@@ -1,5 +1,5 @@
 //! UI-ADVANCED rung S0 — the two-phase seam: the observer, G0-2, G0-3, G0-5
-//! (`docs/UI-PLAN-SPRITES.md`; the architect's 2026-08-21 WorldView ruling).
+//! (`docs/UI-PLAN-SPRITES-S0-S2.md`; the architect's 2026-08-21 WorldView ruling).
 //!
 //! Every test here is **device-free**: a bare `EcsMaster`, no `RhiContext`, no
 //! graphics type. Phase 1 of [`UiUploadSystem`]'s two-phase `run_dispatcher`

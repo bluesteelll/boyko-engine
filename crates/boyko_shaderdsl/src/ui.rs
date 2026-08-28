@@ -1,4 +1,4 @@
-//! The **UI-rect fragment leaves** (`docs/UI-PLAN-SPRITES.md` rung S1 — architecture D30): the
+//! The **UI-rect fragment leaves** (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S1 — architecture D30): the
 //! SEVEN generic `C: Cf` bodies `boyko_render/shaders/ui_rect.fs.hlsl` splices its math out of
 //! (six at S1; [`ui_tile_uv_body`] joins them at S5).
 //!

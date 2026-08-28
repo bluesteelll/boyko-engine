@@ -1,4 +1,4 @@
-//! UI-ADVANCED rung S3 — the SPRITE GPU golden (`docs/UI-PLAN-SPRITES.md` gates G3-1,
+//! UI-ADVANCED rung S3 — the SPRITE GPU golden (`docs/UI-PLAN-SPRITES-S3.md` gates G3-1,
 //! G3-3, G3-5's device half, and the offscreen half of G3-6).
 //!
 //! This is the test that makes the textured lane LIVE end to end on a real device:

@@ -70,7 +70,7 @@ boyko_image = { path = "../boyko_image" }
 # once its condition had diverged), a GPU dispatch failure a `System` body has no `Result` channel
 # to report, and the material loader's fallback notes. Already in the graph through `boyko_ecs`.
 boyko-log = { path = "../boyko_log" }
-# UI-ADVANCED S0 (`docs/UI-PLAN-SPRITES.md` rung S0 item 1): PROMOTED from
+# UI-ADVANCED S0 (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S0 item 1): PROMOTED from
 # `[dev-dependencies]`, where it sat annotated TEST-ONLY for the P6b/P7b screenshot
 # tests. The canonical UI gather (`ui::gather::gather_ui_nodes`), the
 # `ui_pack_inputs!` single spelling, and the `ui_render_discovery` system now name
@@ -95,7 +95,7 @@ boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 # `WorldView` and Phase 2's `&mut RhiContext` at once is the M1 borrow conflict (E0502). Same
 # harness + compiler-witness discipline as `boyko_ecs`'s compile_fail suites.
 trybuild = "1"
-# UI-ADVANCED S1 (`docs/UI-PLAN-SPRITES.md`): `tests/ui_rect_edsl_sync.rs` re-runs the
+# UI-ADVANCED S1 (`docs/UI-PLAN-SPRITES-S0-S2.md`): `tests/ui_rect_edsl_sync.rs` re-runs the
 # `emit_hlsl_ui_*` span printers against the committed `ui_rect.{vs,fs}.hlsl` (which live in
 # THIS crate's `shaders/`), and feeds the HOST `UiInstance` offsets into the mirror printer so
 # the committed struct span is pinned to `offset_of!`, not to a copied literal. TEST-ONLY: the

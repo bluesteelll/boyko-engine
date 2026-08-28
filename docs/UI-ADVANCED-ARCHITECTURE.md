@@ -250,7 +250,7 @@ sort is not ambiguous; the *emission* is. The fix is to specify emission order a
 > **background rect → EITHER the nine-slice sub-quads (row-major TL..BR) OR the image → glyphs →
 > focus ring**, per node.
 
-*(corrected 2026-08-21 at the SECOND S4 pre-build ruling — `UI-PLAN-SPRITES.md` **S-D12 (1)**. As
+*(corrected 2026-08-21 at the SECOND S4 pre-build ruling — [`UI-PLAN-SPRITES-DECISIONS.md` **S-D12 (1)**](UI-PLAN-SPRITES-DECISIONS.md#1-uinineslice-suppresses-the-sub-10-image-record--the-slices-are-the-image-sliced). As
 written, "→ nine-slice sub-quads → image" listed the two as a SEQUENCE, and the sprites plan's S-D11
 took it at its word and ruled 11 records per node. But the only texture a sub-quad can sample is the
 node's own `UiImage`, and the image record is the whole node rect at the whole authored UV
@@ -420,7 +420,7 @@ Extending it: a `.ui` file must not be able to inject a running tween row, a `Dr
 `TextPreedit` into a live world. The vocabulary table's membership is therefore **opt-in per
 component**, and runtime state does not opt in.
 
-So the cost of *not* doing D7 is ~~**12 × 5 = 60**~~ **12 × ~9 = ~108** hand-written landings, not 75 *(recomputed 2026-08-26 from the corrected per-component count above — `UI-PLAN-SPRITES.md` S-D20 (6); the conclusion the figure supports gets STRONGER, not weaker)*.
+So the cost of *not* doing D7 is ~~**12 × 5 = 60**~~ **12 × ~9 = ~108** hand-written landings, not 75 *(recomputed 2026-08-26 from the corrected per-component count above — [`UI-PLAN-SPRITES-DECISIONS.md` S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (6); the conclusion the figure supports gets STRONGER, not weaker)*.
 
 **And the cost of doing it, which the original record did not state at all.** The claim that the table
 is installed *"exactly as `register_bind_accessor` already installs a `ComponentId`-keyed fn-pointer
@@ -439,7 +439,7 @@ parse/serialize codegen framework**, and this is its full parts list:
 * a new `UiField` trait — `parse(&str) -> Option<Self>` plus `write(&self, &mut String)` — and one
   impl per destination field type: `Unit`, `AlignCross`, `AlignMain`, `LayoutType`, `PositionType`,
   `AnchorEdge`, `TextAlign`, `FontId`, `f32`, `u32`, `u8`, `bool`, `[f32; 2]`, `ComponentId`,
-  `TemplateId`. **The bodies already exist** *(true of the fifteen listed and false beyond them — 2026-08-26, `UI-PLAN-SPRITES.md` S-D20 (6): the sprite trio alone needed four leaves this list had none of — `[f32; 4]`, `u16`, `NineSliceMode`, `SpriteAnimMode`. **S6 landed those four on 2026-08-26, so the list is NINETEEN today** — `parse_u16`, `parse_f32_quad`, `parse_nine_slice_mode`, `parse_sprite_anim_mode`; the general claim stays false for the next field type nobody has written a leaf for)* as the free leaf fns at `dispatch.rs:545-875`
+  `TemplateId`. **The bodies already exist** *(true of the fifteen listed and false beyond them — 2026-08-26, [`UI-PLAN-SPRITES-DECISIONS.md` S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (6): the sprite trio alone needed four leaves this list had none of — `[f32; 4]`, `u16`, `NineSliceMode`, `SpriteAnimMode`. **S6 landed those four on 2026-08-26, so the list is NINETEEN today** — `parse_u16`, `parse_f32_quad`, `parse_nine_slice_mode`, `parse_sprite_anim_mode`; the general claim stays false for the next field type nobody has written a leaf for)* as the free leaf fns at `dispatch.rs:545-875`
   (`parse_unit`, `parse_layout_type`, `parse_align_main`, `parse_align_cross`, `parse_position_type`,
   `parse_anchor_edge`, `parse_font_id`, `parse_text_align`, `parse_f32`, `parse_u32`, `parse_u8`,
   `parse_bool`, `parse_f32_pair`, `parse_component_id`, `parse_template_id`) — so the impls are
@@ -605,11 +605,11 @@ Capability is component **presence** throughout; every component is `#[repr(C)]`
 |---|---|---|---|
 | `UiImage` *(exists, 24 B)* | 24 B | `texture` **reinterpreted as the bindless slot**; presence ⇒ textured lane | table (authored, cold) |
 | `UiNineSlice` | ~~20 B~~ **36 B** | `border_px: [f32;4]`, **`border_uv: [f32;4]`**, `mode: u8` (`Stretch`; `Tile` lands at S5), `fill_center: bool`, `_pad: [u8;2]` — both border arrays are `[l,t,r,b]`; presence ⇒ pack emits 9 sub-quads (8 without the centre) **in addition to the node's background and INSTEAD OF its image record** | table (authored, cold) |
-| `UiSpriteSheet` | 4 B | `sheet: u16`, `index: u16` — presence ⇒ pack derives `uv` from the sheet table instead of reading `uv_min`/`uv_max`. **It MODIFIES `UiImage`, it does not replace it: the node still carries `UiImage` (the capability), and the GATHER substitutes the sheet's slot and the computed frame rect into `UiImageInput`** *(added 2026-08-21 — `UI-PLAN-SPRITES.md` **S-D16 (3)**: `ui_node_sub_codes` is the sole authority and its truth table is keyed on `input.image`; substituting in the gather keeps `pack.rs` free of every `boyko_ui` type and keeps `border_uv`'s "a fraction of the CURRENT `UiImage` sub-rect" sentence true — which is what makes nine-slice-over-a-sheet-frame compose for free.)*. **`index` is also the column the flipbook WRITES each frame, through `Mut<_>::set_if_neq`** — see the `UiSpriteCursor` row. | table (authored, cold **— but system-WRITTEN per frame; see the cursor row**) |
+| `UiSpriteSheet` | 4 B | `sheet: u16`, `index: u16` — presence ⇒ pack derives `uv` from the sheet table instead of reading `uv_min`/`uv_max`. **It MODIFIES `UiImage`, it does not replace it: the node still carries `UiImage` (the capability), and the GATHER substitutes the sheet's slot and the computed frame rect into `UiImageInput`** *(added 2026-08-21 — [`UI-PLAN-SPRITES-DECISIONS.md` **S-D16**](UI-PLAN-SPRITES-DECISIONS.md#s-d16--the-flipbook-writes-uispritesheetindex-and-it-must-a-dense-changedc-inside-or-is-measurably-dead) **(3)**: `ui_node_sub_codes` is the sole authority and its truth table is keyed on `input.image`; substituting in the gather keeps `pack.rs` free of every `boyko_ui` type and keeps `border_uv`'s "a fraction of the CURRENT `UiImage` sub-rect" sentence true — which is what makes nine-slice-over-a-sheet-frame compose for free.)*. **`index` is also the column the flipbook WRITES each frame, through `Mut<_>::set_if_neq`** — see the `UiSpriteCursor` row. | table (authored, cold **— but system-WRITTEN per frame; see the cursor row**) |
 | `UiSpriteAnim` | 12 B | the **cold track**: ~~`first: u16, last: u16, fps: f32, mode: u8` (`Forward`\|`Reverse`\|`PingPong`\|`Once`), `repeats: u8`~~ **`first: u16, last: u16, fps: f32, mode: SpriteAnimMode` (a `#[repr(u8)]` TYPED enum — `Forward`\|`Reverse`\|`PingPong`\|`Once`), `repeats: u8, _pad: [u8; 2]`** — author-written, never system-written | table (authored, cold) |
 | `UiSpriteCursor` | 8 B | the **hot cursor**: ~~`elapsed: f32, frame: u16, dir: i8` — the only column the flipbook system writes per frame~~ **`elapsed: f32, dir: i8, loops_done: u8, _pad: [u8; 2]` — the flipbook's PRIVATE state, read by no other system and by no pack input** | **dense** |
 
-*(all three rows corrected 2026-08-21 at the S5 pre-build audit — `UI-PLAN-SPRITES.md` **S-D16**.
+*(all three rows corrected 2026-08-21 at the S5 pre-build audit — [`UI-PLAN-SPRITES-DECISIONS.md` **S-D16**](UI-PLAN-SPRITES-DECISIONS.md#s-d16--the-flipbook-writes-uispritesheetindex-and-it-must-a-dense-changedc-inside-or-is-measurably-dead).
 Three findings. **(a)** The "only column written per frame" claim contradicted the very next line of
 the sprites plan, which has the same system writing `index` — a field of `UiSpriteSheet`, a table
 component. **(b)** The contradiction is settled by a KERNEL MEASUREMENT, not a preference: a dense
@@ -675,7 +675,7 @@ therefore NOT a `probe_component` and does not move the §10.8 census).
 **The `inset_uv` value is a property of the SOURCE, not a constant.** Half a texel of a 16×16 sheet
 is `1/32`; half a texel of a 4×4 sheet is `1/8`, which on a 4×4 sheet (one texel per frame) insets a
 frame to **zero extent**. A sheet whose frames are one texel wide cannot carry a half-texel inset at
-all, and any gate using one must size its source accordingly (`UI-PLAN-SPRITES.md` S-D18 (4)).
+all, and any gate using one must size its source accordingly ([`UI-PLAN-SPRITES-DECISIONS.md` S-D18](UI-PLAN-SPRITES-DECISIONS.md#s-d18--the-s5-gate-table-what-each-device-row-samples-and-where-the-clamp-counter-lives) (4)).
 
 **D8c — uniform grids only in v1; ragged sheets deferred.** A uniform grid makes the frame UV **pure
 arithmetic** from `(cols, rows, index)` and needs *zero* per-frame storage. Ragged/trimmed sheets need
@@ -697,7 +697,7 @@ PLUS 9 sub-quads (8 when `fill_center == false`) and SUPPRESSES the node's image
 not 11. `UiNineSlice` WITHOUT `UiImage` ⇒ 1 record, the background: the component alone is a structural
 no-op. Neither present ⇒ 1; image only ⇒ 2, exactly as before.**
 
-*(corrected AGAIN 2026-08-21, hours after the correction below, by `UI-PLAN-SPRITES.md` **S-D12 (1)** —
+*(corrected AGAIN 2026-08-21, hours after the correction below, by [`UI-PLAN-SPRITES-DECISIONS.md` **S-D12 (1)**](UI-PLAN-SPRITES-DECISIONS.md#1-uinineslice-suppresses-the-sub-10-image-record--the-slices-are-the-image-sliced) —
 and the second correction is the more instructive one. The first fixed a contradiction between this
 sentence and D4; it ruled "ADD" for the BACKGROUND record, which was right, and then **generalized the
 word to the IMAGE record**, which was a different question with the opposite answer. Under 11 records
@@ -733,8 +733,8 @@ is *cheaper here than in Unity* because:
 * ~~`UiRenderScratch.pack`~~ **the in-schedule staging box (`UiUploadSystem::staging`)** is **already**
   the sanctioned frame-transient buffer — the 9 sub-quads need
   no new storage; *(and they replace the image record rather than joining it, so a nine-sliced node
-  costs 10 rows, not 11 — S-D12 (1))* *(buffer corrected 2026-08-21 — `UI-PLAN-SPRITES.md` **S-D13
-  (2)**: `UiRenderScratch` is production-filled only through `pack_sort_upload`, which has **no caller
+  costs 10 rows, not 11 — S-D12 (1))* *(buffer corrected 2026-08-21 — [`UI-PLAN-SPRITES-DECISIONS.md` **S-D13
+  (2)**](UI-PLAN-SPRITES-DECISIONS.md#2-s4-does-not-expand-the-legacy-loop--it-has-no-caller-in-this-workspace): `UiRenderScratch` is production-filled only through `pack_sort_upload`, which has **no caller
   anywhere in this workspace** — the surviving half of the path S0 replaced with the two-phase seam.
   S4's expansion therefore lands in `gather_into_staging`, whose target is the fixed
   `Box<[UiInstance]>` sized once at `initialize`. The argument is unchanged and if anything stronger:
@@ -840,7 +840,7 @@ pub struct UiVisual {
 }                          // 32 B
 ```
 
-⚠️ **`UiVisual`'s `dense` attribute is STRUCK, 2026-08-27** — `UI-PLAN-ANIMATION.md` **AM8 / AD10**,
+⚠️ **`UiVisual`'s `dense` attribute is STRUCK, 2026-08-27** — `UI-PLAN-ANIMATION-DECISIONS.md` [**AM8**](UI-PLAN-ANIMATION-DECISIONS.md#am8--d9-declares-uivisual-dense-and-d10-makes-it-a-term-of-ui_render_discoverys-or-those-two-cannot-both-be-true) / [**AD10**](UI-PLAN-ANIMATION-DECISIONS.md#ad10--uivisual-is-a-table-component-the-four-tween-are-dense),
 folded back here in the change that lands A1, per the standing rule that a diverged pair is worse than
 a missing one. **A dense component cannot be a repaint sink through D6b** — this document's own
 general rule, written on 2026-08-21 one page below (§5.2's ⚠️ note) while amending row 1's
@@ -920,7 +920,7 @@ Query<(
 )>
 ```
 
-⚠️ **Two corrections folded back 2026-08-27 with A1** (`UI-PLAN-ANIMATION.md` AM1, AM2):
+⚠️ **Two corrections folded back 2026-08-27 with A1** (`UI-PLAN-ANIMATION-DECISIONS.md` [AM1](UI-PLAN-ANIMATION-DECISIONS.md#am1--mut-uivisual-bumps-no-tick-so-d9bs-own-query-defeats-d10s-enforcement), [AM2](UI-PLAN-ANIMATION-DECISIONS.md#am2--d9bs-a-uivisual-row-with-no-live-channel-is-skipped-is-false-for-an-all-dense-anyof)):
 the sink term is **`Mut<UiVisual>` written through `Mut::set_if_neq`** — `&mut T` has no change
 tracking, so as written this query would advance the sink's bytes and never advance its tick, and D10's
 own enforcement would never fire (MEASURED: `&mut` write ⇒ 0 `Changed` rows, `Mut::set_if_neq` ⇒ 1);
@@ -988,7 +988,7 @@ property metadata.
 | **2 — composite** | **scroll offset x/y** (D19) | `ScrollPosition` | **repack only** — folded during the gather's DFS descent (D19), never at layout time |
 | **3 — layout** | width, height, padding, gaps, `UiText.size_px`, `Unit::Pct` | `UiLayout`, `ContentSize` | **relayout** — allowed, documented expensive, steered to FLIP (D11) |
 
-⚠️ *(row 1's sink corrected 2026-08-21 at the S5 pre-build audit — `UI-PLAN-SPRITES.md` **S-D16 (1)**,
+⚠️ *(row 1's sink corrected 2026-08-21 at the S5 pre-build audit — [`UI-PLAN-SPRITES-DECISIONS.md` **S-D16**](UI-PLAN-SPRITES-DECISIONS.md#s-d16--the-flipbook-writes-uispritesheetindex-and-it-must-a-dense-changedc-inside-or-is-measurably-dead) **(1)**,
 MEASURED. `UiSpriteCursor` is **dense**, and a dense `Changed<C>` inside `Or<..>` can NEVER be true:
 the `Or` `QueryFilter` impl overrides none of the dense hooks (`HAS_DENSE`, `resolve_dense`,
 `dense_include_candidates`), so the inner term's `dense` pointer stays the `init_fetch` NULL and
@@ -1817,7 +1817,7 @@ each entry names the instrument and the discriminating comparison — not just "
 | **10.6** | D23 item 3 — SoA vs the probes | criterion over the focus pass | N ∈ {100, 1000}: today's AoS+probes vs dirty-gated-only vs dirty-gated+SoA. Item 3 ships **only** if it beats item 1 alone. |
 | **10.7** | The eDSL migration is faithful | `ui_rect_edsl_sync` + `ui_rect_spv_sync` | Byte identity of re-emitted HLSL and re-DXC'd `.spv`. This gate does not exist today in **any** form. |
 | **10.8** | **The gather** — the one cost this campaign adds to every node of every frame (D5, D6a, D31) | a probe counter in `gather_ui_nodes` **plus** wall-clock over the gather alone, separated from pack+sort (which §10.2 owns) | Probes/node/frame and gather µs at N ∈ {256, 2048}, in four states: **(a)** today's baseline (rect-only reads); **(b)** + `UiVisual`; **(c)** + the four sprite components; **(d)** a **static** frame with the D6 compare hoisted ahead of the gather — which must be **zero probes**, or D6a is not wired where it claims to be. This is the number §10 previously omitted entirely, and it is the one that decides whether the sprite lane needs an archetype-shaped gather rather than per-node probes. |
-| **10.9** | **D7 reproduces the hand-written vocabulary before it extends it** (D7c) | the existing `.ui` round-trip + hot-reload equivalence corpus, re-run against the generated table | For all ~~**19**~~ **22** existing components (**S6 landed the twentieth, twenty-first and twenty-second on 2026-08-26 while D7 was still unowned and unbuilt — `UI-PLAN-SPRITES.md` S-D20 (7) / S6 · LANDED; the R4-bounding pin at §11 item 1 is SPENT**): identical spawned worlds, identical `UiParseReport` diagnostics (message, line, column), identical `serialize_ui` bytes. A component that cannot be reproduced takes `#[ui_vocab(manual)]` and is listed. **The rung does not close on judgement**, and no new component is added until this is green — which is what bounds R4. |
+| **10.9** | **D7 reproduces the hand-written vocabulary before it extends it** (D7c) | the existing `.ui` round-trip + hot-reload equivalence corpus, re-run against the generated table | For all ~~**19**~~ **22** existing components (**S6 landed the twentieth, twenty-first and twenty-second on 2026-08-26 while D7 was still unowned and unbuilt — [`UI-PLAN-SPRITES-DECISIONS.md` S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (7) / [S6 · LANDED](UI-PLAN-SPRITES-S6-S7.md#s6--landed-2026-08-26--the-landed-set-the-red-ledger-the-goldens-and-what-the-build-found); the R4-bounding pin at §11 item 1 is SPENT**): identical spawned worlds, identical `UiParseReport` diagnostics (message, line, column), identical `serialize_ui` bytes. A component that cannot be reproduced takes `#[ui_vocab(manual)]` and is listed. **The rung does not close on judgement**, and no new component is added until this is green — which is what bounds R4. |
 
 ---
 
@@ -1830,15 +1830,15 @@ Ordered by dependency and by the cost of doing it late.
    ~~~60~~ ~108 landings and deleting them. It lands as a **pinned refactor**: **§10.9 must be green —
    the generated table reproducing all 19 existing components — before ~~rung 4~~ the rung that adds
    the twentieth.** That pin is what bounds **R4**. *(referent corrected 2026-08-26 at the S6
-   pre-build audit — `UI-PLAN-SPRITES.md` S-D20 (7): **rung 4 is D1, the 80 B widening, and it adds
-   no vocabulary member.** The rung that adds the twentieth `.ui` NAME is `UI-PLAN-SPRITES.md`'s
-   **S6**, which this list does not contain — a rung this pin binds and cannot name. Two further
+   pre-build audit — [`UI-PLAN-SPRITES-DECISIONS.md` S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (7): **rung 4 is D1, the 80 B widening, and it adds
+   no vocabulary member.** The rung that adds the twentieth `.ui` NAME is
+   [`UI-PLAN-SPRITES-S6-S7.md`'s **S6**](UI-PLAN-SPRITES-S6-S7.md#s6--the-ui-authoring-landing-for-the-sprite-vocabulary--size-s), which this list does not contain — a rung this pin binds and cannot name. Two further
    facts the pin's owner needs: **D7 has no owning document** (SPRITES names AETHER, AETHER files it
    as its own inbound dependency and lands it in no rung, ANIMATION names SPRITES, INTERACTION names
    nobody), and S6 therefore lands on its hand-written fallback — after which "all **19** existing
    components" here and at §10.9 / D7c is stale at **22**, and this pin is spent. Filed for the owner
    in `docs/OPEN-QUESTIONS.md`.)*
-   ⚠️ **THE PIN IS NOW SPENT — S6 LANDED 2026-08-26** (`UI-PLAN-SPRITES.md` S6 · LANDED). D7 was
+   ⚠️ **THE PIN IS NOW SPENT — S6 LANDED 2026-08-26** ([`UI-PLAN-SPRITES-S6-S7.md` S6 · LANDED](UI-PLAN-SPRITES-S6-S7.md#s6--landed-2026-08-26--the-landed-set-the-red-ledger-the-goldens-and-what-the-build-found)). D7 was
    still unowned and unbuilt, so S6 took the hand-written fallback and added `UiNineSlice`,
    `UiSpriteSheet` and `UiSpriteAnim` to `parse_and_insert`'s closed match. **Every "all 19 existing
    components" in this document — here, at §10.9 and in D7c — now reads 22**, and every count of the

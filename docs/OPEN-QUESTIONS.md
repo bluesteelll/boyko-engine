@@ -20,7 +20,7 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 **eleventh** adversarial pass, classified *(c) — four positive assertions still false*, and closed by
 a code landing again confined to `crates/boyko_ui/tests/ui_a1_source_census.rs` (**3913 → 4134
 lines**; no tracked file touched) plus this record. Full detail and every measurement:
-`docs/UI-PLAN-ANIMATION.md`'s A1 landing note, part 11.
+[`docs/UI-PLAN-ANIMATION-A1.md`'s A1 landing note, part 11](UI-PLAN-ANIMATION-A1.md#part-11--the-eleventh-pass-classified-c-four-positive-assertions-still-false).
 
 ### 1 — the class is a LIST, not a closure, and the FOURTH member is DESUGARING
 
@@ -69,7 +69,7 @@ and the eleventh pass measured every one of those sentences false. The three liv
   *three*; the eleventh pass's refuter counted *thirteen*; enumerated by grep over the five
   documents, the answer is **21 carriers of five false descriptions**. **3 counts the coordinates,
   13 counts the documents each bullet names, and 21 counts the sentences** — and only the last can be
-  false. A grep for the *coordinate* misses `UI-PLAN-SPRITES.md:1647` entirely, because that site
+  false. A grep for the *coordinate* misses [`UI-PLAN-SPRITES-DECISIONS.md` S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) — pre-split `UI-PLAN-SPRITES.md:1647` — entirely, because that site
   names no stale coordinate at all; a grep for the *document* misses the second copy each
   `OPEN-QUESTIONS` twin carries.
 * **Two of the five were in nobody's list.** `UI-PLAN-SPRITES.md` said `:663` is *"today a sentence
@@ -103,7 +103,7 @@ eleventh pass re-read all of them from the instrument rather than carrying one f
 
 **Status: RECORDED — three items, none of them a new question.** The SCOPE call the item below files
 is unchanged and is reinforced by item 3. Found by the **tenth** adversarial pass over
-`docs/UI-PLAN-ANIMATION.md`'s A1 rung and closed by the **tenth** landing. Full detail and every
+[`docs/UI-PLAN-ANIMATION-A1.md`'s A1 rung](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) and closed by the **tenth** landing. Full detail and every
 measurement: that document's A1 landing note, part 10.
 
 ### 1 — the class, extended: the third execution edge is an OPERATOR, and it costs NOTHING to hide there
@@ -182,7 +182,7 @@ discipline that replaces arithmetic offsets, and it is a **positive assertion th
 Measured over the whole corpus rather than sampled: **41 annotation sites across seven documents**,
 and the false population is **larger than the four the pass reported**.
 
-* **Six sites in `UI-PLAN-ANIMATION.md` (rows E1, H1, H1-arm, H4, H8, and two prose paragraphs)**
+* **Six sites in [`UI-PLAN-ANIMATION-A1.md`](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) (rows E1, H1, H1-arm, H4, H8, and two prose paragraphs)**
   carry part-7 coordinates into `crates/boyko_ui/tests/ui_a1_zero_alloc.rs` that part 9's own
   landing invalidated. **E1 alone was stale at thirteen coordinates, eight of them on plausible
   content** — `:297` is `const VIRTUAL_SPEED: f32 = 0.5;`, *a different `const`*; `:509` is a
@@ -195,16 +195,16 @@ and the false population is **larger than the four the pass reported**.
   not its twin has forked the fact, and a sweep that walks ROWS cannot see that; only one that walks
   FACTS can.**
 * **Three cross-document coordinates, two of them cited four times each.** The dead
-  `benches/ui_animation.rs` path — true `UI-PLAN-ANIMATION.md:2857`; the D7 owner self-citation —
-  true `:3105`; and that document's sibling self-citation, rotted a **fourth** time and this time OUT
-  of content — true `:1696`. ⚠️ **Part 11 re-read all three at their targets 2026-08-28: the three
+  `benches/ui_animation.rs` path — true [`UI-PLAN-ANIMATION-A2-A8.md` A8](UI-PLAN-ANIMATION-A2-A8.md#a8--the-measurement-rung-what-the-tick-actually-costs--size-s--depends-on-a1a5) (pre-split `:2857`); the D7 owner self-citation —
+  true [`UI-PLAN-ANIMATION.md` §8](UI-PLAN-ANIMATION.md#8--dependencies-stated-explicitly) (pre-split `:3105`); and that document's sibling self-citation, rotted a **fourth** time and this time OUT
+  of content — true [`UI-PLAN-ANIMATION-A1.md` A1](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) (pre-split `:1696`). ⚠️ **Part 11 re-read all three at their targets 2026-08-28: the three
   LIVE values still hold. What had gone false is the description of each STALE value** — part 10
   wrote that `:2282` and `:1673` *"are blank lines"* and `:2530` *"is prose about an unrelated
   axis"*, and none of those three sentences is true on today's tree. **They are anchors into the same
   moving document, and the ruling below was applied to the pointer and not to them.** Measured: part
   10's D7 quote stood exactly **200 lines** below the value it describes — the same ripple
   the warning two paragraphs down measures for the live pointer, arriving at the description that sat
-  in the same sentence. Full accounting in `UI-PLAN-ANIMATION.md`'s Cluster B.
+  in the same sentence. Full accounting in [`UI-PLAN-ANIMATION-A1.md`'s Cluster B](UI-PLAN-ANIMATION-A1.md#u4--the-anti-rot-annotation-is-unchecked-prose-and-it-was-false-at-more-sites-than-the-pass-found).
 * **Eight census coordinates went stale inside the tenth landing itself**, within hours, because it
   took `ui_a1_source_census.rs` from 3181 to 3913 lines. Every one of part 9's values was correct on
   the tree part 9 read; every one is plausible content now. **The `ADVANCE_PIN` / termination-test
@@ -239,8 +239,8 @@ never a step inside it** — and the fix for the ripple is to make the last edit
 
 **Status: RECORDED — three items, none of them a new question.** Item 3 restates the SCOPE
 recommendation already open in the item below, with its price re-measured, so it can be weighed
-without opening a test file. Found by the **eighth** adversarial pass over `docs/UI-PLAN-ANIMATION.md`'s
-A1 rung and closed by the **ninth** landing. Full detail and every measurement: that document's A1
+without opening a test file. Found by the **eighth** adversarial pass over [`docs/UI-PLAN-ANIMATION-A1.md`'s
+A1 rung](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) and closed by the **ninth** landing. Full detail and every measurement: that document's A1
 landing note, parts 8 and 9.
 
 ### 1 — the class, because it is reusable: an execution edge can have NO SYNTAX AT THE CALL SITE
@@ -459,7 +459,7 @@ which **36 were inherited coordinates the landing invalidated** — spread acros
 
 ### 4 — two findings in passing, neither asked
 
-* **`UI-PLAN-SPRITES.md` §S5's probe census rests on a stale list length.** It says *"the list holds
+* **[`UI-PLAN-SPRITES-S5.md`](UI-PLAN-SPRITES-S5.md#s5--sprite-sheets-and-the-flipbook--size-m) §S5's probe census rests on a stale list length.** It says *"the list holds
   six pack inputs today"* and derives `ui_pack_inputs!(count) + 1` = **7.00 probes/node/frame**.
   Measured: `__ui_pack_inputs_list!` (`gather.rs:126-138`) holds **seven** members — S5's
   `UiSpriteSheet` landed after the S4 build that paragraph measured. The `7.00` is left as measured
@@ -476,9 +476,9 @@ which **36 were inherited coordinates the landing invalidated** — spread acros
 ## 2026-08-27 — SCOPE + VALUES: **the UI animation sink has no production reader to be ordered after, and the linter gate that would have said so was RED at HEAD**
 
 **Status: OPEN — five items. Item 1 BLOCKS rung A4; items 2 and 3 are VALUES calls that block
-nothing; items 4 and 5 are recorded, not asked.** Found at the `UI-PLAN-ANIMATION.md` A1 red-ledger
+nothing; items 4 and 5 are recorded, not asked.** Found at the [`UI-PLAN-ANIMATION-A1.md`](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) A1 red-ledger
 and adversarial passes (2026-08-27) and their remediation. Full detail and every measurement:
-`docs/UI-PLAN-ANIMATION.md`, the A1 landing note.
+[`docs/UI-PLAN-ANIMATION-A1.md`, the A1 landing note](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency).
 
 ### 1 — SCOPE, and it BLOCKS A4: nothing in production registers `ui_render_discovery`
 
@@ -617,7 +617,7 @@ shape as a red `const` assert masking a whole crate's compile, measured separate
 
 ### What it blocks
 
-Item 1 blocks **rung A4** of `UI-PLAN-ANIMATION.md` (or forces A4 to land with the ordering contract
+Item 1 blocks [**rung A4**](UI-PLAN-ANIMATION-A2-A8.md#a4--the-pack-fold--size-m--depends-on-a1-depends-on-the-sprites-plans-seam-rung-d31-gather--d6-gate) of `UI-PLAN-ANIMATION-A2-A8.md` (or forces A4 to land with the ordering contract
 still unwired and to say so). Items 2–5 block nothing; they are calls and records.
 
 ---
@@ -625,11 +625,11 @@ still unwired and to say so). Items 2–5 block nothing; they are calls and reco
 ## 2026-08-26 — VALUES: **the UI hitch clamp is 100 ms, it was never measured, and it SHIPPED before the question was ever asked**
 
 **Status: OPEN — a VALUES call. Blocks nothing, because the number is already load-bearing in
-shipped, gated code.** Found at the `UI-PLAN-ANIMATION.md` A0 pre-build audit.
+shipped, gated code.** Found at the [`UI-PLAN-ANIMATION-A0.md`](UI-PLAN-ANIMATION-A0.md#a0--the-ui-clock-and-the-one-consumer-that-already-exists--size-s--m--no-cross-plan-dependency) A0 pre-build audit.
 
 ### The situation
 
-`UI-PLAN-ANIMATION.md` §7 has carried this as its question 1 since 2026-08-21, and that section's
+[`UI-PLAN-ANIMATION.md` §7](UI-PLAN-ANIMATION.md#7--open-questions-for-the-owner-values--scope--also-to-be-filed-in-docsopen-questionsmd) has carried this as its question 1 since 2026-08-21, and that section's
 own heading promises its questions are *"also to be filed in `docs/OPEN-QUESTIONS.md`"*. **This one
 never was.** In the meantime the sprites ladder's S5 rung landed the value:
 
@@ -660,7 +660,7 @@ outright that this is not measured, and no instrument in the tree measures perce
 ### The options
 
 1. **Accept 100 ms.** The value ships today; nothing changes.
-2. **Name another number.** It is **one** line: `UI-PLAN-ANIMATION.md` AD9 (3) makes
+2. **Name another number.** It is **one** line: [`UI-PLAN-ANIMATION-DECISIONS.md` AD9](UI-PLAN-ANIMATION-DECISIONS.md#ad9--which-field-a-consumer-reads-is-decided-by-whether-it-carries-d15s-flags-bit-and-the-clamp-has-exactly-one-definition) (3) makes
    `UiClock::default()` *reference* this const rather than restate `0.1`, so the flipbook and the
    tweens cannot come to disagree about what a hitch is.
 3. **Make it per-app rather than a constant.** A0 **landed** a validated
@@ -685,7 +685,7 @@ he was never shown.
 ## 2026-08-26 — SCOPE: **the doc-anchor gate covers four documents; the five UI campaign plans are not among them, and 96 of their 143 anchors are STALE**
 
 **Status: OPEN — a SCOPE call. Blocks nothing; it is what makes every other measurement in those
-five documents unverifiable.** Found at the `UI-PLAN-SPRITES.md` S6 pre-build audit (S-D20 (11))
+five documents unverifiable.** Found at the `UI-PLAN-SPRITES-DECISIONS.md` S6 pre-build audit ([S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (11))
 while trying to CERTIFY the amendments rather than trust them.
 
 ### The measurement
@@ -716,8 +716,8 @@ which **405 are misbindings** (the gate checked a file whose basename is not on 
 range. **Zero are rot**, and a sensitivity probe proved the widened gate blind to the rot this
 campaign did find. The three options below rest on the 96 being real; they are not.
 
-Three dead PATHS as well: `crates/boyko_ui/benches/ui_animation.rs` (`UI-PLAN-ANIMATION.md:2857`, read at its target 2026-08-28 by the tenth pass and re-read by the eleventh — *"**Lands.** `crates/boyko_ui/benches/ui_animation.rs` + its `[[bench]]` entry in `Cargo.toml` —"*; it read `:663`, then `:2282`, **read as a BLANK line on the part-10 tree** and carried through two re-aims of this sentence without being re-opened. ⚠️ **Part 11 re-read `:2282` and that description had itself rotted**: on the tree part 11 inherited it was *"defence out of the fixture and into a **source census** — and the seventh showed that a"*, not a blank line. A description of a stale value is an anchor too) and
-`crates/boyko_render/shaders/ui_rect` twice (`UI-PLAN-SPRITES.md:3067`, `:3470`).
+Three dead PATHS as well: `crates/boyko_ui/benches/ui_animation.rs` ([`UI-PLAN-ANIMATION-A2-A8.md` A8](UI-PLAN-ANIMATION-A2-A8.md#a8--the-measurement-rung-what-the-tick-actually-costs--size-s--depends-on-a1a5), pre-split `:2857`, read at its target 2026-08-28 by the tenth pass and re-read by the eleventh — *"**Lands.** `crates/boyko_ui/benches/ui_animation.rs` + its `[[bench]]` entry in `Cargo.toml` —"*; it read `:663`, then `:2282`, **read as a BLANK line on the part-10 tree** and carried through two re-aims of this sentence without being re-opened. ⚠️ **Part 11 re-read `:2282` and that description had itself rotted**: on the tree part 11 inherited it was *"defence out of the fixture and into a **source census** — and the seventh showed that a"*, not a blank line. A description of a stale value is an anchor too) and
+`crates/boyko_render/shaders/ui_rect` twice ([`UI-PLAN-SPRITES-S5.md` S5](UI-PLAN-SPRITES-S5.md#s5--sprite-sheets-and-the-flipbook--size-m) and [`UI-PLAN-SPRITES-S6-S7.md` S6 · LANDED, "the landed set, file by file"](UI-PLAN-SPRITES-S6-S7.md#the-landed-set-file-by-file) — pre-split `UI-PLAN-SPRITES.md:3067`, `:3470`).
 
 **0 of 735 against 96 of 143 is the gate, not the authors.** The gate's own module doc already
 records the same shape from the other side: 75% of `FEATURE_MAP`/`SYSTEMS`/`ARCHITECTURE`'s anchors
@@ -741,7 +741,7 @@ means anything a week later.
 
 ## 2026-08-26 — SCOPE: **D7, the `.ui` registration table, has no owning document** — three plans name three different owners and none of them builds it
 
-**Status: OPEN — a SCOPE call. Blocks nothing today** because `UI-PLAN-SPRITES.md`'s S6 carries a
+**Status: OPEN — a SCOPE call. Blocks nothing today** because [`UI-PLAN-SPRITES-S6-S7.md`'s S6](UI-PLAN-SPRITES-S6-S7.md#s6--the-ui-authoring-landing-for-the-sprite-vocabulary--size-s) carries a
 hand-written fallback, but the fallback is now the path rather than the contingency, and it is
 roughly twice the size the plans say.
 
@@ -749,9 +749,9 @@ roughly twice the size the plans say.
 
 | Document | What it says about D7 |
 |---|---|
-| `UI-PLAN-SPRITES.md` §0, §6 | owner is **`UI-PLAN-AETHER.md`**; §0 explicitly **Rejects** sprites owning it |
+| [`UI-PLAN-SPRITES.md` §0](UI-PLAN-SPRITES.md#0--what-this-plan-owns-and-what-it-does-not), [§6](UI-PLAN-SPRITES.md#6--what-this-plan-exposes-to-its-siblings) | owner is **`UI-PLAN-AETHER.md`**; §0 explicitly **Rejects** sprites owning it |
 | `UI-PLAN-AETHER.md:73` | files D7 in its own **INBOUND** dependency table, *"soft"*, *"**D7 does not gate any rung here**"*; no rung U0–U8 lands a registration table |
-| `UI-PLAN-ANIMATION.md:3105` (read at its target 2026-08-28 by the tenth pass and re-read by the eleventh — the D7 row whose owner cell is verbatim the quote below; it read `:846`, then `:2530`, **read on the part-10 tree as the prose *"than deleted, because an implementer who builds the axis measures a flat line and reports it as"*** — plausible content carried through one re-aim of this row. ⚠️ **Part 11 re-read `:2530` and that description had itself rotted**: on the tree part 11 inherited it was *"*N+1* renders a strictly-moved value. The failure this catches is one frame of nothing at the head"*, with the prose part 10 quoted **exactly 200 lines below** — the same ripple this landing measured for the live pointer, arriving at the description in the same sentence) | owner is *"`docs/UI-PLAN-SPRITES.md` (rung 1) or wherever it is sequenced"* — the option SPRITES §0 rejected. ⚠️ That plan's own D7 row counts FOUR naming sites and one of them, its self-citation `UI-PLAN-ANIMATION.md:846`, no longer resolves; measured, there are three |
+| [`UI-PLAN-ANIMATION.md` §8](UI-PLAN-ANIMATION.md#8--dependencies-stated-explicitly) (pre-split `:3105`; read at its target 2026-08-28 by the tenth pass and re-read by the eleventh — the D7 row whose owner cell is verbatim the quote below; it read `:846`, then `:2530`, **read on the part-10 tree as the prose *"than deleted, because an implementer who builds the axis measures a flat line and reports it as"*** — plausible content carried through one re-aim of this row. ⚠️ **Part 11 re-read `:2530` and that description had itself rotted**: on the tree part 11 inherited it was *"*N+1* renders a strictly-moved value. The failure this catches is one frame of nothing at the head"*, with the prose part 10 quoted **exactly 200 lines below** — the same ripple this landing measured for the live pointer, arriving at the description in the same sentence) | owner is *"`docs/UI-PLAN-SPRITES.md` (rung 1) or wherever it is sequenced"* — the option SPRITES §0 rejected. ⚠️ That plan's own D7 row counts FOUR naming sites and one of them, its self-citation `UI-PLAN-ANIMATION.md:846`, no longer resolves; measured, there are three |
 | `UI-PLAN-INTERACTION.md:501-504` | names no owner; *"This plan does not block on D7"* |
 | `UI-ADVANCED-ARCHITECTURE.md:371`, `:1773` | D7 is §11 **sequencing item 1** — an architecture ladder no plan file claims |
 
@@ -762,7 +762,7 @@ so nobody outside `UI-PLAN-SPRITES.md` knows that rung exists either.
 
 ### What it costs to leave it
 
-Two numbers moved when the landing count was traced site-by-site (`UI-PLAN-SPRITES.md` S-D20 (6)):
+Two numbers moved when the landing count was traced site-by-site ([`UI-PLAN-SPRITES-DECISIONS.md` S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (6)):
 a hand-written component is **nine** landings, not five, so S6's fallback is ~30 rather than 15 and
 D7's own justification figure is ~108 rather than 60. The argument for doing D7 gets STRONGER; the
 schedule for doing it still does not exist.
@@ -790,7 +790,7 @@ then again for animation and interaction.
 
 ## 2026-08-26 — SCOPE: **ten of the nineteen `.ui` components already round-trip and hot-reload SILENTLY WRONG**, and D7's pin would reproduce it
 
-**Status: OPEN — a SCOPE call. Pre-existing; found at the `UI-PLAN-SPRITES.md` S6 pre-build audit
+**Status: OPEN — a SCOPE call. Pre-existing; found at the [`UI-PLAN-SPRITES-DECISIONS.md` S6 pre-build audit](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree)
 (S-D20 (4)) and MEASURED, not inferred.**
 
 ### The measurement
@@ -886,7 +886,7 @@ and today that discovery is a panic message about archetypes on a line that neve
 kind. Option (2) alone would turn a runtime panic into a compile error for one afternoon's work;
 whether (1) is worth doing is a SCOPE call.
 
-**Addendum 2026-08-26 (S6 pre-build audit — `UI-PLAN-SPRITES.md` S-D20 (1)): there is a FOURTH
+**Addendum 2026-08-26 (S6 pre-build audit — [`UI-PLAN-SPRITES-DECISIONS.md` S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (1)): there is a FOURTH
 option, and it is buildable today.** A TABLE component's `#[component(on_add = …)]` hook can
 deferred-insert the dense component through a one-field `#[derive(Bundle)]` wrapper. MEASURED in a
 probe: after the apply, `has_component` reports the dense `UiSpriteCursor` present with its correct
@@ -904,7 +904,7 @@ for this entry to resolve**, and "the capability is missing" is now only true of
 ## 2026-08-21 — KERNEL DEFECT: a dense `Changed<C>` / `Added<C>` inside `Or<..>` can NEVER be true, and it fails SILENTLY
 
 **Status: OPEN — a real kernel bug, found at the UI-ADVANCED S5 pre-build audit and MEASURED. Not
-blocking S5**, which routes around it (`UI-PLAN-SPRITES.md` **S-D16**: the flipbook's per-frame write
+blocking S5**, which routes around it ([`UI-PLAN-SPRITES-DECISIONS.md` **S-D16**](UI-PLAN-SPRITES-DECISIONS.md#s-d16--the-flipbook-writes-uispritesheetindex-and-it-must-a-dense-changedc-inside-or-is-measurably-dead): the flipbook's per-frame write
 lands on a TABLE column and the dense cursor is never a discovery term). Filed because the next
 subsystem to reach for it will not know, and because there is no diagnostic — the query compiles,
 runs, and quietly matches nothing.
@@ -944,14 +944,14 @@ it.
 
 Two in-flight plans were writing against the property this refutes.
 `UI-ADVANCED-ARCHITECTURE.md`'s tier table listed the **dense** `UiSpriteCursor` as "a term of
-`ui_render_discovery`'s `Or<…>`", and `UI-PLAN-ANIMATION.md` plans `UiVisual` as a dense include
+`ui_render_discovery`'s `Or<…>`", and `UI-PLAN-ANIMATION-DECISIONS.md` plans `UiVisual` as a dense include
 (`AM2`, ~~`:112`~~ — the claim is the *cost model* paragraph, not the bench-axis line the anchor
 pointed at) while `ui_render_discovery`'s filter is a flat `Or` — so `Changed<UiVisual>` would
 have been dead too, and the symptom in both cases is a frozen picture with no error, no panic and no
 failing assertion. ~~Both documents are amended.~~
 
 ⚠️ **"Both documents are amended" was FALSE for the `UiVisual` half, and stayed false for six days.**
-Verified 2026-08-27 at the A1 pre-build audit: `UI-PLAN-ANIMATION.md`'s AM2 still asserted
+Verified 2026-08-27 at the A1 pre-build audit: [`UI-PLAN-ANIMATION-DECISIONS.md`'s AM2](UI-PLAN-ANIMATION-DECISIONS.md#am2--d9bs-a-uivisual-row-with-no-live-channel-is-skipped-is-false-for-an-all-dense-anyof) still asserted
 *"`Mut<UiVisual>` is a dense include"* and derived its whole per-frame cost model, A8's bystander
 bench axis and AD7's `dense_registry().store(UiVisual::component_id())` guard from it; A1's landing
 list named the storage kind of the four `Tween*` and **not** of the sink; and
@@ -961,7 +961,7 @@ UiVisual`. Only the `UiSpriteCursor` half had been applied — to the tier table
 *"Animation adds `UiVisual` HERE (a table component — **the animation plan's own text is corrected to
 say so**)"* (`crates/boyko_render/src/ui/gather.rs:121-122`) — a claim about a document, made in source,
 and untrue at the moment it was written. **Both documents are amended NOW** (2026-08-27):
-`UI-PLAN-ANIMATION.md` **AM8** and **AD10** rule the sink TABLE and the four channels dense, with the
+`UI-PLAN-ANIMATION-DECISIONS.md` [**AM8**](UI-PLAN-ANIMATION-DECISIONS.md#am8--d9-declares-uivisual-dense-and-d10-makes-it-a-term-of-ui_render_discoverys-or-those-two-cannot-both-be-true) and [**AD10**](UI-PLAN-ANIMATION-DECISIONS.md#ad10--uivisual-is-a-table-component-the-four-tween-are-dense) rule the sink TABLE and the four channels dense, with the
 measurement; `UI-ADVANCED-ARCHITECTURE.md`'s D9 attribute and D9b's query are struck and corrected in
 the same change. *(The lesson is the entry's own: a cross-document amendment is not landed when it is
 decided, and "amended" written in a shared record is a claim that needs the same verification as any
@@ -990,7 +990,7 @@ review, not a patch.
 ## 2026-08-21 — SCOPE: `host_upload_frame` + `pack_sort_upload` are public API with no caller in the workspace — delete them, or wire the host that `APP-HOST-PLAN.md` already specifies?
 
 **Status: OPEN — SCOPE, owner's call. Not blocking S4**, which routes around them
-(`UI-PLAN-SPRITES.md` **S-D13 (2)**: the nine-slice expansion lands in `gather_into_staging` only).
+([`UI-PLAN-SPRITES-DECISIONS.md` **S-D13 (2)**](UI-PLAN-SPRITES-DECISIONS.md#2-s4-does-not-expand-the-legacy-loop--it-has-no-caller-in-this-workspace): the nine-slice expansion lands in `gather_into_staging` only).
 
 ### The measurement
 
@@ -1044,16 +1044,16 @@ third rung to pay that cost.
 
 ## 2026-08-21 — UI-ADVANCED S4 stopped BEFORE the first line: the nine slices are painted, then covered by the image they slice
 
-**RESOLVED 2026-08-21 (architect's ruling, recorded as `UI-PLAN-SPRITES.md` **S-D12**; still no S4
+**RESOLVED 2026-08-21 (architect's ruling, recorded as [`UI-PLAN-SPRITES-DECISIONS.md` **S-D12**](UI-PLAN-SPRITES-DECISIONS.md#s-d12--a-nine-sliced-nodes-slices-are-its-image-sub-10-is-suppressed-the-source-split-is-an-authored-border_uv-and-a-slice-with-no-texture-is-a-structural-skip); still no S4
 code written). All four questions ruled; ~~S4 is buildable as amended.~~ **RE-OPENED THE SAME DAY and
-resolved a second time by `UI-PLAN-SPRITES.md` **S-D13** — the implementer refused the S-D12-amended
+resolved a second time by [`UI-PLAN-SPRITES-DECISIONS.md` **S-D13**](UI-PLAN-SPRITES-DECISIONS.md#s-d13--the-ruling-that-had-no-red-the-loop-that-has-no-caller-and-ten-sentences-that-could-not-be-written-as-spelled) — the implementer refused the S-D12-amended
 rung as well, and was right a second time.** The findings below stand as
 raised — every premise was re-verified at source before being ruled on, and two of them turned out
 stronger than reported. The resolution is at the end of this item.
 
 > **✅ THIRD BLOCK CLEARED — S4 IS BUILT AND LANDED, 2026-08-21.** The third implementer built
 > the S-D13-amended rung. Ten further corrections were needed and are ruled as
-> `UI-PLAN-SPRITES.md` **S-D14**; **two of them are this campaign's own headline class, and neither
+> [`UI-PLAN-SPRITES-DECISIONS.md` **S-D14**](UI-PLAN-SPRITES-DECISIONS.md#s-d14--the-ten-corrections-landing-found-and-the-two-reds-that-could-not-fire-as-ruled); **two of them are this campaign's own headline class, and neither
 > was visible to reading — both were found by applying the mutation and watching the wrong thing
 > happen:**
 > **(a)** **M4-c2's ruled sub pair fires for the wrong reason.** Sub 0 is pushed for EVERY node, so
@@ -1078,7 +1078,7 @@ stronger than reported. The resolution is at the end of this item.
 > **All eight gates green with exit codes seen unpiped, all eight reds applied and OBSERVED, both
 > mutated sources restored byte-identically (`cmp` + SHA-256), the five existing image pins
 > unmoved, and the new pin blessed with all ten of its colours counted.** Full record:
-> `UI-PLAN-SPRITES.md` **S-D14** and the **S4 · LANDED** section.
+> [`UI-PLAN-SPRITES-DECISIONS.md` **S-D14**](UI-PLAN-SPRITES-DECISIONS.md#s-d14--the-ten-corrections-landing-found-and-the-two-reds-that-could-not-fire-as-ruled) and the [**S4 · LANDED**](UI-PLAN-SPRITES-S4.md#s4--landed-2026-08-21--the-landed-set-the-red-ledger-the-golden-and-what-the-build-found) section.
 
 > **⚠️ Second block, 2026-08-21, AFTER the resolution below was written.** S-D12 ruled these four
 > questions correctly and introduced two blocking defects of its own, both confirmed by an
@@ -1095,23 +1095,45 @@ stronger than reported. The resolution is at the end of this item.
 > Twelve amend-level findings came with them, including one this entry must own: **S-D12 changed
 > G4-3's border to `[16,24,16,24]` in one row and left M4-b's margin — and two of its own
 > sentences — computing from `[16,16,16,16]`.** The doc-rot-repair class, committed by the repair.
-> Full record: `UI-PLAN-SPRITES.md` **S-D13** and ledger rows **20-33**.
+> Full record: [`UI-PLAN-SPRITES-DECISIONS.md` **S-D13**](UI-PLAN-SPRITES-DECISIONS.md#s-d13--the-ruling-that-had-no-red-the-loop-that-has-no-caller-and-ten-sentences-that-could-not-be-written-as-spelled) and ledger rows **20-33**.
 
 ~~**Status: BLOCKING. Two contradictions and one wrong number, in the rung as AMENDED by the
 2026-08-21 pre-build audit. No S4 code was written; the protocol's stop condition ("a gate that
 cannot fail, a red that cannot fire, a contradiction") is met three times over.**~~
 
+⚠️ **Two coordinates in this entry are DEAD, and they were dead BEFORE the 2026-08-28 plan split —
+so they are MARKED, not repaired.** `UI-PLAN-SPRITES.md:917` (cited twice below, in §1 and §2) and
+`UI-PLAN-SPRITES.md:1019` (cited once, in §1) do not hold what the citing sentences attribute to
+them, and re-reading the pre-split blob `2a10f3a4` — the last tree on which that file existed as one
+document — shows they did not hold it there either:
+
+* `:917` sits mid-sentence inside **S0's discovery-test note**; its readable remainder on that tree
+  is *"with a message naming the three places to add it"* — `ui_pack_inputs!` and `PackInput::ALL`,
+  nothing to do with `UiNineSlice`'s field list.
+* `:1019` reads *"frames — the sheet bleed S-D7 designed a guard around, reproduced by the mechanism
+  that retired"* — the S-D11 tiling argument, not the G4-4 self-gating quote attributed to it.
+
+**Neither repair the neighbouring sites use is available here.** Stamping them "pre-split `:917`",
+the form every re-aimed coordinate in this document carries, would assert the coordinate was good on
+the pre-split tree — a NEW falsehood, written by the repair. Silently re-aiming them at whatever now
+holds the quoted text is what this document's own ruling forbids: a dangling coordinate and a
+re-aimed one are different facts, and only the first says the referent was never at that address.
+They stand as written, marked dead, for the owner to re-source. ⚠️ **No gate can catch either**:
+neither this document nor the UI plans are in the anchors census's `GATED_DOCS`, and that census
+reads `file.rs:N` anchors, not `file.md:N`.
+
 ### 1 — the emission contract occludes itself (BLOCKING)
 
 **S-D11 (3)** fixed the record count as ADD and stated the consequence "so no gate has to guess"
-(`UI-PLAN-SPRITES.md:389-392`): sub **0** background, subs **1..=9** the nine-slice regions,
+([`UI-PLAN-SPRITES-DECISIONS.md` S-D11](UI-PLAN-SPRITES-DECISIONS.md#s-d11--tiling-is-frac-inside-the-sub-rect-it-belongs-to-s5-and-the-nine-sub-quads-are-added-to-the-background-rect-not-substituted-for-it), pre-split `:389-392`): sub **0** background, subs **1..=9** the nine-slice regions,
 sub **10** the image — *"A nine-sliced node emits **10** records …, **11** with an image."*
 
 Four facts in the tree turn that arithmetic into a self-cancelling picture:
 
 * **The only texture a sub-quad can sample is the node's own `UiImage`.** `UiNineSlice` as ruled
-  (`UI-PLAN-SPRITES.md:917`) carries `border_px`, `mode`, `fill_center`, `_pad` — **no slot and no
-  UV**. So a *visible* nine-slice REQUIRES the node to carry `UiImage`.
+  (`UI-PLAN-SPRITES.md:917` — ⚠️ dead, and dead pre-split; see the note at the head of this entry)
+  carries `border_px`, `mode`, `fill_center`, `_pad` — **no slot and no UV**. So a *visible*
+  nine-slice REQUIRES the node to carry `UiImage`.
 * **The image record is the WHOLE node rect at the WHOLE authored sub-rect.**
   `pack_ui_image_instance` covers "the SAME `ComputedRect` as the node's background"
   (`pack.rs:190-193`) and packs `input.rect` verbatim with `uv: image.uv` (`pack.rs:233-243`).
@@ -1144,7 +1166,8 @@ Note the audit ledger's own row 3 caught the mirror-image of this for glyphs and
 constructing an ECS node and so never emitting sub 10. But that is the *self-gating* defect this
 same audit flagged one row later for G4-4 — "its `build_frame` calls `pack_ui_instance` directly, so
 extending it would re-implement the expansion policy inside the test and gate the test against
-itself" (`UI-PLAN-SPRITES.md:1019`). So G4-3 either drives the production emitter and is occluded,
+itself" (`UI-PLAN-SPRITES.md:1019` — ⚠️ dead, and dead pre-split; see the note at the head of this
+entry). So G4-3 either drives the production emitter and is occluded,
 or hand-rolls the expansion and tests itself. **Both branches are defective; there is no third.**
 
 **The decision needed (architect's, not the implementer's — S-D11 (3) is where the record count was
@@ -1161,7 +1184,8 @@ slices.
 
 Nine destination rects come from `border_px`. Nine **source** sub-rects come from nothing:
 
-* `UiNineSlice` carries no source inset (`UI-PLAN-SPRITES.md:917`);
+* `UiNineSlice` carries no source inset (`UI-PLAN-SPRITES.md:917` — ⚠️ dead, and dead pre-split; see
+  the note at the head of this entry);
 * `UiImageInput` is `{ slot, uv, tint }` — **no texture dimensions** (`pack.rs:28-40`), and
   `border_px` is a *destination* quantity, so px → UV is not convertible without them;
 * the dimensions cannot be fetched at S4 even in principle: the bindless table lives behind
@@ -1199,7 +1223,7 @@ becomes a loop) and 8 (`UI_STAGING_ROWS = UI_MAX_NODES * UI_RECORDS_PER_NODE` = 
 1.72 MiB) are all verified correct against the tree and are buildable the moment (1) and (2) are
 ruled. G4-6's scene fits the derived box exactly (2 048 × 11 = 22 528).
 
-### RESOLUTION — 2026-08-21, `UI-PLAN-SPRITES.md` **S-D12**
+### RESOLUTION — 2026-08-21, [`UI-PLAN-SPRITES-DECISIONS.md` **S-D12**](UI-PLAN-SPRITES-DECISIONS.md#s-d12--a-nine-sliced-nodes-slices-are-its-image-sub-10-is-suppressed-the-source-split-is-an-authored-border_uv-and-a-slice-with-no-texture-is-a-structural-skip)
 
 **(1) SUPPRESS.** `UiNineSlice` + `UiImage` ⇒ the image is drawn **sliced**: subs 1..=9 are the whole
 of its rendering and **sub 10 is not emitted**. 10 records (9 without the centre);
@@ -1284,7 +1308,7 @@ substance:
 
 **Landed:** the two-phase `run_dispatcher` + `gather_into_staging`/`upload_staging` split + the
 preallocated staging `Box` in `boyko_render/src/ui/upload.rs`; the fused fn deleted; the plan's
-ten edit sites re-pointed (`docs/UI-PLAN-SPRITES.md` S0); the observer + G0-2 + G0-3 re-pointed at
+ten edit sites re-pointed ([`docs/UI-PLAN-SPRITES-S0-S2.md` S0](UI-PLAN-SPRITES-S0-S2.md#s0--the-seam-the-gate-the-observer--size-l)); the observer + G0-2 + G0-3 re-pointed at
 Phase 1 (device-free, bare `EcsMaster` — `tests/ui_s0_seam.rs`, green); G0-5 as the SEAM GATE
 (signature pins + the trybuild fixture `tests/ui_s0_seam_fusion/refused_refusion.rs`, E0502,
 blessed and green); measurement legs §10.8(d)/§10.3 run headless (static dispatch median
@@ -1303,7 +1327,7 @@ already cover the property).
 
 *(Original entry follows, unedited — the record of why the call was made outlives the call.)*
 
-**The situation.** `UI-PLAN-SPRITES.md` rung S0 item 7 wires the observer through
+**The situation.** [`UI-PLAN-SPRITES-S0-S2.md` rung S0](UI-PLAN-SPRITES-S0-S2.md#s0--the-seam-the-gate-the-observer--size-l) item 7 wires the observer through
 `UiUploadSystem::host_upload_frame_from_world`, item 5 hoists the D6a per-slot generation gate to
 the top of that same function, and gates G0-2/G0-3 (with reds M0-a/M0-b) drive it across frames.
 The plan's own fact table records the seam has "zero callers outside its own doc comments" — as a
@@ -4285,7 +4309,7 @@ author can check. Today the only hazard is the one S6 declined to take, but any 
 **What it blocks today:** nothing. S6 lands `on_add` alone. An animation removed from a SURVIVING
 node (a `.ui` deletion that keeps the node) leaves an 8 B dense cursor row behind; it is inert (the
 flipbook queries all three components) and self-healing (a re-added animation gets a fresh `Default`
-cursor — MEASURED). Recorded in `docs/UI-PLAN-SPRITES.md` S-D20 (1) and S-D21 (1).
+cursor — MEASURED). Recorded in `docs/UI-PLAN-SPRITES-DECISIONS.md` [S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (1) and [S-D21](UI-PLAN-SPRITES-DECISIONS.md#s-d21--the-six-corrections-building-s6-found-and-the-pre-existing-bug-the-rung-could-not-build-around) (1).
 
 ---
 
@@ -4443,7 +4467,7 @@ steady-state: layout pair must allocate no more than the scheduler baseline (bas
 `:296` is the sibling `resize_frame_layout_pair_allocates_zero_over_baseline`. What first surfaced
 it was three whole-package release runs (`cargo test -p boyko-ui --all-targets --release`) reading
 `0, 101, 0`; the 60-run tally above is the re-measurement that pins the rate and both sites.
-`docs/UI-PLAN-ANIMATION.md`'s part-4 landing note already recorded the `:296` half independently at
+[`docs/UI-PLAN-ANIMATION-A1.md`'s part-4 landing note](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) already recorded the `:296` half independently at
 **6 red / 100 standalone runs**; this entry is the owner-facing filing of the same defect, widened to
 `:238` and given the per-site mechanism. **The rate is load-dependent and the site mix moves with it**
 — 6 % at `:296` there, 6.7 % at `:238` and 1.7 % at `:296` here — so treat the rate as a range, not a

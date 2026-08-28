@@ -58,7 +58,7 @@ pub struct LiveNode {
     // `serialize_ui` writes only from `LiveNode`, and `patch_unit_struct` takes
     // its `live_val` only from `LiveNode`, so a component landed everywhere else
     // but here is dead code that silently drops on every round trip and goes
-    // stale on every reload (`docs/UI-PLAN-SPRITES.md` S-D20 (6)).
+    // stale on every reload (`docs/UI-PLAN-SPRITES-DECISIONS.md` S-D20 (6)).
     //
     // `UiSpriteCursor` is NOT here and must not be: it is runtime state, so
     // snapshotting it would make it serializable and then authorable-by-round-trip.

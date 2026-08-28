@@ -609,7 +609,7 @@ enum Node {
     /// (the default arm, as for [`Node::Sqrt`]).
     Rsqrt(u32),
 
-    // ---- UI-ADVANCED S1: the `ui_rect` leaf nodes (`docs/UI-PLAN-SPRITES.md` rung S1) --------
+    // ---- UI-ADVANCED S1: the `ui_rect` leaf nodes (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S1) ----
     //
     // The six UI fragment leaves (`crate::ui`) are the first `float2`/`float4` VALUE math in the
     // eDSL: a rounded-box SDF over a `float2` point with a per-corner `float4` radius, a clip

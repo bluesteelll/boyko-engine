@@ -1,5 +1,5 @@
 //! **A1 gate 8 — MIRI over the fused tick and the deferred reap**
-//! (`docs/UI-PLAN-ANIMATION.md` A1 gate 8, AD5).
+//! (`docs/UI-PLAN-ANIMATION-A1.md` A1 gate 8; `docs/UI-PLAN-ANIMATION-DECISIONS.md` AD5).
 //!
 //! Like the crate's other Miri files this is an ORDINARY test binary — it is NOT
 //! `#![cfg(miri)]`, so it runs natively as well and a `cargo test` filter for it

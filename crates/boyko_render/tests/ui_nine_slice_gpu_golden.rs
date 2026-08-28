@@ -1,5 +1,5 @@
 //! UI-ADVANCED rung S4 — the NINE-SLICE GPU golden
-//! (`docs/UI-PLAN-SPRITES.md` gate G4-3, red mutations M4-b, M4-c1, M4-e).
+//! (`docs/UI-PLAN-SPRITES-S4.md` gate G4-3, red mutations M4-b, M4-c1, M4-e).
 //!
 //! # What this pins, and why it drives the scheduler's own loop
 //!

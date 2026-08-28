@@ -383,7 +383,7 @@ pub fn create_solid_color_texture(
 /// `ShaderReadOnlyOptimal` — the general form of [`create_solid_color_texture`], which is
 /// now one caller of it.
 ///
-/// # Why a raw-bytes entry point exists (`docs/UI-PLAN-SPRITES.md` S-D5)
+/// # Why a raw-bytes entry point exists (`docs/UI-PLAN-SPRITES-DECISIONS.md` S-D5)
 ///
 /// Every UI sprite gate builds its texture IN RUST — an 8×8 checkerboard, a 3×3
 /// nine-slice source, a 4×4 flipbook grid — because `boyko_image` is a DECODER only (there

@@ -257,7 +257,7 @@ One source per stage (both GENERATED — `boyko_shaderdsl/src/bin/emit_ui.rs`; n
 `// === GENERATED … ===` spans), **NO `-D` axis** — each source compiles to exactly ONE artifact.
 The rows exist because the workspace rule ("HLSL the eDSL owns is generated, never hand-edited;
 committed `.spv` are byte-gated") did not bind these files before UI-ADVANCED rung S1
-(`docs/UI-PLAN-SPRITES.md`; architecture D30): the only pin on the two binaries was the
+([`docs/UI-PLAN-SPRITES-S0-S2.md` rung S1](UI-PLAN-SPRITES-S0-S2.md#s1--the-ui-shader-into-the-edsl-both-sync-gates-manifest-rows--size-m); architecture D30): the only pin on the two binaries was the
 const-generic byte LENGTH (`SpirvBlob<2368>` / `SpirvBlob<7060>`, `boyko_render/src/ui/mod.rs`),
 which cannot see a re-compile drift at the same size.
 

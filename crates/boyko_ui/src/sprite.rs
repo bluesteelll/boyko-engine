@@ -1,5 +1,5 @@
 //! Sprite sheets and the flipbook — UI-ADVANCED rung S5
-//! (`docs/UI-PLAN-SPRITES.md` S5, architecture D8a/D8b/D8c).
+//! (`docs/UI-PLAN-SPRITES-S5.md` S5, architecture D8a/D8b/D8c).
 //!
 //! Three things live here, and they are one mechanism:
 //!
@@ -25,7 +25,7 @@
 //!   (`Or` overrides none of the dense hooks, so `HAS_DENSE` takes the trait
 //!   default `false` and the inner term's fetch stays null) — a dense per-frame
 //!   write would render a frozen first frame with no error, no panic and no
-//!   failing assertion. See `docs/UI-PLAN-SPRITES.md` S-D16 (1).
+//!   failing assertion. See `docs/UI-PLAN-SPRITES-DECISIONS.md` S-D16 (1).
 //! * **`set_if_neq`, not `&mut`.** `&mut T` does not consult ticks at all, so the
 //!   generation would never bump and the upload's per-slot gate would keep
 //!   skipping. And `set_if_neq` rather than a plain deref so a 12 fps flipbook on
@@ -97,8 +97,9 @@ struct SpriteCursorBundle {
     cursor: UiSpriteCursor,
 }
 
-/// [`UiSpriteAnim`]'s `on_add` hook (UI-ADVANCED S6, `docs/UI-PLAN-SPRITES.md`
-/// S-D20 (1)): materializes the node's [`UiSpriteCursor`] at its `Default`.
+/// [`UiSpriteAnim`]'s `on_add` hook (UI-ADVANCED S6, `docs/UI-PLAN-SPRITES-S6-S7.md`;
+/// `docs/UI-PLAN-SPRITES-DECISIONS.md` S-D20 (1)): materializes the node's
+/// [`UiSpriteCursor`] at its `Default`.
 ///
 /// # Why this is a HOOK and not `#[require]` or a dispatch-side insert
 ///
@@ -300,7 +301,7 @@ impl UiSheetTable {
     }
 }
 
-/// The UI's frame-delta hitch clamp, in seconds — `UI-PLAN-ANIMATION.md` AD1's
+/// The UI's frame-delta hitch clamp, in seconds — `UI-PLAN-ANIMATION-DECISIONS.md` AD1's
 /// default, and **the crate's only definition of it** (AD9 (3)).
 ///
 /// Without the clamp an alt-tab stall hands a UI consumer a multi-second delta
@@ -326,7 +327,7 @@ pub const UI_FALLBACK_MAX_DELTA: f32 = 0.1;
 /// [`UiSpriteSheet::index`](UiSpriteSheet) through `Mut::set_if_neq` — see the
 /// module doc for why each of those three is the component it is.
 ///
-/// # The clock (A0b — `UI-PLAN-ANIMATION.md` AD9 (1), (2))
+/// # The clock (A0b — `UI-PLAN-ANIMATION-DECISIONS.md` AD9 (1), (2))
 ///
 /// [`UiClock::dt_virtual`](crate::animation::UiClock::dt_virtual), which is the
 /// CLAMPED VIRTUAL delta — the same arithmetic, from the same source, against

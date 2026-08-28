@@ -1,4 +1,4 @@
-//! `emit_ui` — generates BOTH committed UI-rect shaders (`docs/UI-PLAN-SPRITES.md` rung S1,
+//! `emit_ui` — generates BOTH committed UI-rect shaders (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S1,
 //! architecture D30):
 //!
 //! ```text

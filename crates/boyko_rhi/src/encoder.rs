@@ -178,7 +178,8 @@ pub trait RhiCommandEncoder<A: RhiApi> {
     /// against (the layout must have been built with the same bind-group layout via
     /// `GraphicsPipelineDesc::bind_group_layout`).
     ///
-    /// Since `docs/UI-PLAN-SPRITES.md` S3 (decision S-D3) this is a THIN, provided
+    /// Since `docs/UI-PLAN-SPRITES-S3.md` S3 (decision S-D3, in
+    /// `docs/UI-PLAN-SPRITES-DECISIONS.md`) this is a THIN, provided
     /// wrapper over [`Self::bind_descriptor_set_at`]`(0, …)` — the backend overrides
     /// the general verb, and this signature is unchanged, so no existing call site
     /// moved.
@@ -188,7 +189,8 @@ pub trait RhiCommandEncoder<A: RhiApi> {
     }
 
     /// Binds `group` at descriptor-set index `set_index` of `pipeline`'s layout for
-    /// the GRAPHICS bind point (`docs/UI-PLAN-SPRITES.md` rung S3, decision S-D3).
+    /// the GRAPHICS bind point (`docs/UI-PLAN-SPRITES-S3.md` rung S3;
+    /// `docs/UI-PLAN-SPRITES-DECISIONS.md` decision S-D3).
     ///
     /// This is the general verb; [`Self::bind_descriptor_set`] is its
     /// `set_index == 0` case, and the ONLY one a backend overrides.

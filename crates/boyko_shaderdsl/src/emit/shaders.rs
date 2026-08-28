@@ -3008,7 +3008,7 @@ pub fn emit_hlsl_particle_sdf_response() -> String {
     )
 }
 
-// ---- UI-ADVANCED S1: the `ui_rect` leaf emitters (`docs/UI-PLAN-SPRITES.md` rung S1) --------
+// ---- UI-ADVANCED S1: the `ui_rect` leaf emitters (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S1) ----
 
 /// The shared UI-leaf recorder harness — the [`emit_particle_leaf`] idiom with the `vec4_in`
 /// name table added (the UI leaves are the first to take `float4` parameters). Clears the
@@ -3207,7 +3207,7 @@ pub fn emit_hlsl_ui_tile_uv() -> String {
     })
 }
 
-/// The `UiInstance` byte layout as GENERATOR INPUTS (`docs/UI-PLAN-SPRITES.md` S-D10): the
+/// The `UiInstance` byte layout as GENERATOR INPUTS (`docs/UI-PLAN-SPRITES-DECISIONS.md` S-D10): the
 /// field offsets, the stride, and the three flag-bit indices. `emit_ui.rs` spells them as
 /// literals mirroring `boyko_render::ui::instance`; `ui_rect_edsl_sync` re-derives them from
 /// the HOST's own `offset_of!`/`size_of` and pins the committed mirror span to that — so a

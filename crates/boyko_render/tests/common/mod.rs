@@ -136,7 +136,7 @@ fn write_bmp(path: &std::path::Path, rgba: &[u8], w: u32, h: u32) -> std::io::Re
 /// The S-D6 image pin: SHA-256 of the WHOLE readback, asserted against the constant the
 /// test file carries. A texel assertion cannot see a UV that moved by a texel — which is
 /// exactly what D1's un-aliasing does to every glyph; the full-image hash is the cheapest
-/// thing that sees it (`docs/UI-PLAN-SPRITES.md` S-D6, mutation M2-b).
+/// thing that sees it (`docs/UI-PLAN-SPRITES-DECISIONS.md` S-D6, mutation M2-b).
 ///
 /// `BOYKO_UI_GOLDEN_BLESS=1` prints the fresh hash and dumps a top-down BMP into
 /// `target/screenshots/` for a human to look at, then returns WITHOUT asserting (the

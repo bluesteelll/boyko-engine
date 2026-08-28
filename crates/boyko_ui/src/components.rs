@@ -488,7 +488,7 @@ pub enum NineSliceMode {
     Stretch = 0,
     /// The edges and the centre REPEAT their source region across the
     /// destination, at a count DERIVED from the two borders (UI-ADVANCED S5,
-    /// `docs/UI-PLAN-SPRITES.md` S-D15).
+    /// `docs/UI-PLAN-SPRITES-DECISIONS.md` S-D15).
     ///
     /// # The count is derived, not authored, and it needs no texture size
     ///
@@ -530,7 +530,7 @@ const _: () = match NineSliceMode::Stretch {
 /// This component does not add a layer on top of the sprite — it changes HOW
 /// the sprite is drawn. A node carrying both `UiNineSlice` and [`UiImage`]
 /// emits its background rect plus NINE sub-quads and **no whole-rect image
-/// record**; the slices *are* the image (`docs/UI-PLAN-SPRITES.md` S-D12 (1),
+/// record**; the slices *are* the image (`docs/UI-PLAN-SPRITES-DECISIONS.md` S-D12 (1),
 /// which is what Unity's `Image{type: Sliced}`, Godot's `NinePatchRect` and
 /// Bevy's `NodeImageMode::Sliced` all do — none of them draws the image twice).
 /// A node carrying `UiNineSlice` and NO `UiImage` is a structural **no-op**: it
@@ -661,7 +661,7 @@ impl Default for UiNineSlice {
 /// (through `Mut::set_if_neq`) rather than a cursor field, because THIS write's
 /// change tick is the repaint signal: it is what `ui_render_discovery`'s
 /// `Or<(Changed<…>, …)>` filter sees. A dense component in that filter would be
-/// invisible to it — MEASURED, `docs/UI-PLAN-SPRITES.md` S-D16 (1) — so the
+/// invisible to it — MEASURED, `docs/UI-PLAN-SPRITES-DECISIONS.md` S-D16 (1) — so the
 /// per-frame write has to land on a TABLE column, and this is it.
 #[repr(C)]
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -863,7 +863,7 @@ impl Default for UiSpriteCursor {
     ///
     /// The materializing path is `UiSpriteAnim`'s
     /// `on_add` hook `sprite::ui_sprite_anim_on_add` (UI-ADVANCED S6,
-    /// `docs/UI-PLAN-SPRITES.md` S-D20), with
+    /// `docs/UI-PLAN-SPRITES-DECISIONS.md` S-D20), with
     /// [`AnimatedSpriteBundle`](crate::bundles::AnimatedSpriteBundle) as the
     /// ergonomic one-spawn form. It is NOT `#[require]`: that attribute panics on
     /// a dense target on this kernel (see [`UiSpriteAnim`]'s doc and
@@ -992,7 +992,8 @@ pub(crate) struct UiSourceOrder(pub u32);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UI-ADVANCED rung A1 — the animation sink and the four tween channels
-// (`docs/UI-PLAN-ANIMATION.md` A1, AD3, AD6, AD10, AD11, AD12, AM5, AM8).
+// (`docs/UI-PLAN-ANIMATION-A1.md` A1; `docs/UI-PLAN-ANIMATION-DECISIONS.md`
+// AD3, AD6, AD10, AD11, AD12, AM5, AM8).
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// An easing curve identifier (AD2): a `u8` with a reserved custom half.

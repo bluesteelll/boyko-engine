@@ -1,5 +1,5 @@
 //! The canonical UI render gather + discovery — UI-ADVANCED rung S0
-//! (`docs/UI-PLAN-SPRITES.md`, architecture D31 + D6b).
+//! (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S0, architecture D31 + D6b).
 //!
 //! Three things live here, and they are one mechanism:
 //!
@@ -79,7 +79,7 @@ use crate::ui::upload::UiNode;
 /// either would charge a dead probe to every node of every changed frame.
 /// `UiSpriteCursor` additionally could not work here: it is DENSE, and a dense
 /// `Changed<C>` inside this macro's `Or<..>` was MEASURED never to fire
-/// (`docs/UI-PLAN-SPRITES.md` S-D16 (1)).
+/// (`docs/UI-PLAN-SPRITES-DECISIONS.md` S-D16 (1)).
 ///
 /// **That measurement narrows this macro's own promise, and the narrowing is now
 /// ENFORCED rather than described:** "adding a component to `ui_pack_inputs!`
@@ -220,7 +220,7 @@ macro_rules! __ui_pack_inputs_assert_table {
                 concat!(
                     "ui_pack_inputs! member `", stringify!($c),
                     "` MUST be a TABLE component. A dense `Changed<C>` inside this macro's \
-                     `Or<..>` was MEASURED never to fire on this kernel (UI-PLAN-SPRITES S-D16 \
+                     `Or<..>` was MEASURED never to fire on this kernel (UI-PLAN-SPRITES-DECISIONS S-D16 \
                      (1)): a dense member is read correctly by the gather and is INVISIBLE to \
                      ui_render_discovery — the frame never repaints, with nothing saying so."
                 )

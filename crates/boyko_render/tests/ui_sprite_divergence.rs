@@ -1,5 +1,5 @@
 //! UI-ADVANCED rung S3 — the DIVERGENT-DESCRIPTOR leg: correctness across many distinct
-//! bindless slots, and §10.1's measurement (`docs/UI-PLAN-SPRITES.md`).
+//! bindless slots, and §10.1's measurement (`docs/UI-PLAN-SPRITES-S3.md`).
 //!
 //! # Why a separate scene from `ui_sprite_gpu_golden`
 //!

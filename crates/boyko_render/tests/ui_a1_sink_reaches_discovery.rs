@@ -1,6 +1,7 @@
 //! UI-ADVANCED rung **A1**, the half `boyko-ui` structurally cannot assert:
 //! does the animation sink's write reach the RENDER path?
-//! (`docs/UI-PLAN-ANIMATION.md` A1 gate 2, AD10, AM8; `docs/OPEN-QUESTIONS.md`.)
+//! (`docs/UI-PLAN-ANIMATION-A1.md` A1 gate 2; `docs/UI-PLAN-ANIMATION-DECISIONS.md`
+//! AD10, AM8; `docs/OPEN-QUESTIONS.md`.)
 //!
 //! `boyko-ui` names no render crate — the dependency runs `boyko-render →
 //! boyko-ui` and `boyko_render/Cargo.toml` states the acyclicity as a rule — so

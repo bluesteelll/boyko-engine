@@ -1,4 +1,4 @@
-//! The UI-rect shaders' `.hlsl` ↔ `.spv` BYTE GATE (`docs/UI-PLAN-SPRITES.md` rung S1, gate
+//! The UI-rect shaders' `.hlsl` ↔ `.spv` BYTE GATE (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S1, gate
 //! G1-2; architecture D30) — the `particle_edsl_sync` layer-2 idiom applied to
 //! `shaders/ui_rect.{vs,fs}.hlsl`.
 //!

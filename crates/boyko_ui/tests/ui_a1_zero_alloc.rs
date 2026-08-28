@@ -1,5 +1,5 @@
 //! **A1 gate 6 — zero per-frame allocation on the steady animating path**
-//! (`docs/UI-PLAN-ANIMATION.md` A1 gate 6, Principle 5).
+//! (`docs/UI-PLAN-ANIMATION-A1.md` A1 gate 6, Principle 5).
 //!
 //! The crate's established shape: a counting global allocator plus BASELINE
 //! SUBTRACTION (`zero_alloc.rs`, `p4_bind_zero_alloc.rs`,

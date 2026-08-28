@@ -74,7 +74,7 @@ fn lower_one(src: &str) -> (EcsMaster, Option<Entity>, UiParseReport) {
 /// verification — the correction written to stop this comment claiming more than
 /// it walks was itself claiming coverage for a name that has none. `UiText` is
 /// walked by nothing; that is a gap, recorded here rather than papered over. Widening it to all 22 is a
-/// separate rung's work (`docs/UI-PLAN-SPRITES.md` S-D20); what S6 owes is that
+/// separate rung's work (`docs/UI-PLAN-SPRITES-DECISIONS.md` S-D20); what S6 owes is that
 /// the components IT adds are in it.
 const DISPATCHABLE: [&str; 12] = [
     "UiLayout",

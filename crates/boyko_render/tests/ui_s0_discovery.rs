@@ -1,4 +1,4 @@
-//! UI-ADVANCED rung S0 — CPU gates G0-1 and G0-4 (`docs/UI-PLAN-SPRITES.md`).
+//! UI-ADVANCED rung S0 — CPU gates G0-1 and G0-4 (`docs/UI-PLAN-SPRITES-S0-S2.md`).
 //!
 //! **G0-1** — the discovery filter and the gather read list are ONE spelling
 //! (`ui_pack_inputs!`), and the discovery bumps [`UiRenderGeneration`] exactly

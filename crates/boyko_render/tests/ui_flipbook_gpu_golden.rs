@@ -1,5 +1,5 @@
 //! UI-ADVANCED rung S5 — the FLIPBOOK GPU goldens
-//! (`docs/UI-PLAN-SPRITES.md` gates G5-5, G5-9; red mutations M5-b, M5-f, M5-g).
+//! (`docs/UI-PLAN-SPRITES-S5.md` gates G5-5, G5-9; red mutations M5-b, M5-f, M5-g).
 //!
 //! # What these pin, and why the picture comes from the scheduler
 //!

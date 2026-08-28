@@ -289,7 +289,7 @@ pub struct UiPass<'a> {
     /// backing ring holds `instance_count` valid `UiInstance` records uploaded for
     /// THIS frame index before this draw. Re-resolved by the caller.
     pub bind_group: &'a VulkanBindGroup,
-    /// The SET-1 sprite group (`docs/UI-PLAN-SPRITES.md` S3): the host's shared bindless
+    /// The SET-1 sprite group (`docs/UI-PLAN-SPRITES-S3.md` S3): the host's shared bindless
     /// texture array, or the UI's private fallback table when the host has none. Bound at
     /// `first_set = 1` before the draw — `ui_rect.fs` STATICALLY uses set 1 (its sprite
     /// branch is reachable code), so leaving it unbound is `VUID-vkCmdDraw-None-08600` on

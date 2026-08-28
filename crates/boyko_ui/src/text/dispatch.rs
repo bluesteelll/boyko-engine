@@ -167,7 +167,7 @@ pub(crate) fn parse_and_insert(
             expect_struct(name, kind, line_no, body_col, rep)?;
             cmds.entity(entity).insert(parse_ui_anchor(body, body_col, rep));
         }
-        // UI-ADVANCED S6 — the sprite vocabulary (`docs/UI-PLAN-SPRITES.md` S6).
+        // UI-ADVANCED S6 — the sprite vocabulary (`docs/UI-PLAN-SPRITES-S6-S7.md` S6).
         // `UiSpriteCursor` is DELIBERATELY not here and never will be: it is the
         // flipbook's private per-frame state, and the property this closed match
         // enforces is that a `.ui` file cannot NAME a runtime-state component or

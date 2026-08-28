@@ -1,5 +1,5 @@
 //! UI-ADVANCED rung S4 — nine-slice, the DEVICE-FREE half
-//! (`docs/UI-PLAN-SPRITES.md` gates G4-1, G4-2, G4-5, G4-6, G4-8).
+//! (`docs/UI-PLAN-SPRITES-S4.md` gates G4-1, G4-2, G4-5, G4-6, G4-8).
 //!
 //! Every test here drives **`UiUploadSystem::gather_into_staging`** — the loop
 //! the scheduler actually runs — against a bare `EcsMaster` through

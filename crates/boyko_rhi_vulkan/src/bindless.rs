@@ -119,7 +119,7 @@ impl VulkanBindlessSet {
     /// pair the generic bind-group carries — so the shared table can be bound through the
     /// GENERIC [`RhiCommandEncoder::bind_descriptor_set_at`](boyko_rhi::RhiCommandEncoder::bind_descriptor_set_at)
     /// verb instead of only through a concrete `cmd_bind_descriptor_sets` call
-    /// (`docs/UI-PLAN-SPRITES.md` S-D3: the offscreen golden and the on-screen recorder
+    /// (`docs/UI-PLAN-SPRITES-DECISIONS.md` S-D3: the offscreen golden and the on-screen recorder
     /// must be able to bind the SAME set, or the sprite path is untestable without a
     /// display).
     ///

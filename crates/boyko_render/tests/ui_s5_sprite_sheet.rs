@@ -1,5 +1,5 @@
 //! UI-ADVANCED rung S5 — sprite sheets, the flipbook and the tiled lane, the
-//! DEVICE-FREE half (`docs/UI-PLAN-SPRITES.md` gates G5-1, G5-2, G5-3, G5-4,
+//! DEVICE-FREE half (`docs/UI-PLAN-SPRITES-S5.md` gates G5-1, G5-2, G5-3, G5-4,
 //! G5-6, G5-11).
 //!
 //! Every test drives production code: the frame arithmetic through
@@ -792,7 +792,7 @@ fn g5_4_the_three_components_are_the_stated_sizes_with_spelled_padding() {
 /// component through the route `#[require]` could not take:
 /// `UiSpriteAnim`'s `#[component(on_add = …)]` hook deferred-inserts the cursor,
 /// and `InsertCommand` already partitions dense ids off the table path
-/// (`docs/UI-PLAN-SPRITES.md` S-D20 (1)). It was OBSERVED red at that landing,
+/// (`docs/UI-PLAN-SPRITES-DECISIONS.md` S-D20 (1)). It was OBSERVED red at that landing,
 /// reporting `index 3` where it demanded `0`.
 ///
 /// Both halves still pin something a mutation can move — deleting the hook

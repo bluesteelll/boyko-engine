@@ -1,5 +1,5 @@
 //! UI-ADVANCED rung S6 — the `.ui` authoring landing for the sprite vocabulary
-//! (`docs/UI-PLAN-SPRITES.md` S6, gates G6-1, G6-2, G6-3, G6-4).
+//! (`docs/UI-PLAN-SPRITES-S6-S7.md` S6, gates G6-1, G6-2, G6-3, G6-4).
 //!
 //! G6-5 (the two equivalence comparators) lives in `p6a_equivalence.rs`, because
 //! one of the two hand lists it gates is private to that file.

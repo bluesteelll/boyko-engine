@@ -1,5 +1,6 @@
 //! UI-ADVANCED rung **A1** — the sink, the four channels, the fused tick
-//! (`docs/UI-PLAN-ANIMATION.md` A1, AD5, AD6, AD10, AD11, AD12, AM1, AM2, AM8).
+//! (`docs/UI-PLAN-ANIMATION-A1.md` A1; `docs/UI-PLAN-ANIMATION-DECISIONS.md`
+//! AD5, AD6, AD10, AD11, AD12, AM1, AM2, AM8).
 //!
 //! Eleven gates. **Ten legs own a red; leg 5 does not, and that is recorded
 //! rather than papered over** — A0's standard, honestly applied. Eight of the

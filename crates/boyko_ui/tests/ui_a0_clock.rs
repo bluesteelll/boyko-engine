@@ -1,5 +1,5 @@
-//! UI-ADVANCED rung **A0** — the UI clock (`docs/UI-PLAN-ANIMATION.md` A0, AD1,
-//! AD9, AM6, AM7).
+//! UI-ADVANCED rung **A0** — the UI clock (`docs/UI-PLAN-ANIMATION-A0.md` A0;
+//! `docs/UI-PLAN-ANIMATION-DECISIONS.md` AD1, AD9, AM6, AM7).
 //!
 //! Six legs. **Each states what it does NOT prove**, because on this branch two
 //! legs were written believing a third covered them, and the rung's own gate

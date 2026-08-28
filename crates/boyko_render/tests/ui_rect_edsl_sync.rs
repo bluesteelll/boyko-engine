@@ -1,4 +1,4 @@
-//! The UI-rect shaders' eDSL ↔ HLSL SINGLE-SOURCE GUARD (`docs/UI-PLAN-SPRITES.md` rung S1,
+//! The UI-rect shaders' eDSL ↔ HLSL SINGLE-SOURCE GUARD (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S1,
 //! gate G1-1; architecture D30) — the `particle_edsl_sync` layer-1 idiom applied to
 //! `shaders/ui_rect.{vs,fs}.hlsl`.
 //!

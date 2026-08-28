@@ -1,5 +1,5 @@
-//! The UI clock — UI-ADVANCED rung A0 (`docs/UI-PLAN-ANIMATION.md` AD1, AD9,
-//! AM6, AM7).
+//! The UI clock — UI-ADVANCED rung A0 (`docs/UI-PLAN-ANIMATION-A0.md`;
+//! `docs/UI-PLAN-ANIMATION-DECISIONS.md` AD1, AD9, AM6, AM7).
 //!
 //! One resource, [`UiClock`], written exactly once per frame by
 //! [`ui_clock_tick`] and read by every time-varying UI system. Three things live
@@ -424,7 +424,8 @@ impl Plugin for UiAnimationPlugin {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // UI-ADVANCED rung A1 — the fused tick, the deferred reap, and the authoring
-// surface (`docs/UI-PLAN-ANIMATION.md` A1, AD5, AD10, AD11, AD12, AM1, AM2).
+// surface (`docs/UI-PLAN-ANIMATION-A1.md` A1; `docs/UI-PLAN-ANIMATION-DECISIONS.md`
+// AD5, AD10, AD11, AD12, AM1, AM2).
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The retained completion list (AD5): the `(entity, channel)` pairs

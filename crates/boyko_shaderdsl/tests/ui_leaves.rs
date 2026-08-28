@@ -1,4 +1,4 @@
-//! The **UI-rect leaf** pins (`feature = "emit"`) — `docs/UI-PLAN-SPRITES.md` rung S1 gate
+//! The **UI-rect leaf** pins (`feature = "emit"`) — `docs/UI-PLAN-SPRITES-S0-S2.md` rung S1 gate
 //! G1-3, one test pair per leaf ([`boyko_shaderdsl::ui`]):
 //!
 //! - the **Eval** value — `<EvalCf>` over host `f32` ops, checked against constants derived

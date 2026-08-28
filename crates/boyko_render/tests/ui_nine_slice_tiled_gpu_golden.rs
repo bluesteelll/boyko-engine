@@ -1,5 +1,5 @@
 //! UI-ADVANCED rung S5 — the TILED nine-slice GPU goldens
-//! (`docs/UI-PLAN-SPRITES.md` gates G5-7, G5-8; red mutation M5-e).
+//! (`docs/UI-PLAN-SPRITES-S5.md` gates G5-7, G5-8; red mutation M5-e).
 //!
 //! # What these pin
 //!

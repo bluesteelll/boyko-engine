@@ -1181,7 +1181,7 @@ pub trait Cf {
     /// [`crate::pack::pack_material_id_ba_body`] spells it).
     fn rsqrt(x: Self::Scalar) -> Self::Scalar;
 
-    // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets (`docs/UI-PLAN-SPRITES.md`) ----
+    // ---- UI-ADVANCED S1: the `ui_rect` fragment-leaf facets (`docs/UI-PLAN-SPRITES-S0-S2.md`) ----
     //
     // The six UI leaves (`crate::ui`) are the eDSL's first `float2`/`float4` VALUE math: the
     // per-corner rounded-box SDF, the clip-AABB coverage, the MSDF median/range pair, the

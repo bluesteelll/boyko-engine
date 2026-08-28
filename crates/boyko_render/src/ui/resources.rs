@@ -86,8 +86,9 @@ impl UiAtlasUniform {
     }
 }
 
-/// The filter mode the UI's OWN sprite sampler is built with (`docs/UI-PLAN-SPRITES.md`
-/// S-D4) — chosen ONCE at [`RhiContext::ui_setup`], costing ZERO per-instance bytes and
+/// The filter mode the UI's OWN sprite sampler is built with
+/// (`docs/UI-PLAN-SPRITES-DECISIONS.md` S-D4) — chosen ONCE at [`RhiContext::ui_setup`],
+/// costing ZERO per-instance bytes and
 /// leaving the world-shared bindless set untouched (which D3 refuses to let a UI concern
 /// mutate).
 ///
@@ -119,7 +120,7 @@ impl UiSamplerMode {
 }
 
 /// Where set 1 — the sprite lane's `Texture2D g_sprites[]` — comes from, and who owns it
-/// (`docs/UI-PLAN-SPRITES.md` S3).
+/// (`docs/UI-PLAN-SPRITES-S3.md` S3).
 ///
 /// # Why a bindless-LESS host still gets a set 1 (the S3 amendment, measured)
 ///

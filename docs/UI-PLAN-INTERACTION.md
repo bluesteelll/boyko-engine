@@ -418,7 +418,7 @@ to retire from `UiInstance`.
 
 The ring is an outset rect with a border, emitted last in the node's paint order (the architecture's
 D4 emission contract: *background → **either** nine-slice **or** image → glyphs → focus ring*
-*(the middle two terms became alternatives 2026-08-21 — `UI-PLAN-SPRITES.md` **S-D12 (1)**:
+*(the middle two terms became alternatives 2026-08-21 — [`UI-PLAN-SPRITES-DECISIONS.md` **S-D12 (1)**](UI-PLAN-SPRITES-DECISIONS.md#1-uinineslice-suppresses-the-sub-10-image-record--the-slices-are-the-image-sliced):
 `UiNineSlice` suppresses the image record it slices, because the slices ARE that image. The ring's
 position — last — is untouched, and so is everything this plan asserts about it.)*). The caret is a
 1–2 px rect; the selection is one rect per line. All three ride the existing pipeline, the existing
@@ -460,7 +460,7 @@ follows it rather than keeping a second answer.~~
 `Time::delta_secs()` is the VIRTUAL delta; `real_delta()` is the other accessor, documented
 "unclamped, unscaled, pause-blind" (`time/time.rs:79-83`). So this decision has always chosen virtual
 while its heading said real, and the body then described that choice as "D15's default applied here",
-which it is not. **The answer:** `UI-PLAN-ANIMATION.md` **AM7 / AD9** rule that D15's real default is
+which it is not. **The answer:** `UI-PLAN-ANIMATION-DECISIONS.md` [**AM7**](UI-PLAN-ANIMATION-DECISIONS.md#am7--d15s-real-delta-default-is-a-tween-lane-rule-every-consumer-without-a-per-row-flags-bit-has-already-chosen-virtual-twice-in-shipped-code) / [**AD9**](UI-PLAN-ANIMATION-DECISIONS.md#ad9--which-field-a-consumer-reads-is-decided-by-whether-it-carries-d15s-flags-bit-and-the-clamp-has-exactly-one-definition) rule that D15's real default is
 a rule of the TWEEN lane — the only lane with the per-row `flags` bit D15's own opt-in is spelled in
 — and that every consumer without that bit reads `dt_virtual`. Momentum has no `flags` bit, so it
 reads `dt_virtual`, which is exactly `Time::delta_secs()` clamped again at 100 ms. **This decision's
@@ -487,7 +487,7 @@ Named explicitly, in both directions, because the Aether plan depends on what th
 |---|---|---|
 | **`UiVisual` + `TweenTint` + the D14 transition trigger** | I10's tooltip fade and the hover/press *visual* response are animations. This plan ships the **timing and state** half only — `HoverDwell` presence/removal, `DragActive` presence, `Interaction` edges — and never defines `UiVisual`. | The visible half of I10. `HoverDwell`'s timer and its gates land without it. |
 | **G-STANDING-1 (owed by this plan to that one)** | D14 keys on `Changed<Interaction>`. Every rung here that touches `write_interactions` must keep the set-if-changed discipline or the transition trigger fires on still frames. | Nothing, if honoured. Everything, if not. |
-| **The clock default (D15)** | ~~ID12's momentum uses `Time::delta_secs()`. If the animation plan makes the UI clock virtual-by-default, momentum follows that one answer.~~ **ANSWERED 2026-08-26 — `UI-PLAN-ANIMATION.md` AM7/AD9: a consumer with no per-row `flags` bit reads `UiClock::dt_virtual`. Momentum and the dwell timer have none, so both read `dt_virtual`, which is `Time::delta_secs()` re-clamped at the UI's 100 ms — the value ID12 and I10's dwell rule (`:967`) already chose. No follow-up edit is owed beyond ID12's struck heading.** | Nothing. |
+| **The clock default (D15)** | ~~ID12's momentum uses `Time::delta_secs()`. If the animation plan makes the UI clock virtual-by-default, momentum follows that one answer.~~ **ANSWERED 2026-08-26 — [`UI-PLAN-ANIMATION-DECISIONS.md` AM7](UI-PLAN-ANIMATION-DECISIONS.md#am7--d15s-real-delta-default-is-a-tween-lane-rule-every-consumer-without-a-per-row-flags-bit-has-already-chosen-virtual-twice-in-shipped-code)/[AD9](UI-PLAN-ANIMATION-DECISIONS.md#ad9--which-field-a-consumer-reads-is-decided-by-whether-it-carries-d15s-flags-bit-and-the-clamp-has-exactly-one-definition): a consumer with no per-row `flags` bit reads `UiClock::dt_virtual`. Momentum and the dwell timer have none, so both read `dt_virtual`, which is `Time::delta_secs()` re-clamped at the UI's 100 ms — the value ID12 and I10's dwell rule (`:967`) already chose. No follow-up edit is owed beyond ID12's struck heading.** | Nothing. |
 
 ### On [`UI-PLAN-AETHER.md`](UI-PLAN-AETHER.md) — and what it depends on here
 
@@ -511,7 +511,7 @@ components**:
 
 If D7's registration table has landed, each is one derive. If it has not, each is ~~the five~~
 **NINE** hand-written landings D7 exists to collapse *(count corrected 2026-08-26 —
-`UI-PLAN-SPRITES.md` S-D20 (6), traced site-by-site against `UiSpacing`; this plan's own I1 rung at
+[`UI-PLAN-SPRITES-DECISIONS.md` S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (6), traced site-by-site against `UiSpacing`; this plan's own I1 rung at
 §"Lands" already names the `reload/tree_view.rs` pair the five-item list omits, so the two statements
 in this file disagreed. Add the `parse_<comp>_public` wrapper, the `write_node` emit block, the
 `patch_unit_struct::<C>` line, and a SECOND comparator row — `p3_common::presence_vector` and
