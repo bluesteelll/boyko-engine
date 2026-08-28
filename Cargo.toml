@@ -60,6 +60,33 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 libc = "0.2"
 # loom model-checker atomics shim â€” pulled in ONLY under `--cfg loom`.
 loom = "0.7"
+# Rust parser. `boyko_macros` needs it to expand the derives; `boyko_ui`'s
+# `ui_a1_source_census` dev-dependency needs it to WALK `src/animation.rs`
+# instead of scanning it. Hoisted the moment it stopped being a single-crate
+# dep, which is exactly the rule the two carve-outs above (`mimalloc`,
+# `bevy_ecs`) are carved out of. Per-crate feature selections are unioned by
+# Cargo: this base carries `full`, the census adds `visit` locally.
+#
+# The census's need is not a preference. MEASURED by the seventh adversarial
+# pass over rung A1: a keyword-and-regex scanner cannot distinguish
+# `advance(…)` from `done.advance()`, cannot see a branch introduced by a macro
+# invocation, and cannot see a `&&` short-circuit — three live evasions that
+# left the whole crate at EXIT=0. All three are ordinary AST nodes.
+syn = { version = "2.0.100", features = ["full"] }
+# Token printing for the two consumers of `syn` above: the derives emit with it,
+# and the census keys every AST node by its printed token text (which is why the
+# keys survive a reflow that would move every line the old scanner counted).
+quote = "1.0.39"
+# The census's TOKEN-level half. `syn` cannot help with a `macro_rules!` body: it
+# is a token tree with `$` metavariables and does not parse as Rust until
+# expansion. The one component-hook registration rung A1 ships —
+# `#[component(storage = "dense", on_add = crate::animation::ui_visual_sink_on_add)]`
+# — is written INSIDE `tween_channel!`, so an attribute scan over the parsed tree
+# sees nothing there at all. The census walks that body as tokens instead.
+#
+# Not a new node in the dependency graph: `syn` and `quote` above both depend on
+# it, so it is compiled either way; this only lets the census name the type.
+proc-macro2 = "1.0.107"
 
 # Phase X.E â€” deterministic bench codegen.
 # A single codegen unit removes the cross-build codegen-layout variance that

@@ -56,6 +56,14 @@
 //! [`UiAnimationPlugin`] register the tick themselves, ahead of their consumers;
 //! that is the same host responsibility the layout pair and the text measure
 //! system carry.
+//!
+//! That is the CLOCK's ordering, and the sink's is not the same shape.
+//! [`ui_visual_tick`] writes [`UiVisual`] through `Mut::set_if_neq`, and a
+//! `Changed<UiVisual>` reader ordered BEFORE it does not read a stale value —
+//! it reads NOTHING, permanently. Any host system filtering on the sink
+//! (`ui_render_discovery` is the one that matters) MUST be registered
+//! `.after_set(UiAnimationSet)`. See [`ui_visual_tick`] for the mechanism and
+//! the measurement.
 
 use std::mem;
 
@@ -166,6 +174,146 @@ fn invalid_ui_max_delta_panic(secs: f32) -> ! {
     );
 }
 
+/// The rare-path refusal for a tween duration that is not finite or not
+/// POSITIVELY SIGNED.
+///
+/// RELEASE-ACTIVE, and it REFUSES rather than panics — the
+/// [`depth_clamped`](crate::layout) precedent, not
+/// [`UiClock::set_max_delta`]'s: this runs on the gameplay path, and a panic in a
+/// UI system under the windowed runner hangs the window instead of reporting.
+///
+/// # The five refused shapes, MEASURED
+///
+/// 2026-08-27, release, five 100 ms frames of a `0.0 → 0.25` opacity tween with
+/// the guard's `return` deleted so the row is actually built:
+///
+/// | `duration_ms` | `inv_duration` | what the row does |
+/// |---|---|---|
+/// | `+inf` | `0` | `t = 0` forever — frozen at `from`, immortal |
+/// | `-inf` | `-0` | `t = -0` forever — frozen at `from`, immortal |
+/// | negative finite (`-100.0`) | `-10` | **diverges** −0.25 … −1.25, immortal |
+/// | `-0.0` | `-inf` | sink is **`-inf`** from frame 1 on, immortal |
+/// | `NaN` | `NaN` | **completes on frame 1** — see below |
+///
+/// Four of those five are immortal: the row never completes, never enters `done`,
+/// and the reap can never reach it. The negative finite shape is the worst for
+/// the render gate — it bumps `set_if_neq` on every frame, which at rung A4 is
+/// the whole UI's per-slot repaint skip disarmed permanently, not "a wrong
+/// picture on one node".
+///
+/// **`NaN` is the exception and it is recorded, not glossed.** `t` is NaN, and
+/// [`advance`]'s `t < 1.0` spelling puts a NaN `t` on the COMPLETING side, so a
+/// NaN-duration row completes on frame 1, assigns its endpoint and is reaped.
+/// This entry point refuses it anyway — it is an authoring mistake and the
+/// `debug_assert!` below names it at the site — but the refusal and `advance`'s
+/// spelling OVERLAP on this member, and no gate here may claim NaN as coverage
+/// earned by the guard alone.
+///
+/// # What this predicate does NOT close, MEASURED
+///
+/// It closes DEGENERATE RECIPROCALS — `duration_ms` non-finite or not positively
+/// signed. It does **not** close "the immortal row class", and saying it does is
+/// an over-claim this rung retracts.
+///
+/// `elapsed` is an `f32` accumulating `+= dt`, so absorption gives it a hard
+/// ceiling: MEASURED by exact `f32` simulation 2026-08-27, `524288 s` (`2^19`,
+/// **6.068 days**, 24,986,955 frames) at `dt = 1/60 s` and at 16 ms, and
+/// `2097152 s` (`2^21`, **24.273 days**) at the 100 ms [`UiClock`] clamp
+/// ceiling. A row completes only when `elapsed` reaches `duration_ms / 1000`,
+/// so **every accepted `duration_ms` STRICTLY above that ceiling — at 60 Hz,
+/// `> 5.24288e8` — yields a row that never completes, is never reaped, and
+/// bumps `set_if_neq` on EVERY frame.** `1e10` ("115 days"), `1e30` and
+/// `f32::MAX` are all on that side.
+///
+/// **The operator is `>`, not `>=`, and the boundary value itself COMPLETES.**
+/// Re-measured at this site 2026-08-27 (`rustc -O`, exact `f32`), because the
+/// number above was first measured elsewhere and carried here: at
+/// `duration_ms = 5.24288e8` (bits `0x4dfa0000`, exactly `524288000`)
+/// `inv_duration` is bits `0x36000000` — exactly `2^-19` — so at the ceiling
+/// `t` is `524288.0 * 2^-19` = exactly `1.0` (bits `0x3f800000`), and
+/// [`advance`]'s `t < 1.0` spelling puts exactly `1.0` on the COMPLETING side.
+/// The first genuinely never-completing duration is ONE ULP ABOVE it:
+/// `5.24288032e8`, bits **`0x4dfa0001`**, whose `t` at the ceiling is
+/// `0.99999994`. The 100 ms clamp behaves identically — `2.097152e9` (bits
+/// `0x4efa0000`) reaches exactly `1.0` at `2^21` and completes; `0x4efa0001` is
+/// the first that does not.
+///
+/// The REFUSED `+inf` bumps zero times after the first frame; an accepted
+/// `f32::MAX` bumps every frame while rendering an opacity that never leaves
+/// the neighbourhood of its START endpoint — visually the same picture, and
+/// strictly worse for the A4 repaint skip.
+///
+/// **That opacity, MEASURED at THIS site 2026-08-28.** The figure this sentence
+/// used to carry (`3.673e-36`) belonged to no frame of any fixture; it is
+/// corrected here rather than dropped. Read back FROM THE ENGINE through
+/// `an_over_ceiling_duration_is_accepted_and_never_completes`'s own `f32::MAX`
+/// arm — `start_tween_opacity(.., 0.0, 1.0, f32::MAX, LINEAR, 0)` at
+/// `FRAME = 100 ms` — and, independently, by exact `f32` simulation of
+/// [`advance`], the two agreeing bit-for-bit on every frame: the sink holds
+/// **`2.938736e-37`** (bits `0x02c80001`) after frame 1 and **`1.469368e-36`**
+/// (bits `0x03fa0001`) after frame 5.
+///
+/// ⚠️ **Those seven mantissa digits are also `inv_duration`'s, one decade up.**
+/// `1000.0 / f32::MAX` is bits `0x047a0001` and prints `2.938736e-36` — the
+/// same bit pattern the next paragraph names as the smallest duration with a
+/// finite reciprocal, and the reason the digits collide at all. A rendered
+/// opacity and a stored reciprocal are different quantities; tell them apart by
+/// BITS, never by the printed digits.
+///
+/// A second, benign boundary sits far below: `1000.0 / duration_ms` overflows to
+/// `+inf` only for `duration_ms` below bits **`0x047a0001`**
+/// (`2.9387360564219222e-36`) — that is the SMALLEST duration with a finite
+/// reciprocal. **`250.0 x f32::MIN_POSITIVE` is NOT that value**: it is bits
+/// `0x047a0000` (`2.9387358770557188e-36`), one ULP BELOW, and it is the
+/// LARGEST duration that still overflows — the closed form named the wrong side
+/// of the boundary it defines. State it by BITS: the two floats bracketing it
+/// both print `2.938736e-36` at 7 significant figures, so no decimal at that
+/// width can name it. That regime is the one `+0.0` and the denormals live in,
+/// and it is benign: those SNAP.
+///
+/// Whether to refuse an over-ceiling duration is a VALUES call and is filed for
+/// the owner in `docs/OPEN-QUESTIONS.md`; it is not decided here.
+///
+/// **Gated by TWO tests, and neither subsumes the other.**
+/// `an_over_ceiling_duration_is_accepted_and_never_completes`
+/// (`tests/ui_a1_tween.rs`) shows the BEHAVIOUR this section describes actually
+/// happens — the row is live and the sink bumps on every frame — at three sampled
+/// durations. Three points cannot close the word *every*: MEASURED 2026-08-28, a
+/// clamp restricted to `(5.0e8, 1.0e9]` preserved all three samples bit-exactly
+/// and left the crate green while the class was broken, and a cap inside
+/// [`advance`] (`&& *elapsed < 3_600.0`) falsified this paragraph verbatim with
+/// all 1427 tests at EXIT=0. So the CLASS is closed by
+/// `the_termination_condition_is_pinned_to_the_disclosure`
+/// (`tests/ui_a1_source_census.rs`), which pins the normalized source of
+/// [`advance`] and of the `tween_helpers!` `$start` body — any added cap, clamp,
+/// sub-range rewrite or extra conjunct reds it, and its failure message says this
+/// paragraph must be rewritten in the same edit. That census also reds if these
+/// sentences are DELETED while the predicate stands.
+///
+/// # `+0.0` and the denormals are ACCEPTED
+///
+/// They yield `inv_duration = +inf`, so `t = inf` completes on the first frame
+/// with a non-zero delta and the endpoint is ASSIGNED — a zero-duration tween
+/// SNAPS to its target. That is why the predicate is spelled
+/// `is_finite() && is_sign_positive()` and not `is_finite() && > 0.0`: `0.0f32 >
+/// 0.0` is false, so the strict-comparison spelling turned an authored zero
+/// duration into a node that never acquires a sink and never reaches its target.
+/// `-0.0` must stay refused (it is `-inf`, the fourth row above), and the sign
+/// bit is the only thing separating the two. Gated by
+/// `a_zero_or_denormal_duration_snaps_to_the_endpoint` (`tests/ui_a1_tween.rs`).
+#[cold]
+#[inline(never)]
+fn invalid_tween_duration(duration_ms: f32) {
+    debug_assert!(
+        false,
+        "invariant: a tween duration is finite and POSITIVELY SIGNED (got {duration_ms} ms) \
+         — deliberately NOT 'strictly positive': `+0.0` and the denormals are ACCEPTED and \
+         snap to the endpoint, and only the SIGN BIT separates them from `-0.0`, which is \
+         refused. The row stores 1/duration; the release build REFUSES the tween rather than \
+         creating a row that can never complete"
+    );
+}
+
 impl Default for UiClock {
     /// Both deltas zero; `max_delta` is
     /// [`UI_FALLBACK_MAX_DELTA`] — the
@@ -199,18 +347,28 @@ pub fn ui_clock_tick(time: Res<Time>, mut clock: ResMut<UiClock>) {
     clock.dt_virtual = time.delta_secs().min(max);
 }
 
-/// The [`SystemSet`] [`ui_clock_tick`] runs in.
+/// The [`SystemSet`] rung A0's clock tick and rung A1's animation pair run in.
 ///
+/// Three systems, in a pinned order: [`ui_clock_tick`] → [`ui_visual_tick`] →
+/// [`ui_tween_reap`], the last of which is **exclusive** (`&mut EcsMaster`).
 /// Exposed so a host can order its own time-varying UI systems
 /// `.after_set(UiAnimationSet)` — the [`UiWidgetSet`](crate::widgets::UiWidgetSet)
-/// / [`UiBindSet`](crate::interaction::UiBindSet) idiom. A consumer without that
-/// edge reads the previous frame's deltas.
+/// / [`UiBindSet`](crate::interaction::UiBindSet) idiom.
+///
+/// **What "without that edge" costs depends on WHICH member you consume, and the
+/// two are not the same.** A consumer of [`UiClock`] without the edge reads the
+/// previous frame's deltas — a frame late, never a wrong number. A consumer
+/// FILTERING on `Changed<UiVisual>` without the edge reads nothing at all, on
+/// every frame, permanently — see [`ui_visual_tick`]'s `# Ordering`.
 #[derive(Clone, Copy, Debug)]
 pub struct UiAnimationSet;
 impl SystemSet for UiAnimationSet {}
 
-/// Wires the UI clock into an [`App`]: inserts [`UiClock`] and schedules
-/// [`ui_clock_tick`] on [`CoreSchedule::Main`], in [`UiAnimationSet`].
+/// Wires rungs A0 and A1 into an [`App`]: inserts [`UiClock`] **and**
+/// [`UiTweenScratch`] (both insert-if-absent), and schedules [`ui_clock_tick`] →
+/// [`ui_visual_tick`] → [`ui_tween_reap`] on [`CoreSchedule::Main`] in
+/// [`UiAnimationSet`], with SET edges between them because add-order is not a
+/// pin. The reap is EXCLUSIVE.
 ///
 /// # Containment
 ///
@@ -274,10 +432,40 @@ impl Plugin for UiAnimationPlugin {
 ///
 /// A `Resource`-owned buffer reused across frames — the [`UiBarScratch`] shape,
 /// so the steady animating path allocates nothing (A1 gate 6). It is FILLED and
-/// DRAINED inside one frame, which is also what makes the generation-free
-/// [`EntityId`] key safe: a pair never survives the frame that produced it, so
-/// there is no window in which a despawn could recycle the id underneath it.
-/// A1 gate 8 leg (i) is exactly the assertion that the drain happens.
+/// DRAINED inside one frame, and A1 gate 8 leg (i) is exactly the assertion that
+/// the drain happens.
+///
+/// # Why the generation-free key is safe
+///
+/// The key is a generation-free [`EntityId`], and THREE separate facts are what
+/// make that safe. All three were measured 2026-08-27; none of them is "the pair
+/// does not survive its frame", which is true and does not bear on this.
+///
+/// The pair's real lifetime is the window BETWEEN [`ui_visual_tick`] and
+/// [`ui_tween_reap`]. `after(tick)` orders the reap after the tick; it forbids
+/// nothing in between, and `DenseStore::remove` (`dense/dense_store.rs:299`)
+/// takes a bare id with NO liveness check — MEASURED, it removes a live,
+/// unrelated row and returns `true`. What closes the window is:
+///
+/// 1. **A despawn removes the entity's dense rows itself** (MEASURED: a channel's
+///    live count went 1 → 0 across a despawn, with no reap involved), so a pair
+///    naming a despawned entity finds no slot and `remove` returns `false`.
+/// 2. **This kernel does not recycle [`EntityId`]** (MEASURED: spawn `[0..5]`,
+///    despawn four, the next six ids are `[6..11]`; recycled = none), so there is
+///    no id under which fact 1 could be undone. This is the load-bearing fact and
+///    it is NOT architectural — [`Entity`] carries a `generation` and
+///    `Entity::increment_generation` is documented "used to detect stale handles",
+///    so the kernel is BUILT for recycling and merely does not do it yet. It is
+///    therefore guarded by `entity_ids_are_not_recycled_today`
+///    (`tests/miri_a1_tween.rs`), which reds the day it changes.
+/// 3. Nothing in the shipped schedule occupies the window: command applies drain
+///    at the schedule's apply window, so only an EXCLUSIVE system a host
+///    deliberately scheduled between the two could despawn and spawn inside it.
+///
+/// Carrying the generation instead was priced and declined: `(Entity, ComponentId)`
+/// is 12 B against this pair's 8 B (+50 % on a buffer that peaks at one entry per
+/// completion), and `Query::iter_entities_mut` yields an [`EntityId`], so the tick
+/// would need a per-completion generation lookup it has no world access for.
 #[derive(Resource, Default)]
 pub struct UiTweenScratch {
     /// Channels whose `elapsed` reached their duration this frame.
@@ -360,18 +548,39 @@ pub(crate) unsafe fn ui_visual_sink_on_add(mut world: DeferredEcsMaster<'_>, ctx
 /// else takes the real one. A select between two `f32` already in registers, not
 /// a branch on a `Duration`.
 ///
-/// `t >= 1.0` is FALSE for a NaN `t`, so a row whose `inv_duration` went
-/// non-finite in release keeps running and writes NaN into the sink rather than
-/// completing. That is deliberate and it is bounded, not ignored: AD11's bytewise
-/// equality makes the resulting `set_if_neq` idempotent, so the damage is a wrong
-/// picture on one node instead of a render gate disarmed for the whole UI.
+/// The completion test is spelled `t < 1.0`, not `!(t >= 1.0)`: a NaN `t` is
+/// unordered against both, and this spelling puts NaN on the COMPLETING side, so
+/// a row whose `inv_duration` went NaN assigns its endpoint and is reaped instead
+/// of running forever. MEASURED free — 14.002 vs 14.008 ns per 4-channel row
+/// (4096 nodes, release, floor of five process runs).
+///
+/// It is defence in depth, not the guard: it covers NaN and NOTHING ELSE. A
+/// non-positive or infinite `inv_duration` still yields a finite `t < 1.0`
+/// forever. That whole class is refused at the door instead — see
+/// [`invalid_tween_duration`] — because the per-row alternative MEASURED
+/// **+0.536 ns/row (+3.8 %)** and would defend one `pub` field on a route where
+/// `from`, `to` and `elapsed` are equally undefended.
+///
+/// **`t < 1.0` is the ONLY way a row stops, and that is pinned rather than
+/// stated.** This function's normalized source is
+/// [`ADVANCE_PIN`](../../tests/ui_a1_source_census.rs) — a second termination
+/// condition here (a wall-clock cap, an `elapsed` ceiling, an early return)
+/// falsifies [`invalid_tween_duration`]'s over-ceiling disclosure without moving
+/// any number the door stores, so nothing that samples the door can see it.
+/// MEASURED 2026-08-28: `&& *elapsed < 3_600.0` on the line below left 1427 tests
+/// at EXIT=0.
+///
+/// Every branch of this function is enumerated with its coverage in that same
+/// file's `SITES` table; the per-row clock select below is there because it had
+/// ZERO executions in the allocation gate's window until the `virtual_clock`
+/// cohort was added on 2026-08-28.
 #[inline]
 fn advance(elapsed: &mut f32, inv_duration: f32, flags: u8, dt_real: f32, dt_virtual: f32) -> Option<f32> {
     debug_assert!(*elapsed >= 0.0, "invariant: a tween's elapsed is non-negative");
     let dt = if flags & TWEEN_FLAG_VIRTUAL_CLOCK != 0 { dt_virtual } else { dt_real };
     *elapsed += dt;
     let t = *elapsed * inv_duration;
-    if t >= 1.0 { None } else { Some(t) }
+    if t < 1.0 { Some(t) } else { None }
 }
 
 /// Applies rung A1's curve set to a normalized `t`.
@@ -444,6 +653,51 @@ fn lerp_rgba8(from: u32, to: u32, t: f32) -> u32 {
 /// (`to`, never `to ± ULP`) and pushes its `(entity, channel)` pair onto
 /// [`UiTweenScratch`]. The removal is [`ui_tween_reap`]'s, immediately after: a
 /// dense remove is a structural op and this query is iterating.
+///
+/// # Ordering — a wrong order LOSES the repaint, it does not delay it
+///
+/// Any system filtering on `Changed<UiVisual>` MUST be registered
+/// `.after_set(UiAnimationSet)`, as a real ordering edge; add-order is not a pin.
+///
+/// `Schedule::run` bumps ONE `this_run` per run and hands it to every system in
+/// that run (`schedule.rs:288`, `let this_run = world.bump_change_tick();`), and
+/// each system's previous `this_run` becomes its new `last_run` (`schedule.rs:342`,
+/// `sys_box.system.set_change_ticks(prev_this_run, this_run)`). A `Changed` term
+/// is true for a row whose changed tick lies in the HALF-OPEN window
+/// `(last_run, this_run]`; the comparison itself is `Tick::is_newer_than`
+/// (`change_detection/tick.rs:169-171` — `ticks_since_system > ticks_since_insert`),
+/// consumed at `filter.rs:1205`, `:1225`, `:1493` and `:1503`. *(`schedule.rs:152`
+/// is NOT the mechanism — it is a doc comment about the gated-system dispatch
+/// stamp that merely quotes the same `(last_run, this_run]` notation.)*
+/// So a write stamped in frame N carries frame N's tick, and a reader ordered
+/// BEFORE the writer misses it TWICE: in frame N the write has not happened yet,
+/// and in frame N+1 the window's lower bound is EXCLUSIVE and is exactly the tick
+/// the write carries. The write is in neither window. It is lost permanently.
+///
+/// MEASURED 2026-08-27 (20 frames, one animating node, a real
+/// `Or<(Changed<ComputedRect>, Changed<UiVisual>)>` over this system's
+/// `Mut::set_if_neq` write): reader after the writer ⇒ a hit on all 20 frames;
+/// reader before ⇒ **1** hit in 20, and that one is the out-of-schedule insert
+/// stamp, not an animating frame.
+///
+/// This is why [`UiAnimationSet`]'s "a consumer without the edge reads the
+/// previous frame's deltas" is true of [`UiClock`] and FALSE of this system's
+/// sink: `Res<UiClock>` is a plain resource read with no `Changed` window, so it
+/// lags; a `Changed` filter has a window, and the write falls outside both of
+/// them.
+//
+// `clippy::type_complexity`: the `Query<(Mut<…>, AnyOf<(…)>)>` tuple IS this
+// system's `SystemParam` signature, which the scheduler reads to derive access.
+// A `type` alias here WOULD compile — MEASURED 2026-08-27, `type ZzTweenQuery<'w,
+// 's, 'a> = Query<'w, 's, (Mut<'a, UiVisual>, AnyOf<(…)>)>` with this `#[allow]`
+// removed gives `cargo clippy -p boyko-ui --lib -- -D warnings` EXIT=0, and the
+// lib registers this very system below, so the `SystemParam` impl survives the
+// alias (type aliases are transparent). It is declined because it would only
+// hide the access set from a reader, and because the alias must spell three
+// lifetimes explicitly to say what the inline signature elides. The four `AnyOf`
+// arms are the four channel columns AD5 fuses into one pass; splitting them
+// would be the four-system shape AD5 exists to avoid.
+#[allow(clippy::type_complexity)]
 pub fn ui_visual_tick(
     clock: Res<UiClock>,
     mut q: Query<(
@@ -591,12 +845,33 @@ macro_rules! tween_helpers {
         /// `duration_ms` is converted to the row's stored reciprocal once, here,
         /// so the per-frame tick is a multiply.
         ///
+        /// # A degenerate `duration_ms` is REFUSED, in release too
+        ///
+        /// A `duration_ms` that is not finite, or whose SIGN BIT IS SET, creates
+        /// NO ROW: the helper returns without inserting anything. This is the ONE
+        /// check here that survives a release build, and it has to — the row
+        /// stores `1000.0 / duration_ms`, and MEASURED, four of the five refused
+        /// shapes produce a tween that never completes and can never be reaped
+        /// (the fifth, `NaN`, is refused here but would also be survived by
+        /// `advance`; the two defences overlap on it).
+        ///
+        /// **`+0.0` is ACCEPTED and snaps to the endpoint.** `1000.0 / +0.0` is
+        /// `+inf`, so the row completes on the first frame with a non-zero delta
+        /// and `to` is assigned — a zero duration means "be there now", not
+        /// "do nothing". `-0.0` is REFUSED (it is `-inf`, and the sink diverges),
+        /// which is why the predicate tests the sign bit rather than `> 0.0`.
+        ///
+        /// See `invalid_tween_duration` (private, in this module), which carries
+        /// the per-shape measurement and the reason this refuses rather than
+        /// panicking.
+        ///
         /// # Panics
         ///
-        /// In debug builds only, on a non-finite or non-positive `duration_ms`
-        /// or a non-finite endpoint. These are AUTHORING mistakes and the assert
-        /// names them at the site that made them; they are NOT the release-side
-        /// NaN defence, which is [`UiVisual`]'s bytewise `PartialEq` (AD11) —
+        /// In debug builds only, on a non-finite endpoint (and, through
+        /// `invalid_tween_duration`'s `debug_assert!`, on the refused
+        /// duration above, so an authoring mistake still names itself at the
+        /// site that made it). A NaN ENDPOINT is not the release-side defence's
+        /// subject — that is [`UiVisual`]'s bytewise `PartialEq` (AD11) — and
         /// every `debug_assert!` here compiles out.
         pub fn $start(
             cmds: &mut Commands,
@@ -607,11 +882,10 @@ macro_rules! tween_helpers {
             easing: EasingId,
             flags: u8,
         ) {
-            debug_assert!(
-                duration_ms.is_finite() && duration_ms > 0.0,
-                "invariant: a tween duration is finite and strictly positive (got {duration_ms} ms) \
-                 — the row stores 1/duration, so a zero duration is a reciprocal-of-zero trap"
-            );
+            if !(duration_ms.is_finite() && duration_ms.is_sign_positive()) {
+                invalid_tween_duration(duration_ms);
+                return;
+            }
             let finite: fn($payload) -> bool = $finite;
             debug_assert!(
                 finite(from) && finite(to),
@@ -619,10 +893,6 @@ macro_rules! tween_helpers {
                  is a wrong picture on this node for as long as it stands"
             );
             let inv_duration = 1000.0 / duration_ms;
-            debug_assert!(
-                inv_duration.is_finite() && inv_duration > 0.0,
-                "invariant: inv_duration is finite and > 0"
-            );
             cmds.entity(entity).insert($bundle {
                 tween: $channel {
                     from,

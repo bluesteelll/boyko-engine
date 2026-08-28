@@ -43,13 +43,13 @@ values are already on one resource, so it costs nothing but a field.
 
 ### 1.2 The relayout gate is global, and this is the single most important fact for animation
 
-`crates/boyko_ui/src/layout.rs:84-134` — `ui_layout_discovery` is
+`crates/boyko_ui/src/layout.rs:89-139` — `ui_layout_discovery` is
 `Query<(), Or<(Changed<UiLayout>, Changed<UiSpacing>, Changed<UiAlign>, Changed<UiAbsolute>,
 Changed<ContentSize>, Changed<Children>, Changed<ChildOf>, Added<UiRoot>, Changed<UiAnchor>,
 Changed<UiWorldProjection>)>>` reduced to **one boolean**:
 
 ```rust
-scratch.dirty = inputs_changed || viewport_changed;   // layout.rs:128
+scratch.dirty = inputs_changed || viewport_changed;   // layout.rs:132
 ```
 
 and the crate's own doc block states the consequence (`layout.rs:24-31`):

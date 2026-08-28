@@ -14,6 +14,614 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-28 — RECORD: **the no-syntax edge class is a LIST, not a closure — a FOURTH member, a residue guarantee WITHDRAWN, and the anti-rot annotation's own prose measured false at 21 sites**
+
+**Status: RECORDED — no new question, and the SCOPE call below is unchanged.** Found by the
+**eleventh** adversarial pass, classified *(c) — four positive assertions still false*, and closed by
+a code landing again confined to `crates/boyko_ui/tests/ui_a1_source_census.rs` (**3913 → 4134
+lines**; no tracked file touched) plus this record. Full detail and every measurement:
+`docs/UI-PLAN-ANIMATION.md`'s A1 landing note, part 11.
+
+### 1 — the class is a LIST, not a closure, and the FOURTH member is DESUGARING
+
+`for x in it` is a walked node; the `Iterator`/`IntoIterator` impl behind it is **not**. The same
+shape reaches `From` through `?`, `Display` through macro interpolation, and `Deref` through `*`. The
+probe — an `impl Iterator` carrying a fourth termination condition, driven from the opacity arm —
+left the crate at **EXIT=0, 53 targets, 354 passed, identical to the clean tree**, *including after
+its one `SITES` row was paid*. Widened rather than filed as residue, because it measured free:
+`DESUGARED_IMPLS` is a **sibling table** over 8 traits, served by the same scanner, so
+`OPERATOR_SITES` stays **43** and `OPERATOR_IMPLS` stays **3 over 28** and no external citation of
+those numbers was invalidated. Population, measured with the table empty: **ONE**.
+
+⚠️ **The transferable half.** Four members across four passes — drop glue (8th), hook registration
+(8th), operator dispatch (10th), desugaring (11th) — **and every one was found by a PROBE, never by
+construction.** Nothing here derives the class from the language, so a green run means *"none of the
+four known no-syntax edges is unaccounted for"* and never *"there is no no-syntax edge"*. Costs:
+drop glue and operator dispatch **zero rows** each, desugaring **zero rows for the body**.
+
+### 2 — residue item 14's guarantee is WITHDRAWN: the cross-crate population is NOT zero
+
+The item that exists to state the cross-crate blind spot asserted the population was **zero**,
+"because the region's operands are `f32`/`u32`/`u8`/`[f32;2]`, all primitives". Measured: **at least
+five**, all reached on every armed frame, and **two of them carry no operator syntax at the site at
+all** — so the withdrawn sentence named the wrong *mechanism*, not merely the wrong count. It is
+reached through a **deref**: `Mut`'s, `Res`'s and `ResMut`'s. Details in item 14 below.
+
+### 3 — ⚠️ the anti-rot annotation's own PROSE is the thing that rots, at 21 sites and five descriptions
+
+The tenth pass ruled that the annotation stops asserting currency and becomes a dated transcript. **It
+applied the ruling to the pointer and not to the sentence that says where the pointer used to land** —
+and the eleventh pass measured every one of those sentences false. The three live coordinates
+(`:2857`, `:3105`, `:1696`) all still resolve; **the descriptions of the discarded values do not.**
+
+* **The ripple that the tenth pass measured for the live pointer hit the description in the same
+  sentence.** Its own warning — *"a document cannot record a coordinate into itself without moving
+  it"* — was written about `:2506 → :2706`, a **+200** drift in four steps inside one landing. Part
+  10's description of the *stale* value sat two lines above that warning and moved by the same 200:
+  read at `:2530` on the tree part 11 inherited, the D7 prose part 10 quoted for it stood **200 lines
+  below**. *(Quoted as content with a tree attached, never as a line: writing this record moved the
+  lines again, which is the finding restated as a fact about this very paragraph.)*
+* **Two of the three descriptions are *"is a blank line"*, and a blank line cannot be re-resolved by
+  content, because it has none.** The repair this campaign prescribes for a rotted anchor — open the
+  target and read it — is **structurally inapplicable** to exactly the descriptions that rotted
+  hardest. For those, a dated transcript is not the better form; it is the only available one.
+* **The population was undercounted by every pass, and the reason is mechanical.** Part 10 wrote
+  *three*; the eleventh pass's refuter counted *thirteen*; enumerated by grep over the five
+  documents, the answer is **21 carriers of five false descriptions**. **3 counts the coordinates,
+  13 counts the documents each bullet names, and 21 counts the sentences** — and only the last can be
+  false. A grep for the *coordinate* misses `UI-PLAN-SPRITES.md:1647` entirely, because that site
+  names no stale coordinate at all; a grep for the *document* misses the second copy each
+  `OPEN-QUESTIONS` twin carries.
+* **Two of the five were in nobody's list.** `UI-PLAN-SPRITES.md` said `:663` is *"today a sentence
+  about `UI_FALLBACK_MAX_DELTA`"* — it is not, and that carried the word "today", the strongest
+  currency claim in the cluster. And part 10 wrote that `:1656` *"is today the F2 ordering-axis
+  red-ledger row"* **in the same sentence in which it disclaimed the quote it was correcting** — the
+  wrong line and the wrong ledger row.
+
+**The generalisation.** Every pass treated *the anchor* as the thing that rots and re-aimed it. A
+re-aim writes **three** claims, not one: the new coordinate, the old coordinate's content, and often
+a passing remark about a third line. **Only the first is ever re-read, and only the first has never
+been found false. The rot is not in the pointers this campaign maintains — it is in the prose it
+writes about them, which nothing has re-read even once**, and the descriptions outnumber the
+coordinates **21 to 3**. This reinforces the SCOPE call already filed below rather than raising a new
+one: nothing here is mechanical until the **594** bare-basename citations become link form.
+
+### 4 — ⚠️ the hazard that is not about this rung: A KILLED AGENT LEAVES ITS PROBE APPLIED
+
+Three instances in one day across two lanes. One was a one-token swap the suite is green over *by
+construction*; one was a loud panic nothing ran to see; and one sat **between an `#[allow]` attribute
+and the function it was written for, silently re-attaching the attribute to the probe struct**.
+`git status` showed nothing (the probe was inside an already-modified file), the untracked list
+showed nothing, and a name-based grep misses it unless you guess the name right. **The check that
+caught all three was `git diff --numstat` against a known baseline.** The corollary: every figure in
+the reports written before the removal had been measured against a tree nobody re-measured, so the
+eleventh pass re-read all of them from the instrument rather than carrying one forward.
+
+---
+
+## 2026-08-28 — RECORD: **the A1 residue is FIFTEEN, not thirteen — a third execution edge with no syntax at the call site, and the campaign's own anti-rot annotation measured FALSE**
+
+**Status: RECORDED — three items, none of them a new question.** The SCOPE call the item below files
+is unchanged and is reinforced by item 3. Found by the **tenth** adversarial pass over
+`docs/UI-PLAN-ANIMATION.md`'s A1 rung and closed by the **tenth** landing. Full detail and every
+measurement: that document's A1 landing note, part 10.
+
+### 1 — the class, extended: the third execution edge is an OPERATOR, and it costs NOTHING to hide there
+
+The eighth pass found two edges with no syntax at the call site — drop glue and a kernel-registered
+hook. **The tenth found a third, and it is cheaper than both.** `Walk::visit_expr` matched
+`Expr::Binary` only for `And`/`Or`; `Index`, `Unary`, `Assign` and `AssignOp` matched no arm at all.
+An overloaded operator therefore calls a body that is **not a branch node, not a call node, not a
+callee, not a call site**, and carries no `Drop`. A `Mul` impl holding a fourth termination
+condition, invoked from the opacity arm, left every headline count **bit-identical** and the whole
+crate at EXIT=0; an `Index` impl — a structurally different node — did the same. **The recorded
+cross-module escape costs two rows and the factory escape costs two rows; this one costs zero.**
+
+Dispositioned by two scans that are blind to different things, both shipped: `OPERATOR_SITES` pins
+all **43** operator expressions of the walked region, and `OPERATOR_IMPLS` pins every user operator
+`impl` in `boyko_ui/src` over **28** traits. ⚠️ **"Closed" was the wrong word and the eleventh pass
+proved it: a FOURTH edge — DESUGARING — walked straight past both scans**, and the class now carries
+a THIRD scan (`DESUGARED_IMPLS`, 8 traits, measured population **one**). **The class is a LIST, not a
+closure** — four members across four passes, every one found by a probe rather than by construction,
+and nothing derives it from the language. See the eleventh-pass record above. ⚠️ **The pass that
+prescribed the second scan asserted
+the crate holds zero such impls. It holds three** — `PartialEq for UiTextBuffer`, `PartialEq for
+UiVisual`, `PartialOrd for UiName` — and the middle one is AD11's bitwise sink equality, five `&&`
+and four `Index` operations, reached by `set_if_neq` from the walked region's **last line**. It is a
+disposition rather than a hole (`the_sinks_equality_is_idempotent_under_nan` gates it), but *a
+predicted-zero population that measures three is the same defect as a coverage table nobody planted
+a `panic!` into.*
+
+Two further things the ninth landing asserted in the positive were measured **false** and are fixed
+rather than caveated: a nested item was recorded as one node and **not walked**, under a comment
+claiming the definition table compensated — the compensation is call-gated and there is no call; and
+a witness could be **laundered through the allowlist**, one row buying back "reachable" without
+buying back execution. The sentence *"a witness that exists and is never called … reds exactly as
+loudly as one that was deleted"* is **deleted at all three sites where it appeared**, not narrowed.
+
+### 2 — the residue is FIFTEEN, and item 9's stated REASON was refuted
+
+Source of truth: `crates/boyko_ui/tests/ui_a1_source_census.rs:168-363` (the `# THE RESIDUE`
+section; `:168` is its heading, `:363` its last line — *read at its target 2026-08-28, part 11. This
+record said `:148-300`, correct on the 3913-line tree it was written against and stale within hours
+of part 11's landing; on the 4134-line tree both ends land on plausible content*). Items 1–13 are
+unchanged in substance. **Item
+9 kept its disposition and lost its reason**: it excused straight-line code as introducing *"no path
+and no callee"*, which an operator overload refutes — it introduces both while looking like
+straight-line code at the site. It now reads *"straight-line code that is neither a call nor an
+operator"*, and the line is drawn by construct.
+
+* **14 — a no-syntax `impl` that is in ANOTHER CRATE.** `lerp1(from: f32, …)` becoming
+  `lerp1(from: Px, …)` leaves `from + (to - from) * t` printed identically while `+` starts calling
+  `Px`'s `Add`. This is item 1's class reached through an operator instead of a call. ⚠️ **This
+  item's guarantee was WITHDRAWN by the eleventh pass, and it is the item that exists to state it.**
+  It said *"measured population: zero cross-crate, because the region's operands are `f32`, `u32`,
+  `u8` and `[f32; 2]` — all primitives, which is exactly what makes a first non-primitive one red the
+  expression pin."* **The operand list is wrong and the population is at least FIVE**, every one
+  reached on every armed frame: three auto-derefs (`*sink` on `Mut<'w, UiVisual>`; `clock.dt_real()`
+  on `Res<'_, UiClock>`; `done.done.push(…)` on `ResMut<'_, UiTweenScratch>`) and two cross-crate
+  `Iterator` bodies driven by `for` (`q.iter_entities_mut()`, and `&done` via `impl IntoIterator for
+  &Vec<T>`). **Two of the three derefs carry no operator syntax at the site at all**, so no widening
+  of `OPERATOR_SITES` could have listed them — the withdrawn sentence named the wrong *mechanism*,
+  not merely the wrong count. What holds, as a property and not a promise: *`OPERATOR_SITES` reds
+  when the printed TOKENS of an operator expression of the walked region change — that and nothing
+  more.*
+* **15 — the observer scan's SCOPE is `CARGO_MANIFEST_DIR/src`.** A registration from a sibling
+  crate leaves *"0 observer registrations"* true and irrelevant. **Measured population: zero, so it
+  is latent and not live** — no crate outside `boyko_ecs` calls any `OBSERVER_VERB`, and every
+  cross-crate `#[component(on_*)]` in the tree sits in `boyko_ecs` fixtures or `aether_lang`
+  expander tests, none naming a `boyko_ui` path. The hook scan shares the scope but covers all four
+  hook kinds within it.
+
+**Items 1 and 6 remain the two a next pass should attack**, unchanged.
+
+### 3 — ⚠️ the campaign's own anti-rot annotation, *"re-measured by CONTENT"*, is UNCHECKED PROSE and it measured FALSE
+
+This is the part that generalizes past this rung. Three sweeps adopted the annotation as the
+discipline that replaces arithmetic offsets, and it is a **positive assertion that nothing checks**.
+Measured over the whole corpus rather than sampled: **41 annotation sites across seven documents**,
+and the false population is **larger than the four the pass reported**.
+
+* **Six sites in `UI-PLAN-ANIMATION.md` (rows E1, H1, H1-arm, H4, H8, and two prose paragraphs)**
+  carry part-7 coordinates into `crates/boyko_ui/tests/ui_a1_zero_alloc.rs` that part 9's own
+  landing invalidated. **E1 alone was stale at thirteen coordinates, eight of them on plausible
+  content** — `:297` is `const VIRTUAL_SPEED: f32 = 0.5;`, *a different `const`*; `:509` is a
+  `.collect::<Vec<_>>()`; and `:839`, cited as the per-index comparison loop, is `fn armed_once(` —
+  **the right shape for a neighbouring row of the same list.**
+* ⚠️ **The row whose whole subject is stale anchors had itself FORKED.** H4 exists to record where
+  the per-index `min` really is. Part 7 moved it to `:640` and updated the **E1** row but not this
+  one, so for two parts the document carried two different answers — `:531` here, `:640` there — and
+  part 9 invalidated both. True today: `:980`. **A document that repairs one citation of a fact and
+  not its twin has forked the fact, and a sweep that walks ROWS cannot see that; only one that walks
+  FACTS can.**
+* **Three cross-document coordinates, two of them cited four times each.** The dead
+  `benches/ui_animation.rs` path — true `UI-PLAN-ANIMATION.md:2857`; the D7 owner self-citation —
+  true `:3105`; and that document's sibling self-citation, rotted a **fourth** time and this time OUT
+  of content — true `:1696`. ⚠️ **Part 11 re-read all three at their targets 2026-08-28: the three
+  LIVE values still hold. What had gone false is the description of each STALE value** — part 10
+  wrote that `:2282` and `:1673` *"are blank lines"* and `:2530` *"is prose about an unrelated
+  axis"*, and none of those three sentences is true on today's tree. **They are anchors into the same
+  moving document, and the ruling below was applied to the pointer and not to them.** Measured: part
+  10's D7 quote stood exactly **200 lines** below the value it describes — the same ripple
+  the warning two paragraphs down measures for the live pointer, arriving at the description that sat
+  in the same sentence. Full accounting in `UI-PLAN-ANIMATION.md`'s Cluster B.
+* **Eight census coordinates went stale inside the tenth landing itself**, within hours, because it
+  took `ui_a1_source_census.rs` from 3181 to 3913 lines. Every one of part 9's values was correct on
+  the tree part 9 read; every one is plausible content now. **The `ADVANCE_PIN` / termination-test
+  pair has now been re-aimed by parts 8, 9 and 10 and landed on plausible content each time.**
+
+**The ruling, and it is not a widening.** The annotation **stops asserting currency**. Every site now
+reads as *what was read, when, and by which part* — a dated transcript, under the same rule this
+campaign already applies to red ledgers — and the rows most exposed additionally say in words that
+nothing gates them. It is deliberately **not** made mechanical here, and the reason is measured
+rather than asserted: the existing `internal_docs_anchors` gate widened to these five documents
+produces **405 misbindings out of 541 flags**, and its sensitivity control moved the stale count
+**92 → 92** when a real-rot site was repointed 999 458 lines past EOF (item 1 of the SCOPE record
+below). The prerequisite is the **594** bare-basename citations that must become link form first —
+**that is the owner-facing budget, and it is unchanged.** Until it lands, a dated transcript is the
+honest form.
+
+⚠️ **One more thing, measured on this landing rather than argued.** Writing this record moved the two
+cross-document coordinates **four times**: `:2506`/`:2754` → `:2686`/`:2934` when the landing note
+was inserted, → `:2696`/`:2944` when the warning about the first move was added, and →
+**`:2706`/`:2954`** when a seventh finding and this sentence were added. **A document cannot record a
+coordinate into itself without moving it, so the re-read has to be the LAST action of a landing,
+never a step inside it** — and the fix for the ripple is to make the last edit
+**line-count-neutral**, which is what finally converged this one.
+
+---
+
+## 2026-08-28 — RECORD: **rung A1's source census now claims only what it MEASURES, and the difference is a THIRTEEN-item residue** — plus, the repository's anchor gate is green over a file set DISJOINT from this landing
+
+> ⚠️ **Superseded in two numbers by the record above, 2026-08-28 (tenth pass): the residue is
+> FIFTEEN, and the census section it points at is now `:148-300`, not `:126-221` — `:126` is today a
+> module-doc line.** Everything else in this record stands as measured.
+
+**Status: RECORDED — three items, none of them a new question.** Item 3 restates the SCOPE
+recommendation already open in the item below, with its price re-measured, so it can be weighed
+without opening a test file. Found by the **eighth** adversarial pass over `docs/UI-PLAN-ANIMATION.md`'s
+A1 rung and closed by the **ninth** landing. Full detail and every measurement: that document's A1
+landing note, parts 8 and 9.
+
+### 1 — the class, because it is reusable: an execution edge can have NO SYNTAX AT THE CALL SITE
+
+A1's defence is a **source census** — it parses `crates/boyko_ui/src/animation.rs` and asserts that
+the set of control-flow nodes, callees and call sites is exactly a written-down table, so a new
+member fails the build by EXISTING rather than by being noticed. Seven passes hardened it against
+things *written* in the file, the last of them replacing a regex scanner with an AST walk. The eighth
+pass found the edges that are written nowhere:
+
+* **`impl Drop`.** A fourth termination cap — same threshold as a macro form the census DOES catch —
+  placed in a guard object dropped at the end of the opacity arm. Drop glue is called by no syntax at
+  all, so every census was blind: **EXIT=0, 53 targets, 349 passed.**
+* **A kernel-registered hook.** `ui_visual_sink_on_add` runs on every `Tween*` insert; its
+  registration is an attribute one module over, written INSIDE a `macro_rules!` body. It appeared in
+  no census — no walked entry, no site row, no call row — while already carrying an unenumerated live
+  branch. A second branch plus a heap allocation planted in it: **EXIT=0, 349 passed.**
+* **And an "EXECUTABLE witness" was satisfied by MENTIONING its name.** One token —
+  `witness_…(&mut world, …)` → `let _ = witness_…;` — left five covered paths executed **zero** times
+  at EXIT=0, because the reachability scan was a *mention set*, not a call graph.
+
+All three are closed by measurement: three new tests, and the whole-crate comparator that read
+EXIT=0 / 349 passed now reads **EXIT=101, 53 targets, 351 passed, 1 failed**. **The transferable part
+is the question, not the fix** — *what calls this code where I cannot see a call?* Drop glue, hooks,
+observers, trait dispatch selected by type, macro expansion. Each is an edge no syntactic gate sees.
+
+### 2 — the residue: THIRTEEN things the instrument does not measure, written down at the instrument
+
+**This is the rung's honest close, and it is the part worth carrying to other gates.** The census's
+claim used to be *"every executable branch of the A1/A0 systems and their intra-file callees"* — a
+claim about a **runtime reachability set**, checked by a **syntactic walk of nine bodies in one
+file**. Two of those are not the same thing, and eight passes' worth of defects lived in the gap. The
+claim now describes the walk, and the gap is an enumerated list instead of a sentence asserting
+closure. *(The previous spelling of that section ended "this is now the WHOLE residue" and was wrong
+three separate ways.)*
+
+Source of truth, with each item's full reasoning:
+`crates/boyko_ui/tests/ui_a1_source_census.rs:148-300` (the `# THE RESIDUE` section; `:148` is its
+heading, `:300` its last line — *read at its target 2026-08-28 by the tenth pass; this record was
+written with `:126-221`, and `:126` is today a module-doc line*). Digest, **for THIRTEEN items; the
+list is fifteen — see the record above**:
+
+1. **Branches inside a callee in another module or crate.** Enumerating a callee makes its branches
+   *enumerable*, not *visible*. MEASURED: a `pub(crate) fn zz_cap` in `components.rs` called from the
+   opacity arm reds two census tests — and **adding the two rows those failures ask for gives EXIT=0,
+   352 passed, with the cap still live**, because neither the `local` flag nor the `note` prose is
+   checked against anything. *The answer to a new cross-module callee is a place to write a sentence.*
+2. **Trait impls selected by type.** Nothing here resolves a receiver's type or a blanket impl; the
+   drop scan is over-approximate in the fail-closed direction precisely because it cannot resolve.
+3. **Macro EXPANSIONS.** The invocation is a node and the walk descends into a parseable body, but
+   what a `macro_rules!` body expands to is not. An unparseable body is a RED, not a silent skip —
+   fail-closed, not sighted.
+4. **`#[cfg]`-dead code is COUNTED.** MEASURED: a branch under a feature that exists in no profile
+   reds the census and demands a coverage row. Right direction, **at the price of a row whose
+   justification cannot be falsified.**
+5. **A `Drop` impl the scan cannot reach** — in another crate, inside a `macro_rules!` body, or on a
+   type obtained from `make_guard()`. The scan sees struct literals and `T::assoc(…)`, nothing else.
+6. **A coverage row pins an OBSERVABLE, not an EXECUTION COUNT.** MEASURED: a one-token edit
+   (`let mut shift = 0;` → `= 32;`) drives a loop body to zero iterations while its node key does not
+   move, and **both the census and the allocation gate stay green**. One unrelated test elsewhere
+   catches that particular neuter, so it is a coverage-column defect, not an escape. **The exposure
+   is concentrated and now printed rather than folklore: one witness is the sole defence of
+   SEVENTEEN of the 50 paths and observes four liveness counts.**
+7. **The weaker coverage variant** asserts the named `#[test]` *exists*; it does not assert that gate
+   would fail if the path stopped executing. Both rows using it carry a hand-taken measurement of
+   exactly that.
+8. **The PATH decomposition of a node** is authored, not derived. What is mechanical is that no node
+   may exist without a row and no row without a node.
+9. **Straight-line code that calls nothing** — `*elapsed += dt;` introduces no path and no callee.
+10. **Row ORDER.** Two structurally identical nodes are told apart only by position; reordering reds,
+    but the message says "edited", not "reordered".
+11. **String CONTENT.** Literals are emptied before comparison, so a message that has become FALSE
+    does not red. This has already bitten once.
+12. **`macro_rules!` bodies as trees.** Pinned as printed TOKENS — whitespace-, comment- and
+    line-ending-immune, which raw bytes would not be — never as a tree.
+13. **Anchor currency outside this crate** — item 3 below.
+
+**Items 1 and 6 are the two a next pass should attack.** Closing 6 means witnesses that assert *this
+path executed N times*, which needs per-branch instrumentation the fixture does not have; closing 1
+means checking a callee's prose against its body. Neither is cheap, and neither is pretended closed.
+
+### 3 — the anchor gate's green is about OTHER FILES (P6), and what gating the UI plans costs
+
+Re-measured for this record on this tree, each number from the command beside it.
+
+* `cargo test -p boyko-engine --test internal_docs_anchors -- --nocapture` ⇒ **EXIT=0, 5 passed**;
+  `ARCHITECTURE.md` 6 + `FEATURE_MAP.md` 222 + `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` 177 +
+  `SYSTEMS.md` 330 = **735 anchor(s) checked, 0 stale**.
+* **Line-numbered citations from those four documents into any of this landing's TEN moved source
+  files** — `gather.rs`, `ui_a1_sink_reaches_discovery.rs`, `animation.rs`, `layout.rs`, `sprite.rs`,
+  `text/measure.rs`, `miri_a1_tween.rs`, `ui_a1_tween.rs`, `ui_a1_zero_alloc.rs`,
+  `ui_a1_source_census.rs`: **0, 0, 0, 0, 0, 0, 0, 0, 0, 0** (`grep -oE "<basename>:[0-9]+"` over the
+  four). The member-table `(N)` form cannot reach them either — no `**File:**` header in the four
+  names any of the ten. The only contact of any kind is **two link-form path mentions** of
+  `crates/boyko_ui/src/layout.rs` (`FEATURE_MAP.md:137`, `SYSTEMS.md:2162`), checked for EXISTENCE,
+  carrying no line number.
+* **The gate is NOT vacuous, measured here rather than transported.** `SYSTEMS.md:597`/`:599`'s two
+  live anchors swapped (`enable_store.rs:206` ↔ `:299`) ⇒ **EXIT=101**, *"docs/SYSTEMS.md: 330
+  anchor(s) checked, 2 stale"*, each message naming the symbol it failed to find. Restored by inverse
+  `Edit`, `cmp` EXIT=0, SHA-256 identical, `git status` does not list the file, gate back to EXIT=0.
+
+**So "735 anchors, 0 stale" is true and says nothing whatever about the sixteen files this landing
+changed.** And part 9 supplied the counter-example in the same session: the only file this round
+moved is `ui_a1_source_census.rs` (2267 → 3181 lines), and **eight coordinates citing it inside
+`UI-PLAN-ANIMATION.md` went stale — every one onto plausible content — including three test names the
+rewrite had renamed out of existence** (`grep -c` = 0 for each). A renamed test is the rot a
+coordinate sweep cannot repair by re-reading a line: the citing *text* is wrong, not just its number.
+None of it is visible to a green anchor gate, because the gate does not read that document.
+
+**⚠️ And a correction to the sweep doctrine this campaign adopted three passes ago: driven by the
+diff is NECESSARY and NOT SUFFICIENT.** Part 7 replaced "sweep the anchors you TOUCHED" with "sweep
+the anchors your landing MOVED" — computable, bounded, mechanical, and right. Part 9 found the class
+it leaves out. Two coordinates into `crates/boyko_ui/tests/ui_a1_zero_alloc.rs` — **a file this round
+did not move at all** — were stale and both had landed on plausible content: `:203`, cited as a named
+constant, reads `const WARM_FRAMES: usize = 8;`, a different constant eighteen lines above it (true:
+`:221`); `:685`, cited as a pointer, reads a doc line of an unrelated test (true: `:46`). **A
+coordinate that goes stale in landing N and is missed there survives every later sweep**, because
+each later sweep is scoped to its own diff and that file is not in it. The shift-driven scope filters
+*new* rot and has no term for *inherited* rot — and inherited rot is the half that accumulates. The
+eighth pass's `docs/**` sweep (197 spans, 2 out of range) could not see these either: **both are in
+range.** The honest scope is the union — *what this landing moved* plus *a rotating re-read of the
+rest* — and only the first half is mechanical.
+
+**The recommendation, with its price.** Unchanged from the item below — **(1a): convert the five UI
+documents' bare-basename citations to link form FIRST, then widen `GATED_DOCS`.** Widening without
+that step is measured below to produce 405 misbindings out of 541 flags, i.e. noise, not rot. The
+conversion is the whole cost, and it is now sized: over the five documents there are **825**
+line-numbered citations, of which **594 are bare basenames** with no path component and **231**
+already carry one *(measured 2026-08-28 on this tree, after part 9's landing:
+`grep -oE '[A-Za-z0-9_./-]+\.(rs|toml|md|hlsl|spv):[0-9]+'` per document, split on whether the match
+contains `/`)*. **594 citations is the document-surgery budget the owner is being asked to approve**,
+and it buys the weaker in-file property (item 2 below explains why a `cargo test` cannot check the
+real one) rather than the class this campaign keeps hitting.
+
+---
+
+## 2026-08-28 — SCOPE: **widening `GATED_DOCS` to the UI plans does NOT close the anchor-rot class — measured — and the class may not be closable by a test at all**
+
+**Status: OPEN — four items. Item 1 supersedes the 2026-08-27 item's option list below and needs an
+owner call; items 2–4 are recorded, not asked.** Found by the eighth adversarial pass, whose whole
+job was to close the anchor class rather than its instances.
+
+### 1 — the measurement that refutes the options already on the table
+
+The 2026-08-27 item below offers "add the five and repair the 96" or "add them and waive the
+backlog". Both assume the 96 are ROT. **Re-measured on today's tree, they are not.**
+
+`GATED_DOCS` widened to the five UI documents, run unpiped, then the test file restored by `cp` and
+proved byte-identical by `cmp` + SHA-256:
+
+| | anchors | flagged |
+|---|---|---|
+| the four already gated | **735** | **0** |
+| the five UI documents | **618** | **541** |
+
+The 618 is not the 143 the older table records: this landing added ~756 lines to
+`UI-PLAN-ANIMATION.md`, which took that document alone from 4 bound anchors to 463. The
+decomposition is what matters:
+
+| class | count | what it is |
+|---|---|---|
+| **MISBOUND** | **405 (74.9 %)** | the gate checked a file whose basename **does not appear on the citing line at all** |
+| shape-only | 132 | "is not a definition" — the gate models an anchor as pointing at a DEFINITION; these plans cite EVIDENCE lines |
+| out of range | 4 | **and all four are misbindings too** |
+
+The misbinding is structural, not incidental. This gate binds an anchor to the nearest resolvable
+**path** mention to its left; the UI plans cite **bare basenames** in prose (`` `gather.rs:272` ``,
+`` `boyko_render/Cargo.toml:80-82` ``), which are not path mentions, so anchors attach to whatever
+was last linked. Dozens of `ui_a1_zero_alloc.rs` citations were checked against
+`crates/boyko_render/Cargo.toml`. The four "past end of file" findings are the same defect: the gate
+reported `components.rs:1117` and `ui_a1_tween.rs:1116` past EOF *"(996 lines)"* — that is
+`animation.rs`'s length; `components.rs` is 1310 lines and `ui_a1_tween.rs` is 1301, so **both
+coordinates are in range and the verdict was about the wrong file.** Same for
+`UI-PLAN-ANIMATION.md`'s self-citation — `:1673` when the gate ran — judged against `gather.rs`'s
+541 lines in a document that was **2564** lines at the time. *(Both halves are transcript figures and
+both have since moved: part 11 re-read `gather.rs` at **541**, unchanged, and the plan at **3111**
+lines, and the self-citation is now `:1696`. Dated rather than updated, because the sentence is about
+what the gate reported, not about the tree today.)* The gate's own module doc records this exact
+failure from the meshlet plan's
+first attempt — *"83 'stale' of 146, dominated by misbindings"* — and names the prerequisite that
+fixed it: converting the citations to link form.
+
+**And the sensitivity control says widening would not have caught the rot this pass actually
+found.** `gather.rs:272` — cited four times in `UI-PLAN-SPRITES.md` for `text_uv: None`, whose true
+line is `:389` — was repointed to `gather.rs:999999` with the gate widened. Anchor count
+**130 → 130**, stale count **92 → 92**, and no report mentions it. A coordinate 999 458 lines past
+the end of a 541-line file, at one of the four real-rot sites, is **completely invisible**.
+
+So the options are: **(1a)** convert the five documents' bare-basename citations to link form
+*first* — the meshlet plan's own prerequisite, a document-surgery rung with its own budget — and
+only then widen; **(1b)** widen anyway and blanket-`~` the 541, which buys the in-file bounds check
+and nothing else, on documents where the bounds check is already proven blind to the real rot;
+**(1c)** leave the five ungated and record why. **This pass recommends (1a) and did not weaken the
+check to make the corpus quiet.**
+
+### 2 — the class may be structurally ungateable by a `cargo test`
+
+Rot here is *"the coordinate no longer holds the content it was written against"*. That is a
+property of a **diff** — it needs the tree the citation was written against and the tree today. A
+test sees one tree, so it can only check the weaker property *"the coordinate holds something
+definition-shaped that matches a symbol on the citing line"*. Every sweep in this campaign has been
+manual for that reason, not for lack of diligence. If the class is to be closed mechanically it
+belongs in a **pre-commit / CI diff check** — "for every file this change moved, re-verify every
+`docs/**` citation into it" — which is exactly the sweep this pass ran by hand, and which took a
+line-shift table plus a basename-exact matcher.
+
+### 3 — the scope rule that produced three consecutive misses, stated so it is not re-derived
+
+Three sweeps in a row scoped themselves to **documents the landing edited**. Rot is a property of
+the **(target file, coordinate)** pair, so the correct scope is **every document that cites a file
+the landing MOVED, wherever it lives**. Measured this pass over all of `docs/**` (224 markdown
+files): **218 citation spans / 220 coordinates** into the sixteen files this landing changed, of
+which **36 were inherited coordinates the landing invalidated** — spread across `UI-PLAN-SPRITES.md`,
+`UI-PLAN-INTERACTION.md`, `UI-PLAN-AETHER.md`, `UI-ADVANCED-RESEARCH-ANIMATION.md`,
+`AUDIT-2026-07-PLAN.md` and three `docs/archive/` plans, **none of which any previous sweep opened**.
+
+### 4 — two findings in passing, neither asked
+
+* **`UI-PLAN-SPRITES.md` §S5's probe census rests on a stale list length.** It says *"the list holds
+  six pack inputs today"* and derives `ui_pack_inputs!(count) + 1` = **7.00 probes/node/frame**.
+  Measured: `__ui_pack_inputs_list!` (`gather.rs:126-138`) holds **seven** members — S5's
+  `UiSpriteSheet` landed after the S4 build that paragraph measured. The `7.00` is left as measured
+  and the derived increment is owed a re-measurement before that rung reports leg 10.8(c).
+* **A "correct" verdict expires.** The seventh pass's M9 measured this repository's two census
+  citations and reported them CORRECT — and they were, on the tree it read. The same landing that
+  drifted M9's own prose coordinates rewrote `ui_a1_source_census.rs` from 1379 to 2267 lines, and
+  `:705` / `:733` became `Path` fields inside `SITES` — **plausible content**. Both re-aimed this
+  pass to `:1150` / `:1188`. A verification result is only valid against the tree it was taken on,
+  and the tree moved between the review and the landing.
+
+---
+
+## 2026-08-27 — SCOPE + VALUES: **the UI animation sink has no production reader to be ordered after, and the linter gate that would have said so was RED at HEAD**
+
+**Status: OPEN — five items. Item 1 BLOCKS rung A4; items 2 and 3 are VALUES calls that block
+nothing; items 4 and 5 are recorded, not asked.** Found at the `UI-PLAN-ANIMATION.md` A1 red-ledger
+and adversarial passes (2026-08-27) and their remediation. Full detail and every measurement:
+`docs/UI-PLAN-ANIMATION.md`, the A1 landing note.
+
+### 1 — SCOPE, and it BLOCKS A4: nothing in production registers `ui_render_discovery`
+
+Rung A1 MEASURED that a system filtering on `Changed<UiVisual>` and ordered BEFORE `ui_visual_tick`
+does not read the sink one frame late — **it never reads it**. Over 20 animating frames the reader
+after the tick hit 20 times and the reader before hit **1**, and that one was an out-of-schedule
+insert stamp. *(Of the 20, **19** are attributable to the sink: frame 1 is true through BOTH `Or`
+arms, because the spawn stamps the pack-input component in that frame too. The gate asserts the 19
+frame-by-frame and asserts frame 1 separately, crediting it to neither arm — corrected 2026-08-27,
+it used to assert the total and silently credit the sink with a hit its control could not exclude.)*
+The mechanism is that `Changed`'s window `(last_run, this_run]` is HALF-OPEN — `schedule.rs:288`
+(`let this_run = world.bump_change_tick();`) and `:342`
+(`sys_box.system.set_change_ticks(prev_this_run, this_run)`), with the comparison itself in
+`change_detection/tick.rs:169-171` (`ticks_since_system > ticks_since_insert`), consumed at
+`filter.rs:1205`, `:1225`, `:1493` and `:1503`. So a write stamped in frame N is above frame N's
+reader and at-or-below the exclusive lower bound of frame N+1's — it falls in neither. **A golden
+blessed under the wrong order pins a picture that never updates, not one that lags.**
+
+> ⚠️ **This entry cited `schedule.rs:152` as the mechanism until 2026-08-27, and that is a doc
+> comment about gated-system dispatch which merely contains the `(last_run, this_run]` notation.**
+> The half-open semantics is real and is measured by the gate; only the pointer was to prose. The
+> wrong pointer had been replicated into `animation.rs`, `sprite.rs` and both copies of this file —
+> **a citation that reads plausibly is copied without being opened.**
+
+The natural fix is `.after_set(UiAnimationSet)` on `ui_render_discovery`. It cannot be written today:
+
+* **Verified 2026-08-27** — all **12** `add_system(ui_render_discovery)` sites in the tree are in
+  `crates/boyko_render/tests/`. `src/` has **zero**. There is no production registration for an edge
+  to be attached to.
+* `boyko_ui` could not declare it in any case: `crates/boyko_render/Cargo.toml:82` depends on
+  `boyko-ui`, and `boyko_ui` names no render crate. The edge, if it existed, would belong to whoever
+  registers the system.
+
+So A1 shipped the edge as a **contract stated at four sites plus a gate over the contract**
+(`crates/boyko_render/tests/ui_a1_sink_reaches_discovery.rs`). **Rung A4 is where that becomes a real
+defect** — A4 puts `UiVisual` into `ui_pack_inputs!`, which is what makes the discovery filter watch
+the sink at all. A4 has been given a blocking precondition in the plan.
+
+**The call.** Creating a render-side UI plugin that registers `ui_render_discovery` is a new design
+decision, not a remediation: which schedule, which set, how it interacts with `AaPlugin` /
+`Render3dPlugin`, and whether `.after_set` on a set no plugin registered is even legal on this
+builder. **Options:** (a) build that plugin before A4; (b) land A4 with the contract still prose and
+say so in A4's landing note; (c) something else the owner has in mind for how UI gets wired into a
+real app schedule. A remediation rung must not invent (a) on its own, which is why it is here.
+
+### 2 — VALUES: closing the last degenerate-duration route costs +3.8 % on every animating row
+
+A1 found that `duration_ms` of `+inf`, `-inf`, `-0.0` or **any negative finite value** produced a row
+that never completes — the reap can never reach it. The guard for it was only a `debug_assert!`,
+which compiles out. Measured, release, 50 frames: `±inf` freeze the node silently; a
+**negative** duration is worse than the code's own doc claimed — the sink diverged to `-49.999977`
+from a `0.0 → 1.0` tween and bumped `set_if_neq` on **49 of 49** frames, which disarms the whole UI's
+repaint skip rather than spoiling one node.
+
+> ⚠️ **Corrected 2026-08-27: `NaN` is NOT one of the immortal shapes**, and this entry (with three
+> source doc blocks) said it was. Under the shipped `advance`, `t` is NaN and the `t < 1.0` spelling
+> puts a NaN `t` on the COMPLETING side — the row completes on frame 1, assigns its endpoint and is
+> reaped. **Four of the five refused shapes are immortal; `NaN` is refused as an authoring mistake,
+> not as an immortal row.** The two defences OVERLAP on that member, which is exactly what let the
+> gate's NaN arm pass with the guard disabled. `-0.0` is the shape that was never enumerated at all
+> and is genuinely immortal (`1000.0 / -0.0` is `-inf`).
+
+That is now closed at the entry point: `start_tween_*` **refuses** such a duration in release (no row
+is created), and `advance`'s completion test was inverted to put NaN on the completing side — the
+latter MEASURED **free** (14.002 vs 14.008 ns/row).
+
+> ⚠️ **And the refusal's first spelling was itself a regression, fixed 2026-08-27.** It read
+> `is_finite() && duration_ms > 0.0`, and `0.0f32 > 0.0` is **false**, so a `+0.0` duration created
+> no row and no sink at all — a node authored with a zero duration silently never animated, where
+> before the guard it SNAPPED to its endpoint. Reachable from the safe `pub` API (a `duration *
+> speed_multiplier` with a zero multiplier, a config value, a computed 0), and the denormals were
+> unaffected, which is what hid it. The shipped predicate is `is_finite() && is_sign_positive()`:
+> `+0.0` snaps, `-0.0` stays refused, and the sign bit is the only thing separating them.
+
+**What is left open** is the hand-inserted-`TweenXBundle` route, where an author writes the row's
+`pub` fields directly. Closing that in code needs a per-row `inv_duration > 0.0` term inside
+`advance`, and it is NOT free: **14.544 ns/row against a 14.008 floor — +0.536 ns/row, +3.8 %**,
+forever, on every animating row (4096 nodes × 4 channels, release, floor across five process
+invocations). It was declined because the same struct's `from`, `to` and `elapsed` are equally
+undefended on that route, so the tax buys one field out of four. **The call is whether the owner wants
+belt-and-braces at that price**; the edit is one clause.
+
+### 3 — VALUES, pre-existing: `UiTweenScratch.done` is a `std::Vec` inside a `Resource`, and the exception is nowhere written down
+
+Principle 0 says durable subsystem data lives in the kernel's own storage. This buffer is
+`Resource`-owned per-frame scratch on the established `UiBarScratch` shape, filled and drained inside
+one frame — so it is arguably a legitimate exception. But it is **also** the exact shape the O11-SP4
+colored-solve data race came from, and unlike the `unsafe` blocks and the `disallowed_types` allows,
+this class of exception has no written rationale anywhere and no way to enumerate its instances.
+
+Not A1's to fix, and A1 did not create it. **The call is whether "`Resource`-owned per-frame scratch"
+is a named, greppable exception to principle 0** — the way `#[allow(clippy::disallowed_types)] +
+rationale` is — or whether these should migrate to kernel storage.
+
+### 4 — Recorded, not asked: the mandated clippy gate was RED at `e7a16fd9` and masked FOUR crates
+
+`cargo clippy --workspace --all-targets --keep-going -- -D warnings` **exited 101** at commit
+`e7a16fd9`. Cache-matched A/B (`cargo clean -p boyko-ui` before both runs, one edit apart), measured
+twice by two independent passes with identical results:
+
+| | red (at HEAD) | green (after the fix) |
+|---|---|---|
+| EXIT | **101** | 0 |
+| crates reaching a `Checking` line | `boyko-input`, `boyko-threadpool`, `boyko-ui` | **+ `boyko-render`, `boyko-app`, `boyko_rhi_vulkan`, `aether-tests`** |
+
+So **four** crates were never linted at all, and `boyko-ui` is not one of them — it is the crate that
+errored. **Every clippy claim made on this branch between `e7a16fd9` and 2026-08-27 was vacuum-green
+for those four.** With the fix applied the four are clean (0 warnings, 0 errors), so nothing was
+hiding — but the reporting window was blind, and the owner should know its width. *(This is the same
+shape as a red `const` assert masking a whole crate's compile, measured separately in the same pass.)*
+
+### 5 — Recorded, not asked: three gates that do not cover what a reader would assume
+
+* **The UI plans are not anchor-gated.** `tests/internal_docs_anchors.rs:231` gates exactly four
+  documents — `FEATURE_MAP.md`, `SYSTEMS.md`, `ARCHITECTURE.md`,
+  `MESHLET-VIRTUAL-GEOMETRY-PLAN.md`. `UI-PLAN-ANIMATION.md`, `UI-PLAN-SPRITES.md`,
+  `UI-PLAN-INTERACTION.md` and `UI-PLAN-AETHER.md` are **not** among them, so none of their
+  `file:line` citations is mechanically checked. A sibling lane measured **96 of 143** UI-plan
+  anchors already stale, with nothing gating them. Adding the UI plans to `GATED_DOCS` is a SCOPE
+  call — it would red immediately and loudly, which is the point and also the cost.
+* **`tests/ignore_reasons_census.rs` does not exist on `feat/ui-advanced`.** It lives on
+  `feat/multi-paradigm-render` and `fix/inherited-red-gates`. It is NOT RUN on this branch by
+  construction and must not be reported green in any landing note here.
+* **The new `ui_pack_inputs!(assert_table)` const-assert cannot fire for the regression it reads as
+  guarding** *(added 2026-08-27)*. It turns "a dense member of the pack-input list is invisible to
+  `ui_render_discovery`" into a compile error, and for a **NEW** dense member it does exactly that
+  (`error[E0080]` naming the member, reproduced). But for an **EXISTING** member flipped to dense —
+  the realistic regression — the `E0277 … : Bundle` errors from that member's direct-insert sites in
+  `boyko_ui` arrive first, `boyko-render` never compiles, and the const never evaluates. Measured on
+  `StackIndex` (nothing else catches it) and on `UiVisual` (caught loudly, but by `UiVisual`'s OWN
+  const-assert at `crates/boyko_ui/src/components.rs:1117`, a different guard in a different crate).
+  It also guards **one** of the five production `Or<..>` lists in the workspace, not all five —
+  `light_system.rs:989`, `layout.rs:88`, `layout.rs:118` and `text/measure.rs:61` carry no
+  equivalent. Both limits are now written at the macro; **the point for the owner is that a guard
+  reads as covering a class and covers one direction of it.**
+
+### What it blocks
+
+Item 1 blocks **rung A4** of `UI-PLAN-ANIMATION.md` (or forces A4 to land with the ordering contract
+still unwired and to say so). Items 2–5 block nothing; they are calls and records.
+
+---
+
 ## 2026-08-26 — VALUES: **the UI hitch clamp is 100 ms, it was never measured, and it SHIPPED before the question was ever asked**
 
 **Status: OPEN — a VALUES call. Blocks nothing, because the number is already load-bearing in
@@ -26,7 +634,7 @@ own heading promises its questions are *"also to be filed in `docs/OPEN-QUESTION
 never was.** In the meantime the sprites ladder's S5 rung landed the value:
 
 ```rust
-pub const UI_FALLBACK_MAX_DELTA: f32 = 0.1;   // crates/boyko_ui/src/sprite.rs:297
+pub const UI_FALLBACK_MAX_DELTA: f32 = 0.1;   // crates/boyko_ui/src/sprite.rs:320
 ```
 
 It is `pub` inside `pub mod sprite` (`lib.rs:44`), i.e. **public API**. It was applied INLINE inside
@@ -101,7 +709,14 @@ byte-identically, `cmp`):
 | `UI-PLAN-INTERACTION.md` | 8 | **2** |
 | **the five UI documents** | **143** | **96 (67%)** |
 
-Three dead PATHS as well: `crates/boyko_ui/benches/ui_animation.rs` (`UI-PLAN-ANIMATION.md:663`) and
+⚠️ **SUPERSEDED 2026-08-28 — see the item above.** These numbers were measured on the tree of the
+day and are kept as the record. Re-measured after this landing: **618 anchors, 541 flagged**, of
+which **405 are misbindings** (the gate checked a file whose basename is not on the citing line),
+132 are the definition-shape model against evidence-line citations, and 4 are misbound *and* out of
+range. **Zero are rot**, and a sensitivity probe proved the widened gate blind to the rot this
+campaign did find. The three options below rest on the 96 being real; they are not.
+
+Three dead PATHS as well: `crates/boyko_ui/benches/ui_animation.rs` (`UI-PLAN-ANIMATION.md:2857`, read at its target 2026-08-28 by the tenth pass and re-read by the eleventh — *"**Lands.** `crates/boyko_ui/benches/ui_animation.rs` + its `[[bench]]` entry in `Cargo.toml` —"*; it read `:663`, then `:2282`, **read as a BLANK line on the part-10 tree** and carried through two re-aims of this sentence without being re-opened. ⚠️ **Part 11 re-read `:2282` and that description had itself rotted**: on the tree part 11 inherited it was *"defence out of the fixture and into a **source census** — and the seventh showed that a"*, not a blank line. A description of a stale value is an anchor too) and
 `crates/boyko_render/shaders/ui_rect` twice (`UI-PLAN-SPRITES.md:3067`, `:3470`).
 
 **0 of 735 against 96 of 143 is the gate, not the authors.** The gate's own module doc already
@@ -136,7 +751,7 @@ roughly twice the size the plans say.
 |---|---|
 | `UI-PLAN-SPRITES.md` §0, §6 | owner is **`UI-PLAN-AETHER.md`**; §0 explicitly **Rejects** sprites owning it |
 | `UI-PLAN-AETHER.md:73` | files D7 in its own **INBOUND** dependency table, *"soft"*, *"**D7 does not gate any rung here**"*; no rung U0–U8 lands a registration table |
-| `UI-PLAN-ANIMATION.md:846` | owner is *"`docs/UI-PLAN-SPRITES.md` (rung 1) or wherever it is sequenced"* — the option SPRITES §0 rejected |
+| `UI-PLAN-ANIMATION.md:3105` (read at its target 2026-08-28 by the tenth pass and re-read by the eleventh — the D7 row whose owner cell is verbatim the quote below; it read `:846`, then `:2530`, **read on the part-10 tree as the prose *"than deleted, because an implementer who builds the axis measures a flat line and reports it as"*** — plausible content carried through one re-aim of this row. ⚠️ **Part 11 re-read `:2530` and that description had itself rotted**: on the tree part 11 inherited it was *"*N+1* renders a strictly-moved value. The failure this catches is one frame of nothing at the head"*, with the prose part 10 quoted **exactly 200 lines below** — the same ripple this landing measured for the live pointer, arriving at the description in the same sentence) | owner is *"`docs/UI-PLAN-SPRITES.md` (rung 1) or wherever it is sequenced"* — the option SPRITES §0 rejected. ⚠️ That plan's own D7 row counts FOUR naming sites and one of them, its self-citation `UI-PLAN-ANIMATION.md:846`, no longer resolves; measured, there are three |
 | `UI-PLAN-INTERACTION.md:501-504` | names no owner; *"This plan does not block on D7"* |
 | `UI-ADVANCED-ARCHITECTURE.md:371`, `:1773` | D7 is §11 **sequencing item 1** — an architecture ladder no plan file claims |
 
@@ -344,7 +959,7 @@ list named the storage kind of the four `Tween*` and **not** of the sink; and
 UiVisual`. Only the `UiSpriteCursor` half had been applied — to the tier table's row 1, which names
 `UiVisual` in the same cell. The shipped tree, meanwhile, had ruled and said so:
 *"Animation adds `UiVisual` HERE (a table component — **the animation plan's own text is corrected to
-say so**)"* (`crates/boyko_render/src/ui/gather.rs:91-93`) — a claim about a document, made in source,
+say so**)"* (`crates/boyko_render/src/ui/gather.rs:121-122`) — a claim about a document, made in source,
 and untrue at the moment it was written. **Both documents are amended NOW** (2026-08-27):
 `UI-PLAN-ANIMATION.md` **AM8** and **AD10** rule the sink TABLE and the four channels dense, with the
 measurement; `UI-ADVANCED-ARCHITECTURE.md`'s D9 attribute and D9b's query are struck and corrected in
@@ -3709,3 +4324,168 @@ route around it (`ui_s6_authoring` captures the lowering report itself), but the
 what most `.ui` tests use. Making `spawn_dot_ui` assert the lowering report would red today on
 anything else already mis-parsing, which is a repair rung with its own budget rather than a line in
 S6.
+
+## 2026-08-27: UI-ADVANCED A1 — a tween duration above ~6 days is accepted and is IMMORTAL, and the bound is a VALUES call
+
+**Status: OPEN — a VALUES call, deliberately NOT decided by the rung.** The behaviour is documented
+at the site and gated; what is not decided is whether to refuse it.
+
+`crates/boyko_ui/src/animation.rs`'s `invalid_tween_duration` guard closes **degenerate
+reciprocals** — `duration_ms` non-finite or not positively signed. It does **not** close the
+"immortal row" class, and A1 part 4 retracts any reading that it does.
+
+**The mechanism, MEASURED by exact `f32` simulation 2026-08-27.** `elapsed` is an `f32` accumulating
+`+= dt`, so absorption gives it a HARD CEILING — past it, `elapsed += dt` is a no-op and the value
+never grows again:
+
+| `dt` | `elapsed` ceiling | in days | frames to reach |
+|---|---|---|---|
+| 1/60 s | **524288 s** (`2^19`) | **6.068** | 24,986,955 |
+| 16 ms | 524288 s (`2^19`) | 6.068 | 25,150,895 |
+| 100 ms — the `UiClock` clamp ceiling | **2097152 s** (`2^21`) | **24.273** | 18,073,720 |
+
+A row completes only when `elapsed` reaches `duration_ms / 1000`. **Above the ceiling it never can,
+no matter how long the process runs.** At 60 Hz that boundary is `duration_ms > 5.24288e8`
+(≈ 6.07 days) — ⚠️ **STRICTLY above: the operator is `>`, not `>=`, because the boundary value
+itself COMPLETES.** Re-measured at THIS site 2026-08-27 (`rustc -O`, exact `f32`), because the
+number was first measured elsewhere and carried here: at `duration_ms = 5.24288e8` (bits
+`0x4dfa0000`, exactly `524288000`) `inv_duration` is bits `0x36000000` — exactly `2^-19` — so `t`
+at the ceiling is `524288.0 * 2^-19` = exactly `1.0` (bits `0x3f800000`), and `advance`'s `t < 1.0`
+spelling puts exactly `1.0` on the COMPLETING side. The first genuinely never-completing duration is
+ONE ULP ABOVE it: `5.24288032e8`, bits **`0x4dfa0001`**, whose `t` at the ceiling is `0.99999994`.
+The 100 ms clamp behaves identically — `2.097152e9` (bits `0x4efa0000`) reaches exactly `1.0` at
+`2^21` and completes; `0x4efa0001` is the first that does not. `1e10` ("115 days"), `1e30` and
+`f32::MAX` are **all** above it — so all three are
+immortal in exactly the sense the guard claims to have closed.
+
+**Why this is worse than the shape that IS refused.** An accepted over-ceiling row bumps
+`set_if_neq` on **every** frame. The REFUSED `+inf` bumps **zero** times after the first (its `t` is
+a constant). So `f32::MAX` — accepted — is strictly worse for the A4 repaint skip than `+inf` —
+refused — while the opacity it renders never leaves the neighbourhood of its START endpoint, which
+is visually the same picture as the refusal.
+
+⚠️ **The opacity figure, RE-MEASURED at THIS site 2026-08-28.** This sentence used to name
+`3.673e-36`, and that number belonged to **no frame of any fixture** — it is corrected rather than
+dropped. Read back FROM THE ENGINE through the gate's own `f32::MAX` arm
+(`start_tween_opacity(.., 0.0, 1.0, f32::MAX, LINEAR, 0)` at `FRAME = 100 ms`) and, independently,
+by exact `f32` simulation of `advance` — the two agreeing bit-for-bit on every frame and every arm:
+
+| frame | opacity | bits |
+|---|---|---|
+| 1 | **2.938736e-37** | `0x02c80001` |
+| 5 | **1.469368e-36** | `0x03fa0001` |
+
+⚠️ **`2.938736e-37` shares all seven mantissa digits with the `2.938736e-36` in the paragraph
+below**, and that is not a coincidence: `1000.0 / f32::MAX` is bits `0x047a0001`, the same bit
+pattern named there as the smallest duration with a finite reciprocal. A rendered opacity and a
+stored reciprocal are different quantities one decade apart — tell them apart by BITS, never by the
+printed digits. This adjacency is the most likely origin of the wrong figure above.
+
+**A second, benign boundary sits far below**, and is recorded only so it is not confused with the
+first: `1000.0 / duration_ms` overflows to `+inf` only for `duration_ms` below bits **`0x047a0001`**
+(`2.9387360564219222e-36`) — that is the SMALLEST duration with a finite reciprocal. ⚠️ **`250.0 ×
+f32::MIN_POSITIVE` is NOT that value.** Re-measured at THIS site 2026-08-27: the product is bits
+`0x047a0000` (`2.9387358770557188e-36`), ONE ULP BELOW, and it is the LARGEST duration that still
+overflows — the closed form named the value on the wrong side of the boundary it defines. ⚠️
+**State it by BITS** — the two
+floats bracketing that boundary both print `2.938736e-36` at 7 significant figures (`{:.6e}`), so
+**no decimal AT THAT WIDTH** can name it. ⚠️ The unqualified form of that sentence — *"so a decimal
+cannot name it"* — is FALSE, and the same paragraph refutes it: the two 17-digit decimals printed
+above round-trip **exactly** to their stated bits (re-verified 2026-08-28), and even the
+shortest-round-trip form distinguishes them (`2.9387359e-36` vs `2.938736e-36`). The limit is the
+WIDTH, not decimal. That regime is where `+0.0` and the denormals live, and it is benign: those SNAP
+to the endpoint.
+
+**The concrete option, if the owner wants the class closed.** Add a second conjunct
+`duration_ms < UI_MAX_TWEEN_MS` to the existing `if` in `tween_helpers!`
+(`crates/boyko_ui/src/animation.rs:885` — `if !(duration_ms.is_finite() &&
+duration_ms.is_sign_positive())`; the macro begins at `:828`, and the call it guards,
+`invalid_tween_duration(duration_ms);`, is at `:886`. All re-read by CONTENT 2026-08-28 for the
+third time: they were `:839` / `:782`, then `:857` / `:800` after this entry's own opacity
+correction added 18 doc lines above them, and the animation census landing later that day added a
+further **+28**. ⚠️ Two successive re-readings by content, one day apart, and the second was stale
+within hours — an anchor into a file under active edit is a measurement with a shelf life, not a
+fact. The class this entry asks the owner about is now ALSO pinned mechanically, by
+`the_termination_condition_is_pinned_to_the_disclosure` in
+`crates/boyko_ui/tests/ui_a1_source_census.rs`, which reds if this guard is weakened, clamped,
+or bounded — so a stale coordinate here no longer means the question is unguarded).
+
+> **Price note, because this campaign's two cautionary prices do NOT transfer.** That guard is on
+> the `start_*` path — **once per tween start**, not per row per frame. The two prices on record
+> (+15 ns / +5 %, and +0.536 ns / +3.8 %) were both **per-row** guards on the TICK path. If the
+> answer is yes, price it anyway with the FLOOR statistic, interleaved A/B/A/B across process
+> invocations (a one-shot read on this box spreads 14.0–22.9 ns for identical code), and add an arm
+> to `a_degenerate_duration_creates_no_row`.
+
+**What is NOT open:** the boundary is `dt`-dependent (6.07 d at 60 Hz vs 24.27 d at the clamp
+ceiling), so any compile-time constant is a conservative policy choice rather than a derived one —
+which is exactly why the rung did not pick one silently. The disclosure is gated meanwhile by
+`crates/boyko_ui/tests/ui_a1_tween.rs`'s
+`an_over_ceiling_duration_is_accepted_and_never_completes`, so if a later rung adds an upper bound
+that test reds and the documentation must be rewritten in the same edit.
+
+## 2026-08-27: the crate's PRE-EXISTING `zero_alloc` suite is FLAKY in release — A1 neither introduced nor fixed it
+
+**Filed as a SEPARATE defect and deliberately NOT fixed inside the A1 landing.** It is recorded
+because A1's release certification is intermittently red and the red is not A1's; a reader who
+re-runs the suite has to be able to tell the two apart without re-deriving this.
+
+**MEASURED at THIS site 2026-08-27** (`rustc 1.97.1`, release, the pre-existing binary
+`target/release/deps/zero_alloc-*.exe` run standalone, `--test-threads=1`, each run a separate
+process): **5 red in 60 runs**. Sites: `crates/boyko_ui/tests/zero_alloc.rs:238` alone 4 runs,
+`:296` alone 1 run, both together 0. Verbatim:
+
+```
+thread 'unchanged_frame_layout_pair_allocates_zero_over_baseline' panicked at crates\boyko_ui\tests\zero_alloc.rs:238:5:
+steady-state: layout pair must allocate no more than the scheduler baseline (baseline 5, pair 6; the layout pair's own per-frame allocs = 1)
+```
+
+`:296` is the sibling `resize_frame_layout_pair_allocates_zero_over_baseline`. What first surfaced
+it was three whole-package release runs (`cargo test -p boyko-ui --all-targets --release`) reading
+`0, 101, 0`; the 60-run tally above is the re-measurement that pins the rate and both sites.
+`docs/UI-PLAN-ANIMATION.md`'s part-4 landing note already recorded the `:296` half independently at
+**6 red / 100 standalone runs**; this entry is the owner-facing filing of the same defect, widened to
+`:238` and given the per-site mechanism. **The rate is load-dependent and the site mix moves with it**
+— 6 % at `:296` there, 6.7 % at `:238` and 1.7 % at `:296` here — so treat the rate as a range, not a
+constant.
+
+**A1 neither introduced nor fixed it, and that is PROVEN rather than asserted.**
+`crates/boyko_ui/tests/zero_alloc.rs` is untouched by the landing (`git status` on that path is
+empty, so the file is at `e7a16fd9`), and `crates/boyko_ui/src/layout.rs` — the code these two
+assertions measure — has **zero non-comment changed lines** in the landing.
+
+**The mechanism — and ⚠️ the two sites do NOT share a statistic, so they are stated separately
+rather than one measurement being carried to the other.** Both assertions are `assert!(pair <= base)`
+with ZERO slack, and A1's D1/E1 measured, on ITS OWN fixture, that the parallel executor contributes
+a sporadic **+1** allocation per frame (idle rate 0.20–0.34 per frame per index). What differs is how
+each side is sampled:
+
+* **`:238`** takes each side from `warmed_idle_allocs` (`zero_alloc.rs:189-194`; call sites `:216`
+  and `:220`), which reduces four samples with **`.max()`** — the statistic A1's own D1/E1 was
+  convened to replace:
+
+  ```rust
+  (0..4).map(|_| count_allocs(|| sched.run(world))).max().unwrap_or(0)
+  ```
+
+  so ONE noisy sample anywhere in the pair's four promotes `pair` to `base + 1` for the whole test.
+* **`:296`** does not use `warmed_idle_allocs` at all: `base` and `pair` are each a **single**
+  `count_allocs` of ONE frame (`:286` and `:294`). One sample against one sample — strictly weaker
+  than max-against-max, and it reds whenever that one pair frame is the noisy one.
+
+**The file's own comment at `:231-237` already saw half of this**: it relaxed
+`assert_eq!` to `<=` in 2026-08-11 after catching `baseline 6, pair 5`, and states that
+"`warmed_idle_allocs` takes the MAX of four samples on each side independently". But it reasons only
+about the BASELINE's max drifting above the pair's, which `<=` absorbs. **The direction that
+actually reds is the opposite one, and `<=` does not absorb it.**
+
+**The remedy is on the shelf, not invented here.** `ui_a1_zero_alloc.rs` replaced exactly this
+statistic with a floor over independent REPETITIONS of the same frame index (`REPS = 8`), which
+removes per-frame-random noise while keeping per-site resolution — `.max()` does neither. Applying
+it here is a mechanical change to `warmed_idle_allocs` and its call sites.
+
+**VALUES call for the owner.** Does the `zero_alloc` suite get re-based on the repetition floor now,
+or stay flaky until the rung that owns it lands? It was left alone here on purpose: re-basing
+another rung's gate from inside the A1 landing is the "the repair for the previous pass carried the
+next defect" pattern this campaign has already paid for twice, and a suite that reds ~8 % of release
+runs is a known quantity where a silently re-based one is not.

@@ -851,7 +851,7 @@ general rule, written on 2026-08-21 one page below (§5.2's ⚠️ note) while a
 discovery filter's `Or`; a **table** sink gives 1 through the `Or`. The symptom of the dense form is
 every animation rendering nothing, with no panic, no error and no failing assertion. The shipped tree
 had already ruled: *"Animation adds `UiVisual` HERE (a table component)"*,
-`crates/boyko_render/src/ui/gather.rs:91-93`. **`UiVisual` is a TABLE component; the four `Tween*`
+`crates/boyko_render/src/ui/gather.rs:121-122`. **`UiVisual` is a TABLE component; the four `Tween*`
 stay dense, because nothing filters them** (`AnyOf` forwards the dense hooks, `Or` does not).
 
 Per-channel tween rows, all `#[component(storage = "dense")]`, one per animatable channel:
@@ -1021,7 +1021,7 @@ type is a term of `ui_render_discovery`'s change set (D6b), which is one render-
 `boyko_ui` tick never names a `boyko_render` resource and cannot forget to.
 
 **The enforcement is structural, not documentary.** A Tier-1/Tier-2 tween writes `UiVisual`, and
-`UiVisual` appears in **no term** of `ui_layout_discovery`'s ten-way `Or<…>` (`layout.rs:84-134`). It
+`UiVisual` appears in **no term** of `ui_layout_discovery`'s ten-way `Or<…>` (`layout.rs:92-112`). It
 is therefore *impossible* for a Tier-1/2 animation to trigger a relayout — not "discouraged", not
 "by convention", but unrepresentable, because the tick system's signature names a type the layout
 query does not.
@@ -1038,7 +1038,7 @@ argument, not a benchmark — labelled as such per research §9.2's fair objecti
 ### 5.3 D11 — layout-affecting animation: allowed, expensive, and steered to FLIP
 
 `ui_layout_discovery` collapses ten `Changed`/`Added` terms into **one bool** and `ui_layout_apply`
-then re-lays-out **every cached root** (`layout.rs:126,190-198`). Verified by reading. So one animated
+then re-lays-out **every cached root** (`layout.rs:130,194-202`). Verified by reading. So one animated
 `UiLayout.width` re-solves the entire screen every frame for the animation's duration.
 
 v1 does **not** fix the granularity. Instead:
@@ -1351,8 +1351,8 @@ velocity change after one millisecond, `normal = 0.998` — so `v *= rate.powf(d
 **The defect this replaces, recorded rather than quietly fixed.** The original record put
 `ScrollPosition` "on the container, offsetting children **at layout time**". For that to have any
 visible effect, a `ScrollPosition` write must reach `ui_layout_discovery` — and that system collapses
-ten `Changed`/`Added` terms into **one bool** (`layout.rs:118-127`), after which `ui_layout_apply`
-re-lays-out **every cached root** (`layout.rs:189-197`: `for i in 0..scratch.roots.len() { …
+ten `Changed`/`Added` terms into **one bool** (`layout.rs:127-130`), after which `ui_layout_apply`
+re-lays-out **every cached root** (`layout.rs:194`: `for i in 0..scratch.roots.len() { …
 layout_root(…) }`). `ScrollMomentum` writes the offset **every frame while coasting**. So as
 specified, every frame of every fling re-solved every root on the screen — which is, verbatim, the
 Bevy issue #22893 defect §5.2 cites as this document's own cautionary tale: *a scrollbar thumb writing

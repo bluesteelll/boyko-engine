@@ -88,7 +88,7 @@ It reuses the exact `get_component_raw` prologue (null + generation check, retur
 
 ### Decision 6: Outer 0%-gate — split discovery/apply; static `ui!` types via `Or<(Changed<…>)>`, dynamic `.ui` types via a **new id-keyed archetype-changed-since-tick probe**
 **What**: `ui_data_bind_system` is split into **discovery** (cheap, sets a `dirty` flag on `UiBindScratch`) and **apply** (early-returns when `!dirty`), mirroring the verified `ui_layout_discovery`/`ui_layout_apply` pair (`layout.rs:81`/`137`).
-- **Static `ui!`-bound types** use a const `Query<(), Or<(Changed<C1>, Changed<C2>, …)>>` probe (`iter().next().is_some()` — the exact 0%-gate idiom proven in `ui_layout_discovery`, `layout.rs:111`; `NEEDS_CHANGE_DETECTION` const-folds the dispatcher when unused).
+- **Static `ui!`-bound types** use a const `Query<(), Or<(Changed<C1>, Changed<C2>, …)>>` probe (`iter().next().is_some()` — the exact 0%-gate idiom proven in `ui_layout_discovery`, `layout.rs:130` *(re-measured by CONTENT 2026-08-28: it read `:111`, which was a comment inside the `root_set_changed` doc block, not the idiom; `:130` is `let inputs_changed = changed.iter().next().is_some();`)*; `NEEDS_CHANGE_DETECTION` const-folds the dispatcher when unused).
 - **Dynamic `.ui`-bound types** (source type not known at the bind site) use a **new public boyko_ecs probe** `any_changed_since(component_ids: &[ComponentId], last_run: Tick, this_run: Tick) -> bool`. This is the second honest boyko_ecs read-only edit. It scans **only the archetypes that host any of the registered bound `ComponentId`s** and tests each archetype's column change epoch — NOT every entity. The bound-component set is a small `[ComponentId]` registered at bind time (closed at runtime, grows only on a new `.ui` bind kind).
 **Why a real primitive, not a hand-wave**: the prior draft said "checked via the archetype change-tick" without naming a primitive; the critic correctly flagged that no such id-keyed probe exists and a naive scan would be O(archetypes × ids) **every frame**, defeating the gate. The new `any_changed_since` is bounded to hosting archetypes and short-circuits on the first changed column. Both gate halves feed the same `dirty` flag.
 **Complexity of the probe**: O(hosting-archetypes × bound-ids) worst case, but (a) it only iterates archetypes that actually host a bound id (typically 1–few), (b) it short-circuits on first hit, and (c) a still frame finds no changed column and returns `false` in O(hosting-archetypes). A bench asserts the `.ui`-dynamic still-frame path is ~0, in parallel with the `ui!`-static still-frame bench.
@@ -316,7 +316,7 @@ pub fn install_bind_accessor(component_id: usize, acc: BindAccessor);
 ## Algorithms for critical paths
 
 ### `ui_focus_system` — hit-test + interaction (exclusive)
-**Signature**: exclusive system `&mut EcsMaster` (mirrors `ui_layout_apply`, `layout.rs:137`): hit-test reads a node's ancestors' `ComputedClip`/`FocusPolicy` while writing *other* nodes' `Interaction` — not expressible as a conflict-free parallel `Query`.
+**Signature**: exclusive system `&mut EcsMaster` (mirrors `ui_layout_apply`, `layout.rs:156` — re-measured by CONTENT 2026-08-28; it read `:137`, a section-divider comment): hit-test reads a node's ancestors' `ComputedClip`/`FocusPolicy` while writing *other* nodes' `Interaction` — not expressible as a conflict-free parallel `Query`.
 ```rust
 pub fn ui_focus_system(world: &mut EcsMaster);
 // reads: Res<PhysicalInput> (cursor_pos, cursor_inside, window_focused, mouse edges),

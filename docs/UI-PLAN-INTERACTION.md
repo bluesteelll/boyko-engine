@@ -90,7 +90,7 @@ Read in this worktree, 2026-08-21. This is the substrate the ladder stands on.
 | The query-filter vocabulary is `Added` / `Changed` / `With` / `Without` / `Or`. **`Removed<C>` does not exist** | `boyko_ecs/.../query/filter.rs:513,693,863,1253,1535` |
 | The observer backbone does exist: `observe_on_remove`, `observe_entity_event`, `trigger`, `PropagationMode::{None,Up,Down}`, `ChildOfTraversal`, `propagate(bool)`, gated by the sticky `ArchetypeFlags::HAS_ENTITY_OBSERVER` bit | `observer_api.rs:170,322,449`; `observers/traversal.rs:25-40`; `observers/entity_store.rs:5-11` |
 | `Time` is reachable from `boyko_ui` with **no new crate edge** (`boyko-ecs` is already a dependency); `delta_secs()` is clamped, speed-scaled and pause-aware | `boyko_ui/Cargo.toml:12`; `time/time.rs:63-75` |
-| `LayoutScratch::relayout_count` is `#[cfg(test)]`-only | `layout.rs:168-171,190-194` |
+| `LayoutScratch::relayout_count` is `#[cfg(test)]`-only | `layout.rs:173-176,194-198` |
 | Hot reload deliberately never writes transient components — *"Transient components (`UiFocus`/`UiScroll`/`UiHover`, P4+) … are NEVER written, so they are preserved by omission"* | `reload/reconcile.rs:49-52` |
 
 ### The three dead data this plan inherits
@@ -349,8 +349,8 @@ canonical gather in the sibling render plan.
 `ScrollPosition` is a term of `ui_render_discovery`'s `Or<…>` (or the frame would not move) and of
 I11's candidate-rebuild dirty set (or the hit-test would test pre-scroll rects). **It is not a term of
 `ui_layout_discovery`'s `Or<…>`**, and that omission is the decision: `ui_layout_discovery` collapses
-its terms into one bool (`layout.rs:126-129`) after which `ui_layout_apply` re-solves **every** cached
-root (`layout.rs:189-197`), so a `ScrollMomentum` write every coasting frame would re-solve the whole
+its terms into one bool (`layout.rs:130-133`) after which `ui_layout_apply` re-solves **every** cached
+root (`layout.rs:193-201`), so a `ScrollMomentum` write every coasting frame would re-solve the whole
 screen per fling frame. §M2 is the pass/fail gate; a future editor adding the term re-introduces
 exactly this defect.
 

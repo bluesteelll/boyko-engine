@@ -33,15 +33,38 @@
 //!   the index does not move: the repaint churn is proportional to VISIBLE change,
 //!   not to frame rate.
 //!
-//! # Ordering
+//! # Ordering — a wrong order LOSES the repaint, it does not delay it
 //!
-//! Register [`ui_sprite_flipbook`] `.before(ui_render_discovery)`. `Changed`
-//! compares a row's changed tick against the READING system's `last_run`, so a
-//! flipbook write that lands after discovery in frame N is seen in frame N+1 —
-//! never a lost repaint, but a repaint one frame late, and a golden blessed under
-//! the wrong order pins a stale picture. The order is the host's responsibility
-//! (this module ships the system, not an App schedule), exactly as it is for the
-//! layout pair and the text measure system.
+//! Register [`ui_sprite_flipbook`] `.before(ui_render_discovery)`, as a real
+//! ordering edge; add-order is not a pin.
+//!
+//! `Schedule::run` bumps ONE `this_run` per run and hands it to every system in
+//! that run (`schedule.rs:288`), and each system's previous `this_run` becomes
+//! its new `last_run` (`schedule.rs:342`). A `Changed` term is true for a row
+//! whose changed tick lies in the HALF-OPEN window `(last_run, this_run]`; the
+//! comparison is `Tick::is_newer_than` (`change_detection/tick.rs:169-171`),
+//! consumed at `filter.rs:1205`, `:1225`, `:1493` and `:1503`.
+//! *(`schedule.rs:152` is NOT the mechanism — it is a doc comment about the
+//! gated-system dispatch stamp that quotes the same notation.)*
+//! So a write stamped in frame N carries frame N's tick, and a reader ordered
+//! BEFORE the writer misses it TWICE: in frame N the write has not happened yet,
+//! and in frame N+1 the window's lower bound is EXCLUSIVE and is exactly the tick
+//! the write carries. The write is in neither window. It is lost permanently.
+//!
+//! MEASURED 2026-08-27 (20 frames, one animating node, a real
+//! `Or<(Changed<ComputedRect>, Changed<UiVisual>)>` over a `Mut::set_if_neq`
+//! write in the same `Schedule::run` shape this system uses): reader after the
+//! writer ⇒ a hit on all 20 frames; reader before ⇒ **1** hit in 20, and that one
+//! is the out-of-schedule insert stamp, not an animating frame.
+//!
+//! *(This corrects the pre-2026-08-27 text here, which said such a write is
+//! "seen in frame N+1 — never a lost repaint, but a repaint one frame late".
+//! That is what the half-open window makes impossible.)*
+//!
+//! A golden blessed under the wrong order therefore pins a picture that never
+//! updates, not one that lags. The order is the host's responsibility (this
+//! module ships the system, not an App schedule), exactly as it is for the layout
+//! pair and the text measure system.
 //!
 //! Since rung A0b the flipbook also needs
 //! [`ui_clock_tick`](crate::animation::ui_clock_tick) ahead of it, for the same
@@ -318,7 +341,10 @@ pub const UI_FALLBACK_MAX_DELTA: f32 = 0.1;
 /// defects S5 measured and AD9 ruled on. Register
 /// [`ui_clock_tick`](crate::animation::ui_clock_tick) ahead of this system (or
 /// add [`UiAnimationPlugin`](crate::animation::UiAnimationPlugin) and order this
-/// system `.after_set(UiAnimationSet)`); a world with no
+/// system `.after_set(UiAnimationSet)` — note that since A1 the set ends in an
+/// exclusive full-world system
+/// ([`ui_tween_reap`](crate::animation::ui_tween_reap)), so `.after_set` orders a
+/// consumer behind that too); a world with no
 /// [`UiClock`] panics loudly at `get_param` rather
 /// than animating on a stale zero.
 pub fn ui_sprite_flipbook(

@@ -81,12 +81,42 @@ use crate::ui::upload::UiNode;
 /// `Changed<C>` inside this macro's `Or<..>` was MEASURED never to fire
 /// (`docs/UI-PLAN-SPRITES.md` S-D16 (1)).
 ///
-/// **That measurement narrows this macro's own promise, and the narrowing is
-/// stated here because this is where the promise lives:** "adding a component to
-/// `ui_pack_inputs!` wires the discovery filter for free" is true for TABLE
-/// components only. A DENSE component added to this list would be read correctly
-/// by the gather and would be INVISIBLE to `ui_render_discovery` — the frame
-/// would never repaint, with nothing saying so.
+/// **That measurement narrows this macro's own promise, and the narrowing is now
+/// ENFORCED rather than described:** "adding a component to `ui_pack_inputs!`
+/// wires the discovery filter for free" is true for TABLE components only. A
+/// DENSE component added to this list would be read correctly by the gather and
+/// would be INVISIBLE to `ui_render_discovery` — the frame would never repaint,
+/// with nothing saying so. `ui_pack_inputs!(assert_table)`, invoked at item scope
+/// just below, makes that a compile error instead: one
+/// `const _: () = assert!(!STORAGE_IS_DENSE)` per member, so a future rung adding
+/// a dense component here gets `error[E0080]` naming it rather than a silent
+/// frozen frame.
+///
+/// Recorded negative, surveyed 2026-08-27: every production `Or<..>` arm in the
+/// workspace is already table — `light_system.rs:989` (×4), `layout.rs:88` (×10),
+/// `layout.rs:118` (×3), `text/measure.rs:61` (×2), `gather.rs`'s own list (×7),
+/// plus `UiVisual`. No silent always-false arm exists today.
+///
+/// # What this guard covers, and what it does NOT
+///
+/// **It covers ONE of those five lists — this one.** `ui_pack_inputs!(assert_table)`
+/// is invoked exactly once in the workspace (just below); `light_system.rs`,
+/// both `layout.rs` lists and `text/measure.rs` carry no equivalent, so "this
+/// guard keeps it that way" would be an over-claim about four of the five.
+///
+/// **It fires reliably for a NEW member** added to this list with dense storage:
+/// `error[E0080]` naming the member.
+///
+/// **For an EXISTING member flipped to dense it is not what reports the error.**
+/// MEASURED 2026-08-27, `#[component(storage = "dense")]` added to `UiVisual`,
+/// `cargo check -p boyko-render --lib`: the build stops in `boyko-ui` with TWO
+/// errors — `E0277 UiVisual: Bundle` at `boyko_ui/src/animation.rs:457` (the
+/// sink's own direct insert) and `E0080` from `boyko_ui/src/components.rs:1117`,
+/// which is `UiVisual`'s OWN dedicated const-assert (A1 leg 11a). `boyko-render`
+/// never compiles, so the assert below never evaluates. The regression IS caught
+/// — loudly, and by name — but by the member's own guard in its defining crate,
+/// not by this one. That ordering holds for any member `boyko_ui` both defines
+/// and inserts directly, because the defining crate compiles first.
 ///
 /// Animation adds `UiVisual` HERE (a table component — the animation plan's own
 /// text is corrected to say so); interaction adds its scroll datum HERE — never
@@ -107,6 +137,15 @@ macro_rules! __ui_pack_inputs_list {
     };
 }
 
+// The promise above, enforced rather than described. `UiVisual` (A4) and the
+// interaction plan's scroll datum land in that list; each gets this assert free.
+//
+// Path-qualified (`crate::`) rather than bare: `macro_rules!` name resolution is
+// TEXTUAL for an unqualified invocation, and both `ui_pack_inputs!` and the
+// `assert_table` applier are defined below this point. The path form resolves
+// through the crate root and is order-independent.
+crate::ui_pack_inputs!(assert_table);
+
 /// Expands the pack-input set into the discovery filter type
 /// (`ui_pack_inputs!(changed)`) or the gather's per-node read tuple
 /// (`ui_pack_inputs!(read <view>, <entity>, <probes>)`), from the ONE component
@@ -124,6 +163,10 @@ macro_rules! __ui_pack_inputs_list {
 ///   so any test pinning the probe census is pinning this number — and UI-ADVANCED
 ///   S3 found `ui_s0_discovery` doing that with a hand-written `5 * 5` that the
 ///   fifth pack input silently invalidated. A derived count moves with the list.
+/// - `assert_table` → one `const _: () = assert!(!C::STORAGE_IS_DENSE)` per
+///   member, at item scope. Enforces the list's own TABLE-only promise: a dense
+///   member's `Changed<C>` never fires inside the `Or`, so it would be invisible
+///   to `ui_render_discovery`. Invoked once, below [`__ui_pack_inputs_list!`].
 ///
 /// Deleting a component from the list changes the read tuple's arity, which
 /// fails [`gather_ui_nodes`]'s destructuring at compile time — the M0-c red.
@@ -137,6 +180,9 @@ macro_rules! ui_pack_inputs {
     };
     (count) => {
         $crate::__ui_pack_inputs_list! { __ui_pack_inputs_count () }
+    };
+    (assert_table) => {
+        $crate::__ui_pack_inputs_list! { __ui_pack_inputs_assert_table () }
     };
 }
 
@@ -159,6 +205,27 @@ macro_rules! __ui_pack_inputs_changed {
 macro_rules! __ui_pack_inputs_count {
     (() [$($c:ty),* $(,)?]) => {
         <[()]>::len(&[$($crate::__ui_pack_input_unit!($c)),*])
+    };
+}
+
+/// [`ui_pack_inputs!`] applier: one const-assert per member that it is a TABLE
+/// component. This is the macro's own promise, enforced.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __ui_pack_inputs_assert_table {
+    (() [$($c:ty),* $(,)?]) => {
+        $(
+            const _: () = assert!(
+                !<$c as ::boyko_ecs::ecs::core::component::component::Component>::STORAGE_IS_DENSE,
+                concat!(
+                    "ui_pack_inputs! member `", stringify!($c),
+                    "` MUST be a TABLE component. A dense `Changed<C>` inside this macro's \
+                     `Or<..>` was MEASURED never to fire on this kernel (UI-PLAN-SPRITES S-D16 \
+                     (1)): a dense member is read correctly by the gather and is INVISIBLE to \
+                     ui_render_discovery — the frame never repaints, with nothing saying so."
+                )
+            );
+        )*
     };
 }
 
@@ -435,11 +502,34 @@ fn sheet_frame(
 /// the per-row `Changed` window; `is_empty()` is archetype-level only — the
 /// `ui_layout_discovery` precedent). In steady state the scan yields nothing
 /// and the generation holds, which is what arms the D6a per-slot gate's skip.
+///
+/// # Register this `.after_set(boyko_ui::animation::UiAnimationSet)`
+///
+/// From rung A1 the animation sink is written by `ui_visual_tick` through
+/// `Mut::set_if_neq`, and from rung A4 `UiVisual` is a member of the list below.
+/// This system ordered BEFORE that write does not see it one frame late — it
+/// never sees it. MEASURED 2026-08-27: 20 animating frames, reader after ⇒ 20
+/// hits; reader before ⇒ 1, and that one is the out-of-schedule insert stamp.
+/// The cause is the half-open `(last_run, this_run]` window — a write stamped in
+/// frame N is above frame N's reader and at-or-below the EXCLUSIVE lower bound of
+/// frame N+1's, so it falls in neither.
+///
+/// The edge cannot be declared from `boyko_ui` (the dependency runs render → ui);
+/// it belongs to whoever registers this system. Gated by
+/// `the_reader_must_be_ordered_after_the_tick_or_every_write_is_lost`
+/// (`tests/ui_a1_sink_reaches_discovery.rs`).
 //
 // `clippy::type_complexity`: the `Query<(), Or<(Changed<…>, …)>>` change-set
-// type IS the SystemParam signature (the `ui_layout_discovery` precedent) —
-// it cannot be a `type` alias without losing the SystemParam impl. The macro
-// keeps the spelling single; the type stays structural.
+// type IS the SystemParam signature, which the scheduler reads to derive access
+// (the `ui_layout_discovery` precedent). A `type` alias is declined because it
+// would only hide the change set from a reader. The macro keeps the spelling
+// single; the type stays structural.
+//
+// NOT MEASURED HERE, deliberately. `ui_visual_tick` carries a measurement that
+// an alias compiles over ITS query — data `(Mut<UiVisual>, AnyOf<(…x4)>)`, no
+// filter, THREE lifetimes. This one is `()` data behind a macro filter and needs
+// TWO. The shapes are different and the result does not transfer; anyone wanting
+// a measured claim here must compile the alias here.
 #[allow(clippy::type_complexity)]
 pub fn ui_render_discovery(
     changed: Query<(), ui_pack_inputs!(changed)>,

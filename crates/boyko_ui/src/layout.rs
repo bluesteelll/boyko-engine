@@ -79,8 +79,12 @@ use crate::world::components::{
 /// [`ui_layout_apply`] early-returns.
 //
 // `clippy::type_complexity`: the `Query<(), Or<(Changed<…>, …)>>` change-set type
-// IS the SystemParam signature — the engine resolves it positionally, so it
-// cannot be a `type` alias without losing the SystemParam impl. Allowed.
+// IS the SystemParam signature, which the engine reads to derive access. A `type`
+// alias is declined because it would only hide the change set from a reader, and
+// the alias must spell the lifetimes the inline signature elides. Allowed.
+//
+// NOT MEASURED HERE. `ui_visual_tick`'s measurement is over a query of a
+// DIFFERENT shape (three lifetimes against this one's two) and does not transfer.
 #[allow(clippy::type_complexity)]
 pub fn ui_layout_discovery(
     changed: Query<

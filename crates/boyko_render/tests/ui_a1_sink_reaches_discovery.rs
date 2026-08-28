@@ -78,7 +78,9 @@ fn read_or(
     out.generation.push(g);
 }
 
-fn world_with_one_animated_node() -> (EcsMaster, Entity) {
+/// One node carrying a real pack input ([`ComputedRect`]) and one opacity tween
+/// of the caller's duration.
+fn world_with_one_animated_node_ms(duration_ms: f32) -> (EcsMaster, Entity) {
     let mut world = EcsMaster::new();
     world.insert_resource(Time::default());
     world.insert_resource(UiClock::default());
@@ -88,10 +90,14 @@ fn world_with_one_animated_node() -> (EcsMaster, Entity) {
 
     let node = world.run_system(|mut cmds: Commands| cmds.spawn(ComputedRect::default()).id());
     world.run_system(move |mut cmds: Commands| {
-        // 400 ms at 100 ms a frame: live across the whole measured window.
-        start_tween_opacity(&mut cmds, node, 0.0, 1.0, 400.0, EasingId::LINEAR, 0);
+        start_tween_opacity(&mut cmds, node, 0.0, 1.0, duration_ms, EasingId::LINEAR, 0);
     });
     (world, node)
+}
+
+fn world_with_one_animated_node() -> (EcsMaster, Entity) {
+    // 400 ms at 100 ms a frame: live across the whole measured window.
+    world_with_one_animated_node_ms(400.0)
 }
 
 /// `[ui_clock_tick → ui_visual_tick → ui_tween_reap → ui_render_discovery → read_or]`.
@@ -103,6 +109,25 @@ fn schedule(world: &mut EcsMaster) -> Schedule {
     let reap = b.add_system(ui_tween_reap).after(tick).key();
     let disc = b.add_system(ui_render_discovery).after(reap).key();
     b.add_system(read_or).after(disc);
+    b.build(world)
+}
+
+/// `[read_or → ui_clock_tick → ui_visual_tick → ui_tween_reap → ui_render_discovery]`
+/// — the SAME five systems as [`schedule`], the SAME world, and the ONE thing
+/// changed is where the reader sits.
+///
+/// `ui_render_discovery` is kept here even though nothing reads its generation in
+/// the ordering test: dropping it would make the two schedules differ in TWO
+/// ways, and then a difference in the readings could no longer be attributed to
+/// the reader's position alone.
+fn schedule_reader_first(world: &mut EcsMaster) -> Schedule {
+    let pool = ThreadPoolBuilder::new().num_threads(2).build();
+    let mut b = ScheduleBuilder::new(pool);
+    let rd = b.add_system(read_or).key();
+    let clock = b.add_system(ui_clock_tick).after(rd).key();
+    let tick = b.add_system(ui_visual_tick).after(clock).key();
+    let reap = b.add_system(ui_tween_reap).after(tick).key();
+    b.add_system(ui_render_discovery).after(reap);
     b.build(world)
 }
 
@@ -150,6 +175,78 @@ fn the_sink_is_seen_through_a_real_or_next_to_a_real_pack_input() {
     assert!(
         world.get_component::<UiVisual>(node).is_some(),
         "the sink is retained after the reap (AM2)"
+    );
+}
+
+/// **The ordering axis, which AD10's const-assert does not cover.**
+///
+/// AD10 hardens the STORAGE axis at compile time. The ORDERING axis has the
+/// identical silent-frozen-picture symptom and is guarded by nothing, so it is
+/// guarded here. 20 frames, one tween live across all of them, the same fixture
+/// in both arms — only the reader's position differs.
+#[test]
+fn the_reader_must_be_ordered_after_the_tick_or_every_write_is_lost() {
+    // 100 s at 100 ms a frame: live across all 20 frames in both arms.
+    let (mut wa, _) = world_with_one_animated_node_ms(100_000.0);
+    let mut sa = schedule(&mut wa);
+    for _ in 0..20 {
+        frame(&mut wa, &mut sa);
+    }
+    let after = wa.resource::<Readings>().or_with_sink.clone();
+    let after_ctl = wa.resource::<Readings>().pack_input_only.clone();
+
+    let (mut wb, _) = world_with_one_animated_node_ms(100_000.0);
+    let mut sb = schedule_reader_first(&mut wb);
+    for _ in 0..20 {
+        frame(&mut wb, &mut sb);
+    }
+    let before = wb.resource::<Readings>().or_with_sink.clone();
+    let before_ctl = wb.resource::<Readings>().pack_input_only.clone();
+
+    println!("reader AFTER  the tick: or={after:?}\n  control={after_ctl:?}");
+    println!("reader BEFORE the tick: or={before:?}\n  control={before_ctl:?}");
+
+    assert_eq!(
+        after_ctl[1..20].iter().sum::<usize>(),
+        0,
+        "control: the Or's pack-input arm is inert across the ANIMATING window, so every hit \
+         counted there is the sink's"
+    );
+    assert_eq!(
+        before_ctl[1..20].iter().sum::<usize>(),
+        0,
+        "control, reader-first arm"
+    );
+    // 19, not 20, and the window is the SAME `[1..20]` the two controls above
+    // prove inert. Frame 1's hit is real but is NOT attributable to the sink:
+    // the spawn stamps the pack-input components in that frame too, so the `Or`
+    // is true through BOTH arms there and a `sum() == 20` would credit the sink
+    // with a hit the control cannot exclude. Asserting the 19 frame-by-frame is
+    // also strictly stronger than asserting their total, and it mirrors the
+    // reader-first arm's `&[0; 19]` below.
+    assert_eq!(
+        &after[1..20],
+        &[1; 19][..],
+        "reader AFTER the tick sees the sink write on every one of the 19 animating frames the \
+         control proves the pack-input arm is inert for — so every one of these hits is the \
+         sink's, and none is the spawn's"
+    );
+    assert_eq!(
+        after[0], 1,
+        "frame 1 hits too, but through BOTH Or arms (the spawn stamps the pack inputs), so it is \
+         asserted separately and credited to neither arm alone"
+    );
+    assert_eq!(
+        &before[1..20],
+        &[0; 19][..],
+        "reader BEFORE the tick sees NOTHING after frame 1 — a write stamped at frame N's \
+         this_run is above frame N's reader (it has not happened) and at-or-below the EXCLUSIVE \
+         lower bound of frame N+1's (last_run, this_run] window. The repaint is LOST, not late."
+    );
+    assert_eq!(
+        before.iter().sum::<usize>(),
+        1,
+        "and the single hit is frame 1's out-of-schedule spawn/insert stamp, not an animating frame"
     );
 }
 

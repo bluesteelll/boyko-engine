@@ -79,10 +79,21 @@ fn live_count(world: &EcsMaster, id: ComponentId) -> usize {
 /// despawned after its tween completed leaves nothing behind for a later frame
 /// to replay.
 ///
-/// The key stored in the scratch is a generation-free `EntityId`, which is safe
-/// EXACTLY because the buffer is filled and drained inside one frame. If an
-/// entry outlived its frame, the next reap would remove whatever channel that id
-/// carries by then — after a despawn and an id reuse, an unrelated entity's.
+/// # The drain is the GATE; the survival below is SMOKE
+///
+/// The `pending() == 0` assertions own red mutation 8 (drop the `done.clear()`
+/// in `ui_tween_reap`) and are what this leg gates.
+///
+/// The survival half — the second entity's channel still live after three
+/// frames — **cannot red, and is kept as a smoke assertion only.** MEASURED
+/// 2026-08-27, two independent reasons, either of which alone is sufficient:
+/// a despawn removes the entity's dense rows ITSELF (a channel's live count went
+/// 1 → 0 across a despawn, no reap involved), so a replayed stale pair finds no
+/// slot; and this kernel does not recycle `EntityId` at all, so there is no id
+/// under which that could be undone. No `live_count` assertion over a stale
+/// replay can fail while both hold. The property that actually protects the
+/// scratch's generation-free key is carried by
+/// [`entity_ids_are_not_recycled_today`], which is where it can fail.
 #[test]
 fn retained_scratch_survives_a_despawn() {
     let mut world = a1_world();
@@ -97,20 +108,72 @@ fn retained_scratch_survives_a_despawn() {
 
     world.run_system(move |mut cmds: Commands| cmds.despawn(a));
 
-    // A fresh entity very likely reuses `a`'s id slot. Give it its own tween and
-    // run frames: a replayed stale entry would remove this one's channel.
+    // This kernel hands out fresh ids (measured); see
+    // `entity_ids_are_not_recycled_today`, which is what makes the bare key safe
+    // and which reds if that changes.
     let b = spawn_node(&mut world);
     world.run_system(move |mut cmds: Commands| {
-        start_tween_opacity(&mut cmds, b, 0.0, 1.0, 10_000.0, EasingId::LINEAR, 0);
+        start_tween_tint(&mut cmds, b, 0x0000_0000, 0xFFFF_FFFF, 10_000.0, EasingId::LINEAR, 0);
     });
     for _ in 0..3 {
         frame(&mut world, FRAME);
         assert_eq!(world.resource::<UiTweenScratch>().pending(), 0);
     }
+    // The queued pair named `TweenTint` (the channel `a` completed above), so the
+    // watched store must be `TweenTint` too — watching `TweenOpacity` here was
+    // looking at a store no stale pair could ever have named.
     assert_eq!(
-        live_count(&world, TweenOpacity::component_id()),
+        live_count(&world, TweenTint::component_id()),
         1,
-        "the long tween on the RECYCLED id is untouched — no stale pair was replayed"
+        "smoke: the long tween on the channel the stale pair NAMED is untouched"
+    );
+    assert!(
+        world.get_component::<TweenTint>(b).is_some(),
+        "smoke: and it is on `b` — the pair's id, had it been replayed onto a recycled slot, is \
+         the one this row would have lost"
+    );
+}
+
+/// **The property A1's generation-free scratch key rests on.**
+///
+/// Not a Miri subject — it lives here because this is the file whose leg (i)
+/// depends on it. If this ever reds, `UiTweenScratch`'s bare `EntityId` key stops
+/// being safe on the day it reds, and `ui_tween_reap` must carry the generation.
+///
+/// # This is a KERNEL-PROPERTY gate, and it owns no mutation ON PURPOSE
+///
+/// Do not "fix" it as a gate with no red. Its red IS the fact changing: `Entity`
+/// already carries a `generation: u32` and `Entity::increment_generation` is
+/// documented "used to detect stale handles", so the kernel is BUILT for
+/// recycling and merely does not do it yet. The day allocation starts reusing
+/// freed ids, this goes red and names the consequence, instead of
+/// `ui_tween_reap` silently removing an unrelated entity's channel —
+/// `DenseStore::remove` takes a bare `EntityId` and performs NO liveness check
+/// (MEASURED: it removed a live, unrelated row and returned `true`).
+#[test]
+fn entity_ids_are_not_recycled_today() {
+    let mut world = a1_world();
+
+    let first: Vec<Entity> = (0..6).map(|_| spawn_node(&mut world)).collect();
+    let first_ids: Vec<_> = first.iter().map(|e| e.id()).collect();
+
+    for &e in &first[..4] {
+        world.run_system(move |mut cmds: Commands| cmds.despawn(e));
+    }
+
+    let second: Vec<Entity> = (0..6).map(|_| spawn_node(&mut world)).collect();
+    let second_ids: Vec<_> = second.iter().map(|e| e.id()).collect();
+
+    let recycled: Vec<_> =
+        second_ids.iter().filter(|id| first_ids.contains(id)).copied().collect();
+
+    assert!(
+        recycled.is_empty(),
+        "an EntityId handed out before was handed out AGAIN ({recycled:?}; first batch \
+         {first_ids:?}, second batch {second_ids:?}). `UiTweenScratch`'s key is a bare EntityId \
+         with no generation, and `DenseStore::remove` does no liveness check — the moment ids are \
+         recycled, a completion pair replayed across a despawn removes an UNRELATED entity's \
+         channel. `ui_tween_reap` must carry `Entity` (generation included) from here on."
     );
 }
 

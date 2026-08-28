@@ -48,6 +48,20 @@ boyko-threadpool = { path = "../boyko_threadpool" }
 boyko-macros     = { path = "../boyko_macros" }
 # P2 `ui!` macro compile-fail acceptance tests (snapshot-based).
 trybuild         = "1"
+# A1: `tests/ui_a1_source_census.rs` PARSES `src/animation.rs` rather than
+# scanning it. `visit` on top of the workspace base's `full` — the census walks
+# the tree with `syn::visit::Visit`.
+#
+# Not a new node in the dependency graph: `boyko-macros` (a `[dependencies]`
+# entry of this crate, three lines above) already pulls the same pinned `syn`,
+# so the compile was happening either way. Test-only, like `trybuild` beside it.
+syn              = { workspace = true, features = ["visit"] }
+quote            = { workspace = true }
+# The census's hook-registration scan reads `#[component(… on_add = …)]` as
+# TOKENS, because the one that matters is written inside `macro_rules!
+# tween_channel` and a parsed tree has no attribute there at all. Test-only, and
+# already compiled as a dependency of `syn` and `quote` above.
+proc-macro2      = { workspace = true }
 
 [lints]
 workspace = true
