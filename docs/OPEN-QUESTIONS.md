@@ -14,6 +14,142 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-28 — The `machine` "one transition per frame" claim is FALSE: two same-frame events run BOTH exit/action/enter chains
+
+Found while designing per-entity machines, confirmed by two independent reads of the emitter and
+the schedule. `run_state_transitions` executes ONCE, before the executor loop, so `State<S>` is
+constant for the whole frame — while the emitter gives every route its OWN system gated only by
+`.run_if(in_state(leaf))`, with no ordering edges and no latch between siblings. Two events of
+different types arriving for one leaf in one frame therefore run BOTH exit/action/enter chains, and
+`NextState` is decided by the last write. The emitter's own comment (`expand.rs`, the transition-fn
+doc) calls this "§5.1 one transition per machine per frame", and the registration-order note claims
+declaration order makes two same-frame transitions deterministic — it determines WHICH wins, not
+HOW MANY run.
+
+**Scheduled fix (owner-approved direction):** the `state_chart!` move into `boyko_macros` (campaign
+rung R2, [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md)) merges a leaf's routes into one dispatch,
+which makes a second same-frame chain structurally impossible AND lands the arbitration alignment
+(first-declared-wins) the owner chose. **The red test comes first**: two events, one leaf, one
+frame → today it must FAIL by observing two chains; after R2 it pins exactly one.
+
+Nothing else is blocked; the global `machine` misbehaves only under same-frame multi-event load,
+which the shipped tests deliberately avoid (distinct event types per edge).
+
+---
+
+## 2026-08-27 — The event participant context is a DEAD DATUM: computed, leaked, stored, never read — RESOLVED 2026-08-28
+
+Found while designing the Aether sugar for `event`, when the owner asked whether a participant could
+carry query-style filters (`victim: entity(with Health, without Invulnerable)`). Before answering I
+followed what today's `entity(Health)` actually reaches, and it reaches nothing.
+
+The chain is complete and every link is real:
+
+```text
+Aether  entity(Health)
+  -> #[participant(components = "Health")]
+  -> ParticipantInfo { name, required_components: &[Health::component_id()] }
+  -> EventTypeInfo::participant_info                    (event_registry.rs:126, :175)
+  -> pub fn get_event_participants(event_id)            (event_registry.rs:272)
+  -> (nothing)
+```
+
+**Grep over the whole workspace** (`crates/`, `--include=*.rs`): `required_components` occurs
+**once** — its own field declaration at
+[`participants.rs:28`](../crates/boyko_ecs/src/ecs/core/events/participants/participants.rs). `get_event_participants` has
+**zero callers**. Not in the dispatcher, not in `EventReader`/`EventWriter`, not in a `debug_assert`,
+not in a test, not in a bench.
+
+So every event registration pays for it — one `<Comp as Component>::component_id()` per context
+component, a `&'static` leak per participant list behind a `OnceLock` — and no code path consults the
+result. This is the class already recorded as recurring in this repo (five prior instances); this is
+a sixth, and it is on the PUBLIC event surface, which is why it is worth a decision rather than a
+silent deletion.
+
+Scope of the check: `get_event_participants` is `pub`, so an out-of-tree consumer is possible in
+principle. Inside the engine, its tests and its benches there is none.
+
+**What is worth deciding — three readings, and they are not equally cheap.**
+
+1. **A debug-time assertion.** On `send`, `debug_assert` that the participant entity actually carries
+   the declared components. This is what the field looks designed for, it vanishes in release, and it
+   turns a whole class of "the event fired but the reader's `get_mut` returned `None`" into a loud
+   failure at the send site. Cost: one archetype lookup per participant per send, debug only.
+2. **A read-side filter.** Events are double-buffered and cross a frame boundary, so by read time the
+   participant may be dead, may have lost `Health`, or may have gained `Invulnerable`. Today every
+   reader re-checks this by hand (`let Ok(h) = q.get_mut(d.participants.victim) else { continue }`).
+   If the context were live, `EventReader` could skip such events itself and the check would leave
+   every reader. This is the reading that would make `without` mean something, and it is the most
+   valuable — and the most expensive, because filtering must not cost the readers that do not need it.
+3. **Documentation, and say so.** Keep it descriptive, and write in the doc comment that it is
+   never consulted — so the next person does not spend the same half hour looking for the consumer.
+
+**What it blocks.** The Aether sugar `entity(with A, without B)` is on hold until this is answered.
+Extending a list nobody reads would double the dead datum, and it would ship a syntax that *looks*
+like a guarantee while giving none — which is worse than not having it. Reading 2 additionally needs
+engine work (`#[participant]` grows a second channel, `ParticipantInfo` a second slice) that should
+not be started before the first slice has a consumer.
+
+Nothing in the engine is blocked: events dispatch correctly today, because none of this is on the
+dispatch path. What is blocked is the language surface above it.
+
+**RESOLVED 2026-08-28 — reading 1, scoped to the machine event router (owner delegated the call).**
+The per-entity machine design gives the datum its first consumer: the generated router that
+deposits an event into the victim row `debug_assert`s, in debug builds only, that the victim
+actually carries the declared context components. A stun sent to a crate becomes loud at the send
+site; release cost is zero; a miss stays the safe silent `None`. The `without`-filter extension
+remains unbuilt (reading 2 stays unfunded until the checked half proves itself). Recorded in
+[`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) §M4.
+
+---
+
+## 2026-08-26 — A worker panic under the windowed host FREEZES the window instead of ending the process
+
+MEASURED while wiring `PhysicsPlugin` into `examples/playground.rs`. The plugin's
+`.colored_solve()` registered `physics_solve_colored` — a stage that reads
+`ResMut<ColoredSoftStepSolver>` **by name**, not through the pipeline's generic `S` — while the
+resource inserted was `SoftStepSolver`. The param resolve did exactly what it should:
+
+```text
+thread 'boyko-worker-1' panicked at crates/boyko_ecs/src/ecs/core/system/params/diagnostics.rs:22:5:
+Resource `boyko_physics::solver::colored::ColoredSoftStepSolver` not registered.
+```
+
+**What the operator saw was none of that.** The window went "not responding" and stayed there: no
+crash, no exit code, no CPU (6.5 s of CPU over 9 minutes of wall clock — the process was blocked,
+not spinning), and the panic text scrolled past in stderr where a windowed run does not look. It was
+reported to me as "boyko playground is not responding", and I had to bisect the frame loop with
+`eprintln!` probes to find a *panic*.
+
+**The plugin bug is fixed in this commit** — `insert_physics_resources` now inserts
+`ColoredSoftStepSolver` whenever `colored_solve` is set, so the stage's parameter always resolves.
+That closes THIS instance and none of the class.
+
+**The class, and the question.** `Schedule::run` re-raises the first worker panic (the event-lane
+campaign's fix, `schedule.rs:223`), and `CommandQueue::apply` calls `resume_unwind` — so a panic is
+*supposed* to leave the frame loop. Under `boyko_app`'s windowed runner it did not: the process
+stayed alive with a dead schedule and a live window. Whether the panic is swallowed on the way out
+of the Fixed schedule specifically, or the re-raise lands somewhere the runner never observes, I did
+not chase — it needs a deliberate look at the propagation path rather than an incidental one.
+
+Two things that are worth deciding rather than assuming:
+
+1. **Should a worker panic take the window down?** A frozen window is the worst of the three
+   outcomes (crash / degraded frame / freeze): it hides the diagnosis the engine already produced,
+   and an operator cannot tell it apart from a GPU hang or a deadlock. My inclination is that the
+   host should catch the propagated panic and exit with the message on the console, but that is a
+   VALUES call about how a shipped game should die.
+2. **Should a registered system with an unresolvable resource fail at BUILD time?** Every parameter
+   a schedule needs is known when `ScheduleBuilder::build` runs, and the world is right there. A
+   build-time check would have turned this into a startup error naming the missing type, rather than
+   a first-substep panic on a worker thread. The cost is that it forbids "insert the resource later,
+   before the first run", which some legitimate boot orders may rely on.
+
+Nothing is blocked on either — the scene runs. What is blocked is anyone else meeting this class and
+spending the same hour on it.
+
+---
+
 ## 2026-08-20 — Gate #17: two findings about the INSTRUMENT, one fixed in this commit and one still open
 
 Measuring the particle passes (213 legs over four sessions) produced two facts about the measuring
