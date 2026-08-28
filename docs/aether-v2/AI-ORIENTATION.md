@@ -26,9 +26,12 @@ information the model cannot derive (what exists, what fired, what is canonical)
   diagnostic — verbatim message, file/line/column, **byte offsets**, source-line echo — because
   `diag::err` never falls back to `Span::call_site()`. Warm edit→diagnostic cycle: **561 ms**
   (floor: 465 ms cargo no-op); pure `expand_block`: 0.054 ms.
-- **Gaia's type-level substrate: CLOSED by serialization decisions** (`stable_name`,
-  `format_version`, loud `UnmappedEntity`, determinism suites) — adopted for other reasons,
-  pre-paying AI requirements.
+- **Gaia's type-level substrate: partially pre-paid by serialization decisions** (`stable_name`,
+  `format_version`, loud `UnmappedEntity`, determinism suites — adopted for other reasons).
+  *Corrected at Gaia G0*: the original "CLOSED" wording was refuted by the Gaia inventory —
+  hooks-on-load, resources-in-format, tick reset, handle carriers and opt-in remap are NOT covered
+  by those decisions (see `docs/gaia/DECISIONS.md`, disagreement 5). An unqualified closure claim
+  without a census is the gate-that-cannot-fail class, in prose.
 
 ## Measured defects (all with committed red-first repros)
 

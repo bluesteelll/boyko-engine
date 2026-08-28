@@ -14,6 +14,34 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-08-28 — Gaia: seven owner ballots, two of them blocking
+
+The Gaia research (two multi-agent passes, ~25 systems surveyed; plan corpus now at
+[`gaia/`](gaia/CAMPAIGN.md)) closed every architecture/perf fork by standing rule, and left seven
+VALUES/SCOPE ballots. Full bodies with prices: [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) §Owner
+ballots. The two that BLOCK rungs:
+
+- **F1 — the bake route into the byte format.** `save_world` is the only legal printer, so the
+  baker must build a live world from text. Route (a), the EG2 reflection seam, is already rejected
+  by the owner's own audit ballot of 2026-08-27; route (b), macro-time GK-4 (derive-emitted
+  name-keyed field tables + typed constructors), needs no reflection at all and detaches Gaia from
+  both EG2 and the unlanded C11. Recommendation: (b) now, (a) as a later upgrade. The real ballot
+  is SEQUENCING: decide EG2 first (it unblocks more than Gaia), or detach now. Blocks G1.
+- **F4 — what "loaded" means.** Measured: the loader runs no hooks — reverse indexes
+  (`Children`, `LikedBy`) are absent after a load, and asset refcounts stay at 0, so every mesh of
+  a loaded scene is retirable mid-game. The same document is correct in the dev loop and broken in
+  the shipped game. Options: (a) a specified post-load fixup pass with a hook-coverage census —
+  recommended; (b) the loader fires attach hooks (correct by construction, but a hook then mutates
+  the world mid-load — a real semantic fork plus a per-row price); (c) forbid hook-dependent
+  components in baked assets — untenable, it forbids `MeshHandle`. This defines the engine's load
+  semantics generally; decide before the first Gaia scene. Blocks G6.
+
+The remaining five (F2 data-assets-as-entities, F3 table files, F5 streaming scope, F6 the fate of
+`.ui`, F7 mods-and-who-runs-bake) are in the same table with recommendations; F7's silence would be
+a default decision, so it asks for an explicit line either way.
+
+---
+
 ## 2026-08-28 — The `machine` "one transition per frame" claim is FALSE: two same-frame events run BOTH exit/action/enter chains
 
 Found while designing per-entity machines, confirmed by two independent reads of the emitter and
