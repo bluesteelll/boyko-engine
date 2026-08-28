@@ -67,6 +67,21 @@ feature pays nothing.
 | **new crate `boyko_spatial`** | the hash grid, queries, census; Phase 1 needs **zero kernel changes** |
 | **shared kernel building block (goal)** | cell-hash + CSR counting-sort + key-range scatter, designed for three consumers (gameplay now; physics broadphase convergence and coarse streaming cells later) so the structure is configured, not re-implemented |
 
+## AI-oriented (owner directive, 2026-08-28)
+
+Both **Aether and Gaia treat AI authorship as a first-class consumer**, alongside the human
+programmer. What that means concretely is the subject of a commissioned research supplement, but
+the axis is binding on every design decision from here on: a regular, low-ambiguity grammar an
+agent can generate without trial-and-error; **canonical formatting** so machine edits produce
+semantic diffs, not noise; **structured, machine-readable diagnostics** (the rustc
+`--error-format=json` precedent) so an agent can self-correct from the compiler/baker output;
+**stable edit-target identities** (a patch addresses a node by id, never by line position);
+**schema introspection** (an agent can ask what components/fields/constructs exist instead of
+guessing); and validation loops cheap enough to iterate against. Much of Aether's existing
+discipline (spans on user tokens, did-you-mean, one-error-per-fault recovery, golden-pinned
+messages) already serves this axis — the supplement's job is to inventory what is covered and
+close what is not.
+
 ## Discipline
 
 - Every rung commits atomically when its oracle is green; broken intermediate states are never
