@@ -27,11 +27,12 @@ per-entity state machines with compiled timers; the spatial index; parallel even
 kernel enablers all of that needs.
 
 **Out (separate campaigns, own decision records):** programmable/graph materials (`material` is
-parked; the blocker is policy — is a material shader a source or an asset); the scene asset format
-and world streaming (`scene` narrows to authored scenes; the world lives in a baked binary format
-with zero runtime reflection). Physics and render culling deliberately do **not** adopt the spatial
-index (the render cull is GPU-resident by design; the physics broadphase has a different contract —
-see DECISIONS.md §Spatial).
+parked; the blocker is policy — is a material shader a source or an asset); **Gaia** — the data
+language (owner, 2026-08-28: *Aether is for logic, Gaia is for data*) covering scenes, UI
+documents and the DataAsset/DataTable analog, absorbing the scene-format campaign's pipeline
+(own text → build-time bake with reflection → binary, zero runtime reflection). Physics and render
+culling deliberately do **not** adopt the spatial index (the render cull is GPU-resident by
+design; the physics broadphase has a different contract — see DECISIONS.md §Spatial).
 
 ## Rung ladder
 
@@ -48,7 +49,7 @@ lesson.
 | **R4** | Parallel event emission (EVENTS.md): `send(&self)`, `send_slice`, `par_for_each_chunk_entities`, router combine, `ordered` opt-in | R1 (65 lanes) | `build(1) == build(W)`-style determinism gates; loom/stress story for the lane path |
 | **R5** | Per-entity machines (MACHINES.md): `machine … on entity`, compiled timers, field elision | R1 (`Entities`, `Query::get`), R2 (chart core), R4 only for `parallel` | behaviour tests over both reference scenarios (enemy AI, ability) + size const-asserts + the D1 cost-model note |
 | **R6** | `boyko_spatial` Phases 1–3 (SPATIAL.md); Aether `near` (Phase 4) | Phase 4 needs R5 | zero-alloc row, `build(1) == build(W)`, the own-cell double-visit pin test |
-| **R7** | Ratification of the open constructs (OPEN.md): `set`, `exclusive`, `gpu`, `relation`, hierarchical tags, `attributes`, event payload binding | owner | — |
+| **R7** | ~~Ratification of the open constructs~~ **DONE 2026-08-28 — all eight adopted** (OPEN.md holds the rulings; specs in CONSTRUCTS.md). Implementation folds into R3: `set`, `exclusive`, `gpu`, `relation`, `resource`, `attributes`, payload binding, hierarchical `tags` | — | the same R3 gate lanes |
 
 Rungs R0–R2 are pure engine work and can proceed in parallel worktrees (one worktree per system —
 standing owner rule). R3 is the language pivot; everything after it layers on.

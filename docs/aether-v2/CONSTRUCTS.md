@@ -107,6 +107,61 @@ system chase(
 - `when (A or B)` / `unless C` lower to the kernel combinators (`CombinedSystem`, eager fold).
 - `or(...)` in **filter** position is RESERVED: refused with a span diagnostic pointing at the
   verbatim escape, until the kernel `Or`-dense fix is green and a real consumer exists (D4).
+- **`gpu`** (bare group) → `.gpu()` — marks a GPU-compute system (dispatcher-solo at the apply
+  window, the sound site for `!Send` RHI recording). The kernel marker is deliberately
+  non-inferable from access, so this is the only ergonomic route. *(Ratified O3.)*
+- **`system exclusive name(w: world) { … }`** → `fn(&mut EcsMaster)`. Exactly one param (`world`
+  is contextual); any second param is refused. A plain `system` with a verbatim `&mut EcsMaster`
+  is refused with a pointer at `exclusive` — accidental exclusivity (a whole-frame barrier)
+  becomes unwritable. *(Ratified O2.)*
+
+## `set` *(ratified O1)*
+
+```
+set Combat order (after Input, before Render) when (in_state(GameFlow::Playing));
+```
+
+Emits `#[derive(SystemSet)] pub struct Combat;` plus `b.configure_set(Combat)…` in the sibling
+plugin — the set-level ordering and conditions (`configure_set`) that `sets (Combat)` could only
+reference. A set-level `when` evaluates once per set per frame instead of once per member system.
+
+## `relation` *(ratified O4, variant b)*
+
+```
+relation Likes -> LikedBy { linked_despawn, allow_self }
+```
+
+One declaration mints BOTH sides of a relationship: the source FK component and the target
+reverse-index component with its **private** collection field (the privacy the kernel macro
+enforces becomes generator-internal — no exception to the "everything pub" rule, and the
+`target =`/`source =` cross-references cannot desync because nobody writes them). A single-field
+source needs no `key` marker. The two-block `relates`/`related` form remains for a source with
+extra fields.
+
+## `attributes` *(ratified O7 — the foundation; `effect` layers on later)*
+
+```
+attributes Stats { attack: f32 = 10.0, armor: f32 = 5.0 }
+```
+
+Emits three POD components (`StatsBase`, `StatsMods`, `StatsCurrent`), the `#[require]` wiring,
+and ONE recompute system under `Changed<StatsMods>` with `current = (base + add) * mul` unrolled
+per field. What it kills: field-list desync across the three structs, and order-dependent buff
+removal drift — removal is subtract-from-Mods + recompute-from-Base, exact by construction.
+
+## `tags` — hierarchical *(ratified O6, with both gates)*
+
+```
+tags sticky { Weapon.Ranged.Rifle; Weapon.Melee.Sword; }
+```
+
+Mints prefixed unit structs (`WeaponRangedRifle` requires `WeaponRanged` requires `Weapon`), so
+attaching the leaf implies the ancestors — the silent partial-attach class becomes unwritable, and
+`With<Weapon>` catches every descendant as one signature bit. **Zero runtime difference** vs
+attaching the tags manually — this is correctness sugar, valuable when queries span taxonomy
+levels. Gates: the expander computes the archetype-count product of orthogonal branches and
+refuses past the ceiling; `#[require]` is granted only to the `sticky` class, because requires
+fire on attach and are never removed — a removable taxonomy would strand stale ancestors.
 
 ## `each`
 
@@ -129,7 +184,7 @@ each drift(mut Transform, Velocity, with Enemy, time: res<Time>) {
 Unchanged, except the emitted `name()` override is removed — the trait default (fully-qualified
 type name) is strictly better in duplicate diagnostics.
 
-## `resource` (new; ratification tracked in OPEN.md)
+## `resource` *(ratified O5)*
 
 ```
 resource PlayerFocus { who: option<entity>, pos: Vec3 } with { init }   // Default-constructed
@@ -146,6 +201,12 @@ Grammar unchanged; the **codegen authority moves to `boyko_macros::state_chart!`
 becomes a front-end (R2). The route merge that lands there fixes the both-chains-run defect and
 aligns arbitration to first-declared-wins (M6). The per-entity form is specified in
 [`MACHINES.md`](MACHINES.md).
+
+**Payload binding** *(ratified O8)*: `on Damage(dmg) if dmg.parameters.amount > 50.0 => T { … }` —
+the drain loop binds the user's pattern, visible in the guard and the action (the global-machine
+twin of the per-entity `arg` slot). Semantics after the R2 merge: the FIRST event of the frame
+passing the guard wins, consistent with first-declared arbitration. Binding guards
+(`if let Some(x) = …`) follow as a second step on demand.
 
 ## `material`, `scene`
 

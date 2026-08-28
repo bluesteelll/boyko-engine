@@ -1,23 +1,28 @@
-# Open items — not yet ratified by the owner
+# Open items
 
-Everything in the campaign that still needs an owner decision, plus the claims that remain
-unverified. Each construct row carries a one-line recommendation so the whole section can be closed
-in one review pass, the way the machine forks were.
+The construct backlog was **fully ratified by the owner on 2026-08-28**; what remains open here is
+only the unverified-claims ledger below. Implementation folds into rung R3 (see
+[`CAMPAIGN.md`](CAMPAIGN.md)); the specs live in [`CONSTRUCTS.md`](CONSTRUCTS.md).
 
-## Constructs proposed but never discussed
+## Constructs — RATIFIED 2026-08-28
 
-| # | Construct | What it closes | Recommendation |
-|---|---|---|---|
-| O1 | `set Combat order (…) when (…);` | `configure_set` (set-level ordering/conditions) is unreachable from the language; `sets (Combat)` can only reference | adopt — it is the missing half of the `sets` group |
-| O2 | `system exclusive flush(w: world)` | exclusive systems (`fn(&mut EcsMaster)`) compile through the verbatim escape BY ACCIDENT — no arity check, no mixing refusal | adopt — one keyword, two refusals |
-| O3 | `gpu` marker on `system` | `SystemConfig::gpu()` (GPU-compute, dispatcher-solo at the apply window — the only sound site for `!Send` RHI recording) has no language surface | adopt for an engine with an in-house RHI |
-| O4 | `relation Likes -> LikedBy { linked_despawn, allow_self }` | the ONE unadopted component-design decision: the reverse side requires a PRIVATE collection field, colliding with the "everything pub" rule | adopt the synthesizing construct (one declaration mints both sides; privacy becomes the generator's internal business) over a visibility exception |
-| O5 | `resource` ratification | used by the accepted machine design; formally never approved as a construct | ratify as specified in CONSTRUCTS.md |
-| O6 | hierarchical tags `tags { Weapon.Ranged.Rifle; }` | UE GameplayTags ergonomics via a `#[require]` lattice; `With<Weapon>` catches all descendants for free | adopt with the two hard gates: an archetype-count ceiling computed in the expander, and a split vocabulary (only a `sticky` class gets `#[require]`, because requires are never removed) |
-| O7 | `attributes` (GAS Base/Mods/Current) | one declaration → three POD structs + one recompute system under `Changed<Mods>`; makes the three field lists unable to desync; order-independent buff removal | the judge escalated it as a VALUES call: without an `effect` construct nobody can write a buff through it — decide whether it ships alone or waits for effects |
-| O8 | event payload binding `on Damage(dmg) if dmg > 5 => …` + binding guards (`if let Some(x) = …`) | an event's payload is not bindable in a transition at all today | adopt — small, closes a real hole; the per-entity `arg` slot already covers the machine side, this is the global-machine twin |
+| # | Construct | Ruling |
+|---|---|---|
+| O1 | `set Combat order (…) when (…);` | **adopt** — Aether-only, no engine impact; completes the `sets` group (set-level `run_if` evaluates once per set instead of once per system) |
+| O2 | `system exclusive flush(w: world)` | **adopt** — the accidental verbatim-escape exclusivity becomes a named, arity-checked form; a plain system with a verbatim `&mut EcsMaster` is refused with a pointer at `exclusive` |
+| O3 | `gpu` marker on `system` | **adopt** — emits `SystemConfig::gpu()`; the marker is deliberately non-inferable in the kernel, so the language surface is the only ergonomic route |
+| O4 | `relation Likes -> LikedBy { … }` | **adopt variant (b)** — one construct mints both sides; the private reverse-index field becomes generator-internal and the cross-references cannot desync |
+| O5 | `resource` | **ratified** as specified. The owner floated a broader "resources" campaign — scope to be clarified when it opens; the construct does not wait for it |
+| O6 | hierarchical tags `tags { Weapon.Ranged.Rifle; }` | **adopt with both gates** (archetype-count ceiling computed in the expander; `#[require]` only for the `sticky` vocabulary class since requires are never removed). Honest framing recorded: zero runtime difference vs manual tags — this is correctness sugar (the ancestor-implication invariant kills the silent partial-attach class), valuable when queries span taxonomy levels |
+| O7 | `attributes` (GAS Base/Mods/Current) | **adopt as the foundation** — the recompute-from-base pattern is the part hand-rolled buff code gets wrong (field-list desync; order-dependent removal drift); the `effect` construct layers on later without rework |
+| O8 | event payload binding `on Damage(dmg) if … => …` | **adopt** (the global-machine twin of the per-entity `arg` slot; first event passing the guard wins, consistent with first-declared arbitration). Binding guards (`if let`) follow as a second step on demand |
 
 ## Open questions elsewhere in the corpus
+
+- **Gaia** — the data language (scenes, UI documents, the DataAsset/DataTable analog), named by
+  the owner 2026-08-28: *Aether is for logic, Gaia is for data*. It absorbs the scene-format
+  campaign's pipeline decisions (own text → build-time bake with reflection → binary, zero runtime
+  reflection). Research launched; a plan directory of its own follows the research.
 
 - The participant-context dead datum: **RESOLVED** (F6 — a router debug_assert; recorded in
   OPEN-QUESTIONS with the date).

@@ -229,6 +229,31 @@ different instance: AABBs, substep cadence, pair output); coarse world-streaming
 Render culling is explicitly excluded: this engine's cull is GPU-resident (host computes frustum
 planes and pushes them to the cull shader; HZB is GPU) — a CPU hash accelerates nothing there.
 
+## Ratifications 2026-08-28(2) — the former open constructs
+
+All eight adopted by the owner in one pass; rulings in [`OPEN.md`](OPEN.md), specs in
+[`CONSTRUCTS.md`](CONSTRUCTS.md). The notable reasoning:
+
+- **O1/O2/O3 (`set`, `exclusive`, `gpu`)** — pure language surface over existing kernel features;
+  the owner's framing is correct that no engine trade-off existed, they had simply never come up.
+- **O4 `relation` as a synthesizing construct** over a visibility exception — same principle as
+  `tag`/`flag`: the invalid (a hand-written reverse index; desynced cross-references) becomes
+  unwritable rather than diagnosable.
+- **O6 hierarchical tags** — adopted AFTER the honest accounting: zero runtime difference vs
+  manual tags (same archetype, same bits); the value is the ancestor-implication invariant killing
+  the silent partial-attach class. Gated: expander-computed archetype ceiling; `#[require]` only
+  for `sticky` vocabularies (requires never un-attach — a removable taxonomy strands ancestors).
+- **O7 `attributes`** — adopted as a foundation despite the missing `effect` layer, because the
+  recompute-from-base pattern is the part hand-rolled buff code reliably gets wrong; `effect`
+  stacks on later without rework.
+- **O5 `resource`** — ratified; the owner floated a broader "resources" campaign whose scope is to
+  be clarified when it opens — the construct does not wait for it.
+
+**Gaia** (owner, same session): the data language — scenes, UI documents, the DataAsset/DataTable
+analog — is its own campaign. *Aether is for logic, Gaia is for data.* It inherits the
+scene-format pipeline decisions (text → bake → binary, reflection only at build time). Research
+commissioned; Gaia gets its own plan directory after the research lands.
+
 ## Doc repairs bundled with the campaign
 
 - The `g6` bench header claimed "boyko ~5%/11% slower" and cited a nonexistent path; the measured
