@@ -12,10 +12,13 @@
 //! `Query::iter().fold(_, f32::algebraic_add)` pattern. Two groups:
 //!
 //! * **`g6_*`** (Wave 8B) — single-component f32-sum reduction over
-//!   `&VelF32`. Result: boyko ~5 % / ~11 % SLOWER than Bevy (both engines
-//!   autovectorize the scalar inner loop; per-row state-machine cost
-//!   amortises). The 5× target was NOT met on this shape — see
-//!   `docs/PHASE-X.A-RESULTS.md`.
+//!   `&VelF32`. Result: parity band (both engines autovectorize the
+//!   scalar inner loop; per-row state-machine cost amortises), with the
+//!   sign unstable across runs: the Wave 8 run measured boyko ~5 % /
+//!   ~11 % slower (default / `-Ctarget-cpu=native`), the X.A.1 re-run
+//!   measured ~8 % FASTER at default and ~4 % slower at native. The 5×
+//!   target was NOT met on this shape — see the two measured tables in
+//!   `docs/archive/PHASE-X.A-RESULTS.md`.
 //! * **`g6b_*`** (Phase X.A.1) — multi-component reduction over a
 //!   `(PosF32, VelF32, AccF32)` 3-tuple. Validates the plan §13 Risk 5
 //!   hypothesis that the speedup widens when Bevy pays a per-row
