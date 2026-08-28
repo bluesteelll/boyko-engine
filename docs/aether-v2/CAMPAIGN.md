@@ -50,6 +50,7 @@ lesson.
 | **R5** | Per-entity machines (MACHINES.md): `machine … on entity`, compiled timers, field elision | R1 (`Entities`, `Query::get`), R2 (chart core), R4 only for `parallel` | behaviour tests over both reference scenarios (enemy AI, ability) + size const-asserts + the D1 cost-model note |
 | **R6** | `boyko_spatial` Phases 1–3 (SPATIAL.md); Aether `near` (Phase 4) | Phase 4 needs R5 | zero-alloc row, `build(1) == build(W)`, the own-cell double-visit pin test |
 | **R7** | ~~Ratification of the open constructs~~ **DONE 2026-08-28 — all eight adopted** (OPEN.md holds the rulings; specs in CONSTRUCTS.md). Implementation folds into R3: `set`, `exclusive`, `gpu`, `relation`, `resource`, `attributes`, payload binding, hierarchical `tags` | — | the same R3 gate lanes |
+| **R8** | AI-orientation tooling ([`AI-ORIENTATION.md`](AI-ORIENTATION.md)): `check_block` + `aether check --format=json` (AIR-01), the `AE####` code registry + census (AIR-02/03), the generated grammar manifest + project schema dump (AIR-06), `aetherfmt` + idempotence gate + comment survival (AIR-07/14), the compact generated surface file (AIR-11), recorded loop budgets (AIR-12). AIR-04/05/13 (accumulating block checks, resync fix, v1→v2 migration diagnostics) fold into **R3**; Gaia items bind through AIR-16/17 | R3 | every AIR oracle demonstrably red before its fix; probes C and E are committed repros |
 
 Rungs R0–R2 are pure engine work and can proceed in parallel worktrees (one worktree per system —
 standing owner rule). R3 is the language pivot; everything after it layers on.
