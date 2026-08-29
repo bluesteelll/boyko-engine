@@ -55,6 +55,19 @@ same type from another system would write the same lane; the kernel cannot expre
 exclusivity implicitly, so the opt-in makes it an explicit registered contract). Past 64 chunks the
 ordered path falls back to serial emission for that type.
 
+> **OPEN BALLOT AB-4 — what registers the sender-exclusivity fact.** The refusal above names its
+> *timing* (boot-time — already pinned by three sites) but not its **predicate** or its
+> **registrant**, and a refusal that names neither cannot be implemented or made red. Alternatives
+> for the registrant: (a) the **generated path** calls a `register_ordered_emitter` at plugin
+> build; (b) **`SystemMeta` emit-access** — the fact is derived from declared access, not
+> registered; (c) the **`#[event]` macro side** owns it. Second, coupled question: the
+> **verbatim-escape disposition** — a hand-written `EventWriter<E>` param bypasses every generated
+> registration, so either the param list refuses it for an `ordered` type, or such senders are
+> declared out of contract. Blocks **R4**. Companion red fixture (KERNEL-BACKLOG KE8): a **two-
+> emitter** fixture for this refusal, plus loom/stress re-scoped to include a
+> `WORKER_ID_UNATTACHED` thread sending concurrently with worker 0 — as scoped today the debug
+> assert excludes that class by construction, so the stress cannot reach it.
+
 Rejected for the opt-in: the outbox pattern (full determinism, zero kernel changes — but one event
 per entity per frame, a serial O(N) sweep costing 4–8× the pass itself, and a permanent widening of
 the hot row).
@@ -63,10 +76,51 @@ the hot row).
 
 Lane exclusivity = the lane function is injective over {workers} ∪ {dispatcher} OS threads (TLS is
 written in exactly two places; lanes = worker_count + 1; the const-assert closes the 65th-thread
-hole; unattached threads are excluded by the re-aimed debug assert, and in release are documented to
-route through the world-side send). No user code runs inside any `&self` batch write window. The
+hole).
+
+⚠ **The release-mode clause previously written here was false, and is replaced by the measured
+behaviour.** Unattached threads are **not** routed anywhere else in release: every unattached OS
+thread maps to **lane 0 — worker 0's own lane**. The mapping lives in
+`boyko_threadpool::current_worker_id_or_dispatcher_lane` (`crates/boyko_threadpool/src/tls.rs`),
+whose `WORKER_ID_UNATTACHED` arm returns `0`, while a worker returns its own id — so worker 0 also
+returns `0`. `EventDispatcher::send_event`
+(`crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs`) is the caller that turns that value
+into the lane index. The unattached→lane-0 half is pinned today by
+`event_send_from_unattached_thread_uses_lane_zero` (`crates/boyko_ecs/tests/event_send_from_worker.rs`);
+the worker→own-id half is the same function's fall-through arm. So injectivity does
+not hold over {workers} ∪ {dispatcher} ∪ {any other thread}: a host thread and worker 0 collide on
+one lane. The re-aimed `debug_assert` guards the **param path only**; `EventDispatcher::send_event`
+is guarded by **nothing** — and its own doc comment asserts a distinct id per thread, on the same
+page as the EVT1 claim it contradicts (`event_dispatcher.rs`, `send_event` doc / EVT1 paragraph).
+This paragraph records the measurement; it is **not** a contract.
+
+> **OPEN BALLOT AB-3 — unattached-thread lane contract.** The truthful CONTRACT text lands with
+> this ruling, not before. Alternatives: (a) **per-thread claimed host lanes** — raise the const
+> which is `MAX_EVENT_THREADS = 64` in the tree (65 is KE8's unlanded plan value), so the raise is
+> `64 → 66+`, two lanes while KE8 is unlanded — one for its own const-assert, one for the claimed
+> host lane — with one-claimer enforcement; (b) **`Err` on unattached** — breaks silent
+> main-thread senders that work today; (c) **accepted hazard**, documented as such and left
+> unguarded. Blocks **R4** (the `&self` send). Companion doc-rot fixes ride the same commit:
+> `EventWriter::send` doc and the `EventDispatcher` EVT1 paragraph.
+
+**Lane-count obligation.** The obligation `lanes = worker_count + 1` above is stated as a *safety*
+property, while `with { lanes N }` (CONSTRUCTS §`event`) lets an author set the count. An
+author-settable `lanes N` must not be able to violate a stated safety obligation while parsing
+green: the parse check enforces only the constant **ceiling**, and the binding constraint is the
+machine-dependent **floor** `lanes >= worker_count + 1`, which is not representable at parse time.
+Reconcile with whatever ballot **AB-2** selects (minimum-raised-at-boot / boot refusal / drop the
+knob) — until then this is a known hole, not a guarantee.
+
+No user code runs inside any `&self` batch write window. The
 swap barrier and writer-handle uniqueness are untouched. The new `par_for_each_chunk_entities`
 driver is genuinely new unsafe (the entity-slice aliasing contract) — it goes through the
-code-reviewer gate, with a loom/stress story for the lane path, and the determinism gate for
-`ordered` is a fixed-scenario replay comparing event streams across two runs at different worker
-counts.
+code-reviewer gate, with a loom/stress story for the lane path.
+
+**The `ordered` determinism gate — re-axed at [`CAMPAIGN.md`](CAMPAIGN.md) R4, the same way R6 was.**
+The property the gate must test is *the parallel path emits the stream the serial path emits* — a
+fixed scenario's event stream from the parallel pass compared **against the serial-emission
+reference stream** for W ∈ {1, 2, N}. `build(1) == build(W)` is demoted to a **smoke** check: it
+compares two runs of the same code against each other and so cannot see a lane-assignment defect
+that is stable across runs, which is exactly the defect class `ordered` exists to exclude. The run
+must **report per-worker send counts** (AIR-12's counts-not-exit-code rule) so a silently-serial run
+is red, not green.

@@ -27,7 +27,7 @@ record; engine claims were verified line-by-line in this checkout).
 2. **`MeshHandle(u32)` / `MaterialHandle(u16)` are POB integers that blit a process-local slot** —
    every loud refusal passes and the reference is meaningless after a restart. The single most
    dangerous finding for scenes. Cure: stable asset ids in the binary + a bake lint banning the raw
-   form. → §Identity, N1.
+   form. → §Identity, GN1.
 3. No resource region in the format (→ F2). 4. Entity remap is per-field opt-in — hence `link` is
    mandatory grammar. 5. Ticks reset on every load — a streamed cell is a one-frame salvo of every
    `Changed<T>` consumer; documented as initial-apply semantics. 6. `save_world` requires a live
@@ -75,8 +75,17 @@ exact fact) · **curves as a first-class asset kind + the `scalable` field type*
 multiplier — the GAS `FScalableFloat` valve that kills expression-language pressure; baked into
 flat keyframe arrays) · contracts from a closed predicate vocabulary over the record's own fields,
 blame = file+span of the violating VALUE · **bake budgets** per file (expansion steps, spawned
-fields, template depth, output bytes) with a committed red fixture — "not Turing-complete" is not
-the safety property (billion-laughs was pure substitution).
+fields, template depth, output bytes) — "not Turing-complete" is not the safety property
+(billion-laughs was pure substitution).
+
+**One committed red fixture PER AXIS, not one for the set.** A single fixture proves at most one
+axis and lets the other three ship unguarded while the row reads green. Each of the four fixtures
+asserts the `GA####` code that names ITS OWN axis (a fixture satisfied by any budget diagnostic is
+a gate that cannot distinguish the thing it guards), and each budget's numeric value is recorded
+beside its own fixture rather than in prose here, so the value and its guard cannot drift apart.
+The expansion-steps axis carries the loop-refusal wording
+([PENDING](PENDING-SYNTAX-PLAN.md) §Tier 2, the `for … if …` clause) as its diagnostic. The
+fixture set is mirrored into G4's Gate column in CAMPAIGN.md.
 
 **References to Aether/engine items are by NAME, resolved by bake; unresolvable = bake error.**
 Components by mandatory explicit `stable_name` (bake REFUSES the default module-path name — it is
@@ -84,7 +93,7 @@ refactor-brittle). Actions, run-conditions, systems, machines — by exported Ae
 condition in a Gaia file is a **token reference, never an expression** — that is the whole answer
 to "how data references logic without becoming code".
 
-**N1 (adversarial pass, adopted):** in the baked binary every reference form is a **name hash**
+**GN1 (adversarial pass, adopted; `N1` before the id-namespace pass):** in the baked binary every reference form is a **name hash**
 resolved once at load, cold — the exact analogue of `resolve_stable_name` one level down. Raw
 build-local ordinals (`ComponentId` mint order, derive-order `u8`s, `Actionlike::index()`,
 `FontId`, `Assets` slots) are **unrepresentable in the file**; a bake lint over the closed list of
@@ -121,10 +130,28 @@ ambiguity Unity left undocumented). Bake emits a **provenance sidecar** (asset �
   `gaia fmt --assign-ids` writes ids INTO the text; bake refuses a referenced node without one.
   **An anonymous node can never be the target of a cross-file reference, an override, or a patch**
   — ordinals re-key on insertion (the Terraform-count class).
-- **Two reference kinds, two syntaxes**: value references (templates, `let`) are lexical,
-  copy-semantics; entity references (`@asset/object`) are identity, remapped at load. No config
-  language in the survey has object identity at all — one spelling would invite authors to assume
-  one behaviour.
+- **Two reference kinds, two syntaxes** *(ratified)*: value references (templates, `let`) are
+  lexical, copy-semantics; entity references (`@asset/object`) are identity, remapped at load. No
+  config language in the survey has object identity at all — one spelling would invite authors to
+  assume one behaviour.
+- ⚠ **Open ballot GB-3 — the taxonomy is short one kind.** An **asset** reference (a curve, a
+  string table, a style record, a mesh) is neither of the two above: it is not copied lexically,
+  and it is not an entity id remapped by `LoadEntityMap`. Today it has no ruled spelling, so the
+  two-kind rule does not tell an author which behaviour to assume for the case the language uses
+  most. Recording this as an **extension consistent with the ruling's own one-spelling-one-
+  behaviour rationale, NOT a reversal of it** — but it still amends ratified text, so it goes to
+  ballot rather than being written in. The question, in three parts:
+  1. **Asset-ref spelling** — (a) its own sigil, (b) a typed head, or (c) bare strings. Option (c)
+    needs a separate answer for the dangle check (what refuses a reference to an asset that is not
+    there), because a bare string carries no marker for the checker to key on.
+  2. **Which kind GN1's name-hash covers, stated explicitly.** GN1 resolves every reference form in
+    the binary to a name hash at load — WITHOUT remap. That is the asset kind's behaviour, and the
+    ratified text never says so.
+  3. **Style references** (K15) — whether they are the asset kind or a fourth thing.
+  **Settle jointly with the `$hole` sigil (K3) and the style-reference disposition (K15)**, so the
+  reference rule is rewritten exactly once and syntax ruling
+  [**PENDING R4**](PENDING-SYNTAX-PLAN.md) is regenerated once — the Gaia ruling series, **not**
+  Aether rung R4. Blocks **G2, G3** and [PENDING](PENDING-SYNTAX-PLAN.md) Tiers 1–2.
 - `link` is mandatory grammar for entity-reference fields — the difference between a loud
   `UnmappedEntity` and a silently stale id.
 - Content hashes are integrity/cache only, never identity; the freeze/cache key is a hash of the
@@ -140,14 +167,14 @@ The answer is already shipped and gated at zero allocations in this repo; Gaia g
 
 1. A binding bakes into a **POD bind-record component**: object id → `Entity` (load remap),
    `stable_name` hash → `ComponentId`, field-name hash → `u8`, template → an id in the baked
-   template table. All four resolutions at load, once, cold (N1). This also closes the two
+   template table. All four resolutions at load, once, cold (GN1). This also closes the two
    by-name forms the UI dispatch code itself lists as unbuilt — the largest concrete win over `.ui`.
 2. **Constants are not bindings**: a provably-constant expression emits component bytes and ZERO
    bind records (Slint's const-propagation + remove-unused); `once` is first-class syntax.
 3. **The arrow is sink→source**: no subscriber lists, no dependency nodes; a change-gated system
    asks each sink "did my source change" via the per-row tick the ECS already pays for. The entire
    runtime reactivity of a document = one 4-byte `last_run` tick per bind system.
-4. **N2 (adopted over survey 5):** per-binding monomorphized systems are impossible for a
+4. **GN2 (adopted over survey 5; `N2` before the id-namespace pass):** per-binding monomorphized systems are impossible for a
    runtime-loaded binary; the honest ceiling is a **bindable-type set closed at engine compile
    time** (`register_bindable::<C>`) with open binding INSTANCES through the already-built
    type-erased fn-pointer arm. The alternative (bake emits Rust into the game build — Slint's
@@ -159,11 +186,44 @@ The answer is already shipped and gated at zero allocations in this repo; Gaia g
    instead of hiding it). Quantization stays in systems.
 7. Two-way = a second opposed system gated on the UI-value tick, schedule-ordered — no shared
    cell, no cycle possible.
-8. Forbidden in generated code, with red fixtures: `Or<(Changed<A>, Changed<B>)>` over dense (our
-   measured silent never-true) and untracked `Query<&mut T>`.
+8. Forbidden in generated code, with red fixtures — three rows, each with its own ground:
+   - **Untracked `Query<&mut T>`.** Ground: `&mut T` stamps no change tick, so a sink written
+     through it is invisible to every downstream `Changed<T>`. Untouched by any rung — this row
+     stands on its own regardless of what happens to the two below.
+   - **`Or<(Changed<A>, Changed<B>)>` over dense.** Ground as recorded (2026-08-28): the `Or`
+     filter does not override the dense hooks, so the arm is silently never true.
+     ⚠ **Superseded-by note (dated 2026-08-29):** this is exactly the defect **Aether rung R0 /
+     backlog KE1** exists to fix. ⚠ **Open ballot GB-9** — does the emission ban SURVIVE the kernel fix:
+     (a) keep it, with a stated ground that is not the fixed defect (D4's coupling is the
+     candidate ground and must be cited if this option wins), or (b) delete it with a record of
+     why it existed. **Decide before Aether rung R0 lands**
+     ([`../aether-v2/CAMPAIGN.md`](../aether-v2/CAMPAIGN.md) §Rung ladder). Blocks G7's codegen rules.
+     Either way, the red fixture must assert that the **GENERATOR does not emit the shape** — a
+     fixture that instead asserts the kernel's behaviour goes green on that R0 commit and stops
+     guarding anything, without anyone editing it.
+     The coupling is recorded here, on the Gaia side, precisely because a kernel-side fix would
+     otherwise never prompt anyone to revisit this line; the Aether R0 / KE1 rung note owes the
+     matching back-pointer.
+   - **A bind source on a dense (or bitset) component.** `any_changed_since`
+     (`boyko_ecs` `component_api.rs:403`) resolves per-archetype pools, and non-signature storage
+     owns none (`archetype.rs:389-395`), so the gate is **never true** — the sink never updates and nothing is
+     logged. Red fixtures cover BOTH spellings: an explicit `kernel (storage = dense)` component
+     and a `table`-derived dense column, since Gaia's own `table` bakes to dense — the second
+     spelling is the one an author reaches by accident. Companion doc fix in the same commit:
+     the `any_changed_since` doc comment (`component_api.rs:386-389`) claims the scan is bounded
+     to hosting archetypes, which is false for exactly this case. The remedy (a bake refusal keyed on the GK-4 storage kind vs
+     routing dense through `DenseStore` ticks) is the implementer's engineering choice, per the
+     standing rule.
 9. **The benchmark is the STILL FRAME** (the failure UMG's polling names): 200 bindings with
-   nothing changing must cost like zero. No vendor has published this number; Gaia gates it by
-   wall-clock delta-subtraction.
+   nothing changing must cost like zero. No vendor has published this number. **The gate is a
+   COUNT, not a clock**: bind-sink writes executed == 0 (observable because every sink is
+   set-if-changed, item 6) and the tick slots read by `any_changed_since` pinned to the fixture's
+   expected value; red-first by dirtying exactly one source, after which both counters move.
+   Wall-clock delta-subtraction is not falsifiable at this scale and cannot say WHICH work
+   disappeared. AIR-12 is cited here as the **precedent for counts-over-exit-code**, not as an
+   existing ruling over a runtime bench — no such ruling exists. ⚠ **Open ballot GB-7**: whether a
+   wall-clock companion is kept beside the count gate, and at what tolerance / run count /
+   noise floor.
 
 ## Refusals (ratified)
 
@@ -194,9 +254,9 @@ collections, small files, bake as the post-merge validator) · **no second front
 
 ## Disagreement resolutions (kept so they are not re-litigated)
 
-1. Monomorphized-per-binding vs N2 → **N2** (runtime-loaded binaries cannot add systems).
-2. Bake `(ComponentId, u8)` into the binary vs N1 → **N1**; the gated-offsets/name-hashes/ungated-
-   ordinals criterion above.
+1. Monomorphized-per-binding vs GN2 → **GN2** (runtime-loaded binaries cannot add systems).
+2. Bake `(ComponentId, u8)` into the binary vs GN1 → **GN1**; the gated-offsets/name-hashes/
+   ungated-ordinals criterion above.
 3. Patch precedence ambiguity in Bevy's wording → irrelevant for Gaia: later-wins in ladder order,
    one sentence + one pinned test.
 4. `remove` in inheritance: VALUES challenge vs in-v1 → **in v1**, owner veto point (asymmetric

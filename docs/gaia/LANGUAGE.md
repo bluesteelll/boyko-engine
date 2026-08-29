@@ -15,7 +15,8 @@ asset "pack:path/name"
 KDL-shaped nodes: `name positional key=value { children }`, `/-` slashdash to comment out one
 component or child. Values are engine-native literals; the target Rust field dictates the type
 (type-directed parsing — the `.ui` rule). Comments are first-class and survive the formatter
-(AIR-14). Whitespace is never load-bearing (AIR-16a).
+(AIR-14). Whitespace is never load-bearing (AIR-16, its "delimited whitespace-insensitive text"
+clause — AIR-16 is a single row with no lettered sub-clauses).
 
 ## Scene profile
 
@@ -23,10 +24,10 @@ component or child. Values are engine-native literals; the target Rust field dic
 gaia 1 profile=scene
 asset "levels/crypt/cell_07"
 
-abstract template Torch(intensity: f32) {
+abstract template Torch(power: f32) {
     Transform pos=(0,0,0)
     MeshRef "props/torch"            // stable asset id — never a slot index
-    PointLight intensity=$intensity color=#FFB35CFF
+    PointLight power=$power range=12.0 color=#FFB35CFF
 }
 
 entity @gate_01 {
@@ -36,9 +37,47 @@ entity @gate_01 {
 }
 
 instance "prefabs/torch_wall" @wall_east {
-    patch @sconce_a.PointLight intensity=2.5 layer=tuning
+    patch @sconce_a.PointLight power=2.5 layer=tuning
 }
 ```
+
+> **Interim annotations (drift-reduction only).** This file is **ratified-stale**: it is pre-R1 on
+> essentially every line — R1 being the first of the Gaia **syntax rulings R1–R7** in
+> [`PENDING-SYNTAX-PLAN.md`](PENDING-SYNTAX-PLAN.md) (finding M6 there), not an Aether campaign
+> rung — and the rewrite into the reworked syntax is owner-gated. The
+> notes below are the ONLY corrections applied; the rest of the sketch has not been swept.
+>
+> - **`PointLight`'s field is `power`, not `intensity`** — corrected above at all three sites (the
+>   template hole, the key, and the `patch` line). Verified against the engine: `PointLight`
+>   (`boyko_render/src/light.rs`) is the unique struct of that name in the workspace and carries
+>   `position: [f32; 3]`, `color: [f32; 3]`, `power: f32` (luminous power Φ in lumens; the baked
+>   intensity is `Φ / (4π)`) and `range: f32`. Nothing in the engine is called `intensity` on a
+>   point light, so every line that used the old spelling was a bake error waiting to happen.
+> - **`range` has no default and is now supplied.** `PointLight` derives no `Default` (the bundle
+>   doc in `boyko_render/src/bundles.rs` says so outright), so a typed constructor REQUIRES
+>   `range`; the sketch omitted it. The `12.0` above is illustrative, not ruled. This is the same
+>   hole PENDING M7 records at FIELD granularity — the closed evaluator has no way to spell a
+>   missing field's neutral.
+> - **Colour-literal arity is unreconciled.** `#FFB35CFF` is an RGBA-4 literal written into
+>   `color: [f32; 3]`, which is three channels. PENDING Tier 4 carries only the sRGB-decode half of
+>   the colour question (ballot **GB-2**); the arity half is carried by nothing. Left as authored
+>   and flagged, not silently trimmed.
+> - ⚠ **Open ballot GB-5 — `position` on `PointLight`.** `light_reconcile` DERIVES `position` from
+>   the entity's `GlobalTransform`, so whatever a scene authors into that field is overwritten. The
+>   **ui** profile already rules that engine outputs are undeclarable (bake error); GB-5 rules
+>   whether the same rule extends to engine-derived fields in the **scene** profile. It must land
+>   as a DECISIONS line **before G1 freezes the GK-4 field table**, since that table is where such
+>   fields would be marked. Not settled here.
+> - **`MeshRef` is an UNLANDED carrier**, at both sites above. No `MeshRef` type exists in the
+>   workspace; what the engine has is `MeshHandle(pub u32)`
+>   (`boyko_scene/src/render_caps.rs`) — the raw process-local slot form that the ratified **GN1**
+>   lint exists to BAN, and substituting it would falsify this line's own comment ("never a slot
+>   index"). The name therefore stands as a placeholder pointing at DECISIONS **GN1** / §Identity
+>   and at CAMPAIGN **G6** / ballot **F4**; the stable-asset-id carrier is named by the G6 design
+>   pass, not here.
+> - **Every other component head in this sketch is unswept against the engine.** `MeshRef` was
+>   found by looking; nothing here establishes that the rest are real. Sweep them all before any
+>   rewrite.
 
 `@name` — the file-local stable object id (author-visible, assignable by `gaia fmt --assign-ids`,
 never minted by bake). `instance` + `patch` — the single composition construct; `extends` (live)
