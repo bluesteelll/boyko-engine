@@ -1405,7 +1405,7 @@ byte-identity holds by construction as well as by measurement.
 
 **Lands:** the `.glb` decoder (§3.3) registered as a second `LoaderEntry` on `MeshGpu::LOADERS`;
 `assets/vg_corpus/CORPUS.toml` + the `.gitignore` rule + `fetch_corpus`;
-`crates/boyko_app/tests/vg_corpus_ingest.rs`. <!-- doc-anchor-ignore -->
+`crates/boyko_app/tests/vg_corpus_ingest.rs`.
 
 > ✅ **LANDED AT REV 36 EXCEPT THE PAYLOAD ITSELF, and the exception is a deliberate stop.** The
 > decoder ships with its own gate (one valid document decodes; **twelve** mutations, each changing
@@ -1553,7 +1553,7 @@ readback armed by env knob; the host-side histogram + triangles-per-pixel reduce
 the 2× SSAA composite is the route to it, **decided from §9.1's measured grant table** (on this
 box: rungs 0–1 direct, rungs 2–3 via the armed composite), with **SSAA arming ASSERTED rather than
 trusted**;
-`crates/boyko_app/tests/vg_density_census.rs`. <!-- doc-anchor-ignore -->
+`crates/boyko_app/tests/vg_density_census.rs`.
 
 > ⚠️ **The extent route is Rev 28's, and its absence was a precondition with no producer — the
 > §3.4 shape on a different axis.** `[census].assert_achieved_extent` gates every rung, and the

@@ -19,7 +19,7 @@
 | every refusal the derive makes (generics, packed, bitset, `Opaque`, un-`repr`'d enum) | **this file** |
 | the Nested / Opaque recursion contract and its allocation audit | **this file** |
 | entity/component enumeration · `get_field`/`set_field` glue · `add_default`/`remove` · the public by-id structural seam on `EcsMaster` · the `StorageKind`×`ResidencyKind`×dynamic-tag runtime matrix · `BUG-MIGRATE-TB-1` in the enumeration glue | [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md) |
-| `Sink`/`Source` · the name-keyed wire · `stable_name` consumption at the wire · tuple-struct reorder caveat — ~~⚠️ **DEBT, opened 2026-08-21 (C7 audit): BOUNDARY does not state the caveat.** Its only tuple-struct text is [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):977 and it carries no "caveat" / "by-position" / "positional" sentence; B4 gate 4's reorder subjects are all named-field types, so nothing there depends on what C7 retracts. This is a delegated statement with no recipient text, not a contradiction. **BOUNDARY owes the paragraph before its first `Sink` rung lands**~~ **PAID 2026-08-27 at the B0 audit.** BOUNDARY's **D24** states the caveat in full — "caveat", "by-position" and "positional" all present — and it lands a tuple-struct fixture (`PosPair(u32, u32)`) on rung B0, because the plan's only previous tuple struct was B5's dogfood `Name` ([`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):1292), which an owner “no” on B.13 #1 deletes outright | [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md) |
+| `Sink`/`Source` · the name-keyed wire · `stable_name` consumption at the wire · tuple-struct reorder caveat — ~~⚠️ **DEBT, opened 2026-08-21 (C7 audit): BOUNDARY does not state the caveat.** Its only tuple-struct text then was the B5 dogfood line, today at [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):1365, and that line carries no "caveat" / "by-position" / "positional" sentence; B4 gate 4's reorder subjects are all named-field types, so nothing there depends on what C7 retracts. This is a delegated statement with no recipient text, not a contradiction. **BOUNDARY owes the paragraph before its first `Sink` rung lands**~~ **PAID 2026-08-27 at the B0 audit.** BOUNDARY's **D24** states the caveat — "caveat" and "by-position" are present, "positional" is not (**0** occurrences in that whole file, re-derived on every run <!-- measure: lines-in docs/REFLECTION-PLAN-BOUNDARY.md positional = 0 -->) — and it lands a tuple-struct fixture (`PosPair(u32, u32)`) on rung B0, because the plan's only previous tuple struct was B5's dogfood `Name`, which an owner “no” on B.13 #1 deletes outright — [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):791-792, "plan's only tuple struct was B5's dogfood `Name`, and the dogfood half is deleted outright" | [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md) |
 | CI legs (feature-on/off matrix) · the ship absence gate (`cargo tree` + symbol census + present control) · the Miri package allowlist · the hot-loop 0 % bench · the bevy-shaped `get_field` baseline | [`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md) |
 
 **Every rung below has a gate that a GATES-plan leg must actually run.** The dependency is
@@ -85,7 +85,7 @@ finds one false stops and escalates rather than working around it.
 | F14 | Package names are dashed, directories underscored (`boyko-serialize` in `crates/boyko_serialize`), and every member carries `[lints] workspace = true` | `crates/boyko_serialize/Cargo.toml` |
 | F15 | `clippy.toml` bans `HashMap`/`HashSet`/`Mutex`/`RwLock`/`Rc`/`RefCell` at **deny** via `[workspace.lints.clippy] disallowed_types = "deny"`; `OnceLock` is **not** banned; exceptions carry `#[allow(clippy::disallowed_types)]` + a rationale | `clippy.toml`, root `Cargo.toml` |
 | F16 | The root is **also a package**, so `default-members` names every member **plus `"."`** — *"there is no non-workspace-wide root build any more"* | root [`Cargo.toml`](../Cargo.toml):1-40 |
-| F17 | **`grep -c hwrt .github/workflows/ci.yml` = 0.** Every `#[cfg(feature = "hwrt")]` body in the tree is compiled by **no CI leg**. A feature-gated body is invisible to the default gate — measured, not feared | `.github/workflows/ci.yml` |
+| F17 | **`grep -c hwrt .github/workflows/ci.yml` = 0.** <!-- measure: lines-in .github/workflows/ci.yml hwrt = 0 --> Every `#[cfg(feature = "hwrt")]` body in the tree is compiled by **no CI leg**. A feature-gated body is invisible to the default gate — measured, not feared | `.github/workflows/ci.yml` |
 | F18 | CI's Miri step is a **hand-listed package allowlist** (`-p boyko-ecs -p boyko-utils -p boyko-threadpool -p boyko-serialize -p boyko-math -p boyko_sdf_math -p boyko_image`), required, not `continue-on-error`; `MIRIFLAGS=-Zmiri-tree-borrows` is workspace-wide | `.github/workflows/ci.yml:193-226`, `.cargo/config.toml` |
 | F19 | Features unify **per package**, and the tree has recorded the consequence: *"a `#[cfg]`'d field on a struct `boyko_app` constructs appears or vanishes for that crate depending on a flag none of its own source names"* | `crates/boyko_rhi_vulkan/Cargo.toml:21~-25` |
 | F20 | A counting-global-allocator **delta** harness with baseline subtraction is the tree's established zero-allocation instrument | `crates/boyko_ui/tests/p4_bind_zero_alloc.rs:1~-20` |
@@ -432,7 +432,7 @@ items that exist nowhere:
   that now includes the `pub use reflect::{Reflect, ReflectDefault};` line — its own
   counter-example. A range containing what its sentence denies is worse than no range, so it is retired rather than widened. The identifier appears in the plan set at exactly two sites and **both are uses** (C7 `REFLECTION-PLAN-CORE.md:2381`, C8 `:2995`). `REFLECTION-ANALYSIS.md:11` even records *the absence of a `trait Reflect`* as a finding about the tree.
 * **`boyko_reflect::ReflectDefault`.** Its only occurrence anywhere is inside **D20's prose**
-  (:344-349), in a fenced sketch introduced by *"where `boyko_reflect` declares"*. D20 is a
+  (`REFLECTION-PLAN-CORE.md:341-349`), in a fenced sketch introduced by *"where `boyko_reflect` declares"*. D20 is a
   decision, not a rung. By C9 the trait is load-bearing twice — gate 5 blesses a `.stderr` against
   its `on_unimplemented` message, and C9's third red deletes that attribute *from* it — while
   created by nobody.
@@ -509,7 +509,7 @@ table that names no invocation is the shortest path to one.
 **Consequences the same ruling settles.** Gate 5's alloc arm cannot be an arm on
 `c4_prim_zero_alloc.rs` — that file is in the package that cannot run the derive, so the arm would
 measure a hand-written `default_in_place` wearing the derived one's verdict (the weaker-subject
-substitution C11 already forbids by name at :3354-3356). It becomes a **second** instrument, in
+substitution C11 already forbids by name at `REFLECTION-PLAN-CORE.md:3835-3837`). It becomes a **second** instrument, in
 `reflect_fixture`, with its own positive control; the c4 header's *"for no gain"* argument against a
 second `#[global_allocator]` was written before a subject existed that its binary cannot reach, and
 the gain is now twofold, because keeping the allocator out of `c7_derive_bake.rs` is also what keeps
@@ -838,7 +838,7 @@ plan delivers at C8"* — but it is respecified as what it can see, and given a 
 
 **Gate 3 (token absence, feature OFF).** Its deferral to G6b is not a route to an instrument:
 G6b has **selected no form** (*"Which form lands is an implementation choice with a stated
-criterion … Record the choice and the reason in the ledger"*, GATES `:1280-1282`), has **no ledger
+criterion … Record the choice and the reason in the ledger"*, `REFLECTION-PLAN-GATES.md:1321-1323`), has **no ledger
 row at all** (Appendix GB carries two `G6` rows and one `G6c`, no `G6b`), and has **no implementing
 file** — `reflect_fixture/tests/` holds five files, none of them a token census. Every `G5`/`G6`/
 `G6c`/`G7a`/`G7b`/`G8` row reads `— | —`, which that appendix's own preamble defines as *not
@@ -1021,7 +1021,7 @@ bound and cannot be a `compile_error!`), at `crates/boyko_reflect/src/reflect.rs
 **The span.** Three census-gated documents specified three different carets for one refusal:
 this plan's C9 table said *"the `storage` key"*;
 [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):352-359 and its §10 dependency row said *"the
-user's own type name"*; [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):1386-1389 said
+user's own type name"*; [`REFLECTION-PLAN-BOUNDARY.md`](REFLECTION-PLAN-BOUNDARY.md):1459-1462 said
 *"pins the span on `reflect`, not on the struct and not on `aether! {`"*. One emission has one span,
 and gate 1's blessed `.stderr` freezes whichever is built first, so the choice had to be made before
 the corpus. ECS's rationale is analysis B.5's Aether case, which
@@ -1044,10 +1044,10 @@ and C8's clauses migrate into the corpus. Nothing is lost: feature off, the whol
 mechanisms at two boundaries"* is the compile-time refusal plus the release `assert!` — not three.
 
 **And the release `assert!`'s ownership claim was wrong.** C9's *"It was on no rung's list in any of
-the four documents"* is false: [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1514 carries it
-against rung **EG3** with a live fallback (*"If CORE declines it, EG3 must add the check on its own
-read path and say so"*). C9 accepting the item creates a **C9 → EG3** edge and an obligation to
-retire that conditional; both are recorded in §7.4.
+the four documents"* is false: [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1867 carries it
+against rung **EG3** with a then-live fallback (*"If CORE declines it, EG3 must add the check on its
+own read path and say so"*). C9 accepting it creates a **C9 → EG3** edge and an obligation to retire
+that conditional; §7.4 records both, and ECS has since STRUCK the conditional there as DISCHARGED.
 
 ---
 
@@ -2541,12 +2541,12 @@ opt-in".
      three **whether the derive is correct or sabotaged**; the count is identically zero and "no
      leak, no double-free" is unfalsifiable over that set. A.8 — which this gate cites by name —
      prescribes `{ pod, String, Nested{String} }` (`REFLECTION-ANALYSIS.md:1054-1055`); §3.3's row
-     (`REFLECTION-PLAN-CORE.md:1220`) silently substituted the drop-free set, and the substitution is what removed the
+     (`REFLECTION-PLAN-CORE.md:1220`, which now says of itself *"this row substituted the drop-free one"*) silently substituted the drop-free set, and the substitution is what removed the
      instrument. **`Owned { tag: u32 }` with `impl Drop` bumping a thread-local restores it at C7
      without waiting for `Str`** (C11), and it is a *stronger* subject than `String` for this
      property: an exact count separates leak (too low) from double-free (too high), where an
      allocator delta only sees the heap. **A.8's `String` half is C11's**, and C11 already carries
-     it — gate 2's *"exactly 1 alloc + 1 free"* and its second red (*"1 alloc, 0 frees — a leak"*);
+     it — gate 2's (`REFLECTION-PLAN-CORE.md:1221`) *"exactly 1 alloc + 1 free"* and its second red (`:535`) (*"1 alloc, 0 frees — a leak"*);
      the cross-reference is recorded there rather than duplicated here.
    * **Nothing called the slot.** The rung's own *"no install call is emitted at this rung; the
      static exists and is inert"* means a mutated `drop_in_place` would be **written and never
@@ -3317,7 +3317,7 @@ distinct ids: a one-subject gate whose subject happens to hold id 0 cannot see i
 > `Lands`, and C8 gate 4's respecification); the six neighbours `:239 :263 :315 :334` → **`:254 :278  <!-- doc-anchor-ignore -->
 > :330 :386`** (`:123`, `:144` unmoved) at two sites; D31's *"six existing slots"* `:389-394` →  <!-- doc-anchor-ignore -->
 > **`:441-446`** (the verifier's report said `:441-447`, which is **seven** — `:447` is  <!-- doc-anchor-ignore -->
-> `#reflect_install`, the slot D31's sentence is explicitly *not* counting). **Beyond the six:** F7's  <!-- doc-anchor-ignore -->
+> `#reflect_install`, the slot D31's sentence is explicitly *not* counting). **Beyond the six:** F7's
 > whole anchor block (`:371-397` → **`:423-450`** plus seven live anchors), §D14's  <!-- doc-anchor-ignore -->
 > `parse_reflect_no_default` call site `:165` → **`:180`**, and five `reflect_absence_census.rs`  <!-- doc-anchor-ignore -->
 > anchors that C8 re-measured **at the audit** and then rotted **at the landing** (`:124`→`:181`→  <!-- doc-anchor-ignore -->
@@ -3572,9 +3572,9 @@ C10-independent; the window is recorded so it is not rediscovered.
 [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):352-359 states the requirement as *"refusal is
 TWO mechanisms at TWO boundaries; neither substitutes for the other"*). ~~**It was on no rung's list
 in any of the four documents**~~ — **FALSE, corrected 2026-08-26 (D37).**
-[`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1514 lists this exact item against rung **EG3**,
-with a live fallback clause — *"If CORE declines it, EG3 must add the check on its own read path and
-say so"* — which C9 accepting the item does **not** retire. The substantive half of the claim holds
+[`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1867 lists this exact item, its rung cell now
+reading ~~EG3~~ **CORE C9 — LANDED**, with a then-live fallback — *"If CORE declines it, EG3 must
+add the check on its own read path and say so"* — which C9 accepting did not retire; ECS has. The substantive half holds
 (no rung's *Lands* carried it), and the wrongness mattered twice: it hid the obligation to retire
 ECS's conditional, and it hid the new **C9 → EG3** edge, now recorded in §7.4. Re-verified at this
 audit: the landed installer (`crates/boyko_reflect/src/registry.rs:87`) still carries only its
@@ -3622,7 +3622,7 @@ c8_bitset_suppression` → `running 17` and `running 2`, exit 0. One compile err
 
 *(The falsehood at that file's header — *"the four `REFLECTION-PLAN-*.md` documents are not in
 `internal_docs_anchors.rs`'s `GATED_DOCS`"* — died with the file. HEAD `eeb567be` had put all four
-in, at `tests/internal_docs_anchors.rs:283`, one commit before the comment was read. The by-name
+in, at `tests/internal_docs_anchors.rs:311`, one commit before the comment was read. The by-name
 citation practice it defended is still right; only its stated reason was doc-rot.)*
 
 **Gate.**
@@ -3978,10 +3978,10 @@ defect.
    **And CORE now owes ECS a second install-side item: `C9` carries ECS D5's release
    `assert!(storage_kind(id) != Bitset)` inside `install_type_info` (D29, re-confirmed at the C9 audit
    under D37), so **ECS EG3 depends on CORE C9** — the last rung of this plan.
-   [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1514 has carried that item against EG3 all
+   [`REFLECTION-PLAN-ECS.md`](REFLECTION-PLAN-ECS.md):1867 has carried that item against EG3 all
    along, with the fallback *"If CORE declines it, EG3 must add the check on its own read path and say
-   so"*; CORE does **not** decline it, so that conditional is retired and must be struck when ECS is
-   next edited, or EG3 builds the same check twice. C9's own text claimed the item *"was on no rung's
+   so"*; CORE does **not** decline it, so that conditional is retired. ✅ **DONE — ECS struck it at
+   that row (D17); this anchor was wrong from line 1514.** C9's own text claimed the item *"was on no rung's
    list in any of the four documents"*, which was false and is struck at the rung; the sentence is
    what hid this edge, exactly as the C8 → EG8 edge above was hidden.
 5. **BOUNDARY owes CORE the `serialize` slot's first reader** (D9), and consumes

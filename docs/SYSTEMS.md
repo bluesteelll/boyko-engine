@@ -483,7 +483,7 @@ Observers need no gate (`add_observer` runs the dynamic archetype-bit walk).
 `observe_on_add::<C>(runner) -> ObserverId` (143) / `observe_on_insert` (151)
 / `observe_on_replace` (161) / `observe_on_remove` (170); the type-erased
 `add_observer(kind, cid, runner)` (182); `remove_observer(id) -> bool` (199).
-Phase 14b also changed `get_component_mut::<T>(entity)` ([component_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs):553) from
+Phase 14b also changed `get_component_mut::<T>(entity)` ([component_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs):583) from
 `Option<&mut T>` to `Option<Mut<'_, T>>` — the change-detection-correct
 direct-API mutator (the `Mut` deref-guard bumps the row's change tick).
 
@@ -1022,8 +1022,8 @@ that declares it:
   `delete_entity` (798).
 - Bulk spawn — `spawn_batch::<B, I>` ([ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):1079).
 - Component access — [component_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs):
-  `get_component_raw` (176) / `set_component_raw` (444);
-  `get_component_mut::<T> -> Option<Mut<T>>` (553).
+  `get_component_raw` (206) / `set_component_raw` (474);
+  `get_component_mut::<T> -> Option<Mut<T>>` (583).
 - Queries — `query::<D, F>() -> QueryView` ([ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):825).
 - Cold scans — [entity_query_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_query_api.rs):
   `has_entity` (17) / `entity_count` (69) / `archetype_count` (75) /

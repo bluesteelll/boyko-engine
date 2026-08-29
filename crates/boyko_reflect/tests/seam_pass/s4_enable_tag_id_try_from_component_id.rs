@@ -18,6 +18,12 @@
 //! `mod tags` is private and reachable only through the parent's `pub use tags::*`. The plan
 //! says S4′ *"lands in `component_registry::tags`"*, which is true of the **source file** and
 //! false of the **public path**.
+//!
+//! **Flipped from `compile_fail` to `pass` at EG2 (gate 11).** The item landed, so this
+//! fixture's blessed `.stderr` was **deleted**, never re-blessed: *"Expected test case to
+//! fail to compile, but it succeeded"* is a FLIP, and a flip has no error output to bless.
+//! A `t.pass()` case is compiled **and RUN**, so the body below asserts the return value --
+//! the claim a bare compile check could not make.
 
 use boyko_ecs::ecs::core::component::component_registry::EnableTagId;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
@@ -27,5 +33,12 @@ fn main() {
     let mut ecs = EcsMaster::new();
     let id: ComponentId = ecs.register_tag("eg0_s4_probe").component_id();
 
-    let _ = EnableTagId::try_from_component_id(id);
+    // `register_tag` mints a `StorageKind::Table` id, and S4' answers `Some` only for
+    // `Bitset`. That is the whole content of F16's word PROOF: the constructor is a kind
+    // CHECK, not a cast, so an `EnableTagId` still means "this id was minted as one".
+    assert_eq!(
+        EnableTagId::try_from_component_id(id),
+        None,
+        "S4' landed as a proof and not a cast: a Table-kind id yields `None`"
+    );
 }

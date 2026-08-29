@@ -183,10 +183,10 @@ binding the anchor gate checks.
 
 | What you want to do | Method (line) |
 |---------------------|---------------|
-| Read a component (raw) | `get_component_raw(entity, id)` (176) |
-| Write a component (raw bytes) | `set_component_raw(entity, id, &[u8])` (444) |
-| Mutate a component (change-tracked) | `get_component_mut::<T>(entity) -> Option<Mut<'_, T>>` (553) |
-| Check component presence | `has_component(entity, id)` (673) |
+| Read a component (raw) | `get_component_raw(entity, id)` (206) |
+| Write a component (raw bytes) | `set_component_raw(entity, id, &[u8])` (474) |
+| Mutate a component (change-tracked) | `get_component_mut::<T>(entity) -> Option<Mut<'_, T>>` (583) |
+| Check component presence | `has_component(entity, id)` (703) |
 
 **File:** [core/ecs_master/entity_query_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_query_api.rs) — cold inspection of the entity set.
 

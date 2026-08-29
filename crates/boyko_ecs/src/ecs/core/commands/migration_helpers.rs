@@ -2067,6 +2067,413 @@ pub(crate) fn retag_in_place(world: &mut EcsMaster, entity: Entity, ids: &[Compo
     // NO drain (Q-A1): the caller owns the drain — see `migrate_entity_attach_ids`.
 }
 
+/// Where one attached column's initial value comes from (D9 / EG2 FORK A).
+///
+/// Mirrors `clone::materialize::CloneColumnSrc` verbatim in shape — the
+/// codebase's established discriminator for exactly "bytes, or reconstruct
+/// through a capture-free ctor". A plain `&[&[u8]]` cannot express the second
+/// case: a `#[require]`d component that the caller never named has no source
+/// bytes anywhere, only a [`RequiredCtor`].
+#[derive(Clone, Copy)]
+pub(crate) enum AttachSrc<'a> {
+    /// Caller-supplied bytes; `len()` must equal the id's registry size (the
+    /// CALLER's release `if` decides this).
+    Bytes(&'a [u8]),
+    /// A `#[require]`-expanded column with no source bytes: build in place
+    /// through the capture-free ctor. F2-immune by construction — the ctor
+    /// never sees the world.
+    Ctor(component_registry::RequiredCtor),
+}
+
+/// Byte-carrying sibling of [`migrate_entity_attach_ids`] (D9): the same
+/// id-keyed attach migration, with a byte write for the added columns.
+///
+/// A SIBLING, not a widening: widening the original with an `Option<&[&[u8]]>`
+/// would put a branch in every tag attach and would blur its ZST
+/// `debug_assert!` — the statement that makes the byte-write-free fast path
+/// sound — into "…unless bytes were supplied", which is not checkable.
+///
+/// Caller guarantees:
+/// * `source_archetype_id != target_archetype_id`;
+/// * every id in `added` is hosted by `target` and NOT by `source`
+///   (`T = S ⊎ A`, debug-asserted);
+/// * `entity` is live and resolves to the source archetype;
+/// * `added.len() == srcs.len()`, and for every `AttachSrc::Bytes(b)` the
+///   `b.len()` equals the registry size of the paired `added[i]` — the caller's
+///   release `if` decides this ([`EcsMaster::add_component_by_id`]), NOT a
+///   `debug_assert!` here. An [`AttachSrc::Ctor`] carries no length to check:
+///   the registry pairs the ctor with the column's own type.
+///
+/// **O3 — zero-retained shape is first-class**: attaching FROM the empty
+/// archetype means the source has zero pools — the retained-copy loop runs zero
+/// times and no pool pointer is minted.
+///
+/// **Size-0 added columns are first-class here** (unlike the ZST-only original):
+/// `srcs[i]` is then an empty [`AttachSrc::Bytes`] slice,
+/// `write_at_unchecked_initialized` copies `layout.size() == 0` bytes, and the
+/// row is committed and tick-stamped exactly as a data column is.
+///
+/// **`#[require]` expansion needs NO change here and no `required_fire`
+/// scratch.** Phase 2 below already fires on_add + on_insert for every id in
+/// `added`, and every id in `added` is NEW to the source by precondition
+/// (debug-asserted) — so a `#[require]`-constructed id placed in `added` gets
+/// its hooks for free. `migrate_entity_insert` carries a 4 KiB `required_fire`
+/// bitmap only because its bundle path must tell newly-added from overwritten;
+/// that distinction does not exist on this path.
+#[cold]
+#[inline(never)]
+pub(crate) fn migrate_entity_attach_ids_with_bytes(
+    world: &mut EcsMaster,
+    entity: Entity,
+    source_archetype_id: ArchetypeId,
+    target_archetype_id: ArchetypeId,
+    added: &[ComponentId],
+    srcs: &[AttachSrc<'_>],
+) {
+    debug_assert_ne!(
+        source_archetype_id, target_archetype_id,
+        "migrate_entity_attach_ids: caller must filter the in-place path (retag_in_place)"
+    );
+    debug_assert!(
+        !added.is_empty(),
+        "migrate_entity_attach_ids: empty attach set is a caller bug"
+    );
+    // D9: the ZST `debug_assert!` of the tag-only original is DELETED here, not
+    // copied — this path exists precisely to carry data bytes. Nothing replaces
+    // it inside: the per-id length contract is the CALLER's release `if`.
+    debug_assert_eq!(
+        added.len(),
+        srcs.len(),
+        "migrate_entity_attach_ids_with_bytes: one AttachSrc per added id"
+    );
+
+    let current_tick = world.current_tick();
+
+    let source_ptr = world
+        .archetype_master_mut()
+        .archetype_ptr_for(source_archetype_id)
+        .expect("invariant: source archetype exists");
+    let target_ptr = world
+        .archetype_master_mut()
+        .archetype_ptr_for(target_archetype_id)
+        .expect("invariant: target archetype just resolved");
+
+    let inland = world.entity_master.entities_inland[entity.id().0];
+    debug_assert!(
+        !inland.is_null() && inland.generation() == entity.generation(),
+        "migrate_entity_attach_ids: stale entity passed (caller must filter)"
+    );
+    let source_row = inland.unit_index() as usize;
+
+    // EnableTag Step 6: borrow-free scratch for the migrating entity's enable
+    // bits + the list of target tags whose first column had to be allocated (O2
+    // bookkeeping fired after the block).
+    let mut enable_scratch: SmallList4<(ComponentId, bool)> = SmallList4::new();
+    let mut enable_newly_allocated: SmallList4<ComponentId> = SmallList4::new();
+
+    // Phase 14a §3.4 (C2): the entire `source` / `target` `&mut` lifetime is
+    // confined to this Phase-1 block. The EntityInland repoint is HOISTED INTO
+    // it (it touches `world.entity_master`, not the archetypes), so after the
+    // block the entity is fully in `target` and BOTH `&mut Archetype` are
+    // dead — Phase 2 can mint `world_ptr` with no live reborrow (SAFETY-1).
+    {
+        // SAFETY (U1, U2, U14, SCH7, F1): mirrors `migrate_entity_insert` —
+        //   * `source_ptr` / `target_ptr` carry write-capable, interior-mutable
+        //     (`SharedReadWrite`, F4-rooted) slab provenance minted under
+        //     `&mut self`; each survives sibling structural writes (incl. the
+        //     OTHER archetype's `current_index` bump) under TB/SB because every
+        //     slab element is a distinct `UnsafeCell`.
+        //   * `source != target` (debug-asserted), so the two `&mut Archetype`
+        //     reborrows alias disjoint slots.
+        //   * `&mut EcsMaster` exclusivity prevents any sibling reader (SCH7).
+        //   * The reborrows are confined to this block (Phase 1).
+        let source: &mut Archetype = unsafe { &mut *source_ptr };
+        let target: &mut Archetype = unsafe { &mut *target_ptr };
+
+        // EnableTag Step 6 PHASE 1 (C4 READ-before-swap): snapshot the migrating
+        // entity's enable bits BEFORE the source `move_out_entity` (Step 4)
+        // relocates the source's OTHER rows' bits. 0%-gate via `is_empty()`.
+        read_source_enable_bits(source, source_row, &mut enable_scratch);
+
+        debug_assert!(
+            added.iter().all(|&cid| !source.component_ids().contains(&cid)),
+            "migrate_entity_attach_ids: added ids must be NEW to the source \
+             (present-tag re-add is retag_in_place's job)"
+        );
+        debug_assert!(
+            added.iter().all(|&cid| target.has_component_id(cid)),
+            "migrate_entity_attach_ids: target must host every added id (T = S ∪ A)"
+        );
+
+        target.reserve_capacity(1).expect(
+            "attach-migration: target pool reserve ceiling (rows) exhausted — \
+             committed capacity grows on demand (Phase X.I), so this fires only \
+             when the target archetype outgrows a pool's reserve_rows",
+        );
+        let new_row: u32 = target.current_index as u32;
+        let row = target.current_index;
+
+        // Step 1: copy every RETAINED column into the reserved target row.
+        // The retained set is EXACTLY the source set (`T = S ⊎ A` by
+        // precondition), so the loop walks `source.component_ids()` directly —
+        // no scratch copy, no allocation. Attach FROM the empty archetype:
+        // zero source columns ⇒ zero iterations, no pool pointers minted (O3).
+        for &retained_cid in source.component_ids() {
+            // Dense plan D2 / W1 — `component_ids()` is the RETAINED id list, NOT
+            // the archetype signature: `create_by_ids` stores it verbatim while
+            // filtering only the mask, so every non-signature-storage id
+            // (`Bitset` OR `Dense`) stays in it and owns NO per-archetype pool by
+            // construction. Skip it BEFORE the pool lookup below, through the
+            // single shared predicate (`is_signature_id` is the per-id companion
+            // of `is_signature_storage`; parity with `clone/materialize.rs`).
+            // Reachable from a PURE-TABLE entity: archetype dedup keys on the
+            // FILTERED mask, so the retained list belongs to whichever spawn
+            // minted the archetype first. For a table-only world nothing is
+            // skipped — zero ids SKIPPED, not zero cost: the guard measured
+            // ≈ +15 ns (~+5%) per attach+detach round trip at `f7c46c76`,
+            // acceptable because all four migration fns are `#[cold]
+            // #[inline(never)]`.
+            if !component_registry::is_signature_id(retained_cid) {
+                continue;
+            }
+            let src_pool = source
+                .component_pools()
+                .get_pool(retained_cid)
+                .expect("invariant: source hosts its own component id");
+            debug_assert!(
+                source_row < src_pool.count(),
+                "source_row out of bounds for retained component"
+            );
+            let stride = src_pool.component_layout().size();
+            // SAFETY (Round 3 C-N2 / Phase 10 STORE3) — mirrors
+            // `migrate_entity_insert` Step 1:
+            //   * `source_row < src_pool.count()` (debug-asserted) ⇒
+            //     `unit_ptr(source_row)` addresses an initialized arena slot.
+            //   * The slice borrows the live `source` pool; it is consumed by
+            //     the `write_at_unchecked_initialized` memcpy in this same
+            //     iteration, before `source` is mutated (Step 3).
+            //   * `&mut EcsMaster` ⇒ no concurrent writer; the tick sub-regions
+            //     are committed for every row `< src_pool.count()` (Phase X.I).
+            let bytes =
+                unsafe { core::slice::from_raw_parts(src_pool.unit_ptr(source_row), stride) };
+            // SAFETY: same conditions as the byte read above (committed,
+            //   initialized row; exclusive world access).
+            let added_tick = unsafe { src_pool.read_added_tick(source_row) };
+            // SAFETY: same as above.
+            let changed_tick = unsafe { src_pool.read_changed_tick(source_row) };
+
+            let dst_pool = target
+                .component_pools_mut()
+                .get_pool_mut(retained_cid)
+                .expect("invariant: retained component must exist in target (T = S ∪ A)");
+            // SAFETY (mirrors `migrate_entity_insert` Step 1):
+            //   * `row == target.current_index == dst_pool.count()` (pools grow
+            //     in lockstep) and `reserve_capacity(1)` guaranteed a committed
+            //     slot (Phase X.I Phase B) ⇒ `write_at_unchecked_initialized`
+            //     targets a logically-uninit slot (no drop runs).
+            //   * `bytes.len() == stride == dst_pool.component_layout().size()`
+            //     (same `ComponentId` ⇒ same registry layout).
+            //   * `&mut target` ⇒ exclusive access; `commit_units(row, 1)`
+            //     extends the dense tail by one (pre: `row == count`), after
+            //     which the tick writes stamp the ORIGINAL source ticks into
+            //     the now-live slot.
+            unsafe {
+                dst_pool.write_at_unchecked_initialized(row, bytes);
+                dst_pool.commit_units(row, 1);
+                dst_pool.write_added_tick(row, added_tick);
+                dst_pool.write_changed_tick(row, changed_tick);
+            }
+        }
+
+        // Step 2: write and commit the ADDED columns. Unlike the tag sibling
+        // this materializes a value, so the order is STEP 1'S: write (pre: a
+        // logically-uninit slot, no drop runs) -> `commit_units` (pre:
+        // `row == count`, lockstep, debug-asserted, with committed capacity
+        // from `reserve_capacity(1)`) -> ticks. Both ticks land at
+        // `current_tick` — uniform with a fresh insert (D1). A size-0 added
+        // column takes the `Bytes` path unchanged with an empty slice.
+        //
+        // The two arms differ ONLY in how the row is produced; the commit + tick
+        // tail is identical, and identical to `clone/materialize.rs`'s
+        // reconstruct tail (`construct_at_uninitialized` -> `commit_units` ->
+        // `fill_ticks`).
+        for (i, &added_cid) in added.iter().enumerate() {
+            let dst_pool = target
+                .component_pools_mut()
+                .get_pool_mut(added_cid)
+                .expect("invariant: added id must exist in target (T = S ∪ A)");
+            debug_assert_eq!(
+                dst_pool.count(),
+                row,
+                "added pool out of lockstep with the target row"
+            );
+            match srcs[i] {
+                AttachSrc::Bytes(b) => {
+                    debug_assert_eq!(
+                        b.len(),
+                        dst_pool.component_layout().size(),
+                        "added byte slice must match the registry layout (the \
+                         caller's release `if` decides this; this only restates it)"
+                    );
+                    // SAFETY (U5, new): `row == target.current_index ==
+                    //   dst_pool.count()` and `reserve_capacity(1)` committed
+                    //   the slot, so the write targets a logically-uninit row
+                    //   and no drop runs; `b.len() ==
+                    //   dst_pool.component_layout().size()` (checked by the
+                    //   caller, debug-restated above); `&mut target` ⇒
+                    //   exclusive.
+                    unsafe {
+                        dst_pool.write_at_unchecked_initialized(row, b);
+                    }
+                }
+                AttachSrc::Ctor(ctor) => {
+                    // SAFETY (U5, FORK A): same slot preconditions as the
+                    //   `Bytes` arm — `row == dst_pool.count()`, committed by
+                    //   `reserve_capacity(1)`, logically uninit, so the ctor's
+                    //   `ptr::write` drops nothing. The registry pairs `ctor`
+                    //   with `added_cid`'s own type, so it writes exactly one
+                    //   value of this column's layout. The ctor is capture-free
+                    //   (`unsafe fn(*mut u8)`) and never sees the world, so it
+                    //   cannot re-enter the migration.
+                    unsafe {
+                        dst_pool.construct_at_uninitialized(row, ctor);
+                    }
+                }
+            }
+            // Shared tail — both arms produced an initialized value at `row`, so
+            // `commit_units` extends the dense tail by one (pre: `row == count`,
+            // debug-asserted above) and the ticks stamp the now-live slot. Both
+            // are SAFE fns; no `unsafe` block belongs here.
+            dst_pool.commit_units(row, 1);
+            dst_pool.fill_ticks(row, 1, current_tick);
+        }
+
+        // Step 3: archetype-side bookkeeping (mirrors `migrate_entity_insert`
+        // Step 4): every target pool now holds one committed row at `row`, so
+        // the entity-id list and `current_index` advance in lockstep.
+        target.entity_ids.push(entity.id());
+        target.current_index = row + 1;
+
+        // EnableTag Step 6 PHASE 2: restore the snapshotted enable bits into the
+        // target's new row while `target` is `&mut`-live.
+        write_target_enable_bits(
+            target,
+            new_row as usize,
+            &enable_scratch,
+            &mut enable_newly_allocated,
+        );
+
+        // Step 4: release source's bytes WITHOUT drop (C5 + W-N2). Every
+        // retained value was memcpy'd into target (Step 1) and now belongs to
+        // the target row — dropping the source copy would double-free. The
+        // added ids never existed in source; nothing to release for them.
+        match source.move_out_entity(InlandPoolId(source_row)) {
+            RemoveOutcome::Last => {}
+            RemoveOutcome::Swapped { moved_entity } => {
+                // The entity at source's last row took source_row's slot. Fix
+                // its EntityInland.unit_index — touches `world.entity_master`,
+                // NOT `source`/`target` (independent of the reborrows).
+                if let Some(slot) = world.entity_master.entities_inland.get_mut(moved_entity.0) {
+                    slot.set_unit_index(source_row as u32);
+                }
+            }
+            RemoveOutcome::PoolFailure => {
+                panic!("invariant: migration source removal must succeed");
+            }
+        }
+
+        // Step 5 (HOISTED into Phase 1, §3.4): repoint `entity`'s EntityInland
+        // at the target slot. Touches `world.entity_master` (not the
+        // archetypes); after this the entity is fully in `target` and add /
+        // insert hooks (Phase 2) read the NEW target row (Bevy-parity
+        // asymmetry, §0).
+        world.entity_master.entities_inland[entity.id().0] =
+            EntityInland::new(target_ptr, new_row, entity.generation());
+        // <-- `source` / `target` `&mut Archetype` DROP here (block close).
+    }
+
+    // EnableTag Step 6 O2: fire presence + `enable_generation` bookkeeping for
+    // every target column the copy newly allocated (no `&mut Archetype` live).
+    fire_enable_column_alloc_bookkeeping(world, target_archetype_id, &enable_newly_allocated);
+
+    // Feature 2 (mirrors `migrate_entity_insert`'s FIX C1): raise the sticky
+    // HAS_ENTITY_OBSERVER bit on the DESTINATION archetype BEFORE the flags are
+    // read for this entity's fires. On the FIRST migration of an observed entity
+    // into an archetype that never held an observed member the destination's
+    // bit 10 is still clear; raising it AFTER the read skips exactly this
+    // migration's entity-targeted fires and raises the bit one frame too late —
+    // the C1 bug the typed twin already carries the fix for. The entity is fully
+    // repointed into `target` now (Phase-1 block closed), so `&mut world` is
+    // usable and the probe resolves against the destination archetype.
+    // `migrate_entity_observer_bit` is gated by `has_observer(entity)` — one
+    // `Option::is_none()` for an entity with no entity observer (the 0%-gate).
+    // The bit is sticky, so the `flags` read below observes the raise.
+    world.migrate_entity_observer_bit(entity);
+
+    // PHASE 2 (§3.4): fire on_add, then on_insert, for the ADDED ids. The
+    // entity is repointed into `target`; both `&mut Archetype` are dead —
+    // only `target_ptr` (*mut, Copy) survives.
+    //
+    // SAFETY (F1): `target_ptr` is write-capable, stable, interior-mutable
+    //   (`SharedReadWrite`, F4-rooted) slab provenance — it survived the
+    //   Phase-1 push into `target` (which bumped `target.current_index`
+    //   through a same-cell-derived pointer) under TB/SB because the whole
+    //   slab element is `UnsafeCell`-wrapped. Reading `flags` is one `u16`
+    //   load (no `&mut`). The `migrate_entity_observer_bit` call above may have
+    //   just set HAS_ENTITY_OBSERVER on this same archetype; the bit is sticky
+    //   and the write completed under `&mut world` before this read, so it is
+    //   observed.
+    let flags = unsafe { (*target_ptr).flags };
+    if !flags.is_empty() {
+        // MINT: no `world`-derived `&mut Archetype` is live (SAFETY-1).
+        let world_ptr = NonNull::from(&mut *world);
+        // Ordering (SAFETY-2): ALL on_add, THEN ALL on_insert — every attached
+        // id is newly added by precondition, so both kinds iterate `added`.
+        // Per kind: hooks first, then observers (Phase 14b §5).
+        if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
+            if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
+                for &cid in added {
+                    trigger_on_add(world_ptr, cid, entity);
+                }
+            }
+            if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
+                for &cid in added {
+                    fire_on_add_observers(world_ptr, cid, entity);
+                }
+            }
+        }
+        if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
+            if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
+                for &cid in added {
+                    trigger_on_insert(world_ptr, cid, entity);
+                }
+            }
+            if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
+                for &cid in added {
+                    fire_on_insert_observers(world_ptr, cid, entity);
+                }
+            }
+        }
+        // Feature 2 — entity-targeted on_add / on_insert observers, over the
+        // SAME iteration set as the component-level fires above (every added id
+        // is newly added by this fn's own precondition, so both kinds iterate
+        // `added` unfiltered — the typed twin's `bundle_added[i]` filter has no
+        // analogue here). Gated by the sticky HAS_ENTITY_OBSERVER bit. Mirrors
+        // `migrate_entity_insert`'s Phase-2 entity-observer block.
+        if flags.contains(ArchetypeFlags::HAS_ENTITY_OBSERVER) {
+            for &cid in added {
+                fire_entity_observers(world_ptr, ObserverKind::Add, cid, entity);
+            }
+            for &cid in added {
+                fire_entity_observers(world_ptr, ObserverKind::Insert, cid, entity);
+            }
+        }
+    }
+    // NO drain (Q-A1): the caller owns the drain — `EcsMaster::add_component_by_id`
+    // drains at depth 0; a deferred route would delegate to it, whose drain
+    // no-ops at depth >= 1 (the outermost drive drains).
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // EnableTag Step 6 — cross-archetype enable-bit copy tests.
 //
@@ -2545,5 +2952,239 @@ mod step6_enable_migration_tests {
                 }
             }
         }
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EG2 gate 10 — Miri (Tree Borrows) over `migrate_entity_attach_ids_with_bytes`.
+//
+// The sibling is `pub(crate)`, so an integration test cannot reach it and its
+// aliasing gate has to live in-crate. It rides CI's Miri sweep, which runs
+// `--all-targets -p boyko-ecs` (`.github/workflows/ci.yml:306`) with
+// `MIRIFLAGS = "-Zmiri-tree-borrows"` set workspace-wide in
+// `.cargo/config.toml`.
+//
+// A NEW `#[cfg(test)] mod` rather than an append into
+// `step6_enable_migration_tests`: that module's header scopes it to EnableTag
+// Step 6 and its fixed-id sub-block [335, 340) is exhausted.
+//
+// ── Fixed ids: free sub-block [432, 440) ─────────────────────────────────────
+//
+// The shared lib-test process registers ComponentIds process-globally, so these
+// must be disjoint from EVERY other `#[cfg(test)]` module in the lib. Census
+// re-run at the EG2 landing —
+//   grep -rhon "ComponentId(4[0-9][0-9])" crates/boyko_ecs/src/
+//   → 400 401 402 410 411 412 413 414 415 416 417 420 421 422 460 461 463 466
+//     467 468 469 470 471 472 475 480 481 482 483 484 485 486 487 488 490 491
+//     492 493 495 496 497 498
+// — so [432, 440) is free.
+//
+// ── Fixture (rung §B.0) ──────────────────────────────────────────────────────
+//
+// POPULATED source: the victim is row 0 of three, so `move_out_entity` returns
+// `RemoveOutcome::Swapped` and the inland repoint actually executes. POPULATED
+// target: one entity already lives there, so the new row is non-zero. The
+// RETAINED column carries `Drop`, because the discipline Step 4 relies on —
+// release the source row WITHOUT drop, the value now belongs to the target row
+// — is what a double free would violate, and only a `drop_fn`-carrying column
+// can observe it.
+// ═════════════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod seam_by_id_unsafe {
+    use std::mem::ManuallyDrop;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    use super::*;
+    use crate::ecs::core::component::component_registry;
+
+    const G10_DATA: ComponentId = ComponentId(432); // retained, Drop-carrying
+    const G10_ADD: ComponentId = ComponentId(433); // the attached data column
+
+    static G10_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+    /// The RETAINED column. `Drop` is the whole point: Step 1 memcpy's the
+    /// value into the target row and Step 4 releases the source row WITHOUT
+    /// running `drop_fn`, so a migration that drops here is a double free.
+    ///
+    /// It **owns a heap allocation** rather than being a plain counter, and
+    /// that is what makes this a MIRI gate instead of a test that merely runs
+    /// under Miri: MEASURED at the EG2 landing, a `u32` newtype whose `Drop`
+    /// only bumps a counter makes both candidate mutations red on the LEDGER
+    /// assertion — an artifact the native run produces just as well — because
+    /// dropping a `u32` twice is not memory-unsafe and Miri sees nothing. With
+    /// a `Box` inside, the second `drop_in_place` is a real double free and
+    /// Miri reports it as UB, which is the only thing this leg can say that the
+    /// native leg cannot.
+    ///
+    /// `tag` sits at offset 0 (`#[repr(C)]`) so the byte read-back below stays a
+    /// plain 4-byte load.
+    #[repr(C)]
+    struct G10Data {
+        tag: u32,
+        owned: Box<u32>,
+    }
+    impl Component for G10Data {
+        fn component_id() -> ComponentId {
+            G10_DATA
+        }
+    }
+    impl Drop for G10Data {
+        fn drop(&mut self) {
+            G10_DROPS.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    /// The ATTACHED column — a plain POD whose bytes the sibling writes.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct G10Add(u32);
+    impl Component for G10Add {
+        fn component_id() -> ComponentId {
+            G10_ADD
+        }
+    }
+
+    fn register() {
+        component_registry::register_layout::<G10Data>(G10_DATA.0);
+        component_registry::register_layout::<G10Add>(G10_ADD.0);
+    }
+
+    /// Spawns one `G10Data` entity into `arch`.
+    ///
+    /// The local is `ManuallyDrop`: its bytes are memcpy'd into the pool, which
+    /// takes ownership — dropping the local too would count a drop the engine
+    /// never performed and make the ledger below meaningless.
+    fn spawn_data(ecs: &mut EcsMaster, arch: ArchetypeId, v: u32) -> Entity {
+        let d = ManuallyDrop::new(G10Data { tag: v, owned: Box::new(v) });
+        // SAFETY (test): `d` outlives the borrow; byte view of a `#[repr(C)]`
+        //   value whose type is the registered type of `G10_DATA`.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &*d as *const G10Data as *const u8,
+                core::mem::size_of::<G10Data>(),
+            )
+        };
+        ecs.create_entity(arch, &[(G10_DATA, bytes)])
+            .expect("spawn must succeed")
+    }
+
+    /// Spawns one `{G10Data, G10Add}` entity — the pre-existing target tenant.
+    fn spawn_both(ecs: &mut EcsMaster, arch: ArchetypeId, d: u32, a: u32) -> Entity {
+        let dv = ManuallyDrop::new(G10Data { tag: d, owned: Box::new(d) });
+        let av = G10Add(a);
+        // SAFETY (test): both locals outlive the borrows; byte views of
+        //   `#[repr(C)]` values whose types are the registered types of their ids.
+        let (db, ab) = unsafe {
+            (
+                core::slice::from_raw_parts(
+                    &*dv as *const G10Data as *const u8,
+                    core::mem::size_of::<G10Data>(),
+                ),
+                core::slice::from_raw_parts(
+                    &av as *const G10Add as *const u8,
+                    core::mem::size_of::<G10Add>(),
+                ),
+            )
+        };
+        ecs.create_entity(arch, &[(G10_DATA, db), (G10_ADD, ab)])
+            .expect("spawn must succeed")
+    }
+
+    /// Reads `entity`'s `(archetype_ptr, row)` from its inland slot.
+    fn current_loc(ecs: &EcsMaster, e: Entity) -> (*mut Archetype, usize) {
+        let inland = ecs.entity_master.entities_inland[e.id().0];
+        assert!(!inland.is_null() && inland.generation() == e.generation());
+        (inland.archetype_ptr(), inland.unit_index() as usize)
+    }
+
+    /// Reads a `#[repr(C)]` POD column back through the public raw accessor.
+    fn read_u32_at(ecs: &EcsMaster, e: Entity, cid: ComponentId) -> u32 {
+        let raw = ecs
+            .get_component_raw(e, cid)
+            .expect("invariant: the entity must host the column being read back");
+        // SAFETY (test): `raw` addresses the live, initialized 4-byte slot of a
+        //   `#[repr(C)]` newtype over `u32`.
+        unsafe { *(raw as *const u32) }
+    }
+
+    #[test]
+    fn attach_with_bytes_migration_is_alias_clean_and_drops_nothing() {
+        register();
+        let mut ecs = EcsMaster::new();
+
+        let src = ecs.create_archetype(&[G10_DATA]);
+        let tgt = ecs.create_archetype(&sorted_pair(G10_DATA, G10_ADD));
+        assert_ne!(src, tgt, "the fixture needs two distinct archetypes");
+
+        // POPULATED TARGET: the new row must be non-zero.
+        let occupant = spawn_both(&mut ecs, tgt, 0x5A5A_5A5A, 0x5A5A_5A5A);
+        // POPULATED SOURCE: victim at row 0 of three ⇒ `Swapped`.
+        let victim = spawn_data(&mut ecs, src, 0xA5A5_A5A5);
+        let _mid = spawn_data(&mut ecs, src, 0x1111_1111);
+        let swapped = spawn_data(&mut ecs, src, 0x3333_3333);
+        assert_eq!(current_loc(&ecs, victim).1, 0, "victim is row 0");
+        assert_eq!(current_loc(&ecs, swapped).1, 2, "the swap donor is the tail");
+
+        let payload = G10Add(0xDEAD_BEEF);
+        // SAFETY (test): `payload` outlives the borrow; byte view of a
+        //   `#[repr(C)]` value whose type is the registered type of `G10_ADD`.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &payload as *const G10Add as *const u8,
+                core::mem::size_of::<G10Add>(),
+            )
+        };
+
+        G10_DROPS.store(0, AtomicOrdering::SeqCst);
+        migrate_entity_attach_ids_with_bytes(
+            &mut ecs,
+            victim,
+            src,
+            tgt,
+            &[G10_ADD],
+            &[AttachSrc::Bytes(bytes)],
+        );
+
+        assert_eq!(
+            G10_DROPS.load(AtomicOrdering::SeqCst),
+            0,
+            "Step 4 releases the source row WITHOUT drop — the retained value \
+             now belongs to the TARGET row, and dropping the source copy would \
+             be a double free"
+        );
+
+        let (_, new_row) = current_loc(&ecs, victim);
+        assert_ne!(new_row, 0, "the target was populated: the new row is non-zero");
+        assert_eq!(
+            read_u32_at(&ecs, victim, G10_ADD),
+            0xDEAD_BEEF,
+            "the attached bytes landed at the victim's new row"
+        );
+        assert_eq!(
+            read_u32_at(&ecs, victim, G10_DATA),
+            0xA5A5_A5A5,
+            "the retained column carried its value across"
+        );
+        assert_eq!(
+            read_u32_at(&ecs, occupant, G10_ADD),
+            0x5A5A_5A5A,
+            "the pre-existing target tenant is untouched"
+        );
+        assert_eq!(
+            current_loc(&ecs, swapped).1,
+            0,
+            "ROW: the swap donor was repointed at the vacated source row"
+        );
+        assert_eq!(
+            read_u32_at(&ecs, swapped, G10_DATA),
+            0x3333_3333,
+            "BYTES: the swap donor keeps its value"
+        );
+    }
+
+    /// Canonical order for a two-id archetype (`create_archetype` debug-asserts
+    /// it, and `ComponentId`s are minted in process-global order).
+    fn sorted_pair(a: ComponentId, b: ComponentId) -> [ComponentId; 2] {
+        if a.0 <= b.0 { [a, b] } else { [b, a] }
     }
 }

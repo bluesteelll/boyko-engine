@@ -419,8 +419,8 @@ type_info_of(id)` → `fp = base.add(f.offset)` → `(f.get)(fp)`. ~~`add_defaul
 are already off the iteration hot path.~~
 
 **`get_component_raw` re-confirmed and WIDENED (2026-08-21).** It is still at
-`ecs_master/component_api.rs:176`, with `get_component_raw_mut` at `:253` and
-`set_component_raw` at `:444`, and it is still arena-rooted exactly as described.
+`ecs_master/component_api.rs:206`, with `get_component_raw_mut` at `:283` and
+`set_component_raw` at `:474`, and it is still arena-rooted exactly as described.
 Since the snapshot it grew (a) a **dense branch** routing to `dense_get_raw` (`:76`)
 and (b) a null-column check that safely covers device-backed columns. It is a
 **better** foundation than at snapshot, not a worse one.
@@ -1219,7 +1219,7 @@ resolution" is **already built** and is a consumption task, not a construction t
 ## B.3 Enumeration is structurally blind — the signature is no longer the component set
 
 > `component_registry/mod.rs:323-356` · `archetype/archetype.rs:1411` ·
-> `ecs_master/component_api.rs:176,:76` · `boyko_render/src/gpu_transform3d.rs:84~`
+> `ecs_master/component_api.rs:206,:76` · `boyko_render/src/gpu_transform3d.rs:84~`
 
 §4 makes `components_of` — the archetype signature — the enumeration entry point.
 **That premise is false today.** `is_signature_storage` (`component_registry/mod.rs:341~-356`) returns true
@@ -1322,7 +1322,7 @@ datum the tag has. Real consumers exist today: `EmitterActive`
 
 > ⚠️ **A live trap for exactly the code a reflection layer would write:**
 > **`EcsMaster::has_component(e, id)` silently returns `false` for every bitset tag.**
-> (`ecs_master/component_api.rs:673-702`.) It branches on `StorageKind::Dense` → `dense_contains`,
+> (`ecs_master/component_api.rs:703-732`.) It branches on `StorageKind::Dense` → `dense_contains`,
 > but has **no `Bitset` branch** — so a bitset id falls through to the archetype
 > `columns` lookup, finds `column.ptr.is_null()` (a bitset tag has no column in any
 > archetype, by construction), and reports `false` for a tag the entity demonstrably

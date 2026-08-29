@@ -15,6 +15,11 @@ mod event_api;
 mod observer_api;
 mod relationship_api;
 mod resource_api;
+mod seam_by_id;
 mod state_api;
 mod system_api;
+
+// EG2 §4 — the by-id structural seam's outcome types (the fns themselves are
+// inherent `EcsMaster` methods and keep their `EcsMaster::foo` paths).
+pub use seam_by_id::{AddOutcome, RejectReason};
 //pub mod archetype_bundle;

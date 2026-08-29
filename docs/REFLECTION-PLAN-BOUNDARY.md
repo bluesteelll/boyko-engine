@@ -662,8 +662,8 @@ accessor slots `None` — and thereby plants B7's own subject in the wrong shape
 where nothing observes it. That is the dead-datum class by construction. The fix is the move.
 
 ⚠️ **`StrFixture` is claimed by THREE plans and owned by none — found by sweeping the ARTEFACT,
-which the name sweep for `B0` could not see.** `REFLECTION-PLAN-CORE.md:3811` says C11's *"fixture
-is local (`struct StrFixture { s: String }`)"*; `REFLECTION-PLAN-ECS.md:1416` puts *"a locally
+which the name sweep for `B0` could not see.** `REFLECTION-PLAN-CORE.md:3810-3811` says C11's *"fixture
+is local (`struct StrFixture { s: String }`)"*; `REFLECTION-PLAN-ECS.md:1765` puts *"a locally
 declared `StrFixture { s: String }`"* on EG8's acceptance entity and asserts its alloc pair at EG8
 gate 3; and B0 landed it. **This document's copy is now B7's**, whose prerequisite is the rung that
 makes the type expressible. The other two are *uses* of a fixture in their own packages, not a
@@ -830,7 +830,7 @@ strikes and annotates discharged edges in place (*"**LANDED — the stub is stru
 table now does the same.
 
 **And the unblocked prefix is B0–B1–B2, not B0–B3.** Row 6 blocks B1 *and B3*, and its `_mut` half
-is ECS **EG5**, which `REFLECTION-PLAN-ECS.md:1576` blocks on **EG2** — the owner-gated rung
+is ECS **EG5**, which `REFLECTION-PLAN-ECS.md:1911` blocks on **EG2** — the owner-gated rung
 (B.13 #2). The table marked only B4 as owner-blocked, which overstates how much of this ladder is
 startable. **B0 itself is genuinely independent of that gate** — no row names B0, and its fixture
 set (minus `StrFixture`) was MEASURED compiling and running green on today's tree. That is the
@@ -1025,7 +1025,7 @@ first as one function doing both and could not fire.
 
 **This rung also lands its own census bookkeeping.** B0 builds four of this document's five
 `<!-- doc-path-planned -->` paths, so the four markers come off and `PLANNED_EXACT`'s
-`("REFLECTION-PLAN-BOUNDARY.md", 5)` (`tests/internal_docs_anchors.rs:1757`) becomes `1` **in
+`("REFLECTION-PLAN-BOUNDARY.md", 5)` (`tests/internal_docs_anchors.rs:2624`) becomes `1` **in
 the same change**. Only B4's `format_divergence_ledger.rs` marker survives. Both halves are
 gated and neither substitutes for the other: a marker left on a line whose path now exists
 reds the `stale` clause, and a marker removed without the decrement reds the equality assert.
@@ -1188,7 +1188,7 @@ never reached — the clause is correctly placed, and it was only its *discrimin
 `ScalarKind`; `dump_component` for the `Prim`-only case; **and `RefusalKind` itself
 (D12's four citizens), which this Lands list did not name.**
 
-> ⚠️ **Inherited, unremedied, and B1's — not B0's.** `REFLECTION-PLAN-ECS.md:1999` recorded on
+> ⚠️ **Inherited, unremedied, and B1's — not B0's.** `REFLECTION-PLAN-ECS.md:2348` recorded on
 > 2026-08-27 that `RefusalKind` is *"named **once** in the whole corpus"* — the `SinkEvent` block
 > at §The event stream — *"is landed by no rung, and its variant set is neither a subset nor a
 > superset of the `Refusal` EG1 lands"* (`crates/boyko_reflect/src/ecs.rs:63`). `SinkEvent` is
@@ -1318,7 +1318,7 @@ unimplementable from an external crate, and the by-name substitute writes the wr
    `Refused(NotReflectable)`.
 6. **`has_component` is never the presence probe** — a source census asserting the string
    `has_component` does not appear in `crates/boyko_reflect/src/**`. It silently returns
-   `false` for every bitset tag (`ecs_master/component_api.rs:673-702` has no `Bitset`
+   `false` for every bitset tag (`ecs_master/component_api.rs:703-732` has no `Bitset`
    branch), so an inspector reaching for it would **report the wrong answer rather than
    refuse** (B.4).
 7. **`register_enable_tag` is never the presence *write*, either** — the same source census, second
@@ -1547,7 +1547,7 @@ derive.
 | 3 | `REFLECTION-PLAN-CORE.md` | the opt-in surface. **This plan assumes A.5's `#[component(reflect)]` helper attribute and argues for it on Aether grounds (D13)** — under §2's two-derive `cfg_attr` form, `aether_lang` must emit a crate path and a feature string it cannot check. **LANDED at C7**, together with `stable_name` — both are keys of **one** `#[component(…)]` list, never two attributes (D21) | B6 |
 | 4 | `REFLECTION-PLAN-CORE.md` | `#[reflect(skip)]` and the spanned, opt-out-able `Opaque` refusal (A.6 correction). The boundary encodes `Refused(Skipped)`; the syntax is CORE's. **LANDED at C9** — `crates/reflect_fixture/tests/c7_derive_bake.rs:219`, `tests/reflect_compile_fail/vec_field_rejected.stderr`. ⚠️ `skip` short-circuits CLASSIFICATION, so it will silence a *missing* arm as readily as an undescribable field (D20's remedy trap) | B2 |
 | 5 | `REFLECTION-PLAN-ECS.md` | three-source enumeration **with each id kind-tagged** (B.3) — `dump_entity` needs `(ComponentId, StorageKind, ResidencyKind)`, not a bare slice. **PART-DISCHARGED: sources 1+2 LANDED at EG1** (`IdKind` at `crates/boyko_reflect/src/ecs.rs:93`, `components_of_into` at `:169`); **source 3 (bitset presence) is outstanding at EG3**, which EG2 gates | B4 |
-| 6 | `REFLECTION-PLAN-ECS.md` | `get_component_raw` / `_mut` reached through the ECS glue, incl. the dense branch (`component_api.rs:176`, `:253`, `:76`). **NOT landed — `crates/boyko_reflect/src/ecs.rs` exposes only `Refusal`, `IdKind`, `IdEntry`, `components_of_into`, `display_name`.** ⚠️ **The `_mut` half is ECS EG5, which `REFLECTION-PLAN-ECS.md` blocks on EG2 — the owner-gated rung — so B3 is transitively owner-blocked too, not only B4 (D26)** | B1, B3 (**B3 owner-blocked via EG5 → EG2**) |
+| 6 | `REFLECTION-PLAN-ECS.md` | `get_component_raw` / `_mut` reached through the ECS glue, incl. the dense branch (`component_api.rs:206`, `:283`, `:76`). **NOT landed — `crates/boyko_reflect/src/ecs.rs` exposes only `Refusal`, `IdKind`, `IdEntry`, `components_of_into`, `display_name`.** ⚠️ **The `_mut` half is ECS EG5, which `REFLECTION-PLAN-ECS.md` blocks on EG2 — the owner-gated rung — so B3 is transitively owner-blocked too, not only B4 (D26)** | B1, B3 (**B3 owner-blocked via EG5 → EG2**) |
 | 7 | `REFLECTION-PLAN-ECS.md` — **it claims it; this is no longer "or here"** | **`EnableTagId::try_from_component_id`** = its **S4′**, landing at **EG2** under the single owner call B.13 #2 (D10's resolution note). Without it B.4's presence view is unimplementable from an external crate, and the by-name substitute writes the wrong bit | B4 |
 | 8 | `REFLECTION-PLAN-GATES.md` | **TWO Miri rows**: `-p boyko-reflect` **plain** and `-p reflect-fixture --features reflect-fixture/reflect`, each proven by landing a deliberate red first (B.9, as corrected). ~~`-p boyko-reflect` with the feature ON~~ is a cargo error — the crate has no such feature (GATES D4) | B7 |
 | 9 | `REFLECTION-PLAN-GATES.md` | the feature-off CI leg for `aether_tests`, and the `unexpected_cfgs`-under-`-D warnings` promotion this plan's D16 relies on | B6 |
@@ -1569,7 +1569,7 @@ derive.
 | B-2 | **Are Aether components reflectable by default or opt-in?** → **B.13 #4.** This plan sets the engineering default to **opt-in** (D14) and states the flip cost precisely: default-on makes a `reflect` feature declaration mandatory in every `aether!`-bearing crate under the existing `-D warnings` gate | **OWNER** (DSL ergonomics) | B6 |
 | B-6 | **May engine crates carry a `reflect` feature?** → **B.13 #1.** Not previously on any list, and the largest of the five: it decides whether v1 dogfoods the engine's own components at all. This plan is affected only indirectly — B5's **dogfood half** names `Transform` / `Visibility` / `GpuTransform3D`, so a "no" deletes that half; the instrument half (local fixtures, the golden blob, the id-reorder) already stands on its own (`REFLECTION-ANALYSIS.md` B.12, "Reversibility") | **OWNER** (shipping manifest surface) | B5 |
 | B-3 | Should `register_stable_name` become total over bitset types, retiring D9's type-name scan? A `boyko_ecs` change with a `boyko_serialize` blast radius | engineering, v2 | — |
-| B-4 | `has_component` has no `Bitset` branch and reports `false` for a tag the entity demonstrably has (`component_api.rs:673-702`). Reflection is how it was found; whether the kernel fn grows the third branch is a `boyko_ecs` question | engineering | — |
+| B-4 | `has_component` has no `Bitset` branch and reports `false` for a tag the entity demonstrably has (`component_api.rs:703-732`). Reflection is how it was found; whether the kernel fn grows the third branch is a `boyko_ecs` question | engineering | — |
 | B-5 | D16's diagnostic **span** — verified by rung B6 gate 6, not predicted here. If `unexpected_cfgs` points at the derive call site rather than the user's `reflect` key, the expander needs `quote_spanned!` on the emitted key | engineering, settled by a compile | B6 |
 
 **Recorded as settled, not open:** §0/§2's central finding (optional crate + Cargo feature

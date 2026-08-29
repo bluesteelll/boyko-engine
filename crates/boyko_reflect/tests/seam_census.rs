@@ -41,6 +41,18 @@
 //! single undifferentiated "negative list" is what let one item sit on it while a sibling
 //! plan declared the same item mandatory.
 //!
+//! ⚠️ **EG2 HAPPENED (gate 11), so the corpus is now TWO directories** — [`CORPUS`] holds the one
+//! refusal, [`PASS_CORPUS`] holds the four that landed — and the field that predicted the split is
+//! the field that now names which directory a row's fixture lives in. **A flip is not a mismatch
+//! and cannot be re-blessed**: `trybuild` says *"Expected test case to fail to compile, but it
+//! succeeded"*, an error with no error output behind it. What lands is a `git mv` plus a deleted
+//! `.stderr`, and because a `t.pass()` case is compiled **and RUN**, each moved body gained the
+//! return-value assertion its item can finally make. Three separate guards now refuse the
+//! re-bless: [`corpus`] panics on a `.rs` in [`CORPUS`] with no `.stderr`, the flipping-kind loop
+//! in [`the_plan_and_the_corpus_name_the_same_not_yet_reachable_items`] demands that **no** blessed
+//! `.stderr` name a landed item, and the two kind-derived floors below refuse an emptied corpus on
+//! either side.
+//!
 //! # Four ways this file could have been a gate that cannot fail — and what stops each
 //!
 //! 1. **An empty glob is a VACUOUS PASS**, MEASURED in this very package: `trybuild` prints
@@ -318,6 +330,21 @@ const PLAN: &str = "../../docs/REFLECTION-PLAN-ECS.md";
 /// `format!("tests/{CORPUS}/*.rs")`, written inline at the one call site.
 const CORPUS: &str = "seam_compile_fail";
 
+/// The `pass` corpus directory — where a fixture goes **when its item lands** (EG2 gate 11).
+///
+/// ⚠️ **A flip is not a mismatch, and it cannot be re-blessed.** When EG2 made S1/S2/S3/S4′
+/// reachable, `trybuild` reported *"Expected test case to fail to compile, but it succeeded"* for
+/// all four — an error with **no error output behind it**. The only correct operation is to move
+/// the fixture here and DELETE its `.stderr`; re-blessing is not merely wrong, it is impossible in
+/// the direction it would be attempted, and the nearest thing to it — deleting the fixture — erases
+/// the compiler's word about an item this census exists to speak for.
+///
+/// A `t.pass()` case is compiled **and RUN**, so a moved fixture is strictly *more* than it was:
+/// each body now asserts the return value its item can finally produce (`Attached`, `false`, `false`,
+/// `None`). The same one-spelling discipline as [`CORPUS`] applies — the glob below is
+/// `format!("tests/{PASS_CORPUS}/*.rs")`, so the floor and the glob cannot name different places.
+const PASS_CORPUS: &str = "seam_pass";
+
 /// Repository-relative path resolved against this crate's manifest directory
 /// (the `vg_r0d_census.rs` / `vg_thresholds::repo_path` shape).
 fn repo_path(rel: &str) -> PathBuf {
@@ -452,8 +479,43 @@ fn fixture_paths() -> Vec<PathBuf> {
     out
 }
 
+/// Every `.rs` fixture in the **pass** corpus — the same shape as [`fixture_paths`], counting
+/// [`PASS_CORPUS`], the one string the `t.pass()` glob is built from.
+fn pass_fixture_paths() -> Vec<PathBuf> {
+    let dir = repo_path("tests").join(PASS_CORPUS);
+    let mut out: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("the seam pass corpus must exist at {}: {e}", dir.display()))
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Both corpora, as PATHS. **Paths only, and that is the point** — see [`corpus`], which stays
+/// scoped to [`CORPUS`] because it demands a blessed `.stderr` beside every path it is given and a
+/// flipped fixture correctly no longer has one.
+///
+/// The correspondence assertion counts *this*: after EG2 the plan still names five items, and they
+/// are spread over two directories rather than one. Counting only the `compile_fail` side would
+/// have redded the equality for the right reason on the wrong axis, and the cheapest repair to
+/// **that** is deleting plan rows.
+fn all_fixture_paths() -> Vec<PathBuf> {
+    let mut out = fixture_paths();
+    out.extend(pass_fixture_paths());
+    out.sort();
+    out
+}
+
 /// Every fixture paired with the blessed `.stderr` beside it — the compiler's own word about
 /// the item, which is what the correspondence below binds against.
+///
+/// ⚠️ **Scoped to [`CORPUS`] deliberately, and routing [`PASS_CORPUS`] through it is a defect.**
+/// This fn `panic!`s *"every fixture needs a blessed .stderr"* on a missing sibling, and after the
+/// EG2 migration all four flipped fixtures are exactly that. The cheapest reading of that panic is
+/// *"keep the `.stderr`"* — which re-blesses a flip and certifies the opposite of what gate 11
+/// claims. The union over the two directories is [`all_fixture_paths`], and it is over **paths**.
 fn corpus() -> Vec<(PathBuf, String)> {
     fixture_paths()
         .into_iter()
@@ -529,15 +591,23 @@ fn the_plan_and_the_corpus_name_the_same_not_yet_reachable_items() {
     let doc = read_plan();
     let items = seam_items(&doc);
     let corpus = corpus();
+    // ⚠️ The UNION of the two directories, and only after EG2 does the distinction matter. Before
+    // the flip both sides of this equality lived in one place; counting `corpus.len()` now would
+    // red at 1 vs 5 for the right reason on the wrong axis, and the cheapest repair to THAT is
+    // deleting plan rows — the exact direction the message below calls the dangerous one.
+    let all_paths = all_fixture_paths();
 
     assert_eq!(
-        corpus.len(),
+        all_paths.len(),
         items.len(),
-        "the plan names {} not-yet-reachable item(s) and the corpus holds {} fixture(s). \
+        "the plan names {} not-yet-reachable item(s) and the two corpora hold {} fixture(s) \
+         between them ({} still refused in `{CORPUS}`, {} flipped into `{PASS_CORPUS}`). \
          UP means a fixture nobody's plan row asks for; DOWN means a plan row with no \
          compiler behind it -- and DOWN is the one that reads as green everywhere else.",
         items.len(),
-        corpus.len()
+        all_paths.len(),
+        fixture_paths().len(),
+        pass_fixture_paths().len()
     );
 
     let witness = |item: &SeamItem| -> Vec<PathBuf> {
@@ -547,24 +617,6 @@ fn the_plan_and_the_corpus_name_the_same_not_yet_reachable_items() {
             .map(|(p, _)| p.clone())
             .collect()
     };
-
-    for item in &items {
-        let matches = witness(item);
-        assert_eq!(
-            matches.len(),
-            1,
-            "`{}` must be named by EXACTLY ONE blessed .stderr as an E0599 -- the sentence rustc \
-             writes only when resolution LOOKED for it and found nothing; {} matched. If nothing \
-             matched, either the fixture calls it unqualified (a filename or a comment is NOT the \
-             binding) or the item BECAME REACHABLE and its diagnostic is now some other code -- \
-             `E0061` for a signature mismatch, `E0624` for a private one -- in which case the row \
-             must move off the plan's list in the same commit. Matching the path as a substring \
-             would have passed in BOTH of those cases; that is measured, and it is why this \
-             matches the diagnostic and not the spelling.",
-            item.path,
-            matches.len()
-        );
-    }
 
     // ── the two kinds, ASSERTED apart rather than logged apart ──────────────────────────
     // `flips_at_eg2` is parsed from two DIFFERENT places in the document -- §4's seam table
@@ -582,6 +634,32 @@ fn the_plan_and_the_corpus_name_the_same_not_yet_reachable_items() {
         refused.len(),
         flipping.len()
     );
+
+    // ── the E0599 witness, over the REFUSED kind only (EG2 gate 11) ─────────────────────
+    // `E0599` is the sentence only an ABSENT item can produce, so before EG2 it was the right
+    // demand for all five rows and after EG2 it is the right demand for exactly one. Running it
+    // over `items` here would red on the four that LANDED — and it would red with the message
+    // *"the item BECAME REACHABLE"*, whose stated remedy is *"the row must move off the plan's
+    // list"*. §4's table is the owner's approved justification record and is not deleted, so the
+    // loop narrows to the kind whose claim is still absence.
+    for item in &refused {
+        let matches = witness(item);
+        assert_eq!(
+            matches.len(),
+            1,
+            "`{}` must be named by EXACTLY ONE blessed .stderr as an E0599 -- the sentence rustc \
+             writes only when resolution LOOKED for it and found nothing; {} matched. If nothing \
+             matched, either the fixture calls it unqualified (a filename or a comment is NOT the \
+             binding) or the item BECAME REACHABLE and its diagnostic is now some other code -- \
+             `E0061` for a signature mismatch, `E0624` for a private one -- in which case it is no \
+             longer a REFUSED row and §4 and EG0's `refuses to add` paragraph disagree about it. \
+             Matching the path as a substring would have passed in BOTH of those cases; that is \
+             measured, and it is why this matches the diagnostic and not the spelling.",
+            item.path,
+            matches.len()
+        );
+    }
+
     for r in &refused {
         for f in &flipping {
             assert_ne!(
@@ -592,25 +670,39 @@ fn the_plan_and_the_corpus_name_the_same_not_yet_reachable_items() {
                  this state survive between two sibling plans until F27.",
                 r.path
             );
-            assert_ne!(
-                witness(r),
-                witness(f),
-                "the refused item `{}` and the flipping item `{}` are certified by the SAME \
-                 fixture. The per-item count above cannot see this -- a single .stderr naming \
-                 both still matches each of them exactly once -- and D21 records that the seam \
-                 items DO contaminate each other's blessed output. A refusal that never gets \
-                 its own compiler run is a row with no witness.",
-                r.path,
-                f.path
-            );
         }
+    }
+
+    // ── the flip is a MOVE, never a re-bless (EG2 gate 11) ──────────────────────────────
+    // This replaces the pre-EG2 `assert_ne!(witness(r), witness(f))` cross-check, which the
+    // migration made VACUOUS: `witness(f)` is now `[]` for every flipping row, so an inequality
+    // against a non-empty `witness(r)` is trivially true and asserts nothing. The property that
+    // still has content is the one gate 11 exists for. A `.stderr` naming a landed item can only
+    // come from re-blessing a flip — and *"Expected test case to fail to compile, but it
+    // succeeded"* has no error output behind it, so whatever got blessed is not the flip: it is
+    // some OTHER diagnostic (the EG0 audit measured `E0061` from a wrong-arity stub producing a
+    // path-qualified suggestion) certifying the opposite of what this census claims.
+    for f in &flipping {
+        assert!(
+            witness(f).is_empty(),
+            "`{}` LANDED at EG2 and must be named by NO blessed .stderr in `{CORPUS}`; {:?} names \
+             it as an E0599. A flipped fixture is MOVED to `{PASS_CORPUS}` and its .stderr is \
+             DELETED -- a non-empty witness here means one was re-blessed instead, which certifies \
+             the item is still unreachable while the compiler has just proved it is not.",
+            f.path,
+            witness(f)
+        );
     }
 
     // Print the census, so a reader of the log sees WHAT was compiled, not only that
     // something was. Two kinds, and the distinction is now asserted above, not only labelled.
     for item in &items {
-        let kind = if item.flips_at_eg2 { "flips to pass at EG2" } else { "refused forever" };
-        println!("EG0 seam census: `{}` -- not reachable today, {kind}", item.path);
+        let kind = if item.flips_at_eg2 {
+            "LANDED at EG2 -- fixture compiles, runs, and asserts its return value in `seam_pass`"
+        } else {
+            "refused forever -- still unreachable, and its E0599 is the witness"
+        };
+        println!("EG0 seam census: `{}` -- {kind}", item.path);
     }
 }
 
@@ -618,8 +710,16 @@ fn the_plan_and_the_corpus_name_the_same_not_yet_reachable_items() {
 // The negative half — the trybuild corpus
 // ═══════════════════════════════════════════════════════════════════════════════════════
 
-/// **EG0 gate 2.** Every item on the not-yet-reachable list fails to compile, with its
-/// blessed message.
+/// **EG0 gate 2, and EG2 gate 11's other half.** Every item the plan still REFUSES fails to
+/// compile with its blessed message, and every item EG2 LANDED compiles **and runs** its return-value
+/// assertion.
+///
+/// ⚠️ **The name speaks for the refused kind only, and it is kept rather than corrected on
+/// purpose.** It is cited from `docs/REFLECTION-PLAN-ECS.md` and renaming it would rot that
+/// citation for a cosmetic gain; what the name no longer covers is stated here instead. After EG2
+/// this fn drives **two** globs — `compile_fail` over [`CORPUS`], `pass` over [`PASS_CORPUS`] —
+/// because a flip is a MOVE, not a re-bless, and the moved fixtures must keep being handed to a
+/// compiler or the census stops speaking for them at all.
 ///
 /// The floor is **read from the plan** rather than written here as a literal, so the two
 /// cannot drift and the number is derived rather than asserted. `>=`, not `==`: adding a
@@ -640,14 +740,41 @@ fn the_plan_and_the_corpus_name_the_same_not_yet_reachable_items() {
 #[test]
 fn the_not_yet_reachable_seam_items_still_do_not_compile() {
     let doc = read_plan();
-    let floor = seam_items(&doc).len();
-    let n = fixture_paths().len();
+    let items = seam_items(&doc);
+    // ⚠️ BOTH floors are KIND-DERIVED, and neither may be raised, lowered or deleted (EG2 gate 11).
+    // Before the flip one floor over `items.len()` was right, because one directory held every
+    // fixture. Simulating the migration WITHOUT touching this fn was measured to red TWO tests,
+    // not one — this floor at `1 >= 5` as well as the correspondence above — and this is the one
+    // whose repair is dangerous: raising it, or deleting it, destroys the guard that stops an
+    // EMPTIED corpus passing vacuously. `trybuild` over a glob that matches nothing prints *"There
+    // are no trybuild tests enabled yet"*, reports `running 1 test … ok`, and exits **0**.
+    // Re-deriving each floor from the kind that populates its directory keeps the guard AND makes
+    // it impossible for either number to drift from §4's table.
+    let refused = items.iter().filter(|i| !i.flips_at_eg2).count();
+    let flipping = items.len() - refused;
+
+    let n_fail = fixture_paths().len();
     assert!(
-        n >= floor,
-        "the seam corpus holds {n} fixture(s) and the plan names {floor} not-yet-reachable \
-         item(s). An empty or short corpus is a VACUOUS PASS in this harness -- measured."
+        n_fail >= refused,
+        "the `{CORPUS}` corpus holds {n_fail} fixture(s) and the plan REFUSES {refused} item(s). \
+         An empty or short corpus is a VACUOUS PASS in this harness -- measured."
+    );
+    let n_pass = pass_fixture_paths().len();
+    assert!(
+        n_pass >= flipping,
+        // ⚠️ Do NOT spell the `pass` call as `t . pass (…)` anywhere in this message. MEASURED
+        // at the EG2 landing: `tests/trybuild_corpus_compiler_witness.rs` scans every
+        // NON-COMMENT line for the needle `.pass(` and then demands a string literal after it,
+        // so the needle written inside a runtime message counted as a 66th glob call site and
+        // redded that census with "the glob is not a string literal". A prose mention of a
+        // harness call is indistinguishable from the call to a line scanner.
+        "the `{PASS_CORPUS}` corpus holds {n_pass} fixture(s) and the plan names {flipping} \
+         item(s) that FLIPPED at EG2. Same vacuity, other direction: a `pass` glob that \
+         matches nothing is the identical exit-0 no-op, and here it would also mean the landed \
+         items lost the only place that RUNS them."
     );
 
     let t = trybuild::TestCases::new();
     t.compile_fail(format!("tests/{CORPUS}/*.rs"));
+    t.pass(format!("tests/{PASS_CORPUS}/*.rs"));
 }
