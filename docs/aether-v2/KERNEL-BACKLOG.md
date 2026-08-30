@@ -314,6 +314,39 @@ recommendation.** The deliverable is the fastest variant, landed and measured; t
 means. This row exists so the direction is not lost, and so whoever picks it up starts from the
 decomposition below rather than from the idea.
 
+### ⚠⚠ "All variants" means the whole space, and the decomposition below is NOT it
+
+Owner, clarifying 2026-08-30: *"By all variants I mean not only the ones we have just discussed, but
+generally all that could exist in theory. Again — study the solutions on the internet and the papers
+on the topic."*
+
+**So the three mechanisms enumerated below are a STARTING POINT, not the design space**, and the
+research must not treat them as the menu. They were derived from one defect that happened to be
+found, which is precisely how a survey inherits its own blind spot — the same failure this campaign
+measured when a storage-kind census was built from eight known instances and could not see the class
+that sat above it.
+
+The survey therefore owes:
+
+* **the literature**, not only the implementations — work-stealing has a research record (Blumofe &
+  Leiserson's Cilk scheduler and its bounds; the work-first/help-first split; lifeline-based global
+  load balancing; receiver- vs sender-initiated balancing) and the papers state *why* each design
+  chose what it did, which the source code does not;
+* **the whole axis set**, enumerated before candidates are scored: where work is placed on spawn,
+  who initiates transfer, granularity of transfer, victim selection, what a blocked thread does,
+  parking/backoff policy, affinity and NUMA, and whether the pool is even the right level for the
+  fix — a scheduler-level answer (partitioning systems by measured cost) may beat a pool-level one;
+* **designs deliberately unlike ours** — a fixed partition with no stealing at all, a central task
+  queue, hierarchical/per-socket queues, delegation instead of stealing — including ones this engine
+  would reject, since knowing *why* they lose is what makes the winner defensible;
+* **what was tried and abandoned**, which is the half a survey usually skips and the half that
+  prevents rediscovering a dead end.
+
+⚠ And the standing evidence rule applies with force here: **separate what a design documents from
+what a blog claims.** This repository's own token-economy record notes that the percentage claims it
+once surveyed were blog-sourced and unverified. A number without a paper, a benchmark harness, or a
+source read is recorded as unverified or not at all.
+
 ### What is already established, and is not in question
 
 * **Defect A** — a task spawned by a worker goes to `injector_local[wid]`; sibling stealing iterates
