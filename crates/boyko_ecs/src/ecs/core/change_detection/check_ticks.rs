@@ -64,6 +64,16 @@ pub(crate) fn run_check_ticks_scan(world: &mut EcsMaster) {
 
     let archetype_master = world.archetype_master_mut();
     for archetype in archetype_master.iter_archetypes_mut() {
+        // KE6 — the archetype-level `ArchAdded` stamp ages out on exactly the
+        // same axis as the per-row ticks below, and for a stamp the risk is
+        // worse than for a row: a dormant archetype (one that took a spawn
+        // burst and was never touched again) never revisits its stamp, so
+        // without this clamp its `is_newer_than` verdict would silently flip
+        // from "very old" to "newer than now" once the age crossed
+        // MAX_CHANGE_AGE. Clamped before the per-row walk so the archetype's
+        // summary can never be older than the rows it summarises.
+        archetype.clamp_arch_added(current);
+
         // The archetype's component id slice borrows `archetype` immutably,
         // and the subsequent `component_pools_mut()` borrows it mutably.
         // Materialise the id list onto the stack (cold path; allocation
@@ -112,5 +122,149 @@ pub(crate) fn run_check_ticks_scan(world: &mut EcsMaster) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecs::core::archetype::archetype::Archetype;
+    use crate::ecs::core::change_detection::{MAX_CHANGE_AGE, Tick};
+    use crate::ecs::identifiers::primitives::ArchetypeId;
+
+    /// Creates a **component-free** archetype holding one row, and returns its
+    /// id.
+    ///
+    /// ⚠ The component-free part is deliberate and was arrived at by
+    /// measurement. The first version of these tests declared a probe component
+    /// with a hand-picked `ComponentId`, following the convention in
+    /// `enable_tag_api::tests`. That convention has a failure mode the filtered
+    /// run cannot show: ids are picked by hand across ~111 sites in this crate,
+    /// the registry refuses a second type on an occupied slot, and the panic
+    /// surfaces only when the whole lib binary runs (measured — id 331 was
+    /// already `archetype::tests::ResComp`). Since the property under test is
+    /// **archetype-level**, the probe needs no component at all, and dropping it
+    /// removes the collision class rather than moving it to a different number
+    /// that a sibling rung might claim next.
+    fn empty_archetype_with_one_row(world: &mut EcsMaster) -> ArchetypeId {
+        let e = world.spawn_empty();
+        world
+            .entity_archetype_id(e)
+            .expect("a freshly spawned entity is live")
+    }
+
+    fn stamp_of(world: &EcsMaster, arch_id: ArchetypeId) -> Tick {
+        world
+            .archetype_master()
+            .get_archetype(arch_id)
+            .expect("archetype resolves")
+            .arch_added()
+    }
+
+    fn set_stamp(world: &mut EcsMaster, arch_id: ArchetypeId, tick: Tick) {
+        let arch: &mut Archetype = world
+            .archetype_master_mut()
+            .get_archetype_mut(arch_id)
+            .expect("archetype resolves");
+        arch.stamp_arch_added(tick);
+    }
+
+    /// **KE6, the clamp half of the oracle.** `run_check_ticks_scan` must pull
+    /// an aged-out `ArchAdded` stamp back to the oldest still-valid tick,
+    /// exactly as it already does for the per-row `added`/`changed` columns.
+    ///
+    /// # Why the stamp needs this more than a row does
+    ///
+    /// A per-row tick belongs to a row that is, by construction, part of a live
+    /// archetype somebody is iterating. The `ArchAdded` stamp of a **dormant**
+    /// archetype — one that took a spawn burst and was never touched again — is
+    /// never rewritten by anything. It is therefore the value most likely to
+    /// age past `MAX_CHANGE_AGE`, and `Tick::is_newer_than` reads a wrapped
+    /// difference as an elapsed count: an unclamped stamp does not degrade
+    /// gracefully, it **inverts**, turning a permanent skip into a permanent
+    /// non-skip or the reverse.
+    ///
+    /// The arrangement inverts the usual one for convenience: rather than
+    /// advancing the world tick past `MAX_CHANGE_AGE` (4 billion bumps), the
+    /// stamp is written *ahead* of a fresh world's `current_tick == 0`, which
+    /// is the same wrapped-age condition (`0.wrapping_sub(1000)` is enormous).
+    ///
+    /// Red without the `archetype.clamp_arch_added(current)` line in
+    /// `run_check_ticks_scan`: the stamp stays at 1000.
+    #[test]
+    fn check_ticks_clamps_the_arch_added_stamp() {
+        let mut world = EcsMaster::new();
+        let arch_id = empty_archetype_with_one_row(&mut world);
+
+        // An "ancient" stamp, expressed as a tick far AHEAD of the world's
+        // current 0 — `current.wrapping_sub(stamp)` is then huge, which is the
+        // condition `check_tick` clamps on.
+        const AHEAD: u32 = 1_000;
+        set_stamp(&mut world, arch_id, Tick::new(AHEAD));
+
+        let current = world.current_tick();
+        assert_eq!(current, Tick::ZERO, "a fresh world starts at tick 0");
+        assert!(
+            current.get().wrapping_sub(AHEAD) > MAX_CHANGE_AGE,
+            "precondition: the stamp's wrapped age must exceed MAX_CHANGE_AGE, \
+             or the scan has nothing to clamp and this test is vacuous",
+        );
+
+        run_check_ticks_scan(&mut world);
+
+        let clamped = stamp_of(&world, arch_id);
+        assert_eq!(
+            clamped,
+            Tick::new(current.get().wrapping_sub(MAX_CHANGE_AGE)),
+            "the aged-out stamp must be pulled to the oldest still-valid tick",
+        );
+        assert_ne!(
+            clamped,
+            Tick::new(AHEAD),
+            "…and must not have been left untouched",
+        );
+    }
+
+    /// The over-correction guard: a stamp that is NOT aged out must survive the
+    /// scan byte-identical. Without it, `clamp_arch_added` could
+    /// unconditionally overwrite the stamp and still pass the test above.
+    ///
+    /// ⚠ The stamp is written **explicitly**, not left to the spawn. An earlier
+    /// draft relied on the spawn's own stamp and was measured **vacuous**: a
+    /// fresh world sits at `current_tick == 0` and an unmaintained stamp also
+    /// reads `Tick::ZERO`, so `assert_eq!(after, before)` held against an
+    /// implementation that stamped nothing at all — it passed on the red run
+    /// that failed every other test in this pair. `u32::MAX - 10` is a value no
+    /// code path could have produced, and its wrapped age against `current == 0`
+    /// is 11, comfortably inside `MAX_CHANGE_AGE`, so the scan must return it
+    /// untouched.
+    #[test]
+    fn check_ticks_leaves_a_fresh_arch_added_stamp_alone() {
+        let mut world = EcsMaster::new();
+        let arch_id = empty_archetype_with_one_row(&mut world);
+
+        const FRESH: u32 = u32::MAX - 10;
+        set_stamp(&mut world, arch_id, Tick::new(FRESH));
+
+        let current = world.current_tick();
+        assert!(
+            current.get().wrapping_sub(FRESH) <= MAX_CHANGE_AGE,
+            "precondition: the stamp must be INSIDE the valid window, or this \
+             guard is testing the clamp path instead of the pass-through one",
+        );
+
+        run_check_ticks_scan(&mut world);
+
+        let after = stamp_of(&world, arch_id);
+        assert_eq!(
+            after,
+            Tick::new(FRESH),
+            "a stamp within MAX_CHANGE_AGE of `current` is returned unchanged",
+        );
+        assert_ne!(
+            after,
+            Tick::new(current.get().wrapping_sub(MAX_CHANGE_AGE)),
+            "…and specifically was NOT pulled to the clamp value",
+        );
     }
 }

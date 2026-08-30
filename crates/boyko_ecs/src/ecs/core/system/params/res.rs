@@ -138,6 +138,70 @@ unsafe impl<'a, R: Resource> SystemParam for Res<'a, R> {
     }
 }
 
+// ── Option<Res<R>> (Aether v2 KE4, rung R1) ─────────────────────────────────
+
+// SAFETY (SP1, SP2, SP4): identical composition to the `Res<'a, R>` impl above,
+//   with ONE difference — `get_param`'s null branch returns `None` instead of
+//   taking the `#[cold] missing_resource_panic`.
+//   - SP1: `init_access` declares the SAME resource read as `Res<R>`. This is a
+//     correctness requirement, not a courtesy: whether the resource exists is a
+//     RUNTIME fact, while the scheduler's conflict analysis is a STATIC one. A
+//     param that declared nothing "because it might be absent" would be
+//     scheduled concurrently with a `ResMut<R>` writer and alias the slot the
+//     moment the resource exists — a race no test of the `None` path can see.
+//     Pinned by `tests/ke4_optional_resource_params.rs`.
+//   - SP2: the `Some` branch dereferences exactly the resource declared in
+//     `init_access`, under the same aliasing protocol as `Res<R>`.
+//   - SP4: `init_state` mutates no registry — it reads `R::resource_id()` and
+//     stashes the id, sharing `ResState<R>` with `Res<R>` so the Option wrapper
+//     carries no extra per-system state.
+unsafe impl<'a, R: Resource> SystemParam for Option<Res<'a, R>> {
+    type State = ResState<R>;
+    type Item<'w, 's> = Option<Res<'w, R>>;
+
+    #[inline]
+    fn init_state(_world: &mut EcsMaster, _system_meta: &mut SystemMeta) -> Self::State {
+        // W1: pay the `R::resource_id()` `OnceLock` load once at init.
+        ResState {
+            id: R::resource_id(),
+            _marker: PhantomData,
+        }
+    }
+
+    fn init_access(
+        state: &Self::State,
+        _system_meta: &mut SystemMeta,
+        access_set: &mut FilteredAccessSet,
+        _world: &mut EcsMaster,
+    ) {
+        // Unchanged from `Res<R>` — see the SAFETY block above for why the
+        // optionality of the VALUE must not soften the declaration.
+        access_set
+            .add_resource_read(state.id, std::any::type_name::<Self>())
+            .unwrap_or_else(|conflict| intra_system_conflict_panic(conflict));
+    }
+
+    #[inline]
+    unsafe fn get_param<'w, 's>(
+        state: &'s mut Self::State,
+        _system_meta: &SystemMeta,
+        world: UnsafeEcsCell<'w>,
+    ) -> Self::Item<'w, 's> {
+        // SAFETY (SP1, SP2, U_C2): `init_access` declared a read of `state.id`;
+        //   the protocol guarantees no `ResMut<R>` for the same id is being
+        //   fetched in this stage. By-value call on a `Copy` cell — no `&self`
+        //   retag (C1 RESOLUTION).
+        let resources = unsafe { world.resources() };
+        // The KE4 difference: the absent slot is an answer, not a panic.
+        let ptr = resources.get_ptr_by_id(state.id)?;
+        // SAFETY (SP2): `ptr` was minted from a populated slot whose
+        //   registration was bound to `R` at insert time (R1: bit-implies-init).
+        //   `ResState<R>` ties `state.id` to `R` at the type level, so the cast
+        //   is type-correct; the borrow's lifetime is `'w`.
+        Some(Res(unsafe { &*(ptr as *const R) }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::OnceLock;

@@ -425,7 +425,7 @@ impl EcsMaster {
     /// ceilings). (Phase X.J retired the historical shared Arena.)
     pub fn new() -> Self {
         let archetype_master = ArchetypeMaster::new();
-        // EventDispatcher::new(1) validates 1 ∈ 1..=64 — never fails.
+        // EventDispatcher::new(1) validates 1 ∈ 1..=MAX_EVENT_THREADS — never fails.
         let events = EventDispatcher::new(1)
             .expect("invariant: default thread_count=1 is always valid");
         // Phase 12.6 — entity fast-store starts empty. Growth is driven by:
@@ -472,7 +472,7 @@ impl EcsMaster {
     /// explicitly after construction.
     pub fn with_capacity(entity_capacity: usize, archetype_capacity: usize) -> Self {
         let archetype_master = ArchetypeMaster::with_capacity(archetype_capacity);
-        // EventDispatcher::new(1) validates 1 ∈ 1..=64 — never fails.
+        // EventDispatcher::new(1) validates 1 ∈ 1..=MAX_EVENT_THREADS — never fails.
         let events = EventDispatcher::new(1)
             .expect("invariant: default thread_count=1 is always valid");
         Self {

@@ -1,5 +1,38 @@
 # Serialization — Research & Plan (`boyko_serialize`)
 
+> **⚠ THE STATUS LINE BELOW IS STALE, AND GAIA NOW BUILDS ON THIS FORMAT (note added 2026-08-29).**
+>
+> **It is implemented.** `grep -rn "fn resolve_stable_name\|fn load_archetype\|fn load_dense_store\|struct LoadEntityMap\|fn save_world" crates/boyko_serialize/src/ crates/boyko_ecs/src/`
+> resolves every one: `save_world` / `save_world_to_file` (`boyko_serialize` `save.rs`),
+> `load_archetype` / `load_dense_store` / `load_dense_store_via_fn` (`boyko_ecs`
+> `ecs/core/serialize/load_writer.rs`), `LoadEntityMap` (`ecs/core/serialize/mod.rs`),
+> `resolve_stable_name` (`ecs/core/component/component_registry/serialize.rs`). The crate ships
+> `save.rs` · `load.rs` · `format.rs` · `error.rs`.
+>
+> **What Gaia now owns.** [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) — the data language for scenes, UI
+> documents and the DataAsset/DataTable analog — **absorbs the scene-format pipeline** (own text →
+> build-time bake with reflection behind a default-off feature → binary; zero runtime reflection).
+> Its ruling that binds this document: **the bake tool PRINTS this format. A second byte format is
+> forbidden.** ([`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Inherited pipeline, where all five runtime
+> mechanisms were re-confirmed at source.) The §0 codegen-not-reflection decision is upheld, not
+> reopened — Gaia allows reflection **only at bake**, never in the shipped load path.
+>
+> **What Gaia found that this plan's load semantics do not cover** — none of it is settled here, and
+> all of it is open ballot **F4** ([`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) §Owner ballots, widened
+> 2026-08-29 from "hooks" to **every insert-path mechanism**): (i) the loader **runs no hooks**, so
+> reverse indexes are absent engine-wide after a load and asset refcounts sit at 0; (ii) **the
+> `requires` closure is not run on load** — nothing adds a component the file omitted, so
+> `query<(&Health, &Regen)>` silently skips level-authored entities while gameplay-spawned ones
+> match, and `RequiredCtor` being an `unsafe fn(*mut u8)` makes ctor-form requires unbakeable in
+> principle; (iii) flag initial state (bitset ids are filtered out of the loaded signature);
+> (iv) relation reverse index; (v) asset refcounts. Also recorded there: `MeshHandle(u32)` /
+> `MaterialHandle(u16)` are POB integers that **blit a process-local slot**, so every loud refusal
+> passes and the reference is meaningless after a restart (kernel request **GK-3** for the fixup
+> seam; stable asset ids + the `GN1` bake lint for the handles).
+>
+> Nothing below has been edited. Read this file for the format's design and rationale; read
+> [`gaia/DECISIONS.md`](gaia/DECISIONS.md) for what a *baked authored asset* additionally requires.
+
 > **Status: RESEARCH + PLAN ONLY. No implementation.** Branch `ecs`, 2026-06-16.
 >
 > Produced by a 5-agent research workflow (R1 fast-binary architectures, R2

@@ -519,6 +519,10 @@ fn materialize_clone_into(
             let target: &mut Archetype = &mut *target_ptr;
             target.entity_ids.push(entity.id());
             target.current_index = new_row + 1;
+            // KE6 write site 4/9 — inside the same confined `&mut Archetype`
+            // reborrow as the `current_index` advance, so the D2 exclusivity
+            // ground is the one already argued for that write.
+            target.stamp_arch_added(current_tick);
         }
         guard.disarm();
         // <-- the guard (now disarmed) drops harmlessly at the block close.

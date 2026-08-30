@@ -124,6 +124,33 @@ impl BitSet256 {
         false
     }
 
+    /// ORs `other`'s bits into `self` in place (set union).
+    ///
+    /// Four `OR` instructions over the four words; the compiler unrolls the
+    /// bounded loop exactly as it does for [`intersects`](Self::intersects).
+    /// Mirrors `ComponentMask::union_with`, the equivalent primitive on the
+    /// 512-bit component side, so a caller that needs the union of two
+    /// access surfaces writes the same shape for both halves.
+    ///
+    /// ```
+    /// use boyko_utils::bit_mask::bit_set_256::BitSet256;
+    ///
+    /// let mut a = BitSet256::new();
+    /// a.set(3);
+    /// let mut b = BitSet256::new();
+    /// b.set(200);
+    /// a.union_with(&b);
+    /// assert!(a.get(3) && a.get(200));
+    /// assert_eq!(a.count_ones(), 2);
+    /// ```
+    #[inline]
+    pub fn union_with(&mut self, other: &Self) {
+        // Word 0..=3; bounded loop, compiler unrolls.
+        for i in 0..4usize {
+            self.words[i] |= other.words[i];
+        }
+    }
+
     /// Removes and returns the index of the lowest set bit, or `None` if empty.
     ///
     /// Uses the BLSR-equivalent `word & (word - 1)` to clear the lowest set bit

@@ -298,7 +298,7 @@ The remaining five, in the same shape:
 
 ---
 
-## 2026-08-28 — The `machine` "one transition per frame" claim is FALSE: two same-frame events run BOTH exit/action/enter chains
+## 2026-08-28 — The `machine` "one transition per frame" claim is FALSE: two same-frame events run BOTH exit/action/enter chains — FIXED 2026-08-30 (rung R2)
 
 Found while designing per-entity machines, confirmed by two independent reads of the emitter and
 the schedule. `run_state_transitions` executes ONCE, before the executor loop, so `State<S>` is
@@ -318,6 +318,33 @@ frame → today it must FAIL by observing two chains; after R2 it pins exactly o
 
 Nothing else is blocked; the global `machine` misbehaves only under same-frame multi-event load,
 which the shipped tests deliberately avoid (distinct event types per edge).
+
+**RESOLVED 2026-08-30, rung R2.** The red test is
+[`aether_tests/tests/r2_chart_arbitration.rs`](../crates/aether_tests/tests/r2_chart_arbitration.rs),
+and it was watched failing before anything moved. MEASURED pre-fix, all five counters at once on
+one leaf with `on Alpha => ToAlpha` declared before `on Beta => ToBeta`:
+
+| exit | alpha action | beta action | enter ToAlpha | enter ToBeta | settled state |
+|---|---|---|---|---|---|
+| **2** | 1 | 1 | 1 | 1 | **ToBeta** |
+
+Two exits, two actions, two enters — and the surviving state was the LAST-declared route's, which
+is the arbitration artifact M6 called out. Post-fix the same run reads `1 / 1 / 0 / 1 / 0 /
+ToAlpha`.
+
+The fix is the per-leaf **route merge** in `boyko_macros::state_chart!`
+(`state_chart::emit::leaf_fn`): one system per leaf drains every lane, a single `__sc_route`
+selection takes the first-declared accepting route, and one `match` arm runs the only chain. A
+second same-frame chain is now structurally impossible — there is one selection point, so the
+question "how many chains ran" has no way to answer anything but one.
+
+Two things a reader should not have to rediscover:
+
+* the emitter comment that made this claim is gone with the emitter — the flattening now lives in
+  `boyko_macros`, and Aether lowers to it;
+* every lane is still drained even when its route loses, which preserves the pre-merge per-lane
+  drain exactly. The kernel's `EventIter` advances the cursor only past what it yielded, so a
+  merge that skipped the loser's lane would have left this frame's events to re-fire on the next.
 
 ---
 

@@ -269,6 +269,21 @@ in-tree consumer exists AND the kernel `Or`-dense fix is green. The kernel fix i
 and independent (R0). Reasoning: every grammar form is permanent maintenance; the worst outcome on
 record is a filter that silently matches nothing.
 
+> ⚠ **R0 removed one of D4's two conjuncts, and this line must not be read as unaffected.
+> R0 LANDED 2026-08-29** ([`CAMPAIGN.md`](CAMPAIGN.md) R0; [`KERNEL-BACKLOG.md`](KERNEL-BACKLOG.md)
+> KE1). The ground here is a **conjunction** — a real consumer *and* a green kernel fix — so that
+> landing retired the second half, and D4's reserve now stands on the consumer clause **alone**.
+> That is a
+> narrower ground than the one recorded above, and it is not the same argument. Say which clause is
+> load-bearing when the reserve is next cited.
+>
+> This is the **Aether-side** twin of a Gaia ruling whose ground R0 removes *entirely*: the
+> generated-code ban on `Or<(Changed<A>, Changed<B>)>` over dense
+> ([`../gaia/DECISIONS.md`](../gaia/DECISIONS.md) §UI bindings, item 8). Its disposition is **open
+> ballot GB-9** — keep the ban with a ground that is not the fixed defect (D4's coupling is the
+> named candidate ground, which is why this line is cited from there), or delete it with a record
+> of why it existed. **GB-9 is the owner's and is not settled here or by R0 landing.**
+
 **D5. Run-condition combinators fold EAGERLY — no short-circuit.** Not (only) because `run_once`
 mutates on evaluation: a condition's change-tick window advances only when it actually runs, so a
 short-circuited RHS freezes its `Changed` window and observes a bogus burst later. `CombinedSystem`

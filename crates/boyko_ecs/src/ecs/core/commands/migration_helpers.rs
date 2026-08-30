@@ -776,6 +776,24 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         unsafe {
             core::ptr::addr_of_mut!((*target_ptr).current_index).write(row + 1);
         }
+        // KE6 write site 6/9 — the ONE site that is not a `&mut Archetype`.
+        // It uses the raw-pointer twin for the same reason the
+        // `current_index` write above does: forming a `&mut Archetype` here
+        // would narrow the interior-mutable slab cell to a persistent `Unique`
+        // tag and make the later `EcsMaster`-drop deallocation of the bundle
+        // `Box` illegal under Tree Borrows. D2's race-freedom ground is
+        // *exclusive access on a cold path*, which this site has (apply window,
+        // `&mut EcsMaster`, no worker live); the `&mut Archetype` phrasing in
+        // the ruling names the usual carrier of that exclusivity, not a
+        // requirement the borrow be spelled that way.
+        //
+        // SAFETY: `target_ptr` is the same write-capable slab provenance the
+        //   `current_index` write above uses, under the exclusive `&mut
+        //   EcsMaster` this function holds; no `&`/`&mut Archetype` is live
+        //   across the call.
+        unsafe {
+            Archetype::stamp_arch_added_raw(target_ptr, current_tick);
+        }
 
         // EnableTag Step 6 PHASE 2: restore the snapshotted enable bits into the
         // target's new row (`new_row`). Must precede the source `move_out_entity`
@@ -849,6 +867,40 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     // SOURCE archetype where the bit was already present, so it does NOT need
     // this hoist — see `migrate_entity_remove`.)
     world.migrate_entity_observer_bit(entity);
+
+    // KE10: initial enable-bit states for the NEWLY-attached ids only. A
+    // RETAINED component was attached on some earlier frame, so re-applying its
+    // declared initial state here would clobber a bit the game has since
+    // toggled — which is why this uses `apply_attach_flags_for` (an explicit
+    // newly-attached set) and not the whole-archetype spawn form.
+    //
+    // The newly-attached set is exactly the one the Phase-2 on_add window
+    // iterates: the `bundle_added`-filtered bundle ids, the constructed required
+    // ids, and the newly-added dense ids. Applied BEFORE the fires so an on_add
+    // hook observes the initial state and can override it (the same ordering
+    // `EcsMaster::create_entity` uses).
+    //
+    // SAFETY (F1): identical to the Phase-2 `flags` read below — `target_ptr` is
+    //   stable, write-capable, interior-mutable slab provenance and no
+    //   `world`-derived `&mut Archetype` is live here. One `u16` load.
+    let attach_flags = unsafe { (*target_ptr).flags };
+    if attach_flags.contains(ArchetypeFlags::FLAGS_ON_ATTACH) {
+        for (i, &cid) in bundle_ids[..bundle_id_count].iter().enumerate() {
+            if bundle_added[i] {
+                world.apply_attach_flags_for(entity, &[cid]);
+            }
+        }
+        if let Some((required_ids, required_count)) = &required_fire {
+            for i in 0..*required_count {
+                world.apply_attach_flags_for(entity, &[required_ids[i]]);
+            }
+        }
+        for &(cid, newly_added) in &dense_fire_buf[..dense_fire_n] {
+            if newly_added {
+                world.apply_attach_flags_for(entity, &[cid]);
+            }
+        }
+    }
 
     // PHASE 2 (§3.4 / P3): fire hooks. The entity is repointed into `target`;
     // both `&mut Archetype` are dead — only `target_ptr` (*mut, Copy) survives.
@@ -1542,6 +1594,8 @@ pub(crate) fn migrate_entity_attach_ids(
         // the entity-id list and `current_index` advance in lockstep.
         target.entity_ids.push(entity.id());
         target.current_index = row + 1;
+        // KE6 write site 7/9 — `&mut Archetype`.
+        target.stamp_arch_added(current_tick);
 
         // EnableTag Step 6 PHASE 2: restore the snapshotted enable bits into the
         // target's new row while `target` is `&mut`-live.

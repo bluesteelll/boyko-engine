@@ -39,6 +39,7 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::resources::nonsend_resources::NonSendResources;
 use crate::ecs::core::resources::resources::Resources;
+use crate::ecs::core::system::params::entities::Entities;
 use crate::ecs::core::system::params::entity_counter::EntityCounter;
 use crate::ecs::identifiers::primitives::ArchetypeId;
 
@@ -285,6 +286,54 @@ impl<'w> UnsafeEcsCell<'w> {
         //     (EM1) — the only blessed projection.
         //   * EM6 is upheld by the destination type — see above.
         unsafe { EntityCounter::from_ptr(atomic_ptr) }
+    }
+
+    /// Aether v2 KE2: mints an [`Entities<'s>`] projecting only the entity fast
+    /// store (`EntityMaster::entities_inland`). The returned param cannot reach
+    /// any other `EntityMaster` field — the EM6 aliasing rule is type-enforced
+    /// (the carried pointer's type is `*const InlandStore`, not
+    /// `*const EntityMaster`), exactly as [`entity_counter`] does with
+    /// `*const AtomicUsize`.
+    ///
+    /// # Safety (U_C2, EM6, SCH7)
+    ///
+    /// * The caller asserts that the active `SystemParam::init_access` permits
+    ///   a shared read of the entity fast store. `Entities` declares no access
+    ///   in the conflict graph (there is no entity-store axis to declare on);
+    ///   soundness rests on SCH7 — structural mutation of the store takes
+    ///   `&mut EntityMaster` and runs dispatcher-solo inside the apply window,
+    ///   so it cannot overlap a live system body. This is the same argument
+    ///   `EntityMaster`'s own `unsafe impl Sync` (SEND5) already makes for the
+    ///   `&self` reads of this field on the `get_component_raw` path.
+    /// * The by-value receiver preserves the raw pointer's provenance: no
+    ///   `&self` retag downgrades the carried `*mut EcsMaster` before the field
+    ///   projection.
+    /// * `'s <= 'w` by the caller's PhantomData re-tag (the SystemParam
+    ///   protocol enforces this on the consumer side).
+    ///
+    /// [`Entities<'s>`]: super::params::entities::Entities
+    /// [`entity_counter`]: UnsafeEcsCell::entity_counter
+    #[inline]
+    pub(crate) unsafe fn entity_inland_store<'s>(self) -> Entities<'s> {
+        // SAFETY (U_C2, EM6):
+        //   * By-value receiver — no `&self` retag. The underlying
+        //     `*mut EcsMaster` is valid for `'w` and carries the provenance
+        //     minted by `new_mutable` / `new_readonly`.
+        //   * The `&raw const` projection takes the address of the
+        //     `entity_master.entities_inland` field without materialising an
+        //     intermediate `&EcsMaster`, so the pointer is not
+        //     SharedReadOnly-downgraded.
+        //   * The destination type is `InlandStore` — no compile-time path
+        //     leads from the carried pointer to any other `EntityMaster` field,
+        //     type-enforcing EM6.
+        let store_ptr = unsafe { &raw const (*self.ptr).entity_master.entities_inland };
+        // SAFETY (`Entities::from_store_ptr` contract):
+        //   * The pointer was just minted from a live `EntityMaster` reachable
+        //     through `self.ptr`, valid for `'w >= 's`.
+        //   * It aims at the `entities_inland` field — the only blessed
+        //     projection for this param.
+        //   * The no-structural-mutation clause is SCH7, argued above.
+        unsafe { Entities::from_store_ptr(store_ptr) }
     }
 
     /// Direct mutable access to the resources subsystem. Hot path for

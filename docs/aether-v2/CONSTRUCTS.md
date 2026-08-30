@@ -139,6 +139,11 @@ system chase(
 - `when (A or B)` / `unless C` lower to the kernel combinators (`CombinedSystem`, eager fold).
 - `or(...)` in **filter** position is RESERVED: refused with a span diagnostic pointing at the
   verbatim escape, until the kernel `Or`-dense fix is green and a real consumer exists (D4).
+  ⚠ **Rung R0 removed the first of those two conditions (LANDED 2026-08-29)** — this reserve now
+  stands on the consumer clause alone, a narrower ground than the one written here. The Gaia twin of
+  this ban stands on the kernel defect *entirely* and its disposition is **open ballot GB-9**; see
+  [`DECISIONS.md`](DECISIONS.md) D4 and [`../gaia/DECISIONS.md`](../gaia/DECISIONS.md) §UI bindings,
+  item 8.
 - **`gpu`** (bare group) → `.gpu()` — marks a GPU-compute system (dispatcher-solo at the apply
   window, the sound site for `!Send` RHI recording). The kernel marker is deliberately
   non-inferable from access, so this is the only ergonomic route. *(Ratified O3.)*

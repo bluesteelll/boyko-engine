@@ -40,6 +40,37 @@ documents and the DataAsset/DataTable analog, absorbing the scene-format campaig
 culling deliberately do **not** adopt the spatial index (the render cull is GPU-resident by
 design; the physics broadphase has a different contract — see DECISIONS.md §Spatial).
 
+## Relation to Gaia — separate scopes, ONE body of work
+
+"Out of scope" above means *this ladder does not build it*; it does **not** mean a separate project.
+*Aether is the language for **logic**, Gaia the language for **data*** — the split is by subject
+matter, and the two share a kernel, one AI-orientation requirement set, one diagnostic envelope and
+one id namespace. Concretely, and each checkable today: [`gaia/DECISIONS.md`](../gaia/DECISIONS.md)
+cites **this campaign's `KE#` ids** directly (and `KERNEL-BACKLOG.md`'s header records that the
+`E#` → `KE#` rename was first scoped wrongly *because* it treated `docs/gaia/` as someone else's
+corpus); [`AI-ORIENTATION.md`](AI-ORIENTATION.md) — a file in **this** directory — carries
+**AIR-08** and **AIR-16** with `Gaia spec` in their own Rung column, **AIR-17** with `Gaia G0`, and
+**AIR-09** with `R8 / Gaia tooling`; the `AE####` / `GA####` code registries are one discipline
+minted by AIR-02; and two ballots of the **Gaia** `GB` series name rungs on **this** ladder
+(**GB-9** → R0, **GB-8** → R8, both listed below).
+
+**And the campaigns find each other's defects.** Three defects in *shipped* code — the `Or` dense
+arm (**KE1**, rung R0), `any_changed_since` over a dense/bitset bind source (Gaia **GK-2**), and the
+load path's dropped `requires` closure (Gaia **F4(ii)**) — are **one mechanism**: code that resolves
+a per-archetype pool without screening the storage kind, and so is blind to the kinds that own no
+pool. Two of the three were raised by the *data* campaign, in kernel and UI code *this* campaign
+owns. ⚠ **`with`/`without` over a `flag` (AB-11) was listed here as the fourth member; R0's census
+measured it and it is NOT** — same *class* (a presence test resolved through a mechanism the storage
+kind does not participate in) but a **different mechanism**: the failing code is
+`With::matches_component_set`'s fall-through to `mask.contains(state.id)` in the **leaves**, not a
+`get_pool` resolve, and it needs no `Or` at all — a bare `Query<&P, With<Flag>>` is already wrong.
+R0's fix demonstrably does not reach it (`crates/boyko_ecs/tests/ab11_flag_filter_polarity.rs`, run
+with the fix in the tree). The count of the pool-resolution class is **four blind sites**, and AB-11
+is not among them — see [`KERNEL-BACKLOG.md`](KERNEL-BACKLOG.md) §Census. The joint account, the
+couplings table, and the owed enumeration of the class live in
+[`../AETHER-GAIA-REVISION-2026-08-29.md`](../AETHER-GAIA-REVISION-2026-08-29.md) §One mechanism,
+three shipped defects and §Aether and Gaia are one body of work.
+
 ## Rung ladder
 
 Rungs are ordered by dependency, not preference. Each rung names its oracle — the thing that must
@@ -48,9 +79,9 @@ lesson.
 
 | Rung | What | Depends on | Oracle |
 |---|---|---|---|
-| **R0** | Kernel bug fixes: `Or` dense blindness (`impl_or_filter_tuple` declares no dense plumbing while the AND tuple does). R0's priority rests on the **silent-wrong-answer mechanism** — a dense arm inside `Or<...>` is never true and nothing reports it — **not** on blast radius: the measured census is **112 textual `Or<(` matches**, of which **4 are production type positions** (`boyko_ui` `layout.rs:88`/`:118`, `text/measure.rs:61`; `boyko_render` `light_system.rs:989`), 6 are doc-comment mentions, 48 are kernel-internal lines across four files (`filter.rs` 34, `par_chunk.rs` 7, `filter_enable.rs` 4, `state.rs` 3), and 54 are test/bench/fixture sites | — | a **red-first** test pinning `Or<(Changed<TableC>, Changed<DenseC>)>` against a hand oracle |
+| **R0** | ✅ **LANDED 2026-08-29.** `Or` now forwards `HAS_DENSE` (OR-fold) and `resolve_dense` (per-arm) and deliberately does NOT forward `HAS_DENSE_INCLUDE` / `dense_include_candidates` — a disjunct bounds no candidate set, so forwarding those two would have traded the fix for a new silent-wrong-answer. Oracle: `crates/boyko_ecs/tests/ke1_or_dense_blindness.rs`, 8 hand-oracle tests over 8 arm shapes; **7 observed red before the fix, all 8 green after**. The defect had **two** polarities, not the one this row assumed: a dense `Without` arm answers from the same NULL store and **excludes nothing**. Also landed, as R0's census half: the class table in [`KERNEL-BACKLOG.md`](KERNEL-BACKLOG.md) §Census (42 production pool-resolution sites classified; **4 blind**, 2 of them owned by KE11/AB-6 and 2 by Gaia GK-2 — the second GK-2 site, `get_component_changed_tick`, is **not named in GK-2's own row**), plus `#[ignore]`d red tests for the GK-2 pair and for ballot **AB-11**'s flag-filter polarity. The census also raised **one NEW unowned kernel bug, KE13** — `QueryView::get`/`get_mut` never call `F::filter_fetch` and resolve `resolve_dense` for `D` only, so a **dense** `With`/`Without` filter is applied by `iter()` and silently ignored by `get()`; `get`'s own doc comment asserts "there is no silent-ignore path". Measured red, needs a rung. Kernel bug fixes: `Or` dense blindness (`impl_or_filter_tuple` declares no dense plumbing while the AND tuple does). R0's priority rests on the **silent-wrong-answer mechanism** — a dense arm inside `Or<...>` is never true and nothing reports it — **not** on blast radius: the measured census is **112 textual `Or<(` matches**, of which **4 are production type positions** (`boyko_ui` `layout.rs:88`/`:118`, `text/measure.rs:61`; `boyko_render` `light_system.rs:989`), 6 are doc-comment mentions, 48 are kernel-internal lines across four files (`filter.rs` 34, `par_chunk.rs` 7, `filter_enable.rs` 4, `state.rs` 3), and 54 are test/bench/fixture sites. ⚠ **Landing R0 falsifies the recorded ground of a Gaia ruling** — the generated-code ban on `Or<(Changed<A>, Changed<B>)>` over dense, whose disposition is open ballot **GB-9**. See §Open ballots below for which reading of "decide before R0 lands" the corpus supports; the ballot is the owner's either way | — | a **red-first** test pinning `Or<(Changed<TableC>, Changed<DenseC>)>` against a hand oracle |
 | **R1** | Kernel enablers, batch 1: `Entities` param; `Query::{get, get_mut, single, single_mut, contains, first}`; `Option<Res<R>>`/`Option<ResMut<R>>`; run-condition combinators (eager fold); `on_despawn` derive key; `CommandQueue::{mark, rewind}`; structural `ArchAdded` stamp; `MAX_EVENT_THREADS` → 65 + const-assert; **KE10** `FLAGS_DIRECT`; **KE11** the `#[require]` refusal for a poolless required id (**red test written FIRST**, parameterised over **both** poolless kinds — bitset AND dense; see KERNEL-BACKLOG KE11) | — | unit tests per item; the combinator fold semantics pinned by the five tests **D5(1)–D5(5)** enumerated in DECISIONS.md §D5 |
-| **R2** | `state_chart!` moves the machine flattening into `boyko_macros`; per-leaf **route merge** (fixes the both-chains-run defect *and* aligns arbitration to first-declared-wins); reachability/dead-state analysis | — | a red-first test: two events on one leaf in one frame must run exactly ONE exit/action/enter chain |
+| **R2** ✅ **DONE 2026-08-30** | `state_chart!` moved the machine flattening into `boyko_macros`; per-leaf **route merge** (fixed the both-chains-run defect *and* aligned arbitration to first-declared-wins); reachability/dead-state analysis as a hard error | — | red-first `aether_tests/tests/r2_chart_arbitration.rs` — MEASURED failing at two exits / two actions / two enters and settling on the LAST-declared route, green afterwards at exactly one chain on the FIRST. One flattening implementation, not two: Aether's `machine` lowers to a `state_chart!` invocation. 8 of the 9 `machine_*` trybuild goldens passed the move byte-identical, which is the evidence that the extra macro layer moves no caret |
 | **R3** | Aether v2 construct rewrite (CONSTRUCTS.md) — component groups, `tag`/`flag`, bundle forms, event `with { lanes, capacity }` + auto-registration + flat ctor, system groups + `nonsend` + `chain`, `each`, `resource`, `plugin` `name()` removal. **Deliverable: commit probes C and E as trybuild fixtures** under `crates/aether_tests/tests/ui/` — probe C = a broken construct followed by `scen lab {}`; probe E = one block carrying two independent block-level defects; each pins error **COUNT == 2** | R1 (combinators, on_despawn, `FLAGS_DIRECT`), R2 (machine fronts `state_chart!`) | token pins + trybuild goldens, same three-lane gate discipline as v1; **+ AIR-10: a DECISIONS familiarity/false-friend line per risk-list keyword, present before the R3 surface hardens** |
 | **R4** | Parallel event emission (EVENTS.md): `send(&self)`, `send_slice`, `par_for_each_chunk_entities`, router combine, `ordered` opt-in | R1 (65 lanes) | **re-axed the same way R6 was.** The property the `ordered` gate must test is *the parallel path emits the stream the serial path emits* — a fixed scenario's event stream from the parallel pass compared **against the serial-emission reference stream** for W ∈ {1, 2, N}. `build(1) == build(W)` is demoted to a **smoke** check: it compares two runs of the same code against each other and so cannot see a lane-assignment defect that is stable across runs, which is exactly the defect class `ordered` exists to exclude. The run must **report per-worker send counts** (AIR-12's counts-not-exit-code rule) so a silently-serial run is red, not green. Plus the loom/stress story for the lane path, re-scoped per KERNEL-BACKLOG KE8 to include a `WORKER_ID_UNATTACHED` sender concurrent with worker 0 |
 | **R5** | Per-entity machines (MACHINES.md): `machine … on entity`, compiled timers, field elision | R1 (`Entities`, `Query::get`) — **⚠ blocked on ballot AB-5**, see §Open ballots on this ladder; R2 (chart core), R4 only for `parallel` | behaviour tests over both reference scenarios (enemy AI, ability) + size const-asserts + the D1 cost-model note |
@@ -103,11 +134,59 @@ group) are architecture gaps routed to **R3's own design pass**, not to the owne
 and `relation` constructs may not be declared done while they stand. Both are recorded in
 [`../gaia/PENDING-SYNTAX-PLAN.md`](../gaia/PENDING-SYNTAX-PLAN.md) §Part E.
 
+**Three more items ride NO rung on either ladder — `CG-1`, `CG-2`, `CG-3`.** They are not ballots
+either, so no register was carrying them; their single home is
+[`../gaia/CAMPAIGN.md`](../gaia/CAMPAIGN.md) §Carrier gap, cited from here because two of the three
+are candidates for **this** ladder. **CG-1** (`link` as the shared remap spelling in authored-scene
+emission) and **CG-2** (component references riding mandatory explicit `stable_name`, likewise) are
+Gaia assertions about **Aether's** emitted scenes, so R3's `scene` surface is a candidate owner.
+**CG-3** — GB-6(b)'s conditional-visibility pressure valve — carries an explicit **deadline**
+("before the first designer asks") and GB-6(b) states in as many words that it needs "an F-id AND a
+rung on the **Aether** ladder"; it has neither. A deadline with no rung can never come due, so it is
+not a schedule. **Assigning them is the owner's or the architect's call, not this plan's**; what is
+recorded here is that they exist and that this ladder is where two or three of them would land.
+
+Also rungless, and on this side: the **two authored-scene emission fixes** in
+[`CONSTRUCTS.md`](CONSTRUCTS.md) §`material`, `scene` (collapsing the per-node `.insert` chain into
+one generated extras bundle; grouping same-shaped anonymous nodes through `spawn_batch`). They are
+the Aether twins of CG-1/CG-2 — asserted, unowned.
+
 Two Gaia-series ballots also name rungs on **this** ladder. Both are **OPEN**; only their bodies are
 housed on the Gaia side (see [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md)) — neither is decided:
 **GB-9** must be decided *before* R0 lands (R0 is what makes the `Or`-over-dense emission ban's
 original ground false), and **GB-8** names R8 as a candidate owner for the corpus-wide link/id
 census.
+
+> ⚠ **Two readings of GB-9's "before R0 lands" are in the corpus, and they disagree.** This section
+> says GB-9 *must be decided before R0 lands*, while
+> [`../AETHER-GAIA-REVISION-2026-08-29.md`](../AETHER-GAIA-REVISION-2026-08-29.md) §Work order lists
+> R0 under **"buildable now, no ballot in the way"** — and the roll-up three paragraphs above says
+> **"R0/R1/R2 — none, buildable now."** Recorded here rather than resolved by edit, but the
+> evidence in the corpus points one way, and it is worth stating so nobody stalls a green rung:
+>
+> - GB-9's own **`Blocks` field names Gaia's `G7`, not R0** (`../OPEN-QUESTIONS.md` §2026-08-29).
+> - The revision record's blocked-rung table lists **G7** as waiting on GB-6/GB-7/GB-9; **R0 appears
+>   in that table not at all**.
+> - R0 is a `boyko_ecs` bug fix whose oracle is a kernel-side red-first test. GB-9 asks what a
+>   **Gaia generator that does not exist yet** should emit. Nothing in R0's scope or oracle changes
+>   with GB-9's answer.
+>
+> **So: "before R0 lands" is a staleness deadline on the DECISION, not a build blocker on the
+> RUNG.** The thing it protects is real and is the reason the deadline was written — once R0 is
+> green, the ban's original ground is gone and a fixture written against the *kernel's* behaviour
+> "goes green on that R0 commit and stops guarding anything, without anyone editing it"
+> ([`../gaia/DECISIONS.md`](../gaia/DECISIONS.md) §UI bindings, item 8).
+>
+> ⚠⚠ **AND THE DEADLINE HAS NOW EXPIRED, UNANSWERED — R0 LANDED 2026-08-29 WITH GB-9 STILL OPEN.**
+> Measured, not predicted: the R0 row above reads "✅ LANDED 2026-08-29",
+> [`KERNEL-BACKLOG.md`](KERNEL-BACKLOG.md) KE1 reads "✅ LANDED (R0, 2026-08-29)", and the oracle
+> `crates/boyko_ecs/tests/ke1_or_dense_blindness.rs` is in the tree. GB-9 does **not** lapse; it
+> becomes a ballot whose **original ground can no longer be observed in the tree**, which is
+> strictly worse to answer than it was this morning. Option (a) must now state a ground that was
+> never the fixed defect; option (b)'s "record of why it existed" must be reconstructed from
+> `gaia/DECISIONS.md` §UI bindings item 8 rather than from a reproducible failure. **Owner call;
+> nothing here settles it. Flagged loudly because this is precisely the outcome the deadline
+> existed to prevent.**
 
 ## Engine-layer split
 

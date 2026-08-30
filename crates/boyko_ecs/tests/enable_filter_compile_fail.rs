@@ -59,6 +59,13 @@
 //!   suite runs `cargo check` — the in-body `const {}` at each method top is the
 //!   codegen-time trigger for real callers).
 //!
+//! * `contains_dense_data_rejected.rs` — KE3: `Query::contains` with a dense `D`
+//!   → `assert_contains_not_dense` fires. Dense-store membership needs a data
+//!   fetch, so a `contains` that answered anyway would answer a DIFFERENT
+//!   question from `get`, silently and only for dense queries. Same `const ITEM`
+//!   shape and the same caveat below: written only as the in-body `const {}`, the
+//!   refusal had no fixture in this suite that could fire at all.
+//!
 //!   COVERAGE CAVEAT (reviewer P2-b): because a `compile_fail` suite only
 //!   `cargo check`s, these three cases invoke the shared helper DIRECTLY in a
 //!   `const ITEM` — they pin that the *helper* rejects an enable-bearing `F`, NOT

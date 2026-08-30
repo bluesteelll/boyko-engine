@@ -75,19 +75,23 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     }
 
     // EnableTag D5 (Step 10 hardening A): a bitset enable tag has NO
-    // `ComponentPool`, so the structural lifecycle hooks (on_add / on_insert /
-    // on_replace / on_remove) can NEVER fire for it — enable/disable is a
-    // per-row bit RMW, not a structural component op. Silently accepting the
-    // combination would install dead hooks (a compile-but-lie footgun), so
-    // reject it loudly at macro time. (A future enable-bit observer, if any,
-    // would be a SEPARATE key, not these structural hooks.)
+    // `ComponentPool`, so the lifecycle hooks (on_add / on_insert / on_replace /
+    // on_remove / on_despawn) can NEVER fire for it — enable/disable is a
+    // per-row bit RMW, not a structural component op, and a bitset id is
+    // excluded from every archetype signature, so `ArchetypeFlags` never even
+    // ORs its hook bits in. Silently accepting the combination would install
+    // dead hooks (a compile-but-lie footgun), so reject it loudly at macro time.
+    // KM2 folds `on_despawn` into this refusal for the same reason it is refused
+    // for the other four — the flag bit is computed over the signature. (A
+    // future enable-bit observer, if any, would be a SEPARATE key.)
     if hooks.storage_bitset && hooks.any() {
         return syn::Error::new(
             input.ident.span(),
             "#[component(storage = \"bitset\")] cannot combine with lifecycle hooks \
-             (on_add/on_insert/on_replace/on_remove): an enable-bit tag has no \
-             ComponentPool, so these hooks never fire. Remove the hook(s), or drop \
-             `storage = \"bitset\"` to use a normal component.",
+             (on_add/on_insert/on_replace/on_remove/on_despawn): an enable-bit tag has \
+             no ComponentPool and is excluded from every archetype signature, so these \
+             hooks never fire. Remove the hook(s), or drop `storage = \"bitset\"` to use \
+             a normal component.",
         )
         .to_compile_error()
         .into();
@@ -170,8 +174,12 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     // line in the generated `component_id()` reads THAT const — so the cold `HOOKS`
     // slot is installed for a relationship even though the in-macro `hooks` struct
     // carries no user hook path.
+    // KM2: the relationship arm MERGES the user's non-owned hook paths
+    // (`on_add` / `on_remove` / `on_despawn`) into the generated body. It used to
+    // discard them — this is the only `register_hooks` emitted for a
+    // relationship side, so a user hook on one compiled and never fired.
     let hook_items = match &relationship {
-        Some(role) => role.hook_items_codegen(),
+        Some(role) => role.hook_items_codegen(&hooks),
         None => hooks.codegen(),
     };
 
@@ -427,6 +435,12 @@ pub(crate) struct ComponentHookPaths {
     pub(crate) on_insert: Option<Path>,
     pub(crate) on_replace: Option<Path>,
     on_remove: Option<Path>,
+    /// KM2: the entity-level despawn hook, fired once per dying entity BEFORE
+    /// any component drops. Deferred out of Phase 14a and shipped kernel-side by
+    /// Feature 2 (`ComponentHooks::on_despawn`, `ArchetypeFlags::ON_DESPAWN_HOOK`,
+    /// `trigger_on_despawn`); the derive key was unlocked once the kernel half
+    /// was re-verified firing.
+    on_despawn: Option<Path>,
     no_bundle: bool,
     /// `true` iff `storage = "bitset"` was supplied (EnableTag D5).
     storage_bitset: bool,
@@ -461,6 +475,31 @@ impl ComponentHookPaths {
             || self.on_insert.is_some()
             || self.on_replace.is_some()
             || self.on_remove.is_some()
+            || self.on_despawn.is_some()
+    }
+
+    /// The hook paths a relationship side does NOT own, as `register_hooks`
+    /// assignment statements (KM2). A `#[derive(Relationship)]` /
+    /// `#[derive(RelationshipTarget)]` component generates its `register_hooks`
+    /// body from [`RelationshipRole::hook_items_codegen`], which owns
+    /// `on_insert` / `on_replace` and is the ONLY body emitted — so anything the
+    /// user declared used to be discarded wholesale. `reject_hook_collision`
+    /// refuses the owned slots, and its doc states the remaining slots "compose
+    /// without conflict"; this method is what makes that true. `on_insert` /
+    /// `on_replace` are deliberately absent here — a user value for either is a
+    /// compile error before this is ever called.
+    pub(crate) fn non_relationship_owned_assigns(&self) -> Vec<TokenStream2> {
+        let mut assigns: Vec<TokenStream2> = Vec::new();
+        if let Some(p) = &self.on_add {
+            assigns.push(quote! { hooks.on_add = ::std::option::Option::Some(#p); });
+        }
+        if let Some(p) = &self.on_remove {
+            assigns.push(quote! { hooks.on_remove = ::std::option::Option::Some(#p); });
+        }
+        if let Some(p) = &self.on_despawn {
+            assigns.push(quote! { hooks.on_despawn = ::std::option::Option::Some(#p); });
+        }
+        assigns
     }
 
     /// Emits the `const HAS_HOOKS = true;` + `register_hooks` impl when any key
@@ -486,6 +525,9 @@ impl ComponentHookPaths {
         }
         if let Some(p) = &self.on_remove {
             assigns.push(quote! { hooks.on_remove = ::std::option::Option::Some(#p); });
+        }
+        if let Some(p) = &self.on_despawn {
+            assigns.push(quote! { hooks.on_despawn = ::std::option::Option::Some(#p); });
         }
 
         quote! {
@@ -605,13 +647,14 @@ fn reject_non_zst_bitset_tag(input: &DeriveInput) -> Result<(), TokenStream> {
 /// Parses the optional `#[component(on_add = path, ...)]` attribute (Phase 14a,
 /// plan §6.1). Mirrors the `#[event]` macro's `parse_nested_meta` idiom.
 ///
-/// Accepts the four lifecycle-hook keys (`on_add` / `on_insert` / `on_replace` /
-/// `on_remove`), each `= <path>`, the bare `no_bundle` flag key (Phase 22
-/// D7 — suppresses the single-component `Bundle` emission), and the
+/// Accepts the five lifecycle-hook keys (`on_add` / `on_insert` / `on_replace` /
+/// `on_remove` / `on_despawn`), each `= <path>`, the bare `no_bundle` flag key
+/// (Phase 22 D7 — suppresses the single-component `Bundle` emission), and the
 /// `storage = "bitset"` NameValue key (EnableTag D5 — a `LitStr` value, Wave 5
-/// Step 10). Rejects:
-/// - `on_despawn` (removed from 14a — deferred to 14b),
-/// - any other unknown key,
+/// Step 10). `on_despawn` was deferred out of Phase 14a and unlocked by KM2 once
+/// the kernel half (`ComponentHooks::on_despawn` + `ArchetypeFlags::ON_DESPAWN_HOOK`
+/// + `trigger_on_despawn`) was re-verified firing. Rejects:
+/// - any unknown key,
 /// - a duplicate key,
 /// - a key missing its `= <path>` value (surfaced by `meta.value()` / `parse`),
 /// - an unknown `storage` string (only `"bitset"` is supported),
@@ -635,17 +678,6 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
         seen_attr = true;
 
         let result = attr.parse_nested_meta(|meta| {
-            // `on_despawn` was removed from Phase 14a — emit a clear error rather
-            // than letting it fall into the generic "unknown key" branch.
-            if meta.path.is_ident("on_despawn") {
-                return Err(meta.error(
-                    "on_despawn is not supported in this version (deferred to Phase 14b); \
-                     valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
-                     no_clone, clone = <fn>, storage = \"bitset\", no_serialize, \
-                     stable_name = \"..\", format_version = N",
-                ));
-            }
-
             // Phase 22 D7: bare flag key — no `= <value>` follows.
             if meta.path.is_ident("no_bundle") {
                 if paths.no_bundle {
@@ -771,12 +803,16 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 &mut paths.on_replace
             } else if meta.path.is_ident("on_remove") {
                 &mut paths.on_remove
+            } else if meta.path.is_ident("on_despawn") {
+                // KM2: unlocked. The kernel slot has existed and fired since
+                // Feature 2; only the derive was still refusing the key.
+                &mut paths.on_despawn
             } else {
                 return Err(meta.error(
                     "unknown #[component(...)] key; \
-                     valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, \
-                     no_clone, clone = <fn>, storage = \"bitset\", no_serialize, \
-                     stable_name = \"..\", format_version = N",
+                     valid keys: on_add, on_insert, on_replace, on_remove, on_despawn, \
+                     no_bundle, no_clone, clone = <fn>, storage = \"bitset\", \
+                     no_serialize, stable_name = \"..\", format_version = N",
                 ));
             };
 

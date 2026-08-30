@@ -18,6 +18,7 @@ mod component;
 mod event;
 mod relationship;
 mod resource;
+mod state_chart;
 mod system_set;
 mod ui;
 
@@ -68,9 +69,11 @@ use proc_macro::TokenStream;
 /// unsafe fn my_on_remove(world: DeferredEcsMaster<'_>, ctx: HookContext) { /* ... */ }
 /// ```
 ///
-/// Valid keys: `on_add`, `on_insert`, `on_replace`, `on_remove`. Any other key
-/// (including `on_despawn`, which is deferred to Phase 14b) is a compile error,
-/// as is a duplicate key. When at least one key is present the derive emits
+/// Valid keys: `on_add`, `on_insert`, `on_replace`, `on_remove`, `on_despawn`.
+/// Any other key is a compile error, as is a duplicate key. `on_despawn` fires
+/// once per DYING ENTITY at the despawn site, before any component drops — it is
+/// not the per-component `on_remove`, and it is the one hook a pull-style
+/// carrier cannot substitute for. When at least one key is present the derive emits
 /// `const HAS_HOOKS: bool = true;` and a `register_hooks` impl; the
 /// macro-generated `component_id()` then installs the hooks into the cold
 /// `HOOKS` table on first call, atomically with ID assignment and therefore
@@ -529,4 +532,63 @@ pub fn ui(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Bindable, attributes(bind))]
 pub fn bindable_macro(input: TokenStream) -> TokenStream {
     bindable::expand(input)
+}
+
+/// Hierarchical state machines (Harel-lite charts) with a **flat** runtime.
+///
+/// Nested `state` blocks, `enter` / `exit` actions and `on EVENT => TARGET`
+/// routes compile to a flat enum of LEAVES, one system per leaf, and
+/// `run_if(in_state(leaf))` registrations. The hierarchy exists only at compile
+/// time: innermost-wins handler inheritance and least-common-ancestor exit/enter
+/// chains are resolved here, so the runtime does no tree walk and keeps no
+/// parallel data structure.
+///
+/// This is the engine's single machine-codegen authority. Aether's `machine`
+/// construct is a front-end that lowers its own sugar onto this macro rather
+/// than flattening charts a second time.
+///
+/// # Semantics
+///
+/// * **Innermost wins** — a handler on a composite is inherited by every
+///   descendant leaf that declares no handler of its own for that event.
+/// * **LCA chains** — a transition exits source-side states below the least
+///   common ancestor innermost-first and enters target-side ones
+///   outermost-first, so two leaves under one composite never re-enter it.
+/// * **Exactly one chain per frame** — a leaf's routes are merged into ONE
+///   system: every event lane is drained, the **first-declared** accepting route
+///   wins, and only its exit/action/enter chain runs.
+/// * **Unreachable states are a compile error** — a state no transition targets
+///   and that is not the chart's `initial` can never be entered.
+///
+/// # Generated registration surface
+///
+/// * `__state_chart_install_<chart>(app)` — `insert_state` of the initial leaf,
+///   plus its entry chain as a startup system.
+/// * `__state_chart_systems_<chart>(builder)` — the per-leaf systems.
+///
+/// # Example
+///
+/// ```ignore
+/// boyko_macros::state_chart! {
+///     chart GameFlow;
+///     initial Boot;
+///
+///     state Boot { on AssetsReady => Playing; }
+///     state Playing {
+///         initial Running;
+///         enter(mut cmds: Commands) { cmds.spawn(HudRoot); }
+///         state Running { on PausePressed => Playing.Paused; }
+///         state Paused  { on PausePressed => Playing.Running; }
+///         on PlayerDied(score: Res<Score>) if score.lives == 0 => GameOver;
+///     }
+///     state GameOver { on RestartPressed => Boot; }
+/// }
+/// ```
+///
+/// The example is `ignore`'d: a proc-macro crate cannot consume its own macros,
+/// and `boyko-macros` cannot depend on `boyko-ecs` (see the crate doc). Real
+/// usage lives in `aether-tests`.
+#[proc_macro]
+pub fn state_chart(input: TokenStream) -> TokenStream {
+    state_chart::expand(input.into()).into()
 }

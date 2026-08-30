@@ -801,11 +801,19 @@ mod tests {
     // ── Tests ─────────────────────────────────────────────────────────────────
 
     /// Test #1: EventConfig bounds validation.
+    ///
+    /// KE8 raised `MAX_EVENT_THREADS` from 64 to 65 — one lane per pool worker
+    /// (`boyko_threadpool::MAX_WORKERS == 64`) PLUS one for a non-worker sender —
+    /// so 65 is now inside the range and 66 is the first refusal. This is the
+    /// SECOND copy of these bounds in the crate (`event_config.rs` has the
+    /// other); both were updated, and this one is why a sweep with
+    /// `--no-fail-fast` was needed to see it.
     #[test]
     fn event_config_bounds() {
         assert!(EventConfig::new(1, 64).is_ok());
         assert!(EventConfig::new(0, 64).is_err());
-        assert!(EventConfig::new(65, 64).is_err());
+        assert!(EventConfig::new(65, 64).is_ok(), "KE8: the 65th lane is admissible");
+        assert!(EventConfig::new(66, 64).is_err());
         assert!(EventConfig::new(1, 0).is_err());
         assert!(EventConfig::new(1, 16385).is_err());
     }

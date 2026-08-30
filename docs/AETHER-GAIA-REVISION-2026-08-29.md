@@ -67,6 +67,54 @@ four sites **created a fifth**. Doc-rot repair is as error-prone as doc-rot auth
 rule this establishes: **after repairing a false claim, run a separate pass asking whether the
 replacement is true**, or the repair propagates the lie under cover of a fix.
 
+## One mechanism, three shipped defects
+
+**The sharpest evidence that these are one campaign and not two.** Three defects in **shipped**
+code — two of them found by the *data* campaign, in kernel and UI code the *logic* campaign owns —
+are the same defect on the same axis: **a mechanism that resolves a per-archetype pool without
+screening the storage kind, and so is blind to the kinds that own no pool** (`Dense`, `Bitset`).
+Every one compiles, runs, and answers wrongly in silence.
+
+| Site | Symptom | Raised by |
+|---|---|---|
+| `Or<(…)>` with a dense arm | the arm is never true; the query returns a plausible wrong set | Aether **KE1** / rung **R0** ([`aether-v2/KERNEL-BACKLOG.md`](aether-v2/KERNEL-BACKLOG.md)) |
+| `any_changed_since` over a dense or bitset bind source | the change gate is never true, so a `boyko_ui` binding over such a component **never updates**, and nothing is logged | Gaia **GK-2** ([`gaia/DECISIONS.md`](gaia/DECISIONS.md) §UI bindings, item 8) |
+| the load path's `requires` closure | nothing on load adds a component the file omitted, so `query<(&Health, &Regen)>` **silently skips level-authored entities** while gameplay-spawned ones match | Gaia **F4(ii)** ([`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) §Owner ballots) |
+| `with F` / `without F` over a `flag` | the *fourth* member, and the one that shows the class is not about Dense alone: `with` matches nothing, `without` excludes nothing — **two different** wrong answers from one storage kind | Aether **AB-11** ([`aether-v2/CONSTRUCTS.md`](aether-v2/CONSTRUCTS.md) §`system`) |
+
+Two consequences the corpus has to carry, because neither is visible from inside one campaign:
+
+- **A fix on one ladder falsifies a ground on the other.** R0 removes the ground under Gaia's
+  `Or`-over-dense codegen ban — that is ballot **GB-9**, and it is why the ban's site carries a
+  superseded-by note pointing at a rung it does not own.
+- **The class needs an enumeration, not four anecdotes — and it now has one.** Its single home is
+  [`aether-v2/KERNEL-BACKLOG.md`](aether-v2/KERNEL-BACKLOG.md) **§Census — "resolves a per-archetype
+  pool by `ComponentId` without screening the storage kind"**, landed with R0 and carrying its own
+  producing command. **Both ladders cite that section; neither re-derives it** — re-deriving per
+  campaign is how the same defect gets found a fifth time. Its content is deliberately not repeated
+  here.
+
+## Aether and Gaia are one body of work
+
+*Aether is the language for **logic**, Gaia the language for **data*** — scenes, UI documents,
+assets (owner, 2026-08-28). The split is by **subject matter, not by project**: the two share a
+kernel, a tooling axis, a diagnostic envelope and an id namespace, and each has already found
+defects that belong to the other. The couplings that exist **today**, each checkable:
+
+| Coupling | Where |
+|---|---|
+| **Shared kernel enablers.** Gaia cites the Aether campaign's backlog ids directly; `KE1`'s fix is the disposition question in Gaia's own ballot GB-9, and Gaia's `GK-2` names the same pool-resolution mechanism | [`aether-v2/KERNEL-BACKLOG.md`](aether-v2/KERNEL-BACKLOG.md) is cited from [`gaia/DECISIONS.md`](gaia/DECISIONS.md); the backlog's own header enumerates `docs/gaia/` as a citing corpus |
+| **One AI-orientation requirement set, housed on the Aether side but partly owned by Gaia.** `AIR-08` (stable node ids) and `AIR-16` (grammar rulings) carry **"Gaia spec"** in their own Rung column; `AIR-17` carries **"Gaia G0"**; `AIR-09` carries "R8 / Gaia tooling" | [`aether-v2/AI-ORIENTATION.md`](aether-v2/AI-ORIENTATION.md) |
+| **One diagnostic envelope and one code-registry discipline.** `AE####` (Aether) and `GA####` (Gaia) are the *same* registry rule, minted by `AIR-02`; Gaia's diagnostics ride the `AIR-01` envelope from the baker's first commit | `AI-ORIENTATION.md` AIR-01/02; [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) §Relations |
+| **Cross-campaign ballots.** Two ballots in the **Gaia** `GB` series name rungs on the **Aether** ladder: **GB-9** (decide before R0) and **GB-8** (names **R8** as a candidate owner of the corpus-wide link/id census) | [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) §2026-08-29; [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) §Open ballots |
+| **One id namespace, enforced across both directories.** The `E#`/`M#` → `KE#`/`KM#` rename was scoped wrongly *because* it treated `docs/gaia/` as someone else's corpus, and had to be re-run over all of `docs/` | `KERNEL-BACKLOG.md`'s own header records the miss |
+| **A shared surface boundary.** Aether's `scene` narrows to dev-bootstrap and the shipped world form moves to Gaia; Gaia's baker **prints the existing `boyko_serialize` format** rather than minting a second one | [`aether-v2/CONSTRUCTS.md`](aether-v2/CONSTRUCTS.md) §`material`, `scene`; [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Inherited pipeline |
+
+**Working rule.** A reader who arrives at either campaign's `CAMPAIGN.md` must be able to reach the
+other from it, and a change that touches a coupling above updates **both** sides in the same commit
+— a diverged pair is worse than a missing one, because the reader cannot tell which side is current
+and finds out only by acting on the stale one.
+
 ## Per-file: what changed
 
 | File | Substance |

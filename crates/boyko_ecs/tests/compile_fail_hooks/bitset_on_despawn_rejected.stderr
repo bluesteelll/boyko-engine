@@ -1,0 +1,5 @@
+error: #[component(storage = "bitset")] cannot combine with lifecycle hooks (on_add/on_insert/on_replace/on_remove/on_despawn): an enable-bit tag has no ComponentPool and is excluded from every archetype signature, so these hooks never fire. Remove the hook(s), or drop `storage = "bitset"` to use a normal component.
+  --> tests/compile_fail_hooks/bitset_on_despawn_rejected.rs:22:8
+   |
+22 | struct Bad;
+   |        ^^^

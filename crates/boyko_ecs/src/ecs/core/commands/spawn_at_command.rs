@@ -329,11 +329,23 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
         // ── Step 6: archetype-side bookkeeping ────────────────────────
         archetype.entity_ids.push(entity.id());
         archetype.current_index = row + 1;
+        // KE6 write site 8/9 — `&mut Archetype`, the same borrow the
+        // `current_index` advance above uses (its last use, per the Step-8
+        // note below).
+        archetype.stamp_arch_added(current_tick);
 
         // ── Step 7: fast-store registration ────────────────────────────
         world
             .entity_master
             .register_entity_with_ptr(entity, archetype_ptr, row as u32);
+
+        // ── Step 7b (KE10): initial enable-bit states ───────────────────
+        // Applied BEFORE the fires so an `on_add` hook observes the initial
+        // state and can override it (same ordering as `EcsMaster::create_entity`).
+        // On a spawn every signature id is newly attached. Gated on
+        // `ArchetypeFlags::FLAGS_ON_ATTACH` — one `u16` test when no component
+        // in the process declares `flags (…)`.
+        world.apply_attach_flags_all(entity);
 
         // ── Step 8 (Phase 14a §3.1): fire on_add / on_insert hooks ──────
         // The closure's per-invocation `&mut *archetype_ptr` (Step 5) dropped

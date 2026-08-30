@@ -26,7 +26,9 @@ use boyko_ecs::App;
 use boyko_ecs::ecs::core::events::event_config::EventConfig;
 use boyko_ecs::ecs::core::state::State;
 
-/// The kernel's maximum event-lane count (`EventConfig` validates `1..=64`). Sizing for it
+/// One event lane per pool worker (`boyko_threadpool::MAX_WORKERS` == 64). The kernel
+/// ceiling is `MAX_EVENT_THREADS` == 65 since KE8 — one more, reserved for a
+/// non-worker sender — so `EventConfig` validates `1..=65`. Sizing for the worker count
 /// makes lane selection independent of how wide THIS machine's worker pool is.
 const MAX_EVENT_LANES: u32 = 64;
 

@@ -18,6 +18,106 @@ No interpreter, no registry, no reflection, no second codegen path.
 
 ---
 
+## STATUS 2026-08-29 — this file is LIVE, and the `Verdict` column is still open
+
+**What it is now.** Two things at once, and both are current:
+
+1. **The catalogue of what v1 actually accepts** — still the authority over
+   [AETHER-LANG-PLAN.md](AETHER-LANG-PLAN.md), whose design intent §5 records as diverging from the
+   source in seventeen places.
+2. **The declared baseline of Aether v2.** [`aether-v2/CONSTRUCTS.md`](aether-v2/CONSTRUCTS.md) is
+   written as a *delta over this file* and says so in its own first paragraph, so a row's **absence
+   from the delta is inheritance, not deletion** — that file states the rule explicitly for the
+   filter grammar. Reading v2 without this file therefore under-reads it.
+
+**The `Verdict` column is still empty, and it is still the owner's.** The v2 campaign did not fill
+it in — it answers at *construct* granularity and **never cites a row id of this file**. Two
+runnable measurements, both from the repo root:
+
+```
+grep -rnoE '\b(CM|TG|BN|EV|SY|SF|SC|SO|SM|PL|MC|MS|MT|SL|SN|AT|SP)-[0-9]+\b' docs/aether-v2/ docs/gaia/   # 0 hits
+grep -rnoE '\b(C|D|N|X|P|G)-[0-9]+\b'                                        docs/aether-v2/ docs/gaia/   # 1 hit
+```
+
+The single hit is `docs/gaia/PENDING-SYNTAX-PLAN.md:43` → **`G-09`**, which is *not* a citation of
+this file: it belongs to Gaia's own conformance-audit series (`M#` / `C#` / `I#` / `G-##`, one prefix
+per hunting lens). **So: zero of this catalogue's rows are cited anywhere in either campaign, and
+the mapping below is section-level and NOT clean at row granularity.** It is offered so the owner
+can see which rows a verdict would still be deciding something about; it is not a claim that those
+rows are answered.
+
+### Rows a v2 ruling already disposes of
+
+| Rows | v2 disposition | Site |
+|---|---|---|
+| `C-1`..`C-9` | seven of the nine constructs reshaped, and **seven new ones** added (`flag`, `set`, `relation`, `attributes`, `tags`, `each`, `resource`) | [`aether-v2/CONSTRUCTS.md`](aether-v2/CONSTRUCTS.md), throughout |
+| `D-1` (everything is `pub`) | **reaffirmed** — `relation` keeps the kernel's mandatory private reverse-index field generator-internal so there is "no exception to the 'everything pub' rule" | CONSTRUCTS.md §`relation` |
+| `D-4` (trailing commas) | reaffirmed and generalised to the new group lists | CONSTRUCTS.md, shared rules |
+| `D-7` / `EV-9` (an `event` is not registered for you) | **changed** — the sibling `plugin` auto-registers the lanes. ⚠ on ballot **AB-1**, which may stage it | CONSTRUCTS.md §`event`; CAMPAIGN.md §Open ballots |
+| `CM-2` / `CM-7` (`requires` takes bare paths only) | **closed** — `requires (Regen, Mass(1.0), Transform = expr)` carries all three engine ctor forms | CONSTRUCTS.md §`component` |
+| `CM-3` (four hook keys) | becomes the `hooks (…)` group and gains a fifth, `on_despawn` | CONSTRUCTS.md §`component`; KERNEL-BACKLOG `KM2` |
+| `CM-4` (`no_bundle`) | respelled `kernel (bundle = off)` | CONSTRUCTS.md §`component` |
+| `CM-8` / `N-5` / `P-12` (no storage key on `component`) | **half closed** — `kernel (storage = table \| dense)` lands; `storage = bitset` stays absent *by design*, because that is now the `flag` construct. ⚠ `requires` over a dense component is a KNOWN-OPEN hole on ballot **AB-6** | CONSTRUCTS.md §`component` |
+| `TG-1` / `TG-2` | **split** — `tag` (ZST, may take `with { }`) vs `flag` (enable bit, accepts nothing at all) | CONSTRUCTS.md §`tag` / `flag` |
+| `TG-5` | ⚠ **the row is measurably WRONG — see the correction below** | — |
+| `BN-1` | **changed** — a positional `bundle Pawn(Health, Velocity)` becomes primary, the named form kept for `..base`; a NEW refusal for a repeated component type | CONSTRUCTS.md §`bundle` |
+| `BN-2` (arity 16) | kept, in both forms | CONSTRUCTS.md §`bundle` |
+| `EV-7` (ZST event fails at monomorphisation) | **changed** — refused at parse with a counter-suggestion | CONSTRUCTS.md §`event` |
+| `EV-8` (no flat constructor) | **changed** — a flat `Damage::new(…)` is generated in source field order | CONSTRUCTS.md §`event` |
+| `SY-9` (verbatim escape is never mut-inferred) | eased for the commonest case — `nonsend<T>` / `mut nonsend<T>` become sugar | CONSTRUCTS.md §`system`; DECISIONS `C4` |
+| `SF-1` (`with` / `without`) | over a `flag` both are silent wrong answers; whether v2 **refuses** them is ballot **AB-11** | CONSTRUCTS.md §`system` + §Open ballots |
+| `SC-1`..`SC-9` | **restructured** — the flat clause list becomes four groups (`schedule` / `sets` / `order` / `when`), `chain` is added, and `when` folds **eagerly** | CONSTRUCTS.md §`system`; DECISIONS `C4`, `D5` |
+| `MC-*` / `MS-*` | grammar **unchanged**; the codegen authority moves to `boyko_macros::state_chart!` (rung **R2**), which merges per-leaf routes and aligns arbitration to first-declared-wins; `O8` adds payload binding; per-entity machines are a new form | CONSTRUCTS.md §`machine`; CAMPAIGN.md R2; [`aether-v2/MACHINES.md`](aether-v2/MACHINES.md) |
+| `N-6` | closed with `CM-7` · `N-7` closed with `D-7` · `N-9` closed by `machine … on entity` (rung R5) · `N-19` closed by `when (A or B)` / `unless C` over the kernel combinators · `N-20` closed by the new `set` construct (ratified `O1`) · `P-14` closed with `N-9` | CONSTRUCTS.md; MACHINES.md; OPEN.md `O1` |
+| `N-18` (no `Or<>` filter) | **RESERVED, not built** (`D4`): the form waited on a real in-tree consumer **and** the kernel `Or`-dense fix. ⚠ rung **R0 landed 2026-08-29** and removed the second half of that ground, so the reserve now stands on the consumer clause alone — see the GB-9 notes in `DECISIONS.md` `D4` and `CONSTRUCTS.md` §`system` | DECISIONS `D4` |
+
+### Rows with NO v2 disposition — a verdict here still decides something
+
+- **`material` — the whole of §2.9 (`MT-1`..`MT-9`).** Out of the v2 campaign: parked pending a
+  policy call the language cannot make (is a material shader a source or an asset). Its own campaign.
+- **`scene` — the whole of §2.10 (`SL-*`, `SN-*`, `AT-*`, `SP-*`).** `scene` narrows to a
+  dev-bootstrap role; the shipped world form moves to **Gaia** ([`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md)).
+  Two emission fixes ride independently of any rung (one generated extras bundle per node instead of
+  an `.insert` chain; `spawn_batch` for same-shaped anonymous nodes). Four of the §3 absences —
+  `N-14` (no node handle), `N-15` (no scene unload), `N-16` (mesh sources), `N-17` (no material asset
+  handle) — are **Gaia's ground now**, addressed there at a different granularity (node ids under
+  AIR-08; unload under ballot F5 / rung G6; stable asset ids under gaia `DECISIONS.md` §Identity and
+  the `GN1` bake lint), **never row by row**.
+- **`X-1`..`X-12` — all twelve sharp edges.** No v2 site disposes of any of them.
+- **`D-2`, `D-3`, `D-5`, `D-6`, `D-8`** · **`CM-1`, `CM-5`, `CM-6`, `CM-9`, `CM-10`** ·
+  **`TG-3`, `TG-4`, `TG-6`** · **`BN-3`** · **`EV-1`..`EV-6`** · **`SY-1`..`SY-8`** ·
+  **`SF-2`, `SF-3`** · **`SO-1`..`SO-6`** · **`SM-1`..`SM-5`** · **`PL-1`..`PL-6`** ·
+  **`N-1`..`N-4`, `N-8`, `N-10`..`N-13`, `N-21`, `N-22`** · **`G-1`..`G-7`**.
+- **§5 (`P-1`..`P-17`) is historical**, not open: it compares the v1 *plan* against the v1 *source*,
+  both of which are now records. Only `P-12` and `P-14` are closed by v2 (above); `P-13`
+  (`priority N`) remains absent from the grammar.
+
+### ⚠ One row of this catalogue is measurably wrong: `TG-5`
+
+`TG-5` states that over a bitset tag "`With` / `Without` is **not** refused but never matches."
+**That is right about `With` and wrong about `Without`, and the two failures are different.** A
+bitset id is filtered out of every archetype signature (`Archetype::filtered_signature_mask`,
+applied by `ArchetypeMaster::create_archetype`), yet both filters still take the *archetypal* path
+over it, so each tests that mask directly: **`with F` matches NOTHING** (its include bit is
+unreachable) and **`without F` excludes NOTHING — it matches everything** (bit-absence is always
+true). Neither is diagnosed. The corrected mechanism is written out in
+[`aether-v2/CONSTRUCTS.md`](aether-v2/CONSTRUCTS.md) §`system`, and the refutation is recorded in
+[`AETHER-GAIA-REVISION-2026-08-29.md`](AETHER-GAIA-REVISION-2026-08-29.md) §What the engine refuted.
+The row is left as written — this file is a record — but **do not act on `TG-5` without reading the
+correction.** Whether v2 *refuses* these two spellings is open ballot **AB-11**.
+
+### ⚠ Id-namespace note
+
+This file's §6 policy series is spelled `G-1`..`G-7`, and it is **the third live `G` series in the
+corpus**: Gaia's rung ladder is `G0`..`G8`, and Gaia's conformance-audit lens series is `G-##`
+(hyphenated, two digits — `G-09` at `gaia/PENDING-SYNTAX-PLAN.md:43`), which differs from `G-1`
+only by zero-padding. The campaign has already renumbered one `G#` series for exactly this —
+`aether-v2/AI-ORIENTATION.md`'s defect series became `AD1`..`AD4` because "the old `G#` collided
+head-on with Gaia's rungs". Cite this file's rows **with the hyphen AND with the filename**, never
+as a bare `G1` or `G-1`.
+
+---
+
 ## 0. The whole grammar
 
 ```ebnf

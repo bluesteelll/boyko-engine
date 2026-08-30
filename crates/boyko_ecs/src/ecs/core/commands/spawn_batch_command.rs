@@ -69,6 +69,7 @@ use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::identifiers::primitives::{EntityId, InlandPoolId};
 
@@ -698,6 +699,11 @@ where
             .entity_ids
             .extend_exact((start_id..start_id + n).map(EntityId));
         archetype.current_index = start_row + n;
+        // KE6 write site 9/9 — `&mut Archetype`. One store for the whole batch:
+        // every row in it carries the same `current_tick` (stamped in bulk by
+        // `fill_ticks_batch` above), which is the spawn-burst case the item
+        // exists to serve.
+        archetype.stamp_arch_added(current_tick);
 
         // ── Step 8: bulk-register entities ────────────────────────────
         world.entity_master.register_batch(
@@ -706,6 +712,33 @@ where
             start_row as u32,
             n,
         );
+
+        // ── Step 9 (KE10): initial enable-bit states, per spawned entity ──
+        // Unlike the on_add/on_insert gap documented at Step 5b, this is NOT
+        // left to match the batch path's lifecycle silence: a flag's initial
+        // state is part of what the component ARRIVES with, not a reaction to
+        // its arrival, so skipping it here would make `spawn_batch` produce
+        // entities in a different state than `spawn` — a silent wrong answer
+        // rather than a missing notification.
+        //
+        // 0%-gate: the first `apply_attach_flags_all` reads the archetype's
+        // `ArchetypeFlags::FLAGS_ON_ATTACH` and returns; to keep even that out
+        // of a batch spawn in a world with no `flags (…)` group anywhere, the
+        // whole loop rides one hoisted test of the same bit.
+        //
+        // SAFETY: `archetype_ptr` is stable, write-capable slab provenance held
+        //   across Steps 5-8; reading `flags` is one `u16` load (no `&mut`).
+        let attach_flags = unsafe { (*archetype_ptr).flags };
+        if attach_flags.contains(ArchetypeFlags::FLAGS_ON_ATTACH) {
+            for i in 0..n {
+                let id = EntityId(start_id + i);
+                // Read the generation back out of the slot `register_batch` just
+                // wrote rather than assuming the fresh-reserve value, so this
+                // keeps working if the batch path ever recycles ids.
+                let generation = world.entity_master.entities_inland[id.0].generation();
+                world.apply_attach_flags_all(Entity::new(id, generation));
+            }
+        }
     }
 }
 

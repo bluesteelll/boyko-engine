@@ -19,6 +19,7 @@ use static_assertions::assert_impl_all;
 
 use crate::ecs::core::archetype::archetype::{Archetype, Column};
 use crate::ecs::core::archetype::archetype_signature::ArchetypeSignature;
+use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component_mask::ComponentMask;
 use crate::ecs::core::component::component_pool_bundle::ComponentPoolBundle;
 use crate::ecs::core::component::component_registry::{self, MAX_COMPONENTS};
@@ -507,6 +508,12 @@ impl ArchetypeBundle {
             // no commit until the first push).
             addr_of_mut!((*slot_ptr).entity_ids)
                 .write(VmColumn::new("Archetype.entity_ids", POOL_MAX_ROWS));
+            // KE6: the `ArchAdded` structural stamp must be initialised on the
+            // in-place slab path too (U13) or the slot is partially uninit.
+            // A fresh archetype holds no rows, so "never stamped" is the honest
+            // start; `Archetype::has_structural_add_since` gates on
+            // `entity_count() != 0` so the sentinel is never interpreted.
+            addr_of_mut!((*slot_ptr).arch_added).write(Tick::ZERO);
         }
 
         // All fields are now initialised; promote the raw pointer to a

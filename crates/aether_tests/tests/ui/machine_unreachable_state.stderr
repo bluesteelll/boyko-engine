@@ -1,0 +1,11 @@
+error: state `Victory` is unreachable: no transition in `M` targets it and it is not the chart's `initial` state, so the machine can never enter it — add a transition into it, or remove it
+  --> tests/ui/machine_unreachable_state.rs:27:15
+   |
+27 |         state Victory {
+   |               ^^^^^^^
+
+error: state `Credits` and everything nested in it are unreachable: no transition in `M` targets it and it is not the chart's `initial` state, so the machine can never enter it — add a transition into it, or remove it
+  --> tests/ui/machine_unreachable_state.rs:31:15
+   |
+31 |         state Credits {
+   |               ^^^^^^^

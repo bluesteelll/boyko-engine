@@ -1,0 +1,20 @@
+error[E0080]: evaluation panicked: Query::contains cannot answer for a dense `D` — dense-store membership needs a data fetch. Use get(e).is_some() / get_mut(e).is_some().
+  --> tests/enable_filter_compile_fail/contains_dense_data_rejected.rs:24:15
+   |
+24 | const _: () = assert_contains_not_dense::<&Dense>();
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `assert_contains_not_dense::<&Dense>`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: src/ecs/core/iters/query/query.rs
+   |
+   | /     assert!(
+   | |         !D::HAS_DENSE,
+   | |         "Query::contains cannot answer for a dense `D` — dense-store \
+   | |          membership needs a data fetch. Use get(e).is_some() / \
+   | |          get_mut(e).is_some()."
+   | |     );
+   | |_____- in this macro invocation

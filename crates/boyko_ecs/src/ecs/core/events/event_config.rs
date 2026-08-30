@@ -35,12 +35,13 @@ impl EventConfig {
     /// # Errors
     ///
     /// Returns `Err(InvalidEventConfig)` if:
-    /// - `thread_count` is 0 or exceeds [`MAX_EVENT_THREADS`] (64).
+    /// - `thread_count` is 0 or exceeds [`MAX_EVENT_THREADS`] (65 — one lane per
+    ///   pool worker plus one for a non-worker sender; KE8).
     /// - `capacity_per_lane` is 0 or exceeds [`MAX_EVENT_CAPACITY`] (16 384).
     pub fn new(thread_count: u32, capacity_per_lane: u32) -> EcsResult<Self> {
         if thread_count == 0 || thread_count > MAX_EVENT_THREADS {
             return Err(EcsError::InvalidEventConfig {
-                reason: "thread_count out of range (must be 1..=64)",
+                reason: "thread_count out of range (must be 1..=65)",
             });
         }
         if capacity_per_lane == 0 || capacity_per_lane > MAX_EVENT_CAPACITY {
@@ -89,11 +90,15 @@ mod tests {
         // Valid range.
         assert!(EventConfig::new(1, 1).is_ok());
         assert!(EventConfig::new(64, 16384).is_ok());
+        // KE8: the 65th lane — one per pool worker (MAX_WORKERS == 64) plus one
+        // for a non-worker sender — is now representable. This assertion was
+        // `is_err()` before the raise.
+        assert!(EventConfig::new(65, 16384).is_ok());
 
         // Zero thread_count is invalid.
         assert!(EventConfig::new(0, 1024).is_err());
         // Exceeding MAX_EVENT_THREADS is invalid.
-        assert!(EventConfig::new(65, 1024).is_err());
+        assert!(EventConfig::new(66, 1024).is_err());
 
         // Zero capacity is invalid.
         assert!(EventConfig::new(1, 0).is_err());
@@ -105,8 +110,22 @@ mod tests {
     fn default_for_validates_thread_count() {
         assert!(EventConfig::default_for(1).is_ok());
         assert!(EventConfig::default_for(64).is_ok());
+        assert!(EventConfig::default_for(65).is_ok(), "KE8: the 65th lane is admissible");
         assert!(EventConfig::default_for(0).is_err());
-        assert!(EventConfig::default_for(65).is_err());
+        assert!(EventConfig::default_for(66).is_err());
+    }
+
+    /// KE8 — the ceiling must stay one above the pool's worker ceiling. This is
+    /// the runtime twin of the `const _: () = assert!(MAX_WORKERS + 1 <= …)` in
+    /// `ecs::constants`: the const-assert fails the BUILD (and was observed
+    /// doing so at the old value of 64), while this states the same property
+    /// where a reader of the event surface will find it.
+    #[test]
+    fn the_lane_ceiling_admits_every_worker_plus_one_non_worker() {
+        assert!(
+            EventConfig::new(boyko_threadpool::MAX_WORKERS as u32 + 1, 1024).is_ok(),
+            "a fully-saturated pool plus one non-worker sender must be representable"
+        );
     }
 
     #[test]

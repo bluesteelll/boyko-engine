@@ -23,6 +23,29 @@ in this corpus resolves to a use site there, and until the owner approves the fi
 carries are proposed, not ratified). The commissioning research: two multi-agent passes
 (2026-08-28, ~25 systems surveyed with sources; engine inventory verified line-by-line).
 
+## Relation to Aether — separate scopes, ONE body of work
+
+Gaia and [Aether v2](../aether-v2/CAMPAIGN.md) are **one body of work split by subject matter, not
+two projects**: *Aether for logic, Gaia for data*. The couplings are concrete and checkable today —
+this file's [`DECISIONS.md`](DECISIONS.md) cites the Aether campaign's **`KE#` kernel-backlog ids**
+directly; the AI-orientation requirement set that binds Gaia lives in the **Aether** directory
+([`../aether-v2/AI-ORIENTATION.md`](../aether-v2/AI-ORIENTATION.md)), where **AIR-08** (stable node
+ids) and **AIR-16** (grammar rulings) carry `Gaia spec` in their own Rung column, **AIR-17** carries
+`Gaia G0`, and **AIR-09** carries `R8 / Gaia tooling`; `AE####` and `GA####` are one registry
+discipline minted by AIR-02; and two ballots of **this** `GB` series name rungs on the **Aether**
+ladder (**GB-9** → Aether R0, **GB-8** → Aether R8).
+
+**And each campaign finds the other's defects.** Three defects in *shipped* code — the `Or` dense
+arm (Aether **KE1** / rung R0), `any_changed_since` over a dense or bitset bind source (**GK-2**
+below), and the load path's dropped `requires` closure (**F4(ii)** below) — are **one mechanism**:
+code that resolves a per-archetype pool without screening the storage kind, and so is blind to the
+kinds that own no pool. **Two of the three were raised here, in kernel and UI code the logic
+campaign owns.** The joint account, the couplings table, and the still-owed enumeration of the class
+are in [`../AETHER-GAIA-REVISION-2026-08-29.md`](../AETHER-GAIA-REVISION-2026-08-29.md) §One
+mechanism, three shipped defects and §Aether and Gaia are one body of work. A change touching any
+coupling above updates **both** sides in the same commit — the diverged-pair cost is already
+measured in this repo.
+
 ## The industry map, in one paragraph
 
 Identity converged on a **pair** (durable file id + file-local object id) — Unity and Godot arrived
@@ -47,7 +70,7 @@ massive lag"); what stops it is refusal plus a pressure valve (curves), not disc
 | **G4** | Composition: templates / `abstract` / patches / the priority ladder / `remove` / bake budgets / provenance sidecar | **file-order independence**: `bake(files) == bake(shuffle(files))` byte-identical over ≥2 shuffled permutations plus the reversed order, on a fixture whose ladder layers span several files; byte-identity scoped to the bake OUTPUT (diagnostics may still list files in walk order); the permutation count is reported by the test. Plus the two-writes-one-layer red fixture (the error must name BOTH files). Plus the Godot-#32179 fixture (diff-at-save eating an intentional override). Plus the per-axis bake-budget fixture set (DECISIONS §The logic line: one committed red fixture per axis). ⚠ The former `bake(1) == bake(W)` form is **struck as vacuous**: `W` has no referent anywhere in this corpus and nothing makes the bake parallel, so the gate could not fail — the exact class this pass repairs. If a parallel bake is ever intended it arrives as its own design line with a defined `W`. |
 | **G5** | **data** profile (smallest; needs F2/F3): tables → dense columns, `[DefOf]`-style generated row constants, curves + `scalable`, contracts | per-profile fixtures; named red-first, the **eagerness** fixture: a violated `contract` on a field NOTHING reads must fail the bake, through both entrances — a plain declared field, and a field that a template expanded but no one ever reads — with blame on the file+span of the violating VALUE (Jsonnet's lazy assertions are the negative control) |
 | **G6** | **scene** profile (needs the F4 fixup seam + stable-asset-id carrier forms): the cell catalog emitted from day one; `load_cell` + GK-1 as its own rung | reconstruct-and-compare on the catalog |
-| **G7** | **ui** profile (prerequisites: a windowed UI pass and a real `UiPlugin` — UI does not reach the screen today; `.ui` absorption per F6) | the STILL-FRAME gate, re-axed onto **counts, not a clock**: still frame over a HUD with 200 bindings — bind-sink writes executed **== 0** (observable because every generated sink is set-if-changed) **and** the tick slots read by `any_changed_since` PINNED to the fixture's expected value; red-first by dirtying exactly one source, after which BOTH counters must move. A wall clock cannot say which work disappeared, and the delta-subtraction form alone was unfalsifiable. ⚠ **Open ballot GB-7**: whether a wall-clock companion is kept beside the count gate, and at what tolerance / run count / noise floor. |
+| **G7** | **ui** profile (prerequisites: a windowed UI pass and a real `UiPlugin` — UI does not reach the screen today; `.ui` absorption per F6) | the STILL-FRAME gate, re-axed onto **counts, not a clock**: still frame over a HUD with 200 bindings — bind-sink writes executed **== 0** (observable because every generated sink is set-if-changed) **and** the tick slots read by `any_changed_since` PINNED to the fixture's expected value; red-first by dirtying exactly one source, after which BOTH counters must move. A wall clock cannot say which work disappeared, and the delta-subtraction form alone was unfalsifiable. ⚠ **Open ballot GB-7**: whether a wall-clock companion is kept beside the count gate, and at what tolerance / run count / noise floor. ⚠ **Also blocked by GB-9**, which this row did not name: GB-9's own `Blocks` field reads "**G7**'s codegen rules" ([`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29), and [`../AETHER-GAIA-REVISION-2026-08-29.md`](../AETHER-GAIA-REVISION-2026-08-29.md) §Work order lists G7 as waiting on GB-6, GB-7 **and** GB-9. GB-9 asks whether the `Or`-over-dense **generated-code** ban survives Aether rung R0 (the kernel fix that removes its ground) — a codegen rule of exactly this rung. ⚠ Unreconciled in that same work order: it lists **GB-6** against G7, while GB-6's own body names **G6**; not resolved here. |
 | **G8** | Streaming remainder + GK-2/GK-3, each behind its own design pass | defined by each sub-item's own design pass (GK-2, GK-3, streaming remainder); G8 cannot close before those passes exist and name their own red-first oracles. Nothing here pre-commits GK-2's oracle. |
 
 ## Kernel requests born from the design (each gets its own design pass)
@@ -105,6 +128,27 @@ default-inexpressibility costs more later (the Unity nested-prefab lesson in min
   `link` as the shared remap spelling, and component references riding mandatory explicit
   `stable_name` — ride no rung at all today. They are asserted here and land nowhere; the pass
   that names their carrier is owed and is not part of GB-6.
+
+### Carrier gap — `CG-1`..`CG-3`: asserted here, landing nowhere
+
+**This subsection is their single home.** They were unlosable only as prose inside a longer bullet,
+which is how an item with no rung disappears. Ids are minted here so both ladders can cite them; the
+`CG` series is otherwise unused in this corpus (`grep -rn "\bCG-[0-9]" docs/` returned nothing
+before this line). **None of the three can be assigned a rung by this pass** — that is the owner's
+or the architect's call, and none of them is a ballot question, so `OPEN-QUESTIONS.md` is the wrong
+register too. What they need is an owner and a rung, and the pass that names one is **owed**.
+
+| id | The item | Why it is stranded | Who could own it |
+|---|---|---|---|
+| **CG-1** | **`link` as the shared remap spelling** for authored-scene emission — the same keyword doing the same job on both sides of the boundary, so an entity-bearing field is remapped identically whether it was written in Aether or in Gaia | Asserted in §Relations above and in **no rung's deliverable list**, on either ladder. Related but **not** the same item: [`PENDING-SYNTAX-PLAN.md`](PENDING-SYNTAX-PLAN.md) **M3** already owns the *cross-check* between the two carriers (bake refuses a `link` mismatch in either direction, two red fixtures at **G3**) and **M10** owns the bake refusal for an `Entity` field authored without `link`. What has no carrier is the **shared spelling decision itself** in Aether's emitted authored scenes | Aether **R3**'s `scene` surface, or Gaia **G3** beside M3/M10 |
+| **CG-2** | **Component references ride mandatory explicit `stable_name`** in authored-scene emission | The `stable_name` *ruling* is ratified and carried ([`DECISIONS.md`](DECISIONS.md) §Identity and references — the bake refuses the default module-path name), and its resolution axis is specified at PENDING **M8**. What rides no rung is applying it to **Aether-authored scene emission**, which is where the assertion was made | same as CG-1 |
+| **CG-3** | **GB-6(b)'s pressure valve** — the "conditional visibility" `EnableTag`-toggling action idiom | It carries an explicit **DEADLINE** — *"before the first designer asks, or the document side caves"* — and no rung. The corpus states the consequence itself: **a deadline with no rung can never come due, and is therefore not a schedule.** GB-6(b) classifies the *line*; it does not schedule the valve | the **Aether** ladder (GB-6(b) says so in as many words: it "must get an F-id AND a rung on the Aether ladder") |
+
+⚠ **CG-1 and CG-2 are the two "authored-scene emission fixes" of §Relations, not new work**, and
+they must not be confused with the *other* pair of authored-scene emission fixes recorded on the
+Aether side ([`../aether-v2/CONSTRUCTS.md`](../aether-v2/CONSTRUCTS.md) §`material`, `scene`: the
+one-extras-bundle collapse and `spawn_batch` grouping). Those two also ride no rung. Four items,
+two homes, one shared property.
 - **AI-orientation**: AIR-08/09/16/17 bind Gaia from the spec; diagnostics ride the AIR-01 envelope
   from the baker's first commit; `GA####` codes from the shared registry discipline.
 - **Out of scope**: mod pipeline (F7), an editor, non-Latin text shaping, graph materials.

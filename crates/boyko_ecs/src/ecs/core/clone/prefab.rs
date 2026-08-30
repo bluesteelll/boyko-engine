@@ -772,6 +772,9 @@ pub(crate) fn instantiate(world: &mut EcsMaster, prefab: &Prefab) -> Entity {
                 let target: &mut Archetype = &mut *target_ptr;
                 target.entity_ids.push(entity.id());
                 target.current_index = new_row + 1;
+                // KE6 write site 5/9 — same confined `&mut Archetype` reborrow
+                // as the `current_index` advance.
+                target.stamp_arch_added(current_tick);
             }
             guard.disarm();
         }

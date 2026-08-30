@@ -13,6 +13,8 @@
 
 pub(crate) mod bitset_intersects;
 pub mod common_conditions;
+// KE5 — run-condition combinators (`CombinedSystem` / `Not`), ruling D5.
+pub mod condition_combinators;
 pub(crate) mod conflict_graph;
 pub(crate) mod executor_scratch;
 pub(crate) mod ordering;
@@ -27,6 +29,7 @@ pub mod system_set;
 pub(crate) mod system_box;
 
 pub use common_conditions::{in_state, on_enter, on_exit, on_transition, run_once};
+pub use condition_combinators::{AndOp, CombineOp, CombinedSystem, ConditionExt, Not, OrOp, not};
 pub use schedule::{GpuBarrierEdge, Schedule};
 pub use schedule_builder::{
     ConfigureSet, MAX_SYSTEMS_PER_SCHEDULE, ScheduleBuildError, ScheduleBuilder,

@@ -204,6 +204,18 @@ The answer is already shipped and gated at zero allocations in this repo; Gaia g
      The coupling is recorded here, on the Gaia side, precisely because a kernel-side fix would
      otherwise never prompt anyone to revisit this line; the Aether R0 / KE1 rung note owes the
      matching back-pointer.
+     ⚠⚠ **The back-pointer is now written** — [`../aether-v2/KERNEL-BACKLOG.md`](../aether-v2/KERNEL-BACKLOG.md)
+     KE1, [`../aether-v2/CAMPAIGN.md`](../aether-v2/CAMPAIGN.md) R0, and the two Aether-side twins
+     of this ban ([`../aether-v2/DECISIONS.md`](../aether-v2/DECISIONS.md) `D4` and
+     [`../aether-v2/CONSTRUCTS.md`](../aether-v2/CONSTRUCTS.md) §`system`) all cite GB-9.
+     **And the deadline has expired, unanswered: R0 LANDED 2026-08-29 with GB-9 still open**
+     (KERNEL-BACKLOG KE1 reads "✅ LANDED (R0, 2026-08-29)"; the red-first oracle is
+     `crates/boyko_ecs/tests/ke1_or_dense_blindness.rs`). GB-9 is therefore now a ballot whose
+     **original ground can no longer be observed in the tree** — the option-(a) answer must state a
+     ground that was never the fixed defect, and the option-(b) record must be reconstructed from
+     this line rather than from a reproducible failure. **Nothing here decides it; the ballot is the
+     owner's and remains open.** This is exactly the outcome the deadline existed to prevent, and
+     recording it is the only remaining honest move.
    - **A bind source on a dense (or bitset) component.** `any_changed_since`
      (`boyko_ecs` `component_api.rs:403`) resolves per-archetype pools, and non-signature storage
      owns none (`archetype.rs:389-395`), so the gate is **never true** — the sink never updates and nothing is

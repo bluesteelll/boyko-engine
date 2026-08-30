@@ -1,5 +1,15 @@
 # Gaia — language sketch (research-stage, NOT a spec)
 
+> ⚠️ **ratified-stale.** The syntax shown below is **pre-R1 on essentially every line** and does
+> **not** match the ratified rulings ([`PENDING-SYNTAX-PLAN.md`](PENDING-SYNTAX-PLAN.md) finding
+> **M6**; [`../AETHER-GAIA-REVISION-2026-08-29.md`](../AETHER-GAIA-REVISION-2026-08-29.md)
+> §per-file table). **Do not generate Gaia from this file** — an agent that reads it as the spec
+> emits wrong-on-every-line output. Only interim drift-reduction annotations have landed here; the
+> rewrite into the reworked syntax is owner-gated. This banner is the marking G0's own gate
+> requires in the file's head: *a file that RESOLVES but is STALE does not satisfy a
+> cross-reference*, and an index that knows is a file the reader never opened
+> (gated by [`tests/gaia_g0_citation_census.rs`](../../tests/gaia_g0_citation_census.rs)).
+
 The shape of the language as recommended by the research synthesis. Every ruling behind a line here
 is in [`DECISIONS.md`](DECISIONS.md); the grammar itself is written at rung G2 and gated there.
 This file exists so the *feel* of the language is on record before the spec — nothing in it is

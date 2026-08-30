@@ -34,6 +34,25 @@ use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 /// by invariant **CQ-PACK1**.
 const COMMAND_PAYLOAD_OFFSET: usize = mem::size_of::<CommandMeta>();
 
+/// Save-point into a [`CommandQueue`]'s byte arena, produced by
+/// [`CommandQueue::mark`] and consumed by [`CommandQueue::rewind`]
+/// (kernel backlog **KE7**).
+///
+/// A newtype rather than a bare `usize` so a byte offset cannot be confused
+/// with a row index, a cursor, or a command count at a call site — the arena
+/// deals in all four.
+///
+/// # Validity
+///
+/// A mark is valid only for the queue that produced it, and only until that
+/// queue's next `apply` (which drains the arena to length 0, invalidating
+/// every outstanding offset). Using one across an `apply` is a caller bug;
+/// `rewind` debug-asserts the offset is in range but cannot detect the
+/// cross-queue case, which is why the type carries no `Default` and no
+/// public constructor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CommandMark(usize);
+
 /// Type-erased, packed, byte-arena command queue.
 ///
 /// # Layout (invariants CQ1, CQ2)
@@ -160,6 +179,171 @@ impl CommandQueue {
             std::ptr::write_unaligned(base.add(COMMAND_PAYLOAD_OFFSET) as *mut C, cmd);
             self.bytes.set_len(old_len + total);
         }
+    }
+
+    /// Records the queue's current write position so a later
+    /// [`rewind`](Self::rewind) can discard everything pushed after it
+    /// (kernel backlog **KE7**).
+    ///
+    /// The mark is a byte offset into the arena, taken at a slot boundary:
+    /// every `push` writes a whole `[CommandMeta][payload]` block, so
+    /// `bytes.len()` is always the start of the next slot and never lands
+    /// inside one.
+    ///
+    /// # Cost
+    ///
+    /// One `usize` load. No allocation, no arena walk.
+    #[inline]
+    pub(crate) fn mark(&self) -> CommandMark {
+        debug_assert_eq!(
+            self.cursor, 0,
+            "invariant (KE7): `mark` is taken at rest — a queue mid-`apply` has a \
+             non-zero cursor and its byte offsets are being consumed, so a mark \
+             into it would not survive the walk",
+        );
+        CommandMark(self.bytes.len())
+    }
+
+    /// Discards every command pushed after `mark`, running each one's
+    /// **drop glue** (kernel backlog **KE7**).
+    ///
+    /// This is the structural half of an all-or-nothing enqueue: a caller
+    /// that has pushed part of a compound edit and then discovers it cannot
+    /// finish rewinds to the mark, and the world never observes the partial
+    /// prefix.
+    ///
+    /// # Why the glue replay is load-bearing
+    ///
+    /// A `CommandMeta` header carries the ONLY surviving type information
+    /// for its payload; the arena is `[MaybeUninit<u8>]`, which has no drop
+    /// glue of its own. A rewind that merely did `bytes.set_len(mark)` would
+    /// therefore leak every non-trivial field a discarded command owns — a
+    /// `String`, a `Box`, a `Bundle` holding heap data. The walk below calls
+    /// [`consume_and_drop_glue`] with `world = None`, which is exactly the
+    /// path [`CommandQueue::drop`](Drop::drop) uses for un-flushed commands,
+    /// so a rewound command is dropped exactly once and never applied.
+    ///
+    /// # ⚠ Reserved entity ids are NOT reclaimed
+    ///
+    /// `Commands::spawn` / `spawn_empty` / `clone_and_spawn*` mint their
+    /// `Entity` **synchronously** from the atomic `EntityCounter` (so
+    /// `.id()` can return before the apply) and only then push the command.
+    /// A rewind discards the *command*; it cannot un-mint the id, because
+    /// `EntityCounter::reserve_entity` deliberately does not touch the free
+    /// list (Phase 11 EM2 — workers must not pop it), and the queue does not
+    /// record which ids belong to which slot.
+    ///
+    /// The consequence is a **leak of id space, by design**: the ids minted
+    /// for rewound spawns are never issued again and never become live
+    /// entities. This is the same contract a dropped, never-applied queue
+    /// already carries (`Commands::clone_and_spawn`: "if the queue drops
+    /// without an apply, the id leaks"). It is written down here because a
+    /// rewind is the one path where a caller might reasonably expect
+    /// otherwise. Pinned by `rewind_does_not_reclaim_reserved_entity_ids`.
+    ///
+    /// # Panics
+    ///
+    /// A panic inside a discarded command's `Drop` impl propagates to the
+    /// caller **after** the arena has been truncated to `mark` — the queue is
+    /// left consistent and re-usable, and the commands the walk had not yet
+    /// reached are leaked rather than left in a half-drained arena. That
+    /// ordering (truncate, then resume) is the same trade the `Drop` impl
+    /// makes; a panicking `Drop` is pathological either way.
+    ///
+    /// # Cost when unused
+    ///
+    /// Zero. `rewind` is never called by the engine's own paths; a program
+    /// that does not call it pays for one extra `pub(crate)` function that is
+    /// not reachable from any hot path, and `mark`'s `CommandMark` is a
+    /// stack-local `usize` the caller owns. No field is added to
+    /// `CommandQueue` — the 56 B / one-cache-line layout (O2) is unchanged.
+    ///
+    /// # ⚠ No caller-facing surface yet
+    ///
+    /// `mark` / `rewind` are `pub(crate)` and, outside this module's own tests,
+    /// have **no caller anywhere in the workspace**. The mechanism is complete
+    /// and pinned; the surface that would let a user (or Aether-generated code,
+    /// which lives in the user's crate) reach it is not part of KE7 as landed.
+    /// A `pub` here would not be enough on its own either — a system holds
+    /// `Commands`, not `&mut CommandQueue` — so exposing the all-or-nothing
+    /// enqueue means designing a `Commands`-level transaction surface, which is
+    /// a scope decision rather than a repair. Noted here rather than left to be
+    /// re-derived: the module's file-level `#![allow(dead_code)]` means nothing
+    /// will ever warn that this pair is unwired.
+    pub(crate) fn rewind(&mut self, mark: CommandMark) {
+        let start = mark.0;
+        debug_assert!(
+            start <= self.bytes.len(),
+            "invariant (KE7): a mark cannot be past the arena's end — a mark is \
+             only valid for the queue it was taken from, and the arena never \
+             shrinks below it except through this function",
+        );
+        debug_assert_eq!(
+            self.cursor, 0,
+            "invariant (KE7): `rewind` runs at rest (cursor == 0), never from \
+             inside an `apply` walk",
+        );
+        if start >= self.bytes.len() {
+            // Nothing pushed since the mark — the common case for a caller
+            // that marked defensively and then completed normally.
+            return;
+        }
+
+        // Reuse the audited apply walk in its drop-only mode rather than
+        // hand-rolling a second byte walk: setting `cursor` to the mark makes
+        // `start` the walk's own entry cursor, so on success it drop-glues
+        // `[mark..len)` and truncates to `mark` for us.
+        self.cursor = start;
+        let mut raw = self.raw();
+
+        // SAFETY (CQ4 + drop-only path, mirrors `Drop::drop`):
+        //   - We hold `&mut self`, so no other reader/writer touches the
+        //     queue for the call's duration; `raw` is the sole accessor
+        //     while the walk runs (we do not touch `self` inside the closure).
+        //   - `world = None` selects `consume_and_drop_glue`'s drop-only
+        //     branch: each command is moved out of its slot by
+        //     `read_unaligned` and dropped in place, exactly once. No
+        //     `Command::apply` runs, so the world is never mutated.
+        //   - `cursor <= bytes.len()` on entry (debug-asserted above), the
+        //     walk's stated precondition.
+        //   - No command can push during a drop-only walk (a `Drop` impl has
+        //     no handle on this queue), so the walk's success path takes the
+        //     `set_len(start)` branch.
+        let walk = AssertUnwindSafe(|| unsafe {
+            raw.apply_or_drop_queued_no_catch(None);
+        });
+        let outcome = std::panic::catch_unwind(walk);
+
+        if let Err(payload) = outcome {
+            // A discarded command's `Drop` panicked. `CursorSync` synced the
+            // walk's local cursor into `self.cursor` during the unwind, so the
+            // slots at `[start..cursor)` have already been moved out and the
+            // ones at `[cursor..len)` were never reached. Truncating to
+            // `start` discards both ranges: the first is logically
+            // uninitialised (re-reading it would be UB), the second leaks.
+            //
+            // SAFETY:
+            //   - `start <= self.bytes.len()` (debug-asserted on entry; the
+            //     panicking walk never grows the arena).
+            //   - `MaybeUninit<u8>` has no drop glue, so `set_len` runs no
+            //     destructor over the discarded suffix.
+            //   - Bytes `0..start` are untouched by the walk (it began at
+            //     `start`) and remain valid `[CommandMeta][payload]` slots.
+            unsafe {
+                self.bytes.set_len(start);
+            }
+            self.cursor = 0;
+            std::panic::resume_unwind(payload);
+        }
+
+        debug_assert_eq!(
+            self.bytes.len(),
+            start,
+            "invariant (KE7): the drop-only walk truncates the arena to the mark",
+        );
+        // The walk left `cursor == start`; restore the at-rest value the rest
+        // of the queue's contract assumes (`apply_via_raw_twin` debug-asserts it).
+        self.cursor = 0;
     }
 
     /// Mints a [`RawCommandQueue`] borrowed from `self` for the duration
@@ -1002,6 +1186,349 @@ mod tests {
             after - before,
             COMMAND_PAYLOAD_OFFSET + mem::size_of::<ZeroCmd>(),
             "push must write meta + payload contiguously",
+        );
+    }
+
+    // =========================================================================
+    // KE7 — `CommandQueue::{mark, rewind}` (kernel backlog KE7)
+    // =========================================================================
+    //
+    // The oracle these tests exist to be: a rewind that merely truncated the
+    // arena (`bytes.set_len(mark)`) passes the "which commands applied?"
+    // assertions and FAILS `rewind_runs_drop_glue_exactly_once` — the payload
+    // of every discarded command leaks. That test is the reason the item's
+    // implementation is a walk and not a `set_len`, so it is written to
+    // observe the drop, not the outcome.
+
+    /// A command that owns heap memory, so a rewind that skips the drop glue
+    /// leaks a real allocation (visible to Miri's leak checker as well as to
+    /// the drop counter).
+    struct OwningCommand {
+        payload: Box<u32>,
+        apply_counter: &'static AtomicUsize,
+        drop_counter: &'static AtomicUsize,
+    }
+
+    impl Command for OwningCommand {
+        fn apply(self, _world: &mut EcsMaster) {
+            self.apply_counter
+                .fetch_add(*self.payload as usize, Ordering::Relaxed);
+        }
+    }
+
+    impl Drop for OwningCommand {
+        fn drop(&mut self) {
+            self.drop_counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// KE7 — the load-bearing property: a rewound command's payload is
+    /// dropped, **exactly once**, and never applied.
+    ///
+    /// Distinguishes the shipped drop-glue walk from a truncate-only
+    /// `set_len(mark)` rewind (which would report `DROP == 0` here). The
+    /// trailing `apply` proves the same bytes are not walked a second time:
+    /// a double-drop would push `DROP` to 2 and, on a real payload, be UB.
+    #[test]
+    fn rewind_runs_drop_glue_exactly_once() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut q = CommandQueue::new();
+        let mark = q.mark();
+        q.push(OwningCommand {
+            payload: Box::new(9),
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        q.rewind(mark);
+
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            1,
+            "the rewound command must be dropped exactly once — a truncate-only \
+             rewind reports 0 here and leaks the Box",
+        );
+        assert_eq!(
+            APPLY.load(Ordering::Relaxed),
+            0,
+            "a rewound command must never reach `Command::apply`",
+        );
+        assert_eq!(q.bytes.len(), mark.0, "the arena is truncated to the mark");
+
+        // The rewound slot must not be walked again by a later apply.
+        let mut world = EcsMaster::new();
+        q.apply(&mut world);
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            1,
+            "a later apply must not re-walk the rewound bytes (a second drop \
+             would be a double-drop, not merely a wrong count)",
+        );
+    }
+
+    /// KE7 — a rewind discards the suffix and preserves the prefix: commands
+    /// pushed BEFORE the mark still apply.
+    #[test]
+    fn rewind_keeps_commands_pushed_before_the_mark() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut q = CommandQueue::new();
+        q.push(CounterCommand {
+            delta: 1,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        let mark = q.mark();
+        q.push(CounterCommand {
+            delta: 10,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        q.push(CounterCommand {
+            delta: 100,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        q.rewind(mark);
+
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            2,
+            "both post-mark commands are dropped by the rewind",
+        );
+
+        let mut world = EcsMaster::new();
+        q.apply(&mut world);
+        assert_eq!(
+            APPLY.load(Ordering::Relaxed),
+            1,
+            "only the pre-mark command applies (1, not 11 / 101 / 111)",
+        );
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            3,
+            "the surviving command drops once, on its own apply",
+        );
+    }
+
+    /// KE7 — a mark taken on an empty queue rewinds the whole arena, and the
+    /// queue is re-usable afterwards (`cursor` is restored to its at-rest 0,
+    /// which `apply_via_raw_twin` debug-asserts).
+    #[test]
+    fn rewind_to_an_empty_mark_clears_the_queue_and_leaves_it_reusable() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut q = CommandQueue::new();
+        let mark = q.mark();
+        assert_eq!(mark.0, 0, "a mark on an empty queue is offset 0");
+        for delta in [2usize, 3, 4] {
+            q.push(CounterCommand {
+                delta,
+                apply_counter: &APPLY,
+                drop_counter: &DROP,
+            });
+        }
+        q.rewind(mark);
+
+        assert!(q.is_empty(), "the arena is empty after a rewind to offset 0");
+        assert_eq!(q.cursor, 0, "the cursor is restored to its at-rest value");
+        assert_eq!(DROP.load(Ordering::Relaxed), 3, "all three drop");
+
+        // Re-usable: a fresh push/apply cycle behaves normally.
+        q.push(CounterCommand {
+            delta: 5,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        let mut world = EcsMaster::new();
+        q.apply(&mut world);
+        assert_eq!(
+            APPLY.load(Ordering::Relaxed),
+            5,
+            "only the post-rewind command applied",
+        );
+    }
+
+    /// KE7 — rewinding with nothing pushed since the mark is a no-op, not an
+    /// error. The common shape for a caller that marks defensively and then
+    /// completes normally.
+    #[test]
+    fn rewind_with_nothing_pushed_since_the_mark_is_a_noop() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut q = CommandQueue::new();
+        q.push(CounterCommand {
+            delta: 6,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        let mark = q.mark();
+        let len_at_mark = q.bytes.len();
+        q.rewind(mark);
+
+        assert_eq!(q.bytes.len(), len_at_mark, "no bytes discarded");
+        assert_eq!(DROP.load(Ordering::Relaxed), 0, "nothing dropped");
+
+        let mut world = EcsMaster::new();
+        q.apply(&mut world);
+        assert_eq!(APPLY.load(Ordering::Relaxed), 6, "the command still applies");
+    }
+
+    /// KE7 — **the documented caveat, pinned as a test rather than only as
+    /// prose**: a rewind does NOT return reserved entity ids to circulation.
+    ///
+    /// `Commands::spawn` mints its `Entity` from the atomic `EntityCounter`
+    /// before pushing the command, and `reserve_entity` deliberately never
+    /// pops the free list (Phase 11 EM2). Rewinding the command therefore
+    /// leaves the id minted and unused — id space leaks, by design. This test
+    /// models that exact sequence at the layer where both halves are visible.
+    #[test]
+    fn rewind_does_not_reclaim_reserved_entity_ids() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let world = EcsMaster::new();
+        let mut q = CommandQueue::new();
+
+        let mark = q.mark();
+        // The `Commands::spawn` shape: mint the id first, then enqueue.
+        // `reserve_entity` takes `&self` — that `&`, not `&mut`, is the whole
+        // reason a worker can mint an id without the free list.
+        let rewound = world.entity_master.reserve_entity();
+        q.push(CounterCommand {
+            delta: 1,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        q.rewind(mark);
+
+        let after = world.entity_master.reserve_entity();
+        assert_ne!(
+            after.id(),
+            rewound.id(),
+            "the rewound id is NOT re-issued — `rewind` discards the command, \
+             never the mint (KE7's documented leak)",
+        );
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            1,
+            "the command itself was discarded and dropped",
+        );
+    }
+
+    /// A command whose `Drop` panics — the fixture for `rewind`'s recovery
+    /// branch. The counter is bumped BEFORE the panic so the test can tell
+    /// "the glue ran and then panicked" from "the glue never ran".
+    struct PanickingDropCommand {
+        drop_counter: &'static AtomicUsize,
+    }
+
+    impl Command for PanickingDropCommand {
+        fn apply(self, _world: &mut EcsMaster) {
+            unreachable!("this command exists only to be rewound");
+        }
+    }
+
+    impl Drop for PanickingDropCommand {
+        fn drop(&mut self) {
+            self.drop_counter.fetch_add(1, Ordering::Relaxed);
+            panic!("KE7 fixture: a discarded command's Drop panicked");
+        }
+    }
+
+    /// KE7 — the **recovery branch**: a panic inside a discarded command's
+    /// `Drop`.
+    ///
+    /// Everything `rewind`'s `# Panics` section promises happens on this path
+    /// and nowhere else: the `catch_unwind`, the `unsafe { set_len(start) }`
+    /// with its "[start..cursor) is logically uninitialised, [cursor..len)
+    /// leaks" reasoning, the `cursor = 0` restore, and the `resume_unwind`.
+    /// Every other KE7 test drives the success path, so that whole branch —
+    /// including its `unsafe` — was never executed by anything, while the
+    /// sibling `apply` path has a dedicated `tests/command_queue_panic_recovery.rs`.
+    /// An untaken branch is not a covered branch.
+    #[test]
+    fn rewind_recovers_from_a_panicking_drop_and_leaves_the_queue_reusable() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+        static PANICKER_DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut q = CommandQueue::new();
+        // Before the mark: must survive the rewind untouched.
+        q.push(CounterCommand {
+            delta: 1,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        let mark = q.mark();
+        // First past the mark: the walk reaches this one and its `Drop` panics.
+        q.push(PanickingDropCommand {
+            drop_counter: &PANICKER_DROP,
+        });
+        // Second past the mark: the walk never reaches it — the leak the doc
+        // comment names, made observable by its drop counter staying 0.
+        q.push(CounterCommand {
+            delta: 100,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+
+        // The harness prints a backtrace-ish line for the deliberate panic;
+        // silence it so a green run reads green.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| q.rewind(mark)));
+        std::panic::set_hook(previous_hook);
+
+        assert!(
+            outcome.is_err(),
+            "the Drop panic must PROPAGATE to the caller — `rewind` recovers the \
+             queue, it does not swallow the panic",
+        );
+        assert_eq!(
+            PANICKER_DROP.load(Ordering::Relaxed),
+            1,
+            "the panicking command's glue ran (once) before it panicked",
+        );
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            0,
+            "the command AFTER the panicking one was never reached, so it is \
+             leaked rather than dropped — the documented trade",
+        );
+        assert_eq!(
+            q.bytes.len(),
+            mark.0,
+            "the arena is truncated to the mark even on the panic path: both the \
+             moved-out prefix and the unreached suffix are discarded, so no slot \
+             can be re-read (which would be UB)",
+        );
+        assert_eq!(q.cursor, 0, "the at-rest cursor is restored before the resume");
+
+        // Re-usable: the pre-mark command still applies, exactly once, and the
+        // discarded bytes are never walked again.
+        let mut world = EcsMaster::new();
+        q.apply(&mut world);
+        assert_eq!(
+            APPLY.load(Ordering::Relaxed),
+            1,
+            "only the pre-mark command applies (1, not 101)",
+        );
+        assert_eq!(
+            DROP.load(Ordering::Relaxed),
+            1,
+            "and it drops exactly once, on its own apply — the leaked suffix is \
+             never re-walked",
+        );
+        assert_eq!(
+            PANICKER_DROP.load(Ordering::Relaxed),
+            1,
+            "no second drop of the panicking command (that would be a \
+             double-drop, not merely a wrong count)",
         );
     }
 }

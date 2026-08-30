@@ -376,8 +376,42 @@ pub const INLAND_MAX_SLAB: usize = 16 * 1024 * 1024;
 //
 
 /// Maximum number of worker threads that can send events concurrently.
-/// Controls the number of per-type writer lanes in `EventBuffer<E>`.
-pub const MAX_EVENT_THREADS: u32 = 64;
+///
+/// A CEILING, not an allocation: `EventBuffer<E>` allocates exactly
+/// `EventConfig::thread_count` lanes, and this constant only bounds what
+/// `EventConfig::new` will accept. Raising it therefore costs a program that
+/// does not ask for the extra lane nothing at all — no wider array, no larger
+/// buffer, no extra branch.
+///
+/// KE8: **65, one more than [`boyko_threadpool::MAX_WORKERS`]**. Every pool
+/// worker can send, and so can the thread that is not a pool worker (the host /
+/// main thread, `WORKER_ID_UNATTACHED`), so a fully-saturated pool needs
+/// `MAX_WORKERS + 1` distinct lanes. At 64 the host thread had to share worker
+/// 0's lane. The const-assert below is what keeps the two constants from
+/// drifting apart again — it is the gate, and it was observed failing the build
+/// with the old value of 64 before this line was raised.
+///
+/// ⚠ Widening this to 65 does **not** by itself give the host thread its own
+/// lane; it only makes one representable. What the unattached sender maps to is
+/// owner ballot **AB-3**, and the `send(&self)` surface that needs it is rung
+/// R4. Nothing in the tree requests 65 lanes today.
+///
+/// [`boyko_threadpool::MAX_WORKERS`]: boyko_threadpool::MAX_WORKERS
+pub const MAX_EVENT_THREADS: u32 = 65;
+
+// KE8 — the lane budget must leave room for every pool worker PLUS one
+// non-worker sender. `MAX_WORKERS` lives in another crate and can be raised
+// there without any signal reaching this file; this assert is the signal.
+//
+// The plan states the property as `MAX_WORKERS + 1 <= MAX_EVENT_THREADS`; over
+// integers that is exactly the strict `<` below, which is the form
+// `clippy::int_plus_one` (a `-D warnings` lint here) accepts. The plan's
+// spelling is kept in this comment so a grep for it still lands.
+const _: () = assert!(
+    boyko_threadpool::MAX_WORKERS < MAX_EVENT_THREADS as usize,
+    "MAX_EVENT_THREADS must admit one lane per pool worker plus one for a \
+     non-worker (host / main-thread) sender: MAX_WORKERS + 1 <= MAX_EVENT_THREADS"
+);
 
 /// Maximum events per lane per frame in `EventBuffer<E>`.
 /// Bounds the per-lane write buffer allocation at preregister time.
