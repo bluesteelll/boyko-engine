@@ -52,6 +52,7 @@ a citation of this file.
 | KE13 | 🆕 **UNOWNED — raised by R0's census, 2026-08-29.** `QueryView::get` / `get_mut` apply the matched-archetype bitset, the dynamic tag terms and the enable terms, but **never call `F::filter_fetch`, and resolve `resolve_dense` only for `D`**. A **dense** `With<C>` / `Without<C>` is therefore silently ignored on the point-lookup path: a dense `With` has `IS_ARCHETYPAL = false` and a `matches_component_set` that admits every archetype, so its ONLY gate is the `filter_fetch` `get` does not run. `get` returns `Some` for a non-member and **disagrees with `iter()` on the same view** | Same shape as KE1 one path over — *a caller that does not make the dense call* — but strictly worse: KE1 made an arm never true, this applies **no gate at all**, in both polarities. ⚠ **`get`'s own doc comment asserts the opposite in writing** ("So `get` only ever sees archetypal and enable terms — there is no silent-ignore path"), on the premise that `With`/`Without` are archetypal, which the Dense plan falsified. A fix owes that paragraph an edit **in the same commit**. ⚠ In-tree precedent that this path was known under-served: `state.rs`'s `dense_get_iter_agree` carries a "PRE-EXISTING BUG … flagged for the reviewer" note that `get` never calls `resolve_dense`, calling the repair "a one-line `resolve_dense` mirror" — **the `D` half was since fixed, the `F` half was not**, and it is not a one-liner (there is no `filter_fetch` call to feed) | n/a (bug fix) | ✅ already written and **observed red**: `crates/boyko_ecs/tests/ke13_query_view_get_ignores_dense_filter.rs` — two `#[ignore = "deferred: KE13 …"]` tests (both polarities) plus a non-ignored control pinning that `get` DOES apply a table filter and that `iter()` answers the dense one correctly. Un-`#[ignore]` them when a rung takes this |
 | KE14 | 🆕 **UNOWNED — opened 2026-08-30 by AB-6's landing.** The retained-dense path in `migrate_entity_insert`: five confirmed defects, four of them pre-existing, none of them memory-safety (Miri clean). **D1** is a reachable panic — `invariant: retained component must exist in source` at `migration_helpers.rs:596`, with a sibling face on the remove path at `:1234` — and **D2** makes a correctly constructed required dense component **vanish from every dense query on the next insert**. Full statement, repro and oracle: **§KE14** below the tables | `#[require]` over dense works on the **spawn path only**. KE11 made the declaration accepted and advertised, so it is now a documented route into defects that were previously unreachable | n/a (bug fix) | red-first per defect, written from the three-step repro **before** any fix; the `ke11_*` table-storage controls stay green throughout, since they are what distinguishes a real fix from a broken fixture |
 | KE15 | 🆕 **UNOWNED — opened 2026-08-30 by AB-7's ruling.** Give the parallel chunk runner a world cell. `par_iter.rs:305` carries `const { assert!(!D::HAS_DENSE && !F::HAS_DENSE) }`, and the comment above it names the cause in its own words — *"the chunk runner has no world cell"* — i.e. unwired plumbing, not a design limit, the same shape as KE1. The **next** `const` block refuses `Related<R, D>` joins for the SAME missing cell, so one fix retires two refusals. Full statement and oracle: **§KE15** below the tables | the owner ruled R-DENSE lifted; lifting alone gives **sequential** machines over dense, and the `parallel` half waits on this row | yes — const-folds away for a query with no dense and no relation term | red-first: a `par_iter` over a dense term seen failing to compile, then compiling and matching the sequential `Query::iter` result set for W ∈ {1, 2, N}, with **per-worker touch counts reported** so a silently-sequential run is red rather than green |
+| KE16 | 🆕 **UNOWNED, RESEARCH-AND-BUILD, deliberately not launched (owner, 2026-08-30).** Pool occupancy: work spawned by a worker is unreachable by siblings (defect A, `worker.rs:370-371`), and the joining thread parks half a wave in a stealer-less private scratch (defect B, `scope.rs:440-531`). The owner adds a third mechanism neither defect covers — an **idle-worker queue**, since the first-level system scheduler distributes unevenly and lanes drain at different times. Full decomposition, the three mechanisms with their separate prices, the cache-locality axis, and the research scope: **§KE16** below the tables | measured: `par_iter` in a system body is **1.01×** where the same driver called from outside is **7.69×**; all four parallel physics sites are on that path | n/a (bug fix + design) | ⚠ **the acceptance criterion is THROUGHPUT, not occupancy** — owner: *"if it needs synchronisation heavier than the gain from maximum core loading, it should not be done."* A red-first occupancy gate proves the mechanism; the decision between variants is wall-clock on a real consumer, and "keep the current behaviour" is a legitimate outcome for B |
 
 ### What R0 landed for KE1 (2026-08-29)
 
@@ -300,3 +301,95 @@ rather than green (the campaign's standing counts-not-exit-code rule). The `Rela
 same treatment or an explicit statement of why it is deferred.
 
 **Owner:** unassigned. Depends on nothing that is still balloted.
+
+## KE16 — pool occupancy: the design space, RECORDED AND NOT YET RESEARCHED (2026-08-30)
+
+**Status: deliberately NOT launched.** Owner, 2026-08-30: *"we need to consider exactly all possible
+variants and study various articles and information on the topic. For now don't launch the research,
+just record it."* And, on what the eventual work is: *"the agents' task will be to study all possible
+variants and make the most performant one."*
+
+⇒ **The commissioned work is research THEN implementation, one pass, not a study that hands back a
+recommendation.** The deliverable is the fastest variant, landed and measured; the survey is the
+means. This row exists so the direction is not lost, and so whoever picks it up starts from the
+decomposition below rather than from the idea.
+
+### What is already established, and is not in question
+
+* **Defect A** — a task spawned by a worker goes to `injector_local[wid]`; sibling stealing iterates
+  the worker **deques** only, so no thread ever polls another thread's local injector. Work spawned
+  inside a system body is reachable by its own worker alone. Measured: `par_iter` in a system body
+  **1.01×** against **7.69×** for the same driver called from outside. `worker.rs:370-371`.
+* **Defect B** — `Scope::drop` steals ~half the wave into a private `scratch` with no registered
+  `Stealer` and runs it inline, serially. Even on the healthy path only **4–5 of 16** tasks are ever
+  simultaneously live. `scope.rs:440-531`.
+* **Inter-system parallelism works** — four conflict-free systems reach four lanes at 25.1 % top
+  lane, at W=4 and W=16.
+
+### The owner's proposal, and why it is a third thing rather than a restatement
+
+> *"Perhaps it makes sense to have some queue of free threads. Obviously the first-level system
+> scheduler (the one with system ordering) will distribute tasks unevenly between threads, and it
+> can happen that some cores go free before others. Then they could be given other work. But again,
+> here the question of cache locality arises."*
+
+The observation is correct and is **not** covered by defects A and B: systems have unequal cost, so
+lanes drain at different times regardless of how intra-system work is spread. The proposal
+decomposes into three mechanisms with different prices, and they must not be conflated:
+
+| # | mechanism | what it needs | the cost to weigh |
+|---|---|---|---|
+| **1** | an idle worker takes **another system** | the executor must hand out systems **dynamically**; if assignment is static, an idle lane cannot help even when a runnable system exists. **Establish first whether assignment is static or dynamic** — this is unmeasured | conflict-graph re-check per hand-out; a system may be runnable-but-blocked, so idleness is not always fixable |
+| **2** | an idle worker takes **intra-system work** from a busy peer | exactly defect A. Already established, already the fix under design | expected cheap: pushing to one's own deque is thread-local, cheaper than the shared-injector push it replaces |
+| **3** | a **registry of idle workers** a spawner pushes into directly | push-to-idle instead of poll-to-steal — a genuinely different discipline, not an optimisation of stealing | the registry is shared mutable state on the spawn path; it can cost more than the idleness it removes, which is the owner's own caveat |
+
+### The owner's caveat is the acceptance criterion, and it binds mechanism 3 hardest
+
+> *"If some too-heavy synchronisation is needed that would cost more in performance than the gain
+> from maximum core loading, then it should not be done. In short — simply the most performant
+> variant."*
+
+⇒ **Occupancy is a diagnostic, not the goal.** A variant that occupies more cores and finishes slower
+loses. Mechanism 3 is where this bites: a shared idle-registry touched on every spawn is exactly the
+"too-heavy synchronisation" the caveat rules out unless measured otherwise.
+
+The same caveat already applies to **defect B**: `Injector::steal_batch_and_pop` takes half the queue
+**to amortise the atomic traffic**. Stealing one task at a time so nothing is ever parked privately
+pays a synchronised operation per task, and on short bodies that can cost more than the idle lanes it
+recovers. **Keeping B as it is may be the correct answer**, and that outcome must be reportable
+rather than treated as a failure to fix.
+
+### Cache locality — the owner named it, and it is the axis that decides mechanism 1
+
+Stealing moves a task's working set across L1/L2. This is why mature pools split the discipline —
+LIFO for the owner (hot data first) and FIFO for thieves (oldest, coldest, least likely to be in the
+victim's cache) — and why several keep a "last victim" hint. **For mechanism 1 the locality question
+is sharper than for 2 or 3**: handing a whole *system* to a different lane moves that system's entire
+component working set, and this engine's principles put D-cache locality at the same level as
+parallelism. A win in lane occupancy that costs cache residency across a frame may be a net loss, and
+nothing here measures that today.
+
+### What the research must cover, when it is launched
+
+* how mature work-stealing pools (Rayon, Tokio's multi-threaded scheduler, Intel TBB, Taskflow, Go's
+  runtime) handle **nested spawn from a worker** and **the joining thread**, and which of the three
+  mechanisms above each one actually implements;
+* **steal granularity** — one task vs a batch vs half the queue — and what the measured trade-off is
+  against contention;
+* **push-to-idle vs poll-to-steal**: which designs maintain an idle registry, what it costs them, and
+  whether any abandoned it;
+* the **locality** heuristics: LIFO/FIFO split, last-victim hints, NUMA and core-affinity policies,
+  and what evidence exists that they pay;
+* ⚠ separate what a design **documents** from what a blog **claims**. This repository has been burned
+  by vendor-page numbers, and its own token-economy record says the percentage claims it surveyed
+  were blog-sourced and unverified.
+
+### Two false doc comments to correct whenever this is touched
+
+`thread_pool.rs:128-129` and `worker.rs:356` assert siblings see local-injector tasks *"via the
+local-injector poll in stage 1.5 of `worker_main`"* — **there is no stage 1.5**. And
+`colored.rs:2629-2631` assumes a lane pool of `num_threads + 1` where it is **1**.
+
+**Owner:** unassigned; research pending on the owner's own instruction. Downstream of this row:
+**KE15** (dense × `par_iter`) cannot pay off before defect A is fixed, and the O-series colored-solve
+numbers need re-taking rather than re-reading once it is.
