@@ -14,6 +14,37 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+---
+
+## 2026-08-30 — the owner's rulings, and the Aether ladder closes
+
+Seven ballots answered by the owner in one session, plus eleven decided by the orchestrator under
+the standing rule that performance and architecture forks are settled with numbers. **Every `AB`
+ballot is now closed except AB-12**, which blocks nothing.
+
+Recorded here as the single index; each ruling's full ground and rejected alternative live at the
+site named in its row.
+
+| ballot | ruling | where the ground lives |
+|---|---|---|
+| **AB-1** | **RATIFIED as specified** — event auto-registration adopted on ergonomic grounds; the STAGE-under-D4 alternative rejected. ⚠ The reopen was licensed because C3's recorded ground — *"the unregistered case fails silently on both ends"* — was **refuted by measurement**: both generated ends are a loud init-time panic. The grant now stands on a stated ground (ergonomics), not on the refuted one | [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) C3 |
+| **AB-6** | **Option (b), and the class split in two.** The ballot's premise was refuted first: hand-written Rust could not do it either, so there was no ratified surface to narrow — only a promise the kernel did not keep. **Dense**: build the construct-and-commit route. **Bitset/flag**: refuse in the **derive**, since a flag has no bytes and `FLAGS_DIRECT` is the mechanism. Refusing in Aether alone was ruled out because it would make Aether reject what the derive accepts | [`aether-v2/KERNEL-BACKLOG.md`](aether-v2/KERNEL-BACKLOG.md) AB-6 + **KE14** |
+| **AB-7** | **R-DENSE LIFTED, and the ballot's framing rejected.** Owner: *"that there is no parallelism is just wrong."* The candidate driver-independent ground had already been measured and **refuted on both conjuncts**; the owner then declined to treat the driver limitation as a constraint at all. Measured: the refusal is a `const assert` whose own comment says the chunk runner *"has no world cell"* — unwired plumbing, not a design limit, and the same gap blocks `Related` joins | [`aether-v2/KERNEL-BACKLOG.md`](aether-v2/KERNEL-BACKLOG.md) **KE15** |
+| **AB-10** | **(a) the measurement script IS required** when the audit branch is taken. **(b) the widening to the joint Aether+Gaia vocabulary is RATIFIED** — if the two languages are one body of work, the vocabulary is one vocabulary, and a word meaning different things across them is a false friend between the author's own languages. Price accepted: the risk list grows with Gaia's vocabulary, and a collision there may force a rename in Aether | [`aether-v2/AI-ORIENTATION.md`](aether-v2/AI-ORIENTATION.md) AIR-10 / AB-10 |
+| **AB-11** | **The recommended option — a parse refusal** with a did-you-mean pointing at `enabled` / `disabled`. ⚠ Adds a refusal where v1 documents non-refusal, which is what made it the owner's. Ground, measured with R0's fix already in the tree: over a `flag`, `with F` matches nothing and `without F` excludes nothing — two different silent wrong answers — and the defect is in the **leaves**, so R0's `Or` fix does not reach it | [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) AB-11 row; red test `ab11_flag_filter_polarity.rs` |
+| **AB-13** | **`true` / `false`.** Settles all four interacting parts at once: the values are Rust keywords already, so nothing new is reserved; the three-way `on` collision (`machine … on entity`, `on E => T`, `flags (X = on)`) **does not arise**, so neither a reader nor a generator needs lookahead; and the group keeps the name `flags`, PENDING Tier 3's withdrawal of the `flags → initial` rename standing on its own sound ground. Spelling: `flags (Stunned = false, Burning = true)` | [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) AB-13 row |
+| **GB-2** | **`#RRGGBB` is `#RRGGBBAA` with maximal `AA`** — a defaulted field, not a second literal kind, which dissolves the reopen question rather than answering it. **And the arity direction the clause did not cover: REFUSE AT BAKE** — an 8-digit literal at a 3-component field (`PointLight.color` is `[f32; 3]`) is a coded refusal naming the field, never a silent alpha drop | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Colour |
+
+**Still open on the Aether side: AB-12 only**, and it blocks nothing. Evidence gathered 2026-08-30
+points at option (b): every `G1`/`G2` occurrence in the 2026-08-29 plan session is a **Gaia rung**,
+not a defect body, and the surviving `AD1..AD4` all have subjects. That is evidence, not proof — the
+search was a grep over a 7 MB transcript, an instrument this campaign has had lie to it three times
+in one day.
+
+**Not ballots, and not the owner's: K8 and K9** — the bundle-with-`link Entity` spawn spelling and
+the relationship macro's private-field demand — are architecture gaps routed to R3's own design
+pass. R3's `bundle` and `relation` constructs may not be declared done while they stand.
+
 ## 2026-08-29 — Corpus audit of the aether-v2 + gaia plans: THIRTY-TWO open ballots, listed here because a plan that settles a fork silently is the defect
 
 A multi-lens review of the two plan corpora ([`aether-v2/`](aether-v2/CAMPAIGN.md),
@@ -31,6 +62,15 @@ premise, and that is said at the item.
 
 **Nothing here blocks R0, R1 or R2 on the Aether ladder** — those are buildable immediately (KERNEL-BACKLOG **KE11**'s
 red tests land regardless of its disposition). Everything above them waits on a line from this list.
+
+> ✅ **STATUS, 2026-08-30 — read this before any ballot body below.** The bodies in this section are
+> kept verbatim as the record of what was open and why; **they are not a to-do list any more.**
+> **Every `AB` ballot except AB-12 is now closed**, along with `GB-1`, `GB-2`, `GB-7`, `GB-8` and
+> `GB-9`. Seven were answered by the owner and eleven by the orchestrator under the standing
+> perf/architecture rule. The index with each ruling and where its ground lives is
+> §*2026-08-30 — the owner's rulings, and the Aether ladder closes*, above.
+> **Still open and genuinely awaiting an answer: the Gaia `F` series (F1–F10) and `GB-3`, `GB-4`,
+> `GB-5`, `GB-6`** — fourteen. Plus **AB-12**, which blocks nothing.
 
 ### Gaia — the `F` series (F1..F7 raised 2026-08-28, full bodies in the entry below; F8..F10 born in this review)
 

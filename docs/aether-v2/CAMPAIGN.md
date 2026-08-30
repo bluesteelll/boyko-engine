@@ -146,13 +146,23 @@ whose row names no ballot reads as unblocked. Bodies live in
 | **AB-13** | The flag-initial value vocabulary, and disambiguation across all three `on` positions (`machine … on entity`, `on E => T`, `flags (X = on)`). ⚠ the `flags → initial` rename **touches a ratified keyword** | `on\|off` reserved vs contextual; and: [`../gaia/PENDING-SYNTAX-PLAN.md`](../gaia/PENDING-SYNTAX-PLAN.md) §Tier 3 **withdrew** the `flags → initial` rename (ground: `initial` is already the machine's initial-state keyword, so the rename recreates the defect it fixes) — does that withdrawal stand, or is a different rename wanted? | **R3** |
 
 **Roll-up by rung** — the number a rung's own row does not show: **R0/R1/R2** — none, buildable now.
-**R3** — AB-1, ~~AB-2~~, AB-6, ~~AB-8~~, AB-11, AB-13 (**four open**; AB-2 ruled 2026-08-30 at
-**E4** and AB-8 the same day at **C5a**, plus AB-10 on its keyword surface alone).
+**R3** — ~~AB-1~~, ~~AB-2~~, ~~AB-6~~, ~~AB-8~~, ~~AB-11~~, ~~AB-13~~ — **ONE open: AB-10(b) only**,
+on the keyword surface. All six of the others were ruled 2026-08-30: AB-2 at **E4** and AB-8 at
+**C5a** (delegated); **AB-1** ratified on ergonomics, **AB-6** option (b) with the class split,
+**AB-11** the parse refusal with a did-you-mean, and **AB-13** `true | false` — all four **by the
+owner**. AB-10's half (a) is answered too (the measurement script IS required); only (b), the joint
+Aether+Gaia vocabulary widening, is open, and it is ⚠ a scope change to a ratified requirement.
+⚠ R3 additionally carries the **K8/K9** design debt, which is the architect's, not a ballot.
 **R4** — ~~AB-2, AB-3, AB-4~~ — **all three ruled 2026-08-30** (**E4**, **E5**, **E6**); R4 carries
 **no open ballot**. It is not thereby buildable: E5 raises `MAX_EVENT_THREADS` to 66 and E4 needs a
 dispatcher lane-count setter, and the rest of KE8 (`&self` send, `send_slice`, the re-aimed debug
 assert) is still unlanded — those are work, not ballots.
-**R5** — **AB-7 only**; AB-5 and AB-8 were RULED 2026-08-30 (DECISIONS **M4a** / **C5a**).
+**R5** — ~~AB-5~~, ~~AB-7~~, ~~AB-8~~ — **no open ballot.** AB-5 and AB-8 were ruled 2026-08-30
+(DECISIONS **M4a** / **C5a**, delegated); **AB-7 was ruled the same day by the owner**, who rejected
+the ballot's framing rather than picking an option: *"that there is no parallelism is just wrong."*
+**R-DENSE is lifted**, and the driver limitation behind it became work — see KERNEL-BACKLOG
+**KE15**. ⚠ As with R4 and R8, no open ballot is not the same as buildable: lifting gives
+**sequential** machines over dense today; the `parallel` half waits on KE15.
 **R6** — none of its own; it depends on R5.
 **R7** — ratification is done, but its implementation folds into R3, so it inherits R3's list.
 **R8** — ~~AB-9~~ — **ruled 2026-08-30** ([`DECISIONS.md`](DECISIONS.md) §Sequencing rulings); R8

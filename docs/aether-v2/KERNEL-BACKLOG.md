@@ -50,6 +50,8 @@ a citation of this file.
 | KE11 | **Refuse (or filter) `#[require]` of an id whose storage kind owns no per-archetype pool — BOTH poolless kinds, Bitset AND Dense** (the row previously said "a bitset tag", which is half the class). Two sites reach an unfiltered pool lookup for such an id, and they are **two DIFFERENT calls** — (1) `BundleColumnCache::resolve_required_missing` (`crates/boyko_ecs/src/ecs/core/bundle/bundle_column_cache.rs`) via `component_pools().pool_id_for(entry.component_id).expect("invariant: the archetype was expanded with every required id …")`, and (2) the `has_requires` required-ctor pass inside `migrate_entity_insert` (`crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs`) via `component_pools_mut().get_pool_mut(req_id).expect("invariant: target hosts every required id (expanded archetype)")`. Neither screens the storage kind first, unlike the sibling loop in `BundleColumnCache::resolve_and_cache`, which diverts a `StorageKind::Dense` id to `DENSE_POOL_SENTINEL` before resolving. ⚠ **Status updated by R0's census, 2026-08-29 — site (1) is MEASURED, site (2) is not.** A throwaway probe spawning a bundle whose component `#[require]`s a dense component, and one that `#[require]`s a bitset flag, panicked for **both** kinds at `bundle_column_cache.rs:410` with the predicted misleading message. Site (2) was **never reached**, because the spawn path dies at site (1) first — see the census's blind-site table for why that matters to this row's oracle | `requires` of a `flag` — and, on the same mechanism, `requires` of a dense-storage component — is a boot-time crash carrying a misleading invariant message | n/a | write the red tests FIRST, **parameterised over both poolless kinds** — and ⚠ **over both SITES**: a suite that only spawns pins site (1) twice and silently reports site (2) as covered. Reaching site (2) needs an **insert into an existing entity** (the `migrate_entity_insert` path). The tests demonstrate the panic regardless of which disposition wins. Disposition (refuse / filter / dense construct-and-commit route) is ballot **AB-6** below |
 | KE12 | *(deferred, measure first)* `VmColumn` promotion to pub; the g6-style A/B of `iter` vs `for_each_chunk` on the machine-pass shape; the D2 value-half bench | — | — | criterion |
 | KE13 | 🆕 **UNOWNED — raised by R0's census, 2026-08-29.** `QueryView::get` / `get_mut` apply the matched-archetype bitset, the dynamic tag terms and the enable terms, but **never call `F::filter_fetch`, and resolve `resolve_dense` only for `D`**. A **dense** `With<C>` / `Without<C>` is therefore silently ignored on the point-lookup path: a dense `With` has `IS_ARCHETYPAL = false` and a `matches_component_set` that admits every archetype, so its ONLY gate is the `filter_fetch` `get` does not run. `get` returns `Some` for a non-member and **disagrees with `iter()` on the same view** | Same shape as KE1 one path over — *a caller that does not make the dense call* — but strictly worse: KE1 made an arm never true, this applies **no gate at all**, in both polarities. ⚠ **`get`'s own doc comment asserts the opposite in writing** ("So `get` only ever sees archetypal and enable terms — there is no silent-ignore path"), on the premise that `With`/`Without` are archetypal, which the Dense plan falsified. A fix owes that paragraph an edit **in the same commit**. ⚠ In-tree precedent that this path was known under-served: `state.rs`'s `dense_get_iter_agree` carries a "PRE-EXISTING BUG … flagged for the reviewer" note that `get` never calls `resolve_dense`, calling the repair "a one-line `resolve_dense` mirror" — **the `D` half was since fixed, the `F` half was not**, and it is not a one-liner (there is no `filter_fetch` call to feed) | n/a (bug fix) | ✅ already written and **observed red**: `crates/boyko_ecs/tests/ke13_query_view_get_ignores_dense_filter.rs` — two `#[ignore = "deferred: KE13 …"]` tests (both polarities) plus a non-ignored control pinning that `get` DOES apply a table filter and that `iter()` answers the dense one correctly. Un-`#[ignore]` them when a rung takes this |
+| KE14 | 🆕 **UNOWNED — opened 2026-08-30 by AB-6's landing.** The retained-dense path in `migrate_entity_insert`: five confirmed defects, four of them pre-existing, none of them memory-safety (Miri clean). **D1** is a reachable panic — `invariant: retained component must exist in source` at `migration_helpers.rs:596`, with a sibling face on the remove path at `:1234` — and **D2** makes a correctly constructed required dense component **vanish from every dense query on the next insert**. Full statement, repro and oracle: **§KE14** below the tables | `#[require]` over dense works on the **spawn path only**. KE11 made the declaration accepted and advertised, so it is now a documented route into defects that were previously unreachable | n/a (bug fix) | red-first per defect, written from the three-step repro **before** any fix; the `ke11_*` table-storage controls stay green throughout, since they are what distinguishes a real fix from a broken fixture |
+| KE15 | 🆕 **UNOWNED — opened 2026-08-30 by AB-7's ruling.** Give the parallel chunk runner a world cell. `par_iter.rs:305` carries `const { assert!(!D::HAS_DENSE && !F::HAS_DENSE) }`, and the comment above it names the cause in its own words — *"the chunk runner has no world cell"* — i.e. unwired plumbing, not a design limit, the same shape as KE1. The **next** `const` block refuses `Related<R, D>` joins for the SAME missing cell, so one fix retires two refusals. Full statement and oracle: **§KE15** below the tables | the owner ruled R-DENSE lifted; lifting alone gives **sequential** machines over dense, and the `parallel` half waits on this row | yes — const-folds away for a query with no dense and no relation term | red-first: a `par_iter` over a dense term seen failing to compile, then compiling and matching the sequential `Query::iter` result set for W ∈ {1, 2, N}, with **per-worker touch counts reported** so a silently-sequential run is red rather than green |
 
 ### What R0 landed for KE1 (2026-08-29)
 
@@ -245,3 +247,56 @@ existing `ke11_require_poolless_storage_kind.rs` controls stay green throughout 
 distinguishes a real fix from a broken fixture.
 
 **Owner:** unassigned. This is *work*, not a ballot — AB-6 is settled; these are its unfinished half.
+
+## KE15 — give the parallel chunk runner a world cell (NEW, opened 2026-08-30 by AB-7's ruling)
+
+**Ballot AB-7 was resolved by the owner, and he rejected the ballot's framing rather than picking
+one of its two options.** Owner, 2026-08-30: *"this needs to be fixed — that there is no
+parallelism is just wrong."*
+
+⇒ **R-DENSE is LIFTED**, and the reason the ballot offered for keeping it unconditionally is gone:
+the candidate driver-independent ground was measured on 2026-08-30 and **refuted on both
+conjuncts** — the router's deposit path does not assume a table row (both `get_component_mut` and
+`Query::get_mut` carry working dense arms, pinned in `ke3_query_random_access.rs`), and there is no
+layout const-assert (every dense `const assert` in the kernel belongs to a *driver*). Dense is fully
+iterable and tracked under `iter_mut`, 64/64 rows.
+
+⇒ **And the driver limitation itself is now work, not a constraint to design around.**
+
+**What actually refuses, measured.** `crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs:305`:
+
+```rust
+const {
+    assert!(
+        !D::HAS_DENSE && !F::HAS_DENSE,
+        "a dense (storage = \"dense\") term is not supported on `par_iter` in D3 — …"
+    )
+};
+```
+
+and the comment above it states the cause in its own words: *"the parallel path does not resolve the
+dense store into each worker chunk's `Fetch` (the chunk runner has no world cell)"*.
+
+**That is unwired plumbing, not a design limit** — the same shape as KE1, where `Or` refused dense
+because it forwarded none of the dense plumbing the AND tuple already declared. A refusal whose
+stated ground is "the driver does not do it yet" must not be ratified as permanent, which is exactly
+what the owner's reading caught.
+
+**One fix, two refusals.** The immediately following `const` block rejects `Related<R, D>` joins for
+the *same* missing world cell (`par_iter.rs:317`, *"the parallel chunk runner has no world cell to
+resolve the FK target's archetype per row"*). Whatever gives the chunk runner access to the world
+unblocks both; a design that fixes only the dense half leaves the second refusal standing on a
+ground that no longer exists, which is how this corpus generates stale refusals.
+
+**Scope note, so nobody over-promises from AB-7's lifting alone:** lifting R-DENSE gives
+**sequential** machines over dense today. `parallel` machines over dense need this rung. Until it
+lands, an Aether `machine … on entity parallel` over a dense-storage component is still a
+compile-time `E0080`, and the refusal message should say *"not yet"* rather than *"not supported"*.
+
+**Oracle:** red-first — a `par_iter` over a dense term must be seen failing to compile, then compile
+and produce the same result set as the sequential `Query::iter` over the same fixture, for
+W ∈ {1, 2, N}, with a **per-worker touch counter reported** so a silently-sequential run is red
+rather than green (the campaign's standing counts-not-exit-code rule). The `Related` half gets the
+same treatment or an explicit statement of why it is deferred.
+
+**Owner:** unassigned. Depends on nothing that is still balloted.

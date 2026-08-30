@@ -84,9 +84,22 @@ record; engine claims were verified line-by-line in this checkout).
   illustrative literal list, not a reopen (the one list this corpus closes says *"the list is
   exhaustive"*, and it is §The logic line's, not this one).
 
-  ⚠ **FLAGGED FOR THE OWNER, 2026-08-30 — this ruling was delegated, and TWO independent reviewers
-  both read the `#RRGGBB` clause as widening a ratified surface rather than annotating an
-  illustrative one.** The ruling's ground for treating it as an addition is stated above and is not
+  ✅ **RULED BY THE OWNER, 2026-08-30 — and the ruling dissolves the reopen question rather than
+  answering it.** Owner: *"`#RRGGBB` is just `#RRGGBBAA` where `AA` is maximal."* So it is not a
+  second kind of literal at all; it is the same literal with a **defaulted field**. There is no
+  surface to widen, and AIR-10's reopen bar does not engage.
+
+  ✅ **And the arity direction the clause did NOT cover is ruled too: REFUSE AT BAKE.** Owner,
+  2026-08-30. The rule above says what 6 digits mean at a 4-component field. The engine also has the
+  opposite shape — `PointLight.color` is `[f32; 3]` — and an 8-digit literal there must be a
+  **coded bake refusal naming the field**, never a silent alpha drop. Ground: dropping it is a
+  silent wrong answer, the author wrote a transparency and the baker ate it; and it is the same
+  disposition the owner ratified for **AB-11** on the same day, for the same reason — a refusal that
+  dissolves a class beats a documented sharp edge.
+
+  ⚠ *Superseded record, kept because it is why the question reached the owner at all:* this ruling
+  was delegated, and TWO independent reviewers both read the `#RRGGBB` clause as widening a ratified
+  surface rather than annotating an illustrative one. The ruling's ground for treating it as an addition is stated above and is not
   frivolous: the corpus marks exactly one literal list as closed, and it is a different list. But a
   delegated ruling that exempts itself from the reopen bar **on its own reading of which list it
   touches** is settling a fork by proximity, which is the defect this whole ballot list exists to
