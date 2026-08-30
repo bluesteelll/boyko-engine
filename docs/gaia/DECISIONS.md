@@ -13,6 +13,25 @@ record; engine claims were verified line-by-line in this checkout).
   `resolve_stable_name` (once per type, cold), POB column blits, `load_archetype`/`load_dense_store`,
   `LoadEntityMap` with loud `UnmappedEntity`, per-component `format_version`. The bake tool PRINTS
   the existing `boyko_serialize` format — a second byte format is forbidden.
+
+  ✅ **F1 RULED BY THE OWNER, 2026-08-30 — the bake route is macro-time GK-4, taken NOW.** Owner:
+  *"Do it properly right away. But bear in mind the world must support streaming."* Both halves
+  bind. **The route:** derive-emitted name-keyed field tables + typed constructors in
+  `boyko_macros` (rung **G1**) — not the audited-and-rejected EG2 reflection seam, and not
+  sequenced behind it. Gaia detaches from EG2 and from the unlanded C11 rather than waiting on
+  either. **The constraint:** no part of the bake design may foreclose streaming, which is why
+  **F5** lands *with* the scene profile instead of after it (§Load semantics below).
+  **Rejected: decide EG2 first, because it unblocks more than Gaia.** Price: G1 waits on a seam
+  this campaign does not need, and the ballot's own framing conceded the wait was the whole
+  question; the owner declined it in as many words.
+  ⚠ **One inference the ballot drew from `RequiredCtor` does not survive the ruling, and it matters
+  downstream.** The ballot argued that `unsafe fn(dst: *mut u8)` makes ctor-form `#[require]`
+  unbakeable *in principle*. Measured after the ruling: a GK-4 baker is a **Rust program linked
+  against the derive-emitted tables**, so it resolves and calls that fn pointer trivially — a
+  downstream crate did exactly that through today's public `required_ctor_in_set`
+  (`crates/boyko_ecs/src/ecs/core/serialize/mod.rs:51`) and got the ctor's value. What cannot call
+  a fn pointer is the *Gaia evaluator over text*, which is a different claim about a different
+  program. §Load semantics takes the corrected version as its ground.
 - **Canonical printer + round-trip gate.** *(AIR cross-note: this is also AIR-07/16.)* Byte-level
   where bytes are compared, but the load-bearing gate compares on the WORLD side with a generated
   comparator — two in-tree incidents prove a hand-listed comparator goes green over divergence.
@@ -116,6 +135,16 @@ record; engine claims were verified line-by-line in this checkout).
   nothing" is proven by a gate, not a sentence). Its measured defects share ONE cause — four
   hand-maintained lists of one vocabulary — cured by a single generated vocabulary manifest.
 
+  ✅ **F6 RULED BY THE OWNER, 2026-08-30: option (a) — MIGRATE the existing `.ui` documents to the
+  Gaia `ui` profile and DELETE the old format in the same campaign.** Rejected: freeze `.ui` and
+  decide after an owner-eval of a real Gaia HUD. Price of the rejected option, and it is already
+  measured in this repository rather than argued: two authoring formats for one subsystem is the
+  diverged-pair state — the reader cannot tell which is current and finds out by acting on the
+  stale one (`docs/ru/` carries the same rule for the same reason). Price of the ruling, stated so
+  it is not discovered later: **the migration is done blind.** G7's prerequisites — a windowed UI
+  pass and a real `UiPlugin` — do not exist, so nothing renders a Gaia HUD to judge before the old
+  format is gone. That price rides **G7**, and G7's row records it.
+
 ## The logic line: total, eager, closed
 
 The evaluator is **total by construction** (no recursion form exists), **eager** (every contract
@@ -216,6 +245,76 @@ a patch target resolves against the **immediate** base — one sentence plus one
 ambiguity Unity left undocumented). Bake emits a **provenance sidecar** (asset → field → ordered
 (pack, file, span) list) — a dev/CI artifact absent from release.
 
+### The instance spelling — ballot GB-4, ruled 2026-08-30 [delegated]
+
+*(Body in [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29. The owner's word on this
+ballot was **"давай"** — delegation, not a selection: he named no option and the ballot text
+carries no recommendation for the word to point at. It is therefore decided under the standing
+perf/architecture rule and said so here, rather than attributed to him.)*
+
+**Option (a): linkage-in-slot, and the linkage word is MANDATORY.** One head keyword, `instance`;
+the linkage word occupies a fixed modifier slot with no default:
+
+```
+instance <name> extends|copy <base-ref>
+```
+
+`from` is **deleted**. Field order (name, then linkage, then base) is endorsed but is **G2**'s
+grammar work, not this ruling's — under §Identity's sigil rule the slots are disambiguated by
+sigil, not by position.
+
+**Ground 1 — (b) mints two grammars for one ratified construct.** This section already ratifies
+*"Instance = variant = derived asset = one construct"*. Option (b) gives that one construct two
+heads (`instance` for live, `copy` for snapshot), which is the shape **AIR-15** rejects by name —
+*"two grammars per construct — the `at` lesson"* — and it rejects it on the AI-orientation axis,
+the axis this ballot was to be judged on.
+
+**Ground 2 — (b) turns a modifier change into an anchor mutation.** Under (a), "make `wall_east` a
+snapshot" rewrites **one token in a fixed slot**; the head and the name are untouched, so a patch,
+a diff or a tool edit keyed on *the `instance` node named `wall_east`* still resolves afterwards.
+Under (b) the same semantic change rewrites the node's **head keyword**, and **AIR-09**'s ratified
+patch model is `{node_id, key, value}` edits applied by a tool — a head is neither a key nor a
+value, so (b) puts linkage outside the model's reach.
+
+**Ground 3 — (b) has no refusal for the omitted case; (a) does.** Under (a) a missing linkage word
+is a coded refusal at a known span over a closed two-way choice. Under (b), `instance …` alone is
+legal and means *live*, so an author who meant a snapshot and forgot gets a silent wrong-linkage
+node — this repo's standing defect class, and the identical consequence §Layers and depth already
+bought once for a forgotten `layer=`. Defaulting is also unavailable on the section's own ground:
+*RimWorld and Factorio each shipped one and their ecosystems invented the other*, so neither form
+is the natural default and a default is a coin flip made on the author's behalf.
+
+**Ground 4 — the two axes stay orthogonal, and the slot is already load-bearing at a second
+construct.** The data profile already spells a linkage word in a slot on `row`. Under (a),
+`extends|copy` is **one** modifier slot reused at `instance`, at `row`, and at whatever construct
+comes next; under (b), `copy` is a *head* in the scene profile while `extends` stays a *slot word*
+in the data profile — one word in two grammatical roles, the "one word, N positions" class the
+syntax plan already catalogues against Aether. The closed operation list (which must be
+**generated from the parser dispatch table**) then grows per construct × linkage under (b), and by
+two entries total under (a).
+
+**Rejected, with its price stated rather than dismissed.** Option (b) is genuinely cheaper to read
+in the common case — no linkage word when the link is live — and maximally loud on scan. **(a)'s
+price is one mandatory word on every instance line**, including the case an author would have been
+happy to leave implicit. The trade is taken because a generator emits a required token in a fixed
+slot from a two-item closed set essentially without error, while a *silent* default is a class of
+error nothing catches. **On the generator axis specifically:** under (a) both wrong answers are
+visible (the token is there and it is the other one); under (b) one of the two wrong answers is
+invisible — emitting `instance` when it meant `copy` produces a well-formed node with the wrong
+semantics and no diagnostic, and omission is the commonest generator error.
+
+**`from` — measured, with the qualification that strengthens the deletion.** A raw grep counts
+prose, so the measurement is over **code fences only**: extract fenced blocks from `docs/gaia/*.md`
+and match `\bfrom\b` → **1 hit in 44 fenced lines across 4 files**, and it is
+`bind value from=@player/unit …` — `from=` as a **field key on `bind`**, not the head-position
+`from` this ruling deletes. So the head keyword's occurrence count is **zero** and the ballot's
+ground holds. `grep -rn '"from"' crates/aether_lang/src/` exits 1 — not a keyword on the Aether
+side either. The qualification: had head-`from` survived, `from` would have carried two
+grammatical roles across the two profiles — Ground 4's class. ⚠ **A riding line falls out of it:**
+the syntax plan's own R1 amendment spells that construct `bind: value source=…`, so the corpus
+contains an undeclared `from=` → `source=` rename. GB-4 deletes head-`from`; the surviving role
+must not be left half-renamed. That edit is **owed to G2** and is not made here.
+
 ## Identity and references
 
 *(= AIR-08 ratified, with one conscious inversion.)*
@@ -230,28 +329,138 @@ ambiguity Unity left undocumented). Bake emits a **provenance sidecar** (asset �
   `gaia fmt --assign-ids` writes ids INTO the text; bake refuses a referenced node without one.
   **An anonymous node can never be the target of a cross-file reference, an override, or a patch**
   — ordinals re-key on insertion (the Terraform-count class).
-- **Two reference kinds, two syntaxes** *(ratified)*: value references (templates, `let`) are
-  lexical, copy-semantics; entity references (`@asset/object`) are identity, remapped at load. No
-  config language in the survey has object identity at all — one spelling would invite authors to
-  assume one behaviour.
-- ⚠ **Open ballot GB-3 — the taxonomy is short one kind.** An **asset** reference (a curve, a
-  string table, a style record, a mesh) is neither of the two above: it is not copied lexically,
-  and it is not an entity id remapped by `LoadEntityMap`. Today it has no ruled spelling, so the
-  two-kind rule does not tell an author which behaviour to assume for the case the language uses
-  most. Recording this as an **extension consistent with the ruling's own one-spelling-one-
-  behaviour rationale, NOT a reversal of it** — but it still amends ratified text, so it goes to
-  ballot rather than being written in. The question, in three parts:
-  1. **Asset-ref spelling** — (a) its own sigil, (b) a typed head, or (c) bare strings. Option (c)
-    needs a separate answer for the dangle check (what refuses a reference to an asset that is not
-    there), because a bare string carries no marker for the checker to key on.
-  2. **Which kind GN1's name-hash covers, stated explicitly.** GN1 resolves every reference form in
-    the binary to a name hash at load — WITHOUT remap. That is the asset kind's behaviour, and the
-    ratified text never says so.
-  3. **Style references** (K15) — whether they are the asset kind or a fourth thing.
-  **Settle jointly with the `$hole` sigil (K3) and the style-reference disposition (K15)**, so the
-  reference rule is rewritten exactly once and syntax ruling
-  [**PENDING R4**](PENDING-SYNTAX-PLAN.md) is regenerated once — the Gaia ruling series, **not**
-  Aether rung R4. Blocks **G2, G3** and [PENDING](PENDING-SYNTAX-PLAN.md) Tiers 1–2.
+- **THREE reference kinds, three sigils** *(the two-kind rule as ratified 2026-08-28, extended by
+  ballot **GB-3** — third kind **ADOPTED BY THE OWNER 2026-08-30**, the four-part rewrite ruled the
+  same day [delegated]; body in [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29)*. The
+  extension is consistent with the original rationale — *one spelling would invite authors to
+  assume one behaviour* — and does not reverse it. **The third row's last column is what makes it a
+  third kind, and it is the column the other two do not have:** an asset reference is the only one
+  whose referent can **stop being valid after load**, because streaming retires slots — which under
+  the owner's F5 ruling is the normal case, not an edge.
+
+  | kind | sigil | at bake | at load | after load |
+  |---|---|---|---|---|
+  | **lexical / copy** — templates, `let`, styles, inheritance bases | `$` | substituted; **no reference survives into the binary** | nothing to resolve | nothing |
+  | **entity** — an authored object's identity | `@` | resolved offline; `UnmappedEntity` lifted from load to bake | **remapped** through the load map | stable for the load's lifetime |
+  | **asset** — mesh, curve, string table, font, sound | one glyph, closed jointly with the operator list (below) | resolved to a **path-name hash** | **looked up, not remapped** — `PathIndex::lookup(hash: u64) -> Option<(u32, u32)>` = `(slot, generation)`, `crates/boyko_ecs/src/ecs/core/asset/path_index.rs:112` | **refcounted and revalidated every frame** — `validate_asset_refs` compares `try_generation(slot)` against the `MeshRefGen` / `MaterialRefGen` lanes and disables a stale row (`crates/boyko_render/src/asset_refcount.rs`) |
+
+  Both collapses are refuted by that table, at source. It **cannot** be the entity kind: there is no
+  `Entity`, no load-map row, and `PathIndex` is first-insert-wins with one entry per hash —
+  **globally interned, not per-load**. It **cannot** be the lexical kind: a lexical reference does
+  not survive into the binary at all, and this one must. ⚠ **And the asset kind already has the
+  cross-cell mechanism the entity kind lacks:** two cells referencing the same path resolve to the
+  *same* `(slot, generation)`, the refcount keeps it alive while either cell holds it, and unloading
+  one cell decrements without disturbing the other. That is a positive reason to keep the kinds
+  apart — folding assets into `@` would take the one reference kind that already works across a
+  cell boundary and give it the lifetime of the one that does not (§Load semantics, GK-1).
+
+  **Part 1 — the asset-ref spelling is a SIGIL** (option (a)), applied uniformly and
+  position-independently. The invariant bought: **a bare word is never a reference**, anywhere.
+  That invariant replaces the case-gate the syntax plan's R6 lost when M12 refuted it, and it makes
+  the dangle check a single lexical pass instead of a grammar walk.
+  - **Rejected: (c) bare strings**, on this section's own ratified rationale. A string literal is
+    already a **non-reference value** in this language (`text "…"`, contract text, `stable_name`),
+    so (c) puts kind 3 into the same spelling as a plain value — a worse collision than the one the
+    rationale was written against. Its second price is the dangle check: (c) keys on the
+    destination field's GK-4 row, which works for component fields (the GB-2 precedent) but **not**
+    for the positions that carry asset references and have no destination field — the instance base
+    slot, a valve argument, and a file's own `asset` declaration. Three mechanisms where the sigil
+    needs one, and three places the check can be forgotten for a position nobody enumerated.
+  - **Rejected: (b) a typed head**, on the measured ground that already killed widget sugar: *"the
+    vocabulary is unclosable — every new widget steals a legal object name"*, and **R7** requires
+    the operation list be closed and generated, which an open-ended per-kind head vocabulary cannot
+    be. It also buys type information the system already holds twice.
+  - ⚠ **The glyph is CONSTRAINED and is not independently choosable — this is a finding, and it is
+    why no glyph is minted here.** Measured over Gaia code fences (extract fenced blocks from
+    `docs/gaia/*.md`; 44 fenced lines, 4 files): `/` 21, `@` 10, `:` 4, `#` 3, `|` 2, `-` 2, `$` 1,
+    `;` 1, `+` 1, `>` 1; **absent: `!  %  &  *  <  ?  \  ^  ` ~`**. Constraints: not `@`, `#`, `$`
+    (taken — entity, colour literal, lexical); not `&` (ratified-rejected at R4, and it reads as
+    *borrow* to Rust eyes, misstating an owned refcounted handle); not `?` (reads as
+    fallible/optional, which states the opposite of §Refusals' *no construct with a fallback*); not
+    a backtick (measured-hostile in this toolchain, and Gaia text lives inside markdown throughout
+    this corpus); and **not any glyph that can open a binary operator** — R3 ratifies that
+    whitespace is never significant, so `(a %b)` and `(a % b)` must parse identically, and `%` is
+    the glyph the ratified `for … if` guard wants for its commonest predicate. **Therefore the
+    asset sigil cannot be chosen before Gaia's arithmetic operator vocabulary is closed** (§The
+    logic line ratifies *arithmetic/interpolation over same-document values* and never enumerates
+    the operators, while M17 already requires that list to exist). They are one question, and
+    choosing the glyph first is how the ambiguity gets minted. **Recommendation: `~`** — absent
+    from every Gaia fence and from `aether_lang`, never binary in any plausible operator set,
+    unused in Rust, carrying no prior that misstates a behaviour. **The final glyph is closed by
+    G2 jointly with the operator list, and that joining is part of this ruling.**
+  - **The dangle check, named.** Every sigil-marked token must resolve at bake; unresolvable is a
+    coded `GA####` refusal naming the pack and the path, blamed on the reference's own span. The
+    resolver is the bake-time analogue of the shipped `PathIndex`: a name-hash index over the
+    pack's assets, first-insert-wins, so there is exactly one entry per hash and never an ambiguous
+    first match. This is the same lift §Identity already ratified for the entity kind
+    (*`UnmappedEntity` lifted from load to bake*), now stated for the asset kind, which the
+    ratified text never did. Because it is one lexical pass over sigil-marked tokens, the check
+    **cannot be structurally unreachable** for a position someone forgot to enumerate — the
+    specific failure (c) carries.
+
+  **Part 2 — style references are the FIRST kind (lexical/copy), not the third and not a fourth.**
+  §Refusals already ratifies *"no cascade (styles are named records by explicit reference,
+  **flattened by bake** — 'which rule won' is a fact, not a computation)"*, and a thing flattened by
+  bake leaves no reference in the binary, which is the definition of kind 1. ⚠ **A live
+  contradiction inside the ballot's own text is resolved here rather than carried forward:** the
+  ballot listed *"a style record"* among the asset kind's examples, contradicting §Refusals on the
+  same page. §Refusals is ratified; the parenthetical was not, and it is **dropped** — the example
+  list above carries no style record. Streaming check: a copy carries **no cross-cell obligation at
+  all**, which makes it the safest kind under F5. Its price is ratified rather than chosen here —
+  flattening multiplies bytes across N cells and a style edit rebakes every cell that used it, and
+  the provenance sidecar is what keeps that debuggable.
+
+  **Part 3 — `$hole` STAYS, reclassified.** The ballot's premise (*"a third reference sigil where
+  two are ratified"*) is false: templates and `let` are already named as the **lexical** kind, so
+  `$power` is kind 1 and was ratified all along. What `$` marks is not a kind but a **substitution
+  from a lexically-bound name at value position**, and it is doing work nothing else can do: R6's
+  case-gate was refuted (M12), so case is a lint only, and at value position the grammar admits
+  bare lowercase words that are **not** references (RON-style enum values, the ladder names
+  `base|variant|tuning|debug`, `rarity=common`). `power=power` is genuinely ambiguous, and a
+  template with a parameter named `common` would silently flip `rarity=common` from an enum value
+  into a substitution. **Ruled disposition:** `$` marks the lexical kind — template parameters
+  **and** `let` bindings — **in every position**, including the reference slots R4-as-amended
+  currently sends bare (`extends $sword_base`, `apply $Torch`). That regularity is what lets a
+  generator pick the sigil from the **kind alone**, with no positional knowledge. This overrides
+  R4's *"lexical/copy positions go bare"*, which is legitimate: R4 is an unratified syntax ruling
+  in an owner-gated file, GB-3 regenerates it by construction, and ratified §Identity fixes `@` for
+  the entity kind while saying nothing about the lexical spelling. **Price:** `extends $sword_base`
+  is one character noisier than the bare form, bought against a whole class of value/reference
+  ambiguity. M5's ban is intact — `$` is legal at value position only and forbidden in the name
+  slot (`pillar_$i` stays refused) — and `$x` where `x` is not a declared parameter or `let`
+  binding is a coded refusal naming the declared list.
+
+  **Part 4 — "a declared node ⇒ `@`" is WITHDRAWN**, and replaced by a positive rule. The ground is
+  the one the syntax plan already states — the criterion is *behaviour*, not declaredness — and the
+  corpus shows the damage: `LANGUAGE.md` spells a **lexical** inheritance base as
+  `extends @iron_sword`, using the identity sigil for a copy. **What replaces it is one question
+  with three mechanically decidable answers — *what does bake do with this reference?***
+  1. **substitutes it** → lexical, `$` (templates, `let`, styles, inheritance bases);
+  2. **records an object id for load remap** → entity, `@`;
+  3. **records a path hash for load lookup + refcount** → asset, the new glyph.
+
+  Decidable from the GK-4 field table at field positions and from the head/valve grammar elsewhere.
+  ⚠ **This rule is F8-neutral and F10-neutral by construction**: it never asks whether a node's
+  anchor is a human name that bakes to an id or a minted id, and it says nothing about whether a
+  bundle expands at bake.
+
+  ⚠ **Riding lines this ruling OWES and does not make here** (recorded so they are not lost):
+  [`PENDING-SYNTAX-PLAN.md`](PENDING-SYNTAX-PLAN.md) R4/R5/R7 and Tiers 1–2 are regenerated by this
+  ruling, and [`LANGUAGE.md`](LANGUAGE.md) carries `extends @iron_sword` and bare-string asset refs.
+  Both files are already marked — PENDING as owner-gated and uncommitted, LANGUAGE.md as
+  `ratified-stale` in its own head, gated by
+  [`tests/gaia_g0_citation_census.rs`](../../tests/gaia_g0_citation_census.rs) — so the divergence
+  is *marked*, not silent. The edits belong to **G2**.
+
+- **GN1's coverage, stated per kind — and the ballot's premise about it is REFUTED.** The ballot
+  asserted *"GN1 resolves every reference form in the binary to a name hash at load — WITHOUT
+  remap. That is the asset kind's behaviour."* GN1's own four resolutions (§UI bindings item 1)
+  open with *"object id → `Entity` (**load remap**)"*, so GN1 spans a remapping resolution and is
+  not the asset kind's behaviour. **GN1 is the uniform cost-and-representation law over all three
+  kinds** — nothing in the binary is an ungated ordinal, and every resolution is paid once, cold,
+  at load. Per kind, which the ratified text never said: kind 1 has **nothing in the binary to
+  resolve** (GN1 is vacuous for it); kind 2 resolves by **remap**; kind 3 resolves by **lookup**,
+  then refcounts and revalidates. **Only kind 3 is lookup-without-remap.**
 - `link` is mandatory grammar for entity-reference fields — the difference between a loud
   `UnmappedEntity` and a silently stale id.
 - Content hashes are integrity/cache only, never identity; the freeze/cache key is a hash of the
@@ -260,6 +469,411 @@ ambiguity Unity left undocumented). Bake emits a **provenance sidecar** (asset �
   the lexer, before the CST.
 - One id space across scenes and UI documents (UI already holds cross-document entity references).
   Bake resolves every cross-file reference offline — `UnmappedEntity` lifted from load to bake.
+
+## Load semantics — what "loaded" means (ballot F4, ruled 2026-08-30 [delegated])
+
+*(Body in [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-28 and its index row in
+§2026-08-29. This is the **GK-3** design line; it also carries the owner's **F5** streaming ruling,
+because F5 rewrites what the fixup must survive.)*
+
+**RULING: option (a) — a specified post-load fixup pass, in the form SUPPRESS-THEN-FIXUP, on the
+clone path's own precedent. Option (b) is not rejected wholesale: its MECHANISM (fire the real
+hooks) is adopted as sub-pass 4; its TIMING (during the load) is refuted by measurement.** Fired at
+the right moment, (b) **is** (a).
+
+**The five mechanisms, re-measured in this checkout.** All five reproduce as red at `6f75ee9e`
+(`cargo test -p boyko-serialize --test gaia_f4_load_path_fixups -- --ignored --test-threads=1` →
+`0 passed; 5 failed`, with the two controls green). The census in one number, with a command that
+cannot match a comment — `grep -rEn "trigger_on_[a-z]+\("` — is **0** hook-dispatch call sites
+across `crates/boyko_ecs/src/ecs/core/serialize/` + `crates/boyko_serialize/src/`, against **38**
+across `crates/boyko_ecs/src/ecs/core/commands/` + `.../ecs_master/`. Two corrections the
+measurement forces on the ballot's own list:
+
+- **(ii) the `#[require]` closure is NOT a load-path defect** — the loader merely *shares* it with
+  the dynamic by-id entrance. Measured on `EcsMaster::create_entity(arch, &[(ComponentId, bytes)])`,
+  the only entrance a baker holding `(id, bytes)` pairs from text can use: `create_entity` fires 1
+  hook and produces **no** required component, where `Commands::spawn` of the same bundle produces
+  it. `create_entity` is public, shipped, and used by `boyko_physics/tests/bundles_s6.rs`, whose own
+  comment already concedes the caller must hand-supply the require closure. So the silent wrong
+  answer exists **in the live engine one call from gameplay code** — and a GK-4 baker built on
+  `create_entity` would bake the defect *into the file*, which the "build a live world, then
+  `save_world`" route was assumed to prevent.
+- **(iii) flag state SPLITS IN TWO, and the ballot conflates them.** (iii-a) *declared* initial
+  state (`FLAGS_DIRECT` / `apply_flags_declared_by`,
+  `crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs:275`) is a pure function of the
+  component set and is reconstructible **with no format change at all**. (iii-b) *authored or
+  mutated* per-entity state is genuinely unrepresentable, and it is **F9**'s, not F4's — and it is
+  a shared defect of two of the three non-spawn entrances, since the clone path drops the enable
+  bit too.
+
+(iv) and (v) are consequences of (i), not independent — with one addition the census file does not
+carry: `mesh_handle_on_insert` (`crates/boyko_scene/src/render_caps.rs`) is
+`if let Some(deltas) = dm.resource_mut::<RefcountDeltas>()`, so it **silently no-ops when the
+resource is absent**. "Fire the hooks" only contributes a refcount in a world that already booted
+the render plugin.
+
+**The four ordered sub-passes. Order is load-bearing, not stylistic.**
+
+| # | pass | mechanism it uses | closes |
+|---|---|---|---|
+| 1 | **require closure**, at PARSE time — widen the id list with `for_each_required_id_excluding` **before** the `load_archetype` call and emit the existing `LoadColumn::Construct` per added id | already in the loader (`crates/boyko_ecs/src/ecs/core/serialize/load_writer.rs:147,512`) | (ii) |
+| 2 | **declared flags** — `flags_direct_for(owner)` per loaded id, then `set_enable_bit` | `enable_tag_api.rs:275` verbatim | (iii-a) |
+| 3 | *(existing)* `remap_loaded_entities` | unchanged | — |
+| 4 | **hooks** — `on_add` / `on_insert` per (entity, component), then drain deferred commands to a fixpoint | the same dispatch the insert path performs | (i), (iv), (v) |
+
+Sub-pass 1 is the cheap surprise: **`LoadColumn::Construct` already exists and already takes a
+`RequiredCtor`.** It is simply never reached for a component the file does not mention, because
+column classification runs per *file column descriptor*. Widening the id list closes (ii) with
+**zero new kernel machinery and zero migration** — no archetype churn, no second write. Requires
+**must** precede hooks (sub-pass 4 reads lanes sub-pass 1 supplies). Hooks **must** follow the
+remap. During sub-passes 1–3, relationship linking is suppressed through the existing
+`relationship_link_suppressed` bracket
+(`crates/boyko_ecs/src/ecs/core/relationship/mod.rs:97`).
+
+**Why the timing is a measurement and not a preference.** `DeferredEcsMaster` statically withholds
+every structural-change method, so a hook *cannot* "mutate the world mid-load" — the kernel already
+made that impossible, and the ballot's stated price for (b) is therefore wrong. The real hazard is
+**ordering against the entity remap**, which runs as a separate whole-world pass *after* every
+archetype. `relationship_on_insert`
+(`crates/boyko_ecs/src/ecs/core/relationship/generic_hooks.rs`) reads a **raw saved FK** and guards
+with `if !view.is_alive(target)`; measured id collision across a normal round trip is
+`saved=[0..7] fresh=[0..7]` — **overlap 8/8, 100%**. The guard does not fire, so the hook takes the
+*link* branch and builds a reverse index pointing at **a live but wrong entity** — strictly worse
+than today's empty index, because an empty index is detectably empty and a wrong one answers
+plausibly. **This bug already has a name in this kernel: BUG-EDGE-CLONE-1** (`generic_hooks.rs:104`
+— *"during a deep clone the FK is a VERBATIM copy still pointing at the ORIGINAL (un-remapped)
+target"*), and the clone path's fix is exactly the thread-local suppression bracket plus a relink
+that runs **after** the FK is remapped. The clone path also already reconstructs missing required
+components. **The kernel has already answered F4 once, on the sibling path, and it answered (a).**
+
+**What this costs to build: three `pub` promotions and a driver, not a redesign.** Measured as
+compile errors from a downstream crate: `for_each_required_id_excluding` is private
+(`component_registry/required.rs:404`), `DeferredEcsMaster::from_world` is private, and
+`EnableTagId(pub(crate) ComponentId)`
+(`component_registry/tags.rs:93`) is **one-way** — forward conversion is public, the reverse has no
+path, so a pass holding a resolved flag id cannot call `enable_id`. Everything else the fixup needs
+is **already public**: `required_ctor_in_set`, `flags_direct_for`
+(`component_registry/flags.rs:156`), `get_hooks`, the `ComponentHooks` fields, `HookFn`, the
+`FlagDirectEntry` fields.
+
+**Rejected, with prices.**
+
+- **(b) as written — fire hooks DURING the load.** Price: a 100%-rate silent mis-link of every
+  relation (measured above); refcount hooks that no-op against a world without `RefcountDeltas`;
+  `on_replace`-shaped hooks reading a lane sub-pass 1 has not yet supplied; and it still leaves
+  (ii) and (iii) open, so the coverage census is owed regardless. Rejected on measurement, not
+  preference.
+- **(c) forbid load-incomplete components in baked assets.** **Verified rather than inherited, and
+  it is worse than "untenable".** An attribute-line census over `crates/*/src/`, hand-audited to
+  drop test-fixture and doc-string hits: **10 require-bearing shipped components** — three light
+  types, `ParticleEffectHandle`, three camera types, `MeshHandle`, `MaterialHandle`, and
+  `UiWorldProjection`'s owner — plus **3 explicit hook-bearing** and the whole
+  `Relationship`/`RelationshipTarget` family. (c) forbids **every mesh, material, light, camera and
+  particle effect**; a scene profile that cannot express a mesh is not a scene profile.
+  `MeshHandle` alone is load-incomplete on **three** counts at once (requires ×3, `on_insert`,
+  `on_replace`), and it is the one component no scene can omit.
+- **Fix it at bake instead — make the baker spawn through `Commands`.** Price: refuted for the
+  *dynamic* set a text document produces (the `create_entity` measurement above), and it cannot
+  work in principle for (i)/(iv)/(v) — the bake-time world has no `RefcountDeltas` and no renderer,
+  so a bake-time refcount is meaningless, and reverse-index state would have to survive the format.
+  **Bake-time is the wrong side of the boundary for every runtime-state mechanism.** Sub-pass 1 is
+  the only part that could move to bake; keeping it in the loader costs one `Construct` column and
+  buys immunity to a stale bake.
+
+**The coverage census is part of the ruling, not a follow-up.** It enumerates **all five**
+mechanisms, not hooks alone — the ballot's own recommendation, and the reason the widened form of
+F4 was put at all.
+
+### Streaming scope — F5, ruled by the owner 2026-08-30: EVERYTHING FROM THE START
+
+Owner: *"Все сразу грамотно по списку с самого начала."* ⇒ **option (b)** — the one nobody had
+written down. `load_cell` / `unload_cell`, **GK-1's cross-load map with a declared lifetime**, and
+cross-cell reference resolution ship **with** the scene profile (**G6**), not after it at G8.
+**Rejected: (a) format-ready-loader-later** (catalog + attribution + id map now, loader at G8).
+Price of the rejected option as the ballot itself priced it: a catalog with no loader is a datum
+nothing consumes until G8 — this repository's own recurring defect class. **Price of the ruling,
+stated because it is the larger one:** G6 absorbs the hardest half of the design, since a per-load
+`LoadEntityMap` cannot express references BETWEEN chunks (measured), and the scene profile cannot
+land until that is solved. That price is now G6's, and G6's row says so.
+
+**GK-1 — six requirements, each from a measured blocker.** `LoadEntityMap` today
+(`crates/boyko_ecs/src/ecs/core/serialize/mod.rs`) is `entries: Vec<(u64, Entity)>` keyed on the
+**saved `EntityId.0`** — a *file-local* value — with the contract insert-all → `finalize` (sort
+once) → `get` (binary search) and `debug_assert!(!self.sealed, "insert after finalize")`.
+`LoadEntityPolicy` (`crates/boyko_serialize/src/load.rs:72-77`) has exactly **one** variant,
+`Remap`.
+
+1. **The key becomes a GLOBAL object id, not a file-local `EntityId.0`.** Two independently baked
+   cells both contain saved ids 0,1,2… — they collide outright. The key is the industry pair the
+   campaign already names: durable asset/file id + file-local object id.
+2. **Insert-after-`finalize` must become legal.** Cell *N+1* inserts into a map cell *N* already
+   sealed; today that is a debug panic and, in release, an **unsorted tail that `binary_search`
+   silently misses** — a wrong answer, not an error. Keep the sorted `Vec` (never keyed on an
+   untrusted value; memory `O(entries)`) and make sealing incremental: sort the appended tail and
+   merge.
+3. **`unload_cell` needs removal — which the map has no method for at all — and a REVERSE edge**
+   ("who still references me"), which it does not carry. Without it, unloading cell A leaves cell
+   B's `@` references dangling with no diagnostic.
+4. **Lifetime: world-owned (a `Resource`), not a per-call local.** Today it is a stack local of
+   `load_world`, destroyed at return. F5's declared lifetime is "as long as any loaded cell can be
+   referenced".
+5. ⚠ **The fresh-world contract must be lifted, and this is the sharpest one.** `load_dense_store`
+   carries `debug_assert!(store.is_empty(), …)` whose message reads *"fresh-world-load contract
+   violated — merge load is unsupported"* (`load_writer.rs:703`), with the reason in its own doc: a
+   remapped fresh id could collide with an existing member and **silently corrupt the store**.
+   `load_cell` **is** a merge load by definition, and the guard is a `debug_assert!` — **it
+   vanishes in the shipping build**, so today `load_cell` would corrupt the dense store silently in
+   release and loudly only in dev.
+6. **`LoadEntityPolicy` gains its second variant** (`MergeInto`), which is where the streaming
+   contract is written down rather than implied.
+
+**The F4 ruling survives all six**, because every sub-pass is **per-entity and idempotent**:
+sub-passes 1–2 are pure functions of one entity's component set, and sub-pass 4 is the same
+dispatch the insert path performs per entity. Running the fixup over *only the newly loaded
+entities of one cell* is the same code with a narrower iteration domain. ⚠ **But GK-1 and GK-3 must
+land together or the cross-cell half of F5 is silently half-present:** sub-pass 4's hook dispatch is
+what makes a cross-cell reference *observable* — a `ChildOf` across a cell boundary only enters the
+reverse index when the link hook runs, which is today's F4(iv) one scope up.
+
+### The stable asset-id carrier — F4's G6 addendum, ruled with it
+
+**The carrier is a stable asset NAME in the file, resolved to the existing `MeshHandle(u32)` at
+load — no new component type.** Three measurements decide it:
+
+- **`MeshHandle(pub u32)` (`crates/boyko_scene/src/render_caps.rs:143`) blits a process-local slot,
+  and it is worse than the ballot states**: `Handle<T>` is `{ index: u32, generation: u32 }` and
+  `MeshHandle` drops even the generation. That omission is *why* `MeshRefGen` exists as a separate
+  lane.
+- **`MeshRef` does not exist as a type.** `grep -rn "\bMeshRef\b" crates/` → **0**; the 7 hits in
+  the repository are all corpus prose. `grep -rnE "MeshRefGen|MaterialRefGen" crates/` → **96**, a
+  **generation counter**. The name is not merely unlanded; it is one suffix from a live type
+  meaning something else. **Do not mint `MeshRef`.**
+- **There is no name- or path-keyed asset lookup anywhere in the engine.**
+  `grep -rnE "get_by_name|by_path|load_path|handle_for_name|name_to_handle"` over
+  `crates/boyko_ecs/src/ecs/core/asset/` + `crates/boyko_render/src/` → **0**. The registry the
+  carrier would key into does not exist either; **GB-3's rewrite must absorb that**, and it is a
+  build item, not a spelling item.
+
+This is not an invention — it is the discipline the engine already applies to *component* identity,
+and the format already implements it: `EnableTagId`'s own doc says the numeric value is
+first-call-order process-unstable and **the name is the stable serialization key**, and
+`load_world`'s doc says the loader *"resolves the file's stable names against already-registered
+ids"*. Asset identity gets the same two-layer treatment: **stable name on disk, process-local slot
+in memory, resolution at load.** The runtime carrier stays `u32` — `#[repr(transparent)]`, and the
+GPU draw-indirect path reads the column raw, a property that must not be spent. Concretely this
+makes the asset reference **GB-3's third kind** in the format, resolved at the sub-pass 1 / sub-pass
+4 boundary: the fixup resolves name → `Assets<T>` slot and writes `MeshHandle`, and sub-pass 4's
+`on_insert` then contributes the `+1` that closes (v). One mechanism, both halves. ⚠ This names a
+**carrier form**, not a name-vs-id ruling: **F8** stays free to decide whether an authored object's
+name is its id.
+
+### What F4's ruling does NOT settle, stated so nothing is settled by implication
+
+- **F9** owns (iii-b). The ruling closes (iii-a) with no format change and hands F9 a strictly
+  smaller question, but F9 **cannot** be answered "the format already carries it".
+- **F8** and **F10** are untouched.
+- ⚠ **The `create_entity` require-drop is an ENGINE defect independent of Gaia and needs its own
+  carrier.** It is not F4's to fix, and filing it under F4 would let a Gaia-scoped fix leave the
+  gameplay-facing hole open.
+- ⚠ **`remap_loaded_entities` is O(whole world), per load** (`load_writer.rs:919` collects **every**
+  archetype, then walks **every** live row of each remappable column — not only the freshly loaded
+  ones). Under F5 this runs on every `load_cell`. Pre-existing, not created here; it belongs to the
+  F4/F5 build and is a further reason a data table is loaded once and pinned rather than per-cell
+  (§Data tables).
+- ⚠ **An `F#` id-namespace collision, recorded because the two series are semantically adjacent.**
+  [`../ASSET-STREAMING-PLAN.md`](../ASSET-STREAMING-PLAN.md) declares its own `F1`–`F8`, and engine
+  doc comments cite it *inside the very files this ruling stands on*
+  (`crates/boyko_scene/src/render_caps.rs` cites "asset-streaming plan F2" and "F5"). Asset-streaming
+  **F4** is `PathIndex` while Gaia **F4** is this ruling, whose fifth mechanism is asset refcounts;
+  asset-streaming **F5** is `MeshRefGen` / `validate_asset_refs` while Gaia **F5** is the streaming
+  scope just ruled. This is the class the syntax plan already fixed once for `R#` — *a bare `R#` is
+  legal only in the table that DECLARES it* — and the same discipline is owed to `F#` at every cite.
+- ⚠ **A latent item in a sibling plan becomes live with Gaia, and its own next sentence is a warning
+  against option (b) executed in the wrong order.** [`../ASSET-STREAMING-PLAN.md`](../ASSET-STREAMING-PLAN.md)
+  item (e) already filed *"`load_archetype` … does NOT run `#[require]` expansion → a `MeshHandle`
+  row … would lack `MeshRefGen` and be AND-filtered out of `validate`'s query (silent, no panic).
+  **Latent (no such save in-tree)**"*. Gaia is the thing that ends "no such save in-tree".
+
+## Data tables — where a DataAsset's rows live (ballots F2 and F3)
+
+### F2, ruled 2026-08-30 [delegated]: (a) rows are ENTITIES — amended in three ways the ballot did not carry
+
+**(i) Storage is `StorageKind::Table`, not dense — and that is the answer to "data that doesn't
+have to be dense".** The ballot's own words were *"a dense-column archetype"*, and that phrase
+**does not denote anything in this engine**: a dense id is signature-excluded, so
+`get_or_create_archetype(&[DenseRow])` returns **the empty archetype** (measured:
+`dense_arch == empty_arch → true`), and under the ballot's wording 4000 item rows would land in the
+world's component-less bucket alongside every bare entity in the game. For a table whose rows all
+carry the row component and nothing else, the `Table` archetype holds **exactly one
+`ComponentPool`, and all rows are already contiguous in it** — dense's one-global-column property
+buys nothing while costing an `s2e` column, an `e2s` map sized to *the maximum entity id ever
+inserted*, a live bitmap, a free list and a per-archetype bitset. **The mechanical rule for which
+kind a given table gets: is the row component carried by entities OUTSIDE the table?** No (a pure
+item catalogue) → `Table`. Yes (an in-world instance carries the row inline, so the component
+spreads across gameplay archetypes) → `Dense`. It is a property of the schema, decidable at bake,
+and one derive attribute either way.
+
+**(ii) Rows become entities EAGERLY, AT LOAD — never lazily.** Four grounds, descending:
+**determinism of the world** (`save_world` sums live archetypes, so under lazy materialization a
+save records which rows *happened to have been touched* — the same game state saves to different
+files and a round trip is no longer one); **every insert-path mechanism F4 enumerates fires on
+insert**, so lazy materialization fires them at an arbitrary later frame from inside whichever
+system first touched the row; **the derive-emitted row constants exist to delete a lookup**, and a
+constant that must first check residency *is* the lookup; and **Principle 1** — a residency branch
+on every row access with no measurement behind it.
+
+**(iii) A table is loaded by its own explicit load and PINNED; `unload_cell` never touches it.** Its
+entities live in their own archetype, which belongs to no cell's entity set, so the cell-unload path
+never enumerates them. **The runtime handle is an `Entity` captured at load, never a row index** —
+`Archetype::swap_remove` moves rows and loads append into dedup'd archetypes, so a row index is not
+a stable handle in this engine. ⚠ That is stated **without touching F8**: whatever the *authored*
+identity turns out to be, the *runtime* handle is an `Entity`, and it is captured, not computed.
+
+**Why the ruling holds under F5's streaming, answered by measurement rather than assertion.**
+`load_world` is **additive** — it creates fresh entities into the existing world and never clears
+it — so a table loads *by itself*, into a live world, at any time; there is no full-world-load
+prerequisite. And `load_archetype` **dedups and appends** (`start_row` is the archetype's current
+index; capacity reservation is additive), so repeated cell loads append into existing archetypes
+rather than minting new ones. Both are properties the streaming half needs anyway; (a) consumes
+them rather than adding to them.
+
+**What the ballot's headline price actually is, measured.** For 4000 rows of a 40-byte row type, as
+table entities, marginal against a running world: `ItemRow` pool data 262 144 B + `added` ticks
+65 536 + `changed` ticks 65 536 + `Archetype.entity_ids` 65 536 + inland store 64 000 =
+**522 752 B ≈ 511 KiB** (payload 160 000 B). The 4000 ids consume **0.006%** of the inland store's
+67 108 864-slot ceiling. Per-frame cost of those idle entities is **one extra archetype mask test
+per query**, not 4000 row visits — queries are signature-filtered.
+
+**Rejected: (b) a new RESOURCE region in the byte format.** It buys **129 536 B** on that table
+(25%), or 326 144 B (62%) **only if a new tick-free VM primitive is also written** — because
+`VmColumn<T>::new` **panics** unless `size_of::<T>()` divides the commit granule
+(`crates/boyko_ecs/src/ecs/memory/vm_column.rs:144-149`), and 40 does not, nor do 48, 56 or 72. So a
+resource-owned flat column cannot use the engine's bare column primitive at all; it must reuse
+`ComponentPool` — which requires a registered `ComponentId`, i.e. the row type is a `Component`
+anyway, and which unconditionally lays out `[data | added | changed]`. Against **0.13 MB**, the
+costs are: a format version bump and a third header growth; **≥ 607 production lines + ≥ 444 test
+lines** by the dense region's own precedent (`d043ad8f`, which added the v1→v2 dense region), for a
+region whose payload shape — unlike dense's — has **no existing analogue**; and **the entire
+per-`ResourceId` serialize seam from scratch**, because `grep -rniw "resource" crates/boyko_serialize/src/`
+returns **0 occurrences of the word anywhere in the crate, comments included**, and the resource
+registry has no stable name, no fingerprint and no fn-pointer table (components get all of that from
+an 847-line `SerializeInfo` carrier). It also forfeits queryability: a table that is a resource
+cannot be joined against anything, so *"which recipe uses this item"* becomes hand-written iteration
+over a side structure — the shape Principle 0 exists to refuse.
+
+**Rejected without a ballot, and still rejected: a `HashMap<Name, Row>` side store** — a parallel
+data system, forbidden outright and mechanically caught by `clippy.toml`'s `disallowed-types` on the
+existing `-D warnings` gate. **Rejected: `StorageKind::Dense` as the default for table rows** —
+measured to collapse into the empty archetype, and to add `s2e` + `e2s` + a live bitmap + a free
+list for a contiguity the single-archetype `Table` case already has.
+
+⚠ **Two corpus corrections this ruling makes in passing.** `load_archetype` / `load_dense_store` are
+**not** in `boyko_serialize` — they are `pub fn` in
+`boyko_ecs::ecs::core::serialize::load_writer`, while `boyko_serialize`'s own parser halves are
+`load_one_archetype` and `load_dense_region`; the ballot's "a second load path in `boyko_serialize`
+beside `load_archetype`/`load_dense_store`" straddles two crates. And two engine docs contradict
+each other on the W4 anchor — `crates/boyko_serialize/src/load.rs` says loads go into *freshly
+created* archetypes while `load_writer.rs` says `create_archetype` **dedups** and *"the W4 anchor is
+therefore relaxed"*. Neither is Gaia's to fix; both are recorded so the next reader does not inherit
+them.
+
+### F3, ruled by the owner 2026-08-30: ONE schema for both file shapes
+
+Single-file-per-asset **and** a table file baking N rows are both admitted, and they bake through
+**one schema**: the table file is a **spelling**, not a second type system. Rejected: a table
+dialect — which the one-language-three-profiles ruling already refuses in the large. The owner asked
+for a recommendation on the details; that is answered separately and is not this line.
+
+## Flags in the byte format — ballot F9 (PARTLY ruled 2026-08-30; one VALUES question remains the owner's)
+
+*(Body in [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29. The research settles three
+things beyond doubt and declines to settle the fourth, which is a values call about the authoring
+surface — recorded here rather than decided.)*
+
+**The two-sided measurement.** A probe with two `storage = "bitset"` flags on a POB-carrying entity
+— one declared through `FLAGS_DIRECT`, one raised by hand — round-trips through `save_world` /
+`load_world`: the entity survives, the POB field restores, and **both** flag bits come back
+`false`; the file names no bitset column at all (`types_bitset_skipped = 0`, so the load-side guard
+was never even exercised), while a **respawn in the same loaded world** sets the declared flag
+`true`. Both sides reproduce.
+
+⚠ **The F4 census's stated SAVE-side mechanism is wrong, and the correction changes what a carrier
+must defeat.** The census says a bitset id is excluded from every archetype signature "so the saver
+never emits a column for it". But `save_world` iterates **`archetype.component_ids()`**
+(`crates/boyko_serialize/src/save.rs:174`), which is the **raw unfiltered** list — measured: an
+archetype minted over `[POB, bitset]` reports both ids. The guard that actually stops the saver is
+one match later — `component_pools().get_pool(component_id) { Some(p) => p, None => continue }`
+(`save.rs:190-193`) — and it runs *before* the type is interned, so a flag's type never reaches the
+file's type table. **Conclusion unchanged, mechanism different: the save side is guarded by
+POOLLESSNESS, not by the signature filter** — which means a carrier **never has to touch
+`filtered_signature_mask`**, and the archetype-fragmentation invariant stays exactly as it is.
+
+**RULED (1): `FLAGS_DIRECT` must NOT be fired on the load path.** `apply_attach_flags_all` /
+`apply_attach_flags_for` have **8 call sites in 4 files**, all spawn or migration — command:
+`grep -rn "^[[:space:]]*\(self\|world\)\.apply_attach_flags_\(all\|for\)(" crates/boyko_ecs/src/ | wc -l`
+→ **8**. `load_archetype` calls neither, and KE10's own header says *"NOT covered, and deliberately
+so: clone and load."* Firing it would be a **new** defect, not a fix: `apply_flags_declared_by`
+writes `set_enable_bit(entity, flag, entry.initial)` **unconditionally**, and the kernel's own doc
+states *"`false` is NOT a no-op: it clears a bit an earlier attach may have set"*. `load_archetype`
+serves **two semantics with one function** — *born* (a Gaia bake: the file is the initial state) and
+*resumed* (a savegame: the file is the current state). FLAGS_DIRECT is right for the first and wrong
+for the second; on the very round trip the red fixture asserts, it would overwrite every saved bit
+with its attach-time value — **the door the player unlocked comes back locked.**
+
+**RULED (2): the refusal option is inconsistent with a ratified owner ruling and may not be
+chosen.** **AB-6** placed the flag refusal *in the derive, not in Aether*, under the owner's
+principle that a language *"may not refuse what the derive accepts"*. F9's option (a) is that exact
+shape one layer out: `EcsMaster::enable` is public, sanctioned and O(1), and the clone path's own
+doc calls enable-bit propagation a *"v1.1 follow-up"*, not a prohibition. The three refusals are
+also not the same shape — **AB-11** and **AB-6** each leave the capability intact and point at a
+working spelling, while F9's option (a) has no honest did-you-mean: "make it a component" costs the
+author the archetype fragmentation the flag exists to avoid. **Consistency with AB-11/AB-6 is broken
+by the refusal, not preserved by it.**
+
+**RULED (3): if a carrier lands, its spelling is `flags (X = true)` — AB-13's ratified vocabulary,
+shared VERBATIM with Aether, as a per-object group.** No second spelling is minted (the same
+argument the corpus already applies on the `link` axis). And the carrier is **F4's GK-3 carrier, not
+a new one**: the flags region's load side is one entry in the fixup pass, and it must be keyed on
+**GK-1's global object identity**, never on a file-local row index — a flag raised in cell A on an
+entity owned by cell B is a cross-cell write, and row-index keying forecloses it.
+
+**What a carrier would cost, measured so the open question is priced.** Format: the v1→v2 dense
+region is the exact precedent in the same file — a 16-byte header descriptor plus a trailing region
+with an explicit 0%-gate; a flags region is that shape again (`flags_table_off` /
+`flags_block_count`, header 80 → 96 B, format version 2 → 3). Bump cost **today** is near zero and
+measured — `find . -name "*.sav" -not -path "./target/*"` returns nothing, and the only version
+assertions read the `FORMAT_VERSION` *symbol* — and it will not stay near zero once a savegame
+ships. Region size: one block per (archetype block × tag with a column), `u32 type_index +
+ceil(n/8)`; 10 000 entities × 4 tags = **5 016 B**. Save side: **one `pub` accessor, no new
+algorithm** — `EnableStore::read_row_bits`
+(`crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs:702`) is the per-row snapshot and
+`enabled_runs` (`:385`) the bulk walk, both `pub(crate)`, and the migration path already does
+snapshot-here/restore-there across archetypes. Load side: **no new writer at all** — the loader
+already holds the fresh `Entity` per row and `enable_id` is public and O(1); the one gap is the
+missing reverse `EnableTagId::from_component_id(ComponentId) -> Option<Self>`, which screens
+`StorageKind::Bitset` and is therefore the *right* shape anyway. The load-side W1 bitset skip stays
+and must stay — it guards the *column* path, whose failure mode is a poolless-id panic — and the new
+region needs its own hardening in the same style. ⚠ `load_fuzz.rs` sums the skip counters into its
+bound; **a new counter must join that sum or the fuzz bound silently stops being a bound.**
+
+**Rejected, with prices.** *(a) a `GA####` refusal*: contradicts AB-6, has no honest did-you-mean,
+and leaves F4(iii) permanently red — savegames lose flag state forever. Cheapest to build, most
+expensive to live with. *(b) FLAGS_DIRECT on load, no carrier*: measured wrong semantics for the
+savegame half of the same function, and it cannot express per-entity variation, which is the case
+that raised F9. *(c) carrier now, spelling later*: a format region nothing writes — a dead datum,
+the class this corpus has catalogued five times.
+
+⚠ **STILL THE OWNER'S, and it is one sentence:** *is Gaia's flag surface allowed to set a flag on an
+individual authored object, or may an entity's flag state only be declared by a component it
+carries?* If per-object authoring is allowed, the carrier is required and both (a) and (b) fail. If
+it is not, FLAGS_DIRECT covers the declared half and the carrier is needed only for F4(iii)'s
+savegame fidelity — a smaller, separately schedulable claim. **This is a VALUES call about the
+authoring surface**, which is why it is escalated rather than decided. It blocks **G2** (the
+grammar) and nothing else; the three rulings above are not contingent on it.
+⚠ One inconsistency spotted in passing, not F9's to fix: the ballot list records AB-11's
+did-you-mean as pointing at `enabled`/`disabled`, while AB-6's ruling text records the did-you-mean
+as pointing at `flags (X = true)`. Different refusals, different targets — worth one reconciling
+line.
 
 ## UI bindings — the zero-cost lowering
 
@@ -446,6 +1060,11 @@ gets deferred until it is convenient.
 *Where it lands.* The id half becomes **work on G0**, and Aether **R8** receives the link census with
 its red-first evidence already measured. ⚠ This ruling **adds work; it does not unblock a rung** —
 G0's row is still held by owner ballots **F1** and **F4**, and neither is touched here.
+✅ **Superseded on the ballot half, 2026-08-30: F1 and F4 were both answered that day** (F1 by the
+owner, F4 delegated and ruled — §Inherited pipeline and §Load semantics). **G0 now carries no open
+ballot; it still carries this ruling's work**, and the widening edit has not landed. The sentence
+above is kept rather than rewritten because "no open ballot" is not "done", and this row is the
+example.
 
 ## Refusals (ratified)
 
@@ -460,6 +1079,20 @@ at runtime; constraints bake into POD components, the solver is a runtime system
 reactivity · no external-mod pipeline in v1 (the format carries layer names from day one so the
 retrofit is additive) · no merge driver (mergeability comes from the format: stable ids, keyed
 collections, small files, bake as the post-merge validator) · **no second front-end**.
+
+✅ **F7 RATIFIED BY THE OWNER, 2026-08-30: mods are NOT supported for now — option (a), stated
+explicitly.** The ballot existed because **silence was itself a decision**: the wide reading of the
+reflection refusal would have calcified by never being contradicted, and a later mod campaign would
+have been blocked by a sentence that never meant to block it. It is no longer silent. **The
+constraint is recorded in its narrow form, which is what the explicit ratification buys:** what is
+ratified is *no reflection in the GAME BINARY* (§Inherited pipeline), not *no bake tooling in a
+player's hands at all* — a text-mod pipeline would ship the bake tool as a **separate executable**
+and the game would still load only bytes. Rejected: **(b) accept the separate-executable pipeline
+now and design the format's stability guarantees for it from the start.** Price of the rejected
+option: v1's format gains a compatibility surface for a consumer that does not exist, which is the
+dead-datum class. Price of the ruling: if a mod campaign is ever taken, the stability guarantees are
+retrofitted rather than designed in — accepted knowingly, and the "for now" in the owner's answer is
+what makes that a schedule rather than a prohibition.
 
 ## Rejected models, for the record
 
