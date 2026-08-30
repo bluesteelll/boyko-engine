@@ -1197,3 +1197,78 @@ Owner: *"runtime RAM and performance are the priority. Disk space is not so impo
 ⚠ **This changes an evaluation axis, not just a preference.** A format decision that trades bytes on
 disk for less work or less resident memory at runtime is now the preferred trade, and any ruling
 argued on file size must be re-read against it.
+
+---
+
+## GB-5 — RULED BY THE OWNER, 2026-08-30: **permit as SEED**
+
+**The ruling.** A scene document **may** declare an engine-derived field. The authored value is the
+**initial** value; the engine takes it over if and when its condition holds. Owner's ground, and it
+is stronger than the ballot's framing: *"the third is the most logical — it is simply a starting
+point in space; obviously this data exists to be manipulated and will not be static."*
+
+⇒ A field the engine derives is, by definition, a field that changes. "Initial value" is therefore
+its honest semantics, not a concession.
+
+**Rejected, with prices.** *Refuse* — would also forbid the cases where the authored value works,
+which is every entity lacking the driving component; and it would force the baker to decide a
+question it cannot see. *Permit silently* — the silent-wrong-answer class this campaign spent the
+day removing. *Refuse conditionally* — requires the baker to reason about the entity's other
+components, and for two of the twelve about their **runtime values**, which bake cannot do.
+
+### Why the ruling generalises across all twelve, checked field by field
+
+The seed reading was tested against the measured list rather than assumed from the spatial example
+it was reasoned from:
+
+* **Spatial** (`PointLight.position`, `SpotLight.position`/`.direction`,
+  `DirectionalLight.direction`, `Transform.translation`/`.rotation`, the two whole-`Transform`
+  camera cases, `RigidBody.position`/`.rotation`) — a seed is a starting pose. Direct fit, and the
+  engine already ships this exact semantics: `SpotLight::new`'s `direction` is documented as *"only
+  a SEED: `light_reconcile` overwrites it"*.
+* **`ContentSize.width`/`.height`** — this is where seed stops being a concession and becomes the
+  only correct answer: **until the font loads there is no measurement at all**, so the authored
+  value is the only value there is, and it is what prevents a layout pop.
+* **`UiValue.0`, `UiTextBuffer`** — the value before the binding first fires. Same argument.
+* **`UiLayout.width`/`.height`** — the extent before the `Bar` fill takes the axis.
+
+### The case the ruling dissolves rather than answers
+
+**`Transform` and `RigidBody` are a polarity pair.** Which side is author-owned flips on
+`Simulated` — a bitset bit gameplay toggles **at runtime**. Under *refuse* the baker would have to
+guess which of the two to reject and would be wrong half the time. **Under seed there is nothing to
+guess: both are permitted, both are initial values, and the polarity stops being a question the
+baker has to answer.** This is the strongest argument for the ruling and it was not in the ballot.
+
+### What the ruling still requires — and the form it must NOT take
+
+Permitting is not the same as staying silent. An author writing such a field should be told it is a
+seed, which means the derive-emitted field table needs a disposition column, which G1 was blocked
+from minting until this ballot was answered.
+
+⚠ **It must not be a boolean.** GB-5's own analysis refuted that mechanism: *"a per-field boolean
+pins a predicate that is false for every case it covers"* — every one of the twelve is derived
+**conditionally**, so "this field is engine-derived" is a false statement about most entities that
+carry it.
+
+⇒ **The column records the CONDITION and the WRITER, not a verdict**: *this field may be taken over
+by `light_reconcile` when the entity has `GlobalTransform`*. That claims nothing about a particular
+entity, so it cannot be false, and it is exactly what a diagnostic needs in order to say something
+true to the author.
+
+⚠ **The owner's acceptance condition, recorded as a requirement on the implementation rather than an
+assumption:** *"if the marking costs nothing at runtime and is purely for convenience, then yes."*
+The column must therefore sit behind the same default-off bake feature as the rest of the bake
+machinery — Gaia's ratified pipeline is *zero reflection in the shipped load path*. **If it turns
+out the column cannot be kept out of the game binary, the condition is not met and this returns to
+the owner.**
+
+**Timing, and why it was cheap to answer now.** `grep -rn "field_table\|FieldTable\|field_by_name"`
+over `boyko_macros` and `boyko_ecs` is **empty** — G1 is unstarted, so "before the freeze" meant
+before the table's shape was designed. Cost now: one attribute at the component definition site, one
+column in the derive-emitted table, **zero consumers to update**. Cost later: a hand-maintained side
+list keyed by (component, field) — an object this corpus has already priced, since four
+hand-maintained lists of one vocabulary were the measured cause of `.ui`'s defects, and a printer
+losing 10 of 19 components under a gate structurally blind to the loss.
+
+**Unblocks:** the **G1 field-table freeze**, which was the only thing GB-5 was holding.
