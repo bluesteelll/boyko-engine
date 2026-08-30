@@ -1120,3 +1120,80 @@ what makes that a schedule rather than a prohibition.
    **refuted** by inventory (hooks/resources/ticks/carriers/opt-in-remap uncovered); the line is
    corrected in that file as of G0 — an unqualified closure claim without a census is the
    gate-that-cannot-fail class, in prose.
+
+---
+
+## 2026-08-30 — owner directions recorded for a later research pass (NOT launched)
+
+Four directions the owner gave after the F4/F2 rulings landed. **Recorded, not acted on**, on his
+instruction: *"record it, we'll run the additional research later."* The standing priority he set
+governs all of them: **runtime resident memory and runtime performance are what matter; disk size
+does not.**
+
+### D-1 — move the post-load fixup to BAKE time wherever it can go
+
+Owner: *"I think where possible the post-load pass should be done before runtime, i.e. baked
+properly if that is possible. Maximum performance."*
+
+**This is more available than F4's ballot assumed.** The ballot held that the `requires` closure is
+unbakeable in principle because `RequiredCtor` is `unsafe fn(dst: *mut u8)`. F4's research
+**refuted that by measurement**: the ctor is capture-free by construction, and the baker is a Rust
+program linked against the derive-emitted tables, so it calls the pointer trivially — demonstrated by
+resolving and calling one from a downstream crate. The unbakeable claim was about the *language*
+evaluator over Gaia text, not about the baker.
+
+The four sub-passes therefore split unevenly, and the research owes a per-mechanism verdict rather
+than one answer:
+
+| sub-pass | bakeable? | note |
+|---|---|---|
+| 1 — `requires` closure | **fully** — the baker constructs the component and writes it as an ordinary column; runtime cost goes to zero | already measured callable |
+| 2 — declared flags | **yes in principle** — `flags_direct_for` is a pure function of the component set, which the baker knows | ⚠ blocked by **F9**: flag state is *not representable in the format at all* today, failing on both sides of the round trip |
+| 3 — entity remap | **no** — ids are assigned at load, by construction | |
+| 4 — hooks | **partially** — a relationship reverse index is derivable from the forward FKs, so the baker can write it; asset refcounts need a live `AssetServer` and are irreducibly runtime | this is the expensive sub-pass (per entity × component, with a drain to a fixpoint), so partial removal is still the largest win available |
+
+⇒ **The research question is not "can it be baked" but "which effects are functions of the file
+alone".** An effect computable from the file's own content is bakeable; one that needs a live world,
+a runtime id, or a runtime service is not. That test, applied to all five F4 mechanisms, is the
+deliverable.
+
+### D-2 — split baked assets across several files
+
+Owner, on load spikes: *"maybe it makes sense to split baked assets into several files so they load
+separately, and then there would be less reserved empty space."*
+
+**Correct instinct, but the benefit is not primarily the one stated, and saying so is the point of
+recording it.**
+
+* **Resident memory — conditional.** `POOL_MIN_SLAB`'s 64 KiB floor is paid per non-empty column of
+  an **archetype**, not per file. Splitting the file does not reduce the archetype count once
+  everything is loaded, so the floor is unchanged. The saving is real only if chunks are
+  **unloaded** — i.e. it is the streaming half, which the owner already ruled in (F5, everything
+  from the start).
+* **Load spikes — direct and larger.** F4 sub-pass 4 is work proportional to entities × components
+  with a fixpoint drain. Splitting the world into cells breaks one long spike into many short ones,
+  and that holds **whether or not anything is ever unloaded.**
+
+⇒ The honest framing for the research: **splitting is an amortisation mechanism first and a memory
+mechanism second**, and the memory half is a consequence of unloading rather than of splitting.
+
+### D-3 — the resident floor itself
+
+`POOL_MIN_SLAB = 64 KiB` (`constants.rs:103`) is deliberate and its comment states the intent — *"the
+floor that keeps sparse archetypes cheap (a 1-row archetype commits 3 × 64 KiB per pool, not
+megabytes)"*. It is also the **OS commit granule**, so it cannot simply be lowered.
+
+⇒ The available direction is **sub-granule packing** — several small columns sharing one commit
+slab. That is real kernel work, and it pays beyond Gaia: every sparse archetype in the engine
+currently pays the same floor. The F2 finding (twenty small tables ⇒ ~5 MiB resident for 40 KB of
+payload) is one symptom of an engine-wide property, not a data-language problem.
+
+Owner: *"if it can somehow be fixed, it should be fixed."*
+
+### D-4 — the priority that governs all of the above
+
+Owner: *"runtime RAM and performance are the priority. Disk space is not so important."*
+
+⚠ **This changes an evaluation axis, not just a preference.** A format decision that trades bytes on
+disk for less work or less resident memory at runtime is now the preferred trade, and any ruling
+argued on file size must be re-read against it.
