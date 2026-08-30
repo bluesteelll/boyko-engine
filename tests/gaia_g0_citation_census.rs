@@ -22,22 +22,54 @@
 //! A property nobody runs is the repo's standing failure class — a gate that cannot
 //! fail is not a gate. This file runs all of it.
 //!
-//! **No waivers, by construction.** The anchor-census precedent is the reason: a
-//! per-site waiver clause abdicated 188 of 302 anchors to known rot
-//! ([`tests/internal_docs_anchors.rs`](internal_docs_anchors.rs) is the sibling gate
-//! that carries that history). Nothing here carries a skip list. Where a property
-//! turned out **not to be decidable** as written, it is narrowed to a predicate that
-//! *is* decidable and the narrowing is stated in the failure message — never papered
-//! over with a per-site exception.
+//! **No waivers, by construction — and since 2026-08-30 that is a RULING, not just a
+//! habit.** Ballot GB-8 asked whether a corpus-wide census may carry per-site waivers
+//! and was ruled **no, at all four censuses here, permanently**
+//! ([`docs/OPEN-QUESTIONS.md`](../docs/OPEN-QUESTIONS.md) §2026-08-29). Nothing here
+//! carries a skip list. Where a property turned out **not to be decidable** as
+//! written, it is narrowed to a predicate that *is* decidable and the narrowing is
+//! stated in the failure message — never papered over with a per-site exception. A
+//! **scope statement** ("this census covers directory X") is not a waiver; a per-site
+//! skip list is.
 //!
-//! # Scope, and the ballot it does not pre-empt
+//! ⚠ **The precedent figure this file used to cite is not the tree's.** It read
+//! "a per-site waiver clause abdicated 188 of 302 anchors to known rot". No in-tree
+//! gate produces those numbers — [`tests/internal_docs_anchors.rs`](internal_docs_anchors.rs),
+//! the sibling gate that carries the history, states neither. Run live on 2026-08-30
+//! it prints **735 anchors, 116 waived** (ARCHITECTURE 6/0, FEATURE_MAP 222/7,
+//! SYSTEMS 330/20, MESHLET-VIRTUAL-GEOMETRY-PLAN **177/89**). The aggregate is 15.8%,
+//! not 62% — **and the precedent is stronger for it**: the waiver did not spread, it
+//! concentrated entirely in the one document admitted under the allowance, which now
+//! waives **50.3%** of its anchors, and a waived anchor keeps *neither* shape *nor*
+//! identity. That is the measured ground GB-8's ruling stands on.
+//!
+//! # Scope, and the widening this file still owes
 //!
 //! The AIR census runs over `docs/gaia/` **and** `docs/aether-v2/` — G0's own scope.
-//! Whether it goes corpus-wide is open ballot **GB-8**
-//! ([`docs/gaia/CAMPAIGN.md`](../docs/gaia/CAMPAIGN.md) row `G0`), and this file
-//! does not answer it. The `KE#`/`KM#` census does run over all of `docs/`, because
-//! that is the scope the backlog's own published recipe names; GB-8 is about the AIR
-//! census, not this one.
+//! The `KE#`/`KM#` census does run over all of `docs/`, because that is the scope the
+//! backlog's own published recipe names.
+//!
+//! ⚠ **GB-8 has been RULED (2026-08-30) and this file has not yet been changed to
+//! match.** The ruling: the AIR census **widens to all of `docs/`, and it lands at
+//! G0** — here, in this file, as a one-constant change ([`G0_DIRS`] →
+//! `markdown_under("docs")`). It was measured green: the `AIR-##` citations outside
+//! the two directories sit in **5** files (`docs/OPEN-QUESTIONS.md`,
+//! `docs/ru/OPEN-QUESTIONS.md`, `docs/AETHER-GAIA-REVISION-2026-08-29.md`,
+//! `docs/FEATURE_MAP.md`, `docs/AETHER-V1-SURFACE-REVIEW.md`), and **every id cited
+//! lies inside the carrier's `AIR-01..AIR-18`** — so the widening costs **zero**
+//! remediation. ⚠ The *count* is deliberately not pinned in this comment: it measured
+//! 21 before GB-8's ruling was written and 40 after, because the ruling text itself
+//! cites `AIR-06` repeatedly. A citation count goes stale on the next edit; the
+//! property — every cited id resolves — is what this file enforces, and it is the one
+//! worth writing down. The pass that ruled GB-8 deliberately did
+//! not make the edit: it decides and records, it does not build a rung. **G0 owes
+//! this change**, and until it lands, this paragraph is the record that the scope
+//! below is narrower than the ruling.
+//!
+//! The **link** half of GB-8 is a different deliverable and was ruled onto **Aether
+//! R8**, not here: measured 1636 relative markdown targets under `docs/`, **59 dead
+//! across 11 files** (44 of them in `docs/AUDIT-2026-05-23.md`), versus **0 dead** of
+//! 116 inside the two directories this file already covers.
 //!
 //! # Home
 //!
@@ -243,8 +275,10 @@ fn air_cross_notes_resolve_to_defined_items() {
         unresolved.is_empty(),
         "{} AIR citation(s) resolve to no defined item in {AIR_CARRIER}.{}\n\n\
          G0's gate is that every AIR cross-note resolves. Fix the citation or define \
-         the item — this census carries NO waiver list, deliberately: the anchor-census \
-         precedent abdicated 188 of 302 sites under one.",
+         the item — this census carries NO waiver list, by ballot GB-8's ruling \
+         (2026-08-30): on the sibling anchor gate, the one document admitted under a \
+         waiver allowance now waives 89 of its 177 anchors (50.3%), and a waived \
+         anchor keeps neither shape nor identity.",
         unresolved.values().map(Vec::len).sum::<usize>(),
         render(&unresolved)
     );
@@ -320,8 +354,8 @@ fn kernel_backlog_ids_resolve_to_backlog_rows() {
 /// The backlog's stated exception names exactly **one** of those carriers (a bare
 /// `E1`/`E2`/`E3` inside `aether-v2/DECISIONS.md`) and is silent on the other three,
 /// the largest of which sits in the same directory. Enforcing the literal form would
-/// therefore require ~1400 per-site dispositions — which is the 188-of-302 waiver
-/// outcome the corpus forbids, reached by a different road.
+/// therefore require ~1400 per-site dispositions — which is the waiver outcome the
+/// corpus forbids (GB-8's ruling, 2026-08-30), reached by a different road.
 ///
 /// So the property is narrowed to one that IS decidable, with no waiver list:
 /// **a bare `E#`/`M#` on a line that references `KERNEL-BACKLOG.md` is a retired

@@ -8,7 +8,8 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
+use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, Expr, Fields, Ident, Path, Type, parse_macro_input};
 
 use crate::common::FieldAccess;
@@ -197,6 +198,16 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let require_items = requires.codegen(&name);
     let require_install = requires.install_codegen();
 
+    // KE11 (ballot AB-6 arm (a)): refuse `#[require(<a bitset flag>)]` at COMPILE
+    // time. The derive cannot resolve `Foo` to a `StorageKind` (it holds a token),
+    // so the refusal is a `const _: () = assert!(!<Foo as Component>::STORAGE_IS_BITSET, …)`
+    // item the compiler evaluates — see `RequiresSpec::bitset_refusal_codegen`.
+    // The refusal lives HERE and not in Aether on purpose: Aether's prime directive
+    // is to emit exactly what a disciplined engineer would hand-write, so a refusal
+    // that existed only in Aether would make the two surfaces disagree about the
+    // same declaration. `storage = "dense"` is deliberately NOT refused.
+    let require_bitset_refusals = requires.bitset_refusal_codegen();
+
     // Entity cloning (Feature 3): emit the `CLONE_BEHAVIOR` const + `clone_fn()`
     // override classifying the type, and the UNGATED `install_clone_fn::<Self>(raw)`
     // call in `component_id()`. The classification (`TriviallyCopyable` /
@@ -330,6 +341,8 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         #bundle_items
 
         #require_ctor_fns
+
+        #require_bitset_refusals
 
         #relationship_clone_assert
 
@@ -1007,6 +1020,76 @@ impl RequiresSpec {
             })
             .collect();
         quote! { #(#fns)* }
+    }
+
+    /// Emits the per-entry compile-time refusal of `#[require(<a bitset flag>)]`
+    /// (KE11, ballot AB-6 arm (a)) — one `const _: () = assert!(…)` item per
+    /// `#[require]` entry, in declaration order. Empty when no `#[require]` key
+    /// is present (the 0%-gate).
+    ///
+    /// # Why the refusal is a const-assert and not a `syn::Error`
+    ///
+    /// The macro CANNOT know a required component's storage kind. It sees
+    /// `#[require(Foo)]` as a [`Path`] — a token, never a resolved type — which
+    /// is the same limit the duplicate check states for itself in
+    /// [`parse_requires`] ("the macro cannot resolve a path to a `ComponentId`").
+    /// There is no attribute, no naming convention and no side channel that
+    /// carries `StorageKind` into expansion, so a `syn::Error` here is not
+    /// merely inconvenient, it is unimplementable.
+    ///
+    /// What the macro CAN do is emit code that makes the COMPILER answer the
+    /// question during const evaluation: `Component::STORAGE_IS_BITSET` is a
+    /// trait const (`false` by default, overridden to `true` by
+    /// `#[component(storage = "bitset")]` — see [`ComponentHooks::storage_codegen`]),
+    /// so `<Foo as Component>::STORAGE_IS_BITSET` is decided at `cargo check`
+    /// time by name resolution and const-eval, at the one place that does know.
+    /// This is the shape the query layer already uses for `Added<C>` / `Changed<C>`
+    /// over a bitset tag; the refusal is a compile error, never a runtime panic.
+    ///
+    /// A plain `const _: () = …` item suffices because `#[derive(Component)]`
+    /// never handles generics (`input.generics` is not read anywhere in this
+    /// module), so the assert is non-generic and evaluated eagerly rather than
+    /// per-monomorphization.
+    ///
+    /// # Why BITSET only, and never DENSE
+    ///
+    /// [`RequiredCtor`] is an `unsafe fn(*mut u8)` whose whole job is to
+    /// materialize BYTES into an uninitialized storage slot. A `dense` component
+    /// has bytes — it merely keeps them in a `DenseStore` instead of an archetype
+    /// column — so `#[require(SomeDense)]` is meaningful and MUST keep compiling.
+    /// A `bitset` flag has no bytes at all, so there is nothing for a ctor to
+    /// write; the capability the author actually wants ("attaching X sets flag F")
+    /// exists under its own name as the component `flags (…)` group, backed by
+    /// the `FLAGS_DIRECT` table. The message names it.
+    fn bitset_refusal_codegen(&self) -> TokenStream2 {
+        if !self.any() {
+            return TokenStream2::new();
+        }
+        let asserts: Vec<TokenStream2> = self
+            .entries
+            .iter()
+            .map(|e| {
+                let ty = &e.ty;
+                // Span the whole item at the required type path so the diagnostic
+                // points at the offending entry INSIDE `#[require(...)]`, not at
+                // the `#[derive(Component)]` line — with several entries the
+                // derive-site span would not say which one is the flag.
+                quote_spanned! { ty.span() =>
+                    const _: () = assert!(
+                        !<#ty as ::boyko_ecs::ecs::core::component::component::Component>
+                            ::STORAGE_IS_BITSET,
+                        "#[require(...)] of a bitset flag: a flag is a BIT, not bytes, and a \
+                         required-component constructor exists only to write bytes into a \
+                         storage slot, so there is nothing to construct. Declare the initial \
+                         flag state instead: the component `flags (...)` group, e.g. \
+                         `flags (TheFlag = true)`, which is backed by FLAGS_DIRECT and sets \
+                         the bit on attach. (A `storage = \"dense\"` component is NOT refused \
+                         here — it has bytes, and #[require] of it is supported.)"
+                    );
+                }
+            })
+            .collect();
+        quote! { #(#asserts)* }
     }
 
     /// Emits `const HAS_REQUIRES = true;` + the `register_required` impl when any

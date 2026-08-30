@@ -34,7 +34,7 @@ about the engine will be read differently.
 | `Transform` derives no `Default`, so a partial record cannot be completed | `boyko_scene::Transform` **has** `impl Default` → `IDENTITY`. The hole is real but at **field** granularity: a closed build-time evaluator cannot name an individual omitted field's neutral, and no per-field default table exists |
 | `PointLight` carries `intensity` | It carries **`power`** (luminous flux Φ, lumens). Also `range` with no default, `position` that `light_reconcile` **derives** from `GlobalTransform` (so it must be undeclarable in a scene), and `color: [f32; 3]` documented LINEAR against a four-component `#RRGGBBAA` literal |
 | `without F` over a `flag` never matches | Inverted. A `flag` is `StorageKind::Bitset`, filtered out of every archetype signature, yet both filters still take the archetypal path over it — so **`with F` matches nothing** and **`without F` excludes nothing**. Two different silent wrong answers from one storage kind. `CONSTRUCTS.md` carried the defect in its own example |
-| `MAX_EVENT_THREADS` is 65 | **64** in the tree; 65 is `KE8`'s unlanded plan value. Corrected at five sites |
+| `MAX_EVENT_THREADS` is 65 | It was **64** when this row was written; 65 was `KE8`'s unlanded plan value, corrected at five sites. ⚠ **Superseded 2026-08-30**: KE8's lane half landed with R1 at `01a4436e`, so the tree now reads **65** (`crates/boyko_ecs/src/ecs/constants.rs:400`), and ruling **E5** raises it to **66**. The row is kept because the *lesson* stands — a plan value was being cited as an engine fact — but the number in it is now history, not the tree |
 | Event registration fails silently on both ends (ruling C3) | Both generated ends **panic loudly at init**. Only the direct `EcsMaster::events_of` path is silent, and no generated system uses it — so the auto-registration grant stands on no recorded ground (ballot **AB-1**) |
 | `Query` gains `contains`/`first` by porting `QueryView`'s tests | `QueryView` has neither. They are new API needing new tests, including a **stated** order for `first` |
 | "~117 production `Or<(` sites" | 112 textual matches: **4** production type positions, 6 doc comments, 48 kernel-internal, 54 test/bench/fixture. `R0`'s priority rests on the silent-wrong-answer mechanism, not blast radius |
@@ -84,9 +84,16 @@ Every one compiles, runs, and answers wrongly in silence.
 
 Two consequences the corpus has to carry, because neither is visible from inside one campaign:
 
-- **A fix on one ladder falsifies a ground on the other.** R0 removes the ground under Gaia's
-  `Or`-over-dense codegen ban — that is ballot **GB-9**, and it is why the ban's site carries a
-  superseded-by note pointing at a rung it does not own.
+- **A fix on one ladder falsifies a ground on the other.** R0 removed the ground under Gaia's
+  `Or`-over-dense codegen ban — that was ballot **GB-9**, and it is why the ban's site carried a
+  superseded-by note pointing at a rung it does not own. ✅ **RULED 2026-08-30: the ban is DELETED
+  with a record**, and its hazard re-aimed onto the still-live GK-2 row (a bind source or
+  change-gate over a dense/bitset component). ⚠ **The coupling worked exactly as designed and the
+  ruling is its receipt** — a kernel-side fix on one ladder did prompt a revisit of a data-side
+  ruling that would otherwise never have been reopened. ⚠ **What it did NOT do is meet its own
+  deadline**: "decide before R0 lands" expired unanswered, so the record had to be reconstructed
+  from prose rather than from a reproducible failure. A cross-ladder note is not a substitute for a
+  rung — the next such coupling needs an owner and a rung, not only a deadline.
 - **The class needs an enumeration, not four anecdotes — and it now has one.** Its single home is
   [`aether-v2/KERNEL-BACKLOG.md`](aether-v2/KERNEL-BACKLOG.md) **§Census — "resolves a per-archetype
   pool by `ComponentId` without screening the storage kind"**, landed with R0 and carrying its own
@@ -106,7 +113,7 @@ defects that belong to the other. The couplings that exist **today**, each check
 | **Shared kernel enablers.** Gaia cites the Aether campaign's backlog ids directly; `KE1`'s fix is the disposition question in Gaia's own ballot GB-9, and Gaia's `GK-2` names the same pool-resolution mechanism | [`aether-v2/KERNEL-BACKLOG.md`](aether-v2/KERNEL-BACKLOG.md) is cited from [`gaia/DECISIONS.md`](gaia/DECISIONS.md); the backlog's own header enumerates `docs/gaia/` as a citing corpus |
 | **One AI-orientation requirement set, housed on the Aether side but partly owned by Gaia.** `AIR-08` (stable node ids) and `AIR-16` (grammar rulings) carry **"Gaia spec"** in their own Rung column; `AIR-17` carries **"Gaia G0"**; `AIR-09` carries "R8 / Gaia tooling" | [`aether-v2/AI-ORIENTATION.md`](aether-v2/AI-ORIENTATION.md) |
 | **One diagnostic envelope and one code-registry discipline.** `AE####` (Aether) and `GA####` (Gaia) are the *same* registry rule, minted by `AIR-02`; Gaia's diagnostics ride the `AIR-01` envelope from the baker's first commit | `AI-ORIENTATION.md` AIR-01/02; [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) §Relations |
-| **Cross-campaign ballots.** Two ballots in the **Gaia** `GB` series name rungs on the **Aether** ladder: **GB-9** (decide before R0) and **GB-8** (names **R8** as a candidate owner of the corpus-wide link/id census) | [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) §2026-08-29; [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) §Open ballots |
+| **Cross-campaign ballots.** Two ballots in the **Gaia** `GB` series named rungs on the **Aether** ladder: **GB-9** (decide before R0) and **GB-8** (named **R8** as a candidate owner of the corpus-wide link/id census). ✅ **Both RULED 2026-08-30** — and the ruling **halves one of the two couplings**: GB-8's *id* census lands at **Gaia G0**, not R8, so only its *link* census remains cross-ladder | [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) §2026-08-29; [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) §Open ballots |
 | **One id namespace, enforced across both directories.** The `E#`/`M#` → `KE#`/`KM#` rename was scoped wrongly *because* it treated `docs/gaia/` as someone else's corpus, and had to be re-run over all of `docs/` | `KERNEL-BACKLOG.md`'s own header records the miss |
 | **A shared surface boundary.** Aether's `scene` narrows to dev-bootstrap and the shipped world form moves to Gaia; Gaia's baker **prints the existing `boyko_serialize` format** rather than minting a second one | [`aether-v2/CONSTRUCTS.md`](aether-v2/CONSTRUCTS.md) §`material`, `scene`; [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Inherited pipeline |
 
@@ -122,7 +129,7 @@ and finds out only by acting on the stale one.
 | [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) | R8's phantom-artifact oracle; R0's measured `Or<(` breakdown; R1 gains `KE10`/`KE11` and `single_mut`; R4 and R6 gates re-axed; a new **§Open ballots on this ladder** |
 | [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) | C3 rewritten against the measurement (→ AB-1, AB-2); D5's five pin tests enumerated so citations resolve; dangling `F#` citations substituted; a new **AIR-10 familiarity / false-friend audit** section; the D3 numbering gap recorded |
 | [`aether-v2/CONSTRUCTS.md`](aether-v2/CONSTRUCTS.md) | `without Stunned` → `disabled Stunned` with the corrected polarity and its mechanism; event bounds symbolic; `requires` over dense storage recorded as a known-open hole (→ AB-6); the `each par` driver honesty edit (→ AB-8) |
-| [`aether-v2/MACHINES.md`](aether-v2/MACHINES.md) | scenario 2 declares the `regen_mana` it orders against; the `MIN_ARCHETYPE_FOR_PARALLEL` floor stated; router mechanism held open (→ AB-5); R-DENSE re-grounded (→ AB-7) |
+| [`aether-v2/MACHINES.md`](aether-v2/MACHINES.md) | scenario 2 declares the `regen_mana` it orders against; the `MIN_ARCHETYPE_FOR_PARALLEL` floor stated; router mechanism held open (→ AB-5, **RULED 2026-08-30: `Query::get_mut`**); R-DENSE re-grounded (→ AB-7, **still the owner's; its candidate ground measured and REFUTED**) |
 | [`aether-v2/EVENTS.md`](aether-v2/EVENTS.md) | the false release-mode lane claim replaced by the measured behaviour with a real symbol; `ordered` gate aligned to R4; sender-exclusivity registrant held open (→ AB-4) |
 | [`aether-v2/KERNEL-BACKLOG.md`](aether-v2/KERNEL-BACKLOG.md) | series renamed `KE#`/`KM#`; `KE11` widened to **both** poolless storage kinds with both real call sites; `KE3` provenance corrected; `KE9`'s full signature pinned; `boyko_reflect` recorded as external and unmerged |
 | [`aether-v2/SPATIAL.md`](aether-v2/SPATIAL.md) · [`OPEN.md`](aether-v2/OPEN.md) | Phase 3 gate re-axed; forced-collision pin test given a shape that can fail; the unverified ledger gains the `Or<(` command and the probe provenance |
@@ -143,16 +150,16 @@ and finds out only by acting on the stale one.
 
 | Rung | Waits on |
 |---|---|
-| Aether R3 | AB-1, AB-2 (event construct) · AB-6, AB-8, AB-11, AB-13 (the rest of the surface) · AB-10 on its keyword surface |
+| Aether R3 | AB-1, ~~AB-2~~ (event construct) · AB-6, ~~AB-8~~, AB-11, AB-13 (the rest of the surface) · AB-10 on its keyword surface. ~~AB-8~~ ✅ **RULED 2026-08-30** → [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) **C5a**: `each par` → `par_iter_mut` (measured 2048/2048 tracked vs 0/2048 chunked; 1.17–1.47× ≈ 1–2 % of the pass); `soa par` exists and is the only route to the chunked driver; batching key not author-visible |
 | Aether R4 | AB-3, AB-4 |
-| Aether R5 | AB-5, AB-7 |
-| Aether R8 | AB-9, GB-8 |
+| Aether R5 | ~~AB-5~~, AB-7. ~~AB-5~~ ✅ **RULED 2026-08-30** → **M4a**: the router uses `Query::get_mut`; the decisive ground is that `get_component_mut` forces an **exclusive** system, which takes **no param tuple** and so cannot hold `EventReader<E>` — it would have to read via `events_of`, silent on an unregistered type and one frame stale. **AB-7 remains the owner's**, but its candidate driver-independent ground was **measured and REFUTED** (both deposit APIs carry working dense arms; no layout const-assert exists) |
+| Aether R8 | ~~AB-9~~ ✅ **RULED 2026-08-30** (merge pulled forward as its own rung before R8; AIR-06(b) not descoped; engine-crate reflection opt-in attached to R8's Lands) · ~~GB-8~~ ✅ **RULED 2026-08-30** — and the ruling **splits it**: the id census widens to all of `docs/` at **G0**, not R8; only the **link** census lands at R8, with 59 measured dead targets as its red-first evidence. R8 is no longer blocked by either |
 | Gaia G1 | F1, GB-5 |
-| Gaia G2–G3 | GB-2, GB-3 |
-| Gaia G4 | GB-1, GB-4 |
+| Gaia G2–G3 | ~~GB-2~~ ✅ **RULED 2026-08-30** — the colour transfer function is a property of the **destination field**, not of the literal (sRGB EOTF into a linear float colour, identity into a `u32` STRAIGHT-RGBA8 field, coded refusal into a device-encoded packed carrier); the arity half, which nothing carried, is settled on the same ruling by mirroring Aether's shipped `ColorLit`. ⚠ Carries a **fixture constraint** into G2: the two routes agree at bytes 0 and 255 only, so a white or black colour fixture cannot fail · GB-3 |
+| Gaia G4 | ~~GB-1~~ ✅ **RULED 2026-08-30** — a template expansion occupies **no ladder layer**: it is one step on the inheritance-**depth** axis, ranked where `extends` ranks, and resolution is depth-then-ladder; an unlabeled write is `base`. The ratified ladder is untouched, and finding K2 is dissolved rather than diagnosed · GB-4 |
 | Gaia G5 | F2, F3 |
 | Gaia G6 | F4 (widened) |
-| Gaia G7 | GB-6, GB-7, GB-9 |
+| Gaia G7 | GB-6 · ~~GB-7~~ ✅ **RULED 2026-08-30** — **no wall-clock companion; the count gate stands alone.** Measured: the timed loop's inputs are archetype count, bound-**type** count and row count, and **not** the binding count (`dynamic_bound_ids` is a deduplicated type set), so the still frame is 332 ns at **+0% for 10× the bindings** but **+82% for 2× the rows**; at a 100 ns timer step the frame is ~3.3 ticks with a 15-25× single-call tail, and the red-first delta (0 → 1 sink write) sits at signal-to-noise 0.05-0.50. A clock over the **scan itself**, world pinned, belongs to GK-2 · ~~GB-9~~ ✅ **RULED 2026-08-30** — the `Or`-over-dense emission ban is **deleted** and replaced by a ban on a bind source or change-gate over a dense/bitset component (GK-2's still-live ground); the three `Or`-dense shapes R0 left uncovered, plus KE13, are filed against G7's codegen rules as the shapes with no oracle |
 
 **Not a ballot — design debt inside R3**, routed to the architect rather than the owner. Neither
 `bundle` nor `relation` may be declared done while these stand:

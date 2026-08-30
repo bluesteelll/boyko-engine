@@ -110,6 +110,31 @@ use proc_macro::TokenStream;
 /// is expected (wrap it in a `#[derive(Bundle)]` struct instead). The flag is
 /// also the escape hatch when a type must derive BOTH `Component` and
 /// `Bundle` — without it the two derives now collide on the `Bundle` impl.
+///
+/// # Required components (`#[require(...)]`) and storage kind
+///
+/// `#[require(B)]`, `#[require(C = expr)]` and `#[require(D(args))]` declare
+/// components the engine constructs alongside this one on attach. Two storage
+/// kinds behave differently, and the difference is enforced at COMPILE time:
+///
+/// * `storage = "dense"` is **supported**. A dense component has bytes; it
+///   merely keeps them in the global `DenseStore` rather than an archetype
+///   column, so there is something for the constructor to write.
+/// * `storage = "bitset"` (a flag) is **refused**. The constructor behind
+///   `#[require]` is an `unsafe fn(*mut u8)` whose entire job is to materialize
+///   BYTES into an uninitialized slot, and a flag is one BIT with no bytes at
+///   all — so the construct is meaningless rather than merely unimplemented.
+///   Declare the initial flag state instead, via the component `flags (...)`
+///   group (`flags (TheFlag = true)`), which is backed by the `FLAGS_DIRECT`
+///   table and sets the bit on attach.
+///
+/// The derive itself cannot tell the two apart: `#[require(Foo)]` reaches it as
+/// a path — a token, never a resolved type — which is the same limit that makes
+/// its duplicate check textual. It therefore emits, per entry, a
+/// `const _: () = assert!(!<Foo as Component>::STORAGE_IS_BITSET, …)` item and
+/// lets the COMPILER decide during const evaluation, at the one place that
+/// knows the storage kind. The refusal is a `cargo check` error spanned at the
+/// offending entry inside `#[require(...)]`, never a runtime panic.
 #[proc_macro_derive(
     Component,
     attributes(component, require, entities, relationship, relationship_target)

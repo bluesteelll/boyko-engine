@@ -67,8 +67,147 @@ red tests land regardless of its disposition). Everything above them waits on a 
 
 - **GB-1** — which layer of the priority ladder a template EXPANSION and an UNLABELED write occupy.
   Blocks **G4**.
+
+  > **RESOLVED 2026-08-30 — decided by standing rule** (`CLAUDE.md`: perf and architecture forks are
+  > decided without asking; only VALUES and SCOPE go to the owner). This ballot was mis-routed here;
+  > the owner re-routed it back. **Neither case gets a ladder layer, because the ladder is the wrong
+  > axis for one of them.**
+  >
+  > **The ratified ordering, quoted exactly** ([`gaia/DECISIONS.md`](gaia/DECISIONS.md) §The logic
+  > line): *"defaults + a **closed priority ladder** `base < variant < tuning < debug` (named layers,
+  > never free numbers — the `!important` race; two writes of one field on one layer = error with
+  > both files; bake is order-independent and byte-identical in any file order)"*. Nothing below
+  > disturbs it: no rung is added, removed, renamed or reordered.
+  >
+  > **(a) A template EXPANSION occupies no ladder layer. It is one step on the INHERITANCE-DEPTH
+  > axis, which is already ratified and already separate.** The corpus carries depth as its own
+  > mechanism in three places — *"Single parent, no diamonds"*, *"Variant chains: a patch target
+  > resolves against the **immediate** base — one sentence plus one pinned test"*, and the bake
+  > budget over *"expansion steps, spawned fields, **template depth**, output bytes"*. A template
+  > application ranks exactly where `extends` ranks: below the applying node's own writes, at the
+  > same layer. Resolution order is **depth first, then ladder**: within one layer a node's own write
+  > beats what it expanded; across layers the flattened node from the lower layer loses field-wise to
+  > the higher one.
+  >
+  > **The decisive ground is that the alternative is not expressible.** The rejected option is to
+  > mint a rung for expansion (`template < base < …`). Its price is not taste: **`template depth` is
+  > a BUDGETED quantity in the ratified text, and a budget bounds a number that is otherwise
+  > unbounded.** A template that applies a template needs one rung per level; a closed four-name
+  > enum cannot carry an unbounded count. The rung would also break the ladder's own closure, which
+  > AIR-10's bar protects. So the option fails twice — on the ratified text and on arithmetic — and
+  > this is why the ruling routes expansion to the axis that is already unbounded.
+  >
+  > **This dissolves K2 without new machinery.** K2 is *"template application double-writes a field
+  > on one unnamed ladder rung"*: `apply Torch` plus a local `power=2.5` in the same node looked like
+  > the ratified *two-writes-one-layer = error*, which would have made the commonest authoring act in
+  > the language — apply a template, override one field — a bake error. Under the ruling they sit at
+  > different DEPTHS, so it is an override, not a collision. The error keeps a real referent and
+  > narrows to what is genuinely ambiguous: **same depth AND same layer.**
+  >
+  > **(b) An UNLABELED write occupies `base`.** Ground: `base` is the layer whose name already means
+  > "the thing itself", and it is the ladder's bottom, so authored content stays overridable by every
+  > pack above it. The rejected alternative is an implicit fifth "unlabeled" rung, and its price is
+  > the exact race the ladder was ratified to prevent — an unranked write makes *"which write won"* a
+  > computation over file order, which would make G4's own gate (`bake(files) == bake(shuffle(files))`
+  > byte-identical) either red or, worse, vacuously green on a fixture that happens not to collide.
+  >
+  > **Recorded, NOT decided here — the consequence (b) buys.** In a non-`base` pack every line must
+  > repeat `layer=tuning`, and one forgotten `layer=` lands silently at `base`: a silent wrong-layer
+  > write, which is this repo's standing defect class. A file-level layer default is the obvious cure
+  > and is a **grammar** question belonging to **G4**, not to this ballot; naming it here so it is not
+  > lost, and deliberately not ruling it.
+  >
+  > **Spelling-independent, and deliberately so.** The ruling is about precedence, not words. It
+  > holds under either option of **GB-4** (`instance … extends|copy` in slot vs in head) and under
+  > whatever anchor the template-application fix lands on (PENDING Tier 1 proposes `apply Torch:`).
+  > It is scoped to **template** expansion, the construct GB-1 names. Whether a **bundle** expands at
+  > bake at all is **F10**, which is the owner's and is untouched; if F10 rules "expand", the depth
+  > rule above applies to it unchanged, and that is a consequence, not a pre-decision.
+  >
+  > **Riding lines moved in the same edit:** [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §The logic line
+  > and §Inheritance / variants, [`gaia/PENDING-SYNTAX-PLAN.md`](gaia/PENDING-SYNTAX-PLAN.md)
+  > Tier 1 (template use), Part D and Part E (K2),
+  > [`AETHER-GAIA-REVISION-2026-08-29.md`](AETHER-GAIA-REVISION-2026-08-29.md) §Work order,
+  > and [`ru/OPEN-QUESTIONS.md`](ru/OPEN-QUESTIONS.md).
+
 - **GB-2** — the colour transfer function: `#RRGGBBAA` sRGB-decoded at bake, vs raw bytes carried
   into a LINEAR field. Blocks **G2/G5**.
+
+  > **RESOLVED 2026-08-30 — decided by standing rule.** This is a correctness question with a
+  > measured answer, and the answer is **neither of the two options as posed**: both assume ONE rule
+  > for the literal. **The transfer function is a property of the DESTINATION FIELD, not of the
+  > literal**, and it is declared in the GK-4 field table.
+  >
+  > **What is true at source.** Every colour-typed field in the workspace was read, not inferred.
+  > There are three carrier classes and they disagree with each other:
+  >
+  > | carrier | fields | what the source says |
+  > |---|---|---|
+  > | LINEAR float | `PointLight::color` (`boyko_render/src/light.rs:309-310`), `DirectionalLight::color` (`:289-290`), `SpotLight::color` (`:336-337`), `SkyLight::sky_color`/`ground_color` (`:357-360`), `MaterialGpu::base_color`/`emissive` (`material.rs:51,54,64-69`) | `/// LINEAR rgb color`; `light.rs:114` *"All radiometric values are LINEAR"*; `material.rs:56` *"All values are LINEAR"* |
+  > | 8-bit encoded RGBA | `UiBackground::color`/`border_color` (`boyko_ui/src/components.rs:211,220-223`), `UiText::color` (`text/components.rs:39-47`) | `u32`, *"authored STRAIGHT RGBA8 (`byte0=R .. byte3=A`)"* — **"straight" here means NON-PREMULTIPLIED, not "not decoded"**: `components.rs:211` continues *"the pack system premultiplies them"*, and `premultiply_rgba8` (`boyko_render/src/ui/instance.rs:196`) is the operation named. No sRGB decode exists anywhere on the UI path — `ui_rect.fs.hlsl:130` unpacks the byte word and composites it directly |
+  > | device-encoded packed | `ParticleEffect::color_keys: [u32; 4]` (`boyko_render/src/particle_effect.rs:120-143`) | byte order is **`0xAABBGGRR`**, *"the opposite of the `0xRRGGBBAA` an author reaches for by habit"* — and its own doc records that both in-tree presets were authored wrong exactly that way, *"and neither was caught by anything"* |
+  >
+  > That table settles the ratified-text worry before it starts: the ratified *"`#RRGGBBAA` →
+  > straight-RGBA8"* line ([`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Language shape) is a statement
+  > about **alpha association**, not about a transfer function. It is not being reopened; it is being
+  > read against the field whose doc comment defines the word.
+  >
+  > **The ruling.**
+  > 1. **Destination is a LINEAR float colour field → the sRGB EOTF is applied at bake.** The
+  >    authored byte is display-referred; the field is scene-referred; a converter that skips the
+  >    conversion is simply wrong.
+  > 2. **Destination is an 8-bit encoded RGBA carrier → the transfer function is the IDENTITY.** Not
+  >    a special case bolted on: source space and destination space are the same space, so the
+  >    general rule yields the identity here. **Measured:** decode-then-re-encode over the whole
+  >    domain drifts **0 of 256 bytes**, so stating the rule uniformly changes no existing UI colour.
+  > 3. **Destination is a device-encoded packed carrier → a coded `GA####` bake refusal**, naming the
+  >    field's own byte order. Gaia must not be the fourth way to author `0xAABBGGRR` by habit.
+  >
+  > **Rejected alternative, and its price — measured, not asserted.** Carrying raw bytes into a
+  > LINEAR field (the ballot's option (b), and what
+  > [`gaia/LANGUAGE.md`](gaia/LANGUAGE.md) does today) is wrong by up to **12.92×** multiplicatively
+  > (byte 3: `0.011765` raw vs `0.000911` decoded) and **0.287** absolutely (byte 136). On the
+  > corpus's own literal `#FFB35CFF` into `PointLight::color` it is **1.557× on green** (`0.702` vs
+  > `0.451`) and **3.371× on blue** (`0.361` vs `0.107`) — a large hue shift toward desaturation,
+  > not a brightness nudge, and nothing downstream attributes it to the baker. The mirror-image
+  > alternative — one global "always decode" rule — is wrong in the other direction: applied to a
+  > `u32` field by storing the decoded value it corrupts every UI colour, which is why the rule is
+  > keyed on the destination rather than on the literal.
+  >
+  > **⚠ A gate constraint that falls out of the same measurement, and must be obeyed by G2's
+  > fixtures: the two routes have exactly TWO fixed points, byte 0 and byte 255.** A red fixture
+  > written with `#FFFFFFFF` or `#000000FF` is satisfied identically by both routes — **a gate that
+  > cannot fail**, the class this corpus exists to repair. Every colour fixture must use a
+  > mid-domain channel; `128` (raw `0.501961` vs decoded `0.215861`) is the recommended witness.
+  >
+  > **The ARITY half — settled here, and it needed settling because nothing carried it.**
+  > `LANGUAGE.md:71-74` flags a 4-component `#RRGGBBAA` written into a 3-component `[f32; 3]` and
+  > records that *"the arity half is carried by nothing"*. **The precedent is already shipped in this
+  > repo**: Aether's `ColorLit` (`crates/aether_lang/src/parse.rs:1177-1213`) checks arity against
+  > the TARGET's arity — 3 or 4 for `base`, exactly 3 for `emissive` — synthesizes the missing alpha
+  > as `1.0` when widening (`expand.rs:891-898`), refuses when narrowing with a message naming the
+  > target type (*"`Material::new` takes `emissive: [f32; 3]`, emitted radiance has no alpha"*), and
+  > lands the blame on the **tuple's own span**, *"because neither the key nor any single component is
+  > the thing that is wrong"*. Gaia mirrors that rule verbatim: **widening 3 → 4 supplies alpha
+  > `1.0`; narrowing 4 → 3 is a coded refusal, never a silent alpha drop** (a silent drop is Unity's
+  > class, which §Inheritance bans by name). Consequence: the 6-digit **`#RRGGBB`** form is admitted
+  > as the 3-component spelling, and `LANGUAGE.md`'s `color=#FFB35CFF` on a `PointLight` is a bake
+  > error whose correct form is `#FFB35C`.
+  >
+  > **Why admitting `#RRGGBB` is not a reopen.** §Language shape's literal list is introduced as
+  > *"Literals are engine-native (…)"* — an illustrative list. The one list in this corpus that is
+  > closed says so in as many words (§The logic line: *"the list is exhaustive"*), and this is not
+  > that list. The alternative to admitting the 6-digit form is to make every light colour a float
+  > tuple, which prices the commonest scene edit in the least readable form for no correctness gain.
+  >
+  > **Not touched:** whether `PointLight::position` is declarable at all is **GB-5**, the owner's,
+  > and nothing above bears on it.
+  >
+  > **Riding lines moved in the same edit:** [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Language
+  > shape, [`gaia/LANGUAGE.md`](gaia/LANGUAGE.md), [`gaia/PENDING-SYNTAX-PLAN.md`](gaia/PENDING-SYNTAX-PLAN.md)
+  > Tier 1 (`PointLight` field names), Tier 4, Part D and Part E (K12),
+  > [`AETHER-GAIA-REVISION-2026-08-29.md`](AETHER-GAIA-REVISION-2026-08-29.md) §Work order,
+  > and [`ru/OPEN-QUESTIONS.md`](ru/OPEN-QUESTIONS.md).
 - **GB-3** — the reference taxonomy needs a THIRD kind. Ratified §Identity has two (lexical/copy,
   entity identity via `@` with remap); asset references are neither. On one ballot because R4 should
   be rewritten once: the asset-ref spelling (sigil / typed head / bare strings — the bare-string
@@ -90,13 +229,196 @@ red tests land regardless of its disposition). Everything above them waits on a 
   come due**. Recorded beside it: the two authored-scene emission fixes ride no rung at all.
 - **GB-7** — the wall-clock companion beside G7's count gate: kept or dropped, and if kept, its
   tolerance, run count and noise floor. **G7**, minor.
-- **GB-8** — the corpus-wide link/id census: which rung owns it, and whether it may carry per-site
-  waivers. **Precedent, not a reopen** (no ratified item is touched): this repository's own
-  anchor-census precedent says no — a waiver allowance licensed 188 abdications out of 302 sites.
-  **G0/R8**.
-- **GB-9** — does the `Or`-over-dense generated-code ban survive the kernel fix (KERNEL-BACKLOG **KE1**)? Keep it
-  with a stated ground, or delete it with a record. **Decide before R0 lands**, because R0 is
-  precisely what makes the ban's original ground false. Blocks **G7**'s codegen rules.
+
+  > **RESOLVED 2026-08-30 — decided by standing rule. DROPPED.** No wall-clock companion. G7's gate
+  > is the count gate alone, exactly as re-axed. The ground is measured, and it is **not** "a clock
+  > is noisy" — it is that a clock does not measure the quantity this gate is about.
+  >
+  > **What is true at source** (read, not inferred — the shapes decide the ruling):
+  > - `ui_bind_discovery` (`crates/boyko_ui/src/binding/bind_system.rs:75-89`) makes **one** call:
+  >   `world.any_changed_since(&scratch.dynamic_bound_ids, …)`.
+  > - `dynamic_bound_ids` is a **deduplicated set of component TYPES** — `register_bound_id`
+  >   (`:56-60`) pushes only `if !self.dynamic_bound_ids.contains(&id)`.
+  > - `EcsMaster::any_changed_since` (`crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs:403-423`)
+  >   is `for archetype in …iter_archetypes()` over **every archetype in the world**, then `for &id in
+  >   ids`, then `for row in 0..pool.count()`.
+  > - `ui_bind_apply` (`:98-105`) returns immediately when `!dirty`, so a still frame is **discovery
+  >   only**.
+  >
+  > **Therefore the still frame's wall clock is a function of archetype count, bound-TYPE count and
+  > live-row count — and of the binding count not at all.** "200 bindings" is the number in the
+  > gate's own name and it is **not an input to the loop being timed**: 200 or 2000 bindings over the
+  > same three component types produce the identical id set and the identical scan.
+  >
+  > **Measured on this machine** (`windows-gnu`, rustc 1.97.1, `-O`; the discovery loop modelled at
+  > HUD scale — 40 archetypes, 3 bound types, 200 rows; medians of 60 × 2000-call batches, two runs
+  > agreeing to <1%):
+  >
+  > | what changed | still-frame cost | vs the fixture |
+  > |---|---|---|
+  > | the fixture as written | **332 ns** | — |
+  > | bindings 200 → 2000, same 3 types | **332 ns** | **+0%** — the gate's own number moves nothing |
+  > | 2× archetypes (an unrelated feature adds types) | 360 ns | **+8%** |
+  > | 5× archetypes | 484 ns | **+46%** |
+  > | 2× live rows (an unrelated feature adds entities) | 604 ns | **+82%** |
+  > | 2× bound component types | 670 ns | **+101%** |
+  >
+  > A threshold pinned on that fixture is pinned to **none** of what its title names and to **all** of
+  > what the fixture does not pin. Spawning one more entity in an unrelated part of the fixture world
+  > moves it by tens of percent, so the companion would fail for reasons that have nothing to do with
+  > binding cost — and the standing repair for that is to loosen the tolerance until it cannot fail,
+  > which is where every gate in this repo's failure ledger ended up.
+  >
+  > **Resolution, second and independent ground.** `Instant::now()`'s median non-zero step here is
+  > **100 ns**, so the whole still frame is **~3.3 timer ticks**. Single-call jitter on an idle
+  > machine: median 200-300 ns against a max of 4600-5800 ns — a **15-25× tail** over the entire
+  > measured quantity. The only form that reaches a usable ±1.7% process-to-process is a batch of
+  > **200 000** frames (25 processes, 222 700-226 400 ns per 1000-call batch) — and 200 000 frames is
+  > not a still frame; it is a microbenchmark of `any_changed_since`, which belongs to **GK-2**, not
+  > to G7. Even that form's in-run spread ranged **36%-83%** across six runs, reproducing on the CPU
+  > the lesson this repo already recorded for GPU timing: **the noise floor is not a constant.**
+  >
+  > **The tolerance the ballot asked for cannot be honestly quoted.** A tolerance must come from a
+  > measured noise floor; the measured floor here is a range, not a number, and the signal it would
+  > have to resolve — G7's red-first is *"dirtying exactly one source"*, i.e. **0 → 1 sink write** —
+  > sits at a single-frame signal-to-noise of **0.05-0.50** across six runs, never once above 0.5.
+  > The count gate resolves that same delta **exactly** (0 vs 1) with no instrument at all. Quoting a
+  > round number instead would be exactly the move this ballot exists to prevent.
+  >
+  > **Rejected alternative and its price.** Keeping a loose companion (say "must stay under 1 ms")
+  > costs a line that can never go red — it is 3000× the measured cost, so it survives any regression
+  > the count gate would catch, and it would be read by later maintainers as timing coverage that
+  > does not exist. That is strictly worse than no clock: the corpus already struck the
+  > delta-subtraction form as unfalsifiable, and re-admitting it in a looser dress re-creates the
+  > defect with a fig leaf. **A gate that cannot fail is worse than an absent one, because it is
+  > counted.**
+  >
+  > **The condition under which a clock returns, stated so the drop is not permanent by accident.**
+  > A wall clock over the **scan itself** — `any_changed_since` benchmarked with archetype count,
+  > bound-type count and row count all pinned, and the number reported per row rather than per frame
+  > — is a legitimate instrument, and it is exactly what **GK-2**'s design pass needs to justify a
+  > per-column tick (GK-2's row already calls today's scan *"an O(live rows) scan documented as
+  > 'cheap'"*). That bench belongs to GK-2 and is not a companion to G7's count gate.
+  >
+  > **Corroborated in passing, not reopened:** the `any_changed_since` doc comment (`:386-389`) claims
+  > the scan is *"Bounded to the archetypes that actually host a bound id (typically 1-few)"*. The
+  > loop at `:404` is over **all** archetypes; only the inner work is bounded. The corpus already
+  > owns this as GK-2's companion doc fix ([`gaia/DECISIONS.md`](gaia/DECISIONS.md) §UI bindings,
+  > item 8) — recording that the reading holds, and changing nothing else.
+  >
+  > **Riding lines moved in the same edit:** [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) row G7,
+  > [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §UI bindings item 9,
+  > [`AETHER-GAIA-REVISION-2026-08-29.md`](AETHER-GAIA-REVISION-2026-08-29.md) §Work order,
+  > and [`ru/OPEN-QUESTIONS.md`](ru/OPEN-QUESTIONS.md).
+- **GB-8** — **RESOLVED 2026-08-30** (orchestrator ruling; the owner delegated this ballot as one of
+  the twelve mis-routed under CLAUDE.md's "perf and architecture forks are decided with numbers").
+  Original question: the corpus-wide link/id census — which rung owns it, and whether it may carry
+  per-site waivers. **Precedent, not a reopen** (no ratified item is touched). Ruling recorded in the
+  campaign's own decision log: [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Census discipline.
+
+  **Measured first, because the ballot's own ground is not this tree's.** `188 of 302` appears in
+  four corpus files and in the census test's doc comment, and **no in-tree gate produces it** —
+  `tests/internal_docs_anchors.rs` states neither number. Run live (2026-08-30) it prints **735
+  anchors, 116 waived**: ARCHITECTURE.md 6/0, FEATURE_MAP.md 222/7, SYSTEMS.md 330/20,
+  MESHLET-VIRTUAL-GEOMETRY-PLAN.md **177/89**. The aggregate is 15.8%, not 62% — **and the
+  precedent is stronger than the aggregate, not weaker**: the waiver did not spread evenly, it
+  concentrated entirely in the one document admitted under the allowance, which now waives
+  **50.3%** of its anchors, and a waived anchor "keeps **neither** shape nor identity"
+  (`internal_docs_anchors.rs` head, clause 3).
+
+  **Also measured:** the census that landed at `01a4436e` is not one scope but four.
+  `tests/gaia_g0_citation_census.rs` (460 lines, **4 tests, all green**): the **AIR** census covers
+  `docs/gaia` + `docs/aether-v2` (18 definitions, **114 citations across 13 files**); the **KE/KM**
+  census **already runs corpus-wide over all of `docs/`** (16 rows, 101 citations, 352 files); the
+  retired-form census also runs over all 352 files under a narrowed predicate; the staleness census
+  covers the 1 file the revision record marks `ratified-stale`. None carries a waiver list.
+  Widening the AIR census corpus-wide is **green at zero remediation**: the `AIR-##` citations
+  outside G0's two directories sit in **5** files (`OPEN-QUESTIONS.md`, `ru/OPEN-QUESTIONS.md`,
+  `AETHER-GAIA-REVISION-2026-08-29.md`, `FEATURE_MAP.md`, `AETHER-V1-SURFACE-REVIEW.md`), and
+  **every id cited lies inside the carrier's `AIR-01..AIR-18`** — so none of them is a repair.
+  ⚠ **The count is deliberately not pinned here, and the reason is this ruling's own footprint.**
+  It measured **21** before the ruling was written and **40** after, because the ruling text itself
+  cites `AIR-06` a dozen times in this file and its Russian twin. A citation count is a moving
+  target that goes stale on the next edit — which is the exact defect this ruling corrects two
+  paragraphs above. **The property is the ruling; the number is an observation with a timestamp.**
+  **The LINK half had never been measured and is the half with a cost**: over the two G0
+  directories, 116 relative markdown targets, **0 dead**; over all of `docs/`, **1636 targets, 59
+  dead across 11 files — 44 of the 59 in one file**, `docs/AUDIT-2026-05-23.md` (the other 15: 8 in
+  `docs/plans/`, 5 in `docs/archive/`, 2 in `docs/diagnostics/`).
+
+  **RULING, three parts.**
+  1. **No per-site waivers, at any of the four censuses, ever.** The ground is the live measurement
+     above, not the cited 188/302. Where a property is not decidable as written, the remedy is the
+     one this census file already practises and states at its own site — **narrow the predicate and
+     print the narrowing in the failure message** (its retired-form test replaces ~1400 per-site
+     dispositions with one decidable rule). A **scope statement** ("this census covers directory X")
+     is not a waiver; a per-site skip list is.
+  2. **The AIR census widens to all of `docs/`, and it lands at G0 — not R8.** It is a one-constant
+     change (`G0_DIRS` → `markdown_under("docs")`), it is green at zero remediation, the sibling
+     census in the same file already runs corpus-wide from G0, and G0 is still open (its row carries
+     no ✅ and is held by F1/F4), so it can still take work. R8 depends on R3 and would date a
+     one-line edit months out.
+  3. **The link census is a SEPARATE deliverable and it lands at R8**, with the 59 dead targets as
+     its red-first evidence and with `docs/archive/` + `docs/plans/` **in scope** — excluding them
+     would be the scope-statement route and it is not needed, since only 13 of the 59 live there.
+
+  **Rejected, with the price.** *Per-site waivers so the whole thing lands in one commit* — price,
+  measured on the sibling gate: 50.3% abdication on the document that used the allowance, with
+  `check_anchor` returning at the waiver branch before the shape test, so a waived anchor that is
+  simply **wrong** about which line holds the symbol still passes. *Give the whole census to R8* —
+  price: a green, free, one-line widening waits behind R3 and R8, while the KE/KM half in the same
+  file already contradicts that placement by running corpus-wide from G0 today. *Land id and link
+  together at one rung* — price: the free half is held hostage by the half carrying 59 repairs,
+  which is how a gate gets deferred until it is convenient.
+- **GB-9** — **RESOLVED 2026-08-30** (orchestrator ruling under the same delegation). Original
+  question: does the `Or`-over-dense generated-code ban ([`gaia/DECISIONS.md`](gaia/DECISIONS.md)
+  §UI bindings, item 8, second row) survive the kernel fix (KERNEL-BACKLOG **KE1**)? Keep it with a
+  stated ground, or delete it with a record. The deadline "decide before R0 lands" **expired
+  unanswered** — R0 landed at `01a4436e` — so the original ground can no longer be observed in the
+  tree and this ruling reconstructs it from the record.
+
+  **Measured.** (1) KE1 is fixed and gated: `crates/boyko_ecs/tests/ke1_or_dense_blindness.rs`
+  **8/8 green** (run 2026-08-30; 7 of 8 red before the fix), and `impl_or_filter_tuple` now folds
+  `HAS_DENSE = false || $F::HAS_DENSE` and forwards `resolve_dense` per arm.
+  (2) **The ban's ground CANNOT have "moved to KE13", and a ruling that said so would be false.**
+  The same macro folds `NEEDS_CHANGE_DETECTION = false || $F::NEEDS_CHANGE_DETECTION`, and
+  `EcsMaster::query<D, F>()` opens with `const { eval_query_no_change_detection::<D, F>() }` — a
+  **compile error** whenever `F::NEEDS_CHANGE_DETECTION`. So `Or<(Changed<A>, Changed<B>)>` cannot
+  reach a `QueryView` at all, and KE13 is a `QueryView::get`/`get_mut` defect over a dense
+  `With`/`Without` — a different shape from the banned one.
+  (3) What *does* survive R0: the three shapes R0's own landing note says it did not cover
+  (`Query<Entity, Or<..dense..>>`, `Added<Dense>` inside `Or`, arity > 2 with more than one dense
+  arm); `par_iter`/`for_each_chunk`, which now **compile-refuse** a dense-armed `Or` — loud, not
+  silent; and D4, whose reserve R0 narrowed to the consumer clause alone.
+  (4) **The banned shape is not generator-reachable.** Gaia's ratified GN2 (§UI bindings item 4)
+  rejects "bake emits Rust into the game build"; the runtime is a **closed bindable-type set**
+  (`register_bindable::<C>`, shipped at `boyko_ui/src/interaction/plugin.rs:189`) plus type-erased
+  fn-pointer accessors. The `Or<(Changed<C1>, …)>` change-gate in the shipped precedent is
+  **host-composed** — `boyko_ui/src/binding/bind_system.rs` says so in as many words — hand-written
+  engine-side, not emitted per binding. All four production `Or<(` type positions in the tree are
+  hand-written and none is over dense (the only production dense component is `GpuTransform3D`).
+
+  **RULING: option (b) — DELETE the ban, and replace it with a rule that is not about `Or`.**
+  Its recorded ground is fixed and gated. Option (a)'s named candidate ground — D4's coupling — does
+  not survive contact: **D4 reserves the Aether *surface* `or(...)`, while the ban governs *generated
+  code*, and GN2 says the baker emits no Rust** — a ban on a shape the generator cannot emit,
+  grounded in a reserve on a surface the generator does not write, is a rule with no subject. The
+  row is replaced by **"a bind source or change-gate over a dense (or bitset) component"**, which is
+  item 8's *third* row and whose ground (`any_changed_since` / `get_component_changed_tick` blind to
+  dense — **GK-2**) is still live and unfixed; the `Or` row was always the weaker statement of the
+  same hazard, aimed at one filter shape instead of at the storage kind. The fixture discipline is
+  kept and re-aimed: the red fixture asserts the **generator does not emit a change-gate over a
+  non-signature storage kind**, which cannot go green on a kernel commit. The three uncovered
+  `Or`-dense shapes and KE13 are filed against G7's codegen rules as *"if a generator ever emits
+  `Or` over dense, these are the shapes with no oracle"* — deleting the ban must not delete the
+  knowledge.
+
+  **Rejected, with the price.** *(a) Keep the ban.* Price: a ratified line whose stated ground is a
+  fixed defect, whose fallback ground (D4) is about a different artifact than the one the ban
+  governs, and whose only remaining candidate ground (KE13) is factually unavailable — i.e. exactly
+  the "recommendation printed as if ratified" defect this ballot list exists to catch, re-created by
+  the act of resolving it. Second price: the red fixture stays aimed at a shape nothing emits, which
+  is how a gate becomes unfalsifiable.
 
 ### Aether v2 — the `AB` series
 
@@ -105,58 +427,237 @@ red tests land regardless of its disposition). Everything above them waits on a 
   measurement**: the grant's recorded ground was that the unregistered case "fails silently on both
   ends", and both generated ends are in fact a loud init-time panic. Blocks **R3**'s event
   construct.
-- **AB-2** — where the `lanes N` FLOOR lives. Parse can only enforce the constant ceiling; the
-  binding constraint `lanes >= worker_count + 1` is machine-dependent and unrepresentable at parse,
-  and the path that was called "replaced" is a release-mode slice-index panic, not a `Result`.
-  Options: minimum silently raised at boot / boot refusal / drop the knob. The worked example
-  changes under all three. Blocks **R3+R4**.
-- **AB-3** — the unattached-thread lane contract. Measured: every OS thread that is not a pool
-  worker maps to lane 0, which is worker 0's lane, guarded by a `debug_assert` on the param path and
-  by nothing on `send_event`. Options: per-thread claimed host lanes (one claimer enforced) / `Err`
-  on unattached (breaks silent main-thread senders) / accepted hazard, documented. **The const in
-  the tree is `MAX_EVENT_THREADS = 64`** (`crates/boyko_ecs/src/ecs/constants.rs`); the `65` this
-  option used to start from is KERNEL-BACKLOG **KE8**'s plan value and has **not landed**, so the
-  first option raises `64 → 66+` and, while KE8 is unlanded, buys **two** lanes rather than one —
-  one to satisfy KE8's own `MAX_WORKERS + 1 <= MAX_EVENT_THREADS` const-assert, and one for the
-  claimed host lane on top of it. Blocks **R4**'s `&self` send.
-- **AB-4** — `ordered` sender exclusivity: what REGISTERS the fact (generated-path
-  `register_ordered_emitter` / `SystemMeta` emit-access / the `#[event]` macro side), plus the
-  disposition of the verbatim escape (param-list refusal vs declared out of contract). Blocks
-  **R4**.
-- **AB-5** — the machine event router's random-access mechanism, and the tick visibility that
-  follows from it. **Open, two ways:** (a) amend M4 from `get_component_mut` to `Query::get_mut`;
-  (b) keep `get_component_mut`. The two APIs stamp DIFFERENT ticks, so the choice drags two riding
-  questions that must move in the same commit: does `publish tracked` (M7 / D6) then see the
-  router's deposit **in the same frame**, and is M7's tick bypass still needed at all — M7's remedy
-  was derived from apply-window stamping, which is the behaviour of the API (b) keeps. The prices,
-  as the engine stands: **(b)** — `EcsMaster::get_component_mut`
-  ([`component_api.rs`](../crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs)) takes
-  `&mut self`, the exclusive-world path, and its own documented contract is that a write made from
-  inside a running `Schedule` frame stamps the **apply-window tick**, so a `Changed<T>` reader
-  observes it on the FOLLOWING frame, not the same one. **(a)** — the `Query` SystemParam
-  ([`query.rs`](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs)) has **no** `get`/`get_mut`
-  today; `Query` random access is an R1 kernel addition
-  ([`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) §Engine-layer split), so (a) makes R5's Depends
-  cell cite `Query::get_mut` and rides R1 — in exchange, an in-system guard stamps at the system's
-  `this_run` (the same-frame visibility the same doc comment points at). Blocks **R5**, and the
-  M4 / M7 / D6 lines in [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) and
-  [`aether-v2/MACHINES.md`](aether-v2/MACHINES.md) §Event routing — they move together or the
-  record drifts against itself.
+- **AB-2** — ✅ **RESOLVED 2026-08-30 [delegated]** → ruling **E4** in
+  [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md). **`lanes N` is redefined from a count to a
+  MINIMUM**: the effective count is `max(N, worker_count + 1)`, resolved where the worker count is
+  first known, and the raise is **reported once at boot**, not silent.
+  *Measured, not reasoned:* the floor is unchecked on every path because
+  `current_worker_id_or_dispatcher_lane` returns a worker's own id and **ignores** its
+  `worker_count` argument — a correct denominator clamps nothing. The violation is a panic in both
+  profiles (`thread_index 3 >= thread_count 1` in debug; `index out of bounds: the len is 1 but the
+  index is 3` in release), never a `Result`, so the ballot's characterisation is **confirmed** — and
+  it is a *safe* bounds panic, not UB, which is what makes raising affordable.
+  ⚠ *The probe also found the floor is already violated by the DEFAULT path:* `EcsMaster::new()`
+  hard-wires `EventDispatcher::new(1)` with no setter, so `preregister_event_default` allocates one
+  lane on every machine — a 4-worker pool + default registration + 64 worker sends **panicked 3
+  times** in release. Feasible because `App::new()` builds the pool before `add_plugin` runs.
+  *Rejected:* **boot refusal** (a source correct on a 4-core laptop becomes unbootable on a 64-core
+  server, for a number the author cannot know); **dropping the knob** — technically the cleanest
+  answer, since `lanes` is not author-meaningful, but it **deletes a ratified language surface**,
+  which is a SCOPE call: **escalated to the owner as a recommendation, deliberately not taken.**
+- **AB-3** — ✅ **RESOLVED 2026-08-30 [delegated]** → ruling **E5**. **Per-thread claimed host lane,
+  one claimer enforced.** `MAX_EVENT_THREADS` 65 → **66**, const-assert strengthening to
+  `MAX_WORKERS + 2 <= MAX_EVENT_THREADS`.
+  ⚠ **Two premises in this ballot were false and are corrected at source.** (1) `MAX_EVENT_THREADS`
+  in the tree is **65, not 64** — `constants.rs:400`, raised together with its const-assert in
+  `01a4436e`, the very commit this corpus was written alongside (`git log -L400,400:…` dates it).
+  KE8's *lane-constant* half has **landed**; its `&self` send, `send_slice` and re-aimed debug
+  assert have not. So this option buys **one** lane, not two. (2) It is not true that "every OS
+  thread that is not a pool worker maps to lane 0": the mapping has **three** arms, and the
+  **dispatcher gets its own reserved lane** (`worker_count`). Only `WORKER_ID_UNATTACHED` maps to 0.
+  *The hazard, measured in release* — an unattached thread and worker 0 each sending 4000 events,
+  released on a rendezvous barrier: **6 of 6 runs lost events** (1891, 2295, 2070, 183, 1473, 1940
+  of 8000 = 2.3 %–28.7 %), and **every send returned `Ok`**. Without the barrier 6/6 runs lose
+  nothing — which is precisely how a stress test that does not force overlap stays green over this.
+  *Why "accepted hazard, documented" was unavailable:* the loss is silent **and** it is UB (two
+  threads writing one `MaybeUninit<E>` slot through an `UnsafeCell`), and the tree already holds
+  that option's output as a **false** `// SAFETY:` clause — `send_one`'s U4 clause 2 claims "only
+  the worker pinned to `thread_index` accesses this UnsafeCell". Ratifying (c) would ratify an
+  invariant measurement has refuted; principle 8 forbids it. *Rejected:* **`Err` on unattached** —
+  breaks the escape hatch the engine itself documents (`EventWriter::send`'s doc sends main-thread
+  and FFI callers to `send_event`, calling that route "safe"), and buys nothing the claimed lane
+  does not. The chosen contract concedes that breakage for the **second** unattached claimant only,
+  which is the genuinely unsound case.
+- **AB-4** — ✅ **RESOLVED 2026-08-30 [delegated]** → ruling **E6**. **Registrant: the generated
+  path**, calling a new `register_ordered_emitter(event_id, system_id)` at plugin build, beside the
+  `preregister_event[_default]` it already emits. **Predicate** (the half the ballot said was
+  missing): at build end, any `ordered` event id with an emitter count **> 1** is a hard boot
+  failure naming both systems. **Verbatim escape: refused at the param list** — a hand-written
+  `EventWriter<E>` for an `ordered` `E` is refused at `EventWriter::init_state`, the site that
+  already panics loudly for an unregistered event and already has `E::event_id()` and the dispatcher
+  in hand.
+  *Rejected — `SystemMeta` emit-access:* measured, `EventWriter::init_access` is an **empty body**
+  carrying "events stay OUTSIDE the conflict graph" (Phase 12 EW5 / Q2 Option A), so `SystemMeta`
+  holds zero event information and there is no axis to read. Adding one as a *write* would make the
+  scheduler serialise every pair of same-type emitters — surrendering exactly the parallel emission
+  E1 exists to buy; adding a non-conflicting axis is option (a) with worse placement.
+  *Rejected — the `#[event]` macro side:* structurally impossible, since exclusivity is a property
+  of the emitter **set** and the macro sees one type and zero systems (it does not even read its
+  attribute arguments today — `boyko_macros/src/lib.rs:261` takes `_args`).
+  *Price of the refusal, stated:* a hand-written system cannot emit an `ordered` event even as sole
+  emitter; the escape is to declare the emitter in Aether.
+- **AB-5** — **RESOLVED 2026-08-30** (orchestrator ruling under the owner's delegation of the
+  perf/architecture forks). Original question: the machine event router's random-access mechanism
+  and the tick visibility following from it — (a) amend M4 to `Query::get_mut`; (b) keep
+  `get_component_mut`. **Decision: (a).** Full ruling with the measurements:
+  [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) **M4a**, with M7 and **D6a** amended in the
+  same edit and [`aether-v2/MACHINES.md`](aether-v2/MACHINES.md) §Event routing + CAMPAIGN R5's
+  Depends cell moved with them.
+
+  *First, a correction to this item's own body.* It said the `Query` SystemParam "has **no**
+  `get`/`get_mut` today". That was true when written and is **not** true now: both landed with R1 at
+  `01a4436e` (`iters/query/query.rs`, `get` and `get_mut`), so (a) was a citation fix, not a new
+  dependency.
+
+  *The tick half, measured* under an explicit ordering edge — which the pre-existing tests lack, and
+  without which "same frame" and "one frame later" are indistinguishable: `Query::get_mut` +
+  `Mut<T>` is seen by a `Changed<T>` reader **in the same frame**; `get_component_mut` is **not**,
+  even with the reader ordered after it.
+
+  *But the decisive ground turned out not to be the tick at all.* `get_component_mut` takes
+  `&mut self`, so its router can only be an **exclusive** system — and an exclusive body is
+  `FnMut(&mut EcsMaster)` with, in the kernel's own words, "no param tuple, no per-param state"
+  (`system/exclusive_function_system.rs`). Such a router **cannot take `EventReader<E>`**. It must
+  read through `EcsMaster::events_of`, whose contract is "Returns an **empty slice** if `E` was not
+  registered or if no events were sent last frame" — the one silent path ruling C3 already
+  identified, collapsing *unregistered* and *nothing happened* into one value. Option (a)'s router is
+  an ordinary system: it takes `EventReader<E>`, and a forgotten registration is a **loud boot
+  panic**. `events_of` also serves the **previous** frame, making (b)'s latency **two** frames
+  against the one MACHINES.md documents.
+
+  *Rejected — (b), and its price:* a machine whose `inbox` event is un-preregistered routes nothing,
+  silently, forever; doubled latency; plus a bypass mechanism that exists only to repair (b).
+
+  *A ground I expected and did NOT get, recorded so nobody re-argues it.* Exclusive systems declare
+  `Access::universal()` and are single-per-round, so (b) looked like a per-event-type scheduler
+  barrier. **Measured against a control that proves the schedule had real concurrency to lose**
+  (1 thread 235–250 µs vs 8 threads 79–133 µs, **2.7–3.2×**): an exclusive router cost **0.78–1.00×**
+  a `Query` router at both 1 and 8 routers — below the ±20 µs noise, sign flipping between runs.
+  **Scheduler cost grounds neither option.**
+
+  *The two riding questions, answered here rather than left to drift:* `publish tracked` **does**
+  now see the router's deposit in the same frame; and M7's tick bypass is **withdrawn, not
+  re-derived** — measured, a plain `&mut T` through `get_mut` bumps **no** tick while `Mut<T>` bumps
+  at `this_run`, so all-or-nothing falls out of the emitted term. (b) had no such lever:
+  `get_component_mut` returns `Mut<T>` unconditionally, which is exactly why a bypass had to be
+  invented for it.
 - **AB-6** — `requires` of a dense-storage component: parse refusal / a dense required-ctor route /
   known-open plus a hook workaround. ⚠ the refusal option **narrows the ratified
   `storage = table|dense` × `requires` surface**. The red tests land now under any disposition —
   they demonstrate the panic either way. Blocks KERNEL-BACKLOG **KE11**'s disposition and **R3**'s wording.
 - **AB-7** — R-DENSE: unconditional with a driver-independent ground that must be ESTABLISHED rather
   than asserted, or lifted by `publish tracked`. ⚠ **re-grounds a ratified refusal**. Blocks **R5**.
-- **AB-8** — the `each par` driver. Two kernel drivers exist with opposite tick behaviour
-  (`par_iter_mut`, per-row, ticks preserved; `par_for_each_chunk`, chunked, tick-excluding);
-  recommendation is `par_iter_mut`, per C5's own rationale. On the same ballot: whether `soa par`
-  exists at all, whether the batching key is author-visible (`parallel (batch = N)`), and whether
-  machines and `each` share one driver. Blocks **R3/R5**.
-- **AB-9** — `boyko_reflect` sequencing. It is not a workspace member and lives on the unmerged
-  branch `feat/reflection` (18 commits ahead). Options: R8 waits on the merge / AIR-06(b) is
-  descoped to the reflection-free halves (which satisfies the oracle) / the merge is pulled forward.
-  Blocks **R8**.
+  **STILL OPEN — STILL THE OWNER'S.** What was delegated was not the choice but the *measurement*
+  underneath it, and it was taken on **2026-08-30**: **the candidate driver-independent ground is
+  REFUTED, on both of its conjuncts.** The ballot therefore goes to the owner with a refuted premise
+  rather than an open question. Evidence, all read or run in this tree at `01a4436e`:
+
+  1. *"the router's deposit path assumes a table row"* — **false.** Both random-access deposit APIs
+     carry working dense arms: `EcsMaster::get_component_mut` resolves the global `DenseStore` and
+     bumps the per-slot `changed_tick` (`ecs_master/component_api.rs`, `StorageKind::Dense` branch),
+     and `Query::get`/`get_mut` carry `HAS_DENSE` gates. Pinned green in-tree by
+     `tests/ke3_query_random_access.rs::{get_applies_a_dense_with_filter,
+     get_mut_applies_a_dense_with_filter}`.
+  2. *"the layout const-assert assumes a table row"* — **there is no such assert.** Every dense
+     `const { assert!(…) }` in the kernel belongs to a **driver** (`for_each_chunk`,
+     `par_for_each_chunk`, `par_iter`, `Query::contains`; `dense_iter` asserts the converse). Every
+     other `StorageKind::Dense` site is a branch that *handles* dense, not one that rejects it.
+  3. Measured positively: a dense component is fully iterable **and** change-tracked under the
+     sequential `iter_mut` driver — 64 of 64 rows reached a `Changed<>` reader — which is exactly the
+     lowering `publish tracked` selects.
+
+  **What the measurement did find** is a real constraint, but narrower than "driver-independent":
+  dense is compile-rejected (`E0080`, reproduced) by **all three non-sequential drivers** —
+  `for_each_chunk`, `par_for_each_chunk` **and `par_iter_mut`** — and `par_iter`'s own message gives
+  the reason as *"the parallel path does not resolve the dense store into each worker chunk's
+  `Fetch` (the chunk runner has no world cell)"*. The rejection tracks **parallelism and chunking**,
+  not chunking alone. Two consequences for whoever takes this: **(i)** option (b) is what the engine
+  supports today, and lifting the refusal does **not** make `parallel` machines work over dense,
+  because both parallel drivers reject it too; **(ii)** a genuinely driver-independent ground may
+  exist but lives in a **different ballot** — `requires` over a dense component panics
+  (KERNEL-BACKLOG **KE11** / ballot **AB-6**). That is also the owner's and is **neither settled nor
+  assumed** here.
+- **AB-8** — **RESOLVED 2026-08-30** (orchestrator ruling; a performance fork, so it is decided with
+  numbers rather than escalated). Original question: the `each par` driver, plus three riders. Full
+  ruling: [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) **C5a**.
+
+  **Decision: `each par` → `par_iter_mut`.** Measured rather than taken from the labels — over 2048
+  rows (clear of the 1024-row inline floor), with the writer keyed `.before` the reader: a
+  `Changed<>` reader sees **2048 of 2048** `par_iter_mut` writes and **0 of 2048**
+  `par_for_each_chunk` writes. Cost, release, 200 000 rows × 200 frames, 8 workers, five samples:
+  `par_iter_mut` is **1.17–1.47×** `par_for_each_chunk` (median ≈1.19), a delta of **0.03–0.07
+  ns/row**. Absolute ns/row is **not** reproducible run to run (0.13→0.34, machine noise) — the
+  *ratio* is, which is why the ratio is what is recorded. At the machine cost model's own 10 000 rows
+  that delta is **0.3–0.7 µs/frame**, against the **34–40 µs** ruling D1 measured for the 5-arm jump
+  table at the same row count: **≈1–2 % of the pass**. The measurement carried a falsification guard
+  (row count and per-row increment count asserted after timing), so a no-op could not have produced
+  the numbers.
+
+  *Rejected: `par_for_each_chunk` as the `par` driver.* Price — the most inviting parallel spelling
+  in the language would be structurally tick-blind, silently killing every downstream `Changed<>`.
+  That is C5's own recorded defect, and the 0-of-2048 above is it reproduced.
+
+  The three riders, answered with it: **`soa par` EXISTS**, and is the only route to
+  `par_for_each_chunk` (tick-blindness stays behind the word that announces it). **The batching key
+  is NOT author-visible in v1** — measured ground, not taste: `BatchingStrategy` has **three** fields
+  (`batches_per_thread`, `min_batch_size`, `max_batch_size`), so `parallel (batch = N)` cannot name
+  what it appears to name; *rejected alternative* — mapping `N` to `batches_per_thread`, whose price
+  is that an author writing `batch = 64` expecting 64 rows per chunk gets 64 chunks **per thread**.
+  The knob stays reachable via `batching_strategy(…)` from the verbatim escape, and the form is built
+  when a measured in-tree consumer appears (D4's rule). **Machines and `each` share the LADDER, not
+  the default** — both select tracking by term and climb `iter_mut` → `soa` → `par`, but `each`
+  defaults to `iter_mut` (C5) and the machine pass to the chunked driver (M7/D6), each measured
+  separately; unifying the defaults would reopen M7/D6, which AB-5 licensed only for the citation and
+  the withdrawn bypass. Left standing deliberately.
+- **AB-9** — **RESOLVED 2026-08-30** (orchestrator ruling under the same delegation). Original
+  question: `boyko_reflect` sequencing for AIR-06(b). Options were: R8 waits on the merge /
+  AIR-06(b) is descoped to the reflection-free halves (asserted to still satisfy the oracle) / the
+  merge is pulled forward. Ruling recorded in the campaign's own decision log:
+  [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) §Sequencing rulings, entry **AB-9**.
+
+  **Measured, and the ballot's figures were stale in both directions.**
+  1. `feat/reflection` is **15 commits ahead of and 20 BEHIND** `feat/aether-v2` (merge-base
+     `5ec1699f`). "18 commits ahead" was measured against a different base and before
+     `f7c46c76`/`d272e1fd`/`0e0b4c68` landed. The behind-count is the number the ballot never
+     carried and it is the one that grows.
+  2. Merge cost, from `git merge-tree --write-tree` (**no merge performed**): **7 conflicted
+     paths** — 4 docs (`FEATURE_MAP.md`, `SYSTEMS.md`, `OPEN-QUESTIONS.md`, `ru/OPEN-QUESTIONS.md`),
+     2 trybuild `.stderr` (`unknown_key_rejected.stderr` content; `on_despawn_rejected.stderr` a
+     **modify/delete** — `01a4436e` deleted it on this branch while reflection modified it, so it
+     needs a decision, not a re-bless), and **one source file**,
+     `crates/boyko_macros/src/component.rs`, at **2 hunks / 23 lines**. The merge brings 15 commits,
+     124 files, +44 956/−214, and **3 new workspace members** (`boyko_reflect`, `reflect_fixture`,
+     `reflect_dogfood`).
+  3. **The ballot's load-bearing claim — that the reflection-free halves "still satisfy its oracle"
+     — is false as it would be used.** AIR-06's oracle has three clauses; the second is *"a
+     probe-crate component must appear in the dump"*, and "the dump" is (b)'s **project** schema — a
+     *grammar* manifest generated from parser dispatch tables cannot contain a workspace component.
+     Descoping (b) does not leave that clause satisfied; it removes its subject. It is *satisfiable*
+     reflection-free only by declaring the probe component in an `aether!` block — which makes the
+     gate green over a dump covering **0 of the 138 `#[derive(Component)]` sites in the engine
+     crates** (`boyko_ecs` 43, `boyko_ui` 36, `boyko_render` 21, `boyko_physics` 15, `boyko_scene`
+     14, `boyko_demo` 8, `boyko_input` 1; 185 across all of `crates/*/src`). Measured: **zero
+     production `aether!` declaration blocks exist** — all 50 live under test files, and the 6
+     `*/src` hits are the macro's own implementation and doc comments. Gaia declares nothing (no
+     baker).
+  4. **And the merge alone does not fix that either.** `boyko_reflect::registry::type_info_of`
+     returns `None` for "a component without `#[component(reflect)]`" — reflection is **opt-in per
+     component**. On `feat/reflection`, `#[component(reflect)]` appears at **106 lines across 33
+     files, and not one is in an engine crate** (23 files `reflect_fixture`, 4 `boyko_reflect`, 3
+     `reflect_dogfood`, 3 `boyko_macros`).
+
+  **RULING, three parts.**
+  1. **Pull the merge forward** — `feat/reflection` merges into `feat/aether-v2` as its own rung
+     before R8, at the measured cost above. "Waiting" is rejected as an option with no event to wait
+     for: nobody else is merging the branch, and it is already 20 commits behind, with the lag
+     concentrating in `crates/boyko_macros/src/component.rs` — the one file both the derive work and
+     the reflect work touch.
+  2. **AIR-06(b) is NOT descoped.** The descope buys a vacuous green.
+  3. **A fourth item, which no option on the ballot named, is the real precondition and is attached
+     to R8's Lands**: engine components must opt into reflection — either a sweep marking them
+     `#[component(reflect)]`, or a decision that the derive opts in by default. Until one exists,
+     AIR-06(b)'s dump covers the empty set under **all three** of the ballot's options. **Which of
+     the two routes is taken is R8's own design pass and is NOT decided here** — it has a
+     per-component static + `OnceLock` cost that has to be measured, not argued. In the same edit,
+     AIR-06's oracle clause is corrected from "a probe-crate component" to "a hand-written
+     `#[derive(Component)]` component **from an engine crate**", because the probe-crate form is
+     satisfiable by a route that measures nothing.
+
+  **Rejected, with the price.** *R8 waits on the merge* — price: R8's gate goes green on a dump
+  covering 0 of 138 engine components (the opt-in set is empty), while the branch keeps diverging
+  and the one real source conflict keeps growing in exactly the file both campaigns edit.
+  *Descope AIR-06(b) to the reflection-free halves* — price: the same zero coverage **plus** the
+  loss of the oracle's only workspace-facing clause, i.e. a gate that cannot fail.
 - **AB-10** — AIR-10 residue: is the measurement script required when the audit branch is taken, and
   is PENDING's widening to the joint Aether+Gaia vocabulary ratified? ⚠ the second is a **scope
   change to a ratified requirement** and must not arrive as a side effect of an edit.

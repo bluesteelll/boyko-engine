@@ -37,7 +37,7 @@ asset "levels/crypt/cell_07"
 abstract template Torch(power: f32) {
     Transform pos=(0,0,0)
     MeshRef "props/torch"            // stable asset id — never a slot index
-    PointLight power=$power range=12.0 color=#FFB35CFF
+    PointLight power=$power range=12.0 color=#FFB35C
 }
 
 entity @gate_01 {
@@ -68,10 +68,19 @@ instance "prefabs/torch_wall" @wall_east {
 >   `range`; the sketch omitted it. The `12.0` above is illustrative, not ruled. This is the same
 >   hole PENDING M7 records at FIELD granularity — the closed evaluator has no way to spell a
 >   missing field's neutral.
-> - **Colour-literal arity is unreconciled.** `#FFB35CFF` is an RGBA-4 literal written into
->   `color: [f32; 3]`, which is three channels. PENDING Tier 4 carries only the sRGB-decode half of
->   the colour question (ballot **GB-2**); the arity half is carried by nothing. Left as authored
->   and flagged, not silently trimmed.
+> - **Colour — BOTH halves settled, and the literal above is corrected.** Ballot **GB-2** RESOLVED
+>   2026-08-30 by standing rule ([`DECISIONS.md`](DECISIONS.md) §Language shape; body and
+>   measurements in [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29).
+>   - **Arity:** checked against the target's arity, mirroring Aether's shipped `ColorLit`
+>     (`crates/aether_lang/src/parse.rs:1177-1213`). Widening 3 → 4 supplies alpha `1.0`; narrowing
+>     4 → 3 is a coded refusal, never a silent alpha drop. `PointLight::color` is `[f32; 3]`, so the
+>     RGBA-4 `#FFB35CFF` this sketch used to carry was a bake error; the 6-digit form **`#FFB35C`**
+>     is now written above. This is a drift-reduction correction of the same kind as `power`.
+>   - **Transfer function:** a property of the destination field, not the literal. `PointLight::color`
+>     is documented LINEAR (`boyko_render/src/light.rs:309-310`), so the bake applies the **sRGB
+>     EOTF**; a `u32` STRAIGHT-RGBA8 UI field gets the **identity**. Carrying raw bytes into the
+>     linear field — what this sketch's earlier form implied — is wrong by **1.557× on green and
+>     3.371× on blue** for this very colour.
 > - ⚠ **Open ballot GB-5 — `position` on `PointLight`.** `light_reconcile` DERIVES `position` from
 >   the entity's `GlobalTransform`, so whatever a scene authors into that field is overwritten. The
 >   **ui** profile already rules that engine outputs are undeclarable (bake error); GB-5 rules

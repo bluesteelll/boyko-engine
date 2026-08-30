@@ -41,9 +41,59 @@ record; engine claims were verified line-by-line in this checkout).
   The profile picks the root schema and the lowering — nothing else. Rejected: three dialects.
 - **KDL-shaped node model** (`name positional key=value { children }`) + `/-` slashdash (comment
   out one component/child — the most frequent scene edit). Literals are engine-native (`Vec3`,
-  quaternion, `#RRGGBBAA` → straight-RGBA8, `Px/Pct/Stretch/Auto`, RON-style enums). **Type is
+  quaternion, `#RRGGBBAA` / `#RRGGBB`, `Px/Pct/Stretch/Auto`, RON-style enums). **Type is
   always dictated by the target Rust field** — the type-directed rule `.ui` already proved; the
   YAML "Norway problem" class is inexpressible, not diagnosed.
+
+- **Colour: the transfer function belongs to the DESTINATION FIELD, not to the literal**
+  *(ballot **GB-2** RESOLVED 2026-08-30 by standing rule; full body and the measurements in
+  [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29)*. A hex literal is display-referred
+  8-bit; where it lands decides what happens to it, and the GK-4 field table declares which. Three
+  carrier classes exist in the engine and they disagree, so one rule for the literal was never
+  available:
+  1. **LINEAR float colour** (`PointLight::color` and the other light colours,
+     `boyko_render/src/light.rs:289-360`, all `/// LINEAR rgb color` under `:114` *"All radiometric
+     values are LINEAR"*; `MaterialGpu::base_color`/`emissive`, `material.rs:51-69`) → **the sRGB
+     EOTF is applied at bake.**
+  2. **8-bit encoded RGBA** (`UiBackground::color`/`border_color`, `boyko_ui/src/components.rs:220-223`;
+     `UiText::color`, `text/components.rs:46-47`) → **the identity**, because source and destination
+     are the same space. Measured: decode-then-re-encode drifts **0 of 256 bytes**, so the uniform
+     rule changes no shipped UI colour. Note that "STRAIGHT RGBA8" in those doc comments means
+     NON-PREMULTIPLIED (`components.rs:211` names `premultiply_rgba8` as the next step), not
+     "undecoded" — the phrase says nothing about a transfer function.
+  3. **Device-encoded packed** (`ParticleEffect::color_keys`, `particle_effect.rs:120-143`, byte
+     order `0xAABBGGRR`) → **a coded `GA####` bake refusal.** Its own doc records two shipped
+     presets authored wrong by exactly the `0xRRGGBBAA` habit, *"and neither was caught by
+     anything"*; Gaia does not become the fourth entrance to that mistake.
+
+  Rejected: raw bytes into a linear field — wrong by up to **12.92×** (byte 3) and **0.287**
+  absolute (byte 136), and **1.557× / 3.371×** on green/blue for the corpus's own `#FFB35CFF`, a
+  hue shift no consumer attributes to the baker. Also rejected: one global "always decode", which
+  corrupts every UI colour in the opposite direction.
+  ⚠ **Fixture constraint, and it is load-bearing: the two routes agree at exactly two points, byte
+  0 and byte 255.** A colour fixture written with `#FFFFFFFF` or `#000000FF` is a gate that cannot
+  fail. Mid-domain only; `128` (raw `0.501961` vs decoded `0.215861`) is the recommended witness.
+
+- **Colour arity is checked against the target's arity, mirroring the shipped Aether rule.**
+  Widening 3 → 4 supplies alpha `1.0`; **narrowing 4 → 3 is a coded refusal, never a silent alpha
+  drop** (the silent drop is Unity's class, banned by name in §Inheritance below). Blame lands on
+  the literal's own span. The precedent is in-tree and shipped: `ColorLit`
+  (`crates/aether_lang/src/parse.rs:1177-1213`, `expand.rs:891-905`) does exactly this, down to
+  putting the error on the tuple *"because neither the key nor any single component is the thing
+  that is wrong"*. Consequence: `#RRGGBB` is the 3-component spelling — an ADDITION to an
+  illustrative literal list, not a reopen (the one list this corpus closes says *"the list is
+  exhaustive"*, and it is §The logic line's, not this one).
+
+  ⚠ **FLAGGED FOR THE OWNER, 2026-08-30 — this ruling was delegated, and TWO independent reviewers
+  both read the `#RRGGBB` clause as widening a ratified surface rather than annotating an
+  illustrative one.** The ruling's ground for treating it as an addition is stated above and is not
+  frivolous: the corpus marks exactly one literal list as closed, and it is a different list. But a
+  delegated ruling that exempts itself from the reopen bar **on its own reading of which list it
+  touches** is settling a fork by proximity, which is the defect this whole ballot list exists to
+  prevent. **The question put to the owner is narrow:** does adding a 3-component `#RRGGBB` spelling
+  beside the ratified `#RRGGBBAA` count as a reopen requiring AIR-10's trigger-and-measurement bar?
+  Everything else in GB-2 — the sRGB decode at bake, verified against every colour-typed field —
+  stands regardless of the answer and is not reopened by this mark.
 - **`.ui` is absorbed, not coexisted with.** It already violates "never a second format" (own
   version constant, an inverted float rule, a printer losing 10 of 19 components under a gate
   structurally blind to the loss, a vocabulary that cannot express a visible pixel). What survives
@@ -65,7 +115,8 @@ Allowed (the list is exhaustive): native literals · closed records against the 
 key = authored-span error; CUE-closedness without the lattice, free because the schema is a known
 type) · defaults + a **closed priority ladder** `base < variant < tuning < debug` (named layers,
 never free numbers — the `!important` race; two writes of one field on one layer = error with both
-files; bake is order-independent and byte-identical in any file order) · typed templates with
+files; bake is order-independent and byte-identical in any file order — and see §Layers and depth
+below for what the ladder does NOT rank) · typed templates with
 declared named holes expanded over the typed AST — never text substitution (Paradox `$P$` and SC2
 `^token^` are the counter-precedents); `abstract` erased by bake (RimWorld) · `for` over literal
 lists and integer ranges with `if` guards and `let`; no functions, no recursion (CUE and Dhall
@@ -86,6 +137,42 @@ beside its own fixture rather than in prose here, so the value and its guard can
 The expansion-steps axis carries the loop-refusal wording
 ([PENDING](PENDING-SYNTAX-PLAN.md) §Tier 2, the `for … if …` clause) as its diagnostic. The
 fixture set is mirrored into G4's Gate column in CAMPAIGN.md.
+
+### Layers and depth — two axes, resolved in that order
+
+*(Ballot **GB-1** RESOLVED 2026-08-30 by standing rule; body in
+[`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29. The ladder above is untouched — no rung
+added, removed, renamed or reordered.)*
+
+- **A template EXPANSION occupies NO ladder layer.** It is one step on the **inheritance-depth**
+  axis, which this file already carries separately: *single parent, no diamonds*; *a patch target
+  resolves against the immediate base*; and `template depth` as one of the four bake budgets above.
+  A template application ranks exactly where `extends` ranks — **below the applying node's own
+  writes, at the same layer**.
+- **Resolution is depth first, then ladder.** Within one layer a node's own write beats what it
+  expanded; across layers the flattened node from the lower layer loses field-wise to the higher.
+- **An UNLABELED write occupies `base`** — the layer whose name already means "the thing itself",
+  and the bottom, so authored content stays overridable by every pack above it.
+- **The two-writes-one-field error therefore means same DEPTH and same LAYER.** This is what keeps
+  the commonest authoring act in the language — apply a template, override one field — from being a
+  bake error, which is finding **K2**, now dissolved rather than diagnosed.
+
+**Rejected: a ladder rung for expansion** (`template < base < …`). Not a taste call — it is not
+expressible. `template depth` is a **budgeted** quantity, and a budget bounds something otherwise
+unbounded: a template applying a template needs one rung per level, and a closed four-name enum
+cannot carry an unbounded count. It would also break the ladder's closure, which AIR-10 protects.
+**Rejected: an implicit fifth "unlabeled" rung** — an unranked write makes *which write won* a
+computation over file order, which turns G4's own `bake(files) == bake(shuffle(files))` gate either
+red or vacuously green.
+
+**Recorded, deliberately NOT decided here:** in a non-`base` pack every line must repeat
+`layer=tuning`, and a forgotten `layer=` lands silently at `base`. A file-level layer default is the
+candidate cure and is a **grammar** question owned by **G4**.
+
+**Spelling-independent:** the ruling is about precedence, not words. It holds under either **GB-4**
+option and under whatever anchor the template-application fix takes (PENDING Tier 1 proposes
+`apply`). It is scoped to **template** expansion; whether a **bundle** expands at all is **F10**,
+the owner's, and untouched — if F10 rules "expand", the depth rule applies to it unchanged.
 
 **References to Aether/engine items are by NAME, resolved by bake; unresolvable = bake error.**
 Components by mandatory explicit `stable_name` (bake REFUSES the default module-path name — it is
@@ -190,32 +277,54 @@ The answer is already shipped and gated at zero allocations in this repo; Gaia g
    - **Untracked `Query<&mut T>`.** Ground: `&mut T` stamps no change tick, so a sink written
      through it is invisible to every downstream `Changed<T>`. Untouched by any rung — this row
      stands on its own regardless of what happens to the two below.
-   - **`Or<(Changed<A>, Changed<B>)>` over dense.** Ground as recorded (2026-08-28): the `Or`
-     filter does not override the dense hooks, so the arm is silently never true.
-     ⚠ **Superseded-by note (dated 2026-08-29):** this is exactly the defect **Aether rung R0 /
-     backlog KE1** exists to fix. ⚠ **Open ballot GB-9** — does the emission ban SURVIVE the kernel fix:
-     (a) keep it, with a stated ground that is not the fixed defect (D4's coupling is the
-     candidate ground and must be cited if this option wins), or (b) delete it with a record of
-     why it existed. **Decide before Aether rung R0 lands**
-     ([`../aether-v2/CAMPAIGN.md`](../aether-v2/CAMPAIGN.md) §Rung ladder). Blocks G7's codegen rules.
-     Either way, the red fixture must assert that the **GENERATOR does not emit the shape** — a
-     fixture that instead asserts the kernel's behaviour goes green on that R0 commit and stops
-     guarding anything, without anyone editing it.
-     The coupling is recorded here, on the Gaia side, precisely because a kernel-side fix would
-     otherwise never prompt anyone to revisit this line; the Aether R0 / KE1 rung note owes the
-     matching back-pointer.
-     ⚠⚠ **The back-pointer is now written** — [`../aether-v2/KERNEL-BACKLOG.md`](../aether-v2/KERNEL-BACKLOG.md)
+   - ~~**`Or<(Changed<A>, Changed<B>)>` over dense.**~~ **DELETED 2026-08-30 by ballot GB-9's
+     ruling, option (b) — with the record of why it existed, which is what option (b) required.**
+
+     **Why it existed.** Ground as recorded 2026-08-28: the `Or` filter did not override the dense
+     hooks, so a dense arm was silently never true. That was the shipped kernel's real behaviour;
+     the ban was the correct call against it, and it is the line that made a *kernel* defect visible
+     to the *data* campaign at all.
+
+     **Why it goes.** Its ground is fixed and gated — Aether rung **R0** / backlog **KE1** landed
+     2026-08-29 (`crates/boyko_ecs/tests/ke1_or_dense_blindness.rs`, **8/8 green** on 2026-08-30, 7
+     of 8 red before the fix); `impl_or_filter_tuple` now folds `HAS_DENSE` and forwards
+     `resolve_dense` per arm. Option (a)'s only named candidate ground — **D4's coupling** — was
+     measured and does **not** survive contact: **D4 reserves the Aether *surface* `or(...)`, while
+     this ban governs *generated code*, and this document's own ratified **GN2** (item 4 above)
+     rejects "bake emits Rust into the game build"**. A ban on a shape the generator cannot emit,
+     grounded in a reserve on a surface the generator does not write, is a rule with no subject.
+     ⚠ **And the ground could not be moved to KE13 either**, which is the answer a careless ruling
+     would have reached: `Or` folds `NEEDS_CHANGE_DETECTION` over its members and
+     `EcsMaster::query<D, F>()` opens with `const { eval_query_no_change_detection::<D, F>() }`, so
+     `Or<(Changed<A>, Changed<B>)>` **cannot reach a `QueryView` at all** — KE13 is a
+     `QueryView::get`/`get_mut` defect over a dense `With`/`Without`, a different shape.
+
+     **What replaces it, so the deletion is not a loss.** The hazard this row aimed at is stated
+     better by the **third row below** — a bind source or change-gate over a dense (or bitset)
+     component — whose ground (`any_changed_since` / `get_component_changed_tick` blind to dense,
+     Gaia **GK-2**) is **still live and unfixed in the tree**. This row was always the weaker
+     statement of the same hazard: aimed at one filter shape instead of at the storage kind. The
+     fixture discipline the ban carried is **kept and re-aimed onto that row** — the red fixture
+     asserts the **GENERATOR does not emit a change-gate over a non-signature storage kind**, which
+     cannot go green on a kernel commit, the exact failure this list warned about.
+
+     **Filed to G7's codegen rules rather than dropped** — deleting a ban must not delete the
+     knowledge. If a generator ever does emit `Or` over dense, these are the shapes with **no
+     oracle**, per R0's own landing note: `Query<Entity, Or<..dense..>>` (the empty-include branch),
+     `Added<Dense>` inside `Or`, arity > 2 with more than one dense arm, and **KE13** on the point-lookup
+     path. `par_iter` / `for_each_chunk` need no rule: they now **compile-refuse** a dense-armed
+     `Or`, which is loud, not silent.
+
+     **Cross-links, kept because the coupling worked.** The back-pointers this line asked for were
+     written and did their job — [`../aether-v2/KERNEL-BACKLOG.md`](../aether-v2/KERNEL-BACKLOG.md)
      KE1, [`../aether-v2/CAMPAIGN.md`](../aether-v2/CAMPAIGN.md) R0, and the two Aether-side twins
-     of this ban ([`../aether-v2/DECISIONS.md`](../aether-v2/DECISIONS.md) `D4` and
-     [`../aether-v2/CONSTRUCTS.md`](../aether-v2/CONSTRUCTS.md) §`system`) all cite GB-9.
-     **And the deadline has expired, unanswered: R0 LANDED 2026-08-29 with GB-9 still open**
-     (KERNEL-BACKLOG KE1 reads "✅ LANDED (R0, 2026-08-29)"; the red-first oracle is
-     `crates/boyko_ecs/tests/ke1_or_dense_blindness.rs`). GB-9 is therefore now a ballot whose
-     **original ground can no longer be observed in the tree** — the option-(a) answer must state a
-     ground that was never the fixed defect, and the option-(b) record must be reconstructed from
-     this line rather than from a reproducible failure. **Nothing here decides it; the ballot is the
-     owner's and remains open.** This is exactly the outcome the deadline existed to prevent, and
-     recording it is the only remaining honest move.
+     ([`../aether-v2/DECISIONS.md`](../aether-v2/DECISIONS.md) `D4`,
+     [`../aether-v2/CONSTRUCTS.md`](../aether-v2/CONSTRUCTS.md) §`system`). ⚠ **The deadline
+     ("decide before R0 lands") did expire unanswered** — R0 landed with GB-9 open — so this ruling
+     reconstructs the record from prose rather than from a reproducible failure, and says so. That
+     is the cost the deadline existed to avoid, and it is recorded rather than smoothed away.
+     Full body, measurements and rejected alternative:
+     [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29.
    - **A bind source on a dense (or bitset) component.** `any_changed_since`
      (`boyko_ecs` `component_api.rs:403`) resolves per-archetype pools, and non-signature storage
      owns none (`archetype.rs:389-395`), so the gate is **never true** — the sink never updates and nothing is
@@ -233,9 +342,97 @@ The answer is already shipped and gated at zero allocations in this repo; Gaia g
    expected value; red-first by dirtying exactly one source, after which both counters move.
    Wall-clock delta-subtraction is not falsifiable at this scale and cannot say WHICH work
    disappeared. AIR-12 is cited here as the **precedent for counts-over-exit-code**, not as an
-   existing ruling over a runtime bench — no such ruling exists. ⚠ **Open ballot GB-7**: whether a
-   wall-clock companion is kept beside the count gate, and at what tolerance / run count /
-   noise floor.
+   existing ruling over a runtime bench — no such ruling exists.
+
+   **GB-7 RESOLVED 2026-08-30 by standing rule: NO wall-clock companion.** The count gate stands
+   alone. The ground is not "a clock is noisy" — it is that a clock does not measure this gate's
+   subject, and that was established at source and then measured:
+   - `ui_bind_discovery` (`boyko_ui/src/binding/bind_system.rs:75-89`) makes ONE call, and
+     `dynamic_bound_ids` is a **deduplicated set of component TYPES** (`register_bound_id`,
+     `:56-60`). `ui_bind_apply` (`:98-105`) returns immediately when `!dirty`, so a still frame is
+     discovery only. **The binding count is not an input to the timed loop**: 200 or 2000 bindings
+     over the same three types give the same id set and the same scan.
+   - Measured at HUD scale (40 archetypes / 3 types / 200 rows; medians of 60 × 2000-call batches,
+     two runs agreeing to <1%): the still frame is **332 ns**, and it moves **+0%** for 10× the
+     bindings, **+8%** for 2× archetypes, **+46%** for 5× archetypes, **+82%** for 2× rows and
+     **+101%** for 2× bound types. A threshold on that fixture tracks everything the fixture does
+     not pin and nothing its own title names.
+   - `Instant::now()`'s median step here is **100 ns** — the whole still frame is ~3.3 ticks, with a
+     15-25× single-call tail (median 200-300 ns, max 4600-5800 ns). The only form reaching ±1.7%
+     across processes times **200 000** frames, which is a microbenchmark of `any_changed_since` —
+     **GK-2's** subject, not G7's — and even that spread ranged 36%-83% across runs: the noise floor
+     is not a constant.
+   - The red-first delta this would have to resolve is **0 → 1 sink write**, at a single-frame
+     signal-to-noise of **0.05-0.50**, never above 0.5. The count gate resolves it exactly, with no
+     instrument. **No honest tolerance exists to quote**, and a loose one (e.g. "under 1 ms",
+     3000× the measured cost) is a gate that cannot fail — worse than no clock, because it is
+     counted as coverage.
+
+   **When a clock legitimately returns:** over the **scan itself**, with archetype count, bound-type
+   count and row count pinned and the number reported per row rather than per frame. That is the
+   bench **GK-2**'s design pass needs to justify a per-column tick, and it is not a companion to
+   this gate.
+
+## Census discipline — ballot GB-8, ruled 2026-08-30 [delegated]
+
+The entry carries the ballot's id, as the Aether log does for its sequencing rulings: this is a
+**precedent about gates**, not a language line, and it touches no ratified item.
+
+**GB-8. (1) No per-site waivers, at any of the four censuses, ever. (2) The AIR-id census widens to
+all of `docs/` and lands at G0. (3) The LINK census is a SEPARATE deliverable and lands at Aether
+R8.**
+
+*Measured first, because the ballot's cited precedent is not this tree's number.* `188 of 302`
+appears in four corpus files and in the census test's doc comment, and **no in-tree gate produces
+it** — `tests/internal_docs_anchors.rs` prints neither number. Run live (`cargo test -p boyko-engine
+--test internal_docs_anchors -- --nocapture`, 2026-08-30, 5 passed): **735 anchors checked, 116
+waived** — `ARCHITECTURE.md` 6/0, `FEATURE_MAP.md` 222/7, `SYSTEMS.md` 330/20,
+`MESHLET-VIRTUAL-GEOMETRY-PLAN.md` **177/89**. The aggregate is 15.8%, not 62% — **and the precedent
+survives stronger, not weaker**: the waiver did not spread, it concentrated **entirely** in the one
+document admitted under the allowance, which now waives **50.3%** of its anchors, and the test's own
+head says a waived anchor keeps *"neither shape nor identity"*.
+
+*The census that landed at `01a4436e` is not one scope but four.*
+[`tests/gaia_g0_citation_census.rs`](../../tests/gaia_g0_citation_census.rs), 4 tests, green and
+non-vacuous when run: the **AIR** census over `docs/gaia` + `docs/aether-v2` (18 definitions, 119
+citations across 13 files); the **KE/KM** census **already corpus-wide** over all **352** markdown
+files under `docs/` (16 rows, 111 citations); the retired-form census over the same 352 under a
+narrowed predicate (34 backlog-referencing lines, 0 offenders); the staleness census over the 1 file
+marked `ratified-stale`. **None carries a waiver list.**
+
+*Widening the AIR census is green at zero remediation*: the `AIR-##` citations outside G0's two
+directories sit in 5 files (`OPEN-QUESTIONS.md`, `ru/OPEN-QUESTIONS.md`,
+`AETHER-GAIA-REVISION-2026-08-29.md`, `FEATURE_MAP.md`, `AETHER-V1-SURFACE-REVIEW.md`) and **every id
+cited lies inside the carrier's `AIR-01..AIR-18`**, so none of them is a repair. ⚠ **The count is
+deliberately not pinned**, and the reason is this ruling's own footprint: it read 21 before the
+ruling was written and 40 after, because the ruling text cites `AIR-06` — and the in-scope count
+itself moved 114 → **119** between the two runs of this same pass. **The property is the ruling; the
+number is an observation with a timestamp.**
+
+*The LINK half had never been measured and is the half with a cost.* Over `docs/gaia` +
+`docs/aether-v2`: 146 relative markdown targets, **0 dead**. Over all of `docs/`: **1687 targets, 59
+dead across 11 files, 44 of them in `docs/AUDIT-2026-05-23.md`** (the other 15: 8 in `docs/plans/`,
+5 in `docs/archive/`, 2 in `docs/diagnostics/`). `docs/archive/` and `docs/plans/` stay **in scope** —
+excluding them would be the scope-statement route and it is not needed, since only 13 of the 59 live
+there.
+
+*Where a property is not decidable as written*, the remedy is the one this census file already
+practises and states at its own site: **narrow the predicate and print the narrowing in the failure
+message** (its retired-form test replaces ~1400 per-site dispositions with one decidable rule). A
+**scope statement** ("this census covers directory X") is not a waiver; a per-site skip list is.
+
+*Rejected, with the price.* **Per-site waivers so the whole thing lands in one commit** — priced on
+the sibling gate: 50.3% abdication in the document that used the allowance, and `check_anchor`
+returns at the waiver branch *before* the shape test, so a waived anchor that is simply **wrong**
+about which line holds the symbol still passes. **Give the whole census to R8** — a green, free,
+one-constant widening (`G0_DIRS` → `markdown_under("docs")`) waits behind R3 and R8 while the KE/KM
+half in the same file already contradicts that placement by running corpus-wide from G0 today.
+**Land id and link at one rung** — the free half is held hostage to 59 repairs, which is how a gate
+gets deferred until it is convenient.
+
+*Where it lands.* The id half becomes **work on G0**, and Aether **R8** receives the link census with
+its red-first evidence already measured. ⚠ This ruling **adds work; it does not unblock a rung** —
+G0's row is still held by owner ballots **F1** and **F4**, and neither is touched here.
 
 ## Refusals (ratified)
 

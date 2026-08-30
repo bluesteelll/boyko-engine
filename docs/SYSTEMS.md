@@ -462,13 +462,13 @@ migration paths — counted against this ledger per the Phase-14b lesson):
 | `EcsMaster::create_entity` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):137, fires 279/299 | add, insert |
 | `EcsMaster::create_entity_at` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):354, fires 461/481 | add, insert |
 | `EcsMaster::fire_despawn_hooks` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):704, fires 787/799 | replace, remove |
-| `SpawnAtCommand::apply` | [commands/spawn_at_command.rs](../crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs):113, fires 386/406 | add, insert |
+| `SpawnAtCommand::apply` | [commands/spawn_at_command.rs](../crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs):114, fires 386/406 | add, insert |
 | `InsertCommand::apply_replace_in_place` | [commands/insert_command.rs](../crates/boyko_ecs/src/ecs/core/commands/insert_command.rs):113, fires 176/201 | replace, insert |
-| `migrate_entity_insert` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):332, fires 951/970 | add, insert |
-| `migrate_entity_remove` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1032, fires 1184/1190 | replace, remove |
-| `migrate_entity_attach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1424, fires 1667/1679 | add, insert |
-| `migrate_entity_detach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1712, fires 1892/1902 | replace, remove |
-| `retag_in_place` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1976, fires 2006/2042 | replace, insert |
+| `migrate_entity_insert` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):384, fires 951/970 | add, insert |
+| `migrate_entity_remove` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1166, fires 1184/1190 | replace, remove |
+| `migrate_entity_attach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1558, fires 1667/1679 | add, insert |
+| `migrate_entity_detach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1846, fires 1892/1902 | replace, remove |
+| `retag_in_place` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):2110, fires 2006/2042 | replace, insert |
 
 The plan's original "6 fire sites" undercounted: Phase 14a also fires at the 4
 deferred-command apply sites (rows 4–7), so observers were silent for
@@ -544,10 +544,10 @@ via the POD `AddTagCommand`/`RemoveTagCommand`
 
 **Dynamic migration (D9)** — allocation-free id-keyed helpers in
 [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):
-`merged_archetype_id_dyn` (:1282) / `without_ids_archetype_id` (:1357, maps
+`merged_archetype_id_dyn` (:1416) / `without_ids_archetype_id` (:1491, maps
 `kept.is_empty()` → the EMPTY archetype — O3) / `migrate_entity_attach_ids`
-(:1424, zero-retained attach-FROM-empty is first-class) /
-`migrate_entity_detach_ids` (:1712) / `retag_in_place` (:1976, the present-tag
+(:1558, zero-retained attach-FROM-empty is first-class) /
+`migrate_entity_detach_ids` (:1846) / `retag_in_place` (:2110, the present-tag
 replace path). All three fire hooks + observers (ledger rows 8–10 in §3.6)
 with Phase-14a §3.4 reborrow confinement. `MAX_BUNDLE_ARITY` raised 8 → 16
 (:58, lock-step with the derive and `spawn_at_command.rs`).
@@ -697,8 +697,8 @@ before touching `archetype_master`) → flips the bit → fires
 whose `apply` calls `enable_id`/`disable_id` at the apply window. Cross-archetype
 migration copies the enable bits via the borrow-free two-phase snapshot in
 [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs)
-(`read_source_enable_bits` :104 PHASE-1 / `write_target_enable_bits` :129
-PHASE-2 / `fire_enable_column_alloc_bookkeeping` :162 O2), each gated by
+(`read_source_enable_bits` :137 PHASE-1 / `write_target_enable_bits` :162
+PHASE-2 / `fire_enable_column_alloc_bookkeeping` :195 O2), each gated by
 `EnableStore::is_empty` so an enable-free entity is byte-identical to before.
 
 **Query integration (D2/D4/D7)** — three shapes, all archetype-granularity cull

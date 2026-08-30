@@ -57,6 +57,39 @@ const MAX_MIGRATION_COLUMNS: usize = MAX_COMPONENTS;
 /// Phase 22: kept in lock-step with the derive macro's ceiling (16).
 const MAX_BUNDLE_ARITY: usize = 16;
 
+/// KE11 — capacity of `migrate_entity_insert`'s deferred dense-fire buffer.
+///
+/// It holds two populations that the POST window fires together: the bundle's
+/// OWN dense ids (bounded by [`MAX_BUNDLE_ARITY`]) and the CONSTRUCTED dense
+/// required ids, whose true bound is the transitive `#[require]` closure — an
+/// archetype-level concern with the [`MAX_MIGRATION_COLUMNS`] ceiling, the same
+/// distinction `required_fire`'s C2 note draws.
+///
+/// The buffer is NOT sized to that true bound. `required_fire` can afford it
+/// because it is a lazily-boxed `Option` that stays unallocated on the
+/// require-free path; `dense_fire_buf` is a plain stack array read by three
+/// windows, so sizing it at `MAX_MIGRATION_COLUMNS` would put ~8 KiB of
+/// `(ComponentId, bool)` on the frame of every insert migration to serve a set
+/// that is empirically zero or one. This is a deliberate, DIAGNOSABLE ceiling
+/// instead — twice the bundle half, with
+/// [`required_dense_fire_overflow_panic`] naming the constant and the remedy.
+const MAX_DENSE_FIRE: usize = MAX_BUNDLE_ARITY * 2;
+
+/// KE11 — cold fail-loud site for [`MAX_DENSE_FIRE`] exhaustion in
+/// `migrate_entity_insert`'s required-component constructor pass.
+#[cold]
+#[inline(never)]
+fn required_dense_fire_overflow_panic(n: usize) -> ! {
+    panic!(
+        "migrate_entity_insert: dense-fire buffer exhausted at {n} entries (ceiling \
+         MAX_DENSE_FIRE = {MAX_DENSE_FIRE}). One insert carried more dense components — \
+         the bundle's own plus its transitively-#[require]d ones — than the deferred \
+         on_add/on_insert buffer holds. Raise MAX_DENSE_FIRE in \
+         `commands/migration_helpers.rs`; it is a stack-frame budget, not a \
+         correctness bound."
+    )
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // EnableTag Step 6 — cross-archetype enable-bit migration (Decision D1 / D3 /
 // the C4 READ-before-swap ordering).
@@ -257,7 +290,26 @@ pub(crate) fn merged_archetype_id<B: Bundle>(
     // `bundle_ids` (the inserted set); a component required only by an
     // already-present source component is not auto-inserted (Bevy parity:
     // requires expand the INSERTED bundle, not the resident archetype).
+    //
+    // KE11 — the required half needed the SAME non-signature screen the two
+    // loops above already do, and for a sharper reason than they have. A dense
+    // required id in `combined` mints a PHANTOM entry in the target's retained
+    // `component_ids` with no pool behind it, and `migrate_entity_insert`'s
+    // Step-1 retained-copy loop iterates exactly that list and resolves
+    // `src.get_pool(cid)` UNSCREENED. Reachable sequence: spawn a require-dense
+    // bundle (the phantom lands in the spawn archetype, which retains it per D0),
+    // then insert a SECOND require-dense bundle — the unscreened expansion re-adds
+    // the phantom to the target, Step 1 finds it in the source's ids, and the
+    // `get_pool` returns `None`. Screening here is what keeps the fix at two
+    // sites instead of moving the panic to a third `.expect`.
+    //
+    // A required dense component is NOT lost by this: it is constructed straight
+    // into its `DenseStore` by the Step-2b dense arm below, which is where a dense
+    // component lives — it never wanted an archetype column.
     component_registry::for_each_required_id_excluding(bundle_ids, |cid| {
+        if !component_registry::is_signature_id(cid) {
+            return;
+        }
         if !combined[..len].contains(&cid) {
             debug_assert!(
                 len < MAX_MIGRATION_COLUMNS,
@@ -430,7 +482,10 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     // Dense plan D2 — dense fire scratch: `(cid, newly_added)` recorded inside the
     // Phase-1 closure (the store op runs there, where `bytes` is live), read in
     // Phase 2. Empty for a table-only bundle.
-    let mut dense_fire_buf = [(ComponentId(0), false); MAX_BUNDLE_ARITY];
+    // KE11 widened this from `MAX_BUNDLE_ARITY` to [`MAX_DENSE_FIRE`]: the Step-2b
+    // dense arm appends the CONSTRUCTED dense required ids to the same buffer, and
+    // bundle arity is not their bound.
+    let mut dense_fire_buf = [(ComponentId(0), false); MAX_DENSE_FIRE];
     let mut dense_fire_n = 0usize;
     let entity_id_for_dense = entity.id();
 
@@ -607,7 +662,7 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                 let newly_added =
                     store.insert_or_replace(entity_id_for_dense, bytes, current_tick);
                 store.mark_arch_present(target_archetype_id);
-                debug_assert!(dense_fire_n < MAX_BUNDLE_ARITY);
+                debug_assert!(dense_fire_n < MAX_DENSE_FIRE);
                 dense_fire_buf[dense_fire_n] = (id, newly_added);
                 dense_fire_n += 1;
                 return;
@@ -704,11 +759,87 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         if has_requires {
             let bundle_supplied = B::component_ids();
             let bundle_id_set = &bundle_ids[..bundle_id_count];
+            // KE11 — a fresh disjoint-field borrow for the DENSE required arm. The
+            // `:599` `dense_reg` binding's last use was inside the Phase-1 bundle
+            // closure, which has returned, so NLL has released it. `dense_registry`
+            // is disjoint from `world.entity_master` (Step 5/6 below) and carries
+            // no relationship to the raw `source_ptr` / `target_ptr` slab
+            // provenance — the identical borrow shape `:599` uses in this block.
+            let required_dense_reg = &mut world.dense_registry;
             // Materialise the fire scratch lazily — only on this require-bearing
             // path. `Box::new([..])` zeroes the 4 KiB on the heap (cold path).
             let (fire_ids, fire_count) =
                 required_fire.get_or_insert_with(|| (Box::new([ComponentId(0); MAX_MIGRATION_COLUMNS]), 0));
             component_registry::for_each_required_id_excluding(bundle_supplied, |req_id| {
+                // KE11 — screen the storage kind BEFORE touching a pool. Only a
+                // Table id has one. For a table-only require set the match folds
+                // to its first arm (the 0%-gate).
+                match component_registry::storage_kind(req_id.0) {
+                    component_registry::StorageKind::Table => {}
+                    component_registry::StorageKind::Dense => {
+                        // A dense required id supplied by the bundle was already
+                        // routed to its store by the Phase-1 closure above.
+                        if bundle_id_set.contains(&req_id) {
+                            return;
+                        }
+                        // present⇒skip against the DENSE oracle. `src!()
+                        // .component_ids()` is the TABLE signature and is simply
+                        // the wrong oracle for a non-signature id: it answers
+                        // "absent" for an entity that IS a member, and the
+                        // re-insert that follows trips `DenseStore::insert`'s
+                        // debug-asserted absence precondition. The exact oracle is
+                        // the store's own `e2s` membership.
+                        if required_dense_reg
+                            .store(req_id)
+                            .is_some_and(|s| s.contains(entity_id_for_dense))
+                        {
+                            return;
+                        }
+                        let ctor = component_registry::required_ctor_for(bundle_supplied, req_id)
+                            .expect(
+                                "invariant: req_id came from the bundle's required closure, so \
+                                 a ctor exists for it",
+                            );
+                        let store = required_dense_reg.store_mut(req_id);
+                        // SAFETY (U5): `ctor` was resolved by `required_ctor_for`
+                        //   for THIS `req_id`, and `store_mut` was called with that
+                        //   same id — so the store's column carries exactly the
+                        //   layout the ctor writes. Absence was just checked
+                        //   against the store's own membership map, which is
+                        //   `insert_with_ctor`'s debug-asserted precondition.
+                        unsafe {
+                            store.insert_with_ctor(entity_id_for_dense, ctor, current_tick)
+                        };
+                        // TARGET, not source: the entity is migrating, and the D3
+                        // candidate-archetype seed must name the archetype it ENDS
+                        // in. Omitting it panics nothing — it makes a mixed dense
+                        // query silently miss this entity.
+                        store.mark_arch_present(target_archetype_id);
+                        // Route the fire through `dense_fire_buf`, NOT
+                        // `required_fire`: `required_fire` drives the Phase-2 window
+                        // that is gated by the TARGET's `ArchetypeFlags`, and a dense
+                        // id is not in the signature, so those flags say nothing
+                        // about its hooks. `dense_fire_buf` feeds the ungated POST
+                        // window at the end of this function — and the KE10 attach
+                        // loop at `:898` already applies flags for every
+                        // `newly_added == true` entry there, so this one `push`
+                        // buys the fires AND the flags with no new code.
+                        // `newly_added` is unconditionally `true`: the arm is
+                        // reached only after both present⇒skip tests failed.
+                        if dense_fire_n >= MAX_DENSE_FIRE {
+                            required_dense_fire_overflow_panic(dense_fire_n);
+                        }
+                        dense_fire_buf[dense_fire_n] = (req_id, true);
+                        dense_fire_n += 1;
+                        return;
+                    }
+                    component_registry::StorageKind::Bitset => {
+                        component_registry::required_bitset_panic(
+                            "migrate_entity_insert (required-component constructor pass)",
+                            req_id,
+                        )
+                    }
+                }
                 // present⇒skip: a required id already hosted by the source keeps
                 // its existing value (no overwrite, no construct, no re-fire —
                 // C1's "present does not fire" path). A required id supplied by
@@ -725,7 +856,10 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                 let dst_pool = tgt!()
                     .component_pools_mut()
                     .get_pool_mut(req_id)
-                    .expect("invariant: target hosts every required id (expanded archetype)");
+                    .expect(
+                        "invariant: target hosts every TABLE required id (expanded archetype; \
+                         dense is constructed into its DenseStore above, bitset is refused)",
+                    );
                 debug_assert!(
                     !dst_pool.has_row(row),
                     "required ctor pass: pool already committed row (id supplied twice?)"

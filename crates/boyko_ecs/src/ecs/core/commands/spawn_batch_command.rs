@@ -67,6 +67,7 @@ use static_assertions::assert_impl_all;
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::bundle::Bundle;
+use crate::ecs::core::bundle::bundle_column_cache::DENSE_POOL_SENTINEL;
 use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
@@ -655,6 +656,12 @@ where
                 for (entry, &pool_idx) in
                     required_missing.iter().zip(required_pool_ids.iter())
                 {
+                    // KE11: a DENSE required id carries the sentinel — it has no
+                    // archetype column. Step 5c below is its commit. For a
+                    // table-only require set this test is never true (0%-gate).
+                    if pool_idx == DENSE_POOL_SENTINEL {
+                        continue;
+                    }
                     // SAFETY (mirrors `SpawnAtCommand::apply` Step 5b; Feature 1 D5):
                     //   - `pool_idx.0 < pools.len()` — resolved at cache install
                     //     time against the same archetype (`resolve_required_missing`).
@@ -677,6 +684,57 @@ where
                             .pool_at_unchecked_mut(pool_idx)
                             .construct_at_uninitialized(row, entry.ctor);
                     }
+                }
+            }
+        }
+
+        // ── Step 5c (KE11): DENSE required-component construct-and-commit ──
+        // The Step-5b table pass skipped every sentinel-marked entry; this pass is
+        // their commit, run per row because a `DenseStore` insert is keyed by
+        // `EntityId` (there is no batch form — the free list is LIFO and each
+        // entity gets its own slot).
+        //
+        // `EntityId(start_id + i)` is this row's entity — the identical id
+        // arithmetic the dense BUNDLE branch uses in the row loop above (the batch
+        // reserved the contiguous `[start_id, start_id + n)` range). `archetype`
+        // is a raw `&mut *archetype_ptr` reborrow, disjoint from `world`'s fields,
+        // so `world.dense_registry` may be reached here while it is live — the
+        // same coexistence the dense byte path documents.
+        //
+        // NO FIRES, deliberately: `SpawnBatchCommand::apply` fires no
+        // on_add/on_insert for ANY component (the gap documented at Step 5b), and
+        // the dense bundle branch above holds to the same silence. A constructed
+        // required dense component therefore matches the batch path's existing
+        // behaviour exactly — no table/dense and no bundle/required asymmetry.
+        // `mark_arch_present` is NOT a fire and is still mandatory: it is the D3
+        // candidate-archetype seed, and omitting it makes a mixed dense query
+        // silently miss these entities.
+        //
+        // 0%-gate: `required_missing` is empty for a require-free bundle; for a
+        // table-only require set every `pool_idx` fails the sentinel test and the
+        // per-row loop is never entered.
+        if required_missing
+            .iter()
+            .zip(required_pool_ids.iter())
+            .any(|(_, &p)| p == DENSE_POOL_SENTINEL)
+        {
+            for i in 0..n {
+                let entity_id = EntityId(start_id + i);
+                for (entry, &pool_idx) in required_missing.iter().zip(required_pool_ids.iter()) {
+                    if pool_idx != DENSE_POOL_SENTINEL {
+                        continue;
+                    }
+                    let store = world.dense_registry.store_mut(entry.component_id);
+                    // SAFETY (U5): `entry.ctor` is the registry-paired ctor for
+                    //   `entry.component_id` (`RequiredEntry` pairs the two by
+                    //   construction in `build_required_plan`), and `store_mut` was
+                    //   called with THAT SAME id — so the store's column carries
+                    //   exactly the layout the ctor writes. Each `entity_id` in
+                    //   `[start_id, start_id + n)` was freshly reserved by this
+                    //   batch and is absent from every dense store, satisfying
+                    //   `insert_with_ctor`'s debug-asserted absence precondition.
+                    unsafe { store.insert_with_ctor(entity_id, entry.ctor, current_tick) };
+                    store.mark_arch_present(archetype_id);
                 }
             }
         }
