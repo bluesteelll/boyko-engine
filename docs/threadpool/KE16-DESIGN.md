@@ -165,8 +165,12 @@ stays green with no feature.
 default = []
 scheduler-trace = []
 # KE16 tournament switches -- one per candidate, mutually exclusive per axis (enforced by
-# `compile_error!` in src/lib.rs), DELETED in the same pass once the verdict lands. A shipped
-# crate carries none of them.
+# `compile_error!` in src/lib.rs), DELETED FROM THE SHIPPED CRATE in the same pass once the
+# verdict lands — but FROZEN, not destroyed. Owner ruling, 2026-09-02: a losing candidate is
+# kept as a spare, "so the code is recorded but not present in the project". The mechanism is
+# in `KE16-DESIGN-MEASUREMENT.md` Step App: one annotated tag at the last commit where every
+# candidate still builds, plus a register of what lost, by what number, and under what
+# condition it would be worth reaching for again. A shipped crate still carries none of them.
 ke16-a1 = []                 # A1: own registered deque, LIFO owner end
 ke16-a1-fifo = []            # A1: own registered deque, FIFO owner end (today's end discipline)
 ke16-a2 = []                 # A2: injector_local joins the sibling scan set

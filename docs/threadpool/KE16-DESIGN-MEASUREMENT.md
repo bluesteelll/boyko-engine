@@ -292,6 +292,36 @@ is serial and every candidate beats it):
 band on every cell and consumer; a difference beyond the band is a defect in the removal step, not a
 new datum.
 
+**Step App, first half — FREEZE BEFORE REMOVING (owner ruling, 2026-09-02).** The losing candidates
+are not destroyed. *"Do not delete the unsuitable one, leave them as a spare — so the code is
+recorded but not present in the project."* The removal commit is therefore preceded by a freeze,
+and the order is not negotiable: freeze, then remove, because after the removal there is nothing
+left to point a tag at.
+
+1. **One annotated tag, `ke16/tournament`**, on the last commit at which every candidate still
+   builds — that is, the commit whose gates Step 7 ran. ONE tag rather than one per candidate: the
+   candidates coexist in a single tree behind mutually exclusive features, so per-candidate tags
+   would all address the same commit and would falsely suggest independent snapshots. The tag
+   message carries the verdict line for each candidate and the exact feature flag that builds it,
+   so `git show ke16/tournament` answers "what was tried" without a checkout.
+2. **A register, `docs/threadpool/KE16-REJECTED.md`**, written in the removal commit. One row per
+   candidate that did not ship: what it was, in one sentence; the measurement that eliminated it,
+   with the number and the cell it was taken in; the feature flag and the tag that build it; and —
+   the column that decides whether this file is worth keeping — **the condition under which it
+   should be reconsidered**. A condition is a fact about the world that could change, not a wish:
+   "if the machine exceeds 16 hardware threads", "if the physics waves stop being latency-bound at
+   the chunk sizes the solver produces", "if defect B is ever fixed by a route other than B1". A
+   row with no such condition says the candidate is closed, and says so explicitly rather than
+   leaving the reader to guess.
+3. ⚠ **The register states its own decay, in its header, because a "spare" invites a false
+   expectation.** A frozen candidate is a snapshot, not a part on a shelf. The tree moves; within
+   months it will not apply to the current code and will not build against it. Its value is that
+   it shows HOW the thing was done and WHY it lost, at a commit where that was measured — not that
+   it can be switched back on. Any claim to the contrary is refuted by the tag's own age.
+4. The removal commit's `grep -rn 'feature = "ke16' crates` still must return nothing, and the
+   shipped crate still carries no `cfg` residue: the freeze changes what is RECOVERABLE, not what
+   is BUILT.
+
 **The physics acceptance line** for the whole pass (`KE16-DESIGN-APP.md` §11): (1)
 `in_scheduled_system < single_threaded_O5` (31.52 ms today); (2) PRIMARY:
 `in_scheduled_system − empty_schedule_control ≤ REF × (1 + band)`, where `REF` is the W-LANE
