@@ -16,8 +16,9 @@
 //!   `a*b + c` rounds TWICE. The two differ by a single ULP on FMA-capable CPUs
 //!   and would diverge per target. Every `a*b + c` here is a SEPARATE `_mm256_mul_ps`
 //!   then `_mm256_add_ps`, mirroring the scalar two-rounding sequence exactly. (The
-//!   crate also carries no `target-feature=+fma` and no `mul_add` call, so the
-//!   compiler cannot contract the explicit `mul`+`add` either.)
+//!   ISA baseline DOES include FMA since 2026-09-02, but this module emits no
+//!   `mul_add` and no fused intrinsic, and Rust never contracts an explicit
+//!   `mul`+`add` on its own — see the "FMA baseline" section below.)
 //! - **NO `rsqrtps` / `rcpps`** (`_mm256_rsqrt_ps` / `_mm256_rcp_ps`): the
 //!   approximate reciprocal/reciprocal-sqrt instructions return DIFFERENT bits on
 //!   Intel vs AMD. The normalize uses exact `_mm256_sqrt_ps` then `_mm256_div_ps`,
@@ -43,13 +44,30 @@
 //! `pointvel_x8` / `effective_mass_x8` / `apply_impulse_blend_x8`) — is written
 //! `mul_add`-FREE: every `a*b + c` is a SEPARATE `_mm256_mul_ps` then
 //! `_mm256_add_ps`, mirroring the scalar two-rounding sequence, so the SIMD bits
-//! match the scalar oracle on every target. Rust does NOT auto-contract an
-//! explicit `mul`+`add` into a single FMA (contraction needs an explicit
-//! `f32::mul_add`, which this module never calls, or a global fast-math flag,
-//! which Rust stable exposes none of), so a `+fma` build would NOT silently fuse
-//! these — but to make the no-FMA assumption a COMPILE-TIME contract rather than
-//! a runtime hope, the build is rejected outright under `+fma` (the
-//! [`compile_error!`] guard at module scope, below the doc block).
+//! match the scalar oracle on every target.
+//!
+//! # FMA baseline — the ISA has it; this module does not use it
+//!
+//! The build enables FMA. Owner ruling, 2026-09-02: the ISA baseline is
+//! `-C target-cpu=x86-64-v3`, which includes FMA, and the two `compile_error!`
+//! guards that used to reject such a build (here and in `crate::sdf_simd`) are
+//! gone. **The property that was ever load-bearing is that this module contains
+//! no fused and no approximate op — not that the CPU lacks the instruction.**
+//!
+//! An ISA bit cannot fuse anything on its own: Rust does NOT contract an explicit
+//! `mul`+`add` into an FMA. Contraction requires an explicit [`f32::mul_add`] or a
+//! global fast-math flag, and stable Rust exposes neither implicitly. MEASURED
+//! 2026-09-02 on `rustc 1.97.1` with `-C target-cpu=x86-64-v3 --emit=asm`:
+//! `a * b + c` compiles to `vmulss` + `vaddss` — ZERO `vfmadd`; `a.mul_add(b, c)`
+//! compiles to exactly ONE `vfmadd213ss`; and a slice loop `c[i] = a[i]*b[i]+c[i]`
+//! auto-vectorises to 16 `ymm` references with SEPARATE `vmulps` and `vaddps` and
+//! still zero FMA. So the twice-rounded sequence survives an `+fma` build intact,
+//! and the old guard was rejecting a build that could not have hurt us.
+//!
+//! What makes the invariant load-bearing now is a source census, not the ISA:
+//! [`tests::solver_simd_has_no_fma_or_approx_callsites`] fails the build if this
+//! file ever gains a fused intrinsic, an `rcp`/`rsqrt` approximation, or a
+//! `mul_add` call. That test is the enforcement; this paragraph is only its map.
 //!
 //! # Safety
 //!
@@ -70,18 +88,13 @@
 //! which is byte-identical to the shipped `refresh_inertia` / integrate loop —
 //! the campaign 0%-gate. The scalar kernel is also the differential-test oracle.
 
-// Decision 5 (O7) defense-in-depth: this SIMD module is written `mul_add`-free
-// (O1 integrate/inertia + O7 colored-solve `x8` helpers); reject any `+fma` build
-// so the no-FMA determinism invariant is a compile-time contract, not a runtime
-// hope. See the "No-FMA invariant" module-doc paragraph for why contraction
-// cannot actually occur on our explicit `mul`+`add` even under `+fma`.
-#[cfg(target_feature = "fma")]
-compile_error!(
-    "boyko-physics determinism requires no FMA contraction; this SIMD module is \
-     written mul_add-free and must be built without +fma. (No mul_add is emitted, \
-     so +fma would not actually contract our explicit mul+add, but the build is \
-     rejected to make the no-FMA invariant load-bearing.)"
-);
+// A `#[cfg(target_feature = "fma")] compile_error!` stood here until 2026-09-02,
+// rejecting the whole build under `+fma`. It was removed when the owner enabled
+// the `x86-64-v3` baseline, because it gated the WRONG proposition: it asserted
+// "the CPU has no FMA" when what the oracle tests need is "this file emits no
+// fused or approximate op". The enforcement moved rather than vanished — see
+// `tests::solver_simd_has_no_fma_or_approx_callsites`, the source census that now
+// fails the build on a fused/approx/`mul_add` call site regardless of ISA.
 
 use crate::math::{Mat3, Vec3};
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -518,7 +531,8 @@ fn mat3_transpose_x8(m: [core::arch::x86_64::__m256; 9]) -> [core::arch::x86_64:
 // helpers above, and is `pub(super)` so `colored.rs` (which owns `ContactColumns`
 // and the oracle `solve_color`) can call them next to the oracle. Every `a*b + c`
 // is a SEPARATE `_mm256_mul_ps` then `_mm256_add_ps` (NO FMA — the module-doc
-// no-FMA invariant + the `+fma` compile_error guard), and the op ORDER matches the
+// no-FMA invariant, enforced by the `solver_simd_has_no_fma_or_approx_callsites`
+// source census; the ISA baseline does carry FMA), and the op ORDER matches the
 // scalar source line-for-line, so the 8-lane result is `f32`-bit-identical to the
 // scalar per-lane result (Decision 2's per-lane op-identity premise).
 
@@ -1525,5 +1539,96 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// No-FMA / no-approx source census — the enforcement that REPLACED the
+    /// `#[cfg(target_feature = "fma")] compile_error!` guard removed on 2026-09-02
+    /// when the `x86-64-v3` (AVX2 + FMA) baseline landed. Mirrors
+    /// [`crate::sdf_simd`]'s `sdf_simd_has_no_fma_or_approx_callsites`.
+    ///
+    /// The guard asserted "the CPU has no FMA"; the property the bit-identity
+    /// oracles actually need is "this file emits no fused and no approximate op",
+    /// which is a source property and holds on any ISA. This test gates that
+    /// property directly, so the invariant survives an FMA-capable build.
+    ///
+    /// Why each banned item is banned:
+    ///
+    /// - `fmadd` / `fmsub` / `fnmadd` / `fnmsub` / `fmaddsub` / `fmsubadd`: every
+    ///   fused form rounds ONCE, where the scalar oracle's `a*b + c` (or `a*b - c`)
+    ///   rounds TWICE. One ULP of divergence breaks `f32::to_bits` equality against
+    ///   the scalar kernel. The whole family is listed, not just `fmadd`, because
+    ///   this module is dense in mul-then-SUB sequences too — `cross8` is literally
+    ///   `mul; mul; sub`, which is exactly what an `fmsub` would fuse.
+    /// - `rsqrt` / `rcp`: ~12-bit approximations whose refinement differs between
+    ///   Intel and AMD, so they return different bits per VENDOR, not merely per
+    ///   rounding. The quaternion normalize (exact `_mm256_sqrt_ps` then
+    ///   `_mm256_div_ps`) and the effective-mass reciprocal are the two sites a
+    ///   future edit would plausibly "optimise" into them.
+    /// - `mul_add(`: the safe-Rust route to the same single rounding. A future edit
+    ///   could reach for it in a scalar oracle helper without touching an intrinsic
+    ///   at all, which an intrinsic-only ban would never see. Matching the bare
+    ///   `mul_add(` stem catches the method form, the `f32::mul_add(` UFCS form and
+    ///   any re-export alike.
+    ///
+    /// Both 256-bit and 128-bit spellings are banned: the module is `__m256`-only
+    /// today, but a tail-handling edit is the obvious way a `_mm_` form arrives.
+    ///
+    /// Doc-comment prose naming the banned ops (this comment, and the module doc)
+    /// is allowed — only NON-comment lines are scanned.
+    #[test]
+    fn solver_simd_has_no_fma_or_approx_callsites() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("solver")
+            .join("simd.rs");
+        let contents = std::fs::read_to_string(&path).expect("solver/simd.rs must be readable");
+
+        // Match a CALL-SITE: each stem completed to a real `_ps(` invocation. The
+        // needles are ASSEMBLED from fragments at runtime so no full call token
+        // appears as a string literal in THIS source — otherwise the gate would
+        // flag its own definition line.
+        let suffix = "_ps(";
+        let widths = ["_mm256_", "_mm_"];
+        let stems = ["fmadd", "fmsub", "fnmadd", "fnmsub", "fmaddsub", "fmsubadd", "rsqrt", "rcp"];
+        let mut banned: Vec<String> = Vec::with_capacity(widths.len() * stems.len() + 1);
+        for w in widths {
+            for s in stems {
+                banned.push(format!("{w}{s}{suffix}"));
+            }
+        }
+        banned.push(format!("{}{}", "mul_add", "("));
+
+        let mut hits = Vec::new();
+        for (i, line) in contents.lines().enumerate() {
+            let trimmed = line.trim_start();
+            // Skip doc / line comments — prose may name the banned ops to document
+            // the prohibition (the module-doc and this test's own doc do exactly
+            // that). `//!` starts with `//`, so one check covers both.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            for b in &banned {
+                if line.contains(b.as_str()) {
+                    hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "no-FMA/no-approx invariant violated: solver/simd.rs has banned op call-sites \
+             (the scalar oracles in this file are the bit-identity reference; a fused or \
+             approximate op diverges from them):\n{}",
+            hits.join("\n"),
+        );
+
+        // Non-vacuity: a census that scans the wrong text passes for the wrong
+        // reason. Proving the scanner sees real intrinsic call-sites of the exact
+        // shape the needles model means an empty `hits` is evidence, not silence.
+        assert!(
+            contents.contains("_mm256_mul_ps("),
+            "census scanned {} but found no `_mm256_mul_ps(` call-site — the file moved or \
+             was rewritten, so an empty hit list proves nothing",
+            path.display(),
+        );
     }
 }

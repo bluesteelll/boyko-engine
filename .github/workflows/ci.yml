@@ -9,7 +9,29 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # `-C target-cpu=x86-64-v3` is NOT redundant with `.cargo/config.toml`, and leaving it
+  # out was a silent defect from 2026-09-02 until it was measured the same day. The
+  # `RUSTFLAGS` environment variable REPLACES `build.rustflags` and
+  # `target.<triple>.rustflags` from the config rather than appending to them (Cargo
+  # reference, "Environment variables that Cargo reads"). So every job below, which
+  # inherits this value, was dropping the engine's declared ISA baseline: measured on the
+  # gnu toolchain, `RUSTFLAGS="-D warnings"` gives 5 of 5 baseline features ABSENT.
+  #
+  # The consequence is not a slower build, it is a DIFFERENT one. Every
+  # `cfg(target_feature = "avx2")` arm compiles to nothing: boyko_physics's 8-wide colored
+  # solve, refresh_inertia, position_integrate, apply_gravity and the SDF narrowphase x8
+  # kernels, plus `sdf_simd`'s entire `o9_kernel_tests` module — which had therefore never
+  # compiled once, and whose tests had never run, until the baseline was turned on locally.
+  # Absent code cannot go red, so CI reported green over all of it.
+  #
+  # `tests/isa_baseline_census.rs` now fails loudly when the baseline does not reach rustc,
+  # so this class cannot go quiet again. If a job needs its own RUSTFLAGS, it must carry
+  # this flag too, or that census will say so.
+  #
+  # ⚠ Assumes the runner supports AVX2. GitHub-hosted `ubuntu-latest` runners are Intel
+  # Xeon (Skylake or newer) or AMD EPYC, all of which do; a runner without it would fail
+  # with an illegal instruction on the first vectorised kernel, not a build error.
+  RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
 
 # 2026-07 audit, P0 build-gate finding: EVERY job below used to run a bare
 # `cargo <cmd> --all-targets`. This workspace root is ALSO a package (`boyko-engine`,
@@ -183,7 +205,10 @@ jobs:
       # release-mode panic. Catches any regression that accidentally
       # allocates from `Arena` inside a System body. See
       # docs/PHASE-9-FORCE-ALLOC-PANIC.md.
-      RUSTFLAGS: "--cfg force_alloc_panic -D warnings"
+      # Carries `-C target-cpu=x86-64-v3` because this env REPLACES the top-level one; see
+      # the note on that value. Without it this job would silently test a scalar-fallback
+      # engine, which is not the engine being shipped.
+      RUSTFLAGS: "--cfg force_alloc_panic -D warnings -C target-cpu=x86-64-v3"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -200,6 +225,17 @@ jobs:
     # UnsafeCell interior mutation — Stacked Borrows (SB) falsely rejects it.
     # Miri retag UB (Step 1) + EntityId leak (Step 4) jointly close Phase 3a.
     # continue-on-error removed from .github/workflows/ci.yml as per Phase 3a plan.
+    #
+    # This job deliberately does NOT carry `-C target-cpu=x86-64-v3`, unlike every other
+    # job. Miri interprets MIR rather than executing machine code, so the ISA baseline buys
+    # it nothing and would only ask the interpreter to model vector intrinsics. It hides no
+    # coverage: every `cfg(target_feature = "avx2")` site in the workspace is in
+    # `boyko_physics` (`solver/simd.rs`, `sdf_simd.rs`, `lib.rs`), and this job runs only
+    # `boyko-ecs` targets, which contain none. If a Miri step is ever pointed at
+    # `boyko_physics`, add the flag here and expect the AVX2 kernels to need intrinsic
+    # support from the interpreter.
+    env:
+      RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

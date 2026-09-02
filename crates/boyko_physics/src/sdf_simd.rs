@@ -23,12 +23,30 @@
 //! NO `_mm256_fmadd*` (a fused multiply-add rounds ONCE; the scalar `a*b + c`
 //! rounds TWICE — they diverge by a ULP per target), NO `_mm256_rsqrt_ps` /
 //! `_mm256_rcp_ps` (their approximations return different bits on Intel vs AMD).
-//! Every `a*b + c` is a SEPARATE `_mm256_mul_ps` then `_mm256_add_ps`. Rust does
-//! NOT auto-contract an explicit `mul`+`add` into an FMA (contraction needs an
-//! explicit `f32::mul_add`, never called here, or a global fast-math flag stable
-//! Rust does not expose), so even a `+fma` build would not fuse these — but to make
-//! the no-FMA invariant a COMPILE-TIME contract the build is rejected outright
-//! under `+fma` (the [`compile_error!`] below).
+//! Every `a*b + c` is a SEPARATE `_mm256_mul_ps` then `_mm256_add_ps`.
+//!
+//! # FMA baseline — the ISA has it; this module does not use it
+//!
+//! The build enables FMA. Owner ruling, 2026-09-02: the ISA baseline is
+//! `-C target-cpu=x86-64-v3`, which includes FMA, and the `compile_error!` guard
+//! that used to reject such a build is gone. **The property that was ever
+//! load-bearing is that this module contains no fused and no approximate op — not
+//! that the CPU lacks the instruction.**
+//!
+//! An ISA bit cannot fuse anything on its own: Rust does NOT contract an explicit
+//! `mul`+`add` into an FMA. Contraction requires an explicit [`f32::mul_add`] or a
+//! global fast-math flag, and stable Rust exposes neither implicitly. MEASURED
+//! 2026-09-02 on `rustc 1.97.1` with `-C target-cpu=x86-64-v3 --emit=asm`:
+//! `a * b + c` compiles to `vmulss` + `vaddss` — ZERO `vfmadd`; `a.mul_add(b, c)`
+//! compiles to exactly ONE `vfmadd213ss`; and a slice loop `c[i] = a[i]*b[i]+c[i]`
+//! auto-vectorises to 16 `ymm` references with SEPARATE `vmulps` and `vaddps` and
+//! still zero FMA. So the twice-rounded sequence survives an `+fma` build intact.
+//!
+//! What makes the invariant load-bearing now is the source census
+//! [`o9_kernel_tests::sdf_simd_has_no_fma_or_approx_callsites`], which fails the
+//! build if this file ever gains a fused intrinsic, an `rcp`/`rsqrt`
+//! approximation, or a `mul_add` call. That test is the enforcement; this
+//! paragraph is only its map.
 //!
 //! # Lane isolation (R5)
 //!
@@ -38,18 +56,16 @@
 //! point (the corner's own world position) purely to keep `(b - a) / k` finite — a
 //! belt-and-suspenders measure; lanes 6,7 are never read.
 
-// Width-only AVX2 narrowphase: this module is `mul_add`-free (every `a*b + c` is a
-// separate `_mm256_mul_ps` then `_mm256_add_ps`), so the no-FMA determinism
-// invariant must hold. Reject any `+fma` build to make it a compile-time contract,
-// not a runtime hope (Rust never contracts our explicit mul+add even under +fma —
-// see the "No-FMA / no-approx invariant" module-doc paragraph for why).
-#[cfg(target_feature = "fma")]
-compile_error!(
-    "boyko-physics SDF narrowphase determinism requires no FMA contraction; this \
-     SIMD module is written mul_add-free and must be built without +fma. (No \
-     mul_add is emitted, so +fma would not actually contract our explicit mul+add, \
-     but the build is rejected to make the no-FMA invariant load-bearing.)"
-);
+// A `#[cfg(target_feature = "fma")] compile_error!` stood here until 2026-09-02,
+// rejecting the whole build under `+fma`. It was removed when the owner enabled
+// the `x86-64-v3` baseline, because it gated the WRONG proposition: it asserted
+// "the CPU has no FMA" when what the CPU↔GPU bit-exactness gate needs is "this
+// file emits no fused or approximate op". The enforcement moved rather than
+// vanished — see `o9_kernel_tests::sdf_simd_has_no_fma_or_approx_callsites`, the
+// source census that now fails the build on a fused/approx/`mul_add` call site
+// regardless of ISA. Note this module only EXISTS on an `+avx2` build (it is
+// `cfg`-gated at its `lib.rs` declaration), so before the baseline landed that
+// census had never once run.
 
 use core::arch::x86_64::__m256;
 
@@ -675,28 +691,48 @@ mod o9_kernel_tests {
         );
     }
 
-    /// No-FMA / no-approx grep gate: `sdf_simd.rs` must contain ZERO `_mm256_fmadd`,
-    /// `_mm256_rsqrt`, or `_mm256_rcp` CALL-SITES (a fused/approx op would diverge
-    /// from the twice-rounded scalar by a ULP). Doc-comment prose naming them (to
-    /// document the prohibition) is allowed — only NON-comment code lines are
-    /// scanned.
+    /// No-FMA / no-approx grep gate: `sdf_simd.rs` must contain ZERO fused
+    /// (`fmadd` / `fmsub` / `fnmadd` / `fnmsub` / `fmaddsub` / `fmsubadd`), ZERO
+    /// approximate (`rsqrt` / `rcp`) and ZERO `mul_add` CALL-SITES. A fused op
+    /// rounds ONCE where the scalar leaf rounds TWICE (one ULP, and the leaf is the
+    /// SOLE CPU↔GPU oracle); `rsqrt`/`rcp` are ~12-bit approximations that return
+    /// different bits on Intel vs AMD.
+    ///
+    /// This gate became the ONLY enforcement on 2026-09-02, when the `+fma`
+    /// `compile_error!` was removed for the `x86-64-v3` baseline — so it was
+    /// widened at the same time:
+    ///
+    /// - from `fmadd` alone to the whole fused family, because the kernel is dense
+    ///   in mul-then-SUB (the CSG folds, the central-difference gradient), which is
+    ///   what an `fmsub` fuses — banning only `fmadd` left that hole open;
+    /// - to `mul_add(`, the safe-Rust route to the same single rounding, which a
+    ///   future edit could take without touching an intrinsic at all;
+    /// - to the `_mm_` 128-bit spellings alongside `_mm256_`.
+    ///
+    /// Doc-comment prose naming them (to document the prohibition) is allowed —
+    /// only NON-comment code lines are scanned.
     #[test]
     fn sdf_simd_has_no_fma_or_approx_callsites() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("sdf_simd.rs");
         let contents = std::fs::read_to_string(&path).expect("sdf_simd.rs must be readable");
-        // Match a CALL-SITE: each intrinsic stem completed to a real `_ps(`
-        // invocation (`_mm256_fmadd_ps(`, `_mm256_rsqrt_ps(`, `_mm256_rcp_ps(`). The
-        // needles are ASSEMBLED from fragments at runtime so the full call token
-        // never appears as a string literal in THIS source — otherwise the gate
-        // would flag its own definition line. Doc-comment prose is also skipped.
+        // Match a CALL-SITE: each stem completed to a real `_ps(` invocation, over
+        // both vector widths. The needles are ASSEMBLED from fragments at runtime so
+        // no full call token appears as a string literal in THIS source — otherwise
+        // the gate would flag its own definition line. The banned spellings are
+        // deliberately NOT written out contiguously even here in prose, so the
+        // self-reference holds independently of the comment skip below.
         let suffix = "_ps(";
-        let banned = [
-            format!("_mm256_{}{}", "fmadd", suffix),
-            format!("_mm256_{}{}", "rsqrt", suffix),
-            format!("_mm256_{}{}", "rcp", suffix),
-        ];
+        let widths = ["_mm256_", "_mm_"];
+        let stems = ["fmadd", "fmsub", "fnmadd", "fnmsub", "fmaddsub", "fmsubadd", "rsqrt", "rcp"];
+        let mut banned: Vec<String> = Vec::with_capacity(widths.len() * stems.len() + 1);
+        for w in widths {
+            for s in stems {
+                banned.push(format!("{w}{s}{suffix}"));
+            }
+        }
+        banned.push(format!("{}{}", "mul_add", "("));
         let mut hits = Vec::new();
         for (i, line) in contents.lines().enumerate() {
             let trimmed = line.trim_start();
@@ -715,6 +751,16 @@ mod o9_kernel_tests {
             hits.is_empty(),
             "no-FMA/no-approx invariant violated: sdf_simd.rs has banned op call-sites:\n{}",
             hits.join("\n"),
+        );
+
+        // Non-vacuity: a census that scans the wrong text passes for the wrong
+        // reason. Proving the scanner sees real intrinsic call-sites of the exact
+        // shape the needles model means an empty `hits` is evidence, not silence.
+        assert!(
+            contents.contains("_mm256_mul_ps("),
+            "census scanned {} but found no `_mm256_mul_ps(` call-site — the file moved or \
+             was rewritten, so an empty hit list proves nothing",
+            path.display(),
         );
     }
 
