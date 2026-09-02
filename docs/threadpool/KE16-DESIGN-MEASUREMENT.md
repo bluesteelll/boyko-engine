@@ -288,6 +288,38 @@ is serial and every candidate beats it):
 3. `c1` (batch spawn) not kept ⇒ `c1f` is not measured (it needs the batch push).
 4. The final configuration is `A*+B*+W*+C*`.
 
+## Precondition on every timed step: the machine must be IDLE, and the run must prove it
+
+Owner, 2026-09-02: *"if tests were run in the last hour they will need redoing, because I was
+playing Dota 2."* This box is the owner's workstation, not a bench rig. A game holds gigabytes
+resident and saturates every core, and nothing in this plan would have noticed: a contaminated
+number arrives looking exactly like a clean one.
+
+**This applies to the TIMED steps only, and the distinction is worth stating because it decides how
+much has to be re-run.** A structural verdict — does it compile, is the feature actually enabled,
+does the witness match, is a test ignored or vacuous, does a binary segfault before `main`, do two
+test-name sets differ — is indifferent to machine load and does not need re-taking. Everything that
+is a ratio of times is not, and neither is any test whose assertion is a scheduling observation
+(`cross_pool_routing`'s "a B worker ran at least one" is the measured example; its flake rate was
+taken under exactly this load and is discarded, though the reason the assertion is unsound is
+structural and stands).
+
+Therefore, for every step that reports a time:
+
+1. **Ask before running.** The tournament is not started until the owner says the machine is free.
+   This is a dependency, not a courtesy: a step re-run later costs the same as a step run right.
+2. **Record a load receipt beside every number**, in the same table: what else was running. The
+   cheapest sufficient form on Windows is the process list filtered to anything holding more than a
+   few hundred megabytes, captured immediately before and immediately after the timed region, plus
+   `available_parallelism`. A number whose before and after receipts disagree is re-taken.
+3. **The spread rule already in this document is necessary and not sufficient.** Two runs minutes
+   apart under a steady game load agree with each other perfectly and are both wrong. Agreement
+   between runs proves reproducibility, not cleanliness — the same distinction this campaign already
+   recorded about gates that re-run a published command.
+4. **State the machine's other occupants in the results file.** `KE16-RESULTS.md` carries the
+   topology (App-9) already; it carries this too, because a reader a year from now comparing against
+   a re-take needs to know what the box was doing.
+
 **Step App**: the unconditional code's numbers must match the winning feature build's within the
 band on every cell and consumer; a difference beyond the band is a defect in the removal step, not a
 new datum.
