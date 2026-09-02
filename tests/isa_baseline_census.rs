@@ -102,32 +102,78 @@ fn the_declared_isa_baseline_actually_reached_the_compiler() {
     );
 }
 
-/// The census can fail, and its own list is not empty.
+/// Features the declared baseline does NOT include, carried through the same machinery as
+/// the required ones so the instrument's negative arm is exercised rather than asserted.
+///
+/// `CLAUDE.md` puts AVX-512 behind an opt-in `cfg(target_feature)` and `x86-64-v3` does not
+/// include it, so on a correct build every entry here is absent. If one ever becomes
+/// present that is not by itself an error — but this file's negative control would then be
+/// proving nothing, and the census says so instead of passing quietly.
+#[cfg(target_arch = "x86_64")]
+const FEATURES_OUTSIDE_THE_BASELINE: &[(&str, bool, &str)] = &[
+    (
+        "avx512f",
+        cfg!(target_feature = "avx512f"),
+        "AVX-512 foundation: CLAUDE.md makes it opt-in per call site, not part of the \
+         baseline, because it is absent on every AMD part before Zen 4 and fused off on \
+         most consumer Intel parts since Alder Lake",
+    ),
+    (
+        "avx512vl",
+        cfg!(target_feature = "avx512vl"),
+        "the 128/256-bit forms of AVX-512; present only where the foundation is",
+    ),
+];
+
+/// The census can fail, its lists are not empty, and its predicate reports absence as well
+/// as presence.
 ///
 /// A census whose subject list is empty passes over anything, which is the shape this
 /// repository has measured repeatedly (an empty trybuild glob exits 0; a filter that
-/// selects no test prints `running 0 tests` and succeeds). This test pins the list's size
-/// so deleting an entry is a deliberate edit rather than a silent weakening, and proves
-/// the negative arm of the predicate works by evaluating it against a feature the baseline
-/// deliberately does NOT include.
+/// selects no test prints `running 0 tests` and succeeds). Both list sizes are pinned so
+/// deleting an entry is a deliberate edit rather than a silent weakening.
+///
+/// The negative control runs the SAME predicate over
+/// [`FEATURES_OUTSIDE_THE_BASELINE`] that the real check runs over
+/// [`REQUIRED_X86_64_FEATURES`], rather than asserting a bare `cfg!` — which would be a
+/// constant expression the compiler folds and clippy rejects, and which would in any case
+/// exercise a different path from the one under test.
 #[cfg(target_arch = "x86_64")]
 #[test]
-fn the_census_list_is_non_empty_and_its_predicate_can_report_absence() {
+fn the_census_lists_are_pinned_and_its_predicate_can_report_absence() {
     assert_eq!(
         REQUIRED_X86_64_FEATURES.len(),
         5,
-        "the ISA census list changed size; update this count in the same commit and say \
-         in the list's doc comment why a feature was added or removed"
+        "the ISA census's required list changed size; update this count in the same commit \
+         and say in the list's doc comment why a feature was added or removed"
+    );
+    assert_eq!(
+        FEATURES_OUTSIDE_THE_BASELINE.len(),
+        2,
+        "the ISA census's outside-the-baseline list changed size; same rule"
     );
 
-    // AVX-512 is explicitly NOT part of the declared baseline: `CLAUDE.md` says it is
-    // opt-in via `cfg(target_feature)`, and `x86-64-v3` does not include it. Evaluating
-    // the same predicate against it shows the check reports absence rather than always
-    // reporting presence — the positive control for this instrument.
-    assert!(
-        !cfg!(target_feature = "avx512f"),
-        "avx512f is enabled, which the declared baseline does not include. That is not \
-         itself an error, but this census's negative control now proves nothing: pick a \
-         feature the build genuinely lacks, or drop this assertion and say why."
+    // The same filter the real check uses, pointed at features that must be absent. On a
+    // correct build it selects everything; a build that selects nothing has lost the
+    // control and is told so.
+    let absent: Vec<&(&str, bool, &str)> = FEATURES_OUTSIDE_THE_BASELINE
+        .iter()
+        .filter(|(_, present, _)| !*present)
+        .collect();
+
+    assert_eq!(
+        absent.len(),
+        FEATURES_OUTSIDE_THE_BASELINE.len(),
+        "a feature outside the declared baseline is enabled, so this census's negative \
+         control no longer demonstrates that the predicate can report absence.\n\n{}\n\n\
+         That is not itself an error — a wider ISA may be deliberate. But pick features \
+         this build genuinely lacks, or delete the control and say in its place why the \
+         instrument is trusted without one.",
+        FEATURES_OUTSIDE_THE_BASELINE
+            .iter()
+            .filter(|(_, present, _)| *present)
+            .map(|(name, _, why)| format!("  - `{name}` is PRESENT — {why}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
 }
