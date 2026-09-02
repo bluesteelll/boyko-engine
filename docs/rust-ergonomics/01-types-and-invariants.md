@@ -1,4 +1,4 @@
-# §1 Types and invariants — ERG-01 … ERG-10
+# §1 Types and invariants — ERG-01 … ERG-10, ERG-47
 
 Part of [RUST-ERGONOMICS.md](../RUST-ERGONOMICS.md). Cost verdicts cite [EVIDENCE.md](EVIDENCE.md).
 Code is cited by file path and item name, never by line number.
@@ -54,6 +54,75 @@ until a shader reads garbage. The gate re-checks itself on every `cargo check`, 
 author's own wrong beliefs: EV-03 failed on the guide's own `DspBuf<1>` sketch (16 bytes, not 9),
 and the runtime-cost guard wrote `63 + 8` for `DspBuf<63>` and got `E0080` — the true padded size
 is `N.next_multiple_of(align_of::<usize>()) + size_of::<usize>()` (EV-36).
+
+**Clause 4 (added by the second sweep) — an `align(N)` attribute states WHICH of two purposes
+it serves, and the false-sharing purpose is 128 on x86_64, not 64.** Two different claims wear the
+same attribute. *Alignment FOR a line* — a SIMD load, a page, a single-writer hot block
+(`enable_store.rs`'s 64-byte page, `iters/archetype_bit_set.rs`) — is correct at 64 and merely
+wasteful at 128. *Padding AGAINST the adjacent line* — two fields written by two threads — is
+**128 bytes on x86_64 and aarch64**, because the spatial prefetcher pulls pairs of 64-byte lines;
+`crossbeam_utils::CachePadded` is 128 here, 256 on s390x and 32 on arm/mips, and it is already a
+workspace dependency used in seven files. The doc line beside the attribute says which purpose it
+serves and, for the padding purpose, states the memory delta (`192 → 384` for the modelled lane).
+⚠️ **CLAUDE.md principle 3 says "cache-line alignment (64 B)"; that number is right for the first
+purpose and wrong for the second** — an owner-facing correction, not a rule this pass can apply to
+the tree. And the runtime BENEFIT of widening 64 → 128 is NOT measured on this box (EV-81): a site
+does not widen without a row from
+`crates/boyko_log/benches/lane_padding_ablation.rs` (which today has only the padded-64 and
+unpadded arms) taken on an IDLE machine.
+
+**Clause 5 (added by the second sweep) — a type uploaded to a device also owes a NO-PADDING
+proof, and a size gate cannot give one.** `assert!(size_of::<T>() == N)` passes over padding
+bytes; padding bytes in a struct written to a GPU or an FFI boundary are uninitialised bytes the
+device reads. `#[derive(bytemuck::Pod, bytemuck::Zeroable)]` requires `repr(C)` / `repr(transparent)`
+and emits a compile-time assertion that the size equals the sum of the field sizes —
+`#[repr(C)] { a: u16, b: u32 }` fails it with "derive(Pod) was applied to a type with padding"
+while its `size_of == 8` gate passes (EV-82). `bytemuck` with `derive` is already in the workspace
+`Cargo.toml` and already used by `crates/boyko_render/src/gpu3d_instance.rs`, so REF-10 is
+satisfied: no `macro_rules!` can compute a field-size sum. The `const _` size gate STAYS — the two
+claims are different — and `bytemuck::bytes_of` is an ICF alias with the hand
+`slice::from_raw_parts` (EV-82).
+
+**Clause 6 (added by the third sweep) — the CONVERSE: no layout claim, no `#[repr(C)]`.** This
+rule fires ON a claim; the attribute is not free of consequence when there is none. `#[repr(C)]`
+forfeits rustc's automatic field reordering, so on a mixed-size struct it ADDS padding, and the
+cost is invisible because it never shows up in a diff — only as a larger struct.
+`{ a: u8, b: u64, c: u8, d: u32 }` is **16 bytes as `repr(Rust)` and 24 as `#[repr(C)]`** (EV-100).
+The habit survives because on a single-`u32` fixture the two are equal, i.e. it is free exactly
+where it also states nothing — and every such site weakens the signal at the sites where the
+attribute IS load-bearing. Census: **230 `#[repr(C` sites across 71 files under
+`crates/boyko_ecs/src`**; 30 carry a `const _` gate or an `offset_of!` within twenty lines, 118
+are inside a `#[cfg(test)]` module, 82 are neither.
+*Before* — `crates/boyko_ecs/src/ecs/core/iters/query/state.rs`: `CompA` … `CompD`, four
+single-`u32` test fixtures, and `TagA` / `TagB`, two ZSTs, all six carrying `#[repr(C)]` and
+stating nothing — in a module where `P`, three screens away, IS byte-viewed and needs it.
+*After* — the attribute goes where the claim is; `P` keeps it, the six lose it.
+*Exception* — a `#[repr(C)]` on a type that is `#[derive(Pod)]`, FFI-passed, byte-viewed, or
+compared field-by-field against a shader struct is a claim even when no `const _` sits beside it;
+the doc line is what says so, and clause 5 is what proves the no-padding half. This is a SHOULD,
+not a MUST: the classification above is mechanical only for the `#[cfg(test)]` third.
+
+**Clause 7 (added by the third sweep) — an EMBEDDED blob's alignment is a wrapper type, and a
+loaded file is VALIDATED, never transmuted.** `include_bytes!` yields align 1, so a cast to `&[T]`
+is UB at an address the type system never saw. The positive design REF-27 does not give:
+`#[repr(C)] pub struct AlignAs<B: ?Sized, T> { _align: [T; 0], bytes: B }` forces the blob to `T`'s
+alignment (**align 4 for the `u32` witness against align 1 unwrapped, `offset_of!(bytes) == 0`** —
+EV-101), a `check_alignment::<T>()` validates the ADDRESS before any cast, a magic word pins
+endianness, and ids are range-checked ONCE into a `Result`. The separating principle, which is the
+load-bearing half: **logical validity is not a memory-safety invariant** — a corrupt or
+version-skewed file must be a WRONG ANSWER (`Err(BadMagic)`, `Err(OutOfRange)`), never UB, so no
+loaded id may reach a `get_unchecked`. That is the other side of ERG-03's "a deserialised proof is
+a forged proof".
+*Before* — `crates/boyko_serialize/src/{load.rs,save.rs}` and
+`crates/boyko_ecs/src/ecs/core/serialize/wire.rs`, whose "validate, never transmute blindly" (C3)
+contract is prose across three module headers, and whose loader copies rather than views.
+*After* — the wrapper plus one `check_alignment` at the load boundary; the Gaia bake pipeline
+(text → bake → binary) and the committed `.spv` tables are the sites this is for.
+⚠️ *The codegen half of this claim was REFUTED and the clause is narrowed accordingly* — a
+per-element `read_unaligned` walk over a 4096-byte table VECTORISES on 1.97.1 at `v3` (62
+instructions, 13 `vpaddd`) just as the validated `&[u32]` view does (71 instructions, 13
+`vpaddd`). The validated form costs nine instructions ONCE per load, not per element, and buys the
+SAFETY property, not speed. Do not adopt it for a number.
 
 **Verified.** EV-03: 38 gates compiled in the release profile emit no code; a wrong one is
 `E0080`. Const evaluation precedes codegen, so the generic-body form emits nothing either.
@@ -207,6 +276,31 @@ as a refusal.
 
 ---
 
+**Clause 5 (added by the second sweep) — an index newtype is `u32`, never `usize`.** An id that
+indexes a table cannot exceed the table's length, and the width multiplies through every handle,
+relation edge, command payload and `Option<Id>` the kernel stores.
+`crates/boyko_ecs/src/ecs/identifiers/primitives.rs`'s `define_id!` emits `pub struct
+$name(pub usize)` for nine ids and `pub type Generation = usize` twenty lines below, while
+`boyko_utils` spells the same generation `u32`. Measured (EV-79): `Option<ComponentId(usize)>` is
+16 bytes against 8 for the `u32` form; a 2^20-entry table probed at golden-ratio stride runs
+**1.49–2.09× faster** when the entry halves — the class EV-59 measured at 2.55×. rustc's own
+`newtype_index!`, `la-arena`, `slotmap` and `thunderdome` are all `u32`. This is the same edit as
+REF-09's `pub` field and ERG-03's mint, and like them it is an ARCHITECTURE pass, not a
+line-by-line sweep: the guide states the width, the campaign that touches `define_id!` performs it.
+
+**Clause 6 (added by the second sweep, SHOULD) — the container is typed by its index.** ERG-02
+protects the parameter; at every `xs[id.0 as usize]` the newtype is stripped again, and nothing
+stops the archetype table being indexed with a `ComponentId` (65 such hand-unwrapped sites under
+`crates/boyko_ecs/src` by one regex). A `#[repr(transparent)] struct IndexSlice<I: Idx, T> { _m:
+PhantomData<fn(&I)>, raw: [T] }` with `impl Index<I>` closes the seam at every `[]` for about
+forty lines and no dependency (rustc_index's shape). Its `index` body IS `&self.raw[i.index()]`, so
+REF-15 — which refuses an `Index` impl that hands out a `get_unchecked` licence — does not bite.
+Measured (EV-84): 27 = 27 instructions, one diff line (the panic-location constant); the
+cross-domain index is `E0308`. A SHOULD, not a MUST, because the diff is as wide as clause 5's and
+belongs to the same pass.
+
+---
+
 ### ERG-03 — A bounded value is minted once into a private-field newtype and holding one IS the proof — of exactly the bound the mint establishes; a sink whose consumers are fixed at construction is written through a handle only the registration mints; the hot path indexes with a plain `[]`
 
 **Binding:** SHOULD · **Cost:** the `unsafe fn` and its contract are deleted for free; the bounds
@@ -342,8 +436,15 @@ instructions, 0 diff lines, at 1 and 16 units; constructing the handle outside i
   `BodyEffective` rows per 8-wide cohort through `body_copy` / `body_mut` off GATHERED
   `body_a(i)` / `body_b(i)` indices, and its own comment records that the slice form "could not
   elide its panic branch" there. A per-lane bounds branch inside a gather is the one place a
-  check is not known to be free; that kernel is UNMEASURED and stays on `row_ptr` under ERG-07
-  shape 2 / ERG-24 case (a) unless a measurement at that site says otherwise (OPEN 9).
+  check is not known to be free; that kernel is UNMEASURED **at the site** and stays on `row_ptr`
+  under ERG-07 shape 2 / ERG-24 case (a) unless a measurement there says otherwise (OPEN 9).
+  ⚠️ **Updated by the second sweep (EV-92): a lab model of that gather now points the other way.**
+  On a 64-byte column at `-C target-cpu=x86-64-v3` the safe `[]` ran at **0.76-0.79x of the
+  `row_ptr` form** — faster, three runs of three, despite thirteen surviving panic sites — and the
+  HOISTED `assert_unchecked` proposed as the compromise discharged NOTHING (thirteen panic sites
+  survived and the body grew 261 -> 371 instructions; REF-44). The lab kernel is scalar and
+  L2-resident and the tree's is 8-wide, so this does not close the item; it flips the direction the
+  measurement at the site should test first.
 - There must be no `new_unchecked` without `unsafe`, no `pub fn from_raw`, and no
   `#[derive(Default)]`; `boyko_serialize` routes through the mint — a deserialised proof is a
   forged proof.
@@ -478,6 +579,58 @@ runtime; `Option<IslandId>` in a guarded loop lost one prologue instruction.
 
 ---
 
+**Clause 4 (added by the second sweep) — the composite id: `Entity` is 8 bytes, and the
+generation's `NonZero` is what makes `Option<Entity>` free.**
+`crates/boyko_ecs/src/ecs/core/entity/entity.rs` is `{ EntityId(usize), generation: u32 }` — 16
+bytes of which 4 are pure padding, and `Option<Entity>` is **24** (rustc does not tag into the
+tail padding — a gate written as 16 failed with `E0080`, EV-79). The form is
+`#[repr(C, align(8))] { slot: u32, generation: NonZeroU32 }` with the field order
+endian-conditional: 8 bytes, `Option<Entity>` **8**, eight entities per cache line instead of
+four. It buys three things beyond the size, each of them an existing rule applied once more:
+`to_bits()` / `from_bits()` where `from_bits` returns `None` for generation 0 makes the wire form
+a mint rather than a transmute (ERG-03's "a deserialised proof is a forged proof"); a hand `Ord`
+over `to_bits()` is **4 instructions against the derived lexicographic `Ord`'s 12 with a branch**
+(EV-79), and `Entity` derives no `Ord` today; and the `NonZeroU32` niche is the ERG-04 shape-1
+absence encoding for free. `crates/boyko_utils/src/identifiers/slot.rs`'s `Slot { usize, u32 }` is
+the same 16 bytes and the same edit.
+
+**A sited After for the tagged-union row, with its measurement.**
+`crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs`'s `EntityInland { *mut Archetype, u32, u32 }`
+is the C-in-Rust list's hand-rolled tagged union; the free chain that goes with it lives in a
+SEPARATE `free_entity_ids: Vec<EntityId>` in `entity_master.rs` (a parallel data system by
+principle 0, REF-25's shape). `enum Slot { Live { NonNull<Archetype>, u32, u32 }, Dead {
+next_free: Option<NonZeroU32>, generation: u32 } }` is **still 16 bytes** — the niche is the tag
+and the chain fits in the dead slot's own bytes — and a spawn / free-all / respawn burst of 2^16
+drops from 3 alloc + 28 realloc to 2 alloc + 14 realloc (EV-93). ⚠️ `alloc_id` grows from 37 to 56
+instructions, so this is an architecture item with a measurement attached (index OPEN 10), not a
+MUST.
+
+**Clause 5 (added by the third sweep) — where the natural sentinel is `X::MAX`, the niche is at
+the TOP end and the `+1` bias disappears.** Shape 1 above stores `index + 1` in an
+`Option<NonZeroU32>` and concedes the price in its own words: the bias lives in two accessors and
+is STATED AT THE FIELD, because the stored value no longer means what its name says. But this
+tree's actual sentinel is `u32::MAX` — `ABSENT`, `NO_ISLAND`, and sixteen `X::MAX` sentinels
+across nine crates. `#[repr(transparent)] struct NonMaxU32(NonZeroU32)` storing `!v` gives
+`size_of::<Option<NonMaxU32>>() == 4` with **index 0 still meaning 0** (EV-102), so there is no
+bias to state and no accessor pair to keep in step. Use shape 1's `+1` when the absent value is
+naturally zero; use this when it is naturally `X::MAX`.
+*Before* — `crates/boyko_ecs/src/ecs/core/component/dense/entity_slot_map.rs`: `ABSENT =
+u32::MAX` with nine hand comparisons and a `debug_assert_ne!` guarding a caller who might store
+the sentinel; `crates/boyko_physics/src/resources.rs`'s `NO_ISLAND`.
+*After* — `Option<NonMaxU32>`; the `debug_assert_ne!` goes because the sentinel is not
+constructible as a value.
+*Verified* — EV-102: 4 bytes, `new(u32::MAX)` is `None`, `new(0)` is `Some(0)`; the 2^20 probe
+runs at **1.11–1.13× of the hand sentinel** under load, three runs of three, and level with the
+biased form.
+*Exceptions* — the encoding relies on `NonZeroU32`'s layout, so it owes an ERG-01 gate and a
+`get()` that is the ONLY reader, or it recreates the bias one layer down. ⚠️ **It does NOT buy a
+second niche**: `size_of::<Option<Option<NonMaxU32>>>()` is **8**, the same as
+`Option<Option<NonZeroU32>>` — the "one niche per type" exception above stands unchanged, and a
+claim to the contrary was checked and is false (EV-102). Instruction count alone favours the
+biased form (25 against 30); the decider is the bias, not the count.
+
+---
+
 ### ERG-05 — `PhantomData` is chosen from the Nomicon table, and `!Send` is pinned explicitly
 
 **Binding:** MUST · **Cost:** ZERO-COST (EV-06, EV-09) · **Guarantee level:** language
@@ -601,6 +754,24 @@ pinned by `crates/boyko_ecs/tests/compile_fail_dispatcher_token.rs` (ERG-10).
 
 ---
 
+**Clause 3 (added by the second sweep) — an FFI descriptor that holds a pointer into caller
+memory carries the borrow's LIFETIME.** A `#[repr(C)]` create-info with a `*const T` into a
+caller slice is precisely this rule's Before — a `Copy` handle whose validity lives in a comment.
+`crates/boyko_rhi_vulkan/src/ffi.rs`'s `VkDeviceCreateInfo` is bare, and its own doc says the
+`p_next` "points to a stack-local `VkPhysicalDeviceFeatures`"; the file has 72 `p_next` fields and
+the crate 398 occurrences across 29 files (counted on this checkout). Adding `<'a>` plus a `PhantomData<&'a ()>` tail leaves
+`size_of`, `align_of` and every `offset_of!` EQUAL (a lifetime has no representation — EV-85, and
+`abi_guard.rs` already owns the gate that proves it), and makes
+`let ci = mk(&local); drop(local); submit(&ci)` an `E0505` that compiles today. **This is a
+tried-and-reverted datum, not a preference:** `ash` removed its Builder API for exactly this
+reason — `.build()` discarded the lifetime and produced dangling pointers. The second half —
+`unsafe trait ExtendsDeviceCreateInfo {}` per spec `structextends` row, with
+`push_next<T: ExtendsX>` — turns a PDF table into `E0277` at zero cost (EV-85), but the impl
+table is a HAND LIST unless it is generated from `vk.xml`, and that maintenance is the decision
+the RHI owner makes, not this guide.
+
+---
+
 ### ERG-07 — A worker never receives a whole-buffer `&mut [T]`: range-partitioned work gets disjoint chunk slices; a colour-partitioned buffer gets a build view and a solve view with no slice surface
 
 **Binding:** MUST · **Cost:** ZERO-COST, structural (method absence) · **Guarantee level:**
@@ -699,34 +870,31 @@ transitions, a 4104-byte `memcpy` per step, ~190× slower.
 
 ---
 
-### ERG-09 — A kernel trait whose implementors must uphold an `unsafe` invariant is sealed, and the site says which seal
+**Clause 3 (added by the second sweep) — the constructor side of the same physics: build the
+value IN the destination.** This rule's MUST-NOT prices a large by-value move across a
+non-inlined boundary (EV-08). The producer-side spelling is
+`add_with<T>(&mut self, f: impl FnOnce() -> T)`, which reserves the row and writes `f()` straight
+into it, beside the existing `add_typed(value: T)`. Measured (EV-86) on
+`crates/boyko_ecs/src/ecs/memory/component_pool.rs`'s shape: at a 4-byte component the two are an
+**ICF alias** — nothing is lost; at a 4096-byte component with the method `#[inline(never)]` the
+by-value form emits **one `memcpy` and a `___chkstk_ms` stack probe for a 4 KB caller frame**
+while the closure form emits neither, and the by-value form keeps the probe even when the method
+is `#[inline]`. bumpalo ships `alloc_with` for the same reason ("the by-value form relies on an
+optimisation that does not always fire"). SHOULD, not MUST: in the n-push loop the two converge
+(159 against 161 instructions), so the clause fires for components large enough to matter and the
+site says which.
 
-**Binding:** MUST · **Cost:** COMPILE-TIME ONLY (EV-11) · **Guarantee level:** language
+---
 
-**Rule.** `mod sealed { pub trait Sealed {} }` in a PRIVATE module for a hard seal. If a derive
-macro must emit the impl downstream, the module is `#[doc(hidden)] pub mod sealed` and the doc
-says "a discoverability boundary, not an enforcement". A trait that carries an `unsafe`
-contract, or whose associated consts the kernel trusts, is not left open.
+### ERG-09 — merged into ERG-20 (second sweep, 2026-09-02)
 
-**Before** — `crates/boyko_utils/src/bit_mask/bit_set.rs`, `BitInteger`: public, unsealed. A
-downstream `impl BitInteger for Foo { const BITS: usize = 1000; … }` makes every
-`debug_assert!(index < T::BITS)` in `BitSet` vacuous and shifts past the width.
-
-**After** — `crates/boyko_ecs/src/ecs/core/app/plugins.rs`: `mod sealed { pub trait
-Sealed<Marker> {} }`, `pub trait Plugins<Marker>: sealed::Sealed<Marker>`. For `BitInteger`:
-`pub trait BitInteger: sealed::BitIntegerSealed + Copy + …` with one `impl
-sealed::BitIntegerSealed for u8 {}` per blessed type.
-
-**What it buys.** The safety argument of `BitSet` rests on `BITS` telling the truth; the seal
-makes that a compiler fact at no runtime trace.
-
-**Verified.** EV-11: sealed-with-marker and plain trait folded to one symbol.
-
-**Exceptions.**
-- A `pub use` of the sealed module silently unseals. With a `Marker` parameter, the supertrait
-  carries the SAME marker or the impls overlap again.
-- `crates/boyko_ecs/src/ecs/core/bundle/bundle.rs`'s first paragraph above `mod sealed`
-  describes a hard seal for a module that is `pub mod sealed` — doc-rot to delete on next edit.
+The sealing MUST — *a kernel trait whose implementors must uphold an `unsafe` invariant is sealed,
+and the site says which seal* — is now **ERG-20 clause 5**, with its `BitInteger` Before, its
+`plugins.rs` / `bundle.rs` Afters, its EV-11 verdict and both exceptions carried over unchanged.
+It was merged, not cut: ERG-20 already owns "who is allowed to establish an unsafe obligation and
+where that is written", which is the same question a seal answers from the implementor's side,
+and the guide's own precedent is ERG-21 (merged into ERG-20 for exactly this reason). The merge
+pays for one of the second sweep's two new rules — see the index's size paragraph.
 
 ---
 
@@ -765,3 +933,69 @@ further `compile_fail_*` suites under `crates/boyko_ecs/tests/` and one under
   reason). A new suite must be counted by that witness.
 - A case that fails for the WRONG reason still passes; the `.stderr` baseline pins the reason.
   `TRYBUILD=overwrite` without reading the diff blesses a regression in.
+
+---
+
+### ERG-47 — `#[derive]` on a generic type emits a BOUND on the parameter; where that bound is wrong, the impl is hand-written
+
+**Binding:** MUST for a generic tag / state / handle type whose parameter is carried only in a
+`PhantomData` · **Cost:** ZERO-COST (EV-78) · **Guarantee level:** language (the derive's expansion
+is specified); measured (codegen)
+
+**Rule.** `#[derive(Clone, Copy)]` on `struct S<R> { id: u32, _m: PhantomData<fn() -> R> }` does
+not emit `impl<R> Clone for S<R>`. It emits `impl<R: Clone> Clone` and `impl<R: Copy> Copy` —
+the "perfect derive" rustc deliberately does not do (rust-lang/rust#26925) — so the state is
+`Copy` only when the RESOURCE is, even though the state does not contain one. The same applies to
+`PartialEq`, `Eq`, `Hash`, `Debug` and `Default` on the same shape. Where the parameter is carried
+only as a marker, write the five impls by hand. This is ERG-05's neighbour and its complement:
+ERG-05 chooses the `PhantomData` ROW, ERG-47 stops a DEFAULT from undoing the choice on the line
+above.
+
+**Before** — `crates/boyko_ecs/src/ecs/core/system/params/res.rs`, `ResState<R: Resource>`:
+
+```rust
+/// `Copy` is derived because the state carries only the `ResourceId` and a
+/// zero-sized `PhantomData`; tuple states benefit from the cheap copy when
+/// destructured.                                    <-- the belief, stated verbatim
+#[derive(Clone, Copy)]
+pub struct ResState<R: Resource> { pub(crate) id: ResourceId, pub(crate) _marker: PhantomData<fn() -> R> }
+```
+
+The doc sentence is FALSE as written: `ResState<R>` is `Copy` if and only if `R` is. **Fifteen
+sites in `boyko_ecs` carry this exact shape** (a `#[derive(Clone, Copy)]` within six lines of a
+`PhantomData<fn() -> _>` field): `res.rs`, `resmut.rs`, `nonsend_res.rs`, `nonsend_resmut.rs`,
+`iters/query/data/mut_.rs`, `data/ref_.rs`, `data_is_enabled.rs`, `query/filter.rs`
+(`WithState`, `WithoutState`, `AddedState`, `ChangedState`), `filter_enable.rs` (`EnabledState`,
+`DisabledState`), `relation/filter.rs` (`HasRelationState`, `NoRelationState`).
+
+**After** — the tree already knows the answer at ONE site,
+`crates/boyko_ecs/src/ecs/core/asset/handle.rs`, whose doc says it outright: *"hand-implemented
+(not `#[derive(..)]`) for the same reason: a derive on a generic type bounds the parameter"*.
+
+```rust
+impl<R: Resource> Clone for ResState<R> { #[inline] fn clone(&self) -> Self { *self } }
+impl<R: Resource> Copy for ResState<R> {}
+```
+
+**What it buys.** A `Resource` or `Component` that is not `Copy` — a `Vec`-backed asset table, a
+`String`-carrying config — silently makes every system state that mentions it non-`Copy`, and the
+failure surfaces far away as an `E0507` in the tuple-state destructure of the param machinery,
+where nothing points at the derive. The type is the same four bytes either way; only the impl's
+bound differs.
+
+**Verified.** EV-78: **ICF aliases `dup_hand = dup_derived` and `pair_hand = pair_derived`** at
+codegen-units 1 and 16 — the copy body and the tuple destructure are byte-identical; both forms
+are 4 bytes over a non-`Copy` `R`; `assert_copy::<DerivedState<NotCopy>>()` is `E0277` and the
+hand form compiles. rust-analyzer's `la-arena` writes all five impls by hand on `Idx<T>` for the
+same reason.
+
+**Obligation.** This is exactly ERG-10's trigger — a derive can silently undo it — so the fix
+ships with `const _: () = assert_copy::<ResState<NonCopyResource>>();` beside the type (a `const`
+item, not a trybuild fixture: the property is a positive one, "still compiles", which a gate can
+carry more cheaply than a `.stderr`).
+
+**Exceptions.**
+- Where the parameter IS stored by value, the derive's bound is CORRECT and the derive stays.
+- `Debug` is the one member of the set worth leaving derived if the parameter is `Debug` in
+  practice: a hand `Debug` that omits the type name is worse than a bound nobody trips.
+- A type that is `Clone` but deliberately not `Copy` (an owning handle) hand-writes `Clone` only.

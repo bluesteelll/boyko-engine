@@ -6,7 +6,9 @@ This section is as important as the rules, and it has two halves because the fai
 against is two-sided. **Part A** refuses techniques sold as "ergonomic and free" that COST here —
 cycles, binary size, build time, a guarantee silently deleted, or a panic silently turned into a
 wrong answer (REF-40 sits in Part A and REF-41 / REF-42 in Part B although numbered last — ids
-are stable, not positional). It is what stops a developer
+are stable, not positional; REF-43 … REF-45, added by the second technique sweep, and REF-46 … REF-49, added by
+the third, are appended at the end of Part B — of those, REF-43, REF-44 and REF-47 are Part-A
+refusals by nature and the rest are Part-B; again, ids are stable, not positional). It is what stops a developer
 "improving" a hot loop into a regression. **Part B** refuses ABSTRACTIONS that cost nothing at
 runtime and prevent no defect anyone here would hit — a name to learn and a hop to follow for
 nothing. It is what stops the rules in §1 from being applied indiscriminately, which would make
@@ -266,3 +268,107 @@ costs a re-bless on every rustc move — 23 fixtures went red at once on one bum
 glob. ERG-10's MUST is for properties an `impl`, a derive or a method can silently undo: a
 `!Send` pin, an operator added to `IdleWord`, a slice method on a solve view, a wrong-phase
 call, a downstream impl of a sealed trait.
+
+**REF-43 — `core::hint::cold_path()` in a branch whose slow arm is already a `#[cold]` fn.**
+Tempting because ERG-28 expresses coldness only at FUNCTION granularity, and a rare arm that
+cannot be outlined without a call appears to get nothing — so the in-body hint looks like the
+missing half. It is not, at the shape that motivated it. MEASURED (EV-89) on
+`crates/boyko_ecs/src/ecs/memory/component_pool.rs`'s `add_typed` growth arm, whose `grow_rows`
+is already `#[cold] #[inline(never)]`: with and without `cold_path()` the bodies are **0 code
+diff lines** at codegen-units 1 and 16 — the only cu-16 difference is the `@feat.00` / `.text`
+assembler directives — and the `callq grow_rows` sits at the same block position in both. The
+`#[cold]` on the callee already told LLVM everything the hint would. std's own doc adds the
+falsifier: it "can slow a path that is taken more often than expected". REFUSED as a rule; it is
+a per-site directive under ERG-28's measurement line like `#[inline(always)]`, and a site that
+adopts it must show a block-order or timing change the `#[cold]` callee did not already produce.
+(`cold_path` IS stable on `rustc 1.97.1` — probed, along with `assert_unchecked` and
+`select_unpredictable`; the "nightly" label one sweep gave it is wrong.)
+
+**REF-44 — A HOISTED `core::hint::assert_unchecked` on a gathered-index MAXIMUM.** The proposed
+shape was one UB promise at the top of the cohort loop —
+`assert_unchecked(max_gathered < bodies.len())` — with every per-lane `[]` left safe and its
+branch "now provably dead". It is not dead, and the promise costs. MEASURED (EV-92) on the
+`solve_color_avx2` gather shape: the safe `[]` form is 261 instructions with **13 panic sites**;
+the same form under the hoisted promise is **371 instructions with the same 13 panic sites** —
+LLVM cannot connect a recorded maximum to `a[lane]`, so nothing is discharged and the body grows
+by 42 %. Only the promise repeated PER LANE elides the checks (109 instructions, 0 panic sites),
+and at that point it is `get_unchecked` (107) with a different spelling and the identical UB on
+violation. REFUSED in the hoisted form. The per-lane form is not separately refused and not
+separately permitted: it is exactly what ERG-03 already licenses — a measurement at the site and
+a SAFETY naming the mint — with no additional guarantee, so a site that wants it writes
+`get_unchecked` and gets the same asm, or writes the safe `[]`, which EV-92 measured at
+**0.76–0.79× of the current `row_ptr` form** in that shape (index OPEN 9).
+
+**REF-45 — `ParamSet` as a rule of THIS guide.** A `ParamSet<(P0, P1)>` whose `p0(&mut self)` /
+`p1(&mut self)` accessors make two otherwise-conflicting system parameters non-simultaneous is
+free and it works: `via_set` is 110 instructions against 121 for direct field access, and holding
+`p0`'s item across a `p1()` call is `E0499` (EV-94). It is refused here anyway, on the guide's own
+deciding question. It is not a SPELLING of something the tree already writes — there is no
+`ParamSet` in `crates/boyko_ecs/src/ecs/core/system/params/`, and the conflict detector in
+`filtered_access_set.rs` can today only REJECT, so adopting it is building a scheduler feature,
+not restating an invariant. No author is on record hitting the rejection. A guide that grows by
+absorbing unbuilt features stops being a guide; this belongs in the schedule campaign's backlog
+with EV-94 attached, and returns as an ERG-06 INSTANCE if it is ever built.
+
+**REF-46 — The leak-on-panic guard for an IN-PLACE column rewrite (rustc's `flat_map_in_place`
+shape).** ERG-43 teaches the RESTORING guard; its counterpart — a guard that deliberately does NOT
+restore, because restoring mid-move is unsound and setting `len = 0` and leaking is the only
+correct unwind behaviour — is genuinely counterintuitive and is not in the guide. It is refused
+here **for want of a site, which was the outcome the sweep itself said was possible.** The three
+candidate files were read on this checkout with no build: `entity_master.rs`'s two `collect()`
+calls are both BELOW its `#[cfg(test)]` boundary and are test scaffolding;
+`migration_helpers.rs`'s one production `collect()` builds a short `Vec<ComponentId>` of retained
+ids at migration-planning time — it allocates a NEW list, it does not rewrite a column in place,
+and there is no half-moved state for a guard to be correct about; `component_pool.rs`'s
+`swap_remove` is the single-element case, which has no unwind window at all (`T: Copy`, two
+writes kept together under ERG-20). A rule whose Before does not exist is a rule nobody can apply.
+Recorded rather than dropped, because the mechanism is right and the day a column IS rewritten in
+place — the Gaia bake's load path is the plausible first one — this entry is where to look, and
+the shape is: set the length to 0 first, rebuild, `mem::forget` the guard once the buffer is valid
+again.
+
+**REF-47 — "Push ifs up and fors down" as a rule of this guide, on the strength of its named
+site.** The technique (hoist a branch above a function boundary; make the BATCH rather than the
+element the primitive) is real advice from a credible source, and the sweep pointed it at
+`crates/boyko_physics/src/systems.rs`'s AVX2 pass 2, where a per-corner `if d >= 0.0 { continue }`
+sits around an 8-wide SDF call. **MEASURED and refuted at that site** (EV-106): the compacted
+two-pass form is **171 instructions with 104 vector ops and one panic site** against the branchy
+form's **127 / 113 / 0** — bigger and LESS vectorised — and timing under load, best-of-7 × 3
+process runs, at the three penetrating-corner ratios that could decide it gives **0.96×–1.03×**,
+with no win at any ratio in any run. The reason is structural and worth stating so nobody
+re-proposes it: each surviving corner needs its OWN six-offset gradient evaluation, so compacting
+the indices does not create a wider vector op — it only adds a gather and a second loop. REFUSED
+for want of a site rather than on the merits of the idea; a site where the per-element body is
+genuinely lane-uniform would be a different measurement. The one half of the advice this guide
+already carries is ERG-35 clause 5 (`&` over `&&` where the predicate feeds an accumulator).
+
+**REF-48 — `Fn` instead of `FnMut` as a capture-restriction tool.** rustc's `unord.rs` takes
+`impl Fn(&K, &V)` rather than `impl FnMut` so the closure cannot ACCUMULATE across calls — "to
+reduce the risk of accidentally leaking the internal order via the closure environment" — and the
+tightening is free (a bound change emits nothing; EV-66 already established the scoped-closure
+form as an ICF alias). It is refused as ceremony because **the census says there is nothing to
+tighten**. Counted on this checkout: **26 `FnMut` bounds across 22 files** under
+`crates/boyko_ecs/src/ecs/core` and **2** in `crates/boyko_threadpool/src`, and essentially every
+one is a `for_each`-shaped callback whose caller legitimately mutates — `Query::for_each` and
+`for_each_chunk` (a user body accumulating), `for_each_component_bytes` /
+`for_each_data_component_bytes` (writing into the destination),
+`for_each_required_id_excluding` and `for_each_set_bit` (accumulating), `ExclusiveFunctionSystem`'s
+`FnMut(&mut EcsMaster)`. The motivating problem does not exist here either: the order-leak
+`unord.rs` guards against is hash-iteration order, and `clippy.toml` bans the map types on these
+rows. REF-32's neighbourhood — a restriction for what the surface already guarantees.
+
+**REF-49 — Nested-tuple folding in a derive as an alternative to a compile-time arity refusal.**
+ERG-01 cites `crates/boyko_ecs/src/ecs/core/system/params/tuple_impl.rs`'s
+`const { panic!("MAX_SYSTEM_PARAM_ARITY = 12") }` as its exemplar, and Bevy's
+`derive_system_param` shows the other answer: fold fields into nested tuples above the limit, so
+the user never meets the ceiling. The DISTINCTION is real and cheap to state — a compile-time
+refusal is right when the user can restructure, wrong when the macro could have restructured for
+them. It is refused because **`boyko_macros` has no derive that can hit an arity ceiling**: its
+eight derives (`Component`, `Relationship`, `RelationshipTarget`, `Resource`, `Bundle`,
+`SystemSet`, `Actionlike`, `Bindable`) all emit per-FIELD code, not a tuple type, and the word
+"tuple" appears in that crate only in `compile_error!` text about struct shape. The one place a
+ceiling is met is a bare 13-argument `fn` system, which cannot be folded because there is no
+derive to do the folding — so `tuple_impl.rs`'s `const { panic!() }` stays correct and this would
+be a clause about macros that do not exist. Recorded so the distinction is written down for the
+day a composite derive (`SystemParam`, `QueryData`) is actually built; it belongs in that
+campaign's plan, next to REF-45.

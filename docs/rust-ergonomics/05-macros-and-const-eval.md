@@ -1,4 +1,4 @@
-# §5 Const evaluation and `cfg` — ERG-29 · 31 · 33
+# §5 Const evaluation and `cfg` — ERG-31 (ERG-29 and ERG-33 both merged into it)
 
 Part of [RUST-ERGONOMICS.md](../RUST-ERGONOMICS.md). Cost verdicts cite [EVIDENCE.md](EVIDENCE.md).
 Code is cited by file path and item name, never by line number.
@@ -11,58 +11,66 @@ a compile error.
 
 ---
 
-### ERG-29 — What can be `const` is `const`: a POD config's defaults are `const DEFAULT: Self`; constructors and accessors of `Copy` value types are `const fn` taking `self`; never `..Default::default()` on an allocating `Default`
+### ERG-29 — merged into ERG-31 (second sweep, 2026-09-02)
 
-**Binding:** MUST (`const DEFAULT` for POD config; MUST-NOT the allocating functional update);
-SHOULD (`const fn` + by-value `self` on `Copy` value types) · **Cost:** identical for POD (EV-28,
-EV-50); the allocating base COSTS one malloc + one free per construction (EV-45); a wide by-value
-receiver is passed by pointer with NO copy (EV-60) · **Guarantee level:** measured
-
-**Rule.** `pub const DEFAULT: Self = Self { … };` beside a plain-data struct, `Default` delegating
-to it, call sites writing `Cfg { substeps: 2, ..Cfg::DEFAULT }`. `pub const fn new(…) -> Self`
-and `pub const fn index(self) -> usize` on ids, slots, flags, codes and math — `const` is what
-admits the value to an ERG-01 gate and an ERG-31 call-site constant; `self` on `Copy` matches the
-house macro. For a struct whose `Default` builds a `String` / `Vec` / `Box`, never override a
-field through `..Default::default()`: the base is fully constructed and the overridden field's
-default is then freed.
-
-**Before** — `let cfg = Cfg { name, ..Default::default() };` where `Default` builds a `String`;
-`crates/boyko_utils/src/identifiers/slot.rs`, `Slot`: `pub fn new`, `pub fn index(&self)` — none
-`const`, so a `Slot` cannot appear in a gate or a `static`.
-
-**After** — `crates/boyko_scene/src/camera.rs`, `Camera::DEFAULT` with `impl Default` delegating;
-`crates/boyko_ecs/src/ecs/identifiers/primitives.rs`, `define_id!`: `pub const fn new(raw) ->
-Self` / `pub const fn get(self) -> usize`; `crates/boyko_log/src/codes.rs`, `code_newtype!`'s
-`const fn policy(self)` — "the whole reason the rate gate costs nothing at the 74 sites that
-declare no damping".
-
-**What it buys.** `..Self::DEFAULT` is a constant with no base construction; a `const fn` accessor
-lets the type participate in the tree's dominant idiom (the layout gate) at no codegen change.
-
-**Verified.** EV-28: `..Cfg::DEFAULT` and `..Default::default()` on a POD fold to one symbol.
-EV-45 (counting allocator): overriding one field of an allocating `Default` costs 2 alloc + 1
-dealloc against 1 + 0 for the literal. EV-50: `const fn index(self)` and `fn index(&self)` fold to
-one symbol; the gate `assert!(Slot::new(7, 1).index() == 7)` compiles. EV-60 corrects the previous
-draft's mechanism for wide types: a 64-byte `Copy` receiver by value across a non-inlined boundary
-is passed INDIRECTLY (a pointer to the caller's value) and is instruction-for-instruction identical
-to `&self` — no `memcpy` anywhere. The copy appears only when the callee must mutate or the value
-must outlive the call (ERG-08's consuming transition, EV-08).
-
-**Exceptions.**
-- Do not contort a body to make it `const`; a function that needs trait calls stays a plain `fn`.
-- A `#[non_exhaustive]` struct forbids functional update downstream (ERG-14 clause 4).
-- A boot-time `..Default::default()` on a non-POD struct is one malloc at boot and is permitted —
-  but if a `DEFAULT` exists, use it.
+*What can be `const` is `const`* is now **ERG-31 clause 1**, unchanged in substance: `const
+DEFAULT: Self` on POD config with `Default` delegating (MUST), `const fn` taking `self` on `Copy`
+value types (SHOULD), never `..Default::default()` on an allocating `Default` (MUST-NOT), with
+EV-28 / EV-45 / EV-50 / EV-60 and all three exceptions. It was merged because ERG-29 and ERG-31
+were one rule wearing two ids — both say "make the const evaluator SEE the decision", and ERG-29's
+`const fn` accessor exists precisely so the value can appear in an ERG-01 gate and in ERG-31's own
+call-site `const`. The merge pays for one of the second sweep's two new rules; see the index's
+size paragraph.
 
 ---
 
-### ERG-31 — A per-type predicate is an associated `const` tested with `if const { T::FLAG }`, so the arm the type does not take is deleted at monomorphisation and a later refactor cannot silently make the condition a runtime load; a per-site policy is bound into a call-site `const`
+### ERG-33 — merged into ERG-31 (third sweep, 2026-09-03)
 
-**Binding:** MUST for kernel generic paths (query data, storage kind, change detection, rate
-policy) · **Cost:** ZERO-COST (EV-49, EV-61) · **Guarantee level:** language (an inline `const`
-block is evaluated at compile time — RFC 2920); arm deletion is measured compiler behaviour
+*Every illegal `cfg` / feature combination is a `compile_error!` per pair* is now **ERG-31
+clause 4**, carried whole — rule, `Before`, the `boyko_threadpool` `After`, the what-it-buys
+paragraph and all three exceptions. It was merged because this section's own title already pairs
+them (`Const evaluation and cfg`) and because both are one thesis: make the compiler SEE the
+decision, so a configuration nobody meant cannot exist at runtime. ERG-29 was merged into the same
+rule on the same reasoning one revision earlier. This merge is the PAYMENT for the third sweep's
+one new rule, ERG-48; see the index's size paragraph.
 
-**Rule.** `trait QueryData { const HAS_DENSE: bool; … }` and, in the generic body, `if const {
+---
+
+### ERG-31 — Compile-time evaluation and configuration: what can be `const` is `const`; a per-type PREDICATE is an associated `const` tested with `if const { T::FLAG }`, so the arm the type does not take is deleted at monomorphisation and a later refactor cannot silently make it a runtime load; a per-type POLICY that must bound a generic is an associated TYPE over sealed markers; every illegal `cfg` / feature pair is a `compile_error!`
+
+**Binding:** MUST for the `const DEFAULT` / allocating-functional-update halves of clause 1, for
+kernel generic paths in clauses 2-3 (query data, storage kind, change detection, rate policy) and
+for clause 4's feature switches, tournament arms and loom / miri shims; SHOULD for clause 1's
+`const fn` accessors · **Cost:** ZERO-COST (EV-28, EV-45, EV-49, EV-50, EV-60, EV-61, EV-80);
+COMPILE-TIME ONLY for clause 4 · **Guarantee level:** language (an inline `const` block is evaluated
+at compile time — RFC 2920; an associated type is resolved by trait selection); arm deletion is
+measured compiler behaviour
+
+**Clause 1 (merged from ERG-29) — what can be `const` is `const`.** MUST: `pub const DEFAULT:
+Self = Self { … };` beside a plain-data struct, `Default` delegating to it, call sites writing
+`Cfg { substeps: 2, ..Cfg::DEFAULT }`. SHOULD: `pub const fn new(…) -> Self` and `pub const fn
+index(self) -> usize` on ids, slots, flags, codes and math — `const` is what admits the value to
+an ERG-01 gate and to clause 2's call-site constant, and `self` on `Copy` matches the house macro.
+MUST-NOT: `..Default::default()` on a struct whose `Default` builds a `String` / `Vec` / `Box` —
+the base is fully constructed and the overridden field's default is then freed.
+*Before* — `let cfg = Cfg { name, ..Default::default() };` over an allocating `Default`;
+`crates/boyko_utils/src/identifiers/slot.rs`'s `Slot::new` / `index(&self)`, neither `const`, so a
+`Slot` cannot appear in a gate or a `static`.
+*After* — `crates/boyko_scene/src/camera.rs`'s `Camera::DEFAULT` with `impl Default` delegating;
+`define_id!`'s `pub const fn new` / `get`; `crates/boyko_log/src/codes.rs`'s `code_newtype!`
+`const fn policy(self)` — "the whole reason the rate gate costs nothing at the 74 sites that
+declare no damping".
+*Verified* — EV-28: `..Cfg::DEFAULT` and `..Default::default()` fold to one symbol on POD.
+EV-45 (counting allocator): overriding one field of an allocating `Default` costs 2 alloc + 1
+dealloc against 1 + 0. EV-50: `const fn index(self)` and `fn index(&self)` fold to one symbol.
+EV-60 corrects the previous mechanism: a 64-byte `Copy` receiver by value across a non-inlined
+boundary is passed INDIRECTLY and is instruction-identical to `&self` — no `memcpy`; the copy
+appears only when the callee must mutate or the value must outlive the call (ERG-08, EV-08).
+*Exceptions* — do not contort a body to make it `const`; a `#[non_exhaustive]` struct forbids
+functional update downstream (ERG-14 clause 4); a boot-time `..Default::default()` on a non-POD
+struct is one malloc at boot and is permitted, but if a `DEFAULT` exists, use it.
+
+**Clause 2 — the per-type PREDICATE, as before.** `trait QueryData { const HAS_DENSE: bool; … }` and, in the generic body, `if const {
 D::HAS_DENSE } { … }` — the kernel's own spelling (132 `if const {` lines under `crates/*/src`,
 nearly all in `boyko_ecs`). Not a
 runtime field on the storage, not a `bool` parameter, not a `match` on a tag read per row, and
@@ -99,7 +107,41 @@ to use a non-constant value in a constant`. EV-49: 39 instructions each against 
 plus the placement trap (a 2× wall-clock delta over byte-identical bodies that an unrelated edit
 removed).
 
-**Exceptions.**
+**Clause 3 (added by the second sweep) — a per-type POLICY that must appear in a
+where-clause is an associated TYPE over sealed marker ZSTs, not a set of independent `bool`s.**
+An associated `const` can be BRANCHED on; it cannot BOUND a generic. Where the kernel needs to
+refuse a whole storage class at the SIGNATURE, the policy is a type:
+
+```rust
+mod seal { pub trait Seal {} }
+pub trait StorageClass: seal::Seal + 'static { const KIND: StorageKind; }
+pub struct TableStorage; pub struct BitsetStorage; pub struct DenseStorage;   // + seal impls
+pub trait Component: 'static + Sized { type Storage: StorageClass; /* … */ }
+
+fn pool_of<C: Component<Storage = TableStorage>>(m: &EcsMaster) -> &ComponentPool { … }
+```
+
+*Before* — `crates/boyko_ecs/src/ecs/core/component/component.rs` carries `const
+STORAGE_IS_BITSET: bool = false` and `const STORAGE_IS_DENSE: bool = false` as two INDEPENDENT
+consts, so `(true, true)` is representable and is policed by the derive plus runtime `const`
+gates in `component_registry/mod.rs` — whose comments name the wrong pairing
+(`STORAGE_IS_DENSE` + `RESIDENCY = Gpu`). The runtime enum the markers mirror already exists
+(`StorageKind { Table, Bitset, Dense }`), and 35 files under `crates/*/src` reference one or the other.
+*What it buys* — the illegal pair stops being representable; the pool-less kinds are refused at
+the signature instead of resolving a pool that is not there. That is the monomorphic half of a
+recorded defect class (GK-2 / KE11 / KE13: a `ComponentPool` resolved without consulting
+`StorageKind` reads NULL as an answer). Clause 2's `if const` arm survives unchanged through
+`<C::Storage as StorageClass>::KIND`, and the seal is ERG-20 clause 5's mechanism.
+*Verified* — EV-80: **ICF aliases in BOTH instantiations** at codegen-units 1 and 16 —
+`if const { C::STORAGE_IS_DENSE }` and
+`if const { matches!(<C::Storage as StorageClass>::KIND, StorageKind::Dense) }` compile to one
+symbol; every marker is a ZST; `pool_of::<Flagged>` is `E0271`; a downstream `impl StorageClass`
+is `E0277`.
+*Scope, stated honestly* — this closes the MONOMORPHIC resolvers only. The dynamic
+`ComponentId` paths — the "caller who does not resolve at all" of KE13 — stay on the runtime
+`StorageKind` enum under ERG-14, and no type can reach them.
+
+**Exceptions (clauses 1–3; clause 4 carries its own).**
 - A predicate that legitimately depends on runtime state stays a plain `if`; do not contort a body
   to fit `const { }`.
 - Dead-arm deletion is compiler behaviour, not a language guarantee: a 0 %-gate claim still needs
@@ -109,12 +151,14 @@ removed).
 
 ---
 
-### ERG-33 — Every illegal `cfg` / feature combination is a `compile_error!` per pair; every conditional site carries the axis banner; a build-variant witness reports the configuration; a test-only substitution is a `cfg`-selected module of `pub use` re-exports
+**Clause 4 (merged from ERG-33, third sweep) — every illegal `cfg` / feature combination is a
+`compile_error!` per pair; every conditional site carries the axis banner; a build-variant witness
+reports the configuration; a test-only substitution is a `cfg`-selected module of `pub use`
+re-exports.** Binding: MUST for feature switches and tournament arms; MUST for loom / miri shims.
+Cost: compile-time only; a `pub use` re-export is a name binding. Guarantee level: language. The
+body below is ERG-33's, carried whole.
 
-**Binding:** MUST for feature switches and tournament arms; MUST for loom / miri shims ·
-**Cost:** compile-time only; a `pub use` re-export is a name binding · **Guarantee level:** language
-
-**Rule.** In `lib.rs`, one `#[cfg(all(feature = "x", feature = "y"))] compile_error!("<axis>: `x`
+*Rule.* In `lib.rs`, one `#[cfg(all(feature = "x", feature = "y"))] compile_error!("<axis>: `x`
 and `y` are mutually exclusive (<why>)")` per illegal pair. At every `#[cfg]` site of one axis the
 same banner comment (`// === KE16 A switch: ke16-a1 / ke16-a1-fifo ===`), so the arm is greppable
 and deletable as a unit. One `pub fn variant() -> String` printing the configuration — it allocates,
@@ -123,21 +167,21 @@ substitution is `#[cfg(loom)] pub use loom::sync::atomic::*` / `#[cfg(not(loom))
 core::sync::atomic::*` — never a trait object, never a runtime flag. Custom `cfg`s are registered
 in the workspace `unexpected_cfgs` table.
 
-**Before** — two features that silently combine and produce a number for a configuration nobody
+*Before* — two features that silently combine and produce a number for a configuration nobody
 meant to measure; a loom shim behind a `dyn` atomic trait.
 
-**After** — `crates/boyko_threadpool/src/lib.rs`: eleven `compile_error!` arms ("a mis-specified
+*After* — `crates/boyko_threadpool/src/lib.rs`: eleven `compile_error!` arms ("a mis-specified
 `--features` line fails to BUILD instead of producing a number …") plus `ke16_variant()`;
 `tls.rs`: the banner at each of its three conditional sites; `sync.rs`: the re-exports, with the
 list of what is deliberately NOT shimmed and why per item; root `Cargo.toml`: `cfg(loom)` and
 `cfg(force_alloc_panic)` registered.
 
-**What it buys.** This repository's recorded failure mode is a gate that could not fail; a feature
+*What it buys* — this repository's recorded failure mode is a gate that could not fail; a feature
 combination that compiles and measures the wrong thing is that failure with a number attached.
 
-**Verified.** `compile_error!` and `cfg` resolve before codegen; no runtime row exists or is needed.
+*Verified* — `compile_error!` and `cfg` resolve before codegen; no runtime row exists or is needed.
 
-**Exceptions.**
+*Exceptions* — the three that are ERG-33's own:
 - `cfg(miri)` is built in and must NOT be registered in `unexpected_cfgs`.
 - A pair Cargo already implies is legal and absent from the list; the list is edited when features
   change and deleted with the tournament.

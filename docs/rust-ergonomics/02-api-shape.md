@@ -198,6 +198,39 @@ the `String` because LLVM deleted a dead one; the rule stands on the definition 
 
 ---
 
+**Clause 4 (added by the second sweep, MAY) — one kernel BODY over a lane trait, instantiated
+at the scalar and the vector type.** This rule's yield-to line says never de-specialise a hot
+generic kernel because the monomorphisation IS the optimisation; the corollary the guide had no
+position on is the SIMD/scalar duality. Today
+`crates/boyko_physics/src/solver/simd.rs` carries **21 `_scalar(` twins beside the AVX2 bodies**,
+each a hand transcription, and bit-identity is VERIFIED after the fact by differential tests. One
+body over a `trait Lane: Copy` with `splat / add / sub / mul / min / max` — and deliberately NO
+`mul_add` — instantiated at `f32` and at an `F32x8(__m256)` newtype CONSTRUCTS the identity
+instead. Two hot instantiations satisfy REF-30, and the engine already made this exact move one
+subsystem over: `crates/boyko_shaderdsl/src/scalar.rs`'s `FieldScalar: Copy` over `f32` (the host
+oracle) and `Emit` (the HLSL printer).
+
+*Verified* — EV-87: on the AVX2 arm the generic body inside a `#[target_feature]` wrapper and the
+hand `_mm256` transcription are **87 instructions each with identical opcode histograms, zero
+`call`, zero `vfmadd`**; the scalar instantiation is **bit-identical over 10^6 random inputs**.
+*Three conditions, all measured or structural, which is why this is a MAY:*
+1. The `impl Lane for f32` must call the SAME primitive the scalar twin calls. The lab's first
+   draft wrote `if self < o { self } else { o }` for `min`, and its asm lost the
+   `vcmpunordps` / `vblendvps` pair that `f32::min` emits — a NaN difference the bit-identity
+   gate would have caught only if the gate feeds NaNs. `f32::min` / `f32::max` restored identity.
+2. `#[inline(always)]` on the generic body is REQUIRED (memchr's reason: the vector ops must be
+   compiled inside the featured wrapper), and it still owes ERG-28's measurement line — this
+   clause supplies the structural half of that line, not a waiver.
+3. The scalar instantiation stops being an INDEPENDENT transcription. Parity then tests
+   sameness, not truth, so the independent oracle must move elsewhere — for the SDF path it
+   already lives in `boyko_shaderdsl`'s `f32` host oracle, and a subsystem without one does not
+   take this clause.
+*Cost, stated* — the generic scalar body is 37 instructions against the hand twin's 29 (an
+`xmm6` spill and a 24-byte frame). On this checkout the scalar arm never ships (`x86-64-v3`
+baseline), so that is a cost on the oracle, not on the kernel; a target that ships it pays.
+
+---
+
 ### ERG-17 — `Deref` only from a buffer to its slice, or from a smart pointer / guard to the single value it owns; never from a domain newtype, a proof-carrying type or a solve view; a `Deref` with a side effect says so at the impl
 
 **Binding:** MUST-NOT (newtype / proof / solve view); the two permitted forms carry their cost in

@@ -58,6 +58,24 @@ SLOWER on an L1-resident loop — the case where reading asm alone gives the wro
 
 ---
 
+**Clause 5 (added by the second sweep) — inside a fold that must vectorise, the operator is
+`&` / `|`, not `&&` / `||`.** This rule's yield-to line already says a reduction that must
+vectorise is written lane-wise; the operator fact it never stated is why. `&&` and `||` are
+data-dependent BRANCHES per element, and the compiler may not convert them because
+short-circuiting is observable (the right-hand side must not be evaluated); `&` and `|` evaluate
+both sides into a lane mask. *Verified* — EV-91: `eq = eq && (a[k] == b[k])` over two 1 MiB
+slices is **105 instructions, ZERO vector ops and 20 branches — not vectorised**, while
+`eq &= a[k] == b[k]` is 98 instructions with **36 vector ops and 5 `vpcmpeqb`**, and runs
+**4.2–15.1× faster** (three runs, under load). ⚠️ **Scope, measured:** a COUNTING loop
+(`if a && b && c { n += 1 }` against `n += u32::from(a & b & c)`) vectorises BOTH ways — the
+operator is load-bearing where the predicate feeds an accumulator the NEXT iteration reads, not
+universally, and REF-36 still forbids citing an operator as a perf claim without a row. No site
+in this tree was located: `boyko_physics::narrowphase`, the `boyko_ecs` query filter evaluation
+and `boyko_utils::bit_mask` are the places to look first, and the clause fires only where the
+loop shape matches.
+
+---
+
 ### ERG-36 — Iterator contracts are honest and typed: `size_hint` exact only when free and `(0, None)` over a guess; a release check under any `unsafe` write sized by `len()`; `IntoIterator for &T` / `&mut T` with the read-only bound as the gate; `Extend` on reserved capacity; never `FromIterator`
 
 **Binding:** MUST (`(0, None)` over a guess; the release check; the `ReadOnlyQueryData` bound on
