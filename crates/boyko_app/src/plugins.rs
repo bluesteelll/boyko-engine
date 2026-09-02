@@ -31,6 +31,7 @@ use boyko_render::{
 use boyko_scene::{CameraPlugin, FixedSet};
 
 use crate::runner::{self, WindowDesc};
+use crate::timer_resolution::TimerResolutionGuard;
 
 /// The engine host plugin: composes the scene/render frame systems, wires the
 /// D4 `FixedSet` ordering seam, opens a window, and installs the windowed
@@ -328,6 +329,47 @@ fn arm_profiler_from_env(app: &mut App) {
         "BOYKO_PROFILE_ON was set but the profiler refused to arm: {outcome:?}"
     );
 }
+
+/// Records the KE16 App-12 timer-resolution outcome — one line, once, at boot.
+///
+/// # Why `info!` and not `warn!` with a code
+///
+/// A refused raise is a fact about the machine, not a defect the operator can act on, and the
+/// engine keeps running either way — the same bar `boot_and_enable_logging_from_env`'s own closing
+/// `info!` clears. Reaching for `warn!` would additionally mean registering a new `Live` `W` code
+/// in `boyko_log::codes` **plus** a `docs/diagnostics/<code>.md` page (the registry's orphan check
+/// requires both), which is a three-file cross-crate change to say something no reader needs to
+/// act on. `info!` takes no code, so the brief's "one line stating the requested period and
+/// whether it was granted" costs exactly one line.
+///
+/// # Ordering
+///
+/// Called from the runner closure, so `boot_and_enable_logging_from_env` has already run in
+/// `build()` and the target ceilings are armed. Emitting from `build()` instead would be safe but
+/// pointless — the guard does not exist yet there.
+#[cfg(windows)]
+fn report_timer_resolution(guard: &TimerResolutionGuard) {
+    match guard.held_period_ms() {
+        Some(period_ms) => boyko_log::info!(
+            boyko_log::App,
+            "timer resolution: requested {} ms, granted — short park_timeout backstops now expire \
+             near their deadline instead of at the ~15.6 ms default quantum",
+            period_ms
+        ),
+        None => boyko_log::info!(
+            boyko_log::App,
+            "timer resolution: requested {} ms, REFUSED (TIMERR_NOCANDO) — timed waits keep this \
+             system's default quantum; the engine runs, less precisely",
+            crate::timer_resolution::ENGINE_PERIOD_MS
+        ),
+    }
+}
+
+/// The non-Windows arm: there is no process-wide timer resolution to raise (POSIX timed waits
+/// already carry nanosecond deadlines), so there is nothing to report and a line claiming
+/// otherwise would be noise the reader has to learn to ignore.
+#[cfg(not(windows))]
+fn report_timer_resolution(_guard: &TimerResolutionGuard) {}
 
 impl Plugin for EnginePlugins {
     /// Composes the frame systems + the D4 seam, then installs the windowed
@@ -701,6 +743,24 @@ impl Plugin for EnginePlugins {
             ssaa_scale,
         };
         app.set_runner(Box::new(move |app: &mut App| {
+            // ── KE16 App-12: the timer resolution, held for exactly the run ─────────────────────
+            //
+            // The binding lives HERE and not in `build()` above, and the difference is the whole
+            // point of an RAII guard. `build()` is the precedent for a process-wide boot-time side
+            // effect (`boot_and_enable_logging_from_env`, two blocks up) but it takes `&self` and
+            // returns, so a guard bound there would raise the resolution and restore it before the
+            // first frame — the one shape that costs the power and buys none of the precision.
+            // This closure IS the run: `run_windowed`'s own doc says it "owns the whole app
+            // lifecycle" — device boot, frame loop, D2 teardown — so the guard's scope is the
+            // process's useful life and its `Drop` runs on the normal return AND on an unwind
+            // through the frame loop.
+            //
+            // Unconditional and un-flagged: the owner ruled on 2026-09-02 that the engine takes
+            // the documented power cost, so this is not an opt-in. It is also not free to skip on
+            // a boot that fails — a refused device still unwinds through this frame, which is
+            // exactly why the release is a `Drop` and not a statement after the call.
+            let timer_resolution = TimerResolutionGuard::new_1ms();
+            report_timer_resolution(&timer_resolution);
             runner::run_windowed(app, desc)
         }));
     }

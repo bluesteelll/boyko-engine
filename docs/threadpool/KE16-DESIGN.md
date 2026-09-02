@@ -109,7 +109,7 @@ box); "the consumers" are `ke16_solve_in_system` (physics) and `ke16_par_iter_in
 | App-2 | L1 | inside A1 | `Worker::new_lifo()` |
 | App-3 | L2 | inside B1; the one-line call change ships even if B0 wins | the joiner's sweep randomised and self-skipped (it reuses `try_steal_random`) |
 | App-6 | J14 | **ships regardless** | ONE identity predicate for the push arm, the joiner and the W-d′ target: `tls::worker_lane_for(inner)`; a cross-pool joiner and an `install` frame on a worker are EXTERNAL joiners of the target pool; the foreign-install test asserts on a `(pool address, worker id)` receipt |
-| App-7 | axis 36 | **ships regardless** (a bench row) | measure `park_timeout(50 µs)` real expiry on the bench box; no `timeBeginPeriod` call (§6 Q4) |
+| App-7 | axis 36 | **ships regardless** (a bench row) | measure `park_timeout(50 µs)` real expiry on the bench box, now in BOTH configurations — App-12 raises the resolution for the shipped host, so every row states whether the guard was held (§6 ruling 4) |
 | App-8 | new | **ships regardless** | `InSystemRunGuard` becomes a depth counter: a helping joiner may run a sibling system inline (already reachable today through `injector_global` at `scope.rs:488`; likely under B1) |
 | App-9 | M1-0 | **ships regardless** | record the bench box's topology (cores, SMT, L2/L3) in the results file |
 | App-10 | new (the critic's round-2 non-blocking item 5; round-3 blocking item 2) | **ships regardless** (a bench row) | `bench_thread_install_Wminus1`: the physics bench-thread route over a `num_threads(W − 1)` pool. The acceptance line's PRIMARY reference `REF` is chosen by LANE COUNT, not by row name: this row (W−1 workers + a HELPING external joiner = W lanes) when the shipped B is B0 or B1; `bench_thread_install` (W workers + a PARKED joiner = W lanes) when it is B3, under which this row is only W−1 lanes and would loosen the line by ≈ 6.7 % at W=16 (`KE16-DESIGN-APP.md` §11; `KE16-DESIGN-MEASUREMENT.md` §7 Step B rule 4) |
@@ -306,11 +306,21 @@ today, and **both** B arms improve it.
 3. **S6/S10 as a separate ticket (KE17).** This pass fixes the pool; the scheduler-level lever
    (the apply-window barrier) is recorded as the next ticket with M1-a as its first rung. Confirm
    the split.
-4. **Timer resolution.** `park_timeout(50 µs)` is a ≥1 ms wait on Windows (axis 36). The design does
-   NOT call `timeBeginPeriod(1)` (documented power/scheduler cost); W-d′ makes the backstop
-   non-load-bearing on route (b) instead, and the external arm keeps its (rare, snooze-masked)
-   window. If App-7's probe or a production trace after the pass shows the backstop expiring,
-   raising the resolution is a VALUES call (power vs latency) — yours.
+4. **Timer resolution — ASKED, THEN RULED AND SHIPPED.** The question was whether to leave
+   `park_timeout(50 µs)` as the ≥1 ms wait Windows makes of it (axis 36). The design had decided
+   against `timeBeginPeriod(1)` on the documented power cost, relying on W-d′ to make the backstop
+   non-load-bearing on route (b). **The owner overrode that on 2026-09-02 and the measurement
+   vindicates the override decisively.** App-12 measured the real expiry on this box over 200
+   samples: a 50 µs park expires after a median of **15 296 µs** unguarded and **1 021 µs** with the
+   guard held — a **15.0× reduction**, and the same figures for a 100 µs park. Dropping the guard
+   restores 15 333 µs, so the release is genuine. At the default quantum a lost wakeup costs most of
+   a 16 ms frame; under the guard it costs a millisecond. Shipped as
+   `boyko_app::timer_resolution::TimerResolutionGuard`, held for the run in the host runner closure
+   — the host layer, not the pool, because a library must not change process-wide state.
+   ⚠ **One run in five granted the request and moved nothing** (15 371 → 15 368 µs). CPU saturation
+   and Windows 11 EcoQoS were both tested and refuted as the cause, which is why App-12's gate
+   asserts only "not worse", and why the honest reading is that the win is large but not guaranteed
+   on every boot.
 5. **Nested system execution.** A helping joiner can run a sibling conflict-free system inline
    inside another system's body (already reachable today via `injector_global`; more likely under
    B1). The design makes this legal (App-8 depth counter) and documents it. It changes nothing the
@@ -350,6 +360,8 @@ design fork, not a VALUES call, and is decided here: it is in scope, `KE16-DESIG
 | `tls.rs:185-192` | "nested system runs are a contract violation under SCH7" | App-8: nesting through a helping joiner is legal; the counter bounds depth |
 | `crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs:269-272` | "EVT1 — per-thread lane single-writer. Each worker is the sole writer of its lane" — true, and silent about nesting | gains one sentence: a sibling system run inline by a helping joiner (App-8) appends to the SAME lane sequentially; events of the two systems interleave within the lane; no reader relies on per-system contiguity (`KE16-DESIGN-B.md` §2.5) |
 | `scope.rs:504-513` (the joiner's park comment) | "Wake one idle worker before parking" — says nothing about the joiner's OWN idle bit, which stays clear | under B1/B3: the joiner marks its bit and parks the way `worker_main` does (B1-P), so it is claimable by any wave; under B0 the comment gains "this joiner is not idle-marked and is invisible to other waves' wake decisions until its own last completer or the backstop" |
+| `crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:72` | "nothing in the tree calls `timeBeginPeriod`, so the real expiry is ≥1 ms" — false since **App-12** | the host now holds `timeBeginPeriod(1)` for the run, so under the shipped host the expiry is ~1 ms (measured 1 021 µs); a process without the host still sees the quantum, bounded by whatever another process requested |
+| `crates/boyko_threadpool/benches/ke16_nested_scope.rs:35` (header) and its `ke16_park_timeout` group description | same false claim, and it matters more here | same correction, **plus**: the `park_timeout_*` medians now depend on whether the host guard is held, so every published row must say which configuration it was taken in (App-12 measured 15 296 µs unguarded against 1 021 µs guarded on this box) |
 
 ## 8. Soundness obligations and the gates that discharge them
 

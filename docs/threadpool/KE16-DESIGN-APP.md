@@ -161,7 +161,11 @@ ke16_nested_scope.rs` (Step 0): rows `park_timeout_50us`, `park_timeout_1ms`, `p
 each `b.iter(|| std::thread::park_timeout(d))` with no pending unpark; criterion's median IS the
 expiry latency and the three rows make the timer quantum visible.
 
-**Decision (perf, taken here):** do NOT call `timeBeginPeriod(1)`. Microsoft documents the cost
+⚠ **SUPERSEDED 2026-09-02 by the owner's ruling — the resolution IS raised; see App-12 below.** The
+reasoning that follows is kept because it is why the question reached the owner at all, and because
+the cost it names is real and was accepted, not refuted.
+
+**Decision (perf, originally taken here, now overridden):** do NOT call `timeBeginPeriod(1)`. Microsoft documents the cost
 ("the thread scheduler switches tasks more often … can also prevent the CPU power management system
 from entering power-saving modes" `[D]`), and the pass makes the backstop non-load-bearing on the
 route that ships instead (W-d′ §3.4: the last completer's unpark is exact on route (b); the joiner
@@ -171,6 +175,64 @@ under B1 parks only after exhausting stealable work). The external arm keeps its
 park expiring rather than being woken (a `boyko_diag` counter on the backstop-expiry path is a
 one-line follow-up), raising the resolution is the owner's VALUES call (index §6 Q4). A
 spin-until-deadline backstop is rejected: it burns the core the wave is trying to use.
+
+## 6b. App-12 — the resolution IS raised (owner ruling 2026-09-02), SHIPPED and measured
+
+**The ruling.** Owner, after being given the cost in full: *"ну давай повысим тогда"*. §6's decision
+above is overridden. What follows is what shipped and what it measured, so a later reader sees the
+number rather than the argument.
+
+**Where it lives, and why not in the pool.** `crates/boyko_app/src/timer_resolution.rs`:
+hand-declared `winmm` FFI (`#[link(name = "winmm")]` with edition-2024 `unsafe extern "system"`),
+named `TIMERR_NOERROR` / `TIMERR_NOCANDO` constants, and `TimerResolutionGuard` — an RAII type that
+raises on construction and passes back on `Drop` the identical period it actually acquired, and does
+nothing on drop when the request was refused. `#[cfg(windows)]`; the other arm is a no-op because
+POSIX timed waits already carry nanosecond deadlines. It is bound in the host runner closure in
+`plugins.rs`, so its scope is the whole app lifecycle and it releases on normal return and on unwind.
+**It is not in `boyko_threadpool` and must not be:** the resolution is process-wide state, and a
+library that changes process-wide state behind its caller's back is the defect this placement avoids.
+Two guards alive at once are legal (Windows refcounts the requests), so no global "already raised"
+flag is used — such a flag would break the second, legitimate caller.
+
+**Measured on this box, `park_timeout` real expiry, median of 200 samples:**
+
+| configuration | granted | 50 µs park | 100 µs park |
+|---|---|---|---|
+| unguarded | no | **15 296 µs** | **15 330 µs** |
+| guarded | 1 ms | **1 021 µs** | **1 021 µs** |
+| after the guard drops | no | **15 333 µs** | **15 316 µs** |
+
+**15.0× reduction**, and the restored row proves `Drop` genuinely releases. At the default quantum a
+lost wakeup costs most of a 16 ms frame; under the guard it costs a millisecond. That is what the
+owner bought, and it is why the pass keeps W-d′ as well: the guard makes the residual window cheap,
+W-d′ makes it rare.
+
+⚠ **One run in five granted the request and moved nothing** — 15 371 → 15 368 µs, a spread far too
+tight to be contention. Two hypotheses were tested rather than asserted: CPU saturation is refuted
+(with all 16 cores spinning the numbers become 20 221 → 9 527 µs, i.e. load *widens* the spread and
+*degrades* the win, it does not produce that tight 15.37 ms), and Windows 11 EcoQoS is refuted for
+this process (`GetProcessInformation(ProcessPowerThrottling)` returns `state_mask = 0x0`, so
+`IGNORE_TIMER_RESOLUTION` is not applied). The cause is unidentified. **This is why the gate asserts
+only "guarded is not worse than unguarded"**: a "must improve 2×" gate would have been red on correct
+code the first time it ran. `SetProcessInformation(ProcessPowerThrottling, IGNORE_TIMER_RESOLUTION →
+off)` is the documented lever if that shape ever recurs; it is a second process-wide power decision
+and is deliberately not taken here.
+
+**A detail that changes how the App-7 rows are read:** `std::thread::sleep` is *unaffected* by the
+timer resolution (1 148 µs at the 15.6 ms quantum) because std backs it with a high-resolution
+waitable timer. `park_timeout` and a raw `Sleep` both track the quantum. Only the latter two are the
+subject here, and only they move when the guard is held.
+
+**Gate.** `crates/boyko_app/tests/app12_timer_resolution.rs` — a recorder
+(`#[ignore = "slow: ..."]`, 12.6 s idle) that prints both tables, plus a live fast test covering the
+balance-and-nesting contract, so the class of bug that silently changes machine-wide state is not
+gated behind `--ignored`.
+
+**Two prose claims elsewhere in the tree are now stale** and are corrected in the same pass as the
+code they describe (index §7): `crates/boyko_ecs/src/ecs/core/schedule/schedule.rs` and the header of
+`crates/boyko_threadpool/benches/ke16_nested_scope.rs` both assert that nothing in the tree calls
+`timeBeginPeriod`. Under the shipped host that is false, and the bench header matters most because
+its `ke16_park_timeout` medians now depend on whether the host guard is held.
 
 ## 7. App-8 — `InSystemRunGuard` becomes a depth counter
 
