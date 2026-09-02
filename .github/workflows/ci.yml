@@ -260,3 +260,111 @@ jobs:
           cargo +nightly miri test --all-targets \
             -p boyko-ecs -p boyko-utils -p boyko-threadpool -p boyko-serialize \
             -p boyko-math -p boyko_sdf_math -p boyko_image
+
+  # ---------------------------------------------------------------------------------------------
+  # loom — the permutation checker for the pool's wake protocol
+  # ---------------------------------------------------------------------------------------------
+  #
+  # `crates/boyko_threadpool/tests/loom_pool.rs` is where the pool's no-lost-wakeup property is
+  # PROVED rather than sampled: loom re-runs each model over every thread interleaving and every
+  # memory-model outcome its preemption bound admits, so a wake that is lost on one interleaving in
+  # a million — or only on a weakly-ordered CPU, never on x86 — is found by construction. Ordinary
+  # tests cannot establish that property at all. The whole file is `#![cfg(loom)]`, so a build
+  # WITHOUT `--cfg loom` links a test binary containing zero models; that is the exact vacuity this
+  # job's gate exists to make impossible (see the step's comment).
+  #
+  # WHY THIS JOB EXISTS: the models could not be run on the KE16 bench box for most of that
+  # campaign — every `--cfg loom` binary there died with STATUS_ACCESS_VIOLATION before `main`,
+  # even for `--help`. MEASURED 2026-09-02, that was never loom's fault and never `--cfg loom`'s:
+  # the `RUSTFLAGS` environment variable REPLACES `target.<triple>.rustflags` (the same rule the
+  # top-level `env:` block explains at length), and on that machine those config flags carry a
+  # `-Clink-arg=-B<lld>` that routes the mingw link through LLD. Spelling the loom flag as a bare
+  # `RUSTFLAGS="--cfg loom"` discarded it, binutils `ld` 2.42 then emitted a truncated import
+  # directory for the raw-dylib `kernel32.dll` descriptor that `generator` (loom's stack-switching
+  # dependency) needs — 4 symbols where LLD writes 40+, with `VirtualAlloc`, `VirtualProtect`,
+  # `GetSystemInfo` and `AddVectoredExceptionHandler` left unbound — and the mingw startup
+  # relocator faulted on them. Restoring that one flag makes every model build and pass locally, in
+  # both profiles. None of it applies to `ubuntu-latest`; this job is the durable, machine-
+  # independent home for the models regardless of what any developer box does to its linker.
+  #
+  # RUSTFLAGS: this job needs its own, and because the variable REPLACES rather than appends it has
+  # to repeat everything the tree relies on.
+  #   * `-D warnings` — repeated for the reason every other job repeats it. VERIFIED locally: the
+  #     crate and all five models compile clean under `--cfg loom -D warnings`.
+  #   * `-C target-cpu=x86-64-v3` — KEPT, unlike the `miri` job just above. Miri opts out because it
+  #     interprets MIR and never executes machine code, so the ISA buys it nothing; this job
+  #     executes a real binary, so the ISA baseline is a real property of the artifact under test.
+  #     It hides no coverage either way — `boyko_threadpool` contains no `cfg(target_feature)` arm,
+  #     every one in the workspace being in `boyko_physics` — but carrying it is what the top-level
+  #     note requires of any job that defines its own RUSTFLAGS, and it costs nothing here.
+  #
+  # PROFILE: release. Both profiles were built and run locally and both pass; release is ~4.8x
+  # faster on the models as they stand (0.96 s vs 4.63 s of model time) and is the profile the
+  # design's own invocation uses (`docs/threadpool/KE16-DESIGN-MEASUREMENT.md:388`). The engine's
+  # older note that "loom release binaries crash at startup" was the linker defect described above,
+  # not a property of the profile: release was re-verified green once the link flag was restored.
+  #
+  # LOOM_MAX_PREEMPTIONS=3 is the bound `docs/threadpool/KE16-DESIGN.md` §8 (the W-b row) and
+  # `KE16-DESIGN-MEASUREMENT.md:388` both specify. Measured wall time for the five models at that
+  # bound, release, on the bench box: ~1 s of model time after a ~75 s cold build.
+  loom:
+    name: loom (threadpool wake protocol)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--cfg loom -D warnings -C target-cpu=x86-64-v3"
+      LOOM_MAX_PREEMPTIONS: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: loom
+      # THE FIVE MODEL NAMES ARE WRITTEN OUT **AND** THE COUNT IS PINNED, because neither half is
+      # sufficient on its own. Both vacuous forms were probed on 2026-09-02 and BOTH EXIT 0:
+      #   * built without `--cfg loom`, the harness prints `running 0 tests` and cargo exits 0;
+      #   * with one name in the `--exact` list renamed, the harness prints `running 4 tests` and
+      #     `1 filtered out`, and cargo STILL exits 0.
+      # So the run's own status is checked first, and then the two harness lines are pinned
+      # verbatim. `0 filtered out` is part of the pin deliberately: it goes red if the `--exact`
+      # list and the compiled model set stop being the same set, in EITHER direction.
+      #
+      # WHERE THE FIVE CAME FROM: they are every `#[test]` in `tests/loom_pool.rs` that is not
+      # behind a `#[cfg(feature = "ke16-…")]` gate — the model set of a default build, read off
+      # `loom_pool --list` on 2026-09-02. The file holds 8 further models behind the KE16 tournament
+      # features (`ke16-a5`, `ke16-w-gate`, `ke16-w-count`). They are deliberately NOT in this job:
+      # `KE16-DESIGN.md` §4 says those switches are DELETED once the verdict lands, and a permanent
+      # gate keyed to a temporary feature breaks on the commit that removes it. They belong to the
+      # candidate's own measurement step, run per-candidate with `--features`.
+      #
+      # ADDING A MODEL: add its name to the list AND bump both `5`s. Forgetting is not silent — an
+      # unlisted new model shows up as `1 filtered out`, and a listed one moves `running 5 tests` to
+      # `running 6 tests`; either way the pin fails. That friction IS the gate: it is what makes
+      # this job unable to pass while measuring nothing.
+      - name: cargo test --release --test loom_pool (5 models, count-pinned)
+        shell: bash
+        run: |
+          set +e
+          cargo test --release -p boyko-threadpool --test loom_pool -- \
+            --test-threads=1 --exact \
+            loom_m1_fork_join_no_lost_wakeup \
+            loom_m2_idle_race_c_no_lost_wakeup \
+            loom_m2_calibration_no_producer_fence_is_lost \
+            loom_m2b_idle_cas_contention_exactly_one \
+            loom_m3_shutdown_handshake_worker_exits \
+            > loom.log 2>&1
+          status=$?
+          set -e
+          cat loom.log
+          if [ "$status" -ne 0 ]; then
+            echo "::error::loom models failed (cargo exit $status)"
+            exit "$status"
+          fi
+          if ! grep -qx "running 5 tests" loom.log; then
+            echo "::error::loom ran the wrong number of models -- expected the line 'running 5 tests'. A run that compiles the models and executes none exits 0; this is the check that forbids it."
+            exit 1
+          fi
+          if ! grep -q "^test result: ok\. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" loom.log; then
+            echo "::error::loom summary line did not match '5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' -- a model was ignored, filtered, or added without updating this job."
+            exit 1
+          fi
+          echo "loom: 5 models executed and passed at LOOM_MAX_PREEMPTIONS=$LOOM_MAX_PREEMPTIONS"
