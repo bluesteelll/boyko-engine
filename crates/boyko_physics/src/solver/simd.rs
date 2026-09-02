@@ -1597,6 +1597,18 @@ mod tests {
             }
         }
         banned.push(format!("{}{}", "mul_add", "("));
+        // `algebraic_mul` / `_add` / `_sub` / `_div` / `_rem`, stable since Rust 1.98
+        // (float_algebraic, rust-lang/rust#136469). They are the sanctioned per-operation
+        // fast-math API: they permit the optimiser to CONTRACT a multiply and an add into
+        // one rounding and to REASSOCIATE, which is precisely the pair of freedoms this
+        // module's determinism rests on refusing. A future edit could write
+        // `a.algebraic_mul(b).algebraic_add(c)` and, before this needle existed, the census
+        // would have passed while the no-FMA contract silently stopped holding — the closed
+        // needle list is exactly the shape a new language feature walks past, and this one
+        // walked past it within a release of the list being written (2026-09-02).
+        // The stem alone is banned rather than each spelling: the family is closed to this
+        // module either way, and a stem match cannot be defeated by a UFCS call.
+        banned.push(format!("{}{}", "algebraic", "_"));
 
         let mut hits = Vec::new();
         for (i, line) in contents.lines().enumerate() {
