@@ -18,6 +18,79 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## RESOLVED 2026-09-02 — KE16's six owner calls, answered the same day they were asked
+
+**Where the work is.** Worktree `D:/wt/threadpool`, branch `feat/threadpool-ke16`. The design is
+`docs/threadpool/KE16-DESIGN.md` and its five axis files; the measurement plan is
+`KE16-DESIGN-MEASUREMENT.md`. The catalogue behind it (`KE16-DESIGN-SPACE.md`, the `KE16-VARIANTS-*`
+files, `KE16-EVIDENCE.md`) is 99 variants on 35 axes. Eighteen candidates are being built behind
+mutually exclusive cargo features and will be measured one axis at a time; the winner becomes
+unconditional and every feature is deleted in the same pass.
+
+**What the harness established before any fix** (release, 16 workers, this box): a wave spawned from
+inside a worker is *exactly* serial (max-in-flight 1, wall-clock on the serial floor within 1 %);
+`par_iter` inside a scheduled system is 1.00× against 10.82× from the bench thread at 65 536 rows;
+the colored solve on the route that ships is **36.02 ms against 31.52 ms single-threaded** — enabling
+parallel physics as wired today costs 14 % more than leaving it off. Every O-series colored-solve
+number on record was taken on the healthy route the engine does not use.
+
+The six calls below were VALUES or SCOPE. All six are now ruled.
+
+1. **Commit the harness — YES.** The five instrument files and the three `Cargo.toml` hunks carry
+   every number above and ship with the pass. The documentation corpus is committed ahead of the
+   implementation so the design and its evidence exist on a commit while the axes are still in
+   flight; the instruments follow with the code they measure.
+
+2. **The MSDF bake — OPTIMISE IT, do not merely choose a joiner policy for it.** Owner: *"if it can
+   be optimised somehow, optimise it."* Reading the site changed the question.
+   `generate_distance_field` (`crates/boyko_fontbake/src/msdf/distance.rs`) calls `pool.install` from
+   an application thread and spawns `4 × workers` disjoint row bands — 64 tasks at W=16. That is the
+   external-joiner route, and it is the one route where **defect B is live in production today**: the
+   joining bake thread batch-steals up to 33 of those 64 bands into a private unregistered scratch
+   deque and runs them one at a time. The measured signature of that shape on the harness is a
+   33-of-64 serial residue. So the bake is not choosing between "keep a helper" and "lose a lane" —
+   it is currently paying the defect in full, and **both** B candidates improve it. Two consequences,
+   both now design requirements rather than notes:
+   - **The bake gets its own bench row, and it decides B1 versus B3.** The B verdict is no longer
+     settleable on code size: `crates/boyko_fontbake` gains a criterion row over a real glyph on both
+     joiner policies, and whichever is faster on it wins the external arm.
+   - **`spawn_batch` at the bake moves from out-of-scope into the pass.** It was recorded as "a
+     one-line follow-up if `ke16-c-batch` ships"; under this ruling, if that candidate wins its step,
+     the bake is converted in the same pass and re-measured on the same row.
+
+3. **The scheduler-level lever is KE17 — CONFIRMED, "надо будет исправить отдельно".** Lanes draining
+   at different times at the ECS level is the apply-window barrier (`schedule.rs`, the
+   `pending == running` gate), not the pool; system assignment is already dynamic. The row is open in
+   `docs/aether-v2/KERNEL-BACKLOG.md` as of 2026-09-02, work not started, and it is expected to be
+   worked separately after this pass.
+
+4. **Windows timer resolution — RAISE IT.** Owner, after hearing the cost: *"ну давай повысим тогда"*,
+   which overrides the design's earlier refusal. The reasoning is kept so the record of *why*
+   outlives the call: `timeBeginPeriod(1)` raises the timer-interrupt rate, so the CPU wakes more
+   often and cannot settle into deep idle states — idle draw rises and battery life falls. It does
+   **not** make running code faster; it makes a *timed wait* expire close to when it was asked to.
+   Workers here are woken directly by `unpark`, so the timer governs only the lost-wakeup backstop —
+   but at the default ~15.6 ms resolution a lost wakeup costs a whole frame instead of 50 µs, and
+   that is the insurance the owner bought. It ships as **App-12**: a hand-declared `winmm` FFI pair
+   behind an RAII guard that raises 1 ms at host boot and restores it on drop, `#[cfg(windows)]`,
+   living in the host layer (`crates/boyko_app`) because a library must not silently change
+   process-wide state — the pool and the ECS do not call it. It is measured both ways in
+   `crates/boyko_app/tests/app12_timer_resolution.rs`, so the pass reports what the change bought
+   rather than asserting it. The pass still removes the *dependency* on the backstop (count-gated
+   completion); raising the resolution makes the residual window cheap instead of frame-sized. Two
+   prose claims in the tree that nothing calls `timeBeginPeriod` are corrected in the same pass.
+
+5. **A helping joiner may run a sibling system inline — ACCEPTABLE.** A worker joining its own wave
+   can pick up a conflict-free sibling system and run it inside another system's body. Sound by the
+   conflict graph; visible as two overlapping system spans on one lane and interleaved events within
+   one event lane. The in-system guard becomes a depth counter (`App-8`).
+
+6. **Scope of the O-series retake — CONFIRMED.** The shipping-route numbers go into a new
+   `docs/threadpool/KE16-RESULTS.md`; the O6 tables get one dated line pointing there. The O-series
+   documents are not rewritten.
+
+---
+
 ## 2026-08-30 — what the adversarial pass found in the rulings above, and the kernel finding that outranks all of them
 
 **Recorded, not repaired.** The rulings in this file landed and their gates are green; two independent
