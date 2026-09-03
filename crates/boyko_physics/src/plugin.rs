@@ -302,6 +302,12 @@ pub fn add_physics_colored_solve(
 /// Opt-in: a body-only scene uses [`add_physics_systems`] and is byte-for-byte
 /// unaffected (the SDF stage is never registered — the 0%-gate). The returned
 /// [`PhysicsStageKeys::narrowphase_sdf`] carries the SDF stage's descriptor index.
+///
+/// The box path folds the field with
+/// [`PhysicsConfig::sdf_narrowphase`](crate::resources::PhysicsConfig::sdf_narrowphase),
+/// which defaults to the scalar oracle. The O9 AVX2 fold is a deliberate opt-in
+/// because it is not bit-identical (see
+/// [`SdfNarrowphaseKernel::Avx2`](crate::resources::SdfNarrowphaseKernel::Avx2)).
 pub fn add_physics_sdf<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,

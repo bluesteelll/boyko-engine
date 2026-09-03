@@ -46,12 +46,33 @@ MIRIFLAGS = "-Zmiri-tree-borrows"
 # still zero FMA. The guards were therefore rejecting a build that could not have
 # hurt them.
 #
-# The enforcement MOVED rather than vanished: `solver/simd.rs` and `sdf_simd.rs`
-# each carry a source census test (`solver_simd_has_no_fma_or_approx_callsites`,
-# `sdf_simd_has_no_fma_or_approx_callsites`) that fails the build if either file
-# gains a fused intrinsic, an `rcp`/`rsqrt` approximation, or a `mul_add` call.
-# Those tests are what keeps the determinism contract load-bearing now, and they
-# gate the property directly instead of a proxy for it.
+# The enforcement MOVED rather than vanished: every file in `boyko_physics` that
+# contains an `_mm256_*` call site carries a source census test that fails the
+# build if that file gains a fused intrinsic, an `rcp`/`rsqrt` approximation, a
+# `mul_add` call or an `algebraic_*` fast-math call. Those tests are what keeps the
+# determinism contract load-bearing now, and they gate the property directly
+# instead of a proxy for it.
+#
+# Until 2026-09-03 this paragraph named TWO files and said the build fails "if
+# either file gains" a banned op. That was true when it was written and this very
+# baseline made it a hole: `solver/colored.rs` (73 `_mm256_*` call sites) and
+# `systems.rs` (8) sit behind `cfg(target_feature = "avx2")`, so before
+# `x86-64-v3` they were never COMPILED and therefore never censused — the day they
+# started building they became the AVX2 files with nothing keeping them clean.
+# There are now FOUR censuses over the four files that hold an `_mm256_*` call
+# site, which is all of them:
+#
+#   solver/simd.rs    -> solver::simd::tests::solver_simd_has_no_fma_or_approx_callsites
+#   sdf_simd.rs       -> sdf_simd::o9_kernel_tests::sdf_simd_has_no_fma_or_approx_callsites
+#   systems.rs        -> systems::o9_manifold_tests::systems_has_no_fma_or_approx_callsites
+#   solver/colored.rs -> solver::colored::tests::colored_has_no_fma_or_approx_callsites
+#
+# (The last lives in `solver/colored_tests.rs` and is the only one that does not
+# scan its own file. That file is a fifth match for a bare `grep _mm256_`, three
+# times, every one of them prose or a needle fragment and none of them a call
+# site.) Three of the four survive a build that loses the ISA flag; the
+# `sdf_simd.rs` one vanishes with its `cfg(target_feature = "avx2")` module, which
+# is the shape the root `tests/isa_baseline_census.rs` exists to catch.
 #
 # THE PRICE, stated because it is a real one: a binary built this way executes an
 # illegal instruction on any CPU older than Intel Haswell (2013) or AMD Excavator

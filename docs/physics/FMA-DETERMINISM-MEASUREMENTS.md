@@ -134,7 +134,11 @@ differently should keep the width column; a `ymm` op in `solve_color` would mean
 Four facts read straight off the table:
 
 1. **The shipped configuration emits no fused and no approximate op anywhere**, not only in the
-   two censused files — with FMA in the ISA. This is the in-tree form of "rustc does not
+   censused files — with FMA in the ISA. (This read "the **two** censused files" when it was
+   written on 2026-09-02 and there were two; there are four since 2026-09-03, covering every file
+   in the crate that holds an `_mm256_*` call site. The binary-level fact this item states is
+   unchanged and is what makes the point: it was true of the whole crate even where no census yet
+   looked.) This is the in-tree form of "rustc does not
    contract", on the real profile, and it is also the binary-level check that the source censuses
    approximate: any `vfmadd` in a `boyko_physics`/`boyko_math`/`boyko_sdf_math` symbol of a
    default-flag build is a violation of the rule this design keeps.
@@ -187,10 +191,23 @@ documented fix for the mingw `dlltool`/`ld` on this machine).
 same toolchain, same profile (`test`), only the ISA differing (the last row above versus nothing
 set):
 
-| Configuration | Unit tests in the `boyko_physics` lib binary |
+| Configuration | Unit tests in the `boyko_physics` lib binary (as measured 2026-09-02) |
 |---|---|
 | `x86-64-v3` (the config file's baseline; what a developer runs) | **136** |
 | `x86-64-v3` with `avx2` and `fma` subtracted (what any `RUSTFLAGS` that omits the ISA flag produces — a developer's `--emit=asm` shell, a `--cfg loom` run, or CI before `cced895a`) | **127** |
+
+> ⚠ **Both counts are as-measured on 2026-09-02 and the crate has gained tests since**; they are
+> kept with their date rather than refreshed, because the quantity this table is *for* is the
+> **difference** — the size of the loss when the ISA flag is dropped — and re-taking one number
+> without the other would make the gap a fiction. At least the two censuses added on 2026-09-03
+> (`systems_has_no_fma_or_approx_callsites`, `colored_has_no_fma_or_approx_callsites`) belong to
+> both columns, since neither is ISA-gated, so they raise both counts equally and leave the
+> difference where it is. **Measured 2026-09-03 on the baseline row only:**
+> `cargo test -p boyko-physics --lib -- --test-threads=1 has_no_fma_or_approx` reports
+> `running 4 tests` with `134 filtered out`, i.e. **138** unit tests — exactly the 136 above plus
+> the two new censuses, which is the arithmetic this note predicts. The second row was NOT
+> re-taken, so the gap of 9 is still 2026-09-02's. Anyone re-taking these must re-take **both rows
+> in one sitting**, on the two routes named above.
 
 The nine that vanish: `sdf_simd::o9_kernel_tests::{sdf_simd_has_no_fma_or_approx_callsites,
 w4_rhi_vulkan_has_no_x8, x8_bits_eq_scalar_bits_widened_proptest, x8_empty_list_is_far_all_lanes,
@@ -200,8 +217,13 @@ degenerate_lane_differential_test_1d, cohort_shape_proptest_bit_exact_and_non_va
 in both lists but comparing scalar to scalar without the arm:
 `solver::simd::tests::{refresh_inertia, apply_gravity, position_integrate}_simd_bits_match_scalar`,
 `degenerate_quat_lane_matches_scalar`, `adversarial_inputs_simd_bits_match_scalar`. Present in
-both and meaningful in both: `solver_simd_has_no_fma_or_approx_callsites` and every worker-count
-and run-to-run self-comparison. Integration-test files are not in the lib list; two of them carry
+both and meaningful in both: **three of the four no-FMA censuses** —
+`solver_simd_has_no_fma_or_approx_callsites` and, since 2026-09-03,
+`systems::o9_manifold_tests::systems_has_no_fma_or_approx_callsites` and
+`solver::colored::tests::colored_has_no_fma_or_approx_callsites` (both under a plain
+`#[cfg(test)]`, no ISA gate) — plus every worker-count and run-to-run self-comparison. The fourth,
+`sdf_simd_has_no_fma_or_approx_callsites`, is in the vanishing list above with the rest of its
+module. Integration-test files are not in the lib list; two of them carry
 a crate-level `avx2` gate and vanish the same way (`tests/colored_simd_parallel_o7.rs`,
 `tests/colored_acceptance_simd_o7.rs`), and `tests/simd_o1.rs` compiles but, per its own header,
 "trivially holds" without the arm.
@@ -255,7 +277,7 @@ transcription: it fused ONE site differently — the SIMD side computed the norm
 expression". Result: **2 799 / 29 752 impulses differ, up to 256 ULP**, from one site in ~151 per
 contact, in a kernel that still converged plausibly. The property is preservable, not automatic,
 and its failure is quiet. That is why the design's gate (FMA-DETERMINISM.md, section "The gate — a
-census over the whole core, not two files") bans fusion on *both* sides rather than trusting them
+census over the whole core, not the AVX2 files") bans fusion on *both* sides rather than trusting them
 to agree.
 
 ---
@@ -335,9 +357,19 @@ mutually independent, so the removed multiplies were on the critical resource, n
 **Clean range 0.908–0.954. Fusing the scalar reference makes it 5–9 % slower** in the
 transcription, by the packing mechanism shown in the opcode census — a mechanism the in-tree
 `solve_color` exhibits too (section "In-tree confirmation on the shipped binary"), so the sign is
-the real kernel's and the magnitude is the transcription's. This path is the default:
-`PhysicsConfig::simd` and `PhysicsConfig::simd_solve` both default to `false` in `resources.rs`,
-and no production call site sets either.
+the real kernel's and the magnitude is the transcription's. This arm is the default, and since
+2026-09-03 that rests on `simd_solve` alone: `PhysicsConfig::simd_solve` defaults to `false`
+(`resources.rs:449`) and it is the only flag `solve_color_dispatch` (`solver/colored.rs:1711`)
+consults when choosing between `solve_color_avx2` and the scalar `solve_color` measured here.
+
+> **This sentence read "`PhysicsConfig::simd` and `PhysicsConfig::simd_solve` both default to
+> `false` in `resources.rs`, and no production call site sets either" until 2026-09-03.**
+> `simd` now defaults to `true` (`resources.rs:444`). It never selected this arm — it is read into
+> a different local (`solver/colored.rs:3083`) and reaches only `simd::apply_gravity` (`:3114`) and
+> `simd::refresh_inertia` (`:3151`) — so the measurement above is unaffected, in mechanism and in
+> value. The "no production call site" half still holds for `simd_solve`: the sole assignment in
+> the workspace is `tests/colored_acceptance_simd_o7.rs:132`. The decision file's section 3 works
+> through what the flip does and does not move.
 
 ### E — inertia refresh, scalar reference (10 011 bodies per pass)
 

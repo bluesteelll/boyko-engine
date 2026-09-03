@@ -822,9 +822,17 @@ mod o9_kernel_tests {
         // Non-vacuity: a census that scans the wrong text passes for the wrong
         // reason. Proving the scanner sees real intrinsic call-sites of the exact
         // shape the needles model means an empty `hits` is evidence, not silence.
+        //
+        // The witness is ASSEMBLED from fragments for the same reason the needles
+        // are. Written as a literal it named itself: this census scans its OWN file,
+        // so `contents` contained the token because the assertion line contained it,
+        // and the check passed over a hypothetical file with no intrinsics left in it
+        // at all — the guard against a vacuous pass was itself vacuous (found
+        // 2026-09-03 while extending the census to `systems.rs` and `colored.rs`).
+        let witness = format!("{}{}{}", "_mm256_", "mul", suffix);
         assert!(
-            contents.contains("_mm256_mul_ps("),
-            "census scanned {} but found no `_mm256_mul_ps(` call-site — the file moved or \
+            contents.contains(&witness),
+            "census scanned {} but found no `{witness}` call-site — the file moved or \
              was rewritten, so an empty hit list proves nothing",
             path.display(),
         );

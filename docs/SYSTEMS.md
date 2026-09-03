@@ -2005,10 +2005,29 @@ split (no parallel data system — the SP4 race remediation put both solvers on 
 - [soft/](../crates/boyko_physics/src/soft/) — soft-body (`component.rs`, `collide.rs`, `self_collision.rs`, `coupling.rs`, `colored.rs`).
 - [sdf_query.rs](../crates/boyko_physics/src/sdf_query.rs) — body-vs-SDF via `boyko_sdf_math` (zero readback, zero graphics deps).
 - [scene_sync.rs](../crates/boyko_physics/src/scene_sync.rs) — `boyko_scene` `Transform` ↔ body sync.
+- [resources.rs](../crates/boyko_physics/src/resources.rs) — `PhysicsConfig`, the single tunables `Resource`, plus its three selector enums: `BroadphaseKind` (`AllPairs` default / `Grid`), `BroadphaseSelectMode` (`Manual` default / `Auto`) and `SdfNarrowphaseKernel` (`Scalar` default / `Avx2`). Every kernel choice is a runtime field, never a `cfg` — see the note under **Entry point**.
 
 **Entry point:** `add_physics_systems` (+ `_soft` / `_soft_colored` / `_sdf` /
 `_with_scene_sync` variants) adds the fixed-step pipeline to a `ScheduleBuilder`.
-Deterministic, Miri-clean; broadphase auto-selected (`select_broadphase`).
+Deterministic, Miri-clean. The broadphase is **user-owned by default**:
+`BroadphaseSelectMode::Manual` is the default and `select_broadphase` returns without
+touching `PhysicsConfig::broadphase` unless the mode is `Auto`
+(`broadphase_policy.rs:186`). (This line read "broadphase auto-selected
+(`select_broadphase`)" until 2026-09-03, which described the `Auto` arm as though it
+were the default; the policy has always been opt-in, and its `Manual` arm is the
+campaign's 0 %-gate.)
+
+**Kernel selection is a runtime field, not a build flag** — the rule the crate now
+states in one place. `PhysicsConfig::simd` (default `true` since 2026-09-03) gates the
+O1 AVX2 gravity + inertia-refresh kernels, which are bit-identical to their scalar
+oracles; `simd_solve` (default `false`) gates the O7 cohort-batched colored contact
+solve, also bit-identical; `sdf_narrowphase` (default `SdfNarrowphaseKernel::Scalar`)
+picks the box-vs-SDF fold and is the one selector whose non-default arm is **NOT**
+bit-identical to its oracle (`+0` for `-0` at a `±0` tie; owner-deferred, standing RED
+gate `x8_bits_eq_scalar_bits_widened_proptest`). That last one was chosen by
+`cfg(target_feature = "avx2")` until 2026-09-03, so enabling the `x86-64-v3` ISA
+baseline silently moved every build onto the divergent arm; it is a field now so that
+an ISA flag cannot change a number and asking for the other arm is visible in a diff.
 
 ## 26. boyko_input ✅
 

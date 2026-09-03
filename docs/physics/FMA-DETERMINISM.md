@@ -41,6 +41,15 @@ the bit-exact 8-wide solve and inertia refresh already exist, are gated and test
 **off** — `PhysicsConfig::simd`, `simd_solve` and `parallel_solve` all default to `false` and no
 production site turns them on. That lever is orders of magnitude larger than anything FMA can buy.
 
+> **Answered in half, 2026-09-03, and the sentence above is kept as written so the change is
+> visible rather than tidied away.** `PhysicsConfig::simd` now defaults to **`true`**
+> (`resources.rs:444`), so the O1 AVX2 gravity and inertia-refresh kernels ship live in every
+> default build. `simd_solve` (`:449`) and `parallel_solve` (`:470`) still default to `false`, and
+> `PhysicsPlugin` still overrides none of the three (`plugin.rs:441-464`). So "the bit-exact 8-wide
+> solve and inertia refresh … ship **off**" is now true of the solve only. Section 9's call is what
+> produced the change; what it does to the section-3 verdicts is worked out in the note under that
+> section's table, and the short answer is that it moves none of them.
+
 ---
 
 ## 1. The question
@@ -174,7 +183,7 @@ latency-bound rows before treating them as universal.
 | Kernel (file · function) | Fusible sites | Share of FP ops fused | Measured split/fused | Verdict |
 |---|---|---|---|---|
 | **Colored contact solve, 8-wide** — `colored.rs::solve_color_avx2` over the `simd.rs` x8 helpers (`cross8`, `dot8`, `mat3mulvec8`, `pointvel_x8`, `effective_mass_x8`, `apply_impulse_blend_x8`) | 145 per 8 contacts (counted in the compiled loop: 3 per cross, 2 per dot, 28 per effective mass, 12 per impulse apply) | 32 % of vector FP arithmetic; 12.6 % of all loop instructions; spills fall 51→40 stores | **0.98–1.01×** (8 runs; median 1.00) | **No prize.** Latency-bound on the serial Gauss–Seidel chain; `mul→add→add` and `mul→fma→fma` have equal depth. Confirmed by an L1-resident-gather variant (memory is ~2.5 % of the loop) that still shows 0.97–1.01×. |
-| **Colored contact solve, scalar reference** — `colored.rs::solve_color` over `contact.rs::{effective_mass, point_velocity, apply_impulse}` and `boyko_math` | 145 per contact (identical sites) | LLVM SLP-packs the split form's `Vec3` arithmetic (transcription: 57 `vmulps`/30 `vaddps`; **in-tree `solve_color`, default release profile: 93 `vmulps`/38 `vaddps`/24 `vsubps`, every one of them `xmm`** — the symbol contains no `ymm` op at all, so none of it is an inlined AVX2 callee; the scalar/SIMD fork is in `solve_color_dispatch`) next to 92/49/28 scalar ops; the fused transcription has **zero packed ops** (145 `vfmadd*ss`) | **0.91–0.95×** in the transcription (7 clean runs of 8; the two arms never overlap) | **Regression.** The mechanism — partial packing that `mul_add` defeats — is confirmed on the in-tree kernel by disassembly; the *magnitude* is the transcription's, because the in-tree fused variant cannot be built without editing `crates/`. This is the path that ships: `PhysicsConfig::simd` and `simd_solve` both default to `false`, with no production call site setting them. |
+| **Colored contact solve, scalar reference** — `colored.rs::solve_color` over `contact.rs::{effective_mass, point_velocity, apply_impulse}` and `boyko_math` | 145 per contact (identical sites) | LLVM SLP-packs the split form's `Vec3` arithmetic (transcription: 57 `vmulps`/30 `vaddps`; **in-tree `solve_color`, default release profile: 93 `vmulps`/38 `vaddps`/24 `vsubps`, every one of them `xmm`** — the symbol contains no `ymm` op at all, so none of it is an inlined AVX2 callee; the scalar/SIMD fork is in `solve_color_dispatch`) next to 92/49/28 scalar ops; the fused transcription has **zero packed ops** (145 `vfmadd*ss`) | **0.91–0.95×** in the transcription (7 clean runs of 8; the two arms never overlap) | **Regression.** The mechanism — partial packing that `mul_add` defeats — is confirmed on the in-tree kernel by disassembly; the *magnitude* is the transcription's, because the in-tree fused variant cannot be built without editing `crates/`. This is the arm that ships, and since 2026-09-03 that rests on `simd_solve` **alone** — see the note under the table. |
 | **Inertia refresh, 8-wide** — `simd.rs::refresh_inertia_avx2` (`quat_to_mat3_x8` + `mat3_mul_x8` ×2) | 36 per 8 bodies (2 per 3-term dot × 18 dots) | ~34 % of vector FP ops | **1.14–1.23×** (8 runs; median 1.16) | **Real, in isolation.** 18 independent dot products, no chain to hide behind. |
 | **Inertia refresh, scalar reference** — `simd.rs::refresh_inertia_scalar` = `Mat3::from_quat`, `Mat3 * Mat3`, `transpose` in `boyko_math` | 36 per body | Transcription: not packed in either form (63 `vmulss`/60 `vaddss` split; 36 `vfmadd*ss` fused). **In-tree, the split form *is* partially packed** (7 `vmulps`/6 `vaddps`/2 `vsubps` on `xmm` **plus 3 `vmulps`/2 `vaddps` on `ymm`**, beside 21/18/4 scalar ops), which the transcription lacked | **1.14–1.16×** (3 runs, 1.136–1.161) — an **upper bound** for the in-tree kernel | **Real in the transcription; likely smaller in-tree**, because the same packing that `mul_add` defeats in the solve is present here too. |
 | **Inertia refresh, as a share of a step** — 4 refreshes vs 12 solve passes per step at the defaults (`substeps = 4`, `relax_iterations = 2`) | — | inertia is 2.2–2.6 % of solve+inertia time | fusing it saves **0.26–0.35 % of the step** (both paths; less if the in-tree scalar bound above binds) | **Below the noise floor** of every in-tree criterion bench (their run-to-run spreads are several percent). Counting broadphase, narrowphase, graph build, gather and apply shrinks the share further. |
@@ -182,6 +191,39 @@ latency-bound rows before treating them as universal.
 | **SDF narrowphase** — `sdf_simd.rs::{sd_sphere_x8, sd_box_x8, smin_x8, sdf_edit_list_x8}` | 2 of 10 / 2 of 19 / ~2 of 11 / 0 in combine and clamp | ~10–15 % (in-tree `sdf_edit_list_x8`: 24 `vmulps`/16 `vaddps`/31 `vsubps` against 15 `vmaxps`, 6 `vminps`, 4 `vsqrtps`, 3 `vdivps`, all `ymm`) | not timed — argued from the op census; the ceiling is too low to matter | **Worst prize, worst cost.** Dominated by `max`/`min`/`sub`/`sqrt`/`blend`; fusing it means fusing the frozen `boyko_sdf_math` leaf and putting the CPU↔GPU ±2/255 goldens in play. |
 | **Soft-body kernels** — `soft/{solver, colored, coupling, self_collision, collide}.rs` | not counted per site | small: XPBD projection is `sqrt`/`div`-dominated per constraint | **not timed — argued from the op shape, not measured** | No prize expected; the SP4 serial golden pins them; a value change buys a re-bless for nothing. |
 | **Box–box SAT narrowphase** — `narrowphase/box_box.rs` | 28 `*` in 959 lines | small; branch-bound | **not timed — argued from the op census, not measured** | Not worth widening for; its `to_bits` manifold gate and 1e-4 tolerances would need a re-bless for nothing. |
+
+**What "the arm that ships" rests on, after the 2026-09-03 default flip.** Until that date the
+scalar-solve row justified itself with: *"This is the path that ships: `PhysicsConfig::simd` and
+`simd_solve` both default to `false`, with no production call site setting them."* Half of that
+premise is now false — `simd` defaults to **`true`** (`resources.rs:444`), so the O1 AVX2 gravity
+and inertia kernels run in every default build. **The verdict is unaffected, because the false half
+was never doing any work for it**, and the trace is worth writing down rather than asserting:
+
+- `ColoredSoftStepSolver::step` reads the two flags into two different locals —
+  `use_simd = config.simd` (`solver/colored.rs:3083`) and `use_simd_solve = config.simd_solve`
+  (`:3087`) — and they never meet. `use_simd_solve` is threaded through `solve_all_colors`
+  (`:3133`, `:3164`) into `solve_color_dispatch` (`:1711`), whose `simd` parameter is the *only*
+  thing selecting `solve_color_avx2` over the scalar `solve_color` this row measures.
+  `use_simd` reaches exactly two calls, `simd::apply_gravity` (`:3114`) and
+  `simd::refresh_inertia` (`:3151`).
+- `simd_solve` still defaults to `false` (`resources.rs:449`), `PhysicsPlugin` inserts
+  `..PhysicsConfig::default()` and overrides neither flag (`plugin.rs:441-464`), and the only
+  assignment in the workspace is a test (`tests/colored_acceptance_simd_o7.rs:132`). So the scalar
+  arm is still what a default build executes.
+- Nothing the flip turned on changes this row's *numbers* either. The measured regression is LLVM's
+  SLP-packing of `solve_color`'s own `Vec3` arithmetic, confirmed in-tree on that symbol's
+  disassembly; `apply_gravity_avx2` and `refresh_inertia_avx2` are different symbols. Nor do they
+  change the values the solve consumes: the O1 kernels are bit-identical to their scalar oracles by
+  the gates listed in section 7, so the body state entering the solve is the same bits either way.
+
+**What the flip does cost the sentence** is its old scope. "The path that ships" used to be a
+statement about the whole substep loop, every SIMD kernel in it being off. The loop is now mixed —
+O1 integrate/inertia on their AVX2 arms, the contact solve on its scalar one — so the claim has to
+name the dispatch it is about, and it does. Two neighbouring rows change *meaning* without changing
+value for the same reason: the "Inertia refresh, 8-wide" and "as a share of a step" rows describe a
+kernel that is now the one production runs rather than a dormant opt-in. Their verdicts stand as
+written — the share argument is stated for both paths — but a reader should no longer read them as
+pricing something nobody executes.
 
 **How much the value moves if the solver fuses** (the size of the re-bless, measured): 7 029 of
 29 752 converged normal impulses change (23.6 %), maximum gap **6 848 ULP** — not a last-bit
@@ -242,7 +284,7 @@ Condensed from the companion file's section "Practices survey". The one-line ver
 | Kernel | Stays split because |
 |---|---|
 | Colored solve (scalar and 8-wide) | No measured prize on the 8-wide path; a measured regression on the scalar path that ships, with the mechanism confirmed in-tree; the largest re-bless surface in the crate. |
-| Inertia refresh (scalar and 8-wide) | A real 1.16× on the 8-wide kernel (an upper bound of 1.16× on the scalar one) that is 0.26–0.35 % of a step — invisible to every in-tree bench, and the price is a re-bless of `bodytype_determinism_golden::GOLDEN`, a rewrite of both censuses into site-pairing, and a permanent two-file hand-maintained invariant across `boyko_math` and `simd.rs`. |
+| Inertia refresh (scalar and 8-wide) | A real 1.16× on the 8-wide kernel (an upper bound of 1.16× on the scalar one) that is 0.26–0.35 % of a step — invisible to every in-tree bench, and the price is a re-bless of `bodytype_determinism_golden::GOLDEN`, a rewrite of all four censuses into site-pairing (two when this row was written, 2026-09-02), and a permanent two-file hand-maintained invariant across `boyko_math` and `simd.rs`. |
 | Gravity / position integrate | Memory-bound; `position_integrate` already ships scalar by measurement. |
 | Soft-body kernels (`soft/{solver, colored, coupling, self_collision, collide}.rs`) | Not timed; argued from the op shape (`sqrt`/`div`-dominated projection). Prose-only no-FMA rule today; the SP4 serial golden pins them. |
 | SDF narrowphase and `boyko_sdf_math` | ~10–15 % of ops fusible; the leaf is frozen for a CPU↔GPU parity contract the engine does not own. |
@@ -280,14 +322,38 @@ The one rule is about the boundary:
   a determinism or SIMD-vs-scalar hazard, and the goldens are the right instrument for it. Widening
   the census to every upstream crate would turn a boundary into a crusade.
 
-### 5.3 The gate — a census over the whole core, not two files, plus a crate-local AVX2-arm guard
+### 5.3 The gate — a census over the whole core, not the AVX2 files, plus a crate-local AVX2-arm guard
 
-Today's enforcement is two per-file censuses, `solver::simd::tests::solver_simd_has_no_fma_or_approx_callsites`
-and `sdf_simd::o9_kernel_tests::sdf_simd_has_no_fma_or_approx_callsites`. They are well built
+Today's enforcement is four per-file censuses:
+`solver::simd::tests::solver_simd_has_no_fma_or_approx_callsites`,
+`sdf_simd::o9_kernel_tests::sdf_simd_has_no_fma_or_approx_callsites`,
+`systems::o9_manifold_tests::systems_has_no_fma_or_approx_callsites` and
+`solver::colored::tests::colored_has_no_fma_or_approx_callsites`. They are well built
 (comment-skipping, runtime-assembled needles so they cannot flag themselves, a non-vacuity
-witness) and both run in CI on this tree (section 5.4). What they guard is **two files**, while
-the scalar oracles those files must match — `contact.rs`, `colored.rs`, `soft/*`, `boyko_math`,
-`boyko_sdf_math` — carry the same rule in doc comments only. A `mul_add` written into
+witness) and they run in CI on this tree (section 5.4).
+
+> **This paragraph said "two per-file censuses" and the heading said "not two files" until
+> 2026-09-03**, and both were accurate on 2026-09-02 when this revision was written. Two censuses
+> were added that day, for `systems.rs` and `solver/colored.rs`, and the reason is the one this
+> section is about: both files' AVX2 kernels sit behind `cfg(target_feature = "avx2")` and were
+> never COMPILED before the `x86-64-v3` baseline landed, so nothing had ever censused them. The
+> coverage is now exactly the four files in the crate that hold an `_mm256_*` call site — verified
+> by scanning, not assumed. Counting `_mm256_<name>(` occurrences on non-comment lines:
+> `solver/simd.rs` 209, `solver/colored.rs` 82, `sdf_simd.rs` 72, `systems.rs` 8. (The fourth
+> census's own doc comment, `solver/colored_tests.rs:3255`, says "85 `_mm256_*` sites" for
+> `colored.rs`. That is the raw `grep -c _mm256_` line count, prose included — a looser
+> convention, not a wrong one, but not the same quantity as the 82 above.) A fifth file,
+> `solver/colored_tests.rs`, matches a bare `grep _mm256_` three times and holds **zero** call
+> sites; all three are prose or needle fragments, and it is the file the fourth census lives in.
+>
+> **This moves one item off the list below.** `colored.rs` was named here as a scalar oracle
+> carrying the rule "in doc comments only". It is now censused, and it is the largest vectorised
+> body in the crate after `solver/simd.rs`, so it was never really a *scalar* oracle in the first
+> place — the row it belonged in was "AVX2 file that nothing was checking".
+
+What the four censuses guard is **four files**, while the scalar oracles those files must match —
+`contact.rs`, `soft/*`, `boyko_math`, `boyko_sdf_math` — carry the same rule in doc comments only.
+A `mul_add` written into
 `boyko_math::Mat3::mul` today *is* caught — by `bodytype_determinism_golden` (the hash moves
 because the value moves) and by `refresh_inertia_simd_bits_match_scalar` (the 8-wide kernel no
 longer matches its oracle). What those catches lack is **locality and timing**: the golden says
@@ -343,11 +409,12 @@ with two tests:
     because a `vfmadd`/`vrsqrt` mnemonic inside an `asm!` block is invisible to every intrinsic
     needle. Zero hits in the three roots today; the control-word probe of section 7 is placed in
     `boyko_utils` precisely so this needle can stay absolute.
-- **Self-reference:** the core-wide scan covers `solver/simd.rs` and `sdf_simd.rs`, which contain
-  the two per-file censuses. Their needle tables are fragment-assembled today (`"mul_add"` +
-  `"("`, `widths` × `stems` + `suffix`), so they are not flagged; the same convention is mandatory
-  for any future needle added to them. The core-wide census's own file is under `tests/`, outside
-  the scanned roots.
+- **Self-reference:** the core-wide scan covers `solver/simd.rs`, `sdf_simd.rs`, `systems.rs` and
+  `solver/colored_tests.rs`, which between them contain the four per-file censuses (the fourth
+  scans `colored.rs` from the sibling test file). Every one of their needle tables is
+  fragment-assembled (`"mul_add"` + `"("`, `widths` × `stems` + `suffix`, `"algebraic"` + `"_"`),
+  so they are not flagged; the same convention is mandatory for any future needle added to them.
+  The core-wide census's own file is under `tests/`, outside the scanned roots.
 - **Non-vacuity, in both directions:** assert the scan saw all three crate roots and a file count
   above a floor; assert it saw `_mm256_mul_ps(` in `solver/simd.rs` and `impl Mul for Mat3` in
   `boyko_math/src/mat.rs` (proof it read the right text); assert that **one synthetic line per
@@ -358,10 +425,29 @@ with two tests:
   censuses).
 - **Exemptions:** none inside the core. A future kernel that genuinely needs an approximation lives
   outside these three crates or behind a new decision that rewrites this document.
-- **The two existing per-file censuses stay unchanged.** They are a strict subset of this one,
-  cheaper, and already in the crate's unit-test binary; both run under the same
+- **The existing per-file censuses stay unchanged.** They are a strict subset of this one,
+  cheaper, and already in the crate's unit-test binary; all of them run under the same
   `cargo test -p boyko-physics` as the new file. Aligning their needle tables is optional and is
-  not part of this change — that keeps this pass out of two files a concurrent agent is editing.
+  not part of this change — that keeps this pass out of files a concurrent agent is editing.
+
+  > **Overtaken by events, 2026-09-03; recorded rather than rewritten, because the prescription
+  > above is what a reader will find in the history.** This bullet said "the **two** existing
+  > per-file censuses stay unchanged", and they did not stay unchanged — twice, and neither change
+  > was this pass's:
+  >
+  > 1. **`algebraic_` became a stem** in both, at commit `98ede3e0` ("the no-FMA census had a hole
+  >    a compiler release opened"). That is defect 1 of `docs/RUST-FRONTIER.md` §6 acted on: the
+  >    1.98 per-operation fast-math API is a route to single rounding that an intrinsic-only ban
+  >    could not see. The needle-alignment this bullet called optional therefore happened anyway,
+  >    and the four censuses share one needle table today.
+  > 2. **Their non-vacuity witness was itself vacuous, and was rebuilt.** Each asserted the scanner
+  >    had seen a real `_mm256_mul_ps(` call, "else the file was rewritten and an empty ban-list
+  >    proves nothing" — but spelled that witness as a **string literal inside the file it scans**,
+  >    so `contents.contains(..)` was satisfied by the assertion's own source line. The guard
+  >    against a vacuous pass was itself vacuous. It is now assembled from fragments at runtime,
+  >    like the needles, and for the same reason.
+  >
+  > The subset claim survives both: this census remains a strict superset of all four.
 
 **Test 2 — `avx2_gated_kernels_and_their_gates_are_present_in_this_build`.** Revision 2's
 `isa_baseline_reaches_this_test_build` is **deleted**: it was a two-feature subset of the root
@@ -424,13 +510,19 @@ Consequence for this design's safety story: "both sides stay split, and the bit 
 remains, and what the two new tests add, is the `-p` invocation gap (Test 2) and the scalar
 oracles' prose-only rule (Test 1). Two corrections still fall out of the tree as it stands:
 
-- **`.cargo/config.toml`'s ISA-baseline comment** names the two per-file censuses as "what keeps
-  the determinism contract load-bearing now". Both do run in CI; what is missing is that neither
-  scans the scalar oracles the SIMD files must match. Correct it to name the core-wide census
-  (section 5.3) as the gate over the whole core and the per-file pair as the local, cheaper layer.
+- **`.cargo/config.toml`'s ISA-baseline comment** named the two per-file censuses as "what keeps
+  the determinism contract load-bearing now", and said the build fails "if **either file**" gains a
+  banned op. ✅ **Corrected 2026-09-03**: it now names all four, with their module paths and the
+  reason the two later ones did not exist (their kernels were `cfg`-compiled out until this very
+  baseline landed). The remaining gap is the one this section names and the correction states — no
+  census scans the scalar oracles the SIMD files must match. When the core-wide census lands, that
+  comment should name it as the gate over the whole core and the per-file set as the local,
+  cheaper layer.
 - **`tests/isa_baseline_census.rs`'s `fma` entry** says the physics kernels are "written
-  `mul_add`-free and two source censuses enforce that"; once the core-wide census lands, "three"
-  — or better, point at this directory rather than a count.
+  `mul_add`-free and two source censuses enforce that" (`tests/isa_baseline_census.rs:47`).
+  ⚠ **Still uncorrected, and now understated by two rather than one**: there are four censuses
+  today. Point it at this directory rather than at a count, so the next census does not stale it
+  again — the failure mode this row has already demonstrated twice.
 
 ### 5.5 The docs that must change, even though the policy does not
 
@@ -508,9 +600,10 @@ build it).
 | `solver::simd::tests::{refresh_inertia, apply_gravity, position_integrate}_simd_bits_match_scalar`, `degenerate_quat_lane_matches_scalar`, `adversarial_inputs_simd_bits_match_scalar`; `tests/simd_o1` | local and CI, SIMD versus scalar | None. Test 2 of 5.3 makes the scalar-equals-scalar configuration a named red on a `-p` run that has lost the arm. |
 | `sdf_simd::o9_kernel_tests::x8_bits_eq_scalar_bits_widened_proptest`, `assert_lane_bit_exact`, `x8_inert_lanes_do_not_leak` (against the frozen `boyko_sdf_math` leaf) | local and CI | None; the leaf stays frozen. |
 | Pinned goldens (`tests/bodytype_determinism_golden::GOLDEN`, `tests/soft_colored_sp4_baseline::SP4_SERIAL_GOLDEN`) | local and CI | None — no value moves. Re-bless procedure recorded in the companion file for any future deliberate solver-math change. |
-| `solver::simd::tests::solver_simd_has_no_fma_or_approx_callsites`, `sdf_simd::o9_kernel_tests::sdf_simd_has_no_fma_or_approx_callsites` | local and CI | Keep unchanged; the core-wide census is their superset. |
+| `solver::simd::tests::solver_simd_has_no_fma_or_approx_callsites`, `sdf_simd::o9_kernel_tests::sdf_simd_has_no_fma_or_approx_callsites` | local and CI; the `sdf_simd` one vanishes with its `cfg(target_feature = "avx2")` module on a build that loses the arm | This row said "Keep unchanged"; both were changed on 2026-09-03 (an `algebraic_` stem at `98ede3e0`, and a non-vacuity witness that was itself vacuous — section 5.3). The core-wide census is still their superset. |
+| **Added 2026-09-03** `systems::o9_manifold_tests::systems_has_no_fma_or_approx_callsites`, `solver::colored::tests::colored_has_no_fma_or_approx_callsites` | local and CI; both survive a build that loses the arm (plain `#[cfg(test)]`, no ISA gate) | The other two of today's four. They census `systems.rs` and `solver/colored.rs`, whose AVX2 kernels were `cfg`-compiled out — and therefore uncensused — until the `x86-64-v3` baseline landed. `systems.rs`'s witness is `_mm256_loadu_ps(`, not `_mm256_mul_ps(`: that file packs and stores lanes and delegates every arithmetic op to `sdf_edit_list_x8`. |
 | Root `tests/isa_baseline_census.rs` (five features, size pin, negative control) | CI (every `--workspace --all-targets` leg) and a local `cargo test --workspace`; **not** a local `cargo test -p boyko-physics` | None. It is the authority on the baseline; Test 2 defers to it. |
-| **New** `tests/deterministic_core_fp_census::deterministic_core_has_no_fused_or_approx_callsites` (section 5.3, Test 1) | local and CI, unconditionally — no `cfg` | Create. Turns the prose-only rule in `contact.rs`, `colored.rs`, `soft/*`, `boyko_math` and `boyko_sdf_math` into a check with a line number, with the probed needle spellings and the per-needle positive witness. |
+| **New** `tests/deterministic_core_fp_census::deterministic_core_has_no_fused_or_approx_callsites` (section 5.3, Test 1) | local and CI, unconditionally — no `cfg` | Create. Turns the prose-only rule in `contact.rs`, `soft/*`, `boyko_math` and `boyko_sdf_math` into a check with a line number, with the probed needle spellings and the per-needle positive witness. (`colored.rs` was named here too until 2026-09-03; it has had its own census since, so its share of this test's remit is already covered — see section 5.3.) |
 | **New** `tests/deterministic_core_fp_census::avx2_gated_kernels_and_their_gates_are_present_in_this_build` (section 5.3, Test 2) | local and CI: green; red on any `-p` run whose environment dropped the arm | Create, after being seen red once via the measured `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="-C target-feature=-avx2,-fma"` route. |
 | **New, recommended** — debug-build floating-point control-word probe | local and CI debug legs (compiled out in release) | Add `boyko_utils::fp_env::x86_control_word_is_default() -> bool`: `#[cfg(all(target_arch = "x86_64", not(miri)))]` reads MXCSR with a read-only `stmxcsr` in `asm!` (`_mm_getcsr` is deprecated on this toolchain and fails `-D warnings`), masks the six sticky exception-flag bits, and compares the rest to the IEEE default `0x1F80` (round-to-nearest, all exceptions masked, FTZ and DAZ clear); every other cfg returns `true`. `boyko_physics` already depends on `boyko_utils`. Assert it with `debug_assert!` at the entry of `ColoredSoftStepSolver::step` (the calling thread) and at the top of each closure `solve_color_parallel` spawns into `pool.scope` (the workers). Cost: one `stmxcsr` per colour chunk per pass in debug builds, zero in release. It lives outside the census roots so the `asm!(` needle stays absolute, and outside the Miri sweep's reach because Miri cannot execute inline assembly. Makes the assumption of section 2 a check rather than a sentence. |
 | Tolerance acceptance gates (`tests/colored_acceptance_o5`, `tests/colored_acceptance_simd_o7`, `tests/sdf_collision`, `narrowphase/box_box` manifold `to_bits` + 1e-4 anchors) | local and CI | None now. Under any future fusion they are re-run and re-argued (value moves up to 6 848 ULP), never widened in the same commit as the value change. |
@@ -558,6 +651,22 @@ in 5.3, and the placement of the control-word probe in 7.
    `benches/ke16_solve_in_system.rs` exists to measure exactly that route) until that campaign
    lands, and which is the path on which the O7 review's cross-worker gather read was found. This
    is a change to another campaign's shipped default, so it is the owner's, not this pass's.
+
+   > **RULED IN HALF, 2026-09-03.** `simd` now defaults to `true`; `simd_solve` and
+   > `parallel_solve` do not. The call was taken on `PhysicsConfig::default()`
+   > (`resources.rs:444`) rather than on `PhysicsPlugin` as this item proposed — the plugin still
+   > inserts `..PhysicsConfig::default()` and overrides none of the three
+   > (`plugin.rs:441-464`), so the effect is the one asked for and the mechanism is one level
+   > lower. What unblocked it was not this document: the O1 bit-identity gates only began
+   > EXECUTING their AVX2 arms when the `x86-64-v3` baseline landed on 2026-09-02, and before that
+   > both O7 test binaries printed `running 0 tests`. The 0 %-gate is now satisfied by measured
+   > bit-identity rather than by leaving the path unshipped.
+   >
+   > **The paragraph above therefore no longer describes the tree**, and two of its sentences are
+   > now false as written: "all default to `false`" and "Production therefore runs the
+   > single-threaded **scalar** solve." Production runs the AVX2 integrate and inertia kernels and
+   > the **scalar** contact solve. The remaining open half of the call is `simd_solve` — its
+   > numbers above are untouched, and `parallel_solve` remains bounded by KE16 defect A.
 2. **`colored_columns_snapshot_matches_pre_p2_vec_baseline` reads a file on `D:/tmp` and passes
    silently without it.** Scope call: delete it (the {1,N} and run-to-run byte gates above it cover
    the property), or check the captured baseline into the repository so the test can actually
