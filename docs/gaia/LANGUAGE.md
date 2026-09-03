@@ -58,16 +58,22 @@ instance "prefabs/torch_wall" @wall_east {
 >   `range`; the sketch omitted it. The `12.0` above is illustrative, not ruled. This is the same
 >   hole PENDING M7 records at FIELD granularity — the closed evaluator has no way to spell a
 >   missing field's neutral.
-> - **Colour-literal arity is unreconciled.** `#FFB35CFF` is an RGBA-4 literal written into
->   `color: [f32; 3]`, which is three channels. PENDING Tier 4 carries only the sRGB-decode half of
->   the colour question (ballot **GB-2**); the arity half is carried by nothing. Left as authored
->   and flagged, not silently trimmed.
-> - ⚠ **Open ballot GB-5 — `position` on `PointLight`.** `light_reconcile` DERIVES `position` from
->   the entity's `GlobalTransform`, so whatever a scene authors into that field is overwritten. The
->   **ui** profile already rules that engine outputs are undeclarable (bake error); GB-5 rules
->   whether the same rule extends to engine-derived fields in the **scene** profile. It must land
->   as a DECISIONS line **before G1 freezes the GK-4 field table**, since that table is where such
->   fields would be marked. Not settled here.
+> - **Colour-literal arity — BOTH HALVES RULED 2026-08-30 (ballot GB-2), and this line's premise is
+>   no longer open.** `#FFB35CFF` is an RGBA-4 literal written into `color: [f32; 3]`, which is three
+>   channels. The ruling: **`#RRGGBB` is `#RRGGBBAA` with maximal `AA`** — a DEFAULTED FIELD, not a
+>   second literal kind — and in the narrowing direction an 8-digit literal at a 3-component field is
+>   a **coded bake refusal naming the field**, never a silent alpha drop. So the literal above is a
+>   bake error as authored and the correct 6-digit form is `#FFB35C`. ⚠ The sketch is left AS AUTHORED
+>   and flagged rather than silently trimmed, because rewriting the fences is G2's rewrite of this
+>   whole file, not a drive-by edit ([`CAMPAIGN.md`](CAMPAIGN.md) G2 row, deliverable 4).
+> - **`position` on `PointLight` — RULED 2026-08-30 (ballot GB-5): PERMIT AS SEED.**
+>   `light_reconcile` DERIVES `position` from the entity's `GlobalTransform`, so whatever a scene
+>   authors into that field is overwritten — and the owner's ruling is that this is exactly what an
+>   authored value is for: *"it is simply a starting point in space; obviously this data exists to be
+>   manipulated and will not be static."* The authored value is the INITIAL value. What the ruling
+>   requires is a disposition column in the GK-4 field table recording the CONDITION and the WRITER
+>   (never a boolean — all twelve measured members are conditionally derived), behind the default-off
+>   bake feature. **The G1 table freeze is unblocked.** See [`DECISIONS.md`](DECISIONS.md) §GB-5.
 > - **`MeshRef` is an UNLANDED carrier**, at both sites above. No `MeshRef` type exists in the
 >   workspace; what the engine has is `MeshHandle(pub u32)`
 >   (`boyko_scene/src/render_caps.rs`) — the raw process-local slot form that the ratified **GN1**
@@ -112,7 +118,7 @@ error.
 gaia 1 profile=data
 asset "items/swords"
 
-table SwordDef {                      // N rows of one set → a dense column + a generated const per row
+table SwordDef {                      // N rows of one set → ONE ARCHETYPE COLUMN + a const per row
     row @iron_sword  { damage=12 weight=3.5 rarity=common }
     row @flame_sword extends @iron_sword {
         damage=18 rarity=rare
@@ -122,8 +128,13 @@ table SwordDef {                      // N rows of one set → a dense column + 
 contract SwordDef { damage > 0, weight in 0.1..50.0 }
 ```
 
-`table` (pending fork F3) bakes rows into one dense column and emits a Rust const per row name —
-renaming a row becomes a COMPILE error at every use site. `scalable` is the curve valve; `contract`
+`table` bakes N rows into **one archetype column** (`StorageKind::Table`) and emits a Rust const
+per row name — renaming a row becomes a COMPILE error at every use site. ⚠ **Corrected
+2026-09-03: this paragraph and the comment above used to say "dense column", which denotes
+nothing in this engine** — a dense id is signature-excluded (`is_signature_storage` matches
+`StorageKind::Table` alone), so `get_or_create_archetype(&[DenseRow])` returns the EMPTY
+archetype. F3 is no longer a pending fork: **RULED BY THE OWNER 2026-08-30 — both file shapes
+over ONE schema** — and F2's ruling is what fixes the storage kind. `scalable` is the curve valve; `contract`
 is the closed predicate vocabulary with blame on the violating value's span.
 
 ## Evaluation summary

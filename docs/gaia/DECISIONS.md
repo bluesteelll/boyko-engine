@@ -134,24 +134,67 @@ ambiguity Unity left undocumented). Bake emits a **provenance sidecar** (asset �
   lexical, copy-semantics; entity references (`@asset/object`) are identity, remapped at load. No
   config language in the survey has object identity at all — one spelling would invite authors to
   assume one behaviour.
-- ⚠ **Open ballot GB-3 — the taxonomy is short one kind.** An **asset** reference (a curve, a
-  string table, a style record, a mesh) is neither of the two above: it is not copied lexically,
-  and it is not an entity id remapped by `LoadEntityMap`. Today it has no ruled spelling, so the
-  two-kind rule does not tell an author which behaviour to assume for the case the language uses
-  most. Recording this as an **extension consistent with the ruling's own one-spelling-one-
-  behaviour rationale, NOT a reversal of it** — but it still amends ratified text, so it goes to
-  ballot rather than being written in. The question, in three parts:
-  1. **Asset-ref spelling** — (a) its own sigil, (b) a typed head, or (c) bare strings. Option (c)
-    needs a separate answer for the dangle check (what refuses a reference to an asset that is not
-    there), because a bare string carries no marker for the checker to key on.
-  2. **Which kind GN1's name-hash covers, stated explicitly.** GN1 resolves every reference form in
-    the binary to a name hash at load — WITHOUT remap. That is the asset kind's behaviour, and the
-    ratified text never says so.
-  3. **Style references** (K15) — whether they are the asset kind or a fourth thing.
-  **Settle jointly with the `$hole` sigil (K3) and the style-reference disposition (K15)**, so the
-  reference rule is rewritten exactly once and syntax ruling
-  [**PENDING R4**](PENDING-SYNTAX-PLAN.md) is regenerated once — the Gaia ruling series, **not**
-  Aether rung R4. Blocks **G2, G3** and [PENDING](PENDING-SYNTAX-PLAN.md) Tiers 1–2.
+- **THREE reference kinds** *(the two-kind rule as ratified 2026-08-28, extended by ballot **GB-3**:
+  the third kind was **ADOPTED BY THE OWNER 2026-08-30** and the four-part rewrite ruled the same
+  day [delegated]).* The extension is consistent with the original rationale — *one spelling would
+  invite authors to assume one behaviour* — and does not reverse it. What makes it a THIRD kind is
+  the column the other two do not have: an **asset** reference is the only one whose referent can
+  **stop being valid after load**, because streaming retires slots — which under F5's ruling is the
+  normal case, not an edge.
+
+  | kind | sigil | at bake | at load | after load |
+  |---|---|---|---|---|
+  | **lexical / copy** — templates, `let`, styles, inheritance bases | `$` | substituted; **no reference survives into the binary** | nothing to resolve | nothing |
+  | **entity** — an authored object's identity | `@` | resolved offline; `UnmappedEntity` lifted from load to bake | **remapped** through the load map | stable for the load's lifetime |
+  | **asset** — mesh, curve, string table, font, sound | one glyph, **not yet minted** (below) | resolved to a **path-name hash** | **looked up, not remapped** (`PathIndex`) | **refcounted and revalidated every frame** |
+
+  **Part 1 — the asset-ref spelling is a SIGIL**, applied uniformly and position-independently. The
+  invariant bought: **a bare word is never a reference**, anywhere, which makes the dangle check a
+  single lexical pass instead of a grammar walk. Rejected: bare strings (a string literal is already
+  a non-reference value in this language, and the check would key on a destination field that three
+  reference positions do not have) and a typed head (the vocabulary is unclosable — the ground that
+  already killed widget sugar). ⚠ **THE GLYPH IS NOT MINTED HERE, and must not be:** it is a **G2
+  deliverable, closed JOINTLY with Gaia's arithmetic operator vocabulary**, because the ratified
+  rule that whitespace is never significant makes any glyph that can open a binary operator
+  ambiguous. Recommendation `~`; the joining is part of the ruling.
+  **The dangle check, named:** every sigil-marked token must resolve at bake, and unresolvable is a
+  coded `GA####` refusal naming the pack and the path, blamed on the reference's own span.
+
+  **Part 2 — style references are the FIRST kind** (lexical/copy), not the third and not a fourth.
+  §Refusals already ratifies *styles are named records by explicit reference, flattened by bake*, and
+  a thing flattened by bake leaves no reference in the binary, which is the definition of kind 1. The
+  ballot's own example list, which included *"a style record"* under the asset kind, is dropped.
+
+  **Part 3 — `$hole` STAYS, reclassified.** The ballot's premise (*a third reference sigil where two
+  are ratified*) is false: templates and `let` are already the **lexical** kind, so `$power` was kind
+  1 all along. `$` marks the lexical kind — template parameters **and** `let` bindings — **in every
+  position**, which is what lets a generator pick the sigil from the KIND alone with no positional
+  knowledge.
+
+  **Part 4 — "a declared node ⇒ `@`" is WITHDRAWN**, replaced by one question with three
+  mechanically decidable answers — *what does bake do with this reference?* (1) substitutes it ⇒
+  lexical, `$`; (2) records an object id for load remap ⇒ entity, `@`; (3) records a path hash for
+  load lookup + refcount ⇒ asset, the new glyph. ⚠ This rule is **F8-neutral and F10-neutral by
+  construction**: it never asks whether a node's anchor is a human name or a minted id, and says
+  nothing about whether a bundle expands at bake.
+
+  ⚠ **The ballot's GN1 premise is REFUTED.** It asserted that GN1 resolves every reference form to a
+  name hash *without* remap, and therefore describes the asset kind. GN1's own first resolution is
+  *object id → `Entity` (**load remap**)*, so GN1 is the uniform cost-and-representation law over
+  **all three** kinds — kind 1 has nothing in the binary to resolve, kind 2 resolves by remap, kind 3
+  by lookup. **Only kind 3 is lookup-without-remap.**
+
+  ⚠ **Riding lines this ruling OWES and does not make here:**
+  [`PENDING-SYNTAX-PLAN.md`](PENDING-SYNTAX-PLAN.md) R4/R5/R7 and Tiers 1–2 are regenerated by it,
+  and [`LANGUAGE.md`](LANGUAGE.md) still spells a lexical inheritance base as `extends @iron_sword`.
+  Both edits belong to **G2**. ⚠ And one FOLLOW-ON FINDING that is not a ballot and is not closed:
+  the asset-ref dangle check is structurally unreachable downstream of the sigil pass as the engine
+  stands — `AssetServer::load` logs `E0801` and returns a LIVE handle in the `Failed` state which it
+  inserts into the path index, and `validate_asset_refs` early-returns unless `free_epoch` advanced,
+  which a never-loaded asset never makes happen.
+  *Ruling recorded here 2026-09-03 from the working branch; the full ground, the measured glyph
+  census and the rejected alternatives live at `feat/threadpool-ke16` `gaia/DECISIONS.md`
+  §Identity and references.*
 - `link` is mandatory grammar for entity-reference fields — the difference between a loud
   `UnmappedEntity` and a silently stale id.
 - Content hashes are integrity/cache only, never identity; the freeze/cache key is a hash of the
@@ -190,26 +233,48 @@ The answer is already shipped and gated at zero allocations in this repo; Gaia g
    - **Untracked `Query<&mut T>`.** Ground: `&mut T` stamps no change tick, so a sink written
      through it is invisible to every downstream `Changed<T>`. Untouched by any rung — this row
      stands on its own regardless of what happens to the two below.
-   - **`Or<(Changed<A>, Changed<B>)>` over dense.** Ground as recorded (2026-08-28): the `Or`
-     filter does not override the dense hooks, so the arm is silently never true.
-     ⚠ **Superseded-by note (dated 2026-08-29):** this is exactly the defect **Aether rung R0 /
-     backlog KE1** exists to fix. ⚠ **Open ballot GB-9** — does the emission ban SURVIVE the kernel fix:
-     (a) keep it, with a stated ground that is not the fixed defect (D4's coupling is the
-     candidate ground and must be cited if this option wins), or (b) delete it with a record of
-     why it existed. **Decide before Aether rung R0 lands**
-     ([`../aether-v2/CAMPAIGN.md`](../aether-v2/CAMPAIGN.md) §Rung ladder). Blocks G7's codegen rules.
-     Either way, the red fixture must assert that the **GENERATOR does not emit the shape** — a
-     fixture that instead asserts the kernel's behaviour goes green on that R0 commit and stops
-     guarding anything, without anyone editing it.
-     The coupling is recorded here, on the Gaia side, precisely because a kernel-side fix would
-     otherwise never prompt anyone to revisit this line; the Aether R0 / KE1 rung note owes the
-     matching back-pointer.
+   - ~~**`Or<(Changed<A>, Changed<B>)>` over dense.**~~ **DELETED 2026-08-30 by ballot GB-9's
+     ruling, option (b) — with the record of why it existed, which is what option (b) required.**
+
+     **Why it existed.** Ground as recorded 2026-08-28: the `Or` filter did not override the dense
+     hooks, so a dense arm was silently never true. That was the shipped kernel's real behaviour, the
+     ban was the correct call against it, and it is the line that made a KERNEL defect visible to the
+     DATA campaign at all.
+
+     **Why it goes.** Its ground is fixed and gated by Aether rung **R0** / backlog **KE1**. Option
+     (a)'s only named candidate ground — D4's coupling — was measured and does not survive contact:
+     **D4 reserves the Aether *surface* `or(...)`, while this ban governed *generated code*, and this
+     document's own ratified GN2 rejects "bake emits Rust into the game build"**. A ban on a shape the
+     generator cannot emit, grounded in a reserve on a surface the generator does not write, is a rule
+     with no subject. ⚠ It could not be re-grounded on KE13 either: `Or` folds
+     `NEEDS_CHANGE_DETECTION` and `EcsMaster::query` const-refuses it, so the banned shape cannot
+     reach a `QueryView` at all.
+
+     **What replaces it, so the deletion is not a loss.** The hazard is stated better by the third row
+     below — a bind source or change-gate over a dense (or bitset) component — whose ground is still
+     live and unfixed. The fixture discipline this ban carried is **kept and re-aimed** onto that row:
+     the red fixture asserts the **GENERATOR does not emit a change-gate over a non-signature storage
+     kind**, which cannot go green on a kernel commit — the exact failure this list warned about.
+     Filed to G7's codegen rules rather than dropped: if a generator ever does emit `Or` over dense,
+     the shapes with **no oracle** are `Query<Entity, Or<..dense..>>`, `Added<Dense>` inside `Or`,
+     arity > 2 with more than one dense arm, and KE13 on the point-lookup path.
+
+     ⚠ **The deadline this row used to print — "decide before Aether rung R0 lands" — EXPIRED
+     UNANSWERED: R0 landed with GB-9 open.** So the ruling reconstructs the record from prose rather
+     than from a reproducible failure, and says so. That is the cost the deadline existed to avoid,
+     and it is recorded rather than smoothed away — the work order in the same commit that carried the
+     deadline already declared R0 *"buildable now, no ballot in the way"*.
    - **A bind source on a dense (or bitset) component.** `any_changed_since`
      (`boyko_ecs` `component_api.rs:403`) resolves per-archetype pools, and non-signature storage
      owns none (`archetype.rs:389-395`), so the gate is **never true** — the sink never updates and nothing is
      logged. Red fixtures cover BOTH spellings: an explicit `kernel (storage = dense)` component
-     and a `table`-derived dense column, since Gaia's own `table` bakes to dense — the second
-     spelling is the one an author reaches by accident. Companion doc fix in the same commit:
+     and a `table`-derived one. ⚠ **The premise of that second spelling was CORRECTED 2026-08-30 by
+     F2's ruling and is dated here:** Gaia's `table` bakes to **`StorageKind::Table`**, not to dense,
+     so a table row is not the accidental entrance this row assumed. The row's hazard is unchanged
+     and still live — a bind source on a dense OR bitset component is invisible to the gate — and the
+     dense spelling is reached deliberately, through `kernel (storage = dense)`, or by a row
+     component that is ALSO carried by entities outside the table, which is the one case F2 leaves
+     to `Dense`. Companion doc fix in the same commit:
      the `any_changed_since` doc comment (`component_api.rs:386-389`) claims the scan is bounded
      to hosting archetypes, which is false for exactly this case. The remedy (a bake refusal keyed on the GK-4 storage kind vs
      routing dense through `DenseStore` ticks) is the implementer's engineering choice, per the
@@ -221,9 +286,24 @@ The answer is already shipped and gated at zero allocations in this repo; Gaia g
    expected value; red-first by dirtying exactly one source, after which both counters move.
    Wall-clock delta-subtraction is not falsifiable at this scale and cannot say WHICH work
    disappeared. AIR-12 is cited here as the **precedent for counts-over-exit-code**, not as an
-   existing ruling over a runtime bench — no such ruling exists. ⚠ **Open ballot GB-7**: whether a
-   wall-clock companion is kept beside the count gate, and at what tolerance / run count /
-   noise floor.
+   existing ruling over a runtime bench — no such ruling exists.
+
+   **GB-7 RESOLVED 2026-08-30 by standing rule: NO wall-clock companion.** The count gate stands
+   alone. The ground is not "a clock is noisy" — it is that a clock does not measure this gate's
+   subject, and that was established at source and then measured. `ui_bind_discovery` makes ONE
+   call and `dynamic_bound_ids` is a **deduplicated set of component TYPES**
+   (`register_bound_id`, [`bind_system.rs:56-60`](../../crates/boyko_ui/src/binding/bind_system.rs)),
+   so **the binding count is not an input to the timed loop**: 200 or 2000 bindings over the same
+   three types give the same id set and the same scan. Measured at HUD scale, the still frame is
+   **332 ns** and moves **+0% for 10× the bindings**, **+82% for 2× the rows** and **+101% for 2×
+   the bound types** — a threshold on that fixture tracks everything the fixture does not pin.
+   `Instant::now()`'s step is 100 ns, so the whole frame is ~3.3 ticks with a 15-25× single-call
+   tail, and the red-first delta this would have to resolve (0 → 1 sink write) sits at
+   signal-to-noise **0.05-0.50**, never above 0.5. The count gate resolves it exactly, with no
+   instrument; **no honest tolerance exists to quote**, and a loose one is a gate that cannot fail.
+   **When a clock legitimately returns:** over the **scan itself**, with archetype count,
+   bound-type count and row count pinned and the number reported per row rather than per frame —
+   which is the bench **GK-2**'s design pass needs, not a companion to this gate.
 
 ## Refusals (ratified)
 
@@ -235,9 +315,63 @@ no path/name/positional identity · no multiple inheritance · no bespoke patch 
 `{node_id, key, value}` edits are applied by a TOOL) · no per-file pragmas that change parsing (the
 RON `#![enable]` class) · no comment directives · **no layout at bake** (even Slint solves layout
 at runtime; constraints bake into POD components, the solver is a runtime system) · no structural
-reactivity · no external-mod pipeline in v1 (the format carries layer names from day one so the
-retrofit is additive) · no merge driver (mergeability comes from the format: stable ids, keyed
+reactivity · **no external-mod pipeline in v1** — *ratified by the owner 2026-08-30 (ballot F7), and dated
+here because until that date this line was a ratified refusal answering half of an OPEN ballot,
+which is the settle-by-proximity shape [`CAMPAIGN.md`](CAMPAIGN.md) forbids on this page. The
+ruling makes it correct; it did not make it legitimate at the time.* The constraint is recorded
+in its NARROW form — no reflection in the GAME BINARY — so a later mod campaign is not blocked
+by a sentence that never meant to block it; the format carries layer names from day one, so the
+retrofit is additive · no merge driver (mergeability comes from the format: stable ids, keyed
 collections, small files, bake as the post-merge validator) · **no second front-end**.
+
+## GB-5 — RULED BY THE OWNER, 2026-08-30: **permit as SEED**
+
+*Recorded on this branch 2026-09-03. The ruling landed on `feat/threadpool-ke16` in `b6c41237`
+(2026-08-31), a commit that touched that branch's `gaia/DECISIONS.md` and nothing else — which is why
+every index, on both branches, went on printing GB-5 as OPEN. The full ground is at that branch's
+`gaia/DECISIONS.md` §GB-5.*
+
+**The ruling.** A scene document **may** declare an engine-derived field. The authored value is the
+**initial** value; the engine takes it over if and when its condition holds. The owner's ground, and
+it is stronger than the ballot's framing: *"the third is the most logical — it is simply a starting
+point in space; obviously this data exists to be manipulated and will not be static."* ⇒ A field the
+engine derives is, by definition, a field that changes; "initial value" is its honest semantics, not
+a concession.
+
+**Rejected, with prices.** *Refuse* — would also forbid the cases where the authored value works,
+which is every entity lacking the driving component. *Permit silently* — the silent-wrong-answer
+class this campaign exists to remove. *Refuse conditionally* — requires the baker to reason about the
+entity's other components, and for two of the twelve about their **runtime values**, which bake
+cannot do.
+
+**Why it generalises across all twelve measured members.** Spatial fields take a seed as a starting
+pose, and the engine already ships that exact semantics — a spot light's `direction` is documented as
+a SEED that `light_reconcile` overwrites
+([`light.rs:1207`](../../crates/boyko_render/src/light.rs)). For `ContentSize.width`/`.height` a seed
+is the ONLY correct answer, because until the font loads there is no measurement at all. And it
+dissolves the case a refusal could not answer: **`Transform` and `RigidBody` are a polarity pair**
+whose author-owned side flips on `Simulated`, a bit gameplay toggles at RUNTIME — under *refuse* the
+baker would have to guess which to reject and would be wrong half the time.
+
+**What the ruling still requires, and the form it must NOT take.** An author writing such a field
+should be told it is a seed, which is why the derive-emitted field table needs a disposition column —
+the thing G1 was blocked from minting until this ballot was answered. ⚠ **It must not be a boolean:**
+every one of the twelve is derived CONDITIONALLY, so "this field is engine-derived" is a false
+statement about most entities that carry it. ⇒ **The column records the CONDITION and the WRITER**,
+not a verdict: *this field may be taken over by `light_reconcile` when the entity has
+`GlobalTransform`*. That claims nothing about a particular entity, so it cannot be false.
+
+⚠ **The owner's acceptance condition, recorded as a requirement on the implementation rather than an
+assumption:** *"if the marking costs nothing at runtime and is purely for convenience, then yes."*
+The column must therefore sit behind the same default-off bake feature as the rest of the bake
+machinery — the ratified pipeline is *zero reflection in the shipped load path*. **If it turns out
+the column cannot be kept out of the game binary, the condition is not met and this returns to the
+owner.**
+
+**Unblocks:** the **G1 field-table freeze**, which was the only thing GB-5 was holding. G1 is
+unstarted — `field_table|FieldTable|field_by_name` greps empty across `boyko_macros` and `boyko_ecs`
+— so the cost today is one attribute and one column with **zero consumers to update**, and it only
+rises.
 
 ## Rejected models, for the record
 

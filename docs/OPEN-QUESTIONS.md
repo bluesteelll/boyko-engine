@@ -14,6 +14,345 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-09-03 — the Gaia register catches up with the owner: TWELVE of the fourteen ballots were ruled on 2026-08-30/31, on a branch this one never received
+
+**Why this entry exists.** The owner remembers deciding the Gaia ballots, and he is right. They were
+put to him on 2026-08-30 and he answered twelve of them the same day; four more were settled by the
+standing perf/architecture rule. **The rulings landed on `feat/threadpool-ke16` and this branch
+never received them**, so until this entry the register the repository's own rules name as primary
+still listed all fourteen as OPEN — and printed one of them **backwards**.
+
+**Established from git history, not from reading order.** `97c504c8` (2026-08-29), the head of
+`feat/multi-paradigm-render` when this sync was written, **is the merge-base** with
+`feat/threadpool-ke16` and is an ancestor of it: that branch is **28 commits ahead** and carries
+nothing this one does not. The ruling commits are `6f75ee9e` (2026-08-30, *the owner's rulings, and
+the Aether ladder closes*), `c1a9b8ec` (2026-08-31, *the delegated rulings*), `b7a9931d`
+(2026-08-31, four owner directions recorded for a later research pass) and `b6c41237` (2026-08-31,
+*GB-5 ruled*). **None of the four is reachable from this branch** (`git merge-base --is-ancestor`
+returns false for each). Nothing here overrules the working branch; where the two disagree, KE16 is
+newer by ancestry.
+
+⚠ **The single most dangerous cell, now repaired.** [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) and this
+file printed F5's recommendation as **(a)** — *the option the owner rejected*. He chose **(b)**,
+"Все сразу грамотно по списку с самого начала". A reader resuming from this branch would have built
+the wrong half of the streaming design.
+
+⚠ **And the column that made a recommendation readable as a decision.** The ballot table in
+`gaia/CAMPAIGN.md` was headed **Recommendation** — the plan's own recommendation.
+`git log -G"Recommendation" -- docs/gaia/CAMPAIGN.md` returns exactly two commits: `a4591c56`, whose
+message says the ballots are **held**, and `c1a9b8ec`, which renamed the column on the working
+branch. F1's cell there read "(b) GK-4 now" and happens to match what the owner later ruled — a cell
+**wrong in status and right in content**, which is the shape nobody re-checks. The column is now
+headed **Disposition (2026-08-30)**.
+
+### What was ruled, and by whom
+
+`RULED BY THE OWNER` and `[delegated]` are different things and are kept apart. The full ground of
+each ruling lives on `feat/threadpool-ke16` at the site named. Where that site does not exist on
+this branch the branch is named rather than linked, because a link that dangles here is the defect
+this entry repairs.
+
+| ballot | who | ruling |
+|---|---|---|
+| **F1** | owner | **Macro-time GK-4, NOW** — not sequenced behind EG2. *"Do it properly right away. But bear in mind the world must support streaming."* Both halves bind: no part of the bake design may foreclose streaming. ⚠ The ballot's own `RequiredCtor`-is-unbakeable inference is **refuted** — a GK-4 baker is a Rust program linked against the derive tables and calls the fn pointer trivially; only the *evaluator over text* cannot. Ground: KE16 `gaia/DECISIONS.md` §Inherited pipeline |
+| **F2** | delegated | **(a) rows are ENTITIES — amended three ways**: storage is `StorageKind::Table`, **not dense**; rows materialize **eagerly at load**; a table is loaded by its own explicit load and **pinned**, so `unload_cell` never touches it. The runtime handle is an `Entity` captured at load, never a row index. ⚠ **Confirmed on CORRECTED grounds — see the F2 section below.** Ground: KE16 `gaia/DECISIONS.md` §Data tables |
+| **F3** | owner | **Both file shapes over ONE schema.** A table file is a **spelling**, not a second type system. Rejected: a table dialect. Ground: KE16 `gaia/DECISIONS.md` §Data tables |
+| **F4** | delegated | **(a), as SUPPRESS-THEN-FIXUP** — four ordered sub-passes on the clone path's own precedent. (b)'s *mechanism* is adopted as sub-pass 4; its *timing* is refuted at a measured 100 % mis-link rate (saved/fresh id overlap 8/8). (c) is worse than "untenable": it forbids every mesh, material, light, camera and particle effect. Carries the stable-asset-carrier addendum — a stable NAME resolved to `MeshHandle(u32)` at load, since `MeshRef` does not exist. ⚠ **Three amendments and a moved subject — see the F4 section below.** Ground: KE16 `gaia/DECISIONS.md` §Load semantics |
+| **F5** | owner | **Option (b), EVERYTHING FROM THE START.** *"Все сразу грамотно по списку с самого начала."* `load_cell`/`unload_cell`, GK-1's cross-load map with a declared lifetime, and cross-cell reference resolution ship **with** the scene profile. ⚠ The largest change to the campaign's ground: **G6 absorbs the hardest half**, because a per-load `LoadEntityMap` cannot express references BETWEEN chunks. **The register printed (a) — the rejected option — until this entry.** Ground: KE16 `gaia/DECISIONS.md` §Streaming scope |
+| **F6** | owner | **(a) migrate `.ui` to the Gaia `ui` profile and DELETE the old format in the same campaign.** Price accepted and recorded at G7: the migration is done **blind**, because G7's prerequisites do not exist yet. Ground: KE16 `gaia/DECISIONS.md` §Language shape |
+| **F7** | owner | **RATIFIED — mods are NOT supported for now**, stated explicitly so that silence stops being a default decision. The reflection constraint is recorded in its **narrow** form (no reflection in the **game binary**), so a later mod campaign is not blocked by a sentence that never meant to block it. Ground: KE16 `gaia/DECISIONS.md` §Refusals |
+| **F8** | — | ⚠ **UNANSWERED — still open**, and deliberately untouched by every ruling of 2026-08-30. GB-3's Part 4 and F4's carrier addendum are both **F8-neutral by construction** and say so at their own sites: a *carrier form* (a stable name used as a key) is not a *name-vs-id ruling* |
+| **F9** | delegated, **partly** | ⚠ **Three eliminations RULED, the residual escalated back.** (1) `FLAGS_DIRECT` must **not** fire on the load path — it would overwrite every saved bit with its attach-time value; (2) the refusal option **may not be chosen**, because it contradicts ratified **AB-6** (*a language may not refuse what the derive accepts*); (3) if a carrier lands, its spelling is `flags (X = true)`, shared verbatim with Aether, keyed on GK-1's global object id and riding F4's fixup pass. ⚠ **STILL THE OWNER'S:** may a document set a flag on an **individual authored object**? Blocks G2 and nothing else. Ground: KE16 `gaia/DECISIONS.md` §Flags in the byte format |
+| **F10** | — | ⚠ **UNANSWERED — still open**, and deliberately untouched. Every ruling that could have brushed it states its F10-neutrality at its own site rather than settling it by proximity |
+| **GB-1** | standing rule | **RESOLVED — and the owner resolved it by sending it back**: it is an architecture fork, not a values call. Neither a template EXPANSION nor an UNLABELED write gets a ladder layer, because the ladder is the wrong axis: expansion is one step on the inheritance-**DEPTH** axis, ranked where `extends` ranks, resolution depth-then-ladder; an unlabeled write is `base`. The ratified ladder is untouched and finding K2 is **dissolved**, not diagnosed. Ground: KE16 `gaia/DECISIONS.md` §Layers and depth |
+| **GB-2** | owner | **`#RRGGBB` is `#RRGGBBAA` with maximal `AA`** — a defaulted field, not a second literal kind, which dissolves the reopen rather than answering it. Plus the arity direction the clause never covered: an 8-digit literal at a 3-component field (`PointLight::color` is `[f32; 3]`, [`light.rs:309-310`](../crates/boyko_render/src/light.rs)) is a **coded bake refusal naming the field**, never a silent alpha drop. Ground: KE16 `gaia/DECISIONS.md` §Language shape |
+| **GB-3** | owner (adoption) + delegated (the rewrite) | **The THIRD reference kind is ADOPTED**, and the four-part rewrite is ruled: the spelling is a **sigil**, uniform and position-independent, so *a bare word is never a reference*; style references are the **first** kind; `$hole` **stays**, reclassified lexical in every position; *"declared node ⇒ `@`"* is **withdrawn**. ⚠ **The glyph is NOT minted** — it is a **G2 deliverable, closed jointly with Gaia's arithmetic operator vocabulary**, because R3 makes whitespace insignificant and a glyph that can open a binary operator is ambiguous (recommendation `~`). Ground: KE16 `gaia/DECISIONS.md` §Identity and references |
+| **GB-4** | delegated | **(a) linkage-in-slot, and the linkage word is MANDATORY**: `instance <name> extends\|copy <base-ref>`, no default. `from` is deleted — measured over code fences only, 1 `from` hit in 44 fenced lines and it is `from=` as a field key on `bind`, so head-position `from` counts **zero**. Price, stated: one mandatory word per instance line. ⚠ Rider owed to G2: the corpus carries an **undeclared `from=` → `source=` rename on `bind`**. Ground: KE16 `gaia/DECISIONS.md` §The instance spelling |
+| **GB-5** | owner | **PERMIT AS SEED** — ruled 2026-08-30, recorded 2026-08-31. ⚠ **See the GB-5 section below: this is the one answer the register lost outright, and four registers on the working branch itself still say it is open** |
+| **GB-6** | owner | ✅ **DISPOSED 2026-09-03, both halves — it is no longer an open ballot.** (a) The scene-form narrowing is **RULED**: the Gaia TEXT is the source the editor saves, the BINARY is the compiled artifact that ships, and the alternative the ballot never named — shipping a scene as TEXT and parsing it at runtime, Godot's `.tscn` shape — is declined. (b) The conditional-visibility valve is **NOT a Gaia ballot**: *«gaia это не логика а данные»*, so it MOVES to **Aether R3** and is struck from this series. See the ruling section below |
+| **GB-7** | standing rule | **RESOLVED — no wall-clock companion; G7's still-frame COUNT gate stands alone.** Measured, not asserted: the timed loop's inputs are archetype count, bound-**type** count and row count and **not** the binding count (`dynamic_bound_ids` is a deduplicated type set, [`bind_system.rs:56-60`](../crates/boyko_ui/src/binding/bind_system.rs)), so the still frame is **332 ns at +0 % for 10× the bindings** but **+82 % for 2× the rows** and **+101 % for 2× the bound types**. `Instant::now()`'s step is 100 ns, so the frame is ~3.3 ticks with a 15-25× single-call tail, and the red-first delta (0 → 1 sink write) sits at signal-to-noise **0.05-0.50** — which the count gate resolves exactly and no clock does. A clock over the **scan itself**, world pinned, belongs to GK-2's design pass |
+| **GB-8** | delegated | **Three parts.** (1) **No per-site waivers**, at any of the four censuses, ever; where a property is not decidable as written, narrow the **predicate** and print the narrowing in the failure message. (2) The AIR census **widens to all of `docs/` and lands at G0** — a one-constant change, green at zero remediation. (3) The **LINK census is a separate deliverable at Aether R8** (1636 relative targets under `docs/`, **59 dead across 11 files, 44 of them in `docs/AUDIT-2026-05-23.md`**); landing it with the id half would hold the free half hostage to 59 repairs. ⚠ The census file itself, `tests/gaia_g0_citation_census.rs`, exists on `feat/threadpool-ke16` and **not on this branch**, and the G0 widening edit has landed on neither |
+| **GB-9** | standing rule | **RESOLVED — option (b): the `Or<(Changed<A>, Changed<B>)>`-over-dense emission ban is DELETED, with a record.** Its original ground was fixed and gated by Aether R0 / KE1; the fallback ground (D4) was measured and rejected — **D4 reserves the Aether *surface* `or(...)` while the ban governed *generated code*, and ratified GN2 says the baker emits no Rust**, so the ban had no subject. It could not be re-grounded on KE13 either: `Or` folds `NEEDS_CHANGE_DETECTION` and `EcsMaster::query` const-refuses it, so the banned shape cannot reach a `QueryView` at all. ⚠ **Its deadline expired unanswered** — R0 landed with GB-9 open |
+
+**The Aether `AB` series closed on the same day and on the same branch.** Every `AB` ballot except
+**AB-12** (which blocks nothing) is ruled — seven by the owner, eleven under the standing rule —
+indexed on `feat/threadpool-ke16` at `docs/OPEN-QUESTIONS.md` §*2026-08-30 — the owner's rulings, and
+the Aether ladder closes*. The four with direct Gaia consequences are marked at their bodies in the
+2026-08-29 entry below (**AB-6**, **AB-10**, **AB-11**, **AB-13**). The rest are not individually
+rewritten here: this pass verified the Gaia side and the index, not each Aether ground, and a
+register that restates what it did not check is how the next false claim enters.
+
+### GB-5 — the one answer the register lost outright
+
+**RULED BY THE OWNER 2026-08-30, recorded 2026-08-31 (`b6c41237`): a scene document MAY declare an
+engine-derived field. The authored value is the INITIAL value; the engine takes it over if and when
+its condition holds.** The owner's ground, verbatim, is stronger than the ballot's own framing:
+*"the third is the most logical — it is simply a starting point in space; obviously this data exists
+to be manipulated and will not be static."*
+
+**Required form, and it is not a boolean.** All twelve measured engine-derived field members are
+*conditionally* derived, so a per-field boolean pins a predicate that is false for most entities
+carrying the field. **The disposition column records the CONDITION and the WRITER** — *this field
+may be taken over by `light_reconcile` when the entity has `GlobalTransform`* — which claims nothing
+about a particular entity and so cannot be false. The engine already ships the semantics: a spot
+light's `direction` is documented as a SEED that `light_reconcile` overwrites
+([`light.rs:1207`](../crates/boyko_render/src/light.rs)). For `ContentSize.width`/`.height` a seed is
+the **only** correct answer — there is no measurement until the font loads. And it dissolves the
+case a refusal could not answer: `Transform` and `RigidBody` are a polarity pair whose author-owned
+side flips on `Simulated`, a bit gameplay toggles at RUNTIME.
+
+**The owner's acceptance condition is discharged by construction, so this does NOT return to him:**
+*"if the marking costs nothing at runtime and is purely for convenience, then yes"* — the column is
+born behind the same default-off bake feature as the rest of the bake machinery and never reaches
+the game binary. If it turns out it cannot be kept out of the game binary, the condition is not met
+and it does return to him.
+
+⚠ **The mechanism that lost the answer, named so it is not repeated.**
+`git show --name-only b6c41237` touches `docs/gaia/DECISIONS.md` **and nothing else** — not
+`OPEN-QUESTIONS.md`, not its Russian twin, not `gaia/CAMPAIGN.md`. The EN/RU same-commit rule held
+for the commits it covers and simply does not reach `DECISIONS.md`, which has no Russian twin.
+**Four registers on `feat/threadpool-ke16` still say GB-5 is open** — that branch's
+`docs/OPEN-QUESTIONS.md:250`, `:282` and `:198`, and its `docs/gaia/CAMPAIGN.md:124`, the last of
+which reads *"a ruling here would be a defect"*. This pass writes nothing on that branch; the repair
+there belongs to whoever owns it. **The consequence is not cosmetic: G1's field-table freeze reads
+as BLOCKED in every index and is UNBLOCKED in the log**, and G1 is unstarted —
+`field_table|FieldTable|field_by_name` greps **empty** across `boyko_macros` and `boyko_ecs` on this
+branch, so the cost is one attribute and one column with zero consumers to update. That cost only
+rises.
+
+**The standing cure this argues for** is one grep: a census asserting that no ballot id appearing
+under a RULED heading in [`gaia/DECISIONS.md`](gaia/DECISIONS.md) may appear as OPEN in this file,
+its Russian twin, or [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md). It would have caught GB-5 the day it
+landed. GB-8's ruling already puts the census file on the G0 row — but that file
+(`tests/gaia_g0_citation_census.rs`) exists on `feat/threadpool-ke16` and **not here**, so writing
+the check on this branch would mean porting a gate across a branch boundary. Recorded as owed and
+deliberately not done inside a register-sync commit.
+
+### F2 — the ruling is CONFIRMED and its original ground is SUPERSEDED
+
+A correction was filed against F2 on the working branch (`docs/OPEN-QUESTIONS.md:146-164` there) and
+must not be left standing as though unanswered: *"the ruling stands but its decisive number was
+taken at the size that flatters it."* Its arithmetic: `constants.rs:55` documents a resident floor of
+one `POOL_MIN_SLAB` (64 KiB) commit per NON-EMPTY column; a table archetype has four non-empty
+columns ⇒ **256 KiB per table regardless of row count**; so twenty 50-row tables cost **~5 MiB
+resident for 40 KB of payload**, and the rejected resource region *"wins by two orders of magnitude
+at 50 rows"*.
+
+**The ruling stands. That ground does not, and is marked SUPERSEDED.** Three reads on THIS branch:
+
+1. **The floor is symmetric across the fork.** `COMMIT_GRANULE = 64 * 1024`
+   ([`constants.rs:7`](../crates/boyko_ecs/src/ecs/constants.rs)) is the commit unit on **both**
+   sides — a resource region commits in the same granule. At the correction's own worst case the
+   margin is therefore **≤ 4× and ≤ 3.75 MiB**, not two orders of magnitude. One 1024² RGBA8 texture
+   is 4 MiB.
+2. **The floor keys on SCHEMA count, not FILE count.** `create_archetype` **dedups** by id set and
+   `load_archetype` **appends** at the archetype's current row head — the loader says so itself at
+   [`load_writer.rs:325-335`](../crates/boyko_ecs/src/ecs/core/serialize/load_writer.rs). N one-row
+   documents and one N-row document therefore land in the SAME archetype, and F3's owner-ruled
+   one-schema-both-shapes form is exactly the mitigation. The correction's "twenty tables" counts
+   files.
+3. **Option (b) cannot be built with the engine's own primitive.** `VmColumn::new` asserts
+   `COMMIT_GRANULE.is_multiple_of(size_of::<T>())`
+   ([`vm_column.rs:144-149`](../crates/boyko_ecs/src/ecs/memory/vm_column.rs)) and 40 ∤ 65536, so
+   the correction's "flat column" of a 40 B row type collapses into a pool-reusing variant that
+   saves 25 % while paying 100 %. And `grep -rniw "resource" crates/boyko_serialize/src/` returns
+   **0** on this branch — (b) writes an entire per-`ResourceId` serialize seam from scratch rather
+   than adding a region.
+
+⚠ **What the correction is RIGHT about, carried forward rather than dismissed.** F2 was partly argued
+on "dense does not parallelise", and the KE16 kernel finding — every `par_iter` inside a system body
+runs on one thread — removes that axis for **both** options: it now discriminates nothing. F2 must
+be read on resident memory and access cost alone, which is what the three reads above do. The
+internal tension the correction names is also unresolved and is recorded, not closed: F2(ii) rejects
+laziness because *"row constants exist to delete a lookup"* while F2(iii) makes the runtime handle
+an `Entity`, and reading a row from an `Entity` **is** a lookup. Access cost is priced on neither
+option. **Marginal cost:** the honest figure is **511-704 KiB**, not a flat 511 KiB.
+
+### F4 — the ruling stands with three amendments, and its subject MOVED
+
+The 2026-08-30 [delegated] ruling — option (a), suppress-then-fixup, four ordered sub-passes inside
+`load_world` — is confirmed. Three amendments follow from measurement and are part of the record:
+
+1. **Sub-pass 4 SPLITS.** **4a** = relationship relink through the already-installed fn-pointer
+   table (fires no user code, closes the reverse index and therefore the hierarchy); **4b** = user
+   hook dispatch, needed only for refcounts and genuine user hooks. 4a is nearly free: the relink
+   table already exists and is FK-driven rather than map-driven (`install_relationship_relink` /
+   `get_relationship_relink_fn`,
+   [`clone.rs:238`](../crates/boyko_ecs/src/ecs/core/component/component_registry/clone.rs)), and
+   the suppression bracket already exists (`LinkSuppressGuard`,
+   [`relationship/mod.rs:111`](../crates/boyko_ecs/src/ecs/core/relationship/mod.rs)).
+2. **The coverage census is 5 mechanisms × 3 STORAGE KINDS** {table, dense, bitset}, not 5 × 1.
+3. **Sub-pass 4b reports per hook class** on `LoadReport`, and a refcount hook that found no
+   `RefcountDeltas` must say so.
+
+The fixup runs INSIDE `load_world` and is not optional; it is additionally exposed `pub` over a
+narrowed iteration domain so that F5's `load_cell` needs no second implementation.
+
+**Two of F4's five mechanisms were measured this week, and one of them was FIXED — on the other
+branch, not on this one.**
+
+- ⚠ **A dense component's `#[entities]` field was never remapped on load. FIXED on
+  `feat/threadpool-ke16` by `8d351b2e` (2026-09-03)**: `remap_loaded_entities` gathered its columns
+  from `archetype.component_ids()` and had no dense arm at all, so the loader remapped the store's
+  OWNER but never the component's INTERIOR — measured as a loaded `DenseRef.target` still equal to
+  the SAVED id, with `dense_stores_skipped = 0` and `load_world` returning `Ok`. **The defect is
+  still live on this branch**: `remap_loaded_entities`
+  ([`load_writer.rs:912`](../crates/boyko_ecs/src/ecs/core/serialize/load_writer.rs)) iterates
+  archetypes only, and `LoadReport` here carries neither `remapped_table_rows` nor
+  `remapped_dense_rows`.
+- ⚠ **Relation reverse indexes are still never rebuilt on load, on BOTH branches**, and the
+  consequence is render-visible rather than a query-hygiene nicety. Measured on this branch:
+  `grep -rE "trigger_on_[a-z]+\(" crates/boyko_ecs/src/ecs/core/serialize/` returns **0**, and no
+  relink call reaches `crates/boyko_serialize/src/`. `Children` classifies `Serializability::Ignore`
+  with no rebuilder — the loader's own comment says so at `load_writer.rs:326-330` — and transform
+  propagation descends **only** through `Children`:
+  [`propagation.rs:349-350`](../crates/boyko_scene/src/propagation.rs) holds the sole `stack.extend`
+  edge in the file. **So a reloaded scene's children never compose their parent's pose.** Under the
+  2026-09-03 editor ruling that is the editor's very first useful frame.
+- ⚠ **A code comment asserts the mechanism that does not exist.**
+  [`component.rs:137-142`](../crates/boyko_macros/src/component.rs) states that a relationship
+  TARGET's reverse index *"is rebuilt from the sources' `Relationship` on load, exactly as it is
+  rebuilt on clone"*. The clone half is true; the load half is the measurement above. The comment is
+  identical on both branches and is **deliberately not edited here** — the honest place for it is
+  the commit that lands sub-pass 4a and makes it true, and that file is 150 lines diverged between
+  the branches. Recorded so the 4a implementer does not have to rediscover it.
+
+Also recorded: the fresh-world contract guard a merge load walks into is a `debug_assert!` at **two**
+sites (`load_writer.rs:703` and `:795`), so it vanishes in a shipping build. Editor undo is
+structurally a merge load, which makes this an editor concern and not only a streaming one.
+
+### RULED BY THE OWNER, 2026-09-03 — the rulings of today
+
+None of these is a ballot from the 2026-08-28/29 series. All are the owner's own words in his own
+session, recorded here because the register is where owner rulings live and because several of them
+CLOSE things this entry would otherwise have listed as open. The editor design documents themselves
+live on `feat/threadpool-ke16` under `docs/editor/`; they do not exist on this branch, so the
+rulings are recorded here and the edits to those documents are owed on that branch.
+
+**The editor edits Gaia DIRECTLY** — scenes, data assets **and** ui documents. His model, verbatim:
+*"когда мы изменяем сцену мы можем ее сохранить, в таком случае меняются исходники gaia — ну типа
+как json файл. После этого да, мы уже компилируем эту сцену в бинарь."* So the Gaia **TEXT** is the
+SOURCE and is what the editor edits and saves; the **BINARY** is the compiled artifact and is what
+ships. ⚠ **This SUPERSEDES the editor design's `E6.1`**, which decided the document's persistent
+form in v1 to be *"the `boyko_serialize` binary written by `save_world`"*
+(`feat/threadpool-ke16` `docs/editor/EDITOR-DOCUMENT.md` §1). The rest of E6.1 — *the document IS
+the edit World, there is no retained document model beside it* — is untouched; only the persistent
+FORM changes. Consequence carried rather than hidden: the Gaia TEXT printer then needs the same
+derived/`Ignore` classification the byte format already has, or the first save-after-load writes
+`Children`, GB-5's seed fields and hook-installed state back out as authored data — two sources of
+truth in a hand-editable file.
+
+**Gaia proceeds in PARALLEL with the KE16 threadpool work, in separate worktrees** (the standing
+worktree-per-system rule). No rung moves; this decides who does the work and where, and it closes
+the schedule question this pass had listed as open.
+
+#### GB-6 is DISPOSED, both halves — it stops being an open Gaia ballot
+
+**GB-6(a), the scene-form narrowing — RULED BY THE OWNER.** The §Relations line
+([`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md)) is correct as written and is now **decided**. The
+alternative the ballot never named is recorded here, because the ballot's own body observed that its
+rejected alternative was its only witness and that this is why it could not be vetoed: the real
+alternative was **shipping a scene as TEXT and parsing it at runtime** — Godot's `.tscn` shape — and
+the owner has declined it. The four downstream reassignments already filed against the line
+therefore **stand** rather than reverting to provisional. The rider that a veto point must state its
+price is discharged by the ruling itself: the question is answered, so there is nothing left to veto.
+
+**GB-6(b), the conditional-visibility valve — NOT A GAIA BALLOT AT ALL; it MOVES.** The owner's
+objection, and it is correct: *"Не ясно вообще в чем вопрос и причем тут gaia. gaia это не логика а
+данные. Логика у нас либо в расте либо в aether."* Traced, the ballot is **misfiled rather than
+wrong**: Gaia's own ratified rule already says what he says — structure bakes, only VALUES react, and
+a condition in a Gaia file is a token REFERENCE, never an expression — so the data side says only
+*this node's visibility is controlled by token X*, and the logic that decides X is Rust or Aether.
+The one missing piece is entirely on the Aether side: **Aether has no construct that toggles a
+flag**, while the runtime ships three times over (`UiWorldCulled` / `UiWorldHidden` /
+`UiWorldOccluded`). **Disposition: it moves to Aether rung R3**, where `tag`, `flag` and the `scene`
+surface already live, and it is **struck from the Gaia `GB` series**. ⚠ Recorded because it was
+visible and unresolved rather than newly discovered: the ballot was already filed against one rung
+while its own body named another.
+
+#### The editor's design questions, ruled today
+
+- **Play window:** a SEPARATE OS window in v1; embedding is v2.
+- **Edits made while playing:** discarded. *"Правки применяются только когда не запущен play in
+  editor."*
+- **The v1 demonstration document:** the **boyko playground** scene.
+- **Destructive commands issued by an agent** (`entity.despawn`, `document.save` over an existing
+  file, `play.stop`) require an explicit `confirm: true` over the transport — never when the same
+  command is issued by the editor's own UI.
+- **The edit viewport stays FROZEN, and a preview toggle is NOT in v1.** *"у нас же два режима во
+  вьюпорте есть — редактирование, где всё заморожено, и play; ну как в unreal engine."*
+  ⚠ **This REVERSES a recommendation made earlier the same day** — the analysis had argued for a
+  preview toggle on the ground that the editor process still runs ENGINE systems (particles,
+  animation, physics) even without game systems, so a preview would be meaningful. That
+  recommendation is kept visible here with its disposition attached rather than deleted. The owner
+  ruled two modes, and the consequence follows the ruling into the record: tuning a particle effect
+  goes through Play or through a separate preview panel, and the main viewport keeps two states.
+
+#### ⚠ Replay determinism — the owner CHANGED a design decision, not just answered a question
+
+The editor replay design (`feat/threadpool-ke16` `docs/editor/EDITOR-REPLAY.md`, decision **E4.5**)
+states that the sufficiency oracle is **EXPECTED RED on event-lane order** — *"events of two systems
+interleave PER WORKER THREAD, so lane order follows scheduling"* — and offers "make lane order
+deterministic", a scheduler change with a real cost, as the alternative. **The owner rejected that
+framing and gave a better design:**
+
+> *"можно сделать отдельный флаг чтобы в реплей записывать порядок воркеров и потом отдельный флаг
+> воспроизведения чтобы это считывать. Тогда при дебаге это позволит нормально дебажить, а если цель
+> просто посмотреть демо игры как в dota — производительность не будет страдать. В любом случае в
+> 90% игр реплеев вообще не будет и производительность должна быть максимальной."*
+
+His ground is the load-bearing part: **worker divergence between runs is not a defect, it is what a
+work-stealing pool does** — so constraining the scheduler fights the mechanism for a property that
+one mode of three needs. RECORD the outcome instead of constraining the engine, which is the same
+principle the replay design already applies to input: record the seam.
+
+**Two flags:** a RECORD flag that writes the lane order into the replay, and a PLAYBACK flag that
+reads it back. A debug replay is exact; a spectator/demo replay does not pay for it; a game with no
+replay pays nothing.
+
+Consequences, written into the record rather than left to be rediscovered:
+
+1. **E4.5's "expected RED" is WITHDRAWN.** The oracle is not red — it is GREEN under the debug flag
+   and honestly NOT-APPLICABLE under the demo flag. Those are different states, and the document
+   must stop conflating them. E4.5's old position is not deleted; it is superseded, with this date.
+2. **The kernel scheduler change ("make lane order deterministic") is no longer a prerequisite of
+   replay.** If it is wanted later it is wanted on its own merits, and it is no longer owner
+   question 4 of that design.
+3. *Engineering note, recorded as such and not as the owner's words:* what needs recording is the
+   **merge order of the lanes per frame** — a permutation — not which worker took which task. That
+   leaves the event WRITE path untouched and costs a few bytes per frame.
+4. ⚠ **One verification is OPEN and is filed as open, not assumed:** recording an ORDER restores
+   sequence but not any non-determinism in parallel-computed VALUES. Physics is covered — the
+   colored solve's {1, N}-worker bit-identity is pinned — but any OTHER parallel float reduction
+   needs its own answer. That check is outstanding.
+
+### Still open, and NOT answered here
+
+After today's rulings **one scoping item and three ballots** remain. What follows each is **the
+pricing pass's RECOMMENDATION, and it is a recommendation** — a ruling written for any of them
+would be the defect this entry exists to repair.
+
+| open item | question | the pass RECOMMENDS (it is NOT a ruling) |
+|---|---|---|
+| **EDITOR-UI-SCOPE** | Created by today's editor ruling: does editor v1 author UI documents (the Gaia `ui` profile) as well, or only scenes and data assets? ⚠ **The ruling as stated names *ui documents*, which read strictly answers this (b).** It is recorded as open rather than closed because the pass had recommended (a) and one line settles which was meant — recording it as decided on an inference is exactly the shape this entry repairs | **(a)** scenes + data assets in v1; cheap to reverse. F6's ANSWER does not change either way — `.ui` is migrated and deleted regardless — only its SCHEDULE and G7's position do. One fact binds under both answers: `.ui` **cannot author a background colour at all** (`UiBackground`, [`components.rs:219`](../crates/boyko_ui/src/components.rs), is carried by the Panel/Button/Bar bundles and appears nowhere under `crates/boyko_ui/src/text/`), so an editor saving `.ui` would display a coloured panel and save a colourless one — under a green round-trip gate whose universe never contained it |
+
+**Closed today, and recorded here so the change of state is visible rather than silent:**
+**GB-6** is disposed in both halves (see the ruling section above) and is no longer a Gaia ballot;
+**CAMPAIGN-PRIORITY** is answered by the parallel-worktrees ruling. What survives of the pass's
+recommendation on the latter is its ordering constraint alone: the register sync and F4's sub-pass
+4a land FIRST, and the sync lands in the MAIN checkout.
+
+**F8, F9's residual and F10 also remain unanswered, and are NOT settled here.** The pricing pass
+offers a disposition for each under the standing architecture rule — F8: the object NAME is not the
+id, the ratified file-local id slot stands, and the reopen never met AIR-10's own bar (it stated its
+trigger and never its measurement). F9's residual: no per-object `flags (…)` group; per-object
+authored state is a durable COMPONENT FIELD owned by exactly one deriving system. F10: not a ballot
+at all — a bundle is a CODE fact, so it expands from the live derive-emitted manifest at load and is
+never frozen at bake. **Each of those three is a recommendation offered as a veto line, not a
+ruling**, and each is recorded as such at its ballot body below.
+
+---
+
 ## 2026-08-29 — Corpus audit of the aether-v2 + gaia plans: THIRTY-TWO open ballots, listed here because a plan that settles a fork silently is the defect
 
 A multi-lens review of the two plan corpora ([`aether-v2/`](aether-v2/CAMPAIGN.md),
@@ -32,43 +371,128 @@ premise, and that is said at the item.
 **Nothing here blocks R0, R1 or R2 on the Aether ladder** — those are buildable immediately (KERNEL-BACKLOG **KE11**'s
 red tests land regardless of its disposition). Everything above them waits on a line from this list.
 
+> ✅ **STATUS, 2026-09-03 — read this before any ballot body below.** The bodies in this section are
+> kept verbatim as the record of what was open and why; **they are no longer a to-do list.** Of the
+> fourteen Gaia ballots, **twelve are answered** — six by the owner outright (F1, F3, F5, F6, F7 and
+> GB-3's adoption), four **delegated** and since ruled (F2, F4, F9 in part, GB-4), and four by
+> standing rule (GB-1, GB-7, GB-8, GB-9). **Still open: F8, F10 and F9's residual VALUES
+> question** — with two corrections: **GB-5 is RULED** (permit as seed, 2026-08-30) and only the
+> registers said otherwise, and **GB-6 was DISPOSED 2026-09-03** in both halves, its (b) half
+> moving to Aether R3. Every `AB` ballot except AB-12 is closed. The
+> per-ballot index, the git provenance and the F2/F4 corrections are in
+> §*2026-09-03 — the Gaia register catches up with the owner*, above. Each body below now carries its
+> own disposition line, so no body has to be read against a stale header.
+
 ### Gaia — the `F` series (F1..F7 raised 2026-08-28, full bodies in the entry below; F8..F10 born in this review)
 
 - **F1 — the bake route.** EG2 reflection seam (already rejected by the 2026-08-27 audit ballot) vs
   macro-time GK-4 now with EG2 as a later upgrade. The real question is SEQUENCING. Blocks **G1**.
+  ✅ **RESOLVED 2026-08-30 BY THE OWNER — macro-time GK-4, NOW, with streaming not foreclosed.**
+  Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Inherited pipeline.
 - **F2 — where a DataAsset's rows live at runtime.** Entity-shaped dense columns with generated row
   constants, vs a new resource region in the byte format. Blocks **G5**.
+  ✅ **RESOLVED 2026-08-30 [delegated] — (a) rows are entities, AMENDED**: `StorageKind::Table` not
+  dense, eager at load, own explicit load and pinned. ⚠ **Confirmed on CORRECTED grounds
+  2026-09-03**; the original size argument is superseded — see the 2026-09-03 entry above.
 - **F3 — the shape of a table file.** Single-file-per-asset only, vs also a table file baking N rows
-  into one dense column — over ONE schema either way. Blocks the **grammar** (G5's authoring
-  surface).
+  into ONE ARCHETYPE COLUMN — over ONE schema either way. Blocks the **grammar** (G5's authoring
+  surface). ⚠ *This body used to read "into one dense column". F2's ruling refutes the phrase: a
+  dense id is signature-excluded (`is_signature_storage` matches `StorageKind::Table` alone), so
+  `get_or_create_archetype(&[DenseRow])` returns the EMPTY archetype and "dense-column archetype"
+  denotes nothing in this engine.*
+  ✅ **RESOLVED 2026-08-30 BY THE OWNER — both shapes, ONE schema.** A table file is a spelling, not
+  a second type system. Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Data tables.
 - **F4 — what "loaded" means, WIDENED** to every insert-path mechanism the load path misses (hooks,
   the `#[require]` closure, flag initial state, relation reverse indexes, asset refcounts). Blocks
   **G6** and the engine's load semantics generally; carries the G6 stable-asset-carrier addendum.
+  ✅ **RESOLVED 2026-08-30 [delegated] — (a), as SUPPRESS-THEN-FIXUP: four ordered sub-passes**, with
+  **three amendments recorded 2026-09-03** (sub-pass 4 splits into 4a relink / 4b hooks; the census
+  is 5 mechanisms × 3 storage kinds; 4b reports per hook class). ⚠ Its subject MOVED: one of the
+  five mechanisms was fixed on `feat/threadpool-ke16` and another is still live on both branches —
+  see the 2026-09-03 entry above.
 - **F5 — streaming scope.** Catalog now / loader later, vs the whole streaming half inside G6. The
   second option had never been written down. Blocks **G6**.
+  ✅ **RESOLVED 2026-08-30 BY THE OWNER — option (b), EVERYTHING FROM THE START.** *"Все сразу
+  грамотно по списку с самого начала."* ⚠ **This register printed the recommendation as (a) — the
+  option he rejected — until 2026-09-03.** G6's scope is rewritten accordingly. Ground:
+  `feat/threadpool-ke16` `gaia/DECISIONS.md` §Streaming scope.
 - **F6 — the fate of `.ui`.** Migrate and delete in the same campaign, vs freeze until an owner-eval
   of a real Gaia HUD. Blocks **G7**.
+  ✅ **RESOLVED 2026-08-30 BY THE OWNER — (a), migrate and delete in the same campaign.** Ground:
+  `feat/threadpool-ke16` `gaia/DECISIONS.md` §Language shape.
 - **F7 — mods.** ⚠ Borders the ratified reflection-only-at-bake refusal; must be framed against it
   rather than asked fresh. Blocks nothing today; silence is itself a decision.
+  ✅ **RESOLVED 2026-08-30 BY THE OWNER — mods are NOT supported for now, ratified explicitly**, and
+  the reflection constraint is recorded in its narrow form (no reflection in the game binary).
+  Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Refusals; the ratified line in this branch's
+  [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Refusals now carries that date.
 - **F8 — name-vs-id for objects.** Does an authored object carry a human NAME that bakes to an id,
   or a minted ID with the name as commentary? ⚠ **REOPENS the ratified `gaia fmt --assign-ids`
   identity ruling** — which was written before the third reference kind (assets, GB-3) surfaced.
   AIR-10's bar applies: a reopen states its TRIGGER and its MEASUREMENT, it does not re-argue taste.
   Blocks: **TBD — owner scoping** (G3 is the candidate).
+  ⚠ **STILL OPEN, and deliberately untouched by every ruling of 2026-08-30.** GB-3's Part 4 and F4's
+  carrier addendum are both **F8-neutral by construction** and say so at their own sites: a *carrier
+  form* (a stable name used as a key) is not a *name-vs-id ruling*.
+  *RECOMMENDATION, not a ruling (2026-09-03):* the object NAME is **not** the id — the ratified
+  file-local id slot stands and the reopen never met AIR-10's own bar, because it stated its trigger
+  (the third reference kind) and never its measurement; GB-3's ruling then made asset references a
+  position-independent sigil and declares its F8-neutrality at its own site, so the trigger does not
+  reach object identity. Offered as a veto line: disagreeing reopens the whole grammar rung, so it is
+  cheaper to say so now than at G2.
 - **F9 — the flags carrier.** Where a document's `flag` lands in the byte format: a carrier of its
   own, or a bake-time refusal with a `GA####` code telling the author to spell it as a component.
   Blocks **G2/G6**.
+  ⚠ **PARTLY RESOLVED 2026-08-30 [delegated] — three eliminations ruled, the residual escalated
+  back.** RULED: (1) `FLAGS_DIRECT` must **not** be fired on the load path — it would overwrite every
+  saved bit with its attach-time value; (2) the refusal option **may not be chosen**, because it
+  contradicts ratified **AB-6** (*a language may not refuse what the derive accepts*); (3) the
+  spelling, if a carrier lands, is `flags (X = true)` shared verbatim with Aether, keyed on GK-1's
+  global object id, riding F4's fixup pass. ⚠ **STILL THE OWNER'S:** may a document set a flag on an
+  **individual authored object**? That is a VALUES call about the authoring surface; it blocks **G2**
+  and nothing else.
+  *RECOMMENDATION, not a ruling (2026-09-03):* no per-object `flags (…)` group in v1 — per-object
+  authored state is a durable COMPONENT FIELD, and the flag stays owned by exactly one system that
+  derives it (`Visibility` byte → `RenderEnabled` bit is the shipped, gated pattern). A flag bumps no
+  change tick, so a document-set flag can race its owning system with no observable. Offered as a
+  veto line: a level FILE outranking a SYSTEM over a runtime bit is a legitimate values position, and
+  option (A) is fully priced (header 80→96 B, version 2→3, 5 016 B for 10 000 entities × 4 tags).
 - **F10 — bundles: expand or refuse.** Does the baker expand a bundle into its components at bake
   time, or refuse a bundle in a document and demand the components? **Pre-question: is this a ballot
   at all** — PENDING's Tier 3 and its Part D contradict each other on whether it was already
   decided. Blocks: **TBD — owner scoping**.
+  ⚠ **STILL OPEN, and deliberately untouched.** Every ruling of 2026-08-30 that could have brushed it
+  — GB-1's depth rule, GB-3's Part 4, GB-4's instance form — states its F10-neutrality at its own
+  site rather than settling it by proximity. ⚠ **The pre-question is UNANSWERABLE BY READING:** both
+  sides of the alleged contradiction were rewritten into mutual notices of it, neither now states a
+  POSITION, and the original text was never in git — `git log --all -- docs/gaia/PENDING-SYNTAX-PLAN.md`
+  returns the commit that ADDED the file in its present form and one later touch. It can only be
+  settled by ruling.
+  *RECOMMENDATION, not a ruling (2026-09-03):* not a ballot — an architecture fork, decided by F4's
+  own ratified provenance criterion (a datum that is a function of the CODE is re-read live and never
+  frozen into the artifact). A bundle is a code fact, so a document MAY name one and it is expanded
+  from the LIVE derive-emitted manifest on the load path, never at bake — a bake-time expansion is
+  the version-skew class F4 rejected, where a level baked before `Pawn` gained a member loads without
+  it forever, silently. The refuse-arm survives narrowed to the K8 shape, with a `GA####` code at G2.
 
 ### Gaia — the `GB` series (born in this review)
 
 - **GB-1** — which layer of the priority ladder a template EXPANSION and an UNLABELED write occupy.
   Blocks **G4**.
+  ✅ **RESOLVED 2026-08-30 by STANDING RULE — and the owner resolved it by sending it back**, which is
+  the opposite failure from the one this list hunts: an architecture fork over-escalated. **Neither
+  case gets a ladder layer**, because the ladder is the wrong axis: a template expansion is one step
+  on the inheritance-DEPTH axis, ranked exactly where `extends` ranks, and resolution is depth first,
+  then ladder; an UNLABELED write occupies `base`. The ratified ladder is untouched, and finding K2
+  is dissolved rather than diagnosed. Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md`
+  §Layers and depth.
 - **GB-2** — the colour transfer function: `#RRGGBBAA` sRGB-decoded at bake, vs raw bytes carried
   into a LINEAR field. Blocks **G2/G5**.
+  ✅ **RESOLVED 2026-08-30 BY THE OWNER — `#RRGGBB` is `#RRGGBBAA` with maximal `AA`**: a DEFAULTED
+  FIELD, not a second literal kind, which dissolves the reopen rather than answering it. Plus the
+  arity direction the original clause never covered: an 8-digit literal at a 3-component field
+  (`PointLight::color` is `[f32; 3]`) is a **coded bake refusal naming the field**, never a silent
+  alpha drop.
 - **GB-3** — the reference taxonomy needs a THIRD kind. Ratified §Identity has two (lexical/copy,
   entity identity via `@` with remap); asset references are neither. On one ballot because R4 should
   be rewritten once: the asset-ref spelling (sigil / typed head / bare strings — the bare-string
@@ -76,29 +500,113 @@ red tests land regardless of its disposition). Everything above them waits on a 
   disposition, and withdrawal of the "declared node ⇒ `@`" rule. ⚠ **amends ratified §Identity** —
   an extension consistent with its own one-spelling-one-behaviour rationale, not a reversal. Blocks
   **G2/G3** and PENDING Tiers 1-2.
+  ✅ **RESOLVED 2026-08-30 — THIRD KIND ADOPTED BY THE OWNER; the four-part rewrite ruled
+  [delegated].** (1) the spelling is a **SIGIL**, uniform and position-independent, so a bare word is
+  never a reference — but ⚠ **the glyph is NOT minted**: it is a **G2 deliverable, closed jointly
+  with Gaia's arithmetic operator vocabulary**, because R3 makes whitespace insignificant and a glyph
+  that can open a binary operator is ambiguous (recommendation `~`). (2) style references are the
+  FIRST kind, and the ballot's example list drops "a style record". (3) `$hole` STAYS, reclassified
+  lexical in every position. (4) "declared node ⇒ `@`" is WITHDRAWN, replaced by *what does bake do
+  with this reference?*. ⚠ The ballot's GN1 premise is refuted: GN1's first resolution is a load
+  remap, so GN1 is the law over all three kinds. The ruling now sits in this branch's
+  [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Identity and references, where the open ballot body used
+  to sit inline. **Follow-on finding, unresolved and NOT a ballot:** the asset-ref dangle check is
+  structurally unreachable downstream of the sigil pass — `AssetServer::load` logs `E0801` and
+  returns a LIVE handle in the `Failed` state which it inserts into the path index, and
+  `validate_asset_refs` early-returns unless `free_epoch` advanced, which a never-loaded asset never
+  makes happen.
 - **GB-4** — instance re-spelling: (a) linkage-in-slot (`instance wall_east extends|copy "…"`) vs
   (b) linkage-in-head (`instance` ≡ live link, `copy` its own head). `from` is deleted either way —
   it was minted by that one line and appears in no ratified vocabulary. Blocks **G4** / Tier 2.
+  ✅ **RESOLVED 2026-08-30 [delegated] — (a) linkage-in-slot, and THE LINKAGE WORD IS MANDATORY**:
+  `instance <name> extends|copy <base-ref>`, no default. (b) was rejected on four grounds, the
+  sharpest being that it has NO refusal for the OMITTED case while (a) does — and on the generator
+  axis (b)'s omission error is the invisible one. Price, stated: one mandatory word per instance
+  line. ⚠ Rider owed to G2: the corpus contains an UNDECLARED `from=` → `source=` rename on `bind`.
 - **GB-5** — may a scene document declare an ENGINE-DERIVED field (`PointLight.position`)? The `ui`
   profile already refuses this; the ballot is extending the rule to `scene` as a DECISIONS line
   BEFORE G1 freezes the GK-4 field table, which then marks such fields. Blocks the **G1 table
   freeze**.
+  ✅ **RESOLVED 2026-08-30 BY THE OWNER (recorded 2026-08-31, `b6c41237`) — PERMIT AS SEED.** *"the
+  third is the most logical — it is simply a starting point in space; obviously this data exists to
+  be manipulated and will not be static."* Required form: the field-table disposition column MUST NOT
+  be a boolean — all twelve measured members are CONDITIONALLY derived, so the column records the
+  CONDITION and the WRITER. His acceptance condition (*"if the marking costs nothing at runtime and
+  is purely for convenience, then yes"*) is DISCHARGED BY CONSTRUCTION: the column is born behind the
+  same default-off bake feature and never reaches the game binary, so this does NOT return to him.
+  ⚠ **This is the clearest case of a register losing an answer the owner gave** — see the 2026-09-03
+  entry above for the mechanism and for the four registers on `feat/threadpool-ke16` that still say
+  it is open. **G1's table freeze is UNBLOCKED.**
 - **GB-6** — §Relations carries two unclassified "ratify" imperatives: the scene-form fork (blocks
   **G6** if it is a ballot; if delegated, it must be relabelled "decided, owner may veto"), and the
   EnableTag-toggling visibility valve, which carries a DEADLINE ("before the first designer asks")
   and therefore needs an F-id and a rung on the Aether ladder — **a deadline with no rung can never
   come due**. Recorded beside it: the two authored-scene emission fixes ride no rung at all.
+  ✅ **DISPOSED 2026-09-03 BY THE OWNER, both halves — no longer an open ballot.** (a) The
+  scene-form fork is **RULED**, and the line is decided rather than relabelled: the Gaia TEXT is the
+  source the editor saves and the BINARY is the compiled artifact that ships. The alternative the
+  ballot could not name — shipping a scene as TEXT and parsing it at runtime (Godot's `.tscn`
+  shape) — is declined, so the four downstream reassignments filed against the line STAND.
+  (b) The valve is **not a Gaia ballot at all** and MOVES to **Aether R3**: Gaia is data, the logic
+  that decides the token is Rust or Aether, and the only missing piece is an Aether construct that
+  toggles a flag. ⚠ The misfiling this ballot carried was visible rather than newly discovered:
+  [`AETHER-GAIA-REVISION-2026-08-29.md`](AETHER-GAIA-REVISION-2026-08-29.md) files GB-6 against
+  **G7** while its own body named **G6**.
 - **GB-7** — the wall-clock companion beside G7's count gate: kept or dropped, and if kept, its
   tolerance, run count and noise floor. **G7**, minor.
+  ✅ **RESOLVED 2026-08-30 by STANDING RULE — NO wall-clock companion; the count gate stands alone.**
+  The model case of a ballot a measurement settled and that should never have been asked: the timed
+  loop's inputs are archetype count, bound-TYPE count and row count and NOT the binding count, so the
+  still frame is 332 ns at +0 % for 10× the bindings but +82 % for 2× the rows and +101 % for 2× the
+  bound types; at a 100 ns timer step the frame is ~3.3 ticks with a 15-25× single-call tail, and the
+  red-first delta (0 → 1 sink write) sits at signal-to-noise 0.05-0.50. A clock over the SCAN itself,
+  with the world pinned, belongs to GK-2's own design pass. The ruling now sits in this branch's
+  [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §UI bindings item 9, where the open ballot body used to
+  sit inline.
 - **GB-8** — the corpus-wide link/id census: which rung owns it, and whether it may carry per-site
   waivers. **Precedent, not a reopen** (no ratified item is touched): this repository's own
-  anchor-census precedent says no — a waiver allowance licensed 188 abdications out of 302 sites.
+  anchor-census precedent says no. ⚠ *This body used to cite "188 abdications out of 302 sites".
+  That is NOT this tree's number and no in-tree gate produces it:*
+  [`tests/internal_docs_anchors.rs`](../tests/internal_docs_anchors.rs) *run live prints* **735
+  anchors / 116 waived** *— and the precedent is STRONGER than that aggregate, because the waiver
+  concentrated entirely in the one document admitted under it, which waives* **89 of 177 (50.3 %)**.
   **G0/R8**.
-- **GB-9** — does the `Or`-over-dense generated-code ban survive the kernel fix (KERNEL-BACKLOG **KE1**)? Keep it
-  with a stated ground, or delete it with a record. **Decide before R0 lands**, because R0 is
-  precisely what makes the ban's original ground false. Blocks **G7**'s codegen rules.
+  ✅ **RESOLVED 2026-08-30 [delegated], in three parts.** (1) **NO PER-SITE WAIVERS** at any of the
+  four censuses, ever; where a property is not decidable as written, narrow the PREDICATE and print
+  the narrowing in the failure message. (2) The AIR census **widens to ALL of `docs/` and LANDS AT
+  G0** — a one-constant change, green at zero remediation. (3) The **LINK census is a SEPARATE
+  deliverable at Aether R8** (1636 relative targets under `docs/`, 59 dead across 11 files, 44 of
+  them in `docs/AUDIT-2026-05-23.md`), because landing it with the id half would hold the free half
+  hostage to 59 repairs. ⚠ **G0 is NOT done**: the widening edit has landed on no branch, and the
+  census file `tests/gaia_g0_citation_census.rs` exists on `feat/threadpool-ke16` and not on this
+  one. ⚠ Filing correction: the work order files GB-8 against **R8 only**, dropping the **G0** half
+  that turned out to carry the work.
+- **GB-9** — does the `Or`-over-dense generated-code ban survive the kernel fix (KERNEL-BACKLOG
+  **KE1**)? Keep it with a stated ground, or delete it with a record. The body said **"Decide before
+  R0 lands"**, because R0 is precisely what makes the ban's original ground false. Blocks **G7**'s
+  codegen rules.
+  ✅ **RESOLVED 2026-08-30 by STANDING RULE — option (b): the ban is DELETED WITH A RECORD.** Its
+  original ground was fixed and gated by Aether R0 / KE1; the fallback ground (D4) was measured and
+  rejected — D4 reserves the Aether SURFACE `or(...)` while the ban governed GENERATED CODE, and
+  ratified GN2 says the baker emits no Rust, so the ban had no subject. It could not be re-grounded
+  on KE13 either: `Or` folds `NEEDS_CHANGE_DETECTION` and `EcsMaster::query` const-refuses it, so the
+  banned shape cannot reach a `QueryView` at all. What G7 owes INSTEAD: the red fixture asserts the
+  GENERATOR does not emit a change-gate over a NON-SIGNATURE storage kind (GK-2's ground, still
+  live). ⚠ **The deadline EXPIRED UNANSWERED — R0 landed with GB-9 open**, which is why the ruling
+  reconstructs the record from prose rather than from a reproducible failure. It is recorded rather
+  than smoothed away, and the same work order that carried the deadline declared R0 "buildable now,
+  no ballot in the way" in the same commit.
 
 ### Aether v2 — the `AB` series
+
+> ✅ **STATUS, 2026-09-03.** Every `AB` ballot except **AB-12** was closed on 2026-08-30 — seven
+> by the owner and eleven under the standing perf/architecture rule — on `feat/threadpool-ke16`,
+> which this branch had not received. The per-ballot index with each ruling's ground is that
+> branch's `docs/OPEN-QUESTIONS.md` §*2026-08-30 — the owner's rulings, and the Aether ladder
+> closes*. **AB-12 blocks nothing.** Only the four with a direct Gaia consequence are annotated
+> individually below (AB-6, AB-10, AB-11, AB-13): this pass verified the Gaia side and the index,
+> not each Aether ground, and a register that restates what it did not check is how the next false
+> claim enters.
 
 - **AB-1** — auto-registration of events: ratify on ergonomics alone, or STAGE it under D4 until an
   in-tree consumer exists. ⚠ **reopens the ratified C3 grant, and the reopen is licensed by
@@ -146,6 +654,14 @@ red tests land regardless of its disposition). Everything above them waits on a 
   known-open plus a hook workaround. ⚠ the refusal option **narrows the ratified
   `storage = table|dense` × `requires` surface**. The red tests land now under any disposition —
   they demonstrate the panic either way. Blocks KERNEL-BACKLOG **KE11**'s disposition and **R3**'s wording.
+  ✅ **RESOLVED 2026-08-30 — option (b), and the class SPLITS IN TWO.** **Dense** gets the
+  construct-and-commit route (KE14); **bitset/flag** is refused IN THE DERIVE, since a flag has no
+  bytes and `FLAGS_DIRECT` is the mechanism. Refusing in Aether alone was ruled out on the owner's
+  principle that *a language may not refuse what the derive accepts*. The ballot's premise was
+  refuted first: hand-written Rust could not do it either, so there was no ratified surface to
+  narrow — only a promise the kernel did not keep. **Landed as code on `feat/threadpool-ke16`**,
+  commit `ef81ecaa` (2026-08-30). Gaia-relevant: **F9's refusal option is off the table verbatim
+  because of it.**
 - **AB-7** — R-DENSE: unconditional with a driver-independent ground that must be ESTABLISHED rather
   than asserted, or lifted by `publish tracked`. ⚠ **re-grounds a ratified refusal**. Blocks **R5**.
 - **AB-8** — the `each par` driver. Two kernel drivers exist with opposite tick behaviour
@@ -160,11 +676,26 @@ red tests land regardless of its disposition). Everything above them waits on a 
 - **AB-10** — AIR-10 residue: is the measurement script required when the audit branch is taken, and
   is PENDING's widening to the joint Aether+Gaia vocabulary ratified? ⚠ the second is a **scope
   change to a ratified requirement** and must not arrive as a side effect of an edit.
+  ✅ **RESOLVED 2026-08-30 — (a) the measurement script IS required** when the audit branch is
+  taken; **(b) the widening to the JOINT Aether+Gaia vocabulary is RATIFIED**, on the owner's own
+  ground that the two languages are ONE BODY OF WORK, so a word meaning different things across
+  them is a false friend between the author's own languages. Price accepted: a Gaia collision may
+  force a rename in AETHER. Direct Gaia consequence for G2: every Gaia keyword ruling (PENDING
+  Tier 1's `key` → `keyframe`, `table` → `defs`/`catalog`, the `text:` deletion) is now subject to
+  AIR-10's bar over the joint vocabulary.
 - **AB-11** — `with`/`without` over a `flag`. Recommended: a parse refusal with a did-you-mean
   pointing at `enabled`/`disabled`, which dissolves the whole class (`with Flag` matches nothing,
   `without Flag` excludes nothing; both silent). The alternative is forbidden-form-only, caught at
   doc-generation. ⚠ **adds a refusal where v1 documents non-refusal**. Blocks **R3**'s filter
   goldens.
+  ✅ **RESOLVED 2026-08-30 — a PARSE REFUSAL with a did-you-mean.** Ground, measured with R0's fix
+  in the tree: over a `flag`, `with F` matches NOTHING and `without F` excludes NOTHING — two
+  different silent wrong answers — and the defect is in the LEAVES, so R0's `Or` fix does not reach
+  it. Red test `ab11_flag_filter_polarity.rs`. ⚠ Rider, unreconciled and now cheap to close: AB-11
+  records the did-you-mean as `enabled`/`disabled` while AB-6's ruling text records
+  `flags (X = true)`, so an author who hits both is told two spellings for one concept. Under F9's
+  recommended disposition all three flag-adjacent refusals point at ONE target — *set the component
+  field* — and the reconciling line belongs in G2's diagnostics list.
 - **AB-12** — *(a query, not a values call)* do the two dropped measured defects — the old G1/G2 of
   the AI-orientation defect series — exist in the session record? If they do, they return as AD5/AD6
   with repros; if not, the renumbered record stands. Only the owner's session archive can answer.
@@ -183,6 +714,13 @@ red tests land regardless of its disposition). Everything above them waits on a 
   touches a ratified keyword, so AIR-10's bar applies and the offered measurement is the collision
   audit over the three `on` positions. Blocks **R3** (the `flag` construct surface and its filter
   goldens).
+  ✅ **RESOLVED 2026-08-30 — `true`/`false`**, which settles all four parts at once: they are Rust
+  keywords already, so nothing new is reserved; the three-way `on` collision does not arise, so
+  neither a reader nor a generator needs lookahead; and the group KEEPS THE NAME `flags`, PENDING
+  Tier 3's withdrawal of the `flags` → `initial` rename standing on its own ground. Spelling:
+  `flags (Stunned = false, Burning = true)`. **Gaia shares this vocabulary VERBATIM** — but, under
+  F9's recommended disposition, only for a component TYPE's initial state, never for an individual
+  authored object.
 
 **Two items on this list are NOT ballots, and are named so they are not mistaken for one.** K8 (no
 honest spawn spelling for a bundle carrying `link Entity`) and K9 (the kernel's relates/related
@@ -210,6 +748,15 @@ The two that BLOCK rungs:
   name-keyed field tables + typed constructors), needs no reflection at all and detaches Gaia from
   both EG2 and the unlanded C11. Recommendation: (b) now, (a) as a later upgrade. The real ballot
   is SEQUENCING: decide EG2 first (it unblocks more than Gaia), or detach now. Blocks G1.
+
+  > ✅ **RESOLVED 2026-08-30 BY THE OWNER — (b), macro-time GK-4, taken NOW.** His words: *"Do it
+  > properly right away. But bear in mind the world must support streaming."* Both halves bind —
+  > G1 takes the GK-4 route, and no part of the bake design may foreclose streaming, which F5's
+  > ruling then made concrete. Rejected: sequence EG2 first. ⚠ **This ballot's own decisive
+  > inference is REFUTED**: `RequiredCtor` being an `unsafe fn(*mut u8)` does *not* make ctor-form
+  > `requires` unbakeable — a GK-4 baker is a Rust program linked against the derive tables and
+  > calls the fn pointer trivially. Only the *evaluator over Gaia text*, a different program,
+  > cannot. Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Inherited pipeline.
 - **F4 — what "loaded" means. WIDENED: the loader misses more of the insert path than hooks.**
   The finding that opened this ballot was "the loader runs no hooks". That is ONE mechanism of
   several, and the ballot as first written would have bought a hook-coverage census and still left
@@ -241,6 +788,19 @@ The two that BLOCK rungs:
   is what makes a loaded reference mean anything after a restart. This defines the engine's load
   semantics generally; decide before the first Gaia scene. Blocks G6.
 
+  > ✅ **RESOLVED 2026-08-30 [delegated] — option (a), specified as SUPPRESS-THEN-FIXUP: four
+  > ordered sub-passes inside `load_world`.** (b)'s *mechanism* is adopted as sub-pass 4; its
+  > *timing* is refuted at a measured 100 % mis-link rate (saved/fresh id overlap 8/8), which is
+  > worse than today's empty index. (c) is worse than "untenable": it forbids every mesh,
+  > material, light, camera and particle effect. The addendum is answered with it — the stable
+  > asset-id carrier is a stable NAME in the file, resolved to the existing `MeshHandle(u32)` at
+  > load, with no new component type. **Three amendments recorded 2026-09-03** (sub-pass 4 splits
+  > into 4a relink / 4b hooks; the coverage census is 5 mechanisms × 3 storage kinds; 4b reports
+  > per hook class), together with what MOVED since the ballot: a reloaded scene's children never
+  > compose their parent's pose, and a dense component's `#[entities]` field was fixed on the
+  > other branch. See §*2026-09-03* above. Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md`
+  > §Load semantics.
+
 The remaining five, in the same shape:
 
 - **F2 — where a DataAsset's rows live at runtime.** (a) rows are ENTITIES: each row lands in a
@@ -253,6 +813,18 @@ The remaining five, in the same shape:
   is the sentence *"a table is entities"* — everything stays queryable, one storage, Principle 0
   intact. Rejected without a ballot: a `HashMap<Name, Row>` side store — a parallel data system,
   which the standing rule forbids outright. Blocks G5.
+
+  > ✅ **RESOLVED 2026-08-30 [delegated] — (a) rows are entities, AMENDED in three ways the ballot
+  > did not carry.** Storage is **`StorageKind::Table`**, not dense — the ballot's "dense-column
+  > archetype" denotes nothing here, because a dense id is signature-excluded and
+  > `get_or_create_archetype(&[DenseRow])` returns the EMPTY archetype. Rows materialize **eagerly
+  > at load**, never lazily. A table is loaded by its own explicit load and **pinned**, so
+  > `unload_cell` never touches it; the runtime handle is an `Entity` captured at load, never a
+  > row index. ⚠ **CONFIRMED 2026-09-03 on CORRECTED GROUNDS, and the original size argument is
+  > marked SUPERSEDED** — the commit granule is symmetric across both options, the resident floor
+  > keys on SCHEMA count rather than FILE count, and `VmColumn` refuses a 40-byte element
+  > outright. The arithmetic is in §*2026-09-03* above. Ground: `feat/threadpool-ke16`
+  > `gaia/DECISIONS.md` §Data tables.
 - **F3 — the shape of a table file.** Single-file-per-asset only (one document = one asset), or
   ALSO a table file that bakes N rows into one dense column. Price of the second form: the grammar
   grows a row-repetition shape and identity has to name a row INSIDE a file (which is F8's
@@ -261,6 +833,19 @@ The remaining five, in the same shape:
   which is the recommendation — the table file is a spelling, not a second type system. Rejected:
   a table dialect, which the one-language-three-profiles ruling already refuses in the large.
   Blocks the grammar (G5's authoring surface).
+
+  > ✅ **RESOLVED 2026-08-30 BY THE OWNER — both shapes, over ONE schema.** The table file is a
+  > **spelling**, not a second type system. Rejected: a table dialect. Added under the standing
+  > rule rather than escalated: the DEFAULT shape is chosen mechanically by the LOADING UNIT — an
+  > own file when the record is independently referenced and independently loadable/unloadable, a
+  > table row when the records are a catalogue always resident together. The shape question is
+  > settled by code rather than taste: `create_archetype` DEDUPS by id set and `load_archetype`
+  > APPENDS at the archetype's current row head, so N one-row documents and one N-row document
+  > land in the SAME archetype, contiguously — file shape is resident-memory-, query-cost- and
+  > layout-neutral. ⚠ Two riders, both G2 deliverables and neither a ballot: a locally-stable
+  > canonical printer (red fixture — edit row 200 of 400, re-print, assert the diff touches one
+  > span), and the deletion of the "dense column" wording everywhere it appears in this corpus.
+  > Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Data tables.
 - **F5 — streaming scope, and the alternative nobody wrote down.** The recommendation on the table
   is (a) *format-ready-loader-later*: the cell catalog, its attribution, and the persistent id map
   (GK-1) land NOW as one design unit; `load_cell`, unload, and cross-cell references land at G8.
@@ -273,6 +858,18 @@ The remaining five, in the same shape:
   (b): G6 absorbs the hardest half of the design, because a per-load `LoadEntityMap` cannot express
   references BETWEEN chunks (measured), and the scene profile cannot land until that is solved.
   Blocks G6, through what its catalog is required to contain.
+
+  > ✅ **RESOLVED 2026-08-30 BY THE OWNER — option (b), the alternative nobody had written down.**
+  > His words: *"Все сразу грамотно по списку с самого начала."* `load_cell`/`unload_cell`, GK-1's
+  > cross-load map with a declared lifetime, and cross-cell reference resolution ship **with** the
+  > scene profile. ⚠ **THE RECOMMENDATION PRINTED ABOVE — (a) — IS THE OPTION HE REJECTED**, and
+  > this register carried it as the recommendation until 2026-09-03. Ground for (b) over (a): a
+  > per-load `LoadEntityMap` cannot express references BETWEEN chunks (measured), and (a)'s
+  > catalog-with-no-loader is this repository's own recurring dead-datum class. ⚠ Follow-on
+  > finding, NOT a ballot: **GK-1 as specified violates Principle 0** — its requirement 4 makes
+  > `LoadEntityMap` a world-owned `Resource` keeping its `Vec`, turning the transient-scratch
+  > exception into a durable parallel data system; the in-tree cure is `PathIndex`'s `VmColumn`
+  > shape. Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Streaming scope.
 - **F6 — the fate of `.ui` once Gaia absorbs it.** (a) migrate the existing `.ui` documents to the
   Gaia `ui` profile and DELETE the old format in the same campaign; (b) freeze `.ui` where it is
   and decide after an owner-eval of a real Gaia HUD. Price of (a): the migration is done blind —
@@ -281,6 +878,18 @@ The remaining five, in the same shape:
   subsystem, which is the diverged-pair cost this repository has already measured on `docs/ru/` —
   a reader cannot tell which is current and finds out by acting on the stale one. Recommendation
   (a). Blocks G7.
+
+  > ✅ **RESOLVED 2026-08-30 BY THE OWNER — (a): migrate to the Gaia `ui` profile and DELETE the
+  > old format in the same campaign.** The price is accepted and recorded at G7 rather than
+  > discovered later: the migration is done **blind**, because G7's own prerequisites do not
+  > exist. What survives the deletion, verbatim: reconcile-by-name+ordinal hot reload (the
+  > engine's only apply-to-a-live-world primitive, and the editor's future live preview), the
+  > typed leaf parsers, the bind path, bar quantization and the action seam. ⚠ Measured while
+  > pricing it, and it strengthens the ruling: `.ui` **cannot author a background colour at all**
+  > — `UiBackground` is carried by the Panel/Button/Bar bundles and appears nowhere under
+  > `crates/boyko_ui/src/text/`, so the writer silently drops every panel and button fill while
+  > the round-trip gate stays green, because the gate's universe is the writer's own emit roster.
+  > Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Language shape.
 - **F7 — mods, and the executable the ratified refusal does not mention.** ⚠ **This borders a
   ratified refusal and has to be framed against it, not asked fresh.** What is ratified: *own text
   → build-time bake → binary; reflection only at bake, behind a default-off feature; the shipped
@@ -295,6 +904,17 @@ The remaining five, in the same shape:
   separate-executable pipeline now and design the format's stability guarantees for it from the
   start. Price of silence: it is a DEFAULT DECISION — the wide reading calcifies by never being
   contradicted. Blocks nothing today; it decides what a later campaign is allowed to propose.
+
+  > ✅ **RESOLVED 2026-08-30 BY THE OWNER — (a): mods are NOT supported for now, ratified
+  > explicitly**, so that silence stops being a default decision; and the reflection constraint is
+  > recorded in its NARROW form (no reflection in the GAME BINARY), so a later mod campaign is not
+  > blocked by a sentence that never meant to block it. Blocks nothing on the ladder. ⚠ Recorded
+  > because it is the proximity-settlement shape this list exists to catch: the ratified
+  > §Refusals line *"no external-mod pipeline in v1"* was already in
+  > [`gaia/DECISIONS.md`](gaia/DECISIONS.md) while this ballot was OPEN — a ratified line
+  > answering half of an open ballot, on a page whose own campaign file forbids exactly that. The
+  > ruling makes the line correct retroactively; it did not make it legitimate at the time, and
+  > the line now carries this date so it reads as sourced.
 
 ---
 
