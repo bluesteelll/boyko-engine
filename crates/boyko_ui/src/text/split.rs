@@ -6,12 +6,14 @@
 //!
 //! # What is copied vs. new
 //!
-//! * [`split_top_level`] is COPIED VERBATIM from the `.keys` parser
+//! * [`split_top_level`] began as a VERBATIM copy of the `.keys` parser
 //!   (`boyko_input::persist::grammar::split_top_level`). Copying (not depending
 //!   on `boyko_input`) avoids a `boyko_ui → boyko_input` crate edge for a
-//!   ~20-line pure function. It tracks paren depth + quote state ONLY; it is
-//!   NOT brace-aware, so P3 uses it strictly on the already-extracted INNER
-//!   field list (Decision 5), never to isolate a component span.
+//!   ~20-line pure function. It has since DIVERGED by one clause — bracket
+//!   depth — because P6a introduced `[f32; 2]` field values; see the function
+//!   docs. It is still NOT brace-aware, so P3 uses it strictly on the
+//!   already-extracted INNER field list (Decision 5), never to isolate a
+//!   component span.
 //! * [`strip_comment_slashslash`] is NEW: the `.keys` strip-comment is a
 //!   single-byte `#` rule, but `.ui` reserves `#` for the name sigil, so the
 //!   comment lead is the two-byte `//` (Decision 2). It returns the PRE-TRIM
@@ -22,14 +24,27 @@
 /// The canonical indentation step: 4 spaces per nesting level (P3 §1).
 pub(crate) const STEP: u32 = 4;
 
-/// Splits a top-level comma-separated list while tracking paren depth and
-/// quotes. A comma inside `(...)` or inside `"…"` does not split. The returned
-/// slices borrow from `s`.
+/// Splits a top-level comma-separated list while tracking paren AND bracket
+/// depth plus quote state. A comma inside `(...)`, inside `[...]` or inside
+/// `"…"` does not split. The returned slices borrow from `s`.
 ///
-/// COPIED VERBATIM from `boyko_input::persist::grammar::split_top_level`
-/// (Decision 5). Used ONLY on the inner field list of a component body, which is
-/// provably free of `{`/`[`/quoted-comma values in the P3 grammar (locked by a
-/// rejection test), so paren+quote awareness is sufficient.
+/// Adapted from `boyko_input::persist::grammar::split_top_level` (Decision 5),
+/// with ONE divergence: `[`/`]` count toward the same depth as `(`/`)`.
+///
+/// # Why the divergence exists
+///
+/// The `.keys` original tracks parens only, and P3's copy inherited a doc line
+/// claiming the `.ui` field list is "provably free of `[` values". P6a made that
+/// false when it gave `UiImage` two `[f32; 2]` UV fields: `uv_min: [0.1, 0.2]`
+/// split at the comma INSIDE the brackets, so `parse_f32_pair` saw `[0.1`, failed,
+/// and the field kept `UiImage::default()` while the orphan `0.2]` was reported as
+/// a missing `key: value`. A `.ui` document could not carry a non-default UV at
+/// all. The `[` clause is what makes the field values the format already accepts
+/// actually reachable.
+///
+/// A stray closing delimiter saturates at depth 0 (the original's tolerance),
+/// so a malformed body degrades into extra splits rather than swallowing the
+/// rest of the line.
 pub(crate) fn split_top_level(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut out = Vec::new();
@@ -40,8 +55,8 @@ pub(crate) fn split_top_level(s: &str) -> Vec<&str> {
     while i < bytes.len() {
         match bytes[i] {
             b'"' => in_quotes = !in_quotes,
-            b'(' if !in_quotes => depth += 1,
-            b')' if !in_quotes => depth = depth.saturating_sub(1),
+            b'(' | b'[' if !in_quotes => depth += 1,
+            b')' | b']' if !in_quotes => depth = depth.saturating_sub(1),
             b',' if !in_quotes && depth == 0 => {
                 out.push(&s[start..i]);
                 start = i + 1;

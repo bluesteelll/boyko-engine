@@ -19,16 +19,31 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::hierarchy::Children;
 
+use crate::binding::components::{BindText, BindValue};
 use crate::components::{
-    ComputedClip, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiName, UiRoot,
-    UiSourceOrder, UiSpacing,
+    Bar, BarFill, Button, ComputedClip, ContentSize, StackIndex, UiAbsolute, UiAlign, UiAnchor,
+    UiGrid, UiImage, UiLayout, UiName, UiRoot, UiSourceOrder, UiSpacing,
 };
+use crate::interaction::action::{OnClick, OnHover, OnSubmit};
+use crate::text::components::UiText;
 
 /// The owned, text-relevant component snapshot of one live node.
 ///
-/// `Option` per component = presence (the archetype hosts it). Layout/render
-/// outputs and transient components NOT in the text-owned set are deliberately
-/// absent here — the snapshot carries only what the reconcile reads.
+/// `Option` per component = presence (the archetype hosts it); a ZST marker is a
+/// `bool`, since there is no value to carry.
+///
+/// # Scope: the whole `.ui` vocabulary, not just the reconcile's patch set
+///
+/// This snapshot is the serializer's ONLY input, so whatever it omits, a save
+/// cannot write. It previously carried 8 members of a 21-member vocabulary, which
+/// put a STRUCTURAL ceiling under `serialize_ui`: twelve author-owned components
+/// were unwritable no matter what the writer did. It now carries every member the
+/// parser accepts except `ComputedRect` (layout output — Decision 14, and
+/// `WriterPolicy::Omit` in [`vocab`](crate::text::vocab) records the reason) and
+/// the private `UiSourceOrder`.
+///
+/// The added `get_component` reads are the cost of a lossless save. They land on
+/// the reconcile/serialize path, which runs on a file-watch event, not per frame.
 #[derive(Clone, Debug)]
 pub struct LiveNode {
     /// The node's entity handle.
@@ -54,6 +69,21 @@ pub struct LiveNode {
     pub stack_index: Option<StackIndex>,
     pub clip: Option<ComputedClip>,
     pub is_root: bool,
+
+    // The style / widget / interaction half of the vocabulary (P5b, P6a, P4,
+    // GUI #27). Snapshotted so a save can write them back.
+    pub text: Option<UiText>,
+    pub image: Option<UiImage>,
+    pub grid: Option<UiGrid>,
+    pub anchor: Option<UiAnchor>,
+    pub is_button: bool,
+    pub is_bar: bool,
+    pub is_bar_fill: bool,
+    pub on_click: Option<OnClick>,
+    pub on_hover: Option<OnHover>,
+    pub on_submit: Option<OnSubmit>,
+    pub bind_text: Option<BindText>,
+    pub bind_value: Option<BindValue>,
 }
 
 /// A read-only view over the live UI subtree rooted at the document's roots.
@@ -103,6 +133,18 @@ impl UiTreeView {
                 stack_index: world.get_component::<StackIndex>(entity).copied(),
                 clip: world.get_component::<ComputedClip>(entity).copied(),
                 is_root: world.has_component(entity, UiRoot::component_id()),
+                text: world.get_component::<UiText>(entity).copied(),
+                image: world.get_component::<UiImage>(entity).copied(),
+                grid: world.get_component::<UiGrid>(entity).copied(),
+                anchor: world.get_component::<UiAnchor>(entity).copied(),
+                is_button: world.has_component(entity, Button::component_id()),
+                is_bar: world.has_component(entity, Bar::component_id()),
+                is_bar_fill: world.has_component(entity, BarFill::component_id()),
+                on_click: world.get_component::<OnClick>(entity).copied(),
+                on_hover: world.get_component::<OnHover>(entity).copied(),
+                on_submit: world.get_component::<OnSubmit>(entity).copied(),
+                bind_text: world.get_component::<BindText>(entity).copied(),
+                bind_value: world.get_component::<BindValue>(entity).copied(),
             };
             nodes.push(node);
             // Children pushed in reverse so the pre-order is preserved on pop.

@@ -2,9 +2,25 @@
 //! (P3 §6, Decision 16).
 //!
 //! `parse_ui(serialize_ui(view))` is value/topology-equal to the source on
-//! canonical input; `serialize → parse → serialize` is byte-identical (the
-//! gate). The canonical field order + the pinned float rule + 4-space indent
-//! make the output a normal form.
+//! canonical input; `serialize → parse → serialize` is byte-identical. The
+//! canonical field order + the pinned float rule + 4-space indent make the output
+//! a normal form.
+//!
+//! # Byte-identity is NOT the anti-loss gate
+//!
+//! `serialize → parse → serialize` is byte-identical whenever the writer drops a
+//! component CONSISTENTLY — the dropped data is absent from both texts, so it
+//! never enters the comparison. That is how this writer emitted 8 of the 20
+//! non-exempt members of its own parser's vocabulary under a green gate. Coverage
+//! is enforced by two other mechanisms, not by that one:
+//!
+//! * COMPILE TIME — [`write_attached`] matches EXHAUSTIVELY on
+//!   [`UiTextComponent`](crate::text::vocab::UiTextComponent), so a member added
+//!   to the vocabulary is an `E0004` here until it is handled;
+//! * RUN TIME — `p3_world_round_trip.rs` builds a world holding every emitted
+//!   member with non-default values, serializes it, re-spawns the text into a
+//!   SECOND world and compares the two WORLDS, which catches an arm that exists
+//!   but writes nothing.
 //!
 //! # The `.ui` float rule (Decision 16) — INVERSE of `write_f32`
 //!
@@ -18,11 +34,17 @@
 
 use core::fmt::Write as _;
 
+use boyko_ecs::ecs::core::entity::entity::Entity;
+
+use crate::binding::components::{BindText, BindValue, TemplateId, NO_FIELD};
 use crate::components::{
-    ComputedClip, ComputedRect, ContentSize, UiAbsolute, UiAlign, UiLayout, UiSpacing,
+    AnchorEdge, ComputedClip, ComputedRect, ContentSize, UiAbsolute, UiAlign, UiAnchor, UiGrid,
+    UiImage, UiLayout, UiSpacing,
 };
 use crate::reload::tree_view::{LiveNode, UiTreeView};
+use crate::text::components::{TextAlign, UiText};
 use crate::text::report::UI_FORMAT_VERSION;
+use crate::text::vocab::UiTextComponent;
 use crate::units::{AlignCross, AlignMain, LayoutType, PositionType, Unit};
 
 /// Serialize a live UI subtree (rooted at the view's roots) back to canonical
@@ -61,45 +83,14 @@ fn write_node(view: &UiTreeView, node: &LiveNode, depth: u32, out: &mut String) 
     write_ui_layout(&layout, out);
     out.push('\n');
 
-    // Attached components in a FIXED canonical order, each at depth+1.
+    // Attached components at depth+1, in the vocabulary's canonical order. The
+    // roster is walked rather than hand-listed so a member added to
+    // `UiTextComponent` cannot be forgotten here: `write_attached`'s match is
+    // exhaustive, so the new variant is an `E0004` until it is handled.
     let attach_indent = indent + 4;
-    if let Some(spacing) = node.spacing {
-        push_spaces(out, attach_indent);
-        write_ui_spacing(&spacing, out);
-        out.push('\n');
+    for comp in UiTextComponent::ALL.iter().copied() {
+        write_attached(view, node, comp, attach_indent, out);
     }
-    if let Some(align) = node.align {
-        push_spaces(out, attach_indent);
-        write_ui_align(&align, out);
-        out.push('\n');
-    }
-    if let Some(absolute) = node.absolute {
-        push_spaces(out, attach_indent);
-        write_ui_absolute(&absolute, out);
-        out.push('\n');
-    }
-    if let Some(cs) = node.content_size {
-        push_spaces(out, attach_indent);
-        write_content_size(&cs, out);
-        out.push('\n');
-    }
-    if let Some(si) = node.stack_index {
-        push_spaces(out, attach_indent);
-        let _ = write!(out, "StackIndex({})", si.0);
-        out.push('\n');
-    }
-    if let Some(clip) = node.clip {
-        push_spaces(out, attach_indent);
-        write_computed_clip(&clip, out);
-        out.push('\n');
-    }
-    if node.is_root {
-        push_spaces(out, attach_indent);
-        out.push_str("UiRoot\n");
-    }
-    // `ComputedRect` is layout output — OMITTED (Decision 14 / §6). It is a
-    // spawn-time seed only; layout overwrites it. `UiSourceOrder` is private —
-    // NEVER serialized.
 
     // Children at depth+1 (their attached components land at depth+2).
     for &child in &node.children {
@@ -107,6 +98,143 @@ fn write_node(view: &UiTreeView, node: &LiveNode, depth: u32, out: &mut String) 
             write_node(view, child_node, depth + 1, out);
         }
     }
+}
+
+/// Writes ONE attached-component line for `comp` if this node carries it, and
+/// nothing otherwise.
+///
+/// The `match` is EXHAUSTIVE over the vocabulary on purpose (see
+/// [`vocab`](crate::text::vocab)): it is the compile-time half of the
+/// anti-loss gate. Exhaustiveness cannot see an arm that exists but writes
+/// nothing, which is why `p3_world_round_trip.rs` re-reads the whole document out
+/// of a second world — an arm that silently does nothing reds there.
+fn write_attached(
+    view: &UiTreeView,
+    node: &LiveNode,
+    comp: UiTextComponent,
+    indent: u32,
+    out: &mut String,
+) {
+    match comp {
+        // Written on the node's HEAD line, above — never as an attached line.
+        UiTextComponent::UiLayout => {}
+        // Layout OUTPUT: a spawn-time seed `ui_layout_apply` overwrites, so writing
+        // it back would pin a stale rect into the document (Decision 14 / §6).
+        // `UiSourceOrder` is private and is not in the vocabulary at all.
+        UiTextComponent::ComputedRect => {}
+
+        UiTextComponent::UiSpacing => {
+            if let Some(v) = node.spacing {
+                line(out, indent, |o| write_ui_spacing(&v, o));
+            }
+        }
+        UiTextComponent::UiAlign => {
+            if let Some(v) = node.align {
+                line(out, indent, |o| write_ui_align(&v, o));
+            }
+        }
+        UiTextComponent::UiAbsolute => {
+            if let Some(v) = node.absolute {
+                line(out, indent, |o| write_ui_absolute(&v, o));
+            }
+        }
+        UiTextComponent::ContentSize => {
+            if let Some(v) = node.content_size {
+                line(out, indent, |o| write_content_size(&v, o));
+            }
+        }
+        UiTextComponent::StackIndex => {
+            if let Some(v) = node.stack_index {
+                line(out, indent, |o| {
+                    let _ = write!(o, "StackIndex({})", v.0);
+                });
+            }
+        }
+        UiTextComponent::ComputedClip => {
+            if let Some(v) = node.clip {
+                line(out, indent, |o| write_computed_clip(&v, o));
+            }
+        }
+        UiTextComponent::UiRoot => {
+            if node.is_root {
+                line(out, indent, |o| o.push_str("UiRoot"));
+            }
+        }
+        UiTextComponent::UiText => {
+            if let Some(v) = node.text {
+                line(out, indent, |o| write_ui_text(&v, o));
+            }
+        }
+        UiTextComponent::UiImage => {
+            if let Some(v) = node.image {
+                line(out, indent, |o| write_ui_image(&v, o));
+            }
+        }
+        UiTextComponent::UiGrid => {
+            if let Some(v) = node.grid {
+                line(out, indent, |o| write_ui_grid(&v, o));
+            }
+        }
+        UiTextComponent::UiAnchor => {
+            if let Some(v) = node.anchor {
+                line(out, indent, |o| write_ui_anchor(&v, o));
+            }
+        }
+        UiTextComponent::Button => {
+            if node.is_button {
+                line(out, indent, |o| o.push_str("Button"));
+            }
+        }
+        UiTextComponent::Bar => {
+            if node.is_bar {
+                line(out, indent, |o| o.push_str("Bar"));
+            }
+        }
+        UiTextComponent::BarFill => {
+            if node.is_bar_fill {
+                line(out, indent, |o| o.push_str("BarFill"));
+            }
+        }
+        UiTextComponent::OnClick => {
+            if let Some(v) = node.on_click {
+                line(out, indent, |o| {
+                    let _ = write!(o, "OnClick({})", v.0);
+                });
+            }
+        }
+        UiTextComponent::OnHover => {
+            if let Some(v) = node.on_hover {
+                line(out, indent, |o| {
+                    let _ = write!(o, "OnHover({})", v.0);
+                });
+            }
+        }
+        UiTextComponent::OnSubmit => {
+            if let Some(v) = node.on_submit {
+                line(out, indent, |o| {
+                    let _ = write!(o, "OnSubmit({})", v.0);
+                });
+            }
+        }
+        UiTextComponent::BindText => {
+            if let Some(v) = node.bind_text {
+                line(out, indent, |o| write_bind_text(view, &v, o));
+            }
+        }
+        UiTextComponent::BindValue => {
+            if let Some(v) = node.bind_value {
+                line(out, indent, |o| write_bind_value(view, &v, o));
+            }
+        }
+    }
+}
+
+/// Writes one indented line: `indent` spaces, the body, a newline.
+#[inline]
+fn line(out: &mut String, indent: u32, body: impl FnOnce(&mut String)) {
+    push_spaces(out, indent);
+    body(out);
+    out.push('\n');
 }
 
 // ── Component writers (canonical field order) ─────────────────────────────────
@@ -195,6 +323,110 @@ fn write_computed_clip(v: &ComputedClip, out: &mut String) {
     out.push_str(" }");
 }
 
+fn write_ui_text(v: &UiText, out: &mut String) {
+    out.push_str("UiText { color: ");
+    let _ = write!(out, "{}", v.color);
+    out.push_str(", size_px: ");
+    write_f32_ui(v.size_px, out);
+    // The dense font handle is written BARE (`font: 0`); the parser also accepts
+    // the `FontId(0)` call form, and the bare form is the canonical one.
+    out.push_str(", font: ");
+    let _ = write!(out, "{}", v.font.0);
+    out.push_str(", align: ");
+    out.push_str(text_align_str(v.align));
+    // `_pad` is not authorable and is never written.
+    out.push_str(" }");
+}
+
+fn write_ui_image(v: &UiImage, out: &mut String) {
+    out.push_str("UiImage { texture: ");
+    let _ = write!(out, "{}", v.texture);
+    out.push_str(", uv_min: ");
+    write_f32_pair(v.uv_min, out);
+    out.push_str(", uv_max: ");
+    write_f32_pair(v.uv_max, out);
+    out.push_str(", tint: ");
+    let _ = write!(out, "{}", v.tint);
+    out.push_str(" }");
+}
+
+fn write_ui_grid(v: &UiGrid, out: &mut String) {
+    let _ = write!(out, "UiGrid {{ columns: {}, rows: {} }}", v.columns, v.rows);
+}
+
+fn write_ui_anchor(v: &UiAnchor, out: &mut String) {
+    out.push_str("UiAnchor { edge: ");
+    out.push_str(anchor_edge_str(v.edge));
+    out.push_str(", offset_x: ");
+    write_f32_ui(v.offset_x, out);
+    out.push_str(", offset_y: ");
+    write_f32_ui(v.offset_y, out);
+    out.push_str(", use_safe_area: ");
+    out.push_str(if v.use_safe_area { "true" } else { "false" });
+    // `_pad` is not authorable and is never written.
+    out.push_str(" }");
+}
+
+fn write_bind_text(view: &UiTreeView, v: &BindText, out: &mut String) {
+    out.push_str("BindText { source: ");
+    write_bind_source(view, v.source, out);
+    let _ = write!(out, ", comp: {}, field: {}, field2: ", v.comp.0, v.field);
+    write_field_opt(v.field2, out);
+    out.push_str(", template: ");
+    out.push_str(template_id_str(v.template));
+    out.push_str(" }");
+}
+
+fn write_bind_value(view: &UiTreeView, v: &BindValue, out: &mut String) {
+    out.push_str("BindValue { source: ");
+    write_bind_source(view, v.source, out);
+    let _ = write!(out, ", comp: {}, num_field: {}, den_field: ", v.comp.0, v.num_field);
+    write_field_opt(v.den_field, out);
+    out.push_str(" }");
+}
+
+/// Writes a bind `source`: the `#name` form when the target is a NAMED node of
+/// this document, else the raw entity id.
+///
+/// The `#name` form is the only one that survives a reload, because it re-resolves
+/// against the name index of the world the text is spawned into; a raw id is a
+/// per-world handle. The numeric fallback is therefore a best effort for a source
+/// OUTSIDE the document (a gameplay entity holding the bound component), and it
+/// carries a known limitation: the parser reconstructs it with
+/// `Entity::with_id`, i.e. GENERATION 0, so a bind to a non-zero-generation
+/// entity reloads as a stale handle. Making that lossless needs a grammar that
+/// can spell a generation — a format decision, not a writer one.
+fn write_bind_source(view: &UiTreeView, source: Entity, out: &mut String) {
+    match view.get(source).and_then(|n| n.name) {
+        Some(name) => {
+            out.push('#');
+            out.push_str(name.as_str());
+        }
+        None => {
+            let _ = write!(out, "{}", source.id().0);
+        }
+    }
+}
+
+/// Writes an optional field id: the `NO_FIELD` bareword for the sentinel (which
+/// the parser accepts and which reads as intent), else the numeric id.
+fn write_field_opt(field: u8, out: &mut String) {
+    if field == NO_FIELD {
+        out.push_str("NO_FIELD");
+    } else {
+        let _ = write!(out, "{field}");
+    }
+}
+
+/// Writes a `[f32; 2]` in the parser's bracketed form (`[u, v]`).
+fn write_f32_pair(v: [f32; 2], out: &mut String) {
+    out.push('[');
+    write_f32_ui(v[0], out);
+    out.push_str(", ");
+    write_f32_ui(v[1], out);
+    out.push(']');
+}
+
 /// Writes a [`ComputedRect`] (only used by tests / completeness — the serializer
 /// omits authored rects per §6, but the writer is provided for symmetry).
 #[allow(dead_code)]
@@ -278,6 +510,35 @@ fn align_cross_str(a: AlignCross) -> &'static str {
         AlignCross::Center => "Center",
         AlignCross::End => "End",
         AlignCross::Stretch => "Stretch",
+    }
+}
+
+fn text_align_str(a: TextAlign) -> &'static str {
+    match a {
+        TextAlign::Left => "Left",
+        TextAlign::Center => "Center",
+        TextAlign::Right => "Right",
+    }
+}
+
+fn anchor_edge_str(e: AnchorEdge) -> &'static str {
+    match e {
+        AnchorEdge::TopLeft => "TopLeft",
+        AnchorEdge::TopCenter => "TopCenter",
+        AnchorEdge::TopRight => "TopRight",
+        AnchorEdge::CenterLeft => "CenterLeft",
+        AnchorEdge::Center => "Center",
+        AnchorEdge::CenterRight => "CenterRight",
+        AnchorEdge::BottomLeft => "BottomLeft",
+        AnchorEdge::BottomCenter => "BottomCenter",
+        AnchorEdge::BottomRight => "BottomRight",
+    }
+}
+
+fn template_id_str(t: TemplateId) -> &'static str {
+    match t {
+        TemplateId::Value => "Value",
+        TemplateId::Ratio => "Ratio",
     }
 }
 
