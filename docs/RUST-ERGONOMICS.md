@@ -10,6 +10,10 @@ construction: it refuses gratuitous abstraction (a name to learn and a hop to fo
 nothing) AND it names the C-in-Rust patterns, which are the failure this engine is more exposed to
 because they are invisible — the code works, it is fast, and nothing complains.
 
+**As of the fourth technique sweep, 2026-09-03: thirty rules (ERG-01 … ERG-48, ids stable, several
+merged), fifty-three refusals (REF-00 … REF-52) and one hundred and fourteen evidence rows
+(EV-01 … EV-114).**
+
 **Two bars every rule passed.** (1) It makes an invariant VISIBLE or a defect class IMPOSSIBLE,
 and the rule says which. (2) Its cost was COMPILED AND COMPARED in both spellings on this
 checkout's toolchain (`rustc 1.97.1`, `stable-x86_64-pc-windows-gnu`, edition 2024) — every
@@ -22,25 +26,38 @@ says so and the old row is kept as superseded.
 ruling of that date, "AVX2 by default"). Rows EV-01 … EV-76 were taken at the bare x86-64
 baseline: their IDENTITY results are ISA-independent and stand, their ABSOLUTE ns/element figures
 were taken at SSE2 and do not transfer to the shipped build; they are read as ratios. Rows
-EV-77 … EV-107 were taken at `v3`. ⚠️ **Every timing in EV-77 … EV-107 was taken with the box
+EV-77 … EV-114 were taken at `v3`. ⚠️ **Every timing in EV-77 … EV-114 was taken with the box
 under load** (a game plus three concurrent build workflows); each is best-of-7 across three process
-runs with all three printed. Directions reproduced; magnitudes did not. Every IDENTITY in
-EV-96 … EV-107 was taken at the SHIPPED `codegen-units = 16` and re-checked at 1, and the row says
+runs with all three printed, and EV-111's single figure is a COMPILE time, not a runtime one.
+Directions reproduced; magnitudes did not. Every IDENTITY in
+EV-96 … EV-114 was taken at the SHIPPED `codegen-units = 16` and re-checked at 1, and the row says
 which — an ICF alias at one unit proves nothing at sixteen.
 
 **Precedence.** [CLAUDE.md](../CLAUDE.md)'s principles win any conflict, and the rule says so
 where they touch (the yields table below). Code is cited by file path and item name, never by
 line number.
 
-**Size.** **Thirty rules** — still thirty after the third technique sweep as well, which is the
-point. The third sweep (2026-09-03) added ONE rule, **ERG-48** (an obligation no representation
+**Size.** **Thirty rules** — still thirty after the third technique sweep, and still thirty after
+the fourth, which is the point. **The fourth sweep (2026-09-03) added NO rule and therefore paid
+nothing**: it completed the third sweep's diff with two lenses that had been dropped from it, and
+everything that survived is a CLAUSE on an existing rule, a sentence on an existing refusal, a new
+refusal, or an open item. Three clauses (ERG-01 clause 8, ERG-48's `'static` payload bound, and
+two limit-exceptions on ERG-31 clause 1), one correction (ERG-01 clause 7 cites a Before whose
+After already ships two crates away), two sentence additions (REF-00's negative result, REF-07's
+external confirmation), **three refusals — REF-50 … REF-52, so fifty-three refusals, REF-00 …
+REF-52** — and three open items (12 and 13 updated, 16 new). Seven evidence rows, EV-108 … EV-114.
+⚠️ **The answer to the question the third sweep asked of itself is in the ERG-48 note below, and
+it is "covered".**
+
+The third sweep (2026-09-03) added ONE rule, **ERG-48** (an obligation no representation
 can hold is a bound or a returned value), and **paid for it by merging ERG-33 into ERG-31 as
 clause 4** — the section's own title already pairs const evaluation and `cfg`, both rules say
 "make the compiler SEE the decision so a configuration nobody meant cannot exist at runtime", and
 ERG-29 was merged into the same rule on the same reasoning one revision earlier. ERG-33's body,
 Before, After, what-it-buys and all three exceptions are carried whole. Six further findings were
 adopted as CLAUSES on existing rules (ERG-01 clauses 6 and 7, ERG-04 clause 5, ERG-20 clause 6),
-four were refused (**REF-46 … REF-49**, so **fifty refusals**, REF-00 … REF-49), two became
+four were refused (**REF-46 … REF-49**, so **fifty refusals as of that sweep**, REF-00 … REF-49; the
+count today is at the top of this file), two became
 architecture items with measurements (index OPEN 10's parity arm, OPEN 13), two became
 `RUST-FRONTIER.md` rows this pass was scoped out of writing (OPEN 14), and one was a **correction
 to an adopted clause of the previous sweep**: ERG-22 clause 4's roundtrip half is WITHDRAWN,
@@ -116,6 +133,50 @@ source-cut sweep is not recommended**: two of this one's four defensible items w
 two different lenses, which is the signal that the well is being read twice. The axis no external
 source can supply is this document's own OPEN list and the diagnostics campaign's "gate that could
 not fail" family — cut the next pass by DEFECT CLASS.
+
+A sixth revision (2026-09-03) completed that third sweep. Two of its lenses — the no-allocator
+world (`embedded-hal` typestate, `heapless`, RTIC, `critical-section`, `defmt`, `postcard`,
+`bbqueue`, the Embedonomicon, `static_cell`, `panic-never`, `svd2rust`) and compile-time /
+type-level technique (`all_tuples`, Bevy's `Component::Mutability`, `bon`, `zerocopy`, `typeid`,
+`typenum`, `frunk`, the nightly const features) — had been dropped from the diff, and this pass
+diffed them. **It answers the question the fifth revision asked of itself, and the answer is
+"ERG-48 covers it".** The prediction was that the no-allocator world, where hardware state is
+encoded in types because there is no runtime to check it, would show that the class named yesterday
+— an invariant no REPRESENTATION can hold — is wider than four shapes. It is not. That lens's
+canonical instances map onto ERG-48 one for one, arrived at independently: `embedded-hal`'s
+C-PIN-STATE **is** shape 1, and its C-ERASED-PIN requirement **is** shape 1's one-way
+`to_unaligned()` downgrade, made a checklist item by the industry that invented the pattern;
+`critical_section::CriticalSection<'cs>` is `DispatcherToken<'_>`, i.e. ERG-06; embassy's
+`RawMutex` policy parameter is ERG-31 clause 3; `heapless::pool`'s intrusive free list is index
+OPEN 10 / EV-93; RTIC's compile-time ceiling analysis is `ConflictGraph::build`, hoisted as far as
+a plugin-assembled system set allows. The Embedonomicon's DMA `Transfer<B>` is shape 3 — and it is
+the ONE place where the outside world is ahead of the rule, not because it has a fifth shape but
+because it closes shape 3's own recorded falsifier with a BOUND (`B: 'static`) rather than a
+wrapper. That is now a clause, compiled (EV-108). The second lens, named as the other likely source
+of the class, produced NONE of it. **Four shapes is the class.**
+
+What the second lens produced instead is a different family the guide also had no vocabulary for,
+and it is the fourth sweep's one real finding: **a fact that lives in TWO PLACES because a boundary
+forced it there, kept in step by a comment.** ERG-04's header complains about this for integers
+inside one crate; the general case is `const MAX_BUNDLE_ARITY: usize = 16` declared **eight
+independent times** on this checkout (four of them inside the very crate that exports it), a
+`ReadOnlyQueryData` marker beside the `IS_READ_ONLY` const it is supposed to mirror with only prose
+between them, and a test asserting a ceiling against its own copy of the ceiling. It became ERG-01
+clause 8 rather than a rule, because its answer is the `const _` gate ERG-01 already owns, applied
+at the boundaries where the language pushes back — and because the sweep's own lab found the trap
+inside the obvious fix: an associated-const cross-check that nothing FORCES compiles cleanly over a
+contradiction (EV-109c), which is this repository's recorded meta-defect, a gate that cannot fail,
+reproduced from first principles.
+
+Two further things this revision refuted rather than adopted, both worth the reader's ten seconds.
+`[const { X::new() }; N]` is NOT a cheaper array initialiser than `core::array::from_fn` — the two
+are 69 = 69 byte-identical instructions and BOTH materialise the array on the stack before the
+`Box` (EV-110). And "what can be `const` is `const`" has a low ceiling: `long_running_const_eval`
+is a hard error at two million interpreted steps, and twenty million costs 1 m 46 s of compile time
+(EV-111) — so `smaa_luts.rs`'s committed bytes are the right answer, not a failure to apply
+ERG-31. ⚠️ **The fifth revision's advice stands and is now doubly earned**: a fifth source-cut
+sweep is not recommended. Both of these lenses independently found link-time panic-freedom (index
+OPEN 16) and both independently landed on index OPEN 13, which is the well being read twice again.
 
 ## The deciding question
 
@@ -267,7 +328,7 @@ and `docs/OPEN-QUESTIONS.md`), not a thing to register.
 
 | ID | Binding | Rule |
 |---|---|---|
-| ERG-01 | MUST | A layout claim is a `const _` gate beside the type; a claim about a generic parameter is `const { assert!() }` in the monomorphised body. |
+| ERG-01 | MUST | A layout claim is a `const _` gate beside the type; a claim about a generic parameter is `const { assert!() }` in the monomorphised body; no claim, no `#[repr(C)]`; an embedded blob's alignment is a wrapper type and a loaded file is validated; and a fact the language forces into TWO places is derived from one of them or gated against it — with the gate FORCED, because an unforced associated-const cross-check cannot fail (clause 8). |
 | ERG-02 | MUST / SHOULD | A domain integer that is stored, paired with a same-typed operand or used as an index is a `#[repr(transparent)]` newtype (a lone count with its noun in the name stays bare); a `[lo, hi)` pair is a `Range<T>`; siblings that must not diverge come from one macro. |
 | ERG-03 | SHOULD | A bounded value is minted once into a private-field newtype and holding one IS the proof — of exactly the bound the mint establishes; a sink whose consumers are fixed at construction is written through a handle only the registration mints; the hot path indexes with a plain `[]` — `get_unchecked` only under a SAFETY naming the mint, with a measurement at the site; no range-narrowing mask. |
 | ERG-04 | MUST / SHOULD | A sentinel is a type: absence is a `NonZero` niche; a mode is a data-carrying enum with a right-sized payload, or a stored transparent newtype with a view enum only when the payload needs its full width; never a magic constant compared by hand. |
@@ -303,7 +364,7 @@ and `docs/OPEN-QUESTIONS.md`), not a thing to register.
 | ERG-26 | MUST | `expect("invariant: …")`, never `unwrap()`; `debug_assert!` by default; a release `assert!` only against silent corruption, with that sentence at the site. |
 | ERG-28 | MUST / SHOULD | Failure paths are cold `-> !` helpers; kernel errors are `Copy`; a FAILURE signal is `Result<(), Fieldless>`, never `bool`, and a predicate stays `bool`; `#[inline(always)]` and `select_unpredictable` only with the measurement line — the latter on BOTH predicate distributions. |
 | ERG-46 | MUST / SHOULD | An `unsafe` whose only obligation is a target feature is DELETED: the caller carries `#[target_feature]`, the kernel stays a safe fn, and the island has exactly one boundary `unsafe` naming the crate-wide `cfg`. |
-| ERG-48 | MUST / MAY | An obligation no REPRESENTATION can hold is a bound or a returned value, never a sentence repeated at every site: an alignment regime is a sealed type parameter; a property of an index STREAM is an empty sealed `unsafe` marker trait; a device-owned resource returns through a consuming `reclaim`; a "must give it back" is a `#[must_use]` ticket whose `Drop` tripwire is debug-only. |
+| ERG-48 | MUST / MAY | An obligation no REPRESENTATION can hold is a bound or a returned value, never a sentence repeated at every site: an alignment regime is a sealed type parameter; a property of an index STREAM is an empty sealed `unsafe` marker trait; a device-owned resource returns through a consuming `reclaim` over a `'static` payload; a "must give it back" is a `#[must_use]` ticket whose `Drop` tripwire is debug-only. |
 
 ### §5 Const evaluation and `cfg` — [rust-ergonomics/05-macros-and-const-eval.md](rust-ergonomics/05-macros-and-const-eval.md)
 
@@ -354,7 +415,15 @@ author on record hitting the rejection it would remove) · REF-46 the leak-on-pa
 in-place column rewrite (no site: two of three candidate `collect()`s are `#[cfg(test)]` and the
 third builds a fresh id list) · REF-48 `Fn` instead of `FnMut` as a capture restriction (28 `FnMut`
 bounds censused, essentially all `for_each`-shaped with a mutating caller) · REF-49 nested-tuple
-folding in a derive (none of `boyko_macros`' eight derives can hit an arity ceiling).
+folding in a derive (none of `boyko_macros`' eight derives can hit an arity ceiling) ·
+REF-50 phantom SOURCE / DESTINATION spaces on a transform type (free — an ICF alias, EV-114 — but
+276 space-named matrix occurrences of API surface in a bit-determinism-pinned crate; the per-seam
+`ViewProj(Mat4)` newtype is ERG-02 and is the answer at the named site) · REF-51 a bbqueue-style
+write GRANT whose `Drop` publishes nothing (no site: `lane.rs::emit_to` advances its cursor in ONE
+`Release` store that is the function's last statement, so "the record never existed" is already the
+unwind state) · REF-52 a const-constructible type id (`typeid::ConstTypeId`) to fold `TypeIntern`'s
+runtime hash into a call-site constant (matching `ConstTypeId`s do NOT guarantee identical types —
+a key collision in `component_registry` is the KE13 class at its worst).
 
 ## Checklist — run over the diff before submitting, in both directions
 
@@ -405,6 +474,11 @@ folding in a derive (none of `boyko_macros`' eight derives can hit an arity ceil
 - [ ] An `include_bytes!` blob cast to `&[T]`, or a loaded id used without a range check?
   (ERG-01 clause 7)
 - [ ] An `X::MAX` sentinel where `Option<NonMaxU32>` keeps index 0 meaning 0? (ERG-04 clause 5)
+- [ ] A constant, ceiling or flag DECLARED A SECOND TIME because the first was inconvenient to
+  import — or a marker trait beside the `bool` it is supposed to mirror, with only a doc line
+  between them? (ERG-01 clause 8)
+- [ ] A `submit` / `enqueue` that hands a buffer to the GPU or the OS and returns a token whose
+  payload is NOT `'static`? (ERG-48 shape 3, clause)
 
 **Did I pile on abstraction?**
 - [ ] A newtype for a value that never leaves one function; a trait with one implementor; a
@@ -427,6 +501,11 @@ folding in a derive (none of `boyko_macros`' eight derives can hit an arity ceil
   REF-38, REF-39, REF-43)
 - [ ] A HOISTED `assert_unchecked` claimed to delete a per-element bounds check it cannot reach?
   (REF-44)
+- [ ] Two phantom parameters on a math type where one newtype at the seam states the fact; a
+  reservation guard for a window the control flow already closes; a const type id that trades
+  uniqueness for a folded hash? (REF-50, REF-51, REF-52)
+- [ ] `[const { X::new() }; N]` or a bigger `const fn` table cited as a COST change?
+  (ERG-31 clause 1 exceptions, EV-110, EV-111)
 
 **Did I keep the obligations?**
 - [ ] Every size / align / niche I rely on has a gate; every "does not compile" claim has a
@@ -484,6 +563,8 @@ folding in a derive (none of `boyko_macros`' eight derives can hit an arity ceil
 | new ERG-48 | added, 5th rev. | the class the third sweep found and the guide had no vocabulary for: an obligation NO REPRESENTATION can hold — a property of an index stream, of a buffer's history, or of an external agent's timeline. Every other rule puts its fact in a value's representation; this one puts it in a BOUND or a returned VALUE. Four shapes, four sites, four measurements (EV-96 … EV-99), the third of which records its own falsifier (`mem::forget` still compiles) |
 | ERG-01 (clauses 6, 7) · ERG-04 (clause 5) · ERG-20 (clause 6) | clauses added, 5th rev. | the converse of the layout gate (no claim, no `#[repr(C)]` — 16 bytes against 24, EV-100) and the embedded blob (`AlignAs` plus a validating load, EV-101, with its vectorisation claim REFUTED and the clause narrowed to the safety property); the top-end niche (`NonMaxU32`, EV-102, which also CONFIRMS rather than refutes ERG-04's one-niche-per-type exception); and the validity / safety split as `// SAFETY:`'s stopping rule plus the module-as-TCB numbers (EV-103) |
 | ERG-22 (clause 4, roundtrip half) | withdrawn, 5th rev. | the clause prescribed `expose_provenance` / `with_exposed_provenance` and said the benefit "was not measured". `RUST-FRONTIER.md`'s FR-13 had already REFUSED that pair on FV-12's Miri run — the `as`-cast and the exposed pair produce the same warnings and the same strict-mode error — and FV-12 counted ZERO int-to-ptr casts in boyko's production code, so the one site the clause named is inside `#[cfg(test)]`. Deleted rather than superseded; the `.addr()` half stands on EV-83 unchanged |
+| ERG-01 (clause 8) · ERG-48 (shape 3 clause) · ERG-31 (clause 1 exceptions) | clauses added, 6th rev. | the fourth sweep added NO rule and paid nothing. ERG-01 clause 8 is the SPLIT FACT — a fact the language forces into two places is derived from one of them or gated against it, with the gate FORCED (EV-109; the unforced form compiles over its own contradiction, which is the repository's meta-defect reproduced). ERG-48 shape 3 gains the `'static` payload bound that turns its recorded `mem::forget` falsifier from a dangling write into a leak (EV-108, an ICF alias). ERG-31 clause 1 gains two LIMITS: the CTFE budget (EV-111) and the refutation of the array-repeat inline `const` as a cost change (EV-110) |
+| ERG-01 (clause 7) | corrected, 6th rev. | the clause cited `boyko_serialize` as its Before and did not know that its After already ships: `boyko_rhi_vulkan/src/compute.rs`'s `SpirvBlob<{ include_bytes!(..).len() }>` under `#[repr(C, align(4))]` is the wrapper it prescribes, with the length taken from the file |
 | ERG-03 (OPEN 9 exception) | updated, 4th rev. | a lab model of the gather (EV-92) measured the safe `[]` at 0.76–0.79× of `row_ptr` — FASTER, three runs of three — and refuted the hoisted `assert_unchecked` that was proposed as the compromise (REF-44). The item stays open because the lab kernel is scalar and L2-resident where the tree's is 8-wide; what changed is which direction the site measurement should test first |
 
 ## Open — what this pass could not verify
@@ -548,11 +629,18 @@ folding in a derive (none of `boyko_macros`' eight derives can hit an arity ceil
    partition from 64 to 128 needs a third arm in
    `crates/boyko_log/benches/lane_padding_ablation.rs`, run on an IDLE machine. Until then no
    site widens.
-12. **`cargo llvm-lines`, `cargo bloat` and `cargo mutants` are not installed on this box.**
-   REF-07's "32 instantiations = 3× code" and REF-18's "+43 % build" rest on hand counts, and the
-   ledger now says so rather than borrowing an instrument's authority. `cargo mutants` is the
-   instrument that would test whether ERG-10's fixtures DISCRIMINATE — the repository's own
-   recorded meta-defect, a gate that cannot fail — and nothing checks that today.
+12. **`cargo llvm-lines`, `cargo bloat` and `cargo mutants` are not installed on this box —
+   PARTIALLY CLOSED, 2026-09-03.** REF-07's "32 instantiations = 3× code" and REF-18's "+43 %
+   build" rest on hand counts, and the ledger says so rather than borrowing an instrument's
+   authority. What has changed is that the COUNT half needs no install:
+   `-Zdump-mono-stats=DIR -Zdump-mono-stats-format=markdown` on the already-installed
+   `nightly-x86_64-pc-windows-gnu 1.100.0` writes a per-item instantiation count and size estimate,
+   verified on a probe (EV-112, now ledger **method T**) — a one-off run under a NAMED nightly, the
+   pattern `RUST-FRONTIER.md` already established, with no channel move and no pin. Running it over
+   `crates/` is the remaining work and needs a checkout no other workflow holds; until then neither
+   refusal's number moves. `cargo mutants` is untouched by this, and it is still the instrument that
+   would test whether ERG-10's fixtures DISCRIMINATE — the repository's own recorded meta-defect, a
+   gate that cannot fail — with nothing checking that today.
 13. **`#![no_std]` on `boyko_utils` is feasible, priced, and not done (EV-105).** REF-00 is the
    guide's only refusal enforced purely by review — `clippy.toml` denies the map and lock types,
    but `Box<dyn Trait>`, `Vec::new()`, `format!` and `String::from` are left to a reviewer. In a
@@ -567,6 +655,17 @@ folding in a derive (none of `boyko_macros`' eight derives can hit an arity ceil
    pattern is house-approved. This is ENGINE work with an owner, not a rule; it is the only
    proposal in three sweeps that would convert a CLAUDE.md principle into a LINK error rather than
    better prose.
+   **UPDATED 2026-09-03 — the blocker is priced and does not need a dependency.** The no-allocator
+   ecosystem's answer to "a `Sync` once-cell with no `std`" is `embassy`'s `static_cell::StaticCell`
+   (`init(&'static self) -> &'static mut T`, panicking on the second call, built on
+   `portable-atomic`). It is a third-party dependency on the boot path of every registry in the
+   kernel, which is REF-10's neighbourhood, so the in-house arm was compiled instead: a **65-line**
+   `OnceCore<T>` — `AtomicU8` state machine over `UnsafeCell<MaybeUninit<T>>`, `const fn new` /
+   `get` / `get_or_init` / `Drop`, five `unsafe` blocks each with its `// SAFETY:` — compiles under
+   `#![no_std]` at the shipped profile with zero `alloc` symbols (EV-113). ⚠️ That is a FEASIBILITY
+   probe and not a soundness review: it owes Miri and a `code-reviewer` pass before it replaces
+   `OnceLock`. The decision is unchanged in kind — ENGINE work with an owner — but its cost is now
+   a number rather than an unknown.
 14. **Two `RUST-FRONTIER.md` rows are measured but unwritten (EV-107).** This pass was scoped to
    `docs/rust-ergonomics/` and `docs/RUST-ERGONOMICS.md` and did not touch the frontier document,
    which is where both belong. **Pattern types** (`u32 is 0..=63`) compile on the pinned
@@ -586,6 +685,25 @@ folding in a derive (none of `boyko_macros`' eight derives can hit an arity ceil
    on the per-task path. That puts it squarely on the accepted-erasure list's `TaskHandle` row and
    under ERG-45, and KE16's own numbers decide it. Recorded here only so nobody opens an ERG rule
    for it.
+16. **Link-time panic-freedom is a CI leg this repository does not have, and it is the only
+    proposal that makes a hand-counted claim MECHANICAL** (fourth sweep, found independently by
+    both of its lenses — which is the signal that the well is being read twice, and also the signal
+    that the item is real). This guide COUNTS panic sites as evidence: REF-44 turns on "13 panic
+    sites survive", EV-92 counts them again, and every one of those numbers is a human reading one
+    build of one function. Nothing goes red when a refactor puts a panic branch back. Two
+    mechanisms exist and both are link errors, not types: `panic-never` supplies a
+    `#[panic_handler]` that resolves to an undefined symbol, so any surviving panicking branch
+    fails the LINK (release profile mandatory, `#![no_std]` in practice — rust-embedded/wg #551
+    records that adopting it workspace-wide was found impossible because upstream libraries panic
+    freely); dtolnay's `#[no_panic]` is the per-function variant that works in `std` crates by the
+    same mechanism (useless under `panic = "abort"`, does nothing on `cargo check` or a library
+    build with no linker invocation, and needs thin LTO to reach a cross-crate non-inline callee).
+    The candidate leaves are the `#![no_std]` ones — `boyko_sdf_math` today, `boyko_utils` after
+    OPEN 13, whose enablement this shares. ⚠️ **NOT an ergonomics rule and it must not become one**:
+    it is a per-crate CI leg, it is a proc-macro dependency in the `#[no_panic]` form (REF-10), and
+    it is NOT measured here — nothing in the ledger claims it links on this box. Recorded because
+    the repository's recorded meta-defect is a gate that cannot fail, and this is a gate that
+    structurally can.
 
 ## Files
 
@@ -597,8 +715,8 @@ folding in a derive (none of `boyko_macros`' eight derives can hit an arity ceil
 - [rust-ergonomics/03-unsafe-and-pointers.md](rust-ergonomics/03-unsafe-and-pointers.md) — ERG-20, 22, 24, 43, 45, 26, 28, 46, 48 (absorbs the former §4 and ERG-09)
 - [rust-ergonomics/05-macros-and-const-eval.md](rust-ergonomics/05-macros-and-const-eval.md) — ERG-31 (ERG-29 and ERG-33 both merged into it)
 - [rust-ergonomics/06-iterators-and-data-flow.md](rust-ergonomics/06-iterators-and-data-flow.md) — ERG-35, 36, 38
-- [rust-ergonomics/08-refused.md](rust-ergonomics/08-refused.md) — REF-00 … REF-49, in two parts (REF-40, REF-43, REF-44 and REF-47 are cost refusals; REF-41, REF-42, REF-45, REF-46, REF-48 and REF-49 are ceremony / scope / no-site refusals — ids are stable, not positional)
-- [rust-ergonomics/EVIDENCE.md](rust-ergonomics/EVIDENCE.md) — EV-01 … EV-107; the only place a number lives
+- [rust-ergonomics/08-refused.md](rust-ergonomics/08-refused.md) — REF-00 … REF-52, in two parts (REF-40, REF-43, REF-44 and REF-47 are cost refusals; REF-41, REF-42, REF-45, REF-46, REF-48, REF-49 and REF-50 … REF-52 are ceremony / scope / no-site refusals — ids are stable, not positional)
+- [rust-ergonomics/EVIDENCE.md](rust-ergonomics/EVIDENCE.md) — EV-01 … EV-114; the only place a number lives
 - [RUST-FRONTIER.md](RUST-FRONTIER.md) — the companion in the other direction: this guide is the rules for code written NOW on the pinned stable channel; that document is the standing ADOPT / REFUSE / BLOCKED-ON-STABLE verdict per recent-Rust feature (FR-nn, ledger FV-nn), including the trait-solver answer and the price of any nightly pin — consult it before proposing a feature that is not in this guide.
 - The former `04-errors-panics-assertions.md` and `07-naming-and-documentation.md` are merged into
   §3 and §2 respectively and no longer exist.

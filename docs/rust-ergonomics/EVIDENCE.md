@@ -71,6 +71,11 @@ pinned nightly (EV-107). Nothing under `crates/` was built, modified or linked i
   (which is the instrument behind REF-07's and REF-18's code-size refusals) and `cargo bloat` are
   NOT installed on this box and are NOT method rows: those two refusals rest on hand instruction
   counts, and this ledger says so rather than borrowing an instrument's authority.
+- **T (monomorphisation stats)** — `-Zdump-mono-stats=DIR -Zdump-mono-stats-format=markdown` on the
+  same named nightly, which writes `<crate>.mono_items.md` with a per-item instantiation count and
+  a size estimate. Added by the fourth sweep (EV-112). It needs no install and no channel move, so
+  it is the instrument the `cargo llvm-lines` sentence above says is missing — for the COUNT half.
+  It has not been run over `crates/`; a claim about REF-07 or REF-18 still owes that run.
 
 **Reading rule.** Instruction count is NOT a cost proxy in either direction: EV-02's faster loop
 has MORE instructions (unrolling), EV-22's slower one has FEWER. Any verdict here that rests on a
@@ -1045,3 +1050,125 @@ padding proof `#[derive(bytemuck::Pod)]` already gives on stable (EV-82), and no
 shape. → both are `RUST-FRONTIER.md` rows, not ergonomics rules; this pass was scoped out of that
 file and records the measurements here so the rows can be written without re-running them
 (index OPEN 14).
+
+---
+
+## Rows added by the fourth technique sweep (2026-09-03) — the two dropped lenses, compiled
+
+⚠️ **Where.** Rows EV-108 … EV-114 came from single-file `rustc` probes in the session scratchpad
+(`erg-lab5`, outside the repository), invoked with the shipped profile's flags spelled explicitly —
+`--edition 2024 -C opt-level=3 -C codegen-units=16 -C target-cpu=x86-64-v3`, no LTO — and every
+identity re-run at `-C codegen-units=1`, because an ICF alias at one unit proves nothing at
+sixteen. Nothing under `crates/` was built, modified or linked into any probe. The one timing
+figure in this block (EV-111) was taken with the box under load, and it is a COMPILE-time figure,
+not a runtime one.
+
+**EV-108 — the `'static` bound that changes what ERG-48 shape 3's `mem::forget` hole COSTS.** (A, B)
+Two spellings of the rule's own `submit` / `reclaim` sketch: `PendingA<T>` as the rule writes it
+today, and `PendingB<T: 'static>` as the Embedonomicon's DMA chapter writes it, bodies otherwise
+character-identical. Asm: **`drive_b = drive_a`, an explicit ICF alias at codegen-units 16 AND 1**,
+15 instructions — a bound emits no code, as expected and now measured. The behaviour half is the
+point. The Embedonomicon's exact hazard —
+
+```rust
+let mut local = [0u8; 64];
+let t = d.submit(&mut local[..]);
+core::mem::forget(t);            // the frame dies while the agent still owns the bytes
+```
+
+— **COMPILES CLEAN against the unbounded arm** (that is the falsifier ERG-48 already records, now
+confirmed rather than asserted) and is **`error[E0597]: local does not live long enough` against
+the bounded arm**. The bound does not stop `mem::forget`; it stops the payload from being a borrow
+of a frame, so what a leak leaves behind is a live resource and not a dangling one. → ADOPTED as a
+clause on ERG-48 shape 3.
+
+**EV-109 — the SPLIT FACT: gating one copy against the other, and the forcing trap.** (L, B, A)
+Three shapes, and the third is the one worth the row.
+
+*(a) The check the derive EMITS.* A two-crate probe: `kernel` exports `pub const MAX_BUNDLE_ARITY:
+usize = 16`; the "user" crate carries what a derive would emit — `const _: () = assert!(17 <=
+kernel::MAX_BUNDLE_ARITY, "…")` — and the result is `error[E0080]: evaluation panicked: Bundle
+arity exceeds MAX_BUNDLE_ARITY`; at 9 fields it is silent. The proc-macro crate never learns the
+number and there is one copy of it.
+
+*(b) The enum-indexed table.* `const _: () = assert!(TABLE.len() == SdfOp::COUNT, …)` plus one
+per-row order assert; adding a fourth variant without a row is `E0080` naming the message.
+Compile-time only, no codegen row.
+
+*(c) THE FORCING TRAP, and it is this repository's own recorded meta-defect.* An `unsafe trait
+ReadOnlyQueryData: QueryData` carrying the cross-check as a DEFAULTED associated const —
+`const READ_ONLY_AGREES: () = assert!(Self::IS_READ_ONLY, …)` — over an impl that deliberately
+contradicts it (`IS_READ_ONLY = false` beside `unsafe impl ReadOnlyQueryData`): **the crate
+COMPILES CLEAN.** An associated-const default is evaluated only where it is USED, so the unforced
+version is a gate that CANNOT FAIL. Adding one line to the generic body that every impl reaches —
+`const { <D as ReadOnlyQueryData>::READ_ONLY_AGREES };` — turns the same source into
+`error[E0080]: evaluation panicked: IS_READ_ONLY disagrees with the marker`, with
+`note: erroneous constant encountered` naming `<Liar as ReadOnlyQueryData>::READ_ONLY_AGREES`.
+Cost of the forcing line over an HONEST impl: **`drive_prose = drive_forced`, an ICF alias at
+codegen-units 16 AND 1** — const evaluation precedes codegen and the line emits nothing.
+→ ADOPTED as ERG-01 clause 8.
+
+**EV-110 — `[const { X::new() }; N]` as a CHEAPER array initialiser: REFUTED.** (A) The site is
+`ecs_master.rs`'s `bundle_archetype_cache`, documented as a ~30–50 µs cold path over
+`Box::new(core::array::from_fn(|_| OnceLock::new()))` at `MAX_BUNDLE_TYPES = 1024`. Modelled at
+that shape, `Box::new(core::array::from_fn(|_| OnceLock::new()))` and
+`Box::new([const { OnceLock::new() }; 1024])` are **69 = 69 instructions with byte-identical
+bodies** at codegen-units 16 and 1 (the only textual difference is the local `.LCPI` / `.LBB` label
+numbering). BOTH build the array on the STACK with the same 32-wide `vmovups` loop
+(`___chkstk_ms`, an 8 224-byte frame), allocate, and `memcpy` it into the box — the inline `const`
+block deletes NO initialiser and produces NO `.rodata` blob. This is the EV-08 physics the
+proposal's own caveat named, and it decides against it. → NOT a cost change; recorded as one
+exception sentence on ERG-31 clause 1 (write whichever reads better), and NOT as a rule.
+
+**EV-111 — "what can be `const` is `const`" has a CEILING, and it is low.** (B, T — compile time)
+CTFE is a MIR interpreter. A `const fn` counting loop evaluated at compile time: **100 000
+iterations is silent**; **2 000 000 iterations is `error: constant evaluation is taking a long
+time`** — the `long_running_const_eval` lint, which is DENY-by-default and is therefore a hard
+error out of the box. It is a LINT, so `#![allow(long_running_const_eval)]` lets it through on
+stable: with the allow, 20 000 000 iterations compiles, emitting five repeated diagnostics, in
+**1 m 46 s** (single file, box under load — roughly 200 k interpreted iterations per second,
+orders of magnitude slower than the same loop at run time). → ADOPTED as an exception on ERG-31
+clause 1: past a table of a few hundred thousand interpreted steps the answer is a build script or
+a committed blob, not a bigger `const fn` — and the clause now says where it stops.
+
+**EV-112 — the monomorphisation instrument OPEN 12 says is missing (method T).** (B) `cargo
+llvm-lines` and `cargo bloat` are not installed here and are not claimed. **rustc's own collector
+needs no install**: on `nightly-x86_64-pc-windows-gnu 1.100.0-nightly (8925ea358 2026-08-20)` —
+the ledger's method-S nightly, run as a one-off, no channel move and no pin —
+`-Zdump-mono-stats=DIR -Zdump-mono-stats-format=markdown` writes `<crate>.mono_items.md`. On a
+probe with one generic fn over three types × two const-generic `bool`s it reports, exactly:
+
+| Item | Instantiation count | Estimated Cost Per Instantiation | Total Estimated Cost |
+| --- | ---: | ---: | ---: |
+| `solve` | 6 | 35 | 210 |
+| `drive` | 1 | 7 | 7 |
+
+i.e. per-item instantiation counts and a size estimate — the shape of number REF-07's
+"32 instantiations = 3× code" and REF-18's "+43 % build" currently rest on hand counts for.
+→ Recorded as **method T** and as a partial close of index OPEN 12. It is NOT a re-measurement of
+either refusal: nobody has run it over `crates/` yet, and three workflows hold that directory.
+
+**EV-113 — OPEN 13's one residual blocker, PRICED in-house.** (B) OPEN 13 / EV-105 found that
+`boyko_utils` compiles under `#![no_std]` with no `alloc` after a mechanical `std::`→`core::`
+substitution, except for `type_intern`'s four `std::sync::OnceLock` sites, because `core` has no
+`Sync` once-cell. The no-allocator ecosystem's answer is the third-party `static_cell`; the
+in-house answer was compiled here instead. A **65-line** `OnceCore<T>` — an `AtomicU8` state
+machine (`EMPTY` / `BUSY` / `READY`) over `UnsafeCell<MaybeUninit<T>>`, with `const fn new`,
+`get`, `get_or_init`, `Drop`, and a `// SAFETY:` on each of its five `unsafe` blocks — compiles
+under `#![no_std]` at the shipped profile with **zero `__rust_alloc` / `alloc::` / `core::fmt`
+symbols in the emitted asm**. ⚠️ This is a FEASIBILITY probe, not a soundness review: a
+hand-rolled once-cell sits on the boot path of every registry in the kernel and owes Miri plus a
+`code-reviewer` pass before it replaces `OnceLock`. What the row establishes is only that the
+blocker does not require a dependency. → index OPEN 13, updated.
+
+**EV-114 — phantom SOURCE / DESTINATION spaces on a transform: free, and refused anyway.** (A, L)
+`euclid`'s `Transform3D<T, Src, Dst>` modelled on this engine's `Mat4`:
+`Tf<Src, Dst>(Mat4, PhantomData<fn(Src) -> Dst>)` with a `then<Out>(self, Tf<Dst, Out>)`
+composition, against the bare `proj.mul(view)` the tree writes at
+`boyko_render/src/view.rs::view_proj_columns`. **`view_proj_spaced = view_proj_bare`, an ICF alias
+at codegen-units 16 AND 1**, 17 instructions; `Tf<World, View>` is 64 bytes / align 16, identical
+to `Mat4`. The encoding costs nothing at run time, which is why the refusal that follows is a
+Part-B one: it is the API surface that pays — two parameters on every constructor, every `Mat4`
+method and every GPU upload seam, across 276 space-named matrix occurrences in 13 files, in a
+crate whose math is bit-determinism-pinned against a shader oracle. → REF-50, with ERG-02's
+one-fact newtype named as the cheaper answer at the site that motivated it.

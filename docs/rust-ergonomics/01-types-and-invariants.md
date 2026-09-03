@@ -118,14 +118,87 @@ a forged proof".
 contract is prose across three module headers, and whose loader copies rather than views.
 *After* — the wrapper plus one `check_alignment` at the load boundary; the Gaia bake pipeline
 (text → bake → binary) and the committed `.spv` tables are the sites this is for.
+⚠️ *Correction, fourth sweep — one After ALREADY SHIPS and this clause did not know it.*
+`crates/boyko_rhi_vulkan/src/compute.rs` has `#[repr(C, align(4))] struct SpirvBlob<const N: usize>([u8; N])`,
+instantiated by `embed_spirv!` as `SpirvBlob<{ include_bytes!($path).len() }>` — the wrapper this
+clause prescribes, with the byte length taken FROM the file rather than hand-counted ("so there is
+no hand-counted size to keep in sync", its own doc), and `as_words` re-viewing it as `&[u32]`
+behind a `const { assert!(N.is_multiple_of(4)) }`. Cite that, not only `boyko_serialize`'s Before.
+It is also one of the two const-generic shapes REF-07 permits, and the reason it is permitted is
+visible here: the parameter is a FILE's length, so the fan-out is the number of embedded blobs and
+not a combinatorial product.
 ⚠️ *The codegen half of this claim was REFUTED and the clause is narrowed accordingly* — a
 per-element `read_unaligned` walk over a 4096-byte table VECTORISES on 1.97.1 at `v3` (62
 instructions, 13 `vpaddd`) just as the validated `&[u32]` view does (71 instructions, 13
 `vpaddd`). The validated form costs nine instructions ONCE per load, not per element, and buys the
 SAFETY property, not speed. Do not adopt it for a number.
 
+**Clause 8 (added by the fourth sweep) — a fact that lives in TWO PLACES is DERIVED from one of
+them or GATED against it, and an associated-const gate that nothing FORCES cannot fail.** ERG-04's
+header already complains about "one fact stored twice in two integer encodings kept in step by
+'site N of 3' comments" — for integers, inside one crate. The general case is wider and the tree
+is full of it. Census on this checkout: **eight independent declarations of
+`const MAX_BUNDLE_ARITY: usize = 16`** — `boyko_ecs`'s public one in `bundle/bundle.rs`, FOUR
+local copies in the same crate (`commands/{insert_command, migration_helpers, spawn_at_command,
+spawn_batch_command}.rs`, each with a doc line saying "mirrors" or "kept in lock-step"), one in
+`boyko_macros/src/bundle.rs`, one in `aether_lang/src/parse.rs` and one in
+`boyko_physics/tests/bundles_s6.rs` — plus a second family (`MAX_TYPED_WRITE_ARITY`) beside it.
+Only ONE of the eight is structurally forced: a proc-macro crate cannot import the crate it
+generates for, and `boyko_macros` says so at the site. The other seven are habit, and the test's
+assertion (`arity 8 <= MAX_BUNDLE_ARITY 16`) is made against its own copy, so raising the real
+ceiling leaves it green while measuring the wrong number.
+
+Three answers, cheapest first, all compile-time only (EV-109):
+
+1. **Import it.** Four of the eight copies are in the crate that exports the constant. Nothing is
+   bought by re-declaring it; delete and `use`.
+2. **Where a crate boundary genuinely forbids the import, EMIT the check into the crate that CAN
+   see both sides.** A derive does not need to KNOW the number: it expands
+   `const _: () = assert!(FIELD_COUNT <= ::boyko_ecs::…::MAX_BUNDLE_ARITY, "<decision id>: …");`
+   into the user's crate, where the kernel constant is in scope. One copy survives, and the error
+   still fires at `cargo check` time — `error[E0080]: evaluation panicked: <your message>`. The
+   alternative the ecosystem uses (a shared internal crate both sides depend on, `serde`'s
+   `serde_derive_internals` shape) is for the case where the macro must BRANCH on the value; this
+   engine's ceilings only need to be checked.
+3. **Where the two encodings are of different KINDS — a `bool` beside a marker trait, a table
+   beside the enum that indexes it — gate them against each other, and FORCE the gate.** A table
+   indexed by an enum is two lists that must agree in length and in order:
+   `const _: () = assert!(TABLE.len() == Kind::COUNT, …)` plus one per-row order assert. A marker
+   trait beside a predicate const is the harder case and it carries a trap. `QueryData::IS_READ_ONLY`
+   and `unsafe trait ReadOnlyQueryData` are one fact in two encodings, kept in step by
+   `data.rs`'s prose ("Implementations MUST be `QueryData` impls whose `IS_READ_ONLY = true`") —
+   the same unmechanised pair Bevy ships. The natural fix is a defaulted associated const on the
+   marker, `const READ_ONLY_AGREES: () = assert!(Self::IS_READ_ONLY, …)`.
+   ⚠️ **Written that way and left alone it is a gate that CANNOT FAIL** — an associated-const
+   default is evaluated only where it is USED, and MEASURED (EV-109c) an impl that sets
+   `IS_READ_ONLY = false` and writes `unsafe impl ReadOnlyQueryData` beside it **compiles clean**.
+   One line in a generic body that every impl reaches —
+   `const { <D as ReadOnlyQueryData>::READ_ONLY_AGREES };` — makes the same source `E0080` and
+   NAMES the offending type. The forcing line is an ICF alias against the unforced body at
+   codegen-units 16 and 1.
+
+*What it buys.* This is the guide's own thesis — one fact, one place — applied to the boundaries
+where the language pushes back. And clause-8 shape 3 is the repository's recorded meta-defect (a
+gate that could not fail) reproduced in a lab: the mechanism that looks like the fix IS the defect
+until it is forced. A gate added under this clause owes the trybuild case ERG-10 asks for, because
+what it prevents is exactly what a later impl can silently undo.
+
+*Exceptions.*
+- A copy that is deliberately NOT the same fact — a local scratch size that merely happens to be 16
+  today — says so in its doc line and is not gated to the other. A gate between two facts that are
+  only numerically equal is worse than two constants.
+- Shape 2 puts a `const _` into every downstream crate that uses the derive. That is compile-time
+  only, but it is a diagnostic the user sees: the message names the decision id and the limit, or
+  it is not worth emitting.
+- A gate whose value is only knowable at run time is not this clause; it is `debug_assert!`
+  (ERG-26).
+
 **Verified.** EV-03: 38 gates compiled in the release profile emit no code; a wrong one is
 `E0080`. Const evaluation precedes codegen, so the generic-body form emits nothing either.
+EV-109 (clause 8): the emitted cross-crate assert fires and names its message; the enum-table gate
+fires on an added variant; the unforced marker cross-check compiles WITH the contradiction in it
+and the forced one is `E0080`, at zero codegen cost (`drive_prose = drive_forced`, an ICF alias at
+codegen-units 16 and 1).
 
 **Exceptions.**
 - A gate whose value depends on pointer width is written against `size_of::<usize>()` or is

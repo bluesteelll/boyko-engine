@@ -6,9 +6,9 @@ This section is as important as the rules, and it has two halves because the fai
 against is two-sided. **Part A** refuses techniques sold as "ergonomic and free" that COST here —
 cycles, binary size, build time, a guarantee silently deleted, or a panic silently turned into a
 wrong answer (REF-40 sits in Part A and REF-41 / REF-42 in Part B although numbered last — ids
-are stable, not positional; REF-43 … REF-45, added by the second technique sweep, and REF-46 … REF-49, added by
-the third, are appended at the end of Part B — of those, REF-43, REF-44 and REF-47 are Part-A
-refusals by nature and the rest are Part-B; again, ids are stable, not positional). It is what stops a developer
+are stable, not positional; REF-43 … REF-45, added by the second technique sweep, REF-46 … REF-49, added by
+the third, and REF-50 … REF-52, added by the fourth, are appended at the end of Part B — of those, REF-43, REF-44 and REF-47 are Part-A
+refusals by nature and the rest, REF-50 … REF-52 included, are Part-B; again, ids are stable, not positional). It is what stops a developer
 "improving" a hot loop into a regression. **Part B** refuses ABSTRACTIONS that cost nothing at
 runtime and prevent no defect anyone here would hit — a name to learn and a hop to follow for
 nothing. It is what stops the rules in §1 from being applied indiscriminately, which would make
@@ -28,6 +28,16 @@ The half review must catch: `Box<dyn Trait>`, `Arc<Mutex<_>>`, `Vec::new()`, `fo
 `String::from`, large `clone()` on the kernel and schedule rows. Exception route: a row of the
 accepted-erasure list in the index with its amortisation unit. "It is cold" in a comment is the
 sentence five falsified `type_intern` sites wrote. REFUSED (ERG-12, ERG-14, ERG-15, ERG-28).
+*Added by the fourth sweep, as a NEGATIVE result worth having on record:* there is no type-level
+spelling of "this function may not allocate". Rust has no negative bounds and no effect system, a
+`!Alloc` bound cannot be written, and REF-23 already records that a static `!Send` assertion
+asserts nothing. The half this ban leaves to a reviewer therefore has exactly three mechanical
+answers, none of them a type: a capability TOKEN that must be presented to do the dangerous thing
+(ERG-06, `DispatcherToken`); a crate that does not LINK `alloc`, in which four of the five
+un-lintable bans are not NAMEABLE (`#![no_std]`, index OPEN 13, priced at EV-105 and EV-113); and a
+LINKER refusal for the panic half (index OPEN 16). Two of the three are already open items with
+measurements attached, and neither is an ergonomics rule — which is why this refusal stays
+review-enforced and says so.
 
 **REF-01 — `Deref` on a domain newtype "to restore ergonomics".** Free at runtime — which is
 why it is dangerous: it re-exposes every inner method and re-admits the raw value at every site;
@@ -59,7 +69,24 @@ beyond two or three fixed capacities.** 2^N bodies per flag, one copy of every l
 the literal-argument runtime version folded to the same symbol (EV-19: 32 instantiations = 3×
 code, +38 % build). `solve::<true, false>(dt)` is as unreadable as `solve(true, false)`.
 REFUSED. Per-type predicates are associated consts under `if const` (ERG-31); two or three
-fixed capacities with the padded-size gate (ERG-01) are permitted; a lane count is a plain `const`.
+fixed capacities with the padded-size gate (ERG-01) are permitted; a lane count is a plain `const`,
+and a capacity taken FROM a file (`SpirvBlob<{ include_bytes!(..).len() }>`, ERG-01 clause 7) is the
+second permitted shape, because its fan-out is the number of blobs rather than a product.
+*Two notes added by the fourth sweep.* (1) **The strongest external confirmation this refusal will
+get comes from the community that most wanted the opposite:** `heapless` — whose whole thesis is
+capacity-in-the-type — shipped View types in 0.9 (`VecView<T>` is to `Vec<T, N>` what `[T]` is to
+`[T; N]`, reached by unsizing coercion) for the stated purpose of improving "both compile time and
+the size of the resulting binary". That is an escape hatch from exactly the cost EV-19 measured.
+It is NOT adopted here: the only const-generic container in this tree is `boyko_log`'s
+`DspBuf<N>` at two plausible instantiations, which REF-07 already permits, so a `?Sized` view
+sibling would be machinery for a fan-out of two. It is recorded so that a THIRD capacity is a
+signal to build the view rather than to argue with this refusal. (2) **Type-level integers
+(`typenum`, Peano `Succ<Zero>`) are this same refusal by a worse mechanism** and are covered by it:
+min-const-generics has expressed the motivating case since 1.51, the encoding gives the part of the
+language responsible for arithmetic a second incompatible counterpart that must be written twice,
+and the errors are trait-resolution failures with no arithmetic in them. No site exists —
+`boyko_math` is fixed-size, the physics kernels are fixed 8-wide, and every kernel capacity is a
+plain `const`.
 
 **REF-08 — Type aliases presented as type safety.** `pub type Generation = usize;` is transparent
 to the checker and misleads the reader into assuming newtype behaviour. REFUSED (ERG-02).
@@ -372,3 +399,59 @@ derive to do the folding — so `tuple_impl.rs`'s `const { panic!() }` stays cor
 be a clause about macros that do not exist. Recorded so the distinction is written down for the
 day a composite derive (`SystemParam`, `QueryData`) is actually built; it belongs in that
 campaign's plan, next to REF-45.
+
+**REF-50 — Phantom SOURCE / DESTINATION spaces on a transform type (`euclid`'s
+`Transform3D<T, Src, Dst>`).** The temptation is real and the defect class is real: a 4×4 matrix
+carries no evidence of which two spaces it maps between, `boyko_render/src/view.rs`'s
+`pub fn view_proj_columns(m: Mat4)` takes a bare `Mat4` that MUST be a view-projection and cannot
+say so, and this repository's recorded render failures — the net-Y-inversion rule, the shadow
+mirror rule, a pose drawn a frame late — are the family a wrong-space multiplication belongs to.
+It is also **free at run time**, which is why it is refused HERE and not in Part A: MEASURED
+(EV-114), `Tf<Src, Dst>(Mat4, PhantomData<fn(Src) -> Dst>)` with a `then` composition against the
+bare `proj.mul(view)` gives **`view_proj_spaced = view_proj_bare`, an ICF alias at codegen-units 16
+AND 1**, 17 instructions, and `Tf<World, View>` is 64 bytes / align 16 exactly like `Mat4`.
+What pays is the API surface: two parameters on every constructor, every `Mat4` method and every
+GPU upload seam, across **276 space-named matrix occurrences in 13 files of `boyko_render/src`**
+(view.rs 91, shadow_atlas.rs 60, hzb.rs 32, csm_config.rs 30, motion_cam.rs 27, frustum.rs 19), in
+a crate whose math is bit-determinism-pinned against a shader oracle so every touch is
+identity-gated. REF-35's reasoning applies unchanged — a container abstraction where newtyping the
+value buys the invariant — and the cheaper answer at the site that motivated this is already a rule
+of the guide: `view_proj_columns(vp: ViewProj)` over a `#[repr(transparent)] struct ViewProj(Mat4)`
+minted where the product is formed (ERG-02). That states the one fact the seam needs, in one file,
+for one type. REFUSED as a SYSTEM; the per-seam newtype is ERG-02 and is encouraged.
+
+**REF-51 — A bbqueue-style write GRANT whose `Drop` publishes nothing.** The mechanism is right
+and is genuinely not in this guide: `grant_exact(n) -> GrantW` hands out the region, `commit(used)`
+CONSUMES the grant and is the only way to publish, and dropping it publishes NOTHING — the mirror
+image of ERG-48 shape 4's ticket, whose drop is a tripwire because there the correct unwind state
+is "give it back", and the mirror image of REF-46's leak-on-panic guard, which is refused for the
+same reason as this one. `boyko_log`'s own prose names the hazard — "the open-record window"
+appears in `record.rs` twice and in `sink/request.rs` once, and `DspBuf` exists "to keep user code
+out of" it — so the site looked certain. **It is not there.** `lane.rs::emit_to` was read on this
+checkout: `admit` is a pure budget computation that mutates nothing, the header and payload are
+written into bytes the consumer cannot yet see, and the cursor advances in ONE `lane.write.store(…,
+Release)` that is the function's last statement. There is no reserve→commit window: every early
+return is before the publish, the arguments are `Copy` so encoding runs no destructor, and "the
+record never existed" is already the unwind state, structurally, with no type needed. A `Grant`
+here would be a type that states what the control flow already guarantees — REF-32. RECORDED
+rather than dropped, because the mechanism is correct and the day a ring in this engine DOES
+advance a cursor before it fills the region (a DMA- or GPU-filled staging span is the plausible
+first one), this entry is where to look, and the shape is: the reservation is a returned value,
+`commit(used)` consumes it, and `Drop` does nothing at all.
+
+**REF-52 — A const-constructible type id (`typeid::ConstTypeId`, `#![feature(const_type_id)]`) to
+fold `TypeIntern`'s runtime hash into a call-site constant.** Tempting because the cost is visible:
+`boyko_utils::type_intern`'s `KeyHasher` mixes a 128-bit `TypeId` with fxhash on EVERY registry
+lookup, four registries key on it, and `TypeId::of::<T>()` is not const-constructible on stable, so
+a per-`T` `const KEY: u64` cannot be written. Refused on the price, which the stand-in's own
+documentation states: unlike `core::any::TypeId`, matching `ConstTypeId`s do NOT guarantee
+identical types outside a stated special case — and the upstream stabilisation of the std version
+is blocked on precisely that ("a new scheme for building type ids that is collision resistant is
+needed before stabilizing", rust#77125 / #144133). A key collision in `component_registry` is not a
+wrong answer at one site; it is two components sharing a storage row in the table every storage
+path resolves through, which is the KE13 defect class at its worst. EnTT documents the same failure
+mode for its constexpr `type_hash`. It is additionally a third-party proc-macro-adjacent dependency
+on the kernel's boot path (REF-10). REFUSED on stable; the nightly `const_type_id` form is a
+`RUST-FRONTIER.md` BLOCKED-ON-STABLE row, not an ergonomics rule. If the hash ever measures, the
+answer that does not weaken uniqueness is to hoist the lookup out of the loop (REF-28's shape), not
+to make the id constant.

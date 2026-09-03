@@ -69,6 +69,27 @@ appears only when the callee must mutate or the value must outlive the call (ERG
 *Exceptions* — do not contort a body to make it `const`; a `#[non_exhaustive]` struct forbids
 functional update downstream (ERG-14 clause 4); a boot-time `..Default::default()` on a non-POD
 struct is one malloc at boot and is permitted, but if a `DEFAULT` exists, use it.
+*Two exceptions added by the fourth sweep, both measured, and both of them limits on the clause
+rather than extensions of it.*
+- **This clause has a CEILING and it is low.** CTFE is a MIR interpreter, so "compute it at compile
+  time" costs interpreted steps. MEASURED (EV-111) on `rustc 1.97.1`: a `const fn` counting loop is
+  silent at 100 000 iterations and is `error: constant evaluation is taking a long time` at
+  2 000 000 — the `long_running_const_eval` lint, DENY-by-default, hence a hard error out of the
+  box. It is a LINT, so `#![allow(long_running_const_eval)]` lets a genuinely long computation
+  through on stable — at 20 000 000 iterations that is **1 m 46 s** of compile time (box under
+  load) plus five repeated diagnostics that downstream consumers also see. `boyko_image`'s
+  `const CRC32_TABLE: [u32; 256] = crc32_table()` is far under the budget and is the right size for
+  this clause. A table an order of magnitude larger — an SMAA-shaped LUT, an SDF probe table — is a
+  build script or a committed blob with a gate, not a bigger `const fn`; `boyko_render`'s
+  `smaa_luts.rs` already ships its two as committed bytes with SHA-256 pins, and that is the
+  correct answer, not a failure to apply this clause.
+- **The array-repeat inline `const` is NOT a cost change.** `[const { X::new() }; N]` is the
+  idiom for an array of a non-`Copy`, const-constructible element, and it reads better than
+  `core::array::from_fn(|_| X::new())`. It buys nothing else: MEASURED (EV-110) at the
+  `bundle_archetype_cache` shape (`[OnceLock<_>; 1024]`, boxed), the two spellings are **69 = 69
+  instructions with byte-identical bodies** at codegen-units 16 and 1 — both materialise the array
+  on the STACK with the same vectorised loop and `memcpy` it into the box, exactly the EV-08
+  physics. Write whichever reads better; never cite the change as a cost one (REF-21, REF-36).
 
 **Clause 2 — the per-type PREDICATE, as before.** `trait QueryData { const HAS_DENSE: bool; … }` and, in the generic body, `if const {
 D::HAS_DENSE } { … }` — the kernel's own spelling (132 `if const {` lines under `crates/*/src`,

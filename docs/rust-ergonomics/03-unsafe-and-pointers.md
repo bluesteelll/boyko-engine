@@ -658,7 +658,7 @@ are correct as written.
 ### ERG-48 — An obligation that NO REPRESENTATION can hold is carried by a BOUND or by a returned VALUE, never by a sentence repeated at every site
 
 **Binding:** MUST for shapes 1–3 where the site exists; MAY for shape 4 · **Cost:** ZERO-COST
-(EV-96, EV-97, EV-98, EV-99) · **Guarantee level:** language (a sealed marker, an empty `unsafe`
+(EV-96, EV-97, EV-98, EV-99, EV-108) · **Guarantee level:** language (a sealed marker, an empty `unsafe`
 trait and a consuming call are all resolved by trait selection and borrowck); measured (codegen)
 
 **Rule.** Every other rule in this guide puts a fact into a value's REPRESENTATION — a niche
@@ -771,6 +771,22 @@ STILL COMPILES (EV-98). The payload is therefore `ManuallyDrop` and the device o
 leak leaves the resource alive, which is a leak and not a use-after-free. A `Drop` tripwire would
 not have bought this, and this rule does not pretend otherwise.
 
+*Clause added by the fourth sweep — the payload is `'static`, and that is what makes the leak
+harmless.* The sentence above is only true while the payload is not a BORROW. `submit(&mut local[..])`
+followed by `mem::forget` compiles today, and what it leaves behind is a device writing into a
+frame that has been reclaimed — the falsifier at its worst. The standard fix comes from the
+community that met this first, the Embedonomicon's DMA chapter, and it is not a wrapper but a
+BOUND: `pub fn submit<T: 'static>(&self, t: T) -> Pending<T>`. MEASURED (EV-108): the bounded and
+unbounded spellings are **`drive_b = drive_a`, an ICF alias at codegen-units 16 AND 1** (15
+instructions — a bound emits no code), and the hazard above goes from compiling clean to
+`error[E0597]: local does not live long enough`. The bound does not stop `mem::forget`; it stops
+the payload from being a borrow, so a leaked token leaves a LIVE resource rather than a dangling
+one, which is the difference between a leak and UB. Where the payload genuinely cannot be
+`'static` — a scoped upload staged from a frame — the answer is the scoped-closure half of ERG-06,
+not a longer SAFETY paragraph. (This engine's own uploads go through `HostVisibleBlock`'s
+persistently-mapped allocation, which outlives every submission, so the bound is satisfiable for
+free at the sites that motivated shape 3.)
+
 **Shape 4 (MAY) — a "must give it back" is a `#[must_use]` linear TICKET whose `Drop` tripwire is
 `#[cfg(debug_assertions)]` only.** ERG-43's Exceptions name the hole and leave it open: "the window
 between take and put-back is a state where the field is EMPTY and observable". There are 85
@@ -808,7 +824,8 @@ the un-coloured view, the early `destroy`, the un-returned row.
 - Shape 2's marker states DISJOINTNESS and nothing else; the in-bounds fact stays a SAFETY clause
   with its own upholder (ERG-20 clause 6). A marker that tries to state both states neither.
 - Shape 3 does not survive `mem::forget`, and no Rust type does. It is structural — the payload is
-  `ManuallyDrop` and the device owns it — not a tripwire; do not sell it as leak-proof.
+  `ManuallyDrop`, the device owns it, and the `'static` bound (clause above, EV-108) makes what
+  survives a leak rather than a dangling write — not a tripwire; do not sell it as leak-proof.
 - Shape 4 is a MAY, and it stays a MAY: `Option<Ticket<T>>` is 8 bytes (no niche in a `u32`), so a
   ticket that must be optional wants a `NonMaxU32` index (ERG-04 clause 5) before it is stored.
 - The `#[cfg(debug_assertions)]` `Drop` must not change the type's SIZE; gate both profiles
