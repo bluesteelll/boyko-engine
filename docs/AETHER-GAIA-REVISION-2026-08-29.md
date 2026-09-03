@@ -115,7 +115,7 @@ ballots have since been answered; the strikethroughs record which:
 | Gaia G4 | ~~GB-1~~ · ~~GB-4~~ — both RULED |
 | Gaia G5 | ~~F2~~ · ~~F3~~ — both ANSWERED. ⚠ Plus **GB-2**'s G5 half, which this table never filed |
 | Gaia G6 | ~~F4 (widened)~~ · ⚠ **AND F5, which this row omitted** — F5 blocks G6 by its own body, and its ruling REWRITES G6's scope. Both ANSWERED 2026-08-30 |
-| Gaia G7 | ~~GB-7~~ · ~~GB-9~~ — both RESOLVED. ⚠ **AND F6, which this row omitted** (F6 blocks G7 by its own body; RULED 2026-08-30). ⚠ **GB-6 was MIS-FILED here**: its own body names **G6**, not G7 — and it is now DISPOSED (2026-09-03), its (b) half moving to **Aether R3** |
+| Gaia G7 | ~~GB-7~~ · ~~GB-9~~ — both RESOLVED. ⚠ **AND F6, which this row omitted** (F6 blocks G7 by its own body; RULED 2026-08-30). ⚠ **GB-6 was MIS-FILED here**: its own body names **G6**, not G7 — and it is now DISPOSED (2026-09-03), its (b) half moving to **Aether R3**. ⚠ **G7's POSITION changed 2026-09-03**: the owner ruled that editor v1 authors UI documents too, so G7 moves UP the ladder rather than sitting after G6, and the `.ui` deletion census is written before the windowed pass. Its blocker is unchanged — UI reaching the screen, which is a wiring gap, not a missing plugin |
 | Gaia G2 / G6 | ⚠ **F9, which appeared against NO rung in this table at all** though its own body, `gaia/CAMPAIGN.md` and PENDING Part D all say G2/G6. Partly ruled; its residual VALUES question is still the owner's and blocks **G2** |
 | Aether R3 | ⚠ **GB-6(b)**, moved here 2026-09-03: an Aether construct that toggles a flag |
 

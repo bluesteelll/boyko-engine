@@ -276,6 +276,23 @@ while its own body named another.
 - **Edits made while playing:** discarded. *"Правки применяются только когда не запущен play in
   editor."*
 - **The v1 demonstration document:** the **boyko playground** scene.
+- **Editor v1 authors UI documents TOO — option (b).** Asked as a straight choice (*Авторит ли
+  редактор v1 ещё и документы UI (профиль `ui`), или только сцены и data assets?*), answered
+  **"И UI тоже в v1"** — so the editor's *assets are Gaia* rule has **no exception on day one**.
+  ⚠ **The pricing pass had RECOMMENDED (a)** — scenes and data assets only, on the ground that it
+  is cheap to reverse — **and was overruled.** The losing recommendation is kept visible for the
+  same reason a ruling is. **What this does NOT change: F6's answer.** `.ui` is migrated and
+  deleted either way, which was already ruled 2026-08-30. **What it changes is F6's SCHEDULE:**
+  **G7 moves UP the ladder** rather than sitting after G6, while still waiting on the measured
+  prerequisite — UI reaching the screen, which today is a wiring gap and not a missing plugin.
+  The `.ui` deletion trigger (a coverage census over `UiTextComponent::ALL` ∪ `UiBackground` on
+  the WORLD side) therefore becomes work that is written before the windowed pass lands, not
+  after G6. The fact that binds under either answer, and now binds sooner: `.ui` **cannot author
+  a background colour at all** — `UiBackground`
+  ([`components.rs:219`](../crates/boyko_ui/src/components.rs)) is carried by the
+  Panel/Button/Bar bundles and appears **nowhere** under `crates/boyko_ui/src/text/`, so an
+  editor saving `.ui` would display a coloured panel and save a colourless one, under a green
+  round-trip gate whose universe never contained it.
 - **Destructive commands issued by an agent** (`entity.despawn`, `document.save` over an existing
   file, `play.stop`) require an explicit `confirm: true` over the transport — never when the same
   command is issued by the editor's own UI.
@@ -287,6 +304,20 @@ while its own body named another.
   recommendation is kept visible here with its disposition attached rather than deleted. The owner
   ruled two modes, and the consequence follows the ruling into the record: tuning a particle effect
   goes through Play or through a separate preview panel, and the main viewport keeps two states.
+- **The 3D viewport has a FIXED render resolution taken from CONFIG; the UI scales, the render plane
+  does not follow the window.** *"ты ставишь разрешение вьюпорта в конфиге и потом просто интерфейс
+  скейлится, реальная плоскость рендеринга вьюпорта остается такой же."* ⚠ **This DISSOLVES the
+  resize question rather than answering it**: the scene stops being something that must be reconciled
+  with the window extent and becomes a fixed-size texture the UI composites into a panel rect. Two
+  consequences follow, and they are recorded because one of them inverts a price everyone assumed:
+  1. **The "editor viewport as a sub-rect" question is settled as SUB-RECT — and the sub-rect is
+     CHEAPER than fullscreen, not more expensive.** The assumed price of a sub-rect was extent
+     plumbing threaded through the renderer; under a config-fixed render target **no extent plumbing
+     is threaded at all**, because nothing downstream of the target ever learns the window size.
+  2. *Engineering detail decided under the standing rule, recorded as MINE and not his:* scaling into
+     a panel of a different aspect ratio must **preserve aspect — bars at the edges — never stretch
+     per axis.** Today the blit stretches, which is why a non-proportional window drag distorts the
+     3D. Fixing that is part of the compositing step this ruling creates, not a separate campaign.
 
 #### ⚠ Replay determinism — the owner CHANGED a design decision, not just answered a question
 
@@ -328,19 +359,15 @@ Consequences, written into the record rather than left to be rediscovered:
 
 ### Still open, and NOT answered here
 
-After today's rulings **one scoping item and three ballots** remain. What follows each is **the
-pricing pass's RECOMMENDATION, and it is a recommendation** — a ruling written for any of them
-would be the defect this entry exists to repair.
+After today's rulings **no scoping question remains open — three ballots do.**
 
-| open item | question | the pass RECOMMENDS (it is NOT a ruling) |
-|---|---|---|
-| **EDITOR-UI-SCOPE** | Created by today's editor ruling: does editor v1 author UI documents (the Gaia `ui` profile) as well, or only scenes and data assets? ⚠ **The ruling as stated names *ui documents*, which read strictly answers this (b).** It is recorded as open rather than closed because the pass had recommended (a) and one line settles which was meant — recording it as decided on an inference is exactly the shape this entry repairs | **(a)** scenes + data assets in v1; cheap to reverse. F6's ANSWER does not change either way — `.ui` is migrated and deleted regardless — only its SCHEDULE and G7's position do. One fact binds under both answers: `.ui` **cannot author a background colour at all** (`UiBackground`, [`components.rs:219`](../crates/boyko_ui/src/components.rs), is carried by the Panel/Button/Bar bundles and appears nowhere under `crates/boyko_ui/src/text/`), so an editor saving `.ui` would display a coloured panel and save a colourless one — under a green round-trip gate whose universe never contained it |
-
-**Closed today, and recorded here so the change of state is visible rather than silent:**
-**GB-6** is disposed in both halves (see the ruling section above) and is no longer a Gaia ballot;
-**CAMPAIGN-PRIORITY** is answered by the parallel-worktrees ruling. What survives of the pass's
-recommendation on the latter is its ordering constraint alone: the register sync and F4's sub-pass
-4a land FIRST, and the sync lands in the MAIN checkout.
+**Closed today, and recorded here so each change of state is visible rather than silent:**
+**GB-6** is disposed in both halves (see the ruling section above) and is no longer a Gaia ballot.
+**EDITOR-UI-SCOPE** — created by the editor ruling and open for the length of one section of this
+entry — is **RULED (b)**, UI documents in v1 too; the pass had recommended (a) and was overruled,
+and the bullet above records both. **CAMPAIGN-PRIORITY** is answered by the parallel-worktrees ruling;
+what survives of the pass's recommendation there is its ordering constraint alone — the register
+sync and F4's sub-pass 4a land FIRST, and the sync lands in the MAIN checkout.
 
 **F8, F9's residual and F10 also remain unanswered, and are NOT settled here.** The pricing pass
 offers a disposition for each under the standing architecture rule — F8: the object NAME is not the
