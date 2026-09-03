@@ -524,8 +524,8 @@ pub use particle_effect::{
 };
 pub use particle_plugin::ParticlePlugin;
 pub use particle_system::{
-    ParticleEffectScratch, ParticleEmitScratch, advance_emitter, particle_apply_effect_refs,
-    particle_pack_effects, particle_tick_emitters,
+    ParticleEffectScratch, ParticleEmitScratch, ParticleTickSet, advance_emitter,
+    particle_apply_effect_refs, particle_pack_effects, particle_tick_emitters,
 };
 pub use occlusion_marker::{OcclusionCulling, VB_INST_FLAG_OCCLUSION_CULLING};
 pub use occlusion_plugin::OcclusionPlugin;

@@ -40,8 +40,8 @@ use crate::particle_clock::ParticleClock;
 use crate::particle_config::ParticleConfig;
 use crate::particle_effect::ParticleEffect;
 use crate::particle_system::{
-    ParticleEffectScratch, ParticleEmitScratch, particle_apply_effect_refs, particle_pack_effects,
-    particle_tick_emitters,
+    ParticleEffectScratch, ParticleEmitScratch, ParticleTickSet, particle_apply_effect_refs,
+    particle_pack_effects, particle_tick_emitters,
 };
 
 /// Composes the GPU particle subsystem's ECS half: the owner-set config, the subsystem-owned
@@ -78,7 +78,16 @@ impl Plugin for ParticlePlugin {
         app.add_systems_cfg(|b| {
             // A1: advance the clock, then fold every enabled emitter into this frame's request
             // table. Sequential by design (≤256 rows), zero atomics, zero allocations.
-            b.add_system(particle_tick_emitters);
+            //
+            // `in_set` and NOT `after_set(CameraSet::Resolve)`, although propagation is exactly
+            // what this fold's `&GlobalTransform` read must follow. Membership contributes no
+            // ordering edge, so it stays inside D17: a world composing this plugin alone is
+            // byte-identical to one that does not, and no `boyko-W1501` fires for an edge
+            // against a camera-less world's memberless set. The COMPOSING app declares
+            // `ParticleTickSet.after(CameraSet::Resolve)`; see `ParticleTickSet`'s own doc for
+            // why that split is the workspace's shipped answer to this exact problem, and for
+            // what an unordered fold costs.
+            b.add_system(particle_tick_emitters).in_set(ParticleTickSet);
 
             // The carrier refcount fold, ordered BEFORE the effect bake: a `+1`/`-1` can move the
             // asset table's own dirty generation, and the bake's re-run gate reads it. Running the
