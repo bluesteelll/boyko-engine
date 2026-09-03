@@ -435,9 +435,26 @@ impl EcsMaster {
     /// (verified `false` for an entity that never had the component — this
     /// never silently creates a NEW membership; that is `Commands::insert` /
     /// `dense_insert_and_fire`'s job, which additionally fires hooks/observers).
-    /// Unlike the table arm, the dense write bumps the slot's `changed` tick
-    /// (`insert_or_replace`'s replace path always does), so a direct-API dense
-    /// write is observed by a subsequent `Changed<T>` query.
+    ///
+    /// # Change detection — BOTH arms stamp [`Self::current_tick`]
+    ///
+    /// A successful write stamps the row's / slot's `changed` tick with the
+    /// world's current tick on either storage kind, so a direct-API write is
+    /// observed by a subsequent `Changed<T>` query exactly like a `Mut<T>`
+    /// deref. The dense arm stamps inside `insert_or_replace`; the table arm
+    /// stamps the same value through `ComponentPool::write_changed_tick`.
+    ///
+    /// The table arm did NOT stamp before this was fixed, and that was a silent
+    /// wrong answer rather than an error: the bytes landed, `get_component` read
+    /// them back, and every dirty gate keyed on the tick — `boyko_scene`'s
+    /// transform propagation, the GPU instance sync, `boyko_ui`'s data binds —
+    /// stayed blind, so a raw write moved the data and nothing on screen.
+    /// Gated by `tests/change_tick_on_raw_write.rs`.
+    ///
+    /// A REFUSED write (stale entity, absent component) stamps nothing.
+    ///
+    /// Outside a system the stamp carries the same `is_added` / `is_changed`
+    /// caveats as [`Self::get_component_mut`] — see its `O4` / Bug #56 sections.
     ///
     /// [`DenseStore::insert_or_replace`]: crate::ecs::core::component::dense::DenseStore::insert_or_replace
     #[inline]
@@ -471,9 +488,48 @@ impl EcsMaster {
             return true;
         }
 
-        let Some(dst) = self.get_component_raw_mut(entity, component_id) else {
+        // Table arm. Resolved inline instead of through `get_component_raw_mut`
+        // because the write must ALSO stamp the row's `changed` tick, and the
+        // two live in different places: the fast data pointer in `columns`, the
+        // tick sub-region on the `ComponentPool`. One resolution yields both
+        // (the alternative — call the helper, then re-resolve the entity for the
+        // tick — pays the inland lookup, the slab hop and the storage-kind test
+        // twice on a `~15-18 ns` path). Same prologue and same projections as
+        // `get_component_mut`'s table arm.
+        let current_tick = self.current_tick();
+        let Some(&inland) = self.entity_master.entities_inland.get(entity.id().0) else {
             return false;
         };
+        if inland.is_null() || inland.generation() != entity.generation() {
+            return false;
+        }
+        debug_assert!(component_id.0 < MAX_COMPONENTS);
+        let row = inland.unit_index() as usize;
+        let archetype_ptr = inland.archetype_ptr();
+
+        // BUG-MIGRATE-TB-1 (Tree Borrows): do NOT form `&mut *archetype_ptr` —
+        // a struct-wide `&mut Archetype` covers `current_index` and would narrow
+        // the interior-mutable slab cell a sibling structural migration writes.
+        // Project the single `Column` through a raw-pointer read instead.
+        // SAFETY (U1, U2, U4, U11, U14, F1): `archetype_ptr` is write-capable,
+        //   stable, interior-mutable (`SharedReadWrite`, F4-rooted) slab
+        //   provenance minted during `create_entity`; it is non-null and
+        //   generation-matched above ⇒ the slot is live, and `&mut self` means
+        //   no other live borrow into it exists. `component_id.0 <
+        //   MAX_COMPONENTS` (debug-asserted; the caller boundary is the same one
+        //   `get_component_raw_mut` relies on) keeps the `[Column;
+        //   MAX_COMPONENTS]` index in bounds. `Column` is `Copy`.
+        let column = unsafe {
+            let columns_ptr = core::ptr::addr_of!((*archetype_ptr).columns).cast::<Column>();
+            *columns_ptr.add(component_id.0)
+        };
+        // A null column is the single source of truth for "not hosted HERE" —
+        // it also covers a GPU-resident column, whose pool still exists but
+        // whose CPU rows are not the live storage.
+        if column.ptr.is_null() {
+            return false;
+        }
+
         // Stride is not re-queried here; the size invariant lives at the
         // caller boundary (typed wrappers downcast from `&T` with
         // `size_of::<T>()`). A debug-assertable stride check would require
@@ -481,9 +537,9 @@ impl EcsMaster {
         // which defeats the fast-path goal. The pool layer carries the
         // ultimate size guarantee through `Layout`.
         // SAFETY (U5, U6, U10):
-        //   - dst is a valid *mut u8 to a byte range of size `stride` for
-        //     the target component (U5/U6 — column resolved through the
-        //     same fast path as get_component_raw_mut).
+        //   - `column.ptr + row * stride` is a valid *mut u8 to a byte range of
+        //     size `stride` for the target component (U5/U6 — `row` is the live
+        //     entity's own row, and the column base is the pool's buffer base).
         //   - The caller's slice is sized to match by API contract; typed
         //     wrappers enforce this via `size_of::<T>()`.
         //   - Single-threaded &mut self ⇒ no concurrent reader.
@@ -491,8 +547,34 @@ impl EcsMaster {
         //     buffer live in disjoint allocations (slice is a caller-stack
         //     view; the pool buffer lives in the pool's own reservation).
         unsafe {
-            std::ptr::copy_nonoverlapping(component_bytes.as_ptr(), dst, component_bytes.len());
+            std::ptr::copy_nonoverlapping(
+                component_bytes.as_ptr(),
+                column.ptr.add(row * column.stride as usize),
+                component_bytes.len(),
+            );
         }
+
+        // The stamp. `current_tick` is the SAME value the dense arm hands to
+        // `insert_or_replace` above — one tick source for both storages, so the
+        // two arms cannot drift into two answers.
+        // SAFETY (U1, U4, F1): same slab provenance as the `columns` projection
+        //   above; this one reads only the cold `component_pools` field (never
+        //   `current_index`), so the shared `&ComponentPoolBundle` narrows
+        //   nothing a sibling migration writes — the uniform F4 read discipline
+        //   `get_component_raw` and `get_component_changed_tick` already use.
+        let pools = unsafe { &*core::ptr::addr_of!((*archetype_ptr).component_pools) };
+        let pool = pools.get_pool(component_id).expect(
+            "invariant: a non-null column is published from a live CPU-resident pool in the \
+             same archetype (`refresh_column`), so the pool exists",
+        );
+        debug_assert!(row < pool.count());
+        // SAFETY: `row` is the live entity's own row, so `row < pool.count() <=
+        //   committed_rows` (debug-asserted above) — the tick slot lies in the
+        //   committed prefix of the pool's `changed` tick sub-region. Exclusive
+        //   access to this `(archetype, component)` rests on `&mut self`, the
+        //   direct-API OBS-MUT2 basis (no system is running, so Phase 9 SCH3's
+        //   conflict graph is not the argument here).
+        unsafe { pool.write_changed_tick(row, current_tick) };
         true
     }
 
