@@ -874,11 +874,33 @@ pub fn load_dense_store_via_fn(
     Ok(member_count)
 }
 
+/// What the S2.5 remap pass ([`remap_loaded_entities`]) actually touched, split by
+/// STORAGE KIND.
+///
+/// The split is the point, and it is there because of a measured defect: the pass
+/// gathered its work from `archetype.component_ids()` only, which cannot reach a
+/// dense column, and so an `#[entities]` field in dense storage silently kept its
+/// saved id while the same annotation in table storage was remapped. Nothing
+/// observable moved — no counter, no diagnostic code, and `Ok` returned. A single
+/// combined total would have preserved exactly that blindness: a caller could not
+/// tell "no dense component opted in" from "the pass cannot see dense storage at
+/// all". Two fields let a caller's load report state which ARMS ran.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct RemapStats {
+    /// Rows visited in ARCHETYPE (table) columns whose component installed a
+    /// `map_entities_fn`. One count per (column, row), not per rewritten field.
+    pub table_rows: u64,
+    /// LIVE slots visited in DENSE stores whose component installed a
+    /// `map_entities_fn`. Tombstoned slots are neither counted nor visited — see
+    /// [`remap_loaded_entities`]'s dense arm.
+    pub dense_rows: u64,
+}
+
 /// S2.5 — the entity-remap pass (plan §3.11 step 5 + §5 C4). Runs AFTER every
-/// archetype has loaded (a separate whole-world pass): rewrites every saved
-/// `Entity` reference inside a remappable component to its freshly-allocated
-/// `Entity`, translated through `map` (saved id → fresh, populated by
-/// [`load_archetype`]).
+/// archetype AND every dense store has loaded (a separate whole-world pass):
+/// rewrites every saved `Entity` reference inside a remappable component to its
+/// freshly-allocated `Entity`, translated through `map` (saved id → fresh,
+/// populated by [`load_archetype`]).
 ///
 /// A column is remappable iff its
 /// [`SerializeInfo::map_entities_fn`](component_registry::SerializeInfo::map_entities_fn)
@@ -894,6 +916,42 @@ pub fn load_dense_store_via_fn(
 /// rows holding their (partially-remapped) saved ids, but the caller surfaces the
 /// error so no consumer observes a dangling reference as valid.
 ///
+/// # Two arms, because there are two storages (the D4 dense arm)
+///
+/// The archetype walk CANNOT reach a dense component's value, because a dense
+/// component has no per-archetype `ComponentPool` — its one column lives in the
+/// world-global `DenseRegistry`. MEASURED, both ways it can present: a
+/// LOADED archetype does not even name the dense id in `component_ids()` (the
+/// loader builds the signature from the file's table columns), while a
+/// SPAWN-built archetype DOES retain it there (`component_ids` keeps
+/// non-signature ids since Dense plan D0) and the table arm then drops it at
+/// `get_pool(cid) == None`. Under either shape the value is never visited, so the
+/// dense arm below is the only route to it: it walks
+/// `DenseRegistry::dense_ids()` for the same `map_entities_fn` opt-in and applies
+/// it per LIVE slot. Both arms use the SAME unmappable policy — propagate
+/// `DecodeError::UnmappedEntity` — deliberately: a divergence between the storage
+/// kinds is the defect class this arm was added to close, so a second policy here
+/// would re-open it in a new shape.
+///
+/// **Live slots only, and that is a soundness requirement, not a preference.** A
+/// dense store tombstones on remove: `DenseStore::remove` runs the registered
+/// `drop_fn` on the slot and clears its live bit, leaving the bytes logically
+/// UNINITIALIZED while the slot stays below the column high-water mark. Handing
+/// such a slot to `map_entities_fn` would read a dropped value. The arm therefore
+/// filters on `DenseStore::is_live`, the same oracle `DenseStore::for_each_live`
+/// and the saver use. A tombstone holds no reference to remap, so skipping it
+/// loses nothing and needs no counter.
+///
+/// # What is NOT skipped, and therefore moves no skip counter
+///
+/// The dense arm has no lossy branch to record. A dense component with no
+/// `map_entities_fn` has nothing to remap (identical to the table arm's
+/// `filter_map`); an id with no store has no members; and a dense block that was
+/// genuinely undecodable never reached a store at all — it was already counted and
+/// reported at LOAD time (`LoadReport::dense_stores_skipped` + `boyko-W0901`).
+/// [`RemapStats`] is therefore a positive record: it says each arm RAN, which is
+/// the signal that was missing.
+///
 /// # F2 / W5 borrow discipline (critical)
 ///
 /// The remap is a PURE per-row mutation with NO structural op during the walk.
@@ -903,7 +961,8 @@ pub fn load_dense_store_via_fn(
 /// re-derives a slab-stable `*mut Archetype`, and per ROW derives the dst `*mut u8`
 /// in a tight scope that DROPS the `&mut Archetype` reborrow BEFORE invoking the
 /// (panic-prone, user-authored) `map_entities_fn`. At the call only `dst: *mut u8`
-/// is live (no TB protector spans it).
+/// is live (no TB protector spans it). The dense arm holds the same discipline
+/// against `&mut DenseStore`.
 ///
 /// # Panics
 ///
@@ -912,7 +971,8 @@ pub fn load_dense_store_via_fn(
 pub fn remap_loaded_entities(
     world: &mut EcsMaster,
     map: &LoadEntityMap,
-) -> Result<(), DecodeError> {
+) -> Result<RemapStats, DecodeError> {
+    let mut stats = RemapStats::default();
     // Snapshot the live archetype ids under a SHORT immutable borrow that ends
     // before any write — never iterate-and-mutate (W5). The slab is fixed (no
     // archetype is created during the remap pass), so each id stays resolvable.
@@ -996,9 +1056,88 @@ pub fn remap_loaded_entities(
                 //     `&mut EcsMaster` accessor (F2 / W5).
                 // An unmapped saved id surfaces as `Err(UnmappedEntity)` (C4 loud).
                 unsafe { map_entities_fn(dst_ptr, map)? };
+                stats.table_rows += 1;
             }
         }
     }
 
-    Ok(())
+    // ── Dense arm (Dense plan D4) ──────────────────────────────────────────────
+    // A dense component has no per-archetype pool, so the walk above cannot reach
+    // its value (see the "Two arms" section): this arm is the ONLY route by which
+    // an `#[entities]` field in dense storage is remapped. Snapshotted first, under a
+    // SHORT shared borrow that ends before any write, and pre-filtered by the same
+    // `map_entities_fn` opt-in the table arm uses — a world with no annotated dense
+    // component collects an empty `Vec` (no allocation) and runs zero turns.
+    let dense_remap_stores: Vec<(ComponentId, LoadMapEntitiesFn)> = world
+        .dense_registry()
+        .dense_ids()
+        .iter()
+        .filter_map(|&cid| {
+            component_registry::get_serialize_info(cid.0)
+                .and_then(|info| info.map_entities_fn)
+                .map(|f| (cid, f))
+        })
+        .collect();
+
+    for (cid, map_entities_fn) in dense_remap_stores {
+        // Resolve the column high-water mark + stride in a tight scope, then drop
+        // the borrow before the write loop (mirrors the table arm's `(row_count,
+        // stride)` probe). `len()` is the high-water mark, NOT the live count —
+        // tombstoned slots sit inside it and are filtered per slot below.
+        let Some((slot_count, stride)) = world
+            .dense_registry_mut()
+            .store_existing_mut(cid)
+            .map(|store| (store.len(), store.stride()))
+        else {
+            continue;
+        };
+
+        for slot in 0..slot_count {
+            // A tombstoned slot's bytes are logically UNINITIALIZED (`remove` ran
+            // the registered `drop_fn`), so it must never reach the fn-ptr. Checked
+            // under a shared borrow that ends here.
+            let is_live = world
+                .dense_registry()
+                .store(cid)
+                .is_some_and(|store| store.is_live(slot));
+            if !is_live {
+                continue;
+            }
+
+            // SAFETY: `slot < slot_count == store.len()` (the loop bound) and the
+            //   slot is LIVE (checked immediately above), so it holds an
+            //   initialized value of `cid`'s type written by `DenseStore::insert`
+            //   and not since `drop_at`-ed. `column_base_mut()` returns the
+            //   column's address-stable reservation base — the stored `NonNull`,
+            //   whose write-capable provenance outlives this `&mut DenseStore`
+            //   borrow — and `stride == store.stride()` is `cid`'s registered
+            //   component size, so `base.add(slot * stride)` lies inside the
+            //   column's committed data sub-region (a ZST dense component cannot
+            //   carry an `Entity`, so `stride == 0` is unreachable here, and
+            //   `add(0)` would be valid regardless).
+            let dst_ptr = unsafe {
+                let store = world
+                    .dense_registry_mut()
+                    .store_existing_mut(cid)
+                    .expect("invariant: the store resolved above and this pass is non-structural");
+                store.column_base_mut().add(slot * stride)
+            };
+
+            // SAFETY (`LoadMapEntitiesFn` contract):
+            //   * `dst_ptr` points at a live, initialized value of `cid`'s type (a
+            //     dense slot restored by `load_dense_store` / `_via_fn`).
+            //   * `map` is a shared, non-aliased reference for the call's duration
+            //     (single-threaded `&mut EcsMaster`).
+            //   * NO `&mut DenseStore` (nor `&mut DenseRegistry`) is live across
+            //     this call — both reborrows above ended — so a panic inside the fn
+            //     leaves the caller's frame as the sole `&mut EcsMaster` accessor
+            //     (the F2 / W5 anchor the table arm uses).
+            // An unmapped saved id surfaces as `Err(UnmappedEntity)` — the SAME C4
+            // loud policy as the table arm, never a second one.
+            unsafe { map_entities_fn(dst_ptr, map)? };
+            stats.dense_rows += 1;
+        }
+    }
+
+    Ok(stats)
 }

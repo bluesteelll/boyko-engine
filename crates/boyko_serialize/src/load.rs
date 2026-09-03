@@ -133,6 +133,24 @@ pub struct LoadReport {
     /// block's `member_count`). The owning entities stay valid without their dense
     /// membership/value; this records how many were dropped.
     pub dense_members_skipped: u64,
+    /// S2.5 remap — TABLE (archetype-column) rows whose remappable `Entity`
+    /// references (`ChildOf`, an `#[entities]` field) were rewritten from their
+    /// saved ids to the freshly-allocated ones. One count per (column, row), not
+    /// per rewritten field.
+    pub remapped_table_rows: u64,
+    /// S2.5 remap — DENSE store slots whose remappable `Entity` references were
+    /// rewritten (tombstoned slots hold no value and are not visited).
+    ///
+    /// This counter exists because its absence was a defect: the remap pass
+    /// gathered its work from `archetype.component_ids()`, which cannot reach a
+    /// dense column (a dense component has no per-archetype pool), and so an
+    /// `#[entities]` field in dense storage kept its stale saved id while the same
+    /// annotation in table storage was remapped — SILENTLY, with `Ok` returned and
+    /// no counter moving.
+    /// Reported SEPARATELY from [`Self::remapped_table_rows`] on purpose: a single
+    /// total cannot tell "no dense component opted in" from "the pass cannot see
+    /// dense storage at all".
+    pub remapped_dense_rows: u64,
     /// The file's [`PERSIST_TICKS_FLAG`] header bit, round-tripped from
     /// `SaveOptions::persist_ticks` (a save/load residual fix). `true` when the file
     /// was saved with that option set. Per-row tick VALUES are NOT restored by this
@@ -262,13 +280,20 @@ pub fn load_world(
     load_dense_region(world, bytes, &header, &resolved, &map, &mut report)?;
 
     // ── Step 5: the entity-remap pass (S2.5 / C4) ──────────────────────────────
-    // A SEPARATE whole-world pass AFTER every archetype is loaded: rewrite each
-    // saved `Entity` reference inside a remappable component (`ChildOf` / an
-    // `#[entities]` field) to its freshly-allocated `Entity` via `map`. An unmapped
-    // saved id is a loud `LoadError::Decode(UnmappedEntity)`, never a silent
-    // dangling reference. A world with no remappable component pays nothing (no
-    // pool's `map_entities_fn` is set, so no row is ever visited).
-    remap_loaded_entities(world, &map)?;
+    // A SEPARATE whole-world pass AFTER every archetype AND every dense store is
+    // loaded: rewrite each saved `Entity` reference inside a remappable component
+    // (`ChildOf` / an `#[entities]` field) to its freshly-allocated `Entity` via
+    // `map`. An unmapped saved id is a loud `LoadError::Decode(UnmappedEntity)`,
+    // never a silent dangling reference. A world with no remappable component pays
+    // nothing (no `map_entities_fn` is set, so no row is ever visited).
+    //
+    // The pass runs TWO arms — archetype columns and dense stores — because a
+    // dense component is excluded from every archetype signature and no archetype
+    // walk can reach it. The per-arm counts land on the report so a caller can see
+    // that each arm ran, rather than inferring it from a silent `Ok`.
+    let remap = remap_loaded_entities(world, &map)?;
+    report.remapped_table_rows = remap.table_rows;
+    report.remapped_dense_rows = remap.dense_rows;
 
     Ok(report)
 }
