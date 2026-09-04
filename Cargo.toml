@@ -68,8 +68,45 @@ loom = "0.7"
 # same machine code). This is NOT `lto`: LTO over the Bevy dependency in
 # `bench_bevy_vs_boyko` would explode compile time, and LTO shifts the mean
 # rather than the variance â€” out of scope for X.E. See docs/BENCHMARKING.md.
+# The SHIPPED profile. Until 2026-09-04 no `[profile.release]` existed at all, so a
+# release build ran at cargo's defaults: opt-level 3, codegen-units 16, LTO OFF.
+# `lto = "fat"` was chosen on a measured matrix (5 configurations x 7 benchmarks,
+# 10 interleaved passes plus 12 rotated-order passes on a verified-idle machine;
+# raw data and receipts in the 2026-09-04 measurement report).
+#
+# What it buys, as ratios to the previous default:
+#   ComponentPool::swap_remove/10k  0.655   (LTO is the whole ~35% lever here)
+#   ComponentPool::add fill/10k     0.849
+#   query_ref_iter/10k              0.375   (2.67x, and reproducible: IQR/median 0.4%)
+#   geometric mean over 7           0.793
+# It also SHRINKS the binary 8.76 MB -> 3.46 MB, because inlining across the crate
+# boundary makes the original bodies dead and dedups cross-crate generic
+# instantiations. Cost: roughly 2-3x the link-time of a non-LTO build.
+#
+# ⚠ `codegen-units = 1` is deliberately NOT set here, and that is a measured
+# refusal rather than an omission. Paired with fat LTO it is the ONLY configuration
+# in the whole matrix that is SLOWER than the pre-2026-09-04 default on any
+# benchmark: query_ref_iter/10k regresses 17.4%. It wins 5 of 7 benchmarks by 1-6%
+# and 26.7% on query_mut_iter, so the aggregate is close — but a default profile
+# should trade forgone gains, never a measured regression. Principle 7's
+# "excessive inlining bloats L1i and LOWERS performance" is the likely mechanism.
+[profile.release]
+lto = "fat"
+
 [profile.bench]
 codegen-units = 1
+# ⚠ EXPLICIT, not inherited: `bench` inherits `release`, so the `lto = "fat"` above
+# would otherwise silently turn every benchmark into `fat + codegen-units = 1` — the
+# one configuration measured SLOWER than the shipped default (see above). It would
+# also re-introduce exactly the compile-time explosion over the Bevy dependency that
+# the note above says X.E rejected LTO to avoid.
+#
+# The consequence must be stated rather than left to be discovered: `cargo bench` and
+# `cargo build --release` are now DIFFERENT codegen configurations by design — bench
+# optimises for VARIANCE (reproducible layout), release for SPEED. A number taken with
+# `cargo bench` therefore does NOT describe the shipped profile on the codegen axis,
+# and must not be quoted as if it did.
+lto = false
 
 [package]
 name = "boyko-engine"
