@@ -114,8 +114,14 @@ compile_error!(
 ))]
 compile_error!(
     "KE16 axis B: `ke16-b1` / `ke16-b3` require `ke16-a1` or `ke16-a1-fifo` — the worker joiner \
-     needs a REGISTERED destination deque, which only the A1 arms give it; A2/A3/A5 leave the \
-     joiner at B0"
+     must be able to REACH its own deque, and only the A1 arms publish that deque's address into \
+     this thread's TLS (`WorkerDequeDeposit`, `worker.rs`). THE MISSING THING IS THE DEPOSIT, NOT \
+     THE DEQUE: every arm builds `worker_count` deques and registers their `Stealer`s \
+     unconditionally (`thread_pool.rs`), and each worker is handed one by move, so `WorkerLane` \
+     under A2/A3/A5 simply carries a `wid` with no `deque()` accessor. A2/A3/A5 therefore leave \
+     the joiner at B0 — a REACHABILITY gap, not a structural impossibility. An earlier wording of \
+     this message said the A1 arms are what GIVE the joiner a registered deque; that was false, \
+     and it is what made axis B read as closed by construction"
 );
 
 // =========================================================================

@@ -692,7 +692,7 @@ load-bearing for the `a2`/`a5` veto, as above.
 
 ---
 
-## §B. Axis B — B0 BY CONSTRUCTION, NOT BY MEASUREMENT
+## §B. Axis B — B0 IN THIS PASS; the "BY CONSTRUCTION" reading was based on a FALSE premise (see the 2026-09-07 correction below)
 
 `b1` and `b3` carry a compile-time refusal. Verified in the tree, twice, on independent passes, and
 receipted as an exit code rather than read off the source:
@@ -708,6 +708,60 @@ compile_error!("KE16 axis B: `ke16-b1` / `ke16-b3` require `ke16-a1` or `ke16-a1
 
 `cargo check -p boyko-threadpool --features ke16-a3,ke16-b1` exits **101** with that message.
 **Neither `b1` nor `b3` BUILDS over `a3`. There is no Step B tournament to run.**
+
+### ⚠ CORRECTION 2026-09-07 — the refusal is right, its stated reason was FALSE
+
+The `compile_error!` quoted above said the A1 arms are what *give* the worker joiner a registered
+destination deque. **That is false as written, and it is what made axis B read as closed by
+construction.** Verified in the tree three ways:
+
+* `thread_pool.rs:718-737` builds `worker_count` deques and registers their `Stealer`s
+  **unconditionally**; the only `cfg` there chooses `new_lifo()` vs `new_fifo()`.
+* `worker.rs:33` hands each worker its `Worker<Task>` by move **under every arm**.
+* What the A1 arms uniquely do is publish that deque's address into the thread's TLS —
+  `WorkerDequeDeposit` at `worker.rs:60-61`. And `tls::worker_lane_for` **already has a working
+  non-A1 branch** (`tls.rs:238-248`) returning `Some(WorkerLane { wid })`; it carries
+  `#[cfg_attr(feature = "ke16-a3", allow(dead_code))]` (`tls.rs:221`) only because under `a3`
+  nothing calls it.
+
+So the axis-B closure is a **REACHABILITY gap, not a structural impossibility**. The refusal itself
+stays — `b1`/`b3` call `lane.deque()`, which the non-A1 `WorkerLane` does not have — but its message
+has been rewritten to say the missing thing is the deposit, not the deque.
+
+**Defect B is live under `a3` by DIRECT measurement of the joiner's own call, not only by occupancy
+inference.** `the_worker_joiner_does_not_run_a_residue_before_re_checking_its_scope`
+(`tests/ke16_b_join_arms.rs:343`) under `--features ke16-a3`, five runs, `running 1 test` each:
+
+| | µs |
+|---|---|
+| measured join, five runs | 192 142 / 192 205 / 192 111 / 188 129 / 192 133 |
+| **median** | **192 133 (192.1 ms)** |
+| B0 residue floor | 132 000 |
+| join budget | 60 000 |
+| `ke16-a1,ke16-b1` / `,ke16-b3` (recorded) | 4 / 5 |
+
+`a3+b0` reads the same 192 ms `ke16-a1` does, at **3.2× the budget**, against arms that read
+microseconds — a separation of roughly four orders of magnitude that no ambient load can flip.
+
+⚠ **Number correction.** The worker-route occupancy for `a3` at W=16 is `top_lane = 33` on **all
+three** reps with `lanes_used = 15/16/15` (§ appendix). A session note circulated `33/31/24`; that
+number appears nowhere in this corpus — `13/24/21` is `a1`'s row, not `a3`'s.
+
+**External corroboration of the framing.** A survey of Rayon, Go, Tokio, Java ForkJoinPool, TBB,
+Cilk-5, .NET and `async-executor` finds **no production scheduler that batch-steals into a private
+buffer only the stealer can drain**: they either steal one task (Rayon — current `registry.rs` has
+zero `steal_batch` calls — FJP, TBB, Cilk, .NET) or batch into a destination that stays stealable by
+everyone (Go's `runqsteal` into the P's own runq, whose `runqgrab` is documented "Can be executed by
+any P"; Tokio; `async-executor`). Our own `tests/shutdown.rs:24-37` already records the consequence
+of the private buffer — a task blocking on a peer that sits unrun in the same `scratch` deadlocks —
+and states that **both B arms remove it**.
+
+⚠ Two constraints any remedy inherits. `Injector` is a linked list of 63-slot blocks, so the
+documented "steals about half" rule applies **only** when head and tail share a block; a real
+multi-block wave takes the flat `(BLOCK_CAP − offset).min(limit)` branch, i.e. 33 every call — "it
+only takes half, so it self-limits" is wrong here. And `tests/loom_pool.rs:208-236, 330` models the
+joiner's re-poll **as `steal_batch_and_pop` specifically**, citing the `SeqCst` fence it carries, so
+changing that call changes what those models cover.
 
 The design pre-committed the response and it was followed: its B1(i) row names the trigger
 *"A2/A3/A5 wins Step A beyond the band (then the worker joiner also has no registered deque)"* and

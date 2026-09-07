@@ -1833,12 +1833,12 @@ everything above (worker threads, parking, scope, panic propagation, install
 API) is hand-rolled to fit the scheduler's contracts. Exports:
 
 - `ThreadPool` / `ThreadPoolBuilder` / `WorkerHandle` / `PoolInner` /
-  `MAX_WORKERS` (lib.rs:284).
-- `Scope` (lib.rs:283) — `Scope::spawn` with `'scope` lifetime erasure;
+  `MAX_WORKERS` (lib.rs:290).
+- `Scope` (lib.rs:289) — `Scope::spawn` with `'scope` lifetime erasure;
   `Scope::Drop` blocks via *work-stealing* (rayon pattern) so nested scopes can't
   deadlock. `install` (dispatcher TLS bookkeeping) vs `scope` (worker-safe,
   lighter; used by `par_iter` / `par_for_each_chunk`).
-- TLS (lib.rs:285): `current_worker_id`, `WORKER_ID_DISPATCHER` /
+- TLS (lib.rs:291): `current_worker_id`, `WORKER_ID_DISPATCHER` /
   `WORKER_ID_UNATTACHED`, `InSystemRunGuard` (the ALLOC1/ALLOC6 guard — the
   ECS crate's context-restricted paths `debug_assert!` it or its negation:
   event lane routing, the hook-drain SAFETY-7 gate), `try_with_active_pool`.
