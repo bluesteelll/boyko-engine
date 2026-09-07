@@ -1,4 +1,4 @@
-error[E0560]: struct `UiLayout` has no field named `widht`
+error[E0560]: struct `boyko_ui::components::UiLayout` has no field named `widht`
  --> tests/ui_macro_compile_fail/bad_field.rs:9:20
   |
 9 |         UiLayout { widht: boyko_ui::units::Unit::Px(1.0), ..UiLayout::default() }

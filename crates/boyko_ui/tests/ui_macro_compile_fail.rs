@@ -33,6 +33,32 @@
 //! * `non_component.rs`        — a non-Component literal -> `Bundle` bound (E0277).
 //! * `bad_field_in_bundle_slot.rs` — a wrong-type literal that lands in the
 //!   `UiNodeBundle.layout` field -> a type mismatch pointing at the user's type.
+//!
+//! # Re-blessing discipline — what `TRYBUILD=overwrite` must not be allowed to hide
+//!
+//! Both deferred-to-typecheck snapshots went stale and stayed that way: `bad_field.stderr` for
+//! **861 commits** (last blessed 2026-06-21) and `non_component.stderr` for **496** (2026-07-23,
+//! and that one was ITSELF a re-bless for "rustc note-path rendering drift", so this is the same
+//! class recurring, not a first occurrence). `cargo test` stops at the first failing target, so a
+//! pair of permanently-red fixtures is the cover under which a real regression sits unread until
+//! someone passes `--no-fail-fast`.
+//!
+//! `TRYBUILD=overwrite` rewrites whatever currently mismatches, which makes it exactly as good at
+//! recording a compiler's new phrasing as at erasing a genuine behaviour change. Before blessing,
+//! diff EXPECTED against ACTUAL and require that the **error code, the message, the primary span
+//! and the `help:` clause are unchanged** — only incidental rendering may move. The two blessed on
+//! 2026-09-07 were:
+//!
+//! * `bad_field.rs` — ``struct `UiLayout` `` became ``struct `boyko_ui::components::UiLayout` ``.
+//!   Same E0560, same field, same span; rustc now qualifies the path.
+//! * `non_component.rs` — the "the following other types implement trait `Bundle`" enumeration
+//!   lost `Bar`, `BarFill`, `BindText`, `BindValue` and `Button`, and gained five later-sorting
+//!   names. ⚠️ **That reads like five impls disappearing, and it is not.** A probe asserting
+//!   `Bundle` for all five compiles clean, so the enumeration is an INCIDENTAL SAMPLE of the impl
+//!   set rather than a sorted prefix of it. Nothing about the program changed — which is why this
+//!   fixture will rot again, and why the list must never be read as evidence about which types
+//!   implement the trait. The assertion this fixture actually makes is the E0277 on
+//!   `NotAComponent`, and that never moved.
 
 #[cfg(not(miri))]
 #[test]
