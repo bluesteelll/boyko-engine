@@ -4786,3 +4786,20 @@ of `address-reuse` anywhere in the tree). Sixteen Miri processes over
 `-Zmiri-address-reuse-rate` x `-Zmiri-address-reuse-cross-thread-rate` in {0,1} decide it: identical
 printed counts mean the defect is latent, any increase at rate 1 means `overlaps=3/4` is partly an
 artefact today.
+
+## RESOLVED 2026-09-07 — all four of the day's questions, ruled by the owner
+
+1. **Defect B — DEFERRED to the quiet window, not dropped.** B4-1 lands in the SAME session that has
+   a quiet machine for axes W and C, so the re-run it forces — `a3+b4` against `a1f+b1` — happens
+   interleaved there, in one session, and the axis-A verdict never sits unproven. Until then `a3+b0`
+   ships as it does today, clearing both acceptance clauses.
+2. **graphify — INSTALLED.** `graphifyy` into the interpreter the hook already pins; the hook's first
+   probe now passes and `graphify-out/.graphify_python` needed no change. Verified by the next commit,
+   which launched a background graph rebuild instead of printing the error it had printed on every
+   commit for a month.
+3. **`master` — FAST-FORWARDED** from `e65a5673` (2026-07-09) to `45dd0dbd`, 611 commits, a true
+   fast-forward: `master` held nothing this branch lacks and no worktree had it checked out.
+   `feat/reflection` (+20) and `feat/ui-advanced` (+16) are merged separately, later.
+4. **The gate's `overlaps >= 1` threshold — PER-CONTEXT COUNTERS.** `--test-threads=1` was rejected
+   because it changes the recipe the measured 4/4 and 3/4 table was taken under, and every negative
+   control compares against that table. Not yet implemented; it is the next small item after Stage 3b.
