@@ -304,3 +304,158 @@ speculatively: if B4-1 puts leg 3 at `top_lane <= 8`, this rung is deleted, not 
    placement-adjacent and would need its own row. Not decided here; recorded.
 3. **B4-2's acceptance-line consequence** is a VALUES call, not a perf call: it moves `REF` and
    clause (2) sits at 93.5 %.
+
+---
+
+# ⚠ ROUND-2 CRITIQUE — three blocking findings. B4-1 IS NOT FREE.
+
+Reviewed 2026-09-07 against `d647d930`. Every site below was re-verified by hand.
+
+## BLOCKING 1 — the crate's own axis-B property test is a deterministic RED under `a3+b4`, twice over
+
+`tests/ke16_b_join_properties.rs` is uncfg'd and selects its assertion at run time (`:31-35`:
+*"Every test here runs in EVERY build, selecting its assertion from `KE16_B` / `KE16_A` at run
+time"*). With `KE16_B = "b4"` the `b0` early return at `:258-264` is skipped, and
+`the_worker_joiner_takes_its_own_wave_before_a_foreign_one` fails twice:
+
+1. **The own-wave assert (`:267-272`).** The fixture is `num_threads(1)`; the FOREIGN 8 are pushed by
+   the test thread (`:209-218`) and the OWN 8 by the worker inside the scope (`:176-188`) — and
+   **under `a3` BOTH land in `injector_global`**, because `place_task` returns at
+   `worker.rs:1060-1061` before the lane test. `Injector` is FIFO, so step 2 hands back the oldest,
+   which is tag 1000: *"a foreign task first means the own-deque pop is not happening"*.
+2. **The arm match (`:274-282`).** There is no `a3` arm; the fallthrough is
+   `unreachable!("axis B is built without an A1 arm (KE16_A = {other})")`. Its own comment explains
+   why that was safe — *"`any(ke16-b1, ke16-b3)` without an A1 arm is a `compile_error!` … so the B
+   arms imply a1 / a1f"* — **and a new `ke16-b4` is not covered by that refusal.**
+
+⇒ **§3's claim that B4-1 buys "own-deque-first, which kills P2 outright" is WRONG as written.** Over
+`a3` the joiner's own deque never holds its own wave, so "own scope first" is **structurally
+undeliverable**; what step 1 (`scope.rs:1472`) actually drains is this joiner's *previously stolen*
+residue, and **P2 dies from the self-skip at `worker.rs:312-313`**, not from step 1. One of the four
+advertised properties is void, and any repair must include an `a3` arm for this test asserting what
+is actually true over a global injector.
+
+## BLOCKING 2 — R2, "the mutation that matters", strands tasks instead of hiding them
+
+R2 says: keep `ke16-b4`, steal into a stack-local `Worker` instead of `lane.deque()`; expected
+"leg 3 red; legs 1 and 2 stay GREEN". **Both halves are false.**
+
+`join_on_worker` has **no `drain_scratch`** — that helper is
+`#[cfg(not(any(feature = "ke16-b1", feature = "ke16-b3")))]` at `scope.rs:1742` and belongs to B0,
+not to the B arms. So the <= 32 residue that `pop_global_injector` (`worker.rs:272`) and
+`try_steal_random` (`worker.rs:316`) leave in the destination is **never run**, and every stranded
+element is destroyed by `Task::drop`, whose own doc (`task.rs:288-292`) states it *"does NOT complete
+a scope registration: a SCOPED task reaching this path would leave its scope's join waiting
+forever"*.
+
+* Leg 2 goes **RED on its completion clause** (`ke16_b_join_arms.rs:437-441` asserts all 96 foreign
+  tasks finish; ~32 of every 33 are dropped unrun). Its 60 ms budget assert at `:428` still passes.
+* Leg 3 **HANGS** on a never-draining `pending`, because its fixture spawns scope tasks.
+
+⇒ The independence claim ("if leg 3 does not red here, it is not measuring reachability") rests on a
+mutation that reds leg 2 as well and turns leg 3 into a timeout. **A red-first mutation that produces
+a hang is indistinguishable from a broken harness.** R2 is also not a faithful "B0 minus
+reachability" model at all: B0 *drained* its scratch (`scope.rs:1744-1751`), so R2 is a strictly
+different and worse defect. It must be replaced by a mutation that keeps the drain and removes only
+the reachability.
+
+## BLOCKING 3 — the monotone argument checks the wrong register row, and the row it omits fires ON ITS LETTER
+
+§4 concludes "B4-1 does not trip the letter of `a1f`'s return condition" and stops. But
+`KE16-REJECTED.md:359-362` gives `b1`/`b3` a **second** trigger, echoed in the summary rows at
+`:475-476`:
+
+> `b1`/`b3` become reachable **if and only if** an A arm with a registered worker deque wins axis A —
+> i.e. `a1` or `a1f` — **or if defect B is fixed by some other route that gives the worker joiner a
+> registered destination deque.**
+
+**B4-1's chosen option (e) is that route, verbatim.** So `b1`/`b3` return the moment B4-1 lands, and
+they build only over `a1`/`a1f` — which means what returns with them is **`a1f+b1`**.
+
+⇒ §4's first bullet — *"faster or tied -> the verdict holds a fortiori; nothing is owed"* — **is
+wrong.** The inference `a3+b4 <= a3+b0 < a1f+b0` is arithmetically true and irrelevant: it bounds
+nothing about `a1f+b1`. As written, the bullet guarantees that nobody looks, while
+`KE16-RESULTS.md:12` ("Axis B — B0 BY CONSTRUCTION") is un-published and `:531` ("axis A closes on
+`a3`") is RETAINED on a head-to-head against a configuration the register's own returning row has
+just superseded. **Un-publishing one verdict while silently retaining a larger one is this
+campaign's worst failure mode.**
+
+The effect size is not remote. The deciding cell's headroom is 38.7 % (159 470 / 114 960 = 1.3872),
+so `a1f+b1` needs a **27.9 % gain** on `worker/body_10us_tasks_4W` to tie. That cell is the worker
+route, the joiner is on it, and `KE16-RESULTS.md:1158-1163` records `a1`'s worker route at
+`top_lane = 13/24/21` — *"defect B's self-steal signature promoted onto the worker route under
+A1+B0"*. The loser was measured **with the same defect live**, and 33 x 10 us = 330 us against a
+159 us cell puts the mechanism at the same order as the cell, not at rounding error.
+
+### Consequence for staging
+
+**B4-1 cannot be described as a cheap local fix.** Its true price is a re-run of the axis-A
+head-to-head on a new substrate: `a3+b4` vs `a1f+b1`, interleaved pass-by-pass in one session, on the
+physics primary and on `worker/body_10us_tasks_4W`. `a1f+b1` reaching <= 114 960 ns on the deciding
+cell or <= 11.709 ms on physics **voids the axis-A closure**; failing to reach it discharges the
+`b1`/`b3` return row with a number instead of an argument. Either way the measurement is owed, and it
+needs the same quiet machine B4-0(3) already needed.
+
+## Non-blocking, recorded
+
+1. **The cfg-widening list in §3 is presented as exhaustive and is missing at least four carriers.**
+   (a) `tls.rs:238` is `#[cfg(not(any(a1, a1-fifo)))]`; widening only `:225` leaves BOTH branches of
+   `worker_lane_for` compiled and `:247` constructs `WorkerLane { wid }` without the now-existing
+   `deque` field — **E0063, the build does not compile.** (b) `lib.rs:185` defines `KE16_B = "b0"`
+   under `not(any(b1, b3))`; unwidened, `a3+b4` reports `b0` while the witness certifies the run —
+   the quiet mislabelling `lib.rs:139-148` exists to forbid. (c)
+   `tests/ke16_feature_scheme_census.rs:55-67`, `:79-90` hard-code the switch list and the illegal
+   pairs; declaring `ke16-b4` reds rules 1 and 4. (d) The `worker_lane_for` unit rows at `tls.rs:744`
+   are A1-cfg'd, so the newly live predicate branch ships **with no unit coverage**. (a)-(c) are
+   loud; (d) is the quiet one.
+2. **The Miri-vacuity ground in §3 is true but is not the load-bearing reason.** There is genuinely
+   no push path over `a3` (both `push_on_lane_no_wake` definitions are cfg'd out — `worker.rs:880`
+   needs an A1 arm, `:902` is `not(ke16-a3)`), so the answer to "can an inline body push through the
+   TLS deque" is no. But the sentence that matters is "the only writer is the steal path", and its
+   real support is **arithmetic, not placement**: crossbeam's `MIN_CAP` is 64, every batch is <= 32,
+   and both `join_on_worker` (`scope.rs:1472` before `:1484`) and `worker_main` (`worker.rs:89`
+   before `:95`) pop one at a time before re-batching, so the deque never exceeds ~32 and
+   `dest.reserve` never resizes. Any later change that batches twice before popping reinstates the
+   write **with no gate**, because `tests/miri_scope.rs:567-572` is already
+   `#[cfg_attr(not(any(a1, a1-fifo)), ignore)]` and prints `1 ignored`.
+3. **P2 survives on the `None` route for one caller class.** `join_external_helping`'s doc
+   (`scope.rs:1573-1579`) records that the external classification covers *"a worker of THIS pool
+   inside an `install` frame, whose deque is still registered"*. B4-1 routes `None` to B0's body,
+   whose `try_steal_any` (`scope.rs:1772-1788`) sweeps `0..n` with **no self-skip** into `scratch`.
+   So `tests/shutdown.rs:32-42`'s note that *"both B arms remove it"* would be **false for `ke16-b4`**
+   — b4 removes the private buffer on the worker route only. Add it to the deferred list and fix the
+   note when B4-2 lands.
+4. **The residue deferral names the wrong recovery mechanism.** "Under `w0` every push wakes, so the
+   next push recovers them" — there may be no next push, and recovery does not depend on one. What
+   actually recovers it is (i) the residue is stealable, and (ii) the joiner drains it
+   unconditionally on returning, because both `worker_main`'s stage 2 (`worker.rs:89`) and an outer
+   `join_on_worker`'s step 1 (`scope.rs:1472`) are `pop()`-first. Note `wake_after_residue` is a
+   no-op without `ke16-w-gate` (`worker.rs:654-655`), so no wake is issued on that transition. The
+   deferral is correct; only its justification was.
+5. **Leg 3's sample rule contradicts the deferral beside it.** ">= 3 processes x >= 10 waves" reads as
+   the threshold while the next sentence says the mode's granularity is UNMEASURED. If the mode is
+   per-process at the rate the only recorded evidence supports (2 of 3 processes bad), a 3-process
+   gate has a ~4 % false-green rate. **The count is an OUTPUT of B4-0(2); no number belongs next to
+   "Requirement" until it is measured.**
+
+## What the critique confirmed as solid
+
+* All five §0 corrections hold at `7f294afe`, including the 33-vs-32 asymmetry between
+  `Injector::steal_batch_and_pop` and `Stealer::steal_batch_and_pop`.
+* **Leg 3's threshold is not a new constant in old clothes.** On this fixture
+  `wall >= top_lane * BODY` unconditionally, so `speedup >= W/2` strictly IMPLIES the pre-registered
+  `top_lane <= 2 * tasks / W`, and at `tasks = 4W` the two coincide at every W. All three observed
+  modes classify correctly: 33 -> 1.92x RED, 16 -> 4x RED, 5 -> 12.4x GREEN.
+* The headroom arithmetic is right: 16.49 % and 38.72 %, and 93.5 % of budget flips on a 6.5 % REF
+  move.
+* **R3's reasoning is correct and non-obvious**: the existing gate for the
+  `let _ = WorkerDequeDeposit::new(..)` defect is a PLACEMENT test (`tls.rs:698-699`) that cannot
+  exist over `a3`, so leg 1 really is the only thing that can see it.
+* **The loom coupling does NOT break.** M2's consumer-side barrier (`loom_pool.rs:340`, documented at
+  `:233-240`) still sits on the b4 joiner's park path: `pop_any` (`worker.rs:238-244`) reaches
+  `mark_idle`+park only after `local.pop()` returned `None` AND `pop_global_injector` issued the
+  fence on its empty-check path. **The design should say this** rather than leaving loom as a bare
+  exit condition — a reader cannot tell an unexamined risk from an examined one.
+* Leg 1's two sites work over `a3+b4`; `b_join_properties.rs:313` needs no cfg widening at all (it
+  selects at run time), so §5's "widen their cfg" is right for one site and vacuous for the other.
+* Options (b), (b') and (c) are correctly rejected on structure rather than taste.
