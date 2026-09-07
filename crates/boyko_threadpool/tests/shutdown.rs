@@ -28,6 +28,18 @@ const WORKERS: usize = 4;
 // barrier-of-N would wedge the dispatcher while its sibling tasks sit unrun in
 // the same scratch deque → deadlock. (Same hazard as a blocking barrier across
 // rayon tasks.) We therefore prove shutdown/join with non-blocking work only.
+//
+// KE16 axis B (this paragraph goes with the features): the MECHANISM above is
+// the B0 joiner's, and both B arms remove it. Under `ke16-b1` / `ke16-b3` a
+// joining worker takes one task at a time into its own REGISTERED deque, so
+// whatever it has not run is still stealable by a sibling, and an external
+// joiner takes one task at a time (`ke16-b1`) or none at all (`ke16-b3`) — no
+// batch of siblings can sit unreachable behind a blocked task. The RULE does not
+// change and these tests do not change with it: a task that blocks on a
+// cross-task primitive inside a scope is still a misuse (as in rayon), because a
+// joiner may legally run any subset of a wave, in any order, on ONE thread,
+// while a `Barrier`-of-N assumes N threads are running it. Non-blocking work
+// only, in every build.
 
 /// Run a batch of independent tasks, then drop the handle; `Drop` must set
 /// `shutdown`, unpark every worker, and join them without hanging. If the

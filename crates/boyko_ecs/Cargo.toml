@@ -261,3 +261,20 @@ workspace = true
 [[bench]]
 name = "gj1_flag_cost"
 harness = false
+
+# KE16 — the ECS-level measurement harness for threadpool defect A: the same
+# `par_iter` over the same world, driven (a) from the bench thread inside
+# `pool.install` (healthy: chunks reach `injector_global`) and (b) from inside a
+# scheduled system body, which the parallel scheduler runs ON A WORKER (chunks
+# reach that worker's `injector_local`, which no sibling polls). Reports
+# wall-clock, a max-in-flight occupancy counter and the ratio at N in
+# {4096, 65536}. See benches/ke16_par_iter_in_system.rs.
+[[bench]]
+name = "ke16_par_iter_in_system"
+harness = false
+
+# KE17 -- sizes the apply-window barrier (schedule.rs:623 gate). See
+# benches/ke17_apply_window.rs.
+[[bench]]
+name = "ke17_apply_window"
+harness = false

@@ -64,6 +64,8 @@ struct StubParam<'w, 's> {
 //   - SP4: `init_state` performs no world mutation — `StubState` is
 //     zero-sized.
 unsafe impl<'a, 'b> SystemParam for StubParam<'a, 'b> {
+    const HAS_DEFERRED: bool = false;
+
     type State = StubState;
     type Item<'w, 's> = StubParam<'w, 's>;
 

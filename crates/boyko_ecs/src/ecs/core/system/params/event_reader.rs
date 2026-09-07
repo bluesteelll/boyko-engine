@@ -310,6 +310,8 @@ impl<E: Event> Drop for EventIter<'_, E> {
 //     `Acquire` load on `frame_event_count` — both pure with respect to
 //     archetype / resource registries.
 unsafe impl<E: Event> SystemParam for EventReader<'_, E> {
+    const HAS_DEFERRED: bool = false;
+
     type State = EventReaderState<E>;
     type Item<'w, 's> = EventReader<'s, E>;
 

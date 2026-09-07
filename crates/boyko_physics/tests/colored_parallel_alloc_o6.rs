@@ -217,21 +217,24 @@ fn dense_world_scope_alloc_is_bounded_to_large_colors() {
 
     // Per-step passes = substeps × (1 + relax). Per pass, the FEW large color(s)
     // each issue a `pool.scope`, each allocating a small bounded constant (1 shared
-    // frame + ≤ (workers + 1) × CHUNKS_PER_WORKER spawn closures + internal
+    // frame + ≤ workers × CHUNKS_PER_WORKER spawn closures + internal
     // bookkeeping). The dense packed line has exactly ONE color above the threshold
     // (the shared floor), so the per-step scope-alloc count is ~`passes × per_scope`
     // — a small constant INDEPENDENT of the total color count. We bound it generously
-    // (the O6 work-balanced chunking emits up to (workers+1) × CHUNKS_PER_WORKER
+    // (the O6 work-balanced chunking emits up to workers × CHUNKS_PER_WORKER
     // work-balanced chunks so the work-stealing pool equalizes the lanes; the
     // measured per-scope footprint is ~closures + frame + completion-channel/worker
     // bookkeeping), and the load-bearing assertion below is the n_colors-INDEPENDENCE
     // check, not this absolute number.
     let passes = 4 * (1 + 2); // substeps × (1 + relax_iterations) with the defaults
-    // 1 frame + ≤ (workers+1) × CHUNKS_PER_WORKER closures + per-closure/pool
+    // 1 frame + ≤ workers × CHUNKS_PER_WORKER closures + per-closure/pool
     // bookkeeping. CHUNKS_PER_WORKER (= 6) is a private const mirrored here only for
-    // this bound; keep in sync with `colored.rs::CHUNKS_PER_WORKER`.
+    // this bound; keep in sync with `colored.rs::CHUNKS_PER_WORKER`. The lane count is
+    // `workers`, not `workers + 1`, since KE16 App-1: the thread that calls `pool.scope`
+    // is one OF the workers on the production route, so the site emits
+    // `num_threads() × CHUNKS_PER_WORKER` chunks.
     let chunks_per_worker = 6;
-    let per_scope_cap = 16 + (workers + 1) * chunks_per_worker * 5; // generous
+    let per_scope_cap = 16 + workers * chunks_per_worker * 5; // generous
     let large_colors_cap = 2; // the dense floor-line crosses the threshold in ~1 color
     let bound = passes * per_scope_cap * large_colors_cap;
 

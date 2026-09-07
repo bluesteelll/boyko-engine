@@ -131,3 +131,27 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+# KE16: the physics consumer measured on BOTH dispatch routes. `parallel_solve`
+# and `colored_solve` both drive `solve_colored` from the bench thread (the
+# healthy path: `install` labels it WORKER_ID_DISPATCHER, so the solver's
+# `pool.scope` tasks reach `injector_global`). Production reaches the same call
+# from `physics_solve_colored`, a scheduled system whose body runs ON A WORKER,
+# where the tasks reach `injector_local[wid]` that no sibling polls. This bench
+# runs the identical warmed 10k-contact pyramid step down both routes, plus an
+# empty-schedule control that prices `Schedule::run` itself and the O5
+# single-threaded reference. See benches/ke16_solve_in_system.rs.
+name = "ke16_solve_in_system"
+harness = false
+
+[[bench]]
+# O1 END-TO-END: the gap MEASUREMENT-QUEUE.md §4 names — no bench prices `simd`
+# through a WHOLE `SoftStepSolver` step, so every figure quoted for the switch is a
+# kernel ratio. Runtime-switched A/B (`simd` is a PhysicsConfig field, read per call,
+# so both arms live in ONE binary and there is no between-build drift) over the ~10k
+# pyramid, plus a `o1_widened_fraction` group that measures what fraction of the step
+# the two gated passes actually occupy. Do NOT reconcile its ratio against the
+# circulating 3.8x — that is a kernel number and this is not.
+name = "simd_end_to_end"
+harness = false

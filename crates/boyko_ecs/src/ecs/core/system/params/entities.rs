@@ -220,6 +220,8 @@ impl<'w> Entities<'w> {
 //     rather than on the conflict graph — see the module docs.
 //   - SP4: `init_state` is a no-op; it touches no registry.
 unsafe impl<'a> SystemParam for Entities<'a> {
+    const HAS_DEFERRED: bool = false;
+
     type State = ();
     type Item<'w, 's> = Entities<'w>;
 

@@ -52,6 +52,8 @@ pub const MAX_SYSTEM_PARAM_ARITY: usize = 12;
 // SAFETY (SP1, SP2, SP4): the empty tuple has no access surface, no
 //   state, and no per-invocation view. Every invariant holds vacuously.
 unsafe impl SystemParam for () {
+    const HAS_DEFERRED: bool = false;
+
     type State = ();
     type Item<'w, 's> = ();
 
@@ -88,6 +90,11 @@ macro_rules! impl_system_param_tuple {
         //   the elements is caught by `FilteredAccessSet::add_*` during
         //   the threaded `init_access` walk.
         unsafe impl<$($p: SystemParam),*> SystemParam for ($($p,)*) {
+            /// KE17 D3 — the OR over the elements, mirroring `apply`'s
+            /// forwarding below. The trailing `false` is the arity-0 identity
+            /// and makes the expansion legal for every arity.
+            const HAS_DEFERRED: bool = $(<$p as SystemParam>::HAS_DEFERRED ||)* false;
+
             type State = ($($p::State,)*);
             type Item<'w, 's> = ($($p::Item<'w, 's>,)*);
 
@@ -194,6 +201,14 @@ macro_rules! impl_system_param_tuple_too_large {
         //   vacuously upheld because no code path that respects the
         //   contract ever observes the impl's effects.
         unsafe impl<$($p: SystemParam),*> SystemParam for ($($p,)*) {
+            // The same `const { panic!(...) }` treatment every other member of
+            // this stub gets: an oversized tuple cannot be built (`init_state`
+            // fires first), so this const is unreachable, and spelling it
+            // `false` would put a silent wrong answer in the one place KE17 D3
+            // requires an honest one.
+            const HAS_DEFERRED: bool =
+                const { panic!("tuple too large: see init_state diagnostic") };
+
             type State = ();
             type Item<'w, 's> = ();
 
@@ -293,6 +308,8 @@ mod tests {
     //   `init_state`, and returns a unit `Item`. Every invariant holds
     //   vacuously.
     unsafe impl SystemParam for DummyParam {
+        const HAS_DEFERRED: bool = false;
+
         type State = DummyState;
         type Item<'w, 's> = DummyParam;
 

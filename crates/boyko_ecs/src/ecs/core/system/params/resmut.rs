@@ -78,6 +78,8 @@ pub struct ResMutState<R: Resource> {
 //     alongside a `ResMut<R>`) for the same id can co-exist past init.
 //   - SP4: `init_state` mutates no registry.
 unsafe impl<'a, R: Resource> SystemParam for ResMut<'a, R> {
+    const HAS_DEFERRED: bool = false;
+
     type State = ResMutState<R>;
     type Item<'w, 's> = ResMut<'w, R>;
 
@@ -148,6 +150,8 @@ unsafe impl<'a, R: Resource> SystemParam for ResMut<'a, R> {
 //   - SP4: `init_state` mutates no registry and reuses `ResMutState<R>`, so the
 //     Option wrapper carries no extra per-system state.
 unsafe impl<'a, R: Resource> SystemParam for Option<ResMut<'a, R>> {
+    const HAS_DEFERRED: bool = false;
+
     type State = ResMutState<R>;
     type Item<'w, 's> = Option<ResMut<'w, R>>;
 

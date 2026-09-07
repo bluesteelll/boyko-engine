@@ -164,6 +164,33 @@ pub unsafe trait System: Send + Sync + 'static {
     #[inline]
     fn apply(&mut self, _world: &mut EcsMaster) {}
 
+    /// KE17 D3 — whether [`apply`](Self::apply) may mutate the world.
+    ///
+    /// `FunctionSystem` overrides this to forward
+    /// [`SystemParam::HAS_DEFERRED`], which is a compile-time OR over its
+    /// param chain and is `true` only for `Commands`. The schedule builder
+    /// folds the answer into a per-system `may_defer` bitset.
+    ///
+    /// # Why the default is `true` and not `false`
+    ///
+    /// The opposite polarity of [`is_gpu`](Self::is_gpu), and for the same
+    /// reason: each defaults to the side whose cost is performance rather than
+    /// correctness. The consumer of this answer is the apply-window barrier,
+    /// which today is the ONLY mechanism giving a successor visibility of its
+    /// predecessor's deferred commands. A `false` here licenses releasing the
+    /// successor early; a hand-written `System` outside this crate that
+    /// forgets to override would then have its `apply` race the successor that
+    /// reads what it wrote — a silent wrong read, not a slow frame. `true`
+    /// keeps the barrier, so the worst an omission can cost is the 8.1 % of a
+    /// frame the barrier is measured at
+    /// (`docs/scheduler/KE17-APPLY-WINDOW-MEASUREMENT.md`).
+    ///
+    /// [`SystemParam::HAS_DEFERRED`]: super::system_param::SystemParam::HAS_DEFERRED
+    #[inline]
+    fn has_deferred(&self) -> bool {
+        true
+    }
+
     /// Phase 10 Round 2 C1 — read-only accessor for [`SystemMeta`].
     ///
     /// Returns this system's cached meta so the dispatcher can read the
@@ -325,6 +352,26 @@ mod tests {
             meta: SystemMeta::for_testing("noop"),
         };
         assert_eq!(sys.name(), "noop");
+    }
+
+    /// **KE17 D3 — the fail-safe receipt.**
+    ///
+    /// `NoopSystem` is a hand-written `System` impl that declares nothing
+    /// about deferred work — exactly the out-of-crate impl whose author never
+    /// heard of the split apply window. It must read as `true`, so the split
+    /// keeps its barrier over it: a forgotten declaration costs performance
+    /// and never soundness. If this ever reads `false`, the default flipped
+    /// and every such system became a silent-wrong-read candidate.
+    #[test]
+    fn undeclared_system_keeps_its_barrier() {
+        let sys = NoopSystem {
+            meta: SystemMeta::for_testing("undeclared"),
+        };
+        assert!(
+            sys.has_deferred(),
+            "invariant: a System impl that declares nothing must keep its \
+             apply-window barrier (System::has_deferred defaults to true)"
+        );
     }
 
     /// **Phase 10 Round 2 C1 — load-bearing regression test (plan §13.1).**

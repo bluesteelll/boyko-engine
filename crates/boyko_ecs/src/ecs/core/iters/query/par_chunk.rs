@@ -248,8 +248,17 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                 // non-overlapping by construction; CD3 disjointness for
                 // `&mut [T]` slices is therefore satisfied structurally. The run
                 // walk nests INSIDE each batch with `range_end = end` (C5).
-                let mut start = 0usize;
-                while start < entity_count {
+                //
+                // KE16 App-4: the archetype's chunks go out as ONE wave — one
+                // `pending` RMW and one wake decision instead of `n_chunks` of
+                // each. `chunk_size >= 1`, so the count is the closed form of
+                // the `while start < entity_count` walk it replaces and the
+                // ranges are unchanged. Without `ke16-c-batch` `spawn_batch` is
+                // one `spawn` per body, i.e. that walk.
+                let n_chunks = entity_count.div_ceil(chunk_size);
+
+                scope.spawn_batch(n_chunks, (0..n_chunks).map(|chunk| {
+                    let start = chunk * chunk_size;
                     let end = (start + chunk_size).min(entity_count);
 
                     let captured = ChunkChunkCaptures::<'_, D, F, Func> {
@@ -286,13 +295,11 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                     //   - The conflict graph / `FilteredAccessSet` guarantees
                     //     no concurrent system aliases this archetype's
                     //     columns for the current dispatch round (SCH3).
-                    scope.spawn(move || {
+                    move || {
                         // SAFETY: forwarded; see outer SAFETY block.
                         unsafe { run_chunk_owned::<D, F, Func>(captured); }
-                    });
-
-                    start = end;
-                }
+                    }
+                }));
             }
         });
     });

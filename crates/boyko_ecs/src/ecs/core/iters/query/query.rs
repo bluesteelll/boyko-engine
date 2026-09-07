@@ -1240,6 +1240,8 @@ where
     D: QueryData + 'static,
     F: QueryFilter + 'static,
 {
+    const HAS_DEFERRED: bool = false;
+
     type State = QueryDataState<D, F>;
     type Item<'w, 's> = Query<'w, 's, D, F>;
 

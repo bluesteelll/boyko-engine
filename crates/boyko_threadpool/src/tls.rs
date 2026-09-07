@@ -10,10 +10,56 @@
 //! `Arc<PoolInner>` and must never resurrect the handle, so it deposits the
 //! `PoolInner` pointer. `PoolInner` is opaque `pub`; consumers
 //! (`par_iter`/`par_chunk`) only call its `num_threads()`/`scope()`.
+//!
+//! # KE16 A1 — the deque-lane invariants (`KE16-DESIGN-A.md` §1.7)
+//!
+//! This paragraph and the slot it describes are deleted with the tournament's
+//! features. The five keep the design's own names, `D1`–`D5`, and TWO other
+//! `D`-series already run through this crate's comments: the diagnostics rung
+//! `D1` that `worker_main` names at its `boyko_diag::lane::set_lane` call, and
+//! the Phase 9 plan's `D2`–`D5` cited in the `loom_pool.rs` / `miri_scope.rs`
+//! headers. These five are neither, so every citation of one carries
+//! `KE16-DESIGN-A.md` beside it and the three series stay separable.
+//!
+//! `D1`, `D2`, `D4` and `D5` govern `WORKER_DEQUE`, which exists only under
+//! `ke16-a1` / `ke16-a1-fifo`; every other arm leaves a worker's spawns in a
+//! queue the pool owns, where nothing thread-local is load-bearing. `D3` is
+//! the property the whole axis exists to restore, and every arm owes it.
+//!
+//! - **D1** `WORKER_DEQUE` holds `(Arc::as_ptr(&inner), &raw const deque)` for
+//!   the whole of `worker_main`'s loop and `(null, null)` on every other
+//!   thread and at every other time. Upheld by `WorkerDequeDeposit`, whose
+//!   `drop` clears the slot and which `worker_main` declares AFTER the `deque`
+//!   parameter, so the clear happens before the pointee dies.
+//! - **D2** worker `wid`'s deque in pool `P` is pushed to only by worker
+//!   `wid`'s own thread — crossbeam's single-owner `Worker` contract, which
+//!   under A1 reduces to: only by `push_task` on a `Some` answer from
+//!   [`worker_lane_for`], i.e. the calling thread IS that worker, the target
+//!   pool IS `P`, and the thread is acting as that worker rather than inside
+//!   an `install` frame.
+//! - **D3** every task pushed to a worker deque is reachable by every sibling
+//!   through `inner.stealers`, and by any joiner through the same stealers.
+//!   This is defect A's closure: an unreachable destination is what makes a
+//!   worker-spawned wave run serially.
+//! - **D4** `WorkerLane::deque` is the ONLY dereference of the deposited
+//!   pointer; there is no other way to form a `&Worker` from the slot, so the
+//!   `unsafe` obligation is discharged in one place.
+//! - **D5** no `&Worker` minted from the slot is a field of a by-value
+//!   argument, a parameter whose activation spans a task body, or a value used
+//!   after a task body has run: each is consumed by one method call in its own
+//!   statement (`let popped = lane.deque().pop();` — never an `if let`
+//!   scrutinee, whose temporaries live through the THEN block in Rust 2024),
+//!   or handed to a helper that runs no task body. This is what keeps a
+//!   protected tag from spanning a nested spawn through the same slot.
 
 use core::cell::Cell;
 use core::ptr;
 
+#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+use crossbeam_deque::Worker;
+
+#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+use crate::task::Task;
 use crate::thread_pool::PoolInner;
 
 /// Sentinel for the dispatcher thread (the calling thread inside
@@ -42,11 +88,235 @@ thread_local! {
     /// - [`WORKER_ID_UNATTACHED`] — not on a worker, not in an install scope.
     pub(crate) static CURRENT_WORKER_ID: Cell<u32> = const { Cell::new(WORKER_ID_UNATTACHED) };
 
-    /// Allocation discipline guard (ALLOC1). Set true by the worker's
-    /// run-system RAII guard; the ECS crate's context-restricted paths
-    /// `debug_assert!` it (or its negation). Reset by
-    /// [`InSystemRunGuard::drop`].
-    pub(crate) static IN_SYSTEM_RUN: Cell<bool> = const { Cell::new(false) };
+    /// Allocation discipline guard (ALLOC1), as a NESTING DEPTH (KE16 App-8).
+    /// Incremented by the worker's run-system RAII guard, decremented on its
+    /// drop; the ECS crate's context-restricted paths `debug_assert!` the
+    /// boolean [`is_in_system_run`] (or its negation). It is a counter rather
+    /// than a flag because a helping joiner may run a sibling conflict-free
+    /// system INLINE inside a system body, so guards nest.
+    pub(crate) static IN_SYSTEM_RUN: Cell<u32> = const { Cell::new(0) };
+}
+
+// === KE16 A switch: ke16-a1 / ke16-a1-fifo ===
+#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+thread_local! {
+    /// KE16 A1. The calling worker's own Chase-Lev deque (`worker_main`'s
+    /// `deque` parameter), reachable from `push_task` on the SAME thread, and
+    /// the pool it belongs to. Null / null on every thread that is not a
+    /// worker. Deposited by `worker_main` after the active-pool deposit and
+    /// cleared by [`WorkerDequeDeposit::drop`] before `worker_main` returns.
+    ///
+    /// The pointer is minted with `&raw const deque` — a raw borrow of the
+    /// place, NOT a reference — so no reference tag to the deque outlives any
+    /// single method call (discipline D5, `KE16-DESIGN-A.md` §1.3).
+    ///
+    /// The pool tag is what [`worker_lane_for`] compares against its target,
+    /// NOT `ACTIVE_POOL`: an `install` of pool B running on a pool-A worker
+    /// swaps `ACTIVE_POOL` to B for that frame, and a B task must not land in
+    /// A's deque.
+    pub(crate) static WORKER_DEQUE: Cell<(*const PoolInner, *const Worker<Task>)>
+        = const { Cell::new((ptr::null(), ptr::null())) };
+}
+
+/// The calling thread's lane in a pool: a registered worker id and, under the
+/// KE16 A1 arms, the raw pointer to that worker's own deque.
+///
+/// `Copy`, and it holds a RAW pointer, not a reference: a `WorkerLane` passed
+/// by value into a function therefore carries no reference field for Miri to
+/// retag and protect for the callee's duration. The only way to touch the
+/// deque is [`WorkerLane::deque`], whose result is consumed by ONE method call
+/// in its own statement (discipline D5, `KE16-DESIGN-A.md` §1.7).
+// === KE16 A switch: ke16-a3 === The control arm addresses no per-worker
+// structure at all — every spawn goes to the global injector and the joiner has
+// no own slot — so it is the one arm with no caller for the predicate. Every
+// other arm constructs a lane on its spawn path.
+#[cfg_attr(feature = "ke16-a3", allow(dead_code))]
+#[derive(Clone, Copy)]
+pub(crate) struct WorkerLane {
+    /// The registered worker id of the calling thread in the pool this lane was
+    /// minted for. Always `< inner.worker_count()`.
+    // === KE16 A switch: ke16-a1 / ke16-a1-fifo === Those arms address the lane
+    // by its DEQUE, never by index, so the id is carried and not read until the
+    // B axis lands the worker joiner that needs it.
+    #[cfg_attr(any(feature = "ke16-a1", feature = "ke16-a1-fifo"), allow(dead_code))]
+    pub(crate) wid: u32,
+    // === KE16 A switch: ke16-a1 / ke16-a1-fifo === (the field exists only when a deque TLS exists)
+    #[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+    deque: *const Worker<Task>,
+}
+
+#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+impl WorkerLane {
+    /// A shared reference to the lane's deque, to be consumed by ONE method
+    /// call in its own statement (`let popped = lane.deque().pop();`).
+    ///
+    /// Callers MUST NOT bind the result to a local that lives across a task
+    /// body, nor use it as an `if let` scrutinee whose THEN block runs a task
+    /// body — in Rust 2024 such a temporary lives through that block (D5,
+    /// `KE16-DESIGN-A.md` §1.3).
+    // The consumers are the A1 push arm (`worker::push_on_lane`) and, when it
+    // lands, the B1 joiner.
+    #[inline]
+    pub(crate) fn deque(&self) -> &Worker<Task> {
+        // SAFETY (`KE16-DESIGN-A.md` §1.3, D5 — four facts, each of which the
+        //   code below actually relies on):
+        //
+        //   1. LIVENESS. `self.deque` was deposited on THIS thread by
+        //      `WorkerDequeDeposit::new` as `&raw const deque` — a raw borrow of
+        //      `worker_main`'s by-value parameter, no reference created — and the
+        //      guard is declared after that parameter, so its `drop` clears the
+        //      slot before the parameter drops. `worker_lane_for` handed out this
+        //      lane only after matching the deposited pool tag against the target
+        //      pool, and every caller runs inside `worker_main`'s loop (the loop
+        //      itself, a task body, or a join inside a task body), so the pointee
+        //      is alive. The cell is thread-local and `Worker<T>` is `!Sync`, so
+        //      no other thread can observe the pointer; the pointee is never
+        //      moved after the deposit.
+        //   2. CONSUMPTION FORM. The `&Worker` minted here is consumed by ONE
+        //      method call in its own statement (`lane.deque().push(task);`) OR
+        //      passed as an argument to a helper that runs no task body
+        //      (`P::deque(lane.deque())` in `worker::push_on_lane_no_wake`), and it
+        //      is never used after the call that consumed it — so a body that
+        //      later pushes through this same slot (a nested scope run inline)
+        //      finds no live use of an older tag to conflict with.
+        //   3. PROTECTORS. The only protectors ever attached to a tag on this
+        //      deque are a `Worker` method's `&self` and the helpers' `local`
+        //      argument, and no task body runs inside either — so no protected
+        //      tag spans a foreign access. The reference is never a
+        //      by-value-argument FIELD: `WorkerLane` carries a raw pointer
+        //      precisely because Miri retags and protects reference fields of
+        //      by-value arguments unconditionally, which would put a protected
+        //      shared tag across every task a joiner runs.
+        //   4. PROVENANCE under the owner's own writes. The only bytes of the
+        //      pointee written after construction are its `buffer:
+        //      Cell<Buffer<T>>` (crossbeam-deque 0.8.7 `deque.rs:198`), rewritten
+        //      by `resize` through `Cell::replace` (`deque.rs:304`) from a
+        //      `&self` that is a child of whatever tag called `push`. Those bytes
+        //      are interior-mutable and Tree Borrows tracks interior mutability
+        //      byte-precisely by default, so a shared tag's permission tolerates
+        //      them; they are written only by this thread, only through children
+        //      of this provenance. Thieves hold their own `Arc` clone of the heap
+        //      `Inner` and touch that allocation, never this one.
+        unsafe { &*self.deque }
+    }
+}
+
+/// The calling thread's lane in `inner`, when it is a registered worker of
+/// `inner` acting AS that worker.
+///
+/// `Some` iff the pool tag deposited on this thread is `inner` AND
+/// [`current_worker_id`] is a worker id (`< inner.worker_count()`). `None` on
+/// the dispatcher, on an unattached thread, on a worker of another pool, and
+/// inside an `install` frame on a worker of THIS pool — `install` rewrites
+/// `CURRENT_WORKER_ID` to [`WORKER_ID_DISPATCHER`], which is exactly how
+/// `push_task` has always treated that frame. `scope` does not rewrite the id,
+/// so a `par_iter` scope on a worker IS that worker's lane.
+///
+/// This is the ONE identity predicate (KE16 App-6): the push arm, the joiner's
+/// dispatch and the count-gated completion target all ask it, so the three
+/// cannot disagree — "a pool-A worker joining a pool-B scope drains B's
+/// `injector_local[wid_A]`" stops being expressible.
+// === KE16 A switch: ke16-a3 === (no caller under the control arm; see the
+// attribute on [`WorkerLane`])
+#[cfg_attr(feature = "ke16-a3", allow(dead_code))]
+#[inline]
+pub(crate) fn worker_lane_for(inner: &PoolInner) -> Option<WorkerLane> {
+    // === KE16 A switch: ke16-a1 / ke16-a1-fifo ===
+    #[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+    {
+        let (pool, deque) = WORKER_DEQUE.with(|c| c.get());
+        if !ptr::eq(pool, inner) {
+            return None;
+        }
+        let wid = current_worker_id();
+        if (wid as usize) >= inner.worker_count() as usize {
+            return None;
+        }
+        // The deque pointer is only carried: no dereference happens here.
+        Some(WorkerLane { wid, deque })
+    }
+    #[cfg(not(any(feature = "ke16-a1", feature = "ke16-a1-fifo")))]
+    {
+        if !ptr::eq(active_pool_ptr(), inner) {
+            return None;
+        }
+        let wid = current_worker_id();
+        if (wid as usize) >= inner.worker_count() as usize {
+            return None;
+        }
+        Some(WorkerLane { wid })
+    }
+}
+
+/// `true` when the calling thread is a registered worker thread OF `inner`,
+/// whatever frame it is running in.
+///
+/// [`worker_lane_for`] answers the narrower question — *is this thread acting AS
+/// that worker right now* — and says `None` inside an `install` frame of
+/// `inner`, because `install` rewrites the worker id to
+/// [`WORKER_ID_DISPATCHER`] and a task pushed from that frame goes to the global
+/// injector rather than to this thread's deque. That is the right answer for
+/// PLACEMENT and the wrong one for "may this joiner refuse to help": a worker of
+/// `inner` that refuses is a lane the pool has lost while waiting for work only
+/// `inner` can run, and at `num_threads(1)` — or with every worker inside such a
+/// frame — there is then no thread left to run it at all. The one caller is the
+/// `ke16-b3` external arm (`KE16-DESIGN-B.md` §3 plus the round-4 review's
+/// blocking item 2); every other route asks the identity predicate.
+///
+/// Not part of the identity predicate's contract (App-6) and not a substitute
+/// for it: it never yields a lane, only the fact of registration, so no
+/// per-worker structure can be indexed through it.
+// === KE16 B switch: ke16-b3 ===
+#[cfg(feature = "ke16-b3")]
+#[inline]
+pub(crate) fn is_worker_thread_of(inner: &PoolInner) -> bool {
+    // === KE16 A switch: ke16-a1 / ke16-a1-fifo === the deposit IS the
+    // registration record; nothing else on this thread survives the id rewrite.
+    #[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+    {
+        ptr::eq(WORKER_DEQUE.with(|c| c.get()).0, inner)
+    }
+    // `ke16-b3` without an A1 arm is already a `compile_error!` (`lib.rs`): B
+    // needs the TLS deque. This arm exists so that refused configuration reports
+    // that one error instead of a second, misleading one about a missing TLS.
+    #[cfg(not(any(feature = "ke16-a1", feature = "ke16-a1-fifo")))]
+    {
+        let _ = inner;
+        false
+    }
+}
+
+/// RAII deposit of the calling worker's deque into [`WORKER_DEQUE`] (KE16 A1).
+///
+/// Constructed by `worker_main` immediately after the active-pool deposit and
+/// declared AFTER the `deque` parameter it points at, so it drops — clearing
+/// the slot — before the deque itself does.
+#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+pub(crate) struct WorkerDequeDeposit {
+    /// Prevents construction outside `new`, and keeps the guard `!Send`: the
+    /// deposit describes THIS thread and must not travel.
+    _not_send: core::marker::PhantomData<*const ()>,
+}
+
+#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+impl WorkerDequeDeposit {
+    /// Publish `(pool, deque)` for this thread. `deque` must be a raw borrow
+    /// (`&raw const deque`) of a place that outlives the guard.
+    #[inline]
+    pub(crate) fn new(pool: *const PoolInner, deque: *const Worker<Task>) -> Self {
+        WORKER_DEQUE.with(|c| c.set((pool, deque)));
+        Self {
+            _not_send: core::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+impl Drop for WorkerDequeDeposit {
+    #[inline]
+    fn drop(&mut self) {
+        WORKER_DEQUE.with(|c| c.set((ptr::null(), ptr::null())));
+    }
 }
 
 /// Returns the current worker id, or [`WORKER_ID_DISPATCHER`] /
@@ -79,9 +349,14 @@ pub fn current_worker_id_or_dispatcher_lane(worker_count: u32) -> u32 {
 
 /// Returns `true` when the current thread is executing inside a system body
 /// (between [`InSystemRunGuard::enter`] and the guard's drop).
+///
+/// The predicate is depth-insensitive: with guards nested (a sibling system
+/// run inline by a helping joiner, KE16 App-8) it stays `true` until the
+/// outermost guard drops, which is what every caller means by "in a system
+/// body".
 #[inline]
 pub fn is_in_system_run() -> bool {
-    IN_SYSTEM_RUN.with(|c| c.get())
+    IN_SYSTEM_RUN.with(|c| c.get() > 0)
 }
 
 /// Set the worker id for the current thread. Called once on `worker_main`
@@ -172,24 +447,35 @@ where
     }
 }
 
-/// RAII guard around a worker's system-body execution. Sets `IN_SYSTEM_RUN`
-/// on entry, clears on drop. The ECS scheduler wraps `System::run_unsafe`
-/// in `let _g = InSystemRunGuard::enter();` so context-restricted paths can
-/// `debug_assert!` whether they run inside a system body (ALLOC6).
+/// RAII guard around a worker's system-body execution. Raises the
+/// `IN_SYSTEM_RUN` depth on entry, lowers it on drop. The ECS scheduler wraps
+/// `System::run_unsafe` in `let _g = InSystemRunGuard::enter();` so
+/// context-restricted paths can `debug_assert!` whether they run inside a
+/// system body (ALLOC6).
+///
+/// **Nesting is legal** (KE16 App-8): a joiner that helps while a scope is
+/// open may run a sibling conflict-free system inline inside another system's
+/// body — reachable today through the global-injector drain — so the guard
+/// counts depth instead of asserting a flag was clear. SCH7's apply window is
+/// unaffected: both systems are in `running` and the drain gate counts
+/// completions, not lanes.
 pub struct InSystemRunGuard {
     /// Prevents the guard from being constructible outside `enter`.
     _private: (),
 }
 
 impl InSystemRunGuard {
-    /// Enter a system run. Panics in debug builds if a previous guard is
-    /// still live on this thread (nested system runs are a contract
-    /// violation under SCH7).
+    /// Enter a system run, raising this thread's system-body depth by one.
+    ///
+    /// Panics in debug builds if the depth would exceed 64 — the conflict
+    /// graph admits at most one inline sibling per open scope, so a deeper
+    /// stack is a guard that was leaked rather than dropped.
     #[inline]
     pub fn enter() -> Self {
         IN_SYSTEM_RUN.with(|c| {
-            debug_assert!(!c.get(), "InSystemRunGuard nested; SCH7 violation");
-            c.set(true);
+            let depth = c.get();
+            debug_assert!(depth < 64, "InSystemRunGuard depth runaway");
+            c.set(depth + 1);
         });
         Self { _private: () }
     }
@@ -198,7 +484,11 @@ impl InSystemRunGuard {
 impl Drop for InSystemRunGuard {
     #[inline]
     fn drop(&mut self) {
-        IN_SYSTEM_RUN.with(|c| c.set(false));
+        IN_SYSTEM_RUN.with(|c| {
+            let depth = c.get();
+            debug_assert!(depth > 0, "InSystemRunGuard dropped at depth 0");
+            c.set(depth.saturating_sub(1));
+        });
     }
 }
 
@@ -227,6 +517,256 @@ mod tests {
         assert!(!is_in_system_run());
     }
 
+    /// App-6: inside an `install` frame the pool tag matches but the worker id
+    /// is the dispatcher sentinel, so the calling thread is NOT a lane of the
+    /// pool — the answer that keeps a sentinel out of every per-worker index.
+    #[test]
+    fn worker_lane_for_is_none_inside_an_install_frame() {
+        let pool = crate::ThreadPoolBuilder::new().num_threads(2).build();
+        pool.install(|_scope| {
+            let is_lane = try_with_active_pool(|inner| worker_lane_for(inner).is_some());
+            assert_eq!(
+                is_lane,
+                Some(false),
+                "the install frame's dispatcher sentinel must not read as a worker lane"
+            );
+        });
+    }
+
+    /// App-6, the design's white-box row: with the pool tag deposited AND the
+    /// worker id rewritten to the dispatcher sentinel — i.e. inside
+    /// `pool.install` running ON a worker of that same pool — the predicate must
+    /// answer `None`, so no per-worker array is ever indexed with a sentinel.
+    ///
+    /// The sibling `worker_lane_for_is_none_inside_an_install_frame` runs the
+    /// frame on the test thread, where the tag half already fails under the A1
+    /// arms; only this shape puts the id check under load in every build.
+    #[test]
+    fn worker_lane_for_is_none_in_an_install_frame_on_a_worker_of_the_same_pool() {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let pool = crate::ThreadPoolBuilder::new().num_threads(2).build();
+        // u32::MAX = the probe never ran; otherwise bit 0 = the lane outside the
+        // install frame, bit 1 = the lane inside it. Required: 0b01.
+        let answered = Arc::new(AtomicU32::new(u32::MAX));
+        let answered_cl = Arc::clone(&answered);
+        let pool_cl = Arc::clone(&pool);
+        pool.spawn(move || {
+            let outer = try_with_active_pool(|inner| worker_lane_for(inner).is_some());
+            let framed =
+                pool_cl.install(|_scope| try_with_active_pool(|i| worker_lane_for(i).is_some()));
+            let bits = u32::from(outer == Some(true)) | (u32::from(framed == Some(true)) << 1);
+            answered_cl.store(bits, Ordering::Release);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while answered.load(Ordering::Acquire) == u32::MAX && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            answered.load(Ordering::Acquire),
+            0b01,
+            "expected a lane on the worker and none inside its own install frame \
+             (u32::MAX = the probe never ran)"
+        );
+    }
+
+    /// App-6: on a registered worker of the pool the predicate answers `Some`
+    /// with that worker's own id.
+    #[test]
+    fn worker_lane_for_is_some_on_a_registered_worker() {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let pool = crate::ThreadPoolBuilder::new().num_threads(2).build();
+        // A fire-and-forget task never runs on the calling thread, so the body
+        // is guaranteed to observe a worker's TLS.
+        let seen = Arc::new(AtomicU32::new(u32::MAX));
+        let mismatched = Arc::new(AtomicU32::new(0));
+        let seen_cl = Arc::clone(&seen);
+        let mismatched_cl = Arc::clone(&mismatched);
+        pool.spawn(move || {
+            let lane_wid = try_with_active_pool(|inner| worker_lane_for(inner).map(|l| l.wid));
+            match lane_wid {
+                Some(Some(wid)) if wid == current_worker_id() => {
+                    seen_cl.store(wid, Ordering::Release);
+                }
+                _ => {
+                    mismatched_cl.store(1, Ordering::Release);
+                    seen_cl.store(u32::MAX - 2, Ordering::Release);
+                }
+            }
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while seen.load(Ordering::Acquire) == u32::MAX && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            mismatched.load(Ordering::Acquire),
+            0,
+            "a worker's own lane must be Some(its own id)"
+        );
+        assert!(
+            seen.load(Ordering::Acquire) < 2,
+            "the detached body did not run on a worker of the pool"
+        );
+    }
+
+    /// App-6, the white-box half of `cross_pool_routing.rs`'s routing receipt: a
+    /// worker of pool A asking for its lane in pool B is told `None`, whatever
+    /// its own id is. This is the fact an integration test cannot see — a task
+    /// drained from `B.injector_local[wid_A]` and a task stolen from a B
+    /// worker's deque look the same from outside.
+    #[test]
+    fn worker_lane_for_is_none_on_a_worker_of_another_pool() {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let pool_a = crate::ThreadPoolBuilder::new().num_threads(2).build();
+        let pool_b = crate::ThreadPoolBuilder::new().num_threads(2).build();
+        // B's shared-state address, read through the public accessor while B's
+        // own install frame holds it in this thread's TLS.
+        let b_addr = pool_b.install(|_scope| {
+            crate::ThreadPool::current_pool()
+                .expect("invariant: install deposits the active pool")
+                .as_ptr() as usize
+        });
+
+        // u32::MAX = the body never ran; 0 = None (required); 1 = Some.
+        let answered = Arc::new(AtomicU32::new(u32::MAX));
+        let answered_cl = Arc::clone(&answered);
+        let keep_b = Arc::clone(&pool_b);
+        pool_a.spawn(move || {
+            // Keeps B alive for the whole body (see the SAFETY note below).
+            let _ = &keep_b;
+            // SAFETY: `b_addr` came from B's own `ThreadPool::current_pool()`
+            //   accessor, so it is the address of a live `PoolInner`; the
+            //   `Arc<ThreadPool>` captured above keeps that allocation alive for
+            //   the whole body. `PoolInner` is never borrowed `&mut` (it lives
+            //   behind `Arc` and is dropped only at refcount 0, after every
+            //   worker has joined), so no `&mut` protector can span this shared
+            //   reference.
+            let b: &PoolInner = unsafe { &*(b_addr as *const PoolInner) };
+            answered_cl.store(u32::from(worker_lane_for(b).is_some()), Ordering::Release);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while answered.load(Ordering::Acquire) == u32::MAX && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            answered.load(Ordering::Acquire),
+            0,
+            "a pool-A worker must have no lane in pool B (u32::MAX = the probe never ran)"
+        );
+    }
+
+    /// A1 (`KE16-DESIGN.md` §8, the A1/A1-fifo row's last gate clause): the
+    /// deposit publishes exactly the pair it was given, and the guard's `drop`
+    /// clears it back to `(null, null)`.
+    ///
+    /// What it pins is the GUARD'S CONTRACT, on which clause 1 of
+    /// [`WorkerLane::deque`]'s SAFETY block rests: `new` publishes the pair
+    /// unaltered, `drop` restores `(null, null)`. Nothing else in the tree
+    /// asserts on that pair, so a `Drop` impl that stopped clearing would go
+    /// unnoticed here.
+    ///
+    /// It does NOT observe the production deposit — `worker_main`'s
+    /// `let _deque_deposit = ...`, declared after the `deque` parameter so that
+    /// local-before-parameter drop order clears the slot first: this test builds
+    /// its own guard on the test thread. That line can be broken two ways, and
+    /// they fail DIFFERENTLY:
+    ///
+    /// - A `worker_main` restructure that drops or returns the deque while the
+    ///   loop still runs (or a `mem::forget` of the guard followed by any later
+    ///   use of the slot on that thread) leaves a DANGLING pair:
+    ///   `worker_lane_for` keeps handing out a lane whose `deque()` derefs freed
+    ///   stack, reachable from safe code through `Scope::spawn` and silent in
+    ///   release. That is the use-after-free clause 1 exists against, and its
+    ///   gates are the two Miri shapes of `tests/miri_scope.rs` (which run the
+    ///   real worker loop under Tree Borrows) plus invariant D1 on
+    ///   `worker_main`'s shape — not an assertion in this file.
+    /// - `let _ = WorkerDequeDeposit::new(..)` compiles, but `let _ = expr;`
+    ///   drops the value at the end of that statement, so the slot is CLEARED
+    ///   AT ONCE and `worker_lane_for` answers `None` for the rest of the worker
+    ///   loop. There is no live pair, no deref and no use-after-free: every
+    ///   worker spawn falls through to `push_global`, the arm measures A3's
+    ///   placement, and `KE16_A` still reports `a1` while `KE16_EXPECT`
+    ///   certifies the run — the quiet mislabelling of `KE16-DESIGN.md` §4, not
+    ///   a soundness defect. The gate for it is
+    ///   `worker::tests::a1_a_spawn_from_a_worker_body_lands_on_its_own_deque`,
+    ///   which reads the production deposit from inside a worker body; measured
+    ///   against that mutation, it goes red while THIS test stays green. (The
+    ///   predicate rows below go red on it too — under the A1 arms
+    ///   `worker_lane_for` reads this very deposit — but only that row covers
+    ///   the PLACEMENT, i.e. that the push arm reached the lane's deque rather
+    ///   than the global injector.)
+    #[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+    #[test]
+    fn worker_deque_deposit_publishes_the_pair_and_clears_it_on_drop() {
+        let pool = crate::ThreadPoolBuilder::new().num_threads(1).build();
+        let pool_ptr = std::sync::Arc::as_ptr(&pool.inner);
+        let deque: Worker<Task> = Worker::new_fifo();
+        // The production mint: a raw borrow of the place, never a reference.
+        let deque_ptr = &raw const deque;
+
+        assert_eq!(
+            WORKER_DEQUE.with(|c| c.get()),
+            (ptr::null(), ptr::null()),
+            "a thread that is not a worker starts with an empty deposit"
+        );
+        {
+            let _deposit = WorkerDequeDeposit::new(pool_ptr, deque_ptr);
+            assert_eq!(
+                WORKER_DEQUE.with(|c| c.get()),
+                (pool_ptr, deque_ptr),
+                "the deposit must publish the pair it was given, unaltered"
+            );
+        }
+        assert_eq!(
+            WORKER_DEQUE.with(|c| c.get()),
+            (ptr::null(), ptr::null()),
+            "the guard's drop must clear the slot; a deposit that outlives its guard leaves \
+             `worker_lane_for` handing out a lane over a dangling deque"
+        );
+        drop(deque);
+    }
+
+    /// A1: the same fact pinned through the PREDICATE rather than through the
+    /// raw cell — after the guard drops, `worker_lane_for` answers `None`, so no
+    /// caller can obtain a `WorkerLane` (and hence no `deque()` deref) over a
+    /// deque whose deposit has ended.
+    ///
+    /// The `Some` half first, because a test that only ever observes `None`
+    /// would pass over a predicate that is broken in the other direction.
+    #[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+    #[test]
+    fn worker_lane_for_answers_none_once_the_deposit_guard_has_dropped() {
+        let pool = crate::ThreadPoolBuilder::new().num_threads(2).build();
+        let pool_ptr = std::sync::Arc::as_ptr(&pool.inner);
+        let deque: Worker<Task> = Worker::new_fifo();
+
+        // The id half of the predicate: impersonate worker 0 of this pool. The
+        // test thread pushes nothing while it holds the id, so no task can land
+        // in a slot it does not own.
+        set_current_worker_id(0);
+        {
+            let _deposit = WorkerDequeDeposit::new(pool_ptr, &raw const deque);
+            assert!(
+                worker_lane_for(&pool.inner).is_some(),
+                "a deposited deque of this pool plus a worker id IS a lane"
+            );
+        }
+        assert!(
+            worker_lane_for(&pool.inner).is_none(),
+            "the worker id is unchanged, so only the cleared deposit can deny the lane — and it \
+             must, or `deque()` would deref a pointer whose pointee is about to drop"
+        );
+        clear_current_worker_id();
+    }
+
     #[test]
     fn set_clear_worker_id_round_trip() {
         set_current_worker_id(3);
@@ -235,5 +775,55 @@ mod tests {
         assert_eq!(current_worker_id_or_dispatcher_lane(8), 3);
         clear_current_worker_id();
         assert_eq!(current_worker_id(), WORKER_ID_UNATTACHED);
+    }
+
+    /// App-8: the guard counts DEPTH, so a helping joiner that runs a sibling
+    /// system inline inside a system body leaves the predicate true until the
+    /// outer body ends.
+    ///
+    /// The boolean shape this replaced could not express that: the inner guard's
+    /// drop cleared the flag and the rest of the OUTER system then ran with
+    /// `is_in_system_run() == false`, which is the answer every consumer keys
+    /// its behaviour off. Depth 2 is the reachable case (the inline run is one
+    /// level); the loop past it pins that nothing saturates early.
+    #[test]
+    fn in_system_run_guard_stays_true_until_the_outermost_guard_drops() {
+        assert!(
+            !is_in_system_run(),
+            "the test thread starts outside a system"
+        );
+        let outer = InSystemRunGuard::enter();
+        {
+            let inner = InSystemRunGuard::enter();
+            assert!(is_in_system_run(), "depth 2 is inside a system run");
+            drop(inner);
+        }
+        assert!(
+            is_in_system_run(),
+            "the inner guard's drop must not end the OUTER system's run"
+        );
+        drop(outer);
+        assert!(!is_in_system_run(), "depth 0 is outside a system run");
+    }
+
+    /// App-8: the counter is a counter, not a saturating flag — eight nested
+    /// entries need eight drops. One `enter` short of the top must still read
+    /// true, which is what distinguishes a depth counter from a
+    /// "set on first enter, clear on any drop" bug.
+    #[test]
+    fn in_system_run_guard_needs_one_drop_per_enter() {
+        let mut guards = Vec::new();
+        for _ in 0..8 {
+            guards.push(InSystemRunGuard::enter());
+        }
+        for _ in 0..7 {
+            guards.pop();
+            assert!(
+                is_in_system_run(),
+                "a guard remains, so the thread is still inside a system run"
+            );
+        }
+        guards.pop();
+        assert!(!is_in_system_run(), "every guard dropped; the run is over");
     }
 }

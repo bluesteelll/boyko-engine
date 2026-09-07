@@ -81,8 +81,8 @@ fn miri_schedule_run_empty_no_ub() {
     sched.run(&mut world); // second frame — pred_remaining reset path.
 }
 
-/// `InSystemRunGuard` round-trip — the TLS flag is set on `enter` and
-/// cleared on drop. Miri sees the Cell::get / Cell::set ops and validates
+/// `InSystemRunGuard` round-trip — the TLS depth is raised on `enter` and
+/// lowered on drop. Miri sees the Cell::get / Cell::set ops and validates
 /// no concurrent thread observes torn state (single-thread here).
 #[test]
 fn miri_in_system_run_guard_round_trip_no_ub() {
@@ -120,4 +120,28 @@ fn miri_in_system_run_guard_back_to_back_no_ub() {
         drop(_g);
         assert!(!is_in_system_run());
     }
+}
+
+/// NESTED `InSystemRunGuard`s (KE16 App-8) — a helping joiner may run a
+/// sibling conflict-free system inline inside another system's body, so two
+/// guards are live on one thread at once. Under the old `Cell<bool>` guard
+/// the inner `enter` tripped `debug_assert!(!c.get())` and aborted; under the
+/// depth counter it is legal, `is_in_system_run()` stays true across the
+/// INNER guard's drop (the outer body is still running), and the depth
+/// returns to zero only when the outer one drops.
+#[test]
+fn miri_in_system_run_guard_nested_depth_two_no_ub() {
+    assert!(!is_in_system_run());
+    let outer = InSystemRunGuard::enter();
+    assert!(is_in_system_run());
+    {
+        let _inner = InSystemRunGuard::enter();
+        assert!(is_in_system_run());
+    }
+    // The load-bearing assertion: a flag would read false here, and every
+    // context-restricted path in the outer body would then take the wrong
+    // branch for the rest of that body.
+    assert!(is_in_system_run());
+    drop(outer);
+    assert!(!is_in_system_run());
 }

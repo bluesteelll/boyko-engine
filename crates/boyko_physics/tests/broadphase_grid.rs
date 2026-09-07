@@ -608,12 +608,20 @@ mod o3_parallel {
     }
 
     // ── Gate 6: pool-dispatched `build_parallel` byte-identity at workers ∈
-    //    {1, 2, 4} over many dense scenes — the interleave-dependent leg. Each
+    //    {2, 3, 4} over many dense scenes — the interleave-dependent leg. Each
     //    worker count's output must be byte-for-byte equal to the O2 serial
     //    `build` AND to all-pairs (the candidate multiset is partition- AND
-    //    interleave-independent; the final sort canonicalizes order). ──────────
+    //    interleave-independent; the final sort canonicalizes order).
+    //
+    //    The set is {2, 3, 4} and not {1, 2, 4} since KE16 App-1: `build_parallel`
+    //    now computes `lanes = pool.num_threads()` and returns early when
+    //    `lanes < 2`, so a ONE-worker pool takes the O2 serial `build` and a
+    //    `workers = 1` leg would exercise the fallback while this comment claimed
+    //    it covered the dispatched emit. That leg has its own test below
+    //    (`one_worker_build_parallel_takes_the_serial_fallback`), with a receipt
+    //    that it really is the serial path. ─────────────────────────────────────
     #[test]
-    fn parallel_dispatched_bit_identical_at_1_2_4_workers() {
+    fn parallel_dispatched_bit_identical_at_2_3_4_workers() {
         // A spread of body counts ABOVE the parallel threshold so the dispatched
         // branch is taken; several distinct dense scenes so interleave-dependent
         // bugs across builds surface.
@@ -628,7 +636,7 @@ mod o3_parallel {
             assert_eq!(serial, oracle, "O2 serial build == all-pairs (n={n})");
             assert!(!serial.is_empty(), "anti-vacuity: scene n={n} has survivors");
 
-            for &workers in &[1usize, 2, 4] {
+            for &workers in &[2usize, 3, 4] {
                 let par = parallel_pairs(workers, &bodies);
                 assert_eq!(
                     par, serial,
@@ -637,6 +645,52 @@ mod o3_parallel {
                 );
             }
         }
+    }
+
+    // ── App-1 leg: a ONE-worker pool takes the O2 SERIAL `build`, and still
+    //    reproduces it byte-for-byte. KE16 App-1 re-aimed the dead
+    //    `lanes < 2` guard (it asked `num_threads() + 1 < 2`, which cannot hold)
+    //    at `num_threads() < 2`, so this leg left the dispatched set above and
+    //    needs its own name. The RECEIPT that it really is the serial path is the
+    //    allocation count: the dispatched path opens two `pool.scope`s per build
+    //    and allocates their frames + per-chunk closures, while a warmed serial
+    //    `build` allocates ZERO (the property
+    //    `grid_does_no_per_step_alloc_in_steady_state` gates directly). ────────
+    #[test]
+    fn one_worker_build_parallel_takes_the_serial_fallback() {
+        let bodies = dense_scene(MIN_PARALLEL_BODIES + 500);
+
+        let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+        let mut serial = Vec::new();
+        grid.build(&bodies, &mut serial);
+        assert!(!serial.is_empty(), "anti-vacuity: the one-worker scene has survivors");
+
+        let pool = ThreadPoolBuilder::new().num_threads(1).build();
+        assert_eq!(pool.num_threads(), 1, "the fallback leg needs a one-worker pool");
+
+        let (par, allocs) = pool.install(|_scope| {
+            let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+            let mut out = Vec::new();
+            // Warm every scratch Vec so the measured build is the steady-state one.
+            for _ in 0..6 {
+                grid.build_parallel(&bodies, &mut out);
+            }
+            let before = super::ALLOC.count();
+            grid.build_parallel(&bodies, &mut out);
+            let after = super::ALLOC.count();
+            (out, after.wrapping_sub(before))
+        });
+
+        assert_eq!(
+            par, serial,
+            "build_parallel on a one-worker pool must reproduce the O2 serial build byte-for-byte"
+        );
+        assert_eq!(
+            allocs, 0,
+            "a warmed one-worker build_parallel allocated {allocs} times: it dispatched the \
+             shaped path (two `pool.scope`s allocate) instead of taking the App-1 serial \
+             fallback, so the `lanes < 2` guard is not doing what its comment says"
+        );
     }
 
     // ── Gate 6 (anti-vacuity): the PARALLEL branch genuinely runs — the pool has
@@ -729,13 +783,13 @@ mod o3_parallel {
 
         // Pass A + Pass B each issue ONE `pool.scope` (a boxed shared frame + the
         // per-spawn closure boxes); the work-balanced chunking emits up to
-        // (workers + 1) × CHUNKS_PER_WORKER chunks per scope. The grid's OWN
+        // workers × CHUNKS_PER_WORKER chunks per scope. The grid's OWN
         // scratch is zero-per-step-alloc (capacity reuse), so the only residual is
         // this bounded 2-scope dispatch cost — INDEPENDENT of the candidate-set
         // size (the load-bearing property: a buffer that re-grew per step would
         // scale the count with n_pairs). CHUNKS_PER_WORKER (= 4) is mirrored here.
         let chunks_per_worker = 4;
-        let per_scope_cap = 16 + (workers + 1) * chunks_per_worker * 5; // generous
+        let per_scope_cap = 16 + workers * chunks_per_worker * 5; // generous
         let scopes_per_build = 2; // Pass A + Pass B
         let bound = scopes_per_build * per_scope_cap;
         assert!(

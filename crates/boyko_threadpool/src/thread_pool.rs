@@ -37,6 +37,7 @@ use crossbeam_utils::CachePadded;
 
 use crate::scope::{Scope, ScopeShared};
 use crate::sync::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use crate::task::Task;
 use crate::tls;
 use crate::worker::worker_main;
 
@@ -56,31 +57,6 @@ pub const MAX_WORKERS: usize = 64;
 // this crate and cannot name `MAX_WORKERS`. A comment on either side would
 // record the equality; only this makes breaking it a build failure.
 const _: () = assert!(boyko_diag::lane::LANE_WORKER_MAX as usize == MAX_WORKERS);
-
-/// One unit of work submitted to the pool. `body` is the actual closure;
-/// it is heap-allocated so that the deque entries remain word-sized.
-///
-/// The `Send` bound on `body` is sufficient at the type level; the pool
-/// upholds the 'static erasure via [`Scope`]'s `Drop` blocking contract
-/// (plan §4.5.6).
-pub struct TaskHandle {
-    pub(crate) body: Box<dyn FnOnce() + Send + 'static>,
-}
-
-impl TaskHandle {
-    /// Wrap a closure into a heap-allocated task handle. Used by
-    /// [`Scope::spawn`] and [`ThreadPool::spawn`].
-    #[inline]
-    pub(crate) fn new(body: Box<dyn FnOnce() + Send + 'static>) -> Self {
-        Self { body }
-    }
-
-    /// Consume the handle and run the closure.
-    #[inline]
-    pub(crate) fn run(self) {
-        (self.body)();
-    }
-}
 
 /// Per-worker control block. Wrapped in [`CachePadded`] by the pool so that
 /// idle/unpark traffic on worker `i` doesn't false-share with worker `j`.
@@ -121,17 +97,56 @@ struct WorkerJoin {
 #[repr(C)]
 pub struct PoolInner {
     /// Global injector. The dispatcher (or any non-worker thread) pushes
-    /// here; workers drain it in stage 2 of `worker_main`.
-    pub(crate) injector_global: CachePadded<Injector<TaskHandle>>,
+    /// here; every worker drains it as the THIRD source of `worker_main`'s poll
+    /// order (own local injector → own deque → global injector → sibling
+    /// steal), and the work-stealing joiner as its SECOND (own local injector →
+    /// global injector → sibling steal).
+    ///
+    /// KE16 (deleted with the features): the two consumers named above drain the
+    /// SAME first source, so an arm that deletes it moves both. Under
+    /// `ke16-a1` / `ke16-a1-fifo` / `ke16-a3` nothing feeds
+    /// [`PoolInner::injector_local`], stage 1 is compiled out
+    /// with it, and this queue becomes the SECOND source of the worker loop and
+    /// the FIRST of the B0 joiner (`scope::join_workers_until_drained`). Under
+    /// `ke16-b1` / `ke16-b3` "the joiner" is two functions and neither is the
+    /// sentence above: the worker joiner polls own deque → here → sibling sweep
+    /// (second again, for a different reason — it drains its own DEQUE first,
+    /// not an injector), the helping external joiner polls here → sibling sweep
+    /// (first, and one task per probe), and a `ke16-b3` external joiner that is
+    /// not a worker of this pool never drains it at all. Under `ke16-a3` this is
+    /// additionally where every spawn lands.
+    pub(crate) injector_global: CachePadded<Injector<Task>>,
 
     /// Per-worker local injectors. A worker pushes inner-spawn tasks to
-    /// `injector_local[worker_id]` for cache locality; siblings still see
-    /// them via the local-injector poll in stage 1.5 of `worker_main`.
-    pub(crate) injector_local: Arc<[CachePadded<Injector<TaskHandle>>]>,
+    /// `injector_local[worker_id]` for cache locality. NOTHING ELSE DRAINS
+    /// THAT SLOT: worker `wid` polls it as the first source of its own loop,
+    /// and a joiner running on worker `wid`'s thread drains it too, but the
+    /// sibling scan walks `stealers` only. A wave spawned from inside a worker
+    /// therefore stays on that worker and runs serially — KE16 defect A, whose
+    /// fix is the subject of the tournament's A axis.
+    ///
+    /// KE16 (deleted with the features): what each A arm does to this queue.
+    /// `ke16-a1` / `ke16-a1-fifo` route a worker's spawn to its own REGISTERED
+    /// deque instead, and `ke16-a3` routes it to `injector_global`, so under
+    /// those three the slot is never fed and never polled — it is kept, empty,
+    /// only so the other rows compile against one struct. `ke16-a2` keeps
+    /// today's placement and adds the slot to every sibling's scan set (the
+    /// second probe in `worker::try_steal_random` and in the joiner's sweep),
+    /// which is what makes it reachable. `ke16-a5` additionally places into the
+    /// slot of an idle SIBLING it has claimed, which is sound only because A2
+    /// put these queues in the scan set.
+    // The arms that never feed it also never read it; the field stays so that
+    // one `PoolInner` serves every row of the tournament. Removed, with this
+    // attribute, when the winner becomes unconditional.
+    #[cfg_attr(
+        any(feature = "ke16-a1", feature = "ke16-a1-fifo", feature = "ke16-a3"),
+        allow(dead_code)
+    )]
+    pub(crate) injector_local: Arc<[CachePadded<Injector<Task>>]>,
 
     /// Per-worker stealers. Index `i` is the [`Stealer`] for worker `i`'s
     /// Chase-Lev deque. Workers steal from siblings in randomized order.
-    pub(crate) stealers: Arc<[Stealer<TaskHandle>]>,
+    pub(crate) stealers: Arc<[Stealer<Task>]>,
 
     /// Per-worker handles (thread handle for `unpark`).
     pub(crate) workers: Arc<[CachePadded<WorkerHandle>]>,
@@ -158,6 +173,29 @@ pub struct PoolInner {
     /// Worker count (cold; written once at construction). Lives here (O1) so
     /// a worker holding `&PoolInner` can read it.
     pub(crate) worker_count: u32,
+
+    /// KE16 A5 receipt: idle bits claimed by `worker::try_place_on_idle_sibling`
+    /// and workers it unparked, counted in the crate's OWN test build only.
+    ///
+    /// A5-1 ("a claimed bit is ALWAYS unparked") is the invariant whose
+    /// violation costs a core until shutdown and which no completion test can
+    /// see — the task itself stays reachable through A2's scan set, so every
+    /// other assertion in the suite still passes at W−1 lanes. The design's §8
+    /// gate for it is therefore a pair of counters, and this is that pair.
+    ///
+    /// `#[cfg(test)]` and not a feature: the A5 arm is a TOURNAMENT arm being
+    /// measured for throughput, and two shared-line RMWs per spawn on the very
+    /// path under measurement would be charged to A5's own numbers. The gate
+    /// runs in the lib's unit-test build (`worker.rs`'s `mod tests`), where no
+    /// number is taken; the measured build compiles neither field nor increment.
+    #[cfg(all(feature = "ke16-a5", test))]
+    pub(crate) a5_claimed: CachePadded<AtomicU64>,
+
+    /// The unpark half of [`PoolInner::a5_claimed`]; see it for why the pair is
+    /// test-build-only. Incremented AFTER the `unpark`, so any control flow that
+    /// separates A5-1's two halves leaves the two counters unequal.
+    #[cfg(all(feature = "ke16-a5", test))]
+    pub(crate) a5_unparked: CachePadded<AtomicU64>,
 }
 
 impl PoolInner {
@@ -173,14 +211,71 @@ impl PoolInner {
         self.worker_count as usize
     }
 
+    /// KE16 W-d′ — the count-gated wake target for a scope opened HERE, or null
+    /// when its joiner will be external.
+    ///
+    /// `KE16-DESIGN-W.md` §3.2 spells this function `worker_wake_handle` and
+    /// gives it a `lane: Option<WorkerLane>` parameter; it is named and shaped
+    /// differently here because the predicate call moved INSIDE, so the W switch
+    /// is one site and the un-gated build computes nothing. The name is written
+    /// out in this sentence so a grep from either side — the design's name or
+    /// the code's — reaches this definition.
+    ///
+    /// The answer is the lane's `WorkerHandle.thread`, which is a
+    /// `std::thread::Thread` — and under `cfg(not(loom))`
+    /// `crate::sync::WakeHandle` IS that type, so this is a plain `&Thread as
+    /// *const Thread`: no deref, no cast through another type, no allocation,
+    /// and a pointee `PoolInner` owns and keeps alive for as long as any task of
+    /// this pool can run.
+    ///
+    /// The lane comes from `tls::worker_lane_for`, the ONE identity predicate
+    /// (`KE16-DESIGN-A.md` §1.1), so its `wid` is `< worker_count` by
+    /// construction and cannot be the dispatcher sentinel: an `install` frame on
+    /// a same-pool worker rewrites `CURRENT_WORKER_ID` to `WORKER_ID_DISPATCHER`
+    /// before the scope is opened, the predicate answers `None`, and that scope
+    /// is external — the same answer `push_task` gives that frame.
+    // === KE16 W switch: ke16-w-count === The predicate is called from INSIDE
+    // this function rather than at the two call sites, so the switch is one site
+    // and the un-gated build pays nothing for a value nothing reads: a scope is
+    // created per system run on the ECS frame path, and the tournament's
+    // reference grid is taken on that build.
+    #[cfg(all(not(loom), feature = "ke16-w-count"))]
+    #[inline]
+    fn joiner_wake_target(&self) -> *const crate::sync::WakeHandle {
+        match tls::worker_lane_for(self) {
+            Some(lane) => {
+                debug_assert!((lane.wid as usize) < self.workers.len());
+                &self.workers[lane.wid as usize].thread as *const crate::sync::WakeHandle
+            }
+            None => core::ptr::null(),
+        }
+    }
+
+    /// The W-d′ target when the arm is not built: always null, so
+    /// `ScopeShared::complete_task` takes its unconditional
+    /// unpark-before-decrement path and nothing on the scope-creation path is
+    /// added to today's behaviour.
+    ///
+    /// The `cfg(loom)` half of this arm is the ONE `cfg(loom)` pair in
+    /// production code, and it is never executed: no `PoolInner` can be built
+    /// under loom (the pool is crossbeam-coupled and loom-opaque, `crate::sync`'s
+    /// scope note), so no scope is opened through this path. The M1c model
+    /// constructs a `ScopeShared` directly with a model-owned target. Same
+    /// compiles-never-runs status as the `crate::sync::thread::current()` waker
+    /// calls below.
+    #[cfg(any(loom, not(feature = "ke16-w-count")))]
+    #[inline]
+    fn joiner_wake_target(&self) -> *const crate::sync::WakeHandle {
+        core::ptr::null()
+    }
+
     /// Push a task onto the pool from outside any scope. Backing
     /// implementation of [`ThreadPool::spawn`].
     pub(crate) fn spawn<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        let task = TaskHandle::new(Box::new(f));
-        crate::worker::push_task(self, task);
+        crate::worker::push_task(self, Task::new_detached(f));
     }
 
     /// Backing implementation of [`ThreadPool::install`]. Runs on the
@@ -221,7 +316,15 @@ impl PoolInner {
         // `crate::sync::thread::current()` so the captured waker `Thread`
         // matches `ScopeShared.waker`'s type under both backends (loom routes
         // park/unpark through its own `Thread`).
-        let shared = Box::new(ScopeShared::new(crate::sync::thread::current()));
+        //
+        // The W-d′ target is asked for AFTER the `InstallGuard` frame has
+        // rewritten `CURRENT_WORKER_ID` to the dispatcher sentinel, which is why
+        // an `install` on a same-pool worker is an EXTERNAL joiner here and gets
+        // a null target — the same answer `push_task` gives that frame.
+        let shared = Box::new(ScopeShared::new(
+            crate::sync::thread::current(),
+            self.joiner_wake_target(),
+        ));
         // SAFETY (scope lifetime erasure to '_):
         //   The scope is dropped before this function returns; Drop
         //   blocks until every spawned task has completed (or has
@@ -265,8 +368,13 @@ impl PoolInner {
         };
 
         // See `install`: shimmed `current()` so the waker `Thread` type matches
-        // `ScopeShared.waker` under the loom backend.
-        let shared = Box::new(ScopeShared::new(crate::sync::thread::current()));
+        // `ScopeShared.waker` under the loom backend. This is the route-(b)
+        // entry — a worker body opening a nested scope — so the W-d′ target is
+        // non-null here whenever the caller really is a worker of this pool.
+        let shared = Box::new(ScopeShared::new(
+            crate::sync::thread::current(),
+            self.joiner_wake_target(),
+        ));
         let scope = Scope::new(self, shared);
 
         let result = f(&scope);
@@ -361,6 +469,19 @@ impl ThreadPool {
     #[inline]
     pub fn num_threads(&self) -> usize {
         self.inner.num_threads()
+    }
+
+    /// A snapshot of the idle bitset: bit `i` is 1 iff worker `i` was parked or
+    /// about to park at the moment of the load (KE16 App-11).
+    ///
+    /// Read-only diagnostics — one `Acquire` load, pairing with the `Release`
+    /// `fetch_or` in `mark_idle` so a set bit implies that worker's publish is
+    /// visible. The value is stale the instant it is returned; it is a receipt
+    /// for occupancy instruments ("who was asleep while this wave ran"), never a
+    /// scheduling input.
+    #[inline]
+    pub fn parked_mask(&self) -> u64 {
+        self.inner.idle.load(Ordering::Acquire)
     }
 
     /// Read the active pool for the current thread (the one set by the
@@ -494,11 +615,16 @@ impl Drop for ThreadPool {
 // SAFETY (Send/Sync for ThreadPool / PoolInner):
 //   Every field is either trivially Send/Sync (Arc, atomics, Mutex,
 //   plain `u32`) or a `CachePadded<...>` wrapper around such a type.
-//   `Injector<TaskHandle>`, `Stealer<TaskHandle>`, and `Worker<TaskHandle>`
-//   are Send/Sync per crossbeam-deque's public contracts (verified in
-//   crossbeam-deque 0.8 docs). `TaskHandle::body` is `Box<dyn FnOnce + Send
-//   + 'static>` so the queues' element types are Send. No interior
-//   `!Send`/`!Sync` field exists.
+//   `Injector<Task>`, `Stealer<Task>`, and `Worker<Task>` are Send/Sync per
+//   crossbeam-deque's public contracts (verified in crossbeam-deque 0.8 docs)
+//   FOR A `T: Send`, which `Task` is by the `unsafe impl` in `src/task.rs` --
+//   read THAT clause rather than this line, because with a raw payload address
+//   plus a monomorphized `unsafe fn(*const ())` the obligation is about the CELL
+//   the address names (written before the publishing push, never written again,
+//   body type bounded `Send` at both constructors) and no field type can carry
+//   it. This paragraph used to name `TaskHandle::body: Box<dyn FnOnce + Send +
+//   'static>`; a SAFETY comment justifying a type that no longer exists is worse
+//   than none. No interior `!Send`/`!Sync` field exists.
 //
 //   `PoolInner` MUST be Send + Sync because the `Arc<PoolInner>` is shared
 //   between the spawning thread and every worker thread (and the ambient-pool
@@ -587,23 +713,36 @@ impl ThreadPoolBuilder {
 
         // Crossbeam workers must be constructed up-front so that we can
         // publish the corresponding stealers into a shared registry before
-        // any worker_main runs. We hand the `Worker<TaskHandle>` to the
+        // any worker_main runs. We hand the `Worker<Task>` to the
         // worker thread by move (it's not Sync).
-        let mut deques: Vec<Worker<TaskHandle>> = Vec::with_capacity(worker_count);
-        let mut stealers: Vec<Stealer<TaskHandle>> = Vec::with_capacity(worker_count);
+        let mut deques: Vec<Worker<Task>> = Vec::with_capacity(worker_count);
+        let mut stealers: Vec<Stealer<Task>> = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
-            let w: Worker<TaskHandle> = Worker::new_fifo();
+            // === KE16 A switch: ke16-a1 === (App-2, `KE16-DESIGN-A.md` §1.4)
+            // The owner's end discipline is the ONE difference between the two
+            // A1 arms. LIFO pops the newest entry — the spawner's own freshest
+            // chunk, whose descriptor is hottest in L1 — and its pop is a local
+            // fence plus a shared READ of `front` instead of FIFO's contended
+            // `front.fetch_add`; the price is paid by the thief, which needs one
+            // SeqCst CAS per stolen ELEMENT from a LIFO source against FIFO's one
+            // CAS per batch. The trade points both ways and is decided by the
+            // tournament, not by the RMW count; every other arm keeps today's
+            // FIFO.
+            #[cfg(feature = "ke16-a1")]
+            let w: Worker<Task> = Worker::new_lifo();
+            #[cfg(not(feature = "ke16-a1"))]
+            let w: Worker<Task> = Worker::new_fifo();
             stealers.push(w.stealer());
             deques.push(w);
         }
-        let stealers: Arc<[Stealer<TaskHandle>]> = stealers.into();
+        let stealers: Arc<[Stealer<Task>]> = stealers.into();
 
-        let mut injector_local_vec: Vec<CachePadded<Injector<TaskHandle>>> =
+        let mut injector_local_vec: Vec<CachePadded<Injector<Task>>> =
             Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             injector_local_vec.push(CachePadded::new(Injector::new()));
         }
-        let injector_local: Arc<[CachePadded<Injector<TaskHandle>>]> = injector_local_vec.into();
+        let injector_local: Arc<[CachePadded<Injector<Task>>]> = injector_local_vec.into();
 
         // Workers are created lazily — we need their `Thread` handles to
         // populate `inner.workers`, which means we must spawn the threads,
@@ -684,6 +823,10 @@ impl ThreadPoolBuilder {
             active_scopes: CachePadded::new(AtomicUsize::new(0)),
             shutdown: CachePadded::new(AtomicBool::new(false)),
             worker_count: worker_count as u32,
+            #[cfg(all(feature = "ke16-a5", test))]
+            a5_claimed: CachePadded::new(AtomicU64::new(0)),
+            #[cfg(all(feature = "ke16-a5", test))]
+            a5_unparked: CachePadded::new(AtomicU64::new(0)),
         });
 
         // Publish the inner state to the waiting workers.

@@ -83,6 +83,8 @@ pub struct ResState<R: Resource> {
 //     reads `R::resource_id()` (a pure `OnceLock` cache) and stashes the
 //     resulting id in the state.
 unsafe impl<'a, R: Resource> SystemParam for Res<'a, R> {
+    const HAS_DEFERRED: bool = false;
+
     type State = ResState<R>;
     type Item<'w, 's> = Res<'w, R>;
 
@@ -156,6 +158,8 @@ unsafe impl<'a, R: Resource> SystemParam for Res<'a, R> {
 //     stashes the id, sharing `ResState<R>` with `Res<R>` so the Option wrapper
 //     carries no extra per-system state.
 unsafe impl<'a, R: Resource> SystemParam for Option<Res<'a, R>> {
+    const HAS_DEFERRED: bool = false;
+
     type State = ResState<R>;
     type Item<'w, 's> = Option<Res<'w, R>>;
 
