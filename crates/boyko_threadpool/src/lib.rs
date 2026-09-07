@@ -60,6 +60,7 @@
 //! Subsequent waves (Schedule, par_iter, ECS Send/Sync gate, etc.) live in
 //! `boyko_ecs`. This crate has no dependency on the ECS.
 
+mod block;
 mod scope;
 pub(crate) mod sync;
 mod task;
@@ -480,4 +481,63 @@ pub mod loom_exports {
     pub fn publish_fence() {
         crate::worker::publish_fence();
     }
+}
+
+/// The layout facts this crate's allocation receipts are stated over.
+///
+/// `#[doc(hidden)] pub` because the receipt binaries in `tests/` are external
+/// crates: they cannot read a `pub(crate)` constant, and a number they carried
+/// themselves would be a number nothing checks. Hidden because it is an
+/// instrument, not API.
+///
+/// EVERY CONSTANT HERE IS AN INDEPENDENT LITERAL, and that is the whole design.
+/// A receipt that computed its expectation from the type under test would
+/// assert `x == x` and survive any change to either. Each literal is instead
+/// pinned to the real type by a `const _: () = assert!(..)` NEXT TO THAT TYPE —
+/// the two cell headers in `task.rs`, the three chunk facts in `block.rs` — so
+/// drift between a number here and the thing it describes is a build failure.
+///
+/// The cell headers carry THREE pins each rather than one. `size_of::<Cell<()>>()
+/// == HEADER` alone would still hold with the `body` field deleted; the second
+/// pin, at a 64-byte body, is what says the body is IN the cell at its own size.
+/// The third pins the ALIGNMENT, because a receipt's bucket is the pair
+/// `(size, align)` and the two size pins leave that pair half-open — an added
+/// `#[repr(align(16))]` keeps both of them green while emptying the bucket.
+#[doc(hidden)]
+pub mod __layout_receipt {
+    /// `size_of::<ScopedCell<F>>() - size_of::<F>()`: the `CellHead` thunk plus
+    /// the scope's `ScopeShared` address. Pinned in `task.rs`.
+    pub const SCOPED_CELL_HEADER: usize = 16;
+
+    /// `align_of::<ScopedCell<F>>()` for every `F` whose own alignment does not
+    /// exceed it — the cell class's alignment floor, set by the thunk and the
+    /// `ScopeShared` address. Pinned in `task.rs`.
+    ///
+    /// A receipt buckets an allocation on the PAIR `(size, align)`, so this
+    /// half needs its own literal: with size pinned alone, a cell class free to
+    /// move to another alignment moves out of the bucket a receipt counts over,
+    /// and "zero allocations in the cell class" comes back green from an empty
+    /// bucket rather than from a clean run.
+    pub const SCOPED_CELL_ALIGN: usize = 8;
+
+    /// `size_of::<DetachedCell<F>>() - size_of::<F>()`: the `CellHead` thunk
+    /// alone, because a fire-and-forget task has no scope to name. Pinned in
+    /// `task.rs`.
+    pub const DETACHED_CELL_HEADER: usize = 8;
+
+    /// `align_of::<DetachedCell<F>>()` under the same condition and for the
+    /// same reason as [`SCOPED_CELL_ALIGN`]: the thunk alone sets it. Pinned in
+    /// `task.rs`.
+    pub const DETACHED_CELL_ALIGN: usize = 8;
+
+    /// The block allocator's base chunk capacity — every chunk is `CHUNK0 << e`
+    /// bytes for some `e`. Pinned in `block.rs`.
+    pub const CHUNK0: usize = 4096;
+
+    /// Every chunk's alignment. With the power-of-two size above it is the
+    /// bucket predicate a chunk-class receipt matches on. Pinned in `block.rs`.
+    pub const CHUNK_ALIGN: usize = 64;
+
+    /// The chunk table's length. Pinned in `block.rs`.
+    pub const MAX_CHUNKS: usize = 32;
 }

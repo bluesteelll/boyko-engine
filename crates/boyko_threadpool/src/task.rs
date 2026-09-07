@@ -126,6 +126,23 @@ struct ScopedCell<F> {
     body: F,
 }
 
+// Pins `__layout_receipt::SCOPED_CELL_HEADER`, the number the allocation
+// receipts predict a chunk count from. TWO asserts rather than one, and the
+// second is not decoration: the first alone would still hold if `body` were
+// deleted, and it is the second that says the body is IN the cell at its own
+// size. Drift on either side is a build failure.
+const _: () = assert!(size_of::<ScopedCell<()>>() == crate::__layout_receipt::SCOPED_CELL_HEADER);
+const _: () =
+    assert!(size_of::<ScopedCell<[u8; 64]>>() == crate::__layout_receipt::SCOPED_CELL_HEADER + 64);
+
+// And a THIRD pin, on the alignment, which neither size pin implies. A receipt
+// buckets an allocation on the PAIR `(size, align)`; pinning size alone leaves
+// the other half of the discriminant free to move, and a cell class that moved
+// would leave the receipt counting over an EMPTY bucket — vacuously green.
+// `#[repr(C, align(16))]` on the type above is the concrete edit that does it:
+// both sizes stay 16 and 80, and the real allocations move to align 16.
+const _: () = assert!(align_of::<ScopedCell<()>>() == crate::__layout_receipt::SCOPED_CELL_ALIGN);
+
 /// Payload of a fire-and-forget task (`ThreadPool::spawn`). No scope, no
 /// completion accounting, no panic capture — an unwind out of the body reaches
 /// [`worker::run_task`](crate::worker::run_task) and aborts.
@@ -134,6 +151,19 @@ struct DetachedCell<F> {
     head: CellHead,
     body: F,
 }
+
+// Pins `__layout_receipt::DETACHED_CELL_HEADER`, doubly, for the reason stated
+// over `ScopedCell` above: this cell's header is the thunk alone, and a single
+// assert would not notice a cell that had stopped carrying its body.
+const _: () =
+    assert!(size_of::<DetachedCell<()>>() == crate::__layout_receipt::DETACHED_CELL_HEADER);
+const _: () = assert!(
+    size_of::<DetachedCell<[u8; 64]>>() == crate::__layout_receipt::DETACHED_CELL_HEADER + 64
+);
+// The alignment half of this cell class's bucket, for the reason stated over
+// `ScopedCell` above.
+const _: () =
+    assert!(align_of::<DetachedCell<()>>() == crate::__layout_receipt::DETACHED_CELL_ALIGN);
 
 /// One unit of work as the pool's queues carry it: a payload address and the
 /// monomorphized function that consumes it.
@@ -793,5 +823,45 @@ mod tests {
             "the element does not grow for a ZST body"
         );
         drop(task);
+    }
+
+    #[test]
+    fn the_cell_head_sits_at_offset_zero_in_every_cell() {
+        // `Task::drop` reads `drop_unrun` from offset 0 of a `*const ()` whose
+        // body type it does not know, and NOTHING pinned that offset: the two
+        // size pins and the alignment pin over each cell all survive a reorder
+        // to `{ body, head, shared }`, which under `#[repr(C)]` moves the thunk
+        // to a non-zero offset and turns that blind load into a read of the
+        // body's first word.
+        //
+        // Cheap to state, and it has to be stated HERE — `ScopedCell` /
+        // `DetachedCell` / `CellHead` are private to this module, so no other
+        // file in the crate can name them.
+        assert_eq!(
+            core::mem::offset_of!(CellHead, drop_unrun),
+            0,
+            "the thunk is the first field of the shared prefix"
+        );
+        assert_eq!(
+            core::mem::offset_of!(ScopedCell<()>, head),
+            0,
+            "a scoped cell begins with its head, which is what makes Task::drop's blind \
+             offset-0 load well defined"
+        );
+        assert_eq!(
+            core::mem::offset_of!(ScopedCell<[u8; 64]>, head),
+            0,
+            "and it does so for a body of any size — the offset is not an accident of a ZST"
+        );
+        assert_eq!(
+            core::mem::offset_of!(DetachedCell<()>, head),
+            0,
+            "a detached cell begins with its head, for the same reason"
+        );
+        assert_eq!(
+            core::mem::offset_of!(DetachedCell<[u8; 64]>, head),
+            0,
+            "and for a body of any size"
+        );
     }
 }
