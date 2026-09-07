@@ -4684,3 +4684,105 @@ frozen/hashed files — would make on-disk bytes deterministic everywhere and re
 The cost is that it rewrites line endings across working trees on the next checkout, and two lanes
 (`feat/reflection`, `feat/ui-advanced`) are mid-flight in worktrees right now. That is a
 disruption I should not schedule for you. The thresholds gate is immune either way.
+
+## Fixing defect B reopens axis A — by the register's own return row (2026-09-07)
+
+`KE16-RESULTS.md` §B shipped the sentence "Axis B — B0 BY CONSTRUCTION", and the `compile_error!`
+that justified it said the worker joiner "needs a REGISTERED destination deque, which only the A1
+arms give it". **That reason was false.** Every arm builds `worker_count` deques and registers their
+`Stealer`s unconditionally (`thread_pool.rs:718-737` — the only `cfg` there picks LIFO vs FIFO), and
+each worker is handed one by move (`worker.rs:33`). What the A1 arms uniquely publish is the deque's
+ADDRESS into the thread's TLS (`worker.rs:60-61`); `tls::worker_lane_for` already has a working
+non-A1 branch (`tls.rs:238-248`) carrying `allow(dead_code)` only because nothing calls it. The
+refusal itself stays — `b1`/`b3` call `lane.deque()` — but it is a REACHABILITY gap, not a
+structural impossibility, and the message now says so.
+
+The defect is live under `a3` by direct measurement, not by occupancy inference: the shipped
+`the_worker_joiner_does_not_run_a_residue_before_re_checking_its_scope` under `--features ke16-a3`,
+five runs, `running 1 test` each, reads a **median 192.1 ms** against a 60 ms budget and a 132 ms
+residue floor, where the B arms read 4 and 5 us.
+
+**The decision that is yours.** A remedy exists and its code is already written (`join_on_worker`,
+five review rounds old); publishing the TLS deposit under a new `ke16-b4` costs one store per worker
+per process and changes **no steal granularity at any site**, so it does not trip the letter of
+`a1f`'s return condition. But `KE16-REJECTED.md:359-362` and `:475-476` give `b1`/`b3` a SECOND
+return trigger — *"or if defect B is fixed by some other route that gives the worker joiner a
+registered destination deque"* — and that route is exactly this one. So `b1`/`b3` return the moment
+the remedy lands, they build only over `a1`/`a1f`, and the comparison becomes **`a3+b4` vs
+`a1f+b1`**, not vs `a1f+b0`.
+
+The monotone shortcut does not save it: `a3+b4 <= a3+b0 < a1f+b0` is arithmetically true and bounds
+nothing about `a1f+b1`. `a1f+b1` needs a 27.9 % gain on `worker/body_10us_tasks_4W` to tie, that
+cell is the worker route, and `a1`'s worker route was measured **with defect B live**
+(`top_lane = 13/24/21`), where 33 x 10 us = 330 us sits at the same order as the 159 us cell.
+
+**So the remedy's true price is a re-run of the axis-A head-to-head on a new substrate**, interleaved
+pass-by-pass in one session, on the physics primary and the deciding cell — a quiet machine. The
+alternative is legitimate and already shipped: leave defect B live, as `a3+b0` does today while
+clearing both acceptance clauses (the first by 2.4x, the second at 93.5 % of budget). Not scheduled
+without you. See `docs/threadpool/KE16-DESIGN-B4.md`.
+
+## graphify is not installed on this machine at all (2026-09-07)
+
+`CLAUDE.md` and two `PreToolUse` hooks require `graphify query` before reading or grepping source,
+and the `post-commit` hook rebuilds the graph. **The tool is absent.** All three of the hook's
+interpreter probes fail: the pinned `C:\Python314\python.exe` exists but `import graphify` raises
+`ModuleNotFoundError`; `graphify-out/.graphify_python` records that same interpreter (so the file is
+not wrong about the path, it is wrong about the module); and no `graphify` launcher is on PATH from
+either shell. `C:\Python312` is an empty directory with no `python.exe` — the interpreter that held
+it was removed by the upgrade to 3.14, and site-packages went with it. Neither `uv` nor `pipx` is
+present.
+
+Consequences: the hook has failed on **every** commit, so `graphify-out/graph.json` is dated
+**2026-08-03** while the branch tips are September; and the graphify-first instruction has been
+unsatisfiable for a month while its reminder still prints on every grep.
+
+**Yours to decide** because it installs third-party code on your machine: the PyPI package is
+`graphifyy` (not `graphify`) — `uv tool install --upgrade graphifyy` or `pip install graphifyy`,
+after which `graphify-out/.graphify_python` must be repointed or the hook will fail the same way.
+
+## `master` is 603 commits behind, and the branches are a chain rather than a fan (2026-09-07)
+
+`master` is at `e65a5673`, dated **2026-07-09**. Every active lane is 559-603 commits ahead of it and
+**zero** behind. Two months of engine, particles, Aether, render and UI work lives on unmerged
+branches.
+
+The encouraging half, measured pairwise rather than assumed: `fix/inherited-red-gates` and
+`feat/aether-v2` are **entirely contained** in `feat/threadpool-ke16` (their-only = 0);
+`feat/multi-paradigm-render` differs by 2 commits; `feat/reflection` and `feat/ui-advanced` by 20 and
+16. So integration is close to linear, not a merge fan — `master` could fast-forward to the
+threadpool tip and pick up 603 commits including the gates and Aether lanes.
+
+This is your release line and the call is yours; it is recorded here because a two-month-old `master`
+silently changes what "the shipped code" means in every other document.
+
+## The protector gate's `overlaps >= 1` is a PROCESS-GLOBAL threshold read by two parallel tests (2026-09-07)
+
+Found while reviewing a proposed change to the Miri probe, and it is a finding about the tree rather
+than about that change, so it is recorded rather than fixed.
+
+`assert_probe_armed` (`tests/miri_scope_completion_protector.rs:290-303`) computes `overlaps` as a
+delta over a window in which the sibling test is also running: the default Miri build of that binary
+runs two non-feature-gated `#[test]`s in parallel (`:350-351`, `:793-794`), and the file itself
+records that libtest runs them in parallel with process-global counters (`:263-266`).
+
+That file justifies the non-strict comparison for `firings` on the grounds that a concurrent test
+"can only ADD" — correct there, because for `firings` the ADD direction is harmless. **For `overlaps`
+the ADD direction is the FALSE-GREEN direction**: context X's `overlaps >= 1` can be satisfied
+entirely by context Y's genuine overlap, so a per-context claim is not per-context. Today both tests
+exercise the same arm with the same shape, so the consequence is mild — but the gate guards a shipped
+UB fix, and this is the same shape as the family this repository keeps cataloguing.
+
+Cures: per-context counters, or pinning the Miri gate to `--test-threads=1`. The second additionally
+bounds window-slot occupancy but changes the recipe the measured table at `:88-98` was taken under,
+invalidating the 4/4 and 3/4 baselines every negative control compares against — so it needs its own
+re-measurement pass and is not a free tightening.
+
+A separate, cheaper question is still open and needs no edit to answer: whether the gate's
+address-keyed window slots are **already** being satisfied by address reuse. Miri's default same-thread
+heap reuse rate is 0.5, every `Box<ScopeShared>` is allocated and freed on one thread, the window key
+is address equality alone (`scope.rs:272-275`), and the recipe pins no reuse rate (zero occurrences
+of `address-reuse` anywhere in the tree). Sixteen Miri processes over
+`-Zmiri-address-reuse-rate` x `-Zmiri-address-reuse-cross-thread-rate` in {0,1} decide it: identical
+printed counts mean the defect is latent, any increase at rate 1 means `overlaps=3/4` is partly an
+artefact today.
