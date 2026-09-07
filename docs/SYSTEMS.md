@@ -1264,7 +1264,7 @@ failure mode into a compile error at the crate-visible boundary.
 
 Consumers (the D4 disposition table, all migrated): the
 `QueryIter` / `QueryIterMut` constructors ([iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/iter.rs):95/:410), the
-par distribution loops `for_each_impl` / `run_chunk_inline` ([par_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs):286/:602),
+par distribution loops `for_each_impl` / `run_chunk_inline` ([par_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs):286/:608),
 `for_each_chunk_impl` ([chunk_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/chunk_iter.rs):97),
 `par_for_each_chunk_impl` ([par_chunk.rs](../crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs):104), and `Query`/`QueryView`
 `len`/`is_empty`/`get`/`get_mut`/`single`. Per-driver behavioral suite:
@@ -1287,7 +1287,7 @@ pub unsafe trait System: Send + Sync + 'static {
     fn access(&self) -> &Access;                           // :70
     unsafe fn run_unsafe(&mut self, world: UnsafeEcsCell<'_>) -> Self::Out;  // :95
     fn apply(&mut self, _world: &mut EcsMaster) {}         // :165 (safe; flushes deferred state)
-    fn set_change_ticks(&mut self, last_run: Tick, this_run: Tick);  // :240 (Phase 10 C1)
+    fn set_change_ticks(&mut self, last_run: Tick, this_run: Tick);  // :267 (Phase 10 C1)
     fn check_change_tick(&mut self, current: Tick);        // Phase 16.1 Gap #2 (no default body)
 }
 ```
@@ -1430,13 +1430,16 @@ topo + apply-window barrier. Module: [core/schedule/](../crates/boyko_ecs/src/ec
 ### 11.1. Schedule + ScheduleBuilder
 
 ```rust
-// schedule/schedule.rs:93
+// schedule/schedule.rs:114
 pub struct Schedule {
     pool: Arc<ThreadPool>,
     systems: Vec<SystemBox>,                  // topo order, stable addresses
     conflict_graph: ConflictGraph,
     executor_scratch: ExecutorScratch,
     has_condition: FixedBitSet,               // Phase 16 0%-gate
+    may_defer: FixedBitSet,                   // KE17 step 1: `System::has_deferred` folded
+                                              //   at build. Written only; no executor path
+                                              //   reads it until the split retire lands.
     system_conditions: Vec<Vec<BoolSystem>>,  // Phase 16
     system_gating_sets: Vec<Box<[SystemSetId]>>,
     set_conditions: Vec<SetConditionEntry>,
@@ -1642,9 +1645,9 @@ are rejected at compile time (`ZstCheck`).
   type, each carrying a type-erased `EventVTable { swap_fn, drop_fn, type_id }`
   (no `dyn Trait`). API in
   [event_dispatcher.rs](../crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs):
-  `send_event::<E>(event)` (274, reads the worker id from TLS);
-  `send::<E>(thread_index, event)` (292, low-level);
-  `update_events()` (436, per-frame swap of write lanes into the read buffer).
+  `send_event::<E>(event)` (285, reads the worker id from TLS);
+  `send::<E>(thread_index, event)` (303, low-level);
+  `update_events()` (447, per-frame swap of write lanes into the read buffer).
 - `EventBuffer<E>` — split cache-line lanes (`#[repr(C)]` + `CachePadded`,
   Phase 12 false-sharing fix C3): `frame_event_count` on CL0; reader fields on
   CL1; per-thread write lanes on CL2+. `MAX_EVENT_THREADS = 65`,
@@ -1821,7 +1824,7 @@ generation }`; the shared key for sparse-set / slot-map structures.
 ## 18. boyko_threadpool ✅
 
 **Crate:** [crates/boyko_threadpool/](../crates/boyko_threadpool/) — files
-`thread_pool.rs`, `scope.rs`, `worker.rs`, `tls.rs`, `sync.rs`,
+`thread_pool.rs`, `scope.rs`, `worker.rs`, `tls.rs`, `sync.rs`, `task.rs`,
 [lib.rs](../crates/boyko_threadpool/src/lib.rs).
 
 A custom Chase-Lev work-stealing pool built **directly on
@@ -1830,15 +1833,22 @@ everything above (worker threads, parking, scope, panic propagation, install
 API) is hand-rolled to fit the scheduler's contracts. Exports:
 
 - `ThreadPool` / `ThreadPoolBuilder` / `WorkerHandle` / `PoolInner` /
-  `TaskHandle` / `MAX_WORKERS` (lib.rs:61).
-- `Scope` (lib.rs:61) — `Scope::spawn` with `'scope` lifetime erasure;
+  `MAX_WORKERS` (lib.rs:284).
+- `Scope` (lib.rs:283) — `Scope::spawn` with `'scope` lifetime erasure;
   `Scope::Drop` blocks via *work-stealing* (rayon pattern) so nested scopes can't
   deadlock. `install` (dispatcher TLS bookkeeping) vs `scope` (worker-safe,
   lighter; used by `par_iter` / `par_for_each_chunk`).
-- TLS (lib.rs:65): `current_worker_id`, `WORKER_ID_DISPATCHER` /
+- TLS (lib.rs:285): `current_worker_id`, `WORKER_ID_DISPATCHER` /
   `WORKER_ID_UNATTACHED`, `InSystemRunGuard` (the ALLOC1/ALLOC6 guard — the
   ECS crate's context-restricted paths `debug_assert!` it or its negation:
   event lane routing, the hook-drain SAFETY-7 gate), `try_with_active_pool`.
+- NOT exported — the queue element. KE16 replaced
+  `TaskHandle { body: Box<dyn FnOnce() + Send + 'static> }` with
+  `Task { payload: *const (), execute: TaskFn }`
+  ([task.rs](../crates/boyko_threadpool/src/task.rs):143) — same 16 bytes, one
+  fewer dependent load on dispatch. It is `pub(crate)`: the element is an
+  implementation detail of the deques and no caller outside the crate can name
+  it.
 
 `ThreadPool::drop` joins workers (Phase 9.3b: split handle + `Arc<PoolInner>`
 breaks the worker↔pool cycle). The whole pool + `Scope` fork/join + parallel

@@ -766,7 +766,7 @@ these docs said "no dispatcher" — that is now stale; the dispatcher exists.
 | Define an event type | [boyko_macros/src/lib.rs](../crates/boyko_macros/src/lib.rs) ✅ | `#[event] struct DamageEvent { #[participant(...)] victim: Entity, #[parameter] amount: f32 }` |
 | Read events in a system | [params/event_reader.rs](../crates/boyko_ecs/src/ecs/core/system/params/event_reader.rs):87 ✅ | `EventReader<'s, E>` → `EventIter` (245) (cursor checkpointed on partial iter) |
 | Write events in a system | [params/event_writer.rs](../crates/boyko_ecs/src/ecs/core/system/params/event_writer.rs):89 ✅ | `EventWriter<'s, E>` (per-lane TLS routing; parallel writers OK) |
-| The dispatcher | [events/event_dispatcher.rs](../crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs) ✅ | `EventDispatcher` — `send_event::<E>` (274), `send::<E>(thread_index, ..)` (292), `update_events()` (436, frame swap) |
+| The dispatcher | [events/event_dispatcher.rs](../crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs) ✅ | `EventDispatcher` — `send_event::<E>` (285), `send::<E>(thread_index, ..)` (303), `update_events()` (447, frame swap) |
 | The double-buffer | [events/event_buffer.rs](../crates/boyko_ecs/src/ecs/core/events/event_buffer.rs) ✅ | `EventBuffer<E>` — split cache-line lanes (Phase 12 false-sharing fix) |
 | Config / capacity | [events/event_config.rs](../crates/boyko_ecs/src/ecs/core/events/event_config.rs) ✅ | `EventConfig`; `MAX_EVENT_THREADS = 65`, `MAX_EVENT_CAPACITY = 16384` ([constants.rs](../crates/boyko_ecs/src/ecs/constants.rs)) |
 | Registry / metadata | [events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs) ✅ | `MAX_EVENTS` (51) = 256; `register_event` (159) / `register_event_new` (109) mint the lazy per-type id |
