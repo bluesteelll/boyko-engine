@@ -174,22 +174,41 @@
 //!   — `:N~` or `(N~)` — waives the *definition* checks for that one anchor; the file must still
 //!   exist and line N must still be within it. This keeps the check at full strength for every
 //!   other anchor and leaves each waiver greppable instead of forcing the shape test to be
-//!   loosened for everyone. 25 anchors carry it today, on 15 lines — struct fields
+//!   loosened for everyone. 29 anchors carry it today, on 19 lines — struct fields
 //!   (`Archetype::enable_store`, `ObserverLists::by_kind_component`,
 //!   `ArchetypeMaster::observer_registry`), enforcement sites inside a derive body, the four call
-//!   sites of the enable-store 0%-gate, and the `dispatch.rs` OBS-FIRE-LOOP module-doc invariant.
+//!   sites of the enable-store 0%-gate, the `dispatch.rs` OBS-FIRE-LOOP module-doc invariant, and
+//!   two physics sites that cite a BEHAVIOUR rather than a declaration — the once-per-step read of
+//!   `PhysicsConfig::sdf_narrowphase` (`systems.rs:557~`) and the `Manual` early return that makes
+//!   the broadphase policy opt-in (`broadphase_policy.rs:186~`). Both were red under the shape
+//!   test for months, and the repair a renumber would have made — moving them onto the enclosing
+//!   `fn` — would have destroyed exactly the claim the prose makes.
 //!   Enumerate them from `docs/` with
 //!   `grep -oE '[:(][0-9]+(-[0-9]+)?~' FEATURE_MAP.md SYSTEMS.md ARCHITECTURE.md | wc -l`. Both
 //!   loosenings in that pattern are load-bearing and each was measured: dropping the `[:(]`
-//!   alternative to a bare `:` reports 24, because one waiver is written in the parenthesised
-//!   form (`(65~`, FEATURE_MAP.md:756); dropping `(-[0-9]+)?` also reports 24, because one is
-//!   written on a range (`dispatch.rs:19-33~`, SYSTEMS.md:435). Use `-o`, not `-n`: several of
-//!   these lines carry more than one waiver, so counting lines reports 15, not 25.
-//!   ⚠️ **All four numbers here were 26/16/25/25 and went stale in the commit that un-waived one
-//!   anchor in SYSTEMS.md** — a repair that changed a measured INPUT rather than restating a fact,
-//!   so grepping for the sentence would not have found them. They are re-derived, not adjusted.
-//!   This pattern deliberately covers only the three navigation documents; the meshlet plan writes
-//!   its waivers before the range (`:N~-M`), a spelling with zero occurrences in these three.
+//!   alternative to a bare `:` reports 28, because one waiver is written in the parenthesised
+//!   form (`(65~`, FEATURE_MAP.md:796); dropping `(-[0-9]+)?` also reports 28, because one is
+//!   written on a range (`dispatch.rs:19-33~`, SYSTEMS.md:445). Use `-o`, not `-n`: several of
+//!   these lines carry more than one waiver, so counting lines reports 19, not 29.
+//!   ⚠️ **These four numbers have now gone stale TWICE, and the second time nobody noticed.**
+//!   They read 26/16/25/25, and the commit that un-waived one anchor in SYSTEMS.md re-derived
+//!   them to 25/15/24/24 — a re-derivation that was ALREADY WRONG IN THE OTHER DIRECTION:
+//!   piping `git show 4a363678:docs/{FEATURE_MAP,SYSTEMS,ARCHITECTURE}.md` through the pattern
+//!   above measures **27/17/26/26 on the very tree that shipped the sentence**, so the corpus
+//!   had gained two waivers the sentence never saw. This is the failure mode of a measured
+//!   INPUT: it rots with no edit to the sentence stating it, so `git log -S` on the prose finds
+//!   nothing and only re-running the grep does. 29/19/28/28 is re-derived from the current tree,
+//!   not obtained by adding the two waivers this repair introduced.
+//!   ⚠️ **The two exemplar citations in this paragraph are anchors into the gated documents, and
+//!   this gate structurally cannot check them** — it scans `docs/`, never `tests/`. Both had
+//!   rotted: `(65~` moved 756 → 796 and `dispatch.rs:19-33~` moved 435 → 445, silently, under a
+//!   green gate. A citation is live only where a checker reads it.
+//!   This pattern deliberately covers only the three navigation documents. ⚠️ Its closing claim,
+//!   that the waiver-first spelling `:N~-M` has "zero occurrences in these three", was FALSE when
+//!   written: SYSTEMS.md:1317 carries `system_meta.rs:172~-188`, and `git show 4a363678` finds it
+//!   on the same line there too. The counts are unaffected (the pattern matches its `:172~` head
+//!   either way), but rev 12's range repair has a live subject in the navigation docs as well,
+//!   not only in the meshlet plan.
 //! * **Historical quotes** — a line that deliberately reproduces a former, now-wrong anchor
 //!   ("this used to say ...") carries `<!-- doc-anchor-ignore -->` and is skipped whole. This is
 //!   an explicit opt-out rather than a heuristic on words like "formerly": a heuristic would

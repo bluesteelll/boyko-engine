@@ -144,7 +144,7 @@ landing marks itself; a second status carrier is how a diverged pair starts.
 | Rigid-body physics (3D TGS-Soft solver, narrowphase, contacts) | `boyko_physics` — [solver/](../crates/boyko_physics/src/solver/) · [soft/](../crates/boyko_physics/src/soft/) · [narrowphase/](../crates/boyko_physics/src/narrowphase/) · [components.rs](../crates/boyko_physics/src/components.rs) · [plugin.rs](../crates/boyko_physics/src/plugin.rs) |
 | Body-vs-SDF collision (CPU field query, zero readback) | `boyko_physics` — [sdf_query.rs](../crates/boyko_physics/src/sdf_query.rs) + `boyko_sdf_math` |
 | Tune physics: gravity, substeps, broadphase, SIMD and kernel selection | `boyko_physics` — [resources.rs](../crates/boyko_physics/src/resources.rs) (`PhysicsConfig` + its selectors `BroadphaseKind`, `BroadphaseSelectMode`, `SdfNarrowphaseKernel`). All runtime fields on one `Resource`, not build flags |
-| Choose the box-vs-SDF narrowphase kernel (`SdfNarrowphaseKernel::{Scalar, Avx2}`) | `boyko_physics` — [resources.rs](../crates/boyko_physics/src/resources.rs) (`PhysicsConfig::sdf_narrowphase`, default `Scalar`) → the field is read once per step ([systems.rs](../crates/boyko_physics/src/systems.rs):557) and the branch on it is one per box body, outside the 8-corner loop (`box_sdf_manifold`). ⚠ `Avx2` is the one SIMD arm in the crate that is **not** bit-identical to its oracle (`+0` where the scalar fold gives `-0` at a `±0` tie; owner-deferred fix, standing RED gate `x8_bits_eq_scalar_bits_widened_proptest`). It is a runtime field rather than a `cfg` precisely so an ISA flag cannot change a number |
+| Choose the box-vs-SDF narrowphase kernel (`SdfNarrowphaseKernel::{Scalar, Avx2}`) | `boyko_physics` — [resources.rs](../crates/boyko_physics/src/resources.rs) (`PhysicsConfig::sdf_narrowphase`, default `Scalar`) → the field is read once per step ([systems.rs](../crates/boyko_physics/src/systems.rs):557~) and the branch on it is one per box body, outside the 8-corner loop (`box_sdf_manifold`). ⚠ `Avx2` is the one SIMD arm in the crate that is **not** bit-identical to its oracle (`+0` where the scalar fold gives `-0` at a `±0` tie; owner-deferred fix, standing RED gate `x8_bits_eq_scalar_bits_widened_proptest`). It is a runtime field rather than a `cfg` precisely so an ISA flag cannot change a number |
 | Analytic SDF edit-list field (shared GPU golden + CPU physics) | `boyko_sdf_math` — [lib.rs](../crates/boyko_sdf_math/src/lib.rs) · [brick.rs](../crates/boyko_sdf_math/src/brick.rs) · [mesh_sdf.rs](../crates/boyko_sdf_math/src/mesh_sdf.rs) |
 | Rebindable input actions (raw events → typed actions) | `boyko_input` — [raw/](../crates/boyko_input/src/raw/) · [action/](../crates/boyko_input/src/action/) · [win32.rs](../crates/boyko_input/src/win32.rs) · [plugin.rs](../crates/boyko_input/src/plugin.rs) |
 | Save / load a world (custom binary; codegen not reflection) | `boyko_serialize` — [save.rs](../crates/boyko_serialize/src/save.rs) · [load.rs](../crates/boyko_serialize/src/load.rs) · [format.rs](../crates/boyko_serialize/src/format.rs) |
@@ -222,9 +222,9 @@ binding the anchor gate checks.
 | What you want to do | Method (line) |
 |---------------------|---------------|
 | Read a component (raw) | `get_component_raw(entity, id)` (176) |
-| Write a component (raw bytes) | `set_component_raw(entity, id, &[u8])` (444) |
-| Mutate a component (change-tracked) | `get_component_mut::<T>(entity) -> Option<Mut<'_, T>>` (553) |
-| Check component presence | `has_component(entity, id)` (673) |
+| Write a component (raw bytes) | `set_component_raw(entity, id, &[u8])` (461) |
+| Mutate a component (change-tracked) | `get_component_mut::<T>(entity) -> Option<Mut<'_, T>>` (635) |
+| Check component presence | `has_component(entity, id)` (755) |
 
 **File:** [core/ecs_master/entity_query_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_query_api.rs) — cold inspection of the entity set.
 
