@@ -1,0 +1,39 @@
+# Pins the toolchain IN THE TREE, so the choice stops depending on an environment
+# variable in one developer's personal, machine-global settings file.
+#
+# WHY THIS FILE EXISTS (measured 2026-09-07). The workstation that builds this
+# repo carried TWO independent Rust installs: a rustup one, and a chocolatey
+# `rust` package (1.95.0) that won on PATH because chocolatey's bin directory is
+# in the MACHINE-level PATH while rustup's shim directory had never been written
+# to the registry PATH at all. The chocolatey `cargo` is NOT a rustup shim, so it
+# silently ignores RUSTUP_TOOLCHAIN, the `+toolchain` syntax, and this file —
+# every toolchain selection the project believed it was making was a no-op
+# against it. Nothing in the tree recorded which toolchain was intended, so the
+# discrepancy could not be noticed: the workspace reported green on a toolchain
+# nobody had chosen, two minor versions behind the one that was configured.
+#
+# PRECEDENCE — measured on the machine, not taken from documentation:
+#   `cargo +toolchain ...`  BEATS this file   (verified: +nightly-gnu won over a 1.98.0 pin)
+#   RUSTUP_TOOLCHAIN env    BEATS this file   (verified: env's 1.97.1 won over a 1.98.0 pin)
+#   this file               BEATS `rustup default`
+#
+# Two CI consequences follow, and BOTH are load-bearing:
+#   - ci.yml's Miri job calls `cargo +nightly miri ...` explicitly. `+` outranks
+#     this file, so that job stays on nightly. Do not rewrite those invocations
+#     to drop the `+`.
+#   - docs.yml pins `nightly-2026-05-20` (newer nightlies break component_pool.rs
+#     via niche/layout changes, and boyko_shaderdsl needs `core_intrinsics`, which
+#     is E0554 on stable) and calls cargo WITHOUT `+`. It therefore sets
+#     RUSTUP_TOOLCHAIN explicitly to stay above this file. Removing that env block
+#     would silently drop that job onto stable.
+#
+# `channel = "stable"` rather than an exact version: it resolves to stable for
+# whatever host triple is current, which keeps Linux CI and the windows-gnu
+# workstation on one line, and it needs no download on either. Switch to an exact
+# version here if reproducibility ever has to outrank currency.
+#
+# Components are deliberately NOT listed: each CI job declares the ones it needs
+# (clippy, llvm-tools, miri, rustfmt), and listing them here would make every job
+# fetch all of them.
+[toolchain]
+channel = "stable"
