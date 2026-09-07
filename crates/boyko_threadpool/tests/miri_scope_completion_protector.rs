@@ -227,6 +227,18 @@ fn frees_inside_window() -> usize {
     }
 }
 
+/// Reads the count of completers that found no free window slot, or 0 natively.
+fn slot_exhaustions() -> usize {
+    #[cfg(miri)]
+    {
+        boyko_threadpool::miri_window_slot_exhaustions()
+    }
+    #[cfg(not(miri))]
+    {
+        0
+    }
+}
+
 /// Asserts that this run actually produced the interleaving it claims to decide.
 ///
 /// # Why a gate needs this at all
@@ -287,7 +299,26 @@ fn frees_inside_window() -> usize {
 /// non-monotonic in the yield count. The count is printed rather than asserted
 /// so that a drift from 3/4 toward 1/4 is visible before it reaches 0/4 and
 /// fails.
-fn assert_probe_armed(firings_before: usize, frees_before: usize, expected: usize, ctx: &str) {
+///
+/// # And a third number, which is a DIAGNOSIS rather than an observation
+///
+/// `slot_exhaustions` counts completers that found no free slot in the window
+/// array and therefore recorded nothing. Such a completer can only LOSE an
+/// observation, never invent one, so the gate above stays sound — but the loss
+/// arrives here as a smaller `overlaps`, and at the limit as the `overlaps == 0`
+/// red whose message sends the reader to re-tune `MIRI_RELEASE_PROBE_YIELDS`
+/// against an observation that was never taken. It is asserted EQUAL TO ZERO,
+/// not `>=` like the other two: unlike them it has no benign direction, and
+/// process-globality works the right way round here — a sibling test's
+/// exhaustion is a real shortage of a shared array and this run wants to hear
+/// about it.
+fn assert_probe_armed(
+    firings_before: usize,
+    frees_before: usize,
+    exhaustions_before: usize,
+    expected: usize,
+    ctx: &str,
+) {
     #[cfg(miri)]
     {
         for _ in 0..PROBE_OBSERVE_CAP {
@@ -301,6 +332,7 @@ fn assert_probe_armed(firings_before: usize, frees_before: usize, expected: usiz
 
         let fired = probe_firings().saturating_sub(firings_before);
         let overlapped = frees_inside_window().saturating_sub(frees_before);
+        let exhausted = slot_exhaustions().saturating_sub(exhaustions_before);
 
         // One pre-formatted line, for the same reason as the censuses above:
         // under `-Zmiri-many-seeds` every seed writes to the same unbuffered
@@ -309,7 +341,7 @@ fn assert_probe_armed(firings_before: usize, frees_before: usize, expected: usiz
             use std::io::Write as _;
             let line = format!(
                 "KE16-PROTECTOR-GATE-ARMED ctx={ctx} firings={fired}/{expected} \
-                 overlaps={overlapped}/{expected}\n"
+                 overlaps={overlapped}/{expected} slot_exhaustions={exhausted}\n"
             );
             let mut err = std::io::stderr().lock();
             let _ = err.write_all(line.as_bytes());
@@ -321,6 +353,18 @@ fn assert_probe_armed(firings_before: usize, frees_before: usize, expected: usiz
             "{ctx}: the release probe fired {fired} times, expected at least {expected}. The \
              gate is DISARMED - the probe was deleted, cfg'd away, or moved off the `prev == 1` \
              path. Every census above can stay green while this test decides nothing."
+        );
+
+        // BEFORE the overlap assert, because when both would fire this one holds
+        // the true diagnosis and the other holds a misleading one.
+        assert_eq!(
+            exhausted, 0,
+            "{ctx}: {exhausted} completer(s) found NO free slot in the window array and recorded \
+             nothing. That loses observations without inventing any, so nothing below is unsound \
+             - but `overlaps` is now an UNDERCOUNT, and at the limit it reaches 0 and reds the \
+             next assert with a message about the yield count that would send you tuning the \
+             wrong knob. Raise the size of MIRI_OPEN_RELEASE_WINDOWS, or find out why windows are \
+             staying open."
         );
 
         assert!(
@@ -335,7 +379,7 @@ fn assert_probe_armed(firings_before: usize, frees_before: usize, expected: usiz
     }
     #[cfg(not(miri))]
     {
-        let _ = (firings_before, frees_before, expected, ctx);
+        let _ = (firings_before, frees_before, exhaustions_before, expected, ctx);
     }
 }
 
@@ -351,6 +395,7 @@ fn assert_probe_armed(firings_before: usize, frees_before: usize, expected: usiz
 fn completer_holds_no_protector_when_the_joiner_frees() {
     let probes_before = probe_firings();
     let frees_before = frees_inside_window();
+    let exhaustions_before = slot_exhaustions();
     // Every body of every scope executed — the primary anti-vacuity census.
     let ran = AtomicUsize::new(0);
     // Scopes whose last-finishing body ran on a genuine worker.
@@ -450,7 +495,13 @@ fn completer_holds_no_protector_when_the_joiner_frees() {
 
     // ...and no census above can see whether the probe that OPENS the window ran
     // at all. One firing per scope's `pending -> 0`.
-    assert_probe_armed(probes_before, frees_before, SCOPES, "external-joiner arm");
+    assert_probe_armed(
+        probes_before,
+        frees_before,
+        exhaustions_before,
+        SCOPES,
+        "external-joiner arm",
+    );
 }
 
 /// Process-level state for the W-d′ test, and the reason it is `static` rather
@@ -622,6 +673,7 @@ fn worker_joiner_completer_holds_no_protector_when_the_joiner_frees() {
 
     let probes_before = probe_firings();
     let frees_before = frees_inside_window();
+    let exhaustions_before = slot_exhaustions();
     let pool = ThreadPoolBuilder::new().num_threads(WORKERS_W).build();
 
     // The outer body captures NOTHING — see `w_state` for the measured reason.
@@ -727,7 +779,13 @@ fn worker_joiner_completer_holds_no_protector_when_the_joiner_frees() {
          worker; a shortfall means the wave stayed in its own lane and no window was offered"
     );
 
-    assert_probe_armed(probes_before, frees_before, SCOPES_W, "W-d-prime arm");
+    assert_probe_armed(
+        probes_before,
+        frees_before,
+        exhaustions_before,
+        SCOPES_W,
+        "W-d-prime arm",
+    );
 }
 
 /// The BODY-ENVIRONMENT half of the same rule, judged by a FRAME POP instead of
@@ -794,6 +852,7 @@ fn worker_joiner_completer_holds_no_protector_when_the_joiner_frees() {
 fn body_environment_protector_expires_before_the_borrowed_frame_pops() {
     let probes_before = probe_firings();
     let frees_before = frees_inside_window();
+    let exhaustions_before = slot_exhaustions();
     // Every body of every scope executed — the primary anti-vacuity census.
     let ran = AtomicUsize::new(0);
     // Scopes whose last-finishing body ran on a genuine worker.
@@ -840,7 +899,13 @@ fn body_environment_protector_expires_before_the_borrowed_frame_pops() {
          schedule stopped matching the design and this run decided less than it claims"
     );
 
-    assert_probe_armed(probes_before, frees_before, SCOPES, "body-environment arm");
+    assert_probe_armed(
+        probes_before,
+        frees_before,
+        exhaustions_before,
+        SCOPES,
+        "body-environment arm",
+    );
 }
 
 /// Drives ONE scope whose bodies borrow only locations of THIS frame, and

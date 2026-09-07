@@ -161,22 +161,85 @@ const JOIN_BACKSTOP: Duration = Duration::from_micros(50);
 #[cfg(miri)]
 const MIRI_RELEASE_PROBE_YIELDS: usize = 16;
 
-/// Miri-only: slots recording which allocations currently have a completer
-/// inside its post-decrement release window.
+/// Miri-only: mints one identity per [`ScopeShared`], so a release window is
+/// matched to the SCOPE that opened it rather than to a machine address.
 ///
-/// One `AtomicUsize` per concurrently-open window, holding the address of the
-/// `ScopeShared` whose completer is inside the burst, or 0 for a free slot. Eight
-/// is far more than the two or three a gate run ever opens at once; a completer
-/// that finds none simply does not record its window, which can only LOSE an
-/// observation and never invent one.
+/// Starts at 1 because 0 is [`MIRI_WINDOW_SLOT_EMPTY`], the free-slot sentinel
+/// of [`MIRI_OPEN_RELEASE_WINDOWS`]: a key must never be mistakable for a free
+/// slot, by the claim CAS or by the free site's scan.
 ///
-/// Directionality is the point: a slot holds an address only its own scope's
-/// completers ever write, so a free that finds its own address there has
-/// certainly caught one of its own completers mid-window. A clobbered slot
-/// yields a MISS, which makes the gate red, never green.
+/// # Why an epoch, and not the address this replaced
+///
+/// The slot array's stated invariant was address UNIQUENESS — "a slot holds an
+/// address only its own scope's completers ever write". That is an ASSUMPTION
+/// about the allocator, not a fact about the data. Every `Box<ScopeShared>` is
+/// allocated and freed on the SAME THREAD (`Scope::new`'s `Box::into_raw` ->
+/// `Scope::drop`'s `Box::from_raw`), Miri's default same-thread heap
+/// address-reuse rate is 0.5, and this gate's published recipe pins no reuse
+/// rate. So scope k's stale slot can hold an address that scope k+1's
+/// allocation is subsequently handed, and k+1's free then certifies an overlap
+/// that never happened — an ADDITIVE error, which is the FALSE-GREEN direction
+/// for a gate whose threshold is `overlaps >= 1`. A monotonic counter is unique
+/// by construction and needs no allocator behaviour to be true.
+///
+/// `Relaxed` is the whole ordering requirement: this counter's only job is to
+/// hand out distinct values, and every value that reaches a slot is published
+/// there by a `SeqCst` CAS.
+#[cfg(miri)]
+static MIRI_SCOPE_EPOCH: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(1);
+
+/// Miri-only: the free-slot sentinel of [`MIRI_OPEN_RELEASE_WINDOWS`], and the
+/// one value [`MIRI_SCOPE_EPOCH`] never mints.
+#[cfg(miri)]
+const MIRI_WINDOW_SLOT_EMPTY: usize = 0;
+
+/// Miri-only: slots recording which SCOPES currently have a completer inside
+/// their post-decrement release window.
+///
+/// One `AtomicUsize` per concurrently-open window, holding the
+/// [`MIRI_SCOPE_EPOCH`] key of the scope whose completer is inside the burst, or
+/// [`MIRI_WINDOW_SLOT_EMPTY`] for a free slot. Eight is far more than the two or
+/// three a gate run ever opens at once; a completer that finds none does not
+/// record its window, which can only LOSE an observation and never invent one —
+/// but a lost observation resurfaces as `overlaps = 0` under an assert that
+/// blames the yield count, so the shortage is counted separately in
+/// [`MIRI_WINDOW_SLOT_EXHAUSTIONS`] and asserted by the gate instead of being
+/// left to be misdiagnosed.
+///
+/// Directionality is the point: a slot holds a key only its own scope's
+/// completers ever write, so a free that finds its own key there has certainly
+/// caught one of its own completers mid-window. A clobbered slot yields a MISS,
+/// which makes the gate red, never green.
+///
+/// EVERY MUTATION IS A `compare_exchange` WHOSE EXPECTED VALUE IS THE MUTATOR'S
+/// OWN KEY, so a slot can only ever be cleared by a party holding that key. ⚠
+/// The shipped tree does NOT have a bug here, and this is not the repair of one:
+/// with no closer, slot `i` has a unique writer between its claim and its clear,
+/// so the unconditional `store(0)` the release CAS replaced is safe today. The
+/// CAS is what makes ADDING a closer later — a `Scope::drop` that clears its own
+/// scope's slots after the last reclamation — a two-line change rather than a
+/// correctness re-argument.
 #[cfg(miri)]
 static MIRI_OPEN_RELEASE_WINDOWS: [core::sync::atomic::AtomicUsize; 8] =
-    [const { core::sync::atomic::AtomicUsize::new(0) }; 8];
+    [const { core::sync::atomic::AtomicUsize::new(MIRI_WINDOW_SLOT_EMPTY) }; 8];
+
+/// Miri-only: how many completers found NO free slot in
+/// [`MIRI_OPEN_RELEASE_WINDOWS`] and so could not record their window.
+///
+/// A DIAGNOSIS, not a property — and it exists because the gate had no way to
+/// state this one. `MIRI_OPEN_RELEASE_WINDOWS`'s own doc is right that a failed
+/// claim "can only LOSE an observation and never invent one", so soundness is
+/// never at stake. What it could not do is say WHY the gate went red: the lost
+/// observation reappears as `overlaps = 0`, under an assert whose message tells
+/// the reader to re-tune [`MIRI_RELEASE_PROBE_YIELDS`] against an observation
+/// that was never taken at all. A RED WITH THE WRONG DIAGNOSIS is the failure
+/// mode this repository keeps cataloguing, so a slot shortage is made to say
+/// that it is a slot shortage: the gate prints this delta as
+/// `slot_exhaustions=` and asserts it is zero.
+#[cfg(miri)]
+pub(crate) static MIRI_WINDOW_SLOT_EXHAUSTIONS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 /// Miri-only: how many `Scope::drop` frees landed while a completer of THAT
 /// SAME allocation was inside its post-decrement release window.
@@ -224,37 +287,58 @@ pub(crate) static MIRI_RELEASE_PROBE_FIRINGS: core::sync::atomic::AtomicUsize =
 /// which the joiner may free the allocation, and to make that window OBSERVABLE
 /// to the free site so the gate can assert it happened.
 ///
-/// `addr` is the allocation this completer was handed, as an integer. An integer
-/// deliberately, not a pointer: it is only ever compared for equality with the
-/// free site's own address, never dereferenced, so the allocation may be freed
-/// under it — which is precisely the situation being recorded.
+/// `key` is the [`MIRI_SCOPE_EPOCH`] identity of the scope this completer was
+/// handed, read out of the allocation BEFORE the decrement by both callers —
+/// after the decrement the joiner may already have freed it, so the field is no
+/// longer there to read. It is a plain integer, and deliberately so: it is only
+/// ever compared for equality with the free site's own key, never dereferenced,
+/// so the allocation may be freed under it, which is precisely the situation
+/// being recorded.
 ///
 /// `SeqCst` throughout: this is instrumentation whose whole value is that the
 /// free site sees the freshest state, and its cost is irrelevant because none of
 /// it exists outside `cfg(miri)`.
 #[cfg(miri)]
 #[inline(never)]
-fn miri_release_probe(addr: usize) {
+fn miri_release_probe(key: usize) {
     use core::sync::atomic::Ordering::SeqCst;
 
     MIRI_RELEASE_PROBE_FIRINGS.fetch_add(1, SeqCst);
 
-    // Claim a slot for the duration of the burst. Failure to find one loses an
-    // observation and can only make the gate redder.
+    // CLAIM. The CAS, not the scan, is what makes the claim exclusive: the
+    // winner of `EMPTY -> key` at index `i` is the only party that wrote `key`
+    // there, which is what entitles it — and nobody else — to clear `i` below.
     let mut claimed: Option<usize> = None;
     for (i, slot) in MIRI_OPEN_RELEASE_WINDOWS.iter().enumerate() {
-        if slot.compare_exchange(0, addr, SeqCst, SeqCst).is_ok() {
+        if slot
+            .compare_exchange(MIRI_WINDOW_SLOT_EMPTY, key, SeqCst, SeqCst)
+            .is_ok()
+        {
             claimed = Some(i);
             break;
         }
+    }
+    if claimed.is_none() {
+        MIRI_WINDOW_SLOT_EXHAUSTIONS.fetch_add(1, SeqCst);
     }
 
     for _ in 0..MIRI_RELEASE_PROBE_YIELDS {
         std::thread::yield_now();
     }
 
+    // RELEASE-OWN. `key -> EMPTY` at the REMEMBERED index, so this clear can
+    // never erase a window that is not this one's. A failed CAS means the slot
+    // no longer holds this key and there is nothing of ours to clear: write
+    // nothing. Today the CAS cannot fail — nobody else can write `i` between the
+    // claim and here — and that is exactly why this is a substrate change and
+    // not a bug fix; see `MIRI_OPEN_RELEASE_WINDOWS`.
     if let Some(i) = claimed {
-        MIRI_OPEN_RELEASE_WINDOWS[i].store(0, SeqCst);
+        let _ = MIRI_OPEN_RELEASE_WINDOWS[i].compare_exchange(
+            key,
+            MIRI_WINDOW_SLOT_EMPTY,
+            SeqCst,
+            SeqCst,
+        );
     }
 }
 
@@ -264,14 +348,20 @@ fn miri_release_probe(addr: usize) {
 ///
 /// See [`MIRI_FREES_INSIDE_A_RELEASE_WINDOW`] for why this, and not the probe's
 /// firing count, is what certifies the gate.
+///
+/// OBSERVE, in the slot protocol's terms: `key` is the freeing scope's own
+/// [`ScopeShared::miri_key`], so a match means a completer OF THIS SCOPE is
+/// mid-window. It was the allocation's ADDRESS until Stage 3y, which made the
+/// match depend on the allocator not recycling an address across two scopes —
+/// see [`MIRI_SCOPE_EPOCH`].
 #[cfg(miri)]
 #[inline(never)]
-fn miri_note_free_against_open_windows(addr: usize) {
+fn miri_note_free_against_open_windows(key: usize) {
     use core::sync::atomic::Ordering::SeqCst;
 
     if MIRI_OPEN_RELEASE_WINDOWS
         .iter()
-        .any(|slot| slot.load(SeqCst) == addr)
+        .any(|slot| slot.load(SeqCst) == key)
     {
         MIRI_FREES_INSIDE_A_RELEASE_WINDOW.fetch_add(1, SeqCst);
     }
@@ -349,6 +439,25 @@ pub(crate) struct ScopeShared {
     // arms that never read it also never write anything but null through it.
     #[cfg_attr(not(feature = "ke16-w-count"), allow(dead_code))]
     pub(crate) joiner_wake: *const crate::sync::WakeHandle,
+
+    /// Miri-only: this scope's identity in the completion gate's window slots —
+    /// a [`MIRI_SCOPE_EPOCH`] draw, minted once in [`ScopeShared::new`] and
+    /// never written again.
+    ///
+    /// APPENDED LAST, AND THAT PLACEMENT IS LOAD-BEARING. `#[repr(C)]` fixes the
+    /// field order, and this struct's doc records why: the completion-gate's UB
+    /// report names `alloc…[0x8]`, an offset inside `CachePadded`'s padding, and
+    /// `repr(C)` is what makes that offset mean the same thing on every build.
+    /// Appending leaves every existing field at the offset it already had, so
+    /// every recorded report stays readable against this struct. Prepending
+    /// would invalidate them all.
+    ///
+    /// It is read by [`complete_task`](Self::complete_task) BEFORE the
+    /// decrement, as a place expression through `*const Self` — a `Copy` read
+    /// that forms no reference and so installs no protector over the very
+    /// allocation the gate is judging.
+    #[cfg(miri)]
+    pub(crate) miri_key: usize,
 }
 
 impl ScopeShared {
@@ -361,11 +470,30 @@ impl ScopeShared {
     /// itself, so the W switch is ONE site.)
     #[inline]
     pub(crate) fn new(waker: Thread, joiner_wake: *const crate::sync::WakeHandle) -> Self {
+        // Miri-only: mint this scope's window-slot identity. `Relaxed` because
+        // the counter owes nothing but distinctness — the value is published to
+        // other threads by the `SeqCst` claim CAS that writes it into a slot.
+        #[cfg(miri)]
+        let miri_key = {
+            let key = MIRI_SCOPE_EPOCH.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            // The only guard the key needs: 0 is the slot array's EMPTY
+            // sentinel, and a wrapped counter would hand out a key that reads as
+            // a free slot. Reaching it takes 2^64 scopes in one process.
+            debug_assert!(
+                key != MIRI_WINDOW_SLOT_EMPTY,
+                "MIRI_SCOPE_EPOCH wrapped onto the EMPTY sentinel; window keys are no longer \
+                 distinguishable from free slots"
+            );
+            key
+        };
+
         Self {
             pending: CachePadded::new(AtomicUsize::new(0)),
             panic_payload: AtomicPtr::new(ptr::null_mut()),
             waker,
             joiner_wake,
+            #[cfg(miri)]
+            miri_key,
         }
     }
 
@@ -589,6 +717,20 @@ impl ScopeShared {
             //   pointer forms NO reference and therefore installs no protector.
             let target = unsafe { (*shared).joiner_wake };
             if !target.is_null() {
+                // Miri-only, and copied out here for the SAME reason as `target`
+                // above: the probe's key must be read while the allocation is
+                // certainly live, i.e. before the decrement that authorises the
+                // joiner to free it. It is `Copy` and read as a place expression
+                // through the raw pointer, so it forms NO reference and installs
+                // no protector — the property this whole function exists to
+                // keep.
+                //
+                // SAFETY: `*shared` is live per this function's contract — this
+                //   task is still counted in `pending`, so no join can have
+                //   observed zero and the single free site cannot have run.
+                #[cfg(miri)]
+                let miri_key = unsafe { (*shared).miri_key };
+
                 // SAFETY: live for the reason above. The only protector alive
                 //   when this RMW commits is `AtomicUsize::fetch_sub`'s own
                 //   `&self`, whose range is entirely `UnsafeCell` and therefore
@@ -646,7 +788,7 @@ impl ScopeShared {
                     // reason that does not depend on scheduling luck.
                     // `cfg(miri)` only.
                     #[cfg(miri)]
-                    miri_release_probe(shared as usize);
+                    miri_release_probe(miri_key);
                 }
                 return;
             }
@@ -660,6 +802,17 @@ impl ScopeShared {
         //   of THIS allocation and is STRONG — which is sound precisely because
         //   it expires before the decrement below, not after it.
         unsafe { (*shared).waker.unpark() };
+        // Miri-only: the probe's key, read while the allocation is certainly
+        // live. It must precede the decrement below, which is what lets the
+        // joiner free — the W-d′ arm reads it in the same position, next to its
+        // own pre-decrement copy-out. A `Copy` place expression through the raw
+        // pointer, forming no reference and installing no protector.
+        //
+        // SAFETY: `*shared` is live per this function's contract: this task has
+        //   not decremented yet, so `pending >= 1` and no join can have observed
+        //   zero.
+        #[cfg(miri)]
+        let miri_key = unsafe { (*shared).miri_key };
         // SAFETY: live until this RMW commits, for the reason above. When it
         //   commits, the only protector over this allocation is `fetch_sub`'s
         //   own all-`UnsafeCell` (weak) `&self`; this function holds `shared` by
@@ -695,7 +848,7 @@ impl ScopeShared {
         // reads it", not "reading it is free".
         #[cfg(miri)]
         if _prev == 1 {
-            miri_release_probe(shared as usize);
+            miri_release_probe(miri_key);
         }
     }
 
@@ -1189,15 +1342,25 @@ impl<'scope> Drop for Scope<'scope> {
         //     allocation is freed exactly once — no double-free, multi-drain-safe
         //     (the free is tied to scope END, never to an intermediate wave's
         //     `pending -> 0`).
-        // Miri-only: record whether this free landed inside one of THIS
-        // allocation's own release windows. That overlap is the interleaving the
+        // Miri-only: record whether this free landed inside one of THIS SCOPE's
+        // own release windows. That overlap is the interleaving the
         // completion-protector gate exists to force, and the only thing that
         // certifies the gate is armed - see
-        // `MIRI_FREES_INSIDE_A_RELEASE_WINDOW`. It touches no memory of the
-        // allocation, only the integer address, so it is sound at the instant
-        // before the free. `cfg(miri)` only.
+        // `MIRI_FREES_INSIDE_A_RELEASE_WINDOW`. The key was the allocation's
+        // ADDRESS until Stage 3y; an address makes the match depend on the
+        // allocator never recycling one across two scopes, which Miri's
+        // same-thread reuse rate of 0.5 does not promise (`MIRI_SCOPE_EPOCH`).
+        //
+        // SAFETY: `*raw` is live and this thread is its sole owner: the join
+        //   above observed `pending == 0`, no task of this scope exists, and the
+        //   single free is the `Box::from_raw` below, which has not run. The key
+        //   is a `Copy` place read through the raw pointer, so it forms no
+        //   reference and leaves no protector behind for that free to trip over.
+        //   `cfg(miri)` only.
         #[cfg(miri)]
-        miri_note_free_against_open_windows(raw as usize);
+        let miri_key = unsafe { (*raw).miri_key };
+        #[cfg(miri)]
+        miri_note_free_against_open_windows(miri_key);
 
         unsafe { drop(Box::from_raw(raw)) };
 

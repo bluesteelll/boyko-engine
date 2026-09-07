@@ -340,6 +340,25 @@ pub fn miri_frees_inside_a_release_window() -> usize {
     scope::MIRI_FREES_INSIDE_A_RELEASE_WINDOW.load(core::sync::atomic::Ordering::SeqCst)
 }
 
+/// Miri-only: how many completers could not record their release window because
+/// every slot was already taken.
+///
+/// NOT a third armed-ness observation — it is what stops the other two from
+/// being read wrong. A completer that finds no slot loses an observation and can
+/// never invent one, so the gate stays sound; but the loss reappears downstream
+/// as `overlaps = 0`, under an assert whose message sends the reader off to
+/// re-tune the probe's yield count against an observation that was never taken.
+/// A red with the WRONG DIAGNOSIS is the failure mode this repository keeps
+/// cataloguing. The gate prints this delta and asserts it is zero, so a slot
+/// shortage reports itself as a slot shortage.
+///
+/// `cfg(miri)`-only.
+#[cfg(miri)]
+#[must_use]
+pub fn miri_window_slot_exhaustions() -> usize {
+    scope::MIRI_WINDOW_SLOT_EXHAUSTIONS.load(core::sync::atomic::Ordering::SeqCst)
+}
+
 /// Phase 9.1 loom test surface (test-only; `#[cfg(loom)]`, never in the shipped
 /// artifact).
 ///
