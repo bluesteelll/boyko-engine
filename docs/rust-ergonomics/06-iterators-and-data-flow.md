@@ -6,16 +6,22 @@ Code is cited by file path and item name, never by line number.
 The theme: the loop is where the frame's time goes. Write it in the form that hands LLVM the most
 facts — one slice length instead of two, an exact count instead of a guess, a `ControlFlow` token
 instead of a flag — and verify identity with the index loop AT THE SITE, because the ledger has one
-adaptor that is smaller and slower (`chain`).
+adaptor that is smaller and scalar (`chain`), and its cost is a property of the working set as much
+as of the adaptor.
 
 ---
 
-### ERG-35 — Iterator adaptors are the default loop form; `zip` for paired columns; `filter_map` / `chunks_exact`; `chain` never inside a per-element loop; identity with the index loop is verified per site
+### ERG-35 — Iterator adaptors are the default loop form; `zip` for paired columns; `filter_map` / `chunks_exact`; two loops rather than `chain` inside a per-element loop; identity with the index loop is verified per site
 
-**Binding:** SHOULD (adaptors, `zip`, `filter_map`, `chunks_exact`); MUST-NOT (`chain` per
-element) · **Cost:** ZERO-COST where verified (EV-20, EV-51, EV-60); `chain` COSTS — 1.7× on an
-L1-resident loop, 3–8 % at column scale (EV-21, EV-60) · **Guarantee level:** measured per site —
-identity is usual, not guaranteed
+**Binding:** SHOULD (adaptors, `zip`, `filter_map`, `chunks_exact`); SHOULD-NOT (`chain` per
+element — **demoted from MUST-NOT on 2026-09-03**, because the 1.7× it rested on was an L1-resident
+artefact) · **Cost:** ZERO-COST where verified (EV-20, EV-51, EV-60); `chain` defeats vectorisation
+of the reduction (a reproducible codegen fact — 21 instructions / 0 `ymm` against 73 / 21 vector
+ops) and COSTS **27 % only on a 64-byte column that fits L1** (256 rows, below
+`MIN_ARCHETYPE_FOR_PARALLEL`) — nothing distinguishable at L2 or beyond, and on `f32` not even
+EV-60's 3–8 % (EV-21, re-verified 2026-09-03). The clause now rests on the codegen fact and on
+legibility (two loops read as two loops), not on a magnitude · **Guarantee level:** measured per
+site at three cache tiers — identity is usual, not guaranteed
 
 **Rule.** Two columns walked together are `a.iter().zip(b)`, not an index loop over both;
 `filter_map` replaces `filter().map()`; `chunks_exact(n)` (with `.remainder()` handled) replaces
@@ -41,9 +47,12 @@ two-state iterator whose state test survives into the loop.
 **Verified.** EV-51: index loop 67 instructions with a panic block; `zip` 61, 0 diff lines against
 the hand-hoisted form, same time. EV-60: on 64-byte components, index 80 instructions / 23 vector
 ops / 2 panic sites vs `zip` 69 / 39 / 0; the hoisted-release-assert form 76 / 40 / 1 cold site and
-still the fastest of the three. EV-21: `chain` is 68 instructions vs 87 for two loops and ~1.7×
-SLOWER on an L1-resident loop — the case where reading asm alone gives the wrong verdict; EV-60:
-3–8 % at column scale, direction preserved in every run.
+still the fastest of the three. EV-21 (re-verified 2026-09-03): `chain` is 21 instructions with
+ZERO `ymm` operands against 73 with 21 vector ops for two loops — smaller and scalar, the case
+where reading instruction count alone gives the wrong verdict; ~~≈1.7× SLOWER on an L1-resident
+loop; 3–8 % at column scale, direction preserved in every run~~ 1.27× on a 64-byte column at L1
+with disjoint ranges, 1.03× at L2 and 1.04× at 64 MiB (both inside the noise band), and on `f32`
+1.00× / 0.97× / 1.12× — the direction does NOT reproduce once the column leaves L1.
 
 **Exceptions.**
 - **`zip` truncates silently where indexing panics** — by ERG-26 case 2 a silent partial update IS
@@ -64,9 +73,13 @@ vectorise is written lane-wise; the operator fact it never stated is why. `&&` a
 data-dependent BRANCHES per element, and the compiler may not convert them because
 short-circuiting is observable (the right-hand side must not be evaluated); `&` and `|` evaluate
 both sides into a lane mask. *Verified* — EV-91: `eq = eq && (a[k] == b[k])` over two 1 MiB
-slices is **105 instructions, ZERO vector ops and 20 branches — not vectorised**, while
-`eq &= a[k] == b[k]` is 98 instructions with **36 vector ops and 5 `vpcmpeqb`**, and runs
-**4.2–15.1× faster** (three runs, under load). ⚠️ **Scope, measured:** a COUNTING loop
+slices is **105 instructions, ZERO vector ops and 20 branches — not vectorised** (74 at `x86-64-v3`, still
+zero vector ops), while `eq &= a[k] == b[k]` is 98 instructions with **36 vector ops and 5
+`vpcmpeqb`** (86 / 28 / 21 `ymm` at `v3`), and runs ~~4.2–15.1× faster (three runs, under load)~~
+**26.5× faster at 16 KiB, 17.4× at 256 KiB and 1.38× at 64 MiB** (re-verified 2026-09-03, four
+runs, direction 4 of 4 — the 2026-09-02 spread was three runs at three different effective cache
+residencies). The clause's scope: 17–27× while the compared buffers are cache-resident, ≈1.4× once
+they are not. ⚠️ **Scope, measured:** a COUNTING loop
 (`if a && b && c { n += 1 }` against `n += u32::from(a & b & c)`) vectorises BOTH ways — the
 operator is load-bearing where the predicate feeds an accumulator the NEXT iteration reads, not
 universally, and REF-36 still forbids citing an operator as a perf claim without a row. No site
@@ -82,8 +95,9 @@ loop shape matches.
 `IntoIterator for &Query`; `FromIterator` on VM-backed storage is MUST-NOT); SHOULD (an exact
 hint where it is O(1) — the beneficiary is `collect` on the boot / tools / test layers, not the
 kernel; the `IntoIterator` pair on other collections) · **Cost:** nothing added to `next()`;
-`collect` without a hint COSTS 10 reallocations at n = 4096 (EV-46); the desugaring is ZERO-COST
-(EV-31) · **Guarantee level:** measured
+`collect` without a hint COSTS 10 reallocations at n = 4096 — 14 at 65 536, 22 at 16 777 216 —
+and 10× / 32× / 3× in time at 16 KiB / 256 KiB / 64 MiB (EV-46, re-verified 2026-09-03; the
+2026-08 "~1.5×" was under-stated); the desugaring is ZERO-COST (EV-31) · **Guarantee level:** measured
 
 **Rule.** `size_hint` is either exact or conservative; `ExactSizeIterator` is a contract that a
 wrong `len` — safe code — breaks in safe callers, so any frontier write sized from one keeps a
@@ -122,8 +136,11 @@ fn size_hint(&self) -> (usize, Option<usize>) {
 none. The bound on the `&Query` impl is free strength — an access-mode invariant that would
 otherwise live in a reviewer's head.
 
-**Verified.** EV-46: `collect` with the default hint at n = 4096 is 1 alloc + 10 reallocs; with an
-exact hint 1 + 0 (~1.5×); `extend` into `Vec::with_capacity(n)` is 1 + 0 regardless. EV-31: `for &x
+**Verified.** EV-46 (re-verified 2026-09-03 at three sizes): `collect` with the default hint is
+1 alloc + 10 reallocs at n = 4096, + 14 at 65 536, + 22 at 16 777 216; with an exact hint 1 + 0 at
+all three; in time ~~(≈1.5×)~~ 10.0× / ≈32× / 3.0× — the exact-hint path from a slice is a
+`memcpy` specialisation, the hintless one a push loop; `extend` into `Vec::with_capacity(n)` is
+1 + 0 regardless. EV-31: `for &x
 in c` and `for &x in c.iter()` fold to one symbol. Zero `impl FromIterator` exists under
 `crates/*/src` today; the rule preserves a property.
 

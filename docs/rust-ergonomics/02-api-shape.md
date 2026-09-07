@@ -65,8 +65,12 @@ and `B::new().num_threads(8);` with one attribute.
 
 ### ERG-12 — Return `impl Iterator` (or a named concrete type), never `Box<dyn Iterator>`; name the concrete type for anything the kernel stores
 
-**Binding:** MUST · **Cost:** ZERO-COST for RPIT; `Box<dyn Iterator>` COSTS 1.8–2.8× (EV-13,
-EV-60) · **Guarantee level:** language (RPIT is an opaque CONCRETE type)
+**Binding:** MUST · **Cost:** ZERO-COST for RPIT; `Box<dyn Iterator>` COSTS one allocation per
+construction by definition, and per element **1.4–3.2× ONLY while the vtable is genuinely dynamic
+AND the column is L1/L2-resident** — parity beyond the LLC and on a latency-bound body (EV-13,
+re-verified 2026-09-03 at three cache tiers; EV-60's 2.8× absorbed there). The MUST rests on the
+allocation and on principle 1's hot-path ban, not on a magnitude · **Guarantee level:** language
+(RPIT is an opaque CONCRETE type); measured
 
 **Rule.** `-> impl Iterator<Item = T> + '_` for a value consumed at the call site. For a value a
 struct or `QueryState` must hold, write the concrete iterator type or a generic parameter — RPIT is
@@ -82,9 +86,15 @@ in-scope type and const parameter (omitting one is a compile error, not a looser
 
 **What it buys.** `next()` is a static call that inlines; no allocation, no fat pointer.
 
-**Verified.** EV-13: boxed 69 instructions with a real allocator call, 1.8× slower. EV-60: on a
-64-byte component column with a box LLVM cannot devirtualise, 2.8× (9 calls per element, 6 vector
-ops against 13).
+**Verified.** EV-13 (re-verified 2026-09-03): a box holding ONE concrete iterator type is
+DEVIRTUALISED at the shipped profile — its loop is byte-identical to the RPIT loop with no indirect
+call, and the measured "cost" is one malloc+free per CALL that impersonates a per-element cost at
+small n (EV-124). With the vtable genuinely dynamic (two concrete types behind an opaque flag) on a
+64-byte column: 3.20× at L1, 2.40× at L2, 1.03× beyond the LLC. Across an opaque `#[inline(never)]`
+seam on the engine's real 12 B + 12 B query pair: throughput-bound 1.59× / 1.04× / 0.96× at 1 024 /
+65 536 / 1 048 576 rows, latency-bound 1.17× / 1.05× / 0.89× — the FP accumulator chain hides the
+whole call. ~~EV-13: 1.8× slower; EV-60: 2.8× on a 64-byte column~~ — both reproduce only at the
+L1-resident, throughput-bound, dynamic-vtable corner.
 
 **Exceptions.**
 - Auto-traits leak through the opaque type: if the hidden iterator stops being `Send`, downstream
@@ -94,8 +104,12 @@ ops against 13).
 
 ### ERG-14 — A closed set is an exhaustive `#[repr(uN)]` enum: dispatch by tag with no `dyn` or fn-pointer call per element on the kernel or schedule layer; a set of integer constants is an enum at the API surface; `#[non_exhaustive]` only on the External list
 
-**Binding:** MUST · **Cost:** enum tag ZERO-COST; `dyn` / fn-ptr COST 2.5–5× on throughput loops
-(EV-14, EV-60); `as uN` on a `#[repr(uN)]` enum is a no-op (EV-59) · **Guarantee level:** measured
+**Binding:** MUST · **Cost:** enum tag ZERO-COST; `dyn` / fn-ptr COST **7–11× on the engine's
+own per-worker chunk sizes** (12–256 KiB — L1/L2, which a `par_iter` chunk never leaves), 25× / 9×
+on an L1 / L2 u64 stream, and 1.0–1.14× only on a stream past the LLC that no chunk reaches (EV-14,
+re-verified 2026-09-03 at three cache tiers on the tree's 12 B + 12 B query pair; EV-60's 2.5–3× was
+the 64-byte, L2, single-point reading of the same fact); `as uN` on a `#[repr(uN)]` enum is a no-op
+(EV-59) · **Guarantee level:** measured
 
 **Rule.** Four clauses:
 1. A build-time classification (system kind, storage kind, cloneability) is a `#[repr(u8)]` enum
@@ -139,10 +153,18 @@ const _: () = assert!(CodeClass::Warn as u8 == b'W');
 call blocks vectorisation. An integer that could be any of 2^32 values becomes one of three the
 compiler enumerates, and exhaustiveness — the best refactoring tool this codebase has — is kept.
 
-**Verified.** EV-14: throughput loop — tag 0.233 ns/elem = monomorphic; `&dyn` 1.17; fn ptr 1.18
-(5×); latency-bound loop — indistinguishable (state the loop shape with every dispatch claim).
-EV-60: `dyn` per element on a 64-byte component 2.5–3×, 2 vector ops against 88; `match` inside
-vs outside the loop 0.536 vs 0.540 ns. EV-59: `mk_r(SdfOp)` writing `op as u32` and `mk_c(u32)`
+**Verified.** EV-14 (re-verified 2026-09-03): enum tag = monomorphic holds (0.99× at L1; the
+`match` unswitched and the body vectorised — 123 instructions / 32 vector ops / 34 `ymm` lines
+against `dyn`'s 40 with `callq *%r12` inside the loop and ZERO vector ops). On the tree's own
+12 B + 12 B pair the codegen delta is the DELETED VECTORISATION — 80 instructions / 42 vector ops
+against 46 / 4 / one indirect call — and the time is **10.95× at 1 024 rows, 7.24× at 65 536 (a
+96 KiB per-worker chunk), 1.14× at 1 048 576 (beyond the LLC)**, direction 18 of 18; u64 stream
+25.4× / 9.3× / 1.00×. ~~Throughput loop 5×; latency-bound loop — indistinguishable.~~ The latency
+exemption is REFUTED for short chains: a ≈2-cycle serial chain pays 2.89× at L1, 2.79× at L2, 1.33×
+beyond the LLC — the 2026-08 chain was long enough to hide a call, which is a property of the chain
+LENGTH, not the loop shape. State the loop shape AND the working set with every dispatch claim.
+EV-60: `match` inside vs outside the loop 0.536 vs 0.540 ns (LLVM unswitches; hoisting is
+readability). EV-59: `mk_r(SdfOp)` writing `op as u32` and `mk_c(u32)`
 emitted identical 3-instruction bodies; `combine` as a `match` and as `if op == const` chains
 emitted the same opcode multiset with the enum form one byte shorter. EV-26: `#[non_exhaustive]`
 from a sibling crate — `E0004`, `E0638`, `E0639`; the `as`-cast folklore is wrong (only a marked

@@ -355,8 +355,12 @@ relation edge, command payload and `Option<Id>` the kernel stores.
 `crates/boyko_ecs/src/ecs/identifiers/primitives.rs`'s `define_id!` emits `pub struct
 $name(pub usize)` for nine ids and `pub type Generation = usize` twenty lines below, while
 `boyko_utils` spells the same generation `u32`. Measured (EV-79): `Option<ComponentId(usize)>` is
-16 bytes against 8 for the `u32` form; a 2^20-entry table probed at golden-ratio stride runs
-**1.49–2.09× faster** when the entry halves — the class EV-59 measured at 2.55×. rustc's own
+16 bytes against 8 for the `u32` form; a 2^20-entry table probed at golden-ratio stride ran
+**1.49–2.09× faster** when the entry halved — one point, under load, in the index-width class
+EV-59 has since re-scaled (2026-09-03): 3–5× while both tables are cache-resident, 1.3× once both
+are beyond the LLC, ~7× only where the wide table crosses the LLC and the narrow one does not;
+the direction holds at every scale, and the mechanism is a deleted load and a deleted branch,
+not the working set. rustc's own
 `newtype_index!`, `la-arena`, `slotmap` and `thunderdome` are all `u32`. This is the same edit as
 REF-09's `pub` field and ERG-03's mint, and like them it is an ARCHITECTURE pass, not a
 line-by-line sweep: the guide states the width, the campaign that touches `define_id!` performs it.
@@ -377,10 +381,14 @@ belongs to the same pass.
 ### ERG-03 — A bounded value is minted once into a private-field newtype and holding one IS the proof — of exactly the bound the mint establishes; a sink whose consumers are fixed at construction is written through a handle only the registration mints; the hot path indexes with a plain `[]`
 
 **Binding:** SHOULD · **Cost:** the `unsafe fn` and its contract are deleted for free; the bounds
-check a plain `[]` keeps on a proof-carrying id is one compare and a never-taken branch with no
-measurable time on the SEQUENTIAL-index shapes EV-60 measured — the gathered-index SIMD kernel
-is unmeasured (Exceptions); the registration handle is 0 diff lines (EV-75); the mask that would
-delete the check is REFUSED (REF-40) · **Guarantee level:** measured
+check a plain `[]` keeps on a proof-carrying id is, on a SEQUENTIAL index, no cost at all — the
+checked and unchecked loops are ONE SYMBOL at the shipped profile (EV-02, re-verified 2026-09-03);
+on a GATHERED index it is a real codegen delta and ~13–28 % of time ONLY while the column is
+L1-resident (256 rows — below `MIN_ARCHETYPE_FOR_PARALLEL`), inside the noise band at L2, and
+unmeasurable beyond the LLC (EV-02, EV-23); on the read-modify-write cohort at the real 10k
+pyramid the safe `[]` is at parity to 10 % slower than `row_ptr` and never faster (EV-92); the
+registration handle is 0 diff lines (EV-75); the mask that would delete the check is REFUSED
+(REF-40) · **Guarantee level:** measured at three cache tiers
 
 **Rule.** Two shapes of one move — a fact established once, at construction, carried by a value
 nobody else can make:
@@ -480,11 +488,17 @@ reintroduced by a later push arm that names a bare index.
 
 **Verified.** EV-67: the safe `[]` under the proof-carrying id is 13 instructions with `cmpl
 $511; ja` and a cold panic path against 3 for `get_unchecked` — a count, which the ledger's own
-reading rule says is not a cost. EV-60 (runtime-cost guard, three runs): removing a bounds
-check under a proof changes the asm (22 → 48, the panic tail gone, LLVM unrolls) but NOT the
-time — 0.765–0.791 vs 0.717–0.779 ns/elem on a 16 KB `f32` table, 0.793 vs 0.780 on a 256 KB
-component column. EV-02 / EV-23's "1.5×" is a shape-specific result and no longer licenses
-`unsafe`. EV-76 (this pass): `mark_idle` / `unmark_idle` over `WorkerId(u8)` are 0 diff lines
+reading rule says is not a cost. EV-02 (re-verified 2026-09-03 at the shipped profile, three
+cache tiers): on a sequential index the bounds-checked and `get_unchecked` loops are ONE SYMBOL — an
+ICF alias at codegen-units 16 and 1 on `f32`, and on the tree's 40-byte `Transform` column LLVM
+merged them so completely that the unchecked symbol does not exist and its 17 call sites were
+rewritten to the checked one; a three-column query fetch (12 B + 12 B + the 4-byte `Tick`) has an
+identical 47-op vector body in both spellings and times 1.00× / 0.97× / 0.83× at 1 024 / 65 536 /
+1 048 576 rows. On a GATHERED 64-byte column the codegen delta is real (23 instructions / 3 vector
+ops / one `panic_bounds_check` against 57 / 12 / none) and the time delta is 1.19–1.28× at 16 KiB,
+1.03–1.13× at 256 KiB (inside the 6 % noise band) and unusable beyond the LLC (EV-23). EV-02 /
+EV-23's "1.5×" was an L1-resident, single-codegen-unit artefact and is REFUTED, not re-scoped;
+EV-60's "no measurable time" was right and is now an identity. EV-76 (this pass): `mark_idle` / `unmark_idle` over `WorkerId(u8)` are 0 diff lines
 against the `u32` + `debug_assert!` form (6 instructions: `shlq %cl; lock orq`); the table
 index `wake_r` keeps its `[]` compare, because the type proves `< 64`, not `< worker_count`.
 EV-75 (this pass): a push through a `Scanned` handle and through a raw index are 20
@@ -503,21 +517,25 @@ instructions, 0 diff lines, at 1 and 16 units; constructing the handle outside i
   production every set idle bit IS a registered worker (only a worker marks its own bit), the
   one site that converts is `try_place_on_idle_sibling`, and `[]` already turns a violation into
   a panic rather than a wrong answer.
-- **The cost sentence is scoped.** EV-60's "no measurable time" was taken on sequential-index
-  shapes — a 16 KB `f32` table and a 256 KB component column, one proof-carrying id per element
-  in order. `crates/boyko_physics/src/solver/colored.rs`, `solve_color_avx2`, reads sixteen
-  `BodyEffective` rows per 8-wide cohort through `body_copy` / `body_mut` off GATHERED
+- **The cost sentence is scoped, and the gathered shape now has numbers.** The identity above is
+  for a SEQUENTIAL index. `crates/boyko_physics/src/solver/colored.rs`, `solve_color_avx2`, reads
+  sixteen `BodyEffective` rows per 8-wide cohort through `body_copy` / `body_mut` off GATHERED
   `body_a(i)` / `body_b(i)` indices, and its own comment records that the slice form "could not
-  elide its panic branch" there. A per-lane bounds branch inside a gather is the one place a
-  check is not known to be free; that kernel is UNMEASURED **at the site** and stays on `row_ptr`
-  under ERG-07 shape 2 / ERG-24 case (a) unless a measurement there says otherwise (OPEN 9).
-  ⚠️ **Updated by the second sweep (EV-92): a lab model of that gather now points the other way.**
-  On a 64-byte column at `-C target-cpu=x86-64-v3` the safe `[]` ran at **0.76-0.79x of the
-  `row_ptr` form** — faster, three runs of three, despite thirteen surviving panic sites — and the
-  HOISTED `assert_unchecked` proposed as the compromise discharged NOTHING (thirteen panic sites
-  survived and the body grew 261 -> 371 instructions; REF-44). The lab kernel is scalar and
-  L2-resident and the tree's is 8-wide, so this does not close the item; it flips the direction the
-  measurement at the site should test first.
+  elide its panic branch" there — confirmed as a codegen fact (on a two-row read-modify-write
+  gather the safe form keeps 3 panic sites, `row_ptr` 1, `get_unchecked` 0, all three with the SAME
+  59 vector ops) and confirmed as irrelevant to speed. ~~Updated by the second sweep (EV-92): a lab
+  model of that gather points the other way — the safe `[]` ran at 0.76–0.79× of the `row_ptr`
+  form, faster, three runs of three.~~ **REVERSED 2026-09-03 (EV-92, two independent labs):** on
+  a read cohort the three spellings are within 12 % (parity); on the tree's actual
+  read-modify-write shape at the real pyramid (10 011 bodies / 29 751 contacts, 625 KiB) the safe
+  `[]` is **1.05× SLOWER** than `row_ptr` (six paired runs; 1.02× at 1 024 bodies, 1.10× at
+  262 144), never faster, and `get_unchecked` / `row_ptr` are 1.00× / 0.96× / 1.12×. The HOISTED
+  `assert_unchecked` proposed as the compromise is still refuted on EV-92's asm half (thirteen
+  panic sites survived, 261 → 371 instructions; REF-44). Both lab kernels are scalar and the
+  tree's is 8-wide with ≈25 stack scratch arrays, so the kernel is still UNMEASURED **at the site**
+  and stays on `row_ptr` under ERG-07 shape 2 / ERG-24 case (a) (OPEN 9) — but the direction to
+  test first no longer flips: expect the three spellings within ≈10 % of each other, with a small,
+  consistent edge to the raw form.
 - There must be no `new_unchecked` without `unsafe`, no `pub fn from_raw`, and no
   `#[derive(Default)]`; `boyko_serialize` routes through the mint — a deserialised proof is a
   forged proof.
@@ -629,10 +647,25 @@ Held at codegen-units 1 and 16. The sizes that decide 2a against 2b: `enum { Wor
 8; `enum { Worker(NonZeroU32), Dispatcher, Unattached }` 8 (a niche buys ONE spare variant);
 `#[repr(u8)] enum { Worker(u16), .. }` 4. EV-64: the 2b split is 4 bytes with a 9-instruction
 view match. EV-04 / EV-59: shape 1 — the niche loop folds to one symbol with the hand-rolled
-sentinel loop; `Option<usize>` 16 bytes vs `Option<NonZeroU32>` 4, and a 2^20-entry sparse
-array probed 2^20 times at random went from 27.20 ms to 10.67 ms (2.55×) because the working
-set dropped from 16 MiB to 4 MiB — the one finding where the current spelling costs measurable
-runtime; `Option<IslandId>` in a guarded loop lost one prologue instruction.
+sentinel loop AND with the plain unconditional sum (a three-way ICF alias at codegen-units 16 and
+1, re-verified 2026-09-03); `Option<usize>` 16 bytes vs `Option<NonZeroU32>` 4. ~~A 2^20-entry
+sparse array probed 2^20 times at random went from 27.20 ms to 10.67 ms (2.55×) because the
+working set dropped from 16 MiB to 4 MiB — the one finding where the current spelling costs
+measurable runtime.~~ **RE-SCALED 2026-09-03 (EV-59, three independent labs):** the direction
+holds at every scale, but the 2.55× was one point and the mechanism was misnamed. The niche form
+is **3–5× faster while BOTH tables are cache-resident** (16 KiB / 4 KiB and 256 KiB / 64 KiB —
+where a working-set argument cannot apply), **1.3× once both are beyond the LLC**, and **≈7× only
+where the wide table crosses the 16 MiB LLC and the narrow one does not** — which on this tree is
+the two entity-keyed maps at ≈10^6 keys, `clone::map` and `observers::entity_store`, and nothing
+else; at the dominant key domains (`ComponentId < MAX_COMPONENTS = 512`, `ArchetypeId`) it is
+**1.0–2.1×** from one deleted load. The mechanism the asm shows: the niche loop is 7 instructions
+with ZERO branches per probe (`None` is the zero word, `get()` the identity) while the
+`Option<usize>` loop keeps a tag compare, a branch LLVM cannot if-convert, and a dependent payload
+load — a random tag mispredicts on ≈1/3 of probes. Still the one finding where the current
+spelling costs measurable runtime; the number is now honest about where. The tagged-union
+conversion (`Option<LiveEntity>`, the C-in-Rust table's row) is codegen-FREE — 18 = 18
+instructions, 0 diff lines at 16 and 1 units (EV-59, corrected); the earlier "25 vs 23, measure at
+the site" is withdrawn. `Option<IslandId>` in a guarded loop lost one prologue instruction.
 
 **Exceptions.**
 - **A FULL-WIDTH payload in a data-carrying enum is refused as the stored form** (REF-34):
@@ -693,8 +726,9 @@ the sentinel; `crates/boyko_physics/src/resources.rs`'s `NO_ISLAND`.
 *After* — `Option<NonMaxU32>`; the `debug_assert_ne!` goes because the sentinel is not
 constructible as a value.
 *Verified* — EV-102: 4 bytes, `new(u32::MAX)` is `None`, `new(0)` is `Some(0)`; the 2^20 probe
-runs at **1.11–1.13× of the hand sentinel** under load, three runs of three, and level with the
-biased form.
+ran at **1.11–1.13× of the hand sentinel** under load, three runs of three, and level with the
+biased form — one point at one scale, in the index-width class EV-59 has since re-scaled; the
+clause rests on the direction and on the layout guarantee, not on that magnitude.
 *Exceptions* — the encoding relies on `NonZeroU32`'s layout, so it owes an ERG-01 gate and a
 `get()` that is the ONLY reader, or it recreates the bias one layer down. ⚠️ **It does NOT buy a
 second niche**: `size_of::<Option<Option<NonMaxU32>>>()` is **8**, the same as
@@ -872,9 +906,13 @@ receives one `&'c mut [T]` for its `[start, end)`, "CD3 disjointness … satisfi
 `add`; where the partition IS contiguous the slice form hands LLVM two provably disjoint
 regions.
 
-**Verified.** Method absence is checked by the compiler. EV-60 / EV-70: on rustc 1.97.1 the
-chunk-slice form is at worst equal to raw per-row pointers (both vectorise) — the reason to
-prefer shape 1 where it applies is review budget, not cycles.
+**Verified.** Method absence is checked by the compiler. EV-70 / EV-22 (re-verified 2026-09-03):
+on `f32` the chunk-slice form and raw per-row pointers both vectorise and time at parity; ⚠️ on a
+64-byte column the slice form FAILS TO UNROLL (a per-iteration bounds decrement, 23 instructions /
+3 vector ops against the raw form's 43 / 15, 4× unrolled) and is 1.4–2.3× slower while the column
+is L1-resident, indistinguishable at L2 and beyond. "At worst equal" is withdrawn: the reason to
+prefer shape 1 where it applies is review budget, and where a wide, L1-resident chunk measures
+slower at the site, ERG-24 case (a) is the path.
 
 **Exceptions.**
 - The split does not prove index DISJOINTNESS; the colouring does. `row_ptr`'s `# Safety` says so.
@@ -929,11 +967,16 @@ builder-mode instance already in the tree.)
 **What it buys.** The check moves from debug-only runtime to always-compile-time; both cfg blocks
 and the flag disappear; by-value `finalize(self)` makes double-finalize impossible too.
 
-**Verified.** EV-59: `get` over the flag form and over the sealed typestate emitted
-label-normalised IDENTICAL 41-instruction bodies, and the typestate is SMALLER — 24 bytes against
-32 (the `bool` plus seven bytes of padding are gone). EV-07: a consuming chain over a small
-payload folds to the literal. EV-08: over a 4096-byte inline payload across `#[inline(never)]`
-transitions, a 4104-byte `memcpy` per step, ~190× slower.
+**Verified.** EV-59 / EV-07 (re-verified 2026-09-03 at the shipped profile): `get` over the
+sealed typestate is **6 instructions against the flag form's 8** — the diff is exactly the deleted
+`cmpb $1; jne` — ~~label-normalised IDENTICAL 41-instruction bodies~~ (the earlier "identical" was
+a single-unit reading; the typestate is strictly SHORTER, which the zero-cost verdict survives a
+fortiori), and the typestate is SMALLER — 24 bytes against 32 (the `bool` plus seven bytes of
+padding are gone). EV-07: a consuming chain over a small payload folds to the literal — an ICF
+alias at codegen-units 16 and 1, and 2 = 2 instructions across a forced unit split. EV-08: over a
+4096-byte inline payload across `#[inline(never)]` transitions, a 4104-byte `memcpy` per step —
+≈190× in 2026-08, **182–229× re-measured at the shipped ISA** across three call counts (flat,
+because it is a per-call cost with no cache axis).
 
 **Exceptions.**
 - Principle 3 wins: N states × M methods is N·M instantiations; state-independent methods go on

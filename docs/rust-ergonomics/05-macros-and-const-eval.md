@@ -61,8 +61,9 @@ the base is fully constructed and the overridden field's default is then freed.
 `const fn policy(self)` — "the whole reason the rate gate costs nothing at the 74 sites that
 declare no damping".
 *Verified* — EV-28: `..Cfg::DEFAULT` and `..Default::default()` fold to one symbol on POD.
-EV-45 (counting allocator): overriding one field of an allocating `Default` costs 2 alloc + 1
-dealloc against 1 + 0. EV-50: `const fn index(self)` and `fn index(&self)` fold to one symbol.
+EV-45 (counting allocator; re-verified 2026-09-03 with the time number EV-29 lacked): overriding
+one field of an allocating `Default` costs exactly one extra alloc and one extra dealloc per
+construction — 1.48×, ~40 ns, one malloc+free, flat across batch size. EV-50: `const fn index(self)` and `fn index(&self)` fold to one symbol.
 EV-60 corrects the previous mechanism: a 64-byte `Copy` receiver by value across a non-inlined
 boundary is passed INDIRECTLY and is instruction-identical to `&self` — no `memcpy`; the copy
 appears only when the callee must mutate or the value must outlive the call (ERG-08, EV-08).

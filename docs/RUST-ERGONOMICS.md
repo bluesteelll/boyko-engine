@@ -10,28 +10,61 @@ construction: it refuses gratuitous abstraction (a name to learn and a hop to fo
 nothing) AND it names the C-in-Rust patterns, which are the failure this engine is more exposed to
 because they are invisible — the code works, it is fast, and nothing complains.
 
-**As of the fourth technique sweep, 2026-09-03: thirty rules (ERG-01 … ERG-48, ids stable, several
-merged), fifty-three refusals (REF-00 … REF-52) and one hundred and fourteen evidence rows
-(EV-01 … EV-114).**
+**As of the re-verification pass, 2026-09-03: thirty rules (ERG-01 … ERG-48, ids stable, several
+merged), fifty-three refusals (REF-00 … REF-52, one of them — REF-14 — demoted to a preference) and
+one hundred and twenty-five evidence rows (EV-01 … EV-125).**
+
+> ⚠️ **CORRECTION, 2026-09-03 — read this if you saw an earlier version of this guide.** The
+> owner read a summary of it and said the numbers looked wrong. They were, in three ways, and every
+> one is now fixed IN PLACE with the old number struck through beside the new one — in the ledger
+> rows (EV-02, EV-13, EV-14, EV-21, EV-22, EV-23, EV-56, EV-59, EV-62, EV-90, EV-92) and in every
+> rule and refusal that cited them. **(1) The profile.** Rows EV-01 … EV-58 were taken at
+> `codegen-units = 1`. The shipped build is `cargo build --release` with NO `[profile.release]` —
+> cargo's default 16 units, no LTO — and the only single-unit pin in the workspace is
+> `[profile.bench]`, so `cargo bench` and the product are different codegen. Worse, a bare
+> `--emit=asm` silently emits ONE unit whatever the profile says (EV-122), so "re-checked at 16" in
+> rows EV-61 … EV-76 was unverifiable as written; the identities the MUSTs rest on were re-taken at
+> an EXPLICIT 16 with the pair forced into different units, and hold (EV-01, 04, 05, 07, 09, 11, 59,
+> 61, 62). **(2) The scale.** Several headline magnitudes were L1-resident artefacts: a per-element
+> cost is a fixed number of cycles, and beyond the LLC it vanishes into memory latency. Re-measured
+> at three cache tiers on the engine's real shapes: EV-02's "1.5×" for `get_unchecked` is REFUTED
+> (the two loops are one symbol); EV-21's "1.7×" for `chain` is 27 % at L1 only and nothing at
+> column scale (ERG-35's MUST-NOT is a SHOULD-NOT, REF-14 is a preference); EV-22's "25 %" for
+> `split_at_mut` is refuted and on a 64-byte column runs the OTHER way (ERG-24's "at worst equal"
+> withdrawn); EV-90's "8–9×" for `select_unpredictable` is a real 2.5× at exactly one point;
+> EV-92's "safe `[]` at 0.76–0.79× of `row_ptr`" is REVERSED (parity to 10 % slower). In the other
+> direction, `dyn` dispatch is 7–11× on the engine's per-worker chunk sizes, not 2.5–5× (ERG-14
+> strengthened); `OnceLock` per element is 6–16×, not 1.6×; and the sparse-width win is 3–5×
+> cache-resident but 1.3× beyond the LLC and 1.0–2.1× at the engine's real 512-key tables, not
+> "2.55×". **(3) The ISA.** The brief that commissioned this pass repeated the stale "SSE2 is
+> shipped" sentence; the tree has shipped `x86-64-v3` since 2026-09-02, the AVX2 solver arms
+> compile in, and the setting is worth 1.97× on the colored solve (EV-116, EV-117). What is NEW,
+> and is the owner's call, is the missing `[profile.release]`: see "The shipped build profile"
+> below — a finding, not a rule.
 
 **Two bars every rule passed.** (1) It makes an invariant VISIBLE or a defect class IMPOSSIBLE,
 and the rule says which. (2) Its cost was COMPILED AND COMPARED in both spellings on this
 checkout's toolchain (`rustc 1.97.1`, `stable-x86_64-pc-windows-gnu`, edition 2024) — every
 number is a row of [rust-ergonomics/EVIDENCE.md](rust-ergonomics/EVIDENCE.md), and a rule never
 carries a number that is not in that ledger. Where a previous number did not reproduce, the rule
-says so and the old row is kept as superseded.
+says so and the old verdict is kept IN THE ROW, struck through, dated, with the reason — since
+2026-09-03 a reader never follows a pointer to a correction elsewhere.
 
-**The shipped ISA is `x86-64-v3` (AVX2 + FMA), and this document said otherwise until
-2026-09-02.** `.cargo/config.toml` sets `-C target-cpu=x86-64-v3` on all three x86 targets (owner
-ruling of that date, "AVX2 by default"). Rows EV-01 … EV-76 were taken at the bare x86-64
-baseline: their IDENTITY results are ISA-independent and stand, their ABSOLUTE ns/element figures
-were taken at SSE2 and do not transfer to the shipped build; they are read as ratios. Rows
-EV-77 … EV-114 were taken at `v3`. ⚠️ **Every timing in EV-77 … EV-114 was taken with the box
-under load** (a game plus three concurrent build workflows); each is best-of-7 across three process
-runs with all three printed, and EV-111's single figure is a COMPILE time, not a runtime one.
-Directions reproduced; magnitudes did not. Every IDENTITY in
-EV-96 … EV-114 was taken at the SHIPPED `codegen-units = 16` and re-checked at 1, and the row says
-which — an ICF alias at one unit proves nothing at sixteen.
+**The shipped profile is `cargo build --release` with no `[profile.release]` — `opt-level = 3`,
+`codegen-units = 16`, no LTO, `panic = unwind`, `-C target-cpu=x86-64-v3` (AVX2 + FMA) — and this
+document's ledger was mostly taken at something else until 2026-09-03.** The ledger's Method
+section now states that profile first and names every block of rows that departs from it: EV-01 …
+EV-58 at `codegen-units = 1` and SSE2 (identity results ISA-independent; absolute figures read as
+ratios; every ICF alias single-unit evidence); EV-59 at one unit and an ad-hoc `+avx2`; EV-60 at 16
+units, SSE2, ONE 256 KiB fixture; EV-61 … EV-76 at one unit with an unrecorded 16-unit re-check, of
+which the load-bearing identities were re-taken at an EXPLICIT 16 on 2026-09-03; EV-77 … EV-114 at
+an explicit 16 and `v3`; EV-115 … EV-125 at the shipped profile, with the unit count named on every
+identity and three working-set points on every timing. ⚠️ **Every timing in EV-77 … EV-125 was
+taken with the box under load** (other agents building throughout); each is best-of-7 across ≥ 3
+process runs with the spread printed and the contaminated runs named, and EV-111's single figure is
+a COMPILE time, not a runtime one. Directions reproduced; magnitudes are reported WITH the working
+set they were taken at, because without it they mean nothing — an ICF alias at one unit proves
+nothing at sixteen, and a ratio at 16 KiB proves nothing at 4 MiB.
 
 **Precedence.** [CLAUDE.md](../CLAUDE.md)'s principles win any conflict, and the rule says so
 where they touch (the yields table below). Code is cited by file path and item name, never by
@@ -208,15 +241,15 @@ about. The free spelling beside it was compiled and compared (the row is named i
 | A bare `u32` / `usize` that is stored, paired with a same-typed operand, or used to index — a component id, a row, a stride, a worker id | `ComponentPool::new(component_id: usize, reserve_rows: usize)`; `create_column(stride: u32, cap_rows: u32)`; `claim_one_idle(observed: u64, exclude: u64, start: u32) -> Option<u32>` (forty lines of doc on why the two masks must not be confused; the confusion compiles); `prev_labels: Option<(u32, u16)>`; callers writing `.get()` at the seam | a `#[repr(transparent)]` newtype per domain, by the three-part test (a lone count with its noun in the method name stays bare — REF-41); a same-typed pair as a PAIR (`IdleWord` / `ExcludeMask`, the first with no `BitAnd`); two same-typed positional integers in one signature is the tell | ERG-02 |
 | A `[lo, hi)` pair as `(usize, usize)`, destructured by hand at every use | `solve_color(.., span: (usize, usize), ..)`, `solve_color_dispatch(.., span, g_lo: usize, g_hi: usize, ..)`, `let (start, end) = span; for i in start..end` (`colored.rs`) | `core::ops::Range<usize>` — same 16 bytes, same loop; the order is stated where it is built, `len()` saturates, `&xs[span]` hoists the bounds check (a reversed range still compiles — a SHOULD) | ERG-02 |
 | A magic constant standing in for a variant, compared by hand at every site — or the same fact stored twice in two integer encodings kept in step by "site N of 3" comments | `WORKER_ID_DISPATCHER = u32::MAX - 1` / `WORKER_ID_UNATTACHED` (tls.rs, three spellings of one question) beside `LANE_DISPATCHER = 64` / `LANE_HOST` / `LANE_UNCLAIMED = u16::MAX` (`boyko_diag::lane`), synchronised by the D1 three-site discipline; `ABSENT = u32::MAX` with nine comparisons; `NO_ISLAND`; sixteen `X::MAX` sentinels across nine crates | absence → `Option<NonZeroU32>` (same 4 bytes); a mode whose payload fits a narrower integer → a `#[repr(u8)]` data-carrying enum (2 bytes, smaller than the sentinel) with `lane()` deriving the second encoding where it is derivable; a full-width payload → a stored `#[repr(transparent)]` newtype with a view enum | ERG-04 |
-| `Option<usize>` for an optional index | `SparseMap::sparse: Vec<Option<usize>>` — 16 bytes per slot, 4× the memory, 2.55× the probe time | `Option<NonZeroU32>` — the niche IS the absent state | ERG-04 |
+| `Option<usize>` for an optional index | `SparseMap::sparse: Vec<Option<usize>>` — 16 bytes per slot, 4× the memory; 3–5× the probe time while cache-resident, 1.3× beyond the LLC, 1.0–2.1× at this map's real 512-key domain (EV-59, re-scaled 2026-09-03) | `Option<NonZeroU32>` — the niche IS the absent state | ERG-04 |
 | A `bool` parameter at a call site that says nothing, or a `bool` return meaning two unrelated things | `match_word(p, w, !want)` (a stray `!` is a silent wrong answer); `set_enable_bit(.., true) -> bool`; `create_fence(true)` | a two-variant enum (`Polarity`, `EnableBit`, `FenceState`) — one instruction shorter | ERG-39 |
 | A `bool` failure signal, accumulated with `&=` | `pool.swap_remove(row) -> bool`; the bundle keeps mutating past the first failure | `Result<(), FieldlessEnum>` — one byte, same instructions, `#[must_use]` by construction, `?` stops | ERG-28 |
 | A closed set as `pub const u32` constants | `sdf_op::{UNION, SUBTRACT, INTERSECT}`; `boyko_log`'s `class: u8` under a doc titled "class is a TYPE, not a field" | a `#[repr(u32)]` enum at the API surface; the wire field stays the integer | ERG-14 |
 | A null-sentinel raw pointer checked by hand, then arithmetic that trusts the check | `Column { ptr: *mut u8, .. }` + `is_null()`; `VkBuffer(pub u64)` + `NULL` | `Option<NonNull<u8>>` — same 16-byte layout, `zeroed()` is `None`, `let base = col.ptr?` PRODUCES the proof | ERG-22 |
 | An invariant tracked in a comment or a debug-only flag | `LoadEntityMap { #[cfg(debug_assertions)] sealed: bool }` — in release, `get` before `finalize` is an unsorted binary search; `WorkerLane.wid: u32` with "always `< worker_count`" in a doc | a ZST typestate (24 bytes, was 32); a `WorkerId(u8)` minted only where `< 64` is established — the bound it states is the bound it proves, no more; `1u64 << id` cannot mark the wrong worker | ERG-08, ERG-03 |
 | A `Copy` handle handing out a reference with a FREE lifetime, and "MUST NOT be used after this line" in a comment | `SharedPtr::as_ref<'a>(&self) -> &'a ScopeShared` (scope.rs) and the task wrapper's "`shared` MUST NOT be dereferenced after this line" — on an allocation that has already had a use-after-free (Phase 9.2 Candidate U) | a non-`Copy` handle whose last access `complete(self)` consumes it — the same 22 instructions; a later use is `E0382` | ERG-06 |
-| A hand-rolled tagged union: one field is the tag, two others are "unspecified when null" | `EntityInland { archetype_ptr: *mut Archetype, unit_index, generation }` | `Option<LiveEntity>` — same layout and offsets; layout-free, ~2 register ops in a micro-shape, measure at the site | ERG-04, ERG-22 |
-| An `unsafe fn` whose contract is "the caller registered it", re-stated at every caller | `get_layout_unchecked(component_id: usize)` and every SAFETY clause above its callers | a proof-carrying id minted only by registration and a SAFE `[]` — the `unsafe fn` and its contract go; the bounds check stays (no measured time on sequential shapes, and a forged id panics rather than reading the wrong row); no mask | ERG-03 |
+| A hand-rolled tagged union: one field is the tag, two others are "unspecified when null" | `EntityInland { archetype_ptr: *mut Archetype, unit_index, generation }` | `Option<LiveEntity>` — same layout and offsets, and the same 18 instructions with 0 diff lines at codegen-units 16 and 1: codegen-free (EV-59, corrected 2026-09-03) | ERG-04, ERG-22 |
+| An `unsafe fn` whose contract is "the caller registered it", re-stated at every caller | `get_layout_unchecked(component_id: usize)` and every SAFETY clause above its callers | a proof-carrying id minted only by registration and a SAFE `[]` — the `unsafe fn` and its contract go; the bounds check stays (on a sequential index the checked and unchecked loops are ONE SYMBOL at the shipped profile — EV-02 — and a forged id panics rather than reading the wrong row); no mask | ERG-03 |
 | A sink that is written, whose consumers are fixed by the builder's push order, with reachability asserted in a comment | `injector_local[wid]` — `push_task` writes it, `stealers` never lists it, two docs said siblings reach it "via stage 1.5" (no such stage): every `par_iter` in a system body at 1.01×; `scope.rs`'s `scratch: Worker::new_fifo()` with no `Stealer`: 4–5 of 16 tasks in flight | a handle minted ONLY by the registration that puts the queue into a scan set; `push_task` names its destination by that handle, so an unreachable slot cannot be spelled and an unregistered deque reads as such — 0 diff lines | ERG-03 |
 | Manual set / undo pairing around a body that can return early or panic | `depth += 1; body(); depth -= 1` | a `Drop` guard — the normal path is identical, the unwind path is what you bought | ERG-43 |
 | `SeqCst` because it is "the safe one" | (the threadpool is already right: 1 `SeqCst` in 54 orderings, a documented fence) | the weakest ordering that discharges a named pairing; a `SeqCst` store is a bus lock, a `Release` store is a `mov` | ERG-45 |
@@ -244,7 +277,10 @@ Read these before writing code; the rest of the guide is a reference you grep wh
 up. Every one was compiled in both spellings on this checkout: the surviving rules were reproduced
 as zero-cost or negative-cost by an independent guard pass (EV-60), the new rule and the new
 clauses by the editorial lab (EV-61 … EV-70) and the second revision's corrections by the same
-lab (EV-71 … EV-73), each re-checked at the shipped codegen-units.
+lab (EV-71 … EV-73) — and on 2026-09-03 every identity a MUST rests on was re-taken at an EXPLICIT
+`codegen-units = 16` with the pair forced into different units (EV-01, 04, 05, 07, 09, 11, 59, 61,
+62: all hold), because the earlier "re-checked at the shipped codegen-units" had been taken with an
+instrument that silently used one (EV-122).
 
 ERG-01 layout gate · ERG-02 domain newtype · ERG-04 sentinel is a type · ERG-05 `PhantomData`
 row · ERG-06 token / scoped closure · ERG-07 no whole-buffer slice to a worker · ERG-12 no
@@ -378,7 +414,7 @@ and `docs/OPEN-QUESTIONS.md`), not a thing to register.
 
 | ID | Binding | Rule |
 |---|---|---|
-| ERG-35 | SHOULD / MUST-NOT | Adaptors by default; `zip` for paired columns with a hoisted release assert on caller lengths; no `chain` per element; identity verified per site. |
+| ERG-35 | SHOULD / SHOULD-NOT | Adaptors by default; `zip` for paired columns with a hoisted release assert on caller lengths; two loops rather than `chain` per element (demoted from MUST-NOT 2026-09-03 — the 1.7× was an L1 artefact, the codegen fact stands); identity verified per site. |
 | ERG-36 | MUST / SHOULD / MUST-NOT | Honest `size_hint`; a release check under any `unsafe` write sized by `len()`; `IntoIterator for &Query` with the read-only bound; `Extend` on reserved capacity; never `FromIterator`. |
 | ERG-38 | SHOULD / MUST | let-else, let-chains, `matches!`, labelled blocks; `ControlFlow` + `?` instead of a flag in closure-shaped bodies. |
 
@@ -389,16 +425,20 @@ and `docs/OPEN-QUESTIONS.md`), not a thing to register.
 enforcement · REF-05 GhostCell · REF-06 stored `impl Trait` / `Box<dyn Iterator>` · REF-07
 const-generic flags and math · REF-08 aliases as safety · REF-09 `pub` id fields · REF-10
 proc-macro crates for a `macro_rules!` shape · REF-11 `#[track_caller]` · REF-12 bare
-`PhantomData<T>` · REF-13 allocating `..Default::default()` · REF-14 `chain` per element · REF-15
-`Index` on a proven path (no `unsafe` licence) · REF-16 `#[inline(always)]` unmeasured · REF-17
-`FromIterator` · REF-18 reflexive `Debug` · REF-19 raw-pointer loops (review budget, not speed) ·
+`PhantomData<T>` · REF-13 allocating `..Default::default()` · REF-14 `chain` per element (demoted
+to a PREFERENCE 2026-09-03 — 27 % at L1 only, noise at every column scale; the codegen fact
+stands) · REF-15 `Index` on a proven path (no `unsafe` licence; on a sequential index the two
+spellings are one symbol) · REF-16 `#[inline(always)]` unmeasured · REF-17 `FromIterator` · REF-18
+reflexive `Debug` · REF-19 raw-pointer loops (review budget alone — on a 64-byte L1-resident column
+the raw loop IS faster, and ERG-24 case (a) is the escape) ·
 REF-20 `String` in kernel signatures · REF-21 "hoist config" (not a rule) · REF-22 lending
 iterators · REF-23 a vacuous `!Send` assertion · REF-24 `thiserror` / `anyhow` · REF-25 `Vec` in a
 `Resource` as bulk state · REF-26 blanket impls · REF-27 ungated `transmute` · REF-28 `OnceLock`
 per element · REF-40 a range-narrowing mask on a proof-carrying id (a panic turned into a silent
 wrong read, for no measured time) · REF-43 `core::hint::cold_path()` where the slow arm is already
 a `#[cold]` fn (0 diff lines) · REF-44 a HOISTED `assert_unchecked` on a gathered-index maximum
-(13 panic sites survive and the body grows 42 %) · REF-47 "push ifs up and fors down" at its named
+(13 panic sites survive and the body grows 42 %; the "safe `[]` faster" number it cited beside that
+is REVERSED — EV-92) · REF-47 "push ifs up and fors down" at its named
 site (the compacted form is 171 instructions / 104 vector ops against 127 / 113, and 0.96–1.03× at
 every penetrating-corner ratio).
 
@@ -518,8 +558,8 @@ a key collision in `component_registry` is the KE13 class at its worst).
 - [ ] `expect("invariant: …")`; `debug_assert!` by default; each release `assert!` has the "a
   vanished check would silently …" sentence? (ERG-26)
 - [ ] Guard / token / builder types and undroppable statuses carry `#[must_use = "…"]`? (ERG-11)
-- [ ] `zip` on caller-supplied slices has its hoisted release `assert!`; no `chain` per element;
-  `size_hint` is exact or `(0, None)`? (ERG-35, ERG-36)
+- [ ] `zip` on caller-supplied slices has its hoisted release `assert!`; two loops rather than
+  `chain` per element; `size_hint` is exact or `(0, None)`? (ERG-35, ERG-36)
 - [ ] POD configs have `const DEFAULT`; a new feature has its `compile_error!` pairs and banners;
   every `pub` item has `///`; every new suppression is an `#[expect]` with a reason?
   (ERG-31 clauses 1 and 4, ERG-41)
@@ -566,6 +606,98 @@ a key collision in `component_registry` is the KE13 class at its worst).
 | ERG-01 (clause 8) · ERG-48 (shape 3 clause) · ERG-31 (clause 1 exceptions) | clauses added, 6th rev. | the fourth sweep added NO rule and paid nothing. ERG-01 clause 8 is the SPLIT FACT — a fact the language forces into two places is derived from one of them or gated against it, with the gate FORCED (EV-109; the unforced form compiles over its own contradiction, which is the repository's meta-defect reproduced). ERG-48 shape 3 gains the `'static` payload bound that turns its recorded `mem::forget` falsifier from a dangling write into a leak (EV-108, an ICF alias). ERG-31 clause 1 gains two LIMITS: the CTFE budget (EV-111) and the refutation of the array-repeat inline `const` as a cost change (EV-110) |
 | ERG-01 (clause 7) | corrected, 6th rev. | the clause cited `boyko_serialize` as its Before and did not know that its After already ships: `boyko_rhi_vulkan/src/compute.rs`'s `SpirvBlob<{ include_bytes!(..).len() }>` under `#[repr(C, align(4))]` is the wrapper it prescribes, with the length taken from the file |
 | ERG-03 (OPEN 9 exception) | updated, 4th rev. | a lab model of the gather (EV-92) measured the safe `[]` at 0.76–0.79× of `row_ptr` — FASTER, three runs of three — and refuted the hoisted `assert_unchecked` that was proposed as the compromise (REF-44). The item stays open because the lab kernel is scalar and L2-resident where the tree's is 8-wide; what changed is which direction the site measurement should test first |
+| ERG-03 (OPEN 9 exception) · REF-44 · REF-15 | REVERSED, re-verification 2026-09-03 | EV-92's "safe `[]` at 0.76–0.79× of `row_ptr`" did not reproduce in either of two independent labs and REVERSED in the one built on the tree's real read-modify-write shape at the 10k pyramid: parity to 10 % SLOWER, never faster, eighteen paired comparisons. The hoisted-`assert_unchecked` refusal stands on its asm half; the "faster" number is withdrawn from ERG-03, REF-15 and REF-44 |
+| ERG-35 (`chain` clause) · REF-14 | DEMOTED, re-verification 2026-09-03 | the MUST-NOT and the Part-A refusal rested on EV-21's 1.7×, which is an L1-resident artefact: 27 % on a 64-byte column that fits L1, inside the noise band at every column scale the engine allocates, and on `f32` not even EV-60's 3–8 %. The codegen fact (`chain` defeats vectorisation of the reduction) holds; the clause is a SHOULD-NOT resting on it and on legibility, and REF-14 is a preference |
+| ERG-24 · ERG-07 · REF-19 | "at worst equal" WITHDRAWN, re-verification 2026-09-03 | EV-22 re-taken at three tiers: on `f32` parity (the sign flips with placement between two binaries); on a 64-byte column the SLICE form fails to unroll and is 1.4–2.3× slower while L1-resident. The MUST stands on review budget alone, with case (a)'s measured-at-site escape named as the path |
+| ERG-03 (cost sentence) · REF-15 · REF-40 | STRENGTHENED, re-verification 2026-09-03 | EV-02's "1.5×" is REFUTED rather than re-scoped: on a sequential index the checked and unchecked loops are ONE SYMBOL at the shipped profile (the unchecked symbol does not even exist on the `Transform` column); the gathered delta is ≈20 % at L1 only |
+| ERG-14 · REF-02 · ERG-12 · REF-06 · REF-28 | numbers REPLACED, re-verification 2026-09-03 | `dyn` / fn-ptr dispatch is 7–11× on the engine's per-worker chunk sizes (EV-14; the latency exemption refuted for short chains); `Box<dyn Iterator>` costs per element only with a genuinely dynamic vtable on an L1/L2-resident column (EV-13, EV-124); `OnceLock` per element 6–16× (EV-56). All three rules are STRONGER, and each now names the working set |
+| ERG-04 · ERG-02 clause 5 | RE-SCALED, re-verification 2026-09-03 | EV-59's "2.55×, working set 16 MiB → 4 MiB" is one point with a misnamed mechanism: 3–5× cache-resident, 1.3× beyond the LLC, ≈7× only straddling it, 1.0–2.1× at the engine's 512-key `SparseMap` domain; the direction holds everywhere and the rule is unchanged. The `Option<LiveEntity>` "25 vs 23, measure at the site" is corrected to codegen-free (18 = 18) |
+| ERG-43 · ERG-28 clause 5 · ERG-08 · ERG-36 · ERG-31 clause 1 | CONDITIONED or RE-NUMBERED, re-verification 2026-09-03 | the `Drop` guard's identical normal path holds exactly when `Drop` inlines (EV-62); `select_unpredictable`'s instruction counts are unit-dependent and its win is one L2 point (EV-90); the typestate `get` is two instructions SHORTER, not identical (EV-07 / EV-59); `collect` without a hint is 10–32× not ≈1.5× (EV-46); `..Default::default()` on an allocating `Default` has its time number, 1.48× (EV-45) |
+
+## The shipped build profile — a FINDING of the 2026-09-03 pass, not a rule
+
+This section is build configuration, not ergonomics. It is here because the re-verification had
+to establish what `cargo build --release` actually is before any number in this guide could be
+read, and what it found is worth more than most of the rules above. **Nothing in it is adopted;
+the choices are the owner's**, listed at the end as questions with the number behind each.
+
+**What ships today** (EV-115, confirmed from a real release rustc command line, not inferred from
+the manifest): `opt-level = 3` · **`codegen-units = 16`** · **`lto = false`** · `panic = unwind` ·
+`debug = 0` · `strip = debuginfo` (cargo's default when `debug = 0`) · **`-C target-cpu=x86-64-v3`**
+from `.cargo/config.toml` (since `cced895a`, 2026-09-02) · `rustc 1.97.1`,
+`stable-x86_64-pc-windows-gnu`. There is NO `[profile.release]` anywhere in the workspace and never
+has been; the only profile table is `[profile.bench] codegen-units = 1`, whose own comment says it
+is deliberately not LTO. So `cargo bench` and the product differ by one axis, and a bench number
+called "the shipped profile" is wrong by it — every 2026-09-03 bench-harness number below forced
+the bench profile back to release's settings before it was taken.
+
+**The ISA setting is ALREADY taken, and it is the biggest number in this pass** (EV-116, EV-117).
+The AVX2 solver arms are in the shipped physics rlib (3 620 `ymm` references, nine
+`cfg(target_feature = "avx2")` symbols, zero `vfmadd`) and were not before `cced895a`. Worth:
+**1.97× on the 10 200-contact AVX2 colored solve** (9.474 → 4.877 ms, eight interleaved passes,
+IQR under 4 %), **1.10× on the scalar physics path** (autovectorisation of scalar code), and
+**nothing on the ECS storage paths** (0.97–1.02×). The portability price is the one the config
+file already documents — an illegal instruction on anything older than Haswell (2013) / Excavator
+(2015) — and it was the owner's call on 2026-09-02, taken without this number. Recommendation: do
+not lose it. `-C target-cpu=native` is refused on its own number: 0.8 % geomean, every bench within
+±2.5 %, twelve added features the hot code does not use, and a machine-dependent build (EV-119).
+
+**The open call: `[profile.release]`** (EV-118, EV-120). Six candidate configurations were measured
+on seven single-threaded hot-path benchmarks built from one verified-identical source snapshot.
+The levers are NOT the same lever on every path:
+
+| Setting | ECS storage: `swap_remove` / `add fill` at 10 000 rows | ECS query: `query_mut_iter_10k` / `tuple_2` | Physics solve | Geomean: 7 benches / without the outlier | Clean build (two samples) | Binary |
+|---|---|---|---|---|---|---|
+| **today**: cgu 16, no LTO | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 | 1.000 / 1.000 | 148 s / 100 s | 8.76 MB |
+| `codegen-units = 1` | 0.986 / 1.010 | **0.721** / 0.917 | 0.96–1.01 | 0.933 / 0.922 | 221 s | 6.42 MB |
+| `lto = "thin"` | **0.645** / 0.912 | 1.004 / 0.991 | ≈1.0 | 0.922 / 0.910 | 167 s / 117 s | 5.45 MB |
+| `lto = "fat"` | **0.648** / **0.850** | 1.015 / 1.004 | ≈1.0 | **0.787** / 0.891 | 233 s / 324 s | 3.46 MB |
+| cgu 1 + `lto = "fat"` | **0.624** / **0.831** | **0.750** / 0.949 | 0.94–1.01 | 0.873 / **0.831** | 257 s / 316 s | 3.33 MB |
+| `target-cpu=native` | 0.978 / 1.022 | 1.009 / 1.002 | ≈1.0 | 0.992 / 0.990 | 158 s | 8.81 MB |
+
+Ratios are medians over eight interleaved passes, ratio to today, IQR typically under 4 %; build
+times are order-of-magnitude (the two samples of today's config differ by 48 % under different
+background load). **LTO is the cross-crate lever** — the bench → `boyko_ecs` rlib boundary is
+structurally the `boyko_app` → `boyko_ecs` boundary of the shipped binary — and
+**`codegen-units = 1` is a different, complementary lever** on the query iterators; neither touches
+the physics solver, whose hot loops are intra-crate and already inlined at 16 units. Binary size
+is a WIN under LTO (38–62 % smaller), not a cost; the cost is clean-build and final-link time
+(2–3× for fat, ≈+15 % for thin), landing on every binary and test target, while an incremental
+rlib rebuild is barely affected (the rlib itself grows ≈5 % from embedded bitcode). Portability is
+unchanged: LTO and codegen-units change no ISA and no ABI.
+
+⚠️ **One result argues for measuring before pinning, and it is not smoothed over:**
+`query_ref_iter_10k` is **2.68× FASTER under fat LTO at 16 units and 17 % SLOWER under fat LTO at
+1 unit** — the same optimisation with the opposite sign, decided by the unit count, both readings
+with IQR under 1 % over eight passes. It was not disassembled. Until it is, "cgu 1 + fat" is a
+configuration known to leave a 3.1× on the table on one measured ECS path while winning 5–10 % on
+four others. Everything in the table is single-threaded by choice (no `par_iter` arm, no KE16
+bench, no `bench_bevy_vs_boyko`), so nothing here says what LTO or the ISA do under the scheduler.
+A first campaign of 924 data points was DISCARDED for 43–809 % per-cell spreads, and its one
+apparent verdict — "16 units cost 1.45× on the AVX2 solve" — is retracted (EV-121).
+
+**The owner's choices, as questions with the number behind each:**
+
+1. **Add a `[profile.release]` at all?** Its absence costs ≈17 % of single-threaded hot-path time
+   on the seven paths measured and ≈5.4 MB of binary; fixing it costs nothing in portability and
+   only build time.
+2. **`lto = "fat"` + `codegen-units = 1`?** Geomean 0.831 without the outlier (0.873 with it),
+   binary 0.38×, clean build 2–3×. The pass's recommendation if the shipped product is what is
+   valued — with the outlier named, not hidden.
+3. **`lto = "thin"` + `codegen-units = 1` instead?** Geomean ≈0.91–0.92 — most of the ECS-storage
+   win and all of the query-mut win — for ≈+15 % build time. The hedge, if day-to-day iteration
+   speed is what is valued.
+4. **`lto = "fat"` at 16 units?** Geomean 0.787 counting the 2.68× outlier, 0.891 without; it
+   beats option 2 by 3.1× on `query_ref_iter_10k` and loses to it by 5–10 % on four others.
+   Disassembling that one bench under both is the cheap way to choose between 2 and 4.
+5. **What happens to `[profile.bench] codegen-units = 1`?** If release gains cgu 1, the bench
+   pin's stated premise (deterministic codegen) holds and the pin is redundant; if release gains
+   LTO and bench does not, `cargo bench` measures a configuration the product does not ship — the
+   exact defect this pass corrected, reintroduced on the other axis.
+6. **Not a choice — a standing hazard** (EV-122): `RUSTFLAGS` REPLACES the config file's
+   rustflags, so any agent or CI leg that sets it without `-C target-cpu=x86-64-v3` silently
+   ships the scalar fallback again. CI spells the flag three times for that reason, and
+   `tests/isa_baseline_census.rs` is the only gate that would notice.
 
 ## Open — what this pass could not verify
 
@@ -583,9 +715,14 @@ a key collision in `component_registry` is the KE13 class at its worst).
    place. What survives of the item: **every absolute ns/element figure in EV-01 … EV-76 was taken
    at SSE2** and is read as a ratio, not as a number for the shipped build; the identity results
    are unaffected. Not re-measured — the box is loaded.
-3. **The `[profile.release]` question.** The shipped release is codegen-units 16 (the ledger's
-   method paragraph is corrected). Adding `[profile.release] codegen-units = 1` would make the
-   0 %-gate methodology hold for release builds too — an owner / orchestrator decision, not made here.
+3. **The `[profile.release]` question — MEASURED 2026-09-03, and it is the owner's call.** The
+   shipped release is `codegen-units = 16`, no LTO. The candidate settings were measured on seven
+   single-threaded hot-path benchmarks from ONE source snapshot (EV-118 … EV-120): `lto = "fat"` +
+   `codegen-units = 1` is ≈17 % geomean faster and a 62 % smaller binary for a 2–3× clean-build
+   cost; `lto = "thin"` + `codegen-units = 1` buys most of it for ≈+15 % build time; one path
+   (`query_ref_iter_10k`) is 2.68× faster under fat LTO at 16 units and 17 % SLOWER at 1,
+   undissected. The numbers and the six questions are in "The shipped build profile" above;
+   nothing there is a rule.
 4. **Lint first waves** — require building the repository, not done while other agents hold
    `crates/`: `unsafe_op_in_unsafe_fn = "deny"` and `clippy::undocumented_unsafe_blocks = "warn"`
    in the workspace lint table (ERG-20); `clippy::unwrap_used` at warn (ERG-26); `#![warn(missing_docs)]`
@@ -606,12 +743,17 @@ a key collision in `component_registry` is the KE13 class at its worst).
    three things. (i) The HOISTED `assert_unchecked` proposed for it does not work: 13 panic sites
    survive and the body grows 261 → 371 instructions — refused as REF-44. (ii) The per-lane
    promise and `get_unchecked` are the same thing with different spellings (109 vs 107
-   instructions, 0 panic sites), already covered by ERG-03. (iii) The safe `[]` ran at
-   **0.76–0.79× of `row_ptr`** — FASTER, three runs of three, despite its 13 panic sites — so
-   "the slice form could not elide its panic branch" is not by itself a reason to keep `row_ptr`.
-   ⚠️ The lab kernel is SCALAR and L2-resident; the tree's is 8-wide with different aliasing, and
-   the timings were taken under load. What remains open is the measurement AT THE SITE; the
-   direction to test first has flipped.
+   instructions, 0 panic sites), already covered by ERG-03. (iii) ~~The safe `[]` ran at
+   0.76–0.79× of `row_ptr` — FASTER, three runs of three, despite its 13 panic sites.~~
+   **REVERSED 2026-09-03 (EV-92):** two independent re-measurements — a read cohort at three cache
+   tiers, and the tree's real read-modify-write shape at the actual pyramid (10 011 bodies /
+   29 751 contacts) — put the safe `[]` at parity to **10 % SLOWER** than `row_ptr`, never faster,
+   in eighteen of eighteen paired comparisons. "The slice form could not elide its panic branch"
+   is confirmed as a codegen fact and is still not by itself a reason, because all three spellings
+   emit the same 59 vector ops. ⚠️ Both lab kernels are SCALAR; the tree's is 8-wide with ≈25 stack
+   scratch arrays and different aliasing. What remains open is the measurement AT THE SITE, on the
+   AVX2 arm; the expectation to test against is now "within ≈10 %, with a small consistent edge to
+   the raw form", and the site stays on `row_ptr`.
 10. **The intrusive entity free list is sited and measured but not adopted (EV-93).**
    `enum Slot { Live { NonNull, u32, u32 }, Dead { Option<NonZeroU32>, u32 } }` is still 16
    bytes, so `entity_master.rs`'s `free_entity_ids: Vec<EntityId>` — a parallel data system by
@@ -650,8 +792,8 @@ a key collision in `component_registry` is the KE13 class at its worst).
    only residual blocker is `type_intern`'s `std::sync::OnceLock` (4 sites; `core` has no `Sync`
    once-cell, and adding `extern crate alloc` does not help at all); the two `Vec`-backed sparse
    maps are the crate's only `alloc` users, and `sparse_map`'s `Vec<Option<usize>>` is already
-   ERG-04's worst measured site (EV-04 / EV-59, 2.55x) — the crate split and the ERG-04 fix are
-   one edit. Two crates already carry `#![no_std]` (`boyko_sdf_math`, `boyko_shaderdsl`), so the
+   ERG-04's worst measured site (EV-04 / EV-59 — 3–5× cache-resident, 1.0–2.1× at its real 512-key
+   domain, re-scaled 2026-09-03) — the crate split and the ERG-04 fix are one edit. Two crates already carry `#![no_std]` (`boyko_sdf_math`, `boyko_shaderdsl`), so the
    pattern is house-approved. This is ENGINE work with an owner, not a rule; it is the only
    proposal in three sweeps that would convert a CLAUDE.md principle into a LINK error rather than
    better prose.
@@ -716,7 +858,7 @@ a key collision in `component_registry` is the KE13 class at its worst).
 - [rust-ergonomics/05-macros-and-const-eval.md](rust-ergonomics/05-macros-and-const-eval.md) — ERG-31 (ERG-29 and ERG-33 both merged into it)
 - [rust-ergonomics/06-iterators-and-data-flow.md](rust-ergonomics/06-iterators-and-data-flow.md) — ERG-35, 36, 38
 - [rust-ergonomics/08-refused.md](rust-ergonomics/08-refused.md) — REF-00 … REF-52, in two parts (REF-40, REF-43, REF-44 and REF-47 are cost refusals; REF-41, REF-42, REF-45, REF-46, REF-48, REF-49 and REF-50 … REF-52 are ceremony / scope / no-site refusals — ids are stable, not positional)
-- [rust-ergonomics/EVIDENCE.md](rust-ergonomics/EVIDENCE.md) — EV-01 … EV-114; the only place a number lives
+- [rust-ergonomics/EVIDENCE.md](rust-ergonomics/EVIDENCE.md) — EV-01 … EV-125; the only place a number lives. Rows EV-115 … EV-125 are the 2026-09-03 re-verification and the profile investigation; every re-verdicted row keeps its old verdict struck through in place
 - [RUST-FRONTIER.md](RUST-FRONTIER.md) — the companion in the other direction: this guide is the rules for code written NOW on the pinned stable channel; that document is the standing ADOPT / REFUSE / BLOCKED-ON-STABLE verdict per recent-Rust feature (FR-nn, ledger FV-nn), including the trait-solver answer and the price of any nightly pin — consult it before proposing a feature that is not in this guide.
 - The former `04-errors-panics-assertions.md` and `07-naming-and-documentation.md` are merged into
   §3 and §2 respectively and no longer exist.

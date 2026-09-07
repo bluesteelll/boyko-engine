@@ -44,7 +44,9 @@ why it is dangerous: it re-exposes every inner method and re-admits the raw valu
 on a solve view it reintroduces the O11-SP4 race in two lines (EV-17). REFUSED (ERG-17).
 
 **REF-02 — Typestate through `Box<dyn State>` or a runtime `mode` field.** An allocation per
-transition, an indirect call per method (EV-14: 5×; EV-60: 2.5–3× on 64-byte components), and
+transition, an indirect call per method (EV-14, re-verified 2026-09-03: 7–11× on the engine's
+12-byte query pair at per-worker chunk scale, 25× / 9× on an L1 / L2 stream, 1.0–1.14× only beyond
+the LLC; EV-60's 2.5–3× was the 64-byte L2 point), and
 the wrong-state call becomes a runtime panic again — nothing was bought. REFUSED (ERG-08).
 
 **REF-03 — `#[non_exhaustive]` on workspace-internal types.** Adding a variant produces ZERO
@@ -61,8 +63,12 @@ not fit: one exclusive token per brand proves "this thread owns all of it", the 
 coloured solve over disjoint rows (documented, not measured). REFUSED; ERG-06 shape 2 is not this.
 
 **REF-06 — `-> impl Trait` for a value the kernel stores; `Box<dyn Iterator>` as its fix.**
-Unnameable, so the reachable "fix" is the banned box: allocation + vtable per `next()` (EV-13:
-1.8×; EV-60: 2.8×). RPIT for consumed values; name the concrete type for stored ones (ERG-12).
+Unnameable, so the reachable "fix" is the banned box: an allocation per construction by
+definition, and a vtable per `next()` that costs 1.4–3.2× per element only while the vtable is
+genuinely dynamic and the column L1/L2-resident, parity beyond the LLC (EV-13, re-verified
+2026-09-03; ~~EV-13: 1.8×; EV-60: 2.8×~~ were the L1/L2 corner) — and a box whose concrete type is
+visible at the loop is devirtualised and costs one malloc+free per call (EV-124). RPIT for
+consumed values; name the concrete type for stored ones (ERG-12).
 
 **REF-07 — Const-generic `bool` flags; dimension-checked const-generic math; const generics
 beyond two or three fixed capacities.** 2^N bodies per flag, one copy of every loop per shape;
@@ -109,22 +115,35 @@ which would break the `CloneFn` / `HookFn` tables. REFUSED below the boot layer.
 are inherited, so a `Res` state becomes `!Send` the moment `R` is (EV-06). REFUSED (ERG-05).
 
 **REF-13 — `..Default::default()` where `Default` allocates.** The overridden field's default is
-built and then freed: 2 alloc + 1 dealloc per construction vs 1 + 0 (EV-45). REFUSED (ERG-29).
+built and then freed: 2 alloc + 1 dealloc per construction vs 1 + 0, and 1.48× / ~40 ns per
+construction — one malloc+free — re-verified 2026-09-03 with the counting allocator and the clock
+agreeing (EV-45). REFUSED (ERG-31 clause 1).
 
-**REF-14 — `iter().chain(…)` inside a per-element loop.** A two-state iterator whose state test
-survives into the loop: SMALLER and slower — 1.7× on an L1-resident loop (EV-21), 3–8 % at
-column scale (EV-60). The magnitude is scale-dependent; the direction is not. REFUSED per element;
-two loops (ERG-35). Fine at setup.
+**REF-14 — `iter().chain(…)` inside a per-element loop — DEMOTED to a preference, 2026-09-03.**
+A two-state iterator whose state test survives into the loop and defeats vectorisation of the
+reduction: 21 instructions with zero `ymm` operands against 73 with 21 vector ops — a reproducible
+codegen fact. ~~SMALLER and slower — 1.7× on an L1-resident loop (EV-21), 3–8 % at column scale
+(EV-60). The magnitude is scale-dependent; the direction is not.~~ Re-verified at three cache tiers
+(EV-21): **27 % on a 64-byte column that fits L1** (256 rows, below the parallel floor),
+indistinguishable at L2 and beyond, and on `f32` not even 3–8 % — the direction does NOT survive
+once the column leaves L1. A refusal that rested on a magnitude which shrank to noise at every
+column scale the engine allocates is not a Part-A refusal; it is a PREFERENCE: write two loops
+because they read as two loops and vectorise, and never cite the change as a cost one without a row
+(REF-36); ERG-35's clause is a SHOULD-NOT. The id stays for stability. Fine at setup.
 
 **REF-15 — `Index` as the hot-path accessor on a proven-in-range path.** `Index` cannot be
 fallible or `unsafe`, so its contract is a compare and a cold panic branch per element (EV-23).
-BUT the time delta of removing it did not reproduce on this engine's shapes (EV-60), so this is a
-preference, not a licence: prefer the proven form — a proof-carrying id and a plain `[]`
+BUT on a sequential index the two spellings are ONE SYMBOL at the shipped profile (EV-02,
+re-verified 2026-09-03 — on the `Transform` column the unchecked symbol does not even exist; its
+call sites were rewritten to the checked one), and on a gathered index the time delta is
+1.19–1.28× at 16 KiB only, inside the noise band at 256 KiB and unusable beyond the LLC (EV-23), so
+this is a preference, not a licence: prefer the proven form — a proof-carrying id and a plain `[]`
 (ERG-03; the mask that would delete the check is REF-40) — and never write `get_unchecked` on
-this row's authority. KEEP `Index` for cold, diagnostic and test sites. The preference is for the
-SEQUENTIAL shapes EV-60 measured; the gathered-index SIMD kernel (`colored.rs`,
-`solve_color_avx2`, sixteen body rows per cohort off gathered indices) is UNMEASURED and stays
-on `row_ptr` (ERG-03 exceptions, ERG-07).
+this row's authority. KEEP `Index` for cold, diagnostic and test sites. On the read-modify-write
+cohort at the real 10k pyramid the safe `[]` is at parity to 10 % slower than `row_ptr` (EV-92,
+reversed from its 2026-09-02 "faster"); the AVX2 arm of that kernel (`colored.rs`,
+`solve_color_avx2`, sixteen body rows per cohort off gathered indices) is still UNMEASURED at the
+site and stays on `row_ptr` (ERG-03 exceptions, ERG-07).
 
 **REF-16 — `#[inline(always)]` without a measurement.** A directive the compiler honours even
 when honouring it bloats L1i (principle 3); rustc 1.97.1 already inlines tiny and ~20-line
@@ -141,10 +160,15 @@ public types; hand-write the three fields that matter on a 200-field GPU descrip
 
 **REF-19 — Hand-rolled raw-pointer loops where a slice API exists.** The previous draft's
 performance argument ("LLVM cannot prove two derefs off one raw base disjoint") is no longer
-true on rustc 1.97.1 — the raw form vectorises and times identically (EV-60, EV-70). The refusal
-stands on review budget: the raw loop carries a SAFETY obligation the slice form does not, for a
-gain that is zero. REFUSED except ERG-24's two cases (no slice expresses the access; an aliasing
-projection with its id).
+true on rustc 1.97.1 — on `f32` the raw form vectorises and times at parity (EV-70, EV-22). ~~The
+refusal stands on review budget: the raw loop carries a SAFETY obligation the slice form does not,
+for a gain that is zero.~~ Corrected 2026-09-03: the gain is NOT always zero — on a 64-byte column
+the slice form fails to unroll and the raw loop is 1.4–2.3× faster while the column is
+L1-resident (EV-22), indistinguishable elsewhere. The refusal stands on review budget alone: the
+raw loop carries a SAFETY obligation the slice form does not, and where a wide L1-resident chunk
+measures slower at the site, ERG-24 case (a) already licenses the raw form with the number written
+there. REFUSED except ERG-24's two cases (no slice expresses the access, or the slice form measured
+slower at the site; an aliasing projection with its id).
 
 **REF-20 — `impl Into<String>` / `String` in kernel signatures or errors.** An allocation with
 a convenient face (EV-39 records honestly that the probe could not show it — LLVM deleted a dead
@@ -185,7 +209,9 @@ previous draft's census "none puns live kernel data" was wrong.) REFUSED otherwi
 
 **REF-28 — `OnceLock` / `LazyLock` read per element.** An acquire load and a compare that are
 not hoisted (the miss branch is an exit), so the loop stays scalar — 8 instructions per element,
-zero vector ops; hoisted, the plain vectorised loop (EV-56; EV-60: 1.6×). REFUSED per element;
+zero vector ops; hoisted, the plain vectorised loop (EV-56, re-verified 2026-09-03: **13–16× at
+L1, 6–7× at L2** — it is scalar against `ymm` — and 1.0× on a stream past the LLC; ~~EV-60: 1.6×~~
+was a serious understatement at every per-worker chunk size). REFUSED per element;
 `get()` once at the system entry. The one hoisting rule WITH a measurement — contrast REF-21.
 
 **REF-40 — A range-narrowing mask (`& (N - 1)`, `% N`) on a proof-carrying id to delete the
@@ -196,7 +222,9 @@ wrongly-widened id it converts a bounds PANIC into a silent read of the wrong ta
 is ERG-26 case 2's definition of silent corruption, in the component registry every storage path
 keys on — so a developer cannot satisfy ERG-03-with-mask and ERG-26 at the same site. (2) The
 4-vs-13 count is the reading this ledger's own rule forbids: instruction count is not a cost
-proxy. (3) EV-60 measured no time delta from a bounds check on this engine's shapes. Plain `[]`
+proxy. (3) On a sequential index the checked and unchecked loops are ONE SYMBOL at the shipped
+profile (EV-02, re-verified 2026-09-03), and on a gathered one the delta is ~20 % at L1 only
+(EV-23). Plain `[]`
 under the proof; `get_unchecked` only under a `// SAFETY:` naming the mint plus a measurement at
 the site (ERG-03). The previous revision of this guide carried the mask as a rule; it is
 withdrawn, and the withdrawal is recorded here so nobody re-derives it from EV-67's count.
@@ -258,7 +286,7 @@ bit-determinism-pinned.
 
 **REF-36 — Slice patterns, `first_chunk`, `as_chunks` or any adaptor as a PERFORMANCE claim.**
 The ledger's history forbids it: EV-20's four adaptor comparisons came out three ways, EV-21's
-smaller code was slower. A refutable slice pattern on a runtime-length slice is a let-else with an
+smaller code was slower at L1 and indistinguishable at column scale. A refutable slice pattern on a runtime-length slice is a let-else with an
 `else` arm the reader must evaluate; `as_chunks` drops the remainder silently. Use them where they
 READ better (ERG-38); never cite them as a cost change without a row.
 
@@ -323,8 +351,11 @@ and at that point it is `get_unchecked` (107) with a different spelling and the 
 violation. REFUSED in the hoisted form. The per-lane form is not separately refused and not
 separately permitted: it is exactly what ERG-03 already licenses — a measurement at the site and
 a SAFETY naming the mint — with no additional guarantee, so a site that wants it writes
-`get_unchecked` and gets the same asm, or writes the safe `[]`, which EV-92 measured at
-**0.76–0.79× of the current `row_ptr` form** in that shape (index OPEN 9).
+`get_unchecked` and gets the same asm, or writes the safe `[]`, ~~which EV-92 measured at
+0.76–0.79× of the current `row_ptr` form in that shape~~ which two independent re-measurements
+(2026-09-03, EV-92) put at parity to 10 % SLOWER than `row_ptr` on the real read-modify-write
+cohort at the 10k pyramid — never faster. The refusal of the HOISTED form stands on the asm half
+(13 panic sites survive, +42 %), which was not re-taken and is EV-92's own shape (index OPEN 9).
 
 **REF-45 — `ParamSet` as a rule of THIS guide.** A `ParamSet<(P0, P1)>` whose `p0(&mut self)` /
 `p1(&mut self)` accessors make two otherwise-conflicting system parameters non-simultaneous is

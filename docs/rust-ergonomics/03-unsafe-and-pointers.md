@@ -239,9 +239,12 @@ guide that names it; OPEN 1 is corrected in the index accordingly.
 
 ### ERG-24 — Reach for the slice API (`split_at_mut`, `chunks_exact_mut`, `iter_mut`) before raw-pointer arithmetic for disjoint access; a raw pointer only for a named aliasing reason with its id, or with a measurement at the site
 
-**Binding:** MUST · **Cost:** ZERO-COST — on rustc 1.97.1 the two forms vectorise alike and time
-alike (EV-60, EV-70); the ledger's "25 % faster" (EV-22) no longer reproduces · **Guarantee
-level:** measured
+**Binding:** MUST · **Cost:** on `f32` the two forms vectorise alike and time alike (EV-70;
+EV-22 re-verified 2026-09-03); ⚠️ **on a 64-byte column the SLICE form is the one that fails to
+unroll, and it is 1.4–2.3× slower while the column is L1-resident**, indistinguishable at L2 and
+beyond (EV-22). The ledger's "25 % faster" for the slice form (2026-08) and "at worst equal"
+(2026-09-02) are both withdrawn; the rule rests on review budget ALONE, and case (a) below is its
+measured escape · **Guarantee level:** measured at three cache tiers
 
 **Rule.** Two mutable regions of one buffer are `let (lo, hi) = buf.split_at_mut(mid)`; a stride
 is `chunks_exact_mut(n)`. A raw pointer is minted instead in exactly two cases:
@@ -268,15 +271,22 @@ materialise a transient `&MaybeUninit<Archetype>` whose borrow-stack pop could l
 retag-conflict …", U11); `component_api.rs`'s `addr_of!((*p).columns)`; `dispatcher_token.rs`'s
 `WorldView` ("NEVER forms a struct-wide `&EcsMaster`").
 
-**What it buys.** Review budget: the slice form has no SAFETY obligation, and it is never slower.
-The previous draft claimed a speed win; that claim is withdrawn — the rule stands on
-reviewability and on being at worst equal.
+**What it buys.** Review budget: the slice form has no SAFETY obligation. ~~And it is never
+slower … the rule stands on reviewability and on being at worst equal.~~ Withdrawn 2026-09-03: on
+a 64-byte column at L1 it IS slower (EV-22). The rule stands on reviewability, and on the measured
+fact that the cost is confined to a wide, L1-resident chunk — which is exactly what case (a)'s
+"measured slower at the site, number written there" exists for.
 
-**Verified.** EV-70 (this pass): `f32` halves — `split_at_mut` 40 instructions with 2 `addps`,
-raw pointers 34 with 2 `addps`; BOTH vectorised. EV-60 (runtime-cost guard, three runs):
-0.078–0.085 vs 0.082–0.085 ns/elem on `f32`; 1.062 vs 1.083–1.102 on 64-byte components — within
-noise. EV-22's 2026-08 result (77 scalar instructions, 25 % slower) is kept in the ledger as
-superseded.
+**Verified.** EV-70 / EV-22 (re-verified 2026-09-03 at the shipped profile, codegen-units 16
+and 1): `f32` halves — `split_at_mut` 60 instructions / 15 vector ops / 12 `ymm`, raw pointers
+62 / 18 / 12, BOTH vectorised, and the timing sign flips with code placement between two binaries
+(parity). 64-byte column — `split_slice_col` 23 instructions / 3 vector ops with a per-iteration
+`subq $1; jb <panic>` and NO unrolling; `split_raw_col` 43 / 15, 4× unrolled, no panic site; the
+raw form faster in 6 runs of 6 at L1 (2.33× and 1.42× in two binaries), the binaries disagreeing
+at L2 (1.06× / 1.21×), inside the 25 % band at 64 MiB. EV-60's 64-byte parity (1.062 vs
+1.083–1.102 at 256 KiB) was its one L2 point and is consistent with this; it had no L1 point.
+EV-22's 2026-08 result (77 scalar instructions, the raw form 25 % slower) is REFUTED and kept
+struck through in the ledger.
 
 **Exceptions.**
 - The colour-partitioned shape is case (a) by construction and carries "disjointness comes from the
@@ -291,7 +301,9 @@ superseded.
 **Binding:** MUST (the guard, for any undo — a TLS depth, a cursor write-back, a suppression flag,
 a raw allocation freed on early return); SHOULD (`mem::take` / `replace` / `swap` over `clone` /
 `RefCell` / a parallel `Vec`); MAY (`ManuallyDrop` / `MaybeUninit`, with layout gates) · **Cost:**
-the guard's normal path is IDENTICAL; it adds an unwind landing pad (EV-62); `mem::take` of a
+the guard's normal path is IDENTICAL when its `Drop` inlines — a one-line guard's does; a
+`#[inline(never)]` `Drop` puts a call on the normal path — and it adds an unwind landing pad
+(EV-62); `mem::take` of a
 `Vec` field is deleted by LLVM (EV-65); `replace` of a large inline array COSTS two `memcpy`s
 (EV-65) · **Guarantee level:** language (drop order, drop-on-unwind); measured
 
@@ -333,12 +345,16 @@ wrong (in a threadpool where a task body may panic and a joiner runs a sibling s
 is not theoretical); and a new exit path added later that forgets the epilogue. Clause 2 removes
 the reason a C-trained author reaches for `RefCell`, a clone or a parallel `Vec` — all three banned.
 
-**Verified.** EV-62 (this pass, `panic = unwind`): with an opaque `fn()` body the guard and the
-manual epilogue have IDENTICAL normal paths (the same 20 instructions); the guard adds exactly a
-7-instruction cleanup landing pad (`drop_glue`, `_Unwind_Resume`, `panic_in_cleanup`) plus an
-exception-table entry — the cost IS the thing bought. With a body the compiler can see does not
-unwind, the two fold to one symbol (`run_manual_nounwind = run_guard_nounwind`), at codegen-units 1
-and 16. EV-65: `mem::take` of a `Vec` field around a helper call is the same 5 instructions as the
+**Verified.** EV-62 (`panic = unwind`; re-verified 2026-09-03 at an explicit codegen-units 16
+and 1): with an opaque `fn()` body the guard and the manual epilogue have IDENTICAL normal paths
+(9 instructions, byte-identical); the guard adds a FOUR-instruction cleanup landing pad (`decl;
+movq; callq _Unwind_Resume; ud2`) plus `.seh_handler` and an exception-table entry — the cost IS
+the thing bought. ~~A 7-instruction pad with `drop_glue` and `panic_in_cleanup`~~ — that shape
+reproduces only when the guard's `Drop` is `#[inline(never)]`, and THEN the guard also puts a
+`callq <Guard as Drop>::drop` on the NORMAL path and grows the frame (`subq $32` → `$48`): the
+"normal path is identical" sentence is true exactly when `Drop` inlines, which a one-line depth /
+cursor guard's does. With a body the compiler can see does not unwind, the two fold to one symbol
+(`run_manual_nounwind = run_guard_nounwind`) at 16 and 1 units and across a forced unit split. EV-65: `mem::take` of a `Vec` field around a helper call is the same 5 instructions as the
 plain reborrow — LLVM deleted the move-out and move-back; `mem::replace` on a `[u8; 4096]` field
 is two 4095-byte `memcpy`s and a 4136-byte frame with a `___chkstk_ms` probe. EV-59:
 `run_manual = run_guard` alias in the finder's lab (a non-unwinding body).
@@ -584,10 +600,15 @@ condition is well-predictable"*. There are zero uses in this workspace and no si
 misprediction rate, so it arrives WITH a row or not at all. *Verified* — EV-90: on an arithmetic
 select (`acc += if d < r { hit } else { miss }`) the hint is an **ICF alias with the plain `if`** —
 it buys nothing, because LLVM already blends; on a two-READ select (`if p { a[i] } else { b[i] }`)
-it is 140 instructions and 12 branches against 343 and 54, and it runs **3.2–9.0× faster on a
-random 50/50 predicate** and **0.84–1.48× on a sorted one — a 19 % LOSS in one of three runs**.
-The measurement line at the site therefore names two numbers, not one: the random case must win
-AND the predicted case must not lose more than it gains.
+~~it is 140 instructions and 12 branches against 343 and 54, and it runs 3.2–9.0× faster on a
+random 50/50 predicate and 0.84–1.48× on a sorted one — a 19 % LOSS in one of three runs~~
+**(re-verified 2026-09-03, EV-90)** the instruction counts are CODEGEN-UNIT-DEPENDENT (at the
+shipped 16 units the select form is the BIGGER one, 99 against 35; at 1 unit 36 = 36) and are not
+carried; the random-predicate win is **1.01× at L1 (none), 2.55× at L2 (real, ranges disjoint),
+1.02× beyond the LLC (none)**; the sorted predicate is 1.00× / 1.02× / 1.00× — no loss and no win
+at any scale. The measurement line at the site therefore names two distributions AND the working
+set: the hint buys something only for a genuinely unpredictable branch over data that is L2- but
+not L1-resident, and nothing on either side.
 
 ---
 
