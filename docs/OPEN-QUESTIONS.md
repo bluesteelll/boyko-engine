@@ -4894,3 +4894,54 @@ rewriting the yardstick mid-campaign is closer to scope. Three things are worth 
    A rule that requires consumer agreement is only as good as the consumers it agrees across. Adding
    the scheduler and the bake as harnesses is a real cost and a real coverage gain; it is your call
    whether the campaign pays it now or records the gap.
+
+## The `Vec` side-store did not come back — Stage 4 of the 2026-07 remediation was never run (2026-09-08)
+
+Asked why physics holds bulk data in `std::Vec` again after the O11-SP4 incident "when we checked
+everything and there were no problems". It never came back. It was never removed, and three
+structural reasons kept that invisible.
+
+**IT WAS FOUND, NAMED, AND STAGED.** `docs/ARCH-AUDIT-ECS-DATA-REMEDIATION.md` lists
+`ConstraintGraph ×8` under **S3** — *"per-step SoA/CSR scratch, ~20 resources / ~90 Vec fields …
+only the backing medium (std::Vec → ComponentPool) changes"* — and it is **not** in that document's
+"Legit-keep" list. Its remedy is **Stage 4**, *"mechanically swap the S3 per-step `Vec` fields →
+`ScratchColumn`"*.
+
+**STAGES 0 AND 1' RAN; STAGE 4 DID NOT.** `ScratchColumn` exists (`scratch_ids.rs`), the three body
+mirrors are converted, and `solver/colored.rs:305` documents the address-stable backing. So what was
+fixed is **the race**, not **the class** — which is exactly why the memory of it is "we checked and
+it was clean": SP4 is closed and its gate is green. Counted 2026-09-08 across
+`crates/boyko_physics/src`: **50 fields on `ScratchColumn`, 106 still on `Vec`.** Part of S3 did get
+converted (`ra_x`/`ra_y` at `colored.rs:806` are the `ContactColumns` SIMD lanes); `ConstraintGraph`'s
+eight did not. The remediation is **partially executed**.
+
+**WHY NOTHING SURFACED IT — three reasons, all structural:**
+
+1. **There is no gate on `Vec`.** `clippy.toml` mechanically bans `HashMap`, `HashSet`, `Mutex`,
+   `RwLock`, `Rc`, `RefCell` and their `parking_lot`/`hashbrown` forwards. `std::vec::Vec` is
+   absent. Principle 0's "no parallel data system" clause rests on prose alone, while the repo's
+   other two make-a-check-disappear mechanisms — `unsafe` and `#[allow]` — each carry a mandatory
+   written justification and a census.
+2. **Two different "we checked everything" statements read as one.** `clippy.toml`'s header says a
+   full classification across 14 crates *"found ZERO violations"* — true, and scoped to the types it
+   lists. The architecture audit says *"~90 Vec fields"* in physics — also true, and about a class
+   the lint never covered. The first sentence lives in the gate file, sounds absolute, and carries
+   the same 2026-07 date as the second.
+3. **Neither plan document tracks stage status.** There is no "Stage 1' — done" and no "Stage 4 —
+   open" anywhere in `ARCH-AUDIT-ECS-DATA-REMEDIATION.md` or `DENSE-COMPONENTS-PLAN.md`. A
+   half-executed plan is textually identical to an unexecuted one.
+
+**WHAT IS PUT TO YOU:**
+
+1. **Does Stage 4 get scheduled, or is S3 accepted as a standing exception?** Either is defensible —
+   the pattern (CSR/SoA, cleared-and-refilled, zero-alloc) is already correct and the audit says so;
+   what `ScratchColumn` buys is address-stability on grow, which matters only where a raw pointer
+   outlives a resize. If it is accepted, it belongs in "Legit-keep" with that reason, not left
+   looking like open work.
+2. **Should `Vec`-as-a-durable-side-store get a mechanical gate?** It cannot be a blanket
+   `disallowed-types` entry — `Vec` is legitimate almost everywhere — so it would have to be a
+   census over `Resource`-held structs, in the shape `ignore_reasons_census.rs` and
+   `print_census.rs` already use. That is real work and it is the only thing that would stop this
+   recurring.
+3. **Should the plan documents carry per-stage status?** The cheapest of the three, and it is what
+   turned a known backlog into a surprise.
