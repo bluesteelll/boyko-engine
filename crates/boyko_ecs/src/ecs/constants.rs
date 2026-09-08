@@ -163,7 +163,7 @@ pub const fn pool_reserve_rows(stride: usize) -> usize {
 /// cache line per `component_id` (mod 64) lands consecutive pools' element-`i`
 /// rows in 64 *different* L1 sets (and, since the stride is a cache line,
 /// 64 different L2 sets too).
-const POOL_STAGGER_LINES: usize = 64;
+pub const POOL_STAGGER_LINES: usize = 64;
 
 // The stagger granule must preserve the SIMD data-base alignment guarantee:
 // each step is a whole `CACHE_LINE_SIZE` (64 B) and the data sub-region starts
@@ -193,7 +193,25 @@ const _: () = assert!(
 /// staggered data base preserves the AVX2 alignment contract. It is strictly
 /// less than one page (`< 64 × 64 = 4096`), so it costs at most one extra
 /// lazily-committed page per pool.
-pub(crate) const fn pool_base_stagger(component_id: usize) -> usize {
+/// # Contract for a COHORT of columns (why this is `pub`)
+///
+/// The stagger is a pure function of `component_id % POOL_STAGGER_LINES`, so
+/// **two pools whose ids are congruent mod 64 get the SAME stagger** and their
+/// element `i` lands in the same L1/L2 set again — the exact conflict storm this
+/// function exists to prevent. A subsystem that sweeps many columns at index `i`
+/// in one hot loop (a "cohort") therefore has an obligation the kernel cannot
+/// discharge for it: **the cohort's ids must be pairwise distinct mod
+/// [`POOL_STAGGER_LINES`]**, and the cohort must be at most that many columns
+/// wide.
+///
+/// A CONTIGUOUS run of at most `POOL_STAGGER_LINES` ids satisfies this
+/// automatically, which is the cheapest way to hold the invariant — assert the
+/// run's width in a `const _: () = assert!(...)` at the id-allocation site and
+/// the property is checked at compile time. Both this function and
+/// `POOL_STAGGER_LINES` are exported so a cohort owner can state and test that
+/// invariant against the kernel's own definition instead of re-deriving the
+/// modulus (which would silently drift the day the constant changes).
+pub const fn pool_base_stagger(component_id: usize) -> usize {
     (component_id % POOL_STAGGER_LINES) * CACHE_LINE_SIZE
 }
 

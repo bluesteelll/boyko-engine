@@ -36,7 +36,9 @@
 //! across many worlds cost one branch each after the first.
 
 use boyko_ecs::ecs::core::component::component_registry::{MAX_COMPONENTS, register_layout};
-use boyko_ecs::ecs::constants::{POOL_MAX_ROWS, POOL_MIN_ROWS, POOL_TARGET_DATA_BYTES};
+use boyko_ecs::ecs::constants::{
+    POOL_MAX_ROWS, POOL_MIN_ROWS, POOL_STAGGER_LINES, POOL_TARGET_DATA_BYTES,
+};
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 
 use crate::resources::BodyState;
@@ -109,6 +111,57 @@ pub(crate) const SCRATCH_ID_BODY_EFF_COLORED: usize = MAX_COMPONENTS - 2;
 /// [`SoftStepSolver`](crate::solver::SoftStepSolver)'s
 /// `bodies: ScratchColumn<BodyEffective>` serial per-body view (mirror 3).
 pub(crate) const SCRATCH_ID_BODY_EFF_SERIAL: usize = MAX_COMPONENTS - 3;
+
+// ── The cache-set invariant on the whole scratch band (P2-CACHE-FIX) ─────────
+//
+// `ComponentPool` staggers each pool's in-reservation base by
+// `pool_base_stagger(id) = (id % POOL_STAGGER_LINES) * CACHE_LINE_SIZE`, so
+// element `i` of neighbouring columns lands in DIFFERENT L1/L2 sets. Two ids
+// congruent mod `POOL_STAGGER_LINES` collapse back onto the same set — and the
+// solver sweeps ~24 contact columns per contact, which is exactly the
+// conflict-miss storm that cost the measured ~40 % rigid-solver regression when
+// these columns first moved off `std::Vec` (constants.rs, `pool_base_stagger`).
+//
+// The band is a single CONTIGUOUS descending run, so distinctness reduces to a
+// width check: a run of at most `POOL_STAGGER_LINES` consecutive integers has
+// pairwise-distinct residues mod `POOL_STAGGER_LINES`. Asserting the width is
+// therefore a compile-time proof of the whole property.
+//
+// ⚠ This is the constraint a future migration is most likely to break, because
+// it breaks SILENTLY: adding columns is a correctness no-op and the cost shows
+// up only as a throughput regression nobody attributes to id assignment. Widen
+// the band past `POOL_STAGGER_LINES` and this assert fires at compile time;
+// allocate a column OUTSIDE the run and `scratch_band_stagger_slots_are_distinct`
+// fires at test time.
+
+/// Highest id in the physics scratch band (inclusive).
+const SCRATCH_BAND_TOP: usize = SCRATCH_ID_BODY_STATE;
+
+/// Lowest id in the physics scratch band (inclusive).
+const SCRATCH_BAND_BOTTOM: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM;
+
+/// Number of ids the scratch band spans, top and bottom inclusive.
+const SCRATCH_BAND_WIDTH: usize = SCRATCH_BAND_TOP - SCRATCH_BAND_BOTTOM + 1;
+
+// Contiguity: the contact band must begin exactly one id below the lowest body
+// mirror, or the run has a hole and the width check no longer implies
+// distinctness.
+const _: () = assert!(
+    SCRATCH_ID_CONTACT_BAND_TOP + 1 == SCRATCH_ID_BODY_EFF_SERIAL,
+    "physics scratch band is not contiguous: the contact band must start one id \
+     below SCRATCH_ID_BODY_EFF_SERIAL, or the width check below stops implying \
+     pairwise-distinct cache-set staggers"
+);
+
+// Width: at most one full stagger period, so every id in the run gets its own
+// cache-set slot.
+const _: () = assert!(
+    SCRATCH_BAND_WIDTH <= POOL_STAGGER_LINES,
+    "physics scratch band is wider than one stagger period: two of its columns \
+     now share a cache-set slot and element i of both lands in the same L1/L2 \
+     set — the P2 conflict-miss storm. Either keep the band within \
+     POOL_STAGGER_LINES ids or give the cohort explicit, distinct slots"
+);
 
 /// Registers the [`Layout`](std::alloc::Layout) of every scratch element type
 /// under its reserved synthetic id, idempotently.
@@ -201,4 +254,83 @@ pub(crate) fn body_eff_colored_id() -> ComponentId {
 #[inline]
 pub(crate) fn body_eff_serial_id() -> ComponentId {
     ComponentId::new(SCRATCH_ID_BODY_EFF_SERIAL)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boyko_ecs::ecs::constants::pool_base_stagger;
+
+    /// Every id this module hands to a `ScratchColumn` gets its OWN cache-set
+    /// stagger slot.
+    ///
+    /// The const asserts above prove the property for the band as a RANGE. This
+    /// test proves it for the ids actually handed out, which is the stronger
+    /// statement and the one that survives a future column being allocated
+    /// outside the run: a new id that collides with an existing one turns this
+    /// red even though the band's width is untouched.
+    ///
+    /// It compares against the kernel's own `pool_base_stagger` rather than
+    /// re-deriving `% 64` locally, so the day `POOL_STAGGER_LINES` changes this
+    /// test follows it instead of silently testing a stale rule.
+    #[test]
+    fn scratch_band_stagger_slots_are_distinct() {
+        let mut ids: Vec<usize> = vec![
+            SCRATCH_ID_BODY_STATE,
+            SCRATCH_ID_BODY_EFF_COLORED,
+            SCRATCH_ID_BODY_EFF_SERIAL,
+        ];
+        ids.extend((0..CONTACT_COLUMN_COUNT).map(|k| contact_column_id(k).get()));
+
+        assert_eq!(
+            ids.len(),
+            SCRATCH_BAND_WIDTH,
+            "anti-vacuity: the enumerated ids must cover the whole declared band, \
+             or this test checks a subset and a collision can hide outside it"
+        );
+
+        for (i, &a) in ids.iter().enumerate() {
+            for &b in &ids[i + 1..] {
+                assert_ne!(
+                    pool_base_stagger(a),
+                    pool_base_stagger(b),
+                    "scratch ids {a} and {b} share cache-set stagger slot {} of {} — \
+                     element i of both columns lands in the same L1/L2 set, which is \
+                     the P2 conflict-miss storm the stagger exists to prevent",
+                    a % POOL_STAGGER_LINES,
+                    POOL_STAGGER_LINES
+                );
+            }
+        }
+    }
+
+    /// The band is a contiguous run with no hole and no duplicate — the premise
+    /// the width-based const assert rests on.
+    #[test]
+    fn scratch_band_is_a_contiguous_run() {
+        let mut ids: Vec<usize> = vec![
+            SCRATCH_ID_BODY_STATE,
+            SCRATCH_ID_BODY_EFF_COLORED,
+            SCRATCH_ID_BODY_EFF_SERIAL,
+        ];
+        ids.extend((0..CONTACT_COLUMN_COUNT).map(|k| contact_column_id(k).get()));
+        ids.sort_unstable();
+
+        assert_eq!(ids[0], SCRATCH_BAND_BOTTOM, "run starts at the declared bottom");
+        assert_eq!(
+            ids[ids.len() - 1],
+            SCRATCH_BAND_TOP,
+            "run ends at the declared top"
+        );
+        for w in ids.windows(2) {
+            assert_eq!(
+                w[1],
+                w[0] + 1,
+                "hole or duplicate in the scratch band between {} and {} — the width \
+                 assert stops implying distinct staggers once the run is not dense",
+                w[0],
+                w[1]
+            );
+        }
+    }
 }
