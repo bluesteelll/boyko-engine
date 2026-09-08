@@ -103,8 +103,43 @@ mkdir -p "$OUT_DIR"
 # task cell into a per-scope bump block), and §CS forbids comparing across code
 # states. Re-taking the reference is what makes the W rows mean anything.
 #
-# Step C is deliberately ABSENT: `c1` is defined as `A*+B*+W*+c1`, so it cannot
-# be built until the W verdict names W*. Adding it here would be a guess.
+# STEP C IS PARAMETERISED ON W*, not hard-coded, because `c1` is defined as
+# `A*+B*+W*+c1`. `KE16_WSTAR` selects it; the default is the arm the W step left
+# standing. Passing the wrong one is caught by the witness, which is built from
+# the same table entry as the baseline name.
+WSTAR="${KE16_WSTAR:-wc}"
+case "$WSTAR" in
+    w0) WSTAR_FEATURES='' ;;
+    wc) WSTAR_FEATURES=',ke16-w-count' ;;
+    *)  echo "KE16_WSTAR must be w0 or wc -- \`wg\`/\`wgc\` were eliminated at CS-4 (KE16-RESULTS.md §W)" >&2
+        exit 2 ;;
+esac
+
+# ⚠⚠ `c1` AND `c1f` ARE MEASURED AS A PAIR, and that DEPARTS from §7 Steps W/C
+# rule 3 ("`c1` not kept => `c1f` is not measured"). The departure is a decision
+# taken on a number, and it is recorded rather than silently applied.
+#
+# Rule 3's premise was that `c1` is App-4's mechanism and `c1f` a width
+# refinement on top of it. `src/scope.rs::Scope::wake_for_wave` states the
+# opposite about a build with `ke16-c-batch` ALONE: the wave's ONE wake decision
+# activates the spawner plus ONE sibling, and what turns that into a wave's worth
+# of lanes is `worker::wake_after_residue` -- which is `ke16-w-gate`'s and a no-op
+# without it. So `c1` alone is not "App-4's accounting"; it is App-4's accounting
+# MINUS up to W/2 lanes.
+#
+# The design escalated the resulting fork ("measured on top of a fan-out
+# mechanism, or fan out unconditionally -- a DESIGN call"), offering two ways to
+# make a `c1` row interpretable: over `ke16-w-gate`'s cascade, or over
+# `ke16-w-fanout`. **THE W STEP DELETED THE FIRST**: `wg` is eliminated at CS-4,
+# capping the pool at 5-6 of 16 lanes for a 2-6x loss, so a `c1` row taken over
+# it would describe a configuration that will never ship. Only `c1f` remains as a
+# wake mechanism a `c1` row can be read against.
+#
+# Applying rule 3 literally would therefore file a REJECTION OF APP-4 that is
+# really a rejection of the wake collapse, and forbid measuring the one arm that
+# could separate them. Both are taken; the C verdict is read off `c1f`, and `c1`
+# is recorded as the isolated cost of the wake collapse rather than as a
+# candidate.
 VARIANT_KEYS=(w0 wg wc wgc)
 variant_string() {
     case "$1" in
@@ -112,6 +147,9 @@ variant_string() {
         wg)  echo 'a3+b0+wg+c0'  ;;
         wc)  echo 'a3+b0+wc+c0'  ;;
         wgc) echo 'a3+b0+wgc+c0' ;;
+        c0)  echo "a3+b0+$WSTAR+c0"  ;;
+        c1)  echo "a3+b0+$WSTAR+c1"  ;;
+        c1f) echo "a3+b0+$WSTAR+c1f" ;;
         *)   echo '' ;;
     esac
 }
@@ -121,6 +159,11 @@ variant_features() {
         wg)  echo 'ke16-a3,ke16-w-gate' ;;
         wc)  echo 'ke16-a3,ke16-w-count' ;;
         wgc) echo 'ke16-a3,ke16-w-gate,ke16-w-count' ;;
+        c0)  echo "ke16-a3$WSTAR_FEATURES" ;;
+        c1)  echo "ke16-a3$WSTAR_FEATURES,ke16-c-batch" ;;
+        # `ke16-w-fanout` implies `ke16-c-batch` in the manifest; both are spelled
+        # so the feature line and the witness `c1f` are legible side by side.
+        c1f) echo "ke16-a3$WSTAR_FEATURES,ke16-c-batch,ke16-w-fanout" ;;
         *)   echo '' ;;
     esac
 }

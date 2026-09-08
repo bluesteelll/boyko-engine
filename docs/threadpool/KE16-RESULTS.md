@@ -10,8 +10,8 @@ table in `KE16-DESIGN.md`.
 | 0 | MEASURED — baseline `a0+b0+w0+c0`, 24-cell grid ×3 runs, ECS at both populations, five physics rows, per-cell band | §0, §Band |
 | A | **CLOSED ON `a3`** — five arms measured, then the deciding pair re-measured interleaved in ONE session | §A |
 | B | **B0 BY CONSTRUCTION, NOT BY MEASUREMENT** — `b1`/`b3` do not compile over `a3` | §B |
-| W1, W2 | **MEASURED 2026-09-08 at CS-4** — `wg` and `wgc` ELIMINATED (0 improvements, 13 and 14 regressions, and an occupancy receipt: 5–6 of 16 lanes, speedup pinned at 2.00×). `wc` a tie on all 38 cells and NOT YET KEPT — rule 2 makes its keep conditional on two gates that have not been run. ⚠ No physics ranking is filed: the passes carry a monotone warm-up drift and the PRIMARY row's band is 85 % | §W |
-| C, F | **NOT MEASURED — BLOCKED ON W\***, which `wc`'s two gates decide | §C |
+| W1, W2 | **CLOSED ON `wc` 2026-09-08 at CS-4.** `wg` and `wgc` ELIMINATED (0 improvements, 13 and 14 regressions, and an occupancy receipt: 5–6 of 16 lanes, speedup pinned at 2.00×). `wc` is a tie on all 38 cells and rule 2's two gates — a real-park loom M1c and the route-(b) 32-seed liveness gate — are GREEN, so **W\* = `wc`**. ⚠ No physics ranking is filed: the passes carry a monotone warm-up drift and the PRIMARY row's band is 85 % | §W |
+| C, F | **UNBLOCKED, NOT YET MEASURED.** W\* = `wc`, so `c1` is `a3+b0+wc+c1`. ⚠ `c1` and `c1f` are measured as a PAIR, departing from rule 3 with the number that forces it | §C |
 | App | **NOT RUN — OWED.** No number here comes from the unconditional shipped code | §App, §Owed |
 
 This file exists because the tournament ran for weeks and produced no written result. Everything
@@ -951,14 +951,45 @@ carried by the clean pass on its own, and passes 1 and 2 add agreement rather th
    the same way extend the trend rather than average it out. A physics verdict needs a session that
    opens already settled, or a discard rule taken per harness as §W's CS-2 pass did.
 
-### `wc` — eligible under rule 2, NOT YET KEPT, and the reason is a gate rather than a number
+### ✅ `wc` IS KEPT — W\* = `wc`. Rule 2's two gates ran at CS-4 and are green
 
-Step W rule 2 keeps `wc` when (a) it regresses no 1 µs cell and it is a tie everywhere — both hold —
-**"PROVIDED both its gates are green: loom M1c (a real-park M1c) and the route-(b) many-seeds
-gate."** Neither has been run at CS-4. **`wc` is therefore recorded as MEASUREMENT-ELIGIBLE and
-NOT KEPT**, and W\* is undecided between `wc` and `w0` until those two gates report. The numbers
-cannot settle it: rule 2 is explicitly a soundness clause, and a red on either gate drops the feature
-rather than re-opening the comparison.
+Step W rule 2 keeps `wc` when (a) it regresses no 1 µs cell and it is a tie everywhere — both hold
+above — **"PROVIDED both its gates are green: loom M1c (a real-park M1c) and the route-(b)
+many-seeds gate."** Both ran on 2026-09-08 at CS-4:
+
+| gate | recipe | verdict |
+|---|---|---|
+| **loom M1c**, real park | `cargo --config target.x86_64-pc-windows-gnu.rustflags=["-C","target-cpu=x86-64-v3","--cfg","loom"] test --release -p boyko-threadpool --test loom_pool --features ke16-a3,ke16-w-count` | **6 passed, 0 failed**, `loom_m1c_count_gated_completion_wakes_the_parked_worker_joiner ... ok`. Repeated with `LOOM_MAX_PREEMPTIONS=3`: same |
+| **route-(b) liveness**, 32 seeds | `MIRIFLAGS="… -Zmiri-many-seeds=0..32" cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool --test miri_scope nested_scope_from_worker_is_stolen_by_sibling --features ke16-a3,ke16-w-count` | **32 × `1 passed`**, zero UB, zero liveness timeouts |
+
+**It is an M1c and not an "M1c-count"** (the distinction §5 item 16 makes, and the one rule 2
+depends on): the model's joiner is `while !shared.is_drained() { thread::park(); }` — loom's real
+park — not M1's yield re-poll, verified in the source before the run. The `loom_pool` run also
+carries its own anti-vacuity receipt: `loom_m2_calibration_no_producer_fence_is_lost - should panic
+... ok`, i.e. the un-fenced copy did reproduce the lost wake.
+
+⚠ **The ISA flag is spelled in full in that `--config` array on purpose.** `.cargo/config.toml` sets
+`rustflags = ["-C", "target-cpu=x86-64-v3"]` for this target, and `--config` REPLACES the key rather
+than appending to it, so a bare `--config …rustflags=["--cfg","loom"]` would have silently dropped
+the x86-64-v3 baseline the whole campaign is measured under. The same asymmetry as `RUSTFLAGS`.
+
+### ⚠⚠ The route-(b) gate's FIRST run was a vacuous pass, and the gate is what caught it
+
+Run with `--features ke16-w-count` alone — the arm's own feature, which is what the rule names — it
+printed `running 1 test` **thirty-two times** and exited **0**. It ran nothing. The result line reads
+`0 passed; 0 failed; 1 ignored; 0 measured; 6 filtered out`, and thirty-two `running 1 test` lines
+look like far better evidence of thirty-two runs than one does.
+
+The test refused on its own terms, and its `ignore` reason is the whole diagnosis: *"Under
+ke16-w-count WITH NO A ARM the shape needs a SIBLING to take one of the two handshaked nested bodies
+and has none, so it would hang rather than measure: **NO W-d-prime liveness row may be filed from
+that build**."* It also forecloses the obvious workaround — forcing it with `--ignored` hits
+`refuse_to_certify_without_a_reachability_arm()` as the body's first statement.
+
+⇒ **§8's `<F>` is the CONFIGURATION's feature list, not the arm's**, and for this step that is
+`ke16-a3,ke16-w-count`. The corrected run is the one in the table above. Recorded because the failure
+mode is this corpus's own: `running N` is not a receipt, and a count of `running N` lines is not a
+better one.
 
 ### ⚠ Raw data lost, and it was this pass that lost it
 
@@ -1020,11 +1051,30 @@ reference's, `IMP` at the mirror inequality, `tie` otherwise.
 
 ---
 
-## §C, §F. NOT MEASURED — BLOCKED ON W\*
+## §C, §F. UNBLOCKED BY W\* = `wc`; NOT YET MEASURED
 
-**`c1` and `c1f` were never measured**, and cannot be until the two `wc` gates above decide W\*:
-step C is `A*+B*+W*+c1`. Per §7 Steps W/C rule 3, if `c1` is not kept then `c1f` is not measured at
-all — it needs the batch push.
+**`c1` and `c1f` were never measured.** With W\* fixed they are buildable: `c1` is
+`a3+b0+wc+c1` (`ke16-a3,ke16-w-count,ke16-c-batch`), `c1f` adds `ke16-w-fanout`.
+
+### ⚠⚠ They will be measured as a PAIR, which DEPARTS from rule 3 — and the departure is forced by §W's own result
+
+§7 Steps W/C rule 3 says *"`c1` (batch spawn) not kept ⇒ `c1f` is not measured"*. Its premise is
+that `c1` is App-4's mechanism and `c1f` a width refinement on top of it.
+`src/scope.rs::Scope::wake_for_wave` states the opposite about `ke16-c-batch` ALONE: the wave's ONE
+wake decision activates the spawner plus ONE sibling, and what turns that into a wave's worth of
+lanes is `worker::wake_after_residue` — which is `ke16-w-gate`'s and a no-op without it. So `c1`
+alone is not App-4's accounting; it is **App-4's accounting minus up to W/2 lanes**, which is exactly
+the mechanism §W measured at 2–6× against `wg`.
+
+The design escalated the resulting fork as a DESIGN call, offering two ways to make a `c1` row
+interpretable: over `ke16-w-gate`'s cascade, or over `ke16-w-fanout`. **§W deleted the first** — `wg`
+is eliminated, so a `c1` row taken over it would describe a configuration that will never ship. Only
+`c1f` remains.
+
+Applying rule 3 literally would therefore file a rejection of App-4 that is really a rejection of the
+wake collapse, and forbid measuring the one arm that could tell them apart. **Both are taken; the C
+verdict is read off `c1f`, and `c1` is recorded as the isolated cost of the wake collapse rather than
+as a candidate.** The driver carries the same statement at its variant table.
 
 ⚠ The `c1` caveat below still travels with any future C row, and CS-4 does not change it.
 
@@ -1459,13 +1509,13 @@ A contaminated run named is worth more than one silently dropped.
 Named here rather than in a covering note, because a reader who mistakes this file for a completed
 tournament will ship on numbers that were never taken.
 
-1. **AXIS W IS MEASURED; AXIS C IS NOT, AND THREE THINGS INSIDE W ARE STILL OWED.** `wg` and `wgc`
-   are eliminated at CS-4 (§W). Owed: **(a)** `wc`'s two gates — a real-park loom M1c and the
-   route-(b) many-seeds Miri gate — without which rule 2 cannot keep it and W\* stays undecided
-   between `wc` and `w0`; **(b)** a physics ranking, which this pass cannot supply because its three
-   passes drift monotonically and the PRIMARY row's band is 85 % — that needs a session that opens
-   already settled, not more passes taken the same way; **(c)** `c1`/`c1f`, blocked on W\*. Any
-   future C row over `w0` carries the App-4 cascade caveat.
+1. **AXIS W IS CLOSED ON `wc`; AXIS C IS NOT MEASURED; ONE THING INSIDE W IS STILL OWED.** `wg` and
+   `wgc` are eliminated at CS-4 and rule 2's two gates are green, so W\* = `wc` (§W). Owed:
+   **(a)** a physics ranking, which this pass cannot supply because its three passes drift
+   monotonically and the PRIMARY row's band is 85 % — that needs a session that opens already
+   settled, not more passes taken the same way, and it is NOT on the critical path since W\* was
+   fixed by gates rather than by numbers and Step App re-takes every consumer row anyway;
+   **(b)** `c1`/`c1f`, now buildable and measured as a pair (§C).
    ⚠ The CS-2 reference (49 rows) is preserved as PROSE only — this pass overwrote its criterion
    baselines for r1–r3 under the same directory names (§W, last subsection).
 2. **STEP APP HAS NOT BEEN RUN.** No number in this file comes from the unconditional shipped code.
