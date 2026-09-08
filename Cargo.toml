@@ -37,6 +37,41 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(force_alloc_p
 [workspace.lints.clippy]
 disallowed_types = "deny"
 
+# `missing_const_for_thread_local` is BROKEN in the pinned toolchain and is allowed here rather
+# than at eight separate sites. Measured 2026-09-08 on clippy 0.1.97 (8bab26f4f6 2026-07-14), the
+# version `rust-toolchain.toml` selects: it fires on `thread_local!` blocks whose initialisers
+# ALREADY are `const { ... }`, which is precisely what it asks for. All eight were read before
+# this line was written and every one is already const:
+#
+#   boyko_diag/src/lane.rs:150            LANE          = const { Cell::new(LANE_UNCLAIMED) }
+#   boyko_log/src/drain_owner.rs:40       TOKEN_ANCHOR  = const { 0 }
+#   boyko_log/src/probe.rs:77             WATCH/COUNT   = const { Cell::new(..) }
+#   boyko_log/src/sync_out.rs:68          TOKEN_ANCHOR  = const { 0 }
+#   boyko_shaderdsl/src/emit/mod.rs:42    ARENA         = const { RefCell::new(Vec::new()) }
+#   boyko_shaderdsl/src/emit/mod.rs:638   VARENA        = const { RefCell::new(Vec::new()) }
+#   boyko_shaderdsl/src/emit/mod.rs:644   TEMP_TYPES    = const { RefCell::new(Vec::new()) }
+#   boyko_shaderdsl/src/emit/mod.rs:2600  STMTS/VARS    = const { RefCell::new(Vec::new()) }
+#
+# ⚠ WHY WORKSPACE-WIDE AND NOT PER SITE. A per-site `#[allow]` must go INSIDE the macro, on the
+# static: written outside `thread_local!` it is reported as `unused attribute` AND the lint still
+# fires, so the first attempt turned one error into two. Beyond the awkwardness, the lint has no
+# signal left to preserve in this version — a genuinely non-const initialiser would fire exactly
+# as these eight do, so keeping it enabled cannot distinguish a real case from a false one. It is
+# denying nothing and hiding everything.
+#
+# ⚠ WHAT THIS COST BEFORE IT WAS FIXED, and it is why the line is worth its rationale.
+# `boyko-diag` is a DEPENDENCY, so `cargo clippy --workspace -- -D warnings` stopped compiling
+# there and never linted anything downstream. The gate was not merely red — it was BLIND past its
+# first failure, exactly the shape `reference-clippy-worktree-config-leak` records. Silencing the
+# ONE diag site is what revealed the other seven: `boyko-log` and `boyko_shaderdsl` had not been
+# linted at all, and their errors did not appear in any report until 2026-09-08.
+#
+# REMOVAL CONDITION — a fact, not a wish: on the next toolchain bump, delete this line and run
+# `cargo clippy --workspace --all-targets -- -D warnings`. If it stays green, the false positive is
+# fixed upstream and the lint returns for free. If it reds on the sites above, re-read them before
+# restoring the allow — one of them may by then be a genuine finding.
+missing_const_for_thread_local = "allow"
+
 # Shared third-party version pins (W2 workspace hygiene). Member crates opt in
 # with `<dep>.workspace = true` so a version bump happens in ONE place instead of
 # being re-declared per crate. Per-crate feature selections are preserved: the
