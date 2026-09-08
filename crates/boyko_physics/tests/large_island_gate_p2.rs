@@ -1,25 +1,36 @@
 //! P2 large-island threshold gate (docs/ARCHITECTURE-HYBRID-PERF.md Part 3.3 / P2).
 //!
-//! The colored-parallel constraint solve is keyed on island size, not on a build-time
-//! flag alone: even with `PhysicsConfig::parallel_solve` opted in, a step whose
-//! LARGEST island holds fewer than
-//! [`LARGE_ISLAND_CONSTRAINTS`](boyko_physics::resources::LARGE_ISLAND_CONSTRAINTS)
-//! manifolds runs the byte-identical SINGLE-THREADED colored solve (the per-color
-//! `pool.scope` dispatch cannot amortize on so small a parallel unit), and a step
-//! at/above the threshold takes the colored-parallel path. The selection is a single
-//! scalar compare on a count [`ConstraintGraph::build`] already folds in (zero extra
-//! pass).
+//! The colored-parallel constraint solve is keyed on the width of the WIDEST COLOR,
+//! not on a build-time flag alone: even with `PhysicsConfig::parallel_solve` opted
+//! in, a step whose widest color cannot clear the solver's own
+//! `MIN_PARALLEL_SLOTS_PER_COLOR` floor runs the byte-identical SINGLE-THREADED
+//! colored solve (no color is worth a `pool.scope`, so the whole dispatch is pure
+//! loss), and a step that clears it takes the colored-parallel path. The selection
+//! is one pass over the `color_offsets` CSR `build_columns` has already filled.
+//!
+//! ⚠ **The metric used to be island size, and that was a defect.** This file's
+//! Gate A tests still measure `max_island_constraints` — it is an exact and useful
+//! description of island structure — but it is NO LONGER the dispatch predicate,
+//! because island size bounds color width from below not at all: `n` disjoint pairs
+//! are `n` islands of one manifold each AND one color of `n` slots, so the old gate
+//! forced the single-threaded path on the most parallel scenes the solver can be
+//! handed. See `many_disjoint_pairs_are_one_wide_color_and_must_dispatch` for the
+//! scene that shows it, and `LARGE_ISLAND_CONSTRAINTS`'s doc for the full account.
 //!
 //! This file is the P2 gate's tester suite. It proves three properties:
 //!
 //! 1. **`max_island_constraints` is exact** (Gate A, Miri-safe pure `build`): the
 //!    largest-island manifold count matches a hand-computed reference on single-big-
 //!    island, many-small-island, empty, and threshold-boundary scenes.
-//! 2. **The gate SELECTS the path by island size** (Gate B, `cfg(not(miri))`): with
-//!    `parallel_solve == true`, a SMALL-island scene issues ZERO `pool.scope`
-//!    allocations (forced single-threaded by the gate) while a LARGE-island scene
-//!    issues a non-zero, bounded count (let through to the parallel dispatch) — the
-//!    island size, and ONLY the island size, flips the observable.
+//! 2. **The gate SELECTS the path by COLOR WIDTH** (Gate B, `cfg(not(miri))`): with
+//!    `parallel_solve == true`, a scene whose widest color is under the floor issues
+//!    ZERO `pool.scope` allocations (forced single-threaded) while a scene that
+//!    clears it issues a non-zero, bounded count. Three scenes pin this, and the
+//!    third is the one that separates the two candidate metrics: 200 disjoint pairs
+//!    (both metrics say "too thin" — gated), a chained island (both say "wide" —
+//!    dispatched), and 500 disjoint pairs, where island size still reads 1 while the
+//!    single color holds 500 slots (color width says "wide" — dispatched; the island
+//!    metric would refuse).
 //! 3. **Both gated paths are BIT-IDENTICAL** (Gate C, `cfg(not(miri))`, the
 //!    load-bearing equivalence): a small-island scene's gated single-threaded result
 //!    bit-equals the `parallel_solve == false` reference, and a large-island scene's
@@ -446,6 +457,67 @@ mod pool_gates {
         );
     }
 
+    /// ⚠ THE GATE MEASURES THE WRONG WIDTH, and this is the scene that shows it.
+    ///
+    /// The gate's premise, stated in this file's own header, is that a step whose
+    /// largest ISLAND is small "cannot produce a color worth a `pool.scope`
+    /// dispatch". That inference does not hold. A colour is a set of
+    /// BODY-DISJOINT manifolds, and manifolds in DIFFERENT islands are always
+    /// body-disjoint — so `n` disjoint pairs are `n` islands of one manifold
+    /// each AND a single colour of `n` manifolds. Island size bounds nothing
+    /// about colour width from below.
+    ///
+    /// 500 disjoint pairs is therefore the maximally parallel scene: one colour,
+    /// 500 slots, comfortably over the solver's own per-colour dispatch floor
+    /// (`MIN_PARALLEL_SLOTS_PER_COLOR == 256`, colored.rs). The gate refuses it
+    /// anyway, because `max_island_constraints() == 1 < 256`.
+    ///
+    /// Note the neighbours: `small_island_scene_is_gated_to_single_thread` uses
+    /// 200 pairs, where the island metric and the colour metric AGREE that the
+    /// work is too thin — so that test is correct and stays correct. The defect
+    /// only becomes observable once the colour clears the floor while the island
+    /// does not, which is exactly the band this test occupies.
+    #[test]
+    fn many_disjoint_pairs_are_one_wide_color_and_must_dispatch() {
+        // 500 > MIN_PARALLEL_SLOTS_PER_COLOR (256), 1 contact point per manifold.
+        let pairs = 500u32;
+        let (bodies, manifolds) = many_small_islands_scene(pairs);
+        let g = build_graph(&bodies, &manifolds);
+
+        assert_eq!(
+            g.n_islands(),
+            pairs,
+            "anti-vacuity: each disjoint pair is its own island"
+        );
+        assert_eq!(
+            g.max_island_constraints(),
+            1,
+            "anti-vacuity: the island metric reads 1 — this is the scene the gate \
+             misjudges, so the premise of the test must hold before its conclusion"
+        );
+        assert_eq!(
+            g.n_colors(),
+            1,
+            "anti-vacuity: body-disjoint manifolds all fit ONE colour — this is the \
+             width the dispatch floor actually compares against"
+        );
+
+        let allocs = warmed_parallel_step_allocs(&bodies, &manifolds, 4);
+        eprintln!(
+            "[P2 GateB] disjoint pairs={pairs} n_colors={} max_island={} \
+             parallel_solve=ON scope_allocs={allocs}",
+            g.n_colors(),
+            g.max_island_constraints()
+        );
+        assert!(
+            allocs > 0,
+            "a warmed parallel step on {pairs} disjoint pairs must dispatch: that is \
+             ONE colour of {pairs} slots, over the per-colour floor of 256. The gate \
+             refused it because the largest ISLAND holds 1 manifold — a width that \
+             bounds nothing about colour width. got {allocs} allocs"
+        );
+    }
+
     // ── Gate C: both gated paths are BIT-IDENTICAL (the load-bearing equivalence) ─
 
     #[test]
@@ -495,6 +567,46 @@ mod pool_gates {
         assert_eq!(serial, par_w2, "gated-parallel large scene (2w) must equal serial bits");
         assert_eq!(serial, par_w4, "gated-parallel large scene (4w) must equal serial bits");
         assert_eq!(serial, par_w8, "gated-parallel large scene (8w) must equal serial bits");
+    }
+
+    /// The scene whose PATH the metric fix changed must keep its BITS.
+    ///
+    /// `many_disjoint_pairs_are_one_wide_color_and_must_dispatch` proves the wide
+    /// -color scene now dispatches. That is a behaviour change, and the two
+    /// existing Gate C tests do not cover it: one uses 180 pairs (still gated to
+    /// single-thread, so its path did not move) and the other a chained island
+    /// (parallel before and after). This scene is the ONLY one that crossed from
+    /// serial to parallel, so it is the only one whose bits are newly at risk —
+    /// and an unchecked path change is exactly how a determinism contract breaks
+    /// quietly.
+    #[test]
+    fn wide_color_scene_newly_dispatching_is_bit_identical_to_serial() {
+        let pairs = 500u32;
+        let (bodies, manifolds) = many_small_islands_scene(pairs);
+        let g = build_graph(&bodies, &manifolds);
+        assert_eq!(
+            g.max_island_constraints(),
+            1,
+            "anti-vacuity: this is the scene the OLD island metric refused"
+        );
+        assert_eq!(
+            g.n_colors(),
+            1,
+            "anti-vacuity: one colour, so the new metric lets it through"
+        );
+        let steps = 6;
+
+        let serial = run(&bodies, &manifolds, steps, false, 1);
+        let par_w1 = run(&bodies, &manifolds, steps, true, 1);
+        let par_w4 = run(&bodies, &manifolds, steps, true, 4);
+        let par_w8 = run(&bodies, &manifolds, steps, true, 8);
+
+        assert_eq!(serial, par_w1, "newly-dispatching scene (1w) must equal serial bits");
+        assert_eq!(serial, par_w4, "newly-dispatching scene (4w) must equal serial bits");
+        assert_eq!(serial, par_w8, "newly-dispatching scene (8w) must equal serial bits");
+
+        let rest = run(&bodies, &manifolds, 0, false, 1);
+        assert_ne!(rest, serial, "anti-vacuity: the solve must have moved the bodies");
     }
 
     // ── Counting global allocator (mirrors colored_parallel_alloc_o6.rs) ──────────

@@ -2119,38 +2119,52 @@ const OCC_WORD_BITS: u32 = 64;
 /// solve runs the byte-identical single-threaded path (plan P2, the LargeIslandSplitter
 /// trigger).
 ///
-/// # Rationale (`[DERIVED]` direction, `[ESTIMATE]` value)
+/// ⚠ **RETIRED AS THE DISPATCH GATE.** The whole-solve gate now reads the widest
+/// COLOR's slot count (`ContactColumns::widest_color_slots`, colored.rs) against
+/// the solver's own `MIN_PARALLEL_SLOTS_PER_COLOR`. This const survives as the
+/// island-size threshold the P2 tests are written against; nothing in the solve
+/// path reads it.
 ///
-/// `build_graph` + greedy coloring + the per-color `pool.scope` dispatch are pure
-/// overhead at small contact counts: below the crossover the partition + dispatch
-/// cost exceeds the parallel-solve saving (docs/ARCHITECTURE-HYBRID-PERF.md Part 3.3
-/// `[DERIVED]`). The colored solve parallelizes WITHIN a color, and the largest
-/// color is bounded by the largest island's manifold count, so the largest island is
-/// the metric that bounds the largest parallel unit a step can produce. When even
-/// the largest island is below this, no color can cross the solver's own
-/// `MIN_PARALLEL_SLOTS_PER_COLOR` per-color dispatch threshold (a color holds ≤ one
-/// manifold per island it spans, and a step's manifolds-per-island peak is exactly
-/// this count), so a `pool.scope` can never help — the whole solve runs
-/// single-threaded, skipping the ambient-pool probe and per-color span checks every
-/// pass.
+/// # Why it was retired — two independent errors, both in the expensive direction
+///
+/// The rationale it carried was: "the largest color is bounded by the largest
+/// island's manifold count", justified by "a color holds ≤ one manifold per island
+/// it spans, and a step's manifolds-per-island peak is exactly this count".
+///
+/// 1. **The premise is false.** A color is a set of BODY-DISJOINT manifolds, not a
+///    set of island representatives. Two manifolds of the SAME island can be body
+///    disjoint and share a color — in the chain `A-B-C-D`, `(A,B)` and `(C,D)` do.
+/// 2. **The inference does not follow even if the premise held.** A bound of one
+///    manifold per island caps each island's CONTRIBUTION to a color, not the
+///    color's WIDTH. Manifolds in different islands are always body-disjoint, so
+///    `n` disjoint pairs are `n` islands of one manifold each AND one color of `n`
+///    slots. Island size bounds color width from below not at all.
+///
+/// So the gate forced the single-threaded path on precisely the most parallel
+/// scenes the solver can be handed — every many-pile, many-debris, many-ragdoll
+/// world. Regression-gated by
+/// `many_disjoint_pairs_are_one_wide_color_and_must_dispatch`
+/// (tests/large_island_gate_p2.rs).
+///
+/// # The guard that should have caught it, and why it did not
+///
+/// The retired sanity assert below encoded exactly the right worry — the
+/// whole-solve gate must not be stricter than the per-color floor — and enforced
+/// it by setting this const EQUAL to `MIN_PARALLEL_SLOTS_PER_COLOR = 256`. That
+/// could not work: the two 256s are in different UNITS. One counts manifolds in
+/// the largest island, the other counts slots in a color. Matching the magnitude
+/// of two incommensurable quantities proves nothing about their order, and the
+/// gate was stricter anyway. **A guard that compares numbers across units is not
+/// a guard.**
 ///
 /// # Value (UNMEASURED)
 ///
-/// `256` mirrors the analysis's `~256 contacts` first-principles crossover AND the
-/// solver's own `MIN_PARALLEL_SLOTS_PER_COLOR = 256` per-color floor (a step that
-/// cannot reach that floor in its largest island can never dispatch). It is a
-/// PROVISIONAL const; **P10 (offline calibration) is a HARD dependency** — it
-/// replaces this `[ESTIMATE]` with a `[MEASURED]` break-even. Until then the gate
-/// only changes WHERE the bit-identical colored solve runs, never the bits, so a
-/// mis-calibrated value is at worst a perf regression near the boundary, never a
-/// result change.
+/// `256` mirrored the analysis's `~256 contacts` first-principles crossover. It
+/// remains an `[ESTIMATE]`; P10 (offline calibration) would have replaced it with
+/// a `[MEASURED]` break-even. That dependency now belongs to
+/// `MIN_PARALLEL_SLOTS_PER_COLOR`, which is the value the gate actually reads.
 pub const LARGE_ISLAND_CONSTRAINTS: u32 = 256;
 
-// Sanity: the whole-solve gate must not be STRICTER than the solver's own per-color
-// dispatch floor — if it were, a step could clear the per-color floor (a genuinely
-// parallel color exists) yet still be forced single-threaded by this coarser gate,
-// leaving real parallelism on the table. Keeping it == the per-color floor makes the
-// whole-solve gate a pure pre-empt of steps that cannot dispatch anyway.
 const _: () = assert!(LARGE_ISLAND_CONSTRAINTS >= 1, "the threshold must admit at least one constraint");
 
 /// Constraint islands + greedy graph coloring of one step's manifolds (plan O4,
@@ -2284,15 +2298,21 @@ impl ConstraintGraph {
     }
 
     /// Manifold count of the LARGEST island in the current partition (`0` for an
-    /// empty partition) — the P2 large-island gate metric.
+    /// empty partition).
     ///
-    /// The colored solve compares this against
-    /// [`LARGE_ISLAND_CONSTRAINTS`](crate::resources::LARGE_ISLAND_CONSTRAINTS) to
-    /// decide its whole-solve parallel-dispatch strategy: below the threshold it runs
-    /// the byte-identical single-threaded path (the dispatch cannot amortize), at/
-    /// above it the colored-parallel path. Computed during
-    /// [`build`](Self::build) at zero extra pass (folded into the island CSR), so
-    /// reading it is free.
+    /// ⚠ **This is NOT the parallel-dispatch metric, and using it as one was a
+    /// measured defect.** It bounds nothing about how wide a COLOR can be: a color
+    /// is a set of body-disjoint manifolds, and manifolds in different islands are
+    /// always body-disjoint, so `n` disjoint pairs give `max_island_constraints ==
+    /// 1` and a single color of `n` slots. The whole-solve gate reads
+    /// `ContactColumns::widest_color_slots` instead — see
+    /// [`LARGE_ISLAND_CONSTRAINTS`](crate::resources::LARGE_ISLAND_CONSTRAINTS) for
+    /// the full account.
+    ///
+    /// It remains an exact, cheap description of ISLAND structure — computed during
+    /// [`build`](Self::build) at zero extra pass (folded into the island CSR) — and
+    /// is kept for diagnostics and for the P2 tests. Do not reintroduce it as a
+    /// dispatch predicate.
     #[inline]
     pub fn max_island_constraints(&self) -> u32 {
         self.max_island_constraints

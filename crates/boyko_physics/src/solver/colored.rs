@@ -96,7 +96,7 @@ use super::RigidSolver;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{
-    BodyState, ConstraintGraph, IslandSleep, LARGE_ISLAND_CONSTRAINTS, PhysicsConfig, SolverScratch,
+    BodyState, ConstraintGraph, IslandSleep, PhysicsConfig, SolverScratch,
 };
 use crate::scratch_ids::{
     body_eff_colored_id, contact_column_id, register_scratch_layouts, scratch_reserve_rows,
@@ -1140,6 +1140,33 @@ impl ContactColumns {
     #[inline]
     fn color_offsets(&self) -> &[u32] {
         self.color_offsets.as_read_slice()
+    }
+
+    /// Slot count of the WIDEST color — the whole-solve dispatch metric.
+    ///
+    /// This is the same quantity `solve_all_colors` compares against
+    /// [`MIN_PARALLEL_SLOTS_PER_COLOR`] per color, taken over the widest color:
+    /// if it does not clear the floor, no color does, and the whole-solve
+    /// dispatch is pure loss. If it DOES clear the floor, at least one color is
+    /// worth dispatching and the whole-solve gate must let the step through.
+    ///
+    /// It replaces `ConstraintGraph::max_island_constraints` as the gate metric.
+    /// That one measured ISLAND size, on the premise that a small largest island
+    /// cannot yield a wide color — but a color is a set of BODY-DISJOINT
+    /// manifolds, and manifolds in DIFFERENT islands are always body-disjoint,
+    /// so island size bounds color width from ABOVE only in the degenerate
+    /// single-island case and bounds it from below not at all. `n` disjoint
+    /// pairs are `n` islands of one manifold each AND one color of `n` slots.
+    ///
+    /// Zero for an empty partition: `color_offsets` is then empty or a lone
+    /// sentinel, `windows(2)` yields nothing, and the gate correctly refuses.
+    #[inline]
+    fn widest_color_slots(&self) -> u32 {
+        self.color_offsets()
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .max()
+            .unwrap_or(0)
     }
 
     /// The per-group CSR (`group_start`) as a read slice.
@@ -3089,21 +3116,33 @@ impl ColoredSoftStepSolver {
         // to the single-threaded colored solve for any worker count (disjoint-body
         // groups + canonical warm store); when off it is BYTE-IDENTICAL to O5.
         //
-        // P2 large-island gate: even with `parallel_solve` opted in, a step whose
-        // LARGEST island is below `LARGE_ISLAND_CONSTRAINTS` cannot produce a color
-        // worth a `pool.scope` dispatch — the largest color is bounded by the largest
-        // island's manifold count, so no color can clear the solver's per-color
-        // `MIN_PARALLEL_SLOTS_PER_COLOR` dispatch floor. Force the byte-identical
-        // single-threaded path so the whole solve skips the ambient-pool probe + the
-        // per-color span checks every pass (the build_graph + dispatch overhead the
-        // analysis flags as pure loss below the crossover). This changes only WHERE
-        // the colored solve runs, NEVER the bits: the inline / single-threaded path is
-        // the SAME `solve_color` the `parallel == false` fallback uses, and the
-        // {1, N}-worker bit-identity property makes large-island parallel == this. The
-        // metric is a single scalar compare on a count `build_graph` already folded in
-        // (zero extra pass). `[ESTIMATE]` threshold — P10 calibrates it (see the const).
+        // P2 whole-solve dispatch gate: even with `parallel_solve` opted in, a step
+        // whose WIDEST COLOR cannot clear the solver's own per-color
+        // `MIN_PARALLEL_SLOTS_PER_COLOR` floor has no color worth a `pool.scope`, so
+        // the whole dispatch is pure loss. Force the byte-identical single-threaded
+        // path and skip the ambient-pool probe + the per-color span checks every pass.
+        // This changes only WHERE the colored solve runs, NEVER the bits: the inline
+        // path is the SAME `solve_color` the `parallel == false` fallback uses, and
+        // the {1, N}-worker bit-identity property makes the parallel path equal to it.
+        //
+        // ⚠ THE METRIC WAS WRONG UNTIL NOW, AND IT WAS WRONG IN THE EXPENSIVE
+        // DIRECTION. It used `graph.max_island_constraints() >=
+        // LARGE_ISLAND_CONSTRAINTS`, on the stated premise that "the largest color is
+        // bounded by the largest island's manifold count". It is not. A color is a set
+        // of BODY-DISJOINT manifolds, and manifolds in DIFFERENT islands are always
+        // body-disjoint — so `n` disjoint pairs are `n` islands of ONE manifold each
+        // AND a single color of `n` slots. Island size bounds color width from below
+        // not at all, and the old gate therefore forced the single-threaded path on
+        // precisely the most parallel scenes the solver can be handed: every
+        // many-pile, many-debris, many-ragdoll world. Regression-gated by
+        // `many_disjoint_pairs_are_one_wide_color_and_must_dispatch`.
+        //
+        // The new metric is the quantity the per-color floor already compares against,
+        // maximised over colors — read off the `color_offsets` CSR that
+        // `build_columns` (above) has already filled, so it stays a single pass over
+        // `n_colors + 1` u32s and no new state.
         let parallel =
-            config.parallel_solve && graph.max_island_constraints() >= LARGE_ISLAND_CONSTRAINTS;
+            config.parallel_solve && self.columns.widest_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR;
 
         for _ in 0..substeps {
             // (1) Gravity integrate DYNAMIC bodies (shared O1 kernel). Single-
