@@ -71,11 +71,21 @@ impl Hasher for KeyHasher {
 
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
-        for c in &mut chunks {
-            self.mix(u64::from_ne_bytes(c.try_into().expect("invariant: chunks_exact(8) yields 8 bytes")));
+        // `as_chunks::<8>()` rather than `chunks_exact(8)`, and the reason is a
+        // type rather than a style preference: it yields `&[u8; 8]` directly, so
+        // the `try_into().expect("invariant: chunks_exact(8) yields 8 bytes")`
+        // this loop used to carry is gone — the invariant is now the element
+        // type, checked by the compiler instead of asserted at run time on a
+        // hashing path that runs once per interned `TypeId`.
+        //
+        // Flagged by `clippy::chunks_exact_to_as_chunks`, new in clippy 0.1.98.
+        // `as_chunks` itself is stable well before the pinned 1.97 — probed on
+        // that exact toolchain before this edit — so the rewrite builds on both
+        // and is not a forward reference to the newer compiler.
+        let (chunks, rest) = bytes.as_chunks::<8>();
+        for c in chunks {
+            self.mix(u64::from_ne_bytes(*c));
         }
-        let rest = chunks.remainder();
         if !rest.is_empty() {
             let mut buf = [0u8; 8];
             buf[..rest.len()].copy_from_slice(rest);

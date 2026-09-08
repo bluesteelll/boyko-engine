@@ -554,7 +554,15 @@ pub(crate) fn claim_one_idle(
         return None;
     }
     let rotated = candidates.rotate_right(start);
-    let low = rotated & rotated.wrapping_neg();
+    // `isolate_lowest_one()` rather than `rotated & rotated.wrapping_neg()`.
+    // The two are the SAME operation — the standard library defines the method
+    // as exactly that expression, and both lower to one `blsi` under this
+    // tree's `x86-64-v3` baseline — so this is a rename of an idiom, not a
+    // change to the wake path's arithmetic. Flagged by
+    // `clippy::manual_isolate_lowest_one`, new in clippy 0.1.98; the method
+    // itself is stable well before the pinned 1.97, probed on that toolchain
+    // before the edit, so it is not a forward reference to the newer compiler.
+    let low = rotated.isolate_lowest_one();
     let id = (low.trailing_zeros() + start) % 64;
     let new = observed & !(1u64 << id);
     match inner
