@@ -8,8 +8,8 @@ table in `KE16-DESIGN.md`.
 | Step | State | Where |
 |---|---|---|
 | 0 | MEASURED — baseline `a0+b0+w0+c0`, 24-cell grid ×3 runs, ECS at both populations, five physics rows, per-cell band | §0, §Band |
-| A | **CLOSED ON `a3`** — five arms measured, then the deciding pair re-measured interleaved in ONE session | §A |
-| B | **B0 BY CONSTRUCTION, NOT BY MEASUREMENT** — `b1`/`b3` do not compile over `a3` | §B |
+| A | ⚠ **RE-OPENED 2026-09-08 — the closure on `a3` is VOID.** `a1f+b1` beats the shipped configuration on 10 of 35 cells (the deciding cell by 2.1×), ties both consumers, and its §8 gate ladder is green. The 64W tiebreak that saves `a3` fires on a width the engine's own chunking cannot produce | §A, **§A-RE** |
+| B | ⚠ **RE-OPENED with A.** `b1` compiles over `a1f`, and it is what delivers §A-RE's win — `a1f` alone improves nothing. It also removes defect B's signature: `top_lane = 4` against the 13/24/21 recorded under `a1+b0` | §B, **§A-RE** |
 | W1, W2 | **CLOSED ON `wc` 2026-09-08 at CS-4.** `wg` and `wgc` ELIMINATED (0 improvements, 13 and 14 regressions, and an occupancy receipt: 5–6 of 16 lanes, speedup pinned at 2.00×). `wc` is a tie on all 38 cells and rule 2's two gates — a real-park loom M1c and the route-(b) 32-seed liveness gate — are GREEN, so **W\* = `wc`**. ⚠ No physics ranking is filed: the passes carry a monotone warm-up drift and the PRIMARY row's band is 85 % | §W |
 | C, F | **CLOSED ON `c0` 2026-09-08.** Both arms DROPPED — neither improves anything anywhere; `c1` runs the wave on **2 of 16 lanes**, `c1f` on 9–10 and still loses 1.86×. Measured as a PAIR, departing from rule 3 with the number that forces it. **Final: `a3+b0+wc+c0`** | §C |
 | App | **NOT RUN — OWED.** No number here comes from the unconditional shipped code | §App, §Owed |
@@ -574,6 +574,141 @@ clause (2) EASIER. The counterfactual is decisive: give `a3` `a2`'s `REF` and `a
 The entire clause-(2) ordering in §A.1 is the ordering of which session each arm drew its `REF`
 from. It flattered `a3`, the winner — and the winner does not rest on it: `a3` wins on the pool
 grid, whose session-stability was verified to < 1 % on 22 of 24 cells.
+
+---
+
+---
+
+## §A-RE. THE AXIS-A CLOSURE IS VOID — `a1f+b1` beats the shipped configuration (2026-09-08, CS-4)
+
+### Why this was run, and why it was run FIRST
+
+`KE16-DESIGN-B4.md` BLOCKING 3 established that fixing defect B by any route that gives the worker
+joiner a registered destination deque fires `b1`/`b3`'s **second** return trigger
+(`KE16-REJECTED.md`), and that those arms build only over `a1`/`a1f` — so the comparison the remedy
+owes is `a3+b4` vs **`a1f+b1`**, not vs `a3+b0`. It described that re-run as the price paid **after**
+B4-1 is written.
+
+**It does not have to be.** `a1f` and `b1` are both already implemented arms, so *"does `a1f+b1`
+beat the shipped `a3`?"* is answerable with no new code at all. Taking it first turns a design
+blocker into a measured fact — and the fact is that the blocker fires.
+
+Three interleaved passes over `{a3+b0+wc+c0, a1f+b0+wc+c0, a1f+b1+wc+c0}` at CS-4 after
+`--prebuild`; no `DIRTY-PASS.txt`; per-arm load receipts 0.1–9.8 % CPU with one 17.9 % excursion.
+35 comparable cells (the three `park_timeout` rows are excluded — they are a property of the box).
+
+### The result
+
+| | improved | regressed | tie |
+|---|---|---|---|
+| `a1f+b0` vs shipped | **0** | 5 | 30 |
+| **`a1f+b1` vs shipped** | **10** | **2** | 23 |
+
+| cell | shipped `a3+b0+wc+c0` | `a1f+b0` | `a1f+b1` |
+|---|---:|---:|---:|
+| `worker/body_10us_tasks_4W` **the deciding cell** | 117.8 µs | 162.4 µs (1.38×) | **55.6 µs (0.47×)** |
+| `worker/body_100us_tasks_4W` | 1.71 ms | 1.98 ms | **0.44 ms (0.26×)** |
+| `worker/body_1ms_tasks_4W` | 14.74 ms | 19.50 ms | **4.44 ms (0.30×)** |
+| `dispatcher/body_100us_tasks_4W` | 1.65 ms | 1.63 ms | **0.43 ms (0.26×)** |
+| `dispatcher/body_10us_tasks_4W` | 128.4 µs | 122.5 µs | **47.4 µs (0.37×)** |
+| physics `in_scheduled_system` | 8.78 ms | 10.63 ms (1.21×) | 8.46 ms (tie) |
+| ecs `par_in_system/65536` | 87.90 ms | 91.74 ms | 87.58 ms (tie) |
+| `worker/body_1us_tasks_4W` | 12.3 µs | 14.9 µs | 14.4 µs (**1.17×**) |
+| `worker/body_1us_tasks_64W` | 80.5 µs | 110.3 µs | 109.5 µs (**1.36×**) |
+
+**BLOCKING 3's threshold was a 27.9 % gain on the deciding cell. The measurement is 53 %.**
+
+**The win is `b1`'s, not the placement's.** `a1f` alone improves nothing and regresses five cells
+including the physics primary at 1.21×. The challenger wins *despite* its placement, on a joiner
+that takes work instead of waiting.
+
+**And the same arm fixes defect B.** The occupancy gate under `a1f+b1` reads `top_lane = 4` at both
+W = 4 / 16 tasks and W = 16 / 64 tasks, against a rule-3 budget of `2 × tasks/W` = 8 — and against
+the `top_lane = 13/24/21` recorded for `a1+b0`, *"defect B's self-steal signature promoted onto the
+worker route"*. The signature is gone, measured rather than argued.
+
+### ⚠ THE LETTER OF STEP-A RULE 3 SAVES `a3`, AND THE LETTER IS WRONG HERE
+
+Rule 2 ranks by physics: 8.78 vs 8.46 ms against an 8.4 % band — a tie, so rule 3 applies. Rule 3
+compares the 1 µs and 10 µs WORKER-route cells pairwise in both directions; each arm regresses the
+other, so *"the 64W column decides"*. In that column at 1 µs, `a3` wins (80.5 vs 109.5 µs).
+
+**By the letter, the closure survives on one cell out of thirty-five.** It should not, and the
+reason is a fact about the engine rather than a preference:
+
+* **The default batching strategy is `batches_per_thread = 1`**
+  (`boyko_ecs/.../par_iter.rs`), so `chunk_size = entity_count / worker_count` and an archetype
+  splits into **exactly `W` chunks — one per worker**. Not 4W. Not 64W.
+* **`MIN_ARCHETYPE_FOR_PARALLEL = 1024`**, so a chunk is at least 1024 rows. Reaching a 1 µs body
+  would need a row to cost under a nanosecond. The ECS harness's real chunk is **~82 ms**.
+
+⇒ **The 64W column that decides rule 3 is a width the engine's own chunking cannot produce, at a
+body size its own minimum chunk cannot reach.** The tiebreak was written to separate `a1` from
+`a1f` — two arms differing in end discipline, where the steal path genuinely dominates at 64W. It is
+being asked here to adjudicate two configurations differing by an entire axis-B mechanism, and it
+discards a 2–4× win across the mid-body range on the strength of one unreachable cell.
+
+**On the column the engine DOES produce — `tasks = W` — `a1f+b1` wins at every body size, on both
+routes, and the margin grows with the body:**
+
+| body | worker `tasks=W` | dispatcher `tasks=W` |
+|---|---:|---:|
+| 1 µs | 1.02× (tie) | 0.98× |
+| 10 µs | 0.89× | 0.92× |
+| 100 µs | 0.84× | 0.91× |
+| 1 ms | **0.81×** | 0.89× |
+
+That monotonicity is the mechanism showing itself: the longer the wave, the more a joiner that helps
+is worth against one that waits.
+
+### Consequences, stated rather than deferred
+
+1. **The axis-A closure on `a3` cannot stand.** It was decided against `a1f+b0`; the register's own
+   return row brings back `b1`, and `a1f+b1` beats the shipped configuration on the engine's shape.
+2. **A\* and B\* both change**, so the shipped configuration becomes `a1f+b1+wc+c0` — subject to the
+   §8 gates, which are recorded below.
+3. **`KE16-REJECTED.md`'s `a1f` and `b1` rows move from REJECTED to RETURNED**, with the number that
+   returned them. The register's return conditions did their job: `b1`'s row named this exact event
+   and it happened.
+4. **§7's Step-A rule 3 needs rewriting before it is used again.** Its defect is not the 64W choice
+   as such — it is that a single fixed column can override every other cell, including both
+   consumers, with no reference to whether the engine can generate that column. The replacement has
+   to be **consumer agreement plus engine-producible widths**, and it has to be written before the
+   next candidate is judged, not after.
+
+### The §8 gate ladder for `a1f+b1+wc+c0` — every leg run at CS-4, every leg green
+
+| gate | verdict |
+|---|---|
+| `cargo check -p boyko-threadpool --all-targets --features …` | exit 0 |
+| `cargo check -p boyko-ecs -p boyko-physics --all-targets --features boyko-threadpool/…` | exit 0 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **exit 0** — see `a4433654`; this leg had never been green, and it was blind rather than red |
+| `cargo test -p boyko-threadpool --all-targets --no-fail-fast --features …` | 20 targets, **162 passed, 0 failed**, 2 ignored |
+| `cross_pool_routing` | 10 passed |
+| red-first occupancy (threadpool) | `running 1 test`, ok — `top_lane = 4` at W=4/16 tasks and W=16/64 tasks, against a rule-3 budget of 8 |
+| **B1-P receipt** — a parked joiner is claimed by a foreign wave | `running 1 test`, ok |
+| ECS occupancy gate | `running 1 test`, ok |
+| ECS nested-system inline (b1-specific) | 2 passed |
+| physics `{1, N}` bit-identity oracles | 137 passed |
+| loom M1 / M1c / M2 / M2b / M3 + the `should_panic` calibration | 6 passed, 0 failed |
+| Miri, 16 seeds, both A1 shapes present | 16 × `1 passed; 0 failed`, 0 UB |
+| Miri, the A1 inline receipt, 16 seeds | 16 × `1 passed; 0 failed`, **0 `receipt not observed`** |
+
+⚠ **Two of those legs were nearly filed as passes when they were not, and both were caught by
+`running N` rather than by an exit code.**
+
+* The red-first occupancy gate returned `running 0 tests`, `4 filtered out`, exit 0 under the §8
+  command. The reason is in the test's own ignore text: under an A arm it is **not** ignored and
+  runs in the ordinary leg, so `-- --ignored` — which runs ONLY ignored tests — filtered it out.
+  §8's command is written for the default build. Re-run without the flag it reads `running 1 test`.
+* The A1 inline receipt appeared absent because I ran the shape without `--nocapture`. It is not a
+  printed line at all: the test `return`s on success and panics with the literal
+  `receipt not observed` on failure, so the receipt is observed by the ABSENCE of that panic. Zero
+  occurrences across 16 seeds, with 16 result tuples all reading `1 passed; 0 failed; 0 ignored`.
+
+⚠ And a grep of mine reported `FAILED / panicked anywhere : 14` on a log with none of either: a
+case-insensitive pattern matched the literal `0 failed` inside every result line. **The count was
+the instrument, not the run.** Re-counted case-sensitively: 0 `FAILED`, 0 `panicked at`.
 
 ---
 

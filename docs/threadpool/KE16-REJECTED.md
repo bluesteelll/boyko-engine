@@ -552,19 +552,23 @@ argues from the instrument that lost.
 
 | Candidate | Flag | Code state | Status | The number | Return condition |
 |---|---|---|---|---|---|
-| `a1f` | `ke16-a1-fifo` | CS-1 | REJECTED (rule 2) | physics 13.640 vs `a3` 11.709 ms, ranges disjoint; deciding cell 159 470 vs 114 960 ns | **RETURNABLE, first priority** — any change to steal granularity (batch cap, steal-half, `ke16-c-batch`) voids the measurement |
+| `a1f` | `ke16-a1-fifo` | CS-1 → **CS-4** | ⚠ **RETURNED 2026-09-08** | ALONE it still loses (0 improved, 5 regressed at CS-4). But it is the only placement `b1` builds over, and `a1f+b1` beats the shipped `a3+b0+wc+c0` on 10 of 35 cells — deciding cell 55.6 vs 117.8 µs | **CONDITION MET.** It returned exactly as written: on the arm below becoming reachable |
 | `a1` | `ke16-a1` | CS-1 | REJECTED (rule 2) | physics 16.411 vs 10.354 ms = 58.50 % against a 26.96 % threshold | **RETURNABLE, second** — re-measure in a session with `O5` spread ≤ 1 % and a same-session `a0` control |
 | `a2` | `ke16-a2` | CS-1 | REJECTED (rule 3) | worker `10us_4W` 182 993.5 vs 111 278.65 ns = 1.6445×, 8× the threshold | **RETURNABLE, conditional** — an A1-specific UB **and** an `a3` gate failure; or the ECS wall-vs-criterion dispute settled and the 1.6445× closed in `a3`'s session |
 | `a5` | `ke16-a5` | CS-1 | REJECTED (rule 2) | physics 11.784 vs 10.354 ms = 13.81 % against 8.00 % | **RETURNABLE** — **if the App-12 timer guard ships**; nothing else about `a5` should be reconsidered without it |
-| `b1` | `ke16-b1` | — | **NEVER MEASURED — cannot build over `a3`** | `compile_error!`; `cargo check --features ke16-a3,ke16-b1` exits 101 | an A arm with a **registered worker deque** wins axis A (i.e. `a1`/`a1f`), or defect B is fixed by another route that gives the joiner a registered destination |
-| `b3` | `ke16-b3` | — | **NEVER MEASURED — cannot build over `a3`** | same refusal | same |
+| `b1` | `ke16-b1` | **CS-4** | ⚠ **RETURNED AND WINNING 2026-09-08** | over `a1f`: the deciding cell 2.12× faster than shipped, 4W cells 2.4–3.8×, both consumers a tie, `top_lane` 4 against 13/24/21 — defect B's signature GONE. Full §8 gate ladder green | **CONDITION MET, by the second clause.** `KE16-DESIGN-B4.md` BLOCKING 3 predicted this fires; it was tested BEFORE writing the remedy and it fired |
+| `b3` | `ke16-b3` | — | **NOT MEASURED — now reachable** | same refusal lifted with `a1f`; it differs from `b1` only in the external joiner's policy (park vs help) | **OWED**: rule 2 of Step B decides `b3` vs `b1` on the dispatcher-route 100 µs and 1 ms × 4W cells. `b1` is measured; `b3` is not |
 | `wg` | `ke16-w-gate` | CS-4 | REJECTED (rule 1, both clauses) | 13 of 38 cells regress, 0 improve; `max_in_flight` **5–6 of 16**, speedup pinned 2.00× | a wake mechanism whose width does not depend on a serial cascade (eventcount / futex broadcast); or consumer bodies below ~1 µs |
 | `wgc` | `ke16-w-gate,ke16-w-count` | CS-4 | REJECTED (rule 1) | 14 of 38 regress, 0 improve — `wg`'s profile, `wc` being a tie | **CLOSED as a pair** — returns iff `wg` returns |
 | `wc` | `ke16-w-count` | CS-4 | ✅ **KEPT — W\*** | tie on all 35 comparable cells, re-tested on clean data: 0 regressions; both gates green | — (shipped) |
 | `c1` | `ke16-c-batch` | CS-4 | REJECTED (rule 1, clause b) | 0 improvements, 6 regressions; `max_in_flight` **2 of 16** — the arm's own source comment, measured | the wave's wake width decoupled from its push count; concretely, `c1f` reading `max_in_flight` = 16 at N = 65536 |
 | `c1f` | `ke16-w-fanout` | CS-4 | REJECTED (rule 1, clause b) | 0 improvements, 5 regressions; recovers 2 → **9–10 of 16**, 8.00×, still × 1.86 | same as `c1`, inseparable; or a per-round idle re-read shown not to double-wake |
 
-**No row in this file is CLOSED.** Every one carries a fact about the world that could change.
+**No row in this file is CLOSED.** Every one carries a fact about the world that could change — and
+on 2026-09-08 two of them CHANGED. `b1`'s return condition named its own trigger and the trigger
+fired; `a1f` came back with it, because it is the only placement `b1` builds over. **A register
+whose rows can return is worth keeping only if somebody eventually tests the condition. This one was
+tested, and it cost the campaign its axis-A verdict.**
 
 ---
 
