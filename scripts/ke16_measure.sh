@@ -150,6 +150,10 @@ variant_string() {
         c0)  echo "a3+b0+$WSTAR+c0"  ;;
         c1)  echo "a3+b0+$WSTAR+c1"  ;;
         c1f) echo "a3+b0+$WSTAR+c1f" ;;
+        # The axis-A RE-JUDGEMENT that fixing defect B forces. See the block below.
+        ship)  echo "a3+b0+$WSTAR+c0"    ;;
+        a1f)   echo "a1f+b0+$WSTAR+c0"   ;;
+        a1fb1) echo "a1f+b1+$WSTAR+c0"   ;;
         *)   echo '' ;;
     esac
 }
@@ -164,6 +168,31 @@ variant_features() {
         # `ke16-w-fanout` implies `ke16-c-batch` in the manifest; both are spelled
         # so the feature line and the witness `c1f` are legible side by side.
         c1f) echo "ke16-a3$WSTAR_FEATURES,ke16-c-batch,ke16-w-fanout" ;;
+
+        # === The axis-A re-judgement `KE16-DESIGN-B4.md` BLOCKING 3 owes =======
+        #
+        # The register gives `b1`/`b3` a SECOND return trigger
+        # (`KE16-REJECTED.md:359-362`): they return "if defect B is fixed by some
+        # other route that gives the worker joiner a registered destination
+        # deque" — which is exactly what B4-1 would be. They build only over
+        # `a1`/`a1f`, so what returns with them is `a1f+b1`, and the axis-A
+        # closure was decided against `a1f+b0`.
+        #
+        # !! THE MEASUREMENT DOES NOT NEED B4 TO EXIST. `a1f` and `b1` are both
+        # already implemented arms, so "does `a1f+b1` beat the shipped `a3`?" is
+        # answerable today, with no new code. B4's design treats this re-run as a
+        # price paid AFTER writing the remedy; taking it first turns a design
+        # blocker into a measured fact, and decides whether B4-1 is a local fix
+        # (return row discharged with a number) or whether the axis-A closure is
+        # void (a finding larger than the remedy).
+        #
+        # `wc` rides on all three arms because it is the shipped W and measured a
+        # tie everywhere, so it is neutral to the comparison and keeps every arm
+        # at the configuration that would actually ship. `a1f` alone is carried to
+        # separate `b1`'s contribution from `a1f`'s.
+        ship)  echo "ke16-a3$WSTAR_FEATURES" ;;
+        a1f)   echo "ke16-a1-fifo$WSTAR_FEATURES" ;;
+        a1fb1) echo "ke16-a1-fifo,ke16-b1$WSTAR_FEATURES" ;;
         *)   echo '' ;;
     esac
 }
@@ -267,7 +296,13 @@ for key in "${VARIANT_KEYS[@]}"; do
     # the naming scheme could not express the distinction the document forbids
     # collapsing. The short HEAD hash makes the distinction structural, so two
     # code states can never address one directory.
-    CODE_STATE="${KE16_CODE_STATE:-$(git -C "$REPO_ROOT" rev-parse --short HEAD)}"
+    # ⚠ DERIVED FROM THE LAST COMMIT THAT TOUCHED `crates/`, not from HEAD. HEAD
+    # moves on documentation commits too, and this campaign writes a lot of them:
+    # labelling by HEAD splits ONE code state across several directory names,
+    # which is the opposite defect to the collision this field was added to fix
+    # and just as misleading — a reader comparing two labels would think the code
+    # differed. `-- crates/` is the whole build input for every bench here.
+    CODE_STATE="${KE16_CODE_STATE:-$(git -C "$REPO_ROOT" log -1 --format=%h -- crates/)}"
     baseline="$variant-$CODE_STATE-r$PASS"
     echo ""
     echo "=== pass $PASS / variant $variant (features: $features) ==="
