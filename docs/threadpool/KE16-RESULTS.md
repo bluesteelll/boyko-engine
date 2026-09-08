@@ -10,8 +10,8 @@ table in `KE16-DESIGN.md`.
 | 0 | MEASURED — baseline `a0+b0+w0+c0`, 24-cell grid ×3 runs, ECS at both populations, five physics rows, per-cell band | §0, §Band |
 | A | **CLOSED ON `a3`** — five arms measured, then the deciding pair re-measured interleaved in ONE session | §A |
 | B | **B0 BY CONSTRUCTION, NOT BY MEASUREMENT** — `b1`/`b3` do not compile over `a3` | §B |
-| W1, W2 | **NOT MEASURED — OWED.** Only the reference `a3+b0+w0+c0` was taken | §W, §Owed |
-| C, F | **NOT MEASURED — OWED** | §W, §Owed |
+| W1, W2 | **MEASURED 2026-09-08 at CS-4** — `wg` and `wgc` ELIMINATED (0 improvements, 13 and 14 regressions, and an occupancy receipt: 5–6 of 16 lanes, speedup pinned at 2.00×). `wc` a tie on all 38 cells and NOT YET KEPT — rule 2 makes its keep conditional on two gates that have not been run. ⚠ No physics ranking is filed: the passes carry a monotone warm-up drift and the PRIMARY row's band is 85 % | §W |
+| C, F | **NOT MEASURED — BLOCKED ON W\***, which `wc`'s two gates decide | §C |
 | App | **NOT RUN — OWED.** No number here comes from the unconditional shipped code | §App, §Owed |
 
 This file exists because the tournament ran for weeks and produced no written result. Everything
@@ -157,6 +157,13 @@ them compares across a rewrite without knowing it.
 | **CS-1** | AFTER the `complete_task` protector fix (`complete_task` takes `*const Self`), **BEFORE** Stage 1 of the task representation | Step 0 baseline; axis A's five arms `a0/a1/a1f/a2/a3/a5`; the `a3`-vs-`a1f` head-to-head that closed axis A |
 | **CS-2** | AFTER Stage 1 — the queue element is now `Task { payload: *const (), execute: unsafe fn(*const ()) }` | The axis-W/C reference `a3+b0+w0+c0` (49 rows); the Stage-1 structural certification |
 | **CS-3** | The unconditional code after feature removal | **NOTHING. Step App has not been run.** |
+| **CS-4** | AFTER stage 3b (`d51b4ced`) — the scoped task cell is emplaced into a per-scope `ScopeBlock` and released by one `free_all` in `Scope::drop`, instead of one `alloc`/`dealloc` per task | **Step W**: the re-taken reference `a3+b0+w0+c0` and the three W arms, 3 interleaved passes (§W below) |
+
+⚠ **CS-4 is why §W's reference was RE-TAKEN rather than read off the CS-2 table.** The 49-row CS-2
+reference describes a tree in which every spawned task carried its own heap allocation; stage 3b
+removed that from the scoped path. Comparing a CS-4 arm against the CS-2 reference would be exactly
+the mixing this section exists to forbid. The CS-2 numbers stay below, unchanged, and are not
+comparable to §W's.
 
 ### Stage 1's measured effect on the task path
 
@@ -806,12 +813,170 @@ nowhere.
 
 ---
 
-## §W, §C, §F. NOT MEASURED — OWED
+## §W. MEASURED 2026-09-08 at CS-4 — `wg` and `wgc` ELIMINATED on an OCCUPANCY receipt; `wc` a tie everywhere
 
-**`wg`, `wc`, `wgc`, `c1` and `c1f` were never measured.** Only the reference configuration was
-taken, and the run was stopped when the owner started a game.
+**Three interleaved passes over `{w0, wg, wc, wgc}` at CS-4**, one pass = all four arms in table
+order, driver `scripts/ke16_measure.sh`, witness `KE16_EXPECT` matched in all three harness logs for
+all twelve runs. 38 cells carry a complete 4 × 3 set. `c1`/`c1f` are NOT measured and cannot be until
+W\* is fixed: step C is defined as `A*+B*+W*+c1`.
 
-### The reference: `a3+b0+w0+c0` on the POST-STAGE-1 code (CS-2), 49 rows, preserved
+### The verdict, and it does not rest on the wall clock
+
+| arm | cells improved | cells regressed | `max_in_flight` at N = 65536 | ECS speedup there |
+|---|---|---|---|---|
+| `wg` (W-b) | **0** | **13 of 38** | **5–6** of 16 | **2.00×** |
+| `wgc` | **0** | **14 of 38** | 5–8 of 16 | 2.00–4.00× |
+| `wc` (W-d′) | 0 | **0** | **16** of 16 | 10.6–15.8× |
+| `w0` (reference) | — | — | **16** of 16 | 13.9–15.7× |
+
+**`wg` and `wgc` fail step W rule 1 on BOTH clauses** — each regresses a 1 µs cell beyond 2 × band
+(`worker/body_1us_tasks_64w`, × 1.42 and × 1.26; `wgc` also `dispatcher/body_1us_tasks_64w`, × 1.51)
+and neither improves a single cell or consumer. **Eliminated.**
+
+**The deciding evidence is the occupancy receipt, not a time.** W-b does not make the pool slower by
+adding work; **it leaves ten of sixteen lanes parked.** The ECS protocol pass reports
+`max_in_flight` directly, and under `wg` it reads 5–6 with the speedup pinned at **2.00×** in every
+pass — which is the gate's own arithmetic rather than a measurement artefact: on a wave pushed to
+one destination only the first two pushes see `pre_len` of 0 and 1, so only two workers are woken,
+and the thief-residue cascade restores width one unpark-round at a time, too late for the wave. At
+N = 4096 the same reading is `max_in_flight` 3 against the reference's 4, speedup 2.00 against 4.00.
+
+⚠ **This is a receipt the wall clock alone could not have produced**, and it is why
+`KE16-DESIGN-MEASUREMENT.md` §3 lists occupancy as "the diagnostic behind a wall-clock change".
+
+### The design named this outcome as its own risk, on exactly these cells
+
+`KE16-DESIGN-W.md` §2.4 predicted the gain at **1 µs × {4W, 64W} on the worker route**, and wrote the
+risk as: *"the 100 µs–1 ms × W cells, where the chain's 4 hops of Windows wake latency plus the
+one-body stall may exceed the W serial unparks the spawner paid before."*
+
+| cell | design said | measured `wg` / `w0` |
+|---|---|---|
+| `worker/body_1us_tasks_4w` | gain | 1.10 — tie |
+| `worker/body_1us_tasks_64w` | gain | **1.42 — REGRESSES** |
+| `worker/body_100us_tasks_w` | risk | **3.66** |
+| `worker/body_1ms_tasks_w` | risk | **3.31** |
+| `dispatcher/body_100us_tasks_w` | risk | **4.69** |
+| `dispatcher/body_1ms_tasks_w` | risk | **5.51** |
+
+**Both halves of the prediction failed in the same direction**: the two cells named as the gain went
+tie and regression, and the risk fired at 3.3 × to 5.5 × rather than the "may exceed" it was written
+as. §2.4 also said the gain would show on the physics consumer, "whose 6 colors leave workers parked
+between steps" — the physics rows separate no arm at all (below).
+
+### ⚠ The data carries a MONOTONE DRIFT, and the verdict is stated only where the drift cannot reach
+
+The reference's own three passes are not stationary. They get FASTER, monotonically:
+
+| reference row | r1 | r2 | r3 | spread |
+|---|---:|---:|---:|---:|
+| `bench_thread_install` | 36.24 ms | 13.36 ms | 8.12 ms | **346 %** |
+| `bench_thread_install_Wminus1` | 19.79 ms | 12.74 ms | 7.84 ms | 152 % |
+| `in_scheduled_system` **PRIMARY** | 15.65 ms | 14.88 ms | 8.45 ms | **85 %** |
+| `single_threaded_O5` (session meter) | 33.46 ms | 32.92 ms | 26.37 ms | 27 % |
+| `par_in_system/65536` | 174.4 ms | 109.2 ms | 85.7 ms | 104 % |
+| `seq/65536` (ECS single-threaded) | 1314 ms | 1365 ms | 1311 ms | **4.1 %** |
+
+This is the §Band Step-0 finding again — *"the band as taken is measuring a first-run WARM-UP, not
+jitter"* — in a session rather than in a run. The load receipts agree: pass 1 opened at 14.8 % CPU
+and pass 3's first receipt reads 1.4 / 0 / 0.1 %. The machine was still settling from the build when
+pass 1 ran.
+
+**Consequences, stated rather than smoothed over:**
+
+1. **NO PHYSICS VERDICT IS FILED.** With an 85 % band on the PRIMARY row every arm is a tie by
+   construction, and a tie against a band that wide says nothing. The physics rows below are
+   recorded as data, not as a ranking.
+2. **The elimination of `wg`/`wgc` survives the drift, and here is why it is not an artefact of it.**
+   The effect is 1.8 ×–5.5 ×, larger than the drift; it is present in EVERY pass, not in one; it
+   appears on cells whose reference spread is tight (`worker/body_10us_tasks_w`: reference
+   31 584 / 32 090 / 31 437 ns, spread 2.1 %, against `wg` 59 354 / 73 507 / 55 269); and it is
+   corroborated by an occupancy integer that drift cannot move — 5 lanes is not a slow 16.
+3. **`wc` is a tie on the TIGHT cells too**, which is what makes its tie meaningful rather than a
+   consequence of wide bands: 33 796 / 30 387 / 31 333 ns on that same cell, against the reference's
+   31 584 / 32 090 / 31 437.
+4. **A fourth pass would not settle the physics rows** — the drift is monotone, so more passes taken
+   the same way extend the trend rather than average it out. A physics verdict needs a session that
+   opens already settled, or a discard rule taken per harness as §W's CS-2 pass did.
+
+### `wc` — eligible under rule 2, NOT YET KEPT, and the reason is a gate rather than a number
+
+Step W rule 2 keeps `wc` when (a) it regresses no 1 µs cell and it is a tie everywhere — both hold —
+**"PROVIDED both its gates are green: loom M1c (a real-park M1c) and the route-(b) many-seeds
+gate."** Neither has been run at CS-4. **`wc` is therefore recorded as MEASUREMENT-ELIGIBLE and
+NOT KEPT**, and W\* is undecided between `wc` and `w0` until those two gates report. The numbers
+cannot settle it: rule 2 is explicitly a soundness clause, and a red on either gate drops the feature
+rather than re-opening the comparison.
+
+### ⚠ Raw data lost, and it was this pass that lost it
+
+`--save-baseline` is keyed on the variant string alone, which does not name the code state, and
+criterion overwrites in place. Re-taking `a3+b0+w0+c0` at CS-4 therefore **destroyed the CS-2
+reference's raw samples for r1, r2 and r3**; `-r4` and `-r5` survive only because this pass stopped
+at three. Every median, band and per-run value of that reference is preserved in prose below, so the
+findings are intact — the per-sample data behind three of five runs is not, and criterion baselines
+are not rebuildable from anything in the tree. Fixed in `e7910d5f`: the baseline name now carries the
+short HEAD hash, so two code states can no longer address one directory.
+
+### Appendix: every cell, median of three passes at CS-4
+
+Medians are the median of the three per-pass medians. `band` is the reference's widest
+pairwise gap over its three passes, floored at 4 % (§4). A verdict is `REG` when
+`med_V > med_R x (1 + 2 x band)` with the band taken as the larger of the arm's and the
+reference's, `IMP` at the mirror inequality, `tie` otherwise.
+
+| cell | `w0` | band | `wg` | vs | `wc` | vs | `wgc` | vs |
+|---|---:|---:|---:|:--|---:|:--|---:|:--|
+| `worker/body_100us_tasks_4w` | 1.69 ms | 10.1 % | 2.13 ms | tie | 1.73 ms | tie | 2.19 ms | tie |
+| `worker/body_100us_tasks_64w` | 7.23 ms | 12.0 % | 7.56 ms | tie | 7.44 ms | tie | 7.67 ms | tie |
+| `worker/body_100us_tasks_w` | 189.8 us | 32.8 % | 695.0 us | **REG** | 183.3 us | tie | 711.6 us | **REG** |
+| `worker/body_10us_tasks_4w` | 130.3 us | 10.3 % | 215.1 us | **REG** | 126.0 us | tie | 219.9 us | **REG** |
+| `worker/body_10us_tasks_64w` | 813.3 us | 12.5 % | 807.0 us | tie | 762.7 us | tie | 777.3 us | tie |
+| `worker/body_10us_tasks_w` | 31.6 us | 4.0 % | 59.4 us | **REG** | 31.3 us | tie | 56.4 us | **REG** |
+| `worker/body_1ms_tasks_4w` | 17.23 ms | 12.5 % | 19.35 ms | tie | 16.27 ms | tie | 18.68 ms | tie |
+| `worker/body_1ms_tasks_64w` | 67.98 ms | 8.0 % | 72.53 ms | tie | 68.36 ms | tie | 70.45 ms | tie |
+| `worker/body_1ms_tasks_w` | 1.58 ms | 78.5 % | 5.22 ms | **REG** | 1.37 ms | tie | 7.08 ms | **REG** |
+| `worker/body_1us_tasks_4w` | 15.9 us | 8.2 % | 17.5 us | tie | 15.9 us | tie | 15.0 us | tie |
+| `worker/body_1us_tasks_64w` | 109.4 us | 12.6 % | 155.3 us | **REG** | 98.7 us | tie | 137.8 us | **REG** |
+| `worker/body_1us_tasks_w` | 9.7 us | 12.3 % | 9.3 us | tie | 9.5 us | tie | 9.4 us | tie |
+| `dispatcher/body_100us_tasks_4w` | 1.69 ms | 12.9 % | 2.48 ms | **REG** | 1.60 ms | tie | 2.48 ms | **REG** |
+| `dispatcher/body_100us_tasks_64w` | 7.63 ms | 13.7 % | 7.51 ms | tie | 7.54 ms | tie | 7.82 ms | tie |
+| `dispatcher/body_100us_tasks_w` | 173.7 us | 61.1 % | 815.0 us | **REG** | 154.2 us | tie | 808.1 us | **REG** |
+| `dispatcher/body_10us_tasks_4w` | 139.1 us | 4.0 % | 273.4 us | **REG** | 144.1 us | tie | 270.9 us | **REG** |
+| `dispatcher/body_10us_tasks_64w` | 791.3 us | 15.2 % | 835.9 us | tie | 768.6 us | tie | 827.8 us | tie |
+| `dispatcher/body_10us_tasks_w` | 21.9 us | 4.0 % | 65.5 us | **REG** | 22.1 us | tie | 69.2 us | **REG** |
+| `dispatcher/body_1ms_tasks_4w` | 14.99 ms | 10.7 % | 20.67 ms | tie | 14.64 ms | tie | 23.78 ms | tie |
+| `dispatcher/body_1ms_tasks_64w` | 67.94 ms | 7.3 % | 70.65 ms | tie | 69.33 ms | tie | 70.67 ms | tie |
+| `dispatcher/body_1ms_tasks_w` | 1.45 ms | 32.8 % | 7.96 ms | **REG** | 1.36 ms | tie | 7.69 ms | **REG** |
+| `dispatcher/body_1us_tasks_4w` | 11.8 us | 20.5 % | 15.8 us | tie | 13.2 us | tie | 14.8 us | tie |
+| `dispatcher/body_1us_tasks_64w` | 106.1 us | 4.0 % | 171.5 us | tie | 108.3 us | tie | 160.0 us | **REG** |
+| `dispatcher/body_1us_tasks_w` | 4.8 us | 8.3 % | 5.4 us | tie | 4.8 us | tie | 5.3 us | tie |
+| `park_timeout_1ms` | 15.57 ms | 4.0 % | 15.57 ms | tie | 15.56 ms | tie | 15.59 ms | tie |
+| `park_timeout_2ms` | 15.55 ms | 4.0 % | 15.57 ms | tie | 15.56 ms | tie | 15.55 ms | tie |
+| `park_timeout_50us` | 15.57 ms | 4.0 % | 15.58 ms | tie | 15.58 ms | tie | 15.58 ms | tie |
+| `physics bench_thread_install` | 13.36 ms | 346.3 % | 17.67 ms | tie | 12.74 ms | tie | 13.33 ms | tie |
+| `physics bench_thread_install_wminus1` | 12.74 ms | 152.3 % | 9.94 ms | tie | 12.17 ms | tie | 13.12 ms | tie |
+| `physics empty_schedule_control` | 1.7 us | 9.1 % | 1.7 us | tie | 1.7 us | tie | 1.8 us | tie |
+| `physics in_scheduled_system` | 14.88 ms | 85.2 % | 10.42 ms | tie | 12.43 ms | tie | 12.71 ms | tie |
+| `physics single_threaded_o5` | 32.92 ms | 26.9 % | 30.98 ms | tie | 30.83 ms | tie | 32.85 ms | tie |
+| `ecs par_from_dispatcher/4096` | 22.60 ms | 65.2 % | 43.00 ms | tie | 23.47 ms | tie | 40.99 ms | tie |
+| `ecs par_from_dispatcher/65536` | 100.00 ms | 68.7 % | 687.46 ms | **REG** | 119.07 ms | tie | 675.75 ms | **REG** |
+| `ecs par_in_system/4096` | 21.63 ms | 7.3 % | 33.79 ms | **REG** | 22.20 ms | tie | 35.49 ms | **REG** |
+| `ecs par_in_system/65536` | 109.20 ms | 103.6 % | 533.09 ms | **REG** | 124.24 ms | tie | 493.82 ms | **REG** |
+| `ecs seq/4096` | 82.23 ms | 4.3 % | 84.84 ms | tie | 81.95 ms | tie | 82.00 ms | tie |
+| `ecs seq/65536` | 1,314.06 ms | 4.1 % | 1,358.65 ms | tie | 1,375.83 ms | tie | 1,311.34 ms | tie |
+
+---
+
+## §C, §F. NOT MEASURED — BLOCKED ON W\*
+
+**`c1` and `c1f` were never measured**, and cannot be until the two `wc` gates above decide W\*:
+step C is `A*+B*+W*+c1`. Per §7 Steps W/C rule 3, if `c1` is not kept then `c1f` is not measured at
+all — it needs the batch push.
+
+⚠ The `c1` caveat below still travels with any future C row, and CS-4 does not change it.
+
+### The CS-2 reference: `a3+b0+w0+c0` on the POST-STAGE-1 code, 49 rows, preserved — NOT comparable to §W above
 
 ⚠ **These numbers describe CS-2 and MUST NOT be compared against §A's, which are CS-1.** See §CS.
 
@@ -1242,9 +1407,15 @@ A contaminated run named is worth more than one silently dropped.
 Named here rather than in a covering note, because a reader who mistakes this file for a completed
 tournament will ship on numbers that were never taken.
 
-1. **AXES W AND C ARE NOT MEASURED.** `wg`, `wc`, `wgc`, `c1` and `c1f` are owed. The reference
-   `a3+b0+w0+c0` exists (§W, 49 rows, CS-2) and is preserved; the run was stopped when the owner
-   started a game. Any future C row over `w0` carries the App-4 cascade caveat.
+1. **AXIS W IS MEASURED; AXIS C IS NOT, AND THREE THINGS INSIDE W ARE STILL OWED.** `wg` and `wgc`
+   are eliminated at CS-4 (§W). Owed: **(a)** `wc`'s two gates — a real-park loom M1c and the
+   route-(b) many-seeds Miri gate — without which rule 2 cannot keep it and W\* stays undecided
+   between `wc` and `w0`; **(b)** a physics ranking, which this pass cannot supply because its three
+   passes drift monotonically and the PRIMARY row's band is 85 % — that needs a session that opens
+   already settled, not more passes taken the same way; **(c)** `c1`/`c1f`, blocked on W\*. Any
+   future C row over `w0` carries the App-4 cascade caveat.
+   ⚠ The CS-2 reference (49 rows) is preserved as PROSE only — this pass overwrote its criterion
+   baselines for r1–r3 under the same directory names (§W, last subsection).
 2. **STEP APP HAS NOT BEEN RUN.** No number in this file comes from the unconditional shipped code.
    The design requires the retake on the code that ships, and separately every absolute here is a
    bench-profile number that does not describe the shipped codegen configuration.

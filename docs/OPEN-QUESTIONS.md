@@ -4803,3 +4803,54 @@ artefact today.
 4. **The gate's `overlaps >= 1` threshold — PER-CONTEXT COUNTERS.** `--test-threads=1` was rejected
    because it changes the recipe the measured 4/4 and 3/4 table was taken under, and every negative
    control compares against that table. Not yet implemented; it is the next small item after Stage 3b.
+
+## Axis W is decided against `wg`; what remains is a GATE, not a number (2026-09-08)
+
+Three interleaved passes at CS-4 eliminated `wg` (W-b) and `wgc`: zero improvements, thirteen and
+fourteen regressions, and — the reading that decides it — an **occupancy receipt**. Under `wg` the
+ECS protocol pass reports `max_in_flight` of **5–6 of 16 lanes** with the speedup pinned at
+**2.00×** in every pass, against the reference's 16 and 13.9–15.7×. W-b does not add overhead; it
+leaves ten lanes parked, because on a wave pushed to one destination only the first two pushes see
+`pre_len` of 0 and 1. `KE16-DESIGN-W.md` §2.4 had named this outcome as its own risk clause, on
+exactly the cells it fired on.
+
+`wc` (W-d′) is a tie on all 38 cells and preserves 16/16 occupancy. **Step W rule 2 makes its keep
+conditional on two gates rather than on any number**: a real-park loom M1c, and the route-(b)
+many-seeds Miri gate. Neither has been run at CS-4. So **W\* is undecided between `wc` and `w0`,
+and no measurement can decide it** — a red on either gate drops the feature outright.
+
+⇒ **Nothing here needs you.** The two gates are structural work and will be run when the machine is
+free; they are not a values call. This entry exists so that a reader who sees "axis W measured" does
+not conclude that W\* is fixed.
+
+### ⚠ What IS worth your ruling: the physics ranking, and whether it is worth a session
+
+**No physics verdict was filed, and it cannot be from this data.** The three passes drift
+monotonically — the reference's `bench_thread_install` reads 36.24 / 13.36 / 8.12 ms across passes
+1, 2, 3, and the PRIMARY row `in_scheduled_system` carries an **85 % band**. Against a band that
+wide every arm is a tie by construction, which is a statement about the band and not about the arms.
+The machine was still settling from the build when pass 1 ran; the load receipts show 14.8 % CPU at
+pass 1's open and 1.4 / 0 / 0.1 % at pass 3's.
+
+**More passes taken the same way would not fix it** — the drift is monotone, so extra passes extend
+the trend rather than average it out. A physics ranking needs a session that opens ALREADY SETTLED:
+the box idle before the first build, not after it.
+
+**My recommendation is that this is NOT worth a session, and the reason is that it is not on the
+critical path.** W\* is a choice between `wc` and `w0`, and rule 2 decides it on the two gates. A
+physics ranking would matter only if `wc` were a candidate to keep on performance grounds — it is
+not; it is a measured tie. And Step App re-takes every consumer number on the unconditional shipped
+code anyway, which is where the acceptance line is formally taken. **Unless you want the record to
+carry a CS-4 physics row for its own sake, the next quiet window is better spent on the axis-A
+re-judgement that fixing defect B forces** (`a3+b4` vs `a1f+b1`, ruling 1 of 2026-09-07).
+
+### ⚠ Raw data this pass destroyed, recorded because it cannot be recovered
+
+`--save-baseline` is keyed on the variant string, which does not name the code state, and criterion
+overwrites in place. Re-taking `a3+b0+w0+c0` at CS-4 overwrote the **CS-2 reference's raw samples for
+r1, r2 and r3**; r4 and r5 survive only because the pass stopped at three. The medians, bands and
+per-run values are preserved as prose in `KE16-RESULTS.md` §W, so the findings are intact — the
+per-sample data behind three of five runs is gone, and criterion baselines are not rebuildable from
+anything in the tree. The naming scheme now carries the short HEAD hash (`e7910d5f`), so two code
+states can no longer address one directory. **No action is asked of you; it is here because a
+document that only records its successes is the thing this campaign keeps finding to be wrong.**
