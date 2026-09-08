@@ -48,14 +48,39 @@
 # ⚠ THIS SCRIPT TIMES THINGS. Nothing else may run on the box while it does --
 # including the agent that started it. That is a rule about the MACHINE, not
 # about the script.
+#
+# ⚠⚠ AND THE SCRIPT ITSELF IS THE THING MOST LIKELY TO BREAK THAT RULE. Each
+# variant is a different `--features` line, so cargo rebuilds the pool crate and
+# its dependents the first time an arm is used, and this loop then measures in
+# the wake of a full-core compile. MEASURED 2026-09-08: in pass 1 three of the
+# four arms compiled SEVEN CRATES immediately before their timed region while
+# passes 2 and 3 compiled nothing, and the reference's `bench_thread_install`
+# read 36.24 / 13.36 / 8.12 ms across the three -- a monotone "speed-up" that was
+# entirely this script's own compiles ending. Moving the build ahead of the load
+# receipt makes the RECEIPT honest; it does not make the MACHINE quiet.
+#
+# ⇒ RUN `--prebuild` ONCE BEFORE PASS 1, and only then take the passes:
+#
+#     bash scripts/ke16_measure.sh --prebuild
+#     bash scripts/ke16_measure.sh 1
+#     ...
+#
+# A pass whose logs show any `Compiling` line is a pass taken in a compile's
+# wake; the driver prints a warning when it sees one.
 
 set -u
 set -o pipefail
 
 PASS="${1:-}"
 if [ -z "$PASS" ]; then
-    echo "usage: bash scripts/ke16_measure.sh <pass-number> [variant-key ...]" >&2
+    echo "usage: bash scripts/ke16_measure.sh --prebuild" >&2
+    echo "       bash scripts/ke16_measure.sh <pass-number> [variant-key ...]" >&2
     exit 2
+fi
+PREBUILD=no
+if [ "$PASS" = "--prebuild" ]; then
+    PREBUILD=yes
+    PASS=prebuild
 fi
 shift || true
 
@@ -147,6 +172,30 @@ echo "=== KE16 pass $PASS : ${VARIANT_KEYS[*]} ==="
 echo "toolchain: $(rustc --version)"
 echo "output:    $OUT_DIR"
 
+# ---------------------------------------------------------------------------
+# Prebuild: every arm, every harness, before ANY pass is taken
+# ---------------------------------------------------------------------------
+#
+# The whole point is that after this returns, no `cargo bench` in any later pass
+# has anything left to compile, so no timed region sits in a compile's wake.
+if [ "$PREBUILD" = yes ]; then
+    rc=0
+    for key in "${VARIANT_KEYS[@]}"; do
+        features="$(variant_features "$key")"
+        prefixed="$(echo "$features" | sed 's/[^,]*/boyko-threadpool\/&/g')"
+        echo "--- prebuilding $key ($features) ---"
+        cargo bench -p boyko-threadpool --bench ke16_nested_scope      --features "$features" --no-run || rc=1
+        cargo bench -p boyko-ecs        --bench ke16_par_iter_in_system --features "$prefixed" --no-run || rc=1
+        cargo bench -p boyko-physics    --bench ke16_solve_in_system    --features "$prefixed" --no-run || rc=1
+    done
+    if [ "$rc" -eq 0 ]; then
+        echo ""
+        echo "prebuild complete. Let the box settle before pass 1 -- a compile's aftermath (indexer,"
+        echo "AV scan of the fresh binaries, page-cache churn) outlives the compile itself."
+    fi
+    exit "$rc"
+fi
+
 failures=0
 
 for key in "${VARIANT_KEYS[@]}"; do
@@ -204,6 +253,18 @@ for key in "${VARIANT_KEYS[@]}"; do
         echo "  BUILD FAILED -- see $OUT_DIR/$key-build.log; variant skipped, NOT recorded as a number"
         failures=$((failures + 1))
         continue
+    fi
+
+    # A `Compiling` line here means this arm's timed region is about to run in the
+    # wake of a full-core compile. That is not fatal -- the numbers are still
+    # taken -- but it is the difference between a pass that measures the arm and
+    # one that measures the machine recovering, so it is said out loud and
+    # written into the pass directory rather than left in a log nobody re-reads.
+    if grep -q '^ *Compiling' "$OUT_DIR/$key-build.log"; then
+        n=$(grep -c '^ *Compiling' "$OUT_DIR/$key-build.log")
+        echo "  ⚠ COMPILED $n crate(s) just now -- this timed region follows a full-core build."
+        echo "    Run \`bash scripts/ke16_measure.sh --prebuild\` before pass 1 and let the box settle."
+        echo "$key: compiled $n crate(s) immediately before its timed region" >> "$OUT_DIR/DIRTY-PASS.txt"
     fi
 
     load_receipt "before $variant" "$OUT_DIR/$key-load-before.txt"

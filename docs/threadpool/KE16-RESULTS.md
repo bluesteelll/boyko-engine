@@ -879,8 +879,60 @@ The reference's own three passes are not stationary. They get FASTER, monotonica
 
 This is the §Band Step-0 finding again — *"the band as taken is measuring a first-run WARM-UP, not
 jitter"* — in a session rather than in a run. The load receipts agree: pass 1 opened at 14.8 % CPU
-and pass 3's first receipt reads 1.4 / 0 / 0.1 %. The machine was still settling from the build when
-pass 1 ran.
+and pass 3's first receipt reads 1.4 / 0 / 0.1 %.
+
+### ⚠⚠ THE DRIFT'S CAUSE IS THE DRIVER ITSELF, and it is named here rather than guessed at
+
+The machine was verified idle before the series (CPU 9.5 → 5.9 → **0.7 %**) and no game is present in
+any of the twenty-four load receipts. **The contamination was self-inflicted, and the build logs say
+so:**
+
+| pass | crates compiled immediately before each timed region |
+|---|---|
+| 0 (rehearsal) | the initial full build — a 119-line log |
+| **1** | `wg`, `wc`, `wgc`: **7 crates each**; `w0` none (already built by pass 0) |
+| 2, 3 | **zero** — every arm's log is three `Finished` lines |
+
+Each arm is a different `--features` line, so cargo rebuilds the pool crate and its dependents on
+first use of that arm. The driver therefore ALTERNATES a full-core compile with a timed region, and
+the first pass measures in the wake of one. Moving the build ahead of the load receipt (`e7910d5f`)
+made the receipt HONEST — it is what reports the 15–44 % — but it did not make the machine quiet.
+**The monotone speed-up across passes is the compiles stopping, not the box freeing itself.**
+
+⇒ **A future pass should PRE-BUILD EVERY ARM BEFORE PASS 1**, then measure. `scripts/ke16_measure.sh`
+does not do this yet; the fix is one `--no-run` loop over the variant table ahead of the pass loop.
+
+### The within-pass control: `seq` says the arms ARE comparable inside a pass
+
+The drift is BETWEEN passes, which is exactly what interleaving is built to absorb — and the ECS
+sequential row is the receipt that it does. Within each pass, across all four arms:
+
+| control | pass 1 | pass 2 | pass 3 |
+|---|---:|---:|---:|
+| `seq/65536` spread across the four arms | 7.2 % | 4.1 % | 5.0 % |
+
+At pass 3 it is 1.00, 1.00, 1.05, 1.00 relative to the reference. **A single-threaded row that is
+identical across arms inside a pass says the machine state is identical across those arms**, so a
+difference in the parallel rows of that pass is the arm and not the box.
+
+### `wg` is eliminated by PASS 3 ALONE — the pass that compiled nothing
+
+Discard passes 1 and 2 entirely and the verdict does not move:
+
+| cell (pass 3 only) | `w0` | `wg` | ratio | `wc` | ratio |
+|---|---:|---:|---:|---:|---:|
+| `worker/body_1ms_tasks_w` | 2.554 ms | 7.878 ms | **3.08** | 1.330 ms | 0.52 |
+| `worker/body_10us_tasks_w` | 31 437 ns | 55 269 ns | **1.76** | 31 333 ns | 1.00 |
+| `dispatcher/body_1ms_tasks_w` | 1.712 ms | 8.003 ms | **4.68** | 1.199 ms | 0.70 |
+| `dispatcher/body_100us_tasks_w` | 245 976 ns | 804 307 ns | **3.27** | 137 975 ns | 0.56 |
+| `ecs par_in_system/65536` | 85.69 ms | 635.37 ms | **7.41** | 89.38 ms | 1.04 |
+| `ecs par_from_dispatcher/65536` | 85.16 ms | 655.56 ms | **7.70** | 126.49 ms | 1.49 |
+| `ecs seq/65536` **CONTROL** | 1310.98 ms | 1311.11 ms | **1.00** | 1375.83 ms | 1.05 |
+| `ecs seq/4096` **CONTROL** | 81.96 ms | 81.94 ms | **1.00** | 81.95 ms | 1.00 |
+
+**17 of 38 cells put `wg` above 1.30 × the reference in that one clean pass; `wc` reaches 1.30 × on
+three, none above 1.63 ×.** The two controls sit at 1.00. The three-pass verdict above is therefore
+carried by the clean pass on its own, and passes 1 and 2 add agreement rather than evidence.
 
 **Consequences, stated rather than smoothed over:**
 
