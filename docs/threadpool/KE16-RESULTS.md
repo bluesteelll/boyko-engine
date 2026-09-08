@@ -813,7 +813,7 @@ nowhere.
 
 ---
 
-## §W. MEASURED 2026-09-08 at CS-4 — `wg` and `wgc` ELIMINATED on an OCCUPANCY receipt; `wc` a tie everywhere
+## §W. CLOSED ON `wc` 2026-09-08 at CS-4 — `wg`/`wgc` ELIMINATED on an OCCUPANCY receipt; the keep re-tested on clean data
 
 **Three interleaved passes over `{w0, wg, wc, wgc}` at CS-4**, one pass = all four arms in table
 order, driver `scripts/ke16_measure.sh`, witness `KE16_EXPECT` matched in all three harness logs for
@@ -1000,6 +1000,119 @@ at three. Every median, band and per-run value of that reference is preserved in
 findings are intact — the per-sample data behind three of five runs is not, and criterion baselines
 are not rebuildable from anything in the tree. Fixed in `e7910d5f`: the baseline name now carries the
 short HEAD hash, so two code states can no longer address one directory.
+
+
+
+### ⚠⚠ CORRECTION, same day: "no physics ranking CAN be filed" was wrong, and §C is what refuted it
+
+The subsection above concluded that the three W passes could not support a physics ranking and that
+**"more passes taken the same way would not fix it — the drift is monotone"**. The first half is true
+of those passes. **The second half named the wrong remedy**, and the reason is now measured rather
+than argued: the drift was not the machine settling, it was this driver's own compiles, and removing
+them removes the drift.
+
+Step C ran three passes on the same box, the same day, over the same three harnesses, after
+`scripts/ke16_measure.sh --prebuild`:
+
+| reference row | §W passes (compile before each timed region) | §C passes (`--prebuild`, none) |
+|---|---:|---:|
+| `single_threaded_O5` — the session meter | 33.46 / 32.92 / 26.37 ms, spread **27 %** | 29.69 / 29.61 / 29.71 ms, spread **0.3 %** |
+| `in_scheduled_system` — PRIMARY | 15.65 / 14.88 / 8.45 ms, band **85 %** | 10.87 / 11.15 / 11.34 ms, band **4.3 %** |
+| `bench_thread_install_Wminus1` | 19.79 / 12.74 / 7.84 ms, spread 152 % | 10.80 / 11.00 / 10.91 ms, spread **1.9 %** |
+
+**A twentyfold improvement in the session meter, from a flag.** So a physics ranking for axis W was
+never impossible — it was being destroyed by the instrument, and the correct sentence is "not filed
+from THOSE passes, and cheap to obtain from clean ones".
+
+**That matters beyond the record, because `wc` was kept on the words "a tie everywhere", and a tie
+against an 85 % band is a much weaker claim than a tie against 4 %.** The keep is therefore re-tested
+below against clean data rather than left standing on the noisy pass.
+
+### ✅ THE KEEP RE-TESTED ON CLEAN DATA — `wc` regresses NOTHING, and improves one cell
+
+Three further interleaved passes over `{w0, wc}` after `--prebuild`, settling receipt
+**3.2 / 1.7 / 0.7 / 1.4 / 0.7 % CPU** — the quietest of the day — and no `DIRTY-PASS.txt`.
+
+**35 comparable cells: 1 improved, 0 regressed, 34 tie.** The one improvement is
+`worker/body_1us_tasks_64w`, 88.4 µs → 81.3 µs (× 0.920) against a 4.0 % band — which lands
+*exactly* on the 2 × band threshold, so it is reported as an improvement by the rule and treated as a
+tie by judgement. Nothing depends on it: rule 2 asks for a tie everywhere, and that is what the
+clean data gives, on bands of 4–12 % rather than 4–346 %.
+
+⇒ **The `wc` keep stands, and now stands on data that could have refuted it.**
+
+#### The clean re-take, every comparable cell
+
+| cell | `w0` | band | `wc` | ratio | vs |
+|---|---:|---:|---:|---:|:--|
+| `worker/body_100us_tasks_4w` | 1.66 ms | 5.3 % | 1.71 ms | 1.028 | tie |
+| `worker/body_100us_tasks_64w` | 6.68 ms | 4.0 % | 6.68 ms | 1.001 | tie |
+| `worker/body_100us_tasks_w` | 156.6 us | 4.0 % | 156.0 us | 0.996 | tie |
+| `worker/body_10us_tasks_4w` | 113.7 us | 5.5 % | 109.6 us | 0.964 | tie |
+| `worker/body_10us_tasks_64w` | 696.6 us | 4.0 % | 695.5 us | 0.998 | tie |
+| `worker/body_10us_tasks_w` | 27.0 us | 4.0 % | 27.4 us | 1.018 | tie |
+| `worker/body_1ms_tasks_4w` | 14.32 ms | 11.2 % | 15.01 ms | 1.048 | tie |
+| `worker/body_1ms_tasks_64w` | 65.59 ms | 4.0 % | 65.57 ms | 1.000 | tie |
+| `worker/body_1ms_tasks_w` | 1.29 ms | 4.0 % | 1.28 ms | 0.998 | tie |
+| `worker/body_1us_tasks_4w` | 12.7 us | 4.0 % | 13.0 us | 1.023 | tie |
+| `worker/body_1us_tasks_64w` | 88.4 us | 4.0 % | 81.3 us | 0.920 | **IMP** |
+| `worker/body_1us_tasks_w` | 7.6 us | 4.0 % | 7.6 us | 0.993 | tie |
+| `dispatcher/body_100us_tasks_4w` | 1.68 ms | 4.0 % | 1.60 ms | 0.956 | tie |
+| `dispatcher/body_100us_tasks_64w` | 6.69 ms | 4.0 % | 6.69 ms | 1.000 | tie |
+| `dispatcher/body_100us_tasks_w` | 127.6 us | 4.0 % | 126.5 us | 0.991 | tie |
+| `dispatcher/body_10us_tasks_4w` | 124.2 us | 4.7 % | 129.3 us | 1.041 | tie |
+| `dispatcher/body_10us_tasks_64w` | 692.2 us | 4.0 % | 691.7 us | 0.999 | tie |
+| `dispatcher/body_10us_tasks_w` | 16.2 us | 4.0 % | 16.2 us | 0.997 | tie |
+| `dispatcher/body_1ms_tasks_4w` | 13.64 ms | 5.2 % | 14.26 ms | 1.046 | tie |
+| `dispatcher/body_1ms_tasks_64w` | 66.23 ms | 4.0 % | 66.13 ms | 0.998 | tie |
+| `dispatcher/body_1ms_tasks_w` | 1.23 ms | 4.0 % | 1.20 ms | 0.982 | tie |
+| `dispatcher/body_1us_tasks_4w` | 9.7 us | 4.0 % | 10.0 us | 1.024 | tie |
+| `dispatcher/body_1us_tasks_64w` | 86.8 us | 4.8 % | 85.3 us | 0.984 | tie |
+| `dispatcher/body_1us_tasks_w` | 4.1 us | 4.4 % | 4.1 us | 1.002 | tie |
+| `physics bench_thread_install` | 10.51 ms | 22.1 % | 10.55 ms | 1.003 | tie |
+| `physics bench_thread_install_wminus1` | 10.63 ms | 4.0 % | 10.69 ms | 1.006 | tie |
+| `physics empty_schedule_control` | 1.5 us | 12.2 % | 1.5 us | 0.993 | tie |
+| `physics in_scheduled_system` | 11.87 ms | 4.0 % | 11.70 ms | 0.986 | tie |
+| `physics single_threaded_o5` | 29.22 ms | 11.2 % | 29.04 ms | 0.994 | tie |
+| `ecs par_from_dispatcher/4096` | 26.47 ms | 35.7 % | 25.95 ms | 0.980 | tie |
+| `ecs par_from_dispatcher/65536` | 88.22 ms | 4.0 % | 89.00 ms | 1.009 | tie |
+| `ecs par_in_system/4096` | 21.33 ms | 12.3 % | 20.68 ms | 0.970 | tie |
+| `ecs par_in_system/65536` | 89.39 ms | 4.0 % | 88.63 ms | 0.992 | tie |
+| `ecs seq/4096` | 81.93 ms | 4.0 % | 81.93 ms | 1.000 | tie |
+| `ecs seq/65536` | 1,310.81 ms | 4.0 % | 1,310.88 ms | 1.000 | tie |
+
+
+### ⚠⚠ THREE OF THE 38 "CELLS" ARE NOT AN ARM PROPERTY AT ALL, and they nearly produced a false regression
+
+The three `ke16_park_timeout` rows measure the **Windows global timer resolution**, not the pool.
+Two independent readings say so, and the second is the one that settles it:
+
+| pass group | box state | `park_timeout` 50 µs / 1 ms / 2 ms |
+|---|---|---|
+| §W passes (Discord, Steam, browsers up) | default tick | **15.56 / 15.55 / 15.55 ms**, identical across `w0`, `wc`, `wg`, `wgc` and all runs |
+| §C and this re-take (those closed) | partially raised | 6.0–7.3 ms, with excursions to 12–13.5 ms — **within a session, for one arm** |
+
+**The 50 µs row and the 2 ms row read the same number in every run.** A 50 µs park and a 2 ms park
+cannot take the same time unless a resolution floor dominates both, so what the row reports is the
+floor. `wc`'s own three runs of `park_timeout_50us` read 13.17 / 6.94 / 11.35 ms — a 90 % within-arm
+band on a quantity nothing in the pool touches.
+
+**The near miss:** against `w0`'s 6.54 ms, `wc`'s 11.35 ms median is × 1.736. It was scored a tie
+ONLY because `wc`'s own 90 % band swallowed it. Had `wc`'s three runs happened to agree at 13 ms
+while `w0`'s agreed at 6.5, the rule would have reported **three regressions of 1.7–2 ×** and
+eliminated the arm this campaign is shipping — for a difference produced by whichever process last
+called `timeBeginPeriod`.
+
+⇒ **The three rows are excluded from every candidate comparison** and are what §0 already calls them:
+an App-7 backstop reference for the box, recorded beside a verdict and never inside one. The counts
+above are over the **35 comparable cells**.
+
+⚠ This EXTENDS §Instruments 4 and corrects its remedy. That entry established that the printed
+`configuration=guarded|unguarded` **label** is unreliable (~26 % of probes read "guarded" on an
+unguarded box — reproduced again today: pass 1 said `unguarded`, passes 2 and 3 said `guarded`, on
+the same box minutes apart) and prescribed *"decide state on the criterion medians"*. That is right
+for reading the BOX. It is wrong as licence to treat those medians as cells: they are a system-global
+quantity, and the campaign's comparison machinery had no way to know it.
 
 
 ### Appendix: every cell, median of three passes at CS-4
@@ -1475,10 +1588,16 @@ across 162 samples every 8 s, and the observed Game-process count set was **exac
 sample — never 0. The primary receipt is a CPU **percentage**, not a list, precisely so it cannot be
 green from a zero.
 
-### 4. ⚠ The `park_timeout configuration=` label is not a state classifier
+### 4. ⚠ The `park_timeout` rows are a property of the BOX, not of any arm — label AND medians
 
-See §0. ~26 % of probes read "guarded" on a fully unguarded box. **Decide state on the criterion
-medians; record the label beside them, never instead.** Verified not to split any decision cell.
+See §0. ~26 % of probes read "guarded" on a fully unguarded box, reproduced again 2026-09-08
+(pass 1 `unguarded`, passes 2 and 3 `guarded`, same box, minutes apart). The original remedy —
+*"decide state on the criterion medians"* — is right for reading the BOX and was **wrong as licence
+to treat those medians as comparison cells**: they track the Windows global timer resolution, they
+read 15.55 ms for every arm in one session and 6–13 ms for one arm within another, and the 50 µs row
+and the 2 ms row report the same number because a resolution floor dominates both. On 2026-09-08
+that nearly eliminated the shipped arm on a × 1.736 "regression" (§W). **Excluded from every
+candidate comparison; recorded beside a verdict, never inside one.**
 
 ### 5. ⚠ Two ECS sources disagree, and only for one arm
 
