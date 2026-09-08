@@ -12,7 +12,11 @@
 //! Scope: `T: Copy` (POD — `f32` / `u32` / the solver's body-state structs).
 //! `clear` is `len = 0` with NO free (the committed pages stay resident for the
 //! next step's refill). There is NO change-detection tick use — this is raw
-//! scratch, refilled every step.
+//! scratch, refilled every step, and the backing is `ComponentPool` in its
+//! UNTRACKED mode so the two tick sub-regions are reserved but never committed.
+//! That is not a micro-optimisation: a tracked column pays 8 B/row of ticks on
+//! top of the datum and a 192 KiB resident floor, so the unread ticks were
+//! two thirds of this type's storage cost across the solver's live columns.
 
 use std::marker::PhantomData;
 
@@ -23,9 +27,9 @@ use super::views::{ScratchBuildView, ScratchSolveView};
 
 /// A transient, Copy-only scratch column backed by one [`ComponentPool`].
 ///
-/// Backed by `ComponentPool::new(component_id, reserve_rows)` directly — the
-/// same backing the committed dense kernel uses, no bespoke `VmReservation`
-/// primitive. The pool gives the two load-bearing properties:
+/// Backed by `ComponentPool::new_untracked(component_id, reserve_rows)`
+/// directly — the same backing the committed dense kernel uses, no bespoke
+/// `VmReservation` primitive. The pool gives the two load-bearing properties:
 /// * **address-stable base** — `ComponentPool` grows IN PLACE (commits fresh
 ///   pages at the frontier of the SAME reservation; the base is write-once in
 ///   `ComponentPool::new`), so a [`ScratchSolveView`] copy handed to a worker
@@ -45,18 +49,40 @@ pub struct ScratchColumn<T: Copy> {
 
 impl<T: Copy> ScratchColumn<T> {
     /// Creates an empty scratch column for `component_id`, backing the data with
-    /// `ComponentPool::new(component_id, reserve_rows)` directly.
+    /// `ComponentPool::new_untracked(component_id, reserve_rows)` directly.
     ///
     /// `component_id`'s layout MUST already be registered in the
     /// `ComponentRegistry` and MUST match `T` (the `ComponentPool::new`
     /// contract). The caller owns the id assignment — `ScratchColumn` is a
     /// generic kernel primitive, not bound to any one component.
     ///
+    /// # Why the backing is UNTRACKED
+    ///
+    /// The module header's "There is NO change-detection tick use — this is raw
+    /// scratch" is not merely a convention; it is structural, and the untracked
+    /// backing is what makes the engine stop PAYING for the unread ticks. This
+    /// type's entire pool surface is `push_copy`, `clear_no_drop`, `buffer_ptr`,
+    /// `buffer_ptr_mut`, `count`, `capacity` and `component_layout`, and none of
+    /// those reaches tick memory — `push_copy` in particular only calls
+    /// `grow_rows` and writes through `row_ptr`. The pool is a private field and
+    /// is never handed out, so no caller can reach a tick either.
+    ///
+    /// A tracked pool commits TWO tick sub-regions alongside the data at 64 KiB
+    /// granularity, i.e. 8 B/row of change detection the scratch path never
+    /// reads: a 192 KiB resident floor per column and 3.0x the commit charge of
+    /// the equivalent `Vec<u32>`. Untracked reserves those sub-regions and never
+    /// commits them, so the cost is the data region alone. Every tick accessor
+    /// on `ComponentPool` carries a `debug_assert!(self.is_tracked())`, so a
+    /// future edit that reaches for a tick here fails loudly in debug and under
+    /// Miri instead of faulting in production.
+    ///
     /// # Panics
     /// * `T` needs drop — scratch is POD-only (asserted at construction: a
     ///   `clear`/refill that skips drop would leak or double-free a non-`Copy`
     ///   `T`; `T: Copy` already forbids `Drop`, this asserts the corollary
     ///   loudly).
+    /// * `T` is a ZST — an untracked pool's rows cannot be tick-driven (see
+    ///   `ComponentPool::new_untracked`). Scratch is POD data, never a tag.
     /// * the `ComponentPool::new` panics (unregistered id, `reserve_rows == 0`,
     ///   alignment over a page, etc. — see its contract).
     pub fn new(component_id: ComponentId, reserve_rows: usize) -> Self {
@@ -66,7 +92,7 @@ impl<T: Copy> ScratchColumn<T> {
              {} needs drop",
             core::any::type_name::<T>()
         );
-        let column = ComponentPool::new(component_id.get(), reserve_rows);
+        let column = ComponentPool::new_untracked(component_id.get(), reserve_rows);
         debug_assert_eq!(
             column.component_layout().size(),
             core::mem::size_of::<T>(),

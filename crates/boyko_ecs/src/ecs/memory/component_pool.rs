@@ -20,6 +20,29 @@ use crate::ecs::memory::vm::VmReservation;
 const _: () = assert!(std::mem::size_of::<UnsafeCell<Tick>>() == 4);
 const _: () = assert!(std::mem::align_of::<UnsafeCell<Tick>>() == 4);
 
+/// `ticks_committed` sentinel for an UNTRACKED pool — one whose tick
+/// sub-regions are reserved but will never be committed
+/// ([`ComponentPool::new_untracked`]).
+///
+/// # Why a sentinel in the existing field rather than a new flag
+///
+/// `ComponentPool` is size-pinned at 128 B by a const assert below, with no
+/// spare byte for a `bool`. A sentinel costs zero bytes AND zero branches:
+/// `grow_rows`'s tick-commit guard is already `if t_new > self.ticks_committed`,
+/// and `t_new` is bounded by `tick_len` (itself bounded by the reservation), so
+/// `usize::MAX` makes that guard uniformly false without a single new `if` on
+/// the cold path — and without touching the layout, which is what keeps the
+/// `debug_assert!(t_new <= layout.tick_len)` proof step above it TRUE.
+///
+/// ⚠ The alternative — zeroing `tick_len` in the layout — is UNSOUND and was
+/// rejected with its mechanism: that assert fires BEFORE the commit guard, and
+/// with `tick_len == 0` every `t_new = align_up(rows * 4, 64 KiB) >= 65 536`
+/// trips it on every debug build and every Miri run. Reserved-uncommitted is
+/// also the form the approved remediation prescribes verbatim
+/// (`docs/ARCH-AUDIT-ECS-DATA-REMEDIATION.md`, "tick sub-regions
+/// reserved-uncommitted").
+pub(crate) const UNTRACKED_TICKS: usize = usize::MAX;
+
 // Phase 4 Seam 3 (IM-1 / IM-6): the `vm: VmReservation` -> `backing:
 // PoolBacking` swap must add ZERO bytes. `PoolBacking::Device(Box<DeviceColumn>)`
 // is 8 B (a single `Box`), <= `VmReservation`'s 16 B (host) — so on the host
@@ -176,6 +199,13 @@ pub struct ComponentPool {
     data_committed: usize,
 
     /// Committed bytes of EACH tick sub-region; granule-aligned, monotonic.
+    ///
+    /// [`UNTRACKED_TICKS`] is a SENTINEL, not a byte count: it marks a pool
+    /// built by [`ComponentPool::new_untracked`], whose tick sub-regions stay
+    /// RESERVED-BUT-NEVER-COMMITTED. The sentinel needs no branch in
+    /// `grow_rows` — its commit guard is `t_new > self.ticks_committed`, and
+    /// nothing exceeds `usize::MAX`, so the two tick commits are skipped by the
+    /// arithmetic that is already there.
     ticks_committed: usize,
 
     /// `added` tick sub-region base (`vm.base() + stagger + data_len`);
@@ -420,6 +450,83 @@ impl ComponentPool {
             // `self.backing`).
             backing: PoolBacking::Host(vm),
         }
+    }
+
+    /// Creates a pool whose tick sub-regions are RESERVED BUT NEVER COMMITTED —
+    /// for raw scratch that carries no change detection.
+    ///
+    /// Identical to [`new`](Self::new) in layout, in base pointers, and in every
+    /// data-path byte; the only difference is that `grow_rows` skips the two
+    /// tick commits, so the pool's resident cost is its data region alone.
+    ///
+    /// # Why this exists
+    ///
+    /// A `ComponentPool` reservation is `[pad | data | added_ticks |
+    /// changed_ticks]` and `grow_rows` commits ALL THREE at
+    /// [`COMMIT_GRANULE`](crate::ecs::constants::COMMIT_GRANULE) = 64 KiB
+    /// granularity. Two tick regions at 4 B/row is **8 B of change detection per
+    /// row on top of the datum**, so a tracked column costs 3.0x a plain
+    /// `Vec<u32>`, 2.0x a `Vec<u64>` and 9.0x a `Vec<bool>` in commit charge —
+    /// and the first non-empty grow makes >= 3 x 64 KiB = 192 KiB resident per
+    /// column regardless of row count.
+    ///
+    /// [`ScratchColumn`] declares it never reads a tick ("There is NO
+    /// change-detection tick use — this is raw scratch"), and that claim is
+    /// structural rather than aspirational: its entire pool surface is
+    /// `push_copy` / `clear_no_drop` / `buffer_ptr` / `buffer_ptr_mut` /
+    /// `count` / `capacity` / `component_layout`, and none of those reaches tick
+    /// memory. So every tick page such a column commits is paid for and never
+    /// read.
+    ///
+    /// # Contract — the caller must never read or write a tick
+    ///
+    /// The tick sub-regions of an untracked pool are RESERVED address space with
+    /// no backing pages. Touching one is not a logic error that returns a wrong
+    /// answer; it is a hard fault. Every tick accessor on this type therefore
+    /// carries a `debug_assert!(self.is_tracked())` naming this constructor, so
+    /// the misuse is loud in debug and under Miri rather than only in
+    /// production. `new_untracked` is for storage whose element type carries its
+    /// own liveness (`ScratchColumn`'s refill-every-step discipline), never for
+    /// a pool that backs an archetype column.
+    ///
+    /// # Panics
+    /// * everything [`new`](Self::new) panics on, and
+    /// * `stride == 0` — a ZST pool's row capacity is TICK-DRIVEN
+    ///   (`grow_rows_zst`: `data_committed` is invariantly 0 and the tick
+    ///   regions alone bound `committed_rows`), so an untracked ZST pool could
+    ///   never grow past zero rows. Refused loudly instead of silently
+    ///   capping at 0.
+    ///
+    /// [`ScratchColumn`]: crate::ecs::core::component::scratch::ScratchColumn
+    pub(crate) fn new_untracked(component_id: usize, reserve_rows: usize) -> Self {
+        let mut pool = Self::new(component_id, reserve_rows);
+
+        // Phase 22 D6 interaction: the ZST arm derives row capacity from the
+        // tick sub-regions, which this constructor refuses to commit. Asserted
+        // AFTER `new` so the layout/registry diagnostics fire first and this one
+        // reads as the narrower refusal it is.
+        assert!(
+            pool.component_layout.size() > 0,
+            "ComponentPool::new_untracked: a ZST (stride == 0) pool is tick-driven \
+             (grow_rows_zst bounds committed_rows by the tick sub-regions alone), \
+             so an untracked ZST pool could never grow past zero rows"
+        );
+
+        // Sound to flip AFTER construction rather than threading a flag through
+        // `new`: construction is one address-space reservation with ZERO commit
+        // (D3), so no tick page has been committed yet and the sentinel cannot
+        // strand one. Keeping `new` untouched also keeps it byte-identical for
+        // every existing caller.
+        pool.ticks_committed = UNTRACKED_TICKS;
+        pool
+    }
+
+    /// `false` iff this pool was built by
+    /// [`new_untracked`](Self::new_untracked) — i.e. its tick sub-regions are
+    /// reserved but hold no committed pages, so no tick may be read or written.
+    #[inline]
+    pub(crate) fn is_tracked(&self) -> bool {
+        self.ticks_committed != UNTRACKED_TICKS
     }
 
     /// Creates a new pool with the Phase X.I D2 byte-targeted, row-clamped
@@ -984,6 +1091,11 @@ impl ComponentPool {
             // `&mut self` gives exclusive access to the tick sub-regions;
             // no concurrent reader exists per Phase 9 SCH3.
             unsafe {
+                debug_assert!(
+                    self.is_tracked(),
+                    "ComponentPool::swap_remove (tick swap): tick access on an UNTRACKED pool \
+                     (new_untracked) - the tick sub-regions are reserved, NOT committed"
+                );
                 let added = self.added_base.as_ptr();
                 let changed = self.changed_base.as_ptr();
                 *(*added.add(index)).get() = *(*added.add(last_index)).get();
@@ -1546,6 +1658,11 @@ impl ComponentPool {
             //   `&mut self` ⇒ exclusive access to the tick sub-regions;
             //   no concurrent reader exists per Phase 9 SCH3.
             unsafe {
+                debug_assert!(
+                    self.is_tracked(),
+                    "ComponentPool::swap_remove (tick swap): tick access on an UNTRACKED pool \
+                     (new_untracked) - the tick sub-regions are reserved, NOT committed"
+                );
                 let added = self.added_base.as_ptr();
                 let changed = self.changed_base.as_ptr();
                 *(*added.add(idx)).get() = *(*added.add(last_index)).get();
@@ -1586,6 +1703,11 @@ impl ComponentPool {
     #[allow(dead_code)]
     #[inline]
     pub(crate) fn added_ticks_ptr(&self) -> *const UnsafeCell<Tick> {
+        debug_assert!(
+            self.is_tracked(),
+            "ComponentPool::added_ticks_ptr: tick access on an UNTRACKED pool \
+             (new_untracked) - the tick sub-regions are reserved, NOT committed"
+        );
         self.added_base.as_ptr().cast_const()
     }
 
@@ -1597,6 +1719,11 @@ impl ComponentPool {
     #[allow(dead_code)]
     #[inline]
     pub(crate) fn changed_ticks_ptr(&self) -> *const UnsafeCell<Tick> {
+        debug_assert!(
+            self.is_tracked(),
+            "ComponentPool::changed_ticks_ptr: tick access on an UNTRACKED pool \
+             (new_untracked) - the tick sub-regions are reserved, NOT committed"
+        );
         self.changed_base.as_ptr().cast_const()
     }
 
@@ -1615,6 +1742,11 @@ impl ComponentPool {
     ///   guarantees no concurrent reader of the same slot exists).
     #[inline]
     pub(crate) unsafe fn write_added_tick(&self, index: usize, tick: Tick) {
+        debug_assert!(
+            self.is_tracked(),
+            "ComponentPool::write_added_tick: tick access on an UNTRACKED pool \
+             (new_untracked) - the tick sub-regions are reserved, NOT committed"
+        );
         debug_assert!(index < self.committed_rows);
         // SAFETY: caller asserts `index < self.count() <= committed_rows`,
         // so the slot lies in the committed prefix of the `added` tick
@@ -1641,6 +1773,11 @@ impl ComponentPool {
     /// Same conditions as [`Self::write_added_tick`].
     #[inline]
     pub(crate) unsafe fn write_changed_tick(&self, index: usize, tick: Tick) {
+        debug_assert!(
+            self.is_tracked(),
+            "ComponentPool::write_changed_tick: tick access on an UNTRACKED pool \
+             (new_untracked) - the tick sub-regions are reserved, NOT committed"
+        );
         debug_assert!(index < self.committed_rows);
         // SAFETY: caller asserts `index < self.count() <= committed_rows`
         // (committed prefix of the `changed` tick sub-region) and Phase 9
@@ -1661,6 +1798,11 @@ impl ComponentPool {
     #[allow(dead_code)]
     #[inline]
     pub(crate) unsafe fn read_added_tick(&self, index: usize) -> Tick {
+        debug_assert!(
+            self.is_tracked(),
+            "ComponentPool::read_added_tick: tick access on an UNTRACKED pool \
+             (new_untracked) - the tick sub-regions are reserved, NOT committed"
+        );
         debug_assert!(index < self.committed_rows);
         // SAFETY: caller asserts `index < self.count() <= committed_rows`
         // (committed prefix of the `added` tick sub-region) and Phase 9
@@ -1677,6 +1819,11 @@ impl ComponentPool {
     #[allow(dead_code)]
     #[inline]
     pub(crate) unsafe fn read_changed_tick(&self, index: usize) -> Tick {
+        debug_assert!(
+            self.is_tracked(),
+            "ComponentPool::read_changed_tick: tick access on an UNTRACKED pool \
+             (new_untracked) - the tick sub-regions are reserved, NOT committed"
+        );
         debug_assert!(index < self.committed_rows);
         // SAFETY: caller asserts `index < self.count() <= committed_rows`
         // (committed prefix of the `changed` tick sub-region) and Phase 9
@@ -1701,6 +1848,11 @@ impl ComponentPool {
     #[allow(dead_code)]
     #[inline]
     pub(crate) unsafe fn move_ticks(&mut self, src: usize, dst: usize) {
+        debug_assert!(
+            self.is_tracked(),
+            "ComponentPool::move_ticks: tick access on an UNTRACKED pool \
+             (new_untracked) - the tick sub-regions are reserved, NOT committed"
+        );
         debug_assert!(src < self.committed_rows);
         debug_assert!(dst < self.committed_rows);
         // SAFETY: both indices are `< committed_rows` (debug-asserted), so both
@@ -1934,6 +2086,11 @@ impl ComponentPool {
     /// the loop down to two unchecked-cell stores.
     #[inline]
     pub(crate) fn fill_ticks(&mut self, start_row: usize, count: usize, tick: Tick) {
+        debug_assert!(
+            self.is_tracked(),
+            "ComponentPool::fill_ticks: tick access on an UNTRACKED pool \
+             (new_untracked) - the tick sub-regions are reserved, NOT committed"
+        );
         // Defense-in-depth: skip the entire body on a zero-count call.
         // Mirrors the `commit_units` guard above; keeps the public API
         // total even for callers that have not pre-filtered `n == 0`.
@@ -3673,6 +3830,103 @@ mod tests {
             before,
             "rejected grow leaves the frontier untouched"
         );
+    }
+
+    // ----- Untracked backing: reserved-but-never-committed tick sub-regions -----
+
+    /// THE untracked-backing gate: `new_untracked` commits the DATA sub-region
+    /// exactly as a tracked pool does, and NEVER commits either tick
+    /// sub-region.
+    ///
+    /// The TRACKED TWIN is the load-bearing half of this test, not decoration.
+    /// An untracked-only assertion would pass just as happily if the new
+    /// constructor had also broken data growth — "ticks never move" is trivially
+    /// true of a pool that commits nothing at all. Comparing the two frontiers
+    /// row for row is what pins the change to the tick axis alone.
+    #[test]
+    fn untracked_pool_commits_data_but_never_ticks() {
+        use super::UNTRACKED_TICKS;
+
+        component_registry::register_layout::<U64Pair>(U64_ID.0);
+        let mut tracked = make_u64_pool(100_000);
+        let mut untracked = ComponentPool::new_untracked(U64_ID.0, 100_000);
+
+        assert!(tracked.is_tracked(), "the twin must be tracked");
+        assert!(!untracked.is_tracked(), "new_untracked ⇒ !is_tracked");
+        assert_eq!(
+            untracked.ticks_committed, UNTRACKED_TICKS,
+            "the sentinel is installed at construction"
+        );
+        assert_eq!(untracked.data_committed, 0, "D3: zero commit at construction");
+        assert_eq!(untracked.committed_rows(), 0, "no rows before the first grow");
+
+        let base_before = untracked.buffer_ptr();
+
+        // Three growths crossing at least one commit step each way.
+        for n in [1usize, 5_000, 40_000] {
+            assert!(tracked.grow_rows(n), "tracked grow within the ceiling (n = {n})");
+            assert!(untracked.grow_rows(n), "untracked grow within the ceiling (n = {n})");
+
+            assert_eq!(
+                untracked.ticks_committed, UNTRACKED_TICKS,
+                "the tick frontier must NEVER move on an untracked pool (n = {n})"
+            );
+            assert_eq!(
+                (untracked.data_committed, untracked.committed_rows()),
+                (tracked.data_committed, tracked.committed_rows()),
+                "data growth must be IDENTICAL to the tracked twin (n = {n})"
+            );
+            assert!(
+                untracked.committed_rows() >= n,
+                "the request must be covered (n = {n})"
+            );
+        }
+
+        // Anti-vacuity: if the twin never committed a tick either, the equality
+        // above compares two equally-empty pools and proves nothing.
+        assert!(
+            tracked.ticks_committed > 0,
+            "anti-vacuity: the TRACKED twin must actually have committed ticks, \
+             or the comparison above is vacuous"
+        );
+
+        assert_eq!(
+            untracked.buffer_ptr(),
+            base_before,
+            "the data base stays address-stable across untracked growth"
+        );
+    }
+
+    /// `new_untracked` REFUSES a ZST, loudly, at construction.
+    ///
+    /// `grow_rows_zst` derives row capacity from the tick sub-regions alone
+    /// (`data_committed` is invariantly 0 on that path), so an untracked ZST
+    /// pool could never grow past zero rows. Silently capping at 0 rows is
+    /// exactly the "green from emptiness" shape this tree keeps catching, so the
+    /// constructor refuses instead.
+    #[test]
+    #[should_panic(expected = "a ZST (stride == 0) pool is tick-driven")]
+    fn untracked_pool_refuses_a_zst() {
+        component_registry::register_layout::<ZstTag>(ZST_TAG_ID.0);
+        let _ = ComponentPool::new_untracked(ZST_TAG_ID.0, 1_024);
+    }
+
+    /// Reading a tick from an untracked pool is refused by the guard rather than
+    /// faulting on reserved-uncommitted pages.
+    ///
+    /// This is the test that gives the ten `debug_assert!(self.is_tracked())`
+    /// guards their value: without it they are unexercised prose, and a future
+    /// edit could delete them all and stay green.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "tick access on an UNTRACKED pool")]
+    fn untracked_pool_refuses_tick_access() {
+        component_registry::register_layout::<U64Pair>(U64_ID.0);
+        let mut pool = ComponentPool::new_untracked(U64_ID.0, 1_024);
+        assert!(pool.grow_rows(1), "grow so the DATA row exists");
+        // SAFETY: index 0 < committed_rows after the grow above; the call is
+        // expected to trip the untracked guard before any tick is touched.
+        let _ = unsafe { pool.read_added_tick(0) };
     }
 
     // ----- Phase 4 Seam 3: PoolBacking -----
