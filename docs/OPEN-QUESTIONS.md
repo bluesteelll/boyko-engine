@@ -4854,3 +4854,43 @@ per-sample data behind three of five runs is gone, and criterion baselines are n
 anything in the tree. The naming scheme now carries the short HEAD hash (`e7910d5f`), so two code
 states can no longer address one directory. **No action is asked of you; it is here because a
 document that only records its successes is the thing this campaign keeps finding to be wrong.**
+
+## A measurement RULE was rewritten after it ruled, and that is yours to accept or reject (2026-09-08)
+
+`KE16-DESIGN-MEASUREMENT.md` §7's Step-A rules 2 and 3 are amended, and the amendment is flagged
+here rather than merely applied because of when it happened: **rule 3 decided against `a1f+b1`, and
+`a1f+b1` was then measured better on ten of thirty-five cells with both consumers tied.** A decision
+rule rewritten after it has ruled is the shape that most deserves an owner's eye, so the original
+text is preserved verbatim directly beneath the amendment and the change is reversible by deleting
+one block.
+
+**What was wrong with the rule, as a fact rather than a preference.** Rule 3's tiebreak gave the
+decisive vote to the 64W column. The engine cannot produce that column: `BatchingStrategy::default()`
+sets `batches_per_thread = 1`, so an archetype splits into exactly W chunks — one per worker — and
+reaching 64W needs `batches_per_thread = 64`, which **no caller in the tree sets**;
+`MIN_ARCHETYPE_FOR_PARALLEL = 1024` floors a chunk at 1024 rows, so the 1 µs body the tiebreak fires
+on needs a row costing under a nanosecond, against a real ECS chunk of ~82 ms; and the physics
+solver does not use that path at all. So one cell at an unreachable width and an unreachable body
+size outvoted six mid-body cells at 2–4 × and a tie on both consumers.
+
+**What the amendment says.** Rule 2 becomes CONSUMER AGREEMENT rather than physics primacy — a
+candidate leads only if it leads or ties on every consumer, and a disagreement between consumers is
+reported as a tie rather than broken by choosing one. Rule 3's veto surface becomes the widths the
+engine PRODUCES: `tasks = W` decides, 4W and 64W are recorded and cannot decide, and no single cell
+may again override the rest of the grid and both consumers.
+
+**Why it is put to you.** Perf and architecture forks are the orchestrator's to settle, but
+rewriting the yardstick mid-campaign is closer to scope. Three things are worth your ruling:
+
+1. **Accept, reject, or narrow the amendment.** Rejecting it does not restore `a3`: §A-RE's reversal
+   rests on the measurement, not on the rule — ten cells improved, two regressed, both consumers
+   tied, gate ladder green. Rejecting the amendment means the campaign carries a rule that its own
+   measurement contradicts, which is a coherent choice only if the rule is then fixed some other way.
+2. **`4W` is reachable but unused.** `BatchingStrategy` is public and `par_iter().batching_strategy()`
+   accepts it; nothing in the engine calls it. If you expect callers to start tuning that, 4W should
+   join the deciding surface and the amendment should say so.
+3. **The consumer set is thin.** The pool has four production dispatchers — the scheduler, ECS
+   `par_iter`, the physics colour solver, and the MSDF bake — and the campaign measures TWO of them.
+   A rule that requires consumer agreement is only as good as the consumers it agrees across. Adding
+   the scheduler and the bake as harnesses is a real cost and a real coverage gain; it is your call
+   whether the campaign pays it now or records the gap.
