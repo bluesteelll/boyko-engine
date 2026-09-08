@@ -154,6 +154,7 @@ variant_string() {
         ship)  echo "a3+b0+$WSTAR+c0"    ;;
         a1f)   echo "a1f+b0+$WSTAR+c0"   ;;
         a1fb1) echo "a1f+b1+$WSTAR+c0"   ;;
+        a1fb3) echo "a1f+b3+$WSTAR+c0"   ;;
         *)   echo '' ;;
     esac
 }
@@ -193,6 +194,18 @@ variant_features() {
         ship)  echo "ke16-a3$WSTAR_FEATURES" ;;
         a1f)   echo "ke16-a1-fifo$WSTAR_FEATURES" ;;
         a1fb1) echo "ke16-a1-fifo,ke16-b1$WSTAR_FEATURES" ;;
+        # Step B's remaining arm: `b1`'s worker joiner plus an EXTERNAL joiner
+        # that never helps — it snoozes and parks. Reachable only since `a1f`
+        # returned; `b1`/`b3` are mutually exclusive and neither builds over `a3`.
+        #
+        # §7 Step B rule 2 decides `b3` vs `b1` on the DISPATCHER-route 100 us and
+        # 1 ms x 4W cells, calling them "the fontbake shape", and that citation is
+        # sound: `boyko_fontbake/src/msdf/distance.rs::pick_band_rows` sets
+        # `target_bands = workers * 4`, so the MSDF bake dispatches exactly 4W
+        # tasks. This is the case Step A rule 3's 64W column was NOT — a width a
+        # production dispatcher really emits, named in the source rather than
+        # assumed — so the rule stands as written and this arm is judged by it.
+        a1fb3) echo "ke16-a1-fifo,ke16-b3$WSTAR_FEATURES" ;;
         *)   echo '' ;;
     esac
 }
