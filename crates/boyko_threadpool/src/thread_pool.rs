@@ -617,7 +617,7 @@ impl Drop for ThreadPool {
 //   plain `u32`) or a `CachePadded<...>` wrapper around such a type.
 //   `Injector<Task>`, `Stealer<Task>`, and `Worker<Task>` are Send/Sync per
 //   crossbeam-deque's public contracts (verified in crossbeam-deque 0.8 docs)
-//   FOR A `T: Send`, which `Task` is by the `unsafe impl` in `src/task.rs` --
+//   FOR A `T: Send`, which `Task` is by the `unsafe impl` in `src/task/mod.rs` --
 //   read THAT clause rather than this line, because with a raw payload address
 //   plus a monomorphized `unsafe fn(*const ())` the obligation is about the CELL
 //   the address names (written before the publishing push, never written again,

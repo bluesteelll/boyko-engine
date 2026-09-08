@@ -148,6 +148,40 @@ compile_error!(
 // thief-residue cascade): the binary was neither the default nor the candidate.
 // A new arm that lands in halves reinstates its own refusal for the same reason.
 // =========================================================================
+// KE16 M2w — the Tree-Borrows negative control is MIRI-ONLY.
+//
+// `tb-neg-m2w` is not a tournament candidate and carries no witness token: it
+// is a deliberate-UB arm whose purpose is to BE REPORTED. It exists so that
+// M2w's positive result — "the shipped `task::scoped::run_scoped` executed
+// under Tree Borrows with the chunk freed inside a completer's open release
+// window and no UB was reported" — is known to be falsifiable, which a green
+// with no producible red is not.
+//
+// A native build of it would put deliberate UB into every scoped spawn of an
+// ordinary artifact, and `--all-features` is the configuration that would do
+// that without anyone asking for it. So it does not compile.
+//
+// EXIT CONDITION 9 ASSERTS THIS MESSAGE, NOT THE EXIT CODE. Before the feature
+// row existed, `cargo check --features tb-neg-m2w` already failed — because
+// cargo did not know the feature — which satisfied a "must FAIL" criterion
+// while the arm it gates did not exist. A condition whose pass criterion is an
+// exit code cannot tell a refusal from an absence.
+// =========================================================================
+
+#[cfg(all(feature = "tb-neg-m2w", not(miri)))]
+compile_error!(
+    "`tb-neg-m2w` is the KE16 M2w DELIBERATE-UB negative control and builds ONLY under Miri. \
+     `cfg(miri)` is unset in this build, so the arm would compile into a native artifact whose \
+     every scoped task commits a Tree-Borrows violation on purpose: `run_scoped_neg` holds a \
+     protector over chunk memory across the release RMW that authorises `Scope::drop`'s \
+     `free_all` to deallocate that chunk. Run it under `cargo miri test`, through \
+     `scripts/tb_neg_gate.ps1`, or drop the feature. THIS refusal is the failure exit condition 9 \
+     requires; cargo's own `none of the selected packages contains these features` is NOT — that \
+     one means the feature row is missing from `crates/boyko_threadpool/Cargo.toml` and the arm \
+     does not exist at all"
+);
+
+// =========================================================================
 // KE16 witness — which tournament configuration this artifact actually is.
 //
 // The benches and the two red-first gates print `ke16_variant()` on entry and
@@ -340,6 +374,29 @@ pub fn miri_frees_inside_a_release_window() -> usize {
     scope::MIRI_FREES_INSIDE_A_RELEASE_WINDOW.load(core::sync::atomic::Ordering::SeqCst)
 }
 
+/// Miri-only: how many `Scope::drop` CHUNK frees landed while a completer of
+/// that same scope was still inside its post-decrement release window.
+///
+/// The KE16 M2w observation. It is the block's counterpart to
+/// [`miri_frees_inside_a_release_window`] and NOT a second reading of it:
+/// that one observes the `ScopeShared` box's `Box::from_raw`, this one observes
+/// `ScopeBlock::free_all`, which reclaims the chunks the scope's task cells
+/// live in. Since Stage 3b those cells outlive the release RMW, so their
+/// storage is freed inside the same window the scope's own allocation is — and
+/// that is a NEW free, in a class no completer holds a pointer into, which is
+/// why it gets its own column rather than sharing one whose `>= 1` could be
+/// satisfied by the other event entirely.
+///
+/// Counted once per `Scope::drop`, and only for a scope whose block actually
+/// grew a chunk.
+///
+/// `cfg(miri)`-only.
+#[cfg(miri)]
+#[must_use]
+pub fn miri_block_frees_inside_a_release_window() -> usize {
+    scope::MIRI_BLOCK_FREES_INSIDE_A_RELEASE_WINDOW.load(core::sync::atomic::Ordering::SeqCst)
+}
+
 /// Miri-only: how many completers could not record their release window because
 /// every slot was already taken.
 ///
@@ -513,8 +570,9 @@ pub mod loom_exports {
 /// A receipt that computed its expectation from the type under test would
 /// assert `x == x` and survive any change to either. Each literal is instead
 /// pinned to the real type by a `const _: () = assert!(..)` NEXT TO THAT TYPE —
-/// the two cell headers in `task.rs`, the three chunk facts in `block.rs` — so
-/// drift between a number here and the thing it describes is a build failure.
+/// the two cell headers in `task/scoped.rs` and `task/detached.rs`, the three
+/// chunk facts in `block.rs` — so drift between a number here and the thing it
+/// describes is a build failure.
 ///
 /// The cell headers carry THREE pins each rather than one. `size_of::<Cell<()>>()
 /// == HEADER` alone would still hold with the `body` field deleted; the second
@@ -525,12 +583,12 @@ pub mod loom_exports {
 #[doc(hidden)]
 pub mod __layout_receipt {
     /// `size_of::<ScopedCell<F>>() - size_of::<F>()`: the `CellHead` thunk plus
-    /// the scope's `ScopeShared` address. Pinned in `task.rs`.
+    /// the scope's `ScopeShared` address. Pinned in `task/scoped.rs`.
     pub const SCOPED_CELL_HEADER: usize = 16;
 
     /// `align_of::<ScopedCell<F>>()` for every `F` whose own alignment does not
     /// exceed it — the cell class's alignment floor, set by the thunk and the
-    /// `ScopeShared` address. Pinned in `task.rs`.
+    /// `ScopeShared` address. Pinned in `task/scoped.rs`.
     ///
     /// A receipt buckets an allocation on the PAIR `(size, align)`, so this
     /// half needs its own literal: with size pinned alone, a cell class free to
@@ -541,12 +599,12 @@ pub mod __layout_receipt {
 
     /// `size_of::<DetachedCell<F>>() - size_of::<F>()`: the `CellHead` thunk
     /// alone, because a fire-and-forget task has no scope to name. Pinned in
-    /// `task.rs`.
+    /// `task/detached.rs`.
     pub const DETACHED_CELL_HEADER: usize = 8;
 
     /// `align_of::<DetachedCell<F>>()` under the same condition and for the
     /// same reason as [`SCOPED_CELL_ALIGN`]: the thunk alone sets it. Pinned in
-    /// `task.rs`.
+    /// `task/detached.rs`.
     pub const DETACHED_CELL_ALIGN: usize = 8;
 
     /// The block allocator's base chunk capacity — every chunk is `CHUNK0 << e`

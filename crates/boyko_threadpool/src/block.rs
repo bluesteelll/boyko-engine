@@ -1,14 +1,25 @@
 //! The per-scope bump allocator — [`ScopeBlock`] — and the pointer type its
 //! allocations come back as, [`BlockPtr`].
 //!
-//! # This module is wired to NOTHING, and that is the shipping unit
+//! # Who owns one, and where its three call sites are
 //!
-//! Stage 3a lands it alone: [`Scope`](crate::Scope) does not own a
-//! `ScopeBlock` yet and `Task::new_scoped` still calls `alloc_cell` once per
-//! spawn. Everything here is therefore dead code plus its pins, which is why
-//! the file carries an `#![allow(dead_code)]` — deleted by the commit that
-//! wires it. Landing it alone is what lets the layout pins and the property
-//! tests be judged against a tree in which nothing else moved.
+//! Every [`Scope`](crate::Scope) owns one INLINE — a field, not a pointer, so
+//! the block's two hot words share the scope's own cache line
+//! (`ScopeBlock`'s field-order note below). The wiring is exactly three sites
+//! and there are no others:
+//!
+//! * `Scope::new` — [`ScopeBlock::new`], which allocates nothing;
+//! * `Scope::prepare` — hands `&self.block` to `Task::new_scoped`, which
+//!   [`emplace`](ScopeBlock::emplace)s the task's cell into it and keeps only
+//!   the [`erase`](BlockPtr::erase)d word;
+//! * `Scope::drop` — [`free_all`](ScopeBlock::free_all), the first thing after
+//!   the join returns.
+//!
+//! Stage 3a landed this file wired to nothing, so that the layout pins and the
+//! property tests below could be judged against a tree in which nothing else
+//! moved; the file-wide `allow(dead_code)` that made an unwired module
+//! shippable went with the wiring, in the commit that added the three sites
+//! above.
 //!
 //! # What it replaces, and what it must not become
 //!
@@ -30,20 +41,44 @@
 //! One bookkeeping word inside a chunk destroys this and nothing announces it,
 //! which is why it is stated first.
 //!
-//! **D2 — the offending expression is not constructible at the boundary.**
+//! **D2 — the offending expression is not constructible THROUGH THIS TYPE.**
 //! [`ScopeBlock::emplace`] allocates AND initialises, so no caller ever holds a
 //! pointer to uninitialised block memory, and [`BlockPtr`]'s only exit is
 //! [`erase`](BlockPtr::erase). There is no `Deref`, no `as_mut`, no accessor
-//! and no `From`, so no caller can form a REFERENCE into chunk memory — and a
-//! reference passed as a function argument is exactly the material Tree
-//! Borrows turns into a protector. This is checked by the type system, not by
-//! a grep.
+//! and no `From`, so no route through [`BlockPtr`] can form a REFERENCE into
+//! chunk memory — and a reference passed as a function argument is exactly the
+//! material Tree Borrows turns into a protector. That much is checked by the
+//! type system, not by a grep.
+//!
+//! **The unqualified sentence — "no reference into chunk memory exists" — is
+//! FALSE about this crate, and it is written here so that a reader does not
+//! have to discover it.** The `drop_unrun_scoped` thunk in `task/scoped.rs`
+//! reaches the body through `ptr::drop_in_place(ptr::addr_of_mut!((*cell).body))`,
+//! which forms no reference itself — but the drop glue that call invokes hands
+//! the user's `Drop::drop(&mut self)` a `&mut F` whose referent IS chunk
+//! memory, as a function ARGUMENT. That is a genuine strong protector over a
+//! chunk, live for the whole of a destructor this crate does not write, and no
+//! type in this module can prevent it: the route does not pass through
+//! [`BlockPtr`] at all.
+//!
+//! **It cannot span a free, and the reason is ORDER rather than absence.** An
+//! unrun scoped task's registration is still counted in its scope's `pending`,
+//! so `Scope::drop`'s join has not returned, so
+//! [`free_all`](ScopeBlock::free_all) has not run: there is no deallocation for
+//! that protector to overlap. `drop_unrun_scoped` carries the same argument at
+//! its own site ("not merely forbidden but unreachable-by-order"). So D2 keeps
+//! its type-system half exactly as stated, and the one protector over chunk
+//! memory that exists outside that half is discharged by ordering — which is
+//! why D5's reduction, not this paragraph, is what makes the property
+//! checkable.
 //!
 //! **D3 — the erased pointer is inert without a private type.** `erase`
 //! returns `*const ()`; using one requires `cast::<ScopedCell<F>>()`, and
-//! `ScopedCell` is private to `task.rs`. Laundering a pointer out of here buys
-//! nothing unless the same commit also widens that type's visibility, which is
-//! a type-system-visible edit.
+//! `ScopedCell` is declared in `task/scoped.rs` at `pub(in crate::task)` — it
+//! is nameable inside the `task` module and nowhere else, which is the same
+//! bound the pre-split `task.rs` gave it. Laundering a pointer out of here
+//! buys nothing unless the same commit also widens that type's visibility,
+//! which is a type-system-visible edit.
 //!
 //! # Two absences that are decisions
 //!
@@ -59,12 +94,6 @@
 //! a destructor the joiner's `&mut self` would have to run, and would make the
 //! "free every chunk exactly once" question a matter of drop order rather than
 //! of one call site.
-
-// Stage 3a ships the module before its caller (see the header). The crate gate
-// is `-D warnings`, so without this allow an unwired module is unshippable on
-// its own — which would force the wiring and its gate into the same commit,
-// the exact coupling staging exists to avoid. DELETED in Stage 3b.
-#![allow(dead_code)]
 
 use core::alloc::Layout;
 use core::cell::Cell;
@@ -109,9 +138,11 @@ const _: () = assert!(MAX_CHUNKS == crate::__layout_receipt::MAX_CHUNKS);
 /// [`grow`](Self::grow) and [`is_empty`](Self::is_empty) do. So the hot working
 /// set is two words, not the three-field `#[repr(C)]` prefix `cur`/`end`/
 /// `n_chunks` (bytes 0..20, or 0..24 with `_pad`); the 288-byte table behind
-/// them is read exactly once per scope, by [`free_all`](Self::free_all). Under
-/// Stage 3b's `#[repr(C, align(64))]` on `Scope` those two words share one
-/// cache line with the scope's own two hot fields.
+/// them is read exactly once per scope, by [`free_all`](Self::free_all).
+/// `Scope` is `#[repr(C, align(64))]` and holds this block third, behind two
+/// words of its own, so those two hot words share ONE cache line with the
+/// scope's `inner` and `shared` — always, rather than with a probability set
+/// by where the joiner's frame happened to land.
 #[repr(C)]
 pub(crate) struct ScopeBlock {
     /// HOT — the bump cursor. Null on a block that has never grown.
@@ -144,6 +175,21 @@ pub(crate) struct ScopeBlock {
 // stated over this number.
 const _: () = assert!(size_of::<ScopeBlock>() == 312);
 
+// THE SIZE PIN DOES NOT COVER THE FIELD ORDER, and the order is what the
+// hot-prefix claim above rests on. MEASURED against that pin: moving `bases` /
+// `exps` ahead of `cur` / `end` keeps `size_of::<ScopeBlock>() == 312` exactly
+// — the pin stays GREEN — while carrying the bump cursor to block offset 288,
+// i.e. out of `Scope`'s first cache line. These two lines are what fail on
+// that edit.
+//
+// They are also the half of `Scope`'s one-cache-line claim that can only be
+// stated HERE: `scope.rs` pins `offset_of!(Scope, block) == 16`, but it cannot
+// name these two fields, because `offset_of!` respects field visibility and
+// both are private to this module. `block`@16 composed with `cur`@0 / `end`@8
+// is what puts the two hot words at bytes 16..32 of a 64-aligned `Scope`.
+const _: () = assert!(core::mem::offset_of!(ScopeBlock, cur) == 0);
+const _: () = assert!(core::mem::offset_of!(ScopeBlock, end) == 8);
+
 impl ScopeBlock {
     /// A block that owns nothing.
     ///
@@ -166,6 +212,14 @@ impl ScopeBlock {
     ///
     /// Not a spawn-count: a scope that emplaced only zero-sized values is still
     /// empty, because a ZST costs no chunk byte.
+    ///
+    /// Both callers are conditional — `Scope::drop`'s M2w note is
+    /// `cfg(miri)` and the property tests below are `cfg(test)` — so a plain
+    /// `cargo build` sees no call at all. The allow is scoped to THIS method
+    /// under exactly the configuration that leaves it uncalled, rather than
+    /// re-taken over the file: a file-wide allow would also hide the next item
+    /// that genuinely stopped being reachable.
+    #[cfg_attr(not(miri), allow(dead_code))]
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
         self.n_chunks.get() == 0
@@ -464,8 +518,23 @@ impl ScopeBlock {
 /// function's NAME is the whole diagnosis. The `boyko_log` E-code such a site is
 /// owed is deliberately not minted here — a code is a workspace-level act with
 /// four gates behind it (a registry row, a `docs/diagnostics/` page, an
-/// identifier-use check and a ledger row for a code no test can name), and it
-/// does not belong to a module that is wired to nothing.
+/// identifier-use check and a ledger row for a code no test can name), and what
+/// this site buys by paying them is nothing a reader of the crash does not
+/// already have: the abort is unreachable while `alloc` succeeds (the paragraph
+/// above), so the page would document a failure nobody has observed, while the
+/// symbol in the stack already names the invariant that broke.
+///
+/// **The second half of that justification ROTTED, and is replaced rather than
+/// deleted.** It read "and it does not belong to a module that is wired to
+/// nothing". Stage 3b wired the module — three sites in `Scope`, listed in this
+/// file's header — so the clause is now false as written. What the wiring
+/// changed is the MODULE's reachability, not this SITE's, which is why the
+/// decision outlived its stated reason. It reverses the moment the abort
+/// becomes reachable — a lower [`MAX_CHUNKS`], or a growth rule that stops
+/// doubling — and then the four gates are simply the price.
+///
+/// One reason it is NOT: that this path cannot log. The crate already does
+/// log-then-flush-then-abort in `worker::abort_on_task_panic` (`E0201`).
 #[cold]
 #[inline(never)]
 fn chunk_table_exhausted() -> ! {
@@ -705,8 +774,9 @@ mod tests {
     //     survives DELETING EVERY `record()` CALL — so the cause is the
     //     delegation, not the tape.
     // Installing it unconditionally would therefore turn this crate's Miri gate
-    // red on a std-internal issue, and that gate is where `task.rs`'s own test
-    // module says its "still frees" claim is decided.
+    // red on a std-internal issue, and that gate is where the `task`
+    // module's own teardown tests say their "still frees" claim is decided
+    // (`task/mod.rs`'s `teardown_support`).
     #[cfg(not(miri))]
     #[global_allocator]
     static RECORDING_ALLOC: RecordingAlloc = RecordingAlloc;

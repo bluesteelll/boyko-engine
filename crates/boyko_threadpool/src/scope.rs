@@ -57,6 +57,7 @@ use crossbeam_deque::Worker;
 use crossbeam_deque::Steal;
 use crossbeam_utils::{Backoff, CachePadded};
 
+use crate::block::ScopeBlock;
 use crate::sync::{AtomicPtr, AtomicUsize, Ordering, Thread};
 use crate::task::Task;
 use crate::thread_pool::PoolInner;
@@ -263,6 +264,38 @@ pub(crate) static MIRI_WINDOW_SLOT_EXHAUSTIONS: core::sync::atomic::AtomicUsize 
 pub(crate) static MIRI_FREES_INSIDE_A_RELEASE_WINDOW: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
+/// Miri-only: how many `Scope::drop` CHUNK frees landed while a completer of
+/// that same scope was inside its post-decrement release window.
+///
+/// The KE16 M2w observation, and the reason it is a SECOND counter rather than
+/// a second increment of [`MIRI_FREES_INSIDE_A_RELEASE_WINDOW`]: THE TWO COUNT
+/// DIFFERENT EVENTS, over different allocations, at different points in
+/// `Scope::drop`.
+///
+/// * M1's counter observes the `Box::from_raw` of the `ScopeShared` — the
+///   allocation a completer's own `*const Self` names.
+/// * this one observes `ScopeBlock::free_all`, which hands back the CHUNKS the
+///   scope's task cells live in. Those are allocations no completer holds a
+///   pointer to at all: what a completer names is its own cell, and the chunk
+///   it sits in is reclaimed wholesale.
+///
+/// Keeping them apart is what stops this column from inheriting the other's
+/// verdict. A shared counter would read `>= 1` from either free, so an M2w
+/// green could be produced entirely by M1's event — the "green from
+/// elsewhere" failure this repository keeps cataloguing — and the two are not
+/// interchangeable evidence: they are freed by different calls, and only this
+/// one is the free that Stage 3b introduced.
+///
+/// Incremented ONCE PER `Scope::drop`, not once per chunk, and only when the
+/// block actually grew one. Per-chunk counting would make the number a
+/// function of the payload bytes a scope happened to spawn rather than of the
+/// event being observed, and the threshold the gate asserts (`>= 1`, as M1's
+/// is) would then be met by a single large scope while a hundred small ones
+/// went unobserved.
+#[cfg(miri)]
+pub(crate) static MIRI_BLOCK_FREES_INSIDE_A_RELEASE_WINDOW: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 /// Miri-only: how many times [`miri_release_probe`] has run — one per
 /// `pending -> 0` transition.
 ///
@@ -364,6 +397,37 @@ fn miri_note_free_against_open_windows(key: usize) {
         .any(|slot| slot.load(SeqCst) == key)
     {
         MIRI_FREES_INSIDE_A_RELEASE_WINDOW.fetch_add(1, SeqCst);
+    }
+}
+
+/// Miri-only: the sibling of [`miri_note_free_against_open_windows`] for the
+/// BLOCK free, called by `Scope::drop` immediately before `free_all`.
+///
+/// Same slot protocol and same `key` — the freeing scope's own
+/// [`ScopeShared::miri_key`], so a match means a completer OF THIS SCOPE is
+/// mid-window — and a deliberately separate counter, because the event is a
+/// different free of a different allocation class. See
+/// [`MIRI_BLOCK_FREES_INSIDE_A_RELEASE_WINDOW`] for why the two must not share
+/// one.
+///
+/// A separate function rather than a parameter on the existing one: the two
+/// notes are called from adjacent lines of the same `Drop`, and a boolean
+/// discriminant would put the choice of counter at the call site, where a
+/// copy-paste can silently point the block's free at M1's column and produce a
+/// green in the column that was not exercised.
+///
+/// `#[inline(never)]` for the reason its sibling carries it: the gate's failure
+/// diagnoses are read off symbol names.
+#[cfg(miri)]
+#[inline(never)]
+fn miri_note_block_free_against_open_windows(key: usize) {
+    use core::sync::atomic::Ordering::SeqCst;
+
+    if MIRI_OPEN_RELEASE_WINDOWS
+        .iter()
+        .any(|slot| slot.load(SeqCst) == key)
+    {
+        MIRI_BLOCK_FREES_INSIDE_A_RELEASE_WINDOW.fetch_add(1, SeqCst);
     }
 }
 
@@ -616,8 +680,8 @@ impl ScopeShared {
     /// by then entitled to have freed. That never materialised — but only
     /// because `complete_task` is `#[inline]` and was in fact always inlined
     /// into its caller of the day (the `Box`ed task-body wrapper, since
-    /// deleted — see `task.rs`), where the attribute does not survive. The old
-    /// code was therefore safe by an inlining DECISION rather than by any
+    /// deleted — see the `task` module), where the attribute does not survive.
+    /// The old code was therefore safe by an inlining DECISION rather than by any
     /// guarantee, and a future `#[inline(never)]`, a codegen-unit change or a
     /// PGO run that declined to inline it would have been enough. A raw pointer
     /// parameter carries no such licence.
@@ -896,8 +960,19 @@ impl Drop for ScopeShared {
 /// Spawn child tasks via [`Scope::spawn`]; the scope blocks at drop time
 /// until every spawned task has completed.
 ///
+/// `#[repr(C, align(64))]` is bought deliberately, and the field ORDER is the
+/// purchase: a spawn touches `inner`, `shared` and the block's `cur` / `end` —
+/// bytes 0..32 under this order — so the alignment makes that span ONE cache
+/// line always, rather than a straddle whose probability is set by where the
+/// joiner's frame happened to land. The price is 56 bytes of stack padding once
+/// per scope, paid for one guaranteed line per spawn. The order is PINNED below
+/// by `offset_of!`, because the size and alignment pins there do not cover it —
+/// see the comment on those pins for the edit that keeps both of them green
+/// while breaking this paragraph.
+///
 /// [`ThreadPool::install`]: crate::ThreadPool::install
 /// [`ThreadPool::scope`]: crate::ThreadPool::scope
+#[repr(C, align(64))]
 pub struct Scope<'scope> {
     /// The pool's worker-shared state this scope spawns into. Borrowed for
     /// `'scope` (Phase 9.3b decision E: `&PoolInner`, not the handle — the
@@ -912,11 +987,60 @@ pub struct Scope<'scope> {
     /// Created by `Box::into_raw` in [`Scope::new`], freed by `Box::from_raw`
     /// in [`Scope::drop`] (the single free site).
     pub(crate) shared: NonNull<ScopeShared>,
+    /// This scope's cell storage: every task spawned into the scope has its
+    /// payload cell emplaced here by [`Scope::prepare`], and the whole block is
+    /// returned to the allocator by ONE `free_all` in [`Scope::drop`],
+    /// immediately after the join.
+    ///
+    /// Held INLINE and third. Inline because a `Box` would put the bump cursor
+    /// one dependent load away from the spawn path and add an allocation to
+    /// every scope, including the ones that spawn nothing (the block itself is
+    /// lazy — `ScopeBlock::new` allocates nothing). Third because the block's
+    /// own two hot words lead its layout, so they land in bytes 16..32 and
+    /// share this struct's first cache line with the two fields above.
+    block: ScopeBlock,
     /// `PhantomData<&'scope mut &'scope ()>` makes the scope invariant in
     /// `'scope`, which is what we want — `'scope` is a borrow window, not
     /// a covariant lifetime.
     _phantom: PhantomData<&'scope mut &'scope ()>,
 }
+
+// 8 (`inner`) + 8 (`shared`) + 312 (`ScopeBlock`, pinned in `block.rs`) + 0
+// (`PhantomData`) = 328 bytes of content, rounded up to the 64-byte alignment
+// above = 384. The size is what the padding cost is stated over, and the
+// ALIGNMENT is the thing the one-cache-line claim rests on — a size pin alone
+// would survive the alignment being dropped, which is exactly the edit that
+// silently turns the guaranteed line back into a probability.
+//
+// NEITHER OF THOSE TWO COVERS THE FIELD ORDER, and the field order is what the
+// doc comment above says was bought. MEASURED, by compiling the reordering
+// against this pin set: declaring `block` FIRST gives `block`@0, `inner`@312,
+// `shared`@320, `_phantom`@328 — still 328 bytes of content, still
+// `size_of == 384`, still `align_of == 64`, so the two pins above stay SILENT
+// while the four hot fields end up on THREE different cache lines (`cur`/`end`
+// at 0..16 in the first, `inner` at 312..320 in the fifth, `shared` at 320..328
+// in the sixth). The property the alignment was paid for is then gone with no
+// build failure at all. That reordering is the edit the three `offset_of!` pins
+// below catch — all three fired on the probe — and the two above cannot.
+//
+// The pins state one half of a composition. The other half is `cur`@0 /
+// `end`@8 INSIDE `ScopeBlock`, pinned beside that struct's field list in
+// `block.rs` — it has to be stated there, because `offset_of!` respects field
+// visibility and both fields are private to that module. Composed:
+// `block`@16 with `cur`@0 / `end`@8 puts the block's two hot words at bytes
+// 16..32 of this struct, and `inner`@0 / `shared`@8 puts the scope's own two
+// ahead of them, so all four lie in bytes 0..32 of a 64-aligned allocation.
+//
+// `inner` and `shared` are pinned for the reader rather than for the property:
+// swapping just those two would preserve the one-line claim, and `block`@16 is
+// the load-bearing line. They are stated because the byte span in the doc
+// comment is read off them, and a reader re-deriving 0..32 should not have to
+// reconstruct it from `repr(C)` plus two sizes.
+const _: () = assert!(size_of::<Scope<'static>>() == 384);
+const _: () = assert!(align_of::<Scope<'static>>() == 64);
+const _: () = assert!(core::mem::offset_of!(Scope<'static>, inner) == 0);
+const _: () = assert!(core::mem::offset_of!(Scope<'static>, shared) == 8);
+const _: () = assert!(core::mem::offset_of!(Scope<'static>, block) == 16);
 
 impl<'scope> Scope<'scope> {
     #[inline]
@@ -929,6 +1053,9 @@ impl<'scope> Scope<'scope> {
         Self {
             inner,
             shared,
+            // Lazy: no chunk is allocated until the first spawn, so a scope
+            // that spawns nothing still makes no allocator call for its block.
+            block: ScopeBlock::new(),
             _phantom: PhantomData,
         }
     }
@@ -1215,7 +1342,19 @@ impl<'scope> Scope<'scope> {
         //   This is observable only at the language level; no real program can
         //   observe the UB because the process is gone. Same edge case as
         //   rayon's `scope`.
-        unsafe { Task::new_scoped(shared, f) }
+        //
+        // SAFETY (`new_scoped`'s third clause — the block that holds the cell):
+        //   `&self.block` is THIS scope's block, so it is the block of the
+        //   `ScopeShared` named above, and its single `free_all` is in
+        //   `Scope::drop` behind the same join as the free of that
+        //   `ScopeShared` — so the cell outlives the task's execution for
+        //   exactly the reason the registration clause gives. `&self` is what
+        //   makes this a shared borrow rather than a unique one, and the
+        //   protector it installs covers the 312-byte block STRUCT in this
+        //   frame, never the chunks: `emplace` writes through a `*mut T` and
+        //   hands back a `BlockPtr` whose only exit is `erase`, so no reference
+        //   into chunk memory is formed here (D1/D2 in `block.rs`'s header).
+        unsafe { Task::new_scoped(&self.block, shared, f) }
     }
 }
 
@@ -1287,6 +1426,58 @@ impl<'scope> Drop for Scope<'scope> {
         //   parameter.
         unsafe { join_workers_until_drained(self.inner, raw) };
 
+        // Miri-only: the window key of the scope being torn down, read ONCE
+        // here and used by both notes below. It has to be read before the first
+        // reclamation either way — after the `Box::from_raw` the field is no
+        // longer there — and one read makes it evident on sight that the block
+        // note and the `ScopeShared` note are keyed by the SAME scope identity,
+        // which is the whole basis for comparing their two counts.
+        //
+        // SAFETY: `*raw` is live and this thread is its sole owner: the join
+        //   above observed `pending == 0`, no task of this scope exists, and the
+        //   single free is the `Box::from_raw` below, which has not run. The key
+        //   is a `Copy` place read through the raw pointer, so it forms no
+        //   reference and leaves no protector behind for either free to trip
+        //   over. `cfg(miri)` only.
+        #[cfg(miri)]
+        let miri_key = unsafe { (*raw).miri_key };
+
+        // Miri-only: record whether the CHUNK free below lands inside one of
+        // this scope's own release windows (KE16 M2w). A DIFFERENT event from
+        // the note further down — that one observes the `ScopeShared` free —
+        // and it is counted separately for that reason; see
+        // `MIRI_BLOCK_FREES_INSIDE_A_RELEASE_WINDOW`. Once per `Scope::drop`
+        // rather than once per chunk, because the property is about the free
+        // SITE and not about how many chunks it happens to hand back, and
+        // guarded by `is_empty` so a scope that never grew a chunk does not
+        // report a free it never performed.
+        #[cfg(miri)]
+        if !self.block.is_empty() {
+            miri_note_block_free_against_open_windows(miri_key);
+        }
+
+        // FIRST reclamation of the scope, immediately after the join and before
+        // anything that could unwind — which is what makes the block's
+        // leak-safety structural instead of a `Drop` impl (`block.rs`'s header).
+        //
+        // SAFETY (`free_all`'s two preconditions):
+        //   - EVERY EMPLACED VALUE IS ALREADY DEAD, and the join is what
+        //     establishes it. Each cell in the block belongs to a task that was
+        //     registered in `pending`; the join returned, so `pending == 0`, so
+        //     every one of them either RAN — `run_scoped` moved its body out of
+        //     the cell by `ptr::read` before completing the registration — or
+        //     was dropped unrun, in which case `Task::drop`'s thunk dropped the
+        //     body in place. A task that had done neither would still be
+        //     counted, and this line would not have been reached.
+        //   - NO `BlockPtr` OR ERASED COPY IS DEREFERENCED AFTERWARDS. The only
+        //     copy that ever leaves this thread is `Task.payload`, and the
+        //     element carrying it is consumed by whichever of the two thunks
+        //     ran; `emplace` keeps no handle, and `BlockPtr::erase` consumed the
+        //     typed one at the spawn. Nothing on this thread names a chunk
+        //     either: `free_all` reads the table out of this frame.
+        //   Called once — `Drop` runs once, and the call is unconditional.
+        unsafe { self.block.free_all() };
+
         // The join returned ⇒ `pending == 0` (the final wave's decrement). No
         // worker will start a new `complete_task`, and every worker that ran
         // has completed its `fetch_sub`, which happens-before the join's
@@ -1351,14 +1542,10 @@ impl<'scope> Drop for Scope<'scope> {
         // allocator never recycling one across two scopes, which Miri's
         // same-thread reuse rate of 0.5 does not promise (`MIRI_SCOPE_EPOCH`).
         //
-        // SAFETY: `*raw` is live and this thread is its sole owner: the join
-        //   above observed `pending == 0`, no task of this scope exists, and the
-        //   single free is the `Box::from_raw` below, which has not run. The key
-        //   is a `Copy` place read through the raw pointer, so it forms no
-        //   reference and leaves no protector behind for that free to trip over.
-        //   `cfg(miri)` only.
-        #[cfg(miri)]
-        let miri_key = unsafe { (*raw).miri_key };
+        // POSITION UNCHANGED by Stage 3b: this note stays the last thing before
+        // the `ScopeShared` free, because it is that free it observes. The key
+        // it reads was hoisted above the block free, where it is read once for
+        // both notes.
         #[cfg(miri)]
         miri_note_free_against_open_windows(miri_key);
 

@@ -1833,19 +1833,19 @@ everything above (worker threads, parking, scope, panic propagation, install
 API) is hand-rolled to fit the scheduler's contracts. Exports:
 
 - `ThreadPool` / `ThreadPoolBuilder` / `WorkerHandle` / `PoolInner` /
-  `MAX_WORKERS` (lib.rs:291).
-- `Scope` (lib.rs:290) — `Scope::spawn` with `'scope` lifetime erasure;
+  `MAX_WORKERS` (lib.rs:325).
+- `Scope` (lib.rs:324) — `Scope::spawn` with `'scope` lifetime erasure;
   `Scope::Drop` blocks via *work-stealing* (rayon pattern) so nested scopes can't
   deadlock. `install` (dispatcher TLS bookkeeping) vs `scope` (worker-safe,
   lighter; used by `par_iter` / `par_for_each_chunk`).
-- TLS (lib.rs:292): `current_worker_id`, `WORKER_ID_DISPATCHER` /
+- TLS (lib.rs:326): `current_worker_id`, `WORKER_ID_DISPATCHER` /
   `WORKER_ID_UNATTACHED`, `InSystemRunGuard` (the ALLOC1/ALLOC6 guard — the
   ECS crate's context-restricted paths `debug_assert!` it or its negation:
   event lane routing, the hook-drain SAFETY-7 gate), `try_with_active_pool`.
 - NOT exported — the queue element. KE16 replaced
   `TaskHandle { body: Box<dyn FnOnce() + Send + 'static> }` with
   `Task { payload: *const (), execute: TaskFn }`
-  ([task.rs](../crates/boyko_threadpool/src/task.rs):173) — same 16 bytes, one
+  ([task/mod.rs](../crates/boyko_threadpool/src/task/mod.rs):191) — same 16 bytes, one
   fewer dependent load on dispatch. It is `pub(crate)`: the element is an
   implementation detail of the deques and no caller outside the crate can name
   it.

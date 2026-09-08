@@ -227,6 +227,27 @@ fn frees_inside_window() -> usize {
     }
 }
 
+/// Reads the count of CHUNK frees that landed inside a release window, or 0
+/// natively.
+///
+/// The KE16 M2w column, and a different observation from
+/// [`frees_inside_window`] rather than a second reading of it: that one counts
+/// `Scope::drop`'s `Box::from_raw` of the `ScopeShared` box, this one counts
+/// `ScopeBlock::free_all`, which hands back the chunks the scope's task cells
+/// live in. Stage 3b made those cells outlive the release RMW, so their
+/// storage is now reclaimed inside the same window — which is the free the
+/// gate below has to see, and the one no completer holds a pointer into.
+fn block_frees_inside_window() -> usize {
+    #[cfg(miri)]
+    {
+        boyko_threadpool::miri_block_frees_inside_a_release_window()
+    }
+    #[cfg(not(miri))]
+    {
+        0
+    }
+}
+
 /// Reads the count of completers that found no free window slot, or 0 natively.
 fn slot_exhaustions() -> usize {
     #[cfg(miri)]
@@ -251,7 +272,7 @@ fn slot_exhaustions() -> usize {
 /// yields: `running 1 test`, `1 passed`, full census, `windows == SCOPES`, and
 /// the gate deciding nothing whatever.
 ///
-/// # Two observations, because they fail differently
+/// # Three observations, because they fail differently
 ///
 /// * `firings` — the probe was CALLED, once per `pending -> 0`. Catches a probe
 ///   deleted, `cfg`'d away, or moved off the `prev == 1` path.
@@ -261,6 +282,14 @@ fn slot_exhaustions() -> usize {
 ///   alone: keep the `fetch_add`, delete only the yield loop, and both the
 ///   firing counter and a compile-time floor on the yield count stay green while
 ///   the gate is disarmed and the defect ships.
+/// * `block_frees_inside_window` — the same for the CHUNK free that Stage 3b
+///   introduced. It is a THIRD observation and not a second reading of the
+///   second: the two count different frees, of different allocations, at
+///   different points in one `Scope::drop`. A shared counter would read `>= 1`
+///   from either event, so this column's green could be produced entirely by
+///   the other's — the "green from elsewhere" shape this repository keeps
+///   cataloguing — which is why `src/scope.rs` gives it its own static and its
+///   own note function.
 ///
 /// # Why not a floor on the yield count
 ///
@@ -271,7 +300,7 @@ fn slot_exhaustions() -> usize {
 /// ALIGNMENT, not duration. No constant certifies it. This does, by observing
 /// the result rather than the input.
 ///
-/// # Why both are `>=` and both SPIN
+/// # Why all three are `>=` and all three SPIN
 ///
 /// `>=`: the counters are process-global and libtest runs this file's tests in
 /// parallel, so a concurrent test can only ADD. Under-counting — the failure
@@ -281,6 +310,16 @@ fn slot_exhaustions() -> usize {
 /// completion through the decrement, and the bump follows it). MEASURED while
 /// building this gate: a single sample read 1 where 2 probes had fired, i.e. a
 /// FALSE RED. If the probe is gone, no amount of spinning invents a firing.
+///
+/// The block column is in the spin condition too, and NOT because its
+/// visibility was derived. It could have been: both notes fire from one
+/// `Scope::drop`, the block one first, both `SeqCst`, so a read that observes
+/// the second increment observes the first — but only if that drop's block note
+/// MATCHED, which is exactly the ordering claim this column exists to monitor.
+/// Deriving the monitor's own visibility from the claim it monitors is circular,
+/// so it is observed on the same footing as the other two. On a green run it
+/// costs nothing: under the claim's precondition `block_overlaps >=
+/// overlaps >= 1`, so the loop leaves on the same turn.
 ///
 /// # The two thresholds differ, and the difference is the point
 ///
@@ -300,21 +339,59 @@ fn slot_exhaustions() -> usize {
 /// so that a drift from 3/4 toward 1/4 is visible before it reaches 0/4 and
 /// fails.
 ///
-/// # And a third number, which is a DIAGNOSIS rather than an observation
+/// # `block_overlaps`: the same threshold, a different event, and the ONE
+/// precondition it is the only report of
+///
+/// `block_overlaps` is required `>= 1` — deliberately the same threshold as
+/// `overlaps`, and for the same reason: Miri aborts the interpreter on the first
+/// UB, so ONE chunk free landing inside ONE release window is exactly what makes
+/// this gate able to report a `run_scoped` that holds a protected reference into
+/// its cell across the release. The threshold is shared; the OBSERVATION is not,
+/// and that is the point of the column. It watches `ScopeBlock::free_all`, not
+/// the `ScopeShared` box's `Box::from_raw`, so a green here cannot be inherited
+/// from the line above it.
+///
+/// It is also carrying an argument rather than only a census, and the argument
+/// has a precondition that nothing else in the tree would report. Stage 3b
+/// DELETED the strongest clause of `run_scoped`'s soundness statement — the cell
+/// used to be freed before the body ran, so at the instant the release RMW
+/// committed the payload allocation did not exist at all. It exists now, and
+/// what replaces the lost clause is the reduction in `src/task/mod.rs` plus THIS
+/// execution gate. The ordering that makes the gate armed is
+/// `block_overlaps >= overlaps`, and it holds only because the completer
+/// executes nothing that yields between the releasing `pending.fetch_sub` and
+/// the CAS inside `miri_release_probe` that OPENS the window — the window does
+/// not open at the decrement. At `-Zmiri-preemption-rate=0` that interval is a
+/// `fetch_add`, a CAS loop, and on the W-d′ arm an `unpark`, which is a wake and
+/// not a wait. Two ways for it to stop holding:
+///
+/// * the recipe's `-Zmiri-preemption-rate=0` is dropped, at which rate the
+///   joiner may be scheduled inside that interval, reach `free_all` before the
+///   window opens, and produce `overlaps = 1, block_overlaps = 0`;
+/// * a future Miri shim makes `unpark` a preemption point, which does the same
+///   thing on the W-d′ arm — where the unpark sits AFTER the decrement, unlike
+///   the external arm, whose unpark precedes it.
+///
+/// Both fail SILENTLY, and this printed count is the only thing in the tree that
+/// would say so.
+///
+/// # And one number that is a DIAGNOSIS rather than an observation
 ///
 /// `slot_exhaustions` counts completers that found no free slot in the window
 /// array and therefore recorded nothing. Such a completer can only LOSE an
 /// observation, never invent one, so the gate above stays sound — but the loss
-/// arrives here as a smaller `overlaps`, and at the limit as the `overlaps == 0`
+/// arrives here as a smaller `overlaps` AND a smaller `block_overlaps`, since
+/// both notes scan the same slot array, and at the limit as the `overlaps == 0`
 /// red whose message sends the reader to re-tune `MIRI_RELEASE_PROBE_YIELDS`
 /// against an observation that was never taken. It is asserted EQUAL TO ZERO,
-/// not `>=` like the other two: unlike them it has no benign direction, and
+/// not `>=` like the other three: unlike them it has no benign direction, and
 /// process-globality works the right way round here — a sibling test's
 /// exhaustion is a real shortage of a shared array and this run wants to hear
 /// about it.
 fn assert_probe_armed(
     firings_before: usize,
     frees_before: usize,
+    block_frees_before: usize,
     exhaustions_before: usize,
     expected: usize,
     ctx: &str,
@@ -324,6 +401,7 @@ fn assert_probe_armed(
         for _ in 0..PROBE_OBSERVE_CAP {
             if probe_firings().saturating_sub(firings_before) >= expected
                 && frees_inside_window().saturating_sub(frees_before) >= 1
+                && block_frees_inside_window().saturating_sub(block_frees_before) >= 1
             {
                 break;
             }
@@ -332,6 +410,7 @@ fn assert_probe_armed(
 
         let fired = probe_firings().saturating_sub(firings_before);
         let overlapped = frees_inside_window().saturating_sub(frees_before);
+        let block_overlapped = block_frees_inside_window().saturating_sub(block_frees_before);
         let exhausted = slot_exhaustions().saturating_sub(exhaustions_before);
 
         // One pre-formatted line, for the same reason as the censuses above:
@@ -341,7 +420,9 @@ fn assert_probe_armed(
             use std::io::Write as _;
             let line = format!(
                 "KE16-PROTECTOR-GATE-ARMED ctx={ctx} firings={fired}/{expected} \
-                 overlaps={overlapped}/{expected} slot_exhaustions={exhausted}\n"
+                 overlaps={overlapped}/{expected} \
+                 block_overlaps={block_overlapped}/{expected} \
+                 slot_exhaustions={exhausted}\n"
             );
             let mut err = std::io::stderr().lock();
             let _ = err.write_all(line.as_bytes());
@@ -376,10 +457,54 @@ fn assert_probe_armed(
              the yield count - re-tune MIRI_RELEASE_PROBE_YIELDS against THIS observation rather \
              than reasoning about its size."
         );
+
+        // LAST, and the order is the same principle the two asserts above
+        // follow: whichever of several possible reds holds the TRUE diagnosis
+        // goes first. A slot shortage is still diagnosed as a slot shortage, and
+        // a burst that no longer overlaps anything is still diagnosed as a dead
+        // burst — both of those drive this column to 0 as well, so reporting it
+        // first would blame the ordering precondition for a failure that is not
+        // its. The case that reaches this assert is the one only it can see:
+        // `overlaps >= 1` while `block_overlaps == 0`, which is precisely the
+        // inequality's violation and cannot be produced by either failure above.
+        //
+        // And the message deliberately does NOT repeat the assert above's advice
+        // to re-tune MIRI_RELEASE_PROBE_YIELDS. `src/scope.rs`'s own note on
+        // that constant records armed-ness as NOT MONOTONIC in it - disarmed at
+        // 8 while armed at 4, 5, 6, 7, 10, 12, 16, 24 and 32, because the
+        // mechanism is round-robin ALIGNMENT rather than duration - and
+        // concludes that no constant threshold can certify it. Sending a reader
+        // there costs a sweep that cannot terminate in a verdict.
+        assert!(
+            block_overlapped >= 1,
+            "{ctx}: {overlapped} of {expected} `ScopeShared` frees landed inside a release window, \
+             but NOT ONE of {expected} CHUNK frees did. This is a DIFFERENT event from the line \
+             above - `ScopeBlock::free_all` rather than the `ScopeShared` box's `Box::from_raw` - \
+             so it could not have inherited that column's green, and it is the only execution \
+             evidence that Stage 3b's freed-after-the-release cell is judged by Tree Borrows at \
+             all. Do NOT re-tune MIRI_RELEASE_PROBE_YIELDS: armed-ness is not monotonic in it and \
+             no constant certifies it (see `MIRI_RELEASE_PROBE_YIELDS` in src/scope.rs). The \
+             number that broke is a PRECONDITION of the ordering claim \
+             `block_overlaps >= overlaps`, which holds only while the completer executes nothing \
+             that yields between its releasing `pending.fetch_sub` and the CAS in \
+             `miri_release_probe` that OPENS the window. Check, in this order: (1) was \
+             -Zmiri-preemption-rate=0 passed? Without it the joiner may be scheduled inside that \
+             interval and reach `free_all` before the window opens, giving exactly this reading. \
+             (2) has a Miri upgrade made `unpark` a preemption point? On the W-d-prime arm the \
+             unpark sits between the decrement and the probe, so that change breaks the \
+             precondition silently and this count is the only thing that reports it."
+        );
     }
     #[cfg(not(miri))]
     {
-        let _ = (firings_before, frees_before, exhaustions_before, expected, ctx);
+        let _ = (
+            firings_before,
+            frees_before,
+            block_frees_before,
+            exhaustions_before,
+            expected,
+            ctx,
+        );
     }
 }
 
@@ -395,6 +520,7 @@ fn assert_probe_armed(
 fn completer_holds_no_protector_when_the_joiner_frees() {
     let probes_before = probe_firings();
     let frees_before = frees_inside_window();
+    let block_frees_before = block_frees_inside_window();
     let exhaustions_before = slot_exhaustions();
     // Every body of every scope executed — the primary anti-vacuity census.
     let ran = AtomicUsize::new(0);
@@ -498,6 +624,7 @@ fn completer_holds_no_protector_when_the_joiner_frees() {
     assert_probe_armed(
         probes_before,
         frees_before,
+        block_frees_before,
         exhaustions_before,
         SCOPES,
         "external-joiner arm",
@@ -673,6 +800,7 @@ fn worker_joiner_completer_holds_no_protector_when_the_joiner_frees() {
 
     let probes_before = probe_firings();
     let frees_before = frees_inside_window();
+    let block_frees_before = block_frees_inside_window();
     let exhaustions_before = slot_exhaustions();
     let pool = ThreadPoolBuilder::new().num_threads(WORKERS_W).build();
 
@@ -782,6 +910,7 @@ fn worker_joiner_completer_holds_no_protector_when_the_joiner_frees() {
     assert_probe_armed(
         probes_before,
         frees_before,
+        block_frees_before,
         exhaustions_before,
         SCOPES_W,
         "W-d-prime arm",
@@ -821,7 +950,14 @@ fn worker_joiner_completer_holds_no_protector_when_the_joiner_frees() {
 /// open past the release, and at `-Zmiri-preemption-rate=0` the joiner then runs
 /// its whole tail — free, `install` return, helper return, frame pop — in one
 /// scheduling turn. So this arm is armed exactly when the sibling arm is, and
-/// `assert_probe_armed` certifies it by the same two observations.
+/// `assert_probe_armed` certifies it by the same three observations.
+///
+/// The block column applies here for a reason worth stating, because the two
+/// reclamations this arm is about are NOT the one it counts: this arm judges the
+/// helper frame's pop, and `block_overlaps` watches `free_all`. They are armed by
+/// the same burst and ordered by the same tail — `free_all` runs first, inside
+/// the join's own frame — so the column certifies that the tail this arm depends
+/// on really did run inside a completer's open window.
 ///
 /// # Verdict, and what the two REDs behind it each prove
 ///
@@ -852,6 +988,7 @@ fn worker_joiner_completer_holds_no_protector_when_the_joiner_frees() {
 fn body_environment_protector_expires_before_the_borrowed_frame_pops() {
     let probes_before = probe_firings();
     let frees_before = frees_inside_window();
+    let block_frees_before = block_frees_inside_window();
     let exhaustions_before = slot_exhaustions();
     // Every body of every scope executed — the primary anti-vacuity census.
     let ran = AtomicUsize::new(0);
@@ -902,6 +1039,7 @@ fn body_environment_protector_expires_before_the_borrowed_frame_pops() {
     assert_probe_armed(
         probes_before,
         frees_before,
+        block_frees_before,
         exhaustions_before,
         SCOPES,
         "body-environment arm",
