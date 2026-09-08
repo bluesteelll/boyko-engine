@@ -11,7 +11,7 @@ table in `KE16-DESIGN.md`.
 | A | **CLOSED ON `a3`** — five arms measured, then the deciding pair re-measured interleaved in ONE session | §A |
 | B | **B0 BY CONSTRUCTION, NOT BY MEASUREMENT** — `b1`/`b3` do not compile over `a3` | §B |
 | W1, W2 | **CLOSED ON `wc` 2026-09-08 at CS-4.** `wg` and `wgc` ELIMINATED (0 improvements, 13 and 14 regressions, and an occupancy receipt: 5–6 of 16 lanes, speedup pinned at 2.00×). `wc` is a tie on all 38 cells and rule 2's two gates — a real-park loom M1c and the route-(b) 32-seed liveness gate — are GREEN, so **W\* = `wc`**. ⚠ No physics ranking is filed: the passes carry a monotone warm-up drift and the PRIMARY row's band is 85 % | §W |
-| C, F | **UNBLOCKED, NOT YET MEASURED.** W\* = `wc`, so `c1` is `a3+b0+wc+c1`. ⚠ `c1` and `c1f` are measured as a PAIR, departing from rule 3 with the number that forces it | §C |
+| C, F | **CLOSED ON `c0` 2026-09-08.** Both arms DROPPED — neither improves anything anywhere; `c1` runs the wave on **2 of 16 lanes**, `c1f` on 9–10 and still loses 1.86×. Measured as a PAIR, departing from rule 3 with the number that forces it. **Final: `a3+b0+wc+c0`** | §C |
 | App | **NOT RUN — OWED.** No number here comes from the unconditional shipped code | §App, §Owed |
 
 This file exists because the tournament ran for weeks and produced no written result. Everything
@@ -1001,6 +1001,7 @@ findings are intact — the per-sample data behind three of five runs is not, an
 are not rebuildable from anything in the tree. Fixed in `e7910d5f`: the baseline name now carries the
 short HEAD hash, so two code states can no longer address one directory.
 
+
 ### Appendix: every cell, median of three passes at CS-4
 
 Medians are the median of the three per-pass medians. `band` is the reference's widest
@@ -1051,12 +1052,116 @@ reference's, `IMP` at the mirror inequality, `tie` otherwise.
 
 ---
 
-## §C, §F. UNBLOCKED BY W\* = `wc`; NOT YET MEASURED
+## §C, §F. MEASURED 2026-09-08 — CLOSED ON `c0`; both arms dropped
 
-**`c1` and `c1f` were never measured.** With W\* fixed they are buildable: `c1` is
-`a3+b0+wc+c1` (`ke16-a3,ke16-w-count,ke16-c-batch`), `c1f` adds `ke16-w-fanout`.
+### ✅ MEASURED 2026-09-08 — BOTH ARMS DROPPED. Axis C closes on `c0`
 
-### ⚠⚠ They will be measured as a PAIR, which DEPARTS from rule 3 — and the departure is forced by §W's own result
+Three interleaved passes over `{c0, c1, c1f}` at CS-4 (`7ccab360`), taken after
+`scripts/ke16_measure.sh --prebuild`, so **no timed region followed a compile** — the driver writes
+`DIRTY-PASS.txt` when one does and wrote none. Settling receipt before pass 1: 8.3 / 7.8 / 5.2 / 5.6
+/ 4.1 % CPU.
+
+| arm | improved | regressed | `max_in_flight` at N = 65536 | ECS speedup there |
+|---|---|---|---|---|
+| `c1` (App-4 batch spawn) | **0** | 6 of 38 | **2** of 16 | **2.00×** |
+| `c1f` (+ W-f fan-out) | **0** | 5 of 38 | 9–10 of 16 | **7.95–8.00×** |
+| `c0` (reference) | — | — | **16** of 16 | 15.05–15.28× |
+
+**Both fail step W/C rule 1 on clause (b): neither improves a single cell or consumer anywhere.**
+Clause (a) holds for both — no 1 µs cell regresses — so the drop is purely the absence of a gain.
+**W\* + C\* = `wc + c0`.**
+
+### The occupancy integers again, and `c1`'s is the code's own sentence
+
+`src/scope.rs::Scope::wake_for_wave` says a build with `ke16-c-batch` alone takes a wave *"down to
+the spawner plus ONE, with the rest asleep for the whole wave"*. Measured: **`max_in_flight` = 2**,
+in all three passes, with the speedup pinned at 2.00×. Not "about two" — two.
+
+`c1f` is the arm built to repair exactly that, and it does repair most of it: 2 → 9–10 lanes,
+speedup 7.95–8.00×. **It still loses 1.86× to the reference**, because a single-snapshot fan-out at
+the wave's first push reaches only the siblings already parked at that instant, and that is about
+half of them. So App-4's `pending` saving — one `fetch_add(n)` per wave instead of `n` — is real,
+invisible, and bought with a lane-count collapse no fan-out available here fully undoes.
+
+### ⚠ The pair measurement is what separates two very different findings, and rule 3 forbade it
+
+Applying §7 rule 3 literally — measure `c1`, see it regress, do not measure `c1f` — would have filed
+**"App-4 rejected"**. What the pair actually shows is **"App-4's accounting is invisible under every
+wake width this tree can build"**: `c1f` recovers 2 → 10 lanes and STILL improves nothing. The second
+statement is the true one, and it is the one that tells a future reader not to retry App-4 behind a
+better fan-out without first finding a wake mechanism that reaches 16.
+
+### The design's prediction about WHERE, and only about where
+
+`KE16-DESIGN-W.md` §2.4 wrote that criterion's back-to-back iterations keep workers spinning, *"so
+the pool grid understates this; the physics consumer, whose 6 colors leave workers parked between
+steps, is where it shows"*. Exactly so: **all 24 pool-grid cells and all three `park_timeout` rows
+are ties**, and every one of the eleven regressions across the two arms is on physics or ECS. The
+design was right about the site and wrong about the sign, on both W and C.
+
+### ✅ A PHYSICS RANKING IS FILED HERE, and the reason it could not be filed for §W was the driver
+
+| physics row | `c0` (r1 / r2 / r3) | spread | `c1` | `c1f` |
+|---|---|---:|---:|---:|
+| `single_threaded_O5` (session meter) | 29.69 / 29.61 / 29.71 ms | **0.3 %** | 29.60 ms | 29.64 ms |
+| `in_scheduled_system` **PRIMARY** | 10.87 / 11.15 / 11.34 ms | **4.3 %** | 16.99 ms (**1.52×**) | 13.77 ms (**1.24×**) |
+| `bench_thread_install_Wminus1` **REF** | 10.80 / 11.00 / 10.91 ms | 1.9 % | 17.04 ms | 13.06 ms |
+
+Compare §W, where the same reference row spread **85 %** and the session meter **27 %**. The
+difference is not the machine and not the arms: it is `--prebuild`. §W's passes alternated a
+seven-crate compile with a timed region; these compiled nothing. **A physics ranking was not
+impossible — it was being destroyed by the driver**, and the acceptance line's clause (1) reads
+cleanly here: `in_scheduled_system` 11.15 ms < `single_threaded_O5` 29.61 ms.
+
+
+### Appendix: every cell, median of three passes, step C at CS-4 / `7ccab360`
+
+Same rule as §W's appendix. The reference is `c0` = `a3+b0+wc+c0`, re-taken in these same
+passes rather than carried over from the W step.
+
+| cell | `c0` | band | `c1` | vs | `c1f` | vs |
+|---|---:|---:|---:|:--|---:|:--|
+| `worker/body_100us_tasks_4w` | 1.66 ms | 4.8 % | 1.69 ms | tie | 1.66 ms | tie |
+| `worker/body_100us_tasks_64w` | 6.68 ms | 4.0 % | 6.65 ms | tie | 6.69 ms | tie |
+| `worker/body_100us_tasks_w` | 156.4 us | 4.0 % | 158.6 us | tie | 158.4 us | tie |
+| `worker/body_10us_tasks_4w` | 110.8 us | 4.0 % | 108.9 us | tie | 107.4 us | tie |
+| `worker/body_10us_tasks_64w` | 694.6 us | 4.0 % | 696.7 us | tie | 696.9 us | tie |
+| `worker/body_10us_tasks_w` | 27.0 us | 4.0 % | 27.4 us | tie | 27.6 us | tie |
+| `worker/body_1ms_tasks_4w` | 13.32 ms | 9.2 % | 14.39 ms | tie | 13.47 ms | tie |
+| `worker/body_1ms_tasks_64w` | 65.61 ms | 4.0 % | 65.62 ms | tie | 65.39 ms | tie |
+| `worker/body_1ms_tasks_w` | 1.31 ms | 4.0 % | 1.30 ms | tie | 1.30 ms | tie |
+| `worker/body_1us_tasks_4w` | 12.5 us | 4.0 % | 12.6 us | tie | 12.6 us | tie |
+| `worker/body_1us_tasks_64w` | 81.6 us | 4.0 % | 81.6 us | tie | 81.4 us | tie |
+| `worker/body_1us_tasks_w` | 7.5 us | 4.0 % | 7.6 us | tie | 7.7 us | tie |
+| `dispatcher/body_100us_tasks_4w` | 1.62 ms | 6.3 % | 1.63 ms | tie | 1.62 ms | tie |
+| `dispatcher/body_100us_tasks_64w` | 6.70 ms | 4.0 % | 6.70 ms | tie | 6.68 ms | tie |
+| `dispatcher/body_100us_tasks_w` | 128.9 us | 4.0 % | 126.3 us | tie | 127.4 us | tie |
+| `dispatcher/body_10us_tasks_4w` | 129.2 us | 6.1 % | 128.9 us | tie | 124.1 us | tie |
+| `dispatcher/body_10us_tasks_64w` | 690.8 us | 4.0 % | 693.9 us | tie | 691.7 us | tie |
+| `dispatcher/body_10us_tasks_w` | 15.9 us | 4.0 % | 16.0 us | tie | 16.0 us | tie |
+| `dispatcher/body_1ms_tasks_4w` | 13.89 ms | 4.7 % | 13.31 ms | tie | 13.17 ms | tie |
+| `dispatcher/body_1ms_tasks_64w` | 66.06 ms | 4.0 % | 65.72 ms | tie | 66.20 ms | tie |
+| `dispatcher/body_1ms_tasks_w` | 1.19 ms | 4.0 % | 1.17 ms | tie | 1.19 ms | tie |
+| `dispatcher/body_1us_tasks_4w` | 9.9 us | 4.3 % | 9.6 us | tie | 9.7 us | tie |
+| `dispatcher/body_1us_tasks_64w` | 86.4 us | 5.8 % | 84.7 us | tie | 83.5 us | tie |
+| `dispatcher/body_1us_tasks_w` | 4.1 us | 5.0 % | 4.1 us | tie | 4.1 us | tie |
+| `park_timeout_1ms` | 6.96 ms | 12.1 % | 6.94 ms | tie | 13.26 ms | tie |
+| `park_timeout_2ms` | 6.95 ms | 10.3 % | 7.04 ms | tie | 13.47 ms | tie |
+| `park_timeout_50us` | 6.93 ms | 14.9 % | 6.95 ms | tie | 12.52 ms | tie |
+| `physics bench_thread_install` | 12.20 ms | 17.9 % | 17.32 ms | tie | 11.97 ms | tie |
+| `physics bench_thread_install_wminus1` | 10.91 ms | 4.0 % | 17.04 ms | **REG** | 13.06 ms | tie |
+| `physics empty_schedule_control` | 1.5 us | 4.0 % | 1.5 us | tie | 1.5 us | tie |
+| `physics in_scheduled_system` | 11.15 ms | 4.3 % | 16.99 ms | **REG** | 13.77 ms | **REG** |
+| `physics single_threaded_o5` | 29.69 ms | 4.0 % | 29.70 ms | tie | 29.64 ms | tie |
+| `ecs par_from_dispatcher/4096` | 22.08 ms | 8.1 % | 40.57 ms | **REG** | 38.99 ms | **REG** |
+| `ecs par_from_dispatcher/65536` | 88.33 ms | 4.0 % | 655.61 ms | **REG** | 164.95 ms | **REG** |
+| `ecs par_in_system/4096` | 23.38 ms | 5.0 % | 42.04 ms | **REG** | 29.94 ms | **REG** |
+| `ecs par_in_system/65536` | 88.86 ms | 4.0 % | 655.60 ms | **REG** | 165.38 ms | **REG** |
+| `ecs seq/4096` | 81.93 ms | 4.0 % | 81.94 ms | tie | 81.93 ms | tie |
+| `ecs seq/65536` | 1,310.86 ms | 4.0 % | 1,310.81 ms | tie | 1,310.80 ms | tie |
+
+
+### ⚠⚠ They were measured as a PAIR, which DEPARTS from rule 3 — and the departure is forced by §W's own result
 
 §7 Steps W/C rule 3 says *"`c1` (batch spawn) not kept ⇒ `c1f` is not measured"*. Its premise is
 that `c1` is App-4's mechanism and `c1f` a width refinement on top of it.
@@ -1072,9 +1177,11 @@ is eliminated, so a `c1` row taken over it would describe a configuration that w
 `c1f` remains.
 
 Applying rule 3 literally would therefore file a rejection of App-4 that is really a rejection of the
-wake collapse, and forbid measuring the one arm that could tell them apart. **Both are taken; the C
+wake collapse, and forbid measuring the one arm that could tell them apart. **Both were taken; the C
 verdict is read off `c1f`, and `c1` is recorded as the isolated cost of the wake collapse rather than
-as a candidate.** The driver carries the same statement at its variant table.
+as a candidate.** The driver carries the same statement at its variant table. The measurement
+vindicated the departure: `c1f` recovered 2 → 10 lanes and still improved nothing, which is a
+different and more useful finding than "App-4 rejected".
 
 ⚠ The `c1` caveat below still travels with any future C row, and CS-4 does not change it.
 
