@@ -315,6 +315,49 @@ original text is directly below, unedited.
 
 1. Rank by physics `in_scheduled_system`; B0 stays unless B1 improves it beyond 2× the band
    (the owner's "keep as is" is the default, not the exception).
+⚠⚠ **STEP B RULE 2 IS AMENDED — 2026-09-08, and it is the SAME defect as Step A rule 3 in a
+different grain.** There, the deciding cell was one the engine cannot produce. Here, it is one
+produced by something that does not matter: the rule below anchors a POOL-WIDE axis-B verdict on
+"the fontbake shape", and fontbake is the MSDF atlas bake — a load-time asset step, not a frame path
+and by no reading a bottleneck. Both are the same underlying error: **a deciding cell chosen without
+asking whether it represents work that matters.**
+
+The citation itself is factually correct and was checked before it was doubted:
+`boyko_fontbake/src/msdf/distance.rs::pick_band_rows` sets `target_bands = workers * 4`, so the bake
+really does dispatch 4W tasks. What is wrong is not the arithmetic but the anchoring.
+
+**THE DISPATCHER THAT MATTERS IS THE SCHEDULER.** `boyko_ecs/.../schedule/schedule.rs:455` calls
+`pool.install(|scope| self.executor_main_loop(world, scope))` — ONE install per frame, wrapping the
+entire executor main loop. The calling thread is the frame thread and it is the external joiner for
+the whole frame. That is the arm `b1` and `b3` actually differ on.
+
+**AND THE TWO DISPATCHERS POINT IN OPPOSITE DIRECTIONS**, which is what makes this a real fork
+rather than a formality:
+
+| dispatcher | what its calling thread is doing | what it argues |
+|---|---|---|
+| fontbake (`install` from an app thread) | nothing — it has no other work while the bake runs | helping (`b1`) is a free extra lane ⇒ **against `b3`** |
+| the scheduler (`install` per frame) | it IS the dispatcher: it scans for ready systems and **parks between rounds** (`schedule.rs`, "dispatcher parks below and wakes on completion") | if it takes a task under `b1`, the next system's dispatch waits for that task to finish — latency injected into the schedule's critical path ⇒ **for `b3`** |
+
+⚠⚠ **AND THE DECIDING PROPERTY IS NOT MEASURED BY ANY HARNESS THIS CAMPAIGN HAS.** The scheduler's
+question is *"does the frame thread's dispatch of the NEXT system get delayed"*, and that is neither
+a width nor a body size. The pool grid measures a wave's makespan, not the latency of the thread
+that hands waves out. So:
+
+* `b3` vs `b1` can be settled on THROUGHPUT alone only if one dominates the other across the grid
+  and both consumers. If it does, take that verdict.
+* **If they are close, the honest verdict is UNDECIDED pending a scheduler harness** — and it must
+  be filed that way rather than broken on the fontbake cells, which is the anchoring this amendment
+  rejects.
+
+**FONTBAKE IS NOT CHANGED**, and the owner offered to change it. It is not a constraint here: the
+amendment moves the RULE, not the bake. Two reasons for leaving `pick_band_rows` alone — it is not a
+bottleneck, so a change buys nothing measurable; and 4× over-decomposition is defensible on the
+bake's own shape, since MSDF band cost is uneven (a band crossing glyph edges evaluates distances
+against every edge, an empty band nearly nothing) and over-decomposition is what buys load balance.
+Revisit it when the bake has a harness, and measure `top_lane` rather than the wall clock, because
+`4W` vs `W` is an argument about balance and balance shows up in occupancy.
+
 2. `b3` vs `b1`: decided on the dispatcher-route 100 µs and 1 ms × 4W cells (the fontbake shape) and
    on `top_lane` from the occupancy test; `b3` is taken only if those cells are ties or better
    (owner question 2 may override on code size).

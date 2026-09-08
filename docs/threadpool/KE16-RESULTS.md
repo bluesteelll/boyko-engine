@@ -9,7 +9,7 @@ table in `KE16-DESIGN.md`.
 |---|---|---|
 | 0 | MEASURED — baseline `a0+b0+w0+c0`, 24-cell grid ×3 runs, ECS at both populations, five physics rows, per-cell band | §0, §Band |
 | A | ⚠ **RE-OPENED 2026-09-08 — the closure on `a3` is VOID.** `a1f+b1` beats the shipped configuration on 10 of 35 cells (the deciding cell by 2.1×), ties both consumers, and its §8 gate ladder is green. The 64W tiebreak that saves `a3` fires on a width the engine's own chunking cannot produce | §A, **§A-RE** |
-| B | ⚠ **RE-OPENED with A.** `b1` compiles over `a1f`, and it is what delivers §A-RE's win — `a1f` alone improves nothing. It also removes defect B's signature: `top_lane = 4` against the 13/24/21 recorded under `a1+b0` | §B, **§A-RE** |
+| B | CLOSED ON `b1` 2026-09-08. `b0` eliminated (8 cells to 0); `b3` improves nothing over `b1` and regresses `dispatcher/10us x W` by 1.43x — it parks an external joiner that had nothing else to do. But `b3` leads physics in 2 of 3 paired passes: ONE GLOBAL FLAG HAS OPPOSITE CORRECT ANSWERS FOR DIFFERENT CALLERS | §B, §B-RE |
 | W1, W2 | **CLOSED ON `wc` 2026-09-08 at CS-4.** `wg` and `wgc` ELIMINATED (0 improvements, 13 and 14 regressions, and an occupancy receipt: 5–6 of 16 lanes, speedup pinned at 2.00×). `wc` is a tie on all 38 cells and rule 2's two gates — a real-park loom M1c and the route-(b) 32-seed liveness gate — are GREEN, so **W\* = `wc`**. ⚠ No physics ranking is filed: the passes carry a monotone warm-up drift and the PRIMARY row's band is 85 % | §W |
 | C, F | **CLOSED ON `c0` 2026-09-08.** Both arms DROPPED — neither improves anything anywhere; `c1` runs the wave on **2 of 16 lanes**, `c1f` on 9–10 and still loses 1.86×. Measured as a PAIR, departing from rule 3 with the number that forces it. **Final: `a3+b0+wc+c0`** | §C |
 | App | **NOT RUN — OWED.** No number here comes from the unconditional shipped code | §App, §Owed |
@@ -709,6 +709,72 @@ is worth against one that waits.
 ⚠ And a grep of mine reported `FAILED / panicked anywhere : 14` on a log with none of either: a
 case-insensitive pattern matched the literal `0 failed` inside every result line. **The count was
 the instrument, not the run.** Re-counted case-sensitively: 0 `FAILED`, 0 `panicked at`.
+
+---
+
+---
+
+## §B-RE. AXIS B CLOSED ON `b1` — and `b3` proves a single global policy is wrong (2026-09-08, CS `4d69fdb9`)
+
+`b1` and `b3` had never been measured: neither builds over `a3`, and `a3` held axis A until the
+re-judgement. Three interleaved passes over `{a1f+b0, a1f+b1, a1f+b3}` after `--prebuild`; no
+`DIRTY-PASS.txt`; per-arm load receipts 0–13.8 % CPU. 35 comparable cells.
+
+| comparison | improved | regressed | tie |
+|---|---|---|---|
+| `b1` vs `b0` | **8** | **0** | 27 |
+| `b3` vs `b0` | 8 | 1 | 26 |
+| **`b3` vs `b1`** | **0** | **1** | 34 |
+
+**`b0` is eliminated** — both arms beat it eight cells to zero or one. **B\* = `b1`**: it never
+loses, and `b3` improves nothing over it while regressing one cell.
+
+**Physics ranks (rule 1):** `b0` 12.33 ms (2.26×), `b1` 10.20 ms (2.74×), `b3` 9.26 ms (3.01×).
+
+### The one regression, and it was PREDICTED FROM SOURCE BEFORE THE RUN
+
+`dispatcher/body_10us_tasks_W`: 16.5 µs → **23.5 µs, × 1.43**.
+
+That is the DISPATCHER route at width **W** — a wave pushed by a non-worker, which is exactly where
+`b3` parks the external joiner instead of letting it help. The prediction was written before the
+measurement, from reading `boyko_fontbake/msdf/distance.rs`: *an external joiner with nothing else
+to do is a free lane, and `b3` throws it away*. Measured cost of throwing it away: 43 %.
+
+### ⚠⚠ AND THE OTHER SIDE OF THE PREDICTION ALSO HELD — a finding about the ENGINE, not about `b3`
+
+`b3` leads physics in two of the three paired passes, by 10.8 % and 10.3 %, losing the third by
+3.5 %; its spread is 4.3 % against `b1`'s 10.1 %. Ten percent against a 10 % band is a TIE by the
+rule and is filed as one — but the mechanism is not noise, and it is the same mechanism read from
+the other end:
+
+| the external joiner is… | what `b3` (park, never help) does | measured |
+|---|---|---|
+| an idle bench/app thread with no other work (the dispatcher-route grid; the MSDF bake) | throws away a whole lane | `dispatcher/10us × W` **× 1.43 worse** |
+| the SCHEDULER's frame thread, which parks between dispatch rounds anyway (`schedule.rs:455`) — and physics dispatches from inside a system, so this is its joiner | costs nothing, and stops the joiner delaying the next round's dispatch | physics **10 % better in 2 of 3 paired passes**, half the variance |
+
+⇒ **ONE GLOBAL FLAG HAS OPPOSITE CORRECT ANSWERS FOR DIFFERENT CALLERS.** That is no longer an
+architectural opinion; it is measured on both sides of the same axis in one pass. The external
+joiner's policy is a property of WHO CALLED, and axis B forces it to be a property of the BUILD.
+
+This is the sharpest available evidence for the engine-wide unification question, and it arrived
+from the campaign rather than from the audit: the pool wants a per-call-site joiner policy, not a
+per-binary one. `b1` ships because it never loses; a caller-scoped policy would let the scheduler
+have `b3`'s behaviour and leave the bake with `b1`'s.
+
+### ⚠ Rule 4's parking receipt is WEAK, not passed — and its target is wrong for this machine
+
+Rule 4 requires that under B3 `bench_thread_install_Wminus1 / bench_thread_install` read
+≈ W/(W−1) = 1.067, as proof the joiner parked. Measured: `b0` 0.9165, `b1` 0.9263, **`b3` 0.9795**.
+The ratio moved toward 1 in the predicted direction and by the predicted mechanism — parking the
+joiner removes the W+1-thread oversubscription from the `install` row — but it did not cross 1, let
+alone reach 1.067.
+
+**The target is miscalibrated for an SMT machine, and that is a defect in the rule rather than in
+the arm.** `W/(W−1)` prices the marginal lane as a full core; on 8 physical / 16 logical the 16th
+lane is an SMT sibling worth a fraction of one. The receipt should be restated as a DIRECTION — the
+ratio must rise under B3 relative to B0/B1 — plus a floor derived from the physical core count.
+Recorded rather than repaired, because changing a receipt to match the result it just produced is a
+shape this campaign already had to be careful about once today.
 
 ---
 
