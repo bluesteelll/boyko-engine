@@ -157,15 +157,50 @@ for key in "${VARIANT_KEYS[@]}"; do
         exit 2
     fi
 
-    baseline="$variant-r$PASS"
+    # ⚠⚠ THE CODE STATE IS PART OF THE BASELINE NAME, AND IT WAS ADDED AFTER A
+    # LOSS. `KE16-DESIGN-MEASUREMENT.md` §2 prescribes `<V>-r<N>`, keyed on the
+    # variant string ALONE -- and the variant string says nothing about which
+    # code state produced it. Criterion's `--save-baseline` overwrites in place,
+    # so re-taking the `a3+b0+w0+c0` reference at a new code state SILENTLY
+    # DESTROYS the old state's raw samples under the identical directory name.
+    # MEASURED 2026-09-08: passes 1-3 of the post-3b re-take overwrote
+    # `a3+b0+w0+c0-r1`, `-r2` and `-r3` of the preserved CS-2 reference; `-r4`
+    # and `-r5` survived only because that pass stopped at three. The medians and
+    # bands live on in `KE16-RESULTS.md` §W, so the FINDINGS survive -- the raw
+    # per-sample data behind three of the five runs does not, and criterion
+    # baselines are not rebuildable from anything in the tree.
+    #
+    # This is §CS's rule ("numbers from different code states must not be
+    # compared") appearing one layer down, in STORAGE rather than in analysis:
+    # the naming scheme could not express the distinction the document forbids
+    # collapsing. The short HEAD hash makes the distinction structural, so two
+    # code states can never address one directory.
+    CODE_STATE="${KE16_CODE_STATE:-$(git -C "$REPO_ROOT" rev-parse --short HEAD)}"
+    baseline="$variant-$CODE_STATE-r$PASS"
     echo ""
     echo "=== pass $PASS / variant $variant (features: $features) ==="
 
-    # The build is NOT timed and is deliberately done before the load receipt:
-    # a compile saturates every core, and a receipt taken with one in flight
-    # describes the compile rather than the bench.
-    if ! cargo build --release -p boyko-threadpool --features "$features" \
-        > "$OUT_DIR/$key-build.log" 2>&1; then
+    # The consumers take the feature through the pool crate, so the switch the
+    # callers read (`KE16_SPAWN_BATCH`, and the W arms' own `cfg`s) is THIS
+    # crate's and not a pass-through of their own.
+    prefixed="$(echo "$features" | sed 's/[^,]*/boyko-threadpool\/&/g')"
+
+    # ALL THREE HARNESSES ARE COMPILED BEFORE THE LOAD RECEIPT IS TAKEN, and
+    # that ordering is the point rather than an optimisation. A compile
+    # saturates every core; a receipt taken with one still draining describes
+    # the compile, and the protocol's before/after pair would then disagree for
+    # a reason that has nothing to do with the machine's other occupants. Build
+    # failures are counted and the variant is SKIPPED -- a configuration that
+    # does not build produces no number, and must not silently produce one from
+    # a stale binary.
+    build_failed=no
+    cargo bench -p boyko-threadpool --bench ke16_nested_scope --features "$features" \
+        --no-run > "$OUT_DIR/$key-build.log" 2>&1 || build_failed=yes
+    cargo bench -p boyko-ecs --bench ke16_par_iter_in_system --features "$prefixed" \
+        --no-run >> "$OUT_DIR/$key-build.log" 2>&1 || build_failed=yes
+    cargo bench -p boyko-physics --bench ke16_solve_in_system --features "$prefixed" \
+        --no-run >> "$OUT_DIR/$key-build.log" 2>&1 || build_failed=yes
+    if [ "$build_failed" = yes ]; then
         echo "  BUILD FAILED -- see $OUT_DIR/$key-build.log; variant skipped, NOT recorded as a number"
         failures=$((failures + 1))
         continue
@@ -179,11 +214,6 @@ for key in "${VARIANT_KEYS[@]}"; do
     cargo bench -p boyko-threadpool --bench ke16_nested_scope --features "$features" \
         -- --save-baseline "$baseline" --noplot > "$OUT_DIR/$key-pool.log" 2>&1
     pool_exit=$?
-
-    # The consumers take the feature through the pool crate, so the switch the
-    # callers read (`KE16_SPAWN_BATCH`, and the W arms' own `cfg`s) is THIS
-    # crate's and not a pass-through of their own.
-    prefixed="$(echo "$features" | sed 's/[^,]*/boyko-threadpool\/&/g')"
 
     cargo bench -p boyko-ecs --bench ke16_par_iter_in_system --features "$prefixed" \
         -- --save-baseline "$baseline" --noplot > "$OUT_DIR/$key-ecs.log" 2>&1
