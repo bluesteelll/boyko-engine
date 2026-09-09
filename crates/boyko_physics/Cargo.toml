@@ -155,3 +155,7 @@ harness = false
 # circulating 3.8x — that is a kernel number and this is not.
 name = "simd_end_to_end"
 harness = false
+
+[[bench]]
+name = "jolt_parity_pyramid"
+harness = false
