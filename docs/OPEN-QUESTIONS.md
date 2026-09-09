@@ -4971,8 +4971,32 @@ machine, its `PyramidScene.h` transcribed index for index) leaves the deficit in
 | 8 | 4.21 | 4.18 | 20.45 | 0.89 |
 | 16 | 3.95 | 4.45 | 25.07 | 0.73 |
 
-Single-threaded the two engines are within 4 % — **the entire deficit is dispatch, not solver
-quality.** The chunk-allocation half is fixed here (`MIN_SLOTS_PER_CHUNK`, −23.5 % at W = 16). What
+⚠ **CORRECTED 2026-09-09 evening — the "within 4 %" this paragraph used to claim was an artifact of
+comparing across measurement sessions.** The boyko column above (18.27) was measured after the
+`BroadphaseGrid` migration; the Jolt column (17.59) was carried over from the earlier head-to-head.
+Re-measured back to back in one quiet window, on the current HEAD:
+
+| W | Jolt ms | Jolt × | boyko ms | boyko × | boyko / Jolt |
+|---|---:|---:|---:|---:|---:|
+| 1 | 16.362 | 1.00 | 18.551 | 1.00 | **1.13×** |
+| 2 | 8.955 | 1.83 | 19.348 | 0.96 | 2.16× |
+| 4 | 5.530 | 2.96 | 19.397 | 0.96 | 3.51× |
+| 8 | 4.109 | 3.98 | 21.218 | 0.87 | 5.16× |
+| 16 | 3.901 | 4.19 | 26.091 | 0.71 | 6.69× |
+
+So single-threaded the gap is **13 %, not 4 %** — and the difference between those two figures is
+almost entirely JOLT's own number moving (17.59 → 16.36 ms, −7 %, same binary, same scene, same
+machine), not boyko regressing (18.27 → 18.55, +1.5 %). **A ratio whose halves come from different
+sessions is not a measurement.** Both sides now have to be taken in one window, and the 7 % swing on
+an unchanged binary is the resolution any single-thread claim about these two engines has to respect:
+quote it as "≈1.1×", never as a tight figure.
+
+⚠ The absolute single-thread ratio is still NOT a solver-quality verdict, for the reason already on
+file: the iteration budgets differ (Jolt 10 velocity + 2 position; here 4 substeps × (1 + 2 relax)).
+Only T(1)/T(N) compares like with like — and that is where the verdict is unambiguous.
+
+**The entire deficit is dispatch, not solver quality**: Jolt reaches 4.19× while boyko is
+NEGATIVE — 0.71× at 16, its best result on ONE worker. The chunk-allocation half is fixed here (`MIN_SLOTS_PER_CHUNK`, −23.5 % at W = 16). What
 remains is the per-wave ramp: 4 substeps × (1 + 2 relax) × ~6 colours = **72 waves per step**, each
 waking and parking W workers — 1152 events per step at W = 16.
 
@@ -5047,7 +5071,9 @@ in any current plan.
    taken from this lane. Step App and the rule-3 rewrite finish first, KE16 closes, and the barrier
    is then taken in `D:/wt/threadpool` against a settled protocol. The cost is accepted with its
    number: the Jolt deficit stays at 0.89x against 4.18x until then, and it is the whole remaining
-   gap, since single-threaded the two engines are within 4 %.
+   gap. (⚠ That ruling cited "single-threaded the two engines are within 4 %"; re-measured in one
+   window the figure is ≈13 %, and the correction is above. It does not change the ruling — the
+   scaling ratio, not the single-thread ratio, is what the ruling rests on.)
 2. **The `Cuts` policy object is DEFERRED until after the barrier**, on the reasoning that the
    barrier changes the per-dispatch cost the policy is being tuned against — so tuning first would
    calibrate against a cost that is about to move. `MIN_SLOTS_PER_CHUNK = 64` therefore ships as-is,
