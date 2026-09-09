@@ -1000,6 +1000,87 @@ impl ComponentPool {
         self.len = 0;
     }
 
+    /// O(1) logical shrink for a drop-free (Copy/POD) pool: lowers `len` to
+    /// `new_len` without per-element work, leaving the committed pages resident.
+    /// A `new_len` at or above the current one is a no-op (`Vec::truncate`
+    /// semantics), so a caller need not compare first.
+    ///
+    /// Sound for exactly the reason [`clear_no_drop`](Self::clear_no_drop) is:
+    /// dropping the tail is a no-op only when the element needs no drop, which
+    /// the [`ScratchColumn`] contract (`T: Copy`) guarantees and the
+    /// `debug_assert!` enforces.
+    ///
+    /// The rows above `new_len` keep their bytes and are re-exposed verbatim by a
+    /// later `push` / `resize` back over them — that is the reuse contract, not a
+    /// leak, and the same one `clear_no_drop` relies on.
+    ///
+    /// [`ScratchColumn`]: crate::ecs::core::component::scratch::ScratchColumn
+    #[inline]
+    pub(crate) fn truncate_no_drop(&mut self, new_len: usize) {
+        debug_assert!(
+            self.drop_fn.is_none(),
+            "truncate_no_drop on a pool with a drop_fn (would leak undropped rows)"
+        );
+        if new_len < self.len {
+            self.len = new_len;
+        }
+    }
+
+    /// Extends a Copy/POD pool to `new_len` rows, writing `value` into every slot
+    /// from the current frontier up to it. Shorter or equal `new_len` is a no-op
+    /// (the caller wanting a shrink uses [`truncate_no_drop`](Self::truncate_no_drop)).
+    ///
+    /// This exists rather than a `push_copy` loop because the loop pays the
+    /// `len >= committed_rows` compare and a potential cold `grow_rows` call PER
+    /// ELEMENT, while the span is known up front: one grow covers the whole
+    /// extension and the fill becomes a constant-stride typed store loop.
+    ///
+    /// # Returns
+    /// - `true` on success.
+    /// - `false` when the reserve ceiling (`reserve_rows`) is exhausted — the pool
+    ///   is NOT modified (`grow_rows` is zero-state-change on the ceiling path).
+    ///
+    /// # Panics (debug only)
+    /// `debug_assert!` if `TypeId::of::<T>()` does not match the pool's registered
+    /// type, or if the pool has a `drop_fn`.
+    #[inline]
+    pub(crate) fn extend_fill_copy<T: Copy + 'static>(&mut self, new_len: usize, value: T) -> bool {
+        debug_assert_eq!(
+            self.component_type_id,
+            TypeId::of::<T>(),
+            "ComponentPool::extend_fill_copy: T = {} does not match pool's registered type",
+            std::any::type_name::<T>()
+        );
+        debug_assert!(
+            self.drop_fn.is_none(),
+            "extend_fill_copy on a pool with a drop_fn (the fill would overwrite live rows              without dropping them)"
+        );
+        if new_len <= self.len {
+            return true;
+        }
+        if new_len > self.committed_rows && !self.grow_rows(new_len) {
+            return false;
+        }
+        for idx in self.len..new_len {
+            // SAFETY: mirrors `push_copy`'s per-slot write, hoisting its grow check
+            // out of the loop.
+            // - `idx < new_len <= committed_rows` (grown above if needed), so
+            //   `row_ptr` yields a pointer to a committed (read/write) slot inside
+            //   the pool's reservation.
+            // - The slot is aligned to `align_of::<T>()`: the buffer base is aligned
+            //   to `component_layout.align()` (>= `align_of::<T>()`, debug-asserted
+            //   by `ScratchColumn::new`) and stride is a multiple of that alignment.
+            // - The slot is exclusively owned (`&mut self`); no aliasing, and no
+            //   `&[T]` / `&mut [T]` over the span exists yet because `len` is only
+            //   raised AFTER every slot has been written.
+            // - `ptr::write` initialises the slot from a `Copy` value, so the rows
+            //   `[old_len, new_len)` are valid `T` before they become live.
+            unsafe { core::ptr::write(self.row_ptr(idx).cast::<T>(), value) };
+        }
+        self.len = new_len;
+        true
+    }
+
     /// Removes the last component from the pool, invoking drop glue if needed.
     pub fn pop(&mut self) -> bool {
         if self.len == 0 {

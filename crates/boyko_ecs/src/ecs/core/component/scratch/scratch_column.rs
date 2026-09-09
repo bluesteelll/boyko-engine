@@ -260,6 +260,38 @@ impl<T: Copy> ScratchColumn<T> {
             .expect("invariant: ScratchColumn reserve ceiling exhausted") as u32
     }
 
+    /// Sets the column's live length to `new_len`, filling any new slots with
+    /// `value` (`Vec::resize` semantics).
+    ///
+    /// Growing takes ONE grow of the backing column and then a constant-stride
+    /// typed fill, rather than the per-element grow check a `push` loop pays.
+    /// Shrinking is O(1) (`T: Copy` ⇒ no drop glue to run) and keeps the committed
+    /// pages for the next refill.
+    ///
+    /// # Panics
+    /// * the backing column's reserve ceiling is exhausted.
+    #[inline]
+    pub(crate) fn resize(&mut self, new_len: usize, value: T)
+    where
+        T: 'static,
+    {
+        if new_len <= self.column.count() {
+            self.column.truncate_no_drop(new_len);
+            return;
+        }
+        assert!(
+            self.column.extend_fill_copy(new_len, value),
+            "invariant: ScratchColumn reserve ceiling exhausted"
+        );
+    }
+
+    /// Shortens the column to `new_len` live elements, keeping the committed
+    /// pages. A `new_len` at or above the current length is a no-op.
+    #[inline]
+    pub(crate) fn truncate(&mut self, new_len: usize) {
+        self.column.truncate_no_drop(new_len);
+    }
+
     /// Appends every element of `values` at the frontier (in-place grow as
     /// needed; the base never moves).
     ///

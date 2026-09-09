@@ -97,6 +97,36 @@ impl<'a, T: Copy> ScratchBuildView<'a, T> {
         self.column.extend_from_slice(values);
     }
 
+    /// Sets the live length to `new_len`, filling any new slots with `value`
+    /// (`Vec::resize` semantics).
+    ///
+    /// The refill idiom for a buffer that is SIZED first and written by index
+    /// afterwards — a CSR cursor pass, a parallel emit into pre-reserved slots, a
+    /// bitset cleared to a known chunk count. Growing costs one grow of the
+    /// backing column plus a constant-stride fill, not a grow check per element.
+    ///
+    /// # Panics
+    /// * the backing column's reserve ceiling is exhausted.
+    #[inline]
+    pub fn resize(&mut self, new_len: usize, value: T)
+    where
+        T: 'static,
+    {
+        self.column.resize(new_len, value);
+    }
+
+    /// Shortens the buffer to `new_len` live elements, keeping the committed
+    /// pages. A `new_len` at or above the current length is a no-op.
+    ///
+    /// The compaction half of the sized-then-written idiom: a pass that reserves
+    /// an upper bound, writes `w <= bound` survivors and then cuts the length to
+    /// `w`. Without it such a pass cannot be expressed at all — `clear` plus
+    /// re-pushing every survivor is a different algorithm, not the same one.
+    #[inline]
+    pub fn truncate(&mut self, new_len: usize) {
+        self.column.truncate(new_len);
+    }
+
     /// The number of live elements (`len`).
     #[inline]
     pub fn len(&self) -> usize {
