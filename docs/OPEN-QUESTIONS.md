@@ -5058,6 +5058,27 @@ more timings 2026-09-10 00:30):**
    means the 540 µs was carried-over process state; 540 µs means the binaries differ in a way the
    source does not show.
 
+**TEST 1 RUN 2026-09-10 ~01:30 (owner: "do the A/B") — REFUTED.** `worker/body_1us_tasks_64W` on
+the shipped HEAD binary, three runs per state: quiet 1.123 / 1.161 / 1.108 ms; sixteen IDLE-priority
+spinners holding every core out of C-states (CPU 100 %) 1.054 / 1.137 / 1.150 ms; one
+BELOW-NORMAL spinner 1.067 / 1.155 / 1.137 ms. `empty_schedule_control` 10.18 / 9.38 / 8.93 µs.
+The cell does not move with core warmth; the box-wake-latency hypothesis above is dead, and the
+"warm CS-4 box" reading of the timeline explains nothing.
+
+**THE ONE VARIABLE STILL UNCONTROLLED IS THE COMPILER.** `~/.rustup/toolchains/stable-x86_64-pc-windows-gnu`
+was rewritten at **2026-09-09 02:52:35** (`rustup update` to 1.98.1; `20fc8a66` records the move
+from 1.97.1). The CS-4 §A-RE table was produced **2026-09-08 10:15** — every CS-4 binary was built by
+rustc **1.97.1**; every binary measured on 09-09/10, including the "same commit, same features"
+replay at `5863b041`, was built by **1.98.1**. A source-level audit cannot see a codegen change,
+and the tree already met one 1.98 effect at the TLS boundary (`missing_const_for_thread_local`,
+63 sites): `worker_lane_for` — the a1f placement predicate — is a `thread_local!` read on every
+push and in every join step, and `a3` never takes it. **Test 0 (cheapest decisive, ~5 min +
+a ~200 MB download): `rustup toolchain install 1.97.1-x86_64-pc-windows-gnu`, rebuild the pool bench
+at `5863b041` with `--features ke16-a1-fifo,ke16-b1,ke16-w-count` under `+1.97.1-…`, run the cell.**
+~110 µs ⇒ the record was right for ITS compiler and 1.98.1 regressed the a1f path (a shipped
+codegen regression, and a `BLESSED_RUSTC`-class receipt is owed beside every grid);
+~1.15 ms ⇒ the compiler is excluded too and only tests 3–4 remain.
+
 **TWO GAPS THIS EXPOSES, EITHER WAY THE TESTS FALL:**
 
 * **`a1` (LIFO owner end) + `b1` was never measured.** `a1` was eliminated at CS-1 on physics in
