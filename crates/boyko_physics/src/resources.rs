@@ -16,7 +16,10 @@ use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
-use crate::scratch_ids::{body_state_id, register_scratch_layouts, scratch_reserve_rows};
+use crate::scratch_ids::{
+    body_state_id, graph_column_id, register_graph_column_layouts, register_scratch_layouts,
+    scratch_reserve_rows,
+};
 use crate::systems::body_bounding_radius;
 
 /// Number of bits in one [`BitSet256`] chunk.
@@ -2207,32 +2210,32 @@ const _: () = assert!(LARGE_ISLAND_CONSTRAINTS >= 1, "the threshold must admit a
 /// in manifold order; CSR groups preserve ascending manifold index. No `HashMap`,
 /// no iteration-order-dependent containers, no atomics. Same input → identical
 /// `island_of` / `color_start` / `color_contacts` every run.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct ConstraintGraph {
     /// Union-find parent links over dynamic body rows, reused across builds. Sized
     /// to the dynamic-body count each build; a static/sentinel row is never a node.
-    uf_parent: Vec<u32>,
+    uf_parent: ScratchColumn<u32>,
     /// Union-find subtree sizes (union-by-size), reused across builds.
-    uf_size: Vec<u32>,
+    uf_size: ScratchColumn<u32>,
     /// `island_of[row]` = compacted island id of dynamic body `row` (flat). A
     /// static/sentinel row holds [`NO_ISLAND`](ConstraintGraph::NO_ISLAND).
-    island_of: Vec<u32>,
+    island_of: ScratchColumn<u32>,
     /// CSR offsets: `island_manifold_start[i]..[i + 1]` indexes `island_manifolds`
     /// (`len == n_islands + 1`). NO `Vec<Vec>`.
-    island_manifold_start: Vec<u32>,
+    island_manifold_start: ScratchColumn<u32>,
     /// CSR values: manifold indices grouped by island (flat).
-    island_manifolds: Vec<u32>,
+    island_manifolds: ScratchColumn<u32>,
     /// CSR offsets: `color_start[c]..[c + 1]` indexes `color_contacts`
     /// (`len == n_colors + 1`). NO `Vec<Vec>`.
-    color_start: Vec<u32>,
+    color_start: ScratchColumn<u32>,
     /// CSR values: manifold indices grouped by color, ascending within a color
     /// (manifold order — D4).
-    color_contacts: Vec<u32>,
+    color_contacts: ScratchColumn<u32>,
     /// Flat per-color body bitset matrix, addressed
     /// `color_occ[color * words_per_color + (body >> 6)]`; bit `body & 63` is set
     /// when `body` is occupied in `color`. Reused (clear, never realloc) — the
     /// coloring occupancy scratch.
-    color_occ: Vec<u64>,
+    color_occ: ScratchColumn<u64>,
     /// `u64` words per color row in `color_occ` (`= n_dynamic.div_ceil(64)`).
     words_per_color: u32,
     /// Number of colors produced this build (`color_start.len() == n_colors + 1`).
@@ -2257,6 +2260,20 @@ pub struct ConstraintGraph {
     max_island_constraints: u32,
 }
 
+impl Default for ConstraintGraph {
+    /// An empty graph at the kernel's standard column budget.
+    ///
+    /// Hand-written because `ScratchColumn` has no `Default`: a column is bound to
+    /// a registered `ComponentId` at construction, so there is no id-free empty
+    /// value to derive. `with_capacity(0)` is the whole body — the reservation is
+    /// address space with zero commit, so a "default" graph costs no resident
+    /// memory until its first build.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
+}
+
 impl ConstraintGraph {
     /// Island id stored in `island_of` for a body that is not a dynamic node
     /// (static / kinematic / sentinel — never part of any island).
@@ -2266,18 +2283,23 @@ impl ConstraintGraph {
     /// steady state). The CSR buffers grow on the first builds to the live counts
     /// and reuse that capacity thereafter.
     pub fn with_capacity(capacity: usize) -> Self {
-        let words = capacity.div_ceil(OCC_WORD_BITS as usize);
+        // `capacity` is now advisory. A `ScratchColumn` reserves ADDRESS SPACE at
+        // the kernel's own budget (`scratch_reserve_rows`) and commits nothing
+        // until it grows, so a generous uniform ceiling costs zero resident bytes
+        // and removes the per-build grow-cap hazard a caller-sized `Vec` had.
+        let _ = capacity;
+        register_graph_column_layouts();
+        let u32_rows = scratch_reserve_rows(core::mem::size_of::<u32>());
+        let u64_rows = scratch_reserve_rows(core::mem::size_of::<u64>());
         Self {
-            uf_parent: Vec::with_capacity(capacity),
-            uf_size: Vec::with_capacity(capacity),
-            island_of: Vec::with_capacity(capacity),
-            island_manifold_start: Vec::with_capacity(capacity + 1),
-            island_manifolds: Vec::with_capacity(capacity),
-            color_start: Vec::with_capacity(capacity + 1),
-            color_contacts: Vec::with_capacity(capacity),
-            // One color row worth of words is a cheap first reserve; it grows to the
-            // live color count × words-per-color and reuses that capacity.
-            color_occ: Vec::with_capacity(words),
+            uf_parent: ScratchColumn::new(graph_column_id(0), u32_rows),
+            uf_size: ScratchColumn::new(graph_column_id(1), u32_rows),
+            island_of: ScratchColumn::new(graph_column_id(2), u32_rows),
+            island_manifold_start: ScratchColumn::new(graph_column_id(3), u32_rows),
+            island_manifolds: ScratchColumn::new(graph_column_id(4), u32_rows),
+            color_start: ScratchColumn::new(graph_column_id(5), u32_rows),
+            color_contacts: ScratchColumn::new(graph_column_id(6), u32_rows),
+            color_occ: ScratchColumn::new(graph_column_id(7), u64_rows),
             words_per_color: 0,
             n_colors: 0,
             n_islands: 0,
@@ -2323,12 +2345,13 @@ impl ConstraintGraph {
     #[inline]
     pub fn color(&self, color: u32) -> &[u32] {
         let c = color as usize;
-        if c + 1 >= self.color_start.len() {
+        let starts = self.color_start.as_read_slice();
+        if c + 1 >= starts.len() {
             return &[];
         }
-        let start = self.color_start[c] as usize;
-        let end = self.color_start[c + 1] as usize;
-        &self.color_contacts[start..end]
+        let start = starts[c] as usize;
+        let end = starts[c + 1] as usize;
+        &self.color_contacts.as_read_slice()[start..end]
     }
 
     /// Manifold indices of island `island`. Returns an empty slice for
@@ -2336,19 +2359,20 @@ impl ConstraintGraph {
     #[inline]
     pub fn island(&self, island: u32) -> &[u32] {
         let i = island as usize;
-        if i + 1 >= self.island_manifold_start.len() {
+        let starts = self.island_manifold_start.as_read_slice();
+        if i + 1 >= starts.len() {
             return &[];
         }
-        let start = self.island_manifold_start[i] as usize;
-        let end = self.island_manifold_start[i + 1] as usize;
-        &self.island_manifolds[start..end]
+        let start = starts[i] as usize;
+        let end = starts[i + 1] as usize;
+        &self.island_manifolds.as_read_slice()[start..end]
     }
 
     /// Compacted island id of dynamic body `row`, or [`NO_ISLAND`](Self::NO_ISLAND)
     /// for a static/sentinel row (or one out of range).
     #[inline]
     pub fn island_of(&self, row: u32) -> u32 {
-        self.island_of.get(row as usize).copied().unwrap_or(Self::NO_ISLAND)
+        self.island_of.as_read_slice().get(row as usize).copied().unwrap_or(Self::NO_ISLAND)
     }
 
     /// Partitions `manifolds` (in manifold order) into islands + colors over the
@@ -2388,16 +2412,24 @@ impl ConstraintGraph {
     /// `island_of` to [`NO_ISLAND`](Self::NO_ISLAND) (capacity reused).
     #[inline]
     fn reset_islands(&mut self, n_dynamic: usize) {
-        self.uf_parent.clear();
-        self.uf_size.clear();
-        self.uf_parent.reserve(n_dynamic);
-        self.uf_size.reserve(n_dynamic);
-        for row in 0..n_dynamic as u32 {
-            self.uf_parent.push(row);
-            self.uf_size.push(1);
+        // `build_view()` is the only surface that can refill a column, and it is
+        // `!Send` by design — that is the property that makes the SP4 whole-buffer
+        // reborrow un-typeable, so the ceremony is the point, not overhead.
+        {
+            let mut parent = self.uf_parent.build_view();
+            let mut size = self.uf_size.build_view();
+            parent.clear();
+            size.clear();
+            for row in 0..n_dynamic as u32 {
+                parent.push(row);
+                size.push(1);
+            }
         }
-        self.island_of.clear();
-        self.island_of.resize(n_dynamic, Self::NO_ISLAND);
+        let mut island_of = self.island_of.build_view();
+        island_of.clear();
+        for _ in 0..n_dynamic {
+            island_of.push(Self::NO_ISLAND);
+        }
     }
 
     /// Iterative union-find `find` with full path compression (no recursion — the
@@ -2405,14 +2437,16 @@ impl ConstraintGraph {
     #[inline]
     fn uf_find(&mut self, mut x: u32) -> u32 {
         // Walk to the root.
+        let mut view = self.uf_parent.build_view();
+        let parent = view.as_mut_slice();
         let mut root = x;
-        while self.uf_parent[root as usize] != root {
-            root = self.uf_parent[root as usize];
+        while parent[root as usize] != root {
+            root = parent[root as usize];
         }
         // Path-compress: point every node on the path straight at the root.
-        while self.uf_parent[x as usize] != root {
-            let next = self.uf_parent[x as usize];
-            self.uf_parent[x as usize] = root;
+        while parent[x as usize] != root {
+            let next = parent[x as usize];
+            parent[x as usize] = root;
             x = next;
         }
         root
@@ -2427,13 +2461,15 @@ impl ConstraintGraph {
         if ra == rb {
             return;
         }
-        let (small, big) = if self.uf_size[ra as usize] < self.uf_size[rb as usize] {
-            (ra, rb)
-        } else {
-            (rb, ra)
+        let (small, big) = {
+            let mut size_view = self.uf_size.build_view();
+            let size = size_view.as_mut_slice();
+            let (small, big) =
+                if size[ra as usize] < size[rb as usize] { (ra, rb) } else { (rb, ra) };
+            size[big as usize] += size[small as usize];
+            (small, big)
         };
-        self.uf_parent[small as usize] = big;
-        self.uf_size[big as usize] += self.uf_size[small as usize];
+        self.uf_parent.build_view().as_mut_slice()[small as usize] = big;
     }
 
     /// Unions the two bodies of every manifold IFF BOTH are dynamic (Box2D's
@@ -2472,7 +2508,7 @@ impl ConstraintGraph {
             let root = self.uf_find(row);
             if root == row {
                 // This row is a root — claim the next dense island id for it.
-                self.island_of[row as usize] = next_id;
+                self.island_of.build_view().as_mut_slice()[row as usize] = next_id;
                 next_id += 1;
             }
         }
@@ -2482,19 +2518,42 @@ impl ConstraintGraph {
                 continue;
             }
             let root = self.uf_find(row);
-            self.island_of[row as usize] = self.island_of[root as usize];
+            let mut view = self.island_of.build_view();
+            let island_of = view.as_mut_slice();
+            island_of[row as usize] = island_of[root as usize];
         }
         self.n_islands = next_id;
 
         // CSR group manifolds by island via a counting sort (deterministic, stable
         // by manifold index). counts → exclusive prefix sum → scatter.
         let n_islands = self.n_islands as usize;
-        self.island_manifold_start.clear();
-        self.island_manifold_start.resize(n_islands + 1, 0);
-        // Per manifold, resolve its island (the dynamic side's island).
-        for m in manifolds {
-            if let Some(isl) = self.manifold_island(m, is_dynamic) {
-                self.island_manifold_start[isl as usize + 1] += 1;
+        {
+            let mut starts = self.island_manifold_start.build_view();
+            starts.clear();
+            for _ in 0..=n_islands {
+                starts.push(0);
+            }
+        }
+        // Per manifold, resolve its island (the dynamic side's island). The
+        // resolution is inlined off a READ slice of `island_of` rather than routed
+        // through `manifold_island`, because that takes `&self` and would conflict
+        // with the hoisted `&mut` view on the starts column — the same split-borrow
+        // shape the scatter loop below already used.
+        {
+            let island_of = self.island_of.as_read_slice();
+            let mut starts_view = self.island_manifold_start.build_view();
+            let starts = starts_view.as_mut_slice();
+            for m in manifolds {
+                let a = m.body_a.0;
+                let b = m.body_b.0;
+                let isl = if is_dynamic(a) {
+                    island_of[a as usize]
+                } else if is_dynamic(b) {
+                    island_of[b as usize]
+                } else {
+                    continue;
+                };
+                starts[isl as usize + 1] += 1;
             }
         }
         // Exclusive prefix-sum the per-island counts in place, folding the LARGEST
@@ -2503,23 +2562,37 @@ impl ConstraintGraph {
         // accumulation below reads it before overwriting), so the max is exact and
         // free. `0` for an island-less partition (the loop body never runs).
         let mut max_island = 0u32;
-        for i in 0..n_islands {
-            max_island = max_island.max(self.island_manifold_start[i + 1]);
-            self.island_manifold_start[i + 1] += self.island_manifold_start[i];
-        }
+        let total = {
+            let mut starts_view = self.island_manifold_start.build_view();
+            let starts = starts_view.as_mut_slice();
+            for i in 0..n_islands {
+                max_island = max_island.max(starts[i + 1]);
+                starts[i + 1] += starts[i];
+            }
+            starts[n_islands] as usize
+        };
         self.max_island_constraints = max_island;
-        let total = self.island_manifold_start[n_islands] as usize;
-        self.island_manifolds.clear();
-        self.island_manifolds.resize(total, 0);
+        {
+            let mut out = self.island_manifolds.build_view();
+            out.clear();
+            for _ in 0..total {
+                out.push(0);
+            }
+        }
         // Scatter with a running cursor (a working copy of the starts). Reuse
         // `uf_size` as the cursor scratch to avoid a fresh alloc. Split-borrow the
         // fields (`island_of` read, `uf_size`/`island_manifolds` written) so the
         // resolution does not re-borrow `self` through `manifold_island`.
-        let cursor = &mut self.uf_size;
-        cursor.clear();
-        cursor.extend_from_slice(&self.island_manifold_start[..n_islands]);
-        let island_of = &self.island_of;
-        let out = &mut self.island_manifolds;
+        {
+            let mut cursor_view = self.uf_size.build_view();
+            cursor_view.clear();
+            cursor_view.extend_from_slice(&self.island_manifold_start.as_read_slice()[..n_islands]);
+        }
+        let mut cursor_view = self.uf_size.build_view();
+        let cursor = cursor_view.as_mut_slice();
+        let island_of = self.island_of.as_read_slice();
+        let mut out_view = self.island_manifolds.build_view();
+        let out = out_view.as_mut_slice();
         for (mi, m) in manifolds.iter().enumerate() {
             let a = m.body_a.0;
             let b = m.body_b.0;
@@ -2535,22 +2608,6 @@ impl ConstraintGraph {
             let slot = cursor[isl as usize];
             out[slot as usize] = mi as u32;
             cursor[isl as usize] = slot + 1;
-        }
-    }
-
-    /// The island a manifold belongs to: the dense island of its dynamic side
-    /// (body_a if dynamic, else body_b if dynamic), or `None` if neither body is
-    /// dynamic (a static-static degenerate contact — filed under no island).
-    #[inline]
-    fn manifold_island(&self, m: &Manifold, is_dynamic: &impl Fn(u32) -> bool) -> Option<u32> {
-        let a = m.body_a.0;
-        let b = m.body_b.0;
-        if is_dynamic(a) {
-            Some(self.island_of[a as usize])
-        } else if is_dynamic(b) {
-            Some(self.island_of[b as usize])
-        } else {
-            None
         }
     }
 
@@ -2572,70 +2629,108 @@ impl ConstraintGraph {
     ) {
         let words = n_dynamic.div_ceil(OCC_WORD_BITS as usize);
         self.words_per_color = words as u32;
-        self.color_occ.clear();
-        self.n_colors = 0;
 
-        // Per-manifold chosen color, then a counting sort into CSR (so the values
-        // stay in ascending manifold order within each color — D4). Reuse
-        // `uf_parent` as the per-manifold color scratch.
-        let chosen = &mut self.uf_parent;
-        chosen.clear();
-        chosen.reserve(manifolds.len());
+        // `n_colors` is grown in a LOCAL and written back once. The column views
+        // below borrow disjoint fields of `self`, so reading the field through
+        // `self` inside the loop would compile — but the local keeps the growth in
+        // one place and makes the write-back a single statement.
+        let mut n_colors = 0u32;
+        {
+            let mut occ_view = self.color_occ.build_view();
+            occ_view.clear();
+            // Per-manifold chosen color, then a counting sort into CSR (so the
+            // values stay in ascending manifold order within each color — D4).
+            // Reuse `uf_parent` as the per-manifold color scratch.
+            let mut chosen = self.uf_parent.build_view();
+            chosen.clear();
 
-        for m in manifolds {
-            let a = m.body_a.0;
-            let b = m.body_b.0;
-            let a_dyn = is_dynamic(a);
-            let b_dyn = is_dynamic(b);
-            // Find the lowest color where every dynamic side is free.
-            let mut color = 0u32;
-            loop {
-                if color >= self.n_colors {
-                    // Need a new color row: append `words` zeroed occupancy words.
-                    self.color_occ.resize(self.color_occ.len() + words, 0);
-                    self.n_colors += 1;
-                }
-                let base = color as usize * words;
-                let free = (!a_dyn || !occ_get(&self.color_occ, base, a))
-                    && (!b_dyn || !occ_get(&self.color_occ, base, b));
-                if free {
-                    if a_dyn {
-                        occ_set(&mut self.color_occ, base, a);
+            for m in manifolds {
+                let a = m.body_a.0;
+                let b = m.body_b.0;
+                let a_dyn = is_dynamic(a);
+                let b_dyn = is_dynamic(b);
+                // Find the lowest color where every dynamic side is free.
+                let mut color = 0u32;
+                loop {
+                    if color >= n_colors {
+                        // Need a new color row: append `words` zeroed occupancy
+                        // words. A column grows by `push`, not `resize` — the
+                        // reservation is already committed-on-demand underneath.
+                        for _ in 0..words {
+                            occ_view.push(0);
+                        }
+                        n_colors += 1;
                     }
-                    if b_dyn {
-                        occ_set(&mut self.color_occ, base, b);
+                    let base = color as usize * words;
+                    let free = {
+                        let occ = occ_view.as_slice();
+                        (!a_dyn || !occ_get(occ, base, a)) && (!b_dyn || !occ_get(occ, base, b))
+                    };
+                    if free {
+                        let occ = occ_view.as_mut_slice();
+                        if a_dyn {
+                            occ_set(occ, base, a);
+                        }
+                        if b_dyn {
+                            occ_set(occ, base, b);
+                        }
+                        chosen.push(color);
+                        break;
                     }
-                    chosen.push(color);
-                    break;
+                    color += 1;
                 }
-                color += 1;
             }
         }
+        self.n_colors = n_colors;
 
         // CSR group manifolds by chosen color (counting sort; stable by manifold
         // index → ascending manifold order within a color).
         let n_colors = self.n_colors as usize;
-        self.color_start.clear();
-        self.color_start.resize(n_colors + 1, 0);
-        for &c in chosen.iter() {
-            self.color_start[c as usize + 1] += 1;
+        {
+            let mut starts = self.color_start.build_view();
+            starts.clear();
+            for _ in 0..=n_colors {
+                starts.push(0);
+            }
         }
-        for c in 0..n_colors {
-            self.color_start[c + 1] += self.color_start[c];
+        {
+            let chosen = self.uf_parent.as_read_slice();
+            let mut starts_view = self.color_start.build_view();
+            let starts = starts_view.as_mut_slice();
+            for &c in chosen {
+                starts[c as usize + 1] += 1;
+            }
+            for c in 0..n_colors {
+                starts[c + 1] += starts[c];
+            }
         }
-        let total = self.color_start[n_colors] as usize;
+        let total = self.color_start.as_read_slice()[n_colors] as usize;
         debug_assert_eq!(total, manifolds.len(), "invariant: every manifold colored");
-        self.color_contacts.clear();
-        self.color_contacts.resize(total, 0);
+        {
+            let mut contacts = self.color_contacts.build_view();
+            contacts.clear();
+            for _ in 0..total {
+                contacts.push(0);
+            }
+        }
         // Scatter with a running cursor (working copy of the starts). Reuse
         // `uf_size` as the cursor scratch.
-        let cursor = &mut self.uf_size;
-        cursor.clear();
-        cursor.extend_from_slice(&self.color_start[..n_colors]);
-        for (mi, &c) in self.uf_parent.iter().enumerate() {
-            let slot = cursor[c as usize];
-            self.color_contacts[slot as usize] = mi as u32;
-            cursor[c as usize] = slot + 1;
+        {
+            let mut cursor_view = self.uf_size.build_view();
+            cursor_view.clear();
+            cursor_view.extend_from_slice(&self.color_start.as_read_slice()[..n_colors]);
+        }
+        {
+            let chosen = self.uf_parent.as_read_slice();
+            let mut cursor_view = self.uf_size.build_view();
+            let cursor = cursor_view.as_mut_slice();
+            let mut contacts_view = self.color_contacts.build_view();
+            let contacts = contacts_view.as_mut_slice();
+            for (mi, &c) in chosen.iter().enumerate() {
+                let slot = cursor[c as usize];
+                contacts[slot as usize] = mi as u32;
+                cursor[c as usize] = slot + 1;
+            }
         }
 
         self.debug_assert_coloring(manifolds, n_dynamic, is_dynamic);

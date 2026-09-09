@@ -134,34 +134,120 @@ pub(crate) const SCRATCH_ID_BODY_EFF_SERIAL: usize = MAX_COMPONENTS - 3;
 // allocate a column OUTSIDE the run and `scratch_band_stagger_slots_are_distinct`
 // fires at test time.
 
-/// Highest id in the physics scratch band (inclusive).
-const SCRATCH_BAND_TOP: usize = SCRATCH_ID_BODY_STATE;
+/// Highest id in the SOLVER cohort (inclusive) — the body mirrors plus the 31
+/// contact columns, which the colored solve sweeps together at slot `i`.
+const SOLVER_COHORT_TOP: usize = SCRATCH_ID_BODY_STATE;
 
-/// Lowest id in the physics scratch band (inclusive).
-const SCRATCH_BAND_BOTTOM: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM;
+/// Lowest id in the solver cohort (inclusive).
+const SOLVER_COHORT_BOTTOM: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM;
 
-/// Number of ids the scratch band spans, top and bottom inclusive.
-const SCRATCH_BAND_WIDTH: usize = SCRATCH_BAND_TOP - SCRATCH_BAND_BOTTOM + 1;
+/// Number of ids the solver cohort spans, top and bottom inclusive.
+const SOLVER_COHORT_WIDTH: usize = SOLVER_COHORT_TOP - SOLVER_COHORT_BOTTOM + 1;
 
-// Contiguity: the contact band must begin exactly one id below the lowest body
-// mirror, or the run has a hole and the width check no longer implies
+// ⚠ THE CONSTRAINT IS PER-COHORT, NOT GLOBAL, and the difference decides whether
+// the migration is possible at all.
+//
+// `pool_base_stagger(id) = (id % POOL_STAGGER_LINES) * CACHE_LINE_SIZE` spreads
+// columns across L1/L2 sets, and two ids congruent mod 64 collapse onto one set.
+// What matters is only that columns swept together AT INDEX `i` IN ONE HOT LOOP
+// — a COHORT — do not collide; columns in different loops never contend for a set
+// at the same moment, so distinct cohorts may reuse the same slots freely.
+//
+// That distinction is load-bearing. Migrating physics' remaining `std::Vec` bulk
+// brings the live column count to ~94, and 94 consecutive ids CANNOT have
+// pairwise-distinct residues mod 64 — a single global band would be impossible on
+// arithmetic alone. Per cohort it is comfortable: the solver sweeps 31 contact
+// columns, the graph 8, the broadphase 13, the soft scratch 19, each far under
+// the 64-slot period.
+//
+// Each cohort therefore gets its OWN contiguous run, and a run of at most
+// `POOL_STAGGER_LINES` consecutive integers has pairwise-distinct residues — so
+// asserting each cohort's width is a compile-time proof for that cohort.
+//
+// ⚠ This is the constraint a future migration is most likely to break, because it
+// breaks SILENTLY: adding a colliding column is a correctness no-op and shows up
+// only as a throughput regression nobody attributes to id assignment. Widen a
+// cohort past the period and its assert fires at compile time; allocate a column
+// outside its cohort's run and `scratch_band_stagger_slots_are_distinct` fires at
+// test time.
+
+// Solver cohort contiguity: the contact band must begin exactly one id below the
+// lowest body mirror, or the run has a hole and the width check no longer implies
 // distinctness.
 const _: () = assert!(
     SCRATCH_ID_CONTACT_BAND_TOP + 1 == SCRATCH_ID_BODY_EFF_SERIAL,
-    "physics scratch band is not contiguous: the contact band must start one id \
+    "the solver cohort is not contiguous: the contact band must start one id \
      below SCRATCH_ID_BODY_EFF_SERIAL, or the width check below stops implying \
      pairwise-distinct cache-set staggers"
 );
 
-// Width: at most one full stagger period, so every id in the run gets its own
-// cache-set slot.
 const _: () = assert!(
-    SCRATCH_BAND_WIDTH <= POOL_STAGGER_LINES,
-    "physics scratch band is wider than one stagger period: two of its columns \
-     now share a cache-set slot and element i of both lands in the same L1/L2 \
-     set — the P2 conflict-miss storm. Either keep the band within \
-     POOL_STAGGER_LINES ids or give the cohort explicit, distinct slots"
+    SOLVER_COHORT_WIDTH <= POOL_STAGGER_LINES,
+    "the solver cohort is wider than one stagger period: two of its columns now \
+     share a cache-set slot and element i of both lands in the same L1/L2 set — \
+     the P2 conflict-miss storm"
 );
+
+// ── The CONSTRAINT-GRAPH cohort (audit Stage 4) ─────────────────────────────
+//
+// `ConstraintGraph`'s eight buffers are swept together by `build` — union-find
+// over `uf_parent`/`uf_size`, then `island_of`, then the two CSR pairs, then the
+// coloring occupancy — so they are one cohort and must not collide with each
+// other. They MAY share slots with the solver cohort above: the graph is built
+// before the solve and the two loops never run at the same index at the same
+// time.
+
+/// Number of `ScratchColumn`s backing [`ConstraintGraph`](crate::resources::ConstraintGraph).
+pub(crate) const GRAPH_COLUMN_COUNT: usize = 8;
+
+/// Top of the constraint-graph cohort — one id below the solver cohort's bottom.
+pub(crate) const SCRATCH_ID_GRAPH_TOP: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM - 1;
+
+/// Bottom of the constraint-graph cohort (inclusive).
+pub(crate) const SCRATCH_ID_GRAPH_BOTTOM: usize =
+    SCRATCH_ID_GRAPH_TOP - (GRAPH_COLUMN_COUNT - 1);
+
+const _: () = assert!(
+    GRAPH_COLUMN_COUNT <= POOL_STAGGER_LINES,
+    "the constraint-graph cohort is wider than one stagger period"
+);
+
+// Cohorts may SHARE cache-set slots (they never sweep at the same index at the
+// same time) but must never share an ID: two pools under one `ComponentId` would
+// register different element types, and the registry's same-type re-register is a
+// SILENT no-op, so the collision would not announce itself.
+const _: () = assert!(
+    SCRATCH_ID_GRAPH_TOP < SOLVER_COHORT_BOTTOM,
+    "the constraint-graph cohort overlaps the solver cohort"
+);
+
+// The scratch region grows DOWNWARD from the top of the id space, toward the
+// production counter climbing up from 0. This is the floor that keeps the two
+// apart: cross it and a `#[derive(Component)]` type could claim a scratch id.
+const _: () = assert!(
+    SCRATCH_ID_GRAPH_BOTTOM >= MAX_COMPONENTS - 64,
+    "the physics scratch region has grown more than 64 ids below the top of the      component-id space; production ids climb from 0 and the reserved band is no      longer comfortably out of their reach"
+);
+
+/// The [`ComponentId`] for graph column `k` (`0`-based, in field order),
+/// descending from [`SCRATCH_ID_GRAPH_TOP`].
+#[inline]
+pub(crate) fn graph_column_id(k: usize) -> ComponentId {
+    debug_assert!(k < GRAPH_COLUMN_COUNT, "graph column index out of cohort");
+    ComponentId::new(SCRATCH_ID_GRAPH_TOP - k)
+}
+
+/// Registers the element layout of every [`ConstraintGraph`] column, idempotently.
+///
+/// Seven `u32` columns and one `u64` (`color_occ`'s bitset words). Same-type
+/// re-registration is a silent no-op, so calling this from the constructor costs
+/// one branch per id after the first.
+pub(crate) fn register_graph_column_layouts() {
+    for k in 0..GRAPH_COLUMN_COUNT - 1 {
+        register_layout::<u32>(graph_column_id(k).get());
+    }
+    register_layout::<u64>(graph_column_id(GRAPH_COLUMN_COUNT - 1).get());
+}
 
 /// Registers the [`Layout`](std::alloc::Layout) of every scratch element type
 /// under its reserved synthetic id, idempotently.
@@ -261,42 +347,27 @@ mod tests {
     use super::*;
     use boyko_ecs::ecs::constants::pool_base_stagger;
 
-    /// Every id this module hands to a `ScratchColumn` gets its OWN cache-set
-    /// stagger slot.
+    /// Enumerates a cohort's ids and asserts every one gets its OWN cache-set slot.
     ///
-    /// The const asserts above prove the property for the band as a RANGE. This
-    /// test proves it for the ids actually handed out, which is the stronger
-    /// statement and the one that survives a future column being allocated
-    /// outside the run: a new id that collides with an existing one turns this
-    /// red even though the band's width is untouched.
-    ///
-    /// It compares against the kernel's own `pool_base_stagger` rather than
-    /// re-deriving `% 64` locally, so the day `POOL_STAGGER_LINES` changes this
-    /// test follows it instead of silently testing a stale rule.
-    #[test]
-    fn scratch_band_stagger_slots_are_distinct() {
-        let mut ids: Vec<usize> = vec![
-            SCRATCH_ID_BODY_STATE,
-            SCRATCH_ID_BODY_EFF_COLORED,
-            SCRATCH_ID_BODY_EFF_SERIAL,
-        ];
-        ids.extend((0..CONTACT_COLUMN_COUNT).map(|k| contact_column_id(k).get()));
-
+    /// The const asserts above prove the property for a cohort as a RANGE. This
+    /// proves it for the ids actually handed out, which is the stronger statement
+    /// and the one that survives a column allocated outside its run: a new id
+    /// colliding with an existing one turns this red even though the declared width
+    /// is untouched. It compares against the kernel's own `pool_base_stagger`
+    /// rather than re-deriving `% 64`, so the day `POOL_STAGGER_LINES` moves the
+    /// test follows it instead of testing a stale rule.
+    fn assert_cohort_slots_distinct(name: &str, ids: &[usize], declared_width: usize) {
         assert_eq!(
             ids.len(),
-            SCRATCH_BAND_WIDTH,
-            "anti-vacuity: the enumerated ids must cover the whole declared band, \
-             or this test checks a subset and a collision can hide outside it"
+            declared_width,
+            "anti-vacuity: the enumerated {name} ids must cover the whole declared              cohort, or this checks a subset and a collision can hide outside it"
         );
-
         for (i, &a) in ids.iter().enumerate() {
             for &b in &ids[i + 1..] {
                 assert_ne!(
                     pool_base_stagger(a),
                     pool_base_stagger(b),
-                    "scratch ids {a} and {b} share cache-set stagger slot {} of {} — \
-                     element i of both columns lands in the same L1/L2 set, which is \
-                     the P2 conflict-miss storm the stagger exists to prevent",
+                    "{name}: ids {a} and {b} share cache-set stagger slot {} of {} —                      element i of both columns lands in the same L1/L2 set, which is                      the P2 conflict-miss storm the stagger exists to prevent",
                     a % POOL_STAGGER_LINES,
                     POOL_STAGGER_LINES
                 );
@@ -304,32 +375,58 @@ mod tests {
         }
     }
 
-    /// The band is a contiguous run with no hole and no duplicate — the premise
-    /// the width-based const assert rests on.
-    #[test]
-    fn scratch_band_is_a_contiguous_run() {
-        let mut ids: Vec<usize> = vec![
+    fn solver_cohort_ids() -> Vec<usize> {
+        let mut ids = vec![
             SCRATCH_ID_BODY_STATE,
             SCRATCH_ID_BODY_EFF_COLORED,
             SCRATCH_ID_BODY_EFF_SERIAL,
         ];
         ids.extend((0..CONTACT_COLUMN_COUNT).map(|k| contact_column_id(k).get()));
-        ids.sort_unstable();
+        ids
+    }
 
-        assert_eq!(ids[0], SCRATCH_BAND_BOTTOM, "run starts at the declared bottom");
-        assert_eq!(
-            ids[ids.len() - 1],
-            SCRATCH_BAND_TOP,
-            "run ends at the declared top"
-        );
-        for w in ids.windows(2) {
-            assert_eq!(
-                w[1],
-                w[0] + 1,
-                "hole or duplicate in the scratch band between {} and {} — the width \
-                 assert stops implying distinct staggers once the run is not dense",
-                w[0],
-                w[1]
+    fn graph_cohort_ids() -> Vec<usize> {
+        (0..GRAPH_COLUMN_COUNT).map(|k| graph_column_id(k).get()).collect()
+    }
+
+    #[test]
+    fn scratch_band_stagger_slots_are_distinct() {
+        assert_cohort_slots_distinct("solver cohort", &solver_cohort_ids(), SOLVER_COHORT_WIDTH);
+        assert_cohort_slots_distinct("graph cohort", &graph_cohort_ids(), GRAPH_COLUMN_COUNT);
+    }
+
+    /// Each cohort is a contiguous run with no hole and no duplicate — the premise
+    /// the width-based const asserts rest on.
+    #[test]
+    fn scratch_band_is_a_contiguous_run() {
+        for (name, mut ids, top, bottom) in [
+            ("solver cohort", solver_cohort_ids(), SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM),
+            ("graph cohort", graph_cohort_ids(), SCRATCH_ID_GRAPH_TOP, SCRATCH_ID_GRAPH_BOTTOM),
+        ] {
+            ids.sort_unstable();
+            assert_eq!(ids[0], bottom, "{name} starts at its declared bottom");
+            assert_eq!(ids[ids.len() - 1], top, "{name} ends at its declared top");
+            for w in ids.windows(2) {
+                assert_eq!(
+                    w[1],
+                    w[0] + 1,
+                    "hole or duplicate in the {name} between {} and {} — the width                      assert stops implying distinct staggers once the run is not dense",
+                    w[0],
+                    w[1]
+                );
+            }
+        }
+    }
+
+    /// The cohorts must not OVERLAP: sharing a stagger slot across cohorts is fine,
+    /// but sharing an ID is a registry collision on a different element type.
+    #[test]
+    fn cohorts_do_not_share_ids() {
+        let solver = solver_cohort_ids();
+        for id in graph_cohort_ids() {
+            assert!(
+                !solver.contains(&id),
+                "graph id {id} also belongs to the solver cohort — two pools would                  register different element types under one ComponentId"
             );
         }
     }
