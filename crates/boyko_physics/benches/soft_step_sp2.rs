@@ -28,7 +28,9 @@ use boyko_ecs::ecs::core::system::into_system::IntoSystem;
 
 use boyko_physics::components::{ColliderShape, RigidBody};
 use boyko_physics::math::{Mat3, Quat, Vec3};
-use boyko_physics::resources::{BodyState, BroadphaseGrid, PhysicsConfig, SolverScratch};
+use boyko_physics::resources::{
+    BodyState, BroadphaseGrid, ContactPairs, PhysicsConfig, SolverScratch,
+};
 use boyko_physics::sdf_query::SdfField;
 use boyko_physics::soft::{
     SoftBody, SoftRigidReaction, physics_soft_rigid_apply, physics_soft_step,
@@ -228,7 +230,7 @@ fn setup_coupled(side: usize) -> EcsMaster {
     // Build the broadphase grid + the scratch snapshot + the reaction sink (what the
     // pipeline produces on the Grid arm).
     let mut grid = BroadphaseGrid::with_capacity(bodies.len().max(1));
-    let mut out = Vec::new();
+    let mut out = ContactPairs::with_capacity(0);
     grid.build(&bodies, &mut out);
     let mut scratch = SolverScratch::with_capacity(bodies.len().max(1));
     scratch.set_bodies(&bodies);

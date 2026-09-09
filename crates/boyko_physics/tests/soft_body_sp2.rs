@@ -46,7 +46,9 @@ use boyko_ecs::ecs::core::system::into_system::IntoSystem;
 
 use boyko_physics::components::{ColliderShape, RigidBody};
 use boyko_physics::math::{Mat3, Quat, Vec3};
-use boyko_physics::resources::{BodyState, BroadphaseGrid, PhysicsConfig, SolverScratch};
+use boyko_physics::resources::{
+    BodyState, BroadphaseGrid, ContactPairs, PhysicsConfig, SolverScratch,
+};
 use boyko_physics::sdf_query::SdfField;
 use boyko_physics::soft::{
     SoftBody, SoftRigidReaction, physics_soft_rigid_apply, physics_soft_step,
@@ -293,7 +295,7 @@ fn sphere_state(position: Vec3, velocity: Vec3, radius: f32, inv_mass: f32) -> B
 fn install_coupling_resources(world: &mut EcsMaster, bodies: Vec<BodyState>) {
     let n = bodies.len();
     let mut grid = BroadphaseGrid::with_capacity(n.max(1));
-    let mut out = Vec::new();
+    let mut out = ContactPairs::with_capacity(0);
     grid.build(&bodies, &mut out);
     assert!(
         bodies.is_empty() || grid.is_built(),

@@ -17,7 +17,7 @@
 use boyko_physics::components::ColliderShape;
 use boyko_physics::manifold::BodyIndex;
 use boyko_physics::math::Vec3;
-use boyko_physics::resources::{BodyState, BroadphaseGrid};
+use boyko_physics::resources::{BodyState, BroadphaseGrid, ContactPairs};
 use boyko_physics::systems::body_bounding_radius;
 
 use proptest::prelude::*;
@@ -61,9 +61,9 @@ fn all_pairs(bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
 
 /// Runs the grid build over `bodies` into a fresh grid, returning the pair set.
 fn grid_pairs(grid: &mut BroadphaseGrid, bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
-    let mut out = Vec::new();
+    let mut out = ContactPairs::with_capacity(0);
     grid.build(bodies, &mut out);
-    out
+    out.pairs().to_vec()
 }
 
 /// Asserts the grid pair set is bit-identical (same `(min, max)` order) to
@@ -407,7 +407,7 @@ fn grid_does_no_per_step_alloc_in_steady_state() {
         .collect();
 
     let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-    let mut out: Vec<(BodyIndex, BodyIndex)> = Vec::new();
+    let mut out = ContactPairs::with_capacity(0);
     // Warm-up builds: grow every buffer (grid scratch + the output Vec) to its
     // steady-state size. Several iterations so prefix-sum/cursor/candidate Vecs
     // all settle.
@@ -528,7 +528,7 @@ mod world_ab {
         let (mut world, mut schedule) = static_cluster_world();
         world.resource_mut::<PhysicsConfig>().broadphase = kind;
         schedule.run(&mut world);
-        world.resource::<ContactPairs>().pairs.clone()
+        world.resource::<ContactPairs>().pairs().to_vec()
     }
 
     #[test]
@@ -562,7 +562,7 @@ mod o3_parallel {
     use super::{all_pairs, sphere};
     use boyko_physics::manifold::BodyIndex;
     use boyko_physics::math::Vec3;
-    use boyko_physics::resources::{BodyState, BroadphaseGrid};
+    use boyko_physics::resources::{BodyState, BroadphaseGrid, ContactPairs};
     use boyko_threadpool::ThreadPoolBuilder;
 
     /// `MIN_PARALLEL_BODIES` from `resources.rs` (private const, mirrored here only
@@ -606,9 +606,9 @@ mod o3_parallel {
         let pool = ThreadPoolBuilder::new().num_threads(workers).build();
         pool.install(|_scope| {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(bodies, &mut out);
-            out
+            out.pairs().to_vec()
         })
     }
 
@@ -635,8 +635,9 @@ mod o3_parallel {
 
             // The serial reference (O2 `build`) + the all-pairs oracle.
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut serial = Vec::new();
+            let mut serial = ContactPairs::with_capacity(0);
             grid.build(&bodies, &mut serial);
+            let serial = serial.pairs().to_vec();
             let oracle = all_pairs(&bodies);
             assert_eq!(serial, oracle, "O2 serial build == all-pairs (n={n})");
             assert!(!serial.is_empty(), "anti-vacuity: scene n={n} has survivors");
@@ -666,8 +667,9 @@ mod o3_parallel {
         let bodies = dense_scene(MIN_PARALLEL_BODIES + 500);
 
         let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-        let mut serial = Vec::new();
+        let mut serial = ContactPairs::with_capacity(0);
         grid.build(&bodies, &mut serial);
+        let serial = serial.pairs().to_vec();
         assert!(!serial.is_empty(), "anti-vacuity: the one-worker scene has survivors");
 
         let pool = ThreadPoolBuilder::new().num_threads(1).build();
@@ -675,7 +677,7 @@ mod o3_parallel {
 
         let (par, allocs) = pool.install(|_scope| {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             // Warm every scratch Vec so the measured build is the steady-state one.
             for _ in 0..6 {
                 grid.build_parallel(&bodies, &mut out);
@@ -683,7 +685,7 @@ mod o3_parallel {
             let before = super::ALLOC.count();
             grid.build_parallel(&bodies, &mut out);
             let after = super::ALLOC.count();
-            (out, after.wrapping_sub(before))
+            (out.pairs().to_vec(), after.wrapping_sub(before))
         });
 
         assert_eq!(
@@ -721,27 +723,27 @@ mod o3_parallel {
         );
         let dispatched = pool.install(|_scope| {
             let mut grid = BroadphaseGrid::with_capacity(big.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(&big, &mut out);
-            out
+            out.pairs().to_vec()
         });
 
         // (b) The SAME scene with NO ambient pool → the no-pool shaped fallback
         //     (build_parallel called outside any install frame).
         let no_pool = {
             let mut grid = BroadphaseGrid::with_capacity(big.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(&big, &mut out);
-            out
+            out.pairs().to_vec()
         };
 
         // (c) Below the threshold, even inside a pool → the serial fallback.
         let small = dense_scene(MIN_PARALLEL_BODIES - 1000);
         let small_in_pool = pool.install(|_scope| {
             let mut grid = BroadphaseGrid::with_capacity(small.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(&small, &mut out);
-            out
+            out.pairs().to_vec()
         });
 
         // Every branch reproduces all-pairs byte-for-byte (the whole contract).
@@ -768,7 +770,7 @@ mod o3_parallel {
 
         let (allocs, n_pairs) = pool.install(|_scope| {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             // Warm: several dispatched builds so every grid scratch Vec
             // (pair_count, pair_offset, cell_*, candidates) AND `out` reach
             // steady-state capacity (clear()+refill thereafter).
@@ -778,7 +780,7 @@ mod o3_parallel {
             let before = super::ALLOC.count();
             grid.build_parallel(&bodies, &mut out);
             let after = super::ALLOC.count();
-            (after.wrapping_sub(before), out.len())
+            (after.wrapping_sub(before), out.pairs().len())
         });
 
         assert!(n_pairs > 0, "anti-vacuity: the warmed parallel build produced pairs");

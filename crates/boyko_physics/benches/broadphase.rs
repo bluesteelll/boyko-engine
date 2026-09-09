@@ -12,7 +12,7 @@ use std::hint::black_box;
 use boyko_physics::components::ColliderShape;
 use boyko_physics::manifold::BodyIndex;
 use boyko_physics::math::Vec3;
-use boyko_physics::resources::{BodyState, BroadphaseGrid};
+use boyko_physics::resources::{BodyState, BroadphaseGrid, ContactPairs};
 use boyko_physics::systems::body_bounding_radius;
 use boyko_threadpool::ThreadPoolBuilder;
 
@@ -113,10 +113,10 @@ fn bench_broadphase(c: &mut Criterion) {
 
         // Anti-vacuity: confirm the scene yields real pairs before benching.
         let mut probe = BroadphaseGrid::with_capacity(n);
-        let mut probe_out = Vec::new();
+        let mut probe_out = ContactPairs::with_capacity(0);
         probe.build(&bodies, &mut probe_out);
         assert!(
-            !probe_out.is_empty(),
+            !probe_out.pairs().is_empty(),
             "benched scene (n={n}) must produce pairs (anti-vacuity)"
         );
 
@@ -130,13 +130,13 @@ fn bench_broadphase(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("grid", n), &bodies, |b, bodies| {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             // Warm the grid so the timed iterations measure the steady-state
             // (capacity-reused, alloc-free) build, not first-build growth.
             grid.build(bodies, &mut out);
             b.iter(|| {
                 grid.build(black_box(bodies), &mut out);
-                black_box(out.len());
+                black_box(out.pairs().len());
             });
         });
     }
@@ -153,10 +153,10 @@ fn bench_disparity(c: &mut Criterion) {
 
         // Anti-vacuity: the giants pair with many small bodies.
         let mut probe = BroadphaseGrid::with_capacity(bodies.len());
-        let mut probe_out = Vec::new();
+        let mut probe_out = ContactPairs::with_capacity(0);
         probe.build(&bodies, &mut probe_out);
         assert!(
-            !probe_out.is_empty(),
+            !probe_out.pairs().is_empty(),
             "disparity scene (n={n}) must produce pairs (anti-vacuity)"
         );
         assert!(
@@ -175,11 +175,11 @@ fn bench_disparity(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("grid", n), &bodies, |b, bodies| {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build(bodies, &mut out);
             b.iter(|| {
                 grid.build(black_box(bodies), &mut out);
-                black_box(out.len());
+                black_box(out.pairs().len());
             });
         });
     }
@@ -235,10 +235,10 @@ fn bench_parallel(c: &mut Criterion) {
         // report whether it is at/above the parallel-dispatch threshold (4096) so
         // the reader knows which n's actually exercise the dispatched branch.
         let mut probe = BroadphaseGrid::with_capacity(n);
-        let mut probe_out = Vec::new();
+        let mut probe_out = ContactPairs::with_capacity(0);
         probe.build(&bodies, &mut probe_out);
         assert!(
-            !probe_out.is_empty(),
+            !probe_out.pairs().is_empty(),
             "parallel bench scene (n={n}) must produce pairs (anti-vacuity)"
         );
 
@@ -247,11 +247,11 @@ fn bench_parallel(c: &mut Criterion) {
         // medians read alike by construction; the pair is the routing receipt.
         group.bench_with_input(BenchmarkId::new("serial_o2", n), &bodies, |b, bodies| {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build(bodies, &mut out);
             b.iter(|| {
                 grid.build(black_box(bodies), &mut out);
-                black_box(out.len());
+                black_box(out.pairs().len());
             });
         });
 
@@ -267,13 +267,13 @@ fn bench_parallel(c: &mut Criterion) {
                 // capacity-reused (bounded-alloc) path.
                 pool.install(|_scope| {
                     let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-                    let mut out = Vec::new();
+                    let mut out = ContactPairs::with_capacity(0);
                     for _ in 0..3 {
                         grid.build_parallel(bodies, &mut out);
                     }
                     b.iter(|| {
                         grid.build_parallel(black_box(bodies), &mut out);
-                        black_box(out.len());
+                        black_box(out.pairs().len());
                     });
                 });
             });

@@ -47,8 +47,16 @@ and `pairs.push(..)` change receiver; the loop body, the bound test and the emit
 benchmark on the owner's workstation, which is a timings request rather than a call to make alone.
 Until it is taken the claim is an inference from a neighbouring buffer, and it is labelled as one.
 
-**Question: run the broadphase bench to confirm the all-pairs arm does not regress, or accept the
-inference from the `BroadphaseGrid` measurement and ship it labelled?**
+⏸ **DEFERRED 2026-09-09 by the owner: no measurements, the machine is not quiet.** The migration
+shipped without one, so the perf claim on this arm stands as an *inference*, not a result — that is
+the honest label and it is written into the commit rather than only here. Two things happen to
+change it: the correctness gate is real and green (37 targets, 370 passed, including the
+zero-heap-allocation steady-state build test, which the column now passes for a stronger reason —
+the buffer no longer reaches the global allocator at all), and the timing claim stays open until a
+quiet window.
+
+**Still open: run the broadphase bench in a quiet window to confirm the all-pairs arm did not
+regress.** `cargo bench -p boyko-physics --bench broadphase`, the `serial_o2` and `all_pairs` rows.
 
 ### 2. `ScratchBuildView` cannot express a pre-sized, parallel-filled, compacted buffer
 
@@ -72,6 +80,19 @@ is the kernel.
 
 **Question: take the kernel addition from this lane, or leave `ContactPairs` as the one unmigrated
 rigid buffer until the kernel is touched for another reason?**
+
+✅ **RESOLVED 2026-09-09, same day, and the question as posed was WRONG.** It framed the addition as
+a choice about one buffer. Counting the remaining Stage 4 census afterwards: `soft/coupling.rs` uses
+`resize` twice and `soft/colored.rs` six times, on top of `build_parallel`'s. **Every single
+remaining buffer in this lane's scope needs it** — so the real alternative was not "leave one buffer"
+but "stop Stage 4 here", which is not a trade anyone would take. Recording that because the framing
+survived into a commit message before the census corrected it, and a question that misstates its own
+stakes is worse than no question.
+
+Taken as `ScratchBuildView::resize` / `::truncate` over a `ComponentPool` no-drop count set, with the
+`extend_fill_copy` grow hoisted out of the loop. Verified by red mutation: removing the fill turns
+three of the five new kernel tests red, including the one written for the failure mode that would
+otherwise pass every length assertion while handing back last frame's bytes.
 
 ## RESOLVED 2026-09-02 — KE16's six owner calls, answered the same day they were asked
 

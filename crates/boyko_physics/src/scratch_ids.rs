@@ -369,8 +369,22 @@ pub(crate) const SCRATCH_ID_BROADPHASE_TOP: usize = SCRATCH_ID_GRAPH_BOTTOM - 1;
 pub(crate) const SCRATCH_ID_BROADPHASE_BOTTOM: usize =
     SCRATCH_ID_BROADPHASE_TOP - (BROADPHASE_COLUMN_COUNT - 1);
 
+/// Synthetic id for [`ContactPairs`](crate::resources::ContactPairs)'s pair list.
+///
+/// One id below the grid's own thirteen and part of the SAME cohort: the grid
+/// writes this buffer at index `i` in the pass that reads its counting columns,
+/// so it is one loop, not two.
+pub(crate) const SCRATCH_ID_CONTACT_PAIRS: usize = SCRATCH_ID_BROADPHASE_BOTTOM - 1;
+
+/// Bottom of the broadphase COHORT (inclusive) — one below the grid's own bottom,
+/// because the pair list belongs to it.
+const BROADPHASE_COHORT_BOTTOM: usize = SCRATCH_ID_CONTACT_PAIRS;
+
+/// Width of the broadphase cohort: the grid's columns plus the pair list.
+const BROADPHASE_COHORT_WIDTH: usize = BROADPHASE_COLUMN_COUNT + 1;
+
 const _: () = assert!(
-    BROADPHASE_COLUMN_COUNT <= POOL_STAGGER_LINES,
+    BROADPHASE_COHORT_WIDTH <= POOL_STAGGER_LINES,
     "the broadphase cohort is wider than one stagger period"
 );
 
@@ -435,6 +449,14 @@ pub(crate) fn register_broadphase_column_layouts() {
             _ => register_layout::<u32>(broadphase_column_id(k).get()),
         }
     }
+    register_layout::<(BodyIndex, BodyIndex)>(SCRATCH_ID_CONTACT_PAIRS);
+}
+
+/// The [`ComponentId`] for [`ContactPairs`](crate::resources::ContactPairs)'s
+/// pair list.
+#[inline]
+pub(crate) fn contact_pairs_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_CONTACT_PAIRS)
 }
 
 /// Registers the element layout of every [`ConstraintGraph`] column, idempotently.
@@ -556,7 +578,7 @@ fn register_solver_tail_layouts() {
 pub(crate) const NARROWPHASE_COLUMN_COUNT: usize = 3;
 
 /// Top of the narrowphase cohort — one id below the broadphase cohort's bottom.
-pub(crate) const SCRATCH_ID_NARROWPHASE_TOP: usize = SCRATCH_ID_BROADPHASE_BOTTOM - 1;
+pub(crate) const SCRATCH_ID_NARROWPHASE_TOP: usize = BROADPHASE_COHORT_BOTTOM - 1;
 
 /// Bottom of the narrowphase cohort (inclusive).
 pub(crate) const SCRATCH_ID_NARROWPHASE_BOTTOM: usize =
@@ -568,8 +590,34 @@ const _: () = assert!(
 );
 
 const _: () = assert!(
-    SCRATCH_ID_NARROWPHASE_TOP < SCRATCH_ID_BROADPHASE_BOTTOM,
+    SCRATCH_ID_NARROWPHASE_TOP < BROADPHASE_COHORT_BOTTOM,
     "the narrowphase cohort overlaps the broadphase cohort"
+);
+
+// —— The one buffer that belongs to TWO cohorts —————————————————————
+//
+// `ContactPairs::pairs` is swept by BOTH phases: the broadphase fills it beside
+// the grid's columns, and the narrowphase then reads element `i` of it in the
+// same loop that writes the manifold columns. So the distinctness that has to
+// hold is over the UNION of the two cohorts, not either one alone — a property
+// no per-cohort width check states.
+//
+// It holds because the two runs are ADJACENT with no gap and their combined width
+// is under one stagger period. Both halves of that are asserted here rather than
+// left to be re-derived by whoever next moves a cohort boundary.
+const _: () = assert!(
+    SCRATCH_ID_NARROWPHASE_TOP + 1 == BROADPHASE_COHORT_BOTTOM,
+    "the broadphase and narrowphase runs are no longer adjacent, so the union ContactPairs::pairs is swept in is not a contiguous run and its residues are no longer provably distinct"
+);
+
+/// Width of the broadphase + narrowphase union, the run `ContactPairs::pairs` is
+/// actually swept in.
+const BROADPHASE_NARROWPHASE_UNION_WIDTH: usize =
+    SCRATCH_ID_BROADPHASE_TOP - SCRATCH_ID_NARROWPHASE_BOTTOM + 1;
+
+const _: () = assert!(
+    BROADPHASE_NARROWPHASE_UNION_WIDTH <= POOL_STAGGER_LINES,
+    "the broadphase + narrowphase union is wider than one stagger period, and ContactPairs::pairs is swept in both halves of it"
 );
 
 /// The [`ComponentId`] for narrowphase column `k` (`0` = `manifolds`,
@@ -723,11 +771,30 @@ mod tests {
     }
 
     fn broadphase_cohort_ids() -> Vec<usize> {
-        (0..BROADPHASE_COLUMN_COUNT).map(|k| broadphase_column_id(k).get()).collect()
+        let mut ids: Vec<usize> =
+            (0..BROADPHASE_COLUMN_COUNT).map(|k| broadphase_column_id(k).get()).collect();
+        ids.push(SCRATCH_ID_CONTACT_PAIRS);
+        ids
     }
 
     fn narrowphase_cohort_ids() -> Vec<usize> {
         (0..NARROWPHASE_COLUMN_COUNT).map(|k| narrowphase_column_id(k).get()).collect()
+    }
+
+    /// `ContactPairs::pairs` is written by the broadphase and read by the
+    /// narrowphase, so the distinctness it needs spans BOTH cohorts. The const
+    /// asserts prove that from adjacency plus a width; this proves it over the ids
+    /// actually handed out, which is the statement that survives a column being
+    /// allocated outside its run.
+    #[test]
+    fn the_broadphase_narrowphase_union_has_distinct_slots() {
+        let mut ids = broadphase_cohort_ids();
+        ids.extend(narrowphase_cohort_ids());
+        assert_cohort_slots_distinct(
+            "broadphase + narrowphase union",
+            &ids,
+            BROADPHASE_COHORT_WIDTH + NARROWPHASE_COLUMN_COUNT,
+        );
     }
 
     #[test]
@@ -737,7 +804,7 @@ mod tests {
         assert_cohort_slots_distinct(
             "broadphase cohort",
             &broadphase_cohort_ids(),
-            BROADPHASE_COLUMN_COUNT,
+            BROADPHASE_COHORT_WIDTH,
         );
         assert_cohort_slots_distinct(
             "narrowphase cohort",
@@ -757,7 +824,7 @@ mod tests {
                 "broadphase cohort",
                 broadphase_cohort_ids(),
                 SCRATCH_ID_BROADPHASE_TOP,
-                SCRATCH_ID_BROADPHASE_BOTTOM,
+                BROADPHASE_COHORT_BOTTOM,
             ),
             (
                 "narrowphase cohort",

@@ -20,7 +20,7 @@ use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
 use crate::scratch_ids::{
     body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
-    box_axis_cache_id, manifolds_id, register_narrowphase_column_layouts,
+    box_axis_cache_id, contact_pairs_id, manifolds_id, register_narrowphase_column_layouts,
     register_graph_column_layouts, register_scratch_layouts, scratch_reserve_rows,
     sensor_overlaps_id, touched_awake_id, touched_solver_id, vn_initial_id,
 };
@@ -531,20 +531,46 @@ pub enum IntegrationMode {
 ///
 /// Each pair is `(BodyIndex, BodyIndex)` keyed by the dense scratch row index
 /// (IM-1). The list is sorted deterministically by `(min, max)` (D4) so contact
-/// iteration order is reproducible (float add is non-associative). The `Vec` is
+/// iteration order is reproducible (float add is non-associative). The column is
 /// cleared and refilled each step, capacity reused.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct ContactPairs {
     /// Candidate pairs in deterministic `(min, max)` order.
-    pub pairs: Vec<(BodyIndex, BodyIndex)>,
+    ///
+    /// Backed by a `ComponentPool` column (audit Stage 4) and `pub(crate)` so the
+    /// broadphase can hand `BroadphaseGrid::build` the column itself: the O3
+    /// parallel emit needs the column's provenance-preserving write base, not a
+    /// pointer laundered through a whole-buffer `&mut [T]`. Consumers read
+    /// [`pairs`](Self::pairs).
+    pub(crate) pairs: ScratchColumn<(BodyIndex, BodyIndex)>,
+}
+
+impl Default for ContactPairs {
+    /// Hand-written because the backing column needs its reserved [`ComponentId`],
+    /// which no derive can supply.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
 }
 
 impl ContactPairs {
     /// Builds an empty pair buffer pre-sized for `capacity` pairs.
     pub fn with_capacity(capacity: usize) -> Self {
+        register_broadphase_column_layouts();
         Self {
-            pairs: Vec::with_capacity(capacity),
+            pairs: ScratchColumn::new(
+                contact_pairs_id(),
+                capacity.max(scratch_reserve_rows(size_of::<(BodyIndex, BodyIndex)>())),
+            ),
         }
+    }
+
+    /// The contiguous read slice over this step's candidate pairs, in the
+    /// deterministic `(min, max)` order the broadphase emitted.
+    #[inline]
+    pub fn pairs(&self) -> &[(BodyIndex, BodyIndex)] {
+        self.pairs.as_read_slice()
     }
 }
 
@@ -1125,8 +1151,12 @@ impl BroadphaseGrid {
     /// over the SAME [`body_bounding_radius`]-based sphere-bound predicate
     /// (`delta.length_squared() <= (rA + rB)²`). All scratch buffers are
     /// capacity-reused — no per-step heap allocation once warmed.
-    pub fn build(&mut self, bodies: &[BodyState], out: &mut Vec<(BodyIndex, BodyIndex)>) {
-        out.clear();
+    pub fn build(
+        &mut self,
+        bodies: &[BodyState],
+        out: &mut ContactPairs,
+    ) {
+        out.pairs.build_view().clear();
         self.candidates.build_view().clear();
 
         let n = bodies.len();
@@ -1148,14 +1178,19 @@ impl BroadphaseGrid {
 
         // (6) Feasibility filter (the SAME sphere-bound predicate as all-pairs) +
         // sort by (min, max). Bit-identical to the all-pairs output set.
-        for &(a, b) in self.candidates.as_read_slice() {
-            let ia = a.0 as usize;
-            let ib = b.0 as usize;
-            if Self::feasible(&bodies[ia], &bodies[ib]) {
-                out.push((a, b));
+        {
+            // One refill view for the whole filter + sort: `out` is a parameter, so
+            // it is disjoint from the `&self` borrow the candidate slice holds.
+            let mut out = out.pairs.build_view();
+            for &(a, b) in self.candidates.as_read_slice() {
+                let ia = a.0 as usize;
+                let ib = b.0 as usize;
+                if Self::feasible(&bodies[ia], &bodies[ib]) {
+                    out.push((a, b));
+                }
             }
+            out.as_mut_slice().sort_unstable();
         }
-        out.sort_unstable();
     }
 
     /// The serial CSR build shared by [`build`](Self::build) and
@@ -1662,7 +1697,11 @@ impl BroadphaseGrid {
     /// regression). The parallel-shaped path is dispatched ONLY when there are
     /// `>= 2` lanes, `n >= MIN_PARALLEL_BODIES`, and a pool is present. Either way
     /// the result is byte-identical to `build`.
-    pub fn build_parallel(&mut self, bodies: &[BodyState], out: &mut Vec<(BodyIndex, BodyIndex)>) {
+    pub fn build_parallel(
+        &mut self,
+        bodies: &[BodyState],
+        out: &mut ContactPairs,
+    ) {
         let n = bodies.len();
 
         // Shortcut: below the parallel threshold (or an empty world) → the O2 serial
@@ -1689,9 +1728,9 @@ impl BroadphaseGrid {
                 return false;
             }
             // CSR build first (serial, byte-identical to O2), then fan the emit.
-            out.clear();
+            out.pairs.build_view().clear();
             self.build_csr(bodies);
-            self.emit_passes(bodies, out, lanes * CHUNKS_PER_WORKER, Some(pool));
+            self.emit_passes(bodies, &mut out.pairs, lanes * CHUNKS_PER_WORKER, Some(pool));
             true
         });
         if dispatched != Some(true) {
@@ -1712,7 +1751,7 @@ impl BroadphaseGrid {
     fn emit_passes(
         &mut self,
         bodies: &[BodyState],
-        out: &mut Vec<(BodyIndex, BodyIndex)>,
+        out: &mut ScratchColumn<(BodyIndex, BodyIndex)>,
         n_chunks: usize,
         pool: Option<&boyko_threadpool::PoolInner>,
     ) {
@@ -1779,8 +1818,11 @@ impl BroadphaseGrid {
         // Size `out` once for the m survivors + the (≤ oversized_reserve) feasible
         // oversized pairs. The survivor region is filled by Pass B; the oversized
         // region is appended serially after.
-        out.clear();
-        out.resize(m + oversized_reserve, (BodyIndex(0), BodyIndex(0)));
+        {
+            let mut out = out.build_view();
+            out.clear();
+            out.resize(m + oversized_reserve, (BodyIndex(0), BodyIndex(0)));
+        }
 
         // Pass B: emit each cell's survivors into its `out[pair_offset[c]..]` sub-
         // range (disjoint per chunk), UNSORTED (cell-major). The single final serial
@@ -1794,7 +1836,11 @@ impl BroadphaseGrid {
             bodies_len: bodies.len(),
             pair_count: core::ptr::null_mut(),
             pair_offset: self.pair_offset.as_read_slice().as_ptr(),
-            out_base: out.as_mut_ptr(),
+            // The column's provenance-preserving write base, NOT a pointer
+            // laundered through a whole-buffer `&mut [T]`: the workers write through
+            // it concurrently, and a base branded by a slice reborrow is the exact
+            // Tree-Borrows shape that root-caused SP4.
+            out_base: out.solve_base(),
         };
         Self::run_balanced_cell_chunks(n_cells, n_chunks, pass_b_ptrs, pool, |c_lo, c_hi| {
             // SAFETY: `[c_lo, c_hi)` is one chunk's disjoint cell range. The worker
@@ -1831,13 +1877,21 @@ impl BroadphaseGrid {
         // Serial oversized emit appended after the m survivors (W3, feasibility-
         // filtered with the SAME predicate). `candidates` already holds this build's
         // oversized pairs (the verbatim O2 emitter above); filter into out[m..].
+        //
+        // The refill view is taken only HERE, after `run_balanced_cell_chunks` has
+        // joined every task: it is a `&mut` borrow of the column, and taking it
+        // while the workers' raw base was live would invalidate that base.
+        let mut out = out.build_view();
         let mut w = m;
-        for &(a, b) in self.candidates.as_read_slice() {
-            let ia = a.0 as usize;
-            let ib = b.0 as usize;
-            if Self::feasible(&bodies[ia], &bodies[ib]) {
-                out[w] = (a, b);
-                w += 1;
+        {
+            let slots = out.as_mut_slice();
+            for &(a, b) in self.candidates.as_read_slice() {
+                let ia = a.0 as usize;
+                let ib = b.0 as usize;
+                if Self::feasible(&bodies[ia], &bodies[ib]) {
+                    slots[w] = (a, b);
+                    w += 1;
+                }
             }
         }
         // Truncate any oversized slots that the feasibility filter dropped (the
@@ -1850,10 +1904,10 @@ impl BroadphaseGrid {
         // dedup) and disjoint from the distinct oversized pairs, so the sorted
         // permutation is unique: the result is the same multiset in the same
         // canonical (min, max) order as the serial `build`.
-        out.sort_unstable();
+        out.as_mut_slice().sort_unstable();
 
         debug_assert!(
-            out.windows(2).all(|p| p[0] <= p[1]),
+            out.as_slice().windows(2).all(|p| p[0] <= p[1]),
             "invariant (O3): the sorted output is non-decreasing (== O2's sort)"
         );
         debug_assert_eq!(
@@ -2023,17 +2077,17 @@ impl BroadphaseGrid {
     pub(crate) fn build_emit_shaped_forced(
         &mut self,
         bodies: &[BodyState],
-        out: &mut Vec<(BodyIndex, BodyIndex)>,
+        out: &mut ContactPairs,
         n_chunks: usize,
     ) {
-        out.clear();
+        out.pairs.build_view().clear();
         let n = bodies.len();
         if n == 0 {
             self.oversized.build_view().clear();
             return;
         }
         self.build_csr(bodies);
-        self.emit_passes(bodies, out, n_chunks, None);
+        self.emit_passes(bodies, &mut out.pairs, n_chunks, None);
     }
 
     /// The number of bodies classified oversized in the most recent

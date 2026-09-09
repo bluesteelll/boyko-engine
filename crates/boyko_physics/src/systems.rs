@@ -280,12 +280,16 @@ pub fn physics_broadphase(
     mut pairs: ResMut<ContactPairs>,
 ) {
     let bodies = scratch.bodies();
-    let pairs = &mut pairs.pairs;
+    let pairs = &mut *pairs;
 
     match cfg.broadphase {
         // The shipped all-pairs loop, kept VERBATIM so the default path's asm is
         // byte-identical to before O2 (the 0%-gate). DO NOT refactor this arm.
         BroadphaseKind::AllPairs => {
+            // The ONLY change to this arm is the receiver: `pairs` is the column's
+            // refill view instead of a `&mut Vec`. The bound test, the emit order
+            // and the loop shape below are untouched.
+            let mut pairs = pairs.pairs.build_view();
             pairs.clear();
             let n = bodies.len();
             for i in 0..n {
@@ -317,7 +321,7 @@ pub fn physics_broadphase(
     }
 
     debug_assert!(
-        pairs.windows(2).all(|w| w[0] <= w[1]),
+        pairs.pairs().windows(2).all(|w| w[0] <= w[1]),
         "invariant: broadphase pairs must be emitted in sorted (min, max) order"
     );
 }
@@ -359,7 +363,7 @@ pub fn physics_narrowphase(
     manifolds.sensor_overlaps.build_view().clear();
     // Ensure the per-pair hysteresis cache can hold this frame's pairs; it is NOT
     // cleared (a single in-place table — this frame reads last frame's axes).
-    manifolds.box_axis_cache.begin_frame(pairs.pairs.len());
+    manifolds.box_axis_cache.begin_frame(pairs.pairs().len());
     // Three disjoint field borrows of one `Manifolds`: two refill views plus the
     // hysteresis cache. The views are taken once for the whole pair loop, not per
     // push.
@@ -367,7 +371,7 @@ pub fn physics_narrowphase(
     let mut sensor_out = manifolds.sensor_overlaps.build_view();
     let axis_cache = &mut manifolds.box_axis_cache;
 
-    for &(a, b) in &pairs.pairs {
+    for &(a, b) in pairs.pairs() {
         let ia = a.0 as usize;
         let ib = b.0 as usize;
         let ba = &bodies[ia];

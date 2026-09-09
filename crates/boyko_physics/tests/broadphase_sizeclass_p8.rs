@@ -23,7 +23,7 @@
 use boyko_physics::components::ColliderShape;
 use boyko_physics::manifold::BodyIndex;
 use boyko_physics::math::Vec3;
-use boyko_physics::resources::{BodyState, BroadphaseGrid};
+use boyko_physics::resources::{BodyState, BroadphaseGrid, ContactPairs};
 use boyko_physics::systems::body_bounding_radius;
 
 use proptest::prelude::*;
@@ -67,9 +67,9 @@ fn all_pairs(bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
 
 /// Builds the grid over `bodies` into a fresh grid, returning the pair set.
 fn grid_pairs(grid: &mut BroadphaseGrid, bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
-    let mut out = Vec::new();
+    let mut out = ContactPairs::with_capacity(0);
     grid.build(bodies, &mut out);
-    out
+    out.pairs().to_vec()
 }
 
 /// Asserts the size-class grid pair set is bit-identical (same `(min, max)` order)

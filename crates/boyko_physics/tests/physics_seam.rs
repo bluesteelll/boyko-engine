@@ -299,7 +299,7 @@ fn deterministic_pair_order() {
         let mut schedule = build_schedule::<NoopSolver>(&mut world, dt);
         schedule.run(&mut world);
 
-        world.resource::<ContactPairs>().pairs.clone()
+        world.resource::<ContactPairs>().pairs().to_vec()
     }
 
     let a = run_once();

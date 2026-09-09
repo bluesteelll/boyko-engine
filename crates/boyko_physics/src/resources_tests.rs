@@ -371,17 +371,17 @@
         /// The O2 serial `build` output for `bodies` (the bit-identity reference).
         fn serial_build(bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build(bodies, &mut out);
-            out
+            out.pairs().to_vec()
         }
 
         /// The shaped-path output at a forced `n_chunks` (single-threaded, no pool).
         fn shaped_build(bodies: &[BodyState], n_chunks: usize) -> Vec<(BodyIndex, BodyIndex)> {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_emit_shaped_forced(bodies, &mut out, n_chunks);
-            out
+            out.pairs().to_vec()
         }
 
         /// Asserts the shaped path at EVERY forced chunk count is byte-for-byte
@@ -564,7 +564,7 @@
             // Non-vacuity: >= 2 giants land in the hatch (oversized–oversized
             // dedup AND oversized–normal emit are both exercised).
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_emit_shaped_forced(&bodies, &mut out, 4);
             assert!(
                 grid.oversized_len() >= 2,
@@ -645,11 +645,11 @@
                 .collect();
 
             let mut reused = BroadphaseGrid::with_capacity(64);
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             // Warm on scene A at a DIFFERENT chunk count, then rebuild scene B.
             reused.build_emit_shaped_forced(&scene_a, &mut out, 8);
             reused.build_emit_shaped_forced(&scene_b, &mut out, 4);
-            let reused_b = out.clone();
+            let reused_b = out.pairs().to_vec();
 
             let fresh_b = shaped_build(&scene_b, 4);
             assert_eq!(
@@ -711,10 +711,11 @@
             }
             let serial = serial_build(&bodies);
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(&bodies, &mut out);
             assert_eq!(
-                out, serial,
+                out.pairs().to_vec(),
+                serial,
                 "build_parallel's no-pool route (the Miri-reachable branch) == serial build"
             );
         }
