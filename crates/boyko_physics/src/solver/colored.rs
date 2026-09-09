@@ -254,6 +254,59 @@ const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
 /// never the bits. `4` is a starting point the bench sweeps (3..=8 typical).
 const CHUNKS_PER_WORKER: usize = 6;
 
+/// Minimum SLOTS a dispatched chunk must carry, so a chunk pays for its own
+/// boxed closure.
+///
+/// ⚠ WITHOUT THIS, MORE WORKERS MAKE THE STEP SLOWER, AND THAT IS MEASURED. The
+/// chunk count was `lanes * CHUNKS_PER_WORKER` clamped only by the GROUP count —
+/// a function of the machine and of the partition, and of nothing about the work
+/// inside a chunk. A color that just clears
+/// [`MIN_PARALLEL_SLOTS_PER_COLOR`] (256 slots) therefore split into
+/// `16 * 6 = 96` chunks on a 16-lane pool: about 2.7 slots of work per boxed
+/// closure. Adding lanes added allocations against fixed work, so the Jolt-parity
+/// pyramid measured 0.82x at 8 workers and 0.56x at 16 — NEGATIVE scaling.
+///
+/// The two existing constants do not cover this. `MIN_PARALLEL_SLOTS_PER_COLOR`
+/// decides WHETHER a color dispatches at all; nothing decided HOW FINELY it was
+/// then cut. The kernel's own row driver has had exactly this floor since it was
+/// written (`BatchingStrategy::min_batch_size`) — this is the physics dispatcher
+/// catching up with it.
+///
+/// Bit-identity is unaffected: the `{1, N}` property holds for ANY partition
+/// (distinct chunks touch disjoint dynamic bodies and the canonical warm store is
+/// order-independent), so this changes only WHERE work runs, never the values.
+///
+/// # ⚠ The value is 64 because 256 was MEASURED to be better on one scene and to
+/// # BREAK another — a single global constant cannot serve both
+///
+/// Swept on the Jolt-parity pyramid (`benches/jolt_parity_pyramid.rs`), W = 8 / 16:
+///
+/// | floor |  W8 ms | W16 ms |
+/// |------:|-------:|-------:|
+/// |    32 |  22.87 |  29.67 |
+/// |    64 |  21.60 |  26.99 |
+/// |   128 |  20.93 |  25.13 |
+/// |   256 |  20.14 |  20.98 |
+///
+/// Monotone, still descending at 256 — so on that scene alone the answer is
+/// "raise it". Raising it to 256 turns
+/// `many_disjoint_pairs_are_one_wide_color_and_must_dispatch` RED: that scene is
+/// ONE colour of 500 slots, `500 / 256 == 1` chunk, and the single-chunk
+/// short-circuit below then sends it inline — undoing the whole measured 1.95x
+/// win of the P2 gate-metric fix.
+///
+/// The two scenes want opposite things and both are legitimate. A pyramid is many
+/// NARROW colours, so its cost is per-wave dispatch and it wants coarse chunks; a
+/// debris pile is ONE WIDE colour, so its cost is idle lanes and it wants fine
+/// ones. No single integer is right for both, which is the concrete case for
+/// making the cut policy a per-call-site OBJECT rather than a global constant —
+/// argued elsewhere in this campaign, measured here.
+///
+/// 64 is therefore chosen as the largest value that keeps BOTH gates green, not
+/// as the optimum of either. It captures most of the pyramid win (26.99 vs 35.26
+/// ms unfloored at W = 16) without refusing the wide-colour dispatch.
+const MIN_SLOTS_PER_CHUNK: usize = 64;
+
 /// O7 SIMD cohort width: the number of body-disjoint manifold-GROUPS packed into
 /// one AVX2 batch (one group per lane = 8 lanes per `__m256`).
 ///
@@ -2694,7 +2747,24 @@ impl ColoredSoftStepSolver {
             // dynamic bodies), so this is a pure, bench-tunable perf knob, never a
             // value change.
             let lanes = pool.num_threads();
-            let n_chunks = (lanes * CHUNKS_PER_WORKER).clamp(1, n_groups);
+            // Work-bounded, not just lane-bounded: a chunk must carry at least
+            // `MIN_SLOTS_PER_CHUNK` slots, or the split costs more in boxed
+            // closures than the extra lane returns. See the const for the measured
+            // failure this floor removes.
+            let by_lanes = lanes * CHUNKS_PER_WORKER;
+            let by_work = ((span.1 - span.0) / MIN_SLOTS_PER_CHUNK).max(1);
+            let n_chunks = by_lanes.min(by_work).clamp(1, n_groups);
+
+            // A ONE-chunk dispatch spawns a single task and then waits for it —
+            // strictly worse than running the color on this thread, since the
+            // caller is a worker and would otherwise be doing the work itself.
+            // `MIN_PARALLEL_SLOTS_PER_COLOR` cannot express this: it is a floor on
+            // the COLOR, while whether a color yields more than one chunk depends
+            // on the work floor and the group count too. Refuse here and let the
+            // caller take the inline path.
+            if n_chunks < 2 {
+                return false;
+            }
 
             // Balance by total SLOT count (work), not group count: groups vary in
             // width (1..=MAX_CONTACT_POINTS points), so an equal-GROUP split is
@@ -2871,13 +2941,17 @@ impl ColoredSoftStepSolver {
                     }
                 }
             });
+            true
         });
 
         // PAR-fallback: no pool attached → run the color single-threaded, routed
         // through the O7 dispatch fork so `simd` still widens (over the whole
         // color's groups as cohorts) and `!simd` is BYTE-IDENTICAL to O5 (the same
         // `solve_color` over the whole color span).
-        if dispatched.is_none() {
+        // `None` = no pool attached; `Some(false)` = a pool was attached but the
+        // color did not split into two or more chunks, so dispatching it would have
+        // been one task and a wait. Both take the inline path.
+        if dispatched != Some(true) {
             Self::solve_color_dispatch(
                 view,
                 bodies_eff,

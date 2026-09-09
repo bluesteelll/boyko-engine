@@ -237,57 +237,6 @@ pub(crate) fn graph_column_id(k: usize) -> ComponentId {
     ComponentId::new(SCRATCH_ID_GRAPH_TOP - k)
 }
 
-// ── The BROADPHASE cohort (audit Stage 4) ───────────────────────────────────
-//
-// `BroadphaseGrid`'s twelve buffers are swept together by `build` — the fine
-// CSR (`counts` -> `cell_start` -> `cell_bodies` via `cursor`), the coarse
-// size-class CSR, the oversized list and the pair bookkeeping — so they are one
-// cohort. They may share cache-set slots with the solver and graph cohorts,
-// which run at different times.
-
-/// Number of `ScratchColumn`s backing [`BroadphaseGrid`](crate::resources::BroadphaseGrid).
-pub(crate) const BROADPHASE_COLUMN_COUNT: usize = 12;
-
-/// Top of the broadphase cohort — one id below the graph cohort's bottom.
-pub(crate) const SCRATCH_ID_BROADPHASE_TOP: usize = SCRATCH_ID_GRAPH_BOTTOM - 1;
-
-/// Bottom of the broadphase cohort (inclusive).
-pub(crate) const SCRATCH_ID_BROADPHASE_BOTTOM: usize =
-    SCRATCH_ID_BROADPHASE_TOP - (BROADPHASE_COLUMN_COUNT - 1);
-
-const _: () = assert!(
-    BROADPHASE_COLUMN_COUNT <= POOL_STAGGER_LINES,
-    "the broadphase cohort is wider than one stagger period"
-);
-
-const _: () = assert!(
-    SCRATCH_ID_BROADPHASE_TOP < SCRATCH_ID_GRAPH_BOTTOM,
-    "the broadphase cohort overlaps the constraint-graph cohort"
-);
-
-/// The [`ComponentId`] for broadphase column `k` (`0`-based, in field order).
-#[inline]
-pub(crate) fn broadphase_column_id(k: usize) -> ComponentId {
-    debug_assert!(k < BROADPHASE_COLUMN_COUNT, "broadphase column index out of cohort");
-    ComponentId::new(SCRATCH_ID_BROADPHASE_TOP - k)
-}
-
-/// Registers the element layout of every [`BroadphaseGrid`] column, idempotently.
-///
-/// Eleven `u32` columns and one `f32` (`scratch_radii`). Both are 4-byte POD, but
-/// they are registered under their real types: the registry's collision check
-/// keys on `(slot, TypeId)`, so a wrong-typed reuse of a slot panics loudly
-/// instead of silently aliasing.
-pub(crate) fn register_broadphase_column_layouts() {
-    for k in 0..BROADPHASE_COLUMN_COUNT {
-        if k == 9 {
-            register_layout::<f32>(broadphase_column_id(k).get());
-        } else {
-            register_layout::<u32>(broadphase_column_id(k).get());
-        }
-    }
-}
-
 /// Registers the element layout of every [`ConstraintGraph`] column, idempotently.
 ///
 /// Seven `u32` columns and one `u64` (`color_occ`'s bitset words). Same-type
