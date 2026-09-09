@@ -150,12 +150,7 @@ impl BoxAxisCache {
         // other scratch column gets rather than this frame's length.
         let reserve = len.max(scratch_reserve_rows(size_of::<AxisEntry>()));
         let mut slots = ScratchColumn::new(id, reserve);
-        {
-            let mut view = slots.build_view();
-            for _ in 0..len {
-                view.push(AxisEntry::empty());
-            }
-        }
+        slots.build_view().resize(len, AxisEntry::empty());
         Self {
             slots,
             mask: len - 1,
@@ -187,11 +182,11 @@ impl BoxAxisCache {
         let len = next_pow2(2 * pairs.max(1));
         if len > self.slots.len() {
             // Grow to a fresh larger table; it starts empty, so occupancy resets.
+            // `clear` before `resize` is what makes it fresh — the surviving prefix
+            // would otherwise keep last frame's keys.
             let mut view = self.slots.build_view();
             view.clear();
-            for _ in 0..len {
-                view.push(AxisEntry::empty());
-            }
+            view.resize(len, AxisEntry::empty());
             self.mask = len - 1;
             self.shift = shift_for(len);
             self.occupied = 0;

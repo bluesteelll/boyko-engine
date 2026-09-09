@@ -235,12 +235,7 @@ impl WarmStartTable {
         // length.
         let reserve = len.max(scratch_reserve_rows(size_of::<WarmEntry>()));
         let mut slots = ScratchColumn::new(id, reserve);
-        {
-            let mut view = slots.build_view();
-            for _ in 0..len {
-                view.push(WarmEntry::empty());
-            }
-        }
+        slots.build_view().resize(len, WarmEntry::empty());
         Self {
             slots,
             mask: len - 1,
@@ -261,17 +256,12 @@ impl WarmStartTable {
         // needs and what the table already has.
         let len = next_pow2(2 * contacts.max(1)).max(self.slots.len());
         {
+            // `clear` + `resize` is the whole rebuild: it zeroes EVERY slot,
+            // including the slack past the needed length that `mask` still covers,
+            // and grows only (the `max` above is what keeps it from shrinking).
             let mut view = self.slots.build_view();
-            // Append rather than clear + refill: the surviving prefix is overwritten
-            // with EMPTY just below, so a clear would only buy extra pushes.
-            for _ in view.len()..len {
-                view.push(WarmEntry::empty());
-            }
-            // Zero every live slot (the whole buffer, including any slack past the
-            // needed length — `mask` covers the full current length).
-            for slot in view.as_mut_slice() {
-                *slot = WarmEntry::empty();
-            }
+            view.clear();
+            view.resize(len, WarmEntry::empty());
         }
         self.mask = len - 1;
         self.shift = shift_for(len);

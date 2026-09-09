@@ -3521,15 +3521,12 @@ impl TouchedMask {
     #[inline]
     pub fn reset(&mut self, rows: usize) {
         let needed = rows.div_ceil(BITS_PER_CHUNK);
-        // `ScratchBuildView` has no `resize`, and does not need one: `clear` keeps
-        // the committed pages, so refilling with zeroed chunks costs `rows / 256`
-        // pushes — 40 of them for a 10 000-body scene, against the 10 000-element
-        // sweeps around it.
+        // `clear` first, then `resize`: a bare `resize` down would KEEP the
+        // surviving prefix's bits, and this is a reset. `clear` is O(1) and leaves
+        // the committed pages, so the fill is the only work.
         let mut view = self.chunks.build_view();
         view.clear();
-        for _ in 0..needed {
-            view.push(BitSet256::new());
-        }
+        view.resize(needed, BitSet256::new());
     }
 
     /// Marks row `index` as touched.
