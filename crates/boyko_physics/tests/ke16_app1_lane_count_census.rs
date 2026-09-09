@@ -23,8 +23,8 @@
 //!
 //! So a reintroduced `+ 1` — the single most likely regression of this item, because the old
 //! rationale reads plausibly and three sites must agree — would ship green. A source census is
-//! what the repo already uses for exactly this class (`tests/isa_baseline_census.rs`,
-//! `crates/boyko_ecs/tests/ke16_witness_census.rs`, `solver/simd.rs`'s no-FMA census): the property
+//! what the repo already uses for exactly this class (`tests/isa_baseline_census.rs` and
+//! `solver/simd.rs`'s no-FMA census): the property
 //! is a property OF THE SOURCE, so the gate reads the source.
 //!
 //! ## What the scan is, precisely

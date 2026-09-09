@@ -124,40 +124,43 @@
 //! `-Zmiri-many-seeds=0..4` demonstrates the seed-independence rather than
 //! assuming it.
 //!
-//! # The two arms, and the DEBT that belongs to the second one
+//! # The two arms, and why the second one needed a test of its own
 //!
 //! `complete_task` has two arms and both carry the protector, so both are gated
-//! here, by one test each:
+//! here, by one test each. Which arm runs is a property of the SCOPE rather than
+//! of the build: `ScopeShared::new` writes a non-null `joiner_wake` only for a
+//! scope opened by a worker of its own pool, and that pointer selects the arm.
 //!
 //! * `completer_holds_no_protector_when_the_joiner_frees` — the EXTERNAL-joiner
-//!   arm, which the default build ships and which an `install` from a non-worker
-//!   thread reaches.
+//!   arm, which a null `joiner_wake` selects and which an `install` from a
+//!   non-worker thread reaches.
 //! * `worker_joiner_completer_holds_no_protector_when_the_joiner_frees` — the
-//!   `ke16-w-count` W-d′ arm, selected by a non-null `joiner_wake`, which
-//!   requires the scope to have been opened BY A WORKER of its own pool.
+//!   count-gated W-d′ arm, selected by a non-null `joiner_wake`, which requires
+//!   the scope to have been opened BY A WORKER of its own pool.
 //!
-//! THE SECOND IS A DEBT OF THE ARM, NOT A LIMITATION OF THIS FILE. `ke16-w-count`
-//! either gets deleted when the tournament closes, or it becomes the completion
-//! path of every task in the engine — and the pass that makes it the default
-//! must not ship an undecided one. Before this test existed, NO test in ANY
-//! configuration decided the protector property for that arm: reaching it is not
-//! enough, because Miri aborts on UB regardless of what a test asserts, and
-//! MEASURED, `miri_scope.rs::nested_scope_from_worker_is_stolen_by_sibling` under
-//! `--features ke16-w-count,ke16-a2` is GREEN with the defect deliberately
-//! reintroduced. It reaches the arm; it does not force the interleaving.
+//! The second one is why this file has the shape it does. The W-d′ arm is the
+//! completion path of every worker-opened scope in the engine, and before this
+//! test existed NO test decided the protector property for it: reaching the arm
+//! is not enough, because Miri aborts on UB regardless of what a test asserts.
+//! MEASURED 2026-09-05, in a build carrying this arm together with a placement
+//! that delivers a worker-spawned wave to sibling lanes,
+//! `miri_scope.rs::nested_scope_from_worker_is_stolen_by_sibling` is GREEN with
+//! the defect deliberately reintroduced. It reaches the arm; it does not force
+//! the interleaving.
 //!
-//! The W-d′ test needs an A arm as well as `ke16-w-count`, and that is a
-//! property of the pool rather than of the test: without one, a worker-spawned
-//! wave never leaves the lane it was spawned on, so the nested scope's last
-//! completer is the joining worker itself and there is no window at all. It is
-//! `#[ignore]`d with that reason in a `ke16-w-count`-only build rather than
-//! passing vacuously.
+//! The W-d′ test also needs the pool to deliver a worker-spawned wave to SIBLING
+//! lanes, and that is a property of the pool rather than of the test: were a
+//! worker's spawns to stay in the lane they were spawned on, the nested scope's
+//! last completer would be the joining worker itself and there would be no
+//! window at all. The shipped placement puts them on the worker's own registered
+//! deque, where a sibling steals them, so the window is offered and the test
+//! decides it rather than passing vacuously.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
-#[cfg(feature = "ke16-w-count")]
-use boyko_threadpool::try_with_active_pool;
-use boyko_threadpool::{ThreadPool, ThreadPoolBuilder, WORKER_ID_DISPATCHER, current_worker_id};
+use boyko_threadpool::{
+    ThreadPool, ThreadPoolBuilder, WORKER_ID_DISPATCHER, current_worker_id, try_with_active_pool,
+};
 
 /// Worker threads. Two is enough: the window is per scope and needs exactly one
 /// off-joiner completer, and every extra thread multiplies Miri's interleaving
@@ -540,9 +543,9 @@ fn completer_holds_no_protector_when_the_joiner_frees() {
 
         // `install` from the test's own thread rewrites `CURRENT_WORKER_ID` to
         // `WORKER_ID_DISPATCHER`, so `ScopeShared::new` is handed a null W-d′
-        // target and every completion takes the EXTERNAL-joiner arm — the arm
-        // the default build ships, and the only one this shape can reach (see
-        // the header's coverage note).
+        // target and every completion takes the EXTERNAL-joiner arm — the arm a
+        // null target selects, and the only one this shape can reach (see the
+        // header's coverage note).
         pool.install(|scope| {
             let ran = &ran;
             let started = &started;
@@ -598,9 +601,8 @@ fn completer_holds_no_protector_when_the_joiner_frees() {
     // mid-line across seeds (measured 2026-09-04 on the sibling probe: 29 of 64
     // census lines survived).
     let census = format!(
-        "KE16-PROTECTOR-GATE-CENSUS variant={} scopes={SCOPES} tasks_per_scope={TASKS_PER_SCOPE} \
+        "KE16-PROTECTOR-GATE-CENSUS scopes={SCOPES} tasks_per_scope={TASKS_PER_SCOPE} \
          workers={WORKERS} bodies={} windows={windows}\n",
-        boyko_threadpool::ke16_variant(),
         ran.load(Ordering::Acquire),
     );
     {
@@ -639,7 +641,8 @@ fn completer_holds_no_protector_when_the_joiner_frees() {
 /// exactly the class this file exists to gate, one level further out, and would
 /// have made this gate report that one instead of the one it names. MEASURED
 /// 2026-09-05 against the THEN-shipped `Box<dyn FnOnce>` task element, with the
-/// raw-pointer `complete_task` receiver, under `ke16-w-count,ke16-a2`:
+/// raw-pointer `complete_task` receiver, on a worker-opened nested scope whose
+/// wave reached sibling lanes:
 ///
 /// ```text
 /// error: Undefined Behavior: deallocation through <425590> (root of the allocation)
@@ -682,7 +685,6 @@ fn completer_holds_no_protector_when_the_joiner_frees() {
 /// `ScopeShared` protector and nothing else. What is NOT carried here is an
 /// EXECUTED arm in the original nested-in-detached shape; that is a coverage
 /// item, tracked for the stage that owns nested-scope arms, not an open defect.
-#[cfg(feature = "ke16-w-count")]
 mod w_state {
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize};
 
@@ -710,19 +712,21 @@ mod w_state {
 ///
 /// # Why this test has to exist separately
 ///
-/// `complete_task`'s `ke16-w-count` arm is selected by a non-null `joiner_wake`,
+/// `complete_task`'s count-gated arm is selected by a non-null `joiner_wake`,
 /// which `ScopeShared::new` writes only when `tls::worker_lane_for(inner)`
 /// answers `Some` — i.e. only when the scope was opened BY A WORKER of its own
 /// pool. No `install` from the test thread can reach it, so the sibling test
-/// above certifies nothing about it however it is built.
+/// above certifies nothing about it.
 ///
 /// And REACHING the arm is not enough either, which is the trap this test was
 /// written to close. Miri aborts the interpreter on UB regardless of what a test
 /// asserts, so it is tempting to treat any test that runs the arm as a gate for
-/// it. MEASURED by the KE16 code review: with the defect deliberately
-/// reintroduced, `miri_scope.rs::nested_scope_from_worker_is_stolen_by_sibling`
-/// under `--features ke16-w-count,ke16-a2` is GREEN. It reaches the arm; it does
-/// not force the interleaving, so it decides nothing about the protector.
+/// it. MEASURED by the KE16 code review, in a build carrying this arm together
+/// with a placement that delivers a worker-spawned wave to sibling lanes: with
+/// the defect deliberately reintroduced,
+/// `miri_scope.rs::nested_scope_from_worker_is_stolen_by_sibling` is GREEN. It
+/// reaches the arm; it does not force the interleaving, so it decides nothing
+/// about the protector.
 ///
 /// # Shape
 ///
@@ -740,19 +744,17 @@ mod w_state {
 /// sibling. Fewer, and the joining worker runs a nested body inline and closes
 /// the window.
 ///
-/// # Why an A arm is required, and why that is the ARM's debt and not this
-/// file's limitation
+/// # Why the window exists at all: the wave must reach SIBLING lanes
 ///
-/// Without an A arm a worker-spawned wave never leaves the lane it was spawned
-/// on: the nested bodies stay in the joining worker's own queue, it runs them
-/// itself, and its own `complete_task` is the last completer — the same thread
-/// decrements and frees, so there is no window to decide. The test is therefore
-/// `#[ignore]`d, with that reason, in a `ke16-w-count`-only build rather than
-/// passing vacuously. `ke16-w-count` either gets deleted when the tournament
-/// closes or becomes the completion path of every task in the engine, and the
-/// pass that makes it the default must not ship an undecided one.
+/// Were a worker's spawns to stay in the lane they were spawned on, the nested
+/// bodies would sit in the joining worker's own queue, it would run them itself,
+/// and its own `complete_task` would be the last completer — the same thread
+/// decrements and frees, so there would be no window to decide. The shipped
+/// placement puts a worker's spawns on its own registered deque, where a sibling
+/// steals them; that is what makes the `WINDOWS == SCOPES_W` assert below a gate
+/// rather than a hope, on the arm every worker-opened scope completes through.
 ///
-/// # Verdict, MEASURED 2026-09-05 under `--features ke16-w-count,ke16-a2` at
+/// # Verdict, MEASURED 2026-09-05 on the worker-opened arm at
 /// `-Zmiri-preemption-rate=0`
 ///
 /// | `complete_task` receiver | burst placement   | verdict |
@@ -771,23 +773,7 @@ mod w_state {
 /// for, and does NOT decide the placement. The placement is kept after the
 /// unpark because it dominates — it makes the probe independent of the joiner's
 /// park state — and `scope.rs` now says so at that strength.
-#[cfg(feature = "ke16-w-count")]
 #[test]
-#[cfg_attr(
-    not(any(
-        feature = "ke16-a1",
-        feature = "ke16-a1-fifo",
-        feature = "ke16-a2",
-        feature = "ke16-a3",
-        feature = "ke16-a5"
-    )),
-    ignore = "deferred: KE16 — the W-d′ window needs a worker-spawned wave to reach SIBLING \
-              lanes, which defect A denies in a build with no A arm: the nested bodies stay in \
-              the joining worker's own queue, it runs them itself, and the last completer is the \
-              joiner, so there is no completion-vs-free window to decide. This is a DEBT OF THE \
-              ARM, not of this file — `ke16-w-count` must not become the default until this test \
-              runs and passes in the configuration that ships."
-)]
 fn worker_joiner_completer_holds_no_protector_when_the_joiner_frees() {
     use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 
@@ -875,9 +861,8 @@ fn worker_joiner_completer_holds_no_protector_when_the_joiner_frees() {
     let outer = w_state::OUTER_WID.load(Acquire);
     let windows = w_state::WINDOWS.load(Relaxed);
     let census = format!(
-        "KE16-PROTECTOR-GATE-CENSUS-W variant={} scopes={SCOPES_W} nested_bodies={NESTED_BODIES} \
+        "KE16-PROTECTOR-GATE-CENSUS-W scopes={SCOPES_W} nested_bodies={NESTED_BODIES} \
          workers={WORKERS_W} outer_wid={outer} bodies={} windows={windows}\n",
-        boyko_threadpool::ke16_variant(),
         w_state::RAN.load(Acquire),
     );
     {
@@ -1017,9 +1002,8 @@ fn body_environment_protector_expires_before_the_borrowed_frame_pops() {
 
     // One pre-formatted line, for the `-Zmiri-many-seeds` reason given above.
     let census = format!(
-        "KE16-PROTECTOR-GATE-CENSUS-ENV variant={} scopes={SCOPES} \
+        "KE16-PROTECTOR-GATE-CENSUS-ENV scopes={SCOPES} \
          tasks_per_scope={TASKS_PER_SCOPE} workers={WORKERS} bodies={} windows={windows}\n",
-        boyko_threadpool::ke16_variant(),
         ran.load(Ordering::Acquire),
     );
     {

@@ -405,7 +405,9 @@ needs the same quiet machine B4-0(3) already needed.
    under `not(any(b1, b3))`; unwidened, `a3+b4` reports `b0` while the witness certifies the run —
    the quiet mislabelling `lib.rs:139-148` exists to forbid. (c)
    `tests/ke16_feature_scheme_census.rs:55-67`, `:79-90` hard-code the switch list and the illegal
-   pairs; declaring `ke16-b4` reds rules 1 and 4. (d) The `worker_lane_for` unit rows at `tls.rs:744`
+   pairs; declaring `ke16-b4` reds rules 1 and 4. ⚠ Those two anchors are AS OF this analysis: Step
+   App deleted that census together with the `ke16-*` switches it censused, so they resolve only
+   against history. (d) The `worker_lane_for` unit rows at `tls.rs:744`
    are A1-cfg'd, so the newly live predicate branch ships **with no unit coverage**. (a)-(c) are
    loud; (d) is the quiet one.
 2. **The Miri-vacuity ground in §3 is true but is not the load-bearing reason.** There is genuinely

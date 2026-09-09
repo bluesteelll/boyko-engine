@@ -63,8 +63,8 @@ environment `MIRIFLAGS` replaces rather than extends it.
 ## §What. The change, and what it costs
 
 **Today**, one heap allocation per spawned task. `alloc_cell` is
-`crates/boyko_threadpool/src/task/detached.rs:74-90` — the cell class is exactly `Layout::new::<C>()`
-(`:76`) and the failure mode is `handle_alloc_error` (`:86-88`). *(Plan5's §3 class table and its
+`crates/boyko_threadpool/src/task/detached.rs:81-97` — the cell class is exactly `Layout::new::<C>()`
+(`:83`) and the failure mode is `handle_alloc_error` (`:93-95`). *(Plan5's §3 class table and its
 §2.3 Q4 answer cite `task.rs:334-348` and `task.rs:345-347`; both are **STALE** — the file is gone,
 though both statements are still TRUE about the code. `alloc_cell` is now `pub(super)` with a single
 remaining caller, on the detached path, at `src/task/mod.rs:292`.)*
@@ -583,7 +583,7 @@ in writing at two sites — `src/scope.rs:139-146`:
 > ARMED-NESS IS NOT MONOTONIC IN THIS NUMBER … reconstruction B is DISARMED at 8 … while armed at
 > 4, 5, 6, 7, 10, 12, 16, 24 and 32 … NO constant threshold can certify it
 
-(repeated at `src/task/detached.rs:62-69`). 3y did land the substrate that makes 3z cheap if the
+(repeated at `src/task/detached.rs:69-76`). 3y did land the substrate that makes 3z cheap if the
 trigger fires: `src/scope.rs:216-223`, quoted in §Sound.
 
 ⚠ **3z was DEFERRED, not reverted** — which is why exit condition 5's written fallback ("if 3z was
@@ -747,7 +747,9 @@ cargo test -p boyko-threadpool --features ke16-c-batch --test block_allocation_r
 ```
 
 The default feature set is empty (`crates/boyko_threadpool/Cargo.toml:37`), mechanically pinned by
-`tests/ke16_feature_scheme_census.rs:222`. One expected-constant set serves both arms because both
+`tests/default_feature_set.rs::the_default_feature_set_is_empty` — it was
+`tests/ke16_feature_scheme_census.rs:222` until Step App deleted that census with the `ke16-*`
+switches, and the row was moved rather than dropped because the property outlives the campaign. One expected-constant set serves both arms because both
 funnel through `prepare` → `Task::new_scoped` → `emplace` (`src/scope.rs:1059`; `:1137`/`:1151`;
 `:1327`). ⚠ **In the DEFAULT build R1b is a duplicate of R1a**, since `spawn_batch` is literally
 `for f in bodies { self.spawn(f) }` — **so the `ke16-c-batch` re-run is the load-bearing half of this
@@ -756,7 +758,7 @@ condition, not a formality: it is the only configuration in which R1b tests a se
 **3. The rewritten teardown tests, Miri, leak checking ON.** `src/task.rs` is gone; the scoped tests
 are `src/task/scoped.rs:222-268` and `:270-309` (each opens a `ScopeBlock::new()` at `:229`/`:273`
 and calls `block.free_all()` at `:267`/`:308`), with detached siblings at
-`src/task/detached.rs:158-189` and `:190+`. The recipe is stated at `src/task/mod.rs:385-393` —
+`src/task/detached.rs:165-196` and `:197+`. The recipe is stated at `src/task/mod.rs:385-393` —
 `MIRIFLAGS` **without** `-Zmiri-ignore-leaks`, which is already the tree's default
 (`.cargo/config.toml:14-15` = `-Zmiri-tree-borrows`; CI's Miri job sets no `MIRIFLAGS` at all).
 
@@ -790,7 +792,7 @@ MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-proven
 **Read the verdict off the `KE16-PROTECTOR-GATE-ARMED` line
 (`tests/miri_scope_completion_protector.rs:343-344`), never off the exit code.** ⚠ **If it reads
 `overlaps=0/2` there is NO discharge path**: re-tuning is refused in writing
-(`src/scope.rs:139-146`, `src/task/detached.rs:62-69`) and 3z is not in the tree. **This is the one
+(`src/scope.rs:139-146`, `src/task/detached.rs:69-76`) and 3z is not in the tree. **This is the one
 condition with no remedy if it goes red, and the register carries it as an accepted risk rather than
 a plan.** The reason it is a real risk and not a formality is written into the tree itself:
 `src/task/detached.rs:42`, *"THE `debug_assert!` BELOW, AND THE RE-CHECK THIS COMMIT OWES"*, with
@@ -880,7 +882,7 @@ REFUTED, 7 were STALE**, out of 55 checked; 32 were CONFIRMED and 2 are UNVERIFI
 | §2.1: "Drift is a build failure" of the layout claim | the size and align pins **do not cover the field ORDER** the one-cache-line claim rests on; no `offset_of` pin exists |
 | §3: `__layout_receipt` publishes **five** literals; double asserts for `ScopedCell` only | **seven**, and the tree carries three ALIGN pins plan5 never mentions — leaving alignment to the test is the vacuity `src/lib.rs:558-563` names |
 | §3: the instrument is **four `AtomicUsize`** statics | three `AtomicUsize` + one **`AtomicIsize`** (`CHUNK_LIVE`), six atomic statics in all |
-| §3/§2.3: `alloc_cell` at `task.rs:334-348`, `handle_alloc_error` at `:345-347` | `src/task/detached.rs:74-90`, `:86-88` |
+| §3/§2.3: `alloc_cell` at `task.rs:334-348`, `handle_alloc_error` at `:345-347` | `src/task/detached.rs:81-97`, `:93-95` |
 | §2.3: `schedule.rs:455` is a scope **per dispatch round** | **one scope per `Schedule::run`, per frame**; anchor correct, label wrong |
 | §2.3: the schedule row's upper end is "**57 KiB**" | 57,344 B = **56.0 KiB** (57.3 kB decimal) |
 | §2.3: the row's low end is "3.6 KiB" | **UNVERIFIABLE** — not re-derivable from the row's own inputs |
@@ -918,7 +920,9 @@ refusal from an absence.** Fix: assert the `compile_error!`'s diagnostic text.
 **2. ⚠ `tb-neg-m2w` is invisible to the feature census, in both directions.**
 `tests/ke16_feature_scheme_census.rs:204-208` filters manifest features by `.starts_with("ke16-")`
 (`:207`), so a `tb-neg-m2w` row is invisible to `the_declared_switch_set_is_exactly_the_designs_eleven`
-**and** to `every_declared_switch_has_either_an_arm_or_a_refusal` (`:261`). plan5 §4's obligation to
+**and** to `every_declared_switch_has_either_an_arm_or_a_refusal` (`:261`). ⚠ Every anchor in this
+paragraph is AS OF this analysis: Step App deleted that census with the `ke16-*` switches, and both
+named tests went with it. plan5 §4's obligation to
 "re-confirm at implementation time" is hereby **discharged in the safe direction** — the census will
 not reject the new row — and that is exactly why `tests/tb_neg_m2w_arm_present.rs` is owed and why
 condition 9 cannot be the only guard.

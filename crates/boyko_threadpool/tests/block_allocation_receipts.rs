@@ -147,9 +147,8 @@
 //! The cell class is deliberately **not** in R4'. R1 already asserts zero
 //! there, and the detached cells R0 creates are freed asynchronously in
 //! `run_detached`, so asserting their net would re-import a join that does not
-//! exist: `ThreadPool::spawn` has no completion accounting (see
-//! `tests/loom_pool.rs`'s fire-and-forget note and
-//! `tests/ke16_w_wake_completion.rs`'s
+//! exist: `ThreadPool::spawn` returns `()` and registers nothing, so it has no
+//! completion accounting (see `tests/ke16_w_wake_completion.rs`'s
 //! `w_b_a_fire_and_forget_wave_into_a_parked_pool_runs_every_task_exactly_once`,
 //! whose drain shape this file reuses).
 //!
@@ -615,10 +614,11 @@ fn detached_body(done: Arc<AtomicUsize>) -> impl FnOnce() + Send + 'static {
 /// Spin until `done` reaches `want`, with the pool deliberately kept ALIVE.
 ///
 /// The shape is `ke16_w_wake_completion.rs`'s
-/// `w_b_a_fire_and_forget_wave_into_a_parked_pool_runs_every_task_exactly_once`
-/// and the note at `loom_pool.rs`: waiting by dropping the pool would unpark
-/// every worker and recover the very strand a fire-and-forget wave can suffer,
-/// so the wave is awaited on its own counter instead.
+/// `w_b_a_fire_and_forget_wave_into_a_parked_pool_runs_every_task_exactly_once`:
+/// waiting by dropping the pool would unpark every worker
+/// (`thread_pool.rs`'s `shutdown_and_join`, which the pool's `Drop` runs) and
+/// so recover the very strand a fire-and-forget wave can suffer, so the wave is
+/// awaited on its own counter instead.
 ///
 /// The deadline is a diagnostic, not a gate: a strand here means the test
 /// panics with a legible message instead of hanging until the harness is
@@ -845,10 +845,10 @@ fn the_scoped_task_path_allocates_no_cell_and_the_block_accounts_for_every_chunk
     // the injector (`Block` is 1520 B / align 8, `Buffer<Task>` is a
     // power-of-two multiple of 16 B / align 8, and the match is exact).
     //
-    // Both arms are asserted with the SAME constant: under the default build
-    // `spawn_batch` is `for f in bodies { self.spawn(f) }`, and under
-    // `ke16-c-batch` it is one `prepare` per body — the same `emplace` either
-    // way, precisely because kind B is deleted.
+    // Both entry points are asserted with the SAME constant: `Scope::spawn_batch`
+    // is `for f in bodies { self.spawn(f) }` (`src/scope.rs`), so every body it
+    // takes reaches the same `prepare` -> `new_scoped` -> `emplace` seam
+    // `Scope::spawn` reaches.
     // -----------------------------------------------------------------
     reset_cumulative();
     pool.install(|s| {

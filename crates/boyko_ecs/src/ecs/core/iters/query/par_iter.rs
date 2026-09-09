@@ -391,13 +391,16 @@ fn for_each_impl<D, F, Body>(
                 }
 
                 let chunk_size = strategy.chunk_size(entity_count, worker_count);
-                // KE16 App-4: this archetype's wave in ONE `pending` RMW and one
-                // wake decision instead of `n_chunks` of each. The count is the
-                // closed form of the walk it replaces — `chunk_size >= 1`, so
-                // the `[i * chunk_size, min((i+1) * chunk_size, entity_count))`
-                // ranges are exactly the ranges the `while start < entity_count`
-                // loop visited, in the same order. Without `ke16-c-batch`
-                // `spawn_batch` is one `spawn` per body, i.e. that loop.
+                // KE16 App-4: this archetype's wave goes out as ONE
+                // `spawn_batch` call instead of a hand-rolled
+                // `while start < entity_count { spawn(...) }` push loop. The
+                // count is the closed form of the walk it replaces —
+                // `chunk_size >= 1`, so the `[i * chunk_size,
+                // min((i+1) * chunk_size, entity_count))` ranges are exactly the
+                // ranges that loop visited, in the same order. `n_chunks` is
+                // `spawn_batch`'s promised UPPER BOUND on the body count, not a
+                // count that is registered: every body is registered and pushed
+                // on its own, and every push takes its own wake decision.
                 let n_chunks = entity_count.div_ceil(chunk_size);
 
                 scope.spawn_batch(n_chunks, (0..n_chunks).map(|chunk| {

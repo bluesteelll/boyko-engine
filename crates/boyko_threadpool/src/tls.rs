@@ -11,20 +11,18 @@
 //! `PoolInner` pointer. `PoolInner` is opaque `pub`; consumers
 //! (`par_iter`/`par_chunk`) only call its `num_threads()`/`scope()`.
 //!
-//! # KE16 A1 — the deque-lane invariants (`KE16-DESIGN-A.md` §1.7)
+//! # The deque-lane invariants (`KE16-DESIGN-A.md` §1.7)
 //!
-//! This paragraph and the slot it describes are deleted with the tournament's
-//! features. The five keep the design's own names, `D1`–`D5`, and TWO other
-//! `D`-series already run through this crate's comments: the diagnostics rung
-//! `D1` that `worker_main` names at its `boyko_diag::lane::set_lane` call, and
-//! the Phase 9 plan's `D2`–`D5` cited in the `loom_pool.rs` / `miri_scope.rs`
+//! The five keep the design's own names, `D1`–`D5`, and TWO other `D`-series
+//! already run through this crate's comments: the diagnostics rung `D1` that
+//! `worker_main` names at its `boyko_diag::lane::set_lane` call, and the
+//! Phase 9 plan's `D2`–`D5` cited in the `loom_pool.rs` / `miri_scope.rs`
 //! headers. These five are neither, so every citation of one carries
 //! `KE16-DESIGN-A.md` beside it and the three series stay separable.
 //!
-//! `D1`, `D2`, `D4` and `D5` govern `WORKER_DEQUE`, which exists only under
-//! `ke16-a1` / `ke16-a1-fifo`; every other arm leaves a worker's spawns in a
-//! queue the pool owns, where nothing thread-local is load-bearing. `D3` is
-//! the property the whole axis exists to restore, and every arm owes it.
+//! `D1`, `D2`, `D4` and `D5` govern `WORKER_DEQUE`, the thread-local slot
+//! through which a worker reaches its own registered deque. `D3` is the
+//! reachability property that placement exists to serve.
 //!
 //! - **D1** `WORKER_DEQUE` holds `(Arc::as_ptr(&inner), &raw const deque)` for
 //!   the whole of `worker_main`'s loop and `(null, null)` on every other
@@ -33,14 +31,15 @@
 //!   parameter, so the clear happens before the pointee dies.
 //! - **D2** worker `wid`'s deque in pool `P` is pushed to only by worker
 //!   `wid`'s own thread — crossbeam's single-owner `Worker` contract, which
-//!   under A1 reduces to: only by `push_task` on a `Some` answer from
+//!   here reduces to: only by `push_task` on a `Some` answer from
 //!   [`worker_lane_for`], i.e. the calling thread IS that worker, the target
 //!   pool IS `P`, and the thread is acting as that worker rather than inside
 //!   an `install` frame.
 //! - **D3** every task pushed to a worker deque is reachable by every sibling
 //!   through `inner.stealers`, and by any joiner through the same stealers.
-//!   This is defect A's closure: an unreachable destination is what makes a
-//!   worker-spawned wave run serially.
+//!   An unreachable destination is what makes a worker-spawned wave run
+//!   serially, and closing that is what this placement is for
+//!   (`KE16-DESIGN-A.md`, defect A).
 //! - **D4** `WorkerLane::deque` is the ONLY dereference of the deposited
 //!   pointer; there is no other way to form a `&Worker` from the slot, so the
 //!   `unsafe` obligation is discharged in one place.
@@ -55,10 +54,8 @@
 use core::cell::Cell;
 use core::ptr;
 
-#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
 use crossbeam_deque::Worker;
 
-#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
 use crate::task::Task;
 use crate::thread_pool::PoolInner;
 
@@ -95,16 +92,12 @@ thread_local! {
     /// than a flag because a helping joiner may run a sibling conflict-free
     /// system INLINE inside a system body, so guards nest.
     pub(crate) static IN_SYSTEM_RUN: Cell<u32> = const { Cell::new(0) };
-}
 
-// === KE16 A switch: ke16-a1 / ke16-a1-fifo ===
-#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
-thread_local! {
-    /// KE16 A1. The calling worker's own Chase-Lev deque (`worker_main`'s
-    /// `deque` parameter), reachable from `push_task` on the SAME thread, and
-    /// the pool it belongs to. Null / null on every thread that is not a
-    /// worker. Deposited by `worker_main` after the active-pool deposit and
-    /// cleared by [`WorkerDequeDeposit::drop`] before `worker_main` returns.
+    /// The calling worker's own Chase-Lev deque (`worker_main`'s `deque`
+    /// parameter), reachable from `push_task` on the SAME thread, and the pool
+    /// it belongs to. Null / null on every thread that is not a worker.
+    /// Deposited by `worker_main` after the active-pool deposit and cleared by
+    /// [`WorkerDequeDeposit::drop`] before `worker_main` returns.
     ///
     /// The pointer is minted with `&raw const deque` — a raw borrow of the
     /// place, NOT a reference — so no reference tag to the deque outlives any
@@ -118,34 +111,26 @@ thread_local! {
         = const { Cell::new((ptr::null(), ptr::null())) };
 }
 
-/// The calling thread's lane in a pool: a registered worker id and, under the
-/// KE16 A1 arms, the raw pointer to that worker's own deque.
+/// The calling thread's lane in a pool: a registered worker id and the raw
+/// pointer to that worker's own deque.
 ///
 /// `Copy`, and it holds a RAW pointer, not a reference: a `WorkerLane` passed
 /// by value into a function therefore carries no reference field for Miri to
 /// retag and protect for the callee's duration. The only way to touch the
 /// deque is [`WorkerLane::deque`], whose result is consumed by ONE method call
 /// in its own statement (discipline D5, `KE16-DESIGN-A.md` §1.7).
-// === KE16 A switch: ke16-a3 === The control arm addresses no per-worker
-// structure at all — every spawn goes to the global injector and the joiner has
-// no own slot — so it is the one arm with no caller for the predicate. Every
-// other arm constructs a lane on its spawn path.
-#[cfg_attr(feature = "ke16-a3", allow(dead_code))]
 #[derive(Clone, Copy)]
 pub(crate) struct WorkerLane {
     /// The registered worker id of the calling thread in the pool this lane was
     /// minted for. Always `< inner.worker_count()`.
-    // === KE16 A switch: ke16-a1 / ke16-a1-fifo === Those arms address the lane
-    // by its DEQUE, never by index, so the id is carried and not read until the
-    // B axis lands the worker joiner that needs it.
-    #[cfg_attr(any(feature = "ke16-a1", feature = "ke16-a1-fifo"), allow(dead_code))]
+    ///
+    /// The push arm addresses the lane by its DEQUE and never by index; the id
+    /// is read by the worker joiner (`scope::join_on_worker`, which skips its
+    /// own stealer by it) and by `PoolInner::joiner_wake_target`.
     pub(crate) wid: u32,
-    // === KE16 A switch: ke16-a1 / ke16-a1-fifo === (the field exists only when a deque TLS exists)
-    #[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
     deque: *const Worker<Task>,
 }
 
-#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
 impl WorkerLane {
     /// A shared reference to the lane's deque, to be consumed by ONE method
     /// call in its own statement (`let popped = lane.deque().pop();`).
@@ -154,8 +139,8 @@ impl WorkerLane {
     /// body, nor use it as an `if let` scrutinee whose THEN block runs a task
     /// body — in Rust 2024 such a temporary lives through that block (D5,
     /// `KE16-DESIGN-A.md` §1.3).
-    // The consumers are the A1 push arm (`worker::push_on_lane`) and, when it
-    // lands, the B1 joiner.
+    // The production consumers are the push arm (`worker::push_on_lane_no_wake`)
+    // and the worker joiner (`scope::join_on_worker`).
     #[inline]
     pub(crate) fn deque(&self) -> &Worker<Task> {
         // SAFETY (`KE16-DESIGN-A.md` §1.3, D5 — four facts, each of which the
@@ -216,89 +201,31 @@ impl WorkerLane {
 /// dispatch and the count-gated completion target all ask it, so the three
 /// cannot disagree — "a pool-A worker joining a pool-B scope drains B's
 /// `injector_local[wid_A]`" stops being expressible.
-// === KE16 A switch: ke16-a3 === (no caller under the control arm; see the
-// attribute on [`WorkerLane`])
-#[cfg_attr(feature = "ke16-a3", allow(dead_code))]
 #[inline]
 pub(crate) fn worker_lane_for(inner: &PoolInner) -> Option<WorkerLane> {
-    // === KE16 A switch: ke16-a1 / ke16-a1-fifo ===
-    #[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
-    {
-        let (pool, deque) = WORKER_DEQUE.with(|c| c.get());
-        if !ptr::eq(pool, inner) {
-            return None;
-        }
-        let wid = current_worker_id();
-        if (wid as usize) >= inner.worker_count() as usize {
-            return None;
-        }
-        // The deque pointer is only carried: no dereference happens here.
-        Some(WorkerLane { wid, deque })
+    let (pool, deque) = WORKER_DEQUE.with(|c| c.get());
+    if !ptr::eq(pool, inner) {
+        return None;
     }
-    #[cfg(not(any(feature = "ke16-a1", feature = "ke16-a1-fifo")))]
-    {
-        if !ptr::eq(active_pool_ptr(), inner) {
-            return None;
-        }
-        let wid = current_worker_id();
-        if (wid as usize) >= inner.worker_count() as usize {
-            return None;
-        }
-        Some(WorkerLane { wid })
+    let wid = current_worker_id();
+    if (wid as usize) >= inner.worker_count() as usize {
+        return None;
     }
+    // The deque pointer is only carried: no dereference happens here.
+    Some(WorkerLane { wid, deque })
 }
 
-/// `true` when the calling thread is a registered worker thread OF `inner`,
-/// whatever frame it is running in.
-///
-/// [`worker_lane_for`] answers the narrower question — *is this thread acting AS
-/// that worker right now* — and says `None` inside an `install` frame of
-/// `inner`, because `install` rewrites the worker id to
-/// [`WORKER_ID_DISPATCHER`] and a task pushed from that frame goes to the global
-/// injector rather than to this thread's deque. That is the right answer for
-/// PLACEMENT and the wrong one for "may this joiner refuse to help": a worker of
-/// `inner` that refuses is a lane the pool has lost while waiting for work only
-/// `inner` can run, and at `num_threads(1)` — or with every worker inside such a
-/// frame — there is then no thread left to run it at all. The one caller is the
-/// `ke16-b3` external arm (`KE16-DESIGN-B.md` §3 plus the round-4 review's
-/// blocking item 2); every other route asks the identity predicate.
-///
-/// Not part of the identity predicate's contract (App-6) and not a substitute
-/// for it: it never yields a lane, only the fact of registration, so no
-/// per-worker structure can be indexed through it.
-// === KE16 B switch: ke16-b3 ===
-#[cfg(feature = "ke16-b3")]
-#[inline]
-pub(crate) fn is_worker_thread_of(inner: &PoolInner) -> bool {
-    // === KE16 A switch: ke16-a1 / ke16-a1-fifo === the deposit IS the
-    // registration record; nothing else on this thread survives the id rewrite.
-    #[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
-    {
-        ptr::eq(WORKER_DEQUE.with(|c| c.get()).0, inner)
-    }
-    // `ke16-b3` without an A1 arm is already a `compile_error!` (`lib.rs`): B
-    // needs the TLS deque. This arm exists so that refused configuration reports
-    // that one error instead of a second, misleading one about a missing TLS.
-    #[cfg(not(any(feature = "ke16-a1", feature = "ke16-a1-fifo")))]
-    {
-        let _ = inner;
-        false
-    }
-}
-
-/// RAII deposit of the calling worker's deque into [`WORKER_DEQUE`] (KE16 A1).
+/// RAII deposit of the calling worker's deque into [`WORKER_DEQUE`].
 ///
 /// Constructed by `worker_main` immediately after the active-pool deposit and
 /// declared AFTER the `deque` parameter it points at, so it drops — clearing
 /// the slot — before the deque itself does.
-#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
 pub(crate) struct WorkerDequeDeposit {
     /// Prevents construction outside `new`, and keeps the guard `!Send`: the
     /// deposit describes THIS thread and must not travel.
     _not_send: core::marker::PhantomData<*const ()>,
 }
 
-#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
 impl WorkerDequeDeposit {
     /// Publish `(pool, deque)` for this thread. `deque` must be a raw borrow
     /// (`&raw const deque`) of a place that outlives the guard.
@@ -311,7 +238,6 @@ impl WorkerDequeDeposit {
     }
 }
 
-#[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
 impl Drop for WorkerDequeDeposit {
     #[inline]
     fn drop(&mut self) {
@@ -539,8 +465,7 @@ mod tests {
     /// answer `None`, so no per-worker array is ever indexed with a sentinel.
     ///
     /// The sibling `worker_lane_for_is_none_inside_an_install_frame` runs the
-    /// frame on the test thread, where the tag half already fails under the A1
-    /// arms; only this shape puts the id check under load in every build.
+    /// frame on the test thread, where the tag half already fails.
     #[test]
     fn worker_lane_for_is_none_in_an_install_frame_on_a_worker_of_the_same_pool() {
         use core::sync::atomic::{AtomicU32, Ordering};
@@ -692,18 +617,16 @@ mod tests {
     ///   drops the value at the end of that statement, so the slot is CLEARED
     ///   AT ONCE and `worker_lane_for` answers `None` for the rest of the worker
     ///   loop. There is no live pair, no deref and no use-after-free: every
-    ///   worker spawn falls through to `push_global`, the arm measures A3's
-    ///   placement, and `KE16_A` still reports `a1` while `KE16_EXPECT`
-    ///   certifies the run — the quiet mislabelling of `KE16-DESIGN.md` §4, not
-    ///   a soundness defect. The gate for it is
+    ///   worker spawn falls through to `push_global_no_wake` instead, so the
+    ///   pool still runs every task and only the locality this placement exists
+    ///   for is silently lost — a quiet regression, not a soundness defect. The
+    ///   gate for it is
     ///   `worker::tests::a1_a_spawn_from_a_worker_body_lands_on_its_own_deque`,
     ///   which reads the production deposit from inside a worker body; measured
     ///   against that mutation, it goes red while THIS test stays green. (The
-    ///   predicate rows below go red on it too — under the A1 arms
-    ///   `worker_lane_for` reads this very deposit — but only that row covers
-    ///   the PLACEMENT, i.e. that the push arm reached the lane's deque rather
-    ///   than the global injector.)
-    #[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
+    ///   predicate rows below go red on it too — `worker_lane_for` reads this
+    ///   very deposit — but only that row covers the PLACEMENT, i.e. that the
+    ///   push arm reached the lane's deque rather than the global injector.)
     #[test]
     fn worker_deque_deposit_publishes_the_pair_and_clears_it_on_drop() {
         let pool = crate::ThreadPoolBuilder::new().num_threads(1).build();
@@ -734,14 +657,13 @@ mod tests {
         drop(deque);
     }
 
-    /// A1: the same fact pinned through the PREDICATE rather than through the
+    /// The same fact pinned through the PREDICATE rather than through the
     /// raw cell — after the guard drops, `worker_lane_for` answers `None`, so no
     /// caller can obtain a `WorkerLane` (and hence no `deque()` deref) over a
     /// deque whose deposit has ended.
     ///
     /// The `Some` half first, because a test that only ever observes `None`
     /// would pass over a predicate that is broken in the other direction.
-    #[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
     #[test]
     fn worker_lane_for_answers_none_once_the_deposit_guard_has_dropped() {
         let pool = crate::ThreadPoolBuilder::new().num_threads(2).build();

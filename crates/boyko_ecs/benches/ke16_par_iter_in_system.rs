@@ -1,25 +1,37 @@
-//! KE16 — the ECS-level measurement harness for threadpool defect A.
+//! KE16 — the ECS-level measurement harness for the worker-spawn route.
 //!
-//! Defect A (measured 2026-08-30, re-measured here): a task pushed from a
-//! WORKER thread lands in `injector_local[wid]` (`worker.rs::push_task`), and
-//! no other thread ever polls another thread's local injector — sibling
-//! stealing walks `inner.stealers`, which holds worker DEQUES only. A worker
-//! that is blocked inside `Scope::drop` drains its own local injector into a
-//! private, unregistered `scratch` deque and runs the batch inline. So work
-//! spawned from inside a worker is reachable by that one worker alone.
+//! A task pushed from a WORKER thread lands on that worker's own REGISTERED
+//! deque (`worker.rs::push_task` -> `push_on_lane_no_wake`), whose stealer sits
+//! in `inner.stealers` and is scanned by every sibling. Work spawned from
+//! inside a worker is therefore reachable by the whole pool, exactly as work
+//! pushed from off-pool is.
+//!
+//! That was not always so, and this harness is the instrument that measured it.
+//! Defect A (measured 2026-08-30): the same push landed in
+//! `injector_local[wid]`, which no other thread ever polls — sibling stealing
+//! walks `inner.stealers`, which holds worker DEQUES only — and a worker
+//! blocked inside `Scope::drop` drained its own local injector into a private,
+//! unregistered `scratch` deque and ran the batch inline. Work spawned from
+//! inside a worker was reachable by that one worker alone.
 //!
 //! The engine's parallel scheduler runs every concurrent system body on a
 //! worker (`schedule.rs` — concurrent systems go through `scope.spawn`;
-//! only EXCLUSIVE systems run inline on the dispatcher). Therefore EVERY
-//! `par_iter` written inside a system body is on the defective path, while the
-//! same `par_iter` driven from a non-worker thread inside `pool.install` is on
-//! the healthy path (the dispatcher's worker id is `WORKER_ID_DISPATCHER`, so
-//! `push_task` routes to `injector_global`, which every worker polls).
+//! only EXCLUSIVE systems run inline on the dispatcher). So EVERY `par_iter`
+//! written inside a system body takes the worker-spawn route, while the same
+//! `par_iter` driven from a non-worker thread inside `pool.install` takes the
+//! off-pool one (the dispatcher's worker id is `WORKER_ID_DISPATCHER`, so
+//! `push_task` routes to `injector_global`, which every worker polls). This
+//! bench measures the two side by side on IDENTICAL work, plus a sequential
+//! baseline, so each speedup is `seq / route`.
 //!
-//! This bench measures the two routes side by side on IDENTICAL work, plus a
-//! sequential baseline so the two speedups (`seq / route`) are the numbers the
-//! prior protocol reported as "1.01x inside a system vs 7.69x from the
-//! dispatcher".
+//! The pair is a REGRESSION receipt now rather than a diagnosis: the placement
+//! that closed defect A also has to keep it closed, and a system route drifting
+//! back toward its own sequential baseline is how a reopening would show.
+//! Both ends are measured (`docs/threadpool/KE16-RESULTS.md`): before the fix
+//! `par_in_system` equalled `seq` to four significant figures at BOTH
+//! populations with `max_in_flight = 1` — the prior protocol's "1.01x inside a
+//! system vs 7.69x from the dispatcher"; after it, the same route reached a
+//! 14.0-15.3x speedup.
 //!
 //! ## Instrument
 //!
@@ -46,14 +58,15 @@
 //! land. 20 µs per row puts a default chunk (>= `MIN_ARCHETYPE_FOR_PARALLEL` =
 //! 1024 rows) at >= 20 ms — four orders of magnitude above any steal latency.
 //!
-//! ## Fan-out ceiling, which is NOT the defect
+//! ## Fan-out ceiling, which is NOT a routing property
 //!
 //! `BatchingStrategy::default()` clamps chunk size UP to
 //! `MIN_ARCHETYPE_FOR_PARALLEL` (1024), so an archetype of N rows yields
 //! `ceil(N / max(N/W, 1024))` chunks: at N = 4096 that is 4 chunks (ceiling
 //! 4x) regardless of worker count, and at N = 65536 it is 16. Both N are
-//! reported so the ceiling is visible next to the defect rather than confused
-//! with it.
+//! reported so the ceiling is visible next to the route comparison rather than
+//! confused with it — it caps BOTH routes equally, so it can never be the
+//! reason one of them trails the other.
 //!
 //! Component id 492 is reserved for this bench (470-479 query_iter,
 //! 480-489 swap_remove; MAX_COMPONENTS = 512).
@@ -70,9 +83,7 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::schedule::{Schedule, ScheduleBuilder};
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
-use boyko_threadpool::{
-    MAX_WORKERS, ThreadPool, ThreadPoolBuilder, current_worker_id, ke16_check_expected_variant,
-};
+use boyko_threadpool::{MAX_WORKERS, ThreadPool, ThreadPoolBuilder, current_worker_id};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 // ── Fixture ─────────────────────────────────────────────────────────────────
@@ -148,8 +159,9 @@ fn reset_route_receipt() {
 ///
 /// The whole point of the `par_in_system` route is that its `par_iter` is pushed FROM a worker.
 /// If the scheduler ever ran the body on the dispatcher instead, the chunks would reach
-/// `injector_global` and fan out perfectly — the healthy route, reported under the defective
-/// route's name (`KE16-DESIGN-MEASUREMENT.md` §5 shape 2).
+/// `injector_global` — which is the OTHER route of this bench, so the row would be that route
+/// measured twice and reported under two names (`KE16-DESIGN-MEASUREMENT.md` §5 shape 2,
+/// "healthy route twice").
 fn assert_system_route_receipt() {
     let runs = SYSTEM_BODY_RUNS.load(Ordering::SeqCst);
     assert!(
@@ -194,7 +206,8 @@ fn spin_body(v: &Ke16Spin) {
 
 /// One archetype, `n` rows, one component — the best case for `par_iter`
 /// (§2.4.4: the unit of parallelism is ONE archetype, so a fragmented world
-/// would confound the defect with the granularity constant).
+/// would confound the difference between the routes with the granularity
+/// constant).
 fn build_world(n: usize) -> EcsMaster {
     register_layout::<Ke16Spin>(SLOT_KE16_SPIN.0);
     let mut world = EcsMaster::new();
@@ -221,7 +234,8 @@ fn route_seq(world: &mut EcsMaster) {
 
 /// Route DISPATCHER — the same `par_iter`, driven from the bench thread inside
 /// `pool.install`. The bench thread is not a registered worker, so
-/// `push_task` routes every chunk to `injector_global`: the HEALTHY path.
+/// `push_task` routes every chunk to `injector_global`: the OFF-POOL route,
+/// which every worker polls directly.
 fn route_par_from_dispatcher(world: &mut EcsMaster, pool: &Arc<ThreadPool>) {
     pool.install(|_scope| {
         world.run_closure_once(|q: Query<&Ke16Spin>| {
@@ -232,7 +246,8 @@ fn route_par_from_dispatcher(world: &mut EcsMaster, pool: &Arc<ThreadPool>) {
 
 /// Route SYSTEM — the same `par_iter`, inside a system body scheduled by the
 /// parallel scheduler. The body executes ON A WORKER, so `push_task` routes
-/// every chunk to that worker's `injector_local`: the DEFECTIVE path.
+/// every chunk to that worker's own registered deque: the WORKER-SPAWN route,
+/// which siblings reach by stealing rather than by polling.
 fn route_par_in_system(world: &mut EcsMaster, schedule: &mut Schedule) {
     schedule.run(world);
 }
@@ -279,14 +294,6 @@ fn timed<F: FnOnce()>(f: F) -> Pass {
 fn protocol_pass(workers: usize) {
     const REPS: usize = 3;
 
-    // The banner and the `KE16_EXPECT` check are TWO obligations (`KE16-DESIGN.md` §4): the
-    // check is SILENT when the variable is unset, so without the banner every number below would
-    // carry no record of which build produced it. It is printed HERE and not inside
-    // `ke16_check_expected_variant` because a print from `crates/*/src/**.rs` reds `boyko-log`'s
-    // print census; the spelling matches the pool crate's KE16 harness files, so one
-    // `grep "KE16 variant"` collects every row of the protocol.
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
     println!("\n=== KE16 protocol pass (release={}) ===", !cfg!(debug_assertions));
     println!(
         "workers={workers}  available_parallelism={}  spin_per_row={:?}",
@@ -380,7 +387,7 @@ fn bench_ke16_par_iter_in_system(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("ke16_par_iter_in_system");
     // A single pass costs N x 20 us of pure spin (1.3 s at N = 65536 on the
-    // serialised routes), so the default 100 samples would run for minutes.
+    // sequential baseline), so the default 100 samples would run for minutes.
     group.sample_size(10);
     group.warm_up_time(Duration::from_millis(500));
     group.measurement_time(Duration::from_secs(5));

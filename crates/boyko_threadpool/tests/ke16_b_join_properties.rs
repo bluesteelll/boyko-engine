@@ -1,16 +1,20 @@
 //! KE16 axis B — the three WORKER-ARM properties of `KE16-DESIGN-B.md` §2.2/§2.6/§2.7 that no
 //! other target in the tree states.
 //!
-//! `tests/ke16_b_join_arms.rs` (the developer's) separates the two EXTERNAL arms and pins §2.2's
-//! "a re-check per task" by wall clock. What it does not reach is the worker arm's *order* and the
-//! *inline-ness* of what a claimed joiner runs, and those are the two statements the B1 candidate
-//! is actually made of:
+//! §2.2's "a re-check per task" is pinned by wall clock in `tests/ke16_b_join_arms.rs`. What no
+//! other target reaches is the worker joiner's *order* and the *inline-ness* of what a claimed
+//! joiner runs, and those are the two remaining statements the B1 worker arm is made of:
 //!
 //! | Design | Statement | Test here |
 //! |---|---|---|
-//! | §2.2 step 1 + "Own scope first under LIFO" | the worker joiner pops its OWN deque before it touches the global injector, and the end it pops is the A arm's | `the_worker_joiner_takes_its_own_wave_before_a_foreign_one` |
+//! | §2.2 step 1 | the worker joiner pops its OWN deque before it touches the global injector, and it pops the owner end | `the_worker_joiner_takes_its_own_wave_before_a_foreign_one` |
 //! | §2.7 | a claimed joiner runs the foreign task **INLINE inside its live join**, not after the join returned | `the_claimed_joiner_runs_the_foreign_task_inside_its_live_join` |
 //! | §2.6 case (a) | a joiner that is the pool's ONLY lane runs its own wave and the scope completes | `a_nested_scope_on_a_single_worker_pool_completes` |
+//!
+//! §2.2's own bullet argues step 1 under a LIFO owner end. The shipped deque is FIFO
+//! (`ThreadPoolBuilder::build` constructs every worker deque with `Worker::new_fifo()`), so the
+//! first test reads the OLDEST own task, not the newest; the step ORDER the section is about is
+//! unaffected by which end that is.
 //!
 //! **Why §2.7 needs a second receipt.** `ke16_nested_scope_occupancy.rs::
 //! parked_joiner_is_claimed_by_a_foreign_wave` asserts `foreign_lane == joiner_lane`. That equality
@@ -28,19 +32,14 @@
 //! order. That makes the step order of `KE16-DESIGN-B.md` §2.2 (own deque → global injector →
 //! sibling sweep) a deterministic observation rather than a statistical one.
 //!
-//! **Every test here runs in EVERY build**, selecting its assertion from
-//! [`boyko_threadpool::KE16_B`] / [`boyko_threadpool::KE16_A`] at run time — a file that vanishes
-//! under `#[cfg]` reports `running 0 tests`, a vacuous pass (`KE16-DESIGN-MEASUREMENT.md` §5 item
-//! 1). The `b0` readings are recorded, never asserted: `b0` is a candidate under measurement, and
-//! its number here is what shows the instrument can tell the arms apart at all.
+//! **Every test here asserts, in every build.** Nothing in this file is behind a `#[cfg]` and
+//! nothing selects its assertion at run time, so it cannot report `running 0 tests` — a vacuous
+//! pass (`KE16-DESIGN-MEASUREMENT.md` §5 item 1).
 //!
 //! ## Run
 //!
 //! ```text
 //! cargo test -p boyko-threadpool --test ke16_b_join_properties -- --test-threads=1 --nocapture
-//! cargo test -p boyko-threadpool --test ke16_b_join_properties --features ke16-a1,ke16-b1 -- --test-threads=1 --nocapture
-//! cargo test -p boyko-threadpool --test ke16_b_join_properties --features ke16-a1-fifo,ke16-b1 -- --test-threads=1 --nocapture
-//! cargo test -p boyko-threadpool --test ke16_b_join_properties --features ke16-a1,ke16-b3 -- --test-threads=1 --nocapture
 //! ```
 
 use std::sync::Arc;
@@ -48,8 +47,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use boyko_threadpool::{
-    KE16_A, KE16_B, ThreadPool, ThreadPoolBuilder, WORKER_ID_DISPATCHER, WORKER_ID_UNATTACHED,
-    current_worker_id, ke16_check_expected_variant, try_with_active_pool,
+    ThreadPool, ThreadPoolBuilder, WORKER_ID_DISPATCHER, WORKER_ID_UNATTACHED, current_worker_id,
+    try_with_active_pool,
 };
 
 /// Sentinel for "this slot was never written". `usize::MAX` cannot collide with a task tag.
@@ -72,15 +71,14 @@ const FOREIGN_TASKS: usize = 8;
 /// scheduling alone — only by a joiner that never resumes.
 const WAIT_BOUND: Duration = Duration::from_secs(30);
 
-/// Bound on the ONE precondition that a build is allowed to miss: "the scope's body is already
-/// running on a sibling when the join starts".
+/// Bound on the fixture PRECONDITION "the scope's body is already running on a sibling when the
+/// join starts".
 ///
-/// Under `ke16-a1` / `ke16-a1-fifo` a sibling reaches a worker-spawned body within microseconds, so
-/// this expires only in a build that still has defect A — where a worker's spawn goes to
-/// `injector_local[wid]` that no sibling polls, and the body cannot run until the joiner runs it
-/// itself. MEASURED at this checkout: the default (`a0`) build waits it out in full and the `a1`
-/// builds never touch it. Short, because paying `WAIT_BOUND` there would make the default-build row
-/// of this file a 30 s gate that is measuring the A axis, not the B one.
+/// A worker's spawn lands on its own registered deque, whose `Stealer` every sibling scans, so a
+/// sibling reaches the body within microseconds and this bound is not normally approached. It is
+/// deliberately much shorter than [`WAIT_BOUND`]: missing the precondition is a fixture outcome the
+/// assertions below already report (the body would have run on the joiner itself), so waiting the
+/// full bound for it would only add dead time to a failing run.
 const BODY_START_BOUND: Duration = Duration::from_secs(2);
 
 /// Spin (never sleep) until `flag` is set or `WAIT_BOUND` expires; returns whether it was set.
@@ -108,36 +106,30 @@ fn is_registered_lane(pool: &ThreadPool, id: usize) -> bool {
 }
 
 // =============================================================================================
-// §2.2 step 1 — the worker joiner takes its OWN wave first, from the A arm's end
+// §2.2 step 1 — the worker joiner takes its OWN wave first, from the deque's owner end
 // =============================================================================================
 
-/// **`KE16-DESIGN-B.md` §2.2 — "1. Own deque, owner end" and "Own scope first under LIFO".**
+/// **`KE16-DESIGN-B.md` §2.2 — "1. Own deque, owner end".**
 ///
-/// The B1 joiner's four sources are ordered, and the order is the candidate: its own deque before
-/// the global injector before a sibling sweep. B0 has no first step at all (under A1 its stage 1 is
-/// compiled out and `injector_global` is the first thing it touches, `KE16-DESIGN-B.md` §1 items
-/// 2–3), so "which wave does the joiner start with" is exactly what the B axis changes and nothing
-/// else in the tree observes it.
+/// The worker joiner's steps are ORDERED, and the order is the property: its own deque before the
+/// global injector before a sibling sweep, and only then a park (`scope.rs::join_on_worker`).
+/// "Which wave does the joiner start with" is what that order decides, and nothing else in the
+/// tree observes it.
 ///
 /// The fixture is `num_threads(1)`. The single worker runs the outer task, and while it is inside
 /// the scope closure NOTHING else in the pool can run — so the completion order recorded below is
 /// the join's own pick order, with no sibling to perturb it:
 ///
-/// - own tasks go to the joiner's own destination (its registered deque under `ke16-a1` /
-///   `ke16-a1-fifo`);
-/// - foreign tasks were pushed from the TEST thread, so they are in `injector_global`;
+/// - own tasks go to the joiner's own registered deque, which is step 1's source;
+/// - foreign tasks were pushed from the TEST thread, so they are in `injector_global`, step 2's;
 /// - both waves are fully queued before the join begins, which the `join_open` flag records.
 ///
-/// Two readings come out of one run. `order[0] < FOREIGN_TAG_BASE` is the step order. Under the B
-/// arms the *value* of `order[0]` is additionally the END discipline of the A arm: `ke16-a1` pops
-/// the owner end of a LIFO deque, so the newest own task (`OWN_TASKS - 1`) comes first; the
-/// `ke16-a1-fifo` row inverts that to `0`. That is the A1-vs-A1-fifo question asked at the JOINER,
-/// where §2.2 says it is asked, rather than at the worker loop (`tests/ke16_a_end_discipline.rs`).
+/// Two readings come out of one run. `order[0] < FOREIGN_TAG_BASE` is the step order. The *value*
+/// of `order[0]` is additionally the deque's END discipline: the owner end is FIFO, so the OLDEST
+/// own task comes back first. That is the end question asked at the JOINER, where §2.2 asks it,
+/// rather than at the worker loop (`tests/ke16_a_end_discipline.rs`).
 #[test]
 fn the_worker_joiner_takes_its_own_wave_before_a_foreign_one() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
-
     let pool = ThreadPoolBuilder::new().num_threads(1).build();
 
     let total = OWN_TASKS + FOREIGN_TASKS;
@@ -209,8 +201,9 @@ fn the_worker_joiner_takes_its_own_wave_before_a_foreign_one() {
     for j in 0..FOREIGN_TASKS {
         let order = Arc::clone(&order);
         let seq = Arc::clone(&seq);
-        // Pushed from the TEST thread, so this wave lands in `injector_global` under every A arm —
-        // it is "somebody else's wave" from the joiner's point of view, which is what step 2 is.
+        // Pushed from the TEST thread, which owns no lane in this pool, so this wave lands in
+        // `injector_global` (`worker::place_task`) — "somebody else's wave" from the joiner's
+        // point of view, which is what step 2 is.
         pool.spawn(move || {
             let slot = seq.fetch_add(1, Ordering::AcqRel);
             order[slot].store(FOREIGN_TAG_BASE + j, Ordering::Release);
@@ -232,8 +225,8 @@ fn the_worker_joiner_takes_its_own_wave_before_a_foreign_one() {
     let observed: Vec<usize> = order.iter().map(|s| s.load(Ordering::Acquire)).collect();
     let lane = outer_lane.load(Ordering::Acquire);
     println!(
-        "[ke16 b-order] a_arm={KE16_A} b_arm={KE16_B} joiner_lane={lane} \
-         own={OWN_TASKS} foreign={FOREIGN_TASKS} ran_before_join={} order={observed:?}",
+        "[ke16 b-order] joiner_lane={lane} own={OWN_TASKS} foreign={FOREIGN_TASKS} \
+         ran_before_join={} order={observed:?}",
         ran_before_join.load(Ordering::Acquire)
     );
 
@@ -255,36 +248,23 @@ fn the_worker_joiner_takes_its_own_wave_before_a_foreign_one() {
         seq.load(Ordering::Acquire)
     );
 
-    if KE16_B == "b0" {
-        // Recorded, not asserted: b0 is the behaviour under measurement. Under `a0` its stage 1
-        // drains `injector_local`, so it too starts with its own wave; under `ke16-a1` that stage
-        // is compiled out and the first thing it touches is the global injector. Both readings are
-        // the baseline this test exists to be compared against.
-        return;
-    }
-
     let first = observed[0];
     assert!(
         first < FOREIGN_TAG_BASE,
-        "the worker joiner's first task under arm `{KE16_B}` was FOREIGN (tag {first}); \
-         `KE16-DESIGN-B.md` §2.2 makes step 1 the joiner's OWN deque and the global injector step \
-         2, so a foreign task first means the own-deque pop is not happening"
+        "the worker joiner's first task was FOREIGN (tag {first}); `KE16-DESIGN-B.md` §2.2 makes \
+         step 1 the joiner's OWN deque and the global injector step 2, so a foreign task first \
+         means the own-deque pop is not happening"
     );
 
-    let expected_first = match KE16_A {
-        // `ke16-a1`: LIFO deque, owner end — the joiner pops the NEWEST of its own wave.
-        "a1" => OWN_TASKS - 1,
-        // `ke16-a1-fifo`: FIFO owner end (today's end discipline) — the OLDEST comes back first.
-        "a1f" => 0,
-        // No other A arm can reach this line: `any(ke16-b1, ke16-b3)` without an A1 arm is a
-        // `compile_error!` (`src/lib.rs`, `KE16-DESIGN.md` §4), so the B arms imply a1 / a1f.
-        other => unreachable!("axis B is built without an A1 arm (KE16_A = {other})"),
-    };
+    // FIFO owner end (`ThreadPoolBuilder::build` uses `Worker::new_fifo()`), so step 1 returns the
+    // OLDEST entry of the joined wave — the one pushed first.
+    const EXPECTED_FIRST: usize = 0;
     assert_eq!(
-        first, expected_first,
-        "the joiner popped own task {first} first under `{KE16_A}`; that arm's owner end makes it \
-         {expected_first} (`KE16-DESIGN-B.md` §2.2, \"Own scope first under LIFO\" — the FIFO row \
-         inverts the order and is measured)"
+        first, EXPECTED_FIRST,
+        "the joiner popped own task {first} first; the deque's owner end is FIFO, which makes it \
+         {EXPECTED_FIRST} (`scope.rs::join_on_worker` step 1). A reversed reading means the deque \
+         is being constructed LIFO, which `tests/ke16_a_end_discipline.rs` reads at the worker \
+         loop and this row reads at the joiner"
     );
 }
 
@@ -306,14 +286,10 @@ fn the_worker_joiner_takes_its_own_wave_before_a_foreign_one() {
 /// receipt holds, both stores and the read are on one thread, so "the join had not returned yet"
 /// is a program-order fact, not a timing estimate.
 ///
-/// Under `b0` the joiner never marks its idle bit, so no claim is possible and the fixture cannot
-/// build the state at all; that reading is RECORDED (it is what B1-P adds) and the test returns
-/// without asserting.
+/// The whole fixture rests on the joiner parking IDLE-MARKED: a joiner that parked without marking
+/// would be unclaimable.
 #[test]
 fn the_claimed_joiner_runs_the_foreign_task_inside_its_live_join() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
-
     const WORKERS: usize = 2;
     let pool = ThreadPoolBuilder::new().num_threads(WORKERS).build();
 
@@ -354,9 +330,9 @@ fn the_claimed_joiner_runs_the_foreign_task_inside_its_live_join() {
                     });
                     // Wait INSIDE the closure: if the body had not started, this thread would pop
                     // its own task at step 1 of the join and never park, and the fixture would be
-                    // measuring nothing. Bounded by `BODY_START_BOUND`, not `WAIT_BOUND`, because
-                    // the one build that cannot satisfy this precondition is the one with defect A
-                    // still in it, and there the wait is pure dead time.
+                    // measuring nothing. Bounded by `BODY_START_BOUND`, not `WAIT_BOUND`: a build
+                    // in which no sibling ever reaches the body fails the `body != joiner`
+                    // assertion below, so waiting longer for it only adds dead time.
                     let deadline = Instant::now() + BODY_START_BOUND;
                     while !body_started.load(Ordering::Acquire) && Instant::now() < deadline {
                         std::hint::spin_loop();
@@ -386,26 +362,10 @@ fn the_claimed_joiner_runs_the_foreign_task_inside_its_live_join() {
         std::hint::spin_loop();
     }
 
-    if KE16_B == "b0" {
-        println!(
-            "[ke16 b1-p inline] arm=b0 joiner_bit_observed={} — B0's joiner does not mark its idle \
-             bit, so it is invisible to every foreign wave's wake decision (`KE16-DESIGN-B.md` §1 \
-             item 5). Recorded, not asserted.",
-            parked_joiner != UNSET
-        );
-        // Let the fixture unwind: nothing will claim the joiner, so release the body by hand.
-        release_body.store(true, Ordering::Release);
-        assert!(
-            spin_until(&outer_done),
-            "the b0 fixture never completed even after the body was released by hand"
-        );
-        return;
-    }
-
     assert_ne!(
         parked_joiner, UNSET,
-        "no joiner bit was ever set in parked_mask (joiner_lane={}, mask={:#x}) under arm \
-         `{KE16_B}`: the worker joiner did not park idle-marked, so rule B1-P is not in this build",
+        "no joiner bit was ever set in parked_mask (joiner_lane={}, mask={:#x}): the worker joiner \
+         did not park idle-marked, so rule B1-P is not being honoured",
         joiner_lane.load(Ordering::Acquire),
         pool.parked_mask()
     );
@@ -438,8 +398,8 @@ fn the_claimed_joiner_runs_the_foreign_task_inside_its_live_join() {
     let foreign = foreign_lane.load(Ordering::Acquire);
     let inline = foreign_saw_open_join.load(Ordering::Acquire);
     println!(
-        "[ke16 b1-p inline] arm={KE16_B} joiner_lane={joiner} body_lane={body} \
-         foreign_lane={foreign} foreign_ran_inside_join={} workers={}",
+        "[ke16 b1-p inline] joiner_lane={joiner} body_lane={body} foreign_lane={foreign} \
+         foreign_ran_inside_join={} workers={}",
         inline == 1,
         pool.worker_count()
     );
@@ -478,8 +438,8 @@ fn the_claimed_joiner_runs_the_foreign_task_inside_its_live_join() {
 /// At `num_threads(1)` case (b) has no completer: no other thread exists to finish the wave, so the
 /// scope terminates only if the joiner itself runs every task. That makes W = 1 the sharpest
 /// liveness gate for the worker arm — if step 1 ever stopped reaching the joiner's own deque (the
-/// A1 deposit lost, the identity predicate answering `None`, the pop taking the wrong end of an
-/// empty deque), this hangs where a W ≥ 2 fixture would quietly be rescued by a sibling.
+/// pop taking the wrong end of an empty deque), this hangs where a W ≥ 2 fixture would quietly be
+/// rescued by a sibling.
 ///
 /// It is also the route-(b) mirror of `tests/cross_pool_routing.rs::
 /// install_on_the_only_worker_of_its_pool_completes`, which covers the same W = 1 corner on the
@@ -490,9 +450,6 @@ fn the_claimed_joiner_runs_the_foreign_task_inside_its_live_join() {
 /// the sentence licenses.
 #[test]
 fn a_nested_scope_on_a_single_worker_pool_completes() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
-
     const OUTER: usize = 4;
     const INNER: usize = 4;
 
@@ -546,18 +503,17 @@ fn a_nested_scope_on_a_single_worker_pool_completes() {
     let completed = spin_until(&done);
     let total = ran.load(Ordering::Acquire);
     println!(
-        "[ke16 b-w1] arm={KE16_B} completed={completed} tasks_run={total} \
-         expected={} lane_mask={:#x}",
+        "[ke16 b-w1] completed={completed} tasks_run={total} expected={} lane_mask={:#x}",
         OUTER + OUTER * INNER,
         lanes_seen.load(Ordering::Acquire)
     );
 
     assert!(
         completed,
-        "a two-level nested scope on a one-worker pool did not complete within {WAIT_BOUND:?} \
-         under arm `{KE16_B}`: the joining worker is the pool's ONLY lane, so case (b) of \
-         `KE16-DESIGN-B.md` §2.6 has no completer and the wave can only be run by the joiner \
-         itself ({total} of {} tasks had run)",
+        "a two-level nested scope on a one-worker pool did not complete within {WAIT_BOUND:?}: \
+         the joining worker is the pool's ONLY lane, so case (b) of `KE16-DESIGN-B.md` §2.6 has \
+         no completer and the wave can only be run by the joiner itself ({total} of {} tasks had \
+         run)",
         OUTER + OUTER * INNER
     );
     assert_eq!(

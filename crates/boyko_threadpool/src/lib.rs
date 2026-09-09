@@ -44,16 +44,12 @@
 //! - `ThreadPool` struct + builder API (no worker affinity yet — see Wave 7).
 //! - `Scope::spawn` with `'scope` lifetime erasure (SAFETY: `Scope::Drop`
 //!   blocks until pending tasks complete, even on panic).
-//! - `worker_main` with the 4-source poll loop (local injector → own deque →
-//!   global injector → sibling steal → backoff/park). The own deque is the
-//!   source the earlier wording omitted: it is where a batch stolen from any
-//!   other source is parked between tasks. A worker's OWN spawns do not land
-//!   there today — they go to `injector_local[wid]`, which no sibling polls
-//!   (KE16 defect A); the A axis of that tournament is what moves them.
-//!   Under `ke16-a1` / `ke16-a1-fifo` they land on the own deque and under
-//!   `ke16-a3` in the global injector, and then the loop is 3-source: the first
-//!   stage is compiled out with the queue it drained (own deque → global
-//!   injector → sibling steal → backoff/park).
+//! - `worker_main` with the 3-source poll loop (own deque → global injector →
+//!   sibling steal → backoff/park). A worker's OWN spawns land on its own
+//!   REGISTERED deque, whose `Stealer` every sibling scans. The owner end is
+//!   FIFO, so the worker takes its OLDEST entry first and a fresh spawn is
+//!   served behind what is already queued. That deque is also where a batch
+//!   stolen from any other source is parked between tasks.
 //! - Public TLS helpers `current_worker_id`,
 //!   `current_worker_id_or_dispatcher_lane`.
 //!
@@ -69,89 +65,10 @@ mod tls;
 mod worker;
 
 // =========================================================================
-// KE16 tournament — mutual exclusion of the candidate features.
-//
-// One `compile_error!` per illegal pair, each naming both features and the
-// axis, so a mis-specified `--features` line fails to BUILD instead of
-// producing a number for a configuration nobody meant to measure
-// (`docs/threadpool/KE16-DESIGN.md` §4). `ke16-a5` implies `ke16-a2` through
-// Cargo, so that one pair is legal and is absent from the list. The whole
-// block is deleted with the features once the verdict lands.
-// =========================================================================
-
-#[cfg(all(feature = "ke16-a1", feature = "ke16-a1-fifo"))]
-compile_error!(
-    "KE16 axis A: `ke16-a1` and `ke16-a1-fifo` are mutually exclusive (one placement candidate \
-     per build)"
-);
-#[cfg(all(feature = "ke16-a1", feature = "ke16-a2"))]
-compile_error!("KE16 axis A: `ke16-a1` and `ke16-a2` are mutually exclusive");
-#[cfg(all(feature = "ke16-a1", feature = "ke16-a3"))]
-compile_error!("KE16 axis A: `ke16-a1` and `ke16-a3` are mutually exclusive");
-#[cfg(all(feature = "ke16-a1-fifo", feature = "ke16-a2"))]
-compile_error!("KE16 axis A: `ke16-a1-fifo` and `ke16-a2` are mutually exclusive");
-#[cfg(all(feature = "ke16-a1-fifo", feature = "ke16-a3"))]
-compile_error!("KE16 axis A: `ke16-a1-fifo` and `ke16-a3` are mutually exclusive");
-#[cfg(all(feature = "ke16-a2", feature = "ke16-a3"))]
-compile_error!("KE16 axis A: `ke16-a2` and `ke16-a3` are mutually exclusive");
-#[cfg(all(feature = "ke16-a5", feature = "ke16-a1"))]
-compile_error!(
-    "KE16 axis A: `ke16-a5` and `ke16-a1` are mutually exclusive (A5 places into `injector_local`, \
-     which A1 never feeds)"
-);
-#[cfg(all(feature = "ke16-a5", feature = "ke16-a1-fifo"))]
-compile_error!("KE16 axis A: `ke16-a5` and `ke16-a1-fifo` are mutually exclusive");
-#[cfg(all(feature = "ke16-a5", feature = "ke16-a3"))]
-compile_error!("KE16 axis A: `ke16-a5` and `ke16-a3` are mutually exclusive");
-
-#[cfg(all(feature = "ke16-b1", feature = "ke16-b3"))]
-compile_error!(
-    "KE16 axis B: `ke16-b1` and `ke16-b3` are mutually exclusive (they differ only in the external \
-     joiner's policy)"
-);
-#[cfg(all(
-    any(feature = "ke16-b1", feature = "ke16-b3"),
-    not(any(feature = "ke16-a1", feature = "ke16-a1-fifo"))
-))]
-compile_error!(
-    "KE16 axis B: `ke16-b1` / `ke16-b3` require `ke16-a1` or `ke16-a1-fifo` — the worker joiner \
-     must be able to REACH its own deque, and only the A1 arms publish that deque's address into \
-     this thread's TLS (`WorkerDequeDeposit`, `worker.rs`). THE MISSING THING IS THE DEPOSIT, NOT \
-     THE DEQUE: every arm builds `worker_count` deques and registers their `Stealer`s \
-     unconditionally (`thread_pool.rs`), and each worker is handed one by move, so `WorkerLane` \
-     under A2/A3/A5 simply carries a `wid` with no `deque()` accessor. A2/A3/A5 therefore leave \
-     the joiner at B0 — a REACHABILITY gap, not a structural impossibility. An earlier wording of \
-     this message said the A1 arms are what GIVE the joiner a registered deque; that was false, \
-     and it is what made axis B read as closed by construction"
-);
-
-// =========================================================================
-// KE16 tournament — every axis's arm is in this tree.
-//
-// The base pass shipped the A axis and the items that ship regardless (W-a,
-// App-6, App-8, App-11); `ke16-b1` / `ke16-b3` landed in `src/scope.rs`,
-// `ke16-w-gate` / `ke16-w-count` in `src/worker.rs`, `src/scope.rs` and
-// `src/sync.rs`, and `ke16-c-batch` / `ke16-w-fanout` (`Scope::spawn_batch`,
-// `worker::push_task_no_wake`, `worker::wake_up_to`, and the production
-// `par_*` / physics callers) with the C axis.
-//
-// Each axis carried a `compile_error!` refusing its own feature until its arm
-// was here, and deleted that refusal in the commit that landed the arm. The
-// refusal was not tidiness: a feature whose arm is missing produces a binary
-// identical to the default build while `KE16_A/B/W/C` still report the
-// candidate's token, so `KE16_EXPECT` certifies the run and a default-build
-// number is filed against the candidate — the failure the witness exists to
-// forbid ("features not actually enabled cannot produce a number",
-// `docs/threadpool/KE16-DESIGN.md` §4), and quiet in the one direction that is
-// never caught downstream: the number is plausible. The sharpest case was
-// `ke16-w-gate` while only HALF of W-b was here (the <=1 push gate without the
-// thief-residue cascade): the binary was neither the default nor the candidate.
-// A new arm that lands in halves reinstates its own refusal for the same reason.
-// =========================================================================
 // KE16 M2w — the Tree-Borrows negative control is MIRI-ONLY.
 //
-// `tb-neg-m2w` is not a tournament candidate and carries no witness token: it
-// is a deliberate-UB arm whose purpose is to BE REPORTED. It exists so that
+// `tb-neg-m2w` does not identify a configuration — it falsifies a gate. It is
+// a deliberate-UB arm whose purpose is to BE REPORTED, and it exists so that
 // M2w's positive result — "the shipped `task::scoped::run_scoped` executed
 // under Tree Borrows with the chunk freed inside a completer's open release
 // window and no UB was reported" — is known to be falsifiable, which a green
@@ -180,146 +97,6 @@ compile_error!(
      one means the feature row is missing from `crates/boyko_threadpool/Cargo.toml` and the arm \
      does not exist at all"
 );
-
-// =========================================================================
-// KE16 witness — which tournament configuration this artifact actually is.
-//
-// The benches and the two red-first gates print `ke16_variant()` on entry and
-// call `ke16_check_expected_variant()`, so "the features were not actually
-// enabled" cannot silently produce a number (`KE16-DESIGN.md` §4,
-// `KE16-DESIGN-MEASUREMENT.md` §5). Deleted with the features.
-// =========================================================================
-
-/// Placement axis (defect A) of this build: `"a0"` (today's `injector_local`
-/// placement), `"a1"`, `"a1f"`, `"a2"`, `"a3"` or `"a5"`.
-#[cfg(not(any(
-    feature = "ke16-a1",
-    feature = "ke16-a1-fifo",
-    feature = "ke16-a2",
-    feature = "ke16-a3"
-)))]
-pub const KE16_A: &str = "a0";
-/// Placement axis (defect A) of this build. See the `a0` arm.
-#[cfg(feature = "ke16-a1")]
-pub const KE16_A: &str = "a1";
-/// Placement axis (defect A) of this build. See the `a0` arm.
-#[cfg(feature = "ke16-a1-fifo")]
-pub const KE16_A: &str = "a1f";
-/// Placement axis (defect A) of this build. See the `a0` arm.
-#[cfg(all(feature = "ke16-a2", not(feature = "ke16-a5")))]
-pub const KE16_A: &str = "a2";
-/// Placement axis (defect A) of this build. See the `a0` arm.
-#[cfg(feature = "ke16-a3")]
-pub const KE16_A: &str = "a3";
-/// Placement axis (defect A) of this build. See the `a0` arm.
-#[cfg(feature = "ke16-a5")]
-pub const KE16_A: &str = "a5";
-
-/// Joiner axis (defect B) of this build: `"b0"` (today's `scratch` joiner),
-/// `"b1"` or `"b3"`.
-#[cfg(not(any(feature = "ke16-b1", feature = "ke16-b3")))]
-pub const KE16_B: &str = "b0";
-/// Joiner axis (defect B) of this build. See the `b0` arm.
-#[cfg(feature = "ke16-b1")]
-pub const KE16_B: &str = "b1";
-/// Joiner axis (defect B) of this build. See the `b0` arm.
-#[cfg(feature = "ke16-b3")]
-pub const KE16_B: &str = "b3";
-
-/// Wake / completion axis of this build: `"w0"` (wake on every push,
-/// unconditional completion unpark), `"wg"`, `"wc"` or `"wgc"`.
-#[cfg(not(any(feature = "ke16-w-gate", feature = "ke16-w-count")))]
-pub const KE16_W: &str = "w0";
-/// Wake / completion axis of this build. See the `w0` arm.
-#[cfg(all(feature = "ke16-w-gate", not(feature = "ke16-w-count")))]
-pub const KE16_W: &str = "wg";
-/// Wake / completion axis of this build. See the `w0` arm.
-#[cfg(all(feature = "ke16-w-count", not(feature = "ke16-w-gate")))]
-pub const KE16_W: &str = "wc";
-/// Wake / completion axis of this build. See the `w0` arm.
-#[cfg(all(feature = "ke16-w-gate", feature = "ke16-w-count"))]
-pub const KE16_W: &str = "wgc";
-
-/// Batch-spawn axis of this build: `"c0"` (per-task spawn), `"c1"`
-/// (`spawn_batch`) or `"c1f"` (`spawn_batch` + the wake fan-out).
-///
-/// ⚠ **`c1` / `c1f` describe the wave's ACCOUNTING under `ke16-a5`; its WAKE
-/// is A5's on every push for which A5 had a bit to claim.** A5's placement
-/// wakes the sibling whose idle bit it claimed and reports that no further
-/// decision is due, so the wave's one wake decision — `c1`'s saving, and the
-/// sole site of `c1f`'s fan-out — is skipped for exactly those waves
-/// (`crate::Scope::wake_for_wave`). When the idle mask was empty or the claim
-/// CAS lost, the decision IS taken and finds nothing, at the cost of one fence
-/// plus one load of the contended `idle` line per wave. The `pending` saving
-/// applies throughout. The design declares the axes composable
-/// (`KE16-DESIGN.md` §4) and
-/// defines C by that decision; until that is resolved, no `c1`/`c1f` row may be
-/// filed from a build whose `KE16_A` is `"a5"`.
-#[cfg(not(feature = "ke16-c-batch"))]
-pub const KE16_C: &str = "c0";
-/// Batch-spawn axis of this build. See the `c0` arm.
-#[cfg(all(feature = "ke16-c-batch", not(feature = "ke16-w-fanout")))]
-pub const KE16_C: &str = "c1";
-/// Batch-spawn axis of this build. See the `c0` arm.
-#[cfg(feature = "ke16-w-fanout")]
-pub const KE16_C: &str = "c1f";
-
-/// Whether [`Scope::spawn_batch`] batches this wave (`ke16-c-batch`) or falls
-/// back to one [`Scope::spawn`] per body.
-///
-/// A `const` rather than a `cfg` the callers repeat, because a caller in
-/// ANOTHER crate cannot see this crate's features: a pass-through feature on
-/// `boyko-ecs` / `boyko-physics` would leave the measured command
-/// (`--features boyko-threadpool/ke16-c-batch`, `KE16-DESIGN.md` §4) enabling
-/// the pool's arm while the callers still spawned per task — the witness would
-/// say `c1` over a `c0` caller, which is the mislabelling the witness exists to
-/// forbid. Reading it instead makes every caller follow THIS crate's feature.
-///
-/// It exists for the one caller shape that must do extra work to produce a
-/// batch count — the physics dispatches, whose chunk cuts are data-dependent
-/// and have to be walked once to be counted (`KE16-DESIGN-W.md` §4.2). Branching
-/// on a `const` costs nothing: the un-batched build folds the count pass away
-/// rather than paying it for a value it would not use. Deleted with the
-/// features.
-pub const KE16_SPAWN_BATCH: bool = cfg!(feature = "ke16-c-batch");
-
-/// The tournament configuration of this build as `"{A}+{B}+{W}+{C}"`, e.g.
-/// `"a0+b0+w0+c0"` for the default build.
-///
-/// Allocating is deliberate: this is called once on bench or gate entry, never
-/// on a pool path.
-pub fn ke16_variant() -> String {
-    format!("{KE16_A}+{KE16_B}+{KE16_W}+{KE16_C}")
-}
-
-/// When `KE16_EXPECT` is set in the environment, panic unless it names exactly
-/// this build; otherwise do nothing.
-///
-/// The measurement protocol sets `KE16_EXPECT` on every recorded run, so a
-/// number can never come from a build whose `--features` line did not take
-/// (`KE16-DESIGN-MEASUREMENT.md` §5 item 3). An unset variable is allowed for a
-/// developer smoke run and its numbers are not recorded.
-///
-/// Emitting the banner is the CALLER's job, not this function's
-/// (`KE16-DESIGN.md` §4 assigns the print to the benches and the gates): a
-/// library source that writes to stdout reds `boyko-log`'s print census, whose
-/// allowlist admits exactly one reason — a record that would otherwise be
-/// invisible because the next statement ends the process — and a variant banner
-/// is not it.
-///
-/// # Panics
-/// If `KE16_EXPECT` is set and differs from [`ke16_variant`].
-pub fn ke16_check_expected_variant() {
-    let actual = ke16_variant();
-    if let Ok(expected) = std::env::var("KE16_EXPECT")
-        && expected != actual
-    {
-        panic!(
-            "KE16_EXPECT mismatch: the environment asked for `{expected}` but this build is \
-             `{actual}` — the `--features` line did not take; the run is void"
-        );
-    }
-}
 
 pub use scope::Scope;
 pub use thread_pool::{MAX_WORKERS, PoolInner, ThreadPool, ThreadPoolBuilder, WorkerHandle};
@@ -496,11 +273,15 @@ pub mod loom_exports {
         }
 
         /// Forwards to the real [`ScopeShared::complete_task`]. Which arm runs
-        /// is the build's, not the model's: without `ke16-w-count`, Phase 9.2
-        /// Candidate U's unconditional `waker.unpark()` BEFORE the `fetch_sub`
-        /// `AcqRel`; with it and a non-null target, the `fetch_sub` first and
-        /// the target's `unpark` only on `prev == 1` (KE16 W-d′). M1c drives the
-        /// second, which is why its target has to be real enough to count.
+        /// is decided by the scope's wake TARGET, not by the model and not by
+        /// the build: a NULL target — the external-joiner shape — takes Phase
+        /// 9.2 Candidate U's unconditional `waker.unpark()` BEFORE the
+        /// `fetch_sub` `AcqRel`, because that waker lives in the allocation the
+        /// decrement releases; a NON-NULL one takes the `fetch_sub` first and
+        /// unparks the target only on `prev == 1` (KE16 W-d′), which it can
+        /// afford because that target is owned by the pool rather than by the
+        /// scope. M1c drives the second, which is why its target has to be real
+        /// enough to count.
         ///
         /// The production function is an associated function over
         /// `*const ScopeShared` (the KE16 protector-lifetime fix), so this

@@ -1,4 +1,5 @@
-//! KE16 — the PHYSICS-level measurement harness for threadpool defect A.
+//! KE16 — the PHYSICS-level measurement harness for the solve that runs inside
+//! a scheduled system.
 //!
 //! ## What this bench exists to measure, and why the existing ones cannot
 //!
@@ -9,14 +10,15 @@
 //! (`parallel_solve.rs:198-199`). The bench thread is not a registered worker,
 //! so `install` labels it `WORKER_ID_DISPATCHER` and every task the solver's
 //! `pool.scope` pushes lands in `injector_global`, which every worker polls.
-//! **Both existing benches therefore measure the HEALTHY dispatch path only.**
+//! **Both existing benches therefore measure the dispatcher's push path only.**
 //!
 //! In production the same call runs from `physics_solve_colored`, registered
 //! with `builder.add_system(...)` (`plugin.rs`), and the parallel scheduler
 //! runs every concurrent system body ON A WORKER. From a worker, `push_task`
-//! routes to `injector_local[wid]`, which no sibling ever polls, and the
-//! joining worker drains it into a private unregistered `scratch` deque and
-//! runs it inline. **The shipping configuration is the path no bench covers.**
+//! routes to that worker's own registered deque rather than to
+//! `injector_global`, and the scope is joined by a registered worker rather
+//! than by the dispatcher — a different destination and a different joiner.
+//! **The shipping configuration is the path no bench covers.**
 //!
 //! This bench runs the IDENTICAL warmed solve over the IDENTICAL scene down
 //! both routes and reports the ratio:
@@ -26,8 +28,8 @@
 //!     scope is open: a W+1 lane route.
 //!   * `bench_thread_install_Wminus1` — the same shape over a `num_threads(W-1)`
 //!     pool, so W-1 workers plus the helping bench thread is exactly W lanes.
-//!     This is the reference the acceptance line uses when the shipped joiner
-//!     policy keeps the external helper, because comparing the scheduled route
+//!     The shipped external joiner helps rather than parking, so this is the
+//!     W-lane reference the acceptance line uses: comparing the scheduled route
 //!     against a W+1 lane route would grant it a structural allowance of up to
 //!     (W+1)/W — 6.25 % at W=16, the width of the effect under study
 //!     (`KE16-DESIGN-APP.md` §11).
@@ -69,9 +71,7 @@ use boyko_physics::manifold::{BodyIndex, ContactPoint, Manifold};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::resources::{BodyState, ConstraintGraph, PhysicsConfig, SolverScratch};
 use boyko_physics::solver::ColoredSoftStepSolver;
-use boyko_threadpool::{
-    MAX_WORKERS, ThreadPool, ThreadPoolBuilder, current_worker_id, ke16_check_expected_variant,
-};
+use boyko_threadpool::{MAX_WORKERS, ThreadPool, ThreadPoolBuilder, current_worker_id};
 
 /// The colored solver's W1 inline-vs-dispatch threshold (a private const in the
 /// crate; mirrored here only for the anti-vacuity witness). Keep in sync with
@@ -84,7 +84,7 @@ const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
 /// any run of it was off-pool. The two sentinels (`WORKER_ID_DISPATCHER = u32::MAX - 1`,
 /// `WORKER_ID_UNATTACHED = u32::MAX`) are the largest `u32`s, so a max is exactly that test.
 /// A body that ran on the dispatcher would push the solver's chunks to `injector_global` and
-/// measure the HEALTHY route under the shipping route's name
+/// measure the BENCH-THREAD route under the shipping route's name
 /// (`KE16-DESIGN-MEASUREMENT.md` §5 shape 2).
 static SYSTEM_WORKER_ID: AtomicU32 = AtomicU32::new(0);
 
@@ -360,14 +360,6 @@ fn spawn_empty_schedule(pool: &Arc<ThreadPool>) -> (EcsMaster, Schedule) {
 // ── Benches ─────────────────────────────────────────────────────────────────
 
 fn bench_ke16_solve_routes(c: &mut Criterion) {
-    // The banner and the `KE16_EXPECT` check are TWO obligations (`KE16-DESIGN.md` §4): the check
-    // is SILENT when the variable is unset, so without the banner the rows below would carry no
-    // record of which build produced them, and the acceptance line this bench feeds would be
-    // unattributable. It is printed HERE and not inside `ke16_check_expected_variant` because a
-    // print from `crates/*/src/**.rs` reds `boyko-log`'s print census; the spelling matches the
-    // pool crate's KE16 harness files, so one `grep "KE16 variant"` collects every row.
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
     let workers = available_parallelism().map(|n| n.get()).unwrap_or(4);
     // The `bench_thread_install_Wminus1` reference pool. `ThreadPoolBuilder` clamps its argument
     // to `[1, MAX_WORKERS]`, so `max(1)` only spells out what the builder would do anyway on a
@@ -408,7 +400,7 @@ fn bench_ke16_solve_routes(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(1));
     group.throughput(Throughput::Elements(n_contacts as u64));
 
-    // ── Route 1: the O6 shape — `pool.install` on the BENCH THREAD (healthy).
+    // ── Route 1: the O6 shape — `pool.install` on the BENCH THREAD.
     group.bench_with_input(
         BenchmarkId::new("bench_thread_install", n_contacts),
         &n_contacts,
@@ -429,10 +421,9 @@ fn bench_ke16_solve_routes(c: &mut Criterion) {
     //    lane route and beats a W-lane scheduled route structurally — by up to (W+1)/W, 6.25 % at
     //    W=16, which is the width of the effect under study. This row removes that allowance:
     //    W-1 workers plus the helping external joiner is W lanes, so the acceptance line compares
-    //    W lanes against W lanes. (Which of the two rows IS the W-lane reference depends on the
-    //    shipped joiner policy: if the external joiner parks instead of helping, this row is W-1
-    //    lanes and `bench_thread_install` is the W-lane one — `KE16-DESIGN-APP.md` §11. The
-    //    ratio between the two rows is itself the receipt for which of the two it was.)
+    //    W lanes against W lanes. (The shipped external joiner steals rather than parking, so it
+    //    is THIS row that is the W-lane reference — `KE16-DESIGN-APP.md` §11 — and the ratio
+    //    between the two rows prices the one extra lane `bench_thread_install` runs on.)
     group.bench_with_input(
         BenchmarkId::new("bench_thread_install_Wminus1", n_contacts),
         &n_contacts,
@@ -448,7 +439,7 @@ fn bench_ke16_solve_routes(c: &mut Criterion) {
         },
     );
 
-    // ── Route 2: the SHIPPING shape — inside a scheduled system (defective).
+    // ── Route 2: the SHIPPING shape — inside a scheduled system.
     group.bench_with_input(
         BenchmarkId::new("in_scheduled_system", n_contacts),
         &n_contacts,

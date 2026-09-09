@@ -2674,11 +2674,10 @@ impl ColoredSoftStepSolver {
             // One chunk cut: `(group lo, group hi, slot start, slot end)`.
             type ColorChunkCut = (usize, usize, usize, usize);
 
-            // The cut walk as a re-runnable iterator. The boundaries are
-            // data-dependent (they follow the CSR's slot runs), so KE16 App-4's
-            // wave count is not available in closed form — it is this same walk,
-            // run once to count. Factored here rather than written twice so the
-            // counted cuts and the dispatched cuts cannot drift apart.
+            // The cut walk as a lazy iterator. The boundaries are data-dependent
+            // (they follow the CSR's slot runs), so they are derived on the fly as
+            // the dispatch loop consumes them — never materialized into a per-step
+            // Vec of chunk bounds (W2), and never available in closed form.
             let cuts = || {
                 let mut chunk_g_lo = g_lo;
                 core::iter::from_fn(move || -> Option<ColorChunkCut> {
@@ -2741,10 +2740,10 @@ impl ColoredSoftStepSolver {
             };
 
             pool.scope(|scope| {
-                // The chunk task, written once and used by both dispatch arms
-                // below: a `Fn` over a cut that hands back that chunk's body.
-                // Every capture is `Copy` (the solve views and the step
-                // scalars), so each body owns its copies and borrows nothing.
+                // The chunk task: a `Fn` over a cut that hands back that chunk's
+                // body, one spawn per cut. Every capture is `Copy` (the solve
+                // views and the step scalars), so each body owns its copies and
+                // borrows nothing.
                 let task = move |cut: ColorChunkCut| {
                     let (task_g_lo, task_g_hi, chunk_start, chunk_end) = cut;
                     move || {
@@ -2804,21 +2803,8 @@ impl ColoredSoftStepSolver {
                     }
                 };
 
-                // KE16 App-4: the color's chunks go out as ONE wave — one
-                // `pending` RMW and one wake decision per color instead of one
-                // per chunk. Branching on a `const` (`KE16_SPAWN_BATCH`), so the
-                // un-batched build folds the counting walk away instead of
-                // paying an O(groups) pass per color per iteration for a value
-                // it would not use, and spawns per task exactly as before.
-                // Chunk bounds are identical either way, and bit-identity is
-                // chunk-count- and chunk-shape-independent regardless.
-                if boyko_threadpool::KE16_SPAWN_BATCH {
-                    let n_waves = cuts().count();
-                    scope.spawn_batch(n_waves, cuts().map(task));
-                } else {
-                    for cut in cuts() {
-                        scope.spawn(task(cut));
-                    }
+                for cut in cuts() {
+                    scope.spawn(task(cut));
                 }
             });
         });

@@ -36,90 +36,10 @@ loom.workspace = true
 [features]
 default = []
 scheduler-trace = []
-# KE16 tournament switches -- one per candidate, mutually exclusive per axis (enforced by
-# `compile_error!` in src/lib.rs), DELETED in the same pass once the verdict lands. A shipped
-# crate carries none of them; `default = []` is today's behaviour plus the items that ship
-# regardless (W-a, App-6, App-11).
-#
-# A row marked NOT IN THIS TREE names a candidate whose ARM has not landed yet: the feature is
-# declared so its axis can be built by name, and `src/lib.rs` REFUSES TO COMPILE it until the arm
-# is there. Without that refusal a `--features` line would produce a binary that differs from the
-# default build in nothing at all (or, for `ke16-w-gate`, in half of one mechanism) while the
-# witness reported the candidate's token and `KE16_EXPECT` certified the run -- the exact quiet
-# mislabelling the witness exists to forbid (`docs/threadpool/KE16-DESIGN.md` §4). Each axis
-# deletes its own refusal in the commit that lands its arm, and rewrites the row below.
-ke16-a1 = []                 # A1: own registered deque, LIFO owner end
-ke16-a1-fifo = []            # A1: own registered deque, FIFO owner end (today's end discipline)
-ke16-a2 = []                 # A2: injector_local joins the sibling scan set
-ke16-a3 = []                 # A3: every spawn to injector_global (the control)
-ke16-a5 = ["ke16-a2"]        # A5: idle-keyed placement into a sibling's injector (needs A2's scan)
-# B1: the worker joiner pops its OWN registered deque and steals into it one task per scope
-# re-check, and parks idle-marked (B1-P) so a parked joiner is a claimable lane; the external
-# joiner steals one task at a time and has no `scratch`. Requires `ke16-a1` / `ke16-a1-fifo` --
-# the worker arm needs a REGISTERED destination deque, which only those arms give it.
-ke16-b1 = []
-# B3: B1's worker arm (B1-P included) plus an external joiner that never helps -- snooze, then
-# park. Same A-arm requirement as `ke16-b1`, and mutually exclusive with it.
-ke16-b3 = []
-# W-b: BOTH mechanisms. The <=1 push gate (`worker::wake_after_push` — a push wakes one worker
-# iff the destination held at most one task immediately before it) AND the self-excluding
-# thief-residue cascade (`worker::wake_after_residue`, called from `pop_global_injector` and
-# `try_steal_random` — a thief left with residue in its own registered deque wakes one worker
-# OTHER than itself). The cascade is where the candidate's O(log W) fan-out lives; half of W-b
-# must never carry W-b's label. Model: loom M4 plus its two calibration copies.
-ke16-w-gate = []
-# W-d': count-gated completion for a joiner that `tls::worker_lane_for` identifies as a
-# registered worker of the scope's pool -- `ScopeShared.joiner_wake` (a `*const WakeHandle` into
-# `PoolInner`-owned memory, copied out BEFORE the decrement), `pending.fetch_sub` first and the
-# unpark only on `prev == 1`. The external-joiner arm keeps today's unpark-before-decrement and
-# its documented window. Model: loom M1c; liveness gate: the route-(b) Miri test at 32 seeds.
-ke16-w-count = []
-# App-4: `Scope::spawn_batch(n, bodies)` -- ONE `pending.fetch_add(n)` per wave, n insertions
-# (`worker::push_task_no_wake` for the first, `worker::push_task_silent` for the rest -- silent
-# also in the sense that they do not COMPUTE the gate's input, so a wave pays one `len()` probe
-# and not n), and the wave's single wake decision taken right after the FIRST push. Callers:
-# `Query::par_iter` / `par_chunk` and the physics colored / soft / emit dispatches, which reach
-# the switch through `boyko_threadpool::KE16_SPAWN_BATCH` (a `const`, not a pass-through feature,
-# so `--features boyko-threadpool/ke16-c-batch` flips the callers too).
-# The `pending` saving holds under every A arm; the WAKE saving is pre-empted per push under
-# `ke16-a5`, whose placement wakes a claimed sibling on every push for which a bit was claimable
-# and falls through to the wave's own decision on the rest (see the `ke16-w-fanout` row).
-# ⚠ THE WAVE'S ONE DECISION ACTIVATES ONE SIBLING. `unpark_one_idle` claims one bit and unparks
-# one worker; a parked worker waits on an UNTIMED `park()`. The thief-residue cascade that re-fans
-# a silent wave out (`worker::wake_after_residue`) is `ke16-w-gate`'s and is a no-op without it,
-# so THIS FEATURE ALONE takes a wave from the `min(n, popcount(idle))` lanes the per-task baseline
-# wakes down to two, worst at 100 us-1 ms x W. A `c1` / `c1f` row is interpretable only relative to
-# the wake configuration it was taken under: measure `ke16-c-batch` on top of `ke16-w-gate` or
-# `ke16-w-fanout` to isolate App-4's accounting; a `c1`-alone row against `c0` does not.
-# (`src/scope.rs::Scope::wake_for_wave` carries the full statement; the fork -- fan-out
-# unconditionally, or never measure c1 alone -- is escalated as a design call.)
-ke16-c-batch = []
-# W-f: at a batch's FIRST push, one `publish_fence` then at most `n` claim+unpark rounds over ONE
-# entry snapshot of the idle mask (`worker::wake_up_to`), i.e. `min(n, popcount(idle))` unparks,
-# instead of one wake plus W-b's cascade. The snapshot is what holds the bound: a worker woken by
-# an early round can park again inside the same call, and a per-round re-read would wake it twice.
-# The wave size is known only where a batch is spawned, hence the implied `ke16-c-batch`.
-# THE FAN-OUT OBEYS THE W GATE, it is not exempt from it: `worker::wake_after_push_up_to` asks
-# `worker::wake_is_due(pre_len)` -- the same `<=1` rule every other push-side site asks, and the
-# one place `ke16-w-gate` is spelled on that side -- and only then fans out. So under
-# `ke16-w-gate,ke16-w-fanout` a first push into a queue that already held >= 2 tasks wakes NOBODY,
-# exactly as without the fan-out; the arm changes the WIDTH of a wake, never whether one is owed.
-# That is what makes `wgc+c1f` minus `wgc+c1` the fan-out COUNT and nothing else, and it is why the
-# `pre_len` the first push probed is read rather than discarded. This departs from
-# `KE16-DESIGN-W.md` §4.1's literal `wake_up_to(inner, n)` in favour of `KE16-DESIGN.md` §4's
-# "the W gate is ONE site" (see `worker::wake_after_push_up_to`).
-# PRE-EMPTED PER PUSH BY `ke16-a5`, NOT DISABLED BY IT: when A5's placement claims an idle bit it
-# unparks that sibling itself and `push_task_no_wake` tells the batch no decision is due, so the
-# fan-out is skipped for that wave; when the mask was empty or the claim CAS lost, `wake_up_to`
-# DOES run and finds nothing -- one fence plus one `idle` load, zero unparks. The arm is thus
-# inert exactly where fan-out would help and live as overhead where it would not, while the
-# witness still reads `c1f` (`src/scope.rs::Scope::wake_for_wave`, `src/lib.rs`'s `KE16_C`).
-# No `c1`/`c1f` row may be filed from a build that also enables `ke16-a5`.
-ke16-w-fanout = ["ke16-c-batch"]
 
-# M2w: the Tree-Borrows NEGATIVE CONTROL of the stage-3 allocation work -- the one switch here that
-# is not a tournament candidate and labels no measurement. It swaps `Task::new_scoped`'s `execute`
-# value for `task::scoped::run_scoped_neg`, which differs from the shipped `run_scoped` by exactly
+# M2w: the Tree-Borrows NEGATIVE CONTROL of the stage-3 allocation work -- a switch that labels no
+# measurement. It swaps `Task::new_scoped`'s `execute` value for `task::scoped::run_scoped_neg`,
+# which differs from the shipped `run_scoped` by exactly
 # one protector: it binds the cell as a `&ScopedCell<F>` and passes that reference as an ARGUMENT
 # to the call that performs the release RMW, so a protector over CHUNK memory is live at the instant
 # `Scope::drop`'s `free_all` deallocates that chunk. Miri under Tree Borrows must then report
@@ -132,9 +52,8 @@ ke16-w-fanout = ["ke16-c-batch"]
 # `#[cfg(all(feature = "tb-neg-m2w", not(miri)))] compile_error!(...)`, so `--all-features` -- the
 # one configuration that would otherwise ship deliberate UB into the ordinary suite -- refuses to
 # compile instead. Driver: `scripts/tb_neg_gate.ps1`, one Miri process per seed, all four red.
-# It carries no `ke16-` prefix on purpose: `tests/ke16_feature_scheme_census.rs` filters the
-# declared switches on that prefix, so this row is outside the design's eleven-switch set and has no
-# witness token in `KE16_A/B/W/C` -- it falsifies a gate, it does not identify a configuration.
+# It carries no `ke16-` prefix on purpose: it falsifies a gate, it does not identify a
+# configuration.
 tb-neg-m2w = []
 
 [lints]

@@ -24,17 +24,11 @@
 //! `cfg!`-based check can only speak about the configuration it was compiled in,
 //! and every piece here belongs to a build (`--features tb-neg-m2w`, under Miri)
 //! that a plain `cargo test` never produces — indeed one that `src/lib.rs`
-//! REFUSES to produce natively, on purpose. Reading the text is the same choice
-//! `tests/ke16_feature_scheme_census.rs` made, for the same reason, and it is
-//! stated here so nobody mistakes it for laziness.
+//! REFUSES to produce natively, on purpose. Reading the text is a deliberate
+//! choice, stated here so nobody mistakes it for laziness.
 //!
-//! It also closes a hole that census cannot see: it filters manifest features by
-//! `.starts_with("ke16-")`, so a `tb-neg-m2w` row is invisible to BOTH
-//! `the_declared_switch_set_is_exactly_the_designs_eleven` and
-//! `every_declared_switch_has_either_an_arm_or_a_refusal`. The feature therefore
-//! has no guard there in either direction, which is precisely why this file is
-//! owed and why `cargo check --features tb-neg-m2w` "must fail" cannot be the
-//! only one — an exit code cannot tell a REFUSAL from an ABSENCE, and before the
+//! `cargo check --features tb-neg-m2w` "must fail" cannot be the only guard the
+//! row has — an exit code cannot tell a REFUSAL from an ABSENCE, and before the
 //! feature was declared that condition was green because cargo did not know the
 //! feature at all.
 //!
@@ -146,10 +140,9 @@ fn read(path: &Path) -> String {
 /// The backward walk stops at the first line that is neither blank nor a comment
 /// nor an attribute, so an attribute belonging to some PREVIOUS item is never
 /// collected — "under the cfg" means the attribute block of THIS item and
-/// nothing else. That "directly above" discipline is the same one
-/// `ke16_feature_scheme_census.rs::has_solo_refusal` uses, and for the same
-/// reason: a plain substring search for the feature name is satisfied by any
-/// mention anywhere in the file, including the comment that explains the rule.
+/// nothing else. A plain substring search for the feature name is satisfied by
+/// any mention anywhere in the file, including the comment that explains the
+/// rule, which is what makes "directly above" load-bearing rather than tidy.
 fn attribute_block_of<'a>(text: &'a str, item_needle: &str) -> Option<Vec<&'a str>> {
     let lines: Vec<&str> = text.lines().collect();
     let idx = lines.iter().position(|l| l.contains(item_needle))?;
@@ -173,9 +166,8 @@ fn item_is_gated_by_the_feature(text: &str, item_needle: &str) -> bool {
 
 /// Does `[features]` declare a row named `name`?
 ///
-/// Hand-rolled for the same reason the sibling census hand-rolls its parser: the
-/// crate has no TOML dev-dependency, and one row's presence does not justify
-/// adding one.
+/// Hand-rolled rather than pulled through a TOML crate: the crate has no TOML
+/// dev-dependency, and one row's presence does not justify adding one.
 fn manifest_declares_feature(manifest: &str, name: &str) -> bool {
     let mut in_features = false;
     for line in manifest.lines() {
@@ -255,10 +247,9 @@ fn the_arm_and_its_completer_live_in_task_scoped_under_the_feature() {
         path.display()
     );
 
-    // Scoped to `finish_neg`'s OWN attribute block, not to the file: the file
-    // already carries an `#[inline(never)]` on `drop_unrun_scoped`, so a
-    // whole-file search would have been green before the arm existed — a check
-    // that could not fail.
+    // Scoped to `finish_neg`'s OWN attribute block, not to the file: a
+    // whole-file search for `#[inline(never)]` is satisfied by the attribute on
+    // ANY item, so it would stop measuring the one frame that has to survive.
     let finish_attrs = attribute_block_of(&text, "fn finish_neg").unwrap_or_default();
     assert!(
         finish_attrs.contains(&"#[inline(never)]"),
@@ -492,8 +483,7 @@ fn both_driver_scripts_name_the_arm_and_the_four_seeds() {
     // it demonstrates the seed-independence of a GREEN and would end the process
     // on the first abort, turning "4/4 red" into "at least 1/4 red" and calling
     // that a pass. A "must not contain" check would fire on the documentation of
-    // the rule rather than on a violation of it, which is the failure
-    // `ke16_feature_scheme_census.rs::ABSENT_MARKER` had to be redesigned around.
+    // the rule rather than on a violation of it.
 }
 
 #[test]

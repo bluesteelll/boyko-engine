@@ -44,10 +44,13 @@ const _: () =
 /// It is unfireable, and it was deleted once for exactly that reason (code
 /// review, 2026-09-06). MEASURED consequence, same command, single variable:
 /// `miri_scope_completion_protector` under `--features ke16-w-count,ke16-a2`
-/// went from `ctx=W-d-prime firings=2/2 overlaps=2/2` (green) to
-/// `firings=2/2 overlaps=0/2` — the anti-vacuity assert firing, deterministic
-/// over three runs, because the arm's release window is a few instructions wide
-/// in a DEBUG build and this assert was on the spawn path.
+/// (the features are gone since Step App; the spellings are kept because they
+/// are the exact key into `KE16-REJECTED.md`'s `Flag` column) went from
+/// `ctx=W-d-prime firings=2/2
+/// overlaps=2/2` (green) to `firings=2/2 overlaps=0/2` — the anti-vacuity
+/// assert firing, deterministic over three runs, because the arm's release
+/// window is a few instructions wide in a DEBUG build and this assert was on
+/// the spawn path.
 ///
 /// **THE COUPLING NO LONGER HAS THE FORM IT WAS MEASURED IN, and that is a
 /// re-check owed rather than a coupling removed.** The measurement was taken
@@ -58,6 +61,13 @@ const _: () =
 /// still armed is therefore an open question ON THIS COMMIT, not an inherited
 /// green: it is exit condition 5 of the plan and it is settled by re-running
 /// the arm, not by reasoning from the old number.
+///
+/// The build it was measured in cannot be rebuilt either. That run selected the
+/// KE16 W-d′ arm, which the tournament settled on and which now ships
+/// unconditionally, together with A2, an axis-A candidate it rejected;
+/// no `ke16-` candidate `cfg` survives in the sources, so the re-run is the
+/// gate as it ships. That makes the old pair of numbers history, not a
+/// baseline: neither half of it was taken on the configuration that ships.
 ///
 /// Two things the tree already says about how to settle it. The cheap answer is
 /// refused: `MIRI_RELEASE_PROBE_YIELDS`'s own doc records that ARMEDNESS IS NOT

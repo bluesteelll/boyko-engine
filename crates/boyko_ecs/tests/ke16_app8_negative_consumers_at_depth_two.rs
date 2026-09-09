@@ -77,14 +77,6 @@ impl Component for Ke16Neg {
     }
 }
 
-/// The KE16 witness. Printed per TEST rather than per binary: the measurement protocol runs these
-/// filtered, so a banner emitted once from a harness `main` would not appear on the invocation
-/// whose reading is recorded (`KE16-DESIGN.md` §4).
-fn ke16_witness() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    boyko_threadpool::ke16_check_expected_variant();
-}
-
 /// A world holding one deletable entity. `register_layout` is `OnceLock`-based and same-type
 /// idempotent, so two tests of this binary may build a world concurrently.
 fn world_with_one_entity() -> (EcsMaster, Entity) {
@@ -111,7 +103,6 @@ fn world_with_one_entity() -> (EcsMaster, Entity) {
 #[cfg(debug_assertions)]
 #[should_panic(expected = "SAFETY-7: hook drain must run with IN_SYSTEM_RUN == false")]
 fn hook_drain_safety_7_still_fires_at_guard_depth_two() {
-    ke16_witness();
     let (mut world, victim) = world_with_one_entity();
 
     let _outer = InSystemRunGuard::enter();
@@ -140,7 +131,6 @@ fn hook_drain_safety_7_still_fires_at_guard_depth_two() {
 #[cfg(debug_assertions)]
 #[should_panic(expected = "Profiler::arm is a setup call and must not run inside a system")]
 fn profiler_arm_is_still_refused_at_guard_depth_two() {
-    ke16_witness();
     let mut profiler = Profiler::new();
 
     let _outer = InSystemRunGuard::enter();
@@ -160,7 +150,6 @@ fn profiler_arm_is_still_refused_at_guard_depth_two() {
 /// value and a predicate, not a `debug_assert!`, so it is a real gate in a release run too.
 #[test]
 fn the_negative_consumers_are_disarmed_again_after_the_depth_two_unwind() {
-    ke16_witness();
     let (mut world, victim) = world_with_one_entity();
 
     assert!(!is_in_system_run(), "the test thread must start outside a system body");

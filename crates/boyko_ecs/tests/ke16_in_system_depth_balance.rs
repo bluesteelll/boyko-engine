@@ -32,8 +32,8 @@
 //! 2. [`the_dispatcher_runs_its_safety_7_drains_at_depth_zero`] — the dispatcher-side balance,
 //!    DRIVEN rather than assumed: the test raises and lowers the depth on the dispatcher thread
 //!    itself, with the same `InSystemRunGuard` bracket the scheduler puts around a system body
-//!    (`schedule.rs:1299`), and then runs the two SAFETY-7 consumers that a leak would disarm on
-//!    that thread — the inline drain that follows an EXCLUSIVE system (`schedule.rs:1176`) and
+//!    (`schedule.rs:1345`), and then runs the two SAFETY-7 consumers that a leak would disarm on
+//!    that thread — the inline drain that follows an EXCLUSIVE system (`schedule.rs:1222`) and
 //!    `delete_entity`'s own drain (`ecs_master.rs:676-679`).
 //!
 //! ## What the dispatcher does NOT do — traced, because an earlier revision asserted the opposite
@@ -44,22 +44,21 @@
 //! at this checkout:
 //!
 //! - the only `InSystemRunGuard::enter()` in the ECS is inside `scope.spawn`
-//!   (`schedule.rs:1299`); the inline-exclusive loop (`schedule.rs:1085-1191`) calls
-//!   `System::run_dispatcher` directly (`:1152`) with NO guard around it;
-//! - the executor never helps: a round that dispatches nothing PARKS (`schedule.rs:695-706`), it
+//!   (`schedule.rs:1345`); the inline-exclusive loop (`schedule.rs:1130-1237`) calls
+//!   `System::run_dispatcher` directly (`:1197`) with NO guard around it;
+//! - the executor never helps: a round that dispatches nothing PARKS (`schedule.rs:741-753`), it
 //!   does not steal;
-//! - `executor_main_loop` returns only at `completed.count_ones(..) == n` (`schedule.rs:666-668`),
+//! - `executor_main_loop` returns only at `completed.count_ones(..) == n` (`schedule.rs:712-714`),
 //!   and a `completed` bit is set only after that system's body has run and been drained — so
-//!   when `pool.install`'s scope drops (`schedule.rs:433-435`) no un-run system task is left for
-//!   `join_workers_until_drained` to find, and it returns on its first `is_drained()`. That
-//!   function is cited by NAME, not by line: it lives in `boyko_threadpool/src/scope.rs` as two
-//!   `#[cfg]`-selected bodies of one signature (the B0 arm and the B1/B3 arm), and the KE16
-//!   tournament moves both. Under `ke16-b1`/`ke16-b3` the external arm likewise finds nothing to
-//!   steal.
+//!   when `pool.install`'s scope drops (`schedule.rs:455-457`) no un-run system task is left for
+//!   `join_workers_until_drained` (`boyko_threadpool/src/scope.rs`) to find, and it returns on its
+//!   first `is_drained()`. This thread holds no lane of that pool, so the joiner's identity
+//!   dispatch (`tls::worker_lane_for` answers `None`) routes it to `join_external`, whose injector
+//!   poll and sibling sweep likewise find nothing to steal.
 //!
 //! So no *guarded body* runs on the dispatcher of a schedule run. The fact is worth recording
-//! rather than merely avoiding: `KE16-DESIGN.md` §8's App-8 row reads inline sibling execution as
-//! "already reachable today through the global-injector drain", and that is reachable on a WORKER
+//! rather than merely avoiding: `KE16-DESIGN.md` §2's App-8 row reads inline sibling execution as
+//! already reachable through the `injector_global` drain, and that is reachable on a WORKER
 //! joiner — which `ke16_nested_system_inline.rs` gates — not on this thread.
 //!
 //! Test 2 therefore does not wait for a race to hand the dispatcher a guarded body. It enters and
@@ -84,7 +83,7 @@ use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_threadpool::{
     InSystemRunGuard, MAX_WORKERS, ThreadPoolBuilder, WORKER_ID_DISPATCHER, WORKER_ID_UNATTACHED,
-    current_worker_id, is_in_system_run, ke16_check_expected_variant,
+    current_worker_id, is_in_system_run,
 };
 
 const SLOT_KE16_DEPTH: ComponentId = ComponentId(495);
@@ -122,14 +121,6 @@ const PROBES_PER_WORKER: usize = 8;
 /// Per-system and per-probe busy-wait. Long enough that the scheduler spreads the wave over
 /// several lanes, short enough that the whole file stays well inside a test budget.
 const SPIN: Duration = Duration::from_micros(200);
-
-/// The KE16 witness. Printed per TEST rather than per binary because the measurement protocol
-/// runs these filtered, so a banner emitted once from a harness `main` would not appear on the
-/// invocation whose reading is recorded (`KE16-DESIGN.md` §4).
-fn ke16_witness() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
-}
 
 fn spin_for(d: Duration) {
     let deadline = Instant::now() + d;
@@ -186,10 +177,9 @@ fn worker_count() -> usize {
 /// The worker-side balance: after a schedule whose bodies ran on the pool's threads, no thread of
 /// that pool still reads as being inside a system body.
 ///
-/// The probe wave is spawned from the TEST thread, i.e. through the dispatcher route, which is
-/// healthy in every configuration of this campaign (`ke16_occupancy_gate.rs`'s control test) —
-/// so this test measures the depth counter, never the placement defect KE16 is fixing. It holds
-/// in the default build and under every candidate; a failure here is a leaked guard, nothing else.
+/// The probe wave is spawned from the TEST thread, i.e. through the dispatcher route, which
+/// `ke16_occupancy_gate.rs`'s control test proves healthy — so this test measures the depth
+/// counter, never task placement. A failure here is a leaked guard, nothing else.
 #[test]
 #[cfg_attr(
     miri,
@@ -197,7 +187,6 @@ fn worker_count() -> usize {
               of real wall-clock spins"
 )]
 fn every_probed_worker_leaves_the_system_depth_at_zero() {
-    ke16_witness();
     let workers = worker_count();
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();
 
@@ -265,7 +254,7 @@ fn every_probed_worker_leaves_the_system_depth_at_zero() {
 }
 
 /// What the dispatcher-side pass records. Every field is written on the dispatcher thread — the
-/// exclusive system runs INLINE there (`schedule.rs:1085-1191`) — and read after `Schedule::run`
+/// exclusive system runs INLINE there (`schedule.rs:1130-1237`) — and read after `Schedule::run`
 /// has returned, so the atomics carry the write across nothing; they are atomics because a
 /// `System` body must be `Send + Sync`, not because two threads race for these fields.
 struct DispatcherProbe {
@@ -306,8 +295,8 @@ impl DispatcherProbe {
 ///    process.
 /// 3. The exclusive system ran on the DISPATCHER lane, exactly once, and read depth 0 there —
 ///    lost if the executor stopped taking the inline path, or if a refactor ever bracketed that
-///    path in an `InSystemRunGuard`. The second case aborts a DEBUG build one line later, at the
-///    `drain_deferred_hook_queue` that follows the body inline (`schedule.rs:1176`, SAFETY-7);
+///    path in an `InSystemRunGuard`. The second case aborts a DEBUG build at the
+///    `drain_deferred_hook_queue` that follows the body inline (`schedule.rs:1222`, SAFETY-7);
 ///    in a RELEASE build, where that `debug_assert!` is compiled out, this receipt is the only
 ///    observer of it.
 /// 4. `delete_entity` still succeeds — the second SAFETY-7 drain (`ecs_master.rs:676-679`), on
@@ -318,7 +307,6 @@ impl DispatcherProbe {
     ignore = "miri-slow: builds a real OS thread pool and runs a 25-system schedule"
 )]
 fn the_dispatcher_runs_its_safety_7_drains_at_depth_zero() {
-    ke16_witness();
     register_layout::<Ke16Depth>(SLOT_KE16_DEPTH.0);
 
     assert!(!is_in_system_run(), "the test thread must start outside a system body");
@@ -389,8 +377,8 @@ fn the_dispatcher_runs_its_safety_7_drains_at_depth_zero() {
     assert!(
         !probe.exclusive_in_system.load(Ordering::SeqCst),
         "the inline-exclusive body read as INSIDE a system body: something now brackets that path \
-         in an `InSystemRunGuard`, and the `drain_deferred_hook_queue` one line later \
-         (`schedule.rs:1176`) violates SAFETY-7 — it aborts a debug build and is silent in release"
+         in an `InSystemRunGuard`, and the `drain_deferred_hook_queue` that follows it inline \
+         (`schedule.rs:1222`) violates SAFETY-7 — it aborts a debug build and is silent in release"
     );
     assert!(
         !is_in_system_run(),

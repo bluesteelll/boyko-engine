@@ -1,32 +1,38 @@
-//! KE16 evidence probe - does the SHIPPED DEFAULT build (a0, no features) exhibit
-//! the Tree-Borrows protector-vs-deallocation window in
-//! `ScopeShared::complete_task`'s EXTERNAL-joiner arm?
+//! KE16 evidence probe - how often does the SHIPPED build's schedule OFFER the
+//! completion-vs-free window in `ScopeShared::complete_task`'s EXTERNAL-joiner
+//! arm?
 //!
 //! # The window under test
 //!
-//! `ScopeShared::complete_task(&self)` (`src/scope.rs:312-347`) ends its
-//! external-joiner arm with
+//! `ScopeShared::complete_task`'s external-joiner arm - the null-`joiner_wake`
+//! fall-through - ends with
 //!
 //! ```text
-//! self.waker.unpark();                          // scope.rs:345
-//! self.pending.fetch_sub(1, Ordering::AcqRel);  // scope.rs:346
-//! }                                             // scope.rs:347 - the &self PROTECTOR ends here
+//! (*shared).waker.unpark();                          // `waker` lives in THIS allocation
+//! (*shared).pending.fetch_sub(1, Ordering::AcqRel);  // the release point
+//! }                                                  // the completer's frame ends here
 //! ```
 //!
-//! `&self` is a reference-typed function argument, so Tree Borrows installs a
-//! *protector* on it that is live for the whole call, i.e. up to the closing
-//! brace at `:347`. The joiner (`join_workers_until_drained`, polled from
-//! `Scope::drop`) may observe `pending == 0` the instant the RMW at `:346`
-//! commits - strictly *before* `:347` - and then free the allocation at
-//! `src/scope.rs:855` (`drop(Box::from_raw(raw))`). Deallocating memory covered
-//! by a live strong protector is UB under Tree Borrows.
+//! The joiner (`join_workers_until_drained`, polled from `Scope::drop`) may
+//! observe `pending == 0` the instant that RMW commits - strictly *before* the
+//! completer's frame ends - and then free the allocation at `Scope::drop`'s
+//! `drop(Box::from_raw(raw))`. Whether that free is legal is decided by what
+//! the completer's frame still HOLDS at that instant: Tree Borrows installs a
+//! *protector* on every reference-typed function ARGUMENT, live for the whole
+//! call whether or not the callee touches a byte, and deallocating a range a
+//! live strong protector covers is UB.
 //!
-//! Both sites are byte-identical between the default build and the KE16 `a1`
-//! candidates: the only `cfg` inside `complete_task` is `ke16-w-count` (off in
-//! all three), and `impl Drop for Scope` carries no `cfg` at all. So the WINDOW
-//! provably exists in shipped code. What this file exists to settle is whether
-//! Miri can be made to EXHIBIT it in the default build - evidence that stops
-//! being obtainable the moment a fix lands.
+//! That is why `complete_task` is an associated function over `*const Self` and
+//! not a method on `&self`: the frame that performs the releasing `fetch_sub`
+//! has no reference-typed argument into the allocation, and the reference-typed
+//! call this arm does make (`unpark`) ends BEFORE the decrement rather than
+//! after it. Whether the receiver is sound is decided by
+//! `tests/miri_scope_completion_protector.rs`, which forces the interleaving at
+//! `-Zmiri-preemption-rate=0` and is cheap enough to run on every change. This
+//! file is the other half of that pair: it measures how often the shipped
+//! schedule PRODUCES the interleaving. It was written to settle whether Miri
+//! could be made to EXHIBIT the window - evidence that stops being obtainable
+//! the moment a fix lands, and the fix has landed, in the receiver above.
 //!
 //! # Shape, and why each part of it is load-bearing
 //!
@@ -38,8 +44,9 @@
 //! * **`pool.install(...)` from the test's own thread** - `install` rewrites
 //!   `CURRENT_WORKER_ID` to `WORKER_ID_DISPATCHER`, so `ScopeShared::new` is
 //!   handed a null W-d-prime target and every completion takes the
-//!   EXTERNAL-joiner arm (`scope.rs:343-346`), which is the arm that carries
-//!   the window.
+//!   EXTERNAL-joiner arm, which is the arm this file drives. (Both arms of
+//!   `complete_task` offer a window; the other one is a worker joiner's, and
+//!   the sibling gate covers it with a test of its own.)
 //! * **`TASKS_PER_SCOPE` tasks per scope** - enough that the last completion
 //!   can land on a worker rather than on the joiner's own inline steal. A scope
 //!   whose last body ran on the joiner has NO window: the same thread does the
@@ -54,7 +61,8 @@
 //! nodes for every transient reborrow the tasks and the joiner make, so each
 //! later scope on the same pool costs more than the one before it.
 //!
-//! MEASURED 2026-09-04/05 on this box, `-Zmiri-tree-borrows` plus
+//! MEASURED 2026-09-04/05 on this box, on the then-shipped default build
+//! (`a0`, no features), `-Zmiri-tree-borrows` plus
 //! `-Zmiri-preemption-rate=0.5`, one seed, one pool:
 //!
 //! | scopes on one pool | wall                            | s per scope-window |
@@ -125,8 +133,8 @@
 //! sweep that prints its volume cannot quietly claim one it did not run - but
 //! the knob that made the mistake possible is gone, and the census line stays.
 //!
-//! This test is deliberately NOT gated on any KE16 feature and NOT
-//! `cfg_attr(miri, ignore)`d. The default build is the whole point.
+//! This test is deliberately NOT `cfg_attr(miri, ignore)`d and carries no
+//! build gate of its own. The shipped build under Miri is the whole point.
 
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -167,7 +175,7 @@ fn ran_on_worker(id: u32) -> bool {
 /// with the freeing thread inside `Scope::drop` and the protector inside
 /// `ScopeShared::complete_task`.
 #[test]
-fn a0_external_joiner_free_races_completion_protector() {
+fn external_joiner_free_races_completion_protector() {
     // Total bodies executed across every scope - the primary anti-vacuity
     // census.
     let ran = AtomicUsize::new(0);
@@ -232,9 +240,8 @@ fn a0_external_joiner_free_races_completion_protector() {
     // 2026-09-04: a 64-seed sweep left only 29 of its 64 census lines intact
     // under `eprintln!`, i.e. more than half the power evidence was unreadable.
     let census = format!(
-        "KE16-FREE-WINDOW-CENSUS variant={} pools={POOLS} scopes={SCOPES} \
+        "KE16-FREE-WINDOW-CENSUS pools={POOLS} scopes={SCOPES} \
          tasks_per_scope={TASKS_PER_SCOPE} workers={WORKERS} bodies={} windows={windows}\n",
-        boyko_threadpool::ke16_variant(),
         ran.load(Ordering::Acquire),
     );
     {

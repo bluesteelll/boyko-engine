@@ -1,5 +1,5 @@
-//! KE16 App-4 (`ke16-c-batch`) — the batched callers' chunk RANGES, at the row
-//! counts where a `div_ceil` conversion can lose or duplicate a row.
+//! The parallel drivers' chunk RANGES, at the row counts where a `div_ceil`
+//! conversion can lose or duplicate a row.
 //!
 //! # What this gate exists to catch
 //!
@@ -31,12 +31,8 @@
 //! message, which is what a `div_ceil` defect needs in order to be diagnosed
 //! from the failure alone.
 //!
-//! # Both arms, deliberately
-//!
-//! Nothing here is `#[cfg]`-gated on `ke16-c-batch`: the property is one BOTH
-//! spawn shapes must have, and the file is therefore the differential gate
-//! between them. Run it with and without the feature; a difference in outcome
-//! IS the defect it looks for.
+//! Nothing here is `#[cfg]`-gated: the range arithmetic is a property the
+//! drivers must have in every build, so the gate runs in every build.
 //!
 //! Nothing in this file needs a GPU, a window or a nightly toolchain, and it
 //! carries no `#[ignore]`.
@@ -162,12 +158,12 @@ fn par_iter_visits_every_row_exactly_once_at_counts_whose_last_chunk_is_short() 
 ///
 /// It additionally carries this file's NON-VACUITY receipt, and it is the only
 /// one of the two that can: the chunk driver hands the body one call per chunk,
-/// so counting the calls reads the wave size `n` that `spawn_batch` was
-/// promised. `par_iter`'s body is per-row and exposes no chunk identity, so its
-/// test above pins coverage alone — the two drivers spell the SAME closed form
-/// (`par_iter.rs:403`, `par_chunk.rs:260`) and this receipt is what stops a
-/// silent sequential fallback (PAR7, "no pool attached") from passing both as
-/// one inline chunk.
+/// so counting the calls reads the `n_chunks` the driver computed. `par_iter`'s
+/// body is per-row and exposes no chunk identity, so its test above pins
+/// coverage alone — the two drivers spell the SAME closed form (`par_iter.rs`,
+/// `for_each_impl`; `par_chunk.rs`, `par_for_each_chunk_impl`) and this receipt
+/// is what stops a silent sequential fallback (PAR7, "no pool attached") from
+/// passing both as one inline chunk.
 #[test]
 fn par_for_each_chunk_visits_every_row_exactly_once_at_counts_whose_last_chunk_is_short() {
     for n in COUNTS {
@@ -195,22 +191,9 @@ fn par_for_each_chunk_visits_every_row_exactly_once_at_counts_whose_last_chunk_i
         assert_eq!(
             chunks_seen.load(Ordering::Acquire) as usize,
             expected_chunks(n),
-            "the wave at {n} rows was not the promised size: `spawn_batch` must be handed \
-             `entity_count.div_ceil(chunk_size)` bodies, and a sequential fallback would \
-             report one"
+            "the dispatch at {n} rows was not the promised size: the driver must emit \
+             `entity_count.div_ceil(chunk_size)` chunk bodies, and a sequential fallback \
+             would report one"
         );
     }
-}
-
-/// The measurement protocol's certification for this binary
-/// (`KE16-DESIGN-MEASUREMENT.md` §5 item 3): with `KE16_EXPECT` set to anything
-/// but this build, the file reds here instead of reporting a coverage result
-/// attributed to the wrong candidate.
-///
-/// The banner is printed from the test binary, not from the library: a print
-/// under `crates/*/src` reds `boyko-log`'s print census.
-#[test]
-fn ke16_witness_certifies_this_binary() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    boyko_threadpool::ke16_check_expected_variant();
 }

@@ -1,10 +1,10 @@
-//! KE16 axis W — the wake gate (W-b) and the count-gated completion (W-d′),
+//! KE16 axis W — the wake protocol and the count-gated completion (W-d′),
 //! observed from outside the crate as LIVENESS and EXACTLY-ONCE accounting.
 //!
 //! ## Why this file exists
 //!
-//! `KE16-DESIGN.md` §8 discharges the two W obligations through loom, and those
-//! models RUN on this box. Their colours, measured 2026-09-03 in this worktree
+//! `KE16-DESIGN.md` §8 discharges the W-d′ obligation through loom, and that
+//! model RUNS on this box. Its colour, measured 2026-09-03 in this worktree
 //! with the recipe recorded in `tests/loom_pool.rs`'s header
 //! (`cargo --config 'target.x86_64-pc-windows-gnu.rustflags=["-C","target-cpu=
 //! x86-64-v3","--cfg","loom"]' … --no-run`, then the emitted exe per test with
@@ -12,14 +12,11 @@
 //!
 //! | Obligation | Design's gate | Reading on this box |
 //! |---|---|---|
-//! | W-b-1 (no task sits in the scan set while every worker is parked and no wake is pending) | loom M4 (`KE16-DESIGN-W.md` §2.5) | `loom_m4a_gate_race_no_lost_wake` **green**; `loom_m4b_decline_is_safe_…` **green** |
-//! | W-b calibration — a model that cannot go red is not a gate (`KE16-DESIGN.md` §3 step 0) | the two copies §2.5 names | `loom_m4_calibration_empty_gate_is_lost` **red for `M4: lost wake`** (36.3 s); `loom_m4_calibration_no_self_exclusion_claims_self` **red for `cascade claimed self`** |
-//! | W-b, the non-lane pusher | `loom_m4c_stale_snapshot_strands_a_task_when_the_pusher_is_not_a_lane` | **red for `M4: lost wake`** (40.7 s) — the escalated finding, MEASURED, not predicted |
 //! | W-d′ (i)–(iii) (count-gated completion) | loom M1c (`KE16-DESIGN-W.md` §3.7) | `loom_m1c_count_gated_completion_wakes_the_parked_worker_joiner` **green** (0.40 s), with a REAL parked joiner — not the "count only" degradation §3.7 allows for |
-//! | W-d′ route-(b) liveness | Miri `nested_scope_from_worker_is_stolen_by_sibling` at 32 seeds | runs under any A arm (the A axis owns that route) **and** under `ke16-w-count`; a `ke16-w-count` build with NO A arm runs it (`running 1 test`) and aborts on the body's first line with `W-d′ route-(b) liveness gate DID NOT RUN` — a "this build cannot run the shape" literal, NOT a liveness red |
+//! | W-d′ route-(b) liveness | Miri `nested_scope_from_worker_is_stolen_by_sibling` at 32 seeds (`tests/miri_scope.rs`) | runs unconditionally; that target is `#![cfg(miri)]`, so a NATIVE `cargo test` of it lists nothing — see the route-(b) row below |
 //!
-//! So this file is NOT the W obligations' discharge and must never be filed as
-//! one — the models are. It is their CORROBORATION on real hardware plus the
+//! So this file is NOT the W-d′ obligation's discharge and must never be filed
+//! as one — the model is. It is its CORROBORATION on real hardware plus the
 //! backstop census: an exhaustive model over a toy transport says nothing about
 //! whether the shipped `crossbeam` push, the Windows `park`/`unpark` pair and
 //! the real worker loop compose the way the model's transcription assumes, and
@@ -47,20 +44,12 @@
 //! merging with it (`.cargo/config.toml`, the `x86-64-v3` baseline), so that
 //! command builds a differently-configured tree. The spelling that survives it
 //! is `cargo --config 'target.x86_64-pc-windows-gnu.rustflags=["-C",
-//! "target-cpu=x86-64-v3","--cfg","loom"]'`, and under it all 11 models list and
+//! "target-cpu=x86-64-v3","--cfg","loom"]'`, and under it the models list and
 //! run.
-//!
-//! ## Every test runs in EVERY build
-//!
-//! Nothing here is `#[cfg(feature = …)]`-gated. A W test that compiles away in
-//! the `w0` build would report `running 0 tests` — a vacuous pass
-//! (`KE16-DESIGN-MEASUREMENT.md` §5 item 1) — and, worse, would leave the base
-//! arm without the baseline that shows the instrument can run at all. The
-//! arm's identity is printed from [`boyko_threadpool::KE16_W`] at run time.
 //!
 //! ## The receipt against a blind pass
 //!
-//! The wake gate is only under test when the destination's siblings are
+//! The wake protocol is only under test when the destination's siblings are
 //! actually ASLEEP: a pool whose workers are all spinning finds the task
 //! without any wake, and the run proves nothing. Each liveness test therefore
 //! counts the repeats in which `ThreadPool::parked_mask()` showed EVERY worker
@@ -72,43 +61,36 @@
 //!
 //! ```text
 //! cargo test -p boyko-threadpool --test ke16_w_wake_completion -- --test-threads=1 --nocapture
-//! cargo test -p boyko-threadpool --test ke16_w_wake_completion --features ke16-w-gate -- --test-threads=1 --nocapture
-//! cargo test -p boyko-threadpool --test ke16_w_wake_completion --features ke16-w-count -- --test-threads=1 --nocapture
-//! cargo test -p boyko-threadpool --test ke16_w_wake_completion --features ke16-w-gate,ke16-w-count -- --test-threads=1 --nocapture
 //! ```
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use boyko_threadpool::{
-    KE16_W, ThreadPool, ThreadPoolBuilder, current_worker_id, ke16_check_expected_variant,
-    ke16_variant,
-};
+use boyko_threadpool::{ThreadPool, ThreadPoolBuilder, current_worker_id};
 
 /// Workers in every fixture pool.
 ///
 /// Four, not `available_parallelism()`: the property under test is "a task is
 /// not stranded while the siblings sleep", which needs siblings that can sleep,
 /// not a wide pool. A fixed width also makes the printed receipt comparable
-/// between arms on different machines.
+/// between machines.
 const WORKERS: u32 = 4;
 
 /// Tasks per wave.
 ///
-/// Above two, because the gate's own branch — `wake_after_push`'s `pre_len > 1`
-/// decline — is unreachable below three pushes: the first two pushes of a wave
-/// snapshot 0 and 1 and wake unconditionally under either arm. 64 gives the
-/// third-and-later pushes many chances to snapshot a length above one while a
-/// thief drains behind them.
+/// 64, not a handful: a wide wave gives the pusher many chances to store a task
+/// while a thief is draining behind it, which is the interleaving a lost wake
+/// needs. The one-, two- and three-task corner is covered separately by
+/// [`w_b_the_boundary_wave_sizes_one_two_and_three_drain_a_parked_pool`].
 const TASKS_PER_WAVE: usize = 64;
 
 /// Waves per liveness test.
 ///
-/// The window W-b leaves open is `[length read, push store]` on the spawner
-/// against a whole task body on a thief — nanoseconds against microseconds — so
-/// a single wave is not a measurement of anything. Repetition is the only lever
-/// a native test has on a race this narrow.
+/// The window a lost wake needs is nanoseconds wide on the spawner against a
+/// whole task body on a thief — so a single wave is not a measurement of
+/// anything. Repetition is the only lever a native test has on a race this
+/// narrow.
 const WAVES: usize = 64;
 
 /// How long a driver thread may take before the test calls it a hang.
@@ -166,10 +148,10 @@ where
     while !done.load(Ordering::Acquire) {
         assert!(
             Instant::now() < expiry,
-            "{label}: the driver did not finish within {DEADLINE:?} on arm `{KE16_W}`. \
-             W-b-1 (`KE16-DESIGN-W.md` §2.3) says every pushed task is eventually run and the \
-             delay is bounded by one task body; the `park_timeout` backstop bounds it again at \
-             ~1 ms. A wave outstanding this long is a wake that was lost AND not recovered."
+            "{label}: the driver did not finish within {DEADLINE:?}. Every pushed task is \
+             eventually run and the delay is bounded by one task body; the `park_timeout` \
+             backstop bounds it again at ~1 ms. A wave outstanding this long is a wake that was \
+             lost AND not recovered."
         );
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -186,7 +168,7 @@ fn assert_each_ran_once(counters: &[AtomicU32], label: &str) {
         assert_eq!(
             c.load(Ordering::Acquire),
             1,
-            "{label}: task {i} of the wave ran {} times, not once, on arm `{KE16_W}`",
+            "{label}: task {i} of the wave ran {} times, not once",
             c.load(Ordering::Acquire)
         );
     }
@@ -196,21 +178,13 @@ fn assert_each_ran_once(counters: &[AtomicU32], label: &str) {
 /// while every worker of the pool is parked, and every task must run exactly
 /// once.
 ///
-/// This is the configuration the W-b proof does NOT cover and the developer
-/// escalated: `KE16-DESIGN-W.md` §2.3 step 2 recovers a stale-snapshot decline
-/// from the fact that a LANE pusher consumes its own deque, and step 4 recovers
-/// it from a thief still inside a body — neither of which applies to a pusher
-/// that is not a worker and does not look at the queue again. What is left is
-/// the joiner's `park_timeout` backstop, which is exactly why this test's
-/// deadline is far above it: a red here is a strand that nothing recovered, and
-/// a green here does NOT claim the window is absent — only that it is bounded.
+/// This test's deadline is far above the joiner's `park_timeout` backstop: a red
+/// here is a strand that nothing recovered, and a green here does NOT claim the
+/// window is absent — only that it is bounded.
 #[test]
 fn w_b_a_dispatcher_wave_into_a_parked_pool_runs_every_task_exactly_once() {
-    ke16_check_expected_variant();
     println!(
-        "KE16 variant: {} (W arm `{KE16_W}`) — dispatcher (non-lane) pusher, \
-         W={WORKERS} tasks={TASKS_PER_WAVE} waves={WAVES}",
-        ke16_variant()
+        "[KE16 W] dispatcher (non-lane) pusher, W={WORKERS} tasks={TASKS_PER_WAVE} waves={WAVES}"
     );
 
     let quiesced = Arc::new(AtomicU32::new(0));
@@ -254,7 +228,7 @@ fn w_b_a_dispatcher_wave_into_a_parked_pool_runs_every_task_exactly_once() {
     );
 
     println!(
-        "[KE16 W] arm={KE16_W} route=dispatcher waves={WAVES} quiesced_before_wave={} \
+        "[KE16 W] route=dispatcher waves={WAVES} quiesced_before_wave={} \
          worst_wave_wall={} us",
         quiesced.load(Ordering::Acquire),
         worst_us.load(Ordering::Acquire)
@@ -275,34 +249,25 @@ fn w_b_a_dispatcher_wave_into_a_parked_pool_runs_every_task_exactly_once() {
 /// W-b, the NON-LANE pusher with NO JOINER AT ALL: a fire-and-forget
 /// [`ThreadPool::spawn`] wave into a parked pool.
 ///
-/// This is the row the code reviewer of 2026-09-03 added to the escalation, and
-/// it is the *unbounded* instance of the M4c window rather than another copy of
-/// the dispatcher row above. `ThreadPool::spawn` (`thread_pool.rs:536-541` →
-/// `PoolInner::spawn`, `:298-304` → `worker::push_task`) opens no scope, so
-/// nothing ever calls `join_workers_until_drained` and the `park_timeout`
-/// backstop that bounds every other non-lane push (`scope.rs`'s
-/// `JOIN_BACKSTOP`) is never on the stack. Meanwhile a worker parks UNTIMED
-/// (`worker::worker_main`'s `std::thread::park()`, `worker.rs:143`). If a push
-/// snapshots `injector_global.len() >= 2`, declines the wake, and the workers
-/// reach that untimed park before the push's store is visible to their
-/// post-`mark_idle` re-poll, the only thing that ever runs the task is
-/// `ThreadPool::shutdown_and_join`'s unpark of every worker at pool teardown
-/// (`thread_pool.rs:600-608`) — not a backstop quantum, a pool lifetime.
+/// This is the row the code reviewer of 2026-09-03 added, and it is the
+/// *unbounded* instance rather than another copy of the dispatcher row above.
+/// `ThreadPool::spawn` (`thread_pool.rs` → `PoolInner::spawn` →
+/// `worker::push_task`) opens no scope, so nothing ever calls
+/// `join_workers_until_drained` and the `park_timeout` backstop that bounds
+/// every other non-lane push (`scope.rs`'s `JOIN_BACKSTOP`) is never on the
+/// stack. Meanwhile a worker parks UNTIMED (`worker::worker_main`'s
+/// `std::thread::park()`).
 ///
 /// The test therefore keeps the pool ALIVE while it waits: the wave is awaited
 /// on a per-task counter, never by dropping the pool, so teardown cannot be
 /// what completes it. A red here is a strand nothing recovered; a green does
 /// NOT claim the window is absent — [`DEADLINE`] is 30 s against a window of
-/// nanoseconds, and the exhaustive statement about it is loom M4c, which is RED
-/// by design (`tests/loom_pool.rs`,
-/// `loom_m4c_stale_snapshot_strands_a_task_when_the_pusher_is_not_a_lane`).
+/// nanoseconds.
 #[test]
 fn w_b_a_fire_and_forget_wave_into_a_parked_pool_runs_every_task_exactly_once() {
-    ke16_check_expected_variant();
     println!(
-        "KE16 variant: {} (W arm `{KE16_W}`) — fire-and-forget (non-lane, no joiner) pusher, \
-         W={WORKERS} tasks={TASKS_PER_WAVE} waves={WAVES}",
-        ke16_variant()
+        "[KE16 W] fire-and-forget (non-lane, no joiner) pusher, \
+         W={WORKERS} tasks={TASKS_PER_WAVE} waves={WAVES}"
     );
 
     let quiesced = Arc::new(AtomicU32::new(0));
@@ -351,7 +316,7 @@ fn w_b_a_fire_and_forget_wave_into_a_parked_pool_runs_every_task_exactly_once() 
     );
 
     println!(
-        "[KE16 W] arm={KE16_W} route=fire_and_forget waves={WAVES} quiesced_before_wave={} \
+        "[KE16 W] route=fire_and_forget waves={WAVES} quiesced_before_wave={} \
          worst_wave_wall={} us",
         quiesced.load(Ordering::Acquire),
         worst_us.load(Ordering::Acquire)
@@ -369,24 +334,16 @@ fn w_b_a_fire_and_forget_wave_into_a_parked_pool_runs_every_task_exactly_once() 
     );
 }
 
-/// W-b, the LANE pusher: the wave is spawned from INSIDE a worker's task body,
-/// which is the case `KE16-DESIGN-W.md` §2.3 step 2 covers ("X does not park
-/// with a non-empty own deque").
+/// W-b, the LANE pusher: the wave is spawned from INSIDE a worker's task body.
 ///
-/// In the default `a0` build the wave lands in `injector_local[wid]` and defect
-/// A makes it serial on that one worker — which is a PERFORMANCE fact, not a
-/// liveness one, so the assertion here is the same in every A arm: the wave
-/// completes and every task runs exactly once. This is the arm whose greenness
-/// the escalated §2.3-vs-§2.5 question does NOT touch, and having both rows in
-/// one file is what makes the pusher axis visible at all.
+/// The wave lands on that worker's OWN registered deque, where a sibling can
+/// steal it, so this row puts the wake protocol under load from a pusher that is
+/// itself a worker of the destination pool. Its assertion is the same as the
+/// dispatcher row's — the wave completes and every task runs exactly once — and
+/// having both rows in one file is what makes the pusher axis visible at all.
 #[test]
 fn w_b_a_worker_spawned_wave_runs_every_task_exactly_once() {
-    ke16_check_expected_variant();
-    println!(
-        "KE16 variant: {} (W arm `{KE16_W}`) — worker (lane) pusher, \
-         W={WORKERS} tasks={TASKS_PER_WAVE} waves={WAVES}",
-        ke16_variant()
-    );
+    println!("[KE16 W] worker (lane) pusher, W={WORKERS} tasks={TASKS_PER_WAVE} waves={WAVES}");
 
     let quiesced = Arc::new(AtomicU32::new(0));
     let on_worker = Arc::new(AtomicU32::new(0));
@@ -441,7 +398,7 @@ fn w_b_a_worker_spawned_wave_runs_every_task_exactly_once() {
     );
 
     println!(
-        "[KE16 W] arm={KE16_W} route=worker waves={WAVES} quiesced_before_wave={} \
+        "[KE16 W] route=worker waves={WAVES} quiesced_before_wave={} \
          outer_body_on_a_registered_worker={}",
         quiesced.load(Ordering::Acquire),
         on_worker.load(Ordering::Acquire)
@@ -460,36 +417,21 @@ fn w_b_a_worker_spawned_wave_runs_every_task_exactly_once() {
     );
 }
 
-/// W-d′ route (b): the scope's join is a WORKER's own, which is the join
-/// `ke16-w-count` re-orders to decrement-then-unpark through the
+/// W-d′ route (b): the scope's join is a WORKER's own, which is the join that
+/// decrements first and unparks only on the last completion, through the
 /// `PoolInner`-owned `WakeHandle`.
 ///
 /// `KE16-DESIGN-W.md` §3.7 makes the 32-seed Miri run of
 /// `nested_scope_from_worker_is_stolen_by_sibling` the SOLE liveness gate for
-/// this arm whenever M1c degrades to count-only. M1c did NOT degrade: it runs
+/// this route whenever M1c degrades to count-only. M1c did NOT degrade: it runs
 /// on this box with a real parked loom joiner and is green (0.40 s, 2026-09-03
-/// — see `tests/loom_pool.rs`'s header), so W-d′ has its exhaustive model and
-/// this row is corroboration on real hardware rather than a substitute.
+/// — see `tests/loom_pool.rs`'s header), so route (b) has its exhaustive model
+/// and this row is corroboration on real hardware rather than a substitute.
 ///
-/// What the Miri gate still does not cover in a build with NO A arm, quoted to
-/// the attribute as it actually stands at `tests/miri_scope.rs`: that test's
-/// `cfg_attr` lists `feature = "ke16-w-count"` inside the `any(...)` ALONGSIDE
-/// the four A arms, so under `ke16-w-count` the ignore LIFTS. The run is
-/// `running 1 test`, not `running 0 tests`, and the body's first statement —
-/// `refuse_to_certify_without_a_reachability_arm()` — aborts with the literal
-/// `W-d′ route-(b) liveness gate DID NOT RUN`. That abort means "this build
-/// cannot run the shape"; it is NOT a Miri liveness red
-/// (`KE16-DESIGN-MEASUREMENT.md` §5 item 14) and must not be filed as one. With
-/// no A arm a worker-spawned wave never reaches a sibling, so the shape REFUSES
-/// rather than measures — the surviving gap is about MEASUREMENT, not about
-/// silence. In the `wc` and `wgc` builds with no A arm this test is therefore
-/// the only thing on REAL hardware that observes the count-gated joiner waking.
-/// The guard is named here so the two files cannot drift apart again.
-///
-/// Those two figures are `cargo +nightly miri test` figures. `miri_scope.rs` is
-/// `#![cfg(miri)]` at its line 95, so a NATIVE `cargo test` of that target lists
-/// nothing and prints `running 0 tests` in EVERY build — that native reading is
-/// not evidence about this gate in either direction.
+/// That Miri run is a `cargo +nightly miri test` run. `miri_scope.rs` carries a
+/// file-level `#![cfg(miri)]`, so a NATIVE `cargo test` of that target lists
+/// nothing and prints `running 0 tests` — that native reading is not evidence
+/// about this gate in either direction, and must not be read as one.
 ///
 /// The shape that makes it route (b) and keeps it there: the outer body is
 /// delivered with `pool.spawn`, so it runs on a worker; the ONLY scope join in
@@ -497,12 +439,7 @@ fn w_b_a_worker_spawned_wave_runs_every_task_exactly_once() {
 /// never opens a scope of its own.
 #[test]
 fn w_d_prime_a_worker_route_join_terminates_and_runs_every_task_exactly_once() {
-    ke16_check_expected_variant();
-    println!(
-        "KE16 variant: {} (W arm `{KE16_W}`) — route (b), worker joiner, \
-         W={WORKERS} tasks={TASKS_PER_WAVE} joins={WAVES}",
-        ke16_variant()
-    );
+    println!("[KE16 W] route (b), worker joiner, W={WORKERS} tasks={TASKS_PER_WAVE} joins={WAVES}");
 
     let joins_on_worker = Arc::new(AtomicU32::new(0));
     let worst_us = Arc::new(AtomicU32::new(0));
@@ -557,7 +494,7 @@ fn w_d_prime_a_worker_route_join_terminates_and_runs_every_task_exactly_once() {
     );
 
     println!(
-        "[KE16 W] arm={KE16_W} route=b joins={WAVES} joined_on_a_registered_worker={} \
+        "[KE16 W] route=b joins={WAVES} joined_on_a_registered_worker={} \
          worst_join_wall={} us",
         joins_on_worker.load(Ordering::Acquire),
         worst_us.load(Ordering::Acquire)
@@ -607,47 +544,28 @@ fn the_join_backstop_source_constant_is_still_50_us() {
 // ===========================================================================
 // Tester-added rows (KE16 axis W). The rows above cover the two pusher routes
 // at one wave size and the count-gated join at one shape; these cover the
-// boundary of the gate's own predicate, the empty-wave corner of the count
-// gate, and the witness the whole tournament is filed by.
+// small-wave corner and the empty-wave corner of the count gate.
 // ===========================================================================
 
-/// Repeats per wave size in the boundary row.
+/// Repeats per wave size in the small-wave row.
 ///
 /// Below [`WAVES`] because each repeat there also pays a [`QUIESCE_BUDGET`]
-/// poll, and the property is a boundary rather than a narrow race: three sizes
-/// x 64 repeats already gives every push position of the boundary many chances
-/// against a parked pool.
+/// poll: three sizes x 64 repeats already gives every push position of a small
+/// wave many chances against a parked pool.
 const BOUNDARY_REPEATS: usize = 64;
 
-/// W-b at the boundary of its own predicate: waves of exactly one, two and
-/// three tasks.
+/// Waves of exactly one, two and three tasks against a parked pool.
 ///
-/// [`boyko_threadpool`]'s wake gate declines iff the destination's pre-push
-/// length was `> 1` (`KE16-DESIGN-W.md` §2.1), so the earliest push a wave can
-/// possibly decline is its THIRD: a one-task wave snapshots 0, a two-task wave
-/// snapshots 0 then 1, and every one of those pushes wakes on either arm. Every
-/// other liveness row in this file runs [`TASKS_PER_WAVE`] = 64, where declines
-/// are the common case and the two undeclinable pushes are lost in the mass.
-///
-/// What separating them buys: a red confined to size 3 is about the DECLINE (a
-/// task pushed with no wake and nothing that recovers it), while a red that
-/// also covers sizes 1 and 2 is about the wake protocol as a whole — the fenced
-/// prologue, the claim CAS, the unpark — and would red the `w0` build too. The
-/// arm is printed with the receipt so the two readings cannot be merged after
-/// the fact.
+/// Every other liveness row in this file runs [`TASKS_PER_WAVE`] = 64, where a
+/// single lost wake is masked: sixty-three other pushes wake the pool behind it
+/// and the wave drains anyway.
 ///
 /// The route is the dispatcher's: the test's own driver thread opens each
-/// scope, so the pushes land in the pool's non-lane destination. That is also
-/// the route with no owner-side recovery (§2.3 step 2 does not apply to a
-/// pusher that never consults the queue again), which is where a boundary
-/// defect would survive longest.
+/// scope, so the pushes land in the pool's non-lane destination.
 #[test]
 fn w_b_the_boundary_wave_sizes_one_two_and_three_drain_a_parked_pool() {
-    ke16_check_expected_variant();
     println!(
-        "KE16 variant: {} (W arm `{KE16_W}`) — dispatcher pusher, W={WORKERS} \
-         wave sizes 1,2,3 x {BOUNDARY_REPEATS} repeats",
-        ke16_variant()
+        "[KE16 W] dispatcher pusher, W={WORKERS} wave sizes 1,2,3 x {BOUNDARY_REPEATS} repeats"
     );
 
     let quiesced = Arc::new(AtomicU32::new(0));
@@ -688,16 +606,16 @@ fn w_b_the_boundary_wave_sizes_one_two_and_three_drain_a_parked_pool() {
     );
 
     println!(
-        "[KE16 W] arm={KE16_W} route=dispatcher shape=boundary \
+        "[KE16 W] route=dispatcher shape=boundary \
          repeats_per_size={BOUNDARY_REPEATS} quiesced_before_wave={}",
         quiesced.load(Ordering::Acquire)
     );
 
     assert!(
         quiesced.load(Ordering::Acquire) > 0,
-        "not one of the {} repeats found every worker parked before its wave, so the wake gate \
-         was never under test — the waves were handed to spinning workers (the receipt this \
-         file's header calls the guard against a blind pass)",
+        "not one of the {} repeats found every worker parked before its wave, so the wake \
+         protocol was never under test — the waves were handed to spinning workers (the receipt \
+         this file's header calls the guard against a blind pass)",
         3 * BOUNDARY_REPEATS
     );
     assert_each_ran_once(
@@ -729,19 +647,15 @@ const AFTER_EMPTY: usize = 16;
 ///
 /// `tests/smoke.rs::pool_install_empty_scope` covers the same corner on the
 /// EXTERNAL arm (an `install` frame from the test thread, whose `joiner_wake`
-/// is null on every arm), which is a different branch of `complete_task` under
-/// `ke16-w-count` and cannot stand in for this one.
+/// is null), which is a different branch of `complete_task` and cannot stand in
+/// for this one.
 ///
 /// The second half — a wave AFTER the empty scopes, on the same pool — is what
 /// separates "the empty join returned" from "the empty join returned and left
 /// the pool usable".
 #[test]
 fn w_d_prime_an_empty_worker_scope_returns_with_no_completer_to_wake_it() {
-    ke16_check_expected_variant();
-    println!(
-        "KE16 variant: {} (W arm `{KE16_W}`) — route (b), empty wave",
-        ke16_variant()
-    );
+    println!("[KE16 W] route (b), empty wave");
 
     let joined_on_worker = Arc::new(AtomicU32::new(0));
     let counters = fresh_counters(AFTER_EMPTY);
@@ -791,7 +705,7 @@ fn w_d_prime_an_empty_worker_scope_returns_with_no_completer_to_wake_it() {
     );
 
     println!(
-        "[KE16 W] arm={KE16_W} route=b shape=empty empty_joins_on_a_registered_worker={}",
+        "[KE16 W] route=b shape=empty empty_joins_on_a_registered_worker={}",
         joined_on_worker.load(Ordering::Acquire)
     );
 
@@ -806,69 +720,5 @@ fn w_d_prime_an_empty_worker_scope_returns_with_no_completer_to_wake_it() {
     assert_each_ran_once(
         &counters,
         "w_d_prime_an_empty_worker_scope_returns_with_no_completer_to_wake_it",
-    );
-}
-
-/// The witness must name this build's W arm and no other.
-///
-/// A feature that does not move the witness is a defect of the tournament
-/// itself rather than of the candidate: every recorded row is filed by the
-/// token [`KE16_W`] prints, and `KE16_EXPECT` certifies a run by comparing
-/// against [`ke16_variant`]. If `wg` and `wgc` ever collapsed onto one token —
-/// a `cfg` written `any(...)` where the design's scheme says `all(..., not
-/// (...))` (`src/lib.rs`, the `KE16_W` block) — two different binaries would be
-/// filed under one name and the `KE16_EXPECT` check would certify both.
-///
-/// This is the compiled cross-check the source census
-/// (`tests/ke16_feature_scheme_census.rs`) cannot make: that file parses the
-/// manifest and `lib.rs` as TEXT, so it sees which switches are declared and
-/// never the value the `cfg` set resolved to in the binary under test. Here the
-/// expectation is computed from `cfg!` in this very build, so the row moves
-/// with the `--features` line by construction.
-#[test]
-fn ke16_w_witness_names_exactly_the_enabled_w_features() {
-    // Not redundant with the assertions below, and not circular: this is the
-    // OPERATOR's expectation (the `KE16_EXPECT` string the measurement protocol
-    // sets on every recorded run), while the rest of this test is the COMPILER's
-    // (`cfg!` in this build). The two disagree in different ways — a wrong
-    // `--features` line trips the first, a wrong `cfg` in `lib.rs` the second —
-    // and this file's header claims every row prints its arm at run time.
-    ke16_check_expected_variant();
-    println!(
-        "KE16 variant: {} (W arm `{KE16_W}`) — witness census",
-        ke16_variant()
-    );
-
-    let gate = cfg!(feature = "ke16-w-gate");
-    let count = cfg!(feature = "ke16-w-count");
-    let expected = match (gate, count) {
-        (false, false) => "w0",
-        (true, false) => "wg",
-        (false, true) => "wc",
-        (true, true) => "wgc",
-    };
-
-    assert_eq!(
-        KE16_W, expected,
-        "the W witness is `{KE16_W}` while this build has ke16-w-gate={gate} and \
-         ke16-w-count={count}, which the design's feature scheme names `{expected}`"
-    );
-
-    let variant = ke16_variant();
-    let mut fields = variant.split('+');
-    let a = fields.next().expect("test setup: the A field of ke16_variant()");
-    let b = fields.next().expect("test setup: the B field of ke16_variant()");
-    let w = fields.next().expect("test setup: the W field of ke16_variant()");
-    let c = fields.next().expect("test setup: the C field of ke16_variant()");
-    assert!(
-        fields.next().is_none(),
-        "`ke16_variant()` = `{variant}` has more than the design's four A+B+W+C fields; a \
-         results row keyed on it would not parse"
-    );
-    assert_eq!(
-        w, KE16_W,
-        "`ke16_variant()` = `{variant}` reports `{w}` in the W field while `KE16_W` is \
-         `{KE16_W}`; the benches print the first and this file's rows print the second, so a \
-         mismatch files two different arms under one name (A=`{a}` B=`{b}` C=`{c}`)"
     );
 }

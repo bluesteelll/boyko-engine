@@ -9,37 +9,25 @@
 //! held only because a joining worker never ran anything but its own scope's tasks.
 //!
 //! It is not a claim the pool can keep. A worker blocked in `Scope::drop` drains the GLOBAL
-//! injector (`boyko_threadpool`'s `scope.rs`, step 2 of `join_workers_until_drained`), which is
-//! where `Schedule::run` puts every concurrent system task, so a worker that opened a `par_iter`
-//! scope inside system A can pick up conflict-free system B and run it INLINE inside A's body.
+//! injector (`boyko_threadpool`'s `scope.rs`, step 2 of `join_on_worker`), which is where
+//! `Schedule::run` puts every concurrent system task, so a worker that opened a `par_iter` scope
+//! inside system A can pick up conflict-free system B and run it INLINE inside A's body.
 //!
-//! The path EXISTS at this checkout; it is not REACHED here, and the difference matters for what
-//! this file can claim. The reasoning below is the DEFAULT build's — the a0 arm of KE16's A axis:
-//! under `ke16-a1` / `ke16-a1-fifo` / `ke16-a3` the joiner's step 1 is compiled out entirely
-//! (those arms never feed `injector_local`, so there is no own slot to drain) and a joiner meets a
-//! worker-spawned wave only through the sibling sweep at step 3. The pool-side sites are cited by
-//! SYMBOL and STEP NAME, not by line: the A-axis switches move that file, and a coordinate that
-//! has drifted is worse than none.
+//! The path EXISTS at this checkout and the joiner reaches it as a matter of course; it is still
+//! not TAKEN on most runs, and the difference matters for what this file can claim. The pool-side
+//! sites are cited by SYMBOL and STEP NAME, not by line: a coordinate that has drifted is worse
+//! than none.
 //!
-//! In the default build `join_workers_until_drained` returns as soon as its top-of-loop
-//! `is_drained()` poll is true, and its step 1 drains the joiner's own `injector_local[wid]` in
-//! <= 33-task batches that `drain_scratch` runs to completion, so the joiner reaches the global
-//! injector at step 2 only in the window where its own local injector is empty while its scope
-//! still has tasks pending. Under today's placement that window opens only if a sibling stole
-//! from that local injector — which is defect A itself: nobody polls it. The KE16 joiner
-//! candidates are what make helping, and therefore the nesting, the joiner's normal behaviour.
-//!
-//! KE16 axis B (deleted with the features): under `ke16-b1` / `ke16-b3` the joiner of a `par_iter`
-//! scope opened on a worker reaches the global injector as its SECOND source on every pass of its
-//! loop — it pops its own deque, then batch-steals the injector INTO that deque — so picking up a
-//! co-dispatched sibling system is the joiner's ordinary behaviour there rather than a window that
-//! opens only if somebody stole from it first. It is still not a CERTAINTY, and the difference
-//! decides what the receipt below may assert: the joiner reaches that second source only once its
-//! own chunks are exhausted, and at W=2 the idle sibling worker usually takes the other system's
-//! task before then. MEASURED at this checkout under `ke16-a1,ke16-b1`, W=2, 8 runs:
-//! `max_same_thread_system_depth=1`, i.e. the same reading as the default build. So under the B
-//! arms the nesting stays a RECORDED number — printed by every pass — and the deterministic gate
-//! remains the guard test.
+//! The joiner of a `par_iter` scope opened on a worker reaches the global injector as its SECOND
+//! source on every pass of its loop — it pops its own deque, then batch-steals the injector INTO
+//! that deque — so picking up a co-dispatched sibling system is the joiner's ordinary behaviour
+//! rather than a window that opens only if somebody stole from it first. It is still not a
+//! CERTAINTY, and the difference decides what the receipt below may assert: the joiner reaches
+//! that second source only once its own chunks are exhausted, and at W=2 the idle sibling worker
+//! usually takes the other system's task before then. MEASURED before the joiner was fixed to the
+//! helping arm, W=2, 8 runs: `max_same_thread_system_depth=1` with a helping joiner and without
+//! one alike. So the nesting stays a RECORDED number — printed by every pass — and the
+//! deterministic gate remains the guard test.
 //!
 //! App-8 therefore turns the guard into a DEPTH COUNTER: nesting is legal, and
 //! `is_in_system_run()` stays the boolean every consumer reads it as.
@@ -68,14 +56,14 @@
 //! 2. [`conflict_free_systems_complete_with_nesting_legal`] — the two-system schedule. What it
 //!    proves is COMPLETION and NON-LEAKAGE: both systems retire once per run, every row is
 //!    visited, and the test thread does not read as inside a system afterwards. It does NOT prove
-//!    that nesting occurred, and in the default build it does not occur — MEASURED here as
+//!    that nesting occurred, and on every run measured it did not occur — MEASURED here as
 //!    `max_same_thread_system_depth=1` over 8 runs at W=2, for the structural reason in the
 //!    paragraph above — so this test passes byte-identically under the OLD `Cell<bool>` guard.
 //!    Read it as an anti-regression on the schedule, never as evidence for App-8.
 //! 3. [`a_sibling_system_is_run_inline_inside_another_system_body`] — the receipt that the JOINER
-//!    produced the nesting. `#[ignore]`d, because in the default build whether a joiner takes a
-//!    sibling task is a race, and a flaky gate is worth less than no gate. Un-ignore it under the
-//!    joiner candidate that makes helping the joiner's normal behaviour.
+//!    produced the nesting. `#[ignore]`d, because whether a joiner takes a sibling task is a race
+//!    even with the helping joiner, and a flaky gate is worth less than no gate. Un-ignore it
+//!    only under a configuration measured to nest deterministically.
 //!
 //! ## Why the instruments are per-run
 //!
@@ -103,9 +91,7 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::schedule::{Schedule, ScheduleBuilder};
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
-use boyko_threadpool::{
-    InSystemRunGuard, ThreadPool, ThreadPoolBuilder, is_in_system_run, ke16_check_expected_variant,
-};
+use boyko_threadpool::{InSystemRunGuard, ThreadPool, ThreadPoolBuilder, is_in_system_run};
 
 const SLOT_KE16_INLINE: ComponentId = ComponentId(494);
 
@@ -180,21 +166,6 @@ impl Instruments {
             rows_seen: AtomicUsize::new(0),
         })
     }
-}
-
-/// Prints the build's variant witness, then refuses to produce a reading for a build that is not
-/// the one the tester named.
-///
-/// The print and the `KE16_EXPECT` check are TWO obligations, not one (`KE16-DESIGN.md` §4): the
-/// check is silent when the variable is unset, so without the banner a run of this file under a
-/// joiner feature would leave no record of WHICH build it was. The spelling matches the pool
-/// crate's KE16 harness files, so one `grep "KE16 variant"` collects every row of the protocol.
-///
-/// The banner is printed here rather than inside `ke16_check_expected_variant`, because a print
-/// from `crates/*/src/**.rs` reds `boyko-log`'s print census.
-fn ke16_witness() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
 }
 
 /// What the deterministic gate observes inside one system body that enters a SECOND guard.
@@ -311,10 +282,6 @@ fn build_schedule(
 /// readings. Every counter it reports was written only by this pass, so two passes may run
 /// concurrently (libtest's default) without either observing the other.
 fn run_repeats() -> Readings {
-    // Per PASS, not per file: this test binary is also run under the joiner features (the
-    // un-ignore below), and a run whose features were not actually enabled must not produce a
-    // reading. `KE16_EXPECT` unset leaves only the banner.
-    ke16_witness();
     let workers = available_parallelism().map_or(WORKERS, |n| n.get().min(WORKERS)).max(1);
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();
     let inst = Instruments::new();
@@ -347,7 +314,6 @@ fn run_repeats() -> Readings {
 /// worker and still brackets it in its own guard (`schedule.rs:1299`), so the second `enter` here
 /// is the same nesting a helping joiner produces, minus the race that produces it.
 fn run_explicit_nesting() -> Arc<NestingProbe> {
-    ke16_witness();
     let workers = available_parallelism().map_or(WORKERS, |n| n.get().min(WORKERS)).max(1);
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();
     let probe = Arc::new(NestingProbe {
@@ -422,9 +388,10 @@ fn a_second_system_guard_inside_a_system_body_is_legal() {
 /// It asserts what it can assert without a race: both conflict-free systems retire once per
 /// `Schedule::run`, the `par_iter` system visits every row, at least one body was entered, and no
 /// guard leaks onto the test thread. All four hold under the OLD `Cell<bool>` guard as well, so
-/// this test cannot fail because of App-8 — in the default build the joiner does not reach the
-/// global injector while its own scope is open (module header), and the observed depth is 1
-/// (printed by [`run_repeats`], MEASURED as 1 over 8 runs at W=2).
+/// this test cannot fail because of App-8 — the joiner reaches the global injector only after its
+/// own chunks are exhausted, and at W=2 a free sibling worker normally takes the other system
+/// first (module header), so the observed depth is 1 (printed by [`run_repeats`], MEASURED as 1
+/// over 8 runs at W=2).
 ///
 /// The behaviour change is gated by [`a_second_system_guard_inside_a_system_body_is_legal`]
 /// above; the joiner-driven receipt is the ignored test below.
@@ -460,22 +427,21 @@ fn conflict_free_systems_complete_with_nesting_legal() {
 /// This is what App-8 exists for, and it is separated from the gate above because it is a race at
 /// this checkout: a joining worker reaches the global injector only on the path through
 /// `Scope::drop` that does not return on its first `is_drained()`, so on most runs an idle worker
-/// takes the sibling first and the depth stays 1. Asserting that in the default build would be a
-/// flaky test, and a flaky gate is worth less than no gate.
+/// takes the sibling first and the depth stays 1. Asserting that would be a flaky test, and a
+/// flaky gate is worth less than no gate.
 ///
-/// KE16 axis B kept it ignored, and the reason is in the module header: `ke16-b1` / `ke16-b3` make
-/// the joiner HELP, which is a necessary condition for the nesting and not a sufficient one — the
-/// joiner reaches the global injector only after its own chunks are gone, and a free sibling
-/// worker normally takes the other system first. The gate the design runs under those features is
-/// this file WITHOUT `--ignored` (`KE16-DESIGN-MEASUREMENT.md` §6, "Additional gates by feature"),
+/// A HELPING joiner is not enough to change that, and the structural reason is in the module
+/// header: helping is a necessary condition for the nesting, not a sufficient one — the joiner
+/// reaches the global injector only after its own chunks are gone, and a free sibling worker
+/// normally takes the other system first. The gate that runs is this file WITHOUT `--ignored`,
 /// i.e. the two live tests; this one stays a recorded reading, available on demand, until a
 /// configuration is measured in which the depth is 2 deterministically.
 #[test]
-#[ignore = "deferred: KE16 App-8 inline-nesting receipt; whether a joiner takes a sibling system \
-            is a race, and MAKING THE JOINER HELP IS NOT ENOUGH — measured depth 1 over 8 runs at \
-            W=2 under `ke16-a1,ke16-b1` as well as in the default build, because the joiner reaches \
-            the global injector only after its own chunks are gone; un-ignore only under a \
-            configuration measured to nest deterministically"]
+#[ignore = "deferred: App-8 inline-nesting receipt; whether a joiner takes a sibling system is a \
+            race, and MAKING THE JOINER HELP IS NOT ENOUGH — measured depth 1 over 8 runs at W=2 \
+            with a helping joiner and without one alike, because the joiner reaches the global \
+            injector only after its own chunks are gone; un-ignore only under a configuration \
+            measured to nest deterministically"]
 fn a_sibling_system_is_run_inline_inside_another_system_body() {
     let r = run_repeats();
     assert!(
