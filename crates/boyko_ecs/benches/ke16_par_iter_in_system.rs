@@ -360,7 +360,10 @@ fn protocol_pass(workers: usize) {
             seq_s / best_sys.wall.as_secs_f64()
         );
         println!(
-            "  RATIO dispatcher/system wall = {:.2}x  (occupancy {} vs {})",
+            // The label used to read `dispatcher/system` while the expression below
+            // computes in_system / from_dispatcher. Anyone who trusted the label and
+            // inverted the value got the reciprocal of the receipt.
+            "  RATIO in_system/from_dispatcher wall = {:.2}x  (occupancy: dispatcher {} vs in_system {})",
             best_sys.wall.as_secs_f64() / best_disp.wall.as_secs_f64(),
             best_disp.max_in_flight,
             best_sys.max_in_flight

@@ -1772,12 +1772,26 @@ needed"* — so **the source and the command contradict each other and the comma
 The fix is a one-word doc edit. The valid receipt was obtained without the flag: `running 3 tests /
 3 passed` on both head-to-head arms.
 
+✅ **FIXED 2026-09-09**: `--ignored` is gone from the THREADPOOL §8 command in
+`KE16-DESIGN-MEASUREMENT.md`, with the reason recorded beside it.
+
+⚠ **And the first attempt at that fix removed it from BOTH commands, which was wrong.** The two
+tests are ignored for different reasons: the threadpool one is `cfg_attr`-ignored only WITHOUT an A
+arm, so `--ignored` runs nothing once an arm is on; the ECS one is ignored UNCONDITIONALLY (RED
+until defect A is fixed), so it needs the flag to run at all. Measured both ways in both
+directions — the over-applied edit turned the ECS gate into `running 1 test … 0 passed; 1 ignored`,
+which is the OTHER vacuous-green shape and the reason `running N` is not a sufficient receipt. The
+table is now in the design document beside the commands.
+
 ### 2. ⚠ The ECS bench's printed RATIO label is INVERTED
 
 The bench prints `RATIO dispatcher/system wall = …` while **computing
 `par_in_system / par_from_dispatcher`** — the metric §3 actually names. Verified arithmetically:
 `87.76 / 93.05 = 0.943`, which is the printed `0.94`. The number is right; the label's word order is
 backwards. Anyone reading the label and inverting the value gets the reciprocal of the receipt.
+
+✅ **FIXED 2026-09-09**: the label now reads `RATIO in_system/from_dispatcher wall`, and the
+occupancy pair beside it names which side is which.
 
 ### 3. ⚠ `tasklist` is DARK in this environment — a load receipt built on it is green from an emptiness
 
@@ -1965,9 +1979,12 @@ tournament will ship on numbers that were never taken.
    bench edit or an affinity mask, and both move the experiment off the phenomenon.
 9. **THE PROTECTOR GATE'S ARMEDNESS COUPLING IS NOT FIXED**, only documented at the coupling site.
    §Miri.
-10. **THE INSTRUMENT DEFECTS OF §Instruments 1 AND 2 ARE NOT FIXED** — the stale `--ignored` recipe
-    and the inverted ECS ratio label. Both are one-line edits that no measuring pass was permitted
-    to make.
+10. ✅ **THE INSTRUMENT DEFECTS OF §Instruments 1 AND 2 ARE FIXED (2026-09-09)** — the stale
+    `--ignored` recipe and the inverted ECS ratio label. Both were one-line edits that no
+    measuring pass was permitted to make; they were made outside a measuring pass.
+    Fixed in the same commit: the four bench sites that still prescribed the retracted
+    `RUSTFLAGS` two-build recipe (§Doc rot below), which on this box deletes the ISA baseline
+    and the linker flags and fails by LOOKING like "the switch does nothing".
 
 ---
 
@@ -2034,6 +2051,12 @@ bench numbers come from "a BETTER-OPTIMISED binary than the one that ships". **F
 and inverted in direction** — see §0. The queue text was written 2026-09-03; the profile changed
 2026-09-04 in HEAD `4a363678` itself.
 
+✅ **BOTH QUEUE ERRORS FIXED 2026-09-09**: the dead `KE16-MEASUREMENT.md` citation now names the
+file that exists, and the profile paragraph states the current shape — release carries
+`lto = "fat"`, bench carries `codegen-units = 1` with `lto = false` EXPLICITLY so it does not
+inherit it, so the two are different codegen configurations in BOTH directions and neither is
+simply "better optimised" than the other.
+
 Four bench headers still instruct a `RUSTFLAGS` two-build recipe (`simd_o1.rs:11`,
 `colored_solve.rs:241`, `boyko_physics/Cargo.toml:65` and `:97`). On this box that would **delete**
 both the ISA baseline and the linker fix, and the failure mode **looks like "the switch does
@@ -2041,6 +2064,11 @@ nothing"**. One site is already correct and is the model (`sdf_narrowphase_o9.rs
 fix landed in that `.rs` header and **not** in the same bench's manifest comment at
 `Cargo.toml:97`, which still carries the retracted recipe. A header and its manifest disagreeing
 about the shipped recipe, where the manifest is the one a reader skims.
+
+✅ **ALL FOUR FIXED 2026-09-09**, including the manifest copy that disagreed with its own header.
+Each now says what to run, why `RUSTFLAGS` is wrong here (it REPLACES rather than appends), that
+`x86-64-v3` already carries AVX2 so no flag is needed at all, and that `cargo --config` is the
+merging form if one ever is.
 
 ---
 

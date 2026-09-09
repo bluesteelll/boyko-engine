@@ -382,6 +382,28 @@ Revisit it when the bake has a harness, and measure `top_lane` rather than the w
    gated arm: the developer fixes it or the feature is dropped; there is no W17 fallback (it would
    fail the same gate).
 3. `c1` (batch spawn) not kept ⇒ `c1f` is not measured (it needs the batch push).
+
+⚠⚠ **THE TWO COMMANDS ABOVE NEED OPPOSITE FLAGS, and until 2026-09-09 both carried
+`--ignored`, which made the FIRST one vacuous.** Measured, both directions:
+
+| command | with `--ignored` | without |
+|---|---|---|
+| threadpool `ke16_nested_scope_occupancy` | `running 0 tests`, 3 filtered out, **EXIT 0** | `running 1 test`, **1 passed** |
+| ecs `ke16_occupancy_gate` | `running 1 test`, **1 passed** | `running 1 test`, **0 passed, 1 IGNORED** |
+
+The reason is that the two tests are ignored for DIFFERENT reasons. The threadpool one
+is `#[cfg_attr(not(any(feature = "ke16-a1", …)), ignore)]` — with an A arm enabled it is
+not ignored at all, and `--ignored` runs ONLY ignored tests, so the gate ran nothing in
+exactly the configuration it exists to check. The ECS one is ignored UNCONDITIONALLY (it
+is RED until defect A is fixed), so it needs `--ignored` to run at all.
+
+⚠ Both failure shapes are vacuous greens that a reader skims past: `running 0 tests` and
+`running 1 test … 0 passed; 1 ignored`. §5 item 1 forbids the first by name; the second
+is why "running N" is not a sufficient receipt either — the passed count is.
+
+⚠ And this note records a repair that was itself over-applied: the first edit removed
+`--ignored` from BOTH lines, which fixed the threadpool command and silently broke the
+ECS one. It was caught by running both forms rather than by reading them.
 4. The final configuration is `A*+B*+W*+C*`.
 
 ## Precondition on every timed step: the machine must be IDLE, and the run must prove it
@@ -474,7 +496,7 @@ cargo clippy -p boyko-threadpool --all-targets --features <F> -- -D warnings
 # Tests, no fail-fast (a red target hides every target behind it otherwise)
 cargo test -p boyko-threadpool --all-targets --no-fail-fast --features <F>
 cargo test -p boyko-threadpool --test cross_pool_routing --features <F>
-cargo test -p boyko-threadpool --test ke16_nested_scope_occupancy worker_spawned_wave_reaches_at_least_half_the_workers --features <F> -- --ignored --test-threads=1 --nocapture
+cargo test -p boyko-threadpool --test ke16_nested_scope_occupancy worker_spawned_wave_reaches_at_least_half_the_workers --features <F> -- --test-threads=1 --nocapture
 cargo test -p boyko-ecs --test ke16_occupancy_gate par_iter_in_system_reaches_more_than_one_thread --features boyko-threadpool/<F> -- --ignored --test-threads=1 --nocapture
 cargo test -p boyko-physics --lib --features boyko-threadpool/<F>      # the {1,N} bit-identity oracles
 

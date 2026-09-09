@@ -61,8 +61,10 @@ harness = false
 
 [[bench]]
 # O1 A/B: scalar vs AVX2 in-solver `refresh_inertia` + integrate on a 10k-body
-# substep — reports the width-only speed-up (build the AVX2 arm with
-# RUSTFLAGS="-C target-feature=+avx2"). The SIMD path is bit-identical to scalar.
+# substep — reports the width-only speed-up. The SIMD path is bit-identical to
+# scalar. ⚠ NO `RUSTFLAGS` recipe: it REPLACES `target.<triple>.rustflags` and
+# would delete the ISA baseline and the linker flags; `x86-64-v3` already carries
+# AVX2. See the bench header.
 name = "simd_o1"
 harness = false
 
@@ -93,8 +95,10 @@ harness = false
 # O9 A/B: the box-vs-SDF narrowphase (`box_sdf_manifold`) scalar build vs the
 # `+avx2` batched-kernel build, at SDF edit counts {1,2,4,8,16}. Two BUILDS of the
 # same public entry (the kernel is cfg-gated, not runtime-switched); the
-# scalar->avx2 delta is the O9 speed-up. Build the AVX2 arm with
-# RUSTFLAGS="-C target-feature=+avx2".
+# scalar->avx2 delta is the O9 speed-up. ⚠ NO `RUSTFLAGS` recipe — the bench
+# header already retracted it, and this comment is the copy a reader skims. It
+# REPLACES `target.<triple>.rustflags`, deleting the ISA baseline and the linker
+# flags; `x86-64-v3` already carries AVX2.
 name = "sdf_narrowphase_o9"
 harness = false
 

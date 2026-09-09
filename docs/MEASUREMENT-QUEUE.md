@@ -15,7 +15,7 @@ made elsewhere can be struck rather than run.
 ## 0. The precondition, and how to check it
 
 The idle-machine precondition already lives in the campaign's measurement plan
-(`docs/threadpool/KE16-MEASUREMENT.md`, added in `b51d03a7`). It is restated here in one line:
+(`docs/threadpool/KE16-DESIGN-MEASUREMENT.md`, added in `b51d03a7`). It is restated here in one line:
 **before any timed step, confirm no agent workflow is compiling and no game is running**, and record
 in the receipt that you did. A timed step without that receipt is not a measurement.
 
@@ -41,11 +41,16 @@ census going red. If a flag must be added, use `cargo --config 'target.x86_64-pc
 which MERGES. **Any bench header still instructing `RUSTFLAGS=...` is stale — fix it rather than
 following it.**
 
-**The bench profile is not the shipped profile.** The root `Cargo.toml` has `[profile.bench]
-codegen-units = 1` and **no `[profile.release]` section at all**, so a release build ships at
-opt-level 3 / codegen-units 16 / no LTO while the bench binary is better optimised. Ratios between
-two arms of the same bench transfer; absolute numbers do not. An identical-code-folding alias at one
-codegen unit proves nothing at sixteen.
+**The bench profile is not the shipped profile, and neither one is simply "better".** The root
+`Cargo.toml` carries `[profile.release] lto = "fat"` and `[profile.bench] codegen-units = 1` with
+`lto = false` set EXPLICITLY so bench does not inherit release's fat LTO. So the two differ on the
+codegen axis in BOTH directions: bench has one codegen unit and no LTO, release has sixteen and fat
+LTO. Ratios between two arms of the same bench transfer; absolute numbers do not. An
+identical-code-folding alias at one codegen unit proves nothing at sixteen.
+
+⚠ This paragraph said the opposite until 2026-09-09 — that there was no `[profile.release]`
+at all and the bench binary was therefore "better optimised". That was written 2026-09-03 and the
+profile changed 2026-09-04, so it had been inverted in direction ever since.
 
 **A microbenchmark whose working set fits in L1 measures a quantity that does not exist at scale.**
 Recorded after a chain figure of 1.7× shrank to 3–8% once the working set was realistic.
