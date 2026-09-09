@@ -1965,10 +1965,9 @@ tournament will ship on numbers that were never taken.
    describe the shipped codegen configuration.
 3. ✅ **THE FREEZE WAS TAKEN**, before the removal as the order requires: the annotated tag
    `ke16/candidates-frozen-2026-09-07` on `897c812f`, and `docs/threadpool/KE16-REJECTED.md`.
-   ⚠ **The tag is LOCAL ONLY** — `git ls-remote --tags origin` returns nothing, for this tag or any
-   other — while the removal commit is pushed. The arms therefore exist on one machine and the tree
-   that deleted them exists on the remote; until the tag is pushed, the freeze protects nothing
-   against the loss of this clone.
+   The tag is PUSHED (owner ruling, 2026-09-09): `git ls-remote --tags origin` resolves it to
+   `897c812f`. It is the project's first and only remote tag — it had been local while the removal
+   commit was already public, which is the one arrangement the freeze exists to prevent.
 4. **RULE 1 IS NOT DISCHARGED FOR THE HEAD-TO-HEAD PASS ITSELF.** Its §8 loom / Miri / clippy /
    full-workspace legs were out of scope by instruction. They sit UPSTREAM of rule 2 — a red there
    deletes the verdict rather than qualifying it. They were later run at CS-2 and are green for the
