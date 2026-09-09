@@ -45,6 +45,7 @@ use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
 use crate::manifold::{BodyIndex, Manifold};
+use crate::math::Vec3;
 use crate::narrowphase::axis_cache::AxisEntry;
 use crate::resources::BodyState;
 use crate::solver::contact::BodyEffective;
@@ -393,6 +394,47 @@ const _: () = assert!(
     "the broadphase cohort overlaps the constraint-graph cohort"
 );
 
+// —— The SOFT-COUPLING cohort (audit Stage 4) ————————————————————
+//
+// `SoftRigidReaction`'s two columns are accumulated into by the SAME loop, one
+// contact at a time (`accumulate` writes row `idx` of both), and drained by the
+// same loop in `physics_soft_rigid_apply`. One cohort of two.
+
+/// Number of `ScratchColumn`s backing
+/// [`SoftRigidReaction`](crate::soft::coupling::SoftRigidReaction).
+pub(crate) const SOFT_COUPLING_COLUMN_COUNT: usize = 2;
+
+/// Top of the soft-coupling cohort — one id below the narrowphase cohort's bottom.
+pub(crate) const SCRATCH_ID_SOFT_COUPLING_TOP: usize = SCRATCH_ID_NARROWPHASE_BOTTOM - 1;
+
+/// Bottom of the soft-coupling cohort (inclusive).
+pub(crate) const SCRATCH_ID_SOFT_COUPLING_BOTTOM: usize =
+    SCRATCH_ID_SOFT_COUPLING_TOP - (SOFT_COUPLING_COLUMN_COUNT - 1);
+
+const _: () = assert!(
+    SOFT_COUPLING_COLUMN_COUNT <= POOL_STAGGER_LINES,
+    "the soft-coupling cohort is wider than one stagger period"
+);
+
+const _: () = assert!(
+    SCRATCH_ID_SOFT_COUPLING_TOP < SCRATCH_ID_NARROWPHASE_BOTTOM,
+    "the soft-coupling cohort overlaps the narrowphase cohort"
+);
+
+/// The [`ComponentId`] for soft-coupling column `k` (`0` = `dv_lin`, `1` = `dv_ang`).
+#[inline]
+pub(crate) fn soft_coupling_column_id(k: usize) -> ComponentId {
+    debug_assert!(k < SOFT_COUPLING_COLUMN_COUNT, "soft-coupling column index out of cohort");
+    ComponentId::new(SCRATCH_ID_SOFT_COUPLING_TOP - k)
+}
+
+/// Registers the element layout of both [`SoftRigidReaction`] columns, idempotently.
+pub(crate) fn register_soft_coupling_column_layouts() {
+    for k in 0..SOFT_COUPLING_COLUMN_COUNT {
+        register_layout::<Vec3>(soft_coupling_column_id(k).get());
+    }
+}
+
 /// The lowest id the physics scratch region may occupy.
 ///
 /// The region grows DOWNWARD from the top of the id space while production
@@ -418,11 +460,11 @@ const _: () = assert!(
 /// and the census above is the thing to re-run before moving this number again.
 const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;
 
-// The narrowphase cohort is the region's lowest edge today. The floor is asserted
-// against the LOWEST cohort rather than against whichever one happened to be last
-// when this was written — add a cohort below and move this assert with it.
+// The soft-coupling cohort is the region's lowest edge today. The floor is
+// asserted against the LOWEST cohort rather than against whichever one happened to
+// be last when this was written — add a cohort below and move this assert with it.
 const _: () = assert!(
-    SCRATCH_ID_NARROWPHASE_BOTTOM >= SCRATCH_REGION_MIN_ID,
+    SCRATCH_ID_SOFT_COUPLING_BOTTOM >= SCRATCH_REGION_MIN_ID,
     "the physics scratch region has grown below SCRATCH_REGION_MIN_ID; production \
      ids climb from 0 and the reserved region is no longer comfortably out of \
      their reach. Re-run the census in that constant's docs before lowering it"
@@ -781,6 +823,10 @@ mod tests {
         (0..NARROWPHASE_COLUMN_COUNT).map(|k| narrowphase_column_id(k).get()).collect()
     }
 
+    fn soft_coupling_cohort_ids() -> Vec<usize> {
+        (0..SOFT_COUPLING_COLUMN_COUNT).map(|k| soft_coupling_column_id(k).get()).collect()
+    }
+
     /// `ContactPairs::pairs` is written by the broadphase and read by the
     /// narrowphase, so the distinctness it needs spans BOTH cohorts. The const
     /// asserts prove that from adjacency plus a width; this proves it over the ids
@@ -811,6 +857,11 @@ mod tests {
             &narrowphase_cohort_ids(),
             NARROWPHASE_COLUMN_COUNT,
         );
+        assert_cohort_slots_distinct(
+            "soft-coupling cohort",
+            &soft_coupling_cohort_ids(),
+            SOFT_COUPLING_COLUMN_COUNT,
+        );
     }
 
     /// Each cohort is a contiguous run with no hole and no duplicate — the premise
@@ -831,6 +882,12 @@ mod tests {
                 narrowphase_cohort_ids(),
                 SCRATCH_ID_NARROWPHASE_TOP,
                 SCRATCH_ID_NARROWPHASE_BOTTOM,
+            ),
+            (
+                "soft-coupling cohort",
+                soft_coupling_cohort_ids(),
+                SCRATCH_ID_SOFT_COUPLING_TOP,
+                SCRATCH_ID_SOFT_COUPLING_BOTTOM,
             ),
         ] {
             ids.sort_unstable();
@@ -857,6 +914,7 @@ mod tests {
             ("graph", graph_cohort_ids()),
             ("broadphase", broadphase_cohort_ids()),
             ("narrowphase", narrowphase_cohort_ids()),
+            ("soft-coupling", soft_coupling_cohort_ids()),
         ];
         for (i, (na, a)) in cohorts.iter().enumerate() {
             for (nb, b) in &cohorts[i + 1..] {

@@ -26,6 +26,7 @@
 //! ([`SolverScratch::bodies`](crate::resources::SolverScratch)) the rigid solve
 //! consumed (same-frame symmetric exchange, no lag).
 
+use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_ecs::ecs::core::iters::query::data::Mut;
 use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::ResMut;
@@ -34,6 +35,9 @@ use boyko_macros::Resource;
 use crate::components::{ColliderShape, RigidBody};
 use crate::math::Vec3;
 use crate::resources::{BodyState, BroadphaseGrid};
+use crate::scratch_ids::{
+    register_soft_coupling_column_layouts, scratch_reserve_rows, soft_coupling_column_id,
+};
 use crate::soft::component::SoftBody;
 use crate::soft::solver::LEN_EPS;
 
@@ -49,21 +53,35 @@ use crate::soft::solver::LEN_EPS;
 /// [`RigidBody`](crate::components::RigidBody) component AFTER `physics_apply` (by
 /// [`physics_soft_rigid_apply`]), like an external impulse — the rigid scratch is
 /// never touched by the soft pass.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct SoftRigidReaction {
-    /// Per-body accumulated linear velocity delta (`Σ p_imp · −inv_mass`).
-    dv_lin: Vec<Vec3>,
+    /// Per-body accumulated linear velocity delta (`Σ p_imp · −inv_mass`). Backed
+    /// by a [`ScratchColumn`] (audit Stage 4).
+    dv_lin: ScratchColumn<Vec3>,
     /// Per-body accumulated angular velocity delta (`Σ inv_inertia · (r × −p_imp)`).
-    dv_ang: Vec<Vec3>,
+    /// Its own column under its own id: the two are written at row `idx` by one
+    /// `accumulate` call, so a shared id would land both in the same cache set.
+    dv_ang: ScratchColumn<Vec3>,
+}
+
+impl Default for SoftRigidReaction {
+    /// Hand-written because both backing columns need their reserved
+    /// [`ComponentId`]s, which no derive can supply.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
 }
 
 impl SoftRigidReaction {
     /// Builds the reaction accumulator pre-sized for up to `rows` bodies (no later
     /// reallocation in steady state).
     pub fn with_capacity(rows: usize) -> Self {
+        register_soft_coupling_column_layouts();
+        let reserve = rows.max(scratch_reserve_rows(size_of::<Vec3>()));
         Self {
-            dv_lin: Vec::with_capacity(rows),
-            dv_ang: Vec::with_capacity(rows),
+            dv_lin: ScratchColumn::new(soft_coupling_column_id(0), reserve),
+            dv_ang: ScratchColumn::new(soft_coupling_column_id(1), reserve),
         }
     }
 
@@ -71,10 +89,14 @@ impl SoftRigidReaction {
     /// capacity (clear + zero-fill; no realloc once warmed).
     #[inline]
     pub fn reset(&mut self, rows: usize) {
-        self.dv_lin.clear();
-        self.dv_ang.clear();
-        self.dv_lin.resize(rows, Vec3::ZERO);
-        self.dv_ang.resize(rows, Vec3::ZERO);
+        // `clear` before `resize`: a bare resize down would keep the surviving
+        // prefix's accumulated deltas, and this is a fresh-frame reset.
+        let mut lin = self.dv_lin.build_view();
+        lin.clear();
+        lin.resize(rows, Vec3::ZERO);
+        let mut ang = self.dv_ang.build_view();
+        ang.clear();
+        ang.resize(rows, Vec3::ZERO);
     }
 
     /// Zeroes both columns IN PLACE, keeping the current length (SP2 M2
@@ -86,8 +108,8 @@ impl SoftRigidReaction {
     /// stale one. No realloc, no shape change.
     #[inline]
     pub fn clear_values(&mut self) {
-        self.dv_lin.iter_mut().for_each(|v| *v = Vec3::ZERO);
-        self.dv_ang.iter_mut().for_each(|v| *v = Vec3::ZERO);
+        self.dv_lin.build_view().as_mut_slice().fill(Vec3::ZERO);
+        self.dv_ang.build_view().as_mut_slice().fill(Vec3::ZERO);
     }
 
     /// Number of body rows currently accumulated (the column length).
@@ -105,8 +127,12 @@ impl SoftRigidReaction {
     /// Accumulates a reaction into body row `idx` (the linear + angular deltas).
     #[inline]
     fn accumulate(&mut self, idx: usize, dv_lin: Vec3, dv_ang: Vec3) {
-        self.dv_lin[idx] = self.dv_lin[idx] + dv_lin;
-        self.dv_ang[idx] = self.dv_ang[idx] + dv_ang;
+        let mut lin_view = self.dv_lin.build_view();
+        let lin = lin_view.as_mut_slice();
+        lin[idx] = lin[idx] + dv_lin;
+        let mut ang_view = self.dv_ang.build_view();
+        let ang = ang_view.as_mut_slice();
+        ang[idx] = ang[idx] + dv_ang;
     }
 }
 
@@ -517,8 +543,8 @@ pub fn physics_soft_rigid_apply(
     let mut row = 0usize;
     for mut body in query.iter_mut() {
         if row < reaction.dv_lin.len() {
-            let dl = reaction.dv_lin[row];
-            let da = reaction.dv_ang[row];
+            let dl = reaction.dv_lin.as_read_slice()[row];
+            let da = reaction.dv_ang.as_read_slice()[row];
             // Only deref-write (bumping the changed tick) when there is a reaction,
             // so an uncoupled body is not spuriously marked changed.
             if dl != Vec3::ZERO || da != Vec3::ZERO {
