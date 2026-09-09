@@ -31,9 +31,37 @@ use std::marker::PhantomData;
 /// require single-threaded exclusive access.
 pub struct ScratchBuildView<'a, T: Copy> {
     column: &'a mut super::scratch_column::ScratchColumn<T>,
+    /// The column's write-capable base, cached for the view's lifetime.
+    ///
+    /// Sound to hold across the column's own `&mut` methods: it comes from
+    /// `ScratchColumn::solve_base`, which reads the pool's stored `buffer` field
+    /// rather than reborrowing `&self`, so its provenance is the reservation's own
+    /// and a `&mut ComponentPool` does not touch it. The base is write-once and
+    /// address-stable across growth (pages commit in place), so it never needs
+    /// re-deriving either.
+    base: *mut T,
+    /// Cached frontier. THE live length while the view exists; written back into
+    /// the column on `Drop`.
+    len: usize,
+    /// Cached committed-row ceiling — the `push` fast-path comparator. Re-read from
+    /// the column after every grow.
+    committed: usize,
     /// Pins the view `!Send` / `!Sync` explicitly (a raw pointer is neither),
     /// independent of the inferred auto-trait of `&mut ScratchColumn`.
     _not_send: PhantomData<*mut ()>,
+}
+
+impl<T: Copy> Drop for ScratchBuildView<'_, T> {
+    /// Publishes the cached frontier back into the column.
+    ///
+    /// ⚠ `mem::forget`ing the view loses the pushes made through it — the column
+    /// keeps the length it had when the view was taken. That is a lost write, not
+    /// unsoundness: the rows above the published length are simply not live, which
+    /// is exactly the state a `clear` leaves them in.
+    #[inline]
+    fn drop(&mut self) {
+        self.column.set_len(self.len);
+    }
 }
 
 impl<'a, T: Copy> ScratchBuildView<'a, T> {
@@ -41,10 +69,37 @@ impl<'a, T: Copy> ScratchBuildView<'a, T> {
     /// [`ScratchColumn::build_view`](super::scratch_column::ScratchColumn::build_view).
     #[inline]
     pub(crate) fn new(column: &'a mut super::scratch_column::ScratchColumn<T>) -> Self {
+        let base = column.solve_base();
+        let len = column.len();
+        let committed = column.committed_rows();
         Self {
             column,
+            base,
+            len,
+            committed,
             _not_send: PhantomData,
         }
+    }
+
+    /// Grows the backing column by at least one row and re-reads the ceiling.
+    ///
+    /// `#[cold]` + `#[inline(never)]`: it runs once per commit step, never on the
+    /// warm push, and keeping it out of line is what leaves `push` as a compare, a
+    /// store and an increment.
+    ///
+    /// # Panics
+    /// * the backing column's reserve ceiling is exhausted.
+    #[cold]
+    #[inline(never)]
+    fn grow_for_push(&mut self) {
+        // The column's own `len` must be current before it grows: `grow_rows`
+        // commits from the frontier it can see.
+        self.column.set_len(self.len);
+        assert!(
+            self.column.grow_to(self.len + 1),
+            "invariant: ScratchColumn reserve ceiling exhausted"
+        );
+        self.committed = self.column.committed_rows();
     }
 
     /// The whole-buffer mutable slice over the column's `len` live elements.
@@ -52,13 +107,19 @@ impl<'a, T: Copy> ScratchBuildView<'a, T> {
     /// lacks (the SP4 fix).
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        self.column.as_mut_slice()
+        // SAFETY: `base` is the column's write-capable, address-stable base, aligned
+        // to at least `align_of::<T>()`; rows `[0, len)` are initialised `T` (written
+        // by this view or live in the column when it was taken); `&mut self` gives
+        // exclusive access for the slice's lifetime, and the view is `!Send` so no
+        // other thread holds the column.
+        unsafe { core::slice::from_raw_parts_mut(self.base, self.len) }
     }
 
     /// The whole-buffer read-only slice over the column's `len` live elements.
     #[inline]
     pub fn as_slice(&self) -> &[T] {
-        self.column.as_slice()
+        // SAFETY: as `as_mut_slice`, through a shared borrow.
+        unsafe { core::slice::from_raw_parts(self.base, self.len) }
     }
 
     /// Logically empties the column (`len = 0`) WITHOUT freeing the backing
@@ -67,7 +128,7 @@ impl<'a, T: Copy> ScratchBuildView<'a, T> {
     /// `T: Copy` ⇒ `!needs_drop`, so dropping the old contents is a no-op.
     #[inline]
     pub fn clear(&mut self) {
-        self.column.clear();
+        self.len = 0;
     }
 
     /// Appends `value` at the frontier, growing the backing column IN PLACE if
@@ -81,7 +142,17 @@ impl<'a, T: Copy> ScratchBuildView<'a, T> {
     where
         T: 'static,
     {
-        self.column.push(value)
+        if self.len == self.committed {
+            self.grow_for_push();
+        }
+        let idx = self.len;
+        // SAFETY: `idx < committed` (grown above if needed), so the slot lies inside
+        // the pool's committed pages; `base` carries the reservation's own write
+        // provenance and is aligned for `T`; the view holds the column exclusively
+        // and is `!Send`, so nothing else can be writing it.
+        unsafe { self.base.add(idx).write(value) };
+        self.len = idx + 1;
+        idx as u32
     }
 
     /// Appends every element of `values` at the frontier (one in-place grow at
@@ -94,7 +165,9 @@ impl<'a, T: Copy> ScratchBuildView<'a, T> {
     where
         T: 'static,
     {
-        self.column.extend_from_slice(values);
+        for &v in values {
+            self.push(v);
+        }
     }
 
     /// Sets the live length to `new_len`, filling any new slots with `value`
@@ -112,7 +185,16 @@ impl<'a, T: Copy> ScratchBuildView<'a, T> {
     where
         T: 'static,
     {
+        if new_len <= self.len {
+            self.len = new_len;
+            return;
+        }
+        // Delegate the grow + fill to the column (one grow for the whole span), then
+        // re-read what it published.
+        self.column.set_len(self.len);
         self.column.resize(new_len, value);
+        self.len = self.column.len();
+        self.committed = self.column.committed_rows();
     }
 
     /// Shortens the buffer to `new_len` live elements, keeping the committed
@@ -124,19 +206,21 @@ impl<'a, T: Copy> ScratchBuildView<'a, T> {
     /// re-pushing every survivor is a different algorithm, not the same one.
     #[inline]
     pub fn truncate(&mut self, new_len: usize) {
-        self.column.truncate(new_len);
+        if new_len < self.len {
+            self.len = new_len;
+        }
     }
 
     /// The number of live elements (`len`).
     #[inline]
     pub fn len(&self) -> usize {
-        self.column.len()
+        self.len
     }
 
     /// `true` iff the column has no live elements.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.column.is_empty()
+        self.len == 0
     }
 }
 

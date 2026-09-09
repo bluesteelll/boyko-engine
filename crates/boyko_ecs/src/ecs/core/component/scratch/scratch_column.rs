@@ -292,6 +292,28 @@ impl<T: Copy> ScratchColumn<T> {
         self.column.truncate_no_drop(new_len);
     }
 
+    /// Rows committed read/write — the frontier a cached refill compares against
+    /// before it may write without checking the pool again.
+    #[inline]
+    pub(crate) fn committed_rows(&self) -> usize {
+        self.column.committed_rows()
+    }
+
+    /// Publishes a frontier written through [`Self::solve_base`] by a cached refill.
+    ///
+    /// The caller must have initialised rows `[0, new_len)`; see
+    /// `ComponentPool::set_len_no_drop`.
+    #[inline]
+    pub(crate) fn set_len(&mut self, new_len: usize) {
+        self.column.set_len_no_drop(new_len);
+    }
+
+    /// Commits at least `rows` rows, returning `false` at the reserve ceiling.
+    #[inline]
+    pub(crate) fn grow_to(&mut self, rows: usize) -> bool {
+        self.column.grow_rows(rows)
+    }
+
     /// Appends every element of `values` at the frontier (in-place grow as
     /// needed; the base never moves).
     ///

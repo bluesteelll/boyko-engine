@@ -236,19 +236,23 @@ pub fn physics_gather(
     // byte-identical to today (Encoding A; the same theorem as `Option<&Sensor>`).
     // The bits ride into `BodyState`, where the integrate/solve gates AND
     // `simulated` with the unchanged `is_dynamic_row` oracle.
-    let mut bodies = scratch.bodies_build();
-    bodies.clear();
-    for (body, mass, collider, sensor, simulated, kinematic) in query.iter() {
-        bodies.push(BodyState::from_columns(
-            body,
-            mass,
-            collider,
-            sensor.is_some(),
-            simulated,
-            kinematic,
-        ));
-    }
-    let n = bodies.len();
+    // The refill view is SCOPED: it publishes its frontier on `Drop`, so the borrow
+    // of `scratch.bodies` has to end before `scratch.touched` is reached.
+    let n = {
+        let mut bodies = scratch.bodies_build();
+        bodies.clear();
+        for (body, mass, collider, sensor, simulated, kinematic) in query.iter() {
+            bodies.push(BodyState::from_columns(
+                body,
+                mass,
+                collider,
+                sensor.is_some(),
+                simulated,
+                kinematic,
+            ));
+        }
+        bodies.len()
+    };
     debug_assert_eq!(n, query.iter().count(), "Encoding A: gather must not drop a row");
     scratch.touched.reset(n);
 }

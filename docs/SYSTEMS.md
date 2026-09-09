@@ -224,10 +224,15 @@ mapping) when it retired the Arena. See
   `get_raw_mut(idx)`.
 - Typed (TypeId-guarded, C-004): `add_typed::<T>`, `set_component_typed::<T>`,
   `get_typed::<T>`, `get_mut_typed::<T>`.
-- Removal: `swap_remove(idx)` (1044), `pop()` — both run `drop_fn`.
-- Iteration: `buffer_ptr() -> *const u8` (1414) — the dense, SIMD-aligned base
-  (`SIMD_BUFFER_ALIGN = 32`, Phase X.A); `count() -> usize` (1338) = the `len`
+- Removal: `swap_remove(idx)` (1148), `pop()` — both run `drop_fn`.
+- Iteration: `buffer_ptr() -> *const u8` (1518) — the dense, SIMD-aligned base
+  (`SIMD_BUFFER_ALIGN = 32`, Phase X.A); `count() -> usize` (1442) = the `len`
   field.
+- Drop-free refill surface (`ScratchColumn` only, all `debug_assert!` that
+  `drop_fn.is_none()`): `clear_no_drop()` (995) O(1) length reset,
+  `truncate_no_drop(n)` (1042) O(1) shrink, `set_len_no_drop(n)` (1029) the
+  write-back half of a cached-frontier refill, and `extend_fill_copy::<T>(n, v)`
+  (1070), which hoists the grow check out of a fill loop.
 - Row addressing: the private `#[inline] unsafe fn row_ptr(&self, idx)` (817) =
   `buffer.as_ptr().add(idx * stride)`.
 

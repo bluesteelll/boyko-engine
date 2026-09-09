@@ -1015,6 +1015,29 @@ impl ComponentPool {
     /// leak, and the same one `clear_no_drop` relies on.
     ///
     /// [`ScratchColumn`]: crate::ecs::core::component::scratch::ScratchColumn
+    /// Sets the live row count of a drop-free (Copy/POD) pool to `new_len`,
+    /// asserting the rows are committed.
+    ///
+    /// The write-back half of a cached-frontier refill: a caller that has already
+    /// written rows `[old_len, new_len)` through the pool's stable base publishes
+    /// the frontier with this, instead of paying a field store per element.
+    ///
+    /// # Safety contract (upheld by the caller, debug-asserted here)
+    /// Rows `[0, new_len)` must all be INITIALISED. Raising `len` over rows that
+    /// were never written would expose uninitialised memory as live `T`.
+    #[inline]
+    pub(crate) fn set_len_no_drop(&mut self, new_len: usize) {
+        debug_assert!(
+            self.drop_fn.is_none(),
+            "set_len_no_drop on a pool with a drop_fn"
+        );
+        debug_assert!(
+            new_len <= self.committed_rows,
+            "set_len_no_drop past the committed frontier"
+        );
+        self.len = new_len;
+    }
+
     #[inline]
     pub(crate) fn truncate_no_drop(&mut self, new_len: usize) {
         debug_assert!(

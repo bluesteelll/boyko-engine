@@ -875,6 +875,9 @@ impl RigidSolver for SoftStepSolver {
         // single-threaded mutable slice over the solver's BodyEffective column (no
         // parallel access — this is the SERIAL solver), while `manifolds` / `points`
         // / the warm tables stay borrowable through the destructured fields.
+        // SCOPED: the three refill views publish their frontiers on `Drop`, so their
+        // borrows of `self`'s fields must end before `store_and_swap` / `write_back`.
+        {
         let Self {
             bodies,
             manifolds: mc_col,
@@ -947,6 +950,7 @@ impl RigidSolver for SoftStepSolver {
             scratch.bodies(),
             scratch.vn_initial(),
         );
+        }
 
         // (W3) Store the converged accumulated impulses into the freshly-zeroed
         // write table (in manifold order) and swap read ↔ write so next frame
