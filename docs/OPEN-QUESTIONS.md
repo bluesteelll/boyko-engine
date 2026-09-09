@@ -4945,3 +4945,65 @@ eight did not. The remediation is **partially executed**.
    recurring.
 3. **Should the plan documents carry per-stage status?** The cheapest of the three, and it is what
    turned a known backlog into a surprise.
+
+---
+
+## `Scope::spawn_batch` after App-4 lost: the design says do not ship it, and four production sites call it (2026-09-09)
+
+**THE RULE, VERBATIM.** `KE16-DESIGN.md`'s App-4 row states its own kill condition: *"no cell better
+than per-task spawn beyond 2× the band — then the API is not shipped (smaller surface wins a tie)"*.
+The tournament shipped `c0` — per-task spawn. App-4 lost. By that sentence the API comes out.
+
+**WHAT ACTUALLY SHIPPED.** The BEHAVIOUR is gone and the SURFACE is not. `Scope::spawn_batch`
+(`crates/boyko_threadpool/src/scope.rs:1060-1074`) is now:
+
+```rust
+let mut k = 0usize;
+for f in bodies { self.spawn(f); k += 1; }
+debug_assert!(k <= n, "invariant: `spawn_batch` bodies yielded more than the `n` it was promised");
+```
+
+Its own doc says so — *"One `spawn` per body: every body is registered and pushed on its own, and
+every push takes its own wake decision"*. There is no `fetch_add(n)`, no once-per-wave wake, nothing
+App-4 proposed. What remains is a loop plus a debug-asserted upper bound.
+
+**THE STATED REASON TO KEEP IT IS NOT EXERCISED BY ANY CALLER.** The doc justifies the surface as
+*"the API exists so that a caller whose chunk count is only an upper bound has one call to make"*.
+All four production call sites pass an EXACT count, and all four have the identical shape
+`spawn_batch(N, (0..N).map(..))`:
+
+| site | argument |
+|---|---|
+| `crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs:406` | `spawn_batch(n_chunks, (0..n_chunks).map(..))` |
+| `crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs:263` | `spawn_batch(n_chunks, (0..n_chunks).map(..))` |
+| `crates/boyko_physics/src/resources.rs:1781` | `spawn_batch(n_waves, (0..n_waves).map(..))` |
+| `crates/boyko_physics/src/soft/colored.rs:1042` | `spawn_batch(n_waves, (0..n_waves).map(..))` |
+
+So the `n` is never an upper bound in production; it is the length of the range immediately beside
+it, and the `debug_assert!` it feeds cannot fire at any of the four.
+
+**WHAT REMOVAL WOULD COST.** Four production sites become `for chunk in 0..n { scope.spawn(..) }`.
+Twelve `#[test]` functions in `scope.rs` go with the API (eleven `spawn_batch_*` plus
+`scope_multi_drain_frees_once`), as do the call sites in
+`crates/boyko_threadpool/tests/block_allocation_receipts.rs:746,876` and
+`crates/boyko_threadpool/tests/miri_scope.rs:629,684` — the latter two are receipts about the
+allocator and the release window, not about batching, so they would be rewritten onto `spawn`
+rather than deleted.
+
+**WHY THIS IS NOT DECIDED HERE.** Mechanical evaluation of the removed `ke16-c-batch` feature keeps
+whatever was outside a `cfg`, and `spawn_batch` was outside one. Removing a public method, rewriting
+four production sites and retiring twelve tests is a scope decision, not a cfg evaluation, and the
+rule that mandates it was written before the API acquired production callers.
+
+**WHAT IS PUT TO YOU:**
+
+1. **Does `Scope::spawn_batch` come out, as its own design rule says?** The honest reading is yes:
+   it is a loop with a promise no caller needs, and "smaller surface wins a tie" was written for
+   exactly this outcome.
+2. **Or does the rule get amended in place?** Defensible too — the four sites read better with it,
+   and the `debug_assert!` is a real invariant for a FUTURE caller whose count is a bound. If so the
+   App-4 row must say that the API survives its own rejection and why, because as written the
+   document and the tree disagree.
+3. **Either way the doc changes.** Today `KE16-DESIGN.md` says the API is not shipped and the API is
+   shipped. That is a documented rule contradicted by the tree, which is the shape this campaign has
+   spent its whole length removing.
