@@ -1678,10 +1678,33 @@ impl ColoredSoftStepSolver {
             let impulse = normal * view.normal_impulse(i)
                 + t1 * view.tangent1_impulse(i)
                 + t2 * view.tangent2_impulse(i);
+            // Guard the write on MOVABILITY, exactly as `solve_color` does — see the
+            // `ia_movable` / `ib_movable` rationale there for the full proof. Two
+            // properties, and only the first is about this function today:
+            //
+            // * BIT-IDENTICAL. A static / kinematic row has `inv_mass == 0` AND
+            //   `inv_inertia == Mat3::ZERO`, so both halves of `apply_impulse` are a
+            //   value no-op on it for every finite impulse. Skipping the write cannot
+            //   change a bit.
+            // * LOAD-BEARING THE MOMENT THIS RUNS IN PARALLEL. The coloring marks only
+            //   DYNAMIC bodies, so two manifold-groups in one color may SHARE a static
+            //   body (a ground floor as `body_b`). Unguarded, a color-partitioned
+            //   parallel apply has every lane writing that one shared static row — a
+            //   data race that is VALUE-identical and therefore invisible to the
+            //   `{1, N}` bit oracles. The guard is what makes each worker's writes
+            //   disjoint, and it must land BEFORE the parallel dispatch, not with it.
+            //
+            // `is_dynamic_row` is the same predicate the O4 coloring uses, so the two
+            // cannot drift into disagreeing about which rows are shared.
             let ia = view.body_a(i) as usize;
-            body_mut(bodies_eff, ia).apply_impulse(view.ra(i), impulse * -1.0);
+            if is_dynamic_row(body_ref(bodies_eff, ia).inv_mass) {
+                body_mut(bodies_eff, ia).apply_impulse(view.ra(i), impulse * -1.0);
+            }
             if !view.b_is_sentinel(i) {
-                body_mut(bodies_eff, view.body_b(i) as usize).apply_impulse(view.rb(i), impulse);
+                let ib = view.body_b(i) as usize;
+                if is_dynamic_row(body_ref(bodies_eff, ib).inv_mass) {
+                    body_mut(bodies_eff, ib).apply_impulse(view.rb(i), impulse);
+                }
             }
         }
     }
@@ -2915,8 +2938,15 @@ impl ColoredSoftStepSolver {
             let applied = new_lambda - lambda_n;
             cols.set_normal_impulse(i, new_lambda);
             let impulse = normal * applied;
-            body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
-            if !b_is_sentinel {
+            // Same movability guard as `solve_color` / `warm_start_apply` — see the
+            // `ia_movable` rationale in `solve_color`. Bit-identical today (an
+            // impulse on an immovable row is a value no-op), and the precondition for
+            // ever running this pass color-partitioned: without it, lanes sharing a
+            // static `body_b` would all write the same row.
+            if is_dynamic_row(body_ref(bodies_eff, ia).inv_mass) {
+                body_mut(bodies_eff, ia).apply_impulse(ra, impulse * -1.0);
+            }
+            if !b_is_sentinel && is_dynamic_row(body_ref(bodies_eff, ib).inv_mass) {
                 body_mut(bodies_eff, ib).apply_impulse(rb, impulse);
             }
         }
