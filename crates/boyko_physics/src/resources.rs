@@ -572,6 +572,17 @@ impl ContactPairs {
     pub fn pairs(&self) -> &[(BodyIndex, BodyIndex)] {
         self.pairs.as_read_slice()
     }
+
+    /// The single-threaded refill view over the pair list (clear + push).
+    ///
+    /// The production producer is `BroadphaseGrid::build` / `::build_parallel`,
+    /// which take the whole resource; this is the surface for a driver that emits
+    /// pairs itself — the all-pairs transcription in `benches/broadphase.rs`, whose
+    /// whole value is being container-identical to the shipped arm.
+    #[inline]
+    pub fn pairs_build(&mut self) -> ScratchBuildView<'_, (BodyIndex, BodyIndex)> {
+        self.pairs.build_view()
+    }
 }
 
 /// A body whose AABB spans more than [`MAX_CELL_SPAN`] grid cells goes here

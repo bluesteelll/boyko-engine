@@ -91,8 +91,24 @@ fn scene(n: usize) -> Vec<BodyState> {
     bodies
 }
 
-/// The all-pairs reference loop (the shipped `AllPairs` arm), into a reused `Vec`.
-fn all_pairs(bodies: &[BodyState], out: &mut Vec<(BodyIndex, BodyIndex)>) {
+/// A TRANSCRIPTION of the shipped `AllPairs` arm
+/// ([`physics_broadphase`](boyko_physics::systems::physics_broadphase)), not the arm
+/// itself.
+///
+/// ⚠ The distinction is load-bearing and this comment used to hide it: it read "the
+/// shipped `AllPairs` arm", which reads as *this row executes that code*. It does
+/// not — the bench never builds a schedule, so nothing here can catch a regression
+/// that lives in the system. What this row measures is the LOOP SHAPE, in
+/// isolation, which is why it must be kept container-identical to the arm: it took
+/// `&mut Vec` while the arm moved to a `ScratchColumn` (audit Stage 4), and a row
+/// that still measures the old container reads GREEN across exactly the change it
+/// was pointed at.
+///
+/// The arm end-to-end is covered by `jolt_parity_pyramid`, which never sets
+/// `PhysicsConfig::broadphase` and therefore runs the DEFAULT `AllPairs` arm
+/// through the real system.
+fn all_pairs(bodies: &[BodyState], out: &mut ContactPairs) {
+    let mut out = out.pairs_build();
     out.clear();
     let n = bodies.len();
     for i in 0..n {
@@ -121,10 +137,10 @@ fn bench_broadphase(c: &mut Criterion) {
         );
 
         group.bench_with_input(BenchmarkId::new("all_pairs", n), &bodies, |b, bodies| {
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             b.iter(|| {
                 all_pairs(black_box(bodies), &mut out);
-                black_box(out.len());
+                black_box(out.pairs().len());
             });
         });
 
@@ -166,10 +182,10 @@ fn bench_disparity(c: &mut Criterion) {
         );
 
         group.bench_with_input(BenchmarkId::new("all_pairs", n), &bodies, |b, bodies| {
-            let mut out = Vec::new();
+            let mut out = ContactPairs::with_capacity(0);
             b.iter(|| {
                 all_pairs(black_box(bodies), &mut out);
-                black_box(out.len());
+                black_box(out.pairs().len());
             });
         });
 

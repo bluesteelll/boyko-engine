@@ -47,16 +47,72 @@ and `pairs.push(..)` change receiver; the loop body, the bound test and the emit
 benchmark on the owner's workstation, which is a timings request rather than a call to make alone.
 Until it is taken the claim is an inference from a neighbouring buffer, and it is labelled as one.
 
-⏸ **DEFERRED 2026-09-09 by the owner: no measurements, the machine is not quiet.** The migration
-shipped without one, so the perf claim on this arm stands as an *inference*, not a result — that is
-the honest label and it is written into the commit rather than only here. Two things happen to
-change it: the correctness gate is real and green (37 targets, 370 passed, including the
-zero-heap-allocation steady-state build test, which the column now passes for a stronger reason —
-the buffer no longer reaches the global allocator at all), and the timing claim stays open until a
-quiet window.
+✅ **MEASURED 2026-09-09 in the owner's quiet window, and the answer is BOTH.** Release/`bench`
+profile, medians, each arm in its own worktree, runs taken back to back.
 
-**Still open: run the broadphase bench in a quiet window to confirm the all-pairs arm did not
-regress.** `cargo bench -p boyko-physics --bench broadphase`, the `serial_o2` and `all_pairs` rows.
+### The arm IS covered end-to-end, and there it costs nothing
+
+The first thing the measurement found was that no new bench was needed:
+**`BroadphaseKind::AllPairs` is the DEFAULT** (`resources.rs`, `#[default]`), and
+`jolt_parity_pyramid` never sets `PhysicsConfig::broadphase` — so that bench has been running the
+DO-NOT arm through the real system all along, at 1240 bodies, on every worker row.
+
+Full physics step, base `e665ccd6` (this session's start) → HEAD `627ca762` — the whole of Stage 4,
+seven cohorts and the kernel addition:
+
+| W | base | HEAD | Δ |
+|---|---|---|---|
+| 1 | 18.671 ms | 18.681 ms | +0.05 % |
+| 2 | 19.240 ms | 18.992 ms | −1.29 % |
+| 4 | 19.394 ms | 19.390 ms | −0.02 % |
+| 8 | 21.017 ms | 20.970 ms | −0.22 % |
+| 16 | 26.073 ms | 25.895 ms | −0.68 % |
+
+Mixed in direction and all of it under the instrument's own resolution: criterion's comparison
+against a stored baseline from an earlier session drifts **+2…4 %** on the same rows, so this
+machine's session-to-session noise is larger than every number in the table. The honest reading is
+**no cost detected, and none below ~2–4 % could have been.**
+
+### The LOOP, in isolation, is 7–17 % slower — the DO-NOT was pointing at something real
+
+The `broadphase` bench's `all_pairs` row, container-A/B on the identical loop (base `&mut Vec`,
+HEAD `ContactPairs` refill view):
+
+| n | base | HEAD | Δ |
+|---|---|---|---|
+| 100 | 5.596 µs | 6.545 µs | **+17.0 %** |
+| 1 000 | 600.3 µs | 637.4 µs | **+6.2 %** |
+| 10 000 | 77.42 ms | 85.17 ms | **+10.0 %** |
+
+A repeat run at HEAD landed within 0.7 %, so this is far outside noise. The two results reconcile
+arithmetically rather than contradicting: at 1240 bodies the all-pairs pass is ≈0.9 ms of an 18.7 ms
+step, and +7 % of that is +0.06 ms — **+0.35 % end-to-end**, under the noise floor of the first
+table. Both are true; only the second one can see it.
+
+### The obvious explanation is WRONG, and it was tested rather than assumed
+
+Hypothesis: `ComponentPool::row_ptr` scales the index by the pool's RUNTIME
+`component_layout.size()`, where `Vec` scales by a compile-time constant — a field load plus a
+multiply per push. Replacing it with typed `size_of::<T>()` arithmetic measured
+**6.645 µs / 648.9 µs / 83.31 ms**: no consistent direction, inside ±2 %. It was reverted rather than
+kept, because a neutral change that adds an unsafe assumption (stride ≡ `size_of::<T>()`, guarded
+only by a `debug_assert`) is a cost with no benefit.
+
+So the cost is NOT the address arithmetic. The remaining candidate is the per-push reload: `push`
+reaches the frontier through `&mut ScratchBuildView` → `&mut ScratchColumn` → `&mut ComponentPool`,
+and the write through the resulting `*mut u8` leaves the compiler unable to keep `len` /
+`committed_rows` / `buffer` in registers across the loop, where `Vec`'s three fields stay live.
+**The fix that follows from that diagnosis is a `ScratchBuildView` that CACHES `(base, len,
+committed)` and writes the length back on `Drop`** — push becomes a compare, a store and an
+increment on registers, with a `#[cold]` slow path for the grow.
+
+**Question: fund the cached-frontier `ScratchBuildView` now, or leave the 7–17 % on the all-pairs
+loop?** The case for leaving it: the loop is O(n²), it is the arm the engine's own density policy
+exists to move OFF, and at any body count where the absolute cost matters the Grid arm is already
+selected — and that arm measured FASTER after its own migration. The case against: `AllPairs` is the
+DEFAULT, so this is the path every world that never opts in takes, and the regression was
+introduced by this lane. It is written down here rather than decided quietly because the reasons cut
+both ways.
 
 ### 2. `ScratchBuildView` cannot express a pre-sized, parallel-filled, compacted buffer
 
