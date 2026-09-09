@@ -4891,3 +4891,21 @@ per-entity data is the one the parallel driver refuses.
 **Question: is resolving the dense store per worker chunk in scope for the kernel now, or does
 Stage P's dense migration wait behind it?** It is a kernel change, not a physics one, and it is not
 in any current plan.
+
+## RESOLVED 2026-09-09 — the three ECS-native-lane questions, ruled by the owner
+
+1. **The in-scope barrier waits for KE16 to CLOSE.** Not interleaved into that campaign and not
+   taken from this lane. Step App and the rule-3 rewrite finish first, KE16 closes, and the barrier
+   is then taken in `D:/wt/threadpool` against a settled protocol. The cost is accepted with its
+   number: the Jolt deficit stays at 0.89x against 4.18x until then, and it is the whole remaining
+   gap, since single-threaded the two engines are within 4 %.
+2. **The `Cuts` policy object is DEFERRED until after the barrier**, on the reasoning that the
+   barrier changes the per-dispatch cost the policy is being tuned against — so tuning first would
+   calibrate against a cost that is about to move. `MIN_SLOTS_PER_CHUNK = 64` therefore ships as-is,
+   documented as the largest value keeping both gates green rather than the optimum of either.
+3. **`par_iter`'s dense rejection waits for Stage 4 to finish.** The remaining ~34 columns this lane
+   owns are all T2 (`ScratchColumn`), which the const assert does not touch, so Stage 4 is not
+   blocked by it. The kernel fix is raised when Stage P's dense migration actually needs it.
+
+Resulting order of work: **finish Stage 4 in this lane → close KE16 → in-scope barrier → re-open
+questions 2 and 3 with the barrier's numbers in hand.**
