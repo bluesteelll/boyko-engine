@@ -47,6 +47,7 @@ use boyko_utils::bit_mask::bit_set_256::BitSet256;
 use crate::manifold::BodyIndex;
 use crate::resources::BodyState;
 use crate::solver::contact::BodyEffective;
+use crate::solver::warm_start::WarmEntry;
 
 /// Top of the rigid colored solver's contact-column band (audit Stage P — P2).
 ///
@@ -215,8 +216,15 @@ const _: () = assert!(
 // separate run proves nothing about collisions against the body mirrors, which
 // is exactly the pair that shares a loop.
 
+/// Number of ids in the solver tail that are named one by one below.
+const SOLVER_TAIL_NAMED_COUNT: usize = 3;
+
+/// Number of `ScratchColumn`s backing the double-buffered warm-start tables:
+/// a `read` + a `write` for each of the two solvers.
+pub(crate) const WARM_TABLE_COLUMN_COUNT: usize = 4;
+
 /// Number of ids in the solver tail.
-const SOLVER_TAIL_COLUMN_COUNT: usize = 3;
+const SOLVER_TAIL_COLUMN_COUNT: usize = SOLVER_TAIL_NAMED_COUNT + WARM_TABLE_COLUMN_COUNT;
 
 /// Synthetic id for [`SolverScratch`](crate::resources::SolverScratch)'s
 /// `vn_initial: ScratchColumn<f32>` — the per-contact-point approach velocity the
@@ -245,6 +253,9 @@ pub(crate) const SCRATCH_ID_TOUCHED_SOLVER: usize = SCRATCH_ID_CONTACT_BAND_BOTT
 /// stagger exists to prevent.
 pub(crate) const SCRATCH_ID_TOUCHED_AWAKE: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM - 3;
 
+/// Top of the warm-start table run, one id below the last named tail column.
+pub(crate) const SCRATCH_ID_WARM_TABLE_TOP: usize = SCRATCH_ID_TOUCHED_AWAKE - 1;
+
 /// Bottom of the solver tail (inclusive), and so of the whole solver cohort.
 const SCRATCH_ID_SOLVER_TAIL_BOTTOM: usize =
     SCRATCH_ID_CONTACT_BAND_BOTTOM - SOLVER_TAIL_COLUMN_COUNT;
@@ -255,9 +266,23 @@ const SCRATCH_ID_SOLVER_TAIL_BOTTOM: usize =
 // id without moving the bottom and the run has a hole the width check would still
 // wave through.
 const _: () = assert!(
-    SCRATCH_ID_TOUCHED_AWAKE == SCRATCH_ID_SOLVER_TAIL_BOTTOM,
-    "the solver tail's lowest named id is not its declared bottom: the contiguous      run has a hole, and SOLVER_COHORT_WIDTH stops covering every tail column"
+    SCRATCH_ID_WARM_TABLE_TOP - (WARM_TABLE_COLUMN_COUNT - 1) == SCRATCH_ID_SOLVER_TAIL_BOTTOM,
+    "the solver tail's lowest id is not its declared bottom: the contiguous run has a hole, and SOLVER_COHORT_WIDTH stops covering every tail column"
 );
+
+/// The [`ComponentId`] for warm-start table `k`: `0` = the serial solver's read
+/// table, `1` its write, `2` = the colored solver's read, `3` its write.
+///
+/// The read/write BINDING is only true at construction: `store_and_swap` swaps the
+/// two tables wholesale, so after the first step the field named `warm_read` owns
+/// the column built under the write id. That is harmless and deliberate — the
+/// point of separate ids is that the two columns keep DIFFERENT cache-set
+/// staggers while they alternate roles, not that a role owns an id.
+#[inline]
+pub(crate) fn warm_table_id(k: usize) -> ComponentId {
+    debug_assert!(k < WARM_TABLE_COLUMN_COUNT, "warm table index out of cohort");
+    ComponentId::new(SCRATCH_ID_WARM_TABLE_TOP - k)
+}
 
 // ── The CONSTRAINT-GRAPH cohort (audit Stage 4) ─────────────────────────────
 //
@@ -477,12 +502,16 @@ fn register_contact_column_layouts() {
 
 /// Registers the element layout of every solver-tail column, idempotently.
 ///
-/// One `f32` (`vn_initial`) and two `BitSet256` chunk columns. The two masks are
-/// registered under DIFFERENT ids on purpose — see [`SCRATCH_ID_TOUCHED_AWAKE`].
+/// One `f32` (`vn_initial`), two `BitSet256` chunk columns and four `WarmEntry`
+/// tables. Every same-typed pair is registered under DIFFERENT ids on purpose —
+/// see [`SCRATCH_ID_TOUCHED_AWAKE`] for the failure a shared id would produce.
 fn register_solver_tail_layouts() {
     register_layout::<f32>(SCRATCH_ID_VN_INITIAL);
     register_layout::<BitSet256>(SCRATCH_ID_TOUCHED_SOLVER);
     register_layout::<BitSet256>(SCRATCH_ID_TOUCHED_AWAKE);
+    for k in 0..WARM_TABLE_COLUMN_COUNT {
+        register_layout::<WarmEntry>(warm_table_id(k).get());
+    }
 }
 
 /// The [`ComponentId`] wrapper for [`SCRATCH_ID_VN_INITIAL`].
@@ -566,6 +595,7 @@ mod tests {
             SCRATCH_ID_TOUCHED_SOLVER,
             SCRATCH_ID_TOUCHED_AWAKE,
         ]);
+        ids.extend((0..WARM_TABLE_COLUMN_COUNT).map(|k| warm_table_id(k).get()));
         ids
     }
 

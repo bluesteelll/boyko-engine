@@ -100,6 +100,7 @@ use crate::resources::{
 };
 use crate::scratch_ids::{
     body_eff_colored_id, contact_column_id, register_scratch_layouts, scratch_reserve_rows,
+    warm_table_id,
 };
 
 /// Loads one SoA `[f32; 8]` column into a `__m256` (the O7 cohort kernel's scalar
@@ -1449,8 +1450,8 @@ impl ColoredSoftStepSolver {
         Self {
             bodies: ScratchColumn::new(body_eff_colored_id(), reserve),
             columns: ContactColumns::with_capacity(contacts),
-            warm_read: WarmStartTable::with_capacity(contacts),
-            warm_write: WarmStartTable::with_capacity(contacts),
+            warm_read: WarmStartTable::with_capacity(warm_table_id(2), contacts),
+            warm_write: WarmStartTable::with_capacity(warm_table_id(3), contacts),
             warm_start_enabled: true,
             frozen: Vec::with_capacity(bodies),
         }

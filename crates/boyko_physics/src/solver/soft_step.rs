@@ -67,7 +67,9 @@ use super::RigidSolver;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{BodyState, PhysicsConfig, SolverScratch};
-use crate::scratch_ids::{body_eff_serial_id, register_scratch_layouts, scratch_reserve_rows};
+use crate::scratch_ids::{
+    body_eff_serial_id, register_scratch_layouts, scratch_reserve_rows, warm_table_id,
+};
 
 /// Maximum penetration-recovery bias speed (world units/s) the soft normal solve
 /// will inject, clamping the otherwise-unbounded `biasRate · separation` push so
@@ -226,8 +228,8 @@ impl SoftStepSolver {
             bodies: ScratchColumn::new(body_eff_serial_id(), reserve),
             manifolds: Vec::with_capacity(contacts),
             points: Vec::with_capacity(contacts),
-            warm_read: WarmStartTable::with_capacity(contacts),
-            warm_write: WarmStartTable::with_capacity(contacts),
+            warm_read: WarmStartTable::with_capacity(warm_table_id(0), contacts),
+            warm_write: WarmStartTable::with_capacity(warm_table_id(1), contacts),
             warm_start_enabled: true,
         }
     }
