@@ -305,5 +305,69 @@ fn large_color_raft(n: u32) -> (Vec<BodyState>, Vec<Manifold>) {
     (bodies, manifolds)
 }
 
-criterion_group!(benches, bench_pyramid_scaling, bench_threshold_effect);
+/// THE SCENE THE OLD GATE REFUSED: `pairs` disjoint dynamic pairs, spaced far apart.
+///
+/// Every pair is its own island holding ONE manifold, so the retired
+/// `max_island_constraints` metric reads 1 and the pre-fix gate forced this whole
+/// scene single-threaded. But manifolds in different islands are always
+/// body-disjoint, so the coloring puts all `pairs` of them in ONE color — the
+/// widest color is `pairs` slots, far above the per-color dispatch floor. This is
+/// the maximally parallel shape a solver can be handed, and it is exactly the shape
+/// the gate rejected: every many-debris / many-ragdoll / many-pile world.
+fn many_disjoint_pairs(pairs: u32) -> (Vec<BodyState>, Vec<Manifold>) {
+    let n = pairs * 2;
+    let mut bodies = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let pair = i / 2;
+        let within = i % 2;
+        bodies.push(dyn_sphere(Vec3::new(pair as f32 * 100.0 + within as f32, 0.6, 0.0)));
+    }
+    let manifolds: Vec<Manifold> = (0..pairs)
+        .map(|p| {
+            manifold(
+                p * 2,
+                p * 2 + 1,
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(p as f32 * 100.0 + 0.5, 0.6, 0.0),
+            )
+        })
+        .collect();
+    (bodies, manifolds)
+}
+
+/// Prices the P2 gate-metric fix: this scene used to run single-threaded no matter
+/// the worker count, because the gate judged by island size. `single_O5` is
+/// therefore ALSO what the parallel arm measured before the fix, so the
+/// single-vs-parallel ratio here IS the fix's win.
+fn bench_gate_metric_fix(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parallel_solve_disjoint_pairs");
+    group.sample_size(30);
+
+    let (bodies, manifolds) = many_disjoint_pairs(4000);
+    let n_contacts = manifolds.len();
+    let graph = build_graph(&bodies, &manifolds);
+    let widest = widest_color(&graph);
+
+    // Anti-vacuity, both directions: the scene must be the one the OLD metric
+    // refused (largest island == 1) AND one the NEW metric accepts (a wide color).
+    assert!(n_contacts > 0, "scene must have contacts");
+    assert_eq!(
+        graph.max_island_constraints(),
+        1,
+        "this must be the scene the retired island metric read as 1"
+    );
+    assert!(
+        widest >= 256,
+        "widest color ({widest}) must clear the per-color dispatch floor, or the          parallel arm is measuring the gated path and the comparison is vacuous"
+    );
+
+    group.throughput(Throughput::Elements(n_contacts as u64));
+    bench_one(&mut group, "disjoint_pairs", n_contacts, &bodies, &manifolds, 0);
+    for w in [2usize, 4, 8, 16] {
+        bench_one(&mut group, "disjoint_pairs", n_contacts, &bodies, &manifolds, w);
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_pyramid_scaling, bench_threshold_effect, bench_gate_metric_fix);
 criterion_main!(benches);
