@@ -287,7 +287,7 @@ impl SoftStepSolver {
         &mut self,
         manifolds: &[Manifold],
         bodies: &[BodyState],
-        vn_initial: &mut Vec<f32>,
+        vn_initial: &mut ScratchColumn<f32>,
     ) {
         // Disjoint-field borrows: the BodyEffective read slice (built by
         // `build_bodies` just above) is read while `self.manifolds` / `self.points`
@@ -303,7 +303,11 @@ impl SoftStepSolver {
         let bodies_eff = body_col.as_read_slice();
         out_manifolds.clear();
         out_points.clear();
-        vn_initial.clear();
+        // The refill view is taken ONCE for the whole build rather than per push:
+        // it is the only surface that mutates the column, and re-deriving it per
+        // contact point would re-load the base and length on every iteration.
+        let mut vn = vn_initial.build_view();
+        vn.clear();
 
         for m in manifolds {
             let count = m.count as usize;
@@ -354,7 +358,7 @@ impl SoftStepSolver {
                     };
                     bb.point_velocity(rb) - ba.point_velocity(ra)
                 };
-                vn_initial.push(dv.dot(normal));
+                vn.push(dv.dot(normal));
                 // W4 per-point warm key: this point's OWN feature id. Each point
                 // probes the `read` table independently, so a box manifold's 4
                 // points each seed from their own last-frame converged impulse. C1:
@@ -817,9 +821,9 @@ impl RigidSolver for SoftStepSolver {
         // the restitution pass.
         self.build_bodies(scratch.bodies());
         // Split the scratch borrow: the snapshot positions feed the constraint
-        // build while `vn_initial` is filled. Both columns are addressed by
-        // distinct ScratchColumns, so the body-read slice and `vn_initial` are
-        // disjoint borrows.
+        // build while `vn_initial` is filled. Both are `ScratchColumn`s under
+        // their own reserved ids, so the body-read slice and the `vn_initial`
+        // refill view are disjoint field borrows.
         {
             // Disjoint field borrows of `scratch`: the BodyState snapshot read
             // slice feeds the constraint build while `vn_initial` is filled.
@@ -911,11 +915,16 @@ impl RigidSolver for SoftStepSolver {
             }
         }
 
-        // Post-loop restitution: ONCE, velocity-only, bias-free. Read `vn_initial`
-        // into a local borrow disjoint from the bodies read slice.
-        let vn_initial = core::mem::take(&mut scratch.vn_initial);
-        Self::apply_restitution(mc, points, bodies_eff, scratch.bodies(), &vn_initial);
-        scratch.vn_initial = vn_initial;
+        // Post-loop restitution: ONCE, velocity-only, bias-free. Both scratch
+        // reads are SHARED borrows of different columns, so they coexist directly
+        // — the take/put-back dance the `Vec` field needed is gone with it.
+        Self::apply_restitution(
+            mc,
+            points,
+            bodies_eff,
+            scratch.bodies(),
+            scratch.vn_initial(),
+        );
 
         // (W3) Store the converged accumulated impulses into the freshly-zeroed
         // write table (in manifold order) and swap read ↔ write so next frame

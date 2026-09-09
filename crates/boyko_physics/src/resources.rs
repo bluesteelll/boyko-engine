@@ -7,7 +7,9 @@
 //! gather→solve→apply pipeline addresses by [`BodyIndex`]
 //! — see [`crate::systems`].
 
+use boyko_ecs::ecs::constants::POOL_MIN_ROWS;
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_macros::Resource;
 use boyko_threadpool::try_with_active_pool;
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
@@ -19,6 +21,7 @@ use crate::narrowphase::axis_cache::BoxAxisCache;
 use crate::scratch_ids::{
     body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
     register_graph_column_layouts, register_scratch_layouts, scratch_reserve_rows,
+    touched_awake_id, touched_solver_id, vn_initial_id,
 };
 use crate::systems::body_bounding_radius;
 
@@ -2938,7 +2941,7 @@ fn occ_set(occ: &mut [u64], base: usize, body: u32) {
 /// other physics buffer); the per-island scratch is cleared + resized each step. No
 /// per-step heap allocation in steady state. The `awake_rows` mask reuses the
 /// engine's growable [`TouchedMask`] bitset.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct IslandSleep {
     /// Per-ROW sleep LATCH — `true` once this row's island has been below
     /// [`PhysicsConfig::sleep_threshold`] for [`PhysicsConfig::sleep_frames`]
@@ -2974,6 +2977,15 @@ pub struct IslandSleep {
     wake_all: bool,
 }
 
+impl Default for IslandSleep {
+    /// Hand-written because `awake_rows`'s backing column needs its reserved
+    /// [`ComponentId`], which no derive can supply.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0, 0)
+    }
+}
+
 impl IslandSleep {
     /// Builds an empty sleep state pre-sized for `islands` islands and `rows` bodies
     /// (no later realloc in steady state).
@@ -2987,7 +2999,7 @@ impl IslandSleep {
             below_count: Vec::with_capacity(rows),
             frozen_islands: Vec::with_capacity(islands),
             energy: Vec::with_capacity(islands),
-            awake_rows: TouchedMask::with_capacity(rows),
+            awake_rows: TouchedMask::with_capacity(touched_awake_id(), rows),
             wake_all: false,
         }
     }
@@ -3412,23 +3424,42 @@ fn local_inv_inertia(shape: ColliderShape, inv_mass: f32) -> Mat3 {
 ///
 /// Built from the `boyko_utils` [`BitSet256`] 256-bit chunk so it scales past
 /// 256 rows (a `BitSet256` alone caps at 256; `BitSet<T>` caps at 128). Each
-/// chunk is a fixed 256-bit word block; the `Vec<BitSet256>` grows in chunk
+/// chunk is a fixed 256-bit word block; the chunk column grows in chunk
 /// granularity and its capacity is reused across steps. The solver sets bit
 /// `i` for every row it mutates; [`physics_apply`](crate::systems::physics_apply)
 /// writes back only set rows.
-#[derive(Default)]
+///
+/// # The chunks live in a [`ScratchColumn`], not a `std::Vec` (audit Stage 4)
+///
+/// One mask is one kernel column, so the bitset is engine storage like every
+/// other physics buffer rather than a side allocation. Each INSTANCE needs its
+/// own [`ComponentId`]: two masks under one id would silently share a
+/// `pool_base_stagger` and put element `i` of both in the same L1/L2 set, so the
+/// id is a constructor parameter instead of a constant baked into the type.
 pub struct TouchedMask {
     /// One 256-bit chunk per 256 rows; chunk `i >> 8` holds bit `i & 255`.
-    chunks: Vec<BitSet256>,
+    chunks: ScratchColumn<BitSet256>,
 }
 
 impl TouchedMask {
     /// Builds an empty mask pre-sized for `rows` bodies (no later realloc in
-    /// steady state).
+    /// steady state), backed by the kernel column registered under `id`.
+    ///
+    /// `id` must be this mask instance's OWN reserved scratch id — see the type
+    /// docs. Registers the scratch layouts (idempotent) before creating the
+    /// column, so a mask built from any constructor finds its layout installed.
     #[inline]
-    pub fn with_capacity(rows: usize) -> Self {
+    pub(crate) fn with_capacity(id: ComponentId, rows: usize) -> Self {
+        register_scratch_layouts();
+        // The ceiling is in CHUNKS, so `scratch_reserve_rows` is the wrong budget
+        // here: it would hand a 32-byte element 16.7 M slots — 256x more chunks
+        // than any world can address. `POOL_MIN_ROWS` chunks already cover
+        // `POOL_MIN_ROWS * 256` rows, past the engine's own `POOL_MAX_ROWS` row
+        // ceiling, so a push can only exceed it in a world whose body column
+        // would have panicked first.
+        let reserve = rows.div_ceil(BITS_PER_CHUNK).max(POOL_MIN_ROWS);
         Self {
-            chunks: Vec::with_capacity(rows.div_ceil(BITS_PER_CHUNK)),
+            chunks: ScratchColumn::new(id, reserve),
         }
     }
 
@@ -3437,8 +3468,15 @@ impl TouchedMask {
     #[inline]
     pub fn reset(&mut self, rows: usize) {
         let needed = rows.div_ceil(BITS_PER_CHUNK);
-        self.chunks.clear();
-        self.chunks.resize(needed, BitSet256::new());
+        // `ScratchBuildView` has no `resize`, and does not need one: `clear` keeps
+        // the committed pages, so refilling with zeroed chunks costs `rows / 256`
+        // pushes — 40 of them for a 10 000-body scene, against the 10 000-element
+        // sweeps around it.
+        let mut view = self.chunks.build_view();
+        view.clear();
+        for _ in 0..needed {
+            view.push(BitSet256::new());
+        }
     }
 
     /// Marks row `index` as touched.
@@ -3448,17 +3486,18 @@ impl TouchedMask {
             index < self.chunks.len() * BITS_PER_CHUNK,
             "invariant: touched index {index} out of range; call reset(rows) first"
         );
-        self.chunks[index >> 8].set(index & (BITS_PER_CHUNK - 1));
+        self.chunks.build_view().as_mut_slice()[index >> 8].set(index & (BITS_PER_CHUNK - 1));
     }
 
     /// Returns `true` if row `index` was touched.
     #[inline]
     pub fn get(&self, index: usize) -> bool {
+        let chunks = self.chunks.as_read_slice();
         let chunk = index >> 8;
-        if chunk >= self.chunks.len() {
+        if chunk >= chunks.len() {
             return false;
         }
-        self.chunks[chunk].get(index & (BITS_PER_CHUNK - 1))
+        chunks[chunk].get(index & (BITS_PER_CHUNK - 1))
     }
 }
 
@@ -3506,7 +3545,12 @@ pub struct SolverScratch {
     /// (P2 W2). Indexed in the solver's flattened contact-point order (manifold
     /// order × point order); rebuilt and refilled each solve, capacity reused
     /// (no per-step alloc). Left empty by the no-op / non-owning solvers.
-    pub vn_initial: Vec<f32>,
+    ///
+    /// Backed by a `ComponentPool` column like `bodies` (audit Stage 4), and
+    /// `pub(crate)` for the same reason: the in-crate solver destructures
+    /// `SolverScratch` to borrow it disjointly from the BodyState read slice.
+    /// External consumers read [`vn_initial`](Self::vn_initial).
+    pub(crate) vn_initial: ScratchColumn<f32>,
 }
 
 impl Default for SolverScratch {
@@ -3525,11 +3569,15 @@ impl SolverScratch {
         let reserve = rows.max(scratch_reserve_rows(size_of::<BodyState>()));
         Self {
             bodies: ScratchColumn::new(body_state_id(), reserve),
-            touched: TouchedMask::with_capacity(rows),
-            // One initial normal-velocity slot per body is a cheap first-frame
-            // reserve; the TGS solver grows it to the live contact-point count
-            // and reuses that capacity thereafter.
-            vn_initial: Vec::with_capacity(rows),
+            touched: TouchedMask::with_capacity(touched_solver_id(), rows),
+            // A `ScratchColumn`'s reserve is a HARD ceiling (a push past it
+            // panics), and contact points outnumber bodies — so unlike the old
+            // `Vec::with_capacity(rows)` hint, the floor here has to be the same
+            // budget every other scratch column gets, not the body count.
+            vn_initial: ScratchColumn::new(
+                vn_initial_id(),
+                rows.max(scratch_reserve_rows(size_of::<f32>())),
+            ),
         }
     }
 
@@ -3580,13 +3628,27 @@ impl SolverScratch {
         self.touched.reset(rows.len());
     }
 
+    /// The contiguous read slice over the captured approach velocities, in the
+    /// solver's flattened contact-point order.
+    #[inline]
+    pub fn vn_initial(&self) -> &[f32] {
+        self.vn_initial.as_read_slice()
+    }
+
+    /// The single-threaded refill view over `vn_initial` (clear + push) — the ONLY
+    /// surface that mutates it, used by the serial TGS solver's constraint build.
+    #[inline]
+    pub fn vn_initial_build(&mut self) -> ScratchBuildView<'_, f32> {
+        self.vn_initial.build_view()
+    }
+
     /// Clears the snapshot for a fresh gather, reusing capacity. The touched
     /// mask is reset by the gather once the row count is known; `vn_initial` is
     /// rebuilt by the solver, so it is cleared here for a fresh solve.
     #[inline]
     pub fn clear(&mut self) {
         self.bodies.build_view().clear();
-        self.vn_initial.clear();
+        self.vn_initial.build_view().clear();
     }
 }
 

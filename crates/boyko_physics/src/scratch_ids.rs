@@ -40,6 +40,7 @@ use boyko_ecs::ecs::constants::{
     POOL_MAX_ROWS, POOL_MIN_ROWS, POOL_STAGGER_LINES, POOL_TARGET_DATA_BYTES,
 };
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
+use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
 use crate::manifold::BodyIndex;
 use crate::resources::BodyState;
@@ -139,8 +140,12 @@ pub(crate) const SCRATCH_ID_BODY_EFF_SERIAL: usize = MAX_COMPONENTS - 3;
 /// contact columns, which the colored solve sweeps together at slot `i`.
 const SOLVER_COHORT_TOP: usize = SCRATCH_ID_BODY_STATE;
 
-/// Lowest id in the solver cohort (inclusive).
-const SOLVER_COHORT_BOTTOM: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM;
+/// Lowest id in the solver cohort (inclusive) — the bottom of the SOLVER TAIL
+/// below, NOT of the contact band. Each tail column is swept inside a loop that
+/// also touches a body mirror, so the tail belongs to this cohort and the run
+/// has to reach down over it for the width check to prove distinctness for every
+/// column the cohort actually contains.
+const SOLVER_COHORT_BOTTOM: usize = SCRATCH_ID_SOLVER_TAIL_BOTTOM;
 
 /// Number of ids the solver cohort spans, top and bottom inclusive.
 const SOLVER_COHORT_WIDTH: usize = SOLVER_COHORT_TOP - SOLVER_COHORT_BOTTOM + 1;
@@ -189,6 +194,69 @@ const _: () = assert!(
      the P2 conflict-miss storm"
 );
 
+// ── The SOLVER TAIL of the solver cohort (audit Stage 4) ────────────────────
+//
+// `SolverScratch`'s two non-body buffers and `IslandSleep`'s awake mask moved off
+// `std::Vec` onto kernel columns. They are NOT a cohort of their own, because
+// every one of them is swept inside a loop that also touches a body mirror:
+//
+// * `vn_initial` is pushed by `SoftStepSolver::build_constraints` while the
+//   BodyState snapshot ([`SCRATCH_ID_BODY_STATE`]) is read, and re-read by
+//   `apply_restitution` against that same snapshot;
+// * `touched` takes a bit inside both solvers' `write_back` loop — the loop that
+//   writes the snapshot — and is read by `physics_apply` as it walks it;
+// * `awake_rows` is probed by `write_back_awake` in that same loop.
+//
+// So the tail EXTENDS the solver cohort's contiguous run downward instead of
+// starting a new one, and `SOLVER_COHORT_WIDTH` covers it. Reading them as a
+// separate cohort would be the cheaper bookkeeping and the wrong claim: a
+// separate run proves nothing about collisions against the body mirrors, which
+// is exactly the pair that shares a loop.
+
+/// Number of ids in the solver tail.
+const SOLVER_TAIL_COLUMN_COUNT: usize = 3;
+
+/// Synthetic id for [`SolverScratch`](crate::resources::SolverScratch)'s
+/// `vn_initial: ScratchColumn<f32>` — the per-contact-point approach velocity the
+/// serial TGS solver captures before its substep loop and consumes in the
+/// post-loop restitution pass.
+///
+/// The COLORED solver has its own `vn_initial` inside `ContactColumns`
+/// (`contact_column_id(25)`); the two are different columns of different length
+/// (per-point in the colored SoA build vs per-point in the serial build) and must
+/// not share an id.
+pub(crate) const SCRATCH_ID_VN_INITIAL: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM - 1;
+
+/// Synthetic id for the chunk column behind
+/// [`SolverScratch`](crate::resources::SolverScratch)'s `touched` mask — one
+/// `BitSet256` per 256 body rows.
+pub(crate) const SCRATCH_ID_TOUCHED_SOLVER: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM - 2;
+
+/// Synthetic id for the chunk column behind
+/// [`IslandSleep`](crate::resources::IslandSleep)'s `awake_rows` mask.
+///
+/// ⚠ A SECOND [`TouchedMask`](crate::resources::TouchedMask) needs a SECOND id,
+/// and the reason it is not optional is that reusing the first one FAILS
+/// SILENTLY: `register_layout` treats a same-type re-registration as a no-op, so
+/// both masks would compile, run, and land on the same `pool_base_stagger` —
+/// element `i` of both in one L1/L2 set, which is the conflict-miss storm the
+/// stagger exists to prevent.
+pub(crate) const SCRATCH_ID_TOUCHED_AWAKE: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM - 3;
+
+/// Bottom of the solver tail (inclusive), and so of the whole solver cohort.
+const SCRATCH_ID_SOLVER_TAIL_BOTTOM: usize =
+    SCRATCH_ID_CONTACT_BAND_BOTTOM - SOLVER_TAIL_COLUMN_COUNT;
+
+// The tail ids are written as explicit offsets rather than handed out by an index
+// function, because they are three DIFFERENT element types rather than a
+// homogeneous run. This assert is what keeps that spelling honest: add a fourth
+// id without moving the bottom and the run has a hole the width check would still
+// wave through.
+const _: () = assert!(
+    SCRATCH_ID_TOUCHED_AWAKE == SCRATCH_ID_SOLVER_TAIL_BOTTOM,
+    "the solver tail's lowest named id is not its declared bottom: the contiguous      run has a hole, and SOLVER_COHORT_WIDTH stops covering every tail column"
+);
+
 // ── The CONSTRAINT-GRAPH cohort (audit Stage 4) ─────────────────────────────
 //
 // `ConstraintGraph`'s eight buffers are swept together by `build` — union-find
@@ -202,7 +270,7 @@ const _: () = assert!(
 pub(crate) const GRAPH_COLUMN_COUNT: usize = 8;
 
 /// Top of the constraint-graph cohort — one id below the solver cohort's bottom.
-pub(crate) const SCRATCH_ID_GRAPH_TOP: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM - 1;
+pub(crate) const SCRATCH_ID_GRAPH_TOP: usize = SOLVER_COHORT_BOTTOM - 1;
 
 /// Bottom of the constraint-graph cohort (inclusive).
 pub(crate) const SCRATCH_ID_GRAPH_BOTTOM: usize =
@@ -332,6 +400,7 @@ pub(crate) fn register_scratch_layouts() {
     register_layout::<BodyEffective>(SCRATCH_ID_BODY_EFF_COLORED);
     register_layout::<BodyEffective>(SCRATCH_ID_BODY_EFF_SERIAL);
     register_contact_column_layouts();
+    register_solver_tail_layouts();
 }
 
 /// Registers the [`Layout`](std::alloc::Layout) of every contact column's element
@@ -386,6 +455,34 @@ fn register_contact_column_layouts() {
         k, SCRATCH_ID_CONTACT_BAND_BOTTOM,
         "contact column band must end exactly at the reserved bottom id"
     );
+}
+
+/// Registers the element layout of every solver-tail column, idempotently.
+///
+/// One `f32` (`vn_initial`) and two `BitSet256` chunk columns. The two masks are
+/// registered under DIFFERENT ids on purpose — see [`SCRATCH_ID_TOUCHED_AWAKE`].
+fn register_solver_tail_layouts() {
+    register_layout::<f32>(SCRATCH_ID_VN_INITIAL);
+    register_layout::<BitSet256>(SCRATCH_ID_TOUCHED_SOLVER);
+    register_layout::<BitSet256>(SCRATCH_ID_TOUCHED_AWAKE);
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_VN_INITIAL`].
+#[inline]
+pub(crate) fn vn_initial_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_VN_INITIAL)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_TOUCHED_SOLVER`].
+#[inline]
+pub(crate) fn touched_solver_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_TOUCHED_SOLVER)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_TOUCHED_AWAKE`].
+#[inline]
+pub(crate) fn touched_awake_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_TOUCHED_AWAKE)
 }
 
 /// The [`ComponentId`] wrapper for [`SCRATCH_ID_BODY_STATE`].
@@ -446,6 +543,11 @@ mod tests {
             SCRATCH_ID_BODY_EFF_SERIAL,
         ];
         ids.extend((0..CONTACT_COLUMN_COUNT).map(|k| contact_column_id(k).get()));
+        ids.extend([
+            SCRATCH_ID_VN_INITIAL,
+            SCRATCH_ID_TOUCHED_SOLVER,
+            SCRATCH_ID_TOUCHED_AWAKE,
+        ]);
         ids
     }
 

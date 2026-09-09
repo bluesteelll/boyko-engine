@@ -217,7 +217,7 @@ pub fn physics_gather(
     cfg.dt = fixed_time.delta_secs();
 
     let scratch = &mut *scratch;
-    scratch.vn_initial.clear();
+    scratch.vn_initial.build_view().clear();
     // Refill the gather column through its single-threaded build view: clear (no
     // free — the committed pages stay resident) then push one BodyState per row.
     // Read-only `iter()` walks the rows in archetype-row order — the same order
