@@ -5007,3 +5007,81 @@ rule that mandates it was written before the API acquired production callers.
 3. **Either way the doc changes.** Today `KE16-DESIGN.md` says the API is not shipped and the API is
    shipped. That is a documented rule contradicted by the tree, which is the shape this campaign has
    spent its whole length removing.
+
+---
+
+## The `a1f` placement reads the defect-A serial floor at 1 µs, the record said 1.36×, and the cause is NOT DETERMINED (2026-09-10)
+
+**WHAT WAS MEASURED (all on one box, one night, bench profile, load receipts, arm witness per run;
+`KE16-RESULTS.md` §A-RE replay and §App).** `worker/body_1us_tasks_64W`, 1,024 tasks × 1 µs from
+inside a worker: `a3+b0` 99.9 / 100.6 µs; `a1f+b0` 1.184 / 1.148 ms; `a1f+b1` 1.170 ms / 444 µs
+(bimodal); unconditional HEAD 1.146–1.200 ms over seven runs. The record (`5863b041`, CS-4) had
+80.5 / 110.3 / 109.5 µs — ALL arms parallel — and the same commit with the same features reads the
+floor tonight. Excluded on measurement: the Step App removal, the box's compute speed
+(`ecs seq/65536` to 0.014 %), timer resolution (probe 756–15,006 µs while the cell held ±4 %).
+Excluded on code (Fable pass, refuted and re-verified): H1 joiner-outruns-thieves (10 µs bodies
+reach 8–15 lanes in the same process), H2 the FIFO owner/thief CAS storm (`b0` never pops its own
+deque, and it is stably serial), H3 a sweep that misses the spawner's stealer, H4 a dropped wake.
+Two facts point outside the pool: dispatcher-route 1 µs cells under `a3` vs `a1f` run near-identical
+code and read 100 vs 540 µs; and EVERY wake-bound cell is elevated arm-independently tonight
+(`a3`'s 1 µs × W 2.4–3.8× its §C values; `empty_schedule_control` 6.3–7.6× its five recorded
+sessions) while compute-bound cells reproduce within 1 %.
+
+**THE HYPOTHESIS THAT FITS EVERYTHING, UNTESTED.** A box scheduling-latency state — on a laptop
+part (Ryzen 9 5900HS) most plausibly core parking / C-state exit latency — that is (a) present in
+every arm, (b) gated by body duration (only wake-bound cells suffer), (c) an order of magnitude
+worse for `a1f` than for `a3` (a woken `a1f` thief must sweep 15 stealers to find the one deque;
+an `a3` thief batch-steals 32 from the global injector at stage 2, so far fewer wakes must land
+in time), and (d) BETTER on a busy box — which is what the CS-4 record's own timeline suggests: the
+driver keys the table depends on were committed 09:43:31 and the table written at 10:15, ≤ 31.5 min
+for ~35 min of passes, with 214 doc lines committed at 09:43 and a 17.7 KB source file written at
+09:54 in the same window (provenance lens, refuted-and-confirmed). A box kept warm by an agent
+editing and compiling would have SHORTER wake latencies than a quiet one, which is the direction
+the record differs from the replay. This is a hypothesis; it is the only one that explains all of
+(a)–(d), and it has not been tested.
+
+**THE DISCRIMINATING TESTS, in cost order (machine must be free; none was run — owner said no
+more timings 2026-09-10 00:30):**
+
+1. **Warm-box A/B.** Run `worker/body_1us_tasks_64W` on the shipped binary twice: once quiet, once
+   with a one-core low-priority spinner (or the `High performance` power plan / core parking
+   disabled) held for the run. If the cell drops from ~1.15 ms toward ~100–400 µs under the warmer,
+   the state is the box's wake latency and the CS-4 record was taken on a warm box. ~2 minutes.
+2. **`empty_schedule_control` alone.** One criterion run; 1.4–1.8 µs means the 6–7× was session
+   state; 9–11 µs on a quiet box with (1) positive confirms the same phenomenon.
+3. **Instrumented wave (mechanism lens's test).** `ke16_nested_scope_occupancy.rs` with `BODY = 1 µs`;
+   read `pool.parked_mask()` right after the spawn loop and count `Steal::Retry` at
+   `worker.rs::drain_one`. `lanes_used == 1` with the 15 sibling bits CLEAR and Retry ≈ 0 ⇒ the
+   siblings were woken and did not run in time (box); bits still SET ⇒ a real dropped wake (code);
+   `lanes_used > 1` at the floor ⇒ the bodies themselves are serialised.
+4. **Cold dispatcher cell.** `dispatcher/body_1us_tasks_64W` alone on the `a1f` binary: ~100 µs
+   means the 540 µs was carried-over process state; 540 µs means the binaries differ in a way the
+   source does not show.
+
+**TWO GAPS THIS EXPOSES, EITHER WAY THE TESTS FALL:**
+
+* **`a1` (LIFO owner end) + `b1` was never measured.** `a1` was eliminated at CS-1 on physics in
+  the one session whose own machine witness FAILED (`KE16-REJECTED.md`: `O5` moved 16.84 % between
+  its two runs, `bench_thread_install` 45 %), before `b1` existed; its return condition is *"a
+  session whose `O5` spread is ≤ 1 %"*. LIFO is the end discipline `KE16-DESIGN-A.md` §1.4 names as
+  the one whose ends "meet only on the last element". If test 3 shows thieves ARRIVING and LOSING,
+  `a1+b1` is the arm to measure next; if it shows them not arriving, LIFO does not help and the
+  answer is in wake policy (axis W was closed on `wc` = every push wakes one).
+* **The physics consumer runs at the collapsed shape.** 96 = 6W chunks per colour, 1–10 µs bodies,
+  from a worker (`KE16-DESIGN-MEASUREMENT.md` §7 correction). Its per-arm numbers were never
+  re-taken after CS-4, and tonight's HEAD physics is 1.44× the record with no meter to normalise by.
+
+**WHAT IS PUT TO YOU:**
+
+1. **Run test 1 when the box is free?** Two minutes, no code, and it decides whether the 11× is a
+   property of the shipped pool or of a quiet laptop. If the box property is real, the shipped
+   configuration is the one most punished by it, and that is a design fact about `a1f`, not noise.
+2. **If the box is the cause: does the record keep numbers taken on a warm box?** The CS-4 table
+   would then be neither wrong nor reproducible — it would be a measurement of a state the protocol
+   did not control. The protocol's load receipt records processes and CPU %, not wake latency; a
+   `park_timeout` probe was added for App-12 and swings 20× on its own. A wake-latency receipt (the
+   `empty_schedule_control` row, or `dispatcher/body_1us_tasks_W`, both arm-independent) beside
+   every published grid would make the next such divergence visible in the table instead of a year
+   later.
+3. **Does `a1+b1` get measured?** It is the only untried combination of a shipped joiner with the
+   end discipline the design itself prefers at fine granularity.

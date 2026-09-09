@@ -597,30 +597,87 @@ Three interleaved passes over `{a3+b0+wc+c0, a1f+b0+wc+c0, a1f+b1+wc+c0}` at CS-
 `--prebuild`; no `DIRTY-PASS.txt`; per-arm load receipts 0.1–9.8 % CPU with one 17.9 % excursion.
 35 comparable cells (the three `park_timeout` rows are excluded — they are a property of the box).
 
-### The result
+### The result — the CS-4 record (2026-09-08), REPLAYED 2026-09-09 at the same commit `5863b041`
+
+⚠ **Read the replay columns, not the struck ones.** On 2026-09-09 the Step App take at HEAD read
+`worker/body_1us_tasks_64W` at 1.146 ms against this table's 109.5 µs — 10.5× — and the same-night
+replay of all three arms AT THIS COMMIT, feature builds, arm witness printed per run, two interleaved
+passes, load receipts 0–13 % CPU, reproduced the deciding cell's ratio and NOT the 1 µs row. Every
+struck number below is the CS-4 record; the value beside it is the replay (p1 / p2). The 11 consumer
+cells were NOT re-taken per arm and carry the record. The full 35-cell CS-4 reduction survives only
+in a session scratchpad (`a_rejudge_table.md`, 10:15) — its raw passes, receipts and criterion
+baselines were never committed and no longer exist.
 
 | | improved | regressed | tie |
 |---|---|---|---|
-| `a1f+b0` vs shipped | **0** | 5 | 30 |
-| **`a1f+b1` vs shipped** | **10** | **2** | 23 |
+| `a1f+b0` vs shipped | ~~**0**~~ **8** of 24 grid cells | ~~5~~ **6** — all six 1 µs cells | ~~30~~ 10 — plus the 11 consumer cells carried from CS-4 (physics 1.21× REG, ECS tie; NOT re-taken) |
+| **`a1f+b1` vs shipped** | ~~**10**~~ **12** of 24 grid cells | ~~**2**~~ **6** — all six 1 µs cells | ~~23~~ 6 — plus the 11 consumer cells carried from CS-4 (both consumers tie; NOT re-taken) |
+
+Replay rule: §4 band on the median of the two passes, band = max(4 %, either arm's p1↔p2 spread),
+2×band margin; every verdict is identical when each pass is judged alone. The CS-4 counts were over
+35 cells in three passes; the replay grid is 24 cells in two.
 
 | cell | shipped `a3+b0+wc+c0` | `a1f+b0` | `a1f+b1` |
 |---|---:|---:|---:|
-| `worker/body_10us_tasks_4W` **the deciding cell** | 117.8 µs | 162.4 µs (1.38×) | **55.6 µs (0.47×)** |
-| `worker/body_100us_tasks_4W` | 1.71 ms | 1.98 ms | **0.44 ms (0.26×)** |
-| `worker/body_1ms_tasks_4W` | 14.74 ms | 19.50 ms | **4.44 ms (0.30×)** |
-| `dispatcher/body_100us_tasks_4W` | 1.65 ms | 1.63 ms | **0.43 ms (0.26×)** |
-| `dispatcher/body_10us_tasks_4W` | 128.4 µs | 122.5 µs | **47.4 µs (0.37×)** |
-| physics `in_scheduled_system` | 8.78 ms | 10.63 ms (1.21×) | 8.46 ms (tie) |
-| ecs `par_in_system/65536` | 87.90 ms | 91.74 ms | 87.58 ms (tie) |
-| `worker/body_1us_tasks_4W` | 12.3 µs | 14.9 µs | 14.4 µs (**1.17×**) |
-| `worker/body_1us_tasks_64W` | 80.5 µs | 110.3 µs | 109.5 µs (**1.36×**) |
+| `worker/body_10us_tasks_4W` **the deciding cell** | ~~117.8 µs~~ 175.7 / 178.9 µs | ~~162.4 µs (1.38×)~~ 125.1 / 125.2 µs (**0.71×, IMP**) | ~~**55.6 µs (0.47×)**~~ **76.5 / 72.6 µs (0.42×, IMP)** |
+| `worker/body_100us_tasks_4W` | ~~1.71 ms~~ 1.616 / 1.597 ms | ~~1.98 ms~~ 1.882 / 1.724 ms (1.12×, tie at band 9.2 %) | ~~**0.44 ms (0.26×)**~~ **440.0 / 438.4 µs (0.27×, IMP)** |
+| `worker/body_1ms_tasks_4W` | ~~14.74 ms~~ 13.341 / 12.975 ms | ~~19.50 ms~~ 14.145 / 19.663 ms (1.29×, tie at band 39 %) | ~~**4.44 ms (0.30×)**~~ **4.223 / 4.144 ms (0.32×, IMP)** |
+| `dispatcher/body_100us_tasks_4W` | ~~1.65 ms~~ 1.708 / 1.706 ms | ~~1.63 ms~~ 1.516 / 1.483 ms (0.88×, IMP) | ~~**0.43 ms (0.26×)**~~ **435.8 / 437.3 µs (0.26×, IMP)** |
+| `dispatcher/body_10us_tasks_4W` | ~~128.4 µs~~ 187.4 / 196.8 µs | ~~122.5 µs~~ 177.9 / 184.1 µs (0.94×, tie) | ~~**47.4 µs (0.37×)**~~ **66.1 / 61.9 µs (0.33×, IMP)** |
+| physics `in_scheduled_system` | 8.78 ms (CS-4; NOT re-taken per arm) | 10.63 ms (1.21×) (CS-4; NOT re-taken) | 8.46 ms (tie) (CS-4; NOT re-taken — HEAD `90a995e8` reads 12.595 / 12.142 ms, §App) |
+| ecs `par_in_system/65536` | 87.90 ms (CS-4; NOT re-taken per arm) | 91.74 ms (CS-4; NOT re-taken) | 87.58 ms (tie) (CS-4; NOT re-taken — HEAD reads 94.007 / 86.246 ms, §App) |
+| `worker/body_1us_tasks_W` | ~~7.5 µs~~ 18.0 / 18.0 µs | ~~7.9 µs~~ 43.1 / 41.8 µs (**2.36×, REG**) | ~~7.6 µs (tie)~~ 33.6 / 32.8 µs (**1.84×, REG**) |
+| `worker/body_1us_tasks_4W` | ~~12.3 µs~~ 31.6 / 31.4 µs | ~~14.9 µs~~ 98.3 / 95.2 µs (**3.07×, REG**) | ~~14.4 µs (**1.17×**)~~ **89.0 / 86.7 µs (2.79×, REG)** |
+| `worker/body_1us_tasks_64W` | ~~80.5 µs~~ 99.9 / 100.6 µs | ~~110.3 µs~~ 1.184 / 1.148 ms (**11.6×, REG**) | ~~109.5 µs (**1.36×**)~~ **1.170 ms / 444.0 µs (8.05× on the median; 11.7× / 4.41× per pass, REG either way; p2 MAD/median 0.532 — BIMODAL)** |
+| `dispatcher/body_1us_tasks_W` | ~~4.2 µs~~ 15.3 / 15.7 µs | ~~4.3 µs~~ 23.5 / 23.8 µs (1.53×, REG) | ~~4.1 µs~~ 26.9 / 26.9 µs (1.74×, REG) |
+| `dispatcher/body_1us_tasks_4W` | ~~10.1 µs~~ 31.1 / 30.8 µs | ~~9.9 µs~~ 48.7 / 50.4 µs (1.60×, REG) | ~~10.2 µs~~ 53.9 / 51.3 µs (1.70×, REG) |
+| `dispatcher/body_1us_tasks_64W` | ~~82.3 µs~~ 115.1 / 100.0 µs | ~~90.6 µs~~ 547.0 / 537.6 µs (5.04×, REG) | ~~86.7 µs~~ 539.9 / 501.6 µs (4.84×, REG) |
 
-**BLOCKING 3's threshold was a 27.9 % gain on the deciding cell. The measurement is 53 %.**
+**BLOCKING 3's threshold was a 27.9 % gain on the deciding cell. The measurement is ~~53 %~~ 53 % at
+CS-4 (0.47×) and 58 % in the replay (0.42×) — the verdict on that cell REPRODUCES.**
 
-**The win is `b1`'s, not the placement's.** `a1f` alone improves nothing and regresses five cells
+~~**The win is `b1`'s, not the placement's.** `a1f` alone improves nothing and regresses five cells
 including the physics primary at 1.21×. The challenger wins *despite* its placement, on a joiner
-that takes work instead of waiting.
+that takes work instead of waiting.~~
+
+**The mid-body win is `b1`'s** — `a1f+b0` never beats `a1f+b1` on a 4W cell at ≥ 10 µs — **but
+"`a1f` alone improves nothing" is RETRACTED by the replay:** `a1f+b0` improves 8 of 24 grid cells
+against `a3` (every `tasks = W` cell at ≥ 10 µs on both routes, plus worker 10 µs × 4W and
+dispatcher 100 µs × 4W), regresses 6 and ties 10. The physics 1.21× stands as recorded; it was not
+re-taken per arm. **And the 1 µs regression belongs to the PLACEMENT, not the joiner:** at
+1 µs × 64W `a1f+b0` reads 1.184 / 1.148 ms and `a1f+b1` 1.170 ms / 444 µs against `a3`'s
+99.9 / 100.6 µs.
+
+### ⚠⚠ REPLAY FINDING — both `a1f` arms read the DEFECT-A SERIAL FLOOR at 1 µs × {4W, 64W}, and the shipped HEAD never leaves it
+
+1 µs × 64W: the floor is 1,024 tasks × 1 µs = 1,024 µs; `a0` — measured exactly serial at Step 0 —
+read this cell at 1,168.6 / 1,135.8 µs (§Band). In the replay `a1f+b0` reads 1,184 / 1,148 µs,
+`a1f+b1` 1,170 µs (p1), and the unconditional HEAD `90a995e8` reads 1.147 / 1.146 / 1.164 / 1.161 /
+1.159 / 1.200 / 1.173 ms over seven runs — never the 444 µs mode the feature build hit once in nine.
+`a3` reads 99.9 / 100.6 µs on the same cell (≥ 10 lanes). 1 µs × 4W: floor 64 µs; `a0` 106.9 /
+97.6 µs; `a1f+b1` 89.0 / 86.7 µs — at `a0`'s reading; `a3` 31.6 / 31.4 µs (≈ 2 lanes). The collapse
+is confined to the 1 µs body: at 10 µs × 4W (floor 640 µs) `a1f+b1` reads 76.5 / 72.6 µs, ≥ 8.4
+lanes. At CS-4 the same arm at the same commit read 14.4 µs and 109.5 µs on these two cells —
+parallel — and so did every other arm on every 1 µs cell, on both routes, with the band at its 4 %
+floor.
+
+**Cause NOT DETERMINED, and three candidates are EXCLUDED on measurement:** the Step App removal
+(the ancestor with the winning features reads the same floor); the box's compute speed
+(`ecs seq/65536` agrees with every recorded session to 0.014 %); and timer resolution (the bench's
+own 50 µs park probe swung 756–15,006 µs across runs while this cell held 1.15–1.20 ms). A
+line-by-line reading of the wake path, the thief's sweep and both joiners (a Fable pass, refuted
+and re-verified) finds no pool source line that produces a serial wave: the wake claims-then-unparks
+in one call, the woken loop re-sweeps every registered stealer with an unbounded `Retry` loop, and
+the `b0` joiner never pops its own deque — so the design's owner-vs-thief CAS storm
+(`KE16-DESIGN-A.md` §1.4) is ABSENT from the arm that is stably serial. Two facts point OUTSIDE the
+pool's source: the dispatcher-route 1 µs cells run near-identical code under `a3` and `a1f` (one
+TLS read differs) yet read 100 vs 540 µs; and the same session elevates EVERY wake-bound cell
+arm-independently — `a3`'s own 1 µs × W cells 2.4–3.8× their §C values, `empty_schedule_control`
+6.3–7.6× its five recorded values — while `a3`'s ≥ 100 µs × 64W cells reproduce §C within 1 %. The
+`ecs seq` receipt is a COMPUTE receipt, not a scheduling-latency receipt. The shape is: a per-process,
+body-duration-gated property of the session, present in every arm, to which the `a1f` placement is
+an order of magnitude more sensitive than `a3`. The discriminating tests are filed in
+`docs/OPEN-QUESTIONS.md` (2026-09-10) and are OWED before the cost can be called off the hot path.
 
 **And the same arm fixes defect B.** The occupancy gate under `a1f+b1` reads `top_lane = 4` at both
 W = 4 / 16 tasks and W = 16 / 64 tasks, against a rule-3 budget of `2 × tasks/W` = 8 — and against
@@ -648,18 +705,51 @@ body size its own minimum chunk cannot reach.** The tiebreak was written to sepa
 being asked here to adjudicate two configurations differing by an entire axis-B mechanism, and it
 discards a 2–4× win across the mid-body range on the strength of one unreachable cell.
 
-**On the column the engine DOES produce — `tasks = W` — `a1f+b1` wins at every body size, on both
-routes, and the margin grows with the body:**
+### ⚠ CORRECTION 2026-09-10 — the "width the engine cannot produce" argument covers the ECS path and NOT the physics consumer
+
+The two ECS bullets above stand (`batches_per_thread = 1`, `MIN_ARCHETYPE_FOR_PARALLEL = 1024`,
+`par_iter.rs:73,104`). The physics claim does not: `solver/colored.rs:2647` dispatches
+`n_chunks = num_threads() × CHUNKS_PER_WORKER = 16 × 6 = 96 = 6W` chunks per colour of ≥ 256 slots,
+per sweep; with `substeps = 4` and `relax_iterations = 2` (`resources.rs:424-425`) a step runs
+12 sweeps × 6 colours = up to 72 waves of 96 tasks, ~6,900 tasks, spawned from inside a worker (the
+scheduled system's `install` frame). The soft solver is 6W (`soft/colored.rs:65,998`), the broadphase
+4W (`resources.rs:598,1586`), the MSDF bake 4W (`fontbake/.../distance.rs:468`). The body per physics
+chunk is roughly `single_threaded_O5` ÷ 12 ÷ 6 ÷ 96 ≈ 3.9 µs under a UNIFORM split — an estimate, not
+a bound: the per-colour slot distribution is on record nowhere (the bench prints only the widest
+colour), and a colour at the 256-slot threshold cut 96 ways is ~3 slots per chunk. **The shipped
+physics shape — ~6W wide, 1–10 µs bodies, from a worker — sits between the grid's 1 µs × 4W cell,
+where `a1f+b1` is at the serial floor, and its 10 µs × 4W cell, where it wins 2.4×.** The 64W column
+remains unproduced; 4W and 6W are produced by three physics sites and the bake, and the sentence
+"4W is reachable only by a caller that sets `batches_per_thread = 4` … nothing uses it" is false.
+
+~~**On the column the engine DOES produce — `tasks = W` — `a1f+b1` wins at every body size, on both
+routes, and the margin grows with the body:**~~ **On `tasks = W`, `a1f+b1` wins at every body size
+≥ 10 µs on both routes and LOSES at 1 µs on both** (CS-4 struck, replay beside):
 
 | body | worker `tasks=W` | dispatcher `tasks=W` |
 |---|---:|---:|
-| 1 µs | 1.02× (tie) | 0.98× |
-| 10 µs | 0.89× | 0.92× |
-| 100 µs | 0.84× | 0.91× |
-| 1 ms | **0.81×** | 0.89× |
+| 1 µs | ~~1.02× (tie)~~ **1.84× REG** | ~~0.98×~~ **1.74× REG** |
+| 10 µs | ~~0.89×~~ 0.64× | ~~0.92×~~ 0.52× |
+| 100 µs | ~~0.84×~~ 0.37× | ~~0.91×~~ 0.33× |
+| 1 ms | ~~**0.81×**~~ **0.42×** | ~~0.89×~~ 0.29× |
+
+⚠ The replay ratios at ≥ 10 µs are wider than CS-4's because `a3`'s `tasks = W` cells read 2.0–2.9×
+their §C values in this session (10 µs × W 71.9 vs 27.0 µs; 100 µs × W 391 vs 156 µs; 1 ms × W
+2,594 vs 1,310 µs) while its ≥ 100 µs × 64W cells reproduce §C within 1 %. Why `a3`'s W-width cells
+moved is UNVERIFIED — it is the same arm-independent, wake-bound elevation named above.
 
 That monotonicity is the mechanism showing itself: the longer the wave, the more a joiner that helps
 is worth against one that waits.
+
+**Consequence for the decision, re-applied 2026-09-10.** Under the amended Step-A rules the closure
+on `a1f+b1` STANDS: rule 2 is a consumer tie carried from CS-4; amended rule 3 at `tasks = W` is
+mutual (1 µs 1.84× against `a1f+b1`, 10 µs 0.64× against `a3`) and the producible column goes
+6 improved / 2 regressed to `a1f+b1`. Under the original rule 3 it falls (the 64W column: 100 vs
+807 µs), as this section already said. What the replay changes is the recorded COST — six 1 µs
+regressions, not two, two of them at `tasks = W` — and the amendment's factual premise about widths.
+Two things are OWED before the cost can be called off the hot path: the physics consumer per arm in
+a settled session (≥ 3 passes, `--prebuild`, r1 discarded), and one grid row at the physics shape
+(worker route, 96 tasks, ~4 µs body).
 
 ### Consequences, stated rather than deferred
 
@@ -1563,23 +1653,82 @@ batch push.
 
 ---
 
-## §App. NOT RUN — OWED
+## §App. TAKEN 2026-09-09 at HEAD `90a995e8` (UNCONDITIONAL shipped code) — the numbers are on record; the acceptance line is NOT EVIDENCE
 
-**No number in this file comes from the code that ships.** §1 of the design requires a Step-App
-retake: *"the final configuration with every feature removed (unconditional code): the full grid +
-consumers ONCE MORE — the number that goes on record must come from the code that ships, not from a
-feature build"*, and *"the unconditional code's numbers must match the winning feature build's
-within the band on every cell and consumer; a difference beyond the band is a defect in the removal
-step, not a new datum."*
+§1 of the design requires a Step-App retake: *"the final configuration with every feature removed
+(unconditional code): the full grid + consumers ONCE MORE — the number that goes on record must come
+from the code that ships, not from a feature build"*, and *"the unconditional code's numbers must
+match the winning feature build's within the band on every cell and consumer; a difference beyond
+the band is a defect in the removal step, not a new datum."*
 
-That has not been run. Two independent reasons the retake is not optional:
+✅ **The removal is DONE** (`67563d3b`) and ✅ **the take is DONE**: box AMD Ryzen 9 5900HS, 16 logical
+(W = 16), the recording box; bench profile (`codegen-units = 1`, `lto = false` — every absolute here
+is a bench-profile number and does not describe the shipped `lto = "fat"` codegen, §0); all three
+benches `--no-run` pre-built OUTSIDE the window; two interleaved passes `app-r1` / `app-r2`; load
+receipt (process set > 300 MB, CPU %) captured immediately before and after every timed region —
+identical process sets on all six, CPU 0.4–13.4 %; `available_parallelism = 16` printed by the
+bench; no `KE16_EXPECT` and no `--features`, because the witness went with the arms. The criterion
+baselines of the winning feature build did not exist on disk (`target/` held no `criterion/`), so
+the §1 within-band check was made against the same-night replay of `a1f+b1+wc+c0` at `5863b041`
+(§A-RE) rather than against a saved baseline.
 
-1. Every absolute here is a **bench-profile** number (`codegen-units = 1`, `lto = false`) and the
-   shipped release profile is `lto = "fat"` — a different codegen configuration by the manifest's
-   own statement.
-2. ✅ **The removal is DONE** (`67563d3b`, 2026-09-09): the winning configuration is the code and
-   not a build of it, and `grep -rn 'feature = "ke16' crates` returns nothing. What is still owed is
-   the RE-TAKE — no number in this file comes from the unconditional code.
+| row | p1 / p2 | band |
+|---|---:|---:|
+| physics `in_scheduled_system/29751` **PRIMARY** | 12.595 / 12.142 ms | 4.0 % |
+| physics `single_threaded_O5/29751` (session meter) | 27.902 / 26.949 ms | 4.0 % |
+| physics `empty_schedule_control/29751` | **9.6 / 11.1 µs** — against 1.451 / 1.693, 1.5, 1.7, 1.5, 1.532 µs in five recorded sessions: **6.3–7.6×**; the row has no arm | 15.4 % |
+| physics `bench_thread_install_Wminus1/29751` **REF** (W−1 workers + the helping external joiner = W lanes; `b1` keeps the helper, `KE16-DESIGN-APP.md` §11) | 11.836 / 10.106 ms | **17.1 %** |
+| physics `bench_thread_install/29751` (W+1 lanes, raw only) | 12.050 / 10.330 ms | 16.6 % |
+| ecs `par_in_system/65536` | 94.007 / 86.246 ms | 9.0 % |
+| ecs `par_from_dispatcher/65536` | 92.099 / 85.832 ms | 7.3 % |
+| ecs `seq/65536` | 1,310.989 / 1,310.827 ms — matches every recorded session to 0.014 % | 4.0 % |
+| ecs protocol pass, N = 65536 | `par_in_system` 92.22 ms, `max_in_flight = 16`, speedup 14.22×; `RATIO in_system/from_dispatcher = 1.06×` | — |
+| `worker/body_10us_tasks_4W` **the deciding cell** | 82.9 / 79.1 µs | 4.9 % |
+| `worker/body_1us_tasks_4W` | 89.9 / 87.0 µs | 4.0 % |
+| `worker/body_1us_tasks_64W` | 1.147 / 1.146 ms, then 1.164 / 1.161 / 1.159 / 1.200 / 1.173 ms (7 runs, never below 1.146 ms) | 4.0 % |
+| the other 21 grid cells, `park_timeout_*` | taken (`target/criterion/*/app-r{1,2}`); not tabled here — the 1 µs and deciding cells are the ones the replay bears on | — |
+
+**Removal check (§1).** Against the same-night replay of `a1f+b1+wc+c0` at `5863b041`:
+`1us_4W` 89.9 / 87.0 vs 89.0 / 86.7 µs (1.01×, tie); `10us_4W` 82.9 / 79.1 vs 76.5 / 72.6 µs
+(1.087× against 2×band 1.107, tie); `1us_64W` 1.147 / 1.146 ms vs 1.170 ms / 444 µs (tie against
+p1; the feature build's 444 µs mode did not appear in seven unconditional runs). Consumers:
+`par_in_system/65536` 94.0 / 86.2 vs the record's 87.58 ms (tie); physics 12.6 / 12.1 vs the
+record's 8.46 ms — 1.44–1.49×, NOT a removal defect: physics absolutes do not travel between
+sessions (§Method corollary 2) and the record's CS-4 pass filed no session meter to normalise by.
+**The removal is the cause of nothing here** — the ancestor with the winning features reads the same
+slow mode on the same cell (§A-RE replay finding).
+
+**Acceptance line (`KE16-DESIGN-APP.md` §11).**
+
+* **Clause (1)** `in_scheduled_system < single_threaded_O5`: 12.595 < 27.902 and 12.142 < 26.949 —
+  **PASS, 2.22× / 2.22×**. Parallel physics on the route that ships is faster than leaving it off
+  (Step 0 read the opposite: 29.98 vs 26.27 ms).
+* **Clause (2) PRIMARY** `in_scheduled_system − empty_schedule_control ≤ REF × (1 + band)`,
+  `REF = bench_thread_install_Wminus1`. Band per §4 = max(0.04, REF spread
+  (11.836 − 10.106) / 10.106 = 0.171, candidate spread (12.585 − 12.131) / 12.131 = 0.037) =
+  **0.171**. Median of passes: 12.348 ≤ 10.971 × 1.171 = 12.85 → passes. Per pass: r1
+  12.585 ≤ 11.836 × 1.171 = 13.86 → passes; r2 12.131 against 10.106 × 1.171 = 11.83 → **fails by
+  2.5 %**. A STRADDLE. Raw against the other row (W+1 lanes): 1.044 / 1.174. And
+  `Wminus1 / bench_thread_install` = 0.982 / 0.978, ≈ 1 — the external joiner helped (B1's receipt).
+  **FILED AS NOT EVIDENCE**, in either direction: the reference row moved 17.1 % between two passes
+  minutes apart — 4.3× the floor — so every reading of the line sits inside the reference's own
+  noise, the shape §11 names (*"a pass inside that margin is not evidence the fix is complete"*) and
+  §W already met (*"the PRIMARY row's band is 85 % — that needs a session that opens already
+  settled, not more passes taken the same way"*).
+* **`empty_schedule_control` at 6.3–7.6× its five recorded values** is a finding about the SESSION,
+  not the arm — the row has no arm, and the same session reads `a3`'s 1 µs × W cells at 2.4–3.8×
+  their §C values while `a3`'s ≥ 100 µs × 64W cells reproduce §C within 1 % (§A-RE replay). Whether
+  it is one phenomenon with the `a1f` 1 µs collapse is NOT DETERMINED; timer resolution is excluded
+  (the bench's 50 µs park probe swung 756–15,006 µs across runs while `1us_64W` held 1.15–1.20 ms).
+
+**The O-series retake line (`KE16-DESIGN-APP.md` §11, first paragraph) is NOT written**: the
+shipping number is filed as not-evidence until a settled-session retake (≥ 3 passes, `--prebuild`,
+r1 discarded, `bench_thread_install` beside it).
+
+**Still OWED under this heading:** that retake; the physics consumer per arm at `5863b041` (the
+§A-RE replay took only the grid per arm); one grid row at the physics shape (96 tasks × ~4 µs, worker
+route); and, for the shipped code, a release-profile (`lto = "fat"`) row beside the bench-profile one
+— every absolute here is a bench-profile number (§0).
 
 **The freeze that must precede removal was taken, in that order** (owner ruling, 2026-09-02: *"Do
 not delete the unsuitable one, leave them as a spare — so the code is recorded but not present in

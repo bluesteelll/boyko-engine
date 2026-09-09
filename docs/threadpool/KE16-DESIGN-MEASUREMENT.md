@@ -243,8 +243,20 @@ cannot produce that column:
   `batches_per_thread = 64`; **no caller in the tree sets it**.
 * `MIN_ARCHETYPE_FOR_PARALLEL = 1024` floors a chunk at 1024 rows, so the 1 µs body the tiebreak
   fires on needs a row costing under a nanosecond. The ECS harness's real chunk is **~82 ms**.
-* The physics solver does not use that path at all — it cuts by colour group
-  (`solver/colored.rs`), and its cut count is of the order of the colour count, not 64 × W.
+* ~~The physics solver does not use that path at all — it cuts by colour group
+  (`solver/colored.rs`), and its cut count is of the order of the colour count, not 64 × W.~~
+  ⚠ **FALSE IN THE CODE (found 2026-09-10, `KE16-RESULTS.md` §A-RE correction).** The rigid
+  solver cuts each colour of ≥ 256 slots into `num_threads() × CHUNKS_PER_WORKER = 16 × 6 = 96 = 6W`
+  chunks (`solver/colored.rs:255,2647`), per sweep, 12 sweeps per step (`substeps = 4`,
+  `relax_iterations = 2`, `resources.rs:424-425`) — up to 72 waves of 96 tasks from inside a worker,
+  with bodies of the order of 1–10 µs (≈ 3.9 µs under a uniform split; the per-colour slot
+  distribution is not on record). The soft solver is 6W (`soft/colored.rs:65,998`), the broadphase
+  4W (`resources.rs:598,1586`), the MSDF bake 4W (`fontbake/src/msdf/distance.rs:468`). The 64W
+  column stays unproduced; **4W and 6W are produced by four shipped callers**, so the amended rule
+  3's sentence *"4W is reachable only by a caller that sets `batches_per_thread = 4` … nothing uses
+  it"* is wrong as well, and the ECS `par_iter` bullets above are the only part of this defect that
+  holds. The cost that this amendment moved off the veto surface — the `a1f` 1 µs cells — was
+  re-measured at 2.8–11.7× (replay), on a width the physics consumer produces every step.
 
 So on 2026-09-08 the tiebreak discarded a 2–4 × win across six mid-body cells and a tie on BOTH
 consumers, on the strength of one cell at a width and a body size nothing in the engine generates
