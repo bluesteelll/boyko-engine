@@ -661,7 +661,16 @@ lanes. At CS-4 the same arm at the same commit read 14.4 µs and 109.5 µs on th
 parallel — and so did every other arm on every 1 µs cell, on both routes, with the band at its 4 %
 floor.
 
-**Cause NOT DETERMINED, and three candidates are EXCLUDED on measurement:** the Step App removal
+**CAUSE DETERMINED 2026-09-10 02:00 — rustc 1.98.1.** Rebuilt at this commit with the winning
+features under **rustc 1.97.1** (the compiler the CS-4 record was built with; the stable toolchain
+was rewritten to 1.98.1 on 2026-09-09 02:52), on a box the owner had just called not quiet:
+`worker/body_1us_tasks_64W` **99.3 / 105.0 / 132.7 µs** — the record's 109.5 µs reproduces — against
+1,170–1,215 µs from the same source under 1.98.1 in this session. `a3` reads 128–166 µs under 1.97.1
+and 100 µs under 1.98.1: the compiler moves the `a1f` path ~11× and `a3`'s not at all. The deciding
+cell reads 0.4–0.5 under both, so the verdict stands under both. Every shipped binary since 09-09 is
+1.98.1: **this is a shipped codegen regression on the pool's fine-granularity path**, and the two
+causal stories that preceded it in `OPEN-QUESTIONS.md` (wake latency, warm box) were measured
+wrong. What was true before the compiler was found — three candidates EXCLUDED on measurement: the Step App removal
 (the ancestor with the winning features reads the same floor); the box's compute speed
 (`ecs seq/65536` agrees with every recorded session to 0.014 %); and timer resolution (the bench's
 own 50 µs park probe swung 756–15,006 µs across runs while this cell held 1.15–1.20 ms). A

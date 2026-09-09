@@ -5079,6 +5079,33 @@ at `5863b041` with `--features ke16-a1-fifo,ke16-b1,ke16-w-count` under `+1.97.1
 codegen regression, and a `BLESSED_RUSTC`-class receipt is owed beside every grid);
 ~1.15 ms ⇒ the compiler is excluded too and only tests 3–4 remain.
 
+**TEST 0 RUN 2026-09-10 ~02:00 (owner: "install it and run") — THE CAUSE IS THE COMPILER.** Same
+commit `5863b041`, same features, same box, arm witness printed, taken on a box the owner had just
+called NOT quiet (park probes 7.8–15.5 ms; a noisy box inflates a reading, it does not deflate one):
+
+| build | `worker/body_1us_tasks_64W` | `worker/body_10us_tasks_4W` |
+|---|---:|---:|
+| `a1f+b1+wc+c0`, **rustc 1.97.1** | **99.3 / 105.0 / 132.7 µs** | 65.8 / 138.4 / 76.3 µs |
+| `a1f+b1+wc+c0`, rustc 1.98.1 (this session, 9 runs) | 1,170–1,215 µs | 72.5–74.7 µs |
+| `a3+b0+wc+c0`, rustc 1.97.1 | 165.8 / 128.1 µs | 182.8 / 157.9 µs |
+| `a3+b0+wc+c0`, rustc 1.98.1 (this session) | 99.9 / 100.6 µs | 175.7 / 178.9 µs |
+
+The record's 109.5 µs reproduces under the compiler that produced it. **rustc 1.98.1 slows the
+`a1f` placement path ~11× at 1 µs bodies and leaves `a3` alone**; the deciding cell is unaffected
+(0.4–0.5 either way, so the axis-A verdict stands under both compilers). `~/.rustup/toolchains/stable-…-gnu`
+was rewritten 2026-09-09 02:52; every shipped binary since is 1.98.1. **This is a shipped codegen
+regression on the pool's fine-granularity path, and it is the answer to the 10× question.** Both
+earlier causal stories in this entry (wake latency, warm box) were wrong and are struck above.
+
+**NEXT (no runs until the owner says the box is free):** (i) bracket it — 1.98.0 is installed
+(`~/.rustup/toolchains/1.98.0-…`, 2026-09-02): one build + one run says whether the regression is
+1.98.0 or the 1.98.1 point release; (ii) name the function — `cargo asm` / `objdump -d` diff of
+`push_on_lane_no_wake`, `worker_lane_for` (a `thread_local!` read on every push; 1.98 already
+misfires `missing_const_for_thread_local` on this tree's 63 `const {}` sites, so TLS codegen on
+windows-gnu is the first suspect), `try_steal_random` and crossbeam's `steal_batch_and_pop` between
+the two builds; (iii) a `BLESSED_RUSTC`-class receipt beside every published grid — the compiler
+that produced the bytes, not the channel name — because a load receipt cannot see this either.
+
 **TWO GAPS THIS EXPOSES, EITHER WAY THE TESTS FALL:**
 
 * **`a1` (LIFO owner end) + `b1` was never measured.** `a1` was eliminated at CS-1 on physics in
