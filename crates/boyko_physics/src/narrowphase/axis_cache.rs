@@ -51,7 +51,11 @@
 //! documents as acceptable for a key remap — while keeping the steady-state load
 //! bounded and every probe chain short.
 
+use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
+
 use crate::manifold::BodyIndex;
+use crate::scratch_ids::{register_narrowphase_column_layouts, scratch_reserve_rows};
 
 /// The empty-slot sentinel key. A real packed key can never equal it: [`pack`]
 /// places the two `u32` body indices in the high/low 32-bit halves, so producing
@@ -78,7 +82,7 @@ fn pack(body_a: BodyIndex, body_b: BodyIndex) -> u64 {
 /// One cache slot — a packed body-pair key and the SAT-axis index chosen last
 /// frame for that pair.
 #[derive(Clone, Copy, Debug)]
-struct AxisEntry {
+pub(crate) struct AxisEntry {
     /// The packed body-pair key ([`pack`]), or [`EMPTY`] for a free slot.
     key: u64,
     /// The canonical SAT-axis index (`0..15`) chosen for this pair last frame.
@@ -114,13 +118,14 @@ fn shift_for(len: usize) -> u32 {
 /// index — the box-box reference-axis hysteresis store (P2 W4).
 ///
 /// Embedded in [`Manifolds`](crate::resources::Manifolds) (narrowphase output), so
-/// it needs no extra resource wiring. The backing `Vec` capacity is reused across
-/// frames.
-#[derive(Default)]
+/// it needs no extra resource wiring. The backing column's capacity is reused
+/// across frames.
 pub struct BoxAxisCache {
     /// The slots; length is always a power of two (`mask = len - 1`). Empty slots
-    /// carry the [`EMPTY`] sentinel key.
-    slots: Vec<AxisEntry>,
+    /// carry the [`EMPTY`] sentinel key. Backed by a [`ScratchColumn`] (engine
+    /// storage, address-stable) rather than a `std::Vec` side allocation
+    /// (audit Stage 4).
+    slots: ScratchColumn<AxisEntry>,
     /// `slots.len() - 1` — the power-of-two index mask for the probe.
     mask: usize,
     /// `64 - log2(len)` — the Fibonacci-hash right-shift, cached alongside `mask` so
@@ -133,12 +138,26 @@ pub struct BoxAxisCache {
 }
 
 impl BoxAxisCache {
-    /// Builds an empty cache pre-sized for up to `pairs` body pairs (no later
-    /// realloc until the pair count exceeds twice this).
-    pub fn with_capacity(pairs: usize) -> Self {
+    /// Builds an empty cache pre-sized for up to `pairs` body pairs, backed by the
+    /// kernel column registered under `id`.
+    ///
+    /// Registers the scratch layouts (idempotent) before creating the column.
+    pub(crate) fn with_capacity(id: ComponentId, pairs: usize) -> Self {
+        register_narrowphase_column_layouts();
         let len = next_pow2(2 * pairs.max(1));
+        // The reserve is a HARD ceiling for a `ScratchColumn`, and `begin_frame`
+        // grows the table with the pair count, so the floor is the same budget every
+        // other scratch column gets rather than this frame's length.
+        let reserve = len.max(scratch_reserve_rows(size_of::<AxisEntry>()));
+        let mut slots = ScratchColumn::new(id, reserve);
+        {
+            let mut view = slots.build_view();
+            for _ in 0..len {
+                view.push(AxisEntry::empty());
+            }
+        }
         Self {
-            slots: vec![AxisEntry::empty(); len],
+            slots,
             mask: len - 1,
             shift: shift_for(len),
             occupied: 0,
@@ -167,16 +186,19 @@ impl BoxAxisCache {
     pub fn begin_frame(&mut self, pairs: usize) {
         let len = next_pow2(2 * pairs.max(1));
         if len > self.slots.len() {
-            // Grow to a fresh larger buffer; it starts empty, so occupancy resets.
-            self.slots.clear();
-            self.slots.resize(len, AxisEntry::empty());
+            // Grow to a fresh larger table; it starts empty, so occupancy resets.
+            let mut view = self.slots.build_view();
+            view.clear();
+            for _ in 0..len {
+                view.push(AxisEntry::empty());
+            }
             self.mask = len - 1;
             self.shift = shift_for(len);
             self.occupied = 0;
         } else if self.occupied > self.slots.len() / 2 {
             // Stale entries have pushed the load past 0.5; wholesale clear to bound
             // occupancy and keep probe chains short (a one-frame warm-start miss).
-            for slot in &mut self.slots {
+            for slot in self.slots.build_view().as_mut_slice() {
                 slot.key = EMPTY;
             }
             self.occupied = 0;
@@ -203,9 +225,10 @@ impl BoxAxisCache {
     pub fn get(&self, a: BodyIndex, b: BodyIndex) -> Option<usize> {
         let key = pack(a, b);
         let mut i = self.home(key);
+        let slots = self.slots.as_read_slice();
         let mut probes = 0usize;
         loop {
-            let slot = self.slots[i];
+            let slot = slots[i];
             if slot.key == key {
                 return Some(slot.axis as usize);
             }
@@ -241,10 +264,15 @@ impl BoxAxisCache {
     pub fn set(&mut self, a: BodyIndex, b: BodyIndex, axis: usize) {
         let key = pack(a, b);
         debug_assert_ne!(key, EMPTY, "invariant: a real body-pair key cannot be EMPTY");
+        // The probe geometry goes into locals BEFORE the refill view is taken:
+        // `home` borrows all of `&self`, while the view holds `&mut self.slots`.
         let mut i = self.home(key);
+        let mask = self.mask;
+        let mut view = self.slots.build_view();
+        let slots = view.as_mut_slice();
         let mut probes = 0usize;
         loop {
-            let slot = &mut self.slots[i];
+            let slot = &mut slots[i];
             if slot.key == key {
                 slot.axis = axis as u32;
                 return;
@@ -255,9 +283,9 @@ impl BoxAxisCache {
                 self.occupied += 1;
                 return;
             }
-            i = (i + 1) & self.mask;
+            i = (i + 1) & mask;
             probes += 1;
-            if probes > self.mask {
+            if probes > mask {
                 // Full table with no home for `key`: only reachable on a sizing
                 // violation (mirrors `get`'s release-mode probe escape). Decline to
                 // cache rather than loop — a cache may refuse an entry.
@@ -274,10 +302,11 @@ impl BoxAxisCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch_ids::box_axis_cache_id;
 
     #[test]
     fn set_get_round_trip() {
-        let mut c = BoxAxisCache::with_capacity(8);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
         c.begin_frame(8);
         c.set(BodyIndex(2), BodyIndex(5), 11);
         assert_eq!(c.get(BodyIndex(2), BodyIndex(5)), Some(11));
@@ -285,7 +314,7 @@ mod tests {
 
     #[test]
     fn miss_returns_none() {
-        let mut c = BoxAxisCache::with_capacity(8);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
         c.begin_frame(8);
         c.set(BodyIndex(0), BodyIndex(1), 3);
         assert_eq!(c.get(BodyIndex(4), BodyIndex(7)), None);
@@ -293,7 +322,7 @@ mod tests {
 
     #[test]
     fn overwrite_updates_axis() {
-        let mut c = BoxAxisCache::with_capacity(8);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
         c.begin_frame(8);
         c.set(BodyIndex(1), BodyIndex(2), 5);
         c.set(BodyIndex(1), BodyIndex(2), 9);
@@ -314,7 +343,7 @@ mod tests {
         // Dense fill at the design load (≤ 0.5): every pair round-trips, no probe
         // chain corrupts a neighbor (the read/write protocol the hysteresis needs).
         let count = 64usize;
-        let mut c = BoxAxisCache::with_capacity(count);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), count);
         c.begin_frame(count);
         for i in 0..count {
             c.set(BodyIndex(i as u32), BodyIndex((i + 1) as u32), i % 15);
@@ -330,7 +359,7 @@ mod tests {
     /// Count live (non-`EMPTY`) slots directly — the eviction invariant is about
     /// physical occupancy, not the logical view through `get`.
     fn live_slots(c: &BoxAxisCache) -> usize {
-        c.slots.iter().filter(|s| s.key != EMPTY).count()
+        c.slots.as_read_slice().iter().filter(|s| s.key != EMPTY).count()
     }
 
     #[test]
@@ -341,7 +370,7 @@ mod tests {
         // forever in release. With the load-based clear, occupancy stays bounded and
         // every `set` returns.
         let pairs_per_frame = 32usize;
-        let mut c = BoxAxisCache::with_capacity(pairs_per_frame);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), pairs_per_frame);
         let capacity = c.slots.len();
         // Many more frames than the table could ever hold if entries never evicted.
         let frames = 200usize;
@@ -376,7 +405,7 @@ mod tests {
         // whose `mask` changed (that strands old entries at unreachable homes and
         // duplicates keys). The clear-on-grow policy makes the grown table empty, so
         // every key that re-round-trips does so through exactly one slot.
-        let mut c = BoxAxisCache::with_capacity(4);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 4);
         c.begin_frame(4);
         for i in 0..4u32 {
             c.set(BodyIndex(i), BodyIndex(i + 100), i as usize % 15);
@@ -407,7 +436,7 @@ mod tests {
         // Fill to just past the load-≤-0.5 target within one logical epoch, then a
         // fresh begin_frame(same budget) must clear (occupancy resets) rather than
         // grow — proving the eviction trigger is the load, not only the grow.
-        let mut c = BoxAxisCache::with_capacity(8);
+        let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
         let capacity = c.slots.len();
         c.begin_frame(8);
         // Insert enough distinct keys to push occupancy past len/2.

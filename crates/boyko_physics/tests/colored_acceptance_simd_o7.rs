@@ -241,7 +241,7 @@ fn simd_solve_sphere_stack_is_stable() {
 
     for _ in 0..300 {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
         let bodies = all_bodies(&mut world);
         for b in &bodies {
             assert!(
@@ -314,8 +314,8 @@ fn simd_solve_box_stack_is_stable() {
     for _ in 0..300 {
         schedule.run(&mut world);
         let manifolds = world.resource::<Manifolds>();
-        total_contacts += manifolds.manifolds.len();
-        if manifolds.manifolds.iter().any(|m| m.count >= 2) {
+        total_contacts += manifolds.manifolds().len();
+        if manifolds.manifolds().iter().any(|m| m.count >= 2) {
             multi_point_frames += 1;
         }
         let bodies = all_bodies(&mut world);

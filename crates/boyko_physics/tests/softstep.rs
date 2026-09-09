@@ -372,7 +372,7 @@ fn restitution_resting_contact_genuine_sphere_pair_does_not_gain_energy() {
     let mut total_contacts = 0usize;
     for _ in 0..200 {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
         let b = all_bodies(&mut world)[1];
         max_y = max_y.max(b.position.y);
         max_speed_sq = max_speed_sq.max(b.linear_velocity.length_squared());
@@ -465,7 +465,7 @@ fn restitution_resting_contact_does_not_gain_energy() {
     let mut total_contacts = 0usize;
     for _ in 0..200 {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
         let b = all_bodies(&mut world)[1];
         max_y = max_y.max(b.position.y);
         max_speed_sq = max_speed_sq.max(b.linear_velocity.length_squared());
@@ -663,7 +663,7 @@ fn floor_slide_xz(friction: f32, push: Vec3, frames: usize) -> (f32, f32) {
     let mut total_contacts = 0usize;
     for _ in 0..frames {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
     }
     // The sphere must be in real contact with the floor (else the friction cone is
     // never loaded and the tangential-motion asserts pass vacuously).
@@ -725,7 +725,7 @@ fn settle_then_push_contact_slip(friction: f32, push: Vec3, frames: usize) -> f3
     let mut total_contacts = 0usize;
     for _ in 0..frames {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
     }
     assert!(
         total_contacts >= 1,
@@ -877,7 +877,7 @@ fn static_body_unmoved_under_tgs() {
     let mut total_contacts = 0usize;
     for _ in 0..60 {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
     }
 
     // Non-vacuous: a contact must have fired on the static floor's row (otherwise
@@ -968,7 +968,7 @@ fn free_dynamic_body_falls_under_owning_solver() {
     let mut total_contacts = 0usize;
     for _ in 0..steps {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
     }
 
     let body = all_bodies(&mut world)[0];
@@ -1091,7 +1091,7 @@ fn stacking_is_stable() {
 
     for _ in 0..300 {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
         let bodies = all_bodies(&mut world);
 
         // No NaN/Inf anywhere (an exploded solve produces non-finite state).
@@ -1294,7 +1294,7 @@ fn sphere_box_resting() {
     let mut total_contacts = 0usize;
     for _ in 0..200 {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
         let b = all_bodies(&mut world)[1];
         min_y = min_y.min(b.position.y);
         assert!(b.position.y.is_finite(), "sphere produced a non-finite y: {b:?}");
@@ -1385,10 +1385,10 @@ fn stacking_is_stable_boxes() {
     for _ in 0..300 {
         schedule.run(&mut world);
         let manifolds = world.resource::<Manifolds>();
-        total_contacts += manifolds.manifolds.len();
+        total_contacts += manifolds.manifolds().len();
         // A box face-face contact must produce multi-point manifolds — count frames
         // where at least one manifold carries >= 2 points (proves the clipper runs).
-        if manifolds.manifolds.iter().any(|m| m.count >= 2) {
+        if manifolds.manifolds().iter().any(|m| m.count >= 2) {
             multi_point_frames += 1;
         }
         let bodies = all_bodies(&mut world);
@@ -1498,7 +1498,7 @@ fn box_incline_slide(incline: f32, friction: f32, frames: usize) -> f32 {
     let mut total_contacts = 0usize;
     for _ in 0..frames {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
     }
     assert!(
         total_contacts >= 1,

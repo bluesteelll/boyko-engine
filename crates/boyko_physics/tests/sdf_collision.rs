@@ -310,7 +310,7 @@ fn sphere_vs_sdf_box_manifold() {
     world.resource_mut::<PhysicsConfig>().gravity = Vec3::ZERO;
     schedule.run(&mut world);
 
-    let manifolds = &world.resource::<Manifolds>().manifolds;
+    let manifolds = world.resource::<Manifolds>().manifolds();
     assert_eq!(manifolds.len(), 1, "exactly one body-vs-SDF manifold");
     let m = manifolds[0];
     assert_eq!(m.body_b, SDF_SENTINEL, "SDF manifold keys body_b == SDF_SENTINEL");
@@ -356,7 +356,7 @@ fn sdf_collision_resolves() {
         let mut total_contacts = 0usize;
         for _ in 0..240 {
             schedule.run(&mut world);
-            total_contacts += world.resource::<Manifolds>().manifolds.len();
+            total_contacts += world.resource::<Manifolds>().manifolds().len();
         }
         (all_bodies(&mut world)[0].position.y, total_contacts)
     }
@@ -433,7 +433,7 @@ fn box_sdf_incline_slide(friction: f32, incline: f32, frames: usize) -> (f32, us
     let mut total_contacts = 0usize;
     for _ in 0..frames {
         schedule.run(&mut world);
-        total_contacts += world.resource::<Manifolds>().manifolds.len();
+        total_contacts += world.resource::<Manifolds>().manifolds().len();
     }
     let final_x = all_bodies(&mut world)[0].position.x;
     (final_x - settled_x, total_contacts)
@@ -565,7 +565,7 @@ fn sdf_critical_point_emits_no_contact_and_stays_finite() {
         world.resource_mut::<PhysicsConfig>().gravity = Vec3::ZERO;
         schedule.run(&mut world);
 
-        let manifolds = &world.resource::<Manifolds>().manifolds;
+        let manifolds = world.resource::<Manifolds>().manifolds();
         assert_eq!(
             manifolds.len(),
             0,

@@ -380,7 +380,7 @@ fn sphere_sphere_narrowphase_3d() {
     world.resource_mut::<PhysicsConfig>().gravity = Vec3::ZERO;
     schedule.run(&mut world);
 
-    let manifolds = &world.resource::<Manifolds>().manifolds;
+    let manifolds = world.resource::<Manifolds>().manifolds();
     assert_eq!(
         manifolds.len(),
         1,

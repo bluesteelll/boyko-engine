@@ -353,15 +353,18 @@ pub fn physics_narrowphase(
 ) {
     let bodies = scratch.bodies();
     let manifolds = &mut *manifolds;
-    manifolds.manifolds.clear();
+    manifolds.manifolds.build_view().clear();
     // S5: the sensor-overlap signal is rebuilt every step alongside the solver
     // buffer (capacity reused). Empty in any world with no `Sensor` id.
-    manifolds.sensor_overlaps.clear();
+    manifolds.sensor_overlaps.build_view().clear();
     // Ensure the per-pair hysteresis cache can hold this frame's pairs; it is NOT
     // cleared (a single in-place table — this frame reads last frame's axes).
     manifolds.box_axis_cache.begin_frame(pairs.pairs.len());
-    let out = &mut manifolds.manifolds;
-    let sensor_out = &mut manifolds.sensor_overlaps;
+    // Three disjoint field borrows of one `Manifolds`: two refill views plus the
+    // hysteresis cache. The views are taken once for the whole pair loop, not per
+    // push.
+    let mut out = manifolds.manifolds.build_view();
+    let mut sensor_out = manifolds.sensor_overlaps.build_view();
     let axis_cache = &mut manifolds.box_axis_cache;
 
     for &(a, b) in &pairs.pairs {
@@ -557,8 +560,8 @@ pub fn physics_narrowphase_sdf(
     let kernel = cfg.sdf_narrowphase;
     let bodies = scratch.bodies();
     let manifolds = &mut *manifolds;
-    let out = &mut manifolds.manifolds;
-    let sensor_out = &mut manifolds.sensor_overlaps;
+    let mut out = manifolds.manifolds.build_view();
+    let mut sensor_out = manifolds.sensor_overlaps.build_view();
 
     for (row, body) in bodies.iter().enumerate() {
         // Only a SIMULATED dynamic body collides against the SDF (a parked /
@@ -575,7 +578,7 @@ pub fn physics_narrowphase_sdf(
         // the overlap buffer so the solver's one-sided wall push never fires on it
         // (the 0%-gate: `is_sensor` is `false` for every body in a sensor-free
         // world, so this always takes the `out` arm — byte-identical to pre-S5).
-        let dst: &mut Vec<Manifold> = if body.is_sensor { sensor_out } else { out };
+        let dst = if body.is_sensor { &mut sensor_out } else { &mut out };
         match body.shape {
             ColliderShape::Sphere { radius } => {
                 if let Some(m) = sphere_sdf_manifold(a, body, radius, &field) {
@@ -1009,7 +1012,7 @@ pub fn physics_build_graph(
         let i = row as usize;
         i < bodies.len() && is_dynamic_row(bodies[i].inv_mass)
     };
-    graph.build(&manifolds.manifolds, n_dynamic, is_dynamic);
+    graph.build(manifolds.manifolds(), n_dynamic, is_dynamic);
 }
 
 /// Runs the colored TGS-Soft solver for one step over the prebuilt
@@ -1056,12 +1059,18 @@ pub fn physics_solve_colored(
     mut sleep: ResMut<IslandSleep>,
 ) {
     if cfg.sleeping {
-        solver.solve_colored_sleeping(&cfg, &manifolds.manifolds, &graph, &mut scratch, &mut sleep);
+        solver.solve_colored_sleeping(
+            &cfg,
+            manifolds.manifolds(),
+            &graph,
+            &mut scratch,
+            &mut sleep,
+        );
     } else {
         // Sleeping off: byte-identical to the O6/O7 colored path; `IslandSleep` is
         // resolved (so the param exists) but never read or written.
         let _ = &mut sleep;
-        solver.solve_colored(&cfg, &manifolds.manifolds, &graph, &mut scratch);
+        solver.solve_colored(&cfg, manifolds.manifolds(), &graph, &mut scratch);
     }
 }
 
@@ -1086,7 +1095,7 @@ pub fn physics_solve_step<S: RigidSolver>(
     if solver.is_noop() {
         return;
     }
-    solver.solve(&cfg, &manifolds.manifolds, &mut scratch);
+    solver.solve(&cfg, manifolds.manifolds(), &mut scratch);
 }
 
 /// Writes the solved snapshot back into the [`RigidBody`] column for touched

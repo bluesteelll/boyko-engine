@@ -447,8 +447,8 @@ fn run_overlap_frame(sensor: bool) -> (Vec3, usize, usize) {
     let manifolds = world.resource::<Manifolds>();
     (
         rb.linear_velocity,
-        manifolds.manifolds.len(),
-        manifolds.sensor_overlaps.len(),
+        manifolds.manifolds().len(),
+        manifolds.sensor_overlaps().len(),
     )
 }
 

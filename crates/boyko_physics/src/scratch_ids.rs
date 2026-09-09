@@ -44,7 +44,8 @@ use boyko_ecs::ecs::constants::{
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
-use crate::manifold::BodyIndex;
+use crate::manifold::{BodyIndex, Manifold};
+use crate::narrowphase::axis_cache::AxisEntry;
 use crate::resources::BodyState;
 use crate::solver::contact::BodyEffective;
 use crate::solver::warm_start::WarmEntry;
@@ -379,11 +380,11 @@ const _: () = assert!(
 /// and the census above is the thing to re-run before moving this number again.
 const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;
 
-// The broadphase cohort is the region's lowest edge today. The floor is asserted
+// The narrowphase cohort is the region's lowest edge today. The floor is asserted
 // against the LOWEST cohort rather than against whichever one happened to be last
 // when this was written — add a cohort below and move this assert with it.
 const _: () = assert!(
-    SCRATCH_ID_BROADPHASE_BOTTOM >= SCRATCH_REGION_MIN_ID,
+    SCRATCH_ID_NARROWPHASE_BOTTOM >= SCRATCH_REGION_MIN_ID,
     "the physics scratch region has grown below SCRATCH_REGION_MIN_ID; production \
      ids climb from 0 and the reserved region is no longer comfortably out of \
      their reach. Re-run the census in that constant's docs before lowering it"
@@ -514,6 +515,74 @@ fn register_solver_tail_layouts() {
     }
 }
 
+// —— The NARROWPHASE cohort (audit Stage 4) ——————————————————————
+//
+// `Manifolds`' three buffers are swept together by the narrowphase: one pass over
+// the candidate pairs writes a manifold into either `manifolds` or
+// `sensor_overlaps` and probes `box_axis_cache` for the box-box reference axis.
+// One cohort, so their ids must be pairwise distinct mod `POOL_STAGGER_LINES`;
+// they MAY reuse the solver / graph / broadphase slots, since those loops never
+// run at the same index at the same moment.
+
+/// Number of `ScratchColumn`s backing [`Manifolds`](crate::resources::Manifolds):
+/// the solver buffer, the sensor-overlap buffer, and the box-axis cache slots.
+pub(crate) const NARROWPHASE_COLUMN_COUNT: usize = 3;
+
+/// Top of the narrowphase cohort — one id below the broadphase cohort's bottom.
+pub(crate) const SCRATCH_ID_NARROWPHASE_TOP: usize = SCRATCH_ID_BROADPHASE_BOTTOM - 1;
+
+/// Bottom of the narrowphase cohort (inclusive).
+pub(crate) const SCRATCH_ID_NARROWPHASE_BOTTOM: usize =
+    SCRATCH_ID_NARROWPHASE_TOP - (NARROWPHASE_COLUMN_COUNT - 1);
+
+const _: () = assert!(
+    NARROWPHASE_COLUMN_COUNT <= POOL_STAGGER_LINES,
+    "the narrowphase cohort is wider than one stagger period"
+);
+
+const _: () = assert!(
+    SCRATCH_ID_NARROWPHASE_TOP < SCRATCH_ID_BROADPHASE_BOTTOM,
+    "the narrowphase cohort overlaps the broadphase cohort"
+);
+
+/// The [`ComponentId`] for narrowphase column `k` (`0` = `manifolds`,
+/// `1` = `sensor_overlaps`, `2` = the box-axis cache slots).
+#[inline]
+pub(crate) fn narrowphase_column_id(k: usize) -> ComponentId {
+    debug_assert!(k < NARROWPHASE_COLUMN_COUNT, "narrowphase column index out of cohort");
+    ComponentId::new(SCRATCH_ID_NARROWPHASE_TOP - k)
+}
+
+/// Registers the element layout of every [`Manifolds`] column, idempotently.
+///
+/// Two `Manifold` columns under DIFFERENT ids — the solver buffer and the
+/// sensor-overlap buffer are written in the same pass, so a shared id would put
+/// element `i` of both in one cache set — plus the `AxisEntry` slot table.
+pub(crate) fn register_narrowphase_column_layouts() {
+    register_layout::<Manifold>(narrowphase_column_id(0).get());
+    register_layout::<Manifold>(narrowphase_column_id(1).get());
+    register_layout::<AxisEntry>(narrowphase_column_id(2).get());
+}
+
+/// The [`ComponentId`] for `Manifolds::manifolds`.
+#[inline]
+pub(crate) fn manifolds_id() -> ComponentId {
+    narrowphase_column_id(0)
+}
+
+/// The [`ComponentId`] for `Manifolds::sensor_overlaps`.
+#[inline]
+pub(crate) fn sensor_overlaps_id() -> ComponentId {
+    narrowphase_column_id(1)
+}
+
+/// The [`ComponentId`] for the [`BoxAxisCache`](crate::narrowphase::axis_cache::BoxAxisCache)
+/// slot table.
+#[inline]
+pub(crate) fn box_axis_cache_id() -> ComponentId {
+    narrowphase_column_id(2)
+}
+
 /// The [`ComponentId`] wrapper for [`SCRATCH_ID_VN_INITIAL`].
 #[inline]
 pub(crate) fn vn_initial_id() -> ComponentId {
@@ -607,6 +676,10 @@ mod tests {
         (0..BROADPHASE_COLUMN_COUNT).map(|k| broadphase_column_id(k).get()).collect()
     }
 
+    fn narrowphase_cohort_ids() -> Vec<usize> {
+        (0..NARROWPHASE_COLUMN_COUNT).map(|k| narrowphase_column_id(k).get()).collect()
+    }
+
     #[test]
     fn scratch_band_stagger_slots_are_distinct() {
         assert_cohort_slots_distinct("solver cohort", &solver_cohort_ids(), SOLVER_COHORT_WIDTH);
@@ -615,6 +688,11 @@ mod tests {
             "broadphase cohort",
             &broadphase_cohort_ids(),
             BROADPHASE_COLUMN_COUNT,
+        );
+        assert_cohort_slots_distinct(
+            "narrowphase cohort",
+            &narrowphase_cohort_ids(),
+            NARROWPHASE_COLUMN_COUNT,
         );
     }
 
@@ -630,6 +708,12 @@ mod tests {
                 broadphase_cohort_ids(),
                 SCRATCH_ID_BROADPHASE_TOP,
                 SCRATCH_ID_BROADPHASE_BOTTOM,
+            ),
+            (
+                "narrowphase cohort",
+                narrowphase_cohort_ids(),
+                SCRATCH_ID_NARROWPHASE_TOP,
+                SCRATCH_ID_NARROWPHASE_BOTTOM,
             ),
         ] {
             ids.sort_unstable();
@@ -655,6 +739,7 @@ mod tests {
             ("solver", solver_cohort_ids()),
             ("graph", graph_cohort_ids()),
             ("broadphase", broadphase_cohort_ids()),
+            ("narrowphase", narrowphase_cohort_ids()),
         ];
         for (i, (na, a)) in cohorts.iter().enumerate() {
             for (nb, b) in &cohorts[i + 1..] {

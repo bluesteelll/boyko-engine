@@ -20,8 +20,9 @@ use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
 use crate::scratch_ids::{
     body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
+    box_axis_cache_id, manifolds_id, register_narrowphase_column_layouts,
     register_graph_column_layouts, register_scratch_layouts, scratch_reserve_rows,
-    touched_awake_id, touched_solver_id, vn_initial_id,
+    sensor_overlaps_id, touched_awake_id, touched_solver_id, vn_initial_id,
 };
 use crate::systems::body_bounding_radius;
 
@@ -2186,14 +2187,19 @@ unsafe impl Sync for EmitPtrs {}
 /// embedded here so the narrowphase stage reaches it via the same `ResMut` it
 /// already holds — no extra resource wiring (the cache is a narrowphase-internal
 /// detail of producing stable feature ids, not a solver input).
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct Manifolds {
     /// Manifolds the SOLVER consumes, in the deterministic pair order. A pair
     /// involving a [`Sensor`](crate::components::Sensor) body never enters this
     /// buffer (it is routed to [`sensor_overlaps`](Self::sensor_overlaps)
     /// instead), so the solved contact set — and thus the bit-deterministic
     /// solve — is identical whether or not any `Sensor` exists (std-lib S5).
-    pub manifolds: Vec<Manifold>,
+    ///
+    /// Backed by a `ComponentPool` column (audit Stage 4) and `pub(crate)` so the
+    /// narrowphase can take a refill view of it disjointly from
+    /// `sensor_overlaps` and `box_axis_cache`. Consumers read
+    /// [`manifolds`](Self::manifolds).
+    pub(crate) manifolds: ScratchColumn<Manifold>,
     /// Sensor / trigger OVERLAPS detected this step (std-lib S5): a manifold for
     /// each overlapping pair where EITHER body carries
     /// [`Sensor`](crate::components::Sensor). The narrowphase generates it with
@@ -2203,22 +2209,69 @@ pub struct Manifolds {
     /// velocity change. Cleared and refilled each step alongside `manifolds`
     /// (capacity reused, no per-step alloc). Empty in any world that never minted
     /// a `Sensor` id (the 0%-gate).
-    pub sensor_overlaps: Vec<Manifold>,
+    ///
+    /// Its own column under its own id, not a second view of `manifolds`: the
+    /// narrowphase writes one or the other for every pair in ONE pass, so a
+    /// shared id would put element `i` of both in the same cache set. Consumers
+    /// read [`sensor_overlaps`](Self::sensor_overlaps).
+    pub(crate) sensor_overlaps: ScratchColumn<Manifold>,
     /// Per-body-pair last-frame SAT-axis index (box-box hysteresis, P2 W4).
     /// Persisted in place across frames; the box-box generator feeds the stored
     /// axis back to bias against feature-id flicker on a resting stack.
     pub box_axis_cache: BoxAxisCache,
 }
 
+impl Default for Manifolds {
+    /// Hand-written because every field's backing column needs its reserved
+    /// [`ComponentId`], which no derive can supply.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
+}
+
 impl Manifolds {
     /// Builds an empty manifold buffer pre-sized for `capacity` manifolds (and the
     /// box-axis hysteresis cache for `capacity` pairs).
     pub fn with_capacity(capacity: usize) -> Self {
+        register_narrowphase_column_layouts();
+        // A `ScratchColumn`'s reserve is a HARD ceiling rather than the growth hint
+        // `Vec::with_capacity` gave, so the floor is the same budget every other
+        // scratch column gets. The sensor buffer keeps the same ceiling: it is
+        // empty in a sensor-free world, and reservation is address space, not
+        // commit.
+        let reserve = capacity.max(scratch_reserve_rows(size_of::<Manifold>()));
         Self {
-            manifolds: Vec::with_capacity(capacity),
-            sensor_overlaps: Vec::new(),
-            box_axis_cache: BoxAxisCache::with_capacity(capacity),
+            manifolds: ScratchColumn::new(manifolds_id(), reserve),
+            sensor_overlaps: ScratchColumn::new(sensor_overlaps_id(), reserve),
+            box_axis_cache: BoxAxisCache::with_capacity(box_axis_cache_id(), capacity),
         }
+    }
+
+    /// The contiguous read slice over this step's solver manifolds, in the
+    /// deterministic pair order.
+    #[inline]
+    pub fn manifolds(&self) -> &[Manifold] {
+        self.manifolds.as_read_slice()
+    }
+
+    /// The contiguous read slice over this step's sensor / trigger overlaps.
+    #[inline]
+    pub fn sensor_overlaps(&self) -> &[Manifold] {
+        self.sensor_overlaps.as_read_slice()
+    }
+
+    /// The single-threaded refill view over the solver manifold buffer (clear +
+    /// push) — the ONLY surface that mutates it, used by the narrowphase.
+    #[inline]
+    pub fn manifolds_build(&mut self) -> ScratchBuildView<'_, Manifold> {
+        self.manifolds.build_view()
+    }
+
+    /// The single-threaded refill view over the sensor-overlap buffer.
+    #[inline]
+    pub fn sensor_overlaps_build(&mut self) -> ScratchBuildView<'_, Manifold> {
+        self.sensor_overlaps.build_view()
     }
 }
 

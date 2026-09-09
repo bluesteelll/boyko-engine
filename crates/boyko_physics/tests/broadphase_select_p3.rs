@@ -240,7 +240,7 @@ fn run_pairs_and_manifolds(
     world.resource_mut::<PhysicsConfig>().broadphase = kind;
     schedule.run(&mut world);
     let pairs = world.resource::<ContactPairs>().pairs.clone();
-    let manifolds = world.resource::<Manifolds>().manifolds.clone();
+    let manifolds = world.resource::<Manifolds>().manifolds().to_vec();
     (pairs, manifolds)
 }
 
