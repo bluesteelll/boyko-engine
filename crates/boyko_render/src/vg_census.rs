@@ -249,13 +249,14 @@ impl Sha256 {
             self.compress(&block);
             self.tail_len = 0;
         }
-        let mut chunks = data.chunks_exact(64);
-        for block in &mut chunks {
-            let mut b = [0u8; 64];
-            b.copy_from_slice(block);
-            self.compress(&b);
+        // `as_chunks::<64>()` yields `&[u8; 64]` directly, which deletes the
+        // per-block stack copy this loop used to make: `chunks_exact` hands out a
+        // `&[u8]`, so reaching the array `compress` wants took a `copy_from_slice`
+        // per 64 bytes of input.
+        let (blocks, rest) = data.as_chunks::<64>();
+        for block in blocks {
+            self.compress(block);
         }
-        let rest = chunks.remainder();
         self.tail[..rest.len()].copy_from_slice(rest);
         self.tail_len = rest.len();
     }

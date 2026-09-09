@@ -54,9 +54,13 @@ fn textured_fs_words() -> Vec<u32> {
         bytes.len().is_multiple_of(4),
         "invariant: a SPIR-V binary is a whole number of 4-byte words"
     );
+    // `as_chunks::<4>()` gives `&[u8; 4]` straight to `from_le_bytes`, so the
+    // element-by-element rebuild of the array goes away with the bounds checks.
     bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect()
 }
 

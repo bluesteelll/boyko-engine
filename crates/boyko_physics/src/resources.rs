@@ -2887,12 +2887,8 @@ impl IslandSleep {
         // Explicit / config-change wake: clear every row's latch before deciding, so
         // no island can be frozen this frame.
         if self.wake_all {
-            for s in &mut self.asleep {
-                *s = false;
-            }
-            for c in &mut self.below_count {
-                *c = 0;
-            }
+            self.asleep.fill(false);
+            self.below_count.fill(0);
             self.wake_all = false;
         }
 

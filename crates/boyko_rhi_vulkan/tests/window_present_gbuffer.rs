@@ -1552,7 +1552,7 @@ fn write_bmp(path: &str, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
     buf.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed
     buf.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant
     // --- pixel data: RGBA -> BGRA (the ONLY channel swap; no row flip) ---
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         buf.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
     }
 
@@ -1565,7 +1565,7 @@ fn write_bmp(path: &str, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
 /// byte-comparable to each other.
 fn readback_to_rgba(readback: &[u8], w: u32, h: u32, is_bgra: bool) -> Vec<u8> {
     let mut out = vec![0u8; (w * h * 4) as usize];
-    for (dst, src) in out.chunks_exact_mut(4).zip(readback.chunks_exact(4)) {
+    for (dst, src) in out.as_chunks_mut::<4>().0.iter_mut().zip(readback.as_chunks::<4>().0) {
         let texel = [src[0], src[1], src[2], src[3]];
         let rgb = readback_rgb(texel, is_bgra);
         dst[0] = rgb[0] as u8;
@@ -3852,7 +3852,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
             );
             let mut mismatches = 0usize;
             let mut worst = (0u32, 0u32, 0i32);
-            for (i, (o, n)) in off_rgba.chunks_exact(4).zip(on_rgba.chunks_exact(4)).enumerate() {
+            for (i, (o, n)) in off_rgba.as_chunks::<4>().0.iter().zip(on_rgba.as_chunks::<4>().0).enumerate() {
                 let mut bad = false;
                 for c in 0..3 {
                     let d = (o[c] as i32 - n[c] as i32).abs();
@@ -6458,7 +6458,7 @@ fn ab_capture<'ctx>(
 fn ab_compare(label: &str, a: &[u8], b: &[u8]) -> (usize, u32) {
     let mut n_diff = 0usize;
     let mut max_d = 0u32;
-    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
         let d = pa
             .iter()
             .zip(pb)
@@ -6480,7 +6480,7 @@ fn ab_compare(label: &str, a: &[u8], b: &[u8]) -> (usize, u32) {
 /// A ×8-amplified per-channel |a−b| RGBA diff map (alpha forced opaque) for visual inspection.
 fn ab_diff_map(a: &[u8], b: &[u8]) -> Vec<u8> {
     let mut out = vec![0u8; a.len()];
-    for ((pa, pb), po) in a.chunks_exact(4).zip(b.chunks_exact(4)).zip(out.chunks_exact_mut(4)) {
+    for ((pa, pb), po) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0).zip(out.as_chunks_mut::<4>().0) {
         for c in 0..3 {
             let d = (i32::from(pa[c]) - i32::from(pb[c])).unsigned_abs() * 8;
             po[c] = d.min(255) as u8;

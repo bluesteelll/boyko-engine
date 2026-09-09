@@ -329,7 +329,9 @@ mod tests {
     /// (which triangles, with which normals, exist) is compared.
     fn triangle_set(mesh: &MeshData) -> HashSet<[(Bits3, Bits3); 3]> {
         mesh.indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|tri| {
                 let mut verts: [(Bits3, Bits3); 3] = std::array::from_fn(|i| {
                     let v = mesh.vertices[tri[i] as usize];

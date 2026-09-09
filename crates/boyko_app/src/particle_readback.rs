@@ -241,8 +241,8 @@ impl ParticleCountersReadback {
     /// gate #17 recorded as the reason this instrument had to be built.
     #[must_use]
     pub fn artifact_line(&self) -> String {
-        let wave_rate = self.wave_skip_rate().map_or(-1.0, |r| r);
-        let lane_rate = self.lane_skip_rate(WAVE_WIDTH_ASSUMED).map_or(-1.0, |r| r);
+        let wave_rate = self.wave_skip_rate().unwrap_or(-1.0);
+        let lane_rate = self.lane_skip_rate(WAVE_WIDTH_ASSUMED).unwrap_or(-1.0);
         format!(
             "particle_counters frames={} cap={} alive_cur={} alive_next={} dead={} dead_base={} \
              emit_base={} real_emit={} clamped={} additive_instances={} alpha_instances={} \

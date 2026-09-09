@@ -3095,7 +3095,7 @@ fn p4b_cull_on_conservative_within_tol_of_cull_off() {
 
         // Prove the device actually executed: the cull-OFF baseline must contain BOTH a
         // mesh/SDF lit texel AND a background texel (not a silent all-zero buffer).
-        let nonzero = off.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = off.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(
             nonzero > 0,
             "[{name}] cull-OFF albedo is all-zero — the device did not render (silent skip?)"
@@ -3444,7 +3444,7 @@ fn b1_gate6_gpu_omega_one_bit_identical_to_pre_b1() {
             assert_eq!(a, b, "[{name} cull={coarse}] two ω=1.0 runs diverged — non-deterministic marcher");
 
             // Prove the device executed (not a silent all-zero buffer).
-            let nonzero = a.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+            let nonzero = a.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
             assert!(nonzero > 0, "[{name} cull={coarse}] ω=1.0 albedo all-zero — device did not render");
 
             // Each ω=1.0 LIT texel within ±2/255 of the ω=1 deferred PBR oracle. Lighting is
@@ -3473,7 +3473,7 @@ fn b1_gate7_gpu_overrelax_hit_miss_parity() {
     };
     for (name, edits) in p4b_scenes() {
         let base = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, 1.0).0;
-        let base_hits = base.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let base_hits = base.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(base_hits > 0, "[{name}] ω=1 baseline all-zero — device did not render");
         for &omega in &[1.2_f32, 1.5, 1.9] {
             let over = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, omega).0;
@@ -3514,7 +3514,7 @@ fn b1_gate8_gpu_omega_1_2_matches_matched_omega_host() {
     for (name, edits) in p4b_scenes() {
         let lit = run_gbuffer_hybrid_ex(&ctx, &edits, false, false, omega).0;
         assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(nonzero > 0, "[{name}] ω={omega} lit all-zero — device did not render");
         // The matched-ω deferred oracle: the host marches the IDENTICAL ω before the resolve.
         let (max_pass, max_arm1, sdf_lit_hits) =
@@ -3788,7 +3788,7 @@ fn a1g_gpu_shadows_ao_matches_host_lit_default_light() {
     for (name, edits) in p4b_scenes() {
         let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
         assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(nonzero > 0, "[{name}] lit all-zero — device did not render");
         let (max_pass, max_arm1, sdf_lit_hits) =
             assert_lit_matches_deferred_golden(&lit, &edits, flags, DEFAULT_LIGHT_DIR, name);
@@ -3834,7 +3834,7 @@ fn a2g_gpu_shadows_only_and_ao_only_gate_independently() {
     for (name, edits) in p4b_scenes() {
         for flags in [LIGHTING_FLAG_SHADOWS, LIGHTING_FLAG_AO] {
             let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
-            let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+            let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
             assert!(nonzero > 0, "[{name} flags={flags}] lit all-zero — device did not render");
             let (max_pass, max_arm1, sdf_lit_hits) =
                 assert_lit_matches_deferred_golden(&lit, &edits, flags, DEFAULT_LIGHT_DIR, name);
@@ -3856,7 +3856,7 @@ fn a2g_gpu_shadows_only_and_ao_only_gate_independently() {
     let mut renders: [Option<Vec<u8>>; 2] = [None, None];
     for (slot, flags) in [LIGHTING_FLAG_SHADOWS, LIGHTING_FLAG_AO].into_iter().enumerate() {
         let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, light).0;
-        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(nonzero > 0, "[twin flags={flags}] lit all-zero — device did not render");
         let (_, _, sdf_lit_hits) =
             assert_lit_matches_deferred_golden(&lit, &edits, flags, light, "twin_self_shadow");
@@ -3866,8 +3866,8 @@ fn a2g_gpu_shadows_only_and_ao_only_gate_independently() {
     let shadows = renders[0].as_ref().expect("SHADOWS render");
     let ao = renders[1].as_ref().expect("AO render");
     let diff_px = shadows
-        .chunks_exact(4)
-        .zip(ao.chunks_exact(4))
+        .as_chunks::<4>().0.iter()
+        .zip(ao.as_chunks::<4>().0)
         .filter(|(s, a)| (0..3).any(|c| (s[c] as i32 - a[c] as i32).abs() > LIT_CHANNEL_TOL))
         .count();
     assert!(
@@ -3990,7 +3990,7 @@ fn a3g_nondefault_light_dir_matches_host_lit_literal() {
     for (name, edits) in p4b_scenes() {
         let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, NONDEFAULT_LIGHT).0;
         assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(nonzero > 0, "[{name}] non-default-light lit all-zero — device did not render");
         // The LITERAL host-vs-GPU comparison with the SAME non-default light_dir, against the
         // deferred PBR oracle (the payoff).
@@ -4075,7 +4075,7 @@ fn a4g_cull_on_lighting_on_sync_validation_clean() {
     let surface = bounds.iter().filter(|b| b.flags & TILE_FLAG_EMPTY == 0).count();
     assert!(surface > 0, "the coarse pass must have marked at least one surface tile");
     let sdf_hits = albedo
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .filter(|t| {
             let mesh = unpack_packed_rgb(pack_rgba(MESH_COLOR));
             let bg = packed_background();
@@ -4378,7 +4378,7 @@ fn d2g_passthrough_within_host_pack_budget() {
     for (name, edits) in p4b_scenes() {
         let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, 0, DEFAULT_LIGHT_DIR).0;
         assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(nonzero > 0, "[{name}] LIT all-zero — device did not render");
         let (max_pass, max_arm1, sdf_lit_hits) =
             assert_lit_matches_deferred_golden(&lit, &edits, 0, DEFAULT_LIGHT_DIR, name);
@@ -4472,7 +4472,7 @@ fn d3g_arm1_within_double_quant_bound_of_deferred_golden() {
             let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, light).0;
             assert_eq!(lit.len(), READBACK_BYTES as usize);
             let nonzero =
-                lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+                lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
             assert!(nonzero > 0, "[{name}/{lname}] LIT all-zero — device did not render");
             let (max_pass, max_arm1, sdf_lit_hits) =
                 assert_lit_matches_deferred_golden(&lit, &edits, flags, light, name);
@@ -4525,7 +4525,7 @@ fn l0a_degenerate_light_table_reproduces_constant_path_image() {
     for (name, edits) in p4b_scenes() {
         let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
         assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(nonzero > 0, "[{name}] LIT all-zero — device did not render");
 
         // The whole-image diff vs the CONSTANT-path oracle = the L0a 0%-gate.
@@ -4878,7 +4878,7 @@ fn l0b_zero_point_spot_table_reproduces_l0a_image() {
             run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &DEGENERATE_LIGHT_TABLE)
                 .0;
         assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(nonzero > 0, "[{name}] L0b LIT all-zero — device did not render");
 
         // Same diff as the L0a 0%-gate: the gViewT addition must NOT perturb the image.
@@ -4922,7 +4922,7 @@ fn l0b_point_and_spot_match_the_table_oracle() {
         let lit =
             run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
         assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(nonzero > 0, "[{name}] L0b point/spot LIT all-zero — device did not render");
 
         let (max_delta, outliers, sdf_lit_hits) =
@@ -5057,7 +5057,7 @@ fn p6_r1_multi_light_sdf_shadows_match_oracle() {
     let lit =
         run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
     assert_eq!(lit.len(), READBACK_BYTES as usize);
-    let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+    let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
     assert!(nonzero > 0, "P6 R1 multi-light LIT all-zero — device did not render");
 
     let (max_delta, sdf_lit_hits) = assert_lit_matches_table_shadowed_golden(
@@ -6199,7 +6199,7 @@ fn run_gbuffer_hybrid_lit_clustered(
         core::ptr::copy_nonoverlapping(viewt_ptr.as_ptr(), viewt_bytes.as_mut_ptr(), READBACK_BYTES as usize);
     }
     let viewt_px: Vec<f32> = viewt_bytes
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
 
@@ -6217,7 +6217,7 @@ fn run_gbuffer_hybrid_lit_clustered(
         core::ptr::copy_nonoverlapping(normal_ptr.as_ptr(), normal_bytes.as_mut_ptr(), READBACK_BYTES as usize);
     }
     let normal_oct: Vec<[u8; 2]> = normal_bytes
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|c| [c[0], c[1]])
         .collect();
 
@@ -6422,7 +6422,7 @@ fn l1_clustered_resolve_matches_the_brute_force_image() {
         let (lit, _grid_bytes, _index_bytes, viewt_px, normal_oct) =
             run_gbuffer_hybrid_lit_clustered(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, &cfg);
         assert_eq!(lit.len(), READBACK_BYTES as usize);
-        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
         assert!(nonzero > 0, "[{name}] L1 clustered LIT all-zero — device did not render");
 
         let (max_delta, sdf_lit_hits) =
@@ -7466,7 +7466,7 @@ fn p5_mesh_sdf_pbr_screenshot_dump() {
     let lit =
         run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
     assert_eq!(lit.len(), READBACK_BYTES as usize);
-    let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+    let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
     assert!(nonzero > 0, "P5 mesh+SDF LIT all-zero — device did not render");
 
     // Spot-check: a mesh-covered pixel must now read a LIT (non-zero, non-MESH_COLOR) value.
@@ -7544,7 +7544,7 @@ fn p6_multilight_shadows_screenshot_dump() {
     let lit =
         run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
     assert_eq!(lit.len(), READBACK_BYTES as usize);
-    let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+    let nonzero = lit.as_chunks::<4>().0.iter().filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
     assert!(nonzero > 0, "P6 R1 multi-light LIT all-zero — device did not render");
 
     // Native composite extent is 64×64; upscale 8× → 512×512 for the owner-facing screenshot.

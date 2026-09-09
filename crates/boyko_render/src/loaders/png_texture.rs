@@ -48,7 +48,10 @@ fn narrow_to_rgba8(image: DecodedImage) -> Vec<u8> {
         8 => image.pixels,
         16 => {
             let mut out = Vec::with_capacity(image.pixels.len() / 2);
-            for sample in image.pixels.chunks_exact(2) {
+            // `as_chunks::<2>()` rather than `chunks_exact(2)`: the width is a
+            // constant, so the element is a `&[u8; 2]` and the index below is checked
+            // at compile time instead of per sample.
+            for sample in image.pixels.as_chunks::<2>().0 {
                 // Big-endian u16: `sample[0]` is the most-significant byte.
                 out.push(sample[0]);
             }
@@ -148,7 +151,11 @@ mod tests {
         assert_eq!(data.height, 3);
         assert_eq!(data.rgba8.len(), 4 * 3 * 4, "tightly-packed RGBA8");
         assert!(
-            data.rgba8.chunks_exact(4).all(|px| px == [0x11, 0x22, 0x33, 0xFF]),
+            data.rgba8
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|px| *px == [0x11, 0x22, 0x33, 0xFF]),
             "every texel must decode to the fill color"
         );
     }
