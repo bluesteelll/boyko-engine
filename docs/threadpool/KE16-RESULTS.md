@@ -1577,16 +1577,16 @@ That has not been run. Two independent reasons the retake is not optional:
 1. Every absolute here is a **bench-profile** number (`codegen-units = 1`, `lto = false`) and the
    shipped release profile is `lto = "fat"` — a different codegen configuration by the manifest's
    own statement.
-2. The winning configuration is still a **feature build**; the features have not been removed, the
-   freeze has not been taken, and the removal commit's `grep -rn 'feature = "ke16' crates` has not
-   been made to return nothing.
+2. ✅ **The removal is DONE** (`67563d3b`, 2026-09-09): the winning configuration is the code and
+   not a build of it, and `grep -rn 'feature = "ke16' crates` returns nothing. What is still owed is
+   the RE-TAKE — no number in this file comes from the unconditional code.
 
-**The freeze that must precede removal has also not been done** (owner ruling, 2026-09-02: *"Do not
-delete the unsuitable one, leave them as a spare — so the code is recorded but not present in the
-project"*): no annotated tag `ke16/tournament`, no `docs/threadpool/KE16-REJECTED.md`. The order is
-not negotiable — freeze, then remove, because after the removal there is nothing left to point a
-tag at. The return conditions the register needs are already measured and are recorded in
-§Rejected below.
+**The freeze that must precede removal was taken, in that order** (owner ruling, 2026-09-02: *"Do
+not delete the unsuitable one, leave them as a spare — so the code is recorded but not present in
+the project"*): the annotated tag `ke16/candidates-frozen-2026-09-07` on `897c812f`, and
+`docs/threadpool/KE16-REJECTED.md`. The design's §freeze prescribes the name `ke16/tournament`; the
+tree's name is the dated one, and that is the name a reader must use. The return conditions the
+register needs are measured and are recorded in §Rejected below.
 
 ---
 
@@ -1959,12 +1959,16 @@ tournament will ship on numbers that were never taken.
    **(b)** `c1`/`c1f`, now buildable and measured as a pair (§C).
    ⚠ The CS-2 reference (49 rows) is preserved as PROSE only — this pass overwrote its criterion
    baselines for r1–r3 under the same directory names (§W, last subsection).
-2. **STEP APP HAS NOT BEEN RUN.** No number in this file comes from the unconditional shipped code.
-   The design requires the retake on the code that ships, and separately every absolute here is a
-   bench-profile number that does not describe the shipped codegen configuration.
-3. **THE FREEZE HAS NOT BEEN TAKEN.** No `ke16/tournament` tag; no `docs/threadpool/KE16-REJECTED.md`.
-   The order is freeze, then remove. §Rejected supplies the measured return conditions the register
-   needs.
+2. **STEP APP'S NUMBERS HAVE NOT BEEN TAKEN.** The removal itself shipped in `67563d3b`, but no
+   number in this file comes from the unconditional shipped code. The design requires the retake on
+   the code that ships, and separately every absolute here is a bench-profile number that does not
+   describe the shipped codegen configuration.
+3. ✅ **THE FREEZE WAS TAKEN**, before the removal as the order requires: the annotated tag
+   `ke16/candidates-frozen-2026-09-07` on `897c812f`, and `docs/threadpool/KE16-REJECTED.md`.
+   ⚠ **The tag is LOCAL ONLY** — `git ls-remote --tags origin` returns nothing, for this tag or any
+   other — while the removal commit is pushed. The arms therefore exist on one machine and the tree
+   that deleted them exists on the remote; until the tag is pushed, the freeze protects nothing
+   against the loss of this clone.
 4. **RULE 1 IS NOT DISCHARGED FOR THE HEAD-TO-HEAD PASS ITSELF.** Its §8 loom / Miri / clippy /
    full-workspace legs were out of scope by instruction. They sit UPSTREAM of rule 2 — a red there
    deletes the verdict rather than qualifying it. They were later run at CS-2 and are green for the

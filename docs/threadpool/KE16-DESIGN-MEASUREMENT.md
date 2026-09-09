@@ -448,12 +448,20 @@ recorded but not present in the project."* The removal commit is therefore prece
 and the order is not negotiable: freeze, then remove, because after the removal there is nothing
 left to point a tag at.
 
-1. **One annotated tag, `ke16/tournament`**, on the last commit at which every candidate still
+1. **One annotated tag** — prescribed here as `ke16/tournament`, TAKEN as
+   `ke16/candidates-frozen-2026-09-07` on `897c812f`; the dated name is the one that exists and the
+   one to use — on the last commit at which every candidate still
    builds — that is, the commit whose gates Step 7 ran. ONE tag rather than one per candidate: the
    candidates coexist in a single tree behind mutually exclusive features, so per-candidate tags
    would all address the same commit and would falsely suggest independent snapshots. The tag
    message carries the verdict line for each candidate and the exact feature flag that builds it,
-   so `git show ke16/tournament` answers "what was tried" without a checkout.
+   so `git show ke16/candidates-frozen-2026-09-07` answers "what was tried" without a checkout.
+   ⚠ AS TAKEN IT DOES NOT. The message inlines no per-candidate detail and instead says *"Read
+   docs/threadpool/KE16-REJECTED.md at this commit"* — but the register was written two commits
+   LATER (`611999cb`), so at `897c812f` that path does not exist and
+   `git show <tag>:docs/threadpool/KE16-REJECTED.md` fails outright. The register is read at `HEAD`,
+   never at the tag, and the tag message is wrong about where to find it. Retagging is the owner's
+   call; until then this note is the correction.
 2. **A register, `docs/threadpool/KE16-REJECTED.md`**, written in the removal commit. One row per
    candidate that did not ship: what it was, in one sentence; the measurement that eliminated it,
    with the number and the cell it was taken in; the feature flag and the tag that build it; and —
