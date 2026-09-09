@@ -4803,3 +4803,91 @@ artefact today.
 4. **The gate's `overlaps >= 1` threshold — PER-CONTEXT COUNTERS.** `--test-threads=1` was rejected
    because it changes the recipe the measured 4/4 and 3/4 table was taken under, and every negative
    control compares against that table. Not yet implemented; it is the next small item after Stage 3b.
+
+## OPEN 2026-09-09 — three questions the ECS-native physics lane raised and cannot rule itself
+
+Lane: `feat/ecs-native-storage` (worktree `D:/wt/ecsnative`), branched from `master` `7e908c87`.
+Nine commits, pushed. Stage 4 stands at **21 of ~60 columns** (`ConstraintGraph` 8,
+`BroadphaseGrid` 13). Physics 38 targets / 369 tests / 0 failed; workspace clippy `-D warnings`
+exit 0.
+
+### 1. ⚠ Step 7 is blocked by LANE OWNERSHIP, not by difficulty — and it is the whole remaining gap
+
+The Jolt-parity measurement (`benches/jolt_parity_pyramid.rs`, Jolt v5.3.0 built on the same
+machine, its `PyramidScene.h` transcribed index for index) leaves the deficit in exactly one place:
+
+| W | Jolt ms | Jolt x | boyko ms | boyko x |
+|---|---:|---:|---:|---:|
+| 1 | 17.59 | 1.00 | 18.27 | 1.00 |
+| 8 | 4.21 | 4.18 | 20.45 | 0.89 |
+| 16 | 3.95 | 4.45 | 25.07 | 0.73 |
+
+Single-threaded the two engines are within 4 % — **the entire deficit is dispatch, not solver
+quality.** The chunk-allocation half is fixed here (`MIN_SLOTS_PER_CHUNK`, −23.5 % at W = 16). What
+remains is the per-wave ramp: 4 substeps × (1 + 2 relax) × ~6 colours = **72 waves per step**, each
+waking and parking W workers — 1152 events per step at W = 16.
+
+The fix is one `pool.scope` per STEP instead of 72, which needs an in-scope BARRIER on
+`boyko_threadpool::Scope` (it has `spawn` and `spawn_batch` and nothing else). The wait logic
+already exists inside `Scope::drop` and is extractable.
+
+**But `boyko_threadpool` is the KE16 campaign's system, open in `D:/wt/threadpool`, and the scope
+completion protocol is precisely what axes W and C measured.** Editing it from this lane would
+collide with that worktree on the same files — the thing the worktree-per-system rule exists to
+prevent — and would invalidate KE16's baselines, which are pinned to the current behaviour.
+
+**Question for the owner: sequence the in-scope barrier INTO the KE16 lane (and if so, before or
+after Step App?), or close KE16 first and take it afterwards?** This lane cannot answer it, and it
+is the difference between 0.89× and something that scales.
+
+### 2. A single global chunking constant is MEASURED not to serve two legitimate scenes
+
+`MIN_SLOTS_PER_CHUNK` was swept on the parity pyramid, W = 8 / 16:
+
+| floor | W8 ms | W16 ms |
+|---:|---:|---:|
+| 32 | 22.87 | 29.67 |
+| 64 | 21.60 | 26.99 |
+| 128 | 20.93 | 25.13 |
+| 256 | 20.14 | 20.98 |
+
+Monotone and still descending at 256 — so on that scene the answer is "raise it". Raising it to 256
+turns `many_disjoint_pairs_are_one_wide_color_and_must_dispatch` RED: that scene is ONE colour of
+500 slots, `500 / 256 == 1` chunk, and the single-chunk short-circuit sends it inline, undoing the
+1.95× the P2 gate-metric fix had just been measured to deliver.
+
+The two scenes want opposite things and both are ordinary: a pyramid is many NARROW colours whose
+cost is per-wave dispatch (wants coarse chunks); a debris pile is ONE WIDE colour whose cost is idle
+lanes (wants fine ones). **64 currently ships as the largest value that keeps both gates green — the
+optimum of neither.**
+
+This is the concrete, measured case for the cut policy being a per-call-site OBJECT rather than a
+global integer. Note that "add more integers" has already been tried and refused by the code base:
+`BatchingStrategy` has carried `batches_per_thread`, `min_batch_size` and `max_batch_size` since it
+was written and **no production caller passes a non-default** — the only non-default in the tree is
+in a test. The distinguishing quantity between call sites is not a number but a FUNCTION: ECS rows
+cut by a closed form, colours by CSR slot runs ("data-dependent … not available in closed form",
+`colored.rs`), broadphase by a survivor prefix sum, and the SIMD path by `COHORT = 8`, which its own
+doc calls "a fixed SIMD-width constant, NOT a perf knob".
+
+**Question: fund a `Cuts` policy object (`Uniform { per_worker, min, max }` | `Explicit(&[u32])`)
+plus one occupancy instrument every dispatch reports through — or accept per-scene tuning and say so
+in the constants?**
+
+### 3. `par_iter` compile-rejects dense storage, which blocks "one worker pool, all systems"
+
+`const { assert!(!D::HAS_DENSE && !F::HAS_DENSE, …) }` at `par_iter.rs:305`, with the reason given
+as plumbing: "the parallel path does not resolve the dense store into each worker chunk's `Fetch`
+(the chunk runner has no world cell)".
+
+The exact boundary: **field `RigidBody`, stage `physics_integrate`, site `systems.rs:149`,
+contract `par_iter.rs:307`.** The day `RigidBody` becomes `#[component(storage="dense")]` — which is
+Stage P's own headline in `DENSE-COMPONENTS-PLAN.md` — that `query.par_iter_mut()` stops compiling.
+
+Until it is fixed, "every system's work is balanced by the same workers through the same seam"
+is unreachable by construction, because the storage class Principle 0 prescribes for bulk
+per-entity data is the one the parallel driver refuses.
+
+**Question: is resolving the dense store per worker chunk in scope for the kernel now, or does
+Stage P's dense migration wait behind it?** It is a kernel change, not a physics one, and it is not
+in any current plan.
