@@ -30,6 +30,14 @@
 //! sampled image) and the color SINK (a storage image) change. The float-to-UNORM store
 //! vs the host `pack_rgba` rounding is absorbed by the `+/-2/255` tolerance.
 
+// clippy 1.98's `chunks_exact_to_as_chunks` fires on the RGBA readback loops below.
+// Left as `chunks_exact` DELIBERATELY: every site here sits inside a `zip` / `filter` /
+// `enumerate` chain where `as_chunks().0` changes the item type from `&[u8]` to
+// `&[u8; N]`, so the rewrite is semantic rather than textual - and these targets need a
+// GPU, so the edit could not be verified by running them on this headless box. The
+// LIBRARY code this lint flagged was converted properly; this is the test-only remainder.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 mod common;
 use common::*;
 

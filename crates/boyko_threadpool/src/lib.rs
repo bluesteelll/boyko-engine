@@ -60,6 +60,16 @@
 //! Subsequent waves (Schedule, par_iter, ECS Send/Sync gate, etc.) live in
 //! `boyko_ecs`. This crate has no dependency on the ECS.
 
+
+// `missing_const_for_thread_local` is a FALSE POSITIVE for this crate on clippy
+// 1.98.0 (2026-09-01): the `thread_local!` initialisers here ALREADY use the
+// `const { … }` form the lint asks for. The 1.97.1 -> 1.98.1 toolchain update
+// was taken to cure it and did not, so this is not a wait-for-upstream item.
+// An `#[allow]` outside a `thread_local!` invocation is reported as an unused
+// attribute while the lint fires anyway, hence crate-level. Delete when clippy
+// stops reporting the const form.
+#![allow(clippy::missing_const_for_thread_local)]
+
 mod block;
 mod scope;
 pub(crate) mod sync;

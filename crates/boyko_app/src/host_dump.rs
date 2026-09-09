@@ -226,7 +226,7 @@ fn write_bmp(path: &str, pixels: &[u8], w: u32, h: u32, rgba_source: bool) -> st
     for row in (0..h as usize).rev() {
         let src = &pixels[row * row_bytes..(row + 1) * row_bytes];
         if rgba_source {
-            for px in src.chunks_exact(4) {
+            for px in src.as_chunks::<4>().0 {
                 out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
             }
         } else {

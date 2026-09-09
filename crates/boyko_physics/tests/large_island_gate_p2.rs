@@ -43,6 +43,11 @@
 //! spin the threadpool (Miri-intractable int-to-ptr, Phase 9.1-9.3) and so are
 //! `cfg(not(miri))`.
 
+// clippy 1.98.0 false positive: this file's `thread_local!` initialisers already
+// use the `const { … }` form the lint asks for (all 63 in the workspace do).
+// See this crate's lib.rs for the full account and the delete condition.
+#![allow(clippy::missing_const_for_thread_local)]
+
 use boyko_physics::manifold::{BodyIndex, ContactPoint, Manifold};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::resources::{BodyState, ConstraintGraph, LARGE_ISLAND_CONSTRAINTS};

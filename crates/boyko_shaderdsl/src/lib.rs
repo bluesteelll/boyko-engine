@@ -32,6 +32,24 @@
 //!
 //! IN-HOUSE: ZERO third-party deps. No rust-gpu / naga / spirv-builder.
 
+
+// `missing_const_for_thread_local` is a FALSE POSITIVE for this crate on clippy
+// 1.98.0 (2026-09-01), and the allow is the repair rather than a suppression:
+// every `thread_local!` initialiser here ALREADY IS `const { … }`, which is
+// exactly what the lint asks for.
+//
+// Two candidate cures were tested and neither works. Upgrading the toolchain
+// (1.97.1 -> 1.98.1) was taken specifically to fix this; it narrowed the lint
+// from five spans to a handful but did not remove it, so "wait for upstream" is
+// not a live plan. And the neighbouring-doc-comment confusion this lint has had
+// before is not the cause: stripping the `///` lines above a flagged static
+// leaves the bare `const { … }` form and the lint still fires.
+//
+// Placement matters: an `#[allow]` written OUTSIDE a `thread_local!` invocation
+// is reported as an `unused attribute` while the lint fires anyway, so this is
+// crate-level. Delete it when clippy stops reporting the const form.
+#![allow(clippy::missing_const_for_thread_local)]
+
 // Strictly `#![no_std]` only when the `sqrt` intrinsic is available (the `nightly`
 // feature) AND the std-side emitter is not requested. The `emit` feature pulls
 // `std` (the SSA arena `Vec` + the `String` HLSL printer); without it the Eval

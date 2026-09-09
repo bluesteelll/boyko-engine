@@ -21,6 +21,14 @@
 //! call site the TEXTURED fragment emits — albedo/normal/metal-rough/AO/emissive across the
 //! gAlbedo/gNormal/gPbr writes).
 
+// clippy 1.98's `chunks_exact_to_as_chunks` fires on the RGBA readback loops below.
+// Left as `chunks_exact` DELIBERATELY: every site here sits inside a `zip` / `filter` /
+// `enumerate` chain where `as_chunks().0` changes the item type from `&[u8]` to
+// `&[u8; N]`, so the rewrite is semantic rather than textual - and these targets need a
+// GPU, so the edit could not be verified by running them on this headless box. The
+// LIBRARY code this lint flagged was converted properly; this is the test-only remainder.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 /// The SPIR-V magic number (little-endian word order — the ONLY byte order DXC emits on this
 /// toolchain; `boyko_rhi_vulkan::compute::SpirvBlob` makes the same little-endian assumption
 /// reinterpreting `include_bytes!` as `&[u32]`).

@@ -554,7 +554,7 @@ pub(crate) fn claim_one_idle(
         return None;
     }
     let rotated = candidates.rotate_right(start);
-    let low = rotated & rotated.wrapping_neg();
+    let low = rotated.isolate_lowest_one();
     let id = (low.trailing_zeros() + start) % 64;
     let new = observed & !(1u64 << id);
     match inner

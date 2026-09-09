@@ -71,11 +71,14 @@ impl Hasher for KeyHasher {
 
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
-        for c in &mut chunks {
-            self.mix(u64::from_ne_bytes(c.try_into().expect("invariant: chunks_exact(8) yields 8 bytes")));
+        // `as_chunks::<8>` hands back `&[[u8; 8]]`, so the array is typed rather
+        // than reconstructed: the `try_into().expect(...)` the `chunks_exact`
+        // form needed is a runtime check of an invariant the type system can
+        // state, and the compiler could not always see through it.
+        let (chunks, rest) = bytes.as_chunks::<8>();
+        for c in chunks {
+            self.mix(u64::from_ne_bytes(*c));
         }
-        let rest = chunks.remainder();
         if !rest.is_empty() {
             let mut buf = [0u8; 8];
             buf[..rest.len()].copy_from_slice(rest);

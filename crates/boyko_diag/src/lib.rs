@@ -47,6 +47,24 @@
 //! page of this crate's `.bss`, and the reserved extent costs address space rather than resident
 //! memory.
 
+
+// `missing_const_for_thread_local` is a FALSE POSITIVE for this crate on clippy
+// 1.98.0 (2026-09-01), and the allow is the repair rather than a suppression:
+// every `thread_local!` initialiser here ALREADY IS `const { … }`, which is
+// exactly what the lint asks for.
+//
+// Two candidate cures were tested and neither works. Upgrading the toolchain
+// (1.97.1 -> 1.98.1) was taken specifically to fix this; it narrowed the lint
+// from five spans to a handful but did not remove it, so "wait for upstream" is
+// not a live plan. And the neighbouring-doc-comment confusion this lint has had
+// before is not the cause: stripping the `///` lines above a flagged static
+// leaves the bare `const { … }` form and the lint still fires.
+//
+// Placement matters: an `#[allow]` written OUTSIDE a `thread_local!` invocation
+// is reported as an `unused attribute` while the lint fires anyway, so this is
+// crate-level. Delete it when clippy stops reporting the const form.
+#![allow(clippy::missing_const_for_thread_local)]
+
 #![deny(clippy::print_stdout)]
 #![deny(clippy::print_stderr)]
 #![deny(clippy::dbg_macro)]

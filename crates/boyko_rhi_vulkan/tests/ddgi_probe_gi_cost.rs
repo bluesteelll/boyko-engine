@@ -36,6 +36,14 @@
 //! Run: `cargo test -p boyko_rhi_vulkan --test ddgi_probe_gi_cost -- --ignored --nocapture
 //! --test-threads=1` with `BOYKO_DISABLE_VALIDATION=1` (validation is crash-prone on the box).
 
+// clippy 1.98's `chunks_exact_to_as_chunks` fires on the RGBA readback loops below.
+// Left as `chunks_exact` DELIBERATELY: every site here sits inside a `zip` / `filter` /
+// `enumerate` chain where `as_chunks().0` changes the item type from `&[u8]` to
+// `&[u8; N]`, so the rewrite is semantic rather than textual - and these targets need a
+// GPU, so the edit could not be verified by running them on this headless box. The
+// LIBRARY code this lint flagged was converted properly; this is the test-only remainder.
+#![allow(clippy::chunks_exact_to_as_chunks)]
+
 use core::ptr::NonNull;
 use std::time::Instant;
 

@@ -306,7 +306,7 @@ pub fn rasterize(
     let fh = height as f32;
 
     for &translation in instances {
-        for tri in indices.chunks_exact(3) {
+        for tri in indices.as_chunks::<3>().0 {
             // Instance transform: a pure translation moves positions and leaves normals alone.
             let world: [[f32; 3]; 3] = [
                 v_add(vertices[tri[0] as usize].position, translation),

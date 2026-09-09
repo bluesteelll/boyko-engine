@@ -220,15 +220,15 @@ mapping) when it retired the Arena. See
 [PHASE-XI-RESULTS.md](archive/PHASE-XI-RESULTS.md).
 
 **API** ([component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs)):
-- Raw byte: `add(&[u8])` (739), `set_component(idx, &[u8])`, `get_raw(idx)`,
+- Raw byte: `add(&[u8])` (846), `set_component(idx, &[u8])`, `get_raw(idx)`,
   `get_raw_mut(idx)`.
 - Typed (TypeId-guarded, C-004): `add_typed::<T>`, `set_component_typed::<T>`,
   `get_typed::<T>`, `get_mut_typed::<T>`.
-- Removal: `swap_remove(idx)` (937), `pop()` — both run `drop_fn`.
-- Iteration: `buffer_ptr() -> *const u8` (1302) — the dense, SIMD-aligned base
-  (`SIMD_BUFFER_ALIGN = 32`, Phase X.A); `count() -> usize` (1226) = the `len`
+- Removal: `swap_remove(idx)` (1044), `pop()` — both run `drop_fn`.
+- Iteration: `buffer_ptr() -> *const u8` (1414) — the dense, SIMD-aligned base
+  (`SIMD_BUFFER_ALIGN = 32`, Phase X.A); `count() -> usize` (1338) = the `len`
   field.
-- Row addressing: the private `#[inline] unsafe fn row_ptr(&self, idx)` (710) =
+- Row addressing: the private `#[inline] unsafe fn row_ptr(&self, idx)` (817) =
   `buffer.as_ptr().add(idx * stride)`.
 
 **Phase X.B** deleted the former parallel `units: Vec<Unit>` (each entry was
@@ -252,7 +252,7 @@ chunks target distinct locations (Round 2 C3).
 (the old `debug_assert!(size > 0)` rejection is gone). A `stride == 0` pool is
 **tick-only**: `pool_byte_layout` degrades to `data_len == 0`,
 `added_off == 0`, `os_len == 2 * tick_len`
-([constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):256+);
+([constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):274+);
 `pool_reserve_rows(0) == POOL_MAX_ROWS` (rows bounded by the tick regions
 only — 2^24 × 4 B × 2 = 128 MiB address space per tag pool per hosting
 archetype, 2 MiB under the cfg fallback `POOL_MAX_ROWS = 262_144`
@@ -717,7 +717,7 @@ PHASE-2 / `fire_enable_column_alloc_bookkeeping` :195 O2), each gated by
 - **Dynamic terms** —
   [query/enable_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs):
   `EnableTerms` (per-view, ≤ `MAX_ENABLE_TERMS = 8`,
-  [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):431) populated by
+  [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):449) populated by
   `with_enabled` / `without_enabled` on `Query`
   ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):200/:215)
   and `QueryView`
@@ -1833,12 +1833,12 @@ everything above (worker threads, parking, scope, panic propagation, install
 API) is hand-rolled to fit the scheduler's contracts. Exports:
 
 - `ThreadPool` / `ThreadPoolBuilder` / `WorkerHandle` / `PoolInner` /
-  `MAX_WORKERS` (lib.rs:291).
-- `Scope` (lib.rs:290) — `Scope::spawn` with `'scope` lifetime erasure;
+  `MAX_WORKERS` (lib.rs:301).
+- `Scope` (lib.rs:300) — `Scope::spawn` with `'scope` lifetime erasure;
   `Scope::Drop` blocks via *work-stealing* (rayon pattern) so nested scopes can't
   deadlock. `install` (dispatcher TLS bookkeeping) vs `scope` (worker-safe,
   lighter; used by `par_iter` / `par_for_each_chunk`).
-- TLS (lib.rs:292): `current_worker_id`, `WORKER_ID_DISPATCHER` /
+- TLS (lib.rs:302): `current_worker_id`, `WORKER_ID_DISPATCHER` /
   `WORKER_ID_UNATTACHED`, `InSystemRunGuard` (the ALLOC1/ALLOC6 guard — the
   ECS crate's context-restricted paths `debug_assert!` it or its negation:
   event lane routing, the hook-drain SAFETY-7 gate), `try_with_active_pool`.
@@ -1891,9 +1891,9 @@ Bundle, SystemSet};`.
 | `POOL_TARGET_DATA_BYTES` | 1 GiB (syscall arms) / 4 MiB (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):60/:69 (syscall / fallback arm, Phase X.I) |
 | `POOL_MIN_ROWS` / `POOL_MAX_ROWS` | 2^16 / 2^24 (syscall arms); 256 / 2^18 (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):75/:85 (syscall arms, Phase X.I) |
 | `POOL_MIN_SLAB` / `POOL_MAX_SLAB` | 64 KiB / 64 MiB | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):103/:110 (Phase X.I) |
-| `DEFAULT_INLAND_RESERVE` | 1 GiB (syscall arms) / 16 MiB (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):354/:361 (syscall / fallback arm, Phase X.G) |
-| `INLAND_MIN_SLAB` / `INLAND_MAX_SLAB` | 256 KiB / 16 MiB | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):367/:372 (Phase X.G) |
-| `MAX_EVENT_THREADS` / `MAX_EVENT_CAPACITY` | 65 / 16384 | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):400/:418 |
+| `DEFAULT_INLAND_RESERVE` | 1 GiB (syscall arms) / 16 MiB (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):372/:379 (syscall / fallback arm, Phase X.G) |
+| `INLAND_MIN_SLAB` / `INLAND_MAX_SLAB` | 256 KiB / 16 MiB | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):385/:390 (Phase X.G) |
+| `MAX_EVENT_THREADS` / `MAX_EVENT_CAPACITY` | 65 / 16384 | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):418/:436 |
 | `MAX_COMPONENTS` | 512 | [component/component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs):63 |
 | `MAX_EVENTS` | 256 | [events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs):51 |
 | `MAX_ARCHETYPES` | 1024 | [iters/archetype_bit_set.rs](../crates/boyko_ecs/src/ecs/core/iters/archetype_bit_set.rs):7 |

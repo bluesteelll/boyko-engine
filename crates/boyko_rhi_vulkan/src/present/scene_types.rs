@@ -4353,8 +4353,10 @@ mod tests {
     /// no index mistake can hide behind a coincidence.
     fn indexed_push() -> [u8; 64] {
         let mut bytes = [0u8; 64];
-        for (e, word) in bytes.chunks_exact_mut(4).enumerate() {
-            word.copy_from_slice(&(e as f32).to_le_bytes());
+        // `as_chunks_mut::<4>` hands back `&mut [u8; 4]`, so the word is ASSIGNED
+        // rather than copied through a slice of unproven length.
+        for (e, word) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            *word = (e as f32).to_le_bytes();
         }
         bytes
     }

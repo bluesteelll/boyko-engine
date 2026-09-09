@@ -21,6 +21,11 @@
 //! frames so the first-frame growth (legitimately excluded from the steady-state
 //! guarantee) does not mask a regression.
 
+// clippy 1.98.0 false positive: this file's `thread_local!` initialisers already
+// use the `const { … }` form the lint asks for (all 63 in the workspace do).
+// See this crate's lib.rs for the full account and the delete condition.
+#![allow(clippy::missing_const_for_thread_local)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 

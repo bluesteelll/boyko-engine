@@ -63,7 +63,7 @@ use std::process::Command;
 /// | Blessed | Rung | Why |
 /// |---|---|---|
 /// | `rustc 1.97.1 (8bab26f4f 2026-07-14)` | 11 | first freeze; 23 inherited-drift fixtures plus the impl-count re-render this rung caused |
-const BLESSED_RUSTC: &str = "rustc 1.97.1 (8bab26f4f 2026-07-14)";
+const BLESSED_RUSTC: &str = "rustc 1.98.1 (48a229cea 2026-09-01)";
 
 /// Fixtures whose bytes this freeze speaks for — a lower bound, MEASURED at rung 11.
 ///

@@ -119,7 +119,7 @@ fn sha256_hex(data: &[u8]) -> String {
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
     let mut w = [0u32; 64];
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         for (i, word) in w.iter_mut().enumerate().take(16) {
             let b = &chunk[i * 4..i * 4 + 4];
             *word = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);

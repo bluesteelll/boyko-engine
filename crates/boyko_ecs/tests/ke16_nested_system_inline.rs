@@ -90,6 +90,11 @@
 //! Component id 494 is reserved for this test binary (492 `ke16_par_iter_in_system`,
 //! 493 `ke16_occupancy_gate`).
 
+// clippy 1.98.0 false positive: this file's `thread_local!` initialisers already
+// use the `const { … }` form the lint asks for (all 63 in the workspace do).
+// See this crate's lib.rs for the full account and the delete condition.
+#![allow(clippy::missing_const_for_thread_local)]
+
 use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::Arc;

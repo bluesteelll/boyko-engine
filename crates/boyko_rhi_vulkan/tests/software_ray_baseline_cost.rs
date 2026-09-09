@@ -202,7 +202,7 @@ fn summarize(samples_ns: &[f64]) -> Summary {
 
 /// Re-views a 48-byte UBO image as its 12 `u32` words for the host-coherent write.
 fn ubo_u32s(bytes: &[u8; 48]) -> Vec<u32> {
-    bytes.chunks_exact(4).map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]])).collect()
+    bytes.as_chunks::<4>().0.iter().map(|c| u32::from_ne_bytes(*c)).collect()
 }
 
 /// The measurement entry (`#[ignore]` — a measurement, not a pass/fail gate). Boots offscreen,
