@@ -435,6 +435,86 @@ pub(crate) fn register_soft_coupling_column_layouts() {
     }
 }
 
+// —— The SOFT-GRAPH cohort (audit Stage 4) ———————————————————————
+//
+// `SoftColorScratch` holds THREE `ParticleColorGraph`s (distance, volume,
+// self-collision) of six columns each, plus the per-substep pair list. Each graph
+// sweeps its own six together — the occupancy matrix is probed and set while
+// `chosen` is pushed, then the counting sort walks `chosen` / `color_start` /
+// `cursor` / `color_items` in one pass — so six is the cohort that has to be
+// distinct. The three graphs are colored at different times and could share slots,
+// and `pair_list` co-sweeps with the self-collision graph.
+//
+// All nineteen are laid out as ONE contiguous run anyway. Nineteen is far under the
+// stagger period, so the over-constraint is free, and one run means one width check
+// instead of four assertions about which graph may alias which.
+
+/// Number of `ScratchColumn`s in one
+/// [`ParticleColorGraph`](crate::soft::colored::ParticleColorGraph):
+/// `color_occ`, `chosen`, `color_start`, `color_items`, `cursor`, `seen_scratch`.
+pub(crate) const SOFT_GRAPH_COLUMNS_PER_INSTANCE: usize = 6;
+
+/// Number of `ParticleColorGraph` instances a `SoftColorScratch` owns.
+pub(crate) const SOFT_GRAPH_INSTANCES: usize = 3;
+
+/// Total ids in the soft-graph cohort: three graphs plus the pair list.
+pub(crate) const SOFT_GRAPH_COLUMN_COUNT: usize =
+    SOFT_GRAPH_COLUMNS_PER_INSTANCE * SOFT_GRAPH_INSTANCES + 1;
+
+/// Top of the soft-graph cohort — one id below the soft-coupling cohort's bottom.
+pub(crate) const SCRATCH_ID_SOFT_GRAPH_TOP: usize = SCRATCH_ID_SOFT_COUPLING_BOTTOM - 1;
+
+/// Bottom of the soft-graph cohort (inclusive) — the pair list's id.
+pub(crate) const SCRATCH_ID_SOFT_GRAPH_BOTTOM: usize =
+    SCRATCH_ID_SOFT_GRAPH_TOP - (SOFT_GRAPH_COLUMN_COUNT - 1);
+
+const _: () = assert!(
+    SOFT_GRAPH_COLUMN_COUNT <= POOL_STAGGER_LINES,
+    "the soft-graph cohort is wider than one stagger period"
+);
+
+const _: () = assert!(
+    SCRATCH_ID_SOFT_GRAPH_TOP < SCRATCH_ID_SOFT_COUPLING_BOTTOM,
+    "the soft-graph cohort overlaps the soft-coupling cohort"
+);
+
+/// The [`ComponentId`] for column `k` of `ParticleColorGraph` instance `instance`
+/// (`0` = distance, `1` = volume, `2` = self-collision).
+///
+/// ⚠ Each INSTANCE needs its own six ids. Three graphs under one set would compile,
+/// run, and give all three the same `pool_base_stagger` — the silent cache-set
+/// collapse a same-type re-registration cannot report.
+#[inline]
+pub(crate) fn soft_graph_column_id(instance: usize, k: usize) -> ComponentId {
+    debug_assert!(instance < SOFT_GRAPH_INSTANCES, "soft graph instance out of cohort");
+    debug_assert!(k < SOFT_GRAPH_COLUMNS_PER_INSTANCE, "soft graph column index out of cohort");
+    ComponentId::new(SCRATCH_ID_SOFT_GRAPH_TOP - (instance * SOFT_GRAPH_COLUMNS_PER_INSTANCE + k))
+}
+
+/// The [`ComponentId`] for `SoftColorScratch`'s per-substep self-collision pair list
+/// — the cohort's lowest id.
+#[inline]
+pub(crate) fn soft_pair_list_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_SOFT_GRAPH_BOTTOM)
+}
+
+/// Registers the element layout of every soft-graph column, idempotently.
+///
+/// Per instance: `color_occ` and `seen_scratch` are `u64` bitset words, the other
+/// four are `u32`; the pair list is `(u32, u32)`.
+pub(crate) fn register_soft_graph_column_layouts() {
+    for instance in 0..SOFT_GRAPH_INSTANCES {
+        for k in 0..SOFT_GRAPH_COLUMNS_PER_INSTANCE {
+            let id = soft_graph_column_id(instance, k).get();
+            match k {
+                0 | 5 => register_layout::<u64>(id),
+                _ => register_layout::<u32>(id),
+            }
+        }
+    }
+    register_layout::<(u32, u32)>(soft_pair_list_id().get());
+}
+
 /// The lowest id the physics scratch region may occupy.
 ///
 /// The region grows DOWNWARD from the top of the id space while production
@@ -460,11 +540,11 @@ pub(crate) fn register_soft_coupling_column_layouts() {
 /// and the census above is the thing to re-run before moving this number again.
 const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;
 
-// The soft-coupling cohort is the region's lowest edge today. The floor is
-// asserted against the LOWEST cohort rather than against whichever one happened to
-// be last when this was written — add a cohort below and move this assert with it.
+// The soft-graph cohort is the region's lowest edge today. The floor is asserted
+// against the LOWEST cohort rather than against whichever one happened to be last
+// when this was written — add a cohort below and move this assert with it.
 const _: () = assert!(
-    SCRATCH_ID_SOFT_COUPLING_BOTTOM >= SCRATCH_REGION_MIN_ID,
+    SCRATCH_ID_SOFT_GRAPH_BOTTOM >= SCRATCH_REGION_MIN_ID,
     "the physics scratch region has grown below SCRATCH_REGION_MIN_ID; production \
      ids climb from 0 and the reserved region is no longer comfortably out of \
      their reach. Re-run the census in that constant's docs before lowering it"
@@ -827,6 +907,17 @@ mod tests {
         (0..SOFT_COUPLING_COLUMN_COUNT).map(|k| soft_coupling_column_id(k).get()).collect()
     }
 
+    fn soft_graph_cohort_ids() -> Vec<usize> {
+        let mut ids = Vec::with_capacity(SOFT_GRAPH_COLUMN_COUNT);
+        for instance in 0..SOFT_GRAPH_INSTANCES {
+            for k in 0..SOFT_GRAPH_COLUMNS_PER_INSTANCE {
+                ids.push(soft_graph_column_id(instance, k).get());
+            }
+        }
+        ids.push(soft_pair_list_id().get());
+        ids
+    }
+
     /// `ContactPairs::pairs` is written by the broadphase and read by the
     /// narrowphase, so the distinctness it needs spans BOTH cohorts. The const
     /// asserts prove that from adjacency plus a width; this proves it over the ids
@@ -862,6 +953,11 @@ mod tests {
             &soft_coupling_cohort_ids(),
             SOFT_COUPLING_COLUMN_COUNT,
         );
+        assert_cohort_slots_distinct(
+            "soft-graph cohort",
+            &soft_graph_cohort_ids(),
+            SOFT_GRAPH_COLUMN_COUNT,
+        );
     }
 
     /// Each cohort is a contiguous run with no hole and no duplicate — the premise
@@ -889,6 +985,12 @@ mod tests {
                 SCRATCH_ID_SOFT_COUPLING_TOP,
                 SCRATCH_ID_SOFT_COUPLING_BOTTOM,
             ),
+            (
+                "soft-graph cohort",
+                soft_graph_cohort_ids(),
+                SCRATCH_ID_SOFT_GRAPH_TOP,
+                SCRATCH_ID_SOFT_GRAPH_BOTTOM,
+            ),
         ] {
             ids.sort_unstable();
             assert_eq!(ids[0], bottom, "{name} starts at its declared bottom");
@@ -915,6 +1017,7 @@ mod tests {
             ("broadphase", broadphase_cohort_ids()),
             ("narrowphase", narrowphase_cohort_ids()),
             ("soft-coupling", soft_coupling_cohort_ids()),
+            ("soft-graph", soft_graph_cohort_ids()),
         ];
         for (i, (na, a)) in cohorts.iter().enumerate() {
             for (nb, b) in &cohorts[i + 1..] {

@@ -29,12 +29,17 @@
 //! duplicated here (simple `for i in 0..n` SoA loops) so the serial
 //! `step_body` is left LITERALLY untouched (C4).
 
+use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_macros::Resource;
 use boyko_threadpool::try_with_active_pool;
 
 use crate::math::Vec3;
+use crate::scratch_ids::{
+    register_soft_graph_column_layouts, scratch_reserve_rows, soft_graph_column_id,
+    soft_pair_list_id,
+};
 use crate::resources::PhysicsConfig;
 use crate::sdf_query::SdfField;
 use crate::soft::collide::collide_sdf;
@@ -100,29 +105,28 @@ fn occ_set(occ: &mut [u64], base: usize, p: u32) {
 /// 6. counting-sort CSR, stable, ascending within a color — identical determinism.
 /// 7. fixed visit order = `0..m` (distance) / `0..k` (volume) / SP3 emission order
 ///    (self) — greedy first-fit is a pure function of the fixed visit order.
-#[derive(Default)]
 pub struct ParticleColorGraph {
     /// Per-color particle bitset matrix, addressed `color_occ[c * words + (p >> 6)]`,
     /// bit `p & 63`. Reused (cleared, never realloc'd) — the occupancy scratch. The
     /// `words` stride is recomputed per coloring from `n` (each `color_*` entry point
     /// derives it locally), so it is not carried as state.
-    color_occ: Vec<u64>,
+    color_occ: ScratchColumn<u64>,
     /// Number of colors produced this coloring (`color_start.len() == n_colors + 1`).
     n_colors: usize,
     /// Per-constraint chosen color (scratch, reused as the counting-sort source).
-    chosen: Vec<u32>,
+    chosen: ScratchColumn<u32>,
     /// CSR offsets: `color_start[c]..[c + 1]` indexes `color_items`
     /// (`len == n_colors + 1`).
-    color_start: Vec<u32>,
+    color_start: ScratchColumn<u32>,
     /// CSR values: constraint indices grouped by color, ascending within a color.
-    color_items: Vec<u32>,
+    color_items: ScratchColumn<u32>,
     /// Counting-sort cursor scratch (a working copy of `color_start`).
-    cursor: Vec<u32>,
+    cursor: ScratchColumn<u32>,
     /// Debug-only "seen this color" particle bitset scratch for the coloring re-scan,
     /// reused (resized + zeroed per color) so the in-debug invariant check is itself
     /// ZERO per-step alloc in steady state (the C3b contract holds in debug too).
     /// Never touched in release (the re-scan is `cfg(debug_assertions)`).
-    seen_scratch: Vec<u64>,
+    seen_scratch: ScratchColumn<u64>,
 }
 
 /// DEBUG snapshot of a [`ParticleColorGraph`] CSR's `(len, capacity)` shape,
@@ -139,15 +143,27 @@ struct CsrShape {
 }
 
 impl ParticleColorGraph {
-    /// Reserves the coloring buffers for up to `n` particles and `m` constraints (no
-    /// later realloc in steady state).
-    fn reserve(&mut self, n: usize, m: usize) {
-        let words = n.div_ceil(OCC_WORD_BITS);
-        self.color_occ.reserve(words);
-        self.chosen.reserve(m);
-        self.color_start.reserve(m + 1);
-        self.color_items.reserve(m);
-        self.cursor.reserve(m + 1);
+    /// Builds one graph's six columns under `instance`'s reserved ids
+    /// (`0` = distance, `1` = volume, `2` = self-collision).
+    ///
+    /// There is no `reserve` any more, and its absence is the point: a
+    /// `ScratchColumn`'s capacity is a HARD ceiling fixed here at the same budget
+    /// every other scratch column gets, so the "denser-than-reserved substep may
+    /// resize-grow" case the old `reserve` existed to soften cannot arise — and
+    /// neither can the realloc that came with it.
+    pub(crate) fn new(instance: usize) -> Self {
+        register_soft_graph_column_layouts();
+        let words = scratch_reserve_rows(size_of::<u64>());
+        let idx = scratch_reserve_rows(size_of::<u32>());
+        Self {
+            color_occ: ScratchColumn::new(soft_graph_column_id(instance, 0), words),
+            n_colors: 0,
+            chosen: ScratchColumn::new(soft_graph_column_id(instance, 1), idx),
+            color_start: ScratchColumn::new(soft_graph_column_id(instance, 2), idx),
+            color_items: ScratchColumn::new(soft_graph_column_id(instance, 3), idx),
+            cursor: ScratchColumn::new(soft_graph_column_id(instance, 4), idx),
+            seen_scratch: ScratchColumn::new(soft_graph_column_id(instance, 5), words),
+        }
     }
 
     /// Number of colors produced by the last coloring.
@@ -160,15 +176,17 @@ impl ParticleColorGraph {
     /// index).
     #[inline]
     pub fn color(&self, c: usize) -> &[u32] {
-        let lo = self.color_start[c] as usize;
-        let hi = self.color_start[c + 1] as usize;
-        &self.color_items[lo..hi]
+        let starts = self.color_start.as_read_slice();
+        let lo = starts[c] as usize;
+        let hi = starts[c + 1] as usize;
+        &self.color_items.as_read_slice()[lo..hi]
     }
 
     /// Total slots in color `c` (its CSR span width) — the parallel-threshold metric.
     #[inline]
     pub fn color_span(&self, c: usize) -> u32 {
-        self.color_start[c + 1] - self.color_start[c]
+        let starts = self.color_start.as_read_slice();
+        starts[c + 1] - starts[c]
     }
 
     /// DEBUG snapshot of the CSR's shape (audit F5): the `(len, capacity)` of the
@@ -180,6 +198,13 @@ impl ParticleColorGraph {
     /// realloc a buffer a worker still holds a `*const` into (use-after-free /
     /// torn read). `capacity` matters because a reserve-only realloc (no length
     /// change) also moves the base.
+    ///
+    /// ⚠ Since the CSR moved onto `ScratchColumn`s (audit Stage 4) the hazard this
+    /// was written for is STRUCTURALLY GONE: a column's base is address-stable
+    /// across growth (the reservation commits pages in place), so no resize can move
+    /// a buffer a worker holds a pointer into. What the snapshot still pins is the
+    /// LENGTH contract — that the CSR is not rebuilt mid-dispatch — which is a real
+    /// invariant and a cheaper one to state than to re-derive.
     ///
     /// `cfg(debug_assertions)` only — a pure invariant probe, never compiled into
     /// release (the borrow checker already forbids `&mut self` here; this is
@@ -216,13 +241,17 @@ impl ParticleColorGraph {
             let b_dyn = is_dynamic_row(inv_mass[b as usize]);
             let color = self.find_free_color_2(words, a, b, a_dyn, b_dyn);
             let base = color * words;
-            if a_dyn {
-                occ_set(&mut self.color_occ, base, a);
+            {
+                let mut occ_view = self.color_occ.build_view();
+                let occ = occ_view.as_mut_slice();
+                if a_dyn {
+                    occ_set(occ, base, a);
+                }
+                if b_dyn {
+                    occ_set(occ, base, b);
+                }
             }
-            if b_dyn {
-                occ_set(&mut self.color_occ, base, b);
-            }
-            self.chosen.push(color as u32);
+            self.chosen.build_view().push(color as u32);
         }
         self.finish_csr(m);
         self.debug_assert_coloring_2(m, inv_mass, words, &endpoint);
@@ -250,19 +279,23 @@ impl ParticleColorGraph {
             let d3 = is_dynamic_row(inv_mass[v3 as usize]);
             let color = self.find_free_color_4(words, (v0, v1, v2, v3), (d0, d1, d2, d3));
             let base = color * words;
-            if d0 {
-                occ_set(&mut self.color_occ, base, v0);
+            {
+                let mut occ_view = self.color_occ.build_view();
+                let occ = occ_view.as_mut_slice();
+                if d0 {
+                    occ_set(occ, base, v0);
+                }
+                if d1 {
+                    occ_set(occ, base, v1);
+                }
+                if d2 {
+                    occ_set(occ, base, v2);
+                }
+                if d3 {
+                    occ_set(occ, base, v3);
+                }
             }
-            if d1 {
-                occ_set(&mut self.color_occ, base, v1);
-            }
-            if d2 {
-                occ_set(&mut self.color_occ, base, v2);
-            }
-            if d3 {
-                occ_set(&mut self.color_occ, base, v3);
-            }
-            self.chosen.push(color as u32);
+            self.chosen.build_view().push(color as u32);
         }
         self.finish_csr(k);
         self.debug_assert_coloring_4(k, inv_mass, words, &vert);
@@ -271,11 +304,10 @@ impl ParticleColorGraph {
     /// Resets the per-coloring state for a fresh coloring of `m` constraints over
     /// `words`-word color rows (capacity reused — clear, never realloc in steady
     /// state).
-    fn begin(&mut self, _words: usize, m: usize) {
-        self.color_occ.clear();
+    fn begin(&mut self, _words: usize, _m: usize) {
+        self.color_occ.build_view().clear();
         self.n_colors = 0;
-        self.chosen.clear();
-        self.chosen.reserve(m);
+        self.chosen.build_view().clear();
     }
 
     /// Finds the lowest color where both dynamic endpoints are free, appending a new
@@ -292,12 +324,13 @@ impl ParticleColorGraph {
         let mut color = 0usize;
         loop {
             if color >= self.n_colors {
-                self.color_occ.resize(self.color_occ.len() + words, 0);
+                let grown = self.color_occ.len() + words;
+                self.color_occ.build_view().resize(grown, 0);
                 self.n_colors += 1;
             }
             let base = color * words;
-            let free = (!a_dyn || !occ_get(&self.color_occ, base, a))
-                && (!b_dyn || !occ_get(&self.color_occ, base, b));
+            let occ = self.color_occ.as_read_slice();
+            let free = (!a_dyn || !occ_get(occ, base, a)) && (!b_dyn || !occ_get(occ, base, b));
             if free {
                 return color;
             }
@@ -317,14 +350,16 @@ impl ParticleColorGraph {
         let mut color = 0usize;
         loop {
             if color >= self.n_colors {
-                self.color_occ.resize(self.color_occ.len() + words, 0);
+                let grown = self.color_occ.len() + words;
+                self.color_occ.build_view().resize(grown, 0);
                 self.n_colors += 1;
             }
             let base = color * words;
-            let free = (!d.0 || !occ_get(&self.color_occ, base, v.0))
-                && (!d.1 || !occ_get(&self.color_occ, base, v.1))
-                && (!d.2 || !occ_get(&self.color_occ, base, v.2))
-                && (!d.3 || !occ_get(&self.color_occ, base, v.3));
+            let occ = self.color_occ.as_read_slice();
+            let free = (!d.0 || !occ_get(occ, base, v.0))
+                && (!d.1 || !occ_get(occ, base, v.1))
+                && (!d.2 || !occ_get(occ, base, v.2))
+                && (!d.3 || !occ_get(occ, base, v.3));
             if free {
                 return color;
             }
@@ -336,26 +371,48 @@ impl ParticleColorGraph {
     /// `color_items` (stable → ascending constraint index within a color, D4/W3#6).
     fn finish_csr(&mut self, m: usize) {
         let n_colors = self.n_colors;
-        self.color_start.clear();
-        self.color_start.resize(n_colors + 1, 0);
-        for &c in &self.chosen {
-            self.color_start[c as usize + 1] += 1;
+        // Histogram then exclusive prefix sum, in place. `chosen` is a SHARED borrow
+        // of one field while `color_start` is the `&mut` of another - disjoint places,
+        // so no copy is needed to split them.
+        {
+            let mut starts_view = self.color_start.build_view();
+            starts_view.clear();
+            starts_view.resize(n_colors + 1, 0);
+            let starts = starts_view.as_mut_slice();
+            for &c in self.chosen.as_read_slice() {
+                starts[c as usize + 1] += 1;
+            }
+            for c in 0..n_colors {
+                starts[c + 1] += starts[c];
+            }
+            debug_assert_eq!(
+                starts[n_colors] as usize, m,
+                "invariant: every constraint colored"
+            );
         }
-        for c in 0..n_colors {
-            self.color_start[c + 1] += self.color_start[c];
+        {
+            let mut items_view = self.color_items.build_view();
+            items_view.clear();
+            items_view.resize(m, 0);
         }
-        debug_assert_eq!(
-            self.color_start[n_colors] as usize, m,
-            "invariant: every constraint colored"
-        );
-        self.color_items.clear();
-        self.color_items.resize(m, 0);
-        self.cursor.clear();
-        self.cursor.extend_from_slice(&self.color_start[..n_colors]);
-        for (ci, &c) in self.chosen.iter().enumerate() {
-            let slot = self.cursor[c as usize] as usize;
-            self.color_items[slot] = ci as u32;
-            self.cursor[c as usize] += 1;
+        {
+            let mut cursor_view = self.cursor.build_view();
+            cursor_view.clear();
+            cursor_view.extend_from_slice(&self.color_start.as_read_slice()[..n_colors]);
+        }
+        {
+            // Three disjoint field borrows: `chosen` read, `cursor` and `color_items`
+            // written. The scatter is the counting sort's stable pass.
+            let chosen = self.chosen.as_read_slice();
+            let mut cursor_view = self.cursor.build_view();
+            let cursor = cursor_view.as_mut_slice();
+            let mut items_view = self.color_items.build_view();
+            let items = items_view.as_mut_slice();
+            for (ci, &c) in chosen.iter().enumerate() {
+                let slot = cursor[c as usize] as usize;
+                items[slot] = ci as u32;
+                cursor[c as usize] += 1;
+            }
         }
     }
 
@@ -370,14 +427,18 @@ impl ParticleColorGraph {
     {
         if cfg!(debug_assertions) {
             let words = words.max(1);
-            self.seen_scratch.clear();
-            self.seen_scratch.resize(words, 0);
+            {
+                let mut seen_view = self.seen_scratch.build_view();
+                seen_view.clear();
+                seen_view.resize(words, 0);
+            }
             // Split the borrows: the CSR is read-only, `seen_scratch` is `&mut`.
-            let starts = &self.color_start;
-            let items = &self.color_items;
-            let seen = &mut self.seen_scratch;
+            let starts = self.color_start.as_read_slice();
+            let items = self.color_items.as_read_slice();
+            let mut seen_view = self.seen_scratch.build_view();
+            let seen = seen_view.as_mut_slice();
             for c in 0..self.n_colors {
-                seen.iter_mut().for_each(|w| *w = 0);
+                seen.fill(0);
                 let lo = starts[c] as usize;
                 let hi = starts[c + 1] as usize;
                 for &ci in &items[lo..hi] {
@@ -401,13 +462,17 @@ impl ParticleColorGraph {
     {
         if cfg!(debug_assertions) {
             let words = words.max(1);
-            self.seen_scratch.clear();
-            self.seen_scratch.resize(words, 0);
-            let starts = &self.color_start;
-            let items = &self.color_items;
-            let seen = &mut self.seen_scratch;
+            {
+                let mut seen_view = self.seen_scratch.build_view();
+                seen_view.clear();
+                seen_view.resize(words, 0);
+            }
+            let starts = self.color_start.as_read_slice();
+            let items = self.color_items.as_read_slice();
+            let mut seen_view = self.seen_scratch.build_view();
+            let seen = seen_view.as_mut_slice();
             for c in 0..self.n_colors {
-                seen.iter_mut().for_each(|w| *w = 0);
+                seen.fill(0);
                 let lo = starts[c] as usize;
                 let hi = starts[c + 1] as usize;
                 for &ci in &items[lo..hi] {
@@ -445,7 +510,7 @@ fn mark_seen(seen: &mut [u64], p: u32, c: usize) {
 /// growth-frame-realloc alloc contract, resources.rs:1946-1949): the common case
 /// never reallocs, but a denser-than-reserved substep may resize-grow. The zero-alloc
 /// gate asserts STEADY STATE (after a warm-up window), NOT first-N-frames (C3b).
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct SoftColorScratch {
     /// Distance-constraint coloring (immutable topology → colored once per frame,
     /// reused across substeps, D3).
@@ -457,7 +522,7 @@ pub struct SoftColorScratch {
     self_pairs: ParticleColorGraph,
     /// The per-substep self-collision pair list in SP3 emission order (C3a). Cleared
     /// + refilled each substep (capacity reused).
-    pair_list: Vec<(u32, u32)>,
+    pair_list: ScratchColumn<(u32, u32)>,
     /// `true` once the distance/volume colorings are computed for the current frame
     /// (so they are not recolored per substep — D3). Reset at the top of each
     /// `step_body_colored`.
@@ -471,16 +536,28 @@ pub struct SoftColorScratch {
     parallel_color_count: usize,
 }
 
-impl SoftColorScratch {
-    /// Reserves all coloring + pair buffers for a body of `n` particles, `m` distance
-    /// constraints, `k` tets, and `pair_cap` expected self-collision pairs (no later
-    /// realloc in steady state).
-    fn reserve(&mut self, n: usize, m: usize, k: usize, pair_cap: usize) {
-        self.distance.reserve(n, m);
-        self.volume.reserve(n, k);
-        self.self_pairs.reserve(n, pair_cap);
-        self.pair_list.reserve(pair_cap);
+impl Default for SoftColorScratch {
+    /// Hand-written because each graph's six columns and the pair list need their own
+    /// reserved [`ComponentId`]s, which no derive can supply. The three graphs take
+    /// instance `0` / `1` / `2` so their eighteen columns land on eighteen distinct
+    /// cache-set staggers.
+    fn default() -> Self {
+        register_soft_graph_column_layouts();
+        Self {
+            distance: ParticleColorGraph::new(0),
+            volume: ParticleColorGraph::new(1),
+            self_pairs: ParticleColorGraph::new(2),
+            pair_list: ScratchColumn::new(
+                soft_pair_list_id(),
+                scratch_reserve_rows(size_of::<(u32, u32)>()),
+            ),
+            topology_colored: false,
+            parallel_color_count: 0,
+        }
     }
+}
+
+impl SoftColorScratch {
 
     /// The DISTANCE coloring (test hook for the `{1, N}` oracle + disjointness gate).
     #[inline]
@@ -661,10 +738,11 @@ fn step_body_colored(
         "invariant: particle_radius must be >= 0"
     );
 
-    // Reserve the coloring buffers once from this body's dimensions (steady-state
-    // zero-alloc; may grow on a denser substep — the C3b alloc contract). The particle
-    // count loosely bounds the expected self-collision pair count.
-    scratch.reserve(n, m, k, n);
+    // No per-body reserve any more (audit Stage 4): every coloring buffer is a
+    // `ScratchColumn` whose capacity is a HARD ceiling fixed at construction, so the
+    // "may grow on a denser substep" half of the C3b alloc contract is unreachable
+    // here — there is no allocator to reach, growth commits pages in place, and the
+    // base never moves.
     // Color the IMMUTABLE distance/volume topology ONCE per frame, reused across
     // substeps (D3).
     color_topology_once(body, scratch);
@@ -847,9 +925,9 @@ fn resolve_self_collision_colored(
             // Emit the SP3-ordered pair list against the single hash (C3a), color it
             // (recolored every sweep — the pair set is position-dependent), then solve
             // color-by-color via the SHARED `project_self_pair` leaf.
-            scratch.pair_list.clear();
             {
-                let pairs = &mut scratch.pair_list;
+                let mut pairs = scratch.pair_list.build_view();
+                pairs.clear();
                 sweep(body, table, inv_cell, |_body, i, j| {
                     pairs.push((i as u32, j as u32));
                 });
@@ -858,7 +936,7 @@ fn resolve_self_collision_colored(
             // (disjoint borrows of the two scratch fields — `self_pairs` `&mut`, the
             // `pair_list` `&`).
             {
-                let pairs = &scratch.pair_list;
+                let pairs = scratch.pair_list.as_read_slice();
                 let pm = pairs.len();
                 scratch
                     .self_pairs
@@ -886,8 +964,10 @@ fn solve_self_color(body: &mut SoftBody, scratch: &mut SoftColorScratch, color: 
     // closure (which crosses `scope.spawn`) holds no `&[...]` borrow into the scratch
     // (TB-clean, 9.3c); reads stay in-bounds (`slot < pair_list.len()`, the colorer's
     // invariant).
-    let pairs_ptr = scratch.pair_list.as_ptr();
-    let pairs_len = scratch.pair_list.len();
+    let (pairs_ptr, pairs_len) = {
+        let pairs = scratch.pair_list.as_read_slice();
+        (pairs.as_ptr(), pairs.len())
+    };
     let parallel_count = &mut scratch.parallel_color_count;
     let graph = &scratch.self_pairs;
     let pl = PairListPtr {
@@ -962,8 +1042,9 @@ fn dispatch_color<F>(
 ) where
     F: Fn(SoftCols, usize) + Send + Sync + Copy,
 {
-    let lo = graph.color_start[color] as usize;
-    let hi = graph.color_start[color + 1] as usize;
+    let starts = graph.color_start.as_read_slice();
+    let lo = starts[color] as usize;
+    let hi = starts[color + 1] as usize;
     if lo == hi {
         return;
     }
@@ -1015,7 +1096,7 @@ fn dispatch_color<F>(
         // un-typeable on this path (see the per-spawn SAFETY block).
         let ptrs = SoftColorPtrs {
             cols: SoftCols::from_body(body),
-            color_items: graph.color_items.as_ptr(),
+            color_items: graph.color_items.as_read_slice().as_ptr(),
         };
 
         // F5 invariant pin: the CSR (`color_start` + `color_items`) is BUILT by the
