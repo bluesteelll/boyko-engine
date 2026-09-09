@@ -14,12 +14,14 @@
 //! Production component ids are minted by `register_new` from a process-global
 //! counter that starts at `0` and climbs UPWARD as `#[derive(Component)]` types
 //! are first touched (component_registry.rs `NEXT_ID`). To avoid colliding with
-//! that ascending production range, the scratch ids occupy a fixed band at the
-//! TOP of `[0, MAX_COMPONENTS)` (`MAX_COMPONENTS == 512`): reaching it from the
-//! production counter would require 500+ distinct component types, far beyond any
-//! realistic world. If a production type ever DID climb into the band, the
+//! that ascending production range, the scratch ids occupy a fixed region at
+//! the TOP of `[0, MAX_COMPONENTS)` (`MAX_COMPONENTS == 512`), floored at
+//! [`SCRATCH_REGION_MIN_ID`] — reaching that floor from the production counter
+//! takes 384 distinct component types against a measured ~142 (see the constant's
+//! docs for the census). If a production type ever DID climb into the region, the
 //! `register_layout` collision check panics loudly (a wrong-type slot is never
-//! silently aliased) — fail-fast, not silent corruption.
+//! silently aliased) — fail-fast, not silent corruption. The floor is the margin
+//! that keeps that panic unreachable; the collision check is the proof.
 //!
 //! The three ids are distinct so the three columns are independent pools; two of
 //! them store the SAME element type (`BodyEffective`), which is fine — the
@@ -290,14 +292,6 @@ const _: () = assert!(
     "the constraint-graph cohort overlaps the solver cohort"
 );
 
-// The scratch region grows DOWNWARD from the top of the id space, toward the
-// production counter climbing up from 0. This is the floor that keeps the two
-// apart: cross it and a `#[derive(Component)]` type could claim a scratch id.
-const _: () = assert!(
-    SCRATCH_ID_GRAPH_BOTTOM >= MAX_COMPONENTS - 64,
-    "the physics scratch region has grown more than 64 ids below the top of the      component-id space; production ids climb from 0 and the reserved band is no      longer comfortably out of their reach"
-);
-
 /// The [`ComponentId`] for graph column `k` (`0`-based, in field order),
 /// descending from [`SCRATCH_ID_GRAPH_TOP`].
 #[inline]
@@ -335,15 +329,39 @@ const _: () = assert!(
     "the broadphase cohort overlaps the constraint-graph cohort"
 );
 
-// The scratch region grows DOWNWARD from the top of the id space toward the
-// production counter climbing up from 0, and the broadphase cohort is now its
-// lowest edge. This is the floor that keeps the two apart — cross it and a
-// `#[derive(Component)]` type could claim a scratch id. It moves down with each
-// cohort added, which is exactly why it is asserted against the LOWEST one
-// rather than against whichever cohort happened to be last when it was written.
+/// The lowest id the physics scratch region may occupy.
+///
+/// The region grows DOWNWARD from the top of the id space while production
+/// `#[derive(Component)]` ids climb UPWARD from `0`, and this is the line that
+/// keeps the two apart. It is a MARGIN, not a proof — the proof is
+/// `register_layout`'s collision check, which panics loudly the moment a
+/// production type lands on a reserved slot. What the margin buys is that the
+/// panic stays unreachable in practice.
+///
+/// # Why 128 ids, measured 2026-09-09
+///
+/// The previous value was 64, written when the region was 34 ids wide, and the
+/// only number behind it was a guess in prose: "500+ distinct component types,
+/// far beyond any realistic world". Counting `#[derive(Component)]` sites under
+/// `src/` across the largest binary's dependency closure (`boyko_demo`: ecs 45 +
+/// ui 36 + render 21 + physics 17 + scene 14 + demo 8 + input 1) gives **142** —
+/// and that is an OVER-count, because it includes `#[cfg(test)]` types no
+/// shipping process ever mints.
+///
+/// Finishing Stage 4 needs roughly 90 scratch ids, which does not fit under 64.
+/// At 128 the scratch side keeps ~38 ids of headroom and the production side gets
+/// 384 against a measured ~142 — a 2.7x margin on the side that actually grows,
+/// and the census above is the thing to re-run before moving this number again.
+const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;
+
+// The broadphase cohort is the region's lowest edge today. The floor is asserted
+// against the LOWEST cohort rather than against whichever one happened to be last
+// when this was written — add a cohort below and move this assert with it.
 const _: () = assert!(
-    SCRATCH_ID_BROADPHASE_BOTTOM >= MAX_COMPONENTS - 64,
-    "the physics scratch region has grown more than 64 ids below the top of the      component-id space; production ids climb from 0 and the reserved band is no      longer comfortably out of their reach"
+    SCRATCH_ID_BROADPHASE_BOTTOM >= SCRATCH_REGION_MIN_ID,
+    "the physics scratch region has grown below SCRATCH_REGION_MIN_ID; production \
+     ids climb from 0 and the reserved region is no longer comfortably out of \
+     their reach. Re-run the census in that constant's docs before lowering it"
 );
 
 /// The [`ComponentId`] for broadphase column `k` (`0`-based, in field order).
