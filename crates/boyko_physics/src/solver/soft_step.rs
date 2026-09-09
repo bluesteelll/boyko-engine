@@ -68,7 +68,8 @@ use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{BodyState, PhysicsConfig, SolverScratch};
 use crate::scratch_ids::{
-    body_eff_serial_id, register_scratch_layouts, scratch_reserve_rows, warm_table_id,
+    body_eff_serial_id, register_scratch_layouts, scratch_reserve_rows,
+    serial_manifold_constraints_id, serial_point_constraints_id, warm_table_id,
 };
 
 /// Maximum penetration-recovery bias speed (world units/s) the soft normal solve
@@ -105,7 +106,7 @@ pub(crate) const RESTITUTION_THRESHOLD: f32 = 1.0;
 /// manifold-order × point-order sequence — the same order
 /// [`SolverScratch::vn_initial`](crate::resources::SolverScratch) is indexed in.
 #[derive(Clone, Copy, Debug, Default)]
-struct PointConstraint {
+pub(crate) struct PointConstraint {
     /// Anchor offset on body A from its center of mass (world frame).
     ra: Vec3,
     /// Anchor offset on body B from its center of mass (world frame).
@@ -151,7 +152,7 @@ pub(crate) const IMMOVABLE_AT_REST: BodyEffective = BodyEffective {
 /// the span of its points in the flattened [`SoftStepSolver::points`] buffer
 /// (P2 W2).
 #[derive(Clone, Copy, Debug, Default)]
-struct ManifoldConstraint {
+pub(crate) struct ManifoldConstraint {
     /// Dense row index of body A.
     ia: usize,
     /// Dense row index of body B, OR — when [`b_is_sentinel`](Self::b_is_sentinel)
@@ -191,11 +192,13 @@ pub struct SoftStepSolver {
     /// `std::Vec` parallel-data-system (audit Stage P). This is the SERIAL path —
     /// every access is single-threaded through the build view's `as_mut_slice`.
     bodies: ScratchColumn<BodyEffective>,
-    /// Per-manifold constraint state, in deterministic manifold order.
-    manifolds: Vec<ManifoldConstraint>,
+    /// Per-manifold constraint state, in deterministic manifold order. Backed by
+    /// a [`ScratchColumn`] (audit Stage 4).
+    manifolds: ScratchColumn<ManifoldConstraint>,
     /// Flattened per-point constraint state, indexed by `manifold.point_start +
-    /// p` (the same order `scratch.vn_initial` uses).
-    points: Vec<PointConstraint>,
+    /// p` (the same order `scratch.vn_initial` uses). Backed by a
+    /// [`ScratchColumn`] (audit Stage 4).
+    points: ScratchColumn<PointConstraint>,
     /// Last frame's converged impulses (W3) — probed to seed this frame's
     /// contacts at the start of [`solve`](Self::solve).
     warm_read: WarmStartTable,
@@ -226,8 +229,14 @@ impl SoftStepSolver {
         let reserve = bodies.max(scratch_reserve_rows(size_of::<BodyEffective>()));
         Self {
             bodies: ScratchColumn::new(body_eff_serial_id(), reserve),
-            manifolds: Vec::with_capacity(contacts),
-            points: Vec::with_capacity(contacts),
+            manifolds: ScratchColumn::new(
+                serial_manifold_constraints_id(),
+                contacts.max(scratch_reserve_rows(size_of::<ManifoldConstraint>())),
+            ),
+            points: ScratchColumn::new(
+                serial_point_constraints_id(),
+                contacts.max(scratch_reserve_rows(size_of::<PointConstraint>())),
+            ),
             warm_read: WarmStartTable::with_capacity(warm_table_id(0), contacts),
             warm_write: WarmStartTable::with_capacity(warm_table_id(1), contacts),
             warm_start_enabled: true,
@@ -303,6 +312,8 @@ impl SoftStepSolver {
             ..
         } = self;
         let bodies_eff = body_col.as_read_slice();
+        let mut out_manifolds = out_manifolds.build_view();
+        let mut out_points = out_points.build_view();
         out_manifolds.clear();
         out_points.clear();
         // The refill view is taken ONCE for the whole build rather than per push:
@@ -466,12 +477,15 @@ impl SoftStepSolver {
             return;
         }
         let point_count = self.points.len();
+        // A shared borrow of one field while `warm_write` is borrowed mutably below
+        // — disjoint places, so no take/put-back is needed.
+        let points = self.points.as_read_slice();
         self.warm_write.rebuild(point_count);
         // Each point persists independently under its own per-point key, in the
         // flattened `(manifold order, point index)` order — the deterministic C3
         // insertion order. A box manifold's 4 points therefore each carry their
         // converged impulse to next frame.
-        for pc in &self.points {
+        for pc in points {
             self.warm_write.insert(
                 pc.warm_key,
                 pc.normal_impulse,
@@ -863,12 +877,18 @@ impl RigidSolver for SoftStepSolver {
         // / the warm tables stay borrowable through the destructured fields.
         let Self {
             bodies,
-            manifolds: mc,
-            points,
+            manifolds: mc_col,
+            points: points_col,
             ..
         } = self;
         let mut bodies_view = bodies.build_view();
         let bodies_eff = bodies_view.as_mut_slice();
+        // The constraint columns are read / mutated through their own views for the
+        // whole substep loop: `mc` is shared (the manifold list is fixed once built),
+        // `points` is the single-threaded mutable slice the sweeps accumulate into.
+        let mc = mc_col.as_read_slice();
+        let mut points_view = points_col.build_view();
+        let points = points_view.as_mut_slice();
 
         for _ in 0..substeps {
             // (1) Gravity integrate DYNAMIC bodies only (C2 gate (2)). O1: the AVX2

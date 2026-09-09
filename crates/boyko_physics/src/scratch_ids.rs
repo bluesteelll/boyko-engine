@@ -48,6 +48,7 @@ use crate::manifold::{BodyIndex, Manifold};
 use crate::narrowphase::axis_cache::AxisEntry;
 use crate::resources::BodyState;
 use crate::solver::contact::BodyEffective;
+use crate::solver::soft_step::{ManifoldConstraint, PointConstraint};
 use crate::solver::warm_start::WarmEntry;
 
 /// Top of the rigid colored solver's contact-column band (audit Stage P — P2).
@@ -217,8 +218,9 @@ const _: () = assert!(
 // separate run proves nothing about collisions against the body mirrors, which
 // is exactly the pair that shares a loop.
 
-/// Number of ids in the solver tail that are named one by one below.
-const SOLVER_TAIL_NAMED_COUNT: usize = 3;
+/// Number of ids in the solver tail that are named one by one below: three above
+/// the warm-start run and three under it.
+const SOLVER_TAIL_NAMED_COUNT: usize = 6;
 
 /// Number of `ScratchColumn`s backing the double-buffered warm-start tables:
 /// a `read` + a `write` for each of the two solvers.
@@ -257,6 +259,22 @@ pub(crate) const SCRATCH_ID_TOUCHED_AWAKE: usize = SCRATCH_ID_CONTACT_BAND_BOTTO
 /// Top of the warm-start table run, one id below the last named tail column.
 pub(crate) const SCRATCH_ID_WARM_TABLE_TOP: usize = SCRATCH_ID_TOUCHED_AWAKE - 1;
 
+/// Synthetic id for the serial TGS solver's per-manifold constraint column
+/// (`SoftStepSolver::manifolds`), rebuilt each solve in manifold order.
+pub(crate) const SCRATCH_ID_SERIAL_MANIFOLD_CONSTRAINTS: usize =
+    SCRATCH_ID_WARM_TABLE_TOP - WARM_TABLE_COLUMN_COUNT;
+
+/// Synthetic id for the serial TGS solver's flattened per-point constraint column
+/// (`SoftStepSolver::points`), indexed by `manifold.point_start + p`.
+pub(crate) const SCRATCH_ID_SERIAL_POINT_CONSTRAINTS: usize =
+    SCRATCH_ID_SERIAL_MANIFOLD_CONSTRAINTS - 1;
+
+/// Synthetic id for the colored solver's O8 integrate-freeze snapshot
+/// (`ColoredSoftStepSolver::frozen`) — the `(row, BodyState)` pairs of slept
+/// bodies, captured before the substep loop and restored after it.
+pub(crate) const SCRATCH_ID_COLORED_FROZEN_ROWS: usize =
+    SCRATCH_ID_SERIAL_POINT_CONSTRAINTS - 1;
+
 /// Bottom of the solver tail (inclusive), and so of the whole solver cohort.
 const SCRATCH_ID_SOLVER_TAIL_BOTTOM: usize =
     SCRATCH_ID_CONTACT_BAND_BOTTOM - SOLVER_TAIL_COLUMN_COUNT;
@@ -267,7 +285,13 @@ const SCRATCH_ID_SOLVER_TAIL_BOTTOM: usize =
 // id without moving the bottom and the run has a hole the width check would still
 // wave through.
 const _: () = assert!(
-    SCRATCH_ID_WARM_TABLE_TOP - (WARM_TABLE_COLUMN_COUNT - 1) == SCRATCH_ID_SOLVER_TAIL_BOTTOM,
+    SCRATCH_ID_WARM_TABLE_TOP - (WARM_TABLE_COLUMN_COUNT - 1)
+        == SCRATCH_ID_SERIAL_MANIFOLD_CONSTRAINTS + 1,
+    "the solver tail has a hole between the warm-start run and the constraint columns below it"
+);
+
+const _: () = assert!(
+    SCRATCH_ID_COLORED_FROZEN_ROWS == SCRATCH_ID_SOLVER_TAIL_BOTTOM,
     "the solver tail's lowest id is not its declared bottom: the contiguous run has a hole, and SOLVER_COHORT_WIDTH stops covering every tail column"
 );
 
@@ -513,6 +537,9 @@ fn register_solver_tail_layouts() {
     for k in 0..WARM_TABLE_COLUMN_COUNT {
         register_layout::<WarmEntry>(warm_table_id(k).get());
     }
+    register_layout::<ManifoldConstraint>(SCRATCH_ID_SERIAL_MANIFOLD_CONSTRAINTS);
+    register_layout::<PointConstraint>(SCRATCH_ID_SERIAL_POINT_CONSTRAINTS);
+    register_layout::<(u32, BodyState)>(SCRATCH_ID_COLORED_FROZEN_ROWS);
 }
 
 // —— The NARROWPHASE cohort (audit Stage 4) ——————————————————————
@@ -581,6 +608,24 @@ pub(crate) fn sensor_overlaps_id() -> ComponentId {
 #[inline]
 pub(crate) fn box_axis_cache_id() -> ComponentId {
     narrowphase_column_id(2)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_SERIAL_MANIFOLD_CONSTRAINTS`].
+#[inline]
+pub(crate) fn serial_manifold_constraints_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_SERIAL_MANIFOLD_CONSTRAINTS)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_SERIAL_POINT_CONSTRAINTS`].
+#[inline]
+pub(crate) fn serial_point_constraints_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_SERIAL_POINT_CONSTRAINTS)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_COLORED_FROZEN_ROWS`].
+#[inline]
+pub(crate) fn colored_frozen_rows_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_COLORED_FROZEN_ROWS)
 }
 
 /// The [`ComponentId`] wrapper for [`SCRATCH_ID_VN_INITIAL`].
@@ -665,6 +710,11 @@ mod tests {
             SCRATCH_ID_TOUCHED_AWAKE,
         ]);
         ids.extend((0..WARM_TABLE_COLUMN_COUNT).map(|k| warm_table_id(k).get()));
+        ids.extend([
+            SCRATCH_ID_SERIAL_MANIFOLD_CONSTRAINTS,
+            SCRATCH_ID_SERIAL_POINT_CONSTRAINTS,
+            SCRATCH_ID_COLORED_FROZEN_ROWS,
+        ]);
         ids
     }
 

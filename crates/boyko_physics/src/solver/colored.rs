@@ -99,8 +99,8 @@ use crate::resources::{
     BodyState, ConstraintGraph, IslandSleep, PhysicsConfig, SolverScratch,
 };
 use crate::scratch_ids::{
-    body_eff_colored_id, contact_column_id, register_scratch_layouts, scratch_reserve_rows,
-    warm_table_id,
+    body_eff_colored_id, colored_frozen_rows_id, contact_column_id, register_scratch_layouts,
+    scratch_reserve_rows, warm_table_id,
 };
 
 /// Loads one SoA `[f32; 8]` column into a `__m256` (the O7 cohort kernel's scalar
@@ -1428,8 +1428,9 @@ pub struct ColoredSoftStepSolver {
     /// slept body, captured before the substep loop and restored after — so a slept
     /// island's bodies are NOT integrated (their hot state is frozen) without masking
     /// the per-lane O1 SIMD integrate kernels. Capacity-reused (cleared each step);
-    /// empty when sleeping is off (the byte-identical O6/O7 path).
-    frozen: Vec<(u32, BodyState)>,
+    /// empty when sleeping is off (the byte-identical O6/O7 path). Backed by a
+    /// [`ScratchColumn`] (audit Stage 4).
+    frozen: ScratchColumn<(u32, BodyState)>,
 }
 
 impl Default for ColoredSoftStepSolver {
@@ -1453,7 +1454,10 @@ impl ColoredSoftStepSolver {
             warm_read: WarmStartTable::with_capacity(warm_table_id(2), contacts),
             warm_write: WarmStartTable::with_capacity(warm_table_id(3), contacts),
             warm_start_enabled: true,
-            frozen: Vec::with_capacity(bodies),
+            frozen: ScratchColumn::new(
+                colored_frozen_rows_id(),
+                bodies.max(scratch_reserve_rows(size_of::<(u32, BodyState)>())),
+            ),
         }
     }
 
@@ -3194,16 +3198,19 @@ impl ColoredSoftStepSolver {
         // slept rows after the loop. This freezes a slept body's position / rotation /
         // velocity without touching the audited integrate kernels. `frozen` is
         // capacity-reused (empty when sleeping is off — the byte-identical path).
-        self.frozen.clear();
-        if let Some(sleep) = sleep_view {
-            for (row, b) in scratch.bodies().iter().enumerate() {
-                if b.inv_mass == 0.0 {
-                    // Static rows are no-ops to the integrate kernels (the
-                    // `inv_mass != 0` guard) — no need to snapshot them.
-                    continue;
-                }
-                if !sleep.is_row_awake(row) {
-                    self.frozen.push((row as u32, *b));
+        {
+            let mut frozen = self.frozen.build_view();
+            frozen.clear();
+            if let Some(sleep) = sleep_view {
+                for (row, b) in scratch.bodies().iter().enumerate() {
+                    if b.inv_mass == 0.0 {
+                        // Static rows are no-ops to the integrate kernels (the
+                        // `inv_mass != 0` guard) — no need to snapshot them.
+                        continue;
+                    }
+                    if !sleep.is_row_awake(row) {
+                        frozen.push((row as u32, *b));
+                    }
                 }
             }
         }
@@ -3328,7 +3335,7 @@ impl ColoredSoftStepSolver {
             let snapshot = snap_view.as_mut_slice();
             let mut eff_view = self.bodies.build_view();
             let eff_rows = eff_view.as_mut_slice();
-            for &(row, snap) in &self.frozen {
+            for &(row, snap) in self.frozen.as_read_slice() {
                 let r = row as usize;
                 snapshot[r] = snap;
                 let eff = &mut eff_rows[r];
