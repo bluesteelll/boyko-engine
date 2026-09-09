@@ -107,7 +107,11 @@ committed)` and writes the length back on `Drop`** — push becomes a compare, a
 increment on registers, with a `#[cold]` slow path for the grow.
 
 **Question: fund the cached-frontier `ScratchBuildView` now, or leave the 7–17 % on the all-pairs
-loop?**
+loop?** The case for leaving it: the loop is O(n²), it is the arm the engine's own density policy
+exists to move OFF, and at any body count where the absolute cost matters the Grid arm is already
+selected — and that arm measured FASTER after its own migration. The case against: `AllPairs` is the
+DEFAULT, so this is the path every world that never opts in takes, and the regression was introduced
+by this lane.
 
 ✅ **FUNDED AND SHIPPED the same day** (`0a803cfc`), and the numbers say the fix works while the
 step-level claim does NOT.
@@ -125,12 +129,7 @@ recorded note about Miri on this machine "was WRONG". That sentence is itself wr
 `reference-miri-nightly-resolves-to-msvc` names `+nightly-x86_64-pc-windows-gnu` as the working form
 and only reports the bare `+nightly` invocation failing. What was wrong was reading the compressed
 index line for the note instead of the note. Recorded here because the commit is pushed and its
-message cannot be amended without a force-push. The case for leaving it: the loop is O(n²), it is the arm the engine's own density policy
-exists to move OFF, and at any body count where the absolute cost matters the Grid arm is already
-selected — and that arm measured FASTER after its own migration. The case against: `AllPairs` is the
-DEFAULT, so this is the path every world that never opts in takes, and the regression was
-introduced by this lane. It is written down here rather than decided quietly because the reasons cut
-both ways.
+message cannot be amended without a force-push.
 
 ### 2. `ScratchBuildView` cannot express a pre-sized, parallel-filled, compacted buffer
 
