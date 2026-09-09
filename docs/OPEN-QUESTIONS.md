@@ -107,7 +107,25 @@ committed)` and writes the length back on `Drop`** — push becomes a compare, a
 increment on registers, with a `#[cold]` slow path for the grow.
 
 **Question: fund the cached-frontier `ScratchBuildView` now, or leave the 7–17 % on the all-pairs
-loop?** The case for leaving it: the loop is O(n²), it is the arm the engine's own density policy
+loop?**
+
+✅ **FUNDED AND SHIPPED the same day** (`0a803cfc`), and the numbers say the fix works while the
+step-level claim does NOT.
+
+The view now caches `(base, len, committed)` and publishes the length on `Drop`. The loop reads
+**5.619 µs / 600.2 µs / 74.78 ms** — the regression is gone, and at n = 10 000 the column is **3.4 %
+FASTER than `Vec`**. End-to-end it is invisible: the pyramid reads 18.551 / 19.348 / 19.397 / 21.218
+/ 26.091 ms against 18.681 / 18.992 / 19.390 / 20.970 / 25.895 before, mixed in direction and inside
+the same +2…4 % drift. That is exactly what the arithmetic predicted, and it is why the case for
+shipping is "the lane introduced the regression and the loop is now better than what it replaced",
+not "the step got faster".
+
+Validated under Miri with Tree Borrows (12 tests). ⚠ **The commit message for `0a803cfc` says the
+recorded note about Miri on this machine "was WRONG". That sentence is itself wrong**: the note
+`reference-miri-nightly-resolves-to-msvc` names `+nightly-x86_64-pc-windows-gnu` as the working form
+and only reports the bare `+nightly` invocation failing. What was wrong was reading the compressed
+index line for the note instead of the note. Recorded here because the commit is pushed and its
+message cannot be amended without a force-push. The case for leaving it: the loop is O(n²), it is the arm the engine's own density policy
 exists to move OFF, and at any body count where the absolute cost matters the Grid arm is already
 selected — and that arm measured FASTER after its own migration. The case against: `AllPairs` is the
 DEFAULT, so this is the path every world that never opts in takes, and the regression was
