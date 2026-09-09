@@ -18,6 +18,61 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-09-09 — Stage 4 reaches an arm the tree says not to touch, and a `ScratchBuildView` that cannot express what the buffer does
+
+Six cohorts have moved this session (`vn_initial` + both `TouchedMask`s, the four warm-start tables,
+the narrowphase output, the serial solvers' constraint buffers). The next buffer in the census,
+`ContactPairs::pairs`, raises two things that are worth writing down before they are decided
+silently.
+
+### 1. The all-pairs broadphase arm carries an explicit DO-NOT
+
+`systems.rs:285-287` reads, verbatim:
+
+> The shipped all-pairs loop, kept VERBATIM so the default path's asm is byte-identical to before O2
+> (the 0%-gate). DO NOT refactor this arm.
+
+Migrating `pairs` off `std::Vec` changes that arm's codegen — that is what the migration IS, and no
+container swap can leave the asm identical. So the note either applies and Stage 4 stops one buffer
+short of finishing, or it was written to fence off *incidental* churn during the O2 grid work and
+does not bind the deliberate storage change.
+
+The reading taken here is the second one, on two grounds: the note's stated purpose is protecting the
+default path from an unrelated change, and the same migration on `BroadphaseGrid`'s thirteen buffers
+measured **faster**, not slower (18.27 vs 19.20 ms on one worker, 20.45 vs 21.60 on eight, 25.07 vs
+26.99 on sixteen, on the Jolt-parity pyramid). The arm's SHAPE is kept exactly — only `pairs.clear()`
+and `pairs.push(..)` change receiver; the loop body, the bound test and the emit order are untouched.
+
+**What is missing is a measurement of THIS arm**, and taking one means running the broadphase
+benchmark on the owner's workstation, which is a timings request rather than a call to make alone.
+Until it is taken the claim is an inference from a neighbouring buffer, and it is labelled as one.
+
+**Question: run the broadphase bench to confirm the all-pairs arm does not regress, or accept the
+inference from the `BroadphaseGrid` measurement and ship it labelled?**
+
+### 2. `ScratchBuildView` cannot express a pre-sized, parallel-filled, compacted buffer
+
+`BroadphaseGrid::build_parallel` (`resources.rs:1782-1853`) does `out.clear()` → `out.resize(m +
+reserve, default)` → parallel fill by index → `out.truncate(w)` → `sort_unstable`. The refill view
+has `clear` / `push` / `extend_from_slice` / `as_mut_slice` and nothing else, so `resize` becomes a
+push loop (fine, but it is a store plus a grow check per element where a `Vec` did one length write
+and a fill) and `truncate` **cannot be written at all** — there is no way to shrink the live length
+short of clearing and re-pushing every survivor.
+
+This is not only this caller's problem. The same push loop was hand-written three times already in
+this session — `TouchedMask::reset`, `WarmStartTable::rebuild` and `::with_capacity`,
+`BoxAxisCache::begin_frame` — each time because `resize` did not exist.
+
+Principle 0 says a capability a subsystem needs becomes a first-class kernel feature rather than a
+per-crate adapter, so the intended answer is `ScratchBuildView::resize(len, value)` and
+`::truncate(len)`, backed by a `ComponentPool` no-drop count set (sound for exactly the reason
+`clear_no_drop` is: `T: Copy` is asserted at `ScratchColumn::new`). That is a `boyko_ecs` change made
+from a physics lane, which is why it is recorded here rather than just done — it is additive, but it
+is the kernel.
+
+**Question: take the kernel addition from this lane, or leave `ContactPairs` as the one unmigrated
+rigid buffer until the kernel is touched for another reason?**
+
 ## RESOLVED 2026-09-02 — KE16's six owner calls, answered the same day they were asked
 
 **Where the work is.** Worktree `D:/wt/threadpool`, branch `feat/threadpool-ke16`. The design is
