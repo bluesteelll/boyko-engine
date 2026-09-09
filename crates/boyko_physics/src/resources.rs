@@ -17,8 +17,8 @@ use crate::manifold::{BodyIndex, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
 use crate::scratch_ids::{
-    body_state_id, graph_column_id, register_graph_column_layouts, register_scratch_layouts,
-    scratch_reserve_rows,
+    body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
+    register_graph_column_layouts, register_scratch_layouts, scratch_reserve_rows,
 };
 use crate::systems::body_bounding_radius;
 
@@ -647,22 +647,22 @@ const MIN_PARALLEL_BODIES: usize = 4096;
 /// changes which cells a pair is bucketed into, never the surviving pairs). The
 /// proxy is kept deterministic anyway for clean reasoning and the determinism
 /// gate. The result is bit-identical run-to-run AND bit-identical to all-pairs.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct BroadphaseGrid {
     /// Exclusive prefix sums of `counts`; `len == n_cells + 1`. CSR offsets.
-    cell_start: Vec<u32>,
+    cell_start: ScratchColumn<u32>,
     /// Body rows bucketed by cell (the scatter target). CSR values.
-    cell_bodies: Vec<u32>,
+    cell_bodies: ScratchColumn<u32>,
     /// Per-cell body-count histogram, reused; rebuilt then prefix-summed each
     /// build.
-    counts: Vec<u32>,
+    counts: ScratchColumn<u32>,
     /// A running write cursor per cell during scatter (a working copy of
     /// `cell_start`), reused across builds.
-    cursor: Vec<u32>,
+    cursor: ScratchColumn<u32>,
     /// Bodies spanning ≥ [`MAX_CELL_SPAN`] cells on some axis — binned into the
     /// COARSE size-class grid below (the P8 size-disparity strategy), never bucketed
     /// into the fine grid. Ascending dense-row order (pushed during the count pass).
-    oversized: Vec<u32>,
+    oversized: ScratchColumn<u32>,
     /// P8 COARSE size-class grid — a second CSR over the SAME world AABB with a
     /// coarser cell ([`COARSE_CELL_FACTOR`] × the fine cell), holding ONLY the
     /// oversized bodies. Replaces the old O(k·n) oversized-vs-all residual:
@@ -670,35 +670,35 @@ pub struct BroadphaseGrid {
     /// the minimum shared coarse cell), and each oversized body's coarse footprint
     /// bounds the fine cells it scans for oversized–small candidates. Exclusive
     /// prefix sums of the coarse histogram; `len == coarse_n_cells + 1`.
-    coarse_cell_start: Vec<u32>,
+    coarse_cell_start: ScratchColumn<u32>,
     /// P8 coarse grid CSR values: the oversized DENSE ROWS bucketed by coarse cell
     /// (the scatter target), `coarse_cell_start[c]..coarse_cell_start[c + 1]` indexes
     /// coarse cell `c`'s oversized rows. Capacity-reused (clear + refill each build).
-    coarse_cell_bodies: Vec<u32>,
+    coarse_cell_bodies: ScratchColumn<u32>,
     /// P8 coarse grid per-cell oversized-body histogram, reused; rebuilt then
     /// prefix-summed into [`coarse_cell_start`](Self::coarse_cell_start) each build.
-    coarse_counts: Vec<u32>,
+    coarse_counts: ScratchColumn<u32>,
     /// P8 coarse grid scatter write cursor (a working copy of `coarse_cell_start`),
     /// reused across builds.
-    coarse_cursor: Vec<u32>,
+    coarse_cursor: ScratchColumn<u32>,
     /// Scratch copy of the per-body bounding radii, reused across builds; used to
     /// compute the deterministic median radius (the typical-body cell-size proxy,
     /// O2 W1). `select_nth_unstable` reorders this in place — that is why it is a
     /// throwaway scratch buffer, not read after the median is taken.
-    scratch_radii: Vec<f32>,
+    scratch_radii: ScratchColumn<f32>,
     /// Pre-filter candidate pairs (before the sphere-bound test), reused. Used
     /// only by the serial [`build`](Self::build); the parallel
     /// [`build_parallel`](Self::build_parallel) emits feasibility-filtered
     /// survivors straight into `out`.
-    candidates: Vec<(BodyIndex, BodyIndex)>,
+    candidates: ScratchColumn<(BodyIndex, BodyIndex)>,
     /// O3 parallel emit (Pass A): per-cell SURVIVING-pair count (the count of
     /// within-cell pairs `(i, j)` with `min_shared_cell == c && feasible`),
     /// `len == n_cells`. Reused (clear + resize each parallel build).
-    pair_count: Vec<u32>,
+    pair_count: ScratchColumn<u32>,
     /// O3 parallel emit: exclusive prefix-sum of `pair_count`, `len == n_cells + 1`
     /// — so `pair_offset[c]..pair_offset[c + 1]` is cell `c`'s contiguous out
     /// sub-range and `pair_offset[n_cells]` is the total survivor count. Reused.
-    pair_offset: Vec<u32>,
+    pair_offset: ScratchColumn<u32>,
     /// World-space origin of cell `(0, 0, 0)` (the AABB min corner).
     origin: Vec3,
     /// Reciprocal of the cell edge length, so a coordinate maps to a cell index by
@@ -721,32 +721,44 @@ pub struct BroadphaseGrid {
     oversized_candidate_count: usize,
 }
 
+impl Default for BroadphaseGrid {
+    /// An empty grid at the kernel's standard column budget. Hand-written because
+    /// `ScratchColumn` has no `Default` — a column is bound to a registered
+    /// `ComponentId` at construction, so there is no id-free empty value.
+    #[inline]
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
+}
+
 impl BroadphaseGrid {
     /// Builds an empty grid pre-sized for `capacity` bodies (no later realloc in
     /// steady state). The cell buffers grow on the first build to the live cell
     /// count and reuse that capacity thereafter.
     pub fn with_capacity(capacity: usize) -> Self {
+        // `capacity` is advisory now: a `ScratchColumn` reserves ADDRESS SPACE at
+        // the kernel's own budget and commits on demand, so a uniform generous
+        // ceiling costs zero resident bytes and removes the grow-cap hazard a
+        // caller-sized `Vec` carried.
+        let _ = capacity;
+        register_broadphase_column_layouts();
+        let u32_rows = scratch_reserve_rows(core::mem::size_of::<u32>());
+        let f32_rows = scratch_reserve_rows(core::mem::size_of::<f32>());
+        let pair_rows = scratch_reserve_rows(core::mem::size_of::<(BodyIndex, BodyIndex)>());
         Self {
-            cell_start: Vec::new(),
-            cell_bodies: Vec::with_capacity(capacity),
-            counts: Vec::new(),
-            cursor: Vec::new(),
-            oversized: Vec::with_capacity(capacity),
-            // P8 coarse size-class grid: the value array holds only the oversized
-            // bodies (few), so a small reserve covers it; the cell-indexed buffers
-            // (start/counts/cursor) grow on the first build to the live coarse cell
-            // count and reuse that capacity thereafter (like the fine grid's).
-            coarse_cell_start: Vec::new(),
-            coarse_cell_bodies: Vec::with_capacity(capacity),
-            coarse_counts: Vec::new(),
-            coarse_cursor: Vec::new(),
-            scratch_radii: Vec::with_capacity(capacity),
-            candidates: Vec::with_capacity(capacity),
-            // The parallel-emit CSR scratch grows on the first parallel build to the
-            // live cell count and reuses that capacity thereafter (like every other
-            // cell-indexed buffer here); a fresh `Vec` is the cheap first reserve.
-            pair_count: Vec::new(),
-            pair_offset: Vec::new(),
+            cell_start: ScratchColumn::new(broadphase_column_id(0), u32_rows),
+            cell_bodies: ScratchColumn::new(broadphase_column_id(1), u32_rows),
+            counts: ScratchColumn::new(broadphase_column_id(2), u32_rows),
+            cursor: ScratchColumn::new(broadphase_column_id(3), u32_rows),
+            oversized: ScratchColumn::new(broadphase_column_id(4), u32_rows),
+            coarse_cell_start: ScratchColumn::new(broadphase_column_id(5), u32_rows),
+            coarse_cell_bodies: ScratchColumn::new(broadphase_column_id(6), u32_rows),
+            coarse_counts: ScratchColumn::new(broadphase_column_id(7), u32_rows),
+            coarse_cursor: ScratchColumn::new(broadphase_column_id(8), u32_rows),
+            scratch_radii: ScratchColumn::new(broadphase_column_id(9), f32_rows),
+            candidates: ScratchColumn::new(broadphase_column_id(10), pair_rows),
+            pair_count: ScratchColumn::new(broadphase_column_id(11), u32_rows),
+            pair_offset: ScratchColumn::new(broadphase_column_id(12), u32_rows),
             origin: Vec3::ZERO,
             inv_cell: 1.0,
             dims: [1, 1, 1],
@@ -809,9 +821,9 @@ impl BroadphaseGrid {
         if c + 1 >= self.cell_start.len() {
             return &[];
         }
-        let start = self.cell_start[c] as usize;
-        let end = self.cell_start[c + 1] as usize;
-        &self.cell_bodies[start..end]
+        let start = self.cell_start.as_read_slice()[c] as usize;
+        let end = self.cell_start.as_read_slice()[c + 1] as usize;
+        &self.cell_bodies.as_read_slice()[start..end]
     }
 
     /// The oversized bodies — those spanning more than [`MAX_CELL_SPAN`] cells on
@@ -819,7 +831,7 @@ impl BroadphaseGrid {
     /// coupling walks these as a separate pass alongside the 27-cell neighbourhood.
     #[inline]
     pub fn oversized_slice(&self) -> &[u32] {
-        &self.oversized
+        self.oversized.as_read_slice()
     }
 
     /// Maps a world position to its integer cell coordinate, clamped into
@@ -966,11 +978,10 @@ impl BroadphaseGrid {
         // median of which is the typical-body cell-size floor input).
         let mut min = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
         let mut max = Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-        self.scratch_radii.clear();
-        self.scratch_radii.reserve(bodies.len());
+        self.scratch_radii.build_view().clear();
         for b in bodies {
             let r = body_bounding_radius(b);
-            self.scratch_radii.push(r);
+            self.scratch_radii.build_view().push(r);
             let p = b.position;
             min.x = min.x.min(p.x - r);
             min.y = min.y.min(p.y - r);
@@ -990,10 +1001,15 @@ impl BroadphaseGrid {
         // (a `body_bounding_radius` of a finite shape; a non-finite shape would
         // already have collapsed the extent below), so no NaN reaches the compare.
         let mid = self.scratch_radii.len() / 2;
-        let (_, median, _) = self
-            .scratch_radii
-            .select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median_radius = *median;
+        let median_radius = {
+            let mut radii_view = self.scratch_radii.build_view();
+            let (_, median, _) = radii_view
+                .as_mut_slice()
+                .select_nth_unstable_by(mid, |a, b| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            *median
+        };
 
         // Clamp the extent to a finite, non-negative box before any cell-count
         // arithmetic: a diverged solver can emit a ±Inf/NaN `BodyState.position`,
@@ -1107,11 +1123,11 @@ impl BroadphaseGrid {
     /// capacity-reused — no per-step heap allocation once warmed.
     pub fn build(&mut self, bodies: &[BodyState], out: &mut Vec<(BodyIndex, BodyIndex)>) {
         out.clear();
-        self.candidates.clear();
+        self.candidates.build_view().clear();
 
         let n = bodies.len();
         if n == 0 {
-            self.oversized.clear();
+            self.oversized.build_view().clear();
             return;
         }
 
@@ -1128,7 +1144,7 @@ impl BroadphaseGrid {
 
         // (6) Feasibility filter (the SAME sphere-bound predicate as all-pairs) +
         // sort by (min, max). Bit-identical to the all-pairs output set.
-        for &(a, b) in &self.candidates {
+        for &(a, b) in self.candidates.as_read_slice() {
             let ia = a.0 as usize;
             let ib = b.0 as usize;
             if Self::feasible(&bodies[ia], &bodies[ib]) {
@@ -1150,65 +1166,106 @@ impl BroadphaseGrid {
     /// any candidate buffer. `bodies` must be non-empty (the caller early-returns on
     /// an empty world).
     fn build_csr(&mut self, bodies: &[BodyState]) {
-        self.oversized.clear();
+        self.oversized.build_view().clear();
 
         // (1) AABB + closed-form cell-size proxy.
         self.recompute_geometry(bodies);
         let n_cells = self.n_cells();
 
+        // Geometry snapshot. `cell_coord` / `cell_index` read ONLY these Copy
+        // scalars, so lifting them into locals lets the column views below stay
+        // hoisted across the hot loops. Without it every increment would have to
+        // rebuild a `build_view()`, because a `&self` helper call cannot coexist
+        // with a `&mut` borrow of one of `self`'s columns.
+        let origin = self.origin;
+        let inv_cell = self.inv_cell;
+        let dims = self.dims;
+        let coord = |p: Vec3| -> [u32; 3] {
+            let rel = p - origin;
+            let to_cell = |v: f32, dim: u32| -> u32 {
+                let idx = (v * inv_cell).floor();
+                if idx <= 0.0 { 0 } else { (idx as u32).min(dim - 1) }
+            };
+            [to_cell(rel.x, dims[0]), to_cell(rel.y, dims[1]), to_cell(rel.z, dims[2])]
+        };
+        let index = |c: [u32; 3]| -> u32 { c[0] + dims[0] * (c[1] + dims[1] * c[2]) };
+
         // (2) Count: per body, +1 to every cell its AABB spans; an AABB spanning
         // more than MAX_CELL_SPAN cells on any axis goes to `oversized` instead.
-        self.counts.clear();
-        self.counts.resize(n_cells, 0);
-        for (row, b) in bodies.iter().enumerate() {
-            let r = body_bounding_radius(b);
-            let half = Vec3::new(r, r, r);
-            let (lo, hi) = self.cell_range(b.position - half, b.position + half);
-            if Self::is_oversized(lo, hi) {
-                self.oversized.push(row as u32);
-                continue;
+        {
+            let mut counts_view = self.counts.build_view();
+            counts_view.clear();
+            for _ in 0..n_cells {
+                counts_view.push(0);
             }
-            for z in lo[2]..=hi[2] {
-                for y in lo[1]..=hi[1] {
-                    for x in lo[0]..=hi[0] {
-                        let c = self.cell_index([x, y, z]) as usize;
-                        self.counts[c] += 1;
+            let counts = counts_view.as_mut_slice();
+            let mut oversized_view = self.oversized.build_view();
+            for (row, b) in bodies.iter().enumerate() {
+                let r = body_bounding_radius(b);
+                let half = Vec3::new(r, r, r);
+                let (lo, hi) = (coord(b.position - half), coord(b.position + half));
+                if Self::is_oversized(lo, hi) {
+                    oversized_view.push(row as u32);
+                    continue;
+                }
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            counts[index([x, y, z]) as usize] += 1;
+                        }
                     }
                 }
             }
         }
 
-        // (3) Exclusive prefix-sum counts → cell_start (len n_cells + 1).
-        self.cell_start.clear();
-        self.cell_start.reserve(n_cells + 1);
-        let mut acc = 0u32;
-        self.cell_start.push(0);
-        for &c in &self.counts {
-            acc += c;
-            self.cell_start.push(acc);
-        }
-        let total_inserts = acc as usize;
+        // (3) Exclusive prefix-sum counts -> cell_start (len n_cells + 1).
+        let total_inserts = {
+            let counts = self.counts.as_read_slice();
+            let mut start_view = self.cell_start.build_view();
+            start_view.clear();
+            let mut acc = 0u32;
+            start_view.push(0);
+            for &c in counts {
+                acc += c;
+                start_view.push(acc);
+            }
+            acc as usize
+        };
 
         // (4) Scatter rows into cell_bodies at cursor[cell]++ (a working copy of
         // cell_start), in dense-row order so each cell slice is row-sorted.
-        self.cursor.clear();
-        self.cursor.extend_from_slice(&self.cell_start[..n_cells]);
-        self.cell_bodies.clear();
-        self.cell_bodies.resize(total_inserts, 0);
-        for (row, b) in bodies.iter().enumerate() {
-            let r = body_bounding_radius(b);
-            let half = Vec3::new(r, r, r);
-            let (lo, hi) = self.cell_range(b.position - half, b.position + half);
-            if Self::is_oversized(lo, hi) {
-                continue;
+        {
+            let mut cursor_view = self.cursor.build_view();
+            cursor_view.clear();
+            cursor_view.extend_from_slice(&self.cell_start.as_read_slice()[..n_cells]);
+        }
+        {
+            let mut bodies_view = self.cell_bodies.build_view();
+            bodies_view.clear();
+            for _ in 0..total_inserts {
+                bodies_view.push(0);
             }
-            for z in lo[2]..=hi[2] {
-                for y in lo[1]..=hi[1] {
-                    for x in lo[0]..=hi[0] {
-                        let c = self.cell_index([x, y, z]) as usize;
-                        let slot = self.cursor[c] as usize;
-                        self.cell_bodies[slot] = row as u32;
-                        self.cursor[c] += 1;
+        }
+        {
+            let mut cursor_view = self.cursor.build_view();
+            let cursor = cursor_view.as_mut_slice();
+            let mut bodies_view = self.cell_bodies.build_view();
+            let cell_bodies = bodies_view.as_mut_slice();
+            for (row, b) in bodies.iter().enumerate() {
+                let r = body_bounding_radius(b);
+                let half = Vec3::new(r, r, r);
+                let (lo, hi) = (coord(b.position - half), coord(b.position + half));
+                if Self::is_oversized(lo, hi) {
+                    continue;
+                }
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            let c = index([x, y, z]) as usize;
+                            let slot = cursor[c] as usize;
+                            cell_bodies[slot] = row as u32;
+                            cursor[c] += 1;
+                        }
                     }
                 }
             }
@@ -1236,62 +1293,106 @@ impl BroadphaseGrid {
         // large `coarse_counts` histogram every frame when there is nothing to bin.
         if self.oversized.is_empty() {
             self.coarse_dims = [0, 0, 0];
-            self.coarse_cell_start.clear();
-            self.coarse_cell_bodies.clear();
+            self.coarse_cell_start.build_view().clear();
+            self.coarse_cell_bodies.build_view().clear();
             return;
         }
 
         let coarse_n_cells = self.coarse_n_cells();
 
+        // Coarse geometry snapshot — same reason as `build_csr`'s: the `&self`
+        // helpers cannot be called while a column view is held.
+        let origin = self.origin;
+        let coarse_inv_cell = self.coarse_inv_cell;
+        let coarse_dims = self.coarse_dims;
+        let coord = |p: Vec3| -> [u32; 3] {
+            let rel = p - origin;
+            let to_cell = |v: f32, dim: u32| -> u32 {
+                let idx = (v * coarse_inv_cell).floor();
+                if idx <= 0.0 { 0 } else { (idx as u32).min(dim - 1) }
+            };
+            [
+                to_cell(rel.x, coarse_dims[0]),
+                to_cell(rel.y, coarse_dims[1]),
+                to_cell(rel.z, coarse_dims[2]),
+            ]
+        };
+        let index =
+            |c: [u32; 3]| -> u32 { c[0] + coarse_dims[0] * (c[1] + coarse_dims[1] * c[2]) };
+
         // (1) Count: per oversized body, +1 to every coarse cell its AABB spans.
-        self.coarse_counts.clear();
-        self.coarse_counts.resize(coarse_n_cells, 0);
-        for &row in &self.oversized {
-            let b = &bodies[row as usize];
-            let r = body_bounding_radius(b);
-            let half = Vec3::new(r, r, r);
-            let (lo, hi) = self.coarse_cell_range(b.position - half, b.position + half);
-            for z in lo[2]..=hi[2] {
-                for y in lo[1]..=hi[1] {
-                    for x in lo[0]..=hi[0] {
-                        let c = self.coarse_cell_index([x, y, z]) as usize;
-                        self.coarse_counts[c] += 1;
+        {
+            let oversized = self.oversized.as_read_slice();
+            let mut counts_view = self.coarse_counts.build_view();
+            counts_view.clear();
+            for _ in 0..coarse_n_cells {
+                counts_view.push(0);
+            }
+            let counts = counts_view.as_mut_slice();
+            for &row in oversized {
+                let b = &bodies[row as usize];
+                let r = body_bounding_radius(b);
+                let half = Vec3::new(r, r, r);
+                let (lo, hi) = (coord(b.position - half), coord(b.position + half));
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            counts[index([x, y, z]) as usize] += 1;
+                        }
                     }
                 }
             }
         }
 
-        // (2) Exclusive prefix-sum → coarse_cell_start (len coarse_n_cells + 1).
-        self.coarse_cell_start.clear();
-        self.coarse_cell_start.reserve(coarse_n_cells + 1);
-        let mut acc = 0u32;
-        self.coarse_cell_start.push(0);
-        for &c in &self.coarse_counts {
-            acc += c;
-            self.coarse_cell_start.push(acc);
-        }
-        let total_inserts = acc as usize;
+        // (2) Exclusive prefix-sum -> coarse_cell_start (len coarse_n_cells + 1).
+        let total_inserts = {
+            let counts = self.coarse_counts.as_read_slice();
+            let mut start_view = self.coarse_cell_start.build_view();
+            start_view.clear();
+            let mut acc = 0u32;
+            start_view.push(0);
+            for &c in counts {
+                acc += c;
+                start_view.push(acc);
+            }
+            acc as usize
+        };
 
         // (3) Scatter the oversized rows into coarse_cell_bodies at coarse_cursor++,
         // in ascending oversized-list (== dense-row) order so each coarse cell slice
         // is row-sorted (matching the fine grid's within-cell ordering).
-        self.coarse_cursor.clear();
-        self.coarse_cursor
-            .extend_from_slice(&self.coarse_cell_start[..coarse_n_cells]);
-        self.coarse_cell_bodies.clear();
-        self.coarse_cell_bodies.resize(total_inserts, 0);
-        for &row in &self.oversized {
-            let b = &bodies[row as usize];
-            let r = body_bounding_radius(b);
-            let half = Vec3::new(r, r, r);
-            let (lo, hi) = self.coarse_cell_range(b.position - half, b.position + half);
-            for z in lo[2]..=hi[2] {
-                for y in lo[1]..=hi[1] {
-                    for x in lo[0]..=hi[0] {
-                        let c = self.coarse_cell_index([x, y, z]) as usize;
-                        let slot = self.coarse_cursor[c] as usize;
-                        self.coarse_cell_bodies[slot] = row;
-                        self.coarse_cursor[c] += 1;
+        {
+            let mut cursor_view = self.coarse_cursor.build_view();
+            cursor_view.clear();
+            cursor_view
+                .extend_from_slice(&self.coarse_cell_start.as_read_slice()[..coarse_n_cells]);
+        }
+        {
+            let mut out_view = self.coarse_cell_bodies.build_view();
+            out_view.clear();
+            for _ in 0..total_inserts {
+                out_view.push(0);
+            }
+        }
+        {
+            let oversized = self.oversized.as_read_slice();
+            let mut cursor_view = self.coarse_cursor.build_view();
+            let cursor = cursor_view.as_mut_slice();
+            let mut out_view = self.coarse_cell_bodies.build_view();
+            let out = out_view.as_mut_slice();
+            for &row in oversized {
+                let b = &bodies[row as usize];
+                let r = body_bounding_radius(b);
+                let half = Vec3::new(r, r, r);
+                let (lo, hi) = (coord(b.position - half), coord(b.position + half));
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            let c = index([x, y, z]) as usize;
+                            let slot = cursor[c] as usize;
+                            out[slot] = row;
+                            cursor[c] += 1;
+                        }
                     }
                 }
             }
@@ -1324,16 +1425,16 @@ impl BroadphaseGrid {
     fn emit_cell_candidates(&mut self, bodies: &[BodyState]) {
         let n_cells = self.n_cells();
         for c in 0..n_cells {
-            let start = self.cell_start[c] as usize;
-            let end = self.cell_start[c + 1] as usize;
-            let slice = &self.cell_bodies[start..end];
+            let start = self.cell_start.as_read_slice()[c] as usize;
+            let end = self.cell_start.as_read_slice()[c + 1] as usize;
+            let slice = &self.cell_bodies.as_read_slice()[start..end];
             // Bodies are row-sorted within the slice, so `(slice[p], slice[q])`
             // with p < q is already `(min, max)`.
             for p in 0..slice.len() {
                 let i = slice[p];
                 for &j in &slice[p + 1..] {
                     if self.min_shared_cell(&bodies[i as usize], &bodies[j as usize]) == c as u32 {
-                        self.candidates.push((BodyIndex(i), BodyIndex(j)));
+                        self.candidates.build_view().push((BodyIndex(i), BodyIndex(j)));
                     }
                 }
             }
@@ -1380,9 +1481,9 @@ impl BroadphaseGrid {
         // ── (1) oversized–oversized via the coarse grid ─────────────────────────
         let coarse_n_cells = self.coarse_n_cells();
         for c in 0..coarse_n_cells {
-            let start = self.coarse_cell_start[c] as usize;
-            let end = self.coarse_cell_start[c + 1] as usize;
-            let slice = &self.coarse_cell_bodies[start..end];
+            let start = self.coarse_cell_start.as_read_slice()[c] as usize;
+            let end = self.coarse_cell_start.as_read_slice()[c + 1] as usize;
+            let slice = &self.coarse_cell_bodies.as_read_slice()[start..end];
             // Oversized rows are row-sorted within a coarse cell slice, so
             // `(slice[p], slice[q])` with p < q is already `(min, max)`.
             for p in 0..slice.len() {
@@ -1391,7 +1492,7 @@ impl BroadphaseGrid {
                     if self.min_shared_coarse_cell(&bodies[i as usize], &bodies[j as usize])
                         == c as u32
                     {
-                        self.candidates.push((BodyIndex(i), BodyIndex(j)));
+                        self.candidates.build_view().push((BodyIndex(i), BodyIndex(j)));
                     }
                 }
             }
@@ -1405,7 +1506,7 @@ impl BroadphaseGrid {
         // the lowest fine cell both share, so a small body found in several of `o`'s
         // overlapped cells contributes the pair exactly once.
         for idx in 0..self.oversized.len() {
-            let o = self.oversized[idx];
+            let o = self.oversized.as_read_slice()[idx];
             let ob = &bodies[o as usize];
             let r = body_bounding_radius(ob);
             let half = Vec3::new(r, r, r);
@@ -1414,14 +1515,14 @@ impl BroadphaseGrid {
                 for y in lo[1]..=hi[1] {
                     for x in lo[0]..=hi[0] {
                         let fine_cell = self.cell_index([x, y, z]);
-                        let cstart = self.cell_start[fine_cell as usize] as usize;
-                        let cend = self.cell_start[fine_cell as usize + 1] as usize;
-                        for &s in &self.cell_bodies[cstart..cend] {
+                        let cstart = self.cell_start.as_read_slice()[fine_cell as usize] as usize;
+                        let cend = self.cell_start.as_read_slice()[fine_cell as usize + 1] as usize;
+                        for &s in &self.cell_bodies.as_read_slice()[cstart..cend] {
                             let sb = &bodies[s as usize];
                             if self.min_shared_cell(ob, sb) == fine_cell {
                                 // Key `(min, max)` over the dense rows (`o` vs `s`).
                                 let (mn, mx) = if o < s { (o, s) } else { (s, o) };
-                                self.candidates.push((BodyIndex(mn), BodyIndex(mx)));
+                                self.candidates.build_view().push((BodyIndex(mn), BodyIndex(mx)));
                             }
                         }
                     }
@@ -1482,9 +1583,9 @@ impl BroadphaseGrid {
     /// the one literal source).
     fn count_cell_pairs(&self, cell: u32, bodies: &[BodyState]) -> u32 {
         let c = cell as usize;
-        let start = self.cell_start[c] as usize;
-        let end = self.cell_start[c + 1] as usize;
-        let slice = &self.cell_bodies[start..end];
+        let start = self.cell_start.as_read_slice()[c] as usize;
+        let end = self.cell_start.as_read_slice()[c + 1] as usize;
+        let slice = &self.cell_bodies.as_read_slice()[start..end];
         let mut count = 0u32;
         for p in 0..slice.len() {
             let i = slice[p];
@@ -1517,9 +1618,9 @@ impl BroadphaseGrid {
         out_slice: &mut [(BodyIndex, BodyIndex)],
     ) -> usize {
         let c = cell as usize;
-        let start = self.cell_start[c] as usize;
-        let end = self.cell_start[c + 1] as usize;
-        let slice = &self.cell_bodies[start..end];
+        let start = self.cell_start.as_read_slice()[c] as usize;
+        let end = self.cell_start.as_read_slice()[c + 1] as usize;
+        let slice = &self.cell_bodies.as_read_slice()[start..end];
         let mut w = 0usize;
         for p in 0..slice.len() {
             let i = slice[p];
@@ -1615,8 +1716,13 @@ impl BroadphaseGrid {
         let n_chunks = n_chunks.clamp(1, n_cells.max(1));
 
         // Pass A: per-cell surviving-pair COUNT into `pair_count` (disjoint slots).
-        self.pair_count.clear();
-        self.pair_count.resize(n_cells, 0);
+        {
+            let mut count_view = self.pair_count.build_view();
+            count_view.clear();
+            for _ in 0..n_cells {
+                count_view.push(0);
+            }
+        }
         // Read-only grid + bodies + the write base, captured as raw pointers so a
         // worker never holds an outer `&self`/`&mut self` borrow across the scope
         // (the Phase 9.3c bare-pointer discipline). The chunk cell ranges are
@@ -1625,7 +1731,7 @@ impl BroadphaseGrid {
             grid: self as *const BroadphaseGrid,
             bodies: bodies.as_ptr(),
             bodies_len: bodies.len(),
-            pair_count: self.pair_count.as_mut_ptr(),
+            pair_count: self.pair_count.solve_base(),
             pair_offset: core::ptr::null(),
             out_base: core::ptr::null_mut(),
         };
@@ -1649,13 +1755,12 @@ impl BroadphaseGrid {
 
         // Serial exclusive prefix-sum pair_count → pair_offset (len n_cells + 1);
         // m = pair_offset[n_cells] is the total surviving within-cell pair count.
-        self.pair_offset.clear();
-        self.pair_offset.reserve(n_cells + 1);
+        self.pair_offset.build_view().clear();
         let mut acc = 0u32;
-        self.pair_offset.push(0);
-        for &c in &self.pair_count {
+        self.pair_offset.build_view().push(0);
+        for &c in self.pair_count.as_read_slice() {
             acc += c;
-            self.pair_offset.push(acc);
+            self.pair_offset.build_view().push(acc);
         }
         let m = acc as usize;
 
@@ -1663,7 +1768,7 @@ impl BroadphaseGrid {
         // calls — the candidate multiset is identical) into `candidates`, then
         // feasibility-filter it — counted now so `out` can be sized once. The coarse
         // CSR was built by `build_csr` above, so the oversized emit is ready here.
-        self.candidates.clear();
+        self.candidates.build_view().clear();
         self.emit_oversized_candidates(bodies);
         let oversized_reserve = self.candidates.len();
 
@@ -1684,7 +1789,7 @@ impl BroadphaseGrid {
             bodies: bodies.as_ptr(),
             bodies_len: bodies.len(),
             pair_count: core::ptr::null_mut(),
-            pair_offset: self.pair_offset.as_ptr(),
+            pair_offset: self.pair_offset.as_read_slice().as_ptr(),
             out_base: out.as_mut_ptr(),
         };
         Self::run_balanced_cell_chunks(n_cells, n_chunks, pass_b_ptrs, pool, |c_lo, c_hi| {
@@ -1723,7 +1828,7 @@ impl BroadphaseGrid {
         // filtered with the SAME predicate). `candidates` already holds this build's
         // oversized pairs (the verbatim O2 emitter above); filter into out[m..].
         let mut w = m;
-        for &(a, b) in &self.candidates {
+        for &(a, b) in self.candidates.as_read_slice() {
             let ia = a.0 as usize;
             let ib = b.0 as usize;
             if Self::feasible(&bodies[ia], &bodies[ib]) {
@@ -1920,7 +2025,7 @@ impl BroadphaseGrid {
         out.clear();
         let n = bodies.len();
         if n == 0 {
-            self.oversized.clear();
+            self.oversized.build_view().clear();
             return;
         }
         self.build_csr(bodies);

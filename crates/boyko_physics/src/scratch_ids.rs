@@ -41,6 +41,7 @@ use boyko_ecs::ecs::constants::{
 };
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 
+use crate::manifold::BodyIndex;
 use crate::resources::BodyState;
 use crate::solver::contact::BodyEffective;
 
@@ -237,6 +238,69 @@ pub(crate) fn graph_column_id(k: usize) -> ComponentId {
     ComponentId::new(SCRATCH_ID_GRAPH_TOP - k)
 }
 
+// ── The BROADPHASE cohort (audit Stage 4) ───────────────────────────────────
+//
+// `BroadphaseGrid`'s thirteen buffers are swept together by `build` — the fine
+// CSR (`counts` -> `cell_start` -> `cell_bodies` via `cursor`), the coarse
+// size-class CSR, the oversized list, the radius scratch and the pair
+// bookkeeping. One cohort, so their ids must be pairwise distinct mod
+// `POOL_STAGGER_LINES`; they MAY reuse the solver's and graph's slots, since
+// those loops never run at the same index at the same moment.
+
+/// Number of `ScratchColumn`s backing [`BroadphaseGrid`](crate::resources::BroadphaseGrid).
+pub(crate) const BROADPHASE_COLUMN_COUNT: usize = 13;
+
+/// Top of the broadphase cohort — one id below the graph cohort's bottom.
+pub(crate) const SCRATCH_ID_BROADPHASE_TOP: usize = SCRATCH_ID_GRAPH_BOTTOM - 1;
+
+/// Bottom of the broadphase cohort (inclusive).
+pub(crate) const SCRATCH_ID_BROADPHASE_BOTTOM: usize =
+    SCRATCH_ID_BROADPHASE_TOP - (BROADPHASE_COLUMN_COUNT - 1);
+
+const _: () = assert!(
+    BROADPHASE_COLUMN_COUNT <= POOL_STAGGER_LINES,
+    "the broadphase cohort is wider than one stagger period"
+);
+
+const _: () = assert!(
+    SCRATCH_ID_BROADPHASE_TOP < SCRATCH_ID_GRAPH_BOTTOM,
+    "the broadphase cohort overlaps the constraint-graph cohort"
+);
+
+// The scratch region grows DOWNWARD from the top of the id space toward the
+// production counter climbing up from 0, and the broadphase cohort is now its
+// lowest edge. This is the floor that keeps the two apart — cross it and a
+// `#[derive(Component)]` type could claim a scratch id. It moves down with each
+// cohort added, which is exactly why it is asserted against the LOWEST one
+// rather than against whichever cohort happened to be last when it was written.
+const _: () = assert!(
+    SCRATCH_ID_BROADPHASE_BOTTOM >= MAX_COMPONENTS - 64,
+    "the physics scratch region has grown more than 64 ids below the top of the      component-id space; production ids climb from 0 and the reserved band is no      longer comfortably out of their reach"
+);
+
+/// The [`ComponentId`] for broadphase column `k` (`0`-based, in field order).
+#[inline]
+pub(crate) fn broadphase_column_id(k: usize) -> ComponentId {
+    debug_assert!(k < BROADPHASE_COLUMN_COUNT, "broadphase column index out of cohort");
+    ComponentId::new(SCRATCH_ID_BROADPHASE_TOP - k)
+}
+
+/// Registers the element layout of every [`BroadphaseGrid`] column, idempotently.
+///
+/// Eleven `u32` columns, one `f32` (`scratch_radii`, k = 9) and one
+/// `(BodyIndex, BodyIndex)` pair column (`candidates`, k = 10). The registry's
+/// collision check keys on `(slot, TypeId)`, so registering each under its REAL
+/// type means a wrong-typed reuse of a slot panics loudly rather than aliasing.
+pub(crate) fn register_broadphase_column_layouts() {
+    for k in 0..BROADPHASE_COLUMN_COUNT {
+        match k {
+            9 => register_layout::<f32>(broadphase_column_id(k).get()),
+            10 => register_layout::<(BodyIndex, BodyIndex)>(broadphase_column_id(k).get()),
+            _ => register_layout::<u32>(broadphase_column_id(k).get()),
+        }
+    }
+}
+
 /// Registers the element layout of every [`ConstraintGraph`] column, idempotently.
 ///
 /// Seven `u32` columns and one `u64` (`color_occ`'s bitset words). Same-type
@@ -389,10 +453,19 @@ mod tests {
         (0..GRAPH_COLUMN_COUNT).map(|k| graph_column_id(k).get()).collect()
     }
 
+    fn broadphase_cohort_ids() -> Vec<usize> {
+        (0..BROADPHASE_COLUMN_COUNT).map(|k| broadphase_column_id(k).get()).collect()
+    }
+
     #[test]
     fn scratch_band_stagger_slots_are_distinct() {
         assert_cohort_slots_distinct("solver cohort", &solver_cohort_ids(), SOLVER_COHORT_WIDTH);
         assert_cohort_slots_distinct("graph cohort", &graph_cohort_ids(), GRAPH_COLUMN_COUNT);
+        assert_cohort_slots_distinct(
+            "broadphase cohort",
+            &broadphase_cohort_ids(),
+            BROADPHASE_COLUMN_COUNT,
+        );
     }
 
     /// Each cohort is a contiguous run with no hole and no duplicate — the premise
@@ -402,6 +475,12 @@ mod tests {
         for (name, mut ids, top, bottom) in [
             ("solver cohort", solver_cohort_ids(), SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM),
             ("graph cohort", graph_cohort_ids(), SCRATCH_ID_GRAPH_TOP, SCRATCH_ID_GRAPH_BOTTOM),
+            (
+                "broadphase cohort",
+                broadphase_cohort_ids(),
+                SCRATCH_ID_BROADPHASE_TOP,
+                SCRATCH_ID_BROADPHASE_BOTTOM,
+            ),
         ] {
             ids.sort_unstable();
             assert_eq!(ids[0], bottom, "{name} starts at its declared bottom");
@@ -422,12 +501,20 @@ mod tests {
     /// but sharing an ID is a registry collision on a different element type.
     #[test]
     fn cohorts_do_not_share_ids() {
-        let solver = solver_cohort_ids();
-        for id in graph_cohort_ids() {
-            assert!(
-                !solver.contains(&id),
-                "graph id {id} also belongs to the solver cohort — two pools would                  register different element types under one ComponentId"
-            );
+        let cohorts = [
+            ("solver", solver_cohort_ids()),
+            ("graph", graph_cohort_ids()),
+            ("broadphase", broadphase_cohort_ids()),
+        ];
+        for (i, (na, a)) in cohorts.iter().enumerate() {
+            for (nb, b) in &cohorts[i + 1..] {
+                for id in b {
+                    assert!(
+                        !a.contains(id),
+                        "{nb} id {id} also belongs to the {na} cohort — two pools would                          register different element types under one ComponentId, and the                          registry's same-type re-register is a SILENT no-op"
+                    );
+                }
+            }
         }
     }
 }
