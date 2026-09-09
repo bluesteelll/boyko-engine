@@ -661,7 +661,10 @@ lanes. At CS-4 the same arm at the same commit read 14.4 µs and 109.5 µs on th
 parallel — and so did every other arm on every 1 µs cell, on both routes, with the band at its 4 %
 floor.
 
-**CAUSE DETERMINED 2026-09-10 02:00 — rustc 1.98.1.** Rebuilt at this commit with the winning
+**MECHANISM 2026-09-10 03:00 — see `RUSTC-198-WINDOWS-GNU-TLS.md`:** every `thread_local!` read under
+rustc ≥ 1.98.0 on windows-gnu executes two contended RMWs on a process-global line plus a
+`FlsSetValue` call; `worker_lane_for` is two such reads per spawn and the thief's epoch pin two per
+victim; `a3` reads no TLS on its paths. **CAUSE DETERMINED 2026-09-10 02:00 — rustc 1.98.1.** Rebuilt at this commit with the winning
 features under **rustc 1.97.1** (the compiler the CS-4 record was built with; the stable toolchain
 was rewritten to 1.98.1 on 2026-09-09 02:52), on a box the owner had just called not quiet:
 `worker/body_1us_tasks_64W` **99.3 / 105.0 / 132.7 µs** — the record's 109.5 µs reproduces — against

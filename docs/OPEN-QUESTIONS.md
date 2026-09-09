@@ -5097,7 +5097,19 @@ was rewritten 2026-09-09 02:52; every shipped binary since is 1.98.1. **This is 
 regression on the pool's fine-granularity path, and it is the answer to the 10× question.** Both
 earlier causal stories in this entry (wake latency, warm box) were wrong and are struck above.
 
-**NEXT (no runs until the owner says the box is free):** (i) bracket it — 1.98.0 is installed
+**MECHANISM FOUND 2026-09-10 ~03:00, IN THE ASSEMBLY — `docs/threadpool/RUSTC-198-WINDOWS-GNU-TLS.md`.**
+Under rustc ≥ 1.98.0 on `x86_64-pc-windows-gnu` every `thread_local!` read calls
+`std::sys::thread_local::guard::windows::enable()` = `lock inc [ACTIVE_ENABLE_CALLS]` + `lock or [rsp],0`
++ `kernel32!FlsSetValue` + `lock dec` — two contended RMWs on one process-global line plus a Win32 call
+per access (rust-lang/rust #148799 + #157483, both milestone 1.98.0; `target_thread_local` is unset on
+windows-gnu, so the per-thread memoisation is compiled out and `const {}` does not help). The `a1f`
+path pays it twice per spawn (`worker_lane_for`) and twice per victim in every thief sweep (crossbeam-epoch
+pin before the `len` check); `a3`'s paths carry zero TLS reads and its `Injector` steal never pins.
+Everything else in the two binaries is relocation-identical. The bracket below is answered by the
+sources (1.98.0); what remains owed is the falsification run in that file's §5 and the two local fixes
+in its §4(b), neither before the owner frees the box.
+
+~~**NEXT (no runs until the owner says the box is free):** (i) bracket it — 1.98.0 is installed~~ (superseded) (i) bracket it — 1.98.0 is installed
 (`~/.rustup/toolchains/1.98.0-…`, 2026-09-02): one build + one run says whether the regression is
 1.98.0 or the 1.98.1 point release; (ii) name the function — `cargo asm` / `objdump -d` diff of
 `push_on_lane_no_wake`, `worker_lane_for` (a `thread_local!` read on every push; 1.98 already
