@@ -5461,3 +5461,69 @@ doc in `crates/boyko_threadpool/src/scope.rs`, and the test header now carries t
 loop. The "fix tree 5 of 6, HEAD 0 of 6" numbers say nothing about the TLS merge; the merge was gated
 separately (`tls_lane_merge.rs`, Miri Tree Borrows under the full recipe). The mechanism to keep: a
 Miri receipt whose flag set is not spelled in full is a receipt about one binary's RNG stream.
+
+## MEASURED 2026-09-10 — Jolt head-to-head with the KE16 winner: boyko's scaling is POSITIVE now (was negative), the gap at 8 workers fell from 5.2× to ≈2.5×, and the residual is as consistent with ~45 % serial work as with dispatch
+
+**Why this entry exists.** Every boyko column in the 2026-09-09 head-to-head was taken on a tree that did
+NOT contain KE16 — `feat/ecs-native-storage` carried the parity harness but not the pool (checked:
+`67563d3b`, `e6115223`, `be1bbbfd` were not ancestors; `tls.rs` still held two slots). This merge put the
+harness and the shipped pool in one tree, and BOTH engines were then measured in ONE window.
+
+**Protocol.** Jolt v5.3.0 `PerformanceTest.exe` (built here, MinGW, LTO) and
+`crates/boyko_physics/benches/jolt_parity_pyramid.rs` — the same 1240-body pyramid transcribed index for
+index — interleaved BY W (Jolt W=1, boyko W=1, Jolt W=2, …), three passes, every bench binary built before
+the window, a load receipt before and after every timed region, `rustc 1.98.1 (48a229cea)`,
+`available_parallelism = 16` (SMT on 8 physical cores — W=16 is not 16 cores, for either engine). Pass 1
+opened on three consecutive clean 20 s polls and is the cleanest; its W=16 pair carried a build process in
+one receipt and is marked DIRTY.
+
+| W | Jolt ms | Jolt T1/TW | boyko ms | boyko T1/TW | boyko/Jolt |
+|---|---:|---:|---:|---:|---:|
+| 1 | 19.799 | 1.00 | 20.311 | 1.00 | **1.01** |
+| 2 | 13.273 | 1.60 | 15.290 | 1.33 | 1.15 |
+| 4 | 7.406 | 2.86 | 12.361 | 1.65 | 1.73 |
+| 8 | 4.966 | 3.99 | 11.931 | **1.71** | **2.47** |
+| 16 | 5.037 | 3.93 | 13.237 | 1.54 | 2.38 |
+
+Medians of three passes. Pass 1 (cleanest) boyko scaling: 1.00 / 1.23 / 1.73 / **1.98** / 1.89.
+
+**What changed, drift-free.** The ratio boyko/Jolt is taken back to back within seconds and does not depend
+on the box's state: **2.16 → 1.15** (W=2), **3.51 → 1.73** (W=4), **5.16 → 2.47** (W=8), **6.69 → 2.38**
+(W=16) against 2026-09-09, reproducing in all three passes. boyko's own scaling went from
+0.96 / 0.96 / 0.87 / 0.71 (more workers = slower at every W) to 1.33 / 1.65 / 1.71 / 1.54. Single-threaded
+the two engines are indistinguishable (1.01 / 1.03 / 0.96 across passes — quote as ≈1.0×, never tighter).
+
+⚠ **What must NOT be read from it.** (1) The absolute milliseconds are not comparable across sessions: the
+UNCHANGED Jolt binary is 1.21–1.48× slower today than on 2026-09-09 at every W, so the box moved. (2) A
+pre-KE16 build of the SAME harness was not run today; "KE16's contribution" is attribution by content — the
+only W-varying machinery in this harness is the coloured solve's `pool.scope` waves, and KE16 is what changed
+their cost — not an A/B in one window. If the number is to be quoted as KE16's, that A/B is owed.
+(3) T(1) runs boyko's NON-parallel path (`parallel_solve = parallel_broadphase = (workers > 1)`), so
+T(1)/T(W) is serial-vs-parallel, which is the honest speed-up and also the reason the 1→2 step includes the
+cost of turning the machinery on.
+
+**The recorded mechanism was an upper bound, not a count.** "72 waves per step" assumed every colour
+dispatches. From the source: 12 `solve_all_colors` passes per step (4 substeps × (1+2) relax,
+`resources.rs:431-432`, `colored.rs:3245/3262/3292`), and a colour opens a `pool.scope` only if
+`color_slots >= MIN_PARALLEL_SLOTS_PER_COLOR = 256` AND `n_chunks >= 2` (`colored.rs:2706-2725`,
+`:2754-2772`). Both gates depend on SLOTS, not on W — so the **wave COUNT is W-independent**; only the
+wake/park EVENTS per wave scale with W, which is exactly the term KE16 cheapened. Waves were not counted on
+the device because physics has no env-var diagnostic and the counters are private `fn` — counting them means
+editing the crate under test.
+
+**The next fix is not yet earned, and the adjudicator is right.** "Dispatch remains the deficit" is
+inferred from boyko/Jolt growing with W — but Amdahl predicts that growth too. The curve saturates
+(1.65 → 1.71 from W=4 to W=8), and solving Amdahl at W=8 gives a **serial fraction of 0.43–0.53** of the
+serial step if the parallel part were perfect. The serial candidates are real and large: `physics_narrowphase`
+(`systems.rs:357`) is a plain serial system building box-box manifolds for every pair; the broadphase is
+serial at 1240 bodies (`MIN_PARALLEL_BODIES = 4096`); and this file's own 2026-09-09 entry records the pyramid
+as "many NARROW colours" — colours under 256 slots solve INLINE, so part of the solve itself is serial. And
+`MIN_SLOTS_PER_CHUNK = 64` caps chunks at slots/64: a ~500-slot colour yields 9 chunks, so 8 lanes get a
+straggler round and 16 lanes have 7 idle.
+
+**WHAT IS OWED before any fix — one measurement, no wave histogram needed:** per-stage wall time at W=1 vs
+W=8 (narrowphase / broadphase / solve / inline-colour share), one `Instant` per system. If narrowphase +
+broadphase + inline colours ≈ 40–50 % of T(1), the fix is parallelising the narrowphase (Jolt does) and
+lowering the per-colour gate / chunk quantisation — not further pool work, and not the in-scope barrier
+alone. If the solve by itself still scales < 2× at W=8, then it is per-wave cost and the barrier is the tool.
+Secondary: `[profile.bench]` is `lto = false`, so none of these absolutes is the shipped binary.
