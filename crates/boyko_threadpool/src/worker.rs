@@ -253,6 +253,30 @@ pub(crate) fn pop_global_injector(
 /// A successful batch goes through the residue decision
 /// ([`wake_after_residue`]): whatever this thief did not take is now in its OWN
 /// registered deque.
+///
+/// # Why the sweep asks `Stealer::is_empty` before it probes
+///
+/// `Stealer::steal_batch_and_pop` calls `epoch::pin()` (crossbeam-deque 0.8.7
+/// `deque.rs:1006`) BEFORE it loads `back` and decides the deque is empty
+/// (`:1009`, `:1012`), and `epoch::is_pinned()` on the line above it is itself
+/// a thread-local read. On a 16-way pool a sweep that finds one task probes 14
+/// empty victims, so the empty case is the common one — and under rustc 1.98.0
+/// and later on `x86_64-pc-windows-gnu` every `thread_local!` access costs two
+/// lock-prefixed RMWs on ONE process-global cache line plus a
+/// `kernel32!FlsSetValue` call (`docs/threadpool/RUSTC-198-WINDOWS-GNU-TLS.md`).
+/// `Stealer::is_empty` (`deque.rs:594`) is two `Acquire` loads and a `SeqCst`
+/// fence with no pin and no TLS, so the gate replaces that cost with two loads
+/// the probe was going to issue anyway.
+///
+/// The gate is a BENIGN RACE, and that is the whole of its correctness
+/// argument: a victim observed empty here and pushed to a moment later is
+/// missed by THIS sweep only. It is not lost — the pusher's own
+/// [`wake_after_push`] decision covers a sleeping thief, and a spinning one
+/// re-enters the sweep on its next backoff step. No task becomes unreachable,
+/// because reachability is D3's property of the deque being REGISTERED, not of
+/// any single probe observing it. `Retry` semantics are untouched: a
+/// non-empty victim still goes through [`drain_one`], which retries until the
+/// deque answers `Success` or `Empty`.
 pub(crate) fn try_steal_random(
     inner: &PoolInner,
     worker_id: u32,
@@ -272,6 +296,12 @@ pub(crate) fn try_steal_random(
             continue;
         }
         let stealer = &inner.stealers[idx];
+        // The empty-victim gate: no epoch pin, hence no TLS, for a victim that
+        // has nothing (see this function's doc comment for the cost and for
+        // why missing a concurrent push here is benign).
+        if stealer.is_empty() {
+            continue;
+        }
         if let Some(t) = drain_one(|| stealer.steal_batch_and_pop(local)) {
             wake_after_residue(inner, worker_id, local);
             return Some(t);

@@ -42,7 +42,7 @@
 //! TASKS:
 //!
 //! * **`pool.install(...)` from the test's own thread** - `install` rewrites
-//!   `CURRENT_WORKER_ID` to `WORKER_ID_DISPATCHER`, so `ScopeShared::new` is
+//!   `LANE_DEPOSIT.wid` to `WORKER_ID_DISPATCHER`, so `ScopeShared::new` is
 //!   handed a null W-d-prime target and every completion takes the
 //!   EXTERNAL-joiner arm, which is the arm this file drives. (Both arms of
 //!   `complete_task` offer a window; the other one is a worker joiner's, and

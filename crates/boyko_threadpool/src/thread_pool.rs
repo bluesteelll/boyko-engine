@@ -191,7 +191,7 @@ impl PoolInner {
     /// The lane comes from `tls::worker_lane_for`, the ONE identity predicate
     /// (`KE16-DESIGN-A.md` §1.1), so its `wid` is `< worker_count` by
     /// construction and cannot be the dispatcher sentinel: an `install` frame on
-    /// a same-pool worker rewrites `CURRENT_WORKER_ID` to `WORKER_ID_DISPATCHER`
+    /// a same-pool worker rewrites `LANE_DEPOSIT.wid` to `WORKER_ID_DISPATCHER`
     /// before the scope is opened, the predicate answers `None`, and that scope
     /// is external — the same answer `push_task` gives that frame.
     #[cfg(not(loom))]
@@ -272,7 +272,7 @@ impl PoolInner {
         // park/unpark through its own `Thread`).
         //
         // The W-d′ target is asked for AFTER the `InstallGuard` frame has
-        // rewritten `CURRENT_WORKER_ID` to the dispatcher sentinel, which is why
+        // rewritten `LANE_DEPOSIT.wid` to the dispatcher sentinel, which is why
         // an `install` on a same-pool worker is an EXTERNAL joiner here and gets
         // a null target — the same answer `push_task` gives that frame.
         let shared = Box::new(ScopeShared::new(

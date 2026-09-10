@@ -541,7 +541,7 @@ fn completer_holds_no_protector_when_the_joiner_frees() {
         let done = AtomicUsize::new(0);
         let last_wid = AtomicU32::new(u32::MAX);
 
-        // `install` from the test's own thread rewrites `CURRENT_WORKER_ID` to
+        // `install` from the test's own thread rewrites `LANE_DEPOSIT.wid` to
         // `WORKER_ID_DISPATCHER`, so `ScopeShared::new` is handed a null W-d′
         // target and every completion takes the EXTERNAL-joiner arm — the arm a
         // null target selects, and the only one this shape can reach (see the

@@ -118,13 +118,22 @@ Minimal report shape: any `thread_local!` read on `x86_64-pc-windows-gnu` (a `Ce
 init suffices); toolchains 1.97.1 vs 1.98.0/1.98.1; sequence A vs sequence B from §2; the 1.98.0
 milestone of #148799 + #157483. Filing it is the owner's call — it publishes.
 (b) **Ours to do regardless**, because a TLS read per spawned task was never a good idea:
-1. **`Scope` captures the lane once.** `inner.scope(..)` is entered ON the worker; `worker_lane_for`
-   can be evaluated there and stored in the `Scope`, so `Scope::spawn` reads it from the struct — one
-   TLS read per scope instead of one per task, under every compiler.
+1. ~~**`Scope` captures the lane once.**~~ **SUPERSEDED (2026-09-10, the fix commit): the two slots are
+   MERGED instead.** A `Scope`-cached lane would help exactly one call site, while the identity predicate
+   is asked at five (`Scope::spawn`, `ThreadPool::spawn`, `joiner_wake_target`, the join dispatch, the
+   `install` frame), and it would make Chase-Lev's owner-only `push` depend on `Scope` happening to be
+   `!Sync`. `WORKER_DEQUE` and `CURRENT_WORKER_ID` are now one `#[repr(C)] LaneDeposit` cell, so
+   `worker_lane_for` is ONE `thread_local!` access instead of two at every site (`tls.rs`, invariants
+   D6–D8; `tests/tls_lane_merge.rs` counts the accesses in the source because no behavioural test can
+   see the difference). The cached-lane design stays a candidate for a later pass, behind a
+   compile-fail pin that `Scope` is `!Sync`.
 2. **Do not pin on an empty victim.** `Stealer::len()` / `is_empty()` load `front`/`back` without pinning;
    probing 14 empty deques per sweep and pinning on each is 28 TLS reads for nothing. Check emptiness
    before `steal_batch_and_pop`. The pin-before-`len` order is crossbeam-deque's and is also worth
-   reporting upstream.
+   reporting upstream. **Done in the same commit**, in both sweeps (`worker::try_steal_random`,
+   `scope::steal_one_random`). ⚠ This tree compiles **crossbeam-deque 0.8.7** (`Cargo.lock`), not 0.8.8:
+   the pin sits at `deque.rs:1002/1006` before the length check at `:1013`; the 0.8.8 line numbers in
+   §2 describe the same defect one release later.
 Both are hot-path changes and are **not** to be shipped without the bench in the gate (§5).
 
 ## 5. The falsification run (owed; a timing — not before the owner says the box is free)

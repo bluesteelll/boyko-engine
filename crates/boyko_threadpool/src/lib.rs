@@ -26,7 +26,7 @@
 //! See `docs/PHASE-9-PARALLEL-SCHEDULER-PLAN.md` §2 for the full invariant
 //! list. The crate ships:
 //!
-//! - **TLS `CURRENT_WORKER_ID`** (TPN13) — populated on worker entry, set to
+//! - **TLS `LANE_DEPOSIT.wid`** (TPN13) — populated on worker entry, set to
 //!   [`WORKER_ID_DISPATCHER`] when [`ThreadPool::install`] runs on the calling
 //!   thread, [`WORKER_ID_UNATTACHED`] otherwise.
 //! - **TLS `IN_SYSTEM_RUN`** (ALLOC1/ALLOC6) — set by the scheduler's RAII

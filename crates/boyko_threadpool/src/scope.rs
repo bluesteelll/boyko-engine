@@ -1623,6 +1623,18 @@ unsafe fn join_external(inner: &PoolInner, shared: *const ScopeShared) {
 /// pushed by a thread with no lane in `inner` goes to `injector_global`
 /// (`worker::place_task`), which the single caller
 /// [`join_external_helping`] probes on the statement above this one.
+///
+/// Gated on `Stealer::is_empty` for the same reason as
+/// [`worker::try_steal_random`], whose doc comment carries the argument:
+/// `Stealer::steal` pins the epoch (crossbeam-deque 0.8.7 `deque.rs:650`)
+/// BEFORE loading `back` and deciding the deque is empty (`:653`), so an
+/// external joiner sweeping an idle pool paid a thread-local access per empty
+/// victim. Skipping a victim that a concurrent push fills a moment later is
+/// benign here too: this joiner loops until the scope's count reaches zero, so
+/// the next iteration of the sweep sees it, and the pusher's own wake decision
+/// covers a joiner that has since parked.
+///
+/// [`worker::try_steal_random`]: crate::worker::try_steal_random
 fn steal_one_random(inner: &PoolInner, rng: &mut XorShift64Star) -> Option<Task> {
     let n = inner.stealers.len();
     if n == 0 {
@@ -1631,6 +1643,10 @@ fn steal_one_random(inner: &PoolInner, rng: &mut XorShift64Star) -> Option<Task>
     let start = (rng.next() as usize) % n;
     for k in 0..n {
         let idx = (start + k) % n;
+        // The empty-victim gate (see this function's doc comment).
+        if inner.stealers[idx].is_empty() {
+            continue;
+        }
         if let Some(t) = drain_one(|| inner.stealers[idx].steal()) {
             return Some(t);
         }

@@ -5145,3 +5145,21 @@ that produced the bytes, not the channel name — because a load receipt cannot 
    later.
 3. **Does `a1+b1` get measured?** It is the only untried combination of a shipped joiner with the
    end discipline the design itself prefers at fine granularity.
+
+---
+
+## The Miri protector gate's arming is seed-dependent — and worse WITHOUT the pool fix (2026-09-10)
+
+While gating the TLS fix, `crates/boyko_threadpool/tests/miri_scope_completion_protector.rs` went red
+at `:454` ("the probe fired 2 times but NOT ONE of 2 frees landed inside a release window") under the
+default seed. A control run on HEAD passed with `overlaps=1/2` — one overlap of margin. Six seeds under
+the project's `-Zmiri-tree-borrows` (an environment `MIRIFLAGS` REPLACES the config's; the first sweep
+was run without the flag by mistake and produced Stacked-Borrows noise in crossbeam-epoch, identical on
+HEAD): **fix tree 5 of 6 green; HEAD 0 of 6 green** (`overlaps=0/2` on four seeds, other contexts red
+on the rest). The fix does not cause the red; the gate's arming was already a coin flip whose default
+seed happened to land. The test's own message names the remedy — re-tune `MIRI_RELEASE_PROBE_YIELDS`
+against the observation — and that is owed as its own change, with the seed sweep as the receipt
+(`scratchpad/miri_seeds_tb.log`, reproduced by the commands in this entry).
+
+**WHAT IS PUT TO YOU:** a Miri gate whose armed-ness flips with the seed is not a gate; retune it, or
+make the arming assert print all six seeds and require a majority.

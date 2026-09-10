@@ -20,15 +20,17 @@
 //! headers. These five are neither, so every citation of one carries
 //! `KE16-DESIGN-A.md` beside it and the three series stay separable.
 //!
-//! `D1`, `D2`, `D4` and `D5` govern `WORKER_DEQUE`, the thread-local slot
+//! `D1`, `D2`, `D4` and `D5` govern [`LANE_DEPOSIT`], the thread-local slot
 //! through which a worker reaches its own registered deque. `D3` is the
-//! reachability property that placement exists to serve.
+//! reachability property that placement exists to serve. `D6`–`D8` are the
+//! three the MERGE of the deque slot and the worker-id slot added (below).
 //!
-//! - **D1** `WORKER_DEQUE` holds `(Arc::as_ptr(&inner), &raw const deque)` for
-//!   the whole of `worker_main`'s loop and `(null, null)` on every other
-//!   thread and at every other time. Upheld by `WorkerDequeDeposit`, whose
-//!   `drop` clears the slot and which `worker_main` declares AFTER the `deque`
-//!   parameter, so the clear happens before the pointee dies.
+//! - **D1** [`LANE_DEPOSIT`]'s `pool` / `deque` fields hold
+//!   `(Arc::as_ptr(&inner), &raw const deque)` for the whole of `worker_main`'s
+//!   loop and `(null, null)` on every other thread and at every other time.
+//!   Upheld by `WorkerDequeDeposit`, which writes and clears EXACTLY those two
+//!   fields and which `worker_main` declares AFTER the `deque` parameter, so
+//!   the clear happens before the pointee dies.
 //! - **D2** worker `wid`'s deque in pool `P` is pushed to only by worker
 //!   `wid`'s own thread — crossbeam's single-owner `Worker` contract, which
 //!   here reduces to: only by `push_task` on a `Some` answer from
@@ -50,6 +52,43 @@
 //!   scrutinee, whose temporaries live through the THEN block in Rust 2024),
 //!   or handed to a helper that runs no task body. This is what keeps a
 //!   protected tag from spanning a nested spawn through the same slot.
+//! - **D6** the two halves of [`LANE_DEPOSIT`] have DISJOINT writers.
+//!   `{pool, deque}` is written only by [`WorkerDequeDeposit::new`] and its
+//!   `drop`; `wid` only by [`set_current_worker_id`] and
+//!   [`clear_current_worker_id`] (`ThreadPool::install` saves the old id with
+//!   [`current_worker_id`] and restores it through the former; there is no
+//!   separate swap entry point). No writer of
+//!   one half writes the other, and that is what makes "an `install` frame on a
+//!   worker of this pool" a STATE — tag present, `wid` = dispatcher sentinel —
+//!   rather than a contradiction: the frame rewrites the id, the deposit
+//!   survives it, and the worker regains its lane when the frame ends with no
+//!   restore code anywhere. A whole-struct write from either guard breaks one
+//!   of those two properties SILENTLY (a null tag written by the id guard makes
+//!   every later spawn from that worker fall through to `injector_global` —
+//!   locality lost, no test red).
+//! - **D7** every read of the slot on the spawn path is exactly ONE
+//!   `LANE_DEPOSIT.with`, through [`lane_deposit`]. [`worker_lane_for`] must
+//!   never call [`current_worker_id`]: that restores the two-read shape the
+//!   merge exists to remove and is invisible to every behavioural test: every
+//!   answer stays correct and only the cost doubles. Gated by the source-shape
+//!   rows of `tests/tls_lane_merge.rs`, which parse THIS file's
+//!   `worker_lane_for` body and count its TLS touches, because no behavioural
+//!   assertion can see the difference.
+//! - **D8** the predicate rejects on the POOL TAG before the id.
+//!   `worker_main` publishes the id before the deque, so between those two
+//!   lines the slot reads `{null, null, wid}`; an id-first predicate would mint
+//!   a lane over a null deque in that window.
+//!
+//! # Why ONE slot rather than two (`docs/threadpool/RUSTC-198-WINDOWS-GNU-TLS.md`)
+//!
+//! Under rustc >= 1.98.0 on `x86_64-pc-windows-gnu` EVERY `thread_local!` read
+//! executes two lock-prefixed RMWs on one process-global cache line plus a
+//! `kernel32!FlsSetValue` call, because std's `guard::windows::enable()` runs
+//! on each access and the OS-key backend gives every key a destructor —
+//! `const {}` initialisation does not help (that document, §3). The spawn path
+//! asked the TLS two questions (which deque, and which worker am I), so it paid
+//! that price twice per task. Merging the two slots makes it one; nothing else
+//! about the predicate changes.
 
 use core::cell::Cell;
 use core::ptr;
@@ -70,6 +109,57 @@ pub const WORKER_ID_DISPATCHER: u32 = u32::MAX - 1;
 /// threads that never entered an install scope.
 pub const WORKER_ID_UNATTACHED: u32 = u32::MAX;
 
+/// The raw published lane state of the calling thread: everything
+/// [`worker_lane_for`] needs, in ONE thread-local slot, so the spawn path pays
+/// ONE `thread_local!` access instead of two (see the module header's cost
+/// note and `docs/threadpool/RUSTC-198-WINDOWS-GNU-TLS.md`).
+///
+/// `#[repr(C)]` fixes the field order so that the pool tag — the field whose
+/// null-ness defines "this thread deposited no deque", and which the
+/// predicate's fast reject reads — sits at offset 0 on every build, and so the
+/// layout asserts below mean the same thing everywhere.
+///
+/// The two halves are INDEPENDENT (D6): `{pool, deque}` is owned by
+/// [`WorkerDequeDeposit`] and `wid` by the id writers.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(crate) struct LaneDeposit {
+    /// The pool whose registered deque this thread owns, or null. Compared by
+    /// `ptr::eq` against the TARGET pool — never against [`ACTIVE_POOL`], which
+    /// an `install` of another pool rewrites for the frame.
+    pool: *const PoolInner,
+    /// A raw borrow (`&raw const deque`) of `worker_main`'s by-value `deque`
+    /// parameter, or null. Null iff `pool` is null (D1); dereferenced in
+    /// exactly one place, [`WorkerLane::deque`] (D4).
+    deque: *const Worker<Task>,
+    /// The thread's ROLE: `0..worker_count-1` on a worker acting as itself,
+    /// [`WORKER_ID_DISPATCHER`] inside an `install` frame (on ANY thread,
+    /// worker or not), [`WORKER_ID_UNATTACHED`] otherwise.
+    wid: u32,
+    /// Explicit tail padding, so `size_of` is readable without re-deriving
+    /// `repr(C)` rules and so `Cell::set` writes no indeterminate byte.
+    _pad: u32,
+}
+
+impl LaneDeposit {
+    /// The state of every thread that is not a worker and has entered no
+    /// frame: no tag, no deque, no role. The `thread_local!` `const {}` seed.
+    pub(crate) const DETACHED: Self = Self {
+        pool: ptr::null(),
+        deque: ptr::null(),
+        wid: WORKER_ID_UNATTACHED,
+        _pad: 0,
+    };
+}
+
+// The slot lives in one thread's own TLS block: never shared, so no
+// false-sharing question arises and no alignment is bought. Written against
+// the pointer width rather than a hard 64-bit constant so the assert stays
+// meaningful (and does not become one more wasm32 blocker) on a 32-bit build.
+const _: () = assert!(size_of::<LaneDeposit>() == 2 * size_of::<*const ()>() + 8);
+const _: () = assert!(align_of::<LaneDeposit>() == align_of::<*const ()>());
+const _: () = assert!(core::mem::offset_of!(LaneDeposit, pool) == 0);
+
 thread_local! {
     /// Active pool pointer for ambient `par_iter` dispatch. Set by
     /// [`ThreadPool::install`](crate::ThreadPool::install) entry / cleared on
@@ -78,12 +168,33 @@ thread_local! {
     /// handle (decision E).
     pub(crate) static ACTIVE_POOL: Cell<*const PoolInner> = const { Cell::new(ptr::null()) };
 
-    /// Current worker id.
-    /// - `0..MAX_WORKERS-1` — running on worker `N`.
-    /// - [`WORKER_ID_DISPATCHER`] — running on the dispatcher thread inside
-    ///   `ThreadPool::install`.
-    /// - [`WORKER_ID_UNATTACHED`] — not on a worker, not in an install scope.
-    pub(crate) static CURRENT_WORKER_ID: Cell<u32> = const { Cell::new(WORKER_ID_UNATTACHED) };
+    /// THE lane slot: this thread's pool tag, its own Chase-Lev deque, and its
+    /// worker id, in one cell. Replaces the separate `WORKER_DEQUE` and
+    /// `CURRENT_WORKER_ID` slots so that [`worker_lane_for`] — the ONE identity
+    /// predicate, and the thing every spawn asks — is ONE `thread_local!`
+    /// access instead of two (D7; the module header prices the difference).
+    ///
+    /// - `wid` is `0..MAX_WORKERS-1` on a worker acting as itself,
+    ///   [`WORKER_ID_DISPATCHER`] inside a `ThreadPool::install` frame, and
+    ///   [`WORKER_ID_UNATTACHED`] on a thread attached to no pool.
+    /// - `{pool, deque}` are the worker's own registered deque and the pool it
+    ///   belongs to; null / null on every thread that is not a worker.
+    ///   Deposited by `worker_main` after the active-pool deposit and cleared by
+    ///   [`WorkerDequeDeposit::drop`] before `worker_main` returns.
+    ///
+    /// The deque pointer is minted with `&raw const deque` — a raw borrow of
+    /// the place, NOT a reference — so no reference tag to the deque outlives
+    /// any single method call (discipline D5, `KE16-DESIGN-A.md` §1.3).
+    ///
+    /// The pool tag is what [`worker_lane_for`] compares against its target,
+    /// NOT [`ACTIVE_POOL`]: an `install` of pool B running on a pool-A worker
+    /// swaps [`ACTIVE_POOL`] to B for that frame, and a B task must not land in
+    /// A's deque. That is also why the two pointers are NOT in one struct.
+    ///
+    /// No field has a destructor, so the slot carries no TLS destructor of its
+    /// own — the same status the two slots it replaces had.
+    pub(crate) static LANE_DEPOSIT: Cell<LaneDeposit>
+        = const { Cell::new(LaneDeposit::DETACHED) };
 
     /// Allocation discipline guard (ALLOC1), as a NESTING DEPTH (KE16 App-8).
     /// Incremented by the worker's run-system RAII guard, decremented on its
@@ -92,23 +203,17 @@ thread_local! {
     /// than a flag because a helping joiner may run a sibling conflict-free
     /// system INLINE inside a system body, so guards nest.
     pub(crate) static IN_SYSTEM_RUN: Cell<u32> = const { Cell::new(0) };
+}
 
-    /// The calling worker's own Chase-Lev deque (`worker_main`'s `deque`
-    /// parameter), reachable from `push_task` on the SAME thread, and the pool
-    /// it belongs to. Null / null on every thread that is not a worker.
-    /// Deposited by `worker_main` after the active-pool deposit and cleared by
-    /// [`WorkerDequeDeposit::drop`] before `worker_main` returns.
-    ///
-    /// The pointer is minted with `&raw const deque` — a raw borrow of the
-    /// place, NOT a reference — so no reference tag to the deque outlives any
-    /// single method call (discipline D5, `KE16-DESIGN-A.md` §1.3).
-    ///
-    /// The pool tag is what [`worker_lane_for`] compares against its target,
-    /// NOT `ACTIVE_POOL`: an `install` of pool B running on a pool-A worker
-    /// swaps `ACTIVE_POOL` to B for that frame, and a B task must not land in
-    /// A's deque.
-    pub(crate) static WORKER_DEQUE: Cell<(*const PoolInner, *const Worker<Task>)>
-        = const { Cell::new((ptr::null(), ptr::null())) };
+/// The ONE read of the lane slot (D7).
+///
+/// Private to this module so that no caller can take the deposit and then ask
+/// a second question of the slot. `#[inline]` is load-bearing rather than
+/// decorative: it must fold into both readers, or the merge trades two TLS
+/// accesses for one access plus a call.
+#[inline]
+fn lane_deposit() -> LaneDeposit {
+    LANE_DEPOSIT.with(|c| c.get())
 }
 
 /// The calling thread's lane in a pool: a registered worker id and the raw
@@ -156,7 +261,13 @@ impl WorkerLane {
         //      itself, a task body, or a join inside a task body), so the pointee
         //      is alive. The cell is thread-local and `Worker<T>` is `!Sync`, so
         //      no other thread can observe the pointer; the pointee is never
-        //      moved after the deposit.
+        //      moved after the deposit. `WorkerDequeDeposit` writes and clears
+        //      the `{pool, deque}` fields of `LANE_DEPOSIT` and NO OTHERS (D6),
+        //      so an `install` frame that runs between the deposit and this
+        //      deref — which rewrites only `wid` — can neither dangle this
+        //      pointer nor resurrect a cleared one; and for the frame's
+        //      duration it makes the predicate answer `None`, so no lane is
+        //      minted from a slot whose id is a sentinel.
         //   2. CONSUMPTION FORM. The `&Worker` minted here is consumed by ONE
         //      method call in its own statement (`lane.deque().push(task);`) OR
         //      passed as an argument to a helper that runs no task body
@@ -189,37 +300,53 @@ impl WorkerLane {
 /// The calling thread's lane in `inner`, when it is a registered worker of
 /// `inner` acting AS that worker.
 ///
-/// `Some` iff the pool tag deposited on this thread is `inner` AND
-/// [`current_worker_id`] is a worker id (`< inner.worker_count()`). `None` on
-/// the dispatcher, on an unattached thread, on a worker of another pool, and
-/// inside an `install` frame on a worker of THIS pool — `install` rewrites
-/// `CURRENT_WORKER_ID` to [`WORKER_ID_DISPATCHER`], which is exactly how
-/// `push_task` has always treated that frame. `scope` does not rewrite the id,
-/// so a `par_iter` scope on a worker IS that worker's lane.
+/// `Some` iff the pool tag deposited on this thread is `inner` AND the
+/// thread's role is a worker id (`< inner.worker_count()`). `None` on the
+/// dispatcher, on an unattached thread, on a worker of another pool, and
+/// inside an `install` frame on a worker of THIS pool — `install` rewrites the
+/// slot's `wid` to [`WORKER_ID_DISPATCHER`], which is exactly how `push_task`
+/// has always treated that frame. `scope` does not rewrite the id, so a
+/// `par_iter` scope on a worker IS that worker's lane.
 ///
 /// This is the ONE identity predicate (KE16 App-6): the push arm, the joiner's
 /// dispatch and the count-gated completion target all ask it, so the three
 /// cannot disagree — "a pool-A worker joining a pool-B scope drains B's
 /// `injector_local[wid_A]`" stops being expressible.
+///
+/// Exactly ONE thread-local access (D7), and the pool tag is tested FIRST (D8).
 #[inline]
 pub(crate) fn worker_lane_for(inner: &PoolInner) -> Option<WorkerLane> {
-    let (pool, deque) = WORKER_DEQUE.with(|c| c.get());
-    if !ptr::eq(pool, inner) {
+    let d = lane_deposit();
+    debug_assert!(
+        d.pool.is_null() == d.deque.is_null(),
+        "D1: the deque half of the lane slot is written and cleared as a PAIR"
+    );
+    // D8: the tag first. `inner` is a reference, so it is never null, and a
+    // thread that deposited nothing rejects here rather than on its role.
+    if !ptr::eq(d.pool, inner) {
         return None;
     }
-    let wid = current_worker_id();
-    if (wid as usize) >= inner.worker_count() as usize {
+    // Discharges BOTH sentinels: `worker_count` is clamped to `[1, 64]` at
+    // build time and both sentinels are `>= u32::MAX - 1`.
+    if (d.wid as usize) >= inner.worker_count() as usize {
         return None;
     }
     // The deque pointer is only carried: no dereference happens here.
-    Some(WorkerLane { wid, deque })
+    Some(WorkerLane {
+        wid: d.wid,
+        deque: d.deque,
+    })
 }
 
-/// RAII deposit of the calling worker's deque into [`WORKER_DEQUE`].
+/// RAII deposit of the calling worker's deque into [`LANE_DEPOSIT`].
 ///
 /// Constructed by `worker_main` immediately after the active-pool deposit and
 /// declared AFTER the `deque` parameter it points at, so it drops — clearing
 /// the slot — before the deque itself does.
+///
+/// Writes and clears the `{pool, deque}` half of the merged slot and NOTHING
+/// else (D6): the `wid` half belongs to the id writers, and an `install` frame
+/// that rewrites it must not lose this deposit.
 pub(crate) struct WorkerDequeDeposit {
     /// Prevents construction outside `new`, and keeps the guard `!Send`: the
     /// deposit describes THIS thread and must not travel.
@@ -231,7 +358,16 @@ impl WorkerDequeDeposit {
     /// (`&raw const deque`) of a place that outlives the guard.
     #[inline]
     pub(crate) fn new(pool: *const PoolInner, deque: *const Worker<Task>) -> Self {
-        WORKER_DEQUE.with(|c| c.set((pool, deque)));
+        debug_assert!(
+            !pool.is_null() && !deque.is_null(),
+            "D1: the deposit publishes a real pair"
+        );
+        LANE_DEPOSIT.with(|c| {
+            let mut d = c.get();
+            d.pool = pool;
+            d.deque = deque;
+            c.set(d);
+        });
         Self {
             _not_send: core::marker::PhantomData,
         }
@@ -241,7 +377,12 @@ impl WorkerDequeDeposit {
 impl Drop for WorkerDequeDeposit {
     #[inline]
     fn drop(&mut self) {
-        WORKER_DEQUE.with(|c| c.set((ptr::null(), ptr::null())));
+        LANE_DEPOSIT.with(|c| {
+            let mut d = c.get();
+            d.pool = ptr::null();
+            d.deque = ptr::null();
+            c.set(d);
+        });
     }
 }
 
@@ -249,7 +390,7 @@ impl Drop for WorkerDequeDeposit {
 /// [`WORKER_ID_UNATTACHED`] sentinel when not on a worker.
 #[inline]
 pub fn current_worker_id() -> u32 {
-    CURRENT_WORKER_ID.with(|c| c.get())
+    lane_deposit().wid
 }
 
 /// Returns the lane index for `EventDispatcher::send_event`:
@@ -286,10 +427,21 @@ pub fn is_in_system_run() -> bool {
 }
 
 /// Set the worker id for the current thread. Called once on `worker_main`
-/// entry; not intended for user code.
+/// entry, and by `ThreadPool::install` to enter and to leave a dispatcher
+/// frame; not intended for user code.
+///
+/// Writes the `wid` field of [`LANE_DEPOSIT`] and NOTHING else (D6). A
+/// whole-struct write here would null the `{pool, deque}` half, and because a
+/// worker keeps its deposit across an `install` frame, that would silently
+/// route every later spawn from that worker to `injector_global` — every test
+/// still green and the locality this placement exists for gone.
 #[inline]
 pub(crate) fn set_current_worker_id(id: u32) {
-    CURRENT_WORKER_ID.with(|c| c.set(id));
+    LANE_DEPOSIT.with(|c| {
+        let mut d = c.get();
+        d.wid = id;
+        c.set(d);
+    });
 }
 
 /// Clear the worker id on the current thread back to
@@ -317,7 +469,11 @@ pub(crate) fn set_current_worker_id(id: u32) {
 #[inline]
 #[allow(dead_code)]
 pub(crate) fn clear_current_worker_id() {
-    CURRENT_WORKER_ID.with(|c| c.set(WORKER_ID_UNATTACHED));
+    LANE_DEPOSIT.with(|c| {
+        let mut d = c.get();
+        d.wid = WORKER_ID_UNATTACHED;
+        c.set(d);
+    });
     boyko_diag::lane::set_lane(boyko_diag::lane::LANE_UNCLAIMED);
 }
 
@@ -472,8 +628,17 @@ mod tests {
         use std::sync::Arc;
 
         let pool = crate::ThreadPoolBuilder::new().num_threads(2).build();
-        // u32::MAX = the probe never ran; otherwise bit 0 = the lane outside the
-        // install frame, bit 1 = the lane inside it. Required: 0b01.
+        // u32::MAX = the probe never ran; otherwise bit 0 = the lane BEFORE the
+        // install frame, bit 1 = the lane INSIDE it, bit 2 = the lane AFTER it.
+        // Required: 0b101.
+        //
+        // Bit 2 costs one line and is the whole of D6's observable content.
+        // Without it the test cannot tell "the frame rewrote `wid` and put it
+        // back" from "the frame wrote the WHOLE struct and destroyed the deque
+        // deposit": both answer `false` inside the frame, which is all bits 0-1
+        // see. Under the whole-struct mutation the worker never regains its
+        // lane, every later `Scope::spawn` from it falls through to
+        // `injector_global`, and nothing else in this crate goes red.
         let answered = Arc::new(AtomicU32::new(u32::MAX));
         let answered_cl = Arc::clone(&answered);
         let pool_cl = Arc::clone(&pool);
@@ -481,7 +646,11 @@ mod tests {
             let outer = try_with_active_pool(|inner| worker_lane_for(inner).is_some());
             let framed =
                 pool_cl.install(|_scope| try_with_active_pool(|i| worker_lane_for(i).is_some()));
-            let bits = u32::from(outer == Some(true)) | (u32::from(framed == Some(true)) << 1);
+            // After `InstallGuard::drop` has restored the id.
+            let after = try_with_active_pool(|inner| worker_lane_for(inner).is_some());
+            let bits = u32::from(outer == Some(true))
+                | (u32::from(framed == Some(true)) << 1)
+                | (u32::from(after == Some(true)) << 2);
             answered_cl.store(bits, Ordering::Release);
         });
 
@@ -491,9 +660,9 @@ mod tests {
         }
         assert_eq!(
             answered.load(Ordering::Acquire),
-            0b01,
-            "expected a lane on the worker and none inside its own install frame \
-             (u32::MAX = the probe never ran)"
+            0b101,
+            "expected a lane on the worker, none inside its own install frame, and the lane BACK \
+             once the frame ended (u32::MAX = the probe never ran)"
         );
     }
 
@@ -634,26 +803,47 @@ mod tests {
         let deque: Worker<Task> = Worker::new_fifo();
         // The production mint: a raw borrow of the place, never a reference.
         let deque_ptr = &raw const deque;
+        let pair = || LANE_DEPOSIT.with(|c| (c.get().pool, c.get().deque));
+        let id = || LANE_DEPOSIT.with(|c| c.get().wid);
+
+        // The `wid` half is this guard's NON-target, and W2's mutation is a
+        // whole-struct write in `new` or in `drop`. Impersonating worker 7
+        // first is what makes such a clobber observable: against the
+        // `DETACHED` seed, a reset TO `DETACHED` reads as no change at all.
+        set_current_worker_id(7);
 
         assert_eq!(
-            WORKER_DEQUE.with(|c| c.get()),
+            pair(),
             (ptr::null(), ptr::null()),
             "a thread that is not a worker starts with an empty deposit"
         );
         {
             let _deposit = WorkerDequeDeposit::new(pool_ptr, deque_ptr);
             assert_eq!(
-                WORKER_DEQUE.with(|c| c.get()),
+                pair(),
                 (pool_ptr, deque_ptr),
                 "the deposit must publish the pair it was given, unaltered"
             );
+            assert_eq!(
+                id(),
+                7,
+                "D6: `new` writes the deque half ONLY; a whole-struct write here resets the \
+                 worker id and the thread stops being its own lane"
+            );
         }
         assert_eq!(
-            WORKER_DEQUE.with(|c| c.get()),
+            pair(),
             (ptr::null(), ptr::null()),
             "the guard's drop must clear the slot; a deposit that outlives its guard leaves \
              `worker_lane_for` handing out a lane over a dangling deque"
         );
+        assert_eq!(
+            id(),
+            7,
+            "D6: `drop` clears the deque half ONLY; a whole-struct clear would detach the \
+             thread from its own id every time a deposit ends"
+        );
+        clear_current_worker_id();
         drop(deque);
     }
 
