@@ -93,8 +93,13 @@ const SKIP_DIRS: &[&str] = &["target", ".git", ".claude", "graphify-out", "book"
 /// stopped walking, not to track the count.
 const MIN_FILES: usize = 800;
 
-/// Floor on ignore sites found. The tree holds 164 (143 plain + 21 `cfg_attr`); this is well below
-/// it and exists only to catch a detector that stopped detecting.
+/// Floor on ignore sites found. The tree holds 226 (161 plain + 65 `cfg_attr`, re-counted
+/// 2026-09-10 — this comment read 164 = 143 + 21, and CLAUDE.md carried the same dead figure); the
+/// floor is well below it and exists only to catch a detector that stopped detecting.
+///
+/// ⚠️ Do not treat the parenthesis as the number to cite: it is a hand-copied snapshot of what the
+/// run PRINTS, and that is the failure mode it just demonstrated. Cite the `[ignore census]` line
+/// from `cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture` instead.
 const MIN_SITES: usize = 120;
 
 /// How far past the attribute to look for the `fn` it decorates. Real sites are 1–6 lines away

@@ -483,7 +483,7 @@ raster-path decision, not independent of it.** R0 records this and touches none 
 
 **Exactly one mesh loader existed when this section was written.** `MeshGpu::LOADERS` is a
 compile-time table ([`mesh.rs`](../crates/boyko_render/src/mesh.rs):240) that held `ObjMeshLoader` alone, whose `EXTENSIONS` is `&["obj"]`
-(`loaders/obj.rs:60~`). ⚠️ **Rev 36 added the second entry** — `GlbMeshLoader`, §3.3's decoder — and
+(`loaders/obj.rs:60`). ⚠️ **Rev 36 added the second entry** — `GlbMeshLoader`, §3.3's decoder — and
 the anchors gate caught this line's number going stale in the same commit, which is amendment 2
 working as intended: adding the entry lengthened the table's doc comment and moved the definition. It
 decodes to `MeshData { vertices: Vec<Vertex>, indices: Vec<u32> }` and runs `generate_tangents` once
@@ -1003,7 +1003,7 @@ triangles below it. If the ceiling does not reach the regime, no LOD scheme reac
 K1 is therefore decidable today, without the error target Rev 1's phrasing implied it needed.
 
 All statistics are reported per camera path, path definitions checked in as test constants — the
-shape `sv0_scene/mod.rs:149~-162` already uses for its camera. (*Checked in*, not *committed*:
+shape `sv0_scene/mod.rs:149-162` already uses for its camera. (*Checked in*, not *committed*:
 "committed path" is reserved for manifest membership per `[k1].committed_paths_rule`.)
 
 > ⚠️ **A CENSUS ROW is one reading, at one `(camera path, ladder rung)` pair, of every statistic

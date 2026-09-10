@@ -40,6 +40,14 @@ newer by ancestry.
 > [`gaia/DECISIONS.md`](gaia/DECISIONS.md). The entry is kept exactly as written because it is the
 > record of WHY the sync was needed: read *“this branch never received them”* and *“none of the
 > four is reachable”* as statements about 2026-09-03, not about today.
+>
+> **Added 2026-09-10, while widening the anchors gate to this file:** the `docs/ru/` freeze's own receipt
+> — *"both sides were last written by `efd7735f` (2026-09-03), verified by `git log -1` per path"* — no
+> longer reproduces on this branch: `git log -1 -- docs/ru/OPEN-QUESTIONS.md` answers `d2c8c646`, the KE16
+> merge, which rewrote that file by +1421/−50 as a conflict resolution (union of both sides' Russian
+> entries, nothing translated, nothing added). Checked per parent, the last REAL writers are `efd7735f`
+> (2026-09-03) and `778739f0` (2026-09-02), both before the freeze, so no Russian text was authored after
+> it — the claim survives, the anchor does not, and divergence is measurable from `d2c8c646` forward.
 
 ⚠ **The single most dangerous cell, now repaired.** [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) and this
 file printed F5's recommendation as **(a)** — *the option the owner rejected*. He chose **(b)**,
@@ -480,11 +488,17 @@ Measured 2026-08-30, three independent instruments, release, 16 workers, 16384 r
 | `par_iter()` **in a system body** | 49.36 | **1.01×** | — |
 | `par_for_each_chunk` **in a system body** | 48.69 | **1.03×** | **1** |
 
-**Mechanism, one line.** `crates/boyko_threadpool/src/worker.rs:370-371` (`push_task`) sends a task
+**Mechanism, one line** *(as it stood before KE16; struck 2026-09-10 by the merge
+`merge/ke16-into-render`)*. ~~`crates/boyko_threadpool/src/worker.rs:370-371` (`push_task`) sends a task
 spawned *by a worker* into `injector_local[wid]`. Sibling stealing iterates `inner.stealers`, which
 holds the worker **deques** only — **no thread ever polls another thread's local injector.** Work
-spawned from inside a worker is reachable by that worker alone, serial by construction. A system
-body always runs on a worker.
+spawned from inside a worker is reachable by that worker alone, serial by construction.~~ A system
+body always runs on a worker. **Superseded:** `push_task` is now `worker.rs:686`, and under the shipped
+`a1f` placement it pushes onto the worker's own REGISTERED Chase-Lev deque, which sibling stealing DOES
+poll (`docs/threadpool/KE16-DESIGN.md`; the §App-2 take in `docs/threadpool/KE16-RESULTS.md` measures
+`par_in_system / par_from_dispatcher = 1.004`). The struck sentence is the record of the defect KE16
+closed, not a description of the tree. The anchor was moved with the strike rather than alone, because
+a renumbered citation under a refuted claim reads as a live claim.
 
 **The query drivers are innocent**: a raw `pool.scope` with zero ECS code, opened from a worker,
 serialises identically.
@@ -4149,8 +4163,9 @@ claim path's Miri and property legs are unaffected and still planned.
      sequential children; a fixed path is a stale-read generator.
   3. **One file = one sitting, one process, or many appended runs.** `G24`'s reverse RED is *defined*
      on staleness and cannot be written until this is chosen.
-  4. **Who aggregates the 21 per-session artifacts into `docs/PROFILING-FLOOR.md`** — rung 7b
-     depends on it and no line assigns it.
+  4. **Who aggregates the 21 per-session artifacts into the PROFILING-FLOOR document** (a rung-7b
+     deliverable that does not exist yet — it is named here, not linked, so the anchors gate does not
+     read a plan as a path) — rung 7b depends on it and no line assigns it.
   5. **Whether `WorkloadTag` is an artifact field.** `resolve` checks it, 7b publishes it into
      markdown, nothing says the session file carries it.
   6. **What the artifact records when the device declines timestamps** — today an `eprintln!` that
