@@ -117,6 +117,102 @@ const JOIN_BACKSTOP: Duration = Duration::from_micros(50);
 /// works, which is the whole point of replacing the inequality with a
 /// measurement.
 ///
+/// # THE SWEEP THAT WAS OWED, AND WHAT IT REFUTED (MEASURED 2026-09-10)
+///
+/// The paragraph above promises that a changed value makes the gate say whether
+/// the new one works. Nobody had ever asked it across more than one value, and
+/// in the meantime a six-seed run reported the gate ARMED on five seeds and
+/// DISARMED on one (`overlaps=0/2`, W-d′ arm, seed 3). Read literally that says
+/// armed-ness is a coin flip on the seed and this constant is mis-tuned. It is
+/// neither. THE FLAPPING WAS THE RECIPE, NOT THE VALUE.
+///
+/// Six values x six seeds = 36 runs, each under this gate's own documented
+/// recipe (`-Zmiri-tree-borrows -Zmiri-disable-isolation
+/// -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-preemption-rate=0
+/// -Zmiri-seed=N`), nightly-x86_64-pc-windows-gnu / miri 2026-08-20. Each cell
+/// is the WORST `overlaps` over the six seeds for that context, as
+/// `n/expected` — the margin, not the typical reading. In all 36 runs
+/// `block_overlaps` EQUALLED `overlaps` and `slot_exhaustions` was 0:
+///
+/// | yields | body-environment | external-joiner | W-d′  | armed |
+/// |--------|------------------|-----------------|------|-------|
+/// | **16** | 3/4              | 3/4             | 1/2  | 6/6   |
+/// | 24     | 3/4              | 3/4             | 1/2  | 6/6   |
+/// | 32     | 4/4              | 4/4             | 1/2  | 6/6   |
+/// | 48     | 3/4              | 3/4             | 1/2  | 6/6   |
+/// | 64     | 3/4              | 2/4             | 1/2  | 6/6   |
+/// | 96     | 3/4              | 3/4             | 2/2  | 6/6   |
+///
+/// EVERY value armed on EVERY seed, in all three contexts. There is no disarmed
+/// point in this range to tune away from, so the SMALLEST is kept — which is the
+/// value that was already here. Confirmed at 16 on five further seeds (0, 7, 8,
+/// 9, 10), armed on all five: 11 distinct seeds, 0 disarmed.
+///
+/// Note what the table does NOT show, because it is why a sweep of this constant
+/// cannot terminate in a verdict on its own: the columns do not improve
+/// monotonically. 64 carries the WORST external-joiner margin in the set and 32
+/// the best, with 48 between them. That is the round-robin ALIGNMENT effect this
+/// doc has recorded since the floor assert was removed, and it is why "raise it
+/// until it arms" is not a procedure.
+///
+/// # The discriminating experiment, which names the knob that WAS broken
+///
+/// SAME tree, SAME 16, SAME seeds 1..6; only the flag set varied:
+///
+/// | recipe                                    | armed |
+/// |-------------------------------------------|-------|
+/// | the documented one, above                 | 6/6   |
+/// | `-Zmiri-tree-borrows -Zmiri-seed=N` only  | 4/6   |
+///
+/// Under the reduced one, seeds 2 and 4 go RED with `overlaps=0/2` on the W-d′
+/// arm — the exact reading whose assert message sends a reader here to re-tune
+/// this number. And seeds 3 and 6 print `block_overlaps` BELOW `overlaps` (1
+/// against 2 on W-d′; 3 against 4 on body-environment), which is the inversion of
+/// `block_overlaps >= overlaps` that `assert_probe_armed` documents as the
+/// signature of a MISSING `-Zmiri-preemption-rate=0`. The monitor that exists
+/// only to report that precondition reported it, on the first runs where the
+/// precondition was actually violated.
+///
+/// Two reduced-recipe runs exist and they do NOT agree per seed: the first
+/// (`miri_seeds_tb.log`, taken in `D:/wt/threadpool` on the uncommitted tree
+/// that became `e6115223`) read seed 3 as the disarmed one, the second (this
+/// tree, a different worktree path and target dir) reads seeds 2 and 4. Miri is
+/// deterministic per seed only for an IDENTICAL binary; a different path string
+/// or target dir is a different binary and shifts the RNG stream, so the two
+/// runs are not seed-comparable — and that non-comparability is the point: a
+/// receipt taken without `-Zmiri-preemption-rate=0` is a property of one build,
+/// not of the constant.
+///
+/// The reduced recipe is markedly faster (the harness's own `finished in` read
+/// 3-4 s against 6-26 s for the full one, on a LOADED box; a range, not a
+/// benchmark), which is exactly what makes it tempting; it buys the speed by
+/// not forcing the schedule. So
+/// `-Zmiri-preemption-rate=0` is load-bearing for ARMED-NESS and not only for
+/// the verdict, and a sweep of this constant taken without it measures the
+/// preemption RNG rather than the yield count.
+///
+/// # The margin is thin, and printed rather than asserted for that reason
+///
+/// Seed 0 at 16 reads `overlaps=1/4` on the external-joiner arm — one scope
+/// from red. That is precisely the drift from 3/4 toward 1/4 that
+/// `assert_probe_armed` tells its reader to watch. It is a property of the SEED:
+/// seed 0 is the thin one, and seeds 1..6 never went below 2/4 at any value.
+/// Whether another value would widen SEED 0's margin was NOT measured — the
+/// sweep above ran seeds 1..6 — so do not read the 32 row as a recommendation.
+///
+/// # Falsifiability, re-established with the value confirmed (2026-09-10)
+///
+/// A sweep that only ever produces green proves the constant is not the problem;
+/// it does not prove the gate can still fail. Measured at 16 under the full
+/// recipe, with `complete_task`'s receiver changed back to `&Self` (the pre-fix
+/// shape) and its two `task/scoped.rs` call sites to `&*shared`: RED on seeds 1,
+/// 2 and 3, every one of them
+/// `error: Undefined Behavior: deallocation through <TAG> ... is forbidden`,
+/// protected tag born at the mutated `complete_task` argument and accessed tag
+/// at `Scope::drop`'s `Box::from_raw`. Zero `KE16-PROTECTOR-GATE-ARMED` lines
+/// and zero arming asserts in all three — the gate reds on the PROPERTY, not on
+/// its own armed-ness check.
+///
 /// Cost: `cfg(miri)` only, so the shipped artifact contains none of it (symbol
 /// census identical to the pre-fix build, zero probe symbols); and even under
 /// Miri it is taken only on `prev == 1`, i.e. once per `pending -> 0` transition

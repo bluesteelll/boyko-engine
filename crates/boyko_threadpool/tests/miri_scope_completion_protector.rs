@@ -112,11 +112,36 @@
 //! # Run
 //!
 //! ```text
-//! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance
-//!   -Zmiri-ignore-leaks -Zmiri-preemption-rate=0"
-//!   cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool
+//! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance \
+//!   -Zmiri-ignore-leaks -Zmiri-preemption-rate=0" \
+//!   cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool \
 //!   --test miri_scope_completion_protector -- --nocapture
 //! ```
+//!
+//! The seed sweep, which is how a change to `MIRI_RELEASE_PROBE_YIELDS` is
+//! judged — and it must carry the WHOLE flag set. An environment `MIRIFLAGS`
+//! REPLACES `.cargo/config.toml`'s `[env]` value rather than extending it, and
+//! MEASURED 2026-09-10 the reduced form `-Zmiri-tree-borrows -Zmiri-seed=N` is
+//! armed on only 4 of 6 seeds where the full one is armed on 6 of 6, so a sweep
+//! run under it measures the preemption RNG rather than the yield count (see
+//! `MIRI_RELEASE_PROBE_YIELDS` in `src/scope.rs` for the table):
+//!
+//! ```text
+//! for S in 0 1 2 3 4 5 6; do
+//!   MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation \
+//!     -Zmiri-permissive-provenance -Zmiri-ignore-leaks \
+//!     -Zmiri-preemption-rate=0 -Zmiri-seed=$S" \
+//!     cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool \
+//!     --test miri_scope_completion_protector -- --nocapture
+//! done
+//! ```
+//!
+//! Read the `KE16-PROTECTOR-GATE-ARMED` line of EVERY seed IN ADDITION TO the
+//! exit code: a value is acceptable only when every seed prints
+//! `test result: ok` AND all three contexts show `firings >= expected`,
+//! `overlaps >= 1`, `block_overlaps >= 1` and `slot_exhaustions=0`. The harness's
+//! `finished in` read 6-26 s per run under this recipe on a loaded box (3-4 s
+//! under the reduced one) — a range for budgeting the loop, not a benchmark.
 //!
 //! `-Zmiri-tree-borrows` is not optional: the protector this gate hunts is a
 //! Tree-Borrows object and Stacked Borrows does not install it on this shape.

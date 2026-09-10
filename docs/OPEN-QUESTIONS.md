@@ -5148,7 +5148,7 @@ that produced the bytes, not the channel name — because a load receipt cannot 
 
 ---
 
-## The Miri protector gate's arming is seed-dependent — and worse WITHOUT the pool fix (2026-09-10)
+## RETRACTED the same day — the Miri protector gate's arming is NOT seed-dependent; the six-seed receipt was taken under a reduced recipe (2026-09-10)
 
 While gating the TLS fix, `crates/boyko_threadpool/tests/miri_scope_completion_protector.rs` went red
 at `:454` ("the probe fired 2 times but NOT ONE of 2 frees landed inside a release window") under the
@@ -5161,5 +5161,22 @@ seed happened to land. The test's own message names the remedy — re-tune `MIRI
 against the observation — and that is owed as its own change, with the seed sweep as the receipt
 (`scratchpad/miri_seeds_tb.log`, reproduced by the commands in this entry).
 
-**WHAT IS PUT TO YOU:** a Miri gate whose armed-ness flips with the seed is not a gate; retune it, or
-make the arming assert print all six seeds and require a majority.
+~~**WHAT IS PUT TO YOU:** a Miri gate whose armed-ness flips with the seed is not a gate; retune it, or
+make the arming assert print all six seeds and require a majority.~~
+
+**RETRACTED 2026-09-10, nothing is put to you.** The receipt above is invalid as evidence about the
+constant: `miri_seeds_tb.log` was taken with `MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-seed=N"`, which
+drops four flags the test header declares mandatory (`-Zmiri-disable-isolation`
+`-Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-preemption-rate=0`) — an environment
+`MIRIFLAGS` REPLACES the config's, and this entry knew that and still spelled only two. Without
+`-Zmiri-preemption-rate=0` the run measures the preemption RNG, and the gate's own monitor said so:
+the reduced runs print `block_overlaps < overlaps`, the inversion `assert_probe_armed` documents as the
+signature of that missing flag. Under the documented recipe, measured on this branch: **every value
+16..96 of `MIRI_RELEASE_PROBE_YIELDS` arms on all six seeds** (36 runs), 16 additionally confirmed on
+seeds 0, 7, 8, 9, 10 — 11 seeds, 0 disarmed — and the gate still reds 3/3 by mutation (`complete_task`
+receiver back to `&Self`), on the protector property and not on its own arming check. The constant
+stays **16**; the sweep table, the recipe A/B and the mutation receipt are recorded on the constant's
+doc in `crates/boyko_threadpool/src/scope.rs`, and the test header now carries the full-recipe seed
+loop. The "fix tree 5 of 6, HEAD 0 of 6" numbers say nothing about the TLS merge; the merge was gated
+separately (`tls_lane_merge.rs`, Miri Tree Borrows under the full recipe). The mechanism to keep: a
+Miri receipt whose flag set is not spelled in full is a receipt about one binary's RNG stream.
