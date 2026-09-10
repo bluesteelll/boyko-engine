@@ -1269,7 +1269,7 @@ failure mode into a compile error at the crate-visible boundary.
 
 Consumers (the D4 disposition table, all migrated): the
 `QueryIter` / `QueryIterMut` constructors ([iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/iter.rs):95/:410), the
-par distribution loops `for_each_impl` / `run_chunk_inline` ([par_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs):286/:608),
+par distribution loops `for_each_impl` / `run_chunk_inline` ([par_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs):286/:611),
 `for_each_chunk_impl` ([chunk_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/chunk_iter.rs):97),
 `par_for_each_chunk_impl` ([par_chunk.rs](../crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs):104), and `Query`/`QueryView`
 `len`/`is_empty`/`get`/`get_mut`/`single`. Per-driver behavioral suite:
@@ -1838,19 +1838,19 @@ everything above (worker threads, parking, scope, panic propagation, install
 API) is hand-rolled to fit the scheduler's contracts. Exports:
 
 - `ThreadPool` / `ThreadPoolBuilder` / `WorkerHandle` / `PoolInner` /
-  `MAX_WORKERS` (lib.rs:301).
-- `Scope` (lib.rs:300) — `Scope::spawn` with `'scope` lifetime erasure;
+  `MAX_WORKERS` (lib.rs:112).
+- `Scope` (lib.rs:111) — `Scope::spawn` with `'scope` lifetime erasure;
   `Scope::Drop` blocks via *work-stealing* (rayon pattern) so nested scopes can't
   deadlock. `install` (dispatcher TLS bookkeeping) vs `scope` (worker-safe,
   lighter; used by `par_iter` / `par_for_each_chunk`).
-- TLS (lib.rs:302): `current_worker_id`, `WORKER_ID_DISPATCHER` /
+- TLS (lib.rs:113): `current_worker_id`, `WORKER_ID_DISPATCHER` /
   `WORKER_ID_UNATTACHED`, `InSystemRunGuard` (the ALLOC1/ALLOC6 guard — the
   ECS crate's context-restricted paths `debug_assert!` it or its negation:
   event lane routing, the hook-drain SAFETY-7 gate), `try_with_active_pool`.
 - NOT exported — the queue element. KE16 replaced
   `TaskHandle { body: Box<dyn FnOnce() + Send + 'static> }` with
   `Task { payload: *const (), execute: TaskFn }`
-  ([task.rs](../crates/boyko_threadpool/src/task.rs):173) — same 16 bytes, one
+  ([task/mod.rs](../crates/boyko_threadpool/src/task/mod.rs):191) — same 16 bytes, one
   fewer dependent load on dispatch. It is `pub(crate)`: the element is an
   implementation detail of the deques and no caller outside the crate can name
   it.

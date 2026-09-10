@@ -6,12 +6,16 @@
 //!   * [`par_iter_from_dispatcher_reaches_more_than_one_thread`] — the CONTROL.
 //!     Driven from the test thread inside `pool.install`, where `push_task`
 //!     routes to `injector_global`. It must be GREEN today; if it is not, the
-//!     instrument is broken and the red gate below proves nothing.
+//!     instrument is broken and the gate below proves nothing.
 //!   * [`par_iter_in_system_reaches_more_than_one_thread`] — the GATE. The same
 //!     call from inside a scheduled system body, which the parallel scheduler
-//!     runs ON A WORKER, so `push_task` routes to `injector_local[wid]` that no
-//!     sibling ever polls. RED today; `#[ignore]`d so the branch stays green,
-//!     and to be un-ignored by whoever fixes defect A.
+//!     runs ON A WORKER. It was written RED against the placement that routed
+//!     such a push into `injector_local[wid]`, which no sibling ever polled; the
+//!     placement that ships pushes onto the worker's OWN registered deque
+//!     (`worker::push_on_lane_no_wake`), whose `Stealer` every sibling scans, so
+//!     the wave fans out and the gate is expected GREEN. It is no longer
+//!     `#[ignore]`d — Step App orders that removal by name
+//!     (`docs/threadpool/KE16-DESIGN-APP.md` §10).
 //!
 //! ## Why max-in-flight and not distinct thread ids
 //!
@@ -26,10 +30,15 @@
 //!
 //! `IN_FLIGHT` / `MAX_IN_FLIGHT` / `ROWS_SEEN` / `SYSTEM_WORKER_ID` are process-global, and both
 //! tests reset them at the start of their own pass, so the two must not run at the same time.
-//! That is why every invocation in the measurement protocol
-//! (`docs/threadpool/KE16-DESIGN-APP.md` §10) passes `--test-threads=1`, and why the
-//! ignored gate's reason repeats the requirement: un-ignoring it without that flag would let
-//! libtest run the two passes concurrently and mix their occupancy readings.
+//! [`INSTRUMENT`] enforces that inside the binary; the measurement protocol
+//! (`docs/threadpool/KE16-DESIGN-APP.md` §10) additionally passes `--test-threads=1` so a
+//! reading is taken with nothing else on the box at all.
+//!
+//! ⚠ Until 2026-09-09 nothing enforced it and the paragraph here credited the flag. What was
+//! actually keeping the passes apart was the GATE's plain `#[ignore]` — so the moment Step App
+//! removed that by name, the default workspace command (`cargo test --workspace --all-targets`,
+//! which passes no `--test-threads=1`) would have run them together. The lock is the property
+//! the ignore had been providing by accident, made explicit.
 //!
 //! Component id 493 is reserved for this test binary.
 
@@ -45,9 +54,7 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
-use boyko_threadpool::{
-    MAX_WORKERS, ThreadPoolBuilder, current_worker_id, ke16_check_expected_variant,
-};
+use boyko_threadpool::{MAX_WORKERS, ThreadPoolBuilder, current_worker_id};
 
 const SLOT_KE16_GATE: ComponentId = ComponentId(493);
 
@@ -88,22 +95,32 @@ static SINK: AtomicU64 = AtomicU64::new(0);
 /// `u32`s, so a max is exactly the test for "some run was not on a registered worker".
 static SYSTEM_WORKER_ID: AtomicU32 = AtomicU32::new(0);
 
-/// Prints the build's variant witness, then refuses to produce a reading for a
-/// build that is not the one the tester named.
+/// Serialises the two passes, which share the process-global instrument above.
 ///
-/// The print and the `KE16_EXPECT` check are TWO obligations, not one
-/// (`KE16-DESIGN.md` §4). With `KE16_EXPECT` unset the check is silent, so
-/// without the banner a recorded red-to-green flip of the gate below carries no
-/// record of which build produced it — and that flip IS this campaign's
-/// verdict. The spelling matches the pool crate's own KE16 harness files, so one
-/// `grep 'KE16 variant'` collects every row of the protocol.
+/// Held from BEFORE [`reset_instruments`] until past the last assertion, so no pass can zero a
+/// counter under another's live wave. The concrete damage without it: one pass's reset zeroes
+/// `ROWS_SEEN` mid-flight, so the other's `assert_eq!(rows, N_ROWS)` is flaky-red; and zeroing
+/// `IN_FLIGHT` under live bodies makes their later `fetch_sub(1)` wrap a `usize`, which then
+/// feeds `MAX_IN_FLIGHT.fetch_max` — garbage in the PASSING direction, which is worse.
 ///
-/// The banner is printed HERE rather than inside `ke16_check_expected_variant`:
-/// a print from `crates/*/src/**.rs` reds `boyko-log`'s print census, and a test
-/// binary is where the census does not look.
-fn ke16_witness() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
+/// Poisoning is absorbed (`into_inner`) deliberately: if one pass panics, the other should
+/// report its own result rather than a poison error naming the wrong test.
+///
+/// `#[allow(clippy::disallowed_types)]` with its rationale, per CLAUDE.md's exception rule: the
+/// `Mutex` ban is about the engine's hot path. This is a test-binary lock taken twice per run,
+/// outside every measured region — the wave itself runs with the guard already held and never
+/// contends for it.
+#[allow(clippy::disallowed_types)]
+static INSTRUMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes [`INSTRUMENT`] for the caller's whole pass, absorbing poisoning.
+///
+/// Fully qualified rather than imported: an `#[allow]` on an item does not reach a `use`
+/// statement, so importing the type would put a bare `Mutex` in the file with no rationale
+/// attached to it — which is exactly what the ban exists to make visible.
+#[allow(clippy::disallowed_types)]
+fn hold_instrument() -> std::sync::MutexGuard<'static, ()> {
+    INSTRUMENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn reset_instruments() {
@@ -149,7 +166,7 @@ fn worker_count() -> usize {
 /// `install` labels it `WORKER_ID_DISPATCHER` and every chunk reaches
 /// `injector_global`, which every worker polls.
 ///
-/// This test is the reason the ignored gate below is evidence rather than an
+/// This test is the reason the gate below is evidence rather than an
 /// assertion: it proves the fixture, the instrument and the pool all work.
 #[test]
 #[cfg_attr(
@@ -157,9 +174,7 @@ fn worker_count() -> usize {
     ignore = "miri-slow: 4096 rows x 100 us of real wall-clock spin across a real OS thread pool"
 )]
 fn par_iter_from_dispatcher_reaches_more_than_one_thread() {
-    // Per TEST, not per file: the measurement protocol runs these FILTERED, so a witness printed
-    // once from a harness main would not appear on the invocation whose number is recorded.
-    ke16_witness();
+    let _instrument = hold_instrument();
     let workers = worker_count();
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();
     let mut world = build_world();
@@ -185,7 +200,7 @@ fn par_iter_from_dispatcher_reaches_more_than_one_thread() {
         peak >= MIN_EXPECTED_IN_FLIGHT,
         "par_iter driven from the dispatcher peaked at {peak} concurrent bodies on a \
          {workers}-worker pool over {N_ROWS} rows. This is the HEALTHY route, so either the \
-         instrument is broken or the pool is — and until it is fixed the ignored \
+         instrument is broken or the pool is — and until it is fixed the \
          `par_iter_in_system_reaches_more_than_one_thread` gate below proves nothing."
     );
 }
@@ -193,23 +208,25 @@ fn par_iter_from_dispatcher_reaches_more_than_one_thread() {
 /// GATE (red-first) — the shipping route.
 ///
 /// The parallel scheduler runs concurrent system bodies on WORKERS
-/// (`schedule.rs`: only exclusive systems run inline on the dispatcher). From a
-/// worker, `worker.rs::push_task` routes each `par_iter` chunk to
-/// `injector_local[wid]`; sibling stealing walks `inner.stealers`, which holds
-/// worker DEQUES only, and the owner's local injector is polled by the owner
-/// alone. The worker then blocks in `Scope::drop`, which drains that injector
-/// into a private `scratch` deque with no registered stealer and runs the batch
-/// inline. So the whole wave executes on one thread and this assertion fails.
+/// (`schedule.rs`: only exclusive systems run inline on the dispatcher). It was
+/// written RED against the placement that routed each `par_iter` chunk from a
+/// worker into `injector_local[wid]`: sibling stealing walks `inner.stealers`,
+/// which holds worker DEQUES only, so the owner's local injector was polled by
+/// the owner alone, and `Scope::drop` then drained that injector into a private
+/// `scratch` deque with no registered stealer and ran the batch inline — the
+/// whole wave on one thread. The placement that ships pushes onto the worker's
+/// own registered deque (`worker.rs::push_on_lane_no_wake`), whose `Stealer`
+/// every sibling scans, so the wave fans out.
 ///
-/// Un-ignore it when defect A is fixed; the control above already proves the
-/// instrument reports >= 2 when the dispatch is healthy.
+/// The control above proves the instrument reports >= 2 when the dispatch is
+/// healthy, which is what makes this reading evidence rather than an assertion.
 #[test]
-#[ignore = "deferred: KE16 red-first occupancy gate; un-ignore when defect A \
-            (worker-spawned work unreachable by siblings) is fixed, and run it with \
-            --test-threads=1: this file's occupancy instrument is process-global and \
-            shared with the control above"]
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: 4096 rows x 100 us of real wall-clock spin across a real OS thread pool"
+)]
 fn par_iter_in_system_reaches_more_than_one_thread() {
-    ke16_witness();
+    let _instrument = hold_instrument();
     let workers = worker_count();
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();
     let mut world = build_world();
@@ -253,10 +270,9 @@ fn par_iter_in_system_reaches_more_than_one_thread() {
     assert!(
         peak >= MIN_EXPECTED_IN_FLIGHT,
         "par_iter inside a scheduled system peaked at {peak} concurrent bodies on a \
-         {workers}-worker pool over {N_ROWS} rows (wall {:.1} ms). Defect A: the system body runs \
-         on a worker, so every chunk `push_task` writes lands in `injector_local[wid]`, which no \
-         sibling polls, and `Scope::drop` runs the batch inline out of an unregistered scratch \
-         deque.",
+         {workers}-worker pool over {N_ROWS} rows (wall {:.1} ms). Work spawned from inside the \
+         system's own worker is not reaching its siblings — the regression this gate was written \
+         against parked it in a queue no sibling polls.",
         wall.as_secs_f64() * 1e3
     );
 }

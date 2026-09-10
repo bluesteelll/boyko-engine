@@ -1110,12 +1110,13 @@ fn dispatch_color<F>(
         #[cfg(debug_assertions)]
         let csr_before = graph.csr_shape();
 
-        // KE16 App-4: the color's chunks go out as ONE wave — one `pending` RMW
-        // and one wake decision for the color instead of one per chunk. `target
-        // >= 1`, so this count is the closed form of the `while chunk_lo < hi`
-        // walk it replaces and the chunk bounds are unchanged (bit-identity is
-        // chunk-count/shape-independent either way). Without `ke16-c-batch`
-        // `spawn_batch` is one `spawn` per body, i.e. that walk.
+        // KE16 App-4: the color's chunks go out through ONE `spawn_batch` call.
+        // The batch is still one `spawn` per chunk — each body takes its own
+        // `pending` RMW and its own wake decision (scope.rs) — so `n_waves` is
+        // not a count that gets registered, it is the promised UPPER BOUND on the
+        // bodies the iterator yields. `target >= 1`, so it is the closed form of
+        // the `while chunk_lo < hi` walk it replaces and the chunk bounds are
+        // unchanged (bit-identity is chunk-count/shape-independent either way).
         let n_waves = total.div_ceil(target);
 
         pool.scope(|scope| {

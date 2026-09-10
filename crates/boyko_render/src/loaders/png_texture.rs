@@ -48,6 +48,9 @@ fn narrow_to_rgba8(image: DecodedImage) -> Vec<u8> {
         8 => image.pixels,
         16 => {
             let mut out = Vec::with_capacity(image.pixels.len() / 2);
+            // `as_chunks::<2>()` rather than `chunks_exact(2)`: the width is a
+            // constant, so the element is a `&[u8; 2]` and the index below is checked
+            // at compile time instead of per sample.
             for sample in image.pixels.as_chunks::<2>().0 {
                 // Big-endian u16: `sample[0]` is the most-significant byte.
                 out.push(sample[0]);

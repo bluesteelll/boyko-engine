@@ -25,6 +25,24 @@ jobs:
   build:
     name: Build documentation
     runs-on: ubuntu-latest
+    # Keeps this job on the pinned nightly declared below, above the repo-root
+    # rust-toolchain.toml (which pins `stable`).
+    #
+    # Precedence was MEASURED on 2026-09-07, not read from documentation:
+    # RUSTUP_TOOLCHAIN outranks rust-toolchain.toml, which in turn outranks the
+    # `rustup default` that dtolnay/rust-toolchain sets. The single cargo call in
+    # this job (`cargo doc`, below) does NOT use `+toolchain`, so without this env
+    # it would silently run on stable — where boyko_shaderdsl's `core_intrinsics`
+    # is E0554 and the layout asserts are a different story again.
+    #
+    # That failure would NOT have been red: the `cargo doc` step is non-fatal and
+    # merely emits `::warning::cargo doc failed` before publishing the book with
+    # no /api/ rustdoc sub-site. The job would have stayed green while quietly
+    # dropping half its output.
+    #
+    # Keep this value in step with the `toolchain:` input in the step below.
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-05-20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

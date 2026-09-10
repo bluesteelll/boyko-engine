@@ -4,19 +4,20 @@
 //!
 //! The 2026-08-30 census measured `par_iter` inside a scheduled system at **1.01x** against
 //! **7.69x** for the identical driver called from the dispatcher thread, and localized the cause
-//! to the pool, not to the query drivers: `push_task` (`src/worker.rs`) routes a task spawned by a
-//! worker of *this* pool into `injector_local[wid]`, and no thread ever polls another thread's
+//! to the pool, not to the query drivers: `push_task` (`src/worker.rs`) routed a task spawned by a
+//! worker of *this* pool into `injector_local[wid]`, and no thread ever polled another thread's
 //! local injector — sibling stealing walks `inner.stealers`, which holds worker **deques** only.
-//! So work spawned from inside a system body is reachable by its own worker alone (**defect A**),
-//! and `Scope::drop` additionally batch-steals about half the wave into a private, unregistered
-//! FIFO `scratch` deque and runs it inline (**defect B**).
+//! Work spawned from inside a system body was therefore reachable by its own worker alone
+//! (**defect A**), and `Scope::drop` additionally batch-stole about half the wave into a private,
+//! unregistered FIFO `scratch` deque and ran it inline (**defect B**). This file is the instrument
+//! that was built to see both, and it stays as the standing gate over the placement that ships.
 //!
-//! Every ECS system body executes on a worker, so every `par_iter` in every system is on the
-//! defective path. Measuring that through `boyko_ecs` would confound the pool with the query
-//! driver's own chunking constant (`MIN_ARCHETYPE_FOR_PARALLEL = 1024`, which caps fan-out at
-//! `ceil(N/1024)` independently of the pool). **This harness therefore drives the pool directly**:
-//! two dispatch routes, identical waves, identical bodies. The only difference between them is
-//! *who* pushed the tasks.
+//! Every ECS system body executes on a worker, so every `par_iter` in every system was on that
+//! path. Measuring it through `boyko_ecs` would confound the pool with the query driver's own
+//! chunking constant (`MIN_ARCHETYPE_FOR_PARALLEL = 1024`, which caps fan-out at `ceil(N/1024)`
+//! independently of the pool). **This harness therefore drives the pool directly**: two dispatch
+//! routes, identical waves, identical bodies. The only difference between them is *who* pushed the
+//! tasks.
 //!
 //! ## The instrument
 //!
@@ -43,13 +44,11 @@
 //!
 //! ```text
 //! cargo test -p boyko-threadpool --test ke16_nested_scope_occupancy -- --nocapture --test-threads=1
-//! cargo test -p boyko-threadpool --test ke16_nested_scope_occupancy -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! The second line is the DEFAULT build's only way to reach the red-first gate
-//! ([`worker_spawned_wave_reaches_at_least_half_the_workers`]), where it is red by design. Under
-//! any A arm that gate is not ignored and the first line runs it, so a feature build needs no
-//! second invocation and cannot pass by never having run.
+//! That single invocation runs every test in this file, the red-first gate
+//! ([`worker_spawned_wave_reaches_at_least_half_the_workers`]) included: nothing here is
+//! `#[ignore]`d, so no test in this file can pass by never having run.
 
 use std::hint::black_box;
 use std::sync::Arc;
@@ -58,7 +57,7 @@ use std::time::{Duration, Instant};
 
 use boyko_threadpool::{
     MAX_WORKERS, ThreadPool, ThreadPoolBuilder, WORKER_ID_DISPATCHER, WORKER_ID_UNATTACHED,
-    current_worker_id, ke16_check_expected_variant, try_with_active_pool,
+    current_worker_id, try_with_active_pool,
 };
 
 /// Per-task body duration. 200 us is far above the ~100 ns Windows `Instant` granule and far
@@ -70,9 +69,9 @@ const BODY: Duration = Duration::from_micros(200);
 /// distribute even if it first hands one task to each worker and only then steals.
 const TASKS_PER_WORKER: usize = 4;
 
-/// Repetitions per (route, width) cell in the recording test. Three is enough to expose the
-/// dispatcher route's bimodality without turning a 40 ms test into a benchmark; the bench file is
-/// where distributions are measured properly.
+/// Repetitions per (route, width) cell in the recording test. Three shows the run-to-run spread of
+/// a cell without turning a 40 ms test into a benchmark; the bench file is where distributions are
+/// measured properly.
 const REPEATS: usize = 3;
 
 // ---------------------------------------------------------------------------
@@ -179,8 +178,9 @@ struct Wave {
     /// Reconciles the two contradictory census measurements of the nested shape (matrix U1).
     outer_worker_id: u32,
     /// Whether the pool attached to the outer task is pointer-identical to the pool that was
-    /// installed. `push_task`'s local-injector fast path is taken only when this is true, so a
-    /// `false` here would mean the nested route never exercised defect A at all (matrix U1).
+    /// installed. The nested wave is opened on the *active* pool, so a `false` here would mean
+    /// the wave was never spawned into the pool under test and the nested route was never
+    /// exercised at all (matrix U1).
     outer_same_pool: bool,
     /// Lanes that executed at least one body of the wave.
     lanes_used: usize,
@@ -201,7 +201,8 @@ impl Wave {
 /// Address of the pool's `PoolInner`, taken from inside an `install` frame on the calling thread.
 ///
 /// Only an integer crosses the thread boundary — the pointer is never dereferenced here; it is a
-/// pool identity token for the same `same_pool` comparison `push_task` itself performs.
+/// pool identity token for the same `ptr::eq(pool, inner)` comparison `tls::worker_lane_for`
+/// itself performs.
 fn pool_addr(pool: &ThreadPool) -> usize {
     pool.install(|_| ThreadPool::current_pool().map_or(0, |p| p.as_ptr() as usize))
 }
@@ -211,8 +212,8 @@ fn pool_addr(pool: &ThreadPool) -> usize {
 // ---------------------------------------------------------------------------
 
 /// **(a) Dispatcher path** — the healthy route. The test thread is not a worker of this pool, so
-/// `push_task`'s `same_pool` test is false and every task lands in `injector_global`, which every
-/// worker drains.
+/// `tls::worker_lane_for` answers `None` and `place_task` sends every task to `injector_global`,
+/// which every worker drains.
 fn dispatcher_path(pool: &ThreadPool, tasks: usize) -> Wave {
     let occ = Arc::new(Occupancy::new());
     let started = Instant::now();
@@ -384,13 +385,9 @@ fn print_wave(route: &str, w: usize, tasks: usize, rep: usize, wave: &Wave) {
 /// census reported "only 4-5 of 16 tasks simultaneously live" even on the dispatcher route).
 #[test]
 fn nested_scope_occupancy_numbers_are_recorded_for_both_routes() {
-    // Per TEST, not per file: the measurement protocol runs these FILTERED, so a witness printed
-    // once from a harness main would not appear on the invocation whose number is recorded. The
-    // banner is printed HERE rather than inside `ke16_check_expected_variant` because a print in
-    // `crates/*/src/**.rs` reds `boyko-log`'s print census; the library owes the panic, the gate
-    // owes the record (`KE16-DESIGN.md` §4).
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
+    // Inside the test rather than once per binary: the measurement protocol runs these FILTERED,
+    // so a line printed from a harness main would not appear on the invocation whose number is
+    // actually recorded.
     println!(
         "[KE16] available_parallelism={} widths={:?} body={}us tasks_per_worker={}",
         hardware_parallelism(),
@@ -402,10 +399,10 @@ fn nested_scope_occupancy_numbers_are_recorded_for_both_routes() {
         let pool = ThreadPoolBuilder::new().num_threads(w).build();
         let tasks = TASKS_PER_WORKER * w;
 
-        // Repeated rather than averaged: the dispatcher route is bimodal at this checkout (how
-        // much of the wave the joining thread batch-steals into its scratch varies run to run,
-        // and that single quantity moves the wall-clock by 4x), and an average would report a
-        // number that neither mode ever produces.
+        // Repeated rather than averaged: the dispatcher route was bimodal against the placement
+        // this file was written against (how much of the wave the joining thread batch-stole into
+        // its private `scratch` varied run to run, and that single quantity moved the wall-clock
+        // by 4x), and an average would report a number that neither mode ever produces.
         for rep in 0..REPEATS {
             let a = dispatcher_path(&pool, tasks);
             print_wave("dispatcher", w, tasks, rep, &a);
@@ -423,13 +420,11 @@ fn nested_scope_occupancy_numbers_are_recorded_for_both_routes() {
 /// thread instead, the nested wave goes to `injector_global` and fans out — a healthy number that
 /// says nothing about the defect.
 ///
-/// This is un-ignored and un-deferred because it is the *precondition* of the RED gate below: a
-/// gate that reds for the wrong configuration is worth nothing, and a gate that greens because the
-/// configuration drifted is worth less than nothing.
+/// It is the *precondition* of the red-first gate below, and that is why it is a gate in its own
+/// right: a gate that reds for the wrong configuration is worth nothing, and a gate that greens
+/// because the configuration drifted is worth less than nothing.
 #[test]
 fn worker_route_outer_task_runs_on_a_registered_worker_of_the_installed_pool() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
     let w = hardware_parallelism();
     let pool = ThreadPoolBuilder::new().num_threads(w).build();
     let tasks = TASKS_PER_WORKER * w;
@@ -445,45 +440,28 @@ fn worker_route_outer_task_runs_on_a_registered_worker_of_the_installed_pool() {
     );
     assert!(
         wave.outer_same_pool,
-        "the outer task's active pool is not the installed pool; push_task's same_pool test is \
-         false and the local-injector path was never taken"
+        "the outer task's active pool is not the installed pool; the nested wave was therefore \
+         opened on some other pool and this harness did not measure the pool it built"
     );
 }
 
-/// **The RED-first gate, and it now RUNS wherever it can pass.** A wave spawned from inside a
-/// worker task must reach at least half the workers simultaneously.
+/// **The red-first gate.** A wave spawned from inside a worker task must reach at least half the
+/// workers simultaneously.
 ///
-/// In the DEFAULT build it is RED, and that red is the finding rather than a fault: the wave lands
-/// in `injector_local[wid]`, which only worker `wid` polls, and `Scope::drop` then batch-steals
-/// about half of it into an unregistered `scratch` and runs it inline on that same worker. So the
-/// `#[ignore]` is `cfg_attr`'d to exactly that build instead of being unconditional: the moment any
-/// A arm is enabled the gate runs in the ORDINARY `cargo test` leg, with no `--ignored` needed.
-/// `KE16-DESIGN-B.md` §2.7 makes the un-ignoring an obligation of the B axis, which is the last of
-/// the four to land; until it was discharged this gate could not fail in ANY configuration, which
-/// is the one property a red-first gate must never have.
+/// It is an ordinary always-run gate: no `#[ignore]`, no `--ignored` leg, and no build in which it
+/// is switched off. That property is the point rather than a detail — the gate was written RED,
+/// against a placement it could not pass, and a red-first gate nothing ever runs is the one shape
+/// such a gate must never have.
 ///
-/// MEASURED at this checkout, `max_in_flight` at W = 4 / W = 16 (floor 2 / 8): `a0` **1** — RED;
-/// `a1` 4 / 16; `a1f` 4 / 16; `a2` 4 / 16; `a3` 4 / 15; `a5` 4 / 16; `a1+b1` 4 / 16; `a1+b3`
-/// 4 / 16. Every A arm clears the floor, so the condition is "any A arm" and not "A1 only" — a
-/// narrower cfg would keep a passing gate switched off and read as coverage the run does not have.
-/// `ke16-a5` is absent from the list because Cargo implies `ke16-a2` from it (`KE16-DESIGN.md`
-/// §4), so naming it again would be a cfg arm that cannot be reached on its own.
+/// What it was written against: the wave landed in `injector_local[wid]`, which only worker `wid`
+/// polls, and `Scope::drop` then batch-stole about half of it into an unregistered `scratch` and
+/// ran it inline on that same worker. The placement that ships — a worker's own spawns go to its
+/// own registered deque, where a sibling can steal them — clears the floor with margin.
 ///
 /// Do not weaken the threshold to make it pass — `W/2` is already a floor, not the target (the
 /// dispatcher route reaches it on the same fixture).
 #[test]
-#[cfg_attr(
-    not(any(
-        feature = "ke16-a1",
-        feature = "ke16-a1-fifo",
-        feature = "ke16-a2",
-        feature = "ke16-a3"
-    )),
-    ignore = "deferred: KE16 red-first occupancy gate; RED in the default build BY DESIGN because defect A (worker-spawned work unreachable by siblings) is fixed only under an A arm, and under any A arm this gate is NOT ignored and runs in the ordinary leg"
-)]
 fn worker_spawned_wave_reaches_at_least_half_the_workers() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
     for w in widths() {
         let pool = ThreadPoolBuilder::new().num_threads(w).build();
         let tasks = TASKS_PER_WORKER * w;
@@ -494,8 +472,9 @@ fn worker_spawned_wave_reaches_at_least_half_the_workers() {
             wave.max_in_flight >= w / 2,
             "W={w}: a wave of {tasks} tasks spawned from inside a worker reached at most \
              {mif} simultaneously live bodies (floor {floor}); wall={wall:.3}ms against a serial \
-             floor of {serial:.3}ms (speedup {sp:.2}x). Defect A: the tasks are in \
-             injector_local[{owid}] and no sibling polls it.",
+             floor of {serial:.3}ms (speedup {sp:.2}x). Work spawned from inside worker {owid} is \
+             not reaching its siblings — the regression this gate was written against parked it \
+             in a queue no sibling polls.",
             mif = wave.max_in_flight,
             floor = w / 2,
             wall = wave.wall.as_secs_f64() * 1e3,
@@ -505,6 +484,7 @@ fn worker_spawned_wave_reaches_at_least_half_the_workers() {
         );
     }
 }
+
 /// **The B1-P receipt** (`KE16-DESIGN-B.md` §2.7). A joiner that parked inside its own scope's
 /// join is a CLAIMABLE lane: another thread's wave claims its idle bit, wakes it, and the task
 /// runs on that joiner INSIDE the join.
@@ -527,15 +507,11 @@ fn worker_spawned_wave_reaches_at_least_half_the_workers() {
 /// The receipt is the foreign task's own `current_worker_id()`: it must be X. Note what makes the
 /// assertion honest rather than racy — Y cannot take that task at all, because Y only leaves its
 /// body when `release` is set and the foreign task is what sets it. So the reading is X or a hang,
-/// and the hang is bounded and reported. Under B0 the test cannot pass (X's bit is never set),
-/// which is why it is compiled only under the B arms.
-// === KE16 B switch: ke16-b1 / ke16-b3 ===
-#[cfg(any(feature = "ke16-b1", feature = "ke16-b3"))]
+/// and the hang is bounded and reported. The whole receipt rests on the joiner parking
+/// idle-marked: a joiner that parks without marking is unclaimable, and step 4 would then have no
+/// lane to reach at all.
 #[test]
 fn parked_joiner_is_claimed_by_a_foreign_wave() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
-
     const WORKERS: usize = 2;
     let pool = ThreadPoolBuilder::new().num_threads(WORKERS).build();
 
@@ -603,7 +579,7 @@ fn parked_joiner_is_claimed_by_a_foreign_wave() {
         assert!(
             Instant::now() < mask_deadline,
             "no joiner bit was ever set in parked_mask (joiner_id={id}, mask={:#x}): the worker \
-             joiner did not park idle-marked, so rule B1-P is not in this build",
+             joiner did not park idle-marked, so rule B1-P is not being honoured",
             pool.parked_mask()
         );
         std::hint::spin_loop();

@@ -1947,12 +1947,11 @@ impl BroadphaseGrid {
         let per = n_cells.div_ceil(n_chunks).max(1);
         match pool {
             Some(pool) => {
-                // KE16 App-4: the pass goes out as ONE wave — one `pending` RMW
-                // and one wake decision instead of one per chunk. `per >= 1`, so
-                // this count is the closed form of the `while c_lo < n_cells`
-                // walk it replaces and the ranges are unchanged. Without
-                // `ke16-c-batch` `spawn_batch` is one `spawn` per body, i.e.
-                // that walk.
+                // `spawn_batch` is one `spawn` per body, so the pooled arm
+                // dispatches exactly the `while c_lo < n_cells` walk of the serial
+                // arm below. `per >= 1`, so this count is that walk's closed form:
+                // the ranges are unchanged, and it is also the upper bound
+                // `spawn_batch` is promised.
                 let n_waves = n_cells.div_ceil(per);
                 let body = &body;
                 pool.scope(|scope| {
@@ -2026,11 +2025,11 @@ impl BroadphaseGrid {
             }
             c_hi
         };
-        // The cut walk as a re-runnable iterator: the chunk boundaries are
-        // data-dependent (they follow the survivor prefix sum), so KE16 App-4's
-        // wave count cannot be derived in closed form the way Pass A's can — it
-        // is the same walk, run once to count. Factored here rather than written
-        // twice so the counted cuts and the spawned cuts cannot drift apart.
+        // The cut walk as an iterator factory: the chunk boundaries are
+        // data-dependent (they follow the survivor prefix sum), so unlike Pass A's
+        // they have no closed form — the only way to learn a cut is to walk to it.
+        // Factored here rather than written twice so the pooled arm and the serial
+        // arm cannot drift apart.
         let cuts = || {
             let next_hi = &next_hi;
             let mut c_lo = 0usize;
@@ -2048,19 +2047,8 @@ impl BroadphaseGrid {
             Some(pool) => {
                 let body = &body;
                 pool.scope(|scope| {
-                    // A `const` branch (`KE16_SPAWN_BATCH`), so the un-batched
-                    // build folds the counting walk away instead of paying an
-                    // O(n_cells) pass per emit for a value it would not use.
-                    if boyko_threadpool::KE16_SPAWN_BATCH {
-                        let n_waves = cuts().count();
-                        scope.spawn_batch(
-                            n_waves,
-                            cuts().map(move |(c_lo, c_hi)| move || body(c_lo, c_hi)),
-                        );
-                    } else {
-                        for (c_lo, c_hi) in cuts() {
-                            scope.spawn(move || body(c_lo, c_hi));
-                        }
+                    for (c_lo, c_hi) in cuts() {
+                        scope.spawn(move || body(c_lo, c_hi));
                     }
                 });
             }

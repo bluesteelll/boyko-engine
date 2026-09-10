@@ -6,12 +6,23 @@
 //! `simd_o1` differential proptest is the gate) — this bench measures ONLY the
 //! speed delta, never a value change.
 //!
-//! Build the SIMD arm with AVX2:
+//! Run it:
 //! ```text
-//! RUSTFLAGS="-C target-feature=+avx2" cargo bench -p boyko-physics --bench simd_o1
+//! cargo bench -p boyko-physics --bench simd_o1
 //! ```
-//! Without `+avx2` the dispatcher runs scalar in both arms (the bench then shows
-//! ~parity — a non-AVX2 build has no SIMD path to measure).
+//!
+//! ⚠ Do NOT reintroduce the old two-build recipe, which set
+//! `RUSTFLAGS="-C target-feature=+avx2"`. `RUSTFLAGS` REPLACES
+//! `target.<triple>.rustflags` rather than appending to it, so that command silently
+//! dropped the repository's `-C target-cpu=x86-64-v3` ISA baseline AND this box's
+//! machine-local linker flags, and benchmarked a different binary from the one that
+//! ships. It is also UNNECESSARY: `x86-64-v3` already carries AVX2, so the SIMD arm
+//! is live in an ordinary build.
+//!
+//! ⚠ The failure mode of getting this wrong LOOKS LIKE a true result — both arms
+//! run scalar, the bench reads ~parity, and it reads as "the switch does nothing".
+//! Where a flag genuinely is needed, `cargo --config target.<triple>.rustflags=[…]`
+//! MERGES instead of replacing.
 
 use std::hint::black_box;
 

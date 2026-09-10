@@ -1,19 +1,16 @@
-//! KE16 — the wall-clock harness every candidate fix for defect A is compared on.
+//! KE16 — the wall-clock harness the candidate fixes for defect A were compared on, kept as the
+//! shipped configuration's route receipt.
 //!
 //! Two dispatch routes, one grid, stable ids:
 //!
-//! - **`dispatcher/…`** — the wave is spawned from a non-worker thread. `push_task`'s `same_pool`
-//!   test is false, so every task lands in `injector_global`, which every worker drains. This is
-//!   the route that works today, and it is the *ceiling* the nested route is measured against.
+//! - **`dispatcher/…`** — the wave is spawned from a non-worker thread, so `tls::worker_lane_for`
+//!   answers `None` and `place_task` sends every task to `injector_global`, which every worker
+//!   drains. It is the *ceiling* the nested route is measured against.
 //! - **`worker/…`** — the wave is spawned from inside a task that is itself running on a worker,
 //!   through `try_with_active_pool` + `PoolInner::scope`. This is verbatim the shape of every ECS
-//!   system body, and of all four parallel physics sites. Today it lands in `injector_local[wid]`,
-//!   which no sibling polls (defect A).
-//!
-//! Under `ke16-c-batch` each route gains a `*_batch/…` twin (`dispatcher_batch`,
-//! `worker_batch`) that hands the identical wave over as ONE `Scope::spawn_batch`
-//! instead of `tasks` separate spawns — App-4's row, and the only difference
-//! between a twin and its sibling.
+//!   system body, and of all four parallel physics sites. It lands on that worker's OWN registered
+//!   deque, whose stealer every sibling scans, so the wave is reachable by the whole pool — the
+//!   placement that closed defect A.
 //!
 //! Grid: body ∈ {1 us, 10 us, 100 us, 1 ms} × tasks ∈ {W, 4W, 64W}, where `W` is
 //! `available_parallelism`. The body sweep is the load-bearing axis: a fix that adds
@@ -26,9 +23,10 @@
 //! Outside: pool construction (one pool for the whole run), the `Duration` grid, criterion's own
 //! bookkeeping. Inside: exactly one wave — the spawn loop, the fan-out, the bodies, and the join.
 //! The `worker` route additionally pays, inside the timed region, one `ThreadPool::spawn` of the
-//! outer task and its `park`/`unpark` handshake (~a few us); that cost is identical for every
-//! candidate variant, so it does not move a comparison, but it does mean the `worker` row of the
-//! `1us x W` cell is dominated by it and should not be read as a fan-out number.
+//! outer task and its `park`/`unpark` handshake (~a few us); that cost is paid by the `worker` row
+//! and not by the `dispatcher` ceiling, so a route-to-route reading owes it. It also means the
+//! `worker` row of the `1us x W` cell is dominated by it and should not be read as a fan-out
+//! number.
 //!
 //! Bodies **spin** on `Instant::elapsed`, never sleep: a sleeping body would let a serialised wave
 //! look distributed at the wall clock.
@@ -69,8 +67,7 @@ use std::time::{Duration, Instant};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use boyko_threadpool::{
-    MAX_WORKERS, Scope, ThreadPool, ThreadPoolBuilder, current_worker_id,
-    ke16_check_expected_variant, try_with_active_pool,
+    MAX_WORKERS, Scope, ThreadPool, ThreadPoolBuilder, current_worker_id, try_with_active_pool,
 };
 
 /// Body durations, with the label that goes into the benchmark id. The labels are spelled out
@@ -101,22 +98,23 @@ const PARK_TIMEOUTS: [(&str, Duration); 3] = [
 /// here (the wave is microseconds wide) and keeps the receipt readable without the join argument.
 static OUTER_WORKER_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 
-/// Prints the build's variant witness and the width the grid is parameterised by, and refuses to
-/// produce a number for a build that is not the one the tester named.
+/// The width the grid is parameterised by: the pool's worker count, the `tasks` axis multiplier,
+/// and the number the receipt prints.
 ///
-/// "The features were not actually enabled" and "the two baselines were taken at different W" are
-/// both false-green shapes this campaign has already met; the witness and the width print are
-/// what make them visible in the bench's own output rather than inferred from the command line.
-fn ke16_witness() {
-    // The banner is printed HERE and not inside `ke16_check_expected_variant`: a print in
-    // `crates/*/src/**.rs` reds `boyko-log`'s print census, and the harness is where the census
-    // does not look (`KE16-DESIGN.md` §4 assigns the print to the benches and the gates).
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
-    println!(
-        "KE16 available_parallelism={}",
-        std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get)
-    );
+/// ONE function for all three, so a reading cannot be printed against a width the grid did not run
+/// at. The `4` fallback is the grid's: `available_parallelism` failing is not a reason to build a
+/// 0-worker pool.
+fn grid_width() -> usize {
+    std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get)
+}
+
+/// Prints the width the grid is parameterised by.
+///
+/// "The two baselines were taken at different W" is a false-green shape this campaign has already
+/// met; this print is what makes it visible in the bench's own output rather than inferred from the
+/// box a run happened on.
+fn print_grid_width() {
+    println!("KE16 available_parallelism={}", grid_width());
 }
 
 /// Busy-wait for `d`.
@@ -130,25 +128,14 @@ fn spin(d: Duration) {
     black_box(acc);
 }
 
-/// How a wave is handed to the pool. A `fn` pointer rather than a flag so the
-/// two dispatch routes below stay ONE function each: the `*_batch` rows differ
-/// from their siblings in this and in nothing else, which is the whole of what
-/// KE16 App-4 changes (`KE16-DESIGN-W.md` §4).
+/// How a wave is handed to the pool.
 type Spawner = fn(&Scope<'_>, usize, Duration);
 
-/// Today's shape: one `spawn` per task, so one `pending` RMW and one wake
-/// decision each.
+/// One `spawn` per task, so one `pending` RMW and one wake decision each.
 fn spawn_per_task(scope: &Scope<'_>, tasks: usize, body: Duration) {
     for _ in 0..tasks {
         scope.spawn(move || spin(body));
     }
-}
-
-/// KE16 App-4: the wave as one `spawn_batch` — one `pending` RMW for the wave
-/// and one wake decision, taken after its first push.
-#[cfg(feature = "ke16-c-batch")]
-fn spawn_as_batch(scope: &Scope<'_>, tasks: usize, body: Duration) {
-    scope.spawn_batch(tasks, (0..tasks).map(|_| move || spin(body)));
 }
 
 /// One wave pushed from a non-worker thread, joined by `Scope::drop`.
@@ -196,7 +183,7 @@ fn worker_wave(pool: &ThreadPool, tasks: usize, body: Duration, spawn: Spawner) 
     // the sentinel ids (DISPATCHER = u32::MAX - 1, UNATTACHED = u32::MAX) are exactly what a
     // future refactor would leave here if the outer task ever ran off-pool. A nested scope opened
     // from a non-worker pushes to `injector_global` and fans out perfectly, so that run would
-    // measure the healthy route twice and report it as the nested one.
+    // measure the `dispatcher` route twice and report it as the nested one.
     let outer = OUTER_WORKER_ID.load(Ordering::Acquire);
     assert!(
         (outer as usize) < MAX_WORKERS,
@@ -273,8 +260,8 @@ fn bench_park_timeout(c: &mut Criterion) {
 }
 
 fn bench_nested_scope(c: &mut Criterion) {
-    ke16_witness();
-    let workers = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+    print_grid_width();
+    let workers = grid_width();
     // One pool for the whole run. Construction spawns W OS threads and is emphatically not part of
     // what this file measures.
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();
@@ -304,20 +291,6 @@ fn bench_nested_scope(c: &mut Criterion) {
             group.bench_function(BenchmarkId::new("worker", &param), |b| {
                 b.iter(|| worker_wave(&pool, tasks, body, spawn_per_task));
             });
-
-            // KE16 App-4's third route: the identical waves handed over as one
-            // batch. Present only under `ke16-c-batch` — in the un-batched build
-            // `spawn_batch` IS the per-task loop above, so these rows would be a
-            // duplicate of the two above under a name that claims a candidate.
-            #[cfg(feature = "ke16-c-batch")]
-            {
-                group.bench_function(BenchmarkId::new("dispatcher_batch", &param), |b| {
-                    b.iter(|| dispatcher_wave(&pool, tasks, body, spawn_as_batch));
-                });
-                group.bench_function(BenchmarkId::new("worker_batch", &param), |b| {
-                    b.iter(|| worker_wave(&pool, tasks, body, spawn_as_batch));
-                });
-            }
         }
     }
 

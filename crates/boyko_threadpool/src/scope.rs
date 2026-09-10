@@ -9,36 +9,23 @@
 //! ## Work-stealing wait (plan §4.5.5)
 //!
 //! `Scope::Drop` does NOT call `std::thread::park()` unconditionally.
-//! Instead, it polls the local injector (if on a worker), the global
-//! injector, and sibling stealers. Without this, nested scopes can
-//! deadlock when every worker is itself blocked inside its own
-//! `Scope::Drop`.
+//! Instead, it polls every source it can act through — a worker joiner its own
+//! registered deque, then the global injector, then its siblings; an external
+//! joiner the global injector and then its siblings — and runs what it finds.
+//! Without this, nested scopes can deadlock when every worker is itself blocked
+//! inside its own `Scope::Drop`.
 //!
-//! Note (plan §4.5.5 / Round 3 W-NEW-2, corrected by KE16), describing the
-//! DEFAULT build: the joiner never reaches the calling worker's own Chase-Lev
-//! deque as its OWNER — that deque is a local of `worker_main` and no owning
-//! handle is in scope here. It does reach its contents as a THIEF:
-//! `try_steal_any` walks every registered stealer including the calling worker's
-//! own, so a batch of up to 33 of the joiner's own tasks lands in the stack-local
-//! `scratch` deque and is run serially from there (KE16 defect B — `scratch` is
-//! unregistered, so no sibling can take any of that batch back). Progress itself
-//! rests on the injectors and the sibling steals.
-//!
-//! KE16 axis B (this paragraph and its features are deleted once the verdict
-//! lands): under `ke16-b1` / `ke16-b3` the join dispatches on the ONE identity
-//! predicate instead. A joining WORKER of this pool DOES reach its own deque as
-//! the owner — `tls::worker_lane_for` hands it the lane `worker_main` deposited —
-//! so it pops its own newest chunk, batch-steals into that same REGISTERED deque
-//! (the residue stays stealable; `scratch` is gone) and re-checks the scope
-//! between tasks; when it must park it parks idle-marked (rule B1-P), which makes
-//! a parked joiner a claimable lane for any other wave. An EXTERNAL joiner — the
-//! dispatcher, an unattached thread, a worker of another pool, a worker inside an
-//! `install` frame of this pool — has no lane here: under `ke16-b1` it steals one
-//! task at a time (no unregistered sink), under `ke16-b3` it only parks, EXCEPT
-//! when it is a worker of this pool inside an `install` frame, whose refusal
-//! would be a hang rather than a lost lane (that frame's pushes are reachable
-//! only through this pool's own workers, and at `num_threads(1)` this thread is
-//! all of them). Nested scopes still cannot deadlock: a joiner either runs a
+//! The join dispatches on the ONE identity predicate (`tls::worker_lane_for`,
+//! `KE16-DESIGN-B.md` §2.1). A joining WORKER of this pool reaches its own deque
+//! as the OWNER — the predicate hands it the lane `worker_main` deposited — so it
+//! pops its own oldest chunk from the FIFO owner end, batch-steals into that same
+//! REGISTERED deque (the residue it does not run stays stealable by every
+//! sibling) and re-checks the scope between tasks; when it must park it parks
+//! idle-marked (rule B1-P), which makes a parked joiner a claimable lane for any
+//! other wave. An EXTERNAL joiner — the dispatcher, an unattached thread, a
+//! worker of another pool, a worker inside an `install` frame of this pool — has
+//! no lane here and steals one task at a time, because it has no registered sink
+//! to receive a batch. Nested scopes cannot deadlock: a joiner either runs a
 //! ready task or parks with a wake guaranteed by its own scope's last completer,
 //! by a foreign wave's claim (B1-P), or by the backstop.
 
@@ -48,44 +35,20 @@ use std::any::Any;
 use std::panic::resume_unwind;
 use std::time::Duration;
 
-// === KE16 B switch: ke16-b1 / ke16-b3 === The B0 joiner's `scratch` is the only
-// deque this module owns, and both B arms delete it (`KE16-DESIGN-B.md` §2.2):
-// their worker arm steals into the lane's REGISTERED deque and their external
-// arm takes one task at a time, so neither has a sink to receive a batch.
-#[cfg(not(any(feature = "ke16-b1", feature = "ke16-b3")))]
-use crossbeam_deque::Worker;
 use crossbeam_deque::Steal;
 use crossbeam_utils::{Backoff, CachePadded};
 
+use crate::block::ScopeBlock;
 use crate::sync::{AtomicPtr, AtomicUsize, Ordering, Thread};
 use crate::task::Task;
 use crate::thread_pool::PoolInner;
-// === KE16 A switch: ke16-a1 / ke16-a1-fifo / ke16-a3 === The joiner's ONE use
-// of the identity predicate is step 1's own-slot lookup, which those arms have
-// no queue for; the B axis brings the next use (a worker joiner that pops its
-// own deque).
-// === KE16 B switch: ke16-b1 / ke16-b3 === adds the SECOND use of the predicate:
-// the joiner's own dispatch (`KE16-DESIGN-B.md` §2.1). The B arms exist only on
-// `ke16-a1` / `ke16-a1-fifo` (the `compile_error!` matrix in `lib.rs`), so that
-// arm of the `any` below is what makes `tls` reachable there.
-#[cfg(any(
-    not(any(feature = "ke16-a1", feature = "ke16-a1-fifo", feature = "ke16-a3")),
-    feature = "ke16-b1",
-    feature = "ke16-b3"
-))]
+// The join's dispatch is the ONE identity predicate (`KE16-DESIGN-B.md` §2.1),
+// and `join_on_worker` acts through the lane it hands back.
 use crate::tls;
 use crate::worker::{push_task, unpark_one_idle};
-// === KE16 C switch: ke16-c-batch === The batch spawn is the one caller that
-// separates placement (`push_task_no_wake` for the wave's first push,
-// `push_task_silent` for the rest) from the wave's single wake decision
-// (`wake_after_push`, or `wake_up_to` under `ke16-w-fanout`), so it reaches the
-// module rather than a fixed set of names.
-#[cfg(feature = "ke16-c-batch")]
-use crate::worker;
-// === KE16 B switch: ke16-b1 / ke16-b3 === The B worker arm joins through the
-// worker loop's OWN poll helpers rather than a second copy of the same scan; the
-// two idle-bitset primitives are rule B1-P's park (`KE16-DESIGN-B.md` §2.2).
-#[cfg(any(feature = "ke16-b1", feature = "ke16-b3"))]
+// The worker joiner joins through the worker loop's OWN poll helpers rather than
+// a second copy of the same scan; the two idle-bitset primitives are rule B1-P's
+// park (`KE16-DESIGN-B.md` §2.2).
 use crate::worker::{
     XorShift64Star, mark_idle, pop_any, pop_global_injector, run_task, splitmix64,
     try_steal_random, unmark_idle, unpark_one_idle_excluding,
@@ -96,16 +59,16 @@ use crate::worker::{
 /// 50 us is the SOURCE constant; `park_timeout` rounds it up to the OS timer
 /// quantum (measured ~15.3 ms unguarded and ~1.0 ms while `boyko_app`'s
 /// `TimerResolutionGuard` holds 1 ms — KE16 App-7 / App-12), which is why every
-/// arm's real wake is a completer's `unpark` and this value only bounds the rare
-/// lost-wakeup window. Named once so the B0 arm and the two B arms cannot drift
-/// apart (`KE16-DESIGN-B.md` §2.2, §3).
+/// route's real wake is a completer's `unpark` and this value only bounds the
+/// rare lost-wakeup window. Named once so the worker route and the external
+/// route cannot drift apart (`KE16-DESIGN-B.md` §2.2, §2.3).
 ///
-/// Under `ke16-w-count` it stops being load-bearing on route (b): the count gate
-/// makes a worker joiner's check-then-park race-free against its own last
-/// completer, so this timeout costs nothing when the wake arrives and is kept
-/// purely as a defensive bound (`KE16-DESIGN-W.md` §3.4). On the external arm,
-/// which keeps the unpark-before-decrement order, it is still the only thing
-/// that ends a lost wake — at a full timer quantum.
+/// It is NOT load-bearing on route (b), the worker joiner: the count gate makes
+/// that joiner's check-then-park race-free against its own last completer, so
+/// this timeout costs nothing when the wake arrives and is kept purely as a
+/// defensive bound (`KE16-DESIGN-W.md` §3.4). On the external route, which keeps
+/// the unpark-before-decrement order, it is still the only thing that ends a lost
+/// wake — at a full timer quantum.
 const JOIN_BACKSTOP: Duration = Duration::from_micros(50);
 
 /// Miri-only: how many times the LAST completer yields while still inside
@@ -117,7 +80,7 @@ const JOIN_BACKSTOP: Duration = Duration::from_micros(50);
 /// no thread holds a live Tree-Borrows protector over `ScopeShared` at the
 /// instant of the free — has a window only a couple of MIR steps wide (the
 /// decrement, then the frame's return) against a joiner tail of order a hundred
-/// (loop exit, `scratch` drop, `take_panic`, `Box::from_raw`). Left to Miri's
+/// (loop exit, `ScopeBlock::free_all`, `take_panic`, `Box::from_raw`). Left to Miri's
 /// random preemption the window is a coin flip on the seed, which is how a
 /// 10 975-window probe reported nothing. Holding the completer's frame open for
 /// a few scheduling rounds turns that into a decision, and it forces exactly the
@@ -153,6 +116,102 @@ const JOIN_BACKSTOP: Duration = Duration::from_micros(50);
 /// green at today; if you change it, the gate tells you whether the new one
 /// works, which is the whole point of replacing the inequality with a
 /// measurement.
+///
+/// # THE SWEEP THAT WAS OWED, AND WHAT IT REFUTED (MEASURED 2026-09-10)
+///
+/// The paragraph above promises that a changed value makes the gate say whether
+/// the new one works. Nobody had ever asked it across more than one value, and
+/// in the meantime a six-seed run reported the gate ARMED on five seeds and
+/// DISARMED on one (`overlaps=0/2`, W-d′ arm, seed 3). Read literally that says
+/// armed-ness is a coin flip on the seed and this constant is mis-tuned. It is
+/// neither. THE FLAPPING WAS THE RECIPE, NOT THE VALUE.
+///
+/// Six values x six seeds = 36 runs, each under this gate's own documented
+/// recipe (`-Zmiri-tree-borrows -Zmiri-disable-isolation
+/// -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-preemption-rate=0
+/// -Zmiri-seed=N`), nightly-x86_64-pc-windows-gnu / miri 2026-08-20. Each cell
+/// is the WORST `overlaps` over the six seeds for that context, as
+/// `n/expected` — the margin, not the typical reading. In all 36 runs
+/// `block_overlaps` EQUALLED `overlaps` and `slot_exhaustions` was 0:
+///
+/// | yields | body-environment | external-joiner | W-d′  | armed |
+/// |--------|------------------|-----------------|------|-------|
+/// | **16** | 3/4              | 3/4             | 1/2  | 6/6   |
+/// | 24     | 3/4              | 3/4             | 1/2  | 6/6   |
+/// | 32     | 4/4              | 4/4             | 1/2  | 6/6   |
+/// | 48     | 3/4              | 3/4             | 1/2  | 6/6   |
+/// | 64     | 3/4              | 2/4             | 1/2  | 6/6   |
+/// | 96     | 3/4              | 3/4             | 2/2  | 6/6   |
+///
+/// EVERY value armed on EVERY seed, in all three contexts. There is no disarmed
+/// point in this range to tune away from, so the SMALLEST is kept — which is the
+/// value that was already here. Confirmed at 16 on five further seeds (0, 7, 8,
+/// 9, 10), armed on all five: 11 distinct seeds, 0 disarmed.
+///
+/// Note what the table does NOT show, because it is why a sweep of this constant
+/// cannot terminate in a verdict on its own: the columns do not improve
+/// monotonically. 64 carries the WORST external-joiner margin in the set and 32
+/// the best, with 48 between them. That is the round-robin ALIGNMENT effect this
+/// doc has recorded since the floor assert was removed, and it is why "raise it
+/// until it arms" is not a procedure.
+///
+/// # The discriminating experiment, which names the knob that WAS broken
+///
+/// SAME tree, SAME 16, SAME seeds 1..6; only the flag set varied:
+///
+/// | recipe                                    | armed |
+/// |-------------------------------------------|-------|
+/// | the documented one, above                 | 6/6   |
+/// | `-Zmiri-tree-borrows -Zmiri-seed=N` only  | 4/6   |
+///
+/// Under the reduced one, seeds 2 and 4 go RED with `overlaps=0/2` on the W-d′
+/// arm — the exact reading whose assert message sends a reader here to re-tune
+/// this number. And seeds 3 and 6 print `block_overlaps` BELOW `overlaps` (1
+/// against 2 on W-d′; 3 against 4 on body-environment), which is the inversion of
+/// `block_overlaps >= overlaps` that `assert_probe_armed` documents as the
+/// signature of a MISSING `-Zmiri-preemption-rate=0`. The monitor that exists
+/// only to report that precondition reported it, on the first runs where the
+/// precondition was actually violated.
+///
+/// Two reduced-recipe runs exist and they do NOT agree per seed: the first
+/// (`miri_seeds_tb.log`, taken in `D:/wt/threadpool` on the uncommitted tree
+/// that became `e6115223`) read seed 3 as the disarmed one, the second (this
+/// tree, a different worktree path and target dir) reads seeds 2 and 4. Miri is
+/// deterministic per seed only for an IDENTICAL binary; a different path string
+/// or target dir is a different binary and shifts the RNG stream, so the two
+/// runs are not seed-comparable — and that non-comparability is the point: a
+/// receipt taken without `-Zmiri-preemption-rate=0` is a property of one build,
+/// not of the constant.
+///
+/// The reduced recipe is markedly faster (the harness's own `finished in` read
+/// 3-4 s against 6-26 s for the full one, on a LOADED box; a range, not a
+/// benchmark), which is exactly what makes it tempting; it buys the speed by
+/// not forcing the schedule. So
+/// `-Zmiri-preemption-rate=0` is load-bearing for ARMED-NESS and not only for
+/// the verdict, and a sweep of this constant taken without it measures the
+/// preemption RNG rather than the yield count.
+///
+/// # The margin is thin, and printed rather than asserted for that reason
+///
+/// Seed 0 at 16 reads `overlaps=1/4` on the external-joiner arm — one scope
+/// from red. That is precisely the drift from 3/4 toward 1/4 that
+/// `assert_probe_armed` tells its reader to watch. It is a property of the SEED:
+/// seed 0 is the thin one, and seeds 1..6 never went below 2/4 at any value.
+/// Whether another value would widen SEED 0's margin was NOT measured — the
+/// sweep above ran seeds 1..6 — so do not read the 32 row as a recommendation.
+///
+/// # Falsifiability, re-established with the value confirmed (2026-09-10)
+///
+/// A sweep that only ever produces green proves the constant is not the problem;
+/// it does not prove the gate can still fail. Measured at 16 under the full
+/// recipe, with `complete_task`'s receiver changed back to `&Self` (the pre-fix
+/// shape) and its two `task/scoped.rs` call sites to `&*shared`: RED on seeds 1,
+/// 2 and 3, every one of them
+/// `error: Undefined Behavior: deallocation through <TAG> ... is forbidden`,
+/// protected tag born at the mutated `complete_task` argument and accessed tag
+/// at `Scope::drop`'s `Box::from_raw`. Zero `KE16-PROTECTOR-GATE-ARMED` lines
+/// and zero arming asserts in all three — the gate reds on the PROPERTY, not on
+/// its own armed-ness check.
 ///
 /// Cost: `cfg(miri)` only, so the shipped artifact contains none of it (symbol
 /// census identical to the pre-fix build, zero probe symbols); and even under
@@ -263,6 +322,38 @@ pub(crate) static MIRI_WINDOW_SLOT_EXHAUSTIONS: core::sync::atomic::AtomicUsize 
 pub(crate) static MIRI_FREES_INSIDE_A_RELEASE_WINDOW: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
+/// Miri-only: how many `Scope::drop` CHUNK frees landed while a completer of
+/// that same scope was inside its post-decrement release window.
+///
+/// The KE16 M2w observation, and the reason it is a SECOND counter rather than
+/// a second increment of [`MIRI_FREES_INSIDE_A_RELEASE_WINDOW`]: THE TWO COUNT
+/// DIFFERENT EVENTS, over different allocations, at different points in
+/// `Scope::drop`.
+///
+/// * M1's counter observes the `Box::from_raw` of the `ScopeShared` — the
+///   allocation a completer's own `*const Self` names.
+/// * this one observes `ScopeBlock::free_all`, which hands back the CHUNKS the
+///   scope's task cells live in. Those are allocations no completer holds a
+///   pointer to at all: what a completer names is its own cell, and the chunk
+///   it sits in is reclaimed wholesale.
+///
+/// Keeping them apart is what stops this column from inheriting the other's
+/// verdict. A shared counter would read `>= 1` from either free, so an M2w
+/// green could be produced entirely by M1's event — the "green from
+/// elsewhere" failure this repository keeps cataloguing — and the two are not
+/// interchangeable evidence: they are freed by different calls, and only this
+/// one is the free that Stage 3b introduced.
+///
+/// Incremented ONCE PER `Scope::drop`, not once per chunk, and only when the
+/// block actually grew one. Per-chunk counting would make the number a
+/// function of the payload bytes a scope happened to spawn rather than of the
+/// event being observed, and the threshold the gate asserts (`>= 1`, as M1's
+/// is) would then be met by a single large scope while a hundred small ones
+/// went unobserved.
+#[cfg(miri)]
+pub(crate) static MIRI_BLOCK_FREES_INSIDE_A_RELEASE_WINDOW: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 /// Miri-only: how many times [`miri_release_probe`] has run — one per
 /// `pending -> 0` transition.
 ///
@@ -279,7 +370,7 @@ pub(crate) static MIRI_FREES_INSIDE_A_RELEASE_WINDOW: core::sync::atomic::Atomic
 pub(crate) static MIRI_RELEASE_PROBE_FIRINGS: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
-/// Miri-only: the release probe itself — one definition, called from both arms
+/// Miri-only: the release probe itself — one definition, called from both routes
 /// of [`ScopeShared::complete_task`], so the two cannot drift apart.
 ///
 /// Must be called ONLY on the `prev == 1` path and ONLY after the release RMW:
@@ -367,6 +458,37 @@ fn miri_note_free_against_open_windows(key: usize) {
     }
 }
 
+/// Miri-only: the sibling of [`miri_note_free_against_open_windows`] for the
+/// BLOCK free, called by `Scope::drop` immediately before `free_all`.
+///
+/// Same slot protocol and same `key` — the freeing scope's own
+/// [`ScopeShared::miri_key`], so a match means a completer OF THIS SCOPE is
+/// mid-window — and a deliberately separate counter, because the event is a
+/// different free of a different allocation class. See
+/// [`MIRI_BLOCK_FREES_INSIDE_A_RELEASE_WINDOW`] for why the two must not share
+/// one.
+///
+/// A separate function rather than a parameter on the existing one: the two
+/// notes are called from adjacent lines of the same `Drop`, and a boolean
+/// discriminant would put the choice of counter at the call site, where a
+/// copy-paste can silently point the block's free at M1's column and produce a
+/// green in the column that was not exercised.
+///
+/// `#[inline(never)]` for the reason its sibling carries it: the gate's failure
+/// diagnoses are read off symbol names.
+#[cfg(miri)]
+#[inline(never)]
+fn miri_note_block_free_against_open_windows(key: usize) {
+    use core::sync::atomic::Ordering::SeqCst;
+
+    if MIRI_OPEN_RELEASE_WINDOWS
+        .iter()
+        .any(|slot| slot.load(SeqCst) == key)
+    {
+        MIRI_BLOCK_FREES_INSIDE_A_RELEASE_WINDOW.fetch_add(1, SeqCst);
+    }
+}
+
 /// Shared state between [`Scope`] and its spawned tasks.
 ///
 /// Allocated on the heap so that every spawned task's payload cell can hold a
@@ -434,10 +556,7 @@ pub(crate) struct ScopeShared {
     /// (`KE16-DESIGN-W.md` §3.5).
     ///
     /// Written once in [`ScopeShared::new`] and never again; read only by
-    /// [`complete_task`](Self::complete_task), and only under `ke16-w-count`.
-    // Kept unconditional so one struct serves every row of the tournament; the
-    // arms that never read it also never write anything but null through it.
-    #[cfg_attr(not(feature = "ke16-w-count"), allow(dead_code))]
+    /// [`complete_task`](Self::complete_task), which dispatches on it.
     pub(crate) joiner_wake: *const crate::sync::WakeHandle,
 
     /// Miri-only: this scope's identity in the completion gate's window slots —
@@ -547,32 +666,16 @@ impl ScopeShared {
         self.register_tasks(1);
     }
 
-    /// Register `n` outstanding tasks in ONE RMW. Called by
-    /// [`Scope::spawn_batch`] before the wave's first task is enqueued (KE16
-    /// App-4: one `pending` RMW per wave instead of one per task).
+    /// Register `n` outstanding tasks in ONE RMW. Its one caller is
+    /// [`register_task`](Self::register_task), which registers a single task
+    /// immediately before that task's push.
     ///
-    /// Ordering as [`register_task`](Self::register_task) — the count the
-    /// increment publishes is the same count the completions decrement.
+    /// `AcqRel` for the reason stated there: the count this increment publishes
+    /// is the same count the `complete_task` decrements consume, and the join
+    /// wait reads the result with `Acquire` in [`Self::is_drained`].
     #[inline]
     pub(crate) fn register_tasks(&self, n: usize) {
         self.pending.fetch_add(n, Ordering::AcqRel);
-    }
-
-    /// Give back `n` registrations that will never be spawned — the KE16 App-4
-    /// correction for a `spawn_batch` whose iterator yielded fewer than `n`
-    /// bodies (including the case where it unwound part-way).
-    ///
-    /// Sound because the ONLY caller is the scope's owner thread inside
-    /// `spawn_batch`, which has not begun joining: no other thread ever reads
-    /// `pending` to decide the allocation is free (the single free site is
-    /// `Scope::drop`, on this thread), so a transient `pending == 0` here
-    /// cannot free anything, and this thread performs no wake, so nothing
-    /// observes the correction as a completion.
-    // === KE16 C switch: ke16-c-batch ===
-    #[cfg(feature = "ke16-c-batch")]
-    #[inline]
-    pub(crate) fn unregister_tasks(&self, n: usize) {
-        self.pending.fetch_sub(n, Ordering::AcqRel);
     }
 
     /// Mark one spawned task complete. Its one production caller is
@@ -616,8 +719,8 @@ impl ScopeShared {
     /// by then entitled to have freed. That never materialised — but only
     /// because `complete_task` is `#[inline]` and was in fact always inlined
     /// into its caller of the day (the `Box`ed task-body wrapper, since
-    /// deleted — see `task.rs`), where the attribute does not survive. The old
-    /// code was therefore safe by an inlining DECISION rather than by any
+    /// deleted — see the `task` module), where the attribute does not survive.
+    /// The old code was therefore safe by an inlining DECISION rather than by any
     /// guarantee, and a future `#[inline(never)]`, a codegen-unit change or a
     /// PGO run that declined to inline it would have been enough. A raw pointer
     /// parameter carries no such licence.
@@ -632,7 +735,7 @@ impl ScopeShared {
     ///
     /// # What now establishes the invariant
     ///
-    /// At the instant either arm's release RMW commits, the only protector
+    /// At the instant either route's release RMW commits, the only protector
     /// covering this allocation is the one `AtomicUsize::fetch_sub` installs on
     /// its own `&self`: a range wholly inside an `UnsafeCell`, hence weak.
     /// Every strongly protected borrow this function takes —
@@ -654,7 +757,14 @@ impl ScopeShared {
     ///
     /// # Order (unchanged by the fix)
     ///
-    /// ORDER IS LOAD-BEARING (Phase 9.2 Candidate U) on the arm whose wake
+    /// WHICH ROUTE RUNS IS DECIDED BY THE TARGET POINTER, not by any build
+    /// configuration: a non-null [`joiner_wake`](Self::joiner_wake) means this
+    /// scope's joiner is a registered worker of this pool, and the count-gated
+    /// route runs (decrement FIRST, unpark only on `prev == 1`); a null one means
+    /// an external joiner, and the route below runs (unpark FIRST, then
+    /// decrement).
+    ///
+    /// ORDER IS LOAD-BEARING (Phase 9.2 Candidate U) on the route whose wake
     /// target lives in the allocation: `waker.unpark()` happens BEFORE
     /// `pending.fetch_sub`. While this task has not yet decremented,
     /// `pending >= 1`, so `Scope::drop`'s join cannot have observed zero and
@@ -663,11 +773,11 @@ impl ScopeShared {
     /// intermediate wave's `pending -> 0` (the ECS executor drains `pending` to
     /// zero once per dispatch wave).
     ///
-    /// The KE16 W-d′ arm below satisfies the same rule by a different route:
-    /// its target is `PoolInner`-owned, so it is read out of `*shared` BEFORE
-    /// the decrement and used AFTER it.
+    /// The count-gated route below (KE16 W-d′) satisfies the same rule by a
+    /// different means: its target is `PoolInner`-owned, so it is read out of
+    /// `*shared` BEFORE the decrement and used AFTER it.
     ///
-    /// The unpark is UNCONDITIONAL on the external arm (no `prev == 1` gate).
+    /// The unpark is UNCONDITIONAL on the external route (no `prev == 1` gate).
     /// NOT because being last is unknowable — `fetch_sub` returns the previous
     /// value, so `prev == 1` costs nothing to learn (the earlier claim that it
     /// "would require reading `pending` after the sub" was simply wrong, KE16
@@ -675,9 +785,9 @@ impl ScopeShared {
     /// lives inside the allocation this decrement releases, so a gated wake has
     /// to read it after the sub, when the joiner may already have freed it.
     /// Gating it needs a target owned elsewhere — which is exactly what
-    /// `ke16-w-count` supplies for a WORKER joiner
-    /// ([`joiner_wake`](Self::joiner_wake), W-d′, `KE16-DESIGN-W.md` §3) and
-    /// what no external joiner has (§3.5, recorded for KE17). The unconditional
+    /// [`joiner_wake`](Self::joiner_wake) is for a WORKER joiner (W-d′,
+    /// `KE16-DESIGN-W.md` §3) and what no external joiner has (§3.5, recorded
+    /// for KE17). The unconditional
     /// pre-decrement unpark is a cheap token store when the joiner runs; a
     /// spurious wake when it is parked is harmless (it re-checks `pending`). Its
     /// rare lost-wakeup window — the joiner consumes the token, re-checks a
@@ -704,12 +814,16 @@ impl ScopeShared {
     /// into the allocation across it.
     #[inline]
     pub(crate) unsafe fn complete_task(shared: *const Self) {
-        // === KE16 W switch: ke16-w-count ===
-        #[cfg(feature = "ke16-w-count")]
+        // The count-gated route (KE16 W-d′), taken when this scope's joiner is a
+        // registered worker of this pool: its wake target is owned by
+        // `PoolInner` rather than by this allocation, so the decrement may come
+        // first. Scoped in a block so `target` cannot outlive the route that
+        // dispatched on it.
         {
             // Copied out BEFORE the decrement: after it the joiner may free this
             // allocation, so `*shared` must not be touched again. A null target
-            // is an external joiner and falls through to today's order below.
+            // is an external joiner and falls through to the
+            // unpark-before-decrement order below.
             //
             // SAFETY: `*shared` is live per this function's contract — this
             //   task is still counted in `pending`, and the only free site runs
@@ -761,21 +875,20 @@ impl ScopeShared {
                     //   a different allocation with a different owner.
                     unsafe { (*target).unpark() };
 
-                    // THE RELEASE POINT on this arm, placed AFTER the unpark — and the
+                    // THE RELEASE POINT on this route, placed AFTER the unpark — and the
                     // reason is now stated at the strength it was actually
                     // established, which is weaker than the first draft claimed.
                     //
                     // The draft said the gate is "RED here and GREEN with the
-                    // burst moved above the unpark, because this arm's joiner
+                    // burst moved above the unpark, because this route's joiner
                     // may be parked and a burst before the wake would hold the
                     // frame open while the only thread that could free was still
-                    // blocked". MEASURED 2026-09-05 under
-                    // `--features ke16-w-count,ke16-a2` at
-                    // `-Zmiri-preemption-rate=0`, with a deliberately
-                    // reference-typed receiver:
+                    // blocked". MEASURED 2026-09-05 during KE16, on a build
+                    // carrying this route, at `-Zmiri-preemption-rate=0`, with a
+                    // deliberately reference-typed receiver:
                     // `worker_joiner_completer_holds_no_protector_when_the_joiner_frees`
                     // is RED at BOTH placements. The disarming the draft
-                    // predicted did not reproduce — this arm's joiner is polling
+                    // predicted did not reproduce — this route's joiner is polling
                     // its nested join, not parked, so the burst reaches it
                     // either way. The gate does NOT decide the placement.
                     //
@@ -793,8 +906,8 @@ impl ScopeShared {
                 return;
             }
         }
-        // External joiner (or the feature off): today's order, for today's
-        // reason — `waker` lives in this allocation.
+        // External joiner (a null target): unpark BEFORE the decrement, because
+        // `waker` lives in this allocation.
         //
         // SAFETY: `*shared` is live per this function's contract: this task has
         //   not decremented yet, so `pending >= 1` and no join can have observed
@@ -804,8 +917,8 @@ impl ScopeShared {
         unsafe { (*shared).waker.unpark() };
         // Miri-only: the probe's key, read while the allocation is certainly
         // live. It must precede the decrement below, which is what lets the
-        // joiner free — the W-d′ arm reads it in the same position, next to its
-        // own pre-decrement copy-out. A `Copy` place expression through the raw
+        // joiner free — the W-d′ route reads it in the same position, next to
+        // its own pre-decrement copy-out. A `Copy` place expression through the raw
         // pointer, forming no reference and installing no protector.
         //
         // SAFETY: `*shared` is live per this function's contract: this task has
@@ -821,7 +934,7 @@ impl ScopeShared {
         let _prev = unsafe { (*shared).pending.fetch_sub(1, Ordering::AcqRel) };
 
         // THE RELEASE POINT. Miri-only; compiles to nothing natively, the same
-        // device as the yields in `join_workers_until_drained` and
+        // device as the yields in `join_on_worker`, `join_external_helping` and
         // `worker::worker_main` (Phase 9.1 H2). Here it is a GATE rather than a
         // scheduling aid: the decrement above is what lets the joiner free this
         // allocation, so holding this frame open across a few scheduling rounds
@@ -832,7 +945,7 @@ impl ScopeShared {
         // while the receiver is a raw pointer; without it that verdict is left
         // to Miri's random preemption, which is how this window survived a
         // 10 975-window probe. Do not delete it without its twin on the W-d′
-        // arm: they are one gate, one probe per arm.
+        // route: they are one gate, one probe per route.
         //
         // NATIVE COST: none, and for a narrower reason than the first draft of
         // this comment claimed. The whole `cfg(miri)` block is absent natively,
@@ -896,8 +1009,19 @@ impl Drop for ScopeShared {
 /// Spawn child tasks via [`Scope::spawn`]; the scope blocks at drop time
 /// until every spawned task has completed.
 ///
+/// `#[repr(C, align(64))]` is bought deliberately, and the field ORDER is the
+/// purchase: a spawn touches `inner`, `shared` and the block's `cur` / `end` —
+/// bytes 0..32 under this order — so the alignment makes that span ONE cache
+/// line always, rather than a straddle whose probability is set by where the
+/// joiner's frame happened to land. The price is 56 bytes of stack padding once
+/// per scope, paid for one guaranteed line per spawn. The order is PINNED below
+/// by `offset_of!`, because the size and alignment pins there do not cover it —
+/// see the comment on those pins for the edit that keeps both of them green
+/// while breaking this paragraph.
+///
 /// [`ThreadPool::install`]: crate::ThreadPool::install
 /// [`ThreadPool::scope`]: crate::ThreadPool::scope
+#[repr(C, align(64))]
 pub struct Scope<'scope> {
     /// The pool's worker-shared state this scope spawns into. Borrowed for
     /// `'scope` (Phase 9.3b decision E: `&PoolInner`, not the handle — the
@@ -912,11 +1036,60 @@ pub struct Scope<'scope> {
     /// Created by `Box::into_raw` in [`Scope::new`], freed by `Box::from_raw`
     /// in [`Scope::drop`] (the single free site).
     pub(crate) shared: NonNull<ScopeShared>,
+    /// This scope's cell storage: every task spawned into the scope has its
+    /// payload cell emplaced here by [`Scope::prepare`], and the whole block is
+    /// returned to the allocator by ONE `free_all` in [`Scope::drop`],
+    /// immediately after the join.
+    ///
+    /// Held INLINE and third. Inline because a `Box` would put the bump cursor
+    /// one dependent load away from the spawn path and add an allocation to
+    /// every scope, including the ones that spawn nothing (the block itself is
+    /// lazy — `ScopeBlock::new` allocates nothing). Third because the block's
+    /// own two hot words lead its layout, so they land in bytes 16..32 and
+    /// share this struct's first cache line with the two fields above.
+    block: ScopeBlock,
     /// `PhantomData<&'scope mut &'scope ()>` makes the scope invariant in
     /// `'scope`, which is what we want — `'scope` is a borrow window, not
     /// a covariant lifetime.
     _phantom: PhantomData<&'scope mut &'scope ()>,
 }
+
+// 8 (`inner`) + 8 (`shared`) + 312 (`ScopeBlock`, pinned in `block.rs`) + 0
+// (`PhantomData`) = 328 bytes of content, rounded up to the 64-byte alignment
+// above = 384. The size is what the padding cost is stated over, and the
+// ALIGNMENT is the thing the one-cache-line claim rests on — a size pin alone
+// would survive the alignment being dropped, which is exactly the edit that
+// silently turns the guaranteed line back into a probability.
+//
+// NEITHER OF THOSE TWO COVERS THE FIELD ORDER, and the field order is what the
+// doc comment above says was bought. MEASURED, by compiling the reordering
+// against this pin set: declaring `block` FIRST gives `block`@0, `inner`@312,
+// `shared`@320, `_phantom`@328 — still 328 bytes of content, still
+// `size_of == 384`, still `align_of == 64`, so the two pins above stay SILENT
+// while the four hot fields end up on THREE different cache lines (`cur`/`end`
+// at 0..16 in the first, `inner` at 312..320 in the fifth, `shared` at 320..328
+// in the sixth). The property the alignment was paid for is then gone with no
+// build failure at all. That reordering is the edit the three `offset_of!` pins
+// below catch — all three fired on the probe — and the two above cannot.
+//
+// The pins state one half of a composition. The other half is `cur`@0 /
+// `end`@8 INSIDE `ScopeBlock`, pinned beside that struct's field list in
+// `block.rs` — it has to be stated there, because `offset_of!` respects field
+// visibility and both fields are private to that module. Composed:
+// `block`@16 with `cur`@0 / `end`@8 puts the block's two hot words at bytes
+// 16..32 of this struct, and `inner`@0 / `shared`@8 puts the scope's own two
+// ahead of them, so all four lie in bytes 0..32 of a 64-aligned allocation.
+//
+// `inner` and `shared` are pinned for the reader rather than for the property:
+// swapping just those two would preserve the one-line claim, and `block`@16 is
+// the load-bearing line. They are stated because the byte span in the doc
+// comment is read off them, and a reader re-deriving 0..32 should not have to
+// reconstruct it from `repr(C)` plus two sizes.
+const _: () = assert!(size_of::<Scope<'static>>() == 384);
+const _: () = assert!(align_of::<Scope<'static>>() == 64);
+const _: () = assert!(core::mem::offset_of!(Scope<'static>, inner) == 0);
+const _: () = assert!(core::mem::offset_of!(Scope<'static>, shared) == 8);
+const _: () = assert!(core::mem::offset_of!(Scope<'static>, block) == 16);
 
 impl<'scope> Scope<'scope> {
     #[inline]
@@ -929,6 +1102,9 @@ impl<'scope> Scope<'scope> {
         Self {
             inner,
             shared,
+            // Lazy: no chunk is allocated until the first spawn, so a scope
+            // that spawns nothing still makes no allocator call for its block.
+            block: ScopeBlock::new(),
             _phantom: PhantomData,
         }
     }
@@ -962,187 +1138,44 @@ impl<'scope> Scope<'scope> {
         push_task(self.inner, self.prepare(f));
     }
 
-    /// Spawn `n` tasks as ONE wave (KE16 App-4, `KE16-DESIGN-W.md` §4).
+    /// Spawn a wave of at most `n` tasks (KE16 App-4, `KE16-DESIGN-W.md` §4).
     ///
-    /// One `pending` RMW for the wave instead of one per task, `n` queue
-    /// insertions, and the wake decision taken ONCE — right after the FIRST
-    /// push, so a parked sibling is already on its way while the remaining
-    /// pushes land. The remaining pushes are silent.
-    ///
-    /// The single decision is the *wave's own*, and under `ke16-a5` it is
-    /// PRE-EMPTED PER PUSH rather than removed: a first push whose placement
-    /// actually CLAIMED an idle sibling unparks that sibling itself and reports
-    /// that no decision is due, so `Scope::wake_for_wave` — the C arm's
-    /// mechanism — is skipped for that wave; when the idle mask was empty or the
-    /// claim CAS lost, A5 falls through to its A2 placement and the wave's
-    /// decision is taken as normal (and finds nothing to wake). The `pending`
-    /// saving is unaffected either way. That interaction is recorded on
-    /// `wake_for_wave` and in the `ke16-w-fanout` feature row.
+    /// One [`spawn`](Self::spawn) per body: every body is registered and pushed
+    /// on its own, and every push takes its own wake decision. `n` is therefore
+    /// not a count that is registered — it is the caller's promise of an UPPER
+    /// BOUND on how many bodies `bodies` will yield, and the API exists so that a
+    /// caller whose chunk count is only an upper bound has one call to make.
     ///
     /// `bodies` must yield at most `n` closures (debug-asserted); fewer is
-    /// allowed and corrected, so a caller whose chunk count is an upper bound
-    /// stays exact. The correction also covers an iterator that panics
-    /// part-way: without it the scope's join would wait forever for bodies that
-    /// were never spawned.
+    /// allowed and costs nothing, because nothing is registered for a body that
+    /// was never produced. The same property covers an iterator that panics
+    /// part-way: it leaves no registration behind for the scope's join — which
+    /// runs during that very unwind — to wait on.
     ///
     /// Panic semantics of the bodies are [`spawn`](Self::spawn)'s.
-    ///
-    /// KE16 (deleted with the features): without `ke16-c-batch` this is one
-    /// `spawn` per body — today's per-task registration and per-push wake
-    /// decision — so the two arms differ in accounting and wake count, never in
-    /// which tasks run.
     pub fn spawn_batch<I, F>(&self, n: usize, bodies: I)
     where
         I: IntoIterator<Item = F>,
         F: FnOnce() + Send + 'scope,
     {
-        // === KE16 C switch: ke16-c-batch ===
-        #[cfg(not(feature = "ke16-c-batch"))]
-        {
-            let mut k = 0usize;
-            for f in bodies {
-                self.spawn(f);
-                k += 1;
-            }
-            debug_assert!(
-                k <= n,
-                "invariant: `spawn_batch` bodies yielded more than the `n` it was promised"
-            );
+        let mut k = 0usize;
+        for f in bodies {
+            self.spawn(f);
+            k += 1;
         }
-
-        #[cfg(feature = "ke16-c-batch")]
-        {
-            // SAFETY: `self.shared` points to the live `ScopeShared` allocation
-            //   owned by this `Scope` (created in `new`, freed only by `drop`).
-            //   Protector-rule statement, as in `spawn` above: this reborrow's
-            //   protector cannot span a free because `Scope: !Sync` (it holds a
-            //   `NonNull`) makes `&Scope: !Send`, so the owner thread is the only
-            //   thread that can reach the single free site, and it is here
-            //   instead. Note this reborrow OUTLIVES the wave's pushes, so the
-            //   argument has to be about the free and not merely about the two
-            //   accounting RMWs: workers are concurrently decrementing `pending`
-            //   under it, and one of them may drive it to zero mid-wave. That is
-            //   sound for the same reason — they cannot free.
-            let shared = unsafe { self.shared.as_ref() };
-            shared.register_tasks(n);
-            // Holds the registrations no body has claimed yet, and gives back
-            // whatever is left when this returns OR unwinds.
-            let mut wave = WaveRegistration {
-                shared,
-                unpushed: n,
-            };
-
-            let mut bodies = bodies.into_iter();
-            if let Some(first) = bodies.next() {
-                wave.charge_one();
-                // `None` means the placement already carried its own targeted
-                // wake (the A5 arm), so the wave owes no decision.
-                if let Some(pre_len) = worker::push_task_no_wake(self.inner, self.prepare(first)) {
-                    Self::wake_for_wave(self.inner, pre_len, n);
-                }
-                for f in bodies {
-                    // The wave's remaining pushes are silent: the first push
-                    // carried the fenced wake decision, and these land in a
-                    // queue an awake thief is already draining or about to
-                    // (`KE16-DESIGN-W.md` §2.3 item 3). Silent also means they
-                    // do not COMPUTE a decision's input: `push_task_silent`
-                    // skips the pre-push length probe, which under
-                    // `ke16-w-gate` is a `SeqCst` load of a contended line and
-                    // would otherwise be paid `n` times for a value read once
-                    // (`KE16-DESIGN-W.md` §4.3, "N−1 `len()` loads").
-                    wave.charge_one();
-                    worker::push_task_silent(self.inner, self.prepare(f));
-                }
-            }
-        }
-    }
-
-    /// The wave's ONE wake decision, taken right after its first push.
-    ///
-    /// `pre_len` is that push's destination length and gates the decision on
-    /// both arms; `n` is the wave size and is read only by W-f, which widens the
-    /// wake from one worker to `min(n, popcount(idle))` without touching whether
-    /// a wake is owed. This is the W-f switch's only site.
-    ///
-    /// ⚠ **ONE decision activates ONE sibling, and only the W axis re-fans it
-    /// out.** Without `ke16-w-fanout` this call ends in
-    /// [`worker::wake_after_push`] → `unpark_one_idle`, which claims exactly one
-    /// idle bit and unparks exactly one worker; a parked worker waits on an
-    /// UNTIMED `std::thread::park()` (`worker.rs`, `worker_main`'s park arm) and
-    /// moves only on an explicit unpark. What turns that one wake into a wave's
-    /// worth of lanes is [`worker::wake_after_residue`], W-b's thief-residue
-    /// cascade — and that helper is `#[cfg(feature = "ke16-w-gate")]`, a no-op
-    /// without it. So a build with `ke16-c-batch` ALONE takes a wave from the
-    /// `min(n, popcount(idle))` siblings the per-task baseline wakes (every push
-    /// wakes when the gate is absent) down to the spawner plus ONE, with the
-    /// rest asleep for the whole wave. That is a lane-count difference of up to
-    /// W/2, not the `pending`-accounting saving the arm is named for, and it
-    /// lands hardest at 100 µs–1 ms × W, where the siblings are parked at the
-    /// wave boundary — the very cells `KE16-DESIGN-W.md` §4.3 predicts as
-    /// "invisible". A `c1` row is therefore interpretable ONLY relative to the
-    /// wake configuration it was taken under: `ke16-c-batch` measured on top of
-    /// `ke16-w-gate` (the cascade) or `ke16-w-fanout` isolates App-4's
-    /// accounting; `ke16-c-batch` alone against a `c0` baseline does not.
-    /// Whether the batch's single decision should become a fan-out
-    /// unconditionally, or `ke16-c-batch` should only ever be measured on top of
-    /// a fan-out mechanism, is a DESIGN call and is escalated, not decided here
-    /// (`KE16-DESIGN.md` §2 App-4 says "so parked *siblings* start stealing",
-    /// plural; §4.1's soundness argument for the silent pushes borrows §2.3
-    /// item 3, which is W-b's).
-    ///
-    /// **Under `ke16-a5` this is CONDITIONAL, not absent.** A5's placement
-    /// answers `None` — "the placement already carried its wake" — only when it
-    /// claimed an idle bit; when the mask was zero or the single claim CAS lost
-    /// (`worker::try_place_on_idle_sibling`, both `Err(task)` exits) the push
-    /// falls through to A5's A2 placement, answers `Some(pre_len)`, and this
-    /// runs. So an `a5 + c-batch` build takes one A5 wake per push for as long
-    /// as siblings are parked and the wave's own decision on the pushes where
-    /// none was claimable; an `a5 + w-fanout` build reaches
-    /// [`worker::wake_up_to`] on exactly those waves and pays one
-    /// `publish_fence` (a local `mfence`) plus one `Acquire` load of the
-    /// contended `idle` line, almost always to return 0 — the mask A5 read a
-    /// few instructions earlier was empty, or its one CAS lost to a claimer
-    /// that took the bit. The fan-out is therefore inert where
-    /// it would help (siblings parked ⇒ A5 pre-empts it) and live as pure
-    /// overhead where it would not — the 1 µs busy cells. `KE16_C` still reads
-    /// `c1` / `c1f` throughout. The design declares the axes composable
-    /// (`KE16-DESIGN.md` §4, "W/C: no exclusions") and simultaneously defines
-    /// C's mechanism as the single wave decision this function is; resolving
-    /// that is a design call, so the code states the interaction and the
-    /// measurement protocol must not file a `c1`/`c1f` row from a build that
-    /// also enables `ke16-a5`.
-    // === KE16 C switch: ke16-w-fanout ===
-    #[cfg(feature = "ke16-c-batch")]
-    #[inline]
-    fn wake_for_wave(inner: &PoolInner, pre_len: usize, n: usize) {
-        #[cfg(feature = "ke16-w-fanout")]
-        {
-            // Both arms consult the SAME rule — `worker::wake_is_due(pre_len)`,
-            // inside the two helpers — and differ only in how wide the wake is.
-            // The fan-out is deliberately NOT gate-exempt: were it, a `c1f` row
-            // would carry "the ≤1 rule lifted on the wave's first push" on top
-            // of the fan-out count that is supposed to decide W-f, and the
-            // `pre_len` the first push already paid a `SeqCst` probe for would
-            // be discarded. The full argument, and the design clause it departs
-            // from, are on `worker::wake_after_push_up_to`.
-            //
-            // The count is the arm's bound made assertable in the pool's own
-            // tests; nothing on the spawn path reads it.
-            let _woken = worker::wake_after_push_up_to(inner, pre_len, n);
-        }
-        #[cfg(not(feature = "ke16-w-fanout"))]
-        {
-            let _ = n;
-            worker::wake_after_push(inner, pre_len);
-        }
+        debug_assert!(
+            k <= n,
+            "invariant: `spawn_batch` bodies yielded more than the `n` it was promised"
+        );
     }
 
     /// Build the queue element for one body: the payload cell, the address of
     /// the scope's shared state, and the lifetime erasure.
     ///
-    /// Registration is the CALLER's (`spawn` per task, `spawn_batch` once per
-    /// wave), so this is the one seam both spawn paths share and no arm of the
-    /// tournament carries a second copy of the erasure argument below.
+    /// Registration is the CALLER's — [`Scope::spawn`] registers each task on the
+    /// statement immediately above its push, and [`Scope::spawn_batch`] routes
+    /// every body through it — so this is the one seam every spawn takes, and
+    /// there is no second copy of the erasure argument below.
     ///
     /// # What used to be here, and why nothing inside it could have saved it
     ///
@@ -1168,10 +1201,10 @@ impl<'scope> Scope<'scope> {
         let shared = self.shared.as_ptr() as *const ScopeShared;
 
         // SAFETY (`new_scoped`'s first clause — the registration): the caller
-        //   registered this task before reaching here (`Scope::spawn` per task,
-        //   `Scope::spawn_batch` once per wave, both immediately above their
-        //   push), so `pending` already counts it and the single free site
-        //   cannot have run. The element's `run_scoped` completes that
+        //   registered this task before reaching here (`Scope::spawn`, on the
+        //   statement immediately above its push; `Scope::spawn_batch` routes
+        //   every body through it), so `pending` already counts it and the
+        //   single free site cannot have run. The element's `run_scoped` completes that
         //   registration exactly once: a `Task` is `!Copy`, the queues hand each
         //   element to exactly one consumer, and `Task::run` forgets the element
         //   so the teardown thunk cannot also fire.
@@ -1215,59 +1248,19 @@ impl<'scope> Scope<'scope> {
         //   This is observable only at the language level; no real program can
         //   observe the UB because the process is gone. Same edge case as
         //   rayon's `scope`.
-        unsafe { Task::new_scoped(shared, f) }
-    }
-}
-
-/// The registrations of one [`Scope::spawn_batch`] wave that no body has
-/// claimed yet (KE16 App-4's `k < n` correction).
-///
-/// A guard rather than a trailing `if k < n`: the correction must also run when
-/// `bodies` unwinds part-way through the wave, or the scope's join — which
-/// `Scope::drop` performs during that same unwind — would wait forever for
-/// tasks that were never spawned.
-// === KE16 C switch: ke16-c-batch ===
-#[cfg(feature = "ke16-c-batch")]
-struct WaveRegistration<'a> {
-    shared: &'a ScopeShared,
-    unpushed: usize,
-}
-
-#[cfg(feature = "ke16-c-batch")]
-impl WaveRegistration<'_> {
-    /// Charge one registration to the body that is about to be pushed.
-    ///
-    /// BEFORE the push, not after, because the debug panic below unwinds
-    /// through `Scope::drop`, which joins: a surplus task that was already in a
-    /// queue when the panic fired would be a completion `pending` never counted,
-    /// and the join would wait forever instead of reporting the contract
-    /// violation. MEASURED — charging after the push hung the k > n test.
-    #[inline]
-    fn charge_one(&mut self) {
-        debug_assert!(
-            self.unpushed > 0,
-            "invariant: `spawn_batch` bodies yielded more than the `n` it was promised"
-        );
-        if self.unpushed > 0 {
-            self.unpushed -= 1;
-        } else {
-            // The contract is broken (more bodies than `n`), which is the debug
-            // panic above. In release the surplus is registered instead of being
-            // left unaccounted: an unregistered task can drive `pending` to zero
-            // while it is still running, and the joiner then frees
-            // `ScopeShared` under it.
-            self.shared.register_tasks(1);
-        }
-    }
-}
-
-#[cfg(feature = "ke16-c-batch")]
-impl Drop for WaveRegistration<'_> {
-    #[inline]
-    fn drop(&mut self) {
-        if self.unpushed > 0 {
-            self.shared.unregister_tasks(self.unpushed);
-        }
+        //
+        // SAFETY (`new_scoped`'s third clause — the block that holds the cell):
+        //   `&self.block` is THIS scope's block, so it is the block of the
+        //   `ScopeShared` named above, and its single `free_all` is in
+        //   `Scope::drop` behind the same join as the free of that
+        //   `ScopeShared` — so the cell outlives the task's execution for
+        //   exactly the reason the registration clause gives. `&self` is what
+        //   makes this a shared borrow rather than a unique one, and the
+        //   protector it installs covers the 312-byte block STRUCT in this
+        //   frame, never the chunks: `emplace` writes through a `*mut T` and
+        //   hands back a `BlockPtr` whose only exit is `erase`, so no reference
+        //   into chunk memory is formed here (D1/D2 in `block.rs`'s header).
+        unsafe { Task::new_scoped(&self.block, shared, f) }
     }
 }
 
@@ -1286,6 +1279,58 @@ impl<'scope> Drop for Scope<'scope> {
         //   raw-pointer / NonNull design). The `*mut` coerces to the `*const`
         //   parameter.
         unsafe { join_workers_until_drained(self.inner, raw) };
+
+        // Miri-only: the window key of the scope being torn down, read ONCE
+        // here and used by both notes below. It has to be read before the first
+        // reclamation either way — after the `Box::from_raw` the field is no
+        // longer there — and one read makes it evident on sight that the block
+        // note and the `ScopeShared` note are keyed by the SAME scope identity,
+        // which is the whole basis for comparing their two counts.
+        //
+        // SAFETY: `*raw` is live and this thread is its sole owner: the join
+        //   above observed `pending == 0`, no task of this scope exists, and the
+        //   single free is the `Box::from_raw` below, which has not run. The key
+        //   is a `Copy` place read through the raw pointer, so it forms no
+        //   reference and leaves no protector behind for either free to trip
+        //   over. `cfg(miri)` only.
+        #[cfg(miri)]
+        let miri_key = unsafe { (*raw).miri_key };
+
+        // Miri-only: record whether the CHUNK free below lands inside one of
+        // this scope's own release windows (KE16 M2w). A DIFFERENT event from
+        // the note further down — that one observes the `ScopeShared` free —
+        // and it is counted separately for that reason; see
+        // `MIRI_BLOCK_FREES_INSIDE_A_RELEASE_WINDOW`. Once per `Scope::drop`
+        // rather than once per chunk, because the property is about the free
+        // SITE and not about how many chunks it happens to hand back, and
+        // guarded by `is_empty` so a scope that never grew a chunk does not
+        // report a free it never performed.
+        #[cfg(miri)]
+        if !self.block.is_empty() {
+            miri_note_block_free_against_open_windows(miri_key);
+        }
+
+        // FIRST reclamation of the scope, immediately after the join and before
+        // anything that could unwind — which is what makes the block's
+        // leak-safety structural instead of a `Drop` impl (`block.rs`'s header).
+        //
+        // SAFETY (`free_all`'s two preconditions):
+        //   - EVERY EMPLACED VALUE IS ALREADY DEAD, and the join is what
+        //     establishes it. Each cell in the block belongs to a task that was
+        //     registered in `pending`; the join returned, so `pending == 0`, so
+        //     every one of them either RAN — `run_scoped` moved its body out of
+        //     the cell by `ptr::read` before completing the registration — or
+        //     was dropped unrun, in which case `Task::drop`'s thunk dropped the
+        //     body in place. A task that had done neither would still be
+        //     counted, and this line would not have been reached.
+        //   - NO `BlockPtr` OR ERASED COPY IS DEREFERENCED AFTERWARDS. The only
+        //     copy that ever leaves this thread is `Task.payload`, and the
+        //     element carrying it is consumed by whichever of the two thunks
+        //     ran; `emplace` keeps no handle, and `BlockPtr::erase` consumed the
+        //     typed one at the spawn. Nothing on this thread names a chunk
+        //     either: `free_all` reads the table out of this frame.
+        //   Called once — `Drop` runs once, and the call is unconditional.
+        unsafe { self.block.free_all() };
 
         // The join returned ⇒ `pending == 0` (the final wave's decrement). No
         // worker will start a new `complete_task`, and every worker that ran
@@ -1351,14 +1396,10 @@ impl<'scope> Drop for Scope<'scope> {
         // allocator never recycling one across two scopes, which Miri's
         // same-thread reuse rate of 0.5 does not promise (`MIRI_SCOPE_EPOCH`).
         //
-        // SAFETY: `*raw` is live and this thread is its sole owner: the join
-        //   above observed `pending == 0`, no task of this scope exists, and the
-        //   single free is the `Box::from_raw` below, which has not run. The key
-        //   is a `Copy` place read through the raw pointer, so it forms no
-        //   reference and leaves no protector behind for that free to trip over.
-        //   `cfg(miri)` only.
-        #[cfg(miri)]
-        let miri_key = unsafe { (*raw).miri_key };
+        // POSITION UNCHANGED by Stage 3b: this note stays the last thing before
+        // the `ScopeShared` free, because it is that free it observes. The key
+        // it reads was hoisted above the block free, where it is read once for
+        // both notes.
         #[cfg(miri)]
         miri_note_free_against_open_windows(miri_key);
 
@@ -1372,149 +1413,19 @@ impl<'scope> Drop for Scope<'scope> {
     }
 }
 
-/// Block (with work stealing) until `shared.pending` is zero. Plan
-/// §4.5.5.
+/// Block (with work stealing) until `shared.pending` is zero. Plan §4.5.5,
+/// `KE16-DESIGN-B.md` §2.1.
 ///
-/// This function is called from `Scope::Drop`. It steals work from any
-/// stealable source (the calling worker's local injector if on a worker;
-/// the global injector; any sibling stealer) and runs the stolen tasks
-/// inline on the calling thread. When no work is stealable, it parks with a
-/// timeout — a re-poll trigger, not a wait anyone should read as 50 µs: 50 µs is
-/// the SOURCE CONSTANT, and `park_timeout` rounds up to the OS timer quantum
-/// (`dur2timeout`, `std/src/sys/pal/windows/mod.rs`), which on this box measured
-/// ~15.3 ms unguarded and ~1.0 ms while `boyko_app`'s `TimerResolutionGuard`
-/// holds 1 ms (KE16 App-7 / App-12). The real wake-up arrives via
-/// `shared.waker.unpark()` from a completing task (Phase 9.2 Candidate U: unpark
-/// precedes the decrement), so the timeout is only the backstop for the rare
+/// Called from `Scope::Drop`. It does not park unconditionally: it polls every
+/// source it can act through and runs what it finds inline, and parks only on the
+/// [`JOIN_BACKSTOP`] timeout — a re-poll trigger, not a wait anyone should read as
+/// 50 µs, since `park_timeout` rounds up to the OS timer quantum (`dur2timeout`,
+/// `std/src/sys/pal/windows/mod.rs`; ~15.3 ms unguarded and ~1.0 ms while
+/// `boyko_app`'s `TimerResolutionGuard` holds 1 ms, KE16 App-7 / App-12). The
+/// real wake-up arrives from a completing task
+/// ([`ScopeShared::complete_task`]), so the timeout only bounds the rare
 /// lost-wakeup window — and a backstop that costs a millisecond, not 50 µs, is
 /// why that window is priced rather than dismissed.
-///
-/// # Safety
-/// `shared` must point to a live `ScopeShared` allocation that remains
-/// valid for the entire duration of this call. The caller (`Scope::drop`)
-/// upholds this: the allocation is freed only by the single `Box::from_raw`
-/// that runs after this function returns. The function reborrows `*shared`
-/// only per-poll for one `Acquire` load (`is_drained`), never forming a
-/// reference that spans a worker's `pending` write.
-// === KE16 B switch: ke16-b1 / ke16-b3 === The B arms replace this whole body
-// (two adjacent functions with one name, `KE16-DESIGN.md` §4): a joiner that owns
-// a registered deque must not steal into an unregistered `scratch`.
-#[cfg(not(any(feature = "ke16-b1", feature = "ke16-b3")))]
-unsafe fn join_workers_until_drained(inner: &PoolInner, shared: *const ScopeShared) {
-    // KE16 App-6: the ONE identity predicate decides whether this joiner may
-    // touch per-worker structures of `inner`. The bare `wid < len` test it
-    // replaces was true for a worker of ANOTHER pool joining this scope, which
-    // then drained `inner.injector_local[wid_of_the_other_pool]` — a slot owned
-    // by a worker of `inner` that is the only thread allowed to drain it.
-    // === KE16 A switch: ke16-a1 / ke16-a1-fifo / ke16-a3 === (those arms never
-    // feed `injector_local`, so the joiner has no own slot to drain either)
-    #[cfg(not(any(
-        feature = "ke16-a1",
-        feature = "ke16-a1-fifo",
-        feature = "ke16-a3"
-    )))]
-    let own_local_inj: Option<usize> = tls::worker_lane_for(inner).map(|lane| lane.wid as usize);
-    // Under A2 / A5 the sweep skips this joiner's own slot, which step 1 drains;
-    // under the arms above there is no slot and the sweep skips nothing.
-    #[cfg(any(feature = "ke16-a1", feature = "ke16-a1-fifo", feature = "ke16-a3"))]
-    let own_local_inj: Option<usize> = None;
-
-    // A temporary deque to receive batches stolen from injectors/sibling
-    // stealers. Not exposed; lives on the dispatcher's stack frame for
-    // the duration of this wait.
-    let scratch: Worker<Task> = Worker::new_fifo();
-
-    let backoff = Backoff::new();
-
-    loop {
-        // Under Miri the scheduler is cooperative: a dispatcher that steals,
-        // runs, and `continue`s without ever reaching the backoff/park branch
-        // would starve the workers. Yield each iteration so Miri can advance
-        // the other threads. Compiles to nothing natively (Phase 9.1 H2).
-        #[cfg(miri)]
-        std::thread::yield_now();
-
-        // SAFETY: per the function contract, `shared` is live for this whole
-        //   call; this is a transient `Acquire` load that does not span a
-        //   worker write.
-        if unsafe { (*shared).is_drained() } {
-            return;
-        }
-
-        // 1. If we're on a worker, drain inner-spawn tasks targeted at us.
-        // Every stolen task below runs through `worker::run_task`, NOT a bare
-        // `t.run()` — 2026-07 audit finding. These queues carry BOTH scope-spawned
-        // tasks (whose body `task::run_scoped` already catches into the scope, so
-        // the guard is inert for them) AND fire-and-forget `ThreadPool::spawn`
-        // tasks, which `task::run_detached` catches NOWHERE — it hands the body
-        // straight to the caller. A bare unwind here escapes `Drop for Scope` and abandons
-        // the join that the `'scope -> 'static` transmute below depends on, freeing
-        // the caller's frame while spawned bodies still borrow it (UAF from safe
-        // code). `run_task` applies the same abort-on-fire-and-forget-panic policy
-        // the worker loop already applies to the identical task type.
-        // === KE16 A switch: ke16-a1 / ke16-a1-fifo / ke16-a3 === (step 1 has no
-        // queue to drain under those arms; the sibling sweep below is the only
-        // place a joiner meets a worker-spawned wave there)
-        #[cfg(not(any(
-            feature = "ke16-a1",
-            feature = "ke16-a1-fifo",
-            feature = "ke16-a3"
-        )))]
-        if let Some(idx) = own_local_inj
-            && let Some(t) = drain_one(|| inner.injector_local[idx].steal_batch_and_pop(&scratch))
-        {
-            crate::worker::run_task(t);
-            drain_scratch(&scratch);
-            backoff.reset();
-            continue;
-        }
-
-        // 2. Global injector.
-        if let Some(t) = drain_one(|| inner.injector_global.steal_batch_and_pop(&scratch)) {
-            crate::worker::run_task(t);
-            drain_scratch(&scratch);
-            backoff.reset();
-            continue;
-        }
-
-        // 3. Sibling steal — any worker, any deque.
-        let stolen = try_steal_any(inner, &scratch, own_local_inj);
-        if let Some(t) = stolen {
-            crate::worker::run_task(t);
-            drain_scratch(&scratch);
-            backoff.reset();
-            continue;
-        }
-
-        // 4. Nothing to do. Either we exhaust backoff and park-with-
-        //    timeout, or we snooze and loop.
-        if backoff.is_completed() {
-            // Wake one idle worker before parking: a sibling that just
-            // pushed inner tasks into its own local injector may not
-            // have raced through unpark_one_idle yet, but the work IS
-            // visible — letting that worker grab it is also valid.
-            //
-            // This joiner does NOT mark its own idle bit (KE16 B0), so while it
-            // sleeps here it is invisible to every other wave's wake decision:
-            // no spawner can claim it, and it resumes only on its own scope's
-            // next completer or on the timeout below. Making the parked joiner a
-            // claimable lane is rule B1-P, which arrives with the B axis
-            // (`KE16-DESIGN-B.md` §2.6).
-            unpark_one_idle(inner);
-            // 50 µs is the source constant; the real expiry is the OS timer
-            // quantum (~15.3 ms unguarded, ~1.0 ms under `boyko_app`'s
-            // `TimerResolutionGuard`), which is why this is a backstop and never
-            // the wake path.
-            std::thread::park_timeout(JOIN_BACKSTOP);
-            backoff.reset();
-        } else {
-            backoff.snooze();
-        }
-    }
-}
-
-/// Block (with work stealing) until `shared.pending` is zero — the B1 / B3 shape
-/// (`KE16-DESIGN-B.md` §2.1).
 ///
 /// One dispatch on the ONE identity predicate (App-6, [`tls::worker_lane_for`]):
 ///
@@ -1531,12 +1442,11 @@ unsafe fn join_workers_until_drained(inner: &PoolInner, shared: *const ScopeShar
 /// per-worker structures of `inner` that belong to somebody else (J14).
 ///
 /// # Safety
-/// The B0 arm's contract, unchanged: `shared` must point to a live `ScopeShared`
-/// that stays valid for the whole call. Both arms reborrow `*shared` only
-/// per-poll for one `Acquire` load and never form a reference that spans a
-/// worker's `pending` write.
-// === KE16 B switch: ke16-b1 / ke16-b3 ===
-#[cfg(any(feature = "ke16-b1", feature = "ke16-b3"))]
+/// `shared` must point to a live `ScopeShared` that stays valid for the whole
+/// call. The caller (`Scope::drop`) upholds this: the allocation is freed only by
+/// the single `Box::from_raw` that runs after this function returns. Both routes
+/// reborrow `*shared` only per-poll for one `Acquire` load and never form a
+/// reference that spans a worker's `pending` write.
 unsafe fn join_workers_until_drained(inner: &PoolInner, shared: *const ScopeShared) {
     match tls::worker_lane_for(inner) {
         // SAFETY: the caller's contract is handed through unchanged — `shared`
@@ -1552,15 +1462,14 @@ unsafe fn join_workers_until_drained(inner: &PoolInner, shared: *const ScopeShar
 /// lane's own deque or stealing INTO that deque; park idle-marked when there is
 /// nothing to run (rule B1-P).
 ///
-/// Three properties this has and the B0 `scratch` joiner does not
-/// (`KE16-DESIGN-B.md` §2.2):
+/// Three properties (`KE16-DESIGN-B.md` §2.2):
 ///
 /// - **No sink.** Every batch lands in the deque `inner.stealers[wid]` publishes,
 ///   so the residue this joiner does not run is stealable by every sibling and by
-///   an external joiner. A batch in `scratch` was reachable by nobody.
+///   an external joiner — nothing it takes is hidden from the pool.
 /// - **A re-check per task.** The scope is consulted between tasks, so the joiner
-///   stops helping the instant its own wave completes; the B0 joiner ran a whole
-///   residue of up to 33 first.
+///   stops helping the instant its own wave completes rather than running a whole
+///   stolen residue first.
 /// - **A parked joiner is a lane** (B1-P): its idle bit is set while it parks, so
 ///   ANY other wave's wake decision can claim it through the same
 ///   `claim_one_idle` that claims a worker. Cost: one `fetch_or` + one
@@ -1580,9 +1489,6 @@ unsafe fn join_workers_until_drained(inner: &PoolInner, shared: *const ScopeShar
 /// # Safety
 /// `shared` must point to a live `ScopeShared` for the whole call — the caller's
 /// contract, upheld by `Scope::drop`.
-// === KE16 B switch: ke16-b1 / ke16-b3 === (B3 is this arm plus a PARKING
-// external joiner, so the worker arm is shared by both features)
-#[cfg(any(feature = "ke16-b1", feature = "ke16-b3"))]
 unsafe fn join_on_worker(inner: &PoolInner, shared: *const ScopeShared, lane: tls::WorkerLane) {
     let wid = lane.wid;
     debug_assert!(
@@ -1603,9 +1509,9 @@ unsafe fn join_on_worker(inner: &PoolInner, shared: *const ScopeShared, lane: tl
     let mut owes_wake = false;
 
     loop {
-        // Miri-only cooperative yield, as in the B0 arm and `worker_main`: a
-        // joiner that keeps finding work would otherwise starve its siblings
-        // under Miri's cooperative scheduler. Native: compiles to nothing.
+        // Miri-only cooperative yield, as in `worker_main`: a joiner that keeps
+        // finding work would otherwise starve its siblings under Miri's
+        // cooperative scheduler. Native: compiles to nothing.
         #[cfg(miri)]
         std::thread::yield_now();
 
@@ -1627,11 +1533,10 @@ unsafe fn join_on_worker(inner: &PoolInner, shared: *const ScopeShared, lane: tl
         // all a claim asks of the lane it wakes.
         owes_wake = false;
 
-        // 1. Own deque, owner end — under `ke16-a1`'s LIFO end that is the
-        //    NEWEST chunk of the wave being joined (the `ke16-a1-fifo` arm
-        //    inverts the order, which is the A1-vs-A1-fifo question). The
-        //    `&Worker` is consumed by `pop()` in THIS statement; the body runs in
-        //    the next one (D5).
+        // 1. Own deque, owner end — a FIFO owner end, so this takes the OLDEST
+        //    entry of the wave being joined, the one pushed first. The `&Worker`
+        //    is consumed by `pop()` in THIS statement; the body runs in the next
+        //    one (D5).
         let popped = lane.deque().pop();
         if let Some(t) = popped {
             run_task(t);
@@ -1730,22 +1635,23 @@ unsafe fn join_on_worker(inner: &PoolInner, shared: *const ScopeShared, lane: tl
 ///
 /// One task at a time because the joiner has no registered deque *to act
 /// through in this pool*: a batch would have to land either in an unregistered
-/// sink (B0's `scratch`) or in a registry that does not exist (B1(i)). One CAS
-/// per task on the joiner, no residue, nothing hidden from the pool.
+/// sink, where no sibling could reach the residue, or in a registry that does not
+/// exist (B1(i)). One CAS per task on the joiner, no residue, nothing hidden from
+/// the pool.
 ///
 /// The design's §2.2 bullet says an external joiner "has no deque". That is true
 /// of the route it was written for (the dispatcher, an unattached thread, a
 /// worker of another pool) and FALSE of one caller: a worker of THIS pool inside
 /// an `install` frame, whose deque is still registered in `inner.stealers` — it
 /// is simply not this frame's lane, which is why the sweep below is allowed to
-/// probe it like any other. Under `ke16-b3` that caller is also the reason this
-/// body is not exclusive to `ke16-b1` (see [`join_external`]'s B3 arm).
+/// probe it like any other. Refusing to help that one caller would be a hang
+/// rather than a lost lane: at `num_threads(1)`, or whenever every worker is
+/// inside such a frame, it is the only thread that could run what the frame
+/// spawned.
 ///
 /// # Safety
 /// `shared` must point to a live `ScopeShared` for the whole call — the caller's
 /// contract, upheld by `Scope::drop`.
-// === KE16 B switch: ke16-b1 / ke16-b3 ===
-#[cfg(any(feature = "ke16-b1", feature = "ke16-b3"))]
 unsafe fn join_external_helping(inner: &PoolInner, shared: *const ScopeShared) {
     let mut rng = XorShift64Star::new(splitmix64(shared as usize as u64));
     let backoff = Backoff::new();
@@ -1783,13 +1689,12 @@ unsafe fn join_external_helping(inner: &PoolInner, shared: *const ScopeShared) {
     }
 }
 
-/// The external joiner under B1: [`join_external_helping`], unconditionally.
+/// The external joiner: [`join_external_helping`], unconditionally — an external
+/// joiner of this pool always helps.
 ///
 /// # Safety
 /// `shared` must point to a live `ScopeShared` for the whole call — the caller's
 /// contract, upheld by `Scope::drop`.
-// === KE16 B switch: ke16-b1 ===
-#[cfg(feature = "ke16-b1")]
 #[inline]
 unsafe fn join_external(inner: &PoolInner, shared: *const ScopeShared) {
     // SAFETY: the caller's contract is handed through unchanged — `shared` is
@@ -1809,15 +1714,23 @@ unsafe fn join_external(inner: &PoolInner, shared: *const ScopeShared) {
 /// that deque is not this frame's lane, so it is a victim like any other, and
 /// crossbeam's `Stealer::steal` is correct from the owning thread.
 ///
-/// The design's shape for this helper carries `try_steal_random`'s second,
-/// `ke16-a2` probe of `injector_local[idx]` "so the code has one shape". It is
-/// not written here: `ke16-b1` with `ke16-a2` is a `compile_error!` (`lib.rs`),
-/// so that probe could never be compiled, let alone type-checked, and an
-/// un-buildable mirror of a live scan is documentation wearing code's clothes.
-/// Under A2 the sweep would need the probe — and under A2 there is no B1 to need
-/// the sweep.
-// === KE16 B switch: ke16-b1 / ke16-b3 ===
-#[cfg(any(feature = "ke16-b1", feature = "ke16-b3"))]
+/// The registered deques are the whole scan set OF THIS SWEEP, and not of the
+/// join: a worker's own spawns land on its own registered deque, but a wave
+/// pushed by a thread with no lane in `inner` goes to `injector_global`
+/// (`worker::place_task`), which the single caller
+/// [`join_external_helping`] probes on the statement above this one.
+///
+/// Gated on `Stealer::is_empty` for the same reason as
+/// [`worker::try_steal_random`], whose doc comment carries the argument:
+/// `Stealer::steal` pins the epoch (crossbeam-deque 0.8.7 `deque.rs:650`)
+/// BEFORE loading `back` and deciding the deque is empty (`:653`), so an
+/// external joiner sweeping an idle pool paid a thread-local access per empty
+/// victim. Skipping a victim that a concurrent push fills a moment later is
+/// benign here too: this joiner loops until the scope's count reaches zero, so
+/// the next iteration of the sweep sees it, and the pusher's own wake decision
+/// covers a joiner that has since parked.
+///
+/// [`worker::try_steal_random`]: crate::worker::try_steal_random
 fn steal_one_random(inner: &PoolInner, rng: &mut XorShift64Star) -> Option<Task> {
     let n = inner.stealers.len();
     if n == 0 {
@@ -1826,125 +1739,12 @@ fn steal_one_random(inner: &PoolInner, rng: &mut XorShift64Star) -> Option<Task>
     let start = (rng.next() as usize) % n;
     for k in 0..n {
         let idx = (start + k) % n;
+        // The empty-victim gate (see this function's doc comment, and
+        // `worker::STEAL_EMPTY_GATE` for why it is host-conditional).
+        if crate::worker::STEAL_EMPTY_GATE && inner.stealers[idx].is_empty() {
+            continue;
+        }
         if let Some(t) = drain_one(|| inner.stealers[idx].steal()) {
-            return Some(t);
-        }
-    }
-    None
-}
-
-/// The external joiner under B3: never help — snooze, then park
-/// (`KE16-DESIGN-B.md` §3) — with ONE caller excepted, because for it "never
-/// help" is not a lost lane but a hang.
-///
-/// The snooze is KEPT and it is load-bearing on the frame path: a system's worker
-/// pushes its ECS completion BEFORE the pool's `complete_task` decrement, so the
-/// dispatcher can reach this loop a few nanoseconds before that decrement lands.
-/// With the external arm's unpark-before-decrement order, a check(false) → park
-/// (consumes a pending token, returns at once) → re-check (the decrement still
-/// has not landed) → park sequence would have no wake left and would sleep the
-/// whole OS-quantum backstop, once per frame that hits the window. The snooze
-/// rounds outlast that window by orders of magnitude.
-///
-/// **The exception (round-4 review, blocking item 2).** The identity predicate
-/// classifies a WORKER OF THIS POOL inside an `install` frame as external —
-/// `install` rewrites the frame's worker id to the dispatcher sentinel, and that
-/// classification is right for placement: the frame's pushes go to
-/// `injector_global`, not to this thread's deque. It is wrong as a licence to
-/// refuse: at `num_threads(1)`, or whenever every worker is inside such a frame,
-/// the refusing thread is the ONLY one that could run what the frame spawned, so
-/// §2.6's deadlock argument loses its case (a) *and* its completer, and the join
-/// sleeps forever. B0 and B1 both help there. This arm therefore asks
-/// [`tls::is_worker_thread_of`] first and helps exactly those callers; the routes
-/// B3 is measured on — the bench dispatcher, the ECS frame dispatcher, the
-/// fontbake bake thread, a worker of ANOTHER pool — are unattached to `inner`'s
-/// worker set and still never help, so no measured cell moves.
-///
-/// # Safety
-/// `shared` must point to a live `ScopeShared` for the whole call — the caller's
-/// contract, upheld by `Scope::drop`.
-// === KE16 B switch: ke16-b3 ===
-#[cfg(feature = "ke16-b3")]
-unsafe fn join_external(inner: &PoolInner, shared: *const ScopeShared) {
-    if tls::is_worker_thread_of(inner) {
-        // SAFETY: the caller's contract is handed through unchanged — `shared`
-        //   is live for the whole of this call, hence for the whole of the
-        //   callee's.
-        return unsafe { join_external_helping(inner, shared) };
-    }
-
-    let backoff = Backoff::new();
-
-    loop {
-        #[cfg(miri)]
-        std::thread::yield_now();
-
-        // SAFETY: per the function contract `shared` is live for this whole call;
-        //   a transient `Acquire` load that does not span a worker write.
-        if unsafe { (*shared).is_drained() } {
-            return;
-        }
-
-        if backoff.is_completed() {
-            // This thread will not run the work, so the only way it moves is a
-            // worker taking it: a sibling that pushed a wave may not have raced
-            // through its own wake yet.
-            unpark_one_idle(inner);
-            std::thread::park_timeout(JOIN_BACKSTOP);
-            backoff.reset();
-        } else {
-            backoff.snooze();
-        }
-    }
-}
-
-/// Drain anything left in our local scratch deque (we may have stolen a
-/// batch where only the first task is returned and the rest live in
-/// `scratch`). We run them all inline.
-// === KE16 B switch: ke16-b1 / ke16-b3 === no `scratch`, no serial residue.
-#[cfg(not(any(feature = "ke16-b1", feature = "ke16-b3")))]
-#[inline]
-fn drain_scratch(scratch: &Worker<Task>) {
-    while let Some(t) = scratch.pop() {
-        // Same abort-guard reason as the steal sites above: a batch stolen from
-        // `injector_global` can contain fire-and-forget tasks, and an unwind out
-        // of here abandons the join (2026-07 audit finding).
-        crate::worker::run_task(t);
-    }
-}
-
-/// Try to steal a task from any sibling deque, ignoring nothing.
-///
-/// KE16 (deleted with the features): under `ke16-a2` — and `ke16-a5`, which
-/// implies it — each index is probed TWICE, its registered deque and then its
-/// `injector_local` slot, mirroring the second probe the worker loop's
-/// `try_steal_random` gains: those arms leave a worker's own spawns in that
-/// slot, so a joiner that scanned deques alone would walk past the very wave it
-/// is waiting for. `own_local_inj` names the joiner's own slot, drained by step
-/// 1 of the join loop and therefore skipped here; it is `None` for an external
-/// joiner and under every arm that does not feed those queues.
-// === KE16 A switch: ke16-a2 === Only the A2 probe below reads the sweep index
-// and the joiner's own slot; without that feature both bindings are dead, and
-// this narrow, feature-scoped allow is what keeps ONE body serving every arm
-// instead of two copies of the sweep. It goes with the probe at removal time.
-// === KE16 B switch: ke16-b1 / ke16-b3 === replaced by `worker::try_steal_random`
-// (App-3: random start, self skipped by the lane's own `wid`, batch into the
-// caller's REGISTERED deque).
-#[cfg(not(any(feature = "ke16-b1", feature = "ke16-b3")))]
-#[cfg_attr(not(feature = "ke16-a2"), allow(unused_variables))]
-fn try_steal_any(
-    inner: &PoolInner,
-    scratch: &Worker<Task>,
-    own_local_inj: Option<usize>,
-) -> Option<Task> {
-    for (idx, stealer) in inner.stealers.iter().enumerate() {
-        if let Some(t) = drain_one(|| stealer.steal_batch_and_pop(scratch)) {
-            return Some(t);
-        }
-        #[cfg(feature = "ke16-a2")]
-        if own_local_inj != Some(idx)
-            && let Some(t) = drain_one(|| inner.injector_local[idx].steal_batch_and_pop(scratch))
-        {
             return Some(t);
         }
     }
@@ -1953,9 +1753,8 @@ fn try_steal_any(
 
 /// Resolve one `Steal` result, retrying only the `Retry` answer.
 ///
-/// Every arm has a caller: the B0 joiner's own sweep, B1's steal-one external
-/// arm, and — since the B3 external arm helps a worker of its own pool caught in
-/// an `install` frame ([`join_external`]) — B3's too.
+/// Its callers are the external joiner's two probes: the global injector in
+/// [`join_external_helping`], and the sibling sweep in [`steal_one_random`].
 #[inline]
 fn drain_one<F>(mut f: F) -> Option<Task>
 where
@@ -2075,11 +1874,11 @@ mod tests {
 
         pool.install(move |scope| {
             for wave in 0..WAVES {
-                // Alternate the two spawn shapes so the multi-drain property is
-                // asserted over BOTH accounting paths (KE16 App-4): per task,
-                // and one `pending` RMW for the whole wave. A batch wave that
-                // registered or corrected wrongly would show up here as a wave
-                // that never drains or as a scope freed mid-life.
+                // Alternate the two spawn ENTRY POINTS so the multi-drain
+                // property is asserted over both: a direct `spawn` per task, and
+                // a whole wave handed to `spawn_batch`. A wave that registered
+                // wrongly would show up here as a wave that never drains or as a
+                // scope freed mid-life.
                 if wave % 2 == 0 {
                     for _ in 0..PER_WAVE {
                         let d = Arc::clone(&done_main);
@@ -2148,13 +1947,15 @@ mod tests {
         assert_eq!(ran.load(Ordering::Acquire), N, "every promised body ran");
     }
 
-    /// KE16 App-4, `k < n`: an iterator shorter than its promise is corrected,
-    /// so the join ends.
+    /// KE16 App-4, `k < n`: an iterator shorter than its promise is simply fewer
+    /// spawns, and the join ends.
     ///
-    /// The failure mode is a HANG, not an assertion: `pending` would keep the
-    /// `n - k` registrations that no task will ever decrement and `Scope::drop`
-    /// would wait for completions that cannot come. The assertion below is
-    /// therefore about the bodies; reaching it at all is the property.
+    /// The failure mode this guards against is a HANG, not an assertion: a
+    /// `spawn_batch` that took `n` as a count to register up front, and did not
+    /// give back the `n - k` registrations no task will ever decrement, would
+    /// leave `Scope::drop` waiting for completions that cannot come. The
+    /// assertion below is therefore about the bodies; reaching it at all is the
+    /// property.
     #[test]
     fn spawn_batch_with_fewer_bodies_than_promised_drains() {
         const PROMISED: usize = 32;
@@ -2213,9 +2014,9 @@ mod tests {
     /// push would leave the flag clear until this thread stopped producing, and
     /// the receipt below would be false.
     ///
-    /// Sound in both arms: without `ke16-c-batch` every push wakes, so the
-    /// property this asserts is one both spawn shapes have, and the test is not
-    /// a way to tell them apart.
+    /// Every push takes its own wake decision, so the wave's first push takes
+    /// one: the property asserted here is one both spawn entry points have, and
+    /// the test is not a way to tell them apart.
     #[test]
     fn spawn_batch_wake_decision_precedes_the_rest_of_the_wave() {
         const N: usize = 64;
@@ -2285,28 +2086,17 @@ mod tests {
             .load(Ordering::Acquire)
     }
 
-    /// KE16 App-4's accounting receipt, and the ONE test that tells the two arms
-    /// apart.
+    /// KE16 App-4's accounting receipt: WHEN the wave's registrations are taken,
+    /// observed at the instant the iterator yields body 0.
     ///
-    /// `KE16-DESIGN-W.md` §4.1 defines the candidate as "one `pending` RMW for
-    /// the wave", taken before the first body is pulled. That is directly
-    /// observable at the instant the iterator yields body 0: the batched arm has
-    /// already run `register_tasks(n)` and no task exists yet to decrement it,
-    /// so `pending` is exactly `n`; the fallback arm has registered nothing, so
-    /// it is 0. Neither reading is a race — the wave's first push has not
-    /// happened in either arm.
-    ///
-    /// Without it `ke16-c-batch` changes no test outcome anywhere in the crate:
-    /// every other `spawn_batch` test asserts a property both arms have, so the
-    /// feature's own mechanism would be certified by the witness string alone,
-    /// and `KE16_EXPECT` only says the features were ENABLED
-    /// (`KE16-DESIGN-MEASUREMENT.md` §5 item 3), never that the arm does
-    /// anything.
+    /// `spawn_batch` registers per task, immediately before each push, so at that
+    /// instant nothing of the wave has been registered and `pending` is exactly
+    /// 0. The reading is not a race — the wave's first push has not happened yet.
     #[test]
-    fn spawn_batch_registers_the_whole_wave_before_its_first_body() {
+    fn spawn_batch_registers_nothing_before_its_first_body() {
         const N: usize = 16;
-        // Neither arm can produce this, so a wave whose iterator was never
-        // pulled fails instead of matching a real reading.
+        // No reading of `pending` can produce this, so a wave whose iterator was
+        // never pulled fails instead of matching a real reading.
         const UNSET: usize = usize::MAX;
 
         let pool = ThreadPoolBuilder::new().num_threads(2).build();
@@ -2327,30 +2117,23 @@ mod tests {
 
         let observed = seen.load(Ordering::Acquire);
         assert_ne!(observed, UNSET, "the wave's iterator was never pulled");
-        if crate::KE16_SPAWN_BATCH {
-            assert_eq!(
-                observed, N,
-                "the batched arm must register the whole wave in one RMW before its first body \
-                 is pulled"
-            );
-        } else {
-            assert_eq!(
-                observed, 0,
-                "the per-task arm must have registered nothing before its first body is pulled"
-            );
-        }
+        assert_eq!(
+            observed, 0,
+            "`spawn_batch` must have registered nothing before its first body is pulled"
+        );
     }
 
-    /// KE16 App-4, the `k < n` correction MEASURED rather than inferred: the
-    /// wave gives back exactly the registrations no body claimed.
+    /// KE16 App-4's `k < n` accounting MEASURED rather than inferred: after a
+    /// wave whose iterator was shorter than its promise, `pending` is exactly
+    /// zero.
     ///
     /// `spawn_batch_with_fewer_bodies_than_promised_drains` proves only that the
     /// join ends, and it proves it by hanging when it does not. This reads the
     /// count itself, from the owner thread, while the scope is still alive and
-    /// after every spawned body has completed: a correction that gives back too
-    /// few leaves `pending` above zero, and one that gives back too many wraps
-    /// it to a huge value — both fail the bounded wait below with a message
-    /// instead of stopping the suite.
+    /// after every spawned body has completed: a wave that registered more than
+    /// it pushed leaves `pending` above zero, and one that gave back more than it
+    /// registered wraps it to a huge value — both fail the bounded wait below
+    /// with a message instead of stopping the suite.
     #[test]
     fn spawn_batch_settles_pending_to_zero_after_a_short_wave() {
         const PROMISED: usize = 32;
@@ -2380,8 +2163,8 @@ mod tests {
             assert_eq!(
                 pending_of(scope),
                 0,
-                "`pending` never returned to zero: the wave gave back the wrong number of \
-                 unspawned registrations"
+                "`pending` never returned to zero: the wave accounted for a different number \
+                 of tasks than it spawned"
             );
         });
 
@@ -2417,9 +2200,8 @@ mod tests {
         assert_eq!(ran.load(Ordering::Acquire), 0, "no body existed to run");
     }
 
-    /// KE16 App-4 edge, `n == 1`: the minimal wave, whose first push IS its
-    /// last, so the arm's "the remaining pushes are silent" loop runs zero times
-    /// and the wave's single wake decision is the only one taken.
+    /// KE16 App-4 edge, `n == 1`: the minimal wave, whose first push IS its last,
+    /// so the loop over the remaining bodies runs zero times.
     #[test]
     fn spawn_batch_of_one_runs_its_only_body() {
         let pool = ThreadPoolBuilder::new().num_threads(2).build();
@@ -2441,14 +2223,15 @@ mod tests {
     /// KE16 App-4: an iterator that PANICS part-way through the wave reports
     /// that panic instead of hanging the scope's join.
     ///
-    /// This is the property the RAII `WaveRegistration` guard buys over the
-    /// design's literal trailing `if k < n { … }` correction
-    /// (`KE16-DESIGN-W.md` §4.1). The trailing form never executes on an unwind,
-    /// so the `n - k` registrations no body will ever claim stay on `pending`,
-    /// and `Scope::drop` — which runs during that same unwind — waits for
-    /// completions that cannot come. The observable difference is termination,
-    /// so what this test asserts is that it finishes at all, with the iterator's
-    /// own message rather than a hang.
+    /// Registering per task is what buys this: a body that was never produced was
+    /// never registered, so the unwind leaves nothing on `pending` for
+    /// `Scope::drop` — which runs during that very unwind — to wait for. Any
+    /// future shape that registers the wave up front owes a give-back on the
+    /// unwind path too (`KE16-DESIGN-W.md` §4.1's literal trailing
+    /// `if k < n { … }` does not run on an unwind), and this is the test that
+    /// catches its absence. The observable difference is termination, so what
+    /// this asserts is that it finishes at all, with the iterator's own message
+    /// rather than a hang.
     #[test]
     #[should_panic(expected = "spawn_batch test iterator: deliberate mid-wave panic")]
     fn spawn_batch_whose_iterator_panics_part_way_does_not_hang_the_join() {
@@ -2470,17 +2253,18 @@ mod tests {
         });
     }
 
-    /// KE16 App-4, `k > n` in RELEASE: the surplus is registered rather than
-    /// left unaccounted, so every body still runs and the scope still drains.
+    /// KE16 App-4, `k > n` in RELEASE: the surplus is registered rather than left
+    /// unaccounted, so every body still runs and the scope still drains.
     ///
     /// The debug arm of this contract is
-    /// `spawn_batch_with_more_bodies_than_promised_is_a_debug_panic`. The
-    /// release arm is different code — `WaveRegistration::charge_one`'s `else`
-    /// branch — with a different property, so it needs its own test: leaving the
-    /// surplus unregistered would let a still-running task drive `pending` to
-    /// zero and the joiner free `ScopeShared` under it. Runs only under
-    /// `cargo test --release`; in a debug build the code under test panics by
-    /// design.
+    /// `spawn_batch_with_more_bodies_than_promised_is_a_debug_panic`; the release
+    /// path has a different property and so needs its own test. Registering per
+    /// task is what gives it: with the `debug_assert!` compiled out, the surplus
+    /// goes through `spawn` like every other body and is counted. Leaving a
+    /// spawned task unregistered would let a still-running task drive `pending`
+    /// to zero and the joiner free `ScopeShared` under it, which is what this
+    /// asserts cannot happen at `k > n`. Runs only under `cargo test --release`;
+    /// in a debug build the code under test panics by design.
     #[test]
     #[cfg(not(debug_assertions))]
     fn spawn_batch_with_more_bodies_than_promised_still_runs_every_body_in_release() {
@@ -2516,13 +2300,11 @@ mod tests {
     /// `spawn_batch_runs_every_promised_body` (`k == n`, one `n`),
     /// `spawn_batch_with_fewer_bodies_than_promised_drains` (`k < n`, one pair)
     /// and the two edges (`n == 0`, `n == 1`) are four samples of a
-    /// two-dimensional domain in which the arm's own arithmetic changes shape
-    /// three times: `n == 0` takes the `bodies.next()` early exit, `k == n`
-    /// leaves `WaveRegistration::unpushed` at zero so `Drop` is a no-op, and
-    /// every `k < n` has `Drop` give back a DIFFERENT count. An off-by-one in
-    /// the give-back — `unpushed` decremented after the push instead of before,
-    /// or `n - k - 1` given back — survives all four samples and fails
-    /// somewhere in this grid.
+    /// two-dimensional domain. The grid pins the contract over the whole of it
+    /// instead: `n` is a promise the implementation is free to use for
+    /// accounting, and an accounting error that is exact at `k == n` and off by
+    /// one everywhere else — a wave registered up front and given back
+    /// `n - k - 1`, say — survives all four samples and fails somewhere in here.
     ///
     /// Exhaustive rather than randomised: the interesting region is small
     /// (`n <= 12`), the failure is a HANG rather than a wrong value, and a
@@ -2531,10 +2313,10 @@ mod tests {
     /// (`W == 1`, where the spawner is the only lane and the wave is drained
     /// entirely by `Scope::drop`'s helping join).
     ///
-    /// The assertion is on the bodies; TERMINATING is the property. A
-    /// give-back that returns too little leaves `pending` above zero and
-    /// `Scope::drop` waits forever, so a defect here stops the suite at a named
-    /// case instead of reporting a number.
+    /// The assertion is on the bodies; TERMINATING is the property. Any
+    /// accounting that leaves `pending` above zero makes `Scope::drop` wait
+    /// forever, so a defect here stops the suite at a named case instead of
+    /// reporting a number.
     #[test]
     fn spawn_batch_drains_every_legal_promise_and_yield_pair() {
         const MAX_N: usize = 12;

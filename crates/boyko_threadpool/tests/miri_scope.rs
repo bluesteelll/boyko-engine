@@ -86,7 +86,8 @@
 //! the whole story:
 //!   * THIS FILE, as it stood for the whole life of that claim, could not have
 //!     caught it. With a deliberately reintroduced `&self` receiver and no
-//!     scheduling probe, all 5 active tests here are GREEN at seeds 0 and 7 —
+//!     scheduling probe, all 5 tests active in that build are GREEN at seeds 0
+//!     and 7 —
 //!     the window is a couple of MIR steps wide and nothing here forced a
 //!     schedule into it.
 //!   * With the `#[cfg(miri)]` release probe that
@@ -109,18 +110,15 @@
 //! *liveness* timeout (NOT UB) — Candidate U's lost-wakeup window, which Miri
 //! cannot recover from because it does not model the `park_timeout` backstop that
 //! recovers it on real hardware (bench-proven). All seeds are UB-clean. That
-//! reading is EXTERNAL-ARM ONLY and stays true for these tests, because every
-//! one of them joins from the test thread: an external joiner keeps the
-//! unpark-before-decrement order and hence the window, on every build. The
-//! WORKER-joiner arm is count-gated under `ke16-w-count` (the decrement first,
-//! the unpark aimed at `PoolInner`-owned memory, KE16 W-d′), which closes that
-//! window on route (b), and it is gated at ZERO liveness timeouts by
+//! reading is EXTERNAL-JOINER ONLY and stays true for these tests, because
+//! every one of them joins from the test thread: an external joiner keeps the
+//! unpark-before-decrement order and hence the window. The WORKER-joiner route
+//! is count-gated instead (the decrement first, the unpark aimed at
+//! `PoolInner`-owned memory, KE16 W-d′), which closes that window on route (b),
+//! and it is gated at ZERO liveness timeouts by
 //! `nested_scope_from_worker_is_stolen_by_sibling` — the one test in this file
-//! whose only join is a worker's, and only in a build that ALSO carries an A
-//! arm, because the shape needs a sibling to reach the wave (see that test's
-//! `# The W-d′ liveness gate` section: without one it now fails loudly rather
-//! than skipping). A timeout in the three tests above is neither a W-d′ failure
-//! nor a W-d′ pass (`KE16-DESIGN-MEASUREMENT.md` §5 item 13).
+//! whose only join is a worker's. A timeout in the three tests above is neither
+//! a W-d′ failure nor a W-d′ pass (`KE16-DESIGN-MEASUREMENT.md` §5 item 13).
 //!
 //! ## Run (plan §5 / §12)
 //! ```bash
@@ -313,81 +311,39 @@ fn miri_scope_multiple_distinct_borrows() {
 }
 
 // ===========================================================================
-// KE16 — the two nested-scope Miri shapes (`KE16-DESIGN-A.md` §1.3, listed for
-// the base commit by `KE16-DESIGN-MEASUREMENT.md` §6).
+// The two nested-scope Miri shapes (`KE16-DESIGN-A.md` §1.3, listed for the
+// base commit by `KE16-DESIGN-MEASUREMENT.md` §6).
 //
-// Both were RED-FIRST and unconditionally `#[ignore]`d until the A-axis push
-// arms landed. They now run in exactly the builds whose arm makes their claim
-// true, and stay ignored in the others — the `cfg_attr` on each names which:
+// Both were RED-FIRST and `#[ignore]`d until the placement that makes their
+// claim true landed. They now run in every build:
 //
-//   * the reachability shape runs under every A arm (`ke16-a1`,
-//     `ke16-a1-fifo`, `ke16-a2`, `ke16-a3`, and `ke16-a5`, which implies
-//     `ke16-a2`), because each of them closes reachability by its own route;
-//     in the DEFAULT build it stays ignored, since defect A denies its
-//     assertion and running it would report a defect the tournament exists to
-//     remove;
-//   * the TLS-deque receipt shape runs only under `ke16-a1` / `ke16-a1-fifo`,
-//     the arms that have a TLS deque. In any other build it would pass by
-//     draining the injector path and certify it under the deque's name — a
-//     green worth nothing.
+//   * the reachability shape asserts that a worker-spawned wave leaves the lane
+//     it was spawned on. The shipped placement closes that: a worker's own
+//     spawns go on its own registered deque, from which a sibling can steal;
+//   * the TLS-deque receipt shape asserts that a body running inline on the
+//     joining worker pushes its own nested wave through that same deque rather
+//     than through an injector, so the green it hands back names the surface it
+//     actually certifies.
 //
-// Run them under `ke16-a1` / `ke16-a1-fifo` with B0 and with B1
-// (`KE16-DESIGN-MEASUREMENT.md` §8).
-//
-// How the first one fails while defect A stands, so the reading is not mistaken
-// for a hang: the nested bodies deadlock on their handshake (the outer worker is
-// the only thread that can reach them and it can only run one at a time), so the
-// bounded `spin_until` panics inside a body of a DETACHED `pool.spawn`, which
-// the pool answers by aborting the process (`abort_on_task_panic`). An abort
-// with the `spin_until timed out` message ahead of it is the red-first reading;
-// a Tree-Borrows `error: Undefined Behavior:` report is the different, real one
+// How the first one fails, so the reading is not mistaken for a hang: the
+// nested bodies deadlock on their handshake (the outer worker is the only
+// thread that can reach them and it can only run one at a time), so the bounded
+// `spin_until` panics inside a body of a DETACHED `pool.spawn`, which the pool
+// answers by aborting the process (`abort_on_task_panic`). An abort with the
+// `spin_until timed out` message ahead of it is the reachability reading; a
+// Tree-Borrows `error: Undefined Behavior:` report is the different, real one
 // (`KE16-DESIGN-MEASUREMENT.md` §5 item 14 classifies the three kinds).
 // ===========================================================================
 
-/// Refuses to let the W-d′ route-(b) liveness gate report a result it did not
-/// measure: panics naming the skip, in exactly the builds that claim the gate
-/// but cannot run it (`ke16-w-count` with no A arm).
+/// No-op: the shipped placement closes the reachability the model below needs,
+/// so the model itself runs and IS the evidence.
 ///
-/// Why a panic and not a wider `ignore`: the silence IS the defect — an ignored
-/// gate whose result is being counted reads as a pass. Why not simply let the
-/// model run: under A0 the two handshaked nested bodies are reachable only by
-/// the one worker that spawned them, so the run would end in `spin_until timed
-/// out` inside a detached body and the pool would abort the process — the same
-/// output a genuine lost wake produces, which is exactly the reading the gate
-/// exists to take. A false red indistinguishable from the signal is no better
-/// than the false green it replaces, so this panic carries its own literal
-/// (`W-d′ route-(b) liveness gate DID NOT RUN`) and the two cannot be confused.
-///
-/// Cold per ERG-28, but deliberately NOT `-> !`: the other `cfg` arm of this
-/// name is a no-op, and a diverging signature here would type the whole model
-/// body below the call site as unreachable in exactly the build that runs it.
-#[cfg(not(any(
-    feature = "ke16-a1",
-    feature = "ke16-a1-fifo",
-    feature = "ke16-a2",
-    feature = "ke16-a3"
-)))]
-#[cold]
-fn refuse_to_certify_without_a_reachability_arm() {
-    panic!(
-        "W-d′ route-(b) liveness gate DID NOT RUN in variant `{}`: the shape needs a SIBLING to \
-         take one of the two handshaked nested bodies, and this build carries no A arm, so a \
-         worker-spawned wave never leaves the lane it was spawned on (defect A) and the shape \
-         would hang rather than measure. Re-run the `KE16-DESIGN-MEASUREMENT.md` §8 recipe with \
-         an A arm as well, e.g. `--features ke16-w-count,ke16-a2`. No W-d′ liveness row may be \
-         filed from this build (`KE16-DESIGN-W.md` §3.7).",
-        boyko_threadpool::ke16_variant()
-    );
-}
-
-/// No-op: an A arm closes the reachability the shape needs, so the model itself
-/// runs and IS the evidence.
-#[cfg(any(
-    feature = "ke16-a1",
-    feature = "ke16-a1-fifo",
-    feature = "ke16-a2",
-    feature = "ke16-a3"
-))]
+/// It stays a call rather than nothing because the model's first statement is
+/// where a build that could not run the shape had to say so out loud: a gate
+/// that cannot execute and stays silent reads as a pass. No build in this tree
+/// is in that position any more, so the check has nothing left to refuse —
+/// `KE16-RESULTS.md` records what it caught while one was (thirty-two runs that
+/// each printed `running 1 test` and executed nothing).
 fn refuse_to_certify_without_a_reachability_arm() {}
 
 /// KE16 A-axis Miri gate 1: a scope opened from inside a worker's task body
@@ -400,41 +356,27 @@ fn refuse_to_certify_without_a_reachability_arm() {}
 /// the joining worker alone cannot finish them: forward progress exists only if
 /// a sibling takes one. Under Tree Borrows this is the shape that puts a
 /// sibling's `Stealer::steal_batch_and_pop` against a deque whose owner reaches
-/// it through the A1 TLS pointer.
+/// it through its TLS lane pointer.
 ///
 /// # The W-d′ liveness gate (`KE16-DESIGN-W.md` §3.7, `-MEASUREMENT.md` §8)
 ///
-/// Under `ke16-w-count` this test's ONE join is count-gated, so a liveness
-/// timeout here is a lost wake in the gated arm — a defect to fix, never a
-/// reason to switch designs (W17 keeps the unpark-before-decrement order and
-/// would show the same timeout). Required: `running 1 test`, ZERO timeouts
-/// across 32 seeds. The full flag string, which REPLACES the `[env]` default of
+/// This test's ONE join is count-gated, so a liveness timeout here is a lost
+/// wake on the gated route — a defect to fix, never a reason to switch designs
+/// (W17 keeps the unpark-before-decrement order and would show the same
+/// timeout). Required: `running 1 test`, ZERO timeouts across 32 seeds. The
+/// full flag string, which REPLACES the `[env]` default of
 /// `.cargo/config.toml` rather than merging with it:
 ///
 /// ```powershell
 /// $env:MIRIFLAGS = "-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-many-seeds=0..32"
 /// Write-Output "MIRIFLAGS=$env:MIRIFLAGS"
-/// cargo +nightly miri test -p boyko-threadpool --test miri_scope nested_scope_from_worker_is_stolen_by_sibling --features ke16-w-count,ke16-a2
+/// cargo +nightly miri test -p boyko-threadpool --test miri_scope nested_scope_from_worker_is_stolen_by_sibling
 /// Remove-Item Env:MIRIFLAGS
 /// ```
 ///
 /// An echoed string without `-Zmiri-tree-borrows` ran under Stacked Borrows and
 /// one without `-Zmiri-many-seeds=` measured a single seed; either way the
 /// result is discarded and the run repeated (refused shape 12).
-///
-/// **The feature list must name an A arm as well as `ke16-w-count`** — any of
-/// `ke16-a1`, `ke16-a1-fifo`, `ke16-a2`, `ke16-a3`, `ke16-a5`; `ke16-a2` above
-/// only because it closes reachability with the fewest other changes. MEASURED
-/// 2026-09-03, the defect this paragraph and
-/// [`refuse_to_certify_without_a_reachability_arm`] exist to close: the recipe
-/// as `-MEASUREMENT.md` §8 wrote it (`--features ke16-w-count`, no A arm)
-/// printed `running 1 test` and `test result: ok. 0 passed; 0 failed; 1 ignored`
-/// on every one of the 32 seeds and exited 0, because the `cfg_attr` below
-/// ignored the test unless an A arm was on. A build with no A arm still cannot
-/// execute the shape (A0 does not deliver a worker-spawned wave to a sibling, so
-/// the H4 handshake would hang instead of measuring), but it no longer passes:
-/// the ignore lifts under `ke16-w-count` and the first line of the body panics
-/// with what was skipped and why.
 ///
 /// # What this run IS for W-d′, and what it is not
 ///
@@ -447,8 +389,8 @@ fn refuse_to_certify_without_a_reachability_arm() {}
 /// `running 1 test … ok`, 0.40 s. Recipe, in full because the obvious spelling
 /// is a trap: `cargo --config 'target.x86_64-pc-windows-gnu.rustflags=["-C",
 /// "target-cpu=x86-64-v3","--cfg","loom"]' test -p boyko-threadpool --test
-/// loom_pool --features ke16-w-gate,ke16-w-count --no-run`, then the emitted
-/// `loom_pool-<hash>.exe` under `LOOM_MAX_PREEMPTIONS=3 --test-threads=1
+/// loom_pool --no-run`, then the emitted `loom_pool-<hash>.exe` under
+/// `LOOM_MAX_PREEMPTIONS=3 --test-threads=1
 /// --exact <name>`; `tests/loom_pool.rs`'s header carries it verbatim together
 /// with every model's colour and wall. W-d′ therefore HAS its exhaustive model,
 /// and this Miri run is CORROBORATION on real hardware, not a substitute for
@@ -464,25 +406,6 @@ fn refuse_to_certify_without_a_reachability_arm() {}
 /// reader who does hit a degraded M1c must name the degradation in the results
 /// file first, and only then may this run be filed as the sole gate.
 #[test]
-#[cfg_attr(
-    not(any(
-        feature = "ke16-a1",
-        feature = "ke16-a1-fifo",
-        feature = "ke16-a2",
-        feature = "ke16-a3"
-    )),
-    ignore = "deferred: KE16 — asserts a worker-spawned wave reaches a sibling, which defect A \
-              denies in the DEFAULT build. It runs under every A arm (ke16-a1, ke16-a1-fifo, \
-              ke16-a2, ke16-a3, and ke16-a5 through the a2 it implies), each of which closes \
-              that reachability. Under ke16-w-count WITH NO A ARM the shape needs a SIBLING to \
-              take one of the two handshaked nested bodies and has none, so it would hang rather \
-              than measure: NO W-d-prime liveness row may be filed from that build \
-              (KE16-DESIGN-W.md 3.7). Re-run the KE16-DESIGN-MEASUREMENT.md 8 recipe with an A \
-              arm as well, e.g. --features ke16-w-count,ke16-a2. Forcing this test with \
-              --ignored in such a build does not evade that: the body's first statement is \
-              refuse_to_certify_without_a_reachability_arm(), which panics with the same \
-              information."
-)]
 fn nested_scope_from_worker_is_stolen_by_sibling() {
     refuse_to_certify_without_a_reachability_arm();
 
@@ -559,17 +482,12 @@ fn nested_scope_from_worker_is_stolen_by_sibling() {
 /// `Worker` allocation's own bytes; that write must not conflict with any tag
 /// minted on the deque earlier in the outer frame. The RECEIPT that the shape
 /// was actually exercised is a nested-spawning body reporting the outer
-/// worker's id; per design §1.3 it is deterministic only under `ke16-a1` +
-/// `ke16-b1`, so the whole shape is retried on a fresh pool up to four times
-/// and a miss panics with the literal `receipt not observed`, which is red
-/// kind (c) — NOT a defect — and is re-run at `-Zmiri-many-seeds=0..64`.
+/// worker's id; per design §1.3 the shipped end discipline does not make that
+/// deterministic (only the LIFO owner end did, and that candidate lost), so the
+/// whole shape is retried on a fresh pool up to four times and a miss panics
+/// with the literal `receipt not observed`, which is red kind (c) — NOT a
+/// defect — and is re-run at `-Zmiri-many-seeds=0..64`.
 #[test]
-#[cfg_attr(
-    not(any(feature = "ke16-a1", feature = "ke16-a1-fifo")),
-    ignore = "deferred: KE16 — the receipt names the A1 TLS deque, which only ke16-a1 / \
-              ke16-a1-fifo push through; in any other build it would drain the injector path \
-              and certify it under the deque's name."
-)]
 fn nested_scope_inline_body_spawns_through_tls_deque_under_live_join() {
     /// crossbeam's `MIN_CAP` is 64; `2 * 64 + 1` pushes force a resize.
     const NESTED: usize = 129;
@@ -642,70 +560,56 @@ fn nested_scope_inline_body_spawns_through_tls_deque_under_live_join() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// KE16 App-4 (`ke16-c-batch`) — the batch wave under Tree Borrows
+// `Scope::spawn_batch` — the wave surface under Tree Borrows
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// `Scope::spawn_batch` is the ONE place in `scope.rs` that departs from
-// `Scope::spawn`'s transient-reborrow discipline: `spawn` bounds
-// `unsafe { self.shared.as_ref() }` to a single expression, while the batched
-// arm mints one `&ScopeShared` and holds it across the whole push loop, handing
-// it to the `WaveRegistration` guard (`scope.rs`, the `ke16-c-batch` arm of
-// `spawn_batch`). Every byte a worker writes through that allocation while the
-// reference is live is inside an `UnsafeCell` — `pending`'s `AtomicUsize` and
-// `panic_payload`'s `AtomicPtr` — so the shape is sound, and Tree Borrows
-// tracks interior mutability byte-precisely, which is exactly why THIS model is
-// the one that can decide it.
+// `spawn_batch` is one `Scope::spawn` per produced body, and its `n` is an
+// upper bound the producer is not required to reach. Nothing else in this file
+// reaches it — every other shape calls `Scope::spawn` directly — so without the
+// two tests below the surface compiles and executes none of it: a green over
+// code that never ran.
 //
-// Nothing in the rest of this file reaches `spawn_batch`: every other shape
-// calls `Scope::spawn`. Without the two tests below, the Miri leg of the C
-// axis's gate (`KE16-DESIGN-MEASUREMENT.md` §8) compiles the batched arm and
-// executes none of it — a green over code that never ran.
-//
-// Both run in BOTH arms. Without `ke16-c-batch` `spawn_batch` is one `spawn`
-// per body and the long-lived reference does not exist, so a green there is the
-// control and a green under the feature is the result.
+// The two questions they put to Tree Borrows are the ones the shape actually
+// raises: (1) a worker's completion write to the scope allocation landing while
+// the spawner is still walking the producing iterator, and (2) a producer that
+// yields fewer bodies than it promised still draining, the join waiting on the
+// bodies that exist rather than on the count that was announced.
 
-/// A batch wave whose worker completion — the `pending` RMW through the
-/// allocation the spawner is holding a `&ScopeShared` to — is FORCED to land
-/// while the spawner is still inside its push loop.
+/// A batch wave whose worker completion — the `pending` RMW on the scope
+/// allocation — is FORCED to land while the spawner is still inside
+/// `spawn_batch`'s push loop.
 ///
 /// The iterator is the instrument, as it is for the native wake receipt: while
 /// producing body 1 the spawner waits, bounded, for body 0 to have finished.
 /// Body 0 finishing IS `ScopeShared::complete_task`'s `fetch_sub` on `pending`,
 /// so the interleaving Tree Borrows is asked about — a worker writing the
-/// allocation under the spawner's live reborrow — is not left to chance.
+/// allocation while the spawner is still mid-wave on it — is not left to
+/// chance.
 ///
-/// ⚠ **This shape is ALSO a liveness gate on the wave's wake, and as of
-/// 2026-09-04 it is RED under `ke16-w-fanout`.** The spawner here deliberately
-/// blocks BEFORE `Scope::drop`, so it cannot help-steal its own wave: the only
-/// thing that can complete body 0 is a sibling the wave's ONE wake decision
-/// woke. A wake decision that wakes nobody therefore shows up as
-/// `spin_until timed out` — `KE16-DESIGN-MEASUREMENT.md` §5 item 14 kind (b),
-/// a liveness defect in the wake protocol, never a Tree-Borrows result.
-/// MEASURED on `-Zmiri-many-seeds=0..64`, one filtered test per run:
+/// ⚠ **This shape is ALSO a liveness gate on the wave's wake.** The spawner
+/// here deliberately blocks BEFORE `Scope::drop`, so it cannot help-steal its
+/// own wave: the only thing that can complete body 0 is a sibling that the
+/// pushes made so far have woken. A wake that reaches nobody therefore shows up
+/// as `spin_until timed out` — `KE16-DESIGN-MEASUREMENT.md` §5 item 14 kind
+/// (b), a liveness defect in the wake protocol, never a Tree-Borrows result.
 ///
-/// | features | `KE16_C` | timeouts / 64 seeds |
-/// |---|---|---|
-/// | (none) | `c0` | 0 |
-/// | `ke16-c-batch` | `c1` | 0 |
-/// | `ke16-w-gate,ke16-c-batch` | `c1` | 0 |
-/// | `ke16-w-fanout` | `c1f` | **1** (seed 31) |
-/// | `ke16-w-gate,ke16-w-fanout` | `c1f` | **1** |
-///
-/// Single-seed reproduction, deterministic — the same seed passes with
-/// `--features ke16-c-batch` and `--features ke16-w-gate,ke16-c-batch`:
-///
-/// ```text
-/// MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-seed=31"
-/// cargo +nightly miri test -p boyko-threadpool --test miri_scope ///     --features ke16-w-fanout miri_spawn_batch_worker_completion
-/// ```
+/// ⚠ **A measured liveness finding whose only record is this paragraph.**
+/// MEASURED 2026-09-04 on `-Zmiri-many-seeds=0..64`, one filtered test per run,
+/// while the KE16 wake candidates were live: every configuration tried showed
+/// ZERO timeouts in 64 seeds except the rejected fan-out candidate — the one
+/// that woke `min(n, idle)` over a single snapshot of the idle mask taken at a
+/// wave's first push — which showed ONE, at seed 31, deterministic on re-run
+/// and unaffected by the wake gate. `KE16-REJECTED.md`'s `c1f` section carries
+/// that candidate's throughput numbers but not this liveness result, and the
+/// code it was taken on is gone, so the finding belongs there rather than here.
+/// None of those runs was the configuration that now ships: the row for this
+/// build is owed, not held.
 ///
 /// No production caller blocks the way this one does — every `spawn_batch`
 /// caller returns and lets `Scope::drop` join, and the joining thread helps —
 /// so the production consequence of the same window is a LOST LANE rather than
 /// a hang: the wave runs on the joiner while a parked sibling sleeps, which is
-/// the throughput this campaign exists to measure. The test is left un-ignored
-/// and red because that is the reading the design asks for.
+/// the throughput that campaign existed to measure.
 #[test]
 fn miri_spawn_batch_worker_completion_lands_under_the_spawners_live_reborrow() {
     const N: usize = 4;
@@ -726,9 +630,8 @@ fn miri_spawn_batch_worker_completion_lands_under_the_spawners_live_reborrow() {
             N,
             (0..N).map(|i| {
                 if i == 1 {
-                    // Still inside `spawn_batch`: the batched arm's
-                    // `&ScopeShared` and its `WaveRegistration` are both live
-                    // on this thread's stack right now.
+                    // Still inside `spawn_batch`: this thread is mid-wave,
+                    // between two of its own pushes onto the same scope.
                     spin_until(
                         first_done_ref,
                         "body 0 to complete while the wave is still being pushed",
@@ -757,16 +660,16 @@ fn miri_spawn_batch_worker_completion_lands_under_the_spawners_live_reborrow() {
     );
 }
 
-/// The `k < n` correction under Tree Borrows: `WaveRegistration::drop` gives
-/// back the unclaimed registrations through the same long-lived reference,
-/// concurrently with workers still completing the ones that were claimed.
+/// A wave shorter than its promise, under Tree Borrows: the producer stops
+/// three bodies into a promised eight while workers are still completing the
+/// three that exist.
 ///
-/// The failure mode if the give-back were wrong is a HANG rather than a UB
-/// report, and `spin_until`'s bound does not cover `Scope::drop`'s join — so
-/// what this adds over the native `spawn_batch_with_fewer_bodies_than_promised_
-/// drains` is the BORROW question, not the accounting one: is the guard's
-/// `unregister_tasks` write to `pending` legal while workers are writing the
-/// same line.
+/// The failure mode if the short wave were mis-accounted is a HANG rather than
+/// a UB report, and `spin_until`'s bound does not cover `Scope::drop`'s join —
+/// so what this adds over the native
+/// `spawn_batch_with_fewer_bodies_than_promised_drains` is the BORROW question,
+/// not the accounting one: are the spawner's writes to `pending` legal while
+/// workers are writing the same line.
 #[test]
 fn miri_spawn_batch_short_wave_gives_back_its_registrations_under_tree_borrows() {
     const PROMISED: usize = 8;
@@ -792,6 +695,6 @@ fn miri_spawn_batch_short_wave_gives_back_its_registrations_under_tree_borrows()
         ran.load(Ordering::Acquire),
         YIELDED,
         "exactly the yielded bodies ran, and the join returned rather than waiting for the \
-         `PROMISED - YIELDED` registrations no body ever claimed"
+         `PROMISED - YIELDED` bodies that were promised and never produced"
     );
 }

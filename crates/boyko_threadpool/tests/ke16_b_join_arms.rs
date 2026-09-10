@@ -1,37 +1,25 @@
-//! KE16 axis B — the two JOIN ARMS, observed from outside the crate.
+//! KE16 axis B — the JOIN ARM, observed from outside the crate.
 //!
-//! `docs/threadpool/KE16-DESIGN-B.md` distinguishes the three B candidates by *what a joining
-//! thread does while it waits*, and the whole axis reduces to three statements that nothing else in
-//! the tree measures:
+//! `docs/threadpool/KE16-DESIGN-B.md` distinguishes the B candidates by *what a joining thread does
+//! while it waits*. The axis closed on B1, whose behaviour is now unconditional, and it reduces to
+//! three statements about that arm that nothing else in the tree measures:
 //!
 //! | Design | Statement | Test here |
 //! |---|---|---|
-//! | §2.3 | under B1 the EXTERNAL joiner helps — one task at a time, no scratch | `the_external_joiner_helps_or_parks_exactly_as_the_b_arm_says` |
-//! | §3 | under B3 the external joiner NEVER helps — it snoozes, then parks | same test, other branch |
-//! | §6 | a worker of ANOTHER pool joining this pool's scope is EXTERNAL, so B3's refusal applies to it | `a_worker_of_another_pool_obeys_the_external_arm` |
-//! | §2.2 | the WORKER joiner (shared by B1 and B3) re-checks its scope between tasks, so it never runs a whole residue first | `the_worker_joiner_does_not_run_a_residue_before_re_checking_its_scope` |
+//! | §2.3 | the EXTERNAL joiner helps — one task at a time, no scratch | `the_external_joiner_helps` |
+//! | §6 | a worker of ANOTHER pool joining this pool's scope is EXTERNAL, so it takes that same arm | `a_worker_of_another_pool_obeys_the_external_arm` |
+//! | §2.2 | the WORKER joiner re-checks its scope between tasks, so it never runs a whole residue first | `the_worker_joiner_does_not_run_a_residue_before_re_checking_its_scope` |
 //!
 //! Two design points make these tests worth their runtime rather than duplicates of the occupancy
 //! harness. First, the harness measures OCCUPANCY (how many lanes a wave reaches) and is blind to
-//! *which* thread the joiner is: `ke16-b1` and `ke16-b3` produce identical occupancy on every route
-//! it drives, so before this file the two features differed in no observable way under test — a
-//! feature that changes nothing a test can see is the exact shape the KE16 witness exists to
-//! forbid. Second, §2.2's "a re-check per task" is the property that *fixes defect B*; §1 item 4
-//! prices B0's alternative at a serial batch of up to 33 tasks, and that is a wall-clock difference
-//! of two orders of magnitude, not a matter of taste.
-//!
-//! **Every test in this file runs in EVERY build.** The assertion is selected at run time from
-//! [`boyko_threadpool::KE16_B`], so the default (`b0`) build records its own number instead of
-//! compiling the file away — a file that vanishes under `#[cfg]` reports `running 0 tests`, which
-//! is a vacuous pass (`KE16-DESIGN-MEASUREMENT.md` §5 item 1), and the b0 reading is what shows the
-//! instrument can tell the arms apart at all.
+//! *which* thread the joiner is. Second, §2.2's "a re-check per task" is the property that *fixes
+//! defect B*; §1 item 4 prices B0's alternative at a serial batch of up to 33 tasks, and that is a
+//! wall-clock difference of two orders of magnitude, not a matter of taste.
 //!
 //! ## Run
 //!
 //! ```text
 //! cargo test -p boyko-threadpool --test ke16_b_join_arms -- --test-threads=1 --nocapture
-//! cargo test -p boyko-threadpool --test ke16_b_join_arms --features ke16-a1,ke16-b1 -- --test-threads=1 --nocapture
-//! cargo test -p boyko-threadpool --test ke16_b_join_arms --features ke16-a1,ke16-b3 -- --test-threads=1 --nocapture
 //! ```
 
 use std::sync::Arc;
@@ -40,8 +28,7 @@ use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use boyko_threadpool::{
-    KE16_B, MAX_WORKERS, ThreadPool, ThreadPoolBuilder, current_worker_id,
-    ke16_check_expected_variant, try_with_active_pool,
+    MAX_WORKERS, ThreadPool, ThreadPoolBuilder, current_worker_id, try_with_active_pool,
 };
 
 /// Tasks in the external-arm fixture. Only the first one blocks; the rest are trivial, and their
@@ -50,10 +37,10 @@ const EXTERNAL_ARM_TASKS: usize = 48;
 
 /// How long the fixture's blocking task holds the pool's only worker.
 ///
-/// It is a BOUND, not a delay: under a helping arm the joiner takes a task within microseconds and
-/// releases it, so the arm that pays this in wall-clock is the one that refuses to help (B3), where
-/// the pool's own worker must finish the wave. Short enough that the b3 rows cost ~0.3 s each,
-/// long enough that a helping joiner has to be descheduled for a third of a second to be missed.
+/// It is a BOUND, not a delay: the joiner takes a task within microseconds and releases it, so the
+/// only run that pays this in wall clock is one where the property under test FAILS and the pool's
+/// own worker has to finish the wave. Short enough that such a run costs ~0.3 s, long enough that a
+/// helping joiner has to be descheduled for a third of a second to be missed.
 const WORKER_HOLD: Duration = Duration::from_millis(300);
 
 /// Spin rather than sleep: a sleeping fixture can be woken late and read as "the joiner never
@@ -110,8 +97,8 @@ fn bodies_run_by_the_joining_thread(pool: &ThreadPool) -> usize {
             // joiner steals from the same queues the worker pops from, so it can take this very
             // task — and then the thread the fixture wanted to keep free is the one blocked, the
             // worker races through the rest, and the reading is "the joiner helped with nothing"
-            // when in fact it helped with this. MEASURED: without the refusal the `ke16-b1` row
-            // read 0 on this route while the same build read 27 when the test ran alone.
+            // when in fact it helped with this. MEASURED: without the refusal this row read 0 on
+            // this route while the same build read 27 when the test ran alone.
             let helper_seen = Arc::clone(&helper_seen);
             let completed = Arc::clone(&completed);
             let ran_on_joiner = Arc::clone(&ran_on_joiner);
@@ -159,7 +146,7 @@ fn bodies_run_by_the_joining_thread(pool: &ThreadPool) -> usize {
     let by_thread = ran_on_joiner.load(Ordering::Acquire);
     let by_id = ran_off_worker_ids.load(Ordering::Acquire);
     println!(
-        "[ke16 b-ext raw] arm={KE16_B} by_thread_identity={by_thread} by_worker_id_sentinel={by_id} \
+        "[ke16 b-ext raw] by_thread_identity={by_thread} by_worker_id_sentinel={by_id} \
          scope_wall={elapsed:?}"
     );
     assert_eq!(
@@ -175,65 +162,44 @@ fn bodies_run_by_the_joining_thread(pool: &ThreadPool) -> usize {
     by_thread
 }
 
-/// **§2.3 vs §3 — the whole of the B1/B3 difference.**
+/// **§2.3 — the external joiner HELPS.**
 ///
-/// A one-worker pool is joined from an unattached thread with the pool's worker held busy. Under
-/// any HELPING external arm (B0's scratch joiner and B1's steal-one joiner alike) the joining
-/// thread must run at least one body, because for `WORKER_HOLD` it is the only thread that can;
-/// under B3 it must run exactly none, because that arm never calls a task at all.
+/// A one-worker pool is joined from an unattached thread with the pool's worker held busy. The
+/// joining thread must run at least one body, because for `WORKER_HOLD` it is the only thread that
+/// can.
 ///
-/// The B3 side is deterministic by construction rather than by timing — `join_external` under
-/// `ke16-b3` has no `run_task` on the path an unattached caller takes — so a non-zero reading there
-/// is a defect and not a flake. The helping side is deterministic in the other direction: the wave
-/// cannot finish without the joiner, so "zero" can only mean the arm did not help.
+/// The reading is deterministic rather than a matter of timing: the wave cannot finish without the
+/// joiner, so "zero" can only mean the external arm did not help.
 #[test]
-fn the_external_joiner_helps_or_parks_exactly_as_the_b_arm_says() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
-
+fn the_external_joiner_helps() {
     let pool = ThreadPoolBuilder::new().num_threads(1).build();
     let helped = bodies_run_by_the_joining_thread(&pool);
 
     println!(
-        "[ke16 b-ext] arm={KE16_B} route=unattached tasks={EXTERNAL_ARM_TASKS} \
+        "[ke16 b-ext] route=unattached tasks={EXTERNAL_ARM_TASKS} \
          bodies_on_the_joining_thread={helped}"
     );
 
-    if KE16_B == "b3" {
-        assert_eq!(
-            helped, 0,
-            "the external joiner ran {helped} bodies under `ke16-b3`, whose external arm must \
-             never help (KE16-DESIGN-B.md §3): the B3 lane-count receipt of Step B rule 4 cannot \
-             discriminate if this arm is still a lane"
-        );
-    } else {
-        assert!(
-            helped >= 1,
-            "the external joiner ran no body under arm `{KE16_B}`, whose external arm helps \
-             (KE16-DESIGN-B.md §2.3): with the pool's only worker held for {WORKER_HOLD:?} and \
-             {} tasks pending, the joining thread was the only thread that could make progress",
-            EXTERNAL_ARM_TASKS - 1
-        );
-    }
+    assert!(
+        helped >= 1,
+        "the external joiner ran no body, but its arm helps (KE16-DESIGN-B.md §2.3): with the \
+         pool's only worker held for {WORKER_HOLD:?} and {} tasks pending, the joining thread was \
+         the only thread that could make progress",
+        EXTERNAL_ARM_TASKS - 1
+    );
 }
 
-/// **§6 — the cross-pool joiner is EXTERNAL, and B3's refusal covers it.**
+/// **§6 — the cross-pool joiner is EXTERNAL, and takes that arm.**
 ///
-/// The same fixture, with the joining thread being a worker of a DIFFERENT pool. `worker_lane_for`
-/// answers `None` for it (its deque belongs to pool A, not to the joined pool B), so it takes the
-/// external arm; and `tls::is_worker_thread_of` — the predicate carrying the B3 arm's one
-/// documented exception, for a worker of THIS pool inside an `install` frame — is false for it too,
-/// because registration is per pool.
+/// The same fixture, with the joining thread being a worker of a DIFFERENT pool.
+/// `tls::worker_lane_for` answers `None` for it — the pool tag deposited on that thread is pool A,
+/// not the joined pool B — so the join dispatches to the external arm instead of acting as a lane
+/// of B.
 ///
-/// That second half is why this row is not a duplicate of the test above: the exception is the
-/// single place where B3 does run a task, and the Step-B rule-4 receipt (the `bench_thread_install`
-/// lane count) is only a receipt if no measured route reaches it. A worker of another pool is the
-/// nearest caller class to the exception that must NOT be covered by it.
+/// A registered worker of A is the nearest caller class to a lane of B that must still not be
+/// treated as one.
 #[test]
 fn a_worker_of_another_pool_obeys_the_external_arm() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
-
     let pool_a = ThreadPoolBuilder::new().num_threads(1).build();
     let pool_b = ThreadPoolBuilder::new().num_threads(1).build();
 
@@ -247,9 +213,10 @@ fn a_worker_of_another_pool_obeys_the_external_arm() {
         let joiner_worker_id = Arc::clone(&joiner_worker_id);
         let outer_done = Arc::clone(&outer_done);
         // `spawn`, not `install` — the U1 rule the occupancy harness rests on. A scope joined from
-        // the test thread would put a HELPING external joiner (B0, B1) on this body: MEASURED, the
-        // `ke16-b1` row then reported `joiner_worker_id=4294967294`, i.e. the fixture had measured
-        // the test thread joining B rather than a worker of A joining B, which is the other test.
+        // the test thread would put the external joiner on this body from the TEST thread:
+        // MEASURED, the row then reported `joiner_worker_id=4294967294`, i.e. the fixture had
+        // measured the test thread joining B rather than a worker of A joining B, which is the
+        // other test.
         pool_a.spawn(move || {
             joiner_worker_id.store(current_worker_id() as usize, Ordering::Release);
             helped.store(bodies_run_by_the_joining_thread(&pool_b), Ordering::Release);
@@ -269,7 +236,7 @@ fn a_worker_of_another_pool_obeys_the_external_arm() {
     let joiner_id = joiner_worker_id.load(Ordering::Acquire);
     let helped = helped.load(Ordering::Acquire);
     println!(
-        "[ke16 b-ext] arm={KE16_B} route=worker_of_another_pool joiner_worker_id={joiner_id} \
+        "[ke16 b-ext] route=worker_of_another_pool joiner_worker_id={joiner_id} \
          tasks={EXTERNAL_ARM_TASKS} bodies_on_the_joining_thread={helped}"
     );
 
@@ -278,35 +245,26 @@ fn a_worker_of_another_pool_obeys_the_external_arm() {
         "the cross-pool join did not run on a registered worker of pool A (id={joiner_id}); the \
          fixture measured some other thread and §6's route was never taken"
     );
-    if KE16_B == "b3" {
-        assert_eq!(
-            helped, 0,
-            "a worker of pool A ran {helped} of pool B's tasks under `ke16-b3`. It is external to \
-             B (§6), and the arm's `is_worker_thread_of` exception is per POOL, so it must not \
-             fire here"
-        );
-    } else {
-        assert!(
-            helped >= 1,
-            "a worker of pool A ran none of pool B's tasks under arm `{KE16_B}`, whose external \
-             arm helps (§2.3, §6): B's only worker was held and A's worker was the only thread \
-             that could make B's wave progress"
-        );
-    }
+    assert!(
+        helped >= 1,
+        "a worker of pool A ran none of pool B's tasks, but it is external to B (§6) and the \
+         external arm helps (§2.3): B's only worker was held and A's worker was the only thread \
+         that could make B's wave progress"
+    );
 }
 
 /// Foreign tasks pushed into the global injector before the measured join.
 const FOREIGN_TASKS: usize = 96;
 
-/// Body of one foreign task. Chosen so that B0's serial residue is unmistakable: B0 batch-steals
-/// `min((len − 1)/2, 32) + 1 ≤ 33` tasks into its unregistered `scratch` and runs them ALL before
-/// the next `is_drained` check (`KE16-DESIGN-B.md` §1 item 4), i.e. ≥ 33 × 4 ms ≈ 132 ms, while a
-/// per-task re-check costs at most one body.
+/// Body of one foreign task. Chosen so that B0's serial residue would be unmistakable: B0
+/// batch-stole `min((len − 1)/2, 32) + 1 ≤ 33` tasks into its unregistered `scratch` and ran them
+/// ALL before the next `is_drained` check (`KE16-DESIGN-B.md` §1 item 4), i.e. ≥ 33 × 4 ms
+/// ≈ 132 ms, while a per-task re-check costs at most one body.
 const FOREIGN_BODY: Duration = Duration::from_millis(4);
 
-/// Wall-clock bound on the measured join under the B arms. Three times a single foreign body and a
-/// third of B0's residue floor: wide enough that a preempted thread (a Windows quantum is ~15 ms)
-/// does not fail it, narrow enough that it cannot be met by running a residue.
+/// Wall-clock bound on the measured join. Three times a single foreign body and a third of B0's
+/// residue floor: wide enough that a preempted thread (a Windows quantum is ~15 ms) does not fail
+/// it, narrow enough that it cannot be met by running a residue.
 const JOIN_BUDGET: Duration = Duration::from_millis(60);
 
 fn spin_for(d: Duration) {
@@ -318,8 +276,7 @@ fn spin_for(d: Duration) {
 
 /// **§2.2 — "a re-check per task": the WORKER joiner stops helping the instant its scope drains.**
 ///
-/// This is the property that fixes defect B, and it is shared by `ke16-b1` and `ke16-b3` (B3 is
-/// B1's worker arm plus a different external arm), so it is measured in both.
+/// This is the property that fixes defect B.
 ///
 /// The fixture separates it from occupancy. A worker X opens a scope holding ONE trivial task while
 /// the global injector holds a large FOREIGN wave of long bodies. What is measured is the wall
@@ -327,23 +284,18 @@ fn spin_for(d: Duration) {
 ///
 /// - a joiner that re-checks between tasks pops its own task, sees the scope drained and returns —
 ///   at most one foreign body of exposure if a sibling stole its task first;
-/// - B0's joiner batch-steals up to 33 foreign tasks into `scratch` and runs the whole batch with
-///   no `is_drained` in between, so the same call cannot return before ~33 bodies.
+/// - B0's joiner batch-stole up to 33 foreign tasks into `scratch` and ran the whole batch with no
+///   `is_drained` in between, so the same call could not return before ~33 bodies.
 ///
-/// The default build is not asserted, only RECORDED: `b0` is the behaviour under measurement, and
-/// its number here is what shows the instrument separates the arms rather than measuring noise.
-///
-/// MEASURED at this checkout, W=2, median of 5 runs each: `ke16-a1` (i.e. b0 in the A-fixed
-/// configuration §1 is written about) **192 ms**; `ke16-a1,ke16-b1` **4 µs**; `ke16-a1,ke16-b3`
-/// **5 µs**. The plain default build (`a0+b0`) reads ~11 µs and is NOT the B0 baseline: under a0
-/// the joiner's stage 1 drains `injector_local`, where its own task is, so it returns before it
-/// ever reaches the global injector. B0's residue is a property of B0 *after* the A1 edits, which
-/// is exactly why §1 derives it from "the code as it will be after A1" rather than from today's.
+/// MEASURED while the tournament's arms were still buildable, W=2, median of 5 runs each: the B0
+/// joiner with the A1 placement in place — the configuration §1 is written about — **192 ms**; B1
+/// **4 µs**; B3 **5 µs**. The pre-tournament default, the A0 placement with the B0 joiner, read
+/// ~11 µs and was NOT the B0 baseline: under A0 the joiner's stage 1 drained `injector_local`,
+/// where its own task was, so it returned before it ever reached the global injector. B0's residue
+/// is a property of B0 *after* the A1 edits, which is exactly why §1 derives it from "the code as
+/// it will be after A1" rather than from the code as it then stood.
 #[test]
 fn the_worker_joiner_does_not_run_a_residue_before_re_checking_its_scope() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    ke16_check_expected_variant();
-
     const WORKERS: usize = 2;
     let pool = ThreadPoolBuilder::new().num_threads(WORKERS).build();
 
@@ -414,7 +366,7 @@ fn the_worker_joiner_does_not_run_a_residue_before_re_checking_its_scope() {
     let micros = join_micros.load(Ordering::Acquire);
     let worker = outer_worker.load(Ordering::Acquire);
     println!(
-        "[ke16 b-recheck] arm={KE16_B} joiner_worker_id={worker} foreign_tasks={FOREIGN_TASKS} \
+        "[ke16 b-recheck] joiner_worker_id={worker} foreign_tasks={FOREIGN_TASKS} \
          foreign_body={FOREIGN_BODY:?} measured_join={micros}us b0_residue_floor={}us",
         33 * FOREIGN_BODY.as_micros()
     );
@@ -424,15 +376,13 @@ fn the_worker_joiner_does_not_run_a_residue_before_re_checking_its_scope() {
         "the measured scope was not opened on a registered worker (id={worker}): the fixture \
          measured the dispatcher route, where the residue rule is a different one"
     );
-    if KE16_B != "b0" {
-        assert!(
-            micros < JOIN_BUDGET.as_micros() as usize,
-            "the worker joiner's scope took {micros} us under arm `{KE16_B}`, over the \
-             {JOIN_BUDGET:?} budget. Its own wave was one trivial task, so the time is somebody \
-             else's wave run without an `is_drained` in between — the B0 residue behaviour \
-             (KE16-DESIGN-B.md §1 item 4), which §2.2's per-task re-check removes"
-        );
-    }
+    assert!(
+        micros < JOIN_BUDGET.as_micros() as usize,
+        "the worker joiner's scope took {micros} us, over the {JOIN_BUDGET:?} budget. Its own wave \
+         was one trivial task, so the time is somebody else's wave run without an `is_drained` in \
+         between — the B0 residue behaviour (KE16-DESIGN-B.md §1 item 4), which §2.2's per-task \
+         re-check removes"
+    );
 
     assert!(
         spin_until_count(&foreign_done, FOREIGN_TASKS, Duration::from_secs(60)),

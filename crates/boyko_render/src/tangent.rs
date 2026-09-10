@@ -62,6 +62,9 @@ pub fn generate_tangents(vertices: &mut [Vertex], indices: &[u32]) {
     let mut tan_accum = vec![Vec3::ZERO; vertices.len()];
     let mut bitan_accum = vec![Vec3::ZERO; vertices.len()];
 
+    // `as_chunks::<3>()` rather than `chunks_exact(3)`: a triangle IS three indices,
+    // so the element type says so (`&[u32; 3]`) and the three reads below need no
+    // bounds check.
     for tri in indices.as_chunks::<3>().0 {
         let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
         let corners = [i0, i1, i2];

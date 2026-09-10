@@ -238,7 +238,14 @@ fn bench_solve(c: &mut Criterion) {
 /// `{simd_solve} / {scalar-colored} >= 1.8x` on the solve, AND
 /// `{parallel + simd} >= {parallel scalar}` (no cohort-snapping width-starvation).
 /// On a non-AVX2 build `simd_solve` routes to the scalar oracle ⇒ the two lines
-/// coincide (the A/B is only meaningful under `RUSTFLAGS="-C target-feature=+avx2"`).
+/// coincide.
+///
+/// ⚠ The remedy for that is NOT `RUSTFLAGS="-C target-feature=+avx2"`, which this
+/// comment used to prescribe. `RUSTFLAGS` REPLACES `target.<triple>.rustflags`, so it
+/// deletes both the repository's `-C target-cpu=x86-64-v3` baseline and this box's
+/// linker flags — and the baseline already carries AVX2, so an ordinary
+/// `cargo bench` has the SIMD arm live. The wrong recipe fails by making both arms
+/// scalar, which reads as "the switch does nothing" rather than as an error.
 fn bench_simd_ab(c: &mut Criterion) {
     let mut group = c.benchmark_group("o7_simd_ab");
     group.sample_size(30);

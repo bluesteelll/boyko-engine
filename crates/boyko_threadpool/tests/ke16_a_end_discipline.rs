@@ -1,43 +1,37 @@
 //! KE16 axis A, `KE16-DESIGN-A.md` §1.4 — the OWNER END of the worker's deque.
 //!
-//! `ke16-a1` and `ke16-a1-fifo` are the SAME placement arm; the whole
-//! difference between the two candidates is one `#[cfg]`-selected constructor
-//! in `ThreadPoolBuilder::build` (`Worker::new_lifo()` under `ke16-a1`,
-//! `Worker::new_fifo()` everywhere else). §1.4 spends its length on what that
-//! one line trades — the owner's `front.fetch_add` against a local fence, the
-//! thief's one CAS per batch against one per element — and the tournament
-//! decides the pair on those numbers.
+//! The end discipline is decided by ONE line in `ThreadPoolBuilder::build`:
+//! every worker deque is constructed with `Worker::new_fifo()`, so the owner
+//! pops the OLDEST entry — the one pushed first. §1.4 spends its length on what
+//! that one line trades — the owner's `front.fetch_add` against a local fence,
+//! the thief's one CAS per batch against one per element.
 //!
-//! Nothing else in the tree observes that line. `KE16_A` reads `"a1"` from the
-//! FEATURE, not from the deque; the placement receipt in `worker::tests`
-//! (`a1_a_spawn_from_a_worker_body_lands_on_its_own_deque`) asserts WHERE the
-//! task lands, not from which end it leaves; and both A1 arms are green on
-//! every occupancy gate, because reachability does not depend on the end. So a
-//! build whose constructor arm was lost — a `#[cfg]` edited to the wrong
-//! feature, the two branches swapped, the LIFO branch deleted with a losing
-//! candidate — would run the tournament's `a1` row over a FIFO deque, report
-//! `a1+b0+w0+c0`, and be certified by `KE16_EXPECT`: the quiet mislabelling
-//! `KE16-DESIGN.md` §4 built the witness apparatus to forbid, in the one place
-//! the witness cannot see, and the two rows it would corrupt are the pair the
-//! rule decides symmetrically.
+//! Almost nothing in the tree observes that line. The placement receipt in
+//! `worker::tests` (`a1_a_spawn_from_a_worker_body_lands_on_its_own_deque`)
+//! asserts WHERE the task lands, not from which end it leaves, and the
+//! occupancy gates are green either way, because reachability does not depend
+//! on the end. So a build whose constructor was quietly changed — to
+//! `Worker::new_lifo()`, or to a LIFO deque handed to the worker loop by some
+//! other route — would reverse the order in which a worker drains its own
+//! spawns, and almost every other test would stay green. One other row reads
+//! the same end: `tests/ke16_b_join_properties.rs`'s
+//! `the_worker_joiner_takes_its_own_wave_before_a_foreign_one`, which asks it
+//! at the JOINER (`KE16-DESIGN-B.md` §2.2) and names this file for the
+//! worker-loop reading. Here the pop is not entangled with the join's step
+//! order.
 //!
 //! The gate is the EXECUTION ORDER of a wave spawned from inside a worker body
 //! on a ONE-worker pool: with no sibling there is no thief, so the order the
-//! worker's own loop pops is the end discipline itself. It is meaningful in
-//! every configuration of the tournament, not only under the A1 arms — every
-//! other arm parks the wave in an `Injector` (FIFO by contract) or on a FIFO
-//! deque — so the row is a pin on `ke16-a1` being the ONLY build in the grid
-//! with a LIFO owner end, and it never reads `running 0 tests`.
+//! worker's own loop pops is the end discipline itself. It never reads
+//! `running 0 tests` — the test is unconditional.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use boyko_threadpool::{MAX_WORKERS, ThreadPoolBuilder, current_worker_id, ke16_variant};
+use boyko_threadpool::{MAX_WORKERS, ThreadPoolBuilder, current_worker_id};
 
-/// Four tasks: enough to tell `[0,1,2,3]` from `[3,2,1,0]` and to survive one
-/// `steal_batch_and_pop` grab on the injector arms (a single batch takes all of
-/// them, so no arm can reorder the wave by splitting it).
+/// Four tasks: enough to tell `[0,1,2,3]` from `[3,2,1,0]`.
 const WAVE: usize = 4;
 
 /// Spin until `counter` reaches `target` or the deadline passes; answers the
@@ -56,10 +50,7 @@ fn wait_for(counter: &AtomicUsize, target: usize, timeout: Duration) -> usize {
 }
 
 #[test]
-fn a_wave_spawned_from_a_worker_body_is_executed_newest_first_only_under_ke16_a1() {
-    boyko_threadpool::ke16_check_expected_variant();
-    println!("KE16 variant: {}", ke16_variant());
-
+fn a_wave_spawned_from_a_worker_body_is_executed_oldest_first() {
     // ONE worker: no sibling can steal, so the observed order is the owner's
     // pop end and nothing else. The wave cannot start before the outer body
     // returns, which is what makes the whole sequence deterministic.
@@ -87,8 +78,9 @@ fn a_wave_spawned_from_a_worker_body_is_executed_newest_first_only_under_ke16_a1
             let cursor_task = Arc::clone(&cursor_outer);
             let wid_task = Arc::clone(&wid_outer);
             // THE SUBJECT: a production spawn issued from inside a worker body,
-            // which is what the A arms place. The four are pushed oldest-first,
-            // so `[0,1,2,3]` is the FIFO reading and `[3,2,1,0]` the LIFO one.
+            // which lands on that worker's own registered deque. The four are
+            // pushed oldest-first, so `[0,1,2,3]` is the FIFO reading and
+            // `[3,2,1,0]` the LIFO one.
             pool_inner.spawn(move || {
                 wid_task.fetch_max(current_worker_id(), Ordering::Relaxed);
                 let slot = cursor_task.fetch_add(1, Ordering::AcqRel);
@@ -116,31 +108,22 @@ fn a_wave_spawned_from_a_worker_body_is_executed_newest_first_only_under_ke16_a1
     );
 
     let observed: Vec<u32> = order.iter().map(|c| c.load(Ordering::Acquire)).collect();
-    // The claim is about the FIRST task executed, not about the whole
-    // permutation. On the A1 arms the wave sits entirely on the owner's deque
-    // and the whole order is the end discipline; on the injector arms it is
-    // not — stage 1 grabs a BATCH, returns one task and parks the remainder on
-    // the deque, so the tail interleaves with the deque pops in a way that is
-    // crossbeam's batching policy rather than an end. MEASURED in the default
-    // build: `[0, 2, 3, 1]`, oldest-first at the head and batch-shaped after
-    // it. The head is the invariant every arm shares a definition of, and it is
-    // the one the LIFO / FIFO constructor decides.
+    // The claim is deliberately about the FIRST task executed, not about the
+    // whole permutation. On this one-worker pool there is no thief, so every
+    // position is decided by the owner's pop end and asserting the full order
+    // would be strictly stronger; that strengthening is a separate call and is
+    // not taken here. The full order is carried into the failure message
+    // rather than asserted.
     let first = observed[0];
-    let (expected_first, end) = if cfg!(feature = "ke16-a1") {
-        (WAVE as u32 - 1, "LIFO (the NEWEST entry, pushed last)")
-    } else {
-        (0, "FIFO (the OLDEST entry, pushed first)")
-    };
+    let expected_first: u32 = 0;
+    let end = "FIFO (the OLDEST entry, pushed first)";
     assert_eq!(
-        first,
-        expected_first,
-        "KE16-DESIGN-A.md §1.4: this build is `{}`, whose owner end must be {end}, so the wave \
-         pushed 0,1,2,3 from inside a worker body must START at {expected_first}; it started at \
-         {first} (full observed order {observed:?}). The `Worker::new_lifo()` / \
-         `Worker::new_fifo()` arm in `ThreadPoolBuilder::build` does not match the feature this \
-         binary reports — the a1 and a1f rows of the tournament, which the design decides \
-         symmetrically against each other, would be measured over the wrong deque under a \
-         witness that cannot see the difference",
-        ke16_variant()
+        first, expected_first,
+        "KE16-DESIGN-A.md §1.4: the owner end of a worker's deque is {end}, so a wave pushed \
+         0,1,2,3 from inside a worker body must START at {expected_first}; it started at {first} \
+         (full observed order {observed:?}). `ThreadPoolBuilder::build` constructs every worker \
+         deque with `Worker::new_fifo()` — a build that reached `Worker::new_lifo()` instead, or \
+         that handed the loop a deque built elsewhere, would drain a worker's own spawns \
+         newest-first"
     );
 }

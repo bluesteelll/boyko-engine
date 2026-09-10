@@ -144,14 +144,6 @@ const WORKERS: u32 = 2;
 /// Seeded before the read, so the reader has something to fail to see.
 const SEEDED: u32 = 3;
 
-/// The variant banner, so a run of this file under `KE16_EXPECT` is attributable like the
-/// measured artifacts are (`KE16-DESIGN.md` §4). Printing from a test binary is not the
-/// `boyko-log` print census's subject — that census is about `crates/*/src/**`.
-fn ke16_witness() {
-    println!("KE16 variant: {}", boyko_threadpool::ke16_variant());
-    boyko_threadpool::ke16_check_expected_variant();
-}
-
 // ── 1. The EventReader family, at guard depth 2 ───────────────────────────────────────────────
 
 /// The `EventReader` half of the positive-polarity surface — three of the eight consumer sites —
@@ -172,7 +164,6 @@ fn ke16_witness() {
     ignore = "miri-slow: spins a real OS thread pool and runs the parallel scheduler"
 )]
 fn event_reader_reads_every_event_at_guard_depth_two() {
-    ke16_witness();
     register_event::<NestedReadEvent>(132);
 
     let pool = ThreadPoolBuilder::new().num_threads(WORKERS as usize).build();
@@ -271,7 +262,6 @@ fn event_reader_reads_every_event_at_guard_depth_two() {
 #[cfg(debug_assertions)]
 #[should_panic(expected = "Time::advance_with called inside a scheduled system body")]
 fn time_advance_with_is_refused_at_guard_depth_two() {
-    ke16_witness();
     let _outer = InSystemRunGuard::enter();
     let _inner = InSystemRunGuard::enter();
 
@@ -288,7 +278,6 @@ fn time_advance_with_is_refused_at_guard_depth_two() {
 /// engine taking the in-system branch forever. So the predicate is asserted, not merely relied on.
 #[test]
 fn time_advance_with_is_permitted_again_after_the_depth_two_unwind() {
-    ke16_witness();
     assert!(
         !is_in_system_run(),
         "the test thread already reads as inside a system body before this test entered a guard: \

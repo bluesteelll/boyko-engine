@@ -226,6 +226,71 @@ is serial and every candidate beats it):
    better). A candidate that is worse on physics beyond 2× the band than another is behind it,
    whatever the grid says — the owner's criterion is throughput on the real consumer, and a variant
    that wins every 1 µs cell but loses the consumer loses.
+⚠⚠ **RULES 2 AND 3 ARE AMENDED — 2026-09-08, AFTER RULE 3 DECIDED AGAINST A CANDIDATE THAT WAS
+THEN MEASURED BETTER ON TEN CELLS.** The amendment is stated before the original text rather than
+replacing it, because a decision rule rewritten after it has ruled is exactly the shape that should
+be auditable. Both the old rule and the reason it was changed are preserved, and the order of
+discovery is named: the defect was found BECAUSE the rule gave an answer the measurement
+contradicted. Motivated scrutiny is still scrutiny — but only if the defect stands on its own, and
+this one does, because it is a fact about the engine rather than a preference about candidates.
+
+**THE DEFECT.** Rule 3's tiebreak gives the decisive vote to the **64W column**, and the engine
+cannot produce that column:
+
+* `BatchingStrategy::default()` sets `batches_per_thread = 1`
+  (`boyko_ecs/src/ecs/core/iters/query/par_iter.rs`), so `chunk_size = entity_count / worker_count`
+  and an archetype splits into **exactly W chunks — one per worker**. Reaching 64W requires
+  `batches_per_thread = 64`; **no caller in the tree sets it**.
+* `MIN_ARCHETYPE_FOR_PARALLEL = 1024` floors a chunk at 1024 rows, so the 1 µs body the tiebreak
+  fires on needs a row costing under a nanosecond. The ECS harness's real chunk is **~82 ms**.
+* ~~The physics solver does not use that path at all — it cuts by colour group
+  (`solver/colored.rs`), and its cut count is of the order of the colour count, not 64 × W.~~
+  ⚠ **FALSE IN THE CODE (found 2026-09-10, `KE16-RESULTS.md` §A-RE correction).** The rigid
+  solver cuts each colour of ≥ 256 slots into `num_threads() × CHUNKS_PER_WORKER = 16 × 6 = 96 = 6W`
+  chunks (`solver/colored.rs:255,2647`), per sweep, 12 sweeps per step (`substeps = 4`,
+  `relax_iterations = 2`, `resources.rs:424-425`) — up to 72 waves of 96 tasks from inside a worker,
+  with bodies of the order of 1–10 µs (≈ 3.9 µs under a uniform split; the per-colour slot
+  distribution is not on record). The soft solver is 6W (`soft/colored.rs:65,998`), the broadphase
+  4W (`resources.rs:598,1586`), the MSDF bake 4W (`fontbake/src/msdf/distance.rs:468`). The 64W
+  column stays unproduced; **4W and 6W are produced by four shipped callers**, so the amended rule
+  3's sentence *"4W is reachable only by a caller that sets `batches_per_thread = 4` … nothing uses
+  it"* is wrong as well, and the ECS `par_iter` bullets above are the only part of this defect that
+  holds. The cost that this amendment moved off the veto surface — the `a1f` 1 µs cells — was
+  re-measured at 2.8–11.7× (replay), on a width the physics consumer produces every step.
+
+So on 2026-09-08 the tiebreak discarded a 2–4 × win across six mid-body cells and a tie on BOTH
+consumers, on the strength of one cell at a width and a body size nothing in the engine generates
+(§A-RE in `KE16-RESULTS.md`).
+
+**AMENDED RULE 2 — CONSUMER AGREEMENT, not physics primacy.** A candidate is ahead of another only
+if it is ahead or tied on **every** consumer harness, each judged against its own band. Physics no
+longer ranks alone. If the consumers disagree — one ahead on physics, the other on the ECS driver —
+the pair is a **TIE at rule 2 and the disagreement is REPORTED**, never averaged and never broken by
+picking the consumer that gives an answer. The owner's criterion is throughput on the real
+consumers, plural: the pool serves the scheduler, ECS iteration, the physics solver and the MSDF
+bake, and a rule that ranks by one of them ranks by one subsystem's shape.
+
+**AMENDED RULE 3 — the veto surface is the widths the engine PRODUCES.** Within the rule-2 tie,
+compare the worker-route 1 µs and 10 µs cells pairwise and in both directions **at `tasks = W`
+only**, that being the width the default chunking emits and the one every shipped caller reaches.
+Cells at 4W and 64W are **recorded and reported, and cannot decide** — 4W is reachable only by a
+caller that sets `batches_per_thread = 4` (the API allows it; nothing uses it) and 64W by none.
+If the pair still ties on that surface, the tiebreak is the **whole producible column** — 1 µs
+through 1 ms at `tasks = W`, on both routes — read as a count of cells improved minus regressed,
+and only then rule 4. **No single cell may override the rest of the grid and both consumers again.**
+
+⚠ **WHAT THIS AMENDMENT DOES NOT DO.** It does not retroactively decide axis A. §A-RE's reversal
+rests on ten improved cells, two regressed, a tie on both consumers and a green gate ladder — a
+reader who rejects this amendment entirely still has to explain those numbers. The amendment
+changes what the RULE would say next time; the measurement is what changed the verdict.
+
+⚠ **THIS IS A SCOPE CALL AND IT IS FLAGGED TO THE OWNER** in `docs/OPEN-QUESTIONS.md`. Changing a
+measurement rule mid-campaign is not a perf fork of the kind the orchestrator decides alone. The
+amendment is applied so the campaign can continue on a coherent rule, and it is reversible: the
+original text is directly below, unedited.
+
+**THE ORIGINAL RULES 2 AND 3, PRESERVED VERBATIM:**
+
 3. **The grid vetoes, symmetrically, within the physics band.** Among candidates within 2× the
    band of each other on physics, compare their 1 µs and 10 µs WORKER-route cells (all three task
    counts) PAIRWISE and in BOTH directions: if V regresses (§4 rule) any such cell against U while
@@ -262,6 +327,49 @@ is serial and every candidate beats it):
 
 1. Rank by physics `in_scheduled_system`; B0 stays unless B1 improves it beyond 2× the band
    (the owner's "keep as is" is the default, not the exception).
+⚠⚠ **STEP B RULE 2 IS AMENDED — 2026-09-08, and it is the SAME defect as Step A rule 3 in a
+different grain.** There, the deciding cell was one the engine cannot produce. Here, it is one
+produced by something that does not matter: the rule below anchors a POOL-WIDE axis-B verdict on
+"the fontbake shape", and fontbake is the MSDF atlas bake — a load-time asset step, not a frame path
+and by no reading a bottleneck. Both are the same underlying error: **a deciding cell chosen without
+asking whether it represents work that matters.**
+
+The citation itself is factually correct and was checked before it was doubted:
+`boyko_fontbake/src/msdf/distance.rs::pick_band_rows` sets `target_bands = workers * 4`, so the bake
+really does dispatch 4W tasks. What is wrong is not the arithmetic but the anchoring.
+
+**THE DISPATCHER THAT MATTERS IS THE SCHEDULER.** `boyko_ecs/.../schedule/schedule.rs:455` calls
+`pool.install(|scope| self.executor_main_loop(world, scope))` — ONE install per frame, wrapping the
+entire executor main loop. The calling thread is the frame thread and it is the external joiner for
+the whole frame. That is the arm `b1` and `b3` actually differ on.
+
+**AND THE TWO DISPATCHERS POINT IN OPPOSITE DIRECTIONS**, which is what makes this a real fork
+rather than a formality:
+
+| dispatcher | what its calling thread is doing | what it argues |
+|---|---|---|
+| fontbake (`install` from an app thread) | nothing — it has no other work while the bake runs | helping (`b1`) is a free extra lane ⇒ **against `b3`** |
+| the scheduler (`install` per frame) | it IS the dispatcher: it scans for ready systems and **parks between rounds** (`schedule.rs`, "dispatcher parks below and wakes on completion") | if it takes a task under `b1`, the next system's dispatch waits for that task to finish — latency injected into the schedule's critical path ⇒ **for `b3`** |
+
+⚠⚠ **AND THE DECIDING PROPERTY IS NOT MEASURED BY ANY HARNESS THIS CAMPAIGN HAS.** The scheduler's
+question is *"does the frame thread's dispatch of the NEXT system get delayed"*, and that is neither
+a width nor a body size. The pool grid measures a wave's makespan, not the latency of the thread
+that hands waves out. So:
+
+* `b3` vs `b1` can be settled on THROUGHPUT alone only if one dominates the other across the grid
+  and both consumers. If it does, take that verdict.
+* **If they are close, the honest verdict is UNDECIDED pending a scheduler harness** — and it must
+  be filed that way rather than broken on the fontbake cells, which is the anchoring this amendment
+  rejects.
+
+**FONTBAKE IS NOT CHANGED**, and the owner offered to change it. It is not a constraint here: the
+amendment moves the RULE, not the bake. Two reasons for leaving `pick_band_rows` alone — it is not a
+bottleneck, so a change buys nothing measurable; and 4× over-decomposition is defensible on the
+bake's own shape, since MSDF band cost is uneven (a band crossing glyph edges evaluates distances
+against every edge, an empty band nearly nothing) and over-decomposition is what buys load balance.
+Revisit it when the bake has a harness, and measure `top_lane` rather than the wall clock, because
+`4W` vs `W` is an argument about balance and balance shows up in occupancy.
+
 2. `b3` vs `b1`: decided on the dispatcher-route 100 µs and 1 ms × 4W cells (the fontbake shape) and
    on `top_lane` from the occupancy test; `b3` is taken only if those cells are ties or better
    (owner question 2 may override on code size).
@@ -286,6 +394,28 @@ is serial and every candidate beats it):
    gated arm: the developer fixes it or the feature is dropped; there is no W17 fallback (it would
    fail the same gate).
 3. `c1` (batch spawn) not kept ⇒ `c1f` is not measured (it needs the batch push).
+
+⚠⚠ **THE TWO COMMANDS ABOVE NEED OPPOSITE FLAGS, and until 2026-09-09 both carried
+`--ignored`, which made the FIRST one vacuous.** Measured, both directions:
+
+| command | with `--ignored` | without |
+|---|---|---|
+| threadpool `ke16_nested_scope_occupancy` | `running 0 tests`, 3 filtered out, **EXIT 0** | `running 1 test`, **1 passed** |
+| ecs `ke16_occupancy_gate` | `running 1 test`, **1 passed** | `running 1 test`, **0 passed, 1 IGNORED** |
+
+The reason is that the two tests are ignored for DIFFERENT reasons. The threadpool one
+is `#[cfg_attr(not(any(feature = "ke16-a1", …)), ignore)]` — with an A arm enabled it is
+not ignored at all, and `--ignored` runs ONLY ignored tests, so the gate ran nothing in
+exactly the configuration it exists to check. The ECS one is ignored UNCONDITIONALLY (it
+is RED until defect A is fixed), so it needs `--ignored` to run at all.
+
+⚠ Both failure shapes are vacuous greens that a reader skims past: `running 0 tests` and
+`running 1 test … 0 passed; 1 ignored`. §5 item 1 forbids the first by name; the second
+is why "running N" is not a sufficient receipt either — the passed count is.
+
+⚠ And this note records a repair that was itself over-applied: the first edit removed
+`--ignored` from BOTH lines, which fixed the threadpool command and silently broke the
+ECS one. It was caught by running both forms rather than by reading them.
 4. The final configuration is `A*+B*+W*+C*`.
 
 ## Precondition on every timed step: the machine must be IDLE, and the run must prove it
@@ -330,12 +460,20 @@ recorded but not present in the project."* The removal commit is therefore prece
 and the order is not negotiable: freeze, then remove, because after the removal there is nothing
 left to point a tag at.
 
-1. **One annotated tag, `ke16/tournament`**, on the last commit at which every candidate still
+1. **One annotated tag** — prescribed here as `ke16/tournament`, TAKEN as
+   `ke16/candidates-frozen-2026-09-07` on `897c812f`; the dated name is the one that exists and the
+   one to use — on the last commit at which every candidate still
    builds — that is, the commit whose gates Step 7 ran. ONE tag rather than one per candidate: the
    candidates coexist in a single tree behind mutually exclusive features, so per-candidate tags
    would all address the same commit and would falsely suggest independent snapshots. The tag
    message carries the verdict line for each candidate and the exact feature flag that builds it,
-   so `git show ke16/tournament` answers "what was tried" without a checkout.
+   so `git show ke16/candidates-frozen-2026-09-07` answers "what was tried" without a checkout.
+   ⚠ AS TAKEN IT DOES NOT. The message inlines no per-candidate detail and instead says *"Read
+   docs/threadpool/KE16-REJECTED.md at this commit"* — but the register was written two commits
+   LATER (`611999cb`), so at `897c812f` that path does not exist and
+   `git show <tag>:docs/threadpool/KE16-REJECTED.md` fails outright. The register is read at `HEAD`,
+   never at the tag, and the tag message is wrong about where to find it. Retagging is the owner's
+   call; until then this note is the correction.
 2. **A register, `docs/threadpool/KE16-REJECTED.md`**, written in the removal commit. One row per
    candidate that did not ship: what it was, in one sentence; the measurement that eliminated it,
    with the number and the cell it was taken in; the feature flag and the tag that build it; and —
@@ -378,7 +516,7 @@ cargo clippy -p boyko-threadpool --all-targets --features <F> -- -D warnings
 # Tests, no fail-fast (a red target hides every target behind it otherwise)
 cargo test -p boyko-threadpool --all-targets --no-fail-fast --features <F>
 cargo test -p boyko-threadpool --test cross_pool_routing --features <F>
-cargo test -p boyko-threadpool --test ke16_nested_scope_occupancy worker_spawned_wave_reaches_at_least_half_the_workers --features <F> -- --ignored --test-threads=1 --nocapture
+cargo test -p boyko-threadpool --test ke16_nested_scope_occupancy worker_spawned_wave_reaches_at_least_half_the_workers --features <F> -- --test-threads=1 --nocapture
 cargo test -p boyko-ecs --test ke16_occupancy_gate par_iter_in_system_reaches_more_than_one_thread --features boyko-threadpool/<F> -- --ignored --test-threads=1 --nocapture
 cargo test -p boyko-physics --lib --features boyko-threadpool/<F>      # the {1,N} bit-identity oracles
 

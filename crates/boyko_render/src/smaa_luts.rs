@@ -128,6 +128,9 @@ mod tests {
         }
         msg.extend_from_slice(&bit_len.to_be_bytes());
 
+        // `as_chunks::<64>()`: a SHA-256 block IS 64 bytes, so the element type says so
+        // and the sixteen word loads below index a `&[u8; 64]` without a bounds check
+        // apiece.
         for chunk in msg.as_chunks::<64>().0 {
             let mut w = [0u32; 64];
             for (i, word) in w.iter_mut().enumerate().take(16) {

@@ -526,12 +526,11 @@ fn install_on_same_pool_worker_is_external() {
 /// The predicate calls that joiner EXTERNAL (`install` rewrote its worker id to
 /// the dispatcher sentinel), and its pushes go to `injector_global` accordingly.
 /// With `num_threads(1)` there is no second worker to steal them, so an external
-/// arm that refuses to help has no completer to wait for and the join never
-/// returns. B0 helps by draining the global injector, `ke16-b1`'s external arm
-/// steals one at a time, and `ke16-b3`'s asks `tls::is_worker_thread_of` before
-/// refusing — this row is the gate on that last one, and the shape the four-
-/// worker `install_on_same_pool_worker_is_external` above is green over (its
-/// three idle siblings carry the wave whatever the joiner does).
+/// arm that refused to help would have no completer to wait for and the join
+/// would never return. The shipped external arm does help — it steals from the
+/// global injector one task at a time — and this row is the gate on that. The
+/// four-worker `install_on_same_pool_worker_is_external` above cannot be that
+/// gate: its three idle siblings carry the wave whatever the joiner does.
 ///
 /// The pool is deliberately LEAKED on the timeout path: a wedged worker is
 /// exactly what this row detects, and `ThreadPool::drop` joins its workers, so
@@ -719,7 +718,6 @@ fn cross_pool_join_from_a_worker_out_of_the_target_pools_id_range_is_external() 
 /// a stranger collected its wake. The assertion here is only that the scope
 /// completes and the process survives; the aliasing claim is what the predicate
 /// makes unrepresentable.
-#[cfg(feature = "ke16-w-count")]
 #[test]
 fn cross_pool_worker_joining_a_foreign_scope_takes_the_external_arm() {
     let pool_a = ThreadPoolBuilder::new().num_threads(2).build();

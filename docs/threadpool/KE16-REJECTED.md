@@ -45,22 +45,29 @@ Three further properties of every absolute in this file:
   single scalar, so no one normaliser repairs it. The pool grid's control reproduced the Step-0 band
   file to < 1 % on 22 of 24 cells and to 0.2 % on the deciding cell.
 
-## ⚠ THE FREEZE IS NOT YET A FREEZE — the tag does not exist
+## ✅ THE FREEZE IS DONE — and this section used to say the opposite
 
-The owner's rule is **tag + register row**. This file is the row half. The tag half is **owed and
-currently impossible to point at anything durable**:
+The owner's rule is **tag + register row**. Both halves exist.
 
-* `git tag --list 'ke16*'` at `D:/wt/threadpool` returns **nothing**.
-* Every candidate arm lives in **uncommitted worktree state** at HEAD
-  `4a363678e1b7fb97d0a9d6b9856678b5ba6a7870` (branch `feat/threadpool-ke16`):
-  `git status --porcelain` = **76** entries, and
-  `git diff --stat HEAD -- crates/boyko_threadpool` = **11 files, 7661 insertions, 430 deletions**.
+* **Tag:** `ke16/candidates-frozen-2026-09-07`, annotated, pointing at `897c812f` — *"the KE16
+  candidate arms, and a task representation that cannot outlive its own release"*. Every axis-A, B,
+  W and C candidate builds from that commit behind its own feature.
+* **Row:** this file.
 
-So the objects this register freezes are, today, reachable only through one dirty working tree. A
-register over uncommitted work is a register over something a single `git checkout` destroys. **The
-arms must be committed and tagged before the flags are deleted**, or this file becomes the only
-surviving trace of five implementations. Nothing in this document performs that commit; it is named
-here because a freeze register that does not say it is not yet frozen would be lying by omission.
+⚠ **What stood here until 2026-09-08 was written before either existed** and said so in detail: that
+`git tag --list 'ke16*'` returned nothing, and that every arm lived in 76 uncommitted worktree
+entries at HEAD `4a363678`. Both facts were true when written and both are now false — the arms were
+committed as `897c812f` and tagged the same day. The old text is summarised rather than deleted
+because a register whose value is that it records what was not yet done must not quietly erase the
+moment it stopped being true.
+
+⚠ **One thing the tag does NOT cover, and it matters for a revival.** `897c812f` predates stage 3b
+(`d51b4ced`), which moved the scoped task cell out of its own heap allocation and into a per-scope
+bump block. An arm recovered from the tag is therefore written against the OLD task path. That is
+exactly the decay this register's header describes — a snapshot, not a part on a shelf — and it is
+why every return condition below ends in a re-measurement rather than a switch. **When the flags are
+removed, the removal commit's parent gets its own tag**, so the last state in which every candidate
+built against the SHIPPED task path is also recoverable.
 
 ## How to read a row
 
@@ -370,64 +377,141 @@ closed question.
 
 ---
 
-# §3. Axes W and C — NOT YET MEASURED, therefore NOT rejected
 
-**These four rows are not defeats. Nothing eliminated them; nothing was run.** They are in this
-register only so that the deletion of their flags does not erase four built, unpriced candidates.
+# §3. Axes W and C — four arms measured and rejected (2026-09-08, CS-4)
 
-The axes-W/C session took the reference configuration `a3+b0+w0+c0` on the **post-Stage-1 code
-(CS-2)** — 49 rows, five runs with per-harness keep/discard, preserved — and was then **stopped
-because the owner started a game**. No candidate row was ever taken.
+Axis W closed on **`wc`** (`ke16-w-count`, W-d′ count-gated completion) and axis C on **`c0`** — no
+batch spawn. The shipped configuration is **`a3+b0+wc+c0`**.
 
-**The reference they would be judged against (CS-2, HEAD `4a363678`, `a3+b0+w0+c0`):**
+All four rows below are **CS-4** — after stage 3b (`d51b4ced`) moved the scoped task cell into a
+per-scope bump block. They were taken with `scripts/ke16_measure.sh`, three interleaved passes per
+step, after `--prebuild` so that no timed region followed a compile.
 
-| Row | Median |
-|---|---|
-| physics `in_scheduled_system`/29751 | 10 018 859 ns |
-| physics `bench_thread_install_Wminus1` (the REF row under B0) | 9 796 178 ns |
-| physics `bench_thread_install` | 9 850 713 ns |
-| physics `empty_schedule_control` | 1 532 ns |
-| physics `single_threaded_O5` (session meter) | 27 422 295 ns |
-| worker 1 µs × W / 4W / 64W (the veto cells) | 9 894 / 19 864 / 216 716 ns (bands 0.0618 / 0.0777 / 0.0400) |
-| worker 10 µs × W / 4W / 64W | 30 621 / 117 741 / 744 546 ns |
-| dispatcher 1 µs × W / 4W / 64W (the veto cells) | 5 109 / 15 320 / 203 087 ns (bands 0.0400 / 0.0745 / 0.1410) |
-| ECS wall N=4096, `par_in_system` / `par_from_dispatcher` | 20 545 000 / 20 535 000 ns |
-| ECS wall N=65536, `par_in_system` / `par_from_dispatcher` | 86 905 000 / 87 515 000 ns |
+**One sentence covers all four eliminations, and it is the finding rather than the verdict: on this
+pool the wake is not overhead, it is the parallelism.** Every rejected arm here trades wake BREADTH
+for wake COUNT. The saving each one makes is real and microscopic — a fence, an `idle` load,
+sometimes a CAS per push — and it is worth nothing against a lane that stayed parked. The measured
+loss tracks the remaining width almost exactly: 2 lanes give 2.00×, 10 lanes give 8.00×, 16 give 15×.
 
-⚠ **This reference is CS-2 and every axis-A number is CS-1.** A W or C row taken later must be taken
-against **this** reference or against a fresh one on the same code — not against any axis-A figure.
+⚠ **The winner is the exception that proves it.** `wc` is the only candidate of the five that does
+not touch the WORKER wake at all — it changes the JOINER's (one unpark per scope instead of one per
+completion). It measured a tie on all 35 comparable cells and was kept for a soundness reason, not a
+speed one.
 
-**The rule they would be judged by — §7 Steps W1/W2/C/F, quoted:**
+---
 
-> *"Keep the candidate only if (a) it regresses no 1 µs cell beyond 2× the band AND (b) it improves
-> at least one consumer or at least one grid cell beyond 2× the band."*
+## `wg` — W-b: wake iff the pre-push length was ≤ 1, plus the thief-residue cascade
 
-with the `wc` exception: *"kept if (a) holds and it is a tie everywhere — it removes one multi-writer
-RMW per task and closes the route-(b) lost-wakeup window — PROVIDED both its gates are green"* (a
-real-park loom M1c, and the route-(b) many-seeds Miri gate).
+**Was.** Two mechanisms under one flag. The push-side gate: a push wakes one worker only if the
+destination held at most one task immediately before it (`worker::wake_after_push`). The cascade: a
+thief left with residue in its own registered deque wakes one worker other than itself
+(`worker::wake_after_residue`, from `pop_global_injector` and `try_steal_random`). The cascade is
+where the O(log W) fan-out was supposed to live.
 
-**Reachability over `a3`:** the `compile_error!` matrix in `src/lib.rs` restricts **axis B only** to
-the A1 arms and imposes **no A-arm requirement** on `ke16-w-gate`, `ke16-w-count`, `ke16-c-batch` or
-`ke16-w-fanout`. That is the absence of a refusal, read from the source — **it was not confirmed by a
-build**, because no build was run for this document.
+**Flag / measured at.** `ke16-w-gate`. CS-4, HEAD `d51b4ced`, three interleaved passes.
 
-| id | Flag | What it is | Status |
-|---|---|---|---|
-| **`wg`** | `ke16-w-gate` | **Both** halves of W-b: a push wakes one worker **iff the destination queue held ≤ 1 task before the push**, AND a thief left with residue in its own registered deque wakes one worker **other than itself** (the self-excluding cascade, where the O(log₂ W) fan-out lives). Half of W-b must never carry W-b's label. | **OWED** |
-| **`wc`** | `ke16-w-count` | W-d′: count-gated completion — `ScopeShared.joiner_wake` (a `*const WakeHandle` into `PoolInner`-owned memory, **copied out before** the decrement), `pending.fetch_sub` first, unpark only on `prev == 1`. Removes one multi-writer RMW per task and closes the route-(b) lost-wakeup window; the external-joiner arm keeps today's order and its documented window. | **OWED** |
-| **`c1`** | `ke16-c-batch` | App-4 `Scope::spawn_batch(n, bodies)`: one `pending.fetch_add(n)` per wave, n insertions, the wake decision taken **once** right after the first push. Callers: `Query::par_iter`, `par_chunk`, the three physics dispatches. | **OWED** |
-| **`c1f`** | `ke16-w-fanout` (implies `ke16-c-batch`) | W-f: at the batch's first push, one `publish_fence` then up to `n` claim+unpark rounds over **one entry snapshot** of the idle mask — `min(n, popcount(idle))` unparks instead of one plus the cascade. The fan-out **obeys** the ≤ 1 gate; it changes the WIDTH of a wake, never whether one is owed. | **OWED**; §7 Step C rule 3: not measured at all unless `c1` is kept |
+**Eliminated by.** Step W rule 1 on BOTH clauses: it regresses `worker/body_1us_tasks_64w` by
+**× 1.42** (a 1 µs cell, clause (a)) and improves **nothing anywhere** (clause (b)). 13 of 38 cells
+regress, 0 improve.
 
-**⚠ The `c1` caveat, which must travel with any future C row.** `ke16-c-batch` alone takes a wave from
-the `min(n, popcount(idle))` lanes the per-task baseline wakes down to **two**, because the wave's one
-decision activates one sibling and the re-fanning cascade belongs to `ke16-w-gate`. So **a `c1`-alone
-row against `c0` does not isolate App-4's accounting** — measure `c1` on top of `wg` or `c1f`. (The
-sibling rule *"no `c1`/`c1f` row may be filed from a build that also enables `ke16-a5`"* is moot:
-`a5` lost.)
+**The number that actually decided it is an occupancy integer, not a time.** The ECS protocol pass
+reports `max_in_flight` = **5–6 of 16** with the speedup pinned at **2.00× in every pass**, against
+the reference's 16 and 13.9–15.7×. W-b does not make the pool slower by adding work; it leaves ten
+lanes parked. On a wave pushed to one destination only the first two pushes see a `pre_len` of 0 and
+1, so two workers are woken, and the cascade restores width one unpark-round at a time — too late
+for the wave. Worst on the `× W` cells: `dispatcher/body_1ms_tasks_w` × 5.51,
+`dispatcher/body_100us_tasks_w` × 4.69, `worker/body_100us_tasks_w` × 3.66.
 
-**RETURN CONDITION — these are not returns, they are RUNS THAT ARE OWED.** The condition is a machine
-the owner is not using, or the interleaving discipline of §4 applied to each pair. Everything needed
-exists: the arms are built, the reference is taken and preserved, and the rules are written.
+⚠ **`KE16-DESIGN-W.md` §2.4 named this outcome as its own risk clause, on exactly these cells** —
+*"the 100 µs–1 ms × W cells, where the chain's 4 hops of Windows wake latency plus the one-body stall
+may exceed the W serial unparks the spawner paid before"* — and predicted the GAIN at
+1 µs × {4W, 64W}, which measured a tie and a regression. Both halves of the prediction failed in the
+same direction.
+
+**RETURN CONDITION.** Reconsider **if the pool ever gains a wake mechanism whose width does not
+depend on a serial cascade** — an eventcount or a futex-style broadcast that wakes `k` lanes in one
+call. W-b's arithmetic is sound; its cascade is what cannot keep up. A second, independent trigger:
+**if the body sizes the consumers produce ever move below ~1 µs**, where the per-push fence and
+`idle` load stop being negligible against the body. Neither is a wish: both are facts about the
+world that could change.
+
+---
+
+## `wgc` — W-b and W-d′ together
+
+**Was.** `ke16-w-gate` + `ke16-w-count`, measured because the design declares the axes composable.
+
+**Eliminated by.** 14 of 38 cells regress, 0 improve — `wg`'s profile essentially unchanged, which is
+the expected reading given `wc` measured a tie on its own. It additionally regresses
+`dispatcher/body_1us_tasks_64w` × 1.51.
+
+**RETURN CONDITION.** **CLOSED as a pair.** It has no independent existence: it returns if and only
+if `wg` returns, and then only as `wg` composed with the shipped `wc`.
+
+---
+
+## `c1` — App-4: `Scope::spawn_batch`, one `pending.fetch_add(n)` per wave
+
+**Was.** One `pending` RMW per wave instead of `n`; `n` insertions of which the first is
+`push_task_no_wake` and the rest `push_task_silent`; the wave's single wake decision taken right
+after the first push. Callers reach it through the `KE16_SPAWN_BATCH` const — `Query::par_iter` /
+`par_chunk` and the physics colored / soft / emit dispatches.
+
+**Flag / measured at.** `ke16-c-batch`. CS-4, HEAD `7ccab360`, three interleaved passes over
+`{c0, c1, c1f}`.
+
+**Eliminated by.** Rule 1 clause (b): **0 improvements** on 38 cells, 6 regressions. Physics
+`in_scheduled_system` **× 1.52** against a 4.3 % band; ECS `par_in_system/65536` **× 7.38**.
+
+**The occupancy integer is this arm's own source comment read back.**
+`src/scope.rs::Scope::wake_for_wave` says a build with `ke16-c-batch` alone takes a wave *"down to
+the spawner plus ONE, with the rest asleep for the whole wave"*. Measured: **`max_in_flight` = 2 of
+16**, in all three passes, speedup pinned at 2.00×. Not about two — two.
+
+⚠ **The `pending` saving is real and was never the problem.** One `fetch_add` per wave against `n`
+is a genuine reduction in multi-writer RMW traffic. It is invisible because the same change collapses
+the wave's wake width, and a parked lane costs orders of magnitude more than a contended increment.
+
+**RETURN CONDITION.** Reconsider **if the wave's wake width is ever decoupled from the wave's push
+count** — i.e. if the pool gains a wake primitive that activates `min(n, idle)` lanes in ONE
+operation, without a per-push decision and without a cascade. `c1f` below is the closest attempt in
+this tree and it reaches only ~10 of 16. Concretely: **if `max_in_flight` under `c1f` ever reads 16 at
+N = 65536**, this row is worth re-measuring, because at that point App-4's accounting would be the
+only thing left in the delta.
+
+---
+
+## `c1f` — W-f: fan-out over one snapshot of the idle mask at the batch's first push
+
+**Was.** `worker::wake_up_to` — one `publish_fence` then at most `n` claim+unpark rounds over ONE
+entry snapshot of the idle mask, i.e. `min(n, popcount(idle))` unparks instead of one wake plus
+W-b's cascade. Implies `ke16-c-batch`; obeys the W gate rather than being exempt from it.
+
+**Flag / measured at.** `ke16-w-fanout`. CS-4, HEAD `7ccab360`, same three passes.
+
+**Eliminated by.** Rule 1 clause (b): **0 improvements**, 5 regressions. Physics
+`in_scheduled_system` × 1.24; ECS `par_in_system/65536` × 1.86.
+
+**It works, and it is still not enough.** `max_in_flight` goes 2 → **9–10 of 16**, speedup 2.00 →
+**7.95–8.00×**. The single snapshot is the limit: a fan-out taken at the wave's first push reaches
+only the siblings already parked at that instant, which on these shapes is about half of them.
+
+⚠ **THIS ROW EXISTS BECAUSE THE PROTOCOL'S OWN RULE 3 WOULD HAVE PREVENTED IT.** §7 Steps W/C rule 3
+says *"`c1` not kept ⇒ `c1f` is not measured"*, on the premise that `c1` is the mechanism and `c1f` a
+width refinement. That premise is false here — `c1` alone is App-4's accounting MINUS up to W/2
+lanes — and the design had escalated the resulting fork as a design call, offering two ways to make a
+`c1` row interpretable: over `ke16-w-gate`'s cascade, or over `ke16-w-fanout`. **The W step deleted
+the first.** Applying rule 3 literally would have filed *"App-4 rejected"*; the pair shows
+*"App-4's accounting is invisible under every wake width this tree can build"*, which is the
+statement a future reader needs.
+
+**RETURN CONDITION.** Same as `c1`'s and inseparable from it: reconsider **if a wake primitive
+appears that reaches all idle lanes from one operation**. A cheaper partial trigger, testable without
+new primitives: **if re-reading the idle mask per round is ever shown not to double-wake** — the
+single snapshot is there to bound the unpark count, and a correct re-read would raise the ceiling
+above ~10. That is a soundness question with a definite answer, not a preference.
+
+
 
 ---
 
@@ -468,27 +552,40 @@ argues from the instrument that lost.
 
 | Candidate | Flag | Code state | Status | The number | Return condition |
 |---|---|---|---|---|---|
-| `a1f` | `ke16-a1-fifo` | CS-1 | REJECTED (rule 2) | physics 13.640 vs `a3` 11.709 ms, ranges disjoint; deciding cell 159 470 vs 114 960 ns | **RETURNABLE, first priority** — any change to steal granularity (batch cap, steal-half, `ke16-c-batch`) voids the measurement |
+| `a1f` | `ke16-a1-fifo` | CS-1 → **CS-4** | ⚠ **RETURNED 2026-09-08** | ALONE it still loses (0 improved, 5 regressed at CS-4). But it is the only placement `b1` builds over, and `a1f+b1` beats the shipped `a3+b0+wc+c0` on 10 of 35 cells — deciding cell 55.6 vs 117.8 µs | **CONDITION MET.** It returned exactly as written: on the arm below becoming reachable |
 | `a1` | `ke16-a1` | CS-1 | REJECTED (rule 2) | physics 16.411 vs 10.354 ms = 58.50 % against a 26.96 % threshold | **RETURNABLE, second** — re-measure in a session with `O5` spread ≤ 1 % and a same-session `a0` control |
 | `a2` | `ke16-a2` | CS-1 | REJECTED (rule 3) | worker `10us_4W` 182 993.5 vs 111 278.65 ns = 1.6445×, 8× the threshold | **RETURNABLE, conditional** — an A1-specific UB **and** an `a3` gate failure; or the ECS wall-vs-criterion dispute settled and the 1.6445× closed in `a3`'s session |
 | `a5` | `ke16-a5` | CS-1 | REJECTED (rule 2) | physics 11.784 vs 10.354 ms = 13.81 % against 8.00 % | **RETURNABLE** — **if the App-12 timer guard ships**; nothing else about `a5` should be reconsidered without it |
-| `b1` | `ke16-b1` | — | **NEVER MEASURED — cannot build over `a3`** | `compile_error!`; `cargo check --features ke16-a3,ke16-b1` exits 101 | an A arm with a **registered worker deque** wins axis A (i.e. `a1`/`a1f`), or defect B is fixed by another route that gives the joiner a registered destination |
-| `b3` | `ke16-b3` | — | **NEVER MEASURED — cannot build over `a3`** | same refusal | same |
-| `wg` | `ke16-w-gate` | CS-2 ref only | **NOT MEASURED — OWED** | — | a quiet machine or interleaved passes; reference exists |
-| `wc` | `ke16-w-count` | CS-2 ref only | **NOT MEASURED — OWED** | — | same, plus its two gates (real-park loom M1c, route-(b) many-seeds Miri) |
-| `c1` | `ke16-c-batch` | CS-2 ref only | **NOT MEASURED — OWED** | — | same; must be measured **on top of `wg` or as `c1f`**, never alone against `c0` |
-| `c1f` | `ke16-w-fanout` | CS-2 ref only | **NOT MEASURED — OWED** | — | same, and only if `c1` is kept (§7 Step C rule 3) |
+| `b1` | `ke16-b1` | **CS-4** | ⚠ **RETURNED AND WINNING 2026-09-08** | over `a1f`: the deciding cell 2.12× faster than shipped, 4W cells 2.4–3.8×, both consumers a tie, `top_lane` 4 against 13/24/21 — defect B's signature GONE. Full §8 gate ladder green | **CONDITION MET, by the second clause.** `KE16-DESIGN-B4.md` BLOCKING 3 predicted this fires; it was tested BEFORE writing the remedy and it fired |
+| `b3` | `ke16-b3` | — | **NOT MEASURED — now reachable** | same refusal lifted with `a1f`; it differs from `b1` only in the external joiner's policy (park vs help) | **OWED**: rule 2 of Step B decides `b3` vs `b1` on the dispatcher-route 100 µs and 1 ms × 4W cells. `b1` is measured; `b3` is not |
+| `wg` | `ke16-w-gate` | CS-4 | REJECTED (rule 1, both clauses) | 13 of 38 cells regress, 0 improve; `max_in_flight` **5–6 of 16**, speedup pinned 2.00× | a wake mechanism whose width does not depend on a serial cascade (eventcount / futex broadcast); or consumer bodies below ~1 µs |
+| `wgc` | `ke16-w-gate,ke16-w-count` | CS-4 | REJECTED (rule 1) | 14 of 38 regress, 0 improve — `wg`'s profile, `wc` being a tie | **CLOSED as a pair** — returns iff `wg` returns |
+| `wc` | `ke16-w-count` | CS-4 | ✅ **KEPT — W\*** | tie on all 35 comparable cells, re-tested on clean data: 0 regressions; both gates green | — (shipped) |
+| `c1` | `ke16-c-batch` | CS-4 | REJECTED (rule 1, clause b) | 0 improvements, 6 regressions; `max_in_flight` **2 of 16** — the arm's own source comment, measured | the wave's wake width decoupled from its push count; concretely, `c1f` reading `max_in_flight` = 16 at N = 65536 |
+| `c1f` | `ke16-w-fanout` | CS-4 | REJECTED (rule 1, clause b) | 0 improvements, 5 regressions; recovers 2 → **9–10 of 16**, 8.00×, still × 1.86 | same as `c1`, inseparable; or a per-round idle re-read shown not to double-wake |
 
-**No row in this file is CLOSED.** Every one carries a fact about the world that could change.
+**No row in this file is CLOSED.** Every one carries a fact about the world that could change — and
+on 2026-09-08 two of them CHANGED. `b1`'s return condition named its own trigger and the trigger
+fired; `a1f` came back with it, because it is the only placement `b1` builds over. **A register
+whose rows can return is worth keeping only if somebody eventually tests the condition. This one was
+tested, and it cost the campaign its axis-A verdict.**
 
 ---
 
 # §6. What is owed before the flags are deleted
 
-1. **Commit and tag the arms.** They exist only as 7661 uncommitted insertions at HEAD `4a363678`;
-   no `ke16*` tag exists. Without the tag, deleting the flags deletes the implementations.
-2. **Axes W and C** — `wg`, `wc`, `c1`, `c1f` against the preserved CS-2 reference.
-3. **The App step** — a re-take on the **unconditional** code after feature removal (CS-3). The
-   design requires the numbers on record to come from the code that ships, and **no number anywhere
-   in this campaign does**. It has not been run.
-4. **Defect B on the frame path** — live under the shipped winner, with no remedy in this pass.
+1. ✅ **Commit and tag the arms — DONE.** `897c812f`, tagged `ke16/candidates-frozen-2026-09-07`.
+   ⚠ That commit predates stage 3b, so a recovered arm is written against the old task path; the
+   removal commit's parent gets its own tag for the shipped one.
+2. ✅ **Axes W and C — MEASURED 2026-09-08 at CS-4.** W closed on `wc`, C on `c0`; the four rejected
+   arms are §3 above.
+3. **The App step — STILL OWED.** A re-take on the **unconditional** code after feature removal
+   (CS-3). The design requires the numbers on record to come from the code that ships, and **no
+   number anywhere in this campaign does**. It has not been run.
+4. **Defect B on the frame path — STILL LIVE** under the shipped winner, at 192.1 ms against a 60 ms
+   budget. ⚠ Its remedy is not local: `KE16-DESIGN-B4.md` BLOCKING 3 shows that fixing B by any route
+   giving the worker joiner a registered destination deque fires the `b1`/`b3` return row above, and
+   those build only over `a1`/`a1f` — so the comparison becomes `a3+b4` vs **`a1f+b1`**, and the
+   axis-A closure is re-opened until that is measured.
+5. **A physics ranking for axis W — owed but NOT on the critical path.** W\* was fixed by gates
+   rather than by numbers, and Step App re-takes every consumer row anyway.

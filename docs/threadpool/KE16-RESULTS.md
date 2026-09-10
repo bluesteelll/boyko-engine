@@ -8,10 +8,10 @@ table in `KE16-DESIGN.md`.
 | Step | State | Where |
 |---|---|---|
 | 0 | MEASURED — baseline `a0+b0+w0+c0`, 24-cell grid ×3 runs, ECS at both populations, five physics rows, per-cell band | §0, §Band |
-| A | **CLOSED ON `a3`** — five arms measured, then the deciding pair re-measured interleaved in ONE session | §A |
-| B | **B0 BY CONSTRUCTION, NOT BY MEASUREMENT** — `b1`/`b3` do not compile over `a3` | §B |
-| W1, W2 | **NOT MEASURED — OWED.** Only the reference `a3+b0+w0+c0` was taken | §W, §Owed |
-| C, F | **NOT MEASURED — OWED** | §W, §Owed |
+| A | ⚠ **RE-OPENED 2026-09-08 — the closure on `a3` is VOID.** `a1f+b1` beats the shipped configuration on 10 of 35 cells (the deciding cell by 2.1×), ties both consumers, and its §8 gate ladder is green. The 64W tiebreak that saves `a3` fires on a width the engine's own chunking cannot produce | §A, **§A-RE** |
+| B | CLOSED ON `b1` 2026-09-08. `b0` eliminated (8 cells to 0); `b3` improves nothing over `b1` and regresses `dispatcher/10us x W` by 1.43x — it parks an external joiner that had nothing else to do. But `b3` leads physics in 2 of 3 paired passes: ONE GLOBAL FLAG HAS OPPOSITE CORRECT ANSWERS FOR DIFFERENT CALLERS | §B, §B-RE |
+| W1, W2 | **CLOSED ON `wc` 2026-09-08 at CS-4.** `wg` and `wgc` ELIMINATED (0 improvements, 13 and 14 regressions, and an occupancy receipt: 5–6 of 16 lanes, speedup pinned at 2.00×). `wc` is a tie on all 38 cells and rule 2's two gates — a real-park loom M1c and the route-(b) 32-seed liveness gate — are GREEN, so **W\* = `wc`**. ⚠ No physics ranking is filed: the passes carry a monotone warm-up drift and the PRIMARY row's band is 85 % | §W |
+| C, F | **CLOSED ON `c0` 2026-09-08.** Both arms DROPPED — neither improves anything anywhere; `c1` runs the wave on **2 of 16 lanes**, `c1f` on 9–10 and still loses 1.86×. Measured as a PAIR, departing from rule 3 with the number that forces it. **Final: `a3+b0+wc+c0`** | §C |
 | App | **NOT RUN — OWED.** No number here comes from the unconditional shipped code | §App, §Owed |
 
 This file exists because the tournament ran for weeks and produced no written result. Everything
@@ -157,6 +157,13 @@ them compares across a rewrite without knowing it.
 | **CS-1** | AFTER the `complete_task` protector fix (`complete_task` takes `*const Self`), **BEFORE** Stage 1 of the task representation | Step 0 baseline; axis A's five arms `a0/a1/a1f/a2/a3/a5`; the `a3`-vs-`a1f` head-to-head that closed axis A |
 | **CS-2** | AFTER Stage 1 — the queue element is now `Task { payload: *const (), execute: unsafe fn(*const ()) }` | The axis-W/C reference `a3+b0+w0+c0` (49 rows); the Stage-1 structural certification |
 | **CS-3** | The unconditional code after feature removal | **NOTHING. Step App has not been run.** |
+| **CS-4** | AFTER stage 3b (`d51b4ced`) — the scoped task cell is emplaced into a per-scope `ScopeBlock` and released by one `free_all` in `Scope::drop`, instead of one `alloc`/`dealloc` per task | **Step W**: the re-taken reference `a3+b0+w0+c0` and the three W arms, 3 interleaved passes (§W below) |
+
+⚠ **CS-4 is why §W's reference was RE-TAKEN rather than read off the CS-2 table.** The 49-row CS-2
+reference describes a tree in which every spawned task carried its own heap allocation; stage 3b
+removed that from the scoped path. Comparing a CS-4 arm against the CS-2 reference would be exactly
+the mixing this section exists to forbid. The CS-2 numbers stay below, unchanged, and are not
+comparable to §W's.
 
 ### Stage 1's measured effect on the task path
 
@@ -570,6 +577,309 @@ grid, whose session-stability was verified to < 1 % on 22 of 24 cells.
 
 ---
 
+---
+
+## §A-RE. THE AXIS-A CLOSURE IS VOID — `a1f+b1` beats the shipped configuration (2026-09-08, CS-4)
+
+### Why this was run, and why it was run FIRST
+
+`KE16-DESIGN-B4.md` BLOCKING 3 established that fixing defect B by any route that gives the worker
+joiner a registered destination deque fires `b1`/`b3`'s **second** return trigger
+(`KE16-REJECTED.md`), and that those arms build only over `a1`/`a1f` — so the comparison the remedy
+owes is `a3+b4` vs **`a1f+b1`**, not vs `a3+b0`. It described that re-run as the price paid **after**
+B4-1 is written.
+
+**It does not have to be.** `a1f` and `b1` are both already implemented arms, so *"does `a1f+b1`
+beat the shipped `a3`?"* is answerable with no new code at all. Taking it first turns a design
+blocker into a measured fact — and the fact is that the blocker fires.
+
+Three interleaved passes over `{a3+b0+wc+c0, a1f+b0+wc+c0, a1f+b1+wc+c0}` at CS-4 after
+`--prebuild`; no `DIRTY-PASS.txt`; per-arm load receipts 0.1–9.8 % CPU with one 17.9 % excursion.
+35 comparable cells (the three `park_timeout` rows are excluded — they are a property of the box).
+
+### The result — the CS-4 record (2026-09-08), REPLAYED 2026-09-09 at the same commit `5863b041`
+
+⚠ **Read the replay columns, not the struck ones.** On 2026-09-09 the Step App take at HEAD read
+`worker/body_1us_tasks_64W` at 1.146 ms against this table's 109.5 µs — 10.5× — and the same-night
+replay of all three arms AT THIS COMMIT, feature builds, arm witness printed per run, two interleaved
+passes, load receipts 0–13 % CPU, reproduced the deciding cell's ratio and NOT the 1 µs row. Every
+struck number below is the CS-4 record; the value beside it is the replay (p1 / p2). The 11 consumer
+cells were NOT re-taken per arm and carry the record. The full 35-cell CS-4 reduction survives only
+in a session scratchpad (`a_rejudge_table.md`, 10:15) — its raw passes, receipts and criterion
+baselines were never committed and no longer exist.
+
+| | improved | regressed | tie |
+|---|---|---|---|
+| `a1f+b0` vs shipped | ~~**0**~~ **8** of 24 grid cells | ~~5~~ **6** — all six 1 µs cells | ~~30~~ 10 — plus the 11 consumer cells carried from CS-4 (physics 1.21× REG, ECS tie; NOT re-taken) |
+| **`a1f+b1` vs shipped** | ~~**10**~~ **12** of 24 grid cells | ~~**2**~~ **6** — all six 1 µs cells | ~~23~~ 6 — plus the 11 consumer cells carried from CS-4 (both consumers tie; NOT re-taken) |
+
+Replay rule: §4 band on the median of the two passes, band = max(4 %, either arm's p1↔p2 spread),
+2×band margin; every verdict is identical when each pass is judged alone. The CS-4 counts were over
+35 cells in three passes; the replay grid is 24 cells in two.
+
+| cell | shipped `a3+b0+wc+c0` | `a1f+b0` | `a1f+b1` |
+|---|---:|---:|---:|
+| `worker/body_10us_tasks_4W` **the deciding cell** | ~~117.8 µs~~ 175.7 / 178.9 µs | ~~162.4 µs (1.38×)~~ 125.1 / 125.2 µs (**0.71×, IMP**) | ~~**55.6 µs (0.47×)**~~ **76.5 / 72.6 µs (0.42×, IMP)** |
+| `worker/body_100us_tasks_4W` | ~~1.71 ms~~ 1.616 / 1.597 ms | ~~1.98 ms~~ 1.882 / 1.724 ms (1.12×, tie at band 9.2 %) | ~~**0.44 ms (0.26×)**~~ **440.0 / 438.4 µs (0.27×, IMP)** |
+| `worker/body_1ms_tasks_4W` | ~~14.74 ms~~ 13.341 / 12.975 ms | ~~19.50 ms~~ 14.145 / 19.663 ms (1.29×, tie at band 39 %) | ~~**4.44 ms (0.30×)**~~ **4.223 / 4.144 ms (0.32×, IMP)** |
+| `dispatcher/body_100us_tasks_4W` | ~~1.65 ms~~ 1.708 / 1.706 ms | ~~1.63 ms~~ 1.516 / 1.483 ms (0.88×, IMP) | ~~**0.43 ms (0.26×)**~~ **435.8 / 437.3 µs (0.26×, IMP)** |
+| `dispatcher/body_10us_tasks_4W` | ~~128.4 µs~~ 187.4 / 196.8 µs | ~~122.5 µs~~ 177.9 / 184.1 µs (0.94×, tie) | ~~**47.4 µs (0.37×)**~~ **66.1 / 61.9 µs (0.33×, IMP)** |
+| physics `in_scheduled_system` | 8.78 ms (CS-4; NOT re-taken per arm) | 10.63 ms (1.21×) (CS-4; NOT re-taken) | 8.46 ms (tie) (CS-4; NOT re-taken — HEAD `90a995e8` reads 12.595 / 12.142 ms, §App) |
+| ecs `par_in_system/65536` | 87.90 ms (CS-4; NOT re-taken per arm) | 91.74 ms (CS-4; NOT re-taken) | 87.58 ms (tie) (CS-4; NOT re-taken — HEAD reads 94.007 / 86.246 ms, §App) |
+| `worker/body_1us_tasks_W` | ~~7.5 µs~~ 18.0 / 18.0 µs | ~~7.9 µs~~ 43.1 / 41.8 µs (**2.36×, REG**) | ~~7.6 µs (tie)~~ 33.6 / 32.8 µs (**1.84×, REG**) |
+| `worker/body_1us_tasks_4W` | ~~12.3 µs~~ 31.6 / 31.4 µs | ~~14.9 µs~~ 98.3 / 95.2 µs (**3.07×, REG**) | ~~14.4 µs (**1.17×**)~~ **89.0 / 86.7 µs (2.79×, REG)** |
+| `worker/body_1us_tasks_64W` | ~~80.5 µs~~ 99.9 / 100.6 µs | ~~110.3 µs~~ 1.184 / 1.148 ms (**11.6×, REG**) | ~~109.5 µs (**1.36×**)~~ **1.170 ms / 444.0 µs (8.05× on the median; 11.7× / 4.41× per pass, REG either way; p2 MAD/median 0.532 — BIMODAL)** |
+| `dispatcher/body_1us_tasks_W` | ~~4.2 µs~~ 15.3 / 15.7 µs | ~~4.3 µs~~ 23.5 / 23.8 µs (1.53×, REG) | ~~4.1 µs~~ 26.9 / 26.9 µs (1.74×, REG) |
+| `dispatcher/body_1us_tasks_4W` | ~~10.1 µs~~ 31.1 / 30.8 µs | ~~9.9 µs~~ 48.7 / 50.4 µs (1.60×, REG) | ~~10.2 µs~~ 53.9 / 51.3 µs (1.70×, REG) |
+| `dispatcher/body_1us_tasks_64W` | ~~82.3 µs~~ 115.1 / 100.0 µs | ~~90.6 µs~~ 547.0 / 537.6 µs (5.04×, REG) | ~~86.7 µs~~ 539.9 / 501.6 µs (4.84×, REG) |
+
+**BLOCKING 3's threshold was a 27.9 % gain on the deciding cell. The measurement is ~~53 %~~ 53 % at
+CS-4 (0.47×) and 58 % in the replay (0.42×) — the verdict on that cell REPRODUCES.**
+
+~~**The win is `b1`'s, not the placement's.** `a1f` alone improves nothing and regresses five cells
+including the physics primary at 1.21×. The challenger wins *despite* its placement, on a joiner
+that takes work instead of waiting.~~
+
+**The mid-body win is `b1`'s** — `a1f+b0` never beats `a1f+b1` on a 4W cell at ≥ 10 µs — **but
+"`a1f` alone improves nothing" is RETRACTED by the replay:** `a1f+b0` improves 8 of 24 grid cells
+against `a3` (every `tasks = W` cell at ≥ 10 µs on both routes, plus worker 10 µs × 4W and
+dispatcher 100 µs × 4W), regresses 6 and ties 10. The physics 1.21× stands as recorded; it was not
+re-taken per arm. **And the 1 µs regression belongs to the PLACEMENT, not the joiner:** at
+1 µs × 64W `a1f+b0` reads 1.184 / 1.148 ms and `a1f+b1` 1.170 ms / 444 µs against `a3`'s
+99.9 / 100.6 µs.
+
+### ⚠⚠ REPLAY FINDING — both `a1f` arms read the DEFECT-A SERIAL FLOOR at 1 µs × {4W, 64W}, and the shipped HEAD never leaves it
+
+1 µs × 64W: the floor is 1,024 tasks × 1 µs = 1,024 µs; `a0` — measured exactly serial at Step 0 —
+read this cell at 1,168.6 / 1,135.8 µs (§Band). In the replay `a1f+b0` reads 1,184 / 1,148 µs,
+`a1f+b1` 1,170 µs (p1), and the unconditional HEAD `90a995e8` reads 1.147 / 1.146 / 1.164 / 1.161 /
+1.159 / 1.200 / 1.173 ms over seven runs — never the 444 µs mode the feature build hit once in nine.
+`a3` reads 99.9 / 100.6 µs on the same cell (≥ 10 lanes). 1 µs × 4W: floor 64 µs; `a0` 106.9 /
+97.6 µs; `a1f+b1` 89.0 / 86.7 µs — at `a0`'s reading; `a3` 31.6 / 31.4 µs (≈ 2 lanes). The collapse
+is confined to the 1 µs body: at 10 µs × 4W (floor 640 µs) `a1f+b1` reads 76.5 / 72.6 µs, ≥ 8.4
+lanes. At CS-4 the same arm at the same commit read 14.4 µs and 109.5 µs on these two cells —
+parallel — and so did every other arm on every 1 µs cell, on both routes, with the band at its 4 %
+floor.
+
+**MECHANISM 2026-09-10 03:00 — see `RUSTC-198-WINDOWS-GNU-TLS.md`:** every `thread_local!` read under
+rustc ≥ 1.98.0 on windows-gnu executes two contended RMWs on a process-global line plus a
+`FlsSetValue` call; `worker_lane_for` is two such reads per spawn and the thief's epoch pin two per
+victim; `a3` reads no TLS on its paths. **CAUSE DETERMINED 2026-09-10 02:00 — rustc 1.98.1.** Rebuilt at this commit with the winning
+features under **rustc 1.97.1** (the compiler the CS-4 record was built with; the stable toolchain
+was rewritten to 1.98.1 on 2026-09-09 02:52), on a box the owner had just called not quiet:
+`worker/body_1us_tasks_64W` **99.3 / 105.0 / 132.7 µs** — the record's 109.5 µs reproduces — against
+1,170–1,215 µs from the same source under 1.98.1 in this session. `a3` reads 128–166 µs under 1.97.1
+and 100 µs under 1.98.1: the compiler moves the `a1f` path ~11× and `a3`'s not at all. The deciding
+cell reads 0.4–0.5 under both, so the verdict stands under both. Every shipped binary since 09-09 is
+1.98.1: **this is a shipped codegen regression on the pool's fine-granularity path**, and the two
+causal stories that preceded it in `OPEN-QUESTIONS.md` (wake latency, warm box) were measured
+wrong. What was true before the compiler was found — three candidates EXCLUDED on measurement: the Step App removal
+(the ancestor with the winning features reads the same floor); the box's compute speed
+(`ecs seq/65536` agrees with every recorded session to 0.014 %); and timer resolution (the bench's
+own 50 µs park probe swung 756–15,006 µs across runs while this cell held 1.15–1.20 ms). A
+line-by-line reading of the wake path, the thief's sweep and both joiners (a Fable pass, refuted
+and re-verified) finds no pool source line that produces a serial wave: the wake claims-then-unparks
+in one call, the woken loop re-sweeps every registered stealer with an unbounded `Retry` loop, and
+the `b0` joiner never pops its own deque — so the design's owner-vs-thief CAS storm
+(`KE16-DESIGN-A.md` §1.4) is ABSENT from the arm that is stably serial. Two facts point OUTSIDE the
+pool's source: the dispatcher-route 1 µs cells run near-identical code under `a3` and `a1f` (one
+TLS read differs) yet read 100 vs 540 µs; and the same session elevates EVERY wake-bound cell
+arm-independently — `a3`'s own 1 µs × W cells 2.4–3.8× their §C values, `empty_schedule_control`
+6.3–7.6× its five recorded values — while `a3`'s ≥ 100 µs × 64W cells reproduce §C within 1 %. The
+`ecs seq` receipt is a COMPUTE receipt, not a scheduling-latency receipt. The shape is: a per-process,
+body-duration-gated property of the session, present in every arm, to which the `a1f` placement is
+an order of magnitude more sensitive than `a3`. The discriminating tests are filed in
+`docs/OPEN-QUESTIONS.md` (2026-09-10) and are OWED before the cost can be called off the hot path.
+
+**And the same arm fixes defect B.** The occupancy gate under `a1f+b1` reads `top_lane = 4` at both
+W = 4 / 16 tasks and W = 16 / 64 tasks, against a rule-3 budget of `2 × tasks/W` = 8 — and against
+the `top_lane = 13/24/21` recorded for `a1+b0`, *"defect B's self-steal signature promoted onto the
+worker route"*. The signature is gone, measured rather than argued.
+
+### ⚠ THE LETTER OF STEP-A RULE 3 SAVES `a3`, AND THE LETTER IS WRONG HERE
+
+Rule 2 ranks by physics: 8.78 vs 8.46 ms against an 8.4 % band — a tie, so rule 3 applies. Rule 3
+compares the 1 µs and 10 µs WORKER-route cells pairwise in both directions; each arm regresses the
+other, so *"the 64W column decides"*. In that column at 1 µs, `a3` wins (80.5 vs 109.5 µs).
+
+**By the letter, the closure survives on one cell out of thirty-five.** It should not, and the
+reason is a fact about the engine rather than a preference:
+
+* **The default batching strategy is `batches_per_thread = 1`**
+  (`boyko_ecs/.../par_iter.rs`), so `chunk_size = entity_count / worker_count` and an archetype
+  splits into **exactly `W` chunks — one per worker**. Not 4W. Not 64W.
+* **`MIN_ARCHETYPE_FOR_PARALLEL = 1024`**, so a chunk is at least 1024 rows. Reaching a 1 µs body
+  would need a row to cost under a nanosecond. The ECS harness's real chunk is **~82 ms**.
+
+⇒ **The 64W column that decides rule 3 is a width the engine's own chunking cannot produce, at a
+body size its own minimum chunk cannot reach.** The tiebreak was written to separate `a1` from
+`a1f` — two arms differing in end discipline, where the steal path genuinely dominates at 64W. It is
+being asked here to adjudicate two configurations differing by an entire axis-B mechanism, and it
+discards a 2–4× win across the mid-body range on the strength of one unreachable cell.
+
+### ⚠ CORRECTION 2026-09-10 — the "width the engine cannot produce" argument covers the ECS path and NOT the physics consumer
+
+The two ECS bullets above stand (`batches_per_thread = 1`, `MIN_ARCHETYPE_FOR_PARALLEL = 1024`,
+`par_iter.rs:73,104`). The physics claim does not: `solver/colored.rs:2647` dispatches
+`n_chunks = num_threads() × CHUNKS_PER_WORKER = 16 × 6 = 96 = 6W` chunks per colour of ≥ 256 slots,
+per sweep; with `substeps = 4` and `relax_iterations = 2` (`resources.rs:424-425`) a step runs
+12 sweeps × 6 colours = up to 72 waves of 96 tasks, ~6,900 tasks, spawned from inside a worker (the
+scheduled system's `install` frame). The soft solver is 6W (`soft/colored.rs:65,998`), the broadphase
+4W (`resources.rs:598,1586`), the MSDF bake 4W (`fontbake/.../distance.rs:468`). The body per physics
+chunk is roughly `single_threaded_O5` ÷ 12 ÷ 6 ÷ 96 ≈ 3.9 µs under a UNIFORM split — an estimate, not
+a bound: the per-colour slot distribution is on record nowhere (the bench prints only the widest
+colour), and a colour at the 256-slot threshold cut 96 ways is ~3 slots per chunk. **The shipped
+physics shape — ~6W wide, 1–10 µs bodies, from a worker — sits between the grid's 1 µs × 4W cell,
+where `a1f+b1` is at the serial floor, and its 10 µs × 4W cell, where it wins 2.4×.** The 64W column
+remains unproduced; 4W and 6W are produced by three physics sites and the bake, and the sentence
+"4W is reachable only by a caller that sets `batches_per_thread = 4` … nothing uses it" is false.
+
+~~**On the column the engine DOES produce — `tasks = W` — `a1f+b1` wins at every body size, on both
+routes, and the margin grows with the body:**~~ **On `tasks = W`, `a1f+b1` wins at every body size
+≥ 10 µs on both routes and LOSES at 1 µs on both** (CS-4 struck, replay beside):
+
+| body | worker `tasks=W` | dispatcher `tasks=W` |
+|---|---:|---:|
+| 1 µs | ~~1.02× (tie)~~ **1.84× REG** | ~~0.98×~~ **1.74× REG** |
+| 10 µs | ~~0.89×~~ 0.64× | ~~0.92×~~ 0.52× |
+| 100 µs | ~~0.84×~~ 0.37× | ~~0.91×~~ 0.33× |
+| 1 ms | ~~**0.81×**~~ **0.42×** | ~~0.89×~~ 0.29× |
+
+⚠ The replay ratios at ≥ 10 µs are wider than CS-4's because `a3`'s `tasks = W` cells read 2.0–2.9×
+their §C values in this session (10 µs × W 71.9 vs 27.0 µs; 100 µs × W 391 vs 156 µs; 1 ms × W
+2,594 vs 1,310 µs) while its ≥ 100 µs × 64W cells reproduce §C within 1 %. Why `a3`'s W-width cells
+moved is UNVERIFIED — it is the same arm-independent, wake-bound elevation named above.
+
+That monotonicity is the mechanism showing itself: the longer the wave, the more a joiner that helps
+is worth against one that waits.
+
+**Consequence for the decision, re-applied 2026-09-10.** Under the amended Step-A rules the closure
+on `a1f+b1` STANDS: rule 2 is a consumer tie carried from CS-4; amended rule 3 at `tasks = W` is
+mutual (1 µs 1.84× against `a1f+b1`, 10 µs 0.64× against `a3`) and the producible column goes
+6 improved / 2 regressed to `a1f+b1`. Under the original rule 3 it falls (the 64W column: 100 vs
+807 µs), as this section already said. What the replay changes is the recorded COST — six 1 µs
+regressions, not two, two of them at `tasks = W` — and the amendment's factual premise about widths.
+Two things are OWED before the cost can be called off the hot path: the physics consumer per arm in
+a settled session (≥ 3 passes, `--prebuild`, r1 discarded), and one grid row at the physics shape
+(worker route, 96 tasks, ~4 µs body).
+
+### Consequences, stated rather than deferred
+
+1. **The axis-A closure on `a3` cannot stand.** It was decided against `a1f+b0`; the register's own
+   return row brings back `b1`, and `a1f+b1` beats the shipped configuration on the engine's shape.
+2. **A\* and B\* both change**, so the shipped configuration becomes `a1f+b1+wc+c0` — subject to the
+   §8 gates, which are recorded below.
+3. **`KE16-REJECTED.md`'s `a1f` and `b1` rows move from REJECTED to RETURNED**, with the number that
+   returned them. The register's return conditions did their job: `b1`'s row named this exact event
+   and it happened.
+4. **§7's Step-A rule 3 needs rewriting before it is used again.** Its defect is not the 64W choice
+   as such — it is that a single fixed column can override every other cell, including both
+   consumers, with no reference to whether the engine can generate that column. The replacement has
+   to be **consumer agreement plus engine-producible widths**, and it has to be written before the
+   next candidate is judged, not after.
+
+### The §8 gate ladder for `a1f+b1+wc+c0` — every leg run at CS-4, every leg green
+
+| gate | verdict |
+|---|---|
+| `cargo check -p boyko-threadpool --all-targets --features …` | exit 0 |
+| `cargo check -p boyko-ecs -p boyko-physics --all-targets --features boyko-threadpool/…` | exit 0 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **exit 0** — see `a4433654`; this leg had never been green, and it was blind rather than red |
+| `cargo test -p boyko-threadpool --all-targets --no-fail-fast --features …` | 20 targets, **162 passed, 0 failed**, 2 ignored |
+| `cross_pool_routing` | 10 passed |
+| red-first occupancy (threadpool) | `running 1 test`, ok — `top_lane = 4` at W=4/16 tasks and W=16/64 tasks, against a rule-3 budget of 8 |
+| **B1-P receipt** — a parked joiner is claimed by a foreign wave | `running 1 test`, ok |
+| ECS occupancy gate | `running 1 test`, ok |
+| ECS nested-system inline (b1-specific) | 2 passed |
+| physics `{1, N}` bit-identity oracles | 137 passed |
+| loom M1 / M1c / M2 / M2b / M3 + the `should_panic` calibration | 6 passed, 0 failed |
+| Miri, 16 seeds, both A1 shapes present | 16 × `1 passed; 0 failed`, 0 UB |
+| Miri, the A1 inline receipt, 16 seeds | 16 × `1 passed; 0 failed`, **0 `receipt not observed`** |
+
+⚠ **Two of those legs were nearly filed as passes when they were not, and both were caught by
+`running N` rather than by an exit code.**
+
+* The red-first occupancy gate returned `running 0 tests`, `4 filtered out`, exit 0 under the §8
+  command. The reason is in the test's own ignore text: under an A arm it is **not** ignored and
+  runs in the ordinary leg, so `-- --ignored` — which runs ONLY ignored tests — filtered it out.
+  §8's command is written for the default build. Re-run without the flag it reads `running 1 test`.
+* The A1 inline receipt appeared absent because I ran the shape without `--nocapture`. It is not a
+  printed line at all: the test `return`s on success and panics with the literal
+  `receipt not observed` on failure, so the receipt is observed by the ABSENCE of that panic. Zero
+  occurrences across 16 seeds, with 16 result tuples all reading `1 passed; 0 failed; 0 ignored`.
+
+⚠ And a grep of mine reported `FAILED / panicked anywhere : 14` on a log with none of either: a
+case-insensitive pattern matched the literal `0 failed` inside every result line. **The count was
+the instrument, not the run.** Re-counted case-sensitively: 0 `FAILED`, 0 `panicked at`.
+
+---
+
+---
+
+## §B-RE. AXIS B CLOSED ON `b1` — and `b3` proves a single global policy is wrong (2026-09-08, CS `4d69fdb9`)
+
+`b1` and `b3` had never been measured: neither builds over `a3`, and `a3` held axis A until the
+re-judgement. Three interleaved passes over `{a1f+b0, a1f+b1, a1f+b3}` after `--prebuild`; no
+`DIRTY-PASS.txt`; per-arm load receipts 0–13.8 % CPU. 35 comparable cells.
+
+| comparison | improved | regressed | tie |
+|---|---|---|---|
+| `b1` vs `b0` | **8** | **0** | 27 |
+| `b3` vs `b0` | 8 | 1 | 26 |
+| **`b3` vs `b1`** | **0** | **1** | 34 |
+
+**`b0` is eliminated** — both arms beat it eight cells to zero or one. **B\* = `b1`**: it never
+loses, and `b3` improves nothing over it while regressing one cell.
+
+**Physics ranks (rule 1):** `b0` 12.33 ms (2.26×), `b1` 10.20 ms (2.74×), `b3` 9.26 ms (3.01×).
+
+### The one regression, and it was PREDICTED FROM SOURCE BEFORE THE RUN
+
+`dispatcher/body_10us_tasks_W`: 16.5 µs → **23.5 µs, × 1.43**.
+
+That is the DISPATCHER route at width **W** — a wave pushed by a non-worker, which is exactly where
+`b3` parks the external joiner instead of letting it help. The prediction was written before the
+measurement, from reading `boyko_fontbake/msdf/distance.rs`: *an external joiner with nothing else
+to do is a free lane, and `b3` throws it away*. Measured cost of throwing it away: 43 %.
+
+### ⚠⚠ AND THE OTHER SIDE OF THE PREDICTION ALSO HELD — a finding about the ENGINE, not about `b3`
+
+`b3` leads physics in two of the three paired passes, by 10.8 % and 10.3 %, losing the third by
+3.5 %; its spread is 4.3 % against `b1`'s 10.1 %. Ten percent against a 10 % band is a TIE by the
+rule and is filed as one — but the mechanism is not noise, and it is the same mechanism read from
+the other end:
+
+| the external joiner is… | what `b3` (park, never help) does | measured |
+|---|---|---|
+| an idle bench/app thread with no other work (the dispatcher-route grid; the MSDF bake) | throws away a whole lane | `dispatcher/10us × W` **× 1.43 worse** |
+| the SCHEDULER's frame thread, which parks between dispatch rounds anyway (`schedule.rs:455`) — and physics dispatches from inside a system, so this is its joiner | costs nothing, and stops the joiner delaying the next round's dispatch | physics **10 % better in 2 of 3 paired passes**, half the variance |
+
+⇒ **ONE GLOBAL FLAG HAS OPPOSITE CORRECT ANSWERS FOR DIFFERENT CALLERS.** That is no longer an
+architectural opinion; it is measured on both sides of the same axis in one pass. The external
+joiner's policy is a property of WHO CALLED, and axis B forces it to be a property of the BUILD.
+
+This is the sharpest available evidence for the engine-wide unification question, and it arrived
+from the campaign rather than from the audit: the pool wants a per-call-site joiner policy, not a
+per-binary one. `b1` ships because it never loses; a caller-scoped policy would let the scheduler
+have `b3`'s behaviour and leave the bake with `b1`'s.
+
+### ⚠ Rule 4's parking receipt is WEAK, not passed — and its target is wrong for this machine
+
+Rule 4 requires that under B3 `bench_thread_install_Wminus1 / bench_thread_install` read
+≈ W/(W−1) = 1.067, as proof the joiner parked. Measured: `b0` 0.9165, `b1` 0.9263, **`b3` 0.9795**.
+The ratio moved toward 1 in the predicted direction and by the predicted mechanism — parking the
+joiner removes the W+1-thread oversubscription from the `install` row — but it did not cross 1, let
+alone reach 1.067.
+
+**The target is miscalibrated for an SMT machine, and that is a defect in the rule rather than in
+the arm.** `W/(W−1)` prices the marginal lane as a full core; on 8 physical / 16 logical the 16th
+lane is an SMT sibling worth a fraction of one. The receipt should be restated as a DIRECTION — the
+ratio must rise under B3 relative to B0/B1 — plus a floor derived from the physical core count.
+Recorded rather than repaired, because changing a receipt to match the result it just produced is a
+shape this campaign already had to be careful about once today.
+
+---
+
 ## §Method. The methodological finding that matters more than the verdict
 
 **THE DOMINANT ERROR TERM IN THIS CAMPAIGN WAS SESSION DRIFT, NOT AMBIENT LOAD — AND THE CAMPAIGN
@@ -806,12 +1116,492 @@ nowhere.
 
 ---
 
-## §W, §C, §F. NOT MEASURED — OWED
+## §W. CLOSED ON `wc` 2026-09-08 at CS-4 — `wg`/`wgc` ELIMINATED on an OCCUPANCY receipt; the keep re-tested on clean data
 
-**`wg`, `wc`, `wgc`, `c1` and `c1f` were never measured.** Only the reference configuration was
-taken, and the run was stopped when the owner started a game.
+**Three interleaved passes over `{w0, wg, wc, wgc}` at CS-4**, one pass = all four arms in table
+order, driver `scripts/ke16_measure.sh`, witness `KE16_EXPECT` matched in all three harness logs for
+all twelve runs. 38 cells carry a complete 4 × 3 set. `c1`/`c1f` are NOT measured and cannot be until
+W\* is fixed: step C is defined as `A*+B*+W*+c1`.
 
-### The reference: `a3+b0+w0+c0` on the POST-STAGE-1 code (CS-2), 49 rows, preserved
+### The verdict, and it does not rest on the wall clock
+
+| arm | cells improved | cells regressed | `max_in_flight` at N = 65536 | ECS speedup there |
+|---|---|---|---|---|
+| `wg` (W-b) | **0** | **13 of 38** | **5–6** of 16 | **2.00×** |
+| `wgc` | **0** | **14 of 38** | 5–8 of 16 | 2.00–4.00× |
+| `wc` (W-d′) | 0 | **0** | **16** of 16 | 10.6–15.8× |
+| `w0` (reference) | — | — | **16** of 16 | 13.9–15.7× |
+
+**`wg` and `wgc` fail step W rule 1 on BOTH clauses** — each regresses a 1 µs cell beyond 2 × band
+(`worker/body_1us_tasks_64w`, × 1.42 and × 1.26; `wgc` also `dispatcher/body_1us_tasks_64w`, × 1.51)
+and neither improves a single cell or consumer. **Eliminated.**
+
+**The deciding evidence is the occupancy receipt, not a time.** W-b does not make the pool slower by
+adding work; **it leaves ten of sixteen lanes parked.** The ECS protocol pass reports
+`max_in_flight` directly, and under `wg` it reads 5–6 with the speedup pinned at **2.00×** in every
+pass — which is the gate's own arithmetic rather than a measurement artefact: on a wave pushed to
+one destination only the first two pushes see `pre_len` of 0 and 1, so only two workers are woken,
+and the thief-residue cascade restores width one unpark-round at a time, too late for the wave. At
+N = 4096 the same reading is `max_in_flight` 3 against the reference's 4, speedup 2.00 against 4.00.
+
+⚠ **This is a receipt the wall clock alone could not have produced**, and it is why
+`KE16-DESIGN-MEASUREMENT.md` §3 lists occupancy as "the diagnostic behind a wall-clock change".
+
+### The design named this outcome as its own risk, on exactly these cells
+
+`KE16-DESIGN-W.md` §2.4 predicted the gain at **1 µs × {4W, 64W} on the worker route**, and wrote the
+risk as: *"the 100 µs–1 ms × W cells, where the chain's 4 hops of Windows wake latency plus the
+one-body stall may exceed the W serial unparks the spawner paid before."*
+
+| cell | design said | measured `wg` / `w0` |
+|---|---|---|
+| `worker/body_1us_tasks_4w` | gain | 1.10 — tie |
+| `worker/body_1us_tasks_64w` | gain | **1.42 — REGRESSES** |
+| `worker/body_100us_tasks_w` | risk | **3.66** |
+| `worker/body_1ms_tasks_w` | risk | **3.31** |
+| `dispatcher/body_100us_tasks_w` | risk | **4.69** |
+| `dispatcher/body_1ms_tasks_w` | risk | **5.51** |
+
+**Both halves of the prediction failed in the same direction**: the two cells named as the gain went
+tie and regression, and the risk fired at 3.3 × to 5.5 × rather than the "may exceed" it was written
+as. §2.4 also said the gain would show on the physics consumer, "whose 6 colors leave workers parked
+between steps" — the physics rows separate no arm at all (below).
+
+### ⚠ The data carries a MONOTONE DRIFT, and the verdict is stated only where the drift cannot reach
+
+The reference's own three passes are not stationary. They get FASTER, monotonically:
+
+| reference row | r1 | r2 | r3 | spread |
+|---|---:|---:|---:|---:|
+| `bench_thread_install` | 36.24 ms | 13.36 ms | 8.12 ms | **346 %** |
+| `bench_thread_install_Wminus1` | 19.79 ms | 12.74 ms | 7.84 ms | 152 % |
+| `in_scheduled_system` **PRIMARY** | 15.65 ms | 14.88 ms | 8.45 ms | **85 %** |
+| `single_threaded_O5` (session meter) | 33.46 ms | 32.92 ms | 26.37 ms | 27 % |
+| `par_in_system/65536` | 174.4 ms | 109.2 ms | 85.7 ms | 104 % |
+| `seq/65536` (ECS single-threaded) | 1314 ms | 1365 ms | 1311 ms | **4.1 %** |
+
+This is the §Band Step-0 finding again — *"the band as taken is measuring a first-run WARM-UP, not
+jitter"* — in a session rather than in a run. The load receipts agree: pass 1 opened at 14.8 % CPU
+and pass 3's first receipt reads 1.4 / 0 / 0.1 %.
+
+### ⚠⚠ THE DRIFT'S CAUSE IS THE DRIVER ITSELF, and it is named here rather than guessed at
+
+The machine was verified idle before the series (CPU 9.5 → 5.9 → **0.7 %**) and no game is present in
+any of the twenty-four load receipts. **The contamination was self-inflicted, and the build logs say
+so:**
+
+| pass | crates compiled immediately before each timed region |
+|---|---|
+| 0 (rehearsal) | the initial full build — a 119-line log |
+| **1** | `wg`, `wc`, `wgc`: **7 crates each**; `w0` none (already built by pass 0) |
+| 2, 3 | **zero** — every arm's log is three `Finished` lines |
+
+Each arm is a different `--features` line, so cargo rebuilds the pool crate and its dependents on
+first use of that arm. The driver therefore ALTERNATES a full-core compile with a timed region, and
+the first pass measures in the wake of one. Moving the build ahead of the load receipt (`e7910d5f`)
+made the receipt HONEST — it is what reports the 15–44 % — but it did not make the machine quiet.
+**The monotone speed-up across passes is the compiles stopping, not the box freeing itself.**
+
+⇒ **A future pass should PRE-BUILD EVERY ARM BEFORE PASS 1**, then measure. `scripts/ke16_measure.sh`
+does not do this yet; the fix is one `--no-run` loop over the variant table ahead of the pass loop.
+
+### The within-pass control: `seq` says the arms ARE comparable inside a pass
+
+The drift is BETWEEN passes, which is exactly what interleaving is built to absorb — and the ECS
+sequential row is the receipt that it does. Within each pass, across all four arms:
+
+| control | pass 1 | pass 2 | pass 3 |
+|---|---:|---:|---:|
+| `seq/65536` spread across the four arms | 7.2 % | 4.1 % | 5.0 % |
+
+At pass 3 it is 1.00, 1.00, 1.05, 1.00 relative to the reference. **A single-threaded row that is
+identical across arms inside a pass says the machine state is identical across those arms**, so a
+difference in the parallel rows of that pass is the arm and not the box.
+
+### `wg` is eliminated by PASS 3 ALONE — the pass that compiled nothing
+
+Discard passes 1 and 2 entirely and the verdict does not move:
+
+| cell (pass 3 only) | `w0` | `wg` | ratio | `wc` | ratio |
+|---|---:|---:|---:|---:|---:|
+| `worker/body_1ms_tasks_w` | 2.554 ms | 7.878 ms | **3.08** | 1.330 ms | 0.52 |
+| `worker/body_10us_tasks_w` | 31 437 ns | 55 269 ns | **1.76** | 31 333 ns | 1.00 |
+| `dispatcher/body_1ms_tasks_w` | 1.712 ms | 8.003 ms | **4.68** | 1.199 ms | 0.70 |
+| `dispatcher/body_100us_tasks_w` | 245 976 ns | 804 307 ns | **3.27** | 137 975 ns | 0.56 |
+| `ecs par_in_system/65536` | 85.69 ms | 635.37 ms | **7.41** | 89.38 ms | 1.04 |
+| `ecs par_from_dispatcher/65536` | 85.16 ms | 655.56 ms | **7.70** | 126.49 ms | 1.49 |
+| `ecs seq/65536` **CONTROL** | 1310.98 ms | 1311.11 ms | **1.00** | 1375.83 ms | 1.05 |
+| `ecs seq/4096` **CONTROL** | 81.96 ms | 81.94 ms | **1.00** | 81.95 ms | 1.00 |
+
+**17 of 38 cells put `wg` above 1.30 × the reference in that one clean pass; `wc` reaches 1.30 × on
+three, none above 1.63 ×.** The two controls sit at 1.00. The three-pass verdict above is therefore
+carried by the clean pass on its own, and passes 1 and 2 add agreement rather than evidence.
+
+**Consequences, stated rather than smoothed over:**
+
+1. **NO PHYSICS VERDICT IS FILED.** With an 85 % band on the PRIMARY row every arm is a tie by
+   construction, and a tie against a band that wide says nothing. The physics rows below are
+   recorded as data, not as a ranking.
+2. **The elimination of `wg`/`wgc` survives the drift, and here is why it is not an artefact of it.**
+   The effect is 1.8 ×–5.5 ×, larger than the drift; it is present in EVERY pass, not in one; it
+   appears on cells whose reference spread is tight (`worker/body_10us_tasks_w`: reference
+   31 584 / 32 090 / 31 437 ns, spread 2.1 %, against `wg` 59 354 / 73 507 / 55 269); and it is
+   corroborated by an occupancy integer that drift cannot move — 5 lanes is not a slow 16.
+3. **`wc` is a tie on the TIGHT cells too**, which is what makes its tie meaningful rather than a
+   consequence of wide bands: 33 796 / 30 387 / 31 333 ns on that same cell, against the reference's
+   31 584 / 32 090 / 31 437.
+4. **A fourth pass would not settle the physics rows** — the drift is monotone, so more passes taken
+   the same way extend the trend rather than average it out. A physics verdict needs a session that
+   opens already settled, or a discard rule taken per harness as §W's CS-2 pass did.
+
+### ✅ `wc` IS KEPT — W\* = `wc`. Rule 2's two gates ran at CS-4 and are green
+
+Step W rule 2 keeps `wc` when (a) it regresses no 1 µs cell and it is a tie everywhere — both hold
+above — **"PROVIDED both its gates are green: loom M1c (a real-park M1c) and the route-(b)
+many-seeds gate."** Both ran on 2026-09-08 at CS-4:
+
+| gate | recipe | verdict |
+|---|---|---|
+| **loom M1c**, real park | `cargo --config target.x86_64-pc-windows-gnu.rustflags=["-C","target-cpu=x86-64-v3","--cfg","loom"] test --release -p boyko-threadpool --test loom_pool --features ke16-a3,ke16-w-count` | **6 passed, 0 failed**, `loom_m1c_count_gated_completion_wakes_the_parked_worker_joiner ... ok`. Repeated with `LOOM_MAX_PREEMPTIONS=3`: same |
+| **route-(b) liveness**, 32 seeds | `MIRIFLAGS="… -Zmiri-many-seeds=0..32" cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool --test miri_scope nested_scope_from_worker_is_stolen_by_sibling --features ke16-a3,ke16-w-count` | **32 × `1 passed`**, zero UB, zero liveness timeouts |
+
+**It is an M1c and not an "M1c-count"** (the distinction §5 item 16 makes, and the one rule 2
+depends on): the model's joiner is `while !shared.is_drained() { thread::park(); }` — loom's real
+park — not M1's yield re-poll, verified in the source before the run. The `loom_pool` run also
+carries its own anti-vacuity receipt: `loom_m2_calibration_no_producer_fence_is_lost - should panic
+... ok`, i.e. the un-fenced copy did reproduce the lost wake.
+
+⚠ **The ISA flag is spelled in full in that `--config` array on purpose.** `.cargo/config.toml` sets
+`rustflags = ["-C", "target-cpu=x86-64-v3"]` for this target, and `--config` REPLACES the key rather
+than appending to it, so a bare `--config …rustflags=["--cfg","loom"]` would have silently dropped
+the x86-64-v3 baseline the whole campaign is measured under. The same asymmetry as `RUSTFLAGS`.
+
+### ⚠⚠ The route-(b) gate's FIRST run was a vacuous pass, and the gate is what caught it
+
+Run with `--features ke16-w-count` alone — the arm's own feature, which is what the rule names — it
+printed `running 1 test` **thirty-two times** and exited **0**. It ran nothing. The result line reads
+`0 passed; 0 failed; 1 ignored; 0 measured; 6 filtered out`, and thirty-two `running 1 test` lines
+look like far better evidence of thirty-two runs than one does.
+
+The test refused on its own terms, and its `ignore` reason is the whole diagnosis: *"Under
+ke16-w-count WITH NO A ARM the shape needs a SIBLING to take one of the two handshaked nested bodies
+and has none, so it would hang rather than measure: **NO W-d-prime liveness row may be filed from
+that build**."* It also forecloses the obvious workaround — forcing it with `--ignored` hits
+`refuse_to_certify_without_a_reachability_arm()` as the body's first statement.
+
+⇒ **§8's `<F>` is the CONFIGURATION's feature list, not the arm's**, and for this step that is
+`ke16-a3,ke16-w-count`. The corrected run is the one in the table above. Recorded because the failure
+mode is this corpus's own: `running N` is not a receipt, and a count of `running N` lines is not a
+better one.
+
+### ⚠ Raw data lost, and it was this pass that lost it
+
+`--save-baseline` is keyed on the variant string alone, which does not name the code state, and
+criterion overwrites in place. Re-taking `a3+b0+w0+c0` at CS-4 therefore **destroyed the CS-2
+reference's raw samples for r1, r2 and r3**; `-r4` and `-r5` survive only because this pass stopped
+at three. Every median, band and per-run value of that reference is preserved in prose below, so the
+findings are intact — the per-sample data behind three of five runs is not, and criterion baselines
+are not rebuildable from anything in the tree. Fixed in `e7910d5f`: the baseline name now carries the
+short HEAD hash, so two code states can no longer address one directory.
+
+
+
+### ⚠⚠ CORRECTION, same day: "no physics ranking CAN be filed" was wrong, and §C is what refuted it
+
+The subsection above concluded that the three W passes could not support a physics ranking and that
+**"more passes taken the same way would not fix it — the drift is monotone"**. The first half is true
+of those passes. **The second half named the wrong remedy**, and the reason is now measured rather
+than argued: the drift was not the machine settling, it was this driver's own compiles, and removing
+them removes the drift.
+
+Step C ran three passes on the same box, the same day, over the same three harnesses, after
+`scripts/ke16_measure.sh --prebuild`:
+
+| reference row | §W passes (compile before each timed region) | §C passes (`--prebuild`, none) |
+|---|---:|---:|
+| `single_threaded_O5` — the session meter | 33.46 / 32.92 / 26.37 ms, spread **27 %** | 29.69 / 29.61 / 29.71 ms, spread **0.3 %** |
+| `in_scheduled_system` — PRIMARY | 15.65 / 14.88 / 8.45 ms, band **85 %** | 10.87 / 11.15 / 11.34 ms, band **4.3 %** |
+| `bench_thread_install_Wminus1` | 19.79 / 12.74 / 7.84 ms, spread 152 % | 10.80 / 11.00 / 10.91 ms, spread **1.9 %** |
+
+**A twentyfold improvement in the session meter, from a flag.** So a physics ranking for axis W was
+never impossible — it was being destroyed by the instrument, and the correct sentence is "not filed
+from THOSE passes, and cheap to obtain from clean ones".
+
+**That matters beyond the record, because `wc` was kept on the words "a tie everywhere", and a tie
+against an 85 % band is a much weaker claim than a tie against 4 %.** The keep is therefore re-tested
+below against clean data rather than left standing on the noisy pass.
+
+### ✅ THE KEEP RE-TESTED ON CLEAN DATA — `wc` regresses NOTHING, and improves one cell
+
+Three further interleaved passes over `{w0, wc}` after `--prebuild`, settling receipt
+**3.2 / 1.7 / 0.7 / 1.4 / 0.7 % CPU** — the quietest of the day — and no `DIRTY-PASS.txt`.
+
+**35 comparable cells: 1 improved, 0 regressed, 34 tie.** The one improvement is
+`worker/body_1us_tasks_64w`, 88.4 µs → 81.3 µs (× 0.920) against a 4.0 % band — which lands
+*exactly* on the 2 × band threshold, so it is reported as an improvement by the rule and treated as a
+tie by judgement. Nothing depends on it: rule 2 asks for a tie everywhere, and that is what the
+clean data gives, on bands of 4–12 % rather than 4–346 %.
+
+⇒ **The `wc` keep stands, and now stands on data that could have refuted it.**
+
+#### The clean re-take, every comparable cell
+
+| cell | `w0` | band | `wc` | ratio | vs |
+|---|---:|---:|---:|---:|:--|
+| `worker/body_100us_tasks_4w` | 1.66 ms | 5.3 % | 1.71 ms | 1.028 | tie |
+| `worker/body_100us_tasks_64w` | 6.68 ms | 4.0 % | 6.68 ms | 1.001 | tie |
+| `worker/body_100us_tasks_w` | 156.6 us | 4.0 % | 156.0 us | 0.996 | tie |
+| `worker/body_10us_tasks_4w` | 113.7 us | 5.5 % | 109.6 us | 0.964 | tie |
+| `worker/body_10us_tasks_64w` | 696.6 us | 4.0 % | 695.5 us | 0.998 | tie |
+| `worker/body_10us_tasks_w` | 27.0 us | 4.0 % | 27.4 us | 1.018 | tie |
+| `worker/body_1ms_tasks_4w` | 14.32 ms | 11.2 % | 15.01 ms | 1.048 | tie |
+| `worker/body_1ms_tasks_64w` | 65.59 ms | 4.0 % | 65.57 ms | 1.000 | tie |
+| `worker/body_1ms_tasks_w` | 1.29 ms | 4.0 % | 1.28 ms | 0.998 | tie |
+| `worker/body_1us_tasks_4w` | 12.7 us | 4.0 % | 13.0 us | 1.023 | tie |
+| `worker/body_1us_tasks_64w` | 88.4 us | 4.0 % | 81.3 us | 0.920 | **IMP** |
+| `worker/body_1us_tasks_w` | 7.6 us | 4.0 % | 7.6 us | 0.993 | tie |
+| `dispatcher/body_100us_tasks_4w` | 1.68 ms | 4.0 % | 1.60 ms | 0.956 | tie |
+| `dispatcher/body_100us_tasks_64w` | 6.69 ms | 4.0 % | 6.69 ms | 1.000 | tie |
+| `dispatcher/body_100us_tasks_w` | 127.6 us | 4.0 % | 126.5 us | 0.991 | tie |
+| `dispatcher/body_10us_tasks_4w` | 124.2 us | 4.7 % | 129.3 us | 1.041 | tie |
+| `dispatcher/body_10us_tasks_64w` | 692.2 us | 4.0 % | 691.7 us | 0.999 | tie |
+| `dispatcher/body_10us_tasks_w` | 16.2 us | 4.0 % | 16.2 us | 0.997 | tie |
+| `dispatcher/body_1ms_tasks_4w` | 13.64 ms | 5.2 % | 14.26 ms | 1.046 | tie |
+| `dispatcher/body_1ms_tasks_64w` | 66.23 ms | 4.0 % | 66.13 ms | 0.998 | tie |
+| `dispatcher/body_1ms_tasks_w` | 1.23 ms | 4.0 % | 1.20 ms | 0.982 | tie |
+| `dispatcher/body_1us_tasks_4w` | 9.7 us | 4.0 % | 10.0 us | 1.024 | tie |
+| `dispatcher/body_1us_tasks_64w` | 86.8 us | 4.8 % | 85.3 us | 0.984 | tie |
+| `dispatcher/body_1us_tasks_w` | 4.1 us | 4.4 % | 4.1 us | 1.002 | tie |
+| `physics bench_thread_install` | 10.51 ms | 22.1 % | 10.55 ms | 1.003 | tie |
+| `physics bench_thread_install_wminus1` | 10.63 ms | 4.0 % | 10.69 ms | 1.006 | tie |
+| `physics empty_schedule_control` | 1.5 us | 12.2 % | 1.5 us | 0.993 | tie |
+| `physics in_scheduled_system` | 11.87 ms | 4.0 % | 11.70 ms | 0.986 | tie |
+| `physics single_threaded_o5` | 29.22 ms | 11.2 % | 29.04 ms | 0.994 | tie |
+| `ecs par_from_dispatcher/4096` | 26.47 ms | 35.7 % | 25.95 ms | 0.980 | tie |
+| `ecs par_from_dispatcher/65536` | 88.22 ms | 4.0 % | 89.00 ms | 1.009 | tie |
+| `ecs par_in_system/4096` | 21.33 ms | 12.3 % | 20.68 ms | 0.970 | tie |
+| `ecs par_in_system/65536` | 89.39 ms | 4.0 % | 88.63 ms | 0.992 | tie |
+| `ecs seq/4096` | 81.93 ms | 4.0 % | 81.93 ms | 1.000 | tie |
+| `ecs seq/65536` | 1,310.81 ms | 4.0 % | 1,310.88 ms | 1.000 | tie |
+
+
+### ⚠⚠ THREE OF THE 38 "CELLS" ARE NOT AN ARM PROPERTY AT ALL, and they nearly produced a false regression
+
+The three `ke16_park_timeout` rows measure the **Windows global timer resolution**, not the pool.
+Two independent readings say so, and the second is the one that settles it:
+
+| pass group | box state | `park_timeout` 50 µs / 1 ms / 2 ms |
+|---|---|---|
+| §W passes (Discord, Steam, browsers up) | default tick | **15.56 / 15.55 / 15.55 ms**, identical across `w0`, `wc`, `wg`, `wgc` and all runs |
+| §C and this re-take (those closed) | partially raised | 6.0–7.3 ms, with excursions to 12–13.5 ms — **within a session, for one arm** |
+
+**The 50 µs row and the 2 ms row read the same number in every run.** A 50 µs park and a 2 ms park
+cannot take the same time unless a resolution floor dominates both, so what the row reports is the
+floor. `wc`'s own three runs of `park_timeout_50us` read 13.17 / 6.94 / 11.35 ms — a 90 % within-arm
+band on a quantity nothing in the pool touches.
+
+**The near miss:** against `w0`'s 6.54 ms, `wc`'s 11.35 ms median is × 1.736. It was scored a tie
+ONLY because `wc`'s own 90 % band swallowed it. Had `wc`'s three runs happened to agree at 13 ms
+while `w0`'s agreed at 6.5, the rule would have reported **three regressions of 1.7–2 ×** and
+eliminated the arm this campaign is shipping — for a difference produced by whichever process last
+called `timeBeginPeriod`.
+
+⇒ **The three rows are excluded from every candidate comparison** and are what §0 already calls them:
+an App-7 backstop reference for the box, recorded beside a verdict and never inside one. The counts
+above are over the **35 comparable cells**.
+
+⚠ This EXTENDS §Instruments 4 and corrects its remedy. That entry established that the printed
+`configuration=guarded|unguarded` **label** is unreliable (~26 % of probes read "guarded" on an
+unguarded box — reproduced again today: pass 1 said `unguarded`, passes 2 and 3 said `guarded`, on
+the same box minutes apart) and prescribed *"decide state on the criterion medians"*. That is right
+for reading the BOX. It is wrong as licence to treat those medians as cells: they are a system-global
+quantity, and the campaign's comparison machinery had no way to know it.
+
+
+### Appendix: every cell, median of three passes at CS-4
+
+Medians are the median of the three per-pass medians. `band` is the reference's widest
+pairwise gap over its three passes, floored at 4 % (§4). A verdict is `REG` when
+`med_V > med_R x (1 + 2 x band)` with the band taken as the larger of the arm's and the
+reference's, `IMP` at the mirror inequality, `tie` otherwise.
+
+| cell | `w0` | band | `wg` | vs | `wc` | vs | `wgc` | vs |
+|---|---:|---:|---:|:--|---:|:--|---:|:--|
+| `worker/body_100us_tasks_4w` | 1.69 ms | 10.1 % | 2.13 ms | tie | 1.73 ms | tie | 2.19 ms | tie |
+| `worker/body_100us_tasks_64w` | 7.23 ms | 12.0 % | 7.56 ms | tie | 7.44 ms | tie | 7.67 ms | tie |
+| `worker/body_100us_tasks_w` | 189.8 us | 32.8 % | 695.0 us | **REG** | 183.3 us | tie | 711.6 us | **REG** |
+| `worker/body_10us_tasks_4w` | 130.3 us | 10.3 % | 215.1 us | **REG** | 126.0 us | tie | 219.9 us | **REG** |
+| `worker/body_10us_tasks_64w` | 813.3 us | 12.5 % | 807.0 us | tie | 762.7 us | tie | 777.3 us | tie |
+| `worker/body_10us_tasks_w` | 31.6 us | 4.0 % | 59.4 us | **REG** | 31.3 us | tie | 56.4 us | **REG** |
+| `worker/body_1ms_tasks_4w` | 17.23 ms | 12.5 % | 19.35 ms | tie | 16.27 ms | tie | 18.68 ms | tie |
+| `worker/body_1ms_tasks_64w` | 67.98 ms | 8.0 % | 72.53 ms | tie | 68.36 ms | tie | 70.45 ms | tie |
+| `worker/body_1ms_tasks_w` | 1.58 ms | 78.5 % | 5.22 ms | **REG** | 1.37 ms | tie | 7.08 ms | **REG** |
+| `worker/body_1us_tasks_4w` | 15.9 us | 8.2 % | 17.5 us | tie | 15.9 us | tie | 15.0 us | tie |
+| `worker/body_1us_tasks_64w` | 109.4 us | 12.6 % | 155.3 us | **REG** | 98.7 us | tie | 137.8 us | **REG** |
+| `worker/body_1us_tasks_w` | 9.7 us | 12.3 % | 9.3 us | tie | 9.5 us | tie | 9.4 us | tie |
+| `dispatcher/body_100us_tasks_4w` | 1.69 ms | 12.9 % | 2.48 ms | **REG** | 1.60 ms | tie | 2.48 ms | **REG** |
+| `dispatcher/body_100us_tasks_64w` | 7.63 ms | 13.7 % | 7.51 ms | tie | 7.54 ms | tie | 7.82 ms | tie |
+| `dispatcher/body_100us_tasks_w` | 173.7 us | 61.1 % | 815.0 us | **REG** | 154.2 us | tie | 808.1 us | **REG** |
+| `dispatcher/body_10us_tasks_4w` | 139.1 us | 4.0 % | 273.4 us | **REG** | 144.1 us | tie | 270.9 us | **REG** |
+| `dispatcher/body_10us_tasks_64w` | 791.3 us | 15.2 % | 835.9 us | tie | 768.6 us | tie | 827.8 us | tie |
+| `dispatcher/body_10us_tasks_w` | 21.9 us | 4.0 % | 65.5 us | **REG** | 22.1 us | tie | 69.2 us | **REG** |
+| `dispatcher/body_1ms_tasks_4w` | 14.99 ms | 10.7 % | 20.67 ms | tie | 14.64 ms | tie | 23.78 ms | tie |
+| `dispatcher/body_1ms_tasks_64w` | 67.94 ms | 7.3 % | 70.65 ms | tie | 69.33 ms | tie | 70.67 ms | tie |
+| `dispatcher/body_1ms_tasks_w` | 1.45 ms | 32.8 % | 7.96 ms | **REG** | 1.36 ms | tie | 7.69 ms | **REG** |
+| `dispatcher/body_1us_tasks_4w` | 11.8 us | 20.5 % | 15.8 us | tie | 13.2 us | tie | 14.8 us | tie |
+| `dispatcher/body_1us_tasks_64w` | 106.1 us | 4.0 % | 171.5 us | tie | 108.3 us | tie | 160.0 us | **REG** |
+| `dispatcher/body_1us_tasks_w` | 4.8 us | 8.3 % | 5.4 us | tie | 4.8 us | tie | 5.3 us | tie |
+| `park_timeout_1ms` | 15.57 ms | 4.0 % | 15.57 ms | tie | 15.56 ms | tie | 15.59 ms | tie |
+| `park_timeout_2ms` | 15.55 ms | 4.0 % | 15.57 ms | tie | 15.56 ms | tie | 15.55 ms | tie |
+| `park_timeout_50us` | 15.57 ms | 4.0 % | 15.58 ms | tie | 15.58 ms | tie | 15.58 ms | tie |
+| `physics bench_thread_install` | 13.36 ms | 346.3 % | 17.67 ms | tie | 12.74 ms | tie | 13.33 ms | tie |
+| `physics bench_thread_install_wminus1` | 12.74 ms | 152.3 % | 9.94 ms | tie | 12.17 ms | tie | 13.12 ms | tie |
+| `physics empty_schedule_control` | 1.7 us | 9.1 % | 1.7 us | tie | 1.7 us | tie | 1.8 us | tie |
+| `physics in_scheduled_system` | 14.88 ms | 85.2 % | 10.42 ms | tie | 12.43 ms | tie | 12.71 ms | tie |
+| `physics single_threaded_o5` | 32.92 ms | 26.9 % | 30.98 ms | tie | 30.83 ms | tie | 32.85 ms | tie |
+| `ecs par_from_dispatcher/4096` | 22.60 ms | 65.2 % | 43.00 ms | tie | 23.47 ms | tie | 40.99 ms | tie |
+| `ecs par_from_dispatcher/65536` | 100.00 ms | 68.7 % | 687.46 ms | **REG** | 119.07 ms | tie | 675.75 ms | **REG** |
+| `ecs par_in_system/4096` | 21.63 ms | 7.3 % | 33.79 ms | **REG** | 22.20 ms | tie | 35.49 ms | **REG** |
+| `ecs par_in_system/65536` | 109.20 ms | 103.6 % | 533.09 ms | **REG** | 124.24 ms | tie | 493.82 ms | **REG** |
+| `ecs seq/4096` | 82.23 ms | 4.3 % | 84.84 ms | tie | 81.95 ms | tie | 82.00 ms | tie |
+| `ecs seq/65536` | 1,314.06 ms | 4.1 % | 1,358.65 ms | tie | 1,375.83 ms | tie | 1,311.34 ms | tie |
+
+---
+
+## §C, §F. MEASURED 2026-09-08 — CLOSED ON `c0`; both arms dropped
+
+### ✅ MEASURED 2026-09-08 — BOTH ARMS DROPPED. Axis C closes on `c0`
+
+Three interleaved passes over `{c0, c1, c1f}` at CS-4 (`7ccab360`), taken after
+`scripts/ke16_measure.sh --prebuild`, so **no timed region followed a compile** — the driver writes
+`DIRTY-PASS.txt` when one does and wrote none. Settling receipt before pass 1: 8.3 / 7.8 / 5.2 / 5.6
+/ 4.1 % CPU.
+
+| arm | improved | regressed | `max_in_flight` at N = 65536 | ECS speedup there |
+|---|---|---|---|---|
+| `c1` (App-4 batch spawn) | **0** | 6 of 38 | **2** of 16 | **2.00×** |
+| `c1f` (+ W-f fan-out) | **0** | 5 of 38 | 9–10 of 16 | **7.95–8.00×** |
+| `c0` (reference) | — | — | **16** of 16 | 15.05–15.28× |
+
+**Both fail step W/C rule 1 on clause (b): neither improves a single cell or consumer anywhere.**
+Clause (a) holds for both — no 1 µs cell regresses — so the drop is purely the absence of a gain.
+**W\* + C\* = `wc + c0`.**
+
+### The occupancy integers again, and `c1`'s is the code's own sentence
+
+`src/scope.rs::Scope::wake_for_wave` says a build with `ke16-c-batch` alone takes a wave *"down to
+the spawner plus ONE, with the rest asleep for the whole wave"*. Measured: **`max_in_flight` = 2**,
+in all three passes, with the speedup pinned at 2.00×. Not "about two" — two.
+
+`c1f` is the arm built to repair exactly that, and it does repair most of it: 2 → 9–10 lanes,
+speedup 7.95–8.00×. **It still loses 1.86× to the reference**, because a single-snapshot fan-out at
+the wave's first push reaches only the siblings already parked at that instant, and that is about
+half of them. So App-4's `pending` saving — one `fetch_add(n)` per wave instead of `n` — is real,
+invisible, and bought with a lane-count collapse no fan-out available here fully undoes.
+
+### ⚠ The pair measurement is what separates two very different findings, and rule 3 forbade it
+
+Applying §7 rule 3 literally — measure `c1`, see it regress, do not measure `c1f` — would have filed
+**"App-4 rejected"**. What the pair actually shows is **"App-4's accounting is invisible under every
+wake width this tree can build"**: `c1f` recovers 2 → 10 lanes and STILL improves nothing. The second
+statement is the true one, and it is the one that tells a future reader not to retry App-4 behind a
+better fan-out without first finding a wake mechanism that reaches 16.
+
+### The design's prediction about WHERE, and only about where
+
+`KE16-DESIGN-W.md` §2.4 wrote that criterion's back-to-back iterations keep workers spinning, *"so
+the pool grid understates this; the physics consumer, whose 6 colors leave workers parked between
+steps, is where it shows"*. Exactly so: **all 24 pool-grid cells and all three `park_timeout` rows
+are ties**, and every one of the eleven regressions across the two arms is on physics or ECS. The
+design was right about the site and wrong about the sign, on both W and C.
+
+### ✅ A PHYSICS RANKING IS FILED HERE, and the reason it could not be filed for §W was the driver
+
+| physics row | `c0` (r1 / r2 / r3) | spread | `c1` | `c1f` |
+|---|---|---:|---:|---:|
+| `single_threaded_O5` (session meter) | 29.69 / 29.61 / 29.71 ms | **0.3 %** | 29.60 ms | 29.64 ms |
+| `in_scheduled_system` **PRIMARY** | 10.87 / 11.15 / 11.34 ms | **4.3 %** | 16.99 ms (**1.52×**) | 13.77 ms (**1.24×**) |
+| `bench_thread_install_Wminus1` **REF** | 10.80 / 11.00 / 10.91 ms | 1.9 % | 17.04 ms | 13.06 ms |
+
+Compare §W, where the same reference row spread **85 %** and the session meter **27 %**. The
+difference is not the machine and not the arms: it is `--prebuild`. §W's passes alternated a
+seven-crate compile with a timed region; these compiled nothing. **A physics ranking was not
+impossible — it was being destroyed by the driver**, and the acceptance line's clause (1) reads
+cleanly here: `in_scheduled_system` 11.15 ms < `single_threaded_O5` 29.61 ms.
+
+
+### Appendix: every cell, median of three passes, step C at CS-4 / `7ccab360`
+
+Same rule as §W's appendix. The reference is `c0` = `a3+b0+wc+c0`, re-taken in these same
+passes rather than carried over from the W step.
+
+| cell | `c0` | band | `c1` | vs | `c1f` | vs |
+|---|---:|---:|---:|:--|---:|:--|
+| `worker/body_100us_tasks_4w` | 1.66 ms | 4.8 % | 1.69 ms | tie | 1.66 ms | tie |
+| `worker/body_100us_tasks_64w` | 6.68 ms | 4.0 % | 6.65 ms | tie | 6.69 ms | tie |
+| `worker/body_100us_tasks_w` | 156.4 us | 4.0 % | 158.6 us | tie | 158.4 us | tie |
+| `worker/body_10us_tasks_4w` | 110.8 us | 4.0 % | 108.9 us | tie | 107.4 us | tie |
+| `worker/body_10us_tasks_64w` | 694.6 us | 4.0 % | 696.7 us | tie | 696.9 us | tie |
+| `worker/body_10us_tasks_w` | 27.0 us | 4.0 % | 27.4 us | tie | 27.6 us | tie |
+| `worker/body_1ms_tasks_4w` | 13.32 ms | 9.2 % | 14.39 ms | tie | 13.47 ms | tie |
+| `worker/body_1ms_tasks_64w` | 65.61 ms | 4.0 % | 65.62 ms | tie | 65.39 ms | tie |
+| `worker/body_1ms_tasks_w` | 1.31 ms | 4.0 % | 1.30 ms | tie | 1.30 ms | tie |
+| `worker/body_1us_tasks_4w` | 12.5 us | 4.0 % | 12.6 us | tie | 12.6 us | tie |
+| `worker/body_1us_tasks_64w` | 81.6 us | 4.0 % | 81.6 us | tie | 81.4 us | tie |
+| `worker/body_1us_tasks_w` | 7.5 us | 4.0 % | 7.6 us | tie | 7.7 us | tie |
+| `dispatcher/body_100us_tasks_4w` | 1.62 ms | 6.3 % | 1.63 ms | tie | 1.62 ms | tie |
+| `dispatcher/body_100us_tasks_64w` | 6.70 ms | 4.0 % | 6.70 ms | tie | 6.68 ms | tie |
+| `dispatcher/body_100us_tasks_w` | 128.9 us | 4.0 % | 126.3 us | tie | 127.4 us | tie |
+| `dispatcher/body_10us_tasks_4w` | 129.2 us | 6.1 % | 128.9 us | tie | 124.1 us | tie |
+| `dispatcher/body_10us_tasks_64w` | 690.8 us | 4.0 % | 693.9 us | tie | 691.7 us | tie |
+| `dispatcher/body_10us_tasks_w` | 15.9 us | 4.0 % | 16.0 us | tie | 16.0 us | tie |
+| `dispatcher/body_1ms_tasks_4w` | 13.89 ms | 4.7 % | 13.31 ms | tie | 13.17 ms | tie |
+| `dispatcher/body_1ms_tasks_64w` | 66.06 ms | 4.0 % | 65.72 ms | tie | 66.20 ms | tie |
+| `dispatcher/body_1ms_tasks_w` | 1.19 ms | 4.0 % | 1.17 ms | tie | 1.19 ms | tie |
+| `dispatcher/body_1us_tasks_4w` | 9.9 us | 4.3 % | 9.6 us | tie | 9.7 us | tie |
+| `dispatcher/body_1us_tasks_64w` | 86.4 us | 5.8 % | 84.7 us | tie | 83.5 us | tie |
+| `dispatcher/body_1us_tasks_w` | 4.1 us | 5.0 % | 4.1 us | tie | 4.1 us | tie |
+| `park_timeout_1ms` | 6.96 ms | 12.1 % | 6.94 ms | tie | 13.26 ms | tie |
+| `park_timeout_2ms` | 6.95 ms | 10.3 % | 7.04 ms | tie | 13.47 ms | tie |
+| `park_timeout_50us` | 6.93 ms | 14.9 % | 6.95 ms | tie | 12.52 ms | tie |
+| `physics bench_thread_install` | 12.20 ms | 17.9 % | 17.32 ms | tie | 11.97 ms | tie |
+| `physics bench_thread_install_wminus1` | 10.91 ms | 4.0 % | 17.04 ms | **REG** | 13.06 ms | tie |
+| `physics empty_schedule_control` | 1.5 us | 4.0 % | 1.5 us | tie | 1.5 us | tie |
+| `physics in_scheduled_system` | 11.15 ms | 4.3 % | 16.99 ms | **REG** | 13.77 ms | **REG** |
+| `physics single_threaded_o5` | 29.69 ms | 4.0 % | 29.70 ms | tie | 29.64 ms | tie |
+| `ecs par_from_dispatcher/4096` | 22.08 ms | 8.1 % | 40.57 ms | **REG** | 38.99 ms | **REG** |
+| `ecs par_from_dispatcher/65536` | 88.33 ms | 4.0 % | 655.61 ms | **REG** | 164.95 ms | **REG** |
+| `ecs par_in_system/4096` | 23.38 ms | 5.0 % | 42.04 ms | **REG** | 29.94 ms | **REG** |
+| `ecs par_in_system/65536` | 88.86 ms | 4.0 % | 655.60 ms | **REG** | 165.38 ms | **REG** |
+| `ecs seq/4096` | 81.93 ms | 4.0 % | 81.94 ms | tie | 81.93 ms | tie |
+| `ecs seq/65536` | 1,310.86 ms | 4.0 % | 1,310.81 ms | tie | 1,310.80 ms | tie |
+
+
+### ⚠⚠ They were measured as a PAIR, which DEPARTS from rule 3 — and the departure is forced by §W's own result
+
+§7 Steps W/C rule 3 says *"`c1` (batch spawn) not kept ⇒ `c1f` is not measured"*. Its premise is
+that `c1` is App-4's mechanism and `c1f` a width refinement on top of it.
+`src/scope.rs::Scope::wake_for_wave` states the opposite about `ke16-c-batch` ALONE: the wave's ONE
+wake decision activates the spawner plus ONE sibling, and what turns that into a wave's worth of
+lanes is `worker::wake_after_residue` — which is `ke16-w-gate`'s and a no-op without it. So `c1`
+alone is not App-4's accounting; it is **App-4's accounting minus up to W/2 lanes**, which is exactly
+the mechanism §W measured at 2–6× against `wg`.
+
+The design escalated the resulting fork as a DESIGN call, offering two ways to make a `c1` row
+interpretable: over `ke16-w-gate`'s cascade, or over `ke16-w-fanout`. **§W deleted the first** — `wg`
+is eliminated, so a `c1` row taken over it would describe a configuration that will never ship. Only
+`c1f` remains.
+
+Applying rule 3 literally would therefore file a rejection of App-4 that is really a rejection of the
+wake collapse, and forbid measuring the one arm that could tell them apart. **Both were taken; the C
+verdict is read off `c1f`, and `c1` is recorded as the isolated cost of the wake collapse rather than
+as a candidate.** The driver carries the same statement at its variant table. The measurement
+vindicated the departure: `c1f` recovered 2 → 10 lanes and still improved nothing, which is a
+different and more useful finding than "App-4 rejected".
+
+⚠ The `c1` caveat below still travels with any future C row, and CS-4 does not change it.
+
+### The CS-2 reference: `a3+b0+w0+c0` on the POST-STAGE-1 code, 49 rows, preserved — NOT comparable to §W above
 
 ⚠ **These numbers describe CS-2 and MUST NOT be compared against §A's, which are CS-1.** See §CS.
 
@@ -875,30 +1665,156 @@ batch push.
 
 ---
 
-## §App. NOT RUN — OWED
+## §App-2. RE-TAKEN 2026-09-10 at HEAD `51631371`, on BOTH HOSTS — clause (1) PASSES; clause (2) passes on msvc and FAILS on gnu by 2.5 %, for a reason this file can now name
 
-**No number in this file comes from the code that ships.** §1 of the design requires a Step-App
-retake: *"the final configuration with every feature removed (unconditional code): the full grid +
-consumers ONCE MORE — the number that goes on record must come from the code that ships, not from a
-feature build"*, and *"the unconditional code's numbers must match the winning feature build's
-within the band on every cell and consumer; a difference beyond the band is a defect in the removal
-step, not a new datum."*
+The 2026-09-09 take below is superseded as the acceptance take (its clause (2) was declared NOT
+EVIDENCE — a straddle over a reference row that moved 17 % between passes). This one is taken on the
+shipped tree after two things changed underneath it: the thread-local fix (`e6115223`) and the
+host-conditional `STEAL_EMPTY_GATE` (`51631371`).
 
-That has not been run. Two independent reasons the retake is not optional:
+**Receipts.** Same box, W = 16 printed by every bench, bench profile, all six bench binaries
+`--no-run` pre-built OUTSIDE the window; the window opened only after three consecutive 20 s samples
+saw zero `cargo`/`rustc`/`link`/`cl` processes; a load receipt was taken immediately before AND after
+each of the **twelve** timed regions and **all twelve read `PROCS=0` — every region CLEAN**, none
+discarded. Runs interleaved r1(pool, ecs, physics on each host), then r2. No `--features`, no
+`KE16_EXPECT`. ⚠ **The two hosts are two compiler lines, not one series** — same rustc commit
+`48a229cea` and same LLVM 22.1.8, different CRT, allocator and thread-local backend
+(`docs/threadpool/RUSTC-198-WINDOWS-GNU-TLS.md` §5b).
 
-1. Every absolute here is a **bench-profile** number (`codegen-units = 1`, `lto = false`) and the
-   shipped release profile is `lto = "fat"` — a different codegen configuration by the manifest's
-   own statement.
-2. The winning configuration is still a **feature build**; the features have not been removed, the
-   freeze has not been taken, and the removal commit's `grep -rn 'feature = "ke16' crates` has not
-   been made to return nothing.
+### The acceptance line, §11 of `KE16-DESIGN-APP.md`, applied verbatim
 
-**The freeze that must precede removal has also not been done** (owner ruling, 2026-09-02: *"Do not
-delete the unsuitable one, leave them as a spare — so the code is recorded but not present in the
-project"*): no annotated tag `ke16/tournament`, no `docs/threadpool/KE16-REJECTED.md`. The order is
-not negotiable — freeze, then remove, because after the removal there is nothing left to point a
-tag at. The return conditions the register needs are already measured and are recorded in
-§Rejected below.
+`REF = bench_thread_install_Wminus1` — B1 ships, so the bench thread's external joiner HELPS and the
+W−1 row is the W-LANE row. `band(c) = max(0.04, |r1 − r2| / min(r1, r2))`, the larger of the two rows'
+bands.
+
+| | gnu | msvc |
+|---|---:|---:|
+| `in_scheduled_system` | 10 358.5 µs | 11 238.0 µs |
+| `single_threaded_O5` | 28 559.0 µs | 29 797.5 µs |
+| `bench_thread_install_Wminus1` = **REF** | 9 694.5 µs | 12 234.5 µs |
+| `bench_thread_install` (W+1 lanes, information only) | 9 335.6 µs | 11 620.0 µs |
+| `empty_schedule_control` | 1.3 µs | 1.2 µs |
+| **(1)** `in_scheduled_system < single_threaded_O5` | **PASS, 2.76×** | **PASS, 2.65×** |
+| **(2)** `in_sched − control ≤ REF × (1+band)` | **FAIL by 2.5 %** (10 357.5 vs 10 106.1; band 4.25 %) | **PASS** (11 237.0 vs 13 442.3; band 9.87 %) |
+| (2) raw ratio against REF | **1.068** | **0.918** |
+| raw ratio against the W+1 row | 1.109 | 0.967 |
+| `Wminus1 / bench_thread_install` — the joiner receipt | 1.038 | 1.053 |
+
+**Clause (1) is the campaign's headline and it passes on both hosts by a wide margin:** parallel
+physics on the route that SHIPS is 2.7× faster than turning it off. The 2026-09-09 take read 2.22×.
+
+**Clause (2)'s split is not noise, and the mechanism is measured elsewhere in this corpus.** The
+scheduled route spawns from INSIDE a worker; the bench-thread reference spawns from an external
+thread. Those are the `worker` and `dispatcher` routes of `ke16_nested_scope`, and today they read
+**gnu 528.2 µs vs 122.7 µs** and **msvc 103.9 µs vs 88.7 µs** at `body_1us_tasks_64W`. On gnu the
+scheduled route still pays one `thread_local!` read per spawn — the residual that `e6115223` could
+not remove, because one read is what the API costs — so it is structurally behind a W-lane external
+reference; on msvc that cost does not exist and the scheduled route comes out 8 % AHEAD of it.
+
+So clause (2) is **a property of the host**, not of the design, and the honest statement is that it
+fails on the host we are leaving and passes on the host we are moving to. ⚠ msvc's band is wide
+(9.87 %, from a `bench_thread_install_Wminus1` pair of 12 810 / 11 659), so the msvc pass has slack —
+but its raw ratio is **0.918**, below 1 before any band is applied, which is the strong form of the
+clause and does not depend on the allowance.
+
+### The ECS consumer — the defect the whole campaign exists for is gone
+
+| `ke16_par_iter_in_system` | gnu | msvc |
+|---|---:|---:|
+| `seq/65536` | 1 311 400 µs | 1 311 150 µs |
+| `par_from_dispatcher/65536` | 89 553 µs | 96 261 µs |
+| **`par_in_system/65536`** | **89 886 µs** | **98 249.5 µs** |
+| `par_in_system / par_from_dispatcher` | **1.004** | 1.021 |
+| speed-up over `seq` | **14.6×** | 13.3× |
+
+`par_iter` inside a scheduled system is now the SAME as from the dispatcher — 1.004 on gnu — where
+the finding that opened this campaign recorded it at **1.01× of `seq`**, i.e. no speed-up at all
+because a `scope` opened from a worker ran serially. At 4096 both routes sit at ~20.6 ms on both
+hosts and `seq` at ~82 ms, a 4.0× that is the same on either route.
+
+## §App. TAKEN 2026-09-09 at HEAD `90a995e8` (UNCONDITIONAL shipped code) — the numbers are on record; the acceptance line is NOT EVIDENCE
+
+§1 of the design requires a Step-App retake: *"the final configuration with every feature removed
+(unconditional code): the full grid + consumers ONCE MORE — the number that goes on record must come
+from the code that ships, not from a feature build"*, and *"the unconditional code's numbers must
+match the winning feature build's within the band on every cell and consumer; a difference beyond
+the band is a defect in the removal step, not a new datum."*
+
+✅ **The removal is DONE** (`67563d3b`) and ✅ **the take is DONE**: box AMD Ryzen 9 5900HS, 16 logical
+(W = 16), the recording box; bench profile (`codegen-units = 1`, `lto = false` — every absolute here
+is a bench-profile number and does not describe the shipped `lto = "fat"` codegen, §0); all three
+benches `--no-run` pre-built OUTSIDE the window; two interleaved passes `app-r1` / `app-r2`; load
+receipt (process set > 300 MB, CPU %) captured immediately before and after every timed region —
+identical process sets on all six, CPU 0.4–13.4 %; `available_parallelism = 16` printed by the
+bench; no `KE16_EXPECT` and no `--features`, because the witness went with the arms. The criterion
+baselines of the winning feature build did not exist on disk (`target/` held no `criterion/`), so
+the §1 within-band check was made against the same-night replay of `a1f+b1+wc+c0` at `5863b041`
+(§A-RE) rather than against a saved baseline.
+
+| row | p1 / p2 | band |
+|---|---:|---:|
+| physics `in_scheduled_system/29751` **PRIMARY** | 12.595 / 12.142 ms | 4.0 % |
+| physics `single_threaded_O5/29751` (session meter) | 27.902 / 26.949 ms | 4.0 % |
+| physics `empty_schedule_control/29751` | **9.6 / 11.1 µs** — against 1.451 / 1.693, 1.5, 1.7, 1.5, 1.532 µs in five recorded sessions: **6.3–7.6×**; the row has no arm | 15.4 % |
+| physics `bench_thread_install_Wminus1/29751` **REF** (W−1 workers + the helping external joiner = W lanes; `b1` keeps the helper, `KE16-DESIGN-APP.md` §11) | 11.836 / 10.106 ms | **17.1 %** |
+| physics `bench_thread_install/29751` (W+1 lanes, raw only) | 12.050 / 10.330 ms | 16.6 % |
+| ecs `par_in_system/65536` | 94.007 / 86.246 ms | 9.0 % |
+| ecs `par_from_dispatcher/65536` | 92.099 / 85.832 ms | 7.3 % |
+| ecs `seq/65536` | 1,310.989 / 1,310.827 ms — matches every recorded session to 0.014 % | 4.0 % |
+| ecs protocol pass, N = 65536 | `par_in_system` 92.22 ms, `max_in_flight = 16`, speedup 14.22×; `RATIO in_system/from_dispatcher = 1.06×` | — |
+| `worker/body_10us_tasks_4W` **the deciding cell** | 82.9 / 79.1 µs | 4.9 % |
+| `worker/body_1us_tasks_4W` | 89.9 / 87.0 µs | 4.0 % |
+| `worker/body_1us_tasks_64W` | 1.147 / 1.146 ms, then 1.164 / 1.161 / 1.159 / 1.200 / 1.173 ms (7 runs, never below 1.146 ms) | 4.0 % |
+| the other 21 grid cells, `park_timeout_*` | taken (`target/criterion/*/app-r{1,2}`); not tabled here — the 1 µs and deciding cells are the ones the replay bears on | — |
+
+**Removal check (§1).** Against the same-night replay of `a1f+b1+wc+c0` at `5863b041`:
+`1us_4W` 89.9 / 87.0 vs 89.0 / 86.7 µs (1.01×, tie); `10us_4W` 82.9 / 79.1 vs 76.5 / 72.6 µs
+(1.087× against 2×band 1.107, tie); `1us_64W` 1.147 / 1.146 ms vs 1.170 ms / 444 µs (tie against
+p1; the feature build's 444 µs mode did not appear in seven unconditional runs). Consumers:
+`par_in_system/65536` 94.0 / 86.2 vs the record's 87.58 ms (tie); physics 12.6 / 12.1 vs the
+record's 8.46 ms — 1.44–1.49×, NOT a removal defect: physics absolutes do not travel between
+sessions (§Method corollary 2) and the record's CS-4 pass filed no session meter to normalise by.
+**The removal is the cause of nothing here** — the ancestor with the winning features reads the same
+slow mode on the same cell (§A-RE replay finding).
+
+**Acceptance line (`KE16-DESIGN-APP.md` §11).**
+
+* **Clause (1)** `in_scheduled_system < single_threaded_O5`: 12.595 < 27.902 and 12.142 < 26.949 —
+  **PASS, 2.22× / 2.22×**. Parallel physics on the route that ships is faster than leaving it off
+  (Step 0 read the opposite: 29.98 vs 26.27 ms).
+* **Clause (2) PRIMARY** `in_scheduled_system − empty_schedule_control ≤ REF × (1 + band)`,
+  `REF = bench_thread_install_Wminus1`. Band per §4 = max(0.04, REF spread
+  (11.836 − 10.106) / 10.106 = 0.171, candidate spread (12.585 − 12.131) / 12.131 = 0.037) =
+  **0.171**. Median of passes: 12.348 ≤ 10.971 × 1.171 = 12.85 → passes. Per pass: r1
+  12.585 ≤ 11.836 × 1.171 = 13.86 → passes; r2 12.131 against 10.106 × 1.171 = 11.83 → **fails by
+  2.5 %**. A STRADDLE. Raw against the other row (W+1 lanes): 1.044 / 1.174. And
+  `Wminus1 / bench_thread_install` = 0.982 / 0.978, ≈ 1 — the external joiner helped (B1's receipt).
+  **FILED AS NOT EVIDENCE**, in either direction: the reference row moved 17.1 % between two passes
+  minutes apart — 4.3× the floor — so every reading of the line sits inside the reference's own
+  noise, the shape §11 names (*"a pass inside that margin is not evidence the fix is complete"*) and
+  §W already met (*"the PRIMARY row's band is 85 % — that needs a session that opens already
+  settled, not more passes taken the same way"*).
+* **`empty_schedule_control` at 6.3–7.6× its five recorded values** is a finding about the SESSION,
+  not the arm — the row has no arm, and the same session reads `a3`'s 1 µs × W cells at 2.4–3.8×
+  their §C values while `a3`'s ≥ 100 µs × 64W cells reproduce §C within 1 % (§A-RE replay). Whether
+  it is one phenomenon with the `a1f` 1 µs collapse is NOT DETERMINED; timer resolution is excluded
+  (the bench's 50 µs park probe swung 756–15,006 µs across runs while `1us_64W` held 1.15–1.20 ms).
+
+**The O-series retake line (`KE16-DESIGN-APP.md` §11, first paragraph) is NOT written**: the
+shipping number is filed as not-evidence until a settled-session retake (≥ 3 passes, `--prebuild`,
+r1 discarded, `bench_thread_install` beside it).
+
+**Still OWED under this heading:** that retake; the physics consumer per arm at `5863b041` (the
+§A-RE replay took only the grid per arm); one grid row at the physics shape (96 tasks × ~4 µs, worker
+route); and, for the shipped code, a release-profile (`lto = "fat"`) row beside the bench-profile one
+— every absolute here is a bench-profile number (§0).
+
+**The freeze that must precede removal was taken, in that order** (owner ruling, 2026-09-02: *"Do
+not delete the unsuitable one, leave them as a spare — so the code is recorded but not present in
+the project"*): the annotated tag `ke16/candidates-frozen-2026-09-07` on `897c812f`, and
+`docs/threadpool/KE16-REJECTED.md`. The design's §freeze prescribes the name `ke16/tournament`; the
+tree's name is the dated one, and that is the name a reader must use. The return conditions the
+register needs are measured and are recorded in §Rejected below.
 
 ---
 
@@ -1084,12 +2000,26 @@ needed"* — so **the source and the command contradict each other and the comma
 The fix is a one-word doc edit. The valid receipt was obtained without the flag: `running 3 tests /
 3 passed` on both head-to-head arms.
 
+✅ **FIXED 2026-09-09**: `--ignored` is gone from the THREADPOOL §8 command in
+`KE16-DESIGN-MEASUREMENT.md`, with the reason recorded beside it.
+
+⚠ **And the first attempt at that fix removed it from BOTH commands, which was wrong.** The two
+tests are ignored for different reasons: the threadpool one is `cfg_attr`-ignored only WITHOUT an A
+arm, so `--ignored` runs nothing once an arm is on; the ECS one is ignored UNCONDITIONALLY (RED
+until defect A is fixed), so it needs the flag to run at all. Measured both ways in both
+directions — the over-applied edit turned the ECS gate into `running 1 test … 0 passed; 1 ignored`,
+which is the OTHER vacuous-green shape and the reason `running N` is not a sufficient receipt. The
+table is now in the design document beside the commands.
+
 ### 2. ⚠ The ECS bench's printed RATIO label is INVERTED
 
 The bench prints `RATIO dispatcher/system wall = …` while **computing
 `par_in_system / par_from_dispatcher`** — the metric §3 actually names. Verified arithmetically:
 `87.76 / 93.05 = 0.943`, which is the printed `0.94`. The number is right; the label's word order is
 backwards. Anyone reading the label and inverting the value gets the reciprocal of the receipt.
+
+✅ **FIXED 2026-09-09**: the label now reads `RATIO in_system/from_dispatcher wall`, and the
+occupancy pair beside it names which side is which.
 
 ### 3. ⚠ `tasklist` is DARK in this environment — a load receipt built on it is green from an emptiness
 
@@ -1101,10 +2031,16 @@ across 162 samples every 8 s, and the observed Game-process count set was **exac
 sample — never 0. The primary receipt is a CPU **percentage**, not a list, precisely so it cannot be
 green from a zero.
 
-### 4. ⚠ The `park_timeout configuration=` label is not a state classifier
+### 4. ⚠ The `park_timeout` rows are a property of the BOX, not of any arm — label AND medians
 
-See §0. ~26 % of probes read "guarded" on a fully unguarded box. **Decide state on the criterion
-medians; record the label beside them, never instead.** Verified not to split any decision cell.
+See §0. ~26 % of probes read "guarded" on a fully unguarded box, reproduced again 2026-09-08
+(pass 1 `unguarded`, passes 2 and 3 `guarded`, same box, minutes apart). The original remedy —
+*"decide state on the criterion medians"* — is right for reading the BOX and was **wrong as licence
+to treat those medians as comparison cells**: they track the Windows global timer resolution, they
+read 15.55 ms for every arm in one session and 6–13 ms for one arm within another, and the 50 µs row
+and the 2 ms row report the same number because a resolution floor dominates both. On 2026-09-08
+that nearly eliminated the shipped arm on a × 1.736 "regression" (§W). **Excluded from every
+candidate comparison; recorded beside a verdict, never inside one.**
 
 ### 5. ⚠ Two ECS sources disagree, and only for one arm
 
@@ -1242,15 +2178,24 @@ A contaminated run named is worth more than one silently dropped.
 Named here rather than in a covering note, because a reader who mistakes this file for a completed
 tournament will ship on numbers that were never taken.
 
-1. **AXES W AND C ARE NOT MEASURED.** `wg`, `wc`, `wgc`, `c1` and `c1f` are owed. The reference
-   `a3+b0+w0+c0` exists (§W, 49 rows, CS-2) and is preserved; the run was stopped when the owner
-   started a game. Any future C row over `w0` carries the App-4 cascade caveat.
-2. **STEP APP HAS NOT BEEN RUN.** No number in this file comes from the unconditional shipped code.
-   The design requires the retake on the code that ships, and separately every absolute here is a
-   bench-profile number that does not describe the shipped codegen configuration.
-3. **THE FREEZE HAS NOT BEEN TAKEN.** No `ke16/tournament` tag; no `docs/threadpool/KE16-REJECTED.md`.
-   The order is freeze, then remove. §Rejected supplies the measured return conditions the register
-   needs.
+1. **AXIS W IS CLOSED ON `wc`; AXIS C IS NOT MEASURED; ONE THING INSIDE W IS STILL OWED.** `wg` and
+   `wgc` are eliminated at CS-4 and rule 2's two gates are green, so W\* = `wc` (§W). Owed:
+   **(a)** a physics ranking, which this pass cannot supply because its three passes drift
+   monotonically and the PRIMARY row's band is 85 % — that needs a session that opens already
+   settled, not more passes taken the same way, and it is NOT on the critical path since W\* was
+   fixed by gates rather than by numbers and Step App re-takes every consumer row anyway;
+   **(b)** `c1`/`c1f`, now buildable and measured as a pair (§C).
+   ⚠ The CS-2 reference (49 rows) is preserved as PROSE only — this pass overwrote its criterion
+   baselines for r1–r3 under the same directory names (§W, last subsection).
+2. **STEP APP'S NUMBERS HAVE NOT BEEN TAKEN.** The removal itself shipped in `67563d3b`, but no
+   number in this file comes from the unconditional shipped code. The design requires the retake on
+   the code that ships, and separately every absolute here is a bench-profile number that does not
+   describe the shipped codegen configuration.
+3. ✅ **THE FREEZE WAS TAKEN**, before the removal as the order requires: the annotated tag
+   `ke16/candidates-frozen-2026-09-07` on `897c812f`, and `docs/threadpool/KE16-REJECTED.md`.
+   The tag is PUSHED (owner ruling, 2026-09-09): `git ls-remote --tags origin` resolves it to
+   `897c812f`. It is the project's first and only remote tag — it had been local while the removal
+   commit was already public, which is the one arrangement the freeze exists to prevent.
 4. **RULE 1 IS NOT DISCHARGED FOR THE HEAD-TO-HEAD PASS ITSELF.** Its §8 loom / Miri / clippy /
    full-workspace legs were out of scope by instruction. They sit UPSTREAM of rule 2 — a red there
    deletes the verdict rather than qualifying it. They were later run at CS-2 and are green for the
@@ -1265,9 +2210,12 @@ tournament will ship on numbers that were never taken.
    bench edit or an affinity mask, and both move the experiment off the phenomenon.
 9. **THE PROTECTOR GATE'S ARMEDNESS COUPLING IS NOT FIXED**, only documented at the coupling site.
    §Miri.
-10. **THE INSTRUMENT DEFECTS OF §Instruments 1 AND 2 ARE NOT FIXED** — the stale `--ignored` recipe
-    and the inverted ECS ratio label. Both are one-line edits that no measuring pass was permitted
-    to make.
+10. ✅ **THE INSTRUMENT DEFECTS OF §Instruments 1 AND 2 ARE FIXED (2026-09-09)** — the stale
+    `--ignored` recipe and the inverted ECS ratio label. Both were one-line edits that no
+    measuring pass was permitted to make; they were made outside a measuring pass.
+    Fixed in the same commit: the four bench sites that still prescribed the retracted
+    `RUSTFLAGS` two-build recipe (§Doc rot below), which on this box deletes the ISA baseline
+    and the linker flags and fails by LOOKING like "the switch does nothing".
 
 ---
 
@@ -1334,6 +2282,12 @@ bench numbers come from "a BETTER-OPTIMISED binary than the one that ships". **F
 and inverted in direction** — see §0. The queue text was written 2026-09-03; the profile changed
 2026-09-04 in HEAD `4a363678` itself.
 
+✅ **BOTH QUEUE ERRORS FIXED 2026-09-09**: the dead `KE16-MEASUREMENT.md` citation now names the
+file that exists, and the profile paragraph states the current shape — release carries
+`lto = "fat"`, bench carries `codegen-units = 1` with `lto = false` EXPLICITLY so it does not
+inherit it, so the two are different codegen configurations in BOTH directions and neither is
+simply "better optimised" than the other.
+
 Four bench headers still instruct a `RUSTFLAGS` two-build recipe (`simd_o1.rs:11`,
 `colored_solve.rs:241`, `boyko_physics/Cargo.toml:65` and `:97`). On this box that would **delete**
 both the ISA baseline and the linker fix, and the failure mode **looks like "the switch does
@@ -1341,6 +2295,11 @@ nothing"**. One site is already correct and is the model (`sdf_narrowphase_o9.rs
 fix landed in that `.rs` header and **not** in the same bench's manifest comment at
 `Cargo.toml:97`, which still carries the retracted recipe. A header and its manifest disagreeing
 about the shipped recipe, where the manifest is the one a reader skims.
+
+✅ **ALL FOUR FIXED 2026-09-09**, including the manifest copy that disagreed with its own header.
+Each now says what to run, why `RUSTFLAGS` is wrong here (it REPLACES rather than appends), that
+`x86-64-v3` already carries AVX2 so no flag is needed at all, and that `cargo --config` is the
+merging form if one ever is.
 
 ---
 

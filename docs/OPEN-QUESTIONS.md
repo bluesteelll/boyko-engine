@@ -4953,6 +4953,148 @@ artefact today.
    because it changes the recipe the measured 4/4 and 3/4 table was taken under, and every negative
    control compares against that table. Not yet implemented; it is the next small item after Stage 3b.
 
+## Axis W is decided against `wg`; what remains is a GATE, not a number (2026-09-08)
+
+Three interleaved passes at CS-4 eliminated `wg` (W-b) and `wgc`: zero improvements, thirteen and
+fourteen regressions, and — the reading that decides it — an **occupancy receipt**. Under `wg` the
+ECS protocol pass reports `max_in_flight` of **5–6 of 16 lanes** with the speedup pinned at
+**2.00×** in every pass, against the reference's 16 and 13.9–15.7×. W-b does not add overhead; it
+leaves ten lanes parked, because on a wave pushed to one destination only the first two pushes see
+`pre_len` of 0 and 1. `KE16-DESIGN-W.md` §2.4 had named this outcome as its own risk clause, on
+exactly the cells it fired on.
+
+`wc` (W-d′) is a tie on all 38 cells and preserves 16/16 occupancy. **Step W rule 2 makes its keep
+conditional on two gates rather than on any number**: a real-park loom M1c, and the route-(b)
+many-seeds Miri gate. Neither has been run at CS-4. So **W\* is undecided between `wc` and `w0`,
+and no measurement can decide it** — a red on either gate drops the feature outright.
+
+⇒ **Nothing here needs you.** The two gates are structural work and will be run when the machine is
+free; they are not a values call. This entry exists so that a reader who sees "axis W measured" does
+not conclude that W\* is fixed.
+
+### ⚠ What IS worth your ruling: the physics ranking, and whether it is worth a session
+
+**No physics verdict was filed, and it cannot be from this data.** The three passes drift
+monotonically — the reference's `bench_thread_install` reads 36.24 / 13.36 / 8.12 ms across passes
+1, 2, 3, and the PRIMARY row `in_scheduled_system` carries an **85 % band**. Against a band that
+wide every arm is a tie by construction, which is a statement about the band and not about the arms.
+The machine was still settling from the build when pass 1 ran; the load receipts show 14.8 % CPU at
+pass 1's open and 1.4 / 0 / 0.1 % at pass 3's.
+
+**More passes taken the same way would not fix it** — the drift is monotone, so extra passes extend
+the trend rather than average it out. A physics ranking needs a session that opens ALREADY SETTLED:
+the box idle before the first build, not after it.
+
+**My recommendation is that this is NOT worth a session, and the reason is that it is not on the
+critical path.** W\* is a choice between `wc` and `w0`, and rule 2 decides it on the two gates. A
+physics ranking would matter only if `wc` were a candidate to keep on performance grounds — it is
+not; it is a measured tie. And Step App re-takes every consumer number on the unconditional shipped
+code anyway, which is where the acceptance line is formally taken. **Unless you want the record to
+carry a CS-4 physics row for its own sake, the next quiet window is better spent on the axis-A
+re-judgement that fixing defect B forces** (`a3+b4` vs `a1f+b1`, ruling 1 of 2026-09-07).
+
+### ⚠ Raw data this pass destroyed, recorded because it cannot be recovered
+
+`--save-baseline` is keyed on the variant string, which does not name the code state, and criterion
+overwrites in place. Re-taking `a3+b0+w0+c0` at CS-4 overwrote the **CS-2 reference's raw samples for
+r1, r2 and r3**; r4 and r5 survive only because the pass stopped at three. The medians, bands and
+per-run values are preserved as prose in `KE16-RESULTS.md` §W, so the findings are intact — the
+per-sample data behind three of five runs is gone, and criterion baselines are not rebuildable from
+anything in the tree. The naming scheme now carries the short HEAD hash (`e7910d5f`), so two code
+states can no longer address one directory. **No action is asked of you; it is here because a
+document that only records its successes is the thing this campaign keeps finding to be wrong.**
+
+## A measurement RULE was rewritten after it ruled, and that is yours to accept or reject (2026-09-08)
+
+`KE16-DESIGN-MEASUREMENT.md` §7's Step-A rules 2 and 3 are amended, and the amendment is flagged
+here rather than merely applied because of when it happened: **rule 3 decided against `a1f+b1`, and
+`a1f+b1` was then measured better on ten of thirty-five cells with both consumers tied.** A decision
+rule rewritten after it has ruled is the shape that most deserves an owner's eye, so the original
+text is preserved verbatim directly beneath the amendment and the change is reversible by deleting
+one block.
+
+**What was wrong with the rule, as a fact rather than a preference.** Rule 3's tiebreak gave the
+decisive vote to the 64W column. The engine cannot produce that column: `BatchingStrategy::default()`
+sets `batches_per_thread = 1`, so an archetype splits into exactly W chunks — one per worker — and
+reaching 64W needs `batches_per_thread = 64`, which **no caller in the tree sets**;
+`MIN_ARCHETYPE_FOR_PARALLEL = 1024` floors a chunk at 1024 rows, so the 1 µs body the tiebreak fires
+on needs a row costing under a nanosecond, against a real ECS chunk of ~82 ms; and the physics
+solver does not use that path at all. So one cell at an unreachable width and an unreachable body
+size outvoted six mid-body cells at 2–4 × and a tie on both consumers.
+
+**What the amendment says.** Rule 2 becomes CONSUMER AGREEMENT rather than physics primacy — a
+candidate leads only if it leads or ties on every consumer, and a disagreement between consumers is
+reported as a tie rather than broken by choosing one. Rule 3's veto surface becomes the widths the
+engine PRODUCES: `tasks = W` decides, 4W and 64W are recorded and cannot decide, and no single cell
+may again override the rest of the grid and both consumers.
+
+**Why it is put to you.** Perf and architecture forks are the orchestrator's to settle, but
+rewriting the yardstick mid-campaign is closer to scope. Three things are worth your ruling:
+
+1. **Accept, reject, or narrow the amendment.** Rejecting it does not restore `a3`: §A-RE's reversal
+   rests on the measurement, not on the rule — ten cells improved, two regressed, both consumers
+   tied, gate ladder green. Rejecting the amendment means the campaign carries a rule that its own
+   measurement contradicts, which is a coherent choice only if the rule is then fixed some other way.
+2. **`4W` is reachable but unused.** `BatchingStrategy` is public and `par_iter().batching_strategy()`
+   accepts it; nothing in the engine calls it. If you expect callers to start tuning that, 4W should
+   join the deciding surface and the amendment should say so.
+3. **The consumer set is thin.** The pool has four production dispatchers — the scheduler, ECS
+   `par_iter`, the physics colour solver, and the MSDF bake — and the campaign measures TWO of them.
+   A rule that requires consumer agreement is only as good as the consumers it agrees across. Adding
+   the scheduler and the bake as harnesses is a real cost and a real coverage gain; it is your call
+   whether the campaign pays it now or records the gap.
+
+## The `Vec` side-store did not come back — Stage 4 of the 2026-07 remediation was never run (2026-09-08)
+
+Asked why physics holds bulk data in `std::Vec` again after the O11-SP4 incident "when we checked
+everything and there were no problems". It never came back. It was never removed, and three
+structural reasons kept that invisible.
+
+**IT WAS FOUND, NAMED, AND STAGED.** `docs/ARCH-AUDIT-ECS-DATA-REMEDIATION.md` lists
+`ConstraintGraph ×8` under **S3** — *"per-step SoA/CSR scratch, ~20 resources / ~90 Vec fields …
+only the backing medium (std::Vec → ComponentPool) changes"* — and it is **not** in that document's
+"Legit-keep" list. Its remedy is **Stage 4**, *"mechanically swap the S3 per-step `Vec` fields →
+`ScratchColumn`"*.
+
+**STAGES 0 AND 1' RAN; STAGE 4 DID NOT.** `ScratchColumn` exists (`scratch_ids.rs`), the three body
+mirrors are converted, and `solver/colored.rs:305` documents the address-stable backing. So what was
+fixed is **the race**, not **the class** — which is exactly why the memory of it is "we checked and
+it was clean": SP4 is closed and its gate is green. Counted 2026-09-08 across
+`crates/boyko_physics/src`: **50 fields on `ScratchColumn`, 106 still on `Vec`.** Part of S3 did get
+converted (`ra_x`/`ra_y` at `colored.rs:806` are the `ContactColumns` SIMD lanes); `ConstraintGraph`'s
+eight did not. The remediation is **partially executed**.
+
+**WHY NOTHING SURFACED IT — three reasons, all structural:**
+
+1. **There is no gate on `Vec`.** `clippy.toml` mechanically bans `HashMap`, `HashSet`, `Mutex`,
+   `RwLock`, `Rc`, `RefCell` and their `parking_lot`/`hashbrown` forwards. `std::vec::Vec` is
+   absent. Principle 0's "no parallel data system" clause rests on prose alone, while the repo's
+   other two make-a-check-disappear mechanisms — `unsafe` and `#[allow]` — each carry a mandatory
+   written justification and a census.
+2. **Two different "we checked everything" statements read as one.** `clippy.toml`'s header says a
+   full classification across 14 crates *"found ZERO violations"* — true, and scoped to the types it
+   lists. The architecture audit says *"~90 Vec fields"* in physics — also true, and about a class
+   the lint never covered. The first sentence lives in the gate file, sounds absolute, and carries
+   the same 2026-07 date as the second.
+3. **Neither plan document tracks stage status.** There is no "Stage 1' — done" and no "Stage 4 —
+   open" anywhere in `ARCH-AUDIT-ECS-DATA-REMEDIATION.md` or `DENSE-COMPONENTS-PLAN.md`. A
+   half-executed plan is textually identical to an unexecuted one.
+
+**WHAT IS PUT TO YOU:**
+
+1. **Does Stage 4 get scheduled, or is S3 accepted as a standing exception?** Either is defensible —
+   the pattern (CSR/SoA, cleared-and-refilled, zero-alloc) is already correct and the audit says so;
+   what `ScratchColumn` buys is address-stability on grow, which matters only where a raw pointer
+   outlives a resize. If it is accepted, it belongs in "Legit-keep" with that reason, not left
+   looking like open work.
+2. **Should `Vec`-as-a-durable-side-store get a mechanical gate?** It cannot be a blanket
+   `disallowed-types` entry — `Vec` is legitimate almost everywhere — so it would have to be a
+   census over `Resource`-held structs, in the shape `ignore_reasons_census.rs` and
+   `print_census.rs` already use. That is real work and it is the only thing that would stop this
+   recurring.
+3. **Should the plan documents carry per-stage status?** The cheapest of the three, and it is what
+   turned a known backlog into a surprise.
+
 ## OPEN 2026-09-09 — three questions the ECS-native physics lane raised and cannot rule itself
 
 Lane: `feat/ecs-native-storage` (worktree `D:/wt/ecsnative`), branched from `master` `7e908c87`.
@@ -5084,3 +5226,238 @@ in any current plan.
 
 Resulting order of work: **finish Stage 4 in this lane → close KE16 → in-scope barrier → re-open
 questions 2 and 3 with the barrier's numbers in hand.**
+
+---
+
+## `Scope::spawn_batch` after App-4 lost: the design says do not ship it, and four production sites call it (2026-09-09)
+
+**THE RULE, VERBATIM.** `KE16-DESIGN.md`'s App-4 row states its own kill condition: *"no cell better
+than per-task spawn beyond 2× the band — then the API is not shipped (smaller surface wins a tie)"*.
+The tournament shipped `c0` — per-task spawn. App-4 lost. By that sentence the API comes out.
+
+**WHAT ACTUALLY SHIPPED.** The BEHAVIOUR is gone and the SURFACE is not. `Scope::spawn_batch`
+(`crates/boyko_threadpool/src/scope.rs:1060-1074`) is now:
+
+```rust
+let mut k = 0usize;
+for f in bodies { self.spawn(f); k += 1; }
+debug_assert!(k <= n, "invariant: `spawn_batch` bodies yielded more than the `n` it was promised");
+```
+
+Its own doc says so — *"One `spawn` per body: every body is registered and pushed on its own, and
+every push takes its own wake decision"*. There is no `fetch_add(n)`, no once-per-wave wake, nothing
+App-4 proposed. What remains is a loop plus a debug-asserted upper bound.
+
+**THE STATED REASON TO KEEP IT IS NOT EXERCISED BY ANY CALLER.** The doc justifies the surface as
+*"the API exists so that a caller whose chunk count is only an upper bound has one call to make"*.
+All four production call sites pass an EXACT count, and all four have the identical shape
+`spawn_batch(N, (0..N).map(..))`:
+
+| site | argument |
+|---|---|
+| `crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs:406` | `spawn_batch(n_chunks, (0..n_chunks).map(..))` |
+| `crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs:263` | `spawn_batch(n_chunks, (0..n_chunks).map(..))` |
+| `crates/boyko_physics/src/resources.rs:1781` | `spawn_batch(n_waves, (0..n_waves).map(..))` |
+| `crates/boyko_physics/src/soft/colored.rs:1042` | `spawn_batch(n_waves, (0..n_waves).map(..))` |
+
+So the `n` is never an upper bound in production; it is the length of the range immediately beside
+it, and the `debug_assert!` it feeds cannot fire at any of the four.
+
+**WHAT REMOVAL WOULD COST.** Four production sites become `for chunk in 0..n { scope.spawn(..) }`.
+Twelve `#[test]` functions in `scope.rs` go with the API (eleven `spawn_batch_*` plus
+`scope_multi_drain_frees_once`), as do the call sites in
+`crates/boyko_threadpool/tests/block_allocation_receipts.rs:746,876` and
+`crates/boyko_threadpool/tests/miri_scope.rs:629,684` — the latter two are receipts about the
+allocator and the release window, not about batching, so they would be rewritten onto `spawn`
+rather than deleted.
+
+**WHY THIS IS NOT DECIDED HERE.** Mechanical evaluation of the removed `ke16-c-batch` feature keeps
+whatever was outside a `cfg`, and `spawn_batch` was outside one. Removing a public method, rewriting
+four production sites and retiring twelve tests is a scope decision, not a cfg evaluation, and the
+rule that mandates it was written before the API acquired production callers.
+
+**WHAT IS PUT TO YOU:**
+
+1. **Does `Scope::spawn_batch` come out, as its own design rule says?** The honest reading is yes:
+   it is a loop with a promise no caller needs, and "smaller surface wins a tie" was written for
+   exactly this outcome.
+2. **Or does the rule get amended in place?** Defensible too — the four sites read better with it,
+   and the `debug_assert!` is a real invariant for a FUTURE caller whose count is a bound. If so the
+   App-4 row must say that the API survives its own rejection and why, because as written the
+   document and the tree disagree.
+3. **Either way the doc changes.** Today `KE16-DESIGN.md` says the API is not shipped and the API is
+   shipped. That is a documented rule contradicted by the tree, which is the shape this campaign has
+   spent its whole length removing.
+
+---
+
+## The `a1f` placement reads the defect-A serial floor at 1 µs, the record said 1.36×, and the cause is NOT DETERMINED (2026-09-10)
+
+**WHAT WAS MEASURED (all on one box, one night, bench profile, load receipts, arm witness per run;
+`KE16-RESULTS.md` §A-RE replay and §App).** `worker/body_1us_tasks_64W`, 1,024 tasks × 1 µs from
+inside a worker: `a3+b0` 99.9 / 100.6 µs; `a1f+b0` 1.184 / 1.148 ms; `a1f+b1` 1.170 ms / 444 µs
+(bimodal); unconditional HEAD 1.146–1.200 ms over seven runs. The record (`5863b041`, CS-4) had
+80.5 / 110.3 / 109.5 µs — ALL arms parallel — and the same commit with the same features reads the
+floor tonight. Excluded on measurement: the Step App removal, the box's compute speed
+(`ecs seq/65536` to 0.014 %), timer resolution (probe 756–15,006 µs while the cell held ±4 %).
+Excluded on code (Fable pass, refuted and re-verified): H1 joiner-outruns-thieves (10 µs bodies
+reach 8–15 lanes in the same process), H2 the FIFO owner/thief CAS storm (`b0` never pops its own
+deque, and it is stably serial), H3 a sweep that misses the spawner's stealer, H4 a dropped wake.
+Two facts point outside the pool: dispatcher-route 1 µs cells under `a3` vs `a1f` run near-identical
+code and read 100 vs 540 µs; and EVERY wake-bound cell is elevated arm-independently tonight
+(`a3`'s 1 µs × W 2.4–3.8× its §C values; `empty_schedule_control` 6.3–7.6× its five recorded
+sessions) while compute-bound cells reproduce within 1 %.
+
+**THE HYPOTHESIS THAT FITS EVERYTHING, UNTESTED.** A box scheduling-latency state — on a laptop
+part (Ryzen 9 5900HS) most plausibly core parking / C-state exit latency — that is (a) present in
+every arm, (b) gated by body duration (only wake-bound cells suffer), (c) an order of magnitude
+worse for `a1f` than for `a3` (a woken `a1f` thief must sweep 15 stealers to find the one deque;
+an `a3` thief batch-steals 32 from the global injector at stage 2, so far fewer wakes must land
+in time), and (d) BETTER on a busy box — which is what the CS-4 record's own timeline suggests: the
+driver keys the table depends on were committed 09:43:31 and the table written at 10:15, ≤ 31.5 min
+for ~35 min of passes, with 214 doc lines committed at 09:43 and a 17.7 KB source file written at
+09:54 in the same window (provenance lens, refuted-and-confirmed). A box kept warm by an agent
+editing and compiling would have SHORTER wake latencies than a quiet one, which is the direction
+the record differs from the replay. This is a hypothesis; it is the only one that explains all of
+(a)–(d), and it has not been tested.
+
+**THE DISCRIMINATING TESTS, in cost order (machine must be free; none was run — owner said no
+more timings 2026-09-10 00:30):**
+
+1. **Warm-box A/B.** Run `worker/body_1us_tasks_64W` on the shipped binary twice: once quiet, once
+   with a one-core low-priority spinner (or the `High performance` power plan / core parking
+   disabled) held for the run. If the cell drops from ~1.15 ms toward ~100–400 µs under the warmer,
+   the state is the box's wake latency and the CS-4 record was taken on a warm box. ~2 minutes.
+2. **`empty_schedule_control` alone.** One criterion run; 1.4–1.8 µs means the 6–7× was session
+   state; 9–11 µs on a quiet box with (1) positive confirms the same phenomenon.
+3. **Instrumented wave (mechanism lens's test).** `ke16_nested_scope_occupancy.rs` with `BODY = 1 µs`;
+   read `pool.parked_mask()` right after the spawn loop and count `Steal::Retry` at
+   `worker.rs::drain_one`. `lanes_used == 1` with the 15 sibling bits CLEAR and Retry ≈ 0 ⇒ the
+   siblings were woken and did not run in time (box); bits still SET ⇒ a real dropped wake (code);
+   `lanes_used > 1` at the floor ⇒ the bodies themselves are serialised.
+4. **Cold dispatcher cell.** `dispatcher/body_1us_tasks_64W` alone on the `a1f` binary: ~100 µs
+   means the 540 µs was carried-over process state; 540 µs means the binaries differ in a way the
+   source does not show.
+
+**TEST 1 RUN 2026-09-10 ~01:30 (owner: "do the A/B") — REFUTED.** `worker/body_1us_tasks_64W` on
+the shipped HEAD binary, three runs per state: quiet 1.123 / 1.161 / 1.108 ms; sixteen IDLE-priority
+spinners holding every core out of C-states (CPU 100 %) 1.054 / 1.137 / 1.150 ms; one
+BELOW-NORMAL spinner 1.067 / 1.155 / 1.137 ms. `empty_schedule_control` 10.18 / 9.38 / 8.93 µs.
+The cell does not move with core warmth; the box-wake-latency hypothesis above is dead, and the
+"warm CS-4 box" reading of the timeline explains nothing.
+
+**THE ONE VARIABLE STILL UNCONTROLLED IS THE COMPILER.** `~/.rustup/toolchains/stable-x86_64-pc-windows-gnu`
+was rewritten at **2026-09-09 02:52:35** (`rustup update` to 1.98.1; `20fc8a66` records the move
+from 1.97.1). The CS-4 §A-RE table was produced **2026-09-08 10:15** — every CS-4 binary was built by
+rustc **1.97.1**; every binary measured on 09-09/10, including the "same commit, same features"
+replay at `5863b041`, was built by **1.98.1**. A source-level audit cannot see a codegen change,
+and the tree already met one 1.98 effect at the TLS boundary (`missing_const_for_thread_local`,
+63 sites): `worker_lane_for` — the a1f placement predicate — is a `thread_local!` read on every
+push and in every join step, and `a3` never takes it. **Test 0 (cheapest decisive, ~5 min +
+a ~200 MB download): `rustup toolchain install 1.97.1-x86_64-pc-windows-gnu`, rebuild the pool bench
+at `5863b041` with `--features ke16-a1-fifo,ke16-b1,ke16-w-count` under `+1.97.1-…`, run the cell.**
+~110 µs ⇒ the record was right for ITS compiler and 1.98.1 regressed the a1f path (a shipped
+codegen regression, and a `BLESSED_RUSTC`-class receipt is owed beside every grid);
+~1.15 ms ⇒ the compiler is excluded too and only tests 3–4 remain.
+
+**TEST 0 RUN 2026-09-10 ~02:00 (owner: "install it and run") — THE CAUSE IS THE COMPILER.** Same
+commit `5863b041`, same features, same box, arm witness printed, taken on a box the owner had just
+called NOT quiet (park probes 7.8–15.5 ms; a noisy box inflates a reading, it does not deflate one):
+
+| build | `worker/body_1us_tasks_64W` | `worker/body_10us_tasks_4W` |
+|---|---:|---:|
+| `a1f+b1+wc+c0`, **rustc 1.97.1** | **99.3 / 105.0 / 132.7 µs** | 65.8 / 138.4 / 76.3 µs |
+| `a1f+b1+wc+c0`, rustc 1.98.1 (this session, 9 runs) | 1,170–1,215 µs | 72.5–74.7 µs |
+| `a3+b0+wc+c0`, rustc 1.97.1 | 165.8 / 128.1 µs | 182.8 / 157.9 µs |
+| `a3+b0+wc+c0`, rustc 1.98.1 (this session) | 99.9 / 100.6 µs | 175.7 / 178.9 µs |
+
+The record's 109.5 µs reproduces under the compiler that produced it. **rustc 1.98.1 slows the
+`a1f` placement path ~11× at 1 µs bodies and leaves `a3` alone**; the deciding cell is unaffected
+(0.4–0.5 either way, so the axis-A verdict stands under both compilers). `~/.rustup/toolchains/stable-…-gnu`
+was rewritten 2026-09-09 02:52; every shipped binary since is 1.98.1. **This is a shipped codegen
+regression on the pool's fine-granularity path, and it is the answer to the 10× question.** Both
+earlier causal stories in this entry (wake latency, warm box) were wrong and are struck above.
+
+**MECHANISM FOUND 2026-09-10 ~03:00, IN THE ASSEMBLY — `docs/threadpool/RUSTC-198-WINDOWS-GNU-TLS.md`.**
+Under rustc ≥ 1.98.0 on `x86_64-pc-windows-gnu` every `thread_local!` read calls
+`std::sys::thread_local::guard::windows::enable()` = `lock inc [ACTIVE_ENABLE_CALLS]` + `lock or [rsp],0`
++ `kernel32!FlsSetValue` + `lock dec` — two contended RMWs on one process-global line plus a Win32 call
+per access (rust-lang/rust #148799 + #157483, both milestone 1.98.0; `target_thread_local` is unset on
+windows-gnu, so the per-thread memoisation is compiled out and `const {}` does not help). The `a1f`
+path pays it twice per spawn (`worker_lane_for`) and twice per victim in every thief sweep (crossbeam-epoch
+pin before the `len` check); `a3`'s paths carry zero TLS reads and its `Injector` steal never pins.
+Everything else in the two binaries is relocation-identical. The bracket below is answered by the
+sources (1.98.0); what remains owed is the falsification run in that file's §5 and the two local fixes
+in its §4(b), neither before the owner frees the box.
+
+~~**NEXT (no runs until the owner says the box is free):** (i) bracket it — 1.98.0 is installed~~ (superseded) (i) bracket it — 1.98.0 is installed
+(`~/.rustup/toolchains/1.98.0-…`, 2026-09-02): one build + one run says whether the regression is
+1.98.0 or the 1.98.1 point release; (ii) name the function — `cargo asm` / `objdump -d` diff of
+`push_on_lane_no_wake`, `worker_lane_for` (a `thread_local!` read on every push; 1.98 already
+misfires `missing_const_for_thread_local` on this tree's 63 `const {}` sites, so TLS codegen on
+windows-gnu is the first suspect), `try_steal_random` and crossbeam's `steal_batch_and_pop` between
+the two builds; (iii) a `BLESSED_RUSTC`-class receipt beside every published grid — the compiler
+that produced the bytes, not the channel name — because a load receipt cannot see this either.
+
+**TWO GAPS THIS EXPOSES, EITHER WAY THE TESTS FALL:**
+
+* **`a1` (LIFO owner end) + `b1` was never measured.** `a1` was eliminated at CS-1 on physics in
+  the one session whose own machine witness FAILED (`KE16-REJECTED.md`: `O5` moved 16.84 % between
+  its two runs, `bench_thread_install` 45 %), before `b1` existed; its return condition is *"a
+  session whose `O5` spread is ≤ 1 %"*. LIFO is the end discipline `KE16-DESIGN-A.md` §1.4 names as
+  the one whose ends "meet only on the last element". If test 3 shows thieves ARRIVING and LOSING,
+  `a1+b1` is the arm to measure next; if it shows them not arriving, LIFO does not help and the
+  answer is in wake policy (axis W was closed on `wc` = every push wakes one).
+* **The physics consumer runs at the collapsed shape.** 96 = 6W chunks per colour, 1–10 µs bodies,
+  from a worker (`KE16-DESIGN-MEASUREMENT.md` §7 correction). Its per-arm numbers were never
+  re-taken after CS-4, and tonight's HEAD physics is 1.44× the record with no meter to normalise by.
+
+**WHAT IS PUT TO YOU:**
+
+1. **Run test 1 when the box is free?** Two minutes, no code, and it decides whether the 11× is a
+   property of the shipped pool or of a quiet laptop. If the box property is real, the shipped
+   configuration is the one most punished by it, and that is a design fact about `a1f`, not noise.
+2. **If the box is the cause: does the record keep numbers taken on a warm box?** The CS-4 table
+   would then be neither wrong nor reproducible — it would be a measurement of a state the protocol
+   did not control. The protocol's load receipt records processes and CPU %, not wake latency; a
+   `park_timeout` probe was added for App-12 and swings 20× on its own. A wake-latency receipt (the
+   `empty_schedule_control` row, or `dispatcher/body_1us_tasks_W`, both arm-independent) beside
+   every published grid would make the next such divergence visible in the table instead of a year
+   later.
+3. **Does `a1+b1` get measured?** It is the only untried combination of a shipped joiner with the
+   end discipline the design itself prefers at fine granularity.
+
+---
+
+## RETRACTED the same day — the Miri protector gate's arming is NOT seed-dependent; the six-seed receipt was taken under a reduced recipe (2026-09-10)
+
+While gating the TLS fix, `crates/boyko_threadpool/tests/miri_scope_completion_protector.rs` went red
+at `:454` ("the probe fired 2 times but NOT ONE of 2 frees landed inside a release window") under the
+default seed. A control run on HEAD passed with `overlaps=1/2` — one overlap of margin. Six seeds under
+the project's `-Zmiri-tree-borrows` (an environment `MIRIFLAGS` REPLACES the config's; the first sweep
+was run without the flag by mistake and produced Stacked-Borrows noise in crossbeam-epoch, identical on
+HEAD): **fix tree 5 of 6 green; HEAD 0 of 6 green** (`overlaps=0/2` on four seeds, other contexts red
+on the rest). The fix does not cause the red; the gate's arming was already a coin flip whose default
+seed happened to land. The test's own message names the remedy — re-tune `MIRI_RELEASE_PROBE_YIELDS`
+against the observation — and that is owed as its own change, with the seed sweep as the receipt
+(`scratchpad/miri_seeds_tb.log`, reproduced by the commands in this entry).
+
+~~**WHAT IS PUT TO YOU:** a Miri gate whose armed-ness flips with the seed is not a gate; retune it, or
+make the arming assert print all six seeds and require a majority.~~
+
+**RETRACTED 2026-09-10, nothing is put to you.** The receipt above is invalid as evidence about the
+constant: `miri_seeds_tb.log` was taken with `MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-seed=N"`, which
+drops four flags the test header declares mandatory (`-Zmiri-disable-isolation`
+`-Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-preemption-rate=0`) — an environment
+`MIRIFLAGS` REPLACES the config's, and this entry knew that and still spelled only two. Without
+`-Zmiri-preemption-rate=0` the run measures the preemption RNG, and the gate's own monitor said so:
+the reduced runs print `block_overlaps < overlaps`, the inversion `assert_probe_armed` documents as the
+signature of that missing flag. Under the documented recipe, measured on this branch: **every value
+16..96 of `MIRI_RELEASE_PROBE_YIELDS` arms on all six seeds** (36 runs), 16 additionally confirmed on
+seeds 0, 7, 8, 9, 10 — 11 seeds, 0 disarmed — and the gate still reds 3/3 by mutation (`complete_task`
+receiver back to `&Self`), on the protector property and not on its own arming check. The constant
+stays **16**; the sweep table, the recipe A/B and the mutation receipt are recorded on the constant's
+doc in `crates/boyko_threadpool/src/scope.rs`, and the test header now carries the full-recipe seed
+loop. The "fix tree 5 of 6, HEAD 0 of 6" numbers say nothing about the TLS merge; the merge was gated
+separately (`tls_lane_merge.rs`, Miri Tree Borrows under the full recipe). The mechanism to keep: a
+Miri receipt whose flag set is not spelled in full is a receipt about one binary's RNG stream.

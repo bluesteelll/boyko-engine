@@ -889,7 +889,7 @@ fn read_bytes(ctx: &VulkanContext, buffer: &BoundBuffer, byte_len: usize) -> Vec
 }
 
 fn words_from_bytes(bytes: &[u8]) -> Vec<u32> {
-    bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
 }
 
 /// Runs ONE arm's cull-only dispatch to completion and reads its three buffers back — the
@@ -974,7 +974,7 @@ fn run_cull_arm(
     // Post-fence mapped reads (the idiom at `tests/sdf_gbuffer_hybrid.rs:6202-6230`): no copy, no
     // staging — the writes are complete and host-coherent-visible once the fence signals.
     let grid_words = words_from_bytes(&read_bytes(ctx, &cluster_grid, (cells * 8) as usize));
-    let grid: Vec<(u32, u32)> = grid_words.chunks_exact(2).map(|w| (w[0], w[1])).collect();
+    let grid: Vec<(u32, u32)> = grid_words.as_chunks::<2>().0.iter().map(|w| (w[0], w[1])).collect();
     let list = words_from_bytes(&read_bytes(ctx, &light_index, (index_list_cap as usize) * 4));
     let alloc_total = words_from_bytes(&read_bytes(ctx, &light_index_alloc, 4))[0];
 

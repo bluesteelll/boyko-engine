@@ -249,8 +249,10 @@ impl Sha256 {
             self.compress(&block);
             self.tail_len = 0;
         }
-        // `as_chunks::<64>` yields `&[u8; 64]` directly, so the block no longer has
-        // to be copied into a local array to be passed as one.
+        // `as_chunks::<64>()` yields `&[u8; 64]` directly, which deletes the
+        // per-block stack copy this loop used to make: `chunks_exact` hands out a
+        // `&[u8]`, so reaching the array `compress` wants took a `copy_from_slice`
+        // per 64 bytes of input.
         let (blocks, rest) = data.as_chunks::<64>();
         for block in blocks {
             self.compress(block);

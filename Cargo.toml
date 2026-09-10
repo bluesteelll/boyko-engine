@@ -37,6 +37,24 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(force_alloc_p
 [workspace.lints.clippy]
 disallowed_types = "deny"
 
+# `missing_const_for_thread_local` is a FALSE POSITIVE across this tree: all 63
+# `thread_local!` statics in twelve crates ALREADY use a `const { … }` initialiser —
+# verified by reading every site clippy names. `rustc 1.98.1`'s clippy reports them
+# anyway, and there is nothing to rewrite because they are already in the form it asks
+# for.
+#
+# It is allowed HERE rather than per crate or per file, for two measured reasons.
+# `-D warnings` turns it into a compile ERROR, and an error in a DEPENDENCY stops its
+# dependents from being linted at all — the gate does not go red, it goes BLIND, and
+# unblinding the first crate revealed six more crates plus two REAL findings that had
+# been hidden behind them. And a crate-root `#![allow]` shifts every line of its file,
+# which moves the line anchors the internal docs carry into these files.
+#
+# Retire it when clippy stops reporting a `const {}` initialiser as non-const: delete
+# this line and run `cargo clippy --workspace --all-targets -- -D warnings`.
+missing_const_for_thread_local = "allow"
+
+
 # Shared third-party version pins (W2 workspace hygiene). Member crates opt in
 # with `<dep>.workspace = true` so a version bump happens in ONE place instead of
 # being re-declared per crate. Per-crate feature selections are preserved: the
