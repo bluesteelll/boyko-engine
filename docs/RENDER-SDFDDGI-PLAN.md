@@ -209,6 +209,246 @@ writes nothing; the first ENABLE lands on the frame whose own light staging carr
 one sibling read for one frame, but both halves are finite grids; a DISABLE leaves the last grid
 bound-but-unread.
 
+### "Why is the GI ~18x stronger on the cube than on the SDF sphere?" — ANSWERED (C1), not a defect
+
+The device gate above proved the term reaches the screen; the same capture showed it far stronger
+on a mesh cube face than on the SDF sphere, and the obvious reading — "the sphere is not receiving
+GI" — is wrong. **The next reader will ask this again, so the answer is recorded here rather than
+re-derived.**
+
+**The probe-update pass's world is the SDF edit list, and nothing else.** `sdf_probe_update.comp.hlsl`
+binds `Buf` (the edit list) + the two atlases + the ray table + the light table; `probe_march`
+sphere-traces `field_distance`, and a miss returns radiance `0` (a black sky). In the eval scene the
+edit list is ONE sphere. So the sun-lit sphere is the **sole emitter in the bounce**, and:
+
+- **A convex emitter cannot light itself.** For a receiver point `X` on the sphere with outward
+  normal `n`, every other sphere point `S` satisfies `(S - X)·n <= 0`, so no sphere point lies in
+  the `+n` hemisphere and `probe_blend`'s `max(dot(texelDir, rayDir), 0)` weight is `0` for every
+  ray that carries sphere radiance. The sphere's own GI is therefore near-zero **by geometry**, not
+  by a bug.
+- **The cube face at `(-2, 0.5, -1)` is the surface that looks straight at the sphere's SUN-LIT
+  side**, which is why it carries the strongest term.
+
+The decisive evidence is the per-surface decode, because it removes solid angle as the explanation:
+
+| surface | relation to the emitter | measured GI term |
+|---|---|---|
+| cube face at `(-2, 0.5, -1)` (the strongest blob) | faces the sphere's **sun-lit** side | mean **+9.0**, max **37** |
+| cube0 `+z` vs cube3 `-x` | **near-identical solid angle** onto the sphere, opposite SIDES of it | **20x** apart |
+| SDF sphere's own disc (1038 of 2071 px) | the emitter itself — convex, cannot light itself | all brighter, max **+6** |
+| sky (22720 px) | not a receiver (`is_sdf_lit == 0`) | delta **0** |
+| whole frame | — | 12654 of 76800 px differ, **all brighter**, none darker |
+
+Two faces of near-identical solid angle differing 20x **purely by which side of the sphere they
+see** is an emitter signature, not an attenuation signature. *(Provenance: these figures are the
+device gate + analysis pass of 2026-09-10, quoted; this pass ran no device and did not re-measure
+them. The convexity argument above is geometry and needs no measurement.)*
+
+The premise the question rests on — "GI should reach the sphere" — assumes a bouncer the update
+pass never sees. **That assumption is a real scope question, and it is the design limit stated at
+the bottom of this section, not a defect.**
+
+### Two REAL defects, found on the way to that answer — both FIXED (lane `ddgi`, 2026-09-10)
+
+Confirmed independently before anything was changed: every site re-opened, every figure re-derived,
+and D-B's host gate written and run RED first. One of the two was **refuted in its stated location**
+and is recorded that way.
+
+#### D-A — the bounce carried no `rho/PI`. CONFIRMED as stated. Factor exactly `PI/rho`.
+
+`shade_hit` accumulated `lit += e.color * (NoL * vis)` and returned `lit * GI_BOUNCE_SCALE` with
+`GI_BOUNCE_SCALE = 1.0`. `e.color` is `linear_color x illuminance` already baked, so `lit` is the
+**irradiance E arriving at the hit point** — no reflectance, no `1/PI`. A Lambertian bounce must
+carry `L_o = (rho/PI) * E`.
+
+**The read side was checked, not assumed, because a matching omission there would have cancelled
+it — and it does not.** `probe_blend` divides by `sum_w`, i.e. stores a cosine-weighted **mean
+radiance** (`E/PI` for a constant field), and `deferred_pbr.hlsl`'s
+`ambient += diffuse_color * gi * ao_final` applies the RECEIVER's albedo with no further `1/PI` —
+correct **precisely because** `gi` is already `E/PI`. Exactly **one** factor of `rho/PI` was missing
+from the chain, on the write side.
+
+- **`PI / 0.8 = 3.926991`** at the engine-default material (`MaterialGpu::default` base `0.8`,
+  non-metal ⇒ `diffuse_color = base * (1 - metallic) = 0.8`).
+- Even at a perfectly white bouncer (`rho = 1`) it would be `PI = 3.1416x` too strong: the omission
+  was never a tint, it was the whole BRDF normalisation.
+- The constant's own comment conceded the omission and said it had been *"tuned from the owner-eval
+  picture"* — a picture whose only bounce receiver was a mesh face.
+
+**Fixed as TRANSPORT, with the look left as an explicit knob.** `GI_BOUNCE_SCALE` is replaced by
+three named constants:
+
+| constant | value | what it is |
+|---|---|---|
+| `GI_BOUNCE_ALBEDO` | `0.8` | **Physics.** A stand-in for the per-hit reflectance the update bind-set cannot look up (it binds no material table), set to the engine's OWN default material base colour. A measurable quantity, not a preference. |
+| `GI_INV_PI` | `0.318309886` | The Lambert normalisation. |
+| `GI_BOUNCE_INTENSITY` | `1.0` | **The artistic knob** — the only dial here that expresses a look preference. `1.0` = no artistic scaling. |
+
+**What this does to the picture, stated so the owner can choose the look without the maths being
+wrong:** at `GI_BOUNCE_INTENSITY = 1.0` the GI term becomes **3.926991x darker** than the shipped
+picture (a factor of `0.8/PI = 0.2546479`). **`GI_BOUNCE_INTENSITY = PI / GI_BOUNCE_ALBEDO =
+3.926991` reproduces today's picture** — to within float rounding of the product, not bit-exactly.
+**No new default brightness was chosen here**: `1.0` is physically-correct transport, and moving it
+is an owner call.
+
+**The firefly clamp moved with it, on purpose.** `DDGI_MAX_RADIANCE = 16.0` was applied in `main`
+to `shade_hit`'s return — a quantity that was `PI/rho` too large. Left at the same numeric `16` on
+the now-correct radiance it would have silently **loosened** by `PI/rho`, letting through fireflies
+the shipped code clips. It is therefore renamed `DDGI_MAX_HIT_IRRADIANCE` and applied INSIDE
+`shade_hit`, ahead of the BRDF factor, on the same `lit` the old code clamped — so **the set of rays
+clipped is bit-identical to before**, and the fix is transport only.
+
+#### D-B — REFUTED as stated (`oct_encode`/`oct_decode`), CONFIRMED one layer down (`border_copy_index`)
+
+**`oct_encode` and `oct_decode` do NOT disagree, and were not touched.** They are the standard
+Cigolle pair and exact mutual inverses, edges and corners included
+(`boyko_shaderdsl/src/oct.rs:98` / `:181`). The decode's `nx += nx >= 0 ? -t : t` with
+`t = saturate(-nz)` is algebraically the classic `(1 - |n.yx|) * signNotZero(n.xy)`. Round-trip
+verified over every interior texel of both tiles plus the four edge extremes; the tree's own
+`oct_decode_edsl_matches_host` was already green. **Changing them would have forked the G-buffer
+normal goldens that depend on `oct_encode`** (`goldens.rs:4958-4967` documents that dependency) — so
+the defect as originally stated would have been "fixed" in the one place that must not move.
+
+**The real defect was the border-copy index map**, `sdf_probe_update.comp.hlsl`'s
+`border_copy_index` — hand-written HLSL **outside** every `// === GENERATED ... ===` span.
+
+The octahedral square folds **each edge onto itself, reversed**: `(1, s)` decodes to
+`normalize(1-|s|, 0, -|s|)`, independent of `sign(s)`, so a path leaving through the right edge
+re-enters through the **right** edge at the mirrored row. The continuation of a border texel is the
+reflection of its own position about the crossed edge, tangential coordinate negated. The committed
+map took every edge run from the **opposite** side of the tile instead:
+
+| border run | committed `src` (pre-D-B) | correct `src` |
+|---|---|---|
+| top row | `(v-1-cx, v-1)` — bottom interior row | `(v-1-cx, 0)` — the **top** row it touches, column reversed |
+| bottom row | `(v-1-cx, 0)` | `(v-1-cx, v-1)` |
+| left col | `(v-1, v-1-bt)` — right interior col | `(0, v-1-bt)` |
+| right col | `(0, v-1-bt)` | `(v-1, v-1-bt)` |
+
+**The four CORNER arms were correct and are unchanged**, because at a corner the two reflections
+compose (in either order — they commute) to the diagonally-opposite interior corner. That is almost
+certainly how the bug survived review: the correct corner rule was generalised to the edges, where
+it does not hold. The code comment stated the wrong rule in as many words ("copies the OPPOSITE
+interior row"), so comment and code agreed with each other and both were wrong.
+
+**Measured damage (host oracle):** **24 of 28** irradiance border texels and **56 of 60** depth
+border texels held a direction from the far side of the sphere — exactly the edge texels, with the
+4 corners of each tile correct. A receiver normal that encodes onto a tile edge (`±x`, `±y`) lands
+at `px = ox + BORDER + e.x * VALID_EXTENT` (`ddgi_resolve.hlsli:73`), i.e. exactly on the
+last-interior/border boundary, so a LINEAR tap draws **50 %** of its weight from that ring: for `+x`
+the border texel held `[-0.98, 0.196, 0]`, `cos = -0.98` against the receiver normal. `+y` is the
+normal of **every floor and every upward-facing face**, so this was the most common receiver normal
+there is, not an exotic corner. The **depth** tile is affected identically and feeds Chebyshev, so
+the repair fixes a **leak** term as well as a colour term.
+
+*(This also re-attributes the analysis pass's "+6 on the `+x` rim" and "+1.4 at `n.x = -0.9`": the
+symptom was real and reproduced, the cause named for it was not.)*
+
+**Other consumers of `oct_encode`/`oct_decode` were enumerated before touching anything, and none
+depended on the border behaviour:** `deferred_pbr.hlsl`, `gbuffer_mrt.fs.hlsl`,
+`sdf_gbuffer_composite.hlsl`, the four `sdf_ssao*`, `shadow_atrous`, `vb_*` all encode/decode into
+**unbordered** RGBA8 normal targets. The bordered-atlas chain is only `sdf_probe_update.comp.hlsl`
+(write) + `ddgi_resolve.hlsli` (read). Nothing else reads `border_copy_index`.
+
+#### Shader ownership, and the gates
+
+`border_copy_index` and the bounce constants are **hand-written glue OUTSIDE the generated
+sentinels** (the generated spans are `oct_decode`, `probe_march`, `probe_blend`,
+`probe_depth_blend`). They are nonetheless carried verbatim in the generator's `format!` literal
+(`boyko_shaderdsl/src/bin/emit_probe_gi.rs`), so **both files were patched from one substitution
+table**, the generator was **re-run**, and its output was diffed against the hand-patched file:
+**identical** (LF-normalised). The `.spv` was then re-compiled with the frozen recipe from the
+shader's own header, cwd = the shaders dir:
+
+```text
+dxc -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 sdf_probe_update.comp.hlsl -Fo sdf_probe_update.comp.spv
+```
+
+| gate | result |
+|---|---|
+| `ddgi_oct_border_host_oracle` (4 arms — **new**, CPU-only, no device) | `4 passed` — RED before the fix (`24 of 28` / arm 3 `cos = -0.98`) |
+| `ddgi_probe_update_spv_sync::sdf_probe_update_spv_byte_identical` (**new**) | `1 passed` |
+| `emit_probe_gi` (eDSL drift + CPU oracles, `--features emit`) | `10 passed` |
+| `ddgi_probe_gi_sync` (`oct_decode_edsl_matches_host`, `sdf_soft_shadow_ranged_copy_matches_resolve`) | `2 passed` |
+| `sdf_field_edsl_sync` | `24 passed` |
+| `marcher_spv_sync` | `2 passed` |
+| `ddgi_probe_sample_host_oracle` | `13 passed` |
+| `boyko-render --lib ddgi` | `22 passed` |
+| `cargo check --workspace --all-targets` | clean |
+
+**`sdf_probe_update.comp.spv` had NO byte gate before this pass**, and `emit_probe_gi.rs`'s own
+header claimed one existed ("the emit drift/sync tests pin the committed `.spv` to a fresh re-DXC").
+A tree-wide grep found the embed site, two doc comments and the recipe line — and no test. The new
+`ddgi_probe_update_spv_sync.rs` is that gate. Line endings do not leak into it: the generator writes
+LF and this checkout is CRLF (`core.autocrlf=true`), and compiling both forms was **measured** to
+produce identical SPIR-V (`f8fe2da5…` either way) — so it gates the shader, not the checkout.
+
+The host oracle's fourth arm exists because arms 1-3 judge a **Rust transcription** of HLSL: it
+`include_str!`s the committed shader and pins the eight `src = uint2(...)` expressions, in source
+order, against the constants written beside the transcribed returns. Demonstrated to fire — with
+the transcription corrected and the shader not yet patched it failed, naming all four swapped edge
+expressions and showing the four corner expressions unchanged. **Its residual is stated in the test:
+it catches an edit to ONE side, not a matching wrong edit to both.**
+
+#### GI-OFF is untouched — by construction, and the construction is checked
+
+1. **Exactly 1 of the 117 committed `.spv` in the tree changed** (`sha256` of every one, before and
+   after): `sdf_probe_update.comp.spv`. Every resolve blob — `deferred_pbr*.comp.spv`,
+   `vb_shade_split*.comp.spv` — is byte-identical, so the pixel-producing shader on the GI-OFF path
+   is literally the same artifact.
+2. That one `.spv` IS compiled into a pipeline at boot unconditionally
+   (`boyko_app/src/gpu_scene/csm.rs:291`) — the honest statement is "loaded, never dispatched", not
+   "never loaded". The **pass** is added only under `scene.ddgi_update.is_some()`
+   (`graph_bridge.rs:2194` deferred; `:5902` under VB via `path_vb_ddgi()`, which ANDs
+   `ddgi_update.is_some()`), so on the OFF path no `ddgi_update` pass exists, nothing dispatches,
+   and the atlases keep their boot-clear contents.
+3. The resolve's GI block is behind `if (ddgi_mode != 0u)` (`deferred_pbr.hlsl:1189`), and the OFF
+   path carries `ddgi_mode_word == 0`.
+4. Every pinned golden routes through `run_showcase_body`
+   (`boyko_rhi_vulkan/tests/window_present_gbuffer.rs:9005`), whose `ddgi_update: None` is at
+   `:9978`. The two other `None` sites are `body_windowed_gbuffer_composite` and
+   `body_p0_coarse_cull`; the single `Some(...)` site is `run_showcase_body_ddgi`, the ignored
+   device gate.
+5. **No golden was re-blessed, and `goldens/PINS.toml` is untouched** (`git status` shows five
+   paths: the shader, its `.spv`, the generator, and two new test files).
+
+**What that does NOT prove:** the goldens were not re-rendered in this pass (no device run here).
+The claim above is a reachability construction plus the measured 1-of-117 artifact delta, which is
+what "byte-identical by construction" means — it is not a substitute for the device CHECK, which the
+orchestrator or the owner should still run (`scripts/golden.ps1 -Pin <name>` over the four DDGI-
+descriptor-binding pins named in F4).
+
+### Known asymmetry, no code (C3): probe burial is tested against the SDF only
+
+`sdf_probe_update.comp.hlsl`'s classification does `bool inside = field_distance(pw) < GI_INSIDE_EPS`
+— the **SDF field alone**. A probe buried inside a **mesh** is therefore never deactivated, and
+because `probe_march` also marches `field_distance`, the depth moments never see the mesh either, so
+Chebyshev cannot reject it. **No magnitude effect in the eval scene** (its cube is transparent to the
+field), which is why this is recorded rather than fixed: fixing it needs mesh occupancy in the
+update pass, which is the same scope question as the design limit below.
+
+### What remains UNPROVEN after this pass
+
+- **Single-bounce GI over an SDF-ONLY world is a DESIGN limit, not a bug.** The I2 row of the ladder
+  above says it in as many words: *"single-bounce, direct + `sdf_soft_shadow`"*. The update pass
+  binds the edit list and nothing else, so **meshes never bounce and the sky never bounces** —
+  a mesh wall beside a lit floor contributes zero indirect light, whatever the knob is set to. That
+  is the honest frame for C1: the sphere-vs-cube asymmetry is the *correct* behaviour of a bounce
+  whose only emitter is the SDF. **Whether the update pass should see mesh geometry at all is a
+  SCOPE question this pass does not answer** — it is an owner/architecture call (a mesh occupancy
+  or BVH source in the update bind-set), not a defect to repair.
+- **Neither fix has been seen on a screen.** Both are proved on the host and in the compiled
+  artifact; the D-B repair's on-screen effect (the `±x`/`±y` rims and every floor/upward face) and
+  the D-A darkening are **unmeasured** here. The `sdf_room_ddgi_dump` two-arm gate and its three
+  clauses (magnitude / sign / mask boundary) remain valid over the fix and should be re-run.
+- **The generator↔committed link is still only a 4-span `.contains`.** `emit_probe_gi.rs`'s drift
+  gate pins the four eDSL spans, not the whole file, so the hand-written glue the two files share
+  has no automatic gate. This pass verified equality by re-running the generator and diffing —
+  once, by hand. Making it mechanical needs `build_shader` moved out of the `[[bin]]` into the
+  library so a test can call it; not done here.
+- **`GI_BOUNCE_ALBEDO` is one constant standing in for every bouncer.** Coloured bleeding and any
+  per-hit reflectance need the material table in the update bind-set — unchanged scope.
+
 ## Open risks (carried)
 
 - Update-pass µs/probe is the one genuinely-new number — UNMEASURED until the I2 bench; if far
