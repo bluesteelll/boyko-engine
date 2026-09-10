@@ -163,10 +163,35 @@ The `boyko_render` unit tests pinned every piece in isolation (the resolve, the 
 layout) and no test ever asked whether a host *composes* them — the same shape as
 `log_host_reachable.rs`. The substitute device gate is `boyko_app/tests/sdf_room_ddgi_dump.rs`
 (the production runner, a NON-default grid so a resurrected local-default b6 pack renders
-visibly wrong, `#[ignore = "gpu-windowed: …"]`): its sha256 must differ from the GI-OFF
-`sdf_room_smoke` dump, and the pinned GI-OFF goldens binding the DDGI descriptors
-(`[grand_showcase_2mat]`, `[vb_both_sdf]`, `[sdf_forward_only]`, `[vb_both]`) must stay
-byte-identical after D1's unconditional composition.
+visibly wrong, `#[ignore = "gpu-windowed: …"]`).
+
+### The substitute gate's OWN first run refuted it (measured on the device, 2026-09-10)
+
+The gate as first shipped stated: dump this binary, dump `sdf_room_smoke` with the same env as
+the GI-OFF control, require the two sha256 to differ. **Neither half of that could fail for the
+right reason** — this repository's own catalogued class, found by running it rather than by
+reading it.
+
+| # | Finding | Consequence | Correction |
+|---|---|---|---|
+| F1 | **The control produces no artifact, on ANY machine.** `host_dump` needs `SETTLE_FRAMES (30) + 1 + DRAIN_FRAMES (3)` ≈ 34 PRESENTED frames; the runner's step-3 `AppExit` check returns from the frame loop BEFORE the present, unconditionally (`runner.rs`, "after the frame completes, before the present"). `sdf_room_smoke` sets `BUDGET = 10` ⇒ ~9 presents, exits green, writes no BMP. The GI-ON dump exists only because this binary sets `BUDGET = 40`. | The A/B was **UNANSWERED** — not passed and not failed. A borrowed control is a control that differs from the treatment in more than the treatment. | The control moves INTO this binary as a second arm selected by `BOYKO_DDGI_GATE=off`, sharing `BUDGET`, scene, camera, `CsmConfig`, window size and title. Not a second `#[test]` (`LightingPlugin`'s eviction hooks are process-global), not a second binary (that is what F1 is). The arms differ in EXACTLY ONE expression: the `DdgiConfig` inserted after `add_plugins`. The OFF arm asserts `ResolvedDdgi::ddgi_mode_word == 0` and `LightingConfig::ddgi_indirect == false`, so an arm that silently armed cannot masquerade as the control. |
+| F2 | **The dump is not bit-reproducible cold-vs-warm.** Run 1 (cold, 28.22 s) vs run 2 (warm, 3.91 s) of the SAME test: 2220 of 76800 px differ (2.891 %), max per-channel delta **2**, mean max-channel delta 1.03, spread over a 288x72 band across the room rather than localised. Runs 2 and 3 (both warm) were BYTE-IDENTICAL. | A sha256 INEQUALITY between a GI-ON and a GI-OFF dump is satisfied by frame pacing alone, with no GI term whatsoever. **"The hashes differ" is not evidence.** | Each arm is run TWICE and the WARM capture is the datum; the cold one is discarded. Warm-vs-warm within one arm must be byte-identical — that is the noise-floor control, and it must hold before the A/B is read. The A/B threshold is max per-channel delta **strictly greater than 2** (the first value the measured jitter cannot produce) AND concentration on the SDF receiver, since F2's noise was NOT localised. |
+| F3 | The GI-ON run **armed**: no SKIP line, no `DdgiCaps` clamp note, the in-World assertions on the armed branch executed (origin, `inv_spacing`, dims, `LightingConfig::ddgi_indirect == true`), and the staged light-table header read word7 = `0x00000014` — `DDGI_MODE_BIT` (bit 4) set in the bytes uploaded to the GPU. | This is a GPU-side claim of exactly the shape the defect is named after ("shipped to the GPU, not to the screen"). | It is therefore **NOT the gate**. The gate is the pixels. |
+| F4 | The 0%-gate half DID pass: `[grand_showcase_2mat]`, `[vb_both_sdf]`, `[sdf_forward_only]`, `[vb_both]` byte-identical after `DdgiPlugin` became unconditional (`scripts/golden.ps1` CHECK, `PINS.toml` untouched). | D1's unconditional composition costs GI-OFF nothing. | Unchanged; kept as the separate half of the gate. |
+
+| F5 | **The corrected gate's own first run refuted its second clause, and the run PASSED anyway.** Measured on the device 2026-09-10 with the two-arm binary: session noise floor **0** (three byte-identical captures per arm), ON-vs-OFF **12654 of 76800 px differ, max per-channel delta 37**, **all 12654 brighter on ON and 0 darker**, the 22720 sky pixels untouched, and the sphere's own disc 1038/2071 px all brighter (max 6). But **88.9 % of the differing mass, and every pixel above delta 10, lie OUTSIDE the sphere disc** — the strongest blob (mean +9.0, max 37) is the CUBE face at `(-2, 0.5, -1)`. | The clause "concentrated on the SDF receiver" would have returned a **RED against a working fix**. Its premise — "GI applies to `is_sdf_lit` pixels, so the SDF sphere is the receiver" — is false in its second half: `deferred_pbr.hlsl:786-788` defines `is_sdf_lit = material_texel.b > 0.5`, the SDF-LIGHTING MASK, and `sdf_gbuffer_composite.hlsl:1884` writes it as `1.0` for RASTERISED geometry too, leaving `0` only on the background. The cubes and the floor are receivers. The gate had moved from "cannot fail for the right reason" to "can fail for a WRONG reason". | Clause replaced by the three that the measurement shows are the discriminating ones: **magnitude** (> 2), **sign** (every differing pixel brighter — pacing jitter is two-sided, an additive radiance term is not), and the **mask boundary** (delta 0 where the mask is 0; a non-zero all-brighter term on the sphere's disc). The receiver box is now used to CHECK that the disc carries a term, never to reject a difference for being elsewhere. |
+
+**The corrected gate.** (a) Four captures — ON cold/warm, OFF cold/warm — under
+`BOYKO_DISABLE_VALIDATION=1 --test-threads=1`, each to its own path, `BOYKO_DDGI_GATE=off`
+selecting the control. (b) Warm-vs-warm within an arm byte-identical (noise floor). (c) ON-warm
+vs OFF-warm, THREE clauses (see F5): max per-channel delta > 2, EVERY differing pixel brighter
+on ON, and delta 0 wherever the mask is 0 (the sky), with the SDF sphere's disc carrying a
+non-zero all-brighter term — analytically a
+~53x53 disc at `x ∈ [101, 153]`, `y ∈ [73, 125]` with `y` DOWNWARD, i.e. file rows `[114, 166]`
+in the bottom-up BMP; recompute or locate it in the OFF dump before rejecting a difference.
+(d) The pinned GI-OFF goldens binding the DDGI descriptors stay byte-identical after D1's
+unconditional composition. The run protocol lives in the test's module doc, which also records
+F1 as the reason the previous protocol was replaced.
 
 **Layout pin recorded (mechanical).** Every committed resolve `.spv` (`deferred_pbr*.comp.spv`,
 `vb_shade_split*.comp.spv`) carries `OpMemberDecorate %type_ResolvedDdgi 3 Offset 36` — a
