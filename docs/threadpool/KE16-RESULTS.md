@@ -48,14 +48,58 @@ miri 0.1.0 (8925ea358a 2026-08-20) on rustc 1.100.0-nightly (8925ea358 2026-08-2
 have deleted BOTH — the ISA baseline and the linker fix. Where `--cfg loom` was needed it was
 added with `cargo --config target.x86_64-pc-windows-gnu.rustflags=[…]`, which joins.
 
+⚠ **That `--config` key is a RECORD of what these runs used, not a recipe to copy after 2026-09-10.**
+On the msvc host a key naming the gnu triple matches nothing, so `--cfg loom` never reaches rustc,
+the `#![cfg(loom)]` binary contains zero models and it exits 0 on `running 0 tests`. The live
+spelling is `target."cfg(windows)".rustflags=["--cfg","loom"]`, which matches either host and joins
+`.cargo/config.toml`'s per-triple ISA array instead of restating it —
+`crates/boyko_threadpool/tests/loom_pool.rs`'s header carries it in full.
+
 ⚠ **Correction to the design's §0 recorded here so nobody re-derives it.** The brief in circulation
 said `.cargo/config.toml` carries "the ISA baseline AND two mandatory linker flags". At this
 checkout the worktree file carries the **ISA baseline only**; the linker flags live in
 `~/.cargo/config.toml`. The no-`RUSTFLAGS` rule still stands, for the ISA reason.
 
-⚠ **`cargo +nightly` resolves to `nightly-x86_64-pc-windows-MSVC` on this box** (msvc stable is the
-rustup default host) and dies in the linker with exit 1, which is indistinguishable from "the gate
-is red". Every Miri command spells `+nightly-x86_64-pc-windows-gnu`.
+⚠ **Every Miri command spells `+nightly-x86_64-pc-windows-gnu`.** As written during the campaign,
+the reason given here was "`cargo +nightly` resolves to `nightly-x86_64-pc-windows-MSVC` on this box
+(msvc stable is the rustup default host) and dies in the linker with exit 1, which is
+indistinguishable from *the gate is red*".
+
+**THAT SENTENCE WAS TRUE WHEN IT WAS WRITTEN AND DOES NOT DESCRIBE THIS BOX TODAY (corrected
+2026-09-10, receipts inline).** (i) It was MEASURED on 2026-09-04, twice and independently: rustup's
+`default_host_tuple` was msvc then, so a bare `+nightly` did resolve to
+`nightly-x86_64-pc-windows-msvc` and did die in the linker. `~/.rustup/settings.toml` was rewritten
+on **2026-09-07 13:56** (file mtime, read 2026-09-10 — the in-tree `rust-toolchain.toml` campaign)
+and has carried `default_host_tuple = "x86_64-pc-windows-gnu"` since, so from that date a bare
+`+nightly` resolves to the **gnu** nightly, i.e. to the NEWER miri. Do not re-derive the earlier
+state from today's `settings.toml`: the file records the present, not the history. (ii) The linker
+half is gone outright: Build Tools 2022 + Windows SDK 10.0.26100 are installed,
+`stable-x86_64-pc-windows-msvc` is `rustc 1.98.1 (48a229cea 2026-09-01)` (the same commit as
+stable-gnu), and the workspace checks, lints and links under it.
+
+The full spelling stays, for a reason that survives the correction: the two installed nightlies carry
+miri **2026-08-20** (gnu) and **2026-05-29** (msvc), three months apart. Every Tree-Borrows result in
+this campaign, and every committed receipt under `docs/threadpool/receipts/`, came from the gnu one.
+
+### ⚠ msvc is a THIRD compiler line — added 2026-09-10, no row below was touched
+
+On 2026-09-10 this tree's recipes moved from `stable-x86_64-pc-windows-gnu` to
+`stable-x86_64-pc-windows-msvc`, spelled explicitly through `RUSTUP_TOOLCHAIN` (which outranks
+`rust-toolchain.toml` and `rustup default` alike, measured 2026-09-07). ⚠ **The rustup DEFAULT host
+has NOT moved: `rustup toolchain list` still prints `stable-x86_64-pc-windows-gnu (active,
+default)`** as of 2026-09-10, so a command that spells no toolchain still builds gnu. `rustup set
+default-host x86_64-pc-windows-msvc` is a later, owner-run step; nothing here depends on it having
+happened, which is exactly why the recipes pin the triple instead of trusting the default.
+**No number in this file was re-measured, and none was edited.** Every absolute here is a gnu number: 1.97.1 for the Step-0 / axis-A/B/W/C grids, 1.98.1 for
+the rows taken after 2026-09-09 02:52 (`RUSTC-198-WINDOWS-GNU-TLS.md` says which and why).
+
+**An msvc build is not a continuation of either gnu series.** Same rustc commit and same LLVM
+(`48a229cea`, LLVM 22.1.8, verified on both stable toolchains 2026-09-10) — and a different CRT, a
+different allocator, and `target_thread_local` NATIVE instead of the OS-key `os::Storage` path, which
+is precisely the mechanism the 11× at 1 µs is made of. So an msvc absolute may not be placed in a
+column with a gnu absolute, and a future pass that runs on msvc must open its own block rather than
+extend a row. `scripts/ke16_measure.sh` defaults to msvc since 2026-09-10 and prints
+`rustc --version` in every pass header; to extend a gnu series, override `RUSTUP_TOOLCHAIN` back.
 
 ### Profile — every absolute in this file is a bench-profile number
 

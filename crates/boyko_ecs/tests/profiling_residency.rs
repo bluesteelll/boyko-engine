@@ -17,18 +17,26 @@
 //!
 //! **2. Domain 3 is measured with `size_of`, not with `section_report`.** The gate names
 //! `section_report{LANES, REGISTRY}.total` as domain 3's bytes — but `section_report` shells out to
-//! `llvm-readobj`, and this box has no `llvm-readobj`, `objdump` or `nm` on `PATH` under the active
-//! `stable-x86_64-pc-windows-gnu` toolchain (re-measured this rung; unchanged since the substrate
-//! measured it). The gate's own rule is that tool absence is a **RED, never a SKIP**, so under the
-//! literal reading this row cannot be green on this machine at all.
+//! `llvm-readobj`, and this box had no `llvm-readobj`, `objdump` or `nm` on `PATH` under the then
+//! active `stable-x86_64-pc-windows-gnu` toolchain (re-measured this rung; unchanged since the
+//! substrate measured it). The gate's own rule is that tool absence is a **RED, never a SKIP**, so
+//! under the literal reading this row could not be green on this machine at all.
+//!
+//! ⚠ `PATH` was always the wrong place to look, and the tool is present now. MEASURED 2026-09-10:
+//! `llvm-tools` is installed on BOTH stable toolchains, and `boyko_diag::storage::resolve_tool`
+//! resolves it through `~/.rustup/toolchains/<toolchain>/lib/rustlib/<triple>/bin/`, not `PATH` —
+//! including on the `x86_64-pc-windows-msvc` toolchain this tree's recipes name since that date
+//! (the rustup default host is still gnu; `resolve_tool` answers correctly under either).
+//! The split below is kept on its own merits (an exact compile-time bound beats a shell-out), but
+//! the reason "the tool is absent" is no longer one of them.
 //!
 //! The two things being conflated are separable. The tool proves **`.bss` residency** — that the
 //! image carries no raw data for a symbol. This gate needs the symbol's **bytes**, and the bytes of
 //! a `static` array are a compile-time constant that `size_of` gives exactly, with no toolchain and
 //! no shell-out. So the bound is measured here and is exact; the residency claim is **not made
-//! here** and stays `G22a`'s, where it remains RED for want of the tool. That RED is pre-existing
-//! and is not this rung's to clear — `rustup component add llvm-tools` is a D0 line item that was
-//! never taken.
+//! here** and stays `G22a`'s, which is UNRUN — not blocked. Its D0 prerequisite
+//! (`rustup component add llvm-tools`) is discharged on both stable toolchains as of 2026-09-10;
+//! nobody has since run the gate, and that is not this rung's to clear either.
 //!
 //! # The counter is PER-THREAD, and the first version of it was not
 //!

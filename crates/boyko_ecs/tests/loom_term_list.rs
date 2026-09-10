@@ -17,18 +17,38 @@
 //!
 //! ```bash
 //! cargo test --release -p boyko-ecs --test loom_term_list \
-//!   --config 'target.x86_64-pc-windows-gnu.rustflags=["--cfg","loom"]' \
+//!   --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
 //!   -- --test-threads=1
 //! ```
 //!
 //! ⚠️ **`RUSTFLAGS="--cfg loom"` — which this header prescribed until
 //! 2026-09-03 — does not work on this box and is why no `--cfg loom` build of
 //! this file ever succeeded.** A `RUSTFLAGS` environment variable REPLACES
-//! `target.<triple>.rustflags` rather than appending to it, so it drops both
-//! the repository's ISA baseline (`-C target-cpu=x86-64-v3`) and the
-//! machine-local `-Cdlltool` / `-L` / `-Clink-arg=-B` trio that this
-//! `windows-gnu` toolchain needs to link at all. `cargo --config` MERGES with
-//! the config arrays instead, which is why the form above links.
+//! `target.<triple>.rustflags` rather than appending to it, so it drops the
+//! repository's ISA baseline (`-C target-cpu=x86-64-v3`) and, on the
+//! windows-gnu host, the machine-local `-Cdlltool` / `-L` / `-Clink-arg=-B`
+//! trio that toolchain needs to link at all. `cargo --config` MERGES with the
+//! config arrays instead, which is why the form above links.
+//!
+//! ⚠️ **The key is `cfg(windows)` and not a triple, re-keyed 2026-09-10** —
+//! the day this tree's Windows recipes moved from `stable-x86_64-pc-windows-gnu`
+//! to `stable-x86_64-pc-windows-msvc`, spelled explicitly through
+//! `RUSTUP_TOOLCHAIN`. (The rustup DEFAULT host is still `x86_64-pc-windows-gnu`
+//! as of 2026-09-10 — `~/.rustup/settings.toml` reads `default_host_tuple =
+//! "x86_64-pc-windows-gnu"` — and `rustup set default-host` is a later,
+//! owner-run step. The key below is correct under either state, which is the
+//! point of a cfg-spec.) A
+//! `target.x86_64-pc-windows-gnu.rustflags` key (this header's spelling before
+//! that date) does not match an msvc build at all, so `--cfg loom` never
+//! reaches rustc, every `#[cfg(loom)]` model below compiles to nothing, and the
+//! binary prints `running 0 tests` and exits **0** — a vacuous green with no
+//! model in it and no error to read. `cfg(windows)` matches either host, and
+//! cargo JOINS a matching cfg-spec's rustflags with the per-triple ones from
+//! `.cargo/config.toml` instead of replacing them, so the ISA baseline survives
+//! without being restated here (measured 2026-09-10 off `cargo -v`'s rustc
+//! line: `--cfg loom` and `-C target-cpu=x86-64-v3` both present). Do NOT move
+//! it to `[build] rustflags`: that key is ignored outright whenever a
+//! `[target.*]` one matches — the same vacuous green by another route.
 //!
 //! # Two gates (matching the architecture plan §"Metrics and validation")
 //!

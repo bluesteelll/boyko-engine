@@ -34,7 +34,7 @@ wording says what actually differs (§7).
    the datum for the gates (§8), and a pipe on Windows PowerShell swallows it.
 7. **Fingerprints.** After editing sources, `cargo clippy` may report "Finished" in 0.1 s with lints
    not re-run; touch the edited files (or `cargo clean -p boyko-threadpool`) before the lint gate.
-8. **`MIRIFLAGS` is replaced, not merged.** `.cargo/config.toml:14-15` sets `MIRIFLAGS =
+8. **`MIRIFLAGS` is replaced, not merged.** `.cargo/config.toml:31-32` sets `MIRIFLAGS =
    "-Zmiri-tree-borrows"` in its `[env]` table; a `$env:MIRIFLAGS` set in the shell REPLACES it.
    Every Miri command in §8 therefore spells the whole string, and the tester prints
    `$env:MIRIFLAGS` immediately before each Miri run and pastes the line into the results file.
@@ -527,7 +527,7 @@ $env:LOOM_MAX_PREEMPTIONS = "3"; cargo test --release -p boyko-threadpool --test
 Remove-Item Env:RUSTFLAGS; Remove-Item Env:LOOM_MAX_PREEMPTIONS
 
 # Miri. The FULL flag string every time: `$env:MIRIFLAGS` REPLACES the [env] default
-# (`-Zmiri-tree-borrows`, .cargo/config.toml:14-15); the header of tests/miri_scope.rs (:61-69)
+# (`-Zmiri-tree-borrows`, .cargo/config.toml:31-32); the header of tests/miri_scope.rs (:61-69)
 # lists the other four flags the primary surface needs. Echo the variable first; the echoed line
 # goes into the results file (refused shape 12 if it lacks -Zmiri-tree-borrows).
 cargo +nightly miri --version

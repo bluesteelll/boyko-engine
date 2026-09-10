@@ -153,7 +153,26 @@ The bracket "1.98.0 or the 1.98.1 point release" is answered by the sources: bot
 milestone, and the 1.98.0 `libstd` rlib on this box already has the RMW `enable` at 0x44840.
 
 The MSVC control ("build the same source for `x86_64-pc-windows-msvc`, where `#[thread_local]` is native")
-is not executable on this box: the installed MSVC toolchain is rustc 1.92.0 and there is no MSVC linker.
+was recorded here as "not executable on this box: the installed MSVC toolchain is rustc 1.92.0 and there
+is no MSVC linker".
+
+⚠ **THAT IS FALSE AS OF 2026-09-10, AND THE CONTROL IS NOW OWED.** Receipt, measured that day:
+Build Tools 2022 + Windows SDK 10.0.26100 are installed; `rustup toolchain list` carries
+`stable-x86_64-pc-windows-msvc`, and `rustc +stable-x86_64-pc-windows-msvc -vV` reports
+**`rustc 1.98.1 (48a229cea 2026-09-01)`, LLVM 22.1.8 — the same commit and the same LLVM as
+`stable-x86_64-pc-windows-gnu`**, which is exactly the control this section wants (one variable: the
+target env). The whole workspace checks, lints and LINKS under it (737 targets, 0 errors), and on
+2026-09-10 this tree's Windows recipes moved to it (spelled through `RUSTUP_TOOLCHAIN`). ⚠ The
+rustup DEFAULT host is still `x86_64-pc-windows-gnu` on that date; moving it is a later, owner-run
+step, and this section's owed control does not depend on it.
+
+The control has NOT been run — no benchmark was taken in the change that moved the host — so §5 stands
+as an owed measurement, not as an impossible one. When it is run, note that it does not extend either
+KE16 series: msvc is a THIRD compiler line (same rustc commit, different CRT, different allocator, and
+`target_thread_local` NATIVE rather than the OS-key `os::Storage` this document measures), so its
+absolutes are comparable to neither gnu line cell for cell. Its value is precisely the mechanism check:
+if the 11x at 1 µs is std's `ACTIVE_ENABLE_CALLS` RMW on the gnu OS-key path, an msvc build of the same
+source must not show it.
 
 ## 6. What this changes for the record
 

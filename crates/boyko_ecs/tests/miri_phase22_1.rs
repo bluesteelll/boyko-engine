@@ -6,10 +6,22 @@
 //! the only oracles that have historically caught the F2 / NEW-1 /
 //! BUG-P19-TB-1 raw-pointer-aliasing UB class — never review, never loom in
 //! isolation). The loom harness (`tests/loom_term_list.rs`) is the *exhaustive
-//! interleaving* companion; in environments where loom cannot be built (its
-//! `tracing-subscriber -> windows-sys` chain needs `dlltool.exe`, absent on the
-//! GNU host here) THIS file carries the central P2 reclaim-vs-read claim
-//! (critic-round-2 MAJOR / gate 11b) by driving real std threads.
+//! interleaving* companion; in environments where loom cannot be built THIS file
+//! carries the central P2 reclaim-vs-read claim (critic-round-2 MAJOR / gate 11b)
+//! by driving real std threads.
+//!
+//! ⚠ The environment named here was "its `tracing-subscriber -> windows-sys`
+//! chain needs `dlltool.exe`, absent on the GNU host here". That was a property
+//! of the windows-gnu host, and this tree's Windows recipes moved to
+//! `stable-x86_64-pc-windows-msvc` on 2026-09-10 (spelled through
+//! `RUSTUP_TOOLCHAIN`; the rustup DEFAULT host is still gnu on that date).
+//! MEASURED that day: `cargo --config
+//! 'target."cfg(windows)".rustflags=["--cfg","loom"]' test -p boyko-threadpool
+//! --test loom_pool --no-run` compiles `tracing-subscriber` and `loom` and links
+//! the binary, which then lists its 6 models — no `dlltool` anywhere. The loom
+//! leg is therefore buildable on this box; `tests/loom_term_list.rs` has NOT been
+//! run under msvc, so its own colour is unknown, and this file's role as the
+//! standing Miri oracle is unchanged either way.
 //!
 //! # What is driven — the REAL protocol (Phase-9.1 C1 discipline)
 //!

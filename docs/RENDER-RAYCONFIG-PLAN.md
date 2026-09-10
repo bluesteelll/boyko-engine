@@ -54,7 +54,7 @@ lives in `present/passes/gbuffer.rs` (`hwrt_triple`).
 Software byte-identity (RT disarmed in `grand_showcase` ⇒ hwrt-OFF == hwrt-ON):
 
 ```powershell
-$env:RUSTUP_TOOLCHAIN='stable-x86_64-pc-windows-gnu'; $env:BOYKO_DISABLE_VALIDATION='1'
+$env:RUSTUP_TOOLCHAIN='stable-x86_64-pc-windows-msvc'; $env:BOYKO_DISABLE_VALIDATION='1'
 # hwrt-OFF (omit --features hwrt) AND hwrt-ON (--features hwrt):
 cargo test -p boyko_rhi_vulkan [--features hwrt] --test window_present_gbuffer `
   engine_grand_showcase_512_screenshot_dump -- --ignored --test-threads=1

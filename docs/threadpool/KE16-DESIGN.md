@@ -370,7 +370,7 @@ design fork, not a VALUES call, and is decided here: it is in scope, `KE16-DESIG
 ## 8. Soundness obligations and the gates that discharge them
 
 Every Miri command below is written with its FULL flag string: `$env:MIRIFLAGS` REPLACES the
-`[env]` default of `.cargo/config.toml:14-15` (`-Zmiri-tree-borrows`), it does not merge with it.
+`[env]` default of `.cargo/config.toml:31-32` (`-Zmiri-tree-borrows`), it does not merge with it.
 A Miri red is classified by KIND before it is acted on (`KE16-DESIGN-MEASUREMENT.md` §5 item 14):
 an `Undefined Behavior` report is an aliasing/data-race defect; a `spin_until` timeout is a
 wake-protocol liveness defect; the two are never confused and only the former can ever send A1 to

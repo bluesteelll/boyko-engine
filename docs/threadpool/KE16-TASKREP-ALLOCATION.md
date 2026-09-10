@@ -47,15 +47,24 @@ plan5 — **nine of them, across four plan5 sections, are corrected below** (§C
 
 ### Toolchain, for every command in this file
 
-⚠ **`cargo +nightly` resolves to `nightly-x86_64-pc-windows-MSVC` on this box and dies in the
-linker with exit 1, which is indistinguishable from "the gate is red"** (`KE16-RESULTS.md` §0).
-Every Miri command below therefore spells `+nightly-x86_64-pc-windows-gnu`.
+⚠ **Every Miri command below spells `+nightly-x86_64-pc-windows-gnu`.** The reason recorded here
+during the campaign — "`cargo +nightly` resolves to `nightly-x86_64-pc-windows-MSVC` on this box and
+dies in the linker with exit 1, which is indistinguishable from *the gate is red*" — is **false as
+of 2026-09-10**, in both halves. Bare `+nightly` DID resolve to the msvc nightly when the sentence
+was written (MEASURED 2026-09-04), but `~/.rustup/settings.toml` was rewritten on 2026-09-07 13:56
+(file mtime) and has read `default_host_tuple = "x86_64-pc-windows-gnu"` since, so a bare
+`+nightly` now selects the **gnu** nightly; and the msvc toolchain links (see `KE16-RESULTS.md`
+§0 for both receipts). ⚠ The rustup default host has NOT moved to msvc — that is a later,
+owner-run step; only this tree's recipes moved, and they spell the triple. The full spelling stays for a live
+reason: the gnu nightly carries miri **2026-08-20** and the msvc nightly **2026-05-29**, and every
+Tree-Borrows result in this file came from the former.
 
 ⚠ **`RUSTFLAGS` must never be set** — `.cargo/config.toml` in this worktree carries the ISA
-baseline on `[target.x86_64-pc-windows-gnu] rustflags`, and setting the environment variable
-*replaces* it. Where `--cfg loom` is needed it goes through `cargo --config
-target.x86_64-pc-windows-gnu.rustflags=[…]`, which JOINS. The same asymmetry applies to
-`MIRIFLAGS`: `.cargo/config.toml:14-15` sets `MIRIFLAGS = "-Zmiri-tree-borrows"`, and an
+baseline on a `[target.<host triple>] rustflags` key (one for each Windows triple), and setting the
+environment variable *replaces* it. Where `--cfg loom` is needed it goes through `cargo --config
+target."cfg(windows)".rustflags=[…]`, which JOINS — re-keyed 2026-09-10 from the gnu triple, which
+after the host switch would match nothing and yield a model-free `running 0 tests`, exit 0. The same asymmetry applies to
+`MIRIFLAGS`: `.cargo/config.toml:31-32` sets `MIRIFLAGS = "-Zmiri-tree-borrows"`, and an
 environment `MIRIFLAGS` replaces rather than extends it.
 
 ---
@@ -760,7 +769,7 @@ are `src/task/scoped.rs:222-268` and `:270-309` (each opens a `ScopeBlock::new()
 and calls `block.free_all()` at `:267`/`:308`), with detached siblings at
 `src/task/detached.rs:165-196` and `:197+`. The recipe is stated at `src/task/mod.rs:385-393` —
 `MIRIFLAGS` **without** `-Zmiri-ignore-leaks`, which is already the tree's default
-(`.cargo/config.toml:14-15` = `-Zmiri-tree-borrows`; CI's Miri job sets no `MIRIFLAGS` at all).
+(`.cargo/config.toml:31-32` = `-Zmiri-tree-borrows`; CI's Miri job sets no `MIRIFLAGS` at all).
 
 ```
 cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool --lib -- task::scoped::tests
@@ -812,8 +821,10 @@ the tree were added by **3b, not 3z** — one static at `src/scope.rs:295-297` a
 `Cell`, `ptr`/`NonNull`, `alloc`/`dealloc`/`handle_alloc_error`, `:76-79`), and
 `src/task/{mod,scoped,detached}.rs` carry atomics only inside `#[cfg(test)]`. So **no production
 atomic is added, removed or reordered.** Run the loom leg with `--cfg loom` added through
-`cargo --config target.x86_64-pc-windows-gnu.rustflags=[…]` — which **joins** the ISA baseline
-rather than replacing it, unlike `RUSTFLAGS` — over `tests/loom_pool.rs` (M1c at `:1534+`).
+`cargo --config target."cfg(windows)".rustflags=[…]` — which **joins** the ISA baseline
+rather than replacing it, unlike `RUSTFLAGS`, and which matches on either Windows host (the gnu
+triple spelled here until 2026-09-10 matches nothing on the msvc host and silently builds zero
+models) — over `tests/loom_pool.rs` (M1c at `:1534+`).
 ⚠ **The exclusion is a documented assumption, not a compile-time guard**: no
 `cfg(all(loom, miri))` refusal exists anywhere in the crate. It holds by invocation discipline (loom
 targets are `#![cfg(loom)]`, and nothing in the tree invokes miri with `--cfg loom`).
@@ -956,9 +967,11 @@ configuration in which the second entry point is actually tested.
 allocation in the process lands at `(2^k >= 4096, 64)` — **cannot be settled by reading at all**;
 R0b and R2's exact equalities are the decision.
 
-**10. ⚠ `cargo +nightly` resolves to MSVC on this box and dies in the linker with exit 1**, which is
-indistinguishable from a red gate (`KE16-RESULTS.md` §0). Every Miri command in this file spells
-`+nightly-x86_64-pc-windows-gnu`.
+**10. ⚠ Every Miri command in this file spells `+nightly-x86_64-pc-windows-gnu`.** The reason given
+here during the campaign ("`cargo +nightly` resolves to MSVC on this box and dies in the linker with
+exit 1, indistinguishable from a red gate") no longer holds — corrected 2026-09-10, receipt in
+`KE16-RESULTS.md` §0. The spelling stays because the two installed nightlies' miri builds are three
+months apart (gnu 2026-08-20, msvc 2026-05-29) and this file's results are the gnu one's.
 
 **11. ⚠ A citation rotted inside a file whose content did not change.** plan5's `:284-289` for M1's
 3/4 was correct at `d647d930` and shifted +12 lines when 3y added a counter *above* it. This is the

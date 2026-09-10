@@ -18,8 +18,11 @@
       5. SHA-256 the .bmp and compare against goldens\PINS.toml -- the single source of truth
          (replaces the hash string formerly hand-copied across ~10 docs).
 
-    Windows / single RTX-3060 / windows-gnu. Windowed dumps require --test-threads=1 and are
-    #[ignore]d, so this is a human/orchestrator command -- it never runs on CI (no GPU there).
+    Windows / single RTX-3060 / windows-msvc (the workstation's build host since 2026-09-10;
+    every sha256 in PINS.toml was blessed on the preceding windows-gnu host and none has been
+    re-run under msvc -- PINS.toml's header states what to do with a first mismatch, and it is
+    NOT -Bless). Windowed dumps require --test-threads=1 and are #[ignore]d, so this is a
+    human/orchestrator command -- it never runs on CI (no GPU there).
 
 .PARAMETER Pin
     Which pin in goldens\PINS.toml to gate. Default: grand_showcase.

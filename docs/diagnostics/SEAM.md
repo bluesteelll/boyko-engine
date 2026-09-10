@@ -1117,5 +1117,6 @@ Collected here so neither plan can bury one in a disposition table.
 *Two of the three architect calls are now TAKEN and travel with their own files:
 **Q1** — `LANE_COUNT = 80` in every profile, with no profile axis (`substrate/02-LANE.md`); and
 **Q2** — the monotone counter, `fetch_sub` deleted from the design (`substrate/03-LOSS.md`).
-What remains is not an architect call at all: the missing `llvm-tools` component
-(`substrate/04-STORAGE.md`), which is one `rustup component add` and is a D0 line item.*
+What remains is not an architect call at all: it was the missing `llvm-tools` component
+(`substrate/04-STORAGE.md`), one `rustup component add` and a D0 line item — and as of 2026-09-10
+that component is installed on both stable toolchains, so what is left is a RUN, not a decision.*

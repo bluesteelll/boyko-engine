@@ -789,13 +789,25 @@ impl VulkanContext {
         // `validation_enabled()` accessor, which reflects whether a messenger was
         // created — therefore sees the effective flag with NO per-site changes.
         //
-        // WHY the env gate: on this windows-gnu (MinGW) box the VulkanSDK
+        // WHY the env gate: MEASURED on the windows-gnu (MinGW) toolchain this
+        // tree's recipes named until 2026-09-10, the VulkanSDK
         // `VkLayer_khronos_validation.dll` (an MSVC build) crashes the MinGW
         // process (0xc0000005) on LOAD, so `vkCreateInstance` faults whenever the
         // layer is requested-and-present, and boot returns `ValidationUnavailable`
-        // when it is absent — either way no GPU pixel golden can run. The render
+        // when it is absent — either way no GPU pixel golden could run. The render
         // OUTPUT does not depend on validation (it only catches API misuse), so
         // `BOYKO_DISABLE_VALIDATION` lets the goldens boot WITHOUT the layer.
+        //
+        // ⚠ THE PREMISE IS HOST-SPECIFIC AND IS NOW UNVERIFIED. On 2026-09-10 this
+        // tree's Windows recipes moved to `stable-x86_64-pc-windows-msvc`, where the
+        // engine process and the layer DLL are built by the same toolchain and the
+        // CRT mismatch that produced the fault does not exist. Whether the layer
+        // now loads is a GPU measurement nobody has taken, so NOTHING here (nor the
+        // 32 `[<pin>.env]` blocks in `goldens/PINS.toml`, nor the 9 test headers
+        // that repeat this rationale — `grep -rl MinGW crates/*/tests/`) has been
+        // flipped. The gate stays an opt-in
+        // escape hatch; if a validation-ON run comes back clean under msvc, THAT is
+        // the change that retires it, not this comment.
         //
         // DEFAULT (env unset): `validation_requested` returns `config.enable_validation`
         // unchanged — byte-identical to prior behavior; this is a pure opt-in.
@@ -2454,12 +2466,18 @@ fn cstr_array_eq(name: &[c_char; 256], want: &CStr) -> bool {
 /// `BOYKO_DISABLE_VALIDATION` environment variable being UNSET.
 ///
 /// The env variable is an opt-in escape hatch: on a host whose
-/// `VK_LAYER_KHRONOS_validation` DLL is incompatible with the process (the
-/// windows-gnu / MinGW build crashes on the MSVC-built layer's load), requesting
+/// `VK_LAYER_KHRONOS_validation` DLL is incompatible with the process, requesting
 /// the layer either faults `vkCreateInstance` or makes boot return
 /// [`BootError::ValidationUnavailable`] — so no GPU pixel golden can run. Since
 /// the render OUTPUT is independent of validation (it only catches API misuse),
 /// setting `BOYKO_DISABLE_VALIDATION` lets the goldens boot without the layer.
+///
+/// That incompatibility was MEASURED on this repository's windows-gnu / MinGW
+/// host (a MinGW process, an MSVC-built layer, 0xc0000005 on load). The
+/// workstation moved to `x86_64-pc-windows-msvc` on 2026-09-10, which removes the
+/// mismatch in principle; it has NOT been re-measured, so the hatch stays and
+/// every caller that sets the variable keeps setting it. See the same note at the
+/// single normalisation site in `boot_headless`.
 ///
 /// With the variable UNSET this is exactly `config.enable_validation`
 /// (`x && true`), so the default path is byte-identical to prior behavior.

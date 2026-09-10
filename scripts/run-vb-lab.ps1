@@ -62,7 +62,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 # Explicit env (never inherit a stray value). The scene reads BOYKO_AA / BOYKO_TAA_SHARPEN /
 # BOYKO_SSAO / BOYKO_GI / BOYKO_CSM_OFF (examples/vb_lab.rs); EnginePlugins reads
 # BOYKO_RENDER_PATH / BOYKO_GEOMETRY_LEGS (crates/boyko_app/src/plugins.rs).
-$env:RUSTUP_TOOLCHAIN     = 'stable-x86_64-pc-windows-gnu'
+$env:RUSTUP_TOOLCHAIN     = 'stable-x86_64-pc-windows-msvc'
 $env:BOYKO_DISABLE_VALIDATION = '1'
 $env:BOYKO_RENDER_PATH    = $Path
 $env:BOYKO_GEOMETRY_LEGS  = $Legs

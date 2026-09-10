@@ -11,6 +11,28 @@
 # This setting was introduced in Phase 3a (Miri retag fix) and is required for
 # Miri to accept the `*const Arena` raw provenance pattern used throughout the
 # ECS core (audit finding C-001 / Phase 3a).
+#
+# MIRI STAYS ON THE GNU NIGHTLY, ON PURPOSE (2026-09-10). On that date this tree's
+# recipes moved from `stable-x86_64-pc-windows-gnu` to `stable-x86_64-pc-windows-msvc`
+# (spelled explicitly; the rustup DEFAULT host is still gnu and moves in a later,
+# owner-run step), and every Miri recipe in the tree still spells
+# `nightly-x86_64-pc-windows-gnu` / `+nightly-x86_64-pc-windows-gnu`. That is not an
+# oversight: MEASURED that day, `nightly-x86_64-pc-windows-gnu` carries miri
+# 2026-08-20 and `nightly-x86_64-pc-windows-msvc` carries miri 2026-05-29 -- three
+# months older. Re-spelling the recipes with the host would swap the CHECKER under
+# every Tree-Borrows gate (and under the committed receipts in
+# `docs/threadpool/receipts/`) inside a change that only moves the build host. The
+# msvc nightly IS installed and `cargo +nightly-x86_64-pc-windows-msvc miri
+# --version` answers, so the re-spell becomes a one-line change the day both
+# nightlies are current -- and it needs its own re-run of the receipts, not this
+# change's.
+#
+# ⚠ WHAT A BARE `cargo +nightly miri` RESOLVES TO HAS ALREADY FLIPPED ONCE, WHICH IS THE
+# REASON TO SPELL IT. Until 2026-09-07 13:56 rustup's `default_host_tuple` was msvc and a
+# bare `+nightly` selected the msvc nightly (which then had no linker — measured
+# 2026-09-04); since that rewrite it is gnu, so today a bare `+nightly` happens to select
+# the gnu nightly, i.e. the NEWER miri. That is luck, not a guarantee: it changes the day
+# `rustup set default-host` runs. Prefer the fully-spelled toolchain, as the recipes do.
 [env]
 MIRIFLAGS = "-Zmiri-tree-borrows"
 

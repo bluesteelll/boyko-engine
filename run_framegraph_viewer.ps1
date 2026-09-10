@@ -13,7 +13,7 @@
 # gate. For the STRONGER check, delete the BOYKO_DISABLE_VALIDATION line below and
 # re-run — if the validation layer stays quiet with G ON, the barriers are proven.
 
-$env:RUSTUP_TOOLCHAIN     = "stable-x86_64-pc-windows-gnu"
+$env:RUSTUP_TOOLCHAIN     = "stable-x86_64-pc-windows-msvc"
 $env:CARGO_INCREMENTAL    = "0"
 $env:BOYKO_DISABLE_VALIDATION = "1"
 

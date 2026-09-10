@@ -78,9 +78,13 @@
 //! IMPORTANT — validation layers do NOT engage on this boot path. The windowed
 //! runner hardcodes `InstanceConfig::enable_validation = false` (runner.rs), so
 //! `EnginePlugins::window(...)` never requests `VK_LAYER_KHRONOS_validation`
-//! regardless of `BOYKO_DISABLE_VALIDATION`; and on the windows-gnu (MinGW)
-//! toolchain the VulkanSDK validation DLL (an MSVC build) crashes the process
-//! on load anyway (see `VulkanContext::boot`'s escape-hatch doc). So the
+//! regardless of `BOYKO_DISABLE_VALIDATION`. On the windows-gnu (MinGW)
+//! toolchain this tree's recipes named until 2026-09-10, the VulkanSDK validation
+//! DLL (an MSVC build) also crashed the process on load; that second reason is
+//! HOST-SPECIFIC and is UNVERIFIED under the msvc toolchain the recipes name since
+//! that date (no GPU run was taken), while the FIRST one
+//! — the runner requests no layer at all — is host-independent and is what
+//! actually decides this path (see `VulkanContext::boot`'s escape-hatch doc). So the
 //! VUID-level "traces a freed resource" oracle is NOT available here. The
 //! load-bearing guarantee that a retired slot is never traced/drawn is instead
 //! STRUCTURAL and proven at the source, not at runtime: `retire_deferred_frees`
@@ -102,9 +106,10 @@
 //! ```
 //!
 //! `BOYKO_DISABLE_VALIDATION` may be set or unset — it makes no difference here
-//! (the windowed runner requests no validation regardless; see above), and on
-//! windows-gnu setting it avoids the MSVC-DLL load crash on any code path that
-//! WOULD request the layer. `--test-threads=1` is required (windowed-test
+//! (the windowed runner requests no validation regardless; see above); on the
+//! windows-gnu host setting it avoided the MSVC-DLL load crash on any code path
+//! that WOULD request the layer, a crash unverified on the msvc host this box
+//! builds with since 2026-09-10. `--test-threads=1` is required (windowed-test
 //! convention: a single process-global GPU device). On a windowless / GPU-less
 //! box the runner exits before the frame loop and this test SKIPs gracefully
 //! (the same discrimination `interp_smoke.rs` / `room_smoke.rs` use), never

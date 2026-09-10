@@ -8,10 +8,21 @@ kept on purpose: a refuted claim is the most useful entry in the file.
 ## Method
 
 **Toolchain.** `rustc 1.97.1 (8bab26f4f 2026-07-14)`, `stable-x86_64-pc-windows-gnu` — the
-engine's toolchain. ⚠️ The box's *default* rustup toolchain is `stable-x86_64-pc-windows-msvc`
-1.92.0; a bare `rustc`/`cargo` without a toolchain override selects it and produces different
-codegen. Every row below was produced with the gnu 1.97.1 toolchain selected explicitly
-(`rustup run stable-x86_64-pc-windows-gnu …` or the verification crate's toolchain override).
+engine's toolchain at the time. Every row below was produced with that toolchain selected
+explicitly (`rustup run stable-x86_64-pc-windows-gnu …` or the verification crate's toolchain
+override), which is what keeps them attributable.
+
+⚠️ **The warning that stood here — "the box's *default* rustup toolchain is
+`stable-x86_64-pc-windows-msvc` 1.92.0; a bare `rustc`/`cargo` without an override selects it" — is
+FALSE, corrected 2026-09-10.** No 1.92.0 is installed; `stable-x86_64-pc-windows-msvc` is
+`rustc 1.98.1 (48a229cea 2026-09-01)`, the same commit as stable-gnu. As of 2026-09-10 the rustup
+default host is **gnu** (`~/.rustup/settings.toml`: `default_host_tuple = "x86_64-pc-windows-gnu"`,
+mtime 2026-09-07 13:56), so a bare `cargo` selects the gnu toolchain, not an msvc one. This tree's
+Windows recipes moved to `stable-x86_64-pc-windows-msvc` on that date by spelling
+`RUSTUP_TOOLCHAIN` explicitly; `rustup set default-host` is a later, owner-run step, after which a
+bare `cargo` WILL select msvc — which is exactly why nothing here should rely on a bare one.
+Either way the point of the
+explicit override stands: these rows are 1.97.1-gnu, and nothing below has been re-measured.
 
 **Profile — the SHIPPED one first; then every block of rows that was taken at a different one.**
 (Rewritten 2026-09-03 by the re-verification pass; the paragraph that stood here is quoted below

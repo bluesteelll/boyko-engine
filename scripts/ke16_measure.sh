@@ -246,12 +246,23 @@ load_receipt() {
 # ---------------------------------------------------------------------------
 
 export PATH="$HOME/.cargo/bin:$PATH"
-export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable-x86_64-pc-windows-gnu}"
+export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable-x86_64-pc-windows-msvc}"
+
+# ⚠ THE DEFAULT MOVED gnu -> msvc ON 2026-09-10 WITH THE WORKSTATION'S BUILD HOST, AND
+# THAT IS A THIRD COMPILER LINE. Every absolute in `docs/threadpool/KE16-RESULTS.md` was
+# taken under `stable-x86_64-pc-windows-gnu` (1.98.1, and the earlier rows 1.97.1). msvc
+# 1.98.1 is the same rustc commit and the same LLVM, but a different CRT, a different
+# allocator and a NATIVE `#[thread_local]` -- i.e. exactly the cost
+# `RUSTC-198-WINDOWS-GNU-TLS.md` measures is absent. Numbers taken by this script now are
+# NOT comparable to the recorded ones cell for cell; ratios inside ONE pass still are. To
+# extend a gnu series, override: `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu ./ke16_measure.sh`.
+# The pass header below prints `rustc --version`, so every output file names its compiler.
 
 # ⚠ RUSTFLAGS IS NEVER SET HERE. `.cargo/config.toml` carries the ISA baseline on
-# `[target.x86_64-pc-windows-gnu] rustflags`, and the environment variable
-# REPLACES that value rather than extending it -- which silently drops the
-# `-C target-cpu=x86-64-v3` every number in this campaign was taken under.
+# `[target.<host triple>] rustflags` -- one key per Windows triple, so the msvc host gets
+# the same `-C target-cpu=x86-64-v3` -- and the environment variable REPLACES that value
+# rather than extending it, which silently drops the ISA every number in this campaign was
+# taken under.
 
 echo "=== KE16 pass $PASS : ${VARIANT_KEYS[*]} ==="
 echo "toolchain: $(rustc --version)"

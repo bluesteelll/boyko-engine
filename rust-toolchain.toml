@@ -28,9 +28,26 @@
 #     would silently drop that job onto stable.
 #
 # `channel = "stable"` rather than an exact version: it resolves to stable for
-# whatever host triple is current, which keeps Linux CI and the windows-gnu
+# whatever host triple is current, which keeps Linux CI and the Windows
 # workstation on one line, and it needs no download on either. Switch to an exact
 # version here if reproducibility ever has to outrank currency.
+#
+# THE HOST TRIPLE IS NOT PINNED HERE, DELIBERATELY (2026-09-10). On that date this
+# tree's Windows recipes moved from `stable-x86_64-pc-windows-gnu` to
+# `stable-x86_64-pc-windows-msvc`, and this file did NOT change: `channel =
+# "stable"` resolves against whatever `default_host_tuple` rustup carries, so the
+# same line serves the Windows workstation and ubuntu CI. A host switch is a rustup
+# setting, NOT a pin in the tree — writing `stable-x86_64-pc-windows-msvc` here
+# would break every Linux job that shares this file.
+#
+# ⚠ STATE OF THE MACHINE, 2026-09-10: `rustup toolchain list` prints
+# `stable-x86_64-pc-windows-gnu (active, default)` and `~/.rustup/settings.toml`
+# reads `default_host_tuple = "x86_64-pc-windows-gnu"`. The default host has NOT
+# been switched yet — `rustup set default-host x86_64-pc-windows-msvc` is a
+# separate, owner-run step. Every msvc recipe in the tree therefore spells
+# `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc` explicitly (env BEATS this file,
+# measured 2026-09-07) rather than relying on the default, and stays correct
+# whichever way the default sits.
 #
 # Components are deliberately NOT listed: each CI job declares the ones it needs
 # (clippy, llvm-tools, miri, rustfmt), and listing them here would make every job

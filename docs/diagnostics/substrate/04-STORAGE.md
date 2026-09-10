@@ -177,6 +177,20 @@ stable-x86_64-pc-windows-gnu` was run and the binaries landed at
 
     ~/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/
 
+⚠️ **AND IT HOLDS ON THE msvc HOST TOO — checked 2026-09-10, the day this tree's Windows recipes
+moved from `stable-x86_64-pc-windows-gnu` to `stable-x86_64-pc-windows-msvc`.** This is not a
+formality:
+`resolve_tool` picks the toolchain whose triple `ends_with(host_env_suffix())`, and
+`host_env_suffix()` reads `cfg!(target_env = "gnu")` — i.e. the answer changes with the host, and a
+component installed only on the gnu toolchain would have left the probe with nothing to prefer.
+Measured: `rustup component list --toolchain stable-x86_64-pc-windows-msvc` reports
+`llvm-tools-x86_64-pc-windows-msvc (installed)`, and
+
+    ~/.rustup/toolchains/stable-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/
+
+holds `llvm-readobj.exe`, `llvm-nm.exe` and `llvm-objdump.exe`. So the probe resolves under either
+host. **No `.bss` gate has been run under either.**
+
 ⚠️ **`section_report` must NOT locate its tool via `rustc --print sysroot`.** Measured on this
 box: the `rustc` on `PATH` is chocolatey's (1.95.0) and its sysroot's `rustlib` bin contains
 **zero** matches for `readobj` — the tools live only under the **rustup** toolchain (1.97.1).

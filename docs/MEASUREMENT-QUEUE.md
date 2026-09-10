@@ -37,9 +37,21 @@ B: RUSTFLAGS="-C target-feature=+avx2"   ->  target-feature=+avx2   (target-cpu 
 
 This one cause produced three separate symptoms in a single day: AVX2 never reaching CI, loom models
 appearing to "crash before main" (a lost `-Clink-arg=-B<lld>` truncated an import table), and the ISA
-census going red. If a flag must be added, use `cargo --config 'target.x86_64-pc-windows-gnu.rustflags=[...]'`,
+census going red. If a flag must be added, use `cargo --config 'target."cfg(windows)".rustflags=[...]'`,
 which MERGES. **Any bench header still instructing `RUSTFLAGS=...` is stale — fix it rather than
 following it.**
+
+⚠ **The key is `cfg(windows)`, not a triple, since 2026-09-10** — the day this tree's Windows
+recipes moved from `stable-x86_64-pc-windows-gnu` to `stable-x86_64-pc-windows-msvc`. Note the
+rustup DEFAULT host is still gnu on that date, so BOTH triples are reachable on this box, which
+is exactly why a cfg-spec and not a triple. A `--config` key naming a
+triple the build does not use contributes NOTHING and says nothing while doing it: a `--cfg loom`
+spelled `target.x86_64-pc-windows-gnu.rustflags` on an msvc host produces a test binary with zero
+models, `running 0 tests`, exit 0. A `cfg(windows)` spec matches either host, and cargo JOINS it
+with the per-triple array in `.cargo/config.toml`, so the ISA baseline neither vanishes nor has to
+be restated (measured 2026-09-10 off `cargo -v`). `[build] rustflags` is NOT a substitute: cargo
+ignores it entirely whenever a `[target.*]` key matches, and the config file defines one for both
+Windows triples.
 
 **The bench profile is not the shipped profile, and neither one is simply "better".** The root
 `Cargo.toml` carries `[profile.release] lto = "fat"` and `[profile.bench] codegen-units = 1` with

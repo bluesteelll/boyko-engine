@@ -44,7 +44,7 @@
 //!
 //! ```bash
 //! # Build (the emitted path is printed by this command):
-//! cargo --config 'target.x86_64-pc-windows-gnu.rustflags=["-C","target-cpu=x86-64-v3","--cfg","loom"]' \
+//! cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
 //!   test -p boyko-threadpool --test loom_pool --no-run
 //! # Run, per model, because a filter that matches nothing exits 0:
 //! LOOM_MAX_PREEMPTIONS=3 ./target/debug/deps/loom_pool-*.exe --test-threads=1 --exact <name>
@@ -61,6 +61,32 @@
 //! `[target.<triple>].rustflags` rather than merging with it (`.cargo/config
 //! .toml`'s `x86-64-v3` baseline), so that command builds a differently
 //! configured tree; `cargo --config` sets the same key and therefore composes.
+//!
+//! ⚠ **The `--config` key is `cfg(windows)` and not a triple, re-keyed
+//! 2026-09-10**, the day this tree's Windows recipes moved from
+//! `stable-x86_64-pc-windows-gnu` to `stable-x86_64-pc-windows-msvc`, spelled
+//! explicitly through `RUSTUP_TOOLCHAIN`. (The rustup DEFAULT host is still gnu
+//! as of 2026-09-10 — `~/.rustup/settings.toml` reads `default_host_tuple =
+//! "x86_64-pc-windows-gnu"` — and `rustup set default-host` is a later,
+//! owner-run step. The key below is correct under either state, which is the
+//! whole reason it is a cfg-spec.) Until that date this
+//! header read `target.x86_64-pc-windows-gnu.rustflags=["-C","target-cpu=
+//! x86-64-v3","--cfg","loom"]`, and that key does not match an msvc build at
+//! all: `--cfg loom` never reaches rustc, every model below is `cfg(loom)`d out,
+//! and the binary prints `running 0 tests` and exits **0**. That failure mode is
+//! a PASS, which is why it is spelled out here rather than left to the reader.
+//! `cfg(windows)` matches on either host, and cargo JOINS a matching cfg-spec's
+//! rustflags with the per-triple ones already in `.cargo/config.toml` instead of
+//! replacing them — so the ISA baseline is no longer restated in the array and
+//! can no longer drift from the file's (measured 2026-09-10 off `cargo -v`'s
+//! rustc command line: `--cfg loom` and `-C target-cpu=x86-64-v3` both present).
+//! `[build] rustflags` is NOT an alternative: cargo ignores that key entirely
+//! whenever a `[target.*]` one matches, and `.cargo/config.toml` defines one for
+//! both Windows triples — the same vacuous green by another route.
+//!
+//! ⚠ Every colour recorded below was measured 2026-09-03 under the gnu-triple
+//! spelling on the windows-gnu host. Nothing in this file has been re-run under
+//! msvc; the rows are that host's.
 //!
 //! **Reading, this checkout, 2026-09-03, `LOOM_MAX_PREEMPTIONS=3`, one model
 //! per process, taken under `--features ke16-w-gate,ke16-w-count`** — the row's

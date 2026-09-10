@@ -63,13 +63,23 @@
 # Why the exit code is not the verdict
 # =============================================================================
 #
-# On this machine `cargo +nightly` resolves to `nightly-x86_64-pc-windows-MSVC`
-# and dies in the LINKER with exit 1 -- indistinguishable from "the gate is red"
-# if the exit code is all you read. Two defences: the toolchain is spelled in full
-# (`+nightly-x86_64-pc-windows-gnu`), and a seed only counts as red once its
-# receipt shows cargo's own `Running ...tb_neg_m2w_block_reference` line, i.e. the
-# binary was built AND launched. A receipt without that line is reported as
-# LAUNCH-FAILED and is NOT counted as red.
+# A build or link failure exits 1 exactly like a red gate does -- indistinguishable
+# from "the gate is red" if the exit code is all you read. Two defences: the
+# toolchain is spelled in full (`+nightly-x86_64-pc-windows-gnu`), and a seed only
+# counts as red once its receipt shows cargo's own
+# `Running ...tb_neg_m2w_block_reference` line, i.e. the binary was built AND
+# launched. A receipt without that line is reported as LAUNCH-FAILED and is NOT
+# counted as red.
+#
+# When this comment was written the concrete failure was that `cargo +nightly`
+# resolved to `nightly-x86_64-pc-windows-msvc`, for which this box had no linker
+# (MEASURED 2026-09-04). That is gone twice over: rustup's default_host_tuple was
+# rewritten to gnu on 2026-09-07 13:56 (file mtime), so a bare `+nightly` now
+# picks the gnu nightly, and msvc links since Build Tools 2022 was installed --
+# but the toolchain stays spelled `+nightly-x86_64-pc-windows-gnu` on purpose: the
+# committed receipts were produced by that nightly's miri (2026-08-20) and the
+# msvc nightly's is 2026-05-29 (both MEASURED 2026-09-10). Moving the build host
+# must not silently move the CHECKER under a Tree-Borrows gate.
 #
 # =============================================================================
 # Usage
