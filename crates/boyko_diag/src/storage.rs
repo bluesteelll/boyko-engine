@@ -301,6 +301,17 @@ mod gate {
         ToolOutputNotUtf8,
         /// The expected field was present but its value did not parse as an integer.
         FieldUnparsable,
+        /// The tool ran, exited 0, and censused **nothing**: `llvm-nm` printed no symbol line
+        /// at all, or said `no symbols` on stderr.
+        ///
+        /// MEASURED 2026-09-10: this is the shape of every image `link.exe` produces on this
+        /// box — `PointerToSymbolTable: 0x0`, `SymbolCount: 0` — because the msvc linker never
+        /// writes a COFF symbol table into the image and the PDB carries publics only. Parsing
+        /// that stdout as [`SymbolReport::NoSuchSymbol`] would be a *silent wrong answer*: a
+        /// residency gate would read "the static was eliminated" on a machine where the tool
+        /// could not have seen it. An empty census is inert exactly the way a missing tool is,
+        /// and it reds under its own name so the operator learns which of the two happened.
+        NoSymbolTable,
     }
 
     /// The result of asking the image about one section.
@@ -429,7 +440,7 @@ mod gate {
             return SectionReport::Failed(ProbeFailure::ToolNotFound);
         };
         match run_tool(&tool, &["--sections"]) {
-            Ok(text) => parse_sections(&text, section),
+            Ok(ToolOutput { stdout, .. }) => parse_sections(&stdout, section),
             Err(f) => SectionReport::Failed(f),
         }
     }
@@ -445,21 +456,48 @@ mod gate {
     /// `0x240` to `0xA240` only once it was forced to be kept. A residency gate phrased purely
     /// over the section table is therefore green on a binary that contains none of the statics it
     /// claims to be measuring. Naming the symbol is what makes it fail.
+    ///
+    /// # Measured limit: an image with no symbol table is a RED, not an absent symbol
+    ///
+    /// MEASURED 2026-09-10 under `stable-x86_64-pc-windows-msvc` (rustc 1.98.1) on this
+    /// crate's own test binary and on six LTO-linked fixture images: `llvm-nm` exits 0, writes
+    /// **nothing** to stdout and `<image>: no symbols` to stderr, because `link.exe` writes no
+    /// COFF symbol table (`llvm-readobj --file-headers`: `SymbolCount: 0`) and the PDB names
+    /// publics only. Under the gnu host the same query answers, since `ld` copies the objects'
+    /// locals into the image's symbol table. This probe therefore reads the *tool's* verdict
+    /// before the *parser's*: a `no symbols` on stderr, or a stdout with no symbol line at all,
+    /// is [`ProbeFailure::NoSymbolTable`] — never [`SymbolReport::NoSuchSymbol`], which would
+    /// license a residency claim the tool could not have checked. The cross-profile census in
+    /// `crates/profile_fixture/tests/profile_axis_census.rs` sidesteps the limit by censusing
+    /// the post-LTO object instead of the image; this probe reads `current_exe()` and cannot,
+    /// so under msvc it reds with the true reason.
     #[must_use]
     pub fn symbol_report(sym: &str) -> SymbolReport {
         let Some(tool) = resolve_tool("llvm-nm") else {
             return SymbolReport::Failed(ProbeFailure::ToolNotFound);
         };
         match run_tool(&tool, &[]) {
-            Ok(text) => parse_nm(&text, sym),
+            Ok(ToolOutput { stderr, .. }) if stderr.contains("no symbols") => {
+                SymbolReport::Failed(ProbeFailure::NoSymbolTable)
+            }
+            Ok(ToolOutput { stdout, .. }) => parse_nm(&stdout, sym),
             Err(f) => SymbolReport::Failed(f),
         }
     }
 
-    /// Runs `tool <args> <current_exe>` and returns its stdout.
+    /// What a binutil said, on both streams. `stderr` is kept because `llvm-nm` reports an
+    /// empty symbol table THERE, with exit 0 and an empty stdout — see [`symbol_report`].
+    struct ToolOutput {
+        /// The tool's stdout, which must be UTF-8 (the parsers read field names from it).
+        stdout: String,
+        /// The tool's stderr, lossily decoded: it is only ever searched for a diagnostic.
+        stderr: String,
+    }
+
+    /// Runs `tool <args> <current_exe>` and returns what it said on both streams.
     #[cold]
     #[inline(never)]
-    fn run_tool(tool: &Path, args: &[&str]) -> Result<String, ProbeFailure> {
+    fn run_tool(tool: &Path, args: &[&str]) -> Result<ToolOutput, ProbeFailure> {
         let Ok(image) = env::current_exe() else {
             return Err(ProbeFailure::ImageUnavailable);
         };
@@ -469,7 +507,9 @@ mod gate {
         if !out.status.success() {
             return Err(ProbeFailure::ToolExitedNonZero);
         }
-        String::from_utf8(out.stdout).map_err(|_| ProbeFailure::ToolOutputNotUtf8)
+        let stdout = String::from_utf8(out.stdout).map_err(|_| ProbeFailure::ToolOutputNotUtf8)?;
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        Ok(ToolOutput { stdout, stderr })
     }
 
     /// Locates an LLVM binutil.
@@ -609,7 +649,15 @@ mod gate {
 
     /// Parses `llvm-nm` output for one symbol. Lines are `<addr> <class> <name>`, and an
     /// undefined symbol has no address at all.
+    ///
+    /// A stdout with **no line at all** is not "no such symbol": it is the tool's report of an
+    /// empty symbol table, which `llvm-nm` otherwise voices only on stderr. The parser
+    /// recognises the shape itself so the distinction does not depend on the caller having
+    /// captured stderr — see [`ProbeFailure::NoSymbolTable`].
     fn parse_nm(text: &str, sym: &str) -> SymbolReport {
+        if text.lines().all(|l| l.trim().is_empty()) {
+            return SymbolReport::Failed(ProbeFailure::NoSymbolTable);
+        }
         for line in text.lines() {
             let mut fields = line.split_whitespace();
             let (Some(a), Some(b)) = (fields.next(), fields.next()) else {
@@ -707,6 +755,27 @@ Sections [
             assert!(!parse_nm(text, "main").is_uninitialized_data());
             assert!(parse_nm(text, "memcpy").class() == Some(b'U'));
             assert!(parse_nm(text, "absent") == SymbolReport::NoSuchSymbol);
+        }
+
+        /// The exact shape `llvm-nm` hands back for every `link.exe`-linked image, MEASURED
+        /// 2026-09-10 on six fixture images and on this crate's own msvc test binary: exit 0,
+        /// **stdout 0 bytes**, and `<image>: no symbols` on stderr. The PE has
+        /// `SymbolCount: 0` (`llvm-readobj --file-headers`), because `link.exe` never writes a
+        /// COFF symbol table and the PDB carries publics only.
+        ///
+        /// Before this test, that stdout parsed to [`SymbolReport::NoSuchSymbol`] — "the tool
+        /// ran and the image has no symbol by that name" — which is a **silent wrong answer**:
+        /// the image has no symbol by ANY name, and a gate reading `NoSuchSymbol` as "the
+        /// static was eliminated" would be green on every msvc machine. An empty census is a
+        /// RED with its own name, exactly like a missing tool.
+        #[test]
+        fn an_empty_census_is_a_red_not_an_absent_symbol() {
+            let r = parse_nm("", "CELLS");
+            assert!(r == SymbolReport::Failed(ProbeFailure::NoSymbolTable));
+            assert!(!r.is_uninitialized_data());
+            assert!(r.failure() == Some(ProbeFailure::NoSymbolTable));
+            // A stdout of bare line terminators is the same empty census.
+            assert!(parse_nm("\r\n\n", "CELLS") == SymbolReport::Failed(ProbeFailure::NoSymbolTable));
         }
 
         #[test]

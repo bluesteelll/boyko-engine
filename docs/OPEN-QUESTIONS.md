@@ -3824,6 +3824,16 @@ repository changed. **The open question is a different one:** `[profile.release]
 build-configuration decision with compile-time cost, and it belongs to the owner rather than to a
 diagnostics rung.
 
+⚠ **ANSWERED since this was written; corrected 2026-09-10.** "No LTO anywhere" is stale:
+`Cargo.toml:111-112` now sets `[profile.release] lto = "fat"` for the whole workspace (with
+`codegen-units` deliberately left alone there, and `[profile.bench]` pinning `codegen-units = 1`
+explicitly so it does not inherit the pair). The owner took the decision; the gate's own
+`--config profile.release.lto="fat"` is now redundant and is kept only so the gate does not depend
+on a profile decision that is the owner's to reverse. One consequence is recorded at
+`crates/profile_fixture/tests/profile_axis_census.rs`: the census's documented "drop the flag ⇒
+every cell reads 1" RED no longer reproduces, and the mutation is now
+`--config profile.release.lto=false`.
+
 ## Rung 14 — `BOYKO_PROFILE=off` does not turn the profiler off, and the thing that would does not exist
 
 `SEAM.md` §S9's table gives the `off` row the tier-column entry *"feature `profiling` off"*.

@@ -22,13 +22,24 @@
 //! measured it). The gate's own rule is that tool absence is a **RED, never a SKIP**, so under the
 //! literal reading this row cannot be green on this machine at all.
 //!
+//! ⚠ **CORRECTED 2026-09-10 -- the paragraph above is stale in both of its halves, and the tool
+//! is present.** Re-measured on this box: `llvm-nm`, `llvm-readobj` and `llvm-objdump` are in the
+//! rustlib bin of BOTH stable toolchains (`ls ~/.rustup/toolchains/stable-x86_64-pc-windows-
+//! {gnu,msvc}/lib/rustlib/x86_64-pc-windows-{gnu,msvc}/bin/`), which is exactly where
+//! `section_report`'s resolver looks after `PATH` -- and `objdump` and `nm` ARE on `PATH`, from
+//! WinLibs' mingw64 (`which objdump nm`). Only the two `llvm-` spellings are off `PATH`. The
+//! consequence is that `boyko_diag`'s `gate::` suite runs green on BOTH hosts (8 tests,
+//! `--features section-gate`), so "this row cannot be green on this machine at all" is no longer
+//! true. This rung's choice of `size_of` stands on its own argument below, not on tool absence.
+//!
 //! The two things being conflated are separable. The tool proves **`.bss` residency** — that the
 //! image carries no raw data for a symbol. This gate needs the symbol's **bytes**, and the bytes of
 //! a `static` array are a compile-time constant that `size_of` gives exactly, with no toolchain and
 //! no shell-out. So the bound is measured here and is exact; the residency claim is **not made
-//! here** and stays `G22a`'s, where it remains RED for want of the tool. That RED is pre-existing
-//! and is not this rung's to clear — `rustup component add llvm-tools` is a D0 line item that was
-//! never taken.
+//! here** and stays `G22a`'s. That RED was attributed to a missing tool and to a never-taken
+//! `rustup component add llvm-tools`; CORRECTED 2026-09-10 -- the component is installed on this
+//! box (paths above), so if G22a is still red it is red for some other reason. It remains
+//! pre-existing and not this rung's to clear.
 //!
 //! # The counter is PER-THREAD, and the first version of it was not
 //!

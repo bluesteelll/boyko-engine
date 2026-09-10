@@ -194,10 +194,17 @@ Three blockers travel with specific files and **must not be softened**:
   from its own 5 KiB of `last_seen`. Exactness follows from the shape of the datum rather than
   from every future producer remembering `fetch_add`, and `fetch_sub` leaves the design.
   `delta_since` ships at D0; `fold_into` does not exist. *(`substrate/03-LOSS.md`, Q2.)*
-- **`llvm-tools` is not installed on this machine** — MEASURED: no `llvm-readobj` / `objdump` /
-  `nm` / `llvm-nm` is on PATH, and the active `stable-x86_64-pc-windows-gnu` toolchain ships only
-  `rust-objcopy` and `rust-lld`. The whole `.bss` gate family cannot run as written, and the gate
-  must treat tool absence as a **RED, never a SKIP**. *(`substrate/04-STORAGE.md`; DG6.)*
+- ~~**`llvm-tools` is not installed on this machine**~~ — **STALE, corrected 2026-09-10.** It was
+  MEASURED as: no `llvm-readobj` / `objdump` / `nm` / `llvm-nm` on PATH, and the active
+  `stable-x86_64-pc-windows-gnu` toolchain shipping only `rust-objcopy` and `rust-lld`. Re-
+  measured on this box, **both** stable toolchains carry `llvm-nm`, `llvm-readobj`, `llvm-objdump`
+  (and `llc`, `llvm-ar`, `llvm-cov`, `llvm-profdata`, `llvm-size`, `llvm-strip`, `opt`) in
+  `~/.rustup/toolchains/stable-x86_64-pc-windows-{gnu,msvc}/lib/rustlib/x86_64-pc-windows-
+  {gnu,msvc}/bin/`, which is where the probe's resolver looks after PATH; `objdump` and `nm` are
+  additionally on PATH from WinLibs' mingw64. `boyko_diag`'s `gate::` suite is green on both hosts
+  (8 tests, `cargo test -p boyko-diag --features section-gate --lib -- gate::`). The rule that
+  tool absence is a **RED, never a SKIP** stands unchanged; only the claim of absence has gone.
+  *(`substrate/04-STORAGE.md`; DG6.)*
 
 Four calls need the **OWNER**, not the architect. They are collected in one place —
 `SEAM.md` §*Open — needs the OWNER* (`seam/open-owner-calls`) — so neither plan can bury one in a
