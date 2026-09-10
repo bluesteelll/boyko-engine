@@ -940,8 +940,10 @@ pub fn remap_loaded_entities(
             //   `&mut EcsMaster`; this shared reborrow only READS the component-id
             //   set and is dropped at the end of this block (before any write).
             let archetype: &Archetype = unsafe { &*archetype_ptr };
+            // KE14 D1: the TABLE list. Every entry below is turned into a pool
+            // row pointer, and a poolless declaration-record id has none.
             archetype
-                .component_ids()
+                .table_component_ids()
                 .iter()
                 .filter_map(|&cid| {
                     component_registry::get_serialize_info(cid.0)

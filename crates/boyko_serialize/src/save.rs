@@ -171,7 +171,10 @@ pub fn save_world(
         let entity_count = archetype.entity_count();
         let mut columns: Vec<ColumnPlan> = Vec::new();
 
-        for &component_id in archetype.component_ids() {
+        // KE14 D1: the TABLE list — every id here resolves to a `ComponentPool`
+        // below. The declaration record would also carry dense / bitset ids,
+        // which own no per-archetype column to save.
+        for &component_id in archetype.table_component_ids() {
             let cid: usize = component_id.0;
 
             let info = component_registry::get_serialize_info(cid);
@@ -187,10 +190,12 @@ pub fn save_world(
             }
             let info = info.expect("a non-Ignore classification implies installed info");
 
-            let pool = match archetype.component_pools().get_pool(component_id) {
-                Some(p) => p,
-                None => continue,
-            };
+            let pool = archetype
+                .component_pools()
+                .get_pool(component_id)
+                .expect(
+                    "invariant: every id in table_component_ids owns a ComponentPool                      (archetype mint invariant, debug-asserted at every funnel). The                      silent `continue` this replaces existed only because the walk                      used to iterate the declaration record",
+                );
             let stride = pool.component_layout().size();
             let count = pool.count();
             debug_assert_eq!(

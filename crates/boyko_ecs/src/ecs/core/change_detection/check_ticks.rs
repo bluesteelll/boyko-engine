@@ -79,7 +79,7 @@ pub(crate) fn run_check_ticks_scan(world: &mut EcsMaster) {
         // Materialise the id list onto the stack (cold path; allocation
         // budget is dominated by the per-row clamp work) to break the
         // borrow.
-        let component_ids: Vec<_> = archetype.component_ids().to_vec();
+        let component_ids: Vec<_> = archetype.table_component_ids().to_vec();
 
         let pools = archetype.component_pools_mut();
         for component_id in component_ids {

@@ -41,6 +41,10 @@ pub mod filter_enable;
 pub mod iter;
 pub mod par_chunk;
 pub mod par_iter;
+// KE13: the per-row filter predicate for a POINT lookup, shared by `Query` and
+// `QueryView`. A separate module rather than a method on either, because a copy
+// in the second type is exactly how KE13 opened.
+pub mod point_filter;
 // The `query` submodule houses the `Query<'w, 's, D, F>` struct itself; the
 // inception is intentional and dictated by the Phase 8b plan file layout
 // (§17.1). The submodule cannot be folded into `mod.rs` because the file is

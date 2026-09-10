@@ -28,21 +28,22 @@ use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry::{self, MAX_COMPONENTS};
+use crate::ecs::core::component::dense::dense_registry::DenseRegistry;
 use crate::ecs::core::component::enable::enable_store::SmallList4;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::hooks::dispatch::{
     trigger_on_add, trigger_on_insert, trigger_on_remove, trigger_on_replace,
 };
+use crate::ecs::core::component::observers::ObserverKind;
 use crate::ecs::core::component::observers::dispatch::{
     fire_on_add_observers, fire_on_insert_observers, fire_on_remove_observers,
     fire_on_replace_observers,
 };
-use crate::ecs::core::component::observers::ObserverKind;
 use crate::ecs::core::component::observers::entity_store::fire_entity_observers;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
-use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, InlandPoolId};
+use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId, InlandPoolId};
 
 /// Stack capacity for the retained / combined slot array in
 /// `migrate_entity_insert` / `migrate_entity_remove` (plan §7.2).
@@ -73,15 +74,17 @@ const MAX_BUNDLE_ARITY: usize = 16;
 /// that is empirically zero or one. This is a deliberate, DIAGNOSABLE ceiling
 /// instead — twice the bundle half, with
 /// [`required_dense_fire_overflow_panic`] naming the constant and the remedy.
-const MAX_DENSE_FIRE: usize = MAX_BUNDLE_ARITY * 2;
+pub(crate) const MAX_DENSE_FIRE: usize = MAX_BUNDLE_ARITY * 2;
 
-/// KE11 — cold fail-loud site for [`MAX_DENSE_FIRE`] exhaustion in
-/// `migrate_entity_insert`'s required-component constructor pass.
+/// KE11 — cold fail-loud site for [`MAX_DENSE_FIRE`] exhaustion in the
+/// required-component constructor pass. KE14 D3 gave it a second caller: the
+/// in-place replace path, whose buffer was widened to the same ceiling for the
+/// same reason (bundle arity does not bound the CONSTRUCTED required ids).
 #[cold]
 #[inline(never)]
-fn required_dense_fire_overflow_panic(n: usize) -> ! {
+pub(crate) fn required_dense_fire_overflow_panic(n: usize) -> ! {
     panic!(
-        "migrate_entity_insert: dense-fire buffer exhausted at {n} entries (ceiling \
+        "required-dense insert: dense-fire buffer exhausted at {n} entries (ceiling \
          MAX_DENSE_FIRE = {MAX_DENSE_FIRE}). One insert carried more dense components — \
          the bundle's own plus its transitively-#[require]d ones — than the deferred \
          on_add/on_insert buffer holds. Raise MAX_DENSE_FIRE in \
@@ -206,6 +209,122 @@ fn fire_enable_column_alloc_bookkeeping(
     }
 }
 
+/// KE14 D2 — re-seeds `arch_presence` for every dense store this entity is a
+/// member of, naming the archetype it ENDS in.
+///
+/// `DenseStore::arch_presence` is documented as having no false negatives, and
+/// it is the ONLY candidate seed a dense query with no table positive term has
+/// (`QueryDataState::dense_seed`). Every existing `mark_arch_present` caller is
+/// a value-WRITING site, so a member merely RETAINED across a migration left the
+/// destination archetype unmarked: the entity kept the component in its store
+/// and stopped being enumerated. Store and query disagreeing is a silent wrong
+/// answer, not a miss, which is why the sweep asks the AUTHORITATIVE oracle
+/// (`e2s` membership) rather than tracking a second copy of it.
+///
+/// Called once at the end of every path that repoints an entity into a
+/// DIFFERENT archetype — the four migration sites (`EntityInland::new` census).
+/// `apply_replace_in_place` is deliberately not one: `target == source` there,
+/// so presence cannot go stale.
+///
+/// 0%-gate: `is_empty()` is `true` for a table-only world, so this executes zero
+/// instructions there. Otherwise it is O(#dense component TYPES) — a handful —
+/// of one bitmap probe each, on a `#[cold]` migration path. No allocation.
+#[inline]
+fn reseed_dense_presence(world: &mut EcsMaster, entity: Entity, target: ArchetypeId) {
+    let registry = &mut world.dense_registry;
+    if registry.is_empty() {
+        return;
+    }
+    let entity_id = entity.id();
+    // Index loop, not `for &cid in registry.dense_ids()`: the shared borrow of
+    // `dense_ids()` must end before `store_existing_mut` takes `&mut`. Scoping
+    // it to the statement is what keeps this allocation-free (no `to_vec`).
+    for i in 0..registry.dense_ids().len() {
+        let cid = registry.dense_ids()[i];
+        let Some(store) = registry.store_existing_mut(cid) else {
+            continue;
+        };
+        if store.contains(entity_id) {
+            store.mark_arch_present(target);
+        }
+    }
+}
+
+/// The deferred dense-fire scratch, passed as ONE parameter.
+///
+/// Both `migrate_entity_insert` and `InsertCommand::apply_replace_in_place` keep
+/// the buffer and its cursor as separate stack locals (the buffer is read by
+/// three later windows, so it cannot be moved). Threading the pair as two
+/// arguments put [`construct_required_dense_one`] at 8 parameters; this groups
+/// them at the boundary without changing either caller's frame.
+pub(crate) struct DenseFireSink<'a> {
+    /// `MAX_DENSE_FIRE`-sized in both callers; the bound is read off the slice
+    /// so the overflow site cannot disagree with the declaration.
+    pub(crate) buf: &'a mut [(ComponentId, bool)],
+    /// Entries written so far.
+    pub(crate) len: &'a mut usize,
+}
+
+/// KE14 D3 — constructs ONE required DENSE component into its store and records
+/// the deferred fire, shared by [`migrate_entity_insert`]'s Step-2b pass and
+/// [`InsertCommand::apply_replace_in_place`](crate::ecs::core::commands::insert_command::InsertCommand).
+///
+/// It is the per-id ARM, not a walk: both callers already own a
+/// `for_each_required_id_excluding` walk, and that walk allocates a `seen: Vec`
+/// per call. A helper that walked for itself would add a second walk and a
+/// second allocation to every require-bearing insert — so the sharing is placed
+/// one level down, where the divergence actually was.
+///
+/// present⇒skip asks the DENSE store's own `e2s` membership. The table
+/// signature is simply the wrong oracle for a non-signature id: it answers
+/// "absent" for an entity that IS a member, and the re-insert that follows trips
+/// `DenseStore::insert_with_ctor`'s debug-asserted absence precondition.
+///
+/// `archetype_id` must be the archetype the entity ENDS in — on a migration the
+/// TARGET, on the in-place replace the source (they are the same there).
+/// Omitting it panics nothing; it makes a dense query silently miss the entity.
+#[cold]
+#[inline(never)]
+pub(crate) fn construct_required_dense_one(
+    registry: &mut DenseRegistry,
+    bundle_supplied: &[ComponentId],
+    req_id: ComponentId,
+    entity_id: EntityId,
+    archetype_id: ArchetypeId,
+    current_tick: Tick,
+    fire: DenseFireSink<'_>,
+) {
+    let DenseFireSink {
+        buf: fire_buf,
+        len: fire_n,
+    } = fire;
+    if registry
+        .store(req_id)
+        .is_some_and(|s| s.contains(entity_id))
+    {
+        return;
+    }
+    let ctor = component_registry::required_ctor_for(bundle_supplied, req_id).expect(
+        "invariant: req_id came from the bundle's required closure, so a ctor exists for it",
+    );
+    let store = registry.store_mut(req_id);
+    // SAFETY (U5): `ctor` was resolved by `required_ctor_for` for THIS `req_id`,
+    //   and `store_mut` was called with that same id — so the store's column
+    //   carries exactly the layout the ctor writes, which is
+    //   `insert_with_ctor`'s stated unsafe precondition. (Absence is a
+    //   `# Panics` precondition, not a safety one; it was checked above against
+    //   the store's own membership map.)
+    unsafe { store.insert_with_ctor(entity_id, ctor, current_tick) };
+    store.mark_arch_present(archetype_id);
+    // `newly_added` is unconditionally `true`: this point is reached only after
+    // the present⇒skip test failed.
+    if *fire_n >= fire_buf.len() {
+        required_dense_fire_overflow_panic(*fire_n);
+    }
+    fire_buf[*fire_n] = (req_id, true);
+    *fire_n += 1;
+}
+
 /// Resolves the `(source, target)` archetype-id pair for an insert
 /// migration (plan §6.3). Falls back to `get_or_create_archetype` for the
 /// merged set; uses the on-stack scratch when the union fits.
@@ -223,7 +342,7 @@ pub(crate) fn merged_archetype_id<B: Bundle>(
         .archetype_master()
         .get_archetype(source_archetype_id)
         .expect("invariant: source_archetype_id is live (resolved from EntityInland)")
-        .component_ids()
+        .table_component_ids()
         .to_vec();
 
     // Stack scratch: union with stable canonical order. Capped at
@@ -236,17 +355,15 @@ pub(crate) fn merged_archetype_id<B: Bundle>(
     // Seed with the source ids (already canonical-sorted per
     // `Archetype::create_by_ids` / `Bundle::component_ids` contract).
     //
-    // Dense plan D2: the source archetype's `component_ids` RETAINS non-signature
-    // ids (dense / bitset, since D0). A dense id must NOT enter the merged set —
-    // otherwise the target archetype would carry a phantom dense column and the
-    // retained-copy `get_pool(dense)` below would panic (no per-archetype pool).
+    // Dense plan D2 / KE14 D1: the seed is the source's TABLE list. Its
+    // DECLARATION record retains non-signature ids (dense / bitset, since D0),
+    // and a dense id must not enter the merged set — the target would carry a
+    // phantom column and the retained-copy `get_pool(dense)` would find none.
     // The entity keeps its dense membership across the table migration (the
-    // `DenseStore` is global, keyed by `EntityId`, untouched by archetype change).
-    // For a table-only source no id is skipped (the 0%-gate).
+    // `DenseStore` is global, keyed by `EntityId`, untouched by archetype
+    // change). The per-turn `is_signature_id` screen that used to sit here is
+    // gone: `table_component_ids` IS that subsequence by mint invariant.
     for &cid in source_ids.iter() {
-        if !component_registry::is_signature_id(cid) {
-            continue;
-        }
         debug_assert!(
             len < MAX_MIGRATION_COLUMNS,
             "migration union exceeds MAX_COMPONENTS"
@@ -343,20 +460,26 @@ pub(crate) fn without_component_archetype_id<C: Component>(
         .get_archetype(source_archetype_id)
         .expect("invariant: source_archetype_id is live (resolved from EntityInland)");
 
-    if !source.component_ids().contains(&removed_id) {
+    // KE14 D1: the TABLE list is the right oracle here, and reachability is
+    // what makes it safe: `RemoveCommand::apply` routes a dense `C` to
+    // `dense_remove_and_fire` and returns BEFORE this function is called, so a
+    // dense id never asks this question. Asking the declaration record instead
+    // would let a race-dependent phantom answer "present" for a component the
+    // entity does not have, and the removal would then proceed to a `kept` set
+    // equal to the source.
+    if !source.table_component_ids().contains(&removed_id) {
         return None; // W1: silent no-op for absent component
     }
 
-    // Dense plan D2: filter the removed id AND any non-signature (dense / bitset)
-    // id out of `kept` — the source's `component_ids` retains dense (D0), but the
-    // target archetype must not carry a phantom dense column (the remove migration
+    // Dense plan D2 / KE14 D1: `kept` is built from the TABLE list, so the
+    // target archetype cannot carry a phantom dense column (the remove migration
     // copies only TABLE columns; the entity keeps its global dense membership
-    // across the table migration). For a table-only source only `removed_id` is
-    // dropped (the 0%-gate).
+    // across it). The `is_signature_id` filter that used to ride this
+    // expression is gone — the list already is that subsequence.
     let kept: Vec<ComponentId> = source
-        .component_ids()
+        .table_component_ids()
         .iter()
-        .filter(|&&cid| cid != removed_id && component_registry::is_signature_id(cid))
+        .filter(|&&cid| cid != removed_id)
         .copied()
         .collect();
 
@@ -466,7 +589,10 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     if has_dense {
         let world_ptr = NonNull::from(&mut *world);
         for &cid in B::component_ids() {
-            if !matches!(component_registry::storage_kind(cid.0), component_registry::StorageKind::Dense) {
+            if !matches!(
+                component_registry::storage_kind(cid.0),
+                component_registry::StorageKind::Dense
+            ) {
                 continue;
             }
             let present = world
@@ -568,13 +694,11 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         // index stays in lockstep: every `target` pool ends with one extra
         // committed row at `row` (retained pools committed in the loop below,
         // bundle-only pools committed in the closure).
-        tgt!()
-            .reserve_capacity(1)
-            .expect(
-                "insert-migration: target pool reserve ceiling (rows) exhausted — \
+        tgt!().reserve_capacity(1).expect(
+            "insert-migration: target pool reserve ceiling (rows) exhausted — \
                  committed capacity grows on demand (Phase X.I), so this fires only \
                  when the target archetype outgrows a pool's reserve_rows",
-            );
+        );
         // Field READS through a raw-pointer projection (no `&mut`, no narrowing).
         // SAFETY: see the block-level SAFETY note above.
         let new_row: u32 = unsafe { (*target_ptr).current_index as u32 };
@@ -585,15 +709,22 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         // pool. The source `&[u8]` is valid throughout this loop (it borrows the
         // live `source` pool), so the memcpy completes before any aliasing
         // mutation of `source`.
-        let target_cids: Vec<ComponentId> = tgt!().component_ids().to_vec();
+        // KE14 D1 (insert face): the TABLE list on BOTH sides. Walking the
+        // declaration record here was the reachable panic — archetype identity
+        // keys on the FILTERED signature, so a target minted earlier from a
+        // dense-bearing id list is returned for a dense-free union, and the
+        // `get_pool` below then asked for a pool a dense id can never own.
+        let target_cids: Vec<ComponentId> = tgt!().table_component_ids().to_vec();
         for target_cid in target_cids.iter().copied() {
-            if !src!().component_ids().contains(&target_cid) {
+            if !src!().table_component_ids().contains(&target_cid) {
                 continue;
             }
             let src_pool = src!()
                 .component_pools()
                 .get_pool(target_cid)
-                .expect("invariant: retained component must exist in source");
+                .expect(
+                    "invariant: a TABLE id of the target that the source also hosts                      owns a pool in the source (table_component_ids ⊆ component_pools,                      debug-asserted at every archetype mint funnel)",
+                );
             debug_assert!(
                 source_row < src_pool.count(),
                 "source_row out of bounds for retained component"
@@ -657,10 +788,14 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
             // route it to its `DenseStore` (insert-or-replace, no migration),
             // record `(id, newly_added)` for the Phase-2 fire, and skip the table
             // bundle bookkeeping + pool write entirely.
-            if matches!(component_registry::storage_kind(id.0), component_registry::StorageKind::Dense) {
+            if matches!(
+                component_registry::storage_kind(id.0),
+                component_registry::StorageKind::Dense
+            ) {
                 let store = dense_reg.store_mut(id);
-                let newly_added =
-                    store.insert_or_replace(entity_id_for_dense, bytes, current_tick);
+                let newly_added = store.insert_or_replace(entity_id_for_dense, bytes, current_tick);
+                // The write-local fast mark; `reseed_dense_presence` at the end
+                // of this function is the completeness oracle (KE14 D2).
                 store.mark_arch_present(target_archetype_id);
                 debug_assert!(dense_fire_n < MAX_DENSE_FIRE);
                 dense_fire_buf[dense_fire_n] = (id, newly_added);
@@ -673,7 +808,7 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
             // `source` row (Step 5 `move_out_entity` has not run yet).
             debug_assert!(bundle_id_count < MAX_BUNDLE_ARITY);
             bundle_ids[bundle_id_count] = id;
-            bundle_added[bundle_id_count] = !src!().component_ids().contains(&id);
+            bundle_added[bundle_id_count] = !src!().table_component_ids().contains(&id);
             bundle_id_count += 1;
 
             let dst_pool = tgt!()
@@ -753,7 +888,7 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
         //
         // `B::component_ids()` is the supplied (inserted) set — the walk is computed
         // over it, matching the `merged_archetype_id` expansion. The
-        // `source.component_ids().contains` / `bundle_id_set` checks together yield
+        // `source.table_component_ids().contains` / `bundle_id_set` checks yield
         // "in target, absent in source, absent in bundle" = exactly the constructed
         // set.
         if has_requires {
@@ -768,8 +903,8 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
             let required_dense_reg = &mut world.dense_registry;
             // Materialise the fire scratch lazily — only on this require-bearing
             // path. `Box::new([..])` zeroes the 4 KiB on the heap (cold path).
-            let (fire_ids, fire_count) =
-                required_fire.get_or_insert_with(|| (Box::new([ComponentId(0); MAX_MIGRATION_COLUMNS]), 0));
+            let (fire_ids, fire_count) = required_fire
+                .get_or_insert_with(|| (Box::new([ComponentId(0); MAX_MIGRATION_COLUMNS]), 0));
             component_registry::for_each_required_id_excluding(bundle_supplied, |req_id| {
                 // KE11 — screen the storage kind BEFORE touching a pool. Only a
                 // Table id has one. For a table-only require set the match folds
@@ -777,60 +912,51 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                 match component_registry::storage_kind(req_id.0) {
                     component_registry::StorageKind::Table => {}
                     component_registry::StorageKind::Dense => {
-                        // A dense required id supplied by the bundle was already
-                        // routed to its store by the Phase-1 closure above.
-                        if bundle_id_set.contains(&req_id) {
-                            return;
-                        }
-                        // present⇒skip against the DENSE oracle. `src!()
-                        // .component_ids()` is the TABLE signature and is simply
-                        // the wrong oracle for a non-signature id: it answers
-                        // "absent" for an entity that IS a member, and the
-                        // re-insert that follows trips `DenseStore::insert`'s
-                        // debug-asserted absence precondition. The exact oracle is
-                        // the store's own `e2s` membership.
-                        if required_dense_reg
-                            .store(req_id)
-                            .is_some_and(|s| s.contains(entity_id_for_dense))
-                        {
-                            return;
-                        }
-                        let ctor = component_registry::required_ctor_for(bundle_supplied, req_id)
-                            .expect(
-                                "invariant: req_id came from the bundle's required closure, so \
-                                 a ctor exists for it",
-                            );
-                        let store = required_dense_reg.store_mut(req_id);
-                        // SAFETY (U5): `ctor` was resolved by `required_ctor_for`
-                        //   for THIS `req_id`, and `store_mut` was called with that
-                        //   same id — so the store's column carries exactly the
-                        //   layout the ctor writes. Absence was just checked
-                        //   against the store's own membership map, which is
-                        //   `insert_with_ctor`'s debug-asserted precondition.
-                        unsafe {
-                            store.insert_with_ctor(entity_id_for_dense, ctor, current_tick)
-                        };
-                        // TARGET, not source: the entity is migrating, and the D3
-                        // candidate-archetype seed must name the archetype it ENDS
-                        // in. Omitting it panics nothing — it makes a mixed dense
-                        // query silently miss this entity.
-                        store.mark_arch_present(target_archetype_id);
-                        // Route the fire through `dense_fire_buf`, NOT
-                        // `required_fire`: `required_fire` drives the Phase-2 window
-                        // that is gated by the TARGET's `ArchetypeFlags`, and a dense
-                        // id is not in the signature, so those flags say nothing
-                        // about its hooks. `dense_fire_buf` feeds the ungated POST
-                        // window at the end of this function — and the KE10 attach
-                        // loop at `:898` already applies flags for every
-                        // `newly_added == true` entry there, so this one `push`
-                        // buys the fires AND the flags with no new code.
-                        // `newly_added` is unconditionally `true`: the arm is
-                        // reached only after both present⇒skip tests failed.
-                        if dense_fire_n >= MAX_DENSE_FIRE {
-                            required_dense_fire_overflow_panic(dense_fire_n);
-                        }
-                        dense_fire_buf[dense_fire_n] = (req_id, true);
-                        dense_fire_n += 1;
+                        // KE14 D3: the construct-and-commit arm lives in
+                        // `construct_required_dense_one`, shared verbatim with
+                        // the in-place replace path. present⇒skip is decided
+                        // there, against the store's own `e2s` membership — the
+                        // table signature is the wrong oracle for a
+                        // non-signature id.
+                        //
+                        // The `bundle_id_set.contains(&req_id)` pre-test that
+                        // used to sit here is GONE and was dead: `bundle_ids` is
+                        // filled by the Phase-1 closure only AFTER its dense
+                        // branch returns, so it never holds a dense id. A dense
+                        // required id supplied by the bundle is caught by the
+                        // store-membership test instead, which the closure's
+                        // `insert_or_replace` has already made true.
+                        //
+                        // TARGET, not source: the entity is migrating, and the
+                        // D3 candidate-archetype seed must name the archetype it
+                        // ENDS in.
+                        //
+                        // The fire is routed through `dense_fire_buf`, NOT
+                        // `required_fire`: `required_fire` drives the Phase-2
+                        // window gated by the TARGET's `ArchetypeFlags`, and a
+                        // dense id is not in the signature, so those flags say
+                        // nothing about its hooks. `dense_fire_buf` feeds the
+                        // ungated POST window at the end of this function.
+                        //
+                        // ⚠ CORRECTION (KE14 D4): the comment this replaces
+                        // claimed the one `push` bought "the fires AND the flags
+                        // with no new code". The fires, yes — the POST window is
+                        // ungated. The flags, no: the KE10 attach loop sat
+                        // inside a gate on the TARGET's flag word, which a
+                        // signature-excluded id never raises. That walk is now
+                        // outside the gate.
+                        construct_required_dense_one(
+                            required_dense_reg,
+                            bundle_supplied,
+                            req_id,
+                            entity_id_for_dense,
+                            target_archetype_id,
+                            current_tick,
+                            DenseFireSink {
+                                buf: &mut dense_fire_buf,
+                                len: &mut dense_fire_n,
+                            },
+                        );
                         return;
                     }
                     component_registry::StorageKind::Bitset => {
@@ -844,7 +970,8 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                 // its existing value (no overwrite, no construct, no re-fire —
                 // C1's "present does not fire" path). A required id supplied by
                 // the bundle was already written by the closure above.
-                if src!().component_ids().contains(&req_id) || bundle_id_set.contains(&req_id) {
+                if src!().table_component_ids().contains(&req_id) || bundle_id_set.contains(&req_id)
+                {
                     return;
                 }
                 // Resolve the ctor for `req_id` from the bundle's transitive
@@ -853,13 +980,10 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                     "invariant: req_id came from the bundle's required closure, so a ctor \
                      exists for it",
                 );
-                let dst_pool = tgt!()
-                    .component_pools_mut()
-                    .get_pool_mut(req_id)
-                    .expect(
-                        "invariant: target hosts every TABLE required id (expanded archetype; \
+                let dst_pool = tgt!().component_pools_mut().get_pool_mut(req_id).expect(
+                    "invariant: target hosts every TABLE required id (expanded archetype; \
                          dense is constructed into its DenseStore above, bitset is refused)",
-                    );
+                );
                 debug_assert!(
                     !dst_pool.has_row(row),
                     "required ctor pass: pool already committed row (id supplied twice?)"
@@ -1002,6 +1126,13 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     // this hoist — see `migrate_entity_remove`.)
     world.migrate_entity_observer_bit(entity);
 
+    // KE14 D2: the entity is now fully in `target`; re-seed the dense candidate
+    // set for every store it belongs to. The `mark_arch_present` calls inside
+    // the Phase-1 block are the write-local fast marks (free — the store is
+    // already in hand); THIS is the completeness oracle, and it is what covers
+    // a member that was merely RETAINED across the migration.
+    reseed_dense_presence(world, entity, target_archetype_id);
+
     // KE10: initial enable-bit states for the NEWLY-attached ids only. A
     // RETAINED component was attached on some earlier frame, so re-applying its
     // declared initial state here would clobber a bit the game has since
@@ -1013,6 +1144,10 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
     // ids, and the newly-added dense ids. Applied BEFORE the fires so an on_add
     // hook observes the initial state and can override it (the same ordering
     // `EcsMaster::create_entity` uses).
+    //
+    // KE14 D4: the TABLE ids stay behind the target's `FLAGS_ON_ATTACH` word,
+    // for which it is a sound over-approximation — a newly-added table id IS in
+    // the target signature, so it contributed to that word at mint.
     //
     // SAFETY (F1): identical to the Phase-2 `flags` read below — `target_ptr` is
     //   stable, write-capable, interior-mutable slab provenance and no
@@ -1029,10 +1164,22 @@ pub(crate) fn migrate_entity_insert<B: Bundle>(
                 world.apply_attach_flags_for(entity, &[required_ids[i]]);
             }
         }
-        for &(cid, newly_added) in &dense_fire_buf[..dense_fire_n] {
-            if newly_added {
-                world.apply_attach_flags_for(entity, &[cid]);
-            }
+    }
+    // KE14 D4: the DENSE walk sits OUTSIDE that gate, and this is the whole
+    // defect. `merged_archetype_id` screens dense ids out of the target
+    // signature, so a dense declarer never contributes to the target's flag
+    // word — gating on it dropped the declared state unless a table sibling in
+    // the same archetype happened to raise the bit. `apply_attach_flags_for`
+    // now gates per id on `declares_flags`, which is the exact oracle, so this
+    // loop is still a no-op in a flag-free world (one cold table load per
+    // newly-added dense id, on a `#[cold]` path).
+    //
+    // Ordering is unchanged: still after the entity is repointed into `target`
+    // and still BEFORE the Phase-2 `on_add` window below, so a hook observes
+    // the initial state and may override it.
+    for &(cid, newly_added) in &dense_fire_buf[..dense_fire_n] {
+        if newly_added {
+            world.apply_attach_flags_for(entity, &[cid]);
         }
     }
 
@@ -1226,12 +1373,18 @@ pub(crate) fn migrate_entity_remove<C: Component>(
         let retained_base: *mut u8 = retained.as_mut_ptr() as *mut u8;
         let retained_stride: usize = mem::size_of::<RemoveRetainedSlot<'_>>();
         let mut retained_count = 0usize;
-        let target_cids: Vec<ComponentId> = target.component_ids().to_vec();
+        // KE14 D1 (remove face): the TABLE list. `target ⊂ source` holds for
+        // the SIGNATURES; it does not hold for the declaration records, because
+        // the target may have been minted earlier from an id list naming a dense
+        // component this source never declared.
+        let target_cids: Vec<ComponentId> = target.table_component_ids().to_vec();
         for target_cid in target_cids.iter().copied() {
             let pool = source
                 .component_pools()
                 .get_pool(target_cid)
-                .expect("invariant: target ⊂ source");
+                .expect(
+                    "invariant: target_table ⊆ source_table on a remove migration, and                      every table id owns a pool (archetype mint invariant)",
+                );
             let stride = pool.component_layout().size();
             // SAFETY (Round 3 C-N2): see `migrate_entity_insert` retained-bytes block.
             let bytes = unsafe { core::slice::from_raw_parts(pool.unit_ptr(source_row), stride) };
@@ -1387,6 +1540,10 @@ pub(crate) fn migrate_entity_remove<C: Component>(
     // the DESTINATION archetype if this entity still carries an entity observer.
     // A no-op for an entity with no entity observer (the 0%-gate).
     world.migrate_entity_observer_bit(entity);
+    // KE14 D2: re-seed the dense candidate set for the archetype the entity
+    // ENDS in — a remove migrates only TABLE columns, so every dense membership
+    // here is a retained one and no write site marked the destination.
+    reseed_dense_presence(world, entity, target_archetype_id);
     // NO drain (Q-A1): runs at depth >= 1 inside the per-system apply; the
     // outermost schedule drive drains.
 }
@@ -1427,7 +1584,13 @@ pub(crate) fn merged_archetype_id_dyn(
             .archetype_master()
             .get_archetype(source_archetype_id)
             .expect("invariant: source_archetype_id is live (resolved from EntityInland)");
-        let source_ids = source.component_ids();
+        // KE14 D1: DELIBERATELY the declaration record. The union below is fed
+        // to `get_or_create_archetype`, which filters it into a signature; the
+        // poolless ids ride through so a dense / bitset declarer's `flags (…)`
+        // still reaches the derived archetype (KE10). No pool is resolved out of
+        // this list — that is what makes the retention inert rather than a fifth
+        // D1 face.
+        let source_ids = source.all_component_ids();
         // Canonical-sortedness precondition (plan: `_dyn` union asserts):
         // `Archetype::create_by_ids` / the funnel guarantee sorted ids; the
         // union below relies on it only for the cheap post-sort, but a broken
@@ -1501,7 +1664,10 @@ pub(crate) fn without_ids_archetype_id(
             .archetype_master()
             .get_archetype(source_archetype_id)
             .expect("invariant: source_archetype_id is live (resolved from EntityInland)");
-        let source_ids = source.component_ids();
+        // KE14 D1: the declaration record, for the same reason as
+        // `merged_archetype_id_dyn` — the kept set is filtered into a signature
+        // by `get_or_create_archetype` and no pool is resolved out of it.
+        let source_ids = source.all_component_ids();
         debug_assert!(
             source_ids.is_sorted_by_key(|c| c.0),
             "without_ids_archetype_id: source component ids must be canonical-sorted"
@@ -1629,7 +1795,9 @@ pub(crate) fn migrate_entity_attach_ids(
         read_source_enable_bits(source, source_row, &mut enable_scratch);
 
         debug_assert!(
-            added.iter().all(|&cid| !source.component_ids().contains(&cid)),
+            added
+                .iter()
+                .all(|&cid| !source.table_component_ids().contains(&cid)),
             "migrate_entity_attach_ids: added ids must be NEW to the source \
              (present-tag re-add is retag_in_place's job)"
         );
@@ -1647,11 +1815,16 @@ pub(crate) fn migrate_entity_attach_ids(
         let row = target.current_index;
 
         // Step 1: copy every RETAINED column into the reserved target row.
-        // The retained set is EXACTLY the source set (`T = S ⊎ A` by
-        // precondition), so the loop walks `source.component_ids()` directly —
-        // no scratch copy, no allocation. Attach FROM the empty archetype:
-        // zero source columns ⇒ zero iterations, no pool pointers minted (O3).
-        for &retained_cid in source.component_ids() {
+        // The retained set is EXACTLY the source's TABLE set (`T = S ⊎ A` by
+        // precondition), so the loop walks `source.table_component_ids()`
+        // directly — no scratch copy, no allocation. Attach FROM the empty
+        // archetype: zero source columns ⇒ zero iterations, no pool pointers
+        // minted (O3).
+        //
+        // KE14 D1 (tag-attach face): the declaration record was the walk here,
+        // so ANY tag attach onto an entity whose archetype declares a dense id
+        // resolved a pool that cannot exist.
+        for &retained_cid in source.table_component_ids() {
             let src_pool = source
                 .component_pools()
                 .get_pool(retained_cid)
@@ -1772,6 +1945,9 @@ pub(crate) fn migrate_entity_attach_ids(
     // EnableTag Step 6 O2: fire presence + `enable_generation` bookkeeping for
     // every target column the copy newly allocated (no `&mut Archetype` live).
     fire_enable_column_alloc_bookkeeping(world, target_archetype_id, &enable_newly_allocated);
+    // KE14 D2: a tag attach moves the entity into a different archetype and
+    // touches no dense store, so every dense membership crosses it retained.
+    reseed_dense_presence(world, entity, target_archetype_id);
 
     // PHASE 2 (§3.4): fire on_add, then on_insert, for the ADDED ids. The
     // entity is repointed into `target`; both `&mut Archetype` are dead —
@@ -1927,7 +2103,10 @@ pub(crate) fn migrate_entity_detach_ids(
         let retained_base: *mut u8 = retained.as_mut_ptr() as *mut u8;
         let retained_stride: usize = mem::size_of::<DetachRetainedSlot<'_>>();
         let mut retained_count = 0usize;
-        for &retained_cid in source.component_ids() {
+        // KE14 D1 (tag-detach face): the TABLE list. The declaration record was
+        // the walk here, so a detach from an entity whose archetype declares a
+        // dense id resolved a pool that cannot exist.
+        for &retained_cid in source.table_component_ids() {
             if removed.contains(&retained_cid) {
                 continue; // dropped in Phase 3, not migrated
             }
@@ -2092,6 +2271,8 @@ pub(crate) fn migrate_entity_detach_ids(
     // every target column the copy newly allocated (after the Phase-3
     // `&mut source` dropped — no live `&mut Archetype` reborrow).
     fire_enable_column_alloc_bookkeeping(world, target_archetype_id, &enable_newly_allocated);
+    // KE14 D2: the detach twin of the attach re-seed above.
+    reseed_dense_presence(world, entity, target_archetype_id);
     // NO drain (Q-A1): the caller owns the drain — see `migrate_entity_attach_ids`.
 }
 
@@ -2331,7 +2512,10 @@ mod step6_enable_migration_tests {
         let b = BundleData(2);
         // SAFETY (test): both locals outlive the borrow; byte views of #[repr(C)].
         let sd = unsafe {
-            core::slice::from_raw_parts(&d as *const _ as *const u8, core::mem::size_of::<SrcData>())
+            core::slice::from_raw_parts(
+                &d as *const _ as *const u8,
+                core::mem::size_of::<SrcData>(),
+            )
         };
         let bd = unsafe {
             core::slice::from_raw_parts(
@@ -2383,7 +2567,10 @@ mod step6_enable_migration_tests {
         let d = SrcData(3);
         // SAFETY (test): local outlives the borrow; byte view of a #[repr(C)].
         let sd = unsafe {
-            core::slice::from_raw_parts(&d as *const _ as *const u8, core::mem::size_of::<SrcData>())
+            core::slice::from_raw_parts(
+                &d as *const _ as *const u8,
+                core::mem::size_of::<SrcData>(),
+            )
         };
         let e = ecs
             .create_entity(src, &[(SRC_DATA, sd), (NORMAL_ZST_TAG, &[])])
@@ -2491,7 +2678,10 @@ mod step6_enable_migration_tests {
         ecs.enable::<TagEnable>(e2);
         let before2 = ecs.archetype_master().enable_generation();
         let target2 = merged_archetype_id_dyn(&mut ecs, src, &added);
-        assert_eq!(target, target2, "same union resolves to the same target archetype");
+        assert_eq!(
+            target, target2,
+            "same union resolves to the same target archetype"
+        );
         migrate_entity_attach_ids(&mut ecs, e2, src, target2, &added);
         assert_eq!(
             ecs.archetype_master().enable_generation(),

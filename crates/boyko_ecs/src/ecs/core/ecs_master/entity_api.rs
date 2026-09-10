@@ -30,17 +30,6 @@ use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 /// to keep the partition signature readable (clippy::type_complexity).
 type ComponentEntry<'a> = (ComponentId, &'a [u8]);
 
-/// Dense plan D2 — `true` iff `cid` is a signature-storage (table) id. The
-/// structural-op fire loops iterate an archetype's RETAINED `component_ids`
-/// (which keeps non-signature ids since D0), so they skip a dense (or bitset) id
-/// via this predicate — dense is fired by the dedicated D2 routing, never the
-/// table `component_ids` machinery. For a table-only world this is always `true`
-/// (cold load + branch on an already-cold path; the 0%-gate).
-#[inline]
-fn is_signature_cid(cid: ComponentId) -> bool {
-    component_registry::is_signature_id(cid)
-}
-
 impl EcsMaster {
     /// Creates a new archetype with the specified component IDs
     /// Returns the ID of the created archetype
@@ -262,40 +251,28 @@ impl EcsMaster {
             if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
                 // SAFETY: `archetype_ptr` is a valid `*const Archetype`; the
                 //   shared slice is transient and not aliased by a live `&mut`.
-                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*archetype_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         trigger_on_add(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         fire_on_add_observers(world_ptr, cid, entity);
                     }
                 }
             }
             if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
                 // SAFETY: same as the on_add slice read above.
-                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*archetype_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         trigger_on_insert(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         fire_on_insert_observers(world_ptr, cid, entity);
                     }
                 }
@@ -444,40 +421,28 @@ impl EcsMaster {
             // observers (mirrors `create_entity`, §5).
             if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
                 // SAFETY: transient shared slice, not aliased by a live `&mut`.
-                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*archetype_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         trigger_on_add(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         fire_on_add_observers(world_ptr, cid, entity);
                     }
                 }
             }
             if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
                 // SAFETY: same as the on_add slice read above.
-                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*archetype_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         trigger_on_insert(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                     for &cid in ids {
-                        if !is_signature_cid(cid) {
-                            continue;
-                        }
                         fire_on_insert_observers(world_ptr, cid, entity);
                     }
                 }
@@ -722,17 +687,16 @@ impl EcsMaster {
             //   prior sibling structural write did not invalidate it.
             let arche = unsafe { &*archetype_ptr };
             // Dense plan D2: copy ONLY signature (table) ids into the fire buffer.
-            // The archetype's `component_ids` RETAINS non-signature ids (dense /
-            // bitset, since D0), but dense despawn fires are owned by the dedicated
-            // `dense_despawn_fire_and_tombstone` routing — so the table despawn
-            // loops below must skip them. For a table-only archetype this filter is
-            // a verbatim copy (every id is `Table`) — the 0%-gate.
+            // The archetype's DECLARATION record retains non-signature ids (dense
+            // / bitset, since D0), but dense despawn fires are owned by the
+            // dedicated `dense_despawn_fire_and_tombstone` routing — so the table
+            // despawn loops below must not see them. KE14 D1 replaced the
+            // per-turn `is_signature_cid` screen with `table_component_ids()`,
+            // which is that subsequence by mint invariant.
             let mut count = 0usize;
-            for &cid in arche.component_ids() {
-                if is_signature_cid(cid) {
-                    id_buf[count] = cid;
-                    count += 1;
-                }
+            for &cid in arche.table_component_ids() {
+                id_buf[count] = cid;
+                count += 1;
             }
             count
             // <-- `&Archetype` drops here.

@@ -31,7 +31,6 @@ use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::bundle::bundle_column_cache::DENSE_POOL_SENTINEL;
 use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
-use crate::ecs::core::component::component_registry;
 use crate::ecs::core::component::hooks::dispatch::{trigger_on_add, trigger_on_insert};
 use crate::ecs::core::component::observers::dispatch::{
     fire_on_add_observers, fire_on_insert_observers,
@@ -389,10 +388,15 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
             //   `entry.component_id` (the `RequiredEntry` pairs them by
             //   construction in `build_required_plan`), and `store_mut` was
             //   called with THAT SAME id — so the store's column carries exactly
-            //   the layout the ctor writes. The entity is absent from this store
-            //   (`resolve_required_missing` emits only ids the bundle does not
-            //   supply, and this is the entity's first frame), which is
-            //   `insert_with_ctor`'s debug-asserted precondition.
+            //   the layout the ctor writes — `insert_with_ctor`'s ONE unsafe
+            //   precondition.
+            //
+            // (KE14 D5) The entity's ABSENCE from this store is a separate
+            // matter and is NOT a safety condition: `insert_with_ctor` lists it
+            // under `# Panics`, and in release a double call leaks a slot and
+            // enumerates the entity twice rather than causing UB. It holds here
+            // because `resolve_required_missing` emits only ids the bundle does
+            // not supply and this is the entity's first frame.
             unsafe { store.insert_with_ctor(entity.id(), entry.ctor, dense_current_tick) };
             // D3 candidate-archetype seed. Omitting this produces no panic and no
             // assert — it produces a mixed dense query that silently MISSES this
@@ -430,46 +434,34 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
             // Ordering (SAFETY-2): ALL on_add, THEN ALL on_insert (Bevy bundle
             // order — add-before-insert across the whole bundle, not interleaved).
             // Observers fire in the same window as their matching hook (hooks
-            // first, then observers over the SAME `component_ids` slice).
+            // first, then observers over the SAME `table_component_ids` slice).
             if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
                 // SAFETY: `archetype_ptr` is a valid `*const Archetype`; the
                 //   shared `&[ComponentId]` is transient and not aliased by any
                 //   live `&mut` (the hooks/observers receive `world_ptr`, not the
                 //   slice).
-                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*archetype_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
                     for &cid in ids {
-                        if !component_registry::is_signature_id(cid) {
-                            continue;
-                        }
                         trigger_on_add(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
                     for &cid in ids {
-                        if !component_registry::is_signature_id(cid) {
-                            continue;
-                        }
                         fire_on_add_observers(world_ptr, cid, entity);
                     }
                 }
             }
             if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
                 // SAFETY: same as the on_add slice read above.
-                let ids = unsafe { (*archetype_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*archetype_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
                     for &cid in ids {
-                        if !component_registry::is_signature_id(cid) {
-                            continue;
-                        }
                         trigger_on_insert(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                     for &cid in ids {
-                        if !component_registry::is_signature_id(cid) {
-                            continue;
-                        }
                         fire_on_insert_observers(world_ptr, cid, entity);
                     }
                 }

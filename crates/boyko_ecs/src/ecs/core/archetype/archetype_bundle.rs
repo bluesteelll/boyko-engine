@@ -500,7 +500,15 @@ impl ArchetypeBundle {
             // Start empty; the OR-compute over the registered components runs
             // in the `register_component_inplace` loop below (Wave 2).
             addr_of_mut!((*slot_ptr).flags).write(ArchetypeFlags::empty());
-            addr_of_mut!((*slot_ptr).component_ids).write(component_ids.to_vec());
+            // KE14 D1: BOTH id lists must be initialised on the in-place slab
+            // path (U13) or the slot is partially uninit (UB). The raw
+            // declaration record is written wholesale; the pool-bearing
+            // subsequence starts empty and is filled by the
+            // `register_component_inplace` walk below, which is the only place
+            // that already knows each id's storage kind.
+            addr_of_mut!((*slot_ptr).all_component_ids).write(component_ids.to_vec());
+            addr_of_mut!((*slot_ptr).table_component_ids)
+                .write(Vec::with_capacity(component_ids.len()));
             // F1: the entity-id column is now a `VmColumn` (address-stable, on
             // one VM reservation) sized to the `u32` `unit_index` ceiling — the
             // in-place slab path must construct it here (U13) or the slot is
@@ -556,6 +564,10 @@ impl ArchetypeBundle {
         if saw_gpu && saw_non_gpu {
             crate::ecs::core::archetype::archetype::residency_conflict_panic(component_ids);
         }
+        // KE14 D1: the two id lists, the signature mask and the pool bundle must
+        // agree before this slot is published. This is the LIVE mint funnel, so
+        // a tripwire only on `create_by_ids` would be dark here.
+        archetype.debug_assert_id_lists_agree();
 
         // Set the occupancy bit only after full initialisation.
         let word = (slot_idx as usize) / 64;

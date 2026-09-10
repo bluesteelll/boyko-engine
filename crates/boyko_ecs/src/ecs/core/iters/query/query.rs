@@ -35,6 +35,7 @@ use crate::ecs::core::iters::query::iter::{
 };
 use crate::ecs::core::iters::query::par_chunk;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
+use crate::ecs::core::iters::query::point_filter;
 use crate::ecs::core::iters::query::state::QueryDataState;
 use crate::ecs::core::iters::query::tag_terms::{
     TagTerms, any_term_matched, archetype_passes_tag_terms, count_term_matched,
@@ -377,9 +378,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   archetype's entity-id column (distinct from every component column).
         //   Phase 22.1 Area A: the id slice is resolved once here.
         let ids = self.driver_ids();
-        unsafe {
-            QueryIterEntities::new(self.state, ids, self.world, self.meta, self.enable_terms)
-        }
+        unsafe { QueryIterEntities::new(self.state, ids, self.world, self.meta, self.enable_terms) }
     }
 
     /// Returns a mutable iterator yielding `(EntityId, D::Item<'_>)` for every
@@ -461,7 +460,12 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     where
         D: DenseQueryData + ReadOnlyQueryData,
     {
-        const { assert!(D::HAS_DENSE, "Query::dense_iter requires a dense `D` (storage = \"dense\")") };
+        const {
+            assert!(
+                D::HAS_DENSE,
+                "Query::dense_iter requires a dense `D` (storage = \"dense\")"
+            )
+        };
         // Dense-enable plan D0 — reject an enable-bearing `F` at monomorphization
         // (the dense fast path is archetype-agnostic and cannot honor a per-row
         // enable term). Mirrors `par_iter`'s dense const-reject and
@@ -487,7 +491,12 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     where
         D: DenseQueryData,
     {
-        const { assert!(D::HAS_DENSE, "Query::dense_iter_mut requires a dense `D` (storage = \"dense\")") };
+        const {
+            assert!(
+                D::HAS_DENSE,
+                "Query::dense_iter_mut requires a dense `D` (storage = \"dense\")"
+            )
+        };
         // Dense-enable plan D0 — reject an enable-bearing `F` (the `&mut` leak the
         // fix closes: today this would write EVERY live slot, disabled rows
         // included). Use `iter_mut()` — its per-row `filter_fetch` enforces the
@@ -788,9 +797,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
             // SAFETY (ENBL-PT): forwarded from this function's own contract —
             //   `arch_ptr` is live and matched, `row < entity_count`. The helper
             //   caches the enable column and tests the row bit.
-            if !unsafe {
-                query_view_enable_passes::<F>(&self.state.filter_state, arch_ptr, row)
-            } {
+            if !unsafe { query_view_enable_passes::<F>(&self.state.filter_state, arch_ptr, row) } {
                 return false;
             }
         }
@@ -810,14 +817,15 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         true
     }
 
-    /// Applies `F`'s per-row predicate at `row` — the call
-    /// [`QueryView::get`](super::query_view::QueryView::get) does **not** make.
+    /// Applies `F`'s per-row predicate at `row`, so `get` / `get_mut` /
+    /// `contains` answer what `iter()` answers.
     ///
-    /// This is KE13's defect, and it is strictly worse on `Query` than on
-    /// `QueryView`: `EcsMaster::query` const-rejects change-detection filters,
-    /// so a `QueryView` only ever loses an archetypal or dense term, whereas
-    /// `Query<D, Changed<C>>` is the shape `Query` exists for. Skipping the call
-    /// would make `get` disagree with `iter()` on the same query — silently.
+    /// The body lives in [`point_filter::point_filter_passes`] because
+    /// [`QueryView`](super::query_view::QueryView) needs the identical
+    /// predicate, and a second copy there is what KE13 was: `QueryView::get`
+    /// grew the `D`-side `resolve_dense` mirror and never grew the `F`-side
+    /// one. Generic over `F` alone, so it also monomorphises once per filter
+    /// rather than once per `(D, F)` pair.
     ///
     /// Const-folds away entirely for `F::IS_ARCHETYPAL` (every archetypal
     /// filter), which is the 0%-gate the common point lookup takes.
@@ -827,57 +835,19 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     /// Same contract as [`Self::point_enable_passes`].
     #[inline]
     unsafe fn point_filter_passes(&self, arch_ptr: *const Archetype, row: usize) -> bool {
-        if const { F::IS_ARCHETYPAL } {
-            // QF1: an archetypal filter's `filter_fetch` is unconditionally
-            // `true`; the whole block below vanishes at monomorphisation.
-            return true;
-        }
-        let mut filter_fetch = <F as QueryFilter>::init_fetch(&self.state.filter_state);
-        // Dense plan D3: a dense `With`/`Without` term caches its global
-        // `DenseStore` pointer here — the point-lookup twin of the resolve the
-        // cursors do in `QueryIter::new`. Without it `filter_fetch` reads a NULL
-        // store as an answer (KE1's mechanism, one path over).
-        if const { F::HAS_DENSE } {
-            // SAFETY (D3): `self.world` is the cell scoped to `'w`; the resolved
-            //   store pointer is address-stable for that lifetime — the SAME
-            //   cell the iter path passes to `resolve_dense`.
-            unsafe {
-                <F as QueryFilter>::resolve_dense(
-                    &mut filter_fetch,
-                    &self.state.filter_state,
-                    self.world,
-                );
-            }
-        }
-        // NCD6 const-fold dispatcher, mirroring `QueryIter::next`. The
-        // `_no_meta` variants are a `#[cold] panic!` for NCD = true impls, so
-        // routing must be const-exact. A filter's tick reads are shared
-        // regardless of the caller's mutability (`Changed::set_table_mut`
-        // delegates to `set_table_readonly` for exactly this reason), so the
-        // read-only surface is correct on both `get` and `get_mut`.
-        //
-        // SAFETY (QF3): `arch_ptr` is live for `'w` and satisfies
-        //   `F::matches_component_set` (it is in the matched set);
-        //   `self.meta` is the active system's `SystemMeta`.
+        // SAFETY: forwarded verbatim from this function's own contract —
+        //   `arch_ptr` is live, matched and slab-stable; `row < entity_count`;
+        //   `self.meta` is the active system's `SystemMeta`, which is what makes
+        //   the NCD arm legal here (unlike on `QueryView`).
         unsafe {
-            if const { F::NEEDS_CHANGE_DETECTION } {
-                <F as QueryFilter>::set_table_readonly(
-                    &mut filter_fetch,
-                    &self.state.filter_state,
-                    arch_ptr,
-                    self.meta,
-                );
-            } else {
-                <F as QueryFilter>::set_table_readonly_no_meta(
-                    &mut filter_fetch,
-                    &self.state.filter_state,
-                    arch_ptr,
-                );
-            }
+            point_filter::point_filter_passes::<F>(
+                &self.state.filter_state,
+                self.world,
+                arch_ptr,
+                row,
+                self.meta,
+            )
         }
-        // SAFETY (QF1): the `set_table_*` above initialised `filter_fetch` for
-        //   this archetype; `row < entity_count` per this function's contract.
-        unsafe { <F as QueryFilter>::filter_fetch(&filter_fetch, row) }
     }
 
     /// Returns the row `entity` occupies, or `None` if it is dead, stale, or
@@ -936,9 +906,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   archetype was matched by `D::matches_component_set`, so every
         //   cached column is non-null; `row` is the live `unit_index`.
         unsafe {
-            if const {
-                <D as QueryData>::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION
-            } {
+            if const { <D as QueryData>::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION } {
                 <D as QueryData>::set_table_readonly(
                     &mut data_fetch,
                     &self.state.data_state,
@@ -1012,9 +980,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         //   `row` is the live `unit_index`. `self.meta` is the ACTIVE system's
         //   meta — see this method's doc comment for why that matters.
         unsafe {
-            if const {
-                <D as QueryData>::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION
-            } {
+            if const { <D as QueryData>::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION } {
                 <D as QueryData>::set_table_mut(
                     &mut data_fetch,
                     &self.state.data_state,
@@ -1493,7 +1459,11 @@ mod tests {
             _marker: PhantomData,
         };
 
-        assert_eq!(q.archetype_count(), 2, "both CompA archetypes must be matched");
+        assert_eq!(
+            q.archetype_count(),
+            2,
+            "both CompA archetypes must be matched"
+        );
         assert!(!q.is_empty(), "two archetypes matched ⇒ not empty");
         // Sanity: matched_ids contains exactly the two CompA archetypes.
         let ids = state.archetype_state.matched_ids_pre_terms();
@@ -1537,14 +1507,13 @@ mod tests {
 
         // Driver: build a Query<&CompA>, count archetypes, and sum
         // component values. Both are returned through the closure output.
-        let (arch_n, value_sum) = ecs
-            .run_closure_once(|q: Query<'_, '_, &CompA>| {
-                let mut sum = 0u32;
-                for a in &q {
-                    sum += a.0;
-                }
-                (q.archetype_count(), sum)
-            });
+        let (arch_n, value_sum) = ecs.run_closure_once(|q: Query<'_, '_, &CompA>| {
+            let mut sum = 0u32;
+            for a in &q {
+                sum += a.0;
+            }
+            (q.archetype_count(), sum)
+        });
 
         assert_eq!(arch_n, 2, "Query<&CompA> must match both CompA archetypes");
         assert_eq!(value_sum, 60, "iter must yield 10 + 20 + 30 = 60");

@@ -138,6 +138,16 @@ pub struct DenseStore {
     /// exact oracle; this set
     /// only over-approximates the candidate archetypes (false positives are
     /// filtered per-row, never false negatives).
+    ///
+    /// ⚠ **"Never false negatives" is a property somebody has to MAINTAIN, and
+    /// for a long time nobody did on the migration paths.** Every
+    /// `mark_arch_present` caller is a value-WRITING site, so a member merely
+    /// RETAINED across an archetype migration left the destination unmarked and
+    /// stopped being enumerated while still living in this store (KE14 D2). The
+    /// four migration paths now end with
+    /// `migration_helpers::reseed_dense_presence`, which re-seeds from the
+    /// authoritative `e2s` membership; the write-site marks are kept as the free
+    /// fast path, and the two are idempotent.
     arch_presence: ArchetypeBitSet,
 
     /// The component id this store serves (debug guards + diagnostics).
@@ -293,7 +303,23 @@ impl DenseStore {
     ///
     /// # Panics
     /// * the entity is already present — debug-asserted, exactly as
-    ///   [`Self::insert`]. Callers do present⇒skip first.
+    ///   [`Self::insert`]. Callers do present⇒skip first, against THIS store's
+    ///   `e2s` membership (KE14: the archetype signature is the wrong oracle
+    ///   for a non-signature id and answers "absent" for a live member).
+    ///
+    ///   ⚠ **What a release build does instead** (KE14 D5 — stated because
+    ///   "debug-asserted" without this is the text that let a caller record the
+    ///   condition as a SAFETY invariant): the assert vanishes, `free.pop()`
+    ///   yields a DIFFERENT slot (or a fresh frontier one), `s2e` records the
+    ///   entity there, `live` sets it, and `e2s.insert` OVERWRITES the old
+    ///   mapping. The old slot stays `live`, still names the entity in `s2e`,
+    ///   and is never returned to `free`. Consequences: (a) an iteration driven
+    ///   by `live` / `s2e` yields the entity TWICE with two distinct values — a
+    ///   silent wrong answer; (b) `remove` frees only the new slot, so the old
+    ///   value's `drop_fn` runs at store teardown — a leak until then;
+    ///   (c) **no double-drop and no aliasing violation** — the two slots hold
+    ///   two distinct values. It is a logic precondition, not a safety one,
+    ///   which is why it lives here and not under `# Safety`.
     /// * the column's reserve ceiling is exhausted on a fresh-slot append (the
     ///   same practically-unreachable `pool_reserve_rows(stride)` ceiling
     ///   [`Self::insert`] documents).
@@ -313,11 +339,21 @@ impl DenseStore {
             Some(slot) => {
                 // SAFETY (U1): `slot` came off `self.free`, so it was APPENDED
                 //   before it was tombstoned ⇒ `slot < column.count() <=
-                //   committed_rows`, which is `construct_at_uninitialized`'s
-                //   precondition. `remove` already ran `drop_at` on it, so the
-                //   slot is LOGICALLY UNINITIALISED and the ctor's `ptr::write`
-                //   drops nothing (no double-drop of the prior tenant). `&mut
-                //   self` ⇒ the column has exclusive access. `ctor` writes
+                //   committed_rows` — `construct_at_uninitialized`'s bound.
+                //   `remove` already ran `drop_at` on it and it was not
+                //   re-committed, so the slot holds NO LIVE VALUE: that is the
+                //   callee's second bullet in its shape (2) (`idx < len`, prior
+                //   tenant dropped), and the ctor's `ptr::write` therefore drops
+                //   nothing and leaks nothing.
+                //
+                //   ⚠ KE14 D5: this comment used to cite `idx < len` as the
+                //   callee's PRECONDITION. It was the opposite — the callee
+                //   demanded `idx >= len`, written for the append-only caller it
+                //   had at the time. The callee's text was widened to the real
+                //   requirement (no live value at `idx`), which this reuse arm
+                //   satisfies; the divergence was in the prose, never in the code.
+                //
+                //   `&mut self` ⇒ the column has exclusive access. `ctor` writes
                 //   exactly one value of this store's registered type (the
                 //   caller's `unsafe` contract above).
                 unsafe { self.column.construct_at_uninitialized(slot as usize, ctor) };

@@ -67,6 +67,33 @@ The enable seam (iter.rs:233, EnableTermCols::passes enable_terms.rs:182-205) is
 ## Data structures
 `DenseStore { column: ComponentPool, e2s: SparseMap<u32>, s2e: Vec<EntityId>, live: BitSet, free: Vec<u32>, arch_presence: ArchetypeBitSet, id }`. `DenseBuildView<'a>{ store: &'a mut DenseStore }` !Send. `DenseSolveView<'a>{ base: *mut u8, stride, len, live: *const BitSetWords }` Copy+Send+Sync 32B — `row_ptr(slot)=base.add(slot*stride)` + live debug_assert; NO `as_mut_slice`/`DerefMut`.
 
+### The archetype's TWO id lists (KE14 D1, 2026-09-10)
+
+A dense id is filtered out of the archetype **signature** but RETAINED in the
+mint-time id list — deliberately, because KE10's attach-flag walk has to reach
+poolless declarers. That retention is a **declaration record**, and treating it
+as a membership oracle is its own defect class:
+
+| list | accessor | what it is |
+|---|---|---|
+| declaration record | `Archetype::all_component_ids()` | every id the archetype was minted from, poolless ones included. **Race-dependent**: identity keys on the FILTERED signature, so two id lists differing only in dense / bitset ids collapse onto ONE archetype and whichever minted it first decides what is recorded. |
+| pool-bearing subsequence | `Archetype::table_component_ids()` | the signature-storage ids, in the same canonical order. Every member owns a `ComponentPool` — debug-asserted at all three mint funnels by `Archetype::debug_assert_id_lists_agree`. |
+
+⚠ **Rule: never resolve a `ComponentPool` out of the declaration record.** KE14
+D1 was four loops that did, and the panic was reachable from plain Rust in three
+steps (spawn a wide bundle carrying a `#[require]`d dense id, spawn a narrow one,
+insert into the narrow entity — the dedup hands back the wide archetype's
+declaration list). The rename is the audit: `component_ids()` no longer exists,
+so every call site had to be re-classified rather than silently keep the old
+meaning.
+
+⚠ **`arch_presence` has no false negatives only because somebody maintains it.**
+Every `mark_arch_present` caller is a value-WRITING site, so a dense member
+merely RETAINED across a migration used to leave the destination unmarked and
+stop being enumerated while still living in its store (KE14 D2). All four
+migration paths now end with `migration_helpers::reseed_dense_presence`, which
+re-seeds from the authoritative `e2s` membership.
+
 ## Staged build plan + gates
 - **D0**: `Dense=2` + reader Dense arm (C1 #0) + `is_signature_storage` + rewrite C1 sites #1,2,4,6,7,8 + widen #9 + #3; derive dense arm (`STORAGE_IS_DENSE` + `set_storage_kind` + `set_residency_class` Cpu). Gate: asm-diff byte-identical Table/Bitset hot loops; test `storage_kind(dense)==Dense` + signature-excluded; reject dense+gpu.
 - **D1**: `DenseStore` + views; insert/remove(tombstone)/slot_of/contains/compact + `live` BitSet. Gate: unit (reuse, deterministic order, address-stability, compact); Miri; property `e2s[s2e[s]]==s ∧ !live(s)⟺s∈free`; trybuild compile-fail (no `&mut[T]`) + static_assert Send/Sync vs !Send.

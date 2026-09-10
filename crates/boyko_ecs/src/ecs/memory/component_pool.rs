@@ -1817,8 +1817,20 @@ impl ComponentPool {
     ///
     /// * `idx < committed_rows` — caller pre-grew via
     ///   `Archetype::reserve_capacity` (Phase X.I committed the rows).
-    /// * `idx >= self.len` (the slot is uninit and not yet committed); after the
-    ///   matching `commit_units(idx, 1)` the slot becomes addressable.
+    /// * The slot at `idx` holds NO LIVE VALUE. Two shapes satisfy this, and the
+    ///   bullet named only the first until KE14 D5:
+    ///   1. `idx == self.len` — a fresh frontier slot, made addressable by the
+    ///      matching `commit_units(idx, 1)` afterwards; or
+    ///   2. `idx < self.len` where the previous tenant was already `drop_at`-ed
+    ///      and the slot not re-committed — `DenseStore`'s LIFO free-slot reuse,
+    ///      a legitimate second caller whose slot is LOGICALLY uninitialised
+    ///      without being POSITIONALLY past `len`.
+    ///
+    ///   `ctor`'s `ptr::write` drops nothing, so a live value at `idx` would be
+    ///   LEAKED, not double-dropped: this requirement is about the leak and
+    ///   about the caller's own `len` / free-list bookkeeping, not about memory
+    ///   safety. The `debug_assert` below checks the bound that IS a safety
+    ///   condition (`idx < committed_rows`).
     /// * `ctor` constructs a value whose layout matches this pool's registered
     ///   type — guaranteed by the registry: `ctor` came from `REQUIRES_ALL`
     ///   keyed by this column's `ComponentId`, the same id this pool was created

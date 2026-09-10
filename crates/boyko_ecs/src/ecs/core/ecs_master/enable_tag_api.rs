@@ -219,7 +219,14 @@ impl EcsMaster {
         //   `u16` and a length; it is dropped before the loop takes `&mut self`.
         let (flags, id_count) = unsafe {
             let archetype = &*inland.archetype_ptr();
-            (archetype.flags, archetype.component_ids.as_slice().len())
+            // KE14 D1: DELIBERATELY the declaration record. This walk exists to
+            // reach POOLLESS declarers — a dense or bitset component that
+            // declares `flags (…)` is signature-excluded, so the table list
+            // would skip exactly the ids KE10 was built for.
+            (
+                archetype.flags,
+                archetype.all_component_ids.as_slice().len(),
+            )
         };
         if !flags.contains(ArchetypeFlags::FLAGS_ON_ATTACH) {
             return;
@@ -227,14 +234,14 @@ impl EcsMaster {
         for i in 0..id_count {
             // Re-resolve per turn so no archetype borrow is held across the
             // `&mut self` application below. A toggle performs no migration and
-            // does not touch `component_ids` (Decision D3), so `i` stays valid;
+            // does not touch `all_component_ids` (Decision D3), so `i` stays valid;
             // re-resolving is borrow hygiene, not a correctness dependency.
             let Some(inland) = self.live_inland(entity) else {
                 return;
             };
             // SAFETY: as above — a shared reborrow reading one `ComponentId` out
             //   of the signature slice, dropped at the end of this statement.
-            let cid = unsafe { (*inland.archetype_ptr()).component_ids.as_slice()[i] };
+            let cid = unsafe { (*inland.archetype_ptr()).all_component_ids.as_slice()[i] };
             self.apply_flags_declared_by(entity, cid);
         }
     }
@@ -245,22 +252,47 @@ impl EcsMaster {
     /// initial state would clobber a bit the game had since toggled.
     ///
     /// `newly_attached` is caller-owned (never a borrow out of `self`), so the
-    /// loop can take `&mut self` freely. Same `FLAGS_ON_ATTACH` gate as
-    /// [`apply_attach_flags_all`](Self::apply_attach_flags_all).
-    pub(crate) fn apply_attach_flags_for(&mut self, entity: Entity, newly_attached: &[ComponentId]) {
-        if newly_attached.is_empty() {
+    /// loop can take `&mut self` freely.
+    ///
+    /// # The gate is the id's own declaration, not the archetype flag word (KE14 D4)
+    ///
+    /// This used to short-circuit on the entity's current archetype's
+    /// `FLAGS_ON_ATTACH` bit. That word is a sound over-approximation for
+    /// SIGNATURE ids only — it is OR-computed at mint over the archetype's
+    /// declaration list. A **dense** id is screened out of every merged
+    /// signature (`merged_archetype_id`), so the archetype a dense component is
+    /// attached alongside generally never recorded the declarer, and the word
+    /// says nothing about it. Gating a dense attach on it dropped the declared
+    /// state silently — KE14 D4, the second of the two gates that did so.
+    ///
+    /// [`declares_flags`] is the exact oracle — the same predicate
+    /// `ArchetypeFlags::insert_from_flag_declarations` uses to raise the bit —
+    /// and it is also CHEAPER at the existing call sites, which pass 1-element
+    /// slices: the cold declaration-table load now decides first, and
+    /// `live_inland` runs only when there is something to apply.
+    ///
+    /// [`declares_flags`]: crate::ecs::core::component::component_registry::declares_flags
+    pub(crate) fn apply_attach_flags_for(
+        &mut self,
+        entity: Entity,
+        newly_attached: &[ComponentId],
+    ) {
+        if !newly_attached
+            .iter()
+            .any(|cid| component_registry::declares_flags(cid.0))
+        {
             return;
         }
-        let Some(inland) = self.live_inland(entity) else {
-            return;
-        };
-        // SAFETY: see `apply_attach_flags_all` — a shared reborrow reading one
-        //   `u16`, dropped at the end of this statement.
-        let flags = unsafe { (*inland.archetype_ptr()).flags };
-        if !flags.contains(ArchetypeFlags::FLAGS_ON_ATTACH) {
+        // Dead / stale entities are a silent no-op, matching the rest of this
+        // module. The `live_inland` probe is kept for that reason alone; the
+        // archetype's flag word is no longer read here.
+        if self.live_inland(entity).is_none() {
             return;
         }
         for &cid in newly_attached {
+            if !component_registry::declares_flags(cid.0) {
+                continue;
+            }
             self.apply_flags_declared_by(entity, cid);
         }
     }
@@ -384,7 +416,10 @@ mod tests {
     }
 
     /// Spawns one `Pos` entity at the origin into `ecs`'s `[Pos]` archetype.
-    fn spawn_pos(ecs: &mut EcsMaster, archetype_id: crate::ecs::identifiers::primitives::ArchetypeId) -> Entity {
+    fn spawn_pos(
+        ecs: &mut EcsMaster,
+        archetype_id: crate::ecs::identifiers::primitives::ArchetypeId,
+    ) -> Entity {
         let p = Pos { x: 0.0, y: 0.0 };
         // SAFETY (test): `p` outlives the borrow; byte view of a `#[repr(C)]`.
         let bytes = unsafe {
@@ -401,7 +436,10 @@ mod tests {
         let arch = ecs.create_archetype(&[TABLE_POS]);
         let e = spawn_pos(&mut ecs, arch);
 
-        assert!(!ecs.is_enabled::<Stunned>(e), "fresh entity starts disabled");
+        assert!(
+            !ecs.is_enabled::<Stunned>(e),
+            "fresh entity starts disabled"
+        );
         ecs.enable::<Stunned>(e);
         assert!(ecs.is_enabled::<Stunned>(e), "enable must set the bit");
         ecs.disable::<Stunned>(e);
@@ -464,7 +502,10 @@ mod tests {
         // And toggling e1 off/on again also does not bump.
         ecs.disable::<Stunned>(e1);
         ecs.enable::<Stunned>(e1);
-        assert_eq!(ecs.archetype_master().enable_generation(), enable_before + 1);
+        assert_eq!(
+            ecs.archetype_master().enable_generation(),
+            enable_before + 1
+        );
     }
 
     /// `is_enabled` resolves the row via the InlandStore — a swap-remove that
@@ -489,7 +530,10 @@ mod tests {
             ecs.is_enabled::<Stunned>(e2),
             "the swapped entity's enable bit must follow it to the new row"
         );
-        assert!(!ecs.is_enabled::<Stunned>(e1), "untagged entity stays disabled");
+        assert!(
+            !ecs.is_enabled::<Stunned>(e1),
+            "untagged entity stays disabled"
+        );
     }
 
     /// Page-boundary toggle: rows 4095 (page 0) and 4096 (page 1) are in
@@ -516,15 +560,24 @@ mod tests {
 
         ecs.enable::<Stunned>(e_4095);
         assert!(ecs.is_enabled::<Stunned>(e_4095), "page-0 toggle set");
-        assert!(!ecs.is_enabled::<Stunned>(e_4096), "page-1 row must be independent");
+        assert!(
+            !ecs.is_enabled::<Stunned>(e_4096),
+            "page-1 row must be independent"
+        );
 
         ecs.enable::<Stunned>(e_4096);
         assert!(ecs.is_enabled::<Stunned>(e_4096), "page-1 toggle set");
-        assert!(ecs.is_enabled::<Stunned>(e_4095), "page-0 toggle undisturbed");
+        assert!(
+            ecs.is_enabled::<Stunned>(e_4095),
+            "page-0 toggle undisturbed"
+        );
 
         ecs.disable::<Stunned>(e_4095);
         assert!(!ecs.is_enabled::<Stunned>(e_4095));
-        assert!(ecs.is_enabled::<Stunned>(e_4096), "clearing page 0 must not touch page 1");
+        assert!(
+            ecs.is_enabled::<Stunned>(e_4096),
+            "clearing page 0 must not touch page 1"
+        );
     }
 
     /// Dead / stale entities are silent no-ops for enable / disable / is_enabled.
@@ -537,7 +590,10 @@ mod tests {
         assert!(ecs.delete_entity(e), "delete must succeed");
 
         // The handle is now stale.
-        assert!(!ecs.is_enabled::<Stunned>(e), "is_enabled on a dead entity is false");
+        assert!(
+            !ecs.is_enabled::<Stunned>(e),
+            "is_enabled on a dead entity is false"
+        );
         // These must not panic and must not allocate a column / bump generation.
         let enable_before = ecs.archetype_master().enable_generation();
         ecs.enable::<Stunned>(e);

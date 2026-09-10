@@ -63,7 +63,22 @@ use std::process::Command;
 /// | Blessed | Rung | Why |
 /// |---|---|---|
 /// | `rustc 1.97.1 (8bab26f4f 2026-07-14)` | 11 | first freeze; 23 inherited-drift fixtures plus the impl-count re-render this rung caused |
-const BLESSED_RUSTC: &str = "rustc 1.97.1 (8bab26f4f 2026-07-14)";
+/// | `rustc 1.98.1 (48a229cea 2026-09-01)` | KE14 D1 | 15 fixtures in 3 harnesses re-rendered by rustc; every OTHER harness in the workspace was verified green under 1.98.1 BEFORE this line moved |
+///
+/// The KE14 D1 row's second clause is the part that makes the row a certification rather than a
+/// shrug. This pin speaks for the WHOLE corpus, so moving it after re-blessing only the harnesses
+/// that happened to be red would certify prose nothing had looked at — the exact shape this file
+/// exists to prevent. Every `trybuild` harness in the workspace was therefore run under 1.98.1
+/// first: `boyko_ecs` (all harnesses), `boyko-input`, `boyko-log`, `boyko-ui`, `aether-tests`,
+/// `boyko-diag`, `boyko-physics`, `boyko_rhi_vulkan`. Exactly three were red —
+/// `enable_filter_compile_fail` (10 of 18), `option_anyof_compile_fail` (1 of 7) and
+/// `query_change_detection_compile_fail` (4 of 4) — and the re-bless diff of all 15 was reviewed
+/// line by line: 14 changed only rustc's `core/src/panic.rs` const-eval rendering (a bare
+/// `= note: the failure occurred here` became the `panic_fmt` source line plus a caret), and
+/// `anyof_arm_option_rejected` gained a rustc-rendered `core/src/option.rs` definition-site block
+/// restating a bound that was already asserted, unchanged, two lines below. No fixture lost or
+/// gained an `error[...]` line; no changed line carried engine content.
+const BLESSED_RUSTC: &str = "rustc 1.98.1 (48a229cea 2026-09-01)";
 
 /// Fixtures whose bytes this freeze speaks for — a lower bound, MEASURED at rung 11.
 ///
