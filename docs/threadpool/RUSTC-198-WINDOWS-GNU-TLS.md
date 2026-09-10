@@ -152,8 +152,72 @@ variables.
 The bracket "1.98.0 or the 1.98.1 point release" is answered by the sources: both PRs carry the 1.98.0
 milestone, and the 1.98.0 `libstd` rlib on this box already has the RMW `enable` at 0x44840.
 
-The MSVC control ("build the same source for `x86_64-pc-windows-msvc`, where `#[thread_local]` is native")
-is not executable on this box: the installed MSVC toolchain is rustc 1.92.0 and there is no MSVC linker.
+~~The MSVC control ("build the same source for `x86_64-pc-windows-msvc`, where `#[thread_local]` is native")
+is not executable on this box: the installed MSVC toolchain is rustc 1.92.0 and there is no MSVC linker.~~
+**STALE, and it was stale within a day.** The owner installed VS Build Tools 2022 + Windows SDK
+10.0.26100 on 2026-09-10 and `stable-x86_64-pc-windows-msvc` is **rustc 1.98.1 (48a229cea), LLVM
+22.1.8 — the same commit and the same LLVM as the gnu toolchain**. That makes the MSVC control the
+cleanest falsification available here (one variable: the host env, hence whether
+`target_thread_local` is set and `LazyKey::force` compiles at all), strictly better than the
+`-Zbuild-std` route above, which patches std. It is queued as the four-arm A/B in §5b.
+
+## 5a. The fix, measured: two thread-local reads per spawn cost exactly twice one (2026-09-10)
+
+`e6115223` merged `WORKER_DEQUE` and `CURRENT_WORKER_ID` into one `LaneDeposit` slot, so
+`worker_lane_for` performs **one** `thread_local!` read per spawn instead of two. If §2's mechanism
+is right the saving must be **half the excess** — not a fraction of the runtime, half of the *gap*
+between 1.97.1 and 1.98.1 — and it must vanish as the body grows, because the cost is a constant
+per spawn and not a rate.
+
+A/B in ONE session, two trees that differ only in `crates/boyko_threadpool/src/{tls,worker,scope,
+thread_pool,lib}.rs`: **A** = `02325b01` (the fix), **B** = `8d13115e` (its parent). Same box, same
+`rustc 1.98.1 (48a229cea)`, `available_parallelism = 16`, features already removed (`67563d3b`), so
+no `--features` and no `KE16_EXPECT`. Both bench binaries were built BEFORE the window; the window
+opened only after three consecutive 20 s samples saw zero `cargo`/`rustc`/`link` processes; a load
+receipt was taken immediately before and after every timed region; the arms were **interleaved**
+A,B,A,B rather than A,A,B,B. The `r1` pair is clean on both receipts (0 build processes); the `r2`
+pair ran with 2 build processes and is reported only as corroboration, never as the datum.
+
+| cell (`ke16_nested_scope`) | A: fix | B: pre-fix | B/A |
+|---|---:|---:|---:|
+| `dispatcher/body_1us_tasks_W` | 4.5 µs | 25.9 µs | **5.75×** |
+| `dispatcher/body_1us_tasks_4W` | 10.4 µs | 43.4 µs | **4.17×** |
+| `dispatcher/body_1us_tasks_64W` | 120.2 µs | 325.5 µs | **2.71×** |
+| `worker/body_1us_tasks_W` | 17.1 µs | 31.0 µs | **1.81×** |
+| `worker/body_1us_tasks_4W` | 39.8 µs | 81.4 µs | **2.05×** |
+| **`worker/body_1us_tasks_64W`** (§1's cell) | **531.6 µs** | **978.7 µs** | **1.84×** |
+| `body_10us_*` (6 cells) | — | — | 1.03–1.50× |
+| `body_100us_*` (6 cells) | — | — | 1.02–1.11× |
+| `body_1ms_*` (6 cells) | — | — | 0.90–1.04× (noise, both directions) |
+
+**The prediction and the number.** Take §1's 1.97.1 figure on the deciding cell as the
+guard-free baseline, ≈ 110 µs (99.3 / 105.0 / 132.7). Then the pre-fix excess is
+978.7 − 110 = 868.7 µs for TWO reads, i.e. ≈ 434 µs per read per wave (1,024 tasks ⇒ ≈ 424 ns per
+read per task, which is the right order for two `lock`-RMWs on a contended global line plus an
+`FlsSetValue` call). One read predicts 110 + 434 = **544 µs**. Measured **531.6 µs** — **2.3 %
+below the prediction**. The mechanism is not merely consistent with the effect; it gets its SIZE
+right.
+
+**And the regression is NOT closed, which the ratio alone would hide.** 531.6 µs against ≈ 110 µs
+is still ≈ 4.8×. The fix removes the read it could remove; the residual is the cost of the ONE
+remaining read on the spawn path, and no further merging can remove that one — it is what a
+`thread_local!` costs on this host under this compiler. The exits are §3's upstream fix, a host
+without the guard (§5b), or a spawn path that reads no thread-local at all.
+
+**The decay across the body axis is the second, independent confirmation.** 5.75× at 1 µs, ~1.2× at
+10 µs, ~1.05× at 100 µs, 1.00× at 1 ms: a constant per spawn amortises exactly like that, and a
+rate would not. Nothing in the 1 ms row moves outside the band in either direction.
+
+## 5b. The MSVC control (queued): if this story is right, the fix must buy NOTHING there
+
+Four arms in one session — `{fix, pre-fix} × {gnu, msvc}` — same source, same rustc commit, same
+LLVM, differing only in the host env. `x86_64-pc-windows-msvc` sets `target_thread_local`, so the
+`REGISTERED` short-circuit compiles and `LazyKey::force` does not exist on the path at all.
+
+**Stated before the run so it can fail:** on msvc the two arms must land on top of each other, both
+near the 1.97.1 gnu figure, while the gnu pair stays ≈ 1.8× apart on the deciding cell. If the fix
+still helps under msvc, this document's mechanism is wrong and §2's disassembly is being
+misattributed.
 
 ## 6. What this changes for the record
 
