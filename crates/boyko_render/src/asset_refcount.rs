@@ -3,7 +3,8 @@
 //! `MeshHandle`/`MaterialHandle` carrier hooks in `boyko_scene::render_caps`)
 //! into the two GPU asset tables (asset-streaming plan F2 §1/§3, gen-checked
 //! as of F5), plus [`validate_asset_refs`](crate::asset_refcount::validate_asset_refs)
-//! (F5's best-effort staleness net),
+//! (the two-way [`RenderStale`] / [`MaterialStale`] staleness oracle, decoupled
+//! from user visibility and pinned before every gather via [`AssetValidateSet`]),
 //! [`retire_deferred_frees`] (F6's fence-gated device-free drain), and the
 //! [`AssetRefcountPlugin`] that wires the resources + both systems into the
 //! app schedule.
@@ -13,17 +14,17 @@ use boyko_ecs::ecs::core::asset::{AssetBacking, AssetLoadState, Assets, GEN_UNSY
 use boyko_ecs::ecs::core::commands::Command;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
-use boyko_ecs::ecs::core::iters::query::Query;
-use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
+use boyko_ecs::ecs::core::iters::query::filter_enable::{Disabled, Enabled};
+use boyko_ecs::ecs::core::iters::query::{Query, Without};
 use boyko_ecs::ecs::core::system::{Commands, NonSendRes, NonSendResMut, Res, ResMut};
 use boyko_ecs::ecs::identifiers::primitives::EntityId;
-use boyko_macros::Resource;
+use boyko_macros::{Component, Resource, SystemSet};
 use boyko_rhi::RhiDevice;
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::swapchain::FRAMES_IN_FLIGHT;
 use boyko_scene::{
-    AssetRefKind, DeferredFree, FreeEntry, MaterialRefGen, MeshHandle, MeshRefGen, RefcountDeltas,
-    RenderEnabled,
+    AssetRefKind, DeferredFree, FreeEntry, MaterialHandle, MaterialRefGen, MeshHandle, MeshRefGen,
+    RefcountDeltas,
 };
 
 use crate::bindless::BindlessTextureTable;
@@ -73,8 +74,8 @@ pub struct RenderEpoch(pub u64);
 ///
 /// Registered by [`AssetRefcountPlugin`] `.before(validate_asset_refs)` (both
 /// systems share one [`App::add_systems_cfg`] closure, so the edge is
-/// expressible — see the plugin's doc for why the further edge to the mesh/CSM
-/// gathers is NOT a hard scheduler edge). The lane writes ride `Commands`,
+/// expressible — see the plugin's doc for how the further edge to the mesh/CSM
+/// gathers is pinned by name through [`AssetValidateSet`]). The lane writes ride `Commands`,
 /// flushed by the PER-SYSTEM apply window immediately after this system's body
 /// returns (`boyko_ecs::ecs::core::schedule::schedule::Schedule::run`'s
 /// dispatch loop calls `system.apply(world)` right after each system
@@ -262,207 +263,319 @@ impl Command for SyncRefGenCommand {
     }
 }
 
-/// Tracks the last `free_epoch` [`validate_asset_refs`] observed on the mesh
-/// store — the O(1) early-out oracle (asset-streaming plan F5 Decision 6).
-/// `Default` starts at 0, matching a fresh `Assets::<MeshGpu>::free_epoch`.
+/// The store epochs [`validate_asset_refs`] last observed — the O(1) early-out
+/// oracle (asset-streaming plan F5 Decision 6, widened by the "HARD PREREQ"
+/// items (a)/(d)) — plus the (e) orphan counter. `Default` starts every epoch at
+/// 0, BELOW a booted store's `install_epoch` (every `add` bumps it), so the first
+/// run after boot performs one full compare pass that emits nothing on a
+/// well-formed scene and then parks the cursor on the live values.
 ///
-/// Mesh-only: `validate_asset_refs` no longer reads the material store at all
-/// (see that fn's doc for why the material arm was removed) — there is
-/// nothing for a `mat` cursor to gate.
+/// # Why FOUR epochs (prereq (a))
+///
+/// `free_epoch` alone (the F5 shape) only advances on a free / a `Retiring`
+/// transition — the transitions that can make a live row STALE. `fill`
+/// (Loading → Loaded), a free-list-reuse `add` and `retire` bump
+/// [`Assets::install_epoch`] — the transitions that can make a stale row LIVE
+/// again (a carrier bound while its asset was Loading). Watching both per store
+/// is what gives validate its enable arm without a kernel edit; a churn-free
+/// (golden) frame still costs exactly four `u64` loads + compares.
 #[derive(Debug, Default, Clone, Copy, Resource)]
 pub struct ValidateCursor {
     /// Last `Assets::<MeshGpu>::free_epoch()` observed.
-    pub mesh: u64,
+    pub mesh_free: u64,
+    /// Last `Assets::<MeshGpu>::install_epoch()` observed (fill / add / retire).
+    pub mesh_install: u64,
+    /// Last `Assets::<Material>::free_epoch()` observed.
+    pub mat_free: u64,
+    /// Last `Assets::<Material>::install_epoch()` observed.
+    pub mat_install: u64,
+    /// Prereq (e): cumulative count of lane-less carriers (a `MeshHandle` row
+    /// without `MeshRefGen`, or a `MaterialHandle` row without `MaterialRefGen`
+    /// — the schema-older-save shape `load_archetype` cannot repair) that the
+    /// orphan pass marked stale. The test-readable signal; a `boyko_log` code
+    /// for it is a follow-up outside this crate.
+    pub orphan_rows_flagged: u64,
 }
 
-/// Deferred disable of [`RenderEnabled`] for a mesh row [`validate_asset_refs`]
-/// found stale this frame (asset-streaming plan F5 Decision 6) — keyed by
+/// Bit SET == this row's `MeshHandle` is STALE — a generation mismatch against
+/// its bound store row, a non-`Loaded` slot state, or a missing `MeshRefGen`
+/// lane (prereq (e)). Written ONLY by [`validate_asset_refs`] (mark AND clear);
+/// read by every raw-`MeshHandle.0` consumer as a `Disabled<RenderStale>` query
+/// term (`gather_mesh_draws`, `gather_shadow_casters`).
+///
+/// Prereq (b): staleness is DECOUPLED from user visibility. The
+/// `boyko_scene::RenderEnabled` bit belongs to `visibility_sync` and the user;
+/// validate never touches it, so a hidden row's stale bit is maintained while
+/// hidden and a stale row stays undrawn no matter how visibility toggles.
+///
+/// Bitset storage: an O(1) toggle with no archetype migration (the instance ring
+/// order changes only on a real transition), and a stale-free world allocates
+/// NO page — `Disabled<RenderStale>` is then a per-row bit test over an absent
+/// page, always true, which is the golden byte-identity argument for the gathers.
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "bitset")]
+pub struct RenderStale;
+
+/// Material twin of [`RenderStale`]: bit SET == this row's `MaterialHandle` is
+/// stale (gen mismatch / non-`Loaded` / lane-less). A stale MATERIAL does not
+/// drop the instance — `gather_mesh_draws` draws it with the pinned default
+/// material (slot 0) instead (prereq (d), asset-streaming plan task #13).
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "bitset")]
+pub struct MaterialStale;
+
+/// Prereq (c): the by-name ordering seam between [`validate_asset_refs`] (its
+/// sole member, joined in [`AssetRefcountPlugin::build`]) and every raw-slot
+/// consumer. A consumer registered through
+/// [`add_gather_mesh_draws`](crate::mesh_draw::add_gather_mesh_draws) /
+/// [`add_gather_shadow_casters`](crate::csm_caster::add_gather_shadow_casters)
+/// is pinned `.after_set(AssetValidateSet)` — an edge that holds regardless of
+/// plugin add-order and across the plugin boundary a `SystemKey` cannot cross
+/// (the same seam `CsmFitSet` / `PunctualResolveSet` / `LightCollectSet` use).
+/// A host that registers the gathers without `AssetRefcountPlugin` gets the
+/// scheduler's memberless-set warning — correct: it has no validate.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AssetValidateSet;
+
+/// Deferred toggle of [`RenderStale`] / [`MaterialStale`] for a row
+/// [`validate_asset_refs`] found to have TRANSITIONED this frame — keyed by
 /// [`EntityId`], mirroring `boyko_scene::visibility_sync`'s
-/// `SetRenderEnabledById`: a read-only query yields only `EntityId` (there is
-/// no `QueryData for Entity` and no world-resolving `SystemParam` in this
-/// kernel — see that fn's doc), so the live, generation-correct `Entity` is
-/// re-resolved at apply time via [`EcsMaster::get_entity`]. A dead/stale id (a
-/// despawn racing this frame) is a silent no-op — the same contract as the
-/// kernel's own `EnableTagCommand`.
-struct DisableStaleMeshCommand {
-    /// The stale row's entity id, read from the matched archetype's entity-id
-    /// column at gather time (`Query::iter_entities`).
+/// `SetRenderEnabledById`: a read-only query yields only `EntityId`, so the
+/// live, generation-correct `Entity` is re-resolved at apply time via
+/// [`EcsMaster::get_entity`]. A dead/stale id (a despawn racing this frame) is
+/// a silent no-op — the same contract as the kernel's own `EnableTagCommand`.
+#[repr(C)]
+struct SetStaleById {
+    /// The row's entity id, read from the matched archetype's entity-id column.
     id: EntityId,
+    /// Which tag to toggle — `Mesh` ⇒ [`RenderStale`], `Material` ⇒ [`MaterialStale`].
+    kind: AssetRefKind,
+    /// `true` ⇒ set the bit (mark stale); `false` ⇒ clear it (row is valid again).
+    stale: bool,
 }
 
-impl Command for DisableStaleMeshCommand {
+impl Command for SetStaleById {
     fn apply(self, world: &mut EcsMaster) {
         let Some(entity) = world.get_entity(self.id) else {
             return;
         };
-        world.disable::<RenderEnabled>(entity);
+        match (self.kind, self.stale) {
+            (AssetRefKind::Mesh, true) => world.enable::<RenderStale>(entity),
+            (AssetRefKind::Mesh, false) => world.disable::<RenderStale>(entity),
+            (AssetRefKind::Material, true) => world.enable::<MaterialStale>(entity),
+            (AssetRefKind::Material, false) => world.disable::<MaterialStale>(entity),
+        }
     }
 }
 
-/// Best-effort staleness net for `MeshHandle`/`MaterialHandle` carriers
-/// (asset-streaming plan F5 Decision 6) — the SOLE backstop for a bare-slot
-/// carrier that has fallen out of sync with its bound store row. A
-/// well-formed carrier's own refcount keeps its slot alive and never goes
-/// stale (see `boyko_scene::render_caps`'s "Refcount hook wiring" doc); the
-/// carriers this system catches are contract violations (the W1 rebind gap, a
-/// stale weak `Handle` copy held outside a carrier) that the durable guards —
-/// refcount (F2) + the `dec_ref` gen-check (F5 Decision 4) — already render
-/// non-corrupting. This system only adds visual cleanliness on top.
+/// Staleness oracle for `MeshHandle`/`MaterialHandle` carriers (asset-streaming
+/// plan F5 Decision 6, completed by the "HARD PREREQ before async streaming"
+/// items (a) (b) (d) (e)) — the SOLE backstop for a bare-slot carrier that has
+/// fallen out of sync with its bound store row. A well-formed carrier's own
+/// refcount keeps its slot alive and never goes stale (see
+/// `boyko_scene::render_caps`'s "Refcount hook wiring" doc); the carriers this
+/// system catches are contract violations (the W1 rebind gap, a stale weak
+/// `Handle` copy held outside a carrier), an in-flight async load (a carrier bound
+/// to a `reserve()`d slot that has not been `fill`ed yet), or a schema-older save's
+/// lane-less row. The durable guards — refcount (F2) + the `dec_ref` gen-check (F5
+/// Decision 4) — already render every one of these non-corrupting; this system
+/// decides what is DRAWN.
 ///
-/// # DISABLE-ONLY by design in F5 — no re-enable path; MESH-ONLY (W1 fix)
+/// # Two-way (mark + clear), decoupled from visibility — prereqs (a) and (b)
 ///
-/// This system only ever DISABLES a mesh row (`disable::<RenderEnabled>`) —
-/// it never re-enables one. This is latent-but-correct today: every in-tree
-/// load is synchronous (`Assets::add` → `Loaded` immediately, never via
-/// `reserve`/`fill`), so no carrier ever binds a `Loading` slot; and no
-/// in-tree scene retires-and-reuses a slot (F6, the first reuse, has not
-/// landed), so `free_epoch` never advances on a golden scene and this
-/// system's per-row loop never runs (see the early-out below). Before async
-/// `reserve`/`fill` streaming is exercised (F6/F7), TWO things are HARD
-/// PREREQUISITES (`docs/ASSET-STREAMING-PLAN.md`'s "HARD PREREQ before async
-/// streaming" section): (a) a `Loading → Loaded` RE-ENABLE path — `fill` must
-/// bump a validation epoch and this system must gain an enable arm; and (b)
-/// DECOUPLING staleness from user visibility — reusing `RenderEnabled` here
-/// fights `visibility_sync` (both drive that same bit); a future rung needs a
-/// separate `RenderStale` `EnableTag` the gather also filters on, instead of
-/// layering onto `RenderEnabled`. (Bevy PR #18734 is the same-frame
-/// handle-swap race this whole mechanism defends against.)
+/// The verdict lives in two bitset tags this system alone writes:
+/// [`RenderStale`] (mesh) and [`MaterialStale`] (material). It never touches
+/// `boyko_scene::RenderEnabled` — that bit belongs to `visibility_sync` and the
+/// user, and the F5 shape (validate `disable::<RenderEnabled>`) fought it: both
+/// drove one bit, and a hidden-while-stale row shown later was drawn stale. Now a
+/// row is drawn iff `Enabled<RenderEnabled> && Disabled<RenderStale>` — two
+/// independent bits with two independent owners — and a stale MATERIAL row is
+/// drawn with the pinned default slot 0 (`Enabled<MaterialStale>`, prereq (d)).
 ///
-/// Material staleness is handled SOLELY by the `dec_ref` gen-check at despawn
-/// (no render effect: the raster hardcodes material 0 until F8 wires
-/// per-instance material into the shader) — a stale weak material carrier can
-/// no longer corrupt a reused slot's refcount, but this system does NOT read
-/// or write `MaterialHandle`/`MaterialRefGen` at all. An earlier revision of
-/// this rung ALSO substituted a stale material row with the pinned default
-/// (id 0) directly here; that was REMOVED (W1 blocking fix, post-review):
-/// `dec_ref(slot, gen)` on a MATCHING-gen `Loading`/`Failed` row (a
-/// resurrection carrier whose `inc_ref` was refused, so the row never left
-/// `Loading`/`Failed` — see `Assets::inc_ref`'s doc) does NOT hit the
-/// gen-mismatch guard and instead PROCEEDS to a real zero-crossing decrement,
-/// silently retiring a row this system had no business retiring (and leaking
-/// the returned `RetireTicket`, since this call site never enqueued it into
-/// [`DeferredFree`]) — latent-dead while F6 has not landed, but F5 is meant
-/// to be the hard, permanent gate, and this activates exactly when F6/F7 do.
-/// The VISIBLE substitution (point a stale material at the pinned default) is
-/// DEFERRED to F8, which has the `Entity`-in-query / `RenderStale`
-/// infrastructure this needs to do it safely — see
-/// `docs/ASSET-STREAMING-PLAN.md`'s "HARD PREREQ before async streaming" (d).
+/// Transitions are found by COMPLEMENTARY queries per store: rows under
+/// `Disabled<Tag>` that are now stale get the bit SET; rows under `Enabled<Tag>`
+/// that are now valid get it CLEARED. Each row is visited exactly once, the
+/// current bit is read by the filter (no per-row world probe), and a command is
+/// emitted ONLY on a transition — a churn frame over N unchanged rows emits zero
+/// commands. Neither query filters on `RenderEnabled`, so a hidden row's bit is
+/// maintained while hidden. (Bevy PR #18734 is the same-frame handle-swap race
+/// this whole mechanism defends against.)
 ///
-/// # `free_epoch` early-out — O(1) on every churn-free/golden frame
+/// # Four-epoch early-out — O(1) on every churn-free/golden frame
 ///
-/// One `u64` load + compare against [`ValidateCursor::mesh`]; if the mesh
-/// store's `free_epoch` has not advanced since the last observation, this
-/// returns immediately — no query iteration, no command. `free_epoch` bumps
-/// only on [`Assets::remove`] or a [`Assets::dec_ref`] zero-crossing (a real
-/// (un)load), so a static/golden scene NEVER advances it — this is the
-/// byte-identity argument's load-bearing fact.
+/// Four `u64` loads + compares against [`ValidateCursor`]: both stores'
+/// `free_epoch` (bumped on `remove` / a `dec_ref` zero-crossing — a row can turn
+/// STALE) and `install_epoch` (bumped on `fill` / `add` / `retire` — a stale row
+/// can turn LIVE: prereq (a)'s enable path). If none advanced, this returns
+/// without iterating. A static/golden scene never advances any of them after its
+/// boot adds, so its per-row loop never runs — the byte-identity argument's
+/// load-bearing fact. An `add` frame (a runtime mint) costs one compare pass that
+/// emits nothing; `reserve` / `fail` bump nothing (neither makes a row drawable).
 ///
-/// # On a churn frame — O(visible) dense `u32`-compares, no random access
+/// # On a churn frame — O(carriers) dense `u32`-compares, no random access
 ///
-/// One pass over `(MeshHandle, MeshRefGen)` for every `Enabled<RenderEnabled>`
-/// row (dense, archetype-order, L1-resident): `MeshRefGen(GEN_UNSYNCED)` means
-/// "bound this frame, not yet synced" and is trusted (skipped — the sibling
-/// `apply_refcount_deltas` system, `.before` this one, guarantees a real
-/// binding is NEVER left at `GEN_UNSYNCED` past this point — see
-/// `apply_one`'s doc); otherwise a gen-mismatch or non-`Loaded` state disables
-/// the row.
+/// One pass per query over `(Handle, RefGen)` (dense, archetype-order,
+/// L1-resident): `RefGen(GEN_UNSYNCED)` means "bound this frame, not yet synced"
+/// and is trusted (skipped) in BOTH arms — the sibling `apply_refcount_deltas`
+/// system, `.before` this one with its per-system flush, guarantees a real
+/// binding is NEVER left at `GEN_UNSYNCED` past this point (see `apply_one`'s
+/// doc); otherwise the stale predicate is `try_generation(slot) != Some(g) ||
+/// state_of_index(slot) != Some(Loaded)`. Material slots widen via `u32::from`.
+///
+/// # Prereq (e): a lane-less carrier is FLAGGED and COUNTED, never drawn
+///
+/// `#[require(MeshRefGen)]` / `#[require(MaterialRefGen)]` materialize the lane on
+/// every `Commands::spawn`/`insert` path but NOT on the raw archetype-deserialize
+/// path (`boyko_ecs::ecs::core::serialize::load_writer::load_archetype` builds
+/// the archetype from the FILE's saved component-id list; no require expansion
+/// runs), so a `MeshHandle` row from a schema-older save lacks its lane and is
+/// AND-filtered out of the two-column queries above — the F5 hole ("silently
+/// skipped"). The orphan pass closes it: `Query<&MeshHandle, (Without<MeshRefGen>,
+/// Disabled<RenderStale>)>` (and the material twin) marks every match stale and
+/// bumps [`ValidateCursor::orphan_rows_flagged`]. It runs UNCONDITIONALLY, outside
+/// the early-out — a load bumps no store epoch, so an orphan placed under the
+/// early-out would be drawn until the next churn — and it is free in a
+/// well-formed world: `Without` over a TABLE component is archetypal, so the
+/// matched set is computed at structural change and a world with no lane-less
+/// archetype iterates zero rows. The `Disabled<..>` term makes each orphan cost
+/// one command, once. Semantics: un-refcounted + unvalidatable ⇒ conservative
+/// (never drawn). The REPAIR (insert the lane, rebind `+1`) is kernel work:
+/// `load_archetype` replays no `on_insert` hook, so a loaded carrier never pushes
+/// `+1` either (pinned by `load_world_fires_no_carrier_hooks`) — the plan's B1.
 ///
 /// # Raw carrier-index read sites downstream of this system
 ///
-/// Because bare-slot carriers give up a gen-keyed map's free staleness
-/// safety, THIS system is the sole backstop for the MESH side — every raw
-/// `MeshHandle.0` read site in the render crate (`mesh_draw.rs`,
-/// `csm_caster.rs`) is documented as relying on running downstream of this
-/// system within the same frame (`apply → validate → gather`). There is no
-/// symmetric material backstop today (see the DISABLE-ONLY / MESH-ONLY
-/// section above) — a raw `MaterialHandle.0` resolve has no live consumer
-/// pre-F8 (the raster hardcodes material 0), so nothing currently depends on
-/// one.
-///
-/// # A renderable missing its ref-gen lane is SILENTLY SKIPPED
-///
-/// `#[require(MeshRefGen)]` / `#[require(MaterialRefGen)]` materialize the
-/// lane on every `Commands::spawn`/`insert`-driven path (the `Bundle`
-/// required-component expansion). They do NOT materialize on the raw
-/// archetype-deserialize path (`boyko_ecs::ecs::core::serialize::load_writer::load_archetype`
-/// calls `EcsMaster::create_archetype` directly with the FILE's own saved
-/// component-id list — no `Bundle`/require expansion runs). A `MeshHandle`
-/// row loaded from a save file that predates this lane (or was otherwise
-/// captured without it) would silently fail to match `q_mesh`'s tuple query
-/// (an AND-match on both components) and never be checked here — no panic,
-/// no disable, just invisible exclusion from validation. Latent today (no
-/// such legacy save file exists in-tree; a same-build save/load round-trip
-/// serializes the lane like any other live column, since it IS present in the
-/// archetype by the time anything gets saved) — flagged for the reviewer as
-/// a version-skew edge the serialization rungs (S0-S3) did not anticipate.
-// SystemParams are consumed by-value by the SystemParam contract.
-#[allow(clippy::needless_pass_by_value)]
+/// Every raw `MeshHandle.0` / `MaterialHandle.0` read site in the render crate
+/// (`mesh_draw.rs`, `csm_caster.rs`) filters on `Disabled<RenderStale>` (and, for
+/// the material lane, splits on `MaterialStale`) and is registered
+/// `.after_set(`[`AssetValidateSet`]`)` through the consumer-side helpers — so it
+/// reads THIS frame's bits (prereq (c)). The gathers additionally keep their own
+/// construction guards (`try_get` for the mesh, `get_by_index` → `None ⇒ 0` for
+/// the material), so a carrier bound to a `reserve()`d slot on its spawn frame —
+/// no epoch bump, this system does not run — still never dereferences a hole.
+// SystemParams are consumed by-value by the SystemParam contract; the six
+// read-only queries + two stores + cursor + Commands ARE the system's access
+// contract (the scheduler reads the signature), so no argument bundling.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments, clippy::type_complexity)]
 pub fn validate_asset_refs(
-    q_mesh: Query<(&MeshHandle, &MeshRefGen), Enabled<RenderEnabled>>,
+    q_mesh_ok: Query<(&MeshHandle, &MeshRefGen), Disabled<RenderStale>>,
+    q_mesh_stale: Query<(&MeshHandle, &MeshRefGen), Enabled<RenderStale>>,
+    q_mat_ok: Query<(&MaterialHandle, &MaterialRefGen), Disabled<MaterialStale>>,
+    q_mat_stale: Query<(&MaterialHandle, &MaterialRefGen), Enabled<MaterialStale>>,
+    q_mesh_orphan: Query<&MeshHandle, (Without<MeshRefGen>, Disabled<RenderStale>)>,
+    q_mat_orphan: Query<&MaterialHandle, (Without<MaterialRefGen>, Disabled<MaterialStale>)>,
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
+    material_assets: Res<Assets<Material>>,
     mut cursor: ResMut<ValidateCursor>,
     mut cmd: Commands,
 ) {
-    let new_epoch = mesh_assets.free_epoch();
+    // Prereq (e): the orphan pass — unconditional, BEFORE the early-out (see the
+    // doc). Zero matched archetypes in a well-formed world => zero rows touched.
+    for (id, _) in q_mesh_orphan.iter_entities() {
+        cmd.add(SetStaleById { id, kind: AssetRefKind::Mesh, stale: true });
+        cursor.orphan_rows_flagged += 1;
+    }
+    for (id, _) in q_mat_orphan.iter_entities() {
+        cmd.add(SetStaleById { id, kind: AssetRefKind::Material, stale: true });
+        cursor.orphan_rows_flagged += 1;
+    }
+
+    let mesh_free = mesh_assets.free_epoch();
+    let mesh_install = mesh_assets.install_epoch();
+    let mat_free = material_assets.free_epoch();
+    let mat_install = material_assets.install_epoch();
     debug_assert!(
-        new_epoch >= cursor.mesh,
-        "invariant: Assets::free_epoch is monotonic non-decreasing (observed {new_epoch}, cursor {})",
-        cursor.mesh
+        mesh_free >= cursor.mesh_free
+            && mesh_install >= cursor.mesh_install
+            && mat_free >= cursor.mat_free
+            && mat_install >= cursor.mat_install,
+        "invariant: Assets::free_epoch / install_epoch are monotonic non-decreasing \
+         (observed mesh {mesh_free}/{mesh_install}, material {mat_free}/{mat_install}; \
+         cursor {:?})",
+        *cursor
     );
-    if new_epoch == cursor.mesh {
+    if mesh_free == cursor.mesh_free
+        && mesh_install == cursor.mesh_install
+        && mat_free == cursor.mat_free
+        && mat_install == cursor.mat_install
+    {
         return;
     }
 
-    for (id, (&MeshHandle(slot), &MeshRefGen(g))) in q_mesh.iter_entities() {
-        if g == GEN_UNSYNCED {
-            continue;
+    // Mesh lane — mark arm, then clear arm (complementary filters, see the doc).
+    for (id, (&MeshHandle(slot), &MeshRefGen(g))) in q_mesh_ok.iter_entities() {
+        if g != GEN_UNSYNCED && is_stale(&mesh_assets, slot, g) {
+            cmd.add(SetStaleById { id, kind: AssetRefKind::Mesh, stale: true });
         }
-        let stale = mesh_assets.try_generation(slot) != Some(g)
-            || mesh_assets.state_of_index(slot) != Some(AssetLoadState::Loaded);
-        if stale {
-            cmd.add(DisableStaleMeshCommand { id });
+    }
+    for (id, (&MeshHandle(slot), &MeshRefGen(g))) in q_mesh_stale.iter_entities() {
+        if g != GEN_UNSYNCED && !is_stale(&mesh_assets, slot, g) {
+            cmd.add(SetStaleById { id, kind: AssetRefKind::Mesh, stale: false });
         }
     }
 
-    cursor.mesh = new_epoch;
+    // Material lane — the same two arms over the `u16` carrier, widened.
+    for (id, (&MaterialHandle(slot), &MaterialRefGen(g))) in q_mat_ok.iter_entities() {
+        if g != GEN_UNSYNCED && is_stale(&material_assets, u32::from(slot), g) {
+            cmd.add(SetStaleById { id, kind: AssetRefKind::Material, stale: true });
+        }
+    }
+    for (id, (&MaterialHandle(slot), &MaterialRefGen(g))) in q_mat_stale.iter_entities() {
+        if g != GEN_UNSYNCED && !is_stale(&material_assets, u32::from(slot), g) {
+            cmd.add(SetStaleById { id, kind: AssetRefKind::Material, stale: false });
+        }
+    }
+
+    cursor.mesh_free = mesh_free;
+    cursor.mesh_install = mesh_install;
+    cursor.mat_free = mat_free;
+    cursor.mat_install = mat_install;
+}
+
+/// The stale predicate (asset-streaming plan F5 Decision 6, unchanged): a
+/// carrier whose lane-stamped generation `g` no longer matches the slot's
+/// current one (the slot was retired and reused under it), or whose slot is not
+/// `Loaded` (Loading / Failed / Retiring / Vacant / out of range). Generic over
+/// the two concrete `AssetBacking` types so both lanes share one monomorphized
+/// body — no dynamic dispatch.
+#[inline]
+fn is_stale<T: AssetBacking>(assets: &Assets<T>, slot: u32, g: u32) -> bool {
+    assets.try_generation(slot) != Some(g)
+        || assets.state_of_index(slot) != Some(AssetLoadState::Loaded)
 }
 
 /// Wires the asset-streaming refcount pipeline into the app schedule
 /// (asset-streaming plan F2 §1/§3, F5's validation, F6's fence gate): inserts
 /// the queue resources ([`RefcountDeltas`], [`DeferredFree`],
 /// [`ValidateCursor`], [`RenderEpoch`]) the carrier hooks and both systems
-/// share, and registers [`apply_refcount_deltas`] `.before(validate_asset_refs)`.
+/// share, and registers [`apply_refcount_deltas`] `.before(validate_asset_refs)`
+/// with `validate_asset_refs` joining [`AssetValidateSet`].
 /// `RenderEpoch` starts at `0`, matching a fresh [`Renderer`](boyko_rhi_vulkan::swapchain::Renderer)'s
 /// `submission_epoch` before the first submit; the host overwrites it every
 /// frame BEFORE `app.update_with_delta` (`boyko_app::runner`'s boot-ordering
 /// contract), so this only matters for a `apply_refcount_deltas` run before
 /// the first host publish (none exists in-tree today).
 ///
-/// # The apply → validate edge is expressible; the validate → gather edge is NOT
+/// # The apply → validate edge is a `SystemKey`; the validate → gather edge is a SET
 ///
 /// Both systems are registered in the SAME [`App::add_systems_cfg`] closure
 /// here, so the `SystemKey`-based `.before` edge between them is directly
-/// expressible. The FURTHER edge this rung's design calls for — validation
-/// running before `boyko_render::gather_mesh_draws` /
-/// `gather_shadow_casters` — is **not** expressible from inside this plugin:
-/// those systems are registered by a LATER, separate
-/// `App::add_systems_cfg` closure in the composing host
-/// (`boyko_app::plugins::EnginePlugins::build`), and a `SystemKey` cannot be
-/// obtained for a system that does not exist yet at this plugin's build time
-/// (mirrors the documented `CsmPlugin`/`ShadowAtlasPlugin`/`LightingPlugin`
-/// cross-plugin limitation — "a `.after(key)` edge needs the target's
-/// `SystemKey`, only obtainable inside the target's own builder closure").
-/// The correctness this gap could threaten is bounded exactly like those:
-/// `EnginePlugins::build` already composes `AssetRefcountPlugin` BEFORE the
-/// mesh/CSM gather closure (add-order), and — as this system's own doc notes
-/// — its churn-frame effect (disable a stale mesh row) is a bounded,
-/// self-correcting one-frame-at-most visual transient, never a soundness
-/// hazard (the durable refcount/gen-check guards do not depend on this
-/// system's timing at all). Closing this gap
-/// with a hard scheduler edge (e.g. a `add_asset_validate_systems(&mut
-/// ScheduleBuilder) -> SystemKey` helper the host calls directly inside its
-/// own gather closure, mirroring `add_gpu_transform_pack`) is host-composition
-/// work, out of this crate's scope.
+/// expressible. The FURTHER edge — validation before
+/// `boyko_render::gather_mesh_draws` / `gather_shadow_casters`, registered by a
+/// LATER, separate closure in the composing host
+/// (`boyko_app::plugins::EnginePlugins::build`) — cannot be a `SystemKey` edge
+/// (a key for a system that does not exist yet at this plugin's build time is
+/// unobtainable, and `SystemKey` is unnameable outside `boyko_ecs`). Prereq (c)
+/// therefore pins it BY NAME: `validate_asset_refs` is the sole member of
+/// [`AssetValidateSet`], and every consumer is registered through
+/// [`add_gather_mesh_draws`](crate::mesh_draw::add_gather_mesh_draws) /
+/// [`add_gather_shadow_casters`](crate::csm_caster::add_gather_shadow_casters),
+/// which chain `.after_set(AssetValidateSet)` before handing the caller its
+/// `SystemConfig` (the `add_gpu_transform_pack` shape). The edge holds
+/// regardless of add-order and is provable in a bare `App` through the builder's
+/// cycle detection (`tests/asset_validate_schedule_edge.rs`) — a mutation that
+/// drops the `.after_set` turns that test red, which an add-order pin could never
+/// offer.
 #[derive(Default)]
 pub struct AssetRefcountPlugin;
 
@@ -474,7 +587,7 @@ impl Plugin for AssetRefcountPlugin {
         app.insert_resource(RenderEpoch::default());
         app.add_systems_cfg(|b| {
             let apply = b.add_system(apply_refcount_deltas).key();
-            b.add_system(validate_asset_refs).after(apply);
+            b.add_system(validate_asset_refs).after(apply).in_set(AssetValidateSet);
         });
     }
 

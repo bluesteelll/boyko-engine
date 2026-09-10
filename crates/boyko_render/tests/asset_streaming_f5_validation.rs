@@ -1,8 +1,15 @@
 //! Asset-streaming plan F5 — cross-crate integration coverage for the
 //! generation-lane validation net: [`apply_refcount_deltas`]'s unconditional
 //! lane-stamp-on-a-refused-inc (the DELTA-1 blocker fix), mesh/material lane
-//! independence, [`validate_asset_refs`]'s `free_epoch` early-out, and its
-//! disable/substitute reaction to a force-reused (simulated F6) slot.
+//! independence, [`validate_asset_refs`]'s epoch early-out, and its
+//! mark-stale reaction to a force-reused (simulated F6) slot.
+//!
+//! Asset-streaming plan "HARD PREREQ" (b) (branch `fix/asset-validate-prereqs`)
+//! INVERTED one assertion here by design: validate no longer clears
+//! `RenderEnabled` (the user's / `visibility_sync`'s bit) — it sets the separate
+//! `RenderStale` tag the gather filters on. The force-reuse test therefore asserts
+//! `RenderStale` set + `RenderEnabled` untouched + a real-gather exclusion. The
+//! full prereq coverage lives in `asset_streaming_prereq_validate.rs`.
 //!
 //! Mirrors `asset_refcount_integration.rs`'s harness shape (a raw `EcsMaster`
 //! plus direct `run_system` calls — the established ad-hoc-system test idiom,
@@ -54,8 +61,14 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
 
 use boyko_render::asset_refcount::{ValidateCursor, validate_asset_refs};
-use boyko_render::{Material, MeshGpu, RenderEpoch, apply_refcount_deltas};
-use boyko_scene::{DeferredFree, MaterialHandle, MaterialRefGen, MeshHandle, MeshRefGen, RefcountDeltas, RenderEnabled};
+use boyko_render::{
+    Material, MeshBundle, MeshGpu, MeshRenderScratch, RenderEpoch, RenderStale,
+    apply_refcount_deltas, gather_mesh_draws,
+};
+use boyko_scene::{
+    DeferredFree, MaterialHandle, MaterialRefGen, MeshHandle, MeshRefGen, RefcountDeltas,
+    RenderEnabled, Transform,
+};
 
 use boyko_rhi::enums::IndexType;
 use boyko_rhi_vulkan::ffi::VkBuffer;
@@ -98,6 +111,11 @@ fn world_with(material_assets: Assets<Material>, mesh_assets: Assets<MeshGpu>) -
     // Asset-streaming plan F6: `apply_refcount_deltas` now reads `RenderEpoch` to
     // stamp a real fence-gated `retire_frame` — mirrors `AssetRefcountPlugin::build`.
     ecs.insert_resource(RenderEpoch::default());
+    // Prereq (b): the force-reuse test proves the gather's `Disabled<RenderStale>`
+    // exclusion on the REAL `gather_mesh_draws`, which needs its scratch resource.
+    ecs.insert_resource(MeshRenderScratch::default());
+    #[cfg(feature = "hwrt")]
+    ecs.insert_resource(boyko_render::ShadowDenoiseConfig::default());
     ecs.insert_resource(material_assets);
     ecs.insert_non_send_resource(mesh_assets);
     // Prime both ids (installs the on_insert/on_replace hooks) before any spawn —
@@ -314,8 +332,12 @@ fn validate_asset_refs_is_a_no_op_on_a_stable_epoch() {
     let enabled_before = ecs.is_enabled::<RenderEnabled>(e);
     assert!(enabled_before, "test precondition: the row starts enabled");
 
-    // Neither store has retired anything since the fresh `ValidateCursor`
-    // Default (both epochs 0) — the O(1) early-out path.
+    // Neither store has retired anything. Prereq (a) widened the cursor to the
+    // stores' `install_epoch` too, so this FIRST call (cursor 0 < the boot adds'
+    // install epochs) performs one compare pass rather than the O(1) early-out —
+    // but the pass emits nothing on a well-formed row, which is what every
+    // assertion below pins. A SECOND call is the true O(1) early-out.
+    ecs.run_system(validate_asset_refs);
     ecs.run_system(validate_asset_refs);
 
     assert_eq!(
@@ -343,6 +365,7 @@ fn validate_asset_refs_is_a_no_op_on_a_stable_epoch() {
         enabled_before,
         "a stable-epoch validate must not touch RenderEnabled"
     );
+    assert!(!ecs.is_enabled::<RenderStale>(e), "a well-formed row is never marked stale");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -350,17 +373,26 @@ fn validate_asset_refs_is_a_no_op_on_a_stable_epoch() {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn a_force_reused_mesh_slot_is_disabled_by_validate_without_refcount_corruption() {
+fn a_force_reused_mesh_slot_is_marked_stale_by_validate_without_refcount_corruption() {
     let mut mesh_assets = Assets::<MeshGpu>::with_reserved(4);
     let h = mesh_assets.add(dummy_mesh_gpu());
     let slot = h.index();
 
     let mut ecs = world_with(Assets::<Material>::with_reserved(4), mesh_assets);
 
-    let e: Entity =
-        ecs.run_system(move |mut cmds: Commands| cmds.spawn(MeshHandle(slot)).enable::<RenderEnabled>().id());
+    // A full drawable (`MeshBundle` carries the `InstanceModelCol` the gather reads), so
+    // the exclusion assertion below is against a row the gather WOULD otherwise draw.
+    let e: Entity = ecs.run_system(move |mut cmds: Commands| {
+        cmds.spawn(MeshBundle::new(MeshHandle(slot), Transform::default())).enable::<RenderEnabled>().id()
+    });
     ecs.run_system(apply_refcount_deltas);
     assert!(ecs.is_enabled::<RenderEnabled>(e), "test precondition: starts enabled");
+    ecs.run_system(gather_mesh_draws);
+    assert_eq!(
+        ecs.resource::<MeshRenderScratch>().instance_count(),
+        1,
+        "positive control: the live row IS drawn before the force-reuse"
+    );
     let stale_gen = ecs.get_component::<MeshRefGen>(e).copied().expect("lane present").0;
     assert_ne!(stale_gen, GEN_UNSYNCED, "the apply must have synced the lane (test precondition)");
 
@@ -380,9 +412,22 @@ fn a_force_reused_mesh_slot_is_disabled_by_validate_without_refcount_corruption(
 
     ecs.run_system(validate_asset_refs);
 
+    // Prereq (b) — the documented inversion: validate marks `RenderStale` and leaves the
+    // user's `RenderEnabled` bit exactly where `visibility_sync` / the user put it; the
+    // REAL gather then excludes the row through its `Disabled<RenderStale>` term.
     assert!(
-        !ecs.is_enabled::<RenderEnabled>(e),
-        "the stale carrier's row must be disabled once validate observes the gen mismatch"
+        ecs.is_enabled::<RenderStale>(e),
+        "the stale carrier's row must be marked RenderStale once validate observes the gen mismatch"
+    );
+    assert!(
+        ecs.is_enabled::<RenderEnabled>(e),
+        "validate must NOT clear RenderEnabled — staleness is decoupled from visibility (prereq (b))"
+    );
+    ecs.run_system(gather_mesh_draws);
+    assert_eq!(
+        ecs.resource::<MeshRenderScratch>().instance_count(),
+        0,
+        "the stale row must be excluded by the gather's Disabled<RenderStale> term"
     );
 
     // No refcount corruption: the entity's eventual detach (a gen-mismatched

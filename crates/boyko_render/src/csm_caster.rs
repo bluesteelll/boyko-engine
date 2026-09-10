@@ -58,13 +58,16 @@
 //! `Without<SdfOccluder>` term to make the exclusion structural, not just asserted).
 
 use boyko_ecs::ecs::core::asset::Assets;
-use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
+use boyko_ecs::ecs::core::iters::query::filter_enable::{Disabled, Enabled};
 use boyko_ecs::ecs::core::iters::query::{Query, With};
+use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
+use boyko_ecs::ecs::core::schedule::system_config::SystemConfig;
 use boyko_ecs::ecs::core::system::{NonSendRes, Res, ResMut};
 use boyko_macros::{Resource, SystemSet};
 use boyko_scene::ViewUniform;
 use boyko_scene::render_caps::{MeshHandle, RenderEnabled};
 
+use crate::asset_refcount::{AssetValidateSet, RenderStale};
 use crate::csm_config::{CsmCasterBounds, CsmConfig, CsmFitMode, ResolvedCsm};
 use crate::csm_marker::ShadowCaster;
 use crate::instance_model::InstanceModelCol;
@@ -130,10 +133,16 @@ impl CsmCasterScratch {
 ///
 /// # The structural filter
 ///
-/// The query filter is `(Enabled<RenderEnabled>, With<ShadowCaster>)` — a tuple-AND:
+/// The query filter is `(Enabled<RenderEnabled>, Disabled<RenderStale>, With<ShadowCaster>)`
+/// — a tuple-AND:
 /// - `Enabled<RenderEnabled>` is the `Visibility::Hidden` per-row gate (the SAME term
 ///   [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) uses), so a hidden caster
 ///   never enters a cascade bucket.
+/// - `Disabled<RenderStale>` is the asset-staleness gate (asset-streaming plan prereq (b),
+///   the SAME term the main gather uses): a caster whose mesh `validate_asset_refs` marked
+///   stale THIS frame never enters a bucket, independently of its visibility bit. Over a
+///   stale-free scene the bit page is absent and the test is always true — no row dropped,
+///   none reordered (the goldens' byte-identity argument).
 /// - `With<ShadowCaster>` is the structural caster term — a non-caster row is excluded at
 ///   iteration (capability-is-presence), so the depth pass draws ONLY casters. This is
 ///   the WHOLE difference from the main gather.
@@ -167,7 +176,7 @@ impl CsmCasterScratch {
 /// read off the MAIN `MeshRenderScratch`. Reading `CsmCasterScratch.0.occlusion_instances()`
 /// would be a SECOND predicate that can disagree with the first, and that is a defect.
 ///
-/// # Registration — unwired-API (matches `gather_mesh_draws`)
+/// # Registration — through [`add_gather_shadow_casters`] only (matches `gather_mesh_draws`)
 ///
 /// This system is NOT registered in [`CsmPlugin`](crate::csm_plugin::CsmPlugin) (nor any
 /// plugin), exactly as
@@ -179,15 +188,19 @@ impl CsmCasterScratch {
 /// `.before(record_csm_depth)` edge is expressible there — the same add-order discipline
 /// `CsmPlugin` documents for the resolve/consumer ordering). The app registers it
 /// alongside [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) and inserts the
-/// [`CsmCasterScratch`] resource when it wires the real CSM caster path.
+/// [`CsmCasterScratch`] resource when it wires the real CSM caster path — and it does so
+/// THROUGH [`add_gather_shadow_casters`], which pins the gather
+/// `.after_set(AssetValidateSet)` (asset-streaming plan prereq (c)) so the
+/// `Disabled<RenderStale>` term above reads THIS frame's verdict, not last frame's.
 // The `Query<D, F>` IS the declarative system signature; the `(Enabled<RenderEnabled>,
-// With<ShadowCaster>)` tuple-AND filter is the whole point of this gather (the structural
-// caster term), so factoring it behind a `type` alias would hide the load-bearing intent.
+// Disabled<RenderStale>, With<ShadowCaster>)` tuple-AND filter is the whole point of this
+// gather (the structural caster term), so factoring it behind a `type` alias would hide
+// the load-bearing intent.
 #[allow(clippy::type_complexity, clippy::needless_pass_by_value)]
 pub fn gather_shadow_casters(
     q: Query<
         (&MeshHandle, &InstanceModelCol, Option<&OcclusionCulling>),
-        (Enabled<RenderEnabled>, With<ShadowCaster>),
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, With<ShadowCaster>),
     >,
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<CsmCasterScratch>,
@@ -210,7 +223,8 @@ pub fn gather_shadow_casters(
             let m = mesh_assets.try_get(MeshHandle(mesh_id))?;
             Some((m.index_count, m.index_type))
         },
-        // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
+        // Slot resolved by index; a stale mesh is excluded by the `Disabled<RenderStale>`
+        // term (validate_asset_refs marked it earlier this frame — the `AssetValidateSet` edge).
         // The caster gather has no material dimension (the CSM depth pass reads only
         // `.batches`/`.ring`, never `.material_ids`) — a constant default payload feeds the
         // shared gather core's material lane inertly (asset-streaming plan F8+). The
@@ -222,6 +236,17 @@ pub fn gather_shadow_casters(
             })
         },
     );
+}
+
+/// Registers [`gather_shadow_casters`] pinned `.after_set(`[`AssetValidateSet`]`)` and hands
+/// the caller the `SystemConfig` to chain its own edges on (`.after(pack)`, `.key()` for the
+/// downstream `sync_csm_light_gate` / `reduce_caster_bounds` edges) — the twin of
+/// [`add_gather_mesh_draws`](crate::mesh_draw::add_gather_mesh_draws); see that helper's
+/// doc for why the validate → gather edge is a by-name set inside a consumer-side helper
+/// (asset-streaming plan prereq (c)).
+#[inline]
+pub fn add_gather_shadow_casters(builder: &mut ScheduleBuilder) -> SystemConfig<'_> {
+    builder.add_system(gather_shadow_casters).after_set(AssetValidateSet)
 }
 
 /// CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C2 — the cross-plugin ordering

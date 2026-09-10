@@ -430,7 +430,10 @@ pub mod upload;
 pub mod vg_census;
 pub mod view;
 
-pub use asset_refcount::{AssetRefcountPlugin, RETIRE_DELAY, RenderEpoch, apply_refcount_deltas, retire_deferred_frees};
+pub use asset_refcount::{
+    AssetRefcountPlugin, AssetValidateSet, MaterialStale, RETIRE_DELAY, RenderEpoch, RenderStale,
+    apply_refcount_deltas, retire_deferred_frees,
+};
 pub use barrier::{PlannedBarrier, lower_barriers};
 pub use bindless::BindlessTextureTable;
 pub use bundles::{DirectionalLightObject, MeshBundle, PointLightObject, SpotLightObject};
@@ -440,8 +443,8 @@ pub use csm_config::{
     resolve_csm_cascades,
 };
 pub use csm_caster::{
-    CsmCasterScratch, CsmFitSet, gather_shadow_casters, reduce_bounds_into, reduce_caster_bounds,
-    sync_csm_light_gate,
+    CsmCasterScratch, CsmFitSet, add_gather_shadow_casters, gather_shadow_casters,
+    reduce_bounds_into, reduce_caster_bounds, sync_csm_light_gate,
 };
 pub use csm_marker::ShadowCaster;
 pub use csm_plugin::CsmPlugin;
@@ -545,7 +548,8 @@ pub use instance_model::{PrevInstanceModelCol, sync_prev_instance_model_cols};
 pub use motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam, MotionCamState};
 pub use mesh_draw::{
     DrawBatch, MeshRenderScratch, PER_INSTANCE_MATERIAL_BYTES, PER_INSTANCE_MATERIAL_TEX_BYTES,
-    PerInstanceMaterial, PerInstanceMaterialTex, gather_mesh_draws, sync_vb_instance_ring_system,
+    PerInstanceMaterial, PerInstanceMaterialTex, add_gather_mesh_draws, gather_mesh_draws,
+    sync_vb_instance_ring_system,
 };
 pub use light_plugin::LightingPlugin;
 pub use light_reconcile::light_reconcile;

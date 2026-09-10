@@ -53,13 +53,16 @@ use boyko_ecs::ecs::constants::pool_reserve_rows;
 use boyko_ecs::ecs::core::asset::{Assets, register_asset_layout};
 use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_ecs::ecs::core::iters::query::Query;
-use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
+use boyko_ecs::ecs::core::iters::query::filter_enable::{Disabled, Enabled};
+use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
+use boyko_ecs::ecs::core::schedule::system_config::SystemConfig;
 use boyko_ecs::ecs::core::system::{NonSendRes, Res, ResMut};
 use boyko_macros::Resource;
 use boyko_rhi::enums::IndexType;
 use boyko_scene::render_caps::{MaterialHandle, MeshHandle, RenderEnabled};
 use bytemuck::{Pod, Zeroable};
 
+use crate::asset_refcount::{AssetValidateSet, MaterialStale, RenderStale};
 use crate::gpu_transform3d::GpuTransform3D;
 use crate::instance_model::{InstanceModelCol, VbInstanceRow};
 use crate::material::{Material, MaterialTextures};
@@ -1052,10 +1055,16 @@ impl MeshRenderScratch {
     /// documents (the SAME `offsets`, the SAME per-mesh cursor advance via a PRIVATE
     /// cursor lane (`material_tex_cursors`), the SAME `counts[m] ==
     /// 0` skip). Call IMMEDIATELY after `gather_mixed_into` on the SAME frame, with a
-    /// factory yielding the SAME `(mesh_id, material_id)` rows — `material_id` is the
-    /// row's ALREADY-CLAMPED id, computed the same way [`gather_mesh_draws`]'s closure
-    /// does (`raw >= material_high_water -> 0`) — in the SAME order as the affine
-    /// gather's factory.
+    /// factory yielding the SAME rows in the SAME order as the affine gather's factory.
+    ///
+    /// `material_id` is the row's ALREADY-RESOLVED id, and the caller MUST obtain it from
+    /// the SAME `resolve_material_id` call the affine gather's
+    /// [`PerInstanceMaterial::id`] came from — both the F8 OOB clamp AND the prereq (d)
+    /// `get_by_index -> None => 0` construction guard. This lane and `material_ids` are
+    /// index-aligned and are read by different shaders against the same `Materials` SSBO,
+    /// so an id computed independently here is a per-instance disagreement (the fix-pass
+    /// BLOCKING finding: this closure once carried the clamp alone and shipped a raw
+    /// Loading-slot id).
     ///
     /// `materials` resolves each row's `base_color`/`metallic`/`roughness` +
     /// [`MaterialTextures`] bindless slots; `default_base_color`/`default_metallic`/
@@ -1179,10 +1188,62 @@ pub fn sync_vb_instance_ring_system(
 /// resource (Principle 0 — instances from spawned entities via the query, not an
 /// ad-hoc buffer).
 ///
-/// The query is filtered on `Enabled<RenderEnabled>` (the `Visibility::Hidden` gate),
-/// so a hidden row never enters a bucket. The world's [`Assets<MeshGpu>`] (a `NonSend`
-/// resource) supplies the mesh count (sizes the lanes, O2) + each batch's `(index_count,
-/// index_type)`.
+/// The queries are filtered on `Enabled<RenderEnabled>` (the `Visibility::Hidden` gate),
+/// so a hidden row never enters a bucket, AND on `Disabled<RenderStale>` (asset-streaming
+/// plan prereq (b)), so a row whose mesh `validate_asset_refs` marked stale THIS frame
+/// never enters one either — two independent bits with two independent owners. The
+/// world's [`Assets<MeshGpu>`] (a `NonSend` resource) supplies the mesh count (sizes the
+/// lanes, O2) + each batch's `(index_count, index_type)`.
+///
+/// # Stale-material substitution by query split (asset-streaming plan prereq (d))
+///
+/// Two queries with IDENTICAL data and complementary `MaterialStale` terms feed ONE
+/// chained iterator: `q_ok` (`Disabled<MaterialStale>`) yields each row's real, guarded
+/// material; `q_mat_stale` (`Enabled<MaterialStale>`) yields the same row shape with the
+/// pinned default material (slot 0, the default colour) substituted. Every pass walks the
+/// SAME `q_ok.chain(q_mat_stale)` row sequence — the count + scatter, the
+/// textured-payload scatter, and under `hwrt` the prev-ring scatter — so every lane stays
+/// index-aligned by construction.
+///
+/// ⚠️ Those passes are SEPARATE closures over that one sequence, not one shared factory:
+/// each `iter_input` has a different `Item` type (the affine gather yields the 5-tuple, the
+/// textured scatter `(mesh_id, material_id)`, the prev-ring scatter `(mesh_id, curr,
+/// prev)`). What must agree between them is therefore agreed EXPLICITLY, by calling ONE
+/// function: the material id both instance lanes ship comes from
+/// `resolve_material_id`. (A fix-pass finding: while each closure computed its own
+/// clamp, the textured lane shipped a raw Loading-slot id that the primary lane guarded to
+/// 0 — two index-aligned lanes disagreeing per instance.)
+///
+/// No `Entity`-in-query, no per-row world probe, no extra pass: a stale row costs the
+/// second query's iteration setup, a stale-free scene costs two per-row bit tests over
+/// ABSENT pages (always true) — `q_ok` then yields exactly the pre-split rows in the
+/// pre-split archetype order and the chained tail is empty, which is the goldens'
+/// byte-identity argument.
+///
+/// # The Loading-slot construction guard (prereq (d), mirror of F6 FIX-2)
+///
+/// For a non-default id `resolve_material_id` resolves `get_by_index(id)`; `None` maps
+/// the id itself to `0` — not only the colour. Before this the colour fell back but the
+/// RAW id shipped to the shader and read a hole row of the material SSBO. Zero cost (the
+/// lookup already ran) and independent of validate's timing: a carrier bound to a
+/// `reserve()`d slot on its spawn frame (no epoch bump ⇒ validate does not run) never
+/// ships a hole id. BOTH instance lanes call it (see the ⚠️ above).
+///
+/// WHICH states resolve to `None` is [`Assets::get_by_index`]'s contract, not this
+/// module's: `Loading`, `Failed`, `Vacant`, and a `Loading → Retiring` row (a reservation
+/// abandoned before its fill) are unresolvable, but a `Loaded → Retiring` row still
+/// resolves — `STATE_RETIRING` consults the `live` bitset, so the value is present until
+/// the fence-gated `retire`. A carrier that binds a still-live retiring slot therefore
+/// ships its real id and reads the not-yet-retired value, which is SAFE and deliberate
+/// (it mirrors the mesh lane's `try_get` contract); the eventual `retire` bumps
+/// `install_epoch`, so validate then marks the carrier `MaterialStale` and the
+/// substitution takes over. `MaterialStale` likewise remains the GEN-mismatch guard — a
+/// reused slot resolves to the NEW tenant, which only the generation lane detects.
+///
+/// # Registration — through [`add_gather_mesh_draws`] only (prereq (c))
+///
+/// The host registers this system via [`add_gather_mesh_draws`], which pins it
+/// `.after_set(AssetValidateSet)` so it reads THIS frame's stale bits; see that helper.
 ///
 /// # Static + interpolated in ONE gather (refined-B — the R5 review P0 fix)
 ///
@@ -1231,12 +1292,13 @@ pub fn sync_vb_instance_ring_system(
 #[cfg(not(feature = "hwrt"))]
 #[allow(clippy::needless_pass_by_value)]
 // `clippy::type_complexity`: this IS the ECS query contract — the 5-term tuple + the
-// `Enabled<RenderEnabled>` filter is the system's `SystemParam` signature, which the
-// scheduler reads to derive access (mirrors the hwrt variant's identical justification;
-// asset-streaming plan F8's material term tips this variant over the threshold too).
+// `(Enabled<RenderEnabled>, Disabled<RenderStale>, Disabled<MaterialStale>)` filter is the
+// system's `SystemParam` signature, which the scheduler reads to derive access (mirrors
+// the hwrt variant's identical justification; asset-streaming plan F8's material term
+// tips this variant over the threshold too).
 #[allow(clippy::type_complexity)]
 pub fn gather_mesh_draws(
-    q: Query<
+    q_ok: Query<
         (
             &MeshHandle,
             &InstanceModelCol,
@@ -1250,7 +1312,19 @@ pub fn gather_mesh_draws(
             // scheduler — the query tuple IS the access contract.
             Option<&OcclusionCulling>,
         ),
-        Enabled<RenderEnabled>,
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, Disabled<MaterialStale>),
+    >,
+    // Asset-streaming plan prereq (d): the SAME data under the complementary material
+    // term — rows whose material is stale, drawn with the pinned default (see the doc).
+    q_mat_stale: Query<
+        (
+            &MeshHandle,
+            &InstanceModelCol,
+            Option<&GpuTransform3D>,
+            Option<&MaterialHandle>,
+            Option<&OcclusionCulling>,
+        ),
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, Enabled<MaterialStale>),
     >,
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<MeshRenderScratch>,
@@ -1291,25 +1365,32 @@ pub fn gather_mesh_draws(
             let m = mesh_assets.try_get(MeshHandle(mesh_id))?;
             Some((m.index_count, m.index_type))
         },
-        // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
+        // Slot resolved by index. Mesh staleness is EXCLUDED by the `Disabled<RenderStale>`
+        // term (validate_asset_refs marked it earlier this frame — the `AssetValidateSet`
+        // edge); material staleness is SUBSTITUTED by the chained `q_mat_stale` tail.
         || {
-            q.iter().map(move |(h, col, pair, mat_h, occ)| {
-                let raw = mat_h.map_or(0u32, |m| u32::from(m.0));
-                let id = if raw >= material_high_water { 0 } else { raw };
-                // Asset-streaming plan F8+: the SAME clamped `id` resolves this instance's
-                // `base_color`. Principle 1: `id == 0` (the pinned default — every all-default
-                // scene) short-circuits the store lookup entirely; a non-default id looks it up,
-                // falling back to the default's color if the slot is momentarily not-Loaded.
-                let base_color = if id == 0 {
-                    default_base_color
-                } else {
-                    material_table.get_by_index(id).map_or(default_base_color, |m| m.gpu.base_color)
-                };
-                let material = PerInstanceMaterial { base_color, id, _pad: [0; 3] };
-                // VG R3 piece 2 step P2-2: PRESENCE is the whole datum, so the `Option<&ZST>`
-                // collapses to a `bool` here and the shared gather core scatters/folds it.
-                (h.0, col, pair, material, occ.is_some())
-            })
+            q_ok.iter()
+                .map(move |(h, col, pair, mat_h, occ)| {
+                    // ONE guarded resolution, shared with the textured-payload scatter
+                    // below (see `resolve_material_id`): the F8 OOB clamp AND the prereq
+                    // (d) construction guard, so both index-aligned lanes ship the SAME id.
+                    let (id, base_color) = resolve_material_id(
+                        material_table,
+                        material_high_water,
+                        default_base_color,
+                        mat_h,
+                    );
+                    let material = PerInstanceMaterial { base_color, id, _pad: [0; 3] };
+                    // VG R3 piece 2 step P2-2: PRESENCE is the whole datum, so the `Option<&ZST>`
+                    // collapses to a `bool` here and the shared gather core scatters/folds it.
+                    (h.0, col, pair, material, occ.is_some())
+                })
+                .chain(q_mat_stale.iter().map(move |(h, col, pair, _mat_h, occ)| {
+                    // Prereq (d): the stale material is substituted by the pinned default.
+                    let material =
+                        PerInstanceMaterial { base_color: default_base_color, id: 0, _pad: [0; 3] };
+                    (h.0, col, pair, material, occ.is_some())
+                }))
         },
     );
     // Textured-PBR rung T6c: the parallel TEXTURED material-payload scatter — a SECOND,
@@ -1327,13 +1408,93 @@ pub fn gather_mesh_draws(
         default_metallic,
         default_roughness,
         || {
-            q.iter().map(move |(h, _col, _pair, mat_h, _occ)| {
-                let raw = mat_h.map_or(0u32, |m| u32::from(m.0));
-                let id = if raw >= material_high_water { 0 } else { raw };
-                (h.0, id)
-            })
+            q_ok.iter()
+                .map(move |(h, _col, _pair, mat_h, _occ)| {
+                    // THE SAME guarded resolution the primary lane above ran — not a
+                    // second, independently-written clamp. `PerInstanceMaterialTex::
+                    // material_id` indexes the same `Materials` SSBO from the textured
+                    // shaders, so a guard on one lane only is a per-instance disagreement.
+                    let (id, _base_color) = resolve_material_id(
+                        material_table,
+                        material_high_water,
+                        default_base_color,
+                        mat_h,
+                    );
+                    (h.0, id)
+                })
+                .chain(q_mat_stale.iter().map(|(h, _col, _pair, _mat_h, _occ)| (h.0, 0u32)))
         },
     );
+}
+
+/// The ONE guarded material resolution BOTH per-instance lanes read (asset-streaming plan
+/// prereq (d) — the fix-pass BLOCKING finding).
+///
+/// # Why a shared fn and not two closures that "do the same thing"
+///
+/// [`gather_mesh_draws`] scatters the material twice into two INDEX-ALIGNED lanes that two
+/// different shaders read: [`PerInstanceMaterial::id`] (the base VB / PM path) and
+/// [`PerInstanceMaterialTex::material_id`] (the TEXTURED path —
+/// `vb_shade.comp.hlsl`'s `Materials[pmt.material_id]`, `gbuffer_mrt.vs.hlsl`'s
+/// `output.tex_mat_id`). Both index the SAME `Materials` SSBO. When the guard lived
+/// inline in the primary closure only, the textured closure kept the bare F8 clamp
+/// (`raw >= high_water -> 0`) and shipped the RAW id of a `reserve()`d / `Failed` /
+/// `Vacant` slot — the two lanes disagreed per instance and the hole id the primary lane
+/// is guarded against reached the shader on every textured path. One function, called
+/// from both, makes the agreement structural instead of a duplicated-edit convention.
+///
+/// # The two guards, in order
+///
+/// 1. F8 §4.2 OOB clamp: a raw slot `>= material_high_water` (garbage / never-minted
+///    handle) clamps to the pinned default 0 — a live, valid row, never a zeroed hole.
+/// 2. Prereq (d) construction guard (mirror of F6 FIX-2): for a non-default id,
+///    `get_by_index` resolving to `None` maps the ID ITSELF to 0, not only the colour.
+///    Zero cost (the lookup already had to run for the colour) and independent of
+///    `validate_asset_refs`' timing: a carrier bound to a `reserve()`d slot on its spawn
+///    frame (no epoch bump ⇒ validate does not run) never ships a hole id.
+///
+/// `id == 0` (the pinned default — every all-default / golden scene) short-circuits the
+/// store lookup entirely (Principle 1). [`MaterialStale`] remains the GEN-mismatch guard:
+/// a REUSED slot resolves to the NEW tenant, which only the generation lane detects.
+#[inline]
+fn resolve_material_id(
+    material_table: &Assets<Material>,
+    material_high_water: u32,
+    default_base_color: [f32; 4],
+    mat_h: Option<&MaterialHandle>,
+) -> (u32, [f32; 4]) {
+    let raw = mat_h.map_or(0u32, |m| u32::from(m.0));
+    let clamped = if raw >= material_high_water { 0 } else { raw };
+    if clamped == 0 {
+        return (0, default_base_color);
+    }
+    match material_table.get_by_index(clamped) {
+        Some(m) => (clamped, m.gpu.base_color),
+        None => (0, default_base_color),
+    }
+}
+
+/// Registers [`gather_mesh_draws`] pinned `.after_set(`[`AssetValidateSet`]`)` and hands the
+/// caller the `SystemConfig` to chain its own edges on (`.after(pack)`, `.after(snap)`) —
+/// the exact [`add_gpu_transform_pack`](crate::gpu_transform_pack::add_gpu_transform_pack)
+/// shape (asset-streaming plan prereq (c)).
+///
+/// # Why a by-name set inside a consumer-side helper
+///
+/// `validate_asset_refs` is registered by `AssetRefcountPlugin` in ITS OWN
+/// `add_systems_cfg` closure; the gather lives in the host's later closure. A
+/// `SystemKey` edge cannot cross that boundary (`SystemKey` is `pub(crate)` to
+/// `boyko_ecs`, and the target does not exist yet at the plugin's build time), so the
+/// F5 shape pinned validate → gather by ADD-ORDER only — deterministic but emergent. The
+/// set edge holds regardless of add-order, and — unlike an edge chained inside the host
+/// closure — it is provable in a bare `App` through the builder's cycle detection
+/// (`tests/asset_validate_schedule_edge.rs` turns red the moment this `.after_set` is
+/// dropped). Every raw-`MeshHandle.0` consumer MUST be registered through a helper of
+/// this shape; a host that registers the gather without `AssetRefcountPlugin` gets the
+/// scheduler's memberless-set warning, which is the correct diagnosis (no validate).
+#[inline]
+pub fn add_gather_mesh_draws(builder: &mut ScheduleBuilder) -> SystemConfig<'_> {
+    builder.add_system(gather_mesh_draws).after_set(AssetValidateSet)
 }
 
 /// The HW-RT Rung 3b variant of [`gather_mesh_draws`] (see that fn's docs): identical
@@ -1346,15 +1507,16 @@ pub fn gather_mesh_draws(
 #[cfg(feature = "hwrt")]
 #[allow(clippy::needless_pass_by_value)]
 // `clippy::type_complexity`: this IS the ECS query contract — the 6-term tuple + the
-// `Enabled<RenderEnabled>` filter is the system's `SystemParam` signature, which the scheduler
-// reads to derive access. Factoring it into a `type` alias would only hide the access set from a
-// reader (and the alias could not carry the elided lifetime cleanly). Both variants now carry
-// the asset-streaming plan F8 material term, so both need this `#[allow]` (mirrors the non-hwrt
-// variant's identical justification); the hwrt variant's EXTRA `Option<&PrevInstanceModelCol>`
-// term is what makes it a 6-tuple rather than the non-hwrt variant's 5-tuple.
+// `(Enabled<RenderEnabled>, Disabled<RenderStale>, Disabled<MaterialStale>)` filter is the
+// system's `SystemParam` signature, which the scheduler reads to derive access. Factoring it
+// into a `type` alias would only hide the access set from a reader (and the alias could not
+// carry the elided lifetime cleanly). Both variants now carry the asset-streaming plan F8
+// material term, so both need this `#[allow]` (mirrors the non-hwrt variant's identical
+// justification); the hwrt variant's EXTRA `Option<&PrevInstanceModelCol>` term is what makes
+// it a 6-tuple rather than the non-hwrt variant's 5-tuple.
 #[allow(clippy::type_complexity)]
 pub fn gather_mesh_draws(
-    q: Query<
+    q_ok: Query<
         (
             &MeshHandle,
             &InstanceModelCol,
@@ -1365,7 +1527,19 @@ pub fn gather_mesh_draws(
             // IDENTICALLY on both legs: the lane contract says the OFF path never diverges.
             Option<&OcclusionCulling>,
         ),
-        Enabled<RenderEnabled>,
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, Disabled<MaterialStale>),
+    >,
+    // Asset-streaming plan prereq (d) — see the non-hwrt variant's comment above.
+    q_mat_stale: Query<
+        (
+            &MeshHandle,
+            &InstanceModelCol,
+            Option<&GpuTransform3D>,
+            Option<&crate::instance_model::PrevInstanceModelCol>,
+            Option<&MaterialHandle>,
+            Option<&OcclusionCulling>,
+        ),
+        (Enabled<RenderEnabled>, Disabled<RenderStale>, Enabled<MaterialStale>),
     >,
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<MeshRenderScratch>,
@@ -1392,21 +1566,28 @@ pub fn gather_mesh_draws(
             let m = mesh_assets.try_get(MeshHandle(mesh_id))?;
             Some((m.index_count, m.index_type))
         },
-        // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
+        // Slot resolved by index; mesh staleness excluded by `Disabled<RenderStale>`,
+        // material staleness substituted by the chained tail — see the non-hwrt variant.
         || {
-            q.iter().map(move |(h, col, pair, _prev, mat_h, occ)| {
-                let raw = mat_h.map_or(0u32, |m| u32::from(m.0));
-                let id = if raw >= material_high_water { 0 } else { raw };
-                // Asset-streaming plan F8+ — see the non-hwrt variant's comment above.
-                let base_color = if id == 0 {
-                    default_base_color
-                } else {
-                    material_table.get_by_index(id).map_or(default_base_color, |m| m.gpu.base_color)
-                };
-                let material = PerInstanceMaterial { base_color, id, _pad: [0; 3] };
-                // VG R3 piece 2 step P2-2 — see the non-hwrt variant's comment above.
-                (h.0, col, pair, material, occ.is_some())
-            })
+            q_ok.iter()
+                .map(move |(h, col, pair, _prev, mat_h, occ)| {
+                    // ONE guarded resolution shared with the textured scatter below —
+                    // see the non-hwrt variant and `resolve_material_id`.
+                    let (id, base_color) = resolve_material_id(
+                        material_table,
+                        material_high_water,
+                        default_base_color,
+                        mat_h,
+                    );
+                    let material = PerInstanceMaterial { base_color, id, _pad: [0; 3] };
+                    // VG R3 piece 2 step P2-2 — see the non-hwrt variant's comment above.
+                    (h.0, col, pair, material, occ.is_some())
+                })
+                .chain(q_mat_stale.iter().map(move |(h, col, pair, _prev, _mat_h, occ)| {
+                    let material =
+                        PerInstanceMaterial { base_color: default_base_color, id: 0, _pad: [0; 3] };
+                    (h.0, col, pair, material, occ.is_some())
+                }))
         },
     );
     // Textured-PBR rung T6c — see the non-hwrt variant's comment above. NOT gated on
@@ -1423,11 +1604,19 @@ pub fn gather_mesh_draws(
         default_metallic,
         default_roughness,
         || {
-            q.iter().map(move |(h, _col, _pair, _prev, mat_h, _occ)| {
-                let raw = mat_h.map_or(0u32, |m| u32::from(m.0));
-                let id = if raw >= material_high_water { 0 } else { raw };
-                (h.0, id)
-            })
+            q_ok.iter()
+                .map(move |(h, _col, _pair, _prev, mat_h, _occ)| {
+                    // THE SAME guarded resolution the primary lane ran — see the
+                    // non-hwrt variant's comment and `resolve_material_id`.
+                    let (id, _base_color) = resolve_material_id(
+                        material_table,
+                        material_high_water,
+                        default_base_color,
+                        mat_h,
+                    );
+                    (h.0, id)
+                })
+                .chain(q_mat_stale.iter().map(|(h, _col, _pair, _prev, _mat_h, _occ)| (h.0, 0u32)))
         },
     );
     // The prev-instance ring is bound ONLY by the temporal-MV raster pipeline, so the O(N)
@@ -1437,9 +1626,12 @@ pub fn gather_mesh_draws(
     // here (`EnginePlugins` adds `ShadowDenoisePlugin` alongside this system). When ON, the
     // re-scatter reuses the SAME offsets over the SAME query order ⇒ index-aligned with `ring`.
     if denoise.temporal_enabled() {
-        // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
+        // The SAME `q_ok ... chain(q_mat_stale ...)` shape as the primary scatter, so the
+        // prev ring stays index-aligned with `ring` across the substitution tail too.
         scratch.gather_prev_ring_into(|| {
-            q.iter().map(|(h, col, _pair, prev, _mat, _occ)| (h.0, col, prev))
+            q_ok.iter()
+                .map(|(h, col, _pair, prev, _mat, _occ)| (h.0, col, prev))
+                .chain(q_mat_stale.iter().map(|(h, col, _pair, prev, _mat, _occ)| (h.0, col, prev)))
         });
     }
 }

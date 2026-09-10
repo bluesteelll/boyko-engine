@@ -24,9 +24,9 @@ use boyko_render::{
     AssetRefcountPlugin, ClusterConfig, CsmCasterScratch, CsmFitSet, CsmPlugin, CsmResolveSet,
     LightCollectSet, LightingConfig, LightingPlugin, MeshRenderScratch, RayPlugin, Render3dPlugin,
     RenderPathPlugin, SdfPlugin, ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin,
-    add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters, reduce_caster_bounds,
-    snap_apply, sync_cluster_light_gate, sync_csm_light_gate, sync_punctual_light_gate,
-    sync_ssao_light_gate, sync_sv0_light_gate,
+    add_gather_mesh_draws, add_gather_shadow_casters, add_gpu_transform_pack,
+    reduce_caster_bounds, snap_apply, sync_cluster_light_gate, sync_csm_light_gate,
+    sync_punctual_light_gate, sync_ssao_light_gate, sync_sv0_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -390,10 +390,14 @@ impl Plugin for EnginePlugins {
 
         // Asset-streaming plan F2: the refcount lifetime pipeline. Inserts
         // `RefcountDeltas`/`DeferredFree` and registers `apply_refcount_deltas`
-        // (no ordering edge needed yet — see that system's doc). The `Assets<
-        // MeshGpu>`/`Assets<Material>` resources it reads are inserted by
-        // `runner::run_windowed` before the frame loop starts, well after this
-        // `build()` call, so add-order here does not matter.
+        // `.before(validate_asset_refs)`, the latter joining `AssetValidateSet`. The
+        // validate -> gather edge is pinned BY NAME: the two gathers below are
+        // registered through `add_gather_mesh_draws` / `add_gather_shadow_casters`,
+        // which chain `.after_set(AssetValidateSet)` (asset-streaming plan prereq (c)),
+        // so this plugin's position in the add-order is no longer load-bearing for
+        // that edge. The `Assets<MeshGpu>`/`Assets<Material>` resources it reads are
+        // inserted by `runner::run_windowed` before the frame loop starts, well after
+        // this `build()` call, so add-order here does not matter either.
         app.add_plugin(AssetRefcountPlugin);
 
         // The R4 lighting stack. LightingPlugin registers the light eviction
@@ -555,6 +559,12 @@ impl Plugin for EnginePlugins {
         // production gather) runs after the pack, and `sync_csm_light_gate`
         // (the header-gate ⇄ depth-pass lock-step) after the caster gather, so
         // the gate's caster predicate is THIS frame's.
+        // Asset-streaming plan prereq (c): BOTH gathers are registered through their
+        // `boyko_render` helpers (`add_gather_shadow_casters` / `add_gather_mesh_draws`),
+        // which pin each `.after_set(AssetValidateSet)` — the validate -> gather edge
+        // is a by-name contract, not the add-order accident it was under F5. The
+        // helpers return the `SystemConfig`, so this closure chains its own `.after(pack)`
+        // / `.after(snap)` edges exactly as before (the `add_gpu_transform_pack` shape).
         // R5 adds the INTERPOLATION Main system `snap_apply` (the zero-streak
         // collapse for teleported bodies) in the SAME closure. Refined-B unifies
         // the two former gathers into ONE `gather_mesh_draws` over ALL drawables
@@ -581,7 +591,7 @@ impl Plugin for EnginePlugins {
             // `PrevInstanceModelCol` column (0%-gate).
             #[cfg(feature = "hwrt")]
             b.add_system(sync_prev_instance_model_cols).before(pack);
-            let casters = b.add_system(gather_shadow_casters).after(pack).key();
+            let casters = add_gather_shadow_casters(b).after(pack).key();
             b.add_system(sync_csm_light_gate).after(casters);
             // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5: `reduce_caster_bounds`
             // is the UNWIRED EXPORTED API `CsmPlugin` deliberately does not register (mirrors
@@ -663,7 +673,7 @@ impl Plugin for EnginePlugins {
             // collapse (snap-before-gather is load-bearing — the gather reads the
             // collapsed pair).
             let snap = b.add_system(snap_apply).key();
-            b.add_system(gather_mesh_draws).after(pack).after(snap);
+            add_gather_mesh_draws(b).after(pack).after(snap);
         });
 
         // The D4 ordering seam: engine Fixed snapshots run AFTER user Fixed

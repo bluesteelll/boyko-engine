@@ -264,31 +264,141 @@ Ordering: F1 store under a green byte-identity gate → F2 lifecycle/refcount �
   is the SOLE staleness backstop for the bare-slot carriers → every raw `MeshHandle.0`/`MaterialHandle.0` read site
   MUST be downstream of `validate` this frame; document each read site + audit completeness.
 
-**HARD PREREQ before async streaming (F6/F7) — F5's validate is deliberately disable-only + latent today:**
-- `fill` (Loading→Loaded) does NOT bump `free_epoch`, and `validate` never re-enables → a carrier bound while its
+**HARD PREREQ before async streaming (F6/F7) — F5's validate is deliberately disable-only + latent today**
+*(status per item below — the plan header's "COMPLETE 9/9" covers the F1..F8 rungs, NOT these five prereqs, which
+carried no marker at all until branch `fix/asset-validate-prereqs`):*
+- **[IN PROGRESS — branch `fix/asset-validate-prereqs`, commit `<hash>`]** (a)+(b) below.
+  `fill` (Loading→Loaded) does NOT bump `free_epoch`, and `validate` never re-enables → a carrier bound while its
   asset is Loading would be disabled and stranded invisible once it finishes loading. Latent in F5 (in-tree loads
   are synchronous `add()`→Loaded; validate never fires on goldens). Before async `reserve`/`fill` streaming is
   exercised, ADD: (a) `fill` bumps a validation epoch + `validate` gains an enable path; and (b) DECOUPLE staleness
   from user visibility — `validate` disabling `RenderEnabled` fights `visibility_sync` (both drive that bit); use a
   separate `RenderStale` EnableTag the gather also filters on, instead of reusing `RenderEnabled`. (Bevy PR #18734
   is the same-frame-handle-swap race this defends against.)
-- (c) **Hard `validate → gather` scheduler edge (F5 review O1):** F5's `validate_asset_refs .before(gather_*)` is
+  - SHIPPED FORM: (a) the validation epoch is the EXISTING `Assets::install_epoch()` (bumped by `fill`/`add`/`retire`)
+    — no kernel field was added; `ValidateCursor` now tracks all four `{mesh,mat} × {free,install}` epochs and
+    `validate_asset_refs` gained a CLEAR arm (a complementary `Enabled<RenderStale>` query whose now-valid rows emit
+    `stale:false`), so a carrier bound while its mesh was Loading is un-stranded by the `fill`. (b) staleness lives in
+    two new `#[component(storage = "bitset")]` EnableTags in `boyko_render::asset_refcount` — `RenderStale` (mesh) and
+    `MaterialStale` — and `validate` NEVER touches `RenderEnabled` again, so `visibility_sync` keeps sole ownership of
+    the visibility bit. Both gathers filter `Disabled<RenderStale>`. Gates: `fill_re_enables_a_carrier_bound_while_loading`,
+    `stale_wins_for_the_gather_and_visibility_bit_is_untouched` (`tests/asset_streaming_prereq_validate.rs`).
+    ⚠️ ADDED (fix pass) — the first shipped form gated the MESH arms and the MAIN gather only; three arms it shipped
+    survived deletion with every lane suite green. Twins now gate each of them, each MEASURED red under its own
+    deletion mutation and red on no other test: `material_fill_re_enables_a_carrier_bound_while_loading` (the
+    `q_mat_stale` CLEAR arm — without it a carrier bound to a `reserve()`d material is drawn with the substituted
+    default forever, the (a) bug mirrored onto the material lane) and `stale_caster_is_dropped_from_the_shadow_gather`
+    (the `Disabled<RenderStale>` term on `gather_shadow_casters` — without it a caster whose mesh slot was reused
+    under it casts the WRONG mesh's shadow while the main gather correctly drops it).
+- **[IN PROGRESS — branch `fix/asset-validate-prereqs`, commit `<hash>`]**
+  (c) **Hard `validate → gather` scheduler edge (F5 review O1):** F5's `validate_asset_refs .before(gather_*)` is
   currently pinned by ADD-ORDER only (deterministic today — NonSend systems are dispatcher-solo, lowest-index-first,
   per-system flush, and `plugins.rs` adds AssetRefcountPlugin before the gather closure — but EMERGENT, not an
   explicit contract). Before F6/F7 (when `validate` actually fires), fold the sketched
   `add_asset_validate_systems(&mut ScheduleBuilder) -> SystemKey` helper into the host gather closure and add the
   explicit `.before` edge (mirror `add_gpu_transform_pack`).
-- (d) **Material substitution (F5 review W1, DEFERRED to F8):** F5's `validate` does NOT substitute stale materials
+  - SHIPPED FORM — a BY-NAME set, not the sketched `SystemKey` helper. `validate_asset_refs` joins
+    `AssetValidateSet` (`#[derive(SystemSet)]`), and each consumer is registered through a `boyko_render`-side helper
+    that chains the edge itself: `add_gather_mesh_draws(&mut ScheduleBuilder) -> SystemConfig<'_>` (mesh_draw.rs) and
+    `add_gather_shadow_casters` (csm_caster.rs), both `.after_set(AssetValidateSet)`; the host chains its own
+    `.after(pack)` / `.after(snap)` onto the returned config (the `add_gpu_transform_pack` shape).
+    WHY NOT the sketched helper: (1) `SystemKey` lives in `pub(crate) mod ordering`, so it is unnameable
+    cross-crate — the same limit `gpu_transform_pack.rs:112-113` already documents; (2) an edge chained inside the
+    HOST closure has no mutation-sensitive test — that closure is reachable only through `EnginePlugins::build`
+    (windowed runner + process-global hooks), and both systems are NonSend/dispatcher-solo, so deleting the edge
+    changes no observable order and a behavioural test cannot go red; (3) a set edge inside a `boyko_render` helper
+    IS provable in a bare `App` via the builder's cycle detection. Gate: `tests/asset_validate_schedule_edge.rs`
+    pins a probe `.after(gather).before_set(AssetValidateSet)` and asserts `App::finish` panics with the B9001
+    "schedule contains a cycle" text; deleting `.after_set` in the helper turns it red (MEASURED).
+    Trade-off: a host that registers the gathers WITHOUT `AssetRefcountPlugin` gets a W1501 memberless-set warning —
+    correct, since such a host has no validate.
+- **[IN PROGRESS — branch `fix/asset-validate-prereqs`, commit `<hash>`]**
+  (d) **Material substitution (F5 review W1, DEFERRED to F8):** F5's `validate` does NOT substitute stale materials
   (it disables stale MESHES only). Stale-material refcount corruption is already prevented by the `dec_ref` gen-check
   at despawn; the VISIBLE substitution (point a stale material at the default slot 0) is inert until F8 (the raster
   hardcodes material 0) and needs `Entity`-in-query / `RenderStale` infrastructure F8 will add — so it lands in F8,
   not F5. (The F5 dev's `&mut MaterialHandle`-in-`validate` workaround was removed: it bypassed the hook contract and
   dropped a retire ticket on a matching-gen Loading/Failed slot.)
-- (e) **Serialize/`#[require]` version-skew (F5 review, S0-S3 concern):** `load_archetype` builds archetypes from
+  - SHIPPED FORM — substitution by QUERY SPLIT, so no `Entity` enters the gather and no `MaterialHandle` is written.
+    Both `gather_mesh_draws` cfg variants take two read-only queries with IDENTICAL data and complementary material
+    terms: `q_ok` `(Enabled<RenderEnabled>, Disabled<RenderStale>, Disabled<MaterialStale>)` and `q_mat_stale`
+    `(… , Enabled<MaterialStale>)`; every pass walks that ONE chained row sequence
+    (`q_ok.map(real).chain(q_mat_stale.map(default))`) — the count pass, the scatter, `gather_material_tex_into` and
+    (hwrt) `gather_prev_ring_into` — so there is no extra pass.
+    ⚠️ CORRECTED (fix pass): those are SEPARATE closures over that one sequence, not one shared factory — each
+    `iter_input` has a different `Item` type. What must agree between them is agreed EXPLICITLY, by calling ONE
+    function: `mesh_draw::resolve_material_id`. The first shipped form had the guard inline in the primary closure
+    only, so the TEXTURED payload closure kept the bare F8 clamp and shipped the RAW id of a `reserve()`d slot in
+    `PerInstanceMaterialTex::material_id` while `PerInstanceMaterial::id` shipped 0 — two index-aligned lanes
+    disagreeing per instance, read by `vb_shade.comp.hlsl:357` (`Materials[pmt.material_id]`) and
+    `gbuffer_mrt.vs.hlsl:404` → `gbuffer_mrt.fs.hlsl:283`.
+    The CONSTRUCTION guard itself (mirror of F6 FIX-2's `try_get`): for `id != 0`, a `get_by_index(id)` that returns
+    `None` maps BOTH id and colour to the pinned default — previously the colour fell back but the RAW id still
+    reached the shader and indexed a hole row of the material SSBO. The guard is independent of validate timing, so a
+    carrier bound to a `reserve()`d slot on its spawn frame (no epoch bump ⇒ validate does not run) is safe too.
+    ⚠️ CORRECTED (fix pass): the unresolvable states are `Loading` / `Failed` / `Vacant` / `Loading→Retiring`, NOT
+    "Loading/Failed/Retiring/Vacant" as first written. `Assets::get_by_index` (`assets.rs:643-650`) reads
+    `STATE_RETIRING => self.live.test(idx)`, so a `Loaded→Retiring` row still RESOLVES — a carrier binding a still-live
+    retiring slot ships its real id and reads the not-yet-retired value, which is safe and deliberate (it mirrors the
+    mesh lane's `try_get` contract): the fence-gated `retire` bumps `install_epoch`, so validate then marks the
+    carrier `MaterialStale` and the substitution takes over.
+    Gates: `stale_material_substitutes_default_slot_0`, `loading_material_ships_id_0_without_validate` — both now
+    assert the id on BOTH lanes (`material_ids[slot].id` AND `material_tex[slot].material_id`); the tex assertion was
+    RED on the first shipped form (MEASURED: `left: 1 right: 0`).
+- **[IN PROGRESS — branch `fix/asset-validate-prereqs`, commit `<hash>`]**
+  (e) **Serialize/`#[require]` version-skew (F5 review, S0-S3 concern):** `load_archetype` builds archetypes from
   the file's saved component-id list and does NOT run `#[require]` expansion → a `MeshHandle` row from a schema-older
   save would lack `MeshRefGen` and be AND-filtered out of `validate`'s query (silent, no panic). Latent (no such
   save in-tree; same-build round-trips serialize the lane). Also confirm the deserialize path does not fire the
   carrier hooks without the lane present (a `-1` with `GEN_UNSYNCED` against a never-incremented refcount).
+  - SHIPPED FORM — the CHECK, not the repair. `validate_asset_refs` gained an unconditional orphan pass (OUTSIDE the
+    epoch early-out, because a load bumps no store epoch): `Query<&MeshHandle, (Without<MeshRefGen>,
+    Disabled<RenderStale>)>` and the material twin mark every match stale and bump
+    `ValidateCursor::orphan_rows_flagged`. `Without` over a TABLE component is archetypal, so a well-formed world
+    matches ZERO archetypes and the pass touches no row; the `Disabled<…Stale>` term makes each orphan cost one
+    command exactly once. Semantics: a lane-less carrier is un-refcounted and unvalidatable ⇒ never drawn
+    (conservative) and counted. Gate: `schema_older_save_lacking_ref_gen_lane_is_flagged_not_drawn`.
+    ⚠️ ADDED (fix pass): that gate strips `MeshRefGen` only, so the MATERIAL orphan pass shipped ungated (deleting it
+    left every lane suite green). `schema_older_save_lacking_material_ref_gen_lane_is_flagged` is its twin — the saved
+    row binds material slot 1, not the default 0, so "flagged and substituted" is DISTINGUISHABLE from "drawn with its
+    raw id"; MEASURED red under the deletion mutation.
+  - CONFIRMED (the second half of the item): `load_archetype` fires NO carrier hooks — verified by reading
+    `crates/boyko_ecs/src/ecs/core/serialize/load_writer.rs:315-583` (blit/decode/construct → `commit_units` →
+    `fill_ticks` → `register_batch`, no hook dispatch anywhere under `ecs/core/serialize`) and PINNED by
+    `load_world_fires_no_carrier_hooks`. So there is no spurious `-1`; the mirror-image problem is B1 below.
+  - **BLOCKED — B1 (kernel/owner), tracked separately: loaded carriers never push `+1`.** Because
+    `load_archetype` dispatches no `on_insert`, EVERY loaded `MeshHandle`/`MaterialHandle` is un-refcounted, even on a
+    same-build round trip. A later despawn then trips `dec_ref`'s `debug_assert!(count > 0)`
+    (`assets.rs:943-946`) or, in release, `saturating_sub` reaches 0 → `Retiring` → the slot retires under other
+    loaded carriers. The fix is kernel-level (replay `on_insert` in `load_archetype`, or expose the loaded-entity
+    range for a scene-level rebind) and outside this lane's crates. No in-tree host calls `load_world` today.
+  - **BLOCKED — B2 (kernel): `#[require]` expansion at load** needs a runtime require table in the component
+    registry; none exists (the only `required_components` is the events one,
+    `events/participants/participants.rs:28`). Hence lane-less rows are QUARANTINED, not reconstructed.
+  - NOT DONE (scope): a `boyko_log` W-code for orphan rows would edit `crates/boyko_log/src/codes.rs` + the
+    diagnostics ledger, outside this lane's `-p` scope and behind its own census gates. The lane ships the
+    `ValidateCursor::orphan_rows_flagged` counter instead; a follow-up may wire a code.
+- **Goldens `58f6c6c3` / `ac09f138` — byte-identical BY CONSTRUCTION. NO golden was RUN in this lane** (it is CPU-only
+  by charter: no device, no timings). The argument, per changed mechanism, is that each one is provably inert on a
+  fully-Loaded, churn-free scene:
+  1. `RenderStale` / `MaterialStale` are `bitset` EnableTags that only `validate_asset_refs` writes, and validate's
+     per-row loop sits behind the four-epoch early-out. A golden scene's stores are `add()`→Loaded at boot and never
+     churn, so no `{free,install}` epoch advances after boot and the loop never runs — every row stays
+     `Disabled<…Stale>`. The gathers' new filter terms therefore exclude nothing.
+  2. The `q_ok` / `q_mat_stale` split leaves `q_ok` yielding exactly the pre-split rows in the pre-split archetype
+     order (the `Disabled<MaterialStale>` term matches every row over an ABSENT bitset page), and the chained tail is
+     EMPTY — same rows, same order ⇒ same ring, same batches, same lanes.
+  3. The orphan passes are `Without<…RefGen>` over TABLE components: archetypal, so a world built by `Commands::spawn`
+     (where `#[require]` materializes both lanes) matches ZERO archetypes and touches no row.
+  4. The fix pass's shared `resolve_material_id` is value-identical to the two computations it replaces WHEREVER the
+     slot is Loaded: `Assets::get_by_index` (`assets.rs:636-653`) returns `Some` for every `STATE_LOADED` row, so the
+     `None ⇒ 0` arm is unreachable on a fully-Loaded scene and both lanes ship exactly the ids they shipped before —
+     the primary lane's expression is unchanged in value, and the tex lane's is unchanged in value on this input
+     class (it differed only on non-Loaded slots, which a golden has none of).
+  5. `.after_set(AssetValidateSet)` adds an ordering CONSTRAINT, not a system: with both gathers already ordered
+     after validate by add-order today, the resolved order is the same one that produced the blessed hashes.
+  The orchestrator, who has the device, should still re-run both goldens before the merge — this is a construction
+  argument, not a measurement.
 
 **F6 locked mechanism (architect→soundness-critic, design-locked):** full design = scratchpad `f6_design_full.md`.
 - **Clock = a dedicated `submission_epoch: u64`, NOT the runner's `frame_index`.** The jitter/SDFDDGI `frame_index`
@@ -388,8 +498,10 @@ Ordering: F1 store under a green byte-identity gate → F2 lifecycle/refcount �
 - **Data path.** A `material_ids` `ScratchColumn` lane parallel to `ring`/`mesh_ids` (same `counts[m]==0` skip) →
   the `pm_instance_material_rings` SSBO that JOINS the F7 instance family (non-RT lockstep grow, RT hard-cap). A HARD
   CPU-side OOB clamp (`raw_material_id >= high_water() → 0`, targeting the live pinned slot 0) is the SOLE
-  material-safety; the visual `MaterialStale` substitution is DEFERRED to the async rung (task#13). `MaterialStale`
-  EnableTag / validate material arm are NOT wired.
+  material-safety; task#13 IN PROGRESS on branch `fix/asset-validate-prereqs` (commit `<hash>`): the `MaterialStale`
+  EnableTag + `validate`'s material arm + the gather substitution (query split: `q_ok` / `q_mat_stale` chained into
+  ONE iterator, no extra pass) + the Loading-slot construction guard (`get_by_index` → `None` ⇒ id 0, so a non-Loaded
+  slot never reaches the shader as a raw id) are now wired. The CPU-side OOB clamp remains, as the first line.
 - **base_color→albedo extension (owner-requested).** The mesh albedo came from the VERTEX color (`deferred_pbr.hlsl:1020`
   reads `base = gAlbedo`); only the SDF marcher read `base_color`. So a "red material" was metallic but not red. Fix:
   the per-instance payload widened to `PerInstanceMaterial { base_color:[f32;4], id:u32, _pad }` (32 B, std430 stride
@@ -398,7 +510,10 @@ Ordering: F1 store under a green byte-identity gate → F2 lifecycle/refcount �
   frozen → byte-identity by construction. Principle 1 (reviewer M1/M2): `id == 0` SHORT-CIRCUITS the store lookup (the
   common/golden all-default path does ZERO per-instance material work), `default_base_color` = the ACTUAL slot-0
   base_color read ONCE. Now the material drives BOTH albedo AND metallic/roughness for meshes.
-- **Deferred/tracked:** MaterialStale substitution → async prereq (task#13); the combined MV+PM variant → **F8-mv**
+- **Deferred/tracked:** ~~MaterialStale substitution → async prereq (task#13)~~ **[SHIPPED — branch
+  `fix/asset-validate-prereqs`, commit `<hash>`]** — the visible substitution landed as prereq (d) above (query split
+  + the shared `resolve_material_id` construction guard on BOTH instance lanes); see that item for the shipped form,
+  its two ⚠️ fix-pass corrections and its gates. The combined MV+PM variant remains → **F8-mv**
   (task#12 — materials render default under temporal denoise, MV>PM, warn-once'd).
 - Gates GREEN: `58f6c6c3` BOTH legs (base `.spv` cmp-identical + full golden holds); a NEW `grand_showcase_2mat`
   golden `ac09f138` (a 5-sphere material chart — default/red/green/gold-metal/blue-metal — oracle-blessed BOTH legs);
@@ -413,3 +528,26 @@ Ordering: F1 store under a green byte-identity gate → F2 lifecycle/refcount �
    `VmReservation`-owned column (localized `col`-type swap).
 2. **Material staleness UX:** substitute id 0 (draw continues, neutral) vs skip-like-mesh — design
    substitutes id 0.
+3. **A carrier bound to a never-minted index is never lane-stamped** (pre-existing, found while shipping the five
+   prereqs): `apply_one` gets `try_generation(slot) == None`, returns no stamp, so the lane stays `GEN_UNSYNCED`
+   forever and `validate_asset_refs` TRUSTS it (`GEN_UNSYNCED` is the "freshly bound" sentinel, skipped in both
+   arms). The gather's `try_get` keeps it safe — the row is simply never drawn — so this is a silent-invisibility
+   hole, not a soundness hole. Not one of the five; recorded here rather than fixed.
+4. **Rebinding a `MaterialHandle` over a bundle's default can permanently retire the PINNED slot 0**
+   (pre-existing, MEASURED 2026-09-10 while writing the (b)/(d) gates). `MeshBundle` already carries
+   `MaterialHandle(0)` (`bundles.rs:72`). Spawning the bundle and then `insert`ing a `MaterialHandle` is a REPLACE:
+   `on_replace` pushes `-1` on slot 0 BEFORE `on_insert`'s `+1`. Applied in order that is a zero-crossing on the
+   default slot → `Retiring` → and `inc_ref` then REFUSES the `+1` (its resurrection guard), so slot 0 stays
+   `Retiring` for the world's lifetime. `state_of_index(0)` is then `None`, so `validate`'s new material arm marks
+   EVERY carrier `MaterialStale` and every row is drawn with the substituted default.
+   - Reachable from user code and from the existing test harnesses (`asset_streaming_f5_validation.rs:261/295/322`,
+     `asset_streaming_f8_material_gather.rs:90`), but NOT from any shipped host path: a survey of
+     `crates/boyko_app/src`, `crates/boyko_render/src`, `crates/boyko_scene/src` and `crates/boyko_demo/src` finds
+     zero `insert(MaterialHandle(..))` / `insert(MeshHandle(..))` sites, so the golden byte-identity argument is
+     unaffected.
+   - It DID silently weaken a gate: with the `insert` form, `stale_wins_for_the_gather_and_visibility_bit_is_untouched`
+     passed because the row was excluded as MATERIAL-stale, and deleting `Disabled<RenderStale>` from the gather
+     filter did NOT turn it red. The new suite's `spawn_drawable` therefore builds the bundle with its material
+     already set; see that function's doc. The other two suites still use the `insert` form and are left alone.
+   - The real fix is a kernel/hook-ordering question (apply `+1` before `-1` within one entity's replace, or make
+     `inc_ref` resurrect a `Retiring` slot whose refcount is climbing again) — outside this lane's crates.
