@@ -146,6 +146,57 @@ impl Access {
         access
     }
 
+    /// ORs `other`'s four bitmasks into `self` — the **union** of two access
+    /// surfaces (kernel backlog **KE5**).
+    ///
+    /// The composed access of a system built out of sub-systems is the union
+    /// of theirs: `CombinedSystem<A, B, OP>` runs BOTH children every frame it
+    /// is reached (ruling D5's eager fold), so anything either child touches is
+    /// touched by the composite, and the composite's declared surface must say
+    /// so.
+    ///
+    /// # What actually reads this union today
+    ///
+    /// `debug_assert_condition_read_only` (`schedule_builder.rs`), and nothing
+    /// else. A composite that declared only the LHS's surface would let an RHS
+    /// declaring `ResMut<T>` walk straight past the Phase-16 CR1 read-only
+    /// contract — a real, checkable consequence, and the one `D5(4)` pins.
+    ///
+    /// ⚠ **Not a data-race guard, despite where combinators live.** This doc
+    /// used to claim the conflict graph would otherwise run a writer of `C`
+    /// concurrently with a composite whose RHS reads `C`. It would not:
+    /// `ConflictGraph::build` reads `descriptors[i].system_box.system.access()`
+    /// — the owning SYSTEM's surface, never its conditions' — and
+    /// `EcsMaster::run_condition` evaluates conditions single-threaded at the
+    /// apply-window barrier under `&mut self`. There is no concurrency on this
+    /// path for a union to guard. Stating a stake the code does not have is how
+    /// a later edit "simplifies" the union away after checking the wrong
+    /// consumer.
+    ///
+    /// # Write-once, not write-never
+    ///
+    /// [`Access`] is documented write-once: populated during `init_access`,
+    /// read-only thereafter. `extend` belongs to that same population phase —
+    /// the composite's `initialize` calls it after initialising its children,
+    /// before the surface is ever read. Because OR is idempotent, a repeated
+    /// call (the scheduler re-`initialize`s conditions every frame) cannot
+    /// change the result.
+    ///
+    /// # Cost
+    ///
+    /// 192 B of ORs — 8 × `u64` for the two [`ComponentMask`]s plus 8 more for
+    /// the two [`BitSet256`]s. Cold: init-time only.
+    ///
+    /// [`ComponentMask`]: crate::ecs::core::component::component_mask::ComponentMask
+    /// [`BitSet256`]: boyko_utils::bit_mask::bit_set_256::BitSet256
+    #[inline]
+    pub fn extend(&mut self, other: &Access) {
+        self.component_reads.union_with(&other.component_reads);
+        self.component_writes.union_with(&other.component_writes);
+        self.resource_reads.union_with(&other.resource_reads);
+        self.resource_writes.union_with(&other.resource_writes);
+    }
+
     /// **Cross-system** conflict check (Phase 9 scheduler use only).
     ///
     /// Returns `true` iff `self` and `other` cannot execute concurrently.

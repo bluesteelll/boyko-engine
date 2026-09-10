@@ -37,5 +37,31 @@ loom.workspace = true
 default = []
 scheduler-trace = []
 
+# M2w: the Tree-Borrows NEGATIVE CONTROL of the stage-3 allocation work -- a switch that labels no
+# measurement. It swaps `Task::new_scoped`'s `execute` value for `task::scoped::run_scoped_neg`,
+# which differs from the shipped `run_scoped` by exactly
+# one protector: it binds the cell as a `&ScopedCell<F>` and passes that reference as an ARGUMENT
+# to the call that performs the release RMW, so a protector over CHUNK memory is live at the instant
+# `Scope::drop`'s `free_all` deallocates that chunk. Miri under Tree Borrows must then report
+# `deallocation through <tag> is forbidden`; A RUN THAT REPORTS NOTHING IS A RED GATE, because it
+# means M2w's positive column -- "the shipped `run_scoped` ran with the free inside a completer's
+# open release window and no UB was reported" -- is no longer known to be falsifiable. Stage 3b
+# deliberately weakened that argument's form (the cell now outlives the release RMW), and this arm
+# is what keeps the replacement checked rather than assumed.
+# THE ARM IS UNBUILDABLE NATIVELY BY DESIGN: `src/lib.rs` carries
+# `#[cfg(all(feature = "tb-neg-m2w", not(miri)))] compile_error!(...)`, so `--all-features` -- the
+# one configuration that would otherwise ship deliberate UB into the ordinary suite -- refuses to
+# compile instead. Driver: `scripts/tb_neg_gate.ps1`, one Miri process per seed, all four red.
+# It carries no `ke16-` prefix on purpose: it falsifies a gate, it does not identify a
+# configuration.
+tb-neg-m2w = []
+
 [lints]
 workspace = true
+
+# KE16 -- the pool-level wall-clock harness for nested (worker-spawned) scopes. `harness = false`
+# because criterion supplies its own main; the sibling `tests/ke16_nested_scope_occupancy.rs`
+# carries the occupancy instrument and the red-first gate, this file carries only throughput.
+[[bench]]
+name = "ke16_nested_scope"
+harness = false

@@ -711,6 +711,19 @@ impl ScheduleBuilder {
             }
         }
 
+        // KE17 D3 — `may_defer[i]` set iff system `i` can enqueue deferred work,
+        // folded here for the same reason `has_condition` is: the answer is
+        // constant for the schedule's lifetime and the executor must not pay a
+        // virtual call per completion to re-ask it. `System::has_deferred`
+        // defaults to `true`, so a bit is CLEAR only where a param chain
+        // declared `HAS_DEFERRED = false` all the way down.
+        let mut may_defer = FixedBitSet::with_capacity(n_final);
+        for (i, sb) in systems.iter().enumerate() {
+            if sb.system.has_deferred() {
+                may_defer.insert(i);
+            }
+        }
+
         // Build the scratch *after* the conflict graph so we can seed
         // `pred_remaining` from `pred_count` in one pass. `set_conditions_table.len()`
         // sizes the set-condition memo bitsets (§7.1).
@@ -723,6 +736,7 @@ impl ScheduleBuilder {
             conflict_graph,
             executor_scratch,
             has_condition,
+            may_defer,
             system_conditions,
             system_gating_sets,
             set_conditions: set_conditions_table,
@@ -1878,6 +1892,51 @@ mod tests {
         let mut world = EcsMaster::new();
         let schedule = builder.build(&mut world);
         assert_eq!(schedule.systems[0].system.meta().zone(), ZONE_ID_UNASSIGNED);
+    }
+
+    /// **KE17 D3 — the `may_defer` fold, all three answers.**
+    ///
+    /// One schedule per case so index 0 is unambiguous under the topological
+    /// permutation:
+    ///
+    /// * a param-free closure declares `HAS_DEFERRED = false` all the way down
+    ///   ⇒ CLEAR, the bit the split apply window will act on;
+    /// * a `Commands` closure ⇒ SET, the only param in the tree that answers
+    ///   `true`;
+    /// * a hand-written `System` that declares NOTHING ⇒ SET, because
+    ///   `System::has_deferred` defaults to the fail-safe side. This is the
+    ///   builder-side half of the receipt whose trait-side half is
+    ///   `system::tests::undeclared_system_keeps_its_barrier`.
+    #[test]
+    fn may_defer_folds_param_chain_and_defaults_to_set() {
+        use crate::ecs::core::system::Commands;
+
+        let mut world = EcsMaster::new();
+
+        let mut b = ScheduleBuilder::new(fresh_pool());
+        b.add_system(|| {});
+        let plain = b.build(&mut world);
+        assert!(
+            plain.may_defer.is_clear(),
+            "a param-free system carries no deferred payload ⇒ bit clear"
+        );
+        assert!(!plain.may_defer(0), "the public accessor agrees");
+
+        let mut b = ScheduleBuilder::new(fresh_pool());
+        b.add_system(|_: Commands| {});
+        let deferring = b.build(&mut world);
+        assert!(
+            deferring.may_defer(0),
+            "a `Commands` system keeps its barrier ⇒ bit set"
+        );
+
+        let mut b = ScheduleBuilder::new(fresh_pool());
+        add_counting(&mut b, "undeclared", Arc::new(AtomicUsize::new(0)));
+        let undeclared = b.build(&mut world);
+        assert!(
+            undeclared.may_defer(0),
+            "a System impl that declares nothing must keep its barrier"
+        );
     }
 
     /// A schedule with NO `.run_if` anywhere builds with an all-zero

@@ -229,6 +229,15 @@ impl EcsMaster {
         // get_component_mut<T> wrappers.
         self.entity_master.register_entity_with_ptr(entity, archetype_ptr, new_unit_index);
 
+        // KE10: apply the archetype's declared initial enable-bit states. Placed
+        // BEFORE the fires so an `on_add` hook observes the initial state and can
+        // override it — the flag is part of what the component arrives with, not
+        // a reaction to its arrival. On a fresh spawn every signature id is newly
+        // attached, so the whole-archetype form applies. Gated on
+        // `ArchetypeFlags::FLAGS_ON_ATTACH`: one `u16` test in a world that
+        // declares no `flags (…)`.
+        self.apply_attach_flags_all(entity);
+
         // Step 6 (Phase 14a §3.2): fire on_add / on_insert hooks. The Step-3
         // `&mut Archetype` was block-scoped (`let pushed = { ... }`) and is
         // dead; only `archetype_ptr` (*mut, Copy) survives — no `world`-derived
@@ -414,6 +423,10 @@ impl EcsMaster {
         // verbatim through `register_entity_with_ptr`.
         self.entity_master
             .register_entity_with_ptr(entity, archetype_ptr, new_unit_index);
+
+        // KE10: initial enable-bit states, before the fires (mirrors
+        // `create_entity` — see the rationale there).
+        self.apply_attach_flags_all(entity);
 
         // Phase 14a §3.2: fire on_add / on_insert hooks (mirrors `create_entity`).
         // The Step-3 `&mut Archetype` was block-scoped and is dead; only

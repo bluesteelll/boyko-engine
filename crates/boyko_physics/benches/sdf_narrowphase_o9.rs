@@ -1,22 +1,28 @@
-//! O9 A/B: the box-vs-SDF narrowphase (`box_sdf_manifold`) — scalar build vs the
-//! `+avx2` batched-kernel build — at SDF edit counts {1, 2, 4, 8, 16}.
+//! O9 A/B: the box-vs-SDF narrowphase (`box_sdf_manifold`) — the scalar fold vs the
+//! AVX2 batched kernel — at SDF edit counts {1, 2, 4, 8, 16}.
 //!
-//! `box_sdf_manifold` is private + cfg-gated (one arm per build), so the A/B is
-//! TWO BUILDS of the SAME public entry, not a runtime flag:
+//! Since 2026-09-03 the arm is [`SdfNarrowphaseKernel`], a `PhysicsConfig` field, so
+//! the A/B is TWO CONFIGS IN ONE BUILD:
 //!
 //! ```text
-//! # scalar baseline (default build):
 //! cargo bench -p boyko-physics --bench sdf_narrowphase_o9
-//! # AVX2 (the batched kernel):
-//! RUSTFLAGS="-C target-feature=+avx2" cargo bench -p boyko-physics --bench sdf_narrowphase_o9
 //! ```
+//!
+//! ⚠ Do NOT reintroduce the old two-build recipe, which set `RUSTFLAGS` to add
+//! `+avx2`. `RUSTFLAGS` REPLACES `target.<triple>.rustflags` rather than appending to
+//! it, so that command silently dropped `-C target-cpu=x86-64-v3` and benchmarked a
+//! different binary from the one that ships. `cargo --config` merges; the config
+//! field needs neither.
+//!
+//! ⚠ The two arms are NOT bit-identical (a `±0` divergence in the x8 leaf, owner-
+//! deferred) — this measures the price of a choice, it does not endorse taking it.
 //!
 //! The bench drives the `add_physics_sdf::<NoopSolver>` schedule over `N` box
 //! bodies, each FULLY submerged in a multi-edit SDF field (so every corner
 //! penetrates and each runs the gradient batch — the worst-case narrowphase). The
 //! `NoopSolver` makes the solve a no-op, so the per-step cost is gather +
-//! broadphase + `physics_narrowphase_sdf`. Gather + broadphase are byte-identical
-//! in BOTH builds (no SIMD-gated code there), so the scalar-build → avx2-build
+//! broadphase + `physics_narrowphase_sdf`. Gather + broadphase run the SAME code in
+//! both arms (the kernel field reaches only the box path), so the scalar → avx2
 //! DELTA is purely the `box_sdf_manifold` kernel — that delta is the O9 speed-up.
 //! (Per-box absolute time includes the shared overhead and is the conservative
 //! upper bound; the kernel-only win is larger.)
@@ -41,6 +47,7 @@ use boyko_physics::components::{
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_sdf;
+use boyko_physics::resources::{PhysicsConfig, SdfNarrowphaseKernel};
 use boyko_physics::sdf_query::SdfField;
 use boyko_physics::solver::NoopSolver;
 
@@ -136,8 +143,8 @@ fn submerging_field(n_edits: usize) -> SdfField {
 }
 
 /// Builds a world of `n_bodies` random-posed boxes + the `n_edits` submerging field
-/// + the `add_physics_sdf::<NoopSolver>` schedule, ready to `run`.
-fn build_scene(n_bodies: usize, n_edits: usize) -> (EcsMaster, Schedule) {
+/// + the `add_physics_sdf::<NoopSolver>` schedule running `kernel`, ready to `run`.
+fn build_scene(n_bodies: usize, n_edits: usize, kernel: SdfNarrowphaseKernel) -> (EcsMaster, Schedule) {
     let mut world = EcsMaster::new();
     let mut rng = Rng::new(0x0900_b0d1_e500_0009);
     for _ in 0..n_bodies {
@@ -153,6 +160,7 @@ fn build_scene(n_bodies: usize, n_edits: usize) -> (EcsMaster, Schedule) {
     }
     let mut builder = ScheduleBuilder::new(serial_pool());
     let _keys = add_physics_sdf::<NoopSolver>(&mut builder, &mut world);
+    world.resource_mut::<PhysicsConfig>().sdf_narrowphase = kernel;
     *world.resource_mut::<SdfField>() = submerging_field(n_edits);
     world.insert_resource(FixedTime::new(Duration::from_secs_f32(1.0 / 60.0)));
     let schedule = builder.build(&mut world);
@@ -164,15 +172,20 @@ fn bench_narrowphase(c: &mut Criterion) {
     let mut group = c.benchmark_group("o9_box_sdf_narrowphase");
     group.throughput(Throughput::Elements(N_BODIES as u64));
 
-    for &n_edits in &[1usize, 2, 4, 8, 16] {
-        group.bench_with_input(BenchmarkId::from_parameter(n_edits), &n_edits, |b, &n_edits| {
-            let (mut world, mut schedule) = build_scene(N_BODIES, n_edits);
-            // Warm one step (populate scratch, archetype caches) before timing.
-            schedule.run(&mut world);
-            b.iter(|| {
-                schedule.run(black_box(&mut world));
+    for (label, kernel) in [
+        ("scalar", SdfNarrowphaseKernel::Scalar),
+        ("avx2", SdfNarrowphaseKernel::Avx2),
+    ] {
+        for &n_edits in &[1usize, 2, 4, 8, 16] {
+            group.bench_with_input(BenchmarkId::new(label, n_edits), &n_edits, |b, &n_edits| {
+                let (mut world, mut schedule) = build_scene(N_BODIES, n_edits, kernel);
+                // Warm one step (populate scratch, archetype caches) before timing.
+                schedule.run(&mut world);
+                b.iter(|| {
+                    schedule.run(black_box(&mut world));
+                });
             });
-        });
+        }
     }
     group.finish();
 }

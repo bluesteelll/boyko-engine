@@ -100,7 +100,19 @@ impl RelationshipRole {
     /// each monomorphizes to one bare `HookFn` per relation type (no `dyn`). A SOURCE
     /// wires `on_insert` (link) + `on_replace` (unlink); a TARGET wires ONLY
     /// `on_replace` (the cascade — never `on_add`/`on_insert`, B7).
-    pub(crate) fn hook_items_codegen(&self) -> TokenStream2 {
+    ///
+    /// KM2 — the user's NON-OWNED hooks are MERGED in. This body is the only
+    /// `register_hooks` emitted for a relationship side (`component.rs` picks
+    /// EITHER this or `ComponentHookPaths::codegen`, never both), so before the
+    /// merge a `#[component(on_add = …)]` on a relationship type compiled and
+    /// then never fired — measured, `km2_on_despawn_derive.rs`
+    /// `relationship_non_owned_hooks_fire`. That silently contradicted
+    /// [`Self::reject_hook_collision`]'s own doc, which states the non-owned
+    /// slots "compose without conflict". `on_insert` / `on_replace` cannot reach
+    /// here: `reject_hook_collision` refuses a user value for either before this
+    /// is called, so the owned assignments below can never be clobbered.
+    pub(crate) fn hook_items_codegen(&self, user: &ComponentHookPaths) -> TokenStream2 {
+        let user_assigns = user.non_relationship_owned_assigns();
         let assigns = match self {
             RelationshipRole::Source(_) => quote! {
                 hooks.on_insert = ::std::option::Option::Some(
@@ -127,6 +139,7 @@ impl RelationshipRole {
                 hooks: &mut boyko_ecs::ecs::core::component::hooks::ComponentHooks,
             ) {
                 #assigns
+                #(#user_assigns)*
             }
         }
     }
@@ -134,8 +147,11 @@ impl RelationshipRole {
     /// Rejects a user `#[component(on_insert=…)]` / `#[component(on_replace=…)]`
     /// alongside the relationship attribute (R5 `relationship_hook_collision`): the
     /// relationship OWNS those slots, so a user hook would be silently dropped or
-    /// double-install. The other two slots (`on_add` / `on_remove`) are free — a
-    /// relationship does not wire them, so they compose without conflict.
+    /// double-install. The other three slots (`on_add` / `on_remove` /
+    /// `on_despawn`) are free — a relationship does not wire them, and
+    /// [`Self::hook_items_codegen`] merges the user's values for them into the
+    /// generated body, so they compose without conflict. (Until KM2 that last
+    /// clause was false: the generated body replaced the user's wholesale.)
     pub(crate) fn reject_hook_collision(
         &self,
         ident: &Ident,

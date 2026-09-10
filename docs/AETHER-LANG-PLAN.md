@@ -1,5 +1,43 @@
 # Aether — the boyko-engine authoring DSL (design plan)
 
+> **STATUS as of 2026-08-29 — SHIPPED, then SUPERSEDED TWICE. This is a design record, not a live
+> plan. Do not build from it.** Nothing below this box has been edited: a superseded plan is
+> evidence of what was decided and when, so it gets a status header and forward pointers, never a
+> rewrite of its body.
+>
+> **It shipped.** Every rung of §9's A0..A7 ladder is in the history —
+> `git log --oneline -- crates/aether_lang crates/aether crates/aether_tests docs/AETHER-LANG-PLAN.md`
+> returns `fa3622b1` (A0) through `7ef41dd2` (A7), plus `5ec1699f` (the demo-arena block that
+> compiles every construct against the real engine). The three crates this file specifies are
+> workspace members (`Cargo.toml` `members`).
+>
+> **Superseded once by its own implementation.** Seventeen places where the shipped language
+> diverges from this plan are catalogued as rows `P-1`..`P-17` of
+> [AETHER-V1-SURFACE-REVIEW.md](AETHER-V1-SURFACE-REVIEW.md) §5. **Where this file and the source
+> disagree, the source wins**; that review, not this plan, is the authority on what v1 accepts.
+>
+> **Superseded again by Aether v2**, which redesigns the surface:
+> [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) (rung ladder, engine-layer split, open ballots) ·
+> [`aether-v2/CONSTRUCTS.md`](aether-v2/CONSTRUCTS.md) (the v2 surface, written as a delta over v1) ·
+> [`AETHER-GAIA-REVISION-2026-08-29.md`](AETHER-GAIA-REVISION-2026-08-29.md) — **the shared entry
+> point** for the Aether v2 and Gaia campaigns: what the engine refuted, which gates were struck as
+> unfalsifiable, and the work order.
+>
+> **Two constructs of this plan left the language's campaign entirely**
+> ([`aether-v2/CONSTRUCTS.md`](aether-v2/CONSTRUCTS.md) §`material`, `scene`): §3.6 `material` is
+> **parked** pending a policy call the language cannot make (is a material shader a source or an
+> asset — its own campaign), and §3.7 `scene` keeps only a **dev-bootstrap** role. The shipped world
+> form moves to **Gaia**, the data language ([`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md)) — *Aether is
+> for logic, Gaia is for data* (owner, 2026-08-28).
+>
+> Two body claims that v2 reverses, flagged here rather than edited in place. §8's risk `R7`
+> documents same-frame transition arbitration as **last-write-wins**; v2 rung **R2**'s per-leaf route
+> merge changes it to **first-declared-wins** ([`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) R2,
+> and `CONSTRUCTS.md` §`machine` payload binding: "the FIRST event of the frame passing the guard
+> wins"). And §Non-goals' "no `.aether` files on disk, no asset-pipeline compiler" is exactly the
+> ground **Gaia** now occupies — its own text, an offline build-time bake, a binary the runtime
+> loads.
+
 ## Goal
 
 **Aether** is a simpler-syntax language for writing engine-level game code fast:

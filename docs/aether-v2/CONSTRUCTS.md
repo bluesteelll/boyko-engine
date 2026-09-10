@@ -85,8 +85,10 @@ event Damage {
                                    //   router (DECISIONS M4) — unread otherwise
     amount: f32,
 } with {
-    lanes    32                    // 1..=MAX_EVENT_THREADS, parse-checked (the example value 32 may
-                                   //   change under ballot AB-2)
+    lanes    32                    // a MINIMUM, not a count (ruling E4): the effective lane count is
+                                   //   max(32, worker_count + 1). 1..=MAX_EVENT_THREADS is
+                                   //   parse-checked; the floor is applied at boot and the raise is
+                                   //   reported. On a 64-worker machine this line yields 65 lanes.
     capacity 4096                  // 1..=MAX_EVENT_CAPACITY, parse-checked (symbolic, never the
                                    //   numeric literal — DECISIONS C3)
     ordered                        // opt-in run-to-run byte-stable order (see EVENTS.md)
@@ -139,6 +141,14 @@ system chase(
 - `when (A or B)` / `unless C` lower to the kernel combinators (`CombinedSystem`, eager fold).
 - `or(...)` in **filter** position is RESERVED: refused with a span diagnostic pointing at the
   verbatim escape, until the kernel `Or`-dense fix is green and a real consumer exists (D4).
+  ⚠ **Rung R0 removed the first of those two conditions (LANDED 2026-08-29)** — this reserve now
+  stands on the consumer clause alone, a narrower ground than the one written here. The Gaia twin of
+  this ban stood on the kernel defect *entirely*; that was ballot **GB-9**, ✅ **RULED 2026-08-30 —
+  the Gaia ban is DELETED with a record**, and the ruling explicitly declined to keep it by
+  borrowing D4: **D4 reserves the Aether *surface*, while that ban governed *generated code*, and
+  Gaia's ratified GN2 says the baker emits no Rust.** The reserve **here** is unaffected. See
+  [`DECISIONS.md`](DECISIONS.md) D4 and [`../gaia/DECISIONS.md`](../gaia/DECISIONS.md) §UI bindings,
+  item 8.
 - **`gpu`** (bare group) → `.gpu()` — marks a GPU-compute system (dispatcher-solo at the apply
   window, the sound site for `!Send` RHI recording). The kernel marker is deliberately
   non-inferable from access, so this is the only ergonomic route. *(Ratified O3.)*
@@ -208,8 +218,14 @@ each drift(mut Transform, Velocity, with Enemy, time: res<Time>) {
 - **Default driver: `iter_mut`** (change ticks work). `each soa` opts into `for_each_chunk`
   (refused when any term is non-archetypal or the data is not chunkable — the diagnostic explains
   tick-blindness); `each par` opts into a parallel driver (needs R4 for event emission).
-- **`each par` — the driver is UNRULED.** There is no "the parallel driver": the kernel exposes
-  **two**, with **opposite tick behaviour**, and this document does not choose between them.
+- **`each par` — RULED 2026-08-30 (ballot AB-8): `par_iter_mut`.** `par_for_each_chunk` is reachable
+  only as `each soa par`. Measured: over 2048 rows a `Changed<>` reader sees **2048** of the
+  `par_iter_mut` writes and **0** of the `par_for_each_chunk` writes; the tracked driver costs
+  **1.17–1.47×** the chunked one (0.03–0.07 ns/row), which at the machine cost model's 10 000 rows
+  is 0.3–0.7 µs/frame against the 34–40 µs ruling D1 measured for the jump table alone — ~1–2 % of
+  the pass. The batching key is **not** author-visible in v1 (`BatchingStrategy` has three fields,
+  so `parallel (batch = N)` cannot name what it appears to name). Full ruling and the rejected
+  alternatives: [`DECISIONS.md`](DECISIONS.md) **C5a**. The kernel facts that decided it:
   - `Query::par_iter` / `Query::par_iter_mut`
     (`crates/boyko_ecs/src/ecs/core/iters/query/query.rs`) accept **any** `D: QueryData` — the
     bound replicates the `iter`/`iter_mut` split, so `Mut<T>` and its change ticks **survive**.
@@ -220,9 +236,8 @@ each drift(mut Transform, Velocity, with Enemy, time: res<Time>) {
     `Default` impl.
   - Both are floored by `MIN_ARCHETYPE_FOR_PARALLEL` = **1024** (same file): an archetype below it
     runs **inline on the calling thread**, `par` opt-in or not.
-  - Recommendation (not a ruling): `par_iter_mut`, by C5's own tick rationale — the same rationale
-    that makes `iter_mut` the default driver. Driver choice, whether `soa par` exists at all, and
-    whether the batching key is author-visible are ballot **AB-8** (see §Open ballots).
+  - Both expose `batching_strategy(BatchingStrategy)` as a builder, so the knob stays reachable from
+    the verbatim escape even though the grammar does not surface it.
 - Refusals: no query datum ("that is a `system`"), two `entity` bindings, and `return` in the body:
   "`return` is not allowed in an `each` body — it would leave the generated system, not this row;
   write `continue` to skip a row, or use `system` to exit early." (True of **both** lowerings: the
@@ -267,10 +282,10 @@ exists to prevent.
 | Ballot | Question | Alternatives | Blocks |
 |---|---|---|---|
 | **AB-6** | `requires` of a `storage = dense` component | (a) parse refusal — ⚠ narrows the ratified `storage = table \| dense` × `requires` surface · (b) dense required-ctor route · (c) leave KNOWN-OPEN + hook workaround | KE11's disposition and the R3 `component` wording; the red tests land under all three |
-| **AB-8** | `each par` lowering | (a) `par_iter_mut` — per-row, ticks preserved (recommended per C5's tick rationale) · (b) `par_for_each_chunk` — chunked, tick-excluding, takes `BatchingStrategy` · plus: does `soa par` exist? is the batching key author-visible (`parallel (batch = N)`)? do machines and `each` share one driver? | R3 / R5 |
+| ~~**AB-8**~~ **RESOLVED 2026-08-30** | `each par` lowering | **`par_iter_mut`** (measured: 2048/2048 rows tracked vs 0/2048 chunked; 1.17–1.47× cost = ~1–2 % of the pass). `soa par` **exists** and is the only route to `par_for_each_chunk`. Batching key **not** author-visible in v1. Machines and `each` share the **ladder**, not the default. → [`DECISIONS.md`](DECISIONS.md) **C5a** | — |
 | **AB-11** | `with`/`without` over a `flag` | (a) parse refusal with did-you-mean → `enabled`/`disabled` (dissolves the whole silent-filter class) · (b) forbidden-form list only, no refusal. ⚠ (a) adds a refusal where v1 documents non-refusal | R3 filter goldens |
 | **AB-13** | `flag` initial-value vocabulary | `on \| off` reserved vs contextual; disambiguation across all three `on` positions (`machine … on entity`, `on E => T`, `flags (X = on)`); and the group's NAME — PENDING Tier 3 **withdrew** `flags → initial` (`initial` is already the machine's initial-state keyword, so the rename recreates the collision it fixes), so the question is whether that withdrawal stands or a different rename is wanted. ⚠ any rename here touches a ratified keyword | R3 |
-| **AB-2** | `lanes N` floor home (cited at `event`) | minimum-raised-at-boot / boot refusal / drop the knob | R3 + R4; the worked `lanes 32` changes under all three |
+| ~~**AB-2**~~ | ✅ **RULED 2026-08-30 → [`DECISIONS.md`](DECISIONS.md) E4**: `lanes N` is a **minimum**, effective `max(N, worker_count + 1)`, raised at boot **and reported** | *Rejected:* boot refusal (machine-dependent unbootability); dropping the knob (cleaner, but deletes a ratified surface — a SCOPE call escalated to the owner, not taken) | ~~R3 + R4~~ — the worked `lanes 32` above now reads as a floor |
 
 ## `material`, `scene`
 

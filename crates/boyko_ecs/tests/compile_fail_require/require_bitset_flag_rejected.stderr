@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: #[require(...)] of a bitset flag: a flag is a BIT, not bytes, and a required-component constructor exists only to write bytes into a storage slot, so there is nothing to construct. Declare the initial flag state instead: the component `flags (...)` group, e.g. `flags (TheFlag = true)`, which is backed by FLAGS_DIRECT and sets the bit on attach. (A `storage = "dense"` component is NOT refused here — it has bytes, and #[require] of it is supported.)
+  --> tests/compile_fail_require/require_bitset_flag_rejected.rs:49:31
+   |
+49 | #[require(TableDep, DenseDep, FlagDep)]
+   |                               ^^^^^^^ evaluation of `_` failed here

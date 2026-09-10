@@ -2510,13 +2510,16 @@ impl ColoredSoftStepSolver {
     ///
     /// # Chunk count + balance (the work-stealing perf knob)
     ///
-    /// The color is split into `(num_threads + 1) * `[`CHUNKS_PER_WORKER`] chunks
+    /// The color is split into `num_threads() * `[`CHUNKS_PER_WORKER`] chunks
     /// (capped at the group count), balanced by total SLOT count rather than group
     /// count — the dispatch loop walks groups accumulating slots and cuts a chunk
-    /// once its run reaches the per-chunk slot quota. Emitting MORE, smaller,
+    /// once its run reaches the per-chunk slot quota. The lane count is
+    /// `num_threads()`, never `+ 1` (KE16 App-1): the thread that calls `pool.scope`
+    /// on the production route IS one of the W workers. Emitting MORE, smaller,
     /// work-balanced chunks than lanes lets the Chase-Lev work-STEALING pool
     /// equalize the lanes (an idle lane steals the next chunk), which removes the
-    /// coarse `num_threads + 1` split's load imbalance. The chunk count + shape are
+    /// load imbalance of O6's ORIGINAL coarse split (one chunk per lane, historical
+    /// — see [`CHUNKS_PER_WORKER`]). The chunk count + shape are
     /// FREE perf knobs (see the bit-identity property below): they change only WHERE
     /// work runs, never the bits.
     ///
@@ -2627,16 +2630,20 @@ impl ColoredSoftStepSolver {
         let dispatched = try_with_active_pool(|pool| {
             // O6 perf: emit MORE, work-BALANCED chunks than lanes so the Chase-Lev
             // work-stealing pool equalizes the lanes (an idle lane steals the next
-            // chunk). The dispatcher lane that called `pool.scope` ALSO work-steals
-            // while the scope is open, so the lane pool is `num_threads + 1`; target
-            // `(num_threads + 1) * CHUNKS_PER_WORKER` chunks, capped at the group
-            // count (a chunk is always ≥ 1 WHOLE manifold-group — never split a
-            // group's order-coupled points across lanes, the C1 invariant). At least
-            // one chunk always (`max(1)`). Bit-identity is chunk-COUNT- AND
-            // chunk-SHAPE-independent (the {1, N} property holds for ANY partition —
-            // distinct chunks touch disjoint dynamic bodies), so this is a pure,
-            // bench-tunable perf knob, never a value change.
-            let lanes = pool.num_threads() + 1;
+            // chunk). KE16 App-1: the lane pool is `num_threads()`, never `+ 1` — on
+            // the production route (`Schedule::run`'s `install` frame) the thread
+            // that calls `pool.scope` IS one of the W workers, so counting it as an
+            // extra lane over-chunked by a lane's worth; the `+ 1` described the
+            // BENCH route, where an external joiner is an extra lane whose share is
+            // measured, not counted. Target `num_threads() * CHUNKS_PER_WORKER`
+            // chunks, capped at the group count (a chunk is always ≥ 1 WHOLE
+            // manifold-group — never split a group's order-coupled points across
+            // lanes, the C1 invariant). At least one chunk always (`max(1)`).
+            // Bit-identity is chunk-COUNT- AND chunk-SHAPE-independent (the {1, N}
+            // property holds for ANY partition — distinct chunks touch disjoint
+            // dynamic bodies), so this is a pure, bench-tunable perf knob, never a
+            // value change.
+            let lanes = pool.num_threads();
             let n_chunks = (lanes * CHUNKS_PER_WORKER).clamp(1, n_groups);
 
             // Balance by total SLOT count (work), not group count: groups vary in
@@ -2664,9 +2671,19 @@ impl ColoredSoftStepSolver {
                 view,
             };
 
-            pool.scope(|scope| {
+            // One chunk cut: `(group lo, group hi, slot start, slot end)`.
+            type ColorChunkCut = (usize, usize, usize, usize);
+
+            // The cut walk as a lazy iterator. The boundaries are data-dependent
+            // (they follow the CSR's slot runs), so they are derived on the fly as
+            // the dispatch loop consumes them — never materialized into a per-step
+            // Vec of chunk bounds (W2), and never available in closed form.
+            let cuts = || {
                 let mut chunk_g_lo = g_lo;
-                while chunk_g_lo < g_hi {
+                core::iter::from_fn(move || -> Option<ColorChunkCut> {
+                    if chunk_g_lo >= g_hi {
+                        return None;
+                    }
                     // The chunk's first group's first slot. Read via the view's raw
                     // `group_start` base (no `&` borrow into `cols`).
                     // SAFETY: `chunk_g_lo` is within `[g_lo, g_hi)`, a valid index
@@ -2716,9 +2733,20 @@ impl ColoredSoftStepSolver {
                         "invariant: a SIMD chunk's lo boundary is a cohort (8-group) boundary"
                     );
 
-                    let task_g_lo = chunk_g_lo;
-                    let task_g_hi = chunk_g_hi;
-                    scope.spawn(move || {
+                    let cut = (chunk_g_lo, chunk_g_hi, chunk_start, chunk_end);
+                    chunk_g_lo = chunk_g_hi;
+                    Some(cut)
+                })
+            };
+
+            pool.scope(|scope| {
+                // The chunk task: a `Fn` over a cut that hands back that chunk's
+                // body, one spawn per cut. Every capture is `Copy` (the solve
+                // views and the step scalars), so each body owns its copies and
+                // borrows nothing.
+                let task = move |cut: ColorChunkCut| {
+                    let (task_g_lo, task_g_hi, chunk_start, chunk_end) = cut;
+                    move || {
                         // DISJOINTNESS (the O6 + P2 soundness argument — why the
                         // concurrent per-element accesses are race- and TB-clean):
                         //   - `ptrs` carries only `Copy` solve views (`ContactSolveView`
@@ -2772,9 +2800,11 @@ impl ColoredSoftStepSolver {
                             bias_active,
                             simd,
                         );
-                    });
+                    }
+                };
 
-                    chunk_g_lo = chunk_g_hi;
+                for cut in cuts() {
+                    scope.spawn(task(cut));
                 }
             });
         });

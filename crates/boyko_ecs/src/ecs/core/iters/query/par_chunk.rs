@@ -248,8 +248,20 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                 // non-overlapping by construction; CD3 disjointness for
                 // `&mut [T]` slices is therefore satisfied structurally. The run
                 // walk nests INSIDE each batch with `range_end = end` (C5).
-                let mut start = 0usize;
-                while start < entity_count {
+                //
+                // KE16 App-4: the archetype's whole chunk count goes to
+                // `Scope::spawn_batch` in ONE call. Underneath it is one
+                // `spawn` per body — each body registers itself and each push
+                // takes its own wake decision — so `n_chunks` is the caller's
+                // UPPER-BOUND promise, not a batched registration; the map
+                // below yields exactly that many bodies. `chunk_size >= 1`
+                // (`BatchingStrategy::chunk_size` ends in `.max(1)`), so the
+                // count is the closed form of the `while start < entity_count`
+                // walk it replaces and the ranges are unchanged.
+                let n_chunks = entity_count.div_ceil(chunk_size);
+
+                scope.spawn_batch(n_chunks, (0..n_chunks).map(|chunk| {
+                    let start = chunk * chunk_size;
                     let end = (start + chunk_size).min(entity_count);
 
                     let captured = ChunkChunkCaptures::<'_, D, F, Func> {
@@ -286,13 +298,11 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                     //   - The conflict graph / `FilteredAccessSet` guarantees
                     //     no concurrent system aliases this archetype's
                     //     columns for the current dispatch round (SCH3).
-                    scope.spawn(move || {
+                    move || {
                         // SAFETY: forwarded; see outer SAFETY block.
                         unsafe { run_chunk_owned::<D, F, Func>(captured); }
-                    });
-
-                    start = end;
-                }
+                    }
+                }));
             }
         });
     });
@@ -446,10 +456,10 @@ where
 {
     // SAFETY (CD1, CD2, CD4, PAR2): mirrors the inline path in
     //   `par_for_each_chunk_impl` but writes to a sub-range only. CD3
-    //   disjointness is enforced by the outer while-loop emitting
-    //   non-overlapping `[start, start + len)` half-open ranges via the
-    //   `BatchingStrategy` monotonic walk. The `data_state` deref is bounded
-    //   by the surrounding `scope.Drop`; the `f` deref likewise.
+    //   disjointness is enforced by the outer `0..n_chunks` dispatch walk,
+    //   which emits non-overlapping `[start, start + len)` half-open ranges
+    //   from the `BatchingStrategy` chunk size. The `data_state` deref is
+    //   bounded by the surrounding `scope.Drop`; the `f` deref likewise.
     let mut chunk_fetch =
         <D as ChunkedQueryData>::init_chunk_fetch(unsafe { &*captured.data_state });
     unsafe {

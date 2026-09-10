@@ -13,3 +13,79 @@
 # ECS core (audit finding C-001 / Phase 3a).
 [env]
 MIRIFLAGS = "-Zmiri-tree-borrows"
+
+# ISA baseline: x86-64-v3 (AVX2 + FMA + BMI1/BMI2 + F16C + LZCNT + MOVBE).
+#
+# `CLAUDE.md` has named AVX2 the baseline since the project began, but until
+# 2026-09-02 nothing in the build enabled it: a default `cargo build --release`
+# compiled for the bare x86-64 baseline (sse2, sse3), so every
+# `cfg(target_feature = "avx2")` arm in the tree - including
+# `boyko_physics::solver::simd`'s vectorised solver - was compiled OUT and the
+# scalar fallback shipped. The declared baseline and the built one had diverged
+# for the whole life of the project.
+#
+# `x86-64-v3` rather than a hand-written feature list: it is the named
+# microarchitecture level, so it also carries BMI2, LZCNT, MOVBE and F16C (free
+# wins an ad-hoc list would have missed) and it selects the matching scheduling
+# model, not only the instruction set.
+#
+# FMA IS INCLUDED, by owner ruling of 2026-09-02 ("Включаем FMA"). For a few hours
+# on that day this line carried `-C target-feature=-fma`, because `boyko_physics`
+# had two `compile_error!` guards that rejected any `+fma` build. Those guards
+# gated the WRONG proposition: they asserted "the CPU has no FMA", when the
+# property the bit-identity oracles need is "the SIMD kernels emit no fused and no
+# approximate op" - a SOURCE property that holds on any ISA.
+#
+# An ISA bit cannot fuse anything on its own. Rust does NOT contract an explicit
+# `mul` + `add` into an FMA; contraction requires an explicit `f32::mul_add` or a
+# global fast-math flag, and stable Rust exposes neither implicitly. MEASURED
+# 2026-09-02 on `rustc 1.97.1` with `-C target-cpu=x86-64-v3 --emit=asm`:
+# `a * b + c` compiles to `vmulss` + `vaddss` with ZERO `vfmadd`; `a.mul_add(b, c)`
+# compiles to exactly ONE `vfmadd213ss`; and a slice loop `c[i] = a[i]*b[i]+c[i]`
+# auto-vectorises to 16 `ymm` references with SEPARATE `vmulps` and `vaddps` and
+# still zero FMA. The guards were therefore rejecting a build that could not have
+# hurt them.
+#
+# The enforcement MOVED rather than vanished: every file in `boyko_physics` that
+# contains an `_mm256_*` call site carries a source census test that fails the
+# build if that file gains a fused intrinsic, an `rcp`/`rsqrt` approximation, a
+# `mul_add` call or an `algebraic_*` fast-math call. Those tests are what keeps the
+# determinism contract load-bearing now, and they gate the property directly
+# instead of a proxy for it.
+#
+# Until 2026-09-03 this paragraph named TWO files and said the build fails "if
+# either file gains" a banned op. That was true when it was written and this very
+# baseline made it a hole: `solver/colored.rs` (73 `_mm256_*` call sites) and
+# `systems.rs` (8) sit behind `cfg(target_feature = "avx2")`, so before
+# `x86-64-v3` they were never COMPILED and therefore never censused — the day they
+# started building they became the AVX2 files with nothing keeping them clean.
+# There are now FOUR censuses over the four files that hold an `_mm256_*` call
+# site, which is all of them:
+#
+#   solver/simd.rs    -> solver::simd::tests::solver_simd_has_no_fma_or_approx_callsites
+#   sdf_simd.rs       -> sdf_simd::o9_kernel_tests::sdf_simd_has_no_fma_or_approx_callsites
+#   systems.rs        -> systems::o9_manifold_tests::systems_has_no_fma_or_approx_callsites
+#   solver/colored.rs -> solver::colored::tests::colored_has_no_fma_or_approx_callsites
+#
+# (The last lives in `solver/colored_tests.rs` and is the only one that does not
+# scan its own file. That file is a fifth match for a bare `grep _mm256_`, three
+# times, every one of them prose or a needle fragment and none of them a call
+# site.) Three of the four survive a build that loses the ISA flag; the
+# `sdf_simd.rs` one vanishes with its `cfg(target_feature = "avx2")` module, which
+# is the shape the root `tests/isa_baseline_census.rs` exists to catch.
+#
+# THE PRICE, stated because it is a real one: a binary built this way executes an
+# illegal instruction on any CPU older than Intel Haswell (2013) or AMD Excavator
+# (2015). Owner decision, 2026-09-02: "AVX2 by default, all modern processors
+# support it."
+#
+# Scoped per target rather than under `[build]` so the wasm32 build
+# (`boyko_demo`) is untouched - x86 features are meaningless there.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

@@ -15,14 +15,23 @@
 //!
 //! Everything `aether!` emits is ordinary Rust that a person could have written (Decision A3), so
 //! the expansion is readable rather than a wall of generated glue: `component` becomes a
-//! `#[derive(::boyko_macros::Component)]` struct, `system` a `pub fn`, `machine` a flat enum plus
-//! one drain-and-act fn per (leaf, event), `scene` a single spawn fn. If a construct's output
+//! `#[derive(::boyko_macros::Component)]` struct, `system` a `pub fn`, `machine` a
+//! `::boyko_macros::state_chart!` invocation, `scene` a single spawn fn. If a construct's output
 //! surprises you, `aether_lang`'s unit tests pin every one of those shapes token-for-token —
 //! they are the same content a `cargo expand` shows, versioned.
 //!
-//! Generated internal names are `__aether_`-prefixed (`__aether_game_flow__boot__assets_ready`,
-//! `__aether_commands`) and never collide with user names, so a name WITHOUT that prefix in an
-//! error message is one you wrote.
+//! `machine` takes TWO expansion steps, and `cargo expand` shows both: Aether de-sugars the chart
+//! (`res<T>` → `Res<T>`, `commands` → `Commands`) and hands it to `state_chart!`, which owns the
+//! flattening — the leaf enum, innermost-wins inheritance, the LCA exit/enter chains, one merged
+//! system per leaf, and the two registration fns the plugin calls. Aether is deliberately NOT a
+//! codegen authority for charts (v2 DECISION C7): one implementation serves both `machine` and
+//! hand-written `state_chart!`, so the two cannot drift apart.
+//!
+//! Generated internal names never collide with user names, so a name carrying a generated prefix
+//! in an error message is not one you wrote. Aether's own are `__aether_`-prefixed
+//! (`__aether_commands`); a chart's are `__state_chart_`-prefixed
+//! (`__state_chart_game_flow__playing_running` for a leaf's merged system,
+//! `__state_chart_install_game_flow` / `__state_chart_systems_game_flow` for its registrations).
 //!
 //! # rust-analyzer, honestly
 //!

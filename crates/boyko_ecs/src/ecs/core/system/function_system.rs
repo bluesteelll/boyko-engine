@@ -279,6 +279,15 @@ where
         }
     }
 
+    /// KE17 D3 — forward the param chain's compile-time answer.
+    ///
+    /// A `const` read, so the whole body folds to a `mov` of an immediate at
+    /// every monomorphisation; the builder calls it once per system at build.
+    #[inline]
+    fn has_deferred(&self) -> bool {
+        <F::Param as SystemParam>::HAS_DEFERRED
+    }
+
     /// Phase 10 Round 2 C1 — read-only meta accessor.
     #[inline]
     fn meta(&self) -> &SystemMeta {

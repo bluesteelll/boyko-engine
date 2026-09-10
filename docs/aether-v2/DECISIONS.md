@@ -93,7 +93,12 @@ canonical `let _ = send(...)` swallows `EventNotRegistered`)". The engine says o
   `EventNotRegistered`, so there was never a `Result` to swallow.
 - **The one surviving silent case is the direct API path**, not the generated one:
   `EcsMaster::events_of` → `EventDispatcher::events` (`event_dispatcher.rs:351-356`) returns an
-  empty slice for an unregistered type. No generated system uses it.
+  empty slice for an unregistered type. No generated system uses it. **That last clause stopped
+  being an observation and became a guarantee on 2026-08-30**: ballot AB-5 (ruling **M4a**) turned
+  precisely on it. The rejected option would have made the machine event router an *exclusive*
+  system, which cannot take `EventReader<E>` and so would have had to read through `events_of` —
+  putting a **generated** system on this path for the first time. Choosing `Query::get_mut` is what
+  keeps this sentence true.
 
 The `with { lanes, capacity }` group and the generated flat constructor are unaffected — their own
 reasons (the two-lane rewrite forces authors to name generated types they never wrote; the
@@ -102,17 +107,22 @@ ground → ballot AB-1** (below). Rejected (deferred): flat read accessors — N
 save one word per access.
 
 **Bounds are stated symbolically — `1..=MAX_EVENT_THREADS` and `1..=MAX_EVENT_CAPACITY`, never
-numerically.** A numeric literal in this line dates the document to one build of the constant. **In
-the tree today `MAX_EVENT_THREADS` is 64** (`crates/boyko_ecs/src/ecs/constants.rs`, alongside
-`MAX_EVENT_CAPACITY = 16384`); ruling **E3** below raises it to 65, and that raise has **not
-landed**: it is carried as a KERNEL-BACKLOG **KE8** work item, so 65 is a plan value and 64 is the
-engine's. The symbolic form is correct under both. What the parse check enforces is only the constant **ceiling**. The
-binding constraint is the machine-dependent **floor** `lanes >= worker_count + 1`
-(`event_dispatcher.rs:258-261`), which is *unrepresentable at parse* — the worker count is not known
-until boot. And the runtime path this check was said to "replace" has no `Result` to replace: a lane
-index past the end is a release-mode **slice-index panic** (`event_buffer.rs:243`/`:301`/`:341-346`),
-with the lane computed from the dispatcher-wide count (`event_dispatcher.rs:279-282`). Where the
-floor lives is **ballot AB-2**. Companion pin, to land in `crates/aether_tests`: the parser's
+numerically.** A numeric literal in this line dates the document to one build of the constant — as
+this paragraph itself demonstrated: it read "in the tree today `MAX_EVENT_THREADS` is 64 … that
+raise has not landed" until 2026-08-30, when the constant was checked and found to be **65**
+(`crates/boyko_ecs/src/ecs/constants.rs:400`, alongside `MAX_EVENT_CAPACITY = 16384`). Ruling **E3**
+landed at `01a4436e`; see the measurement note under E3. The symbolic form was correct across the
+change, which is the whole point of it. What the parse check enforces is only the constant
+**ceiling** — and that half genuinely is a `Result`: `EventConfig::new` returns
+`Err(InvalidEventConfig)` for `thread_count == 0 || > MAX_EVENT_THREADS`
+(`event_config.rs:41-52`). The binding constraint is the machine-dependent **floor**
+`lanes >= worker_count + 1` (`event_dispatcher.rs:258-261`), which is *unrepresentable at parse* —
+the worker count is not known until boot. And the runtime path this check was said to "replace" has
+no `Result` to replace: a lane index past the end is a release-mode **slice-index panic**
+(`event_buffer.rs:243`/`:301`/`:341-346`) — measured in both profiles, see **E4** — with the lane
+computed from the dispatcher-wide count (`event_dispatcher.rs:279-282`), a count that is pinned at
+`1` in every tree-constructed world. Where the floor lives was **ballot AB-2**, now ruled at **E4**.
+Companion pin, to land in `crates/aether_tests`: the parser's
 accepted bounds are asserted equal to `boyko_ecs::ecs::constants::{MAX_EVENT_THREADS,
 MAX_EVENT_CAPACITY}` — the module is `ecs::constants`, not a crate-root `constants`
 (`crates/boyko_ecs/src/ecs/constants.rs`; `boyko_ecs`'s root exports only `pub mod ecs`),
@@ -152,6 +162,60 @@ parse error, and may expect a surrounding `system` to hold it. Mitigation is str
 lexical: `each` is legal only at construct position, so the mistake is a refusal, not working code.
 Spelling kept.
 
+**C5a. Ballot AB-8 RESOLVED 2026-08-30 — `each par` lowers to `par_iter_mut`; `par_for_each_chunk`
+is reachable only through `soa`.** A performance fork, so it is decided here with numbers rather
+than sent to the owner.
+
+*Tick behaviour, measured rather than taken from the labels* (both legs run over 2048 rows, well
+clear of the 1024-row inline floor, with the writer keyed `.before` the reader):
+
+| driver | rows a `Changed<>` reader sees, of 2048 |
+|---|---|
+| `par_iter_mut` over `Mut<T>` | **2048** |
+| `par_for_each_chunk` over `&mut [T]` | **0** |
+
+*Cost, measured* — 200 000 rows × 200 frames, 8 workers, release, five samples:
+`par_iter_mut` is **1.17–1.47×** `par_for_each_chunk` (median ≈1.19), a delta of **0.03–0.07
+ns/row**. Absolute ns/row is **not** stable run to run (0.13→0.34 across samples, machine noise);
+the *ratio* is, which is why the ratio is what is recorded. Scaled to the machine cost model's own
+10 000 rows that delta is **0.3–0.7 µs/frame**, against the **34–40 µs** that ruling D1 measured for
+the 5-arm jump table at the same row count — so tick preservation costs **≈1–2 %** of the pass and
+is invisible beside the cost D1 already accepted. The measurement carried a falsification guard
+(row count and per-row increment count asserted after timing) so a no-op could not have produced it.
+
+*The ruling.* `each par` → `par_iter_mut`. Buying back `Mut<T>`, `Changed`/`Added`, and
+`Enabled`/`Disabled` for ~1.5 % is the same trade C5 already made when it reversed the first spec:
+~37 of 74 real `Query<…>` declarations carry a term the chunked driver refuses.
+
+*Rejected: `par_for_each_chunk` as the `par` driver.* Price — the most inviting parallel spelling in
+the language would be structurally tick-blind, silently killing every downstream `Changed<>`. That
+is C5's recorded defect verbatim, and the 0-of-2048 row above is it reproduced.
+
+The three questions that rode on this ballot, answered with it:
+
+1. **Does `soa par` exist? YES — and it is the ONLY route to `par_for_each_chunk`.** `soa` already
+   means "chunked, tick-blind, and the diagnostic says so"; letting `par` *alone* select the chunked
+   driver would reinstate tick-blindness under a word that does not declare it. Tick-blindness stays
+   behind the word that announces it: `each par` → `par_iter_mut`, `each soa par` →
+   `par_for_each_chunk`.
+2. **Is the batching key author-visible? NO in v1** — refused with a `did-you-mean` at the verbatim
+   escape. The ground is measured, not taste: `BatchingStrategy` has **three** fields
+   (`batches_per_thread`, `min_batch_size`, `max_batch_size`), so the proposed one-scalar
+   `parallel (batch = N)` cannot name the knob it appears to name. *Rejected alternative:* map `N`
+   to `batches_per_thread`; its price is that an author writing `batch = 64` and expecting 64 rows
+   per chunk gets 64 chunks **per thread** — a silent misreading of their own tuning, and
+   `min_batch_size` defaults to `MIN_ARCHETYPE_FOR_PARALLEL` = 1024, which interacts with the inline
+   floor in a way one scalar cannot express. Both parallel drivers expose
+   `batching_strategy(BatchingStrategy)` as a builder, so the knob stays reachable from the verbatim
+   escape and the form is built when a measured in-tree consumer appears — D4's rule, applied.
+3. **Do machines and `each` share one driver? They share the LADDER, not the default.** Both select
+   tracking by *term* (`Mut<T>` bumps, `&mut T` does not) and both climb the same three rungs —
+   `iter_mut` → `soa`/chunked → the `par` variants above. Their **defaults** differ, and each
+   default was measured separately: `each` defaults to `iter_mut` (C5), the machine pass to the
+   chunked driver (M7/D6). Unifying the defaults would reopen M7/D6's ratified choice, which AB-5
+   licensed only for the `get_component_mut` citation and the withdrawn bypass — **not** for the
+   driver. It is left standing deliberately, not by oversight.
+
 **C6. `plugin` unchanged, except the emitted `name()` override is dropped.** The trait default
 returns the fully-qualified type name, which is strictly more informative in duplicate-plugin
 diagnostics; the override was a small regression shipped without a reason.
@@ -188,7 +252,7 @@ event-switched machine compiles to `struct M(u8)`. This answers the owner's obje
 времени — лишняя информация?") and mirrors the `HAS_HOOKS`/`HAS_REQUIRES` const-gating discipline.
 
 **M4. Events reach machines via an O(events) router system depositing a bit + payload into the
-victim row (`get_component_mut`), not via an `EventReader` in the pass.** Keeps the pass one linear
+victim row (`Query::get_mut`), not via an `EventReader` in the pass.** Keeps the pass one linear
 walk; a dead/stale victim is a silent `None` (safe); the deposit's generation check is the liveness
 gate. **[delegated]** (the dead-datum entry this closes is the 2026-08-27 entry in
 [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md), **reading 1**). The participant context
@@ -197,15 +261,64 @@ first reader; release cost zero. Scope, stated because the entry's own wording i
 fix: this resolves the datum **for machine `inbox` events only**; for every other event the datum
 stays unread, and reading 2 is unfunded.
 
-> **Ballot AB-5 (open — do not settle by edit).** The router's random-access mechanism, and the
-> tick visibility that follows from it. Alternatives: **(a)** amend M4 to `Query::get_mut`;
-> **(b)** keep `get_component_mut`. The two APIs **stamp different ticks**, so the answer decides
-> two dependent lines that must move in the same commit: does `publish tracked` (M7 / D6) then see
-> the router's deposit **in the same frame**, and is M7's tick bypass still needed at all — M7's
-> remedy was derived from apply-window stamping, which is the behaviour of the API being replaced.
-> Blocks: **R5**, and the matching cells in [`MACHINES.md`](MACHINES.md) §Event routing + cost
-> model and CAMPAIGN R5's Depends. Editing MACHINES.md alone would create an EN-internal drift
-> pair against this ruling.
+**M4a. Ballot AB-5 RESOLVED 2026-08-30 — the router uses `Query::get_mut` (option (a)).**
+Decided by the orchestrator under the standing perf/architecture rule; every ground below was
+measured in this tree, not read off a plan.
+
+*The tick half, measured under an explicit ordering edge* (writer keyed `.before` the reader, so the
+test distinguishes "same frame" from "one frame later" — which the pre-existing tests do not):
+`Query::get_mut` yielding `Mut<T>` is observed by a `Changed<T>` reader **in the same frame**;
+`EcsMaster::get_component_mut` is **not**, even with the reader ordered after it. Both were run as a
+temporary probe against `boyko-ecs` and agree with the two APIs' own doc comments
+(`iters/query/query.rs` `get_mut` — "the `meta` threaded through the `set_table_mut` calls is what
+closes that hole"; `ecs_master/component_api.rs` `get_component_mut` — "§ Inside a `Schedule` frame
+(Bug #56 interaction) … observed … on the **following** frame"). The standing in-tree pins are
+`tests/ke3_query_random_access.rs::get_mut_stamps_the_changed_tick_from_the_system_meta` and
+`tests/phase14b_get_component_mut.rs::changed_query_observes_get_component_mut_write_on_the_following_frame`;
+both are green at `01a4436e`.
+
+*The decisive ground is not the tick — it is that option (b) cannot read its own events.*
+`get_component_mut` takes `&mut self`, so the only schedulable shape carrying it is
+`ExclusiveFunctionSystem`, whose body is `FnMut(&mut EcsMaster)` with — in the module's own words —
+"no param tuple, no per-param state" (`system/exclusive_function_system.rs` §Exclusive vs
+SystemParam-based systems). A (b) router therefore **cannot take `EventReader<E>`** and must read
+through `EcsMaster::events_of`, whose contract is "Returns an **empty slice** if `E` was not
+registered or if no events were sent last frame" (`ecs_master/event_api.rs`). That is the one
+surviving silent path C3 already identified, and it collapses *unregistered* and *nothing happened*
+into the same value — the recorded "NULL read AS AN ANSWER" class. Option (a)'s router is an
+ordinary system, takes `EventReader<E>`, and a forgotten registration is a **loud boot panic**
+(`system/params/event_reader.rs:320` → `diagnostics.rs:81`). Measured both ways in the probe.
+`events_of` also returns the **previous** frame's events, so (b)'s end-to-end latency is **two**
+frames — contradicting [`MACHINES.md`](MACHINES.md) §Event routing's own "one frame under
+`EveryFrame`".
+
+*Rejected alternative — (b) `get_component_mut`. Its price:* a machine whose `inbox` event is
+un-preregistered routes **nothing, silently, forever**; two-frame latency against a documented one;
+and the M7 bypass mechanism below, which exists only to repair (b).
+
+*A ground I expected and DID NOT get, recorded so it is not re-argued.* Exclusive systems declare
+`Access::universal()` and are single-per-round by construction (`schedule/schedule.rs` — "An
+exclusive system, once accepted, blocks everything else in this round … `break`"), so (b) looked
+like a per-event-type scheduler barrier. **Measured: it is not.** Against four concurrently
+dispatchable worker systems over 20 000 rows — with a control proving the schedule really had
+concurrency to lose (1 thread 235–250 µs vs 8 threads 79–133 µs, **2.7–3.2× speedup**) — an
+exclusive router cost **0.78–1.00×** of a `Query` router at both 1 and 8 routers, i.e. below the
+±20 µs run-to-run noise, and the sign flipped between runs. **Scheduler cost is not a ground for
+either option**; the barrier is one extra dispatcher round, not a serialization of the workers.
+
+*The two riding questions, answered with this ruling:*
+1. **Does `publish tracked` see the router's deposit in the same frame? YES**, under (a) — measured
+   above. Under (b) it did not, which is what made the question live.
+2. **Is M7's tick bypass still needed? NO** — it is *replaced by a term choice*, not re-derived.
+   Measured: a plain `&mut T` obtained through `Query::get_mut` writes the column and bumps **no**
+   tick, while `Mut<T>` through the same call bumps at `this_run`. So the router emits `Mut<M>` when
+   `publish tracked` is on and `&mut M` when it is off, and the all-or-nothing M7 demanded falls out
+   of the generated term with no bypass mechanism at all. (b) had no such lever:
+   `get_component_mut` returns `Mut<T>` unconditionally — the typed path has no untracked variant —
+   which is precisely why a bypass had to be invented for it.
+
+Riding lines moved in this same edit: M7 and D6 below, [`MACHINES.md`](MACHINES.md) §Event routing,
+and CAMPAIGN R5's Depends cell.
 
 **M5. R-Q: `query<...>` inside guards/enter/exit/tick/commit is a COMPILE ERROR.** Cross-entity
 reads go through `res<>` broadcast (1→N), events (N→M, next frame), or `near` (spatial, once it
@@ -223,11 +336,18 @@ free) enforced by R-ORD (a consumer naming `.entered()`/`.fail()` without `order
 compile error, not a convention). Escape: `with { publish tracked }` switches the pass to
 `iter_mut` + `Mut`, paying a per-row fetch; **default off** (ruling D6). Corrections folded in from
 the D6 adjudication: tracked bumps ONLY on a leaf-transition commit (never on `clock -= dt`), and
-the current half-alive untracked state (the router's `get_component_mut` bumps the tick, timer rows
-do not) is forced to all-or-nothing via tick bypass. ⚠ **Both the `get_component_mut` citation and
-the tick-bypass remedy are on ballot AB-5** (see M4): the remedy was derived from the apply-window
-stamping of the API named here, so if AB-5 selects `Query::get_mut` this correction has to be
-re-derived, not merely re-cited. D6 rides the same answer.
+the half-alive untracked state (the router bumped the tick, timer rows did not) is forced to
+all-or-nothing.
+
+**The remedy for that last correction is NOT a tick bypass — it is the router's TERM, and this is
+the AB-5 amendment** (M4a, resolved 2026-08-30). Measured in this tree: through `Query::get_mut` a
+plain `&mut M` writes the column and bumps **no** tick, while `Mut<M>` through the same call bumps
+at the system's `this_run`. So the generated router emits `&mut M` when `publish tracked` is off and
+`Mut<M>` when it is on, and "all-or-nothing" is a property of the emitted term rather than a
+mechanism anyone has to build, test or remember. The bypass was an artifact of the API M4 used to
+name: `EcsMaster::get_component_mut` returns `Mut<T>` unconditionally — its typed path has **no**
+untracked variant — so under that API a bump could only be undone, never declined. **The bypass is
+withdrawn, not re-derived.** D6 rode the same answer and is amended below.
 
 **M8. Owner options (per-machine / per-event, not global policy):** **[owner]**
 history is opt-in (`with { history }` +1 byte shallow; `history deep` +8 bytes lifts R-HIST — R-HIST
@@ -269,6 +389,27 @@ in-tree consumer exists AND the kernel `Or`-dense fix is green. The kernel fix i
 and independent (R0). Reasoning: every grammar form is permanent maintenance; the worst outcome on
 record is a filter that silently matches nothing.
 
+> ⚠ **R0 removed one of D4's two conjuncts, and this line must not be read as unaffected.
+> R0 LANDED 2026-08-29** ([`CAMPAIGN.md`](CAMPAIGN.md) R0; [`KERNEL-BACKLOG.md`](KERNEL-BACKLOG.md)
+> KE1). The ground here is a **conjunction** — a real consumer *and* a green kernel fix — so that
+> landing retired the second half, and D4's reserve now stands on the consumer clause **alone**.
+> That is a
+> narrower ground than the one recorded above, and it is not the same argument. Say which clause is
+> load-bearing when the reserve is next cited.
+>
+> This is the **Aether-side** twin of a Gaia ruling whose ground R0 removed *entirely*: the
+> generated-code ban on `Or<(Changed<A>, Changed<B>)>` over dense
+> ([`../gaia/DECISIONS.md`](../gaia/DECISIONS.md) §UI bindings, item 8). That was ballot **GB-9**,
+> ✅ **RULED 2026-08-30: option (b) — the ban is DELETED with a record.**
+>
+> ⚠ **The ruling turned on THIS line, and the answer went against it.** D4's coupling was the named
+> candidate ground for keeping the ban, and it was measured and rejected: **D4 reserves the Aether
+> *surface* `or(...)`, while that ban governed *generated code*, and Gaia's own ratified GN2 says
+> the baker emits no Rust.** A ban on a shape the generator cannot emit, grounded in a reserve on a
+> surface the generator does not write, is a rule with no subject. **D4 itself is untouched** — its
+> reserve stands, on the consumer clause alone, exactly as the paragraph above records. What is
+> settled is that D4 cannot be lent out as a second document's ground.
+
 **D5. Run-condition combinators fold EAGERLY — no short-circuit.** Not (only) because `run_once`
 mutates on evaluation: a condition's change-tick window advances only when it actually runs, so a
 short-circuited RHS freezes its `Changed` window and observes a bogus burst later. `CombinedSystem`
@@ -293,6 +434,17 @@ and from KERNEL-BACKLOG KE5, so the numbering is load-bearing:
 deliberate non-members of the chunked driver's data trait; one gets either `Changed` or the chunk
 driver, never both. See M7 for the three corrections folded in.
 
+> **D6a — amended 2026-08-30 by the AB-5 ruling (M4a).** The refusal itself is *confirmed at
+> source*, and more strongly than D6 stated: `ChunkedQueryData`'s own doc names `Ref<'_, T>` /
+> `Mut<'_, T>` as "NON-members (deliberate)", and `par_for_each_chunk`'s `// SAFETY:` block states
+> that this makes `NEEDS_CHANGE_DETECTION` const-fold to `false`. Measured end to end: a
+> `par_for_each_chunk` write over 2048 rows is seen by a `Changed<>` reader on **0** of them, while
+> the same write through `par_iter_mut` + `Mut<T>` is seen on **2048**. What changes is only the
+> third M7 correction: **the "tick bypass" is withdrawn**, because with the router on
+> `Query::get_mut` the tracked/untracked split is carried by the emitted term (`Mut<M>` vs
+> `&mut M`) and needs no mechanism. `publish tracked` **does** now see the router's deposit in the
+> same frame — that was measured, and it was the open half of AB-5.
+
 ## Events (EVENTS.md)
 
 **E1. Parallel emission = relaxed TLS lanes + `send_slice` batching + router combine. Rejected:
@@ -314,6 +466,161 @@ O(N) sweep costing 4–8× the pass itself).
 `capacity × size_of::<E>()` per preregistered type, setup only; the alternative (cap workers at 63)
 taxes wide machines forever. The `MAX_WORKERS + 1 <= MAX_EVENT_THREADS` const-assert becomes true
 and compiled-in.
+
+**✅ E3 HAS LANDED (measured 2026-08-30, at HEAD `01a4436e` — the commit this corpus was written
+alongside).** `crates/boyko_ecs/src/ecs/constants.rs:400` reads `pub const MAX_EVENT_THREADS: u32 =
+65;` and the `boyko_threadpool::MAX_WORKERS < MAX_EVENT_THREADS as usize` const-assert is compiled
+in immediately below it (`MAX_WORKERS = 64`, `crates/boyko_threadpool/src/thread_pool.rs:49`).
+`git log -L400,400:crates/boyko_ecs/src/ecs/constants.rs` dates the raise to `01a4436e` itself.
+Every corpus sentence saying "65 is a plan value and 64 is the engine's" was true when written and
+is false now; the surviving instances are corrected in the same commit as this ruling. **The rest of
+KE8 is still unlanded** and the distinction is load-bearing for E5: `EventWriter::send` is still
+`&mut self` (`event_writer.rs:110`), `send_slice` does not exist anywhere in `crates/`, and the
+send-outside-system `debug_assert` still tests `is_in_system_run()` (`event_writer.rs:112`), not the
+re-aimed `current_worker_id() != WORKER_ID_UNATTACHED`.
+
+**E4. The `lanes N` floor is enforced at boot by RAISING, and `lanes N` is redefined from a count to
+a MINIMUM.** **[delegated — ballot AB-2]** The effective lane count is
+`max(N, worker_count + 1)`, resolved where the worker count is first known; the raise is **reported
+once at boot**, not silent.
+
+*Measured ground (2026-08-30, throwaway probe, run and deleted).* The floor has no check anywhere,
+and the reason is structural: `current_worker_id_or_dispatcher_lane`
+(`crates/boyko_threadpool/src/tls.rs:69-77`) has **three** arms, and on the arm that matters — a
+pool worker — it returns that worker's **own id** and never consults `worker_count`, so passing a
+correct denominator does not clamp anything. ⚠ *This sentence read "ignores the `worker_count`
+argument **entirely**" until 2026-08-30; that is false of the function as a whole — the dispatcher
+arm returns `worker_count` itself. The operative claim (no clamp on the worker arm, hence an
+out-of-range index) is unaffected, and E5 six pages later states all three arms correctly.*
+A violation is
+therefore not a `Result` on any path — measured in both profiles on a one-lane buffer:
+
+| profile | `send::<E>(3, …)` on a 1-lane buffer |
+|---|---|
+| debug | panic — `thread_index 3 >= thread_count 1` (the `debug_assert`) |
+| release | panic — `index out of bounds: the len is 1 but the index is 3` |
+
+So the ballot's characterisation is **confirmed**: a release-mode slice-index panic, not a `Result`.
+It is a *safe* bounds panic, not UB — which is why raising, not refusing, is affordable.
+
+*What the probe additionally found, and what actually forces this ruling.* The floor is already
+violated by the **default** path, before any author writes `lanes N`. `EcsMaster::new()` and
+`EcsMaster::with_capacity()` both hard-wire `EventDispatcher::new(1)`
+(`ecs_master.rs:429` / `:476`), `default_thread_count` is assigned at exactly that one site and has
+no setter, and `preregister_event_default::<E>()` derives its config from it
+(`event_api.rs:39`) — so the ergonomic registration allocates **one lane on every machine**.
+Measured end-to-end in release: a 4-worker pool + `preregister_event_default` + 64 worker sends →
+**3 panicked**, 61 succeeded. The same field is the denominator `send_event` passes
+(`event_dispatcher.rs:279-282`), so it is also why `send_event` never reaches the reserved
+dispatcher lane in any tree-constructed world: the probe read `default_thread_count == 1` after
+`EcsMaster::new()` **and still 1 after `preregister_event::<E>(EventConfig::default_for(5))`**, and
+the dispatcher-thread lane index computed from it is `0`. The `send_event` doc's own obligation —
+"Phase 9 callers must preregister event types with `EventConfig::default_for(worker_count + 1)`"
+(`event_dispatcher.rs:258-261`) — is met by **no caller in the tree**.
+
+*Feasibility.* `App::new()` builds the pool in the constructor (`app.rs:201-202`, `with_pool`) and
+`add_plugin` runs `plugin.build(self)` afterwards (`app.rs:550-556`), so the worker count is known
+before any plugin preregisters an event. The blocking site is only `EcsMaster::new()`'s hard-wired
+`1`; the fix is a dispatcher lane-count setter applied once the pool is known.
+
+*Rejected.* **Boot refusal** — price: one source that is correct on a 4-core laptop becomes
+unbootable on a 64-core server, machine-dependently, for a number the author cannot know at
+authoring time. That converts a memory overshoot into a deployment failure and is strictly worse.
+**Dropping the knob** — technically the cleanest answer, because `lanes` is not an author-meaningful
+quantity (its only correct value is machine-derived, so the author has no information the engine
+lacks). It is NOT taken here: it deletes a ratified surface from the language, which is a SCOPE call
+and the owner's. It is escalated as a recommendation, not exercised.
+
+*Why the raise is reported rather than silent.* The overshoot is real and worth a line of log: at
+the worked shape (`capacity 4096`, an 8-byte event) `lanes 32` raised to 65 on a wide machine
+allocates ~33 extra lanes × 4096 × 8 B ≈ **1 MB per event type** the author did not ask for.
+Silence would hide that; refusal would over-punish it.
+
+**E5. The unattached sender gets a CLAIMED host lane, with one claimer enforced.** **[delegated —
+ballot AB-3]** `MAX_EVENT_THREADS` 65 → **66**, the const-assert strengthening to
+`MAX_WORKERS + 2 <= MAX_EVENT_THREADS`. **One lane, not two** — the ballot said two on the premise
+that E3 was unlanded; E3 has landed (above), so its own const-assert obligation is already paid and
+only the claimed host lane remains to buy.
+
+*Measured ground.* First, a correction the ballot needs: it is **not** true that "every OS thread
+that is not a pool worker maps to lane 0". `current_worker_id_or_dispatcher_lane` has three arms —
+a worker returns its own id, the **dispatcher returns `worker_count`, its own reserved lane**, and
+only `WORKER_ID_UNATTACHED` returns `0`. The collision class is threads that never entered an
+install scope. (In the tree the dispatcher *also* lands on lane 0, but for the different E4 reason:
+the denominator it is handed is `default_thread_count - 1 == 0`.)
+
+Second, the hazard, measured in **release** with an unattached thread and worker 0 sending 4000
+events each into one lane. A rendezvous barrier is required to make it reproducible — without one
+the unattached thread usually drains all its sends before the pool task is enqueued and 6/6 runs
+lose nothing, which is exactly how this hazard stays invisible. With the barrier, **6 of 6 release
+runs lost events**: 1891, 2295, 2070, 183, 1473, 1940 out of 8000 (2.3 %–28.7 %). **Every single
+send returned `Ok`.** Silent loss, never an error.
+
+*Why "accepted hazard, documented" (option c) is unavailable.* Documentation is an acceptable
+disposition for a hazard that is loud or bounded. This one is neither: it is silent data loss **and**
+undefined behaviour — two threads writing the same `MaybeUninit<E>` slot through an `UnsafeCell`
+with no synchronisation. Decisively, the tree already contains the documentation option's output,
+and it is **false**: `send_one`'s `// SAFETY (U4 …)` clause 2 reads *"only the worker pinned to
+`thread_index` accesses this UnsafeCell"* (`event_buffer.rs`), which the measurement above falsifies
+directly. Choosing (c) would mean ratifying a `// SAFETY:` comment whose stated invariant does not
+hold — the precise defect class this campaign exists to remove, and a violation of principle 8.
+That comment owes an edit whichever way the rung is built.
+
+*Rejected.* **`Err` on unattached (option b)** — price: it breaks the escape hatch the engine
+itself documents. `EventWriter::send`'s doc directs main-thread and FFI callers to
+`EcsMaster::events().send_event::<E>(...)` and says "the unattached-thread fallback there routes
+safely" (`event_writer.rs:100-103`). Option (b) makes the documented remedy start returning `Err`,
+and it buys nothing (a) does not — the host thread has a legitimate need to send.
+
+*The contract that lands with this ruling.* One host lane exists. The first unattached thread to
+send claims it by CAS on an owner slot and keeps it. A **second** distinct unattached sender is
+refused loudly (`Err`, plus a debug panic), because two unattached senders sharing one lane
+reinstate the measured race exactly. This concedes option (b)'s breakage for the second claimant
+only — the genuinely unsound case — while leaving the single-main-thread case, which is every
+sender in the tree today, working unchanged.
+
+**E6. The `ordered` sender-exclusivity fact is registered by the GENERATED PATH, and the verbatim
+escape is REFUSED at the param list.** **[delegated — ballot AB-4]**
+
+*Registrant: a generated-path `register_ordered_emitter` at plugin build.* `register_ordered_emitter`
+appears nowhere in `crates/` today (docs-only), so it is new under every alternative — the choice is
+not between an existing mechanism and a new one.
+
+*Predicate (the ballot's own complaint was that the refusal named its timing but not its predicate).*
+`register_ordered_emitter(event_id, system_id)` appends at plugin build; at build end, any event id
+carrying `ordered` whose registered emitter count is **> 1** is a hard boot failure naming both
+systems. Boot-time timing was already pinned by three sites; this supplies the missing predicate and
+registrant.
+
+*Rejected: `SystemMeta` emit-access.* This is not a cheaper variant of the same thing — it is a
+reversal of a ratified decision plus a self-defeating one. Measured: `EventWriter`'s `init_access`
+is an **empty body**, carrying the comment *"Phase 12 EW5 / Q2 Option A: events stay OUTSIDE the
+conflict graph"* (`event_writer.rs:211-221`). `SystemMeta.access` therefore holds **zero** event
+information; there is no event axis to read. Adding one has a price beyond the reversal: `Access` is
+a *conflict* structure, so the moment event writes enter it as writes, the scheduler serialises any
+two systems emitting the same event type — destroying exactly the parallel emission E1 exists to
+enable. The alternative, a deliberately non-conflicting access axis, is a new registry wearing
+`SystemMeta`'s name, i.e. option (a) with worse placement.
+
+*Rejected: the `#[event]` macro side.* Structurally impossible, not merely awkward. Exclusivity is a
+property of the **emitter set** — which systems send `E` — and the macro sees one type declaration
+and zero systems, so it cannot count emitters. (It cannot even read the word today:
+`boyko_macros/src/lib.rs:261` is `pub fn event(_args: TokenStream, input: TokenStream)`, which
+**forwards** them as `event::expand(_args, input)`; the discard happens one hop later in
+`boyko_macros/src/event.rs:9`, whose body never reads `_args`. ⚠ *This citation named only
+`lib.rs:261` until 2026-08-30, where a reader checking it sees the arguments being passed along —
+the opposite of the claim. The claim itself holds; the site was one file short.*)
+
+*Verbatim escape: param-list refusal.* A hand-written `EventWriter<E>` param for an `ordered` `E` is
+refused at system-param init. Implementable at the existing site: `EventWriter::init_state` already
+runs per system and already fails loudly for an unregistered event via
+`event_not_preregistered_panic::<E>()` (`event_writer.rs:192-197`), and `E::event_id()` plus the
+dispatcher are both in hand there. *Rejected: "declared out of contract"* — price: a
+documentation-only guard over a soundness property, which is the disposition this very cluster just
+measured the worth of (the false `send_one` SAFETY clause under E5; a `debug_assert` that is
+debug-only on the param path and absent on `send_event`). Price of the refusal, stated honestly: a
+hand-written system cannot emit an `ordered` event even when it is the only emitter; the escape is
+to declare the emitter in Aether.
 
 ## Spatial (SPATIAL.md)
 
@@ -411,6 +718,85 @@ AIR-10 names is five words; the other two are audited at their own rulings — `
   and for a reader with neither it reads as a plain noun with no operational content. No spelling
   tested better on inspection; kept as the ecosystem-nearest word, with the note that its
   diagnostics should say "reverse index" rather than lean on the noun.
+
+## Sequencing rulings — ballots that order the ladder rather than shape the language
+
+These carry the **ballot's own id** as the entry id, because there is one name for one thing and the
+ladder, `AI-ORIENTATION.md` and [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) already cite them that
+way. They shape no construct, so they belong to no construct series.
+
+**AB-9. `boyko_reflect` is MERGED FORWARD as its own rung before R8; AIR-06(b) is NOT descoped; and
+engine-crate reflection opt-in is a FOURTH precondition that no option on the ballot named.**
+**[delegated — ballot AB-9, ruled 2026-08-30]** The question was sequencing: does R8 wait on the
+`feat/reflection` merge, is AIR-06(b) (the project-schema dump) descoped to its reflection-free
+halves, or is the merge pulled forward.
+
+*Measured, and the ballot's own figures were stale in both directions.* Merge-base
+`5ec1699f`; `git rev-list --left-right --count feat/aether-v2...feat/reflection` → **15 ahead, 20
+BEHIND**. "18 commits ahead" was taken against a different base, and the *behind* count — the one
+the ballot never carried — is the one that grows. `git merge-tree --write-tree feat/aether-v2
+feat/reflection` (**no merge performed**) → **7 conflicted paths**: 4 docs (`FEATURE_MAP.md`,
+`SYSTEMS.md`, `OPEN-QUESTIONS.md`, `ru/OPEN-QUESTIONS.md`), 2 trybuild `.stderr`
+(`unknown_key_rejected.stderr` a content conflict; `on_despawn_rejected.stderr` a **modify/delete** —
+stages 1 and 3 only, because `01a4436e` deleted it here while reflection modified it, so it needs a
+decision rather than a re-bless), and **one source file**, `crates/boyko_macros/src/component.rs`, at
+**2 hunks / 23 lines**. Payload: **124 files, +44 956/−214, 3 new workspace members**
+(`boyko_reflect`, `reflect_fixture`, `reflect_dogfood`).
+
+*The ballot's load-bearing claim is false as it would be used.* AIR-06's oracle clause 2 demands that
+a component appear **in the dump**, and "the dump" is (b)'s *project* schema; a *grammar* manifest
+generated from parser dispatch tables cannot contain a workspace component. Descoping (b) does not
+leave the clause satisfied — it **removes its subject**. Reflection-free, the clause is satisfiable
+only by declaring the probe in an `aether!` block, which greens the gate over a dump covering **0 of
+the 138 `#[derive(…Component…)]` sites in the engine crates** — measured over `crates/*/src` with a
+multi-line-aware scan: `boyko_ecs` 43, `boyko_ui` 36, `boyko_render` 21, `boyko_physics` 15,
+`boyko_scene` 14, `boyko_demo` 8, `boyko_input` 1 = **138**; **185** across all of `crates/*/src`
+(the balance is `boyko_macros` 29, `aether_lang` 16, `aether` 2 — tooling, not engine). Measured
+alongside it: **zero production `aether!` declaration blocks exist**.
+
+*And the merge alone does not fix it, which is the fourth item.* `boyko_reflect::registry::type_info_of`
+returns `None` for a component without `#[component(reflect)]` — reflection is **opt-in per
+component**. On `feat/reflection`, `#[component(reflect` appears at **50 attribute sites, and not
+one is in an engine crate** — `reflect_fixture` 47 and `reflect_dogfood` 3, both test/dogfood
+crates. Re-measured 2026-08-30 in `D:/wt/reflect` with
+`grep -rnE '^\s*#\[component\(reflect' --include=*.rs crates/`, which requires the attribute to
+open a code line.
+
+⚠ **This row read *107 attribute sites across 34 `.rs` files* until 2026-08-30, and that number was
+the TEXTUAL grep**: `grep -rn '#\[component(reflect' --include=*.rs crates/` returns **106**, of
+which **47 are prose** — `//`, `///` and `//!` lines *describing* the attribute. That is where the
+old breakdown's `boyko_reflect` 4 and `boyko_macros` 3 came from: those crates talk about the
+attribute, they do not carry it. **The conclusion is unchanged and in fact strengthened** — the
+engine-crate count was zero on the inflated figure and is still zero on the strict one.
+
+⚠⚠ **Note where the old figure sat.** The very next sentence warns that *a looser grep contradicts
+this and is wrong* — and correctly excludes two `.toml` hits. Its own number was that same looser
+grep, one hop further in, **inside `.rs`**. A caveat about over-counting, written beside an
+over-count, is the shape to watch for: the warning made the sentence read as if it had already been
+audited. The `.toml` half of the warning stands and is kept below.
+
+`git grep component(reflect)` over `crates/*` also
+returns `boyko_render/Cargo.toml:43` and `boyko_scene/Cargo.toml:51` — both **comments describing the
+opt-ins that have not arrived**, not opt-in sites. Anyone re-checking this claim must scan for the
+attribute in `.rs`, not for the string.
+
+*Rejected, with the price.* **R8 waits on the merge** — the gate goes green over a dump covering 0 of
+138 engine components while the branch keeps diverging, and the divergence concentrates in
+`crates/boyko_macros/src/component.rs`, the one file both campaigns edit. **Descope AIR-06(b)** — the
+same zero coverage **plus** the loss of the oracle's only workspace-facing clause: a gate that cannot
+fail.
+
+*Not decided here, on purpose.* **Which** route the engine-crate opt-in takes — a sweep marking
+components `#[component(reflect)]`, or a derive that opts in by default — is **R8's own design pass**:
+it carries a per-component static plus `OnceLock` cost that has to be measured, not argued.
+
+*Riding line moved with this ruling, and flagged because it tightens an oracle:* AIR-06's red-first
+clause in [`AI-ORIENTATION.md`](AI-ORIENTATION.md) reads "a hand-written `#[derive(Component)]`
+component **from an engine crate**" as of 2026-08-30; it read "a probe-crate component" before, and
+that form is satisfiable by a route measuring nothing. *What it unblocks:* **R8** carries no open
+ballot of its own any more. That is **not** buildable — the ruling *adds* two pieces of work (the
+merge rung, and the opt-in route), and R8's `Depends` cell still names **R3**, which carries four
+open owner ballots (AB-1, AB-6, AB-11, AB-13).
 
 ## Doc repairs bundled with the campaign
 

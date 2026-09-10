@@ -71,7 +71,7 @@ use crate::narrowphase::feature_vertex_face;
 use crate::narrowphase::sphere_box::sphere_box_contact;
 use crate::resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode,
-    IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
+    IslandSleep, Manifolds, PhysicsConfig, SdfNarrowphaseKernel, SolverScratch,
 };
 use crate::sdf_query::{SdfField, sample_sdf};
 use crate::solver::colored::ColoredSoftStepSolver;
@@ -525,6 +525,11 @@ fn flip_manifold(mut m: Manifold) -> Manifold {
 ///   `normal = −gradient`, anchor = the corner, and a stable per-corner
 ///   `feature_id`. The deepest ≤4 corners are kept (ties by lowest corner index)
 ///   so a box manifold never exceeds [`MAX_CONTACT_POINTS`](crate::math::MAX_CONTACT_POINTS).
+///   Which fold builds those corners is
+///   [`PhysicsConfig::sdf_narrowphase`](crate::resources::PhysicsConfig::sdf_narrowphase),
+///   read ONCE per step here — default
+///   [`Scalar`](crate::resources::SdfNarrowphaseKernel::Scalar), the oracle the GPU
+///   goldens are blessed against.
 ///
 /// A sample whose gradient is shorter than [`SDF_NORMAL_EPS`] (the CSG-seam
 /// degeneracy, O3 — the leaf normalizes it to `Vec3::ZERO`) is SKIPPED: a
@@ -540,12 +545,16 @@ fn flip_manifold(mut m: Manifold) -> Manifold {
 pub fn physics_narrowphase_sdf(
     scratch: Res<SolverScratch>,
     field: Res<SdfField>,
+    cfg: Res<PhysicsConfig>,
     mut manifolds: ResMut<Manifolds>,
 ) {
     // Nothing to collide against an empty field (samples to +far everywhere).
     if field.is_empty() {
         return;
     }
+    // O9: which box kernel folds the field. Hoisted out of the body loop — one
+    // resource read per step, not per body.
+    let kernel = cfg.sdf_narrowphase;
     let bodies = scratch.bodies();
     let manifolds = &mut *manifolds;
     let out = &mut manifolds.manifolds;
@@ -574,7 +583,7 @@ pub fn physics_narrowphase_sdf(
                 }
             }
             ColliderShape::Box { half_extents } => {
-                if let Some(m) = box_sdf_manifold(a, body, half_extents, &field) {
+                if let Some(m) = box_sdf_manifold(a, body, half_extents, &field, kernel) {
                     dst.push(m);
                 }
             }
@@ -668,12 +677,28 @@ fn sphere_sdf_manifold(
 /// the shallower corners inherit the deepest corner's direction, which is only
 /// approximate. Per-point SDF normals would need a different manifold shape and are
 /// DEFERRED (see `docs/PHYSICS-P2-PLAN.md`, W5 / Reserved).
+///
+/// # Kernel selection (O9) — why the default is SCALAR
+///
+/// `kernel` picks which fold builds the corner distances and gradients, and the
+/// DEFAULT [`SdfNarrowphaseKernel::Scalar`] is load-bearing, not inertia: the
+/// [`Avx2`](SdfNarrowphaseKernel::Avx2) fold diverges from the scalar oracle on the
+/// SIGN OF ZERO (`+0` where the oracle gives `-0`) at a `±0` tie, the fix is
+/// owner-deferred (2026-09-02), and the scalar fold is the CPU oracle the committed
+/// GPU goldens are blessed against. **Do not turn this back into a `cfg`.** It WAS
+/// one — the arm was chosen by `cfg(target_feature = "avx2")` alone until
+/// 2026-09-03, so setting the workspace ISA baseline to `x86-64-v3` moved every
+/// build onto the divergent arm with nothing at any layer able to say otherwise.
+/// The branch costs one predictable compare per box body per step, taken OUTSIDE
+/// the 8-corner loop; that is the price of a numeric choice being a decision
+/// somebody makes rather than a side effect of a build flag.
 #[inline]
 fn box_sdf_manifold(
     a: BodyIndex,
     body: &BodyState,
     half_extents: Vec3,
     field: &SdfField,
+    kernel: SdfNarrowphaseKernel,
 ) -> Option<Manifold> {
     let max_points = crate::math::MAX_CONTACT_POINTS;
     // The kept contacts, deepest-first (most negative separation). Fixed capacity,
@@ -682,61 +707,18 @@ fn box_sdf_manifold(
         [(ContactPoint::default(), Vec3::ZERO); crate::math::MAX_CONTACT_POINTS];
     let mut kept_len = 0usize;
 
-    // ── O9 AVX2 batched arm (a `+avx2` build, never under Miri) ──────────────────
-    // Builds the 8 OBB corners' distances with ONE `sdf_edit_list_x8`, then each
-    // penetrating corner's central-difference gradient with ONE 6-offset
-    // `sdf_edit_list_x8` batch. The x8 kernel is bit-identical lane-for-lane to the
-    // scalar `sdf_edit_list`, the gradient differences are taken in the SAME order
-    // as `sdf_edit_list_normal`, and the FROZEN scalar `v_normalize` is reused — so
-    // this arm is `f32::to_bits`-identical to the scalar arm below.
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
-    {
-        box_sdf_manifold_avx2(
-            body,
-            half_extents,
-            field,
-            &mut kept,
-            &mut kept_len,
-            max_points,
-        );
-    }
-
-    // ── Scalar reference arm (default / non-AVX2 / Miri build) ───────────────────
-    // The VERBATIM frozen narrowphase loop — the bit-oracle the AVX2 arm mirrors.
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
-    {
-        // The 8 corners in a FIXED order (corner index = the 3-bit sign pattern), so
-        // both the feature ids and the tie-breaking are deterministic.
-        for corner in 0u32..8 {
-            let sx = if corner & 1 != 0 { 1.0 } else { -1.0 };
-            let sy = if corner & 2 != 0 { 1.0 } else { -1.0 };
-            let sz = if corner & 4 != 0 { 1.0 } else { -1.0 };
-            let local = half_extents.componentwise_mul(Vec3::new(sx, sy, sz));
-            let world = body.position + body.rotation.rotate(local);
-
-            let (d, gradient) = sample_sdf(field, world);
-            if d >= 0.0 {
-                continue;
-            }
-            // O3: skip a degenerate (zero-length) seam gradient — no usable normal.
-            // The `!is_finite()` arm is defense-in-depth (mirrors the sphere path):
-            // `NaN < eps²` is `false`, so without it a non-finite gradient would slip
-            // through and emit a NaN-normal contact.
-            if gradient.length_squared() < SDF_NORMAL_EPS * SDF_NORMAL_EPS || !gradient.is_finite() {
-                continue;
-            }
-            // A → B normal (B = the surface): the gradient (surface → A) negated.
-            let normal = gradient * -1.0;
-            let point = ContactPoint {
-                anchor_a: world,
-                anchor_b: world,
-                separation: d,
-                // A vertex-vs-field contact — tag it as the vertex-face class keyed by
-                // the corner index, so each corner warm-starts independently and a
-                // corner id never aliases a body-body box face/edge id.
-                feature_id: feature_vertex_face(corner),
-            };
-            insert_deepest(&mut kept, &mut kept_len, max_points, point, normal);
+    match kernel {
+        SdfNarrowphaseKernel::Scalar => {
+            box_sdf_manifold_scalar(body, half_extents, field, &mut kept, &mut kept_len, max_points);
+        }
+        SdfNarrowphaseKernel::Avx2 => {
+            // The kernel is x86-64 + AVX2 only and is never taken under Miri (no
+            // intrinsic support), so the variant degrades to the scalar fold rather
+            // than failing to build — selecting it is legal on every target.
+            #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+            box_sdf_manifold_avx2(body, half_extents, field, &mut kept, &mut kept_len, max_points);
+            #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
+            box_sdf_manifold_scalar(body, half_extents, field, &mut kept, &mut kept_len, max_points);
         }
     }
 
@@ -756,16 +738,89 @@ fn box_sdf_manifold(
     Some(m)
 }
 
+/// The VERBATIM frozen scalar body of [`box_sdf_manifold`] — the bit-oracle every
+/// other arm is measured against, and the arm a default build runs.
+///
+/// Samples the 8 OBB corners one at a time through the frozen scalar leaf
+/// (`sample_sdf` → `sdf_edit_list` / `sdf_edit_list_normal`) and fills
+/// `kept` / `kept_len` with the penetrating corners' contacts, deepest-first.
+///
+/// Compiled on EVERY target: it is both the default arm and the fallback the
+/// [`Avx2`](SdfNarrowphaseKernel::Avx2) variant degrades to off x86-64 / under Miri.
+/// It folds through `sdf_edit_list`, which IS the sole CPU↔GPU oracle (the W4
+/// invariant: the x8 kernel is a CPU-only accelerator and is never a golden input),
+/// so a reordered or "simplified" operation here changes the number a committed
+/// golden is compared against. It changes only with the goldens.
+fn box_sdf_manifold_scalar(
+    body: &BodyState,
+    half_extents: Vec3,
+    field: &SdfField,
+    kept: &mut [(ContactPoint, Vec3); crate::math::MAX_CONTACT_POINTS],
+    kept_len: &mut usize,
+    max_points: usize,
+) {
+    // The 8 corners in a FIXED order (corner index = the 3-bit sign pattern), so
+    // both the feature ids and the tie-breaking are deterministic.
+    for corner in 0u32..8 {
+        let sx = if corner & 1 != 0 { 1.0 } else { -1.0 };
+        let sy = if corner & 2 != 0 { 1.0 } else { -1.0 };
+        let sz = if corner & 4 != 0 { 1.0 } else { -1.0 };
+        let local = half_extents.componentwise_mul(Vec3::new(sx, sy, sz));
+        let world = body.position + body.rotation.rotate(local);
+
+        let (d, gradient) = sample_sdf(field, world);
+        if d >= 0.0 {
+            continue;
+        }
+        // O3: skip a degenerate (zero-length) seam gradient — no usable normal.
+        // The `!is_finite()` arm is defense-in-depth (mirrors the sphere path):
+        // `NaN < eps²` is `false`, so without it a non-finite gradient would slip
+        // through and emit a NaN-normal contact.
+        if gradient.length_squared() < SDF_NORMAL_EPS * SDF_NORMAL_EPS || !gradient.is_finite() {
+            continue;
+        }
+        // A → B normal (B = the surface): the gradient (surface → A) negated.
+        let normal = gradient * -1.0;
+        let point = ContactPoint {
+            anchor_a: world,
+            anchor_b: world,
+            separation: d,
+            // A vertex-vs-field contact — tag it as the vertex-face class keyed by
+            // the corner index, so each corner warm-starts independently and a
+            // corner id never aliases a body-body box face/edge id.
+            feature_id: feature_vertex_face(corner),
+        };
+        insert_deepest(kept, kept_len, max_points, point, normal);
+    }
+}
+
 /// O9 — the AVX2 batched body of [`box_sdf_manifold`]: fills `kept` / `kept_len`
-/// with the penetrating corners' contacts, `f32::to_bits`-identical to the scalar
-/// arm.
+/// with the penetrating corners' contacts. Reached ONLY by an explicit
+/// [`SdfNarrowphaseKernel::Avx2`], never by a build flag.
+///
+/// ⚠ **The intended property is `f32::to_bits` identity with
+/// [`box_sdf_manifold_scalar`], and it does NOT hold.** Everything this function
+/// itself does is byte-identical to the scalar arm (see the per-pass notes below);
+/// the divergence is one level down, in
+/// [`sdf_edit_list_x8`](crate::sdf_simd::sdf_edit_list_x8), which returns `+0` where
+/// the scalar `sdf_edit_list` returns `-0` at a `±0` tie —
+/// `MAXPS`/`MINPS` take the second operand on such a tie where `f32::max`/`min` take
+/// the first, and `clamp01_x8`'s operand swap does not cover every tie site in the
+/// fold. Its standing gate is
+/// `sdf_simd::o9_kernel_tests::x8_bits_eq_scalar_bits_widened_proptest`, which is
+/// `#[ignore]`d and RED; the fix is owner-deferred (2026-09-02). The witness is
+/// adversarial and the manifold-level differential
+/// (`box_sdf_manifold_matches_scalar_oracle`) passes, but `+0 == -0` is exactly what
+/// a value comparison cannot see, which is why this arm is opt-in.
 ///
 /// Two batched passes share the one [`sdf_edit_list_x8`](crate::sdf_simd::sdf_edit_list_x8)
 /// kernel:
 ///
 /// 1. **Distances**: the 8 OBB corners (the SAME fixed sign-pattern order +
 ///    `position + rotation·local` world transform as the scalar arm) are evaluated
-///    in ONE 8-wide call — lane `i` == the scalar `sdf_edit_list(edits, corner_i)`.
+///    in ONE 8-wide call — lane `i` is the batched counterpart of the scalar
+///    `sdf_edit_list(edits, corner_i)`, and matches it bit-for-bit everywhere except
+///    the `±0` tie named above.
 /// 2. **Gradient** (per penetrating corner): the 6 central-difference offset points
 ///    (`±GRAD_H` on x, y, z) are packed into lanes 0..6 in the order
 ///    `sdf_edit_list_normal` reads them (`+x, -x, +y, -y, +z, -z`); lanes 6,7 are
@@ -1107,22 +1162,31 @@ pub fn body_bounding_radius(body: &BodyState) -> f32 {
 mod o9_manifold_tests {
     //! O9 full-`Manifold` differential gate for the box-vs-SDF narrowphase.
     //!
-    //! [`box_sdf_manifold`] is private + cfg-gated: a single build compiles ONLY one
-    //! arm (the AVX2 arm under `+avx2`, the verbatim scalar arm otherwise). This
-    //! module compares [`box_sdf_manifold`] (the COMPILED arm) against an INDEPENDENT
-    //! scalar reference ([`scalar_box_sdf_manifold`]) that folds the field through the
-    //! FROZEN scalar oracle [`sample_sdf`] / [`boyko_sdf_math::sdf_edit_list`] and
-    //! replays the SAME post-processing (corner build, `d >= 0` skip, the seam-skip,
-    //! `−gradient` normal, `feature_vertex_face`, [`insert_deepest`], deepest-first
-    //! order).
+    //! [`box_sdf_manifold`] is private and both arms now compile in every build; the
+    //! arm is chosen by the [`SdfNarrowphaseKernel`] argument. These cases pass
+    //! [`SdfNarrowphaseKernel::Avx2`] — the arm that needs watching — and compare the
+    //! result against an INDEPENDENT scalar reference ([`scalar_box_sdf_manifold`])
+    //! that folds the field through the FROZEN scalar oracle [`sample_sdf`] /
+    //! [`boyko_sdf_math::sdf_edit_list`] and replays the SAME post-processing (corner
+    //! build, `d >= 0` skip, the seam-skip, `−gradient` normal,
+    //! `feature_vertex_face`, [`insert_deepest`], deepest-first order).
     //!
     //! - In a `+avx2` build this is a TRUE scalar-oracle-vs-AVX2-arm differential:
-    //!   `box_sdf_manifold` runs [`box_sdf_manifold_avx2`], the reference runs the
-    //!   scalar leaf. Full-`Manifold` `to_bits` equality here PROVES the AVX2 arm is
-    //!   byte-identical to the scalar fold.
-    //! - In a default build both sides fold the same scalar leaf, so it degenerates
-    //!   to a self-consistency check of the reference (still useful: it pins the
-    //!   reference against the shipped scalar arm).
+    //!   the `Avx2` variant runs [`box_sdf_manifold_avx2`], the reference runs the
+    //!   scalar leaf.
+    //! - Off x86-64 / under Miri the `Avx2` variant degrades to the scalar fold, so
+    //!   both sides fold the same leaf and it becomes a self-consistency check of the
+    //!   reference (still useful: it pins the reference against the shipped scalar
+    //!   arm).
+    //!
+    //! ⚠ **A pass here is NOT bit-identity of the two folds.** These are manifold
+    //! shapes over ordinary scenes; the known `±0` divergence between the x8 and
+    //! scalar leaves lives in an adversarial tie palette and is invisible to a
+    //! `Manifold` comparison in either direction (`+0 == -0` compares equal, and
+    //! `to_bits` equality here only says no case in THIS generator hit the tie). The
+    //! gate that does see it is
+    //! `sdf_simd::o9_kernel_tests::x8_bits_eq_scalar_bits_widened_proptest`, and it is
+    //! RED. Read a green here as "the wrapper is faithful", never as "the arms agree".
     //!
     //! The generator includes scenes where SOME corners penetrate and some do not
     //! (the review's noted refinement — the AVX2 arm skips gradient work for
@@ -1358,7 +1422,7 @@ mod o9_manifold_tests {
             );
             let body = box_state(pos, rot, half);
 
-            let got = box_sdf_manifold(a, &body, half, &field);
+            let got = box_sdf_manifold(a, &body, half, &field, SdfNarrowphaseKernel::Avx2);
             let want = scalar_box_sdf_manifold(a, &body, half, &field);
 
             let scene = format!("pos={pos:?} half={half:?} edits={edits:?}");
@@ -1406,7 +1470,8 @@ mod o9_manifold_tests {
     fn box_sdf_manifold_empty_field_is_none() {
         let field = SdfField::default();
         let body = box_state(Vec3::ZERO, Quat::IDENTITY, Vec3::new(1.0, 1.0, 1.0));
-        let got = box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field);
+        let got =
+            box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field, SdfNarrowphaseKernel::Avx2);
         let want = scalar_box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field);
         assert_manifold_bit_eq(&got, &want, "empty field");
         assert!(got.is_none(), "empty field must produce no manifold");
@@ -1426,7 +1491,7 @@ mod o9_manifold_tests {
         )]);
         let half = Vec3::new(1.0, 1.0, 1.0);
         let body = box_state(Vec3::new(0.1, -0.2, 0.3), Quat::IDENTITY, half);
-        let got = box_sdf_manifold(BodyIndex(0), &body, half, &field);
+        let got = box_sdf_manifold(BodyIndex(0), &body, half, &field, SdfNarrowphaseKernel::Avx2);
         let want = scalar_box_sdf_manifold(BodyIndex(0), &body, half, &field);
         assert_manifold_bit_eq(&got, &want, "all-corners-penetrate");
         // It must produce a manifold capped at MAX_CONTACT_POINTS.
@@ -1434,6 +1499,97 @@ mod o9_manifold_tests {
         assert!(
             m.count as usize <= crate::math::MAX_CONTACT_POINTS,
             "manifold must be capped at MAX_CONTACT_POINTS"
+        );
+    }
+
+    /// No-FMA / no-approx grep gate: `systems.rs` must contain ZERO fused
+    /// (`fmadd` / `fmsub` / `fnmadd` / `fnmsub` / `fmaddsub` / `fmsubadd`), ZERO
+    /// approximate (`rsqrt` / `rcp`) and ZERO `mul_add` / `algebraic_` CALL-SITES.
+    ///
+    /// The sibling of `sdf_simd::…::sdf_simd_has_no_fma_or_approx_callsites` and
+    /// `solver::simd::…::solver_simd_has_no_fma_or_approx_callsites`, with the same
+    /// needle list, the same comment skip and the same non-vacuity witness — a
+    /// deliberate copy, because the four must not diverge.
+    ///
+    /// **Why it did not exist until 2026-09-03:** this file's O9 kernel
+    /// ([`box_sdf_manifold_avx2`]) sits behind `cfg(target_feature = "avx2")`, and
+    /// nothing enabled AVX2 in this workspace until the `x86-64-v3` baseline landed
+    /// on 2026-09-02. A vectorised kernel that was never COMPILED was also never
+    /// CENSUSED, so the day it started building it became the one AVX2 file in the
+    /// crate with nothing keeping it clean. It is clean today; that is the property
+    /// this test freezes, not a claim about the past.
+    ///
+    /// The stake here is the same one the other two carry: this kernel feeds
+    /// `sdf_edit_list_x8`, whose fold is the CPU oracle the committed GPU goldens are
+    /// compared against. A fused op rounds ONCE where the scalar leaf rounds TWICE,
+    /// and `rsqrt`/`rcp` are ~12-bit approximations that differ between Intel and
+    /// AMD — either would move a golden without moving a line of shader code.
+    ///
+    /// Doc-comment prose naming the banned ops (this comment does) is allowed — only
+    /// NON-comment lines are scanned.
+    #[test]
+    fn systems_has_no_fma_or_approx_callsites() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("systems.rs");
+        let contents = std::fs::read_to_string(&path).expect("systems.rs must be readable");
+
+        // Match a CALL-SITE: each stem completed to a real `_ps(` invocation, over
+        // both vector widths. The needles are ASSEMBLED from fragments at runtime so
+        // no full call token appears as a string literal in THIS source — the census
+        // scans its own file, so a literal would flag the definition line.
+        let suffix = "_ps(";
+        let widths = ["_mm256_", "_mm_"];
+        let stems = ["fmadd", "fmsub", "fnmadd", "fnmsub", "fmaddsub", "fmsubadd", "rsqrt", "rcp"];
+        let mut banned: Vec<String> = Vec::with_capacity(widths.len() * stems.len() + 2);
+        for w in widths {
+            for s in stems {
+                banned.push(format!("{w}{s}{suffix}"));
+            }
+        }
+        // The safe-Rust route to the same single rounding — reachable without ever
+        // typing an intrinsic, which an intrinsic-only ban would never see.
+        banned.push(format!("{}{}", "mul_add", "("));
+        // `algebraic_mul` / `_add` / `_sub` / `_div` / `_rem` (stable 1.98): the
+        // sanctioned per-operation fast-math API, which permits exactly the two
+        // freedoms — contraction and reassociation — this crate's determinism rests
+        // on refusing. The stem alone is banned so a UFCS spelling cannot defeat it.
+        banned.push(format!("{}{}", "algebraic", "_"));
+
+        let mut hits = Vec::new();
+        for (i, line) in contents.lines().enumerate() {
+            let trimmed = line.trim_start();
+            // Skip doc / line comments — prose may name the banned ops to document
+            // the prohibition. `//!` starts with `//`, so one check covers both.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            for b in &banned {
+                if line.contains(b.as_str()) {
+                    hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "no-FMA/no-approx invariant violated: systems.rs has banned op call-sites (the O9 \
+             box-vs-SDF kernel feeds the CPU fold the GPU goldens are blessed against):\n{}",
+            hits.join("\n"),
+        );
+
+        // Non-vacuity: a census that scans the wrong text passes for the wrong
+        // reason. The witness is ASSEMBLED like the needles rather than written as a
+        // literal — a literal witness would be found in the census's own assertion
+        // line and the check would pass even over a file with no intrinsics left in
+        // it. `loadu` rather than `mul`: this file's kernel packs and stores lanes
+        // and delegates the arithmetic to `sdf_edit_list_x8`, so `_mm256_mul_ps(`
+        // never appears here and asserting it would fail on correct code.
+        let witness = format!("{}{}{}", "_mm256_", "loadu", suffix);
+        assert!(
+            contents.contains(&witness),
+            "census scanned {} but found no `{witness}` call-site — the file moved or was \
+             rewritten, so an empty hit list proves nothing",
+            path.display(),
         );
     }
 }

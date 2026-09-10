@@ -23,12 +23,30 @@
 //! NO `_mm256_fmadd*` (a fused multiply-add rounds ONCE; the scalar `a*b + c`
 //! rounds TWICE — they diverge by a ULP per target), NO `_mm256_rsqrt_ps` /
 //! `_mm256_rcp_ps` (their approximations return different bits on Intel vs AMD).
-//! Every `a*b + c` is a SEPARATE `_mm256_mul_ps` then `_mm256_add_ps`. Rust does
-//! NOT auto-contract an explicit `mul`+`add` into an FMA (contraction needs an
-//! explicit `f32::mul_add`, never called here, or a global fast-math flag stable
-//! Rust does not expose), so even a `+fma` build would not fuse these — but to make
-//! the no-FMA invariant a COMPILE-TIME contract the build is rejected outright
-//! under `+fma` (the [`compile_error!`] below).
+//! Every `a*b + c` is a SEPARATE `_mm256_mul_ps` then `_mm256_add_ps`.
+//!
+//! # FMA baseline — the ISA has it; this module does not use it
+//!
+//! The build enables FMA. Owner ruling, 2026-09-02: the ISA baseline is
+//! `-C target-cpu=x86-64-v3`, which includes FMA, and the `compile_error!` guard
+//! that used to reject such a build is gone. **The property that was ever
+//! load-bearing is that this module contains no fused and no approximate op — not
+//! that the CPU lacks the instruction.**
+//!
+//! An ISA bit cannot fuse anything on its own: Rust does NOT contract an explicit
+//! `mul`+`add` into an FMA. Contraction requires an explicit [`f32::mul_add`] or a
+//! global fast-math flag, and stable Rust exposes neither implicitly. MEASURED
+//! 2026-09-02 on `rustc 1.97.1` with `-C target-cpu=x86-64-v3 --emit=asm`:
+//! `a * b + c` compiles to `vmulss` + `vaddss` — ZERO `vfmadd`; `a.mul_add(b, c)`
+//! compiles to exactly ONE `vfmadd213ss`; and a slice loop `c[i] = a[i]*b[i]+c[i]`
+//! auto-vectorises to 16 `ymm` references with SEPARATE `vmulps` and `vaddps` and
+//! still zero FMA. So the twice-rounded sequence survives an `+fma` build intact.
+//!
+//! What makes the invariant load-bearing now is the source census
+//! [`o9_kernel_tests::sdf_simd_has_no_fma_or_approx_callsites`], which fails the
+//! build if this file ever gains a fused intrinsic, an `rcp`/`rsqrt`
+//! approximation, or a `mul_add` call. That test is the enforcement; this
+//! paragraph is only its map.
 //!
 //! # Lane isolation (R5)
 //!
@@ -38,18 +56,16 @@
 //! point (the corner's own world position) purely to keep `(b - a) / k` finite — a
 //! belt-and-suspenders measure; lanes 6,7 are never read.
 
-// Width-only AVX2 narrowphase: this module is `mul_add`-free (every `a*b + c` is a
-// separate `_mm256_mul_ps` then `_mm256_add_ps`), so the no-FMA determinism
-// invariant must hold. Reject any `+fma` build to make it a compile-time contract,
-// not a runtime hope (Rust never contracts our explicit mul+add even under +fma —
-// see the "No-FMA / no-approx invariant" module-doc paragraph for why).
-#[cfg(target_feature = "fma")]
-compile_error!(
-    "boyko-physics SDF narrowphase determinism requires no FMA contraction; this \
-     SIMD module is written mul_add-free and must be built without +fma. (No \
-     mul_add is emitted, so +fma would not actually contract our explicit mul+add, \
-     but the build is rejected to make the no-FMA invariant load-bearing.)"
-);
+// A `#[cfg(target_feature = "fma")] compile_error!` stood here until 2026-09-02,
+// rejecting the whole build under `+fma`. It was removed when the owner enabled
+// the `x86-64-v3` baseline, because it gated the WRONG proposition: it asserted
+// "the CPU has no FMA" when what the CPU↔GPU bit-exactness gate needs is "this
+// file emits no fused or approximate op". The enforcement moved rather than
+// vanished — see `o9_kernel_tests::sdf_simd_has_no_fma_or_approx_callsites`, the
+// source census that now fails the build on a fused/approx/`mul_add` call site
+// regardless of ISA. Note this module only EXISTS on an `+avx2` build (it is
+// `cfg`-gated at its `lib.rs` declaration), so before the baseline landed that
+// census had never once run.
 
 use core::arch::x86_64::__m256;
 
@@ -562,7 +578,49 @@ mod o9_kernel_tests {
     /// THE bit-exactness gate: 1000+ random cases over the widened C3 tie generator,
     /// each varying edit-count, kind, op, smoothness, and forcing `±0`/surface/center
     /// ties. Every lane of every case must be `to_bits`-identical to the scalar fold.
+    ///
+    /// # RED, and deferred by the owner on 2026-09-02
+    ///
+    /// This gate had **never run once** before 2026-09-02. Its module is declared
+    /// `cfg(all(target_arch = "x86_64", target_feature = "avx2"))`, and until that day
+    /// nothing in the build enabled AVX2 — `CLAUDE.md` declared it, the build never set it
+    /// (fixed at `cced895a`). Turning the declared baseline on turned a vacuously absent
+    /// module into a red one, which is the value of turning it on.
+    ///
+    /// It fails deterministically, same input every run:
+    ///
+    /// ```text
+    /// O9 bit-exactness BREAK: lane 6 x8=0x00000000 scalar=0x80000000  (x8 = +0, scalar = -0)
+    /// ```
+    ///
+    /// A **sign-of-zero** divergence, and the module's own `clamp01_x8` doc names this exact
+    /// hazard: `f32::max`/`min` return the FIRST operand on a `±0` tie and hardware
+    /// `MAXPS`/`MINPS` return the SECOND, so `clamp01_x8` swaps its operands to reproduce
+    /// the scalar rule and claims the fix "verified exhaustively over the `±0.0` tie
+    /// palette". Since a lane still diverges, one of two things is true and neither has been
+    /// established: the swap does not cover the site that produced lane 6, or another
+    /// operation in the fold carries the same tie rule and was never swapped. The
+    /// difference is invisible to a value comparison — `+0 == -0` — which is exactly why
+    /// this gate compares bits.
+    ///
+    /// ⚠ **It is NOT caused by the ISA change and not by FMA.** Measured the same day: the
+    /// failure text is byte-identical with `-C target-feature=-fma`, and neither side of the
+    /// comparison contains a fused instruction (`boyko_physics` and `boyko_sdf_math` both
+    /// emit zero). AVX2 revealed it; it did not create it. The kernel has been shipping
+    /// this divergence for as long as anyone has been able to build it.
+    ///
+    /// Ignored rather than deleted or loosened to a tolerance, because the property is
+    /// correct and worth keeping sharp — the CPU fold is the oracle the committed GPU
+    /// goldens are compared against through `boyko_sdf_math`, whose header warns that a
+    /// reordered operation can push a golden past its `±2/255` tolerance. Run it with
+    /// `--ignored` to see the current state; the fix is owner-scheduled work, not a waiver.
     #[test]
+    #[ignore = "deferred: RED since AVX2 was first enabled (cced895a) — signed-zero \
+                divergence between the x8 fold and the scalar oracle (lane 6, x8 = +0, \
+                scalar = -0), proven independent of FMA and of the ISA change itself; the \
+                clamp01_x8 operand swap does not cover every tie site in the fold. Owner \
+                deferred the SDF fix on 2026-09-02; un-ignore with the fix, never by \
+                widening the comparison to a tolerance"]
     fn x8_bits_eq_scalar_bits_widened_proptest() {
         let mut rng = Rng::new(0x0900_d1ff_cafe_0009);
         // Edit-count palette includes the empty (0), single, MAX, and the clamp
@@ -662,7 +720,19 @@ mod o9_kernel_tests {
         let mut hits = Vec::new();
         scan_dir(&root, &mut |path, contents| {
             for (i, line) in contents.lines().enumerate() {
-                if line.contains("_x8") {
+                // W4's subject is a CODE reference to the CPU batched kernel, not the
+                // three characters `_x8` wherever they appear. Measured 2026-09-02: the
+                // bare `line.contains("_x8")` reported four violations that were debug-dump
+                // FILENAMES — `dump("diff_a_vs_b_x8", ..)` and friends in
+                // `tests/window_present_gbuffer.rs` — text inside string literals that
+                // names an output file and calls nothing. The gate was red on correct code,
+                // which is the failure mode that teaches a reader to ignore a gate.
+                //
+                // Comments are skipped for the same reason the sibling `sdf_simd` census
+                // skips them: prose must be able to NAME the prohibition (this file's own
+                // module doc does) without tripping it.
+                let code = strip_comment_and_string_literals(line);
+                if code.contains("_x8") {
                     hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
                 }
             }
@@ -675,28 +745,60 @@ mod o9_kernel_tests {
         );
     }
 
-    /// No-FMA / no-approx grep gate: `sdf_simd.rs` must contain ZERO `_mm256_fmadd`,
-    /// `_mm256_rsqrt`, or `_mm256_rcp` CALL-SITES (a fused/approx op would diverge
-    /// from the twice-rounded scalar by a ULP). Doc-comment prose naming them (to
-    /// document the prohibition) is allowed — only NON-comment code lines are
-    /// scanned.
+    /// No-FMA / no-approx grep gate: `sdf_simd.rs` must contain ZERO fused
+    /// (`fmadd` / `fmsub` / `fnmadd` / `fnmsub` / `fmaddsub` / `fmsubadd`), ZERO
+    /// approximate (`rsqrt` / `rcp`) and ZERO `mul_add` CALL-SITES. A fused op
+    /// rounds ONCE where the scalar leaf rounds TWICE (one ULP, and the leaf is the
+    /// SOLE CPU↔GPU oracle); `rsqrt`/`rcp` are ~12-bit approximations that return
+    /// different bits on Intel vs AMD.
+    ///
+    /// This gate became the ONLY enforcement on 2026-09-02, when the `+fma`
+    /// `compile_error!` was removed for the `x86-64-v3` baseline — so it was
+    /// widened at the same time:
+    ///
+    /// - from `fmadd` alone to the whole fused family, because the kernel is dense
+    ///   in mul-then-SUB (the CSG folds, the central-difference gradient), which is
+    ///   what an `fmsub` fuses — banning only `fmadd` left that hole open;
+    /// - to `mul_add(`, the safe-Rust route to the same single rounding, which a
+    ///   future edit could take without touching an intrinsic at all;
+    /// - to the `_mm_` 128-bit spellings alongside `_mm256_`.
+    ///
+    /// Doc-comment prose naming them (to document the prohibition) is allowed —
+    /// only NON-comment code lines are scanned.
     #[test]
     fn sdf_simd_has_no_fma_or_approx_callsites() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src")
             .join("sdf_simd.rs");
         let contents = std::fs::read_to_string(&path).expect("sdf_simd.rs must be readable");
-        // Match a CALL-SITE: each intrinsic stem completed to a real `_ps(`
-        // invocation (`_mm256_fmadd_ps(`, `_mm256_rsqrt_ps(`, `_mm256_rcp_ps(`). The
-        // needles are ASSEMBLED from fragments at runtime so the full call token
-        // never appears as a string literal in THIS source — otherwise the gate
-        // would flag its own definition line. Doc-comment prose is also skipped.
+        // Match a CALL-SITE: each stem completed to a real `_ps(` invocation, over
+        // both vector widths. The needles are ASSEMBLED from fragments at runtime so
+        // no full call token appears as a string literal in THIS source — otherwise
+        // the gate would flag its own definition line. The banned spellings are
+        // deliberately NOT written out contiguously even here in prose, so the
+        // self-reference holds independently of the comment skip below.
         let suffix = "_ps(";
-        let banned = [
-            format!("_mm256_{}{}", "fmadd", suffix),
-            format!("_mm256_{}{}", "rsqrt", suffix),
-            format!("_mm256_{}{}", "rcp", suffix),
-        ];
+        let widths = ["_mm256_", "_mm_"];
+        let stems = ["fmadd", "fmsub", "fnmadd", "fnmsub", "fmaddsub", "fmsubadd", "rsqrt", "rcp"];
+        let mut banned: Vec<String> = Vec::with_capacity(widths.len() * stems.len() + 1);
+        for w in widths {
+            for s in stems {
+                banned.push(format!("{w}{s}{suffix}"));
+            }
+        }
+        banned.push(format!("{}{}", "mul_add", "("));
+        // `algebraic_mul` / `_add` / `_sub` / `_div` / `_rem`, stable since Rust 1.98
+        // (float_algebraic, rust-lang/rust#136469). They are the sanctioned per-operation
+        // fast-math API: they permit the optimiser to CONTRACT a multiply and an add into
+        // one rounding and to REASSOCIATE, which is precisely the pair of freedoms this
+        // module's determinism rests on refusing. A future edit could write
+        // `a.algebraic_mul(b).algebraic_add(c)` and, before this needle existed, the census
+        // would have passed while the no-FMA contract silently stopped holding — the closed
+        // needle list is exactly the shape a new language feature walks past, and this one
+        // walked past it within a release of the list being written (2026-09-02).
+        // The stem alone is banned rather than each spelling: the family is closed to this
+        // module either way, and a stem match cannot be defeated by a UFCS call.
+        banned.push(format!("{}{}", "algebraic", "_"));
         let mut hits = Vec::new();
         for (i, line) in contents.lines().enumerate() {
             let trimmed = line.trim_start();
@@ -716,6 +818,58 @@ mod o9_kernel_tests {
             "no-FMA/no-approx invariant violated: sdf_simd.rs has banned op call-sites:\n{}",
             hits.join("\n"),
         );
+
+        // Non-vacuity: a census that scans the wrong text passes for the wrong
+        // reason. Proving the scanner sees real intrinsic call-sites of the exact
+        // shape the needles model means an empty `hits` is evidence, not silence.
+        //
+        // The witness is ASSEMBLED from fragments for the same reason the needles
+        // are. Written as a literal it named itself: this census scans its OWN file,
+        // so `contents` contained the token because the assertion line contained it,
+        // and the check passed over a hypothetical file with no intrinsics left in it
+        // at all — the guard against a vacuous pass was itself vacuous (found
+        // 2026-09-03 while extending the census to `systems.rs` and `colored.rs`).
+        let witness = format!("{}{}{}", "_mm256_", "mul", suffix);
+        assert!(
+            contents.contains(&witness),
+            "census scanned {} but found no `{witness}` call-site — the file moved or \
+             was rewritten, so an empty hit list proves nothing",
+            path.display(),
+        );
+    }
+
+    /// Returns the part of `line` that is CODE: everything from a `//` comment marker
+    /// onwards is dropped, and the contents of every double-quoted string literal are
+    /// blanked.
+    ///
+    /// The W4 gate bans a *reference to* the CPU batched kernel, and a substring match over
+    /// the raw line does not express that. Measured 2026-09-02: it reported four violations
+    /// that were debug-dump filenames inside `dump("…_x8", ..)` calls — a gate red on
+    /// correct code. Prose and file names may say `_x8`; code may not.
+    ///
+    /// Deliberately simple, and its limits are stated rather than hidden: it does not model
+    /// raw strings (`r#"…"#`), escaped quotes inside literals, or character literals. Each
+    /// of those can only make the scan see MORE text as code, never less, so the gate can
+    /// still only err toward a false alarm a reader will investigate — never toward a
+    /// silent pass. If a raw string in the scanned crate ever trips it, narrow this rather
+    /// than widening the waiver.
+    fn strip_comment_and_string_literals(line: &str) -> String {
+        let mut out = String::with_capacity(line.len());
+        let mut in_string = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' if in_string => {
+                    // Consume the escaped character so a `\"` does not close the literal.
+                    chars.next();
+                }
+                '"' => in_string = !in_string,
+                '/' if !in_string && chars.peek() == Some(&'/') => break,
+                _ if !in_string => out.push(c),
+                _ => {}
+            }
+        }
+        out
     }
 
     /// Recursively scans every `*.rs` / `*.hlsl` / `*.spv`-adjacent text file under

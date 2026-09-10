@@ -52,7 +52,7 @@ use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::core::time::Time;
 use boyko_ecs::ecs::identifiers::primitives::EntityId;
-use boyko_macros::Resource;
+use boyko_macros::{Resource, SystemSet};
 use boyko_scene::transform::GlobalTransform;
 use bytemuck::Zeroable;
 
@@ -264,6 +264,35 @@ impl ParticleEffectScratch {
 }
 
 // ── A1 — the per-frame emitter fold ──────────────────────────────────────────────────
+
+/// The cross-plugin ordering seam for [`particle_tick_emitters`]. Mirrors
+/// [`LightCollectSet`](crate::light_system::LightCollectSet) /
+/// [`CsmFitSet`](crate::csm_caster::CsmFitSet): a set-to-set edge pinned BY NAME holds regardless
+/// of plugin add-order, where a per-system `.after(key)` edge cannot cross a plugin boundary
+/// (a `SystemKey` is obtainable only at its own `add_system` call site).
+///
+/// # Why the fold needs an edge at all
+///
+/// [`particle_tick_emitters`] reads `&GlobalTransform`, which
+/// [`propagate_transforms`](boyko_scene::propagation::propagate_transforms) recomposes each frame
+/// as a member of [`CameraSet::Resolve`](boyko_scene::sets::CameraSet::Resolve). Unordered, the
+/// fold spawns from a one-frame-stale pose — a moving emitter trails its own carrier by a frame,
+/// permanently, because the lag never self-corrects. This repository has MEASURED that shape one
+/// subsystem over: a pose written in `Main` was drawn a frame late precisely because its ordering
+/// was "nailed by add-order" rather than by a set edge. Add-order is not a pin.
+///
+/// # Where the edge is declared, and why not here
+///
+/// [`ParticlePlugin`](crate::particle_plugin::ParticlePlugin) puts the fold `in_set` — membership
+/// only, which contributes NO ordering edge — and the COMPOSING app declares
+/// `ParticleTickSet.after(CameraSet::Resolve)`. That split is deliberate and follows this
+/// workspace's own `CsmFitSet` precedent: an ordering edge that references a set with no members
+/// warns `boyko-W1501` at schedule build, so a plugin that ordered itself against propagation
+/// would warn in every world composing it WITHOUT a camera — a legitimate composition, and one
+/// its own D17 containment gate builds. The composing app is the first place both sets have
+/// members, so it is the place the edge belongs.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ParticleTickSet;
 
 /// **A1** — advance the subsystem clock, then fold every ENABLED emitter into one frame's
 /// [`EmitRequestGpu`] table. `CoreSchedule::Main`, once per rendered frame.

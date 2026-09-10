@@ -65,6 +65,27 @@ use crate::ecs::identifiers::primitives::WorldId;
 /// The completing worker unparks the dispatcher via `ScopeShared::waker`;
 /// the timeout is the backstop for the case where the wake-up raced ahead
 /// of the dispatcher's `park_timeout` call. 100 µs matches plan §5.4.5.1.
+///
+/// **This is a source constant, not the wait it produces.** On Windows
+/// `park_timeout` reaches `WaitOnAddress` through `dur2timeout`, which rounds
+/// nanoseconds UP to whole milliseconds, so the expiry is never the 100 µs
+/// written here; what it actually is depends on the system timer resolution
+/// in effect, which is process-wide state and NOT owned by this crate. Under
+/// the shipped host it is ~1 ms: `boyko_app::timer_resolution::
+/// TimerResolutionGuard` holds `timeBeginPeriod(1)` for the whole run (bound
+/// in the host runner closure), and KE16 App-12 measured this box at
+/// **1 021 µs** guarded against **15 296 µs** unguarded — a 15x difference on
+/// the same call. A process that drives this scheduler WITHOUT the host (a
+/// bench binary, a test harness, a tool) still sees the machine quantum,
+/// bounded above by whatever resolution some other process happens to have
+/// requested. KE16 App-7's `ke16_park_timeout` bench group measures the
+/// expiry, and every row it publishes states which of the two configurations
+/// it was taken in.
+///
+/// The value is therefore DEFENSIVE only. Every round that parks here is
+/// expected to be woken by the last completer, and a run in which this
+/// timeout is what ends the wait is a missed wake, not a tuning question —
+/// costing ~1 ms under the host and most of a 16 ms frame without it.
 #[cfg(not(miri))]
 const PARK_TIMEOUT: Duration = Duration::from_micros(100);
 
@@ -115,6 +136,25 @@ pub struct Schedule {
     /// whole run.
     pub(crate) has_condition: FixedBitSet,
 
+    // ── KE17 D3 — the apply-window split predicate (BUILT, NOT YET READ) ─────
+    /// `may_defer[i]` set iff system `i` reports
+    /// [`System::has_deferred`](crate::ecs::core::system::system::System::has_deferred).
+    /// Indexed by post-topo `SystemIndex`, `len() == systems.len()`, folded in
+    /// the same builder pass as its twin `has_condition` above.
+    ///
+    /// A clear bit is the statement "this system's whole param chain inherits
+    /// the no-op `SystemParam::apply`", i.e. it carries nothing that the
+    /// apply-window barrier is protecting. Nothing on the executor path reads
+    /// this yet: the split retire is step 2 of the KE17 rung and lands with the
+    /// `SCH7` safety argument in `apply_window_drain` rewritten around it.
+    /// Until then this field is written at build and read only by tests and by
+    /// `benches/ke17_apply_window.rs`'s model.
+    ///
+    /// The default answer is `true` (see `System::has_deferred`), so a system
+    /// type that says nothing keeps its barrier — an unset bit here is always
+    /// an explicit declaration, never an omission.
+    pub(crate) may_defer: FixedBitSet,
+
     /// Per-system own conditions, indexed by post-topo `SystemIndex` (permuted
     /// alongside `systems` at build, §2.5). `system_conditions[i]` is empty
     /// unless system `i` carried `.run_if`. `len() == systems.len()`.
@@ -137,10 +177,13 @@ pub struct Schedule {
     /// schedule ⇒ the once-per-frame state pass early-outs on a single
     /// `is_empty()` compare (THE 0%-gate, §6.3), the twin of `has_condition`.
     ///
-    /// The last pointer-bearing field. Every pre-existing field keeps its exact
-    /// offset, so the cross-thread hot prefix
-    /// (`pool → systems → conflict_graph → executor_scratch → has_condition`)
-    /// documented above is byte-for-byte unchanged.
+    /// The last pointer-bearing field. Every field of the cross-thread hot
+    /// prefix (`pool → systems → conflict_graph → executor_scratch →
+    /// has_condition`) documented above keeps its exact offset; that prefix is
+    /// byte-for-byte unchanged. (KE17 D3 inserted `may_defer` immediately after
+    /// the prefix rather than appending it, so the fields between there and
+    /// here shifted; the prefix itself did not, and neither did the reason it
+    /// is a prefix.)
     pub(crate) state_entries: Vec<StateEntry>,
 
     // ── Phase 16.1 — tick-aware run conditions (W2) ──────────────────────────
@@ -514,6 +557,30 @@ impl Schedule {
         self.systems.is_empty()
     }
 
+    /// KE17 D3 — whether system `index` (post-topological position, as used by
+    /// [`len`](Self::len)) can enqueue deferred work.
+    ///
+    /// `false` is the statement "this system's whole param chain inherits the
+    /// no-op `SystemParam::apply`", folded at build from
+    /// [`System::has_deferred`](crate::ecs::core::system::system::System::has_deferred).
+    /// The executor does not consult it yet; it is the predicate the split
+    /// apply window will be built on, and `benches/ke17_apply_window.rs` reads
+    /// it to check its model's mask against the kernel's own answer instead of
+    /// against a table.
+    #[inline]
+    pub fn may_defer(&self, index: usize) -> bool {
+        // A release assert, not a `debug_assert`: `FixedBitSet::contains`
+        // answers `false` out of range, and `false` is precisely the answer
+        // that licenses retiring a system early. An out-of-range read must fail
+        // loudly rather than return the one answer that is unsafe to act on.
+        assert!(
+            index < self.systems.len(),
+            "invariant: may_defer index {index} out of range (len {})",
+            self.systems.len()
+        );
+        self.may_defer.contains(index)
+    }
+
     /// Main executor loop. See module docs for the loop rhythm.
     ///
     /// The `'scope` lifetime on `scope` ties every spawned closure to the
@@ -666,9 +733,11 @@ impl Schedule {
             //
             // If nothing dispatched but something is running, park until
             // a worker unparks us (the last-completer pattern in
-            // `ScopeShared::pending`). The 100 µs timeout is the backstop
-            // for the case where the wake-up raced ahead of our park
-            // call — a benign no-op spin.
+            // `ScopeShared::pending`). `PARK_TIMEOUT` is the backstop for the
+            // case where the wake-up raced ahead of our park call — a benign
+            // no-op spin. It is a SOURCE constant: the wait it actually
+            // produces on Windows is >= 1 ms (see `PARK_TIMEOUT`'s doc), so
+            // reaching it is a missed wake and not a 100 µs latency.
             if dispatched == 0 && self.executor_scratch.running.count_ones(..) > 0 {
                 // Under Miri the scheduler is cooperative and does not advance
                 // other threads across a `park_timeout` the way it does across

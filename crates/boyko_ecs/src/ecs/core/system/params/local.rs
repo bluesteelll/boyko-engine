@@ -96,6 +96,8 @@ impl<T: Send + Sync + Default + fmt::Debug + 'static> fmt::Debug for Local<'_, T
 //   - SP4: `init_state` constructs `T::default()` — no archetype / resource
 //     registry mutation (debug-asserted by `FunctionSystem::initialize`).
 unsafe impl<T: Send + Sync + Default + 'static> SystemParam for Local<'_, T> {
+    const HAS_DEFERRED: bool = false;
+
     type State = T;
     type Item<'w, 's> = Local<'s, T>;
 

@@ -63,9 +63,11 @@ is aligned to this by the R2 route merge).
 ## Event routing
 
 `inbox (E)` does not put an `EventReader` into the pass. It generates one **router system per
-event**: O(events), resolving the participant to a row via `get_component_mut` (generation check
-inside; dead/foreign target = silent `None`) and depositing a bit + payload into the row before the
-pass runs (an ordering edge is emitted automatically). The participant's declared context
+event**: an ordinary (non-exclusive) system taking `EventReader<E>`, O(events), resolving the
+participant to a row via `Query::get_mut` (generation check inside; dead/foreign target = silent
+`None`) and depositing a bit + payload into the row before the pass runs (an ordering edge is
+emitted automatically). The deposit term is `Mut<M>` when `publish tracked` is on and `&mut M` when
+it is off — the term, not a bypass, is what makes tracking all-or-nothing (DECISIONS M4a / M7). The participant's declared context
 (`victim: entity(EnemyBrain)`) is checked by a **debug_assert in the router** (DECISIONS M4) — zero
 release cost, loud wrong-target sends in debug. That datum is **resolved for machine `inbox` events
 only**; for every other event the declared context stays unread. Latency: one frame under
@@ -73,13 +75,17 @@ only**; for every other event the declared context stays unread. Latency: one fr
 schedule domain vs the app's `EventUpdatePolicy` mismatch is a **build-time diagnostic**
 (DECISIONS M9).
 
-> **OPEN BALLOT AB-5 — router mechanism.** The mechanism named above (`get_component_mut`) is
-> **not** settled. Alternatives: (a) keep `get_component_mut`; (b) amend to `Query::get_mut`. The
-> two APIs stamp **different ticks**, so the ballot carries two dependent questions: does
-> `publish tracked` then see the router's deposit in the same frame, and is M7's tick bypass (whose
-> remedy was derived from apply-window stamping) still needed at all? Blocks **R5**. This file does
-> not choose — the amendment ships atomically with DECISIONS M4 / M7+D6 or not at all, because
-> editing one side alone creates a drift pair against the ruling.
+> **AB-5 RESOLVED 2026-08-30 — `Query::get_mut`** (DECISIONS **M4a**, where the measurements live).
+> The decisive ground was not the tick but the event read: `get_component_mut` takes `&mut self`, so
+> its router can only be an **exclusive** system, and an exclusive body is `FnMut(&mut EcsMaster)`
+> with *no param tuple* — it cannot take `EventReader<E>` and must fall back to
+> `EcsMaster::events_of`, which returns an **empty slice for an unregistered event type**. That
+> would put the machine router on the one silent-failure path left in the engine, and would make its
+> latency **two** frames rather than the one this section states. The `Query::get_mut` router is an
+> ordinary system: it takes `EventReader<E>`, a forgotten registration is a loud boot panic, and its
+> deposit is visible to a `Changed<>` reader in the **same** frame. A per-event scheduler barrier
+> was *expected* from (b) and **measured not to exist** (0.78–1.00×, below noise) — recorded in M4a
+> so it is not re-argued.
 
 ## Observation from outside
 
@@ -100,15 +106,49 @@ consumers). A system whose body names them without `order (after <Machine>)` is 
 | R-CLOCK: > 8 clock slots from interference coloring | unbounded row growth; the error lists the conflicting leaves |
 | R-PAR (until R4): `parallel` + event emission | `par_for_each_chunk` requires `Fn + Send + Sync`, `send` takes `&mut self` today |
 | R-ARITY: merged pass params > 12 | a trait-error wall on generated tuples |
-| R-DENSE: `on entity` + dense storage | the chunked driver const-rejects dense terms — ⚠ **ground unsettled, ballot AB-7** |
+| R-DENSE: `on entity` + dense storage | the chunked driver const-rejects dense terms — ⚠ **ground unsettled, ballot AB-7; the candidate driver-INDEPENDENT ground was measured and REFUTED, see below** |
 
-> **OPEN BALLOT AB-7 — R-DENSE's ground.** The stated ground ("the chunked driver const-rejects
-> dense terms") is a property of **one** driver, so it evaporates the moment the pass is lowered
-> onto another (see CONSTRUCTS §`each`, ballot AB-8). Alternatives: (a) keep the refusal
-> unconditional and re-ground it driver-independently — the candidate ground is that the layout
-> const-assert and the router's deposit path both assume a **table row**, which must be
-> *established*, not asserted; (b) make the refusal conditional on the default driver, with
-> `publish tracked` lifting it. ⚠ Either way this **re-grounds a ratified refusal**. Blocks **R5**.
+> **OPEN BALLOT AB-7 — R-DENSE's ground. STILL THE OWNER'S; the premise underneath option (a) was
+> measured on 2026-08-30 and is REFUTED.** The ⚠ stands — this re-grounds a ratified refusal, so it
+> is not settled here. What the orchestrator was asked to do was *establish or refute* the
+> driver-independent ground, so that the owner decides against a measurement rather than an
+> assertion. It does not hold, on **both** of its conjuncts:
+>
+> - *"the router's deposit path assumes a table row"* — **FALSE.** Both random-access deposit APIs
+>   have explicit, working dense arms: `EcsMaster::get_component_mut` resolves the global
+>   `DenseStore` and bumps the per-slot `changed_tick` (`ecs_master/component_api.rs`, the
+>   `StorageKind::Dense` branch), and `Query::get`/`get_mut` carry `HAS_DENSE` gates
+>   (`resolve_dense` + `dense_row_passes`). Both are pinned green in-tree by
+>   `tests/ke3_query_random_access.rs::{get_applies_a_dense_with_filter,
+>   get_mut_applies_a_dense_with_filter}`.
+> - *"the layout const-assert assumes a table row"* — **there is no such assert.** Every dense
+>   `const { assert!(…) }` in the kernel belongs to a **driver** (`for_each_chunk`,
+>   `par_for_each_chunk`, `par_iter`, and `Query::contains`; `dense_iter` asserts the *converse*).
+>   Every other `StorageKind::Dense` site in the kernel is a *branch that handles dense*, not a
+>   rejection of it.
+>
+> Measured positively as well: a dense component is fully iterable **and** change-tracked under the
+> sequential `iter_mut` driver — 64 of 64 rows reached a `Changed<>` reader — which is exactly the
+> lowering `publish tracked` selects.
+>
+> **What the measurement did find** is a real ground, but a *different* one than either option
+> names, and it is narrower than "driver-independent": dense is compile-rejected by **all three
+> non-sequential drivers** — `for_each_chunk`, `par_for_each_chunk` **and `par_iter_mut`** (an
+> `E0080` const-eval error, reproduced) — and `par_iter`'s own message gives the reason as *"the
+> parallel path does not resolve the dense store into each worker chunk's `Fetch` (the chunk runner
+> has no world cell)"*. So the rejection tracks **parallelism and chunking**, not chunking alone,
+> and the kernel's own diagnostics name the working alternatives (`Query::iter` / `iter_mut` /
+> `dense_iter`). A refusal that is unconditional therefore cannot be grounded in the kernel as it
+> stands; it can only be grounded in a *policy* choice about which drivers a machine may use.
+>
+> Two consequences for whoever takes this ballot. (i) Option (b) — conditional, lifted by
+> `publish tracked` — is the one the engine actually supports today, and lifting it does **not**
+> make `parallel` machines work over dense, because both parallel drivers reject dense too. (ii) A
+> possible independent ground lives **outside** this ballot: `requires` over a dense component
+> panics (KERNEL-BACKLOG **KE11**, ballot **AB-6**). That is the owner's ballot too and is **not**
+> settled or assumed here — but if AB-6 lands as a refusal, R-DENSE inherits a ground that owes
+> nothing to any driver.
+>
 > Independent of the outcome, the trybuild golden is authored **with `publish tracked` set** —
 > that is the setting in which a checks-only-the-chunked-driver implementation silently passes.
 

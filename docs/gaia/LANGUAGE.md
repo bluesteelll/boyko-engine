@@ -1,5 +1,15 @@
 # Gaia — language sketch (research-stage, NOT a spec)
 
+> ⚠️ **ratified-stale.** The syntax shown below is **pre-R1 on essentially every line** and does
+> **not** match the ratified rulings ([`PENDING-SYNTAX-PLAN.md`](PENDING-SYNTAX-PLAN.md) finding
+> **M6**; [`../AETHER-GAIA-REVISION-2026-08-29.md`](../AETHER-GAIA-REVISION-2026-08-29.md)
+> §per-file table). **Do not generate Gaia from this file** — an agent that reads it as the spec
+> emits wrong-on-every-line output. Only interim drift-reduction annotations have landed here; the
+> rewrite into the reworked syntax is owner-gated. This banner is the marking G0's own gate
+> requires in the file's head: *a file that RESOLVES but is STALE does not satisfy a
+> cross-reference*, and an index that knows is a file the reader never opened
+> (gated by [`tests/gaia_g0_citation_census.rs`](../../tests/gaia_g0_citation_census.rs)).
+
 The shape of the language as recommended by the research synthesis. Every ruling behind a line here
 is in [`DECISIONS.md`](DECISIONS.md); the grammar itself is written at rung G2 and gated there.
 This file exists so the *feel* of the language is on record before the spec — nothing in it is
@@ -27,7 +37,7 @@ asset "levels/crypt/cell_07"
 abstract template Torch(power: f32) {
     Transform pos=(0,0,0)
     MeshRef "props/torch"            // stable asset id — never a slot index
-    PointLight power=$power range=12.0 color=#FFB35CFF
+    PointLight power=$power range=12.0 color=#FFB35C
 }
 
 entity @gate_01 {
@@ -58,14 +68,27 @@ instance "prefabs/torch_wall" @wall_east {
 >   `range`; the sketch omitted it. The `12.0` above is illustrative, not ruled. This is the same
 >   hole PENDING M7 records at FIELD granularity — the closed evaluator has no way to spell a
 >   missing field's neutral.
-> - **Colour-literal arity — BOTH HALVES RULED 2026-08-30 (ballot GB-2), and this line's premise is
->   no longer open.** `#FFB35CFF` is an RGBA-4 literal written into `color: [f32; 3]`, which is three
->   channels. The ruling: **`#RRGGBB` is `#RRGGBBAA` with maximal `AA`** — a DEFAULTED FIELD, not a
->   second literal kind — and in the narrowing direction an 8-digit literal at a 3-component field is
->   a **coded bake refusal naming the field**, never a silent alpha drop. So the literal above is a
->   bake error as authored and the correct 6-digit form is `#FFB35C`. ⚠ The sketch is left AS AUTHORED
->   and flagged rather than silently trimmed, because rewriting the fences is G2's rewrite of this
->   whole file, not a drive-by edit ([`CAMPAIGN.md`](CAMPAIGN.md) G2 row, deliverable 4).
+> - **Colour — BOTH halves settled, and the literal above is corrected.** Ballot **GB-2** RESOLVED
+>   2026-08-30 by standing rule ([`DECISIONS.md`](DECISIONS.md) §Language shape; body and
+>   measurements in [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29).
+>   - **Arity:** checked against the target's arity, mirroring Aether's shipped `ColorLit`
+>     (`crates/aether_lang/src/parse.rs:1177-1213`). Widening 3 → 4 supplies alpha `1.0`; narrowing
+>     4 → 3 is a coded refusal, never a silent alpha drop. `PointLight::color` is `[f32; 3]`, so the
+>     RGBA-4 `#FFB35CFF` this sketch used to carry was a bake error; the 6-digit form **`#FFB35C`**
+>     is now written above. This is a drift-reduction correction of the same kind as `power`.
+>   - **Transfer function:** a property of the destination field, not the literal. `PointLight::color`
+>     is documented LINEAR (`boyko_render/src/light.rs:309-310`), so the bake applies the **sRGB
+>     EOTF**; a `u32` STRAIGHT-RGBA8 UI field gets the **identity**. Carrying raw bytes into the
+>     linear field — what this sketch's earlier form implied — is wrong by **1.557× on green and
+>     3.371× on blue** for this very colour.
+>   - *Duplicate reduced by the merge `merge/ke16-into-render`, 2026-09-10.*
+>     `feat/multi-paradigm-render` carried a second annotation of the same GB-2 ruling. Its distinct
+>     claim is kept: the ruling spells **`#RRGGBB` as `#RRGGBBAA` with maximal `AA`** — a DEFAULTED
+>     FIELD, not a second literal kind — and narrowing at a 3-component field is a coded bake refusal
+>     **naming the field**. Its remaining sentence (“the sketch is left AS AUTHORED and flagged rather
+>     than silently trimmed”) is superseded on this branch, where the 6-digit form is written above;
+>     rewriting the rest of the fences is still G2's rewrite of this whole file, not a drive-by edit
+>     ([`CAMPAIGN.md`](CAMPAIGN.md) G2 row, deliverable 4).
 > - **`position` on `PointLight` — RULED 2026-08-30 (ballot GB-5): PERMIT AS SEED.**
 >   `light_reconcile` DERIVES `position` from the entity's `GlobalTransform`, so whatever a scene
 >   authors into that field is overwritten — and the owner's ruling is that this is exactly what an
@@ -74,6 +97,12 @@ instance "prefabs/torch_wall" @wall_east {
 >   requires is a disposition column in the GK-4 field table recording the CONDITION and the WRITER
 >   (never a boolean — all twelve measured members are conditionally derived), behind the default-off
 >   bake feature. **The G1 table freeze is unblocked.** See [`DECISIONS.md`](DECISIONS.md) §GB-5.
+>   - *Superseded text reduced by the merge `merge/ke16-into-render`, 2026-09-10.*
+>     `feat/threadpool-ke16` still carried GB-5 as OPEN at this line — that side predates the ruling
+>     above, which supersedes it. The question as that side framed it is kept for the record: the
+>     **ui** profile already rules that engine outputs are undeclarable (bake error), and GB-5 asked
+>     whether the same rule extends to engine-derived fields in the **scene** profile, to land as a
+>     DECISIONS line before G1 freezes the GK-4 field table.
 > - **`MeshRef` is an UNLANDED carrier**, at both sites above. No `MeshRef` type exists in the
 >   workspace; what the engine has is `MeshHandle(pub u32)`
 >   (`boyko_scene/src/render_caps.rs`) — the raw process-local slot form that the ratified **GN1**

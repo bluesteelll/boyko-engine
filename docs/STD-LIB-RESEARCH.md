@@ -159,6 +159,18 @@ Net: groups D, F-hierarchy/tags/lifecycle/spawn-despawn, and G-existing are DONE
 - Recommendation: 3D-first, with 2D expressed as the z=0 / orthographic subset of the same types. Reasoning: the engine's REAL renderer and the mature physics kernels are 3D (Vec3/Quat/Mat3, SDF marcher); building 2D-first would mean re-deriving everything for 3D and maintaining two families. A single 3D Transform + Orthographic projection covers the demo's 2D quads (the survey confirms Unity/Unreal do exactly this — 2D is orthographic 3D), at the cost of one unused axis per 2D entity (negligible: 4 bytes, and the hot GPU path already packs its own 2D GpuInstance separately). Defer a dedicated Transform2D unless a 2D-heavy title proves the wasted axis matters — that is a measurable, later decision, not a now decision.
 
 ### Fork 5: Gameplay scaffolding scope: how much of group (G) is in v1 vs deferred — specifically Controller/Pawn relations, prefab/instantiate, and scene assembly?
+
+> **⚠ Two of this fork's three premises are out of date (note added 2026-08-29); the fork itself is
+> not re-answered here.** (1) **Relations are no longer parked** — a general `Relationship` /
+> `RelationshipTarget` trait pair shipped, with `ChildOf`/`Children` refactored onto it
+> ([REMAINING-GAPS.md](REMAINING-GAPS.md) §P0). (2) **Serialization is no longer plan-only** — see
+> the stale-status note at the top of [SERIALIZATION-PLAN.md](SERIALIZATION-PLAN.md). (3) **"Scene
+> assembly" now has an owner and it is a language, not an API**: [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md)
+> — *Gaia is the language for data* — covers scenes, UI documents and the DataAsset/DataTable
+> analog as authored text baked offline to the binary the runtime loads. The prefab/template
+> question this fork calls "template-blit instantiate" is Gaia's rung **G4** (composition:
+> templates / `abstract` / patches / the priority ladder / `remove`), and the whole file is
+> plan-only and uncommitted. Everything below is the 2026 record as written.
 - Why: These are the line between 'a scene/object kit' and 'a gameplay framework'. They depend on machinery that is parked (relations) or plan-only (serialization/prefab). Pulling them into v1 risks scope-creeping the foundational spatial/camera/render work that everything else needs first. The owner's standing rule: foundations before APIs.
 - Options: Foundations-only v1: ship A+B+C+D+E+F (spatial, camera, render capability, physics markers, object bundles, Name/Visibility); defer ALL of G except what already exists (Time/Input/States/App) | Foundations + prefab: add template-blit instantiate (serialization plan is already written) so users can save/spawn whole object trees | Full framework: also add Controller/Pawn possession relations and a scene-assembly API
 - Recommendation: Foundations-only v1. Reasoning: this is the owner's 'foundations before APIs' rule applied directly — Transform/Camera/Renderable are the slow inner loop everything sits on, and they don't exist yet. Controller/Pawn needs the relations subsystem (explicitly PARKED in memory) and a wrong relation design would be expensive to unwind; prefab/instantiate is plan-only (serialization) and is a natural SECOND wave once bundles + transform propagation are proven (template-blit reuses the static-bundle-cache + ChildOf-remap that v1 establishes). Scene assembly is sugar over v1's bundles+hierarchy and should be written against a stable foundation, not concurrently. Keep G to what's already shipped (Time, Input, States, App, Resources-as-GameMode). Promote prefab/instantiate to an explicit Wave 2 so the owner sees it's sequenced, not dropped.

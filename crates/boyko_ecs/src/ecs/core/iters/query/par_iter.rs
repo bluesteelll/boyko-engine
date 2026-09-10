@@ -391,9 +391,20 @@ fn for_each_impl<D, F, Body>(
                 }
 
                 let chunk_size = strategy.chunk_size(entity_count, worker_count);
+                // KE16 App-4: this archetype's wave goes out as ONE
+                // `spawn_batch` call instead of a hand-rolled
+                // `while start < entity_count { spawn(...) }` push loop. The
+                // count is the closed form of the walk it replaces —
+                // `chunk_size >= 1`, so the `[i * chunk_size,
+                // min((i+1) * chunk_size, entity_count))` ranges are exactly the
+                // ranges that loop visited, in the same order. `n_chunks` is
+                // `spawn_batch`'s promised UPPER BOUND on the body count, not a
+                // count that is registered: every body is registered and pushed
+                // on its own, and every push takes its own wake decision.
+                let n_chunks = entity_count.div_ceil(chunk_size);
 
-                let mut start = 0usize;
-                while start < entity_count {
+                scope.spawn_batch(n_chunks, (0..n_chunks).map(|chunk| {
+                    let start = chunk * chunk_size;
                     let end = (start + chunk_size).min(entity_count);
 
                     let captured = ChunkCaptures::<D, F> {
@@ -437,15 +448,13 @@ fn for_each_impl<D, F, Body>(
                     //   - `body_ref: &Body` is `Send + Sync` (Body bound) so
                     //     the worker can invoke it concurrently with
                     //     sibling chunks.
-                    scope.spawn(move || {
+                    move || {
                         // SAFETY: forwarded; see outer SAFETY block.
                         unsafe {
                             run_chunk_owned::<D, F, Body>(captured, body_ref);
                         }
-                    });
-
-                    start = end;
-                }
+                    }
+                }));
             }
         });
     });

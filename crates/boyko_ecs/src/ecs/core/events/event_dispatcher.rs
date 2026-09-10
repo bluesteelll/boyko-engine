@@ -270,6 +270,17 @@ impl EventDispatcher {
     /// writer of its lane; the dispatcher is the sole writer of lane
     /// `worker_count`. This is preserved by construction because the TLS
     /// helper returns a distinct id per thread.
+    ///
+    /// The rule is per THREAD, not per system, and that distinction became
+    /// observable with KE16 App-8: a helping joiner may run a sibling
+    /// conflict-free system inline inside another system's body, and both
+    /// bodies then append to the SAME lane. Still one writer at any instant,
+    /// so EVT1 holds — but the two systems' events INTERLEAVE within that
+    /// lane. No reader relies on per-system contiguity (an `EventReader`
+    /// treats a lane as an opaque sequence), so this is a documented
+    /// consequence rather than a constraint; a future reader who needs
+    /// per-system grouping must carry it in the event, not infer it from the
+    /// lane order.
     #[inline]
     pub fn send_event<E: Event>(&self, event: E) -> EcsResult<()> {
         // `default_thread_count` is the total number of lanes registered with
@@ -801,11 +812,19 @@ mod tests {
     // ── Tests ─────────────────────────────────────────────────────────────────
 
     /// Test #1: EventConfig bounds validation.
+    ///
+    /// KE8 raised `MAX_EVENT_THREADS` from 64 to 65 — one lane per pool worker
+    /// (`boyko_threadpool::MAX_WORKERS == 64`) PLUS one for a non-worker sender —
+    /// so 65 is now inside the range and 66 is the first refusal. This is the
+    /// SECOND copy of these bounds in the crate (`event_config.rs` has the
+    /// other); both were updated, and this one is why a sweep with
+    /// `--no-fail-fast` was needed to see it.
     #[test]
     fn event_config_bounds() {
         assert!(EventConfig::new(1, 64).is_ok());
         assert!(EventConfig::new(0, 64).is_err());
-        assert!(EventConfig::new(65, 64).is_err());
+        assert!(EventConfig::new(65, 64).is_ok(), "KE8: the 65th lane is admissible");
+        assert!(EventConfig::new(66, 64).is_err());
         assert!(EventConfig::new(1, 0).is_err());
         assert!(EventConfig::new(1, 16385).is_err());
     }

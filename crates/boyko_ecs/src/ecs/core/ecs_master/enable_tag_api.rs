@@ -32,6 +32,7 @@
 
 use crate::ecs::core::component::component::Component;
 use crate::ecs::core::component::component_registry::{self, EnableTagId};
+use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
@@ -195,6 +196,96 @@ impl EcsMaster {
         }
     }
 
+    // ── KE10: initial flag states applied on attach ──────────────────────────
+
+    /// Applies the initial enable-bit states declared by EVERY component in
+    /// `entity`'s current archetype (KE10). The fresh-spawn form: on a spawn
+    /// every signature id is newly attached, so the whole signature is the
+    /// newly-attached set.
+    ///
+    /// Gated on [`ArchetypeFlags::FLAGS_ON_ATTACH`], which is OR-computed at
+    /// archetype mint from the cold `FLAGS_DIRECT` table. A world where no
+    /// component declares `flags (…)` never raises the bit, so this returns
+    /// after one `u16` test — the 0%-gate. Dead / stale entities are a silent
+    /// no-op, matching the rest of this module.
+    ///
+    /// [`ArchetypeFlags::FLAGS_ON_ATTACH`]: crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags::FLAGS_ON_ATTACH
+    pub(crate) fn apply_attach_flags_all(&mut self, entity: Entity) {
+        let Some(inland) = self.live_inland(entity) else {
+            return;
+        };
+        // SAFETY (U1, U2, F1): stable interior-mutable slab provenance, non-null
+        //   + generation-matched above ⇒ live. A SHARED reborrow only, reading a
+        //   `u16` and a length; it is dropped before the loop takes `&mut self`.
+        let (flags, id_count) = unsafe {
+            let archetype = &*inland.archetype_ptr();
+            (archetype.flags, archetype.component_ids.as_slice().len())
+        };
+        if !flags.contains(ArchetypeFlags::FLAGS_ON_ATTACH) {
+            return;
+        }
+        for i in 0..id_count {
+            // Re-resolve per turn so no archetype borrow is held across the
+            // `&mut self` application below. A toggle performs no migration and
+            // does not touch `component_ids` (Decision D3), so `i` stays valid;
+            // re-resolving is borrow hygiene, not a correctness dependency.
+            let Some(inland) = self.live_inland(entity) else {
+                return;
+            };
+            // SAFETY: as above — a shared reborrow reading one `ComponentId` out
+            //   of the signature slice, dropped at the end of this statement.
+            let cid = unsafe { (*inland.archetype_ptr()).component_ids.as_slice()[i] };
+            self.apply_flags_declared_by(entity, cid);
+        }
+    }
+
+    /// Applies the initial enable-bit states declared by each id in
+    /// `newly_attached` (KE10). The migration form: on an insert only part of
+    /// the target signature is new, and re-applying a RETAINED component's
+    /// initial state would clobber a bit the game had since toggled.
+    ///
+    /// `newly_attached` is caller-owned (never a borrow out of `self`), so the
+    /// loop can take `&mut self` freely. Same `FLAGS_ON_ATTACH` gate as
+    /// [`apply_attach_flags_all`](Self::apply_attach_flags_all).
+    pub(crate) fn apply_attach_flags_for(&mut self, entity: Entity, newly_attached: &[ComponentId]) {
+        if newly_attached.is_empty() {
+            return;
+        }
+        let Some(inland) = self.live_inland(entity) else {
+            return;
+        };
+        // SAFETY: see `apply_attach_flags_all` — a shared reborrow reading one
+        //   `u16`, dropped at the end of this statement.
+        let flags = unsafe { (*inland.archetype_ptr()).flags };
+        if !flags.contains(ArchetypeFlags::FLAGS_ON_ATTACH) {
+            return;
+        }
+        for &cid in newly_attached {
+            self.apply_flags_declared_by(entity, cid);
+        }
+    }
+
+    /// Applies the `FLAGS_DIRECT` entries `owner` declares, resolving each
+    /// flag's id lazily (KE10 — the entries store the resolver UNCALLED so
+    /// registration never re-enters `owner`'s own `component_id()` init).
+    ///
+    /// The `&'static` entry slice borrows nothing from `self`, so the loop may
+    /// take `&mut self`. An `off` entry is NOT skipped: it clears a bit, which
+    /// matters when a second component attached earlier set the same flag.
+    fn apply_flags_declared_by(&mut self, entity: Entity, owner: ComponentId) {
+        let entries = component_registry::flags_direct_for(owner.0);
+        for entry in entries {
+            let flag = (entry.id_fn)();
+            if !matches!(
+                component_registry::storage_kind(flag.0),
+                component_registry::StorageKind::Bitset
+            ) {
+                flags_target_is_not_a_flag_panic(owner, flag);
+            }
+            self.set_enable_bit(entity, flag, entry.initial);
+        }
+    }
+
     /// Tests the enable bit for `tag` on `entity` (Decision D3 `is_enabled`).
     /// `&self`: read-only. `false` for dead / stale entities, never-toggled
     /// flags (no column), and never-touched pages.
@@ -213,6 +304,29 @@ impl EcsMaster {
             None => false,
         }
     }
+}
+
+/// Cold fail-loud panic site for KE10: a `flags (…)` entry naming an id that is
+/// not a `StorageKind::Bitset` enable tag.
+///
+/// Release-ACTIVE, not a `debug_assert`. Writing an enable bit keyed by a
+/// non-bitset id would allocate an `EnableColumn` nobody ever reads — it would
+/// compile, run, and answer nothing, which is the exact silent-wrong-answer
+/// class this campaign exists to remove. R3's parse refusal is the front-end
+/// gate; this is the kernel's, and it covers the runtime
+/// `try_set_flags_direct` route the front-end cannot see.
+#[cold]
+#[inline(never)]
+fn flags_target_is_not_a_flag_panic(owner: ComponentId, flag: ComponentId) -> ! {
+    panic!(
+        "KE10: component {} declares an initial flag state for {}, which is \
+         {:?} storage, not StorageKind::Bitset. A `flags (…)` entry may name \
+         only an enable tag (`flag X;` / #[component(storage = \"bitset\")]) — \
+         a bit has no home on any other storage kind.",
+        owner.0,
+        flag.0,
+        component_registry::storage_kind(flag.0),
+    )
 }
 
 /// Cold panic site for [`EcsMaster::register_enable_tag`] at budget exhaustion.

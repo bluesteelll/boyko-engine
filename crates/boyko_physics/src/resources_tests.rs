@@ -166,6 +166,18 @@
         assert_eq!(cfg.dt, 0.0, "dt is a placeholder until gather stamps it");
         assert!(!cfg.colored, "O4: colored is OFF by default (the 0%-gate)");
         assert!(!cfg.soft_body, "SP1: soft_body is OFF by default (the 0%-gate)");
+        assert!(
+            cfg.simd,
+            "O1: simd is ON by default since 2026-09-03 — the AVX2 integrate / inertia kernels \
+             are bit-identical to their scalar oracles and their gates are non-vacuous"
+        );
+        assert_eq!(
+            cfg.sdf_narrowphase,
+            SdfNarrowphaseKernel::Scalar,
+            "O9: the box-vs-SDF kernel defaults to the SCALAR oracle. The AVX2 arm has a known \
+             signed-zero divergence from it (owner-deferred fix), so reaching it must take an \
+             explicit opt-in — this is the containment, not a preference"
+        );
     }
 
     // ── O4: ConstraintGraph islands + coloring sanity tests ──

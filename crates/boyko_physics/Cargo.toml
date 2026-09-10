@@ -61,8 +61,10 @@ harness = false
 
 [[bench]]
 # O1 A/B: scalar vs AVX2 in-solver `refresh_inertia` + integrate on a 10k-body
-# substep — reports the width-only speed-up (build the AVX2 arm with
-# RUSTFLAGS="-C target-feature=+avx2"). The SIMD path is bit-identical to scalar.
+# substep — reports the width-only speed-up. The SIMD path is bit-identical to
+# scalar. ⚠ NO `RUSTFLAGS` recipe: it REPLACES `target.<triple>.rustflags` and
+# would delete the ISA baseline and the linker flags; `x86-64-v3` already carries
+# AVX2. See the bench header.
 name = "simd_o1"
 harness = false
 
@@ -93,8 +95,10 @@ harness = false
 # O9 A/B: the box-vs-SDF narrowphase (`box_sdf_manifold`) scalar build vs the
 # `+avx2` batched-kernel build, at SDF edit counts {1,2,4,8,16}. Two BUILDS of the
 # same public entry (the kernel is cfg-gated, not runtime-switched); the
-# scalar->avx2 delta is the O9 speed-up. Build the AVX2 arm with
-# RUSTFLAGS="-C target-feature=+avx2".
+# scalar->avx2 delta is the O9 speed-up. ⚠ NO `RUSTFLAGS` recipe — the bench
+# header already retracted it, and this comment is the copy a reader skims. It
+# REPLACES `target.<triple>.rustflags`, deleting the ISA baseline and the linker
+# flags; `x86-64-v3` already carries AVX2.
 name = "sdf_narrowphase_o9"
 harness = false
 
@@ -131,3 +135,27 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+# KE16: the physics consumer measured on BOTH dispatch routes. `parallel_solve`
+# and `colored_solve` both drive `solve_colored` from the bench thread (the
+# healthy path: `install` labels it WORKER_ID_DISPATCHER, so the solver's
+# `pool.scope` tasks reach `injector_global`). Production reaches the same call
+# from `physics_solve_colored`, a scheduled system whose body runs ON A WORKER,
+# where the tasks reach `injector_local[wid]` that no sibling polls. This bench
+# runs the identical warmed 10k-contact pyramid step down both routes, plus an
+# empty-schedule control that prices `Schedule::run` itself and the O5
+# single-threaded reference. See benches/ke16_solve_in_system.rs.
+name = "ke16_solve_in_system"
+harness = false
+
+[[bench]]
+# O1 END-TO-END: the gap MEASUREMENT-QUEUE.md §4 names — no bench prices `simd`
+# through a WHOLE `SoftStepSolver` step, so every figure quoted for the switch is a
+# kernel ratio. Runtime-switched A/B (`simd` is a PhysicsConfig field, read per call,
+# so both arms live in ONE binary and there is no between-build drift) over the ~10k
+# pyramid, plus a `o1_widened_fraction` group that measures what fraction of the step
+# the two gated passes actually occupy. Do NOT reconcile its ratio against the
+# circulating 3.8x — that is a kernel number and this is not.
+name = "simd_end_to_end"
+harness = false

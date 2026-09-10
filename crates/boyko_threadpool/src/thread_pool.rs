@@ -3,9 +3,11 @@
 //!
 //! Layout follows plan §4.2. Hot atomics live in [`CachePadded`] cells to
 //! avoid false sharing on push/wake paths. Each worker exposes a
-//! [`Stealer`] in a global registry, plus a local [`Injector`] that other
-//! workers / the dispatcher can target for cache-friendly enqueuing
-//! (plan §2.7 / Round 2 C2).
+//! [`Stealer`] in a global registry, and every spawn — a worker's own
+//! included — lands either on a registered deque or in the global
+//! [`Injector`], so no task in the pool is reachable by one thread alone.
+//! Each worker also carries a per-worker `Injector` slot that nothing
+//! currently feeds or drains; see `PoolInner::injector_local`.
 //!
 //! ## Phase 9.3b — the handle/inner split (decision E)
 //!
@@ -37,6 +39,7 @@ use crossbeam_utils::CachePadded;
 
 use crate::scope::{Scope, ScopeShared};
 use crate::sync::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use crate::task::Task;
 use crate::tls;
 use crate::worker::worker_main;
 
@@ -56,31 +59,6 @@ pub const MAX_WORKERS: usize = 64;
 // this crate and cannot name `MAX_WORKERS`. A comment on either side would
 // record the equality; only this makes breaking it a build failure.
 const _: () = assert!(boyko_diag::lane::LANE_WORKER_MAX as usize == MAX_WORKERS);
-
-/// One unit of work submitted to the pool. `body` is the actual closure;
-/// it is heap-allocated so that the deque entries remain word-sized.
-///
-/// The `Send` bound on `body` is sufficient at the type level; the pool
-/// upholds the 'static erasure via [`Scope`]'s `Drop` blocking contract
-/// (plan §4.5.6).
-pub struct TaskHandle {
-    pub(crate) body: Box<dyn FnOnce() + Send + 'static>,
-}
-
-impl TaskHandle {
-    /// Wrap a closure into a heap-allocated task handle. Used by
-    /// [`Scope::spawn`] and [`ThreadPool::spawn`].
-    #[inline]
-    pub(crate) fn new(body: Box<dyn FnOnce() + Send + 'static>) -> Self {
-        Self { body }
-    }
-
-    /// Consume the handle and run the closure.
-    #[inline]
-    pub(crate) fn run(self) {
-        (self.body)();
-    }
-}
 
 /// Per-worker control block. Wrapped in [`CachePadded`] by the pool so that
 /// idle/unpark traffic on worker `i` doesn't false-share with worker `j`.
@@ -121,17 +99,37 @@ struct WorkerJoin {
 #[repr(C)]
 pub struct PoolInner {
     /// Global injector. The dispatcher (or any non-worker thread) pushes
-    /// here; workers drain it in stage 2 of `worker_main`.
-    pub(crate) injector_global: CachePadded<Injector<TaskHandle>>,
+    /// here; every worker drains it as the SECOND source of `worker_main`'s
+    /// poll order (own deque → global injector → sibling steal).
+    ///
+    /// "The joiner" is two functions (`scope::join_workers_until_drained`
+    /// dispatches on the one identity predicate) and this queue sits at a
+    /// different rank in each. The worker joiner — a registered worker of THIS
+    /// pool, joining from inside a task body — polls own deque → here → sibling
+    /// sweep, so SECOND again but for a different reason: what it drains first
+    /// is its own DEQUE, not an injector. The external joiner — the dispatcher,
+    /// an unattached thread, or a worker of another pool — polls here → sibling
+    /// sweep, so FIRST, and takes one task per probe rather than a batch.
+    pub(crate) injector_global: CachePadded<Injector<Task>>,
 
-    /// Per-worker local injectors. A worker pushes inner-spawn tasks to
-    /// `injector_local[worker_id]` for cache locality; siblings still see
-    /// them via the local-injector poll in stage 1.5 of `worker_main`.
-    pub(crate) injector_local: Arc<[CachePadded<Injector<TaskHandle>>]>,
+    /// Per-worker local injectors: `injector_local[worker_id]` is worker
+    /// `worker_id`'s private inbox. **Nothing feeds it and nothing drains it.**
+    /// A worker's own spawns go to its own REGISTERED deque
+    /// (`worker::push_on_lane_no_wake`), so a sibling can steal them; the
+    /// sibling scan walks `stealers`, which holds deques only; and neither
+    /// joiner has a slot here to drain. The queues are allocated per worker in
+    /// `ThreadPoolBuilder::build` and stay empty for the life of the pool.
+    ///
+    /// The field is retained, empty, pending a decision on removing it:
+    /// dropping it changes `PoolInner`'s shape and the pool's boot allocations,
+    /// which is a structural call and not a consequence of the placement rule
+    /// above.
+    #[allow(dead_code)]
+    pub(crate) injector_local: Arc<[CachePadded<Injector<Task>>]>,
 
     /// Per-worker stealers. Index `i` is the [`Stealer`] for worker `i`'s
     /// Chase-Lev deque. Workers steal from siblings in randomized order.
-    pub(crate) stealers: Arc<[Stealer<TaskHandle>]>,
+    pub(crate) stealers: Arc<[Stealer<Task>]>,
 
     /// Per-worker handles (thread handle for `unpark`).
     pub(crate) workers: Arc<[CachePadded<WorkerHandle>]>,
@@ -173,14 +171,65 @@ impl PoolInner {
         self.worker_count as usize
     }
 
+    /// The count-gated wake target (W-d′) for a scope opened HERE, or null when
+    /// its joiner will be external.
+    ///
+    /// `KE16-DESIGN-W.md` §3.2 spells this function `worker_wake_handle` and
+    /// gives it a `lane: Option<WorkerLane>` parameter; it is named and shaped
+    /// differently here because the predicate call lives INSIDE, so both
+    /// scope-creation sites below ask one question of one function. The name is
+    /// written out in this sentence so a grep from either side — the design's
+    /// name or the code's — reaches this definition.
+    ///
+    /// The answer is the lane's `WorkerHandle.thread`, which is a
+    /// `std::thread::Thread` — and under `cfg(not(loom))`
+    /// `crate::sync::WakeHandle` IS that type, so this is a plain `&Thread as
+    /// *const Thread`: no deref, no cast through another type, no allocation,
+    /// and a pointee `PoolInner` owns and keeps alive for as long as any task of
+    /// this pool can run.
+    ///
+    /// The lane comes from `tls::worker_lane_for`, the ONE identity predicate
+    /// (`KE16-DESIGN-A.md` §1.1), so its `wid` is `< worker_count` by
+    /// construction and cannot be the dispatcher sentinel: an `install` frame on
+    /// a same-pool worker rewrites `LANE_DEPOSIT.wid` to `WORKER_ID_DISPATCHER`
+    /// before the scope is opened, the predicate answers `None`, and that scope
+    /// is external — the same answer `push_task` gives that frame.
+    #[cfg(not(loom))]
+    #[inline]
+    fn joiner_wake_target(&self) -> *const crate::sync::WakeHandle {
+        match tls::worker_lane_for(self) {
+            Some(lane) => {
+                debug_assert!((lane.wid as usize) < self.workers.len());
+                &self.workers[lane.wid as usize].thread as *const crate::sync::WakeHandle
+            }
+            None => core::ptr::null(),
+        }
+    }
+
+    /// The W-d′ target under loom: always null, so
+    /// `ScopeShared::complete_task` takes its unconditional
+    /// unpark-before-decrement path.
+    ///
+    /// This is the ONE `cfg(loom)` pair in production code, and it is never
+    /// executed: no `PoolInner` can be built under loom (the pool is
+    /// crossbeam-coupled and loom-opaque, `crate::sync`'s scope note), so no
+    /// scope is opened through this path. The M1c model constructs a
+    /// `ScopeShared` directly with a model-owned target. Same
+    /// compiles-never-runs status as the `crate::sync::thread::current()` waker
+    /// calls below.
+    #[cfg(loom)]
+    #[inline]
+    fn joiner_wake_target(&self) -> *const crate::sync::WakeHandle {
+        core::ptr::null()
+    }
+
     /// Push a task onto the pool from outside any scope. Backing
     /// implementation of [`ThreadPool::spawn`].
     pub(crate) fn spawn<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        let task = TaskHandle::new(Box::new(f));
-        crate::worker::push_task(self, task);
+        crate::worker::push_task(self, Task::new_detached(f));
     }
 
     /// Backing implementation of [`ThreadPool::install`]. Runs on the
@@ -221,7 +270,15 @@ impl PoolInner {
         // `crate::sync::thread::current()` so the captured waker `Thread`
         // matches `ScopeShared.waker`'s type under both backends (loom routes
         // park/unpark through its own `Thread`).
-        let shared = Box::new(ScopeShared::new(crate::sync::thread::current()));
+        //
+        // The W-d′ target is asked for AFTER the `InstallGuard` frame has
+        // rewritten `LANE_DEPOSIT.wid` to the dispatcher sentinel, which is why
+        // an `install` on a same-pool worker is an EXTERNAL joiner here and gets
+        // a null target — the same answer `push_task` gives that frame.
+        let shared = Box::new(ScopeShared::new(
+            crate::sync::thread::current(),
+            self.joiner_wake_target(),
+        ));
         // SAFETY (scope lifetime erasure to '_):
         //   The scope is dropped before this function returns; Drop
         //   blocks until every spawned task has completed (or has
@@ -265,8 +322,13 @@ impl PoolInner {
         };
 
         // See `install`: shimmed `current()` so the waker `Thread` type matches
-        // `ScopeShared.waker` under the loom backend.
-        let shared = Box::new(ScopeShared::new(crate::sync::thread::current()));
+        // `ScopeShared.waker` under the loom backend. This is the route-(b)
+        // entry — a worker body opening a nested scope — so the W-d′ target is
+        // non-null here whenever the caller really is a worker of this pool.
+        let shared = Box::new(ScopeShared::new(
+            crate::sync::thread::current(),
+            self.joiner_wake_target(),
+        ));
         let scope = Scope::new(self, shared);
 
         let result = f(&scope);
@@ -361,6 +423,19 @@ impl ThreadPool {
     #[inline]
     pub fn num_threads(&self) -> usize {
         self.inner.num_threads()
+    }
+
+    /// A snapshot of the idle bitset: bit `i` is 1 iff worker `i` was parked or
+    /// about to park at the moment of the load (KE16 App-11).
+    ///
+    /// Read-only diagnostics — one `Acquire` load, pairing with the `Release`
+    /// `fetch_or` in `mark_idle` so a set bit implies that worker's publish is
+    /// visible. The value is stale the instant it is returned; it is a receipt
+    /// for occupancy instruments ("who was asleep while this wave ran"), never a
+    /// scheduling input.
+    #[inline]
+    pub fn parked_mask(&self) -> u64 {
+        self.inner.idle.load(Ordering::Acquire)
     }
 
     /// Read the active pool for the current thread (the one set by the
@@ -494,11 +569,16 @@ impl Drop for ThreadPool {
 // SAFETY (Send/Sync for ThreadPool / PoolInner):
 //   Every field is either trivially Send/Sync (Arc, atomics, Mutex,
 //   plain `u32`) or a `CachePadded<...>` wrapper around such a type.
-//   `Injector<TaskHandle>`, `Stealer<TaskHandle>`, and `Worker<TaskHandle>`
-//   are Send/Sync per crossbeam-deque's public contracts (verified in
-//   crossbeam-deque 0.8 docs). `TaskHandle::body` is `Box<dyn FnOnce + Send
-//   + 'static>` so the queues' element types are Send. No interior
-//   `!Send`/`!Sync` field exists.
+//   `Injector<Task>`, `Stealer<Task>`, and `Worker<Task>` are Send/Sync per
+//   crossbeam-deque's public contracts (verified in crossbeam-deque 0.8 docs)
+//   FOR A `T: Send`, which `Task` is by the `unsafe impl` in `src/task/mod.rs` --
+//   read THAT clause rather than this line, because with a raw payload address
+//   plus a monomorphized `unsafe fn(*const ())` the obligation is about the CELL
+//   the address names (written before the publishing push, never written again,
+//   body type bounded `Send` at both constructors) and no field type can carry
+//   it. This paragraph used to name `TaskHandle::body: Box<dyn FnOnce + Send +
+//   'static>`; a SAFETY comment justifying a type that no longer exists is worse
+//   than none. No interior `!Send`/`!Sync` field exists.
 //
 //   `PoolInner` MUST be Send + Sync because the `Arc<PoolInner>` is shared
 //   between the spawning thread and every worker thread (and the ambient-pool
@@ -587,23 +667,30 @@ impl ThreadPoolBuilder {
 
         // Crossbeam workers must be constructed up-front so that we can
         // publish the corresponding stealers into a shared registry before
-        // any worker_main runs. We hand the `Worker<TaskHandle>` to the
+        // any worker_main runs. We hand the `Worker<Task>` to the
         // worker thread by move (it's not Sync).
-        let mut deques: Vec<Worker<TaskHandle>> = Vec::with_capacity(worker_count);
-        let mut stealers: Vec<Stealer<TaskHandle>> = Vec::with_capacity(worker_count);
+        let mut deques: Vec<Worker<Task>> = Vec::with_capacity(worker_count);
+        let mut stealers: Vec<Stealer<Task>> = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
-            let w: Worker<TaskHandle> = Worker::new_fifo();
+            // FIFO owner end (`KE16-DESIGN-A.md` §1.4, App-2): the owner pops
+            // the OLDEST entry it pushed, and a thief takes a whole batch for
+            // one SeqCst CAS. The owner pays for that with a contended
+            // `front.fetch_add` per pop — a LIFO owner end would trade it away
+            // and charge the thief one CAS per stolen ELEMENT instead. Which
+            // end the owner pops is observable from a task body, so the choice
+            // is a behavioural contract, not a constructor-name detail.
+            let w: Worker<Task> = Worker::new_fifo();
             stealers.push(w.stealer());
             deques.push(w);
         }
-        let stealers: Arc<[Stealer<TaskHandle>]> = stealers.into();
+        let stealers: Arc<[Stealer<Task>]> = stealers.into();
 
-        let mut injector_local_vec: Vec<CachePadded<Injector<TaskHandle>>> =
+        let mut injector_local_vec: Vec<CachePadded<Injector<Task>>> =
             Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             injector_local_vec.push(CachePadded::new(Injector::new()));
         }
-        let injector_local: Arc<[CachePadded<Injector<TaskHandle>>]> = injector_local_vec.into();
+        let injector_local: Arc<[CachePadded<Injector<Task>>]> = injector_local_vec.into();
 
         // Workers are created lazily — we need their `Thread` handles to
         // populate `inner.workers`, which means we must spawn the threads,

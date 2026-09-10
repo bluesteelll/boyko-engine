@@ -1,5 +1,29 @@
 # Asset system rework — assets-as-components + VM-native store + full streaming
 
+> **Gaia note (added 2026-08-29) — this plan's ground stands; Gaia adds requirements ON it, and
+> owns the authoring half.** [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) is the data language for
+> scenes, UI documents and the DataAsset/DataTable analog, and it **absorbs the scene-format
+> pipeline** (own text → build-time bake → binary, zero runtime reflection). It does not replace the
+> runtime asset system specified here — its D1/S1 decisions are untouched — but three of its
+> findings land squarely on this document, all of them **open, none decided**:
+>
+> - **The handles this plan carries are process-local.** `MeshHandle(u32)` / `MaterialHandle(u16)`
+>   are POB integers that blit a **process-local slot**, so a baked reference passes every loud
+>   refusal and is meaningless after a restart — recorded as "the single most dangerous finding for
+>   scenes" ([`gaia/DECISIONS.md`](gaia/DECISIONS.md) §What the inventory found, item 2). Cure:
+>   stable asset ids in the binary plus a bake lint (`GN1`) banning the raw form.
+> - **A loaded scene's assets sit at refcount 0.** The loader runs no hooks, so the refcount
+>   lifetime owner this plan installs never fires for load-path spawns — every mesh of a loaded
+>   scene is retirable mid-game. That is item (v) of ballot **F4**, and kernel request **GK-3** (a
+>   specified post-load fixup seam).
+> - **Streaming acquires an authoring-side counterpart.** Gaia's **G6** emits a cell catalog from
+>   day one, with `load_cell` / unload and a cross-load object-id → `Entity` map (**GK-1**, a
+>   generalization of `LoadEntityMap`) sequenced behind ballot **F5**.
+>
+> The byte format underneath both is unchanged: Gaia's baker **prints the existing
+> `boyko_serialize` format** — see [SERIALIZATION-PLAN.md](SERIALIZATION-PLAN.md), which carries its
+> own Gaia note.
+
 Status: **DESIGN LOCKED (2026-07-10)** — v2 architecture + delta-fixes below. Owner-approved
 direction (assets-as-components, S1 VM-native shared store, full-streaming scope). Supersedes the
 committed A0–A3b `Assets<T>`-on-`std::Vec` + `Box<dyn Any>` foundation (Principle-0/1 violations).

@@ -158,6 +158,23 @@ pub(crate) fn select_clone_ids(
     component_registry::for_each_required_id_excluding(
         &cloned_set_snapshot[..cloned_len],
         |req_id| {
+            // KE11 — the same non-signature screen the CLONED-id walk above
+            // already does at its own `is_signature_storage` test. A required
+            // dense / bitset id owns no per-archetype pool, and every id that
+            // enters `target_ids` without `copy_from_source` is planned as a
+            // `CloneColumnSrc::Reconstruct` written through `get_pool_mut(id)` —
+            // which would return `None` and panic on a poolless id.
+            //
+            // NOT SOLVED HERE, and deliberately named: whether a clone should
+            // additionally CONSTRUCT a missing required dense component is a
+            // separate scope call. Today `materialize_dense_memberships` copies
+            // only the memberships the SOURCE already has, so a clone of an
+            // entity that legitimately holds the required dense component keeps
+            // it; a clone whose source is missing it stays missing it, exactly as
+            // before. This screen removes a panic, it does not add a construct.
+            if !component_registry::is_signature_id(req_id) {
+                return;
+            }
             if target_ids[..target_len].contains(&req_id) {
                 return; // already in the target set (present⇒skip)
             }
@@ -519,6 +536,10 @@ fn materialize_clone_into(
             let target: &mut Archetype = &mut *target_ptr;
             target.entity_ids.push(entity.id());
             target.current_index = new_row + 1;
+            // KE6 write site 4/9 — inside the same confined `&mut Archetype`
+            // reborrow as the `current_index` advance, so the D2 exclusivity
+            // ground is the one already argued for that write.
+            target.stamp_arch_added(current_tick);
         }
         guard.disarm();
         // <-- the guard (now disarmed) drops harmlessly at the block close.

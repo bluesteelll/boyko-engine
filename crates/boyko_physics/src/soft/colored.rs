@@ -989,10 +989,11 @@ fn dispatch_color<F>(
     // the result still matches the single-threaded path exactly.
     let dispatched = try_with_active_pool(|pool| {
         // Emit MORE, work-balanced chunks than lanes so the work-stealing pool
-        // equalizes the lanes. The dispatcher lane work-steals too, so the lane pool
-        // is `num_threads + 1`. Bit-identity is chunk-count/shape-independent (a pure
-        // perf knob).
-        let lanes = pool.num_threads() + 1;
+        // equalizes the lanes. KE16 App-1: the lane pool is `num_threads()`, never
+        // `+ 1` — on the production route the thread that calls `pool.scope` IS one
+        // of the W workers; the `+ 1` counted the BENCH route's external joiner.
+        // Bit-identity is chunk-count/shape-independent (a pure perf knob).
+        let lanes = pool.num_threads();
         let total = hi - lo;
         let n_chunks = (lanes * CHUNKS_PER_WORKER).clamp(1, total);
         let target = total.div_ceil(n_chunks).max(1);
@@ -1028,14 +1029,21 @@ fn dispatch_color<F>(
         #[cfg(debug_assertions)]
         let csr_before = graph.csr_shape();
 
+        // KE16 App-4: the color's chunks go out through ONE `spawn_batch` call.
+        // The batch is still one `spawn` per chunk — each body takes its own
+        // `pending` RMW and its own wake decision (scope.rs) — so `n_waves` is
+        // not a count that gets registered, it is the promised UPPER BOUND on the
+        // bodies the iterator yields. `target >= 1`, so it is the closed form of
+        // the `while chunk_lo < hi` walk it replaces and the chunk bounds are
+        // unchanged (bit-identity is chunk-count/shape-independent either way).
+        let n_waves = total.div_ceil(target);
+
         pool.scope(|scope| {
-            let mut chunk_lo = lo;
-            while chunk_lo < hi {
-                let chunk_hi = (chunk_lo + target).min(hi);
-                debug_assert!(chunk_lo < chunk_hi, "invariant: a CSR chunk is non-empty");
-                let task_lo = chunk_lo;
-                let task_hi = chunk_hi;
-                scope.spawn(move || {
+            scope.spawn_batch(n_waves, (0..n_waves).map(|chunk| {
+                let task_lo = lo + chunk * target;
+                let task_hi = (task_lo + target).min(hi);
+                debug_assert!(task_lo < task_hi, "invariant: a CSR chunk is non-empty");
+                move || {
                     // SAFETY (cross-worker disjoint aliasing — the SP4 D5 soundness
                     //   argument, mirroring the rigid per-spawn block colored.rs:1935):
                     //   - `ptrs` names the live `SoftBody`'s columns + the
@@ -1078,9 +1086,8 @@ fn dispatch_color<F>(
                         let ci = unsafe { ptrs.color_item_at(s) };
                         solve_one(cols, ci);
                     }
-                });
-                chunk_lo = chunk_hi;
-            }
+                }
+            }));
         });
 
         // F5 invariant pin (post-join): `pool.scope`'s Drop has joined every

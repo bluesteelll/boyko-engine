@@ -28,6 +28,7 @@ use std::ptr::NonNull;
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::bundle::Bundle;
+use crate::ecs::core::bundle::bundle_column_cache::DENSE_POOL_SENTINEL;
 use crate::ecs::core::commands::command::Command;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::component_registry;
@@ -225,7 +226,10 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
         // reborrows drop (the bytes are consumed inside the closure where they
         // are live; the fire is deferred to the safe world_ptr window). Empty for
         // a table-only bundle (the 0%-gate: `dense_mask == 0`).
-        let mut dense_fire_buf = [crate::ecs::identifiers::primitives::ComponentId(0); MAX_BUNDLE_ARITY];
+        // KE11 widened the buffer from `MAX_BUNDLE_ARITY` to [`MAX_DENSE_FIRE`]:
+        // Step 7c appends the CONSTRUCTED dense required ids to the same buffer,
+        // and bundle arity is not their bound.
+        let mut dense_fire_buf = [crate::ecs::identifiers::primitives::ComponentId(0); MAX_DENSE_FIRE];
         let mut dense_fire_n = 0usize;
         // Dense plan D4: snapshot the world tick BEFORE the closure captures
         // `&mut world.dense_registry` (the closure cannot re-borrow `world`).
@@ -255,7 +259,7 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
                 let store = world_ref.dense_registry.store_mut(_id);
                 store.insert(self_entity_id, bytes, dense_current_tick);
                 store.mark_arch_present(archetype_id);
-                debug_assert!(dense_fire_n < MAX_BUNDLE_ARITY);
+                debug_assert!(dense_fire_n < MAX_DENSE_FIRE);
                 dense_fire_buf[dense_fire_n] = _id;
                 dense_fire_n += 1;
                 canonical_idx += 1;
@@ -307,6 +311,14 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
             "required_missing / required_pool_ids length mismatch",
         );
         for (entry, &pool_idx) in required_missing.iter().zip(required_pool_ids.iter()) {
+            // KE11: a DENSE required id carries the sentinel — it has no
+            // archetype column at all. Its construct-and-commit is Step 7c
+            // below, which runs where `&mut EcsMaster` (and therefore the
+            // `DenseStore`) is reachable. For a table-only require set this test
+            // is never true (the 0%-gate).
+            if pool_idx == DENSE_POOL_SENTINEL {
+                continue;
+            }
             // SAFETY (mirrors the bundle write above; Feature 1 D5):
             //   - `pool_idx.0 < pools.len()` — resolved at cache install time
             //     against the same archetype (`resolve_required_missing`).
@@ -329,11 +341,78 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
         // ── Step 6: archetype-side bookkeeping ────────────────────────
         archetype.entity_ids.push(entity.id());
         archetype.current_index = row + 1;
+        // KE6 write site 8/9 — `&mut Archetype`, the same borrow the
+        // `current_index` advance above uses (its last use, per the Step-8
+        // note below).
+        archetype.stamp_arch_added(current_tick);
 
         // ── Step 7: fast-store registration ────────────────────────────
         world
             .entity_master
             .register_entity_with_ptr(entity, archetype_ptr, row as u32);
+
+        // ── Step 7c (KE11): DENSE required-component construct-and-commit ──
+        // The Step-5b table pass skipped every sentinel-marked entry; this pass
+        // is their commit. Placement is forced by three constraints already
+        // stated in this file:
+        //   * the `&mut Archetype` reborrow (`archetype`) must be DEAD before any
+        //     `&mut world` is taken — its last use is `stamp_arch_added` in
+        //     Step 6 (SAFETY-1);
+        //   * the entity must be REGISTERED (Step 7) before `apply_attach_flags_for`
+        //     can resolve its inland, and before any hook fires;
+        //   * KE10 requires flags applied BEFORE the fires — the Step-8b window
+        //     below is where these ids fire, so the flags go here.
+        // No scratch is needed: `required_missing` / `required_pool_ids` are
+        // `&'static` and re-walkable.
+        //
+        // `apply_attach_flags_for` (KE10) is called explicitly rather than left to
+        // Step 7b's `apply_attach_flags_all`. `apply_attach_flags_all` walks the
+        // archetype's RETAINED `component_ids`, which USUALLY carries a dense id
+        // (D0 retention — `cold_register_bundle_archetype` puts the required id in
+        // the expansion and `create_by_ids` keeps it) — but archetype IDENTITY
+        // keys on the FILTERED signature mask, so `get_or_create_archetype` may
+        // hand back an archetype minted EARLIER from a table-only id list, whose
+        // `component_ids` never had the dense id in it. Retention is therefore a
+        // race, and the explicit call is the half that does not depend on winning
+        // it. When retention did win, the two applications are idempotent (the
+        // same bits, the same values) — `apply_flags_declared_by` is a pure
+        // set/clear per declared flag.
+        //
+        // 0%-gate: `required_missing` is empty for a require-free bundle, and for
+        // a table-only require set every `pool_idx` fails the sentinel test.
+        for (entry, &pool_idx) in required_missing.iter().zip(required_pool_ids.iter()) {
+            if pool_idx != DENSE_POOL_SENTINEL {
+                continue;
+            }
+            let store = world.dense_registry.store_mut(entry.component_id);
+            // SAFETY (U5): `entry.ctor` is the registry-paired ctor for
+            //   `entry.component_id` (the `RequiredEntry` pairs them by
+            //   construction in `build_required_plan`), and `store_mut` was
+            //   called with THAT SAME id — so the store's column carries exactly
+            //   the layout the ctor writes. The entity is absent from this store
+            //   (`resolve_required_missing` emits only ids the bundle does not
+            //   supply, and this is the entity's first frame), which is
+            //   `insert_with_ctor`'s debug-asserted precondition.
+            unsafe { store.insert_with_ctor(entity.id(), entry.ctor, dense_current_tick) };
+            // D3 candidate-archetype seed. Omitting this produces no panic and no
+            // assert — it produces a mixed dense query that silently MISSES this
+            // entity, so it is not optional.
+            store.mark_arch_present(archetype_id);
+            world.apply_attach_flags_for(entity, &[entry.component_id]);
+            if dense_fire_n >= MAX_DENSE_FIRE {
+                dense_fire_overflow_panic(dense_fire_n);
+            }
+            dense_fire_buf[dense_fire_n] = entry.component_id;
+            dense_fire_n += 1;
+        }
+
+        // ── Step 7b (KE10): initial enable-bit states ───────────────────
+        // Applied BEFORE the fires so an `on_add` hook observes the initial
+        // state and can override it (same ordering as `EcsMaster::create_entity`).
+        // On a spawn every signature id is newly attached. Gated on
+        // `ArchetypeFlags::FLAGS_ON_ATTACH` — one `u16` test when no component
+        // in the process declares `flags (…)`.
+        world.apply_attach_flags_all(entity);
 
         // ── Step 8 (Phase 14a §3.1): fire on_add / on_insert hooks ──────
         // The closure's per-invocation `&mut *archetype_ptr` (Step 5) dropped
@@ -436,3 +515,34 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
 /// in step with the derive macro's per-bundle arity check.
 /// Phase 22: kept in lock-step with the derive macro's ceiling (16).
 const MAX_BUNDLE_ARITY: usize = 16;
+
+/// KE11 — capacity of the spawn path's deferred dense-fire buffer.
+///
+/// The buffer holds two populations that Step 8b fires together:
+///   * the bundle's OWN dense ids — bounded by [`MAX_BUNDLE_ARITY`];
+///   * the CONSTRUCTED dense required ids (Step 7c) — whose true bound is the
+///     transitive `#[require]` closure, an archetype-level concern with the
+///     much larger `MAX_MIGRATION_COLUMNS` (512) ceiling.
+///
+/// Sizing to that true bound would put a 4 KiB array on the stack frame of
+/// EVERY spawn, require-free ones included, to serve a set that is empirically
+/// zero or one. So this is a deliberate, DIAGNOSABLE ceiling instead: 16 more
+/// slots than the bundle half, with [`dense_fire_overflow_panic`] naming the
+/// constant and the remedy. Raising it is a one-line change; the alternative
+/// (a bare index panic with no message) is a worse diagnostic than the two
+/// `.expect`s KE11 exists to remove.
+const MAX_DENSE_FIRE: usize = MAX_BUNDLE_ARITY * 2;
+
+/// KE11 — cold fail-loud site for [`MAX_DENSE_FIRE`] exhaustion.
+#[cold]
+#[inline(never)]
+fn dense_fire_overflow_panic(n: usize) -> ! {
+    panic!(
+        "SpawnAtCommand: dense-fire buffer exhausted at {n} entries (ceiling \
+         MAX_DENSE_FIRE = {MAX_DENSE_FIRE}). One spawn carried more dense components — \
+         the bundle's own plus its transitively-#[require]d ones — than the deferred \
+         on_add/on_insert buffer holds. Raise MAX_DENSE_FIRE in \
+         `commands/spawn_at_command.rs`; it is a stack-frame budget, not a \
+         correctness bound."
+    )
+}

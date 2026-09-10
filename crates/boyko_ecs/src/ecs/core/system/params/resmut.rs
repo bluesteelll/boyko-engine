@@ -78,6 +78,8 @@ pub struct ResMutState<R: Resource> {
 //     alongside a `ResMut<R>`) for the same id can co-exist past init.
 //   - SP4: `init_state` mutates no registry.
 unsafe impl<'a, R: Resource> SystemParam for ResMut<'a, R> {
+    const HAS_DEFERRED: bool = false;
+
     type State = ResMutState<R>;
     type Item<'w, 's> = ResMut<'w, R>;
 
@@ -132,6 +134,65 @@ unsafe impl<'a, R: Resource> SystemParam for ResMut<'a, R> {
         //   `'w`, bounded by the world's borrow scope; exclusivity is
         //   upheld by the access protocol.
         ResMut(unsafe { &mut *(ptr as *mut R) })
+    }
+}
+
+// ── Option<ResMut<R>> (Aether v2 KE4, rung R1) ──────────────────────────────
+
+// SAFETY (SP1, SP2, SP4): mirror of the `Option<Res<R>>` impl in `res.rs` with
+//   a WRITE declaration and a `&mut R` mint.
+//   - SP1: `init_access` declares the SAME resource write as `ResMut<R>`. The
+//     declaration must not soften just because the value may be absent —
+//     presence is a runtime fact, the conflict graph is static. See the
+//     `Option<Res<R>>` block for the full argument.
+//   - SP2: the `Some` branch mints `&mut R` for exactly the declared id;
+//     exclusivity is upheld by the access protocol.
+//   - SP4: `init_state` mutates no registry and reuses `ResMutState<R>`, so the
+//     Option wrapper carries no extra per-system state.
+unsafe impl<'a, R: Resource> SystemParam for Option<ResMut<'a, R>> {
+    const HAS_DEFERRED: bool = false;
+
+    type State = ResMutState<R>;
+    type Item<'w, 's> = Option<ResMut<'w, R>>;
+
+    #[inline]
+    fn init_state(_world: &mut EcsMaster, _system_meta: &mut SystemMeta) -> Self::State {
+        ResMutState {
+            id: R::resource_id(),
+            _marker: PhantomData,
+        }
+    }
+
+    fn init_access(
+        state: &Self::State,
+        _system_meta: &mut SystemMeta,
+        access_set: &mut FilteredAccessSet,
+        _world: &mut EcsMaster,
+    ) {
+        access_set
+            .add_resource_write(state.id, std::any::type_name::<Self>())
+            .unwrap_or_else(|conflict| intra_system_conflict_panic(conflict));
+    }
+
+    #[inline]
+    unsafe fn get_param<'w, 's>(
+        state: &'s mut Self::State,
+        _system_meta: &SystemMeta,
+        world: UnsafeEcsCell<'w>,
+    ) -> Self::Item<'w, 's> {
+        // SAFETY (SP1, SP2, U_C3): `init_access` declared a write of `state.id`;
+        //   the protocol guarantees no `Res<R>` / `ResMut<R>` for the same id is
+        //   live concurrently. The cell was minted via `new_mutable`
+        //   (debug-asserted inside `resources_mut`); by-value receiver, no
+        //   `&self` retag.
+        let resources = unsafe { world.resources_mut() };
+        // The KE4 difference: the absent slot is an answer, not a panic.
+        let ptr = resources.get_mut_ptr_by_id(state.id)?;
+        // SAFETY (SP2): `ptr` was minted from a populated slot bound to `R` at
+        //   insert time (R1); `ResMutState<R>` ties `state.id` to `R` at the type
+        //   level. The `&mut` borrow's lifetime is `'w`; exclusivity is upheld
+        //   by the access protocol.
+        Some(ResMut(unsafe { &mut *(ptr as *mut R) }))
     }
 }
 

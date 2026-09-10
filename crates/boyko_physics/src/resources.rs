@@ -68,6 +68,45 @@ pub enum BroadphaseSelectMode {
     Auto,
 }
 
+/// Which kernel the box-vs-SDF narrowphase
+/// ([`physics_narrowphase_sdf`](crate::systems::physics_narrowphase_sdf)'s box path)
+/// folds the field with (plan O9).
+///
+/// This is a KERNEL selector in the shape of [`BroadphaseKind`] — a single runtime
+/// branch per box body, taken once per body per step, OUTSIDE the 8-corner loop —
+/// and deliberately NOT a `cfg`. Until 2026-09-03 the arm was chosen by
+/// `cfg(target_feature = "avx2")` alone, so enabling the `x86-64-v3` ISA baseline
+/// silently moved every build onto [`Avx2`](Self::Avx2) and its known divergence.
+/// A configuration that changes NUMERICS must be asked for, and asking for it must
+/// be visible in a diff — hence a resource field a reader can grep, not a build
+/// flag nobody reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SdfNarrowphaseKernel {
+    /// The frozen scalar corner-by-corner fold (DEFAULT) — the bit-oracle the
+    /// committed GPU goldens are blessed against, on every build and every ISA.
+    #[default]
+    Scalar,
+    /// The O9 AVX2 batched fold: the 8 corner distances in one
+    /// `sdf_edit_list_x8` call plus one 6-offset
+    /// batch per penetrating corner. Falls back to
+    /// [`Scalar`](Self::Scalar) on a non-AVX2 build and under Miri (the kernel is
+    /// x86-64 + AVX2 only), so selecting it is always legal.
+    ///
+    /// ⚠ **NOT bit-identical to [`Scalar`](Self::Scalar).** The x8 fold and the
+    /// scalar oracle diverge on the SIGN OF ZERO (`+0` where the oracle produces
+    /// `-0`) at a `±0` tie, because `f32::max`/`min` return the first operand on a
+    /// tie while the hardware `MAXPS`/`MINPS` return the second, and `clamp01_x8`'s
+    /// operand swap does not cover every tie site in the fold. The witness is
+    /// adversarial (coordinates near `1e9`, params at `-0.0`) and the manifold-level
+    /// differential still passes, so the practical exposure is small — but it is a
+    /// real divergence from the oracle the GPU goldens are compared against, it is
+    /// invisible to any value comparison (`+0 == -0`), and the fix is owner-deferred
+    /// (2026-09-02). The standing gate is
+    /// `sdf_simd::o9_kernel_tests::x8_bits_eq_scalar_bits_widened_proptest`, kept
+    /// `#[ignore]`d and RED rather than widened to a tolerance.
+    Avx2,
+}
+
 /// Global physics tunables (plan D1; P2 W1 soft-constraint set).
 ///
 /// `gravity`, `substeps`, `relax_iterations`, and the soft-constraint pair
@@ -115,16 +154,25 @@ pub struct PhysicsConfig {
     /// (the O2 0%-correctness gate), `Auto` is result-transparent — it changes the
     /// broadphase, never a physics result bit.
     pub broadphase_select: BroadphaseSelectMode,
-    /// Opt into the O1 AVX2 width-only SoA kernels for the hot per-substep
-    /// `refresh_inertia` (`R · I⁻¹_local · Rᵀ`) and the gravity/position/quaternion
-    /// integrate loop (default `false`). These are a PURE speed path: each AVX2
+    /// Run the O1 AVX2 width-only SoA kernels for the hot per-substep
+    /// `refresh_inertia` (`R · I⁻¹_local · Rᵀ`) and the gravity integrate loop
+    /// (default `true` since 2026-09-03). These are a PURE speed path: each AVX2
     /// lane mirrors the scalar op sequence exactly — exact `mul`/`add`/`sub`/`div`/
     /// `sqrt`, NO FMA contraction, NO `rsqrt`/`rcp` — so the SIMD output is
     /// BIT-IDENTICAL to the scalar path (the `simd_o1` differential proptest is the
-    /// gate). The scalar path stays the default and the bit-oracle (the campaign
-    /// 0%-gate); when this flag is `false`, or on a non-AVX2 build, the solver runs
-    /// the byte-identical scalar kernels. Toggling it changes performance, never
-    /// the result.
+    /// gate). Set it to `false` to run the scalar bit-oracle instead: the two
+    /// produce the same bits, so the flag changes performance, never the result.
+    ///
+    /// It is also a no-op on a non-AVX2 build and under Miri — the dispatchers in
+    /// [`crate::solver::simd`] are `cfg`-gated and take the scalar arm there.
+    ///
+    /// **It does NOT gate the position/quaternion integrate**, which both solvers
+    /// call with a hard-coded `false`: the SoA kernel MEASURED ~1.6× SLOWER on the
+    /// AoS `BodyState` (see the note at the call site in
+    /// [`SoftStepSolver`](crate::solver::SoftStepSolver)). Nor does it gate the O7
+    /// colored solve ([`simd_solve`](Self::simd_solve)) or the box-vs-SDF
+    /// narrowphase kernel ([`sdf_narrowphase`](Self::sdf_narrowphase)) — the latter
+    /// deliberately, because that arm is not bit-identical.
     pub simd: bool,
     /// Opt into the O7 AVX2 cohort-batched colored CONTACT SOLVE (default `false`),
     /// independent of [`simd`](Self::simd) (which gates only the O1 integrate /
@@ -146,6 +194,20 @@ pub struct PhysicsConfig {
     /// OFF so an un-opted world is byte-identical to the O6 colored solve; enabling
     /// the O7 solve needs `simd_solve == true` (it does NOT follow [`simd`](Self::simd)).
     pub simd_solve: bool,
+    /// Which kernel the box-vs-SDF narrowphase folds the field with (default
+    /// [`SdfNarrowphaseKernel::Scalar`] = the frozen scalar oracle).
+    ///
+    /// Read once per box body in
+    /// [`physics_narrowphase_sdf`](crate::systems::physics_narrowphase_sdf); a no-op
+    /// for a world that never registers the SDF stage
+    /// ([`add_physics_sdf`](crate::plugin::add_physics_sdf)).
+    ///
+    /// ⚠ Unlike [`simd`](Self::simd) and [`simd_solve`](Self::simd_solve), which are
+    /// bit-identity-gated pure speed paths, [`Avx2`](SdfNarrowphaseKernel::Avx2) is
+    /// a KNOWN-DIVERGENT arm (`±0`, owner-deferred fix) — read that variant's docs
+    /// before setting it. It is a separate field precisely so that flipping `simd`
+    /// cannot drag the divergence in with it.
+    pub sdf_narrowphase: SdfNarrowphaseKernel,
     /// Opt into the O3 PARALLEL candidate EMIT in the
     /// [`BroadphaseGrid`](BroadphaseGrid) (default `false`).
     ///
@@ -369,14 +431,31 @@ impl Default for PhysicsConfig {
             // Default Manual so the user owns `broadphase` (the P3 0%-gate): the
             // density policy only counts bodies, it never overrides the kind.
             broadphase_select: BroadphaseSelectMode::Manual,
-            // Default OFF so an un-opted world runs the scalar bit-oracle kernels
-            // (the campaign 0%-gate); the SIMD path is a pure opt-in speed path.
-            simd: false,
+            // Default ON since 2026-09-03. The O1 kernels are bit-identity-gated
+            // against their scalar oracles over counts 1..16 including partial tails,
+            // degenerate quaternions and adversarial inputs, and those gates became
+            // NON-VACUOUS for the first time when the `x86-64-v3` baseline landed
+            // (2026-09-02) — before that both O7 test binaries printed
+            // `running 0 tests` and the "green" proved nothing. With the gates
+            // actually executing the AVX2 arms, the campaign 0%-gate is satisfied by
+            // the bit-identity itself rather than by leaving the path unshipped.
+            // On a non-AVX2 build (or under Miri) the dispatchers still take the
+            // scalar arm, so this is a no-op there.
+            simd: true,
             // Default OFF (independent of `simd`) so the colored solve runs the
             // byte-identical scalar `solve_color` oracle (the O6 0%-gate); the O7
             // cohort-batched solve is a pure opt-in speed path with a bit-identical
             // result. Enabling it requires `simd_solve == true` explicitly.
             simd_solve: false,
+            // Default SCALAR because the AVX2 arm is the ONE SIMD path in this crate
+            // that is NOT bit-identical to its oracle: it returns `+0` where the
+            // scalar fold returns `-0` at a `±0` tie (the standing RED gate
+            // `x8_bits_eq_scalar_bits_widened_proptest`; owner-deferred fix,
+            // 2026-09-02). The scalar fold is what the committed GPU goldens were
+            // blessed against, so it is what a default build must run — an ISA flag
+            // must not be able to change a number. Do NOT "optimise" this to Avx2 to
+            // match `simd`; the two flags gate different guarantees.
+            sdf_narrowphase: SdfNarrowphaseKernel::Scalar,
             // Default OFF so an un-opted grid world runs the O2 serial `build`,
             // byte-identical to O2 (the campaign 0%-gate); the parallel emit is a
             // pure opt-in speed path with a bit-identical pair multiset.
@@ -1467,14 +1546,14 @@ impl BroadphaseGrid {
     /// two AABBs, independent of which worker visits it), and the final
     /// `out.sort_unstable()` canonicalizes ORDER.
     ///
-    /// **Production shortcut.** When there is no ambient pool, OR the pool offers a
-    /// single effective lane (`num_threads() + 1 == 1`, i.e. zero worker threads),
-    /// OR the body count is below [`MIN_PARALLEL_BODIES`], this delegates straight
-    /// to the O2 serial [`build`](Self::build) and returns — a single effective lane
-    /// is pure serial work, so the emit-shaped multi-pass dispatch would only add
-    /// overhead (the W=1 regression). The parallel-shaped path is dispatched ONLY
-    /// when there are `>= 2` lanes, `n >= MIN_PARALLEL_BODIES`, and a pool is
-    /// present. Either way the result is byte-identical to `build`.
+    /// **Production shortcut.** When there is no ambient pool, OR the pool has a
+    /// single worker (`num_threads() < 2`), OR the body count is below
+    /// [`MIN_PARALLEL_BODIES`], this delegates straight to the O2 serial
+    /// [`build`](Self::build) and returns — one lane is pure serial work, so the
+    /// emit-shaped multi-pass dispatch would only add overhead (the W=1
+    /// regression). The parallel-shaped path is dispatched ONLY when there are
+    /// `>= 2` lanes, `n >= MIN_PARALLEL_BODIES`, and a pool is present. Either way
+    /// the result is byte-identical to `build`.
     pub fn build_parallel(&mut self, bodies: &[BodyState], out: &mut Vec<(BodyIndex, BodyIndex)>) {
         let n = bodies.len();
 
@@ -1485,13 +1564,19 @@ impl BroadphaseGrid {
             return;
         }
 
-        // Dispatch the parallel-shaped path ONLY when a pool offers >= 2 effective
-        // lanes; a single lane (no worker threads) is pure serial work, so route to
-        // the O2 serial `build` (no shaped-path overhead — eliminates the W=1
-        // regression). When no pool is attached, `try_with_active_pool` returns
-        // `None` and we fall through to the serial `build`.
+        // Dispatch the parallel-shaped path ONLY when a pool offers >= 2 lanes; a
+        // single lane is pure serial work, so route to the O2 serial `build` (no
+        // shaped-path overhead — eliminates the W=1 regression). When no pool is
+        // attached, `try_with_active_pool` returns `None` and we fall through to the
+        // serial `build`.
+        //
+        // KE16 App-1: `lanes` is `num_threads()`, never `+ 1` — the caller of
+        // `pool.scope` is one OF the W workers on the production route. That also
+        // makes this guard LIVE: `num_threads() + 1 < 2` was unreachable
+        // (`num_threads() >= 1`), while `num_threads() < 2` is the real "one worker
+        // ⇒ serial" test.
         let dispatched = try_with_active_pool(|pool| {
-            let lanes = pool.num_threads() + 1;
+            let lanes = pool.num_threads();
             if lanes < 2 {
                 return false;
             }
@@ -1685,14 +1770,22 @@ impl BroadphaseGrid {
         let per = n_cells.div_ceil(n_chunks).max(1);
         match pool {
             Some(pool) => {
+                // `spawn_batch` is one `spawn` per body, so the pooled arm
+                // dispatches exactly the `while c_lo < n_cells` walk of the serial
+                // arm below. `per >= 1`, so this count is that walk's closed form:
+                // the ranges are unchanged, and it is also the upper bound
+                // `spawn_batch` is promised.
+                let n_waves = n_cells.div_ceil(per);
+                let body = &body;
                 pool.scope(|scope| {
-                    let mut c_lo = 0usize;
-                    while c_lo < n_cells {
-                        let c_hi = (c_lo + per).min(n_cells);
-                        let body = &body;
-                        scope.spawn(move || body(c_lo, c_hi));
-                        c_lo = c_hi;
-                    }
+                    scope.spawn_batch(
+                        n_waves,
+                        (0..n_waves).map(move |chunk| {
+                            let c_lo = chunk * per;
+                            let c_hi = (c_lo + per).min(n_cells);
+                            move || body(c_lo, c_hi)
+                        }),
+                    );
                 });
             }
             None => {
@@ -1755,24 +1848,36 @@ impl BroadphaseGrid {
             }
             c_hi
         };
+        // The cut walk as an iterator factory: the chunk boundaries are
+        // data-dependent (they follow the survivor prefix sum), so unlike Pass A's
+        // they have no closed form — the only way to learn a cut is to walk to it.
+        // Factored here rather than written twice so the pooled arm and the serial
+        // arm cannot drift apart.
+        let cuts = || {
+            let next_hi = &next_hi;
+            let mut c_lo = 0usize;
+            core::iter::from_fn(move || {
+                if c_lo >= n_cells {
+                    return None;
+                }
+                let c_hi = next_hi(c_lo);
+                let cut = (c_lo, c_hi);
+                c_lo = c_hi;
+                Some(cut)
+            })
+        };
         match pool {
             Some(pool) => {
+                let body = &body;
                 pool.scope(|scope| {
-                    let mut c_lo = 0usize;
-                    while c_lo < n_cells {
-                        let c_hi = next_hi(c_lo);
-                        let body = &body;
+                    for (c_lo, c_hi) in cuts() {
                         scope.spawn(move || body(c_lo, c_hi));
-                        c_lo = c_hi;
                     }
                 });
             }
             None => {
-                let mut c_lo = 0usize;
-                while c_lo < n_cells {
-                    let c_hi = next_hi(c_lo);
+                for (c_lo, c_hi) in cuts() {
                     body(c_lo, c_hi);
-                    c_lo = c_hi;
                 }
             }
         }
@@ -2770,12 +2875,8 @@ impl IslandSleep {
         // Explicit / config-change wake: clear every row's latch before deciding, so
         // no island can be frozen this frame.
         if self.wake_all {
-            for s in &mut self.asleep {
-                *s = false;
-            }
-            for c in &mut self.below_count {
-                *c = 0;
-            }
+            self.asleep.fill(false);
+            self.below_count.fill(0);
             self.wake_all = false;
         }
 

@@ -32,6 +32,15 @@ the Aether ladder closes*), `c1a9b8ec` (2026-08-31, *the delegated rulings*), `b
 returns false for each). Nothing here overrules the working branch; where the two disagree, KE16 is
 newer by ancestry.
 
+> ⚠ **2026-09-10 — the merge landed, and the two paragraphs above are now HISTORY, not status.**
+> `merge/ke16-into-render` merges `feat/threadpool-ke16` (`02325b01`) into
+> `feat/multi-paradigm-render` (`0c18acfc`). The four ruling commits this entry was written to
+> report — `6f75ee9e`, `c1a9b8ec`, `b7a9931d` and `b6c41237` — **are reachable from this branch
+> now, and their full bodies are in this file below and in**
+> [`gaia/DECISIONS.md`](gaia/DECISIONS.md). The entry is kept exactly as written because it is the
+> record of WHY the sync was needed: read *“this branch never received them”* and *“none of the
+> four is reachable”* as statements about 2026-09-03, not about today.
+
 ⚠ **The single most dangerous cell, now repaired.** [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) and this
 file printed F5's recommendation as **(a)** — *the option the owner rejected*. He chose **(b)**,
 "Все сразу грамотно по списку с самого начала". A reader resuming from this branch would have built
@@ -380,6 +389,243 @@ ruling**, and each is recorded as such at its ballot body below.
 
 ---
 
+## RESOLVED 2026-09-02 — KE16's six owner calls, answered the same day they were asked
+
+**Where the work is.** Worktree `D:/wt/threadpool`, branch `feat/threadpool-ke16`. The design is
+`docs/threadpool/KE16-DESIGN.md` and its five axis files; the measurement plan is
+`KE16-DESIGN-MEASUREMENT.md`. The catalogue behind it (`KE16-DESIGN-SPACE.md`, the `KE16-VARIANTS-*`
+files, `KE16-EVIDENCE.md`) is 99 variants on 35 axes. Eighteen candidates are being built behind
+mutually exclusive cargo features and will be measured one axis at a time; the winner becomes
+unconditional and every feature is deleted in the same pass.
+
+**What the harness established before any fix** (release, 16 workers, this box): a wave spawned from
+inside a worker is *exactly* serial (max-in-flight 1, wall-clock on the serial floor within 1 %);
+`par_iter` inside a scheduled system is 1.00× against 10.82× from the bench thread at 65 536 rows;
+the colored solve on the route that ships is **36.02 ms against 31.52 ms single-threaded** — enabling
+parallel physics as wired today costs 14 % more than leaving it off. Every O-series colored-solve
+number on record was taken on the healthy route the engine does not use.
+
+The six calls below were VALUES or SCOPE. All six are now ruled.
+
+1. **Commit the harness — YES.** The five instrument files and the three `Cargo.toml` hunks carry
+   every number above and ship with the pass. The documentation corpus is committed ahead of the
+   implementation so the design and its evidence exist on a commit while the axes are still in
+   flight; the instruments follow with the code they measure.
+
+2. **The MSDF bake — OPTIMISE IT, do not merely choose a joiner policy for it.** Owner: *"if it can
+   be optimised somehow, optimise it."* Reading the site changed the question.
+   `generate_distance_field` (`crates/boyko_fontbake/src/msdf/distance.rs`) calls `pool.install` from
+   an application thread and spawns `4 × workers` disjoint row bands — 64 tasks at W=16. That is the
+   external-joiner route, and it is the one route where **defect B is live in production today**: the
+   joining bake thread batch-steals up to 33 of those 64 bands into a private unregistered scratch
+   deque and runs them one at a time. The measured signature of that shape on the harness is a
+   33-of-64 serial residue. So the bake is not choosing between "keep a helper" and "lose a lane" —
+   it is currently paying the defect in full, and **both** B candidates improve it. Two consequences,
+   both now design requirements rather than notes:
+   - **The bake gets its own bench row, and it decides B1 versus B3.** The B verdict is no longer
+     settleable on code size: `crates/boyko_fontbake` gains a criterion row over a real glyph on both
+     joiner policies, and whichever is faster on it wins the external arm.
+   - **`spawn_batch` at the bake moves from out-of-scope into the pass.** It was recorded as "a
+     one-line follow-up if `ke16-c-batch` ships"; under this ruling, if that candidate wins its step,
+     the bake is converted in the same pass and re-measured on the same row.
+
+3. **The scheduler-level lever is KE17 — CONFIRMED, "надо будет исправить отдельно".** Lanes draining
+   at different times at the ECS level is the apply-window barrier (`schedule.rs`, the
+   `pending == running` gate), not the pool; system assignment is already dynamic. The row is open in
+   `docs/aether-v2/KERNEL-BACKLOG.md` as of 2026-09-02, work not started, and it is expected to be
+   worked separately after this pass.
+
+4. **Windows timer resolution — RAISE IT.** Owner, after hearing the cost: *"ну давай повысим тогда"*,
+   which overrides the design's earlier refusal. The reasoning is kept so the record of *why*
+   outlives the call: `timeBeginPeriod(1)` raises the timer-interrupt rate, so the CPU wakes more
+   often and cannot settle into deep idle states — idle draw rises and battery life falls. It does
+   **not** make running code faster; it makes a *timed wait* expire close to when it was asked to.
+   Workers here are woken directly by `unpark`, so the timer governs only the lost-wakeup backstop —
+   but at the default ~15.6 ms resolution a lost wakeup costs a whole frame instead of 50 µs, and
+   that is the insurance the owner bought. It ships as **App-12**: a hand-declared `winmm` FFI pair
+   behind an RAII guard that raises 1 ms at host boot and restores it on drop, `#[cfg(windows)]`,
+   living in the host layer (`crates/boyko_app`) because a library must not silently change
+   process-wide state — the pool and the ECS do not call it. It is measured both ways in
+   `crates/boyko_app/tests/app12_timer_resolution.rs`, so the pass reports what the change bought
+   rather than asserting it. The pass still removes the *dependency* on the backstop (count-gated
+   completion); raising the resolution makes the residual window cheap instead of frame-sized. Two
+   prose claims in the tree that nothing calls `timeBeginPeriod` are corrected in the same pass.
+
+5. **A helping joiner may run a sibling system inline — ACCEPTABLE.** A worker joining its own wave
+   can pick up a conflict-free sibling system and run it inside another system's body. Sound by the
+   conflict graph; visible as two overlapping system spans on one lane and interleaved events within
+   one event lane. The in-system guard becomes a depth counter (`App-8`).
+
+6. **Scope of the O-series retake — CONFIRMED.** The shipping-route numbers go into a new
+   `docs/threadpool/KE16-RESULTS.md`; the O6 tables get one dated line pointing there. The O-series
+   documents are not rewritten.
+
+---
+
+## 2026-08-30 — what the adversarial pass found in the rulings above, and the kernel finding that outranks all of them
+
+**Recorded, not repaired.** The rulings in this file landed and their gates are green; two independent
+reviewers then found the items below. They are written here rather than fixed because a repair taken
+on incomplete information generates a second repair — and one of these findings changes the axis
+that F2 was decided on.
+
+### ⚠⚠ KERNEL — every `par_iter` inside a system body runs on ONE thread
+
+Measured 2026-08-30, three independent instruments, release, 16 workers, 16384 rows, ~50 ns/row body:
+
+| arm | ns/row | speedup | max in flight |
+|---|---|---|---|
+| `for_each_chunk`, no pool (reference) | 50.10 | 1.00× | — |
+| `par_for_each_chunk` under `pool.install` | **6.51** | **7.69×** | 16 |
+| `par_iter()` **in a system body** | 49.36 | **1.01×** | — |
+| `par_for_each_chunk` **in a system body** | 48.69 | **1.03×** | **1** |
+
+**Mechanism, one line.** `crates/boyko_threadpool/src/worker.rs:370-371` (`push_task`) sends a task
+spawned *by a worker* into `injector_local[wid]`. Sibling stealing iterates `inner.stealers`, which
+holds the worker **deques** only — **no thread ever polls another thread's local injector.** Work
+spawned from inside a worker is reachable by that worker alone, serial by construction. A system
+body always runs on a worker.
+
+**The query drivers are innocent**: a raw `pool.scope` with zero ECS code, opened from a worker,
+serialises identically.
+
+**Second, independent occupancy defect on the same principle.** Even on the healthy path only
+**4–5 of 16** tasks are ever simultaneously live: `Scope::drop` steals roughly half the wave into a
+private `scratch` deque that has **no registered `Stealer`**, and runs it inline, one at a time.
+Same shape — runnable work parked where nobody can steal it.
+
+**Blast radius.** All four parallel physics sites are on the defect path — `solver/colored.rs:2667`,
+`soft/colored.rs:1031`, `resources.rs:1688`, `:1760` — plus 7 `par_iter_mut` call sites, all in
+system bodies. Render, UI and app have **zero** exposure. ⚠ **The O-series colored-solve speedups
+were measured from a bench thread (dispatcher = the healthy path); production takes the serial one.
+Those numbers must be RE-TAKEN, not re-read.**
+
+**Why three layers of defence all missed it.** `tests/scheduler_par_iter_concurrent_systems.rs`
+asserts no-deadlock and full row coverage and **nothing about threads** (two matches for
+`num_threads`, both in a builder). The one bench on the path, `g3_boyko_par_iter_10k`, has an
+absolute ≤41 µs ceiling with **no single-thread baseline** and a body that is a `fetch_add` on one
+shared static — which runs *faster* serialised. And two doc comments (`thread_pool.rs:128-129`,
+`worker.rs:356`) assert siblings *can* see these tasks "via stage 1.5 of `worker_main`" — **there is
+no stage 1.5**; `colored.rs:2629-2631` likewise assumes a lane pool of `num_threads + 1` where it is
+**1**.
+
+**Inter-system parallelism is unaffected and measured healthy**: four conflict-free systems under
+`Schedule::run` give `max_inflight=4`, `lanes_busy=4`, `top_lane=25.1%`. The two kinds of
+parallelism this engine plans for are both implemented; the between-systems kind works, the
+within-a-system kind does not.
+
+### F2 — the ruling stands but its decisive number was taken at the size that flatters it
+
+`constants.rs:55`: *"Resident floor: one `POOL_MIN_SLAB` (64 KiB) commit per NON-EMPTY column."* A
+table archetype has four non-empty columns ⇒ **256 KiB per table, independent of row count.** F3
+(owner-ruled) admits N table files through one schema, so twenty small tables of 50 rows × 40 B cost
+**~5 MiB resident for 40 KB of payload (~128× overhead)** plus twenty extra archetype mask tests on
+every query, every frame. The rejected resource region loses by ~25 % at 4000 rows and **wins by two
+orders of magnitude at 50**. The ruling never says the choice is size-dependent, and the mechanical
+rule it gives keys on a different property. Marginal cost also mixes units: honest figure is
+**511–704 KiB**, not a flat 511 KiB.
+
+⚠ **And the parallelism finding above removes the axis F2 was partly argued on** — "dense does not
+parallelise" no longer discriminates between the options, because *nothing* parallelises inside a
+system today. F2 must be re-argued on resident memory and access cost.
+
+Internal tension to resolve with it: F2(ii) rejects laziness because *"row constants exist to delete
+a lookup"*, and F2(iii) then makes the runtime handle an `Entity` captured at load — reading a row
+from an `Entity` **is** a lookup (inland resolve + archetype pool). Access cost is priced on neither
+option.
+
+### GK-1 as specified violates Principle 0
+
+`LoadEntityMap` is legitimate **today** because it is a stack local of `load_world` — the named
+"truly transient function-local scratch" exception. GK-1 requirement 4 makes it world-owned in a
+`Resource` with a lifetime spanning every loaded cell, keeping the `Vec` — which converts the
+exception into exactly the durable parallel data system Principle 0 forbids. **The in-tree answer is
+one line away and the ruling already cites the file**: `PathIndex { entries: VmColumn<PathEntry>,
+sorted_len, … }` — VM-native, sorted prefix + unsorted tail, HashMap-free. `(u64, Entity)` is 16 B
+and divides the granule.
+
+### GB-3's dangle check is structurally unreachable downstream of the sigil pass
+
+A dangling asset reference produces **one error-level log line and an otherwise fully-formed,
+unvalidated, refcount-holding entity**: `AssetServer::load` logs `E0801` and returns a live handle in
+the `Failed` state, which it inserts into the path index. `validate_asset_refs` early-returns unless
+`free_epoch` advanced — a never-loaded asset frees nothing, the epoch never moves, and the row is
+**never examined**. A reference kind whose only validator is owed is a silent-wrong-answer generator.
+
+### The shape four of the five blocking findings share
+
+> *A mechanism was verified to EXIST and was not verified to be REACHABLE, or to behave, on the path
+> being ruled about.*
+
+`Construct` exists — for pooled ids. `remap_loaded_entities` exists — for fresh worlds.
+`relationship_on_insert` exists — with a destructive guard that removes the relationship component
+rather than skipping. `apply_attach_flags_*` is absent from the loader and reachable from its drain.
+**The rulings' citations are accurate; what they under-tested is the second question.** This is the
+same question the kernel finding above answers for `par_iter`, from the other side.
+
+### Owner ballots still open
+
+⚠ **DATED NOTE, 2026-09-10 (`merge/ke16-into-render`) — this heading and the paragraph under it are `feat/threadpool-ke16`'s record of 2026-08-30, and are no longer a live list.** GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`. GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`). `F8`, `F10` and `AB-12` are untouched by this note.
+
+**F8** (name-vs-id) and **F10** (bundle expand-or-refuse) — untouched, and no ruling above settles
+either. ~~**GB-5** and **GB-6** carry analyses, deliberately not rulings: the owner asked for
+trade-offs.~~ **AB-12** remains, and blocks nothing.
+
+## 2026-08-30 — the owner's rulings, and the Aether ladder closes
+
+Seven ballots answered by the owner in one session, plus eleven decided by the orchestrator under
+the standing rule that performance and architecture forks are settled with numbers. **Every `AB`
+ballot is now closed except AB-12**, which blocks nothing.
+
+Recorded here as the single index; each ruling's full ground and rejected alternative live at the
+site named in its row.
+
+| ballot | ruling | where the ground lives |
+|---|---|---|
+| **AB-1** | **RATIFIED as specified** — event auto-registration adopted on ergonomic grounds; the STAGE-under-D4 alternative rejected. ⚠ The reopen was licensed because C3's recorded ground — *"the unregistered case fails silently on both ends"* — was **refuted by measurement**: both generated ends are a loud init-time panic. The grant now stands on a stated ground (ergonomics), not on the refuted one | [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) C3 |
+| **AB-6** | **Option (b), and the class split in two.** The ballot's premise was refuted first: hand-written Rust could not do it either, so there was no ratified surface to narrow — only a promise the kernel did not keep. **Dense**: build the construct-and-commit route. **Bitset/flag**: refuse in the **derive**, since a flag has no bytes and `FLAGS_DIRECT` is the mechanism. Refusing in Aether alone was ruled out because it would make Aether reject what the derive accepts | [`aether-v2/KERNEL-BACKLOG.md`](aether-v2/KERNEL-BACKLOG.md) AB-6 + **KE14** |
+| **AB-7** | **R-DENSE LIFTED, and the ballot's framing rejected.** Owner: *"that there is no parallelism is just wrong."* The candidate driver-independent ground had already been measured and **refuted on both conjuncts**; the owner then declined to treat the driver limitation as a constraint at all. Measured: the refusal is a `const assert` whose own comment says the chunk runner *"has no world cell"* — unwired plumbing, not a design limit, and the same gap blocks `Related` joins | [`aether-v2/KERNEL-BACKLOG.md`](aether-v2/KERNEL-BACKLOG.md) **KE15** |
+| **AB-10** | **(a) the measurement script IS required** when the audit branch is taken. **(b) the widening to the joint Aether+Gaia vocabulary is RATIFIED** — if the two languages are one body of work, the vocabulary is one vocabulary, and a word meaning different things across them is a false friend between the author's own languages. Price accepted: the risk list grows with Gaia's vocabulary, and a collision there may force a rename in Aether | [`aether-v2/AI-ORIENTATION.md`](aether-v2/AI-ORIENTATION.md) AIR-10 / AB-10 |
+| **AB-11** | **The recommended option — a parse refusal** with a did-you-mean pointing at `enabled` / `disabled`. ⚠ Adds a refusal where v1 documents non-refusal, which is what made it the owner's. Ground, measured with R0's fix already in the tree: over a `flag`, `with F` matches nothing and `without F` excludes nothing — two different silent wrong answers — and the defect is in the **leaves**, so R0's `Or` fix does not reach it | [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) AB-11 row; red test `ab11_flag_filter_polarity.rs` |
+| **AB-13** | **`true` / `false`.** Settles all four interacting parts at once: the values are Rust keywords already, so nothing new is reserved; the three-way `on` collision (`machine … on entity`, `on E => T`, `flags (X = on)`) **does not arise**, so neither a reader nor a generator needs lookahead; and the group keeps the name `flags`, PENDING Tier 3's withdrawal of the `flags → initial` rename standing on its own sound ground. Spelling: `flags (Stunned = false, Burning = true)` | [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) AB-13 row |
+| **GB-2** | **`#RRGGBB` is `#RRGGBBAA` with maximal `AA`** — a defaulted field, not a second literal kind, which dissolves the reopen question rather than answering it. **And the arity direction the clause did not cover: REFUSE AT BAKE** — an 8-digit literal at a 3-component field (`PointLight.color` is `[f32; 3]`) is a coded refusal naming the field, never a silent alpha drop | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Colour |
+
+**Still open on the Aether side: AB-12 only**, and it blocks nothing. Evidence gathered 2026-08-30
+points at option (b): every `G1`/`G2` occurrence in the 2026-08-29 plan session is a **Gaia rung**,
+not a defect body, and the surviving `AD1..AD4` all have subjects. That is evidence, not proof — the
+search was a grep over a 7 MB transcript, an instrument this campaign has had lie to it three times
+in one day.
+
+**Not ballots, and not the owner's: K8 and K9** — the bundle-with-`link Entity` spawn spelling and
+the relationship macro's private-field demand — are architecture gaps routed to R3's own design
+pass. R3's `bundle` and `relation` constructs may not be declared done while they stand.
+
+### The Gaia side, same day — fourteen ballots put, TWELVE answered
+
+Six the owner settled outright, four he **delegated** (ruled below and in
+[`gaia/DECISIONS.md`](gaia/DECISIONS.md)), and two he asked to be **analysed, not decided** — those
+two ~~stay OPEN~~, with the analysis attached to their bodies in §2026-08-29 so he can rule from one
+reading. ~~**A ruling written for either would be a defect.**~~ Unanswered: **F8** and **F10**, plus
+**F9's residual VALUES question**, which the delegated ruling deliberately did not settle.
+
+⚠ **DATED NOTE, 2026-09-10 (`merge/ke16-into-render`).** The two ballots this paragraph and the table below send back for analysis have since been ruled, and every sentence here and in that table which says otherwise is struck in place: GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`; GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`). `F8`, `F10` and F9's residual VALUES question are untouched by this note.
+
+| ballot | who | ruling | where the ground lives |
+|---|---|---|---|
+| **F1** | owner | **Macro-time GK-4, NOW** — not sequenced behind EG2. *"Do it properly right away. But bear in mind the world must support streaming."* Both halves bind. ⚠ The ballot's own `RequiredCtor`-is-unbakeable inference is **refuted**: a GK-4 baker is a Rust program linked against the derive tables and calls the fn pointer trivially (measured through today's public `required_ctor_in_set`); only the *evaluator over text* cannot | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Inherited pipeline |
+| **F3** | owner | **ONE schema for both file shapes.** The table file is a spelling, not a second type system. Rejected: a table dialect | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Data tables |
+| **F5** | owner | **EVERYTHING FROM THE START — option (b), the one nobody had written down.** *"Все сразу грамотно по списку с самого начала."* `load_cell`/`unload_cell`, GK-1's cross-load map with a declared lifetime, and cross-cell reference resolution ship **with** the scene profile. ⚠ The single largest change to the campaign's ground: **G6 absorbs the hardest half**, because a per-load `LoadEntityMap` cannot express references BETWEEN chunks | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Streaming scope; [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) rows G6 and G8 |
+| **F6** | owner | **Migrate `.ui` to the Gaia `ui` profile and DELETE the old format in the same campaign.** Price accepted and recorded at G7: the migration is done **blind** | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Language shape |
+| **F7** | owner | **Mods are NOT supported for now**, ratified explicitly — the ballot existed because silence was itself a decision. The reflection constraint is recorded in its **narrow** form (no reflection in the game binary), so a later mod campaign is not blocked by a sentence that never meant to block it | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Refusals |
+| **GB-3** | owner (adoption) + delegated (the rewrite) | **The third reference kind is ADOPTED**, and the four-part rewrite is ruled: sigil / styles-are-kind-1 / `$hole` stays / "declared node ⇒ `@`" withdrawn. ⚠ The glyph itself is **not** minted — it cannot be chosen before Gaia's arithmetic operator vocabulary is closed | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Identity and references |
+| **F4** | delegated | **(a), as SUPPRESS-THEN-FIXUP** — four ordered sub-passes on the clone path's own precedent. (b)'s mechanism adopted as sub-pass 4; its timing refuted at a measured 100% mis-link rate. Carries the stable-asset-carrier addendum | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Load semantics |
+| **F2** | delegated | **(a) rows are entities — AMENDED**: `StorageKind::Table` (not dense), eager at load, own explicit load and pinned. (b) saves 0.13 MB and costs the entire per-`ResourceId` serialize seam from scratch | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Data tables |
+| **F9** | delegated, **partly** | **Three eliminations RULED** — do not fire `FLAGS_DIRECT` on load; the refusal option contradicts ratified **AB-6**; the spelling, if a carrier lands, is `flags (X = true)` shared verbatim with Aether. ⚠ **The residual is a VALUES call and is escalated back:** may a document set a flag on an *individual authored object*? | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Flags in the byte format |
+| **GB-4** | delegated | **(a) linkage-in-slot, and the linkage word is MANDATORY**: `instance <name> extends|copy <base-ref>`. `from` deleted (head-position occurrences measured: **zero**) | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §The instance spelling |
+| **GB-5** | **owner asked for ANALYSIS** | ⚠ ~~STAYS OPEN.~~ **Struck 2026-09-10 by the merge `merge/ke16-into-render`: GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`. This row is the record of 2026-08-30, not a live status.** The analysis is attached to the ballot body below. It settles one thing only, and it is a refutation of the ballot's own mechanism: **all 12 measured engine-derived field members are *conditionally* derived**, and both dispositions are pinned by green committed tests today | §2026-08-29, the GB-5 body |
+| **GB-6** | **owner asked for ANALYSIS** | ⚠ ~~STAYS OPEN.~~ **Struck 2026-09-10 by the merge `merge/ke16-into-render`: GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`). This row is the record of 2026-08-30, not a live status.** Analysis attached below: (a) the disposition is already declarative in four documents with four downstream reassignments filed against it, and its rejected alternative is **its own only witness**; (b) the valve's runtime already ships three times over and the whole gap is **one Aether construct** | §2026-08-29, the GB-6 body |
+
+
 ## 2026-08-29 — Corpus audit of the aether-v2 + gaia plans: THIRTY-TWO open ballots, listed here because a plan that settles a fork silently is the defect
 
 A multi-lens review of the two plan corpora ([`aether-v2/`](aether-v2/CAMPAIGN.md),
@@ -409,6 +655,25 @@ red tests land regardless of its disposition). Everything above them waits on a 
 > per-ballot index, the git provenance and the F2/F4 corrections are in
 > §*2026-09-03 — the Gaia register catches up with the owner*, above. Each body below now carries its
 > own disposition line, so no body has to be read against a stale header.
+>
+> *— and the STATUS as `feat/threadpool-ke16` wrote it on 2026-08-30, kept by the merge `merge/ke16-into-render`, 2026-09-10. It is the earlier of the two; where they disagree — GB-5 and GB-6, which it lists as open — the 2026-09-03 paragraph above is the later state.* ⚠ **Both have since been ruled, and every sentence below that says otherwise is struck in place:** GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`; GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`).
+>
+> ✅ **STATUS, 2026-08-30 — read this before any ballot body below.** The bodies in this section are
+> kept verbatim as the record of what was open and why; **they are not a to-do list any more.**
+> **Every `AB` ballot except AB-12 is now closed**, along with `GB-1`, `GB-2`, `GB-7`, `GB-8` and
+> `GB-9`. Seven were answered by the owner and eleven by the orchestrator under the standing
+> perf/architecture rule. The index with each ruling and where its ground lives is
+> §*2026-08-30 — the owner's rulings, and the Aether ladder closes*, above.
+>
+> ✅ **UPDATED LATER THE SAME DAY — the Gaia fourteen were put to the owner and TWELVE are
+> answered.** Settled by him: **F1, F3, F5, F6, F7** and **GB-3**'s adoption. Delegated and now
+> ruled: **F2, F4, GB-4**, and **F9 in part**. Sent back for **analysis, not decision**: **GB-5**
+> and **GB-6** — both ~~stay OPEN~~, and the analysis is attached to each body below.
+> **Still open and genuinely awaiting an answer: `F8`, `F10`,** ~~`GB-5`, `GB-6`,~~ **and F9's residual
+> VALUES question** (may a document set a flag on an individual authored object). Plus **AB-12**,
+> which blocks nothing. The per-ballot index is the table in
+> §*2026-08-30* above, subsection *The Gaia side, same day*.
+> ⚠ *Struck 2026-09-10 by the merge `merge/ke16-into-render`, which imported this 2026-08-30 paragraph from `feat/threadpool-ke16`.* GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`; GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`). `F8`, `F10` and F9's residual VALUES question keep the status the 2026-09-03 STATUS paragraph at the head of this blockquote gives them.
 
 ### Gaia — the `F` series (F1..F7 raised 2026-08-28, full bodies in the entry below; F8..F10 born in this review)
 
@@ -453,6 +718,14 @@ red tests land regardless of its disposition). Everything above them waits on a 
   the reflection constraint is recorded in its narrow form (no reflection in the game binary).
   Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Refusals; the ratified line in this branch's
   [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Refusals now carries that date.
+  ⚠ *Merge note, 2026-09-10 (`merge/ke16-into-render`): the `Ground:` lines in F1–F7 above name
+  "`feat/threadpool-ke16` `gaia/DECISIONS.md` §…" because they were written on 2026-09-03, when
+  that ground sat on another branch. The merge landed it — every one of those sections is now in
+  this tree's [`gaia/DECISIONS.md`](gaia/DECISIONS.md), under the same §. That branch's own F1–F7
+  bodies stated the same rulings with the local link and nothing these do not say, so they are
+  reduced to this note — except the two `Ground:` pointers only it carried, kept here: **F2** →
+  [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Data tables, and **F4** →
+  [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Load semantics.*
 - **F8 — name-vs-id for objects.** Does an authored object carry a human NAME that bakes to an id,
   or a minted ID with the name as commentary? ⚠ **REOPENS the ratified `gaia fmt --assign-ids`
   identity ruling** — which was written before the third reference kind (assets, GB-3) surfaced.
@@ -467,6 +740,8 @@ red tests land regardless of its disposition). Everything above them waits on a 
   position-independent sigil and declares its F8-neutrality at its own site, so the trigger does not
   reach object identity. Offered as a veto line: disagreeing reopens the whole grammar rung, so it is
   cheaper to say so now than at G2.
+  *(Merge note, 2026-09-10: `feat/threadpool-ke16` carried these same three sentences with
+  different line breaks and without the 2026-09-03 recommendation; reduced to this line.)*
 - **F9 — the flags carrier.** Where a document's `flag` lands in the byte format: a carrier of its
   own, or a bake-time refusal with a `GA####` code telling the author to spell it as a component.
   Blocks **G2/G6**.
@@ -484,6 +759,10 @@ red tests land regardless of its disposition). Everything above them waits on a 
   change tick, so a document-set flag can race its owning system with no observable. Offered as a
   veto line: a level FILE outranking a SYSTEM over a runtime bit is a legitimate values position, and
   option (A) is fully priced (header 80→96 B, version 2→3, 5 016 B for 10 000 entities × 4 tags).
+  Ground and the full price of a carrier:
+  [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Flags in the byte format.
+  *(Merge note, 2026-09-10: the pointer on the two lines above is `feat/threadpool-ke16`'s and is
+  kept; the rest of its version of this item is the same three eliminations, differently wrapped.)*
 - **F10 — bundles: expand or refuse.** Does the baker expand a bundle into its components at bake
   time, or refuse a bundle in a document and demand the components? **Pre-question: is this a ballot
   at all** — PENDING's Tier 3 and its Part D contradict each other on whether it was already
@@ -501,6 +780,9 @@ red tests land regardless of its disposition). Everything above them waits on a 
   from the LIVE derive-emitted manifest on the load path, never at bake — a bake-time expansion is
   the version-skew class F4 rejected, where a level baked before `Pawn` gained a member loads without
   it forever, silently. The refuse-arm survives narrowed to the K8 shape, with a `GA####` code at G2.
+  *(Merge note, 2026-09-10: `feat/threadpool-ke16` carried the first three sentences above with
+  different line breaks and without the pre-question finding or the recommendation; reduced to
+  this line.)*
 
 ### Gaia — the `GB` series (born in this review)
 
@@ -513,6 +795,71 @@ red tests land regardless of its disposition). Everything above them waits on a 
   then ladder; an UNLABELED write occupies `base`. The ratified ladder is untouched, and finding K2
   is dissolved rather than diagnosed. Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md`
   §Layers and depth.
+
+  > *Body kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16` — the record as it stood when the ruling was taken. Where it says a ballot is STILL OPEN, the disposition line above it is the later state.*
+  >
+  > **RESOLVED 2026-08-30 — decided by standing rule** (`CLAUDE.md`: perf and architecture forks are
+  > decided without asking; only VALUES and SCOPE go to the owner). This ballot was mis-routed here;
+  > the owner re-routed it back. **Neither case gets a ladder layer, because the ladder is the wrong
+  > axis for one of them.**
+  >
+  > **The ratified ordering, quoted exactly** ([`gaia/DECISIONS.md`](gaia/DECISIONS.md) §The logic
+  > line): *"defaults + a **closed priority ladder** `base < variant < tuning < debug` (named layers,
+  > never free numbers — the `!important` race; two writes of one field on one layer = error with
+  > both files; bake is order-independent and byte-identical in any file order)"*. Nothing below
+  > disturbs it: no rung is added, removed, renamed or reordered.
+  >
+  > **(a) A template EXPANSION occupies no ladder layer. It is one step on the INHERITANCE-DEPTH
+  > axis, which is already ratified and already separate.** The corpus carries depth as its own
+  > mechanism in three places — *"Single parent, no diamonds"*, *"Variant chains: a patch target
+  > resolves against the **immediate** base — one sentence plus one pinned test"*, and the bake
+  > budget over *"expansion steps, spawned fields, **template depth**, output bytes"*. A template
+  > application ranks exactly where `extends` ranks: below the applying node's own writes, at the
+  > same layer. Resolution order is **depth first, then ladder**: within one layer a node's own write
+  > beats what it expanded; across layers the flattened node from the lower layer loses field-wise to
+  > the higher one.
+  >
+  > **The decisive ground is that the alternative is not expressible.** The rejected option is to
+  > mint a rung for expansion (`template < base < …`). Its price is not taste: **`template depth` is
+  > a BUDGETED quantity in the ratified text, and a budget bounds a number that is otherwise
+  > unbounded.** A template that applies a template needs one rung per level; a closed four-name
+  > enum cannot carry an unbounded count. The rung would also break the ladder's own closure, which
+  > AIR-10's bar protects. So the option fails twice — on the ratified text and on arithmetic — and
+  > this is why the ruling routes expansion to the axis that is already unbounded.
+  >
+  > **This dissolves K2 without new machinery.** K2 is *"template application double-writes a field
+  > on one unnamed ladder rung"*: `apply Torch` plus a local `power=2.5` in the same node looked like
+  > the ratified *two-writes-one-layer = error*, which would have made the commonest authoring act in
+  > the language — apply a template, override one field — a bake error. Under the ruling they sit at
+  > different DEPTHS, so it is an override, not a collision. The error keeps a real referent and
+  > narrows to what is genuinely ambiguous: **same depth AND same layer.**
+  >
+  > **(b) An UNLABELED write occupies `base`.** Ground: `base` is the layer whose name already means
+  > "the thing itself", and it is the ladder's bottom, so authored content stays overridable by every
+  > pack above it. The rejected alternative is an implicit fifth "unlabeled" rung, and its price is
+  > the exact race the ladder was ratified to prevent — an unranked write makes *"which write won"* a
+  > computation over file order, which would make G4's own gate (`bake(files) == bake(shuffle(files))`
+  > byte-identical) either red or, worse, vacuously green on a fixture that happens not to collide.
+  >
+  > **Recorded, NOT decided here — the consequence (b) buys.** In a non-`base` pack every line must
+  > repeat `layer=tuning`, and one forgotten `layer=` lands silently at `base`: a silent wrong-layer
+  > write, which is this repo's standing defect class. A file-level layer default is the obvious cure
+  > and is a **grammar** question belonging to **G4**, not to this ballot; naming it here so it is not
+  > lost, and deliberately not ruling it.
+  >
+  > **Spelling-independent, and deliberately so.** The ruling is about precedence, not words. It
+  > holds under either option of **GB-4** (`instance … extends|copy` in slot vs in head) and under
+  > whatever anchor the template-application fix lands on (PENDING Tier 1 proposes `apply Torch:`).
+  > It is scoped to **template** expansion, the construct GB-1 names. Whether a **bundle** expands at
+  > bake at all is **F10**, which is the owner's and is untouched; if F10 rules "expand", the depth
+  > rule above applies to it unchanged, and that is a consequence, not a pre-decision.
+  >
+  > **Riding lines moved in the same edit:** [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §The logic line
+  > and §Inheritance / variants, [`gaia/PENDING-SYNTAX-PLAN.md`](gaia/PENDING-SYNTAX-PLAN.md)
+  > Tier 1 (template use), Part D and Part E (K2),
+  > [`AETHER-GAIA-REVISION-2026-08-29.md`](AETHER-GAIA-REVISION-2026-08-29.md) §Work order,
+  > and [`ru/OPEN-QUESTIONS.md`](ru/OPEN-QUESTIONS.md).
+
 - **GB-2** — the colour transfer function: `#RRGGBBAA` sRGB-decoded at bake, vs raw bytes carried
   into a LINEAR field. Blocks **G2/G5**.
   ✅ **RESOLVED 2026-08-30 BY THE OWNER — `#RRGGBB` is `#RRGGBBAA` with maximal `AA`**: a DEFAULTED
@@ -520,6 +867,84 @@ red tests land regardless of its disposition). Everything above them waits on a 
   arity direction the original clause never covered: an 8-digit literal at a 3-component field
   (`PointLight::color` is `[f32; 3]`) is a **coded bake refusal naming the field**, never a silent
   alpha drop.
+
+  > *Body kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16` — the record as it stood when the ruling was taken. Where it says a ballot is STILL OPEN, the disposition line above it is the later state.*
+  >
+  > **RESOLVED 2026-08-30 — decided by standing rule.** This is a correctness question with a
+  > measured answer, and the answer is **neither of the two options as posed**: both assume ONE rule
+  > for the literal. **The transfer function is a property of the DESTINATION FIELD, not of the
+  > literal**, and it is declared in the GK-4 field table.
+  >
+  > **What is true at source.** Every colour-typed field in the workspace was read, not inferred.
+  > There are three carrier classes and they disagree with each other:
+  >
+  > | carrier | fields | what the source says |
+  > |---|---|---|
+  > | LINEAR float | `PointLight::color` (`boyko_render/src/light.rs:309-310`), `DirectionalLight::color` (`:289-290`), `SpotLight::color` (`:336-337`), `SkyLight::sky_color`/`ground_color` (`:357-360`), `MaterialGpu::base_color`/`emissive` (`material.rs:51,54,64-69`) | `/// LINEAR rgb color`; `light.rs:114` *"All radiometric values are LINEAR"*; `material.rs:56` *"All values are LINEAR"* |
+  > | 8-bit encoded RGBA | `UiBackground::color`/`border_color` (`boyko_ui/src/components.rs:211,220-223`), `UiText::color` (`text/components.rs:39-47`) | `u32`, *"authored STRAIGHT RGBA8 (`byte0=R .. byte3=A`)"* — **"straight" here means NON-PREMULTIPLIED, not "not decoded"**: `components.rs:211` continues *"the pack system premultiplies them"*, and `premultiply_rgba8` (`boyko_render/src/ui/instance.rs:196`) is the operation named. No sRGB decode exists anywhere on the UI path — `ui_rect.fs.hlsl:130` unpacks the byte word and composites it directly |
+  > | device-encoded packed | `ParticleEffect::color_keys: [u32; 4]` (`boyko_render/src/particle_effect.rs:120-143`) | byte order is **`0xAABBGGRR`**, *"the opposite of the `0xRRGGBBAA` an author reaches for by habit"* — and its own doc records that both in-tree presets were authored wrong exactly that way, *"and neither was caught by anything"* |
+  >
+  > That table settles the ratified-text worry before it starts: the ratified *"`#RRGGBBAA` →
+  > straight-RGBA8"* line ([`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Language shape) is a statement
+  > about **alpha association**, not about a transfer function. It is not being reopened; it is being
+  > read against the field whose doc comment defines the word.
+  >
+  > **The ruling.**
+  > 1. **Destination is a LINEAR float colour field → the sRGB EOTF is applied at bake.** The
+  >    authored byte is display-referred; the field is scene-referred; a converter that skips the
+  >    conversion is simply wrong.
+  > 2. **Destination is an 8-bit encoded RGBA carrier → the transfer function is the IDENTITY.** Not
+  >    a special case bolted on: source space and destination space are the same space, so the
+  >    general rule yields the identity here. **Measured:** decode-then-re-encode over the whole
+  >    domain drifts **0 of 256 bytes**, so stating the rule uniformly changes no existing UI colour.
+  > 3. **Destination is a device-encoded packed carrier → a coded `GA####` bake refusal**, naming the
+  >    field's own byte order. Gaia must not be the fourth way to author `0xAABBGGRR` by habit.
+  >
+  > **Rejected alternative, and its price — measured, not asserted.** Carrying raw bytes into a
+  > LINEAR field (the ballot's option (b), and what
+  > [`gaia/LANGUAGE.md`](gaia/LANGUAGE.md) does today) is wrong by up to **12.92×** multiplicatively
+  > (byte 3: `0.011765` raw vs `0.000911` decoded) and **0.287** absolutely (byte 136). On the
+  > corpus's own literal `#FFB35CFF` into `PointLight::color` it is **1.557× on green** (`0.702` vs
+  > `0.451`) and **3.371× on blue** (`0.361` vs `0.107`) — a large hue shift toward desaturation,
+  > not a brightness nudge, and nothing downstream attributes it to the baker. The mirror-image
+  > alternative — one global "always decode" rule — is wrong in the other direction: applied to a
+  > `u32` field by storing the decoded value it corrupts every UI colour, which is why the rule is
+  > keyed on the destination rather than on the literal.
+  >
+  > **⚠ A gate constraint that falls out of the same measurement, and must be obeyed by G2's
+  > fixtures: the two routes have exactly TWO fixed points, byte 0 and byte 255.** A red fixture
+  > written with `#FFFFFFFF` or `#000000FF` is satisfied identically by both routes — **a gate that
+  > cannot fail**, the class this corpus exists to repair. Every colour fixture must use a
+  > mid-domain channel; `128` (raw `0.501961` vs decoded `0.215861`) is the recommended witness.
+  >
+  > **The ARITY half — settled here, and it needed settling because nothing carried it.**
+  > `LANGUAGE.md:71-74` flags a 4-component `#RRGGBBAA` written into a 3-component `[f32; 3]` and
+  > records that *"the arity half is carried by nothing"*. **The precedent is already shipped in this
+  > repo**: Aether's `ColorLit` (`crates/aether_lang/src/parse.rs:1177-1213`) checks arity against
+  > the TARGET's arity — 3 or 4 for `base`, exactly 3 for `emissive` — synthesizes the missing alpha
+  > as `1.0` when widening (`expand.rs:891-898`), refuses when narrowing with a message naming the
+  > target type (*"`Material::new` takes `emissive: [f32; 3]`, emitted radiance has no alpha"*), and
+  > lands the blame on the **tuple's own span**, *"because neither the key nor any single component is
+  > the thing that is wrong"*. Gaia mirrors that rule verbatim: **widening 3 → 4 supplies alpha
+  > `1.0`; narrowing 4 → 3 is a coded refusal, never a silent alpha drop** (a silent drop is Unity's
+  > class, which §Inheritance bans by name). Consequence: the 6-digit **`#RRGGBB`** form is admitted
+  > as the 3-component spelling, and `LANGUAGE.md`'s `color=#FFB35CFF` on a `PointLight` is a bake
+  > error whose correct form is `#FFB35C`.
+  >
+  > **Why admitting `#RRGGBB` is not a reopen.** §Language shape's literal list is introduced as
+  > *"Literals are engine-native (…)"* — an illustrative list. The one list in this corpus that is
+  > closed says so in as many words (§The logic line: *"the list is exhaustive"*), and this is not
+  > that list. The alternative to admitting the 6-digit form is to make every light colour a float
+  > tuple, which prices the commonest scene edit in the least readable form for no correctness gain.
+  >
+  > **Not touched:** whether `PointLight::position` is declarable at all is **GB-5**, the owner's,
+  > and nothing above bears on it.
+  >
+  > **Riding lines moved in the same edit:** [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Language
+  > shape, [`gaia/LANGUAGE.md`](gaia/LANGUAGE.md), [`gaia/PENDING-SYNTAX-PLAN.md`](gaia/PENDING-SYNTAX-PLAN.md)
+  > Tier 1 (`PointLight` field names), Tier 4, Part D and Part E (K12),
+  > [`AETHER-GAIA-REVISION-2026-08-29.md`](AETHER-GAIA-REVISION-2026-08-29.md) §Work order,
+  > and [`ru/OPEN-QUESTIONS.md`](ru/OPEN-QUESTIONS.md).
 - **GB-3** — the reference taxonomy needs a THIRD kind. Ratified §Identity has two (lexical/copy,
   entity identity via `@` with remap); asset references are neither. On one ballot because R4 should
   be rewritten once: the asset-ref spelling (sigil / typed head / bare strings — the bare-string
@@ -542,6 +967,84 @@ red tests land regardless of its disposition). Everything above them waits on a 
   returns a LIVE handle in the `Failed` state which it inserts into the path index, and
   `validate_asset_refs` early-returns unless `free_epoch` advanced, which a never-loaded asset never
   makes happen.
+
+  > *Body kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16` — the record as it stood when the ruling was taken. Where it says a ballot is STILL OPEN, the disposition line above it is the later state.*
+  >
+  > ✅ **RESOLVED 2026-08-30 — the THIRD KIND IS ADOPTED BY THE OWNER; the four-part rewrite ruled
+  > the same day [delegated].** Full ruling: [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Identity and
+  > references. Summary, with the measured ground and the rejected alternative at each part:
+  >
+  > **The kind is real, and the deciding column is one the other two do not have.** An asset
+  > reference is the only kind whose referent can **stop being valid after load**, because streaming
+  > retires slots — and under the owner's F5 ruling that is the normal case. At source:
+  > `PathIndex::lookup(hash: u64) -> Option<(u32, u32)>` = `(slot, generation)`
+  > (`crates/boyko_ecs/src/ecs/core/asset/path_index.rs:112`), then refcounted and revalidated every
+  > frame by `validate_asset_refs` against the `MeshRefGen`/`MaterialRefGen` lanes. Both collapses
+  > are refuted by that: there is no `Entity` and no load-map row (and `PathIndex` is globally
+  > interned, first-insert-wins, **not** per-load), and a lexical reference does not survive into the
+  > binary at all while this one must. ⚠ It is also the **only reference kind that already works
+  > across a cell boundary** — two cells referencing one path share `(slot, generation)` and the
+  > refcount keeps it alive while either holds it — so folding assets into `@` would give the
+  > working kind the lifetime of the one F5 just made hard.
+  >
+  > **Part 1 — spelling: (a) A SIGIL**, uniform and position-independent, buying the invariant *a
+  > bare word is never a reference*. **Rejected (c) bare strings**, on this ballot's own ratified
+  > rationale: a string literal is already a **non-reference value** in this language, so (c)
+  > collides kind 3 with plain values, not merely with another reference kind — and its dangle check
+  > needs **three** mechanisms (field table, head grammar, closed valve signature) because asset
+  > references occur at positions with no destination field, which is three places the check can be
+  > structurally unreachable. **Rejected (b) a typed head**, on the measured ground that already
+  > killed widget sugar (*the vocabulary is unclosable*) and on R7's requirement that the operation
+  > list be closed and generated. ⚠ **The glyph is NOT minted here, and that is a finding.** Measured
+  > over Gaia code fences (44 fenced lines, 4 files): `/` 21, `@` 10, `:` 4, `#` 3, `|` 2, `-` 2,
+  > `$` 1, `;` 1, `+` 1, `>` 1; absent `!  %  &  *  <  ?  \  ^  ` ~`. Excluded: `@`/`#`/`$` (taken),
+  > `&` (ratified-rejected, and reads as *borrow* for an owned refcounted handle), `?` (reads as
+  > fallible, which contradicts §Refusals' *no construct with a fallback*), backtick
+  > (measured-hostile in this toolchain), **and any glyph that can open a binary operator** — R3
+  > makes whitespace insignificant, so `(a %b)` and `(a % b)` must parse identically and `%` is what
+  > the ratified `for … if` guard wants. **Therefore the sigil cannot be chosen before Gaia's
+  > arithmetic operator vocabulary is closed; the two are one question and G2 closes them together.**
+  > Recommendation `~`. The dangle check is named in the ruling: one lexical pass over sigil-marked
+  > tokens, a coded `GA####` refusal naming pack and path, blamed on the reference's own span.
+  >
+  > **Part 2 — style references are the FIRST kind (lexical/copy).** §Refusals already ratifies *no
+  > cascade — styles are flattened by bake*, and a thing flattened by bake leaves no reference in the
+  > binary. ⚠ **A contradiction inside the ballot's own text is resolved rather than carried
+  > forward:** it listed *"a style record"* among the asset kind's examples, against §Refusals on the
+  > same page. §Refusals is ratified and the parenthetical was not; the example list **drops** it.
+  >
+  > **Part 3 — `$hole` STAYS, and the ballot's premise is false.** It is not a third *kind*: §Identity
+  > already names templates and `let` as the lexical kind, so `$power` was ratified all along. What
+  > `$` does is stop a real ambiguity: R6's case-gate was refuted (M12), and at value position the
+  > grammar admits bare lowercase words that are **not** references (RON-style enums, the ladder
+  > names, `rarity=common`), so a template parameter named `common` would silently flip
+  > `rarity=common` from an enum value into a substitution. Ruled: `$` marks the lexical kind **in
+  > every position**, including `extends $sword_base` and `apply $Torch`, which is what lets a
+  > generator pick the sigil from the kind alone. Price: one character per reference.
+  >
+  > **Part 4 — "declared node ⇒ `@`" is WITHDRAWN**, replaced by *what does bake do with this
+  > reference?* — substitutes it (`$`), records an object id for remap (`@`), or records a path hash
+  > for lookup + refcount (the new glyph). The corpus already shows the withdrawn rule's damage:
+  > `LANGUAGE.md` spells a **lexical** inheritance base as `extends @iron_sword`.
+  >
+  > **The ballot's second item is REFUTED, not answered.** It asserted *"GN1 resolves every reference
+  > form … WITHOUT remap. That is the asset kind's behaviour."* GN1's own four resolutions open with
+  > *"object id → `Entity` (**load remap**)"*, so GN1 spans a remapping resolution. GN1 is the uniform
+  > law over all three kinds; **only kind 3 is lookup-without-remap.**
+  >
+  > ⚠ **Two findings recorded, neither ruled here** (each is a different ballot's or rung's):
+  > (1) **`@asset/object` is ambiguous under the `/` separator** — every asset path in a Gaia fence
+  > has ≥2 slash-separated segments (**8 of 8**), so `@a/b/c` cannot be split without an out-of-band
+  > rule; the one ratified example reads unambiguously only because it uses a 1-segment asset name, a
+  > shape occurring nowhere else. R4's amendment already flags the `/`-vs-`#` drift; the measurement
+  > says only `#` survives contact. (2) **The asset-ref target registry does not exist** —
+  > `grep -rnE "get_by_name|by_path|load_path|handle_for_name|name_to_handle"` over the asset and
+  > render crates returns **0**. That is a build item for **G3**, not a spelling item.
+  >
+  > **Riding lines this ruling OWES and does not make:** PENDING R4/R5/R7 and Tiers 1–2 are
+  > regenerated by it, and `LANGUAGE.md` still carries `extends @iron_sword` and bare-string asset
+  > refs. Both files are already marked — PENDING as owner-gated, `LANGUAGE.md` as `ratified-stale`
+  > in its own head — so the divergence is *marked*, not silent. The edits belong to **G2**.
 - **GB-4** — instance re-spelling: (a) linkage-in-slot (`instance wall_east extends|copy "…"`) vs
   (b) linkage-in-head (`instance` ≡ live link, `copy` its own head). `from` is deleted either way —
   it was minted by that one line and appears in no ratified vocabulary. Blocks **G4** / Tier 2.
@@ -550,6 +1053,51 @@ red tests land regardless of its disposition). Everything above them waits on a 
   sharpest being that it has NO refusal for the OMITTED case while (a) does — and on the generator
   axis (b)'s omission error is the invisible one. Price, stated: one mandatory word per instance
   line. ⚠ Rider owed to G2: the corpus contains an UNDECLARED `from=` → `source=` rename on `bind`.
+
+  > *Body kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16` — the record as it stood when the ruling was taken. Where it says a ballot is STILL OPEN, the disposition line above it is the later state.*
+  >
+  > ✅ **RESOLVED 2026-08-30 [delegated] — (a) linkage-in-slot, with the linkage word MANDATORY.**
+  > Full ruling: [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §The instance spelling.
+  > `instance <name> extends|copy <base-ref>`, no default linkage, `from` deleted.
+  >
+  > ⚠ **How the owner's word was read, said plainly rather than assumed.** He answered *"давай"* —
+  > **delegation, not a selection**: he named no option, and the ballot text carries no recommendation
+  > for the word to point at. Nothing in the evidence makes one option obviously his intent either,
+  > so it is decided under the standing perf/architecture rule and recorded as the orchestrator's
+  > call, not attributed to him.
+  >
+  > **Four grounds.** (1) **(b) mints two grammars for one ratified construct** — this corpus already
+  > ratifies *"Instance = variant = derived asset = one construct"*, and **AIR-15** rejects
+  > *"two grammars per construct — the `at` lesson"* by name, on the AI-orientation axis this ballot
+  > was to be judged on. (2) **(b) turns a modifier change into an anchor mutation**: under (a),
+  > "make `wall_east` a snapshot" rewrites one token in a fixed slot and every patch/diff/tool edit
+  > keyed on *the `instance` node named `wall_east`* still resolves; under (b) it rewrites the
+  > **head**, which is neither a key nor a value and so lies outside **AIR-09**'s ratified
+  > `{node_id, key, value}` patch model. (3) **(b) has no refusal for the omitted case; (a) does** —
+  > `instance …` alone is legal under (b) and means *live*, so forgetting the word yields a silent
+  > wrong-linkage node, the identical consequence the ladder ruling already bought once for a
+  > forgotten `layer=`; and defaulting is unavailable on the section's own ground, since RimWorld and
+  > Factorio each shipped one form and their ecosystems invented the other. (4) **The two axes stay
+  > orthogonal**: the data profile already spells a linkage word in a slot on `row`, so under (b)
+  > `copy` is a *head* in one profile while `extends` is a *slot word* in the other — the "one word,
+  > N positions" class the syntax plan catalogues against Aether — and R7's closed operation list
+  > grows per construct × linkage under (b) versus by two entries under (a).
+  >
+  > **Rejected, with its price stated rather than dismissed.** (b) is genuinely cheaper to read in the
+  > common case and maximally loud on scan; **(a)'s price is one mandatory word on every instance
+  > line.** The trade is taken because on the generator axis (a) has **no silent failure** — both
+  > wrong answers are visible, the token is there and it is the other one — while (b) has exactly
+  > one, and it is the omission case, the commonest generator error.
+  >
+  > **`from` — measured, and the qualification strengthens the deletion.** A raw grep counts prose, so
+  > the measurement is over **code fences only**: extract fenced blocks from `docs/gaia/*.md` and
+  > match `\bfrom\b` → **1 hit in 44 fenced lines across 4 files**, and it is
+  > `bind value from=@player/unit …` — `from=` as a **field key**, not the head-position `from` being
+  > deleted. Head-`from`'s count is therefore **zero**, and `grep -rn '"from"' crates/aether_lang/src/`
+  > exits 1, so it is not an Aether keyword either. ⚠ **Rider:** PENDING's own R1 amendment spells
+  > that construct `bind: value source=…`, so the corpus contains an undeclared `from=` → `source=`
+  > rename. GB-4 deletes head-`from`; the surviving role must not be left half-renamed. That edit is
+  > **owed to G2**.
 - **GB-5** — may a scene document declare an ENGINE-DERIVED field (`PointLight.position`)? The `ui`
   profile already refuses this; the ballot is extending the rule to `scene` as a DECISIONS line
   BEFORE G1 freezes the GK-4 field table, which then marks such fields. Blocks the **G1 table
@@ -564,6 +1112,151 @@ red tests land regardless of its disposition). Everything above them waits on a 
   ⚠ **This is the clearest case of a register losing an answer the owner gave** — see the 2026-09-03
   entry above for the mechanism and for the four registers on `feat/threadpool-ke16` that still say
   it is open. **G1's table freeze is UNBLOCKED.**
+
+  > *Body kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16` — the record as it stood when the ruling was taken. Where it says a ballot is STILL OPEN, the disposition line above it is the later state.*
+  >
+  > ⚠ **HEADER NOTE, 2026-09-10 (`merge/ke16-into-render`) — nothing in this block is a live status.** Every sentence in it that calls the ballot open is struck in place and dated. GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`.
+  >
+  > ⚠ ~~STILL OPEN — 2026-08-30. The owner asked for the TRADE-OFFS, not a ruling, and a ruling
+  > written here would be a defect.~~ What follows is the analysis, written so he can rule from one
+  > reading. Nothing in it is a decision.
+  >
+  > **1. The ground at source.** `light_reconcile`
+  > (`crates/boyko_render/src/light_reconcile.rs:105-125`) takes
+  > `Query<(&GlobalTransform, Mut<PointLight>), Changed<GlobalTransform>>` and writes
+  > `l.position = g.translation()` behind a bit-gate. `PointLight` carries `position`, `color`,
+  > `power`, `range` and is `#[require(Transform, GlobalTransform)]`; its own doc says
+  > `light_reconcile` *"derives `position` from the `GlobalTransform` translation when one is
+  > present."*
+  >
+  > **⚠ What happens today is not one answer but TWO, and both are pinned by green committed tests.**
+  > Run live (`cargo test -p boyko-render --test render_upload_s4`, `running 2 tests`, `EXIT=0`):
+  >
+  > | test (`crates/boyko_render/tests/render_upload_s4.rs`) | result | what it pins |
+  > |---|---|---|
+  > | `point_light_position_tracks_global_translation` (`:261`) | ok | authored `position` is **overwritten** by the transform translation — **the overwrite is a contract** |
+  > | `light_without_global_transform_is_untouched` (`:336`) | ok | *"the authored pose is exactly preserved"* — **non-overwrite is equally a contract** |
+  >
+  > The concrete failure the ballot is about: an author writes `PointLight.position = (3,5,2)` and
+  > omits `Transform`. `#[require]` supplies the defaults, the first frame's `Changed<GlobalTransform>`
+  > matches, and the light silently renders **at the origin**. Nothing logs; the authored value
+  > survives zero frames. ⚠ **One seam decides whether that reproduces for a BAKED scene, and it is
+  > an engineering fork, not the owner's:** F4(ii) measured that the load path adds no component the
+  > file omitted, so whether a baked `PointLight` is overwritten depends on whether the **baker's**
+  > world construction fires `#[require]` — which is G1's own unwritten design. Flagged so it is not
+  > settled by accident.
+  >
+  > **2. The `ui` profile does NOT already refuse this — measured, and this weakens the ballot's
+  > premise three ways.** The rule exists at exactly one site,
+  > [`gaia/LANGUAGE.md`](gaia/LANGUAGE.md): *"Engine outputs (`ComputedRect`, `Interaction`, bitset
+  > tags) are undeclarable — bake error."* (i) **It is not in the decision log** —
+  > `grep -rn "ComputedRect\|Interaction" docs/gaia/DECISIONS.md docs/gaia/CAMPAIGN.md
+  > docs/gaia/PENDING-SYNTAX-PLAN.md` → **zero hits** — and `LANGUAGE.md` is the corpus's standing
+  > example of a file that resolves but is stale. (ii) **It gives no reasoning**: one sentence, three
+  > examples, no ground, so there is nothing to extend *by argument*, only by repetition. (iii)
+  > **All three named examples are WHOLE components; `PointLight.position` is a FIELD inside an
+  > author-owned one** — refusing a component the author never wanted costs nothing, refusing one
+  > field of a component whose other three they must write is a different trade. ⚠ And a name-shaped
+  > reading of that rule is already wrong in-tree: `ComputedClip` is documented *"AUTHOR-OWNED in P1
+  > (not computed)"* and `StackIndex` *"AUTHOR-OWNED in P1"* (`crates/boyko_ui/src/components.rs`),
+  > so a rule keyed on the word "Computed" forbids two author-owned components on day one.
+  >
+  > **3. The class, enumerated — and it is not one field.** Two comment-proof commands over the four
+  > scene-relevant crates (`boyko_scene`, `boyko_render`, `boyko_ui`, `boyko_physics`), re-run
+  > 2026-08-30:
+  > `grep -rEn "[ (,]Mut<[A-Z]|Query<[^>]*&mut [A-Z]" … | grep -vE ":[0-9]+:[[:space:]]*(//|/\*|\*)"`
+  > → **17**; `grep -rEn "get_component_mut::<[A-Z]" … | grep -vE …` → **12**.
+  > ⚠ **These two are a FLOOR, not a census**: they are different mechanisms (`ComputedRect` and
+  > `Interaction` are written only through `get_component_mut`, so the first command misses them
+  > entirely), and reading turned up a **third** — a `Command::apply` body, `SyncRefGenCommand`. No
+  > single grep produces this class.
+  >
+  > **Shape A — whole engine-owned components (what the `ui` clause actually names): 14.**
+  > `GlobalTransform` · `ComputedRect` · `Interaction` · `RelativeCursorPosition` ·
+  > `UiWorldProjection` · `UiWorldCulled` / `UiWorldHidden` / `UiWorldOccluded` (three separate
+  > owning authorities) · `InstanceModelCol` · `PrevInstanceModelCol` · `GpuTransform3D` ·
+  > `Gpu3dInstance` · `MeshRefGen` · `MaterialRefGen`.
+  >
+  > **Shape B — engine-derived FIELDS inside author-owned components. This is GB-5's actual subject:
+  > 12 members over 8 components, and EVERY ONE IS CONDITIONAL.**
+  >
+  > | field | overwritten iff | writer |
+  > |---|---|---|
+  > | `PointLight.position` | the entity has `GlobalTransform` | `light_reconcile` |
+  > | `SpotLight.position`, `.direction` | same | `light_reconcile` |
+  > | `DirectionalLight.direction` | same | `light_reconcile` |
+  > | `Transform.translation`, `.rotation` (`.scale` **never**) | `Simulated` ON ∧ `inv_mass != 0` ∧ no `ChildOf` | `boyko_physics` `scene_sync.rs` |
+  > | `Transform` (whole) | the entity has `OrbitCamera` | `boyko_scene` `camera.rs` |
+  > | `Transform` (whole) | the entity has `FlyCamera` | `boyko_scene` `camera.rs` |
+  > | `RigidBody.position`, `.rotation` | **opposite polarity**: `Simulated` OFF ∧ `inv_mass == 0` | `scene_sync.rs` |
+  > | `ContentSize.width` / `.height` | the node has `UiText`+`UiTextBuffer` ∧ a font is loaded | `boyko_ui` `text/measure.rs` |
+  > | `UiLayout.width` **or** `.height` (axis picked at runtime from the track's `LayoutType`) | the node is a `Bar`'s fill child | `boyko_ui` `widgets.rs` |
+  > | `UiValue.0` | a `BindValue` record targets it | `binding/bind_system.rs` |
+  > | `UiTextBuffer` | a `BindText` record targets it | `binding/bind_system.rs` |
+  >
+  > **The finding that governs any ruling: "engine-derived" is not a property of a FIELD.** It is a
+  > property of *(field × the entity's other components, and for physics and `Bar` × their runtime
+  > values)*. Three consequences: **`Transform` is in the class**, so a blanket per-field rule applied
+  > honestly refuses `Transform.translation` on every entity; **`Transform` and `RigidBody` are a
+  > polarity pair** whose author-owned side flips on `Simulated`, a bitset bit gameplay toggles at
+  > runtime, which bake cannot decide; and **both green tests above are correct**, so any rule saying
+  > "`PointLight.position` is engine-derived, full stop" contradicts a test that passes today.
+  >
+  > **4. Why the timing matters, and the honest price is not the ballot's.**
+  > `grep -rn "field_table\|FieldTable\|field_by_name" crates/boyko_macros/src crates/boyko_ecs/src`
+  > → **empty**: G1 is unstarted, so "before the freeze" means *before the table's shape is designed*.
+  > **Bytes are indifferent** — G1's gate is `bake_one(...) == save_world(...)` byte-for-byte, and a
+  > refusal is a bake-time diagnostic that changes no bytes, so **lateness does not turn a gate red**.
+  > The real prices: **cheap before** — one attribute at the component definition site, one column in
+  > the derive-emitted table, zero consumers to update; **expensive after** — the disposition has to
+  > live in a hand-maintained side list keyed by (component, field), an object this corpus has already
+  > priced (*four hand-maintained lists of one vocabulary* as the single cause of `.ui`'s measured
+  > defects, and a printer losing 10 of 19 components under a gate structurally blind to the loss),
+  > plus reopening a landed G1 under AIR-10's bar.
+  > ⚠ **The same measurement cuts the other way, and this is the strongest argument for deciding
+  > CAREFULLY rather than EARLY:** a per-field marker in the frozen table is the shape the ballot
+  > assumes, and it is **wrong for 12 of 12 measured members**, because not one is unconditional.
+  > Freezing a per-field boolean early locks a predicate that is false for every case it covers —
+  > worse than deciding late.
+  >
+  > **5. The options, each in its strongest form.**
+  > - **(a) REFUSE — a bake error on any write to a marked field.** *Strongest case:* it kills the
+  >   silent wrong answer at authoring time, this repo's standing preference, reaffirmed by the owner
+  >   on this very campaign — GB-2's alpha-drop ruling, whose recorded ground is *a refusal that
+  >   dissolves a class beats a documented sharp edge*. *Price:* it needs a decidable per-field
+  >   predicate and the measurement says none exists; applied to `Transform.translation` it refuses
+  >   the commonest write in the language, and applied only to lights it is a rule for four fields
+  >   pretending to be a class.
+  > - **(b) PERMIT — the field is writable; the engine discards it.** *Strongest case:* no new
+  >   machinery, no over-refusal, and no wrong predicate frozen into the table; it also keeps Aether's
+  >   own emitted authored scenes legal, since the engine already writes a light pose and lets
+  >   `light_reconcile` re-derive it. *Price:* the light-at-the-origin failure, silent, in the language
+  >   whose whole §Refusals section exists to make such things inexpressible.
+  > - **(c) PERMIT-AS-SEED — authorable, documented as a seed, warned about at bake.** *Strongest
+  >   case:* it says what is true, and it is the engine's own vocabulary already (*"`SpotLight::new`'s
+  >   `direction` is only a SEED"*). *Price:* a warning is not a gate, and Gaia's ratified evaluator
+  >   is **closed** — *anything bake cannot fully resolve is a bake error, never a fallback* — so a
+  >   warning-only disposition is the first fallback in a language that has none.
+  > - **(d) REFUSE CONDITIONALLY — refuse iff the deriving sibling is on the same flattened entity.**
+  >   *Strongest case:* it is **the only option consistent with both green tests**, and it is decidable
+  >   at bake for every presence-conditioned member (**7 of 12** — the four light fields, the two
+  >   camera cases, `ContentSize`), because the baker knows the entity's final column set. *Price:*
+  >   the predicate runs over the *flattened* entity, so it is a **G4**-time check while the write is a
+  >   G2/G3-time act — the blame span is a write in file A while the disqualifying sibling arrives from
+  >   a template in file B; and it is **undecidable for the 5 value-conditioned members** (physics
+  >   `Simulated`/`inv_mass`, `UiLayout` under `Bar`), which must then take (b) or (c) anyway, giving
+  >   the language two rules for one class.
+  >
+  > **Where the evidence points, and where it stops.** It points hard at **rejecting the
+  > per-field-flag mechanism the ballot assumes** — that is a measurement, not a preference: 12 of 12
+  > members are conditional. It does **not** pick between (b), (c) and (d); that is a values call
+  > about how much authoring expressiveness a refusal may cost.
+  >
+  > **⇒ The question, in one sentence.** Given that every engine-derived field measured is
+  > *conditionally* derived — including `Transform.translation`, which is engine-owned only for a
+  > simulated dynamic body — should the scene profile **refuse** such a write when the deriving
+  > sibling is present on the same baked entity (accepting a post-composition blame span and a second
+  > rule for the five cases bake cannot decide), or **permit** it and document the discard?
 - **GB-6** — §Relations carries two unclassified "ratify" imperatives: the scene-form fork (blocks
   **G6** if it is a ballot; if delegated, it must be relabelled "decided, owner may veto"), and the
   EnableTag-toggling visibility valve, which carries a DEADLINE ("before the first designer asks")
@@ -579,6 +1272,125 @@ red tests land regardless of its disposition). Everything above them waits on a 
   toggles a flag. ⚠ The misfiling this ballot carried was visible rather than newly discovered:
   [`AETHER-GAIA-REVISION-2026-08-29.md`](AETHER-GAIA-REVISION-2026-08-29.md) files GB-6 against
   **G7** while its own body named **G6**.
+
+  > *Body kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16` — the record as it stood when the ruling was taken. Where it says a ballot is STILL OPEN, the disposition line above it is the later state.*
+  >
+  > ⚠ **HEADER NOTE, 2026-09-10 (`merge/ke16-into-render`) — nothing in this block is a live status.** Every sentence in it that calls the ballot open is struck in place and dated. GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`).
+  >
+  > ⚠ ~~STILL OPEN — 2026-08-30. The owner asked for the ANALYSIS, not a ruling.~~ Below is what was
+  > measured; nothing in it is a decision.
+  >
+  > **(a) The scene-form fork — the evidence says it was already decided, and already acted on.**
+  > The imperative sits in [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) §Relations. The disposition appears
+  > in **four other documents, all in the declarative voice, none interrogative**:
+  >
+  > | site | text |
+  > |---|---|
+  > | [`AETHER-GAIA-REVISION-2026-08-29.md`](AETHER-GAIA-REVISION-2026-08-29.md) | in the **landed-changes** table: *"Aether's `scene` narrows to dev-bootstrap and the shipped world form moves to Gaia"*, with carriers cited |
+  > | [`AETHER-LANG-PLAN.md`](AETHER-LANG-PLAN.md) §3.7 | *"`scene` keeps only a **dev-bootstrap** role"* |
+  > | [`AETHER-V1-SURFACE-REVIEW.md`](AETHER-V1-SURFACE-REVIEW.md) | *"`scene` narrows to a dev-bootstrap role; the shipped world form moves to Gaia"* |
+  > | [`aether-v2/CONSTRUCTS.md`](aether-v2/CONSTRUCTS.md) §`scene` | *"`scene` keeps its narrowed authored-scene role, with the world moving to the baked asset format"* |
+  >
+  > **And downstream work has already been reassigned on its basis.**
+  > [`AETHER-V1-SURFACE-REVIEW.md`](AETHER-V1-SURFACE-REVIEW.md) declares four v1 absences —
+  > `N-14` (no node handle), `N-15` (no scene unload), `N-16` (mesh sources), `N-17` (no material
+  > asset handle) — to be *"Gaia's ground now"*, each with a named carrier (AIR-08; ballot F5 / rung
+  > G6; §Identity + the GN1 lint). *A question still open cannot have had four consequences filed
+  > against it.*
+  >
+  > ⚠ *De-bolded 2026-09-10 by the merge `merge/ke16-into-render`: the sentence is the 2026-08-30 analysis's own argument, kept verbatim, and is no longer set in the bold disposition voice a reader — or the `gaia_ruled_vs_open_census` gate — reads a live status out of.* GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`).
+  >
+  > ⚠ **The one thing missing is the price of the rejected alternative.** Measured:
+  > `grep -rn "SceneModel" docs/ crates/` returns **exactly one line in the whole repository** — the
+  > very line asserting *"the alternative, a shared SceneModel, is priced higher"*. **The claim is its
+  > own only witness.**
+  >
+  > **What changes under each classification.** *As a ballot:* G6 is formally blocked — but G6 is
+  > already held by F4's unimplemented ruling and by F5's newly widened streaming scope, so **no
+  > schedule moves**; what does change is that the four `N-14`…`N-17` reassignments become
+  > provisional and two documents are left asserting a decision the owner has not made — the
+  > diverged-pair cost this corpus already prices. *As delegated (relabel "decided, owner may
+  > veto"):* one phrase changes on one line, the reassignments stand, and the veto becomes explicit
+  > instead of implicit — `CAMPAIGN.md` already carries exactly this shape for first-class `remove`.
+  > ⚠ *The cost of the in-between state is visible in the tree right now*: G7's row records the
+  > symptom itself — *"it lists **GB-6** against G7, while GB-6's own body names **G6**; not resolved
+  > here."* A line that says "ratify" with no register reads as owed; a rung whose row names no ballot
+  > reads as unblocked. Both readings are live.
+  >
+  > **Rider that must travel with a relabel, either way:** a veto point presumes the owner can see
+  > what he is declining to veto, and today he cannot, because "priced higher" cites no price.
+  > Writing that price is one paragraph and is the only thing that makes the veto meaningful.
+  >
+  > **⇒ Question (GB-6a), one sentence.** The scene-form narrowing is stated declaratively in four
+  > documents and has already had four downstream reassignments filed against it — do you want the
+  > §Relations line relabelled **"decided, owner may veto"** (the `remove` shape), or is this
+  > genuinely a ballot you want to answer, in which case those four reassignments revert to
+  > provisional?
+  >
+  > **(b) The conditional-visibility valve — the mechanism exists; ONE construct does not.**
+  > What the valve is for: a designer wants *"show this element when health < 30%"*, which Gaia
+  > refuses by ratified rule (§UI bindings item 5, *"Structure bakes; only VALUES react … a
+  > structural change is an explicit document/subtree swap via an action"*; §Refusals, *no structural
+  > reactivity*, *no out-of-document conditions*). The sanctioned escape: the document names an
+  > action; the action toggles an EnableTag; the layout pass skips the node.
+  >
+  > **Three of the four pieces already ship, measured.** (1) `flag` is a ratified Aether construct —
+  > [`aether-v2/CONSTRUCTS.md`](aether-v2/CONSTRUCTS.md), *"enable bit: O(1) toggle, takes
+  > NOTHING"* — with `enabled`/`disabled` filter terms in the shipped v1 grammar. (2) **The engine
+  > already runs this exact idiom in production, three times over**: `UiWorldCulled`,
+  > `UiWorldHidden`, `UiWorldOccluded` (`crates/boyko_ui/src/world/components.rs`) are bitset tags
+  > owned by three separate authorities, deliberately split so *"the three never race a shared
+  > bit"*, and *"the layout pass skips a root with this bit set."* The valve's runtime is not
+  > speculative; it is shipped, with a documented ownership discipline to copy. (3) Gaia's document
+  > side is ratified already: *"A condition in a Gaia file is a **token reference, never an
+  > expression** — that is the whole answer to how data references logic without becoming code"*.
+  >
+  > **The missing piece is exactly one thing: Aether has no construct that TOGGLES a flag.**
+  > `CONSTRUCTS.md` has 16 construct sections; `flag` declares the bit, the filter grammar reads it,
+  > and there is **no `action` construct at all** — the word "action" occurs once in that file, inside
+  > a machine's drain-loop prose. A machine action block can write one, but `machine … on entity` is
+  > **R5**, and R5 is blocked on owner ballot **AB-7**.
+  >
+  > **What rung could carry it.** **Aether R3 — the only honest candidate today**: it owns
+  > `tag`/`flag`, it owns `system` and `set`, it is the rung CG-1/CG-2 are already nominated to, and
+  > it is where the deadline's own failure mode — *"the surface hardens without it"* — actually
+  > occurs. **R5** if the valve is spelled as a two-state machine, at the price of inheriting AB-7, a
+  > blocker the valve does not need. **Gaia G7** can carry the document-side spelling but **not** the
+  > action, which is an exported Aether symbol by ratified rule — and splitting it G7/R3 gives the
+  > valve two homes, precisely the CG-1/CG-2 disease this section is about.
+  >
+  > **What it costs on R3:** one construct or one modifier that writes a named `flag` bit, its refusal
+  > wording, and a trybuild golden. **No new storage kind, no new tag, no new runtime — all three
+  > exist and ship.**
+  >
+  > ⚠ **What NOT scheduling it costs, and the asymmetry is the finding.** The corpus states the
+  > mechanism itself: *"Logic creep has a documented trajectory (Paradox: literals → … → 'calculated
+  > on every frame, massive lag'); what stops it is refusal plus a pressure valve (curves), not
+  > discipline."* **That one sentence promises two valves, and only one was built.** The data
+  > profile's valve (`curves` + `scalable`) is written into the *exhaustive* allowed list of §The
+  > logic line; the document profile's valve got a deadline and no rung — and the corpus's own words
+  > for that are *"a deadline with no rung can never come due, and is therefore not a schedule."*
+  >
+  > **⇒ Question (GB-6b), one sentence.** The valve's runtime already ships three times over in
+  > `boyko_ui` and its Gaia-side spelling is already ratified, so the whole gap is one Aether
+  > construct that toggles a named `flag` — do you want it attached to **R3** (where `tag`/`flag` and
+  > the `scene` surface already live, and where the deadline's "surface hardens" failure actually
+  > occurs), which is what converts the deadline into a schedule?
+  >
+  > **The carrier gap — CG-1 / CG-2, analysed with the same pass.** Both are assertions about
+  > **Aether's emitted authored scenes**. The natural carrier is Aether **R3**'s `scene` surface,
+  > which is also where the two Aether-side twins sit; the alternative is Gaia **G3**, beside PENDING
+  > M3/M10. **The asymmetry decides it:** the Gaia side is already gated — **M3** owns the cross-check
+  > (bake refuses a `link` mismatch *in either direction*, two red fixtures at G3) and **M10** owns
+  > the bake refusal for an `Entity` field authored without `link` — and what is unowned is only the
+  > **Aether emitter's** half. ⚠ **Which produces a concrete, checkable consequence: M3's fixture
+  > cannot be authored honestly until CG-1 has a carrier**, because "in either direction"
+  > presupposes the Aether side emits `link` at all; written today it is either red by construction or
+  > vacuous — the "gate that cannot fail" class, arriving through an unassigned rung rather than
+  > through bad wording. The precedent for what happens if nothing carries them is in the same
+  > document: the `stable_name` ruling is ratified and its resolution axis specified at M8, while its
+  > *application to Aether-emitted scenes* rides nowhere — so the ratified rule and the emitter can
+  > diverge silently, and the only thing that would notice is a fixture that does not exist.
 - **GB-7** — the wall-clock companion beside G7's count gate: kept or dropped, and if kept, its
   tolerance, run count and noise floor. **G7**, minor.
   ✅ **RESOLVED 2026-08-30 by STANDING RULE — NO wall-clock companion; the count gate stands alone.**
@@ -590,6 +1402,89 @@ red tests land regardless of its disposition). Everything above them waits on a 
   with the world pinned, belongs to GK-2's own design pass. The ruling now sits in this branch's
   [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §UI bindings item 9, where the open ballot body used to
   sit inline.
+
+  > *Body kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16` — the record as it stood when the ruling was taken. Where it says a ballot is STILL OPEN, the disposition line above it is the later state.*
+  >
+  > **RESOLVED 2026-08-30 — decided by standing rule. DROPPED.** No wall-clock companion. G7's gate
+  > is the count gate alone, exactly as re-axed. The ground is measured, and it is **not** "a clock
+  > is noisy" — it is that a clock does not measure the quantity this gate is about.
+  >
+  > **What is true at source** (read, not inferred — the shapes decide the ruling):
+  > - `ui_bind_discovery` (`crates/boyko_ui/src/binding/bind_system.rs:75-89`) makes **one** call:
+  >   `world.any_changed_since(&scratch.dynamic_bound_ids, …)`.
+  > - `dynamic_bound_ids` is a **deduplicated set of component TYPES** — `register_bound_id`
+  >   (`:56-60`) pushes only `if !self.dynamic_bound_ids.contains(&id)`.
+  > - `EcsMaster::any_changed_since` (`crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs:403-423`)
+  >   is `for archetype in …iter_archetypes()` over **every archetype in the world**, then `for &id in
+  >   ids`, then `for row in 0..pool.count()`.
+  > - `ui_bind_apply` (`:98-105`) returns immediately when `!dirty`, so a still frame is **discovery
+  >   only**.
+  >
+  > **Therefore the still frame's wall clock is a function of archetype count, bound-TYPE count and
+  > live-row count — and of the binding count not at all.** "200 bindings" is the number in the
+  > gate's own name and it is **not an input to the loop being timed**: 200 or 2000 bindings over the
+  > same three component types produce the identical id set and the identical scan.
+  >
+  > **Measured on this machine** (`windows-gnu`, rustc 1.97.1, `-O`; the discovery loop modelled at
+  > HUD scale — 40 archetypes, 3 bound types, 200 rows; medians of 60 × 2000-call batches, two runs
+  > agreeing to <1%):
+  >
+  > | what changed | still-frame cost | vs the fixture |
+  > |---|---|---|
+  > | the fixture as written | **332 ns** | — |
+  > | bindings 200 → 2000, same 3 types | **332 ns** | **+0%** — the gate's own number moves nothing |
+  > | 2× archetypes (an unrelated feature adds types) | 360 ns | **+8%** |
+  > | 5× archetypes | 484 ns | **+46%** |
+  > | 2× live rows (an unrelated feature adds entities) | 604 ns | **+82%** |
+  > | 2× bound component types | 670 ns | **+101%** |
+  >
+  > A threshold pinned on that fixture is pinned to **none** of what its title names and to **all** of
+  > what the fixture does not pin. Spawning one more entity in an unrelated part of the fixture world
+  > moves it by tens of percent, so the companion would fail for reasons that have nothing to do with
+  > binding cost — and the standing repair for that is to loosen the tolerance until it cannot fail,
+  > which is where every gate in this repo's failure ledger ended up.
+  >
+  > **Resolution, second and independent ground.** `Instant::now()`'s median non-zero step here is
+  > **100 ns**, so the whole still frame is **~3.3 timer ticks**. Single-call jitter on an idle
+  > machine: median 200-300 ns against a max of 4600-5800 ns — a **15-25× tail** over the entire
+  > measured quantity. The only form that reaches a usable ±1.7% process-to-process is a batch of
+  > **200 000** frames (25 processes, 222 700-226 400 ns per 1000-call batch) — and 200 000 frames is
+  > not a still frame; it is a microbenchmark of `any_changed_since`, which belongs to **GK-2**, not
+  > to G7. Even that form's in-run spread ranged **36%-83%** across six runs, reproducing on the CPU
+  > the lesson this repo already recorded for GPU timing: **the noise floor is not a constant.**
+  >
+  > **The tolerance the ballot asked for cannot be honestly quoted.** A tolerance must come from a
+  > measured noise floor; the measured floor here is a range, not a number, and the signal it would
+  > have to resolve — G7's red-first is *"dirtying exactly one source"*, i.e. **0 → 1 sink write** —
+  > sits at a single-frame signal-to-noise of **0.05-0.50** across six runs, never once above 0.5.
+  > The count gate resolves that same delta **exactly** (0 vs 1) with no instrument at all. Quoting a
+  > round number instead would be exactly the move this ballot exists to prevent.
+  >
+  > **Rejected alternative and its price.** Keeping a loose companion (say "must stay under 1 ms")
+  > costs a line that can never go red — it is 3000× the measured cost, so it survives any regression
+  > the count gate would catch, and it would be read by later maintainers as timing coverage that
+  > does not exist. That is strictly worse than no clock: the corpus already struck the
+  > delta-subtraction form as unfalsifiable, and re-admitting it in a looser dress re-creates the
+  > defect with a fig leaf. **A gate that cannot fail is worse than an absent one, because it is
+  > counted.**
+  >
+  > **The condition under which a clock returns, stated so the drop is not permanent by accident.**
+  > A wall clock over the **scan itself** — `any_changed_since` benchmarked with archetype count,
+  > bound-type count and row count all pinned, and the number reported per row rather than per frame
+  > — is a legitimate instrument, and it is exactly what **GK-2**'s design pass needs to justify a
+  > per-column tick (GK-2's row already calls today's scan *"an O(live rows) scan documented as
+  > 'cheap'"*). That bench belongs to GK-2 and is not a companion to G7's count gate.
+  >
+  > **Corroborated in passing, not reopened:** the `any_changed_since` doc comment (`:386-389`) claims
+  > the scan is *"Bounded to the archetypes that actually host a bound id (typically 1-few)"*. The
+  > loop at `:404` is over **all** archetypes; only the inner work is bounded. The corpus already
+  > owns this as GK-2's companion doc fix ([`gaia/DECISIONS.md`](gaia/DECISIONS.md) §UI bindings,
+  > item 8) — recording that the reading holds, and changing nothing else.
+  >
+  > **Riding lines moved in the same edit:** [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) row G7,
+  > [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §UI bindings item 9,
+  > [`AETHER-GAIA-REVISION-2026-08-29.md`](AETHER-GAIA-REVISION-2026-08-29.md) §Work order,
+  > and [`ru/OPEN-QUESTIONS.md`](ru/OPEN-QUESTIONS.md).
 - **GB-8** — the corpus-wide link/id census: which rung owns it, and whether it may carry per-site
   waivers. **Precedent, not a reopen** (no ratified item is touched): this repository's own
   anchor-census precedent says no. ⚠ *This body used to cite "188 abdications out of 302 sites".
@@ -624,6 +1519,123 @@ red tests land regardless of its disposition). Everything above them waits on a 
   than smoothed away, and the same work order that carried the deadline declared R0 "buildable now,
   no ballot in the way" in the same commit.
 
+> **Merge note, 2026-09-10 (`merge/ke16-into-render`).** The two entries that follow are
+> `feat/threadpool-ke16`'s own **GB-8** and **GB-9** items — the rulings written where they were
+> taken, with the measurements behind them. They repeat the two ballot ids above, which are this
+> branch's 2026-09-03 summaries of the same two rulings. Both are kept: each carries numbers the
+> other does not, and the summaries above additionally record what had NOT landed as of
+> 2026-09-03.
+
+- **GB-8** — **RESOLVED 2026-08-30** (orchestrator ruling; the owner delegated this ballot as one of
+  the twelve mis-routed under CLAUDE.md's "perf and architecture forks are decided with numbers").
+  Original question: the corpus-wide link/id census — which rung owns it, and whether it may carry
+  per-site waivers. **Precedent, not a reopen** (no ratified item is touched). Ruling recorded in the
+  campaign's own decision log: [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Census discipline.
+
+  **Measured first, because the ballot's own ground is not this tree's.** `188 of 302` appears in
+  four corpus files and in the census test's doc comment, and **no in-tree gate produces it** —
+  `tests/internal_docs_anchors.rs` states neither number. Run live (2026-08-30) it prints **735
+  anchors, 116 waived**: ARCHITECTURE.md 6/0, FEATURE_MAP.md 222/7, SYSTEMS.md 330/20,
+  MESHLET-VIRTUAL-GEOMETRY-PLAN.md **177/89**. The aggregate is 15.8%, not 62% — **and the
+  precedent is stronger than the aggregate, not weaker**: the waiver did not spread evenly, it
+  concentrated entirely in the one document admitted under the allowance, which now waives
+  **50.3%** of its anchors, and a waived anchor "keeps **neither** shape nor identity"
+  (`internal_docs_anchors.rs` head, clause 3).
+
+  **Also measured:** the census that landed at `01a4436e` is not one scope but four.
+  `tests/gaia_g0_citation_census.rs` (460 lines, **4 tests, all green**): the **AIR** census covers
+  `docs/gaia` + `docs/aether-v2` (18 definitions, **114 citations across 13 files**); the **KE/KM**
+  census **already runs corpus-wide over all of `docs/`** (16 rows, 101 citations, 352 files); the
+  retired-form census also runs over all 352 files under a narrowed predicate; the staleness census
+  covers the 1 file the revision record marks `ratified-stale`. None carries a waiver list.
+  Widening the AIR census corpus-wide is **green at zero remediation**: the `AIR-##` citations
+  outside G0's two directories sit in **5** files (`OPEN-QUESTIONS.md`, `ru/OPEN-QUESTIONS.md`,
+  `AETHER-GAIA-REVISION-2026-08-29.md`, `FEATURE_MAP.md`, `AETHER-V1-SURFACE-REVIEW.md`), and
+  **every id cited lies inside the carrier's `AIR-01..AIR-18`** — so none of them is a repair.
+  ⚠ **The count is deliberately not pinned here, and the reason is this ruling's own footprint.**
+  It measured **21** before the ruling was written and **40** after, because the ruling text itself
+  cites `AIR-06` a dozen times in this file and its Russian twin. A citation count is a moving
+  target that goes stale on the next edit — which is the exact defect this ruling corrects two
+  paragraphs above. **The property is the ruling; the number is an observation with a timestamp.**
+  **The LINK half had never been measured and is the half with a cost**: over the two G0
+  directories, 116 relative markdown targets, **0 dead**; over all of `docs/`, **1636 targets, 59
+  dead across 11 files — 44 of the 59 in one file**, `docs/AUDIT-2026-05-23.md` (the other 15: 8 in
+  `docs/plans/`, 5 in `docs/archive/`, 2 in `docs/diagnostics/`).
+
+  **RULING, three parts.**
+  1. **No per-site waivers, at any of the four censuses, ever.** The ground is the live measurement
+     above, not the cited 188/302. Where a property is not decidable as written, the remedy is the
+     one this census file already practises and states at its own site — **narrow the predicate and
+     print the narrowing in the failure message** (its retired-form test replaces ~1400 per-site
+     dispositions with one decidable rule). A **scope statement** ("this census covers directory X")
+     is not a waiver; a per-site skip list is.
+  2. **The AIR census widens to all of `docs/`, and it lands at G0 — not R8.** It is a one-constant
+     change (`G0_DIRS` → `markdown_under("docs")`), it is green at zero remediation, the sibling
+     census in the same file already runs corpus-wide from G0, and G0 is still open (its row carries
+     no ✅ and is held by F1/F4), so it can still take work. R8 depends on R3 and would date a
+     one-line edit months out.
+  3. **The link census is a SEPARATE deliverable and it lands at R8**, with the 59 dead targets as
+     its red-first evidence and with `docs/archive/` + `docs/plans/` **in scope** — excluding them
+     would be the scope-statement route and it is not needed, since only 13 of the 59 live there.
+
+  **Rejected, with the price.** *Per-site waivers so the whole thing lands in one commit* — price,
+  measured on the sibling gate: 50.3% abdication on the document that used the allowance, with
+  `check_anchor` returning at the waiver branch before the shape test, so a waived anchor that is
+  simply **wrong** about which line holds the symbol still passes. *Give the whole census to R8* —
+  price: a green, free, one-line widening waits behind R3 and R8, while the KE/KM half in the same
+  file already contradicts that placement by running corpus-wide from G0 today. *Land id and link
+  together at one rung* — price: the free half is held hostage by the half carrying 59 repairs,
+  which is how a gate gets deferred until it is convenient.
+- **GB-9** — **RESOLVED 2026-08-30** (orchestrator ruling under the same delegation). Original
+  question: does the `Or`-over-dense generated-code ban ([`gaia/DECISIONS.md`](gaia/DECISIONS.md)
+  §UI bindings, item 8, second row) survive the kernel fix (KERNEL-BACKLOG **KE1**)? Keep it with a
+  stated ground, or delete it with a record. The deadline "decide before R0 lands" **expired
+  unanswered** — R0 landed at `01a4436e` — so the original ground can no longer be observed in the
+  tree and this ruling reconstructs it from the record.
+
+  **Measured.** (1) KE1 is fixed and gated: `crates/boyko_ecs/tests/ke1_or_dense_blindness.rs`
+  **8/8 green** (run 2026-08-30; 7 of 8 red before the fix), and `impl_or_filter_tuple` now folds
+  `HAS_DENSE = false || $F::HAS_DENSE` and forwards `resolve_dense` per arm.
+  (2) **The ban's ground CANNOT have "moved to KE13", and a ruling that said so would be false.**
+  The same macro folds `NEEDS_CHANGE_DETECTION = false || $F::NEEDS_CHANGE_DETECTION`, and
+  `EcsMaster::query<D, F>()` opens with `const { eval_query_no_change_detection::<D, F>() }` — a
+  **compile error** whenever `F::NEEDS_CHANGE_DETECTION`. So `Or<(Changed<A>, Changed<B>)>` cannot
+  reach a `QueryView` at all, and KE13 is a `QueryView::get`/`get_mut` defect over a dense
+  `With`/`Without` — a different shape from the banned one.
+  (3) What *does* survive R0: the three shapes R0's own landing note says it did not cover
+  (`Query<Entity, Or<..dense..>>`, `Added<Dense>` inside `Or`, arity > 2 with more than one dense
+  arm); `par_iter`/`for_each_chunk`, which now **compile-refuse** a dense-armed `Or` — loud, not
+  silent; and D4, whose reserve R0 narrowed to the consumer clause alone.
+  (4) **The banned shape is not generator-reachable.** Gaia's ratified GN2 (§UI bindings item 4)
+  rejects "bake emits Rust into the game build"; the runtime is a **closed bindable-type set**
+  (`register_bindable::<C>`, shipped at `boyko_ui/src/interaction/plugin.rs:189`) plus type-erased
+  fn-pointer accessors. The `Or<(Changed<C1>, …)>` change-gate in the shipped precedent is
+  **host-composed** — `boyko_ui/src/binding/bind_system.rs` says so in as many words — hand-written
+  engine-side, not emitted per binding. All four production `Or<(` type positions in the tree are
+  hand-written and none is over dense (the only production dense component is `GpuTransform3D`).
+
+  **RULING: option (b) — DELETE the ban, and replace it with a rule that is not about `Or`.**
+  Its recorded ground is fixed and gated. Option (a)'s named candidate ground — D4's coupling — does
+  not survive contact: **D4 reserves the Aether *surface* `or(...)`, while the ban governs *generated
+  code*, and GN2 says the baker emits no Rust** — a ban on a shape the generator cannot emit,
+  grounded in a reserve on a surface the generator does not write, is a rule with no subject. The
+  row is replaced by **"a bind source or change-gate over a dense (or bitset) component"**, which is
+  item 8's *third* row and whose ground (`any_changed_since` / `get_component_changed_tick` blind to
+  dense — **GK-2**) is still live and unfixed; the `Or` row was always the weaker statement of the
+  same hazard, aimed at one filter shape instead of at the storage kind. The fixture discipline is
+  kept and re-aimed: the red fixture asserts the **generator does not emit a change-gate over a
+  non-signature storage kind**, which cannot go green on a kernel commit. The three uncovered
+  `Or`-dense shapes and KE13 are filed against G7's codegen rules as *"if a generator ever emits
+  `Or` over dense, these are the shapes with no oracle"* — deleting the ban must not delete the
+  knowledge.
+
+  **Rejected, with the price.** *(a) Keep the ban.* Price: a ratified line whose stated ground is a
+  fixed defect, whose fallback ground (D4) is about a different artifact than the one the ban
+  governs, and whose only remaining candidate ground (KE13) is factually unavailable — i.e. exactly
+  the "recommendation printed as if ratified" defect this ballot list exists to catch, re-created by
+  the act of resolving it. Second price: the red fixture stays aimed at a shape nothing emits, which
+  is how a gate becomes unfalsifiable.
+
 ### Aether v2 — the `AB` series
 
 > ✅ **STATUS, 2026-09-03.** Every `AB` ballot except **AB-12** was closed on 2026-08-30 — seven
@@ -640,43 +1652,110 @@ red tests land regardless of its disposition). Everything above them waits on a 
   measurement**: the grant's recorded ground was that the unregistered case "fails silently on both
   ends", and both generated ends are in fact a loud init-time panic. Blocks **R3**'s event
   construct.
-- **AB-2** — where the `lanes N` FLOOR lives. Parse can only enforce the constant ceiling; the
-  binding constraint `lanes >= worker_count + 1` is machine-dependent and unrepresentable at parse,
-  and the path that was called "replaced" is a release-mode slice-index panic, not a `Result`.
-  Options: minimum silently raised at boot / boot refusal / drop the knob. The worked example
-  changes under all three. Blocks **R3+R4**.
-- **AB-3** — the unattached-thread lane contract. Measured: every OS thread that is not a pool
-  worker maps to lane 0, which is worker 0's lane, guarded by a `debug_assert` on the param path and
-  by nothing on `send_event`. Options: per-thread claimed host lanes (one claimer enforced) / `Err`
-  on unattached (breaks silent main-thread senders) / accepted hazard, documented. **The const in
-  the tree is `MAX_EVENT_THREADS = 64`** (`crates/boyko_ecs/src/ecs/constants.rs`); the `65` this
-  option used to start from is KERNEL-BACKLOG **KE8**'s plan value and has **not landed**, so the
-  first option raises `64 → 66+` and, while KE8 is unlanded, buys **two** lanes rather than one —
-  one to satisfy KE8's own `MAX_WORKERS + 1 <= MAX_EVENT_THREADS` const-assert, and one for the
-  claimed host lane on top of it. Blocks **R4**'s `&self` send.
-- **AB-4** — `ordered` sender exclusivity: what REGISTERS the fact (generated-path
-  `register_ordered_emitter` / `SystemMeta` emit-access / the `#[event]` macro side), plus the
-  disposition of the verbatim escape (param-list refusal vs declared out of contract). Blocks
-  **R4**.
-- **AB-5** — the machine event router's random-access mechanism, and the tick visibility that
-  follows from it. **Open, two ways:** (a) amend M4 from `get_component_mut` to `Query::get_mut`;
-  (b) keep `get_component_mut`. The two APIs stamp DIFFERENT ticks, so the choice drags two riding
-  questions that must move in the same commit: does `publish tracked` (M7 / D6) then see the
-  router's deposit **in the same frame**, and is M7's tick bypass still needed at all — M7's remedy
-  was derived from apply-window stamping, which is the behaviour of the API (b) keeps. The prices,
-  as the engine stands: **(b)** — `EcsMaster::get_component_mut`
-  ([`component_api.rs`](../crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs)) takes
-  `&mut self`, the exclusive-world path, and its own documented contract is that a write made from
-  inside a running `Schedule` frame stamps the **apply-window tick**, so a `Changed<T>` reader
-  observes it on the FOLLOWING frame, not the same one. **(a)** — the `Query` SystemParam
-  ([`query.rs`](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs)) has **no** `get`/`get_mut`
-  today; `Query` random access is an R1 kernel addition
-  ([`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) §Engine-layer split), so (a) makes R5's Depends
-  cell cite `Query::get_mut` and rides R1 — in exchange, an in-system guard stamps at the system's
-  `this_run` (the same-frame visibility the same doc comment points at). Blocks **R5**, and the
-  M4 / M7 / D6 lines in [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) and
-  [`aether-v2/MACHINES.md`](aether-v2/MACHINES.md) §Event routing — they move together or the
-  record drifts against itself.
+- **AB-2** — ✅ **RESOLVED 2026-08-30 [delegated]** → ruling **E4** in
+  [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md). **`lanes N` is redefined from a count to a
+  MINIMUM**: the effective count is `max(N, worker_count + 1)`, resolved where the worker count is
+  first known, and the raise is **reported once at boot**, not silent.
+  *Measured, not reasoned:* the floor is unchecked on every path because
+  `current_worker_id_or_dispatcher_lane` returns a worker's own id and **ignores** its
+  `worker_count` argument — a correct denominator clamps nothing. The violation is a panic in both
+  profiles (`thread_index 3 >= thread_count 1` in debug; `index out of bounds: the len is 1 but the
+  index is 3` in release), never a `Result`, so the ballot's characterisation is **confirmed** — and
+  it is a *safe* bounds panic, not UB, which is what makes raising affordable.
+  ⚠ *The probe also found the floor is already violated by the DEFAULT path:* `EcsMaster::new()`
+  hard-wires `EventDispatcher::new(1)` with no setter, so `preregister_event_default` allocates one
+  lane on every machine — a 4-worker pool + default registration + 64 worker sends **panicked 3
+  times** in release. Feasible because `App::new()` builds the pool before `add_plugin` runs.
+  *Rejected:* **boot refusal** (a source correct on a 4-core laptop becomes unbootable on a 64-core
+  server, for a number the author cannot know); **dropping the knob** — technically the cleanest
+  answer, since `lanes` is not author-meaningful, but it **deletes a ratified language surface**,
+  which is a SCOPE call: **escalated to the owner as a recommendation, deliberately not taken.**
+- **AB-3** — ✅ **RESOLVED 2026-08-30 [delegated]** → ruling **E5**. **Per-thread claimed host lane,
+  one claimer enforced.** `MAX_EVENT_THREADS` 65 → **66**, const-assert strengthening to
+  `MAX_WORKERS + 2 <= MAX_EVENT_THREADS`.
+  ⚠ **Two premises in this ballot were false and are corrected at source.** (1) `MAX_EVENT_THREADS`
+  in the tree is **65, not 64** — `constants.rs:400`, raised together with its const-assert in
+  `01a4436e`, the very commit this corpus was written alongside (`git log -L400,400:…` dates it).
+  KE8's *lane-constant* half has **landed**; its `&self` send, `send_slice` and re-aimed debug
+  assert have not. So this option buys **one** lane, not two. (2) It is not true that "every OS
+  thread that is not a pool worker maps to lane 0": the mapping has **three** arms, and the
+  **dispatcher gets its own reserved lane** (`worker_count`). Only `WORKER_ID_UNATTACHED` maps to 0.
+  *The hazard, measured in release* — an unattached thread and worker 0 each sending 4000 events,
+  released on a rendezvous barrier: **6 of 6 runs lost events** (1891, 2295, 2070, 183, 1473, 1940
+  of 8000 = 2.3 %–28.7 %), and **every send returned `Ok`**. Without the barrier 6/6 runs lose
+  nothing — which is precisely how a stress test that does not force overlap stays green over this.
+  *Why "accepted hazard, documented" was unavailable:* the loss is silent **and** it is UB (two
+  threads writing one `MaybeUninit<E>` slot through an `UnsafeCell`), and the tree already holds
+  that option's output as a **false** `// SAFETY:` clause — `send_one`'s U4 clause 2 claims "only
+  the worker pinned to `thread_index` accesses this UnsafeCell". Ratifying (c) would ratify an
+  invariant measurement has refuted; principle 8 forbids it. *Rejected:* **`Err` on unattached** —
+  breaks the escape hatch the engine itself documents (`EventWriter::send`'s doc sends main-thread
+  and FFI callers to `send_event`, calling that route "safe"), and buys nothing the claimed lane
+  does not. The chosen contract concedes that breakage for the **second** unattached claimant only,
+  which is the genuinely unsound case.
+- **AB-4** — ✅ **RESOLVED 2026-08-30 [delegated]** → ruling **E6**. **Registrant: the generated
+  path**, calling a new `register_ordered_emitter(event_id, system_id)` at plugin build, beside the
+  `preregister_event[_default]` it already emits. **Predicate** (the half the ballot said was
+  missing): at build end, any `ordered` event id with an emitter count **> 1** is a hard boot
+  failure naming both systems. **Verbatim escape: refused at the param list** — a hand-written
+  `EventWriter<E>` for an `ordered` `E` is refused at `EventWriter::init_state`, the site that
+  already panics loudly for an unregistered event and already has `E::event_id()` and the dispatcher
+  in hand.
+  *Rejected — `SystemMeta` emit-access:* measured, `EventWriter::init_access` is an **empty body**
+  carrying "events stay OUTSIDE the conflict graph" (Phase 12 EW5 / Q2 Option A), so `SystemMeta`
+  holds zero event information and there is no axis to read. Adding one as a *write* would make the
+  scheduler serialise every pair of same-type emitters — surrendering exactly the parallel emission
+  E1 exists to buy; adding a non-conflicting axis is option (a) with worse placement.
+  *Rejected — the `#[event]` macro side:* structurally impossible, since exclusivity is a property
+  of the emitter **set** and the macro sees one type and zero systems (it does not even read its
+  attribute arguments today — `boyko_macros/src/lib.rs:261` takes `_args`).
+  *Price of the refusal, stated:* a hand-written system cannot emit an `ordered` event even as sole
+  emitter; the escape is to declare the emitter in Aether.
+- **AB-5** — **RESOLVED 2026-08-30** (orchestrator ruling under the owner's delegation of the
+  perf/architecture forks). Original question: the machine event router's random-access mechanism
+  and the tick visibility following from it — (a) amend M4 to `Query::get_mut`; (b) keep
+  `get_component_mut`. **Decision: (a).** Full ruling with the measurements:
+  [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) **M4a**, with M7 and **D6a** amended in the
+  same edit and [`aether-v2/MACHINES.md`](aether-v2/MACHINES.md) §Event routing + CAMPAIGN R5's
+  Depends cell moved with them.
+
+  *First, a correction to this item's own body.* It said the `Query` SystemParam "has **no**
+  `get`/`get_mut` today". That was true when written and is **not** true now: both landed with R1 at
+  `01a4436e` (`iters/query/query.rs`, `get` and `get_mut`), so (a) was a citation fix, not a new
+  dependency.
+
+  *The tick half, measured* under an explicit ordering edge — which the pre-existing tests lack, and
+  without which "same frame" and "one frame later" are indistinguishable: `Query::get_mut` +
+  `Mut<T>` is seen by a `Changed<T>` reader **in the same frame**; `get_component_mut` is **not**,
+  even with the reader ordered after it.
+
+  *But the decisive ground turned out not to be the tick at all.* `get_component_mut` takes
+  `&mut self`, so its router can only be an **exclusive** system — and an exclusive body is
+  `FnMut(&mut EcsMaster)` with, in the kernel's own words, "no param tuple, no per-param state"
+  (`system/exclusive_function_system.rs`). Such a router **cannot take `EventReader<E>`**. It must
+  read through `EcsMaster::events_of`, whose contract is "Returns an **empty slice** if `E` was not
+  registered or if no events were sent last frame" — the one silent path ruling C3 already
+  identified, collapsing *unregistered* and *nothing happened* into one value. Option (a)'s router is
+  an ordinary system: it takes `EventReader<E>`, and a forgotten registration is a **loud boot
+  panic**. `events_of` also serves the **previous** frame, making (b)'s latency **two** frames
+  against the one MACHINES.md documents.
+
+  *Rejected — (b), and its price:* a machine whose `inbox` event is un-preregistered routes nothing,
+  silently, forever; doubled latency; plus a bypass mechanism that exists only to repair (b).
+
+  *A ground I expected and did NOT get, recorded so nobody re-argues it.* Exclusive systems declare
+  `Access::universal()` and are single-per-round, so (b) looked like a per-event-type scheduler
+  barrier. **Measured against a control that proves the schedule had real concurrency to lose**
+  (1 thread 235–250 µs vs 8 threads 79–133 µs, **2.7–3.2×**): an exclusive router cost **0.78–1.00×**
+  a `Query` router at both 1 and 8 routers — below the ±20 µs noise, sign flipping between runs.
+  **Scheduler cost grounds neither option.**
+
+  *The two riding questions, answered here rather than left to drift:* `publish tracked` **does**
+  now see the router's deposit in the same frame; and M7's tick bypass is **withdrawn, not
+  re-derived** — measured, a plain `&mut T` through `get_mut` bumps **no** tick while `Mut<T>` bumps
+  at `this_run`, so all-or-nothing falls out of the emitted term. (b) had no such lever:
+  `get_component_mut` returns `Mut<T>` unconditionally, which is exactly why a bypass had to be
+  invented for it.
 - **AB-6** — `requires` of a dense-storage component: parse refusal / a dense required-ctor route /
   known-open plus a hook workaround. ⚠ the refusal option **narrows the ratified
   `storage = table|dense` × `requires` surface**. The red tests land now under any disposition —
@@ -691,15 +1770,133 @@ red tests land regardless of its disposition). Everything above them waits on a 
   because of it.**
 - **AB-7** — R-DENSE: unconditional with a driver-independent ground that must be ESTABLISHED rather
   than asserted, or lifted by `publish tracked`. ⚠ **re-grounds a ratified refusal**. Blocks **R5**.
-- **AB-8** — the `each par` driver. Two kernel drivers exist with opposite tick behaviour
-  (`par_iter_mut`, per-row, ticks preserved; `par_for_each_chunk`, chunked, tick-excluding);
-  recommendation is `par_iter_mut`, per C5's own rationale. On the same ballot: whether `soa par`
-  exists at all, whether the batching key is author-visible (`parallel (batch = N)`), and whether
-  machines and `each` share one driver. Blocks **R3/R5**.
-- **AB-9** — `boyko_reflect` sequencing. It is not a workspace member and lives on the unmerged
-  branch `feat/reflection` (18 commits ahead). Options: R8 waits on the merge / AIR-06(b) is
-  descoped to the reflection-free halves (which satisfies the oracle) / the merge is pulled forward.
-  Blocks **R8**.
+  ~~STILL OPEN — STILL THE OWNER'S.~~ **Struck 2026-09-10 by the merge `merge/ke16-into-render`:
+  the owner LIFTED it — see the ruling table above, `docs/OPEN-QUESTIONS.md:587`, "R-DENSE LIFTED,
+  and the ballot's framing rejected", with his own words. This paragraph is the record of the state
+  BEFORE that ruling, not a live status. ⚠ The RULED-vs-OPEN census cannot see this one: the table
+  at `:583` is headed `| ballot | ruling | where the ground lives |` with no `who` column, so it is
+  not a ruling SOURCE by the predicate, and AB-7 stays in the census's `open` set without reddening
+  it. Found by hand while repairing the ten sites the census did catch.** What was delegated was not the choice but the *measurement*
+  underneath it, and it was taken on **2026-08-30**: **the candidate driver-independent ground is
+  REFUTED, on both of its conjuncts.** The ballot therefore goes to the owner with a refuted premise
+  rather than an open question. Evidence, all read or run in this tree at `01a4436e`:
+
+  1. *"the router's deposit path assumes a table row"* — **false.** Both random-access deposit APIs
+     carry working dense arms: `EcsMaster::get_component_mut` resolves the global `DenseStore` and
+     bumps the per-slot `changed_tick` (`ecs_master/component_api.rs`, `StorageKind::Dense` branch),
+     and `Query::get`/`get_mut` carry `HAS_DENSE` gates. Pinned green in-tree by
+     `tests/ke3_query_random_access.rs::{get_applies_a_dense_with_filter,
+     get_mut_applies_a_dense_with_filter}`.
+  2. *"the layout const-assert assumes a table row"* — **there is no such assert.** Every dense
+     `const { assert!(…) }` in the kernel belongs to a **driver** (`for_each_chunk`,
+     `par_for_each_chunk`, `par_iter`, `Query::contains`; `dense_iter` asserts the converse). Every
+     other `StorageKind::Dense` site is a branch that *handles* dense, not one that rejects it.
+  3. Measured positively: a dense component is fully iterable **and** change-tracked under the
+     sequential `iter_mut` driver — 64 of 64 rows reached a `Changed<>` reader — which is exactly the
+     lowering `publish tracked` selects.
+
+  **What the measurement did find** is a real constraint, but narrower than "driver-independent":
+  dense is compile-rejected (`E0080`, reproduced) by **all three non-sequential drivers** —
+  `for_each_chunk`, `par_for_each_chunk` **and `par_iter_mut`** — and `par_iter`'s own message gives
+  the reason as *"the parallel path does not resolve the dense store into each worker chunk's
+  `Fetch` (the chunk runner has no world cell)"*. The rejection tracks **parallelism and chunking**,
+  not chunking alone. Two consequences for whoever takes this: **(i)** option (b) is what the engine
+  supports today, and lifting the refusal does **not** make `parallel` machines work over dense,
+  because both parallel drivers reject it too; **(ii)** a genuinely driver-independent ground may
+  exist but lives in a **different ballot** — `requires` over a dense component panics
+  (KERNEL-BACKLOG **KE11** / ballot **AB-6**). That is also the owner's and is **neither settled nor
+  assumed** here.
+- **AB-8** — **RESOLVED 2026-08-30** (orchestrator ruling; a performance fork, so it is decided with
+  numbers rather than escalated). Original question: the `each par` driver, plus three riders. Full
+  ruling: [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) **C5a**.
+
+  **Decision: `each par` → `par_iter_mut`.** Measured rather than taken from the labels — over 2048
+  rows (clear of the 1024-row inline floor), with the writer keyed `.before` the reader: a
+  `Changed<>` reader sees **2048 of 2048** `par_iter_mut` writes and **0 of 2048**
+  `par_for_each_chunk` writes. Cost, release, 200 000 rows × 200 frames, 8 workers, five samples:
+  `par_iter_mut` is **1.17–1.47×** `par_for_each_chunk` (median ≈1.19), a delta of **0.03–0.07
+  ns/row**. Absolute ns/row is **not** reproducible run to run (0.13→0.34, machine noise) — the
+  *ratio* is, which is why the ratio is what is recorded. At the machine cost model's own 10 000 rows
+  that delta is **0.3–0.7 µs/frame**, against the **34–40 µs** ruling D1 measured for the 5-arm jump
+  table at the same row count: **≈1–2 % of the pass**. The measurement carried a falsification guard
+  (row count and per-row increment count asserted after timing), so a no-op could not have produced
+  the numbers.
+
+  *Rejected: `par_for_each_chunk` as the `par` driver.* Price — the most inviting parallel spelling
+  in the language would be structurally tick-blind, silently killing every downstream `Changed<>`.
+  That is C5's own recorded defect, and the 0-of-2048 above is it reproduced.
+
+  The three riders, answered with it: **`soa par` EXISTS**, and is the only route to
+  `par_for_each_chunk` (tick-blindness stays behind the word that announces it). **The batching key
+  is NOT author-visible in v1** — measured ground, not taste: `BatchingStrategy` has **three** fields
+  (`batches_per_thread`, `min_batch_size`, `max_batch_size`), so `parallel (batch = N)` cannot name
+  what it appears to name; *rejected alternative* — mapping `N` to `batches_per_thread`, whose price
+  is that an author writing `batch = 64` expecting 64 rows per chunk gets 64 chunks **per thread**.
+  The knob stays reachable via `batching_strategy(…)` from the verbatim escape, and the form is built
+  when a measured in-tree consumer appears (D4's rule). **Machines and `each` share the LADDER, not
+  the default** — both select tracking by term and climb `iter_mut` → `soa` → `par`, but `each`
+  defaults to `iter_mut` (C5) and the machine pass to the chunked driver (M7/D6), each measured
+  separately; unifying the defaults would reopen M7/D6, which AB-5 licensed only for the citation and
+  the withdrawn bypass. Left standing deliberately.
+- **AB-9** — **RESOLVED 2026-08-30** (orchestrator ruling under the same delegation). Original
+  question: `boyko_reflect` sequencing for AIR-06(b). Options were: R8 waits on the merge /
+  AIR-06(b) is descoped to the reflection-free halves (asserted to still satisfy the oracle) / the
+  merge is pulled forward. Ruling recorded in the campaign's own decision log:
+  [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) §Sequencing rulings, entry **AB-9**.
+
+  **Measured, and the ballot's figures were stale in both directions.**
+  1. `feat/reflection` is **15 commits ahead of and 20 BEHIND** `feat/aether-v2` (merge-base
+     `5ec1699f`). "18 commits ahead" was measured against a different base and before
+     `f7c46c76`/`d272e1fd`/`0e0b4c68` landed. The behind-count is the number the ballot never
+     carried and it is the one that grows.
+  2. Merge cost, from `git merge-tree --write-tree` (**no merge performed**): **7 conflicted
+     paths** — 4 docs (`FEATURE_MAP.md`, `SYSTEMS.md`, `OPEN-QUESTIONS.md`, `ru/OPEN-QUESTIONS.md`),
+     2 trybuild `.stderr` (`unknown_key_rejected.stderr` content; `on_despawn_rejected.stderr` a
+     **modify/delete** — `01a4436e` deleted it on this branch while reflection modified it, so it
+     needs a decision, not a re-bless), and **one source file**,
+     `crates/boyko_macros/src/component.rs`, at **2 hunks / 23 lines**. The merge brings 15 commits,
+     124 files, +44 956/−214, and **3 new workspace members** (`boyko_reflect`, `reflect_fixture`,
+     `reflect_dogfood`).
+  3. **The ballot's load-bearing claim — that the reflection-free halves "still satisfy its oracle"
+     — is false as it would be used.** AIR-06's oracle has three clauses; the second is *"a
+     probe-crate component must appear in the dump"*, and "the dump" is (b)'s **project** schema — a
+     *grammar* manifest generated from parser dispatch tables cannot contain a workspace component.
+     Descoping (b) does not leave that clause satisfied; it removes its subject. It is *satisfiable*
+     reflection-free only by declaring the probe component in an `aether!` block — which makes the
+     gate green over a dump covering **0 of the 138 `#[derive(Component)]` sites in the engine
+     crates** (`boyko_ecs` 43, `boyko_ui` 36, `boyko_render` 21, `boyko_physics` 15, `boyko_scene`
+     14, `boyko_demo` 8, `boyko_input` 1; 185 across all of `crates/*/src`). Measured: **zero
+     production `aether!` declaration blocks exist** — all 50 live under test files, and the 6
+     `*/src` hits are the macro's own implementation and doc comments. Gaia declares nothing (no
+     baker).
+  4. **And the merge alone does not fix that either.** `boyko_reflect::registry::type_info_of`
+     returns `None` for "a component without `#[component(reflect)]`" — reflection is **opt-in per
+     component**. On `feat/reflection`, `#[component(reflect)]` appears at **106 lines across 33
+     files, and not one is in an engine crate** (23 files `reflect_fixture`, 4 `boyko_reflect`, 3
+     `reflect_dogfood`, 3 `boyko_macros`).
+
+  **RULING, three parts.**
+  1. **Pull the merge forward** — `feat/reflection` merges into `feat/aether-v2` as its own rung
+     before R8, at the measured cost above. "Waiting" is rejected as an option with no event to wait
+     for: nobody else is merging the branch, and it is already 20 commits behind, with the lag
+     concentrating in `crates/boyko_macros/src/component.rs` — the one file both the derive work and
+     the reflect work touch.
+  2. **AIR-06(b) is NOT descoped.** The descope buys a vacuous green.
+  3. **A fourth item, which no option on the ballot named, is the real precondition and is attached
+     to R8's Lands**: engine components must opt into reflection — either a sweep marking them
+     `#[component(reflect)]`, or a decision that the derive opts in by default. Until one exists,
+     AIR-06(b)'s dump covers the empty set under **all three** of the ballot's options. **Which of
+     the two routes is taken is R8's own design pass and is NOT decided here** — it has a
+     per-component static + `OnceLock` cost that has to be measured, not argued. In the same edit,
+     AIR-06's oracle clause is corrected from "a probe-crate component" to "a hand-written
+     `#[derive(Component)]` component **from an engine crate**", because the probe-crate form is
+     satisfiable by a route that measures nothing.
+
+  **Rejected, with the price.** *R8 waits on the merge* — price: R8's gate goes green on a dump
+  covering 0 of 138 engine components (the opt-in set is empty), while the branch keeps diverging
+  and the one real source conflict keeps growing in exactly the file both campaigns edit.
+  *Descope AIR-06(b) to the reflection-free halves* — price: the same zero coverage **plus** the
+  loss of the oracle's only workspace-facing clause, i.e. a gate that cannot fail.
 - **AB-10** — AIR-10 residue: is the measurement script required when the audit branch is taken, and
   is PENDING's widening to the joint Aether+Gaia vocabulary ratified? ⚠ the second is a **scope
   change to a ratified requirement** and must not arrive as a side effect of an edit.
@@ -784,6 +1981,18 @@ The two that BLOCK rungs:
   > `requires` unbakeable — a GK-4 baker is a Rust program linked against the derive tables and
   > calls the fn pointer trivially. Only the *evaluator over Gaia text*, a different program,
   > cannot. Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Inherited pipeline.
+  >
+  > *— and the same ruling as `feat/threadpool-ke16` recorded it on the day, kept by the merge `merge/ke16-into-render`, 2026-09-10. Both are kept because each carries ground the other does not; where the two differ in status, the paragraph above is the later one.*
+  >
+  > ✅ **RESOLVED 2026-08-30 BY THE OWNER — (b), macro-time GK-4, taken NOW.** *"Do it properly right
+  > away. But bear in mind the world must support streaming."* Both halves bind: G1 takes the GK-4
+  > route, and no part of the bake design may foreclose streaming — which is why F5 lands with the
+  > scene profile rather than after it. **Rejected: decide EG2 first.** Price: G1 waits on a seam
+  > this campaign does not need. ⚠ **One inference in the body above is refuted by the ruling** — the
+  > baker is a Rust program linked against the derive-emitted tables, so it calls a `RequiredCtor`
+  > fn pointer trivially (measured through today's public `required_ctor_in_set`); what cannot call
+  > one is the *evaluator over Gaia text*, a different program. Ground:
+  > [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Inherited pipeline.
 - **F4 — what "loaded" means. WIDENED: the loader misses more of the insert path than hooks.**
   The finding that opened this ballot was "the loader runs no hooks". That is ONE mechanism of
   several, and the ballot as first written would have bought a hook-coverage census and still left
@@ -827,6 +2036,60 @@ The two that BLOCK rungs:
   > compose their parent's pose, and a dense component's `#[entities]` field was fixed on the
   > other branch. See §*2026-09-03* above. Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md`
   > §Load semantics.
+  >
+  > *— and the same ruling as `feat/threadpool-ke16` recorded it on the day, kept by the merge `merge/ke16-into-render`, 2026-09-10. Both are kept because each carries ground the other does not; where the two differ in status, the paragraph above is the later one.*
+  >
+  > ✅ **RESOLVED 2026-08-30 [delegated] — option (a), specified as SUPPRESS-THEN-FIXUP: four ordered
+  > sub-passes, on the clone path's own precedent.** Full ruling and every measurement:
+  > [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Load semantics. In brief:
+  >
+  > **All five reproduce at `6f75ee9e`** (`cargo test -p boyko-serialize --test
+  > gaia_f4_load_path_fixups -- --ignored --test-threads=1` → `0 passed; 5 failed`, controls green),
+  > and the hook census is `grep -rEn "trigger_on_[a-z]+\("` → **0** dispatch sites on the load path
+  > against **38** on the command/master path.
+  >
+  > **The order is the ruling:** (1) require closure at **parse** time — widen the id list with
+  > `for_each_required_id_excluding` and emit the **existing** `LoadColumn::Construct`, which already
+  > takes a `RequiredCtor` and is simply never reached for a component the file does not mention;
+  > (2) declared flags via `flags_direct_for`; (3) the existing remap; (4) hooks, then drain deferred
+  > commands to a fixpoint. Requires must precede hooks; **hooks must follow the remap.**
+  >
+  > **(b)'s MECHANISM is adopted as sub-pass 4; only its TIMING is refuted — and the ballot's stated
+  > price for (b) was wrong.** `DeferredEcsMaster` statically withholds every structural-change
+  > method, so a hook *cannot* mutate the world mid-load. The real hazard is ordering against the
+  > remap: `relationship_on_insert` reads a **raw saved FK** and guards on `is_alive`, and the
+  > measured saved/fresh id overlap across a normal round trip is **8/8, 100%** — so the guard does
+  > not fire and the hook builds a reverse index pointing at a **live but wrong** entity, strictly
+  > worse than today's empty one. **This bug already has a name in this kernel: BUG-EDGE-CLONE-1**,
+  > and the clone path's shipped fix is exactly a suppression bracket plus a relink after the FK is
+  > remapped. **The kernel has already answered F4 once, on the sibling path, and it answered (a).**
+  >
+  > **(c) verified, not inherited, and worse than "untenable":** an attribute-line census over
+  > `crates/*/src/`, hand-audited, finds **10 require-bearing shipped components** (three light
+  > types, `ParticleEffectHandle`, three camera types, `MeshHandle`, `MaterialHandle`,
+  > `UiWorldProjection`'s owner) plus **3 explicit hook-bearing** and the whole
+  > `Relationship`/`RelationshipTarget` family. (c) forbids **every mesh, material, light, camera and
+  > particle effect**; `MeshHandle` alone is load-incomplete on three counts at once.
+  >
+  > **Two corrections to the body above.** (ii) is **not a load-path defect** — it is the *dynamic
+  > by-id entrance*'s, which the loader shares: `EcsMaster::create_entity` is public, shipped, and
+  > produces no required component where `Commands::spawn` does, so the silent wrong answer is live
+  > one call from gameplay code, and a GK-4 baker built on it would bake the defect **into the file**.
+  > (iii) **splits in two**: the *declared* half is reconstructible with **no format change at all**,
+  > and only the *authored per-entity* half is F9's.
+  >
+  > **The addendum is answered too: the carrier is a stable asset NAME in the file, resolved to the
+  > existing `MeshHandle(u32)` at load — no new component type.** `grep -rn "\bMeshRef\b" crates/` →
+  > **0** (all 7 repository hits are corpus prose), while `MeshRefGen`/`MaterialRefGen` is a
+  > **generation counter** — the name is one suffix from a live type meaning something else, so
+  > **`MeshRef` must not be minted**. And there is no name- or path-keyed asset lookup in the engine
+  > at all (**0** hits), so the registry is a **G3** build item. ⚠ This names a *carrier form*, not a
+  > name-vs-id ruling: **F8** stays free.
+  >
+  > ⚠ **Two escalations the ruling does not own.** The `create_entity` require-drop is an **engine**
+  > defect independent of Gaia and needs its own carrier — filing it under F4 would let a
+  > Gaia-scoped fix leave the gameplay-facing hole open. And `remap_loaded_entities` is **O(whole
+  > world) per load**, which under F5 now runs on every `load_cell`.
 
 The remaining five, in the same shape:
 
@@ -852,6 +2115,49 @@ The remaining five, in the same shape:
   > keys on SCHEMA count rather than FILE count, and `VmColumn` refuses a 40-byte element
   > outright. The arithmetic is in §*2026-09-03* above. Ground: `feat/threadpool-ke16`
   > `gaia/DECISIONS.md` §Data tables.
+  >
+  > *— and the same ruling as `feat/threadpool-ke16` recorded it on the day, kept by the merge `merge/ke16-into-render`, 2026-09-10. Both are kept because each carries ground the other does not; where the two differ in status, the paragraph above is the later one.*
+  >
+  > ✅ **RESOLVED 2026-08-30 [delegated] — (a) rows are entities, AMENDED three ways the ballot did
+  > not carry.** Full ruling: [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Data tables.
+  >
+  > ⚠ **The ballot's phrase "a dense-column archetype" is a category error, and it is the thing the
+  > owner's remark caught.** A dense id is signature-excluded, so `get_or_create_archetype(&[DenseRow])`
+  > returns **the empty archetype** (measured: `dense_arch == empty_arch → true`) — under the ballot's
+  > own wording 4000 item rows would land in the world's component-less bucket beside every bare
+  > entity in the game. **(i) Storage is `StorageKind::Table`**, which is what *"data that doesn't
+  > have to be dense"* denotes in this engine's vocabulary: a table whose rows carry the row component
+  > and nothing else is **one archetype with exactly one `ComponentPool`, already contiguous**, while
+  > dense would add `s2e`, an `e2s` sized to the maximum entity id ever inserted, a live bitmap and a
+  > free list for a contiguity `Table` already has. The mechanical rule for which kind a table gets:
+  > *is the row component carried by entities outside the table?* **(ii) Rows materialize EAGERLY at
+  > load**, never lazily — under lazy materialization `save_world` records which rows *happened to
+  > have been touched*, so the same game state saves to different files and a round trip is no longer
+  > one; and every insert-path mechanism F4 enumerates would fire at an arbitrary later frame.
+  > **(iii) A table is loaded by its own explicit load and PINNED**, so `unload_cell` never enumerates
+  > it; the runtime handle is an **`Entity` captured at load**, never a row index, because
+  > `Archetype::swap_remove` moves rows and loads append into dedup'd archetypes.
+  >
+  > **The price, measured rather than asserted.** 4000 rows of a 40-byte row type as table entities
+  > cost **522 752 B ≈ 511 KiB** marginal against a running world (pool data 262 144 + two tick
+  > regions 65 536 each + `entity_ids` 65 536 + inland 64 000), and **0.006%** of the inland store's
+  > slot ceiling; the per-frame cost of those idle entities is **one extra archetype mask test per
+  > query**, not 4000 row visits. **Rejected (b), and its price:** it saves **129 536 B (25%)**, or
+  > 62% *only if a new tick-free VM primitive is also written*, because `VmColumn<T>::new` **panics**
+  > unless `size_of::<T>()` divides the commit granule and 40 does not (nor 48, 56, 72). Against
+  > 0.13 MB it costs a format version bump, **≥ 607 production + ≥ 444 test lines** by the dense
+  > region's own precedent — for a region whose payload shape, unlike dense's, has **no existing
+  > analogue** — and **the entire per-`ResourceId` serialize seam from scratch**:
+  > `grep -rniw "resource" crates/boyko_serialize/src/` returns **0 occurrences of the word anywhere
+  > in the crate, comments included**. It also forfeits queryability, which is the shape Principle 0
+  > exists to refuse.
+  >
+  > ⚠ **Two corpus corrections made in passing:** `load_archetype`/`load_dense_store` are **not** in
+  > `boyko_serialize` (they are `pub fn` in `boyko_ecs::…::serialize::load_writer`; the crate's own
+  > halves are `load_one_archetype`/`load_dense_region`), so the ballot's "second load path" straddles
+  > two crates; and two engine docs contradict each other on the W4 anchor — one says loads go into
+  > freshly created archetypes, the other says `create_archetype` **dedups** and the anchor is
+  > relaxed. Neither is Gaia's to fix.
 - **F3 — the shape of a table file.** Single-file-per-asset only (one document = one asset), or
   ALSO a table file that bakes N rows into one dense column. Price of the second form: the grammar
   grows a row-repetition shape and identity has to name a row INSIDE a file (which is F8's
@@ -873,6 +2179,15 @@ The remaining five, in the same shape:
   > canonical printer (red fixture — edit row 200 of 400, re-print, assert the diff touches one
   > span), and the deletion of the "dense column" wording everywhere it appears in this corpus.
   > Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Data tables.
+  >
+  > *— and the same ruling as `feat/threadpool-ke16` recorded it on the day, kept by the merge `merge/ke16-into-render`, 2026-09-10. Both are kept because each carries ground the other does not; where the two differ in status, the paragraph above is the later one.*
+  >
+  > ✅ **RESOLVED 2026-08-30 BY THE OWNER — both forms, over ONE schema.** The table file is a
+  > **spelling**, not a second type system. Rejected: a table dialect. The owner asked for a
+  > recommendation on the details, which is answered separately and is not this line. Ground:
+  > [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Data tables. ⚠ Its identity half — how a row is named
+  > *inside* a file — is **F8**'s and stays open; F2's ruling constrains only the *runtime* handle
+  > (an `Entity` captured at load) and says nothing about the authored identity.
 - **F5 — streaming scope, and the alternative nobody wrote down.** The recommendation on the table
   is (a) *format-ready-loader-later*: the cell catalog, its attribution, and the persistent id map
   (GK-1) land NOW as one design unit; `load_cell`, unload, and cross-cell references land at G8.
@@ -897,6 +2212,26 @@ The remaining five, in the same shape:
   > `LoadEntityMap` a world-owned `Resource` keeping its `Vec`, turning the transient-scratch
   > exception into a durable parallel data system; the in-tree cure is `PathIndex`'s `VmColumn`
   > shape. Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Streaming scope.
+  >
+  > *— and the same ruling as `feat/threadpool-ke16` recorded it on the day, kept by the merge `merge/ke16-into-render`, 2026-09-10. Both are kept because each carries ground the other does not; where the two differ in status, the paragraph above is the later one.*
+  >
+  > *"Все сразу грамотно по списку с самого начала."* `load_cell` / `unload_cell`, GK-1's cross-load
+  > map **with a declared lifetime**, and cross-cell reference resolution ship **with** the scene
+  > profile at **G6**, not after it at G8. **The rejected option's price is the one the body already
+  > states** (a catalog with no loader is a datum nothing consumes until G8); **the ruling's price is
+  > the larger one and is accepted knowingly** — G6 absorbs the hardest half.
+  >
+  > ⚠ **This is the single largest change to the campaign's ground, and it lands directly on F4.**
+  > Six GK-1 requirements now belong to G6, each from a measured blocker; the two that must not be
+  > lost are (i) **insert-after-`finalize` must become legal**, because today a second cell's inserts
+  > land in an unsorted tail that `binary_search` **silently misses** in release, and (ii) **the
+  > fresh-world contract must be lifted** — `load_dense_store`'s guard is a `debug_assert!` whose own
+  > message reads *"merge load is unsupported"*, and it **vanishes in the shipping build**, so
+  > `load_cell` would corrupt the dense store silently in release and loudly only in dev. ⚠ **GK-1 and
+  > GK-3 must land together** or the cross-cell half is silently half-present: a `ChildOf` across a
+  > cell boundary only enters the reverse index when F4's sub-pass 4 fires. Ground:
+  > [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Streaming scope; the rung rewrite is in
+  > [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) rows **G6** and **G8**.
 - **F6 — the fate of `.ui` once Gaia absorbs it.** (a) migrate the existing `.ui` documents to the
   Gaia `ui` profile and DELETE the old format in the same campaign; (b) freeze `.ui` where it is
   and decide after an owner-eval of a real Gaia HUD. Price of (a): the migration is done blind —
@@ -917,6 +2252,15 @@ The remaining five, in the same shape:
   > `crates/boyko_ui/src/text/`, so the writer silently drops every panel and button fill while
   > the round-trip gate stays green, because the gate's universe is the writer's own emit roster.
   > Ground: `feat/threadpool-ke16` `gaia/DECISIONS.md` §Language shape.
+  >
+  > *— and the same ruling as `feat/threadpool-ke16` recorded it on the day, kept by the merge `merge/ke16-into-render`, 2026-09-10. Both are kept because each carries ground the other does not; where the two differ in status, the paragraph above is the later one.*
+  >
+  > ✅ **RESOLVED 2026-08-30 BY THE OWNER — (a): migrate to the Gaia `ui` profile and DELETE the old
+  > format in the same campaign.** Rejected: freeze until an owner-eval of a real Gaia HUD, on the
+  > diverged-pair cost already measured in this repository. **The ruling's own price is recorded at
+  > G7 rather than left to be discovered:** the migration is done **blind**, because G7's
+  > prerequisites — a windowed UI pass and a real `UiPlugin` — do not exist. Ground:
+  > [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Language shape.
 - **F7 — mods, and the executable the ratified refusal does not mention.** ⚠ **This borders a
   ratified refusal and has to be framed against it, not asked fresh.** What is ratified: *own text
   → build-time bake → binary; reflection only at bake, behind a default-off feature; the shipped
@@ -942,10 +2286,23 @@ The remaining five, in the same shape:
   > answering half of an open ballot, on a page whose own campaign file forbids exactly that. The
   > ruling makes the line correct retroactively; it did not make it legitimate at the time, and
   > the line now carries this date so it reads as sourced.
+  >
+  > *— and the same ruling as `feat/threadpool-ke16` recorded it on the day, kept by the merge `merge/ke16-into-render`, 2026-09-10. Both are kept because each carries ground the other does not; where the two differ in status, the paragraph above is the later one.*
+  >
+  > explicitly.** The ballot existed because silence was itself a decision; it is no longer silent.
+  > **What the explicit ratification buys is the NARROW form of the constraint**: what is ratified is
+  > *no reflection in the GAME BINARY*, not *no bake tooling in a player's hands at all* — so a later
+  > mod campaign is not blocked by a sentence that never meant to block it. **Rejected (b) — accept
+  > the separate-executable pipeline now and design the format's stability guarantees for it.**
+  > Price: v1's format gains a compatibility surface for a consumer that does not exist, which is the
+  > dead-datum class. Price of the ruling, accepted knowingly: if a mod campaign is ever taken, those
+  > guarantees are retrofitted rather than designed in — and the *"for now"* in the owner's answer is
+  > what makes that a schedule rather than a prohibition. Ground:
+  > [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Refusals.
 
 ---
 
-## 2026-08-28 — The `machine` "one transition per frame" claim is FALSE: two same-frame events run BOTH exit/action/enter chains
+## 2026-08-28 — The `machine` "one transition per frame" claim is FALSE: two same-frame events run BOTH exit/action/enter chains — FIXED 2026-08-30 (rung R2)
 
 Found while designing per-entity machines, confirmed by two independent reads of the emitter and
 the schedule. `run_state_transitions` executes ONCE, before the executor loop, so `State<S>` is
@@ -965,6 +2322,33 @@ frame → today it must FAIL by observing two chains; after R2 it pins exactly o
 
 Nothing else is blocked; the global `machine` misbehaves only under same-frame multi-event load,
 which the shipped tests deliberately avoid (distinct event types per edge).
+
+**RESOLVED 2026-08-30, rung R2.** The red test is
+[`aether_tests/tests/r2_chart_arbitration.rs`](../crates/aether_tests/tests/r2_chart_arbitration.rs),
+and it was watched failing before anything moved. MEASURED pre-fix, all five counters at once on
+one leaf with `on Alpha => ToAlpha` declared before `on Beta => ToBeta`:
+
+| exit | alpha action | beta action | enter ToAlpha | enter ToBeta | settled state |
+|---|---|---|---|---|---|
+| **2** | 1 | 1 | 1 | 1 | **ToBeta** |
+
+Two exits, two actions, two enters — and the surviving state was the LAST-declared route's, which
+is the arbitration artifact M6 called out. Post-fix the same run reads `1 / 1 / 0 / 1 / 0 /
+ToAlpha`.
+
+The fix is the per-leaf **route merge** in `boyko_macros::state_chart!`
+(`state_chart::emit::leaf_fn`): one system per leaf drains every lane, a single `__sc_route`
+selection takes the first-declared accepting route, and one `match` arm runs the only chain. A
+second same-frame chain is now structurally impossible — there is one selection point, so the
+question "how many chains ran" has no way to answer anything but one.
+
+Two things a reader should not have to rediscover:
+
+* the emitter comment that made this claim is gone with the emitter — the flattening now lives in
+  `boyko_macros`, and Aether lowers to it;
+* every lane is still drained even when its route loses, which preserves the pre-merge per-lane
+  drain exactly. The kernel's `EventIter` advances the cursor only past what it yielded, so a
+  merge that skipped the loser's lane would have left this frame's events to re-fire on the next.
 
 ---
 
@@ -3999,3 +5383,499 @@ frozen/hashed files — would make on-disk bytes deterministic everywhere and re
 The cost is that it rewrites line endings across working trees on the next checkout, and two lanes
 (`feat/reflection`, `feat/ui-advanced`) are mid-flight in worktrees right now. That is a
 disruption I should not schedule for you. The thresholds gate is immune either way.
+
+## Fixing defect B reopens axis A — by the register's own return row (2026-09-07)
+
+`KE16-RESULTS.md` §B shipped the sentence "Axis B — B0 BY CONSTRUCTION", and the `compile_error!`
+that justified it said the worker joiner "needs a REGISTERED destination deque, which only the A1
+arms give it". **That reason was false.** Every arm builds `worker_count` deques and registers their
+`Stealer`s unconditionally (`thread_pool.rs:718-737` — the only `cfg` there picks LIFO vs FIFO), and
+each worker is handed one by move (`worker.rs:33`). What the A1 arms uniquely publish is the deque's
+ADDRESS into the thread's TLS (`worker.rs:60-61`); `tls::worker_lane_for` already has a working
+non-A1 branch (`tls.rs:238-248`) carrying `allow(dead_code)` only because nothing calls it. The
+refusal itself stays — `b1`/`b3` call `lane.deque()` — but it is a REACHABILITY gap, not a
+structural impossibility, and the message now says so.
+
+The defect is live under `a3` by direct measurement, not by occupancy inference: the shipped
+`the_worker_joiner_does_not_run_a_residue_before_re_checking_its_scope` under `--features ke16-a3`,
+five runs, `running 1 test` each, reads a **median 192.1 ms** against a 60 ms budget and a 132 ms
+residue floor, where the B arms read 4 and 5 us.
+
+**The decision that is yours.** A remedy exists and its code is already written (`join_on_worker`,
+five review rounds old); publishing the TLS deposit under a new `ke16-b4` costs one store per worker
+per process and changes **no steal granularity at any site**, so it does not trip the letter of
+`a1f`'s return condition. But `KE16-REJECTED.md:359-362` and `:475-476` give `b1`/`b3` a SECOND
+return trigger — *"or if defect B is fixed by some other route that gives the worker joiner a
+registered destination deque"* — and that route is exactly this one. So `b1`/`b3` return the moment
+the remedy lands, they build only over `a1`/`a1f`, and the comparison becomes **`a3+b4` vs
+`a1f+b1`**, not vs `a1f+b0`.
+
+The monotone shortcut does not save it: `a3+b4 <= a3+b0 < a1f+b0` is arithmetically true and bounds
+nothing about `a1f+b1`. `a1f+b1` needs a 27.9 % gain on `worker/body_10us_tasks_4W` to tie, that
+cell is the worker route, and `a1`'s worker route was measured **with defect B live**
+(`top_lane = 13/24/21`), where 33 x 10 us = 330 us sits at the same order as the 159 us cell.
+
+**So the remedy's true price is a re-run of the axis-A head-to-head on a new substrate**, interleaved
+pass-by-pass in one session, on the physics primary and the deciding cell — a quiet machine. The
+alternative is legitimate and already shipped: leave defect B live, as `a3+b0` does today while
+clearing both acceptance clauses (the first by 2.4x, the second at 93.5 % of budget). Not scheduled
+without you. See `docs/threadpool/KE16-DESIGN-B4.md`.
+
+## graphify is not installed on this machine at all (2026-09-07)
+
+`CLAUDE.md` and two `PreToolUse` hooks require `graphify query` before reading or grepping source,
+and the `post-commit` hook rebuilds the graph. **The tool is absent.** All three of the hook's
+interpreter probes fail: the pinned `C:\Python314\python.exe` exists but `import graphify` raises
+`ModuleNotFoundError`; `graphify-out/.graphify_python` records that same interpreter (so the file is
+not wrong about the path, it is wrong about the module); and no `graphify` launcher is on PATH from
+either shell. `C:\Python312` is an empty directory with no `python.exe` — the interpreter that held
+it was removed by the upgrade to 3.14, and site-packages went with it. Neither `uv` nor `pipx` is
+present.
+
+Consequences: the hook has failed on **every** commit, so `graphify-out/graph.json` is dated
+**2026-08-03** while the branch tips are September; and the graphify-first instruction has been
+unsatisfiable for a month while its reminder still prints on every grep.
+
+**Yours to decide** because it installs third-party code on your machine: the PyPI package is
+`graphifyy` (not `graphify`) — `uv tool install --upgrade graphifyy` or `pip install graphifyy`,
+after which `graphify-out/.graphify_python` must be repointed or the hook will fail the same way.
+
+## `master` is 603 commits behind, and the branches are a chain rather than a fan (2026-09-07)
+
+`master` is at `e65a5673`, dated **2026-07-09**. Every active lane is 559-603 commits ahead of it and
+**zero** behind. Two months of engine, particles, Aether, render and UI work lives on unmerged
+branches.
+
+The encouraging half, measured pairwise rather than assumed: `fix/inherited-red-gates` and
+`feat/aether-v2` are **entirely contained** in `feat/threadpool-ke16` (their-only = 0);
+`feat/multi-paradigm-render` differs by 2 commits; `feat/reflection` and `feat/ui-advanced` by 20 and
+16. So integration is close to linear, not a merge fan — `master` could fast-forward to the
+threadpool tip and pick up 603 commits including the gates and Aether lanes.
+
+This is your release line and the call is yours; it is recorded here because a two-month-old `master`
+silently changes what "the shipped code" means in every other document.
+
+## The protector gate's `overlaps >= 1` is a PROCESS-GLOBAL threshold read by two parallel tests (2026-09-07)
+
+Found while reviewing a proposed change to the Miri probe, and it is a finding about the tree rather
+than about that change, so it is recorded rather than fixed.
+
+`assert_probe_armed` (`tests/miri_scope_completion_protector.rs:290-303`) computes `overlaps` as a
+delta over a window in which the sibling test is also running: the default Miri build of that binary
+runs two non-feature-gated `#[test]`s in parallel (`:350-351`, `:793-794`), and the file itself
+records that libtest runs them in parallel with process-global counters (`:263-266`).
+
+That file justifies the non-strict comparison for `firings` on the grounds that a concurrent test
+"can only ADD" — correct there, because for `firings` the ADD direction is harmless. **For `overlaps`
+the ADD direction is the FALSE-GREEN direction**: context X's `overlaps >= 1` can be satisfied
+entirely by context Y's genuine overlap, so a per-context claim is not per-context. Today both tests
+exercise the same arm with the same shape, so the consequence is mild — but the gate guards a shipped
+UB fix, and this is the same shape as the family this repository keeps cataloguing.
+
+Cures: per-context counters, or pinning the Miri gate to `--test-threads=1`. The second additionally
+bounds window-slot occupancy but changes the recipe the measured table at `:88-98` was taken under,
+invalidating the 4/4 and 3/4 baselines every negative control compares against — so it needs its own
+re-measurement pass and is not a free tightening.
+
+A separate, cheaper question is still open and needs no edit to answer: whether the gate's
+address-keyed window slots are **already** being satisfied by address reuse. Miri's default same-thread
+heap reuse rate is 0.5, every `Box<ScopeShared>` is allocated and freed on one thread, the window key
+is address equality alone (`scope.rs:272-275`), and the recipe pins no reuse rate (zero occurrences
+of `address-reuse` anywhere in the tree). Sixteen Miri processes over
+`-Zmiri-address-reuse-rate` x `-Zmiri-address-reuse-cross-thread-rate` in {0,1} decide it: identical
+printed counts mean the defect is latent, any increase at rate 1 means `overlaps=3/4` is partly an
+artefact today.
+
+## RESOLVED 2026-09-07 — all four of the day's questions, ruled by the owner
+
+1. **Defect B — DEFERRED to the quiet window, not dropped.** B4-1 lands in the SAME session that has
+   a quiet machine for axes W and C, so the re-run it forces — `a3+b4` against `a1f+b1` — happens
+   interleaved there, in one session, and the axis-A verdict never sits unproven. Until then `a3+b0`
+   ships as it does today, clearing both acceptance clauses.
+2. **graphify — INSTALLED.** `graphifyy` into the interpreter the hook already pins; the hook's first
+   probe now passes and `graphify-out/.graphify_python` needed no change. Verified by the next commit,
+   which launched a background graph rebuild instead of printing the error it had printed on every
+   commit for a month.
+3. **`master` — FAST-FORWARDED** from `e65a5673` (2026-07-09) to `45dd0dbd`, 611 commits, a true
+   fast-forward: `master` held nothing this branch lacks and no worktree had it checked out.
+   `feat/reflection` (+20) and `feat/ui-advanced` (+16) are merged separately, later.
+4. **The gate's `overlaps >= 1` threshold — PER-CONTEXT COUNTERS.** `--test-threads=1` was rejected
+   because it changes the recipe the measured 4/4 and 3/4 table was taken under, and every negative
+   control compares against that table. Not yet implemented; it is the next small item after Stage 3b.
+
+## Axis W is decided against `wg`; what remains is a GATE, not a number (2026-09-08)
+
+Three interleaved passes at CS-4 eliminated `wg` (W-b) and `wgc`: zero improvements, thirteen and
+fourteen regressions, and — the reading that decides it — an **occupancy receipt**. Under `wg` the
+ECS protocol pass reports `max_in_flight` of **5–6 of 16 lanes** with the speedup pinned at
+**2.00×** in every pass, against the reference's 16 and 13.9–15.7×. W-b does not add overhead; it
+leaves ten lanes parked, because on a wave pushed to one destination only the first two pushes see
+`pre_len` of 0 and 1. `KE16-DESIGN-W.md` §2.4 had named this outcome as its own risk clause, on
+exactly the cells it fired on.
+
+`wc` (W-d′) is a tie on all 38 cells and preserves 16/16 occupancy. **Step W rule 2 makes its keep
+conditional on two gates rather than on any number**: a real-park loom M1c, and the route-(b)
+many-seeds Miri gate. Neither has been run at CS-4. So **W\* is undecided between `wc` and `w0`,
+and no measurement can decide it** — a red on either gate drops the feature outright.
+
+⇒ **Nothing here needs you.** The two gates are structural work and will be run when the machine is
+free; they are not a values call. This entry exists so that a reader who sees "axis W measured" does
+not conclude that W\* is fixed.
+
+### ⚠ What IS worth your ruling: the physics ranking, and whether it is worth a session
+
+**No physics verdict was filed, and it cannot be from this data.** The three passes drift
+monotonically — the reference's `bench_thread_install` reads 36.24 / 13.36 / 8.12 ms across passes
+1, 2, 3, and the PRIMARY row `in_scheduled_system` carries an **85 % band**. Against a band that
+wide every arm is a tie by construction, which is a statement about the band and not about the arms.
+The machine was still settling from the build when pass 1 ran; the load receipts show 14.8 % CPU at
+pass 1's open and 1.4 / 0 / 0.1 % at pass 3's.
+
+**More passes taken the same way would not fix it** — the drift is monotone, so extra passes extend
+the trend rather than average it out. A physics ranking needs a session that opens ALREADY SETTLED:
+the box idle before the first build, not after it.
+
+**My recommendation is that this is NOT worth a session, and the reason is that it is not on the
+critical path.** W\* is a choice between `wc` and `w0`, and rule 2 decides it on the two gates. A
+physics ranking would matter only if `wc` were a candidate to keep on performance grounds — it is
+not; it is a measured tie. And Step App re-takes every consumer number on the unconditional shipped
+code anyway, which is where the acceptance line is formally taken. **Unless you want the record to
+carry a CS-4 physics row for its own sake, the next quiet window is better spent on the axis-A
+re-judgement that fixing defect B forces** (`a3+b4` vs `a1f+b1`, ruling 1 of 2026-09-07).
+
+### ⚠ Raw data this pass destroyed, recorded because it cannot be recovered
+
+`--save-baseline` is keyed on the variant string, which does not name the code state, and criterion
+overwrites in place. Re-taking `a3+b0+w0+c0` at CS-4 overwrote the **CS-2 reference's raw samples for
+r1, r2 and r3**; r4 and r5 survive only because the pass stopped at three. The medians, bands and
+per-run values are preserved as prose in `KE16-RESULTS.md` §W, so the findings are intact — the
+per-sample data behind three of five runs is gone, and criterion baselines are not rebuildable from
+anything in the tree. The naming scheme now carries the short HEAD hash (`e7910d5f`), so two code
+states can no longer address one directory. **No action is asked of you; it is here because a
+document that only records its successes is the thing this campaign keeps finding to be wrong.**
+
+## A measurement RULE was rewritten after it ruled, and that is yours to accept or reject (2026-09-08)
+
+`KE16-DESIGN-MEASUREMENT.md` §7's Step-A rules 2 and 3 are amended, and the amendment is flagged
+here rather than merely applied because of when it happened: **rule 3 decided against `a1f+b1`, and
+`a1f+b1` was then measured better on ten of thirty-five cells with both consumers tied.** A decision
+rule rewritten after it has ruled is the shape that most deserves an owner's eye, so the original
+text is preserved verbatim directly beneath the amendment and the change is reversible by deleting
+one block.
+
+**What was wrong with the rule, as a fact rather than a preference.** Rule 3's tiebreak gave the
+decisive vote to the 64W column. The engine cannot produce that column: `BatchingStrategy::default()`
+sets `batches_per_thread = 1`, so an archetype splits into exactly W chunks — one per worker — and
+reaching 64W needs `batches_per_thread = 64`, which **no caller in the tree sets**;
+`MIN_ARCHETYPE_FOR_PARALLEL = 1024` floors a chunk at 1024 rows, so the 1 µs body the tiebreak fires
+on needs a row costing under a nanosecond, against a real ECS chunk of ~82 ms; and the physics
+solver does not use that path at all. So one cell at an unreachable width and an unreachable body
+size outvoted six mid-body cells at 2–4 × and a tie on both consumers.
+
+**What the amendment says.** Rule 2 becomes CONSUMER AGREEMENT rather than physics primacy — a
+candidate leads only if it leads or ties on every consumer, and a disagreement between consumers is
+reported as a tie rather than broken by choosing one. Rule 3's veto surface becomes the widths the
+engine PRODUCES: `tasks = W` decides, 4W and 64W are recorded and cannot decide, and no single cell
+may again override the rest of the grid and both consumers.
+
+**Why it is put to you.** Perf and architecture forks are the orchestrator's to settle, but
+rewriting the yardstick mid-campaign is closer to scope. Three things are worth your ruling:
+
+1. **Accept, reject, or narrow the amendment.** Rejecting it does not restore `a3`: §A-RE's reversal
+   rests on the measurement, not on the rule — ten cells improved, two regressed, both consumers
+   tied, gate ladder green. Rejecting the amendment means the campaign carries a rule that its own
+   measurement contradicts, which is a coherent choice only if the rule is then fixed some other way.
+2. **`4W` is reachable but unused.** `BatchingStrategy` is public and `par_iter().batching_strategy()`
+   accepts it; nothing in the engine calls it. If you expect callers to start tuning that, 4W should
+   join the deciding surface and the amendment should say so.
+3. **The consumer set is thin.** The pool has four production dispatchers — the scheduler, ECS
+   `par_iter`, the physics colour solver, and the MSDF bake — and the campaign measures TWO of them.
+   A rule that requires consumer agreement is only as good as the consumers it agrees across. Adding
+   the scheduler and the bake as harnesses is a real cost and a real coverage gain; it is your call
+   whether the campaign pays it now or records the gap.
+
+## The `Vec` side-store did not come back — Stage 4 of the 2026-07 remediation was never run (2026-09-08)
+
+Asked why physics holds bulk data in `std::Vec` again after the O11-SP4 incident "when we checked
+everything and there were no problems". It never came back. It was never removed, and three
+structural reasons kept that invisible.
+
+**IT WAS FOUND, NAMED, AND STAGED.** `docs/ARCH-AUDIT-ECS-DATA-REMEDIATION.md` lists
+`ConstraintGraph ×8` under **S3** — *"per-step SoA/CSR scratch, ~20 resources / ~90 Vec fields …
+only the backing medium (std::Vec → ComponentPool) changes"* — and it is **not** in that document's
+"Legit-keep" list. Its remedy is **Stage 4**, *"mechanically swap the S3 per-step `Vec` fields →
+`ScratchColumn`"*.
+
+**STAGES 0 AND 1' RAN; STAGE 4 DID NOT.** `ScratchColumn` exists (`scratch_ids.rs`), the three body
+mirrors are converted, and `solver/colored.rs:305` documents the address-stable backing. So what was
+fixed is **the race**, not **the class** — which is exactly why the memory of it is "we checked and
+it was clean": SP4 is closed and its gate is green. Counted 2026-09-08 across
+`crates/boyko_physics/src`: **50 fields on `ScratchColumn`, 106 still on `Vec`.** Part of S3 did get
+converted (`ra_x`/`ra_y` at `colored.rs:806` are the `ContactColumns` SIMD lanes); `ConstraintGraph`'s
+eight did not. The remediation is **partially executed**.
+
+**WHY NOTHING SURFACED IT — three reasons, all structural:**
+
+1. **There is no gate on `Vec`.** `clippy.toml` mechanically bans `HashMap`, `HashSet`, `Mutex`,
+   `RwLock`, `Rc`, `RefCell` and their `parking_lot`/`hashbrown` forwards. `std::vec::Vec` is
+   absent. Principle 0's "no parallel data system" clause rests on prose alone, while the repo's
+   other two make-a-check-disappear mechanisms — `unsafe` and `#[allow]` — each carry a mandatory
+   written justification and a census.
+2. **Two different "we checked everything" statements read as one.** `clippy.toml`'s header says a
+   full classification across 14 crates *"found ZERO violations"* — true, and scoped to the types it
+   lists. The architecture audit says *"~90 Vec fields"* in physics — also true, and about a class
+   the lint never covered. The first sentence lives in the gate file, sounds absolute, and carries
+   the same 2026-07 date as the second.
+3. **Neither plan document tracks stage status.** There is no "Stage 1' — done" and no "Stage 4 —
+   open" anywhere in `ARCH-AUDIT-ECS-DATA-REMEDIATION.md` or `DENSE-COMPONENTS-PLAN.md`. A
+   half-executed plan is textually identical to an unexecuted one.
+
+**WHAT IS PUT TO YOU:**
+
+1. **Does Stage 4 get scheduled, or is S3 accepted as a standing exception?** Either is defensible —
+   the pattern (CSR/SoA, cleared-and-refilled, zero-alloc) is already correct and the audit says so;
+   what `ScratchColumn` buys is address-stability on grow, which matters only where a raw pointer
+   outlives a resize. If it is accepted, it belongs in "Legit-keep" with that reason, not left
+   looking like open work.
+2. **Should `Vec`-as-a-durable-side-store get a mechanical gate?** It cannot be a blanket
+   `disallowed-types` entry — `Vec` is legitimate almost everywhere — so it would have to be a
+   census over `Resource`-held structs, in the shape `ignore_reasons_census.rs` and
+   `print_census.rs` already use. That is real work and it is the only thing that would stop this
+   recurring.
+3. **Should the plan documents carry per-stage status?** The cheapest of the three, and it is what
+   turned a known backlog into a surprise.
+
+---
+
+## `Scope::spawn_batch` after App-4 lost: the design says do not ship it, and four production sites call it (2026-09-09)
+
+**THE RULE, VERBATIM.** `KE16-DESIGN.md`'s App-4 row states its own kill condition: *"no cell better
+than per-task spawn beyond 2× the band — then the API is not shipped (smaller surface wins a tie)"*.
+The tournament shipped `c0` — per-task spawn. App-4 lost. By that sentence the API comes out.
+
+**WHAT ACTUALLY SHIPPED.** The BEHAVIOUR is gone and the SURFACE is not. `Scope::spawn_batch`
+(`crates/boyko_threadpool/src/scope.rs:1060-1074`) is now:
+
+```rust
+let mut k = 0usize;
+for f in bodies { self.spawn(f); k += 1; }
+debug_assert!(k <= n, "invariant: `spawn_batch` bodies yielded more than the `n` it was promised");
+```
+
+Its own doc says so — *"One `spawn` per body: every body is registered and pushed on its own, and
+every push takes its own wake decision"*. There is no `fetch_add(n)`, no once-per-wave wake, nothing
+App-4 proposed. What remains is a loop plus a debug-asserted upper bound.
+
+**THE STATED REASON TO KEEP IT IS NOT EXERCISED BY ANY CALLER.** The doc justifies the surface as
+*"the API exists so that a caller whose chunk count is only an upper bound has one call to make"*.
+All four production call sites pass an EXACT count, and all four have the identical shape
+`spawn_batch(N, (0..N).map(..))`:
+
+| site | argument |
+|---|---|
+| `crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs:406` | `spawn_batch(n_chunks, (0..n_chunks).map(..))` |
+| `crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs:263` | `spawn_batch(n_chunks, (0..n_chunks).map(..))` |
+| `crates/boyko_physics/src/resources.rs:1781` | `spawn_batch(n_waves, (0..n_waves).map(..))` |
+| `crates/boyko_physics/src/soft/colored.rs:1042` | `spawn_batch(n_waves, (0..n_waves).map(..))` |
+
+So the `n` is never an upper bound in production; it is the length of the range immediately beside
+it, and the `debug_assert!` it feeds cannot fire at any of the four.
+
+**WHAT REMOVAL WOULD COST.** Four production sites become `for chunk in 0..n { scope.spawn(..) }`.
+Twelve `#[test]` functions in `scope.rs` go with the API (eleven `spawn_batch_*` plus
+`scope_multi_drain_frees_once`), as do the call sites in
+`crates/boyko_threadpool/tests/block_allocation_receipts.rs:746,876` and
+`crates/boyko_threadpool/tests/miri_scope.rs:629,684` — the latter two are receipts about the
+allocator and the release window, not about batching, so they would be rewritten onto `spawn`
+rather than deleted.
+
+**WHY THIS IS NOT DECIDED HERE.** Mechanical evaluation of the removed `ke16-c-batch` feature keeps
+whatever was outside a `cfg`, and `spawn_batch` was outside one. Removing a public method, rewriting
+four production sites and retiring twelve tests is a scope decision, not a cfg evaluation, and the
+rule that mandates it was written before the API acquired production callers.
+
+**WHAT IS PUT TO YOU:**
+
+1. **Does `Scope::spawn_batch` come out, as its own design rule says?** The honest reading is yes:
+   it is a loop with a promise no caller needs, and "smaller surface wins a tie" was written for
+   exactly this outcome.
+2. **Or does the rule get amended in place?** Defensible too — the four sites read better with it,
+   and the `debug_assert!` is a real invariant for a FUTURE caller whose count is a bound. If so the
+   App-4 row must say that the API survives its own rejection and why, because as written the
+   document and the tree disagree.
+3. **Either way the doc changes.** Today `KE16-DESIGN.md` says the API is not shipped and the API is
+   shipped. That is a documented rule contradicted by the tree, which is the shape this campaign has
+   spent its whole length removing.
+
+---
+
+## The `a1f` placement reads the defect-A serial floor at 1 µs, the record said 1.36×, and the cause is NOT DETERMINED (2026-09-10)
+
+**WHAT WAS MEASURED (all on one box, one night, bench profile, load receipts, arm witness per run;
+`KE16-RESULTS.md` §A-RE replay and §App).** `worker/body_1us_tasks_64W`, 1,024 tasks × 1 µs from
+inside a worker: `a3+b0` 99.9 / 100.6 µs; `a1f+b0` 1.184 / 1.148 ms; `a1f+b1` 1.170 ms / 444 µs
+(bimodal); unconditional HEAD 1.146–1.200 ms over seven runs. The record (`5863b041`, CS-4) had
+80.5 / 110.3 / 109.5 µs — ALL arms parallel — and the same commit with the same features reads the
+floor tonight. Excluded on measurement: the Step App removal, the box's compute speed
+(`ecs seq/65536` to 0.014 %), timer resolution (probe 756–15,006 µs while the cell held ±4 %).
+Excluded on code (Fable pass, refuted and re-verified): H1 joiner-outruns-thieves (10 µs bodies
+reach 8–15 lanes in the same process), H2 the FIFO owner/thief CAS storm (`b0` never pops its own
+deque, and it is stably serial), H3 a sweep that misses the spawner's stealer, H4 a dropped wake.
+Two facts point outside the pool: dispatcher-route 1 µs cells under `a3` vs `a1f` run near-identical
+code and read 100 vs 540 µs; and EVERY wake-bound cell is elevated arm-independently tonight
+(`a3`'s 1 µs × W 2.4–3.8× its §C values; `empty_schedule_control` 6.3–7.6× its five recorded
+sessions) while compute-bound cells reproduce within 1 %.
+
+**THE HYPOTHESIS THAT FITS EVERYTHING, UNTESTED.** A box scheduling-latency state — on a laptop
+part (Ryzen 9 5900HS) most plausibly core parking / C-state exit latency — that is (a) present in
+every arm, (b) gated by body duration (only wake-bound cells suffer), (c) an order of magnitude
+worse for `a1f` than for `a3` (a woken `a1f` thief must sweep 15 stealers to find the one deque;
+an `a3` thief batch-steals 32 from the global injector at stage 2, so far fewer wakes must land
+in time), and (d) BETTER on a busy box — which is what the CS-4 record's own timeline suggests: the
+driver keys the table depends on were committed 09:43:31 and the table written at 10:15, ≤ 31.5 min
+for ~35 min of passes, with 214 doc lines committed at 09:43 and a 17.7 KB source file written at
+09:54 in the same window (provenance lens, refuted-and-confirmed). A box kept warm by an agent
+editing and compiling would have SHORTER wake latencies than a quiet one, which is the direction
+the record differs from the replay. This is a hypothesis; it is the only one that explains all of
+(a)–(d), and it has not been tested.
+
+**THE DISCRIMINATING TESTS, in cost order (machine must be free; none was run — owner said no
+more timings 2026-09-10 00:30):**
+
+1. **Warm-box A/B.** Run `worker/body_1us_tasks_64W` on the shipped binary twice: once quiet, once
+   with a one-core low-priority spinner (or the `High performance` power plan / core parking
+   disabled) held for the run. If the cell drops from ~1.15 ms toward ~100–400 µs under the warmer,
+   the state is the box's wake latency and the CS-4 record was taken on a warm box. ~2 minutes.
+2. **`empty_schedule_control` alone.** One criterion run; 1.4–1.8 µs means the 6–7× was session
+   state; 9–11 µs on a quiet box with (1) positive confirms the same phenomenon.
+3. **Instrumented wave (mechanism lens's test).** `ke16_nested_scope_occupancy.rs` with `BODY = 1 µs`;
+   read `pool.parked_mask()` right after the spawn loop and count `Steal::Retry` at
+   `worker.rs::drain_one`. `lanes_used == 1` with the 15 sibling bits CLEAR and Retry ≈ 0 ⇒ the
+   siblings were woken and did not run in time (box); bits still SET ⇒ a real dropped wake (code);
+   `lanes_used > 1` at the floor ⇒ the bodies themselves are serialised.
+4. **Cold dispatcher cell.** `dispatcher/body_1us_tasks_64W` alone on the `a1f` binary: ~100 µs
+   means the 540 µs was carried-over process state; 540 µs means the binaries differ in a way the
+   source does not show.
+
+**TEST 1 RUN 2026-09-10 ~01:30 (owner: "do the A/B") — REFUTED.** `worker/body_1us_tasks_64W` on
+the shipped HEAD binary, three runs per state: quiet 1.123 / 1.161 / 1.108 ms; sixteen IDLE-priority
+spinners holding every core out of C-states (CPU 100 %) 1.054 / 1.137 / 1.150 ms; one
+BELOW-NORMAL spinner 1.067 / 1.155 / 1.137 ms. `empty_schedule_control` 10.18 / 9.38 / 8.93 µs.
+The cell does not move with core warmth; the box-wake-latency hypothesis above is dead, and the
+"warm CS-4 box" reading of the timeline explains nothing.
+
+**THE ONE VARIABLE STILL UNCONTROLLED IS THE COMPILER.** `~/.rustup/toolchains/stable-x86_64-pc-windows-gnu`
+was rewritten at **2026-09-09 02:52:35** (`rustup update` to 1.98.1; `20fc8a66` records the move
+from 1.97.1). The CS-4 §A-RE table was produced **2026-09-08 10:15** — every CS-4 binary was built by
+rustc **1.97.1**; every binary measured on 09-09/10, including the "same commit, same features"
+replay at `5863b041`, was built by **1.98.1**. A source-level audit cannot see a codegen change,
+and the tree already met one 1.98 effect at the TLS boundary (`missing_const_for_thread_local`,
+63 sites): `worker_lane_for` — the a1f placement predicate — is a `thread_local!` read on every
+push and in every join step, and `a3` never takes it. **Test 0 (cheapest decisive, ~5 min +
+a ~200 MB download): `rustup toolchain install 1.97.1-x86_64-pc-windows-gnu`, rebuild the pool bench
+at `5863b041` with `--features ke16-a1-fifo,ke16-b1,ke16-w-count` under `+1.97.1-…`, run the cell.**
+~110 µs ⇒ the record was right for ITS compiler and 1.98.1 regressed the a1f path (a shipped
+codegen regression, and a `BLESSED_RUSTC`-class receipt is owed beside every grid);
+~1.15 ms ⇒ the compiler is excluded too and only tests 3–4 remain.
+
+**TEST 0 RUN 2026-09-10 ~02:00 (owner: "install it and run") — THE CAUSE IS THE COMPILER.** Same
+commit `5863b041`, same features, same box, arm witness printed, taken on a box the owner had just
+called NOT quiet (park probes 7.8–15.5 ms; a noisy box inflates a reading, it does not deflate one):
+
+| build | `worker/body_1us_tasks_64W` | `worker/body_10us_tasks_4W` |
+|---|---:|---:|
+| `a1f+b1+wc+c0`, **rustc 1.97.1** | **99.3 / 105.0 / 132.7 µs** | 65.8 / 138.4 / 76.3 µs |
+| `a1f+b1+wc+c0`, rustc 1.98.1 (this session, 9 runs) | 1,170–1,215 µs | 72.5–74.7 µs |
+| `a3+b0+wc+c0`, rustc 1.97.1 | 165.8 / 128.1 µs | 182.8 / 157.9 µs |
+| `a3+b0+wc+c0`, rustc 1.98.1 (this session) | 99.9 / 100.6 µs | 175.7 / 178.9 µs |
+
+The record's 109.5 µs reproduces under the compiler that produced it. **rustc 1.98.1 slows the
+`a1f` placement path ~11× at 1 µs bodies and leaves `a3` alone**; the deciding cell is unaffected
+(0.4–0.5 either way, so the axis-A verdict stands under both compilers). `~/.rustup/toolchains/stable-…-gnu`
+was rewritten 2026-09-09 02:52; every shipped binary since is 1.98.1. **This is a shipped codegen
+regression on the pool's fine-granularity path, and it is the answer to the 10× question.** Both
+earlier causal stories in this entry (wake latency, warm box) were wrong and are struck above.
+
+**MECHANISM FOUND 2026-09-10 ~03:00, IN THE ASSEMBLY — `docs/threadpool/RUSTC-198-WINDOWS-GNU-TLS.md`.**
+Under rustc ≥ 1.98.0 on `x86_64-pc-windows-gnu` every `thread_local!` read calls
+`std::sys::thread_local::guard::windows::enable()` = `lock inc [ACTIVE_ENABLE_CALLS]` + `lock or [rsp],0`
++ `kernel32!FlsSetValue` + `lock dec` — two contended RMWs on one process-global line plus a Win32 call
+per access (rust-lang/rust #148799 + #157483, both milestone 1.98.0; `target_thread_local` is unset on
+windows-gnu, so the per-thread memoisation is compiled out and `const {}` does not help). The `a1f`
+path pays it twice per spawn (`worker_lane_for`) and twice per victim in every thief sweep (crossbeam-epoch
+pin before the `len` check); `a3`'s paths carry zero TLS reads and its `Injector` steal never pins.
+Everything else in the two binaries is relocation-identical. The bracket below is answered by the
+sources (1.98.0); what remains owed is the falsification run in that file's §5 and the two local fixes
+in its §4(b), neither before the owner frees the box.
+
+~~**NEXT (no runs until the owner says the box is free):** (i) bracket it — 1.98.0 is installed~~ (superseded) (i) bracket it — 1.98.0 is installed
+(`~/.rustup/toolchains/1.98.0-…`, 2026-09-02): one build + one run says whether the regression is
+1.98.0 or the 1.98.1 point release; (ii) name the function — `cargo asm` / `objdump -d` diff of
+`push_on_lane_no_wake`, `worker_lane_for` (a `thread_local!` read on every push; 1.98 already
+misfires `missing_const_for_thread_local` on this tree's 63 `const {}` sites, so TLS codegen on
+windows-gnu is the first suspect), `try_steal_random` and crossbeam's `steal_batch_and_pop` between
+the two builds; (iii) a `BLESSED_RUSTC`-class receipt beside every published grid — the compiler
+that produced the bytes, not the channel name — because a load receipt cannot see this either.
+
+**TWO GAPS THIS EXPOSES, EITHER WAY THE TESTS FALL:**
+
+* **`a1` (LIFO owner end) + `b1` was never measured.** `a1` was eliminated at CS-1 on physics in
+  the one session whose own machine witness FAILED (`KE16-REJECTED.md`: `O5` moved 16.84 % between
+  its two runs, `bench_thread_install` 45 %), before `b1` existed; its return condition is *"a
+  session whose `O5` spread is ≤ 1 %"*. LIFO is the end discipline `KE16-DESIGN-A.md` §1.4 names as
+  the one whose ends "meet only on the last element". If test 3 shows thieves ARRIVING and LOSING,
+  `a1+b1` is the arm to measure next; if it shows them not arriving, LIFO does not help and the
+  answer is in wake policy (axis W was closed on `wc` = every push wakes one).
+* **The physics consumer runs at the collapsed shape.** 96 = 6W chunks per colour, 1–10 µs bodies,
+  from a worker (`KE16-DESIGN-MEASUREMENT.md` §7 correction). Its per-arm numbers were never
+  re-taken after CS-4, and tonight's HEAD physics is 1.44× the record with no meter to normalise by.
+
+**WHAT IS PUT TO YOU:**
+
+1. **Run test 1 when the box is free?** Two minutes, no code, and it decides whether the 11× is a
+   property of the shipped pool or of a quiet laptop. If the box property is real, the shipped
+   configuration is the one most punished by it, and that is a design fact about `a1f`, not noise.
+2. **If the box is the cause: does the record keep numbers taken on a warm box?** The CS-4 table
+   would then be neither wrong nor reproducible — it would be a measurement of a state the protocol
+   did not control. The protocol's load receipt records processes and CPU %, not wake latency; a
+   `park_timeout` probe was added for App-12 and swings 20× on its own. A wake-latency receipt (the
+   `empty_schedule_control` row, or `dispatcher/body_1us_tasks_W`, both arm-independent) beside
+   every published grid would make the next such divergence visible in the table instead of a year
+   later.
+3. **Does `a1+b1` get measured?** It is the only untried combination of a shipped joiner with the
+   end discipline the design itself prefers at fine granularity.
+
+---
+
+## RETRACTED the same day — the Miri protector gate's arming is NOT seed-dependent; the six-seed receipt was taken under a reduced recipe (2026-09-10)
+
+While gating the TLS fix, `crates/boyko_threadpool/tests/miri_scope_completion_protector.rs` went red
+at `:454` ("the probe fired 2 times but NOT ONE of 2 frees landed inside a release window") under the
+default seed. A control run on HEAD passed with `overlaps=1/2` — one overlap of margin. Six seeds under
+the project's `-Zmiri-tree-borrows` (an environment `MIRIFLAGS` REPLACES the config's; the first sweep
+was run without the flag by mistake and produced Stacked-Borrows noise in crossbeam-epoch, identical on
+HEAD): **fix tree 5 of 6 green; HEAD 0 of 6 green** (`overlaps=0/2` on four seeds, other contexts red
+on the rest). The fix does not cause the red; the gate's arming was already a coin flip whose default
+seed happened to land. The test's own message names the remedy — re-tune `MIRI_RELEASE_PROBE_YIELDS`
+against the observation — and that is owed as its own change, with the seed sweep as the receipt
+(`scratchpad/miri_seeds_tb.log`, reproduced by the commands in this entry).
+
+~~**WHAT IS PUT TO YOU:** a Miri gate whose armed-ness flips with the seed is not a gate; retune it, or
+make the arming assert print all six seeds and require a majority.~~
+
+**RETRACTED 2026-09-10, nothing is put to you.** The receipt above is invalid as evidence about the
+constant: `miri_seeds_tb.log` was taken with `MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-seed=N"`, which
+drops four flags the test header declares mandatory (`-Zmiri-disable-isolation`
+`-Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-preemption-rate=0`) — an environment
+`MIRIFLAGS` REPLACES the config's, and this entry knew that and still spelled only two. Without
+`-Zmiri-preemption-rate=0` the run measures the preemption RNG, and the gate's own monitor said so:
+the reduced runs print `block_overlaps < overlaps`, the inversion `assert_probe_armed` documents as the
+signature of that missing flag. Under the documented recipe, measured on this branch: **every value
+16..96 of `MIRI_RELEASE_PROBE_YIELDS` arms on all six seeds** (36 runs), 16 additionally confirmed on
+seeds 0, 7, 8, 9, 10 — 11 seeds, 0 disarmed — and the gate still reds 3/3 by mutation (`complete_task`
+receiver back to `&Self`), on the protector property and not on its own arming check. The constant
+stays **16**; the sweep table, the recipe A/B and the mutation receipt are recorded on the constant's
+doc in `crates/boyko_threadpool/src/scope.rs`, and the test header now carries the full-recipe seed
+loop. The "fix tree 5 of 6, HEAD 0 of 6" numbers say nothing about the TLS merge; the merge was gated
+separately (`tls_lane_merge.rs`, Miri Tree Borrows under the full recipe). The mechanism to keep: a
+Miri receipt whose flag set is not spelled in full is a receipt about one binary's RNG stream.

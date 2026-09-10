@@ -515,7 +515,7 @@ Layered on the above without disturbing the hot path:
 (`TagId` :49, name-keyed mint :182-207 — the planned `identifiers/tag_id.rs`
 was NOT created, a recorded deviation) over
 [component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)
-(the id mint itself, `try_register_dynamic` :965),
+(the id mint itself, `try_register_dynamic` :967),
 [ecs_master/tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs),
 [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs),
 [query/tag_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/tag_terms.rs),
@@ -556,7 +556,7 @@ archetype (2 MiB cfg fallback) — zero resident until commit.
 (`enable_store.rs` = `EnablePage`/`EnableColumn`/`EnableStore`, `enable_presence.rs`
 = the `EnablePresence` cull oracle),
 [component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)
-(`StorageKind` :323 + the `STORAGE_KIND` table :373) and
+(`StorageKind` :325 + the `STORAGE_KIND` table :375) and
 [component_registry/tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs)
 (`EnableTagId` :93),
 [ecs_master/enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs),

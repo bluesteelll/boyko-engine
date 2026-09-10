@@ -76,6 +76,41 @@ use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
 ///    mutation of the world.
 ///
 pub unsafe trait SystemParam: Sized {
+    /// Whether this param can enqueue work for [`apply`](Self::apply).
+    ///
+    /// `true` iff the param's `apply` may mutate the world. Today exactly one
+    /// impl in the tree answers `true` — [`Commands`], the only one that
+    /// overrides `apply` with a body; every other param inherits the trait's
+    /// no-op and answers `false`. A tuple ORs its members.
+    ///
+    /// # What reads it (KE17 D3)
+    ///
+    /// [`FunctionSystem::has_deferred`] forwards this const, and
+    /// `ScheduleBuilder::try_build` folds it into the schedule's `may_defer`
+    /// bitset. The apply-window barrier exists only to give a successor
+    /// visibility of its predecessor's deferred commands
+    /// (`schedule_builder.rs`'s sync-point doc block states this in writing),
+    /// so a system whose whole param chain answers `false` carries nothing the
+    /// barrier is protecting and can be retired the instant it finishes. The
+    /// measured cost of not knowing this is 8.1 % of a frame on the engine's
+    /// own Main shape — see `docs/scheduler/KE17-APPLY-WINDOW-MEASUREMENT.md`.
+    ///
+    /// # Why no default
+    ///
+    /// The same reasoning
+    /// [`System::set_change_ticks`](super::system::System::set_change_ticks)
+    /// gives for having no default body, at the point where it decides
+    /// soundness rather than freshness. A param whose `apply` does real work
+    /// while silently declaring `false` would let a successor observe the
+    /// world before that work landed — the exact silent-wrong-read class the
+    /// barrier is there to prevent. A defaulted const makes that omission
+    /// compile; a required one makes it `E0046`. The cost is one line per
+    /// impl.
+    ///
+    /// [`Commands`]: super::params::commands::Commands
+    /// [`FunctionSystem::has_deferred`]: super::function_system::FunctionSystem
+    const HAS_DEFERRED: bool;
+
     /// Long-lived state owned by the containing system.
     ///
     /// `Send + Sync + 'static` so the containing system can migrate
@@ -155,6 +190,10 @@ pub unsafe trait SystemParam: Sized {
     ///
     /// Phase 8d `Commands` overrides this to drain its command queue.
     /// Default no-op.
+    ///
+    /// An impl that overrides this with a non-empty body MUST declare
+    /// [`HAS_DEFERRED = true`](Self::HAS_DEFERRED); the two are one statement
+    /// wearing two spellings, and only the const is machine-readable.
     #[inline]
     fn apply(_state: &mut Self::State, _system_meta: &SystemMeta, _world: &mut EcsMaster) {}
 

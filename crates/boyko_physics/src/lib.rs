@@ -80,7 +80,7 @@ pub use scene_sync::{
 pub use resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, BroadphaseSelectMode, ConstraintGraph,
     ContactPairs, DEFAULT_SLEEP_FRAMES, DEFAULT_SLEEP_THRESHOLD, IntegrationMode, IslandSleep,
-    Manifolds, PhysicsConfig, SolverScratch, TouchedMask,
+    Manifolds, PhysicsConfig, SdfNarrowphaseKernel, SolverScratch, TouchedMask,
 };
 pub use sdf_query::{SdfField, sample_sdf};
 pub use soft::{

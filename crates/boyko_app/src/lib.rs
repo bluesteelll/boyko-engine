@@ -63,6 +63,12 @@ mod occlusion_arm;
 // device and no OS, and gating it would make the type invisible to a cross-target doc build.
 pub mod occlusion_force;
 mod runner;
+// KE16 App-12: the `timeBeginPeriod(1)` RAII hold. NOT `#[cfg(windows)]`, unlike its neighbours
+// here: the module's own non-Windows arm is the platform statement (POSIX timed waits already
+// carry nanosecond deadlines, so there is nothing to raise), and gating the module instead would
+// force every caller to carry the `cfg` and would hide the type from a cross-target doc build.
+// `pub` because the App-12 measurement in `tests/` constructs the guard across the crate boundary.
+pub mod timer_resolution;
 // VG R3 piece 3 step P3-5: the `BOYKO_VB_CULL_READBACK` capture driver AND the probe line's one
 // serializer.
 //
@@ -112,4 +118,5 @@ pub use device::GpuDevice;
 pub use fly::{FlyAction, FlyCameraPlugin, fly_default_map};
 pub use occlusion_force::OcclusionForce;
 pub use plugins::EnginePlugins;
+pub use timer_resolution::TimerResolutionGuard;
 pub use window_info::{HostFrameStats, WindowInfo};

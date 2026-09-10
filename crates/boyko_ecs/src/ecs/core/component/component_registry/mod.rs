@@ -48,11 +48,13 @@ use crate::ecs::core::component::hooks::{ComponentHooks, HooksError};
 use crate::ecs::identifiers::primitives::ComponentId;
 
 mod clone;
+mod flags;
 mod required;
 mod serialize;
 mod tags;
 
 pub use clone::*;
+pub use flags::*;
 pub use required::*;
 pub use serialize::*;
 pub use tags::*;

@@ -21,13 +21,21 @@ use boyko_threadpool::ThreadPoolBuilder;
 const WORKERS: usize = 4;
 
 // NOTE on liveness: these tests must NOT use a cross-task blocking primitive
-// (e.g. `std::sync::Barrier`) inside scope tasks. boyko's `Scope::drop`
-// joiner batch-steals (`steal_batch_and_pop`) and drains the batch INLINE on
-// the dispatcher (`drain_scratch`), so the dispatcher can pull several tasks
-// into its scratch deque and run them one-at-a-time; a task that blocks on a
-// barrier-of-N would wedge the dispatcher while its sibling tasks sit unrun in
-// the same scratch deque → deadlock. (Same hazard as a blocking barrier across
-// rayon tasks.) We therefore prove shutdown/join with non-blocking work only.
+// (e.g. `std::sync::Barrier`) inside scope tasks. `Scope::drop` joins by RUNNING
+// the wave on the joining thread until the scope reports drained
+// (`join_workers_until_drained`), so a joiner may legally run any subset of a
+// wave, in any order, on ONE thread, while a `Barrier`-of-N assumes N threads
+// are running it → deadlock. (Same hazard as a blocking barrier across rayon
+// tasks.) We therefore prove shutdown/join with non-blocking work only.
+//
+// KE16 axis B settled HOW MUCH of a wave a joiner may hold at once, and the
+// winning B1 joiner hides none of it: a joining worker runs one task per
+// drained-check and any batch it steals lands in its own REGISTERED deque, so
+// the residue stays stealable by every sibling (`join_on_worker`), and an
+// external joiner takes one task at a time and keeps no residue at all
+// (`join_external_helping`). That removes the "siblings sit unreachable behind a
+// blocked task" shape of the hazard, but not the RULE above. Non-blocking work
+// only.
 
 /// Run a batch of independent tasks, then drop the handle; `Drop` must set
 /// `shutdown`, unpark every worker, and join them without hanging. If the

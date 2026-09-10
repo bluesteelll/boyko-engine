@@ -11,6 +11,23 @@ traversal,propagate}`), and a **general `Relationship` trait** (`Relationship` /
 it). The genuine remaining kernel absences are `.pipe()`, `Reflect`, and
 runtime-layout dynamic components.
 
+> **Superseding note (2026-08-29): that last sentence is no longer the whole list.** The Aether v2
+> campaign enumerates a further set of kernel items — and **one shipped kernel bug** — in
+> [aether-v2/KERNEL-BACKLOG.md](aether-v2/KERNEL-BACKLOG.md) (`KE#` for `boyko_ecs`, `KM#` for
+> `boyko_macros`). Read that file, not this 2026-06-23 snapshot, for what the kernel still owes:
+> an `Entities` param · `Query::{get, get_mut, single, single_mut, contains, first}` ·
+> `Option<Res<R>>` / `Option<ResMut<R>>` · run-condition combinators · an `ArchAdded` structural
+> stamp · `CommandQueue::{mark, rewind}` · parallel event emission · `FLAGS_DIRECT` · a
+> `#[require]` refusal for a poolless required id · unlocking `on_despawn` in the derive ·
+> `state_chart!`.
+>
+> **The bug is `KE1`, and it belongs in this list's spirit rather than in a plan directory alone:**
+> the `Or<(…)>` filter forwards none of the dense plumbing the AND tuple has, so **a dense arm
+> inside an `Or` is never true** — the query compiles, runs, and returns a plausible wrong set, and
+> nothing reports it. Scheduled as rung **R0** with a red-first oracle. Two sibling defects sit on
+> the same axis and were found by the *data* campaign; the shared account is in
+> [AETHER-GAIA-REVISION-2026-08-29.md](AETHER-GAIA-REVISION-2026-08-29.md).
+
 ## Done (so the list is honest about scope)
 
 Full ECS core + scheduler + the entire feature line is landed:

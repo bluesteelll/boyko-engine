@@ -50,20 +50,44 @@
 //! `UiSourceOrder` are NEVER written, so they are preserved by omission and ride
 //! the byte-copy archetype migration when an add/remove migrates a survivor
 //! (Decision 14).
+//!
+//! # What the patcher writes, and why that set is not a list here
+//!
+//! [`patch_node`] walks the vocabulary ROSTER
+//! ([`UiTextComponent::ALL`](crate::text::vocab::UiTextComponent)) and dispatches
+//! through an EXHAUSTIVE `match`, so the set it writes IS the set the parser
+//! accepts, by construction.
+//!
+//! Until 2026-09-03 it was a hand-written list reaching 10 of the 21 members —
+//! eight by value, plus the two data-bind columns by unconditional re-insert. Of
+//! the eleven it left out, exactly one (`ComputedRect`) was left out on purpose;
+//! the other ten — `UiText`, `UiImage`, `UiGrid`, `UiAnchor`, `Button`, `Bar`,
+//! `BarFill`, `OnClick`, `OnHover`, `OnSubmit` — were parsed at spawn and then
+//! silently ignored on every subsequent reload, so editing a button's action or a
+//! label's colour in a live file did nothing at all.
+//!
+//! Each member's behaviour is now declared beside it as a
+//! [`ReloadPolicy`](crate::text::vocab::ReloadPolicy); the uniform rule is that
+//! the FILE is the source of truth, including for deletion.
 
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
 
 use crate::components::{
-    ComputedClip, ContentSize, StackIndex, UiAbsolute, UiAlign, UiName, UiRoot, UiSourceOrder,
-    UiSpacing,
+    Bar, BarFill, Button, ComputedClip, ContentSize, StackIndex, UiAbsolute, UiAlign, UiAnchor,
+    UiGrid, UiImage, UiName, UiRoot, UiSourceOrder, UiSpacing,
 };
+use crate::interaction::action::{OnClick, OnHover, OnSubmit};
 use crate::reload::state::UiHotReload;
 use crate::reload::tree_view::{LiveNode, UiTreeView};
 use crate::text::ast::{CompKind, ParsedNode, ParsedTree};
-use crate::text::dispatch::{parse_bind_text, parse_bind_value, parse_ui_layout_public, BindParse};
+use crate::text::components::UiText;
+use crate::text::dispatch::{
+    self, parse_bind_text, parse_bind_value, parse_ui_layout_public, BindParse,
+};
 use crate::text::lower::{lower_node, BindCtx};
 use crate::text::report::UiParseReport;
+use crate::text::vocab::UiTextComponent;
 
 /// The doomed (vanished) parents to despawn in phase 2, after the drain barrier
 /// has materialised every survivor's `ChildOf` unlink (Decision 13, alt (a)).
@@ -428,8 +452,16 @@ fn node_line(_live: &UiTreeView, _entity: Entity) -> usize {
 
 /// Patches the text-owned component set of a survivor set-if-changed
 /// (Decision 14 / §D). Writes ONLY the closed text-owned set; transient
-/// components + `UiSourceOrder` are preserved by omission. `ComputedRect` is
-/// layout output — EXCLUDED (a spawn-time seed only; layout overwrites it).
+/// components + `UiSourceOrder` are preserved by omission.
+///
+/// The set is the vocabulary ROSTER, walked in canonical order, and
+/// [`patch_member`]'s `match` is EXHAUSTIVE — so a member added to
+/// [`UiTextComponent`] is an `E0004` here until the reconcile handles it, the
+/// same compile-time gate the parser and the writer carry. Each member's
+/// behaviour is declared beside it as a
+/// [`ReloadPolicy`](crate::text::vocab::ReloadPolicy), and
+/// `p3_reload_patch_vocabulary.rs` is the behavioural half of the pair:
+/// exhaustiveness cannot see an arm that exists but does nothing.
 fn patch_node(
     new: &ParsedNode,
     entity: Entity,
@@ -441,34 +473,131 @@ fn patch_node(
     let Some(node) = live.get(entity) else { return };
     report.set_current_line(new.line_no);
 
-    patch_ui_layout(new, node, entity, cmds, report);
-    patch_unit_struct::<UiSpacing>(new, "UiSpacing", node.spacing, entity, cmds, report);
-    patch_unit_struct::<UiAlign>(new, "UiAlign", node.align, entity, cmds, report);
-    patch_unit_struct::<UiAbsolute>(new, "UiAbsolute", node.absolute, entity, cmds, report);
-    patch_unit_struct::<ContentSize>(new, "ContentSize", node.content_size, entity, cmds, report);
-    patch_unit_struct::<ComputedClip>(new, "ComputedClip", node.clip, entity, cmds, report);
-    patch_stack_index(new, node.stack_index, entity, cmds, report);
-    patch_ui_root(new, node, entity, cmds);
+    for comp in UiTextComponent::ALL.iter().copied() {
+        patch_member(comp, new, node, entity, cmds, report, bind_ctx);
+    }
+
+    // `UiName` is NOT a vocabulary member — it is authored by the `#name` sigil,
+    // never as a component literal — so it is patched outside the roster walk.
     patch_ui_name(new, node, entity, cmds);
-    // GUI #27: re-patch the data-bind components on a survivor. The bind columns
-    // are NOT in the live snapshot (transient/render-facing), so this is an
-    // unconditional re-insert from the authored text (last-write-wins) rather than
-    // a set-if-changed — the cost is a cold re-parse + one insert on a reloaded
-    // survivor, and it closes the stale-`#name`-source gap (a survivor whose named
-    // target was respawned re-resolves to the new entity). A numeric source
-    // re-inserts in place; a `#name` source defers to pass 2.
-    patch_bind_text(new, entity, cmds, report, bind_ctx);
-    patch_bind_value(new, entity, cmds, report, bind_ctx);
+}
+
+/// Patches ONE vocabulary member on a survivor, per its
+/// [`ReloadPolicy`](crate::text::vocab::ReloadPolicy).
+///
+/// The uniform rule is `PatchAndRemove`: the authored value is re-parsed and set
+/// if it changed, and a component the file DROPPED is removed — what an author
+/// means by deleting the line. The three departures are declared in
+/// [`vocab`](crate::text::vocab) with their reasons and are the arms that read
+/// differently here.
+fn patch_member(
+    comp: UiTextComponent,
+    new: &ParsedNode,
+    node: &LiveNode,
+    entity: Entity,
+    cmds: &mut Commands,
+    report: &mut UiParseReport,
+    bind_ctx: &mut BindCtx,
+) {
+    let name = comp.name();
+    match comp {
+        // `PatchKeepOnOmit`: the head line. A node requires a `UiLayout`, so a
+        // document that dropped it is degenerate, not an authored removal.
+        UiTextComponent::UiLayout => patch_ui_layout(new, node, entity, cmds, report),
+
+        // `Skip`: layout OUTPUT. `spawn_ui_tree` seeds it and the next
+        // `ui_layout_apply` overwrites it, so patching a survivor from the
+        // document would pin a stale rect (Decision 14 / §6).
+        UiTextComponent::ComputedRect => {}
+
+        UiTextComponent::UiSpacing => {
+            patch_value::<UiSpacing>(new, name, node.spacing, entity, cmds, report)
+        }
+        UiTextComponent::UiAlign => {
+            patch_value::<UiAlign>(new, name, node.align, entity, cmds, report)
+        }
+        UiTextComponent::UiAbsolute => {
+            patch_value::<UiAbsolute>(new, name, node.absolute, entity, cmds, report)
+        }
+        UiTextComponent::ContentSize => {
+            patch_value::<ContentSize>(new, name, node.content_size, entity, cmds, report)
+        }
+        UiTextComponent::StackIndex => {
+            patch_value::<StackIndex>(new, name, node.stack_index, entity, cmds, report)
+        }
+        UiTextComponent::ComputedClip => {
+            patch_value::<ComputedClip>(new, name, node.clip, entity, cmds, report)
+        }
+        UiTextComponent::UiText => {
+            patch_value::<UiText>(new, name, node.text, entity, cmds, report)
+        }
+        UiTextComponent::UiImage => {
+            patch_value::<UiImage>(new, name, node.image, entity, cmds, report)
+        }
+        UiTextComponent::UiGrid => {
+            patch_value::<UiGrid>(new, name, node.grid, entity, cmds, report)
+        }
+        UiTextComponent::UiAnchor => {
+            patch_value::<UiAnchor>(new, name, node.anchor, entity, cmds, report)
+        }
+        UiTextComponent::OnClick => {
+            patch_value::<OnClick>(new, name, node.on_click, entity, cmds, report)
+        }
+        UiTextComponent::OnHover => {
+            patch_value::<OnHover>(new, name, node.on_hover, entity, cmds, report)
+        }
+        UiTextComponent::OnSubmit => {
+            patch_value::<OnSubmit>(new, name, node.on_submit, entity, cmds, report)
+        }
+
+        // ZST markers: presence IS the data, so there is nothing to compare.
+        UiTextComponent::UiRoot => patch_marker::<UiRoot>(new, name, node.is_root, entity, cmds),
+        UiTextComponent::Button => patch_marker::<Button>(new, name, node.is_button, entity, cmds),
+        UiTextComponent::Bar => patch_marker::<Bar>(new, name, node.is_bar, entity, cmds),
+        UiTextComponent::BarFill => {
+            patch_marker::<BarFill>(new, name, node.is_bar_fill, entity, cmds)
+        }
+
+        // `PatchKeepOnOmit`: the data-bind columns re-insert unconditionally and
+        // a DELETED bind is preserved. See the two functions for the reason.
+        UiTextComponent::BindText => patch_bind_text(new, entity, cmds, report, bind_ctx),
+        UiTextComponent::BindValue => patch_bind_value(new, entity, cmds, report, bind_ctx),
+    }
 }
 
 /// Re-patches a survivor's `BindText` from the authored text (GUI #27). Present →
 /// re-insert (numeric) or defer (`#name`).
 ///
-/// A `BindText` DELETED from the file is NOT removed: the bind columns are not in
-/// the live snapshot (render-facing/transient), so presence cannot be read here,
-/// and the reconcile's policy for non-snapshotted components is preserve-by-
-/// omission. Removing a deleted-from-file bind on reload is a documented #27
-/// limitation (the `ui!` and full-reload paths are the route for that).
+/// The re-insert is unconditional (last-write-wins) rather than set-if-changed:
+/// the cost is a cold re-parse plus one insert on a reloaded survivor, and it
+/// closes the stale-`#name`-source gap — a survivor whose named target was
+/// respawned re-resolves to the new entity. `LiveNode` does carry `bind_text`
+/// (the serializer needs it), so a set-if-changed comparison is possible; making
+/// it is a reload-policy change with its own gate, not a side effect.
+///
+/// # The one member that departs from "the file is the source of truth"
+///
+/// A `BindText` DELETED from the file is NOT removed
+/// ([`ReloadPolicy::PatchKeepOnOmit`](crate::text::vocab::ReloadPolicy)), while
+/// every other value-carrying member the file drops IS removed.
+///
+/// **What the search for a stated reason found** (2026-09-03). P3 Decision 14 —
+/// the rule this reconcile implements — says the opposite for a TEXT-OWNED
+/// component: "present live, absent in text → `remove::<C>()` (deleted from the
+/// file)" (`docs/archive/GUI-P3-UI-TEXT-PLAN.md:257`, pseudocode at `:557`), and
+/// it scopes "preserved by omission" to components the text CANNOT author
+/// (`UiFocus`/`UiScroll`/`UiHover`, `UiSourceOrder` — `:559-562`). Decision 14
+/// predates the bind columns, which arrive with P4 / GUI #27, and
+/// `docs/archive/GUI-P4-BINDING-PLAN.md` contains no occurrence of "reload" — so
+/// the bind columns' reload behaviour was never ruled on there. This site
+/// previously called the divergence "a documented #27 limitation"; no such
+/// document exists in `docs/` (the citation could not be followed).
+///
+/// It is kept, not fixed, and now says so as a decision of its own rather than as
+/// a citation: removing a bind on reload changes LIVE binding semantics, which
+/// deserves its own decision and its own gate rather than riding a pass whose
+/// subject was the patch VOCABULARY. `p3_reload_patch_vocabulary.rs` pins the
+/// current behaviour, so a future change to it is a deliberate red.
 fn patch_bind_text(
     new: &ParsedNode,
     entity: Entity,
@@ -495,8 +624,8 @@ fn patch_bind_text(
 }
 
 /// Re-patches a survivor's `BindValue` from the authored text (GUI #27). Same
-/// policy as [`patch_bind_text`] (present → re-insert/defer; deleted → preserved
-/// by omission, the documented #27 limitation).
+/// policy as [`patch_bind_text`] (present → re-insert/defer; deleted → preserved),
+/// including the departure from Decision 14 documented there.
 fn patch_bind_value(
     new: &ParsedNode,
     entity: Entity,
@@ -547,11 +676,16 @@ fn patch_ui_layout(
     }
 }
 
-/// Generic patch for a struct-form text-owned component reconstructed from the
+/// Generic patch for a value-carrying text-owned component reconstructed from the
 /// AST and compared to the live value by `Debug`. `live_val` is the snapshot's
 /// `Option<C>`. Absent-live + in-text → insert; present-both → set-if-changed;
 /// present-live + absent-text → remove (Decision 14, read-guarded).
-fn patch_unit_struct<C>(
+///
+/// The literal FORM (struct `C { .. }` or tuple `C(x)`) is the parser's concern:
+/// [`TextValue::parse`] receives the AST body either way. A body in the wrong
+/// form fails the same per-field parse it would at spawn time and records a
+/// recoverable error on the reachable report.
+fn patch_value<C>(
     new: &ParsedNode,
     name: &str,
     live_val: Option<C>,
@@ -559,7 +693,7 @@ fn patch_unit_struct<C>(
     cmds: &mut Commands,
     report: &mut UiParseReport,
 ) where
-    C: TextStruct,
+    C: TextValue,
 {
     let in_text = new.components.iter().find(|c| c.name == name);
     match (in_text, live_val) {
@@ -581,49 +715,22 @@ fn patch_unit_struct<C>(
     }
 }
 
-/// `StackIndex` patch (tuple newtype). Derives `PartialEq`, so an exact compare
-/// is used.
-fn patch_stack_index(
+/// Presence-only patch for a ZST marker: newly present in the text → insert,
+/// newly absent → remove. There is no value to compare — presence IS the datum —
+/// so this is the whole of the marker's patch.
+fn patch_marker<C>(
     new: &ParsedNode,
-    live_val: Option<StackIndex>,
+    name: &str,
+    live_present: bool,
     entity: Entity,
     cmds: &mut Commands,
-    report: &mut UiParseReport,
-) {
-    let in_text = new.components.iter().find(|c| c.name == "StackIndex");
-    match (in_text, live_val) {
-        (Some(comp), live) => {
-            report.set_current_line(comp.line_no);
-            let parsed = match comp.body.trim().parse::<u32>() {
-                Ok(n) => StackIndex(n),
-                Err(_) => {
-                    // A lower-time re-parse failure: record it on the reachable
-                    // report (never silently swallowed) and fall back to default.
-                    report.error(comp.line_no, comp.body_col, "StackIndex: expected a u32");
-                    StackIndex::default()
-                }
-            };
-            if live != Some(parsed) {
-                cmds.entity(entity).insert(parsed);
-            }
-        }
-        (None, Some(_)) => {
-            cmds.entity(entity).remove::<StackIndex>();
-        }
-        (None, None) => {}
-    }
-}
-
-/// `UiRoot` is a ZST marker: presence-only patch.
-fn patch_ui_root(new: &ParsedNode, node: &LiveNode, entity: Entity, cmds: &mut Commands) {
-    let in_text = new.components.iter().any(|c| c.name == "UiRoot");
-    match (in_text, node.is_root) {
-        (true, false) => {
-            cmds.entity(entity).insert(UiRoot);
-        }
-        (false, true) => {
-            cmds.entity(entity).remove::<UiRoot>();
-        }
+) where
+    C: TextMarker,
+{
+    let in_text = new.components.iter().any(|c| c.name == name);
+    match (in_text, live_present) {
+        (true, false) => C::insert(entity, cmds),
+        (false, true) => C::remove(entity, cmds),
         _ => {}
     }
 }
@@ -650,11 +757,16 @@ fn debug_eq<T: core::fmt::Debug>(a: &T, b: &T) -> bool {
     format!("{a:?}") == format!("{b:?}")
 }
 
-/// A text-owned struct component the patcher can reconstruct from the AST,
-/// insert, and remove. Implemented for the closed text-owned set so
-/// [`patch_unit_struct`] is generic without reflection.
-trait TextStruct: core::fmt::Debug + Sized {
-    /// Reconstructs the component from its AST body.
+/// A value-carrying text-owned component the patcher can reconstruct from the
+/// AST, insert and remove. Implemented for the closed value-carrying part of the
+/// vocabulary so [`patch_value`] is generic without reflection.
+///
+/// [`TextValue::parse`] is the SPAWN path's parser, not a second one: the patch
+/// and the spawn must agree on what a body means, and two parsers for one grammar
+/// is the divergence this module is closing.
+trait TextValue: core::fmt::Debug + Sized {
+    /// Reconstructs the component from its AST body. Per-field failures are
+    /// recorded on `report` and keep that field's default.
     fn parse(body: &str, body_col: u16, report: &mut UiParseReport) -> Self;
     /// Inserts `self` onto `entity`.
     fn insert(self, entity: Entity, cmds: &mut Commands);
@@ -662,63 +774,73 @@ trait TextStruct: core::fmt::Debug + Sized {
     fn remove(entity: Entity, cmds: &mut Commands);
 }
 
-impl TextStruct for UiSpacing {
-    fn parse(body: &str, body_col: u16, report: &mut UiParseReport) -> Self {
-        crate::text::dispatch::parse_ui_spacing_public(body, body_col, report)
-    }
-    fn insert(self, entity: Entity, cmds: &mut Commands) {
-        cmds.entity(entity).insert(self);
-    }
-    fn remove(entity: Entity, cmds: &mut Commands) {
-        cmds.entity(entity).remove::<UiSpacing>();
-    }
+/// A ZST marker in the vocabulary: presence is the whole datum, so the trait has
+/// no `parse` and no value.
+trait TextMarker {
+    /// Inserts the marker onto `entity`.
+    fn insert(entity: Entity, cmds: &mut Commands);
+    /// Removes the marker from `entity`.
+    fn remove(entity: Entity, cmds: &mut Commands);
 }
 
-impl TextStruct for UiAlign {
-    fn parse(body: &str, body_col: u16, report: &mut UiParseReport) -> Self {
-        crate::text::dispatch::parse_ui_align_public(body, body_col, report)
-    }
-    fn insert(self, entity: Entity, cmds: &mut Commands) {
-        cmds.entity(entity).insert(self);
-    }
-    fn remove(entity: Entity, cmds: &mut Commands) {
-        cmds.entity(entity).remove::<UiAlign>();
-    }
+/// Writes the [`TextValue`] impls from one list: every body is identical modulo
+/// the spawn-path parser, and thirteen hand-copied impls are thirteen chances for
+/// one of them to insert or remove the wrong type (ERG-02: siblings that must not
+/// diverge come from one macro).
+macro_rules! impl_text_value {
+    ($( $ty:ty => $parse:path ),+ $(,)?) => {
+        $(
+            impl TextValue for $ty {
+                #[inline]
+                fn parse(body: &str, body_col: u16, report: &mut UiParseReport) -> Self {
+                    $parse(body, body_col, report)
+                }
+                #[inline]
+                fn insert(self, entity: Entity, cmds: &mut Commands) {
+                    cmds.entity(entity).insert(self);
+                }
+                #[inline]
+                fn remove(entity: Entity, cmds: &mut Commands) {
+                    cmds.entity(entity).remove::<$ty>();
+                }
+            }
+        )+
+    };
 }
 
-impl TextStruct for UiAbsolute {
-    fn parse(body: &str, body_col: u16, report: &mut UiParseReport) -> Self {
-        crate::text::dispatch::parse_ui_absolute_public(body, body_col, report)
-    }
-    fn insert(self, entity: Entity, cmds: &mut Commands) {
-        cmds.entity(entity).insert(self);
-    }
-    fn remove(entity: Entity, cmds: &mut Commands) {
-        cmds.entity(entity).remove::<UiAbsolute>();
-    }
+/// Writes the [`TextMarker`] impls from one list, for the same reason.
+macro_rules! impl_text_marker {
+    ($( $ty:ty ),+ $(,)?) => {
+        $(
+            impl TextMarker for $ty {
+                #[inline]
+                fn insert(entity: Entity, cmds: &mut Commands) {
+                    cmds.entity(entity).insert(<$ty>::default());
+                }
+                #[inline]
+                fn remove(entity: Entity, cmds: &mut Commands) {
+                    cmds.entity(entity).remove::<$ty>();
+                }
+            }
+        )+
+    };
 }
 
-impl TextStruct for ContentSize {
-    fn parse(body: &str, body_col: u16, report: &mut UiParseReport) -> Self {
-        crate::text::dispatch::parse_content_size_public(body, body_col, report)
-    }
-    fn insert(self, entity: Entity, cmds: &mut Commands) {
-        cmds.entity(entity).insert(self);
-    }
-    fn remove(entity: Entity, cmds: &mut Commands) {
-        cmds.entity(entity).remove::<ContentSize>();
-    }
+impl_text_value! {
+    UiSpacing => dispatch::parse_ui_spacing_public,
+    UiAlign => dispatch::parse_ui_align_public,
+    UiAbsolute => dispatch::parse_ui_absolute_public,
+    ContentSize => dispatch::parse_content_size_public,
+    ComputedClip => dispatch::parse_computed_clip_public,
+    StackIndex => dispatch::parse_stack_index_public,
+    UiText => dispatch::parse_ui_text_public,
+    UiImage => dispatch::parse_ui_image_public,
+    UiGrid => dispatch::parse_ui_grid_public,
+    UiAnchor => dispatch::parse_ui_anchor_public,
+    OnClick => dispatch::parse_on_click_public,
+    OnHover => dispatch::parse_on_hover_public,
+    OnSubmit => dispatch::parse_on_submit_public,
 }
 
-impl TextStruct for ComputedClip {
-    fn parse(body: &str, body_col: u16, report: &mut UiParseReport) -> Self {
-        crate::text::dispatch::parse_computed_clip_public(body, body_col, report)
-    }
-    fn insert(self, entity: Entity, cmds: &mut Commands) {
-        cmds.entity(entity).insert(self);
-    }
-    fn remove(entity: Entity, cmds: &mut Commands) {
-        cmds.entity(entity).remove::<ComputedClip>();
-    }
-}
+impl_text_marker!(UiRoot, Button, Bar, BarFill);
 

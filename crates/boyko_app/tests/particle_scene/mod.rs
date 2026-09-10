@@ -46,11 +46,14 @@
 //!    `advance(0.0)` would otherwise overwrite `steps` back to zero — the two writes are ordered,
 //!    not raced.
 //!
-//! Both orderings are why this fixture composes the particle subsystem BY HAND instead of calling
-//! `add_plugin(ParticlePlugin)`: an ordering edge needs the other system's `SystemKey`, which only
-//! its registration site holds. [`build_app`] mirrors `ParticlePlugin::build` resource for resource
-//! and system for system — the plugin's own composition is gated separately by
-//! `boyko_render/tests/particle_containment.rs` (gate #11), which is the right place for it.
+//! Both orderings used to be why this fixture composed the particle subsystem BY HAND, mirroring
+//! `ParticlePlugin::build` resource for resource and system for system: a `.after(key)` edge needs
+//! the other system's `SystemKey`, which only its own registration site holds. `EnginePlugins` now
+//! composes `ParticlePlugin` itself, so the mirror would DOUBLE-register the three `Main` systems —
+//! two clock advances and two `begin_frame()` wipes per frame, which is exactly the determinism
+//! this fixture exists to have. The two drives are therefore pinned BY NAME instead, against
+//! [`ParticleTickSet`](boyko_render::ParticleTickSet), the seam the fold's registration site joins;
+//! [`build_app`] keeps only what it genuinely OVERRIDES (the armed config, the re-rated clock).
 //!
 //! The result is a substep count that is a function of the FRAME INDEX alone. That matters beyond
 //! the integrator: `particle_emit` seeds its RNG with `req.rng_seed ^ gid ^ pc.frame_index`, so
@@ -113,10 +116,8 @@ use boyko_ecs::ecs::core::time::Time;
 use boyko_macros::Resource;
 use boyko_render::{
     PARTICLE_BLEND_ADDITIVE, PARTICLE_BLEND_ALPHA, PARTICLE_SHAPE_CONE, EmitterActive,
-    ParticleClock, ParticleCollision,
-    ParticleConfig, ParticleEffect, ParticleEffectHandle, ParticleEffectRefs,
-    ParticleEffectScratch, ParticleEffectsExt, ParticleEmitScratch, ParticleEmitter, ParticleMode,
-    ParticleSortMode, particle_apply_effect_refs, particle_pack_effects, particle_tick_emitters,
+    ParticleClock, ParticleCollision, ParticleConfig, ParticleEffect, ParticleEffectHandle,
+    ParticleEffectsExt, ParticleEmitter, ParticleMode, ParticleSortMode, ParticleTickSet,
 };
 
 // ── The pinned clock ─────────────────────────────────────────────────────────────────
@@ -786,20 +787,26 @@ pub fn setup(
     });
 }
 
-/// Composes the fixture app: `EnginePlugins` (which honours `BOYKO_RENDER_PATH` itself), the
-/// particle subsystem composed BY HAND, the ARMED config, the paused engine clock, and the
-/// fixture's own two drive systems.
+/// Composes the fixture app: `EnginePlugins` (which composes the particle subsystem and honours
+/// `BOYKO_RENDER_PATH` itself), the ARMED config, the re-rated particle clock, the paused engine
+/// clock, and the fixture's own two drive systems.
 ///
-/// # Why the subsystem is composed here and not by `add_plugin(ParticlePlugin)`
+/// # What this fixture composes, and what it only OVERRIDES
 ///
-/// The fixture needs two ordering edges — burst-arm BEFORE the fold, clock-drive AFTER it — and an
-/// edge needs the other system's `SystemKey`, which only its registration site holds. Everything
-/// below mirrors `ParticlePlugin::build` one-for-one (six resources, three systems, the same
-/// `refs → pack` edge); the plugin's own composition and its D17 containment contract are gated by
-/// `boyko_render/tests/particle_containment.rs`, which is where that claim belongs.
+/// `EnginePlugins` composes `ParticlePlugin`, so all six of the subsystem's resources and all three
+/// of its `Main` systems are already present. This fn adds NEITHER — re-inserting the systems would
+/// advance `ParticleClock` twice and `begin_frame()`-wipe the emit lane twice per frame. It sets
+/// only the two resources it genuinely overrides: the ARMED `ParticleConfig` (the plugin's default
+/// is the `Off` 0%-gate) and a `ParticleClock` re-rated to this fixture's substep.
 ///
 /// The `insert_resource` calls come AFTER `add_plugins` on purpose — that is the documented
-/// override order (`App::finish` inserts `Time` only IF ABSENT).
+/// override order (`App::finish` inserts `Time` only IF ABSENT), and it is the very convention the
+/// plugin's own registration comment in `boyko_app::plugins` records as having been a frame-1 panic
+/// while the subsystem was unreachable.
+///
+/// The fixture's two drives bracket the fold by a set edge rather than a `SystemKey`: see the
+/// module doc. The plugin's own composition and its D17 containment contract are gated by
+/// `boyko_render/tests/particle_containment.rs`, which is where that claim belongs.
 pub fn build_app(title: &'static str) -> App {
     let win = window_size();
     let mut app = App::new();
@@ -820,13 +827,10 @@ pub fn build_app(title: &'static str) -> App {
         // the alpha class — see its doc.
         sort: sort_arming(),
     });
-    // The subsystem's own clock, re-rated to the fixture's substep.
+    // The subsystem's own clock, re-rated to the fixture's substep. The plugin already inserted a
+    // stock-rate one; this overwrite is the whole reason the insert is here rather than deleted
+    // with the other four.
     app.insert_resource(ParticleClock::from_hz(LAB_STEP_HZ));
-    // `ParticlePlugin::build`'s other four resources, verbatim.
-    app.insert_resource(Assets::<ParticleEffect>::default());
-    app.insert_resource(ParticleEmitScratch::default());
-    app.insert_resource(ParticleEffectScratch::default());
-    app.insert_resource(ParticleEffectRefs::default());
 
     // The engine clock, PAUSED before frame 0 — the wall clock never reaches the simulation (see
     // the module doc). A startup system could not do this: it runs after that frame's
@@ -837,15 +841,13 @@ pub fn build_app(title: &'static str) -> App {
 
     app.insert_resource(LabClockWitness::default());
     app.add_systems_cfg(|b| {
-        // A1, with the fixture's two drives bracketing it.
-        let burst = b.add_system(lab_arm_burst).key();
-        let tick = b.add_system(particle_tick_emitters).after(burst).key();
-        b.add_system(lab_drive_clock).after(tick);
-
-        // The refcount fold BEFORE the effect bake — `ParticlePlugin`'s own edge and its reason:
-        // a +1/-1 moves the asset table's dirty generation and the bake's re-run gate reads it.
-        let refs = b.add_system(particle_apply_effect_refs).key();
-        b.add_system(particle_pack_effects).after(refs);
+        // The fixture's two drives bracket A1, which `EnginePlugins` registers. Both edges are
+        // set-to-set against `ParticleTickSet` — the seam `ParticlePlugin` puts the fold `in_set`
+        // — because a `SystemKey` does not cross a plugin boundary. The set has exactly one
+        // member, so `before_set`/`after_set` expand to precisely the two edges the hand-composed
+        // version spelled with keys.
+        b.add_system(lab_arm_burst).before_set(ParticleTickSet);
+        b.add_system(lab_drive_clock).after_set(ParticleTickSet);
     });
 
     app
@@ -1053,9 +1055,9 @@ fn sha256(msg: &[u8]) -> [u8; 32] {
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
+        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
             w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
         }
         for i in 16..64 {

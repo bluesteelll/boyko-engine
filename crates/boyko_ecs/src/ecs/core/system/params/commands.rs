@@ -377,6 +377,11 @@ impl<'s> Commands<'s> {
 //   - SP4: `init_state` constructs a fresh `CommandQueue` — no world
 //     mutation, no archetype / resource registry change.
 unsafe impl SystemParam for Commands<'_> {
+    /// The one `true` on the whole `SystemParam` surface (KE17 D3): this is
+    /// the only impl that overrides `apply` with a body, so it is the only
+    /// one whose completion a successor must not be released ahead of.
+    const HAS_DEFERRED: bool = true;
+
     type State = CommandQueue;
     type Item<'w, 's> = Commands<'s>;
 

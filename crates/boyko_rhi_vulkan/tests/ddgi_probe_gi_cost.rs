@@ -552,7 +552,7 @@ fn measure_config(
 /// is `u32`-granular; `48 == 12 * 4`).
 fn bytemuck_u32s(bytes: &[u8; 48]) -> Vec<u32> {
     let mut out = Vec::with_capacity(12);
-    for chunk in bytes.chunks_exact(4) {
+    for chunk in bytes.as_chunks::<4>().0 {
         out.push(u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     out

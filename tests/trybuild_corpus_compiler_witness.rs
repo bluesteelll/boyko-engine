@@ -63,7 +63,21 @@ use std::process::Command;
 /// | Blessed | Rung | Why |
 /// |---|---|---|
 /// | `rustc 1.97.1 (8bab26f4f 2026-07-14)` | 11 | first freeze; 23 inherited-drift fixtures plus the impl-count re-render this rung caused |
-const BLESSED_RUSTC: &str = "rustc 1.97.1 (8bab26f4f 2026-07-14)";
+/// | `rustc 1.98.1 (48a229cea 2026-09-01)` | KE16 | the toolchain moved and `11f4ce51` re-blessed fifteen fixtures for it, but left this pin behind |
+///
+/// ⚠ The 2026-09-09 update carries NO re-bless, and that is the point: every trybuild
+/// target in the workspace passed under 1.98.1 in the run that revealed this red
+/// (`cargo test --workspace --all-targets --no-fail-fast`, ten `compile_fail` harnesses,
+/// zero fixture failures). The corpus was already certified in fact and only the
+/// paper was stale.
+///
+/// That is the mirror of the failure this witness was built to catch. Its own header
+/// warns it "may bless `.stderr` that the mandated toolchain then rejects", because it
+/// compares the live compiler with a HAND-WRITTEN string rather than with whatever
+/// actually produced the bytes. The same blindness runs the other way: a re-bless that
+/// forgets this line leaves the witness red while the corpus is fine, and a reader who
+/// trusts the red re-blesses a corpus that needed nothing.
+const BLESSED_RUSTC: &str = "rustc 1.98.1 (48a229cea 2026-09-01)";
 
 /// Fixtures whose bytes this freeze speaks for — a lower bound, MEASURED at rung 11.
 ///

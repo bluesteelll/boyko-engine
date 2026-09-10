@@ -3239,3 +3239,96 @@
             }
         });
     }
+
+    /// No-FMA / no-approx grep gate: `solver/colored.rs` must contain ZERO fused
+    /// (`fmadd` / `fmsub` / `fnmadd` / `fnmsub` / `fmaddsub` / `fmsubadd`), ZERO
+    /// approximate (`rsqrt` / `rcp`) and ZERO `mul_add` / `algebraic_` CALL-SITES.
+    ///
+    /// The sibling of `solver::simd::…::solver_simd_has_no_fma_or_approx_callsites`
+    /// and `sdf_simd::…::sdf_simd_has_no_fma_or_approx_callsites`, with the same
+    /// needle list, the same comment skip and the same non-vacuity witness — a
+    /// deliberate copy, because the four must not diverge.
+    ///
+    /// **Why it did not exist until 2026-09-03:** the O7 cohort kernel in
+    /// `colored.rs` sits behind `cfg(target_feature = "avx2")`, and nothing enabled
+    /// AVX2 in this workspace until the `x86-64-v3` baseline landed on 2026-09-02.
+    /// Its 85 `_mm256_*` sites — the largest vectorised body in the crate after
+    /// `solver/simd.rs` — were never compiled and therefore never censused. They are
+    /// clean today; that is the property this test freezes.
+    ///
+    /// The stake is the O7 bit-identity claim itself: `solve_color_avx2` is asserted
+    /// BIT-IDENTICAL to the scalar `solve_color` oracle for any cohort shape and
+    /// worker count. A fused op rounds ONCE where the oracle rounds TWICE, and
+    /// `rsqrt`/`rcp` return different bits on Intel and AMD — either would break that
+    /// claim silently, in a kernel whose whole justification is that it cannot.
+    ///
+    /// Doc-comment prose naming the banned ops (this comment does) is allowed — only
+    /// NON-comment lines are scanned.
+    #[test]
+    fn colored_has_no_fma_or_approx_callsites() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("solver")
+            .join("colored.rs");
+        let contents = std::fs::read_to_string(&path).expect("solver/colored.rs must be readable");
+
+        // Match a CALL-SITE: each stem completed to a real `_ps(` invocation, over
+        // both vector widths. The needles are ASSEMBLED from fragments at runtime,
+        // as in the two older censuses: those scan their OWN file, where a literal
+        // would flag the definition line. This one scans a sibling file, so the
+        // assembly is not strictly required here — it is kept so the four censuses
+        // stay copy-paste siblings and so moving this test into `colored.rs` could
+        // not silently turn it vacuous.
+        let suffix = "_ps(";
+        let widths = ["_mm256_", "_mm_"];
+        let stems = ["fmadd", "fmsub", "fnmadd", "fnmsub", "fmaddsub", "fmsubadd", "rsqrt", "rcp"];
+        let mut banned: Vec<String> = Vec::with_capacity(widths.len() * stems.len() + 2);
+        for w in widths {
+            for s in stems {
+                banned.push(format!("{w}{s}{suffix}"));
+            }
+        }
+        // The safe-Rust route to the same single rounding — reachable without ever
+        // typing an intrinsic, which an intrinsic-only ban would never see.
+        banned.push(format!("{}{}", "mul_add", "("));
+        // `algebraic_mul` / `_add` / `_sub` / `_div` / `_rem` (stable 1.98): the
+        // sanctioned per-operation fast-math API, which permits exactly the two
+        // freedoms — contraction and reassociation — this solver's determinism rests
+        // on refusing. The stem alone is banned so a UFCS spelling cannot defeat it.
+        banned.push(format!("{}{}", "algebraic", "_"));
+
+        let mut hits = Vec::new();
+        for (i, line) in contents.lines().enumerate() {
+            let trimmed = line.trim_start();
+            // Skip doc / line comments — prose may name the banned ops to document
+            // the prohibition. `//!` starts with `//`, so one check covers both.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            for b in &banned {
+                if line.contains(b.as_str()) {
+                    hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "no-FMA/no-approx invariant violated: solver/colored.rs has banned op call-sites (the \
+             O7 cohort kernel claims BIT-IDENTITY with the scalar `solve_color` oracle; a fused \
+             or approximate op ends that claim):\n{}",
+            hits.join("\n"),
+        );
+
+        // Non-vacuity: a census that scans the wrong text passes for the wrong
+        // reason. The witness is ASSEMBLED like the needles rather than written as a
+        // literal, so it can only be satisfied by a real call site in the SCANNED
+        // file — a literal witness is satisfied by the assertion's own source line
+        // whenever the census scans the file it lives in.
+        let witness = format!("{}{}{}", "_mm256_", "mul", suffix);
+        assert!(
+            contents.contains(&witness),
+            "census scanned {} but found no `{witness}` call-site — the file moved or was \
+             rewritten, so an empty hit list proves nothing",
+            path.display(),
+        );
+    }

@@ -194,10 +194,27 @@ fn bench_disparity(c: &mut Criterion) {
 /// The headline gate is the speedup @100k: 4 workers vs 1 worker should reach a
 /// ratio of at least 2.8x (the plan's Amdahl estimate is f ~ 0.04-0.10, i.e. a
 /// ~3.08x ceiling at the serial CSR + final-sort fraction). Criterion reports each
-/// lane's median; the 4-vs-1 ratio at 100k is read from the medians. The
-/// `build_parallel` workers=1 median is ALSO the W=1-vs-O2-serial regression probe
-/// (vs the `grid` arm in `bench_broadphase`): the one-lane shaped path adds only the
-/// Pass A count + prefix-sum + per-chunk sort over the serial `build` (a few %).
+/// lane's median; the 4-vs-1 ratio at 100k is read from the medians.
+///
+/// **What the `w1` row measures after KE16 App-1 (2026-09-02).** App-1 set
+/// `lanes = pool.num_threads()` and re-aimed the previously dead `lanes < 2` guard,
+/// so a ONE-worker pool no longer dispatches at all: `w1` is the O2 serial `build`
+/// plus one `try_with_active_pool` probe, and `w1 / serial_o2` is therefore ≈ 1.00x
+/// BY CONSTRUCTION. It is a receipt that the guard routes as documented, not a probe.
+///
+/// The W=1-vs-O2-serial SHAPED regression probe this doc used to claim for that row
+/// is RETIRED, not moved: after App-1 the one-lane shaped path is unreachable through
+/// `build_parallel` at any worker count, so the regression it guarded (a one-lane
+/// caller paying Pass A + prefix-sum + per-chunk sort over the serial `build`) can no
+/// longer occur. `crates/boyko_physics/tests/broadphase_grid.rs::
+/// one_worker_build_parallel_takes_the_serial_fallback` is the gate on that routing,
+/// with an allocation receipt; the shaped path is measured from `w2` upward.
+///
+/// Consequently the 4-vs-1 ratio's DENOMINATOR is now the serial path rather than the
+/// one-lane shaped path. The serial path is the faster of the two, so the same 2.8x
+/// line is now at least as strict as when it was calibrated — the threshold is not
+/// loosened by App-1, but the number is against a different reference and the results
+/// file records which.
 ///
 /// Below MIN_PARALLEL_BODIES (= 4096) `build_parallel` takes the no-pool serial
 /// shaped path regardless of the pool — so n=1k is a single-lane reference; the
@@ -225,8 +242,9 @@ fn bench_parallel(c: &mut Criterion) {
             "parallel bench scene (n={n}) must produce pairs (anti-vacuity)"
         );
 
-        // The O2 serial `build` baseline at this n — the W=1-vs-O2 regression
-        // reference (the parallel w1 lane vs this pure-serial median).
+        // The O2 serial `build` baseline at this n. After App-1 this is also what
+        // the `w1` row runs (the guard routes a one-worker pool here), so the two
+        // medians read alike by construction; the pair is the routing receipt.
         group.bench_with_input(BenchmarkId::new("serial_o2", n), &bodies, |b, bodies| {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
             let mut out = Vec::new();
@@ -242,9 +260,11 @@ fn bench_parallel(c: &mut Criterion) {
             group.bench_with_input(id, &bodies, |b, bodies| {
                 let pool = ThreadPoolBuilder::new().num_threads(workers).build();
                 // Warm + time INSIDE one install frame so `try_with_active_pool`
-                // finds the ambient pool every iteration (the dispatched branch);
-                // warm-up grows every scratch Vec so the timed builds are the
-                // steady-state, capacity-reused (bounded-alloc) path.
+                // finds the ambient pool every iteration (the dispatched branch at
+                // workers >= 2; at workers = 1 the App-1 guard routes to the O2
+                // serial `build`, which is what that row reports); warm-up grows
+                // every scratch Vec so the timed builds are the steady-state,
+                // capacity-reused (bounded-alloc) path.
                 pool.install(|_scope| {
                     let mut grid = BroadphaseGrid::with_capacity(bodies.len());
                     let mut out = Vec::new();

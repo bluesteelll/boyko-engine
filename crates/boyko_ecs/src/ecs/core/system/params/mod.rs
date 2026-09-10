@@ -7,6 +7,8 @@
 
 pub mod commands;
 pub(crate) mod diagnostics;
+// Aether v2 KE2: `Entities<'w>` — the read-only `EntityId -> Entity` resolver.
+pub mod entities;
 pub mod entity_commands;
 pub mod entity_counter;
 pub mod event_reader;
@@ -30,6 +32,10 @@ pub use commands::Commands;
 // methods through the handle returned by `Commands::spawn`), so the
 // re-export is marked `#[allow(unused_imports)]` until the first
 // integration test that names the type by hand lands.
+// Aether v2 KE2: `Entities<'w>` is a first-class user-facing param (systems
+// name it in their signature), so unlike the internal projections above it is
+// re-exported without an `#[allow(unused_imports)]` waiver.
+pub use entities::Entities;
 #[allow(unused_imports)]
 pub use entity_commands::EntityCommands;
 // Phase 11 (Round 3 C-N1): `EntityCounter` is the worker-safe projection

@@ -443,6 +443,54 @@ pub(crate) fn required_ctor_for(
     None
 }
 
+/// KE11 — cold fail-loud panic site for `#[require]` of a BITSET (flag)
+/// component, shared by BOTH required-ctor sites (the
+/// `BundleColumnCache::resolve_required_missing` resolve and the
+/// `migrate_entity_insert` constructor pass) so the diagnosis is written once.
+///
+/// # Why this is a refusal and not a missing feature
+///
+/// [`RequiredCtor`] is an `unsafe fn(*mut u8)` — it exists to WRITE BYTES into a
+/// slot. A `StorageKind::Bitset` component is a BIT: it owns no bytes, no
+/// column, and no slot, so there is nothing for a ctor to write. The construct
+/// is meaningless here, not unimplemented.
+///
+/// The capability "attaching X sets flag F" already exists under its own name:
+/// the KE10 `FLAGS_DIRECT` table, designed exactly as *a bit, not bytes; no
+/// ctor*. Its runtime producer is
+/// [`try_set_flags_direct`](super::try_set_flags_direct) (a
+/// `FlagDirectEntry { id_fn, initial }` table keyed on the OWNING component);
+/// its author-facing producer is the Aether `flags (…)` group.
+///
+/// # Why the kernel keeps this panic even though the derive refuses first
+///
+/// `#[derive(Component)]` rejects `#[require(<bitset>)]` at COMPILE time (a
+/// const-assert on `Component::STORAGE_IS_BITSET`). That closes the derive door,
+/// not the kernel one: [`Component::HAS_REQUIRES`] and
+/// [`Component::register_required`] are public trait items and
+/// [`install_required`] is `pub`, so a HAND-WRITTEN `impl Component` still
+/// reaches this code. This site is the defence for that route — and it replaces
+/// two `.expect`s that blamed the archetype-expansion contract for a cause that
+/// has nothing to do with expansion.
+#[cold]
+#[inline(never)]
+pub(crate) fn required_bitset_panic(requiring_site: &str, required_id: ComponentId) -> ! {
+    let name = get_layout(required_id.0)
+        .map(|l| l.type_name)
+        .unwrap_or("<unregistered>");
+    panic!(
+        "{requiring_site}: #[require] of a BITSET flag component (ComponentId {} — {name}). \
+         A flag is a BIT, not bytes: it owns no column and no slot, and a RequiredCtor \
+         exists only to write bytes into a slot, so there is nothing for it to construct. \
+         Use the initial-flag-state capability instead — it is the same capability under \
+         its own name: `component_registry::try_set_flags_direct(owner_id, &[FlagDirectEntry \
+         {{ id_fn, initial }}])` at runtime, or the Aether `flags (…)` group in source. \
+         (The derive refuses this at compile time; reaching here means a hand-written \
+         `impl Component` declared it.)",
+        required_id.0,
+    )
+}
+
 /// Cold fail-loud panic site for the W2 cycle break. Kept out of line so
 /// [`build_required_plan`]'s body stays compact.
 #[cold]

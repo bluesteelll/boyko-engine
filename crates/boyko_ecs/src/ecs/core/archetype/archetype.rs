@@ -215,6 +215,36 @@ pub struct Archetype {
     ///
     /// `pub(crate)` for in-place slab construction (Phase 7 U13).
     pub(crate) entity_ids: VmColumn<EntityId>,
+
+    /// **`ArchAdded`** — the tick of the most recent *structural add* into this
+    /// archetype (kernel backlog **KE6**, ruling **D2**).
+    ///
+    /// A plain `Tick`, not an `AtomicU32`. D2 rejected the per-row value half of
+    /// the coarse-dirty-summary idea precisely because it would have put an
+    /// atomic on a line every worker hammers (`par_iter` splits one archetype's
+    /// rows across workers); the structural half survives because every write
+    /// site is a **cold, exclusive-access** row-add — see
+    /// [`stamp_arch_added`](Self::stamp_arch_added) for the enumerated census
+    /// and the race-freedom argument.
+    ///
+    /// Semantics: `arch_added` is `>=` (in the `Tick::is_newer_than` sense)
+    /// every per-row `added_tick` stored in this archetype's **table** columns.
+    /// It is deliberately conservative — a row-add always stamps the *current*
+    /// tick even when the row carries an older `added_tick` forward from a
+    /// migration source, so the stamp can be too new but never too old. Too-new
+    /// costs a consumer one non-skip; too-old would be a silent wrong answer.
+    ///
+    /// ⚠ **Table storage only.** A `StorageKind::Dense` component lives in the
+    /// global `DenseStore` and adding one to an entity moves no row and creates
+    /// no archetype row, so `DenseStore::insert`'s `added_tick` is invisible
+    /// here. A future `Added<C>` archetype-skip consumer MUST gate itself on
+    /// `!C::STORAGE_IS_DENSE`. This is the same storage-kind blindness class
+    /// that produced KE1, GK-2 and F4, written down at the source rather than
+    /// left for a reader to discover.
+    ///
+    /// `pub(crate)` for in-place slab construction (Phase 7 U13) — every field
+    /// is written via `addr_of_mut!` on the slab path and this one must be too.
+    pub(crate) arch_added: Tick,
 }
 
 // Phase 7 U5 / D4: the inline column table MUST be at offset 0 so the fast
@@ -260,6 +290,13 @@ const _: () = assert!(std::mem::offset_of!(Archetype, columns) == 0);
 // 64-bit ABI; gated to 64-bit (the engine's supported platform) — see CLAUDE.md
 // target platform. `offset_of(columns) == 0` above is width-independent (first
 // `#[repr(C)]` field) and stays unconditional.
+// KE6 adds `arch_added: Tick` (a `u32`). The figure below is UNCHANGED, and
+// that is the item's zero-cost measurement rather than a coincidence worth
+// glossing over: both arms already carry align-32 tail padding (8608 + 72 =
+// 8680 → 8704, 24 B of pad; 8608 + 88 = 8696 → 8704, 8 B of pad), so a 4-byte
+// field lands inside it on either arm and the struct does not grow by a byte.
+// If a future field consumes that pad, THIS assertion — not a benchmark — is
+// what will report the next one costing real memory.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Archetype>() == 8704);
 
@@ -283,6 +320,8 @@ impl Archetype {
             flags: ArchetypeFlags::empty(),
             component_ids: Vec::new(),
             entity_ids: VmColumn::new("Archetype.entity_ids", POOL_MAX_ROWS),
+            // KE6: no rows yet, so no structural add has happened.
+            arch_added: Tick::ZERO,
         }
     }
 
@@ -345,6 +384,8 @@ impl Archetype {
             flags: ArchetypeFlags::empty(),
             component_ids: component_ids.to_vec(),
             entity_ids: VmColumn::new("Archetype.entity_ids", POOL_MAX_ROWS),
+            // KE6: no rows yet, so no structural add has happened.
+            arch_added: Tick::ZERO,
         };
 
         // Create component pools for each component ID. Each successful
@@ -393,6 +434,12 @@ impl Archetype {
             // (D1) — at D0 that store does not exist yet, so a dense id simply
             // has no per-archetype column here, which is exactly the intended end
             // state (it never gets one).
+            // KE10: the initial-flag-state gate is raised for EVERY id, ABOVE the
+            // storage screen below. `component_ids` retains poolless ids, so
+            // `apply_attach_flags_all` walks them; raising the gate only for
+            // pool-owning ids left a dense/bitset declarer's `flags (…)` group
+            // silently unapplied unless a table sibling happened to raise the bit.
+            flags.insert_from_flag_declarations(comp_id);
             if !component_registry::is_signature_storage(
                 component_registry::storage_kind(comp_id.0),
             ) {
@@ -415,6 +462,20 @@ impl Archetype {
     #[inline]
     pub fn id(&self) -> ArchetypeId {
         self.id
+    }
+
+    /// This archetype's OR-computed [`ArchetypeFlags`] — the "which hook kinds,
+    /// observer kinds and attach actions does ANY component here declare?"
+    /// bitset, fixed at mint.
+    ///
+    /// A read-only accessor over the `pub(crate)` field, added by KE10 so an
+    /// INTEGRATION test can assert the `FLAGS_ON_ATTACH` gate bit is raised for
+    /// a declaring archetype and NOT raised otherwise. That bit is the whole
+    /// zero-when-unused argument for initial flag states, and a gate nothing can
+    /// observe is a gate nothing can falsify. Copies one `u16`.
+    #[inline]
+    pub fn flags(&self) -> ArchetypeFlags {
+        self.flags
     }
 
     /// Registers a component type by ID
@@ -471,6 +532,12 @@ impl Archetype {
         // the bit out of the signature mask too; here we skip the pool so the id
         // never gains a per-archetype backing column (a bitset tag has none ever;
         // a dense id lives in its global `DenseStore` instead).
+        //
+        // KE10: the initial-flag-state gate is raised for EVERY id, ABOVE that
+        // screen — see `ArchetypeFlags::insert_from_flag_declarations`. This is
+        // the LIVE mint funnel, so a gate raised only below the screen was the
+        // reachable half of the defect.
+        self.flags.insert_from_flag_declarations(component_id);
         if !component_registry::is_signature_storage(
             component_registry::storage_kind(component_id.0),
         ) {
@@ -850,6 +917,154 @@ impl Archetype {
         self.current_index
     }
 
+    /// Records that a row was structurally added to this archetype at `tick`
+    /// — the single writer of the [`ArchAdded`](Self::arch_added) stamp
+    /// (kernel backlog **KE6**, ruling **D2**).
+    ///
+    /// `max`-free by construction: `tick` is always the world's *current* tick
+    /// at the calling site, and the world tick is monotonic within a run, so a
+    /// plain store cannot move the stamp backwards. (`check_tick`'s wraparound
+    /// clamp is the one exception, and it also only ever moves the stamp
+    /// forward — see [`clamp_arch_added`](Self::clamp_arch_added).)
+    ///
+    /// # Why a non-atomic store is race-free (D2)
+    ///
+    /// Every call site is a **row add**, and a row add is a structural edit:
+    /// it runs on the dispatcher inside the apply window with the world
+    /// exclusively borrowed, no worker live. That is what makes the stamp
+    /// free — the field is written on paths that were already cold and already
+    /// exclusive, so it adds one `u32` store to a path that is doing a memcpy
+    /// and a pool commit anyway, and it never touches a line a `par_iter` split
+    /// is hammering (the reason D2 rejected the per-row value half).
+    ///
+    /// # The write-site census — reproduce it, do not trust this list
+    ///
+    /// "A row was added" is mechanically "`current_index` advanced upward".
+    /// The producing command, from the repo root:
+    ///
+    /// ```text
+    /// grep -rn --include=*.rs "current_index += 1\|current_index = " crates/boyko_ecs/src
+    /// ```
+    ///
+    /// Nine production sites, each stamping here or through
+    /// [`stamp_arch_added_raw`](Self::stamp_arch_added_raw):
+    ///
+    /// | site | receiver |
+    /// |---|---|
+    /// | `Archetype::create_entity` | `&mut self` |
+    /// | `Archetype::create_entity_with_ticks` | `&mut self` |
+    /// | `Archetype::create_entity_with_pool_ids` | `&mut self` |
+    /// | `clone::materialize::materialize_clone_into` | confined `&mut Archetype` reborrow |
+    /// | `clone::prefab::Prefab::instantiate` | confined `&mut Archetype` reborrow |
+    /// | `commands::migration_helpers::migrate_entity_insert` | raw `addr_of_mut!` (Tree-Borrows discipline) |
+    /// | `commands::migration_helpers::migrate_entity_attach_ids` | `&mut Archetype` |
+    /// | `commands::spawn_at_command::SpawnAtCommand::apply` | `&mut Archetype` |
+    /// | `commands::spawn_batch_command::SpawnBatchCommand::apply` | `&mut Archetype` |
+    ///
+    /// **The fatal direction is under-stamping**, and only under-stamping: a
+    /// missed site would let a consumer skip an archetype that does hold a
+    /// fresh row — a silent wrong answer. Over-stamping costs one non-skip.
+    /// A new row-add path therefore MUST stamp; when in doubt, stamp.
+    ///
+    /// Row *removals* (`remove_entity` / `move_out_entity` / `pop`) do NOT
+    /// stamp: they write no `added_tick`. Neither does
+    /// `InsertCommand::apply_replace_in_place` (it stamps `changed`, never
+    /// `added` — verified by the absence of any `write_added_tick` /
+    /// `fill_ticks` call in `insert_command.rs`).
+    #[inline]
+    pub(crate) fn stamp_arch_added(&mut self, tick: Tick) {
+        self.arch_added = tick;
+    }
+
+    /// Raw-pointer twin of [`stamp_arch_added`](Self::stamp_arch_added), for
+    /// the one site that must not narrow an interior-mutable slab cell to a
+    /// `Unique` tag.
+    ///
+    /// `migrate_entity_insert` writes `current_index` through `addr_of_mut!`
+    /// rather than a place-assign for exactly that reason (a persistent
+    /// `Unique` on the slab cell makes the later `EcsMaster`-drop deallocation
+    /// of the bundle `Box` illegal under Tree Borrows). The stamp sits beside
+    /// that write and must use the same discipline; forming a
+    /// `&mut Archetype` here purely to store a `u32` would reintroduce the
+    /// narrowing the surrounding code exists to avoid.
+    ///
+    /// # Safety
+    ///
+    /// * `archetype_ptr` is a valid, write-capable pointer to a live
+    ///   [`Archetype`] slab slot, held under an exclusive `&mut EcsMaster` —
+    ///   the same precondition the neighbouring `current_index` write carries.
+    /// * No `&`/`&mut Archetype` is live across the call.
+    #[inline]
+    pub(crate) unsafe fn stamp_arch_added_raw(archetype_ptr: *mut Archetype, tick: Tick) {
+        // SAFETY: delegated to the caller's contract above — the pointer is
+        //   write-capable slab provenance under an exclusive world borrow, and
+        //   `addr_of_mut!` forms the field pointer WITHOUT materialising an
+        //   intermediate `&mut Archetype` (which a place-assign would).
+        unsafe {
+            core::ptr::addr_of_mut!((*archetype_ptr).arch_added).write(tick);
+        }
+    }
+
+    /// Returns the [`ArchAdded`](Self::arch_added) stamp verbatim.
+    ///
+    /// Prefer [`has_structural_add_since`](Self::has_structural_add_since),
+    /// which folds in the empty-archetype case; this accessor exists for the
+    /// wraparound-clamp pass and for tests.
+    #[inline]
+    pub fn arch_added(&self) -> Tick {
+        self.arch_added
+    }
+
+    /// Clamps the [`ArchAdded`](Self::arch_added) stamp against `current`, the
+    /// wraparound half of KE6's oracle.
+    ///
+    /// `Tick::is_newer_than` interprets a `wrapping_sub` difference as an
+    /// elapsed-tick count, and that reading is correct only while the stored
+    /// tick stays within `MAX_CHANGE_AGE` of the world's current tick. A stamp
+    /// on a long-dormant archetype (one that took a spawn burst and then never
+    /// changed again) is exactly the value that ages out, and if it did it
+    /// would flip from "very old" to "newer than now" — turning a permanent
+    /// skip into a permanent non-skip, or the reverse. `run_check_ticks_scan`
+    /// calls this for every archetype on the same cold pass that clamps the
+    /// per-row columns.
+    #[inline]
+    pub(crate) fn clamp_arch_added(&mut self, current: Tick) {
+        self.arch_added = self.arch_added.check_tick(current);
+    }
+
+    /// Returns `true` when this archetype may hold a row whose `added_tick`
+    /// falls in the window `(last_run, this_run]` — the consumer predicate
+    /// [`Added<C>`] would gate an archetype-wide skip on.
+    ///
+    /// Conservative in the safe direction: `false` means *no table row in this
+    /// archetype was added in the window*, which is a guarantee; `true` means
+    /// *maybe*, and the caller still has to check per row.
+    ///
+    /// The `entity_count() != 0` conjunct removes the never-stamped case from
+    /// the predicate entirely. An archetype that has never taken a row still
+    /// carries the `Tick::ZERO` sentinel, and `Tick::ZERO` is not a meaningful
+    /// point on the wrapping tick line — but such an archetype has no rows to
+    /// yield either, so the answer is `false` on the row count alone and the
+    /// sentinel is never interpreted.
+    ///
+    /// ⚠ Table storage only — see the field docs. A dense `Added<C>` consumer
+    /// must not call this.
+    ///
+    /// # Status
+    ///
+    /// **No consumer is wired in this rung.** KE6's stated oracle is the stamp
+    /// plus the check-ticks clamp; wiring the archetype-wide skip into the
+    /// query iterator's four archetype-advance sites is a change to the
+    /// kernel's hottest file whose correctness rests on the write-site census
+    /// above being exhaustive, and it deserves its own oracle over every add
+    /// path rather than riding this one.
+    ///
+    /// [`Added<C>`]: crate::ecs::core::iters::query::Added
+    #[inline]
+    pub fn has_structural_add_since(&self, last_run: Tick, this_run: Tick) -> bool {
+        self.entity_count() != 0 && self.arch_added.is_newer_than(last_run, this_run)
+    }
+
     /// Creates a new entity in this archetype with the given components.
     ///
     /// Takes a borrowed slice of `(ComponentId, &[u8])` pairs — zero allocation
@@ -959,6 +1174,10 @@ impl Archetype {
 
         // Increment entity counter
         self.current_index += 1;
+
+        // KE6 write site 1/9 — `&mut self`, so the D2 exclusivity ground holds
+        // by the receiver alone.
+        self.stamp_arch_added(current_tick);
 
         true
     }
@@ -1173,7 +1392,12 @@ impl Archetype {
         components: &[(ComponentId, &[u8], Tick, Tick)],
         current_tick: Tick,
     ) -> bool {
-        let _ = current_tick; // Reserved (Phase 12 OQ5).
+        // `current_tick` was "Reserved (Phase 12 OQ5)" — unused, because every
+        // per-component tick arrives explicitly in `components`. KE6 gives it a
+        // consumer: the per-row ticks carried forward from a migration source
+        // are OLD, but the *structural* add into THIS archetype happens now, so
+        // the stamp at the tail below uses the current tick, not the carried
+        // ones.
 
         // Build a mask of the input ids; signature subset check (mirrors
         // `create_entity`).
@@ -1245,6 +1469,11 @@ impl Archetype {
 
         self.entity_ids.push(entity_id);
         self.current_index += 1;
+        // KE6 write site 2/9 — `&mut self`. Stamps `current_tick`, NOT the
+        // carried per-row `added_tick`s: the stamp records when a row entered
+        // THIS archetype, and is conservative by being too new rather than too
+        // old.
+        self.stamp_arch_added(current_tick);
         true
     }
 
@@ -1320,6 +1549,8 @@ impl Archetype {
         }
         self.entity_ids.push(entity_id);
         self.current_index = row + 1;
+        // KE6 write site 3/9 — `&mut self`.
+        self.stamp_arch_added(current_tick);
         *new_unit_index = row as u32;
         true
     }

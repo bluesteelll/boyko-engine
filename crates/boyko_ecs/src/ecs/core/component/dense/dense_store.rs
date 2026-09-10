@@ -44,6 +44,24 @@ pub(crate) const TOMBSTONE: EntityId = EntityId(usize::MAX);
 /// deliberately tiny test store (e.g. `reserve_rows == 8`) from over-allocating.
 const DENSE_BOOKKEEPING_FLOOR_ROWS: usize = 1024;
 
+/// KE11 — cold fail-loud site for the fresh-slot reserve ceiling in
+/// [`DenseStore::insert_with_ctor`].
+///
+/// The byte-taking [`DenseStore::insert`] reaches the identical condition
+/// through `ComponentPool::add`'s `None` and spells it as an `.expect`; the
+/// ctor-taking twin has to test `grow_rows`' `bool` itself, so the message lives
+/// here instead — out of line, so the insert body stays compact (I-cache).
+#[cold]
+#[inline(never)]
+fn dense_ctor_reserve_ceiling_panic(component_id: ComponentId) -> ! {
+    panic!(
+        "invariant: DenseStore column reserve ceiling exhausted while constructing a \
+         required component (pool_reserve_rows(stride) rows of a single dense type, \
+         component {component_id} — raise POOL_MAX_ROWS if a real workload legitimately \
+         reaches it)"
+    )
+}
+
 /// Global dense column for one component type + its `EntityId`-keyed bookkeeping.
 ///
 /// # Invariant (debug-asserted + property-tested)
@@ -242,6 +260,123 @@ impl DenseStore {
         }
 
         debug_assert!(self.debug_check_slot(slot), "DenseStore::insert invariant");
+        slot
+    }
+
+    /// KE11 — inserts a value for `entity` CONSTRUCTED IN PLACE by `ctor`,
+    /// returning the assigned slot. The ctor-taking twin of [`Self::insert`].
+    ///
+    /// # Why a separate fn and not `insert(entity, &bytes, tick)`
+    ///
+    /// Every other entry point into this store takes a `&[u8]` and memcpys it.
+    /// The required-components path has no bytes to copy from: a
+    /// [`RequiredCtor`] materialises the value by writing THROUGH a `*mut u8`
+    /// into the destination slot. Marshalling that through a stack buffer would
+    /// need a `MaybeUninit` of the registered layout (dynamic size + align) and
+    /// would move the value twice for no reason. So the fresh-slot arm swaps
+    /// [`ComponentPool::add`] (memcpy + append) for the explicit
+    /// `grow_rows` → `construct_at_uninitialized` → `commit_units` triple, which
+    /// is exactly what `add` does around the memcpy.
+    ///
+    /// Everything else is [`Self::insert`] verbatim: LIFO free-slot reuse, the
+    /// `live` / `e2s` / `s2e` bookkeeping, and the D4 change-detection rule that
+    /// stamps BOTH ticks (a constructed required component is `Added` on the
+    /// frame its requirer is).
+    ///
+    /// # Safety
+    ///
+    /// `ctor` must be the registry-paired constructor for THIS store's
+    /// [`component_id`](Self::component_id) — i.e. it writes exactly one value of
+    /// the type this store's column was created for. Passing a ctor for a
+    /// different type writes a foreign value into the column's stride and
+    /// corrupts every later read and the column's `drop_fn`.
+    ///
+    /// # Panics
+    /// * the entity is already present — debug-asserted, exactly as
+    ///   [`Self::insert`]. Callers do present⇒skip first.
+    /// * the column's reserve ceiling is exhausted on a fresh-slot append (the
+    ///   same practically-unreachable `pool_reserve_rows(stride)` ceiling
+    ///   [`Self::insert`] documents).
+    pub(crate) unsafe fn insert_with_ctor(
+        &mut self,
+        entity: EntityId,
+        ctor: crate::ecs::core::component::component_registry::RequiredCtor,
+        current_tick: Tick,
+    ) -> u32 {
+        debug_assert!(
+            !self.e2s.contains(entity.get()),
+            "DenseStore::insert_with_ctor: entity {entity} already present (component {})",
+            self.id
+        );
+
+        let slot = match self.free.pop() {
+            Some(slot) => {
+                // SAFETY (U1): `slot` came off `self.free`, so it was APPENDED
+                //   before it was tombstoned ⇒ `slot < column.count() <=
+                //   committed_rows`, which is `construct_at_uninitialized`'s
+                //   precondition. `remove` already ran `drop_at` on it, so the
+                //   slot is LOGICALLY UNINITIALISED and the ctor's `ptr::write`
+                //   drops nothing (no double-drop of the prior tenant). `&mut
+                //   self` ⇒ the column has exclusive access. `ctor` writes
+                //   exactly one value of this store's registered type (the
+                //   caller's `unsafe` contract above).
+                unsafe { self.column.construct_at_uninitialized(slot as usize, ctor) };
+                self.s2e.set(slot as usize, entity);
+                slot
+            }
+            None => {
+                // Fresh slot at the frontier. `add`'s memcpy is unusable here
+                // (nothing to copy FROM), so its three constituent steps are
+                // spelled out: grow the committed frontier, construct into the
+                // slot, then bump `len`.
+                let slot = self.column.count();
+                if !self.column.grow_rows(slot + 1) {
+                    dense_ctor_reserve_ceiling_panic(self.id);
+                }
+                // SAFETY (U2): `grow_rows(slot + 1)` returned `true`, whose
+                //   contract (GROW1-XI sufficiency) guarantees `committed_rows >=
+                //   slot + 1` ⇒ `slot < committed_rows`. `slot ==
+                //   column.count() == len`, so the slot has NEVER been live and
+                //   holds no value to drop. `&mut self` ⇒ exclusive access.
+                //   Type-pairing as in the reused-slot arm.
+                unsafe { self.column.construct_at_uninitialized(slot, ctor) };
+                // U3 (safe fn, stated for the same reason): `commit_units`'
+                //   precondition `start_row == len` holds because `slot` was READ
+                //   as `column.count()` (== `len`) and nothing between that read
+                //   and this call mutates `len` — `grow_rows` moves only
+                //   `committed_rows`, and `construct_at_uninitialized` writes
+                //   bytes. `slot + 1 <= committed_rows` by U2.
+                self.column.commit_units(slot, 1);
+                debug_assert_eq!(
+                    slot,
+                    self.s2e.len(),
+                    "DenseStore::insert_with_ctor: fresh slot must equal s2e.len()"
+                );
+                self.s2e.push(entity);
+                slot as u32
+            }
+        };
+
+        self.live.set(slot as usize);
+        self.e2s.insert(entity.get(), slot);
+
+        // Change detection (D4): stamp both ticks — a constructed required
+        // component is Added (and trivially Changed) on the frame its requirer is.
+        // SAFETY (U4, verbatim from `insert`): `slot < column.count()` (it was
+        //   just committed at the frontier, or is a reused freed slot below the
+        //   high-water mark), so the slot lies in the committed prefix of BOTH
+        //   tick sub-regions; `&mut self` ⇒ the column has exclusive access; no
+        //   concurrent reader of this slot's tick exists (structural ops are
+        //   single-threaded under `&mut DenseStore`).
+        unsafe {
+            self.column.write_added_tick(slot as usize, current_tick);
+            self.column.write_changed_tick(slot as usize, current_tick);
+        }
+
+        debug_assert!(
+            self.debug_check_slot(slot),
+            "DenseStore::insert_with_ctor invariant"
+        );
         slot
     }
 
