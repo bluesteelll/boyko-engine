@@ -124,7 +124,8 @@ pub use sor::{
 };
 pub use ssao::{
     SSAO_EPS, SSAO_RADIUS, SSAO_SLICES, SSAO_STEPS, SSAO_STRENGTH, ssao_estimate_body,
-    ssao_horizon_step_body, ssao_slice_body,
+    ssao_estimate_body_params, ssao_horizon_step_body, ssao_horizon_step_body_params,
+    ssao_slice_body, ssao_slice_body_params,
 };
 pub use surface::{
     EPS as M2_SURFACE_EPS, M2_REFINE_ITERS, M2_REFINE_RELAX, T_MAX as M2_SURFACE_T_MAX,

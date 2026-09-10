@@ -21,6 +21,13 @@ use boyko_sdf_math::{
     MAX_SDF_EDITS, SDF_GRAD_H, SDF_IMG_H, SDF_IMG_W, SdfEdit, SdfEditField, edit_distance,
     sdf_edit_list, sdf_edit_list_normal, v_dot, v_len, v_normalize, v_sub,
 };
+// GOLDEN-EDSL P0: the eDSL's `f32` Eval backend + the preset-taking SSAO estimate body, for
+// the DERIVED oracle `golden_ssao_attributes_derived`. Reachable ONLY under the `goldens`
+// feature (the optional DIRECT `boyko_shaderdsl` edge in `Cargo.toml`); the shipped `compute`
+// surface never names the eDSL. The eDSL's own `SsaoParams` is aliased apart from the host
+// `compute::SsaoParams` imported below (same five fields, converted field-by-field).
+use boyko_shaderdsl::cf::EvalCf;
+use boyko_shaderdsl::ssao::{SsaoParams as EdslSsaoParams, ssao_estimate_body_params};
 
 use crate::compute::{
     ALPHA_MARGIN, AO_FALLOFF, AO_STEP, AO_STRENGTH, BRICK_CLASS_EMPTY_OUTSIDE, BrickLevelParams,
@@ -2411,6 +2418,13 @@ pub(crate) fn ssao_r2(index: u32, alpha: u32) -> u32 {
 /// The arithmetic is UNCHANGED: feeding [`SsaoParams::default`] (== `SSAO_PARAMS[SSAO_QUALITY_MEDIUM]`
 /// == today's shipped consts) reproduces the pre-Q2 golden BIT-FOR-BIT. Feed `SSAO_PARAMS[q]` to
 /// mirror the variant `q` `.spv`.
+///
+/// GOLDEN-EDSL P0 (step 1-3): this hand mirror now has an eDSL-DERIVED twin,
+/// [`golden_ssao_attributes_derived`], which instantiates the same generic body the HLSL is
+/// emitted from over the `f32` Eval backend. `tests/ssao_golden_derived.rs` is the equivalence
+/// gate (derived == hand, bit-for-bit, over the GPU golden's inputs). This function stays the
+/// oracle the GPU golden (`ssao_variants_match_host`) pins until the retirement step (step 5 of
+/// `docs/GOLDEN-EDSL-MIGRATION-PLAN.md`), which is its own commit — per the circularity guardrail.
 pub fn golden_ssao_attributes(
     gbuf: &[MarcherAttributes],
     px: u32,
@@ -2556,6 +2570,137 @@ pub fn golden_ssao_attributes(
     // `occ / N` divisor reads `params.slices as f32` (the `SSAO_SLICES_F` the variant bakes).
     let ao = (1.0 - params.strength * occ / params.slices as f32).clamp(0.0, 1.0);
     ao * ao
+}
+
+/// GOLDEN-EDSL P0 (step 1): the eDSL-DERIVED SSAO oracle — the same contract and signature as
+/// the hand mirror [`golden_ssao_attributes`] (so the retirement step is a call-site rename),
+/// but the horizon reduction is NOT re-derived by hand: it is
+/// `boyko_shaderdsl::ssao::ssao_estimate_body_params::<EvalCf>` — the SAME generic body
+/// `emit_hlsl_ssao` traces into the GENERATED span of `sdf_ssao.comp.hlsl` — instantiated over
+/// `f32`. The eDSL owns the slice loop, the two half-slice step loops, the per-tap horizon
+/// step, the `1 - strength*occ/slices` complement, `clamp01`, and the `ao*ao` square; `params`
+/// selects the variant exactly as the hand mirror's `params` does.
+///
+/// What remains hand-written here is the SEAM the shader also writes by hand (its `main()`
+/// glue around the generated span): the center-lit gate, the `P = ro + rd*view_t` reconstruct,
+/// the `oct_decode` of the center normal, the `pix_radius` band, the Hilbert+R2 rotation slot
+/// and radial phase, the per-slice `sdir2` rotation, the per-step `advance`, and the
+/// bounds/mask-checked forward neighbour reconstruct. That glue is a TRANSCRIPTION of the hand
+/// mirror's, deliberately NOT shared with it: `tests/ssao_golden_derived.rs` proves the two
+/// oracles bit-identical over the GPU golden's inputs, and a shared helper would make the glue
+/// half of that proof vacuous. The hand copy is retired in its own later commit (plan step 5);
+/// until then the GPU golden keeps pinning the hand mirror — the circularity guardrail.
+pub fn golden_ssao_attributes_derived(
+    gbuf: &[MarcherAttributes],
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    params: &SsaoParams,
+) -> f32 {
+    debug_assert_eq!(
+        gbuf.len(),
+        (img_w as usize) * (img_h as usize),
+        "invariant: SSAO gbuf length must equal img_w * img_h"
+    );
+    // The center pixel's class: a non-lit pixel carries no surface — the neutral factor.
+    let center = gbuf[(py as usize) * (img_w as usize) + (px as usize)];
+    let center_lit = center.mask > 0 && center.view_t < SSAO_VIEWT_BG;
+    if !center_lit {
+        return 1.0;
+    }
+
+    // P = ro + rd * view_t via the shared ray-gen.
+    let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
+    let view_t = center.view_t;
+    let p = [
+        ro[0] + rd[0] * view_t,
+        ro[1] + rd[1] * view_t,
+        ro[2] + rd[2] * view_t,
+    ];
+
+    // The center surface normal — the elevation reference, CONSTANT across all taps.
+    let center_n = oct_decode([
+        center.oct_rg[0] as f32 / 255.0,
+        center.oct_rg[1] as f32 / 255.0,
+    ]);
+
+    // The screen-pixel march radius (clamped band on PERSPECTIVE; the fixed ortho span).
+    let pix_radius = match camera {
+        CompositeCamera::Perspective {
+            forward,
+            tan_half_fov,
+            ..
+        } => {
+            let z_view = rd[0] * forward[0] + rd[1] * forward[1] + rd[2] * forward[2];
+            let z = (z_view * view_t).max(1.0e-3);
+            let pr = params.radius * ((img_h as f32) * 0.5) / (z * tan_half_fov);
+            pr.clamp(SSAO_RADIUS_PIX_MIN, SSAO_RADIUS_PIX_MAX)
+        }
+        CompositeCamera::Ortho => params.radius * ((img_h as f32) * 0.5) / SDF_HALF_EXTENT,
+    };
+
+    // The Hilbert+R2 rotation slot and the radial step-phase (integer picks, bit-exact).
+    let hindex = ssao_hilbert(SSAO_HILBERT_W, px & (SSAO_HILBERT_W - 1), py & (SSAO_HILBERT_W - 1));
+    let slot = ((ssao_r2(hindex, SSAO_R2_ALPHA1).wrapping_mul(SSAO_ROT_N)) >> 24) as usize;
+    let rot = SSAO_ROT[slot];
+    let r2_rad = ssao_r2(hindex, SSAO_R2_ALPHA2);
+    let radial_phase = ((r2_rad >> 16) + 1) as f32 / 256.0;
+
+    // The forward neighbour reconstruct (the hand-written seam): offset in SCREEN pixels along
+    // `sdir2 * sign`, round, bounds-check, mask-check, reconstruct Pp = nro + nrd * nview_t;
+    // else Pp = P (a skipped tap contributes nothing — the eDSL carries no per-tap branch).
+    let reconstruct = |sdir2: (f32, f32), advance: f32, sign: f32| -> [f32; 3] {
+        let npx = ((px as f32) + sign * sdir2.0 * advance).round() as i32;
+        let npy = ((py as f32) + sign * sdir2.1 * advance).round() as i32;
+        if npx >= 0 && npy >= 0 && npx < (img_w as i32) && npy < (img_h as i32) {
+            let n = gbuf[(npy as usize) * (img_w as usize) + (npx as usize)];
+            if n.mask > 0 && n.view_t < SSAO_VIEWT_BG {
+                let (nro, nrd) = composite_ray(npx as u32, npy as u32, img_w, img_h, camera);
+                return [
+                    nro[0] + nrd[0] * n.view_t,
+                    nro[1] + nrd[1] * n.view_t,
+                    nro[2] + nrd[2] * n.view_t,
+                ];
+            }
+        }
+        p
+    };
+
+    // The `tap(slice, step, neg)` seam the eDSL body indexes: the slice's rotated screen axis
+    // and the step's advance are pure functions of `(slice, step)`, so recomputing them per tap
+    // yields the same bits as a per-slice hoist.
+    let steps_f = params.steps as f32;
+    let tap = |sl: usize, sp: usize, neg: bool| -> [f32; 3] {
+        debug_assert_eq!(
+            SSAO_ROT_N % params.slices,
+            0,
+            "invariant: SSAO_SLICES ({}) must divide SSAO_ROT_N ({SSAO_ROT_N}) for even slice spacing",
+            params.slices
+        );
+        let base = SSAO_ROT[((sl as u32) * (SSAO_ROT_N / params.slices)) as usize];
+        let sdir2 = (
+            base.0 * rot.0 - base.1 * rot.1,
+            base.0 * rot.1 + base.1 * rot.0,
+        );
+        let advance = (sp as f32 + radial_phase) * pix_radius / steps_f;
+        reconstruct(sdir2, advance, if neg { -1.0 } else { 1.0 })
+    };
+
+    // The variant preset, handed to the eDSL as ITS `SsaoParams` (the host struct re-states the
+    // same five scalars; the shipped `compute` must not name the eDSL type).
+    let edsl = EdslSsaoParams {
+        radius: params.radius,
+        slices: params.slices,
+        steps: params.steps,
+        strength: params.strength,
+        eps: params.eps,
+    };
+
+    // The eDSL owns everything from here: slices x (2 half-slices x steps) horizon taps,
+    // the complement, the clamp, the square.
+    ssao_estimate_body_params::<EvalCf, _>(p, center_n, &tap, &edsl)
 }
 
 /// Quantizes `v` (clamped to `[0,1]`) to an R16_UNORM code point — `(v * 65535).round()`,
