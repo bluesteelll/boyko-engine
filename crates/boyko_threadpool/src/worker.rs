@@ -22,6 +22,22 @@ use crate::task::Task;
 use crate::thread_pool::PoolInner;
 use crate::tls;
 
+/// Whether the steal sweeps ask `Stealer::is_empty` before probing a victim.
+///
+/// `true` only on `x86_64-pc-windows-gnu`, and the reason is the whole of
+/// [`try_steal_random`]'s "MEASURED 2026-09-10" table: the gate exists to keep
+/// `epoch::pin`'s thread-local read off the sweep, that read is expensive ONLY
+/// under rustc >= 1.98 on windows-gnu
+/// (`docs/threadpool/RUSTC-198-WINDOWS-GNU-TLS.md`), and where the read is
+/// cheap the gate's POLICY cost — steals given up on victims that were empty
+/// for an instant — is all that is left of it: measured 2.2x on the msvc
+/// worker route.
+///
+/// A `cfg!` constant and not a `#[cfg]` block, deliberately: both arms
+/// typecheck and lint on every host, so neither can rot the way a cfg-gated
+/// path does, and the optimiser folds the branch.
+pub(crate) const STEAL_EMPTY_GATE: bool = cfg!(all(windows, target_env = "gnu"));
+
 /// Worker thread entry point. Runs until `inner.shutdown` is set and every
 /// in-flight task has been drained.
 pub(crate) fn worker_main(inner: Arc<PoolInner>, worker_id: u32, deque: Worker<Task>) {
@@ -268,6 +284,32 @@ pub(crate) fn pop_global_injector(
 /// fence with no pin and no TLS, so the gate replaces that cost with two loads
 /// the probe was going to issue anyway.
 ///
+/// # ⚠ MEASURED 2026-09-10: the gate is a gnu-ONLY win and an msvc-ONLY LOSS
+///
+/// It is therefore compiled in only where its premise holds. Three arms — no
+/// change / this gate alone / this gate plus the TLS merge — on both hosts, the
+/// 1 µs rows of `ke16_nested_scope`, interleaved, two runs each, every region
+/// receipt-clean (`worker/body_1us_tasks_64W`, µs):
+///
+/// | host | neither | THIS GATE alone | gate + TLS merge |
+/// |---|---:|---:|---:|
+/// | gnu, `dispatcher` route | 520.1 | **140.7** | 125.7 |
+/// | gnu, `worker` route | 1134.3 | 1089.2 | **594.8** |
+/// | msvc, `dispatcher` route | 88.9 | 90.4 | 89.4 |
+/// | msvc, `worker` route | **124.5** | **274.8** | 266.5 |
+///
+/// On gnu this gate is worth **3.7×** on the dispatcher route, which is the
+/// TLS cost above being removed from the sweep. On msvc, where that cost does
+/// not exist, the gate buys nothing on the dispatcher route and costs **2.2×**
+/// on the worker route — because it is not only a cost-saving, it is a POLICY
+/// change: a thief that skips a momentarily-empty victim gives up a steal that
+/// `steal_batch_and_pop`'s own `Retry` loop would have completed, and at 1 µs
+/// bodies the wave is short enough that the lost steals turn into parks.
+///
+/// So the gate rides `STEAL_EMPTY_GATE`, a `cfg!` CONSTANT rather than a
+/// `#[cfg]` block: both arms typecheck on every host, so neither can go dark
+/// the way a cfg-gated path does, and the optimiser folds the branch away.
+///
 /// The gate is a BENIGN RACE, and that is the whole of its correctness
 /// argument: a victim observed empty here and pushed to a moment later is
 /// missed by THIS sweep only. It is not lost — the pusher's own
@@ -297,9 +339,9 @@ pub(crate) fn try_steal_random(
         }
         let stealer = &inner.stealers[idx];
         // The empty-victim gate: no epoch pin, hence no TLS, for a victim that
-        // has nothing (see this function's doc comment for the cost and for
-        // why missing a concurrent push here is benign).
-        if stealer.is_empty() {
+        // has nothing (see this function's doc comment for the measured cost on
+        // each host, and for why missing a concurrent push here is benign).
+        if STEAL_EMPTY_GATE && stealer.is_empty() {
             continue;
         }
         if let Some(t) = drain_one(|| stealer.steal_batch_and_pop(local)) {

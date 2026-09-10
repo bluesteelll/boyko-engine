@@ -1739,8 +1739,9 @@ fn steal_one_random(inner: &PoolInner, rng: &mut XorShift64Star) -> Option<Task>
     let start = (rng.next() as usize) % n;
     for k in 0..n {
         let idx = (start + k) % n;
-        // The empty-victim gate (see this function's doc comment).
-        if inner.stealers[idx].is_empty() {
+        // The empty-victim gate (see this function's doc comment, and
+        // `worker::STEAL_EMPTY_GATE` for why it is host-conditional).
+        if crate::worker::STEAL_EMPTY_GATE && inner.stealers[idx].is_empty() {
             continue;
         }
         if let Some(t) = drain_one(|| inner.stealers[idx].steal()) {

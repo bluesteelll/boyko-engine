@@ -214,10 +214,57 @@ Four arms in one session — `{fix, pre-fix} × {gnu, msvc}` — same source, sa
 LLVM, differing only in the host env. `x86_64-pc-windows-msvc` sets `target_thread_local`, so the
 `REGISTERED` short-circuit compiles and `LazyKey::force` does not exist on the path at all.
 
-**Stated before the run so it can fail:** on msvc the two arms must land on top of each other, both
-near the 1.97.1 gnu figure, while the gnu pair stays ≈ 1.8× apart on the deciding cell. If the fix
-still helps under msvc, this document's mechanism is wrong and §2's disassembly is being
-misattributed.
+**Stated before the run so it could fail:** on msvc the two arms must land on top of each other,
+both near the 1.97.1 gnu figure, while the gnu pair stays ≈ 1.8× apart on the deciding cell.
+
+**RUN 2026-09-10. The mechanism is confirmed decisively, and the prediction was HALF WRONG in a way
+that changed what ships.** All eight passes receipt-clean, `available_parallelism = 16`.
+
+| `worker/body_1us_tasks_64W` | pre-fix | with the fix commit |
+|---|---:|---:|
+| gnu 1.98.1 | **1116 µs** | 615 µs |
+| msvc 1.98.1 | **121.5 µs** | 234.5 µs |
+
+The left column is the whole story of this document: the same source, the same rustc commit
+(48a229cea) and the same LLVM 22.1.8, differing only in the host env, and **9.2× disappears** —
+landing at 121.5 µs, inside §1's 1.97.1 band of 99–133 µs. On the DISPATCHER route the prediction
+held to the digit (msvc 1.04× / 0.98× / 1.01× — the fix buys exactly nothing where the guard does
+not exist).
+
+**On the WORKER route the fix commit made msvc ~2× WORSE, and that was not predicted.** It is also
+not what the title of the commit says it is, because the commit carries TWO changes: the TLS merge
+and FIX B (`Stealer::is_empty()` before `steal_batch_and_pop`). A third arm — `8d13115e` plus FIX B
+alone — separates them, three arms × two hosts × two runs, every region receipt-clean:
+
+| `worker/body_1us_tasks_64W` (µs) | neither | FIX B alone | FIX B + TLS merge |
+|---|---:|---:|---:|
+| gnu, `dispatcher` route | 520.1 | **140.7** | 125.7 |
+| gnu, `worker` route | 1134.3 | 1089.2 | **594.8** |
+| msvc, `dispatcher` route | 88.9 | 90.4 | 89.4 |
+| msvc, `worker` route | **124.5** | **274.8** | 266.5 |
+
+So the two changes do different jobs and the attribution is clean: **FIX B** carries the gnu
+dispatcher win (3.7×, i.e. this document's TLS cost removed from the steal sweep) and is worth
+almost nothing on the gnu worker route; **the TLS merge** carries the gnu worker win (1.83×) and is
+neutral on msvc. The msvc regression is **entirely FIX B** (274.8 alone vs 266.5 with both, against
+124.5 with neither).
+
+**Why FIX B costs anything at all where TLS is free:** it is not only a cost-saving, it is a POLICY
+change. A thief that skips a victim which is empty for an instant gives up a steal that
+`steal_batch_and_pop`'s own `Retry` loop would have completed, and at 1 µs bodies the wave is short
+enough that the lost steals become parks. On gnu the guard's TLS saving is larger than that loss;
+on msvc there is no saving left and only the loss.
+
+**Consequence, shipped 2026-09-10:** the guard rides `worker::STEAL_EMPTY_GATE`, a `cfg!` constant
+(`all(windows, target_env = "gnu")`) rather than a `#[cfg]` block, so both arms typecheck and lint
+on every host and neither can go dark. Confirmed on both hosts after the change, receipt-clean:
+msvc `worker/1us/64W` back to **103.9 µs** (un-gated 124.5, un-conditional 266.5) and gnu keeping
+its win at **528.2 µs** (594.8 before the constant; that cell's own run-to-run spread is wide —
+455–601 — so "kept", not "improved"). msvc's dispatcher row is unmoved at 88.7.
+
+⚠ This is the second time a KE16 number turned out to be a property of the HOST rather than of the
+design (the first was §1 itself). Any absolute in `KE16-RESULTS.md` that was taken on gnu is a gnu
+number, and the msvc line is a THIRD compiler line, not a continuation of either.
 
 ## 6. What this changes for the record
 
