@@ -1665,6 +1665,73 @@ batch push.
 
 ---
 
+## §App-2. RE-TAKEN 2026-09-10 at HEAD `51631371`, on BOTH HOSTS — clause (1) PASSES; clause (2) passes on msvc and FAILS on gnu by 2.5 %, for a reason this file can now name
+
+The 2026-09-09 take below is superseded as the acceptance take (its clause (2) was declared NOT
+EVIDENCE — a straddle over a reference row that moved 17 % between passes). This one is taken on the
+shipped tree after two things changed underneath it: the thread-local fix (`e6115223`) and the
+host-conditional `STEAL_EMPTY_GATE` (`51631371`).
+
+**Receipts.** Same box, W = 16 printed by every bench, bench profile, all six bench binaries
+`--no-run` pre-built OUTSIDE the window; the window opened only after three consecutive 20 s samples
+saw zero `cargo`/`rustc`/`link`/`cl` processes; a load receipt was taken immediately before AND after
+each of the **twelve** timed regions and **all twelve read `PROCS=0` — every region CLEAN**, none
+discarded. Runs interleaved r1(pool, ecs, physics on each host), then r2. No `--features`, no
+`KE16_EXPECT`. ⚠ **The two hosts are two compiler lines, not one series** — same rustc commit
+`48a229cea` and same LLVM 22.1.8, different CRT, allocator and thread-local backend
+(`docs/threadpool/RUSTC-198-WINDOWS-GNU-TLS.md` §5b).
+
+### The acceptance line, §11 of `KE16-DESIGN-APP.md`, applied verbatim
+
+`REF = bench_thread_install_Wminus1` — B1 ships, so the bench thread's external joiner HELPS and the
+W−1 row is the W-LANE row. `band(c) = max(0.04, |r1 − r2| / min(r1, r2))`, the larger of the two rows'
+bands.
+
+| | gnu | msvc |
+|---|---:|---:|
+| `in_scheduled_system` | 10 358.5 µs | 11 238.0 µs |
+| `single_threaded_O5` | 28 559.0 µs | 29 797.5 µs |
+| `bench_thread_install_Wminus1` = **REF** | 9 694.5 µs | 12 234.5 µs |
+| `bench_thread_install` (W+1 lanes, information only) | 9 335.6 µs | 11 620.0 µs |
+| `empty_schedule_control` | 1.3 µs | 1.2 µs |
+| **(1)** `in_scheduled_system < single_threaded_O5` | **PASS, 2.76×** | **PASS, 2.65×** |
+| **(2)** `in_sched − control ≤ REF × (1+band)` | **FAIL by 2.5 %** (10 357.5 vs 10 106.1; band 4.25 %) | **PASS** (11 237.0 vs 13 442.3; band 9.87 %) |
+| (2) raw ratio against REF | **1.068** | **0.918** |
+| raw ratio against the W+1 row | 1.109 | 0.967 |
+| `Wminus1 / bench_thread_install` — the joiner receipt | 1.038 | 1.053 |
+
+**Clause (1) is the campaign's headline and it passes on both hosts by a wide margin:** parallel
+physics on the route that SHIPS is 2.7× faster than turning it off. The 2026-09-09 take read 2.22×.
+
+**Clause (2)'s split is not noise, and the mechanism is measured elsewhere in this corpus.** The
+scheduled route spawns from INSIDE a worker; the bench-thread reference spawns from an external
+thread. Those are the `worker` and `dispatcher` routes of `ke16_nested_scope`, and today they read
+**gnu 528.2 µs vs 122.7 µs** and **msvc 103.9 µs vs 88.7 µs** at `body_1us_tasks_64W`. On gnu the
+scheduled route still pays one `thread_local!` read per spawn — the residual that `e6115223` could
+not remove, because one read is what the API costs — so it is structurally behind a W-lane external
+reference; on msvc that cost does not exist and the scheduled route comes out 8 % AHEAD of it.
+
+So clause (2) is **a property of the host**, not of the design, and the honest statement is that it
+fails on the host we are leaving and passes on the host we are moving to. ⚠ msvc's band is wide
+(9.87 %, from a `bench_thread_install_Wminus1` pair of 12 810 / 11 659), so the msvc pass has slack —
+but its raw ratio is **0.918**, below 1 before any band is applied, which is the strong form of the
+clause and does not depend on the allowance.
+
+### The ECS consumer — the defect the whole campaign exists for is gone
+
+| `ke16_par_iter_in_system` | gnu | msvc |
+|---|---:|---:|
+| `seq/65536` | 1 311 400 µs | 1 311 150 µs |
+| `par_from_dispatcher/65536` | 89 553 µs | 96 261 µs |
+| **`par_in_system/65536`** | **89 886 µs** | **98 249.5 µs** |
+| `par_in_system / par_from_dispatcher` | **1.004** | 1.021 |
+| speed-up over `seq` | **14.6×** | 13.3× |
+
+`par_iter` inside a scheduled system is now the SAME as from the dispatcher — 1.004 on gnu — where
+the finding that opened this campaign recorded it at **1.01× of `seq`**, i.e. no speed-up at all
+because a `scope` opened from a worker ran serially. At 4096 both routes sit at ~20.6 ms on both
+hosts and `seq` at ~82 ms, a 4.0× that is the same on either route.
+
 ## §App. TAKEN 2026-09-09 at HEAD `90a995e8` (UNCONDITIONAL shipped code) — the numbers are on record; the acceptance line is NOT EVIDENCE
 
 §1 of the design requires a Step-App retake: *"the final configuration with every feature removed
