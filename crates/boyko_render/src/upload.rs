@@ -32,6 +32,7 @@ use boyko_sdf_math::SdfEdit;
 
 use crate::aa_config::{RESOLVED_TAA_BYTES, ResolvedTaa};
 use crate::csm_config::{RESOLVED_CSM_BYTES, ResolvedCsm};
+use crate::ddgi_config::{RESOLVED_DDGI_BYTES, ResolvedDdgi};
 use crate::ray_shadow_config::{RESOLVED_RAY_SHADOW_BYTES, ResolvedRayShadow};
 use crate::shadow_atlas::{RESOLVED_SHADOW_ATLAS_BYTES, ResolvedShadowAtlas};
 use crate::shadow_denoise_config::{
@@ -1249,6 +1250,71 @@ pub unsafe fn upload_atlas_ring(
     }
 }
 
+/// Memcpys `resolved` ([`ResolvedDdgi::as_bytes`], 48 B) into the resolve's binding-18 DDGI
+/// grid UBO `ubo` — the SDFDDGI host-hook upload (the GI analogue of [`upload_atlas_ring`],
+/// minus the ring). The bytes are the twelve LE words the resolve shader's `ResolvedDdgi`
+/// cbuffer reads (`gDdgiOrigin`@0, `gDdgiInvSpacDims`@16, `gDdgiMode`@32, `_gDdgiPad`@36).
+///
+/// # Why a SINGLE buffer, and why the caller value-gates the write
+///
+/// `ubo` is NOT a `FRAMES_IN_FLIGHT` ring: the resolve descriptor sets are built ONCE at
+/// G-buffer creation and capture the buffer handle the boot frame passed, so a host-side
+/// `[slot]` ring would not be observed by the GPU (the descriptor contract, not the "static
+/// config" the grid's D1 world-fixedness suggests). The write token proves THIS slot's fence
+/// only; the sibling in-flight frame may be executing its resolve while the host writes.
+/// The caller therefore writes MONOTONICALLY and value-gated (`boyko_app::runner`):
+///
+/// * only when `resolved.ddgi_mode_word != 0` AND the carrier differs from the last one
+///   written — a steady state performs ZERO host writes, so no concurrent access exists;
+/// * the first write lands on the frame whose `Main` set the header bit; the sibling frame's
+///   light staging (a per-slot ring) still carries bit 0, so it never reads b18 (the read is
+///   inside the shader's `if (ddgi_mode != 0u)`);
+/// * the DISABLED (zero) image is NEVER written after boot — a runtime grid edit may tear the
+///   sibling's 48-byte read for one frame, but both halves of any torn read are then finite
+///   grids (`inv_spacing > 0`, dims ≥ 1), so the worst case is one frame of spatially-wrong
+///   but FINITE GI, never a NaN; a DISABLE leaves the last grid bound-but-unread once the
+///   header bit drops.
+///
+/// # Panics
+///
+/// Panics if `ubo.size` is smaller than [`RESOLVED_DDGI_BYTES`]: the memcpy would be
+/// out-of-bounds (UB), so the guard is a hard assert in every build.
+///
+/// # Safety
+///
+/// * `ubo` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ubo.size` valid, persistently-mapped bytes.
+/// * `token` proves the CALLER's in-flight slot fence was waited this frame; the caller
+///   additionally honours the monotone value-gated discipline above, which is what bounds a
+///   concurrent sibling read of this single buffer to finite bytes.
+pub unsafe fn upload_ddgi_grid(token: &FrameWriteToken, ubo: &BoundBuffer, resolved: &ResolvedDdgi) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    // Hard bound BEFORE the memcpy (review P1 discipline): an undersized buffer would make the
+    // 48-byte write out-of-bounds. One compare per (rare) write.
+    assert!(
+        ubo.size as usize >= RESOLVED_DDGI_BYTES,
+        "DDGI grid UBO too small: {} bytes < the {}-byte ResolvedDdgi mirror",
+        ubo.size,
+        RESOLVED_DDGI_BYTES
+    );
+
+    let mapped = ubo.mapped.expect("invariant: the DDGI grid UBO is host-visible mapped");
+    let bytes = resolved.as_bytes();
+    // SAFETY: `bytes` is a live 48-byte stack array (the carrier's `#[repr(C)]` byte image, every
+    // byte initialized). `mapped` targets >= `ubo.size >= RESOLVED_DDGI_BYTES` valid mapped
+    // host-coherent bytes (hard-asserted above) — the write is in-bounds. The single buffer is
+    // NOT ringed: the borrowed `FrameWriteToken` proves this slot's fence, and the caller's
+    // monotone value-gated discipline (doc above — never the zero image after boot, no write
+    // on a static carrier) is what makes a sibling in-flight read observe only finite grids.
+    // The two regions are distinct allocations (no overlap).
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), RESOLVED_DDGI_BYTES);
+    }
+}
+
 /// Encodes `edits` into the marcher's binding-0 edit-list SSBO (`slot`) — the R7 SDF
 /// instance path's ONE-SHOT boot-static write (host plan R7). Word 0 becomes
 /// `edit_count`, then the packed edit array (see
@@ -1464,6 +1530,52 @@ mod tests {
             size: storage.len() as u64,
             mapped: NonNull::new(storage.as_mut_ptr()),
             block: 0,
+        }
+    }
+
+    /// SDFDDGI host-hook gate (b): `upload_ddgi_grid` writes EXACTLY `ResolvedDdgi::as_bytes()`
+    /// into the b18 buffer — the twelve LE words the resolve's `ResolvedDdgi` cbuffer reads —
+    /// and nothing past them (a 48-byte slot is fully overwritten, no sentinel survives).
+    #[test]
+    fn ddgi_grid_upload_writes_exactly_as_bytes() {
+        use crate::ddgi_config::{DdgiConfig, RESOLVED_DDGI_BYTES, resolve_ddgi};
+
+        let mut storage = [0xA5u8; RESOLVED_DDGI_BYTES];
+        let slot = fake_slot(&mut storage);
+        let resolved = resolve_ddgi(&DdgiConfig {
+            ddgi_indirect: true,
+            origin: [-6.0, -0.5, -6.0],
+            spacing: 0.75,
+            dims: [16, 8, 16],
+        });
+        // SAFETY: no GPU device exists in this process — the `forge_unfenced` setup contract
+        // holds trivially (the `ray_shadow_ring_packs_resolved_and_frame_seed` precedent).
+        let token = unsafe { FrameWriteToken::forge_unfenced(0) };
+        // SAFETY: `slot.mapped` targets `storage`'s live 48-byte backing (this stack frame
+        // outlives the call); `slot.size == 48 >= RESOLVED_DDGI_BYTES` satisfies the hard bound.
+        unsafe {
+            upload_ddgi_grid(&token, &slot, &resolved);
+        }
+        assert_eq!(storage, resolved.as_bytes(), "the b18 write is the carrier's byte image");
+        assert_eq!(resolved.ddgi_mode_word, 1);
+    }
+
+    /// SDFDDGI host-hook gate (b): an undersized b18 slot is a hard panic in every build (the
+    /// memcpy would be out-of-bounds) — the `upload_atlas_ring` discipline.
+    #[test]
+    #[should_panic(expected = "DDGI grid UBO too small")]
+    fn ddgi_grid_upload_rejects_an_undersized_slot() {
+        use crate::ddgi_config::{DdgiConfig, RESOLVED_DDGI_BYTES, resolve_ddgi};
+
+        let mut storage = [0u8; RESOLVED_DDGI_BYTES - 1];
+        let slot = fake_slot(&mut storage);
+        let resolved = resolve_ddgi(&DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() });
+        // SAFETY: as above — no device, the setup contract holds trivially.
+        let token = unsafe { FrameWriteToken::forge_unfenced(0) };
+        // SAFETY: the fn asserts the bound BEFORE any write, so the undersized slot is never
+        // written; `slot.mapped` is still a live pointer into `storage`.
+        unsafe {
+            upload_ddgi_grid(&token, &slot, &resolved);
         }
     }
 

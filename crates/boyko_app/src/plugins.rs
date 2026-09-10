@@ -8,6 +8,7 @@
 use boyko_ecs::ecs::core::app::CoreSchedule;
 use boyko_ecs::ecs::core::log::LogPlugin;
 use boyko_ecs::ecs::core::profiling::{ArmOutcome, Profiler, ProfilerConfig, ProfilerPlugin};
+use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 use boyko_ecs::{App, Plugin};
 use boyko_render::instance_model::sync_instance_model_cols;
 // HW-RT rung 3b: the prev-frame model-affine copy system (temporal motion vectors), ordered
@@ -22,11 +23,12 @@ use boyko_render::MotionCamState;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     AssetRefcountPlugin, ClusterConfig, CsmCasterScratch, CsmFitSet, CsmPlugin, CsmResolveSet,
-    LightCollectSet, LightingConfig, LightingPlugin, MeshRenderScratch, RayPlugin, Render3dPlugin,
+    DdgiPlugin, DdgiResolveSet, LightCollectSet, LightingConfig, LightingPlugin,
+    MeshRenderScratch, RayPlugin, Render3dPlugin,
     RenderPathPlugin, SdfPlugin, ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin,
     add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters, reduce_caster_bounds,
-    snap_apply, sync_cluster_light_gate, sync_csm_light_gate, sync_punctual_light_gate,
-    sync_ssao_light_gate, sync_sv0_light_gate,
+    snap_apply, sync_cluster_light_gate, sync_csm_light_gate, sync_ddgi_light_gate,
+    sync_punctual_light_gate, sync_ssao_light_gate, sync_sv0_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -445,6 +447,25 @@ impl Plugin for EnginePlugins {
         // self-correcting, and the default DISABLED config gates the whole path off).
         app.add_plugin(ShadowAtlasPlugin);
 
+        // SDFDDGI host-hook (Decision 4): `DdgiPlugin` — the GI config substrate — composed
+        // UNCONDITIONALLY, here after `ShadowAtlasPlugin` (its `Resolved*` sibling) and before
+        // `RayPlugin` (whose `RayCaps` boot override sits next to the `DdgiCaps` one in the
+        // runner). It seeds the owner-set `DdgiConfig` (default DISABLED — the 0%-gate;
+        // overwrite it AFTER `add_plugins` to enable GI), the derived `ResolvedDdgi` carrier
+        // (the SINGLE truth for the header bit, the b18 grid bytes and the update-pass arming),
+        // `DdgiUpdateConfig`, `DdgiCaps` (the runner overrides it at boot with the real
+        // `ddgi_storage_ok()` query) and an inert `RenderPathFrozenConsumers` (a harmless
+        // double-insert with `SsaoPlugin`'s — the runner overwrites both at boot), and
+        // registers `resolve_ddgi_grid_gated` in `DdgiResolveSet`. Safe to compose
+        // unconditionally for the same reason `SsaoPlugin`/`AaPlugin` are: the default carrier
+        // is the all-zero DISABLED image (== the b18 buffer's boot seed), the gate keeps the
+        // header bit 0, `ddgi_update` stays `None` — the command stream is byte-identical.
+        //
+        // Before this line NO host composed the plugin: for the whole I0..I7 ladder the
+        // production world carried no carrier, the runner's `DdgiCaps` override landed in a
+        // world with no reader, and `resolve_ddgi_grid_gated` never ran.
+        app.add_plugin(DdgiPlugin);
+
         // HW-RT rung R1 — the dormant unified ray / acceleration-structure seam.
         // RayPlugin seeds the derived `RayBackendConfig` carrier (default DISABLED —
         // every cell Software) + its `RayCaps` device-tier input (default `Absent`)
@@ -572,99 +593,13 @@ impl Plugin for EnginePlugins {
         // the temporal denoiser is on (0%-gate). `not(hwrt)` never inserts it.
         #[cfg(feature = "hwrt")]
         app.insert_resource(MotionCamState::default());
-        app.add_systems_cfg(|b| {
-            let pack = b.add_system(sync_instance_model_cols).key();
-            // HW-RT rung 3b: `prev := curr` MUST run BEFORE the affine pack refreshes `curr`
-            // from this frame's moving `GlobalTransform`, so a mesh's motion vector is this
-            // frame's true per-object displacement (else `prev == curr`, zero motion, every
-            // box ghosts under its own motion). Dormant until a scene carries the
-            // `PrevInstanceModelCol` column (0%-gate).
-            #[cfg(feature = "hwrt")]
-            b.add_system(sync_prev_instance_model_cols).before(pack);
-            let casters = b.add_system(gather_shadow_casters).after(pack).key();
-            b.add_system(sync_csm_light_gate).after(casters);
-            // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5: `reduce_caster_bounds`
-            // is the UNWIRED EXPORTED API `CsmPlugin` deliberately does not register (mirrors
-            // `gather_shadow_casters` itself) — this is the app that co-registers it. `.after
-            // (casters)` folds THIS frame's finished gather output, not last frame's scratch
-            // (D7 — `CsmCasterScratch` is single-writer, `gather_shadow_casters` owns it).
-            // `.in_set(CsmFitSet)` gives `resolve_csm_cascades` (which joins `CsmResolveSet` in
-            // `CsmPlugin`, csm_plugin.rs:76) something to order against below. Without this
-            // registration `CsmCasterBounds` stays the `EMPTY` seed `CsmPlugin` inserts, so
-            // every `CsmFitMode` renders as `Fixed` (D7/T15) — never a panic, always a no-op.
-            b.add_system(reduce_caster_bounds).after(casters).in_set(CsmFitSet);
-            // `CsmFitSet → CsmResolveSet`: `resolve_csm_cascades` must observe THIS frame's
-            // folded bounds, not a one-frame-stale value (D11 — no accepted stagger, unlike
-            // the cold-owner-state cross-plugin staggers documented elsewhere in this file).
-            // Declared HERE (not inside `CsmPlugin`) because this closure is the first one that
-            // gives `CsmFitSet` a member; a `configure_set` inside `CsmPlugin` alone would warn
-            // W1501 (memberless set) in a bare-`CsmPlugin` world (D11). `App::add_systems_cfg`
-            // threads the SAME Main builder through every closure/plugin (app.rs:313-319), so
-            // this edge resolves against `CsmFitSet`'s membership above and `CsmResolveSet`'s
-            // membership in `CsmPlugin` regardless of registration order.
-            b.configure_set(CsmResolveSet).after(CsmFitSet);
-            // The punctual header-gate ⇄ depth-pass lock-step (mirrors the csm sync): after the
-            // SAME caster gather so the gate's caster predicate is THIS frame's. It reads
-            // `ResolvedShadowAtlas.mode_word` (written by `resolve_shadow_atlas` in
-            // ShadowAtlasPlugin, ordered earlier by add-order) — the resolve→sync edge follows the
-            // same cross-plugin add-order discipline as csm (self-correcting under a one-frame lag,
-            // gated off by the default DISABLED ShadowConfig).
-            b.add_system(sync_punctual_light_gate).after(casters);
-            // Render P7-Q2: the SSAO header-gate bridge — mirrors `sync_csm_light_gate`/
-            // `sync_punctual_light_gate`'s cross-plugin registration (it bridges
-            // `SsaoPlugin`'s `SsaoConfig` and `LightingPlugin`'s `LightingConfig`), but
-            // reads `SsaoConfig` directly (no `ResolvedSsao`/caster dependency — mirrors
-            // `sync_ddgi_light_gate`'s shape), so it carries no ordering edge here.
-            b.add_system(sync_ssao_light_gate);
-            // VB-SV0 rung S4: the SDF-on-mesh header-gate bridge — reads the boot-committed
-            // `ResolvedRenderPath`, RESOLVES `LightingConfig`'s two SV0 request bits against
-            // `vb_sdf_mesh_armable()`, and publishes the pair into the `_armed` fields the header
-            // packer reads. Same cross-plugin registration rationale as the gates above (it
-            // bridges `RenderPathPlugin`'s resolved carrier and `LightingPlugin`'s
-            // `LightingConfig`). The resolve is monotone downward — `request && capability` — so
-            // a world that never sets the request is untouched.
-            //
-            // It DOES carry an ordering edge (code-review P2-b), for the reason
-            // `sync_cluster_light_gate` below carries one and `sync_ssao_light_gate` above does
-            // not. Those two publish a bit that FOLLOWS an owner-set config, so an unordered fold
-            // packs a value one frame late and self-corrects. This gate publishes the result of a
-            // CAPABILITY resolve against a request the owner may set at any time: run after the
-            // fold, the first armed frame packs the PRE-resolve `_armed` pair — the wrong state,
-            // not a late one. `[vb_both_sdf]`-shaped fixtures dump a small fixed number of
-            // frames, so "one frame" is a frame that can be the measured one. `LightCollectSet`
-            // is the same by-name cross-plugin seam `sync_cluster_light_gate` uses (see its own
-            // comment below for why `collect_lights`' `SystemKey` is not nameable here).
-            b.add_system(sync_sv0_light_gate).before_set(LightCollectSet);
-            // VB-P1b-0: the L1 cluster header-gate bridge — reads `ClusterConfig` directly (no
-            // caster/resolved-carrier dependency, the SAME "no edge" shape `sync_ssao_light_gate`
-            // above carries for ITS OWN inputs). `ClusterConfig` is seeded by THIS fn (mirrors
-            // `LightingConfig` itself), so this bridge belongs alongside the other
-            // `sync_*_light_gate`s in this SAME closure rather than inside `LightingPlugin`/any
-            // render-path plugin.
-            //
-            // UNLIKE the sibling gates, this one DOES carry an explicit `.before_set` edge
-            // (code-review C1): `sync_csm_light_gate`/`sync_ssao_light_gate` feed the fold with
-            // only a SCALAR HEADER BIT, so a one-frame-stale read is merely a wrong bit (benign,
-            // self-correcting). This gate feeds a GPU BUFFER INDEX (`cluster_packed_dims`): on the
-            // very first frame `clusters_enabled` goes `true`, an unordered fold could pack
-            // `clusters_enabled=1` with STALE/ZERO dims (this gate hasn't run yet that frame), and
-            // the froxel resolve's `cluster_z_slice`/`cluster_linear_index` would then underflow to
-            // an out-of-bounds `ClusterGrid` index. That WAS real GPU UB with
-            // `robust_buffer_access` disabled (`device.rs`); as of VB-P1k all four `ClusterGrid`
-            // readers reject a zero-dims (or over-capacity) header and fall back to the in-bounds
-            // flat light scan, so the residue is a one-frame LIGHTING artefact rather than a
-            // device fault — this edge is now a correctness edge, not the only line against UB,
-            // and it stays for that reason. `.before_set(LightCollectSet)` is the SAME cross-plugin
-            // by-name seam `resolve_shadow_atlas`/`PunctualResolveSet` uses (`collect_lights`'s
-            // `SystemKey` is a closure-local in `LightingPlugin::build`, invisible here) — see
-            // `LightCollectSet`'s own doc.
-            b.add_system(sync_cluster_light_gate).before_set(LightCollectSet);
-            // The unified gather runs after BOTH the affine pack and the snap
-            // collapse (snap-before-gather is load-bearing — the gather reads the
-            // collapsed pair).
-            let snap = b.add_system(snap_apply).key();
-            b.add_system(gather_mesh_draws).after(pack).after(snap);
-        });
+        // SDFDDGI host-hook: the Main frame systems are registered by a NAMED fn (a verbatim
+        // code motion of the former closure) so a headless test can run the PRODUCTION
+        // registration in a subset-composed world -- `app.update()` on a bare `EnginePlugins`
+        // panics (the runner, not `build`, inserts the world residents), and the ECS exposes no
+        // system-name introspection, so this is the only device-free way to prove a gate is
+        // registered (`sync_ddgi_light_gate` was not, for the whole I0..I7 ladder).
+        app.add_systems_cfg(register_main_frame_systems);
 
         // The D4 ordering seam: engine Fixed snapshots run AFTER user Fixed
         // gameplay, pinned BY NAME (no topological accident). R5 makes the seam
@@ -708,6 +643,129 @@ impl Plugin for EnginePlugins {
     fn name(&self) -> &'static str {
         "boyko_app::EnginePlugins"
     }
+}
+
+/// The `Main`-schedule frame systems `EnginePlugins` registers -- the affine pack, the caster
+/// gather, every `sync_*_light_gate` header bridge, the snap collapse and the unified draw
+/// gather -- as ONE builder fn (the body of the former `add_systems_cfg` closure, moved verbatim).
+///
+/// `pub(crate)` so the lib's own tests can run the PRODUCTION registration in a world composed
+/// of the same render plugins minus the window/runner (the `tests/camera_resolve.rs` subset
+/// precedent). That is what lets the SDFDDGI host-hook gate assert `sync_ddgi_light_gate` is
+/// registered HERE with its two ordering edges, rather than trusting a doc comment that says so.
+pub(crate) fn register_main_frame_systems(b: &mut ScheduleBuilder) {
+    let pack = b.add_system(sync_instance_model_cols).key();
+    // HW-RT rung 3b: `prev := curr` MUST run BEFORE the affine pack refreshes `curr`
+    // from this frame's moving `GlobalTransform`, so a mesh's motion vector is this
+    // frame's true per-object displacement (else `prev == curr`, zero motion, every
+    // box ghosts under its own motion). Dormant until a scene carries the
+    // `PrevInstanceModelCol` column (0%-gate).
+    #[cfg(feature = "hwrt")]
+    b.add_system(sync_prev_instance_model_cols).before(pack);
+    let casters = b.add_system(gather_shadow_casters).after(pack).key();
+    b.add_system(sync_csm_light_gate).after(casters);
+    // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5: `reduce_caster_bounds`
+    // is the UNWIRED EXPORTED API `CsmPlugin` deliberately does not register (mirrors
+    // `gather_shadow_casters` itself) — this is the app that co-registers it. `.after
+    // (casters)` folds THIS frame's finished gather output, not last frame's scratch
+    // (D7 — `CsmCasterScratch` is single-writer, `gather_shadow_casters` owns it).
+    // `.in_set(CsmFitSet)` gives `resolve_csm_cascades` (which joins `CsmResolveSet` in
+    // `CsmPlugin`, csm_plugin.rs:76) something to order against below. Without this
+    // registration `CsmCasterBounds` stays the `EMPTY` seed `CsmPlugin` inserts, so
+    // every `CsmFitMode` renders as `Fixed` (D7/T15) — never a panic, always a no-op.
+    b.add_system(reduce_caster_bounds).after(casters).in_set(CsmFitSet);
+    // `CsmFitSet → CsmResolveSet`: `resolve_csm_cascades` must observe THIS frame's
+    // folded bounds, not a one-frame-stale value (D11 — no accepted stagger, unlike
+    // the cold-owner-state cross-plugin staggers documented elsewhere in this file).
+    // Declared HERE (not inside `CsmPlugin`) because this closure is the first one that
+    // gives `CsmFitSet` a member; a `configure_set` inside `CsmPlugin` alone would warn
+    // W1501 (memberless set) in a bare-`CsmPlugin` world (D11). `App::add_systems_cfg`
+    // threads the SAME Main builder through every closure/plugin (app.rs:313-319), so
+    // this edge resolves against `CsmFitSet`'s membership above and `CsmResolveSet`'s
+    // membership in `CsmPlugin` regardless of registration order.
+    b.configure_set(CsmResolveSet).after(CsmFitSet);
+    // The punctual header-gate ⇄ depth-pass lock-step (mirrors the csm sync): after the
+    // SAME caster gather so the gate's caster predicate is THIS frame's. It reads
+    // `ResolvedShadowAtlas.mode_word` (written by `resolve_shadow_atlas` in
+    // ShadowAtlasPlugin, ordered earlier by add-order) — the resolve→sync edge follows the
+    // same cross-plugin add-order discipline as csm (self-correcting under a one-frame lag,
+    // gated off by the default DISABLED ShadowConfig).
+    b.add_system(sync_punctual_light_gate).after(casters);
+    // Render P7-Q2: the SSAO header-gate bridge — mirrors `sync_csm_light_gate`/
+    // `sync_punctual_light_gate`'s cross-plugin registration (it bridges
+    // `SsaoPlugin`'s `SsaoConfig` and `LightingPlugin`'s `LightingConfig`), but
+    // reads `SsaoConfig` directly (no `ResolvedSsao`/caster dependency), so it
+    // carries no ordering edge here — UNLIKE `sync_ddgi_light_gate` below, which reads
+    // a resolved carrier and needs both edges.
+    b.add_system(sync_ssao_light_gate);
+    // SDFDDGI host-hook (the defect this line repairs): the GI header-gate bridge — the SOLE
+    // production writer of `LightingConfig::ddgi_indirect` (LightBuf word-7 bit 4). It was
+    // registered by NO host for the whole I0..I7 ladder, so the bit was never set, the resolve
+    // never entered `if (ddgi_mode != 0u)`, and the probe atlas the update pass wrote every
+    // enabled frame was never sampled — the feature drew zero pixels.
+    //
+    // BOTH edges are load-bearing, and neither is decoration:
+    //
+    // * `.after_set(DdgiResolveSet)` — the gate reads the `ResolvedDdgi` CARRIER (config + the
+    //   R9c boot freeze + the device caps, folded once by `resolve_ddgi_grid_gated`), not any
+    //   config of its own. Run before the resolve it would read LAST frame's carrier and the
+    //   bit would land a frame late on every flip.
+    // * `.before_set(LightCollectSet)` — `collect_lights` consumes `LightTableDirty` and packs
+    //   word 7 in the SAME pass, so without this edge the flipped bit reaches the GPU header a
+    //   frame late. That matters here more than for `sync_ssao_light_gate` (which carries no
+    //   edge): a late bit of 1 over a carrier that has already gone DISABLED is a frame whose
+    //   header says "sample the grid" — the exact shape the single-carrier design exists to
+    //   make impossible. Same by-name cross-plugin seam `sync_cluster_light_gate`/
+    //   `sync_sv0_light_gate` use (`collect_lights`' `SystemKey` is not nameable here).
+    b.add_system(sync_ddgi_light_gate).after_set(DdgiResolveSet).before_set(LightCollectSet);
+    // VB-SV0 rung S4: the SDF-on-mesh header-gate bridge — reads the boot-committed
+    // `ResolvedRenderPath`, RESOLVES `LightingConfig`'s two SV0 request bits against
+    // `vb_sdf_mesh_armable()`, and publishes the pair into the `_armed` fields the header
+    // packer reads. Same cross-plugin registration rationale as the gates above (it
+    // bridges `RenderPathPlugin`'s resolved carrier and `LightingPlugin`'s
+    // `LightingConfig`). The resolve is monotone downward — `request && capability` — so
+    // a world that never sets the request is untouched.
+    //
+    // It DOES carry an ordering edge (code-review P2-b), for the reason
+    // `sync_cluster_light_gate` below carries one and `sync_ssao_light_gate` above does
+    // not. Those two publish a bit that FOLLOWS an owner-set config, so an unordered fold
+    // packs a value one frame late and self-corrects. This gate publishes the result of a
+    // CAPABILITY resolve against a request the owner may set at any time: run after the
+    // fold, the first armed frame packs the PRE-resolve `_armed` pair — the wrong state,
+    // not a late one. `[vb_both_sdf]`-shaped fixtures dump a small fixed number of
+    // frames, so "one frame" is a frame that can be the measured one. `LightCollectSet`
+    // is the same by-name cross-plugin seam `sync_cluster_light_gate` uses (see its own
+    // comment below for why `collect_lights`' `SystemKey` is not nameable here).
+    b.add_system(sync_sv0_light_gate).before_set(LightCollectSet);
+    // VB-P1b-0: the L1 cluster header-gate bridge — reads `ClusterConfig` directly (no
+    // caster/resolved-carrier dependency, the SAME "no edge" shape `sync_ssao_light_gate`
+    // above carries for ITS OWN inputs). `ClusterConfig` is seeded by THIS fn (mirrors
+    // `LightingConfig` itself), so this bridge belongs alongside the other
+    // `sync_*_light_gate`s in this SAME closure rather than inside `LightingPlugin`/any
+    // render-path plugin.
+    //
+    // UNLIKE the sibling gates, this one DOES carry an explicit `.before_set` edge
+    // (code-review C1): `sync_csm_light_gate`/`sync_ssao_light_gate` feed the fold with
+    // only a SCALAR HEADER BIT, so a one-frame-stale read is merely a wrong bit (benign,
+    // self-correcting). This gate feeds a GPU BUFFER INDEX (`cluster_packed_dims`): on the
+    // very first frame `clusters_enabled` goes `true`, an unordered fold could pack
+    // `clusters_enabled=1` with STALE/ZERO dims (this gate hasn't run yet that frame), and
+    // the froxel resolve's `cluster_z_slice`/`cluster_linear_index` would then underflow to
+    // an out-of-bounds `ClusterGrid` index. That WAS real GPU UB with
+    // `robust_buffer_access` disabled (`device.rs`); as of VB-P1k all four `ClusterGrid`
+    // readers reject a zero-dims (or over-capacity) header and fall back to the in-bounds
+    // flat light scan, so the residue is a one-frame LIGHTING artefact rather than a
+    // device fault — this edge is now a correctness edge, not the only line against UB,
+    // and it stays for that reason. `.before_set(LightCollectSet)` is the SAME cross-plugin
+    // by-name seam `resolve_shadow_atlas`/`PunctualResolveSet` uses (`collect_lights`'s
+    // `SystemKey` is a closure-local in `LightingPlugin::build`, invisible here) — see
+    // `LightCollectSet`'s own doc.
+    b.add_system(sync_cluster_light_gate).before_set(LightCollectSet);
+    // The unified gather runs after BOTH the affine pack and the snap
+    // collapse (snap-before-gather is load-bearing — the gather reads the
+    // collapsed pair).
+    let snap = b.add_system(snap_apply).key();
+    b.add_system(gather_mesh_draws).after(pack).after(snap);
 }
 
 /// Parses the `BOYKO_RENDER_PATH` / `BOYKO_GEOMETRY_LEGS` dev/test launch env vars into a
@@ -777,4 +835,161 @@ fn render_path_config_from_env() -> Option<boyko_render::RenderPathConfig> {
         legs_name.as_str()
     );
     Some(boyko_render::RenderPathConfig { path, legs })
+}
+
+#[cfg(test)]
+mod tests {
+    //! SDFDDGI host-hook gate (a2): is `sync_ddgi_light_gate` registered in the PRODUCTION `Main`
+    //! registration, with the edges that make the header bit land in the SAME frame?
+    //!
+    //! # Why the production registration is run in a subset world
+    //!
+    //! `app.update()` on a bare `EnginePlugins` panics: the runner, not `build`, inserts the world
+    //! residents (`tests/log_host_shipping_min.rs`). The ECS exposes no system-name introspection
+    //! either (`SystemBox.name` is `pub(crate)`). So the only device-free way to prove "the gate
+    //! is in the production closure" is to run THAT closure — [`register_main_frame_systems`],
+    //! the verbatim code motion — in a world composed of the same render plugins minus the
+    //! window/runner (the `tests/camera_resolve.rs` subset precedent). Residents the frame
+    //! systems need and the runner normally inserts: `LightTableStaging`, `LightingConfig`,
+    //! `ClusterConfig` (seeded by `EnginePlugins::build` itself), `MeshRenderScratch`,
+    //! `CsmCasterScratch`, the NonSend `Assets<MeshGpu>` (`gather_shadow_casters`,
+    //! `gather_mesh_draws`) and `Assets<Material>` (`gather_mesh_draws`).
+    //!
+    //! # What each assertion catches (the mutations)
+    //!
+    //! * Remove the `sync_ddgi_light_gate` registration line: `LightingConfig::ddgi_indirect`
+    //!   never becomes `true` in phase 2 — the bit is never set at all. This is the mutation
+    //!   the test exists for (the D2 defect: the gate was registered by no host).
+    //! * Drop the R9c freeze fold from `resolve_ddgi_grid_gated`: phase 1 goes red (the carrier
+    //!   resolves ENABLED under a frozen-OFF non-Deferred boot).
+    //! * The staging-header assertion (word 7 bit 4 of `LightTableStaging` after ONE update)
+    //!   catches a bit that reaches `LightingConfig` but not the GPU header in the same frame —
+    //!   a whole-frame miss, NOT the `.before_set(LightCollectSet)` edge specifically.
+    //!
+    //! # What this test does NOT gate — the two ordering edges (MEASURED, and it was overclaimed)
+    //!
+    //! An earlier revision of this doc claimed that removing `.before_set(LightCollectSet)` makes
+    //! the staging assertion "fail whenever `collect_lights` happened to run first, i.e.
+    //! nondeterministically", and that removing `.after_set(DdgiResolveSet)` makes the same-frame
+    //! assertions fail the same way. Both claims are FALSE, and the appeal to nondeterminism is
+    //! false twice over:
+    //!
+    //! * The kernel scheduler is DETERMINISTIC. `kahn_topological_sort`
+    //!   (`boyko_ecs::…::schedule_builder`) pops a FIFO ready queue, so unordered systems run in
+    //!   `add_system` insertion order — "stable for fixed input", its own doc. There is no dice
+    //!   roll for a flaky assertion to catch.
+    //! * Measured on this tree: with `.before_set(LightCollectSet)` removed the test passes 3/3,
+    //!   and with `.after_set(DdgiResolveSet)` removed (the other edge kept) it passes 3/3. Each
+    //!   required order is ALREADY implied by insertion order plus the surrounding plugins' own
+    //!   edges, so the explicit edge changes no run order in THIS composition and no assertion
+    //!   here can observe its absence.
+    //!
+    //! Both edges stay, and are not decoration — they are the contract that survives a future
+    //! reordering (a plugin added earlier, an edge dropped from a neighbour), which is exactly
+    //! what "already implied by the surrounding graph" is vulnerable to; the
+    //! `sync_cluster_light_gate` / `sync_sv0_light_gate` precedent carries the same edge for the
+    //! same reason. But a reader must not count them as GATED: proving an ordering edge needs a
+    //! run-order probe the ECS does not expose today (`SystemBox.name` is `pub(crate)`, and a
+    //! probe system registered from the test inherits the same tie-break, so it observes the
+    //! implied order rather than the edge).
+    //!
+    //! # ONE test, three phases — not three tests
+    //!
+    //! `LightingPlugin` installs `DirectionalLight`'s component hooks in a PROCESS-GLOBAL
+    //! registry, so a second `App` that composes it panics in `register_component_hooks`
+    //! (measured: two `#[test]`s here, the second one always red, and WHICH one is second is
+    //! thread-scheduling nondeterministic). The three phases therefore share one `App` and one
+    //! composition — which also makes them a stronger statement: the same world walks
+    //! frozen-clamped ⇒ enabled ⇒ disabled and the header follows in-frame each time.
+
+    use boyko_ecs::ecs::core::asset::Assets;
+    use boyko_render::light::DDGI_MODE_BIT;
+    use boyko_render::{
+        DdgiConfig, Material, MeshGpu, RenderPathFrozenConsumers, ResolvedDdgi, SsaoConfig,
+    };
+
+    use super::*;
+
+    /// Light-header word 7 (`sky_diffuse.w`, bytes 28..32 LE) of the staged table — the word
+    /// the resolve's `load_ddgi_mode` reads bit 4 from.
+    fn header_word7(app: &App) -> u32 {
+        let bytes = app.world().resource::<LightTableStaging>().bytes();
+        assert!(bytes.len() >= 32, "the staging holds at least the light header");
+        u32::from_le_bytes([bytes[28], bytes[29], bytes[30], bytes[31]])
+    }
+
+    /// The production render-plugin subset + the runner-inserted residents, with the
+    /// PRODUCTION `Main` registration.
+    fn production_subset_app() -> App {
+        let mut app = App::new();
+        app.insert_resource(LightTableStaging::default());
+        app.insert_resource(LightingConfig::default());
+        app.insert_resource(ClusterConfig::default());
+        app.add_plugin(LightingPlugin);
+        app.add_plugin(SsaoPlugin);
+        app.add_plugin(CsmPlugin);
+        app.add_plugin(ShadowAtlasPlugin);
+        app.add_plugin(DdgiPlugin);
+        app.add_plugin(RenderPathPlugin);
+        app.add_plugin(CameraPlugin);
+        app.insert_resource(MeshRenderScratch::default());
+        app.insert_resource(CsmCasterScratch::default());
+        app.insert_resource(Assets::<Material>::default());
+        app.world_mut().insert_non_send_resource(Assets::<MeshGpu>::default());
+        app.add_systems_cfg(register_main_frame_systems);
+        app
+    }
+
+    #[test]
+    fn production_main_registration_packs_the_ddgi_header_bit_in_the_same_frame() {
+        let mut app = production_subset_app();
+        // Enable AFTER composition (the owner's contract), replacing the plugin's DISABLED seed.
+        app.insert_resource(DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() });
+
+        // ---- phase 1: the rung-R9c freeze clamp still holds through the single writer -------
+        // A frozen-OFF, non-Deferred boot keeps the carrier DISABLED even with the config ON,
+        // so the header bit stays 0 — the frozen-consumers gate (c) at the PRODUCTION seam.
+        app.insert_resource(RenderPathFrozenConsumers::new(SsaoConfig::default(), false, true));
+        app.update();
+        assert_eq!(
+            *app.world().resource::<ResolvedDdgi>(),
+            ResolvedDdgi::DISABLED,
+            "the single writer folds the freeze: frozen OFF => DISABLED carrier"
+        );
+        assert!(
+            !app.world().resource::<LightingConfig>().ddgi_indirect,
+            "frozen OFF => the header bit stays 0 with the config ON"
+        );
+        assert_eq!((header_word7(&app) >> DDGI_MODE_BIT) & 1, 0, "staged header: bit 4 clear");
+
+        // ---- phase 2: an inert freeze (the Deferred path) => the bit lands the SAME frame ---
+        app.insert_resource(RenderPathFrozenConsumers::default());
+        app.update();
+        assert_ne!(
+            app.world().resource::<ResolvedDdgi>().ddgi_mode_word,
+            0,
+            "an inert freeze lets the live ENABLED config through to the carrier"
+        );
+        let cfg = *app.world().resource::<LightingConfig>();
+        assert!(
+            cfg.ddgi_indirect,
+            "the registered sync_ddgi_light_gate read THIS frame's ENABLED carrier"
+        );
+        assert_eq!((cfg.shadow_gate_word() >> DDGI_MODE_BIT) & 1, 1, "word-7 bit 4 from the config");
+        assert_eq!(
+            (header_word7(&app) >> DDGI_MODE_BIT) & 1,
+            1,
+            "staged header bit 4 after ONE update: needs after_set(DdgiResolveSet)+before_set(LightCollectSet)"
+        );
+
+        // ---- phase 3: the DISABLE drops the bit in the same frame it flips ------------------
+        app.insert_resource(DdgiConfig::default());
+        app.update();
+        assert_eq!(*app.world().resource::<ResolvedDdgi>(), ResolvedDdgi::DISABLED);
+        assert!(
+            !app.world().resource::<LightingConfig>().ddgi_indirect,
+            "a DISABLED carrier drops the bit in the same frame"
+        );
+        assert_eq!((header_word7(&app) >> DDGI_MODE_BIT) & 1, 0, "the staged header dropped bit 4");
+    }
 }

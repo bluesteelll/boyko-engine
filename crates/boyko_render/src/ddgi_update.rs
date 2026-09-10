@@ -289,13 +289,58 @@ pub fn resolve_ddgi_grid_clamped(cfg: &DdgiConfig, caps: &DdgiCaps) -> ResolvedD
     crate::ddgi_config::resolve_ddgi(cfg)
 }
 
-/// The cold single-writer of [`ResolvedDdgi`] that FOLDS IN the device-storage degrade gate
-/// (SDFDDGI I2 / plan §3) — the storage-aware analogue of
-/// [`resolve_ddgi_grid`](crate::ddgi_config::resolve_ddgi_grid). Reads the cold [`DdgiConfig`]
-/// AND the boot [`DdgiCaps`]; when the caps report no storage it writes the all-zero DISABLED
-/// carrier, so a device lacking B10G11R11/RG16F storage runs the whole GI path into the
-/// 0%-gate (the update pass is never armed, the resolve never samples). CAMERA-INDEPENDENT
-/// (Decision D1): no view read, no per-FIF ring.
+/// THE DDGI resolve — the pure decision that folds BOTH the rung-R9c boot freeze
+/// ([`effective_ddgi_enabled`](crate::render_path_config::effective_ddgi_enabled)) AND the
+/// device-storage caps clamp ([`resolve_ddgi_grid_clamped`]) into ONE carrier. Unit-testable
+/// (no `Res` wrappers); [`resolve_ddgi_grid_gated`] is its scheduled wrapper.
+///
+/// # Why one fold (the SDFDDGI host-hook defect)
+///
+/// Before this fn existed the freeze lived in `sync_ddgi_light_gate` (which ignored caps) and
+/// the caps clamp lived here (which ignored the freeze) — two predicates that could disagree.
+/// On a no-storage device that is a header bit of 1 over a ZERO grid: the resolve's
+/// `spacing = 1 / inv_spacing` is `+inf`, `origin + c * spacing` is NaN for `c == 0`, and NaN
+/// inverts under fast-math `NMin`/`NMax` into a BLACK pixel on every `is_sdf_lit` receiver.
+/// Folding both here makes `ResolvedDdgi` the single truth: the header bit
+/// (`sync_ddgi_light_gate`), the b18 grid bytes (`upload_ddgi_grid`) and the update-pass
+/// arming (`boyko_app::runner`) all derive from `ddgi_mode_word`, so `bit == 1` implies
+/// non-zero grid bytes by construction rather than by three predicates agreeing.
+///
+/// The remaining half of that invariant — `mode_word == 1 ⇒ inv_spacing > 0` — is NOT a
+/// property of this fold: it is enforced one level down, by
+/// [`DdgiConfig::grid_is_sampleable`](crate::ddgi_config::DdgiConfig::grid_is_sampleable)
+/// inside [`DdgiConfig::enabled`](crate::ddgi_config::DdgiConfig::enabled), which both the
+/// `effective_ddgi_enabled` input below and the inner
+/// [`resolve_ddgi`](crate::ddgi_config::resolve_ddgi) funnel through. A degenerate owner grid
+/// (spacing `0` / NaN / `+inf` / subnormal, or a zero dimension) is therefore DISABLED here
+/// too — a frozen-ON boot re-enables the CONFIG BIT, never an unsamplable grid (W1).
+///
+/// Order: the freeze first (it decides the EFFECTIVE config bit — boot bit under a
+/// non-Deferred path, live bit otherwise), then the caps clamp (a no-storage device is
+/// DISABLED regardless of what the config or the freeze say).
+#[inline]
+pub fn resolve_ddgi_grid_frozen(
+    cfg: &DdgiConfig,
+    caps: &DdgiCaps,
+    frozen: &crate::render_path_config::RenderPathFrozenConsumers,
+) -> ResolvedDdgi {
+    let on = crate::render_path_config::effective_ddgi_enabled(cfg.enabled(), frozen);
+    resolve_ddgi_grid_clamped(&DdgiConfig { ddgi_indirect: on, ..*cfg }, caps)
+}
+
+/// The cold single-writer of [`ResolvedDdgi`] — THE single truth for the whole GI path. It runs
+/// [`resolve_ddgi_grid_frozen`], folding the cold [`DdgiConfig`], the rung-R9c boot freeze
+/// ([`RenderPathFrozenConsumers`](crate::render_path_config::RenderPathFrozenConsumers)) AND
+/// the boot [`DdgiCaps`] (SDFDDGI I2 / plan §3: no B10G11R11/RG16F storage ⇒ the all-zero
+/// DISABLED carrier, the update pass never armed, the resolve never sampling).
+/// CAMERA-INDEPENDENT (Decision D1): no view read, no per-FIF ring.
+///
+/// Every downstream reader derives from the carrier it writes and recomputes NO predicate of
+/// its own: [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate) (the header
+/// bit), [`upload_ddgi_grid`](crate::upload_ddgi_grid) (the b18 bytes) and the host's
+/// update-pass arming all read `ddgi_mode_word`. Registered under
+/// [`DdgiResolveSet`](crate::ddgi_config::DdgiResolveSet) by
+/// [`DdgiPlugin`](crate::ddgi_plugin::DdgiPlugin); consumers join `.after_set(DdgiResolveSet)`.
 //
 // `clippy::needless_pass_by_value`: `Res`/`ResMut` are by-value `SystemParam`s read/written
 // through reborrows — the same false-positive `resolve_ddgi_grid` carries.
@@ -303,9 +348,10 @@ pub fn resolve_ddgi_grid_clamped(cfg: &DdgiConfig, caps: &DdgiCaps) -> ResolvedD
 pub fn resolve_ddgi_grid_gated(
     cfg: Res<DdgiConfig>,
     caps: Res<DdgiCaps>,
+    frozen: Res<crate::render_path_config::RenderPathFrozenConsumers>,
     mut out: ResMut<ResolvedDdgi>,
 ) {
-    *out = resolve_ddgi_grid_clamped(&cfg, &caps);
+    *out = resolve_ddgi_grid_frozen(&cfg, &caps, &frozen);
 }
 
 // ---- the per-frame dispatch + UBO packing helpers -------------------------------------
@@ -452,5 +498,71 @@ mod tests {
         let ok = DdgiUpdateConfig { hysteresis: 0.9, ..DdgiUpdateConfig::default() };
         let ubo_ok = pack_ddgi_update_ubo(&resolved, &ok, 0, 1);
         assert_eq!(f32::from_bits(ubo_ok.grid_dims[3]), 0.9);
+    }
+
+    // ---- SDFDDGI host-hook defect gate (c): ONE predicate, folded in the resolve -----------
+
+    /// The pure resolve folds BOTH the R9c boot freeze and the device caps, so the carrier is
+    /// the single truth for the grid bytes, the header bit and the update-pass arming.
+    ///
+    /// Before the fix `resolve_ddgi_grid_clamped` folded caps but not the freeze while
+    /// `sync_ddgi_light_gate` folded the freeze but not caps — on a no-storage device the
+    /// header bit could be 1 over a ZERO grid (inv_spacing 0 ⇒ NaN reaches `ambient`).
+    #[test]
+    fn frozen_resolve_folds_the_r9c_freeze_and_the_caps() {
+        use crate::render_path_config::RenderPathFrozenConsumers;
+        use crate::ssao_config::SsaoConfig;
+
+        let on = DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() };
+        let off = DdgiConfig::default();
+        let caps_ok = DdgiCaps::new(true);
+
+        // Frozen OFF under a non-Deferred boot + config flipped ON at runtime ⇒ DISABLED.
+        let frozen_off = RenderPathFrozenConsumers::new(SsaoConfig::default(), false, true);
+        assert_eq!(
+            resolve_ddgi_grid_frozen(&on, &caps_ok, &frozen_off),
+            ResolvedDdgi::DISABLED,
+            "a frozen-OFF boot keeps the carrier DISABLED even with the config enabled"
+        );
+        // Frozen ON + config flipped OFF at runtime ⇒ the BOOT bit wins (mode 1).
+        let frozen_on = RenderPathFrozenConsumers::new(SsaoConfig::default(), true, true);
+        assert_eq!(
+            resolve_ddgi_grid_frozen(&off, &caps_ok, &frozen_on).ddgi_mode_word,
+            1,
+            "a frozen-ON boot keeps the carrier enabled even with the config disabled"
+        );
+        // Inert freeze (Deferred) ⇒ live config.
+        let live = RenderPathFrozenConsumers::new(SsaoConfig::default(), false, false);
+        assert_eq!(resolve_ddgi_grid_frozen(&on, &caps_ok, &live).ddgi_mode_word, 1);
+        assert_eq!(resolve_ddgi_grid_frozen(&off, &caps_ok, &live), ResolvedDdgi::DISABLED);
+        // No storage ⇒ DISABLED regardless of config and freeze.
+        assert_eq!(
+            resolve_ddgi_grid_frozen(&on, &DdgiCaps::new(false), &frozen_on),
+            ResolvedDdgi::DISABLED,
+            "the caps clamp applies after the freeze fold"
+        );
+    }
+
+    /// The scheduled single writer runs the frozen fold: a frozen-OFF boot with the config ON
+    /// writes DISABLED. RED before the fix (the gated system ignored the freeze and wrote the
+    /// enabled grid).
+    #[test]
+    fn gated_system_writes_disabled_under_a_frozen_off_boot() {
+        use boyko_ecs::ecs::core::app::App;
+
+        use crate::render_path_config::RenderPathFrozenConsumers;
+        use crate::ssao_config::SsaoConfig;
+
+        let mut app = App::new();
+        app.insert_resource(DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() });
+        app.insert_resource(DdgiCaps::new(true));
+        app.insert_resource(RenderPathFrozenConsumers::new(SsaoConfig::default(), false, true));
+        app.insert_resource(ResolvedDdgi::DISABLED);
+        app.world_mut().run_system(resolve_ddgi_grid_gated);
+        assert_eq!(
+            *app.world().resource::<ResolvedDdgi>(),
+            ResolvedDdgi::DISABLED,
+            "the single writer must fold the R9c freeze (frozen OFF ⇒ DISABLED carrier)"
+        );
     }
 }

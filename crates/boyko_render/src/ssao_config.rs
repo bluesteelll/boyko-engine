@@ -37,9 +37,9 @@
 //!
 //! The resolve's `ssao_mode` header gate (word 11) is a SEPARATE seam: it is armed by
 //! [`sync_ssao_light_gate`], the cold bridge from [`SsaoConfig`] into
-//! [`LightingConfig::ssao_mode`](crate::light::LightingConfig::ssao_mode), mirroring
-//! [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate)'s shape (a single
-//! cold config Resource, no caster dependency). It is registered by the composing app
+//! [`LightingConfig::ssao_mode`](crate::light::LightingConfig::ssao_mode), one of the
+//! `sync_*_light_gate` family (a single cold config Resource, no caster dependency — the
+//! DDGI member reads its resolved carrier instead). It is registered by the composing app
 //! (`boyko_app::EnginePlugins`, alongside `sync_csm_light_gate`/`sync_punctual_light_gate`),
 //! not by [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin) itself — the SAME cross-plugin
 //! registration discipline those two systems document (it bridges this plugin's
@@ -245,15 +245,16 @@ pub fn resolve_ssao_policy(
     *resolved = resolve_ssao(crate::render_path_config::effective_ssao_config(&cfg, &frozen));
 }
 
-// ---- the light-header gate bridge (mirrors `sync_ddgi_light_gate`) -------------------
+// ---- the light-header gate bridge (the `sync_*_light_gate` family) -------------------
 
 /// Bridges the [`SsaoConfig`] gate and the [`LightingConfig`] header gate — the SSAO
-/// analogue of
-/// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate) (a single cold
-/// config Resource read directly, no caster dependency — unlike
+/// member of the `sync_*_light_gate` family: a single cold config Resource read directly,
+/// no caster dependency (unlike
 /// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate)/
 /// [`sync_punctual_light_gate`](crate::shadow_atlas::sync_punctual_light_gate), which also
-/// gate on a live caster count). It is the SOLE production writer of
+/// gate on a live caster count) and no resolved-carrier dependency (unlike
+/// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate), which reads its
+/// `ResolvedDdgi` carrier and so carries ordering edges). It is the SOLE production writer of
 /// [`LightingConfig::ssao_mode`], keeping the header's word-11 SSAO gate in lock-step
 /// with the structural predicate [`SsaoConfig::enabled`].
 ///

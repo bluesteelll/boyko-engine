@@ -141,6 +141,49 @@ regardless.
 
 Every I0..I3 keeps GI-OFF byte-identical; only flipping `ddgi_indirect=true` changes pixels.
 
+## Defects found after SHIPPED — the host hook (lane `ddgi`, 2026-09-10)
+
+**The feature drew zero pixels with `ddgi_indirect = true`, and every gate on the ladder was
+green over it.** Verified at `ed0bed45` in the composing app, not in the render crate — the
+whole defect is between the two.
+
+| # | Mechanism (as shipped) | Consequence | Fix |
+|---|---|---|---|
+| D1 | `DdgiPlugin` was composed by **no host**: `boyko_app::plugins` added Lighting/Ssao/Csm/ShadowAtlas/Ray/... and never `DdgiPlugin`. | The production world had no `ResolvedDdgi`, no `DdgiCaps` reader (the runner's boot `insert_resource(DdgiCaps)` was a dead datum), and `resolve_ddgi_grid_gated` never ran. | `EnginePlugins::build` composes `DdgiPlugin` unconditionally after `ShadowAtlasPlugin` (the default carrier is the all-zero DISABLED image, so GI-OFF stays byte-identical). Gate (a1): `tests/ddgi_plugin_composed.rs`. |
+| D2 | `sync_ddgi_light_gate` — the SOLE writer of the LightBuf word-7 bit-4 header gate — was registered **nowhere** (its doc said "the composing app registers it"; the app's closure mentioned it only in a comment). | The header bit was never set, so `deferred_pbr.hlsl`'s `if (ddgi_mode != 0u)` never ran: the probe atlas was updated every enabled frame and never sampled ("shipped to the GPU, not to the screen"). | Registered in `register_main_frame_systems` (the verbatim code motion of the Main closure, made a named fn so the registration is testable headless) as `.after_set(DdgiResolveSet).before_set(LightCollectSet)` — after the resolve so it reads THIS frame's carrier, before `collect_lights` so the bit lands the same frame. Gate (a2): `plugins.rs` tests. |
+| D3 | The resolve's b18 grid UBO (`gpu_scene/csm.rs::ddgi_ubo`) was zero-filled at boot and **never written again**; the update pass's b6 UBO was packed from a LOCAL `DdgiConfig { ddgi_indirect: true, ..Default }` at the arm site — the owner-locked default grid, whatever the owner's config said. | Had D2 been fixed alone: the gate opens over a zero grid ⇒ `spacing = 1 / inv_spacing = +inf` ⇒ NaN in `ambient` on every `is_sdf_lit` pixel (NaN inverts under `NMin`/`NMax` into black). And the update pass marched a grid the resolve could never sample. | `upload_ddgi_grid` (mirror of `upload_atlas_ring` minus the ring) writes `ResolvedDdgi::as_bytes()` into the SINGLE b18 buffer from the runner (step 5d''), **monotone + value-gated** (enabled AND changed; the zero image never written after boot). b6 now packs from the same carrier via `scene(ddgi: Option<&ResolvedDdgi>)`. Gate (b): `ddgi_config.rs` / `upload.rs` tests. |
+| D4 | Three predicates for "GI on": the gate folded config + R9c freeze (not caps); `resolve_ddgi_grid_gated` folded config + caps (not the freeze); the runner's arming re-derived config + freeze + `device_caps().ddgi_storage_ok()`. | On a no-storage device: header bit 1, grid DISABLED ⇒ the NaN case above. On a frozen-ON non-Deferred boot with the config flipped OFF: bit 1, grid zero ⇒ NaN. | ONE fold — `resolve_ddgi_grid_frozen(cfg, caps, frozen)` — inside the single writer; the gate reads `ResolvedDdgi.ddgi_mode_word`, the runner arms from it, b6/b18 pack from it. `bit == 1 ⇒ mode_word == 1` by that fold; `mode_word == 1 ⇒ inv_spacing > 0` by the D5 clamp below (the two halves are enforced at different sites — see D5). Gate (c): `ddgi_update.rs` tests + the frozen-OFF production test in `plugins.rs`. |
+| D5 | (Found by the fix pass's review, W1 — a defect this lane's own repair would have CREATED.) `resolve_ddgi` packed `ddgi_mode_word: 1` with `inv_spacing = 0` for an owner `spacing` of `0` / negative / NaN / `+inf` (`if cfg.spacing > 0.0 { 1.0 / cfg.spacing } else { 0.0 }`, commented "benign degenerate"), and a positive SUBNORMAL spacing packed `inv_spacing = +inf`. `DdgiConfig::enabled()` was exactly `ddgi_indirect`, so the second half of D4's invariant — `mode_word == 1 ⇒ inv_spacing > 0` — was prose, not construction. | The shader is not benign about it: `ddgi_resolve.hlsli` computes `spacing = 1.0 / inv_spacing` = `+inf` and `origin + float3(c) * spacing` = NaN at `c == 0` — the same NaN-through-`NMin`/`NMax` black pixel as D3/D4, now on a config the owner can write. Unreachable BEFORE this lane (nothing set the bit); reachable the moment D1+D2 land. The `debug_assert!` in runner step 5d'' codifies the invariant but does not enforce it — in release it is absent, and in debug it panics the frame loop instead. | The clamp moves into the ONE structural predicate: `DdgiConfig::enabled()` = `ddgi_indirect && grid_is_sampleable()`, where `grid_is_sampleable()` is `spacing.is_normal() && spacing > 0.0 && dims != 0` (`is_normal` is exact, not stylistic: it also rejects the subnormal whose reciprocal overflows). Every variant funnels through it — `resolve_ddgi`, `resolve_ddgi_grid_clamped`, `resolve_ddgi_grid_frozen`, and the runner's boot freeze snapshot (`c.enabled()`) — so a degenerate grid is DISABLED everywhere, the reciprocal is a plain `1.0 / spacing`, and D4's second implication holds by construction. Gate: `a_degenerate_grid_resolves_disabled` + `a_degenerate_grid_stays_disabled_through_the_frozen_fold` (`ddgi_config.rs`), RED before the clamp. |
+
+**Why the ladder's gates were blind.** The DDGI dump gate named for this rung,
+`engine_grand_showcase_512_ddgi_screenshot_dump` (`boyko_rhi_vulkan/tests/window_present_gbuffer.rs`),
+hand-writes the b18 grid UBO itself and drives the header bit at the RHI level — it never
+touches `boyko_app`, so it was green with the host hook broken (a gate that could not fail).
+The `boyko_render` unit tests pinned every piece in isolation (the resolve, the gate, the byte
+layout) and no test ever asked whether a host *composes* them — the same shape as
+`log_host_reachable.rs`. The substitute device gate is `boyko_app/tests/sdf_room_ddgi_dump.rs`
+(the production runner, a NON-default grid so a resurrected local-default b6 pack renders
+visibly wrong, `#[ignore = "gpu-windowed: …"]`): its sha256 must differ from the GI-OFF
+`sdf_room_smoke` dump, and the pinned GI-OFF goldens binding the DDGI descriptors
+(`[grand_showcase_2mat]`, `[vb_both_sdf]`, `[sdf_forward_only]`, `[vb_both]`) must stay
+byte-identical after D1's unconditional composition.
+
+**Layout pin recorded (mechanical).** Every committed resolve `.spv` (`deferred_pbr*.comp.spv`,
+`vb_shade_split*.comp.spv`) carries `OpMemberDecorate %type_ResolvedDdgi 3 Offset 36` — a
+48-byte block, field-for-field `ResolvedDdgi`; `DDGI_UBO_BYTES == RESOLVED_DDGI_BYTES == 48`,
+so there are NO bytes past the struct — bytes 36..48 are the three `_pad` words (zero, read by
+no shader).
+
+**Single buffer, stated.** b18 stays ONE buffer by DESCRIPTOR contract, not because the grid is
+static: `GBufferTargets::create` builds the resolve sets once and captures the boot buffer, so a
+host `[slot]` ring would not be observed by the GPU (the same is true of the atlas "ring" at
+binding 15 — a pre-existing class, out of this lane). The token proves one slot's fence; the
+monotone value gate is what bounds a concurrent sibling read to finite grids: steady state
+writes nothing; the first ENABLE lands on the frame whose own light staging carries the bit
+(the sibling's per-slot staging still has bit 0, so it never reads b18); a runtime edit can tear
+one sibling read for one frame, but both halves are finite grids; a DISABLE leaves the last grid
+bound-but-unread.
+
 ## Open risks (carried)
 
 - Update-pass µs/probe is the one genuinely-new number — UNMEASURED until the I2 bench; if far

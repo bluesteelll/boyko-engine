@@ -110,14 +110,14 @@ use boyko_sdf_math::SdfEdit;
 use boyko_render::{
     AREA_TEX_BYTES, AREA_TEX_H, AREA_TEX_W, AaMode, BindlessTextureTable, ClusterConfig,
     DDGI_UPDATE_UBO_BYTES,
-    DdgiConfig, DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES, GPU_LIGHT_WORDS,
+    DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES, GPU_LIGHT_WORDS,
     GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES, LightHeaderGpu,
     LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialTable, MESH_VERTEX_STRIDE,
     PER_INSTANCE_MATERIAL_BYTES, PER_INSTANCE_MATERIAL_TEX_BYTES, RESOLVED_CSM_BYTES,
-    RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm,
+    RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm, ResolvedDdgi,
     ResolvedShadowAtlas, RetiredGpuBuffers, SEARCH_TEX_BYTES, SEARCH_TEX_H, SEARCH_TEX_W,
     SHADOW_DIM, SharpenMode, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table,
-    mesh_view_t_norm, pack_ddgi_update_ubo, resolve_ddgi, upload_texture_2d_raw,
+    mesh_view_t_norm, pack_ddgi_update_ubo, upload_texture_2d_raw,
 };
 #[cfg(feature = "hwrt")]
 use boyko_ecs::ecs::core::asset::Assets;
@@ -650,8 +650,12 @@ const SPOT_ATLAS_SLOTS: u32 = M_SLOTS as u32;
 /// [`RESOLVED_SHADOW_ATLAS_BYTES`] (the resolve's binding-15 shape).
 const SPOT_ATLAS_UBO_BYTES: u64 = RESOLVED_SHADOW_ATLAS_BYTES as u64;
 /// Byte size of the SDFDDGI grid UBO — `size_of::<ResolvedDdgi>()` via
-/// [`RESOLVED_DDGI_BYTES`] (48 B, the resolve's binding-18 shape). A SINGLE buffer (the grid is
-/// world-fixed — Decision D1), NOT a per-FIF ring. Zero-seeded (bound-but-unread on the OFF path).
+/// [`RESOLVED_DDGI_BYTES`] (48 B, the resolve's binding-18 shape; EXACTLY the carrier — there
+/// are no bytes past `_pad`, and the shader block's member 3 sits at `Offset 36` in every
+/// committed resolve `.spv`). A SINGLE buffer, NOT a per-FIF ring — by DESCRIPTOR contract (the
+/// resolve set is boot-built and captures this buffer), so the runner's `upload_ddgi_grid` is
+/// monotone + value-gated (see `upload_ddgi_grid`). Zero-seeded == `ResolvedDdgi::DISABLED`
+/// (bound-but-unread on the OFF path).
 const DDGI_UBO_BYTES: u64 = RESOLVED_DDGI_BYTES as u64;
 /// Byte size of the SDFDDGI I2 probe-update UBO — `size_of::<DdgiUpdateUbo>()` via
 /// [`DDGI_UPDATE_UBO_BYTES`] (48 B, the update set's b6 shape). A SINGLE buffer (identity
@@ -6115,7 +6119,13 @@ impl GpuSceneBundles {
         atlas: Option<&ResolvedShadowAtlas>,
         interp_count: u32,
         overstep: f32,
-        ddgi_enabled: bool,
+        // SDFDDGI host-hook: the resolved grid carrier when the probe-update pass is ARMED
+        // (`ResolvedDdgi.ddgi_mode_word != 0` — config + R9c freeze + device caps, folded once
+        // by `resolve_ddgi_grid_gated`; the runner threads `armed.then_some(&resolved)`, the
+        // `csm` / `atlas` shape above). `None` ⇒ `ddgi_update = None`, the GI-OFF 0%-gate. The
+        // b6 update UBO packs ITS grid from this carrier — the SAME grid the resolve reads at
+        // b18 — so the atlas is updated over the volume that is sampled.
+        ddgi: Option<&ResolvedDdgi>,
         // VB-SV0 DP3b: this frame's resolved SV0 mode (bit 0 shadow, bit 1 AO; `0` disarmed) —
         // the runner reads `LightingConfig`'s `_armed` pair, published by `sync_sv0_light_gate`
         // inside the SAME ECS frame (`.before_set(LightCollectSet)`), so the mode and the
@@ -6160,7 +6170,7 @@ impl GpuSceneBundles {
         any_textured_material: bool,
         // Render terminator-softening: `true` iff `LightingConfig::terminator_softening > 0`
         // (read by the runner from the `LightingConfig` resource, the SAME `world.try_resource`
-        // pattern `ddgi_enabled` uses). Selects [`Self::resolve_pipeline_wrap`] in place of
+        // pattern the DDGI carrier read uses). Selects [`Self::resolve_pipeline_wrap`] in place of
         // [`Self::resolve_pipeline`] below — `false` (the default) binds the base pipeline, the
         // byte-identical 0%-gate (`deferred_pbr.hlsl`'s frozen-base discipline).
         terminator_wrap: bool,
@@ -6403,7 +6413,11 @@ impl GpuSceneBundles {
         } else {
             aa_mode
         };
-        let ddgi_enabled = ddgi_enabled && sdf_leg;
+        // The SDF-leg conjunct: the probe update marches the SDF field, so a leg set without
+        // the SDF leg disarms it regardless of the carrier (the carrier itself stays the truth
+        // for the header bit + b18; the resolve's sample then reads a never-updated atlas, a
+        // finite boot-cleared image).
+        let ddgi = ddgi.filter(|_| sdf_leg);
 
         // VB-P2 classification plan, rung P2c (the P1-4 owner-decided selector,
         // `GBufferScene::vb_use_classified`'s own doc): `BOYKO_VB_FORCE_CLASSIFIED` is the
@@ -6461,25 +6475,27 @@ impl GpuSceneBundles {
             _ => None,
         };
 
-        // SDFDDGI I2 (the ARM rung): when GI is enabled, pack the b6 update UBO for THIS frame and
-        // arm the probe-update pass. The render stays BYTE-IDENTICAL — I3 has not wired the resolve
-        // sample yet, so the atlas is written-but-unread; this rung validates the LIVE RDG-integrated
-        // dispatch (`record_graph_pass` path). When disabled → `None` (the GI-OFF 0%-gate, default).
+        // SDFDDGI I2 (the ARM rung) + the host-hook fix: when the carrier is armed, pack the b6
+        // update UBO for THIS frame from THAT carrier and arm the probe-update pass; the resolve
+        // (I3/I4, SHIPPED) then samples the atlas the pass wrote, over the SAME grid it reads
+        // from b18. When disarmed → `None` (the GI-OFF 0%-gate, default).
         //
-        // The grid is world-fixed (Decision D1) → a single enabled `ResolvedDdgi` from the
-        // owner-locked default `DdgiConfig` (the host does not run the `DdgiPlugin` resolve, so it
-        // builds the carrier inline). The UBO write is host-coherent into the SINGLE (non-ringed)
-        // `ddgi_update_ubo` before the dispatch reads it (identity ray-rotation → static UBO).
-        // `light_count` drives the shader's per-ray shade loop; the host light table is bound at t5.
-        let ddgi_update = ddgi_enabled.then(|| {
+        // Before the fix this site resolved a LOCAL `DdgiConfig { ddgi_indirect: true, ..Default }`
+        // — the owner-locked default grid, whatever the owner's config said — while b18 stayed
+        // its zero boot seed, so the update pass marched a grid the resolve could never sample
+        // (the "shipped to the GPU, not to the screen" class). The carrier now comes from the
+        // world's single writer via the runner; no config is re-resolved here.
+        //
+        // The UBO write is host-coherent into the SINGLE (non-ringed) `ddgi_update_ubo` before
+        // the dispatch reads it. `light_count` drives the shader's per-ray shade loop; the host
+        // light table is bound at t5.
+        let ddgi_update = ddgi.map(|resolved| {
             let config = DdgiUpdateConfig::default();
-            let resolved = resolve_ddgi(&DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() });
             // The shade loop iterates `light_count` lights from the bound light table. The host's
             // fold caps at `MAX_LIGHTS`; a conservative full-table count keeps the dispatch
-            // representative (the resolve does not sample the atlas this rung, so the exact count
-            // does not perturb byte-identity — only the write cost).
+            // representative (rows past the header's counts are zero-kind and skipped).
             let light_count = MAX_LIGHTS;
-            let ubo = pack_ddgi_update_ubo(&resolved, &config, frame_index, light_count);
+            let ubo = pack_ddgi_update_ubo(resolved, &config, frame_index, light_count);
             let bytes = ubo.as_bytes();
             let mapped = RhiDevice::buffer_mapped_ptr(device, &self.csm.ddgi_update_ubo)
                 .expect("invariant: host-visible DDGI update UBO is mapped");
@@ -6793,26 +6809,32 @@ impl GpuSceneBundles {
             // memcpys `ResolvedShadowAtlas` into via `upload_atlas_ring` (binding 15). The sibling
             // in-flight frame binds the OTHER slot (the lock-free WAR discipline the ring exists for).
             shadow_atlas_ubo: &self.csm.atlas_ubo[slot],
-            // SDFDDGI I1: the 3 DDGI resolve bindings (@16/@17/@18) now bind the REAL probe atlas.
-            // The GI gate is OFF by default (`DdgiConfig::ddgi_indirect == false` → LightBuf word-7
-            // bit 4 == 0), so the resolve's probe-irradiance sample never runs and all three are
-            // bound-but-unread (the 0%-gate — byte-identical pixels). I1 severs the I0a dummy: the
-            // irradiance/depth atlases are the dedicated `B10G11R11_UFLOAT`/`R16G16_SFLOAT`
-            // `Texture2DArray`s, each sampled with a dedicated LINEAR (non-comparison) sampler —
-            // closing the VUID trap (a non-Dref SampleLevel with the old CSM COMPARISON sampler was
-            // UB). The grid UBO is the dedicated zeroed `ddgi_ubo` (single buffer — world-fixed grid,
-            // no ring).
+            // SDFDDGI I1: the 3 DDGI resolve bindings (@16/@17/@18) bind the REAL probe atlas.
+            // The GI gate is OFF by default (`ResolvedDdgi::DISABLED` → LightBuf word-7 bit 4 == 0),
+            // so the resolve's probe-irradiance sample never runs and all three are bound-but-unread
+            // (the 0%-gate — byte-identical pixels). I1 severs the I0a dummy: the irradiance/depth
+            // atlases are the dedicated `B10G11R11_UFLOAT`/`R16G16_SFLOAT` `Texture2DArray`s, each
+            // sampled with a dedicated LINEAR (non-comparison) sampler — closing the VUID trap (a
+            // non-Dref SampleLevel with the old CSM COMPARISON sampler was UB).
+            //
+            // The grid UBO is the SINGLE `ddgi_ubo` (host-hook fix): the runner memcpys the
+            // `ResolvedDdgi` carrier into it (`upload_ddgi_grid`, step 5d'') MONOTONICALLY —
+            // only when the carrier is enabled and changed, never the zero image after boot. It is
+            // one buffer BY DESCRIPTOR CONTRACT, not because the config is static: this set is
+            // built once in `GBufferTargets::create` and captures the boot buffer, so a `[slot]`
+            // ring here would not be observed by the GPU. When the header bit is set the resolve
+            // DOES sample the atlas over this grid (I3/I4 SHIPPED) — the bit derives from the same
+            // carrier, so it cannot be set over a zero grid.
             ddgi_irr_texture: self.csm.ddgi_atlas.irradiance(),
             ddgi_irr_sampler: self.csm.ddgi_atlas.sampler(),
             ddgi_depth_texture: self.csm.ddgi_atlas.depth(),
             ddgi_depth_sampler: self.csm.ddgi_atlas.sampler(),
             ddgi_grid_ubo: &self.csm.ddgi_ubo,
-            // SDFDDGI I2 (the ARM rung): `ddgi_update` is `Some(...)` when GI is enabled (the packed
-            // activation computed above) → the update RDG pass is recorded + dispatched in the LIVE
-            // frame; `None` on the default GI-OFF path (byte-identical 0%-gate — no pass recorded).
-            // Even when armed the render stays byte-identical this rung: I3 has not wired the resolve
-            // sample, so the atlas is written-but-unread. The classification / ray-table / update-UBO
-            // handles are ALWAYS supplied so the RDG sink can resolve them.
+            // SDFDDGI I2 (the ARM rung): `ddgi_update` is `Some(...)` when the carrier is armed
+            // (the packed activation computed above) → the update RDG pass is recorded + dispatched
+            // in the LIVE frame over the carrier's grid; `None` on the default GI-OFF path
+            // (byte-identical 0%-gate — no pass recorded). The classification / ray-table /
+            // update-UBO handles are ALWAYS supplied so the RDG sink can resolve them.
             ddgi_update,
             ddgi_classification: self.csm.ddgi_atlas.classification(),
             ddgi_ray_table: &self.csm.ddgi_ray_table,
@@ -7341,6 +7363,16 @@ impl GpuSceneBundles {
     #[inline]
     pub(crate) fn atlas_ubo_slot(&self, slot: usize) -> &BoundBuffer {
         &self.csm.atlas_ubo[slot]
+    }
+
+    /// SDFDDGI host-hook: the SINGLE binding-18 DDGI grid UBO — the write target of the runner's
+    /// value-gated [`upload_ddgi_grid`](boyko_render::upload_ddgi_grid) (step 5d''). NOT a ring:
+    /// the resolve set is boot-built and captures this one buffer, so the runner writes it
+    /// monotonically (enabled + changed only, never the zero image after boot) — the
+    /// single-buffer WAR discipline `upload_ddgi_grid` documents.
+    #[inline]
+    pub(crate) fn ddgi_ubo(&self) -> &BoundBuffer {
+        &self.csm.ddgi_ubo
     }
 
     /// HW-RT rung 1b: the FENCED slot's HWRT shadow-params-UBO ring buffer — the write target of

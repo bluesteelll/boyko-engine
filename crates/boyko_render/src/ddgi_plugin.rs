@@ -36,9 +36,13 @@ use crate::ddgi_update::{DdgiCaps, DdgiUpdateConfig, resolve_ddgi_grid_gated};
 ///
 /// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate) (the SOLE writer of
 /// the LightBuf word-7 bit-4 gate) is NOT registered here: it bridges this plugin's
-/// [`DdgiConfig`] and the lighting plugin's `LightingConfig` / `LightTableDirty`, so only
-/// the composing app (which adds BOTH) may register it — after `resolve_ddgi_grid`, in the
-/// same builder closure as `sync_csm_light_gate` / `sync_punctual_light_gate`.
+/// [`ResolvedDdgi`] and the lighting plugin's `LightingConfig` / `LightTableDirty`, so only
+/// the composing app (which adds BOTH) registers it. `boyko_app::EnginePlugins` composes THIS
+/// plugin unconditionally and registers the gate in `register_main_frame_systems` as
+/// `.after_set(DdgiResolveSet).before_set(LightCollectSet)`, in the same `Main` builder as
+/// `sync_csm_light_gate` / `sync_punctual_light_gate`. (The SDFDDGI host-hook defect: for the
+/// whole I0..I7 ladder neither the plugin nor the gate was composed by any host, so the GI
+/// atlas was updated every enabled frame and never sampled.)
 #[derive(Default)]
 pub struct DdgiPlugin;
 

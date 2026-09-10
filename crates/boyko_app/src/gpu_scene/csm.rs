@@ -34,9 +34,12 @@ pub(super) struct CsmResources {
     /// fenced write token every frame, so it needs a per-in-flight-frame slot exactly like the
     /// CSM cascade UBO.
     pub(super) atlas_ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
-    /// SDFDDGI I0: the DDGI grid UBO (single buffer — the grid is world-fixed, so no per-FIF ring),
-    /// zero-seeded ⇒ `ddgi_mode_word == 0`, bound-but-unread at resolve binding 18 while the GI gate
-    /// is OFF (the default).
+    /// SDFDDGI I0: the DDGI grid UBO — a SINGLE buffer by DESCRIPTOR contract (the resolve set is
+    /// boot-built and captures it; a host ring would not be observed), zero-seeded ⇒
+    /// `ddgi_mode_word == 0` == `ResolvedDdgi::DISABLED`, bound-but-unread at resolve binding 18
+    /// while the GI gate is OFF (the default). The runner's `upload_ddgi_grid` (host-hook fix)
+    /// writes the `ResolvedDdgi` carrier into it monotonically — enabled + changed only, never
+    /// the zero image after boot — so an in-flight sibling read sees only finite grids.
     pub(super) ddgi_ubo: BoundBuffer,
     /// SDFDDGI I1: the REAL probe atlas — irradiance (`B10G11R11_UFLOAT`) + depth (`R16G16_SFLOAT`)
     /// `Texture2DArray`s + the per-probe classification buffer + a dedicated LINEAR sampler,

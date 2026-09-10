@@ -482,7 +482,7 @@ pub use ddgi_update::{
     DDGI_DEFAULT_DIMS, DDGI_UPDATE_UBO_BYTES, DEFAULT_RAYS_PER_PROBE, DEFAULT_SUBSET_N, DdgiCaps,
     DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, ddgi_update_dispatch_groups,
     fill_fibonacci_ray_table, pack_ddgi_update_ubo, resolve_ddgi_grid_clamped,
-    resolve_ddgi_grid_gated,
+    resolve_ddgi_grid_frozen, resolve_ddgi_grid_gated,
 };
 pub use error::GpuColumnError;
 pub use gpu3d_instance::{GPU3D_INSTANCE_SIZE, Gpu3dInstance};
@@ -626,7 +626,7 @@ pub use texture::{
 pub use texture_data::TextureData;
 pub use upload::{
     upload_atlas_ring, upload_camera_ring, upload_camera_ring_sheared, upload_csm_ring,
-    upload_instance_materials, upload_instance_materials_tex, upload_instance_models,
+    upload_ddgi_grid, upload_instance_materials, upload_instance_materials_tex, upload_instance_models,
     upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_particle_effects,
     upload_particle_emit_requests, upload_ray_shadow_ring, upload_sdf_edit_list,
     upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring,

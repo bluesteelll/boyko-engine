@@ -37,12 +37,12 @@ use boyko_render::{
     AaConfig, AaMode, BindlessTextureTable, CsmCasterScratch, DdgiCaps, JitterState,
     LightingConfig, Material, MaterialId, MaterialTable, MeshAssetsExt,
     MeshGpu, MeshRenderScratch, OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps,
-    RenderEpoch, ResolvedAa, ResolvedCsm, ResolvedShadowAtlas, ResolvedSsao, ResolvedTaa,
+    RenderEpoch, ResolvedAa, ResolvedCsm, ResolvedDdgi, ResolvedShadowAtlas, ResolvedSsao, ResolvedTaa,
     RetiredGpuBuffers,
     RhiContext, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, TaaConfig, TaaState,
     TextureAssetsExt, TextureGpu, advance_jitter, collect_sdf_edits, forward_gbuffer_push_from_view,
     gbuffer_push_from_view, gbuffer_push_from_view_jittered, ndc_jitter, retire_deferred_frees,
-    upload_atlas_ring,
+    upload_atlas_ring, upload_ddgi_grid,
     upload_camera_ring_sheared, upload_csm_ring, upload_instance_materials, upload_instance_materials_tex,
     upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
     backfill_vb_geometry_slots,
@@ -446,7 +446,7 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // override above, so the shadow-denoise consumer snapshot reflects the flight-check
     // knob). `world.try_resource` degrades every missing config Resource to its structural
     // "off" default (a host that composes a SUBSET of `EnginePlugins`'s plugins never
-    // panics here) — the SAME graceful pattern `ddgi_enabled`/`terminator_wrap` use inside
+    // panics here) — the SAME graceful pattern `ddgi_armed`/`terminator_wrap` use inside
     // the frame loop. `host.resolved_render_path` is written below and IS read downstream —
     // this comment said "nothing reads it yet (R2 wires the declarator dispatch)" long after R2
     // wired exactly that: `boyko_rhi_vulkan`'s `declare_frame_graph` selects the per-path
@@ -1827,19 +1827,55 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 upload_atlas_ring(&token, host.gpu.atlas_ubo_slot(s), resolved_atlas);
             }
 
-            // 5d''. HW-RT rung 1b/3b: the HWRT soft-shadow-params UBO into slot `s` —
-            //       UNCONDITIONAL every HWRT frame (20 B; `resolve_ray_shadow_system`
-            //       re-derives the 16-byte resolved mirror from the author
-            //       `RayShadowConfig`, so a boot-seed would go stale on a retune, see
-            //       `upload_ray_shadow_ring`). The rung-3b `frame_index` seed rides
-            //       along in the SAME upload (the runner's own monotonic counter, hot
-            //       per-frame — not resolve-derived) so the shadow ray's cone rotation
-            //       advances by the golden angle every frame, giving the temporal
-            //       shadow denoiser something to average. GATED on an RT device
-            //       (`ray_query_enabled`) — the SAME gate that mints the ring in
-            //       `GpuSceneBundles::boot`, so an unminted slot is never uploaded; a
-            //       software-only build pays zero (the whole block is
-            //       `#[cfg(feature = "hwrt")]`).
+            // 5d''. SDFDDGI host-hook: the DDGI grid UBO (resolve binding 18) — the
+            //       `ResolvedDdgi` carrier `resolve_ddgi_grid_gated` wrote in THIS frame's
+            //       Main (config + R9c freeze + device caps, folded once). A SINGLE buffer,
+            //       not a ring: the resolve descriptor sets are boot-built and capture the
+            //       boot buffer, so a host `[slot]` ring would not be observed by the GPU.
+            //       The write is therefore MONOTONE and value-gated — only when the carrier
+            //       is ENABLED and differs from the last image written — and the zero
+            //       DISABLED image is never written after boot, so a sibling in-flight read
+            //       of the single buffer observes only finite grids (never `inv_spacing == 0`,
+            //       the NaN precondition). Steady state: one 48-byte compare, zero writes.
+            //       The header bit `sync_ddgi_light_gate` set this frame derives from the SAME
+            //       carrier, so the bit cannot be 1 over a zero buffer. An absent carrier (a
+            //       subset host without `DdgiPlugin`) reads as DISABLED.
+            let resolved_ddgi =
+                world.try_resource::<ResolvedDdgi>().copied().unwrap_or_default();
+            if resolved_ddgi.ddgi_mode_word != 0 && resolved_ddgi != host.last_ddgi_grid {
+                // This assert CODIFIES the invariant; it does not enforce it — enforcement is
+                // `DdgiConfig::grid_is_sampleable` inside `enabled()`, which DISABLES a
+                // degenerate grid at the one carrier every reader here derives from (plan D5).
+                debug_assert!(
+                    resolved_ddgi.inv_spacing_dims[0].is_finite()
+                        && resolved_ddgi.inv_spacing_dims[0] > 0.0,
+                    "invariant: an enabled carrier carries a finite positive inv_spacing (the \
+                     resolve computes `spacing = 1 / inv_spacing`; zero or inf would put NaN in \
+                     ambient)"
+                );
+                // SAFETY: `host.gpu.ddgi_ubo()` is boot-minted at `DDGI_UBO_BYTES`
+                // (== `RESOLVED_DDGI_BYTES`), host-coherent mapped, live until teardown; the
+                // token proves this slot's fence, and the monotone value gate above is the
+                // single-buffer discipline `upload_ddgi_grid` documents.
+                unsafe {
+                    upload_ddgi_grid(&token, host.gpu.ddgi_ubo(), &resolved_ddgi);
+                }
+                host.last_ddgi_grid = resolved_ddgi;
+            }
+
+            // 5d'''. HW-RT rung 1b/3b: the HWRT soft-shadow-params UBO into slot `s` —
+            //        UNCONDITIONAL every HWRT frame (20 B; `resolve_ray_shadow_system`
+            //        re-derives the 16-byte resolved mirror from the author
+            //        `RayShadowConfig`, so a boot-seed would go stale on a retune, see
+            //        `upload_ray_shadow_ring`). The rung-3b `frame_index` seed rides
+            //        along in the SAME upload (the runner's own monotonic counter, hot
+            //        per-frame — not resolve-derived) so the shadow ray's cone rotation
+            //        advances by the golden angle every frame, giving the temporal
+            //        shadow denoiser something to average. GATED on an RT device
+            //        (`ray_query_enabled`) — the SAME gate that mints the ring in
+            //        `GpuSceneBundles::boot`, so an unminted slot is never uploaded; a
+            //        software-only build pays zero (the whole block is
+            //        `#[cfg(feature = "hwrt")]`).
             #[cfg(feature = "hwrt")]
             if ctx.ray_query_enabled() {
                 let resolved_ray_shadow = world.resource::<ResolvedRayShadow>();
@@ -1857,16 +1893,16 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     );
                 }
 
-                // 5d'''. HW-RT rung 3a step 7: the à-trous edge-stop UBO (`sigma_z`/`sigma_n`)
-                //        into the renderer's `shadow_denoise_ubo[s]` — the per-level à-trous sets
-                //        bind slot `s` @4. `resolve_shadow_denoise_policy` re-derives it from the
-                //        author `ShadowDenoiseConfig` each frame (a boot-seed would go stale on a
-                //        retune, mirroring `upload_ray_shadow_ring`). `shadow_denoise_ubo_slot`
-                //        is `None` until the first frame syncs the targets (frame 0) OR on a
-                //        device lacking RG16 storage (`shadow_denoise_storage_ok()`) — in both the
-                //        denoise pass is not recorded, so the (absent) slot is never read. GATED on
-                //        `ray_query_enabled()` — the SAME gate that mints the ring in
-                //        `GBufferTargets::build_shadow_denoise_sets`.
+                // 5d''''. HW-RT rung 3a step 7: the à-trous edge-stop UBO (`sigma_z`/`sigma_n`)
+                //         into the renderer's `shadow_denoise_ubo[s]` — the per-level à-trous sets
+                //         bind slot `s` @4. `resolve_shadow_denoise_policy` re-derives it from the
+                //         author `ShadowDenoiseConfig` each frame (a boot-seed would go stale on a
+                //         retune, mirroring `upload_ray_shadow_ring`). `shadow_denoise_ubo_slot`
+                //         is `None` until the first frame syncs the targets (frame 0) OR on a
+                //         device lacking RG16 storage (`shadow_denoise_storage_ok()`) — in both the
+                //         denoise pass is not recorded, so the (absent) slot is never read. GATED on
+                //         `ray_query_enabled()` — the SAME gate that mints the ring in
+                //         `GBufferTargets::build_shadow_denoise_sets`.
                 if let Some(denoise_slot) = host.frame.shadow_denoise_ubo_slot(s) {
                     let resolved_denoise = world.resource::<ResolvedShadowDenoise>();
                     // SAFETY: `denoise_slot` is the renderer's `shadow_denoise_ubo[s]` — a live
@@ -1881,15 +1917,15 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     }
                 }
 
-                // 5d''''. HW-RT Rung 3b step 6: the temporal reproject scalars
-                //         (`feedback_max`/`feedback_min`/`variance_gamma`/`depth_tol`) into the
-                //         renderer's `temporal_shadow_ubo[s]` — the temporal set binds slot `s` @6.
-                //         `resolve_temporal_shadow_policy` re-derives it from the author
-                //         `ShadowDenoiseConfig` each frame (a boot-seed would go stale on a retune,
-                //         mirroring the à-trous upload above). `temporal_shadow_ubo_slot` is `None`
-                //         until the targets sync (frame 0) OR when the temporal denoise is not armed
-                //         (the ring was never minted) — in both the temporal pass is not recorded, so
-                //         the (absent) slot is never read.
+                // 5d'''''. HW-RT Rung 3b step 6: the temporal reproject scalars
+                //          (`feedback_max`/`feedback_min`/`variance_gamma`/`depth_tol`) into the
+                //          renderer's `temporal_shadow_ubo[s]` — the temporal set binds slot `s` @6.
+                //          `resolve_temporal_shadow_policy` re-derives it from the author
+                //          `ShadowDenoiseConfig` each frame (a boot-seed would go stale on a retune,
+                //          mirroring the à-trous upload above). `temporal_shadow_ubo_slot` is `None`
+                //          until the targets sync (frame 0) OR when the temporal denoise is not armed
+                //          (the ring was never minted) — in both the temporal pass is not recorded, so
+                //          the (absent) slot is never read.
                 if let Some(temporal_slot) = host.frame.temporal_shadow_ubo_slot(s) {
                     let resolved_temporal = world.resource::<ResolvedTemporalShadow>();
                     // SAFETY: `temporal_slot` is the renderer's `temporal_shadow_ubo[s]` — a live
@@ -1905,7 +1941,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 }
             }
 
-            // 5d'''''. Anti-aliasing Stage 4 (TAA W5): the resolve's tunables UBO
+            // 5d''''''. Anti-aliasing Stage 4 (TAA W5): the resolve's tunables UBO
             // (`ResolvedTaa`) + its DEDICATED `MotionCam` UBO — into the renderer's
             // `taa_ubo[s]`/`taa_motion_cam_ubo[s]`. NOT `hwrt`-gated (mirrors the à-trous/
             // temporal uploads above, minus the feature gate). `taa_ubo_slot`/
@@ -2274,24 +2310,22 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // even when the pairs are not re-uploaded. `FixedTime` is inserted at
             // `finish()` (insert-if-absent), so it is always present in the loop.
             let overstep = world.resource::<FixedTime>().overstep_fraction();
-            // SDFDDGI I2 (arm): GI is ON when the world carries an ENABLED `DdgiConfig` (the host's
-            // config path — the owner/test inserts `DdgiConfig { ddgi_indirect: true, .. }`) AND the
-            // device supports B10G11R11/RG16F STORAGE (plan §3 degrade — the atlas was created WITHOUT
-            // the STORAGE bit on an unsupported device, so binding it as a storage image would fault;
-            // clamp to OFF). Absent (the default host that never composes `DdgiPlugin`), GI is OFF →
-            // `ddgi_update = None`, the byte-identical 0%-gate. Even when ON the render stays
-            // byte-identical this rung (I3 wires the resolve sample; the atlas is written-but-unread).
-            // Rung R9c: the CONFIG half routes through the boot-freeze clamp (warn-once no-op
-            // under a non-Deferred path — the SAME `effective_ssao_config` discipline); the
-            // device-caps fold stays live.
-            let ddgi_cfg_on = world
-                .try_resource::<boyko_render::DdgiConfig>()
-                .is_some_and(|cfg| cfg.enabled());
-            let ddgi_cfg_on = match world.try_resource::<boyko_render::RenderPathFrozenConsumers>() {
-                Some(f) => boyko_render::effective_ddgi_enabled(ddgi_cfg_on, f),
-                None => ddgi_cfg_on,
-            };
-            let ddgi_enabled = ctx.device_caps().ddgi_storage_ok() && ddgi_cfg_on;
+            // SDFDDGI host-hook (arm): the probe-update pass arms from the SAME carrier the
+            // header bit and the b18 upload (step 5d'') derive from — `ResolvedDdgi.ddgi_mode_word`,
+            // written once per frame by `resolve_ddgi_grid_gated` from the config + the R9c boot
+            // freeze + the device STORAGE caps (`DdgiCaps`, the boot query inserted above). NO
+            // predicate is recomputed here: an armed frame is, by construction, a frame whose b18
+            // bytes are a finite grid and whose header bit is 1. An absent carrier (a subset host
+            // without `DdgiPlugin`) reads DISABLED ⇒ `ddgi_update = None`, the byte-identical
+            // 0%-gate. The previous shape re-derived config + freeze + caps HERE (a third
+            // predicate next to the gate's and the resolve's), which is how the update pass came
+            // to dispatch over a grid the resolve never sampled.
+            let ddgi_armed = resolved_ddgi.ddgi_mode_word != 0;
+            debug_assert!(
+                !ddgi_armed || ctx.device_caps().ddgi_storage_ok(),
+                "invariant: an armed carrier implies storage caps (DdgiCaps is the boot query \
+                 the single writer folds)"
+            );
             // HW-RT rung R2a-3: TLAS arming — hwrt + an RT device + a non-empty gather. On an RT
             // device, first sync the frame-invariant BLAS-address table (a no-op unless the mesh
             // asset table's `install_epoch` advanced — asset-streaming plan F6: gated on install,
@@ -2346,7 +2380,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             };
             // Render terminator-softening: `true` iff the world carries a `LightingConfig`
             // resource with `terminator_softening > 0` — the SAME `world.try_resource` pattern
-            // `ddgi_enabled` above uses. Absent (the default host that never sets it) or `0.0`
+            // `resolved_ddgi` above uses. Absent (the default host that never sets it) or `0.0`
             // (the plugin-inserted default), `terminator_wrap` is `false` → `scene()` binds the
             // base resolve pipeline → byte-identical (the 0%-gate).
             let terminator_wrap = world
@@ -2355,7 +2389,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // Anti-aliasing Stage 1/2: read the resolved AA mode (`AaPlugin`'s
             // `resolve_aa_policy` is the single writer). No `#[cfg(hwrt)]` — AA is
             // feature-independent, unlike `denoise_armed` above. The SAME `try_resource`
-            // pattern `terminator_wrap`/`ddgi_enabled` use: a host that omits `AaPlugin`
+            // pattern `terminator_wrap`/`resolved_ddgi` use: a host that omits `AaPlugin`
             // degrades to the default `Off` rather than panicking. Default/absent `Off` ⇒
             // `scene.aa == None` ⇒ byte-identical (the 0%-gate).
             let resolved_aa_mode = world
@@ -2520,7 +2554,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 punctual_armed.then_some(resolved_atlas),
                 interp_count,
                 overstep,
-                ddgi_enabled,
+                // SDFDDGI host-hook: the carrier itself (b6 packs the grid from it), `None` when
+                // disarmed — the same `Option<&Resolved*>` shape `csm` / `atlas` use above.
+                ddgi_armed.then_some(&resolved_ddgi),
                 // VB-SV0 DP3b: the frame's resolved mode from the `_armed` pair
                 // `sync_sv0_light_gate` published inside this same ECS frame — the request bits
                 // never reach the recorder, only the clamped resolution does.
@@ -3439,6 +3475,7 @@ unsafe fn destroy_host_gpu_chain(host: WindowHost, ctx: &VulkanContext) {
         native_extent: _,
         resolved_render_path: _,
         light_uploaded_gen: _,
+        last_ddgi_grid: _,
         particle_effects_uploaded_gen: _,
         swapchain,
         surface,
