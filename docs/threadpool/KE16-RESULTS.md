@@ -175,7 +175,7 @@ test result: ok. 5 passed; 0 failed; 0 ignored; finished in 15.34s
 ```
 
 * `loom_m2_calibration_no_producer_fence_is_lost` went RED as required, and its attribute at
-  `tests/loom_pool.rs:387` is `#[should_panic(expected = "M2: lost wake")]` — not a bare
+  `tests/loom_pool.rs:413` is `#[should_panic(expected = "M2: lost wake")]` — not a bare
   `#[should_panic]` — so the "ok" certifies the un-fenced copy reproduced the lost wake **with its
   own oracle's message**. §5 item 15 satisfied; the model can fail, so its green is a gate.
 * The M4 pair (`:1403`, `:1461`), M2c (`:677`) and M1c (`:1570`) are `cfg(feature)`-gated and
@@ -1113,7 +1113,7 @@ and states that **both B arms remove it**.
 ⚠ Two constraints any remedy inherits. `Injector` is a linked list of 63-slot blocks, so the
 documented "steals about half" rule applies **only** when head and tail share a block; a real
 multi-block wave takes the flat `(BLOCK_CAP − offset).min(limit)` branch, i.e. 33 every call — "it
-only takes half, so it self-limits" is wrong here. And `tests/loom_pool.rs:208-236, 330` models the
+only takes half, so it self-limits" is wrong here. And `tests/loom_pool.rs:234-262, 356` models the
 joiner's re-poll **as `steal_batch_and_pop` specifically**, citing the `SeqCst` fence it carries, so
 changing that call changes what those models cover.
 

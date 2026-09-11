@@ -514,8 +514,8 @@ later at `:4652+`, so moving the block *earlier* strengthens it), and
 
 ⚠️ **The configuration is not hypothetical.** G5 runs a marked scene under `HzbConfig::Build` with
 `BOYKO_HZB_DUMP` — armed-split **and** armed-poison in the same frame, by construction. The golden
-and gate runs are **dev profile** (`scripts/golden.ps1:180`/`:193` carry no `--release`;
-`goldens/PINS.toml:759` relies on it: *"The pin run itself exercises every new declare/record parity
+and gate runs are **dev profile** (`scripts/golden.ps1:183`/`:196` carry no `--release`;
+`goldens/PINS.toml:777` relies on it: *"The pin run itself exercises every new declare/record parity
 `debug_assert` (dev-profile build)"*), so the assert is live there. In a release binary
 (`Cargo.toml` declares only `[profile.bench]`, so `debug-assertions` are off) the assert is compiled
 out and the clear would run *after* the dispatches, reddening
@@ -880,7 +880,7 @@ filters `s.starts_with("vb")` (`:196`) and asserts set-equality against `VB_PINS
 `found` 15 against a 14-element list and the step reds. `VB_PINS` is bumped in the same commit. That
 file's own `:57-64` records why this list exists and that it already caught exactly this omission
 once in this campaign — ⚠️ the critique cited that note as `PINS.toml:57-64`; it is
-`vg_density_census.rs:57-64` (PINS.toml:57-64 is the `[grand_showcase_2mat]` block). **Read
+`vg_density_census.rs:57-64` (PINS.toml:75-82 is the `[grand_showcase_2mat]` block). **Read
 `vg_density_census.rs:57-64` before authoring the bump**: if `vg_density_census_gate` (`:330`,
 `#[ignore]`d, live-GPU) also requires a measured density row for the new name, that measurement is
 part of P2-6 rather than an afterthought.
@@ -911,10 +911,10 @@ because its file list was short by five; with the list in Integration corrected,
 
 - **P2-0 — the sync-validation LIVENESS probe. No code change; one measured run; it decides what two
   later gates mean.** Round 1 asserted *"`SYNCHRONIZATION_VALIDATION` does not appear anywhere in
-  this repository"* and that is **false**: `crates/boyko_rhi_vulkan/src/device.rs:2152` is
+  this repository"* and that is **false**: `crates/boyko_rhi_vulkan/src/device.rs:2164` is
   `VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT`, packed into `VkValidationFeaturesExt`
   at `:2153-2160` and chained as the instance `p_next` head at `:2187-2193`; `ffi.rs:1665`/`:1670`
-  define both; `scripts/golden.ps1:167` sets `BOYKO_ENABLE_VALIDATION=1` for every `-ValidationOn`
+  define both; `scripts/golden.ps1:170` sets `BOYKO_ENABLE_VALIDATION=1` for every `-ValidationOn`
   pin and `runner.rs:213` reads it; `crates/boyko_render/tests/sync_validation.rs:47-54` calls it
   *"the AUTHORITATIVE oracle"*. **But it degrades SILENTLY** when `VK_EXT_validation_features` is
   absent — `device.rs:2107-2111`, *"Its absence downgrades to plain validation rather than crashing
@@ -1007,11 +1007,11 @@ claim.
 
 A new pin `vb_occ_split`: the `[vb_mesh]` scene, verbatim, with `OcclusionCulling` **in the spawn
 bundle of all five spheres**. Its `sha256_software` **and** `sha256_hwrt` must be the same literals as
-`[vb_mesh]`'s (`goldens/PINS.toml:300`/`:301` — ⚠️ round 1's anchor `:281-284` had **MOVED**; the
-`[vb_mesh]` block is now `:271-307`, `test_binary` `:295`, `test_name` `:296`). It arms through the
-`[vb_mesh_hzb]` route, which needs **no new test binary**: that pin (`:309-341`) reuses
-`test_binary = "vb_mesh"` (`:327`) / `test_name = "vb_mesh_screenshot_dump"` (`:328`) and arms via
-`[vb_mesh_hzb.env]` (`:335`) with `BOYKO_VG_HZB = "1"` (`:339`), read **inside the fixture** at
+`[vb_mesh]`'s (`goldens/PINS.toml:318`/`:319` — ⚠️ round 1's anchor `:281-284` had **MOVED**; the
+`[vb_mesh]` block is now `:289-325`, `test_binary` `:313`, `test_name` `:314`). It arms through the
+`[vb_mesh_hzb]` route, which needs **no new test binary**: that pin (`:327-359`) reuses
+`test_binary = "vb_mesh"` (`:345`) / `test_name = "vb_mesh_screenshot_dump"` (`:346`) and arms via
+`[vb_mesh_hzb.env]` (`:353`) with `BOYKO_VG_HZB = "1"` (`:357`), read **inside the fixture** at
 `crates/boyko_app/tests/vb_mesh.rs:198-200`. A `BOYKO_VG_OCC = "1"` branch takes the identical route.
 
 **Why all five and not a strict subset.** A subset would split the mesh family into two archetypes,
@@ -1023,14 +1023,14 @@ mixed-archetype case is exercised by G2's `vb_occ_multi` fixture, where the gate
 than a hash and an order change cannot produce a false red.
 
 ⚠️ **"Cannot be blessed wrong" — round 1's claim — is FALSE, and the harness prints the destroying
-advice.** `scripts/golden.ps1:245-259` overwrites `sha256_*` with whatever the run produced (the
-write is `Set-Content` at `:259`, inside `if ($Bless)` at `:240`), and `:283` prints *"re-run with
+advice.** `scripts/golden.ps1:248-262` overwrites `sha256_*` with whatever the run produced (the
+write is `Set-Content` at `:262`, inside `if ($Bless)` at `:243`), and `:286` prints *"re-run with
 -Bless"* on the very mismatch the pin exists to report. Nothing parses `PINS.toml` to check that two
 pins agree. The tree states this failure for the identical construction one pin above —
-`PINS.toml:315-318`, *"a lone re-bless here would silently convert the gate from 'inert' to
+`PINS.toml:333-336`, *"a lone re-bless here would silently convert the gate from 'inert' to
 'whatever it does now'"*. What IS true (and closes OQ5) is that the harness cannot re-bless
 *unhelpfully*: the sole `PINS.toml` write is under `-Bless`, a missing key throws only there
-(`:258`), and on the check path an absent or `PENDING` hash exits 2 (`:266`/`:270`).
+(`:261`), and on the check path an absent or `PENDING` hash exits 2 (`:269`/`:273`).
 **⇒ G1 ships with a guard**, a plain `#[test]` that parses `goldens/PINS.toml` and asserts
 `vb_occ_split.sha256_software == vb_mesh.sha256_software`, the same for `sha256_hwrt`, and the same
 for the existing `vb_mesh_hzb`/`vb_mesh` pair. The machinery already exists —
@@ -1133,7 +1133,7 @@ and size rules on the late fill.
   `debug_assert`s alone. **Whichever answer P2-0 returns goes in the commit message**, because a
   green validation leg silently read as barrier evidence is exactly how this campaign has shipped
   vacuous gates before. Independently: the goldens themselves run with `BOYKO_DISABLE_VALIDATION=1`
-  (`goldens/PINS.toml:42`), so the *golden* legs see no validation at all — only the explicit
+  (`goldens/PINS.toml:60`), so the *golden* legs see no validation at all — only the explicit
   `-ValidationOn` runs do.
 
 ### G4 — the derived barrier stream, per CONFIGURATION, asserted FIELD-BY-FIELD
@@ -1189,7 +1189,7 @@ there"*) is falsified by this piece and is edited in P2-5. S4 asserts the same c
 | R2 | delete `vb_raster_late`'s `buffer_access(DRAW_INDIRECT, INDIRECT_COMMAND_READ)` | RED, count drops to 2 |
 | R3 | delete `vb_raster_late`'s `vb_depth` `image_access` | RED — the round-trip transitions vanish and the late scope would `LOAD_OP_LOAD` an image left in `SHADER_READ_ONLY_OPTIMAL` |
 | R4 | declare `vb_raster_late`'s `vb_id` access with `VK_IMAGE_LAYOUT_UNDEFINED` | RED — a first touch appears where a preserving transition must be |
-| R5 | move `hzb_build` **alone**, leaving `hzb_poison` at the old slot | RED, **and it must be shown reddening twice**: the `debug_assert!` at `graph_bridge.rs:4711-4717` fires in dev profile (which is what the golden runs use — `golden.ps1:180`/`:193` carry no `--release`, and `PINS.toml:759` relies on it), and in a release binary the clear runs after the dispatches and `hzb_engine_pyramid_gate.rs:507-517`'s clause 1 reds at every texel. |
+| R5 | move `hzb_build` **alone**, leaving `hzb_poison` at the old slot | RED, **and it must be shown reddening twice**: the `debug_assert!` at `graph_bridge.rs:4711-4717` fires in dev profile (which is what the golden runs use — `golden.ps1:183`/`:196` carry no `--release`, and `PINS.toml:777` relies on it), and in a release binary the clear runs after the dispatches and `hzb_engine_pyramid_gate.rs:507-517`'s clause 1 reds at every texel. |
 
 **Authoring order is mandatory:** the baseline (P2-4) precedes the machine (P2-5). P1-5a's C1/C2
 exists because *"Authoring them after the change would certify the new behaviour."*
@@ -1368,7 +1368,7 @@ not a measurement.
    measured density row for `vb_occ_split`, or does the set-equality bump alone suffice?** Settled by
    reading `vg_density_census.rs:57-64` at P2-6. If a row is required, `vb_occ_split`'s is
    `[vb_mesh]`'s by construction (same scene, same geometry) and the pre-fill-and-verify pattern at
-   `PINS.toml:353-358` / `:477-483` is the shape.
+   `PINS.toml:371-376` / `:495-501` is the shape.
 4. **Naming.** The `vb_raster` identifier is kept for the early pass rather than renamed to
    `vb_raster_early`: 20+ anchors across four files and several docs cite it by name, the pass name
    string reaches `OpSource`-adjacent debug paths, and the R9 plan's §0 already rejected a rename on
@@ -1384,8 +1384,8 @@ not a measurement.
    declares 28 resources non-hwrt (15 images + 13 buffers) / 35 under hwrt; one more is noise. Round
    1 left this open with a "I have not read" hedge; it is read and closed.
 7. **`golden.ps1`'s blessing path — CLOSED.** It cannot re-bless without `-Bless` (sole write:
-   `Set-Content` at `:259` inside `if ($Bless)` at `:240`; check path exits 2 on an absent or
-   `PENDING` hash, `:266`/`:270`). What was missing is the *guard* against a human re-blessing, and
+   `Set-Content` at `:262` inside `if ($Bless)` at `:243`; check path exits 2 on an absent or
+   `PENDING` hash, `:269`/`:273`). What was missing is the *guard* against a human re-blessing, and
    G1 now ships it.
 
 ---

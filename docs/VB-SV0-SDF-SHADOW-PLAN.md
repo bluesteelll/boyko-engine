@@ -240,7 +240,7 @@ drift a gate, but it is fenced and dated so a later reader can tell it apart fro
 | D2 | §3.3's stated *reason* for expecting the ULP probe to fire is **withdrawn**: "structurally the overwhelmingly likely outcome" is not supported, and a 1-ULP perturbation measured on a real term did **not** fire. The probe's *placement* is what saves it — it sits AFTER the OETF, so it is not gamma-attenuated. Rev 2's procedural demand that the control be DEMONSTRATED red is now the only thing carrying that gate, and it is enough. | P0-A |
 | D3 | S2 gate (c) enumerates **all six** `deferred_pbr` `.spv`, not the two a `cs_6_0`-only helper could reach. All six were re-DXC'd and are byte-identical today (§11.2), so the gate is proven implementable before it is written. `redxc_with_defines` gains a **profile** parameter — a `-T` cannot be smuggled through the `defines` slice, which unconditionally `-D`-prefixes every element (`vb_lit_producer_spv_sync.rs`'s `redxc_with_defines`). | P0-C |
 | D4 | S1 lands **two** fixtures, `vb_both_sdf` and `vb_both_sdf_tex`, making S4(ii) constructible for all 8 armable rows. Rev 2 could not build rows 4/6/8. The textured-ness is entirely in-test and the assets are committed; no host plumbing is added. | P0-B |
-| D5 | §5.3's **blocking precondition on S1 is DELETED**. It described a `PINS.toml` self-contradiction that no longer exists: `d93e425` reconciled eight pin blocks, and `goldens/PINS.toml:283-285` now states the `[vb_mesh]` values are the real bless output. §5.3's other consequence (no gate duplicates a hash literal) stands. | P0-A review |
+| D5 | §5.3's **blocking precondition on S1 is DELETED**. It described a `PINS.toml` self-contradiction that no longer exists: `d93e425` reconciled eight pin blocks, and `goldens/PINS.toml:301-303` now states the `[vb_mesh]` values are the real bless output. §5.3's other consequence (no gate duplicates a hash literal) stands. | P0-A review |
 | D6 | Recorded, not fixed here: `deferred_pbr_wrap.comp.spv` ships and is built unconditionally (`gpu_scene/mod.rs:1654-1656`) but has **no row** in `docs/SHADER-VARIANT-MANIFEST.md` — a standing-rule violation predating SV0, fixed in its own commit so this stage does not absorb it. | P0-C |
 | D7 | Two structural blind spots recorded that no earlier revision named: metals have `diffuse_color` **exactly** 0, so `diff_ambient * ao_final` is identically zero for 2 of `[vb_mesh]`'s 5 spheres; and `float ao_final = 1.0;` has **5** sites in `crates/boyko_rhi_vulkan/shaders/`, of which SV0 scopes 3. | P0-A review |
 
@@ -354,7 +354,7 @@ specular ambient, so §1.3's equivalence claim is structural, not aspirational.
   (`render_path_config.rs:904`). On `VB × Both × HWRT` the SDF field therefore casts **no** shadow on
   mesh, because HWRT traces only the mesh TLAS and SDF bodies are not in it. SV0 neither introduces
   nor fixes this; §10 Q3 records it as an unlisted follow-up made explicit.
-* **Not byte-comparable to Deferred.** `goldens/PINS.toml:288-291` records that VB's analytic
+* **Not byte-comparable to Deferred.** `goldens/PINS.toml:306-309` records that VB's analytic
   barycentric interpolation is a genuinely different FP path from hardware raster interpolation.
   VB-vs-Deferred parity is **visual** (owner-eval), never a byte gate.
 
@@ -949,7 +949,7 @@ values *"UNBLESSED placeholders — NOT real hashes"* while the sibling `[vb_bot
 same value as live) and made reconciling it a **blocking precondition on S1**.
 
 **That precondition is discharged and is deleted from this plan.** Commit `d93e425` reconciled the
-eight affected blocks; `goldens/PINS.toml:283-285` now states the values are *"the real bless
+eight affected blocks; `goldens/PINS.toml:301-303` now states the values are *"the real bless
 output, not placeholders"* and names the blessing commit. `grep -n UNBLESSED goldens/PINS.toml`
 returns one hit — `:15`, the generic `"PENDING"` sentinel rule. Nothing blocks S1.
 
@@ -1052,8 +1052,8 @@ message.
 
 ### S1 — the fixture (host test only, no shader edit) — **BLOCKING**
 
-**Why it exists.** Every current VB golden has an **empty** SDF edit list: `PINS.toml:322`
-(`vb_both`: *"boot-seeded EMPTY (count == 0)"*) and `:355` (`vb_sdf_only`, same). By §4.4 the SV0
+**Why it exists.** Every current VB golden has an **empty** SDF edit list: `PINS.toml:340`
+(`vb_both`: *"boot-seeded EMPTY (count == 0)"*) and `:373` (`vb_sdf_only`, same). By §4.4 the SV0
 term on such a scene is exactly `1.0` and byte-identity is *vacuous*. Arming against today's fixtures
 would produce a green gate quantified over an empty selection — the campaign's #1 named defect.
 
@@ -1518,7 +1518,7 @@ Named first are the ones this campaign has actually hit.
 
 | # | Risk | Precedent | Mitigation |
 |---|---|---|---|
-| R1 | **Vacuously-green gate** — assertion quantified over an empty selection. | Hit 3× in Stage 1. **Live here:** every VB golden has `edit_count == 0` (`PINS.toml:322`, `:355`). | S1 is blocking and its gate is an `Eval`-oracle adequacy check, not "the frame differs"; S4(ii) is quantified over **all 8** armable variants. |
+| R1 | **Vacuously-green gate** — assertion quantified over an empty selection. | Hit 3× in Stage 1. **Live here:** every VB golden has `edit_count == 0` (`PINS.toml:340`, `:373`). | S1 is blocking and its gate is an `Eval`-oracle adequacy check, not "the frame differs"; S4(ii) is quantified over **all 8** armable variants. |
 | R2 | **OFF-path drift invisible to an 8-bit golden.** | Rev 1's instance refuted (§3.4); Rev 2's second instance refuted by measurement (§3.4.1). The risk itself is **CONFIRMED REAL and quantified** — §11.1 measured the golden blind to 1 ULP and to 2^-20 on a live shading term. | G1 bounds the textual blast radius; G2 executes and must go **demonstrably** red, with no expectation pre-registered (§3.3). **Residual, stated at full strength:** a ≤1-ULP-class perturbation of the OFF path would pass every gate in this repo. That is the accepted inertness standard for this stage, not an oversight — §12 Q5 puts the choice to the owner. |
 | R3 | **Cost model instead of measurement.** | The refuted `a + b*(froxels*N)` model. | No predicted number in any gate. S1.5 and S5 are measurements; §7's threshold is a ratio to a measured sibling. |
 | R4 | **Session drift read as a regression.** | The phantom regression on this hardware. | Interleaved paired A/B, warmup discarded, 3 sessions, spread reported — enforced in S1.5 and S5. |

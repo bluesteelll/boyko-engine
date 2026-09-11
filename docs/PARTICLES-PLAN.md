@@ -180,7 +180,7 @@ peak (192-bit GDDR6, 288–336 GB/s), low for a streaming RMW where 60–80 % is
 | F3b | `build_graphics_pipeline(desc, set1, depth_compare, depth_write)` is **already parameterised**; `depth_test_enable` hardcoded `VK_TRUE` | `rhi_impl/device.rs:1622`, `:1974-1976`, `:925`, `:2143` |
 | F3c | Depth conventions differ **by path**: `LESS` for Deferred's custom-linear depth, `GREATER` for hardware reverse-Z | `rhi_impl/device.rs:1619-1621`, `:2132-2134` |
 | F3d | Deferred's depth reaches the transparent slot at `SHADER_READ_ONLY_OPTIMAL`; Forward/VB at a depth-stencil write (or SRO under an SDF leg); **only ForwardPlus** already declares `FRAG / DS_ATTACHMENT_READ / DEPTH_ATTACHMENT_OPTIMAL` | `graph_bridge.rs:1259-1263`, `:1296-1300`, `:1327-1331`, `:2238-2242`, `:743`, `:2001` |
-| F4 | `vkCmdDispatchIndirect` is **loaded** and has **zero call sites** | `device.rs:578`, `:2029` |
+| F4 | `vkCmdDispatchIndirect` is **loaded** and has **zero call sites** | `device.rs:578`, `:2041` |
 | F5 | `vkCmdDrawIndexedIndirect` is loaded and used in production; stride 20; `draw_count` forced to 1 | `device.rs:652`; `passes/vb.rs:2454` |
 | F5b | `VkDrawIndexedIndirectCommand` is `#[repr(C)]` ⇒ `offset_of!(.., instance_count) == 4` is real; **`first_instance` MUST be 0 on this device** — "a nonzero value here is a silent corruption class" | `ffi.rs:3595-3616` (verbatim `:3599-3602`) |
 | F6 | `vkCmdDrawIndirect` (non-indexed) and `…IndirectCount` are **not** loaded | `passes/vb.rs:2646` |

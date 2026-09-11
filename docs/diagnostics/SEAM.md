@@ -287,7 +287,7 @@ the rung cannot commit alone.
 
 **Because.** Sharing stderr's *handle* — rather than taking a raw fd — is what makes the two
 producers share stderr's inner lock, so **neither can splice a line into the other**. That is what
-keeps `scripts/golden.ps1:226`'s line-start match on `[vk-validation] ` working. *Ordering* between
+keeps `scripts/golden.ps1:229`'s line-start match on `[vk-validation] ` working. *Ordering* between
 the two producers remains undefined and is stated as such; **line integrity, not ordering, is what
 the gate consumes.**
 

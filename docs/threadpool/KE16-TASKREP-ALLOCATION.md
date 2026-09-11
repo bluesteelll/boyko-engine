@@ -64,7 +64,7 @@ baseline on a `[target.<host triple>] rustflags` key (one for each Windows tripl
 environment variable *replaces* it. Where `--cfg loom` is needed it goes through `cargo --config
 target."cfg(windows)".rustflags=[…]`, which JOINS — re-keyed 2026-09-10 from the gnu triple, which
 after the host switch would match nothing and yield a model-free `running 0 tests`, exit 0. The same asymmetry applies to
-`MIRIFLAGS`: `.cargo/config.toml:31-32` sets `MIRIFLAGS = "-Zmiri-tree-borrows"`, and an
+`MIRIFLAGS`: `.cargo/config.toml:36-37` sets `MIRIFLAGS = "-Zmiri-tree-borrows"`, and an
 environment `MIRIFLAGS` replaces rather than extends it.
 
 ---
@@ -225,7 +225,7 @@ a timing.** If a later reader wants a speed number here, the correct text is tha
 taken.**
 
 Two adjacent figures that a reader will otherwise mistake for a stage-3b measurement — and a
-third, §Ladder's stage-1 CS-2 ledger, which is transcribed from `KE16-RESULTS.md:179-180` and
+third, §Ladder's stage-1 CS-2 ledger, which is transcribed from `KE16-RESULTS.md:223-224` and
 belongs to stage 1:
 
 * **The empty-scope cost is NOT RE-READABLE ON THIS TREE.** `ScopeBlock::new()` is a `const fn` that
@@ -540,8 +540,8 @@ code state **CS-2** and records stage 1's effect — at instruction level, read 
 timing — as **"+3 instructions and +8 B per spawn, −1 level in the call's dependency
 chain"**, which is not an instruction win.
 
-⚠ **That figure is TRANSCRIBED from `docs/threadpool/KE16-RESULTS.md:179-180` (CS-2 is
-defined at `:158`) and belongs to STAGE 1, not to 3b.** No verification arm of this register
+⚠ **That figure is TRANSCRIBED from `docs/threadpool/KE16-RESULTS.md:223-224` (CS-2 is
+defined at `:202`) and belongs to STAGE 1, not to 3b.** No verification arm of this register
 re-took it, and it is the only quantified performance-shaped number in this file — which is
 why it is labelled here rather than left to read as a 3b measurement (§NoTiming).
 
@@ -769,7 +769,7 @@ are `src/task/scoped.rs:222-268` and `:270-309` (each opens a `ScopeBlock::new()
 and calls `block.free_all()` at `:267`/`:308`), with detached siblings at
 `src/task/detached.rs:165-196` and `:197+`. The recipe is stated at `src/task/mod.rs:385-393` —
 `MIRIFLAGS` **without** `-Zmiri-ignore-leaks`, which is already the tree's default
-(`.cargo/config.toml:31-32` = `-Zmiri-tree-borrows`; CI's Miri job sets no `MIRIFLAGS` at all).
+(`.cargo/config.toml:36-37` = `-Zmiri-tree-borrows`; CI's Miri job sets no `MIRIFLAGS` at all).
 
 ```
 cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool --lib -- task::scoped::tests

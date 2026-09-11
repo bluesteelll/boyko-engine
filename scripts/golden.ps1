@@ -160,7 +160,7 @@ foreach ($k in $pins.Keys) {
 #
 # BOYKO_ENABLE_VALIDATION is not redundant with the strip, and the difference was measured, not
 # assumed. The backend gates the layer on `enable_validation && BOYKO_DISABLE_VALIDATION unset`
-# (boyko_rhi_vulkan/src/device.rs:2350), and boyko_app's runner hardcoded the first conjunct to
+# (boyko_rhi_vulkan/src/device.rs:2362), and boyko_app's runner hardcoded the first conjunct to
 # `false`. Stripping alone therefore enabled NOTHING on all 22 boyko-app pins -- this switch
 # reported "VALIDATION: clean (0 messages)" unconditionally, a gate that could not fail. Proof:
 # a deliberately illegal `mip_levels: 12` on a 512x512 image (max 10) was accepted by

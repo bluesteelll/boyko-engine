@@ -130,7 +130,7 @@ impl OcclusionConfig {
 
 /// A verdict override for measurement and gating. NOT an owner knob: it exists so a fixture can
 /// hold every mechanism constant and vary one push-constant bit (the `[vb_occ_mixed*]` ladder,
-/// `PINS.toml:434-439`). Default `None`. Inert unless `OcclusionConfig` armed the split.
+/// `PINS.toml:452-457`). Default `None`. Inert unless `OcclusionConfig` armed the split.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OcclusionForce {
     #[default] None,
@@ -198,7 +198,7 @@ pub(crate) fn hzb_plan_for(
 | `hzb_plan.rs:17` | the module header repeats the claim in the degrade paragraph | reworded to "the same disarmed state a plan-less config pair produces". Same citation. |
 | `hzb_config.rs:42-51` (*"does NOT join `RenderPathFrozenConsumers`"*) | rests on *"the pyramid … is read by nothing"* — **stale since piece 3** | the dead half is deleted; A2's ownership derivation replaces it. The lockstep check is cited as a **`debug_assert!`** (`targets.rs:1836`, checked at `:8632`) **and the sentence says so** — a repair that upgraded it to "release-live" would be this campaign's fourth doc-rot repair to introduce a new lie. |
 
-**Byte-identity: zero pins move — and that is exactly why no pin can serve as the disjunct's control** (condition 1). The disjunct can only change a run that arms occlusion **without** `BOYKO_VG_HZB`. All five occlusion pins set `BOYKO_VG_HZB = "1"` (`PINS.toml:411`, `:474`, `:499`, `:528`, `:556`) and the other 25 arm no occlusion, so deleting the disjunct leaves every pinned configuration — and `vb_mesh_occ_pins_actually_split` — **green**. The executable red therefore has to come from a configuration no pin renders:
+**Byte-identity: zero pins move — and that is exactly why no pin can serve as the disjunct's control** (condition 1). The disjunct can only change a run that arms occlusion **without** `BOYKO_VG_HZB`. All five occlusion pins set `BOYKO_VG_HZB = "1"` (`PINS.toml:429`, `:492`, `:517`, `:546`, `:574`) and the other 25 arm no occlusion, so deleting the disjunct leaves every pinned configuration — and `vb_mesh_occ_pins_actually_split` — **green**. The executable red therefore has to come from a configuration no pin renders:
 
 > **`vb_occ_probe_dump_marked_no_hzb`** — a **fourth worker** in the non-pinned `vb_occ_split_gate.rs` (F40): the same marked single-batch scene, `VB_MESH_PATH`, occlusion armed to `TwoPhase` through `occ_fixture`, and **`HZB_BUILD` deliberately NOT inserted**. Its driver asserts `scopes == 2`. It is not the marked/unmarked control pair's twin and must not be read as one: its partner is `vb_occ_probe_dump_marked` (identical in every respect except the `HzbConfig` insert), so a green pair means "the pyramid arrives by either route" and a red on this leg alone means "the consumer route is gone". Costs no blessing — the binary is pinned by nothing.
 
@@ -239,7 +239,7 @@ The fold at `gpu_scene/mod.rs:6988` becomes `VB_CULL_OCC_ARMED | scene.vb_occlus
 
 - One source of truth: today the arming is an ECS-derived per-frame predicate while the regime is a boot-time env read in another crate; they can disagree and nothing checks them.
 - It removes an `env::var` **and a boot panic** from shipping code.
-- **No pin file changes and no re-blessing.** The `[*.env]` blocks keep `BOYKO_VG_OCC_FORCE = "keep" | "late"` verbatim (`PINS.toml:501`, `:558`); the *fixture* translates env → Resource, exactly as it already translates `BOYKO_VG_HZB` → `HzbConfig`.
+- **No pin file changes and no re-blessing.** The `[*.env]` blocks keep `BOYKO_VG_OCC_FORCE = "keep" | "late"` verbatim (`PINS.toml:519`, `:576`); the *fixture* translates env → Resource, exactly as it already translates `BOYKO_VG_HZB` → `HzbConfig`.
 - **The panic moves with the decode.** A typo'd regime must never silently render the default.
 
 Decode **and insert** live in exactly one place — the new `occ_fixture` module (P4-4).
@@ -714,7 +714,7 @@ All 30 pins stay byte-identical at every rung. **The central vacuity hazard (F15
 
 **Controls (RED):** (i) move `reset_frame` inside the rendering scope → `VUID-vkCmdResetQueryPool-renderpass` in the armed worker and the message-set comparison reds; (ii) place `VbLateRaster`'s bracket *inside* `if occlusion_split` → the disarmed leg's pair becomes FALLBACK and the "no leg is FALLBACK" clause reds with the slot named — where before P4-1 the same edit hung; (iii) size the pool at `2*3` while `VB_PASS_COUNT == 10` → the `reset_frame` assert reds, and with asserts off the validation worker reports an out-of-range reset; (iv) swap `VbRun`'s begin to `TOP_OF_PIPE` → `GapResidual` blows past its band in P4-6 (recorded here as the reason the stage is table-driven and unit-pinned); (v) set both `BOYKO_VB_BENCH` and `BOYKO_VB_CULL_READBACK` → the boot panic fires by name; (vi) set slot 6's bits at the *call sites* instead of threading the witness, then delete the begin stamp inside `record_hzb_poison_build` → the masks read complete while one query is unwritten, and the armed bench run hangs — the executable reason the witness crosses the boundary.
 
-**Cannot claim:** that per-slot numbers are exclusive costs (§B3: within-run migration is zero-sum but redistributes freely); that `m_6` is comparable across an armed/disarmed pair (its call site moves); anything about **barriers** — sync-validation is measured dead on this machine (`PINS.toml:384-388`), so the validation leg sees static legality only; anything about the probe's cost (it cannot co-exist with the bench any more).
+**Cannot claim:** that per-slot numbers are exclusive costs (§B3: within-run migration is zero-sum but redistributes freely); that `m_6` is comparable across an armed/disarmed pair (its call site moves); anything about **barriers** — sync-validation is measured dead on this machine (`PINS.toml:402-406`), so the validation leg sees static legality only; anything about the probe's cost (it cannot co-exist with the bench any more).
 
 ### P4-3 — the record-order witness for `VbCullUniform` (OQ 9, the closable half)
 
@@ -764,7 +764,7 @@ pub fn arm_occlusion(app: &mut App);
 
 **Controls (RED), all executed and published:**
 - **(i) the vacuity demonstration, with a gate that executes.** Delete the `OcclusionConfig` insert from `occ_fixture::arm_occlusion_with` — **one edit**. **All five occlusion pins stay GREEN** (F15/F16), **and so does the cross-pin equality guard**, while `vb_mesh_occ_pins_actually_split` (four legs), G2, `vb_occ_probe_dump_marked_no_hzb` and G-P3-B all red. Verbatim in the commit message, with the pin hashes shown unchanged beside the red gate output.
-- **(ii) the disjunct (condition 1).** Delete `hzb_plan_for`'s disjunct → `occlusion_alone_plans_a_pyramid` reds **and `vb_occ_probe_dump_marked_no_hzb` reds on the GPU**, while **every pin and `vb_mesh_occ_pins_actually_split` stay GREEN** — because all five occlusion pins set `BOYKO_VG_HZB="1"` (`PINS.toml:411/474/499/528/556`) and receive the pyramid by the producer route regardless. The green half is published beside the red half: it is the measured statement of what the pinned corpus cannot see.
+- **(ii) the disjunct (condition 1).** Delete `hzb_plan_for`'s disjunct → `occlusion_alone_plans_a_pyramid` reds **and `vb_occ_probe_dump_marked_no_hzb` reds on the GPU**, while **every pin and `vb_mesh_occ_pins_actually_split` stay GREEN** — because all five occlusion pins set `BOYKO_VG_HZB="1"` (`PINS.toml:429/492/517/546/574`) and receive the pyramid by the producer route regardless. The green half is published beside the red half: it is the measured statement of what the pinned corpus cannot see.
 - **(iii)** map `DeferAll` to `VB_CULL_OCC_FORCE_KEEP` in `flags()` → G-P3-C reds on `Σ n_defer == 6` (the regimes are distinguishable, not merely present).
 - **(iv)** stamp `occ_flags` from the Resource instead of from the pushed word → the `[probe]`/`[host]` provenance cross-check still passes, but flipping `OcclusionForce` after the fold (a deliberate one-line test edit) leaves the artifact reporting the Resource's regime while the GPU ran the other one; the recorder-sourced version reds. The control that proves the stamp is recorder-sourced.
 

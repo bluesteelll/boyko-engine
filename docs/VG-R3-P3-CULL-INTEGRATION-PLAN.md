@@ -37,7 +37,7 @@ and read by nothing (`docs/VG-R3-P1-PYRAMID-PLAN.md`); the capability, the per-i
 
 | claim | refutation | anchor |
 |---|---|---|
-| R2-B2: *"`goldens/PINS.toml` has 25 sections"* | It has **26**. The substantive half stands — only one sets `BOYKO_VG_HZB` — but the arithmetic is **25 of 26 disarmed today**, not 24, and the plan's own "26 pins except two" was wrong in the other direction. | `goldens/PINS.toml` — 26 top-level tables at `:25, 46, 67, 95, 123, 163, 207, 240, 271, 309, 342, 397, 429, 473, 520, 554, 598, 650, 702, 738, 778, 808, 831, 870, 912, 945`; `BOYKO_VG_HZB` only at `:339`, `BOYKO_VG_OCC` only at `:394` |
+| R2-B2: *"`goldens/PINS.toml` has 25 sections"* | It has **26**. The substantive half stands — only one sets `BOYKO_VG_HZB` — but the arithmetic is **25 of 26 disarmed today**, not 24, and the plan's own "26 pins except two" was wrong in the other direction. | `goldens/PINS.toml` — 26 top-level tables at `:43, 64, 85, 113, 141, 181, 225, 258, 289, 327, 360, 415, 447, 491, 538, 572, 616, 668, 720, 756, 796, 826, 849, 888, 930, 963`; `BOYKO_VG_HZB` only at `:357`, `BOYKO_VG_OCC` only at `:412` |
 | R2-B2: *"in the shape the existing boot-layout seeder uses"*, implying one exists in `targets.rs` | **There is no unconditional boot-layout submit in `GBufferTargets::create` at all.** Both boot-clear helpers sit behind conditional wrappers, and `seed_boot_layouts` lives in another crate. So `hzb_null` needs a **new** helper, and it costs an eleventh `DeferredSets::build` parameter plus one drain line in each of the three error arms — a cost round 2 denied and this round pays out loud (D7, Boundary). | `targets.rs:6279` / `:6687` (the two helpers), `:7234` / `:7300` (their conditional wrappers), `boyko_app/src/gpu_scene/csm.rs:365` / `:394-435` |
 | R2-B1: *"`gpu_scene/mod.rs:4005-4012` records that rung R2d-2 already paid for exactly that second-arm-bit pair"* | Wrong anchor. The R2d-2 pair is `vb_visible_instance` (UNCONDITIONAL) against `vb_mesh_bounds` (ARMED). The finding's conclusion is unaffected — only its citation. | `gpu_scene/mod.rs:6488-6492` vs `:6496-6501` |
 | Plan C13's second anchor: *"`mesh_draw.rs:1246-1249` already warns in those words"* | **No such warning exists in that file.** The substance survives on a different anchor: the gather is "recomputed from scratch (never accumulated across frames)". | `boyko_render/src/mesh_draw.rs:657-666` |
@@ -767,7 +767,7 @@ view, minted and bound **unconditionally**, on every VB boot.
 helper lives behind `HzbTargets::build`, whose **first statement** is the armed-only 0%-gate
 (C19: `targets.rs:1258-1262`, before any encoder exists). `hzb_null` is minted and bound
 unconditionally. So on **25 of the 26 committed pins** — every one except `[vb_mesh_hzb]`, which is
-the only section setting `BOYKO_VG_HZB` (`goldens/PINS.toml:339`) — a descriptor would record
+the only section setting `BOYKO_VG_HZB` (`goldens/PINS.toml:357`) — a descriptor would record
 `GENERAL` over an image still in `UNDEFINED`, at **every** `vb_batch_cull` dispatch, from the arming
 commit onward. The escalation exists to make that binding legal and round 2 left it illegal on the
 path that always runs.
@@ -985,7 +985,7 @@ debug_assert!(vb_cull_readback_late.is_none_or(|r| vb_raster_late.is_some_and(|l
 ```
 
 ⚠️ **None of these equates `hzb_build`'s presence with `vb_cull_late`'s** — mechanical fact 17:
-`[vb_mesh_hzb]` (`goldens/PINS.toml:309-333`, env `:335-340`, the variable itself at `:339`) sets `BOYKO_VG_HZB=1` with **no** `BOYKO_VG_OCC` — and it is the **only** one of the 26 committed pins that does, and goldens run
+`[vb_mesh_hzb]` (`goldens/PINS.toml:327-351`, env `:353-358`, the variable itself at `:357`) sets `BOYKO_VG_HZB=1` with **no** `BOYKO_VG_OCC` — and it is the **only** one of the 26 committed pins that does, and goldens run
 the dev profile (`graph_bridge.rs:5071-5076`), so such an assert would
 panic on a correct configuration.
 
@@ -1017,7 +1017,7 @@ path_vb_occlusion_split() = path_is_vb()
   which is exactly why it must be a conjunct and not a comment.
 
 ⚠️ **Consequence that must land in the same commit.** `[vb_occ_split.env]`
-(`goldens/PINS.toml:390-395`) sets `BOYKO_VG_OCC="1"` at `:394` and **not** `BOYKO_VG_HZB`. Adding the
+(`goldens/PINS.toml:408-413`) sets `BOYKO_VG_OCC="1"` at `:412` and **not** `BOYKO_VG_HZB`. Adding the
 conjunct would silently disarm the split on the pin whose whole purpose is to arm it, and G2's
 `scopes == 2` would red for a reason unrelated to any defect. ⇒ `crates/boyko_app/tests/vb_mesh.rs`
 makes `BOYKO_VG_OCC` **imply** the `HzbMode::Build` arm (the const at `:64`, its read at `:135`, the
@@ -1567,7 +1567,7 @@ pub(crate) struct HzbTargets {
 granularity dominates its 4-byte payload, one extra `VulkanBindGroup` per FIF (`vb_set0_late`), and
 one more on HZB boots (`vb_cull_set_hzb`). **On a disarmed `HzbMode::Off` boot — which is 25 of the
 26 committed pins today (`[vb_mesh_hzb]` is the only section setting `BOYKO_VG_HZB`,
-`goldens/PINS.toml:339`), and 24 of 26 after P3-6 adds it to `[vb_occ_split]` — the added device
+`goldens/PINS.toml:357`), and 24 of 26 after P3-6 adds it to `[vb_occ_split]` — the added device
 memory is under 32 KiB plus one 1×1 image**, and no new pass is declared or recorded. One extra
 boot-time submit + fence wait per targets generation (`boot_seed_hzb_null`), on every boot; the
 pyramid's own clear submit is armed-only.
@@ -1859,7 +1859,7 @@ to the test-fixture level.
 |---|---|
 | `src/hzb.rs` | **no functional change.** If the census needs `msb` (`:492-494`), it is exported; nothing else moves. |
 | `src/occlusion_marker.rs` | doc only — the marker's meaning goes from "may be rejected" to "is tested". |
-| `goldens/PINS.toml` | `[vb_occ_split.env]` (`:390-395`) gains `BOYKO_VG_HZB` beside its `BOYKO_VG_OCC="1"` at `:394`; **four** new pins (`vb_occ_mixed_off`, `vb_occ_mixed`, `vb_occ_mixed_keep`, `vb_occ_mixed_late`). ⚠️ The file has **26** top-level pin sections today and exactly ONE sets `BOYKO_VG_HZB` (`:339`) — round 2's critique said 25, and the plan's own "26 except two" was wrong the other way |
+| `goldens/PINS.toml` | `[vb_occ_split.env]` (`:408-413`) gains `BOYKO_VG_HZB` beside its `BOYKO_VG_OCC="1"` at `:412`; **four** new pins (`vb_occ_mixed_off`, `vb_occ_mixed`, `vb_occ_mixed_keep`, `vb_occ_mixed_late`). ⚠️ The file has **26** top-level pin sections today and exactly ONE sets `BOYKO_VG_HZB` (`:357`) — round 2's critique said 25, and the plan's own "26 except two" was wrong the other way |
 | `docs/SHADER-VARIANT-MANIFEST.md` | **no row** — stated so its absence is a decision |
 | `docs/OPEN-QUESTIONS.md` | piece 3 status; and the `vb_indirect_late` provenance gap D8 records as covered by nothing |
 
@@ -1995,7 +1995,7 @@ the gates it is expected to move.
 
 - **P3-6 — ARM IT.** The host sets `VB_CULL_OCC_ARMED`; `path_vb_occlusion_split()` gains its two
   conjuncts (`scene_types.rs:3539-3544`, three conjuncts today); `vb_mesh.rs` makes OCC imply HZB
-  (`:64`/`:135`/`:240-242`); `[vb_occ_split.env]` gains `BOYKO_VG_HZB` (`goldens/PINS.toml:390-395`);
+  (`:64`/`:135`/`:240-242`); `[vb_occ_split.env]` gains `BOYKO_VG_HZB` (`goldens/PINS.toml:408-413`);
   the two tripwires are deleted — `vb.rs:1802-1806` and **`:1224-1230` ONLY** (`:1220-1223` and
   `:1065-1068` survive); the indirection bit is set; `vb_set0_late` and `vb_cull_set_hzb` are bound;
   `VbRecordProbe` is renamed (struct `vb.rs:104-116`, field `:115`) and `late_cull_dispatches` is
