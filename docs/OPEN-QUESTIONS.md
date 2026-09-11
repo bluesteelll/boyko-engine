@@ -5527,3 +5527,70 @@ broadphase + inline colours ≈ 40–50 % of T(1), the fix is parallelising the 
 lowering the per-colour gate / chunk quantisation — not further pool work, and not the in-scope barrier
 alone. If the solve by itself still scales < 2× at W=8, then it is per-wave cost and the barrier is the tool.
 Secondary: `[profile.bench]` is `lto = false`, so none of these absolutes is the shipped binary.
+
+## MEASURED 2026-09-10 — the system heap against mimalloc on the Jolt pyramid: no effect at any worker count, and the 2671-per-step figure that motivated it came from a pool without Stage 3b
+
+**Why this was measured.** A per-frame allocation census of the 1240-body pyramid, taken on
+`feat/ecs-native-storage` @ `ad0ebea4`, counted 2671 heap acquisitions per parallel step — one cell per
+spawned task — and 0 on the physics data path. Two mechanisms could make that cost time at W=8: (a) the
+malloc/free instructions themselves, or (b) cross-thread frees, because the spawner allocates and the
+stealer frees. mimalloc is built for (b), so swapping the global allocator bounds both.
+
+**Protocol.** Two bench executables built before the window and invoked by path, so no cargo ran inside
+it: `jolt_parity_pyramid` without and with the `bench-alloc` feature (this commit). Disassembly proves
+the arms: in the first `__rust_alloc` jumps to `__rdl_alloc` (the Windows process heap); in the second
+to `mi_malloc_aligned`, and `__rust_dealloc` to `mi_free`. Load receipt before and after every region,
+arms interleaved per W, four passes, then the adjudicator's own W=8 cell with the arm order reversed.
+`rustc 1.98.1 (48a229cea)`, `x86_64-pc-windows-gnu`, Ryzen 9 5900HS, 8 cores / 16 threads.
+
+| W | system ms | mimalloc ms | mimalloc / system | band (pass to pass) |
+|---|---:|---:|---:|---:|
+| 1 | 19.958 | 19.933 | **0.998** | ±0.3 % |
+| 8 | 11.152 | 11.407 | **1.023** | ±5 % |
+| 16 | 12.347 | 12.335 | **0.992** | ±2.6 % |
+
+Medians of criterion's slope over the four clean passes. The reversed-order W=8 cell gave 1.005 on the
+slope and 0.974 on the median of samples, so the 2.3 % at W=8 changes sign with the arm order: it is
+noise inside the band. Scaling is the same in both arms (T1/T8 = 1.79 and 1.75, T1/T16 = 1.62 in both).
+
+**Verdict.** Swapping the global allocator changes nothing measurable at any W. Mechanism (b) is not
+supported; mechanism (a), estimated at a few tenths of a percent, is below the resolution.
+
+⚠ **Why the A/B could not have seen (b), found by the adjudicator.** The census and the A/B ran on
+different thread pools. `d51b4ced` ("stage 3b lands the per-scope block") is an ancestor of this tree
+and NOT of `ad0ebea4`: on the census tree `task.rs` still allocated one cell per spawn and `block.rs`
+was wired to nothing; on this tree scoped task cells are emplaced in the per-scope `ScopeBlock`. A
+probe linked against the timed binaries' own rlibs, running the bench's scene, measured per step:
+
+| W | allocations (max) | bytes | cross-thread frees | reallocs |
+|---|---:|---:|---:|---:|
+| 1 | 2.1 (3) | 4.5 KB | 0.1 | 0 |
+| 8 | 331.6 (339) | 1.27 MB | 0.1 | 0 |
+| 16 | 331.6 (339) | 1.27 MB | 0.1 | 0 |
+
+So the 2671 is a property of the pre-3b pool, not of the shipped one, and the stealer-freed cells that
+(b) needed did not exist in the binaries that were timed. Bytes went UP (856 KB to 1.27 MB) because each
+scope takes at least one 4 KiB chunk, allocated and freed on its own thread and not reused across scopes.
+The same class of error as the 2026-09-10 Jolt entry above — a measurement taken on a branch that did not
+contain the code the conclusion was about — and it is recorded as such, not smoothed over.
+
+**What this does and does not establish.**
+- It bounds the shipped pool's allocator cost at W=8 by the band (±5 %), with an estimate of 0.3–0.6 %.
+- It says nothing about a Linux glibc arm, which was not measured.
+- It is NOT the pre-3b vs post-3b comparison. That A/B, owed since the Jolt entry above as "KE16's
+  contribution", is still owed.
+- A confounder both arms share: the pyramid world is never reset and warm-up is time-based, so arms that
+  ran 420 against 630 iterations sampled different simulated-time windows. Where the counts matched
+  (two passes at W=16) the ratios were 0.987 and 0.991, the same answer.
+- W=16 is slower than W=8 in both arms, so running 16 workers on 8 physical cores costs the same whatever
+  the allocator. That regression remains its own open question.
+
+**Consequences.** The Jolt next-fix ordering in the entry above is unchanged: the per-stage wall time at
+W=1 against W=8 (narrowphase, broadphase, solve, the inline-colour share) is still owed before any fix.
+Removing the remaining ~330 dispatch allocations per step goes ahead under the owner's 2026-09-10 ruling
+(no allocator but the engine's own; every runtime structure onto the engine's storage, as close to the
+ECS paradigm as possible), and it is justified by that ruling, not as a speed fix.
+
+The `bench-alloc` feature is kept, off by default and in the same form as `boyko_ecs`'s, so this A/B
+can be re-run (for the glibc arm, or on the pre-3b tree). The raw criterion data and receipts live
+outside the repository and are not reproduced here.

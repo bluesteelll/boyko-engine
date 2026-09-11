@@ -44,6 +44,22 @@
 
 #![allow(clippy::missing_const_for_thread_local)]
 
+// Alloc A/B: opt-in low-variance allocator for A/B signal extraction, the same
+// arm `bench_bevy_vs_boyko/benches/comparison_v2.rs` carries (Phase X.E).
+// OFF by default (`cargo bench` keeps the production system heap for honest
+// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
+// is far more deterministic and exposes structural signals the system heap
+// masks (the documented ±20-30% variance source). Here the question is whether
+// the heap traffic of a parallel step costs time: a gap that grows with W would
+// mean cross-thread frees limit scaling, a flat gap only the malloc/free
+// instructions. Measured 2026-09-10: no gap at any W. On this tree (thread-pool
+// Stage 3b present) a step makes ~332 allocations at W=8, same-thread, not the
+// ~2.7k stealer-freed cells of the pre-3b pool the diagnostic was written for;
+// docs/OPEN-QUESTIONS.md records both. See docs/BENCHMARKING.md.
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::sync::Arc;
 
 use boyko_ecs::ecs::core::component::component::Component;
