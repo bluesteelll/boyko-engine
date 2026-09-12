@@ -375,14 +375,14 @@ they build only over `a1`/`a1f` — which means what returns with them is **`a1f
 ⇒ §4's first bullet — *"faster or tied -> the verdict holds a fortiori; nothing is owed"* — **is
 wrong.** The inference `a3+b4 <= a3+b0 < a1f+b0` is arithmetically true and irrelevant: it bounds
 nothing about `a1f+b1`. As written, the bullet guarantees that nobody looks, while
-`KE16-RESULTS.md:12` ("Axis B — B0 BY CONSTRUCTION") is un-published and `:575` ("axis A closes on
+`KE16-RESULTS.md:12` ("Axis B — B0 BY CONSTRUCTION") is un-published and `:531` ("axis A closes on
 `a3`") is RETAINED on a head-to-head against a configuration the register's own returning row has
 just superseded. **Un-publishing one verdict while silently retaining a larger one is this
 campaign's worst failure mode.**
 
 The effect size is not remote. The deciding cell's headroom is 38.7 % (159 470 / 114 960 = 1.3872),
 so `a1f+b1` needs a **27.9 % gain** on `worker/body_10us_tasks_4W` to tie. That cell is the worker
-route, the joiner is on it, and `KE16-RESULTS.md:1202-1207` records `a1`'s worker route at
+route, the joiner is on it, and `KE16-RESULTS.md:1158-1163` records `a1`'s worker route at
 `top_lane = 13/24/21` — *"defect B's self-steal signature promoted onto the worker route under
 A1+B0"*. The loser was measured **with the same defect live**, and 33 x 10 us = 330 us against a
 159 us cell puts the mechanism at the same order as the cell, not at rounding error.
@@ -418,7 +418,7 @@ needs the same quiet machine B4-0(3) already needed.
    and both `join_on_worker` (`scope.rs:1472` before `:1484`) and `worker_main` (`worker.rs:89`
    before `:95`) pop one at a time before re-batching, so the deque never exceeds ~32 and
    `dest.reserve` never resizes. Any later change that batches twice before popping reinstates the
-   write **with no gate**, because `tests/miri_scope.rs:572-577` is already
+   write **with no gate**, because `tests/miri_scope.rs:567-572` is already
    `#[cfg_attr(not(any(a1, a1-fifo)), ignore)]` and prints `1 ignored`.
 3. **P2 survives on the `None` route for one caller class.** `join_external_helping`'s doc
    (`scope.rs:1573-1579`) records that the external classification covers *"a worker of THIS pool
@@ -453,8 +453,8 @@ needs the same quiet machine B4-0(3) already needed.
 * **R3's reasoning is correct and non-obvious**: the existing gate for the
   `let _ = WorkerDequeDeposit::new(..)` defect is a PLACEMENT test (`tls.rs:698-699`) that cannot
   exist over `a3`, so leg 1 really is the only thing that can see it.
-* **The loom coupling does NOT break.** M2's consumer-side barrier (`loom_pool.rs:366`, documented at
-  `:259-266`) still sits on the b4 joiner's park path: `pop_any` (`worker.rs:238-244`) reaches
+* **The loom coupling does NOT break.** M2's consumer-side barrier (`loom_pool.rs:340`, documented at
+  `:233-240`) still sits on the b4 joiner's park path: `pop_any` (`worker.rs:238-244`) reaches
   `mark_idle`+park only after `local.pop()` returned `None` AND `pop_global_injector` issued the
   fence on its empty-check path. **The design should say this** rather than leaving loom as a bare
   exit condition — a reader cannot tell an unexamined risk from an examined one.
