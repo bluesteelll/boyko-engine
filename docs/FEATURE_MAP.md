@@ -212,10 +212,10 @@ binding the anchor gate checks.
 | What you want to do | Method (line) |
 |---------------------|---------------|
 | Create an archetype | `create_archetype(&[ComponentId])` (48) / `get_or_create_archetype(...)` (55) |
-| Spawn (raw byte API) | `create_entity(arch_id, &[(ComponentId, &[u8])]) -> EcsResult<Entity>` (137) |
-| Spawn (typed, 1–2 comps) | `spawn_one::<A>(arch, a)` (595) / `spawn_two::<A, B>(arch, a, b)` (631) |
-| Spawn with ZERO components (Phase 22) | `spawn_empty() -> Entity` (680) — the empty archetype is created lazily on first use |
-| Delete an entity | `delete_entity(entity) -> bool` (811) |
+| Spawn (raw byte API) | `create_entity(arch_id, &[(ComponentId, &[u8])]) -> EcsResult<Entity>` (139) |
+| Spawn (typed, 1–2 comps) | `spawn_one::<A>(arch, a)` (598) / `spawn_two::<A, B>(arch, a, b)` (634) |
+| Spawn with ZERO components (Phase 22) | `spawn_empty() -> Entity` (683) — the empty archetype is created lazily on first use |
+| Delete an entity | `delete_entity(entity) -> bool` (814) |
 
 **File:** [core/ecs_master/component_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs) — per-entity component access.
 
@@ -352,18 +352,20 @@ Still DEFERRED: SubApps, `PluginGroup`/`DefaultPlugins`,
 |---------------------|-------|-----|
 | Construct an Entity literal | [core/entity/entity.rs](../crates/boyko_ecs/src/ecs/core/entity/entity.rs) ✅ | `Entity::new(id, generation)` / `with_id(id)` |
 | Compare entities (id + generation) | [core/entity/entity.rs](../crates/boyko_ecs/src/ecs/core/entity/entity.rs) ✅ | `e1 == e2` — compares BOTH fields (load-bearing ABA defence) |
-| Allocate an entity (recycle if available) | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `EntityMaster::allocate_entity()` (124) — recycles from `free_entity_ids`, else `fetch_add` on the atomic |
+| Allocate an entity (recycle if available) | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `EntityMaster::allocate_entity()` (191) — pops the recycled stack, else `fetch_add` on the fresh counter. `Commands::spawn` recycles too (EM2′: claims the stack with one `fetch_sub` via `EntityCounter`) |
 | Register into the fast store | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `register_entity_with_ptr(entity, *mut Archetype, row)` / `register_batch(...)` |
 | Validate an entity (gen-checked) | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `is_entity_valid(entity)` / `get_entity(id)` |
 | Deallocate (bumps generation) | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `deallocate_entity(entity) -> bool` (decrements `live_count` on success only) |
 | Iterate only LIVE entities | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `iter_entities()` — **O(capacity)** scan of `entities_inland`, skips `is_null()` slots (cold/inspection API; Phase X.D removed the dense `active_ids` index) |
 
-`EntityMaster` (Phase 7 + X.D + X.G) is four fields (`#[repr(C)]`, hot cluster
-on cache line 0): `entities_inland: InlandStore` (the hot fast store, indexed
-by `EntityId.0`, `is_null()` ⇔ dead — since Phase X.G an address-stable
+`EntityMaster` (Phase 7 + X.D + X.G + EM2′) is three fields (`#[repr(C)]`, hot
+cluster on cache line 0): `entities_inland: InlandStore` (the hot fast store,
+indexed by `EntityId.0`, `is_null()` ⇔ dead — since Phase X.G an address-stable
 reserve/commit store: lazy 1 GiB reservation, frontier slab commits, growth
-copies/writes NOTHING), `next_entity_id: AtomicUsize`, `live_count: usize`,
-`free_entity_ids`. The fast-store record is
+copies/writes NOTHING), `live_count: usize`, and on its own cache line the
+`reservoir: EntityReservoir` ([entity/entity_reservoir.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs)
+— the fresh-id atomic plus the recycled-entity stack on a `VmColumn`, which
+workers claim from through `EntityCounter`). The fast-store record is
 [`EntityInland`](../crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs)
 = 16 B `{ archetype_ptr: *mut Archetype, unit_index: u32, generation: u32 }`
 — a **direct slab pointer** (no `SparseMap` indirection on the hot read path);
@@ -421,7 +423,7 @@ lazy). Public-book pages: `book/src/concepts/tags.md`,
 | Hooks on a dynamic tag | [component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs):887 ✅ | `register_hooks_by_id(tag.component_id(), hooks)` — **mint → register hooks → first attach** (H1: `Err(AlreadyArchetyped)` after) |
 | Observers on a dynamic tag | [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs) ✅ | the existing `add_observer(kind, tag.component_id(), runner)` — no gate (dynamic bit walk) |
 | The dynamic migration paths | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1416/:1491/:1558/:1846/:2110 ✅ | `merged_archetype_id_dyn` / `without_ids_archetype_id` (`kept.is_empty()` → EMPTY — O3) / `migrate_entity_attach_ids` / `migrate_entity_detach_ids` / `retag_in_place` — allocation-free, fire hooks+observers (ledger rows 8–10) |
-| Empty entities | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):680, [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):184 ✅ | `EcsMaster::spawn_empty` / `Commands::spawn_empty` (via `EmptyBundle`, [self_bundle.rs](../crates/boyko_ecs/src/ecs/core/bundle/self_bundle.rs):135); empty signature matches only zero-required-component queries |
+| Empty entities | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):683, [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):190 ✅ | `EcsMaster::spawn_empty` / `Commands::spawn_empty` (via `EmptyBundle`, [self_bundle.rs](../crates/boyko_ecs/src/ecs/core/bundle/self_bundle.rs):135); empty signature matches only zero-required-component queries |
 | ZST pool internals | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs), [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):85/:90 ✅ | tick-only layout, dangling SIMD-aligned base, `grow_rows_zst`; VA: 128 MiB reserve per tag pool per hosting archetype (2 MiB cfg fallback), zero resident until commit — see [SYSTEMS.md §2.3](SYSTEMS.md) |
 
 Ceilings (all loud): 512 shared ComponentIds, `MAX_ARCHETYPES = 1024`
@@ -582,15 +584,15 @@ returns. No `Box<dyn Command>`, no per-command alloc (Phases 8d/11).
 | What you want | Where | Method (line) |
 |---------------|-------|---------------|
 | The SystemParam | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):97 ✅ | `Commands<'s>` |
-| Spawn (chainable) | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):164 ✅ | `commands.spawn(bundle) -> EntityCommands` → `.insert(extra).id()` |
-| Despawn | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):251 ✅ | `commands.despawn(entity)` |
-| Address an existing entity | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):228 ✅ | `commands.entity(entity) -> EntityCommands` |
-| Spawn many | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):313 ✅ | `commands.spawn_batch(iter)` |
-| Spawn empty (Phase 22) | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):184 ✅ | `commands.spawn_empty() -> EntityCommands` (= `spawn(EmptyBundle)`, warm path hits the static bundle cache) |
+| Spawn (chainable) | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):169 ✅ | `commands.spawn(bundle) -> EntityCommands` → `.insert(extra).id()` |
+| Despawn | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):259 ✅ | `commands.despawn(entity)` |
+| Address an existing entity | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):235 ✅ | `commands.entity(entity) -> EntityCommands` |
+| Spawn many | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):321 ✅ | `commands.spawn_batch(iter)` |
+| Spawn empty (Phase 22) | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):190 ✅ | `commands.spawn_empty() -> EntityCommands` (= `spawn(EmptyBundle)`, warm path hits the static bundle cache) |
 | Add / remove a dynamic tag (Phase 22) | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):182/:196 ✅ | `.add_tag(TagId)` / `.remove_tag(TagId)` → `AddTagCommand`/`RemoveTagCommand` ([commands/tag_commands.rs](../crates/boyko_ecs/src/ecs/core/commands/tag_commands.rs):38/:54, POD id payload) |
-| Custom command | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):125 ✅ | `commands.add::<C: Command>(cmd)` |
+| Custom command | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):126 ✅ | `commands.add::<C: Command>(cmd)` |
 | The chainable handle | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):80 ✅ | `EntityCommands<'a, 's>` — `.insert(..)`, `.remove::<C>()`, `.despawn()`, `.id()` |
-| The queue + cmd structs | [commands/](../crates/boyko_ecs/src/ecs/core/commands/) ✅ | `CommandQueue` (CursorSync RAII panic-recovery), `SpawnAtCommand` / `InsertCommand` / `RemoveCommand` / `DespawnCommand` / `SpawnBatchCommand` / `SendEventCommand`; entity-id reservation via `EntityCounter` ([params/entity_counter.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_counter.rs):75) |
+| The queue + cmd structs | [commands/](../crates/boyko_ecs/src/ecs/core/commands/) ✅ | `CommandQueue` (CursorSync RAII panic-recovery), `SpawnAtCommand` / `InsertCommand` / `RemoveCommand` / `DespawnCommand` / `SpawnBatchCommand` / `SendEventCommand`; entity-id reservation via `EntityCounter` ([params/entity_counter.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_counter.rs):108) |
 
 ---
 
@@ -711,8 +713,8 @@ audited `migrate_entity_insert`).
 | Add a child / children | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs) ✅ | `commands.entity(parent).add_child(c)` / `.add_children(&[..])`; `Commands::add_child(p, c)` |
 | Set / clear parent | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs) ✅ | `.set_parent(p)` / `.remove_parent()` |
 | Remove specific / all children | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs) ✅ | `.remove_children(&[..])` (listed only) / `.clear_children()` (all) |
-| Despawn keeping children | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):834 ✅ | `despawn_without_children(e)` — opt out of the default recursive cascade |
-| Recursive despawn (default) | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):811 ✅ | `delete_entity(e)` / `commands.despawn(e)` cascades to all descendants |
+| Despawn keeping children | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):837 ✅ | `despawn_without_children(e)` — opt out of the default recursive cascade |
+| Recursive despawn (default) | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):814 ✅ | `delete_entity(e)` / `commands.despawn(e)` cascades to all descendants |
 
 `Children` consistency is at the deferred-hook-queue drain (same-frame apply
 window). Guards: self-ref + dangling-parent are reactively rejected (the bad

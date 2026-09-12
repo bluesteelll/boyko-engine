@@ -3,4 +3,5 @@
 pub mod entity;
 pub mod entity_inland;
 pub mod entity_master;
+pub(crate) mod entity_reservoir;
 pub(crate) mod inland_store;

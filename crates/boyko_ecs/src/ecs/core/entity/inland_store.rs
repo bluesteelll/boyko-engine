@@ -183,6 +183,8 @@ impl InlandStore {
     #[cold]
     #[inline(never)]
     fn grow_to(&mut self, n: usize) {
+        // Read before `vm` borrows `self.vm` for the rest of the body.
+        let ceiling_predicted = self.ceiling_slots();
         // Lazy materialization (XG-B4): the reservation syscall is deferred
         // from construction to the first growth event — strictly off the
         // warm path (this fn is already #[cold]).
@@ -196,6 +198,13 @@ impl InlandStore {
         };
 
         let ceiling_slots = vm.os_len() / SLOT_SIZE; // exact: 16 | granule | os_len
+        // `EntityReservoir` sizes the recycled-entity stack from the
+        // syscall-free prediction; the two must name the same ceiling or a
+        // stack push could outrun its reservation (plan D6).
+        debug_assert_eq!(
+            ceiling_slots, ceiling_predicted,
+            "InlandStore::ceiling_slots disagrees with the materialized reservation"
+        );
         assert!(
             n <= ceiling_slots,
             "InlandStore exhausted: {n} entity slots requested, reservation ceiling is \
@@ -245,6 +254,19 @@ impl InlandStore {
     #[inline]
     pub(crate) fn committed_slots(&self) -> usize {
         self.committed_slots
+    }
+
+    /// The slot ceiling this store's reservation has — or will have once the
+    /// lazy `grow_to` materializes it — WITHOUT a syscall: the request rounded
+    /// up to the commit granule (exactly as `VmReservation::reserve` rounds
+    /// it), in slots. `grow_to` debug-asserts it equals `os_len / SLOT_SIZE`.
+    ///
+    /// The ceiling bounds every id this store can hold, so it also bounds how
+    /// many distinct recycled ids can be waiting at once — the sizing input of
+    /// `EntityReservoir`'s stack (plan D6).
+    #[inline]
+    pub(crate) fn ceiling_slots(&self) -> usize {
+        checked_slab_round(self.reserve_request) / SLOT_SIZE
     }
 }
 

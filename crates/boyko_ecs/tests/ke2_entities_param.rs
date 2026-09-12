@@ -161,12 +161,15 @@ fn resolve_despawned_entity_is_none() {
 ///
 /// # Why the direct `EcsMaster` path and not `Commands`
 ///
-/// `Commands::spawn` mints its id through `EntityCounter::reserve_entity`,
-/// which by EM2 **never pops the free list** — recycling is dispatcher-only. A
-/// `Commands`-driven despawn/respawn therefore hands out a FRESH id and this
-/// test would be vacuous. (Measured: the fixture precondition below caught
-/// exactly that on the first draft.) `spawn_one` / `delete_entity` go through
-/// `EntityMaster::allocate_entity`, which is the recycling path.
+/// When this test was written, `Commands::spawn` minted its id through
+/// `EntityCounter::reserve_entity`, which by the old EM2 **never popped the free
+/// list**, so a `Commands`-driven despawn/respawn handed out a FRESH id and this
+/// test would have been vacuous. (Measured: the fixture precondition below
+/// caught exactly that on the first draft.) Since EM2′ the deferred route
+/// recycles too — one frame after the despawn — so that reason is gone; the
+/// direct path stays because it recycles SYNCHRONOUSLY, with no frame loop to
+/// drive. `spawn_one` / `delete_entity` go through
+/// `EntityMaster::allocate_entity`.
 #[test]
 fn resolve_id_after_recycle_carries_the_bumped_generation() {
     let mut world = EcsMaster::new();

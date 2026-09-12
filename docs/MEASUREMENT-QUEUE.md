@@ -90,6 +90,13 @@ BOUND — not what the split recovers, because a `Commands`-carrying system keep
 `split_sim` lands within 2 percentage points of `barrier_sim`, KE17 closes with a number** and the
 design is frozen rather than built.
 
+**A requirement the split must keep if it IS built — EM2′-K.** Since EM2′ a `Commands` spawn claims
+from the recycled-entity stack with `fetch_sub`, and every `&mut EntityMaster` operation settles that
+stack with a plain store. So no apply window that mutates `EntityMaster` (any spawn, despawn,
+allocate or rewind) may overlap a dispatched system with `may_defer[i] == true`: the overlap would
+double-issue entity ids and race a stack push against a worker's entry read. Stated at the SCH7 site
+(`apply_window_drain`'s gate) and on the `may_defer` field in `schedule.rs`.
+
 ```bash
 cargo bench -p boyko-ecs --bench ke17_apply_window
 ```

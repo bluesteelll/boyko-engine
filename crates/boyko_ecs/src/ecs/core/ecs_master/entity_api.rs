@@ -69,7 +69,9 @@ impl EcsMaster {
     /// 1. `has_archetype(archetype_id)` is checked first.
     /// 2. Only then is `allocate_entity` called.
     /// 3. If `create_entity` fails, `rewind_allocate` undoes the allocation
-    ///    (fresh-ID path) so the ID is not silently wasted.
+    ///    along the branch `allocate_entity_ticketed` recorded — a fresh id
+    ///    rolls the counter back, a recycled one returns to the recycled stack
+    ///    with its generation — so the ID is neither wasted nor revived.
     ///
     /// # W7 choreography (Phase 7)
     ///
@@ -179,8 +181,11 @@ impl EcsMaster {
         let (table_components, dense_components) =
             Self::partition_dense_components(components, &mut table_buf, &mut dense_buf);
 
-        // Step 2 of W7: allocate the entity id (fresh or recycled).
-        let entity = self.entity_master.allocate_entity();
+        // Step 2 of W7: allocate the entity id (fresh or recycled). The ticket
+        // records WHICH, so the rejection path below undoes exactly that
+        // (R1) — never guessing it from the id.
+        let ticket = self.entity_master.allocate_entity_ticketed();
+        let entity = ticket.entity();
 
         // Step 3 of W7: reborrow archetype_ptr as &mut Archetype inside a
         // tight scope so the &mut reference is dropped before any further
@@ -211,15 +216,13 @@ impl EcsMaster {
             // or the pool reserve ceiling (rows). Phase X.I: committed
             // capacity below the ceiling grows on demand inside the pools,
             // so a capacity rejection here means the archetype outgrew a
-            // pool's reserve_rows. Undo the allocation so the EntityId is
-            // not leaked.
-            let rewound = self.entity_master.rewind_allocate(entity);
-            if !rewound {
-                // rewind_allocate returns false for recycled IDs; fall back
-                // to the full deallocate path so the ID returns to the free
-                // list.
-                self.entity_master.deallocate_entity(entity);
-            }
+            // pool's reserve_rows. Undo the allocation along the branch the
+            // ticket records: a fresh id rolls the counter back, a recycled
+            // entity goes back on the recycled stack with its generation.
+            // Nothing touched the entity store since the allocation (no hook
+            // fires before this point), so the rewind restores; a refusal
+            // would leak the id rather than re-issue it (R1).
+            self.entity_master.rewind_allocate(ticket);
             return Err(EcsError::ArchetypeRejectedEntity { archetype_id });
         }
 

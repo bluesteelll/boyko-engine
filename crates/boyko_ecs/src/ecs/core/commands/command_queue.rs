@@ -225,21 +225,26 @@ impl CommandQueue {
     ///
     /// # ⚠ Reserved entity ids are NOT reclaimed
     ///
-    /// `Commands::spawn` / `spawn_empty` / `clone_and_spawn*` mint their
-    /// `Entity` **synchronously** from the atomic `EntityCounter` (so
+    /// `Commands::spawn` / `spawn_empty` / `clone_and_spawn*` claim their
+    /// `Entity` **synchronously** from the world's entity reservoir (so
     /// `.id()` can return before the apply) and only then push the command.
-    /// A rewind discards the *command*; it cannot un-mint the id, because
-    /// `EntityCounter::reserve_entity` deliberately does not touch the free
-    /// list (Phase 11 EM2 — workers must not pop it), and the queue does not
-    /// record which ids belong to which slot.
+    /// A rewind discards the *command*; it cannot un-claim the id, because the
+    /// id has already ESCAPED: `.id()` handed it to user code, which may have
+    /// copied it into other commands, resources, events or `Local`s, and there
+    /// is no registry of those copies. (Since EM2′ the claim does pop the
+    /// recycled stack — the old "workers must not pop it" reason is gone; the
+    /// escape is the reason that remains.) Nor does the queue record which ids
+    /// belong to which slot.
     ///
-    /// The consequence is a **leak of id space, by design**: the ids minted
-    /// for rewound spawns are never issued again and never become live
-    /// entities. This is the same contract a dropped, never-applied queue
-    /// already carries (`Commands::clone_and_spawn`: "if the queue drops
-    /// without an apply, the id leaks"). It is written down here because a
-    /// rewind is the one path where a caller might reasonably expect
-    /// otherwise. Pinned by `rewind_does_not_reclaim_reserved_entity_ids`.
+    /// The consequence is a **leak of id space, by design**: the ids claimed
+    /// for rewound spawns — fresh or recycled — are never issued again and
+    /// never become live entities. This is the same contract a dropped,
+    /// never-applied queue already carries (`Commands::clone_and_spawn`: "if
+    /// the queue drops without an apply, the id leaks"). It is written down
+    /// here because a rewind is the one path where a caller might reasonably
+    /// expect otherwise. Pinned by `rewind_does_not_reclaim_reserved_entity_ids`
+    /// (fresh) and `rewind_does_not_reissue_a_claimed_recycled_entity`
+    /// (recycled).
     ///
     /// # Panics
     ///
@@ -1381,11 +1386,13 @@ mod tests {
     /// KE7 — **the documented caveat, pinned as a test rather than only as
     /// prose**: a rewind does NOT return reserved entity ids to circulation.
     ///
-    /// `Commands::spawn` mints its `Entity` from the atomic `EntityCounter`
-    /// before pushing the command, and `reserve_entity` deliberately never
-    /// pops the free list (Phase 11 EM2). Rewinding the command therefore
-    /// leaves the id minted and unused — id space leaks, by design. This test
-    /// models that exact sequence at the layer where both halves are visible.
+    /// `Commands::spawn` claims its `Entity` from the world's entity reservoir
+    /// before pushing the command, and the id escapes through `.id()` at that
+    /// moment. Rewinding the command therefore leaves the id claimed and
+    /// unused — id space leaks, by design. This test models that exact
+    /// sequence at the layer where both halves are visible, on an empty
+    /// recycled stack (the claim mints fresh); the recycled twin is
+    /// `rewind_does_not_reissue_a_claimed_recycled_entity`.
     #[test]
     fn rewind_does_not_reclaim_reserved_entity_ids() {
         static APPLY: AtomicUsize = AtomicUsize::new(0);
@@ -1395,9 +1402,9 @@ mod tests {
         let mut q = CommandQueue::new();
 
         let mark = q.mark();
-        // The `Commands::spawn` shape: mint the id first, then enqueue.
-        // `reserve_entity` takes `&self` — that `&`, not `&mut`, is the whole
-        // reason a worker can mint an id without the free list.
+        // The `Commands::spawn` shape: claim the id first, then enqueue.
+        // `reserve_entity` takes `&self` — a worker claims through atomics
+        // alone, without `&mut EntityMaster`.
         let rewound = world.entity_master.reserve_entity();
         q.push(CounterCommand {
             delta: 1,
@@ -1418,6 +1425,54 @@ mod tests {
             1,
             "the command itself was discarded and dropped",
         );
+    }
+
+    /// KE7, recycled twin (EM2′): with a populated recycled stack the claim
+    /// takes a RECYCLED entity, and rewinding its command leaves that entity
+    /// claimed — the dispatcher's next allocation must not re-issue it, and
+    /// neither must the next claim.
+    #[test]
+    fn rewind_does_not_reissue_a_claimed_recycled_entity() {
+        static APPLY: AtomicUsize = AtomicUsize::new(0);
+        static DROP: AtomicUsize = AtomicUsize::new(0);
+
+        let mut world = EcsMaster::new();
+        // Populate the recycled stack with one entity (id 0, generation 1).
+        let e0 = world.entity_master.allocate_entity();
+        world.entity_master.register_entity_with_ptr(
+            e0,
+            core::ptr::NonNull::dangling().as_ptr(),
+            0,
+        );
+        assert!(world.entity_master.deallocate_entity(e0));
+        assert_eq!(world.entity_master.recycled_entity_count(), 1);
+
+        let mut q = CommandQueue::new();
+        let mark = q.mark();
+        let claimed = world.entity_master.reserve_entity();
+        assert_eq!(
+            claimed,
+            crate::ecs::core::entity::entity::Entity::new(e0.id(), e0.generation() + 1),
+            "fixture: the claim must take the recycled entity"
+        );
+        q.push(CounterCommand {
+            delta: 1,
+            apply_counter: &APPLY,
+            drop_counter: &DROP,
+        });
+        q.rewind(mark);
+
+        let next_claim = world.entity_master.reserve_entity();
+        assert_ne!(next_claim.id(), claimed.id(), "the next claim must not re-issue it");
+        let next_alloc = world.entity_master.allocate_entity();
+        assert_ne!(
+            next_alloc.id(),
+            claimed.id(),
+            "the dispatcher's next allocation must not re-pop the claimed entry"
+        );
+        assert_eq!(world.entity_master.recycled_entity_count(), 0);
+        assert_eq!(DROP.load(Ordering::Relaxed), 1, "the command was discarded and dropped");
+        assert_eq!(APPLY.load(Ordering::Relaxed), 0, "and never applied");
     }
 
     /// A command whose `Drop` panics — the fixture for `rewind`'s recovery

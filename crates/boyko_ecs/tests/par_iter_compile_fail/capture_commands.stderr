@@ -1,14 +1,40 @@
-error[E0596]: cannot borrow `cmds` as mutable, as it is a captured variable in a `Fn` closure
-  --> tests/par_iter_compile_fail/capture_commands.rs:40:17
+error[E0277]: `std::cell::Cell<*const boyko_ecs::ecs::core::entity::entity_reservoir::EntityReservoir>` cannot be shared between threads safely
+  --> tests/par_iter_compile_fail/capture_commands.rs:37:27
    |
-32 |   fn must_not_compile(q: Query<&Tag>, mut cmds: Commands<'_>) {
-   |                                       -------- `cmds` declared here, outside the closure
-33 |       q.par_iter().for_each(|_tag: &Tag| {
-   |                    -        ------------ in this closure
-   |  __________________|
-   | |
+37 |       q.par_iter().for_each(|_tag: &Tag| {
+   |                    -------- ^-----------
+   |                    |        |
+   |  __________________|________within this `{closure@$DIR/tests/par_iter_compile_fail/capture_commands.rs:37:27: 37:39}`
+   | |                  |
+   | |                  required by a bound introduced by this call
 ...  |
-40 | |         let _ = &mut cmds;
-   | |                 ^^^^^^^^^ cannot borrow as mutable
-41 | |     });
-   | |______- expects `Fn` instead of `FnMut`
+44 | |         let _ = &mut cmds;
+45 | |     });
+   | |_____^ `std::cell::Cell<*const boyko_ecs::ecs::core::entity::entity_reservoir::EntityReservoir>` cannot be shared between threads safely
+   |
+   = help: within `{closure@$DIR/tests/par_iter_compile_fail/capture_commands.rs:37:27: 37:39}`, the trait `Sync` is not implemented for `std::cell::Cell<*const boyko_ecs::ecs::core::entity::entity_reservoir::EntityReservoir>`
+   = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock`
+note: required because it appears within the type `boyko_ecs::ecs::core::system::params::entity_counter::EntityCounter<'_>`
+  --> src/ecs/core/system/params/entity_counter.rs
+   |
+   | pub struct EntityCounter<'s> {
+   |            ^^^^^^^^^^^^^
+note: required because it appears within the type `Commands<'_>`
+  --> src/ecs/core/system/params/commands.rs
+   |
+   | pub struct Commands<'s> {
+   |            ^^^^^^^^
+   = note: required because it appears within the type `&mut Commands<'_>`
+note: required because it's used within this closure
+  --> tests/par_iter_compile_fail/capture_commands.rs:37:27
+   |
+37 |     q.par_iter().for_each(|_tag: &Tag| {
+   |                           ^^^^^^^^^^^^
+note: required by a bound in `ParQuery::<'q, 's, D, F>::for_each`
+  --> src/ecs/core/iters/query/par_iter.rs
+   |
+   |     pub fn for_each<Body>(self, body: Body)
+   |            -------- required by a bound in this associated function
+   |     where
+   |         Body: Fn(D::Item<'_>) + Send + Sync,
+   |                                        ^^^^ required by this bound in `ParQuery::<'q, 's, D, F>::for_each`

@@ -24,7 +24,8 @@
 //! # `T: Copy` — no element drop
 //!
 //! Every consumer stores a plain-old-data id (`EntityId`, `#[repr(transparent)]`
-//! over `usize`). The bound is `T: Copy`, so `swap_remove` and `clear` never run
+//! over `usize`, or — for `EntityReservoir`'s recycled-entity stack — a 16-byte
+//! `Entity`). The bound is `T: Copy`, so `swap_remove` and `clear` never run
 //! a destructor: a removed element is simply overwritten and the length rolled
 //! back. This is the whole reason the primitive is small and unsafe-light — it
 //! is deliberately NOT a general `Vec` replacement for droppable `T`.
@@ -324,11 +325,10 @@ impl<T: Copy> VmColumn<T> {
     }
 
     /// Raw base pointer to element 0. Valid for `len` reads (dangling but
-    /// well-aligned when `len == 0`). Callers that cache a per-pass pointer
-    /// reach it through `as_slice().as_ptr()` today (identical value); this
-    /// direct accessor is the specified-API twin, retained for a future caller
-    /// that wants the base without materializing a slice.
-    #[allow(dead_code)]
+    /// well-aligned when `len == 0`), and — because the base is write-once —
+    /// for the reservation's whole lifetime once materialized. The
+    /// `EntityReservoir` claim path reads through it from worker threads
+    /// without forming a `&[T]` over a length another thread may later change.
     #[inline]
     pub(crate) fn as_ptr(&self) -> *const T {
         self.base.as_ptr()
@@ -433,22 +433,33 @@ impl<T: Copy> VmColumn<T> {
     /// are read — a stale byte in `[0, old_len)` can never be observed. `T:
     /// Copy` ⇒ no dropped elements to account for either.
     ///
-    /// Part of the primitive's specified API (audit F1/F3) and exercised by the
-    /// unit tests. No F1/F3 caller invokes it yet (the world reset drops whole
-    /// archetypes / dense stores rather than clearing their id column in place),
-    /// so it is retained for a future in-place-reuse reset path.
-    #[allow(dead_code)]
+    /// The world reset of `EntityReservoir` (the recycled-entity stack) is the
+    /// in-place-reuse caller; the archetype / dense id columns are dropped
+    /// whole instead.
     #[inline]
     pub(crate) fn clear(&mut self) {
         self.len = 0;
     }
 
-    /// Commit frontier in elements (diagnostics/tests — mirror of
+    /// Commit frontier in elements (diagnostics — mirror of
     /// `InlandStore::committed_slots` / `ComponentPool::committed_rows`).
-    #[cfg(test)]
     #[inline]
     pub(crate) fn committed_elems(&self) -> usize {
         self.committed_elems
+    }
+
+    /// Grows the commit frontier to cover AT LEAST `n` elements without
+    /// changing `len` — the `Vec::with_capacity` analog for a column whose
+    /// caller asked for committed room up front (`EntityMaster::with_capacity`).
+    /// A no-op when the frontier already covers `n`.
+    ///
+    /// # Panics
+    /// * `n` exceeds the reservation ceiling (the `grow_to` exhaustion assert).
+    #[cold]
+    pub(crate) fn precommit(&mut self, n: usize) {
+        if n > self.committed_elems {
+            self.grow_to(n);
+        }
     }
 
     /// Cold frontier growth: commit enough slabs to cover `n` elements.

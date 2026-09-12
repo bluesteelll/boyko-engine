@@ -3,7 +3,8 @@
 //!
 //! Phase 11 §6.1 (plan Q9). Replaces the Phase 8.5 `SpawnCommand<B>`. The
 //! deferred path now carries a pre-allocated `Entity` minted by
-//! `EntityCounter::reserve_entity`
+//! `EntityCounter::reserve_entity` (EM2′: a recycled entity carrying its
+//! bumped generation, or a fresh id at generation 0)
 //! at the `Commands::spawn` callsite, so the user can call
 //! `.id()` synchronously before apply (EC2 + EC13). Apply delegates to
 //! [`EcsMaster::create_entity_at`](crate::ecs::core::ecs_master::ecs_master::EcsMaster::create_entity_at)
@@ -133,6 +134,20 @@ impl<B: Bundle> Command for SpawnAtCommand<B> {
                 .get(entity.id().0)
                 .is_none_or(|i| i.is_null()),
             "SpawnAtCommand applied to an already-registered entity {:?}",
+            entity
+        );
+        // EM1′ (debug): a claimed recycled entity carries exactly the
+        // generation `deallocate_entity` left in its dead slot, and a fresh id's
+        // slot (if it exists yet) is still generation 0. A mismatch means a
+        // recycled entry lost its generation — the handle would register at a
+        // generation some stale handle already holds.
+        debug_assert!(
+            world
+                .entity_master
+                .entities_inland
+                .get(entity.id().0)
+                .is_none_or(|i| i.generation() == entity.generation()),
+            "SpawnAtCommand: handle {:?} does not carry its slot's generation (EM1′)",
             entity
         );
 

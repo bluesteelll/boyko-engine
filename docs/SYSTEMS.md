@@ -464,10 +464,10 @@ migration paths — counted against this ledger per the Phase-14b lesson):
 
 | Site | File:line (observer calls) | Kinds |
 |------|----------------------------|-------|
-| `EcsMaster::create_entity` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):137, fires 279/299 | add, insert |
-| `EcsMaster::create_entity_at` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):354, fires 461/481 | add, insert |
-| `EcsMaster::fire_despawn_hooks` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):704, fires 787/799 | replace, remove |
-| `SpawnAtCommand::apply` | [commands/spawn_at_command.rs](../crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs):114, fires 386/406 | add, insert |
+| `EcsMaster::create_entity` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):139, fires 282/302 | add, insert |
+| `EcsMaster::create_entity_at` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):357, fires 464/484 | add, insert |
+| `EcsMaster::fire_despawn_hooks` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):707, fires 790/802 | replace, remove |
+| `SpawnAtCommand::apply` | [commands/spawn_at_command.rs](../crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs):115, fires 386/406 | add, insert |
 | `InsertCommand::apply_replace_in_place` | [commands/insert_command.rs](../crates/boyko_ecs/src/ecs/core/commands/insert_command.rs):113, fires 176/201 | replace, insert |
 | `migrate_entity_insert` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):384, fires 951/970 | add, insert |
 | `migrate_entity_remove` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1166, fires 1184/1190 | replace, remove |
@@ -560,9 +560,9 @@ with Phase-14a §3.4 reborrow confinement. `MAX_BUNDLE_ARITY` raised 8 → 16
 **Empty archetype (D5)** — entities may hold zero components. Lazy: resolved
 through `get_or_create_archetype(&[])` on first demand (no reserved constant,
 preserves the Phase-12.6 lazy `EcsMaster::new` budget). `EcsMaster::spawn_empty`
-([ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):680);
+([ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):683);
 `Commands::spawn_empty`
-([params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):184)
+([params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):190)
 = `spawn(EmptyBundle)` — the hand-written zero-component bundle
 ([bundle/self_bundle.rs](../crates/boyko_ecs/src/ecs/core/bundle/self_bundle.rs):135,
 zero unsafe, own `BundleTypeId` so warm spawns hit the static bundle cache).
@@ -829,14 +829,34 @@ generation source of truth.
 **File:** [crates/boyko_ecs/src/ecs/core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 
 ```rust
-#[repr(C)]                                          // X.G: hot cluster on cache line 0
+#[repr(C)]                                          // line 0: inland + live_count; line 1: reservoir
 pub struct EntityMaster {
     pub(crate) entities_inland: InlandStore,        // index = EntityId.0; is_null() ⇔ dead
-    next_entity_id: AtomicUsize,                    // fresh-id minting (EM1/EM6)
     live_count: usize,                              // # live entities (Phase X.D)
-    free_entity_ids: Vec<EntityId>,                 // LIFO recycle queue (dispatcher-only)
+    pub(crate) reservoir: EntityReservoir,          // EM2′: fresh counter + claimable recycled stack
+}
+
+#[repr(C, align(64))]
+pub(crate) struct EntityReservoir {                 // entity/entity_reservoir.rs
+    free_top: AtomicIsize,                          // claimable length; workers fetch_sub(1)
+    next_entity_id: AtomicUsize,                    // fresh-id minting (EM1)
+    free: VmColumn<Entity>,                         // recycled entities, LIFO, generation carried
 }
 ```
+
+**EM2′ (entity-id recycling on the deferred route).** The recycled-id free list
+is a claimable stack on a `VmColumn`: `Commands::spawn` (through
+`EntityCounter`) claims with one `free_top.fetch_sub(1)` and reads the entry
+(id + bumped generation), minting fresh only once the stack is dry — a per-counter
+EXHAUSTED bit in the pointer's bit 0 makes steady-state claims one locked RMW on
+either path. The dispatcher pushes / pops / `settle`s it under `&mut` (SCH7);
+every `&mut` op settles first, clamping the negative overshoot of the last phase's
+claims. A flat population churned through `Commands` therefore reuses its ids
+instead of growing the free list and the slot store forever (the pre-EM2′
+defect). Requirement EM2′-K: no `&mut EntityMaster` op may overlap a dispatched
+system that may defer (stated at the SCH7 gate in `schedule.rs`).
+`create_entity`'s rejection rewinds by an `AllocTicket` recording Fresh vs
+Recycled (R1) — the old `id + 1 == next` arithmetic revived stale handles.
 
 Phase 7 replaced the old `entities` + `SparseMap<EntityInland>` pair with the
 single direct-indexed `entities_inland` fast store. **Phase X.D** removed
@@ -855,29 +875,31 @@ resize-fill died); the g7b entity-store doubling spikes are GONE. See
 [PHASE-XG-RESULTS.md](archive/PHASE-XG-RESULTS.md).
 
 **API** ([entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)):
-- `allocate_entity() -> Entity` (124) — recycles from `free_entity_ids`, else
-  `fetch_add` on `next_entity_id`. `pub(crate)`.
-- `register_entity_with_ptr(entity, *mut Archetype, row)` (323) — writes the
+- `allocate_entity() -> Entity` (191) — pops the recycled stack (after
+  settling), else `fetch_add` on the fresh counter; the ticketed form returns
+  which. `pub(crate)`.
+- `register_entity_with_ptr(entity, *mut Archetype, row)` (330) — writes the
   fast-store slot; `live_count += 1`.
-- `register_batch(start, *mut Archetype, start_row, n)` (263, `pub(crate)`) —
+- `register_batch(start, *mut Archetype, start_row, n)` (270, `pub(crate)`) —
   bulk fast-store write; `live_count += n`.
-- `ensure_capacity(n)` (241, `pub(crate)`) — dispatcher-side lazy growth (Phase
+- `ensure_capacity(n)` (248, `pub(crate)`) — dispatcher-side lazy growth (Phase
   12.6; replaces the eager `EcsMaster::new` pre-extension).
-- `deallocate_entity(entity) -> bool` (360) — bumps generation in place, nulls
+- `deallocate_entity(entity) -> bool` (368) — bumps generation in place, nulls
   the slot, recycles the id; `live_count -= 1` on the success path only (the C1
   guard: a no-op on a stale/never-registered handle never decrements).
-- `is_entity_valid(entity)` (394) / `get_entity(id)` (406) — gen-checked read
+- `is_entity_valid(entity)` (401) / `get_entity(id)` (413) — gen-checked read
   straight from `entities_inland`.
-- `entity_count()` (416) / `is_empty()` (468) — `live_count`-backed (O(1)).
-- `iter_entities()` (447) — **O(capacity)** scan, skips `is_null()`, ascending
+- `entity_count()` (423) / `is_empty()` (489) — `live_count`-backed (O(1)).
+- `iter_entities()` (469) — **O(capacity)** scan, skips `is_null()`, ascending
   `EntityId`. Cold inspection/test API only.
-- `rewind_allocate(entity) -> bool` (520, `pub(crate)`) — C-007 guard plumbing
-  for `EcsMaster::create_entity`'s failure rollback.
+- `rewind_allocate(ticket) -> bool` (542, `pub(crate)`) — C-007 guard plumbing
+  for `EcsMaster::create_entity`'s failure rollback; undoes exactly the branch the
+  `AllocTicket` records, and leaks rather than re-issues on a refusal (R1).
 
-Workers reach `next_entity_id` only through the `EntityCounter<'s>` newtype
-([system/params/entity_counter.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_counter.rs):75)
-(atomic RMW only); all other mutation is dispatcher-`&mut self` inside the apply
-window (SCH7).
+Workers reach the reservoir only through the `EntityCounter<'s>` newtype
+([system/params/entity_counter.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_counter.rs):108)
+(atomic RMWs plus reads of recycled entries that are immutable for the phase);
+all other mutation is dispatcher-`&mut self` inside the apply window (SCH7).
 
 ---
 
@@ -1032,9 +1054,9 @@ that declares it:
   `new()` (426) / `with_capacity(entity_cap, arch_cap)` (473).
 - Archetypes / spawn / despawn — [entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):
   `create_archetype` (48) / `get_or_create_archetype` (55);
-  `create_entity(arch, &[(id, bytes)]) -> EcsResult<Entity>` (137);
-  `spawn_one::<A>` (595) / `spawn_two::<A, B>` (631) / `spawn_empty` (680);
-  `delete_entity` (811).
+  `create_entity(arch, &[(id, bytes)]) -> EcsResult<Entity>` (139);
+  `spawn_one::<A>` (598) / `spawn_two::<A, B>` (634) / `spawn_empty` (683);
+  `delete_entity` (814).
 - Bulk spawn — `spawn_batch::<B, I>` ([ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):1079).
 - Component access — [component_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs):
   `get_component_raw` (176) / `set_component_raw` (461);
@@ -1398,17 +1420,17 @@ pub struct Commands<'s> { /* commands.rs:97 */ }
 
 | Method (line) | Effect |
 |---------------|--------|
-| `spawn(bundle) -> EntityCommands` (164) | reserve id, queue `SpawnAtCommand`; chainable |
-| `entity(entity) -> EntityCommands` (228) | address an existing entity |
-| `despawn(entity)` (251) | queue `DespawnCommand` |
-| `spawn_batch(iter)` (313) | queue `SpawnBatchCommand` |
-| `add::<C: Command>(cmd)` (125) | queue a custom `Command` |
+| `spawn(bundle) -> EntityCommands` (169) | reserve id, queue `SpawnAtCommand`; chainable |
+| `entity(entity) -> EntityCommands` (235) | address an existing entity |
+| `despawn(entity)` (259) | queue `DespawnCommand` |
+| `spawn_batch(iter)` (321) | queue `SpawnBatchCommand` |
+| `add::<C: Command>(cmd)` (126) | queue a custom `Command` |
 
 - `EntityCommands<'a, 's>`
   ([params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):80)
   — `.insert(..)`, `.remove::<C>()`, `.despawn()`, `.id()` (Phase 11 chaining).
 - Entity-id reservation uses an atomic counter via `EntityCounter`
-  ([params/entity_counter.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_counter.rs):75,
+  ([params/entity_counter.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_counter.rs):108,
   Phase 11 Path A).
 - Command structs in [core/commands/](../crates/boyko_ecs/src/ecs/core/commands/):
   `SpawnAtCommand`, `InsertCommand`, `RemoveCommand`, `DespawnCommand`,
@@ -1457,7 +1479,7 @@ pub struct Schedule {
   `build(&mut world) -> Schedule` (324) / `try_build(...)` (350, returns
   `Result<_, ScheduleBuildError>`).
 - `Schedule::run(&mut world)`
-  ([schedule.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule.rs):232) —
+  ([schedule.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule.rs):243) —
   bumps the change tick, runs the state-transition pass, then dispatches.
 - Uses external dep `fixedbitset` for the conflict/condition bitsets.
 

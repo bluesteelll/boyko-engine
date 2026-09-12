@@ -258,13 +258,13 @@ bitsets), `crossbeam-queue` / `crossbeam-utils`, `static_assertions` (compile-ti
 User → EcsMaster::create_entity(archetype_id, &[(ComponentId, &[u8])])
     ├─ Guard (C-007): archetype_master.has_archetype(archetype_id)?
     │      └─ no → Err(EcsError::ArchetypeNotFound) before any allocation
-    ├─ EntityMaster::allocate_entity()
-    │      └─ recycle from free_entity_ids, or fetch_add(next_entity_id)
-    │         → Entity { id, generation }
+    ├─ EntityMaster::allocate_entity_ticketed()
+    │      └─ pop the recycled stack, or fetch_add(next_entity_id)
+    │         → AllocTicket { Entity { id, generation }, Fresh | Recycled }
     ├─ ArchetypeMaster::get_archetype_mut(id) → &mut Archetype
     ├─ Archetype::create_entity(entity_id, &mut inland, components)
     │      ├─ Two-phase commit (C-009): bundle.can_push_entity_components(...)
-    │      │      └─ false → entity_master.rewind_allocate(entity);
+    │      │      └─ false → entity_master.rewind_allocate(ticket);
     │      │                  Err(EcsError::ArchetypeRejectedEntity)
     │      ├─ bundle.push_entity_components(...) — lockstep memcpy into the pool columns
     │      └─ fill the per-row added_ticks/changed_ticks with the world's tick
@@ -414,16 +414,18 @@ exclusivity (a type cannot be both Component and Resource, M6) is checked at
 
 **Where:** [entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 
-Four fields: `free_entity_ids` (LIFO recycle), `next_entity_id: AtomicUsize`,
-`entities_inland: Vec<EntityInland>` (the hot fast store, indexed by `EntityId.0`,
-`is_null()` ⇔ dead), and a plain `live_count: usize`. Phase 7 dropped the
+Three fields: `entities_inland` (the hot fast store, indexed by `EntityId.0`,
+`is_null()` ⇔ dead), a plain `live_count: usize`, and the `reservoir`
+(`EntityReservoir`: the fresh-id `AtomicUsize` plus the recycled-entity stack,
+LIFO on a `VmColumn`). Phase 7 dropped the
 `SparseMap<EntityInland>` indirection; **Phase X.D** dropped the EnTT-style
 `active_ids` + `sparse_to_active` (their only consumer was the cold
 `iter_entities`, and the despawn swap-remove they needed was deleted with them),
 net-removing `unsafe` and shedding −12 B/entity. `Generation` bumps on
-deallocation (the ABA defence). Workers touch only `next_entity_id` (via the
-`EntityCounter` atomic-RMW newtype); all other mutation is dispatcher-`&mut self`
-inside the apply window. See [PHASE-XD-RESULTS.md](archive/PHASE-XD-RESULTS.md).
+deallocation (the ABA defence). Workers touch only the reservoir (via the
+`EntityCounter` newtype: `fetch_sub` claims from the recycled stack, `fetch_add`
+mints fresh — EM2′, so a `Commands`-churned population reuses its ids); all
+other mutation is dispatcher-`&mut self` inside the apply window. See [PHASE-XD-RESULTS.md](archive/PHASE-XD-RESULTS.md).
 
 ### 7. Domain error type `EcsError`
 

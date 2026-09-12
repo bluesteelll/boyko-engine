@@ -17,10 +17,10 @@
 //!
 //! The carried pointer's destination type is [`InlandStore`], **not**
 //! [`EntityMaster`]. There is therefore no compile-time path from an `Entities`
-//! to `free_entity_ids`, `live_count`, or the `next_entity_id` atomic — exactly
-//! the EM6 field-restriction argument
+//! to `live_count` or the entity reservoir (the recycled stack and the fresh-id
+//! atomic) — exactly the EM6′ field-restriction argument
 //! [`EntityCounter`](super::entity_counter::EntityCounter) makes with its
-//! `*const AtomicUsize`. The narrowness is a property of the type, not of a
+//! `*const EntityReservoir`. The narrowness is a property of the type, not of a
 //! convention some later edit could quietly drop.
 //!
 //! # Access declaration — deliberately empty

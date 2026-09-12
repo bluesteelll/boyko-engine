@@ -92,18 +92,19 @@ use crate::ecs::identifiers::primitives::EntityId;
 ///
 /// `Commands<'s>` carries `&'s mut CommandQueue`, which is `!Sync` for the
 /// lifetime `'s` (CQ-SEND2). The owning [`CommandQueue`] itself is `Send`
-/// (CQ-SEND1). The contained `EntityCounter<'s>` is `Send + Sync` on its
-/// own — but `Commands<'s>` inherits the `!Sync` from the queue field.
+/// (CQ-SEND1). The contained `EntityCounter<'s>` is `Send` and `!Sync` on its
+/// own (its EXHAUSTED bit lives in a `Cell`).
 pub struct Commands<'s> {
     /// Exclusive borrow of the system's per-call queue. The system's
     /// cached `State` (a `CommandQueue`) is the storage backing this
     /// borrow; the reborrow is established by [`SystemParam::get_param`].
     pub(crate) queue: &'s mut CommandQueue,
 
-    /// Phase 11 (Round 3 C-N1, EM6): worker-safe projection of the world's
-    /// atomic `next_entity_id`. The newtype encapsulates a raw pointer
-    /// whose destination type is `AtomicUsize` — no compile-time path
-    /// leads to any other `EntityMaster` field through `Commands`.
+    /// Phase 11 (Round 3 C-N1, EM6′): worker-safe projection of the world's
+    /// entity reservoir (fresh-id counter + claimable recycled stack). The
+    /// newtype encapsulates a raw pointer whose destination type is
+    /// `EntityReservoir` — no compile-time path leads to any other
+    /// `EntityMaster` field through `Commands`.
     pub(crate) entity_counter: EntityCounter<'s>,
 }
 
@@ -126,9 +127,13 @@ impl<'s> Commands<'s> {
         self.queue.push(cmd);
     }
 
-    /// Pre-allocates an [`Entity`] via the world's atomic counter and
+    /// Pre-allocates an [`Entity`] through the world's entity reservoir and
     /// enqueues a `SpawnAtCommand<B>` (Phase 11 §5.6 / plan Q9). Returns
     /// an `EntityCommands<'_, 's>` handle for chaining.
+    ///
+    /// The returned `Entity` may reuse an id: since EM2′ a claim takes the
+    /// most recently despawned entity first, so its generation may be > 0.
+    /// The handle is valid after the next apply, exactly like a fresh one.
     ///
     /// The destination [`ArchetypeId`] is resolved on the apply path via
     /// [`Bundle::cached_archetype_id`] — there is no per-callsite
@@ -138,9 +143,9 @@ impl<'s> Commands<'s> {
     ///
     /// # Cost
     ///
-    /// `~28 ns` single-thread / up to `~78 ns` under 8-worker contention
-    /// (plan §10.1 / §10.5): `EntityCounter::reserve_entity` (~10 ns) +
-    /// `CommandQueue::push` (~18 ns) + EntityCommands construction (free).
+    /// `EntityCounter::reserve_entity` (one locked RMW in steady state —
+    /// `fetch_sub` on the recycled stack or `fetch_add` on the fresh counter)
+    /// + `CommandQueue::push` + EntityCommands construction (free).
     ///
     /// # Example
     ///
@@ -169,7 +174,8 @@ impl<'s> Commands<'s> {
 
     /// Pre-allocates an [`Entity`] and enqueues a spawn with **zero
     /// components** (Phase 22 D5). Returns an `EntityCommands<'_, 's>`
-    /// handle for chaining (`.insert(...)`, `.id()`, ...).
+    /// handle for chaining (`.insert(...)`, `.id()`, ...). The returned
+    /// `Entity` may reuse an id; its generation may be > 0 (EM2′).
     ///
     /// The entity lands in the empty archetype
     /// (`get_or_create_archetype(&[])`), created lazily on the first empty
@@ -186,12 +192,13 @@ impl<'s> Commands<'s> {
     }
 
     /// Deferred clone-and-spawn (Feature 3, §8): pre-allocates a destination
-    /// [`Entity`] via the atomic counter and enqueues a `CloneSpawnCommand` that
+    /// [`Entity`] through the entity reservoir (it may reuse an id; its
+    /// generation may be > 0 — EM2′) and enqueues a `CloneSpawnCommand` that
     /// clones `source` (opt-out, shallow, fires hooks — Bevy `clone_and_spawn`
     /// parity) at the apply window. Returns an `EntityCommands<'_, 's>` handle for
     /// chaining (`.insert(...).id()`).
     ///
-    /// The returned id is valid synchronously (the counter mints it now); the actual
+    /// The returned id is valid synchronously (the reservoir claims it now); the actual
     /// clone runs deferred. If the queue drops without an apply, the id leaks (one
     /// per missed apply — the same contract as `spawn`).
     #[inline]
@@ -229,15 +236,16 @@ impl<'s> Commands<'s> {
         EntityCommands::new(entity, self)
     }
 
-    /// Reserves a fresh [`Entity`] without enqueueing any command
+    /// Reserves an [`Entity`] without enqueueing any command
     /// (Phase 11 §5.6 escape hatch).
     ///
     /// Use this when you need an Entity ID to thread through user code
     /// before deciding what to spawn (e.g. constructing a relation between
-    /// two not-yet-spawned entities). The caller is responsible for
+    /// two not-yet-spawned entities). The returned `Entity` may reuse an id;
+    /// its generation may be > 0 (EM2′). The caller is responsible for
     /// eventually enqueueing a `SpawnAtCommand` for this id — if the
     /// queue drops without an apply for this id, the id leaks (one ID per
-    /// missed apply; counter marches forward monotonically per EM4).
+    /// missed apply; a leaked id is never issued again, EM4′).
     #[inline]
     pub fn reserve_entity(&self) -> Entity {
         self.entity_counter.reserve_entity()
@@ -367,9 +375,12 @@ impl<'s> Commands<'s> {
 // SAFETY (SP1, SP2, SP4 — Phase 11 §5.6 augmented):
 //   - SP1: `init_access` declares NO reads / writes. `Commands` is a pure
 //     append-only buffer; the contained `EntityCounter` access is
-//     conflict-free (EM6 + EVT1 precedent — only an `AtomicUsize` is
-//     reachable through the carried pointer type, and atomic RMW from
-//     `&self` is data-race-free).
+//     conflict-free (EM6′ + EVT1 precedent — only the `EntityReservoir` is
+//     reachable through the carried pointer type: its atomics are RMW'd
+//     data-race-free from any thread, and the recycled entries a claim reads
+//     are immutable for the phase because every write to them takes
+//     `&mut EntityMaster`, dispatcher-solo in the apply window — SCH7 /
+//     EM2′-K).
 //   - SP2: per Phase 8c IntoSystem, `get_param` runs PER SYSTEM INVOCATION
 //     each frame (W-N3 / plan §8.7). The `EntityCounter`'s pointer is
 //     re-minted fresh every call; `Commands<'s>::Item<'w, 's>` is dropped
@@ -420,7 +431,7 @@ unsafe impl SystemParam for Commands<'_> {
         //     `get_param` runs once per system invocation; `'s` never
         //     outlives `'w`).
         //   - The `EntityCounter`'s contract (plan §5.5) restricts
-        //     reachable state to the atomic counter only — EM6 is
+        //     reachable state to the entity reservoir only — EM6′ is
         //     type-enforced through the destination pointer type.
         let entity_counter = unsafe { world.entity_counter::<'s>() };
         Commands { queue: state, entity_counter }

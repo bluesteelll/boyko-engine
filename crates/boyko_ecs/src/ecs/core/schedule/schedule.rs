@@ -153,6 +153,17 @@ pub struct Schedule {
     /// The default answer is `true` (see `System::has_deferred`), so a system
     /// type that says nothing keeps its barrier — an unset bit here is always
     /// an explicit declaration, never an omission.
+    ///
+    /// **EM2′-K — a requirement the split MUST keep.** No `&mut EntityMaster`
+    /// operation (any apply that spawns, despawns, allocates or rewinds) may
+    /// run while a system with `may_defer[i] == true` is dispatched. Such a
+    /// system can hold `Commands`, whose `EntityCounter` claims from the
+    /// recycled-entity stack with `fetch_sub` (EM2′): a concurrent `settle`
+    /// stores `free_top` with a plain write that would erase the claim and
+    /// double-issue an id, and a concurrent push writes a stack index the
+    /// worker may be reading. Today the full barrier guarantees it; the split
+    /// retire must keep every `may_defer` system out of any window that
+    /// mutates `EntityMaster`.
     pub(crate) may_defer: FixedBitSet,
 
     /// Per-system own conditions, indexed by post-topo `SystemIndex` (permuted
@@ -674,6 +685,13 @@ impl Schedule {
                 //   that we just Acquire-loaded. The `world_mut` reborrow
                 //   is therefore the exclusive borrow on the world for
                 //   the duration of `apply_window_drain`.
+                //   EM2′-K rests on this gate: the drain's `&mut EntityMaster`
+                //   ops (despawn pushes, the recycled stack's plain-store
+                //   `settle`) must never overlap a dispatched system that may
+                //   hold `Commands` — its `EntityCounter` claims with
+                //   `fetch_sub` on the same stack. A KE17 split window that
+                //   relaxes this gate must keep every `may_defer` system out
+                //   of it (see the `may_defer` field doc).
                 let world_mut: &mut EcsMaster = unsafe { cell.world_mut() };
                 self.apply_window_drain(world_mut, completion);
             }

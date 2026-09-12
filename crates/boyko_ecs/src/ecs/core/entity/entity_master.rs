@@ -1,31 +1,28 @@
 use std::ops::Range;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::core::entity::entity_inland::EntityInland;
+use crate::ecs::core::entity::entity_reservoir::EntityReservoir;
 use crate::ecs::core::entity::inland_store::InlandStore;
-use crate::ecs::core::system::params::entity_counter::MAX_BATCH_HINT;
-use crate::ecs::error::{EcsError, EcsResult};
+use crate::ecs::error::EcsResult;
 use crate::ecs::identifiers::primitives::EntityId;
 
 /// Manages entity lifecycle, recycling, and Phase 7 fast-path lookup.
 ///
-/// Layout (post Phase-X.D slot reduction — four fields):
+/// Layout (three fields):
 ///
-/// - `free_entity_ids`: LIFO recycling queue for ids. Dispatcher-only (EM2);
-///   workers never pop.
-/// - `next_entity_id`: monotonic atomic counter for fresh-id minting.
-///   Phase 11 (EM1): workers call into this through the `EntityCounter<'s>`
-///   newtype (worker-safe — atomic RMW only). The dispatcher reads/bumps
-///   through `&mut self` on `allocate_entity`.
 /// - `entities_inland`: sparse, indexed by `EntityId.0`. A slot with
 ///   `archetype_ptr.is_null()` is dead. The slot's `generation` survives
-///   deallocation so the next `allocate_entity` for that recycled id
-///   returns `Entity::new(id, current_gen)`. Read by the hot
-///   `get_component_raw` path in `EcsMaster`.
+///   deallocation, and the recycled entry carries the bumped generation
+///   verbatim. Read by the hot `get_component_raw` path in `EcsMaster`.
 /// - `live_count`: count of currently-live entities, maintained under
 ///   `&mut self`.
+/// - `reservoir`: the fresh-id counter and the recycled-entity stack
+///   ([`EntityReservoir`]). EM2′: workers claim from the stack through
+///   `EntityCounter` (one `fetch_sub`), so a population churned through
+///   `Commands` recycles its ids instead of minting fresh ones forever; the
+///   dispatcher pushes, pops and settles it under `&mut self`.
 ///
 /// Phase X.D removed the `active_ids` (dense live list) and
 /// `sparse_to_active` (sparse→dense map); their sole consumer was the cold
@@ -34,16 +31,20 @@ use crate::ecs::identifiers::primitives::EntityId;
 /// `entities_inland` directly — O(capacity) instead of O(active); accepted
 /// because real iteration goes through `Query`/archetype storage, never
 /// through here.
-// Phase X.G cache-layout note: `#[repr(C)]` pins the hot scalar cluster —
-// `entities_inland` (32 B: base/os_len/len/committed) + `next_entity_id`
-// (8 B) + `live_count` (8 B) = 48 B — inside ONE cache line at offset 0.
-// Every create/delete/register touches exactly that cluster; the recycle
-// `Vec` header follows on the next line. Measured: the repr(Rust) shuffle
-// after the 24→32 B field growth cost +6-10% on create/delete_entity_10k.
+// Cache-layout note (Phase X.G, re-laid by EM2′ plan D5): `#[repr(C)]` pins
+// line 0 to `entities_inland` (48 B native: base/len/committed/reserve_request/
+// vm) + `live_count` (8 B) — every create/delete/register touches it, and the
+// hot pair (base, len) keeps offsets 0/8 (XG-B1). Line 1 is the reservoir
+// (`align(64)`), holding BOTH RMW'd atomics: a worker spawn's `lock` RMW no
+// longer invalidates the inland header every other worker's
+// `get_component_raw` reads. Measured history: the repr(Rust) shuffle after
+// the 24→32 B inland growth cost +6-10% on create/delete_entity_10k — this
+// family is layout-sensitive, and `create/delete_entity_10k` is the bench that
+// can overturn D5.
 #[repr(C)]
 pub struct EntityMaster {
     /// Phase 7: dense-indexed fast-path lookup record store — FIRST field:
-    /// its hot pair (base, len) sits at offsets 0/16 of the master itself.
+    /// its hot pair (base, len) sits at offsets 0/8 of the master itself.
     ///
     /// Phase X.G: an [`InlandStore`] (address-stable reserve/commit growth)
     /// instead of a `Vec` — growth never reallocates, copies, or fills
@@ -54,38 +55,78 @@ pub struct EntityMaster {
     /// and the Phase 7 hot read path. Outside the crate, the layout is opaque.
     pub(crate) entities_inland: InlandStore,
 
-    /// Phase 11 (EM1, EM6): atomic counter for fresh entity-id minting.
-    ///
-    /// Workers reach this field exclusively through the
-    /// [`crate::ecs::core::system::params::entity_counter::EntityCounter<'s>`]
-    /// newtype (`*const AtomicUsize`), which restricts the reachable surface
-    /// to atomic RMW only. The dispatcher's `&mut self`-bound
-    /// `allocate_entity` performs `fetch_add(1, Relaxed)` on the same atomic.
-    next_entity_id: AtomicUsize,
-
     /// Count of currently-live entities. Maintained under `&mut self`
     /// (dispatcher, apply window SCH7). Replaces the removed `active_ids.len()`.
     live_count: usize,
 
-    /// Pool of free entity IDs for reuse (LIFO). Last field: the `Vec`
-    /// header lives on the second cache line; the recycle pop/push touches
-    /// it only on the create/delete paths that already paid the line.
-    free_entity_ids: Vec<EntityId>,
+    /// EM2′ / EM6′: the fresh-id counter and the claimable recycled-entity
+    /// stack, on its own cache line.
+    ///
+    /// `pub(crate)` so [`crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::entity_counter`]
+    /// can project `&raw const (*world).entity_master.reservoir` without an
+    /// intermediate `&EntityMaster`. Workers reach it ONLY as the
+    /// `*const EntityReservoir` inside
+    /// [`crate::ecs::core::system::params::entity_counter::EntityCounter<'s>`]:
+    /// no other `EntityMaster` field is reachable through that type.
+    pub(crate) reservoir: EntityReservoir,
+}
+
+// Layout pins (plan D5 / O2). Native 64-bit only: under Miri `VmReservation`
+// gains a `Layout` field (inland 64 B, reservoir at +128, size 256), and under
+// loom the atomics are not 8 bytes.
+#[cfg(all(not(miri), not(loom), target_pointer_width = "64"))]
+const _: () = {
+    assert!(core::mem::offset_of!(EntityMaster, entities_inland) == 0);
+    assert!(core::mem::offset_of!(EntityMaster, live_count) == 48);
+    assert!(core::mem::offset_of!(EntityMaster, reservoir) == 64);
+    assert!(size_of::<EntityMaster>() == 192);
+};
+
+/// What [`EntityMaster::allocate_entity_ticketed`] actually did (plan D9).
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AllocSource {
+    /// Minted from the fresh counter at generation 0.
+    Fresh,
+    /// Popped from the recycled stack, carrying its bumped generation.
+    Recycled,
+}
+
+/// An allocation together with the branch that produced it — the only input
+/// [`EntityMaster::rewind_allocate`] accepts, so a rewind undoes exactly what
+/// the allocation did instead of inferring it from id arithmetic (R1).
+///
+/// Neither `Copy` nor `Clone`: rewinding the same allocation twice does not
+/// compile.
+#[must_use]
+#[derive(Debug)]
+pub(crate) struct AllocTicket {
+    entity: Entity,
+    source: AllocSource,
+}
+
+impl AllocTicket {
+    /// The allocated handle.
+    #[inline]
+    pub(crate) fn entity(&self) -> Entity {
+        self.entity
+    }
 }
 
 impl EntityMaster {
     /// Creates a new empty EntityMaster.
     ///
-    /// Phase X.G: pays one address-space reservation syscall
-    /// (`DEFAULT_INLAND_RESERVE`, no commit charge, no resident pages) —
-    /// bounded by the XG-B4 `EcsMaster::new` gate.
+    /// Phase X.G: construction pays NO syscall (both reservations — the inland
+    /// store's and the recycled stack's — materialize lazily), bounded by the
+    /// XG-B4 `EcsMaster::new` gate.
     #[inline]
     pub fn new() -> Self {
+        let entities_inland = InlandStore::new();
+        let reservoir = EntityReservoir::new(entities_inland.ceiling_slots());
         Self {
-            free_entity_ids: Vec::new(),
-            next_entity_id: AtomicUsize::new(0),
-            entities_inland: InlandStore::new(),
+            entities_inland,
             live_count: 0,
+            reservoir,
         }
     }
 
@@ -95,22 +136,25 @@ impl EntityMaster {
     /// first `capacity` entities); a capacity above the default 67 M-slot
     /// ceiling sizes the reservation up instead of failing (R2-W2 option b —
     /// `Vec::with_capacity`'s "never refuse a satisfiable request" contract).
+    /// The recycled stack precommits `capacity / 4` entries, as the former
+    /// `Vec::with_capacity(capacity / 4)` did.
     #[inline]
     pub fn with_capacity(capacity: usize) -> Self {
+        let entities_inland = InlandStore::with_capacity(capacity);
+        let mut reservoir = EntityReservoir::new(entities_inland.ceiling_slots());
+        reservoir.precommit(capacity / 4);
         Self {
-            free_entity_ids: Vec::with_capacity(capacity / 4),
-            next_entity_id: AtomicUsize::new(0),
-            entities_inland: InlandStore::with_capacity(capacity),
+            entities_inland,
             live_count: 0,
+            reservoir,
         }
     }
 
-    /// Allocates a new entity or reuses a recycled one.
+    /// Allocates a new entity or reuses a recycled one, and records which.
     ///
-    /// Returns the allocated entity with the appropriate generation. For
-    /// recycled ids the generation is read from the fast-store slot
-    /// (`deallocate_entity` bumped it before nulling the archetype_ptr).
-    /// Fresh ids start at generation 0.
+    /// A recycled entity comes off the stack with the generation
+    /// `deallocate_entity` bumped (settling the previous phase's worker claims
+    /// first, plan D3). Fresh ids start at generation 0.
     ///
     /// # Visibility (Phase 11 W2)
     ///
@@ -118,63 +162,44 @@ impl EntityMaster {
     /// is [`crate::ecs::core::ecs_master::ecs_master::EcsMaster::create_entity`]
     /// (or `spawn_one` / `spawn_two`). Restricting privacy eliminates the
     /// risk that out-of-tree callers mint an `Entity` without registering
-    /// it into the fast store, leaving a stranded `EntityId` and violating
-    /// the EM2 invariant that recycling is dispatcher-exclusive.
+    /// it into the fast store, leaving a stranded `EntityId`.
     #[inline]
-    pub(crate) fn allocate_entity(&mut self) -> Entity {
-        if let Some(id) = self.free_entity_ids.pop() {
-            // Recycled id: read its current generation from the fast store.
-            // The slot was set to `is_null()` on deallocate_entity; the
-            // generation field was bumped before nulling.
-            debug_assert!(
-                id.0 < self.entities_inland.len(),
-                "Free entity ID out of bounds"
-            );
-            let current_gen = self.entities_inland[id.0].generation();
-            Entity::new(id, current_gen)
+    pub(crate) fn allocate_entity_ticketed(&mut self) -> AllocTicket {
+        if let Some(entity) = self.reservoir.pop_free() {
+            self.debug_check_free_entry(entity, "pop_free");
+            AllocTicket {
+                entity,
+                source: AllocSource::Recycled,
+            }
         } else {
-            // Phase 11 EM1: fresh-id minting through atomic fetch_add. We
-            // hold `&mut self` so the load could be a plain read, but
-            // routing through `fetch_add(Relaxed)` keeps a single source
-            // of truth with the worker path (EntityCounter::reserve_entity)
-            // and lets us share the counter without extra branches.
-            let id_raw = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
-            let id = EntityId(id_raw);
+            // Phase 11 EM1: fresh-id minting through the SAME atomic the worker
+            // claim uses — one source of truth, no extra branch.
+            let entity = self.reservoir.mint_fresh();
             // Ensure the fast store has a slot for this id (X.G: no copy, no
             // fill — `ensure` self-gates on `len`).
-            self.entities_inland.ensure(id.0 + 1);
-            Entity::new(id, 0)
+            self.entities_inland.ensure(entity.id().0 + 1);
+            AllocTicket {
+                entity,
+                source: AllocSource::Fresh,
+            }
         }
     }
 
-    /// Crate-internal accessor for `EntityCounter` construction inside
-    /// [`crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::entity_counter`].
-    ///
-    /// Phase 11 Step 3 (Round 3 C-N1): the field-restriction invariant EM6
-    /// is enforced by exposing ONLY the atomic counter — not the full
-    /// `EntityMaster` — to worker code. Workers receive an
-    /// [`crate::ecs::core::system::params::entity_counter::EntityCounter<'s>`]
-    /// whose internal pointer type is `*const AtomicUsize`, so the type
-    /// system rejects any attempt to project to a different `EntityMaster`
-    /// field via this channel.
+    /// [`allocate_entity_ticketed`](Self::allocate_entity_ticketed) for callers
+    /// that never rewind.
     #[inline]
-    pub(crate) fn next_id_atomic(&self) -> &AtomicUsize {
-        &self.next_entity_id
+    pub(crate) fn allocate_entity(&mut self) -> Entity {
+        self.allocate_entity_ticketed().entity
     }
 
-    /// Reserves a fresh entity ID through an atomic increment — does NOT
-    /// touch the free list (EM2).
+    /// Claims an entity id through the reservoir — a recycled entity if one is
+    /// claimable, otherwise a fresh id at generation 0 — without registering
+    /// it into the fast store (EM2′).
     ///
-    /// Used by dispatcher-side helpers that need a fresh ID without
-    /// registering it into the fast store. Workers go through the
-    /// [`crate::ecs::core::system::params::entity_counter::EntityCounter<'s>`]
-    /// newtype which performs the same atomic RMW but cannot reach any
-    /// other `EntityMaster` field (EM6).
-    ///
-    /// The current Phase 11 implementation routes worker reserves through
-    /// `EntityCounter`; this dispatcher-facing alias is reserved for
-    /// future opcode helpers (e.g. spawn-batch) that have a `&EntityMaster`
-    /// in scope and skip the `UnsafeEcsCell` projection.
+    /// The UNGATED claim: each call stands alone. Used by hooks'
+    /// `DeferredCommands::spawn` on the dispatcher; workers go through
+    /// [`crate::ecs::core::system::params::entity_counter::EntityCounter<'s>`]'s
+    /// gated claim, which reaches only the reservoir (EM6′).
     ///
     /// # Atomic ordering
     ///
@@ -182,25 +207,18 @@ impl EntityMaster {
     /// returned id is established later by the apply-window barrier
     /// (every worker write is visible to the dispatcher via SCH7's join).
     #[inline]
-    #[allow(dead_code)] // reserved for Phase 12 spawn-batch helpers (plan §15.2)
     pub(crate) fn reserve_entity(&self) -> Entity {
-        let id = self.next_entity_id.fetch_add(1, Ordering::Relaxed);
-        debug_assert!(id < usize::MAX / 2, "EntityId counter near exhaustion");
-        Entity::new(EntityId(id), 0)
+        self.reservoir.claim()
     }
 
     /// Phase 12.5 Opt-A2 (plan §5.7 / SBO14): atomically reserves a
-    /// contiguous range of `n` fresh entity IDs through the world's
-    /// counter — does NOT touch the free list (EM2).
+    /// contiguous range of `n` FRESH entity IDs — batches stay fresh and
+    /// contiguous in Stage A (EM2′ plan D7), so this never claims from the
+    /// recycled stack.
     ///
     /// Validates `n ≤ MAX_BATCH_HINT` BEFORE any atomic operation. On
     /// overrun returns `Err(EcsError::SpawnBatchExceedsCapacity)`; **the
     /// counter is not advanced**.
-    ///
-    /// Routed through here (rather than poking `next_entity_id` directly)
-    /// by the C-N2 lock-down: every `fetch_add` on the world counter goes
-    /// through either this entry point or
-    /// [`crate::ecs::core::system::params::entity_counter::EntityCounter::reserve_batch`].
     ///
     /// # Atomic ordering
     ///
@@ -209,18 +227,7 @@ impl EntityMaster {
     /// (SCH7).
     #[inline]
     pub(crate) fn reserve_batch(&self, n: usize) -> EcsResult<Range<usize>> {
-        if n > MAX_BATCH_HINT {
-            return Err(EcsError::SpawnBatchExceedsCapacity {
-                requested: n,
-                max: MAX_BATCH_HINT,
-            });
-        }
-        let start = self.next_entity_id.fetch_add(n, Ordering::Relaxed);
-        debug_assert!(
-            start.checked_add(n).is_some_and(|end| end < usize::MAX / 2),
-            "EntityId counter near exhaustion"
-        );
-        Ok(start..(start + n))
+        self.reservoir.mint_fresh_batch(n)
     }
 
     /// Phase 12.6 — grows the entity fast store so any index in
@@ -349,13 +356,14 @@ impl EntityMaster {
         self.live_count += 1;
     }
 
-    /// Deallocates an entity, bumps its generation, and recycles its id.
+    /// Deallocates an entity, bumps its generation, and recycles it.
     ///
     /// Returns `true` on success, `false` if the entity is stale or never
     /// registered. The generation is bumped IN PLACE on the fast-store slot
-    /// before the slot's `archetype_ptr` is nulled — so the next
-    /// `allocate_entity` for the same recycled id returns
-    /// `Entity::new(id, bumped_gen)`.
+    /// before the slot's `archetype_ptr` is nulled, and the recycled entry
+    /// carries the bumped generation — so whoever claims or pops the id next
+    /// (a worker's `Commands::spawn` or the dispatcher's `allocate_entity`)
+    /// receives `Entity::new(id, bumped_gen)`.
     #[inline]
     pub fn deallocate_entity(&mut self, entity: Entity) -> bool {
         if !self.is_entity_valid(entity) {
@@ -365,8 +373,8 @@ impl EntityMaster {
         let sparse_idx = entity_id.0;
 
         // Bump generation in place and null the archetype_ptr. The
-        // generation must survive deallocation so the next allocate_entity
-        // for this recycled id returns Entity::new(id, bumped_gen).
+        // generation must survive deallocation: the dead slot and the
+        // recycled entry agree on it (F3).
         let current_gen = self.entities_inland[sparse_idx].generation();
         let next_gen = current_gen.wrapping_add(1);
         self.entities_inland[sparse_idx] = EntityInland::new(
@@ -375,11 +383,10 @@ impl EntityMaster {
             next_gen,
         );
 
-        self.free_entity_ids.push(entity_id);
+        self.reservoir.push_free(Entity::new(entity_id, next_gen));
 
         // Decrement only on the success path: the `is_entity_valid` early
-        // return above skips never-registered recycled ids (e.g. the
-        // `EcsMaster::create_entity` rejection fallback), for which
+        // return above skips never-registered recycled ids, for which
         // `register*` never incremented `live_count`.
         debug_assert!(
             self.live_count > 0,
@@ -423,10 +430,13 @@ impl EntityMaster {
         self.entities_inland.len()
     }
 
-    /// Gets the number of recycled entity IDs available for reuse.
+    /// Gets the number of recycled entity IDs available for reuse — the
+    /// claimable length of the recycled stack, which equals its length at rest
+    /// (between frames). Inside a phase it already excludes what workers have
+    /// claimed.
     #[inline]
     pub fn recycled_entity_count(&self) -> usize {
-        self.free_entity_ids.len()
+        self.reservoir.claimable()
     }
 
     /// Gets the next entity ID that would be allocated for a fresh slot.
@@ -435,7 +445,19 @@ impl EntityMaster {
     /// only; no synchronization needed.
     #[inline]
     pub fn next_entity_id(&self) -> EntityId {
-        EntityId(self.next_entity_id.load(Ordering::Relaxed))
+        EntityId(self.reservoir.next_fresh())
+    }
+
+    /// Raw `free_top` of the recycled stack, negative drift included.
+    ///
+    /// Test / loom probe, not API (precedent: the `term_list` gate shims): its
+    /// drift below zero counts exactly the claims that found the stack empty
+    /// since the last settle, so the EXHAUSTED bit's RMW saving is pinned as an
+    /// integer rather than a timing.
+    #[doc(hidden)]
+    #[inline]
+    pub fn free_top_raw(&self) -> isize {
+        self.reservoir.free_top_raw()
     }
 
     /// Returns an iterator over all currently-active entities.
@@ -454,13 +476,12 @@ impl EntityMaster {
 
     /// Clears all entities from the master.
     ///
-    /// Resets the atomic counter under `&mut self` exclusivity — no
-    /// synchronization needed; `Ordering::Relaxed` is sufficient.
+    /// Resets the counter and the recycled stack under `&mut self`
+    /// exclusivity — no synchronization needed.
     pub fn clear(&mut self) {
-        self.free_entity_ids.clear();
+        self.reservoir.clear();
         self.entities_inland.clear();
         self.live_count = 0;
-        self.next_entity_id.store(0, Ordering::Relaxed);
     }
 
     /// Checks if the master is empty (no active entities).
@@ -471,10 +492,11 @@ impl EntityMaster {
 
     /// Gets the total memory usage in bytes (approximate).
     ///
-    /// Phase X.G: reports RESIDENT truth — the committed frontier of the
-    /// entity store, not the (multi-GB, cost-free) address reservation.
+    /// Phase X.G: reports RESIDENT truth — the committed frontiers of the
+    /// entity store and of the recycled stack, not their (multi-GB,
+    /// cost-free) address reservations.
     pub fn memory_usage(&self) -> usize {
-        self.free_entity_ids.capacity() * std::mem::size_of::<EntityId>()
+        self.reservoir.free_committed_bytes()
             + self.entities_inland.committed_slots() * std::mem::size_of::<EntityInland>()
     }
 
@@ -485,66 +507,121 @@ impl EntityMaster {
         self.entities_inland.committed_slots()
     }
 
-    /// Compacts the internal storage to minimize memory usage.
+    /// Orders the recycled stack so the lowest ids are reused first.
+    ///
+    /// No storage is shrunk. The fast store cannot be: that would require
+    /// renumbering live ids, and Phase X.G adds a second reason — no decommit
+    /// of `[0, len)` is EVER legal, because recycled-dead slots are non-zero
+    /// (bumped generations), so re-zeroing them would alias entities
+    /// (invariant J's caveat). The recycled stack keeps its commit frontier
+    /// for the same reuse reason every other `VmColumn` does.
     pub fn compact(&mut self) {
-        self.free_entity_ids.shrink_to_fit();
-
-        // Note: we don't shrink the fast store because that would require
-        // renumbering live ids. Phase X.G adds a second reason: no decommit
-        // of `[0, len)` is EVER legal — recycled-dead slots are non-zero
-        // (bumped generations), so re-zeroing them would alias entities
-        // (invariant J's caveat); decommitting `[len, committed)` is a
-        // possible future non-goal. Instead, we sort the free list for
-        // better cache usage on subsequent allocations.
-        self.free_entity_ids.sort_unstable_by(|a, b| b.cmp(a)); // Reverse order for pop()
+        self.reservoir.sort_free_low_ids_first();
     }
 
-    /// Rolls back the last `allocate_entity` call for a fresh ID (not a recycled one).
+    /// Undoes an allocation that was never registered, following the branch
+    /// the ticket records (R1 / plan D9) — never inferring it from the id.
     ///
-    /// # Invariant
+    /// * **Fresh** — `id + 1 == next_entity_id` rolls the counter back. Any
+    ///   other state means an id was minted after this one; rolling back would
+    ///   re-issue it, so the id is LEAKED instead.
+    /// * **Recycled** — the slot must still be null with the entry's
+    ///   generation (release check); the entity then goes back on the recycled
+    ///   stack. Otherwise the id is LEAKED.
     ///
-    /// `rewind_allocate` must be called immediately after `allocate_entity` and
-    /// before any other `EntityMaster` mutation, otherwise the
-    /// `id == next_entity_id - 1` heuristic for fresh-ID rollback is unsound.
-    /// The current single caller (`EcsMaster::create_entity` on guard failure)
-    /// satisfies this contract by construction. If a second caller emerges,
-    /// audit the contract or promote `rewind_allocate` to a token-based RAII
-    /// guard.
+    /// Returns `true` when the id was restored and `false` when it was leaked.
+    /// A refusal is a bug in the caller (debug builds panic on it); release
+    /// builds leak because a leaked id is bounded and safe, while a wrong
+    /// restore is generation ABA.
     ///
-    /// For recycled IDs (from `free_entity_ids`) this method has no effect and
-    /// returns `false` — recycled IDs are returned to the free list by the
-    /// caller (via `deallocate_entity`) if needed. In the single-caller context,
-    /// `EcsMaster::create_entity` only calls this on the fresh-ID path (before
-    /// `register_entity_with_ptr`), so the recycled case never occurs in practice.
-    #[doc(hidden)]
-    pub(crate) fn rewind_allocate(&mut self, entity: Entity) -> bool {
-        let id = entity.id();
-        // Fresh IDs are minted sequentially from next_entity_id; a fresh entity
-        // is at `next_entity_id - 1` immediately after allocate_entity returns.
-        // The fast-store length tracks the max-ever id, matching the role the
-        // legacy `entities` Vec used to play.
-        //
-        // `&mut self` gives exclusive access to the counter, so the
-        // load+store sequence below is race-free with worker
-        // `EntityCounter::reserve_entity` calls (workers do not run during
-        // the apply window per SCH7 — that is the only context in which
-        // `rewind_allocate` is reachable).
-        let current = self.next_entity_id.load(Ordering::Relaxed);
-        if id.0 + 1 == current && id.0 < self.entities_inland.len() {
-            // Verify it was never registered: a fresh id's slot starts as NULL
-            // (just resized by allocate_entity). Anything else means a caller
-            // registered it before calling rewind.
-            debug_assert!(
-                self.entities_inland[id.0].is_null(),
-                "rewind_allocate called on a registered entity — invariant violated"
-            );
-            // Undo next_entity_id increment.
-            self.next_entity_id.store(current - 1, Ordering::Relaxed);
-            true
-        } else {
-            // Recycled ID path or stale call — caller must use deallocate_entity.
-            false
+    /// The ticket is consumed, so a second rewind of one allocation does not
+    /// compile. The only caller is `EcsMaster::create_entity`'s rejection path,
+    /// which runs between `allocate_entity_ticketed` and any other entity
+    /// mutation.
+    #[cold]
+    pub(crate) fn rewind_allocate(&mut self, ticket: AllocTicket) -> bool {
+        let AllocTicket { entity, source } = ticket;
+        let id = entity.id().0;
+        match source {
+            AllocSource::Fresh => {
+                if id + 1 == self.reservoir.next_fresh_mut() {
+                    debug_assert!(
+                        self.entities_inland.get(id).is_some_and(|slot| slot.is_null()),
+                        "rewind_allocate: fresh id {id} was registered before the rewind"
+                    );
+                    self.reservoir.unmint_fresh_mut();
+                    true
+                } else {
+                    Self::rewind_refused(entity, source)
+                }
+            }
+            AllocSource::Recycled => {
+                let restorable = self
+                    .entities_inland
+                    .get(id)
+                    .is_some_and(|slot| slot.is_null() && slot.generation() == entity.generation());
+                if restorable {
+                    self.reservoir.unpop(entity);
+                    true
+                } else {
+                    Self::rewind_refused(entity, source)
+                }
+            }
         }
+    }
+
+    /// The refusal arm of [`rewind_allocate`](Self::rewind_allocate): leak,
+    /// and in a debug build say so.
+    #[cold]
+    #[inline(never)]
+    fn rewind_refused(entity: Entity, source: AllocSource) -> bool {
+        if cfg!(debug_assertions) {
+            panic!(
+                "rewind_allocate refused the {source:?} ticket for {entity:?}: the entity store \
+                 changed since the allocation, so the id is leaked rather than re-issued (R1)"
+            );
+        }
+        false
+    }
+
+    /// F3 for one entry: its slot is dead and carries its generation.
+    #[inline]
+    fn debug_check_free_entry(&self, e: Entity, site: &'static str) {
+        debug_assert!(
+            self.entities_inland
+                .get(e.id().0)
+                .is_some_and(|slot| slot.is_null() && slot.generation() == e.generation()),
+            "F3 violated at {site}: recycled entry {e:?} does not match its dead slot"
+        );
+    }
+
+    /// Walks F1–F3 over the whole recycled stack, O(n), and panics on the
+    /// first violation. Test / proptest surface, not API.
+    ///
+    /// Settles first (F1 is the post-settle statement), so it is `&mut`.
+    #[doc(hidden)]
+    pub fn check_invariants(&mut self) {
+        let claimable = self.reservoir.claimable();
+        let entries = self.reservoir.settled_entries();
+        assert_eq!(entries.len(), claimable, "F1: settled length != claimable length");
+        let mut seen = crate::ecs::memory::vm_column::VmColumn::<EntityId>::new(
+            "EntityMaster::check_invariants",
+            entries.len().max(1),
+        );
+        for (i, e) in entries.iter().enumerate() {
+            let slot = self.entities_inland.get(e.id().0).unwrap_or_else(|| {
+                panic!("F3: entry {i} ({e:?}) is past the fast store (len {})", self.entities_inland.len())
+            });
+            assert!(slot.is_null(), "F3: entry {i} ({e:?}) names a LIVE slot");
+            assert_eq!(slot.generation(), e.generation(), "F3: entry {i} ({e:?}) generation drift");
+            seen.push(e.id());
+        }
+        let ids = seen.as_mut_slice();
+        ids.sort_unstable();
+        assert!(
+            ids.windows(2).all(|w| w[0] != w[1]),
+            "F3: the recycled stack holds a duplicate id"
+        );
     }
 }
 
@@ -555,30 +632,31 @@ impl Default for EntityMaster {
     }
 }
 
-// SAFETY (SEND5 — Phase 9 §2.4, §9.1; updated Phase X.D):
+// SAFETY (SEND5 — Phase 9 §2.4, §9.1; updated Phase X.D and EM2′):
 //
-// `EntityMaster` is `Send + Sync` under the Phase 9 contract. Post Phase-X.D
-// the struct holds: `free_entity_ids`, `next_entity_id`, `entities_inland`,
-// `live_count`. The `active_ids` / `sparse_to_active` acceleration vectors
-// were removed (Phase X.D), shrinking the shared surface.
+// `EntityMaster` is `Send + Sync` under the Phase 9 contract. The struct
+// holds: `entities_inland`, `live_count`, `reservoir`.
 //
 //   - Hot worker paths take `&self` (`is_entity_valid`, `get_entity`, plus the
 //     inline `entities_inland` reads driven by `EcsMaster::get_component_raw`).
 //     These are race-free as long as no concurrent structural mutation runs.
-//   - Structural mutation (`allocate_entity`, `deallocate_entity`,
+//   - Structural mutation (`allocate_entity*`, `deallocate_entity`,
 //     `register_entity_with_ptr`, `register_batch`, `ensure_capacity`,
-//     `clear`, `rewind_allocate`) takes `&mut self` and runs only on the
-//     dispatcher inside the apply window (SCH7); no worker is in flight, so a
-//     worker `&self` read can never race a structural mutation. Phase X.G
-//     makes the no-mid-flight-reallocation clause STRUCTURAL as well:
-//     `entities_inland` is an `InlandStore` whose base address is write-once
-//     (growth commits fresh pages at the frontier — no pointer is ever
-//     invalidated). This is defense-in-depth, NOT a relaxation: `len` is a
-//     plain non-atomic usize, so a concurrent dispatcher-grow vs worker-read
-//     would still be a data race — SCH7 exclusivity remains the normative
-//     argument.
-//   - `next_entity_id` is the ONLY worker-reachable field, exposed solely as
-//     `*const AtomicUsize` through `EntityCounter<'s>` (EM6) — atomic RMW only.
+//     `clear`, `compact`, `rewind_allocate`) takes `&mut self` and runs only
+//     on the dispatcher inside the apply window (SCH7); no worker is in
+//     flight, so a worker `&self` read can never race a structural mutation.
+//     Phase X.G makes the no-mid-flight-reallocation clause STRUCTURAL as
+//     well: `entities_inland` and the recycled stack both live on write-once
+//     reservations (growth commits fresh pages at the frontier — no pointer is
+//     ever invalidated). This is defense-in-depth, NOT a relaxation: `len`
+//     fields are plain non-atomic usizes, so a concurrent dispatcher-grow vs
+//     worker-read would still be a data race — SCH7 exclusivity (and, for the
+//     recycled stack, EM2′-K) remains the normative argument.
+//   - `reservoir` is the ONLY field a worker mutates, and only through its two
+//     atomics, reached solely as `*const EntityReservoir` through
+//     `EntityCounter<'s>` (EM6′). Its plain parts (`free.base`, the entries)
+//     are read-only in a phase; `EntityReservoir`'s own `Sync` impl carries
+//     that argument.
 //   - `live_count: usize` is dispatcher-only (`&mut self`); no worker reaches it.
 //   - The `*mut Archetype` raw pointers inside `EntityInland` slots point into
 //     the `ArchetypeMaster`'s stable-address slab (SEND6) and are never
@@ -692,34 +770,28 @@ mod tests {
         assert!(!live.contains(&e1), "deallocated e1 must NOT appear in iter_entities");
     }
 
-    /// `rewind_allocate` undoes a fresh `allocate_entity` (the C-007 guard
-    /// path used by `EcsMaster::create_entity` on post-allocate failure).
-    /// Calling it without a prior allocation must report `false` (the
-    /// fresh-id heuristic doesn't fire). Rebuilt as the test-migration
-    /// recipe equivalent of `test_entity_inland_update` (the legacy
-    /// `update_entity_inland` is replaced by `EntityInland::set_unit_index`
-    /// exercised inline).
+    /// `rewind_allocate` undoes a fresh `allocate_entity_ticketed` (the C-007
+    /// guard path used by `EcsMaster::create_entity` on post-allocate
+    /// failure). The former "a second rewind of the same entity reports
+    /// false" leg is gone with the id-arithmetic heuristic it tested: the
+    /// ticket is consumed by the first rewind and is neither `Copy` nor
+    /// `Clone`, so a second rewind of one allocation no longer compiles
+    /// (plan D9).
     #[test]
     fn rewind_allocate_decrements_next_id_on_fresh_path() {
         let mut em = EntityMaster::new();
         assert_eq!(em.next_entity_id(), EntityId(0));
 
-        let e = em.allocate_entity();
+        let ticket = em.allocate_entity_ticketed();
+        assert_eq!(ticket.source, AllocSource::Fresh);
         assert_eq!(em.next_entity_id(), EntityId(1));
 
         // Rewind must succeed and restore `next_entity_id`.
-        let rewound = em.rewind_allocate(e);
+        let rewound = em.rewind_allocate(ticket);
         assert!(rewound, "fresh-id rewind must succeed");
         assert_eq!(em.next_entity_id(), EntityId(0),
             "next_entity_id must roll back after rewind");
         assert_eq!(em.entity_count(), 0);
-
-        // A second rewind on a stale entity must NOT decrement again.
-        let rewound_again = em.rewind_allocate(e);
-        assert!(!rewound_again,
-            "rewind on a stale entity must report false (heuristic doesn't fire)");
-        assert_eq!(em.next_entity_id(), EntityId(0),
-            "next_entity_id must not be touched by a no-op rewind");
     }
 
     /// `EntityInland::set_unit_index` (used by `EcsMaster::delete_entity` on
@@ -776,13 +848,12 @@ mod tests {
         assert_eq!(e2.id(), EntityId(2));
     }
 
-    /// Phase 11 EM2: `reserve_entity` MUST NOT pop from the free list —
-    /// only `allocate_entity` may. Workers calling reserve_entity from
-    /// EntityCounter therefore never observe a recycled ID with a bumped
-    /// generation (the bumped generation always travels through the
-    /// dispatcher's `allocate_entity` path).
+    /// EM2′ (inverts Phase 11's `reserve_entity_skips_free_list`, the test
+    /// that pinned the deferred-route leak's cause): `reserve_entity` claims
+    /// the recycled entity — with its bumped generation — before it mints a
+    /// fresh id, and the next `&mut` op settles the claim off the stack.
     #[test]
-    fn reserve_entity_skips_free_list() {
+    fn reserve_entity_claims_free_list_before_minting() {
         let mut em = EntityMaster::new();
         // Allocate then deallocate to populate the free list.
         let e0 = em.allocate_entity();
@@ -790,11 +861,19 @@ mod tests {
         assert!(em.deallocate_entity(e0));
         assert_eq!(em.recycled_entity_count(), 1, "free list now has one ID");
 
-        // reserve_entity must NOT consume the recycled ID — it must
-        // hand out a strictly fresh one.
         let e1 = em.reserve_entity();
-        assert_eq!(e1.id(), EntityId(1), "fresh ID, not the recycled 0");
-        assert_eq!(em.recycled_entity_count(), 1, "free list intact");
+        assert_eq!(e1, Entity::new(e0.id(), e0.generation() + 1),
+            "the claim must return the recycled id with its bumped generation");
+        assert_eq!(em.recycled_entity_count(), 0, "the claim consumed the entry");
+
+        let e2 = em.reserve_entity();
+        assert_eq!(e2, Entity::new(EntityId(1), 0), "an empty stack mints fresh");
+
+        // The dispatcher's next allocation must not re-issue the claimed id.
+        let e3 = em.allocate_entity();
+        assert_eq!(e3, Entity::new(EntityId(2), 0),
+            "allocate_entity after the claims must mint, not re-pop the claimed entry");
+        assert_eq!(em.free_top_raw(), 0, "settle clamped the overshoot back to 0");
     }
 
     /// Test that `deallocate_entity` on a stale handle (generation mismatch)

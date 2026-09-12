@@ -292,12 +292,15 @@ fn single_mut_panics_on_zero_rows() {
 ///
 /// # Why the direct `EcsMaster` path and not `Commands`
 ///
-/// `Commands::spawn` mints its id through `EntityCounter::reserve_entity`,
-/// which by EM2 **never pops the free list** — recycling is dispatcher-only, so
-/// a `Commands`-driven despawn/respawn hands out a FRESH id and this test would
-/// be vacuous. (Measured: the fixture precondition below caught exactly that on
-/// the first draft.) `spawn_one` / `delete_entity` go through
-/// `EntityMaster::allocate_entity`, which is the recycling path.
+/// When this test was written, `Commands::spawn` minted its id through
+/// `EntityCounter::reserve_entity`, which by the old EM2 **never popped the free
+/// list**, so a `Commands`-driven despawn/respawn handed out a FRESH id and this
+/// test would have been vacuous. (Measured: the fixture precondition below
+/// caught exactly that on the first draft.) Since EM2′ the deferred route
+/// recycles too — one frame after the despawn — so that reason is gone; the
+/// direct path stays because it recycles SYNCHRONOUSLY, with no frame loop to
+/// drive. `spawn_one` / `delete_entity` go through
+/// `EntityMaster::allocate_entity`.
 #[test]
 fn get_returns_none_for_a_stale_generation_handle() {
     let mut world = EcsMaster::new();

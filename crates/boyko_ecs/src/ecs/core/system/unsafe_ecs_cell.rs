@@ -33,7 +33,6 @@
 #![allow(dead_code)]
 
 use std::marker::PhantomData;
-use std::sync::atomic::AtomicUsize;
 
 use crate::ecs::core::archetype::archetype::Archetype;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
@@ -243,22 +242,27 @@ impl<'w> UnsafeEcsCell<'w> {
         unsafe { &(*self.ptr).resources }
     }
 
-    /// Phase 11 (Round 3 C-N1): mints an [`EntityCounter<'s>`] projecting
-    /// only the atomic `next_entity_id` counter from `EntityMaster`. The
-    /// returned counter cannot reach any other `EntityMaster` field — the
-    /// EM6 aliasing rule is type-enforced (the carried pointer's type is
-    /// `*const AtomicUsize`, not `*const EntityMaster`).
+    /// Phase 11 (Round 3 C-N1), re-based by EM2′: mints an
+    /// [`EntityCounter<'s>`] projecting only `EntityMaster::reservoir` — the
+    /// fresh-id counter plus the claimable recycled-entity stack. The returned
+    /// counter cannot reach any other `EntityMaster` field — the EM6′ aliasing
+    /// rule is type-enforced (the carried pointer's type is
+    /// `*const EntityReservoir`, not `*const EntityMaster`).
     ///
     /// The lifetime `'s` may be shorter than `'w`; the caller (typically
     /// `Commands::get_param`) ties `'s` via `PhantomData` re-tag per the
     /// Phase 8c IntoSystem contract (plan §8.7 — `get_param` runs once
     /// per system invocation; `'w >= 's`).
     ///
-    /// # Safety (U_C2, EM6)
+    /// # Safety (U_C2, EM6′, SCH7)
     ///
     /// * The caller asserts that the active `SystemParam::init_access`
-    ///   permits conflict-free atomic-counter access — `Commands` declares
-    ///   no access in the conflict graph (EVT1 precedent + EM6).
+    ///   permits conflict-free reservoir access — `Commands` declares
+    ///   no access in the conflict graph (EVT1 precedent + EM6′): the atomics
+    ///   are RMW'd from any thread, and the stack entries a claim reads are
+    ///   immutable for the phase because every write to them takes
+    ///   `&mut EntityMaster`, which runs dispatcher-solo in the apply window
+    ///   (SCH7 / EM2′-K).
     /// * The by-value receiver preserves the raw pointer's provenance: no
     ///   `&self` retag downgrades the carried `*mut EcsMaster` before the
     ///   field projection.
@@ -266,26 +270,24 @@ impl<'w> UnsafeEcsCell<'w> {
     ///   protocol enforces this on the consumer side).
     #[inline]
     pub(crate) unsafe fn entity_counter<'s>(self) -> EntityCounter<'s> {
-        // SAFETY (U_C2, EM6):
+        // SAFETY (U_C2, EM6′):
         //   * By-value receiver — no `&self` retag. The underlying
-        //     `*mut EcsMaster` is valid for `'w` and carries the
-        //     original write-capable provenance from `new_mutable`.
-        //   * Projecting `(*ptr).entity_master.next_id_atomic()` produces
-        //     a `&AtomicUsize`. Going `&AtomicUsize -> *const AtomicUsize`
-        //     keeps the atomic's address; this raw pointer is what
-        //     `EntityCounter::from_ptr` re-tags to `'s`.
-        //   * The field type at the destination is `AtomicUsize` — no
-        //     compile-time path leads from the carried pointer to any
-        //     other `EntityMaster` field, type-enforcing EM6.
-        let em = unsafe { &(*self.ptr).entity_master };
-        let atomic_ptr = em.next_id_atomic() as *const AtomicUsize;
+        //     `*mut EcsMaster` is valid for `'w` and carries the original
+        //     provenance from `new_mutable`.
+        //   * `&raw const` projects the `reservoir` field's address without
+        //     materializing any reference to `EcsMaster` or `EntityMaster`, so
+        //     no intermediate borrow narrows or retags the provenance; the
+        //     pointer covers exactly the `EntityReservoir`.
+        let reservoir = unsafe { &raw const (*self.ptr).entity_master.reservoir };
         // SAFETY (`EntityCounter::from_ptr` contract, plan §5.5):
-        //   * Pointer was just minted from a live `EntityMaster`
-        //     reachable through `self.ptr`, valid for `'w >= 's`.
-        //   * The pointer aims at the master's `next_entity_id` field
-        //     (EM1) — the only blessed projection.
-        //   * EM6 is upheld by the destination type — see above.
-        unsafe { EntityCounter::from_ptr(atomic_ptr) }
+        //   * Pointer was just projected from a live `EcsMaster` reachable
+        //     through `self.ptr`, valid for `'w >= 's`.
+        //   * It aims at the master's `reservoir` field — the only blessed
+        //     projection (EM6′).
+        //   * No `&mut EntityMaster` is used while the counter lives: the
+        //     counter is dropped with its `Commands<'s>` at system-body end,
+        //     and SCH7 keeps every `&mut` world op out of the phase (EM2′-K).
+        unsafe { EntityCounter::from_ptr(reservoir) }
     }
 
     /// Aether v2 KE2: mints an [`Entities<'s>`] projecting only the entity fast
@@ -293,7 +295,7 @@ impl<'w> UnsafeEcsCell<'w> {
     /// any other `EntityMaster` field — the EM6 aliasing rule is type-enforced
     /// (the carried pointer's type is `*const InlandStore`, not
     /// `*const EntityMaster`), exactly as [`entity_counter`] does with
-    /// `*const AtomicUsize`.
+    /// `*const EntityReservoir`.
     ///
     /// # Safety (U_C2, EM6, SCH7)
     ///

@@ -1,33 +1,61 @@
-//! `EntityCounter<'s>` — minimal projection of `EntityMaster::next_entity_id`.
+//! `EntityCounter<'s>` — the worker's projection of the world's
+//! [`EntityReservoir`]: the fresh-id counter plus the claimable recycled-entity
+//! stack.
 //!
-//! Phase 11 Round 3 (C-N1, EM6 — plan §5.5, §11.10, §12.1). The newtype
-//! encapsulates a raw pointer to the world's atomic entity-id counter so
-//! that worker code holding a [`Commands<'s>`](super::commands::Commands) can
-//! reserve Entity IDs without exposing the full `&EntityMaster`. The field
-//! type of the inner pointer (`*const AtomicUsize`) makes the EM6
-//! field-restriction invariant **type-enforced**: there is no compile-time
-//! path from an `EntityCounter` to any non-atomic `EntityMaster` field.
+//! Phase 11 Round 3 (C-N1, EM6), re-based by EM2′. The newtype carries a raw
+//! pointer to `EntityMaster::reservoir` so that worker code holding a
+//! [`Commands<'s>`](super::commands::Commands) can reserve Entity IDs without
+//! exposing the full `&EntityMaster`. The pointer's destination type
+//! (`*const EntityReservoir`) makes the EM6′ field-restriction invariant
+//! **type-enforced**: there is no compile-time path from an `EntityCounter` to
+//! `entities_inland`, `live_count`, or any other `EntityMaster` field.
+//!
+//! # What a claim does (EM1′, EM2′, EM4′)
+//!
+//! [`EntityCounter::reserve_entity`] takes the most recently recycled entity —
+//! with the generation `deallocate_entity` bumped — if one is claimable
+//! (`free_top.fetch_sub(1)` returned `> 0`), and otherwise mints a fresh id at
+//! generation 0 (`next_entity_id.fetch_add(1)`). The returned handle stays valid
+//! for its owner: every id handed out is in exactly one of {recycled stack,
+//! live, claimed-pending, leaked} (EM4′), and the recycled stack's structure
+//! changes only on the dispatcher under `&mut` (EM2′).
+//!
+//! # The EXHAUSTED bit (plan D4, invariant X1)
+//!
+//! Bit 0 of the carried reservoir address (free: the reservoir is
+//! `align(64)`) records "this counter has seen the stack empty". It is preset at
+//! creation from one `Relaxed` load and set by the first `fetch_sub` that finds
+//! `<= 0`; once set, claims go straight to the fresh counter. The bit is always
+//! TRUE: nothing can push onto the stack while a counter lives (a push needs
+//! `&mut EntityMaster`, which SCH7 keeps out of every phase), so `free_top`
+//! only decreases during the counter's lifetime. A wrong bit could only cost a
+//! missed recycle, never a double issue — it only ever suppresses a
+//! `fetch_sub`. The saving: a steady-state claim is ONE locked RMW on either
+//! path, and only the one claim per system call that runs the stack dry pays
+//! two.
 //!
 //! # Soundness contract (`EntityCounter::from_ptr` SAFETY)
 //!
-//! The `from_ptr` constructor is `unsafe`; callers (Phase 11 limits them
-//! to [`crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::entity_counter`])
+//! The `from_ptr` constructor is `unsafe`; callers (limited to
+//! [`crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell::entity_counter`])
 //! must guarantee:
 //!
 //! 1. The pointer is valid for the lifetime `'s` (provenance + non-dangling).
-//! 2. The atomic is `EntityMaster::next_entity_id` of an `EcsMaster` whose
-//!    lifetime contains `'s`.
-//! 3. EM6: no other code path may use the pointer to reach other
-//!    `EntityMaster` fields — guaranteed by construction because the
-//!    pointer's destination type is `AtomicUsize`, not `EntityMaster`.
+//! 2. It points at `EntityMaster::reservoir` of an `EcsMaster` whose lifetime
+//!    contains `'s`.
+//! 3. For the whole of `'s` nothing mutates the `EntityMaster` except through
+//!    the reservoir's atomics (SCH7 / EM2′-K): no `&mut EntityMaster` is formed
+//!    or used while the counter lives. A `&mut EcsMaster` the pointer was itself
+//!    derived from — `run_system` called inside a `Command::apply` — satisfies
+//!    this as long as it is not used again until the counter is dropped, which
+//!    the nested system's body scope guarantees.
 //!
-//! # Send / Sync (EC1 / EM5)
+//! # Send / !Sync
 //!
-//! `EntityCounter<'s>: Send + Sync` via explicit impls — the only operation
-//! is atomic RMW (`fetch_add(Relaxed)`), which is data-race-free from any
-//! thread. Workers carry `EntityCounter` inside their per-system
-//! `Commands<'s>` view, which is `!Sync` for an independent reason
-//! (`&mut CommandQueue`, CQ-SEND2).
+//! `EntityCounter<'s>: Send` via an explicit impl; it is `!Sync` (and `!Copy`)
+//! because the EXHAUSTED bit lives in a `Cell`. Nothing needs more: the
+//! counter's only owner is its `Commands<'s>`, which is `!Sync` for an
+//! independent reason (`&mut CommandQueue`, CQ-SEND2).
 
 // `EntityCounter` is consumed exclusively by `Commands<'s>` (Wave B) and the
 // `UnsafeEcsCell::entity_counter` projection. The lib build does not exercise
@@ -36,33 +64,39 @@
 // the first public consumer lands.
 #![allow(dead_code)]
 
+use core::cell::Cell;
 use core::marker::PhantomData;
 use core::ops::Range;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ecs::core::entity::entity::Entity;
-use crate::ecs::error::{EcsError, EcsResult};
-use crate::ecs::identifiers::primitives::EntityId;
+use crate::ecs::core::entity::entity_reservoir::EntityReservoir;
+use crate::ecs::error::EcsResult;
 
 /// Phase 12.5 (SBO17): the maximum number of entities one `spawn_batch` call
 /// may reserve. Hard cap; over-budget batches return `Err` without advancing
 /// the counter. See `ecs_master.rs` for the world-side capacity contract.
 pub(crate) const MAX_BATCH_HINT: usize = 8_192;
 
+/// The EXHAUSTED tag in bit 0 of the carried reservoir address (plan D4).
+const EXHAUSTED: usize = 1;
+
+// The tag bit is free only because the reservoir is over-aligned.
+const _: () = assert!(align_of::<EntityReservoir>() > EXHAUSTED);
+
 /// Minimal projection of [`crate::ecs::core::entity::entity_master::EntityMaster`]
-/// exposing only the atomic `next_entity_id` counter for thread-safe entity
-/// reservation from system bodies.
+/// exposing only the [`EntityReservoir`] — the fresh counter and the claimable
+/// recycled stack — for entity reservation from system bodies.
 ///
 /// # Layout (plan §11.10)
 ///
 /// ```text
-/// +0  : next_id_ptr: *const AtomicUsize  (8 B)
-/// +8  : _marker: PhantomData             (0 B ZST)
+/// +0  : tagged: Cell<*const EntityReservoir>  (8 B; bit 0 = EXHAUSTED)
+/// +8  : _marker: PhantomData                  (0 B ZST)
 /// +8  : end
 /// ```
 ///
-/// Size 8 B; align 8. `#[derive(Clone, Copy)]` — trivial copy through
-/// register-passing arguments.
+/// Size 8 B; align 8 (`Cell` is `repr(transparent)`), so `Commands<'s>` stays
+/// 16 B.
 ///
 /// # Lifetime (`'s`)
 ///
@@ -71,97 +105,122 @@ pub(crate) const MAX_BATCH_HINT: usize = 8_192;
 /// borrows). The pointer is minted from `UnsafeEcsCell<'w>` once per
 /// system invocation (plan §8.7 — `'w >= 's`) and re-tagged to `'s` via
 /// `PhantomData`.
-#[derive(Clone, Copy)]
 pub struct EntityCounter<'s> {
-    /// Raw pointer to `EntityMaster::next_entity_id`.
+    /// Pointer to `EntityMaster::reservoir`, bit 0 = EXHAUSTED (X1).
     ///
-    /// Minted from `UnsafeEcsCell<'w>` inside `Commands::get_param` and
-    /// dereferenced only through `fetch_add(Relaxed)` in
-    /// [`reserve_entity`](Self::reserve_entity).
-    next_id_ptr: *const AtomicUsize,
+    /// Minted from `UnsafeEcsCell<'w>` inside `Commands::get_param`. The tag is
+    /// set and cleared with `map_addr`, which keeps the pointer's provenance.
+    tagged: Cell<*const EntityReservoir>,
 
     /// Variance marker — ties the pointer's apparent validity to `'s`.
-    _marker: PhantomData<&'s AtomicUsize>,
+    _marker: PhantomData<&'s EntityReservoir>,
 }
 
-// SAFETY (EC1, EM5, plan §5.5):
-//   `EntityCounter` carries a `*const AtomicUsize`. The only path that
-//   dereferences the pointer is `reserve_entity`, which performs an atomic
-//   RMW (`fetch_add(Relaxed)`). Atomic operations from any thread are
-//   data-race-free; no plain memory access is possible through this type
-//   (the destination type is `AtomicUsize`, never reinterpreted).
+// SAFETY (EC1, EM5, EM6′, plan §5.5 / D4):
+//   Moving an `EntityCounter` to another thread moves the `Cell` with it; the
+//   EXHAUSTED bit is state the counter alone owns, never shared. Through the
+//   carried pointer a counter performs only (a) atomic RMWs and one `Relaxed`
+//   load on the reservoir's `free_top` / `next_entity_id`, data-race-free from
+//   any thread, and (b) plain reads of `free.base` and of entries below its own
+//   claim value. Those plain reads are race-free by SCH7 (+ EM2′-K), NOT by
+//   the pointer type: every write to them takes `&mut EntityMaster`, which
+//   runs only in an apply window, and no counter outlives the phase it was
+//   minted in (`Commands<'s>` is dropped at system-body end).
 unsafe impl<'s> Send for EntityCounter<'s> {}
 
-// SAFETY (EC1, EM5, plan §5.5):
-//   Same composition as `Send`. `&EntityCounter` exposes only
-//   `reserve_entity(&self)` which performs an atomic RMW; concurrent
-//   immutable references from multiple threads alias only the atomic and
-//   are sound.
-unsafe impl<'s> Sync for EntityCounter<'s> {}
-
 // Compile-time size + align contract (plan §11.10 — 8 B).
-// `EntityCounter` wraps a single `*const AtomicUsize`, so its size/align equal
-// the pointer width; the 8-byte figures encode the 64-bit ABI. Gated to 64-bit
-// (the engine's supported platform) — see CLAUDE.md target platform.
+// The 8-byte figures encode the 64-bit ABI. Gated to 64-bit (the engine's
+// supported platform) — see CLAUDE.md target platform.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::size_of::<EntityCounter<'static>>() == 8);
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(core::mem::align_of::<EntityCounter<'static>>() == 8);
 
 impl<'s> EntityCounter<'s> {
-    /// Constructs an `EntityCounter` from a raw pointer to the atomic
-    /// counter.
+    /// Constructs an `EntityCounter` over the world's reservoir, presetting the
+    /// EXHAUSTED bit from one `Relaxed` load (a stack that is empty now stays
+    /// empty for the counter's whole life — X1).
     ///
     /// # Safety (plan §5.5)
     ///
-    /// * `ptr` must be a valid `*const AtomicUsize` for the entirety of `'s`.
-    /// * The pointed-to atomic must be the `next_entity_id` field of an
-    ///   `EntityMaster` whose lifetime contains `'s` — minted by
-    ///   [`crate::ecs::core::entity::entity_master::EntityMaster::next_id_atomic`].
-    /// * Caller asserts the EM6 invariant: no other code path uses the
-    ///   pointer to reach a different `EntityMaster` field. Type-enforced
-    ///   by construction — the pointer's destination type is `AtomicUsize`.
+    /// * `ptr` must be valid for reads for the entirety of `'s`, derived with
+    ///   provenance over the whole `EntityReservoir`.
+    /// * The pointee must be the `reservoir` field of an `EntityMaster` whose
+    ///   lifetime contains `'s`.
+    /// * Nothing may mutate the `EntityMaster` during `'s` except through the
+    ///   reservoir's atomics — no `&mut EntityMaster` is formed or used while
+    ///   the counter lives (SCH7 / EM2′-K): the counter reads recycled entries
+    ///   that only a `&mut` writer could change. (A parent `&mut EcsMaster`
+    ///   the pointer was derived from may exist, unused, for the nested
+    ///   `run_system`-in-apply case — module doc, contract 3.)
     #[inline]
-    pub(crate) unsafe fn from_ptr(ptr: *const AtomicUsize) -> Self {
-        Self { next_id_ptr: ptr, _marker: PhantomData }
+    pub(crate) unsafe fn from_ptr(ptr: *const EntityReservoir) -> Self {
+        debug_assert_eq!(ptr.addr() & EXHAUSTED, 0, "EntityReservoir pointer not 64-aligned");
+        // SAFETY: the caller guarantees `ptr` is valid for reads for `'s` and
+        //   that no `&mut EntityMaster` is used while the counter lives, so the
+        //   `&EntityReservoir` formed for this call conflicts with no write;
+        //   the load itself is atomic.
+        let exhausted = unsafe { (*ptr).is_exhausted_hint() };
+        let tagged = ptr.map_addr(|a| a | (exhausted as usize));
+        Self {
+            tagged: Cell::new(tagged),
+            _marker: PhantomData,
+        }
     }
 
-    /// Atomically reserves a fresh Entity ID — lock-free.
+    /// The untagged reservoir pointer and whether EXHAUSTED is set.
+    #[inline]
+    fn split(&self) -> (*const EntityReservoir, bool) {
+        let tagged = self.tagged.get();
+        (tagged.map_addr(|a| a & !EXHAUSTED), tagged.addr() & EXHAUSTED != 0)
+    }
+
+    /// Reserves an Entity — the most recently recycled one if the stack still
+    /// holds any, otherwise a fresh id at generation 0 — lock-free.
     ///
-    /// Performs `fetch_add(1, Ordering::Relaxed)` on the atomic counter and
-    /// returns an [`Entity`] with generation `0` (fresh path, EM1). The
-    /// caller is responsible for enqueueing a [`crate::ecs::core::commands::Command`]
-    /// (typically `SpawnAtCommand`) that will register the reserved ID into
-    /// the fast store on apply (EM3).
+    /// The caller enqueues a [`crate::ecs::core::commands::Command`]
+    /// (typically `SpawnAtCommand`) that registers the handle into the fast
+    /// store on apply (EM3); the handle is invalid until then, exactly like a
+    /// fresh reserved id.
     ///
     /// # Cost
     ///
-    /// `~10 ns` single-thread (uncontended `lock xadd` on x86_64); up to
-    /// `~60 ns` under N=8 worker contention (plan §10.5).
+    /// One locked RMW on either path in steady state (`fetch_sub` while the
+    /// stack holds entries, `fetch_add` once this counter's EXHAUSTED bit is
+    /// set), plus one plain read of the entry on the recycled path. Only the
+    /// one claim that runs the stack dry pays both RMWs.
     ///
     /// # Atomic ordering
     ///
-    /// `Ordering::Relaxed` is sufficient — uniqueness only; happens-before
-    /// for the returned ID is established later by the apply-window barrier
-    /// (SCH7) when workers join and the dispatcher reads the queue.
+    /// `Ordering::Relaxed` is sufficient — uniqueness comes from the RMWs;
+    /// happens-before for the handle and for the entry it was read from is
+    /// SCH7's (the window that pushed the entry precedes this phase's task
+    /// publication; this phase's completion precedes the next window).
     #[inline]
     pub fn reserve_entity(&self) -> Entity {
-        // SAFETY (EM5, EM6, plan §5.5):
-        //   * `next_id_ptr` was minted by `UnsafeEcsCell::entity_counter`
-        //     (plan §12.7) from a live `EntityMaster::next_id_atomic()`
-        //     projection.
-        //   * The pointer's apparent lifetime `'s` is bounded by `'w >= 's`
-        //     per the Phase 8c IntoSystem contract (plan §8.7 — `get_param`
-        //     runs once per system invocation; `Commands<'s>::Item<'w, 's>`
-        //     is dropped at body end so the pointer never outlives `'w`).
-        //   * Atomic RMW from any thread is data-race-free.
-        let id = unsafe { (*self.next_id_ptr).fetch_add(1, Ordering::Relaxed) };
-        debug_assert!(id < usize::MAX / 2, "EntityId counter near exhaustion");
-        Entity::new(EntityId(id), 0)
+        let (ptr, exhausted) = self.split();
+        // SAFETY (EM5, EM6′, plan §5.5): `ptr` was minted by
+        //   `UnsafeEcsCell::entity_counter` from a live `EntityMaster::reservoir`
+        //   projection and is valid for `'w >= 's` (Phase 8c IntoSystem
+        //   contract: `get_param` runs once per system invocation and
+        //   `Commands<'s>` is dropped at body end). No `&mut EntityMaster` is
+        //   used during `'s` (from_ptr contract 3), so the shared reborrow
+        //   conflicts with no write: the stack entries below this counter's
+        //   claim value and `free.base` are immutable for the phase, and the
+        //   atomics are only ever accessed atomically.
+        let reservoir = unsafe { &*ptr };
+        if !exhausted {
+            if let Some(e) = reservoir.try_claim_recycled() {
+                return e;
+            }
+            self.tagged.set(ptr.map_addr(|a| a | EXHAUSTED));
+        }
+        reservoir.mint_fresh()
     }
 
     /// Phase 12.5 Opt-A2 (SBO17 / plan §5.3): atomically reserves a
-    /// contiguous range of `n` fresh entity IDs.
+    /// contiguous range of `n` FRESH entity IDs (batches stay fresh and
+    /// contiguous in Stage A — EM2′ plan D7).
     ///
     /// Validates `n ≤ MAX_BATCH_HINT` BEFORE any atomic operation. Returns
     /// `Err(EcsError::SpawnBatchExceedsCapacity)` on overrun — **the
@@ -172,39 +231,15 @@ impl<'s> EntityCounter<'s> {
     /// `reserve_batch(n)` in parallel observe disjoint ranges (EM4
     /// atomic-uniqueness).
     ///
-    /// # Cost
-    ///
-    /// `~10 ns` single-thread (one `lock xadd`); contention scales with
-    /// the number of concurrent batch-callers — but since each call
-    /// reserves up to `MAX_BATCH_HINT = 8 192` IDs in one atomic, the
-    /// amortised per-entity cost is sub-nanosecond.
-    ///
     /// # Atomic ordering
     ///
-    /// `Ordering::Relaxed` — same rationale as
-    /// [`Self::reserve_entity`]. The happens-before edge that publishes
-    /// the range's bytes to the dispatcher is established by the
-    /// apply-window barrier (SCH7).
+    /// `Ordering::Relaxed` — same rationale as [`Self::reserve_entity`].
     #[inline]
     pub fn reserve_batch(&self, n: usize) -> EcsResult<Range<usize>> {
-        // SBO17 cap check BEFORE atomic — the counter never advances on Err.
-        if n > MAX_BATCH_HINT {
-            return Err(EcsError::SpawnBatchExceedsCapacity {
-                requested: n,
-                max: MAX_BATCH_HINT,
-            });
-        }
-        // SAFETY (EM5, EM6, plan §5.5): same contract as `reserve_entity`.
-        //   The atomic is `EntityMaster::next_entity_id` projected through
-        //   `next_id_ptr`; the destination type is `AtomicUsize`, so no
-        //   non-atomic field is reachable. Atomic RMW from any thread is
-        //   data-race-free.
-        let start = unsafe { (*self.next_id_ptr).fetch_add(n, Ordering::Relaxed) };
-        debug_assert!(
-            start.checked_add(n).is_some_and(|end| end < usize::MAX / 2),
-            "EntityId counter near exhaustion"
-        );
-        Ok(start..(start + n))
+        let (ptr, _) = self.split();
+        // SAFETY (EM5, EM6′, plan §5.5): same contract as `reserve_entity`;
+        //   the batch path touches only the reservoir's fresh-id atomic.
+        unsafe { (*ptr).mint_fresh_batch(n) }
     }
 }
 
@@ -216,9 +251,8 @@ mod tests {
     #![allow(clippy::disallowed_types)]
 
     use super::*;
-    use core::sync::atomic::AtomicUsize;
 
-    /// `EntityCounter` carries exactly a single pointer — 8 B, align 8.
+    /// `EntityCounter` carries exactly a single tagged pointer — 8 B, align 8.
     /// Mirrors the plan §11.10 layout contract and the module-level
     /// `const _: () = assert!(...)` guards.
     #[test]
@@ -227,23 +261,23 @@ mod tests {
         assert_eq!(core::mem::align_of::<EntityCounter<'_>>(), 8);
     }
 
-    /// `EntityCounter<'static>` satisfies Send + Sync. Compile-time gate;
-    /// the unsafe impl blocks above are the load-bearing declarations.
+    /// `EntityCounter<'static>` is `Send` (and, by the `Cell`, not `Sync`).
+    /// Compile-time gate; the unsafe impl above is the load-bearing
+    /// declaration.
     #[test]
-    fn entity_counter_is_send_and_sync() {
+    fn entity_counter_is_send() {
         fn assert_send<T: Send>() {}
-        fn assert_sync<T: Sync>() {}
         assert_send::<EntityCounter<'static>>();
-        assert_sync::<EntityCounter<'static>>();
     }
 
-    /// Repeated reserves yield strictly distinct IDs — the atomic counter
-    /// advances monotonically (EM4).
+    /// Repeated reserves on an empty stack yield strictly distinct fresh IDs
+    /// at generation 0 (EM1′, EM4′).
     #[test]
     fn entity_counter_reserve_distinct_ids() {
-        let counter_storage = AtomicUsize::new(0);
-        // SAFETY: `counter_storage` lives for the entirety of this test.
-        let counter = unsafe { EntityCounter::from_ptr(&counter_storage) };
+        let reservoir = EntityReservoir::new(64);
+        // SAFETY: `reservoir` lives for the entirety of this test and no
+        // `&mut` to it exists while the counter is alive.
+        let counter = unsafe { EntityCounter::from_ptr(&reservoir) };
         let mut seen = std::collections::HashSet::new();
         for _ in 0..1024 {
             let e = counter.reserve_entity();
@@ -253,21 +287,21 @@ mod tests {
         assert_eq!(seen.len(), 1024);
     }
 
-    /// 8-thread × 1000 reserves = 8000 distinct IDs (EM4 atomic
-    /// uniqueness proof, scaled-down version of the loom test in §13.7).
+    /// 8-thread × 1000 reserves on an empty stack = 8000 distinct IDs (EM4
+    /// atomic uniqueness, scaled-down version of the loom model). One counter
+    /// per thread, as one `Commands` per system.
     #[test]
     fn entity_counter_reserve_lock_free_8_threads() {
         use std::sync::Arc;
         use std::thread;
 
-        let counter_storage = Arc::new(AtomicUsize::new(0));
+        let reservoir = Arc::new(EntityReservoir::new(64));
         let mut handles = Vec::with_capacity(8);
         for _ in 0..8 {
-            let storage = Arc::clone(&counter_storage);
+            let storage = Arc::clone(&reservoir);
             handles.push(thread::spawn(move || {
-                // SAFETY: `storage` keeps the atomic alive for the
-                // thread's lifetime; the raw pointer is valid until
-                // the Arc is dropped on the main thread (after joins).
+                // SAFETY: `storage` keeps the reservoir alive for the
+                // thread's lifetime and no `&mut` to it exists anywhere.
                 let counter = unsafe { EntityCounter::from_ptr(Arc::as_ptr(&storage)) };
                 let mut ids = Vec::with_capacity(1000);
                 for _ in 0..1000 {
@@ -284,5 +318,6 @@ mod tests {
             }
         }
         assert_eq!(all_ids.len(), 8 * 1000, "8 threads × 1000 reserves must yield 8000 unique IDs");
+        assert!(all_ids.iter().all(|&id| id < 8000), "an empty stack mints 0..8000");
     }
 }
