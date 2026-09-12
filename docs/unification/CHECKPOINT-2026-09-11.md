@@ -208,3 +208,40 @@ orders.
   written as files or as numbered parts.
 - **The workstation belongs to the owner.** A "quiet" word covers one window of work, not the rest of
   the session, and build caches never go on drive C:.
+
+## 11. Update 2026-09-13 - the first batch after the checkpoint
+
+The owner resumed the work: "continue, stop at a checkpoint and record it for compaction". Before that
+the owner ran the drive cleanup (C: 61 GB free, D: 105 GB free) and took the KE16 merge and the seven
+overlapping files back as the owner's own step.
+
+| Item | Result | Commit |
+|---|---|---|
+| EM2' entity-id recycling | Tester: workspace 5620 passed, 1 failed (pre-existing, see below), 156 ignored; clippy clean; Miri runs the claim races clean; two mutations of the lock-free claim turn red. A test comment that claimed a separate Miri twin was false and was corrected before the commit. | `0afcbd7d` on `merge/ke16-into-ecsnative`, pushed |
+| Frame-allocation census and its gate | The two gate defects fixed; four mutations turn it red; both profiles green. | `d5782d43`, same branch, pushed |
+| msvc citations, pass 8 | Mechanical check PASS: the debt is 153 numbers on 73 lines. The lane's repair is closed. | `a36ceaa4` on `chore/msvc-host`, local |
+| Runtime data ledger, rev 3 | 2481 rows: 2350 active, 131 superseded; 4492 non-rows. Rungs R2 314, R3 73, R4 161, R5 38, R6 662, out of scope 1102. 673 rows in ECS data forms, 0 unclassified. The recheck confirmed every total and found three small consistency gaps, recorded as the rev-4 work order. | this commit |
+
+Of the four workflows stopped at the checkpoint, three have completed. The per-stage pyramid timing
+(`wf_cc3f9944-c7a`) stays stopped until the owner says the machine is quiet.
+
+**Corrections to the sections above.**
+- Section 7 said the census gate lands before the id recycling. It had to be the reverse: the census
+  header pins the churn scene after EM2' (0 reallocations). It landed as `0afcbd7d`, then `d5782d43`.
+- The one red test in the workspace run, `anyof_dense_plus_enable_yields_correct_rows` (QueryTypeId
+  exhaustion), is not caused by EM2'. It is a pre-existing race between the exhaustion unit tests in
+  `query_type_registry.rs` and any lib test that mints a query type, red in 1 of 11 runs. It is filed as
+  a separate task.
+
+**Environment.** The tester saw a second page-cache bit flip this week: one bit in a cargo registry
+source file, which read back correctly half an hour later, and a rustc access violation in the same
+build. No hardware error was logged, which proves nothing without ECC memory. The owner was told.
+
+**Open after this batch, in order.**
+1. Fix defect 2 (the A1 sleep latch) and defect 3 (the rejected GPU upload leak) red-first on
+   `merge/ke16-into-ecsnative`. Work order: [latent-defects.md](checkpoint-2026-09-11/latent-defects.md).
+2. Ledger rev 4. Work order: [ledger-rev4-work-order.md](checkpoint-2026-09-11/ledger-rev4-work-order.md).
+3. The unified plan, as in section 8, point 5.
+4. A loom model of `EntityReservoir`. EM2' has Miri coverage of its claim races and no loom model.
+5. The per-stage timing, on the owner's quiet word.
+6. The owner's steps: the KE16 merge into `feat/multi-paradigm-render`, and a memory test of the machine.

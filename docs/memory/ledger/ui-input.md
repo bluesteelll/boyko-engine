@@ -1,6 +1,6 @@
-# Runtime Data Ledger rev 2 - group ui-input
+# Runtime Data Ledger rev 3 - group ui-input
 
-Part of the [runtime data ledger, rev 2](../RUNTIME-DATA-LEDGER.md) (the index: vocabularies, totals, entity model, kernel features, decisions). **Tree:** `D:/wt/joltab`, `merge/ke16-into-ecsnative` @ `d11962a9`. **Rows:** 205, of which **83 active** and **122 SUPERSEDED** by the ui-lane (kept below, marked, not counted, not in the TSV); 171 non_rows (kept in the group JSON ledger).
+Part of the [runtime data ledger, rev 3](../RUNTIME-DATA-LEDGER.md) (the index: vocabularies, totals, entity model, kernel features, decisions). **Tree:** `D:/wt/joltab`, `merge/ke16-into-ecsnative` @ `d11962a9`. **Rows:** 205, of which **83 active** and **122 SUPERSEDED** by the ui-lane (kept below, marked, not counted, not in the TSV); 48 non_rows (kept in the group JSON ledger).
 
 Active forms: diagnostics 44, resource-column 23, system-scratch 14, event 2. Active classes: R 8, B 31, D 44. Crates: boyko_input 83. Rungs: R4 8, R6 75.
 
@@ -22,7 +22,7 @@ Active forms: diagnostics 44, resource-column 23, system-scratch 14, event 2. Ac
 
 The features this group proposed, with the index id they merged into.
 
-| group name | index id | rev-2 status |
+| group name | index id | rev-3 status |
 |---|---|---|
 | KF1-scratch-column-for-type | KF-01 | decided |
 | KF2-query-into-kernel-column | KF-27 | active |

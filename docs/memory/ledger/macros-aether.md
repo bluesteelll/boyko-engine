@@ -1,6 +1,6 @@
-# Runtime Data Ledger rev 2 - group macros-aether
+# Runtime Data Ledger rev 3 - group macros-aether
 
-Part of the [runtime data ledger, rev 2](../RUNTIME-DATA-LEDGER.md) (the index: vocabularies, totals, entity model, kernel features, decisions). **Tree:** `D:/wt/joltab`, `merge/ke16-into-ecsnative` @ `d11962a9`. **Rows:** 462, of which **462 active**; 116 non_rows (kept in the group JSON ledger).
+Part of the [runtime data ledger, rev 3](../RUNTIME-DATA-LEDGER.md) (the index: vocabularies, totals, entity model, kernel features, decisions). **Tree:** `D:/wt/joltab`, `merge/ke16-into-ecsnative` @ `d11962a9`. **Rows:** 462, of which **462 active**; 116 non_rows (kept in the group JSON ledger).
 
 Active forms: out-of-scope:compile-time 457, kernel-internal 5. Active classes: K 5, C 457. Crates: aether_lang 263, boyko_macros 199. Rungs: OOS 457, R2 5.
 
@@ -21,7 +21,7 @@ Active forms: out-of-scope:compile-time 457, kernel-internal 5. Active classes: 
 
 The features this group proposed, with the index id they merged into.
 
-| group name | index id | rev-2 status |
+| group name | index id | rev-3 status |
 |---|---|---|
 | static-type-descriptors | KF-43 | active |
 

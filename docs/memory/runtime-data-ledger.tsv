@@ -266,58 +266,75 @@ boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	DrawListScratch::buf	field	Vec	G
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	DrawListScratch::buf (new initializer)	field	Vec	GBufferMeshDraw<'static>	F	system-scratch	system	highwater	no	NEW:FrameBump
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	DrawListScratch::put(v)	param	Vec	GBufferMeshDraw<'_>	F	system-scratch	system	highwater	no	NEW:FrameBump
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	DrawListScratch::take	return	Vec	GBufferMeshDraw<'a>	F	system-scratch	system	highwater	no	NEW:FrameBump
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::boot	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::boot	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::boot::denoise_entries	local	Vec	BindGroupLayoutEntry	B	system-scratch	system	once	no	NEW:BootArena
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::boot::header (edit-list seed)	local	Vec	u32	B	resource-column	none	once	no	NEW:BootArena
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::boot::hwrt_entries	local	Vec	BindGroupLayoutEntry	B	system-scratch	system	once	no	NEW:BootArena
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::boot::resolve_software_layout_entries	local	Vec	BindGroupLayoutEntry	B	system-scratch	system	once	no	NEW:BootArena
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::boot::vis_mv_entries	local	Vec	BindGroupLayoutEntry	B	system-scratch	system	once	no	NEW:BootArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::batch_list	local	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::late_candidates	local	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::late_count_post	local	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::late_count_pre	local	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::late_record_instance_counts	local	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::late_survivors	local	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::record_instance_counts	local	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::visible_instances	local	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::batch_list	field	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::late_candidates	field	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::late_count_post	field	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::late_count_pre	field	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::late_record_instance_counts	field	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::late_survivors	field	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::record_instance_counts	field	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::visible_instances	field	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::batch_list	local	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::late_candidates	local	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::late_count_post	local	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::late_count_pre	local	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::late_record_instance_counts	local	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::late_survivors	local	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::record_instance_counts	local	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::read_vb_cull::visible_instances	local	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	GpuSceneBundles::scene (per-frame assembly)	local	other:OsString/String (std::env)	u8 / u16	F	resource-column	none	perframe	no	out-of-scope:std::env internals allocate per call
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::batch_list	field	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::late_candidates	field	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::late_count_post	field	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::late_count_pre	field	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::late_record_instance_counts	field	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::late_survivors	field	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::record_instance_counts	field	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::visible_instances	field	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	gpu_scene::pack_light_table	return	Vec	u32	B	resource-column	light	once	no	NEW:BootArena
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	gpu_scene::pack_light_table::words	local	Vec	u32	B	resource-column	light	once	no	NEW:BootArena
-boyko_app	crates/boyko_app/src/gpu_scene/particle.rs	ParticleGpuBundle::read_sort_scan::rank_order	local	Vec	ParticleRender	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/gpu_scene/particle.rs	ParticleGpuBundle::read_sort_scan::rank_order	local	Vec	ParticleRender	D	system-scratch	system	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/host.rs	WindowHost::retire_scratch	field	Vec	FreeEntry	F	system-scratch	system	highwater	no	ScratchColumn
 boyko_app	crates/boyko_app/src/host.rs	WindowHost::retire_scratch (WindowHost::boot initializer)	field	Vec	FreeEntry	F	system-scratch	system	highwater	no	ScratchColumn
-boyko_app	crates/boyko_app/src/host_dump.rs	HostDump::finish::pixels	local	Vec	u8	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/host_dump.rs	HostDump::finish::pixels	local	Vec	u8	D	system-scratch	system	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/host_dump.rs	HostDump::from_env	local	other:OsString/String (std::env)	u8 / u16	D	diagnostics	none	once	no	out-of-scope:allocation is inside std::env
 boyko_app	crates/boyko_app/src/host_dump.rs	HostDump::path	field	String	u8 (UTF-8 path)	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/host_dump.rs	host_dump::write_bmp::out	local	Vec	u8	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/host_dump.rs	host_dump::write_bmp	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
+boyko_app	crates/boyko_app/src/host_dump.rs	host_dump::write_bmp::out	local	Vec	u8	D	system-scratch	system	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/hzb_dump.rs	HzbDump::from_env	local	other:OsString/String (std::env)	u8 / u16	D	diagnostics	none	once	no	out-of-scope:allocation is inside std::env
 boyko_app	crates/boyko_app/src/hzb_dump.rs	HzbDump::path	field	String	u8 (UTF-8 path)	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/hzb_dump.rs	hzb_dump::write_dump	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
 boyko_app	crates/boyko_app/src/particle_readback.rs	ParticleCountersReadback::artifact_line	return	String	u8	D	diagnostics	none	once	no	NEW:DspBuf<N> stack text buffer
 boyko_app	crates/boyko_app/src/particle_readback.rs	ParticleCountersReadback::artifact_line	local	String	u8	D	diagnostics	none	once	no	NEW:DspBuf<N> stack text buffer
 boyko_app	crates/boyko_app/src/particle_readback.rs	ParticleSortRangeScan::artifact_line	return	String	u8	D	diagnostics	none	once	no	NEW:DspBuf<N> stack text buffer
 boyko_app	crates/boyko_app/src/particle_readback.rs	ParticleSortRangeScan::artifact_line	local	String	u8	D	diagnostics	none	once	no	NEW:DspBuf<N> stack text buffer
 boyko_app	crates/boyko_app/src/particle_readback.rs	ParticleSortReadback::artifact_lines	return	String	u8	D	diagnostics	none	once	no	NEW:DspBuf<N> stack text buffer
 boyko_app	crates/boyko_app/src/particle_readback.rs	ParticleSortReadback::artifact_lines	local	String	u8	D	diagnostics	none	once	no	NEW:DspBuf<N> stack text buffer
+boyko_app	crates/boyko_app/src/particle_readback.rs	particle readback from_env	local	other:OsString/String (std::env)	u8 / u16	D	diagnostics	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/plugins.rs	<EnginePlugins as Plugin>::build	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
 boyko_app	crates/boyko_app/src/plugins.rs	<EnginePlugins as Plugin>::build -> App::set_runner	local	Box<dyn>	dyn FnOnce(&mut App) -> AppExit	B	kernel-internal	schedule	once	no	NEW:BootArena
 boyko_app	crates/boyko_app/src/plugins.rs	EnginePlugins::boot_and_enable_logging_from_env::bad_preset	local	String	u8 (Option<String>)	B	kernel-internal	none	once	no	NEW:BootArena
 boyko_app	crates/boyko_app/src/plugins.rs	EnginePlugins::boot_and_enable_logging_from_env::raw	local	String	u8	B	kernel-internal	none	once	no	NEW:BootArena
 boyko_app	crates/boyko_app/src/plugins.rs	EnginePlugins::boot_and_enable_logging_from_env::raw	local	String	u8	B	kernel-internal	none	once	no	NEW:BootArena
+boyko_app	crates/boyko_app/src/plugins.rs	arm_profiler_from_env	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/plugins.rs	boot_and_enable_logging_from_env	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/plugins.rs	boot_and_enable_logging_from_env	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/plugins.rs	boot_and_enable_logging_from_env	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/plugins.rs	boot_and_enable_logging_from_env	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/plugins.rs	boot_and_enable_logging_from_env	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/plugins.rs	render_path_config_from_env	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/plugins.rs	render_path_config_from_env	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
 boyko_app	crates/boyko_app/src/profiling/alloc_shim.rs	profiling::alloc_shim::SHIM (#[global_allocator], cfg(feature = "profiling-alloc"))	static	other:#[global_allocator] shim (CountingAlloc forwarding to std::alloc::System)	CountingAlloc (ZST; two atomic counters)	D	diagnostics	none	once	no	a counting LAYER inside the engine's own #[global_allocator]
-boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::collect_losses	return	Vec	LossRow	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::collect_losses	return	Vec	LossRow	D	resource-column	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::collect_losses (class.as_str().to_owned())	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::collect_losses::out	local	Vec	LossRow	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::collect_losses::out	local	Vec	LossRow	D	resource-column	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::floor_source (ArtifactError::UndeclaredContent::workload_tag initializer)	field	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
-boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::losses	field	Vec	LossRow	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::losses	field	Vec	LossRow	D	resource-column	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::PartialLoss::class value	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::TokenMismatch::expected value	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::content_tag value	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::cpu_gpu_offset (Option<(String, usize)>)	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::cpu_gpu_offset value	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
-boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::losses (Vec<LossRow>)	local	Vec	LossRow	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
+boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::losses (Vec<LossRow>)	local	Vec	LossRow	D	system-scratch	system	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::modes value	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::present_mode (Option<String>)	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::present_mode value	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
@@ -327,13 +344,14 @@ boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::run_token 
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::subsystems_tag (Option<String>)	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::subsystems_tag value	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::workload_tag value	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
-boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::zones (Vec<ZoneRow>)	local	Vec	ZoneRow	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
+boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::parse::zones (Vec<ZoneRow>)	local	Vec	ZoneRow	D	system-scratch	system	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::read::text	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::render	return	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::render (ids.join)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::render::ids	local	Vec	String (one per u16)	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::render::s	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::zones	field	Vec	ZoneRow	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::write	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
+boyko_app	crates/boyko_app/src/profiling/artifact.rs	Artifact::zones	field	Vec	ZoneRow	D	resource-column	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	ArtifactError::TokenMismatch::expected	field	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	ArtifactError::TokenMismatch::found	field	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	ArtifactError::UndeclaredContent::workload_tag	field	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
@@ -345,7 +363,7 @@ boyko_app	crates/boyko_app/src/profiling/artifact.rs	ArtifactHeader::run_token	f
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	ArtifactHeader::subsystems_tag	field	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	ArtifactHeader::workload_tag	field	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	LossRow::class	field	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/profiling/artifact.rs	OrderCensus::derived_inconclusive	field	Vec	u16	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/profiling/artifact.rs	OrderCensus::derived_inconclusive	field	Vec	u16	D	resource-column	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	PartialLoss::class	field	String	u8 (Option<String>)	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	profiling::artifact::config_tag	return	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	profiling::artifact::config_tag (format! + to_lowercase)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
@@ -358,48 +376,64 @@ boyko_app	crates/boyko_app/src/profiling/artifact.rs	profiling::artifact::subsys
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	profiling::artifact::subsystems_tag (literal to_owned)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/artifact.rs	profiling::artifact::subsystems_tag (literal to_owned)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/contrast.rs	Floor::from_session_file (Floor::path initializer)	field	PathBuf	OsString bytes	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
-boyko_app	crates/boyko_app/src/profiling/contrast.rs	Floor::from_session_file::rel_all	local	Vec	f64	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
+boyko_app	crates/boyko_app/src/profiling/contrast.rs	Floor::from_session_file::rel_all	local	Vec	f64	D	resource-column	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/contrast.rs	Floor::from_session_file::text	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/contrast.rs	Floor::path	field	PathBuf	OsString bytes	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
-boyko_app	crates/boyko_app/src/profiling/contrast.rs	Floor::rel_all	field	Vec	f64	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
+boyko_app	crates/boyko_app/src/profiling/contrast.rs	Floor::rel_all	field	Vec	f64	D	resource-column	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/contrast.rs	Floor::render_session_file	return	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/contrast.rs	Floor::render_session_file::s	local	String	u8	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
-boyko_app	crates/boyko_app/src/profiling/contrast.rs	WorkloadTag::of::sorted	local	Vec	u16	D	diagnostics	none	once	no	out-of-scope:test-harness/offline only
+boyko_app	crates/boyko_app/src/profiling/contrast.rs	WorkloadTag::of::sorted	local	Vec	u16	D	system-scratch	system	once	no	out-of-scope:test-harness/offline only
 boyko_app	crates/boyko_app/src/profiling/correlate.rs	Correlation::render	return	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/correlate.rs	Correlation::render (format!)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/correlate.rs	Correlation::render (offset_ns.to_string())	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/profiling/reduce.rs	WindowReducer::finish	return	Vec	ZoneRow	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/profiling/reduce.rs	WindowReducer::finish (rows .collect())	local	Vec	ZoneRow	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/profiling/reduce.rs	WindowReducer::zones	field	Vec	ZoneAccum	D	diagnostics	none	highwater	no	NEW:ZoneSlotTable
-boyko_app	crates/boyko_app/src/profiling/reduce.rs	WindowReducer::zones (new initializer)	field	Vec	ZoneAccum	D	diagnostics	none	highwater	no	NEW:ZoneSlotTable
-boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum (accum_index initializer)	field	Vec	f64	D	diagnostics	none	perframe	no	ScratchColumn
-boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum (accum_index initializer)	field	Vec	f64	D	diagnostics	none	perframe	no	ScratchColumn
-boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum (accum_index initializer)	field	Vec	f64	D	diagnostics	none	perframe	no	ScratchColumn
-boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum::begin_off_ns	field	Vec	f64	D	diagnostics	none	perframe	no	ScratchColumn
-boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum::dur_ns	field	Vec	f64	D	diagnostics	none	perframe	no	ScratchColumn
-boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum::end_off_ns	field	Vec	f64	D	diagnostics	none	perframe	no	ScratchColumn
-boyko_app	crates/boyko_app/src/profiling/reduce.rs	profiling::reduce::stats_ns::sorted	local	Vec	f64	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/profiling/reduce.rs	WindowReducer::finish	return	Vec	ZoneRow	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/profiling/reduce.rs	WindowReducer::finish (rows .collect())	local	Vec	ZoneRow	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/profiling/reduce.rs	WindowReducer::zones	field	Vec	ZoneAccum	D	resource-column	none	highwater	no	NEW:ZoneSlotTable
+boyko_app	crates/boyko_app/src/profiling/reduce.rs	WindowReducer::zones (new initializer)	field	Vec	ZoneAccum	D	resource-column	none	highwater	no	NEW:ZoneSlotTable
+boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum (accum_index initializer)	field	Vec	f64	D	resource-column	none	perframe	no	ScratchColumn
+boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum (accum_index initializer)	field	Vec	f64	D	resource-column	none	perframe	no	ScratchColumn
+boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum (accum_index initializer)	field	Vec	f64	D	resource-column	none	perframe	no	ScratchColumn
+boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum::begin_off_ns	field	Vec	f64	D	resource-column	none	perframe	no	ScratchColumn
+boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum::dur_ns	field	Vec	f64	D	resource-column	none	perframe	no	ScratchColumn
+boyko_app	crates/boyko_app/src/profiling/reduce.rs	ZoneAccum::end_off_ns	field	Vec	f64	D	resource-column	none	perframe	no	ScratchColumn
+boyko_app	crates/boyko_app/src/profiling/reduce.rs	profiling::reduce::stats_ns::sorted	local	Vec	f64	D	system-scratch	system	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/profiling/stream.rs	<FileSink as TelemetrySink>::rotate	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
+boyko_app	crates/boyko_app/src/profiling/stream.rs	<FileSink as TelemetrySink>::rotate	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
+boyko_app	crates/boyko_app/src/profiling/stream.rs	<FileSink as TelemetrySink>::rotate	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
 boyko_app	crates/boyko_app/src/profiling/stream.rs	<FileSink as TelemetrySink>::rotate::prev	local	other:OsString	u8 (WTF-8 path bytes)	D	diagnostics	none	unknown	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/profiling/stream.rs	FileSink::open	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
 boyko_app	crates/boyko_app/src/profiling/stream.rs	FileSink::open (FileSink::path initializer)	field	PathBuf	OsString bytes	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/stream.rs	FileSink::path	field	PathBuf	OsString bytes	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/runner.rs	ArtifactHeader::present_mode (runner::frame_loop artifact write)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/runner.rs	run_windowed	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/runner.rs	run_windowed	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/runner.rs	run_windowed	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/runner.rs	run_windowed	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/runner.rs	run_windowed	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/runner.rs	run_windowed	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
 boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop (ArtifactHeader::run_token initializer)	field	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop (draws.iter().map(|d| d.base_instance).collect())	local	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop retire_vb_zone callback::zones (VB-ZONE line)	local	String	u8	D	diagnostics	none	perframe	no	NEW:DspBuf<N> stack text buffer
-boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop::positions (VB-CENSUS line)	local	String	u8	D	diagnostics	none	perframe	no	NEW:DspBuf<N> stack text buffer
-boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop::stages (VB-CENSUS line)	local	String	u8	D	diagnostics	none	perframe	no	NEW:DspBuf<N> stack text buffer
+boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop (draws.iter().map(|d| d.base_instance).collect())	local	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop (pre-loop)	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop (pre-loop)	local	other:OsString/String (std::env)	u8 / u16	B	out-of-scope:os-owned	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop artifact content_tag	local	other:OsString/String (std::env)	u8 / u16	D	diagnostics	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop retire_vb_zone callback::zones (VB-ZONE line)	local	String	u8	D	system-scratch	system	perframe	no	NEW:DspBuf<N> stack text buffer
+boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop run token	local	other:OsString/String (std::env)	u8 / u16	D	diagnostics	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop::positions (VB-CENSUS line)	local	String	u8	D	system-scratch	system	perframe	no	NEW:DspBuf<N> stack text buffer
+boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop::stages (VB-CENSUS line)	local	String	u8	D	system-scratch	system	perframe	no	NEW:DspBuf<N> stack text buffer
 boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop::vb_zone_artifact_path	local	PathBuf	OsString bytes (Option<PathBuf>)	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop::vb_zone_artifact_path	local	PathBuf	OsString bytes	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop::vb_zone_run_token	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop::zone_cmds (VB-CENSUS line)	local	String	u8	D	diagnostics	none	perframe	no	NEW:DspBuf<N> stack text buffer
+boyko_app	crates/boyko_app/src/runner.rs	runner::frame_loop::zone_cmds (VB-CENSUS line)	local	String	u8	D	system-scratch	system	perframe	no	NEW:DspBuf<N> stack text buffer
 boyko_app	crates/boyko_app/src/runner.rs	runner::teardown (&mut Vec::new())	local	Vec	FreeEntry	B	system-scratch	system	once	no	ScratchColumn
 boyko_app	crates/boyko_app/src/runner.rs	runner::word_set	return	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/runner.rs	runner::word_set ("-".to_string())	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/runner.rs	runner::word_set::out	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/vb_cull_probe.rs	VbCullProbe::latch_batches(bases)	param	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/vb_cull_probe.rs	VbCullProbe::finish	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
+boyko_app	crates/boyko_app/src/vb_cull_probe.rs	VbCullProbe::from_env	local	other:OsString/String (std::env)	u8 / u16	D	diagnostics	none	once	no	out-of-scope:allocation is inside std::env
+boyko_app	crates/boyko_app/src/vb_cull_probe.rs	VbCullProbe::latch_batches(bases)	param	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vb_cull_probe.rs	VbCullProbe::path	field	String	u8 (UTF-8 path)	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/vb_cull_probe.rs	VbCullProbe::request_bases	field	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/vb_cull_probe.rs	VbCullProbe::request_bases (from_env initializer)	field	Vec	u32	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/vb_cull_probe.rs	VbCullProbe::request_bases	field	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/vb_cull_probe.rs	VbCullProbe::request_bases (from_env initializer)	field	Vec	u32	D	resource-column	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vb_cull_probe.rs	vb_cull_probe::format_vb_cull_probe_line	return	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vb_cull_probe.rs	vb_cull_probe::format_vb_cull_probe_line	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vb_cull_probe.rs	vb_cull_probe::join	return	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
@@ -408,7 +442,9 @@ boyko_app	crates/boyko_app/src/vb_cull_probe.rs	vb_cull_probe::per_batch_groups	
 boyko_app	crates/boyko_app/src/vb_cull_probe.rs	vb_cull_probe::per_batch_groups (format! per batch)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vb_cull_probe.rs	vb_cull_probe::per_batch_groups (groups.join)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vb_cull_probe.rs	vb_cull_probe::per_batch_groups::groups	local	Vec	String	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/vb_probe_dump.rs	VbProbeDump::from_env	local	other:OsString/String (std::env)	u8 / u16	D	diagnostics	none	once	no	out-of-scope:allocation is inside std::env
 boyko_app	crates/boyko_app/src/vb_probe_dump.rs	VbProbeDump::path	field	String	u8 (UTF-8 path)	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/vb_probe_dump.rs	vb_probe_dump::write_probe	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
 boyko_app	crates/boyko_app/src/vb_probe_dump.rs	vb_probe_dump::write_probe (format! temporary)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vb_probe_dump.rs	vb_probe_dump::write_probe (format! temporary)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vb_probe_dump.rs	vb_probe_dump::write_probe (format! temporary)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
@@ -423,7 +459,9 @@ boyko_app	crates/boyko_app/src/vb_probe_dump.rs	vb_probe_dump::write_probe (form
 boyko_app	crates/boyko_app/src/vb_probe_dump.rs	vb_probe_dump::write_probe (format! temporary)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vb_probe_dump.rs	vb_probe_dump::write_probe (format! temporary)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vb_probe_dump.rs	vb_probe_dump::write_probe::out	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/vg_census_dump.rs	VgCensusDump::from_env	local	other:OsString/String (std::env)	u8 / u16	D	diagnostics	none	once	no	out-of-scope:allocation is inside std::env
 boyko_app	crates/boyko_app/src/vg_census_dump.rs	VgCensusDump::path	field	String	u8 (UTF-8 path)	D	diagnostics	none	once	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/vg_census_dump.rs	vg_census_dump::write_row	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
 boyko_app	crates/boyko_app/src/vg_census_dump.rs	vg_census_dump::write_row (format! temporary)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vg_census_dump.rs	vg_census_dump::write_row (format! temporary)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/vg_census_dump.rs	vg_census_dump::write_row (format! temporary)	local	String	u8	D	diagnostics	none	once	no	NEW:DiagArena
@@ -545,10 +583,10 @@ boyko_ecs	crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs	Archetyp
 boyko_ecs	crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs	ArchetypeRegistry::find_with_filter	return	Vec	ArchetypeId	F	kernel-internal	none	unknown	no	NEW:ScratchList<T: Copy>
 boyko_ecs	crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs	ArchetypeRegistry::find_with_filter_into	param	Vec	ArchetypeId	F	kernel-internal	none	unknown	no	NEW:ScratchList<T: Copy>
 boyko_ecs	crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs	ArchetypeRegistry::id_to_location	field	other:SparseMap (boyko_utils; 3 x Vec inside)	(u8, usize)	K	kernel-internal	none	highwater	no	NEW:VmColumn::grow_filled
-boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/assets.rs	Assets<T>::dirty	field	other:LiveBitmap (Vec<u64> inside, component/dense/live_bitmap.rs)	u64 bitmap word	K	resource-column	none	highwater	no	Resource+VmColumn
-boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/assets.rs	Assets<T>::free	field	Vec	u32 (free slot index)	K	resource-column	none	highwater	no	Resource+VmColumn
-boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/assets.rs	Assets<T>::live	field	other:LiveBitmap (Vec<u64> inside, component/dense/live_bitmap.rs)	u64 bitmap word	K	resource-column	none	highwater	no	Resource+VmColumn
-boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/assets.rs	Assets<T>::pinned	field	other:LiveBitmap (Vec<u64> inside, component/dense/live_bitmap.rs)	u64 bitmap word	K	resource-column	none	highwater	no	Resource+VmColumn
+boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/assets.rs	Assets<T>::dirty	field	other:LiveBitmap (Vec<u64> inside, component/dense/live_bitmap.rs)	u64 bitmap word	K	kernel-internal	none	highwater	no	Resource+VmColumn
+boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/assets.rs	Assets<T>::free	field	Vec	u32 (free slot index)	K	kernel-internal	none	highwater	no	Resource+VmColumn
+boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/assets.rs	Assets<T>::live	field	other:LiveBitmap (Vec<u64> inside, component/dense/live_bitmap.rs)	u64 bitmap word	K	kernel-internal	none	highwater	no	Resource+VmColumn
+boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/assets.rs	Assets<T>::pinned	field	other:LiveBitmap (Vec<u64> inside, component/dense/live_bitmap.rs)	u64 bitmap word	K	component	asset	highwater	no	Resource+VmColumn
 boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/assets.rs	Assets<T>::reserve (fresh-slot path)	local	Vec	u8 (size_of::<T>() zero bytes)	B	kernel-internal	none	once	no	NEW:ComponentPool::add_uninit
 boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/backing.rs	ASSET_LAYOUTS (register_asset_layout)	static	HashMap	TypeId -> ComponentId (inside OnceLock<Mutex<..>>)	B	kernel-internal	none	once	no	NEW:reuse boyko_utils TypeIntern<TypeId, N>
 boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/error.rs	AssetError::Decode	field	String	u8 (decoder message)	D	diagnostics	none	once	no	NEW:EngineStr
@@ -560,10 +598,10 @@ boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/path_index.rs	PathIndex::insert	lo
 boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/path_index.rs	PathIndex::merge	local	Vec	PathEntry (16 B, Copy)	B	resource-column	none	once	no	Resource+VmColumn
 boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/server.rs	AssetServer::load	local	Vec	u8 (file bytes)	B	system-scratch	system	once	no	VmReservation-raw
 boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/server.rs	AssetServer::load (io failure branch)	local	String	u8 (io error text)	D	diagnostics	none	once	no	NEW:EngineStr
-boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/server.rs	AssetServer::load -> std::fs::read -> File::open -> sys::path::windows::maybe_verbatim	local	other:std-internal Vec<u16> (Windows path -> UTF-16 inside File::open)	u16 (NUL-terminated wide path, possibly \\?\-prefixed)	T	out-of-scope:os-owned	none	once	no	out-of-scope:std internals
+boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/server.rs	AssetServer::load -> std::fs::read -> File::open -> sys::path::windows::maybe_verbatim	local	other:std-internal Vec<u16> (Windows path -> UTF-16 inside File::open)	u16 (NUL-terminated wide path, possibly \\?\-prefixed)	T	resource-column	none	once	no	out-of-scope:std internals
 boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/server.rs	server.rs extension_of	return	String	u8 (lowercased extension)	B	kernel-internal	none	once	no	NEW:InlineStr<N>
 boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/server.rs	server.rs unsupported_extension	local	String	u8 (extension)	D	diagnostics	none	once	no	NEW:InlineStr<N>
-boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/staging.rs	AssetStaging<A>::queue	field	Vec	Staged<A> { handle, cpu: A::Cpu } (not Copy)	R	resource-column	none	highwater	no	NEW:VmQueue<T>
+boyko_ecs	crates/boyko_ecs/src/ecs/core/asset/staging.rs	AssetStaging<A>::queue	field	Vec	Staged<A> { handle, cpu: A::Cpu } (not Copy)	R	component	asset	highwater	no	NEW:VmQueue<T>
 boyko_ecs	crates/boyko_ecs/src/ecs/core/bundle/bundle_column_cache.rs	BundleColumnCache::resolve_and_cache	local	Vec	InlandPoolId	B	kernel-internal	none	once	yes	NEW:WorldArena
 boyko_ecs	crates/boyko_ecs/src/ecs/core/bundle/bundle_column_cache.rs	BundleColumnCache::resolve_required_missing	local	Vec	RequiredEntry	B	kernel-internal	none	once	yes	NEW:WorldArena
 boyko_ecs	crates/boyko_ecs/src/ecs/core/bundle/bundle_column_cache.rs	BundleColumnCache::resolve_required_missing	local	Vec	InlandPoolId	B	kernel-internal	none	once	yes	NEW:WorldArena
@@ -620,7 +658,7 @@ boyko_ecs	crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs	tag
 boyko_ecs	crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs	tags::try_register_tag_by_name	local	Box<T>	str (map key copy)	B	kernel-internal	none	once	no	NEW:StaticArena
 boyko_ecs	crates/boyko_ecs/src/ecs/core/component/dense/dense_registry.rs	DenseRegistry::dense_ids	field	Vec	ComponentId	K	kernel-internal	none	once	no	NEW:BoundedArray<u16, MAX_COMPONENTS>
 boyko_ecs	crates/boyko_ecs/src/ecs/core/component/dense/dense_registry.rs	DenseRegistry::slots	field	Box<[T]>	Option<DenseStore> x MAX_COMPONENTS	K	kernel-internal	none	once	no	NEW:VmSlab<T>
-boyko_ecs	crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs	DenseStore::check_invariant	local	HashSet	u32	D	diagnostics	none	unknown	no	out-of-scope:test-only invariant oracle compiled into the shipped lib
+boyko_ecs	crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs	DenseStore::check_invariant	local	HashSet	u32	D	system-scratch	system	unknown	no	out-of-scope:test-only invariant oracle compiled into the shipped lib
 boyko_ecs	crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs	DenseStore::free	field	Vec	u32 (slot index)	K	kernel-internal	none	highwater	no	Resource+VmColumn
 boyko_ecs	crates/boyko_ecs/src/ecs/core/component/dense/entity_slot_map.rs	EntitySlotMap::slots (DenseStore.e2s)	field	Vec	u32 (slot, ABSENT=u32::MAX)	K	kernel-internal	none	highwater	no	NEW:VmColumn::grow_filled
 boyko_ecs	crates/boyko_ecs/src/ecs/core/component/dense/live_bitmap.rs	LiveBitmap::words (DenseStore.live, Assets.live)	field	Vec	u64 (liveness words)	K	kernel-internal	none	highwater	no	NEW:VmColumn::grow_zeroed
@@ -662,12 +700,12 @@ boyko_ecs	crates/boyko_ecs/src/ecs/core/events/erased_buffer.rs	ErasedKindBuffer
 boyko_ecs	crates/boyko_ecs/src/ecs/core/events/event_buffer.rs	EventBuffer<E>::lanes	field	Box<[T]>	ThreadLanePair<E> (128 B, align 64)	R	event	system	once	no	VmReservation-raw
 boyko_ecs	crates/boyko_ecs/src/ecs/core/events/event_buffer.rs	EventBuffer<E>::reader_buf	field	Box<[T]>	MaybeUninit<E> (thread_count * capacity_per_lane)	R	event	system	once	no	VmReservation-raw
 boyko_ecs	crates/boyko_ecs/src/ecs/core/events/event_buffer.rs	ThreadLaneWriter<E>::write_buf	field	Box<[T]>	MaybeUninit<E> (capacity_per_lane slots)	R	event	system	once	no	VmReservation-raw
-boyko_ecs	crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs	EventDiagnostics::per_lane_overflow_count	field	Box<[T]>	u32 (per-lane overflow count)	D	diagnostics	none	once	no	NEW:InlineVec<u32, MAX_EVENT_THREADS>
+boyko_ecs	crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs	EventDiagnostics::per_lane_overflow_count	field	Box<[T]>	u32 (per-lane overflow count)	D	resource-column	none	once	no	NEW:InlineVec<u32, MAX_EVENT_THREADS>
 boyko_ecs	crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs	EventDispatcher::preregister::<E>	local	Box<T>	EventBuffer<E>	R	event	system	once	yes	VmReservation-raw
 boyko_ecs	crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs	EventDispatcher::slots	field	Box<[T]>	[EventTypeSlotStorage; MAX_EVENTS] (256 x 64 B = 16 KiB)	K	kernel-internal	none	once	no	VmReservation-raw
 boyko_ecs	crates/boyko_ecs/src/ecs/core/hierarchy/commands.rs	hierarchy::commands::CASCADE_SUPPRESS (thread_local!)	static	other:thread_local! os-key Value<T> (std AlignedSystemBox, System.alloc)	Cell<bool>	T	kernel-internal	none	once	yes	NEW:engine-owned per-thread context slot
-boyko_ecs	crates/boyko_ecs/src/ecs/core/hierarchy/mod.rs	Children.0	field	Vec	Entity	E	relation	parent-entity (any kind; in-tree: widget via boyko_ui, scene nodes via boyko_scene)	highwater	no	NEW:EntityListPool
-boyko_ecs	crates/boyko_ecs/src/ecs/core/hierarchy/mod.rs	Children::with_one	local	Vec	Entity	E	relation	parent-entity (any kind)	once	no	NEW:EntityListPool
+boyko_ecs	crates/boyko_ecs/src/ecs/core/hierarchy/mod.rs	Children.0	field	Vec	Entity	E	relation	relation-endpoint	highwater	no	NEW:EntityListPool
+boyko_ecs	crates/boyko_ecs/src/ecs/core/hierarchy/mod.rs	Children::with_one	local	Vec	Entity	E	relation	relation-endpoint	once	no	NEW:EntityListPool
 boyko_ecs	crates/boyko_ecs/src/ecs/core/iters/component_set.rs	<(A, B, ..) as ComponentSet>::component_ids init closure	local	Vec	ComponentId	R	kernel-internal	none	once	yes	NEW:StaticIdArena
 boyko_ecs	crates/boyko_ecs/src/ecs/core/iters/component_set.rs	<(A, B, ..) as ComponentSet>::component_ids init closure	local	Vec	ComponentId	R	kernel-internal	none	once	yes	NEW:StaticIdArena
 boyko_ecs	crates/boyko_ecs/src/ecs/core/iters/component_set.rs	<(A, B, ..) as ComponentSet>::component_ids init closure	local	Vec	ComponentId	R	kernel-internal	none	once	yes	NEW:StaticIdArena
@@ -698,14 +736,14 @@ boyko_ecs	crates/boyko_ecs/src/ecs/core/iters/query/term_list.rs	TermScratch::re
 boyko_ecs	crates/boyko_ecs/src/ecs/core/iters/query_state.rs	QueryState::matched_ids	field	Vec	ArchetypeId	K	kernel-internal	system	highwater	no	VmReservation-raw
 boyko_ecs	crates/boyko_ecs/src/ecs/core/iters/query_state.rs	QueryState::matched_ids_pre_terms_mut	return	Vec	ArchetypeId	K	kernel-internal	system	highwater	no	VmReservation-raw
 boyko_ecs	crates/boyko_ecs/src/ecs/core/iters/query_state.rs	QueryState::new	local	Vec	ArchetypeId	B	kernel-internal	system	once	no	VmReservation-raw
-boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	concurrency (co_ran)	local	Vec	u64 (n*n co-ran bit matrix)	D	diagnostics	none	once	no	NEW:FrameBump
-boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	concurrency (frames)	local	Vec	u32 (frame ids in the interval ring)	D	diagnostics	none	once	no	NEW:FrameBump
-boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	concurrency (overlapped)	local	Vec	u64 (n*n overlap bit matrix)	D	diagnostics	none	once	no	NEW:FrameBump
-boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	concurrency (ran_this_frame)	local	Vec	bool (per system)	D	diagnostics	none	once	no	NEW:FrameBump
-boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	concurrency (sysv)	local	Vec	u16 (frame's intervals projected to systems)	D	diagnostics	none	once	no	NEW:FrameBump
-boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	pair_overlap (frames)	local	Vec	u32 (frame ids)	D	diagnostics	none	once	no	NEW:FrameBump
-boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	system_of_zone	return	Vec	u16 (zone -> system index)	D	diagnostics	none	once	no	NEW:FrameBump
-boyko_ecs	crates/boyko_ecs/src/ecs/core/relationship/collection.rs	<Vec<Entity> as RelationshipSourceCollection>::with_capacity	return	Vec	Entity	E	relation	target-entity of any one-to-many relation (Children and every #[derive(RelationshipTarget)])	highwater	no	NEW:EntityListPool
+boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	concurrency (co_ran)	local	Vec	u64 (n*n co-ran bit matrix)	D	system-scratch	system	once	no	NEW:FrameBump
+boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	concurrency (frames)	local	Vec	u32 (frame ids in the interval ring)	D	system-scratch	system	once	no	NEW:FrameBump
+boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	concurrency (overlapped)	local	Vec	u64 (n*n overlap bit matrix)	D	system-scratch	system	once	no	NEW:FrameBump
+boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	concurrency (ran_this_frame)	local	Vec	bool (per system)	D	system-scratch	system	once	no	NEW:FrameBump
+boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	concurrency (sysv)	local	Vec	u16 (frame's intervals projected to systems)	D	system-scratch	system	once	no	NEW:FrameBump
+boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	pair_overlap (frames)	local	Vec	u32 (frame ids)	D	system-scratch	system	once	no	NEW:FrameBump
+boyko_ecs	crates/boyko_ecs/src/ecs/core/profiling/analysis.rs	system_of_zone	return	Vec	u16 (zone -> system index)	D	system-scratch	system	once	no	NEW:FrameBump
+boyko_ecs	crates/boyko_ecs/src/ecs/core/relationship/collection.rs	<Vec<Entity> as RelationshipSourceCollection>::with_capacity	return	Vec	Entity	E	relation	relation-endpoint	highwater	no	NEW:EntityListPool
 boyko_ecs	crates/boyko_ecs/src/ecs/core/relationship/mod.rs	relationship::RELATIONSHIP_EVICTION_SUPPRESS (thread_local!)	static	other:thread_local! os-key Value<T> (std AlignedSystemBox, System.alloc)	Cell<bool>	T	kernel-internal	none	once	yes	NEW:engine-owned per-thread context slot
 boyko_ecs	crates/boyko_ecs/src/ecs/core/relationship/mod.rs	relationship::RELATIONSHIP_LINK_SUPPRESS (thread_local!)	static	other:thread_local! os-key Value<T> (std AlignedSystemBox, System.alloc)	Cell<bool>	T	kernel-internal	none	once	yes	NEW:engine-owned per-thread context slot
 boyko_ecs	crates/boyko_ecs/src/ecs/core/resources/nonsend_resources.rs	NonSendResources::insert::<R>	local	Box<T>	R (any NonSendResource value)	R	kernel-internal	none	once	no	NEW:SlabHeap
@@ -862,7 +900,7 @@ boyko_ecs	crates/boyko_ecs/src/ecs/core/system/system_meta.rs	SystemMeta::gpu_in
 boyko_ecs	crates/boyko_ecs/src/ecs/core/system/system_meta.rs	SystemMeta::set_gpu_intent	local	Box<T>	GpuAccessIntent	B	component	system	once	no	Resource+VmColumn
 boyko_ecs	crates/boyko_ecs/src/ecs/memory/component_pool.rs	PoolBacking::Device	field	Box<T>	DeviceColumn	K	kernel-internal	none	once	no	NEW:inline-by-value
 boyko_ecs	crates/boyko_ecs/src/ecs/memory/vm.rs	VmReservation::reserve (fallback arm)	local	other:std::alloc::alloc_zeroed	u8 (the whole reservation, eager)	K	kernel-internal	none	once	yes	out-of-scope:cfg(any(miri, not(any(windows, unix))))
-boyko_fontbake	crates/boyko_fontbake/src/atlas.rs	boyko_fontbake::atlas::AtlasImage::pixels	field	Vec	u8 (RGBA8 atlas texels)	B	resource-column	material	once	no	NEW:VmBytes
+boyko_fontbake	crates/boyko_fontbake/src/atlas.rs	boyko_fontbake::atlas::AtlasImage::pixels	field	Vec	u8 (RGBA8 atlas texels)	B	system-scratch	material	once	no	NEW:VmBytes
 boyko_fontbake	crates/boyko_fontbake/src/atlas.rs	boyko_fontbake::atlas::BakedFont::cmap	field	Vec	MappedCodepoint (u32 codepoint + u16 slot, repr(C))	B	resource-column	none	once	no	Resource+VmColumn
 boyko_fontbake	crates/boyko_fontbake/src/atlas.rs	boyko_fontbake::atlas::BakedFont::glyphs	field	Vec	GlyphMetrics (36 B, atlas.rs const-assert)	B	resource-column	none	once	no	NEW:VmColumn domain extension
 boyko_fontbake	crates/boyko_fontbake/src/atlas.rs	boyko_fontbake::atlas::BakedFont::kern	field	Vec	KernPair (u32 key + i16 adjust, repr(C))	B	resource-column	none	once	no	Resource+VmColumn
@@ -914,16 +952,16 @@ boyko_image	crates/boyko_image/src/inflate.rs	boyko_image::inflate::lz77_copy (p
 boyko_image	crates/boyko_image/src/inflate.rs	boyko_image::inflate::read_dynamic_tables (let all_lengths)	local	Vec	u8 (literal/length + distance code lengths)	B	system-scratch	system	once	no	NEW:inline fixed array [u8; 320]
 boyko_image	crates/boyko_image/src/inflate.rs	boyko_image::inflate::zlib_decompress	return	Vec	u8 (raw filtered scanlines)	B	system-scratch	system	once	no	NEW:CallScratch
 boyko_image	crates/boyko_image/src/inflate.rs	boyko_image::inflate::zlib_decompress (let out)	local	Vec	u8	B	system-scratch	system	once	no	NEW:CallScratch
-boyko_image	crates/boyko_image/src/png.rs	boyko_image::DecodedImage::pixels	field	Vec	u8	B	resource-column	material	once	no	NEW:VmBytes
+boyko_image	crates/boyko_image/src/png.rs	boyko_image::DecodedImage::pixels	field	Vec	u8	B	system-scratch	material	once	no	NEW:VmBytes
 boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::decode_png (let idat)	local	Vec	u8 (concatenated IDAT zlib stream)	B	system-scratch	system	once	no	NEW:CallScratch
 boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::decode_png (let idat_chunks)	local	Vec	&[u8] (borrowed IDAT chunk payloads)	B	system-scratch	system	once	no	NEW:CallScratch
-boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::expand_to_rgba	return	Vec	u8 (RGBA pixels)	B	resource-column	material	once	no	NEW:VmBytes
-boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::expand_to_rgba (let out, color type 0)	local	Vec	u8 (RGBA pixels)	B	resource-column	material	once	no	NEW:VmBytes
-boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::expand_to_rgba (let out, color type 2)	local	Vec	u8 (RGBA pixels)	B	resource-column	material	once	no	NEW:VmBytes
-boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::expand_to_rgba (let out, color type 4)	local	Vec	u8 (RGBA pixels)	B	resource-column	material	once	no	NEW:VmBytes
+boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::expand_to_rgba	return	Vec	u8 (RGBA pixels)	B	system-scratch	material	once	no	NEW:VmBytes
+boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::expand_to_rgba (let out, color type 0)	local	Vec	u8 (RGBA pixels)	B	system-scratch	material	once	no	NEW:VmBytes
+boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::expand_to_rgba (let out, color type 2)	local	Vec	u8 (RGBA pixels)	B	system-scratch	material	once	no	NEW:VmBytes
+boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::expand_to_rgba (let out, color type 4)	local	Vec	u8 (RGBA pixels)	B	system-scratch	material	once	no	NEW:VmBytes
 boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::report_chunk_crc_mismatch	local	Cow	str (lossy UTF-8 of the 4 chunk-type bytes)	D	diagnostics	none	once	no	NEW:none
-boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::unfilter	return	Vec	u8 (unfiltered scanline bytes)	B	resource-column	material	once	no	NEW:VmBytes
-boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::unfilter (let out)	local	Vec	u8	B	resource-column	material	once	no	NEW:VmBytes
+boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::unfilter	return	Vec	u8 (unfiltered scanline bytes)	B	system-scratch	material	once	no	NEW:VmBytes
+boyko_image	crates/boyko_image/src/png.rs	boyko_image::png::unfilter (let out)	local	Vec	u8	B	system-scratch	material	once	no	NEW:VmBytes
 boyko_input	crates/boyko_input/src/action/map.rs	InputMap::bindings	field	Box<[T]>	BindSpec	R	resource-column	none	highwater	no	NEW:CsrColumn<BindSpec>
 boyko_input	crates/boyko_input/src/action/map.rs	InputMap::clone_arena	local	Box<[T]>	BindSpec	B	resource-column	none	once	no	NEW:CsrColumn<BindSpec>
 boyko_input	crates/boyko_input/src/action/map.rs	InputMap::clone_arena	local	Box<[T]>	(u32, u32)	B	resource-column	none	once	no	NEW:CsrColumn<BindSpec>
@@ -1044,29 +1082,29 @@ boyko_log	crates/boyko_log/src/probe.rs	probe::first_message	return	String	u8	C	
 boyko_log	crates/boyko_log/src/probe.rs	probe::last_message	return	String	u8	C	out-of-scope:test-only	none	unknown	no	out-of-scope:compile-time/tooling only
 boyko_log	crates/boyko_log/src/probe.rs	probe::note_emission	local	String	u8 (rendered line)	C	out-of-scope:test-only	none	perframe	no	out-of-scope:compile-time/tooling only
 boyko_log	crates/boyko_log/src/probe.rs	probe::note_emission	local	String	u8	C	out-of-scope:test-only	none	perframe	no	out-of-scope:compile-time/tooling only
-boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::open	local	other:std::fs internals (Vec<u16> wide path)	u16	T	out-of-scope:os-owned	none	once	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::open	local	other:std::fs internals (Vec<u16> wide path)	u16	T	resource-column	none	once	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (sink path)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
 boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (rotated file name, String then PathBuf)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
-boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	out-of-scope:os-owned	none	unknown	no	out-of-scope:std internals
-boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	out-of-scope:os-owned	none	unknown	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:PathBuf	path	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
 boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (rotated file name)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
 boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (rotated file name)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
-boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	out-of-scope:os-owned	none	unknown	no	out-of-scope:std internals
-boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	out-of-scope:os-owned	none	unknown	no	out-of-scope:std internals
-boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16	T	out-of-scope:os-owned	none	unknown	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16	T	resource-column	none	unknown	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/crash.rs	sink::crash::install_panic_hook	local	Box<dyn>	closure capturing previous: Box<dyn Fn> (16 B)	B	out-of-scope:os-owned	none	once	no	out-of-scope:std panic-hook API requires Box<dyn Fn>
-boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::open	local	other:std::fs internals (Vec<u16> wide path)	u16	T	out-of-scope:os-owned	none	once	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::open	local	other:std::fs internals (Vec<u16> wide path)	u16	T	resource-column	none	once	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (sink path)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
 boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (rotated file name, String then PathBuf)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
-boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	out-of-scope:os-owned	none	unknown	no	out-of-scope:std internals
-boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	out-of-scope:os-owned	none	unknown	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:PathBuf	path	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
 boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (rotated file name)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
 boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (rotated file name)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
-boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	out-of-scope:os-owned	none	unknown	no	out-of-scope:std internals
-boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	out-of-scope:os-owned	none	unknown	no	out-of-scope:std internals
-boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16	T	out-of-scope:os-owned	none	unknown	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
+boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16	T	resource-column	none	unknown	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sync_out.rs	sync_out::TOKEN_ANCHOR (thread_local!)	static	other:thread_local! os-key Value<T> (std AlignedSystemBox, System.alloc)	u8 (used only for its address)	T	kernel-internal	none	once	yes	NEW:engine-owned per-thread context slot
 boyko_macros	crates/boyko_macros/src/actionlike.rs	actionlike_variant_kind	local	String	u8 (UTF-8)	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
 boyko_macros	crates/boyko_macros/src/actionlike.rs	actionlike_variant_kind	local	String	u8 (UTF-8)	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
@@ -1144,6 +1182,11 @@ boyko_macros	crates/boyko_macros/src/event.rs	generate_event_impl	local	Vec	&Ide
 boyko_macros	crates/boyko_macros/src/event.rs	generate_event_impl	local	String	u8 (UTF-8)	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
 boyko_macros	crates/boyko_macros/src/reflect.rs	codegen (fields)	local	Vec	TokenStream2	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
 boyko_macros	crates/boyko_macros/src/reflect.rs	codegen (refusals)	local	Vec	TokenStream2	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
+boyko_macros	crates/boyko_macros/src/reflect.rs	codegen (type_kind, Named arm)	local	other:proc_macro2::Ident	symbol text (crosses the proc_macro bridge buffer, interned by rustc)	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
+boyko_macros	crates/boyko_macros/src/reflect.rs	codegen (type_kind, Opaque arm, enum)	local	other:proc_macro2::Ident	symbol text (crosses the proc_macro bridge buffer, interned by rustc)	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
+boyko_macros	crates/boyko_macros/src/reflect.rs	codegen (type_kind, Opaque arm, union)	local	other:proc_macro2::Ident	symbol text (crosses the proc_macro bridge buffer, interned by rustc)	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
+boyko_macros	crates/boyko_macros/src/reflect.rs	codegen (type_kind, TupleStruct arm)	local	other:proc_macro2::Ident	symbol text (crosses the proc_macro bridge buffer, interned by rustc)	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
+boyko_macros	crates/boyko_macros/src/reflect.rs	codegen (type_kind, Unit arm)	local	other:proc_macro2::Ident	symbol text (crosses the proc_macro bridge buffer, interned by rustc)	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
 boyko_macros	crates/boyko_macros/src/reflect.rs	field_info (kind_ident, Array arm)	local	String	u8 (format! buffer inside quote::format_ident!)	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
 boyko_macros	crates/boyko_macros/src/reflect.rs	field_info (kind_ident, Prim arm)	local	String	u8 (format! buffer inside quote::format_ident!)	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
 boyko_macros	crates/boyko_macros/src/reflect.rs	field_info (name_str)	local	String	u8	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
@@ -1357,7 +1400,10 @@ boyko_reflect	crates/boyko_reflect/src/type_info.rs	exhaust	param	Vec	Problem	D	
 boyko_reflect	crates/boyko_reflect/src/type_info.rs	validate	return	Vec	Problem (Copy: Option<usize>, &'static str, Violation)	D	diagnostics	none	once	no	eliminated
 boyko_reflect	crates/boyko_reflect/src/type_info.rs	validate (problems)	local	Vec	Problem	D	diagnostics	none	once	no	eliminated with row type_info.rs
 boyko_reflect	crates/boyko_reflect/src/type_info.rs	walk_nested	param	Vec	Problem	D	diagnostics	none	once	no	the param becomes the `&mut impl FnMut(Problem)` visitor
-boyko_render	crates/boyko_render/src/asset_refcount.rs	retire_deferred_frees(scratch) - backing field is boyko_app HostState::retire_scratch (boyko_app/src/host.rs)	param	Vec	FreeEntry	F	resource-column	none	highwater	no	ScratchColumn
+boyko_render	crates/boyko_render/benches/ui_pack_sort.rs	bench ui_pack_sort::scene	return	Vec	(PackInput, u32)	C	out-of-scope:test-only	none	once	no	out-of-scope:test-only
+boyko_render	crates/boyko_render/benches/ui_pack_sort.rs	bench ui_pack_sort::scene (collect)	local	Vec	(PackInput, u32)	C	out-of-scope:test-only	none	once	no	out-of-scope:test-only
+boyko_render	crates/boyko_render/benches/ui_pack_sort.rs	bench_pack_sort::gather	local	Vec	UiInstance	C	out-of-scope:test-only	none	highwater	no	out-of-scope:test-only
+boyko_render	crates/boyko_render/src/asset_refcount.rs	retire_deferred_frees(scratch) - backing field is boyko_app HostState::retire_scratch (boyko_app/src/host.rs)	param	Vec	FreeEntry	F	dense-component	asset	highwater	no	ScratchColumn
 boyko_render	crates/boyko_render/src/barrier.rs	lower_barriers (.collect() into the return Vec)	local	Vec	(u32, Box<[PlannedBarrier]>)	B	resource-column	system	once	no	NEW:LoadArena
 boyko_render	crates/boyko_render/src/barrier.rs	lower_barriers (plan.into_boxed_slice())	local	Box<[T]>	PlannedBarrier	B	resource-column	system	once	no	NEW:VmSlice<T: Copy>
 boyko_render	crates/boyko_render/src/barrier.rs	lower_barriers -> return	return	Vec	(u32, Box<[PlannedBarrier]>)	B	resource-column	system	once	no	NEW:LoadArena
@@ -1375,7 +1421,7 @@ boyko_render	crates/boyko_render/src/gpu_column.rs	GpuColumnManager::readback_fo
 boyko_render	crates/boyko_render/src/gpu_system.rs	GpuSystem::barriers	field	Box<[T]>	PlannedBarrier	B	resource-column	system	once	no	NEW:VmSlice<T: Copy>
 boyko_render	crates/boyko_render/src/gpu_system.rs	GpuSystem::new(barriers)	param	Box<[T]>	PlannedBarrier	B	resource-column	system	once	no	NEW:VmSlice<T: Copy>
 boyko_render	crates/boyko_render/src/gpu_system.rs	GpuSystem::set_barriers(barriers)	param	Box<[T]>	PlannedBarrier	B	resource-column	system	once	no	NEW:VmSlice<T: Copy>
-boyko_render	crates/boyko_render/src/gpu_upload.rs	backfill_vb_geometry_slots::pending	local	Vec	Handle<MeshGpu>	B	resource-column	mesh	once	no	ScratchColumn
+boyko_render	crates/boyko_render/src/gpu_upload.rs	backfill_vb_geometry_slots::pending	local	Vec	Handle<MeshGpu>	B	dense-component	mesh	once	no	ScratchColumn
 boyko_render	crates/boyko_render/src/light_system.rs	light_seed_state -> LightSeedState::added_dir closure (System::Out = Vec<EntityId>)	local	Vec	EntityId	F	enable-state	light	perframe	no	NEW:ScratchOut<T>
 boyko_render	crates/boyko_render/src/light_system.rs	light_seed_state -> LightSeedState::added_point closure (System::Out = Vec<EntityId>)	local	Vec	EntityId	F	enable-state	light	perframe	no	NEW:ScratchOut<T>
 boyko_render	crates/boyko_render/src/light_system.rs	light_seed_state -> LightSeedState::added_sky closure (System::Out = Vec<EntityId>)	local	Vec	EntityId	F	enable-state	light	perframe	no	NEW:ScratchOut<T>
@@ -1403,8 +1449,8 @@ boyko_render	crates/boyko_render/src/loaders/glb.rs	GlbMeshLoader::decode (error
 boyko_render	crates/boyko_render/src/loaders/glb.rs	GlbMeshLoader::decode (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/glb.rs	GlbMeshLoader::decode (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/glb.rs	GlbMeshLoader::decode (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
-boyko_render	crates/boyko_render/src/loaders/glb.rs	GlbMeshLoader::decode::indices (-> MeshData::indices)	local	Vec	u32	B	resource-column	mesh	once	no	NEW:VmSlice<T: Copy>
-boyko_render	crates/boyko_render/src/loaders/glb.rs	GlbMeshLoader::decode::vertices (-> MeshData::vertices)	local	Vec	Vertex	B	resource-column	mesh	once	no	NEW:VmSlice<T: Copy>
+boyko_render	crates/boyko_render/src/loaders/glb.rs	GlbMeshLoader::decode::indices (-> MeshData::indices)	local	Vec	u32	B	system-scratch	mesh	once	no	NEW:VmSlice<T: Copy>
+boyko_render	crates/boyko_render/src/loaders/glb.rs	GlbMeshLoader::decode::vertices (-> MeshData::vertices)	local	Vec	Vertex	B	system-scratch	mesh	once	no	NEW:VmSlice<T: Copy>
 boyko_render	crates/boyko_render/src/loaders/glb.rs	GlbMeshLoader::decode::what (per-primitive label)	local	String	u8	B	kernel-internal	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/glb.rs	Json::Arr	field	Vec	Json	B	system-scratch	system	once	no	NEW:LoadArena
 boyko_render	crates/boyko_render/src/loaders/glb.rs	Json::Obj	field	Vec	(String, Json)	B	system-scratch	system	once	no	NEW:LoadArena
@@ -1444,9 +1490,9 @@ boyko_render	crates/boyko_render/src/loaders/glb.rs	decode_primitive (error form
 boyko_render	crates/boyko_render/src/loaders/glb.rs	decode_primitive (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/glb.rs	decode_primitive (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/glb.rs	decode_primitive (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
-boyko_render	crates/boyko_render/src/loaders/glb.rs	decode_primitive -> Result<(Vec<Vertex>, Vec<u32>), AssetError>	return	Vec	Vertex and u32 (a pair of Vecs)	B	resource-column	mesh	once	no	NEW:LoadArena
-boyko_render	crates/boyko_render/src/loaders/glb.rs	decode_primitive::indices	local	Vec	u32	B	resource-column	mesh	once	no	NEW:LoadArena
-boyko_render	crates/boyko_render/src/loaders/glb.rs	decode_primitive::vertices	local	Vec	Vertex	B	resource-column	mesh	once	no	NEW:LoadArena
+boyko_render	crates/boyko_render/src/loaders/glb.rs	decode_primitive -> Result<(Vec<Vertex>, Vec<u32>), AssetError>	return	Vec	Vertex and u32 (a pair of Vecs)	B	system-scratch	mesh	once	no	NEW:LoadArena
+boyko_render	crates/boyko_render/src/loaders/glb.rs	decode_primitive::indices	local	Vec	u32	B	system-scratch	mesh	once	no	NEW:LoadArena
+boyko_render	crates/boyko_render/src/loaders/glb.rs	decode_primitive::vertices	local	Vec	Vertex	B	system-scratch	mesh	once	no	NEW:LoadArena
 boyko_render	crates/boyko_render/src/loaders/glb.rs	f32s (.collect())	local	Vec	f32	B	system-scratch	system	once	no	NEW:LoadArena
 boyko_render	crates/boyko_render/src/loaders/glb.rs	f32s -> Vec<f32>	return	Vec	f32	B	system-scratch	system	once	no	NEW:LoadArena
 boyko_render	crates/boyko_render/src/loaders/glb.rs	glb::err (msg.into())	local	String	u8	D	diagnostics	none	once	no	NEW:InlineStr<N>
@@ -1475,10 +1521,10 @@ boyko_render	crates/boyko_render/src/loaders/obj.rs	ObjMeshLoader::decode::uvs	l
 boyko_render	crates/boyko_render/src/loaders/obj.rs	decode_face (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/obj.rs	decode_face(out)	param	Vec	CornerRecord	B	system-scratch	system	once	no	NEW:LoadArena
 boyko_render	crates/boyko_render/src/loaders/obj.rs	decode_face::face_corners (.collect())	local	Vec	Corner	B	system-scratch	system	once	no	NEW:LoadArena
-boyko_render	crates/boyko_render/src/loaders/obj.rs	dedup_corners(corners: Vec<CornerRecord>) -> (Vec<Vertex>, Vec<u32>)	return	Vec	Vertex and u32 (a pair of Vecs); param Vec<CornerRecord>	B	resource-column	mesh	once	no	NEW:VmSlice<T: Copy>
-boyko_render	crates/boyko_render/src/loaders/obj.rs	dedup_corners::indices (-> MeshData::indices)	local	Vec	u32	B	resource-column	mesh	once	no	NEW:VmSlice<T: Copy>
+boyko_render	crates/boyko_render/src/loaders/obj.rs	dedup_corners(corners: Vec<CornerRecord>) -> (Vec<Vertex>, Vec<u32>)	return	Vec	Vertex and u32 (a pair of Vecs); param Vec<CornerRecord>	B	system-scratch	mesh	once	no	NEW:VmSlice<T: Copy>
+boyko_render	crates/boyko_render/src/loaders/obj.rs	dedup_corners::indices (-> MeshData::indices)	local	Vec	u32	B	system-scratch	mesh	once	no	NEW:VmSlice<T: Copy>
 boyko_render	crates/boyko_render/src/loaders/obj.rs	dedup_corners::order	local	Vec	u32	B	system-scratch	system	once	no	NEW:LoadArena
-boyko_render	crates/boyko_render/src/loaders/obj.rs	dedup_corners::vertices (-> MeshData::vertices)	local	Vec	Vertex	B	resource-column	mesh	once	no	NEW:VmSlice<T: Copy>
+boyko_render	crates/boyko_render/src/loaders/obj.rs	dedup_corners::vertices (-> MeshData::vertices)	local	Vec	Vertex	B	system-scratch	mesh	once	no	NEW:VmSlice<T: Copy>
 boyko_render	crates/boyko_render/src/loaders/obj.rs	malformed_corner (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/obj.rs	obj::decode_error(msg: String)	param	String	u8	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/obj.rs	out_of_range_corner (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
@@ -1486,46 +1532,58 @@ boyko_render	crates/boyko_render/src/loaders/obj.rs	parse_f32 (error format!)	lo
 boyko_render	crates/boyko_render/src/loaders/obj.rs	parse_floats2 (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/obj.rs	parse_floats3 (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/png_texture.rs	PngTextureLoader::decode (error e.to_string())	local	String	u8	D	diagnostics	none	once	no	NEW:InlineStr<N>
-boyko_render	crates/boyko_render/src/loaders/png_texture.rs	narrow_to_rgba8 -> Vec<u8> (-> TextureData::rgba8)	return	Vec	u8	B	resource-column	material	once	no	NEW:VmSlice<T: Copy>
-boyko_render	crates/boyko_render/src/loaders/png_texture.rs	narrow_to_rgba8::out (16-bit arm)	local	Vec	u8	B	resource-column	material	once	no	NEW:VmSlice<T: Copy>
+boyko_render	crates/boyko_render/src/loaders/png_texture.rs	narrow_to_rgba8 -> Vec<u8> (-> TextureData::rgba8)	return	Vec	u8	B	system-scratch	material	once	no	NEW:VmSlice<T: Copy>
+boyko_render	crates/boyko_render/src/loaders/png_texture.rs	narrow_to_rgba8::out (16-bit arm)	local	Vec	u8	B	system-scratch	material	once	no	NEW:VmSlice<T: Copy>
 boyko_render	crates/boyko_render/src/loaders/png_texture.rs	png_texture::decode_error(msg: String)	param	String	u8	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/ron_material.rs	RonMaterialLoader::decode (error .to_owned())	local	String	u8	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/ron_material.rs	parse_floats (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/ron_material.rs	parse_floats (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/ron_material.rs	parse_floats (error format!)	local	String	u8 (formatted message)	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/loaders/ron_material.rs	ron_material::decode_error(msg: String)	param	String	u8	D	diagnostics	none	once	no	NEW:InlineStr<N>
-boyko_render	crates/boyko_render/src/mesh_assets.rs	MeshAssetsExt::destroy::handles	local	Vec	Handle<MeshGpu>	B	resource-column	mesh	once	no	ScratchColumn
-boyko_render	crates/boyko_render/src/mesh_assets.rs	OrphanedMeshGpu::orphans	field	Vec	(MeshGpu, u64)	R	resource-column	mesh	highwater	no	NEW:VmQueue<T>
+boyko_render	crates/boyko_render/src/mesh_assets.rs	MeshAssetsExt::destroy::handles	local	Vec	Handle<MeshGpu>	B	dense-component	mesh	once	no	ScratchColumn
+boyko_render	crates/boyko_render/src/mesh_assets.rs	OrphanedMeshGpu::orphans	field	Vec	(MeshGpu, u64)	R	dense-component	mesh	highwater	no	NEW:VmQueue<T>
 boyko_render	crates/boyko_render/src/mesh_assets.rs	build_mesh_gpu::index_bytes	local	Vec	u8	B	system-scratch	mesh	once	no	ScratchColumn
 boyko_render	crates/boyko_render/src/mesh_assets.rs	build_mesh_gpu::index_bytes (Uint16 arm)	local	Vec	u8	B	system-scratch	mesh	once	no	ScratchColumn
 boyko_render	crates/boyko_render/src/mesh_assets.rs	build_mesh_gpu::index_bytes (Uint32 arm)	local	Vec	u8	B	system-scratch	mesh	once	no	ScratchColumn
-boyko_render	crates/boyko_render/src/mesh_data.rs	MeshData::indices	field	Vec	u32	B	resource-column	mesh	once	no	NEW:VmSlice<T: Copy>
-boyko_render	crates/boyko_render/src/mesh_data.rs	MeshData::vertices	field	Vec	Vertex	B	resource-column	mesh	once	no	NEW:VmSlice<T: Copy>
+boyko_render	crates/boyko_render/src/mesh_data.rs	MeshData::indices	field	Vec	u32	B	system-scratch	mesh	once	no	NEW:VmSlice<T: Copy>
+boyko_render	crates/boyko_render/src/mesh_data.rs	MeshData::vertices	field	Vec	Vertex	B	system-scratch	mesh	once	no	NEW:VmSlice<T: Copy>
 boyko_render	crates/boyko_render/src/retired_gpu_buffers.rs	RetiredGpuBuffers::entries	field	Vec	RetiredBuffer	R	resource-column	none	highwater	no	NEW:VmQueue<T>
 boyko_render	crates/boyko_render/src/retired_gpu_buffers.rs	RetiredGpuBuffers::tlases (cfg feature hwrt)	field	Vec	RetiredTlas	R	resource-column	none	highwater	no	NEW:VmQueue<T>
 boyko_render	crates/boyko_render/src/tangent.rs	generate_tangents::bitan_accum	local	Vec	Vec3	B	system-scratch	system	once	no	NEW:LoadArena
 boyko_render	crates/boyko_render/src/tangent.rs	generate_tangents::tan_accum	local	Vec	Vec3	B	system-scratch	system	once	no	NEW:LoadArena
-boyko_render	crates/boyko_render/src/texture.rs	OrphanedTextureGpu::orphans	field	Vec	(TextureGpu, u64)	R	resource-column	material	highwater	no	NEW:VmQueue<T>
-boyko_render	crates/boyko_render/src/texture.rs	TextureAssetsExt::destroy::handles	local	Vec	Handle<TextureGpu>	B	resource-column	material	once	no	ScratchColumn
+boyko_render	crates/boyko_render/src/texture.rs	OrphanedTextureGpu::orphans	field	Vec	(TextureGpu, u64)	R	dense-component	material	highwater	no	NEW:VmQueue<T>
+boyko_render	crates/boyko_render/src/texture.rs	TextureAssetsExt::destroy::handles	local	Vec	Handle<TextureGpu>	B	dense-component	material	once	no	ScratchColumn
 boyko_render	crates/boyko_render/src/texture.rs	load_slot (std::fs::read(p))	local	Vec	u8	B	system-scratch	system	once	no	NEW:LoadArena
 boyko_render	crates/boyko_render/src/texture.rs	resolve_candidate -> Option<(PathBuf, Vec<u8>)>	return	Vec	u8 (plus PathBuf)	B	system-scratch	system	once	no	NEW:LoadArena
 boyko_render	crates/boyko_render/src/texture.rs	resolve_candidate::path (dir.join(name))	local	other:PathBuf	path bytes	B	system-scratch	system	once	no	NEW:LoadArena
-boyko_render	crates/boyko_render/src/texture_data.rs	TextureData::rgba8	field	Vec	u8	B	resource-column	material	once	no	NEW:VmSlice<T: Copy>
+boyko_render	crates/boyko_render/src/texture_data.rs	TextureData::rgba8	field	Vec	u8	B	system-scratch	material	once	no	NEW:VmSlice<T: Copy>
+boyko_render	crates/boyko_render/src/ui/gather.rs	UiGatherScratch::arch_ids	field	Vec	ArchetypeId	F	kernel-internal	none	highwater	no	kernel QueryState cache
+boyko_render	crates/boyko_render/src/ui/gather.rs	UiGatherScratch::roots	field	Vec	Entity	F	system-scratch	system	highwater	no	ScratchColumn
+boyko_render	crates/boyko_render/src/ui/gather.rs	UiGatherScratch::stack	field	Vec	(Entity, Option<[f32; 4]>)	F	system-scratch	system	highwater	no	ScratchColumn
+boyko_render	crates/boyko_render/src/ui/gather.rs	gather_ui_nodes(node_buf)	param	Vec	UiNode	F	component	widget	highwater	no	ScratchColumn
+boyko_render	crates/boyko_render/src/ui/pack.rs	UiRenderScratch::default (keys: Vec::new())	field	Vec	(u32, u32)	B	system-scratch	system	once	no	ScratchColumn
+boyko_render	crates/boyko_render/src/ui/pack.rs	UiRenderScratch::default (pack: Vec::new())	field	Vec	UiInstance	B	component	widget	once	no	ScratchColumn
 boyko_render	crates/boyko_render/src/ui/pack.rs	UiRenderScratch::keys	field	Vec	(u32, u32)	F	system-scratch	system	highwater	no	ScratchColumn
 boyko_render	crates/boyko_render/src/ui/pack.rs	UiRenderScratch::pack	field	Vec	UiInstance	F	component	widget	highwater	no	ScratchColumn
 boyko_render	crates/boyko_render/src/ui/pack.rs	UiRenderScratch::sort_by_stack(gather)	param	Vec	UiInstance	F	system-scratch	system	highwater	no	ScratchColumn
+boyko_render	crates/boyko_render/src/ui/pack.rs	emit_ui_node_records(sink)	param	Vec	UiInstance	F	component	widget	highwater	no	ScratchColumn
 boyko_render	crates/boyko_render/src/ui/resources.rs	UiRenderResources::new::built	local	Vec	UiRingSlot	B	resource-column	none	once	no	NEW:InlineVec<T, N>
+boyko_render	crates/boyko_render/src/ui/upload.rs	<UiUploadSystem as System>::initialize (staging)	field	Box<[T]>	UiInstance	B	system-scratch	system	once	no	ScratchColumn
 boyko_render	crates/boyko_render/src/ui/upload.rs	UiHost::host_upload_frame(gather)	param	Vec	UiInstance	F	system-scratch	system	highwater	no	ScratchColumn
-boyko_render	crates/boyko_render/src/ui/upload.rs	UiHost::host_upload_frame_from_world(gather)	param	Vec	UiInstance	F	system-scratch	system	highwater	no	ScratchColumn
-boyko_render	crates/boyko_render/src/ui/upload.rs	UiHost::host_upload_frame_from_world(node_buf)	param	Vec	UiNode	F	component	widget	highwater	no	ScratchColumn
 boyko_render	crates/boyko_render/src/ui/upload.rs	UiHost::pack_sort_upload(gather)	param	Vec	UiInstance	F	system-scratch	system	highwater	no	ScratchColumn
-boyko_render	crates/boyko_render/src/vg_census.rs	CensusRow::distinct_instances	field	Vec	u32	D	diagnostics	none	once	no	NEW:InlineVec<T, N>
-boyko_render	crates/boyko_render/src/vg_census.rs	CensusRow::histogram	field	Vec	u64	D	diagnostics	none	once	no	NEW:InlineVec<T, N>
+boyko_render	crates/boyko_render/src/ui/upload.rs	UiUploadSystem::keys	field	Vec	(u32, u32)	F	system-scratch	system	highwater	no	ScratchColumn
+boyko_render	crates/boyko_render/src/ui/upload.rs	UiUploadSystem::new (keys: Vec::new())	field	Vec	(u32, u32)	B	system-scratch	system	once	no	ScratchColumn
+boyko_render	crates/boyko_render/src/ui/upload.rs	UiUploadSystem::new (node_buf: Vec::new())	field	Vec	UiNode	B	component	widget	once	no	ScratchColumn
+boyko_render	crates/boyko_render/src/ui/upload.rs	UiUploadSystem::new (staging: Box::new([]))	field	Box<[T]>	UiInstance	B	system-scratch	system	once	no	ScratchColumn
+boyko_render	crates/boyko_render/src/ui/upload.rs	UiUploadSystem::node_buf	field	Vec	UiNode	F	component	widget	highwater	no	ScratchColumn
+boyko_render	crates/boyko_render/src/ui/upload.rs	UiUploadSystem::staging	field	Box<[T]>	UiInstance	F	system-scratch	system	once	no	ScratchColumn
+boyko_render	crates/boyko_render/src/vg_census.rs	CensusRow::distinct_instances	field	Vec	u32	D	resource-column	none	once	no	NEW:InlineVec<T, N>
+boyko_render	crates/boyko_render/src/vg_census.rs	CensusRow::histogram	field	Vec	u64	D	resource-column	none	once	no	NEW:InlineVec<T, N>
 boyko_render	crates/boyko_render/src/vg_census.rs	Sha256::finish_hex -> String	return	String	char	D	diagnostics	none	once	no	NEW:InlineStr<N>
 boyko_render	crates/boyko_render/src/vg_census.rs	Sha256::finish_hex::out	local	String	char	D	diagnostics	none	once	no	NEW:InlineStr<N>
-boyko_render	crates/boyko_render/src/vg_census.rs	reduce::distinct_instances	local	Vec	u32	D	diagnostics	none	once	no	NEW:InlineVec<T, N>
-boyko_render	crates/boyko_render/src/vg_census.rs	reduce::histogram	local	Vec	u64	D	diagnostics	none	once	no	NEW:InlineVec<T, N>
-boyko_render	crates/boyko_render/src/vg_census.rs	reduce::keys	local	Vec	u64	D	diagnostics	none	once	no	ScratchColumn
+boyko_render	crates/boyko_render/src/vg_census.rs	reduce::distinct_instances	local	Vec	u32	D	system-scratch	system	once	no	NEW:InlineVec<T, N>
+boyko_render	crates/boyko_render/src/vg_census.rs	reduce::histogram	local	Vec	u64	D	system-scratch	system	once	no	NEW:InlineVec<T, N>
+boyko_render	crates/boyko_render/src/vg_census.rs	reduce::keys	local	Vec	u64	D	system-scratch	system	once	no	ScratchColumn
 boyko_rhi	crates/boyko_rhi/src/handle.rs	Kind<U>::free (ResourceRegistry::{buffers, pipelines, shaders, fences})	field	Vec	usize (reclaimed external index)	K	resource-column	none	highwater	no	NEW:pub VmColumn<T: Copy> exported from a leaf memory crate
 boyko_rhi	crates/boyko_rhi/src/handle.rs	Kind<U>::map	field	other:SparseSlotMap	U = A::Buffer / A::ComputePipeline / A::ShaderModule / A::Fence	K	resource-column	none	highwater	no	out-of-scope:for THIS group
 boyko_rhi_vulkan	crates/boyko_rhi_vulkan/src/accel.rs	accel::cmd_build_acceleration_structures_heap	local	Vec	MaybeUninit<VkAccelerationStructureGeometryKHR>	F	system-scratch	system	perframe	no	NEW:ScratchArena
@@ -1591,8 +1649,8 @@ boyko_rhi_vulkan	crates/boyko_rhi_vulkan/src/window.rs	Window::open	local	other:
 boyko_rhi_vulkan	crates/boyko_rhi_vulkan/src/window.rs	Window::open (owned via Window::input_ring raw pointer)	local	Box<T>	InputRing	R	dense-component	window	once	yes	NEW:PinnedCell<T>
 boyko_rhi_vulkan	crates/boyko_rhi_vulkan/src/window.rs	window::to_wide	return	Vec	u16 (NUL-terminated UTF-16)	B	system-scratch	window	once	no	NEW:ScratchArena
 boyko_scene	crates/boyko_scene/src/asset_refs.rs	DeferredFree::drain_ready (param out)	param	Vec	FreeEntry	F	system-scratch	system	highwater	no	ScratchColumn
-boyko_scene	crates/boyko_scene/src/asset_refs.rs	DeferredFree::entries	field	Vec	FreeEntry	R	resource-column	none	highwater	no	Resource+VmColumn
-boyko_scene	crates/boyko_scene/src/asset_refs.rs	RefcountDeltas::deltas	field	Vec	RefDelta	R	event	mesh	highwater	no	Resource+VmColumn
+boyko_scene	crates/boyko_scene/src/asset_refs.rs	DeferredFree::entries	field	Vec	FreeEntry	R	dense-component	asset	highwater	no	Resource+VmColumn
+boyko_scene	crates/boyko_scene/src/asset_refs.rs	RefcountDeltas::deltas	field	Vec	RefDelta	R	relation	mesh	highwater	no	Resource+VmColumn
 boyko_scene	crates/boyko_scene/src/identity.rs	InternerState::map	field	HashMap	&'static str -> u32	B	resource-column	none	highwater	no	NEW:StrInterner
 boyko_scene	crates/boyko_scene/src/identity.rs	InternerState::strings	field	Vec	&'static str	B	resource-column	none	highwater	no	NEW:StrInterner
 boyko_scene	crates/boyko_scene/src/identity.rs	boyko_scene::identity::INTERNER	static	other:OnceLock<Mutex<InternerState>>	InternerState	B	resource-column	none	once	no	NEW:StrInterner
@@ -1624,7 +1682,7 @@ boyko_serialize	crates/boyko_serialize/src/load.rs	boyko_serialize::load::load_o
 boyko_serialize	crates/boyko_serialize/src/load.rs	boyko_serialize::load::load_one_archetype (let saved_entity_ids)	local	Vec	EntityId (saved ids of one archetype block)	B	system-scratch	system	once	no	NEW:CallScratch
 boyko_serialize	crates/boyko_serialize/src/load.rs	boyko_serialize::load::load_one_archetype (paired.sort_by_key)	local	other:std stable-sort scratch (driftsort BufT)	(ComponentId, LoadColumn<'_>)	B	system-scratch	system	once	no	NEW:none
 boyko_serialize	crates/boyko_serialize/src/load.rs	boyko_serialize::load::load_world_from_file (let bytes)	local	Vec	u8 (whole save file)	X	system-scratch	system	once	no	NEW:VmBytes
-boyko_serialize	crates/boyko_serialize/src/load.rs	boyko_serialize::load::load_world_from_file (std::fs::read)	local	other:std Windows UTF-16 path buffer	u16	T	out-of-scope:os-owned	none	once	no	out-of-scope:std-internal
+boyko_serialize	crates/boyko_serialize/src/load.rs	boyko_serialize::load::load_world_from_file (std::fs::read)	local	other:std Windows UTF-16 path buffer	u16	T	resource-column	none	once	no	out-of-scope:std-internal
 boyko_serialize	crates/boyko_serialize/src/load.rs	boyko_serialize::load::resolve_type_table	return	Vec	ResolvedType	B	system-scratch	system	once	no	NEW:CallScratch
 boyko_serialize	crates/boyko_serialize/src/load.rs	boyko_serialize::load::resolve_type_table (let out)	local	Vec	ResolvedType	B	system-scratch	system	once	no	NEW:CallScratch
 boyko_serialize	crates/boyko_serialize/src/save.rs	boyko_serialize::save::ArchetypePlan::columns	field	Vec	ColumnPlan	B	system-scratch	system	once	no	NEW:CallScratch
@@ -1641,7 +1699,7 @@ boyko_serialize	crates/boyko_serialize/src/save.rs	boyko_serialize::save::save_w
 boyko_serialize	crates/boyko_serialize/src/save.rs	boyko_serialize::save::save_world (let via_fn_bytes, per column)	local	Vec	u8	B	system-scratch	system	once	no	NEW:CallScratch
 boyko_serialize	crates/boyko_serialize/src/save.rs	boyko_serialize::save::save_world (param out)	param	Vec	u8 (save file image)	X	system-scratch	system	once	no	NEW:VmBytes
 boyko_serialize	crates/boyko_serialize/src/save.rs	boyko_serialize::save::save_world_to_file (let buf)	local	Vec	u8 (save file image)	X	system-scratch	system	once	no	NEW:VmBytes
-boyko_serialize	crates/boyko_serialize/src/save.rs	boyko_serialize::save::save_world_to_file (std::fs::write)	local	other:std Windows UTF-16 path buffer	u16	T	out-of-scope:os-owned	none	once	no	out-of-scope:std-internal
+boyko_serialize	crates/boyko_serialize/src/save.rs	boyko_serialize::save::save_world_to_file (std::fs::write)	local	other:std Windows UTF-16 path buffer	u16	T	resource-column	none	once	no	out-of-scope:std-internal
 boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_particles.rs	bin emit_particles::build_draw_fs	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:offline generator bin
 boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_particles.rs	bin emit_particles::build_draw_fs	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:offline generator bin
 boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_particles.rs	bin emit_particles::build_draw_vs	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:offline generator bin
@@ -1674,6 +1732,19 @@ boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ssao_variants.rs	bin emit_ss
 boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ssao_variants.rs	bin emit_ssao_variants::main (let out)	local	String	u8 (UTF-8 file name)	C	out-of-scope:compile-time	none	once	no	out-of-scope:offline generator bin
 boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ssao_variants.rs	bin emit_ssao_variants::main (let out)	local	other:PathBuf	u16/u8 OS path bytes	C	out-of-scope:compile-time	none	once	no	out-of-scope:offline generator bin
 boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ssao_variants.rs	bin emit_ssao_variants::main (let shaders)	local	other:PathBuf	u16/u8 OS path bytes	C	out-of-scope:compile-time	none	once	no	out-of-scope:offline generator bin
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::build_fs	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::build_fs (format!)	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::build_vs	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::build_vs (format!)	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::leaf	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::leaf (format!)	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::main (join "..")	local	other:PathBuf	u16/u8 OS path bytes	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::main (join "boyko_render")	local	other:PathBuf	u16/u8 OS path bytes	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::main (join "shaders")	local	other:PathBuf	u16/u8 OS path bytes	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::main (let files)	local	String	u8 (UTF-8 HLSL text) x2	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::main (let out)	local	other:PathBuf	u16/u8 OS path bytes	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::main (let shaders)	local	other:PathBuf	u16/u8 OS path bytes	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/bin/emit_ui.rs	bin emit_ui::main (std::fs::write)	local	other:std Windows UTF-16 path buffer	u16	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/cf.rs	boyko_shaderdsl::emit::cf::<impl Cf for EmitCf>::if_	local	Vec	Stmt	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/cf.rs	boyko_shaderdsl::emit::cf::<impl Cf for EmitCf>::if_else	local	Vec	Stmt	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/cf.rs	boyko_shaderdsl::emit::cf::<impl Cf for EmitCf>::if_else	local	Vec	Stmt	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
@@ -1756,6 +1827,21 @@ boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::de
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	Vec	u32 (CALL_ARGS arena ids)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str (let spelled)	local	Vec	String	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::define_str (spelled.join)	local	String	u8 (UTF-8 comma-joined argument list)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::emit_body	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
@@ -1782,6 +1868,10 @@ boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::fm
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::fmt_lit (let s)	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::inline_expr	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::operand_str	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::operand_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::operand_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::operand_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::operand_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::operand_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::operand_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/mod.rs	boyko_shaderdsl::emit::operand_str	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
@@ -2031,10 +2121,26 @@ boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_transform_interp	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_transform_interp	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_transform_interp (let ins)	local	Vec	Emit	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_ui_clip_coverage	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_ui_flag_consts	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_ui_flag_consts (format!)	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_ui_instance_mirror	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_ui_instance_mirror (format!)	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_ui_median3	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_ui_premultiplied_over	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_ui_screen_px_range	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_ui_sd_rounded_box	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_ui_tile_uv	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_hlsl_ui_unpack_rgba8	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_particle_leaf	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_particle_leaf	local	Vec	Stmt	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_particle_leaf (let span)	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_particle_leaf (let vars)	local	Vec	&'static str	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_ui_leaf	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_ui_leaf (body Block)	local	Vec	Stmt	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_ui_leaf (named_lit clone)	local	Vec	&'static str	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_ui_leaf (span)	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
+boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/shaders.rs	boyko_shaderdsl::emit::shaders::emit_ui_leaf (vars clone)	local	Vec	&'static str	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/vb.rs	boyko_shaderdsl::emit::vb::emit_body_vb_bary_grad	return	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/vb.rs	boyko_shaderdsl::emit::vb::emit_body_vb_bary_grad	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
 boyko_shaderdsl	crates/boyko_shaderdsl/src/emit/vb.rs	boyko_shaderdsl::emit::vb::emit_body_vb_bary_grad	local	String	u8 (UTF-8 HLSL text)	C	out-of-scope:compile-time	none	once	no	out-of-scope:compile-time codegen
@@ -2114,7 +2220,7 @@ boyko_ui	crates/boyko_ui/src/layout.rs	layout::refresh_roots	local	Vec	Entity	F	
 boyko_ui	crates/boyko_ui/src/plugin.rs	UiPlugin::build	local	String	u8 (UTF-8 .ui source)	B	system-scratch	system	once	no	NEW:LoadArena
 boyko_ui	crates/boyko_ui/src/plugin.rs	UiPlugin::build startup closure (hot-reload arm)	local	other:UiParseReport (Vec<(usize,u16,String)> x2)	UiParseReport	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_ui	crates/boyko_ui/src/plugin.rs	UiPlugin::build startup closure (no-reload arm)	local	other:UiParseReport (Vec<(usize,u16,String)> x2)	UiParseReport	D	diagnostics	none	once	no	NEW:DiagArena
-boyko_ui	crates/boyko_ui/src/plugin.rs	plugin::read_signature (UiPlugin::build)	local	other:std-internal Vec<u16> (Windows path conversion)	u16	T	resource-column	none	once	no	out-of-scope:std internals
+boyko_ui	crates/boyko_ui/src/plugin.rs	plugin::read_signature (UiPlugin::build)	local	other:std-internal Vec<u16> (Windows path conversion)	u16	T	out-of-scope:os-owned	none	once	no	out-of-scope:std internals
 boyko_ui	crates/boyko_ui/src/reload/reconcile.rs	DespawnPlan::doomed	field	Vec	Entity	B	system-scratch	system	once	no	NEW:LoadArena
 boyko_ui	crates/boyko_ui/src/reload/reconcile.rs	reconcile::build_global_named_index	return	Vec	(UiName, Entity)	B	system-scratch	system	once	no	NEW:LoadArena
 boyko_ui	crates/boyko_ui/src/reload/reconcile.rs	reconcile::build_global_named_index	local	Vec	(UiName, Entity)	B	system-scratch	system	once	no	NEW:LoadArena

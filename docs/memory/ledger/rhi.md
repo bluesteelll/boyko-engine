@@ -1,6 +1,6 @@
-# Runtime Data Ledger rev 2 - group rhi
+# Runtime Data Ledger rev 3 - group rhi
 
-Part of the [runtime data ledger, rev 2](../RUNTIME-DATA-LEDGER.md) (the index: vocabularies, totals, entity model, kernel features, decisions). **Tree:** `D:/wt/joltab`, `merge/ke16-into-ecsnative` @ `d11962a9`. **Rows:** 64, of which **64 active**; 289 non_rows (kept in the group JSON ledger).
+Part of the [runtime data ledger, rev 3](../RUNTIME-DATA-LEDGER.md) (the index: vocabularies, totals, entity model, kernel features, decisions). **Tree:** `D:/wt/joltab`, `merge/ke16-into-ecsnative` @ `d11962a9`. **Rows:** 64, of which **64 active**; 289 non_rows (kept in the group JSON ledger).
 
 Active forms: system-scratch 41, resource-column 9, out-of-scope:test-only 7, component 4, dense-component 2, diagnostics 1. Active classes: K 5, R 6, F 28, B 15, X 1, D 2, C 7. Crates: boyko_rhi 2, boyko_rhi_vulkan 62. Rungs: OOS 7, R4 39, R6 18.
 
@@ -21,7 +21,7 @@ Active forms: system-scratch 41, resource-column 9, out-of-scope:test-only 7, co
 
 The features this group proposed, with the index id they merged into.
 
-| group name | index id | rev-2 status |
+| group name | index id | rev-3 status |
 |---|---|---|
 | KF-registry-free-scratch-column | KF-01 | decided |
 | KF-owning-scratch-column | KF-02 | active |
