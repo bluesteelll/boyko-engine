@@ -942,8 +942,9 @@ impl OrphanedTextureGpu {
         self.orphans.push((texture, retire_frame));
     }
 
-    /// `true` if no orphan is awaiting teardown — the O(1) golden early-out (no
-    /// `fill` caller exists in-tree yet, so this is always `true` today).
+    /// `true` if no orphan is awaiting teardown — the O(1) golden early-out.
+    /// [`upload_assets`](crate::gpu_upload::upload_assets) is the only producer, so
+    /// this stays `true` on every run that stages no upload `fill` rejects.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.orphans.is_empty()

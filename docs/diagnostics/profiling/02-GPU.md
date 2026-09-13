@@ -131,7 +131,7 @@ GPU-complete by the ring's own fence discipline)."* It also pins the one propert
 needs — the counter *"advances exactly once per successful `vkQueueSubmit` … and only there: a
 pre-acquire out-of-date recreate returns before either counter moves."*
 
-`RenderEpoch` is already an ECS `Resource` (`crates/boyko_render/src/asset_refcount.rs:55` —
+`RenderEpoch` is already an ECS `Resource` (`crates/boyko_render/src/asset_refcount.rs:56` —
 `pub struct RenderEpoch(pub u64);`) written by the host every frame at
 `crates/boyko_app/src/runner.rs:1320`, one line above the ECS frame call at `:1321`. The retire step
 reads it. **No new RHI verb, no fence poll, no block.** The retire seam is the same one the asset
@@ -605,7 +605,7 @@ Carried claims were re-read in the tree rather than inherited. Confirmed unchang
 `crates/` or `src/`**, `ffi.rs:2716` (`pub host_query_reset: VkBool32`), `swapchain.rs:199`
 (`present_mode: VK_PRESENT_MODE_FIFO_KHR`), `surface.rs:218` (`present_mode_supported`),
 `swapchain.rs:10` (its import), `swapchain.rs:164` (its existing use), `frame_driver.rs:319` and
-`:400` (`wait_for_fences(..., VK_TIMEOUT_INFINITE)`), `asset_refcount.rs:55`
+`:400` (`wait_for_fences(..., VK_TIMEOUT_INFINITE)`), `asset_refcount.rs:56`
 (`pub struct RenderEpoch(pub u64)`), `runner.rs:1320` (the `RenderEpoch` publication), `:1321`
 (`app.update_with_delta(dt)`), `:1328-1332` (the 0×0 `continue`), `gpu_timing.rs:186-203` and
 `:575-584` (the two `WAIT_BIT`-blocks-forever comment blocks), `:229` (`pub enum VbTimedPass`),

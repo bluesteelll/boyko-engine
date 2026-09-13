@@ -505,7 +505,7 @@ The importer's *only* obligation is to produce a `MeshData`. Everything downstre
 
 **The streamed path already threads the table.** `impl GpuUpload for MeshGpu` sets
 `type Aux = MeshGeometryTableSlot` and calls `build_mesh_gpu(ctx, &cpu.vertices, &cpu.indices,
-aux.0.as_mut())` ([`gpu_upload.rs`](../crates/boyko_render/src/gpu_upload.rs):51, `:59`). So a **loader-decoded** mesh claims a real slot and is
+aux.0.as_mut())` ([`gpu_upload.rs`](../crates/boyko_render/src/gpu_upload.rs):65, `:78`). So a **loader-decoded** mesh claims a real slot and is
 VB-visible. The **host-authored** primitives pass `None` at their own call site
 ([`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):547~), and the explicit VB sibling is `MeshAssetsVbExt::register_mesh_vb`
 ([`mesh_assets.rs`](../crates/boyko_render/src/mesh_assets.rs):645, `:651`), which every VB fixture uses.
@@ -2404,8 +2404,8 @@ width), `:290~` (the once-stale `VB_IMPLEMENTED == false` comment — repaired s
 `true`, rung R8), `:295~-305`
 (`MemoryLocation::HostVisibleCoherent`), `:529~` (`register_mesh` passes `None`), `:619~-631`
 (`MeshAssetsVbExt`), `:651~` (`register_mesh_vb` trait decl; impl at `:673`) ·
-`crates/boyko_render/src/gpu_upload.rs:41~-61` (`GpuUpload for MeshGpu`; `type Aux =
-MeshGeometryTableSlot` at `:50~`; **the threaded call at `:59`**).
+`crates/boyko_render/src/gpu_upload.rs:56-87` (`GpuUpload for MeshGpu`; the associated
+`type Aux = MeshGeometryTableSlot` at `:65`; **the threaded call at `:78`**).
 
 **Geometry table:** `crates/boyko_render/src/mesh_geometry_table.rs:17~-27` (module doc),
 `:80` (`VB_GEOMETRY_RESERVED_SLOT`), `:96-107` (`MeshGeometryMeta`), `:111` (16 B stride),

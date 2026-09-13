@@ -8,17 +8,18 @@
 //! rung A3b; [`upload_texture_assets`] added textured-PBR rung T6b).
 
 use boyko_ecs::ecs::core::asset::{Asset, AssetBacking, Assets, AssetStaging, Handle};
-use boyko_ecs::ecs::core::system::{NonSendRes, NonSendResMut, ResMut};
+use boyko_ecs::ecs::core::system::{NonSendRes, NonSendResMut, Res, ResMut};
 use boyko_rhi_vulkan::device::VulkanContext;
 
+use crate::asset_refcount::{RETIRE_DELAY, RenderEpoch};
 use crate::bindless::BindlessTextureTable;
 use crate::gpu_column::RhiContext;
 use crate::material::Material;
 use crate::mesh::MeshGpu;
-use crate::mesh_assets::build_mesh_gpu;
+use crate::mesh_assets::{OrphanedMeshGpu, build_mesh_gpu};
 use crate::mesh_data::MeshData;
 use crate::mesh_geometry_table::{MeshGeometryTableSlot, VB_GEOMETRY_RESERVED_SLOT};
-use crate::texture::{TextureGpu, build_texture_gpu};
+use crate::texture::{OrphanedTextureGpu, TextureGpu, build_texture_gpu};
 use crate::texture_data::TextureData;
 
 /// A GPU-resident [`Asset`] that can turn its decoded
@@ -30,13 +31,26 @@ use crate::texture_data::TextureData;
 /// [`MeshGpu`] threads the VB [`MeshGeometryTableSlot`], [`TextureGpu`] threads the
 /// [`BindlessTextureTable`], and only [`Material`] (a pure host-side identity upload)
 /// needs none (`()`).
+///
+/// `Orphans` is where a value [`Assets::fill`] rejects goes. The store never took it, and a
+/// device-owning record has no `Drop`, so [`upload_assets`] hands it to
+/// [`orphan`](Self::orphan) rather than dropping it: [`MeshGpu`] queues on [`OrphanedMeshGpu`],
+/// [`TextureGpu`] on [`OrphanedTextureGpu`], and [`Material`], which owns no device resource,
+/// needs none (`()`). The queue is fixed per implementor at compile time.
 pub trait GpuUpload: Asset {
     /// Extra per-asset-type mutable state [`upload`](Self::upload) needs
     /// beyond the device context.
     type Aux;
 
+    /// The teardown queue a value [`Assets::fill`] rejected is routed into.
+    type Orphans;
+
     /// Turns a decoded CPU intermediate into a resident GPU asset.
     fn upload(cpu: <Self as Asset>::Cpu, ctx: &VulkanContext, aux: &mut Self::Aux) -> Self;
+
+    /// Takes a value [`Assets::fill`] rejected, so every device resource it holds is freed once
+    /// `retire_frame` has passed.
+    fn orphan(rejected: Self, orphans: &mut Self::Orphans, retire_frame: u64);
 }
 
 impl GpuUpload for MeshGpu {
@@ -50,6 +64,11 @@ impl GpuUpload for MeshGpu {
     /// `build_mesh_gpu`'s doc for the host-authored-path scope cut).
     type Aux = MeshGeometryTableSlot;
 
+    /// A rejected mesh still owns its vertex/index buffers, its BLAS under `hwrt`, and, on an
+    /// armed VisibilityBuffer boot, a geometry-table slot. [`OrphanedMeshGpu::drain_ready`]
+    /// releases all of them.
+    type Orphans = OrphanedMeshGpu;
+
     /// Builds the resident mesh through the EXACT SAME device path
     /// [`MeshAssetsExt::register_mesh`](crate::mesh_assets::MeshAssetsExt::register_mesh)
     /// uses for a host-authored mesh: create + fill the vertex/index buffers
@@ -59,11 +78,21 @@ impl GpuUpload for MeshGpu {
     fn upload(cpu: MeshData, ctx: &VulkanContext, aux: &mut Self::Aux) -> Self {
         build_mesh_gpu(ctx, &cpu.vertices, &cpu.indices, aux.0.as_mut())
     }
+
+    /// Queues the rejected mesh on [`OrphanedMeshGpu`] under `retire_frame`.
+    #[inline]
+    fn orphan(rejected: MeshGpu, orphans: &mut OrphanedMeshGpu, retire_frame: u64) {
+        orphans.push(rejected, retire_frame);
+    }
 }
 
 impl GpuUpload for Material {
     /// Material upload is identity — no device work; no extra state needed.
     type Aux = ();
+
+    /// A `Material` owns no device resource (`AssetBacking::NEEDS_TEARDOWN` is `false`), so a
+    /// rejected one needs no teardown queue.
+    type Orphans = ();
 
     /// Materials need no device work: the GPU layout IS the decoded CPU form
     /// (see [`Asset::Cpu`] on [`Material`]'s own `Asset` impl). The GPU
@@ -74,12 +103,20 @@ impl GpuUpload for Material {
     fn upload(cpu: Material, _ctx: &VulkanContext, _aux: &mut Self::Aux) -> Self {
         cpu
     }
+
+    /// Drops the rejected material: it holds nothing a drop fails to free.
+    #[inline]
+    fn orphan(_rejected: Material, _orphans: &mut Self::Orphans, _retire_frame: u64) {}
 }
 
 impl GpuUpload for TextureGpu {
     /// A texture upload registers a bindless slot, so it needs the world's
     /// [`BindlessTextureTable`] (textured-PBR T2) beyond the device context.
     type Aux = BindlessTextureTable;
+
+    /// A rejected texture still owns its image and its bindless slot.
+    /// [`OrphanedTextureGpu::drain_ready`] unregisters the slot and destroys the image.
+    type Orphans = OrphanedTextureGpu;
 
     /// Builds the resident, mip-chained, bindless-registered texture through the
     /// EXACT SAME device path
@@ -89,11 +126,28 @@ impl GpuUpload for TextureGpu {
     fn upload(cpu: TextureData, ctx: &VulkanContext, aux: &mut Self::Aux) -> Self {
         build_texture_gpu(ctx, aux, &cpu)
     }
+
+    /// Queues the rejected texture on [`OrphanedTextureGpu`] under `retire_frame`.
+    #[inline]
+    fn orphan(rejected: TextureGpu, orphans: &mut OrphanedTextureGpu, retire_frame: u64) {
+        orphans.push(rejected, retire_frame);
+    }
 }
 
 /// Drains every entry queued in `staging`, uploads each via
 /// [`GpuUpload::upload`], and [`fill`](Assets::fill)s the corresponding
 /// `Reserved` row in `assets`.
+///
+/// # A rejected fill is routed, never dropped
+///
+/// `fill` rejects a handle that no longer resolves to a `Loading`/`Failed` row: one removed
+/// between staging and this drain, one staged twice, or a `Loading` row whose refcount reached
+/// zero, which [`Assets::dec_ref`] turns `Retiring`. This drain cannot rule those out, and by
+/// the time `fill` answers, [`GpuUpload::upload`] has already built the device record, which
+/// has no `Drop`. So [`GpuUpload::orphan`] takes the rejected value, with `retire_frame` set to
+/// `epoch.saturating_add(`[`RETIRE_DELAY`]`)`, `epoch` being [`RenderEpoch`] at drain time, and
+/// [`retire_deferred_frees`](crate::asset_refcount::retire_deferred_frees) frees it behind the
+/// same fence gate as every other retire: conservative, since the value was never submitted.
 ///
 /// The empty-queue check keeps a call site cheap when nothing is in flight,
 /// without touching `assets` at all — the common case at boot (no scene loads
@@ -107,17 +161,18 @@ pub fn upload_assets<A: GpuUpload + AssetBacking>(
     staging: &mut AssetStaging<A>,
     ctx: &VulkanContext,
     aux: &mut A::Aux,
+    orphans: &mut A::Orphans,
+    epoch: u64,
 ) {
     if staging.is_empty() {
         return;
     }
+    let retire_frame = epoch.saturating_add(RETIRE_DELAY);
     for staged in staging.drain() {
         let gpu = A::upload(staged.cpu, ctx, aux);
-        // A handle that no longer resolves to `Reserved` (removed between decode
-        // and a later rung's unload, or already filled by a re-entrant drain) is a
-        // no-op here, not a bug this drain can rule out in general — so the `Err`
-        // is ignored rather than asserted.
-        let _ = assets.fill(staged.handle, gpu);
+        if let Err((_, rejected)) = assets.fill(staged.handle, gpu) {
+            A::orphan(rejected, orphans, retire_frame);
+        }
     }
 }
 
@@ -141,8 +196,9 @@ pub fn upload_material_assets(
     mut assets: ResMut<Assets<Material>>,
     mut staging: NonSendResMut<AssetStaging<Material>>,
     ctx: NonSendRes<RhiContext>,
+    epoch: Res<RenderEpoch>,
 ) {
-    upload_assets(&mut assets, &mut staging, ctx.context(), &mut ());
+    upload_assets(&mut assets, &mut staging, ctx.context(), &mut (), &mut (), epoch.0);
 }
 
 /// Boot one-shot (asset-system rung A3b): drains `AssetStaging<MeshGpu>` into
@@ -158,13 +214,18 @@ pub fn upload_material_assets(
 /// `MeshGeometryTableSlot` right after `resolve_render_path`, BEFORE this system's
 /// first call — the Rev-5 "flag reaches the registration site before the first mesh
 /// upload" gate.
+///
+/// A mesh upload `fill` rejects is queued on the world's [`OrphanedMeshGpu`] (see
+/// [`upload_assets`]).
 pub fn upload_mesh_assets(
     mut assets: NonSendResMut<Assets<MeshGpu>>,
     mut staging: NonSendResMut<AssetStaging<MeshGpu>>,
     ctx: NonSendRes<RhiContext>,
     mut geometry_table: NonSendResMut<MeshGeometryTableSlot>,
+    mut orphans: NonSendResMut<OrphanedMeshGpu>,
+    epoch: Res<RenderEpoch>,
 ) {
-    upload_assets(&mut assets, &mut staging, ctx.context(), &mut geometry_table);
+    upload_assets(&mut assets, &mut staging, ctx.context(), &mut geometry_table, &mut orphans, epoch.0);
 }
 
 /// Boot one-shot (Multi-paradigm render-path plan): back-fill a VB geometry-table slot for every
@@ -249,11 +310,16 @@ pub fn backfill_vb_geometry_slots(
 /// bindless-registered by the SAME call that fills its `Assets<TextureGpu>` row.
 /// See [`upload_material_assets`] for why this is a distinct, non-generic wrapper
 /// rather than one generic-over-`A` system.
+///
+/// A texture upload `fill` rejects is queued on the world's [`OrphanedTextureGpu`] (see
+/// [`upload_assets`]).
 pub fn upload_texture_assets(
     mut assets: NonSendResMut<Assets<TextureGpu>>,
     mut staging: NonSendResMut<AssetStaging<TextureGpu>>,
     mut bindless: NonSendResMut<BindlessTextureTable>,
     ctx: NonSendRes<RhiContext>,
+    mut orphans: NonSendResMut<OrphanedTextureGpu>,
+    epoch: Res<RenderEpoch>,
 ) {
-    upload_assets(&mut assets, &mut staging, ctx.context(), &mut bindless);
+    upload_assets(&mut assets, &mut staging, ctx.context(), &mut bindless, &mut orphans, epoch.0);
 }

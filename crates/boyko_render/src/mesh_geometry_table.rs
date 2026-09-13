@@ -754,12 +754,18 @@ impl MeshGeometryTable {
     /// `VulkanContext` through a `&mut self` bookkeeping call, and would leave the meta
     /// row stale beside a fresh bounds row — a worse invariant than the uniform one.
     /// Recorded rather than left for the next rung's author to rediscover.
+    ///
+    /// Called by `retire_deferred_frees` for a refcount-retired mesh and by
+    /// [`OrphanedMeshGpu::drain_ready`](crate::mesh_assets::OrphanedMeshGpu::drain_ready)
+    /// for a `fill`-rejected one.
     #[inline]
     pub fn unregister(&mut self, slot: u32, retire_frame: u64) {
         self.alloc.free(slot, retire_frame);
     }
 
     /// Drains every slot whose fence horizon has passed back to the free list.
+    /// [`retire_deferred_frees`](crate::asset_refcount::retire_deferred_frees) calls this when
+    /// the table is armed and the pass has a mesh retire, a mesh orphan or a staged slot.
     #[inline]
     pub fn retire_ready_slots(&mut self, epoch: u64) {
         self.alloc.retire_ready_slots(epoch);
