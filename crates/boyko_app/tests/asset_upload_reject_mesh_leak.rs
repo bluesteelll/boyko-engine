@@ -24,11 +24,11 @@
 //!
 //! # How the leak itself is observed
 //!
-//! There is no validation layer on this boot path (the windowed runner hardcodes
-//! `enable_validation = false`; see `asset_streaming_f6_churn_headless.rs`'s module doc) and the
-//! engine exposes no live-allocation count, so the f6 test has no leak detector to reuse — its
-//! numeric checks are CPU bookkeeping. This test therefore observes the host-visible block pool,
-//! whose rules are fixed in `boyko_rhi_vulkan::memory::BlockPool` and `SubAllocator`:
+//! The windowed runner enables validation only when `BOYKO_ENABLE_VALIDATION` is set, and when
+//! this test was written the engine exposed no live-allocation count (`pool_live_allocations` came
+//! later), so `asset_streaming_f6_churn_headless.rs` had no leak detector to reuse — its numeric
+//! checks are CPU bookkeeping. This test therefore observes the host-visible block pool, whose
+//! rules are fixed in `boyko_rhi_vulkan::memory::BlockPool` and `SubAllocator`:
 //!
 //! - every `HostVisibleCoherent` buffer (both mesh buffers are) is first-fit sub-allocated from a
 //!   pool of blocks; a request that fits no existing block appends a block of
@@ -64,10 +64,11 @@
 //! cargo test -p boyko-app --test asset_upload_reject_mesh_leak -- --ignored --test-threads=1
 //! ```
 //!
-//! `BOYKO_DISABLE_VALIDATION` may be set or unset — the windowed runner requests no validation
-//! either way. `--test-threads=1` is required (one process-global GPU device). On a windowless /
-//! GPU-less box the runner exits before the frame loop and this test prints `SKIP` and returns: a
-//! skip, not a pass. It allocates ~4 x 128 MiB of host-visible device memory.
+//! `BOYKO_DISABLE_VALIDATION` may be set or unset — the windowed runner requests validation only
+//! when `BOYKO_ENABLE_VALIDATION` is set. `--test-threads=1` is required (one process-global GPU
+//! device). On a windowless / GPU-less box the runner exits before the frame loop and this test
+//! prints `SKIP` and returns: a skip, not a pass. It allocates ~4 x 128 MiB of host-visible
+//! device memory.
 
 #![cfg(windows)]
 

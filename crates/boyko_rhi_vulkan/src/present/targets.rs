@@ -1039,17 +1039,29 @@ impl ForwardTargets {
         Ok(Self { depth, set0, set1 })
     }
 
-    /// Tears the depth ring down. The descriptor sets are pool-owned (freed with their pool at
-    /// device teardown, the SAME discipline every other `VulkanBindGroup` in this module follows
-    /// — none of `GBufferTargets`'s OTHER `destroy` bodies free a `VulkanBindGroup` individually
-    /// either).
+    /// Tears down the Set-1 ring, then the Set-0 ring, then the depth ring — the reverse of
+    /// `build`'s acquisition order, and the order its own error edges drain in. Every
+    /// `VulkanBindGroup` owns its own descriptor pool (`create_bind_group` creates one per group
+    /// and `destroy_bind_group` destroys it), so a set not destroyed here stays alive until
+    /// `vkDestroyDevice`.
     ///
     /// # Safety
-    /// Every image was created on `ctx`, the device is idle (the caller's teardown waited), and
-    /// each is destroyed exactly once (by-value).
+    /// Every set and image was created on `ctx`; the device is idle (the runner's teardown dropped
+    /// the renderer, whose `Drop` waits idle, or `sync_gbuffer` waited idle before a replace); no
+    /// pending submission binds any set; each is destroyed exactly once (by-value).
     unsafe fn destroy(self, ctx: &VulkanContext) {
-        // SAFETY: per the contract `ctx` is live + idle and nothing references these images.
+        // SAFETY: every set and image was created on `ctx`; the device is idle (teardown's
+        // renderer drop, or `sync_gbuffer`'s wait before a replace), so no pending submission
+        // binds any set or uses any depth image; `self` is consumed, so each is destroyed exactly
+        // once; the sets go before the depth ring (reverse acquisition), and neither set names an
+        // image of `self.depth` (Set 1's two depth images are the scene's CSM and shadow atlas).
         unsafe {
+            for g in self.set1 {
+                RhiDevice::destroy_bind_group(ctx, g);
+            }
+            for g in self.set0 {
+                RhiDevice::destroy_bind_group(ctx, g);
+            }
             for t in self.depth {
                 RhiDevice::destroy_texture(ctx, t);
             }
@@ -5737,15 +5749,15 @@ impl DeferredSets {
     }
 
     /// Tears down the deferred sets in reverse acquisition order (vb-set0-late → vb-cull →
-    /// ssaa-downsample → smaa → fxaa → resolve-hwrt → sdf-forward-march → present → ddgi-update →
-    /// viewt-from-depth → ssao → cull → resolve → vocab), consuming `self`.
+    /// ssaa-downsample → smaa → fxaa → resolve-hwrt → viewt-from-vb-depth → sdf-forward-march →
+    /// present → ddgi-update → viewt-from-depth → ssao → cull → resolve → vocab), consuming `self`.
     ///
     /// # Safety
     ///
     /// `ctx` is live; no submission references these descriptor sets; each is destroyed exactly once
     /// (the by-value `self`). The `cull`/`ssao`/`viewt_from_depth`/`ddgi-update`/`resolve-hwrt`/
-    /// `sdf-forward-march`/`fxaa`/`smaa_*`/`downsample`/`vb_cull`/`vb_set0_late` sets are
-    /// `Option`-guarded (present only when their feature was wired).
+    /// `viewt_from_vb_depth`/`sdf-forward-march`/`fxaa`/`smaa_*`/`downsample`/`vb_cull`/
+    /// `vb_set0_late` sets are `Option`-guarded (present only when their feature was wired).
     unsafe fn destroy(self, ctx: &VulkanContext) {
         // SAFETY: per the contract `ctx` is live and nothing references these sets; each was created
         // on `ctx` and is destroyed exactly once, in reverse acquisition order.
@@ -5802,6 +5814,15 @@ impl DeferredSets {
             #[cfg(feature = "hwrt")]
             if let Some(hs) = self.resolve_set_hwrt {
                 for g in hs {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            // TAA-under-VB: the `viewt_from_vb_depth` set RING, `Option`-guarded (present only
+            // when `scene.viewt_from_vb_depth` was armed — `VisibilityBuffer × Mesh` with TAA on).
+            // Built AFTER `vb_set0_tex_froxel` and BEFORE `resolve_set_hwrt`, so destroyed between
+            // them (reverse acquisition).
+            if let Some(vs) = self.viewt_from_vb_depth_set {
+                for g in vs {
                     RhiDevice::destroy_bind_group(ctx, g);
                 }
             }
@@ -9131,22 +9152,22 @@ impl GBufferTargets {
         Ok(())
     }
 
-    /// Tears down the G-buffer targets (descriptor sets first, then the images),
-    /// consuming `self`. The caller MUST have made the device idle (the renderer's
-    /// `Drop` waits idle, or `sync_gbuffer` waits idle on a replace) so no submission
-    /// still references them.
+    /// Tears down the G-buffer targets group by group in reverse acquisition order, consuming
+    /// `self`; `ForwardTargets`' sets thus follow `CoreImages`, naming no image destroyed here.
+    /// The caller MUST have made the device idle (the renderer's `Drop` waits idle, or
+    /// `sync_gbuffer` waits idle on a replace) so no submission still references them.
     ///
     /// # Safety
     ///
     /// `ctx` is the live context the targets were created on; no GPU work referencing
     /// them is in flight; each is destroyed exactly once (the by-value `self`).
     unsafe fn destroy(self, ctx: &VulkanContext) {
-        // SAFETY: per the contract `ctx` is live and nothing references these
-        // resources; each was created on `ctx` and is destroyed exactly once, in
-        // reverse acquisition order (sets → images). The vocab, resolve & present RINGS
-        // each have `FRAMES_IN_FLIGHT` slots; the cull & SSAO RINGS + the single DDGI
-        // update set are `Option`-guarded (present only when L1 / SSAO / the DDGI update
-        // pass were wired); the seven render-target image RINGS each have `FRAMES_IN_FLIGHT`
+        // SAFETY: per the contract `ctx` is live and nothing references these resources; each was
+        // created on `ctx` and is destroyed exactly once, group by group in reverse acquisition
+        // order, so `ForwardTargets`' sets follow `CoreImages`, naming no image destroyed here. The
+        // vocab, resolve & present RINGS each have `FRAMES_IN_FLIGHT` slots; the cull & SSAO RINGS
+        // + the single DDGI update set are `Option`-guarded (present only when L1 / SSAO / the DDGI
+        // update pass were wired); the seven render-target image RINGS each have `FRAMES_IN_FLIGHT`
         // slots — every slot of every ring (and the single set) is drained. Rung 3a (`hwrt`) adds
         // the two `Option`-guarded shadow-vis image RINGS, drained before ssao (reverse acquisition).
         unsafe {
@@ -9326,10 +9347,10 @@ impl GBufferTargets {
                     RhiDevice::destroy_bind_group(ctx, g);
                 }
             }
-            // The deferred descriptor SETS (resolve-hwrt → sdf-forward-march → present →
-            // ddgi-update → viewt-from-depth → ssao → cull → resolve → vocab), via the
-            // `DeferredSets` bundle's reverse-acquisition teardown — the SAME order +
-            // `Option`-guards the old flat teardown used.
+            // The deferred descriptor SETS (resolve-hwrt → viewt-from-vb-depth →
+            // sdf-forward-march → present → ddgi-update → viewt-from-depth → ssao → cull →
+            // resolve → vocab), via the `DeferredSets` bundle's reverse-acquisition teardown,
+            // which also carries every set's `Option`-guard.
             DeferredSets {
                 vocab_set: self.vocab_set,
                 resolve_set: self.resolve_set,

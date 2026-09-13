@@ -28,7 +28,7 @@
 // `!Send + !Sync` device context handing out `&mut` from `&self`. See
 // docs/HOT-PATH-EXCEPTIONS.md (class `alloc-guarded`).
 #[allow(clippy::disallowed_types)]
-use core::cell::{OnceCell, RefCell};
+use core::cell::{Cell, OnceCell, RefCell};
 use core::ffi::{CStr, c_char, c_void};
 use core::mem;
 use core::ptr;
@@ -735,6 +735,13 @@ pub struct VulkanContext {
     /// which is why moving mesh data here would only have relocated it.
     #[allow(clippy::disallowed_types)]
     device_pool: RefCell<BlockPool<DeviceLocalBlock>>,
+    /// Persistent descriptor pools created on this context and not yet destroyed: the
+    /// pool behind every `VulkanBindGroup`, the geometry bindless set's and the bindless
+    /// texture set's. Per-encoder pools are not counted — each is created and destroyed
+    /// inside one encoder's lifetime. Read via [`Self::persistent_descriptor_pools`]. A
+    /// plain `Cell`: the context is already `!Sync` (the pool `RefCell`s above), so every
+    /// create and destroy runs on the thread that owns it.
+    persistent_descriptor_pools: Cell<u32>,
     /// HW-RT rung R2a-1: the resolved `VK_KHR_acceleration_structure` command table,
     /// `Some` ONLY when the RT extensions were enabled at device create (mirroring
     /// `DeviceFns::swapchain: Option<SwapchainDeviceFns>`). `None` when the device lacks
@@ -1272,6 +1279,7 @@ impl VulkanContext {
             compute_layouts: OnceCell::new(),
             host_pool,
             device_pool,
+            persistent_descriptor_pools: Cell::new(0),
             #[cfg(feature = "hwrt")]
             accel_fns,
             vb_geometry_table_armed: OnceCell::new(),
@@ -1535,6 +1543,52 @@ impl VulkanContext {
     pub fn pool_total_capacities(&self) -> (u64, u64) {
         (self.host_pool.borrow().total_capacity(), self.device_pool.borrow().total_capacity())
     }
+
+    /// Live sub-allocations in each pool, as `(host, device)`: buffers created through
+    /// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) and not yet
+    /// destroyed. A diagnostic read, never on a per-frame path; the windowed runner samples
+    /// it once, after teardown.
+    pub fn pool_live_allocations(&self) -> (usize, usize) {
+        (self.host_pool.borrow().live_allocations(), self.device_pool.borrow().live_allocations())
+    }
+
+    /// Whether the host-visible sub-allocation keyed by `(block, offset)` — a host-visible
+    /// [`BoundBuffer`](crate::memory::BoundBuffer)'s `block` and `offset` fields, the key
+    /// the pool frees by — is still live.
+    ///
+    /// `false` is exact: no live allocation holds that key (an out-of-range `block`
+    /// included). `true` means some live allocation holds it — the original buffer, unless
+    /// that one was freed and a later allocation in the same block re-used its offset — so
+    /// reading `true` as "not destroyed" can only err toward a false alarm.
+    pub fn host_allocation_is_live(&self, block: u32, offset: u64) -> bool {
+        self.host_pool.borrow().allocation_is_live(block, offset)
+    }
+
+    /// Persistent descriptor pools created on this context and not yet destroyed: one per
+    /// [`RhiDevice::create_bind_group`](boyko_rhi::RhiDevice::create_bind_group) group, plus
+    /// the geometry bindless set's and the bindless texture set's. Per-encoder pools are
+    /// excluded (each is destroyed inside its encoder's lifetime). Every counted pool must be
+    /// destroyed before `vkDestroyDevice`, so a non-zero value once every owner has been torn
+    /// down is a pool that never was.
+    #[inline]
+    pub fn persistent_descriptor_pools(&self) -> u32 {
+        self.persistent_descriptor_pools.get()
+    }
+
+    /// Records one persistent descriptor pool created. Each counted create site calls it
+    /// only after it has fully succeeded, so an error edge that destroys its own pool before
+    /// returning is never counted.
+    pub(crate) fn note_descriptor_pool_created(&self) {
+        self.persistent_descriptor_pools.set(self.persistent_descriptor_pools.get() + 1);
+    }
+
+    /// Records one persistent descriptor pool destroyed. Each counted destroy site calls it
+    /// after its `vkDestroyDescriptorPool`.
+    pub(crate) fn note_descriptor_pool_destroyed(&self) {
+        let live = self.persistent_descriptor_pools.get();
+        debug_assert!(live > 0, "invariant: a destroyed descriptor pool was counted at create");
+        self.persistent_descriptor_pools.set(live.saturating_sub(1));
+    }
 }
 
 impl Drop for VulkanContext {
@@ -1551,18 +1605,21 @@ impl Drop for VulkanContext {
         // calls `vkUnmapMemory` + `vkFreeMemory` through the raw
         // `*const DeviceFns` it cached, which targets the still-live boxed
         // `device_fns` (the box is a field of `self`, dropped implicitly AFTER this
-        // `drop` body runs — plan A1), and they must precede `vkDestroyDevice`. Any
-        // buffers sub-allocated from them were already destroyed via
-        // `RhiDevice::destroy_buffer` / the registry's `destroy_all` before the
-        // context dropped. `clear` drops the whole `Vec` of blocks, so growth does
-        // not change what this must reach — it changes how many.
+        // `drop` body runs — plan A1), and they must precede `vkDestroyDevice`. Every
+        // buffer sub-allocated from them must already be destroyed via
+        // `RhiDevice::destroy_buffer` / the registry's `destroy_all` before the context
+        // drops. Nothing here checks that: `pool_live_allocations` and
+        // `host_allocation_is_live` report what is still live, and the windowed runner
+        // samples both into `boyko_app`'s `HostTeardownStats` after its teardown. `clear`
+        // drops the whole `Vec` of blocks, so growth does not change what this must
+        // reach — it changes how many.
         self.host_pool.borrow_mut().clear();
         // Every device-local block is torn down next, also BEFORE
         // `vkDestroyDevice`. Their `Drop` calls only `vkFreeMemory` (they are
         // never mapped) through the same plan-A1 raw `*const DeviceFns` into the
-        // still-live boxed `device_fns`. Any device-local buffers sub-allocated
-        // from them were already destroyed via `RhiDevice::destroy_buffer` / the
-        // registry's `destroy_all` before the context dropped.
+        // still-live boxed `device_fns`. Every device-local buffer sub-allocated
+        // from them must already be destroyed the same way; `pool_live_allocations`
+        // counts the ones that are not (also sampled into `HostTeardownStats`).
         self.device_pool.borrow_mut().clear();
         // The shared compute layouts (if ever created) are destroyed next — they
         // are device children, so they must go before `vkDestroyDevice` (plan

@@ -93,7 +93,7 @@ const SKIP_DIRS: &[&str] = &["target", ".git", ".claude", "graphify-out", "book"
 /// stopped walking, not to track the count.
 const MIN_FILES: usize = 800;
 
-/// Floor on ignore sites found. The tree holds 164 (143 plain + 21 `cfg_attr`); this is well below
+/// Floor on ignore sites found. The tree holds 232 (167 plain + 65 `cfg_attr`); this is well below
 /// it and exists only to catch a detector that stopped detecting.
 const MIN_SITES: usize = 120;
 

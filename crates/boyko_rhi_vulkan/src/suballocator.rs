@@ -136,6 +136,14 @@ impl SubAllocator {
         self.live.len()
     }
 
+    /// Whether `offset` names a currently-live allocation — the same key
+    /// [`Self::free`] looks up, so this is `true` exactly when `free(offset)`
+    /// would return `true` (test/diagnostic helper; O(live)).
+    #[inline]
+    pub fn is_live(&self, offset: u64) -> bool {
+        self.live.iter().any(|a| a.offset == offset)
+    }
+
     /// Number of disjoint free ranges (test/diagnostic helper — a fully
     /// coalesced empty allocator reports `1`, or `0` at zero capacity).
     #[inline]
@@ -362,5 +370,137 @@ mod tests {
         a.free(o1);
         assert_eq!(a.free_range_count(), 1, "pad must coalesce away");
         assert_eq!(a.alloc(4096, 1), Some(0));
+    }
+
+    /// A11 — an offset `alloc` returned, and nothing has freed, reads live.
+    #[test]
+    fn is_live_is_true_for_an_offset_alloc_returned() {
+        let mut a = SubAllocator::new(1024);
+        let o = a.alloc(100, 1).expect("test setup: 100 bytes fit a 1024-byte allocator");
+        assert!(a.is_live(o), "an offset alloc returned and nothing freed must read live");
+    }
+
+    /// A12 — once `free` has taken an offset back, it reads dead.
+    #[test]
+    fn is_live_is_false_after_free() {
+        let mut a = SubAllocator::new(1024);
+        let o = a.alloc(100, 1).expect("test setup: 100 bytes fit a 1024-byte allocator");
+        assert!(a.free(o), "test setup: the offset alloc returned frees");
+        assert!(!a.is_live(o), "a freed offset must read dead");
+    }
+
+    /// A13 — a fresh allocator has nothing live, not even at offset 0 (the offset an all-zero
+    /// key carries).
+    #[test]
+    fn is_live_is_false_on_a_fresh_allocator() {
+        let a = SubAllocator::new(1024);
+        assert!(!a.is_live(0), "a fresh allocator has no live allocation at offset 0");
+    }
+
+    /// A14 — an offset no allocation was handed out at reads dead while another allocation is
+    /// live.
+    #[test]
+    fn is_live_is_false_for_an_offset_never_returned() {
+        let mut a = SubAllocator::new(1024);
+        let _live = a.alloc(100, 1).expect("test setup: 100 bytes fit a 1024-byte allocator");
+        assert!(!a.is_live(9999), "an offset alloc never returned must read dead");
+    }
+
+    /// A15 — the key is the exact returned offset, not a range: a byte inside a live allocation
+    /// is not itself live.
+    #[test]
+    fn is_live_is_false_inside_a_live_allocation() {
+        let mut a = SubAllocator::new(1024);
+        let o = a.alloc(100, 1).expect("test setup: 100 bytes fit a 1024-byte allocator");
+        assert!(!a.is_live(o + 50), "an interior byte of a live allocation is not a live key");
+    }
+
+    /// A16 — the key is the ALIGNED offset. `alloc(64, 256)` after a 17-byte allocation returns
+    /// 256 while the allocation's reclaimable extent starts at 17, so a lookup keyed on the
+    /// extent start would read this offset dead.
+    #[test]
+    fn is_live_keys_on_the_aligned_offset_after_padding() {
+        let mut a = SubAllocator::new(4096);
+        let _pad_maker = a.alloc(17, 1).expect("test setup: 17 bytes fit");
+        let aligned = a.alloc(64, 256).expect("test setup: 64 bytes at align 256 fit");
+        assert_eq!(aligned, 256, "test setup: the allocation was padded from 17 up to 256");
+        assert!(a.is_live(aligned), "the aligned offset alloc returned must read live");
+    }
+
+    /// Property test: `live_count` and `is_live` against a `BTreeSet<u64>` model of live offsets.
+    mod live_model {
+        use std::collections::BTreeSet;
+
+        use proptest::prelude::*;
+
+        use crate::suballocator::SubAllocator;
+
+        /// Capacity of the allocator under test: room for roughly 8 to 64 of the generated
+        /// allocations, so histories both fill it (alloc returns `None`) and drain it.
+        const CAPACITY: u64 = 4096;
+
+        /// One step of a random alloc/free history.
+        #[derive(Clone, Debug)]
+        enum Op {
+            /// `alloc(size, 1 << align_log2)`.
+            Alloc { size: u64, align_log2: u32 },
+            /// `free` of the live offset at this index into the model's ascending order, reduced
+            /// modulo the model's length; a no-op step when nothing is live.
+            FreeLive(usize),
+            /// `free` of an arbitrary offset, usually one that is not live.
+            FreeAny(u64),
+        }
+
+        fn op() -> impl Strategy<Value = Op> {
+            prop_oneof![
+                3 => (1u64..=512, 0u32..=8).prop_map(|(size, align_log2)| Op::Alloc { size, align_log2 }),
+                2 => any::<usize>().prop_map(Op::FreeLive),
+                1 => (0u64..CAPACITY).prop_map(Op::FreeAny),
+            ]
+        }
+
+        proptest! {
+            /// After every step, `live_count() == model.len()`, and `is_live(o) ==
+            /// model.contains(&o)` for every offset `alloc` ever returned plus the step's own
+            /// offset. `free` is checked against the model too, so the model cannot drift from
+            /// the allocator unnoticed.
+            #[test]
+            fn live_count_and_is_live_match_a_btreeset_model(ops in proptest::collection::vec(op(), 1..96)) {
+                let mut a = SubAllocator::new(CAPACITY);
+                let mut model: BTreeSet<u64> = BTreeSet::new();
+                let mut seen: BTreeSet<u64> = BTreeSet::new();
+                for step in &ops {
+                    let probe = match *step {
+                        Op::Alloc { size, align_log2 } => {
+                            let got = a.alloc(size, 1u64 << align_log2);
+                            if let Some(o) = got {
+                                prop_assert!(model.insert(o), "alloc returned {} while it was already live", o);
+                                seen.insert(o);
+                            }
+                            got
+                        }
+                        Op::FreeLive(i) => {
+                            if model.is_empty() {
+                                None
+                            } else {
+                                let o = *model.iter().nth(i % model.len()).expect("index reduced modulo len");
+                                prop_assert!(a.free(o), "free of live offset {} reported false", o);
+                                model.remove(&o);
+                                Some(o)
+                            }
+                        }
+                        Op::FreeAny(o) => {
+                            let expected = model.remove(&o);
+                            prop_assert_eq!(a.free(o), expected, "free({}) disagreed with the model", o);
+                            Some(o)
+                        }
+                    };
+                    prop_assert_eq!(a.live_count(), model.len(), "live_count after {:?}", step);
+                    for o in seen.iter().copied().chain(probe) {
+                        prop_assert_eq!(a.is_live(o), model.contains(&o), "is_live({}) after {:?}", o, step);
+                    }
+                }
+            }
+        }
     }
 }

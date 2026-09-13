@@ -658,6 +658,9 @@ impl RhiDevice<Vulkan> for VulkanContext {
             (fns.update_descriptor_sets)(device, count as u32, writes.as_ptr(), 0, ptr::null())
         };
 
+        // Counted only past every error edge above (each destroys its own pool before
+        // returning), so the count covers exactly the pools that outlive this call.
+        self.note_descriptor_pool_created();
         Ok(VulkanBindGroup {
             descriptor_pool,
             descriptor_set,
@@ -677,6 +680,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
                 ptr::null(),
             )
         };
+        self.note_descriptor_pool_destroyed();
     }
 
     fn create_shader_module(&self, spirv: &[u32]) -> Result<VulkanShaderModule, VulkanError> {

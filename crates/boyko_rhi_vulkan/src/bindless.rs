@@ -350,6 +350,9 @@ pub fn create_bindless_texture_set(ctx: &VulkanContext) -> Result<VulkanBindless
         ));
     }
 
+    // Counted only past every error edge above (each destroys its own pool before
+    // returning), so the count covers exactly the pools that outlive this call.
+    ctx.note_descriptor_pool_created();
     Ok(VulkanBindlessSet {
         set_layout,
         pool,
@@ -380,6 +383,7 @@ pub unsafe fn destroy_bindless_texture_set(ctx: &VulkanContext, s: VulkanBindles
         (fns.destroy_descriptor_set_layout)(device, s.set_layout, ptr::null());
         (fns.destroy_sampler)(device, s.sampler, ptr::null());
     }
+    ctx.note_descriptor_pool_destroyed();
 }
 
 /// Writes ONE texture into `set`'s bindless array at `slot` — a single
