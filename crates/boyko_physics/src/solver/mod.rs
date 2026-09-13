@@ -42,6 +42,7 @@ use crate::resources::{PhysicsConfig, SolverScratch};
 
 pub use colored::ColoredSoftStepSolver;
 pub use soft_step::SoftStepSolver;
+pub use crate::row_identity::WarmSeedStats;
 
 /// The swappable rigid-body solver seam (plan D2).
 ///

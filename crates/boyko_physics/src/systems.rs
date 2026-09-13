@@ -55,7 +55,7 @@
 //!    would DOUBLE-INTEGRATE (the pipeline AND the solver each advance position +
 //!    orientation in the same step), corrupting the simulation.
 
-use boyko_ecs::ecs::core::iters::query::data::Mut;
+use boyko_ecs::ecs::core::iters::query::data::{Mut, Ref};
 use boyko_ecs::ecs::core::iters::query::data_is_enabled::IsEnabled;
 use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
@@ -186,10 +186,11 @@ pub fn physics_integrate(
 /// system, and the TGS solver later reads `h = dt / substeps`. The stamp is
 /// gather-time so a hand-set `cfg.dt` is overwritten.
 ///
-/// The row→entity projection (for the gameplay
-/// [`Contact`](crate::components::Contact) producer) is NOT gathered in the
-/// foundation: `Entity` is not a `QueryData` in the engine, so it is deferred to
-/// the Phase-10 `Contact` producer (the only consumer) — see [`SolverScratch`].
+/// It also records each row's `EntityId` (through `Query::iter_entities`, which walks
+/// exactly the `iter()` order) and the rows whose `RigidBody` was added since the last
+/// gather into [`SolverScratch`]'s row identity map, so the row-keyed consumers can carry
+/// their state when rows move (defect A, interim). A row → entity projection for the
+/// gameplay [`Contact`](crate::components::Contact) producer is still not carried.
 //
 // `clippy::needless_pass_by_value`: `ResMut<_>` / `Res<_>` are by-value
 // `SystemParam`s mutated/read through reborrows — the same false-positive as the
@@ -200,7 +201,7 @@ pub fn physics_integrate(
 #[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
 pub fn physics_gather(
     query: Query<(
-        &RigidBody,
+        Ref<RigidBody>,
         &RigidBodyMass,
         &Collider,
         Option<&Sensor>,
@@ -238,12 +239,25 @@ pub fn physics_gather(
     // `simulated` with the unchanged `is_dynamic_row` oracle.
     // The refill view is SCOPED: it publishes its frontier on `Drop`, so the borrow
     // of `scratch.bodies` has to end before `scratch.touched` is reached.
+    //
+    // Defect A (interim): the same walk records each row's `EntityId` and the rows whose
+    // `RigidBody` was added (`Ref` is a plain read, so the access set is unchanged), so
+    // `finish_gather` can tell where every body sat one gather ago. `iter_entities`
+    // yields exactly the `iter()` sequence.
+    scratch.rows.begin_gather();
     let n = {
-        let mut bodies = scratch.bodies_build();
+        let SolverScratch { bodies, rows, .. } = &mut *scratch;
+        let mut bodies = bodies.build_view();
         bodies.clear();
-        for (body, mass, collider, sensor, simulated, kinematic) in query.iter() {
+        let (mut ids, mut added) = rows.gather_views();
+        for (entity, (body, mass, collider, sensor, simulated, kinematic)) in query.iter_entities()
+        {
+            if body.is_added() {
+                added.push(bodies.len() as u32);
+            }
+            ids.push(entity);
             bodies.push(BodyState::from_columns(
-                body,
+                &body,
                 mass,
                 collider,
                 sensor.is_some(),
@@ -251,8 +265,10 @@ pub fn physics_gather(
                 kinematic,
             ));
         }
+        debug_assert_eq!(ids.len(), bodies.len(), "invariant: one entity id per gathered row");
         bodies.len()
     };
+    scratch.rows.finish_gather();
     debug_assert_eq!(n, query.iter().count(), "Encoding A: gather must not drop a row");
     scratch.touched.reset(n);
 }
@@ -366,8 +382,12 @@ pub fn physics_narrowphase(
     // buffer (capacity reused). Empty in any world with no `Sensor` id.
     manifolds.sensor_overlaps.build_view().clear();
     // Ensure the per-pair hysteresis cache can hold this frame's pairs; it is NOT
-    // cleared (a single in-place table — this frame reads last frame's axes).
-    manifolds.box_axis_cache.begin_frame(pairs.pairs().len());
+    // cleared (a single in-place table — this frame reads last frame's axes). When the
+    // rows changed since the cache was last keyed, every box pair's previous axis is
+    // pre-read through the row identity map first, before any write of this step
+    // (defect A, interim).
+    let prefetched =
+        manifolds.box_axis_cache.begin_frame_synced(pairs.pairs(), bodies, &scratch.rows);
     // Three disjoint field borrows of one `Manifolds`: two refill views plus the
     // hysteresis cache. The views are taken once for the whole pair loop, not per
     // push.
@@ -375,7 +395,7 @@ pub fn physics_narrowphase(
     let mut sensor_out = manifolds.sensor_overlaps.build_view();
     let axis_cache = &mut manifolds.box_axis_cache;
 
-    for &(a, b) in pairs.pairs() {
+    for (k, &(a, b)) in pairs.pairs().iter().enumerate() {
         let ia = a.0 as usize;
         let ib = b.0 as usize;
         let ba = &bodies[ia];
@@ -412,7 +432,7 @@ pub fn physics_narrowphase(
                 ColliderShape::Box { half_extents: ha },
                 ColliderShape::Box { half_extents: hb },
             ) => {
-                let last_axis = axis_cache.get(a, b);
+                let last_axis = axis_cache.read_hint(prefetched, k, a, b);
                 box_box_contact(
                     a, b, ba.position, ba.rotation, ha, bb.position, bb.rotation, hb, last_axis,
                 )

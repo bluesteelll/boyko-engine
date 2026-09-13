@@ -202,3 +202,12 @@ harness = false
 [[bench]]
 name = "jolt_parity_pyramid"
 harness = false
+
+[[bench]]
+# Defect A (interim): what the row identity map costs per kind of structural change, on the
+# real colored schedule over the Jolt pyramid plus two sphere churn pools — stable /
+# swap_churn / archetype_shift / first_archetype_spawn / burst_despawn / burst_migrate, each
+# × sleeping {off, on}. Only `Schedule::run` is timed; the structural change between steps is
+# not. docs/MEASUREMENT-QUEUE.md §6 holds the arms and the rules (R2, R3).
+name = "row_identity_churn"
+harness = false

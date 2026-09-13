@@ -286,7 +286,7 @@
 
         let mut solver = ColoredSoftStepSolver::default();
         solver.build_bodies(&bodies);
-        solver.build_columns(&manifolds, &graph, &bodies, None);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
         let cols = &solver.columns;
 
         // The total live point count = 1 + 1 + 4 = 6.
@@ -445,7 +445,7 @@
             let (bodies, manifolds, graph) = random_scene(seed);
             let mut solver = ColoredSoftStepSolver::default();
             solver.build_bodies(&bodies);
-            solver.build_columns(&manifolds, &graph, &bodies, None);
+            solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
             let cols = &solver.columns;
 
             let n_colors = cols.color_offsets().len().saturating_sub(1);
@@ -1061,7 +1061,7 @@
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
         solver.build_bodies(&bodies);
-        solver.build_columns(&manifolds, &graph, &bodies, None);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
         let cols = &solver.columns;
         let n_colors = cols.color_offsets().len().saturating_sub(1);
         (0..n_colors)
@@ -1476,7 +1476,7 @@
             // ── Scalar arm ──────────────────────────────────────────────────
             let mut solver_scalar = ColoredSoftStepSolver::default();
             solver_scalar.build_bodies(&bodies);
-            solver_scalar.build_columns(&manifolds, &graph, &bodies, None);
+            solver_scalar.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
             let cols_scalar = &solver_scalar.columns;
             let n_colors = cols_scalar.color_offsets().len() - 1;
             let bodies_scalar = body_scratch_from(&pristine_bodies);
@@ -1501,7 +1501,7 @@
             // ── SIMD arm ─────────────────────────────────────────────────────
             let mut solver_simd = ColoredSoftStepSolver::default();
             solver_simd.build_bodies(&bodies);
-            solver_simd.build_columns(&manifolds, &graph, &bodies, None);
+            solver_simd.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
             let cols_simd = &solver_simd.columns;
             let bodies_simd = body_scratch_from(&pristine_bodies);
             {

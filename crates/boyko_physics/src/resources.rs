@@ -18,11 +18,12 @@ use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
+use crate::row_identity::{NO_ROW, RemapCursor, RowIdentity, RowRemap, SleepLatch};
 use crate::scratch_ids::{
     body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
     box_axis_cache_id, contact_pairs_id, manifolds_id, register_narrowphase_column_layouts,
     register_graph_column_layouts, register_scratch_layouts, scratch_reserve_rows,
-    sensor_overlaps_id, touched_awake_id, touched_solver_id, vn_initial_id,
+    sensor_overlaps_id, sleep_latch_prev_id, touched_awake_id, touched_solver_id, vn_initial_id,
 };
 use crate::systems::body_bounding_radius;
 
@@ -289,13 +290,21 @@ pub struct PhysicsConfig {
     /// [`sleep_threshold`](Self::sleep_threshold) for
     /// [`sleep_frames`](Self::sleep_frames) consecutive frames is FROZEN and thereafter
     /// SKIPS ONLY its SOLVE + INTEGRATE work — the gather still walks every row (IM-1
-    /// intact), so a frozen body keeps its dense-row warm key (no warm-start thrash).
+    /// intact). A frozen body's warm entries are keyed by row, and lookups are
+    /// translated through the row identity map when its row moves (interim,
+    /// `row_identity.rs`).
     ///
-    /// The sleep state is keyed per BODY ROW (rows are stable across frames), and the
-    /// per-frame freeze decision is DERIVED from the rows (an island is frozen iff
-    /// every member row is latched asleep). So a slept pile that a faller / new body
-    /// joins wakes the SAME frame the contact appears (wake-on-merge), and a topology
-    /// change cannot spuriously freeze a moving island.
+    /// The sleep state is stored per BODY ROW. Rows are not stable: a despawn
+    /// swap-removes, a spawn appends, and a component insert or remove migrates a body
+    /// and shifts later rows. `IslandSleep::rekey_rows` re-keys the latch to this
+    /// gather's rows at the start of each sleeping solve. The per-frame freeze decision
+    /// is DERIVED from the rows (an island is frozen iff every member row is latched
+    /// asleep), so a slept pile that a faller / new body joins wakes the SAME frame the
+    /// contact appears (wake-on-merge), and a merge or split cannot spuriously freeze a
+    /// moving island. A row move cannot either, within one bound: a body spawned by a
+    /// command applied inside the physics schedule run, before the gather, is flagged as
+    /// added one gather late, so if it recycled a despawned body's id it carries that
+    /// body's latch for that one step (`row_identity.rs`).
     ///
     /// **Determinism:** the speed² compare is EXACT (no `sqrt`/`rsqrt`/`algebraic_*`),
     /// the debounce is a per-row integer, and the freeze decision is a pure function of
@@ -3010,10 +3019,13 @@ fn occ_set(occ: &mut [u64], base: usize, body: u32) {
 /// denotes a DIFFERENT island after any topology change (a merge, a split, a new
 /// body). Keying the sleep latch by island id therefore breaks under exactly the
 /// events sleeping must handle: a faller merging into a slept pile, or a pile
-/// splitting. Body ROWS, by contrast, are STABLE across frames (the gather is FULL
-/// and dense, IM-1 — rows never shift), so the latch is carried PER ROW and the
-/// island-active decision is DERIVED from the rows fresh each frame. This makes the
-/// model topology-robust by construction: there is no volatile-id carry to corrupt.
+/// splitting. Body ROWS are not stable either — a despawn swap-removes, a spawn
+/// appends, and a component insert or remove migrates a body and shifts every later
+/// row — but unlike an island id a row can be FOLLOWED: the latch is stored PER ROW,
+/// and at the start of each sleeping solve `rekey_rows` re-keys it through
+/// [`SolverScratch`]'s row identity map (interim; U6 replaces it with `BodyGate`). The
+/// island-active decision is then DERIVED from the rows fresh each frame, so there is
+/// no volatile-id carry to corrupt.
 ///
 /// # The model
 ///
@@ -3021,15 +3033,18 @@ fn occ_set(occ: &mut [u64], base: usize, body: u32) {
 ///   at rest for [`PhysicsConfig::sleep_frames`] consecutive frames.
 /// - Each frame, an island is FROZEN iff EVERY one of its member dynamic rows is
 ///   latched `asleep`. If ANY member row is awake — a never-slept row, a just-woken
-///   row, a brand-new body (default `asleep = false`), or a faller that was moving
-///   last frame — the WHOLE island is ACTIVE this frame: all its manifolds are solved
+///   row, a brand-new body (`rekey_rows` gives `asleep = false` to a row whose body was
+///   absent from the previous gather or whose `RigidBody` was just added; one gather
+///   late when the spawn was applied inside the same schedule run, before the gather),
+///   or a faller that was moving last frame — the WHOLE island is ACTIVE this frame:
+///   all its manifolds are solved
 ///   and all its bodies integrated. This is **wake-on-merge**: a slept island that
 ///   absorbs an awake/new row wakes the SAME frame the contact appears (no mid-air
 ///   freeze, no penetration-stick).
 /// - A FROZEN island skips ONLY its SOLVE + INTEGRATE work — but
 ///   [`physics_gather`](crate::systems::physics_gather) still snapshots every row, so
-///   a frozen body keeps its dense-row warm key and the IM-1 `physics_apply` desync
-///   `debug_assert!` can never fire.
+///   the IM-1 `physics_apply` desync `debug_assert!` can never fire. Warm entries
+///   follow row moves through lookup translation.
 ///
 /// # Determinism
 ///
@@ -3051,9 +3066,10 @@ fn occ_set(occ: &mut [u64], base: usize, body: u32) {
 pub struct IslandSleep {
     /// Per-ROW sleep LATCH — `true` once this row's island has been below
     /// [`PhysicsConfig::sleep_threshold`] for [`PhysicsConfig::sleep_frames`]
-    /// consecutive frames, `false` until then or after a wake. Indexed by BODY ROW
-    /// (stable across frames), so it survives topology changes intact (the whole
-    /// point of the rewrite). A brand-new row defaults `false` (awake).
+    /// consecutive frames, `false` until then or after a wake. Indexed by the current
+    /// gather row and carried across row moves by `rekey_rows`, so it survives topology
+    /// changes intact (the whole point of the rewrite). A row whose body is new, or was
+    /// not in the previous gather, starts `false` (awake).
     asleep: Vec<bool>,
     /// Per-ROW consecutive frames its island has been below
     /// [`PhysicsConfig::sleep_threshold`] — the debounce counter. Saturates at
@@ -3081,6 +3097,12 @@ pub struct IslandSleep {
     /// [`wake_all`](Self::wake_all)) — consumed once on the next solve, which clears
     /// every row's latch before deciding afresh.
     wake_all: bool,
+    /// Carry scratch for `rekey_rows`: the previous gather's latch, copied out before the
+    /// latch is permuted to the current rows. 4 B/row, written on change steps only
+    /// (defect A, interim; U6 deletes it).
+    latch_prev: ScratchColumn<SleepLatch>,
+    /// The latch's place in the gather sequence (defect A, interim; U6 deletes it).
+    cursor: RemapCursor,
 }
 
 impl Default for IslandSleep {
@@ -3100,6 +3122,7 @@ impl IslandSleep {
     /// `islands` (the worst case is one singleton island per row, so `islands` is a
     /// hint — the scratch grows to the live island count and reuses that capacity).
     pub fn with_capacity(islands: usize, rows: usize) -> Self {
+        register_scratch_layouts();
         Self {
             asleep: Vec::with_capacity(rows),
             below_count: Vec::with_capacity(rows),
@@ -3107,6 +3130,11 @@ impl IslandSleep {
             energy: Vec::with_capacity(islands),
             awake_rows: TouchedMask::with_capacity(touched_awake_id(), rows),
             wake_all: false,
+            latch_prev: ScratchColumn::new(
+                sleep_latch_prev_id(),
+                rows.max(scratch_reserve_rows(size_of::<SleepLatch>())),
+            ),
+            cursor: RemapCursor::default(),
         }
     }
 
@@ -3165,18 +3193,19 @@ impl IslandSleep {
         self.asleep.get(row).copied().unwrap_or(false)
     }
 
-    /// Resizes the per-ROW latch buffers to `n_rows`, preserving the latch / debounce
-    /// of rows that still exist and defaulting any newly-appeared row to awake
-    /// (`asleep = false`, debounce `0`) — so a brand-new body is awake on its first
-    /// frame.
+    /// Resizes the per-ROW latch buffers to `n_rows`, keeping the entries of rows that
+    /// still exist and defaulting any newly-appeared row to awake (`asleep = false`,
+    /// debounce `0`).
     ///
-    /// Rows are STABLE across frames (the gather is full + dense, IM-1), so this carry
-    /// is exact and topology-robust: a merge / split changes the island assignment,
-    /// not the row identity, so the latch follows the body, not the (volatile) island
-    /// id. There is no per-island carry to corrupt (the C3 class of bug is gone by
-    /// construction).
+    /// This only sizes the buffers and does not decide which body a row holds. On the
+    /// gather-driven path `rekey_rows` has already aligned and sized the latch;
+    /// direct-drive callers rely on this function alone. The carry is exact only after
+    /// `rekey_rows` has aligned the latch with this gather's rows: a merge / split then
+    /// changes the island assignment, not the row identity, so the latch follows the
+    /// body, not the (volatile) island id. There is no per-island carry to corrupt (the
+    /// C3 class of bug is gone by construction).
     ///
-    /// Caveat (caller contract): the latch follows a STABLE row, so a row that flips
+    /// Caveat (caller contract): the latch follows the body's row, so a row that flips
     /// mass regime at RUNTIME (static ↔ dynamic) keeps its old latch — `end_step`
     /// skips static rows and so cannot refresh it. A freshly-dynamic row that carried
     /// a stale `asleep = true` would be a spurious freeze candidate; such a runtime
@@ -3186,6 +3215,83 @@ impl IslandSleep {
     fn sync_rows(&mut self, n_rows: usize) {
         self.asleep.resize(n_rows, false);
         self.below_count.resize(n_rows, 0);
+    }
+
+    /// Re-keys the per-row latch to the current gather's rows (defect A, interim).
+    ///
+    /// Called at the start of every sleeping colored solve, BEFORE the solver's
+    /// no-dynamic-body early return, so a transient all-disabled step does not force a
+    /// wake on the next one.
+    /// * `Identity` — the latch is already keyed by these rows.
+    /// * `Rows` — the latch is permuted: each row takes the latch of the row its body
+    ///   held one gather ago, and a new body starts awake.
+    /// * `Reset` — the latch missed a gather (sleeping was off, or the resource was
+    ///   replaced). It is sized to this gather and a global wake is left pending, so
+    ///   every latch is cleared before `begin_step` reads one: on this solve, or on the
+    ///   next one that runs if this one returns early.
+    ///
+    /// Every arm ends keyed by this gather's rows, so the cursor is stamped after the
+    /// `match`, unconditionally.
+    pub(crate) fn rekey_rows(&mut self, rows: &RowIdentity) {
+        match self.cursor.remap(rows) {
+            RowRemap::Identity => {}
+            RowRemap::Rows(prev_row) => {
+                self.permute_latch(prev_row);
+                debug_assert_eq!(
+                    self.asleep.len(),
+                    rows.rows_len(),
+                    "invariant: a Rows re-key sizes the latch to the gather"
+                );
+            }
+            RowRemap::Reset => {
+                self.sync_rows(rows.rows_len());
+                self.wake_all = true;
+                debug_assert_eq!(
+                    self.asleep.len(),
+                    rows.rows_len(),
+                    "invariant: a Reset re-key sizes the latch to the gather"
+                );
+            }
+        }
+        self.cursor.stamp(rows);
+    }
+
+    /// Diagnostic: `Reset` classifications of the sleep latch's cursor after its first
+    /// stamp. Each one is a gather whose latches were cleared instead of carried, so it
+    /// stays flat while sleeping runs uninterrupted — a structural liveness gate.
+    #[inline]
+    pub fn remap_resets(&self) -> u64 {
+        self.cursor.resets()
+    }
+
+    /// Permutes the per-row latch through `prev_row` (the `Rows` arm of `rekey_rows`).
+    /// O(m + n), sequential.
+    #[cold]
+    #[inline(never)]
+    fn permute_latch(&mut self, prev_row: &[u32]) {
+        let old_len = self.asleep.len();
+        {
+            let mut carry = self.latch_prev.build_view();
+            carry.clear();
+            for (&asleep, &below_count) in self.asleep.iter().zip(&self.below_count) {
+                carry.push(SleepLatch::new(below_count, asleep));
+            }
+        }
+        let n = prev_row.len();
+        self.asleep.resize(n, false);
+        self.below_count.resize(n, 0);
+        let carry = self.latch_prev.as_read_slice();
+        for (row, &p) in prev_row.iter().enumerate() {
+            // A latch last sized by a direct drive can be shorter than the previous
+            // gather, so an old row past its end starts awake like a new body.
+            let latch = if p != NO_ROW && (p as usize) < old_len {
+                carry[p as usize]
+            } else {
+                SleepLatch::default()
+            };
+            self.asleep[row] = latch.asleep;
+            self.below_count[row] = latch.below_count;
+        }
     }
 
     /// Step phase 1 (BEFORE the solve): resizes the per-row latch to this frame's row
@@ -3205,9 +3311,9 @@ impl IslandSleep {
     /// This IS **wake-on-merge**: a slept pile that absorbs an awake/new row wakes the
     /// SAME frame the contact appears (the merged island now contains an awake row, so
     /// it is not frozen — no mid-air freeze, no penetration-stick). It is also
-    /// topology-robust: the decision is recomputed from the stable rows each frame, so
-    /// a re-island'd scene cannot spuriously freeze a moving island (no volatile-id
-    /// carry).
+    /// topology-robust: the decision is recomputed each frame from the per-row latch,
+    /// which `rekey_rows` has aligned with this gather's rows, so a re-island'd scene
+    /// cannot spuriously freeze a moving island (no volatile-id carry).
     ///
     /// `wake_all` (explicit [`wake_all`](Self::wake_all) / a config change) clears
     /// every row's latch first, so no island can be frozen this frame.
@@ -3613,12 +3719,10 @@ impl TouchedMask {
 /// [`physics_apply`](crate::systems::physics_apply) writes back. Every buffer is
 /// cleared and refilled each step, capacity reused.
 ///
-/// A row→entity map (for the gameplay [`Contact`](crate::components::Contact)
-/// producer) is intentionally NOT carried here in the foundation: `Entity` is not
-/// yet a `QueryData`, so the gather cannot populate it, and shipping an
-/// always-empty buffer whose "parallel to `bodies`" invariant is false from day
-/// one is a footgun (review M2). Phase 10 adds it back together with the `Contact`
-/// producer once `Entity`-as-`QueryData` lands.
+/// The gather records row → `EntityId` through `Query::iter_entities` for the row
+/// identity map (`rows`, defect A, interim), which the row-keyed consumers carry their
+/// state through when rows move. A row → entity projection for the gameplay
+/// [`Contact`](crate::components::Contact) producer is still not carried.
 /// # `bodies` is a [`ScratchColumn`], not a `std::Vec` (audit Stage P)
 ///
 /// The gather snapshot lives in the engine's OWN storage — one address-stable
@@ -3654,6 +3758,10 @@ pub struct SolverScratch {
     /// `SolverScratch` to borrow it disjointly from the BodyState read slice.
     /// External consumers read [`vn_initial`](Self::vn_initial).
     pub(crate) vn_initial: ScratchColumn<f32>,
+    /// The gather's per-row entity identity and previous-row map (defect A, interim;
+    /// U5–U7 delete it). Refilled by [`physics_gather`](crate::systems::physics_gather)
+    /// only, so a direct drive that never gathers leaves every consumer on `Identity`.
+    pub(crate) rows: RowIdentity,
 }
 
 impl Default for SolverScratch {
@@ -3681,6 +3789,7 @@ impl SolverScratch {
                 vn_initial_id(),
                 rows.max(scratch_reserve_rows(size_of::<f32>())),
             ),
+            rows: RowIdentity::with_capacity(rows),
         }
     }
 
@@ -3743,6 +3852,21 @@ impl SolverScratch {
     #[inline]
     pub fn vn_initial_build(&mut self) -> ScratchBuildView<'_, f32> {
         self.vn_initial.build_view()
+    }
+
+    /// Diagnostic: how many gathers found the rows changed (or a body added) and built a
+    /// previous-row map. A structural census: flat while no body is spawned, despawned or
+    /// migrated between steps.
+    #[inline]
+    pub fn row_remap_builds(&self) -> u64 {
+        self.rows.remap_builds()
+    }
+
+    /// Diagnostic: how many current rows the previous-row map resolved by sort + binary
+    /// search instead of by its aligned walk. A structural cost gate.
+    #[inline]
+    pub fn row_remap_searched(&self) -> u64 {
+        self.rows.remap_searched()
     }
 
     /// Clears the snapshot for a fresh gather, reusing capacity. The touched

@@ -61,6 +61,10 @@ pub mod math;
 pub mod narrowphase;
 pub mod plugin;
 pub mod resources;
+/// Defect A (interim): the gather's per-row entity identity and the previous-row map the
+/// row-keyed consumers (sleep latch, warm start, box-axis cache) carry their state
+/// through. Internal; the unification rungs U5–U7 delete it.
+pub(crate) mod row_identity;
 /// Synthetic `ComponentId` band + layout registration for the rigid solver's
 /// transient [`ScratchColumn`](boyko_ecs::ecs::core::component::scratch::ScratchColumn)
 /// gather mirrors (audit Stage P). Internal — the ids are an implementation
@@ -90,9 +94,9 @@ pub use components::{
 pub use manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 pub use math::{MAX_CONTACT_POINTS, Mat3, Quat, Vec3};
 pub use plugin::{
-    PhysicsStageKeys, SceneSyncKeys, add_physics_colored, add_physics_colored_solve,
-    add_physics_sdf, add_physics_soft, add_physics_soft_colored, add_physics_systems,
-    add_physics_systems_with_scene_sync,
+    PhysicsGatherSet, PhysicsStageKeys, SceneSyncKeys, add_physics_colored,
+    add_physics_colored_solve, add_physics_sdf, add_physics_soft, add_physics_soft_colored,
+    add_physics_systems, add_physics_systems_with_scene_sync,
 };
 pub use scene_sync::{
     debug_assert_dynamic_bodies_are_roots, sync_body_to_transform, sync_transform_to_body,
@@ -107,7 +111,7 @@ pub use soft::{
     ParticleColorGraph, SoftBody, SoftBodyError, SoftColorScratch, SoftRigidReaction,
     physics_soft_step_colored,
 };
-pub use solver::{ColoredSoftStepSolver, NoopSolver, RigidSolver, SoftStepSolver};
+pub use solver::{ColoredSoftStepSolver, NoopSolver, RigidSolver, SoftStepSolver, WarmSeedStats};
 pub use systems::{
     body_bounding_radius, physics_apply, physics_broadphase, physics_build_graph, physics_gather,
     physics_integrate, physics_narrowphase, physics_narrowphase_sdf, physics_solve_colored,

@@ -30,15 +30,22 @@
 //! history, breaking determinism); a contact that vanished last frame simply has
 //! no entry this frame.
 //!
-//! # Keying (the dense-row assumption, OQ-2)
+//! # Keying (row keys, translated across row moves)
 //!
-//! W3 keys on the dense [`BodyIndex`] row indices,
-//! which are stable frame-to-frame for a stable scene (no spawn/despawn between
-//! frames — the stacking case). A structural change reshuffles the dense rows,
-//! so the matched keys differ for one frame: that is a warm-start MISS (a
-//! one-frame convergence cost), never a determinism break or a soundness issue.
-//! Entity-id keying for robustness across structural changes is the architect's
-//! OQ-2 refinement, deliberately deferred past W3.
+//! W3 keys on the dense [`BodyIndex`] row indices. Rows are not stable: a despawn
+//! swap-removes, a spawn appends, and a component insert or remove migrates a body
+//! and shifts every later row. An untranslated row-keyed lookup after such a change
+//! is therefore a WRONG HIT, not a miss — it reads another body's impulses. On a resting
+//! cube, before lookups were translated, the moved cube left the next step 2.57e-5 m/s
+//! from the control run's velocity, 1.26e4× the control's resting noise (measured by
+//! `warm_start_survivor_moved_into_a_deleted_row_matches_control_velocity` in
+//! `tests/row_keyed_state_defect_a.rs`, whose failure message reports both). The
+//! solvers translate each lookup through the gather's row identity map
+//! (`row_identity.rs`, interim; U7's `PairCache` replaces it): stored keys stay in
+//! current rows, and a lookup uses the
+//! rows the pair held when the table was written. A pair whose row order flipped, or
+//! that names a new body, misses for one step — never a determinism break or a
+//! soundness issue.
 //!
 //! # Capacity
 //!

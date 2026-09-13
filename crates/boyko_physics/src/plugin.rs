@@ -48,11 +48,11 @@ use crate::systems::{
 /// crate makes ZERO core edits. `SystemKey`'s inner `usize` IS public
 /// (`SystemKey(pub usize)`), so the stable, nameable handle this crate can expose
 /// is that index. The physics block's intra-order is fully wired internally by
-/// [`add_physics_systems`] via `.after(..)`; an external caller wishing to order
-/// its OWN systems relative to a physics stage needs a real `SystemKey`, which the
-/// engine's privacy currently keeps internal (a pre-existing engine limitation,
-/// not introduced here — a future `pub use` of `SystemKey` would let this struct
-/// carry the keys directly).
+/// [`add_physics_systems`] via `.after(..)`. An external caller orders its OWN
+/// systems against the gather by name, through [`PhysicsGatherSet`]; against any
+/// other stage it needs a real `SystemKey`, which the engine's privacy currently
+/// keeps internal (a pre-existing engine limitation, not introduced here — a
+/// future `pub use` of `SystemKey` would let this struct carry the keys directly).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysicsStageKeys {
     /// Descriptor index of the [`physics_integrate`] stage — the **block head**.
@@ -558,7 +558,12 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     } else {
         builder.add_system(physics_integrate).key()
     };
-    let gather = builder.add_system(physics_gather).after(integrate).key();
+    // The gather joins `PhysicsGatherSet` so an external caller can order against it by name.
+    let gather = builder
+        .add_system(physics_gather)
+        .after(integrate)
+        .in_set(PhysicsGatherSet)
+        .key();
     // P3: the cold density policy runs `.after(gather)` (the body count is fresh —
     // the gather has just refilled `SolverScratch`) and `.before(broadphase)` (this
     // frame's `BroadphaseKind` decision feeds the build). `physics_broadphase` is
@@ -727,3 +732,27 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         scene_sync: scene_sync_keys,
     }
 }
+
+/// The system set holding the [`physics_gather`] stage of every pipeline this module
+/// wires, so a caller outside this crate can order its own systems against the gather
+/// by name.
+///
+/// # Why a set, not a key
+///
+/// [`PhysicsStageKeys::gather`] is the bare descriptor index inside the gather's
+/// `SystemKey`. The engine keeps `SystemKey` in a `pub(crate)` module, so outside
+/// `boyko_ecs` that index cannot be turned back into a key, and `.before(key)` against
+/// the gather cannot be written. A set is named by its type instead: the same seam
+/// `boyko_render` uses to order across plugin boundaries (for example `CsmFitSet`).
+///
+/// # Use
+///
+/// `builder.add_system(spawner).before_set(PhysicsGatherSet)` runs `spawner` before the
+/// gather. The executor applies a system's `Commands` before it dispatches that system's
+/// successors, so a body spawned there is in the same run's gather. Its `RigidBody` is
+/// flagged added one gather late, the one-step bound stated on [`IslandSleep`].
+///
+/// Membership adds no ordering edge. This crate configures no run condition on the set;
+/// a condition configured on it would skip the gather while the later stages still run.
+#[derive(boyko_macros::SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PhysicsGatherSet;

@@ -720,3 +720,192 @@
             );
         }
     }
+
+    // ─── Defect A interim fix: `IslandSleep::rekey_rows` (T7) ──────────────────────
+    //
+    // Every arm of `rekey_rows` ends keyed by the current gather, so every arm must leave the
+    // cursor stamped with that gather (invariant P). Red under M4 (the `Reset` arm does not
+    // stamp) and M5 (the `Identity` arm does not stamp).
+    mod rekey_rows {
+        use boyko_ecs::ecs::identifiers::primitives::EntityId;
+
+        use crate::resources::IslandSleep;
+        use crate::row_identity::{RemapCursor, RowIdentity, RowRemap};
+
+        /// Feeds one scripted gather into `rows`.
+        fn gather(rows: &mut RowIdentity, ids: &[usize], added: &[u32]) {
+            rows.begin_gather();
+            {
+                let (mut cur, mut add) = rows.gather_views();
+                for &id in ids {
+                    cur.push(EntityId(id));
+                }
+                for &r in added {
+                    add.push(r);
+                }
+            }
+            rows.finish_gather();
+        }
+
+        /// The gather sequence `rows` is at, read through a probe stamp (`RowIdentity` has no
+        /// getter; `stamp` writes exactly this value).
+        fn gather_seq(rows: &RowIdentity) -> u64 {
+            let mut probe = RemapCursor::default();
+            probe.stamp(rows);
+            probe.synced_seq()
+        }
+
+        /// How the latch's cursor classifies against `rows`, without touching it.
+        fn classify(sleep: &IslandSleep, rows: &RowIdentity) -> &'static str {
+            let mut probe = sleep.cursor;
+            match probe.remap(rows) {
+                RowRemap::Identity => "Identity",
+                RowRemap::Rows(_) => "Rows",
+                RowRemap::Reset => "Reset",
+            }
+        }
+
+        fn latch(sleep: &IslandSleep) -> Vec<(bool, u16)> {
+            sleep
+                .asleep
+                .iter()
+                .zip(&sleep.below_count)
+                .map(|(&asleep, &below)| (asleep, below))
+                .collect()
+        }
+
+        fn set_latch(sleep: &mut IslandSleep, values: &[(bool, u16)]) {
+            assert_eq!(sleep.asleep.len(), values.len(), "test setup: latch length");
+            for (row, &(asleep, below)) in values.iter().enumerate() {
+                sleep.asleep[row] = asleep;
+                sleep.below_count[row] = below;
+            }
+        }
+
+        /// T7 `Identity`: unchanged rows one gather on leave the latch in place, and the
+        /// cursor is stamped with the current gather.
+        #[test]
+        fn rekey_rows_identity_keeps_the_latch_and_stamps() {
+            let mut rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+            gather(&mut rows, &[1, 2, 3], &[0, 1, 2]);
+            sleep.rekey_rows(&rows);
+            set_latch(&mut sleep, &[(true, 8), (false, 2), (true, 8)]);
+
+            gather(&mut rows, &[1, 2, 3], &[]);
+            assert_eq!(classify(&sleep, &rows), "Identity", "construction: rows unchanged one gather on");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets(), sleep.wake_all),
+                (vec![(true, 8), (false, 2), (true, 8)], gather_seq(&rows), 0, false),
+                "T7 Identity: (latch, synced_seq, remap_resets, wake_all)"
+            );
+        }
+
+        /// T7 `Rows`: the first gather of a fresh latch, a growth step with a new body, and a
+        /// shrink step each permute the latch through `prev_row` and stamp.
+        #[test]
+        fn rekey_rows_rows_permutes_through_new_bodies_growth_and_shrink_and_stamps() {
+            let mut rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+
+            gather(&mut rows, &[1, 2, 3], &[0, 1, 2]);
+            assert_eq!(classify(&sleep, &rows), "Rows", "construction: a fresh latch's first gather is Rows (P17)");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets()),
+                (vec![(false, 0); 3], gather_seq(&rows), 0),
+                "T7 Rows, first gather: every row new and awake, cursor stamped"
+            );
+            set_latch(&mut sleep, &[(true, 8), (false, 2), (true, 8)]);
+
+            // Growth: ids 3 and 1 move, id 9 is new in row 2, id 2 moves to the end.
+            gather(&mut rows, &[3, 1, 9, 2], &[2]);
+            assert_eq!(classify(&sleep, &rows), "Rows", "construction: growth step");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets()),
+                (vec![(true, 8), (true, 8), (false, 0), (false, 2)], gather_seq(&rows), 0),
+                "T7 Rows, growth with a new body (NO_ROW): each body carries its own latch"
+            );
+
+            // Shrink: ids 1 and 9 are gone, 2 and 3 swap ends.
+            gather(&mut rows, &[2, 3], &[]);
+            assert_eq!(classify(&sleep, &rows), "Rows", "construction: shrink step");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets()),
+                (vec![(false, 2), (true, 8)], gather_seq(&rows), 0),
+                "T7 Rows, shrink: each survivor carries its own latch"
+            );
+        }
+
+        /// T7 `Reset`: a latch that missed a gather counts one reset, sizes to the gather,
+        /// leaves a global wake pending and stamps; the next gather is `Identity` again.
+        #[test]
+        fn rekey_rows_reset_counts_once_leaves_a_wake_pending_and_stamps() {
+            let mut rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+            gather(&mut rows, &[1, 2, 3], &[0, 1, 2]);
+            sleep.rekey_rows(&rows);
+            set_latch(&mut sleep, &[(true, 8), (true, 8), (true, 8)]);
+
+            gather(&mut rows, &[1, 2, 3], &[]); // the latch misses this gather
+            gather(&mut rows, &[1, 2, 3, 4], &[3]);
+            assert_eq!(classify(&sleep, &rows), "Reset", "construction: one gather was missed");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (sleep.remap_resets(), sleep.wake_all, sleep.asleep.len(), sleep.cursor.synced_seq()),
+                (1, true, 4, gather_seq(&rows)),
+                "T7 Reset: (remap_resets, wake_all, latch length, synced_seq)"
+            );
+
+            gather(&mut rows, &[1, 2, 3, 4], &[]);
+            let next = classify(&sleep, &rows);
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (next, sleep.remap_resets(), sleep.cursor.synced_seq()),
+                ("Identity", 1, gather_seq(&rows)),
+                "T7 Reset liveness: the gather after a Reset is Identity and counts nothing"
+            );
+        }
+
+        /// T7 `Rows` over a latch last sized by a direct drive: a previous row at or past the
+        /// latch's length reads `(false, 0)`, and a row inside it carries its latch.
+        #[test]
+        fn rekey_rows_rows_reads_a_row_past_a_direct_drive_latch_as_awake() {
+            let mut rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+            gather(&mut rows, &[1, 2, 3, 4], &[0, 1, 2, 3]);
+            sleep.rekey_rows(&rows);
+            // A direct drive's `begin_step` sizes the latch to its own 2-row snapshot.
+            sleep.sync_rows(2);
+            set_latch(&mut sleep, &[(true, 8), (true, 8)]);
+
+            gather(&mut rows, &[4, 3, 2, 1], &[]);
+            assert_eq!(classify(&sleep, &rows), "Rows", "construction: a permutation one gather on");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq()),
+                (vec![(false, 0), (false, 0), (true, 8), (true, 8)], gather_seq(&rows)),
+                "T7 Rows past a direct-drive latch (old_len 2, m 4): rows 3 and 2 read awake"
+            );
+        }
+
+        /// T7 direct drive: a scratch that never gathered is `Identity`; the latch stays as
+        /// the direct drive left it and the stamp writes the instance's base.
+        #[test]
+        fn rekey_rows_on_a_scratch_that_never_gathered_is_identity() {
+            let rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+            sleep.sync_rows(2);
+            set_latch(&mut sleep, &[(true, 8), (false, 1)]);
+            assert_eq!(classify(&sleep, &rows), "Identity", "construction: never gathered");
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets(), sleep.wake_all),
+                (vec![(true, 8), (false, 1)], gather_seq(&rows), 0, false),
+                "T7 direct drive: (latch, synced_seq, remap_resets, wake_all)"
+            );
+        }
+    }

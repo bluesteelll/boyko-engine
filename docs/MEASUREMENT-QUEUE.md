@@ -168,6 +168,53 @@ Recorded here so that a later reader does not add a wall-clock gate to that ladd
 
 ---
 
+## 6. Physics — what the defect-A interim row identity costs
+
+**Decides:** whether the always-on half of the row identity map (the per-row `EntityId` + added-tick
+read in `physics_gather`, the id compare, one branch per manifold / box pair) stays, and whether the
+cold remap needs a hash instead of sort + binary search. Correctness is gated by
+`row_keyed_state_defect_a.rs` and `row_identity_remap.rs`; this is price only.
+
+⚠ `benches/sleeping.rs` CANNOT see this change: it drives the solver directly with no gather, so
+every consumer classifies `Identity`. Do not use it for this entry.
+
+```bash
+# Arms: A = d5782d43 (no fix), B = the fix. Idle-machine receipt first (§0). No RUSTFLAGS (§1).
+# Run A twice interleaved with B to get the A/A spread.
+cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1
+cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/4
+cargo bench -p boyko-physics --bench row_identity_churn     # B only: arms × sleeping {off,on}
+#   stable                — pyramid, no structural change
+#   swap_churn            — per step: despawn one non-last body, spawn one at rest (recycled id, row count constant)
+#   archetype_shift       — per step: remove/insert a marker on one body in the first-walked archetype (full shift)
+#   first_archetype_spawn — per step: spawn one body into the first-walked archetype, despawn one from the last
+#   burst_despawn         — per step: despawn 32 bodies from the first-walked archetype and respawn 32 (flagged). Alignment
+#                           is KEPT (removals realign through E4): about 32 stage-2 rows
+#   burst_migrate         — per step: insert `Marker` on 32 (> REMAP_WINDOW) bodies of the later archetype, remove it on the
+#                           next step. Alignment is LOST: exercises the budget cut-off and stage 2 over the rest of the walk
+```
+
+**Rules:**
+- R1: if B/A `full_step/1` median > 1.005 and outside the A/A spread → gate ONLY the per-row added-tick
+  read on `Archetype::has_structural_add_since(last_run, this_run)` (archetype.rs:1064; `pub`, no consumer
+  wired per its doc at :1053-1060). It cannot gate the id compare: row removals do not stamp
+  (archetype.rs:969-973), and the id compare is what detects swap-moves. It inherits the same
+  one-run-late window as the added flag itself (same `is_newer_than`). Reaching it needs an archetype-level
+  walk in the gather that exposes the archetype and the system's ticks — not verified to exist; possibly a
+  kernel accessor.
+- R2: if `swap_churn` exceeds `stable` by > 2 % → profile the cold path before changing anything.
+- R3: if `burst_migrate` exceeds `stable` by > 10 % → replace stage 2's sort + binary search with an
+  open-addressed `EntityId → row` table in a `ScratchColumn` (sized with the row count, so the census rule holds).
+  If `burst_despawn`, `archetype_shift` or `first_archetype_spawn` exceeds `stable` by > 2 % → profile the aligned
+  walk before changing it.
+
+The structural companion to R3 is `row_identity_remap.rs` T3's `row_remap_searched` bounds, which need no
+timing.
+
+**Report:** medians and the A/A spread, not a single run.
+
+---
+
 ## When an entry is done
 
 Strike it with the date and the receipt's location, rather than deleting it. An entry that was run

@@ -41,13 +41,14 @@ use boyko_ecs::ecs::core::component::component_registry::{MAX_COMPONENTS, regist
 use boyko_ecs::ecs::constants::{
     POOL_MAX_ROWS, POOL_MIN_ROWS, POOL_STAGGER_LINES, POOL_TARGET_DATA_BYTES,
 };
-use boyko_ecs::ecs::identifiers::primitives::ComponentId;
+use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::Vec3;
 use crate::narrowphase::axis_cache::AxisEntry;
 use crate::resources::BodyState;
+use crate::row_identity::SleepLatch;
 use crate::solver::contact::BodyEffective;
 use crate::solver::soft_step::{ManifoldConstraint, PointConstraint};
 use crate::solver::warm_start::WarmEntry;
@@ -515,6 +516,149 @@ pub(crate) fn register_soft_graph_column_layouts() {
     register_layout::<(u32, u32)>(soft_pair_list_id().get());
 }
 
+// —— The ROW-IDENTITY cohort (defect A, interim) ————————————————————
+//
+// `RowIdentity` (row_identity.rs) records the gather's per-row `EntityId`s and builds the
+// previous-row map; `IslandSleep` and `BoxAxisCache` each keep one carry scratch. Seven
+// columns in TWO runs, because the loops they are swept in differ:
+//
+// * UPPER run (3 ids, directly below the soft-graph cohort): the current and previous
+//   row ids and the added rows. The gather pushes the ids and the added rows at row `i`
+//   in the loop that pushes the BodyState snapshot, and the two id columns swap roles
+//   every gather, so all three must clear `SCRATCH_ID_BODY_STATE`'s slot.
+// * LOWER run (4 ids): `prev_row`, the stage-2 sort pool, the latch carry and the axis
+//   carry. `prev_row` is read inside both solvers' constraint builds, which sweep the
+//   SOLVER cohort; the axis carry is written and read beside the narrowphase's pair list,
+//   manifolds and axis slots.
+//
+// ⚠ THE GAP BETWEEN THE RUNS IS LOAD-BEARING. The solver cohort is 44 ids wide and owns
+// stagger slots 20..=63, so `prev_row` cannot sit anywhere in a contiguous run below the
+// soft-graph cohort (slots 31..=37) without sharing a cache set with a contact column
+// (slot 34 is `color_offsets`). The lower run therefore starts at the highest id whose
+// slot clears the whole solver cohort — COMPUTED rather than hand-picked, so a cohort
+// above that moves re-derives it — and the ids between the runs stay free for a later
+// cohort. The asserts below prove every co-swept family at compile time.
+
+/// Whether `id` shares a cache-set stagger slot with any id of the contiguous run
+/// `bottom ..= top`.
+const fn shares_stagger_slot(id: usize, top: usize, bottom: usize) -> bool {
+    let slot = id % POOL_STAGGER_LINES;
+    let mut k = bottom;
+    while k <= top {
+        if k % POOL_STAGGER_LINES == slot {
+            return true;
+        }
+        k += 1;
+    }
+    false
+}
+
+/// The highest id at or below `start` whose stagger slot clears the run `bottom ..= top`.
+///
+/// Fails const evaluation (underflow) if the run is a full stagger period wide, which the
+/// cohort width asserts already rule out.
+const fn highest_id_clear_of(start: usize, top: usize, bottom: usize) -> usize {
+    let mut id = start;
+    while shares_stagger_slot(id, top, bottom) {
+        id -= 1;
+    }
+    id
+}
+
+/// Number of ids in the row-identity cohort's upper run.
+const ROW_IDENTITY_UPPER_COUNT: usize = 3;
+
+/// Number of ids in the row-identity cohort's lower run.
+const ROW_IDENTITY_LOWER_COUNT: usize = 4;
+
+/// Top of the row-identity cohort — one id below the soft-graph cohort's bottom.
+pub(crate) const SCRATCH_ID_ROW_IDENTITY_TOP: usize = SCRATCH_ID_SOFT_GRAPH_BOTTOM - 1;
+
+/// Synthetic id for `RowIdentity`'s current row → `EntityId` column. Top of the upper run.
+pub(crate) const SCRATCH_ID_ROW_ENTITY: usize = SCRATCH_ID_ROW_IDENTITY_TOP;
+
+/// Synthetic id for `RowIdentity`'s previous row → `EntityId` column.
+pub(crate) const SCRATCH_ID_ROW_ENTITY_PREV: usize = SCRATCH_ID_ROW_IDENTITY_TOP - 1;
+
+/// Synthetic id for `RowIdentity`'s added-rows column. Bottom of the upper run.
+pub(crate) const SCRATCH_ID_ROW_ADDED: usize = SCRATCH_ID_ROW_IDENTITY_TOP - 2;
+
+/// Synthetic id for `RowIdentity`'s `prev_row` map. Top of the lower run: the highest id
+/// below the upper run whose stagger slot clears the solver cohort.
+pub(crate) const SCRATCH_ID_ROW_PREV: usize =
+    highest_id_clear_of(SCRATCH_ID_ROW_ADDED - 1, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM);
+
+/// Synthetic id for `RowIdentity`'s stage-2 sort pool.
+pub(crate) const SCRATCH_ID_ROW_REMAP_SORT: usize = SCRATCH_ID_ROW_PREV - 1;
+
+/// Synthetic id for `IslandSleep`'s latch carry scratch.
+pub(crate) const SCRATCH_ID_SLEEP_LATCH_PREV: usize = SCRATCH_ID_ROW_PREV - 2;
+
+/// Synthetic id for `BoxAxisCache`'s per-pair carried axis. Bottom of the lower run.
+pub(crate) const SCRATCH_ID_AXIS_REMAP: usize = SCRATCH_ID_ROW_PREV - 3;
+
+/// Bottom of the row-identity cohort (inclusive).
+pub(crate) const SCRATCH_ID_ROW_IDENTITY_BOTTOM: usize = SCRATCH_ID_AXIS_REMAP;
+
+/// Number of ids the row-identity cohort spans, top and bottom inclusive, gap included.
+const ROW_IDENTITY_COHORT_WIDTH: usize =
+    SCRATCH_ID_ROW_IDENTITY_TOP - SCRATCH_ID_ROW_IDENTITY_BOTTOM + 1;
+
+const _: () = assert!(
+    SCRATCH_ID_ROW_IDENTITY_TOP < SCRATCH_ID_SOFT_GRAPH_BOTTOM,
+    "the row-identity cohort overlaps the soft-graph cohort"
+);
+
+const _: () = assert!(
+    SCRATCH_ID_ROW_ADDED == SCRATCH_ID_ROW_IDENTITY_TOP - (ROW_IDENTITY_UPPER_COUNT - 1)
+        && SCRATCH_ID_AXIS_REMAP == SCRATCH_ID_ROW_PREV - (ROW_IDENTITY_LOWER_COUNT - 1),
+    "a row-identity run has a hole: its named ids no longer tile the declared counts"
+);
+
+const _: () = assert!(
+    ROW_IDENTITY_COHORT_WIDTH <= POOL_STAGGER_LINES,
+    "the row-identity cohort, gap included, is wider than one stagger period, so its own \
+     columns are no longer provably on distinct slots"
+);
+
+// The gather loop: BodyState snapshot + row ids + added rows at one index.
+const _: () = assert!(
+    !shares_stagger_slot(SCRATCH_ID_BODY_STATE, SCRATCH_ID_ROW_IDENTITY_TOP, SCRATCH_ID_ROW_ADDED),
+    "the gather pushes the BodyState snapshot, the row ids and the added rows together, and \
+     one of the row-identity upper run's slots is BODY_STATE's"
+);
+
+// The constraint builds: `prev_row` beside every solver-cohort column.
+const _: () = assert!(
+    !shares_stagger_slot(SCRATCH_ID_ROW_PREV, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM),
+    "prev_row is read inside the constraint builds, and its slot is one of the solver cohort's"
+);
+
+// The narrowphase: the axis carry beside the broadphase + narrowphase union.
+const _: () = assert!(
+    !shares_stagger_slot(
+        SCRATCH_ID_AXIS_REMAP,
+        SCRATCH_ID_BROADPHASE_TOP,
+        SCRATCH_ID_NARROWPHASE_BOTTOM
+    ),
+    "the axis carry is swept beside the pair list and the narrowphase columns, and its slot is \
+     one of the broadphase + narrowphase union's"
+);
+
+/// Registers the element layout of every row-identity column, idempotently.
+///
+/// Two `EntityId` columns, two `u32` columns, the `(EntityId, u32)` sort pool, the
+/// `SleepLatch` carry and the `u8` axis carry.
+pub(crate) fn register_row_identity_layouts() {
+    register_layout::<EntityId>(SCRATCH_ID_ROW_ENTITY);
+    register_layout::<EntityId>(SCRATCH_ID_ROW_ENTITY_PREV);
+    register_layout::<u32>(SCRATCH_ID_ROW_ADDED);
+    register_layout::<u32>(SCRATCH_ID_ROW_PREV);
+    register_layout::<(EntityId, u32)>(SCRATCH_ID_ROW_REMAP_SORT);
+    register_layout::<SleepLatch>(SCRATCH_ID_SLEEP_LATCH_PREV);
+    register_layout::<u8>(SCRATCH_ID_AXIS_REMAP);
+}
+
 /// The lowest id the physics scratch region may occupy.
 ///
 /// The region grows DOWNWARD from the top of the id space while production
@@ -540,11 +684,11 @@ pub(crate) fn register_soft_graph_column_layouts() {
 /// and the census above is the thing to re-run before moving this number again.
 const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;
 
-// The soft-graph cohort is the region's lowest edge today. The floor is asserted
+// The row-identity cohort is the region's lowest edge today. The floor is asserted
 // against the LOWEST cohort rather than against whichever one happened to be last
 // when this was written — add a cohort below and move this assert with it.
 const _: () = assert!(
-    SCRATCH_ID_SOFT_GRAPH_BOTTOM >= SCRATCH_REGION_MIN_ID,
+    SCRATCH_ID_ROW_IDENTITY_BOTTOM >= SCRATCH_REGION_MIN_ID,
     "the physics scratch region has grown below SCRATCH_REGION_MIN_ID; production \
      ids climb from 0 and the reserved region is no longer comfortably out of \
      their reach. Re-run the census in that constant's docs before lowering it"
@@ -613,6 +757,7 @@ pub(crate) fn register_scratch_layouts() {
     register_layout::<BodyEffective>(SCRATCH_ID_BODY_EFF_SERIAL);
     register_contact_column_layouts();
     register_solver_tail_layouts();
+    register_row_identity_layouts();
 }
 
 /// Registers the [`Layout`](std::alloc::Layout) of every contact column's element
@@ -759,6 +904,7 @@ pub(crate) fn register_narrowphase_column_layouts() {
     register_layout::<Manifold>(narrowphase_column_id(0).get());
     register_layout::<Manifold>(narrowphase_column_id(1).get());
     register_layout::<AxisEntry>(narrowphase_column_id(2).get());
+    register_row_identity_layouts();
 }
 
 /// The [`ComponentId`] for `Manifolds::manifolds`.
@@ -796,6 +942,48 @@ pub(crate) fn serial_point_constraints_id() -> ComponentId {
 #[inline]
 pub(crate) fn colored_frozen_rows_id() -> ComponentId {
     ComponentId::new(SCRATCH_ID_COLORED_FROZEN_ROWS)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_ROW_ENTITY`].
+#[inline]
+pub(crate) fn row_entity_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_ROW_ENTITY)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_ROW_ENTITY_PREV`].
+#[inline]
+pub(crate) fn row_entity_prev_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_ROW_ENTITY_PREV)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_ROW_ADDED`].
+#[inline]
+pub(crate) fn row_added_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_ROW_ADDED)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_ROW_PREV`].
+#[inline]
+pub(crate) fn row_prev_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_ROW_PREV)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_ROW_REMAP_SORT`].
+#[inline]
+pub(crate) fn row_remap_sort_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_ROW_REMAP_SORT)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_SLEEP_LATCH_PREV`].
+#[inline]
+pub(crate) fn sleep_latch_prev_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_SLEEP_LATCH_PREV)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_AXIS_REMAP`].
+#[inline]
+pub(crate) fn axis_remap_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_AXIS_REMAP)
 }
 
 /// The [`ComponentId`] wrapper for [`SCRATCH_ID_VN_INITIAL`].
@@ -1028,6 +1216,145 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    // —— The row-identity cohort (defect A interim fix, Decision 4; two runs) ————————
+
+    /// The row-identity cohort's seven ids: the upper run, then the lower run.
+    fn row_identity_cohort_ids() -> Vec<usize> {
+        vec![
+            SCRATCH_ID_ROW_ENTITY,
+            SCRATCH_ID_ROW_ENTITY_PREV,
+            SCRATCH_ID_ROW_ADDED,
+            SCRATCH_ID_ROW_PREV,
+            SCRATCH_ID_ROW_REMAP_SORT,
+            SCRATCH_ID_SLEEP_LATCH_PREV,
+            SCRATCH_ID_AXIS_REMAP,
+        ]
+    }
+
+    /// The cohort is TWO contiguous runs: three ids directly below the soft-graph cohort,
+    /// then a gap, then four ids whose top is the highest id clear of the solver cohort's
+    /// slots. A single contiguous run would put `prev_row` on a contact column's slot.
+    #[test]
+    fn row_identity_cohort_is_two_contiguous_runs() {
+        let ids = row_identity_cohort_ids();
+        let (upper, lower) = ids.split_at(ROW_IDENTITY_UPPER_COUNT);
+        for (name, run, top, bottom, count) in [
+            ("upper run", upper, SCRATCH_ID_ROW_IDENTITY_TOP, SCRATCH_ID_ROW_ADDED, ROW_IDENTITY_UPPER_COUNT),
+            ("lower run", lower, SCRATCH_ID_ROW_PREV, SCRATCH_ID_ROW_IDENTITY_BOTTOM, ROW_IDENTITY_LOWER_COUNT),
+        ] {
+            let mut run = run.to_vec();
+            run.sort_unstable();
+            assert_eq!(run.len(), count, "row-identity {name}: declared count");
+            assert_eq!((run[0], run[run.len() - 1]), (bottom, top), "row-identity {name}: bounds");
+            for w in run.windows(2) {
+                assert_eq!(w[1], w[0] + 1, "row-identity {name}: hole or duplicate between {} and {}", w[0], w[1]);
+            }
+        }
+        assert_eq!(
+            SCRATCH_ID_ROW_IDENTITY_TOP + 1,
+            SCRATCH_ID_SOFT_GRAPH_BOTTOM,
+            "the upper run sits directly below the soft-graph cohort"
+        );
+        // Constant, so checked at compile time: a test build fails if the runs ever merge.
+        const {
+            assert!(
+                SCRATCH_ID_ROW_PREV + 1 < SCRATCH_ID_ROW_ADDED,
+                "the two row-identity runs must be separated by a gap"
+            );
+        }
+        assert!(
+            ids.iter().all(|&id| id >= SCRATCH_REGION_MIN_ID),
+            "every row-identity id stays above the scratch region floor {SCRATCH_REGION_MIN_ID}"
+        );
+    }
+
+    #[test]
+    fn row_identity_cohort_has_distinct_slots() {
+        assert_cohort_slots_distinct(
+            "row-identity cohort",
+            &row_identity_cohort_ids(),
+            ROW_IDENTITY_UPPER_COUNT + ROW_IDENTITY_LOWER_COUNT,
+        );
+    }
+
+    /// The gather pushes the `BodyState` snapshot, the row id and the added row at one
+    /// index, and the two id columns swap roles every gather.
+    #[test]
+    fn the_gather_loop_columns_have_distinct_slots() {
+        assert_cohort_slots_distinct(
+            "gather loop (BodyState + both row-id columns + added rows)",
+            &[
+                SCRATCH_ID_BODY_STATE,
+                SCRATCH_ID_ROW_ENTITY,
+                SCRATCH_ID_ROW_ENTITY_PREV,
+                SCRATCH_ID_ROW_ADDED,
+            ],
+            4,
+        );
+    }
+
+    /// `prev_row` is read inside both solvers' constraint builds, beside every solver-cohort
+    /// column.
+    #[test]
+    fn the_constraint_builds_with_prev_row_have_distinct_slots() {
+        let mut ids = solver_cohort_ids();
+        ids.push(SCRATCH_ID_ROW_PREV);
+        assert_cohort_slots_distinct("solver cohort + prev_row", &ids, SOLVER_COHORT_WIDTH + 1);
+    }
+
+    /// The axis carry is written and read beside the pair list, the manifolds and the axis
+    /// slots.
+    #[test]
+    fn the_narrowphase_union_with_the_axis_carry_has_distinct_slots() {
+        let mut ids = broadphase_cohort_ids();
+        ids.extend(narrowphase_cohort_ids());
+        ids.push(SCRATCH_ID_AXIS_REMAP);
+        assert_cohort_slots_distinct(
+            "broadphase + narrowphase union + axis carry",
+            &ids,
+            BROADPHASE_COHORT_WIDTH + NARROWPHASE_COLUMN_COUNT + 1,
+        );
+    }
+
+    #[test]
+    fn row_identity_cohort_shares_no_id_with_another_cohort() {
+        let row = row_identity_cohort_ids();
+        for (name, ids) in [
+            ("solver", solver_cohort_ids()),
+            ("graph", graph_cohort_ids()),
+            ("broadphase", broadphase_cohort_ids()),
+            ("narrowphase", narrowphase_cohort_ids()),
+            ("soft-coupling", soft_coupling_cohort_ids()),
+            ("soft-graph", soft_graph_cohort_ids()),
+        ] {
+            for id in &row {
+                assert!(!ids.contains(id), "row-identity id {id} also belongs to the {name} cohort");
+            }
+        }
+    }
+
+    /// Each row-identity id is registered with its own element layout: a wrong-typed
+    /// registration would size the column for the wrong element.
+    #[test]
+    fn row_identity_layouts_register_each_element_size() {
+        register_row_identity_layouts();
+        for (id, size) in [
+            (SCRATCH_ID_ROW_ENTITY, size_of::<EntityId>()),
+            (SCRATCH_ID_ROW_ENTITY_PREV, size_of::<EntityId>()),
+            (SCRATCH_ID_ROW_ADDED, size_of::<u32>()),
+            (SCRATCH_ID_ROW_PREV, size_of::<u32>()),
+            (SCRATCH_ID_ROW_REMAP_SORT, size_of::<(EntityId, u32)>()),
+            (SCRATCH_ID_SLEEP_LATCH_PREV, size_of::<SleepLatch>()),
+            (SCRATCH_ID_AXIS_REMAP, size_of::<u8>()),
+        ] {
+            assert_eq!(
+                boyko_ecs::ecs::core::component::component_registry::get_component_size(id),
+                Some(size),
+                "row-identity id {id}: registered element size"
+            );
         }
     }
 }

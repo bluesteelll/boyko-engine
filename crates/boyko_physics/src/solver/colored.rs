@@ -93,11 +93,12 @@ use super::simd;
 use super::soft_step::{IMMOVABLE_AT_REST, MAX_BIAS_VELOCITY, RESTITUTION_THRESHOLD, SoftCoefficients};
 use super::warm_start::{self, WarmStartTable};
 use super::RigidSolver;
-use crate::manifold::{Manifold, SDF_SENTINEL};
+use crate::manifold::{BodyIndex, Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{
     BodyState, ConstraintGraph, IslandSleep, PhysicsConfig, SolverScratch,
 };
+use crate::row_identity::{RemapCursor, RowIdentity, RowRemap, WarmSeedStats};
 use crate::scratch_ids::{
     body_eff_colored_id, colored_frozen_rows_id, contact_column_id, register_scratch_layouts,
     scratch_reserve_rows, warm_table_id,
@@ -1431,6 +1432,14 @@ pub struct ColoredSoftStepSolver {
     /// empty when sleeping is off (the byte-identical O6/O7 path). Backed by a
     /// [`ScratchColumn`] (audit Stage 4).
     frozen: ScratchColumn<(u32, BodyState)>,
+    /// The warm table's place in the gather sequence, stamped where `warm_read` is
+    /// rebuilt (defect A, interim; U7 deletes it).
+    warm_cursor: RemapCursor,
+    /// The last solve's warm-start lookup diagnostic (defect A, interim; U7 deletes it).
+    warm_stats: WarmSeedStats,
+    /// Solves that ran past the no-dynamic-body early return. Diagnostic (defect A,
+    /// interim).
+    solved_steps: u64,
 }
 
 impl Default for ColoredSoftStepSolver {
@@ -1458,6 +1467,9 @@ impl ColoredSoftStepSolver {
                 colored_frozen_rows_id(),
                 bodies.max(scratch_reserve_rows(size_of::<(u32, BodyState)>())),
             ),
+            warm_cursor: RemapCursor::default(),
+            warm_stats: WarmSeedStats::default(),
+            solved_steps: 0,
         }
     }
 
@@ -1468,6 +1480,22 @@ impl ColoredSoftStepSolver {
             warm_start_enabled: enabled,
             ..Self::with_capacity(0, 0)
         }
+    }
+
+    /// Diagnostic: the last solve's warm-start lookup statistics — how many manifolds
+    /// were seeded, how many of their lookup keys resolved to rows of the previous
+    /// gather, and the warm table cursor's `Reset` count (defect A, interim).
+    #[inline]
+    pub fn warm_seed_stats(&self) -> WarmSeedStats {
+        self.warm_stats
+    }
+
+    /// Diagnostic: the number of solves that ran past the no-dynamic-body early return
+    /// (defect A, interim). A step with no simulated dynamic body returns before the
+    /// count, so an unchanged value across a step shows that the early return ran.
+    #[inline]
+    pub fn solved_steps(&self) -> u64 {
+        self.solved_steps
     }
 
     /// Rebuilds the per-body solver views from the gather snapshot (mirrors the
@@ -1523,7 +1551,15 @@ impl ColoredSoftStepSolver {
         graph: &ConstraintGraph,
         bodies: &[BodyState],
         sleep: Option<&IslandSleep>,
+        remap: RowRemap<'_>,
     ) {
+        if let RowRemap::Rows(prev_row) = remap {
+            debug_assert_eq!(
+                prev_row.len(),
+                bodies.len(),
+                "invariant: the warm remap maps exactly the gathered rows"
+            );
+        }
         // Disjoint-field borrows: `columns` is written while `bodies` /
         // `warm_read` are read. Destructure `self` so the borrow checker sees the
         // fields are distinct (a re-borrow alias through a method call would not).
@@ -1532,6 +1568,8 @@ impl ColoredSoftStepSolver {
             bodies: bodies_eff,
             warm_read,
             warm_start_enabled,
+            warm_cursor,
+            warm_stats,
             ..
         } = self;
         // Reset the push-filled point columns + the three CSR columns, seeding each
@@ -1550,6 +1588,11 @@ impl ColoredSoftStepSolver {
         // read here (the build runs before any parallel dispatch); take one read
         // slice of the solver's body column. Disjoint from `cols` (distinct field).
         let bodies_eff = bodies_eff.as_read_slice();
+
+        // Warm-seed diagnostic (defect A): the carried count is taken only on a step whose
+        // rows changed; the unchanged step does no per-manifold work for it.
+        let carried_rows = *warm_start_enabled && matches!(remap, RowRemap::Rows(_));
+        let (mut seeded, mut carried) = (0u32, 0u32);
 
         for color in 0..graph.n_colors() {
             for &mi in graph.color(color) {
@@ -1571,12 +1614,17 @@ impl ColoredSoftStepSolver {
                     bodies_eff,
                     warm_read,
                     *warm_start_enabled,
+                    remap,
                 );
                 if count != 0 {
                     // One manifold-group per appended manifold with ≥1 live point;
                     // its contiguous slot run is `[base, base + count)` (C1).
                     cols.set_manifold_base(mi as usize, base, count);
                     cols.push_group_start(base + count);
+                    seeded += 1;
+                    if carried_rows && remap.manifold_pair(m).is_some() {
+                        carried += 1;
+                    }
                 }
             }
             cols.push_color_offset(cols.len() as u32);
@@ -1584,6 +1632,18 @@ impl ColoredSoftStepSolver {
             // (the per-color CSR indexes into `group_start`).
             cols.push_color_group_start((cols.group_start().len() - 1) as u32);
         }
+
+        let translated = match remap {
+            _ if !*warm_start_enabled => 0,
+            RowRemap::Identity => seeded,
+            RowRemap::Rows(_) => carried,
+            RowRemap::Reset => 0,
+        };
+        *warm_stats = WarmSeedStats {
+            manifolds: seeded,
+            translated,
+            remap_resets: warm_cursor.resets(),
+        };
 
         // Canonical `(manifold, point)` order for the IM-2b warm store — emitted
         // from the base map recorded above, in ascending manifold index, WITHOUT a
@@ -1624,6 +1684,7 @@ impl ColoredSoftStepSolver {
         bodies_eff: &[BodyEffective],
         warm_read: &WarmStartTable,
         warm_start_enabled: bool,
+        remap: RowRemap<'_>,
     ) -> u32 {
         let count = m.count as usize;
         if count == 0 {
@@ -1644,6 +1705,12 @@ impl ColoredSoftStepSolver {
         let pa = bodies[ia].position;
         let pb = if b_is_sentinel { Vec3::ZERO } else { bodies[ib].position };
 
+        // Defect A (interim): the rows this manifold's bodies held when `warm_read` was
+        // keyed. The stored key stays in current rows; only the lookup is translated. On
+        // `Identity` it is `(a, b)` itself, and each point still packs its read key
+        // separately from its stored key.
+        let lookup = remap.manifold_pair(m);
+
         // One single-thread build view over the 26 push-filled columns for the
         // whole manifold's points (the CSR / `manifold_base` columns are filled by
         // the caller, not here).
@@ -1663,8 +1730,15 @@ impl ColoredSoftStepSolver {
             } else {
                 warm_start::pack(m.body_a, m.body_b, cp.feature_id)
             };
-            let seed = if warm_start_enabled {
-                match warm_read.get(warm_key) {
+            let seed = if warm_start_enabled
+                && let Some((la, lb)) = lookup
+            {
+                let read_key = if b_is_sentinel {
+                    warm_start::pack_sdf(BodyIndex(la), cp.feature_id)
+                } else {
+                    warm_start::pack(BodyIndex(la), BodyIndex(lb), cp.feature_id)
+                };
+                match warm_read.get(read_key) {
                     Some(e) => (e.normal_impulse, e.tangent_impulse[0], e.tangent_impulse[1]),
                     None => (0.0, 0.0, 0.0),
                 }
@@ -3028,8 +3102,12 @@ impl ColoredSoftStepSolver {
     /// the color layout (and, in [O6], the thread count) — the load-bearing
     /// determinism guarantee.
     ///
+    /// After the swap it stamps the warm cursor with `rows`: `warm_read` has just been
+    /// rebuilt from this step's columns, keyed by this gather's rows, and this is its only
+    /// writer (defect A, interim). A disabled solver neither stores nor stamps.
+    ///
     /// [O6]: https://github.com/bluesteelll/boyko-engine
-    fn store_and_swap(&mut self) {
+    fn store_and_swap(&mut self, rows: &RowIdentity) {
         if !self.warm_start_enabled {
             return;
         }
@@ -3044,6 +3122,7 @@ impl ColoredSoftStepSolver {
             );
         }
         core::mem::swap(&mut self.warm_read, &mut self.warm_write);
+        self.warm_cursor.stamp(rows);
     }
 
     /// Writes the solved velocities back into the gather snapshot and flags every
@@ -3148,6 +3227,13 @@ impl ColoredSoftStepSolver {
         let substeps = config.substeps.max(1);
         let h = config.dt / substeps as f32;
 
+        // Defect A (interim): re-key the sleep latch to this gather's rows BEFORE the early
+        // return below, so a transient step with no simulated dynamic body does not leave
+        // the latch keyed by an older gather and force a wake on the next step.
+        if let Some(sleep) = sleep.as_mut() {
+            sleep.rekey_rows(&scratch.rows);
+        }
+
         // O1: degenerate early-return BEFORE any build/alloc. In solver-owned mode
         // a free dynamic body must keep falling, so the only valid skip is a world
         // with no dynamic body to integrate at all — then there is nothing to
@@ -3160,6 +3246,7 @@ impl ColoredSoftStepSolver {
         if !has_dynamic {
             return;
         }
+        self.solved_steps += 1;
 
         // O8 phase 1 (BEFORE the solve): apply the wake conditions and build the
         // body→awake mask from last frame's sleep flags. This decides which islands
@@ -3176,7 +3263,15 @@ impl ColoredSoftStepSolver {
         let sleep_view: Option<&IslandSleep> = sleep.as_deref();
 
         self.build_bodies(scratch.bodies());
-        self.build_columns(manifolds, graph, scratch.bodies(), sleep_view);
+        // Warm start is classified only while it is enabled: a disabled solver never reads
+        // or stores the table, so `Identity` is a placeholder that takes no per-manifold
+        // branch, and its cursor never counts a phantom `Reset`.
+        let warm_remap = if self.warm_start_enabled {
+            self.warm_cursor.remap(&scratch.rows)
+        } else {
+            RowRemap::Identity
+        };
+        self.build_columns(manifolds, graph, scratch.bodies(), sleep_view, warm_remap);
 
         // O8 integrate-freeze (INTEGRATE half): capture the pre-solve hot state of
         // every slept-island body so the per-substep integrate (which streams the
@@ -3307,7 +3402,7 @@ impl ColoredSoftStepSolver {
         Self::apply_restitution(&mut self.columns, self.bodies.solve_view());
 
         // IM-2b: store converged impulses in canonical order, then swap.
-        self.store_and_swap();
+        self.store_and_swap(&scratch.rows);
 
         // O8 integrate-freeze RESTORE: undo the integrate on slept rows by restoring
         // their captured pre-solve hot state into `scratch.bodies` (position /

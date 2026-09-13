@@ -64,9 +64,10 @@ use super::contact::{BodyEffective, effective_mass, is_dynamic_row, tangent_basi
 use super::simd;
 use super::warm_start::{self, WarmStartTable};
 use super::RigidSolver;
-use crate::manifold::{Manifold, SDF_SENTINEL};
+use crate::manifold::{BodyIndex, Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::resources::{BodyState, PhysicsConfig, SolverScratch};
+use crate::row_identity::{RemapCursor, RowIdentity, RowRemap, WarmSeedStats};
 use crate::scratch_ids::{
     body_eff_serial_id, register_scratch_layouts, scratch_reserve_rows,
     serial_manifold_constraints_id, serial_point_constraints_id, warm_table_id,
@@ -210,6 +211,14 @@ pub struct SoftStepSolver {
     /// every contact each frame, used by the A/B convergence test to demonstrate
     /// the warm-start payoff.
     warm_start_enabled: bool,
+    /// The warm table's place in the gather sequence, stamped where `warm_read` is
+    /// rebuilt (defect A, interim; U7 deletes it).
+    warm_cursor: RemapCursor,
+    /// The last solve's warm-start lookup diagnostic (defect A, interim; U7 deletes it).
+    warm_stats: WarmSeedStats,
+    /// Solves that ran past the no-dynamic-body early return. Diagnostic (defect A,
+    /// interim).
+    solved_steps: u64,
 }
 
 impl Default for SoftStepSolver {
@@ -240,6 +249,9 @@ impl SoftStepSolver {
             warm_read: WarmStartTable::with_capacity(warm_table_id(0), contacts),
             warm_write: WarmStartTable::with_capacity(warm_table_id(1), contacts),
             warm_start_enabled: true,
+            warm_cursor: RemapCursor::default(),
+            warm_stats: WarmSeedStats::default(),
+            solved_steps: 0,
         }
     }
 
@@ -255,6 +267,22 @@ impl SoftStepSolver {
             warm_start_enabled: enabled,
             ..Self::with_capacity(0, 0)
         }
+    }
+
+    /// Diagnostic: the last solve's warm-start lookup statistics — how many manifolds
+    /// were seeded, how many of their lookup keys resolved to rows of the previous
+    /// gather, and the warm table cursor's `Reset` count (defect A, interim).
+    #[inline]
+    pub fn warm_seed_stats(&self) -> WarmSeedStats {
+        self.warm_stats
+    }
+
+    /// Diagnostic: the number of solves that ran past the no-dynamic-body early return
+    /// (defect A, interim). A step with no simulated dynamic body returns before the
+    /// count, so an unchanged value across a step shows that the early return ran.
+    #[inline]
+    pub fn solved_steps(&self) -> u64 {
+        self.solved_steps
     }
 
     /// Rebuilds the per-body solver views from the gather snapshot.
@@ -299,7 +327,15 @@ impl SoftStepSolver {
         manifolds: &[Manifold],
         bodies: &[BodyState],
         vn_initial: &mut ScratchColumn<f32>,
+        remap: RowRemap<'_>,
     ) {
+        if let RowRemap::Rows(prev_row) = remap {
+            debug_assert_eq!(
+                prev_row.len(),
+                bodies.len(),
+                "invariant: the warm remap maps exactly the gathered rows"
+            );
+        }
         // Disjoint-field borrows: the BodyEffective read slice (built by
         // `build_bodies` just above) is read while `self.manifolds` / `self.points`
         // are written. `bodies_eff` is the read view of the solver's body column.
@@ -309,6 +345,8 @@ impl SoftStepSolver {
             points: out_points,
             warm_read,
             warm_start_enabled,
+            warm_cursor,
+            warm_stats,
             ..
         } = self;
         let bodies_eff = body_col.as_read_slice();
@@ -321,6 +359,10 @@ impl SoftStepSolver {
         // contact point would re-load the base and length on every iteration.
         let mut vn = vn_initial.build_view();
         vn.clear();
+        // Warm-seed diagnostic (defect A): the carried count is taken only on a step whose
+        // rows changed; the unchanged step does no per-manifold work for it.
+        let carried_rows = *warm_start_enabled && matches!(remap, RowRemap::Rows(_));
+        let (mut seeded, mut carried) = (0u32, 0u32);
 
         for m in manifolds {
             let count = m.count as usize;
@@ -348,6 +390,15 @@ impl SoftStepSolver {
             } else {
                 bodies[ib].position
             };
+            // Defect A (interim): the rows this manifold's bodies held when `warm_read`
+            // was keyed. The stored key stays in current rows; only the lookup is
+            // translated. On `Identity` it is `(a, b)` itself, and each point still packs
+            // its read key separately from its stored key.
+            let lookup = remap.manifold_pair(m);
+            seeded += 1;
+            if carried_rows && lookup.is_some() {
+                carried += 1;
+            }
 
             for p in 0..count {
                 let cp = &m.points[p];
@@ -383,8 +434,14 @@ impl SoftStepSolver {
                 } else {
                     warm_start::pack(m.body_a, m.body_b, cp.feature_id)
                 };
-                let seed = if *warm_start_enabled {
-                    warm_read.get(warm_key)
+                let seed = if *warm_start_enabled
+                    && let Some((la, lb)) = lookup
+                {
+                    warm_read.get(if b_is_sentinel {
+                        warm_start::pack_sdf(BodyIndex(la), cp.feature_id)
+                    } else {
+                        warm_start::pack(BodyIndex(la), BodyIndex(lb), cp.feature_id)
+                    })
                 } else {
                     None
                 };
@@ -415,6 +472,18 @@ impl SoftStepSolver {
                 count,
             });
         }
+
+        let translated = match remap {
+            _ if !*warm_start_enabled => 0,
+            RowRemap::Identity => seeded,
+            RowRemap::Rows(_) => carried,
+            RowRemap::Reset => 0,
+        };
+        *warm_stats = WarmSeedStats {
+            manifolds: seeded,
+            translated,
+            remap_resets: warm_cursor.resets(),
+        };
     }
 
     /// Applies the seeded accumulated impulse of every contact point to both
@@ -472,7 +541,13 @@ impl SoftStepSolver {
     /// swapped-in `read` table is bit-deterministic next frame. When warm-starting
     /// is disabled the store is skipped (the `read` table stays empty, so every
     /// seed misses).
-    fn store_and_swap(&mut self) {
+    ///
+    /// After the swap it stamps the warm cursor with `rows` (defect A, interim): this is
+    /// the table's only writer, so this is where it becomes keyed by this gather. It is
+    /// NOT stamped at lookup time, because this solver looks up in `build_constraints`
+    /// before its no-dynamic-body early return: a lookup-time stamp would mark a table
+    /// current that the step never stored.
+    fn store_and_swap(&mut self, rows: &RowIdentity) {
         if !self.warm_start_enabled {
             return;
         }
@@ -493,6 +568,7 @@ impl SoftStepSolver {
             );
         }
         core::mem::swap(&mut self.warm_read, &mut self.warm_write);
+        self.warm_cursor.stamp(rows);
     }
 
     /// Refreshes each dynamic body's world inverse inertia from its local tensor
@@ -846,9 +922,18 @@ impl RigidSolver for SoftStepSolver {
             let SolverScratch {
                 bodies: body_col,
                 vn_initial,
+                rows,
                 ..
             } = &mut *scratch;
-            self.build_constraints(manifolds, body_col.as_read_slice(), vn_initial);
+            // Warm start is classified only while it is enabled: a disabled solver never
+            // reads or stores the table, so `Identity` is a placeholder that takes no
+            // per-manifold branch, and its cursor never counts a phantom `Reset`.
+            let warm_remap = if self.warm_start_enabled {
+                self.warm_cursor.remap(rows)
+            } else {
+                RowRemap::Identity
+            };
+            self.build_constraints(manifolds, body_col.as_read_slice(), vn_initial, warm_remap);
         }
         // No `manifolds.is_empty()` early-return: in solver-owned mode (C2) this
         // solver is the SOLE integrator, so the substep loop must run its gravity
@@ -865,6 +950,7 @@ impl RigidSolver for SoftStepSolver {
         if !has_dynamic {
             return;
         }
+        self.solved_steps += 1;
 
         let soft = SoftCoefficients::new(config.contact_hertz, config.contact_damping, h);
         let gravity = config.gravity;
@@ -955,7 +1041,7 @@ impl RigidSolver for SoftStepSolver {
         // (W3) Store the converged accumulated impulses into the freshly-zeroed
         // write table (in manifold order) and swap read ↔ write so next frame
         // seeds from this frame's solution.
-        self.store_and_swap();
+        self.store_and_swap(&scratch.rows);
 
         // Write the solved velocities back (positions/orientations were
         // integrated in place into the snapshot) and flag every integrated
