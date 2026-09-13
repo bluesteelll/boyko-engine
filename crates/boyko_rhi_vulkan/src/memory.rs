@@ -612,6 +612,14 @@ pub trait PoolBlock: Sized {
     /// `bound` must have been produced by [`Self::create_in_block`] on THIS block
     /// and not already destroyed.
     unsafe fn destroy_in_block(&mut self, bound: BoundBuffer);
+
+    /// Sub-allocations this block handed out that are not yet destroyed
+    /// (diagnostic — never on a per-frame path).
+    fn live_allocations(&self) -> usize;
+
+    /// Whether `offset` names a live sub-allocation of this block — the same key
+    /// [`Self::destroy_in_block`] frees by (diagnostic; O(live)).
+    fn allocation_is_live(&self, offset: u64) -> bool;
 }
 
 impl PoolBlock for HostVisibleBlock {
@@ -641,6 +649,16 @@ impl PoolBlock for HostVisibleBlock {
         // SAFETY: forwarded verbatim from this trait method's own contract.
         unsafe { self.destroy_bound_buffer(bound) }
     }
+
+    #[inline]
+    fn live_allocations(&self) -> usize {
+        self.suballoc.live_count()
+    }
+
+    #[inline]
+    fn allocation_is_live(&self, offset: u64) -> bool {
+        self.suballoc.is_live(offset)
+    }
 }
 
 impl PoolBlock for DeviceLocalBlock {
@@ -669,6 +687,16 @@ impl PoolBlock for DeviceLocalBlock {
     unsafe fn destroy_in_block(&mut self, bound: BoundBuffer) {
         // SAFETY: forwarded verbatim from this trait method's own contract.
         unsafe { self.destroy_bound_buffer(bound) }
+    }
+
+    #[inline]
+    fn live_allocations(&self) -> usize {
+        self.suballoc.live_count()
+    }
+
+    #[inline]
+    fn allocation_is_live(&self, offset: u64) -> bool {
+        self.suballoc.is_live(offset)
     }
 }
 
@@ -720,6 +748,21 @@ impl<B: PoolBlock> BlockPool<B> {
     #[inline]
     pub fn total_capacity(&self) -> u64 {
         self.blocks.iter().map(B::block_capacity).sum()
+    }
+
+    /// Live sub-allocations summed over every block — buffers allocated from this
+    /// pool and not yet freed (diagnostic — never on a per-frame path).
+    #[inline]
+    pub fn live_allocations(&self) -> usize {
+        self.blocks.iter().map(B::live_allocations).sum()
+    }
+
+    /// Whether the sub-allocation keyed by `(block, offset)` — the
+    /// [`BoundBuffer::block`] and [`BoundBuffer::offset`] that [`Self::alloc`]
+    /// returns — is still live. An out-of-range `block` is `false`, never a panic.
+    #[inline]
+    pub fn allocation_is_live(&self, block: u32, offset: u64) -> bool {
+        self.blocks.get(block as usize).is_some_and(|b| b.allocation_is_live(offset))
     }
 
     /// The capacity a fresh block must have to hold `size`.
@@ -890,5 +933,165 @@ mod tests {
         let p = props_with(&[(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0)]);
         let required = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
         assert_eq!(select_memory_type(&p, required, u32::MAX), None);
+    }
+
+    /// Capacity of every mock block.
+    const MOCK_BLOCK_BYTES: u64 = 1024;
+    /// Size of every mock sub-allocation.
+    const MOCK_ALLOC_BYTES: u64 = 64;
+
+    /// A [`PoolBlock`] with no device behind it — a bare [`SubAllocator`] — so [`BlockPool`]'s
+    /// live-allocation sum and block routing are testable without Vulkan. `new_block` always
+    /// fails, so a pool of these is built from its fields directly and never grows.
+    struct MockBlock {
+        suballoc: SubAllocator,
+    }
+
+    impl PoolBlock for MockBlock {
+        fn new_block(
+            _device: VkDevice,
+            _fns: &DeviceFns,
+            _mem_props: &VkPhysicalDeviceMemoryProperties,
+            _capacity: u64,
+            _device_address: bool,
+        ) -> Result<Self, MemoryError> {
+            Err(MemoryError::NoSuitableMemoryType)
+        }
+
+        fn create_in_block(&mut self, size: u64, _usage: VkFlags) -> Result<BoundBuffer, MemoryError> {
+            let offset = self.suballoc.alloc(size, 1).ok_or(MemoryError::SubAllocExhausted)?;
+            Ok(BoundBuffer { buffer: VkBuffer::NULL, offset, size, mapped: None, block: 0 })
+        }
+
+        fn block_capacity(&self) -> u64 {
+            self.suballoc.capacity()
+        }
+
+        unsafe fn destroy_in_block(&mut self, bound: BoundBuffer) {
+            let freed = self.suballoc.free(bound.offset);
+            assert!(freed, "test mock: destroy_in_block got an offset this block never handed out");
+        }
+
+        fn live_allocations(&self) -> usize {
+            self.suballoc.live_count()
+        }
+
+        fn allocation_is_live(&self, offset: u64) -> bool {
+            self.suballoc.is_live(offset)
+        }
+    }
+
+    /// A mock block holding `count` live allocations at offsets `0, 64, 128, …`.
+    fn mock_block(count: u64) -> MockBlock {
+        let mut block = MockBlock { suballoc: SubAllocator::new(MOCK_BLOCK_BYTES) };
+        for i in 0..count {
+            let bound = block
+                .create_in_block(MOCK_ALLOC_BYTES, 0)
+                .expect("test setup: the mock block has room");
+            assert_eq!(bound.offset, i * MOCK_ALLOC_BYTES, "test setup: first-fit carves from the front");
+        }
+        block
+    }
+
+    /// A pool over `blocks`, built from its fields.
+    fn mock_pool(blocks: Vec<MockBlock>) -> BlockPool<MockBlock> {
+        BlockPool { blocks, default_capacity: MOCK_BLOCK_BYTES }
+    }
+
+    /// One more allocation from block `index`, stamped with that index the way
+    /// [`BlockPool::alloc`] stamps a buffer an existing block had room for. (`alloc` itself needs
+    /// a device fn table, which a unit test cannot build.)
+    fn alloc_in(pool: &mut BlockPool<MockBlock>, index: u32) -> BoundBuffer {
+        let mut bound = pool.blocks[index as usize]
+            .create_in_block(MOCK_ALLOC_BYTES, 0)
+            .expect("test setup: the mock block has room");
+        bound.block = index;
+        bound
+    }
+
+    /// M5 — a pool with no blocks has no live allocations.
+    #[test]
+    fn block_pool_live_allocations_is_zero_without_blocks() {
+        let pool = BlockPool::<MockBlock>::new(MOCK_BLOCK_BYTES);
+        assert_eq!(pool.live_allocations(), 0, "an empty pool holds no live sub-allocation");
+    }
+
+    /// M6 — the live count is summed over every block. Blocks holding 2 and 3 keep the right
+    /// answer apart from the plausible wrong ones: first block alone 2, last alone 3, block count 2.
+    #[test]
+    fn block_pool_live_allocations_sums_every_block() {
+        let pool = mock_pool(vec![mock_block(2), mock_block(3)]);
+        assert_eq!(pool.live_allocations(), 5, "live allocations must be summed over both blocks (2 + 3)");
+    }
+
+    /// M7 — `allocation_is_live` reads only the block it names. Offset 128 is live in block 1
+    /// (three allocations) and was never handed out by block 0 (two), so a lookup that ignored
+    /// the block index would read it live here.
+    #[test]
+    fn block_pool_allocation_is_live_is_false_for_an_offset_live_only_in_another_block() {
+        let pool = mock_pool(vec![mock_block(2), mock_block(3)]);
+        assert!(
+            !pool.allocation_is_live(0, 2 * MOCK_ALLOC_BYTES),
+            "offset 128 is live only in block 1, so block 0 must read it dead"
+        );
+    }
+
+    /// M8 — the same key reads live in the block that holds it.
+    #[test]
+    fn block_pool_allocation_is_live_is_true_in_the_block_that_holds_it() {
+        let pool = mock_pool(vec![mock_block(2), mock_block(3)]);
+        assert!(pool.allocation_is_live(1, 2 * MOCK_ALLOC_BYTES), "offset 128 is live in block 1");
+    }
+
+    /// M9 — a block index one past the end is `false`, not a panic. Offset 0 is live in both
+    /// blocks, so an index that was clamped or wrapped instead of rejected would read live.
+    #[test]
+    fn block_pool_allocation_is_live_is_false_for_a_block_past_the_end() {
+        let pool = mock_pool(vec![mock_block(2), mock_block(3)]);
+        assert!(!pool.allocation_is_live(2, 0), "block 2 does not exist in a two-block pool");
+    }
+
+    /// M10 — the largest possible block index is `false`, not a panic.
+    #[test]
+    fn block_pool_allocation_is_live_is_false_for_block_u32_max() {
+        let pool = mock_pool(vec![mock_block(2), mock_block(3)]);
+        assert!(!pool.allocation_is_live(u32::MAX, 0), "block u32::MAX does not exist in a two-block pool");
+    }
+
+    /// M11 — the key `BlockPool::free` frees by is the key `allocation_is_live` reads: once the
+    /// allocation at (block 1, offset 0) is freed, that key reads dead. Offset 0 stays live in
+    /// block 0, so a lookup that ignored the block index would still read it live.
+    #[test]
+    fn block_pool_free_makes_its_key_read_dead() {
+        let mut pool = mock_pool(vec![mock_block(0), mock_block(0)]);
+        let _in_block_0 = alloc_in(&mut pool, 0);
+        let in_block_1 = alloc_in(&mut pool, 1);
+        // SAFETY: `in_block_1` was just sub-allocated from block 1 of THIS pool and stamped with
+        // that index, exactly as `alloc` returns it, and nothing freed it before; a mock block
+        // owns no device memory.
+        unsafe { pool.free(in_block_1) };
+        assert!(!pool.allocation_is_live(1, 0), "the freed key (block 1, offset 0) must read dead");
+    }
+
+    /// M12 — freeing in one block leaves the same offset live in the other.
+    #[test]
+    fn block_pool_free_leaves_the_same_offset_live_in_another_block() {
+        let mut pool = mock_pool(vec![mock_block(0), mock_block(0)]);
+        let _in_block_0 = alloc_in(&mut pool, 0);
+        let in_block_1 = alloc_in(&mut pool, 1);
+        // SAFETY: as in `block_pool_free_makes_its_key_read_dead`.
+        unsafe { pool.free(in_block_1) };
+        assert!(pool.allocation_is_live(0, 0), "block 0's allocation at offset 0 was not freed");
+    }
+
+    /// M13 — freeing one allocation lowers the pool's live count by exactly one.
+    #[test]
+    fn block_pool_free_decrements_live_allocations() {
+        let mut pool = mock_pool(vec![mock_block(0), mock_block(0)]);
+        let _in_block_0 = alloc_in(&mut pool, 0);
+        let in_block_1 = alloc_in(&mut pool, 1);
+        // SAFETY: as in `block_pool_free_makes_its_key_read_dead`.
+        unsafe { pool.free(in_block_1) };
+        assert_eq!(pool.live_allocations(), 1, "two live allocations, one freed, leaves one");
     }
 }

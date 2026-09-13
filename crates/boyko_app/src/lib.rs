@@ -139,4 +139,6 @@ pub use fly::{FlyAction, FlyCameraPlugin, fly_default_map};
 pub use occlusion_force::OcclusionForce;
 pub use plugins::EnginePlugins;
 pub use timer_resolution::TimerResolutionGuard;
-pub use window_info::{HostFrameStats, WindowInfo};
+pub use window_info::{
+    HOST_TEARDOWN_WATCH_SLOTS, HostAllocationWatch, HostFrameStats, HostTeardownStats, WindowInfo,
+};

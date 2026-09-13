@@ -30,6 +30,7 @@ use crate::bindless::BindlessTextureTable;
 use crate::material::Material;
 use crate::mesh::MeshGpu;
 use crate::mesh_assets::OrphanedMeshGpu;
+use crate::mesh_geometry_table::{MeshGeometryTable, MeshGeometryTableSlot, VB_GEOMETRY_RESERVED_SLOT};
 use crate::retired_gpu_buffers::RetiredGpuBuffers;
 use crate::texture::OrphanedTextureGpu;
 
@@ -435,8 +436,15 @@ pub fn validate_asset_refs(
 /// `RenderEpoch` starts at `0`, matching a fresh [`Renderer`](boyko_rhi_vulkan::swapchain::Renderer)'s
 /// `submission_epoch` before the first submit; the host overwrites it every
 /// frame BEFORE `app.update_with_delta` (`boyko_app::runner`'s boot-ordering
-/// contract), so this only matters for a `apply_refcount_deltas` run before
-/// the first host publish (none exists in-tree today).
+/// contract). The default IS read before that first publish: `boyko_app::runner`
+/// runs the boot upload one-shots
+/// ([`upload_mesh_assets`](crate::gpu_upload::upload_mesh_assets),
+/// [`upload_texture_assets`](crate::gpu_upload::upload_texture_assets) and the
+/// material one) ahead of its frame loop, and a mesh or texture value `fill`
+/// rejects there is stamped `epoch.saturating_add(RETIRE_DELAY)` from it. The
+/// default must therefore stay the epoch a fresh renderer reports: a "not yet
+/// published" sentinel such as `u64::MAX` would stamp such a value `u64::MAX`,
+/// which only the shutdown force-drain reaches.
 ///
 /// # The apply → validate edge is expressible; the validate → gather edge is NOT
 ///
@@ -500,6 +508,17 @@ impl Plugin for AssetRefcountPlugin {
 /// enqueue one — see this function's implementation comment at the texture block
 /// for the full argument.
 ///
+/// # VB geometry-table slots
+///
+/// On an armed VisibilityBuffer boot a mesh also holds a [`MeshGeometryTable`] slot,
+/// and both mesh paths give it back: a refcount-retired mesh stages it through
+/// [`MeshGeometryTable::unregister`] at `epoch + RETIRE_DELAY` (that fn's contract), a
+/// fill-rejected orphan at `epoch` (it was never submitted — see
+/// [`OrphanedMeshGpu::drain_ready`]), and [`MeshGeometryTable::retire_ready_slots`]
+/// returns staged slots to the free list under the same `epoch` gate. The table is
+/// taken out of the World for the pass only when it is armed and one of those three
+/// has work.
+///
 /// # Caller contract — MUST run after `wait_frame_in_flight` for THIS `epoch`
 ///
 /// `epoch` MUST be
@@ -540,11 +559,11 @@ impl Plugin for AssetRefcountPlugin {
 /// A scene that never lets any asset's refcount reach zero (the golden scene:
 /// every load is held for the run's duration) never enqueues a `FreeEntry` or
 /// an orphan, and a scene whose GPU mirrors never outgrow their boot capacity
-/// never pushes a [`RetiredGpuBuffers`] entry — `free.is_empty() &&
-/// orphans_empty && retired_empty` (F7 C2: the early-out is extended, not
-/// narrowed — a growth-only frame with both F6 queues empty must still drain
-/// this queue) short-circuits with three `bool` reads and zero world mutation,
-/// zero device calls. The rewrite below is idempotent in any case (same store
+/// never pushes a [`RetiredGpuBuffers`] entry — the conjunction of every queue's
+/// emptiness (F7 C2: the early-out is extended, not narrowed — a growth-only frame
+/// with both F6 queues empty must still drain this queue; T6b's texture queues and
+/// the geometry-table staged slots extend it the same way) short-circuits with one
+/// `bool` read per queue and zero world mutation, zero device calls. The rewrite below is idempotent in any case (same store
 /// state -> same device calls), so this never perturbs a rendered frame.
 ///
 /// `scratch` is a host-owned, reusable buffer (parked across frames) — zero
@@ -583,11 +602,48 @@ pub fn retire_deferred_frees(
     let tex_orphans_empty = world.non_send_resource::<OrphanedTextureGpu>().is_empty();
     let bindless_recycle_empty = !world.contains_non_send_resource::<BindlessTextureTable>()
         || world.non_send_resource::<BindlessTextureTable>().is_empty();
-    if free_empty && orphans_empty && retired_empty && tex_orphans_empty && bindless_recycle_empty {
+    // VB geometry-table slots staged by an earlier pass (the mesh retire branch and the
+    // orphan drain below both stage them) recycle under the same gate, so a frame with every
+    // other queue empty must still return them. An absent resource or an unarmed table
+    // (`MeshGeometryTableSlot(None)`, every non-VB boot) has nothing staged.
+    let geometry_recycle_empty = world
+        .try_non_send_resource::<MeshGeometryTableSlot>()
+        .and_then(|slot| slot.0.as_ref())
+        .is_none_or(MeshGeometryTable::is_empty);
+    if free_empty
+        && orphans_empty
+        && retired_empty
+        && tex_orphans_empty
+        && bindless_recycle_empty
+        && geometry_recycle_empty
+    {
         return;
     }
 
     world.resource_mut::<DeferredFree>().drain_ready(epoch, scratch);
+
+    // A retired or orphaned mesh gives its VB geometry-table slot back, so the armed table is
+    // needed by the mesh retire branch, the orphan drain and the staged-slot recycle. It is
+    // taken OUT of the World for the reason the `BindlessTextureTable` block below gives, and
+    // only when it is armed and one of those three has work: `remove`/`insert` are `#[cold]`
+    // box (de)allocations, so a material-only or growth-only frame, and every non-VB boot,
+    // never pays them.
+    let geometry_needed = !orphans_empty
+        || !geometry_recycle_empty
+        || scratch.iter().any(|e| e.kind == AssetRefKind::Mesh);
+    let mut geometry = if geometry_needed
+        && world
+            .try_non_send_resource::<MeshGeometryTableSlot>()
+            .is_some_and(|slot| slot.0.is_some())
+    {
+        world.remove_non_send_resource::<MeshGeometryTableSlot>()
+    } else {
+        None
+    };
+    let mut geometry_table = geometry.as_mut().and_then(|slot| slot.0.as_mut());
+    if let Some(table) = geometry_table.as_deref_mut() {
+        table.retire_ready_slots(epoch);
+    }
 
     if !scratch.is_empty() {
         {
@@ -598,6 +654,20 @@ pub fn retire_deferred_frees(
                 // (F5 Decision 5: resurrection is impossible once Retiring), so no
                 // recheck is needed here (see `Assets::retire`'s own debug assert).
                 if let Some(mesh) = mesh_assets.retire(entry.slot) {
+                    if mesh.geometry_slot != VB_GEOMETRY_RESERVED_SLOT {
+                        debug_assert!(
+                            geometry_table.is_some(),
+                            "invariant: a mesh holding geometry slot {} was registered in a live \
+                             table, and that table is taken out above whenever it is armed",
+                            mesh.geometry_slot
+                        );
+                        if let Some(table) = geometry_table.as_deref_mut() {
+                            // `unregister`'s contract: `epoch_at_free + RETIRE_DELAY`.
+                            // Saturating, because the shutdown force-drain passes
+                            // `epoch = u64::MAX`.
+                            table.unregister(mesh.geometry_slot, epoch.saturating_add(RETIRE_DELAY));
+                        }
+                    }
                     // R2a-3 (P0-3): free the AS FIRST — its memory lives in its backing
                     // buffer, which must outlive it (mirrors `MeshAssetsExt::destroy`).
                     #[cfg(feature = "hwrt")]
@@ -630,7 +700,12 @@ pub fn retire_deferred_frees(
         }
     }
 
-    world.non_send_resource_mut::<OrphanedMeshGpu>().drain_ready(epoch, ctx);
+    world
+        .non_send_resource_mut::<OrphanedMeshGpu>()
+        .drain_ready(epoch, ctx, geometry_table);
+    if let Some(slot) = geometry {
+        world.insert_non_send_resource(slot);
+    }
 
     // SAFETY: `epoch`'s fence was waited via `wait_frame_in_flight` (this fn's caller
     // contract above) — the same fence-gate precondition the two drains above rely on.

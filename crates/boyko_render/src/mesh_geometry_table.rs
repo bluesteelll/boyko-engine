@@ -601,6 +601,15 @@ impl MeshGeometryTable {
         &self.bounds_buffer
     }
 
+    /// The `gMeshMeta[]` backing buffer — one [`MeshGeometryMeta`] row per slot.
+    ///
+    /// Host-visible like [`Self::bounds_buffer`]. Exposed so a test can key its host-pool
+    /// sub-allocation by `block` and `offset` and check that it is destroyed at teardown.
+    #[inline]
+    pub fn meta_buffer(&self) -> &BoundBuffer {
+        &self.meta_buffer
+    }
+
     /// Allocates a slot and registers `vertex_buffer`/`index_buffer` (a freshly built
     /// [`MeshGpu`](crate::mesh::MeshGpu)'s OWN buffers — Decision 0 preserves the
     /// deep "`MeshGpu` owns its buffers" invariant, no suballocated global buffer) as
@@ -754,12 +763,18 @@ impl MeshGeometryTable {
     /// `VulkanContext` through a `&mut self` bookkeeping call, and would leave the meta
     /// row stale beside a fresh bounds row — a worse invariant than the uniform one.
     /// Recorded rather than left for the next rung's author to rediscover.
+    ///
+    /// Called by `retire_deferred_frees` for a refcount-retired mesh and by
+    /// [`OrphanedMeshGpu::drain_ready`](crate::mesh_assets::OrphanedMeshGpu::drain_ready)
+    /// for a `fill`-rejected one.
     #[inline]
     pub fn unregister(&mut self, slot: u32, retire_frame: u64) {
         self.alloc.free(slot, retire_frame);
     }
 
     /// Drains every slot whose fence horizon has passed back to the free list.
+    /// [`retire_deferred_frees`](crate::asset_refcount::retire_deferred_frees) calls this when
+    /// the table is armed and the pass has a mesh retire, a mesh orphan or a staged slot.
     #[inline]
     pub fn retire_ready_slots(&mut self, epoch: u64) {
         self.alloc.retire_ready_slots(epoch);
@@ -775,6 +790,12 @@ impl MeshGeometryTable {
     /// objects — reverse creation order, the same discipline the error edges in
     /// [`Self::new`] follow. Waits for the device to go idle first (mirrors
     /// [`BindlessTextureTable::destroy`](crate::bindless::BindlessTextureTable::destroy)).
+    ///
+    /// In the windowed runner it is called by `teardown` (`boyko_app`), which removes
+    /// [`MeshGeometryTableSlot`] after the shutdown force-drain of
+    /// [`retire_deferred_frees`](crate::asset_refcount::retire_deferred_frees), the slot's last
+    /// consumer, and after `Assets<MeshGpu>` is destroyed: the meshes hold slots in this table, so
+    /// they go first, as the textures go before `BindlessTextureTable`.
     pub fn destroy(self, ctx: &VulkanContext) {
         let _ = ctx.wait_idle();
         // SAFETY: the device was just drained (`wait_idle` above), so no submission
@@ -804,6 +825,9 @@ impl MeshGeometryTable {
 /// (unlike the always-constructed texture table) because the table itself is not even
 /// built when the flag is `false` (P2-b's "zero-cost leg toggle" — `Option` costs
 /// nothing when `None`).
+///
+/// At shutdown the windowed runner's `teardown` (`boyko_app`) removes this resource and calls
+/// [`MeshGeometryTable::destroy`] on a `Some` table, after `Assets<MeshGpu>` is destroyed.
 #[derive(Default)]
 pub struct MeshGeometryTableSlot(pub Option<MeshGeometryTable>);
 

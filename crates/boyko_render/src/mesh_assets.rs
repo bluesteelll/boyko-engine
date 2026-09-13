@@ -703,8 +703,10 @@ impl MeshAssetsVbExt for Assets<MeshGpu> {
 /// never stored at all; `DeferredFree` itself is `Send + Sync` POD in
 /// `boyko_scene`, which cannot depend on the `!Send` `MeshGpu` (wrong crate
 /// direction) or hold a non-POD payload. This dedicated `!Send`
-/// `NonSendResource` is therefore the only correct home — a caller pushes
-/// the rejected value here with its own fence-gate stamp, and
+/// `NonSendResource` is therefore the only correct home — the upload drain
+/// ([`upload_assets`](crate::gpu_upload::upload_assets), through
+/// [`GpuUpload::orphan`](crate::gpu_upload::GpuUpload::orphan)) pushes the
+/// rejected value here with its fence-gate stamp, and
 /// `retire_deferred_frees` (`boyko_render::asset_refcount`, F6) drains it on
 /// the same `epoch` gate as every store-owned retire.
 #[derive(Default)]
@@ -725,20 +727,35 @@ impl OrphanedMeshGpu {
         self.orphans.push((mesh, retire_frame));
     }
 
-    /// `true` if no orphan is awaiting teardown — the O(1) golden early-out
-    /// (no `fill` caller exists in-tree yet, so this is always `true` today).
+    /// `true` if no orphan is awaiting teardown — the O(1) golden early-out.
+    /// [`upload_assets`](crate::gpu_upload::upload_assets) is the only producer,
+    /// so this stays `true` on every run that stages no upload `fill` rejects.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.orphans.is_empty()
     }
 
-    /// Tears down (BLAS before its backing buffer, then the vertex/index
-    /// buffers — mirrors [`MeshAssetsExt::destroy`]'s ordering) every orphan
-    /// whose `retire_frame <= epoch`, retaining the rest in enqueue order.
-    /// Called ONLY by `retire_deferred_frees` (`boyko_render::asset_refcount`,
-    /// F6) AFTER `wait_frame_in_flight` for this `epoch` — the same
-    /// per-resource fence precondition every other F6 destroy call relies on.
-    pub fn drain_ready(&mut self, epoch: u64, ctx: &VulkanContext) {
+    /// Tears down (geometry-table slot, then BLAS before its backing buffer,
+    /// then the vertex/index buffers — mirrors [`MeshAssetsExt::destroy`]'s
+    /// ordering) every orphan whose `retire_frame <= epoch`, retaining the rest
+    /// in enqueue order. Called ONLY by `retire_deferred_frees`
+    /// (`boyko_render::asset_refcount`, F6) AFTER `wait_frame_in_flight` for
+    /// this `epoch` — the same per-resource fence precondition every other F6
+    /// destroy call relies on.
+    ///
+    /// `geometry_table` is the world's armed [`MeshGeometryTable`], or `None` on a
+    /// boot that built none. An orphan holding a real `geometry_slot` gives it
+    /// back through [`MeshGeometryTable::unregister`], which stages the slot:
+    /// [`MeshGeometryTable::retire_ready_slots`] later returns it to the free list,
+    /// and the [`MeshGeometryTable::register`] that reissues it rewrites the row.
+    /// Without that call the slot is never reissued, and its row keeps naming the
+    /// buffers this call destroys.
+    pub fn drain_ready(
+        &mut self,
+        epoch: u64,
+        ctx: &VulkanContext,
+        mut geometry_table: Option<&mut MeshGeometryTable>,
+    ) {
         let mut i = 0;
         while i < self.orphans.len() {
             if self.orphans[i].1 > epoch {
@@ -746,6 +763,20 @@ impl OrphanedMeshGpu {
                 continue;
             }
             let (mesh, _) = self.orphans.remove(i);
+            if mesh.geometry_slot != VB_GEOMETRY_RESERVED_SLOT {
+                debug_assert!(
+                    geometry_table.is_some(),
+                    "invariant: a mesh holding geometry slot {} was registered in a live table, \
+                     and retire_deferred_frees threads that table whenever it is armed",
+                    mesh.geometry_slot
+                );
+                if let Some(table) = geometry_table.as_deref_mut() {
+                    // Staged at this `epoch`, mirroring `OrphanedTextureGpu::drain_ready`:
+                    // the value was never submitted (F6 design proof C), so no
+                    // recorded command buffer indexes this slot.
+                    table.unregister(mesh.geometry_slot, epoch);
+                }
+            }
             // R2a-3 (P0-3): free the AS FIRST — its memory lives in its backing
             // buffer, which must outlive it (mirrors `MeshAssetsExt::destroy`).
             #[cfg(feature = "hwrt")]

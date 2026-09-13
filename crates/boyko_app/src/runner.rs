@@ -83,7 +83,7 @@ use crate::particle_gate::particle_effects_upload_due;
 #[cfg(windows)]
 use crate::occlusion_force::OcclusionForce;
 #[cfg(windows)]
-use crate::window_info::{HostFrameStats, WindowInfo};
+use crate::window_info::{HostFrameStats, HostTeardownStats, WindowInfo};
 
 /// Window description handed from [`EnginePlugins`](crate::plugins::EnginePlugins)
 /// to the runner (title + requested client size; `present_mode` etc. arrive
@@ -876,6 +876,8 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     }
 
     teardown(app, host, ctx);
+    // After every host destroy, before `destroy_singleton` clears the pools this reads.
+    record_teardown_stats(app, ctx);
 
     // Plan D2 step 4 — end the singleton's lifecycle: the LAST statement of
     // the RUNNER's teardown sequence, deliberately OUTSIDE `teardown` itself.
@@ -893,9 +895,11 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // since); and NO `&'static VulkanContext` reference remains in any live
     // structure — `teardown` destroyed the whole host chain (renderer /
     // targets / bundles / swapchain / surface / window) and evicted every
-    // World GPU resident (`RhiContext`, `Assets<MeshGpu>`, `GpuDevice`), no
-    // protected `&ctx` parameter is in scope, and `ctx` is not used past this
-    // statement — so the documented `'static` fiction ends with no surviving
+    // World GPU resident (`RhiContext`, `Assets<MeshGpu>`, `MeshGeometryTableSlot`
+    // and `GpuDevice` among them), no protected `&ctx` parameter is in scope
+    // (`record_teardown_stats` returned before this statement; it copied integers
+    // into a POD Resource and retains no reference), and `ctx` is not used past
+    // this statement — so the documented `'static` fiction ends with no surviving
     // reference.
     unsafe { VulkanContext::destroy_singleton() };
 
@@ -908,8 +912,10 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
             && !app.world().contains_non_send_resource::<Assets<MeshGpu>>()
             && !app.world().contains_non_send_resource::<MaterialTable>()
             && !app.world().contains_non_send_resource::<Assets<TextureGpu>>()
-            && !app.world().contains_non_send_resource::<BindlessTextureTable>(),
-        "invariant: the post-run World is GPU-evicted (plan D2 + textured-PBR T6b)"
+            && !app.world().contains_non_send_resource::<BindlessTextureTable>()
+            && !app.world().contains_non_send_resource::<boyko_render::MeshGeometryTableSlot>(),
+        "invariant: the post-run World is GPU-evicted (plan D2 + textured-PBR T6b + the VB \
+         geometry table)"
     );
 
     // ── The diagnostics session ends WITH the run, and nothing ended it before this line ────
@@ -3469,9 +3475,10 @@ unsafe fn destroy_host_gpu_chain(host: WindowHost, ctx: &VulkanContext) {
 /// would deallocate a protected referent, UB regardless of any use-after. The
 /// runner therefore calls `destroy_singleton` as its OWN last statement, after
 /// this fn (and its protector) has returned. Postcondition on return: the
-/// device is idle, every host RHI resource is destroyed, and no `&'static
-/// VulkanContext` remains in any live structure — exactly the destroy
-/// precondition. `ctx` here is only the destroy route for the host's explicit
+/// device is idle, every host RHI resource is destroyed, every World resident
+/// step 3 evicts (the VB geometry table among them) is removed with the device
+/// objects it owns destroyed, and no `&'static VulkanContext` remains in any
+/// live structure — exactly the destroy precondition. `ctx` here is only the destroy route for the host's explicit
 /// (non-`Drop`) RHI resources.
 #[cfg(windows)]
 fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
@@ -3491,6 +3498,8 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
     //     lifecycle;
     //   - `Assets<MeshGpu>` / `MaterialTable`: their buffers are destroyed through
     //     `ctx` under the step-1 idle (`unsafe destroy` — neither has `Drop` glue);
+    //   - `MeshGeometryTableSlot`: the VB geometry table's buffers and descriptor
+    //     objects are destroyed through `ctx` right after `Assets<MeshGpu>`;
     //   - `GpuDevice`: the last world-resident `&'static` handle — no dangling
     //     `&'static` may remain in a live structure past this point.
     drop(app.world_mut().remove_non_send_resource::<RhiContext>());
@@ -3510,6 +3519,19 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
         // any mesh buffer; `ctx` is the context they were created on; the
         // table is destroyed exactly once (just removed from the World).
         unsafe { mesh_assets.destroy(ctx) };
+    }
+    // The VB geometry table: its `gMeshBounds[]` and `gMeshMeta[]` host-visible buffers and its
+    // geometry descriptor set with the pool and layout behind it, which nothing else destroys.
+    // It goes AFTER the force-drain above, the slot's last consumer (`retire_deferred_frees`
+    // takes the slot out and reinserts it), and AFTER `Assets<MeshGpu>`, whose meshes hold slots
+    // in it: slot holders first, table second, the rule the bindless texture table follows
+    // below. The removal is unconditional; a boot without a live table holds
+    // `MeshGeometryTableSlot(None)`, which simply drops.
+    if let Some(boyko_render::MeshGeometryTableSlot(Some(table))) =
+        app.world_mut().remove_non_send_resource::<boyko_render::MeshGeometryTableSlot>()
+    {
+        // A safe fn: it waits the (already idle, step 1) device itself before destroying.
+        table.destroy(ctx);
     }
     // Asset-system rung A1: `MaterialTable`'s table + staging ring are destroyed the
     // SAME way, under the SAME step-1 idle contract. `Assets<Material>` (the CPU
@@ -3578,6 +3600,49 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
 
     // Step 4 (`destroy_singleton`) is the CALLER's — see the fn contract: it
     // must run AFTER this fn returns, once `ctx`'s protector is gone.
+}
+
+/// Samples what `teardown` left alive into [`HostTeardownStats`] — once per run, read-only
+/// against the device.
+///
+/// # Position
+///
+/// The runner calls this right after `teardown` returns and before `destroy_singleton`. Every
+/// host destroy has run by then, while the context's sub-allocator pools (cleared only in
+/// `VulkanContext`'s `Drop`) and its persistent-descriptor-pool count still hold their final
+/// state, and no device allocation happens in between. Where the call sits is recorded as data
+/// (`gpu_device_present_at_sample`, `geometry_table_present_at_sample`) and never asserted here,
+/// so a misplaced call still returns and leaves a record the device tests can reject.
+///
+/// Inserts the resource with its default when no caller did, and fills `live_at_teardown` only
+/// for watch entries whose `key` is `Some`.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn record_teardown_stats(app: &mut App, ctx: &VulkanContext) {
+    let gpu_device_present = app.world().contains_non_send_resource::<GpuDevice>();
+    let geometry_table_present = app
+        .world()
+        .try_non_send_resource::<boyko_render::MeshGeometryTableSlot>()
+        .is_some_and(|slot| slot.0.is_some());
+    let (host_live, device_live) = ctx.pool_live_allocations();
+    let pools_live = ctx.persistent_descriptor_pools();
+
+    if !app.world().contains_resource::<HostTeardownStats>() {
+        app.world_mut().insert_resource(HostTeardownStats::default());
+    }
+    let stats = app.world_mut().resource_mut::<HostTeardownStats>();
+    for watch in &mut stats.watch {
+        if let Some((block, offset)) = watch.key {
+            watch.live_at_teardown = ctx.host_allocation_is_live(block, offset);
+        }
+    }
+    stats.sampled = true;
+    stats.gpu_device_present_at_sample = gpu_device_present;
+    stats.geometry_table_present_at_sample = geometry_table_present;
+    stats.host_allocations_live = u32::try_from(host_live).unwrap_or(u32::MAX);
+    stats.device_allocations_live = u32::try_from(device_live).unwrap_or(u32::MAX);
+    stats.persistent_descriptor_pools_live = pools_live;
 }
 
 #[cfg(test)]

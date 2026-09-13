@@ -247,6 +247,9 @@ pub fn create_geometry_bindless_set(
         return Err(VulkanError::Vk("vkAllocateDescriptorSets(geometry)", result));
     }
 
+    // Counted only past every error edge above (each destroys its own pool before
+    // returning), so the count covers exactly the pools that outlive this call.
+    ctx.note_descriptor_pool_created();
     Ok(VulkanGeometryBindlessSet { set_layout, pool, set, capacity })
 }
 
@@ -268,6 +271,7 @@ pub unsafe fn destroy_geometry_bindless_set(ctx: &VulkanContext, s: VulkanGeomet
         (fns.destroy_descriptor_pool)(device, s.pool, ptr::null());
         (fns.destroy_descriptor_set_layout)(device, s.set_layout, ptr::null());
     }
+    ctx.note_descriptor_pool_destroyed();
 }
 
 /// Writes ONE `STORAGE_BUFFER` descriptor into `set` at `binding`/`dstArrayElement =

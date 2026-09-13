@@ -68,7 +68,7 @@ Two consequences, both applied:
 3. **What is the non-blocking source of `fence_seen`, expressed as an RHI verb?** There is none, and
    none is added. It is **derived** from `RenderEpoch >= slot.submit_epoch + FRAMES_IN_FLIGHT`, the
    asset-retire rule stated by `frame_driver.rs:255-262` and already an ECS `Resource` at
-   `asset_refcount.rs:55` (F13/D4a).
+   `asset_refcount.rs:56` (F13/D4a).
 4. **With `__gpu_null` measured at 0, what is G10's tolerance and what does "quantum" protect?**
    `__gpu_null` is deleted. The quantum is `measured_quantum_ns` — the GCD of the sitting's
    timestamp-derived values, means excluded — and it is a **sub-floor** of the band, never the band.
