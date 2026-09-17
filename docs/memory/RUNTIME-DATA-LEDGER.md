@@ -1,4 +1,4 @@
-# Runtime Data Ledger - rev 3 (index)
+# Runtime Data Ledger - rev 4 (index)
 
 **What this is.** Every runtime heap site in the engine's code, one row each, with the ECS form the datum takes in the one unified system. Rev 2 splits the ledger: this index carries the vocabulary, the totals, the entity model, the kernel features, the decisions and the order of work; the thirteen group files under [`ledger/`](ledger/) carry every row in full; [`runtime-data-ledger.tsv`](runtime-data-ledger.tsv) is the machine-readable row set.
 
@@ -6,11 +6,13 @@
 
 | groups | tree | branch @ commit | note |
 |---|---|---|---|
-| the eleven rev-1 groups | `D:/wt/joltab` | `merge/ke16-into-ecsnative` @ `d11962a9` | crates/*/src identical to `ca582e72`, where rev 1 was taken. The working copy has uncommitted edits in 15 boyko_ecs files; the 110 citations into those files hold at the commit, not in the working copy. |
+| the eleven rev-1 groups | `D:/wt/joltab` | `merge/ke16-into-ecsnative` @ `d552be05` | rev 4 moved the ledger five commits forward from rev 3's `d11962a9` (EM2′ id recycling, the allocation census gate, the fill-reject routing, the teardown fix, the physics row identity). The working copy has no modified tracked file; its two untracked files (`crates/boyko_physics/tests/apply_row_alignment.rs`, `crates/boyko_physics/tests/support_loss_wakes_sleepers.rs`) are tests, outside the census scope (`crates/*/src`), so every citation is read at the commit (W14). A citation whose line the delta DELETED is pinned `D:/wt/joltab@d11962a9:`. |
 | ui-lane | `D:/wt/ui` | `feat/ui-advanced` @ `615cda8f` | the census of record for crates/boyko_ui/src (rev 2) and, since rev 3, for every non-test site the lane adds or changes in other crates (196 rows) |
 | reflect-lane | `D:/wt/reflect` | `feat/reflection` @ `0e0b4c68` | rows only in code the lane added (24 rows) |
 
-**Date:** 2026-09-11. **Revision:** 3. **Status:** complete ledger, not yet a gate (section [What this ledger is not](#what-this-ledger-is-not)).
+**Date:** 2026-09-16. **Revision:** 4. **Status:** complete ledger, not yet a gate (section [What this ledger is not](#what-this-ledger-is-not)).
+
+**How rev 4 was made.** Read-only on every code tree: python, git show, git diff. No cargo, clippy or test. Two inputs: the rev-3 recheck's three open items (the work order), and the joltab delta `d11962a9..d552be05`. The delta pass re-points every joltab coordinate (row positions, quoted citations and unquoted `file.rs:N` references), censuses the non-test code the delta adds or rewrites, and supersedes the one row whose field it removed; the work order closes the three consistency gaps. Every change is one record in `rev4/changes4.json`; the fixer is `rev4/build4.py`, the re-pointing pass `remapcite.py`, the renderer `gen4.py`, the checker `verify4.py` (section [Change log](#change-log), Rev 3 -> rev 4). Four rechecks of rev 4 followed, each an independent recount rather than a re-run of those scripts; their repairs are W4-W17, and from the second recheck on the corrections were applied to the rendered files directly, since the defects were in the citations and the prose - and once (W13) in one row's form.
 
 **How rev 3 was made.** Read-only on every code tree: python, git show, git diff. No cargo, clippy or test. Input: rev 2 (below) and its recheck, whose seven work items and six minor items are the whole scope of rev 3. Every change is one record `{item, tsv_key, field, old, new, evidence}` in `rev3/changes.json`; the fixer is `rev3/synth3/build3.py`, the renderer `gen3.py`, the checker `verify3.py` (section [Change log](#change-log), Rev 2 -> rev 3). Decisions follow the owner's delegation (performance first) and the two decisions files.
 
@@ -25,7 +27,7 @@ The working files (the group JSON ledgers with every non_row, the lane JSONs, `g
 
 **Disclosure:** the gap agent ran `rustc.exe --version` once, by mistake, while locating rust-src; it built nothing. The rev-1 disclosures (two `rustc --version` runs in the timing window) stand in the pool-utils-log and app-demo files.
 
-**Totals:** **2350 active rows** in 23 crates from 13 groups; 131 superseded rows (122 kept in ui-input.md, 9 in render.md); 4492 non_rows (rev 3: no supplementary rows, and the non_rows of sites a lane re-censused are not counted twice). **673 rows (28.6 %) land in an ECS data form** (component, dense-component, enable-state, relation, event, resource-column or system-scratch). 264 are kernel-internal, 301 diagnostics, 10 scope-arena, and 1102 out of scope, 1021 of them compile-time. **0 rows are class U. 0 questions are left undecided.**
+**Totals:** **2357 active rows** in 23 crates from 13 groups; 132 superseded rows (122 in ui-input.md, 9 in render.md, 1 in ecs-storage.md); 4685 non_rows (rev 4: the delta census adds its hits and the lines the delta deleted leave; no supplementary rows since rev 3, and the non_rows of sites a lane re-censused are not counted twice). **691 rows (29.3 %) land in an ECS data form** (component, dense-component, enable-state, relation, event, resource-column or system-scratch). 264 are kernel-internal, 290 diagnostics, 10 scope-arena, and 1102 out of scope, 1021 of them compile-time. **0 rows are class U. 0 questions are left undecided.**
 
 ## Contents
 
@@ -42,11 +44,11 @@ The working files (the group JSON ledgers with every non_row, the lane JSONs, `g
 - [Change log](#change-log)
 - [What this ledger is not](#what-this-ledger-is-not)
 - **Rows by group** (one file each, every row in full):
-  - [ecs-storage](ledger/ecs-storage.md): 109 active rows (D:/wt/joltab)
+  - [ecs-storage](ledger/ecs-storage.md): 109 active rows, 1 superseded (D:/wt/joltab)
   - [ecs-schedule](ledger/ecs-schedule.md): 166 active rows (D:/wt/joltab)
   - [ecs-services](ledger/ecs-services.md): 77 active rows (D:/wt/joltab)
   - [pool-utils-log](ledger/pool-utils-log.md): 131 active rows (D:/wt/joltab)
-  - [physics-scene-math](ledger/physics-scene-math.md): 95 active rows (D:/wt/joltab)
+  - [physics-scene-math](ledger/physics-scene-math.md): 102 active rows (D:/wt/joltab)
   - [render](ledger/render.md): 160 active rows, 9 superseded (D:/wt/joltab)
   - [rhi](ledger/rhi.md): 64 active rows (D:/wt/joltab)
   - [ui-input](ledger/ui-input.md): 83 active rows, 122 superseded (D:/wt/joltab)
@@ -126,7 +128,7 @@ The ECS answer is to run the stages as parallel systems over dense kernel column
 | 9 | kernel-internal | The ECS's own storage bookkeeping. It moves onto the memory library, which is the SDK itself. |
 | 10 | new-kernel-feature:&lt;name> | Allowed only after every form above has been refuted with evidence. |
 | 11 | out-of-scope:&lt;os-owned\|driver-owned\|compile-time\|test-only\|third-party> | Must be backed by evidence. `third-party` is only for a type that a third-party crate imposes (eframe / egui). std internals are `os-owned`, and since rev 3 only while they run before steady state: a std path conversion reachable after steady state is resource-column (the rev-3 path rule, section Decisions). `driver-owned` is narrowed to allocations the driver or OS owns itself (0 rows after gap 4). |
-| 12 | diagnostics | NEW in rev 2 (gap 6), narrowed in rev 3. Cold diagnostic TEXT and ERROR payloads, built only on error / report paths. Home per site: a `&'static str` or structured code; a boyko_log ring record (formatting deferred to the drain); or a cold VmReservation-backed byte arena. In scope (our code allocates it), never kernel-internal. Rung 6. NOT this form (rev 3): numeric captures (profiler samples, GPU readback words, histograms, bit matrices), which are system-scratch when rebuilt per call and resource-column when retained across frames; and per-frame text, which is system-scratch by its growth. |
+| 12 | diagnostics | NEW in rev 2 (gap 6), narrowed in rev 3. Cold diagnostic TEXT and ERROR payloads, built only on error / report paths. Home per site: a `&'static str` or structured code; a boyko_log ring record (formatting deferred to the drain); or a cold VmReservation-backed byte arena. In scope (our code allocates it), never kernel-internal. Rung 6. NOT this form (rev 3): numeric captures (profiler samples, GPU readback words, histograms, bit matrices), which are system-scratch when rebuilt per call and resource-column when retained across frames; and per-frame text, which is system-scratch by its growth. NOT this form (rev 4): a PATH the code hands to std::fs at runtime (the log rotation's rotated names), which is resource-column under the one path rule, like the conversion it feeds. |
 
 **Rev-2 vocabulary changes.**
 
@@ -143,6 +145,13 @@ The ECS answer is to run the stages as parallel systems over dense kernel column
 - No supplementary rows (item 5). The 38 app-demo std-internal sites are counted rows, and `out-of-scope:third-party` is left on the 10 eframe / egui rows only.
 - Owning entities: the three raw relation-endpoint spellings are normalised (M2). `asset` also names a datum that spans several asset kinds (the retire pass, the staging record, the `Assets<T>` pin bit).
 - Gate exception (M5): a row whose container is already kernel storage (`other:ScratchColumn`, the two gap-2 physics rows) is a row for its form decision only. A migration gate that counts std heap must not count it.
+
+**Rev-4 vocabulary changes.**
+
+- `diagnostics` keeps text and error payloads only. A path a runtime call hands to `std::fs` is not one (W3): the ten log-rotation path buffers join the std conversions of the same two functions under the rev-3 one path rule, so a name and the call it feeds now carry the same form. The third recheck found the rule's eleventh site left behind - the profiler stream's `.prev` name in `boyko_app` (`profiling/stream.rs:242`), five lines from the std calls it feeds - and moved it the same way (W13).
+- The rung rule's step 4 reads a row's DESTINATION, not its class: a `boyko_ecs` row whose datum lands in the kernel's own storage (the event channel's typed buffers, the Resource and NonSend stores, the kernel Command records, the asset path index's column) is rung 2, and rev 3's "except class D and T" clause is narrowed to the `diagnostics` form and class T (W1).
+- Gate exception (M5, widened): a row whose container is already kernel storage - `other:ScratchColumn` or `other:VmColumn` - is a row for its form decision only. There are ten: the two gap-2 physics rows and the eight the rev-4 delta census added.
+- One datum, one form (W2): the retire pass's buffer is dense-component on both sides (`host.rs:96/271` with `asset_refcount.rs:575`), and the fontbake rows record that engine Q1 overturns their "a font is not an entity" skip reason without changing their form.
 
 ### Owning entities
 
@@ -168,44 +177,46 @@ The ECS answer is to run the stages as parallel systems over dense kernel column
 
 **SUPERSEDED rows of render (rev 3).** The ui-lane rewrote the seven files of `crates/boyko_render/src/ui` (+2.7k lines) and now censuses them whole, so the 8 joltab rows there are SUPERSEDED by lane rows, and so is `bindless.rs:387`, whose function the lane changed (item 1). They stay in `ledger/render.md`, marked, not counted, not in the TSV. The 11 joltab non_rows in the same seven files are dropped from the non_row total for the same reason, as are the 123 boyko_ui non_rows of ui-input (M1).
 
+**SUPERSEDED rows of a group by its own group (rev 4).** A row whose datum MOVED inside the same tree - the code was rewritten and the row follows it - is marked SUPERSEDED with a pointer to the row that carries the datum now, kept in its group file, not counted and not in the TSV. Rev 4 has one: `D:/wt/joltab@d11962a9:crates/boyko_ecs/src/ecs/core/entity/entity_master.rs:73` (`free_entity_ids: Vec<EntityId>`; the line is blank at `d552be05`), whose datum EM2' moved onto the kernel column `entity_reservoir.rs:89`.
+
 ## Totals
 
 ### Per group
 
 | group | tree | rows | active | superseded | non_rows | supplementary | active by class |
 |---|---|---|---|---|---|---|---|
-| [ecs-storage](ledger/ecs-storage.md) | D:/wt/joltab | 109 | 109 | 0 | 498 | 0 | K 30, E 1, R 9, F 42, B 24, D 1, T 2 |
-| [ecs-schedule](ledger/ecs-schedule.md) | D:/wt/joltab | 166 | 166 | 0 | 666 | 0 | K 35, R 9, F 6, S 6, B 96, D 14 |
+| [ecs-storage](ledger/ecs-storage.md) | D:/wt/joltab | 110 | 109 | 1 | 537 | 0 | K 30, E 1, R 9, F 42, B 24, D 1, T 2 |
+| [ecs-schedule](ledger/ecs-schedule.md) | D:/wt/joltab | 166 | 166 | 0 | 663 | 0 | K 35, R 9, F 6, S 6, B 96, D 14 |
 | [ecs-services](ledger/ecs-services.md) | D:/wt/joltab | 77 | 77 | 0 | 549 | 0 | K 7, E 3, R 10, F 14, B 21, X 1, D 16, T 5 |
 | [pool-utils-log](ledger/pool-utils-log.md) | D:/wt/joltab | 131 | 131 | 0 | 712 | 0 | K 3, R 3, S 5, B 27, D 14, T 23, C 56 |
-| [physics-scene-math](ledger/physics-scene-math.md) | D:/wt/joltab | 95 | 95 | 0 | 562 | 0 | E 21, R 3, F 20, B 51 |
-| [render](ledger/render.md) | D:/wt/joltab | 169 | 160 | 9 | 322 | 0 | K 1, R 6, F 5, B 66, D 80, C 2 |
-| [rhi](ledger/rhi.md) | D:/wt/joltab | 64 | 64 | 0 | 289 | 0 | K 5, R 6, F 28, B 15, X 1, D 2, C 7 |
+| [physics-scene-math](ledger/physics-scene-math.md) | D:/wt/joltab | 102 | 102 | 0 | 689 | 0 | E 22, R 3, F 26, B 51 |
+| [render](ledger/render.md) | D:/wt/joltab | 169 | 160 | 9 | 324 | 0 | K 1, R 6, F 5, B 66, D 80, C 2 |
+| [rhi](ledger/rhi.md) | D:/wt/joltab | 64 | 64 | 0 | 315 | 0 | K 5, R 6, F 28, B 15, X 1, D 2, C 7 |
 | [ui-input](ledger/ui-input.md) | D:/wt/joltab | 205 | 83 | 122 | 48 | 0 | R 8, B 31, D 44 |
-| [app-demo](ledger/app-demo.md) | D:/wt/joltab | 256 | 256 | 0 | 84 | 0 | F 25, B 39, D 182, T 10 |
+| [app-demo](ledger/app-demo.md) | D:/wt/joltab | 256 | 256 | 0 | 86 | 0 | F 25, B 39, D 182, T 10 |
 | [codec-tools](ledger/codec-tools.md) | D:/wt/joltab | 527 | 527 | 0 | 285 | 0 | B 50, X 3, D 1, T 2, C 471 |
 | [macros-aether](ledger/macros-aether.md) | D:/wt/joltab | 462 | 462 | 0 | 116 | 0 | K 5, C 457 |
 | [ui-lane](ledger/ui-lane.md) | D:/wt/ui | 196 | 196 | 0 | 203 | 0 | R 8, F 40, B 78, D 17, T 2, C 51 |
 | [reflect-lane](ledger/reflect-lane.md) | D:/wt/reflect | 24 | 24 | 0 | 158 | 0 | F 2, D 5, C 17 |
-| **total** |  | **2481** | **2350** | **131** | **4492** | **0** |  |
+| **total** |  | **2489** | **2357** | **132** | **4685** | **0** |  |
 
-Sum of the groups' active rows = 2350 = the data-line count of `runtime-data-ledger.tsv` (2350).
+Sum of the groups' active rows = 2357 = the data-line count of `runtime-data-ledger.tsv` (2357).
 
 ### Active rows by crate x ecs_form
 
 |  | component | dense-component | enable-state | relation | event | resource-column | system-scratch | scope-arena | kernel-internal | diagnostics | out-of-scope:compile-time | out-of-scope:os-owned | out-of-scope:test-only | out-of-scope:third-party | total |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | aether_lang | . | . | . | . | . | . | . | . | . | . | 263 | . | . | . | 263 |
-| boyko_app | . | . | . | . | . | 51 | 22 | . | 4 | 124 | . | 19 | . | . | 220 |
+| boyko_app | . | 2 | . | . | . | 52 | 20 | . | 4 | 123 | . | 19 | . | . | 220 |
 | boyko_demo | . | 10 | . | . | . | 5 | 8 | . | 3 | . | . | . | . | 10 | 36 |
 | boyko_diag | . | . | . | . | . | . | . | . | 1 | . | 7 | . | 20 | . | 28 |
 | boyko_ecs | 12 | 2 | . | 26 | 11 | 10 | 54 | 6 | 210 | 22 | . | 1 | . | . | 354 |
 | boyko_fontbake | . | . | . | . | . | 7 | 1 | . | . | . | 36 | . | . | . | 44 |
 | boyko_image | . | . | . | . | . | . | 17 | . | . | 1 | . | . | . | . | 18 |
 | boyko_input | . | . | . | . | 2 | 23 | 14 | . | . | 44 | . | . | . | . | 83 |
-| boyko_log | . | . | . | . | . | 12 | . | . | 4 | 10 | 21 | 6 | 8 | . | 61 |
+| boyko_log | . | . | . | . | . | 22 | . | . | 4 | . | 21 | 6 | 8 | . | 61 |
 | boyko_macros | . | . | . | . | . | . | . | . | 5 | . | 211 | . | . | . | 216 |
-| boyko_physics | . | 40 | . | . | . | 2 | 31 | . | . | . | . | . | . | . | 73 |
+| boyko_physics | . | 41 | . | . | . | 3 | 36 | . | . | . | . | . | . | . | 80 |
 | boyko_reflect | . | . | . | . | . | . | . | . | . | 5 | . | . | . | . | 5 |
 | boyko_render | 6 | 6 | 8 | . | . | 17 | 63 | . | 4 | 75 | . | . | 5 | . | 184 |
 | boyko_rhi | . | . | . | . | . | 2 | . | . | . | . | . | . | . | . | 2 |
@@ -218,7 +229,7 @@ Sum of the groups' active rows = 2350 = the data-line count of `runtime-data-led
 | boyko_ui | 10 | . | . | 4 | 2 | 10 | 76 | . | 4 | 17 | . | 1 | . | . | 124 |
 | boyko_utils | . | . | . | . | . | 3 | . | . | 3 | . | . | . | . | . | 6 |
 | prof_decode | . | . | . | . | . | . | . | . | . | . | 15 | . | . | . | 15 |
-| **total** | **32** | **61** | **8** | **31** | **16** | **155** | **370** | **10** | **264** | **301** | **1021** | **31** | **40** | **10** | **2350** |
+| **total** | **32** | **64** | **8** | **31** | **16** | **167** | **373** | **10** | **264** | **290** | **1021** | **31** | **40** | **10** | **2357** |
 
 ### Active rows by crate x class
 
@@ -234,7 +245,7 @@ Sum of the groups' active rows = 2350 = the data-line count of `runtime-data-led
 | boyko_input | . | . | 8 | . | . | 31 | . | 44 | . | . | 83 |
 | boyko_log | . | . | . | . | . | 7 | . | 10 | 15 | 29 | 61 |
 | boyko_macros | 5 | . | . | . | . | . | . | . | . | 211 | 216 |
-| boyko_physics | . | 21 | . | 16 | . | 36 | . | . | . | . | 73 |
+| boyko_physics | . | 22 | . | 22 | . | 36 | . | . | . | . | 80 |
 | boyko_reflect | . | . | . | . | . | . | . | 5 | . | . | 5 |
 | boyko_render | 1 | . | 6 | 18 | . | 74 | . | 80 | . | 5 | 184 |
 | boyko_rhi | 2 | . | . | . | . | . | . | . | . | . | 2 |
@@ -247,29 +258,29 @@ Sum of the groups' active rows = 2350 = the data-line count of `runtime-data-led
 | boyko_ui | . | . | 8 | 27 | . | 70 | . | 17 | 2 | . | 124 |
 | boyko_utils | 3 | . | 3 | . | . | . | . | . | . | . | 6 |
 | prof_decode | . | . | . | . | . | . | . | . | . | 15 | 15 |
-| **total** | **86** | **25** | **62** | **182** | **11** | **498** | **5** | **376** | **44** | **1061** | **2350** |
+| **total** | **86** | **26** | **62** | **188** | **11** | **498** | **5** | **376** | **44** | **1061** | **2357** |
 
 ### Active rows by class x ecs_form
 
 |  | component | dense-component | enable-state | relation | event | resource-column | system-scratch | scope-arena | kernel-internal | diagnostics | out-of-scope:compile-time | out-of-scope:os-owned | out-of-scope:test-only | out-of-scope:third-party | total |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | K | 2 | 1 | . | 5 | . | 5 | . | . | 73 | . | . | . | . | . | 86 |
-| E | . | 19 | . | 4 | . | 2 | . | . | . | . | . | . | . | . | 25 |
+| E | . | 19 | . | 4 | . | 3 | . | . | . | . | . | . | . | . | 26 |
 | R | 9 | 5 | . | 2 | 9 | 26 | . | . | 11 | . | . | . | . | . | 62 |
-| F | 4 | 11 | 4 | . | 2 | 1 | 129 | . | 31 | . | . | . | . | . | 182 |
+| F | 4 | 14 | 4 | . | 2 | 1 | 132 | . | 31 | . | . | . | . | . | 188 |
 | S | . | . | . | . | . | . | . | 10 | 1 | . | . | . | . | . | 11 |
 | B | 16 | 25 | 4 | 20 | 5 | 54 | 216 | . | 133 | . | . | 25 | . | . | 498 |
 | X | 1 | . | . | . | . | . | 3 | . | 1 | . | . | . | . | . | 5 |
-| D | . | . | . | . | . | 51 | 22 | . | . | 301 | . | 2 | . | . | 376 |
+| D | . | . | . | . | . | 62 | 22 | . | . | 290 | . | 2 | . | . | 376 |
 | T | . | . | . | . | . | 16 | . | . | 14 | . | . | 4 | . | 10 | 44 |
 | C | . | . | . | . | . | . | . | . | . | . | 1021 | . | 40 | . | 1061 |
-| **total** | **32** | **61** | **8** | **31** | **16** | **155** | **370** | **10** | **264** | **301** | **1021** | **31** | **40** | **10** | **2350** |
+| **total** | **32** | **64** | **8** | **31** | **16** | **167** | **373** | **10** | **264** | **290** | **1021** | **31** | **40** | **10** | **2357** |
 
 ### Active rows by container
 
 | container | rows |
 |---|---|
-| Vec | 1088 |
+| Vec | 1087 |
 | String | 890 |
 | Box&lt;[T]> | 61 |
 | Box&lt;T> | 53 |
@@ -283,6 +294,7 @@ Sum of the groups' active rows = 2350 = the data-line count of `runtime-data-led
 | other:std::fs internals (Vec&lt;u16> wide path) | 12 |
 | other:SmallList4 (4 inline, Vec spill - component/enable/enable_store.rs:765-770) | 10 |
 | other:Vec&lt;u16> (std::fs path conversion) | 10 |
+| other:ScratchColumn (kernel column on VmReservation; engine storage, not std heap) | 9 |
 | Cow | 8 |
 | PathBuf | 6 |
 | other:SparseMap (boyko_utils; 3 x Vec inside) | 5 |
@@ -297,13 +309,13 @@ Sum of the groups' active rows = 2350 = the data-line count of `runtime-data-led
 | other:crossbeam_queue::ArrayQueue | 2 |
 | other:std::thread internals | 2 |
 | other:BufWriter (8 KiB Vec&lt;u8> buffer) | 2 |
-| other:ScratchColumn (kernel column on VmReservation; engine storage, not std heap) | 2 |
 | other:UiParseReport (Vec&lt;(usize,u16,String)> x2) | 2 |
 | other:std-internal Vec&lt;u16> (Windows path conversion) | 2 |
 | other:std::alloc::alloc_zeroed | 1 |
 | other:SparseMap&lt;Vec> (boyko_utils SparseMap: 3 x Vec, plus one inner Vec per active pattern) | 1 |
 | other:VisitedSet (Vec&lt;u64> inside; iters/query/relation/traverse_iter.rs:51) | 1 |
 | other:RawBlob (hand-rolled std::alloc alloc/realloc/dealloc byte arena) | 1 |
+| other:VmColumn (kernel column on VmReservation; engine storage, not std heap) | 1 |
 | VecDeque | 1 |
 | other:std::alloc::alloc raw block | 1 |
 | other:std-internal Vec&lt;u16> (Windows path -> UTF-16 inside File::open) | 1 |
@@ -323,9 +335,9 @@ Sum of the groups' active rows = 2350 = the data-line count of `runtime-data-led
 
 ### Active rows by kind, growth, addr_cached
 
-- **kind:** local 1557, field 442, return 239, param 72, static 40
-- **growth:** once 1956, highwater 173, unknown 125, perframe 96
-- **addr_cached:** no 2271, yes 79
+- **kind:** local 1557, field 449, return 239, param 72, static 40
+- **growth:** once 1956, highwater 180, unknown 125, perframe 96
+- **addr_cached:** no 2278, yes 79
 
 **Double representation, by design.** 23 rows are *use sites* of one of our own heap-holding types (SmallList4, SparseMap, LiveBitmap, VisitedSet, SparseSlotMap, UiParseReport). Those types' own `Vec` fields are rows too, in the group that owns the type. Migrating the type retires both; count that storage once.
 
@@ -335,37 +347,37 @@ Every `owning_entity` the active rows imply, with the components, dense componen
 
 |  | component | dense-component | enable-state | relation | event | resource-column | system-scratch | scope-arena | kernel-internal | diagnostics | out-of-scope:compile-time | out-of-scope:os-owned | out-of-scope:test-only | out-of-scope:third-party | total |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| body | . | 12 | . | . | . | . | . | . | . | . | . | . | . | . | 12 |
+| body | . | 13 | . | . | . | . | . | . | . | . | . | . | . | . | 13 |
 | soft-body | . | 36 | . | . | . | . | . | . | . | . | . | . | . | . | 36 |
 | particle | . | 2 | . | . | . | . | . | . | . | . | . | . | . | . | 2 |
 | mesh | . | 3 | . | 1 | . | . | 18 | . | . | . | . | . | . | . | 22 |
 | material | . | 2 | . | . | . | 1 | 11 | . | . | . | . | . | . | . | 14 |
-| asset | 4 | 2 | . | . | . | . | . | . | . | . | . | . | . | . | 6 |
+| asset | 4 | 4 | . | . | . | . | . | . | . | . | . | . | . | . | 8 |
 | light | . | . | 8 | . | . | 2 | . | . | . | . | . | . | . | . | 10 |
 | widget | 14 | . | . | 4 | 2 | . | . | . | . | . | . | . | . | . | 20 |
 | text-run | . | . | . | . | . | . | 3 | . | . | . | . | . | . | . | 3 |
 | window | 4 | 2 | . | . | 2 | . | 5 | . | . | . | . | . | . | . | 13 |
 | observer | . | . | . | 5 | . | . | . | . | . | . | . | . | . | . | 5 |
 | prefab | 4 | . | . | . | . | . | . | . | . | . | . | . | . | . | 4 |
-| system | 6 | 2 | . | 18 | 8 | 8 | 313 | . | 19 | . | . | . | . | . | 374 |
+| system | 6 | 2 | . | 18 | 8 | 8 | 316 | . | 19 | . | . | . | . | . | 377 |
 | schedule | . | . | . | . | 4 | . | 20 | . | 78 | . | . | . | . | . | 102 |
 | pool | . | . | . | . | . | . | . | 10 | 30 | 2 | . | . | . | . | 42 |
 | relation-endpoint | . | . | . | 3 | . | . | . | . | . | . | . | . | . | . | 3 |
-| none | . | . | . | . | . | 144 | . | . | 137 | 299 | 1021 | 31 | 40 | 10 | 1682 |
-| **total** | **32** | **61** | **8** | **31** | **16** | **155** | **370** | **10** | **264** | **301** | **1021** | **31** | **40** | **10** | **2350** |
+| none | . | . | . | . | . | 156 | . | . | 137 | 288 | 1021 | 31 | 40 | 10 | 1683 |
+| **total** | **32** | **64** | **8** | **31** | **16** | **167** | **373** | **10** | **264** | **290** | **1021** | **31** | **40** | **10** | **2357** |
 
 Mappings forced by the closed list, each recorded on its rows: texture -> `material`; system set -> `system`; scene node -> `system` (the consumer of the ChildOf detach event); boid -> `particle`. Entity types this ledger introduces: **`observer`**, **`prefab`** (rev 1) and **`asset`** (rev 2). **`window`** is a real entity type in rev 2.
 
-### body (12 rows)
+### body (13 rows)
 
 **Rigid body** (and the demo's 2D balls). A body IS an entity. Rev 2 follows the physics design and its decisions:
 - **identity** is a stable slot of the `PhysicsBody` dense group, not the archetype row (D1). The slot never moves, so no per-body datum can be renamed by a despawn (latent defect A, section Defects);
-- **dense-component** `BodyGate {flags, asleep, below}`: the sleep latch and its debounce counter (rows `boyko_physics/src/resources.rs:3057/3062` and their constructors `:3104/3105`, writer change W3). main:docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md:304 "| `BodyGate` {flags, asleep, below} | group column, untracked | body |". The rev-1 enable-state `Sleeping` and component `SleepCounter` are withdrawn, and with them KF-16 and KF-18;
-- **resource-column** `PairCache` (warm impulses + SAT axis), keyed by body slots and double-buffered, with the D15 `fresh_step` skip (gap 2; rows `solver/warm_start.rs:214`, `narrowphase/axis_cache.rs:128`). main:docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md:307 "| `PairCache` (warm impulses + axis) | persistent resource columns, double-buffered | — | D5/D15 |";
+- **dense-component** `BodyGate {flags, asleep, below}`: the sleep latch and its debounce counter (rows `boyko_physics/src/resources.rs:3073/3078` and their constructors `:3104/3105`, writer change W3). main:docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md:304 "| `BodyGate` {flags, asleep, below} | group column, untracked | body |". The rev-1 enable-state `Sleeping` and component `SleepCounter` are withdrawn, and with them KF-16 and KF-18;
+- **resource-column** `PairCache` (warm impulses + SAT axis), keyed by body slots and double-buffered, with the D15 `fresh_step` skip (gap 2; rows `solver/warm_start.rs:221`, `narrowphase/axis_cache.rs:179`). main:docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md:307 "| `PairCache` (warm impulses + axis) | persistent resource columns, double-buffered | — | D5/D15 |";
 - **events**: contact and sensor enter/exit, sleep/wake transitions (physics Q1, Q3). No `Touching` relation and no `Contact` component;
 - **dense-component** Position / Velocity / Radius for the demo balls (rows `boyko_demo/src/sim/resources.rs:191-214`), KF-19 and KF-20 (= physics K3 and K4).
 
-Not entities: contact pairs, manifolds, islands, colours and grid cells (main:docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md:291 "- No pair, contact or island entities.").
+Not entities: contact pairs, manifolds, islands, colours and grid cells (main:docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md:291 "- No pair, contact or island entities."). Rev 4 adds one row from the interim fix for defect A: the gather's added-row list (`row_identity.rs:305`), whose datum is the body's own freshness under the design's D15 (main:docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md:264 "### D15 (new, W2): Warm-start freshness is `fresh_step`, not SEEN"), a column of the body's group rather than a side list keyed by a row.
 
 | form | row | owner | container&lt;elem&gt; | class | group |
 |---|---|---|---|---|---|
@@ -377,10 +389,11 @@ Not entities: contact pairs, manifolds, islands, colours and grid cells (main:do
 | dense-component | crates/boyko_demo/src/sim/resources.rs:212 `vel: Vec::with_capacity(max_balls),` | BallSnapshot (with_capacity initializer) | `Vec<(see field)>` | F | [app-demo](ledger/app-demo.md) |
 | dense-component | crates/boyko_demo/src/sim/resources.rs:213 `radius: Vec::with_capacity(max_balls),` | BallSnapshot (with_capacity initializer) | `Vec<(see field)>` | F | [app-demo](ledger/app-demo.md) |
 | dense-component | crates/boyko_demo/src/sim/resources.rs:214 `touched: Vec::with_capacity(max_balls),` | BallSnapshot (with_capacity initializer) | `Vec<(see field)>` | F | [app-demo](ledger/app-demo.md) |
-| dense-component | crates/boyko_physics/src/resources.rs:3057 `asleep: Vec<bool>,` | IslandSleep::asleep | `Vec<bool>` | E | [physics-scene-math](ledger/physics-scene-math.md) |
-| dense-component | crates/boyko_physics/src/resources.rs:3062 `below_count: Vec<u16>,` | IslandSleep::below_count | `Vec<u16>` | E | [physics-scene-math](ledger/physics-scene-math.md) |
-| dense-component | crates/boyko_physics/src/resources.rs:3104 `asleep: Vec::with_capacity(rows),` | IslandSleep::with_capacity (-> IslandSleep::asleep) | `Vec<bool>` | B | [physics-scene-math](ledger/physics-scene-math.md) |
-| dense-component | crates/boyko_physics/src/resources.rs:3105 `below_count: Vec::with_capacity(rows),` | IslandSleep::with_capacity (-> IslandSleep::below_count) | `Vec<u16>` | B | [physics-scene-math](ledger/physics-scene-math.md) |
+| dense-component | crates/boyko_physics/src/resources.rs:3073 `asleep: Vec<bool>,` | IslandSleep::asleep | `Vec<bool>` | E | [physics-scene-math](ledger/physics-scene-math.md) |
+| dense-component | crates/boyko_physics/src/resources.rs:3078 `below_count: Vec<u16>,` | IslandSleep::below_count | `Vec<u16>` | E | [physics-scene-math](ledger/physics-scene-math.md) |
+| dense-component | crates/boyko_physics/src/resources.rs:3127 `asleep: Vec::with_capacity(rows),` | IslandSleep::with_capacity (-> IslandSleep::asleep) | `Vec<bool>` | B | [physics-scene-math](ledger/physics-scene-math.md) |
+| dense-component | crates/boyko_physics/src/resources.rs:3128 `below_count: Vec::with_capacity(rows),` | IslandSleep::with_capacity (-> IslandSleep::below_count) | `Vec<u16>` | B | [physics-scene-math](ledger/physics-scene-math.md) |
+| dense-component | crates/boyko_physics/src/row_identity.rs:305 `added_rows: ScratchColumn<u32>,` | RowIdentity::added_rows | `other:ScratchColumn (kernel column on VmReservation; engine storage, not std heap)<u32 (row index)>` | F | [physics-scene-math](ledger/physics-scene-math.md) |
 
 ### soft-body (36 rows)
 
@@ -437,16 +450,16 @@ Not entities: contact pairs, manifolds, islands, colours and grid cells (main:do
 ### mesh (22 rows)
 
 **Mesh** (an asset). Under engine decision Q1 an asset IS an entity (main:docs/unification/ENGINE-RUNTIME-ECS-DECISIONS.md:23 "| Q1 | Assets as entities | **(a) Assets are entities** | yes |"). Rev 3 applies it to every asset row (item 2):
-- **dense-component**: the GPU value is a column of the mesh K3 group with `RELEASE = Deferred` (main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:216 "- **Value and release.** The asset value is a column of a **K3 dense group with `RELEASE = Deferred`** on the asset"). The handle lists collected only to walk the store (`gpu_upload.rs:216`, `mesh_assets.rs:582`) disappear into an in-place walk of the group, and a fill-rejected or retired value waits in the group's `dying` list for the horizon release K6' (`mesh_assets.rs:712`; KF-49);
+- **dense-component**: the GPU value is a column of the mesh K3 group with `RELEASE = Deferred` (main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:216 "- **Value and release.** The asset value is a column of a **K3 dense group with `RELEASE = Deferred`** on the asset"). The handle lists collected only to walk the store (`gpu_upload.rs:277`, `mesh_assets.rs:582`) disappear into an in-place walk of the group, and a fill-rejected or retired value waits in the group's `dying` list for the horizon release K6' (`mesh_assets.rs:714`; KF-49);
 - **relation**: the refcount is a count-only relation, instance -> asset (`asset_refs.rs:99`; KF-48, engine EK15b: main:docs/unification/ENGINE-RUNTIME-ECS-DECISIONS.md:35 "19 copies of 7 data become 7. Refcounting becomes a count-only relation (EK15b), and asset change");
 - **system-scratch**: the decode payloads (`mesh_data.rs:28/30` and the glb / obj loader buffers) exist only from decode to upload. They sit on the load system's ScratchColumn lanes (KF-09), and the `Staged<A::Cpu>` component on the asset entity holds a Copy span into them;
 - the SDF bake grids and the TLAS instance list stay **system-scratch**, and the mesh index byte images are system-scratch (gap 4).
 
 | form | row | owner | container&lt;elem&gt; | class | group |
 |---|---|---|---|---|---|
-| dense-component | crates/boyko_render/src/gpu_upload.rs:216 `let mut pending: Vec<Handle<MeshGpu>> = Vec::with_capacity(assets.len());` | backfill_vb_geometry_slots::pending | `Vec<Handle<MeshGpu>>` | B | [render](ledger/render.md) |
+| dense-component | crates/boyko_render/src/gpu_upload.rs:277 `let mut pending: Vec<Handle<MeshGpu>> = Vec::with_capacity(assets.len());` | backfill_vb_geometry_slots::pending | `Vec<Handle<MeshGpu>>` | B | [render](ledger/render.md) |
 | dense-component | crates/boyko_render/src/mesh_assets.rs:582 `let handles: Vec<Handle<MeshGpu>> = self.iter().map(\|(h, _)\| h).collect();` | MeshAssetsExt::destroy::handles | `Vec<Handle<MeshGpu>>` | B | [render](ledger/render.md) |
-| dense-component | crates/boyko_render/src/mesh_assets.rs:712 `orphans: Vec<(MeshGpu, u64)>,` | OrphanedMeshGpu::orphans | `Vec<(MeshGpu, u64)>` | R | [render](ledger/render.md) |
+| dense-component | crates/boyko_render/src/mesh_assets.rs:714 `orphans: Vec<(MeshGpu, u64)>,` | OrphanedMeshGpu::orphans | `Vec<(MeshGpu, u64)>` | R | [render](ledger/render.md) |
 | relation | crates/boyko_scene/src/asset_refs.rs:99 `deltas: Vec<RefDelta>,` | RefcountDeltas::deltas | `Vec<RefDelta>` | R | [physics-scene-math](ledger/physics-scene-math.md) |
 | system-scratch | crates/boyko_render/src/loaders/glb.rs:786 `) -> Result<(Vec<Vertex>, Vec<u32>), AssetError> {` | decode_primitive -> Result&lt;(Vec&lt;Vertex>, Vec&lt;u32>), AssetError> | `Vec<Vertex and u32 (a pair of Vecs)>` | B | [render](ledger/render.md) |
 | system-scratch | crates/boyko_render/src/loaders/glb.rs:831 `let mut vertices = Vec::with_capacity(pos.count);` | decode_primitive::vertices | `Vec<Vertex>` | B | [render](ledger/render.md) |
@@ -488,9 +501,9 @@ Not entities: contact pairs, manifolds, islands, colours and grid cells (main:do
 | system-scratch | crates/boyko_render/src/loaders/png_texture.rs:50 `let mut out = Vec::with_capacity(image.pixels.len() / 2);` | narrow_to_rgba8::out (16-bit arm) | `Vec<u8>` | B | [render](ledger/render.md) |
 | system-scratch | crates/boyko_render/src/texture_data.rs:28 `pub rgba8: Vec<u8>,` | TextureData::rgba8 | `Vec<u8>` | B | [render](ledger/render.md) |
 
-### asset (6 rows)
+### asset (8 rows)
 
-**Asset** (NEW in rev 2, writer change W4; widened in rev 3): an asset entity of a kind the closed list does not name, or a datum that spans several asset kinds. Fonts and sprite sheets are asset entities (main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:513 "| mesh, material, texture, font, sprite-sheet, animation-clip, UI document | **yes, asset entities (Q1a)** |"), and `FontTable::fonts` / `UiSheetTable::sheets` are components on them; the glyph tables stay write-once CSR bytes on resource-owned columns. Rev 3 (item 2) adds the kind-generic rows of the asset kernel: the `Pinned` marker (`assets.rs:206`, component), the `Staged<A::Cpu>` staging record (`staging.rs:58`, component: main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:647 "| `AssetStaging<A>` | NonSend Vec | component `Staged<A::Cpu>` on the asset entity | AS5 |"), and the retire pass over the `dying` lists (`asset_refcount.rs:556`, `asset_refs.rs:149`, dense-component: main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:649 "| `DeferredFree` **(rev 2)** | Resource Vec | deleted: K3 `dying` + K6′ horizon (ED16) | AS2 |").
+**Asset** (NEW in rev 2, writer change W4; widened in rev 3): an asset entity of a kind the closed list does not name, or a datum that spans several asset kinds. Fonts and sprite sheets are asset entities (main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:513 "| mesh, material, texture, font, sprite-sheet, animation-clip, UI document | **yes, asset entities (Q1a)** |"), and `FontTable::fonts` / `UiSheetTable::sheets` are components on them; the glyph tables stay write-once CSR bytes on resource-owned columns. Rev 3 (item 2) adds the kind-generic rows of the asset kernel: the `Pinned` marker (`assets.rs:206`, component), the `Staged<A::Cpu>` staging record (`staging.rs:58`, component: main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:647 "| `AssetStaging<A>` | NonSend Vec | component `Staged<A::Cpu>` on the asset entity | AS5 |"), and the retire pass over the `dying` lists (`asset_refcount.rs:575`, `asset_refs.rs:149`, dense-component: main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:649 "| `DeferredFree` **(rev 2)** | Resource Vec | deleted: K3 `dying` + K6′ horizon (ED16) | AS2 |"). Rev 4 (W2) adds the other half of the retire pass: the host buffer the runner parks and passes into it (`host.rs:96` and its constructor `:271`) carries the same datum as the parameter `asset_refcount.rs:575`, so it is dense-component on the asset entity too - one datum, one form.
 
 | form | row | owner | container&lt;elem&gt; | class | group |
 |---|---|---|---|---|---|
@@ -498,7 +511,9 @@ Not entities: contact pairs, manifolds, islands, colours and grid cells (main:do
 | component | crates/boyko_ecs/src/ecs/core/asset/staging.rs:58 `queue: Vec<Staged<A>>,` | AssetStaging&lt;A>::queue | `Vec<Staged<A> { handle, cpu: A::Cpu } (not Copy)>` | R | [ecs-services](ledger/ecs-services.md) |
 | component | D:/wt/ui:crates/boyko_ui/src/sprite.rs:257 `sheets: Vec<UiSheet>,` | UiSheetTable::sheets | `Vec<UiSheet>` | R | [ui-lane](ledger/ui-lane.md) |
 | component | D:/wt/ui:crates/boyko_ui/src/text/font.rs:139 `fonts: Vec<FontEntry>,` | FontTable::fonts | `Vec<FontEntry>` | R | [ui-lane](ledger/ui-lane.md) |
-| dense-component | crates/boyko_render/src/asset_refcount.rs:556 `scratch: &mut Vec<FreeEntry>,` | retire_deferred_frees(scratch) - backing field is boyko_app HostState::retire_scratch (boyko_app/src/host.rs:96) | `Vec<FreeEntry>` | F | [render](ledger/render.md) |
+| dense-component | crates/boyko_app/src/host.rs:96 `pub(crate) retire_scratch: Vec<FreeEntry>,` | WindowHost::retire_scratch | `Vec<FreeEntry>` | F | [app-demo](ledger/app-demo.md) |
+| dense-component | crates/boyko_app/src/host.rs:271 `retire_scratch: Vec::new(),` | WindowHost::retire_scratch (WindowHost::boot initializer) | `Vec<FreeEntry>` | F | [app-demo](ledger/app-demo.md) |
+| dense-component | crates/boyko_render/src/asset_refcount.rs:575 `scratch: &mut Vec<FreeEntry>,` | retire_deferred_frees(scratch) - backing field is boyko_app HostState::retire_scratch (boyko_app/src/host.rs:96) | `Vec<FreeEntry>` | F | [render](ledger/render.md) |
 | dense-component | crates/boyko_scene/src/asset_refs.rs:149 `entries: Vec<FreeEntry>,` | DeferredFree::entries | `Vec<FreeEntry>` | R | [physics-scene-math](ledger/physics-scene-math.md) |
 
 ### light (10 rows)
@@ -603,7 +618,7 @@ Not entities: contact pairs, manifolds, islands, colours and grid cells (main:do
 | component | crates/boyko_ecs/src/ecs/core/clone/prefab.rs:284 `components: Vec<PrefabComponent>,` | Prefab::components | `Vec<PrefabComponent>` | R | [ecs-storage](ledger/ecs-storage.md) |
 | component | crates/boyko_ecs/src/ecs/core/clone/prefab.rs:364 `committed: Vec<PrefabComponent>,` | BlobGuard::committed | `Vec<PrefabComponent>` | B | [ecs-storage](ledger/ecs-storage.md) |
 
-### system (374 rows)
+### system (377 rows)
 
 **System** (including system sets and condition systems, because the closed list has no set entity). This entity type exists only under KF-14 (system entities). Rows imply:
 - a **dense-component** `SystemBox`: the executor caches row addresses, so the slots must never move;
@@ -614,7 +629,7 @@ Not entities: contact pairs, manifolds, islands, colours and grid cells (main:do
 
 **Decided in rev 2** (section Decisions): systems are hidden entities; the compiled executor tables stay kernel-internal, so the per-frame dispatch path does not change. The fallback recorded on every row (kernel-internal on Schedule-owned storage) is what the overturn gate would restore.
 
-By group and form: app-demo system-scratch 30, codec-tools system-scratch 38, ecs-schedule component 6, ecs-schedule dense-component 2, ecs-schedule kernel-internal 19, ecs-schedule relation 18, ecs-schedule system-scratch 8, ecs-services event 7, ecs-services system-scratch 8, ecs-storage system-scratch 18, physics-scene-math event 1, physics-scene-math system-scratch 43, render resource-column 8, render system-scratch 34, rhi system-scratch 34, ui-input system-scratch 14, ui-lane system-scratch 86.
+By group and form: app-demo system-scratch 28, codec-tools system-scratch 38, ecs-schedule component 6, ecs-schedule dense-component 2, ecs-schedule kernel-internal 19, ecs-schedule relation 18, ecs-schedule system-scratch 8, ecs-services event 7, ecs-services system-scratch 8, ecs-storage system-scratch 18, physics-scene-math event 1, physics-scene-math system-scratch 48, render resource-column 8, render system-scratch 34, rhi system-scratch 34, ui-input system-scratch 14, ui-lane system-scratch 86.
 
 The rows in entity forms on this owner:
 
@@ -636,8 +651,8 @@ The rows in entity forms on this owner:
 | event | crates/boyko_ecs/src/ecs/core/events/event_buffer.rs:243 `pub(crate) lanes: Box<[ThreadLanePair<E>]>,` | EventBuffer&lt;E>::lanes | `Box<[T]><ThreadLanePair<E> (128 B, align 64)>` | R | [ecs-services](ledger/ecs-services.md) |
 | event | crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs:221 `let buffer = Box::new(EventBuffer::<E>::new(cfg)?);` | EventDispatcher::preregister::&lt;E> | `Box<T><EventBuffer<E>>` | R | [ecs-services](ledger/ecs-services.md) |
 | event | crates/boyko_scene/src/propagation.rs:133 `detached: Vec<Entity>,` | TransformPropagationScratch::detached | `Vec<Entity>` | R | [physics-scene-math](ledger/physics-scene-math.md) |
-| relation | crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:161 `pub(crate) system_conditions: Vec<Vec<BoolSystem>>,` | Schedule::system_conditions | `Vec<Vec<Box<dyn System<Out = bool>>>>` | K | [ecs-schedule](ledger/ecs-schedule.md) |
-| relation | crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:172 `pub(crate) set_conditions: Vec<SetConditionEntry>,` | Schedule::set_conditions | `Vec<SetConditionEntry>` | K | [ecs-schedule](ledger/ecs-schedule.md) |
+| relation | crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:172 `pub(crate) system_conditions: Vec<Vec<BoolSystem>>,` | Schedule::system_conditions | `Vec<Vec<Box<dyn System<Out = bool>>>>` | K | [ecs-schedule](ledger/ecs-schedule.md) |
+| relation | crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:183 `pub(crate) set_conditions: Vec<SetConditionEntry>,` | Schedule::set_conditions | `Vec<SetConditionEntry>` | K | [ecs-schedule](ledger/ecs-schedule.md) |
 | relation | crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:116 `pub(crate) set_members: HashMap<SystemSetId, Vec<SystemKey>>,` | ScheduleBuilder::set_members | `HashMap<SystemSetId -> Vec<SystemKey>>` | B | [ecs-schedule](ledger/ecs-schedule.md) |
 | relation | crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:122 `pub(crate) set_ordering: Vec<SetOrderEdge>,` | ScheduleBuilder::set_ordering | `Vec<SetOrderEdge>` | B | [ecs-schedule](ledger/ecs-schedule.md) |
 | relation | crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:127 `pub(crate) set_parents: HashMap<SystemSetId, Vec<SystemSetId>>,` | ScheduleBuilder::set_parents | `HashMap<SystemSetId -> Vec<SystemSetId>>` | B | [ecs-schedule](ledger/ecs-schedule.md) |
@@ -686,17 +701,17 @@ By group and form: app-demo kernel-internal 3, ecs-schedule kernel-internal 3, e
 | relation | crates/boyko_ecs/src/ecs/core/hierarchy/mod.rs:159 `Self(vec![child])` | Children::with_one | `Vec<Entity>` | E | [ecs-services](ledger/ecs-services.md) |
 | relation | crates/boyko_ecs/src/ecs/core/relationship/collection.rs:85 `Vec::with_capacity(cap)` | &lt;Vec&lt;Entity> as RelationshipSourceCollection>::with_capacity | `Vec<Entity>` | E | [ecs-services](ledger/ecs-services.md) |
 
-### none (1682 rows)
+### none (1683 rows)
 
 **none.** Singleton tables (resource-column), the kernel's own bookkeeping (kernel-internal) and out-of-scope rows. The builder of every group asserted that `none` appears only with these forms.
 
-Forms: out-of-scope:compile-time 1021, diagnostics 299, resource-column 144, kernel-internal 137, out-of-scope:test-only 40, out-of-scope:os-owned 31, out-of-scope:third-party 10.
+Forms: out-of-scope:compile-time 1021, diagnostics 288, resource-column 156, kernel-internal 137, out-of-scope:test-only 40, out-of-scope:os-owned 31, out-of-scope:third-party 10.
 
 ### The physics entity model (physics-scene-math group, with rev-2 notes)
 
 **Body identity (SolverScratch.bodies gather, BodyIndex)** (rows: none (already ScratchColumn); decides rows 0-1)
 
-- *Entity model:* A body IS an entity. BodyIndex is its position in the archetype-row concatenation of one gather, valid within one pass only (boyko_physics/src/systems.rs:1118 "Correct UNDER the "no structural change between gather and apply" invariant:"). Anything keyed by BodyIndex across frames (IslandSleep's latch today) is keyed by something that is not an identity; a swap_remove (boyko_ecs/src/ecs/core/archetype/archetype.rs:1268 "self.entity_ids.swap_remove(removed_unit_index.0);") renames rows.
+- *Entity model:* A body IS an entity. BodyIndex is its position in the archetype-row concatenation of one gather, valid within one pass only (boyko_physics/src/systems.rs:1138 "Correct UNDER the "no structural change between gather and apply" invariant:"). Anything keyed by BodyIndex across frames (IslandSleep's latch today) is keyed by something that is not an identity; a swap_remove (boyko_ecs/src/ecs/core/archetype/archetype.rs:1268 "self.entity_ids.swap_remove(removed_unit_index.0);") renames rows.
 - *ECS form:* component (Table RigidBody / RigidBodyMass / Collider) + system-scratch gather mirror, which both plans keep as a cache optimisation (D:/wt/joltab/docs/ARCH-AUDIT-ECS-DATA-REMEDIATION.md:24 "**keep the gather, but move its buffer + all physics bulk onto `ComponentPool`**"). After Stage P the dense slot becomes the stable per-body index (D:/wt/joltab/docs/DENSE-COMPONENTS-PLAN.md:19 "Live slots never move."), with determinism downgraded to a fixed op sequence (D:/wt/joltab/docs/DENSE-COMPONENTS-PLAN.md:56 "coloring DEPENDS on absolute body slot values").
 - *Hot-loop cost:* Unchanged by this ledger. The gather turns scattered body_a/body_b reads into a dense mirror; per-body durable extras (sleep) ride the same walk at 2-3 bytes per row.
 - *Missing kernel feature:* KR-1 row->entity datum (D:/claude/BoykoEngine/docs/physics/ADVANCED-PHYSICS-DESIGN-SPACE.md:183 "**Kernel request KR-1**: an entity datum in `Query`") for any cross-frame per-body data that is not a component; KF-enable-write-in-iteration for per-row bits.
@@ -704,7 +719,7 @@ Forms: out-of-scope:compile-time 1021, diagnostics 299, resource-column 144, ker
 
 **IslandSleep** (rows: rows 0-7)
 
-- *Entity model:* Latch and debounce are BODY state (entity); frozen/energy are per-ISLAND per-step derivations. An island is not an entity: ids are volatile (boyko_physics/src/resources.rs:3008 "Island ids are NOT stable: [`ConstraintGraph::build`] re-derives them every frame") and merge/split has no surviving identity.
+- *Entity model:* Latch and debounce are BODY state (entity); frozen/energy are per-ISLAND per-step derivations. An island is not an entity: ids are volatile (boyko_physics/src/resources.rs:3017 "Island ids are NOT stable: [`ConstraintGraph::build`] re-derives them every frame") and merge/split has no surviving identity.
 - *ECS form:* asleep -> enable-state Sleeping (plan D:/wt/joltab/docs/ARCH-AUDIT-ECS-DATA-REMEDIATION.md:30 "sleep → `Sleeping` component + `EnableColumn` paged-bitset tag (O(1) flip, no migration churn)"); below_count -> component; frozen_islands/energy -> system-scratch.
 - *Hot-loop cost:* Solver: none - it reads the per-step awake mask. Gather: +1 paged bit test and +2 B per row. Apply: a bit write only on a latch flip. Removes a latent defect: today the latch follows the row, not the body.
 - *Missing kernel feature:* KF-enable-write-in-iteration; KF-dense-enable-iteration only if bodies go dense.
@@ -722,7 +737,7 @@ Forms: out-of-scope:compile-time 1021, diagnostics 299, resource-column 144, ker
 - *Entity model:* Per-step solver working set: contact slots in colour order, body mirrors, graph CSR. Not entities.
 - *ECS form:* system-scratch (resource-owned ScratchColumns), already done by Stage 4.
 - *Hot-loop cost:* Stage 4 measured no end-to-end cost; the id bands exist only because the id doubles as the cache-set stagger key (boyko_ecs/src/ecs/constants.rs:214 "pub const fn pool_base_stagger(component_id: usize) -> usize {").
-- *Missing kernel feature:* KF-column-id-per-type-with-explicit-stagger would replace the hand-maintained bands and the floor coupling (boyko_physics/src/scratch_ids.rs:541 "const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;").
+- *Missing kernel feature:* KF-column-id-per-type-with-explicit-stagger would replace the hand-maintained bands and the floor coupling (boyko_physics/src/scratch_ids.rs:685 "const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;").
 
 **ContactPairs / Manifolds (is a contact pair an entity?)** (rows: none (already ScratchColumn))
 
@@ -746,16 +761,16 @@ Forms: out-of-scope:compile-time 1021, diagnostics 299, resource-column 144, ker
 - *Hot-loop cost:* Negligible (churn-small queues); DeferredFree's drain goes from O(n^2) to O(n).
 - *Missing kernel feature:* KF-lossless-hook-event; KF-column-id-per-type-with-explicit-stagger (naming: a kernel per-type mint rather than the asset module's).
 
-**PairCache (WarmStartTable + BoxAxisCache) [rev2 GAP 2]** (rows: solver/warm_start.rs:214, narrowphase/axis_cache.rs:128 (rev2 rows))
+**PairCache (WarmStartTable + BoxAxisCache) [rev2 GAP 2]** (rows: solver/warm_start.rs:221, narrowphase/axis_cache.rs:179 (rev2 rows))
 
 - *Entity model:* Not an entity: a contact pair has two owners and pair entities are rejected (main:docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md:159 "### D5: Per-pair persistent state is one resource-owned, double-buffered `PairCache`, keyed by slots (preserved)"). The datum is per-pair and DURABLE across one step boundary.
 - *ECS form:* resource-column PairCache keyed by the stable dense-group body slot, double-buffered, fresh_step skip (main:docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md:268 "- Every `PairCache` lookup (S3 axis read, S5 warm seed) is skipped when `fresh_step[a] == step \|\| fresh_step[b] == step`.").
-- *Hot-loop cost:* Equal: same key width, same probe; the read-old/write-new split lets narrowphase run parallel (joltab:crates/boyko_physics/src/systems.rs:422 "axis_cache.set(a, b, c.reference_axis);").
+- *Hot-loop cost:* Equal: same key width, same probe; the read-old/write-new split lets narrowphase run parallel (joltab:crates/boyko_physics/src/systems.rs:442 "axis_cache.set(a, b, c.reference_axis);").
 - *Missing kernel feature:* The stable body slot (physics D1 / K3 dense group) - without it the key stays the gather row (DC-PAIR-1).
 
 ## Kernel features
 
-The groups and lanes proposed 77 kernel features between them. Deduplicated, they form **49 features**: the 43 of rev 1, KF-44 to KF-46 from the gaps, KF-47 from the reflect lane (the ui-lane needed no new one), and KF-48 / KF-49 from rev 3 (engine Q1). Each is a first-class `boyko_ecs` capability (or a memory-library / pool capability below it) that every crate uses the same way. **Status** says what rev 2 did with it: `active`, `decided` (an open fork closed in section Decisions), `withdrawn` (no user left), `rejected` (a design decision replaced it), `subsumed` / `superseded` (another feature covers it). **K** names the physics design's kernel feature that realises it, **EK** the engine design's. **Rows** are active rows whose form needs the feature.
+The groups and lanes proposed 77 kernel features between them. Deduplicated, they form **49 features**: the 43 of rev 1, KF-44 to KF-46 from the gaps, KF-47 from the reflect lane (the ui-lane needed no new one), and KF-48 / KF-49 from rev 3 (engine Q1). Each is a first-class `boyko_ecs` capability (or a memory-library / pool capability below it) that every crate uses the same way. **Status** says what rev 2 did with it: `active`, `decided` (an open fork closed in section Decisions), `withdrawn` (no user left), `rejected` (a design decision replaced it), `subsumed` / `superseded` (another feature covers it). **K** names the physics design's kernel feature that realises it, **EK** the engine design's. **Rows** are active rows whose form needs the feature; where one coordinate carries two rows, only the row whose destination names the feature counts (W15).
 
 | id | feature | status | physics | K | EK | rows | rows by group |
 |---|---|---|---|---|---|---|---|
@@ -764,10 +779,10 @@ The groups and lanes proposed 77 kernel features between them. Deduplicated, the
 | KF-03 | Owned span / ragged ranges on kernel columns | active | yes | K7 | EK14 | 40 | ecs-storage 4, physics-scene-math 36 |
 | KF-04 | Durable resource column (lifetime + serialization) | active | yes | - | - | 10 | physics-scene-math 6, ui-lane 4 |
 | KF-05 | World scratch frames (re-entrant LIFO scratch for &mut paths) | decided | no | - | - | 15 | ecs-storage 15 |
-| KF-06 | Byte column (bulk append + fmt::Write) | active | no | - | - | 13 | ecs-services 6, ui-input 5, ui-lane 2 |
+| KF-06 | Byte column (bulk append + fmt::Write) | active | no | - | - | 12 | ecs-services 5, ui-input 5, ui-lane 2 |
 | KF-07 | Erased record column (heterogeneous drop-aware records) | active | no | - | - | 6 | ecs-schedule 6 |
 | KF-08 | Serialize seam on kernel columns | active | no | - | - | 9 | codec-tools 8, ecs-services 1 |
-| KF-09 | Loader decode context | active | no | - | - | 65 | codec-tools 18, ecs-services 3, render 44 |
+| KF-09 | Loader decode context | active | no | - | - | 64 | codec-tools 18, ecs-services 2, render 44 |
 | KF-10 | Structured asset error | active | no | - | - | 77 | ecs-services 3, render 74 |
 | KF-11 | Relation reverse index on kernel storage (K7 spans) | decided | yes | K7 | EK15c | 4 | ecs-services 3, ecs-storage 1 |
 | KF-12 | Multi-target relation (OPTIONAL) | active | no | - | - | 18 | ecs-schedule 18 |
@@ -809,7 +824,7 @@ The groups and lanes proposed 77 kernel features between them. Deduplicated, the
 | KF-48 | Count-only relation (asset refcount) | active | no | - | EK15b | 1 | physics-scene-math 1 |
 | KF-49 | Deferred dense-group release with a horizon (K6') | active | conditional | K6 | K6' (engine) | 4 | physics-scene-math 1, render 3 |
 
-Distinct active rows that need at least one kernel feature: **657**.
+Distinct active rows that need at least one kernel feature: **656** (656 distinct coordinates in the row lists). Counted per ROW, not per coordinate: one coordinate, `crates/boyko_ecs/src/ecs/core/asset/server.rs:127`, carries two active rows, and only the class-B file-bytes row (`AssetServer::load`) names a feature in its destination (KF-06 and KF-09); the class-T std wide-path row on the same line goes to `out-of-scope (std internals)` and needs none. Counting both gave 657 here and 13 / 65 above until the fourth recheck (W15).
 
 ### The physics design's K1-K7, cross-referenced
 
@@ -831,11 +846,12 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Status:** decided. **Physics needs it:** yes. **Kind:** capability. **Physics design:** K1. **Engine design:** EK1.
 - **Rev 2:** Minting route decided (section Decisions): the physics design's K1 storage cohorts, which the engine design adopts as EK1: a registry-free scratch band that does not consume component ids, with a contiguous stagger run per cohort. The ui-lane reached the same answer (UL-D6). main:docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md:466 "\| K1 \| Storage cohorts \| `ScratchCohort::reserve(width)`: registry-free scratch pools, contiguous stagger run. `DenseGroup` registration mints column" ; main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:893 "\| EK1 **(rev 2)** \| **= physics K1 storage cohorts**, plus `impl Default for ScratchColumn<T>` (a width-1".
 - **Rev 3:** Rev 3: users added by the ui-lane census outside boyko_ui (item 1) and the numeric diagnostics captures re-formed to system-scratch (item 4).
+- **Rev 4:** Rev 4: seven more users, all already ScratchColumn in the tree - the physics row identity map and the two carry buffers the interim defect-A fix added (`row_identity.rs:301/303/305/307/309`, `resources.rs:3103`, `narrowphase/axis_cache.rs:193`).
 - **Adds to the kernel:** Any crate can build a `ScratchColumn<T: Copy>` from the element TYPE alone (plus `Default`, so a system can hold `Local<ScratchColumn<T>>`). The layout id is minted by ONE kernel registry, keyed by type or `Layout`, from a kernel-managed scratch band. The cache-set stagger is passed explicitly instead of being derived from a distinct id. Today the constructor needs a caller-minted, pre-registered `ComponentId`. As a result, physics hand-keeps id bands (`scratch_ids.rs`), render borrows the asset layout registry, and UI and input have no route at all: three crate-local answers to one kernel need.
 - **Crates:** boyko_ecs (provides); boyko_physics, boyko_ui, boyko_input, boyko_render, boyko_rhi_vulkan, boyko_demo, boyko_scene, boyko_sdf_math callers
 - **Plan:** Planned and never shipped: ARCH-AUDIT-ECS-DATA-REMEDIATION Stage 0 `ComponentPool::new_scratch` (quoted in evidence). The minting route was open in rev 1: ecs-storage, codec-tools and app-demo reuse `register_asset_layout`. physics records that this climbs the production id counter. rhi wants it registry-free. Rev 2 decides it (the Rev 2 line above).
 - **Merged from:** ecs-storage `KF-scratch-column-for-type`; ecs-schedule `KF-typed-scratch-id`; physics-scene-math `KF-column-id-per-type-with-explicit-stagger`; rhi `KF-registry-free-scratch-column`; ui-input `KF1-scratch-column-for-type`; ui-lane `KF-01 ScratchColumn by type (kernel-minted id, explicit stagger)`; reflect-lane `ScratchColumn by type (kernel-minted id, explicit stagger)`
-- **Rows (324):** crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs:328,342,354,367,383,398,418,435,449,462; crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs:126,180,199,226,317,335,396,419; crates/boyko_ecs/src/ecs/core/clone/deep.rs:88,94,137,246; crates/boyko_ecs/src/ecs/core/clone/map.rs:22; crates/boyko_ecs/src/ecs/core/clone/materialize.rs:861; crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs:794; crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs:795,838; crates/boyko_ecs/src/ecs/core/ecs_master/entity_query_api.rs:92,111,112,135,136; crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs:636,637,681; crates/boyko_ecs/src/ecs/core/iters/query/relation/traverse_iter.rs:51,284,300,314; crates/boyko_ecs/src/ecs/core/schedule/conflict_graph.rs:122; crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:485,523,578,589,591,612,614,633,634,906,907,908,951,953,960,961,962,965,966,972,1013,1048,1049,1050,1057,1064,1193,1198,1215,1216,1230,1235,1266,1327,1332; crates/boyko_ecs/src/ecs/core/system/dispatcher_token.rs:352,353; crates/boyko_ecs/src/ecs/core/system/filtered_access_set.rs:127,146; crates/boyko_ecs/src/ecs/core/profiling/analysis.rs:150,198,199,200,201,203,292; crates/boyko_physics/src/resources.rs:2965,3068,3073,3106,3107; crates/boyko_physics/src/soft/component.rs:71,73,75,77,79,81,83,85,87,89,91,93,95,98,105,107,109,111,115,118,129,131,133,142,144,146,154,163,171,177,327,328,329,330,331,374,499,500,501,508,509,510,511,512,513,514,516,517,524,526,540,541,569,570,571,572,573,574,575,580,581,582; crates/boyko_scene/src/asset_refs.rs:99,149,180; crates/boyko_scene/src/propagation.rs:120,124,133,404; crates/boyko_sdf_math/src/mesh_sdf.rs:298,301,316,319,320,321,341,357,791,800,814; crates/boyko_render/src/vg_census.rs:114,134,137; crates/boyko_rhi/src/handle.rs:78; crates/boyko_rhi_vulkan/src/device.rs:2358,2413,2545,2721,3114; crates/boyko_rhi_vulkan/src/framegraph/graph.rs:126,127,136,145,148,156,157,158,161,162,163,164,165,172,188,200,203,204,205; crates/boyko_rhi_vulkan/src/memory.rs:700; crates/boyko_rhi_vulkan/src/present/surface.rs:180,238; crates/boyko_rhi_vulkan/src/suballocator.rs:65,68; crates/boyko_rhi_vulkan/src/window.rs:761; crates/boyko_input/src/action/map.rs:134,136,201,202,242,275,283,330,332,368,369; crates/boyko_input/src/persist/grammar.rs:386,387,398,471,473; crates/boyko_input/src/persist/keyname.rs:215,249; crates/boyko_input/src/persist/writer.rs:30,57,58; crates/boyko_input/src/plugin.rs:100; crates/boyko_app/src/gpu_scene/particle.rs:1083; crates/boyko_app/src/host_dump.rs:170,210; crates/boyko_app/src/profiling/artifact.rs:854,856; crates/boyko_app/src/profiling/contrast.rs:136; crates/boyko_app/src/profiling/reduce.rs:635; [ui-lane] crates/boyko_render/src/ui/gather.rs:284,289; [ui-lane] crates/boyko_render/src/ui/pack.rs:833; [ui-lane] crates/boyko_render/src/ui/upload.rs:198,206,669; [ui-lane] crates/boyko_ui/src/animation.rs:473; [ui-lane] crates/boyko_ui/src/binding/bind_system.rs:46,48; [ui-lane] crates/boyko_ui/src/interaction/focus.rs:117,119,122,128,131,136; [ui-lane] crates/boyko_ui/src/layout.rs:215; [ui-lane] crates/boyko_ui/src/plugin.rs:93; [ui-lane] crates/boyko_ui/src/reload/reconcile.rs:77,116,131,132,140,189,190,248,249,276,334,665; [ui-lane] crates/boyko_ui/src/reload/state.rs:83; [ui-lane] crates/boyko_ui/src/reload/system.rs:92,110; [ui-lane] crates/boyko_ui/src/reload/tree_view.rs:91; [ui-lane] crates/boyko_ui/src/resources.rs:216,218,226,234,239,247,254,323,324,325,327,328,329,335,336,337,338; [ui-lane] crates/boyko_ui/src/sprite.rs:257; [ui-lane] crates/boyko_ui/src/text/ast.rs:31,34,73,75,112,114; [ui-lane] crates/boyko_ui/src/text/emit.rs:65,89,141; [ui-lane] crates/boyko_ui/src/text/font.rs:33,36,38,41,52,55,72,75,139; [ui-lane] crates/boyko_ui/src/text/lower.rs:67,69,83; [ui-lane] crates/boyko_ui/src/text/parser.rs:48,49,51,61,281,310,311,319,320,334; [ui-lane] crates/boyko_ui/src/text/serialize.rs:32,39; [ui-lane] crates/boyko_ui/src/text/split.rs:59,61; [ui-lane] crates/boyko_ui/src/widgets.rs:73; [ui-lane] crates/boyko_ui/src/world/pick.rs:110,113,117
+- **Rows (324):** crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs:328,342,354,367,383,398,418,435,449,462; crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs:126,180,199,226,317,335,396,419; crates/boyko_ecs/src/ecs/core/clone/deep.rs:88,94,137,246; crates/boyko_ecs/src/ecs/core/clone/map.rs:22; crates/boyko_ecs/src/ecs/core/clone/materialize.rs:861; crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs:794; crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs:795,838; crates/boyko_ecs/src/ecs/core/ecs_master/entity_query_api.rs:92,111,112,135,136; crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs:636,637,681; crates/boyko_ecs/src/ecs/core/iters/query/relation/traverse_iter.rs:51,284,300,314; crates/boyko_ecs/src/ecs/core/schedule/conflict_graph.rs:122; crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:485,523,578,589,591,612,614,633,634,906,907,908,951,953,960,961,962,965,966,972,1013,1048,1049,1050,1057,1064,1193,1198,1215,1216,1230,1235,1266,1327,1332; crates/boyko_ecs/src/ecs/core/system/dispatcher_token.rs:352,353; crates/boyko_ecs/src/ecs/core/system/filtered_access_set.rs:127,146; crates/boyko_ecs/src/ecs/core/profiling/analysis.rs:150,198,199,200,201,203,292; crates/boyko_physics/src/resources.rs:2974,3084,3089,3129,3130; crates/boyko_physics/src/soft/component.rs:71,73,75,77,79,81,83,85,87,89,91,93,95,98,105,107,109,111,115,118,129,131,133,142,144,146,154,163,171,177,327,328,329,330,331,374,499,500,501,508,509,510,511,512,513,514,516,517,524,526,540,541,569,570,571,572,573,574,575,580,581,582; crates/boyko_scene/src/asset_refs.rs:99,149,180; crates/boyko_scene/src/propagation.rs:120,124,133,404; crates/boyko_sdf_math/src/mesh_sdf.rs:298,301,316,319,320,321,341,357,791,800,814; crates/boyko_render/src/vg_census.rs:114,134,137; crates/boyko_rhi/src/handle.rs:78; crates/boyko_rhi_vulkan/src/device.rs:2415,2470,2602,2778,3171; crates/boyko_rhi_vulkan/src/framegraph/graph.rs:126,127,136,145,148,156,157,158,161,162,163,164,165,172,188,200,203,204,205; crates/boyko_rhi_vulkan/src/memory.rs:728; crates/boyko_rhi_vulkan/src/present/surface.rs:180,238; crates/boyko_rhi_vulkan/src/suballocator.rs:65,68; crates/boyko_rhi_vulkan/src/window.rs:761; crates/boyko_input/src/action/map.rs:134,136,201,202,242,275,283,330,332,368,369; crates/boyko_input/src/persist/grammar.rs:386,387,398,471,473; crates/boyko_input/src/persist/keyname.rs:215,249; crates/boyko_input/src/persist/writer.rs:30,57,58; crates/boyko_input/src/plugin.rs:100; crates/boyko_app/src/gpu_scene/particle.rs:1083; crates/boyko_app/src/host_dump.rs:170,210; crates/boyko_app/src/profiling/artifact.rs:854,856; crates/boyko_app/src/profiling/contrast.rs:136; crates/boyko_app/src/profiling/reduce.rs:635; [ui-lane] crates/boyko_render/src/ui/gather.rs:284,289; [ui-lane] crates/boyko_render/src/ui/pack.rs:833; [ui-lane] crates/boyko_render/src/ui/upload.rs:198,206,669; [ui-lane] crates/boyko_ui/src/animation.rs:473; [ui-lane] crates/boyko_ui/src/binding/bind_system.rs:46,48; [ui-lane] crates/boyko_ui/src/interaction/focus.rs:117,119,122,128,131,136; [ui-lane] crates/boyko_ui/src/layout.rs:215; [ui-lane] crates/boyko_ui/src/plugin.rs:93; [ui-lane] crates/boyko_ui/src/reload/reconcile.rs:77,116,131,132,140,189,190,248,249,276,334,665; [ui-lane] crates/boyko_ui/src/reload/state.rs:83; [ui-lane] crates/boyko_ui/src/reload/system.rs:92,110; [ui-lane] crates/boyko_ui/src/reload/tree_view.rs:91; [ui-lane] crates/boyko_ui/src/resources.rs:216,218,226,234,239,247,254,323,324,325,327,328,329,335,336,337,338; [ui-lane] crates/boyko_ui/src/sprite.rs:257; [ui-lane] crates/boyko_ui/src/text/ast.rs:31,34,73,75,112,114; [ui-lane] crates/boyko_ui/src/text/emit.rs:65,89,141; [ui-lane] crates/boyko_ui/src/text/font.rs:33,36,38,41,52,55,72,75,139; [ui-lane] crates/boyko_ui/src/text/lower.rs:67,69,83; [ui-lane] crates/boyko_ui/src/text/parser.rs:48,49,51,61,281,310,311,319,320,334; [ui-lane] crates/boyko_ui/src/text/serialize.rs:32,39; [ui-lane] crates/boyko_ui/src/text/split.rs:59,61; [ui-lane] crates/boyko_ui/src/widgets.rs:73; [ui-lane] crates/boyko_ui/src/world/pick.rs:110,113,117
 - **Evidence:**
   - crates/boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:88 "pub fn new(component_id: ComponentId, reserve_rows: usize) -> Self {"
   - crates/boyko_ecs/src/ecs/core/asset/backing.rs:115 "pub fn register_asset_layout&lt;T: 'static>(drop_fn: Option&lt;DropFn>) -> ComponentId {"
@@ -845,26 +861,26 @@ The physics unification design orders its own kernel features K1-K7 (design sect
   - crates/boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:56 "The caller owns the id assignment"
   - crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs:1031 "pub fn register_layout&lt;T: 'static>(component_id: usize) {"
   - crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs:1020 "non-`Component` element type"
-  - crates/boyko_physics/src/scratch_ids.rs:834 "ComponentId::new(SCRATCH_ID_BODY_EFF_SERIAL)"
+  - crates/boyko_physics/src/scratch_ids.rs:1022 "ComponentId::new(SCRATCH_ID_BODY_EFF_SERIAL)"
   - crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs:63 "pub const MAX_COMPONENTS: usize = 512;"
   - boyko_ecs/src/ecs/core/asset/backing.rs:115 "pub fn register_asset_layout&lt;T: 'static>(drop_fn: Option&lt;DropFn>) -> ComponentId {"
   - boyko_render/src/mesh_draw.rs:429 "let u32_id = register_asset_layout::&lt;u32>(None);"
   - boyko_render/src/mesh_draw.rs:446 "counts: ScratchColumn::new(u32_id, u32_rows),"
   - boyko_render/src/mesh_draw.rs:447 "offsets: ScratchColumn::new(u32_id, u32_rows),"
   - boyko_ecs/src/ecs/constants.rs:214 "pub const fn pool_base_stagger(component_id: usize) -> usize {"
-  - boyko_physics/src/scratch_ids.rs:166 "at the same moment, so distinct cohorts may reuse the same slots freely."
-  - boyko_physics/src/scratch_ids.rs:538 "At 128 the scratch side keeps ~38 ids of headroom"
+  - boyko_physics/src/scratch_ids.rs:167 "at the same moment, so distinct cohorts may reuse the same slots freely."
+  - boyko_physics/src/scratch_ids.rs:682 "At 128 the scratch side keeps ~38 ids of headroom"
   - boyko_ecs/src/ecs/core/component/component_registry/mod.rs:968 "let mut current = NEXT_ID.load(Ordering::Relaxed);"
-  - Planned and not shipped: docs/ARCH-AUDIT-ECS-DATA-REMEDIATION.md:27 "`ComponentPool::new_scratch(layout, reserve_rows)` (synthetic-id, registry-free, tick sub-regions reserved-uncommitted)". Shipped instead: boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:88 "pub fn new(component_id: ComponentId, reserve_rows: usize) -> Self {", which needs an id whose layout is registered in the process-global table (boyko_ecs/src/ecs/core/component/component_registry/mod.rs:208 "static LAYOUTS: [OnceLock&lt;ComponentLayout>; MAX_COMPONENTS] =") capped at boyko_ecs/src/ecs/core/component/component_registry/mod.rs:63 "pub const MAX_COMPONENTS: usize = 512;"; register_new mints a FRESH id per call (boyko_ecs/src/ecs/core/component/component_registry/mod.rs:920 "pub fn register_new&lt;T: 'static>() -> usize {"; boyko_ecs/src/ecs/core/component/component_registry/mod.rs:921 "let raw = NEXT_ID.fetch_add(1, Ordering::Relaxed);"), and the untracked constructor is pub(crate) (boyko_ecs/src/ecs/memory/component_pool.rs:501 "pub(crate) fn new_untracked(component_id: usize, reserve_rows: usize) -> Self {"). Physics works around it with a hand-managed band, one id per column (boyko_physics/src/scratch_ids.rs:557 "ComponentId::new(SCRATCH_ID_BROADPHASE_TOP - k)"; boyko_physics/src/scratch_ids.rs:541 "const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;"; boyko_physics/src/scratch_ids.rs:537 "/// Finishing Stage 4 needs roughly 90 scratch ids, which does not fit under 64."). The FrameGraph alone would take 17 (release) to 19 (debug) more ids. Not strictly blocking - ids could be minted from the band today - but every crate hand-managing ids is the crate-local workaround the owner's rule forbids.
+  - Planned and not shipped: docs/ARCH-AUDIT-ECS-DATA-REMEDIATION.md:27 "`ComponentPool::new_scratch(layout, reserve_rows)` (synthetic-id, registry-free, tick sub-regions reserved-uncommitted)". Shipped instead: boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:88 "pub fn new(component_id: ComponentId, reserve_rows: usize) -> Self {", which needs an id whose layout is registered in the process-global table (boyko_ecs/src/ecs/core/component/component_registry/mod.rs:208 "static LAYOUTS: [OnceLock&lt;ComponentLayout>; MAX_COMPONENTS] =") capped at boyko_ecs/src/ecs/core/component/component_registry/mod.rs:63 "pub const MAX_COMPONENTS: usize = 512;"; register_new mints a FRESH id per call (boyko_ecs/src/ecs/core/component/component_registry/mod.rs:920 "pub fn register_new&lt;T: 'static>() -> usize {"; boyko_ecs/src/ecs/core/component/component_registry/mod.rs:921 "let raw = NEXT_ID.fetch_add(1, Ordering::Relaxed);"), and the untracked constructor is pub(crate) (boyko_ecs/src/ecs/memory/component_pool.rs:501 "pub(crate) fn new_untracked(component_id: usize, reserve_rows: usize) -> Self {"). Physics works around it with a hand-managed band, one id per column (boyko_physics/src/scratch_ids.rs:701 "ComponentId::new(SCRATCH_ID_BROADPHASE_TOP - k)"; boyko_physics/src/scratch_ids.rs:685 "const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;"; boyko_physics/src/scratch_ids.rs:681 "/// Finishing Stage 4 needs roughly 90 scratch ids, which does not fit under 64."). The FrameGraph alone would take 17 (release) to 19 (debug) more ids. Not strictly blocking - ids could be minted from the band today - but every crate hand-managing ids is the crate-local workaround the owner's rule forbids.
   - boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:88 "pub fn new(component_id: ComponentId, reserve_rows: usize) -> Self {"
-  - boyko_physics/src/scratch_ids.rs:555 "pub(crate) fn broadphase_column_id(k: usize) -> ComponentId {"
+  - boyko_physics/src/scratch_ids.rs:699 "pub(crate) fn broadphase_column_id(k: usize) -> ComponentId {"
   - D:/wt/ui:crates/boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:62 "pub fn new(component_id: ComponentId, reserve_rows: usize) -> Self {"
-  - D:/wt/joltab:crates/boyko_physics/src/scratch_ids.rs:555 "pub(crate) fn broadphase_column_id(k: usize) -> ComponentId {"
+  - D:/wt/joltab:crates/boyko_physics/src/scratch_ids.rs:699 "pub(crate) fn broadphase_column_id(k: usize) -> ComponentId {"
   - D:/wt/ui:crates/boyko_render/src/mesh_draw.rs:429 "let u32_id = register_asset_layout::&lt;u32>(None);"
   - D:/wt/reflect:docs/REFLECTION-PLAN-BOUNDARY.md:602 "\| resolution shape \| `resolve_type_table` → dense `Vec<ResolvedType>` by file-local index"
 - **Group notes:**
   - (ecs-schedule) The band lives inside MAX_COMPONENTS = 512, so keying by Layout (size, align) rather than by type keeps it finite; Copy-only elements need no drop glue, so the layout is all the pool needs.
-  - (physics-scene-math) Caveat on the per-type mint: it climbs the PRODUCTION id counter (boyko_ecs/src/ecs/core/component/component_registry/mod.rs:968 "let mut current = NEXT_ID.load(Ordering::Relaxed);"), so every distinct scratch element type counts against the 384-id production margin the physics floor protects (boyko_physics/src/scratch_ids.rs:541 "const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;"). Sharing an id without an explicit stagger also shares a cache set - harmless for a lone queue column, the P2 conflict-miss storm for a swept cohort.
+  - (physics-scene-math) Caveat on the per-type mint: it climbs the PRODUCTION id counter (boyko_ecs/src/ecs/core/component/component_registry/mod.rs:968 "let mut current = NEXT_ID.load(Ordering::Relaxed);"), so every distinct scratch element type counts against the 384-id production margin the physics floor protects (boyko_physics/src/scratch_ids.rs:685 "const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;"). Sharing an id without an explicit stagger also shares a cache set - harmless for a lone queue column, the P2 conflict-miss storm for a swept cohort.
   - (ui-input) Replaces the verified file's new_primitive "public, ComponentId-free VmColumn&lt;T: Copy> / ScratchColumn constructor"; exporting VmColumn is refuted (R6). The UNTRACKED backing (no change ticks) is right for scratch; resource-column users (InputMap, fonts) rely on Resource-level change detection (ResMut), which they already do.
   - (ui-lane, note) Replaces the verified file's new_primitive "public, ComponentId-free VmColumn&lt;T: Copy> / ScratchColumn constructor"; exporting VmColumn is refuted (R6). The UNTRACKED backing (no change ticks) is right for scratch; resource-column users (InputMap, fonts) rely on Resource-level change detection (ResMut), which they already do. \| ui-lane: +1 user (UiSheetTable::sheets, sprite.rs:257) and the fallback of UiTweenScratch::done. DECIDED 2026-09-11 (section (i) 'Scratch id minting route', 'One kernel decision'): a kernel scratch band keyed by Layout (size, align) with the cache-set stagger passed explicitly. Performance: it keeps scratch ids off the production counter (the 384-id margin the physics floor protects), a per-Layout key bounds the band (the UI lanes use about 20 distinct element layouts), and an explicit stagger costs nothing for a lone UI lane while it is what prevents the P2 conflict-miss storm for a swept physics cohort. Overturned by a band-exhaustion count, or by a measured conflict-miss rate on a UI lane that a per-type id would have avoided.
   - (ui-lane, capability) ScratchColumn&lt;T: Copy> constructible from any crate by TYPE alone (ScratchColumn::&lt;T>::for_type(reserve_rows)), with the layout id minted by ONE kernel TypeId->layout registry. Today the constructor needs a caller-minted, pre-registered ComponentId, so physics hand-rolls id cohorts, render borrows the ASSET layout registry for u32, and UI/input have no route at all - three crate-local answers to one kernel need.
@@ -879,7 +895,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_ecs (provides); boyko_render, boyko_rhi_vulkan, boyko_app; pool-utils-log only conditionally
 - **Plan:** No plan owns it. It conflicts with ALLOCATOR-DESIGN-SPACE `DropColumn<T>` (the same capability, but as a new primitive on VmReservation).
 - **Merged from:** render `KF-owning-scratch-column`; ecs-storage `KF-owning-scratch-column`; ecs-services `KF-owning-scratch-column`; rhi `KF-owning-scratch-column`; pool-utils-log `KF-owning-scratch-column (render group's name; CONDITIONAL here)`
-- **Rows (9):** crates/boyko_ecs/src/ecs/core/component/component_pool_bundle.rs:13; crates/boyko_ecs/src/ecs/core/component/dense/dense_registry.rs:78; crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs:769; crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs:953; crates/boyko_ecs/src/ecs/core/asset/staging.rs:58; crates/boyko_utils/src/sparse_map/sparse_map.rs:10; crates/boyko_render/src/retired_gpu_buffers.rs:53,59; crates/boyko_rhi_vulkan/src/memory.rs:700
+- **Rows (9):** crates/boyko_ecs/src/ecs/core/component/component_pool_bundle.rs:13; crates/boyko_ecs/src/ecs/core/component/dense/dense_registry.rs:78; crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs:769; crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs:953; crates/boyko_ecs/src/ecs/core/asset/staging.rs:58; crates/boyko_utils/src/sparse_map/sparse_map.rs:10; crates/boyko_render/src/retired_gpu_buffers.rs:53,59; crates/boyko_rhi_vulkan/src/memory.rs:728
 - **Evidence:**
   - boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:43 "pub struct ScratchColumn&lt;T: Copy> {"
   - boyko_ecs/src/ecs/memory/component_pool.rs:1694 "pub(crate) unsafe fn take_at&lt;T: 'static>(&mut self, idx: usize) -> T {"
@@ -888,12 +904,12 @@ The physics unification design orders its own kernel features K1-K7 (design sect
   - crates/boyko_ecs/src/ecs/core/asset/backing.rs:115 "pub fn register_asset_layout&lt;T: 'static>(drop_fn: Option&lt;DropFn>) -> ComponentId {"
   - crates/boyko_render/src/mesh.rs:231 "register_asset_layout::&lt;MeshGpu>(Some(MeshGpu::drop_glue))"
   - crates/boyko_ecs/src/ecs/memory/component_pool.rs:1694 "pub(crate) unsafe fn take_at&lt;T: 'static>(&mut self, idx: usize) -> T {"
-  - crates/boyko_ecs/src/ecs/memory/vm_column.rs:30 "is deliberately NOT a general `Vec` replacement for droppable `T`."
+  - crates/boyko_ecs/src/ecs/memory/vm_column.rs:31 "is deliberately NOT a general `Vec` replacement for droppable `T`."
   - crates/boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:43 "pub struct ScratchColumn&lt;T: Copy> {"
   - ScratchColumn rejects drop types (boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:91 ""ScratchColumn requires a POD (Copy, no Drop) element type; \"); the pool itself already runs drop glue (boyko_ecs/src/ecs/memory/component_pool.rs:237 "drop_fn: Option&lt;DropFn>,"; boyko_ecs/src/ecs/memory/component_pool.rs:1107 "/// Removes the last component from the pool, invoking drop glue if needed.") and registers any T (boyko_ecs/src/ecs/core/component/component_registry/mod.rs:1031 "pub fn register_layout&lt;T: 'static>(component_id: usize) {"), but its typed move-in needs T: Component (boyko_ecs/src/ecs/memory/component_pool.rs:897 "pub fn add_typed&lt;T: Component>(&mut self, value: T) -> Option&lt;usize> {").
   - crates/boyko_ecs/src/ecs/memory/component_pool.rs:237 "drop_fn: Option&lt;DropFn>," (the pool already carries drop glue)
 - **Group notes:**
-  - (render) It is also the uniform fence-retire lane. Read this session: six retire-lane types carry a (value, retire_frame) shape - DeferredFree.entries (boyko_scene), OrphanedMeshGpu, OrphanedTextureGpu, RetiredGpuBuffers.entries, RetiredGpuBuffers.tlases, and BindlessSlotAllocator.retiring_slots (instantiated by two tables). One column type with one retain_ready(epoch) drain serves all six, and a single scheduled retire system can drain them. Other groups' non-Copy Resource tables probably need it as well; not counted. PLAN CONFLICT: D:/claude/BoykoEngine/docs/memory/ALLOCATOR-DESIGN-SPACE.md:111 "`ScratchColumn` + new `DropColumn<T>`" proposes DropColumn&lt;T> as a new column primitive on VmReservation; this is the same capability as a typed view over the existing ComponentPool.
+  - (render) It is also the uniform fence-retire lane. Read this session: six retire-lane types carry a (value, retire_frame) shape - DeferredFree.entries (boyko_scene), OrphanedMeshGpu, OrphanedTextureGpu, RetiredGpuBuffers.entries, RetiredGpuBuffers.tlases, and BindlessSlotAllocator.retiring_slots (instantiated by two tables). One column type with one retain_ready(epoch) drain serves all six, and a single scheduled retire system can drain them. Other groups' non-Copy Resource tables probably need it as well; not counted. PLAN CONFLICT: D:/claude/BoykoEngine/docs/memory/ALLOCATOR-DESIGN-SPACE.md:130 "`ScratchColumn` + new `DropColumn<T>`" proposes DropColumn&lt;T> as a new column primitive on VmReservation; this is the same capability as a typed view over the existing ComponentPool.
   - (ecs-services) Deduplicate with render.ecsform.json; this group adds one user.
   - (pool-utils-log) Not needed if block_groups is flattened to Copy ranges, which is the recommendation.
 
@@ -913,9 +929,9 @@ The physics unification design orders its own kernel features K1-K7 (design sect
   - D:/wt/joltab/docs/DENSE-COMPONENTS-PLAN.md:56 "coloring DEPENDS on absolute body slot values"
   - crates/boyko_ecs/src/ecs/core/component/observers/mod.rs:155 "/// Stored as a field on `ArchetypeMaster`. Mutated only under `&mut self`"
   - crates/boyko_ecs/src/ecs/core/component/observers/mod.rs:156 "/// (`add` / `remove`), read under `&self` (the fire loop, `has_observer`, and"
-  - crates/boyko_physics/src/resources.rs:693 "CSR offsets."
-  - crates/boyko_physics/src/resources.rs:694 "cell_start: ScratchColumn&lt;u32>,"
-  - crates/boyko_physics/src/resources.rs:696 "cell_bodies: ScratchColumn&lt;u32>,"
+  - crates/boyko_physics/src/resources.rs:702 "CSR offsets."
+  - crates/boyko_physics/src/resources.rs:703 "cell_start: ScratchColumn&lt;u32>,"
+  - crates/boyko_physics/src/resources.rs:705 "cell_bodies: ScratchColumn&lt;u32>,"
   - D:/wt/reflect:docs/REFLECTION-PLAN-CORE.md:3800 "as *mut String, s.to_owned())`** on the original arena `*mut` provenance"
 - **Group notes:**
   - (physics-scene-math) This is the inventory's RaggedColumn restated as an ECS capability over existing storage (ScratchColumn columns + dense handle + hooks), not a new column primitive beside ComponentPool.
@@ -930,7 +946,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_ecs, boyko_serialize, boyko_physics, boyko_scene
 - **Plan:** ADVANCED-PHYSICS-DESIGN-SPACE KR-3 (= animation AK-2).
 - **Merged from:** physics-scene-math `KF-durable-resource-column`; ui-lane `KF-04 Durable resource column (lifetime + serialization)`
-- **Rows (10):** crates/boyko_physics/src/narrowphase/axis_cache.rs:128; crates/boyko_physics/src/solver/warm_start.rs:214; crates/boyko_scene/src/identity.rs:72,74,81,121; [ui-lane] crates/boyko_ui/src/text/font.rs:33,36,38,41
+- **Rows (10):** crates/boyko_physics/src/narrowphase/axis_cache.rs:179; crates/boyko_physics/src/solver/warm_start.rs:221; crates/boyko_scene/src/identity.rs:72,74,81,121; [ui-lane] crates/boyko_ui/src/text/font.rs:33,36,38,41
 - **Evidence:**
   - D:/claude/BoykoEngine/docs/physics/ADVANCED-PHYSICS-DESIGN-SPACE.md:868 "KR-3"
   - boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:43 "pub struct ScratchColumn&lt;T: Copy> {"
@@ -953,7 +969,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
   - crates/boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:43 "pub struct ScratchColumn&lt;T: Copy> {"
   - crates/boyko_ecs/src/ecs/core/component/scratch/views.rs:130 "pub fn clear(&mut self) {"
   - crates/boyko_ecs/src/ecs/core/component/scratch/views.rs:141 "pub fn push(&mut self, value: T) -> u32"
-  - D:/claude/BoykoEngine/docs/memory/ALLOCATOR-DESIGN-SPACE.md:112 "\| **Frame** \| `FrameArena` + `FrameVec<T>`, `FrameSlice<T>`"
+  - D:/claude/BoykoEngine/docs/memory/ALLOCATOR-DESIGN-SPACE.md:131 "\| **Frame** \| `FrameArena` + `FrameVec<T>`, `FrameSlice<T>`"
   - D:/wt/reflect:docs/REFLECTION-PLAN-ECS.md:1665 "`MaybeUninit` scratch with its release size/align assert and `#[cold]` heap fallback; U4."
 - **Group notes:**
   - (ecs-storage) The design space's FrameArena is the other admissible backing for system-scratch; ONE of the two should serve, not both plus a third (ScratchStack).
@@ -964,16 +980,17 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 
 - **Status:** active. **Physics needs it:** no. **Kind:** API on existing storage.
 - **Rev 2:** The reflect lane adds a planned user (BOUNDARY B1 `VecSink` over a ScratchColumn&lt;u8>).
+- **Rev 4:** The declared row count read 13 against a list of 12, in rev 2, rev 3 and rev 4 alike (the three lines are byte-identical). The LIST is right: the group tables hold exactly 12 rows whose destination is the byte column (`NEW:ByteSink` / `KF-byte-column API`), and no thirteenth. The count is corrected; nothing else changed. See the change log, W4. W4 corrected this header only; the summary table above kept `13 | ecs-services 6`, and the distinct-row total kept the same extra row, until the fourth recheck (W15). The thirteenth was the second active row at `asset/server.rs:127` (class T, the std wide-path conversion), which shares the coordinate but not the destination.
 - **Adds to the kernel:** Byte-record append on existing kernel columns: `reserve_uninit(n) -> *mut u8` plus `set_len` on `VmColumn<MaybeUninit<u8>>` (kernel users) and on an exported `ScratchColumn<u8>` build view (other crates). Also `core::fmt::Write` on `ScratchBuildView<u8>`, so every serializer and save path writes into a kernel column.
 - **Crates:** boyko_ecs (provides); boyko_serialize, boyko_render, boyko_ui, boyko_input
 - **Plan:** The same capability as ALLOCATOR-DESIGN-SPACE `ByteColumn` (quoted in evidence). The per-queue resident floor depends on the packing plan (rung 0).
 - **Merged from:** ecs-services `KF-byte-column`; ui-input `KF6-fmt-write-on-byte-column`; ui-lane `KF-06 Byte column (bulk append + fmt::Write)`; reflect-lane `Byte column (bulk append + fmt::Write) / Serialize seam on kernel columns`
-- **Rows (13):** crates/boyko_ecs/src/ecs/core/asset/server.rs:127; crates/boyko_ecs/src/ecs/core/commands/command_queue.rs:83,85; crates/boyko_ecs/src/ecs/core/events/erased_buffer.rs:109; crates/boyko_ecs/src/ecs/core/serialize/mod.rs:81; crates/boyko_input/src/persist/keyname.rs:215,249; crates/boyko_input/src/persist/writer.rs:30,57,58; [ui-lane] crates/boyko_ui/src/reload/reconcile.rs:665; [ui-lane] crates/boyko_ui/src/text/serialize.rs:32
+- **Rows (12):** crates/boyko_ecs/src/ecs/core/asset/server.rs:127; crates/boyko_ecs/src/ecs/core/commands/command_queue.rs:83,85; crates/boyko_ecs/src/ecs/core/events/erased_buffer.rs:109; crates/boyko_ecs/src/ecs/core/serialize/mod.rs:81; crates/boyko_input/src/persist/keyname.rs:215,249; crates/boyko_input/src/persist/writer.rs:30,57,58; [ui-lane] crates/boyko_ui/src/reload/reconcile.rs:665; [ui-lane] crates/boyko_ui/src/text/serialize.rs:32
 - **Evidence:**
-  - D:/claude/BoykoEngine/docs/memory/ALLOCATOR-DESIGN-SPACE.md:142 "pub type ByteColumn = VmColumn&lt;MaybeUninit&lt;u8>>;   // + spare_ptr(additional) -> NonNull&lt;u8>, unsafe set_len(n)"
+  - D:/claude/BoykoEngine/docs/memory/ALLOCATOR-DESIGN-SPACE.md:161 "pub type ByteColumn = VmColumn&lt;MaybeUninit&lt;u8>>;   // + spare_ptr(additional) -> NonNull&lt;u8>, unsafe set_len(n)"
   - crates/boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:307 "pub(crate) fn set_len(&mut self, new_len: usize) {"
   - crates/boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:313 "pub(crate) fn grow_to(&mut self, rows: usize) -> bool {"
-  - crates/boyko_ecs/src/ecs/memory/vm_column.rs:122 "/// Creates a LAZY column reserving room for `reserve_elems` elements"
+  - crates/boyko_ecs/src/ecs/memory/vm_column.rs:123 "/// Creates a LAZY column reserving room for `reserve_elems` elements"
   - boyko_ecs/src/ecs/core/component/scratch/views.rs:164 "pub fn extend_from_slice(&mut self, values: &[T])"
   - D:/wt/ui:crates/boyko_ecs/src/ecs/core/component/scratch/views.rs:93 "pub fn extend_from_slice(&mut self, values: &[T])"
   - D:/wt/reflect:docs/REFLECTION-PLAN-BOUNDARY.md:278 "One concrete pair ships: `VecSink` / `SliceSource` over a caller-provided `&mut Vec<u8>` /"
@@ -992,7 +1009,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_ecs
 - **Plan:** None. ALLOCATOR-RESEARCH records that the pre-X.J Layout-keyed arena was deleted for lack of clients; these rows plus CommandQueue are its clients.
 - **Merged from:** ecs-schedule `KF-erased-record-column`
-- **Rows (6):** crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:227; crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:183,837; crates/boyko_ecs/src/ecs/core/schedule/system_box.rs:83,129; crates/boyko_ecs/src/ecs/core/schedule/system_config.rs:189
+- **Rows (6):** crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:238; crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:183,837; crates/boyko_ecs/src/ecs/core/schedule/system_box.rs:83,129; crates/boyko_ecs/src/ecs/core/schedule/system_config.rs:189
 - **Evidence:**
   - crates/boyko_ecs/src/ecs/core/commands/command_queue.rs:83 "pub(crate) bytes: Vec&lt;MaybeUninit&lt;u8>>,"
   - D:/claude/BoykoEngine/docs/memory/ALLOCATOR-RESEARCH.md:699 "a `Layout`-keyed variable-size arena"
@@ -1024,11 +1041,12 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 ### KF-09 Loader decode context
 
 - **Status:** active. **Physics needs it:** no. **Kind:** capability.
+- **Rev 4:** The declared row count read 65 against a list of 64, in rev 2, rev 3 and rev 4 alike (the three lines are byte-identical). All 64 listed references are real rows in the group tables, and no row of any group names a 65th decode-context site. The count is corrected; the list is unchanged. See the change log, W4. W4 corrected this header only; the summary table above kept `65 | ecs-services 3`, and the distinct-row total kept the same extra row, until the fourth recheck (W15). The 65th was the second active row at `asset/server.rs:127` (class T, the std wide-path conversion), which shares the coordinate but not the destination.
 - **Adds to the kernel:** `AssetLoader::decode` receives an ECS-owned decode context: reusable ScratchColumn lanes for per-decode transients, plus per-type staging payload lanes that the decoded bytes are written into. `Asset::Cpu` becomes a Copy `{start, len}` range record. The codec half: `decode_png` splits into a header probe and a decode-into-slice call, and `boyko_image` keeps its no-workspace-crate edge.
 - **Crates:** boyko_ecs, boyko_render, boyko_image, boyko_ui, boyko_fontbake
 - **Plan:** None.
 - **Merged from:** render `KF-loader-decode-context`; codec-tools `KF-loader-decode-context`; ecs-services `KF-loader-decode-context`
-- **Rows (65):** crates/boyko_ecs/src/ecs/core/asset/server.rs:127; crates/boyko_ecs/src/ecs/core/asset/staging.rs:58; crates/boyko_render/src/loaders/glb.rs:94,95,96,211,213,264,286,561,562,693,695,699,704,714,718,720,726,727,786,831,857,915,916; crates/boyko_render/src/loaders/obj.rs:66,67,68,69,78,129,138,183,184,187,188; crates/boyko_render/src/loaders/png_texture.rs:42,50; crates/boyko_render/src/mesh_data.rs:28,30; crates/boyko_render/src/tangent.rs:62,63; crates/boyko_render/src/texture.rs:806,808,828; crates/boyko_render/src/texture_data.rs:28; crates/boyko_fontbake/src/atlas.rs:116,629; crates/boyko_image/src/inflate.rs:213,466,488,517,557,650,674; crates/boyko_image/src/png.rs:60,81,144,378,381,421,430,441,456
+- **Rows (64):** crates/boyko_ecs/src/ecs/core/asset/server.rs:127; crates/boyko_ecs/src/ecs/core/asset/staging.rs:58; crates/boyko_render/src/loaders/glb.rs:94,95,96,211,213,264,286,561,562,693,695,699,704,714,718,720,726,727,786,831,857,915,916; crates/boyko_render/src/loaders/obj.rs:66,67,68,69,78,129,138,183,184,187,188; crates/boyko_render/src/loaders/png_texture.rs:42,50; crates/boyko_render/src/mesh_data.rs:28,30; crates/boyko_render/src/tangent.rs:62,63; crates/boyko_render/src/texture.rs:806,808,828; crates/boyko_render/src/texture_data.rs:28; crates/boyko_fontbake/src/atlas.rs:116,629; crates/boyko_image/src/inflate.rs:213,466,488,517,557,650,674; crates/boyko_image/src/png.rs:60,81,144,378,381,421,430,441,456
 - **Evidence:**
   - boyko_ecs/src/ecs/core/asset/loader.rs:27 "fn decode(bytes: &[u8]) -> Result&lt;&lt;Self::Out as Asset>::Cpu, AssetError>;"
   - boyko_ecs/src/ecs/core/asset/asset.rs:34 "type Cpu: Send + 'static;"
@@ -1037,7 +1055,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
   - boyko_image/src/png.rs:131 "let final_size = (info.width as usize)"
   - boyko_image/src/png.rs:127 "let expected_len = scanline_stride"
   - boyko_image/Cargo.toml:5 "it takes no other workspace crate."
-  - boyko_render/src/gpu_upload.rs:114 "for staged in staging.drain() {"
+  - boyko_render/src/gpu_upload.rs:171 "for staged in staging.drain() {"
   - crates/boyko_ecs/src/ecs/core/asset/asset.rs:34 "type Cpu: Send + 'static;"
 - **Group notes:**
   - (render) Threadpool decode (rung A5) would add per-worker reserved ranges; that is not needed while decode stays synchronous (server.rs:127-133).
@@ -1058,7 +1076,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
   - crates/boyko_ecs/src/ecs/core/asset/server.rs:171 "boyko_log::codes::E0801,"
   - crates/boyko_ecs/src/ecs/core/asset/server.rs:172 ""asset load failed for '{}': {}","
 - **Group notes:**
-  - (render) Agrees with D:/claude/BoykoEngine/docs/memory/ALLOCATOR-DESIGN-SPACE.md:361 "error types carry codes (`boyko_log/src/codes.rs` already exists) + `&'static str`". It differs from that doc only in not needing HeapString for these sites.
+  - (render) Agrees with D:/claude/BoykoEngine/docs/memory/ALLOCATOR-DESIGN-SPACE.md:380 "error types carry codes (`boyko_log/src/codes.rs` already exists) + `&'static str`". It differs from that doc only in not needing HeapString for these sites.
   - (ecs-services) error.rs:30 / server.rs:184 go further: the extension field is dropped because the log line already prints the path.
 
 ### KF-11 Relation reverse index on kernel storage (K7 spans)
@@ -1088,7 +1106,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_ecs
 - **Plan:** Relations v1 Decision 1 (single target).
 - **Merged from:** ecs-schedule `KF-multi-target-relation`
-- **Rows (18):** crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:161,172; crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:116,122,127,139,155,156,157,159,683,693; crates/boyko_ecs/src/ecs/core/schedule/system_descriptor.rs:50,55,62,80,81,82
+- **Rows (18):** crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:172,183; crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:116,122,127,139,155,156,157,159,683,693; crates/boyko_ecs/src/ecs/core/schedule/system_descriptor.rs:50,55,62,80,81,82
 - **Evidence:**
   - crates/boyko_ecs/src/ecs/core/relationship/mod.rs:200 "/// pointing at one target (Relations v1, Decision 1)."
   - crates/boyko_ecs/src/ecs/core/relationship/collection.rs:80 "impl RelationshipSourceCollection for Vec&lt;Entity> {"
@@ -1118,9 +1136,9 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_ecs, boyko_render (gpu intent), boyko_app; the API for other crates is unchanged
 - **Plan:** None. Rev 1 called this the one owner decision the scheduler raises; rev 2 decides it. PHASE-15 research chose Bevy for ORDERING semantics only.
 - **Merged from:** ecs-schedule `KF-system-entities`
-- **Rows (26):** crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:122,161,172; crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:106,116,122,127,131,139,153,155,156,157,158,159,682,683,693; crates/boyko_ecs/src/ecs/core/schedule/system_descriptor.rs:50,55,62,80,81,82; crates/boyko_ecs/src/ecs/core/system/system_meta.rs:140,331
+- **Rows (26):** crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:122,172,183; crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:106,116,122,127,131,139,153,155,156,157,158,159,682,683,693; crates/boyko_ecs/src/ecs/core/schedule/system_descriptor.rs:50,55,62,80,81,82; crates/boyko_ecs/src/ecs/core/system/system_meta.rs:140,331
 - **Evidence:**
-  - crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:216 "pub(crate) world_id: WorldId,"
+  - crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:227 "pub(crate) world_id: WorldId,"
   - crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs:306 "pub fn observe&lt;E: Trigger>(&mut self, runner: TriggerFn) -> ObserverId {"
   - crates/boyko_ecs/src/ecs/core/app/app.rs:140 "schedule: Option&lt;Schedule>,"
   - D:/wt/joltab/docs/archive/PHASE-15-RESEARCH.md:29 "Because boyko is task-parallel, **Bevy is the correct reference model**, not flecs."
@@ -1153,11 +1171,11 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_ecs, boyko_physics (the Sleeping write-back in physics_apply)
 - **Plan:** None.
 - **Merged from:** physics-scene-math `KF-enable-write-in-iteration`
-- **Rows that named it before rev 2 (2; none needs it now):** crates/boyko_physics/src/resources.rs:3057,3104
+- **Rows that named it before rev 2 (2; none needs it now):** crates/boyko_physics/src/resources.rs:3073,3127
 - **Evidence:**
   - boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs:88 "pub fn enable&lt;T: Component>(&mut self, entity: Entity) {"
   - boyko_ecs/src/ecs/core/system/params/entity_commands.rs:220 "pub fn enable&lt;T: Component>(&mut self) -> &mut Self {"
-  - boyko_physics/src/systems.rs:207 "IsEnabled&lt;Simulated>,"
+  - boyko_physics/src/systems.rs:208 "IsEnabled&lt;Simulated>,"
 - **Group notes:**
   - (physics-scene-math) Without it the latch write-back needs KR-1's row->entity map plus one command per flip; flips are rare, so this is a paradigm feature (one uniform mutation path for per-row bits), not a speed lever.
 
@@ -1186,7 +1204,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_ecs, boyko_physics
 - **Plan:** docs/DENSE-ENABLE-QUERY-PLAN.md.
 - **Merged from:** physics-scene-math `KF-dense-enable-iteration (existing plan)`
-- **Rows that named it before rev 2 (2; none needs it now):** crates/boyko_physics/src/resources.rs:3057,3104
+- **Rows that named it before rev 2 (2; none needs it now):** crates/boyko_physics/src/resources.rs:3073,3127
 - **Evidence:**
   - boyko_ecs/tests/enable_filter_compile_fail/query_dense_iter_mut_enable_rejected.rs:27 "const _: () = assert_dense_iter_no_enable::&lt;&mut Dense, Disabled&lt;Tag>>();"
   - D:/wt/joltab/docs/DENSE-COMPONENTS-PLAN.md:26 "**Physics (Stage P)**: RigidBody*/velocity→dense; contacts→dense slots"
@@ -1197,12 +1215,13 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 
 - **Status:** active. **Physics needs it:** yes. **Kind:** capability. **Physics design:** K3.
 - **Rev 2:** Realised by the physics design's K3 dense groups: `DenseColumn<T>` / `DenseColumnMut<T>` params and typed views with disjoint `range_mut` (design section 8).
-- **Rev 3:** Rev 3 (item 2): the asset K3 groups are users. The boot backfill and the two teardown handle lists walk the group column in place (`gpu_upload.rs:216`, `mesh_assets.rs:582`, `texture.rs:709`).
+- **Rev 3:** Rev 3 (item 2): the asset K3 groups are users. The boot backfill and the two teardown handle lists walk the group column in place (`gpu_upload.rs:277`, `mesh_assets.rs:582`, `texture.rs:709`).
+- **Rev 4:** Rev 4: the gather's added-row list (`row_identity.rs:305`) is a group column read by slot, the same access this feature covers.
 - **Adds to the kernel:** Read side: `Query<&T>::dense_slots() -> DenseSlots<'_, T>` (Copy + Send + Sync, `get(slot)`), which can be captured into a par_iter body to read OTHER entities' rows by slot. Write side: sequential `dense_slot_mut(slot) -> Mut<T>`, which stamps the per-slot tick. This is the typed face of `DenseSolveView::row_ptr`, which physics Stage P needs in place of raw pointers.
 - **Crates:** boyko_ecs, boyko_demo, boyko_physics (Stage P)
 - **Plan:** DENSE-COMPONENTS-PLAN Stage P (partially).
 - **Merged from:** app-demo `KF-dense-slot-access`
-- **Rows (14):** crates/boyko_render/src/gpu_upload.rs:216; crates/boyko_render/src/mesh_assets.rs:582; crates/boyko_render/src/texture.rs:709; crates/boyko_demo/src/sim/grid.rs:41; crates/boyko_demo/src/sim/resources.rs:134,142,191,193,195,199,211,212,213,214
+- **Rows (14):** crates/boyko_render/src/gpu_upload.rs:277; crates/boyko_render/src/mesh_assets.rs:582; crates/boyko_render/src/texture.rs:709; crates/boyko_demo/src/sim/grid.rs:41; crates/boyko_demo/src/sim/resources.rs:134,142,191,193,195,199,211,212,213,214
 - **Evidence:**
   - crates/boyko_ecs/src/ecs/core/component/dense/views.rs:239 "pub unsafe fn row_ptr(&self, slot: usize) -> *mut u8 {"
   - crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs:590 "pub fn dense_registry(&self) -> &crate::ecs::core::component::dense::DenseRegistry {"
@@ -1233,8 +1252,8 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Merged from:** physics-scene-math `KF-in-scope-barrier + ordered-parallel-emit (no ledger row)`
 - **Rows (0):** none: a capability with no active ledger row
 - **Evidence:**
-  - boyko_physics/src/resources.rs:650 "const MIN_PARALLEL_BODIES: usize = 4096;"
-  - boyko_physics/src/solver/colored.rs:227 "const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;"
+  - boyko_physics/src/resources.rs:659 "const MIN_PARALLEL_BODIES: usize = 4096;"
+  - boyko_physics/src/solver/colored.rs:228 "const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;"
   - D:/wt/joltab/docs/OPEN-QUESTIONS.md:5145 "The fix is one `pool.scope` per STEP instead of 72, which needs an in-scope BARRIER on"
 - **Group notes:**
   - (physics-scene-math) No ledger row needs it; recorded because the brief ties the ECS-paradigm answer to the Jolt residual. physics_narrowphase is a single serial loop over pairs, the broadphase runs one chunk below 4096 bodies, and colours under 256 slots are solved inline.
@@ -1259,7 +1278,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Merged from:** physics-scene-math `KF-lossless-hook-event`; ui-input `KF3-event-overflow-policy`; rhi `KF-drop-oldest-coalescing-event-lane`
 - **Rows (5):** crates/boyko_scene/src/asset_refs.rs:99; crates/boyko_scene/src/propagation.rs:133; crates/boyko_rhi_vulkan/src/window.rs:122; crates/boyko_input/src/raw/queue.rs:35,59
 - **Evidence:**
-  - boyko_ecs/src/ecs/core/component/hooks/deferred_master.rs:105 "pub fn resource_mut&lt;R: Resource>(&mut self) -> Option&lt;&mut R> {"
+  - boyko_ecs/src/ecs/core/component/hooks/deferred_master.rs:103 "pub fn resource_mut&lt;R: Resource>(&mut self) -> Option&lt;&mut R> {"
   - boyko_ecs/src/ecs/core/events/event_config.rs:47 "if capacity_per_lane == 0 \|\| capacity_per_lane > MAX_EVENT_CAPACITY {"
   - boyko_ecs/src/ecs/core/events/event_buffer.rs:358 "return Err(EcsError::EventBufferFull {"
   - boyko_ecs/src/ecs/core/events/event_dispatcher.rs:124 "Events sent during frame N become readable via [`events`] only after the"
@@ -1273,7 +1292,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 
 - **Status:** rejected. **Physics needs it:** no. **Kind:** capability.
 - **Rev 2:** REJECTED in rev 2 (writer change W5): one-frame UI messages are triggers raised through `Commands::trigger` and applied in the producer's apply window, which the successor waits for; no same-frame event mode is built. main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:330 "- Click, submit and hover-enter/leave become `Trigger`s with `Up` propagation, raised through `Commands::trigger` (EK8)." ; main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:345 "- A same-frame event mode: rejected (rev 1 reasons stand).". UL-D4's "KF-24 is built" half is superseded; its row stays an event.
-- **Rev 3:** Re-decided in rev 3 (item 3) against the one row that still asked for it, joltab `crates/boyko_scene/src/propagation.rs:133`, and REJECTED again with evidence. The detach observer runs in the producer's apply window, and the executor applies a completed system's commands and drains its deferred hooks before it decrements that system's ordered successors: joltab:crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:810 "self.systems[i].system.apply(world);" ; joltab:crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:817 "world.drain_deferred_hook_queue();" ; joltab:crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:831 "self.executor_scratch.pred_remaining[s] -= 1;". So the observer-to-system queue is delivered at the ordering edge, the same frame, for any system ordered before propagation. A same-frame event mode would add a publish step at every edge for every event type; this edge costs one push per detach.
+- **Rev 3:** Re-decided in rev 3 (item 3) against the one row that still asked for it, joltab `crates/boyko_scene/src/propagation.rs:133`, and REJECTED again with evidence. The detach observer runs in the producer's apply window, and the executor applies a completed system's commands and drains its deferred hooks before it decrements that system's ordered successors: joltab:crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:828 "self.systems[i].system.apply(world);" ; joltab:crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:835 "world.drain_deferred_hook_queue();" ; joltab:crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:849 "self.executor_scratch.pred_remaining[s] -= 1;". So the observer-to-system queue is delivered at the ordering edge, the same frame, for any system ordered before propagation. A same-frame event mode would add a publish step at every edge for every event type; this edge costs one push per detach.
 - **Adds to the kernel:** An event type's write lanes are published at a schedule ordering edge (after the producer, before its consumer), so a pair ordered within one frame sees the events that frame. Today they are visible only after the next update_events swap.
 - **Crates:** boyko_ecs, boyko_ui, boyko_input, boyko_scene
 - **Plan:** None.
@@ -1282,7 +1301,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Evidence:**
   - boyko_ecs/src/ecs/core/events/event_dispatcher.rs:43 "/// Called by `update_events`. Reads write lanes, flattens to `reader_buf`,"
   - boyko_ecs/src/ecs/core/events/event_dispatcher.rs:931 "// Frame 1: send; not yet visible."
-  - boyko_ecs/src/ecs/core/component/hooks/deferred_master.rs:105 "pub fn resource_mut&lt;R: Resource>(&mut self) -> Option&lt;&mut R> {"
+  - boyko_ecs/src/ecs/core/component/hooks/deferred_master.rs:103 "pub fn resource_mut&lt;R: Resource>(&mut self) -> Option&lt;&mut R> {"
   - boyko_ecs/src/ecs/core/events/event_config.rs:47 "if capacity_per_lane == 0 \|\| capacity_per_lane > MAX_EVENT_CAPACITY {"
   - boyko_ecs/src/ecs/core/events/event_buffer.rs:358 "return Err(EcsError::EventBufferFull {"
   - boyko_ecs/src/ecs/core/events/event_dispatcher.rs:124 "Events sent during frame N become readable via [`events`] only after the"
@@ -1407,7 +1426,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Evidence:**
   - crates/boyko_ecs/src/ecs/core/app/app.rs:214 "pub fn with_pool(pool: Arc&lt;ThreadPool>) -> Self {"
   - docs/memory/ALLOCATOR-DESIGN-SPACE.md:331 (main checkout D:/claude/BoykoEngine, untracked draft) "\| `Arc<ThreadPool>` in `Schedule`, `ScheduleBuilder`, `App` (`schedule.rs:122`, `app.rs:191`) \| **removed**: `Schedule::run(&mut self, master, pool: &ThreadPool)`; `ScheduleBuilder::build(self, pool: &ThreadPool)`. `App` owns the pool by value \|"
-  - [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:356 "one `TableSet` per pool ("PoolTables"): workers, stealers, lane rings, `ScopeArena`s, `PoolInner`; workers hold `NonNull<PoolInner>` valid until `Drop` joins them"; [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:352 "`App` owns the pool by value"
+  - [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:375 "one `TableSet` per pool ("PoolTables"): workers, stealers, lane rings, `ScopeArena`s, `PoolInner`; workers hold `NonNull<PoolInner>` valid until `Drop` joins them"; [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:371 "`App` owns the pool by value"
 - **Group notes:**
   - (pool-utils-log) A kernel-internal re-layout rather than a new capability for other crates; listed because it changes public signatures. The plan's TableSet is NOT needed for it (plain inline arrays suffice for &lt;= 64 workers) - see plan_conflicts.
 
@@ -1420,7 +1439,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Merged from:** pool-utils-log `KF-memory-below-the-pool`
 - **Rows (9):** crates/boyko_threadpool/src/block.rs:482; crates/boyko_threadpool/src/thread_pool.rs:113,132,135,401,664,682; crates/boyko_threadpool/src/worker.rs:43,347
 - **Evidence:**
-  - [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:105 "`boyko_memory` — new crate containing `vm.rs`, `vm_column.rs`, `utils.rs`"; [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:105 "Reason: `boyko_threadpool` and `boyko_utils` need reservations and cannot depend on `boyko_ecs`"
+  - [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:124 "`boyko_memory` — new crate containing `vm.rs`, `vm_column.rs`, `utils.rs`"; [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:124 "Reason: `boyko_threadpool` and `boyko_utils` need reservations and cannot depend on `boyko_ecs`"
 - **Group notes:**
   - (pool-utils-log) NARROWED against the inventory, which listed 'every non-C, non-T row of this group': boyko_utils needs no edge (SparseMap's users are all in boyko_ecs, SparseSlotMap is deleted in favour of a kernel table), and boyko_log needs none (its rows go to DspBuf in the same crate or are std-owned). Only the pool needs it, and only VmReservation, not VmColumn. Alternative recorded, not chosen: fold boyko_threadpool into boyko_ecs (no cycle: crates/boyko_ecs/Cargo.toml:8 "boyko-threadpool = { path = "../boyko_threadpool" }" is the only edge between them) - costs the pool's standalone loom/Miri harness.
 
@@ -1433,7 +1452,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Merged from:** pool-utils-log `KF-scope-arena-vm`
 - **Rows (4):** crates/boyko_threadpool/src/block.rs:482; crates/boyko_threadpool/src/scope.rs:1096; crates/boyko_threadpool/src/thread_pool.rs:278,328
 - **Evidence:**
-  - [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:113 "\| **Scope** \| `ScopeArena` (one per thread slot, `W+1`), replaces `ScopeBlock`'s `std::alloc` chunks and `Box<ScopeShared>`"; [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:326 "chunks = sub-ranges of the same `ScopeArena`"; fix [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:461 "\| C2 \| **`ScopeArena` slots keyed by `wid` collide.**"; obligation [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:467 "\| W1 \| The KE16 completion-protector Miri gate keys on a DEALLOCATION that rung 1a removes"
+  - [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:132 "\| **Scope** \| `ScopeArena` (one per thread slot, `W+1`), replaces `ScopeBlock`'s `std::alloc` chunks and `Box<ScopeShared>`"; [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:345 "chunks = sub-ranges of the same `ScopeArena`"; fix [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:480 "\| C2 \| **`ScopeArena` slots keyed by `wid` collide.**"; obligation [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:486 "\| W1 \| The KE16 completion-protector Miri gate keys on a DEALLOCATION that rung 1a removes"
 - **Group notes:**
   - (pool-utils-log) Thread identity via a const-initialised, Drop-free TLS pointer (no std TLS destructor), set by worker_main from the pool's per-worker table and, for external installers, by a spare-slot claim at the outermost install released in InstallGuard.
 
@@ -1446,7 +1465,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Merged from:** pool-utils-log `KF-inhouse-lanes`
 - **Rows (4):** crates/boyko_threadpool/src/thread_pool.rs:113,132,682; crates/boyko_threadpool/src/worker.rs:347
 - **Evidence:**
-  - [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:328 "**in-house bounded Chase-Lev** per lane on a `Table<Task>` ring in the pool's `TableSet`"
+  - [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:347 "**in-house bounded Chase-Lev** per lane on a `Table<Task>` ring in the pool's `TableSet`"
 - **Group notes:**
   - (pool-utils-log) Replaces a third-party crate; the plan lists it as rung 1d. Loom model mandatory per the plan.
 
@@ -1459,7 +1478,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Merged from:** pool-utils-log `KF-vmcolumn-ensure-len-zeroed`
 - **Rows (1):** crates/boyko_utils/src/sparse_map/sparse_map.rs:7
 - **Evidence:**
-  - [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:406 "add `ensure_len_zeroed`, `pop`"
+  - [main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:425 "add `ensure_len_zeroed`, `pop`"
 - **Group notes:**
   - (pool-utils-log) The ecs-storage group recorded the same need for component_pool_bundle's SparseMap ('VmColumn&lt;u32> needs a fill-on-grow op'); with the index+1 encoding a fill is never needed, only the zeroed grow.
 
@@ -1471,9 +1490,9 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_ecs, boyko_rhi, boyko_rhi_vulkan, boyko_app, boyko_utils (SparseSlotMap deleted)
 - **Plan:** Conflict: boyko_rhi/src/lib.rs plans the ecs edge, while ARCHITECTURE.md says the RHI does not depend on boyko_ecs.
 - **Merged from:** rhi `KF-kernel-storage-below-the-rhi`; pool-utils-log `KF-generational-table-reachable-from-rhi`
-- **Rows (44):** crates/boyko_utils/src/sparse_map/sparse_slot_map.rs:41,42,44; crates/boyko_rhi/src/handle.rs:78; crates/boyko_rhi_vulkan/src/device.rs:677,688,698,913,2358,2413,2545,2721,3114; crates/boyko_rhi_vulkan/src/framegraph/graph.rs:126,127,136,145,148,156,157,158,161,162,163,164,165,172,188,200,203,204,205; crates/boyko_rhi_vulkan/src/memory.rs:700; crates/boyko_rhi_vulkan/src/present/frame_driver.rs:48; crates/boyko_rhi_vulkan/src/present/surface.rs:180,238; crates/boyko_rhi_vulkan/src/present/swapchain.rs:64,66; crates/boyko_rhi_vulkan/src/suballocator.rs:65,68; crates/boyko_rhi_vulkan/src/window.rs:122,230,365,761
+- **Rows (44):** crates/boyko_utils/src/sparse_map/sparse_slot_map.rs:41,42,44; crates/boyko_rhi/src/handle.rs:78; crates/boyko_rhi_vulkan/src/device.rs:677,688,698,920,2415,2470,2602,2778,3171; crates/boyko_rhi_vulkan/src/framegraph/graph.rs:126,127,136,145,148,156,157,158,161,162,163,164,165,172,188,200,203,204,205; crates/boyko_rhi_vulkan/src/memory.rs:728; crates/boyko_rhi_vulkan/src/present/frame_driver.rs:48; crates/boyko_rhi_vulkan/src/present/surface.rs:180,238; crates/boyko_rhi_vulkan/src/present/swapchain.rs:64,66; crates/boyko_rhi_vulkan/src/suballocator.rs:65,68; crates/boyko_rhi_vulkan/src/window.rs:122,230,365,761
 - **Evidence:**
-  - The layering rule docs/ARCHITECTURE.md:174 "itself does NOT depend on `boyko_ecs` (so no cycle)." and the substrate choice boyko_rhi_vulkan/src/framegraph/graph.rs:13 "`boyko_ecs`'s `pub(crate)` `VmReservation` public; a single-reservation" are why these rows are std::Vec today. It is an architecture fork, not a values call, and it precedes every kernel destination in this group. It is also where the host migration lands: the present/record path must move from the runner (boyko_app/src/runner.rs:2640 "host.renderer.render_gbuffer_frame(") into NonSend systems for the FrameGraph and the singleton rows to reach their forms.
+  - The layering rule docs/ARCHITECTURE.md:174 "itself does NOT depend on `boyko_ecs` (so no cycle)." and the substrate choice boyko_rhi_vulkan/src/framegraph/graph.rs:13 "`boyko_ecs`'s `pub(crate)` `VmReservation` public; a single-reservation" are why these rows are std::Vec today. It is an architecture fork, not a values call, and it precedes every kernel destination in this group. It is also where the host migration lands: the present/record path must move from the runner (boyko_app/src/runner.rs:2646 "host.renderer.render_gbuffer_frame(") into NonSend systems for the FrameGraph and the singleton rows to reach their forms.
   - crates/boyko_rhi/src/lib.rs:28 "The `boyko_ecs` dependency and core's" / crates/boyko_rhi/src/lib.rs:29 "`DeviceColumnHandle(u64)` newtype land in Phase 4; for now the registry uses" (planned the edge) vs docs/ARCHITECTURE.md:174 "itself does NOT depend on `boyko_ecs` (so no cycle)."
 - **Group notes:**
   - (pool-utils-log) Same feature as the rhi group's 'KF-2 kernel storage reachable from the RHI layer' (its build script, ledger/ecsform_rhi/build.py) - dedupe on merge. Two realisations: the boyko_rhi -> boyko_ecs edge its header planned (no cycle: boyko_ecs does not depend on boyko_rhi), or the generational core moved into the bottom memory crate. The choice is the owner's (layering).
@@ -1486,11 +1505,11 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_ecs, boyko_render, boyko_scene
 - **Plan:** None.
 - **Merged from:** render `KF-assets-adopt-retiring`
-- **Rows that named it before rev 2 (2; none needs it now):** crates/boyko_render/src/mesh_assets.rs:712; crates/boyko_render/src/texture.rs:928
+- **Rows that named it before rev 2 (2; none needs it now):** crates/boyko_render/src/mesh_assets.rs:714; crates/boyko_render/src/texture.rs:928
 - **Evidence:**
   - boyko_ecs/src/ecs/core/asset/assets.rs:453 "pub fn fill(&mut self, handle: Handle&lt;T>, value: T) -> Result&lt;(), (AssetError, T)> {"
   - boyko_ecs/src/ecs/core/asset/assets.rs:998 "pub fn retire(&mut self, slot: u32) -> Option&lt;T> {"
-  - boyko_render/src/gpu_upload.rs:120 "let _ = assets.fill(staged.handle, gpu);"
+  - D:/wt/joltab@d11962a9:crates/boyko_render/src/gpu_upload.rs:120 "let _ = assets.fill(staged.handle, gpu);"
   - boyko_render/src/mesh.rs:204 "trivial drop), freeing NO device memory."
 - **Group notes:**
   - (render) It also closes the live defect this pass found: upload_assets drops a rejected MeshGpu/TextureGpu, whose drop glue frees no device memory. It would also unblock the recorded bindless-slot = asset-row-index unification.
@@ -1503,7 +1522,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_ecs, boyko_render
 - **Plan:** None.
 - **Merged from:** render `KF-assets-iter-mut`
-- **Rows that named it before rev 2 (3; none needs it now):** crates/boyko_render/src/gpu_upload.rs:216; crates/boyko_render/src/mesh_assets.rs:582; crates/boyko_render/src/texture.rs:709
+- **Rows that named it before rev 2 (3; none needs it now):** crates/boyko_render/src/gpu_upload.rs:277; crates/boyko_render/src/mesh_assets.rs:582; crates/boyko_render/src/texture.rs:709
 - **Evidence:**
   - boyko_ecs/src/ecs/core/asset/assets.rs:703 "pub fn iter(&self) -> impl Iterator&lt;Item = (Handle&lt;T>, &T)> + '_ {"
   - boyko_render/src/mesh_assets.rs:577 "// `Assets<T>` exposes no owned/mutable whole-table iteration (only the"
@@ -1542,17 +1561,18 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 
 - **Status:** decided. **Physics needs it:** no. **Kind:** kernel-internal technique.
 - **Rev 2:** Decided (section Decisions): intrusive dead-slot lists wherever the dead slot has a free word (InlandStore, the DenseStore s2e tombstone, archetype slab slots, registry records); a VmColumn stack where a slot must hold DEAD bytes (the physics K3 `dying` list, design section 8). LIFO order is preserved in both.
+- **Rev 4:** Rev 4: plan conflict PC1 is decided IN CODE for the entity free list. EM2′ (joltab 0afcbd7d) made it a claimable LIFO stack on a kernel column, joltab:crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs:89 "free: VmColumn&lt;Entity>,", because a worker claim has to be one RMW on a plain index (joltab:crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs:161 "let r = self.free_top.fetch_sub(1, Ordering::Relaxed);"), which an intrusive chain through dead slots cannot serve without a CAS and an ABA tag. The intrusive form stays the answer for the free lists that remain dispatcher-only (the dense store's, the physics K3 dying list).
 - **Adds to the kernel:** A storage's LIFO free list is threaded through its own dead slots (InlandStore, DenseStore s2e tombstones, archetype slab slots, registry records). Reuse order is preserved exactly, and the separate container is deleted.
 - **Crates:** boyko_ecs
 - **Plan:** RUST-ERGONOMICS sites it. Three plans disagree for free_entity_ids (plan conflicts PC1/PC2).
 - **Merged from:** ecs-storage `KF-intrusive-free-lists`
-- **Rows (4):** crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs:135; crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs:11; crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs:126; crates/boyko_ecs/src/ecs/core/entity/entity_master.rs:73
+- **Rows (4):** crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs:135; crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs:11; crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs:126; crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs:89
 - **Evidence:**
   - D:/wt/joltab/docs/RUST-ERGONOMICS.md:759 "`free_entity_ids: Vec<EntityId>` — a parallel data system by"
   - D:/wt/joltab/docs/RUST-ERGONOMICS.md:760 "principle 0 — can live in the dead slots' own bytes, halving the reallocations of a despawn"
   - crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs:34 "pub(crate) const TOMBSTONE: EntityId = EntityId(usize::MAX);"
   - crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs:124 "/// LIFO free list of tombstoned slots. `insert` pops here first so a freed"
-  - crates/boyko_ecs/src/ecs/core/entity/entity_master.rs:378 "self.free_entity_ids.push(entity_id);"
+  - D:/wt/joltab@d11962a9:crates/boyko_ecs/src/ecs/core/entity/entity_master.rs:378 "self.free_entity_ids.push(entity_id);"
 
 ### KF-42 Atomic views over kernel columns
 
@@ -1564,8 +1584,8 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Rows (4):** crates/boyko_ecs/src/ecs/core/component/enable/enable_presence.rs:318; crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs:72,163,173
 - **Evidence:**
   - crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs:60 "pub(crate) struct EnablePage([AtomicU64; WORDS_PER_PAGE]);"
-  - D:/claude/BoykoEngine/docs/memory/ALLOCATOR-DESIGN-SPACE.md:469 "\| W3 \| `VmColumn<EnablePage>` cannot type-check"
-  - crates/boyko_ecs/src/ecs/memory/vm_column.rs:30 "is deliberately NOT a general `Vec` replacement for droppable `T`."
+  - D:/claude/BoykoEngine/docs/memory/ALLOCATOR-DESIGN-SPACE.md:488 "\| W3 \| `VmColumn<EnablePage>` cannot type-check"
+  - crates/boyko_ecs/src/ecs/memory/vm_column.rs:31 "is deliberately NOT a general `Vec` replacement for droppable `T`."
 
 ### KF-43 Static type descriptors (derive output allocation-free)
 
@@ -1628,7 +1648,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Merged from:** rhi `KF46-window-entities`
 - **Rows (13):** crates/boyko_rhi_vulkan/src/present/frame_driver.rs:48; crates/boyko_rhi_vulkan/src/present/surface.rs:180,238; crates/boyko_rhi_vulkan/src/present/swapchain.rs:64,66; crates/boyko_rhi_vulkan/src/window.rs:122,230,274,352,365,761; crates/boyko_input/src/raw/queue.rs:35,59
 - **Evidence:**
-  - joltab:crates/boyko_app/src/window_info.rs:19 "pub struct WindowInfo {"
+  - joltab:crates/boyko_app/src/window_info.rs:20 "pub struct WindowInfo {"
   - main:docs/unification/ENGINE-RUNTIME-ECS-DECISIONS.md:57 "- **Cost.** Both options cost the same per frame. Per-window and per-player data are touched once per"
   - main:docs/unification/ENGINE-RUNTIME-ECS-DECISIONS.md:58 "frame per instance, so a component on an entity costs nothing measurable over a singleton resource."
   - joltab:crates/boyko_rhi_vulkan/src/window.rs:372 "os::SetWindowLongPtrW(hwnd, os::GWLP_USERDATA, input_ring as isize);"
@@ -1667,11 +1687,12 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 
 - **Status:** active. **Physics needs it:** conditional. **Kind:** capability. **Physics design:** K6. **Engine design:** K6' (engine).
 - **Rev 3:** Added in rev 3 (item 2, engine Q1). It is the ledger name for what superseded KF-37.
+- **Rev 4:** Rev 4 (W2): the host side of the retire pass (`host.rs:96/271`) joins the rows this feature releases.
 - **Adds to the kernel:** A K3 group with `RELEASE = Deferred` keeps a removed slot in its `dying` list with the bytes intact; `release_dense_group::<G>(horizon)` returns to `free` only the slots stamped before the horizon, with a visitor that frees the slot's device lane in the same pass.
 - **Crates:** boyko_ecs (provides); boyko_render, boyko_scene; physics uses the horizon-free form
 - **Plan:** The physics design's K6 generalised by the engine design (main:docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md:589 "\| 14 **(rev 2)** \| orphan queues \| NonSend `Vec<(T,u64)>` \| **K3 deferred release with a horizon** (ED16)").
 - **Merged from:** the physics entity model (no group feature)
-- **Rows (4):** crates/boyko_scene/src/asset_refs.rs:149; crates/boyko_render/src/asset_refcount.rs:556; crates/boyko_render/src/mesh_assets.rs:712; crates/boyko_render/src/texture.rs:928
+- **Rows (4):** crates/boyko_scene/src/asset_refs.rs:149; crates/boyko_render/src/asset_refcount.rs:575; crates/boyko_render/src/mesh_assets.rs:714; crates/boyko_render/src/texture.rs:928
 
 ## Primitives refuted
 
@@ -1749,30 +1770,49 @@ These are the cross-cutting conflicts, merged from the eleven groups. Every grou
    - 38 std-internal sites were uncounted, one of them per frame (item 5);
    - the path-conversion decision was applied two ways (item 6);
    - the rung rule put 11 class-K boyko_ecs rows after physics (item 7).
+11. **Rev 4: the ledger against its own rev-3 recheck, and against a tree that moved.** The recheck re-derived every rev-3 total and found them sound, with three consistency gaps; rev 4 closes each (change log, rev 3 -> rev 4): 19 kernel rows sat outside rung 2 while the rung-2 paragraph already claimed them (W1); one asset datum was filed under two forms (W2); and the log rotation's own path buffers were still `diagnostics` while the std calls they feed had moved (W3). Independently, the tree moved five commits, so joltab coordinates are re-pointed and the delta is censused. Two rechecks OF rev 4 followed. The first found two wrong kernel-feature row counts and a citation set stranded by a file rewritten outside this ledger (W4, W5), and named step 4's unwritten enumeration (W7). **The second falsified the first's own repair, and the sweeping claim under which it was signed off.** W6 had re-pointed two CORRECT citations onto a second tree's line numbers; and the pass that claimed "every joltab coordinate is re-pointed", checked by two independent scripts that each reported 0 failures, had in fact skipped every citation written without its `crates/...` prefix - the fixer and both checkers keyed on the same path shape, so the three agreements were one assumption counted three times. Ten coordinates were wrong in 13 renderings, one of them carried from before rev 4 (W8) - and a third recheck found thirteen more in 24 renderings that the second had certified "0 wrong", nine of them in exactly the abbreviated shape W8 had just repaired (W11). Also from the second recheck: the rung rule's step 4 said `active` kernel feature where the published rungs follow ANY feature, a 62-row gap between the written rule and the data it claims to generate (W9), and the TSV's relation to the group tables is one documented substitution, not identity (W10). **The lesson is the one this repository keeps re-learning in a new place: a green from N checkers is a green from ONE checker whenever the N share an assumption - and "is the citation written in the form my regex expects" is exactly such an assumption.** W6's two were found by resolving one citation against BOTH trees instead of one; W8's ten by a scan that keyed on the QUOTE and let the path float. Neither technique needs the citation to be written in any particular shape, which is the whole point. A fourth recheck found the rows, totals, rungs and the three work-order gaps sound, and the same failure one level up: a repair applied at the sites its finding named rather than across the finding's reach - W4 fixed two kernel-feature headers and left the three figures computed from the same rows (W15), and W12 read by content the cells holding four of five stale line pointers without re-reading the pointers, while the fifth was the unmoved half of a pair whose other half had been re-pointed (W16); ten renderings of deleted lines were also left unpinned (W17).
 
 Per-group conflict lists, verbatim: [ecs-storage](ledger/ecs-storage.md#plan-conflicts), [ecs-schedule](ledger/ecs-schedule.md#plan-conflicts), [ecs-services](ledger/ecs-services.md#plan-conflicts), [pool-utils-log](ledger/pool-utils-log.md#plan-conflicts), [physics-scene-math](ledger/physics-scene-math.md#plan-conflicts), [render](ledger/render.md#plan-conflicts), [rhi](ledger/rhi.md#plan-conflicts), [ui-input](ledger/ui-input.md#plan-conflicts), [app-demo](ledger/app-demo.md#plan-conflicts), [codec-tools](ledger/codec-tools.md#plan-conflicts), [macros-aether](ledger/macros-aether.md#plan-conflicts), [ui-lane](ledger/ui-lane.md#plan-conflicts), [reflect-lane](ledger/reflect-lane.md#plan-conflicts).
 
 ## Order of work
 
-The owner ordered the kernel finished first. Rows are assigned to rungs by one mechanical rule (rev 2, gap 5; step 4 widened in rev 3, item 7), applied in this order:
+The owner ordered the kernel finished first. Rows are assigned to rungs by one mechanical rule (rev 2, gap 5; step 4 widened in rev 3, item 7, and again in rev 4, W1), applied in this order:
 
 1. `out-of-scope:*` rows are not in a rung.
 2. `boyko_physics` rows go to rung 3.
 3. `boyko_threadpool` rows and `scope-arena` rows go to rung 5.
-4. **`boyko_ecs` rows go to rung 2 when they are `kernel-internal` (any class), class K, or a row of an active kernel feature (except class D and T)** (kernel-internal since rev 2, gap 5; the rest since rev 3, item 7: no kernel row waits for physics).
+4. **`boyko_ecs` rows go to rung 2 when their DESTINATION is the kernel's own storage or a kernel feature**: `kernel-internal` (any class), class K, a row that appears in ANY kernel feature's row list, or one of the **11 kernel-destination rows enumerated below**. *Any* feature, whatever its Status: a row list is a list of rows that datum would migrate onto, and a feature that is `decided`, `subsumed`, `superseded`, `withdrawn` or `rejected` still names rows whose destination is the kernel. Reading the disjunct as "a feature whose Status is `active`" (35 of the 43 features with row lists) mis-assigns **62 rows** - 42 that would fall to rung 4 and 20 to rung 6, most of them KF-01's, whose Status is `decided`; the published rungs follow the ANY reading, which reproduces all 2357 of them exactly (W8). Excluded: the `diagnostics` form (cold text, rung 6) and class T (std / third-party internals). Kernel-internal since rev 2 (gap 5), class K and kernel features since rev 3 (item 7), the destination reading since rev 4 (W1): no kernel row waits for physics.
 5. Rows of class B, D or X, and rows in `diagnostics`, go to rung 6.
 6. Other `kernel-internal` rows go to rung 2.
 7. Everything else goes to rung 4.
 
 A class-B row that constructs a field migrating in an earlier rung moves with that field in practice; the counts put it in rung 6 by its class.
 
+**Step 4's fourth disjunct is an ENUMERATION, not a predicate over the row data (named in rev 4's repair pass, W7).** The other three read a field: `ecs_form` = `kernel-internal`, `class` = K, and membership of any kernel feature's row list (Status ignored - see step 4). The fourth reads none — no column of the TSV or of the group tables says "this datum lands in the kernel's own storage, and no form or feature reached it". Rev 4 (W1) decided 11 rows that way, and before this pass they existed only as four prose categories inside the rung-2 paragraph, so a checker could not recompute the rung of any row without a human reading that prose. They are therefore named here, in full, and any future addition to this disjunct belongs in this list:
+
+| row | class | form | destination |
+|---|---|---|---|
+| `crates/boyko_ecs/src/ecs/core/events/event_buffer.rs:119` (`ThreadLaneWriter&lt;E>::write_buf`) | R | event | the event channel's typed per-lane write buffer |
+| `crates/boyko_ecs/src/ecs/core/events/event_buffer.rs:238` (`EventBuffer&lt;E>::reader_buf`) | R | event | the event channel's typed reader buffer |
+| `crates/boyko_ecs/src/ecs/core/events/event_buffer.rs:243` (`EventBuffer&lt;E>::lanes`) | R | event | the event channel's lane table |
+| `crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs:221` (`EventDispatcher::preregister::&lt;E>`) | R | event | the boxed typed buffer the dispatcher stores |
+| `crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs:117` (`EventDiagnostics::per_lane_overflow_count`) | D | resource-column | the dispatcher's own per-lane counter table (a kernel table, not cold text - which is why it is here and not in rung 6) |
+| `crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs:127` (`EcsMaster::nonsend_resources`) | R | resource-column | the NonSend resource store |
+| `crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:92` (`StateRegistration::insert`) | B | event | a state registration that becomes a kernel Command record |
+| `crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:144` (`ScheduleBuilder::state_registrations`) | B | event | the state-registration table |
+| `crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:160` (`ScheduleBuilder::new`) | B | event | the state-registration table's construction |
+| `crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:263` (`ScheduleBuilder::insert_state`) | B | event | a state registration that becomes a kernel Command record |
+| `crates/boyko_ecs/src/ecs/core/asset/path_index.rs:172` (`PathIndex::merge`) | B | resource-column | the asset path index's merge scratch over its own column |
+
+With this list and the three field reads, the seven steps reproduce the published rung of all 2357 active rows with no exception (checked in rev 4's repair pass). Every other step is already mechanical: step 3's `scope-arena` is an `ecs_form` value, not prose.
+
 |  | R2 | R3 | R4 | R5 | R6 | OOS | total |
 |---|---|---|---|---|---|---|---|
-| ecs-storage | 101 | . | 5 | . | 3 | . | 109 |
-| ecs-schedule | 142 | . | . | 6 | 18 | . | 166 |
-| ecs-services | 52 | . | 5 | . | 19 | 1 | 77 |
+| ecs-storage | 103 | . | 4 | . | 2 | . | 109 |
+| ecs-schedule | 146 | . | . | 6 | 14 | . | 166 |
+| ecs-services | 65 | . | 1 | . | 10 | 1 | 77 |
 | pool-utils-log | 6 | . | 15 | 32 | 12 | 66 | 131 |
-| physics-scene-math | . | 73 | 7 | . | 15 | . | 95 |
+| physics-scene-math | . | 80 | 7 | . | 15 | . | 102 |
 | render | 1 | . | 11 | . | 146 | 2 | 160 |
 | rhi | . | . | 39 | . | 18 | 7 | 64 |
 | ui-input | . | . | 8 | . | 75 | . | 83 |
@@ -1781,34 +1821,34 @@ A class-B row that constructs a field migrating in an earlier rung moves with th
 | macros-aether | 5 | . | . | . | . | 457 | 462 |
 | ui-lane | 5 | . | 44 | . | 95 | 52 | 196 |
 | reflect-lane | 2 | . | . | . | 5 | 17 | 24 |
-| **total** | **314** | **73** | **161** | **38** | **662** | **1102** | **2350** |
+| **total** | **333** | **80** | **156** | **38** | **648** | **1102** | **2357** |
 
 **Rung 1: the kernel features physics needs (0 rows of its own).** In the physics design's order: K1 (U1) -> K2 + K3 + K6 (U2) -> K4 (U3) -> K5a/b (P1/P2) -> K7 (S0). They realise ledger KF-01, KF-03, KF-11, KF-19, KF-20, KF-21, KF-22, KF-49. The ledger adds physics needs the design does not order: KF-04 Durable resource column (lifetime + serialization), KF-23 Event lane policies (lossless / drop-oldest / coalesce / non-system producers), KF-45 Engine thread-context column (replaces every thread_local!). Together the rung-1 features unblock 370 active rows, app-demo 18, ecs-schedule 44, ecs-services 13, ecs-storage 43, physics-scene-math 91, pool-utils-log 6, render 9, rhi 32, ui-input 24, ui-lane 90. KF-16 and KF-18 left rung 1 in rev 2 (withdrawn by physics Q3).
 
-**Rung 2: kernel-internal rows (314).** The ECS's own bookkeeping, the scheduler tables, the event and command channel storage, the static descriptors and the thread-context statics move onto the memory library. Since gap 5, every boyko_ecs kernel-internal row is here whatever its class; since rev 3, so is every boyko_ecs class-K row and every boyko_ecs row whose destination is a kernel feature (the scheduler's relation and dense rows, the observer stores, the query scratch, prefab and clone scratch, the asset kernel under engine Q1). It depends on the packing plan (docs/ecs/POOL-SUBGRANULAR-PACKING-PLAN.md): per-instance columns cost a 64 KiB commit granule each today and 4 KiB after it.
+**Rung 2: the kernel's own rows (333).** The ECS's own bookkeeping, the scheduler tables, the event and command channel storage, the static descriptors and the thread-context statics move onto the memory library. Since gap 5, every boyko_ecs kernel-internal row is here whatever its class; since rev 3, so is every boyko_ecs class-K row and every boyko_ecs row whose destination is a kernel feature (the scheduler's relation and dense rows, the observer stores, the query scratch, prefab and clone scratch, the asset kernel under engine Q1). Rev 4 (W1) closes the last gap between this paragraph and the rule: the 11 rows whose destination IS the kernel's own storage but which no form or feature reached - the typed event channel storage, the NonSend resource table, the state registrations that become Command records, the asset path index (each named with its file and line in the enumeration under the rule above, W7, because no row field distinguishes them) - and the 8 class-D rows rev 3 re-formed onto kernel columns and then left in rung 6 by a class clause. It depends on the packing plan (docs/ecs/POOL-SUBGRANULAR-PACKING-PLAN.md): per-instance columns cost a 64 KiB commit granule each today and 4 KiB after it.
 
-**Rung 3: physics (73 rows).** The rows move into the physics design's forms: `BodyGate` (W3), the K7 SoftBody segments (gap 3), the slot-keyed `PairCache` (gap 2), and the solver scratch that is already on ScratchColumn. At the same time the physics stages become parallel systems over dense kernel columns (K3/K4/K5). The serial fraction behind the Jolt residual (2.5x at W8, about 45 % serial) sits in exactly these stages.
+**Rung 3: physics (80 rows).** The rows move into the physics design's forms: `BodyGate` (W3), the K7 SoftBody segments (gap 3), the slot-keyed `PairCache` (gap 2), and the solver scratch that is already on ScratchColumn. At the same time the physics stages become parallel systems over dense kernel columns (K3/K4/K5). The serial fraction behind the Jolt residual (2.5x at W8, about 45 % serial) sits in exactly these stages.
 
-**Rung 4: rows in entity/system forms that are not kernel work (161).** Components, dense components, relations, events, enable-states, resource-columns and system-scratch outside physics, including the whole UI, plus 10 boyko_ecs rows that are neither kernel-internal, class K, nor a kernel-feature row (the typed event lanes, archetype-edge and bundle scratch, the NonSend resource table, a class-T path conversion). Rev 2's text said 'the other crates' rows' while 70 boyko_ecs rows sat here; rev 3 moves the kernel ones to rung 2 and names the rest.
+**Rung 4: rows in entity/system forms that are not kernel work (156).** Components, dense components, relations, events, enable-states, resource-columns and system-scratch outside physics, including the whole UI, plus the 5 boyko_ecs rows whose destination is neither kernel storage nor a kernel feature: four archetype-edge and migration scratch buffers the design ELIMINATES rather than moves (`required.rs:410`, `archetype.rs:1423`, `archetype_master.rs:742/767`) and one class-T std path conversion (`asset/server.rs:127`). Rev 2's text said 'the other crates' rows' while 70 boyko_ecs rows sat here; rev 3 moved the kernel ones to rung 2 and rev 4 (W1) the last 19.
 
 **Rung 5: scope arena and pool (38 rows).** block.rs onto the memory library (KF-32/33), the in-house lanes (KF-34), the pool's single reservation (KF-31) and the pool's thread-local statics (KF-45). Justified by unification; the heap A/B measured it as no speed lever.
 
-**Rung 6: setup, diagnostics and X last (662 rows).** Boot/load-path rows (B), the `diagnostics` form, and FFI handoff buffers (X).
+**Rung 6: setup, diagnostics and X last (648 rows).** Boot/load-path rows (B), the `diagnostics` form, and FFI handoff buffers (X). 26 boyko_ecs rows are here, and rev 4 names them, since the rule above sends kernel work to rung 2: 22 are cold `diagnostics` text (schedule-build errors, asset errors, the debug path-index guard), and 4 are class-B rows whose destination is neither kernel storage nor a kernel feature: two archetype / bundle id-set copies the design eliminates (`archetype_master.rs:481`, `bundle_api.rs:102`) and the two serialize-codec readers that materialise a USER component's field (`serialize/wire.rs:160/186`).
 
 **Out of scope (1102 rows):** out-of-scope:compile-time 1021, out-of-scope:test-only 40, out-of-scope:os-owned 31, out-of-scope:third-party 10.
 
-Check: R2 314 + R3 73 + R4 161 + R5 38 + R6 662 + out-of-scope 1102 = 2350 = total 2350.
+Check: R2 333 + R3 80 + R4 156 + R5 38 + R6 648 + out-of-scope 1102 = 2357 = total 2357.
 
-Rung counts through rev 3 (rev 1 and the gaps: the eleven groups; rev 2 and rev 3: all active rows):
+Rung counts through rev 4 (rev 1 and the gaps: the eleven groups; rev 2 onwards: all active rows):
 
-| rung | rev 1 (2193 rows) | after the gaps (2223) | rev 2 (2244 active) | rev 3 (2350 active) |
-|---|---|---|---|---|
-| R2 | 103 | 221 | 223 | 314 |
-| R3 | 71 | 73 | 73 | 73 |
-| R4 | 202 | 198 | 202 | 161 |
-| R5 | 35 | 38 | 38 | 38 |
-| R6 | 657 | 662 | 667 | 662 |
-| OOS | 1125 | 1031 | 1041 | 1102 |
+| rung | rev 1 (2193 rows) | after the gaps (2223) | rev 2 (2244 active) | rev 3 (2350 active) | rev 4 (2357 active) |
+|---|---|---|---|---|---|
+| R2 | 103 | 221 | 223 | 314 | 333 |
+| R3 | 71 | 73 | 73 | 73 | 80 |
+| R4 | 202 | 198 | 202 | 161 | 156 |
+| R5 | 35 | 38 | 38 | 38 | 38 |
+| R6 | 657 | 662 | 667 | 662 | 648 |
+| OOS | 1125 | 1031 | 1041 | 1102 | 1102 |
 
 ## Decisions (formerly undecided)
 
@@ -1825,7 +1865,7 @@ Rev 1 closed with 18 undecided forms, several marked "owner decision". Under the
 | Demo balls and boids | 18 | writer | Keep the demo's 2D solver on dense kernel columns (dense-component + system-scratch, KF-19/20) rather than porting the balls onto boyko_physics. |
 | ScopeShared placement | 10 | writer | The install frame: ScopeShared is a local of the frame that opens the scope, as the physics design places GangShared in lane 0's frame. The rows keep the form scope-arena; the kernel scope machinery owns the placement. |
 | Propagation detach queue and KF-24 (rev 3) | 1 | rev 3 item 3; engine ED9 | An event delivered at the ordering edge: the ChildOf on_remove observer appends to the propagation system's lane inside the producer's apply window, and the executor applies and drains that window before it decrements the producer's successors (verified on joltab, KF-24 section). KF-24 stays rejected. |
-| Rung rule step 4: kernel first (rev 3) | 297 | rev 3 item 7; the owner's order | Every boyko_ecs row that is kernel-internal, class K, or a row of an active kernel feature (except D and T) is in rung 2, before physics. |
+| Rung rule step 4: kernel first (rev 3, widened in rev 4) | 316 | rev 3 item 7; rev 4 W1; the owner's order | Every boyko_ecs row whose destination is the kernel's own storage or a kernel feature is in rung 2, before physics: kernel-internal (any class), class K, a kernel-feature row, or a row marked kernel-destination. Only cold `diagnostics` text and class-T std internals are excluded - rev 3 excluded class D outright, which left 9 rows it had itself re-formed onto kernel columns waiting behind physics. |
 | Supplementary rows (rev 3) | 38 | rev 3 item 5 | Counted rows. Boot env reads: out-of-scope:os-owned. Diagnostic env reads: diagnostics. Dump and sink path conversions: resource-column (the path rule). The per-frame BOYKO_VB_FORCE_CLASSIFIED read: a boot-read resource field. |
 | hover_entered | 1 | writer (W5); engine ED9 | An event in its trigger form (Commands::trigger); KF-24 is not built. |
 | SystemMeta::gpu_intent | 2 | follows KF-14 | A component on the system entity. |
@@ -1834,12 +1874,14 @@ Rev 1 closed with 18 undecided forms, several marked "owner decision". Under the
 | Fonts and sprite sheets | 18 | writer (W4); engine Q1 | Asset entities of table kinds: the per-asset record is a component; the glyph tables are write-once CSR bytes on resource-owned columns. UL-D3 is overturned by scope. |
 | SparseMap users | 9 | both groups agree | SparseMap moves into boyko_ecs on VmColumns; users leave through their own forms; block_groups is flattened to Copy ranges (no KF-02). |
 | Scratch id minting route (KF-01) | 324 | ui-lane UL-D6; = physics K1 / engine EK1 | A registry-free scratch band that does not consume component ids, with a contiguous stagger run per cohort. |
-| System-scratch backing | 370 | ui-lane UL-D5; engine EK13 deleted | ScratchColumn, per system, high-water retained, cleared by set_len. FrameArena is not built. |
+| System-scratch backing | 373 | ui-lane UL-D5; engine EK13 deleted | ScratchColumn, per system, high-water retained, cleared by set_len. FrameArena is not built. |
 | D rows: diagnostics form, narrowed (rev 3) | 376 | gap 6; W1/W2 for the lanes; rev 3 item 4 | Text and error payloads: the form `diagnostics`. Numeric captures (profiler samples, readback words, histograms, bit matrices): system-scratch when rebuilt per call, resource-column when retained across frames. Per-frame text: system-scratch, by its growth. |
-| T rows: third-party / std-internal form | 44 | gap 1 (TLS), writer (W6) | thread_local! statics: kernel-internal via KF-45. crossbeam internals: kernel-internal via KF-34. std internals: out-of-scope:os-owned while boot-only. One path rule since rev 3 (item 6): a std path conversion reachable after steady state (the boyko_log sink rotation and on-demand opens, AssetServer::load, save / load, the ui hot-reload poll, the end-of-run dumps) is resource-column, in-house UTF-16 Win32 FFI on a path pre-encoded into the owning record. Third-party-imposed types: out-of-scope:third-party. |
-| Asset rows under engine Q1 (KF-37 / KF-38; rev 3) | 34 | engine Q1; defect B; rev 3 item 2 | Assets are entities. GPU values are K3 Deferred group columns (dense-component) released through K6' (KF-49); the handle lists become in-place group walks; the refcount is a count-only relation (KF-48); Pinned is a marker component; live / free / dirty are the group's kernel bookkeeping; the staging queue is a Staged&lt;A::Cpu> component; decode payloads are load-system scratch. KF-37 superseded, KF-38 withdrawn. The fill-reject leak is fixed now with the existing Orphaned*Gpu queues. |
-| Physics sleep form | 4 | physics Q3 / D4 (W3) | BodyGate in the PhysicsBody dense group, plus transition events. |
-| Per-pair physics data | 2 | gap 2; physics D5 + D15 | resource-column PairCache keyed by stable body slots, double-buffered, fresh_step skip. |
+| T rows: third-party / std-internal form | 44 | gap 1 (TLS), writer (W6) | thread_local! statics: kernel-internal via KF-45. crossbeam internals: kernel-internal via KF-34. std internals: out-of-scope:os-owned while boot-only. One path rule since rev 3 (item 6): a std path conversion reachable after steady state (the boyko_log sink rotation and on-demand opens, AssetServer::load, save / load, the ui hot-reload poll, the end-of-run dumps) is resource-column, in-house UTF-16 Win32 FFI on a path pre-encoded into the owning record. Rev 4 (W3) applies the same rule to the PATHS those calls are given: the ten log-rotation name buffers were `diagnostics`, which holds text and error payloads, not a path; the third recheck applied it to the eleventh such path, the profiler stream's `.prev` name (W13). Third-party-imposed types: out-of-scope:third-party. |
+| Row identity of the physics pipeline (rev 4) | 7 | rev 4 delta census; defect A | The interim fix's state keeps the forms its own destination implies and is DELETED by the physics rungs, not migrated: the gather ids and the derived maps are system-scratch on KF-01 lanes, the previous-gather ids are a resource column (they cross the step boundary), and the added-row list is a group column of the body (design D15). All seven are already kernel columns, so they carry the M5 gate exception. |
+| Entity id recycling storage (rev 4) | 1 | rev 4 delta census; EM2′ | The recycled-entity stack is a `VmColumn<Entity>` on a kernel reservation, claimable by workers - plan conflict PC1 decided in code, against the intrusive dead-slot chain for THIS list. |
+| Asset rows under engine Q1 (KF-37 / KF-38; rev 3, completed in rev 4) | 36 | engine Q1; defect B; rev 3 item 2; rev 4 W2 | Assets are entities. GPU values are K3 Deferred group columns (dense-component) released through K6' (KF-49); the handle lists become in-place group walks; the refcount is a count-only relation (KF-48); Pinned is a marker component; live / free / dirty are the group's kernel bookkeeping; the staging queue is a Staged&lt;A::Cpu> component; decode payloads are load-system scratch. KF-37 superseded, KF-38 withdrawn. Rev 4 (W2) adds the host side of the retire pass (`host.rs:96/271`), which rev 3 left in a second form. The fill-reject leak is no longer a plan: it is fixed in the tree (defect B, joltab 7c327121), through the same Orphaned*Gpu queues. |
+| Physics sleep form | 0 | physics Q3 / D4 (W3) | BodyGate in the PhysicsBody dense group, plus transition events. |
+| Per-pair physics data | 3 | gap 2; physics D5 + D15 | resource-column PairCache keyed by stable body slots, double-buffered, fresh_step skip. |
 | SoftBody storage | 36 | gap 3; physics Q2 | K7 segmented dense column. |
 | thread_local! statics | 12 | gap 1; corrected by W7 | KF-45 thread-context column, reached by slot. |
 | Exclusive-system scratch | 21 | gap 7; = engine EK2 | KF-44 Local&lt;T> for exclusive systems. |
@@ -1852,7 +1894,7 @@ Rev 1 closed with 18 undecided forms, several marked "owner decision". Under the
 - **Overturned by:** The schedule-dispatch bench (the engine design's render-schedule budget of 2 us per frame at ~20 systems) regressing beyond band, or schedule build time beyond band.
 - **Source:** writer
 - **Current forms:** relation 18, component 6, dense-component 2
-- **Rows:** crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:122,161,172; crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:106,116,122,127,131,139,153,155,156,157,158,159,682,683,693; crates/boyko_ecs/src/ecs/core/schedule/system_descriptor.rs:50,55,62,80,81,82; crates/boyko_ecs/src/ecs/core/system/system_meta.rs:140,331
+- **Rows:** crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:122,172,183; crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:106,116,122,127,131,139,153,155,156,157,158,159,682,683,693; crates/boyko_ecs/src/ecs/core/schedule/system_descriptor.rs:50,55,62,80,81,82; crates/boyko_ecs/src/ecs/core/system/system_meta.rs:140,331
 
 ### Observers as entities (KF-15) (5 rows)
 
@@ -1915,7 +1957,7 @@ Rev 1 closed with 18 undecided forms, several marked "owner decision". Under the
 - **Overturned by:** The KE16 completion-protector Miri gate, re-established RED-first (W1), finding a use after the frame returns: then the first record of the scope block.
 - **Source:** writer
 - **Current forms:** scope-arena 10
-- **Rows:** crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs:139,263; crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs:341,406; crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:455,1341; crates/boyko_threadpool/src/block.rs:482; crates/boyko_threadpool/src/scope.rs:1096; crates/boyko_threadpool/src/thread_pool.rs:278,328
+- **Rows:** crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs:139,263; crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs:341,406; crates/boyko_ecs/src/ecs/core/schedule/schedule.rs:466,1359; crates/boyko_threadpool/src/block.rs:482; crates/boyko_threadpool/src/scope.rs:1096; crates/boyko_threadpool/src/thread_pool.rs:278,328
 
 ### Propagation detach queue and KF-24 (rev 3) (1 rows)
 
@@ -1926,14 +1968,14 @@ Rev 1 closed with 18 undecided forms, several marked "owner decision". Under the
 - **Current forms:** event 1
 - **Rows:** crates/boyko_scene/src/propagation.rs:133
 
-### Rung rule step 4: kernel first (rev 3) (297 rows)
+### Rung rule step 4: kernel first (rev 3, widened in rev 4) (316 rows)
 
-- **Decision:** Every boyko_ecs row that is kernel-internal, class K, or a row of an active kernel feature (except D and T) is in rung 2, before physics.
+- **Decision:** Every boyko_ecs row whose destination is the kernel's own storage or a kernel feature is in rung 2, before physics: kernel-internal (any class), class K, a kernel-feature row, or a row marked kernel-destination. Only cold `diagnostics` text and class-T std internals are excluded - rev 3 excluded class D outright, which left 9 rows it had itself re-formed onto kernel columns waiting behind physics.
 - **Why (performance):** Not a speed decision: an ordering decision taken on the owner's order. It moves no cost onto a hot path; it only removes the case where a physics rung waits on kernel storage that was scheduled after it.
 - **Overturned by:** none; a kernel row that turns out to depend on a physics feature moves with that feature.
-- **Source:** rev 3 item 7; the owner's order
-- **Current forms:** kernel-internal 210, system-scratch 40, relation 26, component 12, resource-column 4, event 3, dense-component 2
-- **Rows:** 297, by group: ecs-schedule 142, ecs-services 52, ecs-storage 101, reflect-lane 2. The filter above identifies them.
+- **Source:** rev 3 item 7; rev 4 W1; the owner's order
+- **Current forms:** kernel-internal 210, system-scratch 48, relation 26, component 12, event 11, resource-column 7, dense-component 2
+- **Rows:** 316, by group: ecs-schedule 146, ecs-services 65, ecs-storage 103, reflect-lane 2. The filter above identifies them.
 
 ### Supplementary rows (rev 3) (38 rows)
 
@@ -1942,7 +1984,7 @@ Rev 1 closed with 18 undecided forms, several marked "owner decision". Under the
 - **Overturned by:** none expected
 - **Source:** rev 3 item 5
 - **Current forms:** out-of-scope:os-owned 19, resource-column 11, diagnostics 8
-- **Rows:** crates/boyko_app/src/gpu_scene/mod.rs:4339,4544,6415; crates/boyko_app/src/host_dump.rs:67,237; crates/boyko_app/src/hzb_dump.rs:86,277; crates/boyko_app/src/particle_readback.rs:601; crates/boyko_app/src/plugins.rs:224,227,228,246,276,316,792,843,844; crates/boyko_app/src/profiling/artifact.rs:760; crates/boyko_app/src/profiling/stream.rs:218,245,246,248; crates/boyko_app/src/runner.rs:161,385,411,422,537,748,1060,1078,1110,2946; crates/boyko_app/src/vb_cull_probe.rs:97,204; crates/boyko_app/src/vb_probe_dump.rs:104,220; crates/boyko_app/src/vg_census_dump.rs:101,350
+- **Rows:** crates/boyko_app/src/gpu_scene/mod.rs:4339,4544,6415; crates/boyko_app/src/host_dump.rs:67,237; crates/boyko_app/src/hzb_dump.rs:86,277; crates/boyko_app/src/particle_readback.rs:601; crates/boyko_app/src/plugins.rs:224,227,228,246,276,316,792,843,844; crates/boyko_app/src/profiling/artifact.rs:760; crates/boyko_app/src/profiling/stream.rs:218,245,246,248; crates/boyko_app/src/runner.rs:161,385,411,422,537,748,1066,1084,1116,2952; crates/boyko_app/src/vb_cull_probe.rs:97,204; crates/boyko_app/src/vb_probe_dump.rs:104,220; crates/boyko_app/src/vg_census_dump.rs:101,350
 
 ### hover_entered (1 rows)
 
@@ -1978,7 +2020,7 @@ Rev 1 closed with 18 undecided forms, several marked "owner decision". Under the
 - **Overturned by:** A spawn/despawn churn bench beyond band.
 - **Source:** writer
 - **Current forms:** kernel-internal 4
-- **Rows:** crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs:135; crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs:11; crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs:126; crates/boyko_ecs/src/ecs/core/entity/entity_master.rs:73
+- **Rows:** crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs:135; crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs:11; crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs:126; crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs:89
 
 ### Fonts and sprite sheets (18 rows)
 
@@ -2007,14 +2049,14 @@ Rev 1 closed with 18 undecided forms, several marked "owner decision". Under the
 - **Current forms:** system-scratch 212, kernel-internal 44, dense-component 37, resource-column 23, component 4, event 3, relation 1
 - **Rows:** 324, by group: app-demo 7, ecs-schedule 44, ecs-services 7, ecs-storage 35, physics-scene-math 85, render 3, rhi 31, ui-input 22, ui-lane 90. The filter above identifies them.
 
-### System-scratch backing (370 rows)
+### System-scratch backing (373 rows)
 
 - **Decision:** ScratchColumn, per system, high-water retained, cleared by set_len. FrameArena is not built.
 - **Why (performance):** Steady state does no work; one bump arena cannot grow several lanes at once.
 - **Overturned by:** The resident commit of the scratch columns (64 KiB per column before the packing plan) over a memory budget.
 - **Source:** ui-lane UL-D5; engine EK13 deleted
-- **Current forms:** system-scratch 370
-- **Rows:** 370, by group: app-demo 30, codec-tools 46, ecs-schedule 8, ecs-services 8, ecs-storage 38, physics-scene-math 46, render 50, rhi 41, ui-input 14, ui-lane 89. The filter above identifies them.
+- **Current forms:** system-scratch 373
+- **Rows:** 373, by group: app-demo 28, codec-tools 46, ecs-schedule 8, ecs-services 8, ecs-storage 38, physics-scene-math 51, render 50, rhi 41, ui-input 14, ui-lane 89. The filter above identifies them.
 
 ### D rows: diagnostics form, narrowed (rev 3) (376 rows)
 
@@ -2022,44 +2064,62 @@ Rev 1 closed with 18 undecided forms, several marked "owner decision". Under the
 - **Why (performance):** Cold text: I-cache and the emitting thread's time dominate, and deferred formatting moves the work to the drain. A capture is data an armed probe reads: a ScratchColumn lane reserved at its bound, or a resource column that lives until the report, does no growth reallocation.
 - **Overturned by:** none expected
 - **Source:** gap 6; W1/W2 for the lanes; rev 3 item 4
-- **Current forms:** diagnostics 301, resource-column 51, system-scratch 22, out-of-scope:os-owned 2
+- **Current forms:** diagnostics 290, resource-column 62, system-scratch 22, out-of-scope:os-owned 2
 - **Rows:** 376, by group: app-demo 182, codec-tools 1, ecs-schedule 14, ecs-services 16, ecs-storage 1, pool-utils-log 14, reflect-lane 5, render 80, rhi 2, ui-input 44, ui-lane 17. The filter above identifies them.
 
 ### T rows: third-party / std-internal form (44 rows)
 
-- **Decision:** thread_local! statics: kernel-internal via KF-45. crossbeam internals: kernel-internal via KF-34. std internals: out-of-scope:os-owned while boot-only. One path rule since rev 3 (item 6): a std path conversion reachable after steady state (the boyko_log sink rotation and on-demand opens, AssetServer::load, save / load, the ui hot-reload poll, the end-of-run dumps) is resource-column, in-house UTF-16 Win32 FFI on a path pre-encoded into the owning record. Third-party-imposed types: out-of-scope:third-party.
+- **Decision:** thread_local! statics: kernel-internal via KF-45. crossbeam internals: kernel-internal via KF-34. std internals: out-of-scope:os-owned while boot-only. One path rule since rev 3 (item 6): a std path conversion reachable after steady state (the boyko_log sink rotation and on-demand opens, AssetServer::load, save / load, the ui hot-reload poll, the end-of-run dumps) is resource-column, in-house UTF-16 Win32 FFI on a path pre-encoded into the owning record. Rev 4 (W3) applies the same rule to the PATHS those calls are given: the ten log-rotation name buffers were `diagnostics`, which holds text and error payloads, not a path; the third recheck applied it to the eleventh such path, the profiler stream's `.prev` name (W13). Third-party-imposed types: out-of-scope:third-party.
 - **Why (performance):** The TLS and crossbeam replacements remove measured per-read and per-thread costs. The path rule removes one allocation and one UTF-8 to UTF-16 transcode per call after steady state, and it keeps a deny-after-steady gate from aborting inside std.
 - **Overturned by:** An msvc TLS A/B for KF-45; for the path rule, a counting #[global_allocator] showing std path calls no longer allocate (then those rows are deleted, not moved).
 - **Source:** gap 1 (TLS), writer (W6)
 - **Current forms:** resource-column 16, kernel-internal 14, out-of-scope:third-party 10, out-of-scope:os-owned 4
 - **Rows:** 44, by group: app-demo 10, codec-tools 2, ecs-services 5, ecs-storage 2, pool-utils-log 23, ui-lane 2. The filter above identifies them.
 
-### Asset rows under engine Q1 (KF-37 / KF-38; rev 3) (34 rows)
+### Row identity of the physics pipeline (rev 4) (7 rows)
 
-- **Decision:** Assets are entities. GPU values are K3 Deferred group columns (dense-component) released through K6' (KF-49); the handle lists become in-place group walks; the refcount is a count-only relation (KF-48); Pinned is a marker component; live / free / dirty are the group's kernel bookkeeping; the staging queue is a Staged&lt;A::Cpu> component; decode payloads are load-system scratch. KF-37 superseded, KF-38 withdrawn. The fill-reject leak is fixed now with the existing Orphaned*Gpu queues.
+- **Decision:** The interim fix's state keeps the forms its own destination implies and is DELETED by the physics rungs, not migrated: the gather ids and the derived maps are system-scratch on KF-01 lanes, the previous-gather ids are a resource column (they cross the step boundary), and the added-row list is a group column of the body (design D15). All seven are already kernel columns, so they carry the M5 gate exception.
+- **Why (performance):** It is the cost of row identity, and the unified model removes the cost rather than paying it better: D1 stable slots (U5) delete the map, U6 moves the latch into `BodyGate`, U7's `PairCache` deletes the rest and the file with it.
+- **Overturned by:** The physics rungs landing (then these rows leave the ledger), or a measurement showing the aligned walk costs more than the slot addressing it stands in for.
+- **Source:** rev 4 delta census; defect A
+- **Current forms:** system-scratch 5, dense-component 1, resource-column 1
+- **Rows:** crates/boyko_physics/src/narrowphase/axis_cache.rs:193; crates/boyko_physics/src/resources.rs:3103; crates/boyko_physics/src/row_identity.rs:301,303,305,307,309
+
+### Entity id recycling storage (rev 4) (1 rows)
+
+- **Decision:** The recycled-entity stack is a `VmColumn<Entity>` on a kernel reservation, claimable by workers - plan conflict PC1 decided in code, against the intrusive dead-slot chain for THIS list.
+- **Why (performance):** A claim is one `fetch_sub` plus one read of an immutable entry; an intrusive chain would need a CAS with an ABA tag to be worker-claimable, and the dispatcher-only lists keep the intrusive form (KF-41).
+- **Overturned by:** A spawn/despawn churn bench where the stack costs more than the chain at W=1, with the claim path unchanged.
+- **Source:** rev 4 delta census; EM2′
+- **Current forms:** kernel-internal 1
+- **Rows:** crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs:89
+
+### Asset rows under engine Q1 (KF-37 / KF-38; rev 3, completed in rev 4) (36 rows)
+
+- **Decision:** Assets are entities. GPU values are K3 Deferred group columns (dense-component) released through K6' (KF-49); the handle lists become in-place group walks; the refcount is a count-only relation (KF-48); Pinned is a marker component; live / free / dirty are the group's kernel bookkeeping; the staging queue is a Staged&lt;A::Cpu> component; decode payloads are load-system scratch. KF-37 superseded, KF-38 withdrawn. Rev 4 (W2) adds the host side of the retire pass (`host.rs:96/271`), which rev 3 left in a second form. The fill-reject leak is no longer a plan: it is fixed in the tree (defect B, joltab 7c327121), through the same Orphaned*Gpu queues.
 - **Why (performance):** The draw path does not resolve a handle per draw (engine Q1); structural changes happen at load and unload, not per frame; one store per kind replaces the duplicated tables and their sync step.
 - **Overturned by:** The engine AS2 handle-resolution microbench.
-- **Source:** engine Q1; defect B; rev 3 item 2
-- **Current forms:** system-scratch 21, dense-component 7, kernel-internal 3, component 2, relation 1
-- **Rows:** crates/boyko_ecs/src/ecs/core/asset/assets.rs:204,205,206,207; crates/boyko_ecs/src/ecs/core/asset/staging.rs:58; crates/boyko_scene/src/asset_refs.rs:99,149; crates/boyko_render/src/asset_refcount.rs:556; crates/boyko_render/src/gpu_upload.rs:216; crates/boyko_render/src/loaders/glb.rs:786,831,857,915,916; crates/boyko_render/src/loaders/obj.rs:183,187,188; crates/boyko_render/src/loaders/png_texture.rs:42,50; crates/boyko_render/src/mesh_assets.rs:582,712; crates/boyko_render/src/mesh_data.rs:28,30; crates/boyko_render/src/texture.rs:709,928; crates/boyko_render/src/texture_data.rs:28; crates/boyko_fontbake/src/atlas.rs:116; crates/boyko_image/src/png.rs:60,378,381,421,430,441,456
+- **Source:** engine Q1; defect B; rev 3 item 2; rev 4 W2
+- **Current forms:** system-scratch 21, dense-component 9, kernel-internal 3, component 2, relation 1
+- **Rows:** crates/boyko_ecs/src/ecs/core/asset/assets.rs:204,205,206,207; crates/boyko_ecs/src/ecs/core/asset/staging.rs:58; crates/boyko_scene/src/asset_refs.rs:99,149; crates/boyko_render/src/asset_refcount.rs:575; crates/boyko_render/src/gpu_upload.rs:277; crates/boyko_render/src/loaders/glb.rs:786,831,857,915,916; crates/boyko_render/src/loaders/obj.rs:183,187,188; crates/boyko_render/src/loaders/png_texture.rs:42,50; crates/boyko_render/src/mesh_assets.rs:582,714; crates/boyko_render/src/mesh_data.rs:28,30; crates/boyko_render/src/texture.rs:709,928; crates/boyko_render/src/texture_data.rs:28; crates/boyko_app/src/host.rs:96,271; crates/boyko_fontbake/src/atlas.rs:116; crates/boyko_image/src/png.rs:60,378,381,421,430,441,456
 
-### Physics sleep form (4 rows)
+### Physics sleep form (0 rows)
 
 - **Decision:** BodyGate in the PhysicsBody dense group, plus transition events.
 - **Why (performance):** No extra load: the solver already streams the co-slotted group.
 - **Overturned by:** None expected (the physics decisions file).
 - **Source:** physics Q3 / D4 (W3)
-- **Current forms:** dense-component 4
-- **Rows:** crates/boyko_physics/src/resources.rs:3057,3062,3104,3105
+- **Current forms:** no active rows
+- **Rows:** none
 
-### Per-pair physics data (2 rows)
+### Per-pair physics data (3 rows)
 
 - **Decision:** resource-column PairCache keyed by stable body slots, double-buffered, fresh_step skip.
 - **Why (performance):** Equal probe cost; read-old/write-new unblocks a parallel narrowphase.
 - **Overturned by:** The physics design's U7 and G-jolt gates.
 - **Source:** gap 2; physics D5 + D15
-- **Current forms:** resource-column 2
-- **Rows:** crates/boyko_physics/src/narrowphase/axis_cache.rs:128; crates/boyko_physics/src/solver/warm_start.rs:214
+- **Current forms:** resource-column 2, system-scratch 1
+- **Rows:** crates/boyko_physics/src/narrowphase/axis_cache.rs:179,193; crates/boyko_physics/src/solver/warm_start.rs:221
 
 ### SoftBody storage (36 rows)
 
@@ -2117,35 +2177,39 @@ The ui-lane decided UL-D1 to UL-D7 and the reflect lane six questions (their gro
 
 ## Defects
 
-Two latent defects came out of the ledger work. Each was traced in code on `D:/wt/joltab` at HEAD `d11962a9` (crates/*/src identical to `ca582e72`); nothing was built or run.
+Two latent defects came out of the ledger work. Each was traced in code on `D:/wt/joltab` at HEAD `d11962a9` (crates/*/src identical to `ca582e72`); nothing was built or run. **Rev 4: both are repaired in the tree this revision names (`d552be05`).** The traces below are kept as written - they are what found the defects - so their citations are pinned to `d11962a9` where the code they quote is gone; each defect ends with a rev-4 status.
 
 ### A. Row-keyed physics state - CONFIRMED, and worse than rev 1 said
 
-A body's solver row is its position in the gather's walk over matching archetypes, and a despawn swap-removes that row: joltab:crates/boyko_ecs/src/ecs/core/archetype/archetype.rs:1268 "self.entity_ids.swap_remove(removed_unit_index.0);". The sleep latch is only resized, never re-keyed: joltab:crates/boyko_physics/src/resources.rs:3187 "self.asleep.resize(n_rows, false);". The docs claim the opposite: joltab:crates/boyko_physics/src/resources.rs:3013 "/// splitting. Body ROWS, by contrast, are STABLE across frames (the gather is FULL".
+A body's solver row is its position in the gather's walk over matching archetypes, and a despawn swap-removes that row: joltab:crates/boyko_ecs/src/ecs/core/archetype/archetype.rs:1268 "self.entity_ids.swap_remove(removed_unit_index.0);". The sleep latch is only resized, never re-keyed: joltab:crates/boyko_physics/src/resources.rs:3216 "self.asleep.resize(n_rows, false);". The docs claim the opposite: D:/wt/joltab@d11962a9:crates/boyko_physics/src/resources.rs:3013 "/// splitting. Body ROWS, by contrast, are STABLE across frames (the gather is FULL".
 
 - **A1 - unbounded.** A body spawned into a latched row (despawn P_j with j < n, so Pn moves into row j, then spawn E at rest in mid-air; or the reverse order) inherits `asleep = true`, its one-member island stays frozen, gravity is undone on restore, and it never moves until an awake body touches it. Rev 1 and the physics research called this "frozen for one frame".
 - **A2 - bounded, performance.** An unrelated despawn moves a sleeping pile member into an awake row: the whole pile island is solved for another `sleep_frames` steps (60 by default).
 - **A3.** A fast mover freezes for one step (the research's F-3). With bodies over several archetypes, any structural change in a non-last archetype shifts every later row by one.
-- **Warm start - CONFIRMED on the default path.** Keys are built from rows (joltab:crates/boyko_physics/src/solver/colored.rs:1664 "warm_start::pack(m.body_a, m.body_b, cp.feature_id)"), sphere contacts share feature id 0, and warm start is on by default (joltab:crates/boyko_physics/src/solver/colored.rs:1456 "warm_start_enabled: true,"). A survivor moved into a despawned body's row reads that body's stored impulse for one step: a wrong HIT, not the MISS the module doc claims. This is the gap's DC-PAIR-1, now confirmed.
+- **Warm start - CONFIRMED on the default path.** Keys are built from rows (joltab:crates/boyko_physics/src/solver/colored.rs:1731 "warm_start::pack(m.body_a, m.body_b, cp.feature_id)"), sphere contacts share feature id 0, and warm start is on by default (joltab:crates/boyko_physics/src/solver/colored.rs:1465 "warm_start_enabled: true,"). A survivor moved into a despawned body's row reads that body's stored impulse for one step: a wrong HIT, not the MISS the module doc claims. This is the gap's DC-PAIR-1, now confirmed.
 - **BoxAxisCache - key reuse CONFIRMED, REFUTED as a correctness defect:** an inherited axis is kept only within 5 % of the best depth (joltab:crates/boyko_physics/src/narrowphase/box_box.rs:246 "Some(last) if last.index != best.index && best.depth >= last.depth / HYSTERESIS_RATIO => last,").
-- **Exposure.** Sleeping is off by default (joltab:crates/boyko_physics/src/resources.rs:480 "sleeping: false,"); warm start is on.
+- **Exposure.** Sleeping is off by default (joltab:crates/boyko_physics/src/resources.rs:489 "sleeping: false,"); warm start is on.
 
 **Decision (performance first, bugs before features).**
 
 1. **Latch: partial fix now.** Clear the latch on any row whose `RigidBody` was added since the solver last ran, in a pass that runs only when sleeping is on, walking in gather order. It removes A1 in both orders. Overturned by `benches/sleeping.rs` regressing beyond noise (then fold the read into the gather). A2 and the one-step freeze remain until the physics U6 rung.
 2. **Warm start: deferred to physics U5 + U7** (slot identity, `fresh_step`). The gather cannot identify a swap-moved body today, and an interim identity would be thrown away at U5. Overturned by the warm-start red-first test showing a survivor velocity jump above 10x resting noise, or visible pops: then an interim 16 B/row last-position column marks the row fresh.
-3. **Land now:** three device-free red-first tests on the `sleeping_pipeline_o8.rs` harness (A1 in both orders: E's y < 3.0 after 30 steps, today exactly 4.0; A2: every pile row asleep after the step; warm start: the survivor's velocity matches a control run), and corrections of the false claims at `resources.rs:3013-3014, 3055-3056, 3173-3177`, `warm_start.rs:35-41`, `axis_cache.rs:28-34`.
+3. **Land now:** three device-free red-first tests on the `sleeping_pipeline_o8.rs` harness (A1 in both orders: E's y < 3.0 after 30 steps, today exactly 4.0; A2: every pile row asleep after the step; warm start: the survivor's velocity matches a control run), and corrections of the false claims at `D:/wt/joltab@d11962a9:` `crates/boyko_physics/src/resources.rs:3013-3014, 3055-3056, 3173-3177`, `crates/boyko_physics/src/solver/warm_start.rs:35-41`, `crates/boyko_physics/src/narrowphase/axis_cache.rs:28-34` (all five ranges are where the claims stood at `d11962a9`; `d552be05` removed or rewrote every one of them, see the rev-4 status below, and none of the five ranges holds the claim there).
 4. **The physics design covers it structurally** (D1 stable slots at U5, D4 `BodyGate` whose DEAD value means awake at U6, D15 `fresh_step` at U7). Widen U6's red-first gate from F-3 to A1 (both orders), A2 and the cross-archetype shift. In the ledger, writer change W3 puts the latch in `BodyGate`.
+
+**Rev-4 status: interim fix landed (joltab `b74f7ee8`), A1 and the warm-start wrong HIT closed.** The gather now records the `EntityId` of every row and the rows whose `RigidBody` was added, and builds `prev_row[r]` when the rows changed (joltab:crates/boyko_physics/src/row_identity.rs:372 "pub(crate) fn finish_gather(&mut self) {"). Each row-keyed consumer carries its state through that map: the sleep latch is permuted (joltab:crates/boyko_physics/src/resources.rs:3235 "pub(crate) fn rekey_rows(&mut self, rows: &RowIdentity) {"), both solvers translate every warm-start lookup, and the box axis cache pre-reads every candidate pair before the first write of a changed step (joltab:crates/boyko_physics/src/narrowphase/axis_cache.rs:352 "pub(crate) fn begin_frame_synced("). The decision above said "warm start: deferred to physics U5 + U7"; the implementation overtook it, and the module says what it cost: the wrong HIT was measured at 2.57e-5 m/s against a control run (joltab:crates/boyko_physics/src/solver/warm_start.rs:39 "//! cube, before lookups were translated, the moved cube left the next step 2.57e-5 m/s"). What remains is the one-gather window for a spawn applied inside the schedule run before the gather, which the module states as its own bound, and the structural end state is unchanged: U5 stable slots, U6 `BodyGate`, U7 `PairCache`. The seven rows of the map are in this ledger (physics-scene-math, rev-4 delta census) and are deleted by those rungs, not migrated.
 
 ### B. Rejected GPU uploads leak device memory - CONFIRMED in code, latent in practice
 
-The only production `Assets::fill` caller discards the rejected value: joltab:crates/boyko_render/src/gpu_upload.rs:120 "let _ = assets.fill(staged.handle, gpu);". Dropping a `MeshGpu` frees nothing (joltab:crates/boyko_render/src/mesh.rs:131 "/// `MeshGpu` does NOT implement `Drop`: an RHI [`BoundBuffer`] must be destroyed through"), and the fill doc names the obligation (joltab:crates/boyko_ecs/src/ecs/core/asset/assets.rs:450 "/// device buffers/BLAS it holds leak."). For meshes the lost value holds a vertex and an index buffer, a BLAS under `hwrt`, and a geometry-table slot when that table is armed; for textures a `VulkanTexture` and a bindless slot.
+The only production `Assets::fill` caller discards the rejected value: D:/wt/joltab@d11962a9:crates/boyko_render/src/gpu_upload.rs:120 "let _ = assets.fill(staged.handle, gpu);". Dropping a `MeshGpu` frees nothing (joltab:crates/boyko_render/src/mesh.rs:131 "/// `MeshGpu` does NOT implement `Drop`: an RHI [`BoundBuffer`] must be destroyed through"), and the fill doc names the obligation (joltab:crates/boyko_ecs/src/ecs/core/asset/assets.rs:450 "/// device buffers/BLAS it holds leak."). For meshes the lost value holds a vertex and an index buffer, a BLAS under `hwrt`, and a geometry-table slot when that table is armed; for textures a `VulkanTexture` and a bindless slot.
 
 - **How a fill is rejected.** Between `AssetServer::load` (the row is Loading) and the boot drain, the row leaves Loading by (a) `assets.remove`, (b) the last MeshRef dropping to zero on the Loading row, or (c) the same handle staged twice. The drain then allocates and `fill` fails with StaleHandle.
 - **Reachability.** The drain runs once, at boot, after every startup system; no in-tree scene calls `load`. (a) and (c) are reachable from any user startup system; (b) at boot was not established. All three become the normal streaming race once the drain runs every frame.
-- **The queue built for this has no producer:** joltab:crates/boyko_render/src/mesh_assets.rs:729 "/// (no `fill` caller exists in-tree yet, so this is always `true` today).".
+- **The queue built for this has no producer:** D:/wt/joltab@d11962a9:crates/boyko_render/src/mesh_assets.rs:729 "/// (no `fill` caller exists in-tree yet, so this is always `true` today).".
 
-**Decision: fix now; the path is cold, so the fix costs nothing on success.** Route the `Err` value into the existing `OrphanedMeshGpu` / `OrphanedTextureGpu` queues (inserted, drained behind the fence gate, force-drained at shutdown), and make `OrphanedMeshGpu::drain_ready` unregister a non-reserved `geometry_slot`. Under engine Q1 the end state is the K6' group release (KF-37 superseded). Red-first: a `gpu:` device test on the f6 churn harness (reserve, stage, remove in a startup system; assert the orphan queue is non-empty, and no undestroyed VkBuffer at teardown with validation on); a device-free tripwire (`clippy::let_underscore_must_use` on `gpu_upload.rs:120`) checks text only. Not traced further: `MeshGeometryTable::unregister` (joltab:crates/boyko_render/src/mesh_geometry_table.rs:758 "pub fn unregister(&mut self, slot: u32, retire_frame: u64) {") has no caller, so under a VisibilityBuffer boot a normally retired mesh may never release its slot.
+**Decision: fix now; the path is cold, so the fix costs nothing on success.** Route the `Err` value into the existing `OrphanedMeshGpu` / `OrphanedTextureGpu` queues (inserted, drained behind the fence gate, force-drained at shutdown), and make `OrphanedMeshGpu::drain_ready` unregister a non-reserved `geometry_slot`. Under engine Q1 the end state is the K6' group release (KF-37 superseded). Red-first: a `gpu:` device test on the f6 churn harness (reserve, stage, remove in a startup system; assert the orphan queue is non-empty, and no undestroyed VkBuffer at teardown with validation on); a device-free tripwire (`clippy::let_underscore_must_use` on `D:/wt/joltab@d11962a9:crates/boyko_render/src/gpu_upload.rs:120`, the discarded `fill` quoted above) checks text only. Not traced further: `MeshGeometryTable::unregister` (joltab:crates/boyko_render/src/mesh_geometry_table.rs:771 "pub fn unregister(&mut self, slot: u32, retire_frame: u64) {") has no caller, so under a VisibilityBuffer boot a normally retired mesh may never release its slot.
+
+**Rev-4 status: fixed (joltab `7c327121` + `fc7eb127`), exactly as decided.** `upload_assets` routes the rejected value into its kind's orphan queue with a fence-gated retire stamp (joltab:crates/boyko_render/src/gpu_upload.rs:173 "if let Err((_, rejected)) = assets.fill(staged.handle, gpu) {" ; joltab:crates/boyko_render/src/gpu_upload.rs:174 "A::orphan(rejected, orphans, retire_frame);"), and `OrphanedMeshGpu::drain_ready` takes the armed geometry table so an orphan gives its slot back. The "not traced further" caveat is closed too: `MeshGeometryTable::unregister` has callers now - the refcount retire and the orphan drain (joltab:crates/boyko_render/src/asset_refcount.rs:668 "table.unregister(mesh.geometry_slot, epoch.saturating_add(RETIRE_DELAY));") - and the windowed teardown destroys the table itself after the shutdown force-drain (joltab:crates/boyko_app/src/runner.rs:3534 "table.destroy(ctx);"). No ledger FORM changes: the orphan queues keep the dense-component form rev 3 gave them (the group's `dying` list, KF-49), and they now have the producer the rev-3 note said they lacked.
 
 ## Change log
 
@@ -2210,18 +2274,71 @@ Form changes in rev 3: item2: 1 x event -> relation; item2: 2 x resource-column 
 
 Index text changes in rev 3 (records with tsv_key `(index)`): the orders' ui-lane scope sentence (item 1); the `diagnostics` and out-of-scope vocabulary rows and the rev-3 vocabulary list (items 4-6); the mesh, material, asset and widget entity texts (items 1-2); KF-24's rev-3 line (item 3); the rung rule text, the rung-2 and rung-4 paragraphs and the rung table (item 7); four decisions rewritten and three added; M3's two text errors; and the asset entity text's design citation, which quoted a changelog row, not the asset table, since rev 2.
 
+### Rev 3 -> rev 4 (2026-09-16; `rev4/changes4.json`)
+
+Rev 4 has four inputs. The tree the eleven groups describe moved five commits (`d11962a9..d552be05`), so joltab coordinates are re-pointed and the non-test code the delta adds is censused; the rev-3 recheck left three consistency gaps, which are the work order W1-W3; an independent recheck OF rev 4 found three citation and count defects plus one auditability observation, repaired as W4-W7; and a SECOND independent recheck of rev 4 recomputed every total and re-read every row, found the quantitative core sound, and found six defects in the citations and the prose, repaired as W6 (rewritten) and W8-W10. A THIRD independent recheck, of the second's repairs (2026-09-17), found that two of them were not closed - the abbreviated-citation class (W8) and the gate bullet's normalization (W10) - and that W3 had been applied at its ten named sites rather than across its rule's reach; repaired as W11-W14. A FOURTH independent recheck, of the third's repairs (2026-09-17), recounted every total, cross-tab and rung from scratch, resolved all 2357 row coordinates, and confirmed the three work-order gaps closed - and found the same shape twice more: W4 had corrected two detail headers but not the three figures derived from the same rows, and five unquoted coordinates sat inside the very cells W12 had enumerated by content, the W11 class for the third time; plus a residue of the pin rule. Repaired as W15-W17.
+
+**Two claims this section made after the first repair pass were false, and the second recheck falsified both.** "Every joltab coordinate is re-pointed" and "every quoted citation into every CODE tree resolves verbatim" were each asserted on the strength of two independent verifier scripts reporting 0 failures. Both scripts, and the re-pointing pass itself, keyed on citations written as a full `crates/...` path; **every citation written in an ABBREVIATED form** (`command_queue.rs:526`, `memory/vm_column.rs:277`) **or as a BARE continuation** (`:876`) was skipped by all three - 1152 quoted citations, 10 of them wrong. A shared blind spot in the fixer and in both of its checkers is not two independent confirmations of anything - it is one unchecked assumption, counted three times. The surviving negative findings, which the second recheck re-derived from scratch and confirms, are: 2357/2357 rungs reproduce from the rule, every total and cross-tab over the rows matches, all 2357 row coordinates resolve with their evidence, and no row either recheck read is wrong.
+
+W4, W5, W7, W9, W10 and W15 are about the document's own consistency. W6, W8, W11, W16 and W17 are about what it says of the code: 36 coordinates in 68 renderings did not land on the line they quote or name (W17's six new ones name a line the delta deleted, without the pin), and until the second recheck every pass over rev 4 reported that none of them existed - and after it, the second pass certified clean the very shape W11 found nine more in, and the third re-read, for W12, the very cells W16 re-pointed.
+
+| item | records | rows / items | what |
+|---|---|---|---|
+| repoint | 395 | 302 | Re-point d11962a9 -> d552be05: 49 row positions, 408 non_row positions, 256 quoted citations moved and 11 pinned to d11962a9 (their line is gone), 295 unquoted `file.rs:N` references moved. 10 non_rows dropped (their line is gone). Kernel-feature membership is unchanged by construction (asserted). |
+| delta | 225 | 215 | Delta census of the five commits: 8 new rows (the EM2′ recycled-entity stack; the seven ScratchColumn lanes of the interim defect-A row identity map), 203 non_rows, 1 row SUPERSEDED (its field was removed). The new bench and the two `harness = false` census test targets are out of scope, as every other joltab bench and test is. |
+| W1 | 53 | 21 | The rung rule reads a row's destination: 19 boyko_ecs rows whose datum lands in the kernel's own storage or on a kernel column move to rung 2 (5 from rung 4, 14 from rung 6), and the rung-2, rung-4 and rung-6 paragraphs name what is left. |
+| W2 | 15 | 9 | One asset datum, one form: the retire pass's host buffer and its constructor (`host.rs:96/271`) become dense-component on the asset entity, like the parameter they feed; six fontbake rows record that engine Q1 overturns their "a font is not an entity" skip reason, with the form unchanged. |
+| W3 | 22 | 11 | The log rotation's path buffers are not `diagnostics`: 10 rows (the 8 the recheck named plus the two base-path copies they are formatted from) become resource-column under the rev-3 one path rule, beside the std conversions they feed. |
+| W4-kf-row-counts | 2 | 2 | Two kernel features declared a row count their own list contradicts: KF-06 said 13 and listed 12, KF-09 said 65 and listed 64. Both lists are right and both counts are corrected. CARRIED, not introduced by rev 4: the two lines are byte-identical in rev 2, rev 3 and rev 4, so the defect dates to the rev-2 merge that built the index and no later pass re-derived them. Neither rev-4 verifier covered KF `Rows (N)`, and both reported 0 errors. **Incomplete (fourth recheck): applied at the two detail headers only; the summary table's `13` / `65`, their `ecs-services` splits and the distinct-row total `657` were derived from the same rows and were left behind - see W15.** |
+| W5-reanchor-ALLOCATOR-DESIGN-SPACE | 1743 | 84 | ALLOCATOR-DESIGN-SPACE.md was rewritten in the working tree at 21:12:34, after rev 4 was rendered at 21:02-21:04 (507 lines -> 1319), and it is outside this ledger's edit scope, so this is post-publication collateral, not a writer error. All 1743 renderings of 84 distinct citations resolved against the committed file and none against the current one; every quote still exists verbatim, uniformly 19 lines lower. Re-anchored +19 and re-verified: 1743/1743 now resolve in the current file, 0 in the committed one, and masking the line numbers leaves a zero-byte residue in all 13 files. Exact precedent: rev 2's W8, +21 lines into the same file. |
+| W6-doc-citation-tree **(REGRESSION, then repaired)** | 8 | 2 | **The first repair pass was wrong, and its justification was false.** It re-pointed two citations rendered 8 times in `macros-aether.md` (lines 41, 389-391) - `docs/OPEN-QUESTIONS.md:1861` -> `:1027`, `docs/aether-v2/DECISIONS.md:259` -> `:195` - on the stated ground that they "never pointed at their own quote". They did. Both files exist in BOTH trees, and both citations are BARE. In `D:/wt/joltab` @ `d552be05` - the macros-aether group's own census tree - the two quotes sit at exactly **1861** and **259**, the rev-3 values; 1027 and 195 are where they sit in the main checkout. Rev 3 was right against the tree its group names; the first repair made it right only against a tree the citation does not name. The ambiguity, not either number, is the defect: neither reading is recoverable from a bare path when the file is in both trees. **Repaired by disambiguation, not by reverting:** the 8 renderings keep `:1027` / `:195` and take the `main:` prefix the ledger already used **604** times for main-checkout documents (612 after this repair; `macros-aether.md` had 0 of them before it and has exactly these 8 now) (`main:docs/OPEN-QUESTIONS.md:1027`, `main:docs/aether-v2/DECISIONS.md:195`), which is also how the ledger cites every other decision document. Bare `docs/` citations are now unambiguous by construction wherever the prefix is present. |
+| W7-rung-step-4-enumerated | 13 | 11 | Not a defect - an auditability repair. Step 4's fourth disjunct, "a row marked kernel-destination", is an ENUMERATION of 11 rows, not a predicate over any row field, and until now those 11 existed only as four prose categories inside the rung-2 paragraph, so the rule could not be recomputed from the row data without a human reading that prose. The 11 are now named with file and line under the rule, with class, form and what each one's destination is; the rung-2 paragraph points at the list. Checked: with this list and the three field reads, the seven steps reproduce the published rung of all 2357 active rows, 0 disagreements. |
+| W8-abbreviated-path-citations | 13 | 10 | **The blind spot the repoint pass and both of its verifiers share.** Citations in this ledger come in three shapes: a full `crates/...` path (2546 quoted), an ABBREVIATED path (`command_queue.rs:526`, `memory/vm_column.rs:277` - 1127 quoted), and a BARE continuation (`:876` - 25 quoted). The re-pointing pass and both checkers keyed on the first shape only, so the other two were never moved and never resolved - which is why both reported 0 failures. A re-scan keyed on the QUOTE instead, letting the path float, found **10 wrong coordinates in 13 renderings**; each was verified in code before it was moved. (a) Six left at the previous commit `d11962a9`, exactly right there and wrong at `d552be05`: `command_queue.rs:526`->`531`, `command_queue.rs:859`->`864`, `command_queue.rs:876`->`881` (written bare, as `:876`), `memory/vm_column.rs:277`->`278` (all ecs-services), `schedule.rs:455`->`466` (pool-utils-log, 2 renderings). (b) Three unquoted references in the same shape, resolved from what the prose around them names: `command_queue.rs:967`->`972` (the growth site inside `__test_inject_recovery`), and `resources.rs:1957`->`1966` / `:2049`->`2058` (the two physics `pool.scope` opens, 2 renderings each). (c) One violated this index's own pin rule: `render.md`'s Findings bullet cited bare `gpu_upload.rs:120 "let _ = assets.fill(staged.handle, gpu);"`, a line `7c327121` replaced (`if let Err((_, rejected)) = ...` at `:173`; `:120` today is an unrelated doc comment), while the same quote is correctly pinned in the other 4 places it is rendered - now pinned there too, `D:/wt/joltab@d11962a9:crates/boyko_render/src/gpu_upload.rs:120`. (d) One is older than rev 4 and every pass has missed it: `lifecycle.rs:621` -> **`:619`**, where the quote sits at `d552be05` AND at `d11962a9` (`boyko_log` is untouched by the delta), so it has been off by 2 since before this revision. **After the repair: 1127 abbreviated and 25 bare quoted citations re-resolved, 0 wrong.** **FALSE (third recheck): nine more abbreviated and bare quoted coordinates, in 16 renderings, survived that re-resolution - each right at `d11962a9` and wrong at `d552be05`, the exact shape this item repaired - see W11.** What stays unverifiable by this method is what carries no quote to re-find - roughly 4,100 abbreviated and 350 bare UNQUOTED references; (b) was caught only because the prose named what should be at the line, and a fourth such reference would not be. |
+| W9-rung-step-4-wording | 2 | 62 | Step 4's third disjunct read "a row of an ACTIVE kernel feature". Read literally it mis-assigns **62 rows** - 42 that would fall to rung 4, 20 to rung 6 - because Status is `active` on only 35 of the 43 features that have row lists, and KF-01 (324 rows) is `decided`. Read as "a row in ANY kernel feature's row list" the seven steps reproduce the published rung of all 2357 rows, 0 disagreements. The published counts follow the second reading, so the prose was the error, not the data: the rule now says ANY, states that Status is ignored and why, and cites the 62. The same wording in W7's paragraph is corrected with it. Measured by re-implementing the rule both ways over the 1255 rows that have a rung: ANY 0 disagreements, ACTIVE-only 62. |
+| W10-tsv-normalization | 1 | 27 | The TSV's descriptive columns strip the `.rs:NNN` pointers the group tables carry inside the same text (e.g. `enable_store.rs:765-770` -> `enable_store.rs`), so the two renderings of one row are not byte-comparable, which weakens the planned "the TSV only shrinks" gate. No count is affected. **Fixed on the documentation side, not by restoring the pointers**, because the strip is a deliberate invariant this index states twice and relies on: 0 of the TSV's 28,284 cells carry a line number, so a line shift is not a diff and a row survives one. Restoring them would put line numbers into 11 row KEYS (`owner` is part of the pairing) and break exactly that. The gate bullet now names the single mechanical substitution that makes the two byte-comparable, `s/\.rs:\d+(-\d+)?/.rs/` on `owner`/`container`/`elem`/`destination`, and enumerates the 27 cells it fires on (16 `container`/`elem`, 11 `owner`). **Wrong on both counts (third recheck): the substitution fires on 29 cells, not 27, and on 488 more in `destination`; it leaves 2 cells unequal; and `destination` is not byte-comparable in 1629 rows for an unrelated reason - see W12.** |
+| W11-abbreviated-citations-again **(W8's closing claim falsified)** | 24 | 13 | **Gap 2 was repaired at its ten instances, not as a class.** A third recheck, keying on the quote as W8 did, found **nine more quoted coordinates in 16 renderings** that W8's "1127 abbreviated and 25 bare ... 0 wrong" had certified - each right at `d11962a9` and wrong at `d552be05`, and each verified in code before it was moved: `schedule.rs:1311`->`1329` (`for idx in to_spawn.drain(..) {`; the same file already cited that quote correctly as `:1329` in the same cell), `schedule.rs:381`->`392` (bare, `contains(i)`), `resources.rs:3187`->`3216` (`self.asleep.resize`, 2 renderings, each beside the re-pointed unquoted `:3215` = `fn sync_rows`), `solver/colored.rs:3172`->`3259` (4), `systems.rs:1067`->`1087` (4), `device.rs:2704`->`2761` (beside the re-pointed `:2589`), `memory.rs:688-690`->`716-718`, `memory.rs:719`->`747`, `runner.rs:3435`->`3441`. Four unquoted companions in the same rows, resolved from what the prose names: `colored.rs:3347`->`3442` (`end_step`, 4 renderings), `schedule.rs` `(:1311)`->`(:1329)`, `device.rs:1454-1459`->`1462-1467` (the "not exposed by reference" comment) and `device.rs:1559,1566`->`1616,1623` (the two pool `clear()` calls in Drop). 13 coordinates, 24 renderings, 8 table rows in 4 group files. **Re-measured after the repair with a scan written from scratch and run on its own output** - every `path.rs:N` followed by a backtick or double-quoted quote, full, abbreviated or bare, resolved by suffix in the group's own tree at its own commit (or the pinned one): 8113 quoted `.rs` citations (5146 full-path, 2926 abbreviated, 41 bare), of which 7991 resolve at the cited line; the 122 the scan cannot resolve are 107 citations of std, crossbeam, wgpu and egui sources outside every tree, 8 bare continuations whose file the scan mis-attributes to a nearer path token and which resolve by hand (`schedule_builder.rs:444/186/525/530/1168`, `nonsend_resources.rs:121`, `resources.rs:133`, and the repaired `schedule.rs:392`), 5 pinned to a fourth tree (`D:/wt/ecsnative@ad0ebea4`), 1 naming the reflect lane's line in prose (`component.rs:968`) and 1 quoting, as W8(c) does, the very citation it repaired - **0 wrong**. That is what W8's certificate lacked: the scan that produced it was never re-run on the files it had just changed. |
+| W12-tsv-gate-bullet **(W10's repair falsified)** | 1 | 2357 | **W10 stated a normalization that is measurably false.** Over all 2357 active rows paired with the TSV: the substitution fires on **29** cells of `owner`/`container`/`elem` (12 `owner`, 17 `container`/`elem`), not 27, and on **488** `destination` cells W10 did not count; after it **2** cells still differ, because their pointer carries a second `/:N` segment the regex half-rewrites (`warm_start.rs:221`'s owner `soft_step.rs:205/:208` -> `soft_step.rs/:208` against the TSV's `soft_step.rs` - the one row key of 2357 that does not pair; coordinates as re-pointed by W16 - and `bundle.rs:349`'s container `bundle.rs:16/98` -> `bundle.rs/98` against `bundle.rs`); and `destination`, one of the four columns the bullet named, is not byte-comparable in **1629 of 2357 rows** for an unrelated reason: the TSV keeps the destination's head and the group cell appends an explanation after it (` (...)` in 969, ` - ...` in 579, the rest after `;`, `:` or `,`) - a prefix in 1629 of 1629, equal outright in the other 727. A byte-equality gate built as the bullet described would have failed on 1630 rows on day one. The bullet now states the two comparisons that hold - byte-equality on `owner`/`container`/`elem` after the substitution, with the 2 exceptions named, and PREFIX-equality on `destination` - and the 29 cells by name. No count is affected. |
+| W13-path-rule-eleventh-site | 4 | 1 | **W3 was applied at its ten named sites, not across its rule's reach.** The structurally identical site in `boyko_app` - `profiling/stream.rs:242`, the `.prev` name a rotation builds (`self.path.clone().into_os_string()` + `push(".prev")`) and hands to `std::fs::remove_file` / `rename` three lines later - was still `diagnostics` while the three std conversions it feeds (`:245`, `:246`, `:248`) were already `resource-column` under the rev-3 path rule: one datum, two forms, five lines apart, the pairing W3 unified in `sink/file.rs` and `sink/binary.rs`. Form -> resource-column and destination -> `NEW:InlineStr<N>` (the stack path buffer W3's rows name; `boyko_app` already depends on `boyko_log`, whose `DspBuf<N>` is that buffer); class D, kind, growth, addr_cached and rung 6 unchanged. Counts that move by one: resource-column 166 -> 167 and diagnostics 291 -> 290 (crate x form, class x form, the `none` entity, the D decision, the app-demo header), ECS-form rows 690 -> 691 (29.3 % either way). The base path it is cloned from (`stream.rs:208` field, `:219` initializer) keeps `diagnostics`: it is the owning record the rule encodes the path into once, not a runtime conversion; whether a PathBuf field armed at boot is `diagnostics` at all is a question the rule does not answer and this pass does not decide. |
+| W14-two-text-repairs | 2 | 2 | Informational. KF-01's rev-4 line listed six coordinates for its seven new users - `row_identity.rs:303` (`prev`) was missing, while the Decisions entry had all seven; no count or rung depended on it. The trees table said joltab's working copy was "clean": no tracked file is modified, but two untracked test files exist (`crates/boyko_physics/tests/apply_row_alignment.rs`, `.../support_loss_wakes_sleepers.rs`), outside the census scope (`crates/*/src`), so no citation is affected; the sentence now says what `git status` says. |
+| W15-kf-figures-downstream-of-W4 **(W4 completed)** | 6 | 3 | **W4 was applied to the two figures its finding named, not to the figures computed from the same rows.** The Kernel features summary table still read `KF-06 \| 13 \| ecs-services 6, ...` and `KF-09 \| 65 \| ..., ecs-services 3, ...`, and the section closed with "Distinct active rows that need at least one kernel feature: **657**". Recounted from the 43 row lists against the thirteen group tables: every listed coordinate is an active row; exactly one coordinate carries two active rows, `crates/boyko_ecs/src/ecs/core/asset/server.rs:127` (the class-B `AssetServer::load` file bytes, destination `KF-loader-decode-context byte lane ... + KF-byte-column API`, and the class-T `std::fs::read -> File::open` wide path, destination `out-of-scope (std internals)`); it sits in the lists of KF-06 and KF-09 and no other. Counting rows at a coordinate gives 13 / 65 / 657; counting the rows whose destination names the feature - W4's own criterion - gives **12 (ecs-services 5) / 64 (ecs-services 2) / 656**, and 656 is also the number of distinct coordinates. All three are corrected, the KF-06 / KF-09 rev-4 lines say what the extra row was, the section intro states the per-row rule, and the distinct-row line explains the one coordinate. No rung moves: step 4 excludes class T whichever way its list membership is read, and the T row's published rung (R4) reproduces either way. Every other feature's count and group split reproduce on both readings. |
+| W16-coordinates-inside-W12s-cells **(the W11 class, third recurrence)** | 15 | 5 | **W12 enumerated these cells by their CONTENT and never re-read the coordinates inside them.** Five unquoted coordinates, each right at `d11962a9` and wrong at `d552be05`, each verified in code before it was moved: (a) `solver/soft_step.rs:204`->`205` and `:207`->`208` (`warm_read: WarmStartTable,` / `warm_write: WarmStartTable,` on `SoftStepSolver`), 4 renderings each; (b) `solver/colored.rs:1421`->`1422` and `:1424`->`1425` (the same two fields on `ColoredSoftStepSolver`), 2 renderings each - sites: the `owner` cell of `physics-scene-math.md` row `solver/warm_start.rs:221`, the "Not a gate yet" bullet (twice) and W12's row above; (c) `resources.rs:645`->`654` (`/// dispatch (a boxed shared frame + a boxed closure per spawn) costs more than it`) in `physics-scene-math.md`'s Findings, whose companion in the same sentence, `solver/colored.rs:206`, had been re-pointed (205->206) - the pair was half-moved. 13 renderings, plus the 2 quotations of what the gate substitution makes of that owner cell (`soft_step.rs/:207` -> `soft_step.rs/:208`), which describe the cell and so move with it. The TSV is untouched (it carries no line numbers); the substitution still fires on the same 29 cells and still leaves the same 2 unequal, so W12's figures stand. |
+| W17-pin-rule-residue | 10 | 7 | Informational: a reader could recover each claim, but the trees table says "A citation whose line the delta DELETED is pinned `D:/wt/joltab@d11962a9:`", and ten renderings did not obey it. (a) `entity/entity_master.rs:73` (`free_entity_ids: Vec<EntityId>,` at `d11962a9`; blank at `d552be05`), rendered unpinned beside its correctly pinned SUPERSEDED row in `ecs-storage.md`'s `VmColumn API extension` rows list and PC1 (both named by the recheck), and - found while repairing them - in this index's SUPERSEDED paragraph and in the superseding row's own note; 4 renderings pinned, the quotation of ALLOCATOR-DESIGN-SPACE.md:353 inside that note left verbatim. (b) Defect A's decision item 3 cited `resources.rs:3013-3014, 3055-3056, 3173-3177` and `axis_cache.rs:28-34` (named by the recheck) and `warm_start.rs:35-41` (not named: at `d552be05` those seven lines hold the CORRECTED module doc, so the range resolves to the correction, not the claim); none of the five ranges holds its false claim at `d552be05` - each claim's text was checked absent from the file there - so all five are pinned, with full paths. (c) Defect B's decision named the tripwire site as bare `gpu_upload.rs:120`, the coordinate W8(c) pinned at its quoted renderings; `:120` is an unrelated doc comment at `d552be05`, so this fifth rendering is pinned too. Also re-checked and left alone: every `entity_master.rs:378`, `resources.rs:3057` and `:3062` rendering sits inside a verbatim quotation of another document. |
+
+[rev 4] Delta census of joltab d11962a9..d552be05 (5 commits: EM2′ id recycling 0afcbd7d, the allocation census gate d5782d43, the fill-reject routing 7c327121, the teardown fix fc7eb127, the physics row identity b74f7ee8). Scope: every non-test file the delta adds, whole, plus the added hunks of every non-test file it changes, under crates/*/src; pattern and lexer as in rev 3 item 1. 211 hit lines in scope -> 8 rows and 203 non_rows; 1 row superseded (its field was removed). crates/boyko_physics/benches/row_identity_churn.rs is OUT of scope, as every other joltab bench is (the eleven groups census crates/*/src): 20 hits, 0 rows. Examined and NOT rows, because they hold no heap and no kernel column: `HostTeardownStats` / `HostAllocationWatch` (a Copy POD Resource with a fixed 4-slot watch array, joltab:crates/boyko_app/src/window_info.rs:86 "pub struct HostTeardownStats {"), the descriptor-pool counter (joltab:crates/boyko_rhi_vulkan/src/device.rs:744 "persistent_descriptor_pools: Cell&lt;u32>,"), the pool live-allocation probe (reads over the existing `BlockPool::blocks` row), `RemapCursor` / `WarmSeedStats` / `AllocTicket` / `SleepLatch` (Copy, 4-16 B), and the reservoir's two atomics. The allocation-census gate (d5782d43) is two `harness = false` [[test]] targets and their counting allocator: test-only, outside the census.
+
+Form changes in rev 4: W2: 2 x system-scratch -> dense-component; W3: 10 x diagnostics -> resource-column; W13: 1 x diagnostics -> resource-column (the W3 rule's eleventh site, third recheck).
+
+Row totals, rev 3 -> rev 4: active 2350 -> 2357; superseded 131 -> 132; non_rows 4492 -> 4685.
+
+Index text changes in rev 4 (records with tsv_key `(index)`): the trees table and the new "How rev 4 was made" paragraph (the delta); the rung rule's step 4 and the rung-2, rung-4 and rung-6 paragraphs, with a rev-4 column in the rung-count table (W1); the asset entity text and the Q1 decision (W2); the `diagnostics` vocabulary row and the path-rule decision (W3); the rev-4 vocabulary list; the kernel-storage bullet of "What this ledger is not" (two rows -> ten); rev-4 lines on KF-01, KF-19, KF-41 and KF-49; a rev-4 status under each of the two defects, both of which the tree now repairs; and two new decisions (the physics row identity map, the entity reservoir). The first repair pass adds: the declared row counts and a rev-4 line on KF-06 and KF-09 (W4); the enumeration of step 4's 11 kernel-destination rows under the rung rule, and the rung-2 paragraph's pointer to it (W7); W5 changed no text, only the line number inside 1743 citations. The second repair pass adds: step 4's ANY-feature reading with the 62 rows the ACTIVE reading would move, and the matching correction in W7's paragraph (W9); the TSV/group-table normalization and its 27 cells in the "Not a gate yet" bullet (W10); and this section's own correction - two false universal claims withdrawn, W6 rewritten as a regression. W6 now changes 8 citation prefixes, W8 ten coordinates in 13 renderings. The third repair pass (2026-09-17) adds: thirteen more re-pointed coordinates in 24 renderings across 8 rows of `ecs-schedule.md`, `physics-scene-math.md`, `rhi.md` and `app-demo.md`, with W8's closing certificate marked false in place (W11); the "Not a gate yet" bullet rewritten from measurement, with W10's claim marked false in place (W12); one row's form and destination in `app-demo.md` and the TSV, the app-demo header, the two form cross-tabs, the `none` entity, the D and T decisions, the totals line and the `diagnostics` vocabulary row (W13); the KF-01 rev-4 line and the trees table (W14); and this section's intro, the "How rev 4 was made" paragraph and Order of work item 11. The fourth repair pass (2026-09-17) adds: the KF-06 and KF-09 summary rows, the distinct-row line and the Kernel features intro, and a sentence on each of the KF-06 / KF-09 rev-4 lines, with W4 marked incomplete in place (W15); five re-pointed coordinates in 13 renderings plus 2 quoted substitution outputs, across `physics-scene-math.md` (one row's `owner` cell, one Findings bullet), the "Not a gate yet" bullet and W12's row (W16); ten pinned renderings across `ecs-storage.md` (a primitives-refuted rows list, PC1, one row note), the SUPERSEDED paragraph and the two defect decisions (W17); and, again, this section's intro and closing paragraphs, the "How rev 4 was made" paragraph and Order of work item 11.
+
+**What the repair passes did NOT do.** The first two changed no row, no form, no rung, no class and no total; the third changed one row's form and destination (W13) and with it two per-form counts, and no rung, class, row total or key; the fourth changed no row cell but one `owner` cell's two line pointers (which the TSV does not carry), and corrected three kernel-feature figures that the row set never supported (W15); none touched a file outside `docs/memory/`. The first pass re-pointed no joltab, ui-lane or reflect-lane coordinate and said so on the strength of two verifiers that could not see six of them; the second pass re-pointed those ten (W8) and nothing else, and certified the abbreviated shape clean; the third re-pointed thirteen more, nine of them in that shape (W11), so "nothing else" was itself a claim of the kind this paragraph warns about; and the fourth re-pointed five more, all UNQUOTED and all inside cells the third pass had just enumerated for W12 (W16), and pinned ten renderings of deleted lines (W17). The unquoted class stays verifiable only by hand. The fourth pass swept every unquoted `file.rs:N` (not bare `:N` or `, N` continuations) into a joltab file the delta touched, whose line differs between the two commits: 291 candidates. It read by hand the 39 whose line the delta added or deleted and the 130 whose surrounding prose matches the `d11962a9` line at least as well as the `d552be05` one; that found a coordinate on every line W16 and W17 changed, and the continuations beside them were resolved by reading those lines. Every other candidate it read was a correct re-point, a quotation of another document, a change-log record of an old coordinate, or a same-named file in another crate. The remaining 122, whose prose matches the `d552be05` line better, were not read one by one. Every full-path coordinate still verifies as rendered, re-checked row by row against all three trees, and every quoted abbreviated and bare one now does too, by a scan that was run on its own output. In particular it did not edit `ALLOCATOR-DESIGN-SPACE.md`, whose rewrite caused W5: that file is the owner's, and the ledger holds citations INTO it, not authority over it. The same collateral will recur on the next rewrite of it - twice now, rev 2 and rev 4 - and the cheap standing check is the one used here: every citation carries its quote, so a pass that re-finds each quote and re-reads the line number costs one scan and cannot be fooled by a line that merely still exists.
+
 ## What this ledger is not
 
 - **Not a per-frame allocation count.** A row is a site, not a rate. The per-frame figures come from the brief's measurements (at the top of this document), and this ledger did not re-measure them. Allocation inside std's panic machinery is not counted: 122 non-test lines in ecs-schedule and 152 in codec-tools can panic, and the rest were not counted. Neither is allocation inside another group's kernel calls, nor the TokenStreams of proc macros.
-- **Not a gate yet.** The gate built on it will assert three things. First, there are no `U` rows. Second, there are no NEW rows: every heap hit in non-test code is a row or a non_row, and the TSV only shrinks. Third, the per-form counts of the non-ECS forms only shrink: `kernel-internal` rows once the kernel is finished, `out-of-scope:*` rows unless re-justified, and every row whose memory still comes from std. The TSV carries no line numbers, so a line shift is not a diff.
+- **Not a gate yet.** The gate built on it will assert three things. First, there are no `U` rows. Second, there are no NEW rows: every heap hit in non-test code is a row or a non_row, and the TSV only shrinks. Third, the per-form counts of the non-ECS forms only shrink: `kernel-internal` rows once the kernel is finished, `out-of-scope:*` rows unless re-justified, and every row whose memory still comes from std. The TSV carries no line numbers, so a line shift is not a diff - and that holds for EVERY cell, not only the key: 0 of the 28,284 cells match `\.rs:\d+`, checked in rev 4's repair pass (W9). The group tables do carry such pointers inside their descriptive text, and their `destination` cell carries an explanation the TSV drops, so the two renderings of one row compare in two ways, measured over all 2357 active rows (W12, third recheck; W10's "one substitution, 27 cells" was wrong on both counts): **(1) `owner`, `container` and `elem` are byte-equal after `s/\.rs:\d+(-\d+)?/.rs/`**, which fires on 29 cells today - 17 `container`/`elem` (`enable_store.rs:765-770` x10, `live_bitmap.rs:31` x3, `traverse_iter.rs:51`, `app.rs:54`, `atlas.rs:61`, `bundle.rs:16`) and 12 `owner` (`component_set.rs:45`/`:19`, `event.rs:376`/`:382`/`:400`, `bundle.rs:320`, `component.rs:873`, `resources.rs:2283`, `soft_step.rs:205/:208` with `colored.rs:1422/:1425`, `task/mod.rs:310`, `scope.rs:1747`, `host.rs:96`) - with exactly 2 exceptions, both a pointer carrying a second `/:N` segment the regex half-rewrites: `warm_start.rs:221`'s owner (`soft_step.rs:205/:208` -> `soft_step.rs/:208`; the TSV has `soft_step.rs`, and this is the one row of 2357 whose key does not pair) and `bundle.rs:349`'s container (`bundle.rs:16/98` -> `bundle.rs/98`; the TSV has `bundle.rs`). **(2) `destination` is PREFIX-equal, not byte-equal:** the TSV keeps the destination's head, and in 1629 of 2357 rows the group cell appends an explanation after it (` (...)` in 969, ` - ...` in 579, the rest after `;`, `:` or `,`; 488 of those tails carry `.rs:N` pointers, so the substitution touches them too, but is not what makes them differ). The group cell starts with the TSV's in 1629 of 1629 cases, and the other 727 are equal outright. A gate asserting byte-equality after one substitution on all four columns - what this bullet said until W12 - would fail on 1630 rows on day one. The comparison is written this way round on purpose: restoring the pointers INTO the TSV would make 12 row KEYS move when an unrelated line moves, which is the property this bullet and "Not a census of a merged tree" both rely on.
 - **Not an allocator design.** It is the input that docs/memory/ALLOCATOR-DESIGN-SPACE.md needs. Where the two disagree, the section Plan conflicts records it.
 - **Not a performance claim.** No form here was benchmarked, because a timing window was running on this box. Hot-loop costs are stated only where a group reasoned them from the code, and they are marked as reasoned.
 - **Not a complete picture of std/third-party allocation.** Rev 2 rows every `thread_local!` static in non-test code (31, gap 1), and since rev 3 every std env read and path conversion a group found is a counted row, but crossbeam-epoch's Local, stable-sort scratch and std path buffers outside the found call sites are not. A `#[global_allocator]` counting gate sees the rest, except the System-allocated os-key TLS cells, which only the rows count.
 
 - **Not a census of a merged tree.** The eleven groups are joltab; ui-lane is `D:/wt/ui`; reflect-lane is `D:/wt/reflect`. Neither lane descends from joltab (both fork at 5ec1699f), and joltab has 4 commits touching boyko_ui that the ui-lane lacks. Merging them needs a re-census of the merged tree, not a union of row sets. The TSV key carries no line number, so rows survive a line shift; a row whose owner or container changes in the merge does not.
 
-- **Not a list of migratable std heap sites, row for row.** Two rows are fields that are already kernel storage (`other:ScratchColumn`: physics `solver/warm_start.rs:214`, `narrowphase/axis_cache.rs:128`, gap 2). They are rows for their form decision (the slot-keyed PairCache), and a gate that counts remaining std heap must filter them out by container (M5).
+- **Not a list of migratable std heap sites, row for row.** Ten rows are fields that are already kernel storage and can never migrate: the two gap-2 physics `other:ScratchColumn` rows (`solver/warm_start.rs:221`, `narrowphase/axis_cache.rs:179`) and the eight the rev-4 delta census added (the entity reservoir's `other:VmColumn` stack and the seven ScratchColumn lanes of the physics row identity map). They are rows for their FORM decision, and a gate that counts remaining std heap must filter them out by container (M5, widened in rev 4).
+
+## Open after rev 4 (the fifth recheck, 2026-09-17)
+
+Rev 4 closed after five independent rechecks. Every one of them recounted the row data from scratch and found it consistent: every total, every cross-tab, the rung rule over all 2357 active rows, and the TSV join. What each recheck kept finding is citation drift - line numbers inside prose that were right at `d11962a9` and are wrong at `d552be05` - in a new shape each time (quoted, abbreviated, bare continuation, half-moved pair). Repairing that class by hand has not converged, so the repair loop is ended here and the fifth recheck's findings are recorded as open rather than fixed in place:
+
+- Stale unquoted coordinates, the W11/W16 'half-moved pair' shape for a fourth time: 15 coordinates in 19 renderings. Each is right at d11962a9 and wrong at d552be05, and in each the full-path partner in the same text was re-pointed but the bare ':N' after it was not. (1) D:/claude/BoykoEngine/docs/memory/RUNTIME-DATA-LEDGER.md:375: 'constructors `:3104/3105`' should be ':3127/3128' (at d552be05, 3104/3105 are the `cursor` doc comment and `cursor: RemapCursor,`). (2) D:/claude/BoykoEngine/docs/memory/ledger/ecs-schedule.md:19 (Findings): ':441 clones on every run' should be ':452' (441 is now a debug_assert string). (3) ecs-schedule.md:179 (row schedule.rs:116): ':455 installs on it' should be ':466'. (4) ecs-schedule.md:185 (row schedule.rs:183): 'rowed at :227' should be ':238' (the row itself sits at schedule.rs:238, line 187 of the same file; 227 is now `world_id`). (5) D:/claude/BoykoEngine/docs/memory/ledger/ecs-services.md:122 (row command_queue.rs:85): 'handle_panic_recovery (:837-)' should be ':842-'. (6) ecs-services.md:123, the OWNER cell of row command_queue.rs:446: 'catch_unwind at :315, :441, :513, :1016, :1030' should be ':320, :446, :518, :1021, :1035'. The cell contradicts its own row coordinate. (7) D:/claude/BoykoEngine/docs/memory/ledger/physics-scene-math.md:87, :88, :92, :93: 'resources.rs:3343-3344 and :3307-3308' should end ':3413-3414' (4 renderings). (8) D:/claude/BoykoEngine/docs/memory/ledger/render.md:92: 'runner.rs:1270 per frame and :3507 at teardown' should read ':3516'. (9) D:/claude/BoykoEngine/docs/memory/ledger/app-demo.md:100-103: 'runner.rs:1629 take, :1981 push, :2699 put' should read ':1987' and ':2705' (8 renderings).
+- D:/claude/BoykoEngine/docs/memory/runtime-data-ledger.tsv line 626 (data row 625) carries the same five stale bare line numbers in its OWNER cell, which is part of the row key. The index says otherwise in three places: RUNTIME-DATA-LEDGER.md:2320 ('The TSV carries no line numbers ... that holds for EVERY cell'), :2325 ('The TSV key carries no line number') and W10 at :2298. The measured check (0 of 28,284 cells match `\.rs:\d+`) is literally true but cannot see bare ':N'. Repairing the numbers changes a TSV key, which is exactly what the ledger's design says a line shift must never do. This is a design question for the fixer, not a one-line edit.
+- The 'Not a gate yet' bullet (RUNTIME-DATA-LEDGER.md:2320) and W12 (:2300) contradict their own totals. They say destination is prefix-equal 'in 1629 of 2357 rows' and 'the other 727 are equal outright', but 1629 + 727 = 2356. Over all 2357 active rows the recount is 1630 prefix-equal (970 ' (' tails, 579 ' - ', 81 other) and 727 equal. The published 1629 / 969 reproduce only if the one unpaired row, solver/warm_start.rs:221, is excluded, and the prose does not say so. The bullet also says '488 of those tails carry .rs:N'. In fact 488 destination CELLS do, but only 487 tails: reflect-lane type_info.rs:435 has its pointer split across the head/tail boundary (TSV head ends 'type_info.rs', the group cell continues ':434 ('). The '1630 rows on day one' figure is correct.
+- Two mislabelled change-log references. RUNTIME-DATA-LEDGER.md:1784 credits the ANY reading and its 62 rows to '(W8)'; the change log (:2297), the index-text paragraph (:2313) and Order of work item 11 (:1773) all put that under W9. RUNTIME-DATA-LEDGER.md:2320 credits the '0 of the 28,284 cells' check to '(W9)'; that check is W10 (:2298).
+- Informational. At d552be05, crates/boyko_render/src/gpu_upload.rs:120 is a BLANK line, not 'an unrelated doc comment' as W8(c) (:2296) and W17(c) (:2305) say. The pin to d11962a9 is right either way.
+- Consequence of gap 1. The change-log summary at RUNTIME-DATA-LEDGER.md:2283 ('36 coordinates in 68 renderings did not land ...') and the 'What the repair passes did NOT do' paragraph (:2315) now undercount. The fourth pass disclosed that bare ':N' continuations were not parsed, but it read only the bare tokens next to references it had flagged. None of the 19 renderings above sits next to a flagged reference: each partner had been re-pointed correctly, so none was flagged.
+
+The durable fix is mechanical and belongs to the gate named in "Not a gate yet": a citation checker that parses every `file:N`, `file:N-M` and bare `:N` continuation, resolves each against the tree and commit its paragraph names, and fails on a mismatch. Citations into `docs/memory/ALLOCATOR-DESIGN-SPACE.md` are additionally moving while that document is being revised (rev 2.x); they are re-anchored once the allocator design closes.
 
 ---
 
-*Row-count check: active rows 2350 = runtime-data-ledger.tsv data lines 2350 = sum of the group files' active rows 2350; superseded rows 131.*
+*Row-count check: active rows 2357 = runtime-data-ledger.tsv data lines 2357 = sum of the group files' active rows 2357; superseded rows 132.*

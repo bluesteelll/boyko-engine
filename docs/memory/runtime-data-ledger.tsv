@@ -293,8 +293,8 @@ boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	VbCullReadback::visible_instance
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	gpu_scene::pack_light_table	return	Vec	u32	B	resource-column	light	once	no	NEW:BootArena
 boyko_app	crates/boyko_app/src/gpu_scene/mod.rs	gpu_scene::pack_light_table::words	local	Vec	u32	B	resource-column	light	once	no	NEW:BootArena
 boyko_app	crates/boyko_app/src/gpu_scene/particle.rs	ParticleGpuBundle::read_sort_scan::rank_order	local	Vec	ParticleRender	D	system-scratch	system	once	no	NEW:DiagArena
-boyko_app	crates/boyko_app/src/host.rs	WindowHost::retire_scratch	field	Vec	FreeEntry	F	system-scratch	system	highwater	no	ScratchColumn
-boyko_app	crates/boyko_app/src/host.rs	WindowHost::retire_scratch (WindowHost::boot initializer)	field	Vec	FreeEntry	F	system-scratch	system	highwater	no	ScratchColumn
+boyko_app	crates/boyko_app/src/host.rs	WindowHost::retire_scratch	field	Vec	FreeEntry	F	dense-component	asset	highwater	no	ScratchColumn
+boyko_app	crates/boyko_app/src/host.rs	WindowHost::retire_scratch (WindowHost::boot initializer)	field	Vec	FreeEntry	F	dense-component	asset	highwater	no	ScratchColumn
 boyko_app	crates/boyko_app/src/host_dump.rs	HostDump::finish::pixels	local	Vec	u8	D	system-scratch	system	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/host_dump.rs	HostDump::from_env	local	other:OsString/String (std::env)	u8 / u16	D	diagnostics	none	once	no	out-of-scope:allocation is inside std::env
 boyko_app	crates/boyko_app/src/host_dump.rs	HostDump::path	field	String	u8 (UTF-8 path)	D	diagnostics	none	once	no	NEW:DiagArena
@@ -400,7 +400,7 @@ boyko_app	crates/boyko_app/src/profiling/reduce.rs	profiling::reduce::stats_ns::
 boyko_app	crates/boyko_app/src/profiling/stream.rs	<FileSink as TelemetrySink>::rotate	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
 boyko_app	crates/boyko_app/src/profiling/stream.rs	<FileSink as TelemetrySink>::rotate	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
 boyko_app	crates/boyko_app/src/profiling/stream.rs	<FileSink as TelemetrySink>::rotate	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
-boyko_app	crates/boyko_app/src/profiling/stream.rs	<FileSink as TelemetrySink>::rotate::prev	local	other:OsString	u8 (WTF-8 path bytes)	D	diagnostics	none	unknown	no	NEW:DiagArena
+boyko_app	crates/boyko_app/src/profiling/stream.rs	<FileSink as TelemetrySink>::rotate::prev	local	other:OsString	u8 (WTF-8 path bytes)	D	resource-column	none	unknown	no	NEW:InlineStr<N>
 boyko_app	crates/boyko_app/src/profiling/stream.rs	FileSink::open	local	other:Vec<u16> (std::fs path conversion)	u16	D	resource-column	none	once	no	out-of-scope:allocation is inside std::fs on Windows
 boyko_app	crates/boyko_app/src/profiling/stream.rs	FileSink::open (FileSink::path initializer)	field	PathBuf	OsString bytes	D	diagnostics	none	once	no	NEW:DiagArena
 boyko_app	crates/boyko_app/src/profiling/stream.rs	FileSink::path	field	PathBuf	OsString bytes	D	diagnostics	none	once	no	NEW:DiagArena
@@ -695,7 +695,7 @@ boyko_ecs	crates/boyko_ecs/src/ecs/core/ecs_master/entity_query_api.rs	EcsMaster
 boyko_ecs	crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs	EcsMaster Down-broadcast trigger DFS	local	other:VisitedSet (Vec<u64> inside; iters/query/relation/traverse_iter.rs)	u64 visited-bit words	F	system-scratch	schedule	perframe	no	NEW:ScratchStack
 boyko_ecs	crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs	EcsMaster Down-broadcast trigger DFS (observer_api.rs)	local	Vec	(Entity, usize)	F	system-scratch	schedule	perframe	no	NEW:ScratchStack
 boyko_ecs	crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs	EcsMaster::push_broadcast_sources	param	Vec	(Entity, usize)	F	system-scratch	schedule	perframe	no	NEW:ScratchStack
-boyko_ecs	crates/boyko_ecs/src/ecs/core/entity/entity_master.rs	EntityMaster::free_entity_ids	field	Vec	EntityId	K	kernel-internal	none	highwater	no	Resource+VmColumn
+boyko_ecs	crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs	EntityReservoir::free	field	other:VmColumn (kernel column on VmReservation; engine storage, not std heap)	Entity (16 B: id + generation, Copy)	K	kernel-internal	none	highwater	no	kernel storage already
 boyko_ecs	crates/boyko_ecs/src/ecs/core/events/erased_buffer.rs	ErasedKindBuffer<K>::data (aliases ParametersBuffer / ParticipantBuffer)	field	Vec	MaybeUninit<u8> (packed Copy element sets)	R	event	system	unknown	no	NEW:VmBytes
 boyko_ecs	crates/boyko_ecs/src/ecs/core/events/event_buffer.rs	EventBuffer<E>::lanes	field	Box<[T]>	ThreadLanePair<E> (128 B, align 64)	R	event	system	once	no	VmReservation-raw
 boyko_ecs	crates/boyko_ecs/src/ecs/core/events/event_buffer.rs	EventBuffer<E>::reader_buf	field	Box<[T]>	MaybeUninit<E> (thread_count * capacity_per_lane)	R	event	system	once	no	VmReservation-raw
@@ -1083,25 +1083,25 @@ boyko_log	crates/boyko_log/src/probe.rs	probe::last_message	return	String	u8	C	o
 boyko_log	crates/boyko_log/src/probe.rs	probe::note_emission	local	String	u8 (rendered line)	C	out-of-scope:test-only	none	perframe	no	out-of-scope:compile-time/tooling only
 boyko_log	crates/boyko_log/src/probe.rs	probe::note_emission	local	String	u8	C	out-of-scope:test-only	none	perframe	no	out-of-scope:compile-time/tooling only
 boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::open	local	other:std::fs internals (Vec<u16> wide path)	u16	T	resource-column	none	once	no	out-of-scope:std internals
-boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (sink path)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
-boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (rotated file name, String then PathBuf)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
+boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (sink path)	D	resource-column	none	unknown	no	NEW:InlineStr<N>
+boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (rotated file name, String then PathBuf)	D	resource-column	none	unknown	no	NEW:InlineStr<N>
 boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
-boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:PathBuf	path	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
-boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (rotated file name)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
-boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (rotated file name)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
+boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:PathBuf	path	D	resource-column	none	unknown	no	NEW:InlineStr<N>
+boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (rotated file name)	D	resource-column	none	unknown	no	NEW:InlineStr<N>
+boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	String	u8 (rotated file name)	D	resource-column	none	unknown	no	NEW:InlineStr<N>
 boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/binary.rs	sink::binary::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16	T	resource-column	none	unknown	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/crash.rs	sink::crash::install_panic_hook	local	Box<dyn>	closure capturing previous: Box<dyn Fn> (16 B)	B	out-of-scope:os-owned	none	once	no	out-of-scope:std panic-hook API requires Box<dyn Fn>
 boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::open	local	other:std::fs internals (Vec<u16> wide path)	u16	T	resource-column	none	once	no	out-of-scope:std internals
-boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (sink path)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
-boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (rotated file name, String then PathBuf)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
+boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (sink path)	D	resource-column	none	unknown	no	NEW:InlineStr<N>
+boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (rotated file name, String then PathBuf)	D	resource-column	none	unknown	no	NEW:InlineStr<N>
 boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
-boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:PathBuf	path	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
-boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (rotated file name)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
-boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (rotated file name)	D	diagnostics	none	unknown	no	NEW:InlineStr<N>
+boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:PathBuf	path	D	resource-column	none	unknown	no	NEW:InlineStr<N>
+boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (rotated file name)	D	resource-column	none	unknown	no	NEW:InlineStr<N>
+boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	String	u8 (rotated file name)	D	resource-column	none	unknown	no	NEW:InlineStr<N>
 boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16 (UTF-16 path, NUL-terminated)	T	resource-column	none	unknown	no	out-of-scope:std internals
 boyko_log	crates/boyko_log/src/sink/file.rs	sink::file::rotate_now	local	other:std::fs internals (Vec<u16> wide path)	u16	T	resource-column	none	unknown	no	out-of-scope:std internals
@@ -1322,16 +1322,23 @@ boyko_macros	crates/boyko_macros/src/ui.rs	parse_body	local	Vec	UiNode	C	out-of-
 boyko_macros	crates/boyko_macros/src/ui.rs	parse_children	return	Vec	UiNode	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
 boyko_macros	crates/boyko_macros/src/ui.rs	parse_children	local	Vec	UiNode	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
 boyko_macros	crates/boyko_macros/src/ui.rs	validate	local	HashMap	String, Span	C	out-of-scope:compile-time	none	once	no	out-of-scope: compile-time proc-macro code, never linked into the shipped binary
+boyko_physics	crates/boyko_physics/src/narrowphase/axis_cache.rs	BoxAxisCache::remapped	field	other:ScratchColumn (kernel column on VmReservation; engine storage, not std heap)	u8 (SAT axis index, AXIS_NONE sentinel)	F	system-scratch	system	highwater	no	kernel storage already
 boyko_physics	crates/boyko_physics/src/narrowphase/axis_cache.rs	BoxAxisCache::slots (instance: Manifolds::box_axis_cache resources.rs)	field	other:ScratchColumn (kernel column on VmReservation; engine storage, not std heap)	AxisEntry (key u64 = pack(body_a, body_b) + SAT axis index u32; Copy)	E	resource-column	none	highwater	no	resource-column PairCache
 boyko_physics	crates/boyko_physics/src/resources.rs	ConstraintGraph::debug_assert_coloring	local	Vec	u64	F	system-scratch	system	perframe	no	ScratchColumn
 boyko_physics	crates/boyko_physics/src/resources.rs	IslandSleep::asleep	field	Vec	bool	E	dense-component	body	highwater	no	dense component
 boyko_physics	crates/boyko_physics/src/resources.rs	IslandSleep::below_count	field	Vec	u16	E	dense-component	body	highwater	no	dense component
 boyko_physics	crates/boyko_physics/src/resources.rs	IslandSleep::energy	field	Vec	f32	F	system-scratch	system	highwater	no	ScratchColumn
 boyko_physics	crates/boyko_physics/src/resources.rs	IslandSleep::frozen_islands	field	Vec	bool	F	system-scratch	system	highwater	no	ScratchColumn
+boyko_physics	crates/boyko_physics/src/resources.rs	IslandSleep::latch_prev	field	other:ScratchColumn (kernel column on VmReservation; engine storage, not std heap)	SleepLatch (4 B: below_count u16 + asleep bool, Copy)	F	system-scratch	system	highwater	no	kernel storage already
 boyko_physics	crates/boyko_physics/src/resources.rs	IslandSleep::with_capacity (-> IslandSleep::asleep)	local	Vec	bool	B	dense-component	body	once	no	dense component
 boyko_physics	crates/boyko_physics/src/resources.rs	IslandSleep::with_capacity (-> IslandSleep::below_count)	local	Vec	u16	B	dense-component	body	once	no	dense component
 boyko_physics	crates/boyko_physics/src/resources.rs	IslandSleep::with_capacity (-> IslandSleep::energy)	local	Vec	f32	B	system-scratch	system	once	no	ScratchColumn
 boyko_physics	crates/boyko_physics/src/resources.rs	IslandSleep::with_capacity (-> IslandSleep::frozen_islands)	local	Vec	bool	B	system-scratch	system	once	no	ScratchColumn
+boyko_physics	crates/boyko_physics/src/row_identity.rs	RowIdentity::added_rows	field	other:ScratchColumn (kernel column on VmReservation; engine storage, not std heap)	u32 (row index)	F	dense-component	body	highwater	no	dense-component
+boyko_physics	crates/boyko_physics/src/row_identity.rs	RowIdentity::cur	field	other:ScratchColumn (kernel column on VmReservation; engine storage, not std heap)	EntityId (8 B, Copy)	F	system-scratch	system	highwater	no	kernel storage already
+boyko_physics	crates/boyko_physics/src/row_identity.rs	RowIdentity::prev	field	other:ScratchColumn (kernel column on VmReservation; engine storage, not std heap)	EntityId (8 B, Copy)	E	resource-column	none	highwater	no	kernel storage already
+boyko_physics	crates/boyko_physics/src/row_identity.rs	RowIdentity::prev_row	field	other:ScratchColumn (kernel column on VmReservation; engine storage, not std heap)	u32 (previous row, NO_ROW sentinel)	F	system-scratch	system	highwater	no	kernel storage already
+boyko_physics	crates/boyko_physics/src/row_identity.rs	RowIdentity::sort_buf	field	other:ScratchColumn (kernel column on VmReservation; engine storage, not std heap)	(EntityId, u32) (12 B, Copy)	F	system-scratch	system	highwater	no	kernel storage already
 boyko_physics	crates/boyko_physics/src/soft/component.rs	SoftBody::build (-> SoftBody::c_a)	local	Vec	u32	B	dense-component	soft-body	once	no	NEW:RaggedColumn
 boyko_physics	crates/boyko_physics/src/soft/component.rs	SoftBody::build (-> SoftBody::c_b)	local	Vec	u32	B	dense-component	soft-body	once	no	NEW:RaggedColumn
 boyko_physics	crates/boyko_physics/src/soft/component.rs	SoftBody::build (-> SoftBody::c_compliance)	local	Vec	f32	B	dense-component	soft-body	once	no	NEW:RaggedColumn
