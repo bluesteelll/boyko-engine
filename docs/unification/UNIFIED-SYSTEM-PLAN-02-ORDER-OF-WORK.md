@@ -1,4 +1,4 @@
-# Unified system plan — 02 Order of work (rev 5)
+# Unified system plan — 02 Order of work (rev 6)
 
 Tree tags (`[J]`, `[M]`, `[G]`) and the citation verification record are in
 [00 Overview](UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md). Bare document names below are `[M]` documents.
@@ -16,9 +16,8 @@ Tree tags (`[J]`, `[M]`, `[G]`) and the citation verification record are in
 5. **Rungs are small and independently green.** No rung is XL. The L rungs carry their size in §2,
    and physics U2's XL scope is split into three rungs, D-S3(i)–(iii). This is the Bevy #20934
    lesson.
-6. **Refactor rule (U-12).** Split a file before the first rung that adds to it. Never split a
-   file a scheduled rung deletes or rewrites; split it after. The one exception is D-M0 (Phase C),
-   stated with its reason there. Locks are per rung and per file (§4).
+6. **Refactor last (Q-4; U-12 overturned).** No file is split before Phase F step F4 (§5). Rungs
+   edit files as they stand; locks are per rung and per file (§4).
 7. **Timings run only in quiet windows (MQ).** No rung waits on a timing unless the table says so.
    Rungs that change a hot loop file an MQ entry, and the entry decides whether the change is kept.
 8. **Design passes before the code that rests on them.** A rung whose design item no critic pass
@@ -27,6 +26,8 @@ Tree tags (`[J]`, `[M]`, `[G]`) and the citation verification record are in
 9. **Gate lists live in 03 §2.** A rung runs every gate that 03 §2 assigns to it, even where a
    gate cell below omits one. The cells below exist for rung-specific arguments: named bodies,
    pins and fixtures.
+10. **Replay determinism (Q-9).** Each hazard of 01 §2.1's register has a rung that lands before
+    UG-22 (RP-3). H-16 is closed by rule B's move clause (U-28), so UG-22 defers nothing.
 
 ## 2. Rungs
 
@@ -39,23 +40,37 @@ ledger rows the rung retires, or unblocks (u) when the rows migrate later.
 |---|---|---|---|---|---|---|---|
 | A0 | Review `claude/trusting-ramanujan-0f8927` (04 §1). `6a9871bb` (event-lane width hazard + worker-panic propagation) is checked against A2's fix and the event-lane code; `867dd734` (`docs/OPEN-QUESTIONS.md`) is read. Each commit is merged into the lane it overlaps (A2, for the panic half) or ruled obsolete with a written reason | — | 0 | the commit's own tests, if it is kept | UG-01 | S | none (a review); a merge takes the target rung's lock |
 | A1 | Physics CK-A4 (support removed → sleeper hangs; pose record) + CK-A5 (apply writes another body when an entity has `RigidBody` without `Collider`) + F1 (`[J]crates/boyko_physics/src/row_identity.rs:278` `#[cfg(not(test))]`) | — | 0 (interim rows are deleted in U5–U7) | `support_loss_wakes_sleepers.rs`, `apply_row_alignment.rs` (untracked in `[J]`, [G]:362-363) | UG-01, UG-03, UG-18 | M | `crates/boyko_physics/**` |
-| A2 | CK-A6 worker-panic propagation + `EntityReservoir` loom model (design rev 3 has one open blocker: `ApplyDrainGuard` off-by-one) | A0 (the panic half of `6a9871bb`) | 0 | `a6_panic_propagation.rs`, `a6_schedule_panic_propagation.rs` ([G]:365-366) | UG-01, UG-08, UG-09 | M | `boyko_threadpool/**`, `ecs/core/schedule/**`, `ecs/core/entity/entity_reservoir.rs`, `boyko_app/src/runner.rs` |
+| A1b | **H-03.** Physics row identity matches on the full `Entity` (id and generation), so a recycled id never inherits a dead body's sleep latch, warm entries or axis hint in the one gather where `is_added` is false (`[J]crates/boyko_physics/src/row_identity.rs:18-26`; matching at `:519`, `:580`). This is interim code, and U5/U7 delete it | A1 | 0 | The inventory's pair: variant A forces the new body Y onto the despawned body X's id; variant B pre-claims that id. Y's post-step velocity bits must be equal in both (red today) | UG-01, UG-03, UG-18 | S | `crates/boyko_physics/**` |
+| AH | **Gate host → msvc (Q-7, U-22).**<br>(1) Merge `fix/census-post-lto-object` (`27ac8904`), then `chore/msvc-host` (`a36ceaa4`).<br>(2) Re-spell every Miri recipe to `nightly-x86_64-pc-windows-msvc`, and re-run the Miri receipts (`docs/threadpool/receipts/**`) with the gnu nightly beside them. The msvc miri (2026-09-09) is now newer than gnu's (2026-08-20), which removes the reason `[W].cargo/config.toml:15-28` gives for staying on gnu.<br>(3) The gate-run recipe sets `TMP`/`TEMP` to `D:/wt/_targets/tmp` (RK-18).<br>(4) **Re-bless**, once, every number pinned under windows-gnu (below) | A1 (04 §2 step 1) | 0 | The census's own reds (`[C]crates/profile_fixture/tests/profile_axis_census.rs:90-97`, `:616-644`); a loom run under the `build.rustflags` form must print `running 0 tests` (the negative control `chore/msvc-host` carries) | UG-01 full on msvc with `--workspace --no-fail-fast` (0 failures: the two census cells go green); UG-08 (msvc nightly, gnu beside it); UG-09 (`--list` first); UG-18; UG-12 (owner) | S, plus one pin commit | `.cargo/config.toml`; `goldens/PINS.toml`; `.github/workflows/ci.yml`; the Miri and loom recipe sites; the pinned census files; `docs/threadpool/receipts/**` |
+| A2 | CK-A6 worker-panic propagation + `EntityReservoir` loom model (design rev 3 has one open blocker: `ApplyDrainGuard` off-by-one) | A0 (the panic half of `6a9871bb`); AH (fixed order #9) | 0 | `a6_panic_propagation.rs`, `a6_schedule_panic_propagation.rs` ([G]:365-366) | UG-01, UG-08, UG-09 | M | `boyko_threadpool/**`, `ecs/core/schedule/**`, `ecs/core/entity/entity_reservoir.rs`, `boyko_app/src/runner.rs` |
 | A3 | `fix/ke13-ke14`: 1 commit, 25 `.rs` ([G]:400). Re-test first: a regression in the observer-flag seed was recorded on 2026-09-10. | — | 0 | its own | UG-01, UG-17 | S | `archetype*.rs`, `migration_helpers.rs`, `query.rs`, `component_pool.rs` |
 | A4a | Inherited red: `check_hotpath_exceptions.py` at `[J]…/entity/entity_reservoir.rs:405` ([G]:835). It is keyed on (file, allow count), and A2's loom model edits the same file first | A1, A2 | 0 | the checker's own red | UG-01, UG-18 | S | `entity/entity_reservoir.rs` |
-| A4b | Inherited red: the `QueryTypeId` exhaustion test race (red 1 run in 11). Read the owner's committed `query_type_registry.rs` first; it may already carry the fix | O1 | 0 | a deterministic reproduction of the race | UG-01, UG-18 | S | `iters/query/query_type_registry.rs` |
-| A5 | Small lane merges (04 §2 order) | A1–A3, A4a | 0 | per lane | UG-01, UG-10, UG-12 (device steps are the owner's) | S each | per lane |
+| A4b | Inherited red: the `QueryTypeId` exhaustion test race (red 1 run in 11). Read the owner's committed `query_type_registry.rs` first; it may already carry the fix | — (O1 done, Q-5) | 0 | a deterministic reproduction of the race | UG-01, UG-18 | S | `iters/query/query_type_registry.rs` |
+| A5 | Small lane merges (04 §2 order), A9's lane included; the census fix and `chore/msvc-host` moved to AH | A1–A3, A4a, AH | 0 | per lane | UG-01, UG-10, UG-12 (device steps are the owner's) | S each | per lane |
 | A6 | Merge `feat/reflection` (20 commits, 82 `.rs`): KC-21 | A3 | 24 reflect-lane rows re-pointed | lane gates `g13b`, `g17` | UG-01, UG-10, UG-17 | L | `migration_helpers.rs`, `boyko_macros/src/component.rs`, `tags.rs` |
 | A7 | Merge `feat/ui-advanced` (16 commits, 69 `.rs`) = engine UI0, plus the `EntityId`-recycling reap stress test (X-11: EM2′ now recycles ids) | A2 | 196 ui-lane rows re-pointed | reap never removes the wrong entity | UG-01, UG-10, UG-12 | L | 4 crates ([G]:398) |
+| A9 | **H-06.** `visibility_sync`'s deferred toggle carries the full `Entity` and is dropped if its generation is stale, instead of resolving a bare `EntityId` at apply (`[Jw]crates/boyko_scene/src/visibility_sync.rs:84-105`). It is developed in a lane worktree cut from `d552be05` and merged in A5's batch | — | 0 | Despawn E, spawn F on E's recycled id in the same frame, with a toggle pending for E: F's `RenderEnabled` bit is unchanged (red today), and equals a run where F gets a fresh id | UG-01, UG-18 | S | `crates/boyko_scene/src/visibility_sync.rs` |
 | O1 / O2 / O3 | Owner steps (04 §3) | — | — | — | — | — | — |
-| A8 | Cut the trunk `integ/unified`. **A code merge, not a docs merge.** After O1, main carries the owner's 14 modified `.rs` files (00 RK-7). They overlap A3 (`query.rs`) and A4b (`query_type_registry.rs`), and they touch `boyko_app`, `boyko_render`, `boyko_rhi` and `boyko_rhi_vulkan` — and also `boyko_physics` (`lib.rs`, `plugin.rs`: A1's crate), `boyko_log` (`codes.rs`) and D-S4's `iters/query/{par_chunk,query_view}.rs` (writer check, `git status` in `[M]`, 2026-09-17; 00 §9 V-26). Code conflicts are resolved by hand; UNION applies to diary docs only (04 §2) | A0, A1–A3, A4a, A4b, A5–A7, O1, O2 | — | the merged tree's full suite | UG-01 full, UG-10, UG-11, UG-12, UG-17, UG-18 | M | the whole tree |
+| A8 | Cut the trunk `integ/unified`. **A code merge, not a docs merge.** Main carries the owner's committed code (Q-5: `5e86fe2d`, `f37650a6`, `f20bdafe`, `69cf3f79`, `5aef7b39`, `b0bff31f`, `b716a5dc`) and, after O2, the KE16 merge. `chore/msvc-host`, in the trunk since AH, and main both edit `boyko_rhi_vulkan/src/device.rs`. They overlap A3 (`query.rs`) and A4b (`query_type_registry.rs`), and they touch `boyko_app`, `boyko_render`, `boyko_rhi` and `boyko_rhi_vulkan` — and also `boyko_physics` (`lib.rs`, `plugin.rs`: A1's crate), `boyko_log` (`codes.rs`) and D-S4's `iters/query/{par_chunk,query_view}.rs` (writer check, `git status` in `[M]`, 2026-09-17; 00 §9 V-26). Code conflicts are resolved by hand; UNION applies to diary docs only (04 §2) | A0, A1, A1b, AH, A2, A3, A4a, A4b, A5–A7, A9, O2 | — | the merged tree's full suite | UG-01 full, UG-10, UG-11, UG-12, UG-17, UG-18 | M | the whole tree |
+
+**AH (4): the re-bless procedure.**
+- **Scope:** UG-03 (`crates/boyko_physics/tests/alloc_frame_census.rs`), the frame-allocation attribution census, UG-18's pinned censuses, and the Miri receipts.
+- **Goldens are not re-blessed.** They were byte-identical under msvc on 2026-09-10 (owner, 32/32). `goldens/PINS.toml` changes only in the env blocks that `chore/msvc-host` carries.
+- **Procedure.**
+  1. Run each pinned test on msvc.
+  2. For every pin that moves, run the same test under `stable-x86_64-pc-windows-gnu`, in `D:/wt/_targets/joltab-gnu`.
+  3. Make one commit that lists every moved pin as (test, gnu value, msvc value, reason). Pins are replaced, never widened (P9). A host difference nobody can explain stays red and is escalated.
+  4. Delete the gnu target dir after the commit.
+- **Who:** the tester runs the CPU censuses and Miri; the owner runs UG-12. No agent re-blesses a golden (03 §4).
+- **Until this commit lands,** gnu-pinned tests run under the gnu toolchain (RK-17).
 
 ### Phase B — gates on the trunk
 
 | Rung | Scope | Prereq | Rows | Red-first tests | Gates | Size |
 |---|---|---|---|---|---|---|
-| B1 | Ledger rev 5 (three trees → trunk) + UG-02 | A8 | pins 2357 active (after the rev-5 recount) | P6's seven hole fixtures; an extra site → red; a missing site → red; an empty scan dir → red on the floor | UG-02 | M |
+| B1 | Ledger rev 5 (three trees → trunk) + UG-02. It carries AP6 W5: KF-33 (`RUNTIME-DATA-LEDGER.md:1446-1457`), KF-34 (`:1459-1470`), `ledger/pool-utils-log.md:18` and the order-of-work row (`:1783`) are restated to allocator P2/P10/P16/P17 and to rungs D-M2/D-M3, and the ledger names the design as authoritative for mechanism and itself for row inventory | A8 | pins 2357 active (after the rev-5 recount) | P6's seven hole fixtures; an extra site → red; a missing site → red; an empty scan dir → red on the floor | UG-02 | M |
 | B2 | G-LOOP, G-GRAPH (a)(b), G-RES, UG-03 re-pinned on the trunk (merges add systems), UG-16 baseline, AL:M-A13 / MD:M-K3 id census | A8 | — | add an exclusive system → G-GRAPH red; add a runner world write → G-LOOP red | UG-03, 13, 14, 16, 20 | M |
-| B3 | UG-15 pin capture on the trunk. This includes leg (7)'s section sizes and symbol multiset, and the sensitivity map's file, layout and containment maps (03 §6). **Profiles:** three are added to the root `Cargo.toml`: `bench-shipped`, `seam-census` and `sensitivity-map` (03 §5, §6). **Probe build:** the `<anon-data>` probe records which anonymous-data forms the gate host's linked PE shows (03 §6, normalisation). **Leg (1)'s macro half:** a `proc_macro2` twin for every `boyko_macros` entry point, the parsers' `const` key table, and the expanded-corpus test. **Other items:** P6-1 reproducibility (two clean `profile.release` builds, disassembly diff); the UG-08 two-leg recipe; the ignore-reason prefix migration (closed vocabulary). **The touch set adds `boyko_macros/src/**`;** B3 precedes RF-K2 (§3) | A8 | — | UG-15 controls, each in its own branch: (i)–(viii) must be red and (ix)–(x) green (03 §6) | UG-08, 11, 15 | M |
+| B3 | **UG-15 pin capture on the trunk, on the msvc gate host (U-22).** It covers leg (7)'s section sizes and symbol multiset, and the sensitivity map's file, layout and containment maps (03 §6).<br>**Symbol subject: the post-LTO object**, built with `cargo rustc … -- --emit=obj`, because the msvc image has no symbol table (`[C]crates/profile_fixture/tests/profile_axis_census.rs:46-78`). B3 lands the dev-only crate `boyko_symcensus`: the object build with its pairing guard (`[C]:213-318`), and `llvm-nm`/`llvm-objdump` wrappers that are RED on an absent tool or an empty census (`[C]:90-97`, `:498-512`). The two existing copies of that instrument stay as they are.<br>**Profiles:** `bench-shipped`, `seam-census` and `sensitivity-map` are added to the root `Cargo.toml` (03 §5, §6).<br>**Probe build:** records (i) the anonymous-data forms the object shows; (ii) the object's symbol-size source (COMDAT section length, or distance to the next symbol); (iii) whether the MSVC Build Tools `llvm-symbolizer` (version printed; absent = RED) resolves the inlined `VmColumn::swap_remove` frame inside the `swap_remove/10k` body from the sensitivity-map PDB — if it does not, the file map comes from a `stable-x86_64-pc-windows-gnu` build of the same commit (03 §6); (iv) P6-1 on the object, and on the image with `-C link-arg=/Brepro`; (v) whether an uncalled `#[no_mangle]` kernel fn, and red control (viii)'s unreferenced static, survive fat LTO and `/OPT:REF` in the msvc image. A control that cannot go red on this host is redesigned at B3, never dropped.<br>**Pin list:** frozen at capture. A candidate body with no symbol in the object is recorded as absent, with its reason, and is not pinned. After capture, a pinned symbol that disappears is RED (P29; critic pass 5, W1).<br>**Leg (1)'s macro half:** a `proc_macro2` twin for every `boyko_macros` entry point, the parsers' `const` key table, and the expanded-corpus test.<br>**Other items:** the UG-08 recipe on the msvc nightly, including the joined-key trial (03 UG-08); the UG-09 recipe; the ignore-reason prefix migration (closed vocabulary). | A8 | — | UG-15 controls, each in its own branch: (i)–(viii) red, (ix)–(x) green (03 §6). (xi) and (xii) start at D-S1(ii) | UG-08, 09, 11, 15 | M |
 | B4 | Physics R0's census (`PHYSICS-ECS-UNIFICATION-DESIGN.md:789`). Take `tests/physics_vec_side_store_census.rs` from `ad0ebea4` (`D:/wt/ecsnative`), re-derive its pin on the trunk, and record the delta from 34 row by row. U6's "Vec 34 → 30" and S0's "census 30 → 0" are re-read as −4 and → 0 from the B4 pin. R0's timing is MQ-01; its SP-1 is MQ-02 | A8 | — | an extra `Vec` side store → red; a removed one → red until the pin is lowered | UG-01, UG-18 | S |
 
 **Phase B worktrees and lock sets (critic pass 4, C2).** B1–B4 are code rungs and run in the code
@@ -65,7 +80,7 @@ first one to go idle. Lock sets:
   exception), the UG-02 scanner test (new) and its fixtures.
 - **B2:** `crates/boyko_physics/tests/alloc_frame_census.rs`, and the new G-LOOP, G-GRAPH, G-RES and
   id-census tests.
-- **B3:** the root `Cargo.toml`, `crates/boyko_macros/src/**`, the UG-15 gate (new),
+- **B3:** the root `Cargo.toml`, `crates/boyko_macros/src/**`, `crates/boyko_symcensus/**` (new), the UG-15 gate (new),
   `tests/ignore_reasons_census.rs`, and every `#[ignore]` site that the prefix migration edits.
 - **B4:** `tests/physics_vec_side_store_census.rs` (new, taken from `ad0ebea4`).
 
@@ -73,27 +88,35 @@ The four sets are disjoint.
 
 ### Document steps (no code; after this plan is approved; parallel with Phase A)
 
+**AP6 has run.** The allocator design is closed at rev 2.4 by orchestrator ruling. AP6 found 0 Critical and left W1–W5 open (`ALLOCATOR-DESIGN-SPACE.md:5-10`, `:3873-3881` at `b716a5dc`).
+
 | Step | Content | Prereq | Must close before |
 |---|---|---|---|
-| DOC-1 | Allocator rev 2.5 (00 §5, first row) | plan approval | AP6 |
-| AP6 | Allocator critique pass 6. Scope: Rev 2.4 (P38–P45) and Rev 2.5 together | DOC-1 | C1 (Rev 2.5); D-S1(i) (P39, P40); D-S2 (P43); UG-15 leg (6) as a gate (P44) |
+| DOC-1 | Allocator rev 2.5 (00 §5, first row), including the AP6 dispositions below and AP6 O1's stale passages | plan approval | AP7 |
+| AP7 | Allocator critique pass 7. **Scope:** the rev-2.5 delta and the AP6 dispositions only; AP6 already reviewed rev 2.4 | DOC-1 | C1 (rev 2.5 rewrites §2.0, which C1 builds) |
 | DOC-2 | Engine rev 4 and physics erratum E2 (00 §5) | plan approval | EP3 |
 | EP3 | Engine critique pass 3. Scope: the rev-3 patch, rev 4 and erratum E2 | DOC-2 | D-S3(iii); AS2; every engine-sourced D-E rung |
 
-### Phase C — memory crate and refactor wave K
+**AP6's open remarks, mapped to rungs.**
+
+| AP6 | Remark | Resolved in |
+|---|---|---|
+| W1 | G6(f)'s two arms link the same kernel | Already answered by UG-15 leg (7), which runs on seam commits against the parent and sees kernel survivors. Leg (6) keeps only feature unification (03 §6). DOC-1 relabels the duplicate (f) row. |
+| W2 | G-MINT rows assume a per-test registry | D-S1(i)'s isolated tests (§2, red-first list). |
+| W3 | P41's counter sits in `HeapRef::free` | Void under U-1: P41's gate is not built. DOC-1 carries the remark with the revival form. |
+| W4 | `register_hooks_by_id` is outside the inventory | 05 §5, row AP6-W4. |
+| W5 | Ledger KF-33/34 text and rung | B1. |
+| O1 | Stale passages | DOC-1. |
+| O2 | One-id-per-element-type mechanism | Void under U-2: scratch is registry-free, so `TraversalScratch` uses `for_type`. |
+| Q4 | `LAYOUTS` scanners see a layout before its kind | D-S1(i)'s cut lists every `LAYOUTS` scanner (`is_type_registered_as_component`, `id_space_census`, reflect enumerations). It confirms that none acts on the kind, or else scopes P40's sentence. |
+| Q5 | `remove_component_type`'s class | Void: deleted (U-10). |
+
+### Phase C — memory crate
 
 | Rung | Scope | Prereq | Rows | Red-first tests | Gates | Size | Lock set |
 |---|---|---|---|---|---|---|---|
-| D-M0 | KC-02, packing S0–S4 (`[J]docs/ecs/POOL-SUBGRANULAR-PACKING-PLAN.md:458-542` and its pin ledger). Citations are re-derived once, at the cut, against the trunk (A3 moved lines in `component_pool.rs`). **Before C1 and RF-K1, by exception to U-12:** the plan's steps and pin ledger are line-cited into `component_pool.rs`, `constants.rs`, `vm.rs` and `vm_column.rs`, which C1 and RF-K1 move. Landing first means one re-derivation instead of three. Its own delta in those files is the commit quantum, `commit_page_region`, ten proof asserts and `committed_bytes()`; RF-K1 then moves that delta as a pure move | B1–B3 | with D-M1, unblocks every per-instance column form of R2 | packing oracles red before the fix: G1 (model) at 3,145,728 B for 16 columns, G3 (OS) at 393,216 B per pool (`:467-478`) | UG-01, 02, 03, 08, 15 (attributed: `ComponentPool::new`, `grow_rows`), 20 | M | `memory/{component_pool,vm,vm_column}.rs`, `ecs/constants.rs`, `core/log/ring.rs` |
-| C1 | KC-01: move `vm.rs`, `vm_column.rs`, `utils.rs` and the granule constants to `boyko_memory`; re-exports; `raw::commit_at<O>`; UG-04 counter | D-M0; AP6 has closed Rev 2.5 | u: KF-32 (9) | a commit from a system body → `commit_delta` red; setup window must be non-zero | UG-01, 04, 10, 15 | M | `ecs/memory/{vm,vm_column,utils}.rs`, `constants.rs` |
-| RF-K1 | Split `component_pool.rs` (4106), `block.rs` (2166), `scope.rs` (2354) | C1, A2 | — | — | UG-01, 10, 15, 17, 18 | L | those files |
-| RF-K2 | Split `component_registry/mod.rs` (1789), `filter.rs` (3343), `migration_helpers.rs` (2662), `archetype.rs` (2574), `archetype_master.rs` (1617), `boyko_macros/src/component.rs` (2067) | A3, A6 | — | — | as RF-K1 | L | those files |
-| RF-K3 | Split `schedule.rs` (2536), `schedule_builder.rs` (2053), `ecs_master.rs` (1918), `query.rs` (1554), `state.rs` (2243), `iter.rs` (1826), `command_queue.rs` (1589), `profiling/{store,tests}.rs` | A2, O1 | — | — | as RF-K1 | L | those files |
-
-Line counts are [G] §1.1's. `wc -l` in `[J]` agrees except for `archetype.rs` (2573) and
-`ecs_master.rs` (1917). `filter.rs` and `state.rs` are the files under `iters/query/`.
-
-`asset/assets.rs` (2634) is **not** split. AS2–AS5 retire `Assets<T>`.
+| D-M0 | KC-02, packing S0–S4 (`[J]docs/ecs/POOL-SUBGRANULAR-PACKING-PLAN.md:458-542` and its pin ledger). Citations are re-derived once, at the cut, against the trunk (A3 moved lines in `component_pool.rs`). **Before C1 (fixed order #6, §4.4).** With U-12 overturned there is no exception to state; the order stands on schedule grounds. D-M0 does not wait for AP7, and C1 does. Landing first also keeps the packing plan's line citations in their own paths until D-M0's cut, the one re-derivation. Its delta in those files is the commit quantum, `commit_page_region`, ten proof asserts and `committed_bytes()`; C1 then moves `vm.rs` and `vm_column.rs` with that delta inside. | B1–B3 | with D-M1, unblocks every per-instance column form of R2 | packing oracles red before the fix: G1 (model) at 3,145,728 B for 16 columns, G3 (OS) at 393,216 B per pool (`:467-478`) | UG-01, 02, 03, 08, 15 (attributed: `ComponentPool::new`, `grow_rows`), 20 | M | `memory/{component_pool,vm,vm_column}.rs`, `ecs/constants.rs`, `core/log/ring.rs` |
+| C1 | KC-01: move `vm.rs`, `vm_column.rs`, `utils.rs` and the granule constants to `boyko_memory`; re-exports; `raw::commit_at<O>`; UG-04 counter | D-M0; AP7 has closed rev 2.5 | u: KF-32 (9) | a commit from a system body → `commit_delta` red; setup window must be non-zero | UG-01, 04, 10, 15 | M | `ecs/memory/{vm,vm_column,utils}.rs`, `constants.rs` |
 
 ### Phase D — kernel contract
 
@@ -101,27 +124,27 @@ Line counts are [G] §1.1's. `wc -l` in `[J]` agrees except for `archetype.rs` (
 
 | Rung | Scope | Prereq | Rows | Red-first tests | Gates | Size |
 |---|---|---|---|---|---|---|
-| D-M1 | KC-03 + KC-18 stacks and encodings; KC-18 tables are `VmColumn<T, TableOwner>` | RF-K1, RF-K3 (`QueryStateCache` lives in `ecs_master.rs`, `[J]…/ecs_master.rs:339`) | retires ≈10 R2 rows (`DenseStore.free`, `EntitySlotMap.slots`, `LiveBitmap.words`, `ArchetypeBundle.{free_slots, id_to_slot}`, `SparseMap` ×3, KF-35, KF-42 ×4); with D-M0, unblocks all R2 (`RUNTIME-DATA-LEDGER.md:1828`) | LIFO and `slot+1` equivalence properties (allocator §5.2); a KC-18 table built with the default owner → UG-04's `Table` setup count reads 0 → red | UG-01, 02, 03, 04, 08, 15 (attributed), 20 | L |
-| D-M2 | KC-05 + KC-06a (allocator 1a + 1b as one commit, then 1f) | D-M1, A2 | KF-33 (4) + "ScopeShared placement" (10) = 14 (R5) | C2 Miri `miri_scope_slot_identity.rs` (`ALLOCATOR-DESIGN-SPACE.md:892-896`); P3 poison-write protector gate re-blessed (zero `KE16-PROTECTOR-GATE-ARMED` lines); mem-shake proven to fire; exhaustion degrades (`D = 1`) | UG-01; UG-03 (App scenes scope/chunk/OTHER → 0; AL:M-A10 `chunk_bytes_resident` pinned); UG-04; UG-08; UG-09 | M |
+| D-M1 | KC-03 + KC-18 stacks and encodings; KC-18 tables are `VmColumn<T, TableOwner>` | C1 (KC-18's tables are `VmColumn<T, TableOwner>`, whose owner parameter C1 adds) | retires ≈10 R2 rows (`DenseStore.free`, `EntitySlotMap.slots`, `LiveBitmap.words`, `ArchetypeBundle.{free_slots, id_to_slot}`, `SparseMap` ×3, KF-35, KF-42 ×4); with D-M0, unblocks all R2 (`RUNTIME-DATA-LEDGER.md:1828`) | LIFO and `slot+1` equivalence properties (allocator §5.2); a KC-18 table built with the default owner → UG-04's `Table` setup count reads 0 → red | UG-01, 02, 03, 04, 08, 15 (attributed), 20 | L |
+| D-M2 | KC-05 + KC-06a (allocator 1a + 1b as one commit, then 1f) | D-M1, A2 | KF-33 (4) + "ScopeShared placement" (10) = 14 (R5) | C2 Miri `miri_scope_slot_identity.rs` (`ALLOCATOR-DESIGN-SPACE.md:899-903`); P3 poison-write protector gate re-blessed (zero `KE16-PROTECTOR-GATE-ARMED` lines); mem-shake proven to fire; exhaustion degrades (`D = 1`) | UG-01; UG-03 (App scenes scope/chunk/OTHER → 0; AL:M-A10 `chunk_bytes_resident` pinned); UG-04; UG-08; UG-09 | M |
 | D-M3 | KC-06b injector ring | D-M2 | KF-34 (4) | loom: push/steal, steal/steal, overflow-spin with park (`LANE_CAP = 2`) | UG-03 (injector → 0, spin counter 0); **UG-05 lands** (first scene at 0); UG-09 | M |
-| D-M4 | KC-07 pool ownership | D-M3, RF-K3 | KF-31 (19) | `Schedule` holds no `Arc` (compile); teardown-order test | UG-01, 02, 15 (`size_of` re-bless recorded) | M |
+| D-M4 | KC-07 pool ownership | D-M3 | KF-31 (19) | `Schedule` holds no `Arc` (compile); teardown-order test | UG-01, 02, 15 (`size_of` re-bless recorded) | M |
 | D-M5 | KC-08 gang + `par_range` (kernel halves of physics P1 and P2) | D-M4 | 0 (KF-21) | board loom model; Miri gang-exit protector gate; abort paths (a)–(f); phase-overlap detector with its mutation (`PHYSICS-ECS-UNIFICATION-DESIGN.md:3591-3602`); NB3 release assert; NB4 trybuild | UG-01, 08, 09, 15 (attributed: mode table), 17 | L |
-| D-M6 | KC-04 thread context, per 01 §6. **Touch set:** `boyko_threadpool/src/{thread_ctx.rs (new), tls.rs, worker.rs, thread_pool.rs, lib.rs}`; `boyko_threadpool/tests/{thread_ctx_lifecycle.rs (new), loom_thread_ctx.rs (new), tls_lane_merge.rs}` (D7's source-shape row now counts `current()` calls); `boyko_diag/src/lane.rs`; `boyko_log/src/{drain_owner, sync_out, codes}.rs` (`codes.rs` gains the two refusal codes); `boyko_ecs/src/ecs/core/{thread_fields.rs (new), mod.rs, component/hooks/scope.rs, component/observers/propagate.rs, hierarchy/commands.rs, relationship/mod.rs, component/component_registry/required.rs}`; `boyko_ecs/tests/required_plan_reentry.rs` (new); root `tests/thread_ctx_census.rs` (new). **Split rule:** if the cut estimates more than 2000 changed lines, the rung splits into D-M6a (threadpool, diag, log: the statics, arms, pool rows, `LANE`, tokens, lifecycle and loom tests) and D-M6b (the ECS rows and the plan-build set), in that order, each green on its own | D-M4, RF-L. MQ-13 runs after the merge and does not hold it (03 §5) | KF-45: 12 rows → 4 key/guard cells | the D-M6 block below | UG-01, 04, 08 (03 §3), 09, 15 attributed (the `Schedule::run` dispatch, including `install`'s record read, and the `swap_remove/10k` body; mode table; leg (1) stays 0 with no allowlist entry), 16 (records `.bss`'s +525,312 B virtual size beside the `.text` / `.rodata` budget of 00 §2), 18 (the new census), 20 | M |
+| D-M6 | KC-04 thread context, per 01 §6. **Touch set:** `boyko_threadpool/src/{thread_ctx.rs (new), tls.rs, worker.rs, thread_pool.rs, lib.rs}`; `boyko_threadpool/tests/{thread_ctx_lifecycle.rs (new), loom_thread_ctx.rs (new), tls_lane_merge.rs}` (D7's source-shape row now counts `current()` calls); `boyko_log/src/{drain_owner, sync_out, codes}.rs` (`codes.rs` gains the two refusal codes); `boyko_ecs/src/ecs/core/{thread_fields.rs (new), mod.rs, component/hooks/scope.rs, component/observers/propagate.rs, hierarchy/commands.rs, relationship/mod.rs, component/component_registry/required.rs}`; `boyko_ecs/tests/required_plan_reentry.rs` (new); root `tests/thread_ctx_census.rs` (new). **Split rule:** if the cut estimates more than 2000 changed lines, the rung splits into D-M6a (threadpool, diag, log: the statics, arms, pool rows, `LANE`, tokens, lifecycle and loom tests) and D-M6b (the ECS rows and the plan-build set), in that order, each green on its own | D-M4. MQ-13 runs after the merge and does not hold it (03 §5) | KF-45: 12 rows → 4 key/guard cells | the D-M6 block below | UG-01, 04, 08 (03 §3), 09, 15 attributed (the `Schedule::run` dispatch, including `install`'s record read, and the `swap_remove/10k` body; mode table; leg (1) stays 0 with no allowlist entry), 16 (records `.bss`'s +525,312 B virtual size beside the `.text` / `.rodata` budget of 00 §2), 18 (the new census), 20 | M |
 
 **Lane STORE**
 
 | Rung | Scope | Prereq | Rows | Red-first tests | Gates | Size |
 |---|---|---|---|---|---|---|
-| D-S1(i) | KC-19a, the registry bug fixes (01 §2) | RF-K2; AP6 has closed P39 and P40 | 0; fixes defect 32.2 | G-MINT-1..4 + the row-8 kind race (`ALLOCATOR-DESIGN-SPACE.md:3663-3698`); `install_dense_storage_kind::<D>(another type's id)` panics in release | UG-01; UG-10 (`tags.rs` waived anchors re-blessed explicitly, P38.4); UG-19; **UG-15 attributed:** pins may move only in `try_register_dynamic`, `register_new::<Transform>` and `register_layout`, each with its P-number in the commit message; any other move is red | S |
-| D-S1(ii) | KC-19b, the modding Stage-1 seam (01 §2; MS-02, MS-03) | D-S1(i) | 0 | G-MINT rows for sized names; a sized name re-minted with a different layout → `Err` | UG-01, UG-10 (`tags.rs` again), UG-19; **UG-15 strict, parent = its cut commit**, which contains D-S1(i) and may also contain D-S3(i) or D-E1 (first cut wins on the registry files, §4.3). Legs (1)–(5) and (7) must be identical; leg (6) is N/A until a modding crate exists. Red controls (i)–(viii) must each be red in their own branch (03 §6). Leg (7) is the check that no KC-19b item survives in the linked `boyko_demo`: `id_space_census()` is reachable from engine code from D-S1(i) on, so a KC-19b item that it comes to call would show up there. If a leg moves, the moving item leaves the kernel for `boyko_mod_host` (modding R1, `MODDING-DESIGN-SPACE.md:1818-1823`) and D-S1(ii) re-lands without it | S |
-| D-S2 | KC-10's columns, including `new_untracked_raw`'s `drop_fn` parameter and the lazy state (01 KC-10), = physics U1 (the `WorldScratch` half lands in D-R2a). **Touch set:** `memory/component_pool.rs`; `boyko_memory/src/vm.rs` (`VmReservation::UNRESERVED`); `component/scratch/**`; and every user of the band or of `ScratchColumn::new`: `boyko_physics/src/{scratch_ids,row_identity,resources}.rs`, `solver/{warm_start,soft_step,colored,colored_tests}.rs`, `narrowphase/axis_cache.rs`, `soft/{coupling,colored}.rs`, and `boyko_render/src/{mesh_draw,particle_system,particle,light_system}.rs`. Ripgrep for `ScratchColumn::new\|scratch_ids::\|SCRATCH_ID_\|broadphase_column_id\|SCRATCH_REGION` in `[J]/crates` finds 281 hits (matching lines) in 17 files, three of them in `boyko_ecs`: `memory/component_pool.rs` and the tests `crates/boyko_ecs/tests/scratch_column{,_miri}.rs`, which this touch set does not name (writer check, 00 §9 V-30) | D-S1(i), D-M0, RF-K1; AP6 has closed P43 | u: KF-01 (324), KF-05 (15); deletes the band | staggers pairwise distinct mod 64 within a cohort and consecutive for same-type singles; `NEXT_ID` unchanged across 1000 cohort and 1000 `for_type` constructions; `size_of::<ComponentPool>()` still 128 / 144; render lane microbench recorded; a `Default` column makes no reservation syscall before its first push, and its first push reserves exactly once | UG-01, 02, 03, 04, 12, 15 (attributed: `ComponentPool::new`, `grow_rows`; leg (3) `ComponentPool` must not move), 19; MQ-03 filed, **not blocking** (03 §5) | L |
-| D-S3(i) | KC-12's kind: `StorageKind::Group`, the exhaustive matches, the decoder, and `create_archetype` refusing `Group`. **Touch set:** the files holding an exhaustive `match` on `StorageKind`, as the compiler reports them when the variant is added (24 non-test files reference the enum at `d552be05`: ripgrep `StorageKind::` outside `tests/`), plus `boyko_macros/src/component.rs`. *Writer check (00 §9 V-38): 24 holds for `[J]crates` with every `tests/` directory excluded. The 24 are 21 `boyko_ecs` files plus `boyko_macros/src/component.rs` (already one of them), `boyko_render/src/occlusion_marker.rs` and `boyko_serialize/src/load.rs`, so the touch set crosses into render and serialize* | D-S2, RF-K3 | 0 | `ALL_STORAGE_KINDS` covers `Group`; a `Group` id in `create_archetype` panics; the decoder round-trips every kind | UG-01, 02, 03, 04, 15 (attributed: the five dispensers, `register_new::<Transform>`), 17, 19 | M |
+| D-S1(i) | KC-19a, the registry bug fixes (01 §2), plus 05 RM-2: `register_stable_name` refuses a second id under an existing full name (`[J]…/component_registry/serialize.rs:394-397`; resolution returns the first match, `:415-421`) | B1–B3. AP6 raised no remark against P39/P40's mechanisms; its W2 is answered by this rung's tests. | 0; fixes defect 32.2 | the isolated registry rows (§2, red-first list, D-S1(i)); `install_dense_storage_kind::<D>(another type's id)` panics in release; two types declaring one `stable_name` → the second registration is refused (red today: it appends), in its own binary `registry_stable_name_refusal.rs` | UG-01; UG-10 (`tags.rs` waived anchors re-blessed explicitly, P38.4); UG-19; **UG-15 attributed:** pins may move only in `try_register_dynamic`, `register_new::<Transform>`, `register_layout` and `Transform::component_id` (RM-2's call sits in the derive's `component_id()` closure, `[J]crates/boyko_macros/src/component.rs:318-321`, `:392`), each with its P-number in the commit message; any other move is red | S |
+| D-S1(ii) | KC-19b (rev 5.1), the modding Stage-1 seam: `ModSeam` and MS-03's four readers (01 §2; 05 MS-03) | D-S1(i) | 0 | S-1's shape check (leg (5)); red control (xi); green control (xii) (05 §6). The sized-name rows move to MS-02b's Stage-3 rung (RM-3) | UG-01, UG-10 (`tags.rs` again), UG-19; **UG-15 strict, parent = its cut commit**, which contains D-S1(i) and may also contain D-S3(i) or D-E1 (first cut wins on the registry files, §4.3). Legs (1)–(5), (7) and (7b) must be identical; leg (6) is N/A until a modding crate exists. Red controls (i)–(viii) and (xi) must each be red, and green controls (ix), (x) and (xii) green, each in its own branch (03 §6). Leg (7) is the check that no KC-19b item survives in the linked `boyko_demo`: `id_space_census()` is reachable from engine code from D-S1(i) on, so a KC-19b item that it comes to call would show up there. If a leg moves, the moving item leaves the kernel for `boyko_mod_host` (modding R1, `MODDING-DESIGN-SPACE.md:1818-1823`) and D-S1(ii) re-lands without it | S |
+| D-S2 | KC-10's columns, including `new_untracked_raw`'s `drop_fn` parameter and the lazy state (01 KC-10), = physics U1 (the `WorldScratch` half lands in D-R2a). **Touch set:** `memory/component_pool.rs`; `boyko_memory/src/vm.rs` (`VmReservation::UNRESERVED`); `component/scratch/**`; and every user of the band or of `ScratchColumn::new`: `boyko_physics/src/{scratch_ids,row_identity,resources}.rs`, `solver/{warm_start,soft_step,colored,colored_tests}.rs`, `narrowphase/axis_cache.rs`, `soft/{coupling,colored}.rs`, and `boyko_render/src/{mesh_draw,particle_system,particle,light_system}.rs`. Ripgrep for `ScratchColumn::new\|scratch_ids::\|SCRATCH_ID_\|broadphase_column_id\|SCRATCH_REGION` in `[J]/crates` finds 281 hits (matching lines) in 17 files, three of them in `boyko_ecs`: `memory/component_pool.rs` and the tests `crates/boyko_ecs/tests/scratch_column{,_miri}.rs`, which this touch set does not name (writer check, 00 §9 V-30) | D-S1(i), D-M0, C1 (`VmReservation::UNRESERVED` lands in `boyko_memory/src/vm.rs`). AP6 raised no remark against P43 (`ALLOCATOR-DESIGN-SPACE.md:4118` at `b716a5dc`). *Writer check (00 §9 V-68): `:4118` closes pass-5 W4 by P43 "with O2's mechanism note"; AP6's optional O2 (`:4101-4105`) concerns P43.1's rule, and this plan voids it under U-2 (Document steps).* | u: KF-01 (324), KF-05 (15); deletes the band | staggers pairwise distinct mod 64 within a cohort and consecutive for same-type singles; `NEXT_ID` unchanged across 1000 cohort and 1000 `for_type` constructions; `size_of::<ComponentPool>()` still 128 / 144; render lane microbench recorded; a `Default` column makes no reservation syscall before its first push, and its first push reserves exactly once | UG-01, 02, 03, 04, 12, 15 (attributed: `ComponentPool::new`, `grow_rows`; leg (3) `ComponentPool` must not move), 19; MQ-03 filed, **not blocking** (03 §5) | L |
+| D-S3(i) | KC-12's kind: `StorageKind::Group`, the exhaustive matches, the decoder, and `create_archetype` refusing `Group`. **Touch set:** the files holding an exhaustive `match` on `StorageKind`, as the compiler reports them when the variant is added (24 non-test files reference the enum at `d552be05`: ripgrep `StorageKind::` outside `tests/`), plus `boyko_macros/src/component.rs`. *Writer check (00 §9 V-38): 24 holds for `[J]crates` with every `tests/` directory excluded. The 24 are 21 `boyko_ecs` files plus `boyko_macros/src/component.rs` (already one of them), `boyko_render/src/occlusion_marker.rs` and `boyko_serialize/src/load.rs`, so the touch set crosses into render and serialize* | D-S2 | 0 | `ALL_STORAGE_KINDS` covers `Group`; a `Group` id in `create_archetype` panics; the decoder round-trips every kind | UG-01, 02, 03, 04, 15 (attributed: the five dispensers, `register_new::<Transform>`), 17, 19 | M |
 | D-S3(ii) | KC-12's store: the group store (with the `release` byte), DEAD, binder, `BindToken`, `GroupSlot` / `GroupRef`, `GroupHead` / `GroupTail`, and the debug reconciliation at the end of `apply_window_drain`. **Touch set:** `ecs_master/{entity_api, ecs_master, binder (new)}.rs`, `archetype/archetype.rs` (`anchor_mask`), `iters/query/**` (new terms), `schedule/schedule.rs` (the end of `apply_window_drain`: physics cites `:841` from `d11962a9`, `PHYSICS-ECS-UNIFICATION-DESIGN.md:2043`; it is `[J]…/schedule.rs:859` at `d552be05`, 00 §9 V-25), `system/params/**` (`:3049`), `dense/dense_registry.rs`, `entity/{entity_master, inland_store}.rs`, `boyko_macros` (`#[dense_group]`) | D-S3(i), D-E0 (fixed order #2) | u: KF-19 (14) | the U2 items for the store, binder and slots (`PHYSICS-ECS-UNIFICATION-DESIGN.md:2981` + `:3583-3587`), with Erratum E1; `clear()` on an `Immediate` group DEAD-fills every slot; NB5 test tokens; **D-E0's test gains its group leg:** each spawn inserts the test group's anchor, and the `(system index, spawn ordinal) → group slot` sequence is identical across runs and equal to W = 1 | UG-01, 02, 03, 04, 08 (TB), 15 (attributed: the `swap_remove/10k` body; leg (3) `EcsMaster`; rev 2's "despawn body" is not a leg-(2) pin, so it is not named), 17, 19 | L |
 | D-S3(iii) | KC-12's chain and KC-13(a): chain, ChainKey, `Release::Stamped`, `died`, `release_dying_before`, and the `clear()` stamping rule. **Touch set:** the `dense/**` group-store files, `ecs_master/ecs_master.rs` (`clear`), `boyko_macros` (ChainKey emission), `system/params/**` (the `GroupHead` methods) | D-S3(ii); EP3 closed | u: KF-49 (4) | the U2 items for the chain; X-17 `clear()` red-first; the Stamped proptest (never released before the horizon, and never by removal, the first-op flush or `clear()`); `release_dying_before` on a `Chained` group fails to compile (UG-17, E0271) | UG-01, 02, 03, 04, 08 (TB), 15 (strict), 17, 19 | M |
-| D-S4 | KC-14 = physics U3 (touch set: `iters/query/{par_chunk,query_view}.rs` and the par drivers) | D-S3(iii), RF-K3 | u: KF-20 (6) | mixed `par_iter` ≡ `iter` multiset; `IsEnabled` + `GroupSlot` in one query | UG-01, 17 | M |
+| D-S4 | KC-14 = physics U3 (touch set: `iters/query/{par_chunk,query_view}.rs` and the par drivers) | D-S3(iii) | u: KF-20 (6) | mixed `par_iter` ≡ `iter` multiset; `IsEnabled` + `GroupSlot` in one query | UG-01, 17 | M |
 | D-S5 | KC-15 + span-typed group columns | D-S3(iii) | u: KF-03 (40) | proptest against a Vec model (frontier bounded by live spans); copies ≤ 2n; Miri `SpanRef` read across a sibling relocation; spans freed before DEAD at all 5 release points | UG-01, 08, 15 (attributed: mode table) | L |
-| D-S6 | KC-16, plus the 7 KF-02 rows in `boyko_ecs` and `boyko_render`. **Touch set:** `component/scratch/**` (the typed wrapper), `component/component_pool_bundle.rs`, `component/dense/dense_registry.rs`, `component/enable/enable_store.rs`, `ecs_master/ecs_master.rs`, `asset/staging.rs`, `boyko_render/src/retired_gpu_buffers.rs` | D-S2 (the `drop_fn` constructor), RF-K3 (`ecs_master.rs`) | KF-02 (7); the rhi row goes to D-E15, the `sparse_map` row to D-R2d | drop counts on truncate / `take_at` / clear / drop; `NEXT_ID` unchanged across 1000 `OwnedColumn` constructions (0 ids) | UG-01, 02, 04, 08, 12 (the render row), 15 (attributed: mode table) | M |
-| D-S7 | KC-17 + byte users (allocator 1c, 1e) | D-M1, RF-K3 | KF-07 (6), KF-06 (12), `TermList` (7) | panic-recovery re-absorb without realloc (O7); resource record reuse; drop count | UG-01, 03, 08 | M |
+| D-S6 | KC-16, plus the 7 KF-02 rows in `boyko_ecs` and `boyko_render`. **Touch set:** `component/scratch/**` (the typed wrapper), `component/component_pool_bundle.rs`, `component/dense/dense_registry.rs`, `component/enable/enable_store.rs`, `ecs_master/ecs_master.rs`, `asset/staging.rs`, `boyko_render/src/retired_gpu_buffers.rs` | D-S2 (the `drop_fn` constructor) | KF-02 (7); the rhi row goes to D-E15, the `sparse_map` row to D-R2d | drop counts on truncate / `take_at` / clear / drop; `NEXT_ID` unchanged across 1000 `OwnedColumn` constructions (0 ids) | UG-01, 02, 04, 08, 12 (the render row), 15 (attributed: mode table) | M |
+| D-S7 | KC-17 + byte users (allocator 1c, 1e) | D-M1 | KF-07 (6), KF-06 (12), `TermList` (7) | panic-recovery re-absorb without realloc (O7); resource record reuse; drop count | UG-01, 03, 08 | M |
 
 **D-S3's three rungs hold their locks separately.**
 - Each has its own branch (`u/D-S3i`, `u/D-S3ii`, `u/D-S3iii`) and its own touch set.
@@ -135,15 +158,15 @@ sources and start as soon as their prerequisites land.
 
 | Rung | Scope | Prereq | Rows | Size |
 |---|---|---|---|---|
-| D-E0 | KC-36 deterministic in-window apply order (EM2′-K test mandatory, RK-10) | RF-K3 | 0 (defect X-14) | S |
-| D-E1 | KC-20 (K-EK22 gate) | RF-K2, EP3 | u: generic users | S |
+| D-E0 | KC-36 deterministic in-window apply order (EM2′-K test mandatory, RK-10) | B1–B3 | 0 (defect X-14) | S |
+| D-E1 | KC-20 (K-EK22 gate) | D-S1(i) (registry files, §4.3), EP3 | u: generic users | S |
 | D-E2 | KC-29a/b (EK15a, EK15b + the despawn redirect, placed per §4.4) | D-E1, D-S3(iii) | KF-48 (1) | M |
-| D-E3 | KC-22 | RF-K3, EP3 | u: KF-44 (21) | S |
+| D-E3 | KC-22 | B1–B3, EP3 | u: KF-44 (21) | S |
 | D-E4 | KC-24 | D-E3 | — | S |
 | D-E5 | KC-23 structural log | D-E4 | u: KF-25 (3) | M |
 | D-E6 | KC-25 | D-E5 | u: KF-17 (8) | S |
 | D-E7 | KC-23 EK6 + EK6g (K-EK6g gate) | D-E6, D-S3(iii) | — | M |
-| D-E8 | KC-26 | D-E7 | u: KF-23 (5) | M |
+| D-E8 | KC-26, plus **KC-37 (d)** (H-19): `#[event(swap = "every_tick")]`. Such a type swaps before every Fixed substep, inside `fixed_advance`'s closure (`[Jw]crates/boyko_ecs/src/ecs/core/app/app.rs:730-733`), instead of at the frame's gated swap (`:713-720`). A Main-schedule reader of an `every_tick` type is refused at `App::finish` with a coded panic, because two substeps in one frame would swap its events out unseen. **Default path (critic pass 6, O1).** `App::finish` records whether any `every_tick` type exists. `update_with_delta` then chooses between two monomorphised `fixed_advance` calls with one predicted branch per frame. A game with no `every_tick` type runs today's substep closure byte for byte, at the cost of one `bool` in `App` and one branch per frame outside the loop. | D-E7, D-E20 | u: KF-23 (5) | M |
 | D-E9 | KC-27 + KC-13(b): the teardown driver, `TeardownToken`, `release_dense_group_at_teardown` (EM2′-K test mandatory) | D-E8, D-M4, D-S3(iii) | KF-29 (2), KF-30 (1) | M |
 | D-E10 | KC-29c (K-EK15c gate) | D-S5, D-E2 | u: KF-11 (4) | L |
 | D-E11 | KC-28 (MQ-14 filed) | D-E9, D-S7 | KF-13 (8), KF-14 (26), KF-15 (5), KF-12 (18) as edge entities | L |
@@ -153,11 +176,15 @@ sources and start as soon as their prerequisites land.
 | D-E15 | KC-34 KF-36 edge; then KF-02's `boyko_rhi_vulkan/src/memory.rs:728` row onto KC-16 | D-E14, D-S6 | u: KF-36 (44); KF-02 (1) | M |
 | D-E16 | KC-34 EK16 | D-E15 | KF-40 (2) | S |
 | D-E17 | KC-32 | D-E13 | — | M |
-| D-E18 | KC-30b structured asset error; every construction site migrates in the same commit | B1 (its 77 rows retire, so UG-02 must be pinned first; rule 2); RF-L (D-E18 adds codes to `boyko_log/src/codes.rs`, U-12) | KF-10 (77) | M |
+| D-E18 | KC-30b structured asset error; every construction site migrates in the same commit | B1 (its 77 rows retire, so UG-02 must be pinned first; rule 2) | KF-10 (77) | M |
 | D-E19 | KC-30c loader decode context (kernel half + loader signatures) | D-E18, D-S2 | KF-09: kernel rows and the loader rows the signature forces; the rest unblocked for F1 | M |
+| D-E20 | **KC-37 (b), writer lanes (H-02).**<br>`EventWriterState` holds a lane index assigned at `init_state`, in registration order. Its `thread_count` field becomes `lane`, so the state stays 24 B (`[Jw]…/system/params/event_writer.rs:50-63`, `:287-290`).<br>`send` and `send_many` stop reading the worker id (`:131-133`, `:162-164`). The reader state changes to match. The flat reader buffer concatenates lanes in lane order.<br>The per-lane capacity now applies per writer, so which events are refused no longer depends on W. `EcsMaster::events().send_event` becomes dispatcher-only (U-21). On a worker it returns `Err(EcsError::EventSendOffDispatcher)` and writes nothing. Its check replaces today's lane routing read (`[Jw]…/events/event_dispatcher.rs:290-292`), so the TLS read count is the same. The worker guidance at `[Jw]…/system/params/commands.rs:349-352` is replaced by "use `EventWriter`", and `tests/event_send_from_worker.rs` is rewritten (red-first list). UG-20 records lanes and reader-buffer bytes per event type (MQ-21) | B1–B3 | 0 | M |
+| D-E21 | **KC-37 (c), declaration-order hooks (H-04).**<br>Within one structural op, `on_add`/`on_insert` hooks and observers fire in the bundle's declaration order, with required components in plan order, never in `ComponentId` order. Today ids are sorted at `[J]crates/boyko_macros/src/bundle.rs:345` and fired in that order at `[J]…/commands/migration_helpers.rs:1022-1107`.<br>Each bundle's cached plan carries a declaration-order permutation; the signature keeps its sorted ids (`[J]…/bundle/bundle_column_cache.rs:322-323`).<br>At its cut, the rung also lists every other kernel site that orders by an `EntityId`, `ComponentId` or `NameId` value, by `ArchetypeId` beyond creation order, or by `TypeId`, and fixes or justifies each (01 §2.1 (e)).<br>**Ops with no declaring bundle (U-26).** Despawn, clone/materialize and archetype-driven removes fire in canonical type order. That order is `ComponentLayout::type_name` bytes, ties broken by `TypeId`. The permutation is built lazily on the `#[cold]` fire path (`[Jw]…/ecs_master/entity_api.rs:705-806`; today `:734` copies `component_ids()` in id order). It is kept in two `VmColumn`s owned by `ArchetypeMaster`: a flat permutation and a per-`ArchetypeId` start, where 0 means not built. `clear()` truncates both.<br>**Touch set:** `migration_helpers.rs`, `bundle_column_cache.rs`, `boyko_macros/src/bundle.rs`, `ecs_master/entity_api.rs` (`fire_despawn_hooks`), `archetype/archetype_master.rs`, plus the clone and materialize fire sites the cut names. | B1–B3 | 0 | S |
+| D-E22 | **KC-37 (i): the generic access visitor.**<br>• `Schedule::for_each_system<V: FnMut(SystemView<'_>)>` and `App::for_each_system_access<V: FnMut(CoreSchedule, SystemView<'_>)>`.<br>• `SystemView { index, name, exclusive, access: &Access }`.<br>• Visit order is post-topological.<br>• Calling the `App` method before `finish` is a coded panic.<br>• **Why the rung exists:** today the systems are `pub(crate)` (`[Jw]…/schedule/schedule.rs:122`), and only `SystemMeta::access()` (`[Jw]…/system/system_meta.rs:255`) is public.<br>• **Lock set:** `schedule/schedule.rs`, `app/app.rs`, `boyko_log/src/codes.rs`. | B1–B3 | 0 | S |
+| D-E23 | **KC-37 (j): frame-level fixed values move to `Time` (U-25, H-20).**<br>• `FixedTime` loses `overstep()`, `overstep_fraction()` and `steps_this_frame()`; its accumulator stays `pub(crate)`.<br>• `Time` gains `fixed_steps()`, `fixed_overstep()` and `fixed_overstep_fraction()`, written once after the loop.<br>• `fixed_advance`'s post-loop lookup (`[Jw]…/time/fixed_loop.rs:82-87`) targets `Time`, and the last `expend` returns the remainder for the debug assert.<br>• **Callers migrate:** `boyko_input`'s `clear_consumed_fixed_edges` (`[Jw]crates/boyko_input/src/action/process.rs:102-109`) reads `Res<Time>`; also `[Jw]crates/boyko_app/src/runner.rs:2282` and `[Jw]crates/boyko_demo/src/app.rs:513`.<br>• **Tests migrate:** `app_fixed_timestep.rs`, `miri_fixed_loop.rs`, `fixed_loop.rs`'s unit tests, and `boyko_render/tests/particle_containment.rs:181`.<br>• **Lock set:** `time/{fixed_time, fixed_loop, time}.rs`, `boyko_input/src/action/process.rs`, `boyko_app/src/runner.rs`, `boyko_demo/src/app.rs`, and the tests named above.<br>*Writer check (00 §9 V-71): these are every code caller of the three getters at `d552be05` (`git grep`). Comments also name them, and the cut decides whether to edit them: `boyko_input/src/{plugin.rs:131, action/state.rs:19, :221, :273}`, `boyko_input/tests/i4_ecs_integration.rs` (comments only), `boyko_app/src/gpu_scene/mod.rs:6093`, `boyko_app/examples/bounce.rs:6`, `boyko_demo/src/render/mod.rs:268`, `boyko_render/src/particle_clock.rs:136`, `boyko_rhi_vulkan/src/present/scene_types.rs:1365`, `boyko_rhi_vulkan/tests/window_present_gbuffer.rs:6902`, `boyko_ui/tests/p4_schedule.rs:6`; `fixed_loop.rs:20` is an intra-doc link, inside the lock set.* | B1–B3, A5 (`runner.rs`) | 0 | S |
 
 Gates for every D-E rung: UG-01, UG-02, UG-10, UG-17, and UG-15 in the mode the table below gives,
-plus the rung-specific gates of engine §17 / P-§17. UG-12 on D-E18 and D-E19.
+plus the rung-specific gates of engine §17 / P-§17. UG-12 on D-E18 and D-E19. D-E20 and D-E21 also run UG-08 (the event buffer's and the hook path's `unsafe`). D-E22 is a seam commit: UG-15 strict with legs (7) and (7b). D-E23 also runs UG-08 (`miri_fixed_loop`), UG-12 (it edits `boyko_app` and a `boyko_render` test) and UG-17 (its `compile_fail` fixture).
 
 **UG-15 mode per rung (critic pass 2, O2; critic pass 3, W1; critic pass 4, W3).**
 - **Default.** A rung runs **attributed** only if it names, before its cut, the leg-(2) bodies and
@@ -175,10 +202,10 @@ plus the rung-specific gates of engine §17 / P-§17. UG-12 on D-E18 and D-E19.
   at its cut, with the reason, in its entry.
 - **Red.** A move of a body or type that is neither named nor argued is red.
 - **Rename lists.** A rung that moves files declares one (03 §6, normalisation):
-  - every RF commit (its move map);
+  - every RF commit (its move map; Phase F);
   - C1 (the map `boyko_ecs::ecs::memory::{vm, vm_column, utils}` → `boyko_memory::…`).
 
-  D-S1(ii) declares `TAG_NAMES → DYN_NAMES`.
+  D-S1(ii) declares none: rev 5.1 moved P32 R1's rename to MS-02b (05 §3.2; RM-3).
 - **R2 sweeps and the `swap_remove/10k` body** (00 §9 V-49; critic pass 4, O5).
   - No ledger row lives in `entity_api.rs` (a ripgrep of `[M]docs/memory/runtime-data-ledger.tsv`
     returns 0 hits), so no R2 sweep edits `delete_entity_core` itself.
@@ -208,8 +235,10 @@ plus the rung-specific gates of engine §17 / P-§17. UG-12 on D-E18 and D-E19.
 | D-E2 | the `swap_remove/10k` body: the redirect inside the `!flags.is_empty()` branch (`[J]…/entity_api.rs:1050`) and `delete_entity_core`'s return type (§4.4). The table-only path executes no added instruction; MQ-20 records the timing | — |
 | D-E11 | `add_system::<F, M>` (system entities); `query_ref_iter/10k` must **not** move (U-16) | — |
 | D-R2a | `EcsMaster`'s layout map | `EcsMaster` (`WorldScratch`) |
-| D-R2b..d, D-E3..E10 (except D-E2), D-E12..E19 | named at the cut by the rule above, otherwise strict | named at the cut, otherwise strict |
-| D-S1(ii), D-S3(iii), D-S4, D-E1, every RF commit, every modding delta | strict | strict |
+| D-E21 | The `swap_remove/10k` body: despawn hooks fire through the permuted loop from `delete_entity_core` (`[J]…/entity_api.rs:1051`). The loop is `#[cold]`, so the cut argues whether any byte of the pinned body moves. Also every body in `EcsMaster`'s layout map, because `ArchetypeMaster` gains two columns and sits by value in `EcsMaster` (`[Jw]…/ecs_master.rs:157`). | `EcsMaster` |
+| D-R2b..d, D-E3..E10 (except D-E2), D-E12..E20, D-E23 | named at the cut by the rule above, otherwise strict | named at the cut, otherwise strict |
+| D-S1(ii), D-S3(iii), D-S4, D-E1, D-E22 (a seam commit), RP-0, RP-1 (a seam commit, 03 §6), RP-2, RP-3, every RF commit (Phase F), every modding delta | strict | strict |
+| A1b, AH, A9 | N/A (before B3) | N/A |
 
 **Red-first tests for the rungs this revision adds or changes.**
 - **D-E0.**
@@ -268,23 +297,63 @@ plus the rung-specific gates of engine §17 / P-§17. UG-12 on D-E18 and D-E19.
   the error path.
 - **D-E19.** A second decode of the same asset reuses the warm lanes (0 heap calls), and
   `Asset::Cpu: Copy`.
+- **D-S1(i), isolated registry rows (AP6 W2).**
+  - **Isolation.** Each stateful case is the only `#[test]` in its own test binary. Cargo runs test binaries serially (00 §11), so no case shares the process-global `LAYOUTS` or `NEXT_ID` with another. Each binary's leg checks `running 1 test`.
+  - **Pins are relative:** `P = id_space_census().next_id + 32`, never an absolute 100.
+  - **The dynamic mint is the engine's tag path:** `EcsMaster::try_register_tag` (`[Jw]…/ecs_master/tag_api.rs:47`), which reaches `try_register_dynamic` (`[J]…/component_registry/mod.rs:967`). The sized by-name mint belongs to MS-02b and is not in this rung.
+  - `tests/registry_mint_skip.rs` (G-MINT-1): mint a tag and get k; call `register_layout::<B>(k + 1)`; mint a second tag. Expect `Ok(j)` with `j != k + 1` and no panic. **Red-first:** restore `dynamic_slot_occupied_panic` → it panics.
+  - `tests/registry_mint_budget.rs` (G-MINT-2): first assert `free ≥ 201`; a smaller value is red, not a skip. Pin P, then mint 200 tags. Expect all `Ok` and none equal to P. **Red-first:** add `fetch_min` to `register_layout` → a mint past P fails.
+  - `tests/registry_mint_exhaustion.rs` (G-MINT-3, not ignored): fill the space with tags. Expect `Err(IdSpaceExhausted)` carrying the census counts, and no panic. **Red-first:** delete the `None` return at `MAX_COMPONENTS` → an out-of-bounds panic on `LAYOUTS[512]` (AP6's corrected prediction).
+  - `tests/registry_pin_contract.rs` (G-MINT-4): call `register_layout::<A>(P)` twice, then `register_layout::<B>(P)`. Expect `#[should_panic(expected = …)]`, with a message naming both types and the census line.
+  - **Row 8, deterministic.** A lib unit test in `component_registry/tags.rs`.
+    - A `#[cfg(test)]` rendezvous, keyed by the test's own tag name, sits right after the intern lock is released.
+    - The minting thread (`try_register_enable_tag_by_name`, `[Jw]…/tags.rs:134`) waits there, while a second thread calls `tag_by_name` (`:201`) and must see `None`.
+    - **Red-first:** move `set_storage_kind` after the unlock → on the first and only pass, the reader sees the unclassified id.
+    - The rendezvous exists only under `cfg(test)`.
+- **D-E20.**
+  - **Order.**
+    - Setup: event `E`, lane capacity 64. Two unordered systems `s_a` and `s_b`, each with a per-run seeded 0–2 ms delay, each send 20 events `(sys, seq)` per frame. A reader records the sequence the next frame.
+    - Runs: 50 at W = 8, 10 at W = 2, 1 at W = 1.
+    - Assert: every sequence equals the W = 1 sequence, which is `s_a`'s 20 events followed by `s_b`'s 20.
+    - **Red today:** lanes follow worker ids, so the concatenation order varies at W ≥ 2.
+  - **Refusals.**
+    - Setup: the same systems, sending 40 each per frame.
+    - Assert: each writer's refused count is 0, and the reader sees 80, at every W.
+    - **Red today:** at W = 1 both writers share one lane, and its 64 slots refuse 16; at W = 2 on distinct workers nothing is refused.
+  - **Worker `send_event`.** `tests/event_send_from_worker.rs` now asserts `Err(EventSendOffDispatcher)` for a worker call, and delivery for an apply-path call. **Red-first:** remove the check → the worker call returns `Ok`.
+- **D-E21.**
+  - **Harness.** A parent test re-executes its own binary twice as child processes (`--ignored --exact <child>`). The child is marked `#[ignore = "solo: child process of d_e21_hook_order; run only by the parent"]`. The env var `BOYKO_MINT_ORDER` is `ab` in one child and `ba` in the other.
+  - **Each child:**
+    - first-touches the derive-hooked `HookA` and `HookB` in the given order;
+    - inserts the bundle `(HookB, HookA)`;
+    - despawns the entity;
+    - prints both ids and the hook log.
+  - **Parent asserts:**
+    - the two children's ids are in opposite orders, which proves the perturbation took effect;
+    - the insert log reads `[B, A]` in both children (declaration order);
+    - `on_despawn`, then `on_replace`, then `on_remove` each read `[A, B]` in both children (`"…::HookA" < "…::HookB"`);
+    - a required component C of A is logged after A (plan order).
+  - **Red today:** the child with `id(A) < id(B)` logs the insert as `[A, B]`, and the despawn order follows ids.
+- **D-E22.**
+  - Setup: an app with a Main system, an exclusive Main system, a Fixed system reading `Time`, and a Fixed system writing a component.
+  - Assert: `for_each_system_access` reports exactly these four, schedule-tagged, in index order, with `Access::is_universal()` on the exclusive one.
+  - **Red-first:** a visitor that walks only Main misses both Fixed systems.
+  - Legs (7) and (7b) confirm the visitor has no symbol in the `boyko_demo` object or in any census rlib object.
+- **D-E23.**
+  - A UG-17 `compile_fail` fixture calls `FixedTime::steps_this_frame()`. **Red-first:** before the move the fixture compiles, so its expected error is missing.
+  - The existing pins move to `Time` and keep their values: `fixed_steps() == 16` and `fixed_overstep() == 0` after an exact multiple (`[Jw]crates/boyko_ecs/tests/app_fixed_timestep.rs:53-54`); `fixed_overstep() < timestep` (`:105-107`); a permanent 0 without a Fixed schedule (`:230`).
+  - `clear_consumed_fixed_edges`'s sticky-edge tests stay green.
 - **D-M6.**
   1. **Census** (`tests/thread_ctx_census.rs`).
      - Production `thread_local!` statics in the four KF-45 crates go from 12 to 4, each with its
        reason (01 §6 item 10).
      - `ext_ptr(` has exactly one call site in the workspace, in `thread_fields.rs`.
      - Red-first: add a `thread_local!` to `boyko_ecs`, or a second `ext_ptr` caller.
-  2. **Loom** (UG-09): 01 §6 item 9; `running 5 tests`.
+  2. **Loom** (UG-09): 01 §6 item 9, run with 03 UG-09's recipe. `-- --list` shows the five names first; then the run prints `running 5 tests` and `0 filtered out`.
   3. **Lifecycle** (`boyko_threadpool/tests/thread_ctx_lifecycle.rs`). The binary holds exactly one
      `#[test]`, so nothing in it runs beside its phases, and cargo runs test binaries one at a time.
      The phases run in order:
-     - **(a) Prepare.**
-       - The first pool build publishes both indices before its first spawn (the `debug_assert!` of
-         01 §6 item 4).
-       - On the word arm, after booting W = 64, `CTX_INDEX_ALLOCS == 1` and
-         `LANE_INDEX_ALLOCS == 1`; on a portable host both read 0, and the phase asserts that
-         instead.
-       - Red-first: delete `prepare()` from `build` → the debug assert trips.
+     - **(a) Prepare — withdrawn in rev 6** (U-19; 01 §8.5).
      - **(b) Claims.**
        - Building and dropping a pool of W = 8 raises `THREAD_CTX_CLAIMS` by exactly 8 during
          `build` and not afterwards. After the join, the busy count equals its value before the
@@ -317,10 +386,8 @@ plus the rung-specific gates of engine §17 / P-§17. UG-12 on D-E18 and D-E19.
          `install` on an existing pool panics with the refusal code before `active_scopes` moves,
          and that pool afterwards drops cleanly. `THREAD_CTX_REFUSED` has risen.
        - Red-first: remove the clamp → a worker takes the lazy path and is refused.
-     - **(g) DG12 leg (00 §5, erratum D0-1).** With diagnostics off and after (a):
-       - `boyko_diag::lane::lanes_leaked() == 0`;
-       - no spare is claimed;
-       - `LANE_IDX` and `LANE_TLS_OFF` are the only `boyko_diag` statics that hold a non-zero value.
+     - **(g) DG12 leg — withdrawn in rev 6.** D-M6 does not touch `boyko_diag`. DG12's existing
+       test stays green without edits (item 6 below).
   4. **Plan build** (`boyko_ecs/tests/required_plan_reentry.rs`).
      - **The cycle case.** A hand-written `Component` A registers an `id_fn`. On its first call, the
        `id_fn` builds an `EcsMaster` and inserts an A (re-entering `get_required_plan(A)`); on later
@@ -332,8 +399,23 @@ plus the rung-specific gates of engine §17 / P-§17. UG-12 on D-E18 and D-E19.
   5. **Miri** (UG-08): 03 §3's D-M6 rows.
   6. **Unchanged gates:** `boyko_threadpool/tests/diag_lane.rs` (DG2, DG3) stays green without
      edits, and so does the logging zero-allocation leg (`[J]crates/boyko_diag/src/lane.rs:38-40`).
-  7. **Structural.** `THREAD_BUSY` and `THREAD_RECORDS` are in `.bss` of the linked `boyko_demo`
-     (`llvm-nm` class `b`/`B`; `llvm-size -A`), checked with leg (7)'s tool under `seam-census`.
+  7. **Structural** (critic pass 6, W8), under `seam-census`:
+     - **Symbol class, from the post-LTO object.** `THREAD_BUSY` and `THREAD_RECORDS` are
+       class `b`/`B` symbols in the object that `boyko_symcensus` builds, not in the image,
+       because `link.exe` writes no COFF symbol table (03 §6, leg (7) part (b)).
+     - **Section size, from the linked image.** The image's `.bss` virtual size grows by at
+       least 525,312 B against the parent (`llvm-size -A`, part (a)).
+     - **`__hold_free_slots`** is absent from the object.
+     - **Anti-vacuity.** `no symbols`, or an absent tool, is RED.
+
+**Lane REPLAY** (KC-37, owner Q-9). Every rung here is kernel-optional: RP-1 adds code only in a generic form (01 §2.1 (g)), and RP-2 and RP-3 add crates and tests that `boyko_demo` does not link.
+
+| Rung | Scope | Prereq | Rows | Red-first tests | Gates | Size | Lock set |
+|---|---|---|---|---|---|---|---|
+| RP-0 | **KC-37 library half (H-08, H-12; U-23).**<br>`boyko_math::det`: `sin`, `cos`, `sin_cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `exp_m1`, `ln`, `ln_1p`, `log2`, `powf`, `powi`, `cbrt`, `hypot`. Built from `+ − × ÷` and exact `sqrt`; no `mul_add` (`[Jw]crates/boyko_math/src/lib.rs:6-19`).<br>`boyko_math::rng`.<br>Physics's two `cbrt` sites move to `det::cbrt`.<br>Root test `tests/sim_math_census.rs`: a `syn` walk (leg (1)'s walker) over the non-test code of `boyko_physics`, `boyko_math`, `boyko_sdf_math`, `boyko_scene`, `boyko_replay` and the gate scenes. The walker is a public function of the gate crate, so a game's own test can run it. It counts method or path calls of the std transcendental functions (`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sin_cos`, `exp`, `exp2`, `exp_m1`, `ln`, `log`, `log2`, `log10`, `ln_1p`, `powf`, `powi`, `cbrt`, `hypot`, `sinh`, `cosh`, `tanh`, `asinh`, `acosh`, `atanh`) against an owner-signed allowlist, which starts with six entries: `boyko_math::mat::perspective_rh`'s `tan` (render only, `[J]crates/boyko_math/src/mat.rs:307`), and the five Main-only camera calls (`[J]crates/boyko_scene/src/camera.rs:483, 727, 728, 926, 927`) | A8, A1b, B3 (UG-15 strict needs B3's pins) | 0 | A committed known-answer table (4096 inputs per function, input bits → output bits), asserted on every UG-22 leg. A `.sin(` added to non-test `boyko_physics` code turns the census red. `bodytype_determinism_golden` stays unchanged (H-12's argument, now checked). The census reports the files it read, and zero files is red | UG-01, UG-15 (strict), UG-18 (new census) | M | `boyko_math/**`; `boyko_physics/src/resources.rs` (first cut wins against D-S2); `tests/sim_math_census.rs` |
+| RP-1 | **KC-37 (g).** `boyko_utils::replay_hash::{ReplayHash, HashSink}`, with generic methods only.<br>Impls for primitives (floats canonicalise NaN and keep ±0), arrays and tuples; for `boyko_math`'s types (a new `boyko_math` → `boyko_utils` edge); and for `Entity` (as `sink.entity_bits`). No impl for `Tick` or `NameId`.<br>`#[derive(ReplayHash)]` in `boyko_macros`: field-wise, with `#[replay(skip)]` | RP-0, B3 | 0 | trybuild: a `Tick` field without `#[replay(skip)]` → E0277. Two NaN payloads hash equal. +0 and −0 hash differently. Known-answer vectors for the derive | UG-01; UG-15 strict **as a seam commit**: legs (1)–(5), (7), (7b), controls as for D-S1(ii) (03 §6); UG-17 | S | `boyko_utils/src/**`; `boyko_macros/src/{lib, replay_hash}.rs`; `boyko_math/**`; the `Entity` impl's file in `boyko_ecs` |
+| RP-2 | **KC-37: the replay crate (01 §2.1).**<br>• New `crates/boyko_replay`, depending on `boyko_ecs`, `boyko_utils`, `boyko_math` and `boyko_input`. It holds:<br>  – `ReplayPlugin` (index-0 placement), `ReplayKey`, `ReplaySpawner`, `ReplayCommands`/`spawn_derived`, `DerivedKeyCounters`, `ReplayKeyIndex`;<br>  – `TickActions` over each registered `ActionState<A>`, `SimInputs<E>` with `#[derive(SimInput)]`;<br>  – the tier-1 hasher (per-worker slots) and the tier-2 hasher, the header, the recorder, the player;<br>  – `boundary_report(&App)` over D-E22's visitor;<br>  – the tick-boundary checks (hash, move digest, structural generation, MXCSR) and the startup gate (paused `Time`).<br>• `boyko_input` gains `ActionState::{replay_capture, replay_restore}`, which are generic, so there is no object code until instantiated.<br>• New `crates/boyko_build_id`: the fingerprint generator shared with 05 §3.3.<br>• All storage is resource-owned kernel columns (principle 0). | RP-1, D-E0, D-E8, D-E21, D-E22, D-E23 | 0 (UG-02 stays green: new code uses kernel forms only) | **Round trip.** Record → play is equal. A recorded `ActionState<A>` with a press held across a 3-substep frame replays at fixed 1-substep pacing with identical per-tick `fixed_just_pressed` bits (red if the player restores only levels).<br>**Keys.**<br>• Two hooks on one entity each call `spawn_derived(parent)` in one op → two distinct keys, identical across two runs with opposite system delays (red under rev 6's caller index: both pass 0 → duplicate-key panic).<br>• An unkeyed parent → coded panic.<br>• A `SimInput` `Repr` holding an unmapped `Entity` fails to compile (trybuild).<br>**Checks.**<br>• A Main write of a hashed component → the hash check is red.<br>• A Main insert of a marker on a keyed entity → the move digest is red.<br>• `clear()` from any system → the H-17 coded panic at the next tick boundary.<br>**Boundary report.** Red on `Res<Time>` in a Fixed system, and red when `ReplayPlugin` is added after a plugin whose Fixed system reads `ActionState<A>`.<br>**MXCSR.** The decoder flags a flipped DAZ bit (a unit test on a value; no live write, which Rust makes UB). | UG-01, UG-02, UG-08 (file buffers over `ByteColumn`; the per-worker slots), UG-15 (strict: `boyko_demo` links neither the crate nor the `boyko_input` pair, so every leg is identical by construction, and leg (7) confirms it; *writer check, 00 §9 V-73: `boyko_demo` has no `boyko_input` dependency at `d552be05` (`[J]crates/boyko_demo/Cargo.toml`), and `boyko_input` is not a leg-(7b) census crate, so no UG-15 leg observes the `boyko_input` pair; its generic shape rests on review*), UG-17 | L | `crates/boyko_replay/**` (new); `crates/boyko_build_id/**` (new); `crates/boyko_input/src/action/state.rs`; root `Cargo.toml` (members); `boyko_log/src/codes.rs` (replay codes) |
+| RP-3 | **UG-22 lands** (03 §7): scenes S-R1..S-R3, the perturbation harness, goldens, controls and the CI legs. `#[derive(ReplayHash)]` on the physics and scene components the scenes hash | RP-2, RP-0, D-E20, A1b | 0 | 03 §7's red controls | UG-01, UG-18, UG-22 | M | `crates/boyko_replay/tests/**`; `.github/workflows/ci.yml`; `boyko_physics/src/components.rs` and the hashed `boyko_scene` component file (derive lines only; first cut wins) |
 
 **R2 sweeps** — remaining kernel rows after their features land.
 
@@ -353,7 +435,7 @@ Each sweep lowers UG-02 and needs D-M1 plus the features its rows name.
 - **Size.** M each; a sweep whose net diff exceeds 2000 changed lines is split by file group.
 
 **Exit from Phase D.** Every non-conditional KC is on the trunk (the conditional ones are KC-11 and
-KC-35); UG-01..UG-05 and UG-15 are green; R2 is at 0.
+KC-35); UG-01..UG-05, UG-15 and UG-22 are green, with every UG-22 arm enabled; R2 is at 0.
 
 ### Phase E — subsystems
 
@@ -377,6 +459,7 @@ KC-35); UG-01..UG-05 and UG-15 are green; R2 is at 0.
   `RUNTIME-DATA-LEDGER.md:1880`), and defects A2 and warm-start.
 - **Size.** U5 and P2 are L; the rest are M.
 - **Census numbers.** U6's and S0's census numbers are read from B4's pin.
+- **UG-22 has no arm deferred to physics.** Rule B's move clause (U-28) keeps Main-side moves off keyed entities, and the move digest detects a breach. U4–U7 still move physics to group-slot order (KC-12), for physics rev 5's own reasons.
 
 **Engine lanes** (two worktrees). Rungs as engine §12 + P-§12, prerequisites remapped:
 
@@ -432,38 +515,39 @@ These rungs retire R4 (156 rows).
 | F1 | R6 (648 rows): diagnostics form, KF-09 / KF-10, B and X rows, by group |
 | F2 | UG-06 per crate when its ledger is ≤ 10 sites; UG-05 in every gate binary; UG-07 |
 | F3 | KC-35 only if MQ-05 says build |
+| F4 | **The refactor campaign (Q-4; §5):** RF-0, RF-K1..K3, RF-L, RF-V, RF-R, RF-T, RF-E, RF-P, RF-A, RF-RE, RF-U, in §5's order, after [G] is re-derived on the post-F3 trunk. RF-V, RF-R and RF-T also wait for owner step O4. |
 
 (Phase F's rung F1 is not the physics step F1 of rung A1.)
 
 ## 3. DAG (edges between rungs; "," means parallel)
 
 ```
-Docs:  plan approved → {DOC-1 → AP6 ; DOC-2 → EP3}                 (parallel with Phase A)
-A:     A0 → A2 ; {A1, A2} → A4a → A5 ; A2 → A7 ; A3 → A6 ; O1 → A4b
-       {A0, A1, A2, A3, A4a, A4b, A5, A6, A7, O1, O2} → A8
-B:     A8 → {B1, B2, B3, B4}                (pool order at A8: B3, B1, B2; B4 next; §4.1)
-C:     {B1, B2, B3} → D-M0 → C1 (needs AP6) → RF-K1 (needs A2)
-       {A3, A6, B3} → RF-K2 ; {A2, B3} → RF-K3            (O1 is inside A8)
-MEM:   {RF-K1, RF-K3} → D-M1 → D-M2 → D-M3 → D-M4 → {D-M5, D-M6 (needs RF-L)}
-STORE: {RF-K2, AP6} → D-S1(i) → D-S1(ii)
-       {D-S1(i), D-M0, RF-K1, AP6} → D-S2
-       {D-S2, RF-K3} → D-S3(i) → D-S3(ii) (needs D-E0) → D-S3(iii) (needs EP3) → {D-S4, D-S5}
-       {D-S2, RF-K3} → D-S6 ; {D-M1, RF-K3} → D-S7
-       (D-S3(i), (ii) and (iii) are separate rungs, branches and lock holders; §2)
-ENG:   RF-K3 → D-E0
-       {RF-K2, EP3} → D-E1 → D-E2 (needs D-S3(iii))
-       {RF-K3, EP3} → D-E3 → D-E4 → D-E5 → D-E6 → D-E7 (needs D-S3(iii)) → D-E8
-         → D-E9 (needs D-M4, D-S3(iii)) → {D-E11 (needs D-S7), D-E14}
-       {D-S5, D-E2} → D-E10 ; D-E11 → D-E12 → D-E13 → D-E17 ; D-E14 → D-E15 (needs D-S6) → D-E16
-       {B1, RF-L} → D-E18 → D-E19 (needs D-S2)
-R2:    {D-S2, D-M1} → D-R2a ; D-R2b..d after D-M1 and the features their rows name (D-R2d also needs D-S6)
-Exit:  Phase-D exit → Phase E (per-rung prereqs in §2) → F
-RF:    RF-0 now. After {A8, B3}: RF-R, RF-L, RF-V, and RF-T (RF-T also after RF-R).
-       RF-L → {D-E18, D-M6}. RF-K1..K3 per Phase C. RF-E after D-E16. RF-P after U7, P2, S0.
-       Priority inside D:/wt/refactor: §5
-       RF-A after HO4 + RE4. RF-RE after RE2 / RE5. RF-U after UI3 (§5)
-MQ:    D-M6 → MQ-13 → D-M6r (only if a U-19 overturn fires) ; D-S2 → MQ-03 (does not block)
-M:     Stage 1 = D-S1(ii) (+ MS-08 with A6); Stage 3 after Phase-D exit (05 §7)
+Docs:   plan approved → {DOC-1 → AP7 ; DOC-2 → EP3}                 (parallel with Phase A)
+A:      A1 → {A1b, AH} ; AH → A2 ; A0 → A2 ; {A1, A2} → A4a → A5 (needs AH; includes A9's lane)
+        A2 → A7 ; A3 → A6 ; A4b (O1 done)
+        {A0, A1, A1b, AH, A2, A3, A4a, A4b, A5, A6, A7, A9, O2} → A8
+B:      A8 → {B1, B2, B3, B4}                (pool order at A8: B3, B1, B2; B4 next; §4.1)
+C:      {B1, B2, B3} → D-M0 → C1 (needs AP7)
+MEM:    C1 → D-M1 → D-M2 (needs A2) → D-M3 → D-M4 → {D-M5, D-M6}
+STORE:  {B1–B3} → D-S1(i) → D-S1(ii)
+        {D-S1(i), D-M0, C1} → D-S2
+        D-S2 → D-S3(i) → D-S3(ii) (needs D-E0) → D-S3(iii) (needs EP3) → {D-S4, D-S5}
+        D-S2 → D-S6 ; D-M1 → D-S7
+        (D-S3(i), (ii) and (iii) are separate rungs, branches and lock holders; §2)
+ENG:    B1–B3 → {D-E0, D-E20, D-E21, D-E22} ; {B1–B3, A5} → D-E23
+        {D-S1(i), EP3} → D-E1 → D-E2 (needs D-S3(iii))
+        {B1–B3, EP3} → D-E3 → D-E4 → D-E5 → D-E6 → D-E7 (needs D-S3(iii)) → D-E8 (needs D-E20)
+          → D-E9 (needs D-M4, D-S3(iii)) → {D-E11 (needs D-S7), D-E14}
+        {D-S5, D-E2} → D-E10 ; D-E11 → D-E12 → D-E13 → D-E17 ; D-E14 → D-E15 (needs D-S6) → D-E16
+        B1 → D-E18 → D-E19 (needs D-S2)
+REPLAY: {A8, A1b, B3} → RP-0 → RP-1 → RP-2 (needs D-E0, D-E8, D-E21, D-E22, D-E23) → RP-3 (needs D-E20) = UG-22
+R2:     {D-S2, D-M1} → D-R2a ; D-R2b..d after D-M1 and the features their rows name (D-R2d also needs D-S6)
+Exit:   Phase-D exit (includes RP-3, every UG-22 arm enabled) → Phase E (per-rung prereqs in §2)
+        → F1, F2, F3 → F4
+F4:     RF-0 → {RF-K1, RF-K2, RF-K3, RF-L} → RF-V, RF-R (both need O4) → RF-T → {RF-E, RF-P, RF-A, RF-RE, RF-U}
+MQ:     D-M6 → MQ-13 → {D-M6r, D-M6w} (only if a U-19 overturn fires) ; D-S2 → MQ-03 ;
+        D-E0 → MQ-18 ; D-E20 → MQ-21 ; RP-0 → MQ-22 ; RP-2 → MQ-23          (none blocks a rung)
+M:      Stage 1 = D-S1(ii) (+ MS-08 with A6); Stage 3 after Phase-D exit (05 §7)
 ```
 
 ## 4. Worktrees, file locks and the order of shared edits
@@ -473,7 +557,7 @@ M:     Stage 1 = D-S1(ii) (+ MS-08 with A6); Stage 3 after Phase-D exit (05 §7)
 | Worktree | Carries | Opens | Closes |
 |---|---|---|---|
 | `D:/wt/joltab` (existing) | before A8: `merge/ke16-into-ecsnative` (A1 runs here) and the Phase-A merges; after A8: the **trunk** `integ/unified` — merges (with their anchor re-derivations, §4.2) and full gate runs only, no rung code | now | end of campaign |
-| `D:/wt/refactor` (existing) | RF waves, one commit open at a time, under §5's priority rule | now (RF-0) | end of campaign |
+| `D:/wt/refactor` (existing) | parked on `refactor/split-oversized-files` until F4 (Q-4): no target dir, no `linkedProjects` entry. In F4, the RF waves, one commit open at a time, in §5's order | F4 | end of campaign |
 | `D:/wt/k-1`, `D:/wt/k-2`, `D:/wt/k-3` (new) | the **code pool** for every rung from Phase B on (B1–B4, then Phases C–E), in any lane: exactly one open rung each; a rung switches a free pool worktree to `u/<rung>`, cut from the trunk | **all three at A8**, right after A8's merge commit. B3, B1 and B2 take them first; B4 takes the first one to go idle | end of Phase E |
 | `D:/wt/k-docs` (new, no target dir) | design-document steps after A8 (§4.5) | A8 | end of campaign |
 
@@ -507,8 +591,7 @@ M:     Stage 1 = D-S1(ii) (+ MS-08 with A6); Stage 3 after Phase-D exit (05 §7)
 
 - A lock is held by one open **rung** (its branch `u/<rung>`), never by a lane.
 - A lock covers a **file**. A rung's touch set is the list of files it edits. It is declared at the
-  cut from the source design's integration section, and re-derived against the post-RF-K file map,
-  where a split file is locked together with its child directory.
+  cut from the source design's integration section, and re-derived against the trunk's file map at the cut. No file is split before F4; in F4, a split file is locked together with its child directory.
 - A rung is cut only when no open rung holds a file in its touch set, and all of its fixed-order
   predecessors (§4.4) have merged.
 - A rung that meets an undeclared file mid-work stops and escalates. It never takes the lock
@@ -537,21 +620,21 @@ M:     Stage 1 = D-S1(ii) (+ MS-08 with A6); Stage 3 after Phase-D exit (05 §7)
 
 | File (`[J]` @ `d552be05` unless new) | Rungs |
 |---|---|
-| `ecs/core/ecs_master/entity_api.rs` (`delete_entity_core` `:980`) | D-S3(ii) → D-E2 |
-| `ecs/core/ecs_master/ecs_master.rs` | RF-K3 → { D-M1 (`QueryStateCache` `:339`) · D-S3(ii) (`entity_master_mut`, `PHYSICS-ECS-UNIFICATION-DESIGN.md:3025`) · D-S3(iii) (`clear`, `:3308`) · D-S6 (KF-02 row `:953`) · D-R2a (`WorldScratch` field) · D-E9 (teardown driver) } |
+| `ecs/core/ecs_master/entity_api.rs` (`delete_entity_core` `:980`; `fire_despawn_hooks` `:707`) | D-S3(ii) → D-E2; D-E21 (`fire_despawn_hooks`) is first-cut-wins against both |
+| `ecs/core/ecs_master/ecs_master.rs` | { D-M1 (`QueryStateCache` `:339`) · D-S3(ii) (`entity_master_mut`, `PHYSICS-ECS-UNIFICATION-DESIGN.md:3025`) · D-S3(iii) (`clear`, `:3308`) · D-S6 (KF-02 row `:953`) · D-R2a (`WorldScratch` field) · D-E9 (teardown driver) } |
 | `ecs/core/ecs_master/binder.rs` (new) | D-S3(ii) → D-S5 (span frees inside the release points) |
 | `ecs/core/ecs_master/tag_api.rs` | D-S1(i) |
 | `ecs/core/component/hooks/archetype_flags.rs` | D-E2 (bit 13) · D-E11 (bit 14); the bit numbers are fixed in 01 §7 |
-| `ecs/core/archetype/archetype.rs` | A3 → RF-K2 → D-S3(i) (`create_archetype` refuses `Group`) → D-S3(ii) (`anchor_mask`) → { D-E2 · D-E11 } (flag computation) |
+| `ecs/core/archetype/archetype.rs` | A3 → D-S3(i) (`create_archetype` refuses `Group`) → D-S3(ii) (`anchor_mask`) → { D-E2 · D-E11 } (flag computation) |
 | `ecs/core/archetype/archetype_bundle.rs` | D-M1 |
-| `ecs/core/iters/query/{query,state,iter}.rs` | A3 (`query.rs`) → A8 (owner edits) → RF-K3 → { D-M1 · D-S3(ii) (new terms) } → D-S4 → { D-E7 · D-E11 · D-E14 } |
-| `ecs/core/iters/query/filter.rs` | RF-K2 → D-E7 |
+| `ecs/core/iters/query/{query,state,iter}.rs` | A3 (`query.rs`) → A8 (owner edits) → { D-M1 · D-S3(ii) (new terms) } → D-S4 → { D-E7 · D-E11 · D-E14 } |
+| `ecs/core/iters/query/filter.rs` | D-E7 |
 | `ecs/core/iters/query/{par_chunk,query_view}.rs` | A8 (owner edits) → D-S4 |
 | `ecs/core/iters/query/query_type_registry.rs` | O1 → A4b |
-| `ecs/core/schedule/schedule.rs` (`apply_window_drain` `:783`, `Arc` `:116`) | A2 → RF-K3 → D-E0 → D-S3(ii) · { D-M4 · D-S7 · D-E5 · D-E9 · D-E11 } |
+| `ecs/core/schedule/schedule.rs` (`apply_window_drain` `:783`, `Arc` `:116`) | A2 → D-E0 → D-S3(ii) · { D-M4 · D-S7 · D-E5 · D-E9 · D-E11 · D-E22 } |
 | `ecs/core/system/params/mod.rs` | D-S3(ii) · D-E3 · D-E4 · D-E7 |
-| `ecs/core/component/component_registry/{mod.rs, tags.rs}` | A6 → RF-K2 → D-S1(i) → { D-S1(ii) · D-S3(i) · D-E1 }. No order among the three changes behaviour, so the first cut wins, and the optional modding seam stays off the STORE critical path |
-| `ecs/memory/component_pool.rs` | A3 → D-M0 → RF-K1 → { D-S2 · D-M1 } |
+| `ecs/core/component/component_registry/{mod.rs, tags.rs}` | A6 → D-S1(i) → { D-S1(ii) · D-S3(i) · D-E1 }. No order among the three changes behaviour, so the first cut wins, and the optional modding seam stays off the STORE critical path |
+| `ecs/memory/component_pool.rs` | A3 → D-M0 → { D-S2 · D-M1 } |
 | `ecs/memory/{vm, vm_column}.rs`, `ecs/constants.rs` (in `boyko_memory` after C1) | D-M0 → C1 → { D-M1 · D-S2 (`VmReservation::UNRESERVED`) } |
 | `ecs/core/component/scratch/**` | D-S2 → D-R2a |
 | `ecs/core/component/dense/{dense_store, entity_slot_map, live_bitmap}.rs` | D-M1 |
@@ -560,23 +643,39 @@ M:     Stage 1 = D-S1(ii) (+ MS-08 with A6); Stage 3 after Phase-D exit (05 §7)
 | `ecs/core/entity/entity_reservoir.rs` | A2 → A4a |
 | `ecs/core/asset/{loader, error, server, staging}.rs` | D-E18 → D-E19 → (Phase E) AS2..AS5 |
 | `boyko_physics/src/` — the D-S2 touch set (02 §2) | A1 → D-S2 → (Phase E) U4 … |
-| `boyko_render/src/{mesh_draw, particle_system, particle, light_system}.rs` | D-S2 → (Phase E) RE2 / RE5 → RF-RE |
+| `boyko_render/src/{mesh_draw, particle_system, particle, light_system}.rs` | D-S2 → (Phase E) RE2 / RE5 → (F4) RF-RE |
 | `boyko_render/src/loaders/**` | O1 (`glb.rs`) → D-E18 → D-E19 |
-| `boyko_app/src/runner.rs` | A2 → A5 (ddgi) → (Phase E) HO* → RF-A |
+| `boyko_app/src/runner.rs` | A2 → A5 (ddgi) → D-E23 → (Phase E) HO* → (F4) RF-A |
 | `ecs/core/component/{component_pool_bundle.rs, enable/enable_store.rs}`, `ecs/core/asset/staging.rs` | D-S6 (KF-02 rows) · D-M1 (`component_pool_bundle.rs`, the `ArchetypeBundle` tables) · D-E18 → D-E19 (`staging.rs`) |
 | `ecs/core/component/{hooks/scope.rs, observers/propagate.rs, component_registry/required.rs}` | D-M6 |
 | `ecs/core/relationship/mod.rs` | D-M6 · D-E2 (EK15a/b) · D-E10 (EK15c) |
 | `ecs/core/hierarchy/commands.rs` | D-M6 · D-E10 (`Children` on K7) |
-| `boyko_threadpool/src/{block, scope}.rs` | A2 → RF-K1 → D-M2 → D-M3 |
+| `boyko_threadpool/src/{block, scope}.rs` | A2 → D-M2 → D-M3 |
 | `boyko_threadpool/src/{thread_pool, worker, tls}.rs` | A2 → D-M2 → D-M3 → D-M4 → { D-M5 · D-M6 }. D-M5 adds board probes to the idle loop and D-M6 moves the `tls.rs` cells; no order between them changes behaviour |
 | `boyko_threadpool/src/thread_ctx.rs` (new), `boyko_ecs/src/ecs/core/thread_fields.rs` (new), `boyko_threadpool/tests/tls_lane_merge.rs`, `tests/thread_ctx_census.rs` (new) | D-M6 → D-M6r (only if an MQ-13 overturn fires) |
-| `boyko_diag/src/lane.rs`, `boyko_log/src/{drain_owner, sync_out}.rs` | D-M6 |
-| `boyko_log/src/codes.rs` | A8 (owner edits) → RF-L → { D-E18 · D-M6 }. Any other rung that adds a code or flips a `CodeStatus` declares the file at its cut and runs the full `--workspace` sweep: the file's own lib-test pin (`[J]crates/boyko_log/src/codes.rs:1393-1528`) is not built under a `--test` filter (`:1400-1415`) |
+| `boyko_log/src/{drain_owner, sync_out}.rs` | D-M6 |
+| `boyko_log/src/codes.rs` | A2 (E0202, E0203; critic pass 5, O4) → A8 (owner edits, W2208) → { D-E18 · D-M6 · D-E8 · D-E22 · RP-2 }. Any other rung that adds a code or flips a `CodeStatus` declares the file at its cut and runs the full `--workspace` sweep: the file's own lib-test pin (`[J]crates/boyko_log/src/codes.rs:1393-1528`) is not built under a `--test` filter (`:1400-1415`) |
 | `boyko_render/src/retired_gpu_buffers.rs` | D-S6 → (Phase E) RE* |
 | `boyko_rhi_vulkan/src/memory.rs` | D-E15 (the KF-36 edge, then the KF-02 row) |
 | `docs/{FEATURE_MAP,SYSTEMS,ARCHITECTURE}.md`, `docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md` | anchor lines: no rung (the merge step, §4.2). Prose: document steps in `D:/wt/k-docs` (§4.5), after O1 for the owner-dirty `FEATURE_MAP.md`, `SYSTEMS.md` and VG plan (00 §9 V-56) |
-| root `Cargo.toml` | A8 → B3 (the three profiles) → C1 (the `boyko_memory` member) · any later rung that adds a crate or a profile |
+| root `Cargo.toml` | A8 → B3 (the three profiles; `boyko_symcensus`) → C1 (the `boyko_memory` member) · RP-2 (`boyko_replay`, `boyko_build_id`) · any later rung that adds a crate or a profile |
 | `docs/memory/{RUNTIME-DATA-LEDGER.md, runtime-data-ledger.tsv, ledger/**}` | B1 (in its pool worktree, §4.5) → every later ledger revision that re-pins UG-02 |
+| `ecs/core/events/{event_buffer, event_dispatcher, event_config}.rs`, `ecs/core/system/params/event_writer.rs`, the reader param, the doc lines `system/params/commands.rs:344-352`, and `boyko_ecs/tests/event_send_from_worker.rs` | D-E20 → D-E8 |
+| `ecs/core/commands/migration_helpers.rs`, `ecs/core/bundle/bundle_column_cache.rs`, `boyko_macros/src/bundle.rs` | A6 → D-E21 |
+| `ecs/core/archetype/archetype_master.rs` | D-E21 (hook-order columns); the other rungs that edit it name it at their cut, first-cut-wins |
+| `ecs/core/app/app.rs` | D-E8 (the `every_tick` swap) · D-E9 (KC-27) · D-E22 (the visitor) |
+| `ecs/core/time/{fixed_time, fixed_loop, time}.rs`, `boyko_ecs/tests/{app_fixed_timestep, miri_fixed_loop}.rs`, `boyko_demo/src/app.rs`, `boyko_render/tests/particle_containment.rs` | D-E23 |
+| `boyko_input/src/action/process.rs` | D-E23 → (Phase E) IN* |
+| `boyko_input/src/action/state.rs` | RP-2 → (Phase E) IN* |
+| `boyko_physics/src/row_identity.rs` | A1 → A1b → (Phase E) U5/U7 |
+| `boyko_physics/src/resources.rs` | A1 → { RP-0 · D-S2 } |
+| `boyko_physics/src/components.rs` | RP-3 (derive lines) · (Phase E) U4… |
+| `boyko_scene/src/visibility_sync.rs` | A9 |
+| `boyko_math/**` | RP-0 → RP-1 |
+| `boyko_utils/src/**` | RP-1 · D-M1 / D-R2d (`sparse_map`); different files, first cut wins |
+| `.cargo/config.toml`, `goldens/PINS.toml` | AH |
+| `.github/workflows/ci.yml` | AH → RP-3 |
+| `crates/boyko_replay/**`, `crates/boyko_build_id/**` (new) | RP-2 → RP-3 |
 
 ### 4.4 Fixed orders, and the step order inside `delete_entity_core`
 
@@ -587,8 +686,12 @@ M:     Stage 1 = D-S1(ii) (+ MS-08 with A6); Stage 3 after Phase-D exit (05 §7)
 | 3 | A2 before A4a | `entity_reservoir.rs` | A4a's fix is keyed on (file, allow count) |
 | 4 | O1 before A4b | `query_type_registry.rs` | the owner's edit may be the same fix |
 | 5 | D-S1(i) before D-S1(ii) | registry | UG-15 attribution (C2) |
-| 6 | D-M0 before C1 and RF-K1 | packing files | the packing citations are re-derived once |
+| 6 | D-M0 before C1 | packing files | D-M0 does not wait for AP7, and C1 does; the packing citations stay in their own paths until D-M0's cut |
 | 7 | D-S3(iii) before D-E9 | KC-13 | the teardown form needs `Stamped` and `died` |
+| 8 | A1 before A1b | `row_identity.rs` | A1's F1 edits the same file |
+| 9 | AH before A2 | recipes | A2's UG-08 and UG-09 run on the recipes AH installs |
+| 10 | D-E20 before D-E8 | event files | KC-26's per-type policy and `every_tick` build on writer lanes |
+| 11 | RP-0 before RP-1 | `boyko_math` | RP-1's impls follow `det`'s module layout |
 
 **Step order inside `delete_entity_core`** (`[J]…/ecs_master/entity_api.rs:980-1112`), fixed:
 1. inland validity checks (`:988-996`);
@@ -638,22 +741,47 @@ D-E2's review checks this order against the merged D-S3(ii) text, and D-E2's red
   same three gates, before main fast-forwards. Nothing else commits on main after A8, so the
   fast-forward cannot fail the way O2's does today.
 
-## 5. Where the refactor campaign fits
+## 5. The refactor campaign: Phase F, step F4 (Q-4)
 
-| Wave | Files (by the letter in the table below) | When | Why |
-|---|---|---|---|
-| RF-0 | pilot: `aether_lang/src/{expand, parse}.rs` ([G] §5.3) | now | Compile-time crate; conflicts with nothing. **Its gate is not UG-15:** `aether_lang` is never linked into the shipped binary (ledger TSV), so a strict UG-15 run would be vacuous. The pilot's first commit adds a snapshot test over the crate's own fixture corpus, whose red-first control is a one-character change to one expansion rule. The move commit must leave every snapshot byte-identical |
-| RF-R | R | **after B3**, so leg (2-RF)'s pins exist before the first split; then in parallel with C–D | No kernel rung adds to these files. Its anchor re-derivations edit `MESHLET-VIRTUAL-GEOMETRY-PLAN.md`, which is owner-dirty until O1; `render_path_config.rs` alone holds 6 waived gated anchors ([G]:621). Its `particle.rs` is `boyko_app/src/gpu_scene/particle.rs` ([G]:89), not `boyko_render/src/particle.rs`, which D-S2 edits |
-| RF-T | T | after B3 and RF-R | test-only; UG-12 per device file |
-| RF-K1..K3 | K1 / K2 / K3 | Phase C, before first use | kernel rungs add to them |
-| RF-L | L (`boyko_log/src/codes.rs`) | after A8 and B3, and before D-E18 and D-M6 | The file is owner-dirty until owner step O1 and reaches the trunk only through A8. B3 captures the UG-15 pins the move is gated by. D-E18 and D-M6 add rows to the file (U-12). The move also updates UG-18's path-keyed `code_registry` census |
-| RF-V | V (`boyko_rhi_vulkan/src/present/targets.rs`, `boyko_rhi_vulkan/src/device.rs`) | after A8 and B3 | Owner-dirty until owner step O1. A8 also contains `chore/msvc-host`, which edits `device.rs`. No kernel rung adds to these files. UG-12 applies per device file |
-| RF-P | P | after U7, P2, S0 | U4–U7 rewrite them |
-| RF-A | A | after HO4 / RE4 | the runner shrinks to the pump |
-| RF-RE | RE | after RE2 / RE5 | those rungs rewrite them |
-| RF-E | E | after D-E16 | D-E16 folds KF-40's two rows in it (`RUNTIME-DATA-LEDGER.md:1552`) |
-| RF-U | U | after UI3 | UI3 rewrites it |
-| never | N | — | deleted by a scheduled rung, or holding pinned baselines |
+- **Owner ruling (2026-09-17).** The refactoring campaign runs after everything else, so the plan is not reworked by it. U-12 is overturned by owner scope (00 §3). No file is split in Phases A–E.
+- **Kept for F4:** the census [G] (`D:/wt/_graph/refactor-census.md`), the closed refactor design, the partial tooling in `D:/wt/refactor`, and the wave letters and file assignment below.
+- **F4's first step** re-derives [G]'s line counts, blockers and anchor counts on the trunk after F3. By then, Phases C–E have rewritten or deleted many census files: U4–U7 touch RF-P's files, HO4/RE4 RF-A's, RE2/RE5 RF-RE's, UI3 RF-U's, D-E16 RF-E's, and AS2–AS5 delete `asset/assets.rs`. Every number below is a `d552be05` number.
+- **Order inside F4:**
+  1. RF-0, the pilot.
+  2. The kernel waves RF-K1, RF-K2, RF-K3 and RF-L.
+  3. The device-gated waves RF-V, RF-R and RF-T, after owner step O4 declares the render/rhi files quiet (critic pass 5, W3).
+  4. RF-E, RF-P, RF-A, RF-RE and RF-U.
+- **One commit is open at a time** in `D:/wt/refactor`.
+- **Device-gated commits** are finished up to UG-12, committed on `rf/<wave>-<n>`, and parked.
+- **A parked commit rebased onto a newer trunk** keeps its UG-12 receipt only if all three hold: `git range-diff` shows the same move outside the path-keyed census files; no conflict occurred elsewhere; and UG-15 strict is green against the new parent (critic pass 5, O5). Otherwise UG-12 re-runs.
+
+| Wave | Files (by the letter in the table below) | Why it is a separate wave |
+|---|---|---|
+| RF-0 | pilot: `aether_lang/src/{expand, parse}.rs` ([G] §5.3) | A compile-time crate that conflicts with nothing. **Its gate is not UG-15:** `aether_lang` is never linked into the shipped binary (ledger TSV), so a strict UG-15 run would be vacuous. The pilot's first commit adds a snapshot test over the crate's own fixture corpus; its red-first control is a one-character change to one expansion rule. The move commit must leave every snapshot byte-identical |
+| RF-K1..K3 | K1 / K2 / K3 | kernel files (the rows below) |
+| RF-L | L (`boyko_log/src/codes.rs`) | The move also updates UG-18's path-keyed `code_registry` census |
+| RF-V | V (`boyko_rhi_vulkan/src/present/targets.rs`, `boyko_rhi_vulkan/src/device.rs`) | owner files (O4); UG-12 per device file |
+| RF-R | R | owner files (O4). `render_path_config.rs` alone holds 6 waived gated anchors ([G]:621). Its `particle.rs` is `boyko_app/src/gpu_scene/particle.rs` ([G]:89) |
+| RF-T | T | test-only; UG-12 per device file |
+| RF-P | P | physics files after U4–U7 |
+| RF-A | A | the runner after HO4 / RE4 |
+| RF-RE | RE | after RE2 / RE5 |
+| RF-E | E | after D-E16 (`RUNTIME-DATA-LEDGER.md:1552`) |
+| RF-U | U | after UI3 |
+| never | N | deleted by a scheduled rung, or holding pinned baselines |
+
+**F4 kernel waves** (moved from rev 5.1 Phase C, lines 89–91 and 93–96, unchanged apart from their prerequisites, which become "F3"):
+
+| Rung | Scope | Prereq | Rows | Red-first tests | Gates | Size | Lock set |
+|---|---|---|---|---|---|---|---|
+| RF-K1 | Split `component_pool.rs` (4106), `block.rs` (2166), `scope.rs` (2354) | F3 | — | — | UG-01, 10, 15, 17, 18 | L | those files |
+| RF-K2 | Split `component_registry/mod.rs` (1789), `filter.rs` (3343), `migration_helpers.rs` (2662), `archetype.rs` (2574), `archetype_master.rs` (1617), `boyko_macros/src/component.rs` (2067) | F3 | — | — | as RF-K1 | L | those files |
+| RF-K3 | Split `schedule.rs` (2536), `schedule_builder.rs` (2053), `ecs_master.rs` (1918), `query.rs` (1554), `state.rs` (2243), `iter.rs` (1826), `command_queue.rs` (1589), `profiling/{store,tests}.rs` | F3 | — | — | as RF-K1 | L | those files |
+
+Line counts are [G] §1.1's. `wc -l` in `[J]` agrees except for `archetype.rs` (2573) and
+`ecs_master.rs` (1917). `filter.rs` and `state.rs` are the files under `iters/query/`.
+
+`asset/assets.rs` (2634) is **not** split. AS2–AS5 retire `Assets<T>`.
 
 **Every census file and its wave.** [G] §1.1 and §1.2 list 58 source files and 4 test/bench files.
 This table **supersedes [G] §2.4's "free" verdicts** (`[G]:420-487`). [G] classifies blockers at
@@ -735,27 +863,6 @@ This table **supersedes [G] §2.4's "free" verdicts** (`[G]:420-487`). [G] class
 
 RF-0's gate is the snapshot equality above, not UG-15 (critic pass 2, O6).
 
-**Refactor-worktree priority (critic pass 4, W5).** `D:/wt/refactor` holds one open commit. Its
-waves are of two kinds:
-- **Kernel-critical.**
-  - Priority order: RF-L (holds D-E18 and D-M6); RF-K3 (holds D-M1, D-M4, D-S3(i), D-S6, D-S7, D-E0,
-    D-E3); RF-K2 (holds D-S1(i), D-E1); RF-K1 (holds D-M1, D-S2).
-  - A kernel-critical wave is taken as soon as its prerequisites have merged, ahead of every other
-    wave.
-- **Device-gated:** RF-R, RF-V, RF-T, RF-A, RF-RE, RF-E and RF-U.
-  - Each such commit needs the owner's UG-12 run. It is finished up to UG-12, committed on its own
-    branch `rf/<wave>-<n>`, and **parked**; the worktree then moves on to the next commit.
-  - The wave table assigns every census file to exactly one wave, so a parked branch touches no
-    kernel-critical file.
-  - If a kernel-critical merge lands meanwhile, the parked commit is rebased and re-runs its CPU
-    gates, UG-15 strict included, against the new parent before it merges.
-  - The owner's UG-12 receipt stays valid across that rebase: a green strict UG-15 shows that the
-    kernel codegen the receipt ran on is unchanged.
-- **RF-P** waits for the physics rungs and is neither kind.
-
-As a result, the kernel critical path never waits on device availability, and the worktree never
-holds two open commits.
-
 The 1,018 ungated anchors are recorded as drift, not repaired ([G]:591-593).
 
 ## 6. Ledger rungs mapped to plan rungs
@@ -768,8 +875,9 @@ The 1,018 ungated anchors are recorded as drift, not repaired ([G]:591-593).
 | R4 | 156 | engine subsystem rungs + 5 boyko_ecs eliminations (in D-R2a) |
 | R5 | 38 | D-M2, D-M3, D-M4, D-M6 |
 | R6 | 648 | F1 |
+| — (replay, KC-37) | 0 | RP-0..RP-3 add code on kernel forms only; UG-02 is unchanged |
 | out of scope | 1102 | none |
 
 **Recount rule.** The rev-4 counts are re-derived at B1 (ledger rev 5), and each rung re-reads the
 ledger revision before starting. This is P43.3, applied both ways
-(`ALLOCATOR-DESIGN-SPACE.md:3799`).
+(`ALLOCATOR-DESIGN-SPACE.md:3806`).

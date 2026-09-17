@@ -1,4 +1,4 @@
-# Unified system plan — 05 Modding readiness (rev 5.1)
+# Unified system plan — 05 Modding readiness (rev 6)
 
 This is the carry target named by `docs/modding/MODDING-DESIGN-SPACE.md:3` (R3).
 
@@ -14,6 +14,13 @@ remarks, `:2423-2517`) and with the owner's hard requirement H-1 (§1). It chang
 - Every kernel modding item is **not compiled** in a game that does not use modding. Rev 5 said
   "dropped at fat LTO"; rule S-1 (§1) replaces that.
 - The no-cost gate gains the checks that prove "not compiled" (§6).
+
+**Rev 6** applies the owner's Stage-0 answers of 2026-09-17 (00 §7, Q-1 and Q-2).
+- The live family is A′, C and A. Options B, D, E and F are out (§3.1).
+- The exact-build contract that every release publishes is §3.3.
+- Load-only stands (U-10).
+- Mod-defined component types stay in scope.
+- RM-2 is placed, RM-3 is applied, and §8 is answered.
 
 ## 1. The requirement as testable properties
 
@@ -116,14 +123,13 @@ route 2 unplaced pending MD:M-C5, and A third. No head is measured (R3-3, §5).
 |---|---|---|---|---|---|
 | **A′** — the engine as a Rust `dylib`, modding configuration only | head on nightly; ties with C-3a on stable | **MS-03 only** | MS-14: the `crate-type` flip as a manifest overlay used only to build the modding executable (route (ii), `:697`); the loader → `boyko_mod_host`; the mod entry and build canary → `boyko_mod_api` | The modding executable forfeits fat LTO whether or not a mod is loaded: 1.18×–2.67× on the 7-bench suite, geomean 1.26×, on stable (`:723-733`). "Forgone only by players who load mods" (`:741-743`) holds only if the static executable runs when no mod is installed | MD:M-F1 (a)–(d); M-T2 informational |
 | **C** — install-time relink, route 3a or route 2 | 3a ties with A′-stable; route 2 unplaced | **MS-03 only** | MS-15: the `.boykom` registry, per-mod `--undefined` roots and the collected-count assertion → `boyko_mod_registry`, a dependency of the modding game binary only | 16 B of sentinels and a zero-iteration boot walk (`:1242-1255`), measured by MD:M-C0b | MD:M-C4, M-C5, M-C1, M-C3, M-C0b |
-| **D** — source mods | after C (`:1979-1984`) | **MS-03 only** | as C, plus a compiler | as C | C's MD:M-C1 |
 | **A** — exact-build `cdylib` | third | MS-03, plus MS-01, MS-02b and MS-08..MS-13 at Stage 3, and RM-1's item | façade, trampoline and probe → `boyko_mod_api`; host seams → `boyko_mod_host` | startup scan only; 0 per frame (`:647-656`) | MD:M-A1, M-A2, M-A4; Stage 0 (iii) |
-| **B**, **E**, **F** | rejected; fork; not priced (`:1971-1977`, `:1986-1987`, `:1380-1407`) | not planned | — | — | Stage 0 (ii) makes B mandatory; Stage 0 (i) makes E or F mandatory |
+| **B**, **D**, **E**, **F** | **out (Q-1, 2026-09-17).** B (a stable ABI) exists for patch-release survival, which is not required. D builds the mod on the player's machine (`:1979-1984`), but the author builds it. E (WebAssembly) and F (out-of-process) exist for a sandbox, which is not required (`:1971-1977`, `:1986-1987`, `:1380-1407`) | not planned | — | — | Q-1 (i)–(iii) |
 
 **Result.**
 - **Phase D builds only the common set:** `ModSeam` and MS-03's four readers (01 KC-19b, rung
   D-S1(ii)).
-- Choosing among A′, C and D changes no kernel rung. Choosing A adds MS-01, MS-02b and MS-08..MS-13
+- Choosing between A′ and C changes no kernel rung. Choosing A adds MS-01, MS-02b and MS-08..MS-13
   at Stage 3, each under S-1.
 
 **Why the common set is this small.**
@@ -135,11 +141,11 @@ route 2 unplaced pending MD:M-C5, and A third. No head is measured (R3-3, §5).
   - item 5 needs no kernel change (`:1662-1665`);
   - item 8 is I-1;
   - the registry is MS-15, outside the kernel.
-- Modding §7.9's seams are not needed by A′, C or D (`:1707-1708`).
+- Modding §7.9's seams are not needed by A′ or C (`:1707-1708`).
 - What remains is item 3's occupancy reads, which the loader takes under A′ and C (`:1653-1656`).
-- **The descriptor path (modding §7.1) is not common.** Under A′, C and D a mod component is a Rust
-  type with the ordinary derive. Only A (and B, E) needs a runtime descriptor. Stage 0's
-  prototype-only scope (00 §7 Q-1 (iv)) removes it under A too (`:2164-2170`).
+- **The descriptor path (modding §7.1) is not common.** Under A′ and C a mod component is a Rust
+  type with the ordinary derive. Only A needs a runtime descriptor. Q-1 (iv) answered that mods may
+  add their own component types, so if A is chosen, MS-01 is built (`:2164-2170`).
 
 ### 3.2 The paths
 
@@ -147,22 +153,65 @@ route 2 unplaced pending MD:M-C5, and A third. No head is measured (R3-3, §5).
 
 | MS | Path | Options | Kernel delta | Owning crate for the rest | Non-modding cost | Gate | Lands |
 |---|---|---|---|---|---|---|---|
-| MS-01 | Descriptor path (modding §7.1): an input struct fanned out into the existing parallel tables | A (B, E) | one `unsafe fn` generic over `ModSeam` that writes the clone, map-entities, serialize and residency rows for a minted id, by value, from inside `boyko_ecs`. **No visibility change:** rev 5's `pub` on `try_register_dynamic` (`[J]…/component_registry/mod.rs:967`), `set_residency_class` (`:614`) and `install_map_entities_fn` (`[J]…/component_registry/clone.rs:181`) is withdrawn; the mint is MS-02b's. **`set_storage_kind` (`:435`) stays `pub(crate)`:** P40 makes the kind a parameter of the mint (`ALLOCATOR-DESIGN-SPACE.md:3692`) | struct, validation, `extern "C"` → `boyko_mod_host` | nothing compiled (S-1); `ComponentLayout` stays 56 B (`[J]…/component_registry/mod.rs:133`) | UG-15 strict with legs (7) and (7b) | Stage 3, only if A is chosen and Stage 0 keeps mod-defined component types |
+| MS-01 | Descriptor path (modding §7.1): an input struct fanned out into the existing parallel tables | A | one `unsafe fn` generic over `ModSeam` that writes the clone, map-entities, serialize and residency rows for a minted id, by value, from inside `boyko_ecs`. **No visibility change:** rev 5's `pub` on `try_register_dynamic` (`[J]…/component_registry/mod.rs:967`), `set_residency_class` (`:614`) and `install_map_entities_fn` (`[J]…/component_registry/clone.rs:181`) is withdrawn; the mint is MS-02b's. **`set_storage_kind` (`:435`) stays `pub(crate)`:** P40 makes the kind a parameter of the mint (`ALLOCATOR-DESIGN-SPACE.md:3699`) | struct, validation, `extern "C"` → `boyko_mod_host` | nothing compiled (S-1); `ComponentLayout` stays 56 B (`[J]…/component_registry/mod.rs:133`) | UG-15 strict with legs (7) and (7b) | Stage 3, only if A is chosen (Q-1 (iv) keeps mod-defined component types) |
 | MS-02a | Name-keyed identity for mod types: a mandatory `stable_name`, refused when the full name is already registered | all | none. **Precondition, an engine defect (RM-2):** a duplicate full name is appended, not refused (`[J]…/component_registry/serialize.rs:394-397`), and resolution returns the first match (`:415-421`) | mandatory-name check in the SDK's registration macro (`boyko_mod_api` / `boyko_mod_registry`); refusal as a loader `Result` (MS-06) | 0 | RM-2's UG-19 row | RM-2's fix as an engine rung; the SDK half at Stage 3 |
-| MS-02b | Dynamic sized mint by name: `intern_or_mint_sized(name, size, align, kind)` (P40's rule in a separate sized body); P32 R1 (`TAG_NAMES` → `DYN_NAMES`, a rename); class-A entries `ComponentLayout::new_dynamic`, `try_register_dynamic_by_name`, `dynamic_by_name` | A (B, E) | the sized body and the entries generic over `ModSeam`; the rename is a rename | mandatory-name check → host | nothing compiled | UG-19 sized-name rows; UG-15 strict with (7) and (7b) | Stage 3, with MS-01 |
-| MS-03 | Id budget: P39's skip mint (KC-19a, a bug fix, D-S1(i)) and occupancy value reads | all | `ModSeam`, plus four `pub fn`s generic over it that return the query, bundle, resource and event counters **by value**. Component occupancy is KC-19a's `id_space_census()`, an engine item (`ALLOCATOR-DESIGN-SPACE.md:3657`) | the bound (D2's `ENGINE_COMPONENT_CEILING`, held by a census over derives, tags, asset kinds and group columns) and the quota for the whole mod set → `boyko_mod_host` (A′, A) or `boyko_mod_registry`'s boot walk (C, D). Under A′ and C, query ids mint at schedule build, after the load slot, so the query quota is read after `App::finish()`, against the whole set (R3-1) | nothing compiled; residual in §1 (b) | UG-15 strict with (7) and (7b) on D-S1(ii); MD:M-K3 | **Stage 1**, D-S1(ii) |
-| MS-04 | Dense storage required for mod components on engine entities | all | none (`STORAGE_IS_DENSE`, `[J]…/component/component.rs:79`) | A: the façade. A′, C, D: a const assertion over `STORAGE_IS_DENSE` emitted by the SDK's registration macro | 0 | A: MD:M-A4 (a). A′, C, D: a `compile_fail` fixture in the SDK | Stage 3 |
-| MS-05 | Config-phase load slot | all | none | A′, A: `ModLoaderPlugin` → `boyko_mod_host`. C, D: the boot walk → `boyko_mod_registry` | 0 | — | Stage 3 |
+| MS-02b | Dynamic sized mint by name: `intern_or_mint_sized(name, size, align, kind)` (P40's rule in a separate sized body); P32 R1 (`TAG_NAMES` → `DYN_NAMES`, a rename); class-A entries `ComponentLayout::new_dynamic`, `try_register_dynamic_by_name`, `dynamic_by_name` | A | the sized body and the entries generic over `ModSeam`; the rename is a rename | mandatory-name check → host | nothing compiled | UG-19 sized-name rows; UG-15 strict with (7) and (7b) | Stage 3, with MS-01 |
+| MS-03 | Id budget: P39's skip mint (KC-19a, a bug fix, D-S1(i)) and occupancy value reads | all | `ModSeam`, plus four `pub fn`s generic over it that return the query, bundle, resource and event counters **by value**. Component occupancy is KC-19a's `id_space_census()`, an engine item (`ALLOCATOR-DESIGN-SPACE.md:3664`) | the bound (D2's `ENGINE_COMPONENT_CEILING`, held by a census over derives, tags, asset kinds and group columns) and the quota for the whole mod set → `boyko_mod_host` (A′, A) or `boyko_mod_registry`'s boot walk (C). Under A′ and C, query ids mint at schedule build, after the load slot, so the query quota is read after `App::finish()`, against the whole set (R3-1) | nothing compiled; residual in §1 (b) | UG-15 strict with (7) and (7b) on D-S1(ii); MD:M-K3 | **Stage 1**, D-S1(ii) |
+| MS-04 | Dense storage required for mod components on engine entities | all | none (`STORAGE_IS_DENSE`, `[J]…/component/component.rs:79`) | A: the façade. A′, C: a const assertion over `STORAGE_IS_DENSE` emitted by the SDK's registration macro | 0 | A: MD:M-A4 (a). A′, C: a `compile_fail` fixture in the SDK | Stage 3 |
+| MS-05 | Config-phase load slot | all | none | A′, A: `ModLoaderPlugin` → `boyko_mod_host`. C: the boot walk → `boyko_mod_registry` | 0 | — | Stage 3 |
 | MS-06 | `Result` on register / load / attribution; param-fetch panic policy **unchanged** | all | none | host / registry | 0 | — | Stage 3 |
-| MS-07 | Load-only ruling: no `FreeLibrary`; every world dropped before the image | all (C, D: by construction) | none | host | 0 | written rule | Stage 3 |
-| MS-08 | By-id structural ops: consume KF-47 (KC-21), marked `MOD-SEAM` | A (B, E) | doc lines only | — | 0 (engine clients exist) | UG-15 (5) | markers with A6, as 02 schedules (no code) |
+| MS-07 | Load-only ruling: no `FreeLibrary`; every world dropped before the image | all (C: by construction) | none | host | 0 | written rule | Stage 3 |
+| MS-08 | By-id structural ops: consume KF-47 (KC-21), marked `MOD-SEAM` | A | doc lines only | — | 0 (engine clients exist) | UG-15 (5) | markers with A6, as 02 schedules (no code) |
 | MS-09 | Mod components are POD in v1: `drop_fn` and `clone_fn` refused at the seam; `map_entities_fn` and the SerPod blit allowed | A | none | seam assert → host | 0 | `mod_seam_pins` (P26.2 rows ii–iii) | Stage 3 |
 | MS-10 | By-stable-name `QueryTypeId` mint + slot installer (`#[doc(hidden)]`) | A | 2 `unsafe fn`s generic over `ModSeam` | `ModQuery` `SystemParam` → `boyko_mod_api` | nothing compiled | UG-15 with (7) and (7b); MD:M-A4 (d) | Stage 3 |
 | MS-11 | Counter probe: address accessors under a hidden `unsafe` seam; exported probe in `boyko_mod_api`. The value readers are MS-03's | A | 5 address accessors generic over `ModSeam` | probe → api | nothing compiled | UG-15 (1), (2), (7), (7b) | Stage 3 |
 | MS-12 | fn-pointer system seam, re-specified for P6-4: `run(ctx, cell, last_run, this_run)`, optional `apply(ctx, world)`, descriptor `{flags: has_deferred / requires_dispatcher / is_gpu, access[], sets[], before[], after[]}` lowered host-side into `SystemConfig` | A | a fn-pointer system type generic over `ModSeam` with its `System` impl, and one `unsafe fn` entry generic over `ModSeam`. The `Box::new` and the vtable are emitted where the token is named, i.e. in `boyko_mod_host`, the host image (`:1776-1790`) | wrapper → host; trampoline → api | nothing compiled; `SystemBox` stays 40 B | UG-15 with (7) and (7b); MD:M-A4 (a), (e) | Stage 3 |
 | MS-13 | Mint-refusal signal: **boundary-side** counter read-back (`cap + 1` poison). No kernel latch (P6-2). **Re-derived at its Stage-3 rung against the post-D-S1 dispensers:** the signal was derived at `mod.rs:938` and `:996` (two of the nine refusal paths listed at `MODDING-DESIGN-SPACE.md:1829`), and P39 changes both arms | A | none | api / host | 0 | MD:M-A4 (b), re-scoped (§5) | Stage 3 |
 | MS-14 | A′'s configuration flip: the engine crates built as `crate-type = ["dylib"]` through a manifest overlay applied only when building the modding executable (route (ii), `:697`). Route (i), `["rlib", "dylib"]` in the shipped manifests, is refused: rust#51009 can drop fat LTO from the non-modding build with no diagnostic (`:700-711`) | A′ | none | the overlay and its in-step check, outside every shipped manifest | 0: the shipped manifests are unchanged. No `Cargo.toml` in `[J]` has a `crate-type` key (grep, 2026-09-17) | a manifest census (`crate-type` keys in shipped manifests = 0); MD:M-F1 (c); UG-15 strict | Stage 3, if A′ is chosen |
-| MS-15 | C's plugin registry: one `.boykom$m` registration static per mod, the installer's per-mod roots, and the boot-time count assertion (`:1116-1130`) | C, D | none | `boyko_mod_registry`, a dependency of the modding game binary only (`:1831`) | 0: the crate is absent | MD:M-C0b; UG-15 leg (6) | Stage 3, if C or D is chosen |
+| MS-15 | C's plugin registry: one `.boykom$m` registration static per mod, the installer's per-mod roots, and the boot-time count assertion (`:1116-1130`) | C | none | `boyko_mod_registry`, a dependency of the modding game binary only (`:1831`) | 0: the crate is absent | MD:M-C0b; UG-15 leg (6) | Stage 3, if C is chosen |
+
+### 3.3 The exact-build contract (Q-1, rev 6)
+
+The owner's answers fix the family:
+- native mods, no sandbox;
+- no survival across engine patch releases;
+- the mod author builds the mod;
+- mods may add their own types.
+
+A′, C and A therefore each load only a mod built against **one** engine release. With every release, the engine publishes what "built against" means.
+
+**Published per release.** A release artifact, `engine-build.toml`, generated by `boyko_build_id` (the generator the replay header uses, 01 §2.1). The same values are compiled into `boyko_mod_api`'s canary as a const.
+1. **Toolchain:** `rustc -vV` (release, commit hash, LLVM version) and the target triple. The gate host's is `x86_64-pc-windows-msvc`; a Linux release publishes its own contract. The mod template ships a `rust-toolchain.toml` that pins that exact release.
+2. **Codegen axes:** `opt-level`, `lto`, `codegen-units`, `panic`, `debug-assertions`, `overflow-checks`; `-C target-cpu=x86-64-v3` (`[W].cargo/config.toml:106-113`); and every `BOYKO_*` build-environment axis that the profile-axis census lists (P6-3).
+3. **Sources:** the engine commit, the `Cargo.lock` hash, the engine crate set and versions, and the cargo features enabled on each engine crate. None of those features is a modding feature (§1 (a)).
+4. **Layout fingerprint** (P6-3): `size_of` and `offset_of` of `EcsMaster`, `UnsafeEcsCell`, and the other types a mod reaches through the chosen option's surface.
+5. **Option artifacts:**
+   - A′: the engine built as a `dylib` through MS-14's overlay, with its metadata;
+   - C: the engine's link inputs and MS-15's relink recipe;
+   - A: `boyko_mod_api` and its probe.
+
+**The rule at load.**
+- The loader compares the mod's embedded fingerprint with the host's, byte for byte. Any difference refuses the mod with a `Result` (MS-06) that names the first differing field.
+- There is no compatibility window and no ABI versioning (option B is out).
+- There is no sandbox or out-of-process host (options E and F are out).
+- There is no unload or hot reload (U-10, Q-2).
+
+**Cost in a game without modding: none.**
+- The contract file is a release artifact.
+- The canary and its comparison live in the modding crates.
+- `boyko_build_id` is a dependency of `boyko_replay` and of the modding crates only, never of a kernel crate.
+
+**Overturned by** an owner ruling that mods must survive patch releases (option B is then re-priced), or must run untrusted (options E and F).
+
+**Removed in rev 6** because only B, D, E or F needed it:
+- the Stage-0 branches that would have made B, E or F mandatory (§3.1 row; §8);
+- D's row and its compiler-on-the-player's-machine requirement;
+- the "(B, E)" labels on MS-01, MS-02b and MS-08;
+- the prototype-only escape of Q-1 (iv).
+
+No kernel item changes: B, D, E and F never had a Phase-D rung (§3.1).
+
+**Replays with mods.** A replay's header lists the loaded mods' fingerprints in load order (01 §2.1). Mod systems enter the Fixed schedule at the load slot, so the mod set is part of a replay's identity.
 
 ## 4. Reconciling allocator §7 with modding rev 6
 
@@ -187,7 +236,7 @@ route 2 unplaced pending MD:M-C5, and A third. No head is measured (R3-3, §5).
 |---|---|
 | R3-1, §7.3 direction | decided in §4 (D2 + P39). MD:M-K3 is a structural check at B2, after D-S3(ii) (group stores and their column ids) and after D-S3(iii). Rev 5.1: under A′ and C the quota unit is the whole mod set, read after `App::finish()` (MS-03) |
 | R3-2, item 2b home | decided: boundary side (MS-13). The `try_register_dynamic` `None` gap is accepted as reachable only outside the façade: `try_register_tag` / `register_*tag` and asset construction join MD:M-A4 leg (a)'s forbidden set as `compile_fail` fixtures. MD:M-A4 leg (b)'s rev-6 system-less red control becomes a fixture, not a runtime latch read. |
-| R3-3, ranking head | open; decided by MQ-09 (MD:M-F1 (d), MD:M-C4, MD:M-C5) and Stage 0. **Rev 5.1: the choice changes no Phase-D rung**, because A′, C and D need only the common set (§3.1) |
+| R3-3, ranking head | open; decided by MQ-09 (MD:M-F1 (d), MD:M-C4, MD:M-C5) (Stage 0 is answered, Q-1). **The choice changes no Phase-D rung**, because A′ and C need only the common set (§3.1) |
 | R3-4, M-P1 first run | UG-15 at B3, then per delta; red controls required |
 | R3-5, this file | exists |
 | P6-1, profile reproducibility | a structural check at B3; if release builds are reproducible, release asm pins are added (UG-15 (2)) |
@@ -200,15 +249,18 @@ route 2 unplaced pending MD:M-C5, and A third. No head is measured (R3-3, §5).
 | P6-8, "absent at fat LTO" quoted beyond its measurement | **answered by S-1 (rev 5.1):** no kernel modding item relies on LTO to be absent |
 | P6-9, per-mod-system price is a floor | option A only; carried with RM-1, which re-poses the TLS part of that price |
 | P6-10, cross-image allocation exists today | option A only; failure mode 5 becomes a mechanical census over everything the façade re-exports, run as part of MD:M-A4 (a) |
+| AP6-W4, `register_hooks_by_id` outside the seam inventory (`ALLOCATOR-DESIGN-SPACE.md:4022-4056` at `b716a5dc`) | **Consequence: void under U-10.** AP6's dangling-hook sequence needs an unloaded, then reloaded, mod image. Under load-only (MS-07) an image is never unmapped, so the pointers stay valid for the process lifetime. **The rule/gate mismatch is scoped to option A.** Under A′ and C a mod links the engine's ordinary public API, so "reachable by a mod" means every `pub` item, and there is no façade to inventory (§3.1). Under A, the Stage-3 rung for MS-12/MS-13 adds `register_hooks_by_id` and the typed hooks builder that delegates to it (AP6: `hooks/builder.rs:149`) to K-MOD-7's not-exposed list. It also replaces leg (5)'s marker comparison with a reference census: the kernel paths that `boyko_mod_api` and `boyko_mod_host` name must equal the marked inventory. Non-modding cost: 0. |
 
 **Remarks raised by rev 5.1.**
 
 | # | Remark | Scope | Disposition |
 |---|---|---|---|
-| RM-1 | **KC-04 re-poses option A's TLS hazard.** Under A the mod image carries its own copies of KC-04's statics `THREAD_RECORDS`, `THREAD_BUSY` and `CTX_IDX` (01 §6 items 1 and 3). On its first lookup the mod's copy of `CTX_IDX` reads 0, so the mod allocates a second TLS index and claims a record in its own table, which reads detached: `par_iter` runs serially and the ALLOC1 checks pass vacuously, the symptoms of §0.3 instance 5 (`:212-217`). Handing the mod the host's index does not help, because the mod's code still indexes its own table. So MD:M-A2's "three TLS writes per system entry" (`:2134`) no longer describes the fix. Each mod image also spends one of the 64 fast TLS indices (00 RK-14, hazard 2) | option A only. A′, C and D have one image; a non-modding build is untouched | open, the architect's; MD:M-A2 is re-posed before A is chosen. A candidate, modding-only: the trampoline copies the host record's pool and lane fields into the mod image's own record at each system entry. Its item is generic over `ModSeam` (S-1) |
-| RM-2 | **A duplicate full `stable_name` is not refused.** `register_stable_name` appends a second id under an existing name (`[J]…/component_registry/serialize.rs:394-397`), and `resolve_stable_name` returns the first match (`:415-421`). Two component types that declare the same `stable_name` therefore resolve silently to whichever minted first, at every load. The default name is `type_name` (`[J]…/component/component.rs:195-197`), so reaching this takes an explicit attribute. The call sits inside the derive's `component_id()` closure (`[J]crates/boyko_macros/src/component.rs:318-321`, `:392`) | engine defect (bugs first). MS-02a depends on it | proposed: refuse in `register_stable_name` when the bucket holds a different id with the same full name. The cost is one compare loop on a once-per-type cold path, in every build, because it is an engine fix, not a modding item. It is an attributed rung naming `Transform::component_id`; the architect places it |
-| RM-3 | **Knock-ons in files this revision does not edit.** **02 D-S1(ii):** scope becomes KC-19b rev 5.1 ("MS-03" instead of "MS-02, MS-03"); its red-first test "a sized name re-minted with a different layout → `Err`" moves to MS-02b's Stage-3 rung; its rename list (`TAG_NAMES → DYN_NAMES`, 02 §2) empties. **03 UG-15 row, leg (7) and UG-16:** "MS-01's rung" is now a Stage-3 rung, option A only. **03 red control (vii):** `dynamic_by_name` no longer lands in Phase D; from D-S1(ii) on, its item is an MS-03 reader instantiated from `boyko_demo` with a control-branch token. **03 leg (5) and new leg (7b):** as §6 below, with controls (xi) and (xii). **03 UG-19:** the sized-name rows move from D-S1(ii) to MS-02b's rung. **03 MQ-09 and the structural list:** since A′ and C head the ordering, MQ-09 gains the timing legs of MD:M-F1 (c) and MD:M-C0b, and the structural list gains MD:M-F1 (a), (b) and the size legs of (c) and M-C0b | plan files 02, 03 | for the architect's next patch |
+| RM-1 | **KC-04 re-poses option A's TLS hazard.** Under A, the mod image carries its own copies of KC-04's statics `THREAD_RECORDS` and `THREAD_BUSY` and of the per-thread `WORD` (01 §6 items 1 and 3; the `CTX_IDX` word arm is not built, 01 §8). On its first lookup, the mod's copy of `WORD` reads 0, so the mod claims a record in its own table, which reads detached: `par_iter` runs serially and the ALLOC1 checks pass vacuously, the symptoms of §0.3 instance 5 (`:212-217`). Handing the mod the host's index does not help, because the mod's code still indexes its own table. So MD:M-A2's "three TLS writes per system entry" (`:2134`) no longer describes the fix. Each mod image also carries its own `WORD` thread-local | option A only. A′ and C have one image; a non-modding build is untouched | open, the architect's; MD:M-A2 is re-posed before A is chosen. A candidate, modding-only: the trampoline copies the host record's pool and lane fields into the mod image's own record at each system entry. Its item is generic over `ModSeam` (S-1) |
+| RM-2 | **A duplicate full `stable_name` is not refused.** `register_stable_name` appends a second id under an existing name (`[J]…/component_registry/serialize.rs:394-397`), and `resolve_stable_name` returns the first match (`:415-421`). Two component types that declare the same `stable_name` therefore resolve silently to whichever minted first, at every load. The default name is `type_name` (`[J]…/component/component.rs:195-197`), so reaching this takes an explicit attribute. The call sits inside the derive's `component_id()` closure (`[J]crates/boyko_macros/src/component.rs:318-321`, `:392`) | engine defect (bugs first). MS-02a depends on it | proposed: refuse in `register_stable_name` when the bucket holds a different id with the same full name. The cost is one compare loop on a once-per-type cold path, in every build, because it is an engine fix, not a modding item. **Placed (rev 6):** in D-S1(i), the registry bug-fix rung, which runs UG-15 attributed and names `Transform::component_id` (02 §2) |
+| RM-3 | **Knock-ons in files this revision does not edit.** **02 D-S1(ii):** scope becomes KC-19b rev 5.1 ("MS-03" instead of "MS-02, MS-03"); its red-first test "a sized name re-minted with a different layout → `Err`" moves to MS-02b's Stage-3 rung; its rename list (`TAG_NAMES → DYN_NAMES`, 02 §2) empties. **03 UG-15 row, leg (7) and UG-16:** "MS-01's rung" is now a Stage-3 rung, option A only. **03 red control (vii):** `dynamic_by_name` no longer lands in Phase D; from D-S1(ii) on, its item is an MS-03 reader instantiated from `boyko_demo` with a control-branch token. **03 leg (5) and new leg (7b):** as §6 below, with controls (xi) and (xii). **03 UG-19:** the sized-name rows move from D-S1(ii) to MS-02b's rung. **03 MQ-09 and the structural list:** since A′ and C head the ordering, MQ-09 gains the timing legs of MD:M-F1 (c) and MD:M-C0b, and the structural list gains MD:M-F1 (a), (b) and the size legs of (c) and M-C0b | plan files 02, 03 | **applied in rev 6** (02 D-S1(ii) and the mode table; 03 §1, §2, §5, §6) |
 | RM-4 | **A′'s P2 needs a launcher rule.** A′'s modding executable pays A′'s price with or without a mod (§3.1), so "only players who load mods pay" requires shipping both executables and starting the static one when no mod is installed | A′ only | a Stage-0 product question beside Q-1; no kernel consequence |
+
+**`ModSeam` stays an `unsafe trait`** (rev 5.1 open item 5, decided in rev 6). Implementing it in a non-modding crate would instantiate seam code and defeat S-1's census. `unsafe impl` makes every implementor greppable, and UG-15 leg (5) counts it. Cost: zero.
 
 ## 6. The no-cost gate
 
@@ -233,7 +285,7 @@ This is UG-15 (03 §6).
   - Leg (7) is what proves modding R1 (`MODDING-DESIGN-SPACE.md:1818-1823`) for the Stage-1 items.
   - Legs (1)–(3) cannot see a seam body that survives fat LTO without an attribute.
   - Leg (6) cannot see it either, because both of its arms contain the kernel
-    (`ALLOCATOR-DESIGN-SPACE.md:3825`).
+    (`ALLOCATOR-DESIGN-SPACE.md:3832`).
 - **Rev 5.1 adds the checks that prove S-1** (to be written into 03 §6, RM-3):
   - **Leg (5), S-1 shape.** A `syn` check over the census crates. Every item that carries a
     `MOD-SEAM` marker and adds code is generic over a parameter bounded by `ModSeam`; MS-08's
@@ -257,21 +309,20 @@ This is UG-15 (03 §6).
 
 | Stage | When | Content |
 |---|---|---|
-| 0 | any time | owner values (00 §7 Q-1, Q-2; RM-4) |
+| 0 | done 2026-09-17 | Q-1 and Q-2 answered (00 §7); RM-4, A′'s launcher rule, is the one Stage-0 item left |
 | 1 | inside Phase D | **Only the common set.** D-S1(ii) lands `ModSeam` and MS-03's four readers (01 KC-19b) under strict UG-15, including legs (7) and (7b). Its parent is D-S1(ii)'s cut commit, which contains D-S1(i), the bug-fix commit (P39, P40's tag path, 32.2, NW4). MS-08's markers land with A6 (doc lines, no code). RM-2's fix is an engine rung, placed by the architect. Nothing else is built for modding in Phase D |
 | 2 | quiet windows; structural checks any time | MQ-09, plus the timing legs of MD:M-F1 (c) and MD:M-C0b. Structural: MD:M-F1 (a), (b) and the size legs of (c) and M-C0b; MD:M-C4, MD:M-C5, MD:M-K3 |
-| 3 | after Phase-D exit | **Only the chosen option's items**, behind the modding crates, gated by UG-15: A′ → MS-14; C or D → MS-15; A → MS-01, MS-02b, MS-09..MS-13 and RM-1's item. Every option → MS-02a's SDK half and MS-04..MS-07. Waiting for D-exit means Stage 3 is not fighting a moving kernel |
+| 3 | after Phase-D exit | **Only the chosen option's items**, behind the modding crates, gated by UG-15: A′ → MS-14; C → MS-15; A → MS-01, MS-02b, MS-09..MS-13 and RM-1's item. Every option → MS-02a's SDK half and MS-04..MS-07. Waiting for D-exit means Stage 3 is not fighting a moving kernel |
 | 4 | after Stage 3 | one real mod end to end (modding §9) |
 
-## 8. Owner values questions (Stage 0)
+## 8. Owner values questions (Stage 0): answered 2026-09-17
 
-These are duplicated in 00 §7 Q-1 and Q-2.
-- Trust model.
-- Patch-release survival.
-- Who builds a mod.
-- Prototype-only scope or mod-defined component types.
-- Unload / hot reload as a product requirement.
+| Question | Answer (00 §7) | Consequence |
+|---|---|---|
+| Trust model | native mods, no sandbox (Q-1 (i)) | E and F are out |
+| Patch-release survival | not required (Q-1 (ii)) | B is out; the exact-build contract applies (§3.3) |
+| Who builds a mod | the mod author (Q-1 (iii)) | D is out; the release ships its toolchain pin |
+| Prototype-only, or mod-defined types | mods may add their own types (Q-1 (iv)) | If A is chosen: MS-01, MS-02b and MS-09..MS-13. Under A′ and C: an ordinary derived type |
+| Unload / hot reload | no hot reload if it adds complexity (Q-2) | U-10 stands: load-only (MS-07) |
 
-The answers decide whether options E or B become mandatory, and whether MS-01, MS-02b and MS-09 to
-MS-13 are built at all. Under A′, C and D, the prototype-only answer removes nothing from the
-kernel, because those options need no descriptor (§3.1).
+The choice among A′, C and A is still open and is decided by MQ-09 (R3-3). RM-1 (option A only) and RM-4 (A′ only) are still open.
