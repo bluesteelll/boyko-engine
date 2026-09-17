@@ -28,7 +28,7 @@ use boyko_render::{
     snap_apply, sync_cluster_light_gate, sync_csm_light_gate, sync_punctual_light_gate,
     sync_ssao_light_gate, sync_sv0_light_gate,
 };
-use boyko_scene::{CameraPlugin, FixedSet};
+use boyko_scene::{CameraPlugin, CameraSet, FixedSet};
 
 use crate::runner::{self, WindowDesc};
 
@@ -43,13 +43,16 @@ use crate::runner::{self, WindowDesc};
 /// `resolve_active_camera` + `visibility_sync` with their ordering edges) and
 /// [`Render3dPlugin`], then registers the R3 mesh path —
 /// `sync_instance_model_cols` → `gather_mesh_draws` (edge-ordered) — AFTER
-/// them. The propagation → pack edge cannot be expressed explicitly
-/// (`propagate_transforms`'s `SystemKey` is only obtainable inside
-/// `CameraPlugin`'s own builder closure), so it is pinned by the documented
-/// cross-crate ADD-ORDER contract — and unlike the `Changed`-gated systems
-/// that contract usually covers, `sync_instance_model_cols` is UNCONDITIONAL:
-/// a wrong order would be a PERMANENT one-frame pose lag, not a
-/// self-correcting stagger. The add-order here IS the pin; do not reorder.
+/// them.
+///
+/// The propagation → pack edge used to rest on this ADD-ORDER alone, on the
+/// grounds that `propagate_transforms`'s `SystemKey` is unobtainable outside
+/// `CameraPlugin`'s own closure. **It did not hold** — MEASURED 2026-08-26, an
+/// entity whose `Transform` is written from a Main-schedule system had its
+/// `GlobalTransform` current and its `InstanceModelCol` one frame stale, every
+/// frame. It is now a REAL edge: `.after_set(CameraSet::Resolve)` at the
+/// registration site below (a set edge needs no key). Add-order still governs
+/// the other cross-crate pairs documented here; do not reorder.
 /// Do NOT also add `CameraPlugin` / `TransformPlugin` / `Render3dPlugin` /
 /// `LightingPlugin` / `CsmPlugin` yourself — a duplicate plugin panics.
 ///
@@ -573,7 +576,30 @@ impl Plugin for EnginePlugins {
         #[cfg(feature = "hwrt")]
         app.insert_resource(MotionCamState::default());
         app.add_systems_cfg(|b| {
-            let pack = b.add_system(sync_instance_model_cols).key();
+            // `.after_set(CameraSet::Resolve)` — the propagation → pack edge, made REAL.
+            //
+            // MEASURED 2026-08-26, on the first scene in this repo that moves an entity from
+            // the MAIN schedule (the playground's camera-parented HUD panel): its `Transform`
+            // and `GlobalTransform` were both this frame's, while its `InstanceModelCol` —
+            // the affine the GPU actually draws — held the PREVIOUS frame's pose, every frame,
+            // exactly. The pack was running BEFORE the propagation.
+            //
+            // The add-order contract documented on `EnginePlugins` claimed this edge; it did
+            // not hold. Nothing caught it because nothing needed it: static props never move,
+            // and a physics body's pose reaches the GPU through the `GpuTransform3D` pair
+            // packed in `FixedSet::Snapshot`, not through this system. A HUD pinned to the
+            // camera makes the one-frame lag a visible judder, and any future Main-schedule
+            // mover would have inherited it silently.
+            //
+            // `propagate_transforms`'s own `SystemKey` is unobtainable here (it is minted
+            // inside `CameraPlugin`'s closure) — which is why the comment above settled for
+            // add-order. A SET edge expresses the same order without the key: `CameraSet::
+            // Resolve` is exactly `propagate_transforms` + `resolve_active_camera`, and this
+            // is the mechanism the camera seam already uses for `Control.before(Resolve)`.
+            let pack = b
+                .add_system(sync_instance_model_cols)
+                .after_set(CameraSet::Resolve)
+                .key();
             // HW-RT rung 3b: `prev := curr` MUST run BEFORE the affine pack refreshes `curr`
             // from this frame's moving `GlobalTransform`, so a mesh's motion vector is this
             // frame's true per-object displacement (else `prev == curr`, zero motion, every

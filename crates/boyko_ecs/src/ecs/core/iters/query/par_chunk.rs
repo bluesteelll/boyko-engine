@@ -262,7 +262,7 @@ pub(crate) unsafe fn par_for_each_chunk_impl<'q, 's, D, F, Func>(
                         has_enable,
                         f: f_ref as *const Func,
                         _state_borrow: PhantomData,
-                        _data_filter_invariance: PhantomData,
+                        _data_filter_marker: PhantomData,
                     };
 
                     // SAFETY (PAR2 / PAR3 / S1 / SEND1 / SEND3 / CD1-CD4):
@@ -353,9 +353,16 @@ struct ChunkChunkCaptures<'s, D: ChunkedQueryData, F: ArchetypalQueryFilter, Fun
     f: *const Func,
     /// Lifetime carrier for the `'s` state borrow.
     _state_borrow: PhantomData<&'s ()>,
-    /// Invariance over `(D, F)`. `fn() -> (D, F)` keeps the marker
-    /// `Send + Sync` independently of `D`/`F` auto-trait bounds.
-    _data_filter_invariance: PhantomData<fn() -> (D, F)>,
+    /// Type carrier for `(D, F)`. `fn() -> (D, F)` owns nothing, so the marker
+    /// is `Send + Sync` independently of `D`/`F` auto-trait bounds — that is
+    /// what the `fn` shape is here for.
+    ///
+    /// NOT invariance, which the old field name (`_data_filter_invariance`)
+    /// and this comment both claimed: a `fn` **return** position is covariant
+    /// (invariance would need `fn(D, F) -> (D, F)`). Neither is observable
+    /// here — `D` and `F` are bounded `+ 'static` at every use site, so
+    /// neither carries a lifetime for variance to act on.
+    _data_filter_marker: PhantomData<fn() -> (D, F)>,
 }
 
 // Manual `Copy`/`Clone` so the auto-derive does not synthesise a

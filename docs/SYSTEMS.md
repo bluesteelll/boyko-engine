@@ -1996,8 +1996,16 @@ split (no parallel data system — the SP4 race remediation put both solvers on 
 - [sdf_query.rs](../crates/boyko_physics/src/sdf_query.rs) — body-vs-SDF via `boyko_sdf_math` (zero readback, zero graphics deps).
 - [scene_sync.rs](../crates/boyko_physics/src/scene_sync.rs) — `boyko_scene` `Transform` ↔ body sync.
 
-**Entry point:** `add_physics_systems` (+ `_soft` / `_soft_colored` / `_sdf` /
-`_with_scene_sync` variants) adds the fixed-step pipeline to a `ScheduleBuilder`.
+**Entry points:** `add_physics_systems` (+ `_soft` / `_soft_colored` / `_sdf` /
+`_with_scene_sync` variants) adds the fixed-step pipeline to a `ScheduleBuilder` — the
+form a test / bench that owns both the builder and the world uses. `PhysicsPlugin`
+([plugin.rs](../crates/boyko_physics/src/plugin.rs)) is the `App` form
+(`app.add_plugin(PhysicsPlugin::new())`): it wires the same pipeline into
+`CoreSchedule::Fixed` with every stage joined to `FixedSet::Gameplay`, and defaults the
+scene sync ON. An `App` never lends the world and the fixed builder at once, so the two
+halves (`insert_physics_resources` / `register_physics_pipeline`) exist for exactly that
+reason. Live scene: `boyko_app` —
+[examples/playground.rs](../crates/boyko_app/examples/playground.rs).
 Deterministic, Miri-clean; broadphase auto-selected (`select_broadphase`).
 
 ## 26. boyko_input ✅

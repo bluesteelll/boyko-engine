@@ -88,8 +88,14 @@ pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> {
     /// byte-identical cursor fast path (0%-gate).
     enable_terms: EnableTerms,
 
-    /// Invariance over `D` and `F`. `fn() -> (D, F)` keeps the marker
-    /// `Send + Sync` regardless of `D`/`F` bounds.
+    /// Type carrier for `D` and `F`. `fn() -> (D, F)` owns nothing, so the
+    /// marker is `Send + Sync` regardless of `D`/`F` bounds — that decoupling
+    /// is the whole reason for the `fn` shape.
+    ///
+    /// NOT invariance, which this comment used to claim: a `fn` **return**
+    /// position is covariant (invariance would need `fn(D, F) -> (D, F)`).
+    /// Nothing here depends on either — `D` and `F` are bounded `+ 'static` at
+    /// every use site, so neither carries a lifetime for variance to act on.
     _marker: PhantomData<fn() -> (D, F)>,
 }
 
