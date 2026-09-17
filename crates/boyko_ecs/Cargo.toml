@@ -97,6 +97,10 @@ proptest.workspace = true
 # `wasm32-unknown-unknown` build (the web-demo target), where getrandom 0.3
 # otherwise requires an explicit backend flag.
 rand = "0.9.0"
+# Defect A6 validation: `tests/a6_schedule_panic_propagation.rs` observes the schedule's
+# cancellation record through `boyko_log::probe`, which exists only under `test-probe`. Dev-only,
+# so the feature never reaches a shipping build (the rule `boyko_log/Cargo.toml` states for it).
+boyko-log = { path = "../boyko_log", features = ["test-probe"] }
 
 [[bench]]
 name = "component_id"

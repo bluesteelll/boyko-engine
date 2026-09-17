@@ -40,27 +40,27 @@
 //! real shared production code. The claim core is the sole model component that
 //! is not literal shared code; it is flagged per the plan's D3 / §4 allowance.
 //!
-//! ## Run — the recipe that WORKS on this box, and the one that does not
+//! ## Run — debug profile, one model per process (msvc and windows-gnu, 2026-09-17)
 //!
 //! ```bash
-//! # Build (the emitted path is printed by this command):
-//! cargo --config 'target.x86_64-pc-windows-gnu.rustflags=["-C","target-cpu=x86-64-v3","--cfg","loom"]' \
-//!   test -p boyko-threadpool --test loom_pool --no-run
-//! # Run, per model, because a filter that matches nothing exits 0:
-//! LOOM_MAX_PREEMPTIONS=3 ./target/debug/deps/loom_pool-*.exe --test-threads=1 --exact <name>
+//! cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
+//!   test -p boyko-threadpool --test loom_pool -- --list   # must print 6 `: test` lines
+//! # Per model; a filter that matches nothing exits 0, so require `running 1 test`:
+//! LOOM_MAX_PREEMPTIONS=3 cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
+//!   test -p boyko-threadpool --test loom_pool -- --exact <name> --test-threads=1
 //! ```
 //!
-//! ⚠ **`RUSTFLAGS="--cfg loom" cargo test …` — the spelling this header carried
-//! until 2026-09-03, and the one `KE16-DESIGN-MEASUREMENT.md` inherited — does
-//! not work here and must not be re-derived.** Measured 2026-09-02: the binary
-//! it links dies at startup with `STATUS_ACCESS_VIOLATION` (0xC0000005) before
-//! libtest prints `running N tests`, `--list` included. That reading was then
-//! written up in this header as "loom does not run on this box", which converted
-//! every model below into an argument and every absent loom row into an excused
-//! one. It is a RECIPE fault, not a box fault: `RUSTFLAGS` REPLACES
-//! `[target.<triple>].rustflags` rather than merging with it (`.cargo/config
-//! .toml`'s `x86-64-v3` baseline), so that command builds a differently
-//! configured tree; `cargo --config` sets the same key and therefore composes.
+//! ⚠ **Three earlier forms of this recipe must not be re-derived** (failures scoped below).
+//! `RUSTFLAGS="--cfg loom"` (until 2026-09-03) REPLACES `[target.<triple>].rustflags`
+//! instead of joining it, so it drops `.cargo/config.toml`'s `x86-64-v3` baseline. On
+//! windows-gnu its binary died with 0xC0000005 before `running N tests` (measured
+//! 2026-09-02, msvc not measured); this header called it "loom does not run on this box".
+//! `target.x86_64-pc-windows-gnu.rustflags` (until 2026-09-17) reaches rustc only on
+//! the gnu toolchain: on msvc `--list` printed `0 tests, 0 benchmarks`, exit 0.
+//! `./target/debug/deps/loom_pool-*.exe` (until 2026-09-17) misses a set
+//! `CARGO_TARGET_DIR`, and the glob can match a stale hash: a build that also selects
+//! `boyko-ecs` unifies features differently and emits a second `loom_pool-*` binary.
+//! **Debug**: `mark_idle` / `unmark_idle` debug-assert the worker-id bound. Release: 6/6 (msvc).
 //!
 //! **Reading, this checkout, 2026-09-03, `LOOM_MAX_PREEMPTIONS=3`, one model
 //! per process, taken under `--features ke16-w-gate,ke16-w-count`** — the row's

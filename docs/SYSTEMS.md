@@ -1457,7 +1457,7 @@ topo + apply-window barrier. Module: [core/schedule/](../crates/boyko_ecs/src/ec
 ### 11.1. Schedule + ScheduleBuilder
 
 ```rust
-// schedule/schedule.rs:114
+// schedule/schedule.rs:116
 pub struct Schedule {
     pool: Arc<ThreadPool>,
     systems: Vec<SystemBox>,                  // topo order, stable addresses
@@ -1479,7 +1479,7 @@ pub struct Schedule {
   `build(&mut world) -> Schedule` (324) / `try_build(...)` (350, returns
   `Result<_, ScheduleBuildError>`).
 - `Schedule::run(&mut world)`
-  ([schedule.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule.rs):243) —
+  ([schedule.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule.rs):245) —
   bumps the change tick, runs the state-transition pass, then dispatches.
 - Uses external dep `fixedbitset` for the conflict/condition bitsets.
 

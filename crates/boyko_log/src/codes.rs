@@ -860,6 +860,16 @@ codes! {
     // warning exists because the panic alone reported 1023 silent mints and then a process kill.
     (201,  E, E0201, RatePolicy::Every, CodeStatus::Live,
         "A fire-and-forget task panicked, so the process is aborting"),
+    // ── A6: the pool's two payload-discard records ──────────────────────────────────────────
+    // `Every` for both, and the subject is why: each occurrence names a DIFFERENT scope and a
+    // different discarded payload, so a latch would report one collision and hide the rest.
+    // Both are emitted from INSIDE a `catch_unwind` on a thread that may already be unwinding --
+    // a panic escaping either site would be a panic-during-cleanup abort, which is the class
+    // `E0202`'s own site exists to remove.
+    (202,  E, E0202, RatePolicy::Every, CodeStatus::Live,
+        "A scope task's panic payload was discarded and is not propagated"),
+    (203,  E, E0203, RatePolicy::Every, CodeStatus::Live,
+        "A discarded panic payload panicked while being dropped, so the second payload was leaked"),
     (501,  W, W0501, RatePolicy::Once,  CodeStatus::Live,
         "The query-type table is three quarters full"),
     (502,  B, B0502, RatePolicy::Every, CodeStatus::Live,
@@ -895,6 +905,17 @@ codes! {
         "The self-collision spatial hash is overloaded, so bucket chains are long"),
     (1501, W, W1501, RatePolicy::Once,  CodeStatus::Live,
         "Ordering references a system set that has no members"),
+    // ── A6: the ECS executor's two panic-path records ───────────────────────────────────────
+    // `E1502` is `Every` because the subject is a RUN: a process that cancels three runs has
+    // three things to tell the reader, and each names a different system. It gets no `stderr`
+    // fallback and no `print_allowlist.txt` row -- its next statement is a `return`, the panic
+    // then propagates to the caller, and the default hook has already printed the payload at the
+    // origin. `E1503`'s next statement is `std::process::abort()`, so it DOES carry the
+    // fallback and its file carries the ledger row.
+    (1502, E, E1502, RatePolicy::Every, CodeStatus::Live,
+        "A system panicked, so the rest of the schedule run was cancelled"),
+    (1503, E, E1503, RatePolicy::Every, CodeStatus::Live,
+        "The completion queue overflowed while publishing a system, so the process is aborting"),
     // L8b flipped both. They are **`boyko_ecs`'s**, not `boyko_app`'s -- this block's header calls
     // `18xx` the app block and the ledger reads that as the `boyko_app` crate, but the two panic
     // sites measure at `ecs/core/app/app.rs:887` and `:899`. The block is about `App`, the type,
@@ -1072,6 +1093,13 @@ codes! {
     // armed three dumps and could write none of them has three things to report, not one.
     (3010, E, E3010, RatePolicy::Every, CodeStatus::Live,
         "A diagnostic dump or artifact could not be written, and the run continued"),
+    // ── A6: the windowed host's ECS panic boundary ──────────────────────────────────────────
+    // `Every`, though in practice the site fires once per process: the argument is the stage
+    // name, so two reports would be two different entry points, and a latch would name one. The
+    // fourth terminal-exit reporter in `diag.rs`, and it follows that file's shape exactly --
+    // emit, `flush()`, print only on `NoConsumer` -- because its next statement ends the process.
+    (3011, E, E3011, RatePolicy::Every, CodeStatus::Live,
+        "A panic escaped an ECS entry point the windowed host owns, so the process is aborting"),
 
     (9001, B, B9001, RatePolicy::Every, CodeStatus::Live,
         "The schedule contains a cycle of systems"),
@@ -1429,6 +1457,11 @@ mod tests {
             (b'W', 114),  // L11a -- downstream code index space at 90 %
             (b'E', 115),  // L11a -- downstream code index space exhausted
             (b'E', 201),  // L6  -- a fire-and-forget task panicked, process aborting
+            // A6 flipped the next five with their emitters, and this pin was missed a FOURTH time
+            // the same way (after rung 2, rung 13 and DP6-0b below): `--test code_registry`
+            // passed 16/16 while `--lib` red on `E202`.
+            (b'E', 202),  // A6  -- a scope task's panic payload was discarded, not propagated
+            (b'E', 203),  // A6  -- a discarded payload panicked on drop, the second one leaked
             (b'W', 501),  // L6  -- query-type table at 75 %
             (b'B', 502),  // L6  -- query-type table exhausted
             (b'W', 701),  // L6  -- an event lane was full, the send was refused
@@ -1438,6 +1471,8 @@ mod tests {
             (b'W', 1302), // L8a -- self-collision cell size exceeds the smallest rest length
             (b'W', 1303), // L8a -- self-collision spatial hash overloaded
             (b'W', 1501), // L6  -- ordering references an empty system set
+            (b'E', 1502), // A6  -- a system panicked, the rest of the schedule run was cancelled
+            (b'E', 1503), // A6  -- the completion queue overflowed, process aborting
             (b'B', 1801), // L8b -- a plugin was added more than once (boyko_ecs's, not the host's)
             (b'B', 1802), // L8b -- an App config method called after finish()
             (b'W', 1803), // the host's preset flag named nothing
@@ -1467,6 +1502,7 @@ mod tests {
             (b'W', 3008), // L8b -- a profiling knob the device cannot serve
             (b'W', 3009), // L8b -- an unrecognised environment override value (two sites)
             (b'E', 3010), // L8b -- a diagnostic dump could not be written (five sites)
+            (b'E', 3011), // A6  -- a panic escaped a host-owned ECS entry point, process aborting
             (b'B', 9001), // L6  -- schedule cycle
             (b'B', 9002), // L6  -- set-hierarchy cycle
             (b'B', 9004), // L6  -- two ordered sets share a member

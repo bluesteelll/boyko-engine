@@ -32,7 +32,7 @@
 use core::marker::PhantomData;
 use core::ptr::{self, NonNull};
 use std::any::Any;
-use std::panic::resume_unwind;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::Duration;
 
 use crossbeam_deque::Steal;
@@ -633,8 +633,16 @@ impl ScopeShared {
             // SAFETY: `raw` was minted from `Box::into_raw` on the line above and the failed CAS
             //   means it was never published, so this thread is still its unique owner and no
             //   other thread can observe it. Reclaiming it here is the "later panics are
-            //   dropped" half of the protocol.
-            drop(unsafe { Box::from_raw(raw) });
+            //   dropped" half of the protocol. Moving the inner box out (`*`) frees the outer
+            //   allocation and leaves the payload's own drop to `discard_payload`.
+            let loser = *unsafe { Box::from_raw(raw) };
+            // NOT a bare `drop`: this drop runs inside the task body but OUTSIDE that body's own
+            // `catch_unwind`, which has already returned, so a payload that panics on drop
+            // (rust#86027) would unwind out of `run_scoped` BEFORE the registration is completed
+            // — `worker::run_task` would then catch it one frame out and abort the whole process,
+            // attributing a SCOPED task's failure to `boyko-E0201`'s fire-and-forget text, while
+            // a joiner was waiting to receive the first payload.
+            discard_payload(loser, DiscardReason::LaterPanicLost);
         }
     }
 
@@ -998,8 +1006,92 @@ impl Drop for ScopeShared {
             // SAFETY: `&mut self` proves exclusive access. A non-null value here was published
             //   by one `capture_panic` CAS and never taken, so this is its unique owner; the
             //   pointer came from `Box::into_raw(Box::new(..))`, matching this `Box::from_raw`.
-            drop(unsafe { Box::from_raw(raw) });
+            //   Moving the inner box out (`*`) frees the outer allocation and leaves the
+            //   payload's own drop to `discard_payload`.
+            let uncollected = *unsafe { Box::from_raw(raw) };
+            // This `Drop` can itself run during an unwind, so the payload's drop is routed
+            // through the non-unwinding discard rather than performed here.
+            discard_payload(uncollected, DiscardReason::Uncollected);
         }
+    }
+}
+
+/// Why a captured panic payload is being discarded instead of delivered.
+///
+/// Three reasons, and each is a different fact about the scope — a reader who
+/// sees `E0202` needs to know which. In two of them the scope's caller still
+/// receives a panic, so the discard loses a SECOND failure: `LaterPanicLost`
+/// (the first task's payload is delivered) and `OwnerAlreadyPanicking` (the
+/// owner closure's own panic is). `Uncollected` is the one in which the
+/// discarded payload was never handed to anyone.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DiscardReason {
+    /// A second task panicked after another had already published its payload.
+    /// The protocol's documented "first wins; subsequent payloads dropped".
+    LaterPanicLost,
+    /// `Scope::drop` found a payload while the scope's OWN closure was
+    /// unwinding — the unwinder is the one dropping the scope — so re-raising
+    /// would be a panic during cleanup. Decided by `Scope::body_returned`, not
+    /// by `std::thread::panicking()`.
+    OwnerAlreadyPanicking,
+    /// A `ScopeShared` was dropped without the `take_panic` hand-off.
+    Uncollected,
+}
+
+impl DiscardReason {
+    /// The record's reason field. A `&'static str` rather than `Display`,
+    /// because this is read on a path that must not allocate and must not
+    /// panic.
+    #[inline]
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LaterPanicLost => "a later panic lost the first-wins CAS",
+            Self::OwnerAlreadyPanicking => "the owner thread was already panicking",
+            Self::Uncollected => "the scope was dropped without collecting it",
+        }
+    }
+}
+
+/// Drop a panic payload that will not be delivered, WITHOUT unwinding.
+///
+/// `Scope::drop`'s discard branch runs on a thread that is already unwinding by
+/// construction (the scope's own closure is unwinding), and `ScopeShared::drop`
+/// can run during any unwind that frees the scope. A panic escaping this
+/// function there is a panic-during-cleanup abort, i.e. the exact class the
+/// discard branch exists to remove. The third call site, `capture_panic`,
+/// states its own reason at the call. So the WHOLE body is inside one
+/// `catch_unwind`: the record first (so it survives a payload whose `Drop`
+/// panics), then the drop, which is the statement that can actually panic
+/// (rust#86027).
+///
+/// A second fault leaks the second payload deliberately. Leaking one box is
+/// strictly better than aborting the process, and it keeps the FIRST payload's
+/// delivery intact.
+#[cold]
+#[inline(never)]
+fn discard_payload(p: Box<dyn Any + Send + 'static>, why: DiscardReason) {
+    let r = catch_unwind(AssertUnwindSafe(move || {
+        boyko_log::error!(
+            boyko_log::Threadpool,
+            boyko_log::codes::E0202,
+            "a scope task's panic payload was discarded ({}) and is not propagated",
+            why.as_str()
+        );
+        drop(p);
+    }));
+    if let Err(second) = r {
+        // NOT dropped: dropping a payload that just panicked ON DROP would fault again, and this
+        // frame may already be inside a cleanup pad.
+        core::mem::forget(second);
+        // One level, no recursion: if even this emission panicked there is nothing left to say.
+        let _ = catch_unwind(|| {
+            boyko_log::error!(
+                boyko_log::Threadpool,
+                boyko_log::codes::E0203,
+                "a discarded panic payload panicked while being dropped; the second payload is \
+                 leaked rather than dropped again"
+            );
+        });
     }
 }
 
@@ -1013,7 +1105,7 @@ impl Drop for ScopeShared {
 /// purchase: a spawn touches `inner`, `shared` and the block's `cur` / `end` —
 /// bytes 0..32 under this order — so the alignment makes that span ONE cache
 /// line always, rather than a straddle whose probability is set by where the
-/// joiner's frame happened to land. The price is 56 bytes of stack padding once
+/// joiner's frame happened to land. The price is 55 bytes of stack padding once
 /// per scope, paid for one guaranteed line per spawn. The order is PINNED below
 /// by `offset_of!`, because the size and alignment pins there do not cover it —
 /// see the comment on those pins for the edit that keeps both of them green
@@ -1048,27 +1140,44 @@ pub struct Scope<'scope> {
     /// own two hot words lead its layout, so they land in bytes 16..32 and
     /// share this struct's first cache line with the two fields above.
     block: ScopeBlock,
+    /// `true` once the closure that owns this scope has RETURNED. Set only by
+    /// [`Scope::join_after_body`], the one normal-flow drop site
+    /// (`PoolInner::install` / `PoolInner::scope`); the unwinder's drop of a
+    /// scope whose closure panicked reaches `Drop` with it still `false`.
+    ///
+    /// So `false` at drop means exactly one thing: this `Drop` runs inside the
+    /// cleanup pad of the scope's OWN closure, where a task's payload must not
+    /// be re-raised. The predicate is this scope's rather than the thread's —
+    /// `std::thread::panicking()` is also true for a scope whose closure
+    /// returned while some OUTER frame of the thread unwinds, and that scope's
+    /// task panic must still reach its caller.
+    ///
+    /// Fourth and cold: written once per scope, read by `Drop` only when a
+    /// payload exists.
+    body_returned: bool,
     /// `PhantomData<&'scope mut &'scope ()>` makes the scope invariant in
     /// `'scope`, which is what we want — `'scope` is a borrow window, not
     /// a covariant lifetime.
     _phantom: PhantomData<&'scope mut &'scope ()>,
 }
 
-// 8 (`inner`) + 8 (`shared`) + 312 (`ScopeBlock`, pinned in `block.rs`) + 0
-// (`PhantomData`) = 328 bytes of content, rounded up to the 64-byte alignment
-// above = 384. The size is what the padding cost is stated over, and the
-// ALIGNMENT is the thing the one-cache-line claim rests on — a size pin alone
-// would survive the alignment being dropped, which is exactly the edit that
-// silently turns the guaranteed line back into a probability.
+// 8 (`inner`) + 8 (`shared`) + 312 (`ScopeBlock`, pinned in `block.rs`) + 1
+// (`body_returned`) + 0 (`PhantomData`) = 329 bytes of content, rounded up to
+// the 64-byte alignment above = 384. The size is what the padding cost is
+// stated over, and the ALIGNMENT is the thing the one-cache-line claim rests
+// on — a size pin alone would survive the alignment being dropped, which is
+// exactly the edit that silently turns the guaranteed line back into a
+// probability.
 //
 // NEITHER OF THOSE TWO COVERS THE FIELD ORDER, and the field order is what the
 // doc comment above says was bought. MEASURED, by compiling the reordering
-// against this pin set: declaring `block` FIRST gives `block`@0, `inner`@312,
-// `shared`@320, `_phantom`@328 — still 328 bytes of content, still
-// `size_of == 384`, still `align_of == 64`, so the two pins above stay SILENT
-// while the four hot fields end up on THREE different cache lines (`cur`/`end`
-// at 0..16 in the first, `inner` at 312..320 in the fifth, `shared` at 320..328
-// in the sixth). The property the alignment was paid for is then gone with no
+// against this pin set, before `body_returned` existed (that one byte sits
+// after `block` and moves neither the size nor any pinned offset): declaring
+// `block` FIRST gives `block`@0, `inner`@312, `shared`@320, `_phantom`@328 —
+// still 328 bytes of content, still `size_of == 384`, still `align_of == 64`,
+// so the two pins above stay SILENT while the four hot fields end up on THREE
+// different cache lines (`cur`/`end` at 0..16 in the first, `inner` at
+// 312..320 in the fifth, `shared` at 320..328 in the sixth). The property the alignment was paid for is then gone with no
 // build failure at all. That reordering is the edit the three `offset_of!` pins
 // below catch — all three fired on the probe — and the two above cannot.
 //
@@ -1105,8 +1214,20 @@ impl<'scope> Scope<'scope> {
             // Lazy: no chunk is allocated until the first spawn, so a scope
             // that spawns nothing still makes no allocator call for its block.
             block: ScopeBlock::new(),
+            body_returned: false,
             _phantom: PhantomData,
         }
+    }
+
+    /// Close the scope on the path where its closure RETURNED: record that
+    /// fact, then drop — the join, the frees and a task's re-raise all run in
+    /// `Drop`. Called by `PoolInner::install` / `PoolInner::scope` immediately
+    /// after `f(&scope)` returns, and nowhere else; a scope whose closure
+    /// panicked is dropped by the unwinder instead and never reaches this.
+    #[inline]
+    pub(crate) fn join_after_body(mut self) {
+        self.body_returned = true;
+        drop(self);
     }
 
     /// Spawn a child task. The closure may borrow data with lifetime
@@ -1117,6 +1238,22 @@ impl<'scope> Scope<'scope> {
     /// A panic inside `f` is captured into the scope's panic payload and
     /// re-raised on the calling thread when the scope drops. The first
     /// panic wins; subsequent panics are dropped.
+    ///
+    /// **Unless this scope's own closure panicked.** If the closure passed to
+    /// `install`/`scope` unwinds while a task has also panicked, the scope is
+    /// dropped by that unwind, and a `resume_unwind` inside that cleanup pad
+    /// would abort the process. The task's payload is then recorded
+    /// (`boyko-E0202`) and discarded, and the closure's panic reaches the
+    /// caller: the owner's panic has the causal position. This is
+    /// `std::thread::scope`'s rule, and as in std the test is on the scope's
+    /// closure, not on `std::thread::panicking()`: a scope whose closure
+    /// returned re-raises its task's panic even while an outer frame of the
+    /// same thread is unwinding, so `install`/`scope` never return normally
+    /// over a panicked task. When the scope was opened by a task that a join
+    /// runs inline, that re-raise unwinds into the task's own catch and follows
+    /// that task's panic policy; a scope opened and closed directly by a
+    /// destructor that runs during an unwind re-raises into that destructor,
+    /// which Rust aborts — as it would for `std::thread::scope`.
     pub fn spawn<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'scope,
@@ -1407,8 +1544,35 @@ impl<'scope> Drop for Scope<'scope> {
 
         // Re-raise OUTSIDE any `*raw` access (the payload is a moved-out stack
         // local that no longer aliases the freed allocation).
+        //
+        // `body_returned` is read ONLY when a payload exists; the non-panicking
+        // path reads a null pointer above and takes neither branch. `false`
+        // means the unwinder is dropping this scope because its OWN closure
+        // panicked: this `Drop` runs inside that closure's cleanup pad, and
+        // `resume_unwind` there is a panic-during-cleanup abort — the owner's
+        // panic and a task's panic together would kill the process instead of
+        // either reaching the caller. `std::thread::scope` resolves the same
+        // collision the same way: the body's payload has the causal position
+        // and wins; the task's is recorded (`boyko-E0202`) rather than
+        // propagated.
+        //
+        // NOT `std::thread::panicking()`, which is true for the whole unwind of
+        // ANY frame on this thread. A scope's closure can return normally while
+        // an outer frame unwinds: a join running inside another scope's cleanup
+        // pad runs queued tasks inline through `run_task` (every source
+        // `join_on_worker` and `join_external_helping` poll — on the frame path
+        // that includes sibling SYSTEMS), and such a task may open and close a
+        // scope of its own. Discarding there would let that scope's
+        // `install`/`scope` return normally over a task that never finished its
+        // body. The re-raise unwinds into the inline task's own catch, below the
+        // outer cleanup pad, so it is handled by that task's panic policy
+        // rather than by the panic-during-cleanup abort.
         if let Some(p) = payload {
-            resume_unwind(p);
+            if self.body_returned {
+                resume_unwind(p);
+            } else {
+                discard_payload(p, DiscardReason::OwnerAlreadyPanicking);
+            }
         }
     }
 }

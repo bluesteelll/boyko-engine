@@ -11,14 +11,17 @@
 # Written at L6, when check 5 first armed and could count. It found eight unnamed rows out of
 # twenty; five were L6's own and got observing tests instead of a row here.
 
-E0201  the next statement at the site is `std::process::abort()`, so a test that reached it would
-       take the harness process with it. Reachable only from a fire-and-forget task panic, which
-       the pool catches precisely in order to abort. Removing this row needs an out-of-process
-       fixture (spawn a child, assert its exit code and its stderr), which is a test-harness
-       capability this repository does not have yet.
 
 
 
+E1503  `Schedule`'s completion-queue overflow site, and it is UNREACHABLE BY CONSTRUCTION rather
+       than merely awkward: the queue's capacity is `system_count`, a run guard publishes exactly
+       once per system per frame (SP2), and SCH6 proves the queue empty between frames. A test
+       would have to break one of those three before it could reach the emitter, and the next
+       statement there is `std::process::abort()` in any case. All three premises ARE gated,
+       separately, by the mutations that red on the frame reset, the apply-window leftover drain
+       and the cancel loop -- so what is unobserved here is the report, not the invariant.
+       Removing this row needs a fixture that can shrink the queue behind the scheduler's back.
 
 E3001  `boyko_demo`'s web entry, inside `#[cfg(target_arch = "wasm32")] fn wasm_start`. The
        function does not EXIST in a native build, so no test on the platform the gates run on can

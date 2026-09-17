@@ -5,3 +5,9 @@ pub mod entity_inland;
 pub mod entity_master;
 pub(crate) mod entity_reservoir;
 pub(crate) mod inland_store;
+
+// Loom-only test surface for the EM2′ claim protocol; the only public path to
+// `entity_reservoir::loom_exports`, which a `pub(crate)` module cannot give.
+#[cfg(loom)]
+#[doc(hidden)]
+pub use entity_reservoir::loom_exports as reservoir_loom_exports;

@@ -129,6 +129,66 @@ const VB_BENCH_WARMUP: usize = 20;
 #[cfg(windows)]
 const MATERIAL_CAPACITY: usize = 256;
 
+/// Run one piece of ECS work a panic must not unwind past. `stage` names the site.
+///
+/// The windowed host owns eight routes into the ECS, and every one of them reaches the scheduler,
+/// the worker pool and arbitrary user systems. Before this, a panic on any of them unwound through
+/// `run_windowed`'s own frame — running `WindowHost`'s and the renderer's `Drop` (device-idle
+/// waits, swapchain teardown) from the state a system had just corrupted — or, on the startup
+/// route, unwound with the window already up. The catch stays INSIDE the frame that owns those
+/// locals, deliberately: hoisting it to `main` is what would tear the device down.
+///
+/// Not a process-wide panic hook, for the opposite reason: a hook fires at the panic ORIGIN and
+/// would kill panics the engine legitimately recovers from — `CommandQueue::apply`'s recovery, the
+/// pool's scope capture, the worker backstop — destroying the propagate-to-owner semantics the
+/// rest of the engine is built on. The existing chained crash-file hook stays as it is: it
+/// RECORDS, and does not decide.
+///
+/// `#[cfg(windows)]`, like every function it serves: `run_windowed`'s body and `frame_loop` are
+/// Windows-only, and `-D warnings` refuses a helper nothing calls.
+#[cfg(windows)]
+#[inline]
+fn guarded<R>(stage: &'static str, f: impl FnOnce() -> R) -> R {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(p) => crate::diag::report_fatal_ecs_panic(stage, &*p),
+    }
+}
+
+/// `app.finish()` behind [`guarded`] — the startup route, which drains every startup system
+/// through the scheduler with the window already up.
+#[cfg(windows)]
+#[inline]
+fn guarded_finish(app: &mut App) {
+    // The `&mut App` `finish` returns for chaining is dropped here: this host does not chain, and
+    // returning it would tie the borrow to the caller for no purpose.
+    guarded("startup", || {
+        app.finish();
+    });
+}
+
+/// `app.update_with_delta(dt)` behind [`guarded`] — the per-frame route.
+#[cfg(windows)]
+#[inline]
+fn guarded_update(app: &mut App, dt: std::time::Duration, stage: &'static str) {
+    guarded(stage, || app.update_with_delta(dt))
+}
+
+/// `app.world_mut().run_system(s)` behind [`guarded`] — the one-shot route, six sites at boot and
+/// one per frame.
+///
+/// The bounds are `EcsMaster::run_system`'s own; they are repeated rather than erased because a
+/// `dyn` seam here would cost a virtual call on a path the frame takes every frame.
+#[cfg(windows)]
+#[inline]
+fn guarded_run_system<F, M, Out>(app: &mut App, stage: &'static str, s: F) -> Out
+where
+    F: boyko_ecs::ecs::core::system::into_system::IntoSystem<(), Out, M>,
+    F::System: boyko_ecs::ecs::core::system::system::System<Out = Out>,
+{
+    guarded(stage, || app.world_mut().run_system(s))
+}
+
 /// The windowed runner body (host plan D6): boot → World residents →
 /// insert-if-absent `AppExit(false)` → `finish()` → frame loop → D2 teardown.
 ///
@@ -635,7 +695,7 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         app.world_mut().insert_resource(AppExit(false));
     }
 
-    app.finish();
+    guarded_finish(app);
 
     // SSAA (AA campaign Stage 3, C1): resolution is a BOOT COMMITMENT — when the host
     // armed the 2× composite extent (`WindowHost::boot`'s device-capability probe), the
@@ -658,7 +718,7 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // inserted before finish) and before the frame loop — makes the gather order-proof
     // and single-site. It sets `SdfEditStaging::dirty` deterministically; the frame
     // loop's first-frame `is_dirty()` block then performs the one-shot upload unchanged.
-    app.world_mut().run_system(collect_sdf_edits);
+    guarded_run_system(app, "sdf-edit-gather", collect_sdf_edits);
 
     // Textured-PBR rung T6c (fix, post-review): build the TEXTURED gbuffer producer
     // pipeline (a 2-set layout needing the bindless texture-array table's
@@ -832,9 +892,9 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // this costs nothing beyond the `staging.is_empty()` check (byte-identical).
     // Textured-PBR T6b adds the texture drain alongside (also empty at boot —
     // dormant until a later rung loads a texture).
-    app.world_mut().run_system(upload_material_assets);
-    app.world_mut().run_system(upload_mesh_assets);
-    app.world_mut().run_system(upload_texture_assets);
+    guarded_run_system(app, "asset-upload", upload_material_assets);
+    guarded_run_system(app, "asset-upload", upload_mesh_assets);
+    guarded_run_system(app, "asset-upload", upload_texture_assets);
 
     // Multi-paradigm render-path plan: under a VisibilityBuffer boot, back-fill a geometry-table
     // slot for every HOST-AUTHORED mesh (`register_mesh`/`cube`/`plane`, which register with the
@@ -843,7 +903,7 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // (`MeshGeometryTableSlot(None)`), so Deferred/Forward/ForwardPlus stay byte-identical; meshes
     // that already hold a real slot (streamed / `register_mesh_vb`) are skipped. Runs after the
     // mesh drain above (streamed meshes present) and before the frame loop's first VB resolve.
-    app.world_mut().run_system(backfill_vb_geometry_slots);
+    guarded_run_system(app, "vb-geometry-backfill", backfill_vb_geometry_slots);
 
     // Asset-system rung A1: boot-seed the material table — hard-size + upload the
     // device SSBO from whatever `finish()` drained into `Assets<Material>` (every
@@ -1236,7 +1296,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // epoch — read before this frame's own submit, matching the fence-gate
         // proof (`retire_deferred_frees`'s doc).
         *app.world_mut().resource_mut::<RenderEpoch>() = RenderEpoch(host.renderer.submission_epoch());
-        app.update_with_delta(dt);
+        guarded_update(app, dt, "frame");
 
         // 3. `AppExit` check — after the frame completes, before the present.
         if app.world().resource::<AppExit>().0 {
@@ -1622,7 +1682,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // never a per-frame path branch on FRAMEGRAPH SHAPE, but this is a plain data-prep step,
         // not a shape change) — a Deferred/Forward boot pays zero cost here.
         if host.resolved_render_path.path == boyko_render::RenderPath::VisibilityBuffer {
-            app.world_mut().run_system(boyko_render::sync_vb_instance_ring_system);
+            guarded_run_system(app, "vb-instance-ring", boyko_render::sync_vb_instance_ring_system);
         }
 
 

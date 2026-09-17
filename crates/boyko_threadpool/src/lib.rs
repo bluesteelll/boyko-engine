@@ -112,7 +112,8 @@ pub use scope::Scope;
 pub use thread_pool::{MAX_WORKERS, PoolInner, ThreadPool, ThreadPoolBuilder, WorkerHandle};
 pub use tls::{
     InSystemRunGuard, WORKER_ID_DISPATCHER, WORKER_ID_UNATTACHED, current_worker_id,
-    current_worker_id_or_dispatcher_lane, is_in_system_run, try_with_active_pool,
+    current_worker_id_or_dispatcher_lane, is_in_system_run, system_run_depth,
+    try_with_active_pool,
 };
 
 /// Miri-only: how many times `ScopeShared::complete_task`'s release probe has

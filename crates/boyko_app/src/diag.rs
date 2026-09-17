@@ -1,5 +1,9 @@
-//! The host's terminal-exit reporters — the three records that must survive a run nobody asked
-//! to log.
+//! The host's terminal-exit reporters — the records that must survive a run nobody asked to log.
+//!
+//! Four of them today: `E3002` (a boot stage failed), `E3003` (a terminal device error),
+//! `E3004` (no windowing arm on this platform) and `E3011` (a panic escaped an ECS entry point
+//! the windowed host owns). The argument below was written for the first three and the fourth is
+//! an instance of it, not an exception — its next statement is `std::process::abort()`.
 //!
 //! # Why this module exists at all, measured rather than assumed *(L8b)*
 //!
@@ -183,6 +187,71 @@ pub(crate) fn report_windowing_unsupported() {
     if flush() == FlushResult::NoConsumer {
         eprintln!("boyko-E3004: windowing is not implemented for this platform - exiting");
     }
+}
+
+/// Report that a panic escaped an ECS entry point this host owns — `boyko-E3011`. Terminal.
+///
+/// `stage` names which entry point (`"startup"`, `"frame"`, `"asset-upload"`, …), so eight
+/// distinguishable sites do not arrive as one format literal — the same argument
+/// `report_boot_stage_failed` makes for its three.
+///
+/// # Why this ends the process here rather than unwinding on
+///
+/// The catch that calls this sits INSIDE `run_windowed`'s frame, where `WindowHost` and the
+/// renderer are locals. Letting the unwind continue would run their `Drop` — device-idle waits,
+/// swapchain teardown — from the state a system just corrupted, which is precisely what every
+/// shipped crash handler argues against. So the process stops here, with the device deliberately
+/// not destroyed.
+///
+/// # Why `abort()` and not `exit(101)`
+///
+/// `ExitProcess` terminates every other thread and then runs `DLL_PROCESS_DETACH` for each loaded
+/// DLL; with the Vulkan loader and the ICD holding a live device and a killed render thread
+/// holding a loader lock, detach is a documented deadlock class — a process that never exits,
+/// window ghosted, no CPU. That is defect A6's own observation moved from the scheduler to process
+/// exit, and a termination mechanism for a hang defect must not be able to hang. `abort` runs no
+/// `atexit` handler, no TLS destructor and no DLL detach, and it is the mechanism this engine
+/// already blessed for the same question one crate over (`abort_on_task_panic`), after the same
+/// flush-then-terminate order.
+///
+/// On an interactive desktop Windows may show an error-reporting dialog before the process ends;
+/// that is expected and is not suppressed — suppressing it (`SEM_NOGPFAULTERRORBOX`) also
+/// suppresses the crash dump.
+///
+/// `#[cfg(windows)]` because its only caller is `runner.rs`'s `guarded`, which is itself
+/// Windows-only, and `-D warnings` refuses a function nothing calls — the same gate
+/// `report_windowing_unsupported` carries in the opposite direction.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+pub(crate) fn report_fatal_ecs_panic(stage: &str, payload: &(dyn core::any::Any + Send)) -> ! {
+    // The two payload shapes `panic!`/`panic_any` produce for a string. Anything else keeps the
+    // stage name and the code, which is still more than an unadorned abort would say.
+    let msg: &str = payload
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("<non-string panic payload>");
+    let rendered = line(format_args!("{msg}"));
+    let m = rendered.as_str();
+    boyko_log::error!(
+        boyko_log::App,
+        codes::E3011,
+        "a panic escaped the {} ECS entry point ({}) - aborting",
+        stage,
+        m
+    );
+    // BEFORE `abort`, and for the reason the first row of `print_allowlist.txt` states: `abort`
+    // runs no destructor and no sink shutdown, so a record still in its lane ring dies with the
+    // process.
+    if flush() == FlushResult::NoConsumer {
+        // `BOYKO_LOG` unset is the default, and then the record above was never CONSTRUCTED.
+        // The panic's own text was printed by the default hook at the origin; this line is the
+        // decision, and without it the one configuration in which this site fires is the one in
+        // which it says nothing.
+        eprintln!("boyko-E3011: a panic escaped the {stage} ECS entry point ({m}) - aborting");
+    }
+    std::process::abort();
 }
 
 /// The extent/VRAM probe half of `W3005`.
@@ -513,5 +582,120 @@ mod tests {
         assert!(msg.contains("census row"), "the KIND must distinguish the sites: {msg}");
         assert!(msg.contains("D:/out/row.toml"), "the path must be carried: {msg}");
         assert!(msg.contains("NotFound"), "the io error must be carried: {msg}");
+    }
+
+    /// P8 (defect A6) — a panic that reaches the windowed host's frame boundary ends the process,
+    /// visibly and non-zero, and does so promptly.
+    ///
+    /// Parent/child: the child re-executes this test binary, catches a panic exactly as `runner.rs`'s
+    /// `guarded` does, and hands the payload to [`report_fatal_ecs_panic`], which never returns. It
+    /// boots no host and touches no device, so this gates the reporter's MECHANISM and not the
+    /// shipped path with a live device (the design lists that as an ungated claim).
+    ///
+    /// The child silences the panic hook before its own panic, so the payload's text can reach
+    /// stderr ONLY through the reporter; and it runs with `BOYKO_LOG` removed, so the record is never
+    /// constructed and the `NoConsumer` fallback line is the observable — the default configuration,
+    /// which is the one this fallback exists for.
+    ///
+    /// Red: the child is still alive at the deadline (the termination mechanism hung — the class
+    /// `abort()` was chosen over `exit` to avoid); the child exits successfully (M11: `abort()` ->
+    /// `exit(0)`); no `boyko-E3011` line on stderr (M12: the `NoConsumer` fallback deleted); a line
+    /// that does not carry the stage or the payload text; or a child that never reached the reporter.
+    ///
+    /// The observed exit status is printed (`[P8] ...`) for `docs/diagnostics/E3011.md`, which
+    /// records it from a run rather than from a specification; the assertion is only "non-zero".
+    #[cfg(windows)]
+    #[test]
+    fn a_frame_panic_ends_the_process_visibly() {
+        use std::io::{Read, Write};
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        const CHILD_ENV: &str = "BOYKO_A6_P8_CHILD";
+        const TEST_NAME: &str = "diag::tests::a_frame_panic_ends_the_process_visibly";
+        const STAGE: &str = "frame";
+        const MESSAGE: &str = "A6 P8 system panic at the frame boundary";
+        const DEADLINE: Duration = Duration::from_secs(20);
+
+        if std::env::var(CHILD_ENV).as_deref() == Ok("1") {
+            // ── CHILD ──
+            std::panic::set_hook(Box::new(|_| {}));
+            let caught = std::panic::catch_unwind(|| {
+                panic!("{MESSAGE}");
+            });
+            let payload = match caught {
+                Ok(()) => unreachable!("the closure always panics"),
+                Err(payload) => payload,
+            };
+            println!("CHILD-REPORTING");
+            std::io::stdout().flush().expect("test setup: flush");
+            report_fatal_ecs_panic(STAGE, &*payload);
+        }
+
+        // ── PARENT ──
+        let exe = std::env::current_exe().expect("test setup: this test binary's own path");
+        let mut child = Command::new(exe)
+            .args(["--exact", TEST_NAME, "--nocapture", "--test-threads", "1"])
+            .env(CHILD_ENV, "1")
+            .env_remove("BOYKO_LOG")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("test setup: re-exec of this test binary");
+        let start = Instant::now();
+        let status = loop {
+            match child.try_wait().expect("test setup: poll the child") {
+                Some(status) => break Some(status),
+                None if start.elapsed() >= DEADLINE => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                None => std::thread::sleep(Duration::from_millis(5)),
+            }
+        };
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        if let Some(mut s) = child.stdout.take() {
+            let _ = s.read_to_string(&mut stdout);
+        }
+        if let Some(mut s) = child.stderr.take() {
+            let _ = s.read_to_string(&mut stderr);
+        }
+
+        let Some(status) = status else {
+            panic!(
+                "WATCHDOG: the child was still alive {DEADLINE:?} after reporting a frame panic -- \
+                 the termination mechanism HUNG.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+        };
+        println!("[P8] child exit status = {status:?}, code() = {:?}", status.code());
+        assert!(
+            stdout.contains("running 1 test"),
+            "the child must have RUN this test rather than filtering it away -- stdout:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("CHILD-REPORTING"),
+            "the child never reached the reporter -- stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            !status.success() && status.code() != Some(0),
+            "the reporter must END the process with a failure status; it exited with {status:?} \
+             -- stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        let expected_prefix = format!("boyko-E{:04}", codes::E3011.number());
+        let line = stderr.lines().find(|l| l.contains(&expected_prefix)).unwrap_or_else(|| {
+            panic!(
+                "no `{expected_prefix}` line on the child's stderr: with `BOYKO_LOG` unset the record \
+                 is never constructed, so the `NoConsumer` fallback is the ONLY trace the decision \
+                 leaves -- stderr:\n{stderr}"
+            )
+        });
+        assert!(
+            line.starts_with("boyko-E3011:"),
+            "the fallback line must lead with the code the registry assigns: {line}"
+        );
+        assert!(line.contains(STAGE), "the fallback line must name the stage: {line}");
+        assert!(line.contains(MESSAGE), "the fallback line must carry the payload's text: {line}");
     }
 }
