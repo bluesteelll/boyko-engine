@@ -218,7 +218,7 @@ fn wait_for(flag: &AtomicBool) {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "instrument: reads a `#[global_allocator]` that is `cfg(not(miri))` because Miri interprets a custom global allocator and std's Windows `System` then frees an over-aligned block through a pointer Tree Borrows rejects (`block_allocation_receipts.rs`'s header carries the measurement); under Miri every counter stays 0 and `refuse_under_miri()` panics with that cause instead. Runs natively."
+    ignore = "miri-unsupported: instrument: reads a `#[global_allocator]` that is `cfg(not(miri))` because Miri interprets a custom global allocator and std's Windows `System` then frees an over-aligned block through a pointer Tree Borrows rejects (`block_allocation_receipts.rs`'s header carries the measurement); under Miri every counter stays 0 and `refuse_under_miri()` panics with that cause instead. Runs natively."
 )]
 fn a_scope_whose_task_panicked_returns_every_chunk() {
     refuse_under_miri();

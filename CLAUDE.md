@@ -53,9 +53,15 @@ measurement, not for tidiness.**
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **280 sites (172 unconditional +
-108 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-17 on this line.** Every one of them now
-states its requirement at the site, and [tests/ignore_reasons_census.rs](tests/ignore_reasons_census.rs)
+The four commands above run **none** of the `#[ignore]`d tests — **311 sites (172 unconditional +
+139 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-18 on this line.** The move from
+2026-09-17's 280 is two things and not one: the A6 lane's three new test files brought **32**
+`cfg_attr` sites (`a6_schedule_panic_propagation.rs` 17, `a6_panic_propagation.rs` 14,
+`a6_panicked_scope_chunk_receipts.rs` 1, all `cfg_attr(miri, …)`), and the census stopped counting
+**two phantoms** — lines that BEGIN inside a `\`-continued string in a `panic!` and merely start
+with `#[cfg_attr(`; one of them was inside the 280, the other inside the 313 this merge first
+printed. Every one of them now states its requirement at the site, and
+[tests/ignore_reasons_census.rs](tests/ignore_reasons_census.rs)
 fails the build if a new one does not — a bare `#[ignore]` is the **third** way to make a check
 disappear, after `unsafe` and `#[allow(clippy::disallowed_types)]`, and it now carries a written
 rationale like the other two.
@@ -88,12 +94,14 @@ non-default cargo feature and are not even *compiled* otherwise (`--features hwr
 and vanish on Linux. There is no single command — each binary has its own env-var protocol in its
 module header (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
-**Leg: Miri.** `cargo +nightly miri test` already carries **107** of the ignores (measured
-2026-09-17 on this line) — the **106** `cfg_attr` sites whose cfg is `miri` (103) or `any(miri, …)`
-(3), which run *natively* and are skipped only under Miri, plus `miri_fixed_loop`'s one plain
-ignore. The two remaining `cfg_attr` sites are not Miri's: `profiling/reduce.rs`'s
+**Leg: Miri.** `cargo +nightly miri test` already carries **138** of the ignores (measured
+2026-09-18 on this line) — the **137** `cfg_attr` sites whose cfg is `miri` (134) or
+`any(miri, debug_assertions)` (3), which run *natively* and are skipped only under Miri, plus
+`miri_fixed_loop`'s one plain ignore. All 32 of the sites added since 2026-09-17 landed here, which
+is why this figure moved and the two above it did not. The two remaining `cfg_attr` sites are not
+Miri's: `profiling/reduce.rs`'s
 `not(debug_assertions)` and `tb_neg_m2w_block_reference.rs`'s `not(all(miri, feature = …))`. None of
-the 107 belong to either leg above.
+the 138 belong to either leg above.
 
 **At least 28 ignored tests belong to no leg at all**, and must not be swept into one. Six were
 enumerated when this section was written: three *generators* that assert nothing and emit source to
@@ -128,9 +136,12 @@ what a prose reason answers. **Making it mechanical takes a reason PREFIX from a
 checked by the same census: `#[ignore = "<class>: <prose>"]` with `class` one of `gpu`,
 `gpu-windowed`, `gpu-cap` (RT / ray-query / `VK_KHR_pipeline_executable_properties`), `feature`,
 `solo` (device-free, needs `--test-threads=1`), `slow` (device-free, wall-clock budget),
-`miri-slow`, `generator`, `deferred`, `flaky`. **The claim that the tree maps onto it "exactly" was
-true of a 143-site tree and is not true now:** that mapping (135 `gpu*`/`feature`, 1 `solo`, 1
-`miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky`) sums to 143 against **172** plain sites today.
+`miri-slow`, `miri-unsupported` (Miri cannot execute what the test needs AT ALL — a child process,
+a custom `#[global_allocator]` — where `miri-slow` means it would finish, given time; 6 sites, the
+A6 lane's, all `cfg_attr(miri, …)`), `generator`, `deferred`, `flaky`. **The claim that the tree
+maps onto it "exactly" was true of a 143-site tree and is not true now:** that mapping (135
+`gpu*`/`feature`, 1 `solo`, 1 `miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky`) sums to 143
+against **172** plain sites today.
 The migration has started at the sites, not in this list: **25 of the 172 plain reasons already
 carry a prefix** — 21 `deferred:`, 2 `gpu-windowed:`, 1 `slow:`, 1 `generator:` (measured
 2026-09-17; at HEAD 17 / 2 / 1 / 0, so the A4/A7 lane's five are the newest sample) — and the other

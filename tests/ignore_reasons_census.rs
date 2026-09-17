@@ -53,13 +53,35 @@
 //!
 //! # What it cannot claim
 //!
-//! It reads lines, not tokens. A `#[ignore]` written at the start of a line **inside a `/* … */`
-//! block comment** would be reported as live code. That shape does not occur — the whole tree
-//! contains one line-initial `/*`, measured — and every mention of `#[ignore]` outside attribute
-//! position is a `//` comment, also measured. The trade is deliberate: a half-correct lexer that
-//! is wrong in a way nobody predicted is worse than a line reader whose one blind spot is written
-//! down here, and the failure mode is a *false red* naming a specific line, which takes seconds to
-//! diagnose — not a false green.
+//! It reads lines, not tokens — with one exception a measurement forced on it.
+//! [`lines_beginning_in_a_string`] walks each file once and records, per line, whether that line
+//! BEGINS inside a string literal; those lines are skipped before classification.
+//!
+//! **The argument that stood here instead was false.** It claimed that every mention of
+//! `#[ignore]` outside attribute position is a `//` comment, and the classifier said the same of
+//! string literals quoting an attribute — that they "sit on lines that start with `(`/`\"`" and
+//! are therefore excluded by the `#[` prefix test. Two live lines disprove both:
+//! `crates/boyko_threadpool/tests/a6_panicked_scope_chunk_receipts.rs:119` and
+//! `crates/boyko_threadpool/tests/block_allocation_receipts.rs:459` are continuation lines of a
+//! `\`-continued reason string inside a `panic!`, and their first non-whitespace characters are
+//! `#[cfg_attr(`. Both were counted as real sites, so the published number was **2 too high**. The
+//! gate stayed green only by luck of shape: a phantom that reads as *reasoned* is merely a wrong
+//! count, while one shaped like a bare `#[ignore]` is a FALSE RED naming a line inside a string
+//! literal — a failure whose stated cause is not where the reader must look.
+//!
+//! The scanner therefore tracks what it takes to answer that one question honestly: escapable,
+//! raw (any hash count) and `b`/`c`-prefixed strings, char literals (`'"'` must not open one, and
+//! a lifetime `&'a T` must not read as an unterminated one), `//` comments, and `/* … */`
+//! comments, which nest in Rust.
+//!
+//! What is still outside its field of view is the block comment: a `#[ignore]` at the start of a
+//! line inside `/* … */` is reported as live code. The scanner does know it is in a comment there
+//! — it must, or a quote inside one would desynchronise the string tracking — and the skip is
+//! deliberately not extended to it, because that shape is not this tree's: the whole tree contains
+//! one line-initial `/*` (measured; inside a raw-string fixture in `boyko_log`'s
+//! `code_registry.rs`), commenting an attribute out leaves a `//` at the line start, and the
+//! failure mode there is a *false red* naming a specific line, which takes seconds to diagnose —
+//! not a false green.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -93,15 +115,17 @@ const SKIP_DIRS: &[&str] = &["target", ".git", ".claude", "graphify-out", "book"
 /// stopped walking, not to track the count.
 const MIN_FILES: usize = 800;
 
-/// Floor on ignore sites found. The tree held 280 (172 plain + 108 `cfg_attr`) when measured on
-/// 2026-09-17; this is well below it and exists only to catch a detector that stopped detecting.
+/// Floor on ignore sites found. The tree held 311 (172 plain + 139 `cfg_attr`) when measured on
+/// 2026-09-18; this is well below it and exists only to catch a detector that stopped detecting.
 ///
 /// The number above is a snapshot and only ever grows — do NOT read it as the current count, and
 /// do not tune this floor to it. `every_ignore_attribute_states_a_reason` prints the live figure on
 /// every run (`-- --nocapture`), which is the only figure a reader should quote. Because this is a
 /// floor, a prose count that drifts upward — here or in `CLAUDE.md` — stays green forever; both
-/// have already done so once (232 was right at `d552be05` and wrong 48 sites later, in the same
-/// lane that edited this file).
+/// have already done so twice (232 was right at `d552be05` and wrong 48 sites later, in the same
+/// lane that edited this file; the 280 this line carried before was what the gate printed on
+/// 2026-09-17 — one of them a phantom the string scanner now rejects — and it was 31 short by the
+/// time the A6 lane's three new test files were merged in).
 const MIN_SITES: usize = 120;
 
 /// How far past the attribute to look for the `fn` it decorates. Real sites are 1–6 lines away
@@ -279,9 +303,10 @@ fn classify(line: &str) -> (IgnoreForm, IgnoreSpelling) {
         return (IgnoreForm::NotAnIgnore, IgnoreSpelling::Plain);
     }
 
-    // Only attribute text is a candidate: string literals QUOTING an attribute (this file's own
-    // classifier table is full of them) sit on lines that start with `(`/`"` and are excluded
-    // here, exactly as prose is excluded above.
+    // Only attribute text is a candidate. This test is NOT what excludes string literals quoting
+    // an attribute: a `\`-continued reason string inside a `panic!` puts `#[cfg_attr(` at the
+    // start of its continuation line and walks straight through here — two live ones did, and
+    // were counted. `lines_beginning_in_a_string` is what excludes them, before this is reached.
     if !trimmed.starts_with("#[") {
         return (IgnoreForm::NotAnIgnore, IgnoreSpelling::Plain);
     }
@@ -323,6 +348,162 @@ fn resolve_test_fn(lines: &[&str], attr_index: usize) -> Option<String> {
     None
 }
 
+/// The lexer state the per-line scanner carries across a newline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scan {
+    /// Ordinary code.
+    Code,
+    /// Inside `// …`, which ends at the newline.
+    LineComment,
+    /// Inside `/* … */`, which NESTS in Rust; the payload is the nesting depth.
+    BlockComment(u32),
+    /// Inside a string literal. `Some(n)` is a raw string closed by `"` followed by `n` `#`;
+    /// `None` is an escapable one (`"…"`, `b"…"`, `c"…"`), where `\"` does not close it.
+    Str(Option<usize>),
+}
+
+/// A prefixed string literal opening at `chars[i]` — `b"`, `c"`, `r"`, `r#…"`, `br#…"`, `cr#…"` —
+/// as `(characters consumed, hash count if raw)`.
+///
+/// The identifier-boundary test is load-bearing twice: the `r` of `for` must not open a literal,
+/// and a raw identifier (`r#type`, whose `#` run is followed by a letter rather than a quote) is
+/// rejected by the quote test below.
+fn string_open_at(chars: &[char], i: usize) -> Option<(usize, Option<usize>)> {
+    if i > 0 && is_ident_char(chars[i - 1]) {
+        return None;
+    }
+    let mut j = i;
+    if matches!(chars.get(j), Some('b' | 'c')) {
+        j += 1;
+    }
+    let raw = chars.get(j) == Some(&'r');
+    let mut hashes = 0usize;
+    if raw {
+        j += 1;
+        while chars.get(j) == Some(&'#') {
+            hashes += 1;
+            j += 1;
+        }
+    }
+    if chars.get(j) != Some(&'"') {
+        return None;
+    }
+    Some((j + 1 - i, if raw { Some(hashes) } else { None }))
+}
+
+/// How many characters the char literal at `chars[i]` occupies, or `1` if that `'` opens a
+/// lifetime or a loop label instead.
+///
+/// `'"'` is the case that matters here: read as a lifetime, its quote would open a string literal
+/// that never closes, and every line after it in the file would be reported as living inside one.
+fn char_literal_len(chars: &[char], i: usize) -> usize {
+    match chars.get(i + 1) {
+        // `'\''`, `'\\'`, `'\u{10FFFF}'` — the escaped character sits at `i + 2`, so the earliest
+        // closing quote is at `i + 3`; the cap covers the longest escape Rust spells.
+        Some('\\') => {
+            let limit = (i + 12).min(chars.len());
+            for (offset, c) in chars.iter().enumerate().take(limit).skip(i + 3) {
+                if *c == '\'' {
+                    return offset + 1 - i;
+                }
+            }
+            1
+        }
+        // `'x'`, including `'"'` and any multi-byte char.
+        Some(_) if chars.get(i + 2) == Some(&'\'') => 3,
+        // `&'a T`, `'outer: loop` — not a literal at all.
+        _ => 1,
+    }
+}
+
+/// For every line of `text`, whether that line BEGINS inside a string literal.
+///
+/// The classifier reads line starts, so this one bit is all it needs from a lexer — but producing
+/// it honestly takes a real scan: a quote inside a `//` comment, inside a `/* … */` comment, or
+/// inside a raw string's body opens nothing. Index `i` of the result is the flag for line `i` of
+/// `text.lines()`; a file ending in a newline yields one extra trailing entry, which no caller
+/// indexes.
+fn lines_beginning_in_a_string(text: &str) -> Vec<bool> {
+    let chars: Vec<char> = text.chars().collect();
+    // The first line begins in code by definition.
+    let mut flags = vec![false];
+    let mut state = Scan::Code;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\n' {
+            if state == Scan::LineComment {
+                state = Scan::Code;
+            }
+            flags.push(matches!(state, Scan::Str(_)));
+            i += 1;
+            continue;
+        }
+        match state {
+            Scan::LineComment => i += 1,
+            Scan::BlockComment(depth) => {
+                if c == '/' && chars.get(i + 1) == Some(&'*') {
+                    state = Scan::BlockComment(depth + 1);
+                    i += 2;
+                } else if c == '*' && chars.get(i + 1) == Some(&'/') {
+                    state = if depth == 1 { Scan::Code } else { Scan::BlockComment(depth - 1) };
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            Scan::Str(Some(hashes)) => {
+                let closes = c == '"'
+                    && chars.len() >= i + 1 + hashes
+                    && chars[i + 1..i + 1 + hashes].iter().all(|h| *h == '#');
+                if closes {
+                    state = Scan::Code;
+                    i += 1 + hashes;
+                } else {
+                    i += 1;
+                }
+            }
+            Scan::Str(None) => {
+                if c == '\\' {
+                    // A `\`-continued literal escapes the NEWLINE itself, and the newline arm
+                    // above must still see it, or every following line's flag shifts by one —
+                    // which is precisely the shape at the two lines this scanner exists for.
+                    i += if chars.get(i + 1) == Some(&'\n') { 1 } else { 2 };
+                } else {
+                    if c == '"' {
+                        state = Scan::Code;
+                    }
+                    i += 1;
+                }
+            }
+            Scan::Code => match c {
+                '/' if chars.get(i + 1) == Some(&'/') => {
+                    state = Scan::LineComment;
+                    i += 2;
+                }
+                '/' if chars.get(i + 1) == Some(&'*') => {
+                    state = Scan::BlockComment(1);
+                    i += 2;
+                }
+                '"' => {
+                    state = Scan::Str(None);
+                    i += 1;
+                }
+                '\'' => i += char_literal_len(&chars, i),
+                'r' | 'b' | 'c' => match string_open_at(&chars, i) {
+                    Some((len, hashes)) => {
+                        state = Scan::Str(hashes);
+                        i += len;
+                    }
+                    None => i += 1,
+                },
+                _ => i += 1,
+            },
+        }
+    }
+    flags
+}
+
 /// Every `.rs` file under `dir`, repo-relative, `/`-separated.
 fn collect_rs(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -341,6 +522,40 @@ fn collect_rs(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Every ignore site in one file's text, in line order.
+///
+/// Split out of [`census`] so a fixture can be run through the SAME scanner, join and classifier
+/// the walk uses, rather than through a re-implementation of them inside a test — the shape that
+/// lets an instrument's test pass while the instrument is wrong.
+fn sites_in_text(file: &str, text: &str) -> Vec<Site> {
+    let lines: Vec<&str> = text.lines().collect();
+    let begins_in_string = lines_beginning_in_a_string(text);
+    let mut sites = Vec::new();
+    for index in 0..lines.len() {
+        // A line whose first non-whitespace characters are `#[cfg_attr(` may be the continuation
+        // of a `\`-continued reason string inside a `panic!` rather than an attribute; two live
+        // ones are, and were counted until this skip existed.
+        if begins_in_string.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        // Continuation lines of a multi-line attribute never begin with `#[`, so joining at
+        // every opener double-counts nothing.
+        let joined = joined_attribute(&lines, index);
+        let (form, spelling) = classify(&joined);
+        if form == IgnoreForm::NotAnIgnore {
+            continue;
+        }
+        sites.push(Site {
+            file: file.to_string(),
+            line: index + 1,
+            test_fn: resolve_test_fn(&lines, index),
+            form,
+            spelling,
+        });
+    }
+    sites
+}
+
 /// Every ignore site in the tree, plus the number of `.rs` files the walk visited.
 fn census() -> (Vec<Site>, usize) {
     let root = repo_root();
@@ -350,23 +565,7 @@ fn census() -> (Vec<Site>, usize) {
     let mut sites = Vec::new();
     for rel in &files {
         let Ok(text) = std::fs::read_to_string(root.join(rel)) else { continue };
-        let lines: Vec<&str> = text.lines().collect();
-        for index in 0..lines.len() {
-            // Continuation lines of a multi-line attribute never begin with `#[`, so joining at
-            // every opener double-counts nothing.
-            let joined = joined_attribute(&lines, index);
-            let (form, spelling) = classify(&joined);
-            if form == IgnoreForm::NotAnIgnore {
-                continue;
-            }
-            sites.push(Site {
-                file: rel.to_string_lossy().replace('\\', "/"),
-                line: index + 1,
-                test_fn: resolve_test_fn(&lines, index),
-                form,
-                spelling,
-            });
-        }
+        sites.extend(sites_in_text(&rel.to_string_lossy().replace('\\', "/"), &text));
     }
     (sites, files.len())
 }
@@ -603,6 +802,144 @@ fn the_detector_classifies_every_shape_it_will_meet() {
         if *want_form != NotAnIgnore {
             assert_eq!(spelling, *want_spelling, "classify({line:?}) read the wrong spelling");
         }
+    }
+}
+
+/// The scanner's own positive control: the line-start states it must tell apart, each fixture run
+/// through the shipped [`sites_in_text`] rather than through a test-local copy of it.
+///
+/// Every row is a shape this tree actually contains, and every row DISCRIMINATES: remove the piece
+/// of the scanner it names and the row reds, either by losing a real site or by reporting a
+/// phantom one.
+#[test]
+fn a_line_that_begins_inside_a_string_literal_is_not_a_site() {
+    // (what the row pins, the fixture's lines, the 1-indexed lines that must be reported).
+    let cases: &[(&str, &[&str], &[usize])] = &[
+        (
+            "a `\\`-continued reason string whose continuation line starts with `#[cfg_attr(`",
+            &[
+                "#[cfg(miri)]",
+                "fn refuse_under_miri() {",
+                "    panic!(",
+                "        \"every counter this test reads is frozen at zero; a test that needs \\",
+                "         #[cfg_attr(miri, ignore = ...)]\"",
+                "    );",
+                "}",
+            ][..],
+            &[][..],
+        ),
+        (
+            "the line AFTER a multi-line string literal ends is ordinary code again",
+            &[
+                "static REASON: &str = \"first line of the literal",
+                "#[ignore] — quoted, and inside the literal",
+                "last line of the literal\";",
+                "#[cfg_attr(miri, ignore = \"real: the literal closed on the line above\")]",
+                "fn t() {}",
+            ][..],
+            &[4][..],
+        ),
+        (
+            "a NESTED block comment holding a lone quote leaves the scanner in code afterwards",
+            &[
+                "/* outer /* nested */ still the outer comment, with a lone \" quote",
+                "   and the outer comment ends here */",
+                "#[cfg_attr(miri, ignore = \"real: after the comment\")]",
+                "fn t() {}",
+            ][..],
+            &[3][..],
+        ),
+        (
+            "a raw string's body may hold an odd number of quotes without ending it",
+            &[
+                "const SNIPPET: &str = r##\"",
+                "#[ignore = \"quoted inside a raw string\"]",
+                "a lone \" quote ends nothing here",
+                "\"##;",
+                "#[cfg_attr(miri, ignore = \"real: after the raw string\")]",
+                "fn t() {}",
+            ][..],
+            &[5][..],
+        ),
+        (
+            "a `'\"'` char literal opens no string, and `&'a T` is no unterminated one",
+            &[
+                "fn quote<'a>(s: &'a str) -> char {",
+                "    let _ = s;",
+                "    '\"'",
+                "}",
+                "#[ignore = \"solo: after a quote char literal\"]",
+                "fn t() {}",
+            ][..],
+            &[5][..],
+        ),
+        (
+            "`br#\"…\"#` and `c\"…\\\"…\"` end where their own rules say, not at the first quote",
+            &[
+                "const RAW_BYTES: &[u8] = br#\"a byte raw string with a \" inside\"#;",
+                "const C_STR: &std::ffi::CStr = c\"a c-string with a \\\" escape\";",
+                "#[cfg_attr(miri, ignore = \"real: after both literals\")]",
+                "fn t() {}",
+            ][..],
+            &[3][..],
+        ),
+    ];
+
+    for (what, lines, want) in cases {
+        let src = lines.join("\n");
+        let got: Vec<usize> = sites_in_text("fixture.rs", &src).iter().map(|s| s.line).collect();
+        assert_eq!(
+            got.as_slice(),
+            *want,
+            "the scanner read the wrong line starts for the case {what:?}; fixture:\n{src}"
+        );
+    }
+}
+
+/// The regression the scanner exists for, pinned at the two live lines that produced it.
+///
+/// A count is the only thing this gate publishes, so the two lines that made it wrong are named
+/// here rather than left to the fixtures: fixtures prove the mechanism, and this proves the tree.
+#[test]
+fn the_two_continuation_lines_inside_panic_strings_are_not_counted() {
+    // (file, 1-indexed continuation line whose first characters are `#[cfg_attr(`).
+    const PHANTOMS: &[(&str, usize)] = &[
+        ("crates/boyko_threadpool/tests/a6_panicked_scope_chunk_receipts.rs", 119),
+        ("crates/boyko_threadpool/tests/block_allocation_receipts.rs", 459),
+    ];
+
+    let root = repo_root();
+    for (rel, line) in PHANTOMS {
+        let text = std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|e| panic!("invariant: the census walks {rel}, which must exist: {e}"));
+        let lines: Vec<&str> = text.lines().collect();
+        let raw = lines
+            .get(line - 1)
+            .unwrap_or_else(|| panic!("{rel} is shorter than {line} lines; re-point this row"));
+
+        // Anti-vacuity, and it is the whole weight of this test: without it the row passes the
+        // day the phantom moves or the file is reformatted, reporting the scanner as working when
+        // nothing was scanned. The line must STILL read as an attribute to the classifier.
+        assert_ne!(
+            classify(raw).0,
+            IgnoreForm::NotAnIgnore,
+            "{rel}:{line} no longer looks like an attribute to `classify`, so this row proves \
+             nothing about the scanner — re-point it at the continuation line (search the file for \
+             `must carry`) or delete it"
+        );
+
+        let sites = sites_in_text(rel, &text);
+        assert!(
+            !sites.iter().any(|s| s.line == *line),
+            "{rel}:{line} is a continuation line of a `\\`-continued string inside `panic!`, and \
+             the census counted it as a real ignore site — the published total is high by one per \
+             line like it"
+        );
+        assert!(
+            !sites.is_empty(),
+            "{rel} carries real ignore sites and the census found none: the scanner skipped the \
+             whole file, which would hide sites rather than phantoms"
+        );
     }
 }
 

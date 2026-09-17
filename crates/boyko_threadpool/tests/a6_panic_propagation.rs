@@ -519,7 +519,7 @@ const DETACHED_MESSAGE: &str = "A6 detached task panic";
 /// reaching stderr (a silent death) or without the `E0201` abort line (an unexplained death).
 #[cfg_attr(
     miri,
-    ignore = "gpu-free child process: re-executes this test binary, which Miri does not support. Runs natively."
+    ignore = "miri-unsupported: gpu-free child process: re-executes this test binary, which Miri does not support. Runs natively."
 )]
 #[test]
 fn detached_spawn_panic_does_not_block_pool_shutdown() {
@@ -608,7 +608,7 @@ const DOUBLE_TEST: &str = "owner_and_task_panicking_together_resume_on_owner_wit
 /// from `install` without any panic.
 #[cfg_attr(
     miri,
-    ignore = "gpu-free child process: re-executes this test binary, which Miri does not support. Runs natively."
+    ignore = "miri-unsupported: gpu-free child process: re-executes this test binary, which Miri does not support. Runs natively."
 )]
 #[test]
 fn owner_and_task_panicking_together_resume_on_owner_without_abort() {
@@ -888,7 +888,7 @@ fn assert_cleanup_stage(run: &ChildRun, label: &str, message_part: &str) {
 /// reason is missing; the later wave does not complete; or the child exits non-zero.
 #[cfg_attr(
     miri,
-    ignore = "gpu-free child process: re-executes this test binary, which Miri does not support. Runs natively."
+    ignore = "miri-unsupported: gpu-free child process: re-executes this test binary, which Miri does not support. Runs natively."
 )]
 #[test]
 fn a_payload_that_panics_on_drop_does_not_block_the_scope() {
@@ -1187,7 +1187,7 @@ fn assert_d3_child(run: &ChildRun, scenario: &str, on_worker: bool, survived: &[
 /// the `boyko-E0201` line.
 #[cfg_attr(
     miri,
-    ignore = "gpu-free child process: re-executes this test binary, which Miri does not support. Runs natively."
+    ignore = "miri-unsupported: gpu-free child process: re-executes this test binary, which Miri does not support. Runs natively."
 )]
 #[test]
 fn a_detached_task_whose_payload_panics_on_drop_still_aborts() {
@@ -1347,7 +1347,7 @@ fn w1_child() {
 /// 0.
 #[cfg_attr(
     miri,
-    ignore = "child process: re-executes this test binary, which Miri does not support. Runs natively."
+    ignore = "miri-unsupported: child process: re-executes this test binary, which Miri does not support. Runs natively."
 )]
 #[test]
 fn a_scope_closed_during_another_scopes_unwind_still_resumes_its_task_panic() {
