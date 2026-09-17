@@ -155,7 +155,7 @@ fn find_dxc() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    if Command::new(bare).arg("--version").output().is_ok() {
+    if Command::new(bare).arg("--version").output_within(DXC_DEADLINE).is_ok() {
         return Some(PathBuf::from(bare));
     }
     None
@@ -232,7 +232,7 @@ fn git_show_shader(rev: &str, name: &str) -> PreSource {
 /// Panics on a non-zero exit: `dxc` was located, and a source that fails to PREPROCESS is a real
 /// defect, not a host difference to skip over.
 fn preprocess(dxc: &Path, shaders_dir: &Path, src_path: &Path, defines: &[&str], out_tag: &str) -> String {
-    let out_path = std::env::temp_dir().join(format!("{out_tag}.p.hlsl"));
+    let out_path = child_guard::scratch_path(&format!("{out_tag}.p.hlsl"));
     let mut cmd = Command::new(dxc);
     cmd.args(["-P", "-spirv", "-T", "cs_6_0", "-E", "main", "-fspv-target-env=vulkan1.3", "-I"]);
     cmd.arg(shaders_dir);
@@ -240,7 +240,7 @@ fn preprocess(dxc: &Path, shaders_dir: &Path, src_path: &Path, defines: &[&str],
         cmd.args(["-D", d]);
     }
     cmd.arg(src_path).arg("-Fi").arg(&out_path);
-    let out = cmd.output().expect("invariant: dxc was located and must run");
+    let out = cmd.output_within(DXC_DEADLINE).expect("invariant: dxc was located and must run");
     assert!(
         out.status.success(),
         "dxc -P failed on {} {defines:?}: {}",
@@ -268,15 +268,15 @@ fn normalize_preprocessed(text: &str) -> String {
     out
 }
 
-/// Materialises `contents` into the process temp directory ([`std::env::temp_dir`]) as `name`, so
-/// both sides of every comparison are preprocessed the same way — from a temp path, resolving
+/// Materialises `contents` as a private temp file ending in `name` (`child_guard::scratch_path`),
+/// so both sides of every comparison are preprocessed the same way — from a temp path, resolving
 /// `#include`s through `-I <shaders_dir>`, and never writing into the shader directory itself.
 ///
 /// Symmetry is the point: an asymmetric setup (one side compiled in place, the other through `-I`)
 /// leaves "one side used `-I`" available as an explanation for a difference, and the gate would then
 /// not be measuring the program.
-fn materialize(name: &str, contents: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(name);
+fn materialize(name: &str, contents: &str) -> child_guard::Scratch {
+    let path = child_guard::scratch_path(name);
     std::fs::write(&path, contents).expect("invariant: the temp dir is writable");
     path
 }
@@ -534,3 +534,9 @@ fn the_normaliser_drops_only_line_bookkeeping_and_blank_lines() {
          vacuously green on its ADDITIVE side"
     );
 }
+
+// `status_within` / `output_within` (a deadline on each dxc this file spawns) and `scratch_path`
+// (a temp file no other run shares) live in `tests/child_guard/mod.rs`, whose module doc records
+// the hung-dxc stall behind them. Declared last so that no line an internal document cites moves.
+mod child_guard;
+use child_guard::{BoundedRun, DXC_DEADLINE};

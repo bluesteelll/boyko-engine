@@ -39,7 +39,7 @@ fn find_dxc() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    if Command::new(bare).arg("--version").output().is_ok() {
+    if Command::new(bare).arg("--version").output_within(DXC_DEADLINE).is_ok() {
         return Some(PathBuf::from(bare));
     }
     None
@@ -49,11 +49,11 @@ fn find_dxc() -> Option<PathBuf> {
 /// (`-spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3`, no `-O`, no `-D`) into a fresh temp
 /// `.spv` and returns the bytes. Never overwrites the committed artifact.
 fn redxc(dxc: &PathBuf, dir: &PathBuf) -> Vec<u8> {
-    let out_spv = std::env::temp_dir().join("sdf_mesh_shadow.comp.spv.redxc.spv");
+    let out_spv = child_guard::scratch_path("sdf_mesh_shadow.comp.spv.redxc.spv");
     let mut cmd = Command::new(dxc);
     cmd.current_dir(dir).args(["-spirv", "-T", "cs_6_0", "-E", "main"]);
     cmd.args(["-fspv-target-env=vulkan1.3", "sdf_mesh_shadow.comp.hlsl", "-Fo"]).arg(&out_spv);
-    let status = cmd.status().expect("invariant: dxc was located and must run");
+    let status = cmd.status_within(DXC_DEADLINE).expect("invariant: dxc was located and must run");
     assert!(status.success(), "dxc failed re-compiling sdf_mesh_shadow.comp.hlsl under the frozen recipe");
     let bytes = std::fs::read(&out_spv).expect("invariant: dxc wrote the re-DXC .spv");
     let _ = std::fs::remove_file(&out_spv); // best-effort tidy
@@ -90,3 +90,9 @@ fn sdf_mesh_shadow_spv_matches_source() {
         "the committed pass is implausibly small ({word_count} words) — the march did not compile in"
     );
 }
+
+// `status_within` / `output_within` (a deadline on each dxc this file spawns) and `scratch_path`
+// (a temp file no other run shares) live in `tests/child_guard/mod.rs`, whose module doc records
+// the hung-dxc stall behind them. Declared last so that no line an internal document cites moves.
+mod child_guard;
+use child_guard::{BoundedRun, DXC_DEADLINE};

@@ -131,7 +131,7 @@ fn find_dxc() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    if Command::new(bare).arg("--version").output().is_ok() {
+    if Command::new(bare).arg("--version").output_within(DXC_DEADLINE).is_ok() {
         return Some(PathBuf::from(bare));
     }
     None
@@ -204,22 +204,22 @@ fn builtin_decorations(dis: &str) -> Vec<String> {
 
 /// Re-DXCs `hlsl_name` (relative to the shaders dir) under the EXACT frozen recipe from that
 /// shader's own header (`-spirv -T <profile> -E main -fspv-target-env=vulkan1.3`, no `-O`) plus
-/// the given `-D` defines, into a fresh temp `.spv` named by `out_tag` (distinct per variant so
-/// parallel test binaries never collide), and returns the bytes. Never overwrites a committed
+/// the given `-D` defines, into a fresh temp `.spv` named after `out_tag` (unique per run and
+/// call, via `child_guard::scratch_path`), and returns the bytes. Never overwrites a committed
 /// artifact.
 ///
 /// Differs from `vb_lit_producer_spv_sync.rs`'s namesake in exactly one way: `profile` is a
 /// parameter rather than a hardcoded `cs_6_0`, because this file's rows span three profiles — see
 /// the module doc, section (c).
 fn redxc_row(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str, profile: &str, defines: &[&str], out_tag: &str) -> Vec<u8> {
-    let out_spv = std::env::temp_dir().join(format!("{out_tag}.redxc.spv"));
+    let out_spv = child_guard::scratch_path(&format!("{out_tag}.redxc.spv"));
     let mut cmd = Command::new(dxc);
     cmd.current_dir(dir).args(["-spirv", "-T", profile, "-E", "main"]);
     for d in defines {
         cmd.args(["-D", d]);
     }
     cmd.args(["-fspv-target-env=vulkan1.3", hlsl_name, "-Fo"]).arg(&out_spv);
-    let status = cmd.status().expect("invariant: dxc was located and must run");
+    let status = cmd.status_within(DXC_DEADLINE).expect("invariant: dxc was located and must run");
     assert!(status.success(), "dxc failed re-compiling {hlsl_name} -T {profile} {defines:?} under the frozen recipe");
     let bytes = std::fs::read(&out_spv).expect("invariant: dxc wrote the re-DXC .spv");
     let _ = std::fs::remove_file(&out_spv); // best-effort tidy
@@ -353,16 +353,16 @@ fn vb_raster_fs_redxc_is_sensitive_to_a_swapped_vb_id_lane() {
     );
     let mutated = source.replacen(needle, "uint2(raw_prim_id, input.instance_id)", 1);
 
-    let scratch_path = std::env::temp_dir().join("vb_raster_fs_swapped_lane_mutant.hlsl");
+    let scratch_path = child_guard::scratch_path("vb_raster_fs_swapped_lane_mutant.hlsl");
     std::fs::write(&scratch_path, &mutated).expect("invariant: temp dir is writable");
-    let out_spv = std::env::temp_dir().join("vb_raster_fs_swapped_lane_mutant.spv");
+    let out_spv = child_guard::scratch_path("vb_raster_fs_swapped_lane_mutant.spv");
     let status = Command::new(&dxc)
         .args(["-spirv", "-T", "ps_6_0", "-E", "main", "-fspv-target-env=vulkan1.3", "-I"])
         .arg(&dir)
         .arg(&scratch_path)
         .arg("-Fo")
         .arg(&out_spv)
-        .status()
+        .status_within(DXC_DEADLINE)
         .expect("invariant: dxc was located and must run");
     assert!(status.success(), "dxc failed compiling the mutated vb_raster.fs.hlsl scratch copy");
     let mutated_bytes = std::fs::read(&out_spv).expect("invariant: dxc wrote the mutant .spv");
@@ -506,3 +506,9 @@ fn the_builtin_selector_reads_both_decoration_forms_and_ignores_names() {
          cannot flip it"
     );
 }
+
+// `status_within` / `output_within` (a deadline on each dxc this file spawns) and `scratch_path`
+// (a temp file no other run shares) live in `tests/child_guard/mod.rs`, whose module doc records
+// the hung-dxc stall behind them. Declared last so that no line an internal document cites moves.
+mod child_guard;
+use child_guard::{BoundedRun, DXC_DEADLINE};

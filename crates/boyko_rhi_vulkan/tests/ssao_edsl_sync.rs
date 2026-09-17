@@ -66,7 +66,7 @@ fn find_dxc() -> Option<PathBuf> {
         }
     }
     // A PATH-resolvable `dxc`.
-    if Command::new(bare).arg("--version").output().is_ok() {
+    if Command::new(bare).arg("--version").output_within(DXC_DEADLINE).is_ok() {
         return Some(PathBuf::from(bare));
     }
     None
@@ -130,7 +130,7 @@ fn ssao_horizon_step_matches_edsl_emit() {
 /// -fspv-target-env=vulkan1.3`, NO `-O`) into a fresh temp `.spv`, and returns the bytes.
 /// Never overwrites a committed artifact.
 fn redxc_to_bytes(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str) -> Vec<u8> {
-    let out_spv = std::env::temp_dir().join(format!("{hlsl_name}.redxc.spv"));
+    let out_spv = child_guard::scratch_path(&format!("{hlsl_name}.redxc.spv"));
     let status = Command::new(dxc)
         .current_dir(dir)
         .args([
@@ -144,7 +144,7 @@ fn redxc_to_bytes(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str) -> Vec<u8> {
             "-Fo",
         ])
         .arg(&out_spv)
-        .status()
+        .status_within(DXC_DEADLINE)
         .expect("invariant: dxc was located and must run");
     assert!(
         status.success(),
@@ -271,8 +271,8 @@ fn ssao_spv_byte_identical() {
 
 /// Re-DXCs `hlsl_name` (relative to the shaders dir) under the EXACT frozen recipe
 /// (`-spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3`, NO `-O`) plus the given `-D`
-/// defines, into a fresh temp `.spv` named by `out_tag` (distinct per variant so parallel
-/// test binaries never collide), and returns the bytes. Never overwrites a committed
+/// defines, into a fresh temp `.spv` named after `out_tag` (unique per run and call, via
+/// `child_guard::scratch_path`), and returns the bytes. Never overwrites a committed
 /// artifact. Mirrors [`redxc_to_bytes`] (which stays untouched — every existing call site and
 /// assertion is unaffected) with the `marcher_spv_sync.rs::redxc_with_defines` shape, for the
 /// `-D VB_THIN=1` re-DXC below.
@@ -283,14 +283,14 @@ fn redxc_with_defines(
     defines: &[&str],
     out_tag: &str,
 ) -> Vec<u8> {
-    let out_spv = std::env::temp_dir().join(format!("{out_tag}.redxc.spv"));
+    let out_spv = child_guard::scratch_path(&format!("{out_tag}.redxc.spv"));
     let mut cmd = Command::new(dxc);
     cmd.current_dir(dir).args(["-spirv", "-T", "cs_6_0", "-E", "main"]);
     for d in defines {
         cmd.args(["-D", d]);
     }
     cmd.args(["-fspv-target-env=vulkan1.3", hlsl_name, "-Fo"]).arg(&out_spv);
-    let status = cmd.status().expect("invariant: dxc was located and must run");
+    let status = cmd.status_within(DXC_DEADLINE).expect("invariant: dxc was located and must run");
     assert!(
         status.success(),
         "dxc failed re-compiling {hlsl_name} {defines:?} under the frozen recipe"
@@ -480,3 +480,9 @@ fn ssao_params_table_host_match_edsl() {
         "SsaoParams::default() must equal the Medium preset"
     );
 }
+
+// `status_within` / `output_within` (a deadline on each dxc this file spawns) and `scratch_path`
+// (a temp file no other run shares) live in `tests/child_guard/mod.rs`, whose module doc records
+// the hung-dxc stall behind them. Declared last so that no line an internal document cites moves.
+mod child_guard;
+use child_guard::{BoundedRun, DXC_DEADLINE};

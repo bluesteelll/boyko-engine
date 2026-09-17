@@ -76,7 +76,7 @@ fn find_dxc() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    if Command::new(bare).arg("--version").output().is_ok() {
+    if Command::new(bare).arg("--version").output_within(DXC_DEADLINE).is_ok() {
         return Some(PathBuf::from(bare));
     }
     None
@@ -778,7 +778,7 @@ const PARTICLE_ARTIFACTS: [ParticleArtifact; 12] = [
 /// <profile> -E main -fspv-target-env=vulkan1.3` + the row's defines, no `-O`) into a fresh temp
 /// `.spv` and returns the bytes. Never overwrites a committed artifact.
 fn redxc(dxc: &PathBuf, dir: &PathBuf, a: ParticleArtifact) -> Vec<u8> {
-    let out_spv = std::env::temp_dir().join(format!("{}.spv.redxc.spv", a.spv_stem));
+    let out_spv = child_guard::scratch_path(&format!("{}.spv.redxc.spv", a.spv_stem));
     let mut cmd = Command::new(dxc);
     cmd.current_dir(dir)
         .args(["-spirv", "-T", a.profile, "-E", "main"]);
@@ -788,7 +788,7 @@ fn redxc(dxc: &PathBuf, dir: &PathBuf, a: ParticleArtifact) -> Vec<u8> {
     cmd.args(a.defines);
     cmd.arg(format!("{}.hlsl", a.hlsl_stem)).arg("-Fo").arg(&out_spv);
     let status = cmd
-        .status()
+        .status_within(DXC_DEADLINE)
         .expect("invariant: dxc was located and must run");
     assert!(
         status.success(),
@@ -1931,3 +1931,9 @@ fn the_two_draw_stages_declare_one_vs_out() {
          two varyings it never reads:\n{vs_struct}"
     );
 }
+
+// `status_within` / `output_within` (a deadline on each dxc this file spawns) and `scratch_path`
+// (a temp file no other run shares) live in `tests/child_guard/mod.rs`, whose module doc records
+// the hung-dxc stall behind them. Declared last so that no line an internal document cites moves.
+mod child_guard;
+use child_guard::{BoundedRun, DXC_DEADLINE};

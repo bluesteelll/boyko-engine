@@ -141,7 +141,7 @@ fn find_dxc() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    if Command::new(bare).arg("--version").output().is_ok() {
+    if Command::new(bare).arg("--version").output_within(DXC_DEADLINE).is_ok() {
         return Some(PathBuf::from(bare));
     }
     None
@@ -185,14 +185,14 @@ fn redxc_defines(
     out_tag: &str,
     defines: &[&str],
 ) -> Vec<u8> {
-    let out_spv = std::env::temp_dir().join(format!("{out_tag}.redxc.spv"));
+    let out_spv = child_guard::scratch_path(&format!("{out_tag}.redxc.spv"));
     let status = Command::new(dxc)
         .current_dir(dir)
         .args(["-spirv", "-T", "cs_6_0", "-E", "main", "-fspv-target-env=vulkan1.3"])
         .args(defines.iter().flat_map(|d| ["-D", d]))
         .args([hlsl_name, "-Fo"])
         .arg(&out_spv)
-        .status()
+        .status_within(DXC_DEADLINE)
         .expect("invariant: dxc was located and must run");
     assert!(status.success(), "dxc failed re-compiling {hlsl_name} under the frozen recipe");
     let bytes = std::fs::read(&out_spv).expect("invariant: dxc wrote the re-DXC .spv");
@@ -1123,3 +1123,9 @@ fn the_inertness_census_uses_whole_token_matching() {
          reasons unrelated to `precise`"
     );
 }
+
+// `status_within` / `output_within` (a deadline on each dxc this file spawns) and `scratch_path`
+// (a temp file no other run shares) live in `tests/child_guard/mod.rs`, whose module doc records
+// the hung-dxc stall behind them. Declared last so that no line an internal document cites moves.
+mod child_guard;
+use child_guard::{BoundedRun, DXC_DEADLINE};
