@@ -1012,6 +1012,14 @@ codes! {
     // that split `W2201` from `W2204`.
     (2207, W, W2207, RatePolicy::Once,  CodeStatus::Live,
         "VB-SV0 was requested on a boot whose resolved render path cannot carry it, so it is off"),
+    // The mesh upload's device-local allocation failed and the geometry stayed in host-visible
+    // memory. A `Warn` and not an `info!` because the consequence is not cosmetic: MEASURED on an
+    // RTX 3060, host-visible mesh buffers made the shadow depth passes ~40x slower (every draw
+    // re-fetches the geometry across PCIe), and a reader who does not know that will look for the
+    // regression anywhere but here. `Once`: the answer is a property of the device, so the second
+    // mesh says nothing the first did not.
+    (2208, W, W2208, RatePolicy::Once,  CodeStatus::Live,
+        "Mesh geometry could not be allocated in device-local memory and stayed host-visible"),
     // ── L8a: `boyko_image` ──────────────────────────────────────────────────────────────────
     // `Every` for both: each occurrence names a different chunk or a different stream, the decode
     // CONTINUES past them, and a file with two corrupt chunks is a different report from a file
@@ -1455,6 +1463,10 @@ mod tests {
             (b'W', 2205), // L8a -- a render-path config changed after the consumer set froze
             (b'W', 2206), // L8a -- a material texture failed to decode
             (b'W', 2207), // VB-SV0 requested on a boot that cannot carry it (found by the census)
+            // Added with the device-local mesh upload. The note above says a `--test <name>`
+            // green proves nothing about `--lib`; this row is here because that is exactly how
+            // it was caught — `code_registry` passed 16/16 while this test red.
+            (b'W', 2208), // mesh geometry stayed host-visible (no device-local allocation)
             (b'W', 2601), // L8a -- PNG chunk CRC-32 mismatch
             (b'W', 2602), // L8a -- zlib Adler-32 mismatch
             (b'E', 3001), // L8b -- boyko_demo could not start
