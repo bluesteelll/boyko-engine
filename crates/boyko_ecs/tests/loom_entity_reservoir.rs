@@ -72,14 +72,18 @@
 //! # Run
 //!
 //! ```bash
-//! # Measured on the x86_64-pc-windows-msvc host; on Linux the key would be
-//! # target."cfg(unix)" (not measured). Debug profile, no preemption bound.
+//! # Measured on the x86_64-pc-windows-msvc and x86_64-pc-windows-gnu toolchains
+//! # (2026-09-17); on Linux the key would be target."cfg(unix)" (not measured).
+//! # Debug profile, no preemption bound.
 //! # Do not set RUSTFLAGS: it replaces the [target.*] rustflags of
 //! # .cargo/config.toml (see the loom_term_list.rs header).
 //! cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
 //!   test -p boyko-ecs --test loom_entity_reservoir -- --list
 //! cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
 //!   test -p boyko-ecs --test loom_entity_reservoir -- --test-threads=1 --nocapture
+//! # One model per process, the form to use when a run dies (see below):
+//! cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
+//!   test -p boyko-ecs --test loom_entity_reservoir -- --exact models::<model> --test-threads=1 --nocapture
 //! ```
 //!
 //! `--list` must print 8 `models::…: test` lines before a run counts. Without
@@ -90,16 +94,24 @@
 //! The file wraps its contents in `#[cfg(loom)] mod models` rather than using a
 //! file-level `#![cfg(loom)]`.
 //!
+//! Every body runs on the model's own loom thread, which loom 0.7.2 gives
+//! generator's default 32 KiB stack with no way to enlarge it. The eight bodies
+//! fit in debug on both Windows toolchains (8/8, 2026-09-17); their peak is not
+//! measured. A body that outgrows the stack kills the process with `0xC0000005` or
+//! `0xC00000FD` and no message, or with generator's `coroutine … has overflowed its
+//! stack`. That is a harness failure, not a protocol one: `loom_term_list.rs`
+//! § "Model body stack" has the diagnosis and the extra thread that fixes it.
+//!
 //! # Reading, 2026-09-17 (not a pin)
 //!
 //! Base `d552be05` plus the uncommitted `loom_exports` shim, msvc host, the
-//! command above. Execution counts: r1 70, r2 1769, r3 2306, r4 7, r5 49,
+//! all-models command above. Execution counts: r1 70, r2 1769, r3 2306, r4 7, r5 49,
 //! r6 49, r7 28; every witness mask complete; n1 panicked with
 //! `was issued twice`. The counts are reported so a collapse of exploration is
 //! visible; the witness masks, not the counts, are the gate.
 //!
-//! Mutation probes run against the production code at that reading (each
-//! applied alone, the file restored byte-identical afterwards):
+//! Mutation probes run against the production code at the `d552be05` reading
+//! (each applied alone, the file restored byte-identical afterwards):
 //!
 //! * `fetch_sub` replaced by `load` + `store(r - 1)`: all 7 positive models red
 //!   on U.
@@ -127,6 +139,10 @@
 //! double issue found) and `=2` keeps it green; `LOOM_MAX_PREEMPTIONS=0` turns
 //! all 8 red (r1–r7 on their witness masks); `LOOM_MAX_PERMUTATIONS` set makes
 //! `model` refuse to run.
+//!
+//! Re-read 2026-09-17 on `1693234d`, where the shim is committed, on both the msvc
+//! and the windows-gnu toolchain: the same counts and the same complete masks.
+//! The mutation and exploration probes above were not re-run there.
 
 #[cfg(loom)]
 mod models {
