@@ -426,6 +426,19 @@ pub fn is_in_system_run() -> bool {
     IN_SYSTEM_RUN.with(|c| c.get() > 0)
 }
 
+/// This thread's system-body nesting depth — the live [`InSystemRunGuard`]
+/// count, of which [`is_in_system_run`] is the `> 0` projection.
+///
+/// The scheduler needs the NUMBER rather than the boolean because nesting is
+/// legal (KE16 App-8): a helping joiner may run a sibling conflict-free system
+/// inline inside another system's body, so "depth is back where this frame
+/// found it" is the only assertion a guard can make about its own bracket, and
+/// `!is_in_system_run()` would fire on a valid execution.
+#[inline]
+pub fn system_run_depth() -> u32 {
+    IN_SYSTEM_RUN.with(|c| c.get())
+}
+
 /// Set the worker id for the current thread. Called once on `worker_main`
 /// entry, and by `ThreadPool::install` to enter and to leave a dispatcher
 /// frame; not intended for user code.

@@ -16,9 +16,14 @@
 //!
 //! * `CompletionChannel::queue` (MPSC `ArrayQueue`) — workers `push`,
 //!   dispatcher `pop` inside `apply_window_drain`.
-//! * `CompletionChannel::pending` (`AtomicUsize`) — workers
+//! * `CompletionChannel::hot.pending` (`AtomicUsize`) — workers
 //!   `fetch_add(1, Release)` on body completion; dispatcher `load(Acquire)`
 //!   to evaluate the apply-window gate.
+//! * `CompletionChannel::hot.panicked` (`AtomicU32`) — a panicking system's
+//!   [`SystemRunGuard`] claims it first-wins; the dispatcher reads it once per
+//!   round and re-arms it once per frame in [`reset_for_frame`].
+//!
+//! [`reset_for_frame`]: ExecutorScratch::reset_for_frame
 //!
 //! The split is documented per-field below; Round 3 O-NEW-2 audit verified
 //! that `pred_remaining` is dispatcher-sole-mutator (no worker access),
@@ -29,13 +34,25 @@
 
 use core::marker::PhantomData;
 use core::ptr::NonNull;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+use boyko_threadpool::InSystemRunGuard;
 use crossbeam_queue::ArrayQueue;
 use crossbeam_utils::CachePadded;
 use fixedbitset::FixedBitSet;
 
 use crate::ecs::core::schedule::conflict_graph::{ConflictGraph, SystemIndex};
+use crate::ecs::core::schedule::schedule::completion_queue_overflow;
+
+/// `panicked`'s "no system has panicked this run" sentinel.
+///
+/// Safe as a sentinel because [`SystemIndex`] is a `u16` newtype: a schedule
+/// would have to hold `u32::MAX` systems for a real index to collide, and
+/// `ExecutorScratch::new` allocates a `FixedBitSet`, a `[u16]` and an
+/// `ArrayQueue` each of `system_count` — `ArrayQueue::new(u32::MAX as usize)`
+/// fails long first. `panicked_claim`'s `debug_assert!` gates the mint side;
+/// the bound itself is enforced by allocation.
+pub(crate) const NO_PANICKED_SYSTEM: u32 = u32::MAX;
 
 /// Cross-thread completion state, heap-allocated so its bytes live OUTSIDE the
 /// `Schedule` allocation. `ExecutorScratch` owns it as a bare
@@ -56,14 +73,49 @@ pub(crate) struct CompletionChannel {
     /// completion; the dispatcher `pop`s in `apply_window_drain`. Capacity
     /// `max(system_count, 1)` ⇒ infallible push under SCH6 (one completion per
     /// system per frame). `ArrayQueue: Send + Sync`; its internal head/tail are
-    /// crossbeam-`CachePadded`, so they do not false-share with `pending`.
+    /// crossbeam-`CachePadded`, so they do not false-share with `hot`.
     queue: ArrayQueue<SystemIndex>,
+    /// The two words every dispatcher round reads. `CachePadded` so these
+    /// cross-thread atomics share no cache line with `queue`'s indices.
+    hot: CachePadded<CompletionHot>,
+}
+
+/// The two words every dispatcher round reads, in ONE cache line.
+///
+/// `pending` keeps offset 0 of the padded block, so no existing access
+/// changes. `panicked` is written only by a panicking system's guard and read
+/// once per round — putting it here means the round's existing `Acquire` load
+/// of `pending` has already brought it into L1, so the cancel check costs no
+/// second line. The line is already contended by completion traffic; a
+/// read-mostly neighbour adds no new sharing.
+#[repr(C)]
+struct CompletionHot {
     /// Outstanding apply count. Workers `fetch_add(1, Release)` after `push`;
     /// the dispatcher `load(Acquire)` to gate the apply window and
-    /// `fetch_sub(target, Relaxed)` after draining. `CachePadded` so this
-    /// cross-thread atomic shares no cache line with `queue`'s indices.
-    pending: CachePadded<AtomicUsize>,
+    /// `fetch_sub(n, Relaxed)` after draining.
+    pending: AtomicUsize,
+    /// `NO_PANICKED_SYSTEM` = none. Claimed first-wins by a panicking system's
+    /// `SystemRunGuard::drop`; read once per dispatcher round; cleared ONLY by
+    /// `reset_for_frame` (Decision 3b — a cancel-path clear would re-arm the
+    /// "a second round mis-fires" hazard).
+    panicked: AtomicU32,
+    // No explicit tail padding: the `CachePadded` wrapper already owns the
+    // false-sharing story, and a hand-written `[u8; 4]` only encodes a 64-bit
+    // assumption into a `const` assert, which is a BUILD ERROR rather than a
+    // test failure on a 32-bit target (this crate keeps a wasm32 arm).
 }
+
+// Target-independent, and the one the claim actually makes: `panicked` sits
+// immediately after `pending`, and the pair is inside one cache line. Reds on
+// every target if the declaration order is swapped.
+const _: () =
+    assert!(core::mem::offset_of!(CompletionHot, panicked) == core::mem::size_of::<AtomicUsize>());
+const _: () = assert!(core::mem::size_of::<CompletionHot>() <= 64);
+
+// The byte-exact pin, gated the way this tree already gates layout pins
+// (`archetype.rs`, `entity_inland.rs`).
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(core::mem::offset_of!(CompletionHot, panicked) == 8);
 
 /// `Copy` read-only handle on a [`CompletionChannel`].
 ///
@@ -144,24 +196,71 @@ impl<'a> CompletionCell<'a> {
     /// the apply-window gate; Relaxed on the SCH6 asserts).
     #[inline]
     pub(crate) fn pending_load(self, order: Ordering) -> usize {
-        self.channel().pending.load(order)
+        self.channel().hot.pending.load(order)
     }
 
     /// Worker post-completion bump: `pending.fetch_add(1, order)` (Release).
     #[inline]
     pub(crate) fn pending_fetch_add(self, order: Ordering) -> usize {
-        self.channel().pending.fetch_add(1, order)
+        self.channel().hot.pending.fetch_add(1, order)
     }
 
     /// Dispatcher post-drain decrement: `pending.fetch_sub(n, order)` (Relaxed).
     #[inline]
     pub(crate) fn pending_fetch_sub(self, n: usize, order: Ordering) -> usize {
-        self.channel().pending.fetch_sub(n, order)
+        self.channel().hot.pending.fetch_sub(n, order)
+    }
+
+    /// Reads the cancel flag — `NO_PANICKED_SYSTEM` when no system of this run
+    /// has panicked.
+    ///
+    /// `Relaxed` is sufficient and the reason is an ordering, not a
+    /// coincidence: the dispatcher performs this load immediately after its
+    /// `Acquire` load of `pending`, and a panicking guard stores this flag
+    /// BEFORE its `Release` `fetch_add` on `pending`. The `Acquire` therefore
+    /// carries the edge for both words (Decision 4).
+    #[inline]
+    pub(crate) fn panicked_load(self, order: Ordering) -> u32 {
+        self.channel().hot.panicked.load(order)
+    }
+
+    /// Claims the cancel flag for `idx`, first writer wins.
+    ///
+    /// Called only from a panicking [`SystemRunGuard`]'s `Drop`, before that
+    /// guard publishes its completion. `Relaxed` on both arms: the edge is
+    /// carried by the `Release` `fetch_add` sequenced after this call.
+    #[inline]
+    pub(crate) fn panicked_claim(self, idx: SystemIndex) {
+        debug_assert!(
+            u32::from(idx.0) < NO_PANICKED_SYSTEM,
+            "invariant: a real SystemIndex must never equal the NO_PANICKED_SYSTEM sentinel"
+        );
+        let _ = self.channel().hot.panicked.compare_exchange(
+            NO_PANICKED_SYSTEM,
+            u32::from(idx.0),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Re-arms the cancel flag for a new run. `reset_for_frame` ONLY
+    /// (Decision 3b).
+    ///
+    /// `Relaxed`: the store runs in the single-threaded window between frames
+    /// (no worker is alive) and is sequenced-before every `scope.spawn` of the
+    /// run that follows, on the same thread.
+    #[inline]
+    pub(crate) fn panicked_reset(self) {
+        self.channel()
+            .hot
+            .panicked
+            .store(NO_PANICKED_SYSTEM, Ordering::Relaxed);
     }
 }
 
 // SAFETY: the cell carries a `NonNull` to a `CompletionChannel` whose interior
-// is entirely `Sync` (`ArrayQueue: Sync`, `CachePadded<AtomicUsize>: Sync`).
+// is entirely `Sync` (`ArrayQueue: Sync`, `CachePadded<CompletionHot>: Sync`,
+// because `CompletionHot` is two atomics and nothing else).
 // Concurrent access through `Copy`s of the cell is the channel's MPSC contract:
 // many workers `push`/`fetch_add(Release)`, one dispatcher `pop`/`load(Acquire)`
 // /`fetch_sub`. The allocation outlives every copy for `'a` (owned by the
@@ -172,6 +271,129 @@ impl<'a> CompletionCell<'a> {
 // never yields a `&mut`.
 unsafe impl<'a> Send for CompletionCell<'a> {}
 unsafe impl<'a> Sync for CompletionCell<'a> {}
+
+/// One system's run obligation: restore the in-system TLS depth, then publish
+/// the completion — on BOTH the normal and the unwinding path, in that order.
+///
+/// Stack-only; never escapes the spawned closure. The defect this type exists
+/// to remove is that the publish used to be two *statements after the body*
+/// rather than an *obligation of the frame*: a panicking system left `pending`
+/// short of `running` forever, the apply window never opened, and the
+/// dispatcher parked for the rest of the process.
+///
+/// # SP2 — exactly one publish per guard
+///
+/// `finish` publishes and disarms; `Drop` returns early when disarmed. The two
+/// paths are mutually exclusive by the flag rather than by reading order. A
+/// double publish would be the one way to overflow the completion queue, whose
+/// capacity proof is `ArrayQueue::new(system_count.max(1))` × one publish per
+/// system per frame × SCH6's between-frames emptiness.
+///
+/// # SP3 — the completion publish is NOT what delivers the payload
+///
+/// This guard publishes inside the task body, strictly before the pool's own
+/// `catch_unwind` returns; the payload reaches the scope's slot in
+/// `capture_panic`, which is sequenced before `complete_task`. So
+/// `Scope::drop`'s join — not this accounting — is what closes delivery
+/// (SCH-A6-1). Two edits would silently break that and neither is visible
+/// here: moving the publish after the pool's catch, or shortening
+/// `Scope::drop`'s join when a payload is already present.
+pub(crate) struct SystemRunGuard<'a> {
+    /// The channel this guard owes a completion to.
+    completion: CompletionCell<'a>,
+    /// The system whose run this guard brackets.
+    idx: SystemIndex,
+    /// The allocation-discipline guard (ALLOC1/ALLOC6), dropped FIRST inside
+    /// this guard so the TLS depth is restored before the publish.
+    alloc: Option<InSystemRunGuard>,
+    /// `true` while the completion is still owed.
+    armed: bool,
+    /// The in-system depth at `enter`. An App-8-safe DELTA, not an absolute: a
+    /// helping joiner may legitimately run a sibling system inline inside
+    /// another system's body, so `depth == 0` is the wrong assertion.
+    #[cfg(debug_assertions)]
+    depth0: u32,
+}
+
+impl<'a> SystemRunGuard<'a> {
+    /// Enters a system run: raises the in-system TLS depth and arms the
+    /// completion obligation.
+    #[inline]
+    pub(crate) fn enter(completion: CompletionCell<'a>, idx: SystemIndex) -> Self {
+        // Read BEFORE the guard raises the depth, so `finish`'s assert compares
+        // the restored depth against the one this frame inherited.
+        #[cfg(debug_assertions)]
+        let depth0 = boyko_threadpool::system_run_depth();
+        Self {
+            completion,
+            idx,
+            alloc: Some(InSystemRunGuard::enter()),
+            armed: true,
+            #[cfg(debug_assertions)]
+            depth0,
+        }
+    }
+
+    /// The normal path: leave the system run, publish the completion, disarm.
+    ///
+    /// Taken by value; the (now disarmed) guard drops at the end of this body.
+    #[inline]
+    pub(crate) fn finish(mut self) {
+        // SP1': the TLS depth is restored BEFORE the completion is published,
+        // so a dispatcher that observes `pending == running` cannot still find
+        // a worker inside a system body.
+        self.alloc = None;
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            boyko_threadpool::system_run_depth(),
+            self.depth0,
+            "invariant SP1': the in-system depth must be restored before the completion is \
+             published"
+        );
+        debug_assert!(self.armed, "invariant SP2: a guard publishes exactly once");
+
+        // NOT a cleanup pad. Byte-for-byte the publish this closure performed
+        // before the guard existed. The `expect` is unreachable (SP2 ×
+        // `ArrayQueue::new(system_count.max(1))` × SCH6); were it to fire,
+        // `self.armed` is still true, so the unwind runs this guard's `Drop`,
+        // whose retried push fails the same way and ends in
+        // `completion_queue_overflow`'s `E1503` abort — the panic never reaches
+        // the pool's `run_scoped`.
+        self.completion
+            .push(self.idx)
+            .expect("invariant SCH6: completion_queue cap ≥ system_count");
+        self.completion.pending_fetch_add(Ordering::Release);
+        self.armed = false;
+    }
+}
+
+impl Drop for SystemRunGuard<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        // The unwinding path. No `debug_assert` that can fire is reachable from
+        // here, and that is a reachability claim rather than a placement rule:
+        // `alloc = None` runs `InSystemRunGuard::drop`'s `depth > 0` assert,
+        // which cannot fire because this guard's own `enter` raised it; the
+        // push's capacity proof is SP2 × `ArrayQueue::new(system_count.max(1))`
+        // × SCH6. A `debug_assert` that fired in a cleanup pad would abort.
+        self.alloc = None;
+        self.completion.panicked_claim(self.idx);
+
+        // `expect` here would be an abort with the message "panic in a
+        // destructor during cleanup", and a DROPPED completion would be the
+        // hang this guard exists to remove — so the overflow gets its own
+        // terminal site that says which invariant broke.
+        if self.completion.push(self.idx).is_err() {
+            completion_queue_overflow(self.idx);
+        }
+        self.completion.pending_fetch_add(Ordering::Release);
+        self.armed = false;
+    }
+}
 
 /// Per-frame executor scratch reused across [`Schedule::run`] calls.
 ///
@@ -286,7 +508,8 @@ pub(crate) struct ExecutorScratch {
 // only because `completion: NonNull<CompletionChannel>` is conservatively
 // `!Send`/`!Sync`. That `NonNull` is an OWNING pointer (`Box::into_raw`-derived,
 // freed exactly once in `Drop`) to a `CompletionChannel` whose interior is
-// `Send + Sync` (`ArrayQueue` + `CachePadded<AtomicUsize>`). It therefore
+// `Send + Sync` (`ArrayQueue` + `CachePadded<CompletionHot>`, the latter two
+// atomics and nothing else). It therefore
 // behaves exactly as the `Box<CompletionChannel>` it stands in for would (which
 // would be auto-`Send + Sync`); the bare `NonNull` is used ONLY to avoid the
 // `Box`-place `Unique`-retag under Tree Borrows. Every other field is already
@@ -329,7 +552,10 @@ impl ExecutorScratch {
         // ArrayQueue panics on capacity 0; guard the empty-schedule case.
         let completion_box = Box::new(CompletionChannel {
             queue: ArrayQueue::new(system_count.max(1)),
-            pending: CachePadded::new(AtomicUsize::new(0)),
+            hot: CachePadded::new(CompletionHot {
+                pending: AtomicUsize::new(0),
+                panicked: AtomicU32::new(NO_PANICKED_SYSTEM),
+            }),
         });
         // SAFETY: `Box::into_raw` yields a non-null, properly-aligned, live
         //   pointer; ownership is transferred to `self.completion` and freed
@@ -366,6 +592,8 @@ impl ExecutorScratch {
     ///
     /// * Clears `running`, `completed`, `ready_scratch`.
     /// * Restores `pred_remaining[i]` from `conflict_graph.pred_count[i]`.
+    /// * Re-arms the cancel flag (`panicked` ← `NO_PANICKED_SYSTEM`) — the ONE
+    ///   production site that clears it (Decision 3b).
     /// * `debug_assert!`s that the previous frame fully drained — both
     ///   `completion_queue` and `pending_apply` must be empty / zero.
     ///
@@ -407,8 +635,24 @@ impl ExecutorScratch {
             *slot = count;
         }
 
-        // The `as_ref()` reads stay INSIDE the `debug_assert!`s so they elide
-        // in release (no frame-path cost).
+        // Decision 3b — re-arm the cancel flag, and NOWHERE else. The slot is
+        // first-wins and sticky by construction, so without a per-frame clear
+        // every later run of this schedule would cancel in round 1 and return
+        // normally having dispatched nothing: a silent no-op frame, with no
+        // symptom the caller can catch, and strictly worse than the hang this
+        // design removes. This is the channel's one UNCONDITIONAL touch here —
+        // one `Relaxed` `u32` store per `Schedule::run`, the same frame-path
+        // cost class as the bitset `clear()`s above.
+        //
+        // SAFETY (Phase 9.3c, and now also on the release path): between frames
+        //   no worker is alive — every `Schedule::run` joins via `Scope::Drop`
+        //   before returning — so this store races nothing. Same non-retagging
+        //   `as_ptr` lineage as every other access; no `Box` place is named.
+        unsafe { CompletionCell::new(self.completion) }.panicked_reset();
+
+        // The two SCH6 `as_ref()` reads stay INSIDE the `debug_assert!`s so
+        // they elide in release; the `panicked` re-arm above is the one access
+        // on the frame path.
         //
         // SAFETY (Phase 9.3c, both reads): between frames, no worker is alive
         //   (every `Schedule::run` joins all workers via `Scope::Drop` before
@@ -424,6 +668,7 @@ impl ExecutorScratch {
         );
         debug_assert_eq!(
             unsafe { self.completion.as_ref() }
+                .hot
                 .pending
                 .load(Ordering::Relaxed),
             0,

@@ -398,6 +398,145 @@ impl EntityReservoir {
     }
 }
 
+/// Loom test surface for the EM2′ claim protocol (`cfg(loom)` only, never in
+/// the shipped artifact).
+///
+/// The loom models (`tests/loom_entity_reservoir.rs`) are an external
+/// integration crate. They cannot name this `pub(crate)` module, the
+/// `pub(crate)` allocate / rewind / claim methods of `EntityMaster`, or a
+/// path to `EntityCounter` (its `params` module is `pub(crate)`), and a
+/// `pub use` of a `pub(crate)` item is rejected (E0364/E0365). Phase 9.1
+/// lesson C1 requires the models to drive the REAL protocol, so every function
+/// here is one call to the production method, and loom schedules the
+/// production `fetch_sub` / `fetch_add` / load through the atomics this file
+/// aliases under `cfg(loom)`. Two functions are not plain forwards and say so:
+/// [`register_claimed`] transcribes two steps of `SpawnAtCommand::apply`, and
+/// [`forbidden_settle_during_phase`] is a negative control.
+///
+/// It is a child of `entity_reservoir` so that [`physical_len`] and the
+/// negative control can reach the private `free` column and `free_top` atomic.
+/// Re-exported as `crate::ecs::core::entity::reservoir_loom_exports`. The same
+/// shape as `boyko_threadpool::loom_exports` and `term_list::test_exports`;
+/// the native build strips it before type-checking, so native codegen is
+/// unchanged.
+#[cfg(loom)]
+#[doc(hidden)]
+pub mod loom_exports {
+    use core::ptr::NonNull;
+
+    use super::Ordering;
+    use crate::ecs::core::archetype::archetype::Archetype;
+    use crate::ecs::core::entity::entity::Entity;
+    use crate::ecs::core::entity::entity_master::{AllocTicket, EntityMaster};
+
+    /// The real `EntityCounter`. The item is `pub`; only its module path is
+    /// crate-private, so this re-export is allowed (the same pattern as
+    /// `boyko_threadpool::loom_exports::WakeHandle`).
+    pub use crate::ecs::core::system::params::entity_counter::EntityCounter;
+
+    /// Opaque `pub` wrapper around the `pub(crate)` `AllocTicket`. Neither
+    /// `Copy` nor `Clone`, like the ticket, so rewinding one allocation twice
+    /// still does not compile.
+    #[must_use]
+    #[derive(Debug)]
+    pub struct LoomTicket(AllocTicket);
+
+    impl LoomTicket {
+        /// The allocated handle (`AllocTicket::entity`).
+        #[inline]
+        pub fn entity(&self) -> Entity {
+            self.0.entity()
+        }
+    }
+
+    /// A real `EntityCounter` over `em`'s reservoir, built by the production
+    /// `EntityCounter::from_ptr`, so its preset `Relaxed` load of `free_top`
+    /// runs under loom. The counter borrows `em` shared: no `&mut EntityMaster`
+    /// can be formed until it drops.
+    #[inline]
+    pub fn counter(em: &EntityMaster) -> EntityCounter<'_> {
+        // SAFETY: the three `from_ptr` requirements.
+        //   (1) The pointer is `&raw const em.reservoir`, derived from the live
+        //       reference `em`, so it has provenance over the whole
+        //       `EntityReservoir` field and is valid for reads for `'_`, the
+        //       lifetime of that reference.
+        //   (2) It is the `reservoir` field of the `EntityMaster` `em`, which
+        //       outlives `'_` because `em` is a reference for `'_`.
+        //   (3) The returned `EntityCounter<'_>` holds `em`'s shared borrow for
+        //       `'_`, so the borrow checker rejects every `&mut EntityMaster`
+        //       (the only route to push / pop / settle / rewind / register)
+        //       until the counter drops. `EntityMaster` has no interior
+        //       mutability other than the reservoir's two atomics, so nothing
+        //       else can mutate it meanwhile.
+        unsafe { EntityCounter::from_ptr(&raw const em.reservoir) }
+    }
+
+    /// The UNGATED claim: forwards to `EntityMaster::reserve_entity`.
+    #[inline]
+    pub fn claim_ungated(em: &EntityMaster) -> Entity {
+        em.reserve_entity()
+    }
+
+    /// The dispatcher's allocation: forwards to
+    /// `EntityMaster::allocate_entity_ticketed` (settle, then pop or mint).
+    #[inline]
+    pub fn allocate_ticketed(em: &mut EntityMaster) -> LoomTicket {
+        LoomTicket(em.allocate_entity_ticketed())
+    }
+
+    /// The rejected-create undo: forwards to `EntityMaster::rewind_allocate`.
+    /// `true` when the id was restored; a refusal panics in a debug build.
+    #[inline]
+    pub fn rewind(em: &mut EntityMaster, ticket: LoomTicket) -> bool {
+        em.rewind_allocate(ticket.0)
+    }
+
+    /// Registers a claimed entity as `SpawnAtCommand::apply` does in its
+    /// steps 3 and 7: grow the fast store to `id + 1`, then
+    /// `register_entity_with_ptr`. THE ONE TRANSCRIPTION in this module (the
+    /// production steps are inline in `apply`, between archetype writes the
+    /// model does not need). The archetype pointer is `NonNull::dangling()`
+    /// and row 0: `EntityMaster` stores the pointer verbatim and never
+    /// dereferences it.
+    #[inline]
+    pub fn register_claimed(em: &mut EntityMaster, e: Entity) {
+        em.ensure_capacity(e.id().0 + 1);
+        em.register_entity_with_ptr(e, NonNull::<Archetype>::dangling().as_ptr(), 0);
+    }
+
+    /// The physical top `free.len()`, read as is (no settle). F2 says a phase
+    /// never changes it, and F1 says it equals the claimable length after a
+    /// settle. `EntityMaster::check_invariants` compares two lengths that are
+    /// both derived from `free_top`, so a settle that fails to truncate `free`
+    /// passes it; this read is what checks F1 against the column itself.
+    /// `&mut` keeps the read out of every phase.
+    #[inline]
+    pub fn physical_len(em: &mut EntityMaster) -> usize {
+        em.reservoir.free.len()
+    }
+
+    /// NEGATIVE CONTROL, not production code. It runs the `free_top` half of
+    /// `EntityReservoir::settle` (`load`, then `store(max(v, 0))`) through the
+    /// shared atomic while claims may be live, which EM2′-K forbids.
+    /// Production `settle` takes `&mut self` and cannot run during a phase
+    /// without aliasing UB, so this models it as the two operations it is at
+    /// machine level: a plain load and store racing a `lock`-prefixed
+    /// subtraction. A `fetch_sub` that lands between them is erased, and the
+    /// entry it claimed becomes claimable again, which is the double issue the
+    /// EM2′-K doc at the top of this file names.
+    ///
+    /// It stays memory-safe: the stored value was loaded during this call,
+    /// under a shared borrow that keeps `free.len()` constant, so it is still
+    /// `<= free.len()` (F2) and every later claim reads an initialized entry.
+    /// `free` is not truncated; only the atomic half of settle is modelled.
+    #[inline]
+    pub fn forbidden_settle_during_phase(em: &EntityMaster) {
+        let top = &em.reservoir.free_top;
+        let v = top.load(Ordering::Relaxed);
+        top.store(v.max(0), Ordering::Relaxed);
+    }
+}
+
 #[cfg(all(test, not(loom)))]
 mod tests {
     // Test-only oracle state (std threads, `Vec` result buffers, a sort) — the

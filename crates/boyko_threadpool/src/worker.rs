@@ -11,6 +11,7 @@
 //! stage that polls one. `push_task`, at the bottom of this file, is the write
 //! side of that rule; these stages are the matching read side.
 
+use std::mem;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
@@ -157,6 +158,17 @@ pub(crate) fn worker_main(inner: Arc<PoolInner>, worker_id: u32, deque: Worker<T
 ///   `Scope::Drop` to re-raise on the joining thread. Such a body cannot unwind
 ///   past its own run function, so the `catch_unwind` below never observes its
 ///   panic and their propagation semantics are unchanged.
+///
+///   That sentence is a claim about the span between the body's catch and
+///   `complete_task`, and what makes it TRUE is
+///   `scope::discard_payload`: the only call in that span is
+///   `capture_panic`, whose loser-payload drop is routed through a
+///   non-unwinding discard. Before that, a payload that panicked on drop
+///   (rust#86027) unwound out of `run_scoped` and landed HERE — aborting the
+///   process on behalf of a scoped task that had a joiner waiting, and
+///   reporting it with `boyko-E0201`'s fire-and-forget text. This backstop was
+///   written for the other discipline and must not be the one that covers this
+///   span.
 /// - **Fire-and-forget tasks** (`ThreadPool::spawn`) have no joiner to receive
 ///   a payload. A raw unwind here would tear down `worker_main`, permanently
 ///   shrinking the pool to `n-1` threads for the rest of the process lifetime
@@ -174,9 +186,19 @@ pub(crate) fn worker_main(inner: Arc<PoolInner>, worker_id: u32, deque: Worker<T
 /// caller's frame (and every stack borrow the still-running tasks hold) would be
 /// popped out from under them: a use-after-free reachable from safe code.
 /// 2026-07 audit finding.
+///
+/// The caught payload is bound and FORGOTTEN, never dropped. Dropping it runs
+/// user code (rust#86027: a payload whose `Drop` panics), and that drop sits
+/// outside the `catch_unwind` below — so a faulting drop would unwind out of
+/// this function before the abort, and reach exactly the two outcomes the
+/// catch exists to prevent: a dead worker, or an abandoned join. The process
+/// is about to abort, so the forgotten box is reclaimed with everything else.
+/// (`.is_err()` on the result is not a substitute: the result is a temporary
+/// of the `if` condition, dropped — payload included — before the block runs.)
 #[inline]
 pub(crate) fn run_task(t: Task) {
-    if catch_unwind(AssertUnwindSafe(|| t.run())).is_err() {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(|| t.run())) {
+        mem::forget(payload);
         abort_on_task_panic();
     }
 }

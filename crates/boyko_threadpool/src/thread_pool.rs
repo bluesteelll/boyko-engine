@@ -257,7 +257,7 @@ impl PoolInner {
         };
 
         // O4 (Phase 9.3b): now that `ThreadPool::drop` actually runs and
-        // joins, a panic propagating out of `f`/`drop(scope)` must NOT leave
+        // joins, a panic propagating out of `f`/the scope's drop must NOT leave
         // `active_scopes > 0` or dirty TLS (that would trip the Drop
         // debug-assert on unwind). The guard restores both on the normal and
         // the unwinding path.
@@ -292,7 +292,10 @@ impl PoolInner {
         // panicked we never reach here; `scope` and `_frame` are dropped by
         // the unwinder in reverse declaration order — `scope` first, then
         // `_frame` — which is the same order as this manual sequence.)
-        drop(scope);
+        // `join_after_body` is that drop, preceded by marking the closure as
+        // returned: the one fact `Scope::drop` uses to choose between
+        // re-raising a task's panic and discarding it.
+        scope.join_after_body();
 
         result
     }
@@ -332,7 +335,8 @@ impl PoolInner {
         let scope = Scope::new(self, shared);
 
         let result = f(&scope);
-        drop(scope);
+        // See `install`: the explicit drop, marking the closure as returned.
+        scope.join_after_body();
 
         result
     }

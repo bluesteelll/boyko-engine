@@ -21,12 +21,25 @@ crates/boyko_threadpool/src/worker.rs  `boyko-E0201`, and the FIRST row of this 
     "strictly worse than the unconditional `eprintln!` this replaced" were it silent. L6 named this
     row as owed; L8c is the rung that could finally write it, because until now there was no file.
 
-crates/boyko_app/src/diag.rs  `boyko-E3002` / `boyko-E3003` / `boyko-E3004` -- the host's three
-    terminal-exit reporters, in ONE file precisely so the engine carries one copy of the pattern
-    rather than a fourth, fifth and sixth. Each emits, calls `flush()`, and prints only on
-    `NoConsumer`. They are not diagnostics: they are the process saying why it is about to stop,
-    and the run that needed the explanation is the one that is now over. The degrade reporters in
-    the same file (`W3005`..`W3009`) do NOT print, which is what keeps this row about exits.
+crates/boyko_app/src/diag.rs  `boyko-E3002` / `boyko-E3003` / `boyko-E3004` / `boyko-E3011` -- the
+    host's four terminal-exit reporters, in ONE file precisely so the engine carries one copy of
+    the pattern rather than a fifth, sixth and seventh. Each emits, calls `flush()`, and prints
+    only on `NoConsumer`. They are not diagnostics: they are the process saying why it is about to
+    stop, and the run that needed the explanation is the one that is now over. `E3011` is the
+    windowed host's ECS panic boundary, added with defect A6's fix; its next statement is
+    `std::process::abort()`, which is the same argument the first three make with `return` plus
+    teardown. The degrade reporters in the same file (`W3005`..`W3009`) do NOT print, which is what
+    keeps this row about exits.
+
+crates/boyko_ecs/src/ecs/core/schedule/schedule.rs  `boyko-E1503`, and the same argument as the
+    first row of this ledger one crate down: the next statement is `std::process::abort()`, and the
+    invariant it guards (completion-queue capacity = `system_count`, one publish per system per
+    frame) is believed unbreakable -- so the only world in which this site fires is one in which the
+    construction changed, and in that world the caller's configuration is whatever it was, which
+    defaults to `Off`. Emits, `flush()`es, prints only on `NoConsumer`. The schedule's OTHER panic
+    record, `boyko-E1502`, deliberately gets no print and no row: its next statement is a `return`,
+    the panic then propagates to the caller, and the default hook has already printed the payload at
+    the origin.
 
 crates/boyko_rhi_vulkan/src/debug.rs  The `[vk-validation]` messenger callback, and the ONLY row
     here that is not about the logger being off. It is a BYTE-FROZEN oracle channel: `golden.ps1`
