@@ -234,10 +234,29 @@ For unsafe code (if nightly is available):
 cargo +nightly miri test
 ```
 
-For loom tests:
+For loom tests, one target at a time, in the profile its header names (Linux: `cfg(unix)`):
 ```powershell
-cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' test --release loom_   # Linux: cfg(unix)
+cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' test -p <crate> --test <loom_file> -- --list
+cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' test -p <crate> --test <loom_file> -- --exact <model> --test-threads=1 --nocapture
+# Lint under loom: --config goes AFTER `clippy`.
+cargo clippy --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' -p <crate> --test <loom_file> -- -D warnings
 ```
+
+- **Read the loom file's own header first.** It names the profile, the per-model form and the
+  `--list` count to require. A workspace-wide `cargo test` under `--cfg loom` is not a shortcut:
+  a crate's unit-test target need not compile under that cfg (measured 2026-09-17:
+  `boyko-threadpool` on the KE16 line), and a name filter such as `loom_` misses models named
+  `models::…`.
+- **`cargo --config <loom cfg> clippy …` lints nothing loom-specific.** The `--config` placed
+  before `clippy` does not reach clippy's inner check: the `-v` rustc line has no `--cfg loom`
+  and no `--extern loom=`, and the run exits 0 (measured 2026-09-17). Only
+  `cargo clippy --config <loom cfg> …` carries both. `test` and `check` do carry the cfg with
+  `--config` before the subcommand (measured the same day).
+- **A loom model that dies with `0xC0000005` or `0xC00000FD` and no message** has most likely
+  outgrown loom 0.7.2's 32 KiB model-thread stack, which `loom::model::Builder` cannot enlarge.
+  On msvc the stack probe writes into generator's read-only guard page, so its overflow handler
+  never fires. `loom_term_list.rs` § "Model body stack" (branch `fix/loom-debug-msvc`) has the
+  diagnosis and the body-thread fix. `thread::Builder::stack_size` takes WORDS, not bytes.
 
 ## 6. Running benchmarks
 
@@ -609,8 +628,9 @@ Run:
 # NOTE: do NOT set $env:RUSTFLAGS - it REPLACES the [target.*] rustflags from
 # .cargo/config.toml (measured), so the AVX2 baseline is silently lost. Do NOT use
 # build.rustflags either: the [target.*] entries win and --cfg loom never reaches rustc.
-# Use: cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' test --release loom_
-cargo test --release loom_tests --test loom_tests
+# Use the per-target form from the loom recipe above, and require the --list count:
+cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' test -p <crate> --test loom_tests -- --list
+cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' test -p <crate> --test loom_tests -- --test-threads=1
 ```
 
 ## Miri-friendly test
