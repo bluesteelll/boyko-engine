@@ -116,6 +116,11 @@ mechanical, and afterwards each leg is a `grep` and every new ignore picks its o
 - OS: Windows / Linux (x86_64)
 - SIMD: AVX2 baseline; AVX-512 optionally via `cfg(target_feature)`
 - Edition: Rust 2024
+- Development host (the owner's machine): **MSVC** since 2026-09-17 — `stable-x86_64-pc-windows-msvc`
+  for builds, `nightly-x86_64-pc-windows-msvc` for Miri; spell both. `stable-x86_64-pc-windows-gnu`
+  stays installed only to compare against numbers pinned before that date, which were blessed under
+  windows-gnu. Loom's `--cfg loom` goes through a `target."cfg(windows)"` key, never
+  `build.rustflags` (see the tester's instructions for why that form compiles every model away).
 
 ## Documentation — two layers
 

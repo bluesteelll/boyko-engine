@@ -209,11 +209,23 @@ Then check the green itself, because **a passing report is not evidence that any
   claim, not a gate.
 - **Skips are not passes.** A test that calls `boot_*_or_skip` and returns early on a machine
   without the device has measured nothing. Report skipped and passed as separate counts.
-- **Beware the toolchain, not just the test.** `cargo +nightly miri` can resolve to a different
-  host triple and die in the linker — exit 1 there is indistinguishable from a red gate, so read
-  the error rather than the exit code. And `RUSTFLAGS=` **replaces** `[build] rustflags` from
-  `.cargo/config.toml` instead of extending it (which silently drops the AVX2 baseline), which is
-  why the loom invocation below uses `--config`.
+- **Beware the toolchain, not just the test.** This machine's build host is **MSVC** since
+  2026-09-17: spell `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc` for builds and
+  `cargo +nightly-x86_64-pc-windows-msvc miri` for Miri. A bare `+nightly` follows rustup's default
+  host, which has flipped before, and a different triple can die in the linker — exit 1 there is
+  indistinguishable from a red gate, so read the error rather than the exit code. Numbers pinned
+  before that date were blessed under windows-gnu: a pin that differs only under msvc is a host
+  difference to report with both values (re-run that one test under
+  `stable-x86_64-pc-windows-gnu` for the comparison), not a regression and not a reason to re-bless.
+- **Rustflags sources replace each other; they never merge.** Cargo takes exactly one of
+  `RUSTFLAGS`, the joined `[target.<triple>]` / `[target.<cfg>]` entries, or `[build] rustflags`.
+  Every tree carrying the AVX2 baseline (`cced895a` and later) sets it as `[target.<triple>]
+  rustflags`, so there `RUSTFLAGS=` drops the baseline, and `--config 'build.rustflags=…'` is
+  **ignored outright**. Measured 2026-09-17 with
+  `cargo check -v`: under the `build.rustflags` form rustc received no `--cfg loom`, so every
+  `#[cfg(loom)]` model compiles to nothing and the run prints `running 0 tests`, exit 0. The loom
+  invocation below therefore uses a `target."cfg(…)"` key, which joins the baseline instead. Before
+  calling a loom run green, show with `--list` that its models exist.
 - **Clippy can report false freshness.** "Finished in 0.1s" immediately after an edit means stale
   fingerprints, not a clean tree — touch the edited sources and re-run before believing it.
 
@@ -224,7 +236,7 @@ cargo +nightly miri test
 
 For loom tests:
 ```powershell
-cargo --config 'build.rustflags=["--cfg","loom"]' test --release loom_
+cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' test --release loom_   # Linux: cfg(unix)
 ```
 
 ## 6. Running benchmarks
@@ -594,9 +606,10 @@ mod loom_tests {
 
 Run:
 ```powershell
-# NOTE: do NOT set $env:RUSTFLAGS - it REPLACES [build] rustflags from
-# .cargo/config.toml (measured), so the AVX2 baseline is silently lost.
-# Use: cargo --config 'build.rustflags=["--cfg","loom"]' test --release loom_
+# NOTE: do NOT set $env:RUSTFLAGS - it REPLACES the [target.*] rustflags from
+# .cargo/config.toml (measured), so the AVX2 baseline is silently lost. Do NOT use
+# build.rustflags either: the [target.*] entries win and --cfg loom never reaches rustc.
+# Use: cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' test --release loom_
 cargo test --release loom_tests --test loom_tests
 ```
 
