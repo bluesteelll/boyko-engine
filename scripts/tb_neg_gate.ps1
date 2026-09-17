@@ -73,13 +73,34 @@
 #
 # When this comment was written the concrete failure was that `cargo +nightly`
 # resolved to `nightly-x86_64-pc-windows-msvc`, for which this box had no linker
-# (MEASURED 2026-09-04). That is gone twice over: rustup's default_host_tuple was
-# rewritten to gnu on 2026-09-07 13:56 (file mtime), so a bare `+nightly` now
-# picks the gnu nightly, and msvc links since Build Tools 2022 was installed --
-# but the toolchain stays spelled `+nightly-x86_64-pc-windows-gnu` on purpose: the
-# committed receipts were produced by that nightly's miri (2026-08-20) and the
-# msvc nightly's is 2026-05-29 (both MEASURED 2026-09-10). Moving the build host
-# must not silently move the CHECKER under a Tree-Borrows gate.
+# (MEASURED 2026-09-04). Both halves of that instance are gone -- msvc links since
+# Build Tools 2022 was installed, and the whole workspace builds under
+# `stable-x86_64-pc-windows-msvc` (MEASURED 2026-09-18) -- while the ambiguity it
+# came from is very much alive: rustup's default_host_tuple was rewritten to gnu on
+# 2026-09-07 13:56 and BACK to msvc on 2026-09-17 14:27 (both by settings-file
+# mtime), so a bare `+nightly` picks the MSVC nightly again today. The paragraph
+# that stood here said it "now picks the gnu nightly"; ten days later that was
+# false, with no edit to this file in between. `$Toolchain` is spelled in full for
+# exactly that reason and needed no edit either time.
+#
+# WHY IT IS THE GNU ONE, restated because the old reason INVERTED. This file used
+# to argue the pin from currency: the receipts came from the gnu nightly's miri
+# (2026-08-20) and the msvc nightly's was 2026-05-29 (MEASURED 2026-09-10), three
+# months older. MEASURED 2026-09-18, with RUSTUP_TOOLCHAIN unset:
+#
+#   cargo +nightly-x86_64-pc-windows-gnu  miri --version -> miri 0.1.0 (8925ea358a 2026-08-20)
+#   cargo +nightly-x86_64-pc-windows-msvc miri --version -> miri 0.1.0 (a36d05efab 2026-09-09)
+#
+# The msvc nightly's miri is now three weeks NEWER, so currency argues against this
+# pin rather than for it. The pin STAYS on RECEIPT CONTINUITY: the receipts
+# committed under `docs/threadpool/receipts/` were produced by the gnu nightly's
+# miri and are censused by
+# `crates/boyko_threadpool/tests/tb_neg_m2w_arm_present.rs`. Re-spelling
+# `$Toolchain` would swap the CHECKER under the receipts this script writes and
+# that census reads, leaving any disagreement between a committed receipt and a
+# fresh run unattributable. Moving the checker is its own change, with its own
+# re-run of all four receipts -- never a passenger on a host move or a comment
+# repair.
 #
 # =============================================================================
 # Usage

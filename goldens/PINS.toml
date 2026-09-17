@@ -17,14 +17,20 @@
 # existing key, so a section missing e.g. sha256_hwrt makes the script throw; seed it with PENDING
 # first.
 #
-# HOST, 2026-09-10: every [<pin>.env] block below now pins
+# HOST, 2026-09-10 (default-host clause and the golden.ps1 citation both re-derived 2026-09-18):
+# every [<pin>.env] block below now pins
 # RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-msvc", moved in the same change as the rest of
-# this tree's Windows recipes. (The workstation's rustup DEFAULT host is still
-# x86_64-pc-windows-gnu on 2026-09-10; moving it is a later, owner-run step.) It had to move
-# HERE and not only in rustup, and it would still have had to after that step: golden.ps1
-# SETS every key of a pin's env block explicitly (:143-150), so a pin that still named the gnu
-# toolchain would have kept the golden leg building gnu after the switch -- a split state the
-# script's own "never inherit" discipline would have hidden rather than exposed.
+# this tree's Windows recipes. (On 2026-09-10 the workstation's rustup DEFAULT host was still
+# x86_64-pc-windows-gnu, and moving it was recorded here as a later, owner-run step. That step
+# ran on 2026-09-17 14:27 -- MEASURED 2026-09-18, `rustup toolchain list` prints
+# `stable-x86_64-pc-windows-msvc (active, default)`.) It had to move HERE and not only in rustup,
+# and it still had to after that step: golden.ps1 SETS every key of a pin's env block explicitly
+# (the loop at :147-154, whose `Set-Item` is :151), so a pin that still named the gnu toolchain
+# would have kept the golden leg building gnu after the switch -- a split state the script's own
+# "never inherit" discipline would have hidden rather than exposed. ⚠ That citation read
+# `:143-150` until 2026-09-18, which is the tail of the env-WIPE loop (:141-146, which only
+# Remove-Items stray BOYKO_* vars) plus the head of the set loop, and stops one line SHORT of the
+# `Set-Item` the sentence is about -- it cited neither of the two things it names.
 #
 # ⚠ THE sha256_* VALUES BELOW WERE ALL BLESSED ON THE windows-gnu HOST. Whether an msvc build
 # of the same source dumps the same bytes is UNMEASURED at this commit (no golden was run in

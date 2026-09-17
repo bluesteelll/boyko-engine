@@ -49,23 +49,35 @@ plan5 — **nine of them, across four plan5 sections, are corrected below** (§C
 
 ⚠ **Every Miri command below spells `+nightly-x86_64-pc-windows-gnu`.** The reason recorded here
 during the campaign — "`cargo +nightly` resolves to `nightly-x86_64-pc-windows-MSVC` on this box and
-dies in the linker with exit 1, which is indistinguishable from *the gate is red*" — is **false as
-of 2026-09-10**, in both halves. Bare `+nightly` DID resolve to the msvc nightly when the sentence
-was written (MEASURED 2026-09-04), but `~/.rustup/settings.toml` was rewritten on 2026-09-07 13:56
-(file mtime) and has read `default_host_tuple = "x86_64-pc-windows-gnu"` since, so a bare
-`+nightly` now selects the **gnu** nightly; and the msvc toolchain links (see `KE16-RESULTS.md`
-§0 for both receipts). ⚠ The rustup default host has NOT moved to msvc — that is a later,
-owner-run step; only this tree's recipes moved, and they spell the triple. The full spelling stays for a live
-reason: the gnu nightly carries miri **2026-08-20** and the msvc nightly **2026-05-29**, and every
-Tree-Borrows result in this file came from the former.
+dies in the linker with exit 1, which is indistinguishable from *the gate is red*" — went **false on
+2026-09-10** in both halves, and one of those halves has since gone true again. Bare `+nightly` DID
+resolve to the msvc nightly when the sentence was written (MEASURED 2026-09-04);
+`~/.rustup/settings.toml` was rewritten on 2026-09-07 13:56 (file mtime) and read
+`default_host_tuple = "x86_64-pc-windows-gnu"` until **2026-09-17 14:27**, when the owner ran
+`rustup set default-host x86_64-pc-windows-msvc` — so MEASURED 2026-09-18 a bare `+nightly` selects
+the **msvc** nightly once more. ⚠ This paragraph said until 2026-09-18 that a bare `+nightly` "now
+selects the **gnu** nightly" and that "the rustup default host has NOT moved to msvc — that is a
+later, owner-run step". The step ran. The linker half stays dead: the msvc toolchain links (see
+`KE16-RESULTS.md` §0 for both receipts). What never moved through any of this is the recipes'
+explicit triples, which is the entire argument for spelling them.
+
+The full spelling stays — but **not** for the reason written here until 2026-09-18 ("the gnu nightly
+carries miri **2026-08-20** and the msvc nightly **2026-05-29**"). MEASURED 2026-09-18 with
+`RUSTUP_TOOLCHAIN` unset, `cargo +nightly-x86_64-pc-windows-gnu miri --version` answers
+`miri 0.1.0 (8925ea358a 2026-08-20)` and `cargo +nightly-x86_64-pc-windows-msvc miri --version`
+answers `miri 0.1.0 (a36d05efab 2026-09-09)` — the msvc one is three weeks **newer**, so currency now
+argues against the pin rather than for it. It holds on **receipt continuity**: every Tree-Borrows
+result in this file came from the gnu nightly's miri, and re-spelling the recipes would swap the
+checker underneath those results instead of re-deriving them.
 
 ⚠ **`RUSTFLAGS` must never be set** — `.cargo/config.toml` in this worktree carries the ISA
 baseline on a `[target.<host triple>] rustflags` key (one for each Windows triple), and setting the
 environment variable *replaces* it. Where `--cfg loom` is needed it goes through `cargo --config
 target."cfg(windows)".rustflags=[…]`, which JOINS — re-keyed 2026-09-10 from the gnu triple, which
 after the host switch would match nothing and yield a model-free `running 0 tests`, exit 0. The same asymmetry applies to
-`MIRIFLAGS`: `.cargo/config.toml:36-37` sets `MIRIFLAGS = "-Zmiri-tree-borrows"`, and an
-environment `MIRIFLAGS` replaces rather than extends it.
+`MIRIFLAGS`: `.cargo/config.toml`'s `[env]` block (`:62-63`, re-derived 2026-09-18 after that file's
+header grew) sets `MIRIFLAGS = "-Zmiri-tree-borrows"`, and an environment `MIRIFLAGS` replaces rather
+than extends it.
 
 ---
 
@@ -769,7 +781,8 @@ are `src/task/scoped.rs:222-268` and `:270-309` (each opens a `ScopeBlock::new()
 and calls `block.free_all()` at `:267`/`:308`), with detached siblings at
 `src/task/detached.rs:165-196` and `:197+`. The recipe is stated at `src/task/mod.rs:385-393` —
 `MIRIFLAGS` **without** `-Zmiri-ignore-leaks`, which is already the tree's default
-(`.cargo/config.toml:36-37` = `-Zmiri-tree-borrows`; CI's Miri job sets no `MIRIFLAGS` at all).
+(`.cargo/config.toml`'s `[env]` block, `:62-63` as re-derived 2026-09-18, = `-Zmiri-tree-borrows`;
+CI's Miri job sets no `MIRIFLAGS` at all).
 
 ```
 cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool --lib -- task::scoped::tests
@@ -970,8 +983,11 @@ R0b and R2's exact equalities are the decision.
 **10. ⚠ Every Miri command in this file spells `+nightly-x86_64-pc-windows-gnu`.** The reason given
 here during the campaign ("`cargo +nightly` resolves to MSVC on this box and dies in the linker with
 exit 1, indistinguishable from a red gate") no longer holds — corrected 2026-09-10, receipt in
-`KE16-RESULTS.md` §0. The spelling stays because the two installed nightlies' miri builds are three
-months apart (gnu 2026-08-20, msvc 2026-05-29) and this file's results are the gnu one's.
+`KE16-RESULTS.md` §0 — and its 2026-09-10 replacement ("the two installed nightlies' miri builds are
+three months apart, gnu 2026-08-20, msvc 2026-05-29") has since INVERTED: MEASURED 2026-09-18, gnu is
+`miri 0.1.0 (8925ea358a 2026-08-20)` and msvc is `miri 0.1.0 (a36d05efab 2026-09-09)`, the msvc one
+three weeks **newer**. The spelling stays on **receipt continuity** — this file's results are the gnu
+miri's, and swapping the checker would leave a rerun's disagreement unattributable.
 
 **11. ⚠ A citation rotted inside a file whose content did not change.** plan5's `:284-289` for M1's
 3/4 was correct at `d647d930` and shifted +12 lines when 3y added a counter *above* it. This is the

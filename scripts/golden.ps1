@@ -158,13 +158,13 @@ foreach ($k in $pins.Keys) {
 # actually live, and hide the window so the audit never parks a window on the desktop.
 # Everything else stays the pin's truth.
 #
-# BOYKO_ENABLE_VALIDATION is not redundant with the strip, and the difference was measured, not
-# assumed. The backend gates the layer on `enable_validation && BOYKO_DISABLE_VALIDATION unset`
-# (boyko_rhi_vulkan/src/device.rs:2362), and boyko_app's runner hardcoded the first conjunct to
-# `false`. Stripping alone therefore enabled NOTHING on all 22 boyko-app pins -- this switch
-# reported "VALIDATION: clean (0 messages)" unconditionally, a gate that could not fail. Proof:
-# a deliberately illegal `mip_levels: 12` on a 512x512 image (max 10) was accepted by
-# vkCreateImage and drew zero messages. See docs/OPEN-QUESTIONS.md.
+# BOYKO_ENABLE_VALIDATION is not redundant with the strip, and the difference was measured. The backend gates the
+# layer on `enable_validation && BOYKO_DISABLE_VALIDATION unset`: `fn validation_requested`,
+# boyko_rhi_vulkan/src/device.rs:2543 (re-derived 2026-09-18 -- this cited :2362 until then, a `message_severity:`
+# field inside the debug-messenger create-info initializer, not a gate). boyko_app's runner USED TO hardcode the
+# first conjunct to `false`, so stripping alone enabled NOTHING on all 22 boyko-app pins -- a "VALIDATION: clean
+# (0 messages)" verdict that could not fail (an illegal `mip_levels: 12` drew zero; docs/OPEN-QUESTIONS.md). The
+# runner is ENV-GATED now (crates/boyko_app/src/runner.rs:221), so SETTING the variable -- not the strip -- arms it.
 if ($ValidationOn) {
     Remove-Item Env:BOYKO_DISABLE_VALIDATION -ErrorAction SilentlyContinue
     $env:BOYKO_ENABLE_VALIDATION = '1'

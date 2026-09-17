@@ -40,14 +40,28 @@
 # setting, NOT a pin in the tree — writing `stable-x86_64-pc-windows-msvc` here
 # would break every Linux job that shares this file.
 #
-# ⚠ STATE OF THE MACHINE, 2026-09-10: `rustup toolchain list` prints
-# `stable-x86_64-pc-windows-gnu (active, default)` and `~/.rustup/settings.toml`
-# reads `default_host_tuple = "x86_64-pc-windows-gnu"`. The default host has NOT
-# been switched yet — `rustup set default-host x86_64-pc-windows-msvc` is a
-# separate, owner-run step. Every msvc recipe in the tree therefore spells
+# ⚠ STATE OF THE MACHINE, 2026-09-18: THE DEFAULT HOST HAS NOW BEEN SWITCHED.
+# MEASURED today: `~/.rustup/settings.toml` (mtime 2026-09-17 14:27) reads
+# `default_host_tuple = "x86_64-pc-windows-msvc"` and
+# `default_toolchain = "stable-x86_64-pc-windows-msvc"`, and `rustup toolchain list`
+# prints `stable-x86_64-pc-windows-msvc (active, default)`.
+#
+# The dated record this replaces, kept because it is one: on 2026-09-10 the same
+# two probes read `stable-x86_64-pc-windows-gnu (active, default)` and
+# `default_host_tuple = "x86_64-pc-windows-gnu"`, and this paragraph said the
+# default host had NOT been switched yet and that
+# `rustup set default-host x86_64-pc-windows-msvc` was a separate, owner-run step.
+# That was accurate on its date; the owner ran that step on 2026-09-17.
+#
+# THE SWITCH IS WHY SPELLING THE TOOLCHAIN WAS WORTH IT — it is not a reason to
+# stop. Every msvc recipe in the tree spells
 # `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc` explicitly (env BEATS this file,
-# measured 2026-09-07) rather than relying on the default, and stays correct
-# whichever way the default sits.
+# measured 2026-09-07) rather than relying on the default. Not one of them needed
+# an edit on 2026-09-17, and each means exactly the same thing before and after it.
+# That argument is worth MORE now, not less: by this tree's own records the default
+# host has been rewritten TWICE in eleven days (msvc → gnu at 2026-09-07 13:56,
+# gnu → msvc at 2026-09-17 14:27, both by settings-file mtime), so a recipe that
+# reads the default depends on a value that moves with no commit to notice.
 #
 # Components are deliberately NOT listed: each CI job declares the ones it needs
 # (clippy, llvm-tools, miri, rustfmt), and listing them here would make every job

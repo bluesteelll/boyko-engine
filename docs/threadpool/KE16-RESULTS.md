@@ -70,26 +70,46 @@ indistinguishable from *the gate is red*".
 `default_host_tuple` was msvc then, so a bare `+nightly` did resolve to
 `nightly-x86_64-pc-windows-msvc` and did die in the linker. `~/.rustup/settings.toml` was rewritten
 on **2026-09-07 13:56** (file mtime, read 2026-09-10 — the in-tree `rust-toolchain.toml` campaign)
-and has carried `default_host_tuple = "x86_64-pc-windows-gnu"` since, so from that date a bare
-`+nightly` resolves to the **gnu** nightly, i.e. to the NEWER miri. Do not re-derive the earlier
-state from today's `settings.toml`: the file records the present, not the history. (ii) The linker
+and carried `default_host_tuple = "x86_64-pc-windows-gnu"` from that date until **2026-09-17 14:27**,
+when the owner ran `rustup set default-host x86_64-pc-windows-msvc`. MEASURED 2026-09-18, the file
+reads `default_host_tuple = "x86_64-pc-windows-msvc"` and `rustup toolchain list` prints
+`stable-x86_64-pc-windows-msvc (active, default)`, so a bare `+nightly` selects the **msvc** nightly
+once more. ⚠ Until 2026-09-18 this paragraph ended "so from that date a bare `+nightly` resolves to
+the **gnu** nightly, i.e. to the NEWER miri" — both halves have since expired, the second one as well
+as the first (see the miri versions below). Do not re-derive the earlier state from today's
+`settings.toml`: the file records the present, not the history, which is why both rewrite timestamps
+are written out here rather than left to be recovered. (ii) The linker
 half is gone outright: Build Tools 2022 + Windows SDK 10.0.26100 are installed,
 `stable-x86_64-pc-windows-msvc` is `rustc 1.98.1 (48a229cea 2026-09-01)` (the same commit as
 stable-gnu), and the workspace checks, lints and links under it.
 
-The full spelling stays, for a reason that survives the correction: the two installed nightlies carry
-miri **2026-08-20** (gnu) and **2026-05-29** (msvc), three months apart. Every Tree-Borrows result in
-this campaign, and every committed receipt under `docs/threadpool/receipts/`, came from the gnu one.
+The full spelling stays — and on **2026-09-18** its stated reason had to be replaced as well. That
+reason was currency: the two installed nightlies carried miri **2026-08-20** (gnu) and **2026-05-29**
+(msvc), three months apart, so the pin bought the newer checker for free. MEASURED 2026-09-18 with
+`RUSTUP_TOOLCHAIN` unset, `cargo +nightly-x86_64-pc-windows-gnu miri --version` answers
+`miri 0.1.0 (8925ea358a 2026-08-20)` and `cargo +nightly-x86_64-pc-windows-msvc miri --version`
+answers `miri 0.1.0 (a36d05efab 2026-09-09)`: the msvc nightly's miri is now the **newer** of the
+two, by three weeks. Currency has inverted and now argues *against* the pin.
+
+The pin holds on the reason that was never a fact about version dates — **receipt continuity.** Every
+Tree-Borrows result in this campaign, and every committed receipt under `docs/threadpool/receipts/`,
+came from the gnu nightly's miri. Re-spelling the recipes would swap the checker underneath those
+receipts, so a disagreement between one on disk and a fresh run could not be attributed to the code
+rather than to the instrument. Moving the checker is its own change, carrying its own re-run of the
+receipts.
 
 ### ⚠ msvc is a THIRD compiler line — added 2026-09-10, no row below was touched
 
 On 2026-09-10 this tree's recipes moved from `stable-x86_64-pc-windows-gnu` to
 `stable-x86_64-pc-windows-msvc`, spelled explicitly through `RUSTUP_TOOLCHAIN` (which outranks
-`rust-toolchain.toml` and `rustup default` alike, measured 2026-09-07). ⚠ **The rustup DEFAULT host
-has NOT moved: `rustup toolchain list` still prints `stable-x86_64-pc-windows-gnu (active,
-default)`** as of 2026-09-10, so a command that spells no toolchain still builds gnu. `rustup set
-default-host x86_64-pc-windows-msvc` is a later, owner-run step; nothing here depends on it having
-happened, which is exactly why the recipes pin the triple instead of trusting the default.
+`rust-toolchain.toml` and `rustup default` alike, measured 2026-09-07). ⚠ **On 2026-09-10 the rustup
+DEFAULT host had not moved**: `rustup toolchain list` printed `stable-x86_64-pc-windows-gnu (active,
+default)` on that date, so a command spelling no toolchain still built gnu, and `rustup set
+default-host x86_64-pc-windows-msvc` was recorded here as a later, owner-run step. **That step ran on
+2026-09-17 14:27** (`~/.rustup/settings.toml` mtime) — MEASURED 2026-09-18, `rustup toolchain list`
+prints `stable-x86_64-pc-windows-msvc (active, default)`. Nothing in this document depended on it
+having happened and nothing needed editing when it did, which is exactly why the recipes pin the
+triple instead of trusting the default.
 **No number in this file was re-measured, and none was edited.** Every absolute here is a gnu number: 1.97.1 for the Step-0 / axis-A/B/W/C grids, 1.98.1 for
 the rows taken after 2026-09-09 02:52 (`RUSTC-198-WINDOWS-GNU-TLS.md` says which and why).
 

@@ -205,7 +205,7 @@ where
 /// `BOYKO_ENABLE_VALIDATION` is the opt-in knob that doc deferred to "a later
 /// rung", and it turned out to be load-bearing rather than a convenience. The
 /// backend gates the layer on `enable_validation && BOYKO_DISABLE_VALIDATION
-/// unset` (`device.rs:2350`), so with this flag hardcoded `false` the FIRST
+/// unset` (`device.rs:2543`), so with this flag hardcoded `false` the FIRST
 /// conjunct was always false and stripping the env var could not enable
 /// anything. `scripts/golden.ps1 -ValidationOn` stripped it and reported
 /// "VALIDATION: clean (0 messages)" for all 22 `boyko-app` pins — a gate that
