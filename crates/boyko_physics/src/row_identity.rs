@@ -11,9 +11,10 @@
 //! The gather records the [`EntityId`] of every row and the rows whose `RigidBody` was
 //! added since it last ran. When the rows changed, [`RowIdentity::finish_gather`] builds
 //! `prev_row[r]`: the row the body now in row `r` held one gather ago, or [`NO_ROW`] for
-//! a body that is new. Each consumer carries its state through that map — the latch is
-//! permuted, warm-start and axis reads are translated — and classifies itself through a
-//! [`RemapCursor`], stamped where its state becomes keyed by the current rows.
+//! a body that is new. Each consumer carries its state through that map — the latch and
+//! its island contact key are permuted, warm-start and axis reads are translated — and
+//! classifies itself through a [`RemapCursor`], stamped where its state becomes keyed by
+//! the current rows.
 //!
 //! # `is_added` can arrive one gather late
 //!
@@ -44,8 +45,10 @@
 //! # Deleted by the unification rungs
 //!
 //! U5 (slots, no row ever moves) deletes the aligned walk, stage 2 and the walk budget.
-//! U6 moves the latch into `BodyGate` and deletes [`SleepLatch`]. U7 (`PairCache`) deletes
-//! the rest, and this file with it.
+//! U6 moves the latch into `BodyGate` and deletes [`SleepLatch`]; the island contact key
+//! moves with it (proposed to the unification plan as a separate `BodySleepKey`). U7
+//! (`PairCache`) deletes the rest, and this file with it; its per-pair contact signal also
+//! makes the island contact key deletable.
 //!
 //! [`physics_gather`]: crate::systems::physics_gather
 //! [`IslandSleep`]: crate::resources::IslandSleep
@@ -68,6 +71,15 @@ use crate::scratch_ids::{
 ///
 /// Rows stay below `2^24` (the warm-start key invariant), so `u32::MAX` is never a row.
 pub(crate) const NO_ROW: u32 = u32::MAX;
+
+/// The island contact key of a row that had no island at the last
+/// [`IslandSleep::begin_step`](crate::resources::IslandSleep::begin_step), and the key of a
+/// row whose body held no row one gather ago.
+///
+/// A live key is the number of manifolds filed under one island, and the graph's island
+/// manifold column holds at most `POOL_MAX_ROWS` (at most `2^24`) entries, so a live key
+/// never equals this value.
+pub(crate) const NO_ISLAND_KEY: u32 = u32::MAX;
 
 /// Cold-path mark in `prev_row` for a row the aligned walk could not resolve. Stage 2
 /// replaces every one, so none survives [`RowIdentity::finish_gather`].
@@ -157,10 +169,14 @@ impl RowRemap<'_> {
     }
 }
 
-/// One row's sleep latch: the element of `IslandSleep`'s permute scratch. 4 B, align 2.
+/// One row's sleep latch and island contact key: the element of `IslandSleep`'s permute
+/// carry. 8 B, align 4.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct SleepLatch {
+    /// The number of manifolds filed under the row's island at the last `begin_step`, or
+    /// [`NO_ISLAND_KEY`]. First, so the struct has no interior padding.
+    pub(crate) island_key: u32,
     /// Consecutive frames the row's island has been below the sleep threshold.
     pub(crate) below_count: u16,
     /// Whether the row is latched asleep.
@@ -169,16 +185,25 @@ pub(crate) struct SleepLatch {
 }
 
 impl SleepLatch {
-    /// A latch holding `below_count` and `asleep`.
+    /// A row whose body held no row one gather ago: awake, no debounce, no key.
+    pub(crate) const FRESH: Self = Self::new(0, false, NO_ISLAND_KEY);
+
+    /// A latch holding `below_count`, `asleep` and `island_key`.
     #[inline]
-    pub(crate) const fn new(below_count: u16, asleep: bool) -> Self {
+    pub(crate) const fn new(below_count: u16, asleep: bool, island_key: u32) -> Self {
         Self {
+            island_key,
             below_count,
             asleep,
             _pad: 0,
         }
     }
 }
+
+const _: () = assert!(
+    size_of::<SleepLatch>() == 8 && align_of::<SleepLatch>() == 4,
+    "SleepLatch is the 8 B, align 4 permute carry element"
+);
 
 /// One row-keyed consumer's place in the gather sequence. 16 B, `Copy`, no heap.
 ///
@@ -244,6 +269,10 @@ pub struct WarmSeedStats {
 
 /// Test-only walk counters. Outside `cfg(test)` this is a zero-sized type whose methods
 /// are empty, so the walk carries no counting cost in a shipping build.
+///
+/// Both profiles share one impl whose counting statements are `#[cfg(test)]`-gated: a
+/// second impl under a negated `test` predicate would be read as test-only by
+/// `tests/production_reachability_census.rs`, which refuses that predicate in the tree.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct WalkCounters {
     /// Branches E1–E6 of the aligned walk, in that order.
@@ -257,34 +286,37 @@ pub(crate) struct WalkCounters {
     pub(crate) walk_stalls: u64,
 }
 
-#[cfg(test)]
 impl WalkCounters {
+    /// Counts one pass through branch `E(e + 1)` of the aligned walk.
     #[inline]
     fn branch(&mut self, e: usize) {
-        self.branches[e] += 1;
+        #[cfg(test)]
+        {
+            self.branches[e] += 1;
+        }
+        // The only other reader of `e` is the gated statement above.
+        let _ = e;
     }
 
+    /// Counts one walk whose lookahead budget ran out, if `exhausted`.
     #[inline]
     fn exhaustion(&mut self, exhausted: bool) {
-        self.budget_exhaustions += u64::from(exhausted);
+        #[cfg(test)]
+        {
+            self.budget_exhaustions += u64::from(exhausted);
+        }
+        // The only other reader of `exhausted` is the gated statement above.
+        let _ = exhausted;
     }
 
+    /// Counts one walk that left the bounded loop with rows still unvisited.
     #[inline]
     fn stall(&mut self) {
-        self.walk_stalls += 1;
+        #[cfg(test)]
+        {
+            self.walk_stalls += 1;
+        }
     }
-}
-
-#[cfg(not(test))]
-impl WalkCounters {
-    #[inline]
-    fn branch(&mut self, _e: usize) {}
-
-    #[inline]
-    fn exhaustion(&mut self, _exhausted: bool) {}
-
-    #[inline]
-    fn stall(&mut self) {}
 }
 
 /// The gather's per-row entity identity and the previous-row map built from it. One

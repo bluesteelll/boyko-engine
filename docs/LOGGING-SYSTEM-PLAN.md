@@ -330,7 +330,7 @@ v3's rule was within-file, and the ledger then claimed it excluded 23 in-`src` t
 |---|---|---|---|
 | `crates/boyko_rhi_vulkan/src/compute/tests.rs` | 16 | `#[cfg(test)]` **inside** the file (`:6`, `:138`, `:257`, `:872`, `:1610`, …) | **yes** |
 | `crates/boyko_sdf_math/src/brick/tests.rs` | 3 | parent: `crates/boyko_sdf_math/src/brick.rs:1829-1830` — `#[cfg(test)]` / `mod tests;` | **no** |
-| `crates/boyko_physics/src/solver/colored_tests.rs` | 4 | parent: `crates/boyko_physics/src/solver/colored.rs:3198-3200` — `#[cfg(test)]` / `#[path = "colored_tests.rs"]` / `mod tests;`. The file's only `cfg(test)` match, `:2569`, is inside a **comment** | **no** |
+| `crates/boyko_physics/src/solver/colored_tests.rs` | 4 | parent: `crates/boyko_physics/src/solver/colored.rs:3198-3200` — `#[cfg(test)]` / `#[path = "colored_tests.rs"]` / `mod tests;`. The file's only `cfg(test)` match, `:2522`, is inside a **comment** | **no** |
 
 So 7 of the 23 would be classified as production sites and `print_census.rs` would fail on them — forcing test-only sites into `print_allowlist.txt`, which is exactly the allowlist-laundering this design says it prevents.
 

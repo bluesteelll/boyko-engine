@@ -53,11 +53,19 @@ measurement, not for tidiness.**
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the 164 `#[ignore]`d tests (143 unconditional + 21
-`#[cfg_attr(miri, ignore = …)]`). Every one of them now states its requirement at the site, and
-[tests/ignore_reasons_census.rs](tests/ignore_reasons_census.rs) fails the build if a new one does
-not — a bare `#[ignore]` is the **third** way to make a check disappear, after `unsafe` and
-`#[allow(clippy::disallowed_types)]`, and it now carries a written rationale like the other two.
+The four commands above run **none** of the `#[ignore]`d tests — **280 sites (172 unconditional +
+108 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-17 on this line.** Every one of them now
+states its requirement at the site, and [tests/ignore_reasons_census.rs](tests/ignore_reasons_census.rs)
+fails the build if a new one does not — a bare `#[ignore]` is the **third** way to make a check
+disappear, after `unsafe` and `#[allow(clippy::disallowed_types)]`, and it now carries a written
+rationale like the other two.
+
+⚠️ **Every count in this section is a snapshot and drifts upward with each campaign; the census
+prints the current figure on every run** (`cargo test -p boyko-engine --test ignore_reasons_census
+-- --nocapture` → `[ignore census] N sites (P plain, C cfg_attr) across … .rs files walked`). Its
+`MIN_SITES` is a floor, so a prose count here may drift arbitrarily far and stay green — read the
+run, not this paragraph. The figures below stood at 164 (143 + 21) when the section was written and
+were already stale before this line was added.
 
 **Leg: device-free ignored tests.** Runs on any machine, no GPU, ~0.03 s. **Covers 1 test.**
 
@@ -69,29 +77,42 @@ The output must read `running 1 test`. A `running 0 tests` line is a vacuous pas
 see the `#![cfg(miri)]` trap below, which produced exactly that.
 
 **Leg: device-needing ignored tests.** A machine with the GPU; the orchestrator or the owner runs
-it, per-binary with `--test-threads=1`. **Covers 135 tests** across `boyko_app`, `boyko_render` and
-`boyko_rhi_vulkan`. Four of them need a non-default cargo feature and are not even *compiled*
-otherwise (`--features hwrt` ×3, `--features spec_constant_smoke` ×1); ~131 additionally sit behind
-`#![cfg(windows)]` and vanish on Linux. There is no single command — each binary has its own
-env-var protocol in its module header (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`,
-`BOYKO_WINDOW_FRAMES`, …).
+it, per-binary with `--test-threads=1`. It covered **135 tests** when it was written, across
+`boyko_app`, `boyko_render` and `boyko_rhi_vulkan`; **that count has NOT been re-taken on this
+line**, and it cannot be re-derived from the reason strings (see the ⚠ below), so it is left as the
+historical figure rather than guessed forward. What IS mechanical today: those three crates hold
+**145 of the 172 plain sites** (`boyko_app` 88, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
+2026-09-17), which is the population this leg is drawn from, not the leg itself. Four of them need a
+non-default cargo feature and are not even *compiled* otherwise (`--features hwrt` ×3,
+`--features spec_constant_smoke` ×1); most of the rest additionally sit behind `#![cfg(windows)]`
+and vanish on Linux. There is no single command — each binary has its own env-var protocol in its
+module header (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
-**Leg: Miri.** `cargo +nightly miri test` already carries **22** of the ignores — the 21
-`cfg_attr(miri, …)` sites (which run *natively* and are skipped only under Miri) plus
-`miri_fixed_loop`'s one plain ignore. None of these belong to either leg above.
+**Leg: Miri.** `cargo +nightly miri test` already carries **107** of the ignores (measured
+2026-09-17 on this line) — the **106** `cfg_attr` sites whose cfg is `miri` (103) or `any(miri, …)`
+(3), which run *natively* and are skipped only under Miri, plus `miri_fixed_loop`'s one plain
+ignore. The two remaining `cfg_attr` sites are not Miri's: `profiling/reduce.rs`'s
+`not(debug_assertions)` and `tb_neg_m2w_block_reference.rs`'s `not(all(miri, feature = …))`. None of
+the 107 belong to either leg above.
 
-**Six ignored tests belong to no leg at all**, and must not be swept into one: three *generators*
-that assert nothing and emit source to paste (`dump_maximal_frame_barrier_stream`,
-`dump_vb_unsplit_barrier_streams`, `dump_vb_split_barrier_streams` — the second's own doc warns
-that running it casually re-measures the baselines the split is compared against), two *deferred
-milestones* that are RED by design until M2's JCGT cubic lands
-(`brick_field_is_conservative_lower_bound`, `trilinear_reconstruct_is_a_tight_lower_bound_in_r1`),
-and one *timing probe* documented "NOT a CI gate" (`no_starvation_every_worker_makes_progress`).
+**At least 28 ignored tests belong to no leg at all**, and must not be swept into one. Six were
+enumerated when this section was written: three *generators* that assert nothing and emit source to
+paste (`dump_maximal_frame_barrier_stream`, `dump_vb_unsplit_barrier_streams`,
+`dump_vb_split_barrier_streams` — the second's own doc warns that running it casually re-measures
+the baselines the split is compared against), two *deferred milestones* that are RED by design until
+M2's JCGT cubic lands (`brick_field_is_conservative_lower_bound`,
+`trilinear_reconstruct_is_a_tight_lower_bound_in_r1`), and one *timing probe* documented "NOT a CI
+gate" (`no_starvation_every_worker_makes_progress`). None of those six carries a vocabulary prefix.
+**A further 22 sites do carry one** (21 `deferred:`, 1 `generator:`, measured 2026-09-17), in
+`boyko_ecs` (9), `boyko_serialize` (5), `boyko_physics` (6 — five of them the A4/A7 lane's), and
+`boyko_ui` (2); each is red or silent by design and belongs to no routine leg either. 28 is a floor,
+not a census: the 147 plain reasons that carry no prefix have not been classified.
 
 ⚠️ **The device-free leg is one test, and it is an explicit invocation rather than a filter,
 because the partition CANNOT be derived from the reason strings.** A keyword classifier over
-`{GPU, RTX, Vulkan, windowed, device, dispatch}` puts 10 of the 143 on the device-free side, and
-**8 of those 10 are wrong** — and wrong in the direction that produces a green:
+`{GPU, RTX, Vulkan, windowed, device, dispatch}` put 10 on the device-free side — of the 143 plain
+sites the tree held when the experiment was run, 172 today — and **8 of those 10 are wrong**, wrong
+in the direction that produces a green:
 
 - `negative_chained_barrier_hazard` and `a5_gpu_off_vs_on_wall_clock_ab` **do** need a device; their
   reasons name the *hazard* and the *purpose*, not the requirement. Both call `boot_*_or_skip`, so
@@ -107,9 +128,23 @@ what a prose reason answers. **Making it mechanical takes a reason PREFIX from a
 checked by the same census: `#[ignore = "<class>: <prose>"]` with `class` one of `gpu`,
 `gpu-windowed`, `gpu-cap` (RT / ray-query / `VK_KHR_pipeline_executable_properties`), `feature`,
 `solo` (device-free, needs `--test-threads=1`), `slow` (device-free, wall-clock budget),
-`miri-slow`, `generator`, `deferred`, `flaky`. Today's tree maps onto it exactly — 135 `gpu*`/
-`feature`, 1 `solo`, 1 `miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky` — so the migration is
-mechanical, and afterwards each leg is a `grep` and every new ignore picks its own leg at the site.
+`miri-slow`, `generator`, `deferred`, `flaky`. **The claim that the tree maps onto it "exactly" was
+true of a 143-site tree and is not true now:** that mapping (135 `gpu*`/`feature`, 1 `solo`, 1
+`miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky`) sums to 143 against **172** plain sites today.
+The migration has started at the sites, not in this list: **25 of the 172 plain reasons already
+carry a prefix** — 21 `deferred:`, 2 `gpu-windowed:`, 1 `slow:`, 1 `generator:` (measured
+2026-09-17; at HEAD 17 / 2 / 1 / 0, so the A4/A7 lane's five are the newest sample) — and the other
+147 do not. So the migration is still mechanical *per site*, and afterwards each leg is a `grep` and
+every new ignore picks its own leg at the site; what it is not is bookkeeping already done.
+
+⚠️ **One prefix is already being used against its own definition, and a mechanical leg built from
+it would run those tests in the wrong place.** `slow` is defined above as *device-free, wall-clock
+budget*, i.e. a `--ignored` leg — but `sleep_settles_box_piles.rs`'s G2, G6 and G7 spell
+`#[cfg_attr(any(miri, debug_assertions), ignore = "slow: …")]`, and that file's module header says
+the opposite for them: they run in the ordinary **release** test run, and `-- --ignored` in a debug
+build is NOT their leg. Harmless while the census only enforces non-emptiness; it bites the day the
+partition becomes a `grep`. Whichever ruling makes the prefixes mechanical has to say which class a
+release-only-but-device-free test takes.
 
 ## Target platform
 

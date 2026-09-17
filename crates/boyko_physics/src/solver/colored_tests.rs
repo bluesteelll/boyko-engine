@@ -2264,8 +2264,8 @@
     }
 
     /// A slept island stays frozen across steps — its body neither drifts nor
-    /// accumulates gravity (the integrate-skip gate). The floor contact is dropped
-    /// while asleep, but the body must not fall.
+    /// accumulates gravity (the integrate-skip gate). The floor contact is emitted on
+    /// every step, including the frozen ones, and the frozen body must not fall.
     #[test]
     fn slept_body_is_frozen_no_drift() {
         let bodies = vec![
@@ -2458,53 +2458,6 @@
         assert!(
             !sleep.is_island_frozen(isl) && !sleep.is_row_asleep(0) && !sleep.is_row_asleep(1),
             "wake_all must wake every row (no island frozen)"
-        );
-    }
-
-    /// Topology change is row-keyed and cannot spuriously freeze a moving island (C3).
-    /// A two-row island latches asleep; then the manifold set splits it into two
-    /// singleton islands AND a brand-new awake row joins one of them. The row latch
-    /// follows the BODY, not the volatile island id, so: the unperturbed singleton
-    /// stays frozen (its row is still latched), and the singleton that gained the new
-    /// awake row is ACTIVE (no spurious freeze of a now-moving partition).
-    #[test]
-    fn topology_split_is_row_keyed_no_spurious_freeze() {
-        let bodies = vec![
-            dyn_sphere(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.5, 0.0), // row 0
-            dyn_sphere(Vec3::new(0.5, 1.0, 0.0), 1.0, 0.5, 0.0), // row 1
-            dyn_sphere(Vec3::new(0.6, 1.0, 0.0), 1.0, 0.5, 0.0), // row 2 (new awake)
-        ];
-        // Frame A: rows 0+1 form one island; row 2 is its own singleton.
-        let ms_a = vec![manifold(0, 1, Vec3::new(1.0, 0.0, 0.0), -0.01, Vec3::new(0.25, 1.0, 0.0))];
-        let graph_a = build_graph(&bodies, &ms_a);
-        let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
-        sleep.begin_step(&graph_a, bodies.len());
-        // Latch rows 0 and 1 asleep (the resting pair); leave row 2 awake.
-        sleep.force_sleep_row(0);
-        sleep.force_sleep_row(1);
-
-        // Frame B: the manifold set SPLITS — 0 alone, and 1+2 now coupled (a new awake
-        // contact). Island ids are re-derived; the row latch is what carries.
-        let ms_b = vec![manifold(1, 2, Vec3::new(1.0, 0.0, 0.0), -0.01, Vec3::new(0.55, 1.0, 0.0))];
-        let graph_b = build_graph(&bodies, &ms_b);
-        sleep.begin_step(&graph_b, bodies.len());
-
-        let isl0 = graph_b.island_of(0);
-        let isl12 = graph_b.island_of(1);
-        // Row 0 alone: still latched ⇒ its singleton island is frozen.
-        assert!(
-            sleep.is_island_frozen(isl0) && !sleep.is_row_awake(0),
-            "the undisturbed latched row must stay frozen across the split"
-        );
-        // Rows 1+2: row 2 is awake (never latched), so their merged island is ACTIVE —
-        // no spurious freeze of a partition that gained a moving row.
-        assert!(
-            isl0 != isl12,
-            "the split must put row 0 in a different island from rows 1+2"
-        );
-        assert!(
-            !sleep.is_island_frozen(isl12) && sleep.is_row_awake(1) && sleep.is_row_awake(2),
-            "an island that gained an awake row must be ACTIVE (no C3 spurious freeze)"
         );
     }
 
@@ -3330,5 +3283,274 @@
             "census scanned {} but found no `{witness}` call-site — the file moved or was \
              rewritten, so an empty hit list proves nothing",
             path.display(),
+        );
+    }
+
+    // ── A4: wake-on-contact-change (design Validation U1–U7, U10) ────────────
+    //
+    // These drive `IslandSleep::begin_step` over hand-built graphs (NO schedule, NO
+    // threadpool), so they run native and under Miri. A row's island contact key is the
+    // number of manifolds filed under its island; a latched row whose key changed is
+    // unlatched. Every dynamic row is an island node (a lone dynamic row is a singleton
+    // island with key 0); only a static row has no island.
+
+    use crate::resources::DEFAULT_SLEEP_FRAMES;
+
+    /// A touching single-point manifold between rows `a` and `b` (the geometry is
+    /// irrelevant to `begin_step`, which only counts manifolds per island).
+    fn contact(a: u32, b: u32) -> Manifold {
+        manifold(a, b, Vec3::new(1.0, 0.0, 0.0), -0.01, Vec3::ZERO)
+    }
+
+    /// `n` dynamic unit spheres at rest, spaced along `x`.
+    fn dyn_rows(n: usize) -> Vec<BodyState> {
+        (0..n)
+            .map(|i| dyn_sphere(Vec3::new(i as f32 * 3.0, 1.0, 0.0), 1.0, 0.5, 0.0))
+            .collect()
+    }
+
+    /// "Freeze": `begin_step`, latch `rows`, `begin_step` again, and prove each latched
+    /// row's island is frozen (the anti-vacuity half every test below starts from).
+    fn freeze_rows(sleep: &mut IslandSleep, graph: &ConstraintGraph, n_rows: usize, rows: &[usize]) {
+        sleep.begin_step(graph, n_rows);
+        for &row in rows {
+            sleep.force_sleep_row(row);
+        }
+        sleep.begin_step(graph, n_rows);
+        for &row in rows {
+            assert!(
+                sleep.is_island_frozen(graph.island_of(row as u32)),
+                "anti-vacuity: row {row} was latched and its island must be frozen before the change"
+            );
+        }
+    }
+
+    /// U1. Rows 0 and 1 are latched together; the only manifold of row 0 goes away (it
+    /// moves to rows 1 and 2), so row 0's island count falls 1 → 0 and row 0 must wake.
+    #[test]
+    fn a_latched_island_that_loses_its_only_contact_wakes() {
+        let bodies = dyn_rows(3);
+        let g_a = build_graph(&bodies, &[contact(0, 1)]);
+        let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
+        freeze_rows(&mut sleep, &g_a, bodies.len(), &[0, 1]);
+
+        let g_b = build_graph(&bodies, &[contact(1, 2)]);
+        sleep.begin_step(&g_b, bodies.len());
+        assert_eq!(
+            (
+                sleep.is_row_asleep(0),
+                sleep.is_row_awake(0),
+                sleep.is_island_frozen(g_b.island_of(0)),
+                sleep.contact_wakes(),
+            ),
+            (false, true, false, 1),
+            "a latched row whose island lost its only manifold must wake on that step: \
+             (latched, awake, island frozen, contact_wakes)"
+        );
+        // C3 half: row 1 kept its count (1 → 1) but now shares an island with the
+        // never-latched row 2, so the island is active.
+        assert_eq!(
+            (
+                sleep.is_island_frozen(g_b.island_of(1)),
+                sleep.is_row_awake(1),
+                sleep.is_row_awake(2),
+            ),
+            (false, true, true),
+            "C3: the island rows 1 and 2 form must be active: (frozen, row 1 awake, row 2 awake)"
+        );
+    }
+
+    /// U2. The island ids renumber (row 2's island is id 1 before and id 2 after, and
+    /// the island count changes 4 → 3) while the latched pair {2, 3} keeps its one
+    /// manifold: nothing may wake.
+    #[test]
+    fn island_renumbering_alone_does_not_wake_a_latched_island() {
+        let bodies = dyn_rows(6);
+        let g_a = build_graph(&bodies, &[contact(0, 1), contact(2, 3)]);
+        let g_b = build_graph(&bodies, &[contact(2, 3), contact(0, 4), contact(0, 5)]);
+        assert_eq!(
+            (g_a.island_of(2), g_b.island_of(2), g_a.n_islands(), g_b.n_islands()),
+            (1, 2, 4, 3),
+            "construction: the latched pair's island id and the island count must both change \
+             between the two graphs: (id before, id after, islands before, islands after)"
+        );
+
+        let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
+        freeze_rows(&mut sleep, &g_a, bodies.len(), &[2, 3]);
+        sleep.begin_step(&g_b, bodies.len());
+        assert_eq!(
+            (
+                sleep.is_island_frozen(g_b.island_of(2)),
+                sleep.is_row_awake(2),
+                sleep.is_row_awake(3),
+                sleep.contact_wakes(),
+            ),
+            (true, false, false, 0),
+            "a renumbered island whose manifold count is unchanged must stay frozen: \
+             (frozen, row 2 awake, row 3 awake, contact_wakes)"
+        );
+    }
+
+    /// U3. After U1's wake, an `end_step` at rest must not re-latch row 0 on the same
+    /// step: the wake restarts the debounce.
+    #[test]
+    fn a_contact_loss_wake_restarts_the_debounce() {
+        let bodies = dyn_rows(3);
+        let g_a = build_graph(&bodies, &[contact(0, 1)]);
+        let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
+        freeze_rows(&mut sleep, &g_a, bodies.len(), &[0, 1]);
+        let g_b = build_graph(&bodies, &[contact(1, 2)]);
+        sleep.begin_step(&g_b, bodies.len());
+        assert!(
+            !sleep.is_row_asleep(0),
+            "construction: row 0 must be woken by the contact change (U1)"
+        );
+
+        // `bodies` are at rest, so row 0's island is below the threshold this step.
+        sleep.end_step(&bodies, &g_b, DEFAULT_SLEEP_THRESHOLD, DEFAULT_SLEEP_FRAMES);
+        assert!(
+            !sleep.is_row_asleep(0),
+            "a body woken by a contact change must not re-latch at the same step's end_step: \
+             its debounce must restart from 0, not resume at {DEFAULT_SLEEP_FRAMES}"
+        );
+    }
+
+    /// U4. A static partner arriving under a frozen pair raises its island's count
+    /// 1 → 2 (the dynamic-static manifold is filed under the dynamic side's island).
+    #[test]
+    fn a_static_partner_arriving_wakes_a_frozen_island() {
+        let mut bodies = dyn_rows(2);
+        bodies.push(static_body(Vec3::new(0.0, -1.0, 0.0)));
+        let g_a = build_graph(&bodies, &[contact(0, 1)]);
+        let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
+        freeze_rows(&mut sleep, &g_a, bodies.len(), &[0, 1]);
+
+        let g_b = build_graph(&bodies, &[contact(0, 1), contact(0, 2)]);
+        sleep.begin_step(&g_b, bodies.len());
+        assert_eq!(
+            (
+                sleep.is_row_awake(0),
+                sleep.is_row_awake(1),
+                sleep.is_island_frozen(g_b.island_of(0)),
+                sleep.contact_wakes(),
+            ),
+            (true, true, false, 2),
+            "a static partner arriving must wake the frozen island (a count that rises, not only \
+             one that falls): (row 0 awake, row 1 awake, frozen, contact_wakes)"
+        );
+    }
+
+    /// U5. A body resting on a static support alone: the support's manifold goes away.
+    #[test]
+    fn a_static_partner_leaving_wakes_the_body_it_carried() {
+        let bodies = vec![
+            dyn_sphere(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.5, 0.0),
+            static_body(Vec3::new(0.0, -1.0, 0.0)),
+        ];
+        let g_a = build_graph(&bodies, &[contact(0, 1)]);
+        let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
+        freeze_rows(&mut sleep, &g_a, bodies.len(), &[0]);
+
+        let g_b = build_graph(&bodies, &[]);
+        sleep.begin_step(&g_b, bodies.len());
+        assert_eq!(
+            (sleep.is_row_asleep(0), sleep.is_row_awake(0), sleep.contact_wakes()),
+            (false, true, 1),
+            "a body whose only (static) support left must wake: (latched, awake, contact_wakes)"
+        );
+    }
+
+    /// U6. The latch sets at an `end_step`, and the very next `begin_step` already sees
+    /// the support gone: the onset step is compared too.
+    #[test]
+    fn a_contact_loss_on_the_latch_onset_step_still_wakes() {
+        let bodies = vec![
+            dyn_sphere(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.5, 0.0),
+            static_body(Vec3::new(0.0, -1.0, 0.0)),
+        ];
+        let g = build_graph(&bodies, &[contact(0, 1)]);
+        let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
+        sleep.begin_step(&g, bodies.len());
+        sleep.end_step(&bodies, &g, DEFAULT_SLEEP_THRESHOLD, 1);
+        assert!(
+            sleep.is_row_asleep(0) && sleep.is_row_awake(0),
+            "anti-vacuity: with a one-frame debounce row 0 latches at this end_step while it \
+             was still solved on this step: (latched {}, awake {})",
+            sleep.is_row_asleep(0),
+            sleep.is_row_awake(0)
+        );
+
+        let g_empty = build_graph(&bodies, &[]);
+        sleep.begin_step(&g_empty, bodies.len());
+        assert_eq!(
+            (sleep.is_row_asleep(0), sleep.is_row_awake(0)),
+            (false, true),
+            "a support lost on the step after the latch was set must still wake the body: \
+             (latched, awake)"
+        );
+    }
+
+    /// U7. A row that turns static keeps its latch while it has no island, and the
+    /// `NO_ISLAND_KEY` it stores then clears that latch when it becomes dynamic again.
+    #[test]
+    fn a_row_that_regains_mass_does_not_inherit_a_stale_latch() {
+        let mut bodies = dyn_rows(2);
+        let contacts = [contact(0, 1)];
+        let g = build_graph(&bodies, &contacts);
+        let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
+        freeze_rows(&mut sleep, &g, bodies.len(), &[0, 1]);
+
+        bodies[0].inv_mass = 0.0;
+        let g_static = build_graph(&bodies, &contacts);
+        sleep.begin_step(&g_static, bodies.len());
+        assert!(
+            g_static.island_of(0) == ConstraintGraph::NO_ISLAND && sleep.is_row_asleep(0),
+            "anti-vacuity: row 0 has no island while static and keeps its latch: (island {}, \
+             latched {})",
+            g_static.island_of(0),
+            sleep.is_row_asleep(0)
+        );
+
+        bodies[0].inv_mass = 1.0;
+        let g_back = build_graph(&bodies, &contacts);
+        sleep.begin_step(&g_back, bodies.len());
+        assert_eq!(
+            (sleep.is_row_asleep(0), sleep.is_row_awake(0), sleep.is_row_awake(1)),
+            (false, true, true),
+            "a row returning from a static phase must not be frozen by the latch it carried: \
+             (row 0 latched, row 0 awake, row 1 awake)"
+        );
+    }
+
+    /// U10. A latched row inside an ACTIVE island (its neighbour never latched) loses its
+    /// only link to that island: it must be compared, although its island was not frozen.
+    #[test]
+    fn a_latched_row_whose_awake_support_separates_wakes() {
+        let mut bodies = dyn_rows(2);
+        bodies.push(static_body(Vec3::new(0.0, -1.0, 0.0)));
+        let g_a = build_graph(&bodies, &[contact(0, 1), contact(1, 2)]);
+        let mut sleep = IslandSleep::with_capacity(bodies.len(), bodies.len());
+        sleep.begin_step(&g_a, bodies.len());
+        sleep.force_sleep_row(0);
+        sleep.begin_step(&g_a, bodies.len());
+        assert_eq!(
+            (
+                sleep.is_row_asleep(0),
+                sleep.is_row_asleep(1),
+                sleep.is_island_frozen(g_a.island_of(0)),
+                sleep.is_row_awake(0),
+            ),
+            (true, false, false, true),
+            "anti-vacuity: row 0 is latched inside an active island: (row 0 latched, row 1 \
+             latched, island frozen, row 0 awake)"
+        );
+
+        let g_b = build_graph(&bodies, &[contact(1, 2)]);
+        sleep.begin_step(&g_b, bodies.len());
+        assert_eq!(
+            (sleep.is_row_asleep(0), sleep.is_row_awake(0), sleep.contact_wakes()),
+            (false, true, 1),
+            "a latched row inside an active island must be compared: its support left and it is \
+             now alone: (latched, awake, contact_wakes)"
         );
     }

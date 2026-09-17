@@ -2043,6 +2043,20 @@ split (no parallel data system — the SP4 race remediation put both solvers on 
 - [sdf_query.rs](../crates/boyko_physics/src/sdf_query.rs) — body-vs-SDF via `boyko_sdf_math` (zero readback, zero graphics deps).
 - [scene_sync.rs](../crates/boyko_physics/src/scene_sync.rs) — `boyko_scene` `Transform` ↔ body sync.
 - [resources.rs](../crates/boyko_physics/src/resources.rs) — `PhysicsConfig`, the single tunables `Resource`, plus its three selector enums: `BroadphaseKind` (`AllPairs` default / `Grid`), `BroadphaseSelectMode` (`Manual` default / `Auto`) and `SdfNarrowphaseKernel` (`Scalar` default / `Avx2`). Every kernel choice is a runtime field, never a `cfg` — see the note under **Entry point**.
+- [body_set.rs](../crates/boyko_physics/src/body_set.rs) — the row selection shared by gather, apply and soft apply: `BodySetFilter` / `BodyQuery` and the per-stage data aliases, pinned by signature and const checks and compared once at wire-up (defect A5).
+
+**Sleeping, and defect A4.** `IslandSleep` (in [resources.rs](../crates/boyko_physics/src/resources.rs))
+latches an island asleep after a debounce and skips ONLY its solve + integrate. `begin_step` keys
+each row by its island's manifold count and unlatches a latched row whose key changed, so an island
+that loses its support cannot stay asleep on a stale latch — that is defect A4, gated by
+[tests/sleep_settles_box_piles.rs](../crates/boyko_physics/tests/sleep_settles_box_piles.rs) and
+[tests/support_loss_wakes_sleepers.rs](../crates/boyko_physics/tests/support_loss_wakes_sleepers.rs).
+Its price is unmeasured: the bench is
+[benches/sleeping_pipeline.rs](../crates/boyko_physics/benches/sleeping_pipeline.rs) and the entry
+that runs it is §8 of [MEASUREMENT-QUEUE.md](MEASUREMENT-QUEUE.md). Two defects found beside it —
+A7 (a resting box pyramid creeps; piles of height ≥ 7 never come to rest, with `contact_wakes == 0`,
+so A4 is not involved) and A7a (a quarter-overlap face contact repeats a feature id, so two
+warm-start keys collide) — are open and recorded in [OPEN-QUESTIONS.md](OPEN-QUESTIONS.md).
 
 **Entry point:** `add_physics_systems` (+ `_soft` / `_soft_colored` / `_sdf` /
 `_with_scene_sync` variants) adds the fixed-step pipeline to a `ScheduleBuilder`.

@@ -18,6 +18,70 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-09-17 — Physics defects A7 and A7a: a resting box pyramid creeps sideways, and a quarter-overlap face contact repeats a feature id
+
+Found while closing defect A4 (the sleep latch that survived the loss of support) and defect A5
+(`physics_apply` writing into another body's row). **Neither is A4's or A5's to fix**, and both were
+about to exist only in `#[ignore]` reason strings, so they are written down here before the lane
+closes. This entry is the record a future session finds by grepping `docs/` for open physics
+defects; the four tests below are red BY DESIGN until the A7 lane lands.
+
+### A7 — a resting box pyramid creeps sideways, and tall piles never come to rest
+
+**What is measured** (msvc release, 2026-09-17; displacements and step counts, no timing):
+
+- Jolt's height-15 pyramid (1240 boxes, layer gap 0, `PhysicsConfig::sleeping = false`) creeps with
+  a fixed (−x, −z) bias. Largest horizontal displacement of any box between step 600 and step 3000,
+  after the vertical settle is over: **D_max = 0.6361069 m**, against the test's bound of 0.01 m
+  (`CREEP_BOUND_M`, two of Box2D's `B2_LINEAR_SLOP`). Sixty-three times the bound is not slop.
+- Piles of height **7 or more never reach a 60-step quiet window**: the contact set keeps changing
+  at rest, so the sleep debounce never completes. Heights 4, 5 and 6 do settle (6 only with the
+  flicker budget, G8).
+- **This clears A4 of it.** Those non-settling runs record `contact_wakes == 0`: no contact-change
+  wake fires at all, so the wake-on-contact-change comparison A4 added is not what keeps them
+  awake. A future session must NOT re-open A4 for the height ≥ 7 non-settling; that reading was
+  taken and it excludes A4.
+
+**Red-first tests** — all in `crates/boyko_physics/tests/sleep_settles_box_piles.rs`, each carrying
+`#[ignore = "deferred: …"]` with its own release-mode re-run command:
+
+- `a_resting_jolt_pyramid_does_not_creep_with_sleeping_off` (A7-R1) — the creep bound above. Its
+  window opens with a standing guard (`STANDING_DROP_M`) so a collapsed-and-resting pile cannot
+  satisfy the bound by having nothing left to move.
+- `a_jolt_scale_box_pyramid_freezes` (A7-R2) — the height-15 pile freezes and holds.
+- `a_height_6_box_pyramid_freezes` (G8) — the height-6 pile freezes and holds; red today because
+  onset flicker keeps it awake.
+
+### A7a — a quarter-overlap face contact repeats a feature id, so two warm-start keys collide
+
+**What is measured:** of the four quarter-overlap face-contact offsets a box pile produces
+(`(±1, ±1)` between two unit boxes overlapping by 1 mm), **3 of 4 repeat a feature id** inside one
+manifold. The warm-start key is `pack(a, b, feature_id)`, so two points of the same manifold hash to
+the same key and `WarmStartTable::insert` overwrites one with the other — the pile's layer-to-layer
+contact loses a point's accumulated impulse every step. Clipped points inherit `min(prev, cur)`
+corner ids, which is where the collision comes from.
+
+**Red-first test:** `a_quarter_overlap_face_contact_has_distinct_feature_ids` (A7-R0), same file.
+It is device-free and schedule-free, so it runs in either profile and under Miri.
+
+### What is NOT decided
+
+1. **Whether A7 and A7a are one defect or two.** A repeated feature id costs warm-start impulse
+   every step on exactly the contacts the creep is measured on, which makes A7a a plausible cause
+   of A7 — but that is an inference, not a measurement. Nothing here establishes it.
+2. **Where the feature-id repair belongs** — the clipper that assigns ids, or the key packing that
+   consumes them. Not investigated.
+3. **A4's Decision 3 (the onset-flicker comparison) is re-decided only AFTER A7**, per the A4
+   round-2 ruling §3.4. Until then a red G2 or G7 is triaged by the four steps in that file's
+   module header and in its failure message — never waived, and never silenced by raising a budget.
+4. **The flicker budgets `G2_MAX_EVENTS` / `G7_MAX_EVENTS` are sized against TODAY's trajectories**
+   (the `flicker_redraw_distribution` generator's 30 height-4 and 56 height-5 draws). A7 will
+   re-draw them; they are re-sized from a fresh generator run at that point, not before.
+5. **No price is attached to any of this.** The A4 bench exists (`§8` of
+   [MEASUREMENT-QUEUE.md](MEASUREMENT-QUEUE.md)) and has never been run.
+
+---
+
 ## 2026-09-09 — Stage 4 reaches an arm the tree says not to touch, and a `ScratchBuildView` that cannot express what the buffer does
 
 Six cohorts have moved this session (`vn_initial` + both `TouchedMask`s, the four warm-start tables,
@@ -27,7 +91,7 @@ silently.
 
 ### 1. The all-pairs broadphase arm carries an explicit DO-NOT
 
-`systems.rs:285-287` reads, verbatim:
+`systems.rs:302-303` reads, verbatim:
 
 > The shipped all-pairs loop, kept VERBATIM so the default path's asm is byte-identical to before O2
 > (the 0%-gate). DO NOT refactor this arm.
@@ -5515,7 +5579,7 @@ editing the crate under test.
 inferred from boyko/Jolt growing with W — but Amdahl predicts that growth too. The curve saturates
 (1.65 → 1.71 from W=4 to W=8), and solving Amdahl at W=8 gives a **serial fraction of 0.43–0.53** of the
 serial step if the parallel part were perfect. The serial candidates are real and large: `physics_narrowphase`
-(`systems.rs:357`) is a plain serial system building box-box manifolds for every pair; the broadphase is
+(`systems.rs:369`) is a plain serial system building box-box manifolds for every pair; the broadphase is
 serial at 1240 bodies (`MIN_PARALLEL_BODIES = 4096`); and this file's own 2026-09-09 entry records the pyramid
 as "many NARROW colours" — colours under 256 slots solve INLINE, so part of the solve itself is serial. And
 `MIN_SLOTS_PER_CHUNK = 64` caps chunks at slots/64: a ~500-slot colour yields 9 chunks, so 8 lanes get a

@@ -42,9 +42,10 @@
 
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::into_system::IntoSystem;
 
-use boyko_physics::components::{ColliderShape, RigidBody};
+use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::resources::{
     BodyState, BroadphaseGrid, ContactPairs, PhysicsConfig, SolverScratch,
@@ -287,6 +288,55 @@ fn sphere_state(position: Vec3, velocity: Vec3, radius: f32, inv_mass: f32) -> B
         is_sensor: false,
         shape: ColliderShape::Sphere { radius },
     }
+}
+
+/// Spawns one body-set member — `RigidBody` + `RigidBodyMass` + `Collider`, the rows
+/// `physics_soft_rigid_apply`'s `BodyQuery` walks — whose columns carry `state`'s values
+/// (`Collider` on layer and mask 1).
+///
+/// The kernel-direct coupling gates run no gather, so only the columns are mirrored: the
+/// `Simulated` / `Kinematic` / `Sensor` bits of `state` are not set on the entity. Every
+/// member lands in the one three-column archetype, so walk rows follow spawn order.
+fn spawn_body_row(world: &mut EcsMaster, state: &BodyState) -> Entity {
+    fn as_bytes<T>(value: &T) -> &[u8] {
+        // SAFETY: `value` is a live, initialised `#[repr(C)]` physics component borrowed for
+        // the slice's whole lifetime; the slice covers exactly its `size_of::<T>()` bytes,
+        // read-only, and `create_entity` only copies those bytes into the column that stores
+        // a `T` with this layout.
+        unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) }
+    }
+    let body = RigidBody {
+        position: state.position,
+        linear_velocity: state.linear_velocity,
+        rotation: state.rotation,
+        angular_velocity: state.angular_velocity,
+    };
+    let mass = RigidBodyMass {
+        inv_inertia: state.inv_inertia,
+        inv_mass: state.inv_mass,
+        restitution: state.restitution,
+        friction: state.friction,
+    };
+    let collider = Collider {
+        shape: state.shape,
+        layer: 1,
+        mask: 1,
+    };
+    let arch = world.create_archetype(&[
+        RigidBody::component_id(),
+        RigidBodyMass::component_id(),
+        Collider::component_id(),
+    ]);
+    world
+        .create_entity(
+            arch,
+            &[
+                (RigidBody::component_id(), as_bytes(&body)),
+                (RigidBodyMass::component_id(), as_bytes(&mass)),
+                (Collider::component_id(), as_bytes(&collider)),
+            ],
+        )
+        .expect("invariant: the body-set archetype accepts its three columns")
 }
 
 /// Installs the coupling resources (`SolverScratch.bodies` snapshot + a BUILT
@@ -624,23 +674,12 @@ fn soft_is_deterministic_sp2() {
         // A DYNAMIC rigid sphere below the cube so the coupling path is LIVE (the
         // contact resolves every substep), exercising the coupled velocity baseline
         // AND the reaction that lands on the RigidBody component. The snapshot row
-        // count must match the live RigidBody count (the pipeline contract the
-        // `physics_soft_rigid_apply` debug_assert enforces): spawn ONE matching
-        // RigidBody for the ONE snapshot body.
+        // count must match the number of body-set members `physics_soft_rigid_apply`
+        // walks (the pipeline contract its debug_assert enforces): spawn ONE body-set
+        // member, built from the ONE snapshot row.
         let sphere_pos = Vec3::new(0.0, 0.0, 0.0);
         let bodies = vec![sphere_state(sphere_pos, Vec3::ZERO, 0.6, 1.0)];
-        let rb_arch = world.create_archetype(&[RigidBody::component_id()]);
-        world
-            .spawn_one(
-                rb_arch,
-                RigidBody {
-                    position: sphere_pos,
-                    linear_velocity: Vec3::ZERO,
-                    rotation: Quat::IDENTITY,
-                    angular_velocity: Vec3::ZERO,
-                },
-            )
-            .expect("RigidBody archetype accepts a RigidBody");
+        spawn_body_row(&mut world, &bodies[0]);
         install_soft_config(
             &mut world,
             1.0 / 60.0,
@@ -701,21 +740,16 @@ fn coupling_resolves_contact_and_moves_dynamic_body() {
     // fires): set prev so the substep velocity baseline points into the sphere.
     body.vel_y[0] = -2.0;
 
-    // Spawn a real RigidBody component so the apply path can land the reaction on it.
+    // Spawn a real body-set member so the apply path can land the reaction on it.
     let mut world = EcsMaster::new();
     spawn_soft(&mut world, body);
-    // The matching RigidBody component (dense row 0 — the SAME order physics_apply
-    // walks). Light (inv_mass 4.0 ⇒ mass 0.25), so the reaction visibly moves it.
-    let rb_arch = world.create_archetype(&[RigidBody::component_id()]);
-    let rb = RigidBody {
-        position: Vec3::new(0.0, 0.0, 0.0),
-        linear_velocity: Vec3::ZERO,
-        rotation: Quat::IDENTITY,
-        angular_velocity: Vec3::ZERO,
-    };
-    world
-        .spawn_one(rb_arch, rb)
-        .expect("RigidBody archetype accepts a RigidBody");
+    // The rigid snapshot the coupled step reads: a LIGHT dynamic sphere at the origin
+    // (inv_mass 4.0 ⇒ mass 0.25), so the reaction visibly moves it.
+    let bodies = vec![sphere_state(Vec3::new(0.0, 0.0, 0.0), Vec3::ZERO, 0.6, 4.0)];
+    // The matching body-set member, built from that snapshot row: row 0 of the
+    // `BodyQuery` walk `physics_soft_rigid_apply` makes (the rows and order
+    // `physics_gather` snapshots in the pipeline).
+    spawn_body_row(&mut world, &bodies[0]);
 
     install_soft_config(
         &mut world,
@@ -727,9 +761,6 @@ fn coupling_resolves_contact_and_moves_dynamic_body() {
         false,
         true, // coupling ON
     );
-    // The rigid snapshot the coupled step reads: a LIGHT dynamic sphere at the origin
-    // with the SAME inv_mass as the component (so the apply's row matches).
-    let bodies = vec![sphere_state(Vec3::new(0.0, 0.0, 0.0), Vec3::ZERO, 0.6, 4.0)];
     install_coupling_resources(&mut world, bodies);
 
     // Capture the soft particle's pre-step downward momentum (mass = 1/inv_mass = 1).
@@ -814,16 +845,9 @@ fn static_body_unmoved_under_coupling() {
 
     let mut world = EcsMaster::new();
     spawn_soft(&mut world, body);
-    let rb_arch = world.create_archetype(&[RigidBody::component_id()]);
-    let rb = RigidBody {
-        position: Vec3::new(0.0, 0.0, 0.0),
-        linear_velocity: Vec3::ZERO,
-        rotation: Quat::IDENTITY,
-        angular_velocity: Vec3::ZERO,
-    };
-    world
-        .spawn_one(rb_arch, rb)
-        .expect("RigidBody archetype accepts a RigidBody");
+    // STATIC sphere (inv_mass == 0), and the body-set member built from it.
+    let bodies = vec![sphere_state(Vec3::new(0.0, 0.0, 0.0), Vec3::ZERO, 0.6, 0.0)];
+    spawn_body_row(&mut world, &bodies[0]);
 
     install_soft_config(
         &mut world,
@@ -835,8 +859,6 @@ fn static_body_unmoved_under_coupling() {
         false,
         true,
     );
-    // STATIC sphere (inv_mass == 0).
-    let bodies = vec![sphere_state(Vec3::new(0.0, 0.0, 0.0), Vec3::ZERO, 0.6, 0.0)];
     install_coupling_resources(&mut world, bodies);
 
     step_coupled_once(&mut world);
@@ -888,16 +910,8 @@ fn m2_no_stale_reaction_reapply() {
 
     let mut world = EcsMaster::new();
     spawn_soft(&mut world, body);
-    let rb_arch = world.create_archetype(&[RigidBody::component_id()]);
-    let rb = RigidBody {
-        position: Vec3::new(0.0, 0.0, 0.0),
-        linear_velocity: Vec3::ZERO,
-        rotation: Quat::IDENTITY,
-        angular_velocity: Vec3::ZERO,
-    };
-    world
-        .spawn_one(rb_arch, rb)
-        .expect("RigidBody archetype accepts a RigidBody");
+    let bodies = vec![sphere_state(Vec3::new(0.0, 0.0, 0.0), Vec3::ZERO, 0.6, 4.0)];
+    spawn_body_row(&mut world, &bodies[0]);
 
     install_soft_config(
         &mut world,
@@ -909,7 +923,6 @@ fn m2_no_stale_reaction_reapply() {
         false,
         true,
     );
-    let bodies = vec![sphere_state(Vec3::new(0.0, 0.0, 0.0), Vec3::ZERO, 0.6, 4.0)];
     install_coupling_resources(&mut world, bodies);
 
     // Frame 1: live coupling ⇒ the rigid body gains v1.

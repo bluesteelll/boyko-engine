@@ -841,7 +841,7 @@ today holds ten `compile_error!`s, `:82-126`, none naming `tb-neg-m2w`).
 **10. §2.2's physics falsifier — CANNOT BE RUN ON THIS MACHINE NOW.** Both anchors are exact:
 `crates/boyko_physics/src/solver/colored.rs:2817` (`scope.spawn_batch(n_waves, cuts().map(task))`,
 inside `if boyko_threadpool::KE16_SPAWN_BATCH {` at `:2815`) and
-`crates/boyko_physics/src/resources.rs:1879` (same `const` branch at `:1877`). The falsifier is
+`crates/boyko_physics/src/resources.rs:1884` (same `const` branch at `:1882`). The falsifier is
 §2.2's withdrawn claim restated: `emplace` aligns to `align_of::<T>()` only — 8 for every shipped
 body — so a bump makes cell *k* and *k+1* **certainly** adjacent where today two cells of one size
 class merely **probably** share a line. Line sharing is not worse in kind, but it is more frequent in

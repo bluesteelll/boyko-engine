@@ -93,8 +93,15 @@ const SKIP_DIRS: &[&str] = &["target", ".git", ".claude", "graphify-out", "book"
 /// stopped walking, not to track the count.
 const MIN_FILES: usize = 800;
 
-/// Floor on ignore sites found. The tree holds 232 (167 plain + 65 `cfg_attr`); this is well below
-/// it and exists only to catch a detector that stopped detecting.
+/// Floor on ignore sites found. The tree held 280 (172 plain + 108 `cfg_attr`) when measured on
+/// 2026-09-17; this is well below it and exists only to catch a detector that stopped detecting.
+///
+/// The number above is a snapshot and only ever grows — do NOT read it as the current count, and
+/// do not tune this floor to it. `every_ignore_attribute_states_a_reason` prints the live figure on
+/// every run (`-- --nocapture`), which is the only figure a reader should quote. Because this is a
+/// floor, a prose count that drifts upward — here or in `CLAUDE.md` — stays green forever; both
+/// have already done so once (232 was right at `d552be05` and wrong 48 sites later, in the same
+/// lane that edited this file).
 const MIN_SITES: usize = 120;
 
 /// How far past the attribute to look for the `fn` it decorates. Real sites are 1–6 lines away
@@ -121,7 +128,7 @@ enum IgnoreForm {
 enum IgnoreSpelling {
     /// `#[ignore …]`, unconditional.
     Plain,
-    /// `#[cfg_attr(<cfg>, ignore …)]`, conditional on a cfg (in this tree, always `miri`).
+    /// `#[cfg_attr(<cfg>, ignore …)]`, conditional on a cfg (in this tree, usually `miri`).
     CfgAttr,
 }
 

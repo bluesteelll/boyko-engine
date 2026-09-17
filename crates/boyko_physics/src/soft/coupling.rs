@@ -27,12 +27,11 @@
 //! consumed (same-frame symmetric exchange, no lag).
 
 use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
-use boyko_ecs::ecs::core::iters::query::data::Mut;
-use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::ResMut;
 use boyko_macros::Resource;
 
-use crate::components::{ColliderShape, RigidBody};
+use crate::body_set::{BodyQuery, BodySoftApplyData};
+use crate::components::ColliderShape;
 use crate::math::Vec3;
 use crate::resources::{BodyState, BroadphaseGrid};
 use crate::scratch_ids::{
@@ -44,9 +43,11 @@ use crate::soft::solver::LEN_EPS;
 /// Per-body accumulated soft→rigid reaction (SP2 D7), keyed by dense BodyIndex
 /// (the snapshot row).
 ///
-/// Two dense columns — linear `Δv` and angular `Δω` — one row per rigid body in
-/// the SAME order [`SolverScratch::bodies`](crate::resources::SolverScratch) /
-/// `physics_apply` walk. The buffers are RESERVED to body capacity at wire-up and
+/// Two dense columns — linear `Δv` and angular `Δω` — one row per gathered body,
+/// indexed by its [`SolverScratch::bodies`](crate::resources::SolverScratch) snapshot
+/// row. [`physics_soft_rigid_apply`] pairs row `i` with the `i`-th entity of its
+/// [`BodyQuery`] walk, the rows and order the gather snapshots. The buffers are
+/// RESERVED to body capacity at wire-up and
 /// CLEARED (not resized) at the start of each coupled soft step
 /// ([`reset`](Self::reset)), so the coupling path does ZERO per-step heap
 /// allocation in steady state. The reaction lands on the
@@ -509,13 +510,17 @@ fn query_shape(rb: &BodyState, row: u32, particle: Vec3, radius: f32) -> Option<
 /// [`RigidBody`](crate::components::RigidBody) column AFTER `physics_apply` (SP2
 /// D7 apply path).
 ///
-/// Registered `.after(apply)` ONLY on the coupling-wired path. Walks the SAME row↔
-/// body order `physics_apply` uses (`iter_mut().enumerate()` → row = BodyIndex),
-/// deref-writing `linear_velocity += dv_lin[row]` / `angular_velocity +=
-/// dv_ang[row]` through the [`Mut`] guard (so the row's `changed` tick bumps, like
-/// an external force). The reaction lands on the component POST-apply: next frame's
-/// gather re-projects it into the scratch cleanly (IM-1) — the scratch and the
-/// gather are never mutated by the soft pass.
+/// Registered `.after(apply)` ONLY on the coupling-wired path. Walks the body set
+/// with a [`BodyQuery`], the query type `physics_gather` and `physics_apply` take, so
+/// a manual row counter makes walk position `row` the snapshot row (= BodyIndex); on a
+/// frame that produced a reaction the `debug_assert!` below checks the walked row count
+/// against the reaction length, and on an UNCOUPLED frame (an empty reaction) it checks
+/// nothing — there the `if row < reaction.dv_lin.len()` guard is what writes nothing. It
+/// deref-writes `linear_velocity += dv_lin[row]` / `angular_velocity += dv_ang[row]`
+/// through the [`Mut`](boyko_ecs::ecs::core::iters::query::Mut) guard (so the row's
+/// `changed` tick bumps, like an external force). The reaction lands on the component
+/// POST-apply: next frame's gather re-projects it into the scratch cleanly (IM-1) — the
+/// scratch and the gather are never mutated by the soft pass.
 ///
 /// # Stale-reaction safety (SP2 M2)
 ///
@@ -536,7 +541,7 @@ fn query_shape(rb: &BodyState, row: u32, particle: Vec3, radius: f32) -> Option<
 // mutated through a reborrow — the same false-positive the rigid systems document.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_soft_rigid_apply(
-    mut query: Query<Mut<RigidBody>>,
+    mut query: BodyQuery<BodySoftApplyData>,
     mut reaction: ResMut<SoftRigidReaction>,
 ) {
     let reaction = &mut *reaction;

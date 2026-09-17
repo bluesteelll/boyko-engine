@@ -150,6 +150,18 @@ name = "sleeping"
 harness = false
 
 [[bench]]
+# A4 / MEASUREMENT-QUEUE.md §8: what wake-on-contact-change costs on the real colored
+# schedule over Jolt's pyramid - an exactly touching pile with sleeping OFF (`begin_step`
+# never runs, so any movement is a leak), a never-latching pile with sleeping ON (the key
+# loop's store-only path), and a frozen pile whose frozen state is reachable identically on
+# a tree without A4, which is what lets the two trees' frozen steps be compared.
+# Anti-vacuity: the frozen arm's receipt carries the step's manifold count (> 0) and island
+# count, because a CONTACT-FREE pile satisfies its freeze step, its zero `contact_wakes` and
+# its unmoved poses just as well.
+name = "sleeping_pipeline"
+harness = false
+
+[[bench]]
 # O11 SP1: the single-threaded XPBD soft-body step (`physics_soft_step`) over
 # {64, 512} particles — the SP4-parallel baseline. Reports per-step time +
 # throughput; not a pass/fail gate (SP1 is the correctness foundation).

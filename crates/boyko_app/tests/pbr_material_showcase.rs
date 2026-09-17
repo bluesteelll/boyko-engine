@@ -51,7 +51,7 @@
 //! | `BOYKO_AA` | post-process AA mode (`fxaa` \| `smaa` \| `ssaa`) | off |
 //! | `BOYKO_SSAO` | Render P7-Q2 SSAO quality (`low` \| `medium` \| `high`) | off |
 //! | `BOYKO_HOST_DUMP=<path.bmp>` | HOST-LEVEL (`boyko_app::host_dump`): arms the screenshot capture | disabled |
-//! | `BOYKO_DISABLE_VALIDATION=1` | operator convention — NOT read by `run_windowed` (which hardcodes `enable_validation: false` already); kept for uniformity with `boyko_rhi_vulkan`/`boyko_render` test harnesses that DO read it | n/a |
+//! | `BOYKO_DISABLE_VALIDATION=1` | withholds the validation layer in the backend (`validation_requested`, `boyko_rhi_vulkan`'s `device.rs`); `run_windowed` requests the layer only when `BOYKO_ENABLE_VALIDATION` is set, so this matters only alongside that variable | unset |
 //!
 //! Windowed-eval conventions (mirrors `textured_smoke.rs`/`pbr_showcase.rs`):
 //! `#[ignore]` (needs a real windowed GPU device), run with

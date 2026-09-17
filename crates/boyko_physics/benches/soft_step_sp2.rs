@@ -24,9 +24,10 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::into_system::IntoSystem;
 
-use boyko_physics::components::{ColliderShape, RigidBody};
+use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::resources::{
     BodyState, BroadphaseGrid, ContactPairs, PhysicsConfig, SolverScratch,
@@ -153,6 +154,52 @@ fn sphere_state(position: Vec3, radius: f32, inv_mass: f32) -> BodyState {
     }
 }
 
+/// Spawns one body-set member — `RigidBody` + `RigidBodyMass` + `Collider`, the rows
+/// `physics_soft_rigid_apply`'s `BodyQuery` walks — whose columns carry `state`'s values
+/// (`Collider` on layer and mask 1). Only the columns are mirrored (no gather runs here);
+/// every member lands in the one three-column archetype, so walk rows follow spawn order.
+fn spawn_body_row(world: &mut EcsMaster, state: &BodyState) -> Entity {
+    fn as_bytes<T>(value: &T) -> &[u8] {
+        // SAFETY: `value` is a live, initialised `#[repr(C)]` physics component borrowed for
+        // the slice's whole lifetime; the slice covers exactly its `size_of::<T>()` bytes,
+        // read-only, and `create_entity` only copies those bytes into the column that stores
+        // a `T` with this layout.
+        unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) }
+    }
+    let body = RigidBody {
+        position: state.position,
+        linear_velocity: state.linear_velocity,
+        rotation: state.rotation,
+        angular_velocity: state.angular_velocity,
+    };
+    let mass = RigidBodyMass {
+        inv_inertia: state.inv_inertia,
+        inv_mass: state.inv_mass,
+        restitution: state.restitution,
+        friction: state.friction,
+    };
+    let collider = Collider {
+        shape: state.shape,
+        layer: 1,
+        mask: 1,
+    };
+    let arch = world.create_archetype(&[
+        RigidBody::component_id(),
+        RigidBodyMass::component_id(),
+        Collider::component_id(),
+    ]);
+    world
+        .create_entity(
+            arch,
+            &[
+                (RigidBody::component_id(), as_bytes(&body)),
+                (RigidBodyMass::component_id(), as_bytes(&mass)),
+                (Collider::component_id(), as_bytes(&collider)),
+            ],
+        )
+        .expect("invariant: the body-set archetype accepts its three columns")
+}
+
 /// Builds a world with a volume body (tets) or a distance-only body, plus the soft
 /// config + SDF floor.
 fn setup_volume(side: usize, with_tets: bool) -> EcsMaster {
@@ -196,25 +243,17 @@ fn setup_coupled(side: usize) -> EcsMaster {
 
     // A field of dynamic rigid spheres beneath the cloth (one per ~4 particles) so
     // the coupling query resolves real contacts.
+    // Each sphere is a body-set member built from its snapshot row, so
+    // `physics_soft_rigid_apply`'s `BodyQuery` walk visits it at that row.
     let mut bodies = Vec::new();
-    let rb_arch = world.create_archetype(&[RigidBody::component_id()]);
     let span = side as f32;
     let count = (side / 2).max(1);
     for i in 0..count {
         let t = i as f32 / count as f32;
         let pos = Vec3::new((t - 0.5) * span, 0.0, (t - 0.5) * span);
-        bodies.push(sphere_state(pos, 0.4, 4.0));
-        world
-            .spawn_one(
-                rb_arch,
-                RigidBody {
-                    position: pos,
-                    linear_velocity: Vec3::ZERO,
-                    rotation: Quat::IDENTITY,
-                    angular_velocity: Vec3::ZERO,
-                },
-            )
-            .expect("spawn rigid body");
+        let state = sphere_state(pos, 0.4, 4.0);
+        spawn_body_row(&mut world, &state);
+        bodies.push(state);
     }
 
     world.insert_resource(PhysicsConfig {

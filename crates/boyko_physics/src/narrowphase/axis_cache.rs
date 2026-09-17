@@ -58,6 +58,15 @@
 //! single frame of warm-start misses — the same one-frame cost a pair whose row order
 //! flipped, or that names a new body, takes after a row move — while keeping the
 //! steady-state load bounded and every probe chain short.
+//!
+//! # A hint change can wake a sleeping island
+//!
+//! With sleeping on, a hint change can also change whether a frozen island's box pair
+//! produces a manifold, and that wakes the island (`IslandSleep::begin_step`). The hint
+//! can change in two ways. It can be dropped by an order flip, a `Reset` or a clear. It
+//! can also be read from a different entry one step after a row move that the pair spent
+//! without a contact: the pre-read carries the hint for the move step only, and nothing
+//! writes it under the new key.
 
 use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
@@ -241,7 +250,8 @@ impl BoxAxisCache {
     /// A clear drops every entry to [`EMPTY`], costing one frame of warm-start misses
     /// (the same one-frame cost that a pair whose row order flipped, or that names a
     /// new body, takes after a row move) in exchange for a bounded steady-state load
-    /// and short probe chains. When neither
+    /// and short probe chains. With sleeping on, a clear can also wake a frozen island
+    /// (module docs, "A hint change can wake a sleeping island"). When neither
     /// trigger fires, the table is left in place and allocates nothing.
     pub fn begin_frame(&mut self, pairs: usize) {
         let len = next_pow2(2 * pairs.max(1));

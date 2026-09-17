@@ -782,6 +782,56 @@
             }
         }
 
+        /// The per-row island contact key (defect A4), row order.
+        fn keys(sleep: &IslandSleep) -> Vec<u32> {
+            sleep.island_key.as_read_slice().to_vec()
+        }
+
+        fn set_keys(sleep: &mut IslandSleep, values: &[u32]) {
+            assert_eq!(sleep.island_key.len(), values.len(), "test setup: key length");
+            let mut view = sleep.island_key.build_view();
+            view.as_mut_slice().copy_from_slice(values);
+        }
+
+        /// U8 (defect A4): the `Rows` arm permutes the island contact key with the latch.
+        /// A new body reads `NO_ISLAND_KEY` (the value a fresh row must carry, so it can
+        /// never compare equal to a live count), and the key stays sized with the latch.
+        #[test]
+        fn rekey_rows_rows_permutes_the_island_key_with_the_latch() {
+            use crate::row_identity::NO_ISLAND_KEY;
+
+            let mut rows = RowIdentity::with_capacity(0);
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+
+            gather(&mut rows, &[1, 2, 3], &[0, 1, 2]);
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (keys(&sleep), sleep.island_key.len() == sleep.asleep.len()),
+                (vec![NO_ISLAND_KEY; 3], true),
+                "U8 first gather: every new row carries NO_ISLAND_KEY: (keys, key len == latch len)"
+            );
+            set_keys(&mut sleep, &[11, 12, 13]);
+
+            // Growth: ids 3 and 1 move, id 9 is new in row 2, id 2 moves to the end.
+            gather(&mut rows, &[3, 1, 9, 2], &[2]);
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (keys(&sleep), sleep.island_key.len() == sleep.asleep.len()),
+                (vec![13, 11, NO_ISLAND_KEY, 12], true),
+                "U8 growth: each body carries its own key and the new body reads NO_ISLAND_KEY: \
+                 (keys, key len == latch len)"
+            );
+
+            // Shrink: ids 1 and 9 are gone, 2 and 3 swap ends.
+            gather(&mut rows, &[2, 3], &[]);
+            sleep.rekey_rows(&rows);
+            assert_eq!(
+                (keys(&sleep), sleep.island_key.len() == sleep.asleep.len()),
+                (vec![12, 13], true),
+                "U8 shrink: each survivor carries its own key: (keys, key len == latch len)"
+            );
+        }
+
         /// T7 `Identity`: unchanged rows one gather on leave the latch in place, and the
         /// cursor is stamped with the current gather.
         #[test]

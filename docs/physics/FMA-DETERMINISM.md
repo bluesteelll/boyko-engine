@@ -340,7 +340,7 @@ witness) and they run in CI on this tree (section 5.4).
 > coverage is now exactly the four files in the crate that hold an `_mm256_*` call site — verified
 > by scanning, not assumed. Counting `_mm256_<name>(` occurrences on non-comment lines:
 > `solver/simd.rs` 209, `solver/colored.rs` 82, `sdf_simd.rs` 72, `systems.rs` 8. (The fourth
-> census's own doc comment, `solver/colored_tests.rs:3255`, says "85 `_mm256_*` sites" for
+> census's own doc comment, `solver/colored_tests.rs:3208`, says "85 `_mm256_*` sites" for
 > `colored.rs`. That is the raw `grep -c _mm256_` line count, prose included — a looser
 > convention, not a wrong one, but not the same quantity as the 82 above.) A fifth file,
 > `solver/colored_tests.rs`, matches a bare `grep _mm256_` three times and holds **zero** call

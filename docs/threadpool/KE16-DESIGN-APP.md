@@ -16,7 +16,7 @@ the `sync.rs` fence note and the loom fidelity note (§9).
 The three sites compute `lanes = pool.num_threads() + 1` with the rationale "the dispatcher lane
 that called `pool.scope` ALSO work-steals while the scope is open":
 `crates/boyko_physics/src/solver/colored.rs:2628-2640`, `crates/boyko_physics/src/soft/colored.rs:
-991-996`, `crates/boyko_physics/src/resources.rs:1470-1477,1493-1496`. On the production caller the
+991-996`, `crates/boyko_physics/src/resources.rs:1475-1482,1498-1501`. On the production caller the
 lane pool is **1** today and **W** after any A-fix, never W+1: the frame-path dispatcher is parked
 (J11) and the route-(b) joiner is one of the W workers. The `+1` came from the bench route, where the
 external joiner is an extra lane whose share is bimodal and measured, not counted.

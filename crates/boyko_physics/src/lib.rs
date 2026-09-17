@@ -46,6 +46,11 @@
 // above is the check that this is still safe to delete blind.
 #![allow(clippy::missing_const_for_thread_local)]
 
+/// Defect A5: the one row selection ([`body_set::BodyQuery`]) shared by every stage that pairs
+/// its rows with the gathered snapshot by position — `physics_gather`, `physics_apply` and
+/// `physics_soft_rigid_apply` — plus the checks that keep the three in agreement.
+pub mod body_set;
+
 /// Object-category physics bundle presets ([`DynamicBody`], [`Trigger`]) — named
 /// `#[derive(Bundle)]` mixes of scene spatial/render components with this crate's
 /// physics columns (std-lib S6). Cycle-free: physics depends on scene.

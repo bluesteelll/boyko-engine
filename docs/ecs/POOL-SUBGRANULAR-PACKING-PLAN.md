@@ -695,7 +695,7 @@ Every file:line the seven rows above cite was re-read on `46c8e489` before the r
 (`constants.rs:1-7, 40-58, 99-103, 146-158, 160-166, 194-195, 274-335, 347-356, 505-520, 675`;
 `component_pool.rs:197-201, 536, 560-573, 654-680, 3303-3373, 3472, 3632, 3889, 3951`;
 `vm.rs:141, 201-204, 227-231, 234, 279`; `core/log/ring.rs:11-13, 69-84`; `vm_column.rs:32-45,
-134-138, 485-508, 536, 715`; `boyko_physics/src/scratch_ids.rs:851-868`; `inland_store.rs:43, 396`;
+134-138, 485-508, 536, 715`; `boyko_physics/src/scratch_ids.rs:895-912`; `inland_store.rs:43, 396`;
 `benches/d6_commit_vs_faults.rs:113, 162`; `docs/SYSTEMS.md:1898`; `docs/OPEN-QUESTIONS.md:295-304`;
 `book/src/memory/arena.md:87`). The ripgrep of N4 was re-run over `D:/wt/ecsnative/crates` and
 still returns no hit. All seven verdicts and actions stand. Corrections made in this run, each

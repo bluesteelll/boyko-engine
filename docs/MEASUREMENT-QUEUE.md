@@ -215,6 +215,119 @@ timing.
 
 ---
 
+## 7. Physics — what the shared body-set selection costs (defect A5)
+
+**Decides:** whether `physics_apply` / `physics_soft_rigid_apply` / `physics_gather` keep the row
+selection as the table filter `BodySetFilter = (With<RigidBodyMass>, With<Collider>)` inside
+`BodyQuery`, or whether it moves into the data terms. Correctness is gated by
+`apply_row_alignment.rs`, `soft_rigid_apply_row_alignment.rs` and `body_set_selection.rs`;
+this is price only.
+
+The claim under test: a table `With<C>` is archetypal
+(`crates/boyko_ecs/src/ecs/core/iters/query/filter.rs:535`) and its `set_table_*` bodies are
+entirely `if const { C::STORAGE_IS_DENSE }` (same file, `:620-669` — `:671-682` is `filter_fetch`,
+not a `set_table_*` body, so the wider `:620-682` that `body_set.rs:44` cites overshoots by one
+function), so the per-row loop,
+fetch and cursor are unchanged; the only possible residue is one 32-byte fetch initialisation per
+iteration start. Expected B/A = 1.000.
+
+⚠ `benches/sleeping.rs` and `benches/parallel_solve.rs` run no gather and no apply. Do not use them.
+
+```bash
+# Arms: A = d552be05 (the defect), B = the fix. Idle-machine receipt first (§0). No RUSTFLAGS (§1).
+# Run A twice interleaved with B for the A/A spread.
+cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1
+cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/4
+cargo bench -p boyko-physics --bench row_identity_churn -- stable          # sleeping_off and sleeping_on
+cargo bench -p boyko-physics --bench soft_step_sp2 -- soft_step_sp2/coupled # fixture migration A/A
+```
+
+**Rules:**
+- R1: `full_step/*` or `stable/*` B/A median > 1.005 and outside the A/A spread → inspect the release
+  `physics_apply` listing for the filter-fetch initialisation; if present, move the selection into the
+  data terms and re-measure. Do NOT revert to `Query<Mut<RigidBody>>`: that is defect A5.
+- R2: B/A < 0.995 on these scenes → suspect the measurement: they hold no `RigidBody` carrier outside
+  the body set, so the fix removes no work there.
+- R3: `soft_step_sp2/coupled` B/A outside the A/A spread by > 2 % → the fixture migration changed the
+  measured work; investigate before accepting it.
+- R4: if `alloc_frame_census` S1a/S1b/S1c or any `alloc_frame_attribution` row moves at all, stop —
+  the fix is specified to add zero allocations.
+
+**Report:** medians and the A/A spread, both worker counts, both sleeping settings.
+
+---
+
+## 8. Physics — what wake-on-contact-change costs (defect A4)
+
+**Decides:** whether `IslandSleep::begin_step` keeps the per-row island contact key — the extra
+sweep that reads `ConstraintGraph::island_starts()` per row, compares the stored count and stores
+the new one — as shipped, or whether the key has to be folded into the freeze fold that already
+walks the same rows. Correctness is gated by `sleep_settles_box_piles.rs`,
+`support_loss_wakes_sleepers.rs` and `resources_tests.rs`'s `rekey_rows` group; this is price only.
+
+**NO TIMING HAS BEEN TAKEN YET.** The bench exists (`crates/boyko_physics/benches/sleeping_pipeline.rs`,
+`cargo test --release -p boyko-physics --bench sleeping_pipeline` runs its structural checks) and
+the arms below are its three `bench_function` names; no number from it has been recorded anywhere,
+here or in a campaign document. Anything quoted as an A4 price before this entry is run is an
+invention.
+
+⚠ `benches/sleeping.rs` (O8 Gate 9) CANNOT decide this entry. It drives the colored solve directly
+with a fixed manifold set and no schedule, narrowphase or gather, so no island's count can change
+between its steps and no contact-change wake can ever fire: it prices the store-only half on a
+scene where the key is always equal. Use it for the O8 bookkeeping question, not for this one.
+
+**The three arms, and what each holds fixed** (all on Jolt's height-15 pyramid, 1240 dynamic boxes
+on a static floor, one `Schedule::run` per sample, serial pool — so the row is the sleep
+bookkeeping, not dispatch):
+
+- `pyramid_sleeping_off` — exactly touching pile (separation 0), gravity on, **sleeping off**.
+  `begin_step` does not run at all, so a B/A move here is a leak into the default path, not a cost.
+- `pyramid_awake_sleeping_on` — Jolt's pile (separation 0.5), gravity on, sleeping on with
+  `sleep_threshold = 0` so **no island ever latches**. Holds the latch state fixed at "awake": the
+  key loop runs its store-only path on every row, every step. This is the always-on price.
+- `pyramid_frozen_sleeping_on` — exactly touching pile, **gravity off**, default threshold and
+  debounce, stepped until every dynamic row is frozen. Holds the poses AND the contact set fixed:
+  every contact is at separation exactly 0 and every velocity is exactly 0, so the pile latches on
+  the step its debounce completes with or without the wake and freezes in its spawn pose. That is
+  what makes the frozen state reachable identically on arm A and lets the two trees be compared.
+  With gravity on, a pile of this height never comes to rest (defect A7) and the two trees freeze
+  different contact sets, so this arm is gravity-free by necessity, not by preference.
+
+```bash
+# Arms: A = d552be05 with the bench's `contact_wakes` helper body replaced by `0` (see below),
+# B = this tree. Idle-machine receipt first (§0). No RUSTFLAGS (§1).
+# Run A twice interleaved with B to get the A/A spread.
+cargo bench -p boyko-physics --bench sleeping_pipeline   # all three arms
+cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1   # cross-check, no sleeping
+```
+
+**Arm A.** `d552be05` has no `IslandSleep::contact_wakes` counter and no key loop. The bench is
+otherwise portable to it: copy `benches/sleeping_pipeline.rs` and its `[[bench]]` entry over, and
+replace the body of its `contact_wakes` helper with `0` — that helper is the ONLY A4-only code in
+the file. Its frozen arm then asserts the same freeze step, the same unmoved poses and the same
+manifold/island structure, which is the point of the comparison.
+
+**Rules:**
+- R1: `pyramid_sleeping_off` B/A outside the A/A spread → stop. Sleeping is off in that arm, so A4
+  must be unreachable there; a move means the key loop leaked into the default path.
+- R2: `pyramid_awake_sleeping_on` B/A median > 1.01 and outside the A/A spread → the cheap lever
+  first, before any behavioural change: the key sweep shares its loop with the freeze fold
+  (`resources.rs:3486-3519`) and calls `graph.island_of(row)` per row, which re-derives the
+  `island_of` read slice and does a bounds-checked `get` each time, while `island_starts()` is
+  already hoisted. Hoist the `island_of` slice the same way — two flat slice loads per row — and
+  re-measure.
+- R3: `pyramid_frozen_sleeping_on` — check the two receipts print the SAME `froze at step`,
+  manifold count and island count on both arms before comparing any time. If they differ, the two
+  trees are not in the same state and the row is void, not slow.
+- R4: the frozen arm's manifold count is 0 on either tree → the row is void. The pile's contacts
+  sit at separation exactly 0, so a narrowphase epsilon change empties the scene while every other
+  check in the arm still passes (the arm's own assertion catches this; do not raise it away).
+
+**Report:** medians and the A/A spread for all three arms, plus both trees' frozen-arm receipts
+(freeze step, manifolds, islands, `contact_wakes`).
+
+---
+
 ## When an entry is done
 
 Strike it with the date and the receipt's location, rather than deleting it. An entry that was run

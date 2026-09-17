@@ -18,12 +18,13 @@ use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
-use crate::row_identity::{NO_ROW, RemapCursor, RowIdentity, RowRemap, SleepLatch};
+use crate::row_identity::{NO_ISLAND_KEY, NO_ROW, RemapCursor, RowIdentity, RowRemap, SleepLatch};
 use crate::scratch_ids::{
     body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
     box_axis_cache_id, contact_pairs_id, manifolds_id, register_narrowphase_column_layouts,
     register_graph_column_layouts, register_scratch_layouts, scratch_reserve_rows,
-    sensor_overlaps_id, sleep_latch_prev_id, touched_awake_id, touched_solver_id, vn_initial_id,
+    sensor_overlaps_id, sleep_island_key_id, sleep_latch_prev_id, touched_awake_id,
+    touched_solver_id, vn_initial_id,
 };
 use crate::systems::body_bounding_radius;
 
@@ -301,17 +302,21 @@ pub struct PhysicsConfig {
     /// is DERIVED from the rows (an island is frozen iff every member row is latched
     /// asleep), so a slept pile that a faller / new body joins wakes the SAME frame the
     /// contact appears (wake-on-merge), and a merge or split cannot spuriously freeze a
-    /// moving island. A row move cannot either, within one bound: a body spawned by a
-    /// command applied inside the physics schedule run, before the gather, is flagged as
-    /// added one gather late, so if it recycled a despawned body's id it carries that
-    /// body's latch for that one step (`row_identity.rs`).
+    /// moving island. A latched body whose island's manifold count changes, for example
+    /// because its support was removed, wakes on the first step whose contacts show the
+    /// change (wake-on-contact-change, `IslandSleep::begin_step`). A row move cannot
+    /// spuriously freeze an island either, within one bound: a body spawned by a command
+    /// applied inside the physics schedule run, before the gather, is flagged as added
+    /// one gather late, so if it recycled a despawned body's id it carries that body's
+    /// latch for that one step (`row_identity.rs`).
     ///
     /// **Determinism:** the speed² compare is EXACT (no `sqrt`/`rsqrt`/`algebraic_*`),
     /// the debounce is a per-row integer, and the freeze decision is a pure function of
-    /// the per-row latch + this frame's island assignment (no `HashMap`, no volatile-id
-    /// carry), so sleeping-ON is run-to-run bit-deterministic. It is NOT bit-equivalent
-    /// to sleeping-off (sleeping deliberately stops integrating); the gate is
-    /// "sleeping-ON rest state == sleeping-OFF rest state to ε".
+    /// the per-row latch and island contact key + this frame's island assignment and
+    /// island manifold counts (no `HashMap`, no volatile-id carry), so sleeping-ON is
+    /// run-to-run bit-deterministic. It is NOT bit-equivalent to sleeping-off (sleeping
+    /// deliberately stops integrating); the gate is "sleeping-ON rest state ==
+    /// sleeping-OFF rest state to ε".
     ///
     /// **Default OFF** so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
     /// colored solve (the campaign 0%-gate); enabling it is the entire opt-in.
@@ -323,10 +328,10 @@ pub struct PhysicsConfig {
     /// The tracked metric is `max over the island's dynamic bodies of
     /// (|linear_velocity|² + |angular_velocity|²)` — pure speed² + angular speed²,
     /// **mass-INDEPENDENT** (no mass term — a light-fast body has a high `|v|²` and so
-    /// correctly stays awake). It is the Box2D-style sleep metric, computed with exact
+    /// correctly stays awake), velocity-only and taken per island, computed with exact
     /// arithmetic (no `sqrt`). An island whose busiest body is below this for
     /// [`sleep_frames`](Self::sleep_frames) consecutive frames sleeps. Units:
-    /// (world-units/s)² + (rad/s)².
+    /// (world-units/s)² + (rad/s)². Box2D's metric differs (`IslandSleep::end_step`).
     pub sleep_threshold: f32,
     /// Consecutive frames an island must stay below
     /// [`sleep_threshold`](Self::sleep_threshold) before it is put to sleep — the
@@ -424,7 +429,7 @@ pub const DEFAULT_SLEEP_THRESHOLD: f32 = 1.0e-4;
 
 /// Default consecutive-frame debounce before an island sleeps (plan O8) — half a
 /// second at 120 Hz, long enough that a transient low-speed frame does not sleep a
-/// still-settling stack (the no-oscillation gate).
+/// still-settling stack (no velocity-driven flap; no self-wake from frozen energy).
 pub const DEFAULT_SLEEP_FRAMES: u16 = 60;
 
 impl Default for PhysicsConfig {
@@ -2598,6 +2603,14 @@ impl ConstraintGraph {
         self.island_of.as_read_slice().get(row as usize).copied().unwrap_or(Self::NO_ISLAND)
     }
 
+    /// The island CSR offsets: island `i` holds `starts[i + 1] - starts[i]` manifolds.
+    /// After a build the slice holds `n_islands + 1` entries; before the first build it
+    /// is empty and `n_islands` is `0`.
+    #[inline]
+    pub(crate) fn island_starts(&self) -> &[u32] {
+        self.island_manifold_start.as_read_slice()
+    }
+
     /// Partitions `manifolds` (in manifold order) into islands + colors over the
     /// `n_dynamic` dynamic body rows, identifying static/sentinel bodies via the
     /// `is_dynamic` predicate (plan O4 — the independently callable pure builder).
@@ -3041,6 +3054,14 @@ fn occ_set(occ: &mut [u64], base: usize, body: u32) {
 ///   and all its bodies integrated. This is **wake-on-merge**: a slept island that
 ///   absorbs an awake/new row wakes the SAME frame the contact appears (no mid-air
 ///   freeze, no penetration-stick).
+/// - Each row also keeps the number of manifolds filed under its island at the
+///   previous `begin_step` (the island contact key, defect A4). A latched row whose
+///   island's count differs this step is unlatched there. This is
+///   **wake-on-contact-change**: a sleeping body whose support is despawned, loses a
+///   physics component or is teleported away wakes on the first step after the
+///   change, whenever that change alters its island's manifold count (`begin_step`
+///   lists what the count cannot see). It only ever clears a latch, so its worst case
+///   is a spurious wake.
 /// - A FROZEN island skips ONLY its SOLVE + INTEGRATE work — but
 ///   [`physics_gather`](crate::systems::physics_gather) still snapshots every row, so
 ///   the IM-1 `physics_apply` desync `debug_assert!` can never fire. Warm entries
@@ -3051,8 +3072,9 @@ fn occ_set(occ: &mut [u64], base: usize, body: u32) {
 /// The per-island energy is `max over the island's dynamic rows of (|v|² + |ω|²)`,
 /// accumulated with EXACT arithmetic (`v·v + ω·ω`, no `sqrt`/`rsqrt`/`algebraic_*`);
 /// the debounce is a per-row integer counter; the freeze decision is a pure function
-/// of the per-row latch + this frame's island assignment. No `HashMap`, no
-/// iteration-order or volatile-id dependence. So sleeping-ON is run-to-run
+/// of the per-row latch and island contact key + this frame's island assignment and
+/// island manifold counts (integer CSR differences of a deterministic build). No
+/// `HashMap`, no iteration-order or volatile-id dependence. So sleeping-ON is run-to-run
 /// bit-deterministic. It is NOT bit-equivalent to sleeping-off (a frozen island
 /// deliberately stops integrating).
 ///
@@ -3061,7 +3083,8 @@ fn occ_set(occ: &mut [u64], base: usize, body: u32) {
 /// The per-row buffers are resized to the live row count (a one-time grow like every
 /// other physics buffer); the per-island scratch is cleared + resized each step. No
 /// per-step heap allocation in steady state. The `awake_rows` mask reuses the
-/// engine's growable [`TouchedMask`] bitset.
+/// engine's growable [`TouchedMask`] bitset, and the island contact key is a kernel
+/// `ScratchColumn<u32>` whose reservation is taken at construction.
 #[derive(Resource)]
 pub struct IslandSleep {
     /// Per-ROW sleep LATCH — `true` once this row's island has been below
@@ -3097,10 +3120,20 @@ pub struct IslandSleep {
     /// [`wake_all`](Self::wake_all)) — consumed once on the next solve, which clears
     /// every row's latch before deciding afresh.
     wake_all: bool,
-    /// Carry scratch for `rekey_rows`: the previous gather's latch, copied out before the
-    /// latch is permuted to the current rows. 4 B/row, written on change steps only
-    /// (defect A, interim; U6 deletes it).
+    /// Carry scratch for `rekey_rows`: the previous gather's latch and island contact key,
+    /// copied out before both are permuted to the current rows. 8 B/row, written on change
+    /// steps only (defect A, interim; U6 deletes it).
     latch_prev: ScratchColumn<SleepLatch>,
+    /// Per-ROW island contact key: the number of manifolds filed under this row's island
+    /// at the previous [`begin_step`](Self::begin_step), or [`NO_ISLAND_KEY`] for a row
+    /// that had no island then or whose body is new. A kernel column under
+    /// `SCRATCH_ID_SLEEP_ISLAND_KEY`. Written for every row by every `begin_step` and
+    /// carried across row moves by `rekey_rows` (defect A4; U6 moves it, U7 makes it
+    /// deletable).
+    island_key: ScratchColumn<u32>,
+    /// Rows unlatched by wake-on-contact-change since construction. A diagnostic counter,
+    /// like [`remap_resets`](Self::remap_resets).
+    contact_wakes: u64,
     /// The latch's place in the gather sequence (defect A, interim; U6 deletes it).
     cursor: RemapCursor,
 }
@@ -3121,6 +3154,9 @@ impl IslandSleep {
     /// The per-row latch buffers reserve `rows`; the per-island scratch reserves
     /// `islands` (the worst case is one singleton island per row, so `islands` is a
     /// hint — the scratch grows to the live island count and reuses that capacity).
+    /// The latch carry and the island contact key are kernel columns that reserve
+    /// address space for at least `rows` rows at the kernel's column budget and commit
+    /// pages as they grow.
     pub fn with_capacity(islands: usize, rows: usize) -> Self {
         register_scratch_layouts();
         Self {
@@ -3134,8 +3170,21 @@ impl IslandSleep {
                 sleep_latch_prev_id(),
                 rows.max(scratch_reserve_rows(size_of::<SleepLatch>())),
             ),
+            island_key: ScratchColumn::new(
+                sleep_island_key_id(),
+                rows.max(scratch_reserve_rows(size_of::<u32>())),
+            ),
+            contact_wakes: 0,
             cursor: RemapCursor::default(),
         }
+    }
+
+    /// Diagnostic: rows unlatched by wake-on-contact-change (see `begin_step`) since
+    /// this resource was constructed. It stays flat while no latched row's island
+    /// changes its manifold count.
+    #[inline]
+    pub fn contact_wakes(&self) -> u64 {
+        self.contact_wakes
     }
 
     /// Requests that EVERY row wake on the next solve (the explicit-wake /
@@ -3193,9 +3242,9 @@ impl IslandSleep {
         self.asleep.get(row).copied().unwrap_or(false)
     }
 
-    /// Resizes the per-ROW latch buffers to `n_rows`, keeping the entries of rows that
-    /// still exist and defaulting any newly-appeared row to awake (`asleep = false`,
-    /// debounce `0`).
+    /// Resizes the per-ROW latch buffers and the island contact key to `n_rows`, keeping
+    /// the entries of rows that still exist and defaulting any newly-appeared row to
+    /// awake (`asleep = false`, debounce `0`, key [`NO_ISLAND_KEY`]).
     ///
     /// This only sizes the buffers and does not decide which body a row holds. On the
     /// gather-driven path `rekey_rows` has already aligned and sized the latch;
@@ -3210,11 +3259,16 @@ impl IslandSleep {
     /// skips static rows and so cannot refresh it. A freshly-dynamic row that carried
     /// a stale `asleep = true` would be a spurious freeze candidate; such a runtime
     /// flip MUST be paired with [`wake_all`](Self::wake_all) (or clearing that row's
-    /// latch). Not reachable today (`inv_mass` is stable after spawn). See
+    /// latch) unless at least one `begin_step` observes the static phase: that step
+    /// stores [`NO_ISLAND_KEY`] for the row, and when the row returns as a dynamic
+    /// island member its live key differs, which clears the latch. A flip spanning only
+    /// steps that take the solver's no-dynamic-body early return keeps its latch and
+    /// key. Not reachable today (`inv_mass` is stable after spawn). See
     /// [`end_step`](Self::end_step).
     fn sync_rows(&mut self, n_rows: usize) {
         self.asleep.resize(n_rows, false);
         self.below_count.resize(n_rows, 0);
+        self.island_key.build_view().resize(n_rows, NO_ISLAND_KEY);
     }
 
     /// Re-keys the per-row latch to the current gather's rows (defect A, interim).
@@ -3223,8 +3277,9 @@ impl IslandSleep {
     /// no-dynamic-body early return, so a transient all-disabled step does not force a
     /// wake on the next one.
     /// * `Identity` — the latch is already keyed by these rows.
-    /// * `Rows` — the latch is permuted: each row takes the latch of the row its body
-    ///   held one gather ago, and a new body starts awake.
+    /// * `Rows` — the latch and the island contact key are permuted: each row takes the
+    ///   latch and key of the row its body held one gather ago, and a new body starts
+    ///   awake with key [`NO_ISLAND_KEY`].
     /// * `Reset` — the latch missed a gather (sleeping was off, or the resource was
     ///   replaced). It is sized to this gather and a global wake is left pending, so
     ///   every latch is cleared before `begin_step` reads one: on this solve, or on the
@@ -3264,22 +3319,33 @@ impl IslandSleep {
         self.cursor.resets()
     }
 
-    /// Permutes the per-row latch through `prev_row` (the `Rows` arm of `rekey_rows`).
-    /// O(m + n), sequential.
+    /// Permutes the per-row latch and island contact key through `prev_row` (the `Rows`
+    /// arm of `rekey_rows`). O(m + n), sequential.
     #[cold]
     #[inline(never)]
     fn permute_latch(&mut self, prev_row: &[u32]) {
         let old_len = self.asleep.len();
         {
+            let keys = self.island_key.as_read_slice();
+            debug_assert_eq!(
+                keys.len(),
+                old_len,
+                "invariant: the island contact key is sized with the latch"
+            );
             let mut carry = self.latch_prev.build_view();
             carry.clear();
-            for (&asleep, &below_count) in self.asleep.iter().zip(&self.below_count) {
-                carry.push(SleepLatch::new(below_count, asleep));
+            for ((&asleep, &below_count), &island_key) in
+                self.asleep.iter().zip(&self.below_count).zip(keys)
+            {
+                carry.push(SleepLatch::new(below_count, asleep, island_key));
             }
         }
         let n = prev_row.len();
         self.asleep.resize(n, false);
         self.below_count.resize(n, 0);
+        let mut key_view = self.island_key.build_view();
+        key_view.resize(n, NO_ISLAND_KEY);
+        let keys = key_view.as_mut_slice();
         let carry = self.latch_prev.as_read_slice();
         for (row, &p) in prev_row.iter().enumerate() {
             // A latch last sized by a direct drive can be shorter than the previous
@@ -3287,20 +3353,22 @@ impl IslandSleep {
             let latch = if p != NO_ROW && (p as usize) < old_len {
                 carry[p as usize]
             } else {
-                SleepLatch::default()
+                SleepLatch::FRESH
             };
             self.asleep[row] = latch.asleep;
             self.below_count[row] = latch.below_count;
+            keys[row] = latch.island_key;
         }
     }
 
     /// Step phase 1 (BEFORE the solve): resizes the per-row latch to this frame's row
-    /// count, derives the per-island FROZEN decision from the row latch (THIS is the
-    /// wake), and rebuilds the `awake_rows` body mask the solver reads to skip frozen
-    /// islands' SOLVE + INTEGRATE (plan O8, row-keyed).
+    /// count, unlatches every latched row whose island's manifold count changed
+    /// (wake-on-contact-change), derives the per-island FROZEN decision from the row
+    /// latch (THIS is the wake), and rebuilds the `awake_rows` body mask the solver reads
+    /// to skip frozen islands' SOLVE + INTEGRATE (plan O8, row-keyed).
     ///
-    /// # Freeze / wake decision (pure function of the per-row latch + this frame's
-    /// island assignment)
+    /// # Freeze / wake decision (pure function of the per-row latch and island contact
+    /// key + this frame's island assignment and island manifold counts)
     ///
     /// An island is FROZEN this frame IFF EVERY one of its member dynamic rows is
     /// latched `asleep`. If ANY member row is awake (`asleep[row] == false`) — a
@@ -3322,6 +3390,62 @@ impl IslandSleep {
     /// solver writes velocities back through `Mut<RigidBody>` every step for every
     /// awake body, so it trips `Changed` itself (W6).
     ///
+    /// # Wake-on-contact-change (defect A4)
+    ///
+    /// Each row's key is the number of manifolds filed under its island this step
+    /// (`island_starts[i + 1] - island_starts[i]`), or [`NO_ISLAND_KEY`] for a row with
+    /// no island. A row that is latched asleep and whose key differs from the one stored
+    /// at the previous `begin_step` is unlatched, its debounce restarts, and
+    /// [`contact_wakes`](Self::contact_wakes) counts it. Every row then stores its key.
+    /// The comparison runs before the freeze fold, so a woken row makes its island
+    /// active on this same step. A key is a count, never an island id, so the
+    /// renumbering of islands that a row move or an unrelated removal causes wakes
+    /// nothing.
+    ///
+    /// The count also sees a support by a static, kinematic or SDF body, because such a
+    /// manifold is filed under the dynamic side's island. Only touching, non-sensor
+    /// manifolds reach the graph. It only ever clears a latch: its worst case is a
+    /// spurious wake, never a new freeze.
+    ///
+    /// **Whole-island wakes.** The unlatch is per row and per row's OWN stored key: a
+    /// member whose stored key happens to equal the island's new count keeps its latch
+    /// (two rows that were in different islands last step can carry different stored
+    /// keys). The island still stays active for at least
+    /// [`PhysicsConfig::sleep_frames`] steps, as in Box2D and Rapier, because the freeze
+    /// fold is an AND over members and the unlatched member's debounce restarts.
+    /// Deleting a member of a frozen pile therefore wakes the rest of the pile.
+    ///
+    /// **Onset flicker.** A latched island is compared on its first frozen step too,
+    /// against a count sampled while it was still being solved. A pile whose knife-edge
+    /// box contacts appear and vanish at rest can therefore be woken at a latch attempt,
+    /// and each such wake restarts the debounce, so the pile sleeps later or not at all
+    /// (defect A7). The comparison is kept because skipping it would leave a support
+    /// removed on that step undetected for as long as the island stays frozen.
+    ///
+    /// **Wakes from a box-axis hint change.** Whether a box-box manifold exists depends
+    /// on the two poses and on the hint the pair reads (`narrowphase/box_box.rs`). With
+    /// fixed poses and a stable pair key the chosen axis is constant, so a frozen
+    /// island's manifolds repeat on every frozen step. A hint change can change them and
+    /// wake the island. It can happen on the step after any row move that the pair
+    /// spends without a contact, on an order-reversing move, on an axis-cache reset, and
+    /// on a wholesale clear (a new all-pair high of any shape, or stale-key occupancy).
+    /// A despawn's swap-remove moves one row; a spawn, a despawn, or a migration into
+    /// or out of an archetype walked before the island's shifts every row of the island
+    /// by one, which re-keys every one of its pairs. Such a wake costs solve time, never
+    /// correctness, and only knife-edge box pairs, whose manifold's existence depends on
+    /// the reference box or axis, are exposed to it. Removing it is the box-axis cache's
+    /// work, not this function's.
+    ///
+    /// Not covered:
+    /// - a support that moves but keeps its island's manifold count (Box2D's
+    ///   `b2Body_SetTransform` does not wake either); call [`wake_all`](Self::wake_all);
+    /// - a user write to a sleeping body that changes no contact;
+    /// - a step whose changes to one frozen island, real or caused by a hint change,
+    ///   add exactly as many manifolds as they remove;
+    /// - a parked support resting on the SDF field (not reachable through the shipped
+    ///   plugin entries) loses its field contact, so its island wakes; the solve's
+    ///   effect on the load it carries is unmeasured.
+    ///
     /// `awake_rows[row]` is set for every body in an ACTIVE island and for every row
     /// with no island (static / out-of-island bodies — they cost nothing to keep
     /// "awake" since the integrate kernels no-op an `inv_mass == 0` row).
@@ -3336,21 +3460,61 @@ impl IslandSleep {
             self.wake_all = false;
         }
 
-        // Derive the per-island FROZEN decision from the row latch: an island starts
-        // a candidate to freeze (`true`) and is cleared the moment any member dynamic
-        // row is found awake. A static/out-of-island row (`NO_ISLAND`) is not a member.
+        // One pass per row: compare and store the island contact key (unlatching a row
+        // whose island's count changed), then derive the per-island FROZEN decision from
+        // the row latch: an island starts a candidate to freeze (`true`) and is cleared
+        // the moment any member dynamic row is found awake. A static/out-of-island row
+        // (`NO_ISLAND`) is not a member.
         let n_islands = graph.n_islands() as usize;
         self.frozen_islands.clear();
         self.frozen_islands.resize(n_islands, true);
-        for row in 0..n_rows {
-            let isl = graph.island_of(row as u32);
-            if isl == ConstraintGraph::NO_ISLAND {
-                continue;
-            }
-            if !self.asleep[row] {
-                // An awake member row forces its whole island active this frame
-                // (wake-on-merge: a new / moving row joining a slept pile wakes it).
-                self.frozen_islands[isl as usize] = false;
+        let starts = graph.island_starts();
+        debug_assert!(
+            n_islands == 0 || starts.len() == n_islands + 1,
+            "invariant: the island CSR holds n_islands + 1 offsets"
+        );
+        {
+            let mut key_view = self.island_key.build_view();
+            debug_assert_eq!(
+                key_view.len(),
+                n_rows,
+                "invariant: sync_rows sized the island contact key to the rows"
+            );
+            // Re-sliced to `n_rows`: the loop visits exactly the rows the latch was
+            // sized to.
+            let keys = &mut key_view.as_mut_slice()[..n_rows];
+            for (row, stored) in keys.iter_mut().enumerate() {
+                let isl = graph.island_of(row as u32);
+                if isl == ConstraintGraph::NO_ISLAND {
+                    // The sentinel is what unlatches a row that returns to an island
+                    // after a static phase.
+                    *stored = NO_ISLAND_KEY;
+                    continue;
+                }
+                let i = isl as usize;
+                // `i + 1` first: its bound check implies the one on `i`.
+                let hi = starts[i + 1];
+                let lo = starts[i];
+                let key = hi - lo;
+                debug_assert!(
+                    key != NO_ISLAND_KEY,
+                    "invariant: a live island contact key is below the sentinel"
+                );
+                // Wake-on-contact-change. It only clears a latch, and it runs before the
+                // fold below so a woken row makes its island active on this step.
+                if self.asleep[row] && *stored != key {
+                    self.asleep[row] = false;
+                    // A restarted debounce keeps a slowly accelerating woken body from
+                    // re-latching at this step's `end_step`.
+                    self.below_count[row] = 0;
+                    self.contact_wakes += 1;
+                }
+                *stored = key;
+                if !self.asleep[row] {
+                    // An awake member row forces its whole island active this frame
+                    // (wake-on-merge: a new / moving row joining a slept pile wakes it).
+                    self.frozen_islands[i] = false;
+                }
             }
         }
 
@@ -3374,11 +3538,16 @@ impl IslandSleep {
     ///
     /// The per-island value is the **MAX over the island's dynamic rows of
     /// `|linear_velocity|² + |angular_velocity|²`** — pure speed² + angular speed²,
-    /// NOT a mass-normalized kinetic energy (it carries no mass term). It is the
-    /// Box2D-style sleep metric: a light-fast body has a high `|v|²` and so correctly
-    /// stays awake. The arithmetic is EXACT (`v·v + ω·ω`, no `sqrt`/`rsqrt`/
-    /// `algebraic_*`, order-fixed dot products), so it is run-to-run bit-deterministic.
-    /// MAX (not SUM) is used so a single busy row keeps its whole island awake.
+    /// NOT a mass-normalized kinetic energy (it carries no mass term), so a light-fast
+    /// body has a high `|v|²` and correctly stays awake. It is velocity-only, and every
+    /// member row's debounce advances from the island's maximum. Box2D's rule differs:
+    /// each body compares `max(|v| + |ω|·extent, 0.5·|Δx|/dt)` with a default 0.05 m/s,
+    /// where `Δx` bounds how far its extent moved during the step, position correction
+    /// included, and keeps its own timer; an island can sleep only once every body in
+    /// it has stayed below for 0.5 s. The arithmetic is EXACT (`v·v + ω·ω`, no
+    /// `sqrt`/`rsqrt`/`algebraic_*`, order-fixed dot products), so it is run-to-run
+    /// bit-deterministic. MAX (not SUM) is used so a single busy row keeps its whole
+    /// island awake.
     ///
     /// # The per-row latch update
     ///
@@ -3387,8 +3556,10 @@ impl IslandSleep {
     /// `asleep = below_count >= frames`; otherwise every member row resets
     /// `below_count = 0` and `asleep = false`. A frozen island's restored-low
     /// velocities keep it below threshold, so it stays latched asleep until a merge
-    /// brings an awake row (handled in `begin_step`) or `wake_all` fires — a frozen
-    /// island does NOT wake via its own frozen energy. No oscillation.
+    /// brings an awake row (handled in `begin_step`), its island's manifold count
+    /// changes (also `begin_step`), or `wake_all` fires — a frozen island does NOT wake
+    /// via its own frozen energy. That is the whole no-oscillation claim: a count change
+    /// can still wake an island at each latch attempt (onset flicker, `begin_step`).
     ///
     /// # Mass-regime flip (caller contract)
     ///
@@ -3400,7 +3571,10 @@ impl IslandSleep {
     /// NOT reachable today (per-body `inv_mass` is stable after spawn), but a future
     /// runtime mass-regime flip MUST be paired with [`wake_all`](Self::wake_all) (or
     /// clearing that row's latch) so a freshly-dynamic body isn't spuriously frozen by
-    /// a stale latch.
+    /// a stale latch, unless at least one `begin_step` observes the static phase: the
+    /// [`NO_ISLAND_KEY`] it stores then clears the latch when the row returns. A flip
+    /// spanning only steps that take the solver's no-dynamic-body early return keeps
+    /// its latch and key.
     pub(crate) fn end_step(
         &mut self,
         bodies: &[BodyState],

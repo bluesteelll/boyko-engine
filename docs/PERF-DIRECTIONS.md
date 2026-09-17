@@ -199,7 +199,7 @@ Foundation state verified in-repo: `dispatch_indirect` is a `#[cold]` no-op stub
 
 **Caveat:** The gather→solve→apply round-trip is itself a full extra streaming pass over all bodies every step — the price of the swappable-solver seam, free only relative to a real solve cost. The split forces two column touches on spawn. Structural, already paid, no gate concern.
 
-**Cite:** `crates/boyko_physics/src/components.rs:18-71`; `crates/boyko_physics/src/resources.rs:91-131`; `crates/boyko_physics/src/systems.rs:92-105,241-269`.
+**Cite:** `crates/boyko_physics/src/components.rs:18-71`; `crates/boyko_physics/src/resources.rs:92-132`; `crates/boyko_physics/src/systems.rs:136-171,243-266`.
 
 ### CPU-D2 — Explicit AVX2/AVX-512 over component columns (alignment already in place) `[PARTIAL]`
 
@@ -209,7 +209,7 @@ Foundation state verified in-repo: `dispatch_indirect` is a `#[cold]` no-op stub
 
 **Caveat:** No speedup number — measure per kernel. Per-row alignment beyond `align_of::<T>()` is NOT guaranteed for non-pow2 `T` (e.g. `[f32;3]` = 12 B), so kernels use unaligned interior loads (`_mm256_loadu_ps`); only the column head is aligned. Current physics integrate uses a per-row `par_iter_mut` closure, NOT a chunk kernel — at the mercy of the autovectorizer through a closure boundary (likely scalar). The 0%-gate forbids changing the `row_ptr`/`for_each_chunk`/query-iter asm, so SIMD kernels must be opt-in user code or a separate `_simd` entry, never a rewrite of the generic iter path. Determinism: float SIMD reduction reorders adds (non-associative) — reproducible reductions need a fixed lane-reduction order.
 
-**Cite:** `component_pool.rs:1121-1145`; `constants.rs:26`; `component_mask.rs:7`; `chunked_data.rs:72-81`; `crates/boyko_physics/src/systems.rs:66-70`.
+**Cite:** `component_pool.rs:1121-1145`; `constants.rs:26`; `component_mask.rs:7`; `chunked_data.rs:72-81`; `crates/boyko_physics/src/systems.rs:149-170`.
 
 ### CPU-D3 — One real AVX2 kernel exists — use it as the house template `[HAVE]`
 
@@ -229,7 +229,7 @@ Foundation state verified in-repo: `dispatch_indirect` is a `#[cold]` no-op stub
 
 **Caveat:** Prefetch is the single most over-applied micro-opt; distance tuning is CPU-specific and a wrong distance is a net loss. Gate on a measured cache-miss profile (perf/VTune), not speculation. The all-pairs broadphase it would most help is itself O(n²) and should be replaced by a spatial structure first — prefetching a quadratic loop is polishing the wrong thing.
 
-**Cite:** (absence verified — no prefetch intrinsics in `src`); `crates/boyko_physics/src/systems.rs:118-142` (O(n²) broadphase).
+**Cite:** (absence verified — no prefetch intrinsics in `src`); `crates/boyko_physics/src/systems.rs:311-321` (O(n²) broadphase).
 
 ### CPU-D5 — Cache-line alignment / false-sharing padding — disciplined where it matters `[HAVE]`
 
@@ -249,7 +249,7 @@ Foundation state verified in-repo: `dispatch_indirect` is a `#[cold]` no-op stub
 
 **Caveat:** No numbers — solver perf is workload-dependent and unmeasured (`NoopSolver` = no data). DETERMINISM is the hard constraint: contact order is pinned to dense `BodyIndex` = archetype row order, reproducible only under deterministic spawn/despawn (the entity-id counter is a Relaxed atomic shared by parallel Commands workers). A SIMD-batched or island-parallel solve reorders float accumulation (non-associative), so reproducibility needs a fixed reduction order + a content-defined contact key independent of row/id (currently deferred). A pair `(a,b)` writes BOTH rows, so naive parallel pair-solve RACES — islands are the prerequisite for safe parallelism. 0%-gate: `is_noop()` early-out keeps a no-solver world at one branch.
 
-**Cite:** `crates/boyko_physics/src/solver.rs:38-81`; `crates/boyko_physics/src/systems.rs:18-31`, `:211-221`; `crates/boyko_physics/src/resources.rs:30-31`, `:85-131,202-226`.
+**Cite:** `crates/boyko_physics/src/solver.rs:38-81`; `crates/boyko_physics/src/systems.rs:1119-1121`, `:1164-1177`; `crates/boyko_physics/src/resources.rs:31-32`, `:86-132,203-227`.
 
 ### CPU-D7 — Rapier/Jolt-FFI behind the `RigidSolver` seam — an option, NOT a default `[FUTURE]`
 

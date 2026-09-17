@@ -718,6 +718,12 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         None
     };
 
+    // Defect A5: the gather, apply and soft apply pair their rows by position, so their
+    // selections must agree. Once per wire-up; a hard assert, because a disagreement is
+    // silent state corruption in a release build. The signature pins in `body_set` list
+    // every stage that pairs rows by position.
+    crate::body_set::assert_body_set_agrees(world);
+
     PhysicsStageKeys {
         integrate: integrate.0,
         gather: gather.0,

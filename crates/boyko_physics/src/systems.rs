@@ -7,8 +7,9 @@
 //!    `rot = rot.integrate(angvel, dt)` (first-order quaternion advance). The
 //!    only real-work stage in the foundation; a sound parallel pass over
 //!    disjoint rows (each body writes only its own row).
-//! 2. [`physics_gather`] — snapshots `(&RigidBody, &RigidBodyMass, &Collider)`
-//!    IN ROW ORDER into the dense
+//! 2. [`physics_gather`] — snapshots the rows
+//!    [`BodySetFilter`](crate::body_set::BodySetFilter) selects, reading `RigidBody`,
+//!    `RigidBodyMass` and `Collider`, IN ROW ORDER into the dense
 //!    [`SolverScratch::bodies`](crate::resources::SolverScratch), derives each
 //!    body's local + world inverse inertia, stamps the step `dt` into
 //!    [`PhysicsConfig`], and resets the touched mask (the seam's gather
@@ -22,8 +23,9 @@
 //! 5. [`physics_solve_step`] — `if solver.is_noop() { return }` else
 //!    `S::solve(..)` (the swappable seam, D2).
 //! 6. [`physics_apply`] — writes the solved snapshot back through
-//!    `Mut<RigidBody>` for touched rows, under the "no structural change between
-//!    gather and apply" invariant (IM-1).
+//!    `Mut<RigidBody>` for touched rows, selected with [`BodyQuery`], the same rows the
+//!    gather snapshots, under the "no structural change between gather and apply"
+//!    invariant (IM-1).
 //!
 //! # Determinism precondition (IM-2)
 //!
@@ -55,15 +57,13 @@
 //!    would DOUBLE-INTEGRATE (the pipeline AND the solver each advance position +
 //!    orientation in the same step), corrupting the simulation.
 
-use boyko_ecs::ecs::core::iters::query::data::{Mut, Ref};
 use boyko_ecs::ecs::core::iters::query::data_is_enabled::IsEnabled;
 use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::core::time::FixedTime;
 
-use crate::components::{
-    Collider, ColliderShape, Kinematic, RigidBody, RigidBodyMass, Sensor, Simulated,
-};
+use crate::body_set::{BodyApplyData, BodyGatherData, BodyQuery};
+use crate::components::{ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use crate::math::Vec3;
 use crate::narrowphase::box_box::box_box_contact;
@@ -173,12 +173,18 @@ pub fn physics_integrate(
 /// Snapshots every body into the dense, row-indexed solver scratch and stamps
 /// the step `dt` (plan IM-1 / OQ-1, the gather boundary).
 ///
-/// Walks the bodies in archetype-row order via `iter()` (the same order
-/// [`physics_apply`] re-walks to write back), projecting the hot [`RigidBody`] +
-/// cold [`RigidBodyMass`] + [`Collider`] columns into [`BodyState`] rows
-/// (deriving each body's local + world inverse inertia from its shape, P2 W1).
+/// Walks the body set, the rows [`BodySetFilter`](crate::body_set::BodySetFilter)
+/// selects, in archetype-row order, projecting the hot [`RigidBody`] + cold
+/// [`RigidBodyMass`] + [`Collider`](crate::components::Collider) columns into
+/// [`BodyState`] rows (deriving each body's local + world inverse inertia from its
+/// shape, P2 W1). [`physics_apply`] and
+/// [`physics_soft_rigid_apply`](crate::soft::physics_soft_rigid_apply) take a
+/// [`BodyQuery`] with the same filter, so they re-walk the same rows in the same order
+/// to write back. The row set is the filter's, not a side effect of this stage's
+/// reads: dropping a read here moves no row, and a new required read that the filter
+/// does not name fails the wire-up check in [`crate::body_set`].
 /// The dense row index IS the [`BodyIndex`]. Resets the touched mask to the body
-/// count. The snapshot `Vec`s are cleared and refilled, capacity reused (no
+/// count. The snapshot columns are cleared and refilled, capacity reused (no
 /// per-step alloc).
 ///
 /// Before the per-body loop it stamps [`PhysicsConfig::dt`] from the fixed
@@ -195,19 +201,9 @@ pub fn physics_integrate(
 // `clippy::needless_pass_by_value`: `ResMut<_>` / `Res<_>` are by-value
 // `SystemParam`s mutated/read through reborrows — the same false-positive as the
 // demo's `ResMut` systems.
-// `clippy::type_complexity`: the gather `Query<D>` SystemParam type must be named
-// concretely in the fn signature; the 6-term tuple is the irreducible projection
-// the gather needs (Decision 3 added the two `IsEnabled<>` data terms).
-#[allow(clippy::needless_pass_by_value, clippy::type_complexity)]
+#[allow(clippy::needless_pass_by_value)]
 pub fn physics_gather(
-    query: Query<(
-        Ref<RigidBody>,
-        &RigidBodyMass,
-        &Collider,
-        Option<&Sensor>,
-        IsEnabled<Simulated>,
-        IsEnabled<Kinematic>,
-    )>,
+    query: BodyQuery<BodyGatherData>,
     mut scratch: ResMut<SolverScratch>,
     mut cfg: ResMut<PhysicsConfig>,
     fixed_time: Res<FixedTime>,
@@ -221,9 +217,9 @@ pub fn physics_gather(
     scratch.vn_initial.build_view().clear();
     // Refill the gather column through its single-threaded build view: clear (no
     // free — the committed pages stay resident) then push one BodyState per row.
-    // Read-only `iter()` walks the rows in archetype-row order — the same order
-    // `physics_apply`'s mutable walk re-visits, so row `i` is the same body in
-    // both passes (the IM-1 gather/apply addressing invariant).
+    // The walk is a `BodyQuery`, whose filter `physics_apply` shares, so both walks
+    // visit the body set in the same archetype-row order and row `i` is the same body
+    // in both passes (the IM-1 gather/apply addressing invariant).
     //
     // S5: `Option<&Sensor>` is a NON-filtering query datum — it yields `Some` for
     // a sensor body and `None` otherwise, so the gathered row count and order are
@@ -1129,22 +1125,33 @@ pub fn physics_solve_step<S: RigidSolver>(
 /// Writes the solved snapshot back into the [`RigidBody`] column for touched
 /// rows (plan D3 stage 5 / IM-1).
 ///
-/// Re-walks the body rows in the same order [`physics_gather`] snapshotted them
-/// (`iter_mut().enumerate()` → row index `i` = [`BodyIndex`]). For each touched
-/// row the whole [`RigidBody`] is written back through the [`Mut`] guard, so
+/// Walks the body set with a [`BodyQuery`], the query type [`physics_gather`] also
+/// takes: the two stages' archetype selections are equal (checked once at wire-up, see
+/// [`crate::body_set`]) and both sweep the matched archetypes in ascending id order, so
+/// a manual row counter makes walk position `i` the snapshot row `i` = [`BodyIndex`].
+/// For each touched row the whole [`RigidBody`] is written back through the
+/// [`Mut`](boyko_ecs::ecs::core::iters::query::Mut) guard, so
 /// `Changed<RigidBody>` fires for moving bodies (MINOR-2: a documented
 /// whole-body choice; a later refinement may split position/velocity).
 ///
 /// Correct UNDER the "no structural change between gather and apply" invariant:
-/// the entire pipeline runs within one schedule pass and no stage spawns or
-/// despawns, so row `i` is the same body in both passes. A user inserting a
-/// structural command mid-pipeline is a documented misuse, caught here by the
-/// `debug_assert!`.
+/// no physics stage spawns, despawns or migrates an entity, so row `i` is the same
+/// body in both passes. Ordering alone does not uphold it for other systems: the
+/// executor applies each finished system's `Commands` in the apply window before it
+/// dispatches further systems, so a `Commands` system with no ordering against the
+/// physics block can land a structural change between the gather and this stage.
+/// Order such a system before the gather
+/// (`builder.add_system(spawner).before_set(PhysicsGatherSet)`, see
+/// [`PhysicsGatherSet`](crate::plugin::PhysicsGatherSet)); this crate offers no set
+/// for ordering after this stage. A violation is caught in debug builds by the
+/// `debug_assert!` below, which today blocks the process from a worker thread
+/// instead of failing it (lane A6); a release build can write solved state into the
+/// wrong entities.
 //
 // `clippy::needless_pass_by_value`: `Res<_>` is a by-value `SystemParam` read
 // via a `&*` reborrow — the same false-positive as the demo's `apply_ball_motion`.
 #[allow(clippy::needless_pass_by_value)]
-pub fn physics_apply(mut query: Query<Mut<RigidBody>>, scratch: Res<SolverScratch>) {
+pub fn physics_apply(mut query: BodyQuery<BodyApplyData>, scratch: Res<SolverScratch>) {
     let scratch = &*scratch;
     let bodies = scratch.bodies();
     let mut row = 0usize;
