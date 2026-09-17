@@ -83,7 +83,7 @@ fn find_tool(stem: &str) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    if Command::new(&exe).arg("--version").output().is_ok() {
+    if Command::new(&exe).arg("--version").output_within(DXC_DEADLINE).is_ok() {
         return Some(PathBuf::from(exe));
     }
     None
@@ -149,14 +149,14 @@ const CENSUS_ONLY: &[(&str, &str, usize)] = &[
 /// Re-DXCs one variant under its frozen recipe into a temp `.spv` and returns the bytes. Never
 /// overwrites a committed artifact.
 fn redxc(dxc: &PathBuf, dir: &PathBuf, v: &Variant) -> Vec<u8> {
-    let out_spv = std::env::temp_dir().join(format!("{}.cgrb.redxc.spv", v.spv));
+    let out_spv = child_guard::scratch_path(&format!("{}.cgrb.redxc.spv", v.spv));
     let mut cmd = Command::new(dxc);
     cmd.current_dir(dir).args(["-spirv", "-T", v.profile, "-E", "main"]);
     for d in v.defines {
         cmd.args(["-D", d]);
     }
     cmd.args(["-fspv-target-env=vulkan1.3", v.hlsl, "-Fo"]).arg(&out_spv);
-    let status = cmd.status().expect("invariant: dxc was located and must run");
+    let status = cmd.status_within(DXC_DEADLINE).expect("invariant: dxc was located and must run");
     assert!(
         status.success(),
         "dxc failed re-compiling {} {:?} under the frozen recipe",
@@ -789,3 +789,9 @@ fn the_cluster_grid_consumer_census_is_closed() {
          exists). Discovered today: {discovered:?}"
     );
 }
+
+// `status_within` / `output_within` (a deadline on each dxc this file spawns) and `scratch_path`
+// (a temp file no other run shares) live in `tests/child_guard/mod.rs`, whose module doc records
+// the hung-dxc stall behind them. Declared last so that no line an internal document cites moves.
+mod child_guard;
+use child_guard::{BoundedRun, DXC_DEADLINE};

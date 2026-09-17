@@ -95,7 +95,7 @@ fn find_dxc() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    if Command::new(bare).arg("--version").output().is_ok() {
+    if Command::new(bare).arg("--version").output_within(DXC_DEADLINE).is_ok() {
         return Some(PathBuf::from(bare));
     }
     None
@@ -532,9 +532,9 @@ fn cluster_cull_hier_error_guards_mechanical_f() {
     );
     let mutated = source.replacen(needle, "#define HIER_MASK_WORDS 64u", 1);
 
-    let scratch_path = std::env::temp_dir().join("cluster_cull_hier_dis_gate_mask64_mutant.hlsl");
+    let scratch_path = child_guard::scratch_path("cluster_cull_hier_dis_gate_mask64_mutant.hlsl");
     std::fs::write(&scratch_path, &mutated).expect("invariant: temp dir is writable");
-    let out_spv = std::env::temp_dir().join("cluster_cull_hier_dis_gate_mask64_mutant.spv");
+    let out_spv = child_guard::scratch_path("cluster_cull_hier_dis_gate_mask64_mutant.spv");
     let out = Command::new(&dxc)
         .args(["-spirv", "-T", "cs_6_0", "-E", "main", "-fspv-target-env=vulkan1.3", "-I"])
         .arg(&dir)
@@ -542,7 +542,7 @@ fn cluster_cull_hier_error_guards_mechanical_f() {
         .arg(&scratch_path)
         .arg("-Fo")
         .arg(&out_spv)
-        .output()
+        .output_within(DXC_DEADLINE)
         .expect("invariant: dxc was located and must run");
     let _ = std::fs::remove_file(&scratch_path);
     let _ = std::fs::remove_file(&out_spv);
@@ -697,3 +697,9 @@ fn cluster_cull_hier_local_size_pinned_h() {
          the workgroup size and the shader's own fold/mask arithmetic have come apart"
     );
 }
+
+// `status_within` / `output_within` (a deadline on each dxc this file spawns) and `scratch_path`
+// (a temp file no other run shares) live in `tests/child_guard/mod.rs`, whose module doc records
+// the hung-dxc stall behind them. Declared last so that no line an internal document cites moves.
+mod child_guard;
+use child_guard::{BoundedRun, DXC_DEADLINE};

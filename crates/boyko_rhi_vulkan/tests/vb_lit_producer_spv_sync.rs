@@ -83,7 +83,7 @@ fn find_dxc() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    if Command::new(bare).arg("--version").output().is_ok() {
+    if Command::new(bare).arg("--version").output_within(DXC_DEADLINE).is_ok() {
         return Some(PathBuf::from(bare));
     }
     None
@@ -91,18 +91,18 @@ fn find_dxc() -> Option<PathBuf> {
 
 /// Re-DXCs `hlsl_name` (relative to the shaders dir) under the EXACT frozen recipe
 /// (`-spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3`, no `-O`) plus the given `-D` defines,
-/// into a fresh temp `.spv` named by `out_tag` (distinct per variant so parallel test binaries
-/// never collide), and returns the bytes. Never overwrites a committed artifact. Mirrors
+/// into a fresh temp `.spv` named after `out_tag` (unique per run and call, via `scratch_path`),
+/// and returns the bytes. Never overwrites a committed artifact. Mirrors
 /// `cluster_cull_spv_sync.rs`.
 fn redxc_with_defines(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str, defines: &[&str], out_tag: &str) -> Vec<u8> {
-    let out_spv = std::env::temp_dir().join(format!("{out_tag}.redxc.spv"));
+    let out_spv = child_guard::scratch_path(&format!("{out_tag}.redxc.spv"));
     let mut cmd = Command::new(dxc);
     cmd.current_dir(dir).args(["-spirv", "-T", "cs_6_0", "-E", "main"]);
     for d in defines {
         cmd.args(["-D", d]);
     }
     cmd.args(["-fspv-target-env=vulkan1.3", hlsl_name, "-Fo"]).arg(&out_spv);
-    let status = cmd.status().expect("invariant: dxc was located and must run");
+    let status = cmd.status_within(DXC_DEADLINE).expect("invariant: dxc was located and must run");
     assert!(status.success(), "dxc failed re-compiling {hlsl_name} {defines:?} under the frozen recipe");
     let bytes = std::fs::read(&out_spv).expect("invariant: dxc wrote the re-DXC .spv");
     let _ = std::fs::remove_file(&out_spv); // best-effort tidy
@@ -205,9 +205,9 @@ fn vb_lit_producer_redxc_is_sensitive_to_an_untouched_literal() {
     );
     let mutated = source.replacen(needle, "max(dot(n, v), 2e-4)", 1);
 
-    let scratch_path = std::env::temp_dir().join("vb_lit_producer_nov_epsilon_mutant.hlsl");
+    let scratch_path = child_guard::scratch_path("vb_lit_producer_nov_epsilon_mutant.hlsl");
     std::fs::write(&scratch_path, &mutated).expect("invariant: temp dir is writable");
-    let out_spv = std::env::temp_dir().join("vb_lit_producer_nov_epsilon_mutant.spv");
+    let out_spv = child_guard::scratch_path("vb_lit_producer_nov_epsilon_mutant.spv");
     // `-I <shaders_dir>` lets the mutant (living outside the shaders dir) still resolve its
     // `#include`s against the real, unmodified headers — the `cluster_cull_hier_dis_gate.rs`
     // idiom for a scratch-copy compile that must never touch the committed tree.
@@ -217,7 +217,7 @@ fn vb_lit_producer_redxc_is_sensitive_to_an_untouched_literal() {
         .arg(&scratch_path)
         .arg("-Fo")
         .arg(&out_spv)
-        .status()
+        .status_within(DXC_DEADLINE)
         .expect("invariant: dxc was located and must run");
     assert!(status.success(), "dxc failed compiling the mutated vb_resolve.comp.hlsl scratch copy");
     let mutated_bytes = std::fs::read(&out_spv).expect("invariant: dxc wrote the mutant .spv");
@@ -245,3 +245,9 @@ fn vb_lit_producer_redxc_is_sensitive_to_an_untouched_literal() {
          This is a real finding — do not tune the mutation to force a green."
     );
 }
+
+// `status_within` / `output_within` (a deadline on each dxc this file spawns) and `scratch_path`
+// (a temp file no other run shares) live in `tests/child_guard/mod.rs`, whose module doc records
+// the hung-dxc stall behind them. Declared last so that no line an internal document cites moves.
+mod child_guard;
+use child_guard::{BoundedRun, DXC_DEADLINE};

@@ -970,8 +970,8 @@ span sits **before the file's first preprocessor conditional**, so it is compile
 variant. Gate (c) must therefore quantify over all of them. Rev 2 said "every `deferred_pbr` `.spv`"
 without enumerating, and an implementer following the existing helpers would have covered **two**:
 every re-DXC helper in `crates/boyko_rhi_vulkan/tests/` hardcodes `-T cs_6_0`
-(`cluster_cull_spv_sync.rs:76`, `marcher_spv_sync.rs:57`, `ssao_edsl_sync.rs:288`,
-`vb_froxel_spv_sync.rs:59`, `vb_lit_producer_spv_sync.rs`, `cluster_cull_hier_dis_gate.rs:539`),
+(`cluster_cull_spv_sync.rs:79`, `marcher_spv_sync.rs:57`, `ssao_edsl_sync.rs:288`,
+`vb_froxel_spv_sync.rs:61`, `vb_lit_producer_spv_sync.rs`, `cluster_cull_hier_dis_gate.rs:539`),
 and the profile **cannot** be smuggled through the `defines` slice because every element of it is
 unconditionally `-D`-prefixed (`vb_lit_producer_spv_sync.rs`'s `redxc_with_defines`).
 
