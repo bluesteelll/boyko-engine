@@ -240,7 +240,7 @@ const HUD_DROP: f32 = -0.42;
 /// 1:1 against it, the glyph's height in SCREEN pixels at the default window size.
 const HUD_GLYPH_PX: f32 = 28.0;
 
-/// The two models the repo ships in `assets/models/`, as
+/// The two downloaded models in `assets/models/` (git-ignored), as
 /// `(folder, target height in metres, x, z, yaw°)`.
 ///
 /// The HEIGHT is authored, not the scale: a downloaded model arrives in whatever units its
@@ -617,7 +617,7 @@ fn setup(
         spawn_hud_panel(&mut commands, &mut meshes, &mut materials, &mut textures, &mut bindless, dev.get());
     }
 
-    // ── The two models shipped in `assets/models/` (see the module doc).
+    // ── The two downloaded models in `assets/models/` (see the module doc).
     if !matches!(std::env::var("BOYKO_MODELS").as_deref(), Ok("off")) {
         spawn_showcase_models(
             &mut commands,

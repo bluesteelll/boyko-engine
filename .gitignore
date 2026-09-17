@@ -26,6 +26,12 @@ graphify-out/
 /assets/materials/*
 !/assets/materials/README.md
 
+# Downloaded third-party 3D models (rigmodels.com) that the playground and _hud_probe examples
+# load when present and skip when absent. Never committed: at least one carries a personal-use-only
+# licence, so this public repository may not redistribute it. Each machine fetches its own copies.
+/assets/models/
+/assets/*_glb*.zip
+
 # VG-R0 density-census corpus (plan section 4.3): the MANIFEST is tracked, the payload is not.
 # Mirrors the assets/materials rule above. A high-poly corpus is not small by any definition that
 # keeps this repo cloneable, there is no .gitattributes (so no Git LFS seam), and git history is
