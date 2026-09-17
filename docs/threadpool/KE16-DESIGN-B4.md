@@ -69,7 +69,7 @@ remove it.
    `(BLOCK_CAP - offset).min(limit)` — a flat 33 per call. Reasoning of the form "it only takes
    half, so it self-limits" is wrong for any real wave.
 2. **The loom models are written against `steal_batch_and_pop` specifically**
-   (`tests/loom_pool.rs:208-236`, `:330`), citing the `SeqCst` fence it carries. Changing the
+   (`tests/loom_pool.rs:234-262`, `:356`), citing the `SeqCst` fence it carries. Changing the
    joiner's steal call changes what those models cover, and that is an exit condition, not a detail.
 
 ## 2. Options, and why five of six lose

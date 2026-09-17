@@ -258,7 +258,7 @@
 //! Three ARMED sessions, run one at a time:
 //!
 //! ```text
-//! $env:RUSTUP_TOOLCHAIN='stable-x86_64-pc-windows-gnu'
+//! $env:RUSTUP_TOOLCHAIN='stable-x86_64-pc-windows-msvc'
 //! $env:BOYKO_DISABLE_VALIDATION='1'; $env:BOYKO_SV0_BENCH='1'
 //! Remove-Item Env:\BOYKO_SV0_BENCH_NULL -ErrorAction SilentlyContinue
 //! cargo test -p boyko-app --test sv0_deferred_term_bench sv0_deferred_term_bench `

@@ -106,8 +106,23 @@ PACKAGE='boyko-threadpool'
 TEST_NAME='tb_neg_m2w_block_reference'
 
 # A bare `+nightly` is unambiguous on Linux; on a Windows host (Git Bash / MSYS)
-# it resolves to MSVC and dies in the linker, so the triple is spelled in full
-# there -- the same defence `tb_neg_gate.ps1` hard-codes.
+# it resolves to whatever rustup's default host tuple is, so the triple is spelled
+# in full there -- the same pin `tb_neg_gate.ps1` hard-codes.
+#
+# THE REASON FOR THE PIN CHANGED ON 2026-09-10 AND THE PIN DID NOT. When this
+# comment was first written a bare `+nightly` resolved to nightly-MSVC, for which
+# this box had no linker, so it died with exit 1 -- indistinguishable from a red
+# gate (MEASURED 2026-09-04). Both halves of that are gone: rustup's
+# default_host_tuple was rewritten to gnu on 2026-09-07 13:56 (file mtime), so a
+# bare `+nightly` now picks the gnu nightly; and msvc links since Build Tools
+# 2022 + Windows SDK 10.0.26100 were installed. The gnu nightly is kept here DELIBERATELY, for a different
+# reason: this gate's whole value is Tree-Borrows fidelity, and the two installed
+# nightlies are three months apart (`nightly-x86_64-pc-windows-gnu` miri
+# 2026-08-20 vs `nightly-x86_64-pc-windows-msvc` miri 2026-05-29, both MEASURED
+# 2026-09-10). The committed receipts under `docs/threadpool/receipts/` came from
+# the gnu nightly; re-spelling this line would swap the CHECKER under them inside
+# a change that only moves the build host. Override with TB_NEG_TOOLCHAIN to try
+# the other one.
 case "$(uname -s 2>/dev/null || echo unknown)" in
     MINGW* | MSYS* | CYGWIN*) DEFAULT_TOOLCHAIN='+nightly-x86_64-pc-windows-gnu' ;;
     *) DEFAULT_TOOLCHAIN='+nightly' ;;

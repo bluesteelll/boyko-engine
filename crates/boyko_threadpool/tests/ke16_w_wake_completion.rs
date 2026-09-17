@@ -8,7 +8,10 @@
 //! with the recipe recorded in `tests/loom_pool.rs`'s header
 //! (`cargo --config 'target.x86_64-pc-windows-gnu.rustflags=["-C","target-cpu=
 //! x86-64-v3","--cfg","loom"]' … --no-run`, then the emitted exe per test with
-//! `LOOM_MAX_PREEMPTIONS=3 --test-threads=1 --exact`):
+//! `LOOM_MAX_PREEMPTIONS=3 --test-threads=1 --exact`) — that gnu-triple key is
+//! the one the 2026-09-03 run used and is kept here as the record of it; the
+//! recipe to RUN TODAY is re-keyed to `target."cfg(windows)"` (§"The loom
+//! recipe" below, and `tests/loom_pool.rs`'s header in full):
 //!
 //! | Obligation | Design's gate | Reading on this box |
 //! |---|---|---|
@@ -43,9 +46,20 @@
 //! a box fault: `RUSTFLAGS` REPLACES `[target.<triple>].rustflags` rather than
 //! merging with it (`.cargo/config.toml`, the `x86-64-v3` baseline), so that
 //! command builds a differently-configured tree. The spelling that survives it
-//! is `cargo --config 'target.x86_64-pc-windows-gnu.rustflags=["-C",
-//! "target-cpu=x86-64-v3","--cfg","loom"]'`, and under it the models list and
-//! run.
+//! is `cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]'`, and
+//! under it the models list and run.
+//!
+//! ⚠ **That key was `target.x86_64-pc-windows-gnu.rustflags=["-C","target-cpu=
+//! x86-64-v3","--cfg","loom"]` until 2026-09-10**, when this tree's Windows
+//! recipes moved to `stable-x86_64-pc-windows-msvc`, spelled explicitly through
+//! `RUSTUP_TOOLCHAIN`. (The rustup DEFAULT host is still gnu as of that date;
+//! `rustup set default-host` is a later, owner-run step — which is precisely why
+//! the key must match EITHER host.) A triple key that does
+//! not match the build simply contributes nothing: `--cfg loom` never reaches
+//! rustc, the models compile away and the binary exits **0** on `running 0
+//! tests`. `cfg(windows)` matches either host and JOINS `.cargo/config.toml`'s
+//! per-triple `-C target-cpu=x86-64-v3` rather than replacing it, so the ISA
+//! baseline no longer has to be restated (measured 2026-09-10 off `cargo -v`).
 //!
 //! ## The receipt against a blind pass
 //!

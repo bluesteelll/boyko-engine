@@ -294,8 +294,8 @@ Once:  if FIRED.load(Relaxed) { return; }          // steady state: load only, p
    The push is a `#[cold]` CAS loop executed **once per site per process**, on the same branch that already performs the single `FIRED.swap(true)` — so the steady-state path is still a pure `Relaxed` load from a site-private line and **nothing is added to the budgeted path**. The census walks the list (`Acquire` on `next`) and prints, per fired site:
 
    ```
-   LOG-ONCE code=W2102 site=device.rs:3100 fired=1 suppressed=UNCOUNTED(by policy)
-   LOG-ONCE code=W2102 site=device.rs:3158 fired=1 suppressed=UNCOUNTED(by policy)
+   LOG-ONCE code=W2102 site=device.rs:3118 fired=1 suppressed=UNCOUNTED(by policy)
+   LOG-ONCE code=W2102 site=device.rs:3176 fired=1 suppressed=UNCOUNTED(by policy)
    ```
 
    A site that never fired is simply **absent from the list**, and its absence is the datum. `OnceCounted` rows carry a real integer in `suppressed=`. `RateSlot::fired` is **deleted** — it was dead the moment `Once` stopped using `RATE` (M1).

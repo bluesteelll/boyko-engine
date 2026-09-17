@@ -515,9 +515,11 @@ fn receipts_for_every_seed_exist_and_name_the_declared_diagnostic() {
         assert!(
             !text.trim().is_empty(),
             "{RECEIPT_DIR}/tb-neg-m2w-{seed}.stderr is empty. An empty receipt is the shape a \
-             run that never launched leaves behind — on this machine a `cargo +nightly` that \
-             resolves to MSVC dies in the linker with exit 1, indistinguishable from a red gate \
-             unless the receipt is read"
+             run that never launched leaves behind — a build or link failure exits 1 exactly \
+             like a red gate does, and the two are indistinguishable unless the receipt is read. \
+             Until 2026-09-10 this box had no MSVC linker at all, so a `cargo` run that reached \
+             the msvc nightly died there; msvc links as of that date, but the reason to read \
+             the receipt rather than the exit code is unchanged"
         );
 
         assert!(

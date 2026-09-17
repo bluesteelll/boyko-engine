@@ -85,8 +85,9 @@ if ($Path -eq 'vb' -and $Scene -ne 'paradigm_lab') {
     Write-Warning "[run-scene] '$Scene' registers meshes WITHOUT a VB geometry-table slot -- its meshes will not appear under -Path vb (SDF still shows). Use -Scene paradigm_lab for the Visibility Buffer path."
 }
 
-# Explicit env (never inherit a stray value); RUSTUP_TOOLCHAIN pins the windows-gnu toolchain.
-$env:RUSTUP_TOOLCHAIN = 'stable-x86_64-pc-windows-gnu'
+# Explicit env (never inherit a stray value); RUSTUP_TOOLCHAIN pins the windows-msvc toolchain
+# (this workstation's build host since 2026-09-10).
+$env:RUSTUP_TOOLCHAIN = 'stable-x86_64-pc-windows-msvc'
 $env:BOYKO_RENDER_PATH = $Path
 $env:BOYKO_GEOMETRY_LEGS = $Legs
 $env:BOYKO_DISABLE_VALIDATION = '1'

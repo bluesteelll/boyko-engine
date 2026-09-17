@@ -60,7 +60,7 @@ if (-not (Test-Path -LiteralPath $OutDir)) { New-Item -ItemType Directory -Force
 $paths = @('deferred', 'forward', 'forwardplus', 'vb')
 $legsSet = if ($Full) { @('both', 'mesh', 'sdf') } else { @($Legs) }
 
-$env:RUSTUP_TOOLCHAIN = 'stable-x86_64-pc-windows-gnu'
+$env:RUSTUP_TOOLCHAIN = 'stable-x86_64-pc-windows-msvc'
 $env:BOYKO_DISABLE_VALIDATION = '1'
 
 $results = @()

@@ -304,8 +304,9 @@ a crate root to a sample's region is argued, not measured.
    which for a `static` array are a compile-time constant. Re-measured this rung: no `llvm-readobj`,
    `objdump` or `nm` on `PATH` under the active toolchain, so under the literal reading the row
    could not be green on this box at all. Splitting them makes the bound exact and toolchain-free;
-   the residency claim is **not made here** and stays `G22a`'s, where it remains RED for want of the
-   tool. That RED is pre-existing — `rustup component add llvm-tools` is a D0 line item never taken.
+   the residency claim is **not made here** and stays `G22a`'s. That RED was recorded as blocked on
+   the tool, and the block is gone: MEASURED 2026-09-10: `llvm-tools` is installed on BOTH stable toolchains (`rustup component list` reports `llvm-tools-x86_64-pc-windows-{gnu,msvc} (installed)`), and each carries `llvm-readobj.exe` / `llvm-nm.exe` / `llvm-objdump.exe` under `lib/rustlib/<triple>/bin/` — which is where `boyko_diag::storage::resolve_tool` looks, not `PATH`. UNBLOCKED IS NOT GREEN: no `.bss` gate has been run. `G22a` is therefore UNRUN rather than
+   unrunnable — nobody has taken the measurement it needs.
 
 5. **`FrameRecord` is 32 B here, not the corpus's pinned 88.** Every omitted field (`run_gross`,
    `fixed_total`, `main_total`, `instrument_*`, `gpu_total`, `fixed_steps`, `rounds`) is filled by
@@ -1883,10 +1884,10 @@ recorded rather than faked.**
   ns/iter**, ratio **2.02×**; armed open/close 78.52 ns/iter against disarmed 16.65. A ratio is
   robust to a box that is slow today; an absolute is not.
 * **`G22b` clause 1 is BLOCKED, clause 2 was written against symbols that do not exist.** Clause 1
-  needs the image probe, and `substrate/section-report` already MEASURED that no
-  `llvm-readobj`/`objdump`/`nm` is on PATH under the active toolchain — so it is RED for exactly
-  the reason `G22a` is, and `rustup component add llvm-tools` remains the D0 line item that unblocks
-  both. Clause 2 says *"must fail `assert_bss_eligible` at compile time; remove the const-assert ⇒
+  needs the image probe, and `substrate/section-report` MEASURED at the time that no
+  `llvm-readobj`/`objdump`/`nm` was on PATH under the active toolchain — so it was RED for exactly
+  the reason `G22a` was. ⚠️ That block is discharged: MEASURED 2026-09-10: `llvm-tools` is installed on BOTH stable toolchains (`rustup component list` reports `llvm-tools-x86_64-pc-windows-{gnu,msvc} (installed)`), and each carries `llvm-readobj.exe` / `llvm-nm.exe` / `llvm-objdump.exe` under `lib/rustlib/<triple>/bin/` — which is where `boyko_diag::storage::resolve_tool` looks, not `PATH`. UNBLOCKED IS NOT GREEN: no `.bss` gate has been run. Clause 1 is UNRUN, not
+  blocked. Clause 2 says *"must fail `assert_bss_eligible` at compile time; remove the const-assert ⇒
   it compiles"*, and **two of those three things are wrong**: `assert_bss_eligible` has zero hits
   anywhere in `crates/` (the symbol is `assert_zero_init_eligible`), and the failure it describes —
   a `.bss` array sized from a `ProfilerConfig` value — is impossible to write here at all, because

@@ -29,8 +29,14 @@ on Alder Lake-P (`vaddps` 2 vs `vfmadd` 4) the split form's edge is larger. Re-t
 before quoting them for another microarchitecture.
 
 **Toolchain and flags.** `rustc 1.97.1 (8bab26f4f 2026-07-14)`, `cargo 1.97.1 (c980f4866
-2026-06-30)`, `stable-x86_64-pc-windows-gnu` (the box's default toolchain is MSVC 1.92.0 with no
-linker, so the scratch crate pins its own `rust-toolchain.toml`). `.cargo/config.toml` in the
+2026-06-30)`, `stable-x86_64-pc-windows-gnu` (the reason the scratch crate pins its own
+`rust-toolchain.toml` was recorded here as "the box's default toolchain is MSVC 1.92.0 with no
+linker" — ⚠ FALSE as of 2026-09-10: no 1.92.0 exists on the box, `stable-x86_64-pc-windows-msvc` is
+`rustc 1.98.1 (48a229cea 2026-09-01)` and links, and it is what this tree's Windows recipes spell
+since that date — though the rustup DEFAULT host is still `x86_64-pc-windows-gnu` on 2026-09-10,
+so a bare `cargo` here still selects gnu. The
+pin is still what makes these rows attributable; the rows themselves are gnu-1.97.1 numbers and are
+not re-taken here). `.cargo/config.toml` in the
 scratch crate: `-C target-cpu=x86-64-v3` — the same ISA baseline the worktree's
 `.cargo/config.toml` now sets per x86_64 target. Profile: `opt-level = 3`, `lto = "fat"`,
 `codegen-units = 1`, `debug = false`. **This is not the shipped profile:** the workspace has no

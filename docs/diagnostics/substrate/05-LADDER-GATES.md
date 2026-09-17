@@ -327,10 +327,11 @@ Verified by reading the files, not by transcription. **`cargo` was not run.**
   to a binary inspector — a process and a file. Resolved by the `section-gate` feature, default
   off, following the `boyko_rhi_vulkan` `goldens` (`Cargo.toml:22-23`, dev-dep at `:94-99`) /
   `boyko_render` `test-readback` (`:17-27`) precedent already in the tree. **Additionally
-  MEASURED:** no `llvm-readobj` / `objdump` / `nm` / `llvm-nm` is on PATH and the active
-  `stable-x86_64-pc-windows-gnu` toolchain ships only `rust-objcopy` and `rust-lld`, so
-  `llvm-tools` is **not installed** and the whole `.bss` gate family (DG6, profiling G22a/G22b, logging
-  G3) **cannot run on this machine as written.** DG6 makes tool absence a **RED, not a SKIP**.
+  MEASURED (at the time):** no `llvm-readobj` / `objdump` / `nm` / `llvm-nm` was on PATH and the
+  active `stable-x86_64-pc-windows-gnu` toolchain shipped only `rust-objcopy` and `rust-lld`, so
+  `llvm-tools` was not installed and the whole `.bss` gate family (DG6, profiling G22a/G22b, logging
+  G3) could not run as written. ⚠️ **THAT PREREQUISITE IS NOW SATISFIED.** MEASURED 2026-09-10: `llvm-tools` is installed on BOTH stable toolchains (`rustup component list` reports `llvm-tools-x86_64-pc-windows-{gnu,msvc} (installed)`), and each carries `llvm-readobj.exe` / `llvm-nm.exe` / `llvm-objdump.exe` under `lib/rustlib/<triple>/bin/` — which is where `boyko_diag::storage::resolve_tool` looks, not `PATH`. UNBLOCKED IS NOT GREEN: no `.bss` gate has been run.
+  DG6 makes tool absence a **RED, not a SKIP**, unchanged.
 
 - **F8 — the S12 compile-fail red CANNOT be a `#[test]`.** A `#[test]` that fails to compile
   fails the test binary's build. `trybuild` is the workspace's existing mechanism. DG7.

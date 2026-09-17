@@ -491,7 +491,7 @@ the case whose fallback (the owner pops its own wave) is KE16's defect.
 to EVERY arm's wake decision, so the A1-vs-A3 delta on the 1 µs cells is pure transport. W-a is no
 longer "zero behavioural change": it is "one contended-line RMW replaced by one local full barrier"
 (`KE16-DESIGN-W.md` §1). loom M2's producer-side `fence(SeqCst)` is re-attributed from "the
-crossbeam injector push transport" (`tests/loom_pool.rs:143-166, 208-217`) to the production
+crossbeam injector push transport" (`tests/loom_pool.rs:169-192, 234-243`) to the production
 `publish_fence()` (exported through `loom_exports`, one line, C1), and a calibration copy of M2 with
 the producer fence deleted MUST go red — the lost-wake window the file's own fidelity note says it
 reproduced (`:147-152`) — recorded by the tester at Step 0 (`KE16-DESIGN-MEASUREMENT.md` §8).

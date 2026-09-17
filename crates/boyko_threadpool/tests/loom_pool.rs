@@ -62,6 +62,22 @@
 //! `boyko-ecs` unifies features differently and emits a second `loom_pool-*` binary.
 //! **Debug**: `mark_idle` / `unmark_idle` debug-assert the worker-id bound. Release: 6/6 (msvc).
 //!
+//! ⚠ `target."cfg(windows)"` matches both Windows toolchains, and cargo JOINS a
+//! matching cfg-spec's rustflags with the `[target.<triple>]` array already in
+//! `.cargo/config.toml`, so the ISA baseline is not restated here and cannot
+//! drift from that file's: the rustc line carries `-C target-cpu=x86-64-v3
+//! --cfg loom` on both toolchains (measured 2026-09-17). `[build] rustflags` is
+//! NOT an alternative: cargo ignores that key entirely whenever a `[target.*]`
+//! one matches, and `.cargo/config.toml` defines one for both Windows triples —
+//! the same vacuous green by another route.
+//!
+//! ⚠ The table below is a 2026-09-03 reading, taken under the gnu-triple
+//! spelling on the windows-gnu host. The models themselves have since been
+//! re-run under the recipe above and are green wherever they were run: 6/6 in
+//! debug on x86_64-pc-windows-msvc and on x86_64-pc-windows-gnu, one model per
+//! process after `--list` printed all six (measured 2026-09-17; the release 6/6
+//! is the msvc one named above).
+//!
 //! **Reading, this checkout, 2026-09-03, `LOOM_MAX_PREEMPTIONS=3`, one model
 //! per process, taken under `--features ke16-w-gate,ke16-w-count`** — the row's
 //! model was gated on the `ke16-w-count` feature then and did not compile

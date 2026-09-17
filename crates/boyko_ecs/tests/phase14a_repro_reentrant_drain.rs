@@ -78,7 +78,7 @@ struct ReproTriggerBundle {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "Phase 9.1-era ignore, NOT re-validated since Phase 9.3a made every executor wait               site Miri-cooperative (schedule.rs carries #[cfg(miri)] yield_now() at both drain               sites); miri_schedule_parallel runs the same 2-worker Schedule::run green under               Miri, so this is LIKELY REMOVABLE -- unverifiable on this box (Miri needs the               nightly MSVC toolchain, which was removed). miri_phase14a covers the               enqueue-then-drain path single-threaded meanwhile."
+    ignore = "Phase 9.1-era ignore, NOT re-validated since Phase 9.3a made every executor wait site Miri-cooperative (schedule.rs carries #[cfg(miri)] yield_now() at both drain sites); miri_schedule_parallel runs the same 2-worker Schedule::run green under Miri, so this is LIKELY REMOVABLE -- but nobody has re-run it. The reason given here until 2026-09-10 was 'unverifiable on this box (Miri needs the nightly MSVC toolchain, which was removed)', and that blocker DOES NOT EXIST: MEASURED 2026-09-10, both nightly-x86_64-pc-windows-gnu (miri 2026-08-20) and nightly-x86_64-pc-windows-msvc (miri 2026-05-29) are installed with miri, and the project's Miri recipes run on the gnu one. What remains is unrun, not unrunnable. miri_phase14a covers the enqueue-then-drain path single-threaded meanwhile."
 )]
 fn schedule_hook_enqueued_despawn_applies_exactly_once() {
     REMOVE_FIRES.store(0, SEQ);

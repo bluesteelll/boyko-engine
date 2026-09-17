@@ -135,7 +135,7 @@ the claim CAS is `AcqRel`/`Acquire`. NEW: `publish_fence()` (`fence(SeqCst)`, th
 ### 1.2 What this is and is not
 
 **Not "zero behavioural change."** Today the producer-side StoreLoad barrier of the Race-C
-protocol (the SB litmus of loom M2's fidelity note, `tests/loom_pool.rs:143-166`) is supplied by
+protocol (the SB litmus of loom M2's fidelity note, `tests/loom_pool.rs:169-192`) is supplied by
 accident: the `Injector::push` CAS + `fetch_or` and the rotor `lock xadd` are all full barriers on
 x86, none placed for that purpose. W-a removes the rotor RMW from the busy path and, under A1, the
 push itself becomes a plain store — so without the fence the busy-path wake decision would be
@@ -150,7 +150,7 @@ redundant with the `lock`-prefixed ops and kept so the protocol has one shape an
 
 ### 1.3 Obligation — loom M2 re-attributed, and calibrated
 
-`tests/loom_pool.rs` M2 (`:200-265`): the producer's `fence(Ordering::SeqCst)` at `:217`, today
+`tests/loom_pool.rs` M2 (`:226-291`): the producer's `fence(Ordering::SeqCst)` at `:243`, today
 commented "injector push transport fence", becomes a call to the real `publish_fence()` exported
 through `loom_exports` (one line, forwards to `crate::sync::fence(SeqCst)` — C1: the model drives
 production code for the producer's half of the litmus). The worker's fence at `:237` keeps its

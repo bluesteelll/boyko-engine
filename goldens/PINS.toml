@@ -17,6 +17,24 @@
 # existing key, so a section missing e.g. sha256_hwrt makes the script throw; seed it with PENDING
 # first.
 #
+# HOST, 2026-09-10: every [<pin>.env] block below now pins
+# RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-msvc", moved in the same change as the rest of
+# this tree's Windows recipes. (The workstation's rustup DEFAULT host is still
+# x86_64-pc-windows-gnu on 2026-09-10; moving it is a later, owner-run step.) It had to move
+# HERE and not only in rustup, and it would still have had to after that step: golden.ps1
+# SETS every key of a pin's env block explicitly (:143-150), so a pin that still named the gnu
+# toolchain would have kept the golden leg building gnu after the switch -- a split state the
+# script's own "never inherit" discipline would have hidden rather than exposed.
+#
+# ⚠ THE sha256_* VALUES BELOW WERE ALL BLESSED ON THE windows-gnu HOST. Whether an msvc build
+# of the same source dumps the same bytes is UNMEASURED at this commit (no golden was run in
+# the change that moved the pins). A MISMATCH on the first msvc run is therefore not
+# automatically a regression -- and -Bless is NOT the reflex: re-blessing would silently
+# convert "the compiler changed" into a new baseline. Diagnose first -- build the same pin with
+# RUSTUP_TOOLCHAIN overridden back to the gnu stable toolchain, dump it, and compare the two,
+# which separates "the host changed the bytes" from "the render changed" -- and re-bless only on
+# an owner sign-off, as this header already requires.
+#
 # Format is a flat, section-scoped TOML subset (see scripts\golden.ps1 :: Read-Pins).
 # `sha256_hwrt` may equal `sha256_software` (the HW-RT shadow path was made
 # byte-identical to software for this scene) or diverge â€” each leg is pinned on its
@@ -41,7 +59,7 @@ sha256_hwrt     = "a5ad662d2a56efd973487fe49063824c6be841ad07009f5099c0992a491ec
 [grand_showcase.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [grand_showcase_2mat]
 # Asset-streaming plan F8 â€” the FIRST scene exercising the PER_INSTANCE_MATERIAL raster
@@ -62,7 +80,7 @@ sha256_hwrt     = "f6147f9033fe3ffe6b468088211d4f25e5ba7ff84fdcca3b017bca16c4800
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\grand_showcase_2mat.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [deferred_sdf_only]
 # Multi-paradigm render-path plan, rung R3 (Deferred leg-disable, sdf leg): the SAME
@@ -90,7 +108,7 @@ sha256_hwrt     = "ffcc0ac6f70a6cdcd113e343ef2d65a9a3f8134478917f35bec73991d3d55
 [deferred_sdf_only.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [deferred_mesh_only]
 # Multi-paradigm render-path plan, rung R3b (Deferred leg-disable, mesh leg -- the mirror-image
@@ -118,7 +136,7 @@ sha256_hwrt     = "65cb2004f3a8bcace12896cd2a5c4f959e2e7ae53d2f75f8b4ea21d9ee004
 [deferred_mesh_only.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [forward_mesh]
 # Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh-only golden. Code-review
@@ -158,7 +176,7 @@ sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de7
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\forward_mesh.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [forwardplus_mesh]
 # Multi-paradigm render-path plan, rung R5: the ForwardPlus v1 mesh-only golden. Clones
@@ -202,7 +220,7 @@ sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de7
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\forwardplus_mesh.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [forward_both]
 # Multi-paradigm render-path plan, rung R-SDFFWD: Forward x Both -- clones [forward_mesh]'s
@@ -235,7 +253,7 @@ sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de7
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\forward_both.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [sdf_forward_only]
 # Multi-paradigm render-path plan, rung R-SDFFWD: Forward x Sdf (mesh-less) -- the FIRST scene
@@ -266,7 +284,7 @@ sha256_hwrt     = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\sdf_forward_only.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_mesh]
 # Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 (FUSED vb_resolve) mesh-only
@@ -304,7 +322,7 @@ sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_mesh_hzb]
 # VG R3 piece 1 step P1-2 (docs/VG-R3-P1-PYRAMID-PLAN.md): [vb_mesh]'s scene, binary and test,
@@ -337,7 +355,7 @@ BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_hzb.bmp"
 BOYKO_VG_HZB             = "1"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_occ_split]
 # VG R3 piece 2 step P2-6, GATE G1 (docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md): [vb_mesh]'s scene,
@@ -421,7 +439,7 @@ BOYKO_VG_OCC             = "1"
 # one that can. COUNTED FROM THIS FILE, not copied: SIX of the 30 pins are HZB-armed -- [vb_mesh_hzb],
 # [vb_occ_split] and the four [vb_occ_mixed*].
 BOYKO_VG_HZB             = "1"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 # ===============================================================================================
 # VG R3 piece 3 step P3-8 -- the vb_occ_mixed FOUR-PIN FAMILY.
@@ -486,7 +504,7 @@ BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_mixed_off.bmp"
 BOYKO_VG_SCENE           = "mixed"
 BOYKO_VG_HZB             = "1"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_occ_mixed_keep]
 # FORCE_KEEP: the split is armed in full -- second scope, late cull dispatch, both extra descriptor
@@ -521,7 +539,7 @@ BOYKO_VG_SCENE           = "mixed"
 BOYKO_VG_HZB             = "1"
 BOYKO_VG_OCC             = "1"
 BOYKO_VG_OCC_FORCE       = "keep"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_occ_mixed]
 # THE LOAD-BEARING PIN: the cull ARMED and UNFORCED on a scene that actually occludes. Four marked
@@ -549,7 +567,7 @@ BOYKO_HOST_DUMP          = "D:\\tmp\\vb_occ_mixed.bmp"
 BOYKO_VG_SCENE           = "mixed"
 BOYKO_VG_HZB             = "1"
 BOYKO_VG_OCC             = "1"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_occ_mixed_late]
 # FORCE_LATE: the early phase defers EVERY marked instance regardless of the pyramid, so the early
@@ -578,7 +596,7 @@ BOYKO_VG_SCENE           = "mixed"
 BOYKO_VG_HZB             = "1"
 BOYKO_VG_OCC             = "1"
 BOYKO_VG_OCC_FORCE       = "late"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_both]
 # Multi-paradigm render-path plan, rung R10: the VisibilityBuffer x Both golden. Clones [vb_mesh]'s
@@ -610,7 +628,7 @@ sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_both_sdf]
 # VB-SV0 plan, rung S1 (docs/VB-SV0-SDF-SHADOW-PLAN.md): the VisibilityBuffer x Both golden with a
@@ -654,7 +672,7 @@ sha256_hwrt     = "PENDING"
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both_sdf.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_both_sdf_tex]
 # VB-SV0 plan, rung S1: the TEXTURED half of the S1 fixture pair -- [vb_both_sdf]'s scene with a
@@ -701,7 +719,7 @@ sha256_hwrt     = "PENDING"
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both_sdf_tex.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_sdf_only]
 # Multi-paradigm render-path plan, rung R10: VisibilityBuffer x Sdf (mesh-less) -- the FIRST scene
@@ -735,7 +753,7 @@ sha256_hwrt     = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_sdf_only.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_mesh_tex]
 # Textured-PBR rung TV0 (RENDER-PARITY-PLAN.md Sec 2.3 / VB-P2-CLASSIFICATION-PLAN.md): the
@@ -779,7 +797,7 @@ sha256_hwrt     = "5d8f8854cfb123d14d04c2cc0977364714a1916e2314ccb9248956e645609
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_tex.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [taa_armed]
 # AA Stage 4 rung T0: the ARMED-TAA gate. Until this pin existed, every one of the other pins
@@ -823,7 +841,7 @@ sha256_hwrt     = "109c7055dfeebe1a67e50b9b9b0eacc609eff4aa752cfe2de47fc44d69883
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\taa_armed.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
 # EXPLICIT since `JitterScope::RasterAndBasis` became the default: this pin exists to freeze the
@@ -880,7 +898,7 @@ sha256_hwrt     = "70aefdfb727deeee65c60a804ac9191bdf69390d0b4e4000dc47979d4b4c7
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\taa_armed_basis.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 BOYKO_AA                 = "taa"
 BOYKO_TAA_SCOPE          = "basis"
 BOYKO_WIN                = "512"
@@ -913,7 +931,7 @@ sha256_hwrt     = "08752f67e3239ed441e4f8cd3718a769be2f2208332e5aace80526c79381c
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\taa_rcas.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
 # Arms SharpenMode::Rcas (requires BOYKO_AA=taa). Scope is left DEFAULT (RasterAndBasis, matching
@@ -954,7 +972,7 @@ sha256_hwrt     = "6eaca7457c5a8f7c73e446fcf545cef7d0c46ae2b81a1c9115f68cdaba897
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_taa.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
 BOYKO_TAA_SCOPE          = "raster"
@@ -983,7 +1001,7 @@ sha256_hwrt     = "b695fe80d73534779693a208bc3d346e9a1314bedbe9cc1d1a0adae1b5a69
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_taa_rcas.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
 BOYKO_TAA_SCOPE          = "raster"
@@ -1012,7 +1030,7 @@ sha256_hwrt     = "85625a11684d4f2e40ee98510b840647546331b9fa0ba555499faf4109e81
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_ssao.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_mesh_froxel]
 # Rung VB-P1b (docs/VB-PERFORMANCE-TRACK.md's VB-P1): the FUSED vb_resolve FROXEL light-cull
@@ -1051,7 +1069,7 @@ sha256_hwrt     = "fb220ff30f16658e8efa165db2c822263253274a17006c5ecf66ad19414d8
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_froxel.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_mesh_tex_froxel]
 # Rung VB-P1c (docs/VB-PERFORMANCE-TRACK.md's VB-P1): the CLASSIFIED (TEXTURED) vb_shade_tex
@@ -1093,7 +1111,7 @@ sha256_hwrt     = "6d7ea00d35c8e77156cb1124d291edcd98209f5124878d7aa459feae81701
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_tex_froxel.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
 [vb_both_taa]
 # TAA-under-VB, the VIEWT rung (VisibilityBuffer x Both): [vb_taa]'s taa_jitter_eval scene
@@ -1121,7 +1139,7 @@ sha256_hwrt     = "61dc2630b15a08712f95be5983a6bd75ffbf03650266857ed62c10cb03b81
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both_taa.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
 BOYKO_TAA_SCOPE          = "raster"
@@ -1151,7 +1169,7 @@ sha256_hwrt     = "00da67699d2d4615e5d7fd9196ab4671db044915463a0b4dce6f9531a5037
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_sdf_taa.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
 BOYKO_TAA_SCOPE          = "raster"
@@ -1216,7 +1234,7 @@ sha256_hwrt     = "PENDING"
 [particle_additive.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_HOST_DUMP          = "D:\\tmp\\particle_additive.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 BOYKO_WIN                = "512"
 BOYKO_RENDER_PATH        = "vb"
 
@@ -1266,7 +1284,7 @@ sha256_hwrt     = "PENDING"
 [particle_sdf_collide.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_HOST_DUMP          = "D:\\tmp\\particle_sdf_collide.bmp"
-RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 BOYKO_WIN                = "512"
 BOYKO_RENDER_PATH        = "deferred"
 BOYKO_PARTICLE_SDF       = "1"

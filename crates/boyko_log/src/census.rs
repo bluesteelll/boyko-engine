@@ -258,7 +258,7 @@ fn render(buf: &mut [u8], row: &CensusRow) -> usize {
 ///
 /// # The FULL path, not the basename
 ///
-/// The corpus's worked example prints `site=device.rs:3100`. Two files in this workspace may share
+/// The corpus's worked example prints `site=device.rs:3118`. Two files in this workspace may share
 /// a basename -- `mod.rs` is in twenty directories -- so a reader given the basename has to guess
 /// which one, and the guess is silent. The path is what makes the row actionable.
 fn render_once(buf: &mut [u8], row: &crate::once_sites::OnceRow) -> usize {

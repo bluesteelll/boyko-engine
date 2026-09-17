@@ -387,9 +387,14 @@ fn refuse_to_certify_without_a_reachability_arm() {}
 /// a REAL parked loom joiner (loom's own `park()`, not the M1 yield re-poll) and
 /// is green — `loom_m1c_count_gated_completion_wakes_the_parked_worker_joiner`,
 /// `running 1 test … ok`, 0.40 s. Recipe, in full because the obvious spelling
-/// is a trap: `cargo --config 'target.x86_64-pc-windows-gnu.rustflags=["-C",
-/// "target-cpu=x86-64-v3","--cfg","loom"]' test -p boyko-threadpool --test
-/// loom_pool --no-run`, then the emitted `loom_pool-<hash>.exe` under
+/// is a trap: `cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]'
+/// test -p boyko-threadpool --test loom_pool --no-run` (the 2026-09-03 run used
+/// the equivalent `target.x86_64-pc-windows-gnu.…` key, which was the host then;
+/// re-keyed 2026-09-10 when the tree's recipes moved to
+/// `stable-x86_64-pc-windows-msvc` (the rustup default host itself is still gnu
+/// on that date) — a triple key that does not match
+/// the build contributes nothing and yields `running 0 tests`, exit 0), then the
+/// emitted `loom_pool-<hash>.exe` under
 /// `LOOM_MAX_PREEMPTIONS=3 --test-threads=1
 /// --exact <name>`; `tests/loom_pool.rs`'s header carries it verbatim together
 /// with every model's colour and wall. W-d′ therefore HAS its exhaustive model,

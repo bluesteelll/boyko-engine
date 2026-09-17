@@ -80,8 +80,11 @@
 //! `BOYKO_ENABLE_VALIDATION` is set (runner.rs), and the backend withholds the
 //! layer whenever `BOYKO_DISABLE_VALIDATION` is set; on the windows-gnu (MinGW)
 //! toolchain the VulkanSDK validation DLL (an MSVC build) crashes the process
-//! on load (see `VulkanContext::boot`'s escape-hatch doc). So the VUID-level
-//! "traces a freed resource" oracle is NOT part of a default run. The
+//! on load (see `VulkanContext::boot`'s escape-hatch doc) — that second reason
+//! is HOST-SPECIFIC and has NOT been re-verified under the msvc toolchain this
+//! tree's recipes name since 2026-09-17 (no GPU run was taken); what decides
+//! this path is the host-independent env gate above. So the
+//! VUID-level "traces a freed resource" oracle is NOT part of a default run. The
 //! load-bearing guarantee that a retired slot is never traced/drawn is instead
 //! STRUCTURAL and proven at the source, not at runtime: `retire_deferred_frees`
 //! is fence-gated on `submission_epoch + FRAMES_IN_FLIGHT`, and the per-frame
@@ -104,7 +107,8 @@
 //! `BOYKO_DISABLE_VALIDATION` may be set or unset — it makes no difference unless
 //! `BOYKO_ENABLE_VALIDATION` is also set (only then does the runner request the
 //! layer; see above), and on windows-gnu setting it avoids the MSVC-DLL load crash
-//! when the layer IS requested. `--test-threads=1` is required (windowed-test
+//! when the layer IS requested — a crash unverified on the msvc host this box
+//! builds with. `--test-threads=1` is required (windowed-test
 //! convention: a single process-global GPU device). On a windowless / GPU-less
 //! box the runner exits before the frame loop and this test SKIPs gracefully
 //! (the same discrimination `interp_smoke.rs` / `room_smoke.rs` use), never

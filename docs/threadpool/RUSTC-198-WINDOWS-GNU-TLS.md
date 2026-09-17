@@ -155,11 +155,14 @@ milestone, and the 1.98.0 `libstd` rlib on this box already has the RMW `enable`
 ~~The MSVC control ("build the same source for `x86_64-pc-windows-msvc`, where `#[thread_local]` is native")
 is not executable on this box: the installed MSVC toolchain is rustc 1.92.0 and there is no MSVC linker.~~
 **STALE, and it was stale within a day.** The owner installed VS Build Tools 2022 + Windows SDK
-10.0.26100 on 2026-09-10 and `stable-x86_64-pc-windows-msvc` is **rustc 1.98.1 (48a229cea), LLVM
-22.1.8 — the same commit and the same LLVM as the gnu toolchain**. That makes the MSVC control the
-cleanest falsification available here (one variable: the host env, hence whether
+10.0.26100 on 2026-09-10 and `stable-x86_64-pc-windows-msvc` is **rustc 1.98.1 (48a229cea
+2026-09-01), LLVM 22.1.8 — the same commit and the same LLVM as the gnu toolchain**; the whole
+workspace checks, lints and LINKS under it (737 targets, 0 errors, measured that day). That makes
+the MSVC control the cleanest falsification available here (one variable: the host env, hence whether
 `target_thread_local` is set and `LazyKey::force` compiles at all), strictly better than the
-`-Zbuild-std` route above, which patches std. It is queued as the four-arm A/B in §5b.
+`-Zbuild-std` route above, which patches std. It is queued as the four-arm A/B in §5b. This tree's
+Windows recipes have named that toolchain, spelled through `RUSTUP_TOOLCHAIN`, since 2026-09-17;
+every gnu figure in this document is the record of the host that was current when it was taken.
 
 ## 5a. The fix, measured: two thread-local reads per spawn cost exactly twice one (2026-09-10)
 
@@ -264,7 +267,9 @@ its win at **528.2 µs** (594.8 before the constant; that cell's own run-to-run 
 
 ⚠ This is the second time a KE16 number turned out to be a property of the HOST rather than of the
 design (the first was §1 itself). Any absolute in `KE16-RESULTS.md` that was taken on gnu is a gnu
-number, and the msvc line is a THIRD compiler line, not a continuation of either.
+number, and the msvc line is a THIRD compiler line — the same rustc commit, but a different CRT, a
+different allocator and `target_thread_local` NATIVE rather than the OS-key `os::Storage` this
+document measures — not a continuation of either.
 
 ## 6. What this changes for the record
 

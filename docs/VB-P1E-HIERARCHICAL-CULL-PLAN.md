@@ -226,7 +226,7 @@ Four changes, all of them in §8.3 / §8 H3 / §9:
    "every froxel was written exactly once"; it does not. Exactly-once is now *derived* in §8.2 from
    totality + tail integrity + the CPU-pinned lane count, and *separately measured* by the
    permutation probe. **Plain validation is no longer cited as an overrun detector anywhere** —
-   `crates/boyko_rhi_vulkan/src/device.rs:2087` enables only
+   `crates/boyko_rhi_vulkan/src/device.rs:2099` enables only
    `VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT`, a repo-wide grep for
    `GPU_ASSISTED` / `debug_printf` returns **zero** hits, and `robustBufferAccess` is off.
 
@@ -367,7 +367,7 @@ post-fence mapped reads are at `:6202-6211` and `:6219-6228`; `INDEX_LIST_CAP` i
   *(Rev 4 keeps the matrix and replaces the mutation that demonstrates the blindness — see P1-4.)*
 * **P1-G — the barrier count is 3, not "three-to-eight" and not 11.** A **radix-16 in-place
   reduction** (2 barriers) plus folding the summary bit into phase 3's atomic. Barrier elision by
-  wave size is **not** available and is not assumed (`device.rs:2584`).
+  wave size is **not** available and is not assumed (`device.rs:2602`).
 * **P1-H — H1's overclaim withdrawn.** H1 falsifies the **pair-count** premise — a *necessary*
   condition — and nothing more. **H1.5** bounds thread-count scaling on the existing flat arm.
 * **Arithmetic.** Rev 3's seven corrections stand, except the two §D3 rows P1-4/P2 falsified, which
@@ -672,7 +672,7 @@ isolated early `return` and GREEN on the correct shape — which the two asserti
 slot provably could not do (M7, M8).
 
 **The barrier count is not reducible by wave-synchronous elision, and this plan does not assume it
-is.** The RHI enables no subgroup feature (`crates/boyko_rhi_vulkan/src/device.rs:2584` —
+is.** The RHI enables no subgroup feature (`crates/boyko_rhi_vulkan/src/device.rs:2602` —
 `subgroup_size_control: VK_FALSE`) and queries `subgroupSize` nowhere (a grep over
 `crates/boyko_rhi_vulkan/src` + `crates/boyko_rhi/src` returns only raw FFI field declarations at
 `ffi.rs:2623,2624,2691,2703` and that one `VK_FALSE`). Without an enabled subgroup guarantee,
@@ -2245,7 +2245,7 @@ all three are blind:
   cells *past* the buffer;
 * assertions 2/3 (per-froxel count and sequence equality) compare only **in-range** cells;
 * "with validation ON the buffer-overrun must be reported" is **unattainable on this stack** —
-  `crates/boyko_rhi_vulkan/src/device.rs:2087` enables exactly one validation feature,
+  `crates/boyko_rhi_vulkan/src/device.rs:2099` enables exactly one validation feature,
   `VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT`; a repo-wide grep for `GPU_ASSISTED`
   and `debug_printf` across `crates/` returns **zero** hits; and `robustBufferAccess` is never enabled
   (`ffi.rs:2718` is a field declaration only). Sync-validation does not range-check shader accesses.
@@ -2568,7 +2568,7 @@ GREEN arm, could not go RED for the stated reason, and did not name the same fro
 | "the `-D HIER=1` module contains **exactly one `OpReturn`**" | **vacuous** — measured (M7): the correct probe, the early-return probe and the fully-broken probe all emit exactly 1. DXC canonicalises to a single exit block |
 | "every `OpControlBarrier` sits in a **merge block**" | **unsound in both directions** — measured (M8): the correct shader's first barrier is not in a merge block (false RED), and all three of the broken shader's barriers are (false GREEN) |
 | "the **TWO** `OpFOrdLessThanEqual`" | **ill-posed** — §5's finiteness predicate adds two `%v3bool` compares, so a §4-conformant HIER module has **four**. Replaced by a split-by-result-type count (M11) |
-| "with validation ON the buffer-overrun must be reported" (H3 mutation (v)) | **unattainable** — only `SYNCHRONIZATION_VALIDATION` is enabled (`device.rs:2087`), no GPU-assisted validation exists in the repo, `robustBufferAccess` is off. Replaced by detector (A) |
+| "with validation ON the buffer-overrun must be reported" (H3 mutation (v)) | **unattainable** — only `SYNCHRONIZATION_VALIDATION` is enabled (`device.rs:2099`), no GPU-assisted validation exists in the repo, `robustBufferAccess` is off. Replaced by detector (A) |
 | "the `0xFFFFFFFF` probe proves every froxel was written **exactly once**" | **overclaim** — it proves at-least-once. Restated as A1; exactly-once comes from §8.2(B) |
 
 ### 8.4 HP — land §1.3's occupancy probe as a committed test (was §12's prose precondition)
@@ -3109,7 +3109,7 @@ or it says **NO** and explains what carries the property instead.
 | `[P1]` FP margin | **Deleted, not bounded**: D2 makes enclosure a monotonicity theorem (§5) with no epsilon | §5 + D8 + H1 | **yes** — mutation (ii) (lane-0 fold) on the adversarial rig, whose target froxel must not be lane 0's |
 | **`[P1-D]` non-finite AABBs** | **Absorbing-element substitution `±FLT_MAX`** (D8, §5 Case B; **Rev 5 corrects Rev 4's `±1e30`**, which inverted enclosure for a finite centre with `\|c\| > 1e30`): a non-finite `valid` lane forces the coarse box to the universe, degrading the group to *exactly* the flat walk. D4 clause (c) is **deleted** as a result — in the **AABB's** finiteness only; the surviving condition on the **light centre** is named as Premise F (§5.2) rather than left implicit | §5, D8, H3 (vii) | **yes, two-sided** — mutation (vii), **re-specified in Rev 5** (`fi == 168u`, all six components, mirrored in HIER + base + host mirror), must be GREEN with the substitution and RED without. Rev 4's one-arm `lane == 7` form could not go green in the GREEN arm and named different froxels in the two modules. *(Rev 3's identity-element mitigation was a no-op in the mixed case and inverted the all-NaN case; withdrawn)* |
 | `[P1-3]` cap saturation | §1.3's measured table (pinned at **HP**) + the exact `alloc_total <= cap` detector asserted as a precondition of every equality run | §6, HP, H1.3, H3.1 | **yes** — set `index_list_cap = 1`; the equality test aborts loudly instead of comparing clamped results |
-| wave/subgroup coherence | No wave intrinsics used, and **no barrier elided on an assumed wave width** — `subgroup_size_control: VK_FALSE` (`device.rs:2584`), `subgroupSize` queried nowhere. Phase 5's trip count is **group-uniform** (all lanes walk the same mask), so zero loop divergence; only the append predicate diverges, exactly as today | design (D1, D9) | **NO** — nothing is assumed, so there is nothing to falsify. Listed for completeness |
+| wave/subgroup coherence | No wave intrinsics used, and **no barrier elided on an assumed wave width** — `subgroup_size_control: VK_FALSE` (`device.rs:2602`), `subgroupSize` queried nowhere. Phase 5's trip count is **group-uniform** (all lanes walk the same mask), so zero loop divergence; only the append predicate diverges, exactly as today | design (D1, D9) | **NO** — nothing is assumed, so there is nothing to falsify. Listed for completeness |
 | dispatch shape | One boot u32 drives the dispatch size, the allocation and the in-shader write bound; a live-header disagreement cannot move `fi`. **H1.7** pins the derivation on the CPU over six grid configs incl. degenerate ones; **H3.10** asserts no-skew on device; a `debug_assert` at `runner.rs:1951` catches an owner edit | H1.7, H3.10, H4 | **yes** — mutations (v), (vi). **Caveat:** H1.7 is a *Rust re-implementation*, not a pin on the HLSL; only H3 sees a shader/mirror drift |
 | barriers | **3 total** (B1, B2, B3), stated once in D1 and footed in §4. H2 gate **(e8)** asserts each lies on the entry function's top-level block chain | D1, D9, §4, H2(e8) | **yes, executed (M9)** — RED on an isolated early `return` and on a divergent barrier, GREEN on the correct shape. *(Rev 3's "one `OpReturn`" and "barrier in a merge block" are DELETED — measured non-discriminating, M7/M8)* |
 | `#error` guards | The dis-gate compiles a scratch copy with `HIER_MASK_WORDS 64u` and asserts dxc **fails** | H2(f) | **yes, and now MECHANICAL** — delete either `#error` and the compile succeeds. *(Rev 3 ran this by hand once and §9 counted it as mechanical; corrected)* |
@@ -3181,7 +3181,7 @@ over.
   or Reading B dominating. Output-neutral by D2's corollary, so it is a pure perf experiment.
 * **VB-P1i — wave-intrinsic reduction** (`WaveActiveMin`/`WaveActiveBallot`). Output-neutral by D2's
   corollary. **Concrete precondition, verified:** the RHI sets `subgroup_size_control: VK_FALSE`
-  (`device.rs:2584`) and queries `subgroupSize` nowhere, so VB-P1i must first add the device-feature
+  (`device.rs:2602`) and queries `subgroupSize` nowhere, so VB-P1i must first add the device-feature
   query.
 * **VB-P1j — give the BASE arm the same capacity bound. CLOSED.** Its total bound was
   `min(64·ceil(boot_cc/64), live_cc)`, which exceeds `boot_cc` when `boot_cc % 64 != 0` **and** the

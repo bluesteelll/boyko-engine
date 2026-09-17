@@ -287,7 +287,7 @@ the rung cannot commit alone.
 
 **Because.** Sharing stderr's *handle* — rather than taking a raw fd — is what makes the two
 producers share stderr's inner lock, so **neither can splice a line into the other**. That is what
-keeps `scripts/golden.ps1:226`'s line-start match on `[vk-validation] ` working. *Ordering* between
+keeps `scripts/golden.ps1:229`'s line-start match on `[vk-validation] ` working. *Ordering* between
 the two producers remains undefined and is stated as such; **line integrity, not ordering, is what
 the gate consumes.**
 
@@ -1117,5 +1117,6 @@ Collected here so neither plan can bury one in a disposition table.
 *Two of the three architect calls are now TAKEN and travel with their own files:
 **Q1** — `LANE_COUNT = 80` in every profile, with no profile axis (`substrate/02-LANE.md`); and
 **Q2** — the monotone counter, `fetch_sub` deleted from the design (`substrate/03-LOSS.md`).
-What remains is not an architect call at all: the missing `llvm-tools` component
-(`substrate/04-STORAGE.md`), which is one `rustup component add` and is a D0 line item.*
+What remains is not an architect call at all: it was the missing `llvm-tools` component
+(`substrate/04-STORAGE.md`), one `rustup component add` and a D0 line item — and as of 2026-09-10
+that component is installed on both stable toolchains, so what is left is a RUN, not a decision.*

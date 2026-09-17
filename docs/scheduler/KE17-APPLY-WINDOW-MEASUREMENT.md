@@ -318,9 +318,15 @@ fewer entities moves the long systems down and the share up, not down.
 ## 6. Reproducing
 
 ```powershell
-$env:PATH = "$HOME/.cargo/bin;$env:PATH"; $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"
+$env:PATH = "$HOME/.cargo/bin;$env:PATH"; $env:RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-msvc"
 cargo bench -p boyko-ecs --bench ke17_apply_window
 ```
+
+⚠ The toolchain in that line was `stable-x86_64-pc-windows-gnu` until 2026-09-10, when this
+tree's Windows recipes moved to msvc; the numbers in §3-§5 above were taken under the **gnu**
+one and a re-run under msvc is a different compiler line (same rustc commit, different CRT,
+allocator and TLS model), so it re-measures rather than extends them. Override `RUSTUP_TOOLCHAIN`
+back to gnu to compare against the recorded rows.
 
 The `KE17 | ...` rows go to stderr, one per shape × worker count.
 `BOYKO_KE17_TIMELINE=1` adds the raw per-system timeline of one frame per

@@ -59,7 +59,10 @@
 //!
 //! `target."cfg(windows)"` matches both Windows toolchains, and cargo joins it with
 //! the `[target.<triple>]` array: the rustc line carries
-//! `-C target-cpu=x86-64-v3 --cfg loom` on both (measured 2026-09-17).
+//! `-C target-cpu=x86-64-v3 --cfg loom` on both (measured 2026-09-17). Do NOT
+//! move the flag to `[build] rustflags`: cargo ignores that key outright
+//! whenever a `[target.*]` one matches, and `.cargo/config.toml` defines one
+//! for both Windows triples — the same vacuous green by a third route.
 //!
 //! # Model body stack
 //!

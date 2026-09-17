@@ -28,12 +28,21 @@
 //! The owner screenshot command (one line, RTX 3060):
 //!
 //! ```text
-//! RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu CARGO_BUILD_TARGET=x86_64-pc-windows-gnu \
+//! RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc \
 //!   cargo test -p boyko_render --test ui_hud_screenshot \
 //!   p6b_hud_screenshot -- --ignored --test-threads=1 --nocapture
 //! ```
 //!
 //! Output image: `D:\claude\BoykoEngine\target\screenshots\p6b_hud.bmp`
+//!
+//! The line also carried `CARGO_BUILD_TARGET=x86_64-pc-windows-gnu` until 2026-09-10, when
+//! this tree's Windows recipes moved to `stable-x86_64-pc-windows-msvc`. It was the only
+//! `CARGO_BUILD_TARGET` in the tree and was already redundant -- the named toolchain's own
+//! host triple was gnu -- but after the switch it would have been worse than redundant: an
+//! explicit gnu `--target` under an msvc toolchain is a CROSS-COMPILE, needing the gnu std
+//! and the machine-global MinGW linker trio, and it also stops cargo applying
+//! `[target.*].rustflags` to build scripts. Dropped rather than re-spelled, because the
+//! toolchain already selects the host triple.
 
 // clippy 1.98's `chunks_exact_to_as_chunks` fires on the RGBA readback loops below.
 // Left as `chunks_exact` DELIBERATELY: every site here sits inside a `zip` / `filter` /

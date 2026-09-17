@@ -6,9 +6,10 @@ a later step retires them; until then, every file here names the sections it was
 reader can diff it against its source.*
 
 **Status:** design. **Both architect blockers on rung D0 are now RESOLVED** — `LANE_COUNT` (Q1)
-and the loss fold's lost-update window (Q2); see *Open, and who owns it* below. What remains
-there is not a design question at all: one `rustup component add llvm-tools`, a D0 line item.
-**D0 is unblocked.**
+and the loss fold's lost-update window (Q2); see *Open, and who owns it* below. What remained
+there was not a design question at all but one `rustup component add llvm-tools`, a D0 line item —
+and as of 2026-09-10 that component is installed on both stable toolchains (receipt under *Open, and
+who owns it*). **D0 is unblocked, and the `.bss` gates it gates are UNRUN, not green.**
 
 ---
 
@@ -194,10 +195,13 @@ Three blockers travel with specific files and **must not be softened**:
   from its own 5 KiB of `last_seen`. Exactness follows from the shape of the datum rather than
   from every future producer remembering `fetch_add`, and `fetch_sub` leaves the design.
   `delta_since` ships at D0; `fold_into` does not exist. *(`substrate/03-LOSS.md`, Q2.)*
-- **`llvm-tools` is not installed on this machine** — MEASURED: no `llvm-readobj` / `objdump` /
-  `nm` / `llvm-nm` is on PATH, and the active `stable-x86_64-pc-windows-gnu` toolchain ships only
-  `rust-objcopy` and `rust-lld`. The whole `.bss` gate family cannot run as written, and the gate
-  must treat tool absence as a **RED, never a SKIP**. *(`substrate/04-STORAGE.md`; DG6.)*
+- **`llvm-tools` — the blocker is DISCHARGED, and the gates are still unrun.** The finding as
+  recorded read *"not installed on this machine — MEASURED: no `llvm-readobj` / `objdump` / `nm` /
+  `llvm-nm` is on PATH, and the active `stable-x86_64-pc-windows-gnu` toolchain ships only
+  `rust-objcopy` and `rust-lld`"*. MEASURED 2026-09-10: `llvm-tools` is installed on BOTH stable toolchains (`rustup component list` reports `llvm-tools-x86_64-pc-windows-{gnu,msvc} (installed)`), and each carries `llvm-readobj.exe` / `llvm-nm.exe` / `llvm-objdump.exe` under `lib/rustlib/<triple>/bin/` — which is where `boyko_diag::storage::resolve_tool` looks, not `PATH`. UNBLOCKED IS NOT GREEN: no `.bss` gate has been run. The `PATH` half of the original finding is
+  still true and still irrelevant for the same reason: the probe resolves through the rustup
+  toolchain directory. The gate's rule that tool absence is a **RED, never a SKIP** is unchanged.
+  *(`substrate/04-STORAGE.md`; DG6.)*
 
 Four calls need the **OWNER**, not the architect. They are collected in one place —
 `SEAM.md` §*Open — needs the OWNER* (`seam/open-owner-calls`) — so neither plan can bury one in a

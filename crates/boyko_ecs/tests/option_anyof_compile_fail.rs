@@ -9,7 +9,7 @@
 //!
 //! ```powershell
 //! $env:TRYBUILD = "overwrite"
-//! cargo +stable-x86_64-pc-windows-gnu test -p boyko-ecs --test option_anyof_compile_fail
+//! cargo +stable-x86_64-pc-windows-msvc test -p boyko-ecs --test option_anyof_compile_fail
 //! ```
 //!
 //! # Covered cases

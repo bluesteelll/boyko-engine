@@ -62,8 +62,11 @@
 //!
 //! IMPORTANT — validation layers do NOT engage on this boot path (see
 //! `asset_streaming_f6_churn_headless.rs`'s module doc for the full argument:
-//! `enable_validation: false` hardcoded in `run_windowed`, and the windows-gnu
-//! MSVC validation DLL crashes on load regardless). A genuine device-UAF here
+//! `enable_validation: false` hardcoded in `run_windowed` — host-independent and
+//! the reason that decides this path — and, on the windows-gnu toolchain this
+//! tree's recipes named until 2026-09-10, the MSVC validation DLL crashing on load
+//! regardless; unverified under msvc). A genuine
+//! device-UAF here
 //! (e.g. a slot descriptor-write racing an in-flight read, or a double-free of
 //! a `VulkanTexture`) would surface as a driver-level crash / hang /
 //! `VK_ERROR_DEVICE_LOST`, not a VUID message — this test is the real-device

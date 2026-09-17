@@ -12,7 +12,7 @@
 //! Regenerate baselines after a rustc point release:
 //! ```powershell
 //! $env:TRYBUILD = "overwrite"
-//! cargo +stable-x86_64-pc-windows-gnu test -p boyko-ecs --test scratch_no_mut_slice
+//! cargo +stable-x86_64-pc-windows-msvc test -p boyko-ecs --test scratch_no_mut_slice
 //! ```
 
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchSolveView};

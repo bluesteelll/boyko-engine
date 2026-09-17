@@ -18,8 +18,11 @@
       5. SHA-256 the .bmp and compare against goldens\PINS.toml -- the single source of truth
          (replaces the hash string formerly hand-copied across ~10 docs).
 
-    Windows / single RTX-3060 / windows-gnu. Windowed dumps require --test-threads=1 and are
-    #[ignore]d, so this is a human/orchestrator command -- it never runs on CI (no GPU there).
+    Windows / single RTX-3060 / windows-msvc (the workstation's build host since 2026-09-10;
+    every sha256 in PINS.toml was blessed on the preceding windows-gnu host and none has been
+    re-run under msvc -- PINS.toml's header states what to do with a first mismatch, and it is
+    NOT -Bless). Windowed dumps require --test-threads=1 and are #[ignore]d, so this is a
+    human/orchestrator command -- it never runs on CI (no GPU there).
 
 .PARAMETER Pin
     Which pin in goldens\PINS.toml to gate. Default: grand_showcase.
@@ -157,7 +160,7 @@ foreach ($k in $pins.Keys) {
 #
 # BOYKO_ENABLE_VALIDATION is not redundant with the strip, and the difference was measured, not
 # assumed. The backend gates the layer on `enable_validation && BOYKO_DISABLE_VALIDATION unset`
-# (boyko_rhi_vulkan/src/device.rs:2350), and boyko_app's runner hardcoded the first conjunct to
+# (boyko_rhi_vulkan/src/device.rs:2362), and boyko_app's runner hardcoded the first conjunct to
 # `false`. Stripping alone therefore enabled NOTHING on all 22 boyko-app pins -- this switch
 # reported "VALIDATION: clean (0 messages)" unconditionally, a gate that could not fail. Proof:
 # a deliberately illegal `mip_levels: 12` on a 512x512 image (max 10) was accepted by

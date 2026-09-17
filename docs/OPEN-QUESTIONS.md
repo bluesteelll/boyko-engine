@@ -2164,7 +2164,7 @@ questions; L7 can gate the first and nothing gates the second.
 > **saying that a golden run's validation was disabled is the entire reason the code exists.**
 > Suppressing it there would deliberately rebuild the defect the 2026-08-06 entry below describes.
 >
-> 1. **No collision is possible.** `scripts/golden.ps1:226` scans with the literal pattern
+> 1. **No collision is possible.** `scripts/golden.ps1:229` scans with the literal pattern
 >    `\[vk-validation\]`. `boyko-E2101` cannot match it.
 > 2. **In a golden run the line does not exist at all.** Measured: **no host calls
 >    `boyko_log::lifecycle::boot` or `enable`** — the only callers anywhere are `boyko_log`'s own
@@ -2964,7 +2964,7 @@ milestone that ran through it. On the 22 of 25 pins that boot through `boyko_app
 fail.
 
 **Mechanism.** The backend gates the layer on a conjunction —
-`config.enable_validation && BOYKO_DISABLE_VALIDATION unset` (`boyko_rhi_vulkan/src/device.rs:2350`)
+`config.enable_validation && BOYKO_DISABLE_VALIDATION unset` (`boyko_rhi_vulkan/src/device.rs:2362`)
 — and `boyko_app`'s runner hardcoded `enable_validation: false`. `-ValidationOn` only ever
 *stripped the env var*, i.e. satisfied the second conjunct while the first stayed false. The layer
 was never requested, no messenger existed, and the scan for `[vk-validation]` lines therefore
@@ -4399,7 +4399,7 @@ Recorded rather than decided.
 **Addendum (same session): the corpus's own accounting for `Once` is not built either.**
 `00-GOAL-TARGETS.md:37`, `01-EMISSION-RING.md:273` and `05-LADDER-GATES.md:918` all specify an
 `ONCE_SITES` intrusive list and one `LOG-ONCE` census row per fired site
-(`code=W2102 site=device.rs:3100 fired=1 suppressed=UNCOUNTED(by policy)`). **Neither exists.** Two
+(`code=W2102 site=device.rs:3118 fired=1 suppressed=UNCOUNTED(by policy)`). **Neither exists.** Two
 doc comments in the tree named it as though it did — `crates/boyko_log/src/rate.rs` called it "the
 `ONCE_SITES` walk's answer", and `crates/boyko_rhi_vulkan/src/present/passes/gbuffer.rs` claimed a
 site "enrols itself in `ONCE_SITES` so the `LOG-ONCE` census can report that it fired at all". Both
@@ -4419,7 +4419,7 @@ emission from a site whose `LogSite::rate` is `Once`/`OnceCounted` — off the e
 cold `'static` data — and `census::print` emits one row per fired site:
 
 ```
-LOG-ONCE code=W2102 site=crates/boyko_rhi_vulkan/src/device.rs:3100 fired=1 suppressed=UNCOUNTED(by policy)
+LOG-ONCE code=W2102 site=crates/boyko_rhi_vulkan/src/device.rs:3118 fired=1 suppressed=UNCOUNTED(by policy)
 ```
 
 **`fired > 1` is the defect, stated as a number.** The row even says so:
@@ -5331,7 +5331,7 @@ it, and the `debug_assert!` it feeds cannot fire at any of the four.
 Twelve `#[test]` functions in `scope.rs` go with the API (eleven `spawn_batch_*` plus
 `scope_multi_drain_frees_once`), as do the call sites in
 `crates/boyko_threadpool/tests/block_allocation_receipts.rs:746,876` and
-`crates/boyko_threadpool/tests/miri_scope.rs:629,684` — the latter two are receipts about the
+`crates/boyko_threadpool/tests/miri_scope.rs:634,689` — the latter two are receipts about the
 allocator and the release window, not about batching, so they would be rewritten onto `spawn`
 rather than deleted.
 
@@ -5658,3 +5658,1554 @@ ECS paradigm as possible), and it is justified by that ruling, not as a speed fi
 The `bench-alloc` feature is kept, off by default and in the same form as `boyko_ecs`'s, so this A/B
 can be re-run (for the glibc arm, or on the pre-3b tree). The raw criterion data and receipts live
 outside the repository and are not reproduced here.
+
+---
+
+## The msvc lane's rotted citations are repaired BY CONTENT - 166 of them, 69 refused, and the count was never 219 (2026-09-10; pass 2 the same day: 208 written, 19 refused, and pass 1's own clean-audit was wrong)
+
+`97bcf826` left one finding open rather than half-repairing it: citations elsewhere in the corpus
+that now point at lines the lane moved. That call was right, and this entry closes the part of it
+that can be closed without guessing.
+
+**The number in that commit message is wrong.** It says *219 citations*. The tester's own saved run
+ends `229 rotted citation(s)`, and a re-baselined re-run of the same script reproduces **229**
+byte-for-byte. A transcription slip, not a change of state: the contributor table is right
+(`device.rs` 91, `PINS.toml` 64, `golden.ps1` 32, `loom_pool.rs` 18, frozen `docs/ru/` 5) and the
+"and a tail" is what dropped `.cargo/config.toml` 10.
+
+**229 is also not 229 defects.** 24 of them are the scanner's own false positives - its regex is an
+unanchored basename, so `rhi_impl/device.rs:1619-1621` and `crates/boyko_rhi/src/device.rs:891-903` <!-- doc-anchor-ignore -->
+are both read as `device.rs:NNN` and attributed to the lane's `boyko_rhi_vulkan/src/device.rs`. The
+tree holds **four** `device.rs` (43 / 1223 / 2584 / 4212 lines); the 2584-line one is not lane-
+modified and its citations cannot have rotted. Conversely the same regex UNDER-counted by ~80: it
+never matched a bare `` `:NNN` `` continuation nor a comma member past the first, so
+`` `golden.ps1:201,226,232` `` counted as one rot and the `` `:226` `` beside it as none - precisely <!-- doc-anchor-ignore -->
+the forms the lane named as the reason a regex rewrite would corrupt things silently.
+
+**What was written: 166 citation tokens / 238 line numbers, across 26 documents.** Repaired by
+CONTENT, never by arithmetic on line numbers. For each cited `F:N`, the old file's line N is taken
+verbatim and must occur in the new file **exactly once** (99 tokens); failing that, the five-line
+window `old[N-2..N+2]` must occur exactly once as a contiguous block (67 tokens - still pure content
+matching, but the pin is the neighbourhood rather than the line, so it is counted apart). 38
+citations already pointed at the right content and were left alone.
+
+The result is checked, not asserted. After the write, every one of the 238 numbers satisfies
+`old_F[N] == new_F[M]` as an exact string comparison. `difflib`'s independent opcode map disagrees
+with the content method on **zero** of them. ~~The diff is +113/-113~~ **[corrected 2026-09-10, pass 2: `git diff --numstat` said +216/-113 at that point. +113/-113 is the ~~25~~ **26** citation files *[pass 3: 26, not 25 - this file is one of them; its lines 1954, 2754, 4189, 4209 and 4989 are pass-1 rewrites, 5 of the 113]*; the other +103/-0 is THIS ENTRY, so `docs/OPEN-QUESTIONS.md` DID change its line count. It moved nothing: no citation in the corpus points at `OPEN-QUESTIONS.md` past line 5166, measured.]** The 113 rewritten lines have **zero lines differing in
+anything but digits**; CRLF is preserved in all 26 files and 25 of them kept their line count (~~not one changed~~), so no
+other citation in the corpus moved as a side effect. The two files that are both citation targets
+and citing files (`scripts/golden.ps1`, `docs/threadpool/KE16-RESULTS.md`) were checked for the
+obvious tail-eating case: of the five lines edited in them, **none** is cited from anywhere.
+
+**Left untouched - 69 tokens - for the lane's own reason.**
+
+- **`ambiguous-path` 50.** *[pass 2: 8 resolved by a sibling, 23 shown rot-free either way, 19 remain.]* Bare `device.rs:NNN` against four candidates. A verbatim-overlap probe
+  decides only 6, and 3 of those name `rhi_impl/device.rs`, which the lane never touched. 44 are
+  undecided and stay that way.
+- **`non-unique-in-new` 18.** *[pass 2: all 18 resolved - the line TEXT repeats, the difflib EQUAL BLOCK holding it does not.]* `PINS.toml` section headers and `loom_pool.rs` idioms that repeat 3-65
+  times with no unique window. This is exactly where a guess corrupts silently.
+- **`line-edited-or-deleted` 1** - `VG-R3-P3-CULL-INTEGRATION-PLAN.md:988`. *[pass 2: resolved - the range's END line is one the lane ~~deleted; clipped to the last surviving line~~.]* **[pass 3: REPLACED, not deleted - same key, `gnu` -> `msvc`; the end now names the replacement line.]** <!-- doc-anchor-ignore -->
+- **frozen `docs/ru/` 5** - reported, excluded by the 2026-09-07 freeze, not repaired. The freeze was
+  taken with divergence as its accepted cost; this is 5 units of that cost, now measured.
+
+**The inventory script CANNOT show this repair, and re-running it makes the number go UP.** After
+the write it prints **237**, and the decomposition is the whole explanation: **153 findings gone**
+(the old numbers), **161 findings new** - the SAME sites, now carrying the corrected numbers - and a
+net **+8** that is *this entry*, which quotes stale citations as evidence. The script is not failing.
+It reads a cited number N as an OLD line number and asks `old_to_new[N] != N`; a repaired citation
+holds a NEW number, and a new number sits in the moved region exactly as the wrong one did, so the
+check fires just as loudly when the citation is RIGHT as when it was wrong. It is a sound rot
+DETECTOR and a useless rot METER: re-running it is the correct reproduction step and the wrong
+verification step, and anyone who reports "the count fell" from it is reporting an artefact. The five
+lines above that quote citations as examples now carry the corpus's own
+`<!-- doc-anchor-ignore -->` marker, and the detector honours it under `--honor-ignore`, which is
+off by default so the lane's original run still reproduces byte-for-byte. With the flag the two runs
+are **229 before and 229 after - exactly invariant**: 153 findings leave and 153 return at the same
+sites carrying the corrected numbers. That the number cannot move under a repair is now measured,
+not argued.
+
+The measurable property is the content one, over the same citation population: **citations whose
+cited line does not hold the intended content fell 268 -> 32**, 4 of the 32 being the frozen
+`docs/ru/` side. That meter is `w2_verify.py`, written because "re-run the scanner" would otherwise
+read as a gate that cannot pass - the failure shape this register has catalogued a dozen times.
+
+**One defect of my own, found by reading my own output.** The repair models four citation forms -
+`F:N`, `F:a-b`, `F:a,b,c` and the backticked continuation `` `:NNN` ``. A **fifth** exists:
+a slash-separated list, `` `PINS.toml:411/474/499/528/556` ``. The regex matched its first member <!-- doc-anchor-ignore -->
+only, so the first pass rewrote `411`->`429` and left the other four at their pre-lane values - a
+list mixing new and old numbering with nothing marking which half is which, strictly worse than
+leaving it alone. Found by reading the applied diff line by line, then confirmed by a census of the
+character following every citation token. Repaired to `429/492/517/546/574`, cross-checked against
+the same five numbers resolved independently at line 201 of the same document, where they appear in
+the comma form; the two derivations agree. **The `/` is not generally a separator here** - of its
+three occurrences, one divides two different files (`device.rs:1883/ffi.rs:2133`) and one precedes a <!-- doc-anchor-ignore -->
+`:`-prefixed continuation (`device.rs:2114/:2132`) - so no blanket `/` rule was adopted; it would be <!-- doc-anchor-ignore -->
+wrong on two of three. ~~An audit for any remaining partial-state citation returns clean.~~ **[RETRACTED 2026-09-10, pass 2.** The audit looked at the character AFTER a token and at unrewritten tokens on rewritten lines. It could not see a REFUSED token beside a rewritten one for the same target on the same line, nor a `` `:NNN` `` on the NEXT line inheriting a rewritten citation's file, nor a comma-SPACE list, and it returned clean over **15 mixed clusters**. Pass 2 below.]
+
+**The anchors gate covers none of this.** `tests/internal_docs_anchors.rs` has
+`GATED_DOCS = ["FEATURE_MAP.md", "SYSTEMS.md", "ARCHITECTURE.md", "MESHLET-VIRTUAL-GEOMETRY-PLAN.md"]`,
+and not one of the 26 files edited here - nor of the 29 that still carry an unresolved citation - is
+among them. *[pass 7: population-limited. `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` is among them, and it carries two lane-shifted citations that no pass's scanner could read: `:2517`'s link-form `PINS.toml` 372 and 417. The gate reads both and passes both, because both carry the `~` waiver, which checks only that the line is inside the file - Pass 7, (2)]* Everything above was invisible to `cargo test` before the repair and is invisible after <!-- doc-anchor-ignore -->
+it. Nothing in this entry is gated by anything.
+
+**Scripts, all stdlib, all re-runnable, in the session scratchpad**
+(`.../dad9a19e-5512-4bbd-9976-cb44400eeb64/scratchpad/`): `w2_scan_committed.py` (the detector,
+re-baselined off `e6115223..HEAD` because the lane is now committed and the original
+`w2_scan.py` dies on a clean worktree), `w2_mapper.py` (proposal + evidence), `w2_apply.py` (the
+write, CRLF-safe), `w2_fix_slash.py`, `w2_forms2.py` (the form census), `w2_partial_audit.py`,
+`w2_selfref.py`, `w2_verify.py` (the content meter).
+
+**WHAT IS PUT TO YOU:** the ~~44~~ **19** still-undecided ambiguous citations *[pass 2 cut 44 to 19; the rest is below]* (18 of the 19 cite a bare
+`device.rs`; the one that does not cites `05-LADDER-GATES.md`, which exists three times under
+`docs/diagnostics/`) are undecidable from the text alone -
+a bare basename with four candidate files is not a citation, it is a hint. Either they get a path
+prefix as they are next edited (cheap, incremental, never verified), or `GATED_DOCS` widens to the
+plan corpus and the gate starts failing on them (expensive once, honest thereafter). The second is
+the only one that makes the next lane's rot visible on the day it happens.
+
+### Pass 2 (2026-09-10, same day): the 42 citations pass 1 left half-done, and the three claims above that it got wrong
+
+The verifier's verdict on pass 1 was **NOT SOUND** - and not one written line was wrong. 234/234
+numbers hold `old_F[N] == new_F[M]`, zero unlisted rewrites, CRLF clean, docs/ru untouched. What was
+wrong is that the pass rewrote one token of a citation, refused the token beside it for the SAME
+target, and then certified the corpus clean: a line reading half new numbering and half old, with
+nothing marking which half is which - strictly worse than untouched, and exactly the state the
+slash-list paragraph above says it had found and fixed once. Three classes, counted before and after:
+
+| class | before | after |
+|---|---|---|
+| **D1** same-line MIXED - a rewritten token beside a refused one, same target, same line | 8 clusters | **0** *[pass 3: on the old rule's population. The widened rule finds 1 more on the same state, and 2 more half-new lines are visible only by content; all 3 repaired - pass 3]* |
+| **D2** cross-line MIXED - a `` `:NNN` `` on the NEXT line inheriting a rewritten citation's file | 7 clusters | **0** |
+| **D3** same-file inconsistency - one site resolved at one line, refused as ambiguous-path at another | 8 tokens | **0** |
+| all-old clusters (every member still pre-lane; honest, listed) | 36 | 16 (19 tokens) *[pass 3: population-limited - the rule refused every bare token whose antecedent was an unnumbered file mention. The widened rule reads 24 all-old + 1 MIXED on the same post-pass-2 state; after pass 3, 16 ambiguous + 2 named residuals, 0 stale]* |
+
+D1+D2 = **15 mixed clusters** by `w2_pass2_check.py`, which finds any line or line-pair citing one
+lane target with numbers on both sides of the map and exits with their count. It prints **0** now.
+
+**Written: 42 tokens / 61 line numbers on 35 lines of 17 files**, four of them new to the diff
+(`KE16-DESIGN-{A,APP,SPACE,W}.md`, which held all-old `loom_pool.rs` clusters). Nothing by
+arithmetic; the evidence tiers, reported apart from pass 1's L1/L2:
+
+- **L3 - 19 tokens**, the whole refused `non-unique-in-new` class. The line TEXT repeats (a TOML
+  section header 32 times, a closing brace 3 times), but the number sits inside a difflib EQUAL
+  block of 25-1730 lines with one uniform offset (+18 for `PINS.toml`, +26 for `loom_pool.rs`) -
+  the block pins the line, and it is the same map the pass-1 verifier validated 234/234 against.
+  Every pass-1 sibling on the same line had moved by that block's offset.
+- **L4 - 2 ranges**, `:271-307` and `:335-340` in `PINS.toml`: both END on a <!-- doc-anchor-ignore -->
+  `RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-gnu"` line the lane ~~DELETED (that deletion is what~~
+  ~~the lane is). The end is clipped to the last surviving old line inside the range (306 -> 324,~~
+  ~~339 -> 357).~~ **[pass 3: false premise. The lane REPLACED those two lines, it did not delete them: hunks `-307 +325` and `-340 +358`, the same key with `gnu` -> `msvc`. `[vb_mesh]` is new 289-325 and `[vb_mesh_hzb.env]` new 353-358, so each end extends to its replacement line, `:289-325` and `:353-358`; pass 3 wrote both.]** These are the only 2 non-frozen numbers the content meter still counts as not <!-- doc-anchor-ignore -->
+  holding the intended content: ~~the intended line no longer exists anywhere~~. **[pass 3: it exists, as its replacement; the meter still counts both, now as REPL - the line is there and its value changed.]**
+- **X - 13 tokens on 9 line-pairs**, the cross-line class: the 7 the verifier named, plus
+  `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1012` (two lines below its antecedent, through a continuation <!-- doc-anchor-ignore -->
+  line), `KE16-DESIGN-B4.md:457`, and `KE16-RESULTS.md:1116`'s `, 330` - a comma-SPACE list, a <!-- doc-anchor-ignore -->
+  SIXTH form, which pass 1 had left as `234-262, 330`, half new on one line. Two candidates are <!-- doc-anchor-ignore -->
+  correctly NOT ours: `VG-R3-P3-CULL-INTEGRATION-PLAN.md:2852`'s `:59`/`:238` follow an unnumbered <!-- doc-anchor-ignore -->
+  `vg_density_census.rs` on their own line (the rule refuses any bare token with an unnumbered file
+  mention before it) *[pass 3: right for this file, which is not a lane target - and wrong as a rule: the same refusal hid 9 clusters whose unnumbered mention IS a lane target]*, and `KE16-DESIGN-W.md:504` inherits `miri_scope.rs` at lines that did not move. <!-- doc-anchor-ignore -->
+- **P3 - 8 tokens**, ambiguous-path resolved by a sibling: the same FILE had already resolved the
+  same old number (`VB-P1E-HIERARCHICAL-CULL-PLAN.md` x4, `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1538`, <!-- doc-anchor-ignore -->
+  `00-GOAL-TARGETS.md:191`), or the same LINE's other numbers fit only one candidate <!-- doc-anchor-ignore -->
+  (`VG-R3-P3-CULL-INTEGRATION-PLAN.md:117`'s 1160 beside 3279; `05-LADDER-GATES.md:231`'s 2110 <!-- doc-anchor-ignore -->
+  beside its quoted list `3100,3158,3189` - a SEVENTH form, `F:N` / `a,b,c`). **[pass 5: the line is a QUOTATION of L7's row - it says those numbers had drifted - so it was not a citation to resolve; all four numbers are restored, pass 5, (2)]** <!-- doc-anchor-ignore -->
+- **RF - 23 tokens**, ambiguous-path but rot-free either way: every cited number lies in the
+  offset-0 head of `device.rs` (lines 1-791), so the citation is right whichever `device.rs` it
+  means. Reclassified, not edited.
+
+Reverted to pre-lane numbering: **0** - every cluster resolved, so no cluster had to go back whole.
+
+Checked: `old_F[N] == new_F[M]` on all 61 (for L4, N is the surviving line *[pass 3: superseded - for those two ends N is the replaced line and M its replacement, same key, so they hold as REPL, not as ==]*); the content meter over
+the population, now including the cross-line, comma-space and slash forms: **297 -> 6** *[pass 3: population-limited by the same refusal - 361 numbers. The widened walk reads 367 -> 76 on the same post-pass-2 state (438 numbers) and 373 -> 28 after pass 3 (444)]* (4 frozen
+`docs/ru` + the 2 L4 ends *[pass 3: replaced-line ends, not deleted-line ends]*); CRLF == LF == CR in all 30 files; no file's line count changed except
+this one's tail. The pass-1 partial-state audit and forms census were re-run and are NOT quiet, which
+is the point: the census shows the same 3 slash sites as before plus this entry's own 3 quotations, and
+the audit - which knows only pass 1's log - flags 13 tokens on lines both passes touched: the pass-2
+rewrites, five offset-0 or non-lane numbers (`PINS.toml:15`, `KE16-RESULTS.md:12`, `loom_pool.rs:12-16`, <!-- doc-anchor-ignore -->
+`rhi_impl/device.rs:1013`, `boyko_rhi/src/device.rs:22`), and an unbackticked `(:61-69)` into <!-- doc-anchor-ignore -->
+`miri_scope.rs` whose lines did not move. That audit is superseded by the checker, not re-certified.
+
+**The content meter's label was too generous, and the split is now printed.** "Repaired" meant
+`old_F[N] == new_F[M]` - a correct MOVE. Whether the sentence around the citation CLAIMS what that
+line holds is a different question, and the verifier now asks it for all 143 rewritten citing lines:
+an identifier named on the citing line must occur within three lines of the cited old line.
+**45 confirmed, 53 NOT confirmed, 45 uncheckable** (no identifier to test). ~~The 53 are pre-lane rot~~
+~~carried over verbatim - correct as a move, wrong as a citation.~~ **[pass 4, 2026-09-11: not all 53. The five `.cargo/config.toml` rows among them were RIGHT at `e6115223` (`:14-15`, `[env]` and `MIRIFLAGS`); the lane commit rewrote them wrong (`:31-32`) and pass 1 took that as old numbering and moved it again (`:53-54`) - lane rot moved twice, neither pre-lane rot nor a correct move. Pass 4 wrote `:36-37`. The other 48 were not re-derived by pass 4.]** With the evidence: <!-- doc-anchor-ignore -->
+`VB-P1E-HIERARCHICAL-CULL-PLAN.md:3452` cites `device.rs:2099`, which is `cmd_blit_image`, while <!-- doc-anchor-ignore -->
+`SYNCHRONIZATION_VALIDATION_EXT` is at 2282; the 2026-08-06 entry above cites `device.rs:2362`, the <!-- doc-anchor-ignore -->
+string `"vkEnumerateInstanceLayerProperties(count)"`, while the `enable_validation &&
+BOYKO_DISABLE_VALIDATION` conjunction it quotes is at ~~2480~~ **[pass 4: 2486 - old 2468, offset +18; 2480 is a doc-comment line, old 2468 plus the +12 of a different region of the file]**; ~~four documents cite~~ **[pass 4: three documents, on five lines, cite]**
+`.cargo/config.toml:53-54`, two comment lines, while `MIRIFLAGS` is at ~~15~~ **[pass 4: 37 - 15 is its `e6115223` number, while this sentence's other numbers (2099, 2282, 2362) are `97bcf826` numbering]**; <!-- doc-anchor-ignore -->
+`VB-PERFORMANCE-TRACK.md:235` cites `PINS.toml:723`, a blank line, for `[vb_mesh_ssao]`, which is at <!-- doc-anchor-ignore -->
+1012. **Not repaired here** - it is a different debt and a regex would guess. The list, with the
+cited old line and the nearest old line holding each named identifier, is `w2_pass2_prerot.json`.
+The heuristic under-reports where a sentence claims without naming and over-reports where a name
+sits near the line by chance (`KE16-DESIGN-B4.md:457` is flagged on `pop_any`, which belongs to the <!-- doc-anchor-ignore -->
+`worker.rs` citation beside it); each row prints enough to judge.
+
+Scripts, stdlib, in the same scratchpad: `w2_lib.py` (old/new from git, difflib equal blocks),
+`w2_pass2_census.py` (forms + cross-line census), `w2_pass2_apply.py` (the write; `--dry` first,
+and the dry run caught its own double-move on the slash list's head before anything was written),
+`w2_pass2_check.py` (the mixed-cluster gate, exit code = count), `w2_pass2_verify.py` (invariant,
+metric, label split), `w2_pass2_note.py` (this addendum).
+
+**Still open, all-old and listed - 19 tokens in 16 clusters.** *[pass 3: the 16 ambiguous clusters stand as listed; the population was limited by the refusal rule, which hid 9 more - see pass 3 below.]* 18 bare `device.rs`:
+`RENDER-PARITY-PLAN.md` x7, `OPTIMIZATION-PLAN-RENDER.md` x2, `ARCHITECTURE-FRAME-GRAPH-PLAN.md` x2,
+`crates/boyko_app/src/runner.rs:148`, `PARTICLES-PLAN.md:183`, `RENDER-R0-INSTRUMENT-PLAN.md:90`, <!-- doc-anchor-ignore -->
+`TAA-PLAN.md:138`, `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:920-921`, <!-- doc-anchor-ignore -->
+`VG-R3-P3-CULL-INTEGRATION-PLAN.md:2842`, `diagnostics/profiling/02-GPU.md:615`; and the <!-- doc-anchor-ignore -->
+`05-LADDER-GATES.md:918` at line 4187 of this file, which by its two siblings means the `logging/` <!-- doc-anchor-ignore -->
+copy - not lane-modified, but `ONCE_SITES` is at its lines ~~54, 85, 375 and 405~~ **[pass 4: 54, 85, 375, 376 and 405]**, never 918:
+pre-existing rot, not lane rot. Two of the 18 have a cross-FILE sibling with the identical old
+number and identical quoted context (`runner.rs:148` quotes the same conjunction as the 2026-08-06 <!-- doc-anchor-ignore -->
+entry's 2350; `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:920`'s 2107-2111 holds the 2110 that <!-- doc-anchor-ignore -->
+`00-GOAL-TARGETS.md:150` resolved). That rule was not adopted - this pass disambiguated by <!-- doc-anchor-ignore -->
+same-file siblings only - and they are put to you with the rest.
+
+
+### Pass 3 (2026-09-10, same day): the refusal rule hid 9 clusters, the L4 premise was false, and a tenth half-new line nobody named
+
+The pass-2 verifier returned four defects. This pass repairs them; every figure below is measured by
+the scripts named at the end, none is carried over.
+
+**Who wrote what.** 25 of this pass's 26 token edits (58 numbers) were written to the tree at 22:52
+by an earlier invocation of this pass, which stopped before verifying or recording them; its log is
+`w2_pass3_applied.json`. This invocation re-derived every one of those numbers from `git show` and
+re-checked it, and wrote one token more (2 numbers). Nothing inherited was taken on trust.
+
+**The widened rule.** A bare `:N`, `:N-M` or comma(-space) list whose NEAREST file mention - on its own
+line, else the last one on the line above - is an UNNUMBERED mention of a lane target (full path or
+basename) cites that target. In every other case pass 2's rule stands verbatim, and an unnumbered
+NON-lane mention still refuses the token: `VG-R3-P3-CULL-INTEGRATION-PLAN.md:2852`'s <!-- doc-anchor-ignore -->
+`vg_density_census.rs` is still skipped. One rule in one file: `w2_pass3_tok.py` is imported by both
+the checker and the meter, because pass 2 carried two copies of the old rule and they shared its
+blind spot. A comma-SPACE list inside backticks is now a bare token as well - pass 2's bare-token
+pattern could not match `VG-R3-P3-CULL-INTEGRATION-PLAN.md:40`'s 26-number row at all. <!-- doc-anchor-ignore -->
+
+**It is a widening, and it fires - both shown, not argued.**
+
+- Census over the whole tree, the old rule against the new on every line: 2074 tokens identical, 62
+  added, 2 re-assigned to a nearer lane mention, **0 dropped**.
+- Injected probe. A scratch COPY of `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md` as pass 2 left it, with three
+  synthetic stale tokens appended past its last line - same-line `scripts/golden.ps1` (`:259`), <!-- doc-anchor-ignore -->
+  cross-line `goldens/PINS.toml` then (`:339`) on the next line, comma-space `goldens/PINS.toml` at <!-- doc-anchor-ignore -->
+  `:25, 46` - and one control, `vg_density_census.rs` (`:187`). The widened checker's output on the <!-- doc-anchor-ignore -->
+  copy differs from its output on the un-injected copy by exactly three STALE clusters (four
+  numbers) and one skipped control; pass 2's checker prints byte-identical output on both copies.
+  The tree was never written for this (`p3proof/`).
+- The "before" state is the tree with this pass's logged edits reversed in memory - no checkout. It
+  is validated, not assumed: pass 2's checker, run unchanged over it, reproduces pass 2's final log
+  byte for byte, and the meter's old-rule population reproduces pass 2's 361 numbers and 297 -> 6.
+
+**What the widened rule finds on the post-pass-2 state: 9 clusters, 63 stale numbers** - the
+verifier's count, cluster for cluster (the checker exits 7 there: 1 MIXED + 6 STALE; the other two
+are the named residuals below).
+
+| cluster | numbers | target by text | target by content | disposition |
+|---|---|---|---|---|
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1032-1033` | 3 | `PINS.toml` | `golden.ps1` | rewritten, `golden.ps1` map (+3) <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1386-1388` | 4 | `golden.ps1` | `golden.ps1` | rewritten (+3) <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1548` (MIXED) | 4 | `PINS.toml` | `golden.ps1` | rewritten (+3); defect 3 <!-- doc-anchor-ignore --> |
+| `VG-R3-P3-CULL-INTEGRATION-PLAN.md:40` | 28 | `PINS.toml` | `PINS.toml` | rewritten (+18; one REPL) <!-- doc-anchor-ignore --> |
+| `VG-R3-P3-CULL-INTEGRATION-PLAN.md:1862` | 4 | `PINS.toml` | `PINS.toml` | rewritten (+18) <!-- doc-anchor-ignore --> |
+| `archive/LIGHTING-L0-L1-PLAN.md:801` | 4 | `device.rs` | `device.rs` | rewritten (+12) <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-W.md:153` | 3 | `loom_pool.rs` | `loom_pool.rs` | rewritten (+26) <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:877-878` | 5 | `PINS.toml` | `vg_density_census.rs`, not a lane file | **not** rewritten - content-refuted <!-- doc-anchor-ignore --> |
+| `logging/00-GOAL-TARGETS.md:182` | 8 (16 occurrences) | `golden.ps1` | `golden.ps1` as of the carve | **not** rewritten - historical <!-- doc-anchor-ignore --> |
+
+Each offset above is a difflib EQUAL block's, and each number was checked inside its block
+(`old_F[N] == new_F[M]`), never applied as arithmetic.
+
+**The widening is a better detector, not an oracle: three of its nine attributions are wrong by
+content.** `:1032-1033` and `:1548` follow an unnumbered `PINS.toml`, but they describe what <!-- doc-anchor-ignore -->
+`golden.ps1` does - the throw under `-Bless`, the `Set-Content`, the check path's `exit 2` - and old
+`golden.ps1` 240, 258, 259, 266 and 270 hold exactly those lines. They were rewritten by the
+`golden.ps1` map, and the checker now prints every written token whose recorded target differs from
+the rule's reading (15 across the three passes). `:877-878` follow `goldens/PINS.toml` too, but cite <!-- doc-anchor-ignore -->
+the test named on line 876, `vg_density_census.rs:187`: old `PINS.toml:196` is `width = 512`, while <!-- doc-anchor-ignore -->
+the test holds `.filter(|s| s.starts_with("vb"))`. The verifier's "PINS +18" for that cluster was the
+rule's reading taken as a fact; applied, it would have moved five numbers of one file into another.
+
+**Defect 1 - repaired.** `VG-R3-P3-CULL-INTEGRATION-PLAN.md:988` `:353-357` -> `:353-358`, and <!-- doc-anchor-ignore -->
+`VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1011` `:289-324` -> `:289-325`. Re-derived from `git show <!-- doc-anchor-ignore -->
+97bcf826:goldens/PINS.toml`: new 325 and 358 are `RUSTUP_TOOLCHAIN = "stable-x86_64-pc-windows-msvc"`,
+the last lines of `[vb_mesh.env]` and `[vb_mesh_hzb.env]`; old 307 and 340 are the same key with
+`gnu`. The pass-2 text asserting a deletion is struck above, in place.
+
+**Defect 3 - repaired, and its class searched rather than its instance.** `:1548`'s four <!-- doc-anchor-ignore -->
+`golden.ps1` numbers are in the table. `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1538`'s `:2110-2122` -> <!-- doc-anchor-ignore -->
+`:2122-2134` and `:2187-2193` -> `:2199-2205`: the last-numbered-antecedent rule gives them <!-- doc-anchor-ignore -->
+`ffi.rs:1665`, but `ffi.rs` 2187-2193 is `VkDescriptorSetVariableDescriptorCountAllocateInfo`; by <!-- doc-anchor-ignore -->
+content they are `device.rs`. The rule mis-assigned them; the text was never ambiguous to a reader.
+`w2_pass3_suspects.py` then lists every bare token the rule gives to a non-lane numbered mention
+while a lane mention stands before it: 19 distinct tokens, each read. 16 are not lane citations
+under any reading, or are offset-0 under the lane's map whichever file they mean (the plan's own
+`:369`/`:371`/`:105`/`:353`, `ci.yml`'s `:64`, `check_hotpath_exceptions.py`, `vm_column.rs`, <!-- doc-anchor-ignore -->
+`vg_occ_split_timing.rs`, `host.rs`, `ffi.rs`'s own `:1670`, ...), 2 are `:1538`'s above, and <!-- doc-anchor-ignore -->
+**one is a tenth half-new line that neither the verifier nor the widened rule saw**:
+`VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1500`, where pass 1 had moved `device.rs:2164`, `:2165-2172` and <!-- doc-anchor-ignore -->
+`:2199-2205` and left `:2110-2111` behind `runner.rs:213`. By content it is `device.rs` - the <!-- doc-anchor-ignore -->
+`sync_validation_available` conjunction that `00-GOAL-TARGETS.md:150` cites as the same `:2110-2111` <!-- doc-anchor-ignore -->
+and pass 1 moved to `:2122-2123`. Rewritten to `:2122-2123` by the map. The mirror census - a token <!-- doc-anchor-ignore -->
+static under its rule target but moved under another lane target named before it - returns 0.
+
+**Numbers written this pass: 60** - 57 by the map (`old_F[N] == new_F[M]`, and difflib's
+equal-block map agrees) and 3 by REPL (a 1:1 `replace` line with the same key): the two range ends
+of defect 1, and `VG-R3-P3-CULL-INTEGRATION-PLAN.md:40`'s 738 -> 756, a lone number in the row that <!-- doc-anchor-ignore -->
+is also a replaced `RUSTUP_TOOLCHAIN` line. That third one extends defect 1's rule beyond a range
+end; it is stated here rather than left implicit. `w2_pass3_verify.py` prints all 60, each with its
+old and new line text.
+
+**Pre-lane rot, moved correctly and still wrong as a citation - listed, not repaired (pass 2's
+policy).** `VG-R3-P3-CULL-INTEGRATION-PLAN.md:40` says "26 top-level tables at ...", but at <!-- doc-anchor-ignore -->
+`e6115223` only 12 of its 26 numbers are top-level headers - of the other 14, six are comments,
+four are key lines (`BOYKO_VG_SCENE`, `sha256_software`, `BOYKO_SHADOW_DENOISE`,
+`RUSTUP_TOOLCHAIN`), two are `crate`/`test_binary` lines and two (778, 912) are `.env` sub-tables -
+and `BOYKO_VG_OCC` is not at 394. The `device.rs` numbers at `:1500` and `:1538` were already wrong at <!-- doc-anchor-ignore -->
+`e6115223`: 2110 is `})`, while `sync_validation_available` is at 2225 and the `p_next` choice at
+2305. A move preserves exactly what a citation pointed at; that it pointed at the wrong thing before
+the lane is a separate debt, the same class as pass 2's 53 NOT-CONFIRMED *[pass 4: less its five `.cargo/config.toml` rows, which were lane rot moved twice - see the correction in pass 2 above]*.
+
+**The historical-narrative decision: `00-GOAL-TARGETS.md:182` is left as written, intentionally <!-- doc-anchor-ignore -->
+old.** The paragraph is the record of a withdrawal at the carve. It quotes what v4 and the withdrawn
+row SAID and what `golden.ps1` held when that was measured; rewriting its numbers to today's would
+make it report that v4 said a number v4 never said, and would break the argument it exists to make.
+Its knock-on is recorded rather than repaired: its present-tense "The file has not moved since
+`66148ae`" became false at `97bcf826`, whose one `golden.ps1` hunk (`-21,2 +21,5`) moved every line
+below it by +3; and the rows it points at (that file's lines 111 and 191) carry today's
+numbering since pass 1. The paragraph and its neighbours now disagree by exactly the lane's +3.
+
+**Final state, measured.**
+
+- Widened checker over the whole tree: 216 clusters, **0 MIXED, 0 STALE** *[pass 4: population-limited - true of this checker's population, not of the tree. The pass-3 verifier's scanner, which also reads a bare number two or more lines below its mention and one behind a nearer non-lane mention, reads 25 more unmoved numbers on 10 lines (4 stale, 21 already wrong at `e6115223`), and 10 wrong numbers - the `.cargo/config.toml` double move - that no checker taking the HEAD token as the old number can see; see pass 4]*; 18 all-old = pass 2's 16
+  ambiguous clusters + the 2 named residuals. Exit 0 (it exits 7 on the post-pass-2 state).
+- Meter, three runs over one walk: old rule / post-pass-2, 361 numbers: 297 -> 6 (pass 2's figure,
+  reproduced); widened / post-pass-2, 438: 367 -> 76; widened / tree, 444: 373 -> **28** = 4 frozen
+  `docs/ru` + 3 REPL + 16 occurrences in the historical paragraph + 5 content-refuted. **0 unclassed.** *[pass 4: population-limited in the same way - 0 unclassed among the 444 numbers this walk reaches; its 10 `.cargo/config.toml` numbers counted as holding, because the meter took the logged HEAD token as the old line (`old[31]` and `new[53]` are both `#`)]*
+- No stray edit: every one of the 30 modified files, with the logged edits of passes 3, 2 and 1
+  reversed, equals `git show HEAD:` (LF-folded; this file on its first 5165 lines). CRLF == LF == CR
+  in all 30; `docs/ru/` untouched.
+
+**Residuals, by name.** (1) Pass 2's 16 ambiguous clusters, unchanged. (2)
+`VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:877-878` - content-refuted, not a lane citation; its numbers are <!-- doc-anchor-ignore -->
+pre-existing rot against `vg_density_census.rs`, whose test function is at 220 today, not 187. (3)
+`00-GOAL-TARGETS.md:182` - historical, above. (4) The 4 frozen `docs/ru/` citations. (5) The 3 REPL <!-- doc-anchor-ignore -->
+numbers: they name the right line, whose value the lane changed, so no exact-text meter can ever
+call them "holding the intended content". Plus the pre-lane rot above, listed with pass 2's.
+
+Scripts, stdlib, same scratchpad: `w2_pass3_tok.py` (the one token walk), `w2_pass3_state.py` (the
+logs, and the reversed post-pass-2 view), `w2_pass3_check.py` (exit = MIXED + STALE; `--state pre3`,
+`--only`, `--sub REPO=COPY`, `--census`), `w2_pass3_oldrun.py` (pass 2's checker, unchanged, over a
+chosen state or copy), `w2_pass3_verify.py` (invariant, meter, label split, stray-edit reversal,
+CRLF), `w2_pass3_suspects.py` and `w2_pass3_suspects2.py` (defect 3's class), `w2_pass3_apply.py` with
+`w2_pass3_applied.json` (the 22:52 write), `w2_pass3b_apply.py` with `w2_pass3b_applied.json` (this
+invocation's one token), `w2_pass3_note.py` (this addendum), and `p3proof/` (the probe copies and
+both checkers' output on them).
+
+**WHAT IS PUT TO YOU:** whether `00-GOAL-TARGETS.md:182` gets a dated note naming today's numbers <!-- doc-anchor-ignore -->
+beside the carve-time ones; and whether the plan corpus keeps writing bare `:N` at all. Every
+cluster this pass repaired is a bare number whose file had to be inferred, and the best text rule
+measured here infers three of nine wrong.
+
+### Pass 4 (2026-09-11): a double move no checker could see, two wrong-file rewrites, and 21 of the verifier's 25 continuation numbers refused by content
+
+The pass-3 verifier returned **NOT SOUND** with a finite list; this pass works that list and nothing
+else. Every number it writes is justified by the text of the cited line, printed beside the old line
+by `w2_pass4_apply.py --dry` before anything was written, never by an offset.
+
+**Written: 16 line numbers - 11 token edits on 9 lines of 4 documents** - and, in this entry, 8
+register lines corrected in place above (struck through, nothing deleted).
+
+- **The double move, 10 numbers on 5 lines** - `KE16-DESIGN-MEASUREMENT.md:37` and `:530`, <!-- doc-anchor-ignore -->
+  `KE16-DESIGN.md:373`, `KE16-TASKREP-ALLOCATION.md:67` and `:772`: `.cargo/config.toml:53-54` -> <!-- doc-anchor-ignore -->
+  `:36-37`. Old line 14 `[env]` is new 36; old line 15 `MIRIFLAGS = "-Zmiri-tree-borrows"` is new 37. <!-- doc-anchor-ignore -->
+- **The two wrong-file rewrites, 2 numbers** - `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1504` `:375` -> <!-- doc-anchor-ignore -->
+  `:357` and `:1506` `:368` -> `:350`, i.e. back to what they said before pass 1. <!-- doc-anchor-ignore -->
+- **One cluster of the verifier's continuation table, 4 numbers** - <!-- doc-anchor-ignore -->
+  `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1013-1014`: `:327`, `:328`, `:335`, `:339` -> `:345`, `:346`, <!-- doc-anchor-ignore -->
+  `:353`, `:357`. Old and new lines are identical and are what the sentence names: `test_binary = <!-- doc-anchor-ignore -->
+  "vb_mesh"`, `test_name = "vb_mesh_screenshot_dump"`, `[vb_mesh_hzb.env]`, `BOYKO_VG_HZB = "1"`.
+  Line 1012 already gave that pin as `:327-359`, so until now `:327` named two lines in one sentence. <!-- doc-anchor-ignore -->
+
+**How the double move happened, and why three checkers passed it.** At `e6115223` the five lines
+said `:14-15`, which was right. The lane commit itself rewrote them to `:31-32`, which was already <!-- doc-anchor-ignore -->
+wrong: at `97bcf826` those are two lines of the toolchain comment. Pass 1 then took the HEAD token
+`31-32` as OLD numbering and moved it through the lane's map to `53-54`. Old 31 is `#` and new 53 is
+`#`, so `old_F[N] == new_F[M]` held - as it holds for any number inside an equal block. Pass 1's
+meter, pass 2's checker and meter, and pass 3's checker and meter all read the number under test
+from the HEAD tree (or from a pass log's `old`, which is the HEAD token), so all of them certified
+`53-54`. The verifier read the citing file at `e6115223` instead. Asking what a line said BEFORE
+the lane is the only question that can see a citation the lane itself rewrote.
+
+The class is closed, not sampled. Of the 144 lines passes 1-3 wrote, exactly 5 differ between
+`e6115223` and `97bcf826` in their digits, and they are these five (`w2_pass4_dmcensus.py`). Over
+all 44 files the lane changed, its own digit-only line rewrites are the same config citations and
+nothing else (`w2_pass4_lanerw.py`; the fifth, `:67`, sits in an unequal replace block). <!-- doc-anchor-ignore -->
+
+The checker's blind spot is now measured from the other side. Run over the repaired tree,
+`w2_pass3_check.py --state tree` exits **7**, where it exited 0 before this pass. It reports the
+correct `:36-37` as 5 STALE clusters, because it reads 36 as an old number that should have moved <!-- doc-anchor-ignore -->
++22. It reports `:1504` and `:1506` as 2 MIXED, because it gives the plan's own numbers to <!-- doc-anchor-ignore -->
+`PINS.toml`. All 7 are right by content. That checker is superseded here, not re-certified.
+
+**The two wrong-file rewrites.** Pass 1 moved `:357` and `:350` by the `PINS.toml` map because <!-- doc-anchor-ignore -->
+`PINS.toml` was the nearest file mention. By content, they are the plan citing its OWN round-1 text:
+- at `9e80cd4e` (the round-1 critique commit), the plan's line 357 reads `vb_scopes == 2,
+  vb_late_draws == <batch count>`, the clause `:1504` quotes; <!-- doc-anchor-ignore -->
+- its line 350 carries "one that cannot be blessed wrong", the phrase `:1506` says to strike; <!-- doc-anchor-ignore -->
+- its line 353 carries the `base_instance` control that `:1504` also names. <!-- doc-anchor-ignore -->
+
+Neither phrase has ever been in `goldens/PINS.toml`: 0 occurrences at `e6115223` and at `97bcf826`,
+and `git log -S` over every ref finds none. The plan is not a lane file, so those numbers never
+moved. The verifier's scanner still gives both to `PINS.toml`, and now flags them as STALE and as
+same-line MIXED. That is its rule, not the text; they are listed below.
+
+The same reading found one more of this class, on a NUMBERED token, which the verifier's bare-token
+reading did not cover. `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:882` says the critique <!-- doc-anchor-ignore -->
+cited that note as `PINS.toml:57-64`, and `9e80cd4e:540` says exactly `PINS.toml:57-64`. The point <!-- doc-anchor-ignore -->
+of the sentence is that the numbers are right and the file is wrong. Pass 1 rewrote the quote to
+`PINS.toml:75-82`, so it now reports a citation the critique never made. The verifier's list does <!-- doc-anchor-ignore -->
+not include it, so it is **not written**; the restore is put to you. **[pass 5: restored, with eight more members of its class - pass 5, (2)]** The parenthetical on line 883
+("`PINS.toml:75-82` is the `[grand_showcase_2mat]` block") does hold at HEAD. <!-- doc-anchor-ignore -->
+
+**The continuation-line class: 25 numbers on 10 lines, 4 written, 21 refused.** The verifier's
+scanner reads what pass 3's rule cannot: a bare number two or more lines below its mention
+(`V3_WALK=6`), and a number behind a nearer non-lane mention (`v3_para.py`). Its table gives each of
+the 25 a map value, and every map value holds as a MOVE. Pass 4 then asked whether the sentence is
+true of the line the value names. For 21 of the 25 it is not, and it was already not true at
+`e6115223`:
+- `VB-SV0-SDF-SHADOW-PLAN.md:1627-1628` (8 numbers) *[pass 8: dated records, kept as written. Both lines sit under the section's lead-in, `:1542`, "Every line below was opened while writing this revision", and `git blame` gives the lead-in and both lines to `62731d91`, where all 8 numbers hold: `PINS.toml` `[vb_both]` 313-343, empty edit list 322, pre-fill note 326-328, `[vb_sdf_only]` 345-377, empty 355. Not moving them was right; counting them as rot was not - Pass 8, (B)]*: `[vb_both]` is at 583 at `e6115223` and 601 <!-- doc-anchor-ignore -->
+  at HEAD, not 313, and `[vb_sdf_only]` is at 706 and 724, not 345. Old 313-377 and new 331-395 are
+  comments and keys inside `[vb_mesh_hzb]` and `[vb_occ_split]`. Its siblings, which pass 1 moved on
+  lines 1625 and 1521, are the same rot, moved.
+- `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:916` (4): `VkValidationFeaturesExt` is packed at old 2271 / new <!-- doc-anchor-ignore -->
+  2283, and the `p_next` chain head is chosen at new 2317-2318. The cited 2153-2193 / 2165-2205 are
+  `#[inline(never)]`, a message string, an instance-extension check and the `VkApplicationInfo`
+  literal. The same holds for line 914's `device.rs:2164`, <!-- doc-anchor-ignore -->
+  which pass 1 moved from 2152: at HEAD, line 2164 is `#[cold]`.
+- `archive/LIGHTING-L0-L1-PLAN.md:183` (2): `query_device_caps` is at old 3211 / new 3229, and <!-- doc-anchor-ignore -->
+  `DeviceCaps` at old 200. The cited 1819-1842 is a function-pointer table (`instance,` ... `gipa,`).
+  Its siblings on lines 181 and 801, moved by passes 1 and 3, are the same rot.
+- `threadpool/KE16-DESIGN-A.md:497` (2) and `KE16-DESIGN-W.md:156`, `:160`, `:163` (5): see the <!-- doc-anchor-ignore -->
+  `loom_pool.rs` finding below.
+
+Moving any of these 21 would have made them agree with the map and stay false. The rule says a
+number that does not hold is not written, so none was.
+
+**A finding of the same kind, measured over every `loom_pool.rs` number any pass wrote: 35 numbers on
+15 lines in 7 files, and none was ever `e6115223` numbering.** The file was 387 lines at `778739f0`,
+where the KE16 design corpus was written. It was 1640 lines at `7fdd738e` and `611999cb`, where
+`KE16-DESIGN-B4.md` and `KE16-RESULTS.md` last cite it. Then `67563d3b` (2026-09-09) cut it to
+644, and that is what the lane started from.
+
+All 35 were read at the numbering they were written against, and all 35 hold there. At `778739f0`:
+- 143-166 is the M2 transport-ordering fidelity note;
+- 217 is `fence(Ordering::SeqCst); // injector push transport fence`;
+- 140 and 343 are the two stale `worker.rs` references that `KE16-DESIGN-SPACE.md:554` lists. <!-- doc-anchor-ignore -->
+At `7fdd738e`, 387 is the `#[should_panic(expected = "M2: lost wake")]` attribute and 340 the
+steal-transport fence.
+
+At `e6115223` and at HEAD the same numbers hold other text: a closing brace, a blank line, a CAS
+helper's doc comment. So every map move on these lines, by passes 1, 2 and 3, moved a pointer that
+already pointed at the wrong line, and pass 3's table row for `KE16-DESIGN-W.md:153` ("rewritten <!-- doc-anchor-ignore -->
+(+26)") is a correct move of a wrong number. Pass 4 wrote none of them and refused the five of this
+kind in the verifier's table. Whether this corpus gets dated notes giving today's numbers (the
+`00-GOAL-TARGETS.md:182` question again) or a new derivation is put to you. <!-- doc-anchor-ignore -->
+
+**The 15 written ~~numbers~~ *[pass 5: tokens, carrying 18 numbers - the 7 that hold are one number each, the 8 that do not carry 11]* whose recorded target differs from the rule's reading, re-read by content.**
+- 7 hold: `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1033`'s `:261`/`:269`/`:273` and `:1548`'s <!-- doc-anchor-ignore -->
+  ~~`:262`/`:243`/`:261`/`:269`~~ *[pass 7: since pass 6, `:1548` reads `:259`/`:240`/`:258`/`:266`, its as-of-2026-08-06 numbering (`:1536`). At `9e80cd4e` those `golden.ps1` lines are `Set-Content`, `if ($Bless) {`, the throw and the `PENDING` check, the same four texts. Seven still hold: `:1033`'s three at HEAD, `:1548`'s four as a record - Pass 7, (4)]*. New lines 243, 261, 262, 269 and 273 of `golden.ps1` are `if ($Bless) {`, <!-- doc-anchor-ignore -->
+  the throw, `Set-Content`, the `PENDING` check and `exit 2`. The verifier's 7 WRONG there are false
+  alarms from its rule, which gives them to `PINS.toml`.
+- 8 do not hold, and all 8 are `device.rs` numbers:
+  - `VB-P1E-HIERARCHICAL-CULL-PLAN.md:2571`'s 2099 is `cmd_blit_image`; <!-- doc-anchor-ignore -->
+  - `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1500`'s 2122-2123 is `})` / `}`; <!-- doc-anchor-ignore -->
+  - `:1538`'s 2164, 2199-2205 and 2122-2134 are `#[cold]`, instance-extension checks and a <!-- doc-anchor-ignore -->
+    doc-comment tail;
+  - `VG-R3-P3-CULL-INTEGRATION-PLAN.md:117`'s 1172 is a comment and its 3279 is `)`; <!-- doc-anchor-ignore -->
+  - `logging/00-GOAL-TARGETS.md:191` and `logging/05-LADDER-GATES.md:231`'s 2122 is `})`. <!-- doc-anchor-ignore -->
+
+  On every one of the 8 the citing line reads the same at `e6115223` and at HEAD. So none is a double
+  move: all are pre-lane rot, moved by the map~~, as the pass-2 and pass-3 lists already say~~ **[pass 5: 6 of the 8 were already listed - `w2_pass2_prerot.json` holds `:2571`'s 2099, `:1538`'s 2164 and `00-GOAL-TARGETS.md:191`'s 2122, and pass 3's pre-lane paragraph covers the `device.rs` numbers of `:1500` and `:1538` (2122-2123; 2199-2205, 2122-2134). The other 2 - `VG-R3-P3-CULL-INTEGRATION-PLAN.md:117`'s 1172 and `05-LADDER-GATES.md:231`'s 2122 - were listed for the first time here, and the second is a quotation, restored by pass 5]**. <!-- doc-anchor-ignore -->
+
+**Gate - the pass-3 verifier's own scanner, run unchanged from copies in `p4/`, before and after
+this pass.** Before, `v3_scan.py` read:
+- walk 1: STALE 21, WRONG 17, paragraph-MIXED 1;
+- walk 6: STALE 44, WRONG 17, paragraph-MIXED 7;
+- same-line MIXED 0 on both walks.
+
+After:
+- walk 1: STALE 23, WRONG 7, same-line MIXED 2, paragraph-MIXED 3;
+- walk 6: STALE 42, WRONG 7, same-line MIXED 2, paragraph-MIXED 8.
+
+Every flagged number is labelled, 0 unlabelled (`p4/gate.py`):
+- STALE: the 21 named residuals (`:877-878`, `00-GOAL-TARGETS.md:182`), the 17 refused above that it <!-- doc-anchor-ignore -->
+  reaches, `:881`'s two (the plan's "that file's own `:57-64`", `vg_density_census.rs` by lines <!-- doc-anchor-ignore -->
+  883-884), and the 2 restored plan self-references;
+- WRONG: the 7 `golden.ps1` false alarms;
+- MIXED: the 2 same-line MIXED are the restored self-references. Every paragraph-MIXED is a
+  paragraph where a moved number sits beside one of the refused, residual or restored numbers above.
+
+The gate as worded - 0 stale and 0 mixed outside the named residuals - is therefore **not met, and
+cannot be met by writing**. Every number that would clear it is false by content at HEAD.
+
+`v3_para.py` goes from 158 candidates to 156:
+- 42 are lane-nearest, each one labelled above;
+- 114 sit behind a nearer non-lane file named on their own line or the line above. ~~109~~ **[pass 5: 110]** of them cite
+  that file (spot-read, not every one read). The other ~~5~~ **[pass 5: 4 - lines 160 and 163 carry four numbers, `:143-166` and `:147-152`; the fifth refused `loom_pool.rs` number, `KE16-DESIGN-W.md:156`'s `:237`, is one of the 42 lane-nearest above, and 114 = 110 + 4]** (`KE16-DESIGN-W.md:160`/`:163`) are the <!-- doc-anchor-ignore -->
+  refused `loom_pool.rs` numbers.
+
+**Residuals, by name.**
+1. Pass 2's 16 ambiguous `device.rs` clusters.
+2. `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:877-878`, content-refuted. `:881` joins it: it is the same <!-- doc-anchor-ignore -->
+   file's own lines.
+3. `00-GOAL-TARGETS.md:182`, historical. <!-- doc-anchor-ignore -->
+4. The 4 frozen `docs/ru/` citations.
+5. The 3 REPL numbers.
+6. **New:** the 21 refused continuation numbers above. *[pass 8: 13 of them. `VB-SV0-SDF-SHADOW-PLAN.md:1627`-`1628`'s 8 are dated records kept as written - Pass 8, (B)]* <!-- doc-anchor-ignore -->
+7. **New:** the 35 pass-written `loom_pool.rs` numbers, which were never `e6115223` numbering.
+8. **New:** `:882`'s rewritten quote. **[pass 5: restored - it is one of nine; the class is listed in pass 5, (2)]** <!-- doc-anchor-ignore -->
+9. The pre-lane rot pass 2 and pass 3 already list, now including the `device.rs` 8 above.
+
+Also, for information, the verifier's two items outside the `:N` form: the `~L` references in
+`RENDER-HWRT-OPTIONAL-ANALYSIS.md` and `RENDER-P5-HYBRID-PLAN.md`, and `KE16-TASKREP-ALLOCATION.md:827`'s <!-- doc-anchor-ignore -->
+`:1534+`, which is the same `loom_pool.rs` story: M1c's header is there at `7fdd738e` (1640 lines). <!-- doc-anchor-ignore -->
+
+**Hygiene.** CRLF == LF == CR in every written file. `git status` shows the same 30 ` M` files as
+at the start and nothing else, and `docs/ru/` is untouched. Every doc line pass 4 changed differs
+from HEAD only in digits. Register corrections are insertions only: each old line survives as a
+character subsequence of its new text. No cargo; no checkout, stash, restore, reset or commit.
+
+Scripts, stdlib, same scratchpad:
+- `w2_pass4_apply.py` (the doc edits; `--dry` prints every number's old and new line), with its log
+  `w2_pass4_applied.json`;
+- `w2_pass4_note.py` (this entry and the in-place corrections);
+- `w2_pass4_dmcensus.py` and `w2_pass4_lanerw.py` (the double-move class);
+- `p4/` (the verifier's scanner copied unchanged, `gate.py`, `para_class.py`, before/after logs).
+
+**WHAT IS PUT TO YOU:**
+- whether `:882`'s quote goes back to `PINS.toml:57-64`; **[pass 5: it went back]** <!-- doc-anchor-ignore -->
+- whether the 35 `loom_pool.rs` numbers, and the 21 refused ones, get dated notes or a fresh
+  derivation against today's files;
+- whether any future pass may certify a number without reading the citing line at the base commit.
+  Three checkers built to catch exactly this passed a number that was wrong twice.
+
+### Pass 5 (2026-09-11): closing scope - lane shifts repaired, quotations restored, pre-lane rot named as debt
+
+The orchestrator closed the lane with a fixed scope. Four passes showed that a map move cannot make a
+citation right if it was already wrong before the lane, and every new verifier counted that rot as a
+failure of the lane again. The scope:
+
+1. **Lane-caused shifts.** A citation whose target line moved in the lane commit (`e6115223` ->
+   `97bcf826`) and was TRUE at `e6115223` must be TRUE at HEAD.
+2. **Rewritten quotations** go back to their pre-pass text. They report what a document said at a
+   named commit, not what a file holds now.
+3. **Pre-lane rot** is not repaired and not moved further. That is every number already false at
+   `e6115223`. It is listed below by name, as separate debt. A number that passes 1-3 moved by the
+   map and that was false both before and after is recorded as *moved, still false - the move
+   neither helped nor harmed*, and it is not moved back, because that would churn files without
+   making anything true.
+4. **This register:** the pass-4 verifier's three false sentences are corrected in place, and the
+   quotation class is listed in full.
+
+**(1) Lane-caused shifts: none of the written numbers is still wrong; ~~one citation that no pass wrote was, and it is now written.~~ [pass 6: two were. `PARTICLES-PLAN.md:183` is written; `VG-R3-P3-CULL-INTEGRATION-PLAN.md:2924` (`[vb_mesh_hzb]:335-341`) escaped every regex by its form, and pass 6 leaves it as written because it is a dated record - Pass 6, F1]** <!-- doc-anchor-ignore -->
+
+- The pass-4 verifier's `v4/rows_j.json` covers every number passes 1-4 wrote: 357 numbers on 146
+  lines. Each was re-read in its target file at both commits.
+  - 344 hold `old_F[N] == new_F[M]` exactly.
+  - 3 are REPL: the lane's own `gnu` -> `msvc` line, same key.
+  - The 10 `.cargo/config.toml` numbers hold from the citing text as it was at `e6115223`:
+    `:14-15` there is `[env]` / `MIRIFLAGS`, and those are new 36-37. <!-- doc-anchor-ignore -->
+  A content-preserving move cannot change whether a citation is true. So ~~the 152 numbers the~~
+  ~~verifier judged TRUE were true at `e6115223` and are true at HEAD~~ *[pass 6: ~~147 of the 152 were.~~ 5 were judged TRUE and were false at `e6115223`: `KE16-DESIGN-B4.md:378`'s 531, `:385`'s 1158 and 1163, and `KE16-RESULTS.md:2257`'s 44 and 48. [pass 7: and seven `device.rs:3158`, which at `e6115223` is the DDGI reporter's `W2102,`, not the shadow-denoise site: 12 in all, so 140 of the 152 were true at `e6115223` - Pass 7, (1)] This pass checked that each target line kept its text across the lane, which is true of ~~all 152~~ [pass 7: 150. `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1011`'s 307 and `VG-R3-P3-CULL-INTEGRATION-PLAN.md:988`'s 340 point at REPL lines, `RUSTUP_TOOLCHAIN` with `gnu` -> `msvc` - Pass 7, (5)], and not whether the verifier's TRUE was right - Pass 6, F4]*, and nothing it judged false was <!-- doc-anchor-ignore -->
+  true at `e6115223`.
+- The class also holds citations that no pass wrote.
+  - Pass 2's 16 ambiguous clusters were read at `e6115223`. 15 cite a bare `device.rs`, and the lane
+    changed only one of the four. 14 of those 15 do not hold in it there, so they cannot be lane
+    shifts, whichever file they mean. The 16th cluster cites a bare `05-LADDER-GATES.md:918` (at <!-- doc-anchor-ignore -->
+    `OPEN-QUESTIONS.md:4187`). No copy holds `ONCE_SITES` at 918. The `logging/` copy, which its two <!-- doc-anchor-ignore -->
+    siblings mean, has it at 54, 85, 375, 376 and 405, and the lane did not touch that copy.
+  - The one that does hold is `PARTICLES-PLAN.md:183`: `device.rs:578`, `:2029`, for "`vkCmdDispatchIndirect` <!-- doc-anchor-ignore -->
+    is **loaded**". At `e6115223`, line 2029 is
+    `cmd_dispatch_indirect: load_device_command(gdpa, device, c"vkCmdDispatchIndirect")?,` and line
+    578 is `pub cmd_dispatch_indirect: PfnVkCmdDispatchIndirect,`. That pair fits one file only. The
+    lane moved 2029 to 2041 and left 578 in its offset-0 head.
+  - **Written: `:2029` -> `:2041`.** This is the one number pass 5 wrote under (1). It was TRUE at <!-- doc-anchor-ignore -->
+    `e6115223`, the lane made it false, and no pass had touched it. `docs/PARTICLES-PLAN.md` is the
+    31st modified file.
+- The 114 `v3_para.py` candidates behind a nearer non-lane file:
+  - 1 lies in an unmoved region (`codes.rs:900`). <!-- doc-anchor-ignore -->
+  - 109 were read against the lane target at `e6115223`. None holds its sentence there; each cites
+    the nearer file (`system_meta.rs`, `rhi_impl/device.rs`, `runner.rs`, `vb.rs`, `vb_probe_dump.rs`,
+    ...).
+  - 4 are the refused `loom_pool.rs` numbers.
+
+**(2) Quotations: nine lines restored, 16 numbers.** The orchestrator named seven. The other two
+turned up when the same question was put to every line the passes rewrote: does this sentence report
+what a document said at a named commit? Each restore was checked in three places:
+- the pass log, for the pre-pass text;
+- the source commit, for the text that makes it a quotation;
+- the tree, for the line after the restore.
+
+`w2_pass5_apply.py --dry` printed all three before the write. Every restored line differs from
+`97bcf826` only in digits, and ~~7 of the 9~~ *[pass 7: 8 of the 9. Pass 6 restored `:1508`'s `PINS.toml:327-359` to `309-341`, so that line is byte-identical to `97bcf826` now - Pass 7, (4)]* are byte-identical to it. ~~The other two are 1010 and 1508,~~ *[pass 7: The other one is 1010,]* <!-- doc-anchor-ignore -->
+whose neighbouring present-tense numbers stay moved.
+
+| line | pass wrote | restored to | what makes it a quotation |
+|---|---|---|---|
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:882` | p1: `PINS.toml:75-82` | `PINS.toml:57-64` | "the critique cited that note as"; `9e80cd4e`'s plan, line 540 (round 1, M5): "`PINS.toml:57-64` records that this test already caught exactly this omission" <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1010` | p1: `:299-302` | `:281-284` | "round 1's anchor"; `9e80cd4e`'s plan, line 536 (M3): `PINS.toml:281-284` <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1508` *(found)* | p1: `PINS.toml:75-82` | `PINS.toml:57-64` | this line IS round 1's M5, carried in the plan, the text `:882` quotes (`9e80cd4e`, line 540) <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:260` *(found)* | p1: `PINS.toml:499` | `PINS.toml:481` | "`PINS.toml:481` said otherwise; P4-7 repaired that comment": `799db999`'s plan, line 258, "`PINS.toml:481` says otherwise", and `799db999`'s `PINS.toml` line 481 is "...the NAMED DISARM ROUTE until piece 4..." - the same token as `:797` <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:796` | p1: `395-396` | `PINS.toml:377-378` | the "what this plan said" column; `799db999`, line 776 <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:797` | p1: `499` | `PINS.toml:481` | the same column; `799db999`, line 776 <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:798` | p1: `428` | `PINS.toml:410` | the same column; `799db999`, line 779: "`PINS.toml:410` says "TWO of the 26 pins"" <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-RESULTS.md:1826` | p1: `497:20` | `miri_scope.rs:492:20` | a verbatim Miri trace, first written at `611999cb`. There, `miri_scope.rs:492` column 20 is the `Arc::new` of `outer_wid` in `nested_scope_from_worker_is_stolen_by_sibling`, the test the trace names <!-- doc-anchor-ignore --> |
+| `logging/05-LADDER-GATES.md:231` | p2: `2122` / `3118,3176,3207` | `device.rs:2110` / `3100,3158,3189` | "L7's row cites line numbers that have drifted": the row at `b1725b32^`, `03-CODES-REGISTRY.md:313` `device.rs:2110` and `:314` `device.rs:3100,3158,3189` <!-- doc-anchor-ignore --> |
+
+Why the two found ones are in the class:
+- **`:1508`.** Restoring `:882` alone would leave the plan saying the critique cited <!-- doc-anchor-ignore -->
+  `PINS.toml:57-64` while showing the critique citing `PINS.toml:75-82`. It is also the wrong-file <!-- doc-anchor-ignore -->
+  class pass 4 restored at `:1504`/`:1506`. The number means `vg_density_census.rs:57-64` (lines <!-- doc-anchor-ignore -->
+  883-884 say so), and pass 1 moved it by the `PINS.toml` map. As a `PINS.toml` citation it is false
+  in either numbering. Restored, it is right for the file it means.
+- **`:260`.** The sentence is in the past tense, about a comment P4-7 rewrote. No HEAD number can be <!-- doc-anchor-ignore -->
+  true of it, and 499 is `sha256_hwrt = "PENDING"`.
+
+What the restores do not change:
+- `:883`'s `PINS.toml:75-82` stays moved: it is present tense and holds at HEAD. <!-- doc-anchor-ignore -->
+- `:1010`'s `:318`/`:319` and `:1011` stay moved. <!-- doc-anchor-ignore -->
+- `:1504`'s `PINS.toml:299-302` stays moved. *[pass 6: restored to 281-284 - the line is under the critique's "Every line number below is as-of-the-critique" (`:1426`); Pass 6]* It is round 1's own text, but its citation was TRUE at <!-- doc-anchor-ignore -->
+  `e6115223` - class (1) - so it stays true, and `:1010`'s "round 1's anchor `:281-284` had MOVED" <!-- doc-anchor-ignore -->
+  is true beside it.
+- `05-LADDER-GATES.md:231`'s `3158` and `3189` were two of the verifier's 152 TRUE numbers. The <!-- doc-anchor-ignore -->
+  restore takes them out of the citation class on purpose: the sentence quotes them as drifted, it
+  does not cite them.
+
+Two more groups could qualify for this class. They are named here and **not restored.** *[pass 6: restored, by the orchestrator's ruling on dated records - Pass 6]* They record
+what a source file held at a named commit, not what a document said. Both are false as present-tense
+citations whichever way they are numbered, and true only as records of their commit. They fall
+inside the orchestrator's (3), so restoring them is a scope call, and it is put to you:
+- `logging/05-LADDER-GATES.md:236`, `:237`, `:245`. The paragraph is "Measured at HEAD, before a line <!-- doc-anchor-ignore -->
+  of L7 was written" (`b1725b32`). There, `device.rs:3788` is the within-file test's SKIP `eprintln!` <!-- doc-anchor-ignore -->
+  and 3732 is ~~`mod tests {`~~ *[pass 7: `#[cfg(test)]`, the first line of the `#[cfg(test)] mod tests` the ladder says opens at `:3732`; `mod tests {` is 3733 - Pass 7, (5)]*. Pass 1 moved these to 3806 / 3750. <!-- doc-anchor-ignore -->
+- `threadpool/KE16-DESIGN.md:359`, `:360` and `KE16-DESIGN-SPACE.md:554`. These are tables of the <!-- doc-anchor-ignore -->
+  stale references inside `loom_pool.rs` at `778739f0`: its line 140 said `worker.rs:78` and its <!-- doc-anchor-ignore -->
+  line 343 said `worker.rs:86`. Both references have since been removed from the file. <!-- doc-anchor-ignore -->
+
+**(3) The debt: ~~212 numbers on 94 lines~~ *[pass 6: 216 numbers on 96 lines - F3 adds `KE16-DESIGN-B4.md:378` and `:385`, 4 numbers; 149 on 71 after pass 6's dated-record restores]* *[pass 7: 170 on 80 - (1) adds five `device.rs` numbers, the link form two, and six lines pass 6 restored are pre-lane rot, 14 numbers; Pass 7]* *[pass 8: 153 on 73 - the five lines of `KE16-DESIGN-B4.md`'s round-2 critique, 9 numbers, are restored as dated records, and `VB-SV0-SDF-SHADOW-PLAN.md:1627`-`1628`, 8 numbers, are dated records kept as written; Pass 8]*, every one by name.** Each of them was already false at <!-- doc-anchor-ignore -->
+`e6115223`. The lane did not make it false, and the lane's line map cannot make it true, so none of
+it belongs to this lane. This is the by-name list that pass 3's pre-lane paragraph, pass 4's
+residuals 6, 7 and 9, and the pass-4 verifier's "62 on 34 lines no register entry names" each covered
+only in part. Pass 2's 53 NOT-CONFIRMED lines map onto it as follows:
+- ~~43~~ *[pass 6: 44 - `KE16-DESIGN-B4.md:378` is the 44th]* are in the table; <!-- doc-anchor-ignore -->
+- 5 are the `.cargo/config.toml` lines, which were lane rot, repaired by pass 4;
+- ~~3~~ *[pass 6: 2]* hold at HEAD and were false alarms of pass 2's heuristic: `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:517` <!-- doc-anchor-ignore -->
+  and `:883`~~, and `KE16-DESIGN-B4.md:378`~~ *[pass 6: not this one - at HEAD its `:575` reads "**FIRES.** The winner is `a3`" and its unmoved `:12` reads "| B | CLOSED ON `b1`"; it is in the table now - Pass 6, F3]*; <!-- doc-anchor-ignore -->
+- 2 are quotations restored in (2): `:1010` and `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:798`. <!-- doc-anchor-ignore -->
+
+The table covers:
+- 150 numbers the verifier judged never true at `e6115223`: `device.rs` 65 (the other 15 of its 80
+  are 13 TRUE and the 2 quoted at `:231`), `PINS.toml` 83 and `miri_scope.rs` 2; <!-- doc-anchor-ignore -->
+- the 35 `loom_pool.rs` numbers written against `778739f0` / `7fdd738e`;
+- the 6 near misses;
+- the 21 continuation numbers pass 4 refused.
+
+It leaves out the three numbers restored above as quotations. Every row whose "moved by" names a pass
+is *moved, still false - the move neither helped nor harmed*. The columns:
+- **last written** is `git blame` of the citing line at `e6115223`.
+- **HEAD by content** takes the line the number held in that commit and follows it to `97bcf826`
+  through difflib equal blocks, never by arithmetic. It is where the author's line is now: a
+  candidate for a future derivation, not a verified repair. It inherits any mistake the author made.
+  A `·` marks a number that held only a brace or a blank line. A `?` marks a row whose line was last
+  written when its number was already stale, so the follow has nothing to start from. `gone` means
+  the text no longer exists. The notes give the target by name where it was read.
+
+Also named, and not repeated in the table:
+- pass 2's 15 remaining ambiguous clusters (the 16th is `PARTICLES-PLAN.md:183`, now written); <!-- doc-anchor-ignore -->
+- `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:877-878` and `:881`, which cite `vg_density_census.rs`, a <!-- doc-anchor-ignore -->
+  non-lane file;
+- `logging/00-GOAL-TARGETS.md:182`, the historical record; <!-- doc-anchor-ignore -->
+- the 4 frozen `docs/ru/` citations.
+
+| citing line | numbers now | moved by | last written | HEAD by content | note |
+|---|---|---|---|---|---|
+| `crates/boyko_log/src/census.rs:261` | 3118 | p1 | `eadd2ff6` *(stale already)* | 3118→? | quotes the corpus's worked example `site=device.rs:N`, and carries the same number as that example (`LOGGING-SYSTEM-PLAN.md:454`) - consistent with it, false with it <!-- doc-anchor-ignore --> |
+| `LOGGING-SYSTEM-PLAN.md:75` | 3118 | p1 | `303a7a92` | 3118→gone | the DDGI-storage `eprintln!` when written; since L7b it is `report_ddgi_storage_unsupported`, 3168-3180 (`W2102` at 3176) <!-- doc-anchor-ignore --> |
+| `LOGGING-SYSTEM-PLAN.md:424` | 3118, 3176 | p1 | `053f6c9f` | 3118→gone, 3176→gone | the DDGI-storage `eprintln!` when written; since L7b it is `report_ddgi_storage_unsupported`, 3168-3180 (`W2102` at 3176); the trio at HEAD is the three `report_*` functions, 3171 / 3192 / 3208 **[pass 7: 3176 added. It was the shadow-denoise site when written; at `e6115223` 3158 is the DDGI reporter's `W2102,`, and at HEAD the shadow-denoise reporter is at 3192 (`W2102.number()` 3197) - Pass 7, (1)]** <!-- doc-anchor-ignore --> |
+| `LOGGING-SYSTEM-PLAN.md:454` | 3118 | p1 | `303a7a92` | 3118→gone | the DDGI-storage `eprintln!` when written; since L7b it is `report_ddgi_storage_unsupported`, 3168-3180 (`W2102` at 3176); a worked example of an output line <!-- doc-anchor-ignore --> |
+| `LOGGING-SYSTEM-PLAN.md:1949` | 2122 | p1 | `5ebcd585` | 2122→2237 | `sync_validation_available = ... is_instance_extension_present(global, VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME)` <!-- doc-anchor-ignore --> |
+| `LOGGING-SYSTEM-PLAN.md:2012` | 2122 | p1 | `5ebcd585` | 2122→2237 | the `E2101` site: condition 2237-2239, reports 2144 / 2166 <!-- doc-anchor-ignore --> |
+| `LOGGING-SYSTEM-PLAN.md:2013` | 3118, 3176 | p1 | `053f6c9f` | 3118→gone, 3176→gone | the DDGI-storage `eprintln!` when written; since L7b it is `report_ddgi_storage_unsupported`, 3168-3180 (`W2102` at 3176); the trio at HEAD is the three `report_*` functions, 3171 / 3192 / 3208 **[pass 7: 3176 added. It was the shadow-denoise site when written; at `e6115223` 3158 is the DDGI reporter's `W2102,`, and at HEAD the shadow-denoise reporter is at 3192 (`W2102.number()` 3197) - Pass 7, (1)]** <!-- doc-anchor-ignore --> |
+| `MULTI-PARADIGM-RENDER-PLAN.md:46` | 2658, 2680 | p1 | `60963e50` | 2658→3056, 2680→3078· | the RT feature probe's `bda_feat` literal; the hwrt-only enable is `_rt_bda` at 3730-3736 <!-- doc-anchor-ignore --> |
+| `OPEN-QUESTIONS.md:2754` | 2362 | p1 | `66148ae1` | 2362→2486 | the `enable_validation && BOYKO_DISABLE_VALIDATION` conjunction (register pass 4: 2486) <!-- doc-anchor-ignore --> |
+| `OPEN-QUESTIONS.md:4189` | 3118 | p1 | `555ed0c4` *(stale already)* | 3118→? | quotes the corpus's worked example, with its number; the example's site is the DDGI one, 3168-3180 <!-- doc-anchor-ignore --> |
+| `OPEN-QUESTIONS.md:4209` | 3118 | p1 | `eadd2ff6` *(stale already)* | 3118→? | the corpus's worked example, with its number; the DDGI site is 3168-3180 <!-- doc-anchor-ignore --> |
+| `PBR-MATERIALS-PLAN.md:32` | 1809, 1854 | p1 | `8888bf04` | 1809→3229, 1854→3584· | `query_device_caps` is 3229 (signature unchanged, outside difflib's blocks) to 3584 <!-- doc-anchor-ignore --> |
+| `PBR-MATERIALS-PLAN.md:433` | 1809, 1854 | p1 | `8888bf04` | 1809→3229, 1854→3584· | `query_device_caps` 3229-3584 <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md:229` | 2099 | p1 | `9a6593e8` | 2099→2282 | the `SYNCHRONIZATION_VALIDATION` array, 2282 <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md:370` | 2602 | p2 | `9a6593e8` | 2602→2785 | `subgroup_size_control: VK_FALSE`, 2785 <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md:675` | 2602 | p1 | `dc0684ef` | 2602→2785 | the same field <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md:2248` | 2099 | p1 | `9a6593e8` | 2099→2282 | the same array <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md:2571` | 2099 | p2 | `9a6593e8` | 2099→2282 | the same array (register pass 2: 2282) <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md:3112` | 2602 | p2 | `9a6593e8` | 2602→2785 | the same field <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md:3184` | 2602 | p2 | `dc0684ef` | 2602→2785 | the same field <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md:3452` | ~~2099, 2100, 2107~~ 2087, 2088, 2095 | p1 | `9a6593e8` | 2099→2282, 2100→2283, 2107→2290· | array 2282, `VkValidationFeaturesExt` 2283-2290 **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md:3453` | ~~2602~~ 2584 | p1 | `9a6593e8` | 2602→2785 | the same field **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VB-PERFORMANCE-TRACK.md:235` | 723 | p2 | `15199271` | 723→1012 | `[vb_mesh_ssao]` (register pass 2: 1012) <!-- doc-anchor-ignore --> |
+| `VB-PERFORMANCE-TRACK.md:266` | ~~281, 310~~ 263, 292 | p1 | `15199271` | 281→289, 310→318 | `[vb_mesh]` / its `sha256_software` **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VB-PERFORMANCE-TRACK.md:271` | 746, 776, 785, 818 | p1 | `15199271` | 746→1035, 776→1065, 785→1074, 818→1107 | `[vb_mesh_froxel]` / sha, `[vb_mesh_tex_froxel]` / sha <!-- doc-anchor-ignore --> |
+| `VB-PERFORMANCE-TRACK.md:273` | 723, 737 | p1/p2 | `15199271` | 723→1012, 737→1026 | `[vb_mesh_ssao]` / its sha <!-- doc-anchor-ignore --> |
+| `VB-SV0-SDF-SHADOW-PLAN.md:243` | 301, 303 | p1 | `3da55688` | 301→309, 303→311 | `[vb_mesh]`'s "real bless output" note, 309-311 <!-- doc-anchor-ignore --> |
+| `VB-SV0-SDF-SHADOW-PLAN.md:357` | 306, 309 | p1 | `62731d91` | 306→304, 309→307 | NEAR MISS: exact when written, 2 lines off at `e6115223`, 2 lines off at HEAD; the note is 304-307 <!-- doc-anchor-ignore --> |
+| `VB-SV0-SDF-SHADOW-PLAN.md:952` | 301, 303 | p1 | `3da55688` | 301→309, 303→311 | the same note <!-- doc-anchor-ignore --> |
+| `VB-SV0-SDF-SHADOW-PLAN.md:1055` | 340 | p1 | `62731d91` | 340→610 | `[vb_both]`'s "boot-seeded EMPTY" <!-- doc-anchor-ignore --> |
+| `VB-SV0-SDF-SHADOW-PLAN.md:1056` | 373 | p2 | `62731d91` | 373→734 | `[vb_sdf_only]`'s "boot-seeded EMPTY" <!-- doc-anchor-ignore --> |
+| `VB-SV0-SDF-SHADOW-PLAN.md:1521` | 340, 373 | p1 | `62731d91` | 340→610, 373→734 | the two notes above <!-- doc-anchor-ignore --> |
+| `VB-SV0-SDF-SHADOW-PLAN.md:1625` | ~~281, 329, 301, 303~~ 263, 311, 283, 285 | p1 | `3da55688` | 281→289, 329→611, 301→309, 303→311 | `[vb_mesh]` 289-325 and its bless note 309-311; the range end 311 held a line that is in `[vb_both]` at HEAD **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:518` | 777 | p1 | `87cd3f61` | 777→1018 | "The pin run itself exercises every new declare/record parity" <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:914` | 2164 | p1 | `87cd3f61` | 2164→2282 | the `SYNCHRONIZATION_VALIDATION` array, 2282 <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1192` | 777 | p1 | `87cd3f61` | 777→1018 | the same pin comment <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1371` | 371, 376, 495, 501 | p1 | `87cd3f61` | 371→612, 376→617, 495→736, 501→742 | the pre-fill-and-verify comments of `[vb_both]` and `[vb_sdf_only]` <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1500` | ~~2164, 2165, 2172, 2199, 2205, 2122, 2123~~ 2152, 2153, 2160, 2187, 2193, 2110, 2111 | p1/p3b | `9e80cd4e` | 2164→2282, 2165→2283, 2172→2290·, 2199→2317, 2205→2323·, 2122→2237, 2123→2238 | round-1 critique text (`9e80cd4e`); array 2282, struct 2283-2290, `p_next` head 2317-2323, condition 2237-2238 **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1538` | ~~2164, 2199, 2205, 2122, 2134~~ 2152, 2187, 2193, 2110, 2122 | p2/p3 | `9e80cd4e` | 2164→2282, 2199→2317, 2205→2323·, 2122→2237, 2134→2252· | round-1 critique text (`9e80cd4e`); same targets as `:1500` **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1548` | ~~373, 376, 497, 501~~ 355, 358, 479, 483 | p1 | `9e80cd4e` | 373→614, 376→617, 497→738, 501→742 | round-1 critique; the same two comments **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1556` | ~~777~~ 759 | p1 | `9e80cd4e` | 777→1018 | round-1 critique; the same pin comment **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VG-R3-P3-CULL-INTEGRATION-PLAN.md:40` | 415, 447, 491, 538, 616, 668, 720, 756, 796, 826, 849, 888, 930, 963, 412 | p3 | `678f60f7` | 415→601, 447→633, 491→677, 538→724, 616→802, 668→854, 720→906, 756→942, 796→982, 826→1012, 849→1035, 888→1074, 930→1116, 963→1149, 412→429 | "26 top-level tables" - all 14 flagged numbers were headers when written; `BOYKO_VG_OCC` 429 <!-- doc-anchor-ignore --> |
+| `VG-R3-P3-CULL-INTEGRATION-PLAN.md:117` | ~~1172, 3279~~ 1160, 3261 | p1/p2 | `8c9c1328` | 1172→1229, 3279→3586 | `get_device_queue` 1229; "one queue from `queue_family_index`" 3586 (`queue_count: 1` at 3662) **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VG-R3-P3-CULL-INTEGRATION-PLAN.md:1020` | 408, 413, 412 | p1 | `678f60f7` | 408→425, 413→442, 412→429 | `[vb_occ_split.env]` 425-442; its end 413 was the `gnu` `RUSTUP_TOOLCHAIN` line, now the `msvc` 442 (REPL) <!-- doc-anchor-ignore --> |
+| `VG-R3-P3-CULL-INTEGRATION-PLAN.md:1862` | 408, 413, 412 | p3 | `678f60f7` | 408→425, 413→442, 412→429 | as `:1020` <!-- doc-anchor-ignore --> |
+| `VG-R3-P3-CULL-INTEGRATION-PLAN.md:1998` | 408, 413 | p1 | `678f60f7` | 408→425, 413→442 | as `:1020` <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:50` | ~~467, 469~~ 449, 451 | p1 | `799db999` | 467→481, 469→483 | plan D12's fixed point, 481-483 **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:51` | ~~416, 602~~ 398, 584 | p1 | `799db999` | 416→422, 602→624 | NEAR MISS at `e6115223`; exact when written: the two `sha256_software` lines **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:52` | ~~411, 412, 479, 480, 504, 505, 533, 534, 561, 562~~ 393, 394, 461, 462, 486, 487, 515, 516, 543, 544 | p1/p2 | `799db999` | 411→417, 412→418, 479→493, 480→494, 504→526, 505→527, 533→555, 534→556, 561→583, 562→584 | the five occlusion pins' `test_binary` / `test_name` **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:53` | ~~447, 450~~ 429, 432 | p1 | `799db999` | 447→461, 450→464 | the MACHINE-CHECKED note of the `[vb_occ_mixed*]` family **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:133` | 452, 457 | p1 | `799db999` | 452→466, 457→471 | THE VARIABLE LADDER, 466-471 <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:201` | 429, 492, 517, 546, 574 | p1 | `799db999` | 429→441, 492→506, 517→539, 546→568, 574→596 | the five `BOYKO_VG_HZB = "1"` <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:242` | 519, 576 | p1 | `799db999` | 519→541, 576→598 | the two `BOYKO_VG_OCC_FORCE` <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:717` | 402, 406 | p1 | `799db999` | 402→408, 406→412 | NEAR MISS at `e6115223`; exact when written: sync validation not live, 408-412 <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:767` | 429, 492, 517, 546, 574 | p1 | `799db999` | 429→441, 492→506, 517→539, 546→568, 574→596 | the same five <!-- doc-anchor-ignore --> |
+| `archive/LIGHTING-L0-L1-PLAN.md:181` | 1850, 1853 | p1 | `c204ab82` | 1850→3510, 1853→3569· | the `DeviceCaps { .. }` literal; the struct itself is 200 (register pass 4) <!-- doc-anchor-ignore --> |
+| `archive/LIGHTING-L0-L1-PLAN.md:801` | 1850, 1853, 1831, 1854 | p3 | `c204ab82` | 1850→3510, 1853→3569·, 1831→3265, 1854→3584· | `DeviceCaps` literal and `query_device_caps` (3229-3584) <!-- doc-anchor-ignore --> |
+| `archive/LIGHTING-L0-L1-PLAN.md:1047` | 1850, 1853 | p1 | `c204ab82` | 1850→3510, 1853→3569· | as `:181` <!-- doc-anchor-ignore --> |
+| `archive/LIGHTING-L0-L1-PLAN.md:1048` | 1831, 1854 | p2 | `c204ab82` | 1831→3265, 1854→3584· | `query_device_caps`, 3229-3584 <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/00-GOAL-TARGETS.md:37` | 3118 | p1 | `d02f74a3` | 3118→gone | the DDGI-storage `eprintln!` when written; since L7b it is `report_ddgi_storage_unsupported`, 3168-3180 (`W2102` at 3176) <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/00-GOAL-TARGETS.md:150` | ~~2122, 2122, 2123~~ 2110, 2110, 2111 | p1 | `d02f74a3` | 2122→2237, 2122→2237, 2123→2238 | same conjunction, 2237-2238 **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/00-GOAL-TARGETS.md:191` | ~~2122~~ 2110 | p2 | `d02f74a3` | 2122→2237 | a record of a verification; the conjunction is 2237-2238 **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/01-EMISSION-RING.md:253` | ~~3118~~ 3100 | p1 | `d02f74a3` | 3118→gone | the DDGI-storage `eprintln!` when written; since L7b it is `report_ddgi_storage_unsupported`, 3168-3180 (`W2102` at 3176); the trio at HEAD is the three `report_*` functions, 3171 / 3192 / 3208 **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/01-EMISSION-RING.md:297` | 3118 | p1 | `d02f74a3` | 3118→gone | the DDGI-storage `eprintln!` when written; since L7b it is `report_ddgi_storage_unsupported`, 3168-3180 (`W2102` at 3176); a worked example of an output line <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/03-CODES-REGISTRY.md:359` | 2122 | p1 | `b30fa810` *(stale already)* | 2122→? | the `E2101` condition is 2237-2239 and its two reports 2144 / 2166 <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/03-CODES-REGISTRY.md:360` | 3118, 3176 | p1 | `b30fa810` *(stale already)* | 3118→?, 3176→? | the trio at HEAD is 3171 / 3192 / 3208 (`report_*`); its parenthetical `eprintln!` is gone since L7b **[pass 7: 3176 added. Stale when this line was written: at `b30fa810` 3158 is already the DDGI reporter's line. Its "at HEAD" is read in Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/05-LADDER-GATES.md:236` | ~~3806~~ 3788 | p1 | `b1725b32` | 3806→3919 | DATED RECORD ("Measured at HEAD", `b1725b32`, where 3788 is the SKIP `eprintln!`) - true there; see (2) **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/05-LADDER-GATES.md:237` | ~~3750~~ 3732 | p2 | `b1725b32` | 3750→3862 | DATED RECORD, `b1725b32`: ~~`mod tests {` at 3732~~ [pass 7: `#[cfg(test)]` at 3732, opening the `mod tests {` at 3733] - true there; see (2) **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/05-LADDER-GATES.md:245` | ~~3806~~ 3788 | p1 | `b1725b32` | 3806→3919 | DATED RECORD, as `:236` **[pass 6: restored as a dated record - no longer debt]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-A.md:494` | 169, 192, 234, 243 | p2 | `778739f0` | 169→217, 192→gone, 234→gone, 243→gone | fidelity note header 217; the push-transport fence (217 when written) is now `publish_fence()` at 328; this line moved, `:497` did not <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-APP.md:275` | ~~169, 192, 234, 243~~ 143, 166, 208, 217 | p2 | `778739f0` | 169→217, 192→gone, 234→gone, 243→gone | as `KE16-DESIGN-A.md:494` ~~**[pass 6: restored as a dated record - no longer debt]**~~ **[pass 7: pre-lane rot returned to its original text. No dating clause is written in its sentence, paragraph, heading or lead-in, so it is debt again - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-B4.md:72` | 234, 262, 356 | p1 | `d647d930` | 234→217, 262→244, 356→338 | written against the 1640-line file: fidelity note 217-244, steal-path fence comment 338 <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-B4.md:378` | ~~12, 575~~ 12, 531 | p1 (`:575`); `:12` never moved | `7fdd738e` | 12→gone, 531→582 | **[added by pass 6, F3]** round-2 critique text, ~~which declares no as-of for~~ ~~its line numbers~~ ~~[pass 7: these numbers. Its one as-of, at `:408`, scopes two `ke16_feature_scheme_census.rs` anchors on its own line - Pass 7, (6)]~~ [pass 8: the critique dates every site below its lead-in, `KE16-DESIGN-B4.md:312`, "Reviewed 2026-09-07 against `d647d930`. Every site below was re-verified by hand." And `:408` is the as-of sentence; the two anchors it scopes are on `:407` - Pass 8, (A), (E)]; follow from the numbers as written. At `7fdd738e` `:12` was "B0 BY CONSTRUCTION" and `:531` "axis A closes on `a3`"; at `e6115223` `:12` reads "CLOSED ON `b1`" and the quote is 538; at HEAD `:12` still reads "CLOSED ON `b1`", 575 is "**FIRES.** The winner is `a3`", the quote is 582 **[pass 8: restored to `:531` as a dated record of the round-2 critique. At `d647d930` `KE16-RESULTS.md:12` is "B0 BY CONSTRUCTION, NOT BY MEASUREMENT" and `:531` is "axis A closes on `a3` and axis B stops" - no longer debt]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-B4.md:385` | ~~1202, 1207~~ 1158, 1163 | p1 | `7fdd738e` | 1158→2071, 1163→2076 | **[added by pass 6, F3]** the `a1` worker-route block (`top_lane=13/24/21`, HEAD 2073); follow from the numbers as written. At `e6115223` 1158-1163 are rows of the `wg`/`w0` table and the block is 2027-2032; HEAD 1202-1207 is that same table **[pass 8: restored to 1158-1163 as a dated record of the round-2 critique (`:312`). At `d647d930` it is the `a1` worker-route block, `top_lane=13/24/21` at 1160 - no longer debt]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-B4.md:421` | ~~572, 577~~ 567, 572 | p1 | `7fdd738e` | 572→gone, 577→gone | the `#[cfg_attr(not(any(a1, a1-fifo)), ignore)]` it names no longer exists: `miri_scope.rs` has no `cfg_attr` at HEAD **[pass 8: restored to 567-572 as a dated record of the round-2 critique (`:312`). At `d647d930` 567-572 is that `#[cfg_attr(` ... `)]`, on `nested_scope_inline_body_spawns_through_tls_deque_under_live_join` - no longer debt]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-B4.md:456` | ~~366~~ 340 | p1 | `7fdd738e` | 366→348 | the steal-transport fence, 348 **[pass 8: restored to 340 as a dated record of the round-2 critique (`:312`). At `d647d930` 340 is `fence(Ordering::SeqCst); // injector steal transport fence` - no longer debt]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-B4.md:457` | ~~259, 266~~ 233, 240 | p2 | `7fdd738e` | 259→241, 266→248 | the consumer-fence note, 241-248 **[pass 8: restored to 233-240 as a dated record of the round-2 critique (`:312`). At `d647d930` 233-240 is the note "The CONSUMER's fence is still the transport's, and is modelled" - no longer debt]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-SPACE.md:554` | ~~166, 369~~ 140, 343 | p2 | `778739f0` | 166→gone, 369→gone | ~~DATED RECORD~~ of stale references INSIDE `loom_pool.rs` at `778739f0` (`worker.rs:78`, `:86`); both were removed from the file ~~**[pass 6: restored as a dated record - no longer debt]**~~ **[pass 7: pre-lane rot returned to its original text. No dating clause is written in its sentence, paragraph, heading or lead-in, so it is debt again - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-W.md:138` | 169, 192 | p2 | `778739f0` | 169→217, 192→gone | fidelity note header 217 <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-W.md:153` | 226, 291, 243 | p3 | `778739f0` | 226→311, 291→440·, 243→gone | the M2 test is `loom_m2_idle_race_c_no_lost_wakeup`, 311-; its producer fence is now the `publish_fence()` call at 328; this line moved, 156/160/163 did not <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN.md:356` | ~~129, 140~~ 103, 114 | p1 | `778739f0` | 129→173, 140→gone | the join-wait note 173; the transport sentence (114 when written) is gone ~~**[pass 6: restored as a dated record - no longer debt]**~~ **[pass 7: pre-lane rot returned to its original text. No dating clause is written in its sentence, paragraph, heading or lead-in, so it is debt again - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN.md:357` | ~~169, 192, 234, 243~~ 143, 166, 208, 217 | p1/p2 | `778739f0` | 169→217, 192→gone, 234→gone, 243→gone | as `KE16-DESIGN-A.md:494` ~~**[pass 6: restored as a dated record - no longer debt]**~~ **[pass 7: pre-lane rot returned to its original text. No dating clause is written in its sentence, paragraph, heading or lead-in, so it is debt again - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN.md:359` | ~~166~~ 140 | p1 | `778739f0` | 166→gone | ~~DATED RECORD,~~ as `KE16-DESIGN-SPACE.md:554` ~~**[pass 6: restored as a dated record - no longer debt]**~~ **[pass 7: pre-lane rot returned to its original text. No dating clause is written in its sentence, paragraph, heading or lead-in, so it is debt again - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN.md:360` | ~~369~~ 343 | p2 | `778739f0` | 369→gone | ~~DATED RECORD,~~ as `KE16-DESIGN-SPACE.md:554` ~~**[pass 6: restored as a dated record - no longer debt]**~~ **[pass 7: pre-lane rot returned to its original text. No dating clause is written in its sentence, paragraph, heading or lead-in, so it is debt again - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN.md:383` | 226, 291 | p1 | `778739f0` | 226→311, 291→440· | as `KE16-DESIGN-W.md:153` <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-RESULTS.md:178` | 413 | p1 | `611999cb` | 413→395 | `#[should_panic(expected = "M2: lost wake")]`, 395 <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-RESULTS.md:1116` | 234, 262, 356 | p1/p2 | `7f294afe` | 234→217, 262→244, 356→338 | as `KE16-DESIGN-B4.md:72` <!-- doc-anchor-ignore --> |
+| `scripts/golden.ps1:163` | 2362 | p1 | `66148ae1` | 2362→2486 | the same conjunction, 2486 <!-- doc-anchor-ignore --> |
+| `VB-SV0-SDF-SHADOW-PLAN.md:1627` | 313, 343, 322, 326, 328 | refused p4 | `62731d91` | 313→601, 343→631, 322→610, 326→614, 328→616 | refused by pass 4; `[vb_both]` 601-631, empty-list note 610, pre-fill note 614-616; 343 was the `gnu` toolchain line, now 631 (REPL) **[pass 8: a dated record kept as written, under the section's lead-in `:1542`, "Every line below was opened while writing this revision"; `62731d91` wrote both, and at `62731d91` `[vb_both]` is 313-343, the empty edit list 322 and the pre-fill note 326-328 - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VB-SV0-SDF-SHADOW-PLAN.md:1628` | 345, 377, 355 | refused p4 | `62731d91` | 345→724, 377→756, 355→734 | refused by pass 4; `[vb_sdf_only]` 724-756, note 734; 377 was the `gnu` toolchain line, now 756 (REPL) **[pass 8: a dated record kept as written, as `:1627`; at `62731d91` `[vb_sdf_only]` is 345-377 and its empty-list note 355 - no longer debt]** <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:916` | 2153, 2160, 2187, 2193 | refused p4 | `87cd3f61` | 2153→2283, 2160→2290·, 2187→2317, 2193→2323· | refused by pass 4; struct 2283-2290, `p_next` head 2317-2323 <!-- doc-anchor-ignore --> |
+| `archive/LIGHTING-L0-L1-PLAN.md:183` | 1819, 1842 | refused p4 | `c204ab82` | 1819→3265, 1842→3584· | refused by pass 4; `query_device_caps` 3229-3584 <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-A.md:497` | 147, 152 | refused p4 | `778739f0` | 147→221, 152→226 | refused by pass 4; the lost-wake window 221-226 <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-W.md:156` | 237 | refused p4 | `778739f0` | 237→348 | refused by pass 4; the steal-transport fence, 348 <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-W.md:160` | 143, 166 | refused p4 | `778739f0` | 143→217, 166→gone | refused by pass 4; note header 217 <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-W.md:163` | 147, 152 | refused p4 | `778739f0` | 147→221, 152→226 | refused by pass 4; 221-226 <!-- doc-anchor-ignore --> |
+| `LOGGING-SYSTEM-PLAN.md:455` | 3176 | p1 | `303a7a92` | 3176→gone | **[added by pass 7, (1)]** a worked example of the second site's output line, `site=device.rs:3158` when written (the shadow-denoise `eprintln!(`); at `e6115223` 3158 is the DDGI reporter's `W2102,`, and at HEAD the shadow-denoise reporter is at 3192 <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/01-EMISSION-RING.md:298` | 3176 | p1 | `d02f74a3` | 3176→gone | **[added by pass 7, (1)]** as `LOGGING-SYSTEM-PLAN.md:455` <!-- doc-anchor-ignore --> |
+| `MESHLET-VIRTUAL-GEOMETRY-PLAN.md:2517` | 372, 417 | never moved: no pass read the link form | `6d1af3a9` | 372→664, 417→709 | **[added by pass 7, (2)]** link form `](../goldens/PINS.toml):N~` in a gated doc, passed by the `~` waiver. When written, `test_name` of `[vb_both_sdf]` and `crate` of `[vb_both_sdf_tex]`; at `e6115223` both are comments (the P3-8 non-vacuity note, the P4-4 `hzb_plan_for` note), which the lane moved to 390 and 435. The two unblessed hwrt legs are `[vb_both_sdf]` 633 (`sha256_hwrt = "PENDING"` 669) and `[vb_both_sdf_tex]` 677 (716) <!-- doc-anchor-ignore --> |
+
+**(4) This register.** The three false sentences the pass-4 verifier found are corrected in place, by
+insertion and strike-through:
+- the "15 written numbers" are 15 tokens carrying 18 numbers;
+- of the "8 `device.rs` tokens ... as the pass-2 and pass-3 lists already say", 6 were listed and 2
+  were added by pass 4;
+- "109 ... the other 5" is 110 and 4, because `KE16-DESIGN-W.md:160`/`:163` carry four numbers and <!-- doc-anchor-ignore -->
+  `:156` belongs to the 42 lane-nearest. <!-- doc-anchor-ignore -->
+
+The quotation class is listed in (2). Annotations now point there from:
+- pass 4's paragraph on `:882`, its residual 8 and its WHAT IS PUT TO YOU; <!-- doc-anchor-ignore -->
+- pass 2's `05-LADDER-GATES.md:231` bullet, which called the list "quoted" and then rewrote it. <!-- doc-anchor-ignore -->
+
+The marker `<!-- doc-anchor-ignore -->` was added to 15 lines of this entry. 14 of them already carried a citation-shaped token without it (lines 5211, 5304, 5306, 5309, 5311, 5312, 5314, 5346, 5357, 5358, 5359, 5363, 5364, 5365), and line 5632 carries one since its correction above. The whole entry now passes the same check.
+
+**The durable fix is not a sixth pass. It is the recommendation already on record** (pass 1's WHAT IS
+PUT TO YOU): widen `GATED_DOCS` in `tests/internal_docs_anchors.rs` to the plan corpus, in the
+doc-gates lane, so that rot reds on the day it happens. The "last written" column shows the mechanism.
+In almost every row the number was right in the commit that last wrote its line. It went false
+later, when the cited file changed and the citing line did not. A gate that read the plan corpus
+would have failed that later commit, while its author was still in context. What the widening has to handle first is exactly
+this pass's class (2). The gate's own scope note keeps "dated records" out because rewriting them
+falsifies the record. The nine restored quotations and the two dated-record groups above are those
+lines, and each needs the gate's existing opt-out, `<!-- doc-anchor-ignore -->`, before a widened
+gate runs over it.
+
+**Hygiene.**
+- CRLF == LF == CR in every file pass 5 wrote.
+- `git status` shows 31 ` M` files: the 30 of passes 1-4 plus `docs/PARTICLES-PLAN.md`. `docs/ru/`
+  is untouched.
+- Every doc line pass 5 changed differs from `97bcf826` only in digits.
+- Register edits are insertions only: each old line survives as a subsequence of its new text.
+- No cargo; no checkout, stash, restore, reset or commit.
+
+Scripts, stdlib, same scratchpad:
+- `w2_pass5_apply.py` (the ten doc edits; `--dry` log `w2_pass5_apply_dry.log`, record `w2_pass5_applied.json`);
+- `w2_pass5_debt.py` (the table's data, `p5_debt.json`);
+- `p5_blamemap.py` and `p5_nonlane.py` (the content-follow and the 114 re-read);
+- `w2_pass5_note.py` (this entry and the in-place corrections).
+
+**WHAT IS PUT TO YOU:**
+- whether the two dated-record groups in (2) are restored as well; *[answered: restored - Pass 6]*
+- whether the two quotations pass 5 found (`:1508`, `:260`) stand - reverting them is two token edits; <!-- doc-anchor-ignore -->
+- the `GATED_DOCS` widening, which is the only item here that stops the next lane from needing a
+  register entry like this one.
+
+### Pass 6 (2026-09-11): dated records restored, and the pass-5 verifier's four findings
+
+The pass-5 verifier left a finite work list, F1-F4. The orchestrator added one ruling, and it decides
+the class pass 5 had put to you. This section records both.
+
+**The rule, recorded once.** The orchestrator decided it. A sentence that records what was verified or
+measured at a named moment is a quotation of a past state. It is restored to its pre-pass text, even
+where rule (1) would have moved it, because a dated record that silently changes its numbers stops
+being a record. The ruling names these forms:
+- "Re-verified at the carve";
+- "Verified unchanged, exactly as written";
+- "Verified this session at";
+- "Measured at HEAD" at a named commit;
+- a table of references as they stood at a named commit.
+
+A restored number is true of the moment its text names. As a present-tense citation it is usually
+false at HEAD, and that is intended.
+
+How pass 6 decided what else is in the class:
+- **The dating must be written.** It can be in the sentence or its verification parenthetical. It can
+  also be in a lead-in, heading or intro that scopes a block of anchors: "Every line number below is
+  as-of-the-critique", "Facts, verified this session", "Every line number below was opened and
+  checked while writing Rev 4".
+- **A document-wide status header does not qualify.** The KE16 design set says the opposite of a
+  record. `threadpool/KE16-DESIGN.md:19-22`: its code line numbers "will move once the pass edits the <!-- doc-anchor-ignore -->
+  files" and are given "so the developer can find the site, not as a coordinate to be preserved". And
+  if a header dated every citation of its file, rule (1) would have nothing left to govern.
+- **A critique that makes a present-tense claim, and declares no as-of for its numbers, is not a
+  record.** ~~Example: `KE16-DESIGN-B4.md`'s round-2 critique (F3).~~ *[pass 8: not an example. That critique dates every site below its lead-in, `KE16-DESIGN-B4.md:312` - Pass 8, (A)]* <!-- doc-anchor-ignore -->
+
+**Restored: 35 lines, 119 numbers.** *[pass 7: 29 of the 35 lines, 105 numbers, are dated records under the orchestrator's rule. The other 6 lines, 14 numbers, have no written dating clause: `KE16-DESIGN.md:356`, `:357`, `:359`, `:360`, `KE16-DESIGN-SPACE.md:554` and `KE16-DESIGN-APP.md:275`. They are pre-lane rot returned to their original text, and they are in the debt - Pass 7, (7)]* <!-- doc-anchor-ignore -->
+- 11 lines are the ones the orchestrator named, with F2.
+- 24 more were found by the sweep. The sweep put the ruling's question to every one of the 140 lines
+  the passes had rewritten, and read each with its paragraph and its nearest heading
+  (`v6/changed.py`, `v6/ctx2_out.txt`).
+- Each restored line is now identical to its `97bcf826` line. Before the restore it differed from
+  that line only in digits.
+- Three files are back to HEAD: `editor/EDITOR-BOUNDARY.md`, `threadpool/KE16-DESIGN-SPACE.md` and
+  `threadpool/KE16-DESIGN-APP.md`.
+
+The dated clause of each line is quoted from the tree, with its markdown emphasis dropped.
+`w2_pass6_apply.py --dry` asserted three things
+before the write: the clause is present, the line lies inside the clause's scope, and the pre-pass
+text differs from the pass-written text only in digits.
+
+| line | why | pass wrote | restored to | the dated clause |
+|---|---|---|---|---|
+| `logging/00-GOAL-TARGETS.md:111` | named | `golden.ps1:199-205`, `:199-201`, `:204`, `:205`, `:229`, `:235`, `:230`, `:236` | `golden.ps1:196-202`, `:196-198`, `:201`, `:202`, `:226`, `:232`, `:227`, `:233` | same line: "Re-verified at the carve" <!-- doc-anchor-ignore --> |
+| `logging/00-GOAL-TARGETS.md:191` | named | `golden.ps1:199-205`, `:229`, `:235`, `device.rs:2122` | `golden.ps1:196-202`, `:226`, `:232`, `device.rs:2110` | same line: "Verified unchanged, exactly as written:" <!-- doc-anchor-ignore --> |
+| `LOGGING-SYSTEM-PLAN.md:491` | named | `scripts/golden.ps1:204,229,235` | `scripts/golden.ps1:201,226,232` | same line: "Verified this session at" <!-- doc-anchor-ignore --> |
+| `logging/02-SINK-LIFECYCLE.md:53` | named | `scripts/golden.ps1:204`, `:229`, `:235` | `scripts/golden.ps1:201`, `:226`, `:232` | same line: "Verified this session at" <!-- doc-anchor-ignore --> |
+| `logging/05-LADDER-GATES.md:236` | named | `device.rs:3806` | `device.rs:3788` | `:230`: "Measured at HEAD, before a line of L7 was written" <!-- doc-anchor-ignore --> |
+| `logging/05-LADDER-GATES.md:237` | named | `:3750` | `:3732` | `:230`: "Measured at HEAD, before a line of L7 was written" <!-- doc-anchor-ignore --> |
+| `logging/05-LADDER-GATES.md:245` | named | `device.rs:3806` | `device.rs:3788` | `:230`: "Measured at HEAD, before a line of L7 was written" <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN.md:359` | named | `tests/loom_pool.rs:166` | `tests/loom_pool.rs:140` | `:340`: "## 7. Doc comments the pass corrects" **[pass 7: not a dating clause; pre-lane rot returned to its original text - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN.md:360` | named | `tests/loom_pool.rs:369` | `tests/loom_pool.rs:343` | `:340`: "## 7. Doc comments the pass corrects" **[pass 7: not a dating clause; pre-lane rot returned to its original text - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-SPACE.md:554` | named | `tests/loom_pool.rs:22,24,166,369` | `tests/loom_pool.rs:22,24,140,343` | `:550`: "Doc corrections owed by whichever variant lands (from A.2)" **[pass 7: not a dating clause; pre-lane rot returned to its original text - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-RESULTS.md:2257` | F2 | `MEASUREMENT-QUEUE.md:56-60` | `MEASUREMENT-QUEUE.md:44-48` | `:2258`: "False at this HEAD," <!-- doc-anchor-ignore --> |
+| `logging/00-GOAL-TARGETS.md:150` | found | `crates/boyko_rhi_vulkan/src/device.rs:2122`, `:2122-2123` | `crates/boyko_rhi_vulkan/src/device.rs:2110`, `:2110-2111` | same line: "Verified this session:" <!-- doc-anchor-ignore --> |
+| `LOGGING-SYSTEM-PLAN.md:119` | found | `golden.ps1:199-205`, `:229`, `:235` | `golden.ps1:196-202`, `:226`, `:232` | `:118`: "Measured this session:" <!-- doc-anchor-ignore --> |
+| `logging/01-EMISSION-RING.md:253` | found | `crates/boyko_rhi_vulkan/src/device.rs:3118`, `:3176`, `:3207` | `crates/boyko_rhi_vulkan/src/device.rs:3100`, `:3158`, `:3189` | `:255`: "All three device sites re-verified this session at exactly `:3100`" <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN.md:356` | found | `:129-140` | `:103-114` | `:340`: "## 7. Doc comments the pass corrects" **[pass 7: not a dating clause; pre-lane rot returned to its original text - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN.md:357` | found | `tests/loom_pool.rs:169-192`, `:234-243` | `tests/loom_pool.rs:143-166`, `:208-217` | `:340`: "## 7. Doc comments the pass corrects" **[pass 7: not a dating clause; pre-lane rot returned to its original text - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-APP.md:275` | found | `tests/loom_pool.rs:169-192, 234-243` | `tests/loom_pool.rs:143-166, 208-217` | `:273`: "Rows new in revision 3:" **[pass 7: not a dating clause; pre-lane rot returned to its original text - Pass 7, (7)]** <!-- doc-anchor-ignore --> |
+| `VB-PERFORMANCE-TRACK.md:266` | found | `goldens/PINS.toml:281`, `:310` | `goldens/PINS.toml:263`, `:292` | `:264`: "Anchor check (re-verified this revision, not assumed)" <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md:3452` | found | `crates/boyko_rhi_vulkan/src/device.rs:2099`, `:2100-2107` | `crates/boyko_rhi_vulkan/src/device.rs:2087`, `:2088-2095` | `:3429`: "Every line number below was opened and checked while writing Rev 4" <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md:3453` | found | `crates/boyko_rhi_vulkan/src/device.rs:2602` | `crates/boyko_rhi_vulkan/src/device.rs:2584` | `:3429`: "Every line number below was opened and checked while writing Rev 4" <!-- doc-anchor-ignore --> |
+| `VB-SV0-SDF-SHADOW-PLAN.md:1625` | found | `:281-329`, `:301-303` | `:263-311`, `:283-285` | `:1542`: "Every line below was opened while writing this revision" <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1500` | found | `crates/boyko_rhi_vulkan/src/device.rs:2164`, `:2165-2172`, `:2199-2205`, `golden.ps1:170`, `:2122-2123` | `crates/boyko_rhi_vulkan/src/device.rs:2152`, `:2153-2160`, `:2187-2193`, `golden.ps1:167`, `:2110-2111` | `:1426`: "⚠️ Every line number below is as-of-the-critique. Re-anchor at use." <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1504` | found | `PINS.toml:299-302` | `PINS.toml:281-284` | `:1426`: "⚠️ Every line number below is as-of-the-critique. Re-anchor at use." <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1506` | found | `golden.ps1:249-262`, `:286`, `PINS.toml:333-336` | `golden.ps1:246-259`, `:283`, `PINS.toml:315-318` | `:1426`: "⚠️ Every line number below is as-of-the-critique. Re-anchor at use." <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1508` | found | `PINS.toml:327-359` | `PINS.toml:309-341` | `:1426`: "⚠️ Every line number below is as-of-the-critique. Re-anchor at use." <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1538` | found | `device.rs:2164`, `:2199-2205`, `:2122-2134`, `golden.ps1:170` | `device.rs:2152`, `:2187-2193`, `:2110-2122`, `golden.ps1:167` | `:1536`: "⚠️ Every line number below is as-of-2026-08-06 and must be re-anchored at the moment of…" <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1548` | found | `:262`, `:243`, `:261`, `:269`, `PINS.toml:373-376`, `:497-501` | `:259`, `:240`, `:258`, `:266`, `PINS.toml:355-358`, `:479-483` | `:1536`: "⚠️ Every line number below is as-of-2026-08-06 and must be re-anchored at the moment of…" <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1556` | found | `golden.ps1:183`, `:196`, `PINS.toml:777` | `golden.ps1:180`, `:193`, `PINS.toml:759` | `:1536`: "⚠️ Every line number below is as-of-2026-08-06 and must be re-anchored at the moment of…" <!-- doc-anchor-ignore --> |
+| `VG-R3-P3-CULL-INTEGRATION-PLAN.md:117` | found | `device.rs:1172`, `:3279` | `device.rs:1160`, `:3261` | `:109`: "### Hard local constraints, each re-verified in this tree" <!-- doc-anchor-ignore --> |
+| `VG-R3-P3-CULL-INTEGRATION-PLAN.md:2851` | found | `PINS.toml:353-359` | `PINS.toml:335-341` | `:2712`: "⚠️ Every line number below is as-of-the-critique. Re-anchor at use." <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:50` | found | `PINS.toml:467-469` | `PINS.toml:449-451` | `:32`: "### Facts, verified this session" <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:51` | found | `PINS.toml:318`, `:350`, `:416`, `:602` | `PINS.toml:300`, `:332`, `:398`, `:584` | `:32`: "### Facts, verified this session" <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:52` | found | `PINS.toml:411-412`, `:479-480`, `:504-505`, `:533-534`, `:561-562` | `PINS.toml:393-394`, `:461-462`, `:486-487`, `:515-516`, `:543-544` | `:32`: "### Facts, verified this session" <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:53` | found | `PINS.toml:379-382`, `:447-450` | `PINS.toml:361-364`, `:429-432` | `:32`: "### Facts, verified this session" <!-- doc-anchor-ignore --> |
+| `editor/EDITOR-BOUNDARY.md:41` | found | `crates/boyko_rhi_vulkan/src/device.rs:767-915` | `crates/boyko_rhi_vulkan/src/device.rs:767-903` | `:29`: "Not taste. Three code-level facts, each read at this checkout." <!-- doc-anchor-ignore --> |
+
+Why the found lines are in the class:
+- **`logging/00-GOAL-TARGETS.md:150`.** Its own parenthetical reads "*(Verified this session: <!-- doc-anchor-ignore -->
+  `let sync_validation_available = ...` spans `:2110-2111`.)*". It was the same form as `:191`. <!-- doc-anchor-ignore -->
+- **`LOGGING-SYSTEM-PLAN.md:119`.** It is the first bullet under "Measured this session:" (`:118`), <!-- doc-anchor-ignore -->
+  and it is the monolith text that `00-GOAL-TARGETS.md:111` carries forward "re-verified at the <!-- doc-anchor-ignore -->
+  carve". The one other rewritten bullet under it, `:123`, is a present-tense rule and stays moved: <!-- doc-anchor-ignore -->
+  "it is the reason `golden.ps1:229`'s line-start match ... keeps working". <!-- doc-anchor-ignore -->
+- **`logging/01-EMISSION-RING.md:253`.** The paragraph after it reads "*(All three device sites <!-- doc-anchor-ignore -->
+  re-verified this session at exactly `:3100` ..., `:3158` ... and `:3189` ...)*". No pass had <!-- doc-anchor-ignore -->
+  touched `:255`, because it carries no file name. So the pair contradicted itself: 3118/3176/3207 <!-- doc-anchor-ignore -->
+  beside "re-verified at exactly 3100/3158/3189".
+- **`threadpool/KE16-DESIGN.md:356`-`357`.** *[pass 7: in the class by association only. The §7 heading dates nothing, so under the orchestrator's rule these two are pre-lane rot, and so are the named `:359`-`:360` - Pass 7, (7)]* They are rows of the §7 table whose `:359`-`:360` <!-- doc-anchor-ignore -->
+  the orchestrator named. Every quoted comment in those four rows stood in `loom_pool.rs` at
+  `778739f0`, and none stands at `e6115223`:
+  - "loom (issue #246) does NOT persist" at `:105-106`; <!-- doc-anchor-ignore -->
+  - "In PRODUCTION that fence is supplied by the crossbeam **injector** transport" at `:156`; <!-- doc-anchor-ignore -->
+  - "post-`mark_idle` re-poll (`worker.rs:78`)" at `:140`; <!-- doc-anchor-ignore -->
+  - "`worker.rs:86`'s" at `:343`. <!-- doc-anchor-ignore -->
+- **`threadpool/KE16-DESIGN-APP.md:275`.** *[pass 7: "Rows new in revision 3" says when a row was added, not that anything was verified. Pre-lane rot - Pass 7, (7)]* It lists "Rows new in revision 3" of that same checklist, <!-- doc-anchor-ignore -->
+  and one of them is the `:143-166, 208-217` fidelity note. It is the same kind of list as the named <!-- doc-anchor-ignore -->
+  `KE16-DESIGN-SPACE.md:554` ("Doc corrections owed"). <!-- doc-anchor-ignore -->
+- **`VB-PERFORMANCE-TRACK.md:266`.** The sentence reads "*Anchor check (re-verified this revision, not <!-- doc-anchor-ignore -->
+  assumed)*". At `15199271`, which wrote it, `PINS.toml:263` is `[vb_mesh]` and `:292` is its <!-- doc-anchor-ignore -->
+  `sha256_software`.
+- **`VB-P1E-HIERARCHICAL-CULL-PLAN.md:3452`-`3453`** and **`VB-SV0-SDF-SHADOW-PLAN.md:1625`.** Both are <!-- doc-anchor-ignore -->
+  appendices whose intros date every line below them.
+- **`VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1500`-`1508`** and **`:1538`-`1556`.** Round 1's critique opens <!-- doc-anchor-ignore -->
+  with "Every line number below is as-of-the-critique" (`:1426`), and its §5 repeats the rule "as-of-2026-08-06" <!-- doc-anchor-ignore -->
+  (`:1536`). This reverses pass 5's "`:1504` stays moved": pass 5 kept it as class (1), and the ruling <!-- doc-anchor-ignore -->
+  overrides class (1). `:1010`'s "round 1's anchor `:281-284` had **MOVED**" now quotes `:1504` <!-- doc-anchor-ignore -->
+  exactly.
+- **`VG-R3-P3-CULL-INTEGRATION-PLAN.md:117`, `:2851`, `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md:50`-`53`** <!-- doc-anchor-ignore -->
+  **and `editor/EDITOR-BOUNDARY.md:41`.** Their dating comes from the heading or intro above them: <!-- doc-anchor-ignore -->
+  - "Hard local constraints, each re-verified in this tree";
+  - round 1's "Every line number below is as-of-the-critique" (`:2712`); <!-- doc-anchor-ignore -->
+  - "Facts, verified this session";
+  - "Three code-level facts, each read at this checkout".
+
+**F1 - not written. The line F1 compared it with is restored instead.** `VG-R3-P3-CULL-INTEGRATION-PLAN.md:2924` <!-- doc-anchor-ignore -->
+reads `[vb_mesh_hzb]:335-341`. As a present-tense citation it is a lane shift, exactly as F1 says: <!-- doc-anchor-ignore -->
+- at `e6115223`, `PINS.toml:335` is `[vb_mesh_hzb.env]`, `:339` is `BOYKO_VG_HZB             = "1"` and <!-- doc-anchor-ignore -->
+  `:341` is the blank before `[vb_occ_split]` at 342; <!-- doc-anchor-ignore -->
+- at HEAD those lines are 353, 357, 359 and 360.
+
+But the line is in round 2's critique, and that critique opens with "⚠️ Line numbers are
+as-of-this-critique. Re-anchor at use." (`:2890`). The finding it belongs to opens with "Re-anchored <!-- doc-anchor-ignore -->
+this session." (`:2922`). Under the ruling, which overrides rule (1) in its own words, the line keeps <!-- doc-anchor-ignore -->
+335-341.
+
+F1 cited `:2851` as already reading 353-359. That line is in round 1's critique, under "Every line <!-- doc-anchor-ignore -->
+number below is as-of-the-critique." (`:2712`). Pass 1 had moved it, and pass 6 restored it to <!-- doc-anchor-ignore -->
+335-341. The two lines now agree, each as a record of its own critique.
+
+**This departs from F1's instruction.** It is put to you below. *[pass 7: decided by the orchestrator. Both lines keep 335-341, as dated records of their critiques - Pass 7, (3)]*
+
+The scan F1 asked for:
+- `git grep -E '\[[A-Za-z0-9_.\-]+\]`?:[0-9]+'` over every tracked file finds `:2924` and nothing <!-- doc-anchor-ignore -->
+  else, `docs/ru/` included.
+- A wider form, any `]` followed by `:N`, adds one hit: `archive/PHASE4-CORE-SEAMS-PLAN.md:377`'s <!-- doc-anchor-ignore -->
+  `#[repr(C)]:72`. It cites `system_meta.rs`, which is not a lane file. <!-- doc-anchor-ignore -->
+- A section name followed by a bare `(:N)` finds `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1014`, which passes <!-- doc-anchor-ignore -->
+  moved as class (1), and `VG-R3-P3-CULL-INTEGRATION-PLAN.md:1862`, which is in the table. <!-- doc-anchor-ignore -->
+- Pass 5's marker check did not match `[section]:N` either. Pass 6's does.
+
+**F2 - `threadpool/KE16-RESULTS.md:2257` restored to `MEASUREMENT-QUEUE.md:44-48`.** The paragraph <!-- doc-anchor-ignore -->
+dates itself: "**False at this HEAD**, ... the profile changed 2026-09-04 in HEAD `4a363678` itself".
+- At `4a363678`, and at `611999cb`, which wrote the line, `MEASUREMENT-QUEUE.md:45` holds the quoted <!-- doc-anchor-ignore -->
+  claim: "`codegen-units = 1` and **no `[profile.release]` section at all**".
+- At `e6115223`, `:44-45` already say the opposite: "neither one is simply "better"" and "`Cargo.toml` <!-- doc-anchor-ignore -->
+  carries `[profile.release] lto = "fat"`".
+
+So 44 and 48 were never true there as present-tense citations. Pass 1's 56-60 is that corrected
+paragraph at HEAD, which is not what the sentence quotes.
+
+**F3 - `threadpool/KE16-DESIGN-B4.md:378` and `:385` ~~are debt, and~~ the table now holds them.** *[pass 8: they are dated records, restored, and so are `:421`, `:456` and `:457`; their rows are marked no longer debt - Pass 8, (A)]* <!-- doc-anchor-ignore -->
+
+Both lines were written at `7fdd738e`, where their numbers were right:
+- `KE16-RESULTS.md:12` read "| B | **B0 BY CONSTRUCTION, NOT BY MEASUREMENT** ..."; <!-- doc-anchor-ignore -->
+- `:531` read "> axis A closes on `a3` and axis B stops.**"; <!-- doc-anchor-ignore -->
+- `:1158-1163` was the `a1` worker-route block, with "top_lane=13/24/21" at 1160. <!-- doc-anchor-ignore -->
+
+At `e6115223` none of them holds:
+- `:12` reads "| B | CLOSED ON `b1` 2026-09-08 ..."; <!-- doc-anchor-ignore -->
+- `:531` reads "**FIRES.** The winner is `a3` ...", and the quote is at 538; <!-- doc-anchor-ignore -->
+- `:1158-1163` are rows of the `wg`/`w0` table, and the block is at 2027-2032. <!-- doc-anchor-ignore -->
+
+So the lane did not make them false. Pass 1 moved 531 to 575 and 1158-1163 to 1202-1207. At HEAD:
+- 575 is "**FIRES.** ...", and the quote is at 582;
+- 1202-1207 is still the `wg`/`w0` table, and the block is at 2071-2076.
+
+~~Neither line is a dated record.~~ *[pass 8: both are. The round-2 critique opens with the lead-in `KE16-DESIGN-B4.md:312`, "Reviewed 2026-09-07 against `d647d930`. Every site below was re-verified by hand." Every number on both lines holds at `d647d930` - Pass 8, (A)]* Both are present-tense claims ("is un-published", "records") of <!-- doc-anchor-ignore -->
+`B4`'s round-2 critique. That critique, unlike those of `VG-R3-P2` and `VG-R3-P3`, declares no as-of
+~~for its line numbers.~~ *[pass 7: ~~for these two lines' numbers. It does declare one,~~ [pass 8: false. It declares one for every site below its lead-in, `:312`, and a second] at `KE16-DESIGN-B4.md:408`: "Those two anchors are AS OF this analysis". That sentence scopes the two `tests/ke16_feature_scheme_census.rs` anchors ~~on its own line~~ [pass 8: on `:407`, the line above it], neither of them a lane citation, and it sits under `## Non-blocking, recorded`, while `:378` and `:385` sit under `## BLOCKING 3`. ~~F3's debt decision stands~~ [pass 8: it does not stand - Pass 8, (A)] - Pass 7, (6)]* The file header dates the document ("Written 2026-09-07 against <!-- doc-anchor-ignore -->
+`feat/threadpool-ke16` @ `7f294afe`"), but by the rule above a header does not make a citation a
+record. ~~Both lines are therefore *moved, still false*,~~ *[pass 8: restored as dated records - Pass 8, (A)]* and the table gains two rows with 4 numbers
+(12 and 575; 1202 and 1207). The rows sit after `KE16-DESIGN-B4.md:72`, at lines 5908-5909. <!-- doc-anchor-ignore -->
+
+**F4 - pass 5's four false sentences, corrected in place.** The corrections use insertion and
+strike-through only.
+- **(a) (3)'s mapping.** It said "3 hold at HEAD ..., and `KE16-DESIGN-B4.md:378`". Only 2 hold: <!-- doc-anchor-ignore -->
+  - `:517`: HEAD's `golden.ps1:183`/`:196` carry no `--release`; <!-- doc-anchor-ignore -->
+  - `:883`: `PINS.toml:75-82` lies inside `[grand_showcase_2mat]`, 64-84. <!-- doc-anchor-ignore -->
+  So pass 5's table, with F3's rows, holds 44 of pass 2's 53 NOT-CONFIRMED lines.
+- **(b) (1)'s "the 152 numbers the verifier judged TRUE were true at `e6115223` and are true at
+  HEAD".** This is false for ~~5~~ *[pass 7: 12 - these 5 and seven `device.rs:3158`, Pass 7, (1)]* of them: `:378`'s 531, `:385`'s 1158 and 1163, and <!-- doc-anchor-ignore -->
+  `KE16-RESULTS.md:2257`'s 44 and 48. Where the 152 stand now: <!-- doc-anchor-ignore -->
+  - ~~95~~ *[pass 7: 90. The five present-tense `device.rs:3158` were never true at `e6115223`, and they are in the table]* are moved and true at HEAD; <!-- doc-anchor-ignore -->
+  - ~~50 were true at `e6115223`~~ *[pass 7: 49 were. `01-EMISSION-RING.md:253`'s 3158 was not; it holds at `d02f74a3`, the moment its record names]* and pass 6 restored them as dated records; <!-- doc-anchor-ignore -->
+  - 2 were restored by pass 5 (`05-LADDER-GATES.md:231`); <!-- doc-anchor-ignore -->
+  - ~~3~~ *[pass 7: 8]* are false and in the table (F3 *[pass 7: 3, and the five `device.rs:3158` - Pass 7, (1)]*) *[pass 8: 5 in the table now, the five `device.rs:3158`. F3's 3 hold at `d647d930`, the moment the critique's lead-in names, and are restored as dated records - Pass 8, (A)]*; <!-- doc-anchor-ignore -->
+  - 2 are false and were restored as a dated record (F2).
+- **(c) (3)'s headline, "212 numbers on 94 lines, every one by name".** F3 makes it incomplete. At the
+  close of pass 5 the debt was 216 numbers on 96 lines.
+- **(d) (1)'s heading, "one citation that no pass wrote was, and it is now written".** `:2924` is a <!-- doc-anchor-ignore -->
+  second one, and it is not written (F1).
+
+Three pointers were also inserted:
+- at pass 5's "`:1504` stays moved"; <!-- doc-anchor-ignore -->
+- at its "not restored" paragraph;
+- at its first WHAT IS PUT TO YOU item.
+
+**The debt after pass 6: 149 numbers on 71 lines.** *[pass 7: 170 on 80 - Pass 7]* *[pass 8: 153 on 73 - Pass 8]* That is 216 on 96, less the 25 table rows (67
+numbers) that pass 6 restored as dated records. Each of those rows is marked in place, and its
+"numbers now" cell shows the restored value. By class:
+
+| class | pass 5 | after pass 6 |
+|---|---|---|
+| never true at `e6115223`, `device.rs` | 65 | 39 |
+| never true at `e6115223`, `PINS.toml` | 83 | 58 |
+| never true at `e6115223`, `miri_scope.rs` | 2 | 2 |
+| `loom_pool.rs` | 35 | 21 |
+| near misses | 6 | 4 |
+| refused continuations | 21 | 21 |
+| F3, `KE16-RESULTS.md` | - | 4 |
+| **total** | **212** | **149** |
+
+**Read in the sweep and not restored.** These looked dated and are not:
+- `PARTICLES-PLAN.md:183`, pass 5's one lane write: its heading, "Verified in-tree facts", names no <!-- doc-anchor-ignore -->
+  moment. It stays at 2041.
+- `PBR-MATERIALS-PLAN.md:32`: "all integration points verified against the code" names no moment. <!-- doc-anchor-ignore -->
+- `VB-P1E-HIERARCHICAL-CULL-PLAN.md:3184`: "Concrete precondition, verified" names no moment. <!-- doc-anchor-ignore -->
+- `logging/03-CODES-REGISTRY.md:360`: ~~"at HEAD" names no commit~~ *[pass 7: right result, wrong reason. "At HEAD" is the same kind of moment as "this session" or "in this tree": the commit that wrote the clause, here `b30fa810`. Its 3100/3158/3189 do not hold there, nor at its parent, so the line records no moment - Pass 7, (7)]*. <!-- doc-anchor-ignore -->
+- `OPEN-QUESTIONS.md:1954`: "scans with the literal pattern" is present tense. It sits inside a dated <!-- doc-anchor-ignore -->
+  entry, but it records no verification.
+- `VB-SV0-SDF-SHADOW-PLAN.md:243` and `:952`: changelog and discharge text ("now states"). <!-- doc-anchor-ignore -->
+- `KE16-DESIGN-B4.md:456`-`457` *[pass 8: restored after all. They sit under the round-2 critique's lead-in `:312`, which this sweep did not read - Pass 8, (A)]*: the section's first bullet names `7f294afe` for §0's corrections <!-- doc-anchor-ignore -->
+  alone; their own sentence claims the present.
+- Design prose that cites the same `loom_pool.rs` sites as §7, not as a list of corrections:
+  `KE16-DESIGN-A.md:494`, `KE16-DESIGN-W.md:138`, `:153`, `KE16-DESIGN.md:383`, `KE16-DESIGN-B4.md:72` <!-- doc-anchor-ignore -->
+  and `KE16-RESULTS.md:1116`. <!-- doc-anchor-ignore -->
+- `KE16-RESULTS.md:178`: a calibration-run record, but its section names a configuration <!-- doc-anchor-ignore -->
+  (`a0+b0+w0+c0`), not a moment, and the citation is present tense ("its attribute at ... is"). This one is
+  borderline.
+- The present-tense rules that cite `golden.ps1:229`/`:235`: `LOGGING-SYSTEM-PLAN.md:123`, `:495`, <!-- doc-anchor-ignore -->
+  `:2031`, `:2175`, `SEAM.md:290`, `02-SINK-LIFECYCLE.md:57`, `03-CODES-REGISTRY.md:393` and <!-- doc-anchor-ignore -->
+  `05-LADDER-GATES.md:955`-`956`. These are class (1), true at HEAD. <!-- doc-anchor-ignore -->
+
+**Hygiene.**
+- CRLF == LF == CR in the 16 docs pass 6 wrote and in this register.
+- `git status` shows 28 ` M` files. The three that dropped out are back to their `97bcf826` content.
+  `docs/ru/` is untouched.
+- Register edits are insertions and strike-through only: each old line survives as a subsequence of
+  its new text.
+- The marker `<!-- doc-anchor-ignore -->` is on every citation-shaped line of the lane's entry,
+  `[section]:N` form included. No pre-existing line lacked it.
+- No cargo; no checkout, stash, restore, reset or commit.
+
+Scripts, stdlib, same scratchpad:
+- `w2_pass6_apply.py` (the 35 restores; `--dry` log `w2_pass6_apply_dry.log`, record `w2_pass6_applied.json`);
+- `w2_pass6_note.py` (this section, the F4 corrections and the table update);
+- `v6/changed.py` and `v6/ctx2.py` (the sweep's inputs).
+
+**WHAT IS PUT TO YOU:**
+- **F1's departure.** *[answered by the orchestrator: both keep 335-341 - Pass 7, (3)]* `VG-R3-P3-CULL-INTEGRATION-PLAN.md:2851` and `:2924` either keep their <!-- doc-anchor-ignore -->
+  as-of-the-critique 335-341 (pass 6), or read HEAD's 353-359 (F1's instruction). Either way it is
+  two token edits.
+- **The sweep's reach.** 24 lines were restored beyond the 11 that were named, all by the
+  written-dating test above. *[pass 7: under the orchestrator's rule, 21 of the 24 are dated records. The other 3 - `KE16-DESIGN.md:356`, `:357` and `KE16-DESIGN-APP.md:275` - carry no written dating clause. They are pre-lane rot returned to their original text, the bytes "do not move pre-lane rot" leaves. Of the 11 named, `KE16-DESIGN.md:359`, `:360` and `KE16-DESIGN-SPACE.md:554` fall the same way - Pass 7, (7)]* The table lists every one of them. Any row reverts by setting its line <!-- doc-anchor-ignore -->
+  back to the "pass wrote" text. The borderline lines left alone are `KE16-RESULTS.md:178` and <!-- doc-anchor-ignore -->
+  `KE16-DESIGN-B4.md:456`-`457`. *[pass 8: both restored as dated records - Pass 8, (A)]* <!-- doc-anchor-ignore -->
+- **The `GATED_DOCS` widening**, unchanged from pass 5. Every restored line needs
+  `<!-- doc-anchor-ignore -->` before a widened gate reads it.
+
+### Pass 7 (2026-09-11): closing - the pass-6 verifier's seven items, and the final accounting
+
+The pass-6 verifier returned seven items. The orchestrator decided two of them outright, F1 and the
+dating rule, and fixed the scope: this pass changes register prose and the debt table only. No
+citation in any other document is edited. The verifier confirmed each one right as it stands, and
+every item below is about how this register counts and classifies them. Every figure is recomputed by
+the scripts named at the end; none is carried over.
+
+**(1) The `device.rs` W2102 trio: five numbers counted as lane shifts were never true at `e6115223`.**
+
+Five present-tense citations name `device.rs:3158` as the second of the three `W2102` sites, the RT <!-- doc-anchor-ignore -->
+shadow-denoise one:
+- `LOGGING-SYSTEM-PLAN.md:424`, `:455` and `:2013`; <!-- doc-anchor-ignore -->
+- `logging/01-EMISSION-RING.md:298`; <!-- doc-anchor-ignore -->
+- `logging/03-CODES-REGISTRY.md:360`. <!-- doc-anchor-ignore -->
+
+Pass 1 moved each 3158 to 3176 by the lane's map. The number was right when four of the lines were
+written: at `053f6c9f`, `303a7a92` and `d02f74a3`, line 3158 is the shadow-denoise `eprintln!(`. The
+fifth, `:360`, was written at `b30fa810`, where it was already stale. By `e6115223`, rung L7b had <!-- doc-anchor-ignore -->
+turned the three `eprintln!`s into three reporter functions:
+- line 3158 is `W2102,` inside `report_ddgi_storage_unsupported`, the FIRST site;
+- the shadow-denoise reporter is `report_shadow_denoise_storage_unsupported`, at 3174, with its
+  `W2102.number()` at 3179.
+
+At HEAD, 3176 is again the DDGI reporter's `W2102,`, and the shadow-denoise reporter is at 3192
+(3197). So the lane did not make these five false, and the move neither helped nor harmed. The
+pass-4 verifier had judged all five TRUE, and pass 6 counted them among its "95 moved and true at
+HEAD".
+
+They are in the table now, by name. Three rows gain a second number (`:424`, `:2013`, `:360`), and two <!-- doc-anchor-ignore -->
+rows are new, appended at the table's end (`LOGGING-SYSTEM-PLAN.md:455`, `01-EMISSION-RING.md:298`). <!-- doc-anchor-ignore -->
+The same 3158 also stands on two restored lines, where it stays:
+- `01-EMISSION-RING.md:253` is a dated record of `d02f74a3`, where 3158 holds; <!-- doc-anchor-ignore -->
+- `05-LADDER-GATES.md:231` quotes it as a number that had drifted. <!-- doc-anchor-ignore -->
+
+The counts are corrected in place, in pass 6's F4 (b) and in pass 5's (1). Of the 152 numbers the
+pass-4 verifier judged TRUE, **140** were true at `e6115223` and 12 were not: F3's 3, F2's 2 and seven
+`3158`. Where the 152 stand now:
+
+| where | numbers |
+|---|---|
+| moved, and true at HEAD | 90 |
+| on lines pass 6 restored as dated records: 49 true at `e6115223`, and `01-EMISSION-RING.md:253`'s 3158, which holds only at `d02f74a3`, the moment its record names | 50 <!-- doc-anchor-ignore --> |
+| restored by pass 5 as a quotation (`05-LADDER-GATES.md:231`) | 2 <!-- doc-anchor-ignore --> |
+| false at `e6115223`, in the table: ~~F3's 3 and~~ the five above *[pass 8: F3's 3 are restored as dated records]* | ~~8~~ 5 |
+| false at `e6115223`, restored as a dated record (F2) | 2 |
+| **total** | **152** |
+
+The 90 were re-checked mechanically (`p7/lane90.py`). For each one, the tree's citing line still
+carries the number passes 1-4 wrote, and the target's line at `e6115223` equals the line that number
+names at `97bcf826`:
+- 78 exactly;
+- 2 as REPL lines, the same key with `gnu` -> `msvc`;
+- 10 are the `.cargo/config.toml` numbers, read from their `e6115223` citing text, `:14-15`. <!-- doc-anchor-ignore -->
+
+Whether each sentence is true of its line is the pass-4 verifier's judgement, less the 12 above; this
+pass did not re-judge the other 140. One is noted and not reopened: the third site, `:3189`, is at <!-- doc-anchor-ignore -->
+`e6115223` the `#[inline(never)]` one line above `fn report_ssao_denoise_storage_unsupported`, and the
+pass-4 verifier counted it TRUE.
+
+After (1) alone, the debt is 154 numbers on 73 lines.
+
+**(2) A fourth citation form escaped the repair's scanners: the markdown link, `[text](path):N`.**
+
+`MESHLET-VIRTUAL-GEOMETRY-PLAN.md:2517` reads `` [`PINS.toml`](../goldens/PINS.toml):372~ `` and the <!-- doc-anchor-ignore -->
+same link with `:417~`. No pass's scanner could read it. Each takes a file name, or a backticked <!-- doc-anchor-ignore -->
+`` `:N` ``, immediately before the number, and here an unbackticked `)` stands there.
+
+The scan (`p7/linkscan.py`) covered every tracked text file in the tree, `docs/ru/` included:
+- 235 citations are of this form;
+- 6 of them name a file the lane changed, all in `MESHLET-VIRTUAL-GEOMETRY-PLAN.md`;
+- two neighbouring forms were checked as well: `](path#Lnn)` occurs 237 times and names no lane
+  file, and `](path:N)` does not occur.
+
+The six:
+- **`:2517`, `PINS.toml` 372 and 417: into the table, not moved.** They were written at `6d1af3a9` <!-- doc-anchor-ignore -->
+  (2026-07-28). There, 372 is `test_name` of `[vb_both_sdf]` and 417 is `crate` of
+  `[vb_both_sdf_tex]`, inside the two unblessed hwrt legs the sentence names. At `e6115223` both are
+  comments (the P3-8 non-vacuity note and the P4-4 `hzb_plan_for` note), so they were false before
+  the lane. The lane moved those comments to 390 and 435, and nobody wrote the citation. At HEAD
+  `[vb_both_sdf]` is at 633, its `sha256_hwrt = "PENDING"` at 669, and `[vb_both_sdf_tex]` at 677
+  (716).
+- **`:2516`'s `PINS.toml:15`, and `:992`, `:1119` and `:1137`'s `sv0_deferred_term_bench.rs` 297, 53 <!-- doc-anchor-ignore -->
+  and 805: not in the table.** The lane's map is the identity at all four lines and at the three
+  range ends, so the lane cannot have made any of them true or false. Its one hunk in
+  `sv0_deferred_term_bench.rs` is a one-line replace at 261, and `PINS.toml:15` lies in the file's <!-- doc-anchor-ignore -->
+  offset-0 head. They are the same class as pass 2's 23 rot-free tokens.
+
+**The anchors gate did read the two, and it passes them.** `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` is the
+fourth entry in `GATED_DOCS`, and the gate's scanner does resolve a link target followed by `:N`. But
+both anchors carry the `~` waiver, and a waived anchor is checked only for lying inside the file
+(`tests/internal_docs_anchors.rs:737`). Both do. So pass 1's "the anchors gate covers none of this" <!-- doc-anchor-ignore -->
+was population-limited: pass 1's population could not contain the link form. It is annotated in place.
+
+The four citation forms that a scanner in use missed and a later reading found:
+
+| # | form | example | missed by | found by |
+|---|---|---|---|---|
+| 1 | slash-separated list | `PINS.toml:411/474/499/528/556` | pass 1 (first member only) | pass 1, reading its own diff <!-- doc-anchor-ignore --> |
+| 2 | comma-space list | `234-262, 330` | pass 1 | pass 2 <!-- doc-anchor-ignore --> |
+| 3 | section-name prefix | `[vb_mesh_hzb]:335-341` | every repair pass through 5 | the pass-5 verifier (F1) <!-- doc-anchor-ignore --> |
+| 4 | markdown link | `` [`PINS.toml`](../goldens/PINS.toml):372~ `` | every repair pass through 6 | the pass-6 verifier <!-- doc-anchor-ignore --> |
+
+Two things are not counted. Pass 2's "seventh form" (`F:N` / `a,b,c`) was named by pass 2 while it
+read and rewrote it. And a continuation two or more lines below its file mention is a failure to bind
+a number to its file, not a token form. For the fourth form, the pass-5 verifier's own scan did list
+both lines, as an alternative binding (`v5/su.txt`); no report named them until the pass-6 verifier's.
+
+**(3) F1, decided by the orchestrator.** `VG-R3-P3-CULL-INTEGRATION-PLAN.md:2924` keeps <!-- doc-anchor-ignore -->
+`[vb_mesh_hzb]:335-341`, and `:2851` keeps its restored 335-341. Each sits under a critique that <!-- doc-anchor-ignore -->
+dates its own line numbers: round 2's "Line numbers are as-of-this-critique" (`:2890`) and round 1's <!-- doc-anchor-ignore -->
+"Every line number below is as-of-the-critique" (`:2712`). Both lines are dated records. This answers <!-- doc-anchor-ignore -->
+pass 6's WHAT IS PUT TO YOU; a pointer is inserted there and at pass 6's "This departs from F1's
+instruction".
+
+**(4) Two stale sentences, corrected in place by strike-through.**
+- Pass 5 (2): "7 of the 9 are byte-identical ... The other two are 1010 and 1508". It is 8 of the 9
+  now. Pass 6 restored `:1508`'s `PINS.toml:327-359` to `309-341`, so that line is byte-identical to <!-- doc-anchor-ignore -->
+  `97bcf826`, and only 1010 is not. Checked over all nine.
+- Pass 4: "7 hold: ... `:1548`'s `:262`/`:243`/`:261`/`:269`". Since pass 6, `:1548` reads <!-- doc-anchor-ignore -->
+  `:259`/`:240`/`:258`/`:266`, its as-of-2026-08-06 numbering. At `9e80cd4e`, `golden.ps1` lines 259, <!-- doc-anchor-ignore -->
+  240, 258 and 266 are `Set-Content`, `if ($Bless) {`, the throw and the `PENDING` check - the same
+  four texts. Seven still hold: three at HEAD and four as a record.
+
+**(5) Two inaccurate sentences, corrected in place.**
+- Pass 6's "which is true of all 152", about each target line keeping its text across the lane. It is
+  true of 150. `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1011`'s 307 and <!-- doc-anchor-ignore -->
+  `VG-R3-P3-CULL-INTEGRATION-PLAN.md:988`'s 340 point at REPL lines: `RUSTUP_TOOLCHAIN`, with `gnu` -> <!-- doc-anchor-ignore -->
+  `msvc`.
+- Pass 5's "3732 is `mod tests {`", in (2) and in the table row for `05-LADDER-GATES.md:237`. At <!-- doc-anchor-ignore -->
+  `b1725b32`, line 3732 is `#[cfg(test)]`, and `mod tests {` is 3733. The ladder's own words,
+  "`#[cfg(test)] mod tests` opening at `:3732`", are right, so the restore stands. Only the register's <!-- doc-anchor-ignore -->
+  gloss was wrong.
+
+**(6) F3's reason, reworded in place, in pass 6's F3 and in the `KE16-DESIGN-B4.md:378` row.** Pass 6 <!-- doc-anchor-ignore -->
+wrote that `KE16-DESIGN-B4.md`'s round-2 critique "declares no as-of for its line numbers". As
+written, that is false. `KE16-DESIGN-B4.md:408`, in the same critique, reads "Those two anchors are AS <!-- doc-anchor-ignore -->
+OF this analysis". That sentence scopes the two `tests/ke16_feature_scheme_census.rs` anchors ~~on its~~
+~~own line,~~ *[pass 8: on `:407`, the line above it; the sentence is on `:408` - Pass 8, (E)]* `:55-67` and `:79-90`, neither of them a lane citation. It sits under <!-- doc-anchor-ignore -->
+`## Non-blocking, recorded` (`:399`), while `:378` and `:385` sit under `## BLOCKING 3` (`:362`). It <!-- doc-anchor-ignore -->
+~~does not reach them, so F3's debt decision stands.~~ *[pass 8: it does not reach them, and it did not need to. The critique's lead-in, `KE16-DESIGN-B4.md:312`, "Reviewed 2026-09-07 against `d647d930`. Every site below was re-verified by hand.", dates every site below it. F3's debt decision does not stand: `:378`, `:385`, `:421`, `:456` and `:457` are restored - Pass 8, (A)]* <!-- doc-anchor-ignore -->
+
+**(7) The dating rule, decided by the orchestrator, and how every case falls.**
+
+The rule: a dating clause counts only when it is written in the sentence, in its paragraph, or in a
+heading or lead-in that scopes the block of anchors. A document-wide header does not count.
+
+This pass applies two more conditions with it. Both were already inside pass 6's ruling, "a sentence
+that records what was verified or measured at a named moment":
+- the clause dates a verification or a measurement, not a present-tense rule that happens to sit
+  under a dated lead-in;
+- the restored numbers hold at the moment the clause names. Otherwise there is no record to preserve.
+
+"At HEAD", "in this tree", "this session", "this checkout" and "this revision" are the same kind of
+moment: the commit that wrote the clause, which `git blame` recovers. They count alike. Pass 6 had
+rejected one "at HEAD" for naming no commit, while accepting "re-verified in this tree", which names
+none either.
+
+How the 35 lines pass 6 restored fall:
+- **29 lines, 105 numbers: dated records.** Every clause is quoted in pass 6's table, and each line's
+  numbers hold at the commit that wrote it (`v7/dated2.txt`, read at `git blame`).
+- **6 lines, 14 numbers: pre-lane rot, returned to its original text.** They are
+  `KE16-DESIGN.md:356` and `:357`, which the orchestrator named; `:359`, `:360` and <!-- doc-anchor-ignore -->
+  `KE16-DESIGN-SPACE.md:554`, which pass 6 had named as dated; and `KE16-DESIGN-APP.md:275`. <!-- doc-anchor-ignore -->
+  - `KE16-DESIGN.md`'s §7 heading, "Doc comments the pass corrects", dates nothing.
+    `KE16-DESIGN-SPACE.md:550`'s "Doc corrections owed by whichever variant lands" dates nothing <!-- doc-anchor-ignore -->
+    either. `KE16-DESIGN-APP.md:273`'s "Rows new in revision 3" says when a row was added, not that <!-- doc-anchor-ignore -->
+    anything was verified.
+  - All 14 numbers hold at `778739f0`, which wrote them, and none holds at `e6115223`:
+    `loom_pool.rs` went from 1640 lines to 644 at `67563d3b`, before the lane.
+  - Each line is byte-identical to `97bcf826`. That is exactly what "do not move pre-lane rot" would
+    have left, so no document changes.
+  - They are back in the table: the pass-6 "no longer debt" marker on each of the six rows is struck.
+    So a row is debt unless its un-struck text says "no longer debt". A struck first number in
+    "numbers now" records only that a pass once rewrote it, not that the row left the debt.
+  - Pass 6 named `:359`, `:360` and `:554` itself, as "a table of references as they stood at a named <!-- doc-anchor-ignore -->
+    commit". No commit is written there, so the rule reaches them as it reaches `:356`-`:357`. This <!-- doc-anchor-ignore -->
+    goes beyond the two lines the orchestrator named, and it is put to you below.
+
+The cases pass 6 decided by a different test, re-read under this rule:
+
+| line | the clause, and where it is written | falls as |
+|---|---|---|
+| `VG-R3-P3-CULL-INTEGRATION-PLAN.md:117` | "each re-verified in this tree", heading `:109` | dated record: the heading scopes the table, and 1160 and 3261 hold at `8c9c1328` <!-- doc-anchor-ignore --> |
+| `logging/03-CODES-REGISTRY.md:360` | "at HEAD", in the sentence | pre-lane rot, stays in the table. The clause was written at `b30fa810` (`git log -S`), and 3100/3158/3189 are not the three sites there, nor at its parent. Pass 6's reason, "names no commit", is replaced in place <!-- doc-anchor-ignore --> |
+| `logging/05-LADDER-GATES.md:236`, `:237`, `:245` | "Measured at HEAD, before a line of L7 was written", lead-in `:230` | dated records: 3788 and 3732 hold at `b1725b32` <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-RESULTS.md:2257` (F2) | "False at this HEAD", in the paragraph, which names `4a363678` | dated record: 44 and 48 hold at `611999cb` <!-- doc-anchor-ignore --> |
+| `logging/01-EMISSION-RING.md:253` | "re-verified this session at exactly `:3100` ..., `:3158` ... and `:3189`", in the parenthetical paragraph directly AFTER it (`:255`) | dated record, and the one borderline case: the clause follows its anchors instead of leading them. It is counted as the line's own paragraph because it restates and dates those exact three numbers, which hold at `d02f74a3`. Read strictly, `:253` is not a record: 3100 and 3158 become pre-lane rot, and 3189, TRUE at `e6115223`, becomes a lane shift owed 3207 - one token <!-- doc-anchor-ignore --> |
+| `LOGGING-SYSTEM-PLAN.md:123` | "Measured this session:", lead-in `:118` | class (1), stays moved, true at HEAD. It is a present-tense rule, written a revision later (`303a7a92`) than the lead-in (`053f6c9f`) <!-- doc-anchor-ignore --> |
+| `PARTICLES-PLAN.md:183`, `PBR-MATERIALS-PLAN.md:32`, `VB-P1E-HIERARCHICAL-CULL-PLAN.md:3184` | "Verified in-tree facts", "verified against the code", "Concrete precondition, verified" | not records: a verification with no moment <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-A.md:494` | "read at this checkout", `:480` | not a record: a different paragraph <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-B4.md:456`-`457` | "hold at `7f294afe`", `:445` | ~~not records: that bullet dates its own claim only~~ **[pass 8: dated records. They sit under the round-2 critique's lead-in `:312`, "Reviewed 2026-09-07 against `d647d930`. Every site below was re-verified by hand.", and 340 and 233-240 hold at `d647d930` - restored, Pass 8, (A)]** <!-- doc-anchor-ignore --> |
+
+The six lines bring the debt to 170 numbers on 80 lines. *[pass 8: 153 on 73 - Pass 8, (C)]*
+
+Corrected in place in pass 6:
+- the restore count, "35 lines, 119 numbers";
+- the six lines' rows in the restore table;
+- the "Why the found lines are in the class" bullets for `:356`-`:357` and `:275`; <!-- doc-anchor-ignore -->
+- "at HEAD names no commit";
+- "all by the written-dating test above", which now says which of the 24 found lines are dated
+  records (21) and which are pre-lane rot returned to original text (3: `KE16-DESIGN.md:356`, `:357`, <!-- doc-anchor-ignore -->
+  `KE16-DESIGN-APP.md:275`). <!-- doc-anchor-ignore -->
+
+#### Final accounting
+
+| class | lines | numbers | state |
+|---|---|---|---|
+| lane-caused shifts | 46 | 91 | all true at HEAD: 90 written by passes 1-4 (78 exact, 2 REPL, 10 `.cargo/config.toml`) and 1 by pass 5 (`PARTICLES-PLAN.md:183`'s `:2041`) <!-- doc-anchor-ignore --> |
+| quotations restored (pass 5) | 9 | 16 | true of the document and commit each one quotes |
+| dated records restored (pass 6, under the rule in (7)) | 29 | 105 | true of the moment each one names |
+| dated record kept as written (F1, `VG-R3-P3-CULL-INTEGRATION-PLAN.md:2924`) | 1 | 2 | as-of round 2's critique <!-- doc-anchor-ignore --> |
+| pre-lane rot returned to its original text (pass 6) | 6 | 14 | counted in the debt below |
+| **debt** | **80** | **170** | false at `e6115223` and false at HEAD *[pass 8: 73 lines, 153 numbers - Pass 8's final accounting]* |
+
+`VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1508` is in both restored rows, so the quotations and dated records <!-- doc-anchor-ignore -->
+are 37 distinct lines and 121 numbers. A lane-shift line can also carry a debt number: `:424` carries <!-- doc-anchor-ignore -->
+3189 (a shift) beside 3118 and 3176 (debt).
+
+The debt by target file:
+
+| target | lines | numbers |
+|---|---|---|
+| `crates/boyko_rhi_vulkan/src/device.rs` | 34 | 50 |
+| `goldens/PINS.toml` | 24 | 72 |
+| `crates/boyko_threadpool/tests/loom_pool.rs` | 19 | 42 |
+| `crates/boyko_threadpool/tests/miri_scope.rs` | 1 | 2 |
+| `docs/threadpool/KE16-RESULTS.md` | 2 | 4 |
+| **total** | **80** *[pass 8: 73]* | **170** *[pass 8: 153]* |
+
+The debt by class, continuing pass 6's table:
+
+| class | pass 5 | after pass 6 | after pass 7 |
+|---|---|---|---|
+| never true at `e6115223`, `device.rs` | 65 | 39 | 44 |
+| never true at `e6115223`, `PINS.toml` | 83 | 58 | 60 |
+| never true at `e6115223`, `miri_scope.rs` | 2 | 2 | 2 |
+| `loom_pool.rs` | 35 | 21 | 35 |
+| near misses | 6 | 4 | 4 |
+| refused continuations | 21 | 21 | 21 |
+| F3, `KE16-RESULTS.md` | - | 4 | 4 |
+| **total** | **212** | **149** | **170** *[pass 8: 153 - Pass 8, (C)]* |
+
+The four citation forms that escaped the scanners are listed in (2): the slash list, the comma-space
+list, the section-name prefix and the markdown link.
+
+**The durable fix on record** is the one pass 1 put to you and passes 5 and 6 repeated. Widen
+`GATED_DOCS` in `tests/internal_docs_anchors.rs` to the plan corpus, in the doc-gates lane, so that rot
+reds on the day it happens. Before a widened gate runs, the ~~37~~ *[pass 8: 45]* restored lines - the 9 quotations and
+the 29 dated records *[pass 8: and 8 more dated records - F1's `VG-R3-P3-CULL-INTEGRATION-PLAN.md:2924`, `VB-SV0-SDF-SHADOW-PLAN.md:1627`-`1628` and the five `KE16-DESIGN-B4.md` lines; listed in Pass 8, (D)]* - need the gate's existing opt-out, `<!-- doc-anchor-ignore -->`, because
+rewriting them falsifies them. Pass 7 adds one lesson. The `~` waiver is not evidence: it is how
+`:2517`'s two stale numbers pass the gate that reads them today, and a widened gate that honours `~` <!-- doc-anchor-ignore -->
+the same way would pass them too. The ~~80~~ *[pass 8: 73]* debt lines are what a widened gate should red on; they are
+listed by name so that each can be decided before that day.
+
+**Hygiene.**
+- CRLF == LF == CR in this register. No other file was written.
+- `git status` shows the same 28 ` M` files as at the start. `docs/ru/` is untouched.
+- Register edits are insertions and strike-through only: each old line survives as a subsequence of
+  its new text. The three new rows sit after the table's last row, so no line number that this entry
+  cites has moved.
+- Pass 7 changed nothing in the first 5165 lines of this file. They differ from `97bcf826` only on the
+  five lines pass 1 rewrote: 1954, 2754, 4189, 4209 and 4989.
+- Every citation-shaped line of the lane's entry carries `<!-- doc-anchor-ignore -->`. The check's
+  pattern now matches the link form `](path):N` as well.
+- No cargo; no checkout, stash, restore, reset or commit.
+
+Scripts, stdlib, in the scratchpad's `p7/`:
+- `lane90.py` - the 90 lane shifts, checked mechanically;
+- `linkscan.py`, with `linkscan.json` - the link-form scan;
+- `rest.py` - the verifier's judgements on the 35 restored lines;
+- `w2_pass7_note.py` - this section, the in-place corrections and the table rows; `--dry` first; `w2_pass7_note2.py` - the table's reading rule, added after.
+
+The pass-6 verifier's `v7/` is the source of items (1)-(7): `c1show.txt`, `dated2.txt`, `rem.txt`
+and `cls1.py`.
+
+**WHAT IS PUT TO YOU:**
+- *[pass 8: the orchestrator's pass-8 accounting, 153 on 73, counts them as pre-lane rot in the debt]* Whether `KE16-DESIGN.md:359`, `:360` and `KE16-DESIGN-SPACE.md:554` count as pre-lane rot, as the <!-- doc-anchor-ignore -->
+  rule gives them, or stay dated records by pass 6's naming. Either way no document byte changes; only
+  this register's debt moves, by 4 numbers on 3 lines.
+- `01-EMISSION-RING.md:253`, the one clause that follows its anchors. Read strictly, its 3189 is owed <!-- doc-anchor-ignore -->
+  3207.
+- The `GATED_DOCS` widening, and whether a widened gate keeps honouring `~` as a bounds-only check.
+
+### ~~Pass 8 (owed, not applied): the pass-7 verifier's findings, stopped at the owner's checkpoint (2026-09-11 08:38)~~ *[done: see "Pass 8 (2026-09-11): the last dating-rule application" below]*
+
+The owner asked to stop at a checkpoint and record everything. ~~Pass 8 was launched and stopped before it wrote anything, so the tree is exactly the pass-7 state.~~ *[done: pass 8 is applied - see "Pass 8 (2026-09-11): the last dating-rule application" below]* What pass 8 is to do, from the pass-7 verifier (full report: `docs/unification/checkpoint-2026-09-11/msvc-citations-pass8-work-order.md` on `feat/multi-paradigm-render`):
+
+- ~~**A.** `KE16-DESIGN-B4.md:312` ("Reviewed 2026-09-07 against d647d930. Every site below was re-verified by hand.", under `# ROUND-2 CRITIQUE` at `:310`) is a dating lead-in under the Pass 6/7 rule, so `B4:378`, `:385`, `:421`, `:456` and `:457` are dated records: restore 575->531, 1202-1207->1158-1163, 572-577->567-572, 366->340, 259-266->233-240, strike them from the debt table, and correct the sentences that call `:408` the critique's only as-of.~~ *[done - Pass 8, (A)]* <!-- doc-anchor-ignore -->
+- ~~**B.** `VB-SV0-SDF-SHADOW-PLAN.md:1627` and `:1628` (8 numbers) are dated records kept as written under the section lead-in `:1542`; move them out of the debt and refused counts. No document edit.~~ *[done - Pass 8, (B)]* <!-- doc-anchor-ignore -->
+- ~~**C.** The debt becomes 153 numbers on 73 lines (device.rs 34/50, PINS.toml 22/64, loom_pool.rs 17/39), not 170 on 80.~~ *[done - Pass 8, (C)]*
+- ~~**D.** The opt-out list for the doc-gates lane grows from 37 to 45 lines (adds F1's `VG-R3-P3:2924`, the two SV0 lines and the five B4 lines).~~ *[done - Pass 8, (D)]* <!-- doc-anchor-ignore -->
+- ~~**E.** Minor: the as-of sentence is on `B4:408` but its anchors are on `:407`; strike the two superseded figures ("50 were true at e6115223", "147 of the 152 were").~~ *[done - Pass 8, (E)]* <!-- doc-anchor-ignore -->
+
+~~The check for pass 8 is mechanical: re-run the pass-7 verifier's scripts and expect 153 on 73 with clean hygiene. The durable fix for the named debt stays the doc-gates lane's: widen `GATED_DOCS` to the plan corpus after the opt-out markers are added.~~ *[done: the check was run - see "Pass 8 (2026-09-11): the last dating-rule application" below]*
+
+### Pass 8 (2026-09-11): the last dating-rule application
+
+The pass-7 verifier found no arithmetic error. It found two lead-ins that the dating rule covers and
+that no pass had read, so seven debt lines were classified wrong. The orchestrator decided (A)-(E)
+below and fixed the scope: one document edit, five lines of `threadpool/KE16-DESIGN-B4.md`, digits
+only, and this register. Every figure here is recomputed by the scripts named at the end.
+
+**(A) `KE16-DESIGN-B4.md`'s round-2 critique is dated by its lead-in, and its five debt lines are restored.**
+
+`:310` is the heading `# ⚠ ROUND-2 CRITIQUE — three blocking findings. B4-1 IS NOT FREE.` `:312`, directly <!-- doc-anchor-ignore -->
+under it, reads "Reviewed 2026-09-07 against `d647d930`. Every site below was re-verified by hand."
+No other top-level heading follows, so the critique runs from `:310` to the end of the file (`:463`). <!-- doc-anchor-ignore -->
+`git blame` gives `:310`-`:312` and all five lines to `7fdd738e`, and the document-wide header is `:3`, <!-- doc-anchor-ignore -->
+a different line. This is the same shape of lead-in as `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1426` and <!-- doc-anchor-ignore -->
+`VG-R3-P3-CULL-INTEGRATION-PLAN.md:2712`/`:2890`, which were already counted as dating clauses. <!-- doc-anchor-ignore -->
+`d647d930..7fdd738e` changes only `KE16-DESIGN-B4.md`, so every number below also holds at the commit
+that wrote the lines.
+
+| line | before (pass 1's text) | after (`97bcf826` and `e6115223` text) | what holds at `d647d930` |
+|---|---|---|---|
+| `:378` | `KE16-RESULTS.md:12` ... `:575` | `KE16-RESULTS.md:12` ... `:531` | `:12` "\| B \| **B0 BY CONSTRUCTION, NOT BY MEASUREMENT** ..."; `:531` "> axis A closes on `a3` and axis B stops.**" <!-- doc-anchor-ignore --> |
+| `:385` | `KE16-RESULTS.md:1202-1207` | `KE16-RESULTS.md:1158-1163` | the `a1` worker-route block: 1158 "**`a1`, worker route:** W=4 three reps ...", `top_lane=13/24/21` at 1160, 1163 "`scratch` runs on a registered worker." <!-- doc-anchor-ignore --> |
+| `:421` | `tests/miri_scope.rs:572-577` | `tests/miri_scope.rs:567-572` | 567 `#[cfg_attr(`, 568 `not(any(feature = "ke16-a1", feature = "ke16-a1-fifo")),`, 572 `)]`, on `nested_scope_inline_body_spawns_through_tls_deque_under_live_join` at 573 <!-- doc-anchor-ignore --> |
+| `:456` | `loom_pool.rs:366` | `loom_pool.rs:340` | 340 `fence(Ordering::SeqCst); // injector steal transport fence` <!-- doc-anchor-ignore --> |
+| `:457` | `:259-266` | `:233-240` | 233 "// The CONSUMER's fence is still the transport's, and is modelled: ...", through 240 "// claim CAS) remain REAL production code." <!-- doc-anchor-ignore --> |
+
+`w2_pass8.py --dry` asserted three things before the write. Each restored line equals its `97bcf826`
+and its `e6115223` line. It differed from the tree line only in digits. And the `d647d930` text in the
+last column is where the table says it is. `KE16-DESIGN-B4.md` still differs from `97bcf826` on one
+line, `:72`, which is above the critique and stays in the debt. <!-- doc-anchor-ignore -->
+
+The five rows of the debt table are marked "no longer debt", and their "numbers now" cells show the
+restored values. These register sentences were false, and each is corrected in place by
+strike-through and insertion:
+- the `KE16-DESIGN-B4.md:378` row: "which declares no as-of for", and "Its one as-of, at `:408`, scopes <!-- doc-anchor-ignore -->
+  two ... anchors on its own line";
+- pass 6's F3: its heading's "are debt", "Neither line is a dated record", "Both lines are therefore
+  *moved, still false*", and in its pass-7 bracket "It does declare one", "on its own line" and "F3's
+  debt decision stands";
+- pass 6's rule bullet, whose example was this critique;
+- pass 6's F4 (b), "F3's 3 ... in the table";
+- pass 6's sweep list and its WHAT IS PUT TO YOU, which left `:456`-`:457` alone; <!-- doc-anchor-ignore -->
+- pass 7's (6): "own line" and "so F3's debt decision stands";
+- pass 7's (7) row for `:456`-`:457`, "that bullet dates its own claim only"; <!-- doc-anchor-ignore -->
+- pass 7's 152 table, "F3's 3 and the five above | 8", now 5.
+
+Of the pass-4 verifier's 152 TRUE numbers, the three F3 numbers (`:378`'s 531, `:385`'s 1158 and 1163) <!-- doc-anchor-ignore -->
+were false at `e6115223` and are now dated records:
+
+| where the 152 stand | numbers |
+|---|---|
+| moved, and true at HEAD | 90 |
+| on lines pass 6 restored as dated records | 50 |
+| restored by pass 5 as a quotation (`05-LADDER-GATES.md:231`) | 2 <!-- doc-anchor-ignore --> |
+| false at `e6115223`, restored as dated records: F2's 2 (pass 6) and F3's 3 (pass 8) | 5 |
+| false at `e6115223`, in the debt: the five `device.rs:3158` | 5 <!-- doc-anchor-ignore --> |
+| **total** | **152** |
+
+**(B) `VB-SV0-SDF-SHADOW-PLAN.md:1627` and `:1628` are dated records kept as written.** They carry 8 <!-- doc-anchor-ignore -->
+numbers, which passes 5-7 counted as refused continuations. They sit in the same paragraph as `:1625`, <!-- doc-anchor-ignore -->
+which pass 6 restored, under the same §9 lead-in, `:1542`: "Every line below was opened while writing <!-- doc-anchor-ignore -->
+**this revision**". `git blame` gives `:1542`, `:1627` and `:1628` to `62731d91` (its lines 767, 832 <!-- doc-anchor-ignore -->
+and 833, identical to the tree). At `62731d91`, `goldens/PINS.toml` has:
+- `[vb_both]` at 313, its block ending at 343 (`RUSTUP_TOOLCHAIN`, then a blank);
+- the "boot-seeded EMPTY" edit-list note at 322;
+- the note that treats the pre-filled hashes as live at 326-328;
+- `[vb_sdf_only]` at 345, its block ending at 377;
+- its "boot-seeded EMPTY" note at 355.
+
+All 8 numbers hold. Both lines are byte-identical at `62731d91`, at `e6115223`, at `97bcf826` and in the
+tree, so no document changes. Pass 4's refusal to move them stands. They are the same class as F1's
+`VG-R3-P3-CULL-INTEGRATION-PLAN.md:2924`. The two table rows are marked "no longer debt", and pass 4's <!-- doc-anchor-ignore -->
+bullet and its residual 6 carry a pointer.
+
+**(C) The debt, recomputed: 153 numbers on 73 lines.** `debt8.py` parses the table with the
+register's own reading rule. On the pre-pass register it reproduces pass 7's 170 on 80 and every
+per-target and per-class figure. On the written register it gives:
+
+| target | lines (pass 7) | numbers (pass 7) | lines | numbers |
+|---|---|---|---|---|
+| `crates/boyko_rhi_vulkan/src/device.rs` | 34 | 50 | 34 | 50 |
+| `goldens/PINS.toml` | 24 | 72 | 22 | 64 |
+| `crates/boyko_threadpool/tests/loom_pool.rs` | 19 | 42 | 17 | 39 |
+| `crates/boyko_threadpool/tests/miri_scope.rs` | 1 | 2 | 0 | 0 |
+| `docs/threadpool/KE16-RESULTS.md` | 2 | 4 | 0 | 0 |
+| **total** | **80** | **170** | **73** | **153** |
+
+| class | pass 5 | after pass 6 | after pass 7 | after pass 8 |
+|---|---|---|---|---|
+| never true at `e6115223`, `device.rs` | 65 | 39 | 44 | 44 |
+| never true at `e6115223`, `PINS.toml` | 83 | 58 | 60 | 60 |
+| never true at `e6115223`, `miri_scope.rs` | 2 | 2 | 2 | 0 |
+| `loom_pool.rs` | 35 | 21 | 35 | 32 |
+| near misses | 6 | 4 | 4 | 4 |
+| refused continuations | 21 | 21 | 21 | 13 |
+| F3, `KE16-RESULTS.md` | - | 4 | 4 | 0 |
+| **total** | **212** | **149** | **170** | **153** |
+
+It matches the orchestrator's expected figure. It keeps `KE16-DESIGN.md:359`, `:360` <!-- doc-anchor-ignore -->
+and `KE16-DESIGN-SPACE.md:554` as pre-lane rot, which pass 7 put to you; counted as dated records they <!-- doc-anchor-ignore -->
+would make it 149 on 70.
+
+**(D) The durable-fix opt-out list: 45 lines.** Every restored or kept-as-written dated record and
+every quotation needs `<!-- doc-anchor-ignore -->` before `GATED_DOCS` widens, because a widened gate
+would otherwise red on it and invite rewriting it. Pass 7 listed 37: the 9 quotations and the 29 dated
+records, with `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md:1508` in both. It left out 8: F1's `:2924`, the two <!-- doc-anchor-ignore -->
+SV0 lines, and the five B4 lines. None of the 45 carries the marker today, and this pass adds none;
+the list is for the doc-gates lane. The count is corrected in place in pass 7's durable-fix paragraph.
+
+| document | lines | count |
+|---|---|---|
+| `LOGGING-SYSTEM-PLAN.md` | `:119`, `:491` | 2 <!-- doc-anchor-ignore --> |
+| `VB-P1E-HIERARCHICAL-CULL-PLAN.md` | `:3452`, `:3453` | 2 <!-- doc-anchor-ignore --> |
+| `VB-PERFORMANCE-TRACK.md` | `:266` | 1 <!-- doc-anchor-ignore --> |
+| `VB-SV0-SDF-SHADOW-PLAN.md` | `:1625`, `:1627`, `:1628` | 3 <!-- doc-anchor-ignore --> |
+| `VG-R3-P2-CAPABILITY-SPLIT-PLAN.md` | `:882`, `:1010`, `:1500`, `:1504`, `:1506`, `:1508`, `:1538`, `:1548`, `:1556` | 9 <!-- doc-anchor-ignore --> |
+| `VG-R3-P3-CULL-INTEGRATION-PLAN.md` | `:117`, `:2851`, `:2924` | 3 <!-- doc-anchor-ignore --> |
+| `VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md` | `:50`, `:51`, `:52`, `:53`, `:260`, `:796`, `:797`, `:798` | 8 <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/00-GOAL-TARGETS.md` | `:111`, `:150`, `:191` | 3 <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/01-EMISSION-RING.md` | `:253` | 1 <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/02-SINK-LIFECYCLE.md` | `:53` | 1 <!-- doc-anchor-ignore --> |
+| `diagnostics/logging/05-LADDER-GATES.md` | `:231`, `:236`, `:237`, `:245` | 4 <!-- doc-anchor-ignore --> |
+| `editor/EDITOR-BOUNDARY.md` | `:41` | 1 <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-DESIGN-B4.md` | `:378`, `:385`, `:421`, `:456`, `:457` | 5 <!-- doc-anchor-ignore --> |
+| `threadpool/KE16-RESULTS.md` | `:1826`, `:2257` | 2 <!-- doc-anchor-ignore --> |
+| **total** | | **45** |
+
+**(E) Minor corrections, in place.**
+- Pass 6's F3 bracket, the `KE16-DESIGN-B4.md:378` row and pass 7's (6) said the `:408` as-of scopes <!-- doc-anchor-ignore -->
+  the census anchors "on its own line". The anchors are on `:407`; the as-of sentence is on `:408`. <!-- doc-anchor-ignore -->
+- The two superseded figures are now struck, not only bracketed: pass 6's "50 were true at `e6115223`"
+  and "147 of the 152 were".
+
+#### Final accounting
+
+| class | lines | numbers | state |
+|---|---|---|---|
+| lane-caused shifts | 46 | 91 | all true at HEAD, unchanged since pass 7: 90 written by passes 1-4 and `PARTICLES-PLAN.md:183`'s `:2041` <!-- doc-anchor-ignore --> |
+| quotations restored (pass 5) | 9 | 16 | true of the document and commit each one quotes |
+| dated records restored (pass 6) | 29 | 105 | true of the moment each one names |
+| dated records restored (pass 8, `KE16-DESIGN-B4.md`'s round-2 critique) | 5 | 9 | true at `d647d930` |
+| dated records kept as written (F1's `VG-R3-P3-CULL-INTEGRATION-PLAN.md:2924`; `VB-SV0-SDF-SHADOW-PLAN.md:1627`-`1628`) | 3 | 10 | true at their critique and at `62731d91` <!-- doc-anchor-ignore --> |
+| pre-lane rot returned to its original text (pass 6) | 6 | 14 | counted in the debt |
+| **debt** | **73** | **153** | false at `e6115223` and false at HEAD |
+
+The quotations and dated records are 45 distinct lines, because `:1508` is in two rows, and 140 <!-- doc-anchor-ignore -->
+numbers: pass 7's 121, plus 2, 9 and 8. Those 45 lines are the opt-out list in (D).
+
+**The lane is closed.** Every lane-caused shift is true at HEAD. Every quotation and dated record
+is back to the text of its moment. Every remaining false number is named debt, by line, in the table
+of pass 5 (3), and it belongs to the doc-gates lane. That lane has three tasks. First, add the 45
+markers. Then widen `GATED_DOCS` to the plan corpus. Then decide the 73 debt lines, and whether a
+widened gate keeps honouring `~` as a bounds-only check. Pass 7's other open item,
+`01-EMISSION-RING.md:253`, stays as pass 7 counted it: a dated record. <!-- doc-anchor-ignore -->
+
+**Hygiene.**
+- CRLF == LF == CR in both files pass 8 wrote.
+- `git status` shows two ` M` files, `docs/OPEN-QUESTIONS.md` and `docs/threadpool/KE16-DESIGN-B4.md`.
+  `docs/ru/` is untouched.
+- Register edits are insertions and strike-through only: each old line survives as a subsequence of its
+  new text. No line was added or removed above this section, so no line number this entry cites has
+  moved. The first 5165 lines are unchanged.
+- Every citation-shaped line of the lane's entry carries `<!-- doc-anchor-ignore -->`.
+- The "Pass 8 (owed, not applied)" section is kept and marked done in place.
+- No cargo; no checkout, stash, restore, reset or commit.
+
+Scripts, stdlib, in the scratchpad's `p8/`:
+- `w2_pass8.py`: the five restores, the in-place corrections and this section. `--dry` first, with its
+  log in `dry.log`.
+- `debt8.py`: the table's reading rule, with targets and classes.
+
+The pass-7 verifier's `v8/` is the source of (A)-(E): `debt.py`, `leadin.py`, `ins.py`, `link.py` and
+`lane90_repl.py`.
