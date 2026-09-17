@@ -172,6 +172,16 @@ RF-0 pilot and RF-R (free render/rhi/shaderdsl/sdf files) run in parallel from P
 | Q-8 | `Scope::spawn_batch` surface (open scope question from 2026-09-09). D-M2 is compatible with either answer. | unchanged |
 | Q-9 | Must entity ids be identical across runs and across worker counts, e.g. for lockstep networking or id-keyed replays? KC-36 makes apply order, hook order, table rows and group slots deterministic, but not ids (U-20). | no |
 
+### Owner answers, 2026-09-17 (binding; the rulings and phases they touch are revised in the next plan revision)
+
+| # | Answer | What changes |
+|---|---|---|
+| Q-5 | **Commit.** Done the same day: `5e86fe2d`, `f37650a6`, `f20bdafe`, `69cf3f79` on `feat/multi-paradigm-render`. Not committed: `.claude/settings.local.json` (machine-local by rule) and the two downloaded 3D models under `assets/` (`assets/models/`, two `*_glb*.zip`): one carries a personal-use-only licence (RigModels), so it cannot go into a public repository. | The trunk cut is no longer blocked by uncommitted owner paths. The KE16 merge branch `merge/ke16-into-render` is no longer a fast-forward of `feat/multi-paradigm-render`; it needs a real merge with the overlapping files. |
+| Q-4 | **The refactoring campaign runs after everything else,** so the plan is not reworked by it. | U-12 is overturned by owner scope: every refactor wave (RF-0 pilot, RF-K, RF-R, RF-V, RF-P, RF-A, RF-U) moves to the end of Phase F. Its census, design (closed after six critique passes) and partial tooling are kept for then (`D:/wt/_graph/refactor-census.md`, `D:/wt/refactor`). |
+| Q-9 | **A replay must load and play on any machine; entity ids need not match.** | U-20 stands (ids are not made deterministic). New requirement: simulation replay determinism — the same binary reproduces the same simulation on any machine and any worker count, given the same recorded inputs; replay files refer to entities by stable replay keys, never by `Entity` ids. KC-36's ordering guarantees are the base; the next revision adds the gate (state hash keyed by stable keys, compared across W = 1/2/8 and across two machines). |
+| Q-1 | **Native mods, no sandbox; they need not survive engine patch releases; the mod author builds the mod; mods may add their own types.** | Option E (WebAssembly) and option B (stable C ABI) are out. The exact-build family (A', C, A) remains; "the author builds" matches an exact-build contract published per engine release. Mod-defined component types are in scope (05 MS items for dynamic component registration stay). |
+| Q-2 | **No hot reload** if it adds complexity. | U-10 stands: load-only. |
+
 ## 8. Readiness checklist (condensed)
 
 | Area | State |
