@@ -53,6 +53,15 @@ use vg_thresholds::{
 const ENV_RUNG: &str = "BOYKO_VG_RUNG";
 /// The env knob the worker reads to know which fixture parameterisation to spawn.
 const ENV_FIXTURE: &str = "BOYKO_VG_FIXTURE";
+/// The capture knob `vg_thresholds::run_worker` hands every worker: it arms the census readback
+/// AND ends the frame loop, so a worker booted without it renders until it is killed.
+const ENV_CENSUS: &str = "BOYKO_VG_CENSUS";
+
+/// The first of `keys` absent from the environment, if any — the input a driverless worker is
+/// missing, named so its skip line can say which one.
+fn first_absent(keys: &[&'static str]) -> Option<&'static str> {
+    keys.iter().copied().find(|k| std::env::var_os(k).is_none())
+}
 
 /// The VB golden pins (a) is measured over. Enumerated so the DOMAIN is machine-checked even
 /// though the hashes are not checked here.
@@ -183,6 +192,20 @@ fn setup_fixture(
 #[test]
 #[ignore = "needs a real windowed GPU device; the census driver spawns it once per (fixture, ladder rung)"]
 fn vg_census_rung_dump() {
+    // The worker is meaningless without the `(fixture, rung)` pair the gate hands it, and
+    // `--ignored` runs EVERY test in this binary — so a direct invocation lands here with nothing
+    // set. Skip BY NAME rather than letting the `expect`s below fire: a panic here reads as a real
+    // failure of the census gate, and a silent return reads as a pass. Neither is true; this
+    // process simply was not the one being asked. `ENV_CENSUS` is in the list because it is what
+    // ENDS the frame loop — booted without it this worker would render until it is killed.
+    if let Some(missing) = first_absent(&[ENV_FIXTURE, ENV_RUNG, ENV_CENSUS]) {
+        eprintln!(
+            "SKIP vg_census_rung_dump: `{missing}` is absent from the environment, so this process \
+             was not spawned by `vg_density_census_gate`. NOTHING about the density census is \
+             measured by this run — the gate is the test that measures it."
+        );
+        return;
+    }
     let src = read_thresholds();
     let ladder = resolution_ladder(&src);
     let rung_index: usize = std::env::var(ENV_RUNG)

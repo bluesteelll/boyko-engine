@@ -51,6 +51,132 @@ measurement, not for tidiness.**
   cull gained a bound query. Neither was visible until the flag was passed. **"Green" without this
   flag means "green up to the first thing already known to be red".**
 
+### The feature axis — `--all-targets` is not `--all-features`
+
+**None of the four commands above compiles a single `#[cfg(feature = "…")]` item.** `--all-targets`
+widens the TARGET set (lib, bins, tests, benches, examples) and leaves the cfg set at the default
+one; the two flags are unrelated, and the names are close enough that this tree ran on the confusion
+for 32 days. The standing gate is therefore not *weak on* feature-gated code, it is **blind** to it:
+that code is never handed to rustc, and rustc cannot go red over a span it never sees.
+
+**MEASURED 2026-09-18, on one tree, one minute apart.** With two shipped lines spelling
+`W2102.number()` / `W2106.number()` — a `u16` where `warn!` takes a typed `WarnCode` —
+`cargo check -p boyko_rhi_vulkan --features hwrt --lib` failed with **10 errors**, while
+`cargo check -p boyko_rhi_vulkan --lib` over the *identical* source finished green in **2.49 s**.
+`718a5129` (2026-08-17) introduced that type and converted every site rustc showed it, including
+**both** non-gated `W2102.number()` sites in the same three-function group of `device.rs`, and left
+the `#[cfg(feature = "hwrt")]` sibling sitting between them. The feature had not compiled for
+**~248 commits / 32 days**, and what finally compiled it was a person running the GPU leg by hand.
+
+⚠️ **The one-flag answer does not exist in this tree, and that is by design rather than neglect.**
+`--all-features` turns on `boyko-threadpool/tb-neg-m2w`, whose crate root is a `compile_error!`
+outside Miri (the KE16 M2w deliberate-UB negative control), and three `nightly` features that are
+E0554 on stable. MEASURED 2026-09-18: `cargo check --workspace --all-targets --all-features` dies on
+`boyko_shaderdsl`'s E0554 before reaching one engine crate. **Per-feature legs are the only form that
+can work here**, and CI's `feature-legs` job runs them — deriving its leg set as *every feature
+`cargo metadata` reports, minus a refusal table*, so a feature added tomorrow is covered by default
+and has to be argued out in writing.
+
+**The enumeration, because a check that covers one feature while implying it covers all is the
+failure this gate exists to stop.** 23 non-default features across 11 packages, measured 2026-09-18:
+
+- **Covered — 15 legs, run on `ubuntu-latest`:** `boyko-diag/section-gate`;
+  `boyko-ecs/{bench-alloc, big_query_table, profiling-analysis}`; `boyko-log/test-probe`;
+  `boyko-physics/bench-alloc`; `boyko-render/{hwrt, profiling-census, test-readback}` (at
+  `--lib --tests` — see the scope table note below); `boyko-threadpool/scheduler-trace`;
+  `boyko_rhi_vulkan/{goldens, hwrt, profiling-census, spec_constant_smoke}`; `boyko_shaderdsl/emit`.
+  `boyko-render/test-readback` is a leg but **adds no coverage of its own**: the crate's
+  self-referential dev-dependency turns that feature on in every `--tests` build. VERIFIED
+  2026-09-18 by running the job's own loop from a Windows host with `--target x86_64-unknown-linux-gnu`
+  appended: 13 legs green with 0 warnings. The two `bench-alloc` legs cannot be cross-checked that
+  way, because `libmimalloc-sys`'s build script needs an `x86_64-linux-gnu-gcc`, which the runner has
+  and a Windows box does not. Both are green natively on msvc.
+- **NOT covered — 8, each with its reason in `ci.yml`:** `boyko-app/{hwrt, profiling-alloc,
+  profiling-census}` — *that crate's **lib** does not build off Windows*, so those legs belong on a
+  developer box, not on the runner; `bench-bevy-vs-boyko/{bench-alloc, nightly}` — the bevy tree,
+  excluded from every job but `bench-compile`; `boyko-threadpool/tb-neg-m2w` — `compile_error!`
+  outside Miri, by design, gated instead by `scripts/tb_neg_gate.{ps1,sh}`; `boyko_sdf_math/nightly`
+  and `boyko_shaderdsl/nightly` — **KNOWN-RED, an open defect** (below).
+- **What no leg covers at all:** clippy lints on gated code. The legs are `cargo check`, so rustc
+  warnings fail them (CI's `RUSTFLAGS` carries `-D warnings`), but no clippy lint has ever run over
+  a `#[cfg(feature = …)]` item in this tree. Narrowed here, not closed.
+
+⚠️ **Three of those 15 legs exist only because a refusal row was re-measured and withdrawn, and a
+refusal that overstates its reason is the same defect as a coverage claim that overstates its
+coverage.** `boyko-render` was excluded as a crate that "does not compile for a non-Windows target
+at all", on a measurement of **2 errors**. RE-MEASURED 2026-09-18 on the same triple, those 2 were
+**one** `error[E0601]` — `main` function not found in `examples/orbit_cube_window.rs`, which is
+`#![cfg(windows)]` as a whole crate by construction — plus cargo's own summary line (`--keep-going`
+confirms no second failing target hides behind it). The **lib compiles**:
+`cargo check -p boyko-render --features hwrt --lib --tests --target x86_64-unknown-linux-gnu` exits
+0 in 10.8 s from a clean `cargo clean -p boyko-render`. The false row had excluded three legs and
+left **34 `#[cfg(feature = "hwrt")]` sites** under `crates/boyko_render/src` compiled by nothing —
+the exact class this job was created to close, one crate over from where it was found. `ci.yml`
+therefore carries a **second table beside the refusals**: a leg whose *lib* builds on the runner but
+whose *example* does not gets a narrower TARGET SET, never an exclusion. An exclusion is only for a
+crate whose lib itself cannot compile there — `boyko-app`, measured below. Both tables fail the
+derive step when a row outlives its subject, and the leg floor is pinned at 15.
+
+Locally a feature is checked per crate — this is the whole recipe:
+
+```powershell
+cargo check -p boyko_rhi_vulkan --features hwrt --all-targets    # the leg that was red for 32 days
+cargo check -p boyko-app        --features hwrt --all-targets    # Windows-only; CI cannot run it
+cargo check -p boyko-render     --features hwrt --all-targets    # the example CI's scoped leg drops
+```
+
+VERIFIED 2026-09-18 on `stable-x86_64-pc-windows-msvc`: all three lines are green (0 errors,
+0 warnings), and so are `boyko-app`'s `profiling-alloc` and `profiling-census` at `--all-targets`.
+For those three `boyko-app` features and for `orbit_cube_window`, this by-hand recipe is the **only**
+compile they get. No CI job runs it, so it is a recipe, not coverage.
+
+⚠️ **Two features are RED right now, and the job refuses them by name rather than hiding them.**
+`boyko_shaderdsl/nightly` (and `boyko_sdf_math/nightly`, which forwards to it) makes the crate
+`no_std` while `src/ssao.rs` uses `format!`/`String`, and calls `core::intrinsics::{sinf32, cosf32}`,
+which current nightly no longer has: RE-MEASURED 2026-09-18, **10 errors in the lib on
+`nightly-x86_64-pc-windows-msvc`** and **9 on `stable-x86_64-pc-windows-msvc`** (E0554 among them),
+identical under `--lib` and `--all-targets` — so it is broken on *both* channels, not merely
+channel-gated. Covering it would make the job permanently red, and a permanently red job is one
+nobody reads; the refusal row carries the date and the error instead, which is the form this
+repository already uses for a known red. Two details the first pass got wrong and the re-measure
+fixed, because a refusal's numbers are a claim like any other: the count was written as **11**,
+while the lib target gives 10 on nightly and 9 on stable at either scope (`--all-targets`
+additionally fails the lib-test unit, 8 on stable / 9 on nightly, RE-MEASURED 2026-09-18 with
+`--keep-going`), and `boyko_sdf_math/nightly` dies **inside the dependency** — that crate is never
+compiled at all, so the count was never its own.
+
+⚠️ **The identical blind spot exists on the PLATFORM cfg, and for `boyko-app` it is NOT closed.**
+One `cargo` invocation compiles one target triple, so a `#[cfg(not(windows))]` item is exactly as
+invisible as a feature-gated one — and it has already produced the same defect:
+`crates/boyko_app/src/diag.rs:184` still spells `codes::E3004.number()` inside a
+`#[cfg(not(windows))]` reporter. It landed 2026-08-13 (`b809041e`), **four days before** the sweep
+that fixed its siblings (`718a5129`), and that sweep — which worked off rustc's own E0308 spans on a
+Windows box — could not be shown it. RE-MEASURED 2026-09-18 with `--keep-going`:
+`cargo check -p boyko-app --lib --target x86_64-unknown-linux-gnu` fails on DEFAULT features with
+five printed diagnostics — 2 × E0432 (`crate::gpu_scene` is a `#[cfg(windows)]` module, imported
+unconditionally at `runner.rs:77` and `particle_readback.rs:34`) and 3 × E0308, all at
+`diag.rs:184` — which rustc's summary line counts as **"7 previous errors"**. The failure is in the
+**lib**, so the ubuntu runner cannot build `boyko-app` at all, and **no CI leg covers its cfg arms
+today**.
+
+**`boyko-render` is NOT in that position, and saying it was is the error the scope table above
+corrects.** Its lib builds on the runner, and the three scoped feature legs compile it,
+`cfg(not(windows))` arms included. The one thing the runner cannot build is
+`examples/orbit_cube_window.rs`, which is `#![cfg(windows)]` and therefore has no `main` there; no
+CI job compiles that example.
+
+⚠️ **One consequence reaches past the feature axis.** The `check`, `test`, `profile-legs`,
+`clippy`, `force-alloc-panic` and `bench-compile` jobs all run `--workspace` on `ubuntu-latest`, and
+their target sets include `boyko-app`'s lib (all six) and that example (the five `--all-targets`
+jobs). A failing unit makes cargo exit non-zero, so **none of those jobs can pass on the runner as
+the tree stands.**
+This is inferred from the two per-crate measurements plus the command lines. `bench-compile`'s
+default target selection is the non-obvious one, and it was checked:
+`cargo +nightly bench --no-run --workspace --exclude boyko_demo --target x86_64-unknown-linux-gnu
+-Z unstable-options --unit-graph` lists `boyko_app`'s lib and no example. The workspace-wide
+commands themselves were not run for the linux triple here, and no CI run history was consulted.
+The repair belongs in those two crates, not in the gate.
+
 ### The ignored suite — legs by what the machine has
 
 The four commands above run **none** of the `#[ignore]`d tests — **311 sites (172 unconditional +

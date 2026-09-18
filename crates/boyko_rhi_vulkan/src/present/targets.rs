@@ -72,7 +72,7 @@ fn report_mandatory_target_build_failed(what: &str) {
 fn report_optional_chain_build_failed(what: &str, effect: &str) {
     boyko_log::warn!(
         boyko_log::RhiVulkan,
-        boyko_log::codes::W2106.number(),
+        boyko_log::codes::W2106,
         "{} build failed (OOM-class) -- record_vb will skip {} this frame; the frame still renders",
         what,
         effect

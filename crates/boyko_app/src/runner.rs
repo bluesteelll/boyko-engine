@@ -116,6 +116,15 @@ const VB_BENCH_DEFAULT_FRAMES: u32 = 220;
 
 /// VB-P1d: the warm-up frames discarded from the front of the bench sample window (shader
 /// compile + GPU clock ramp) — mirrors `window_present_gbuffer`'s own `GPU_PASS_COST_WARMUP`.
+///
+/// ⚠️ **The discard was budgeted for from rung 5c and only PERFORMED from 2026-09-18.** Rung 5c's
+/// zone leg counted retired frames and printed a label census, so this constant meant nothing but
+/// "run this many frames longer"; rung 7b (`ebb22ae0`) then folded every retired frame into
+/// [`crate::profiling::reduce::WindowReducer`] from inside that same closure, and the matching
+/// discard did not arrive with it. Every zone artifact written between those two dates therefore
+/// carries the 20 warm-up frames inside its window — at `BOYKO_VB_BENCH_FRAMES=1`, a window of
+/// 21 frames of which 20 are warm-up. Numbers taken on that instrument must be RE-MEASURED; they
+/// cannot be adjusted, because a median does not decompose.
 #[cfg(windows)]
 const VB_BENCH_WARMUP: usize = 20;
 
@@ -2897,7 +2906,25 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         boyko_log::dsp!(zones, 256)
                     );
                 }
-                if let Some(r) = vb_zone_reducer.as_mut() {
+                // THE WARM-UP DISCARD — the one the exit condition below has budgeted for since
+                // rung 5c and that nothing performed until 2026-09-18. `vb_zone_seen` is folded in
+                // only AFTER this closure returns, so this frame's 1-based position in the window
+                // is that running total plus this call's own `retired_frames`.
+                //
+                // **This changes what every zone number means.** Until here the reducer folded the
+                // 20 shader-compile + clock-ramp frames [`VB_BENCH_WARMUP`] names, so a published
+                // median was over `20 + n` frames, not `n` — at `BOYKO_VB_BENCH_FRAMES=1`, over 20
+                // warm-up frames and one timed one. Every figure taken on the old instrument needs
+                // re-measuring rather than correcting.
+                //
+                // The gate is on `observe_frame` as a WHOLE, not on its timing half: `frames()` is
+                // the artifact's window size and `OrderCensus::frames_checked` is the population
+                // its `violations == 0` is read over. Checking order on frames no median covers
+                // would publish a `frames_checked` larger than the window — a count that reads as
+                // more evidence than the window holds.
+                if vb_zone_seen + retired_frames > VB_BENCH_WARMUP as u32
+                    && let Some(r) = vb_zone_reducer.as_mut()
+                {
                     r.observe_frame(pairs);
                 }
                 for p in pairs {
@@ -2926,6 +2953,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             vb_zone_pairs_torn += torn;
             vb_zone_pairs_unbracketed += unbracketed;
             vb_zone_seen += retired_frames;
+            // The budget counts RETIRED frames, warm-up included; the discard that makes the
+            // `VB_BENCH_WARMUP` term mean something happens at the fold above. The two halves of
+            // that one statement lived apart from rung 7b until 2026-09-18, and this side is why
+            // the window was always the right LENGTH and never the right CONTENT.
             if vb_zone_seen >= VB_BENCH_WARMUP as u32 + vb_zone_frames {
                 // Teardown's own clause: frames stop here, so neither deadline horn can fire and
                 // the last `GPU_RING_DEPTH` slots would otherwise be dropped silently.
@@ -2939,10 +2970,23 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         cause.as_str()
                     );
                 });
+                // `frames` is every frame this window RETIRED; `timed` is the subset the reducer
+                // folded. They differ by [`VB_BENCH_WARMUP`], and both are printed because the
+                // artifact publishes the second while this line used to be read as the first —
+                // one number standing for two windows is how the missing discard stayed invisible.
+                //
+                // The label tallies below deliberately stay over ALL retired frames: a pair the
+                // device lost or tore during warm-up is still a loss this run committed, and a
+                // census that reported only the timed window would under-report the device's
+                // health to keep two numbers agreeing. The artifact's own `LabelCensus` is the
+                // timed-window one, and the two are not the same statement.
                 boyko_log::info!(
                     boyko_log::Profiling,
-                    "VB-ZONE summary frames={} measured={} lost={} torn={} not_bracketed={}",
+                    "VB-ZONE summary frames={} warmup={} timed={} measured={} lost={} torn={} \
+                     not_bracketed={}",
                     vb_zone_seen,
+                    VB_BENCH_WARMUP,
+                    vb_zone_seen.saturating_sub(VB_BENCH_WARMUP as u32),
                     vb_zone_pairs_measured,
                     vb_zone_pairs_lost,
                     vb_zone_pairs_torn,

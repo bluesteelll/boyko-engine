@@ -636,7 +636,7 @@ But **P0-4 stands and is not answered by that tie.** DP6 and DP7 are *partially 
 
 **Consequence for the gates: the 2× cost clause is NOT this rung's justification and is dropped as such.** A consolidation is justified by maintenance surface plus the split-boot win. It is replaced by the gate text below — **Rev 4, superseding Rev 3's three bullets in full** (Rev 3 stated G-NEUTRAL/G-REDUCE over `T(armed)` with the split side read as `ZONE_VB_GEO + ZONE_VB_SHADE`; §R4.1.8 shows that sum is a `Σ(median_f)` the reducer forbids, and §R4.1.3 shows the TOP latch makes it unadjudicable either way):
 
-> **All gates read ONE quantity: `ZONE_VB_PRODUCE_NET = ZONE_VB_PRODUCE_RUN − ZONE_VB_PRESHADE`**, formed inside `WindowReducer::observe_frame` from each frame's own pairs and reduced afterwards — `median_f(Σ)`, never `Σ(median_f)`. `ZONE_VB_PRODUCE_RUN` is reported beside it as the total. Protocol: release, 512×512, `sv0_scene`, **3 identical legs per side**, warmup discarded.
+> **All gates read ONE quantity: `ZONE_VB_PRODUCE_NET = ZONE_VB_PRODUCE_RUN − ZONE_VB_PRESHADE`**, formed inside `WindowReducer::observe_frame` from each frame's own pairs and reduced afterwards — `median_f(Σ)`, never `Σ(median_f)`. `ZONE_VB_PRODUCE_RUN` is reported beside it as the total. Protocol: release, 512×512, `sv0_scene`, **3 identical legs per side**, warmup discarded. ⚠️ **"Warmup discarded" became TRUE only on 2026-09-18** — `runner.rs` budgeted the window as `VB_BENCH_WARMUP(20) + frames` and folded every retired frame into `observe_frame` anyway, so a DP6 window taken before that date is `20 + frames` frames wide with the ramp inside its median. `BOYKO_VB_BENCH_FRAMES` now names the TIMED count, and a re-take must pass the count it wants rather than inherit an earlier run's total.
 >
 > **G-NEUTRAL (fused boots).** `[vb_both_sdf]`, `BOYKO_SDF_MESH=on` (arm A), fixture otherwise unchanged:
 > `median_f(NET)|after DP6c ≤ median_f(NET)|at DP6-0b + R_neutral`.
@@ -761,6 +761,14 @@ What the two GEO arms *do* give is **`GEO_base` — the cost of `vb_geo` itself,
 and after the restamp that number is **transferable across boots**, because a BOTTOM begin no longer
 admits the predecessor drain that made DP6-0's GEO cell fixture-specific. That transferability is
 what the restamp bought, and this re-derivation is its first consumer.
+
+> ⚠️ **Every "MEASURED" cell in this block is SUSPECT as of 2026-09-18 and is queued for a
+> re-take.** They were read out of zone artifacts whose windows included the 20 warm-up frames
+> `VB_BENCH_WARMUP` exists to exclude (the discard was budgeted for and never performed until that
+> date; see the Rev-4 protocol note above). Nothing here is adjusted or struck — a median over a
+> contaminated window does not decompose into a clean one, so the repair is re-measurement. The
+> re-take is also what settles whether the `PRESHADE` between-arm drift this block reports is a
+> property of the workload or of the ramp it was measuring across.
 
 **The four terms.** Before-side, MEASURED, no modelling: `NET([vb_both_sdf], arm A) = 62 976 ns` at
 DP6-0b. Four terms do not cancel; everything else does. `id 6`'s unsplit hzb slot runs on both sides

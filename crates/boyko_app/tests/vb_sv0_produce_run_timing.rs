@@ -98,10 +98,32 @@ struct Cell {
     expect: Expect,
 }
 
-/// The FUSED leg's table — `[vb_both_sdf]`, `mesh_geo_shade_split == false`.
+/// The FUSED leg's table — `mesh_geo_shade_split == false`.
 ///
 /// `sv0_armed` is the `BOYKO_SDF_MESH` arm: the dedicated prepass is recorded only under
 /// `plan.sv0_pass`, so id 10 is the one cell that moves with the arm rather than with the leg.
+///
+/// # ⚠️ Since DP6a the ARM CHANGES THE LEG, so this is no longer the ARMED fixture's table
+///
+/// Commit `c1caa422` (2026-08-20, DP6a) made the SDF-on-mesh term REQUEST imply the split:
+/// `render_path_config.rs` resolves `mesh_geo_shade_split = VB && mesh_leg && (pre_light ||
+/// vb_sv0_split)`, and `vb_sv0_split` is that request conjoined with the resolved soft march and
+/// the RG8 storage cap. The term's producer IS the split's geometry half, so a boot that wants the
+/// term arms the split even with no other pre-light consumer.
+///
+/// The consequence for this harness is not a cell but a LEG: booting `[vb_both_sdf]` with
+/// `BOYKO_SDF_MESH=on` produces a SPLIT leg — `record_vb` takes its `path_vb_split()` arm so ids
+/// 11 and 13 stamp, and `runner.rs`'s declaration site picks `VB_CHAIN_SPLIT` /
+/// `VB_DERIVED_SPLIT` off the same resolved flag. [`dp6_0b_fused_leg_matches_its_expectation_table`]
+/// therefore checks against [`table_split`]. This table kept declaring ids 11 and 13 `Forbidden`
+/// on both arms from DP6a until that driver was re-pointed, which is what made the driver red;
+/// `docs/VB-SV0-DP6-DESIGN.md` §R4.3.6 predicted the move in words while no table followed it.
+///
+/// ⚠️ `table_fused(true)` — id 10 `Required` beside ids 11/13 `Forbidden` — describes a boot DP6a
+/// made unreachable, since the request that stamps id 10 is the one that arms the split. It is kept
+/// because it is what [`VB_CHAIN_FUSED`]'s own membership still declares, and the pairing in
+/// `zone_declarations_agree_with_the_reducer` is what keeps the two spellings from drifting apart
+/// silently; both sides move together or neither does.
 fn table_fused(sv0_armed: bool) -> Vec<Cell> {
     vec![
         Cell { zone: ZONE_VB_RUN, name: "vb_run", expect: Expect::Required },
@@ -195,21 +217,24 @@ fn viewt_gap_ns(rows: &[ZoneRow]) -> Option<f64> {
 /// `VB ∧ mesh_leg ∧ ((¬sdf_leg ∧ aa == Taa) ∨ (split ∧ ssao))`. On `[vb_both_ssao]` arm (b) fires
 /// on BOTH sides of DP6, which is what makes the dispatch common-mode inside the run bracket.
 ///
-/// # ⚠️ DEVIATION — the `Forbidden` side is not live on any bootable fixture (W9)
+/// # The `Forbidden` side — deferred at DP6-0b (W9), LIVE since DP6a
 ///
 /// The design's §R4.3.6 gives `vb_viewt` a per-side cell — `Forbidden` on `[vb_both_sdf]` both
 /// sides, `Required` on `[vb_both_ssao]` both sides — *"checked mechanically without minting a
 /// zone: the `[e6 → b11]` gap must be ≈ 5 248 ns where `Required` and ≈ 0 where `Forbidden`"*.
-/// **On `[vb_both_sdf]` there is no `b11` at all**: id 11 is stamped only inside
-/// `if scene.path_vb_split()`, and that fixture is fused, so the gap has no second end and the
-/// arithmetic has no subject. As specified the `Forbidden` cell is unimplementable at this rung.
+/// **At DP6-0b `[vb_both_sdf]` had no `b11` at all**: id 11 is stamped only inside
+/// `if scene.path_vb_split()` and that fixture was fused, so the gap had no second end and the
+/// arithmetic had no subject. What shipped then was the fused driver asserting [`viewt_gap_ns`] is
+/// `None` — "the check does not apply here", a different statement from "the check passed" — with
+/// the `Forbidden` arm exercised only by arithmetic in the unit tests below.
 ///
-/// What ships instead: the fused driver asserts [`viewt_gap_ns`] is **`None`** — "the check does
-/// not apply here", which is a different statement from "the check passed" and is the one that is
-/// true. The `Forbidden` ARM of this function is exercised by arithmetic in the unit tests below,
-/// so it is not dead, and it becomes live on a real leg at **DP6a**, where `[vb_both_sdf]` gains
-/// the split (id 11 appears) while still carrying no `SsaoConfig` (arm (b) stays dead) — the first
-/// boot on which "id 11 exists and `vb_viewt` must not have run" is a statement about a frame.
+/// **Commit `c1caa422` (2026-08-20, DP6a) ended that**, exactly as the design predicted: the
+/// SDF-on-mesh term request now implies the split, so `[vb_both_sdf]` gains id 11 while still
+/// carrying no `SsaoConfig` (arm (b) stays dead). `dp6_0b_fused_leg_matches_its_expectation_table`
+/// now drives this function's `Forbidden` arm on that leg — the first boot on which "id 11 exists
+/// and `vb_viewt` must not have run" is a statement about a frame rather than about arithmetic.
+/// That gap MEASURES 192 ns on this box, against the 2 048 ns floor and the 5 248 ns the same gap
+/// holds on `[vb_both_ssao]`: two stamps with nothing between them, which is what the arm claims.
 ///
 /// # Boundary ownership
 ///
@@ -500,34 +525,68 @@ fn run_worker(fixture: &str, sv0_armed: bool) -> Option<Artifact> {
     Some(art)
 }
 
-/// **The fused leg** — `[vb_both_sdf]`'s boot, SV0 armed.
+/// **The `[vb_both_sdf]` fixture, SV0 armed** — a SPLIT leg since DP6a, and the boot the design
+/// predicted the `vb_viewt` `Forbidden` arm would first become live on.
+///
+/// # ⚠️ What moved, and when
+///
+/// Commit `c1caa422` (2026-08-20, DP6a) made the SDF-on-mesh term request imply
+/// `mesh_geo_shade_split` ([`table_fused`]'s doc carries the resolver's own predicate). From that
+/// commit this driver's boot stamps ids 11 and 13 and the runner declares `VB_CHAIN_SPLIT` for it,
+/// while the three assertions here still described a fused leg: `table_fused` forbade both ids, the
+/// gap was asserted ABSENT, and `NET` was asserted identical to `PRODUCE_RUN` on the strength of a
+/// structurally absent `PRESHADE`. All three are re-pointed below. The test's name keeps the
+/// FIXTURE's vocabulary (`ENV_FIXTURE=fused` selects the `[vb_both_sdf]` boot); the LEG it produces
+/// is split, which is the whole content of this note — do not re-litigate it from the name.
+///
+/// `docs/VB-SV0-DP6-DESIGN.md` §R4.3.6 predicted exactly this: *"it becomes live on a real leg at
+/// DP6a, where `[vb_both_sdf]` gains the split (id 11 appears) while still carrying no `SsaoConfig`
+/// (arm (b) stays dead)"*. The prediction was written into the design and into
+/// [`check_viewt_gap`]'s doc; nothing re-pointed the table it was about.
 #[test]
 #[ignore = "live GPU measurement; the orchestrator runs it with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
 fn dp6_0b_fused_leg_matches_its_expectation_table() {
     let Some(art) = run_worker("fused", true) else { return };
-    if let Err(why) = check_expectations(&art.zones, &table_fused(true)) {
-        panic!("[vb_both_sdf] (SV0 armed): {why}");
+    // The SPLIT table, on the `[vb_both_sdf]` fixture: with the term armed this boot resolves
+    // `mesh_geo_shade_split == true`, so every zone the split leg stamps must stamp here too.
+    if let Err(why) = check_expectations(&art.zones, &table_split(true)) {
+        panic!("[vb_both_sdf] (SV0 armed, split by DP6a's implication): {why}");
     }
     if let Err(why) = check_order(&art.order) {
-        panic!("[vb_both_sdf] (SV0 armed): {why}");
+        panic!("[vb_both_sdf] (SV0 armed, split by DP6a's implication): {why}");
     }
-    // The fused leg has no id 11, so the gap is not a statement about anything here — asserted as
-    // ABSENT rather than skipped silently, because "the check did not apply" and "the check passed"
-    // are the two states this campaign keeps confusing.
-    assert!(
-        viewt_gap_ns(&art.zones).is_none(),
-        "the fused leg stamped ZONE_VB_GEO, so its expectation table is wrong about the leg"
+    // THE `Forbidden` ARM, LIVE ON A REAL LEG. id 11 exists (the term request armed the split) and
+    // `vb_viewt`'s predicate is dead on both arms here — (a) needs `¬sdf_leg` and this fixture is
+    // `Both`, (b) needs an `SsaoConfig` this worker inserts only on the `split` fixture — so
+    // nothing may sit between id 6's END and id 11's BEGIN. This is a statement about a frame,
+    // which is what the DP6-0b deviation said it could not yet be.
+    let gap = viewt_gap_ns(&art.zones).expect(
+        "invariant: since DP6a this boot is split, so it stamps both id 6 and id 11 and the gap has \
+         two ends",
     );
-    // NET ≡ PRODUCE_RUN on this row: `PRESHADE` is absent-Forbidden, so the derived value is the
-    // run bracket itself. Asserted because it is what makes G-NEUTRAL and G-REDUCE read ONE
-    // comparator rather than two.
+    if let Err(why) = check_viewt_gap(gap, false) {
+        panic!("[vb_both_sdf] (SV0 armed, split by DP6a's implication): {why}");
+    }
+    // The partition identity on the published medians — `[vb_both_ssao]`'s reasoning, now
+    // applicable here because DP6a gave this boot a LIVE `PRESHADE` subtrahend: `NET + PRESHADE`
+    // reconstructs `PRODUCE_RUN` only approximately, since each of the three is its own window
+    // median while the per-frame identity is exact in the reducer. Loose and stated as such: it
+    // catches a derived row formed from the wrong pair of zones, not a reduction artefact.
+    //
+    // ⚠️ The magnitude clause of the split driver (`PRESHADE` dominating at ~78 %) is deliberately
+    // NOT copied: that number is `[vb_both_ssao]`'s à-trous chain, and this fixture carries no
+    // `SsaoConfig` at all. Asserting it here would red on the fixture's identity, not on the
+    // instrument.
     let run = row(&art.zones, ZONE_VB_PRODUCE_RUN);
+    let pre = row(&art.zones, ZONE_VB_PRESHADE);
     let net = row(&art.zones, ZONE_VB_PRODUCE_NET);
+    let residual = (net.median_ns + pre.median_ns - run.median_ns).abs();
     assert!(
-        (run.median_ns - net.median_ns).abs() < 1.0,
-        "on a fused leg NET must be identical to PRODUCE_RUN (PRESHADE is structurally absent and \
-         contributes 0.0); they read {} and {}",
+        residual < 0.05 * run.median_ns,
+        "NET + PRESHADE should reconstruct PRODUCE_RUN to within reduction noise; residual was \
+         {residual:.1} ns on a {:.1} ns run bracket (PRESHADE {:.1} ns, NET {:.1} ns)",
         run.median_ns,
+        pre.median_ns,
         net.median_ns
     );
 }

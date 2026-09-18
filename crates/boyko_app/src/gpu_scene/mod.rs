@@ -7657,10 +7657,27 @@ impl GpuSceneBundles {
         // reading it after the teardown below would be reading a corpse. A DIRECT call rather than
         // `loss::raise`, because the frame loop has stopped by now and `fold.rs` — the flag word's
         // only consumer — will never run again.
-        if let Some(rec) = self.vb_zone.as_ref() {
+        //
+        // The same block releases the recorder's pools, because it is the only place that holds
+        // the recorder by value and the report must read it before it is consumed. `boot` creates
+        // `GPU_RING_DEPTH` pools and hands the array to `GpuZoneRecorder::new`; the recorder has
+        // no `Drop` by design — destroying a `VkQueryPool` needs a device reference it does not
+        // hold, which is what `into_pools` exists for — and no caller in this crate had ever
+        // called it, so every armed `BOYKO_VB_ZONE` run ended with `vkDestroyDevice` reporting
+        // four leaked `VkQueryPool`s. Found by `vb_bench_query_validation` once its validation
+        // oracle was armed.
+        if let Some(rec) = self.vb_zone {
             let abandoned = rec.in_flight_slots();
             if abandoned > 0 {
                 boyko_ecs::ecs::core::profiling::report_gpu_slots_abandoned(abandoned);
+            }
+            // SAFETY: per this fn's contract the device is idle, so no submission still reads
+            // these pools; `ctx` is the live context `boot` created them on; `into_pools`
+            // consumes the recorder, so each of the four handles is destroyed exactly once.
+            unsafe {
+                for pool in rec.into_pools() {
+                    RhiDevice::destroy_query_pool(ctx, pool);
+                }
             }
         }
         // SAFETY: per the contract the device is idle and `ctx` is live; each

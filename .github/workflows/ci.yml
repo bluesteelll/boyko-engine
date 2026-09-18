@@ -188,6 +188,230 @@ jobs:
         # (~43 warnings). Workspace is now clean: no || true workaround needed.
         run: cargo clippy --workspace --all-targets --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko -- -D warnings
 
+  # ---------------------------------------------------------------------------------------------
+  # feature legs — the axis the standing gate cannot see
+  # ---------------------------------------------------------------------------------------------
+  #
+  # `--all-targets` IS NOT `--all-features`, and the two names invite precisely the confusion that
+  # cost this tree 32 days. `--all-targets` widens the TARGET set (lib, bins, tests, benches,
+  # examples); the cfg set those targets compile under stays the default one. So the standing gate —
+  # `cargo clippy --workspace --all-targets -- -D warnings`, the job directly above, which never
+  # passes `--features` — is STRUCTURALLY BLIND to every `#[cfg(feature = "…")]` item in the
+  # workspace. Not "weak on": blind. Such an item is not compiled at all, and rustc cannot go red
+  # over a span it never sees.
+  #
+  # MEASURED 2026-09-18: `cargo check -p boyko_rhi_vulkan --features hwrt --lib` failed with
+  # 10 × E0308, from two lines — `device.rs:3254` and `present/targets.rs:75` passed a `u16`
+  # (`.number()`) where `warn!` takes a typed `WarnCode`. Commit 718a5129 (2026-08-17) introduced
+  # that type and converted every site rustc showed it, INCLUDING both non-gated `W2102.number()`
+  # sites in the same three-function group in `device.rs`, and left the `#[cfg(feature = "hwrt")]`
+  # sibling sitting between them — because no build in this repository had ever compiled it. The
+  # feature was un-compilable for ~248 commits / 32 days, and what finally compiled it was a person
+  # running the GPU leg by hand.
+  #
+  # ⚠ THE ONE-FLAG ANSWER DOES NOT EXIST IN THIS TREE, by design rather than by neglect.
+  # `--all-features` turns on `boyko-threadpool/tb-neg-m2w`, whose crate root answers with a
+  # `compile_error!` unless `cfg(miri)` is set (it is the KE16 M2w deliberate-UB negative control),
+  # and three `nightly` features that are E0554 on the stable channel. MEASURED 2026-09-18:
+  # `cargo check --workspace --all-targets --all-features` dies on `boyko_shaderdsl`'s E0554 before
+  # reaching a single engine crate. Per-feature legs are the only form that can work here.
+  #
+  # WHAT THIS JOB COVERS IS DERIVED, NOT LISTED, and that is the whole design. The leg set is every
+  # feature `cargo metadata` reports MINUS the refusal table in the step below — so a feature added
+  # tomorrow is covered BY DEFAULT and has to be argued out in writing, one line, with a reason. A
+  # hand-written list of covered features has the opposite failure mode, and it is the exact one this
+  # job exists to stop: a check that covers one feature while reading as though it covered all.
+  #
+  # ⚠ A REFUSAL THAT OVERSTATES ITS REASON IS THIS JOB'S OWN FAILURE MODE, and the first review of
+  # the table below found one: `boyko-render` was refused as a crate that "does not compile for a
+  # non-Windows target at all", on a measurement of 2 errors. RE-MEASURED 2026-09-18 on the same
+  # triple, those 2 were ONE `error[E0601]` (`main` function not found in `orbit_cube_window`, which
+  # is `#![cfg(windows)]` as a whole crate) plus cargo's own summary line — the LIB compiles, and
+  # `cargo check -p boyko-render --features hwrt --lib --tests --target x86_64-unknown-linux-gnu`
+  # exits 0 in 10.8 s from clean. The false row excluded three legs and left 34
+  # `#[cfg(feature = "hwrt")]` sites under `crates/boyko_render/src` compiled by nothing: the exact
+  # class this job exists to close, one crate over from where it was found. Hence the scope table
+  # below — a leg whose LIB builds but whose example does not gets a NARROWER TARGET SET, never an
+  # exclusion. An exclusion is only for a crate whose lib itself cannot be compiled here.
+  #
+  # ⚠ WHAT IT DOES NOT COVER, stated plainly for the same reason:
+  #   * THE PLATFORM AXIS for `boyko-app` — the same blind spot on a different cfg, and still open.
+  #     MEASURED 2026-09-18, `crates/boyko_app/src/diag.rs:184` spells `codes::E3004.number()`
+  #     inside a `#[cfg(not(windows))]` reporter; it landed 2026-08-13 (b809041e), four days BEFORE
+  #     the sweep that fixed its siblings, and was invisible to that sweep for the identical reason.
+  #     It is not repaired here and no leg below would find it: `cargo check -p boyko-app --lib
+  #     --target x86_64-unknown-linux-gnu` fails on DEFAULT features — RE-MEASURED 2026-09-18 with
+  #     `--keep-going`: five printed diagnostics (2 × E0432, 3 × E0308), which rustc's summary line
+  #     counts as "7 previous errors" — in the LIB, so unlike `boyko-render` no target scope can
+  #     rescue those legs, and a feature leg for that crate would be measuring the platform instead
+  #     of the feature. That same lib is in the target set of every `--workspace` job in this file
+  #     (six, above and below this one, all on `ubuntu-latest`), so none of them can exit 0 on this
+  #     runner as the tree stands. Reported, not repaired, here: the repair is in
+  #     `crates/boyko_app`, not in this file.
+  #   * CLIPPY LINTS on the gated code. These legs are `cargo check`, so rustc warnings do fail them
+  #     (the top-level `RUSTFLAGS` carries `-D warnings`), but clippy-specific lints never run over
+  #     any `#[cfg(feature = …)]` item in the tree. That hole is narrowed here, not closed.
+  #   * `crates/boyko_render/examples/orbit_cube_window.rs` — the one target the scoped legs drop
+  #     today (`--lib --tests` would also drop a bin or a bench; the crate has neither). It is
+  #     `#![cfg(windows)]` by construction and NO job in this file compiles it — only the by-hand
+  #     Windows recipe in `CLAUDE.md` does.
+  #   * The eight refused features, each carrying its reason at the site.
+  feature-legs:
+    name: cargo check (per-feature legs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-legs
+      # The refusal table is one of this job's TWO hand-maintained lists (the scope table below is
+      # the other), and every row in either is a measured claim rather than a preference. A row whose
+      # `pkg/feature` no longer exists fails the step: an exclusion that outlives its subject is a
+      # coverage claim nobody re-reads.
+      - name: derive the legs from cargo metadata
+        shell: bash
+        run: |
+          cat > feature-refusals.txt <<'EOF'
+          bench-bevy-vs-boyko/bench-alloc|cost: the bevy tree is excluded from every other job in this file (see the note above `jobs:`); `bench-compile` is the one job that builds this crate, default-featured.
+          bench-bevy-vs-boyko/nightly|cost: the same bevy tree as the row above, which is the operative reason and is enough on its own. RE-MEASURED 2026-09-18: `#![cfg_attr(feature = "nightly", feature(float_algebraic))]` is NOT a crate-root attribute, it is at `benches/g6_for_each_chunk.rs:7` -- one bench target -- so the old `channel:` label overstated a per-target E0554 as a crate-wide one. Refused here on cost; the nightly-green claim was not re-measured (building the bevy tree twice is what "cost" means).
+          boyko-threadpool/tb-neg-m2w|by-design: `crates/boyko_threadpool/src/lib.rs:99` is a `compile_error!` refusing this feature whenever `cfg(miri)` is unset -- it is the KE16 M2w deliberate-UB negative control, and a native artifact built from it commits a Tree-Borrows violation on purpose. Its gate is `scripts/tb_neg_gate.{ps1,sh}` under Miri. VERIFIED 2026-09-18 at that line.
+          boyko_sdf_math/nightly|KNOWN-RED 2026-09-18, an open defect and NOT a coverage judgement: it forwards to `boyko_shaderdsl/nightly` (the row below) and dies INSIDE that dependency, so `boyko_sdf_math` itself is never compiled and the counts below are `boyko_shaderdsl`'s rather than this crate's. RE-MEASURED 2026-09-18, `--all-targets`: 9 errors in the `boyko_shaderdsl` lib on stable-msvc, 10 on nightly-msvc.
+          boyko_shaderdsl/nightly|KNOWN-RED 2026-09-18, an open defect and NOT a coverage judgement: the arm makes the crate `no_std` while `src/ssao.rs` uses `format!`/`String`, and it calls `core::intrinsics::{sinf32,cosf32}`, which current nightly no longer has. RE-MEASURED 2026-09-18 on the lib target, identical under `--lib` and `--all-targets`: 9 errors on stable-msvc (E0554 among them), 10 on nightly-msvc -- broken on BOTH channels, not merely channel-gated. `--all-targets` ALSO fails the lib-test unit, 8 errors stable / 9 nightly, so the lib count is not the whole command's. The earlier `11` was wrong at every scope. Covering it would make this job permanently red, and a permanently red job is one nobody reads.
+          boyko-app/hwrt|platform: `boyko-app`'s LIB does not compile for a non-Windows target. RE-MEASURED 2026-09-18 with `--keep-going`, `cargo check -p boyko-app --lib --target x86_64-unknown-linux-gnu` on DEFAULT features: five printed diagnostics, which rustc's summary line counts as "7 previous errors" -- 2 x `error[E0432]: unresolved import crate::gpu_scene` (`runner.rs:77`, `particle_readback.rs:34`; the module is `#[cfg(windows)]` at `lib.rs:60-61`) and 3 x `error[E0308]`, all three at `diag.rs:184` in the `#[cfg(not(windows))]` reporter. Because it is the LIB, no narrower target scope rescues this leg the way `boyko-render`'s was rescued. NO CI job compiles this feature; the by-hand Windows check `cargo check -p boyko-app --features hwrt --all-targets` was VERIFIED green (0 errors, 0 warnings) on stable-msvc 2026-09-18.
+          boyko-app/profiling-alloc|platform: same crate, same measurement as the row above. Its by-hand Windows check (`--features profiling-alloc --all-targets`) was VERIFIED green on stable-msvc 2026-09-18.
+          boyko-app/profiling-census|platform: same crate, same measurement as the row above. Its by-hand Windows check (`--features profiling-census --all-targets`) was VERIFIED green on stable-msvc 2026-09-18.
+          EOF
+          # The SECOND hand-maintained list, and it exists because "covered" and "refused" are not
+          # the only two states a leg has. A crate whose lib builds on this runner but whose EXAMPLE
+          # does not is not a platform refusal; refusing it hides every gated item in the lib, which
+          # is this job's own failure mode. Such a leg gets a narrower TARGET SET here instead.
+          # A row naming something that is not a derived leg fails the step, exactly like a stale
+          # refusal: an override that outlives its subject is a coverage claim nobody re-reads.
+          cat > feature-scopes.txt <<'EOF'
+          boyko-render/hwrt|--lib --tests|MEASURED 2026-09-18 on `--target x86_64-unknown-linux-gnu`, from a clean `cargo clean -p boyko-render`: `--lib --tests` exits 0 in 10.8 s, while `--all-targets` on DEFAULT features gives exactly ONE `error[E0601]` -- `main` function not found in `examples/orbit_cube_window.rs`, which is `#![cfg(windows)]` by construction. RE-MEASURED 2026-09-18 with `--keep-going`: still that one error, so no second failing target hides behind the first. Dropping that one example brings 34 `#[cfg(feature = "hwrt")]` sites under `crates/boyko_render/src` into a build for the first time.
+          boyko-render/profiling-census|--lib --tests|same crate, same one Windows-only example. MEASURED 2026-09-18: `--lib --tests` on the linux triple exits 0 in 12.9 s.
+          boyko-render/test-readback|--lib --tests|same crate, same one Windows-only example. MEASURED 2026-09-18: `--lib --tests` on the linux triple exits 0 in 10.5 s. This leg adds NO coverage of its own, and says so rather than padding the count: `boyko-render`'s self-referential dev-dependency turns `test-readback` on whenever test targets build, so any `--tests` build already compiles the gated items -- measured, this leg was FRESH in 0.19 s, reusing the units of an earlier default `--all-targets` build. It stays because it is derived, and refusing a feature that compiles would be the opposite error.
+          EOF
+          python3 - <<'PY'
+          import json, subprocess, sys
+
+          done = subprocess.run(
+              ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+              capture_output=True,
+          )
+          if done.returncode != 0:
+              sys.stderr.write(done.stderr.decode("utf-8", "replace"))
+              sys.exit("::error::cargo metadata failed; the leg set cannot be derived")
+          meta = json.loads(done.stdout)
+
+          # `default` is not a leg: every other job in this file already compiles it.
+          declared = {
+              (pkg["name"], feat)
+              for pkg in meta["packages"]
+              for feat in pkg["features"]
+              if feat != "default"
+          }
+
+          def read_table(path, fields):
+              """Parse `pkg/feature|col|...` rows into {(pkg, feat): (col, ...)}."""
+              rows = {}
+              with open(path, encoding="utf-8") as handle:
+                  for line in handle:
+                      line = line.strip()
+                      if not line or line.startswith("#"):
+                          continue
+                      parts = line.split("|", fields)
+                      if len(parts) != fields + 1:
+                          sys.exit(f"::error::{path}: row {parts[0]!r} has {len(parts) - 1} "
+                                   f"`|`-separated columns, expected {fields}.")
+                      pkg, _, feat = parts[0].partition("/")
+                      rows[(pkg, feat)] = tuple(parts[1:])
+              return rows
+
+          refused = {key: cols[0] for key, cols in read_table("feature-refusals.txt", 1).items()}
+
+          stale = sorted(key for key in refused if key not in declared)
+          if stale:
+              for pkg, feat in stale:
+                  print(f"::error::feature-refusals.txt refuses {pkg}/{feat}, which no manifest "
+                        f"declares any more -- delete the row.")
+              sys.exit(1)
+
+          legs = sorted(declared - set(refused))
+
+          # The scope table is checked against the DERIVED leg set, not against `declared`: a row for
+          # a refused feature would silently do nothing, which is the same dead-claim defect as a
+          # stale refusal and is caught here the same way.
+          scopes = read_table("feature-scopes.txt", 2)
+          orphan = sorted(key for key in scopes if key not in set(legs))
+          if orphan:
+              for pkg, feat in orphan:
+                  print(f"::error::feature-scopes.txt narrows {pkg}/{feat}, which is not a derived "
+                        f"leg (undeclared, or refused outright) -- delete the row.")
+              sys.exit(1)
+
+          # A floor in the shape the `loom` job uses: it cannot stop the leg set from shrinking, it
+          # makes a shrink an EDIT someone has to justify. 15 is the count measured on 2026-09-18
+          # (23 non-default features across 11 packages, minus the 8 refusals above). It was 12
+          # until the false `boyko-render` platform refusal was re-measured and withdrawn.
+          MIN_LEGS = 15
+          print(f"[feature census] {len(declared)} non-default features declared, "
+                f"{len(refused)} refused, {len(legs)} legs to run "
+                f"({len(scopes)} of them at a narrowed target scope)")
+          for pkg, feat in legs:
+              scope, reason = scopes.get((pkg, feat), ("--all-targets", ""))
+              note = f" -- scoped: {reason}" if reason else ""
+              print(f"  leg: {pkg}/{feat} [{scope}]{note}")
+          for (pkg, feat), reason in sorted(refused.items()):
+              print(f"  refused: {pkg}/{feat} -- {reason}")
+          if len(legs) < MIN_LEGS:
+              sys.exit(f"::error::only {len(legs)} legs derived, floor is {MIN_LEGS}. A feature was "
+                       f"deleted or newly refused; both are fine, and both are an edit to this "
+                       f"number with a reason in the commit message.")
+
+          with open("feature-legs.txt", "w", encoding="utf-8") as handle:
+              for pkg, feat in legs:
+                  scope = scopes.get((pkg, feat), ("--all-targets", ""))[0]
+                  handle.write(f"{pkg} {feat} {scope}\n")
+          PY
+      # Every leg runs even after one fails, for the reason `CLAUDE.md` gives `--no-fail-fast`: one
+      # red leg must not shadow the legs ordered behind it. The executed count is compared against
+      # the derived count because a `while read` over an empty file runs nothing and exits 0 — the
+      # vacuous green this file already guards against in four other places.
+      - name: cargo check each derived leg
+        shell: bash
+        run: |
+          expected=$(wc -l < feature-legs.txt)
+          ran=0
+          failed=0
+          while read -r pkg feat scope; do
+            echo "::group::cargo check -p $pkg --features $feat $scope"
+            # `$scope` is deliberately unquoted: it carries cargo's target-selection flags as
+            # SEPARATE words (`--lib --tests`), and quoting would hand cargo one argument spelled
+            # "--lib --tests", which it rejects. Its content is the scope table above, not input.
+            # shellcheck disable=SC2086
+            if cargo check -p "$pkg" --features "$feat" $scope; then
+              echo "ok: $pkg/$feat"
+            else
+              echo "::error::$pkg/$feat does not compile -- a feature-gated item is compiled by this job and by nothing else in CI, so nothing else will say so."
+              failed=$((failed + 1))
+            fi
+            ran=$((ran + 1))
+            echo "::endgroup::"
+          done < feature-legs.txt
+          echo "feature legs: $ran of $expected ran, $failed failed"
+          if [ "$ran" -eq 0 ] || [ "$ran" -ne "$expected" ]; then
+            echo "::error::feature legs ran $ran of an expected $expected -- a run that checks no feature at all exits 0, which is what this comparison forbids."
+            exit 1
+          fi
+          # `exit "$failed"` rather than `exit 1` was the first form here, and it is a vacuous green
+          # waiting to happen: a shell exit status is taken mod 256, so 256 failing legs would exit 0.
+          # The count is already printed above; the status only has to be non-zero.
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+
   bench-compile:
     name: cargo bench --no-run
     runs-on: ubuntu-latest

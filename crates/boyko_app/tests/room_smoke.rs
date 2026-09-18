@@ -5,8 +5,9 @@
 //! frame; gen-gated light uploads; CSM armed) → D2 teardown — with the exit
 //! requested by an ordinary `AppExit`-setting system. Asserts a clean run, the
 //! gathers actually bucketed the room + casters, the light generation protocol
-//! gated the uploads, the CSM lock-step armed, and the World is GPU-evicted
-//! afterward.
+//! gated the uploads, the CSM lock-step armed, the default `CatchAll` fit folded
+//! a complete caster bound at the `raw_far` the scene's constants imply, and the
+//! World is GPU-evicted afterward.
 //!
 //! SINGLE-TEST BINARY: `EnginePlugins` composes `LightingPlugin`, whose light
 //! eviction hooks are process-global — do not co-locate a second
@@ -58,17 +59,46 @@ fn exit_after_budget(mut budget: ResMut<FrameBudget>, mut exit: ResMut<AppExit>)
 /// The sun direction TO the light — mirrors `examples/room.rs`.
 const SUN_DIR: [f32; 3] = [-0.45, 0.82, 0.36];
 
+/// The caster cubes' authored XZ placements. Spelled once, because both [`setup`] and
+/// [`expected_raw_far`] read it — a caster bound RECOMPUTED from a second copy of the scene would
+/// be a pasted number wearing a formula.
+const CASTER_XZ: [(f32, f32); 4] = [(-2.0, -1.0), (0.0, -2.5), (1.8, -0.6), (0.9, 1.2)];
+/// Every caster cube's authored Y — the cube rests on the floor plane.
+const CASTER_Y: f32 = 0.5;
+/// `Assets::cube`'s `size`: its local AABB is centred on the model origin at ±`CUBE_SIZE / 2`.
+const CUBE_SIZE: f32 = 1.0;
+
+/// `reduce_caster_bounds`'s `raw_far` for this scene, recomputed from the constants above.
+///
+/// The reducer (`boyko_render::csm_caster::reduce_bounds_into`) folds, PER CASTER INSTANCE,
+/// `forward · (centre − eye) + |forward| · half` and keeps the maximum — the D4 per-instance
+/// projection, deliberately not the projection of the union AABB. Every cube here is unrotated and
+/// unscaled, so the Arvo transform leaves `centre = (x, CASTER_Y, z)` and every `half` component at
+/// `CUBE_SIZE / 2`; `eye` and `forward` are the `ViewUniform` lanes the two `assert_lane_near`
+/// checks above have already tied to [`EYE`] and the authored look direction.
+fn expected_raw_far() -> f32 {
+    let eye = Vec3::new(EYE[0], EYE[1], EYE[2]);
+    // The rig's own construction: `look_at_rh(eye, ZERO, up)` ⇒ forward = normalize(target − eye).
+    let forward = (Vec3::ZERO - eye).normalize();
+    let half = CUBE_SIZE * 0.5;
+    let d_half = (forward.x.abs() + forward.y.abs() + forward.z.abs()) * half;
+    CASTER_XZ
+        .iter()
+        .map(|&(x, z)| forward.dot(Vec3::new(x, CASTER_Y, z) - eye) + d_half)
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
 /// The room scene of `examples/room.rs` (R4 form: casters + sun + sky + point),
 /// spawned at startup (the device is present — the runner inserts `GpuDevice` +
 /// `Assets<MeshGpu>` before finish).
 fn setup(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
     let floor = meshes.plane(dev.get(), 12.0);
-    let cube = meshes.cube(dev.get(), 1.0);
+    let cube = meshes.cube(dev.get(), CUBE_SIZE);
     // Floor = receiver-only (no ShadowCaster); cubes = structural casters.
     commands.spawn(MeshBundle::new(floor, Transform::IDENTITY));
-    for (x, z) in [(-2.0, -1.0), (0.0, -2.5), (1.8, -0.6), (0.9, 1.2)] {
+    for (x, z) in CASTER_XZ {
         commands
-            .spawn(MeshBundle::new(cube, Transform::from_translation(Vec3::new(x, 0.5, z))))
+            .spawn(MeshBundle::new(cube, Transform::from_translation(Vec3::new(x, CASTER_Y, z))))
             .insert(ShadowCaster);
     }
 
@@ -193,17 +223,36 @@ fn room_smoke_ten_frames_then_clean_teardown() {
     );
 
     // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5, test T22 (first row):
-    // `reduce_caster_bounds` is now WIRED (`boyko_app::plugins`), but this scene never
-    // sets `fit_mode` (stays the plugin default `Fixed`), so the reducer's own 0%-gate
-    // (csm_caster.rs) returns `EMPTY` every frame. Asserting `total_batches > 0` HERE
-    // would CONTRADICT that gate — see the sibling
-    // `room_smoke_catch_all_fit.rs::room_smoke_catch_all_fit_folds_complete_caster_bounds`
-    // for the assertion that actually needs a non-`Fixed` mode to hold.
-    // What this pins: the Resource still exists (`resource::<T>()` panics otherwise) and
-    // is exactly the documented `EMPTY` seed under `Fixed` — no regression from wiring
-    // the reducer into a scene that never opts into a caster mode.
+    // `reduce_caster_bounds` is WIRED (`boyko_app::plugins`), and this scene takes `fit_mode`
+    // from `CsmConfig::default()`.
+    //
+    // ⚠️ THAT DEFAULT IS `CatchAll`, not `Fixed`. Commit 7ebe9b9f (2026-07-16) flipped
+    // `DEFAULT_FIT_MODE` — 43 minutes after the assertion that stood here was written against
+    // `Fixed` — and updated three files, this one not among them. The reducer's 0%-gate
+    // (`csm_caster.rs`) fires only under `Fixed`, so under the default the fold runs every frame
+    // and `CsmCasterBounds::EMPTY` cannot hold; the old expectation was red for 611 commits,
+    // unseen because this whole binary is `#[ignore]`d behind a windowed GPU.
+    //
+    // What this now pins: the fold RAN, it was COMPLETE, and its `raw_far` is the value this
+    // scene's own geometry implies — `expected_raw_far` recomputes it from `EYE`, `CASTER_XZ`,
+    // `CASTER_Y` and `CUBE_SIZE`, which are the same constants `setup` spawns from, so the number
+    // is DERIVED and a scene edit moves both sides together.
     let bounds = *app.world().resource::<CsmCasterBounds>();
-    assert_eq!(bounds, CsmCasterBounds::EMPTY, "Fixed mode's 0%-gate: the reducer folds nothing");
+    assert_eq!(bounds.total_batches, 1, "one caster mesh (the cube) => one folded caster batch");
+    assert_eq!(
+        bounds.resolved_batches, bounds.total_batches,
+        "the cube mesh is procedural and registered synchronously, so every emitted batch resolved"
+    );
+    assert!(bounds.is_usable(), "a complete, non-empty fold is USABLE as a fit input");
+    let want_raw_far = expected_raw_far();
+    assert!(
+        (bounds.raw_far - want_raw_far).abs() < 1.0e-3,
+        "raw_far: the reducer folded {} where this scene's constants imply {want_raw_far} \
+         (max over the four cubes of forward·(centre − eye) + |forward|·half). The tolerance is \
+         f32 rounding only — both sides evaluate the same expression on the same inputs, so a \
+         disagreement larger than this is a change in WHAT the reducer projects, not noise.",
+        bounds.raw_far
+    );
 
     // The host probe: the depth pass was armed on presented frames, and the
     // light-upload gate actually GATED — a bounded number of catch-up uploads

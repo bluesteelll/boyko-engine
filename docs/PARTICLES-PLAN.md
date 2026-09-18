@@ -995,10 +995,25 @@ Unconditional gate on every rung: all 35 `goldens/PINS.toml` hashes unchanged; `
 
 #### Gate #17 as measured (2026-08-20) — 213 legs, four sessions
 
+> ⚠️ **SUSPECT — the window this whole section reports over included the warm-up, and did so
+> because the runner never discarded it.** `runner.rs` declared `VB_BENCH_WARMUP = 20`, budgeted
+> the window as `warm-up + frames`, and then folded **every** retired frame into the reducer; the
+> discard was written on 2026-09-18 (`runner.rs`'s `VB_BENCH_WARMUP` doc records the two commits
+> it fell between). At `BOYKO_VB_BENCH_FRAMES=1` that makes this section's `n = 21` **20 warm-up
+> frames and one timed frame** — the medians below are medians over shader-compile and
+> clock-ramp frames, with a single measured frame in them.
+>
+> Nothing here is re-blessed, adjusted or deleted: a median does not decompose, so the only
+> correct repair is to **RE-MEASURE** the protocol on the repaired instrument. The same invocation
+> now yields `n = 1`, so a re-take wanting 21 timed frames must pass
+> `BOYKO_VB_BENCH_FRAMES=21`. Every relative claim built on these cells — the resolutions `R`, the
+> nulls, the clause verdicts — is suspect for the same reason and is re-taken with them.
+
 **Protocol.** Release build, `BOYKO_RENDER_PATH=vb` (the pinned path), fixture `particle_lab.rs` +
 `particle_scene/mod.rs`, instrument `BOYKO_VB_ZONE=1` + `BOYKO_PROFILE_ARTIFACT` reading zone ids
 **48/49/50/51** = KICKOFF/EMIT/SIM/DRAW. `BOYKO_VB_BENCH_FRAMES=1` ⇒ `VB_BENCH_WARMUP(20) + 1` =
-**21 timed frames per leg** (`n = 21` in every zone row), **3 legs per cell**, **medians** reported.
+**21 retired frames per leg** (`n = 21` in every zone row — *all 21 folded, warm-up included; see
+the banner above*), **3 legs per cell**, **medians** reported.
 **213 profiling artifacts / 239 process launches**, every leg running the SAME prebuilt executable so
 no leg straddles a re-link. Device: RTX 3060 Laptop.
 
@@ -1016,7 +1031,8 @@ Every EMIT/SIM/DRAW median is an exact multiple of 1 024 ns while KICKOFF resolv
 1 024-ns lattice is a property of the DISPATCH, not of the timer.
 
 **The rows gate #17 asks for** — pool-SATURATED cells (`rate = capacity/4` ⇒ full pool from frame 3,
-17 of the 21 timed frames saturated), base arm, alive counts confirmed by readback:
+17 of the 21 frames saturated — *retired frames, 20 of them warm-up; see the banner*), base arm,
+alive counts confirmed by readback:
 
 | alive | KICKOFF | EMIT | **SIM** | **SIM ns/particle** | DRAW |
 |---|---|---|---|---|---|
@@ -1042,7 +1058,7 @@ Every EMIT/SIM/DRAW median is an exact multiple of 1 024 ns while KICKOFF resolv
 | Clause | Result |
 |---|---|
 | 5(2) — every gated zone `Measured`, `lost == 0`, `torn == 0` | **PASS on 213/213 legs**: `census_measured = 315` (21 frames × 15 zones), `census_lost = 0`, `census_torn = 0`, `census_not_bracketed = 0` on every artifact |
-| 5(3) — `OrderCensus.violations == 0` **and** `frames_checked != 0` | **PASS on 213/213**: `frames_checked = 21`, `violations = 0`, `frames_skipped = 0` |
+| 5(3) — `OrderCensus.violations == 0` **and** `frames_checked != 0` | **PASS on 213/213**: `frames_checked = 21`, `violations = 0`, `frames_skipped = 0`. *(The 21 is the RETIRED count — the reducer folded the warm-up too, so this clause was checked over a population 20 frames larger than the window it is read beside. The verdict direction is unaffected — it is a non-zero count with zero violations either way — but the number moves to 1 on a re-take at these settings.)* |
 | 5(4) — arming / expectation-table half | **PASS**: byte-identical headers across all four arms (`workload_tag = visibilitybuffer_both#7d77abfd`, `regimes = none`, `modes = off`, `regime_n_distinct = 1`, `present_mode = fifo`, `instrument = live`) |
 | 5(4) — derived-row half (`n ≥ 0.9 × frames_checked`) | **N/A — and said as N/A rather than as a pass.** The particle family declares no derived row (`reduce::VB_DERIVED_*` are VB-only), so there is no `n` to gate. The `[order]` block's 21/0/0 is the VB chain's verdict, not the particle rows'. *(The campaign's own vacuity lesson: a clause with nothing to check is not a clause that passed.)* |
 | 5(1) — 3-leg relative spread ≤ 10 % | **per cell.** Two classes fail — below |
@@ -1147,7 +1163,12 @@ arithmetic survives a 4.4-million-spawn refusal.**
   against **+76 800 ns / +72 %** before it: **96 % of the cross-scene absorption is gone**, with a
   resolvable 3-step residual that is stated rather than rounded to zero. Both arms' leg spreads are
   under the 10 % bar (5.5 % / 2.1 %), and `measured = 315`, `lost = torn = not_bracketed = 0`,
-  `frames_checked = 21`, `violations = 0` on all six legs. KICKOFF/EMIT/SIM are unmoved (SIM 73 728 on
+  `frames_checked = 21`, `violations = 0` on all six legs. **⚠️ SUSPECT for the same reason as the
+  gate-#17 cells above** — these six legs ran the same 21-frame window with the warm-up folded in,
+  so the restamp's before/after pair is a comparison of two warm-up-contaminated medians. The
+  restamp's DIRECTION is corroborated independently by `gpu_zone.rs`'s own TOP-vs-BOTTOM ratio
+  finding; the ns figures are not, and are re-taken rather than adjusted.
+  KICKOFF/EMIT/SIM are unmoved (SIM 73 728 on
   both arms) — they were already `BOTTOM`, which is the control. **The DRAW column above is void as a
   baseline across the restamp by construction** — the same treatment DP6-0's four cells got.
 * **Every gate-#17 run is a RED TEST BY CONSTRUCTION.** The zone budget returns from `app.run()`

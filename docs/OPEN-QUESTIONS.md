@@ -1985,6 +1985,15 @@ Measuring the particle passes (213 legs over four sessions) produced two facts a
 apparatus itself. They are recorded here because both outlive the measurement: anyone who reads a
 `ZONE_PARTICLE_DRAW` number, or who wires a harness around `particle_lab`, walks into them.
 
+> ⚠️ **A THIRD fact about the instrument was found on 2026-09-18, and it is about every number in
+> this section: the 21-frame window these legs report over is 20 warm-up frames plus one timed
+> one.** `runner.rs` declared `VB_BENCH_WARMUP = 20` and budgeted the window as `warm-up + frames`,
+> but fed **every** retired frame to `WindowReducer::observe_frame` — the discard the budget
+> assumed was never written, and landed only with that date's repair. So `frames_checked = 21`
+> below is the retired count, and each median is dominated by shader-compile and clock-ramp
+> frames. **No figure here is adjusted or withdrawn; the correct repair is a re-measurement**, and
+> the same invocation now produces `n = 1` (pass `BOYKO_VB_BENCH_FRAMES=21` for 21 timed frames).
+
 **1. `ZONE_PARTICLE_DRAW` was readable only WITHIN one scene. — RESOLVED (architect's ruling,
 2026-08-20); the fix lands in this same commit.**
 
@@ -2018,7 +2027,9 @@ An armed-zone `particle_lab` run writes its profiling artifact and *then* fails 
 cause is two **mutually-exclusive** exits from the same frame loop in `crates/boyko_app/src/runner.rs`:
 
 * the **zone-budget exit** — `vb_zone_seen >= VB_BENCH_WARMUP(20) + vb_zone_frames`, which writes the
-  artifact and `return`s from `App::run`;
+  artifact and `return`s from `App::run`. *(That `VB_BENCH_WARMUP` term budgets for a discard the
+  reducer did not perform until 2026-09-18; since then the window is still `20 + frames` retired
+  frames, of which only the last `frames` are folded.)*;
 * the **capture-driver exit** — the conjunction over the five settle/drain drivers (host dump, census,
   HZB, VB probe, cull readback, particle readback), which fires at presented frame 30 (+3 drain).
 
