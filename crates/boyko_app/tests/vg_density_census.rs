@@ -65,7 +65,7 @@ fn first_absent(keys: &[&'static str]) -> Option<&'static str> {
 
 /// The VB golden pins (a) is measured over. Enumerated so the DOMAIN is machine-checked even
 /// though the hashes are not checked here.
-const VB_PINS: [&str; 19] = [
+const VB_PINS: [&str; 20] = [
     "vb_mesh",
     // VG R3 piece 1 step P1-2: `vb_mesh`'s scene, binary and test with `BOYKO_VG_HZB=1` arming the
     // depth pyramid. It belongs in this DOMAIN like any other VB pin, and it was measured the same
@@ -117,6 +117,13 @@ const VB_PINS: [&str; 19] = [
     "vb_mesh_tex_froxel",
     "vb_both_taa",
     "vb_sdf_taa",
+    // vkval lane (2026-09-18), the unwritten-shadow-map fix: VB cascaded shadows pinned WITHOUT
+    // TAA — `taa_jitter_eval`'s scene (the only pinned VB scene with shadow casters) through
+    // VisibilityBuffer x Mesh with AA off. Same DOMAIN, same measurement route, and added in the
+    // SAME act as the pin: R0c (a) was measured for it by `scripts/golden.ps1 -Pin vb_mesh_shadows`
+    // with the density census unarmed — 32c73274 on the software leg AND on the hwrt leg (vkval
+    // round 3). No density row, for the structural reason recorded above.
+    "vb_mesh_shadows",
 ];
 
 // ===============================================================================================

@@ -1117,6 +1117,15 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // than through the framegraph — so it adds no `ResId` to any declarator and moves no
     // armed/disarmed barrier-stream baseline.
     let mut particle_readback = crate::particle_readback::ParticleReadbackProbe::from_env();
+    // The shadow-map poison probe (`BOYKO_SHADOW_POISON_PROBE`, `crate::shadow_poison`). `None` on
+    // the steady path. Built from the path the BOOT read (`GpuSceneBundles::shadow_poison_probe`),
+    // not from a second env read, so the boot that gave the maps `TRANSFER_SRC` and the driver that
+    // copies them back cannot disagree. Out of band like the particle readback (device idle + one
+    // fenced transfer), so it adds no graph pass and no barrier to any frame it measures.
+    let mut shadow_probe = host
+        .gpu
+        .shadow_poison_probe()
+        .map(|p| crate::shadow_poison::ShadowPoisonProbe::new(p.to_path_buf()));
     // The staging and the driver read the SAME variable at two sites (`GpuSceneBundles::boot` mints
     // the buffer, this drives the capture). A boot that allocated the staging with no driver to end
     // the run would spin forever; a driver with no staging would drain and decode nothing.
@@ -1876,30 +1885,77 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 None
             };
 
-            // 5d. The CSM cascade UBO into slot `s` — UNCONDITIONAL every
-            //     frame (336 B; the fit is recomputed from the live camera by
-            //     `resolve_csm_cascades`, so a boot-seed would go stale — see
-            //     `upload_csm_ring`'s rationale). A DISABLED selection uploads
-            //     as all-zero, the bound-but-unread OFF state.
+            // 5d-pre. The two shadow depth-pass armings (shadow gate SG2), computed HERE —
+            //     before the two UBO uploads below — because each upload carries its pass's
+            //     recording decision (SG4). Each is the resolve's own `depth_pass_armed`, the
+            //     ONE spelling `sync_csm_light_gate` / `sync_punctual_light_gate` drive the
+            //     light-header bits with: no term is added on this side. The leg condition is
+            //     already inside both fits (`resolve_csm_cascades` / `resolve_shadow_atlas`
+            //     publish DISABLED on a leg set without mesh-shadow producers), so a mesh-less
+            //     boot is unarmed on every frame from frame 0. `casts_shadow` (6a) reads the
+            //     SAME `casters` gather, and the scene is armed from these same two bools.
+            let casters = world.resource::<CsmCasterScratch>();
             let resolved_csm = world.resource::<ResolvedCsm>();
+            let resolved_atlas = world.resource::<ResolvedShadowAtlas>();
+            let csm_armed = resolved_csm.depth_pass_armed(casters);
+            let punctual_armed = resolved_atlas.depth_pass_armed(casters);
+            frame_csm_armed = csm_armed;
+            frame_punctual_armed = punctual_armed;
+            #[cfg(debug_assertions)]
+            if csm_armed {
+                // The host cascade texture is boot-fixed at CSM_SHADOW_DIM; a
+                // diverging owner-set resolution would skew the fit's
+                // texel_size against the real map.
+                debug_assert_eq!(
+                    world.resource::<boyko_render::CsmConfig>().resolution,
+                    crate::gpu_scene::CSM_SHADOW_DIM,
+                    "invariant: CsmConfig.resolution matches the host cascade texture"
+                );
+            }
+
+            // 5d. The CSM cascade UBO into slot `s`, every frame (336 B; the fit is
+            //     recomputed from the live camera by `resolve_csm_cascades`, so a
+            //     boot-seed would go stale — see `upload_csm_ring`'s rationale). What
+            //     is uploaded carries THIS frame's recording decision (SG4): the fit
+            //     when the cascade pass is armed, `ResolvedCsm::DISABLED` when it is
+            //     not. So a frame whose header bit says ON but records no cascade pass
+            //     reaches the resolve with `gCsmActive == 0` and never samples the
+            //     cascade — whether the bit TRAILS a disarm or LEADS the first arming.
+            //     Static scenes have the leading case: `taa_jitter_eval`'s hand-seeded
+            //     bit is ON on frame 0 while this host is unarmed (measured 2026-09-18).
+            //     That frame used to sample a cascade no pass wrote; this upload made it
+            //     defined and moved the four TAA pins that carry frame 0 into history
+            //     (`taa_armed`, `taa_armed_basis`, `taa_rcas`, `vb_both_taa`).
+            let csm_uniform = resolved_csm.frame_uniform(csm_armed);
+            debug_assert!(
+                csm_armed || *csm_uniform == ResolvedCsm::DISABLED,
+                "invariant: an unarmed frame uploads the DISABLED cascade UBO (shadow gate SG4)"
+            );
             // SAFETY: the cascade UBO ring slot — same provenance contract as
             // the camera slot above (boot-minted at RESOLVED_CSM_BYTES, live
             // until teardown, the fenced slot `s == token.slot()`).
             unsafe {
-                upload_csm_ring(&token, host.gpu.csm_ubo_slot(s), resolved_csm);
+                upload_csm_ring(&token, host.gpu.csm_ubo_slot(s), csm_uniform);
             }
 
-            // 5d'. The punctual shadow-atlas UBO into slot `s` — UNCONDITIONAL
-            //      every frame (1296 B; the fit is camera-dependent — the
-            //      `spot_priority` top-K shifts with the camera — so a boot-seed
-            //      would go stale, see `upload_atlas_ring`'s rationale). A DISABLED
-            //      selection uploads as all-zero, the bound-but-unread OFF state.
-            let resolved_atlas = world.resource::<ResolvedShadowAtlas>();
+            // 5d'. The punctual shadow-atlas UBO into slot `s`, every frame (1296 B;
+            //      the fit is camera-dependent — the `spot_priority` top-K shifts with
+            //      the camera — so a boot-seed would go stale, see `upload_atlas_ring`'s
+            //      rationale). Same SG4 choice as 5d: `ResolvedShadowAtlas::DISABLED`
+            //      on an unarmed frame, so a header bit that trails or leads the host
+            //      reaches a zero face
+            //      (the spot early-out; the point case is `sync_punctual_light_gate`'s
+            //      "What a punctual sample can read").
+            let atlas_uniform = resolved_atlas.frame_uniform(punctual_armed);
+            debug_assert!(
+                punctual_armed || *atlas_uniform == ResolvedShadowAtlas::DISABLED,
+                "invariant: an unarmed frame uploads the DISABLED atlas UBO (shadow gate SG4)"
+            );
             // SAFETY: the atlas UBO ring slot — same provenance contract as the
             // cascade slot above (boot-minted at RESOLVED_SHADOW_ATLAS_BYTES, live
             // until teardown, the fenced slot `s == token.slot()`).
             unsafe {
-                upload_atlas_ring(&token, host.gpu.atlas_ubo_slot(s), resolved_atlas);
+                upload_atlas_ring(&token, host.gpu.atlas_ubo_slot(s), atlas_uniform);
             }
 
             // 5d''. HW-RT rung 1b/3b: the HWRT soft-shadow-params UBO into slot `s` —
@@ -2031,7 +2087,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // `scene()` below so `GBufferScene.material_table` binds its device SSBO
             // instead of a boot-owned buffer.
             let material_table = world.non_send_resource::<MaterialTable>();
-            let casters = world.resource::<CsmCasterScratch>();
+            // The SAME `casters` gather the 5d-pre arming read.
             let caster_batches = casters.batches();
             // VG rung R2c: the instance ring the per-batch AABB fold reads. Bound ONCE outside
             // the loop — every batch indexes the same slice by its own `base_instance`.
@@ -2074,40 +2130,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 });
             }
 
-            // 6a'. The cascade depth-pass arming predicate (R4): a fitted sun
-            //      (`ResolvedCsm.csm_mode_word == 1` — CsmConfig enabled AND a
-            //      DirectionalLight exists) AND live caster batches. This is
-            //      the SAME predicate `sync_csm_light_gate` drives the light-
-            //      header csm gate with, so the resolve samples the cascades
-            //      only on frame streams where this depth pass transitioned
-            //      the cascade texture (capability = presence: no sun or no
-            //      casters ⇒ None ⇒ no depth pass recorded at all).
-            let csm_armed = resolved_csm.csm_mode_word == 1 && casters.batch_count() > 0;
-            frame_csm_armed = csm_armed;
-            #[cfg(debug_assertions)]
-            if csm_armed {
-                // The host cascade texture is boot-fixed at CSM_SHADOW_DIM; a
-                // diverging owner-set resolution would skew the fit's
-                // texel_size against the real map.
-                debug_assert_eq!(
-                    world.resource::<boyko_render::CsmConfig>().resolution,
-                    crate::gpu_scene::CSM_SHADOW_DIM,
-                    "invariant: CsmConfig.resolution matches the host cascade texture"
-                );
-            }
-
-            // 6a''. The punctual (spot/point) depth-pass arming predicate: a fitted
-            //       atlas (`ResolvedShadowAtlas.mode_word == 1` — ShadowConfig
-            //       enabled AND at least one `CastsPunctualShadow` light got a slot)
-            //       AND live caster batches. The casters are the SAME
-            //       `CsmCasterScratch` the cascade arm reads — a `ShadowCaster` mesh
-            //       casts into BOTH the cascade array and the punctual atlas, so one
-            //       gather feeds both gates. This is the SAME predicate
-            //       `sync_punctual_light_gate` drives the light-header punctual bit
-            //       with, so the resolve samples the atlas only on frame streams where
-            //       this depth pass transitioned the atlas texture.
-            let punctual_armed = resolved_atlas.mode_word == 1 && casters.batch_count() > 0;
-            frame_punctual_armed = punctual_armed;
+            // 6a'/6a''. The cascade and punctual depth-pass armings were computed at 5d-pre,
+            //      before the UBO uploads that carry them. `scene()` below receives the fits
+            //      only on armed frames (`csm_armed.then_some(..)`), so capability = presence:
+            //      no sun, no casters, no slotted light or no mesh leg ⇒ `None` ⇒ no depth pass
+            //      recorded at all.
 
             // 6b. The raster push from the SAME resolved view the camera upload
             //     used (the marcher/raster screen alignment is by construction);
@@ -3340,6 +3367,53 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
         }
 
+        // The shadow-map poison probe (cold): counted to the frame the `BOYKO_HOST_DUMP` capture
+        // completes on, then ONE out-of-band readback of every shadow layer's centre texel beside
+        // the host's own view of the stream, written as the gate's TOML. The counters and the
+        // staged header are read off the World as they stand after this frame's update — the
+        // same values `dump_diagnostics` prints.
+        let shadow_probe_ready = match shadow_probe.as_mut() {
+            Some(p) => p.after_present(presented_ok),
+            None => false,
+        };
+        if shadow_probe_ready {
+            let probe = shadow_probe
+                .take()
+                .expect("invariant: the shadow poison probe just reported ready");
+            let texels = host
+                .gpu
+                .read_shadow_centre_texels(ctx)
+                .expect("invariant: the probe is armed only through the boot's poison knob");
+            let world = app.world();
+            let stats = *world.resource::<HostFrameStats>();
+            let (header_word7, slotted_rows) =
+                crate::shadow_poison::staged_shadow_words(world.resource::<LightTableStaging>().bytes());
+            let rp = host.resolved_render_path;
+            let (path, legs) = (format!("{:?}", rp.path), format!("{:?}", rp.legs));
+            let poison_bits = host
+                .gpu
+                .shadow_poison_depth()
+                .expect("invariant: the probe is armed only through the boot's poison knob")
+                .to_bits();
+            let record = crate::shadow_poison::ShadowProbeRecord {
+                path: &path,
+                legs: &legs,
+                mesh_leg: rp.mesh_leg,
+                presented_frames: probe.presented(),
+                frames: stats.frames,
+                csm_armed_frames: stats.csm_armed_frames,
+                punctual_armed_frames: stats.punctual_armed_frames,
+                header_word7,
+                slotted_rows,
+                csm_active_count: world.resource::<ResolvedCsm>().active_count,
+                atlas_active_layers: world.resource::<ResolvedShadowAtlas>().active_layers,
+                poison_bits,
+                cascade_center_bits: &texels.cascade,
+                atlas_center_bits: &texels.atlas,
+            };
+            probe.finish(&record);
+        }
+
         // Exit once EVERY armed capture has completed. Each driver `take()`s itself on completion,
         // so `is_none()` reads "not armed, or already finished".
         //
@@ -3359,13 +3433,15 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             || hzb_dump_ready
             || vb_probe_ready
             || vb_cull_ready
-            || particle_readback_ready)
+            || particle_readback_ready
+            || shadow_probe_ready)
             && dump.is_none()
             && census.is_none()
             && hzb_dump.is_none()
             && vb_probe.is_none()
             && vb_cull_probe.is_none()
             && particle_readback.is_none()
+            && shadow_probe.is_none()
         {
             return;
         }

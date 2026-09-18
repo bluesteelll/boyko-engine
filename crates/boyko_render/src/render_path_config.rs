@@ -46,10 +46,10 @@
 //!   structurally suppressed — CSM cascade depth, the punctual spot/point atlas depth, and (under
 //!   `hwrt`) the TLAS pack/build + the shadow_vis/à-trous/temporal denoise chain — because
 //!   mesh-shadow producers are mesh-leg-owned (they rasterize/trace MESH casters only; the SDF
-//!   leg's shadow is the marcher's own baked soft march). `GpuSceneBundles::scene()`
-//!   (`boyko_app::gpu_scene`) is the single scene-assembly seam that gates this (capability =
-//!   component presence, not a runtime flag); `declare_deferred_graph` carries a `debug_assert!`
-//!   belt-and-braces check the seam was not missed.
+//!   leg's shadow is the marcher's own baked soft march). The gate is ONE predicate,
+//!   [`ResolvedRenderPath::mesh_shadow_producers`], read in the per-frame plan itself
+//!   (`resolve_csm_cascades` / `resolve_shadow_atlas` take their DISABLED arm), so no header bit,
+//!   UBO, light slot or pass arms; `GpuSceneBundles::scene()` and `declare_deferred_graph` only check it.
 //! - **`Deferred × Mesh`** (SDF leg off, landed R3b): the R3 audit found the marcher is the SOLE
 //!   producer of the `gViewT` lane for MESH-owned pixels too (`sdf_gbuffer_composite.hlsl`'s
 //!   `gViewT[...] = (own_pixel && mask==1.0) ? t : (has_mesh ? t_mesh : 1.0e30)`, both terminal
@@ -61,8 +61,8 @@
 //!   (`boyko_rhi_vulkan::present::graph_bridge` + `boyko_rhi_vulkan::compute::
 //!   ViewtFromDepthPush`) that reproduces the marcher's own mesh-depth → `gViewT` conversion for
 //!   every pixel — the approved producer-replacement design the R3 rung report's Phase-1 audit
-//!   finding (a) called for. Gated by the SAME `GpuSceneBundles::scene()` scene-assembly seam +
-//!   `declare_deferred_graph`'s belt-and-braces `debug_assert!`.
+//!   finding (a) called for. Gated at the `GpuSceneBundles::scene()` scene-assembly seam (no
+//!   per-frame plan owns this pass) + `declare_deferred_graph`'s belt-and-braces `debug_assert!`.
 //!
 //! Both legs are landed as of R3b, so the earlier `RenderPathDegrade::DeferredLegDisableNotYetImplemented`
 //! variant — the "leg-disable landed but this specific leg has not" degrade — no longer has a
@@ -606,10 +606,12 @@ pub struct ResolvedRenderPath {
     /// from these bits, and wiring one to do so would change behaviour rather than centralise
     /// it: each bit is a boot predicate over *config* (`CSM` ⇐ `CsmConfig::enabled()`,
     /// `PUNCTUAL_ATLAS` ⇐ `ShadowConfig::enabled()`), while the corresponding per-frame gate is
-    /// strictly STRONGER — `boyko_app`'s `csm_armed` additionally requires a fitted sun AND live
-    /// caster batches, `punctual_armed` a fitted atlas AND the same, and the hwrt chain a
+    /// strictly STRONGER — `boyko_app`'s `csm_armed` additionally requires a mesh leg
+    /// ([`ResolvedRenderPath::mesh_shadow_producers`]), a fitted sun AND live caster batches,
+    /// `punctual_armed` a mesh leg, a fitted atlas AND the same, and the hwrt chain a mesh leg, a
     /// `HardwareTri` backend AND a non-empty TLAS. A config-enabled CSM in a frame with no
-    /// casters sets this bit and runs no cascade pass; that is correct, not a divergence.
+    /// casters (or on a mesh-less leg set) sets this bit and runs no cascade pass; that is
+    /// correct, not a divergence.
     ///
     /// So the sound relation is CONTAINMENT — the bit is a necessary condition of every
     /// per-frame arm, never a sufficient one — and that is what the checks assert:
@@ -700,6 +702,32 @@ impl ResolvedRenderPath {
     #[inline]
     pub fn post_process_aa_supported(&self) -> bool {
         matches!(self.path, RenderPath::Deferred | RenderPath::VisibilityBuffer)
+    }
+
+    /// Whether this boot's leg set OWNS the mesh-shadow producers: the CSM cascade depth pass,
+    /// the punctual spot/point atlas depth pass, and under `hwrt` the per-frame TLAS build and
+    /// the shadow-visibility denoise chain. `== mesh_leg` today — every one of them rasterizes or
+    /// traces MESH casters only, and the SDF leg's shadow is its own soft march
+    /// ([`ShadowSources::SDF_SOFT_MARCH`]).
+    ///
+    /// The SINGLE predicate every mesh-shadow gate reads (the [`Self::taa_supported`]
+    /// precedent). [`resolve_csm_cascades`](crate::csm_config::resolve_csm_cascades) and
+    /// [`resolve_shadow_atlas`](crate::shadow_atlas::resolve_shadow_atlas) take their DISABLED
+    /// arm when it is `false`, so a mesh-less leg set equals a config-disabled world at every
+    /// consumer downstream of the plan: light-header word 7 bits 2/3, both shadow UBOs, the
+    /// punctual light-table slot, and the host's pass arming. `boyko_app`'s `hwrt` TLAS gate
+    /// reads it directly, and `GpuSceneBundles::scene()` `debug_assert!`s the result.
+    ///
+    /// Why the plan and not a consumer: a suppression applied at ONE consumer (the host's
+    /// recording seam) left the sampling side armed, and a mesh-less VB×Sdf frame then sampled a
+    /// cascade no pass had written. Upstream of every reader, there is no second spelling to
+    /// drift. If the SDF leg ever rasterizes into the cascades, this body is what changes.
+    ///
+    /// Boot-constant (Decision 1): the carrier never changes after `WindowHost::boot`, so the
+    /// resolves' arm is fixed before frame 0 and involves no timing.
+    #[inline]
+    pub const fn mesh_shadow_producers(self) -> bool {
+        self.mesh_leg
     }
 
     /// **VB-SV0 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §S4): whether this boot's VB lit producer is
@@ -2322,6 +2350,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The mesh-shadow producer gate's truth table, over every `(path, legs)` request the boot
+    /// resolver accepts — through [`resolve_render_path`], the real boot entry, so a degrade
+    /// that rewrote the legs is reflected rather than bypassed.
+    ///
+    /// The expectation is spelled from the REQUESTED legs and cross-checked against the resolved
+    /// ones: a row whose legs a degrade had rewritten would fail the second assert instead of
+    /// silently asserting the predicate against itself.
+    #[test]
+    fn mesh_shadow_producers_matrix() {
+        let paths = [
+            RenderPath::Deferred,
+            RenderPath::Forward,
+            RenderPath::ForwardPlus,
+            RenderPath::VisibilityBuffer,
+        ];
+        let mut owned = 0u32;
+        let mut unowned = 0u32;
+        for path in paths {
+            for (legs, want) in
+                [(GeometryLegs::Both, true), (GeometryLegs::Mesh, true), (GeometryLegs::Sdf, false)]
+            {
+                let (resolved, _) = resolve_render_path(
+                    &RenderPathConfig { path, legs },
+                    RenderPathConsumers::default(),
+                    caps_ok(),
+                );
+                assert_eq!(resolved.legs, legs, "{path:?}/{legs:?}: the legs were degraded");
+                assert_eq!(
+                    resolved.mesh_shadow_producers(),
+                    want,
+                    "mesh_shadow_producers({path:?}, {legs:?}) must be {want}"
+                );
+                assert_eq!(resolved.mesh_shadow_producers(), resolved.mesh_leg);
+                if want {
+                    owned += 1;
+                } else {
+                    unowned += 1;
+                }
+            }
+        }
+        assert_eq!((owned, unowned), (8, 4), "the sweep covers every path × legs row");
+        // The default carrier (what a bare-plugin world holds) owns the producers, which is what
+        // keeps the resolves' new arm an identity for every harness that never boots a path.
+        assert!(ResolvedRenderPath::default().mesh_shadow_producers());
     }
 
     #[test]

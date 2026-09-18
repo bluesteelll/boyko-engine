@@ -94,6 +94,11 @@ The vkval lane's commits are split into a pixel-neutral one and a pixel-changing
 belongs to neither. It lands in its own lane after this one, and this entry is closed `RESOLVED`
 then.
 
+The shadow gate's own record of the case is case 2 of `sync_punctual_light_gate`'s "What a
+punctual sample can read" (`crates/boyko_render/src/shadow_atlas.rs`); its probe and its
+device-free sweep count slotted rows by `CASTS_SHADOW_BIT` rather than by
+`light_atlas_slot(kind) == SLOT_NONE` for exactly this reason.
+
 ---
 
 ## 2026-09-17 — Physics defects A7 and A7a: a resting box pyramid creeps sideways, and a quarter-overlap face contact repeats a feature id

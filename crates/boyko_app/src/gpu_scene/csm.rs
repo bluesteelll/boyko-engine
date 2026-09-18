@@ -5,18 +5,38 @@
 
 use super::*;
 
+use crate::shadow_poison::ShadowPoison;
+
+/// The cascade array's layer count — the `MAX_CASCADES` array the resolve binds whole.
+const CASCADE_LAYERS: u32 = 4;
+
+/// The centre texel of every layer of both shadow maps, as raw `f32` bits — what the
+/// `BOYKO_SHADOW_POISON_PROBE` readback copies back (see `crate::shadow_poison`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShadowCentreTexels {
+    /// One per cascade layer, in layer order.
+    pub(crate) cascade: [u32; CASCADE_LAYERS as usize],
+    /// One per atlas layer, in layer order.
+    pub(crate) atlas: [u32; SPOT_ATLAS_SLOTS as usize],
+}
+
 /// The CSM + shadow-atlas trio (host lift of the showcase's `CsmSceneResources`):
 /// ALWAYS created so the resolve set can bind @12/@13 (cascade map + UBO) and
 /// @14/@15 (atlas map + UBO) — the resolve SPIR-V statically references them.
-/// Since host plan R4 the CASCADE side is live: the runner memcpys the frame's
-/// `ResolvedCsm` into `ubo[token.slot()]` and `scene()` arms the depth pass when
-/// the ECS predicate holds (zero-seeded UBOs = the boot OFF state). Both depth
-/// maps are one-shot BOOT-TRANSITIONED to `SHADER_READ_ONLY_OPTIMAL` (review
-/// R4-W1 — see [`Self::seed_boot_layouts`]), so a resolve that reaches them
-/// under a stale header gate before any depth pass ever recorded samples a
-/// DEFINED layout. The punctual ATLAS side stays OFF (`atlas_punctual == None`,
-/// `mode_word == 0` ⇒ bound-but-unread) — the shadowed-punctual composition is
-/// a later rung.
+/// BOTH sides are live. Every frame the runner memcpys each UBO's frame choice
+/// into its ring slot `[token.slot()]` — `ResolvedCsm::frame_uniform` /
+/// `ResolvedShadowAtlas::frame_uniform`: the live fit on a frame whose depth pass
+/// is armed, the DISABLED bytes on every other frame (shadow gate SG4) — and
+/// `scene()` arms the cascade depth pass (`GBufferScene::csm`, host plan R4) and
+/// the punctual spot/point depth pass (`GBufferScene::atlas_punctual`: a
+/// `CastsPunctualShadow` light holds an atlas slot) when the matching
+/// `depth_pass_armed` holds. A leg set without mesh-shadow producers arms neither,
+/// on any frame (SG1). Zero-seeded UBOs are the boot OFF state. Both depth maps are
+/// one-shot BOOT-TRANSITIONED to `SHADER_READ_ONLY_OPTIMAL` (review R4-W1 — see
+/// [`Self::seed_boot_layouts`]); that makes the binding's LAYOUT valid on every
+/// frame and defines no texel VALUES. Keeping a never-written layer out of the
+/// pixel is the SG1/SG4 gates' job (the one open point-light case is F2 in
+/// `boyko_render`'s `sync_punctual_light_gate`, "What a punctual sample can read").
 pub(super) struct CsmResources {
     pub(super) cascade: VulkanTexture,
     pub(super) sampler: VulkanSampler,
@@ -68,6 +88,9 @@ pub(super) struct CsmResources {
     pub(super) point_depth_pipeline: VulkanGraphicsPipeline,
     point_depth_vs: VulkanShaderModule,
     point_depth_fs: VulkanShaderModule,
+    /// The `BOYKO_SHADOW_POISON` diagnostic knob, read once at boot. `None` on every steady run
+    /// (no usage bit changes, no clear, no probe).
+    poison: Option<ShadowPoison>,
 }
 
 impl CsmResources {
@@ -75,6 +98,10 @@ impl CsmResources {
     /// (mirrors `CsmSceneResources::create`). `instance_layout` is the SAME
     /// set-0 instance-SSBO layout the gbuffer raster pipeline uses.
     pub(super) fn create(device: &VulkanContext, instance_layout: &VulkanBindGroupLayout) -> Self {
+        let poison = ShadowPoison::from_env();
+        // `TRANSFER_SRC` ONLY under the poison knob, so its probe can copy texels back. Every run
+        // a poison gate compares sets the knob, so the compared runs share one usage.
+        let probe_usage = if poison.is_some() { ImageUsage::TRANSFER_SRC } else { ImageUsage::NONE };
         let cascade = RhiDevice::create_texture(
             device,
             &TextureDesc {
@@ -83,8 +110,8 @@ impl CsmResources {
                 depth: 1,
                 format: Format::D32Sfloat,
                 dimension: TextureDimension::D2,
-                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
-                array_layers: 4,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED | probe_usage,
+                array_layers: CASCADE_LAYERS,
                 mip_levels: 1,
                 view_format: None,
             },
@@ -166,7 +193,7 @@ impl CsmResources {
                 depth: 1,
                 format: Format::D32Sfloat,
                 dimension: TextureDimension::D2,
-                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED | probe_usage,
                 array_layers: SPOT_ATLAS_SLOTS,
                 mip_levels: 1,
                 view_format: None,
@@ -352,17 +379,25 @@ impl CsmResources {
         // + the shadow atlas from their created UNDEFINED layout to
         // SHADER_READ_ONLY_OPTIMAL, fence-waited, before any frame is recorded.
         // The resolve set binds both as combined image+samplers whose descriptors
-        // expect SHADER_READ_ONLY_OPTIMAL; on the armed path the depth pass
-        // transitions them every frame, but the header CSM gate can lag the arming
-        // predicate by a frame (cross-plugin ordering is unconstrained), so a
-        // multi-coincidence exists where the resolve samples the cascade on a frame
-        // stream where the depth pass NEVER ran — this seed closes that
-        // never-rendered class categorically (a sample then reads undefined VALUES
-        // at a DEFINED layout: a benign 1–2 frame shadow artifact, never an invalid
-        // access). The graph's armed-frame transition is unaffected: its seeded
-        // model uses `oldLayout = UNDEFINED` (content re-rendered, discard-legal
-        // from ANY actual layout).
+        // expect SHADER_READ_ONLY_OPTIMAL whether or not any pass ever renders them.
+        // This makes every ACCESS valid; it does not make the VALUES defined — a
+        // layer no pass wrote holds whatever memory held. Value soundness is the
+        // gates': a leg set without mesh-shadow producers never arms a sample of
+        // either map (the resolves publish DISABLED fits), and a header bit that
+        // trails a disarm or leads the first arming reaches a DISABLED UBO (the
+        // runner's step 5d / 5d'; the leading case is measured on a static scene,
+        // `taa_jitter_eval`'s frame 0). An earlier version of this comment called an
+        // unwritten sample "a benign 1–2 frame artifact"; on a mesh-less VB×Sdf boot
+        // it was a permanent dark SDF sphere. The graph's
+        // armed-frame transition is unaffected: its seeded model uses `oldLayout =
+        // UNDEFINED` (content re-rendered, discard-legal from ANY actual layout).
         Self::seed_boot_layouts(device, &cascade, &atlas);
+        // The poison knob (`crate::shadow_poison`): overwrite every layer of both maps with a
+        // chosen depth, AFTER the seed, so a frame that samples a layer no pass wrote reads a
+        // value the gate controls.
+        if let Some(p) = &poison {
+            Self::poison_layers(device, &cascade, &atlas, p.depth());
+        }
 
         Self {
             cascade,
@@ -383,6 +418,7 @@ impl CsmResources {
             point_depth_pipeline,
             point_depth_vs,
             point_depth_fs,
+            poison,
         }
     }
 
@@ -397,7 +433,7 @@ impl CsmResources {
         let fence = RhiDevice::create_fence(device, false)
             .expect("invariant: CSM boot-layout fence create");
         encoder.begin().expect("invariant: CSM boot-layout encoder begin");
-        for (texture, layer_count) in [(cascade, 4u32), (atlas, SPOT_ATLAS_SLOTS)] {
+        for (texture, layer_count) in [(cascade, CASCADE_LAYERS), (atlas, SPOT_ATLAS_SLOTS)] {
             encoder.image_barrier(&ImageBarrierDesc {
                 texture,
                 src_stage: BarrierStage::TOP_OF_PIPE,
@@ -432,6 +468,214 @@ impl CsmResources {
             RhiDevice::destroy_command_encoder(device, encoder);
             RhiDevice::destroy_fence(device, fence);
         }
+    }
+
+    /// The poison knob's boot fill: every layer of the cascade array and the atlas cleared to
+    /// `depth`, through a CLEAR-only dynamic-rendering scope per layer
+    /// (`VulkanCommandEncoder::clear_depth_layers` — no `TRANSFER_DST` usage needed), and left
+    /// at `SHADER_READ_ONLY_OPTIMAL` exactly as the seed left them. One fence-waited submit; the
+    /// encoder and fence are setup-class transients, the [`Self::seed_boot_layouts`] shape.
+    /// Cold: runs only under `BOYKO_SHADOW_POISON`. Panics on any RHI failure (setup stage).
+    #[cold]
+    #[inline(never)]
+    fn poison_layers(device: &VulkanContext, cascade: &VulkanTexture, atlas: &VulkanTexture, depth: f32) {
+        let mut encoder = RhiDevice::create_command_encoder(device)
+            .expect("invariant: shadow-poison command encoder create");
+        let fence = RhiDevice::create_fence(device, false)
+            .expect("invariant: shadow-poison fence create");
+        encoder.begin().expect("invariant: shadow-poison encoder begin");
+        for (texture, layer_count, extent) in
+            [(cascade, CASCADE_LAYERS, CSM_SHADOW_DIM), (atlas, SPOT_ATLAS_SLOTS, SPOT_SHADOW_DIM)]
+        {
+            let range = ImageSubresourceRange {
+                aspect: ImageAspect::DEPTH,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count,
+            };
+            // `UNDEFINED` as the old layout: every texel is about to be cleared, so the seed's
+            // (undefined) content is discarded on purpose. The seed's submit is fence-waited, so
+            // no access precedes this in the queue.
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture,
+                src_stage: BarrierStage::TOP_OF_PIPE,
+                dst_stage: BarrierStage::EARLY_FRAGMENT_TESTS | BarrierStage::LATE_FRAGMENT_TESTS,
+                src_access: BarrierAccess::NONE,
+                dst_access: BarrierAccess::DEPTH_STENCIL_ATTACHMENT_READ
+                    | BarrierAccess::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                old_layout: ImageLayout::Undefined,
+                new_layout: ImageLayout::DepthAttachmentOptimal,
+                range,
+            });
+            encoder.clear_depth_layers(texture, extent, depth);
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture,
+                src_stage: BarrierStage::LATE_FRAGMENT_TESTS,
+                dst_stage: BarrierStage::COMPUTE_SHADER | BarrierStage::FRAGMENT_SHADER,
+                src_access: BarrierAccess::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                dst_access: BarrierAccess::SHADER_READ,
+                old_layout: ImageLayout::DepthAttachmentOptimal,
+                new_layout: ImageLayout::ShaderReadOnlyOptimal,
+                range,
+            });
+        }
+        encoder.end().expect("invariant: shadow-poison encoder end");
+        device
+            .rhi_queue()
+            .submit(&encoder, &fence)
+            .expect("invariant: shadow-poison submit");
+        RhiDevice::wait_fence(device, &fence, u64::MAX)
+            .expect("invariant: shadow-poison fence wait");
+        // SAFETY: `encoder` and `fence` were created on `device` above; the encoder's ONLY
+        // submission completed (the fence wait just returned), so no GPU work references either;
+        // each is moved by value ⇒ destroyed exactly once. Boot stage: the only earlier submits
+        // (the brick bake, the layout seed) are themselves fence-waited.
+        unsafe {
+            RhiDevice::destroy_command_encoder(device, encoder);
+            RhiDevice::destroy_fence(device, fence);
+        }
+    }
+
+    /// The poison probe's readback: the CENTRE texel of every layer of both maps, copied out of
+    /// band — the device is idled first, then one fence-waited transfer submit brackets the
+    /// copies with `SHADER_READ_ONLY_OPTIMAL ⇄ TRANSFER_SRC_OPTIMAL` transitions, so the maps
+    /// are left in the layout every frame's descriptors expect. The particle-counter readback's
+    /// shape; affordable because the caller ends the frame loop straight after.
+    ///
+    /// `None` when the poison knob is unset: the images then lack `TRANSFER_SRC` usage, and a
+    /// readback of unpoisoned maps would prove nothing.
+    ///
+    /// The `SHADER_READ_ONLY_OPTIMAL` old layout is the one every path leaves both maps in at
+    /// frame end (the resolve set binds them whole, every frame). On a boot that never renders a
+    /// map, the graph's per-frame transition to that layout is the discard-legal
+    /// `UNDEFINED → SHADER_READ_ONLY`, so the poison surviving to this read is a property of the
+    /// driver, which is exactly what the gate's texel check measures rather than assumes.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn read_centre_texels(&self, device: &VulkanContext) -> Option<ShadowCentreTexels> {
+        self.poison.as_ref()?;
+        const CASCADE_N: usize = CASCADE_LAYERS as usize;
+        const ATLAS_N: usize = SPOT_ATLAS_SLOTS as usize;
+        const TEXEL_BYTES: u64 = 4;
+        const TOTAL: u64 = ((CASCADE_N + ATLAS_N) as u64) * TEXEL_BYTES;
+
+        RhiDevice::wait_idle(device).expect("invariant: shadow-poison probe device idle");
+        let staging = RhiDevice::create_buffer(
+            device,
+            &BufferDesc {
+                size: TOTAL,
+                usage: BufferUsage::TRANSFER_DST,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("invariant: shadow-poison probe staging create");
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &staging)
+            .expect("invariant: host-visible shadow-poison probe staging is mapped");
+
+        let region = |layer: u32, dim: u32, slot: u64| boyko_rhi::BufferImageCopy {
+            buffer_offset: slot * TEXEL_BYTES,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            aspect: ImageAspect::DEPTH,
+            mip_level: 0,
+            base_array_layer: layer,
+            layer_count: 1,
+            image_offset_x: (dim / 2) as i32,
+            image_offset_y: (dim / 2) as i32,
+            image_offset_z: 0,
+            image_extent_w: 1,
+            image_extent_h: 1,
+            image_extent_d: 1,
+        };
+        let cascade_regions: [boyko_rhi::BufferImageCopy; CASCADE_N] =
+            core::array::from_fn(|i| region(i as u32, CSM_SHADOW_DIM, i as u64));
+        let atlas_regions: [boyko_rhi::BufferImageCopy; ATLAS_N] =
+            core::array::from_fn(|i| region(i as u32, SPOT_SHADOW_DIM, (CASCADE_N + i) as u64));
+
+        let mut encoder = RhiDevice::create_command_encoder(device)
+            .expect("invariant: shadow-poison probe command encoder create");
+        let fence = RhiDevice::create_fence(device, false)
+            .expect("invariant: shadow-poison probe fence create");
+        encoder.begin().expect("invariant: shadow-poison probe encoder begin");
+        for (texture, layer_count) in [(&self.cascade, CASCADE_LAYERS), (&self.atlas, SPOT_ATLAS_SLOTS)] {
+            // Availability: the last armed frame's depth pass wrote these layers as a depth
+            // attachment; the idle above ordered the execution, this makes the writes visible to
+            // the transfer read.
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture,
+                src_stage: BarrierStage::LATE_FRAGMENT_TESTS
+                    | BarrierStage::FRAGMENT_SHADER
+                    | BarrierStage::COMPUTE_SHADER,
+                dst_stage: BarrierStage::TRANSFER,
+                src_access: BarrierAccess::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                dst_access: BarrierAccess::TRANSFER_READ,
+                old_layout: ImageLayout::ShaderReadOnlyOptimal,
+                new_layout: ImageLayout::TransferSrcOptimal,
+                range: ImageSubresourceRange {
+                    aspect: ImageAspect::DEPTH,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count,
+                },
+            });
+        }
+        encoder.copy_image_to_buffer(&self.cascade, ImageLayout::TransferSrcOptimal, &staging, &cascade_regions);
+        encoder.copy_image_to_buffer(&self.atlas, ImageLayout::TransferSrcOptimal, &staging, &atlas_regions);
+        for (texture, layer_count) in [(&self.cascade, CASCADE_LAYERS), (&self.atlas, SPOT_ATLAS_SLOTS)] {
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture,
+                src_stage: BarrierStage::TRANSFER,
+                dst_stage: BarrierStage::COMPUTE_SHADER | BarrierStage::FRAGMENT_SHADER,
+                src_access: BarrierAccess::NONE,
+                dst_access: BarrierAccess::SHADER_READ,
+                old_layout: ImageLayout::TransferSrcOptimal,
+                new_layout: ImageLayout::ShaderReadOnlyOptimal,
+                range: ImageSubresourceRange {
+                    aspect: ImageAspect::DEPTH,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count,
+                },
+            });
+        }
+        encoder.end().expect("invariant: shadow-poison probe encoder end");
+        device
+            .rhi_queue()
+            .submit(&encoder, &fence)
+            .expect("invariant: shadow-poison probe submit");
+        RhiDevice::wait_fence(device, &fence, u64::MAX)
+            .expect("invariant: shadow-poison probe fence wait");
+
+        let mut words = [0u32; CASCADE_N + ATLAS_N];
+        // SAFETY: `mapped` addresses `TOTAL` valid mapped host-coherent bytes of a buffer this fn
+        // just created; the fence wait above completed the ONLY submission that writes them, so
+        // the copies are complete and (the memory being HOST_COHERENT) host-visible. `words` is a
+        // fresh local of exactly `TOTAL` bytes, every bit pattern of a `u32` is valid, and the two
+        // regions do not overlap.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                mapped.as_ptr(),
+                words.as_mut_ptr().cast::<u8>(),
+                TOTAL as usize,
+            );
+        }
+        // SAFETY: `encoder`, `fence` and `staging` were created on `device` above; the encoder's
+        // only submission completed (the fence wait returned), so no GPU work references any of
+        // them; each is moved by value ⇒ destroyed exactly once.
+        unsafe {
+            RhiDevice::destroy_command_encoder(device, encoder);
+            RhiDevice::destroy_fence(device, fence);
+            RhiDevice::destroy_buffer(device, staging);
+        }
+
+        let mut texels =
+            ShadowCentreTexels { cascade: [0; CASCADE_N], atlas: [0; ATLAS_N] };
+        texels.cascade.copy_from_slice(&words[..CASCADE_N]);
+        texels.atlas.copy_from_slice(&words[CASCADE_N..]);
+        Some(texels)
     }
 
     /// Tears the trio down in reverse creation order (mirrors
@@ -475,5 +719,26 @@ impl CsmResources {
             RhiDevice::destroy_sampler(device, self.sampler);
             RhiDevice::destroy_texture(device, self.cascade);
         }
+    }
+}
+
+impl GpuSceneBundles {
+    /// The `BOYKO_SHADOW_POISON_PROBE` path, when the poison knob armed the probe at boot — the
+    /// runner builds its loop-exit driver from THIS, so the boot that allocated the probe's
+    /// `TRANSFER_SRC` usage and the driver that reads it back come from one env read.
+    pub(crate) fn shadow_poison_probe(&self) -> Option<&std::path::Path> {
+        self.csm.poison.as_ref().and_then(ShadowPoison::probe)
+    }
+
+    /// The depth the poison knob cleared every shadow layer to at boot; `None` when unset.
+    pub(crate) fn shadow_poison_depth(&self) -> Option<f32> {
+        self.csm.poison.as_ref().map(ShadowPoison::depth)
+    }
+
+    /// The poison probe's out-of-band centre-texel readback (see
+    /// [`CsmResources::read_centre_texels`]); `None` when the knob is unset. Idles the device —
+    /// the caller ends the frame loop straight after.
+    pub(crate) fn read_shadow_centre_texels(&self, ctx: &VulkanContext) -> Option<ShadowCentreTexels> {
+        self.csm.read_centre_texels(ctx)
     }
 }

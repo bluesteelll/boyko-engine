@@ -1222,7 +1222,7 @@ pub(crate) struct GpuSceneBundles {
     /// Rung R9b: `vb_shade_split`'s Set-1 LAYOUT (9 bindings; 8 on the software leg): @0-3 =
     /// `forward_layout1`'s shadow table kinds verbatim, @4 `gSsao` STORAGE, @5/@6 the DDGI
     /// COMBINED image+sampler pair, @7 `ResolvedDdgi` UBO, @8 cfg(hwrt) `gShadowVis` STORAGE.
-    /// A DISTINCT object — `forward_layout1` stays byte-untouched.
+    /// A distinct COMPUTE-only object, not `forward_layout1`.
     vb_split_layout1: VulkanBindGroupLayout,
     /// Rung R9b: the split pair pipelines — deferred-built by [`Self::build_vb_split_pipelines`]
     /// (the SAME geometry-Set-2 dependency as [`Self::build_vb_resolve_pipeline`]).
@@ -1334,8 +1334,10 @@ pub(crate) struct GpuSceneBundles {
     /// structurally-identical but DISTINCT `VkDescriptorSetLayout` handles are NOT
     /// interchangeable — an earlier revision's bug).
     forward_layout0: VulkanBindGroupLayout,
-    /// The Forward-family Set-1 (shadow) bind-group layout — 4 bindings (CSM + punctual atlas).
-    /// Shared verbatim by `Forward` and `ForwardPlus` (UNCHANGED by rung R5).
+    /// The Forward-family Set-1 (shadow) bind-group layout — 4 bindings (CSM + punctual atlas),
+    /// each `FRAGMENT | COMPUTE`. Shared verbatim by `Forward` and `ForwardPlus` AND, at Set 1, by
+    /// the `sdf_forward_march` and VB resolve/shade compute pipelines — hence the COMPUTE bit
+    /// (VUID-VkComputePipelineCreateInfo-layout-07988).
     forward_layout1: VulkanBindGroupLayout,
     // ── Multi-paradigm render-path plan, rung R5: ForwardPlus's depth prepass + froxel
     // opaque pipeline variant (see `boot`'s doc — same "built UNCONDITIONALLY, cheap"
@@ -2972,8 +2974,8 @@ impl GpuSceneBundles {
         // compiled without the define on BOTH legs, so a `not(hwrt)` build's entry would be pure
         // dead surface (the layout stays EXACT-FILL at 8 there).
         let vb_split_layout1_base: [BindGroupLayoutEntry; 8] = [
-            // @0-3: forward_layout1's shadow-table kinds VERBATIM (a DISTINCT object —
-            // the Forward family's own layout stays byte-untouched).
+            // @0-3: forward_layout1's shadow-table kinds VERBATIM (a distinct COMPUTE-only
+            // object — the split shade's Set 1 is its own 8/9-binding shape).
             BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
             BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
             BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
@@ -3194,10 +3196,18 @@ impl GpuSceneBundles {
         // `forward_opaque.fs.hlsl`'s doc (bindings 5/6 declared only under `-D FROXEL=1`, but a
         // pipeline layout may always be a SUPERSET of what a given shader stage references).
         //
-        // Set 1 binding shape: `gCsm`+`gCsmCmp` @0 (FRAGMENT, combined), `CsmCascades` @1
-        // (FRAGMENT), `gShadowAtlas`+`gShadowAtlasCmp` @2 (FRAGMENT, combined), `ShadowAtlas`
-        // @3 (FRAGMENT) — `forward_opaque.fs.hlsl`'s OWN binding numbers (a DIFFERENT layout
-        // than the deferred resolve's single compute set, same underlying resources).
+        // Set 1 binding shape: `gCsm`+`gCsmCmp` @0 (combined), `CsmCascades` @1,
+        // `gShadowAtlas`+`gShadowAtlasCmp` @2 (combined), `ShadowAtlas` @3 — every binding
+        // `FRAGMENT | COMPUTE` — `forward_opaque.fs.hlsl`'s OWN binding numbers (a DIFFERENT
+        // layout than the deferred resolve's single compute set, same underlying resources).
+        // COMPUTE is load-bearing, not decoration: this ONE layout object (and so every
+        // `ForwardTargets::set1[fi]` allocated from it) is also Set 1 of the compute pipelines
+        // that read the shadow tables — `sdf_forward_march` and the VB resolve/shade family —
+        // and a compute pipeline whose shader reads a binding without COMPUTE in its
+        // `stageFlags` is invalid (VUID-VkComputePipelineCreateInfo-layout-07988). Widening
+        // the flags keeps ONE handle, so the graphics and compute bind sites stay compatible;
+        // a COMPUTE-only copy would need a second `set1` array written in lock-step with this
+        // one (the `vb_layout0` VERTEX|COMPUTE / FRAGMENT|COMPUTE precedent below).
         //
         // Boot-panic fix: renumbered from an original Set 2 design (with an empty Set-1
         // PLACEHOLDER layout in between, for Vulkan's contiguous-set-index rule). A zero-binding
@@ -3214,25 +3224,25 @@ impl GpuSceneBundles {
                         binding: 0,
                         count: 1,
                         kind: DescriptorKind::CombinedImageSampler,
-                        stage: ShaderStage::FRAGMENT,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
                     },
                     BindGroupLayoutEntry {
                         binding: 1,
                         count: 1,
                         kind: DescriptorKind::UniformBuffer,
-                        stage: ShaderStage::FRAGMENT,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
                     },
                     BindGroupLayoutEntry {
                         binding: 2,
                         count: 1,
                         kind: DescriptorKind::CombinedImageSampler,
-                        stage: ShaderStage::FRAGMENT,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
                     },
                     BindGroupLayoutEntry {
                         binding: 3,
                         count: 1,
                         kind: DescriptorKind::UniformBuffer,
-                        stage: ShaderStage::FRAGMENT,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
                     },
                 ],
             },
@@ -3469,7 +3479,9 @@ impl GpuSceneBundles {
         // a Forward-family-resolved boot with the SDF leg present ever RECORDS the pass. ALL
         // pipeline variants are built against this ONE layout object (the code-review-fixed "one
         // layout per pipeline family" discipline `forward_layout0` already establishes) at Set 0,
-        // + `forward_layout1` at Set 1 (the shadow set, REUSED VERBATIM — no separate layout):
+        // + `forward_layout1` at Set 1 (the shadow set, REUSED VERBATIM — no separate layout; the
+        // reuse is legal because every one of its bindings carries `COMPUTE` in `stageFlags`,
+        // VUID-VkComputePipelineCreateInfo-layout-07988 — see its own block comment):
         // @12 is HAS_MESH-referenced only and @13 VIEWT-referenced only, bound-but-unread by the
         // other variants (the R2 contract).
         let sdf_forward_march_layout = RhiDevice::create_bind_group_layout(
@@ -6085,10 +6097,11 @@ impl GpuSceneBundles {
     /// lighting is ECS-owned —
     /// `light_upload` is `Some(staged_bytes)` on a frame whose staging slot was
     /// just rewritten (the recorder then records the staging→table copy), and
-    /// `csm` is `Some(resolved)` when the runner's arming predicate holds (a
-    /// fitted sun AND live caster batches — the SAME predicate
-    /// `sync_csm_light_gate` drives the light-header gate with, so the resolve
-    /// samples the cascades only on frame streams where this depth pass runs).
+    /// `csm` is `Some(resolved)` when the runner's arming holds —
+    /// `ResolvedCsm::depth_pass_armed`, the SAME call `sync_csm_light_gate` drives
+    /// the light-header gate with (a fitted sun AND live caster batches, the fit
+    /// itself DISABLED on a leg set without mesh-shadow producers); `atlas` likewise
+    /// through `ResolvedShadowAtlas::depth_pass_armed`.
     ///
     /// # The O1 single-matrix pin
     ///
@@ -6338,26 +6351,35 @@ impl GpuSceneBundles {
             "invariant: ssao_atrous_levels > 0 requires ssao_variant.is_some() (resolve_ssao forces this)"
         );
 
-        // Multi-paradigm render-path plan, rung R3 (P1 fix — orchestrator architecture
-        // decision): mesh-shadow producers (CSM cascade depth, the punctual spot/point atlas
-        // depth, and under `hwrt` the per-frame TLAS pack/build + the shadow_vis/à-trous/
-        // temporal denoise chain) are MESH-LEG-OWNED — they rasterize/trace MESH casters only.
-        // The SDF leg gets its shadows from the marcher's baked soft march
-        // (`ShadowSources::SDF_SOFT_MARCH`), never from these. Under `!mesh_leg` (`Deferred ×
-        // Sdf`) they must be structurally ABSENT (capability = component presence, not a
-        // runtime flag), suppressed HERE — the single scene-assembly seam — so every downstream
-        // use in this fn (the `csm`/`atlas_punctual` `GBufferScene` fields below, and the
-        // `hwrt` `tlas`/`shadow` activations, which key off `csm.is_some()`/`tlas_enabled`)
-        // derives from the SAME gated locals and can never disagree. `Deferred × Both`/`Mesh`
-        // keep `mesh_leg == true` ⇒ `.filter(|_| true)` is the identity ⇒ byte-identical.
+        // Mesh-shadow producers (CSM cascade depth, the punctual spot/point atlas depth, and
+        // under `hwrt` the per-frame TLAS pack/build + the shadow_vis/à-trous/temporal denoise
+        // chain) are MESH-LEG-OWNED — they rasterize/trace MESH casters only; the SDF leg gets
+        // its shadows from its own soft march (`ShadowSources::SDF_SOFT_MARCH`).
+        //
+        // Shadow gate SG3: this seam keeps NO leg term of its own for the cascades and the
+        // atlas. The gate is upstream, in the per-frame plan: `resolve_csm_cascades` and
+        // `resolve_shadow_atlas` publish DISABLED under `!mesh_shadow_producers()`, so the
+        // runner's arming — the SAME `depth_pass_armed` call the light-header bits are written
+        // from — hands this fn `None` for both, and the header, both UBOs, the punctual light
+        // slot and these fields all derive from one fact. A suppression applied only here was
+        // the defect: it left the sampling side armed, and a mesh-less VB×Sdf frame sampled a
+        // cascade no pass had written. The assert below CHECKS the upstream gate; it does not
+        // replace it — a regression there now renders invisible-caster shadows (defined) and
+        // trips this in debug, instead of being hidden in release.
         let mesh_leg = resolved_render_path.mesh_leg;
-        let csm = csm.filter(|_| mesh_leg);
-        let atlas = atlas.filter(|_| mesh_leg);
+        debug_assert!(
+            resolved_render_path.mesh_shadow_producers() || (csm.is_none() && atlas.is_none()),
+            "invariant: a mesh-shadow producer armed on a leg set without one — the gate is \
+             ResolvedRenderPath::mesh_shadow_producers() in boyko_render's resolve_csm_cascades / \
+             resolve_shadow_atlas, not this seam"
+        );
+        // The TLAS is not planned by a resolve, so its leg term stays here, spelled through the
+        // SAME named predicate (byte-identical to the former `&& mesh_leg`).
         #[cfg(feature = "hwrt")]
-        let tlas_enabled = tlas_enabled && mesh_leg;
+        let tlas_enabled = tlas_enabled && resolved_render_path.mesh_shadow_producers();
 
-        // Multi-paradigm render-path plan, rung R3b — the SDF-owned-producer half of the R3
-        // scene-assembly seam (the mirror-image gate to `mesh_leg` above): SDFDDGI's probe-update
+        // Multi-paradigm render-path plan, rung R3b — the SDF-owned-producer gate (the mirror
+        // image of the mesh-shadow producer ownership above): SDFDDGI's probe-update
         // pass injects indirect irradiance onto `is_sdf_lit` pixels ONLY (the SDF leg's own
         // geometry) — it is SDF-OWNED, so it must be structurally ABSENT under `!sdf_leg`
         // (`Deferred × Mesh`), suppressed HERE at the same single seam. `Deferred × Both`/`Sdf`

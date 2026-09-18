@@ -1244,6 +1244,82 @@ impl VulkanCommandEncoder {
         }
     }
 
+    /// Records one CLEAR-only dynamic-rendering scope per array layer of the depth `texture`
+    /// (`[0, active_layers)`, each through its per-layer render view), clearing every texel of
+    /// every layer to `depth` with zero draws.
+    ///
+    /// The per-layer view is what the public [`RhiCommandEncoder::begin_rendering`] cannot
+    /// reach (its depth attachment is the texture's layer-0 `view`), and a render-pass clear is
+    /// what lets a depth image be filled WITHOUT `TRANSFER_DST` usage — a transfer clear of an
+    /// image created without it is the missing-usage validation error already found once on
+    /// `taa_hist`.
+    ///
+    /// Cold diagnostic seam: its one caller is `boyko_app`'s shadow-map poison knob
+    /// (`BOYKO_SHADOW_POISON`), which fills never-written shadow layers with a chosen depth so a
+    /// gate can prove a frame does not depend on them. The caller MUST have transitioned every
+    /// layer of `texture` to `DEPTH_ATTACHMENT_OPTIMAL` (with depth-attachment-write access)
+    /// before this call and owns every transition after it. `extent` is the texture's square
+    /// side in texels (`VulkanTexture` does not carry its own extent).
+    #[cold]
+    #[inline(never)]
+    pub fn clear_depth_layers(&mut self, texture: &VulkanTexture, extent: u32, depth: f32) {
+        debug_assert!(
+            texture.aspect_mask & VK_IMAGE_ASPECT_DEPTH_BIT != 0,
+            "invariant: clear_depth_layers clears a DEPTH image"
+        );
+        debug_assert!(
+            (0.0..=1.0).contains(&depth),
+            "invariant: a D32 clear value lies in the [0, 1] depth range"
+        );
+        let area = VkRect2D {
+            offset: VkOffset2D { x: 0, y: 0 },
+            extent: VkExtent2D { width: extent, height: extent },
+        };
+        // SAFETY: `self.fns` points into the context's boxed fn-table, alive per the type
+        // contract (the same deref every recording helper here performs).
+        let fns = unsafe { &*self.fns };
+        for layer in 0..texture.active_layers {
+            let attachment = VkRenderingAttachmentInfo {
+                s_type: VkStructureType::RenderingAttachmentInfo,
+                p_next: ptr::null(),
+                image_view: texture.layer_render_view(layer),
+                image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                resolve_mode: 0,
+                resolve_image_view: VkImageView::NULL,
+                resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                clear_value: VkClearValue {
+                    depth_stencil: VkClearDepthStencilValue { depth, stencil: 0 },
+                },
+            };
+            let rendering = VkRenderingInfo {
+                s_type: VkStructureType::RenderingInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                render_area: area,
+                layer_count: 1,
+                view_mask: 0,
+                color_attachment_count: 0,
+                p_color_attachments: ptr::null(),
+                p_depth_attachment: (&attachment as *const VkRenderingAttachmentInfo).cast(),
+                p_stencil_attachment: ptr::null(),
+            };
+            // SAFETY: recording is open (the caller's `begin`); `rendering` is fully initialized,
+            // names NO color attachment and one depth attachment — the live per-layer render view
+            // of `texture` (`layer < active_layers`, so `layer_render_view` returns a real view,
+            // not the NULL tail), which the caller transitioned to DEPTH_ATTACHMENT_OPTIMAL (the
+            // layout named here). No pipeline is bound and nothing is drawn: the scope exists
+            // only for its CLEAR load op. `attachment` and `rendering` are locals that outlive
+            // both calls. Dynamic rendering is enabled on the device (Vulkan 1.3 core, required
+            // at boot).
+            unsafe {
+                (fns.cmd_begin_rendering)(self.command_buffer, &rendering);
+                (fns.cmd_end_rendering)(self.command_buffer);
+            }
+        }
+    }
+
     /// The cold multi-buffer-barrier fallback for [`RhiCommandEncoder::pipeline_barrier`]
     /// (plan D1): builds a heap `Vec<VkBufferMemoryBarrier>` and records the
     /// barrier. The headless compute path never reaches this (it supplies 0 or 1

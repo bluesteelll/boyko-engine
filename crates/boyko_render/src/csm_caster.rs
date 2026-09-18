@@ -121,6 +121,29 @@ impl CsmCasterScratch {
     }
 }
 
+impl ResolvedCsm {
+    /// Whether this frame's cascade depth pass is armed: a live cascade fit
+    /// (`csm_mode_word == 1`) AND at least one caster batch.
+    ///
+    /// The formula's ONLY spelling. [`sync_csm_light_gate`] drives the light-header sample bit
+    /// with it, and the windowed host (`boyko_app::runner`) arms the depth pass and picks the
+    /// cascade UBO with it, so a term added here reaches both sides at once. The two used to be
+    /// two spellings, and a term added to one of them is how a mesh-less frame came to sample a
+    /// cascade nothing had rendered.
+    ///
+    /// The leg condition is deliberately NOT a term here: `resolve_csm_cascades` folds it into
+    /// `csm_mode_word` (it writes [`ResolvedCsm::DISABLED`] on a leg set without mesh-shadow
+    /// producers), so every reader of the fit inherits it.
+    ///
+    /// An inherent impl in THIS module rather than beside the type in `csm_config`, so
+    /// `csm_config` gains no edge to `csm_caster` (which already depends on it).
+    #[inline]
+    #[must_use]
+    pub fn depth_pass_armed(&self, casters: &CsmCasterScratch) -> bool {
+        self.csm_mode_word == 1 && casters.batch_count() > 0
+    }
+}
+
 /// The ECS-native CSM Inc-2 shadow-caster gather SYSTEM: buckets every visible
 /// `(MeshHandle, InstanceModelCol)` entity that ALSO carries
 /// [`ShadowCaster`] into per-caster-mesh
@@ -475,44 +498,57 @@ pub fn reduce_caster_bounds(
 }
 
 /// Keeps the light-header CSM sample gate ([`LightingConfig::csm_shadows`] → header
-/// word 7 bit [`CSM_MODE_BIT`](crate::light::CSM_MODE_BIT)) in LOCK-STEP with the
-/// cascade depth-pass activation predicate (host plan R4):
+/// word 7 bit [`CSM_MODE_BIT`](crate::light::CSM_MODE_BIT)) tracking the cascade depth-pass
+/// arming (host plan R4). On a flip the light table is marked dirty ([`LightTableDirty`]) so
+/// `collect_lights` rebuilds the header with the new gate word and the staged-table generation
+/// advances (the host re-uploads both ring slots).
 ///
-/// ```text
-/// gate = ResolvedCsm.csm_mode_word == 1  AND  CsmCasterScratch has >= 1 caster batch
-/// ```
+/// # One predicate, two readers
 ///
-/// which is EXACTLY the predicate the windowed host arms `GBufferScene::csm` with —
-/// one predicate, two consumers, no drift. On a flip the light table is marked dirty
-/// ([`LightTableDirty`]) so `collect_lights` rebuilds the header with the new gate word
-/// and the staged-table generation advances (the host re-uploads both ring slots).
+/// The bit is [`ResolvedCsm::depth_pass_armed`], the formula's only spelling; the windowed
+/// host arms `GBufferScene::csm` with the same call on the same two inputs. The leg condition
+/// is not a third term at either reader. It lives upstream, inside `csm_mode_word`:
+/// [`resolve_csm_cascades`](crate::csm_config::resolve_csm_cascades) writes
+/// [`ResolvedCsm::DISABLED`] whenever
+/// [`ResolvedRenderPath::mesh_shadow_producers`](crate::render_path_config::ResolvedRenderPath::mesh_shadow_producers)
+/// is `false`, so on a mesh-less leg set both readers are `false` from frame 0.
 ///
-/// # Why the lock-step is layout-sound under ordering staggers (review R4-W1)
+/// # The header can trail OR lead the host, and neither samples an unrendered cascade
 ///
 /// This system's ordering against `resolve_csm_cascades` / `collect_lights` is
-/// registration-site-dependent (cross-plugin edges are not expressible), so the header
-/// gate can lag the predicate by a frame in EITHER direction — and because this
-/// system's `ResolvedCsm` term can itself be one frame stale, a multi-coincidence
-/// exists (the sun unfits exactly as casters first appear, latching the gate ON from
-/// stale terms; then re-fits exactly as they vanish, inside the header-flip lag) in
-/// which the resolve sees the gate ON and an armed cascade UBO on a frame whose depth
-/// pass did not record — in the extreme, on a stream where it NEVER recorded.
-/// Soundness therefore does NOT rest on this system's timing; it rests on two host
-/// guarantees:
+/// registration-site-dependent (cross-plugin edges are not expressible), so for 1–2 frames the
+/// header bit can disagree with the host's arming in either direction. It can TRAIL an arming
+/// flip, and it can LEAD the host: carry ON before the host has ever armed. Measured 2026-09-18
+/// in `taa_jitter_eval`, which hand-seeds this derived field (`csm_shadows: true`) while this
+/// system runs one frame behind `collect_lights`: on frame 0 the header's CSM bit is ON and the
+/// host, with no caster batch yet, is unarmed; frame 1 is armed with the bit OFF; the two agree
+/// from frame 2. So a STATIC scene can have a header-ON, host-unarmed frame. The shadow design's
+/// premise that "in a static scene the header trails the host, so no static pin has such a
+/// frame" is refuted.
 ///
-/// 1. **The never-rendered class is closed by the BOOT LAYOUT**: the windowed host
-///    one-shot-transitions the cascade array (and shadow atlas) to
-///    `SHADER_READ_ONLY_OPTIMAL` at scene boot, so a gate-ON resolve on a stream
-///    where the depth pass never ran samples undefined VALUES at a DEFINED layout —
-///    a benign 1–2 frame shadow transient, never an invalid access.
-/// 2. **Stale divergence (1–2 frames) is benign**: the host uploads the CURRENT
-///    `ResolvedCsm` into the fenced cascade-UBO slot every frame, so a DISABLED fit
-///    reaches the resolve as `active_count == 0` (the shader's early-out — no sample
-///    at all), and a stale-armed fit samples a valid-layout cascade whose content is
-///    at worst one re-render old.
+/// * **Header OFF while the host is armed:** the depth pass is recorded and not sampled — one
+///   frame without CSM shadows.
+/// * **Header ON while the host is unarmed** (trailing a disarm, or leading the first arming):
+///   on every unarmed frame the host uploads [`ResolvedCsm::DISABLED`] into the cascade UBO
+///   (`boyko_app::runner` step 5d, through
+///   [`ResolvedCsm::frame_uniform`](crate::csm_config::ResolvedCsm::frame_uniform) — shadow gate
+///   SG4), so the resolve sees `gCsmActive == 0` and `csm_visibility` returns 1.0 before any
+///   texture read.
 ///
-/// The gate/dirty mechanics below therefore only bound WHEN the header bit flips
-/// (within 1–2 frames of the predicate), not the safety of any interleaving.
+/// No frame samples a cascade that the frame did not render. Before SG4 that was false for the
+/// leading frame: it uploaded the live fit and sampled a cascade no pass had written, so the
+/// pixel depended on memory nothing wrote (the poison gate proves such memory controls the
+/// pixel). SG4 made that frame defined, and TAA carries frame 0 into history, so four pins moved
+/// with it: `taa_armed`, `taa_armed_basis`, `taa_rcas` and `vb_both_taa` — 5 pixels, max delta
+/// 3/255, on the SDF sphere's upper rim (the three Deferred ones moved on the hwrt leg too).
+/// Reverting SG4 alone restores their earlier hashes. The new frames were ruled correct and
+/// blessed (2026-09-18), and the hand-seed in `taa_jitter_eval` stays as the only witness of a
+/// header-leads-host frame. The host's boot layout seed makes the descriptor's LAYOUT valid and
+/// defines no values; nothing relies on it for values.
+///
+/// Scope: under `hwrt` the same header bit also gates the directional TLAS trace in
+/// `deferred_pbr.hlsl`, which ignores `gCsmActive`. That trace is gated by the host's TLAS
+/// arming (conjoined with `mesh_shadow_producers`), not by this note.
 ///
 /// # Value-gated write
 ///
@@ -532,7 +568,7 @@ pub fn sync_csm_light_gate(
     mut cfg: ResMut<LightingConfig>,
     mut dirty: ResMut<LightTableDirty>,
 ) {
-    let on = resolved.csm_mode_word == 1 && casters.batch_count() > 0;
+    let on = resolved.depth_pass_armed(&casters);
     // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
     if cfg.csm_shadows != on {
         cfg.csm_shadows = on;
@@ -932,5 +968,38 @@ mod tests {
             "raw_far ({}) must not inflate toward the union-AABB projection (~28)",
             bounds.raw_far
         );
+    }
+
+    /// [`ResolvedCsm::depth_pass_armed`]'s truth table: mode word 0/1 × caster batches 0/2.
+    /// Exactly one row arms. The 2-batch scratch is built through the SAME gather core the
+    /// production system runs, and its batch count is asserted before it is used, so a gather
+    /// that emitted nothing cannot make every row read "unarmed" for the wrong reason.
+    #[test]
+    fn depth_pass_armed_needs_a_live_fit_and_casters() {
+        let empty = CsmCasterScratch::default();
+        let rows = [
+            Row { mesh_id: 0, col: affine(0, 0), is_caster: true },
+            Row { mesh_id: 1, col: affine(1, 0), is_caster: true },
+        ];
+        let mut two = CsmCasterScratch::default();
+        gather_casters(&mut two, 2, &rows);
+        assert_eq!((empty.batch_count(), two.batch_count()), (0, 2));
+
+        let live = ResolvedCsm { csm_mode_word: 1, active_count: 3, ..ResolvedCsm::DISABLED };
+        let cases = [
+            (ResolvedCsm::DISABLED, &empty, false),
+            (ResolvedCsm::DISABLED, &two, false),
+            (live, &empty, false),
+            (live, &two, true),
+        ];
+        for (resolved, casters, want) in cases {
+            assert_eq!(
+                resolved.depth_pass_armed(casters),
+                want,
+                "mode {} with {} caster batch(es) must arm = {want}",
+                resolved.csm_mode_word,
+                casters.batch_count()
+            );
+        }
     }
 }

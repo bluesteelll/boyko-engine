@@ -8,6 +8,7 @@ use boyko_ecs::ecs::core::app::{App, Plugin};
 use crate::csm_config::{
     CsmCasterBounds, CsmConfig, CsmFitState, CsmResolveSet, ResolvedCsm, resolve_csm_cascades,
 };
+use crate::render_path_config::ResolvedRenderPath;
 
 /// Registers the CSM config substrate: inserts [`CsmConfig`] (default DISABLED —
 /// `cascade_count == 0`, the 0%-gate) and its derived [`ResolvedCsm`] companion, and
@@ -68,6 +69,15 @@ impl Plugin for CsmPlugin {
         // Rung C3: the anti-shimmer latch. MUST be `UNLATCHED`, not `CsmFitState::default()`
         // (which gives `far_k == 0`, a VALID grid cell) — see `CsmFitState`'s own doc.
         app.insert_resource(CsmFitState { far_k: CsmFitState::UNLATCHED });
+        // Shadow gate SG1: `resolve_csm_cascades` reads the boot carrier to decide whether this
+        // leg set owns the cascades at all, and this kernel has no `Option<Res<R>>`, so a
+        // bare-`CsmPlugin` world needs one. Inserted only if ABSENT: a carrier the host (or
+        // `RenderPathPlugin`) already put there is the real answer and must survive. The
+        // default is `Deferred × Both`, whose `mesh_shadow_producers()` is `true`, so the new
+        // arm is the identity in every world that never boots a path.
+        if !app.world().contains_resource::<ResolvedRenderPath>() {
+            app.insert_resource(ResolvedRenderPath::default());
+        }
 
         // `resolve_csm_cascades` joins `CsmResolveSet` — the by-name ordering seam a
         // future app wiring (rung C5) pins AFTER `CsmFitSet` (`reduce_caster_bounds`), so
@@ -94,6 +104,10 @@ mod tests {
     use super::CsmPlugin;
     use crate::csm_config::{CsmConfig, CsmFit, ResolvedCsm, resolve_csm};
     use crate::light::DirectionalLight;
+    use crate::render_path_config::{
+        GeometryLegs, RenderPath, RenderPathConfig, RenderPathConsumers, RenderPathDeviceCaps,
+        ResolvedRenderPath, resolve_render_path,
+    };
 
     /// CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5, test T15 (disposition
     /// finding I): a world that adds ONLY `CsmPlugin` — no `CsmCasterScratch`, and none
@@ -137,6 +151,58 @@ mod tests {
             got, want,
             "a bare CsmPlugin world (no reducer wired) must degrade to today's Fixed fit, \
              byte-identical to a direct CsmFit::NONE call"
+        );
+    }
+
+    /// Shadow gate SG1, the plugin half. A boot carrier inserted BEFORE `add_plugin` survives
+    /// it (the plugin inserts its default only when the resource is absent), and a mesh-less
+    /// carrier drives `resolve_csm_cascades` to `DISABLED` in the very world
+    /// [`bare_csm_plugin_world_runs_without_the_reducer`] shows producing a live fit: CSM
+    /// enabled, a sun, a perspective camera. The live-fit control is re-derived here, so the
+    /// `DISABLED` result cannot come from inputs that would not have fitted anyway.
+    #[test]
+    fn a_pre_inserted_mesh_less_carrier_survives_and_disables_the_cascades() {
+        let sdf_only = resolve_render_path(
+            &RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Sdf },
+            RenderPathConsumers::default(),
+            RenderPathDeviceCaps::new(true),
+        )
+        .0;
+        assert!(!sdf_only.mesh_shadow_producers(), "the fixture must be a mesh-less leg set");
+        assert_ne!(sdf_only, ResolvedRenderPath::default());
+
+        let mut app = App::new();
+        app.insert_resource(sdf_only);
+        app.add_plugin(CsmPlugin);
+        assert_eq!(
+            *app.world().resource::<ResolvedRenderPath>(),
+            sdf_only,
+            "CsmPlugin overwrote a carrier that was already present"
+        );
+
+        let cfg = CsmConfig { cascade_count: 3, ..CsmConfig::default() };
+        app.insert_resource(cfg);
+        let eye = Vec3::new(0.0, 2.0, 0.0);
+        let world_xf =
+            Affine3A::look_at_rh(eye, eye + Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.0, 1.0, 0.0));
+        let proj = Projection::Perspective { fov_y: FRAC_PI_3, aspect: 16.0 / 9.0, near: 0.1, far: 1000.0 };
+        let view = ViewUniform::from_camera(world_xf, proj);
+        app.insert_resource(view);
+        let sun_dir = [0.3_f32, -1.0, 0.2];
+        app.world_mut().run_system(move |mut cmds: Commands| {
+            cmds.spawn(DirectionalLight { direction: sun_dir, color: [1.0; 3], illuminance: 10_000.0 });
+        });
+        app.run_n(2);
+
+        assert_eq!(
+            resolve_csm(&cfg, &view, sun_dir, CsmFit::NONE).csm_mode_word,
+            1,
+            "control: the same inputs fit live cascades under a mesh-carrying leg set"
+        );
+        assert_eq!(
+            *app.world().resource::<ResolvedCsm>(),
+            ResolvedCsm::DISABLED,
+            "a leg set without mesh-shadow producers must publish the DISABLED selection"
         );
     }
 }

@@ -2349,6 +2349,11 @@ impl VulkanContext {
     /// construction, specialized to a single COMPUTE stage (no vertex input / rasterization
     /// state, no specialization constants — this pass's two variants are separate compiled SPIR-V
     /// modules, not one spec-constant-branched module).
+    ///
+    /// **Contract on `set1_layout`:** every binding of `set1_layout` the shader reads must include
+    /// `COMPUTE` in its `stageFlags` (VUID-VkComputePipelineCreateInfo-layout-07988). A layout
+    /// shared with a graphics pipeline therefore carries `FRAGMENT | COMPUTE`, as
+    /// `GBufferScene::forward_layout1` does.
     pub fn create_compute_pipeline_forward(
         &self,
         desc: &ComputePipelineDesc<Vulkan>,
@@ -2457,6 +2462,11 @@ impl VulkanContext {
     /// `MeshGeometryTable::set().set_layout()`). Otherwise a byte-for-byte mirror of
     /// [`Self::create_compute_pipeline_forward`]'s push-range sizing + pipeline-layout/pipeline
     /// construction, widened from 2 to 3 set layouts.
+    ///
+    /// **Contract on `set1_layout`:** every binding of `set1_layout` the shader reads must include
+    /// `COMPUTE` in its `stageFlags` (VUID-VkComputePipelineCreateInfo-layout-07988) — the
+    /// Forward-family shadow set is shared with graphics pipelines and carries
+    /// `FRAGMENT | COMPUTE` for exactly this reason.
     pub fn create_compute_pipeline_vb(
         &self,
         desc: &ComputePipelineDesc<Vulkan>,
@@ -2574,6 +2584,10 @@ impl VulkanContext {
     /// (`DeviceCaps::max_bound_descriptor_sets`'s own doc — `MeshGeometryTable::new` already
     /// `debug_assert!`s this at construction for every `VisibilityBuffer`-resolved boot, textured
     /// or not), so no additional floor check is needed here.
+    ///
+    /// **Contract on `set1_layout`:** every binding of `set1_layout` the shader reads must include
+    /// `COMPUTE` in its `stageFlags` (VUID-VkComputePipelineCreateInfo-layout-07988), as for
+    /// [`Self::create_compute_pipeline_vb`].
     pub fn create_compute_pipeline_vb_textured(
         &self,
         desc: &ComputePipelineDesc<Vulkan>,

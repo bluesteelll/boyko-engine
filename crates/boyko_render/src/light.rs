@@ -595,15 +595,21 @@ pub struct LightingConfig {
     ///
     /// This is DERIVED state, not owner state: when the CSM composition is wired
     /// (`CsmPlugin` + the caster gather), its single writer is
-    /// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate), which keeps the
-    /// header gate in lock-step with the depth-pass activation predicate ("a fitted sun
-    /// AND live casters exist") to within 1–2 frames. Layout soundness under that lag
-    /// does NOT come from timing (review R4-W1): the windowed host boot-transitions the
-    /// cascade map to `SHADER_READ_ONLY_OPTIMAL` once at scene boot (closing the
-    /// gate-ON-but-never-rendered class) and uploads the CURRENT `ResolvedCsm` UBO
-    /// every frame (a DISABLED fit early-outs the resolve) — see the sync system's
-    /// layout-soundness note. Set this manually only in hosts that hold the same two
-    /// guarantees (the showcase harness discipline).
+    /// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate), which writes
+    /// [`ResolvedCsm::depth_pass_armed`](crate::csm_config::ResolvedCsm::depth_pass_armed)
+    /// — the host's own arming call — and so tracks the depth pass to within 1–2 frames, trailing
+    /// it OR leading it. A leg set without mesh-shadow producers never arms it (the fit itself is
+    /// DISABLED). Value soundness under the disagreement comes from the host, not from timing:
+    /// every frame whose pass is not recorded uploads the DISABLED cascade UBO, so the resolve
+    /// early-outs before reading a cascade (see the sync system's "The header can trail OR lead
+    /// the host" note). The boot layout seed only makes the binding's LAYOUT valid. A manual
+    /// write in a composed app stands until the sync system next runs and overwrites a value
+    /// that disagrees with the arming, so it can make the header LEAD the host for any frame
+    /// `collect_lights` packs before that: `taa_jitter_eval`'s hand-seed does exactly that on
+    /// frame 0 (measured 2026-09-18), and the DISABLED upload is what makes that frame defined.
+    /// Set this manually only in hosts that sample no cascade they did not render this frame
+    /// (the windowed runner guarantees it through that upload; the showcase harness by
+    /// discipline).
     pub csm_shadows: bool,
     /// The resolve's punctual (spot/point atlas) sample gate — packed into light-header
     /// word 7 bit [`PUNCTUAL_MODE_BIT`] by [`shadow_gate_word`](Self::shadow_gate_word).
@@ -614,11 +620,11 @@ pub struct LightingConfig {
     ///
     /// Like `csm_shadows`, this is DERIVED state: its single production writer is
     /// [`sync_punctual_light_gate`](crate::shadow_atlas::sync_punctual_light_gate), which
-    /// keeps the header gate in lock-step with the depth-pass activation predicate ("a
-    /// fitted atlas AND live casters exist") to within 1–2 frames. Layout soundness under
-    /// that lag rests on the SAME two host guarantees the CSM path documents (boot-transition
-    /// the atlas array to `SHADER_READ_ONLY_OPTIMAL` once + upload the CURRENT
-    /// `ResolvedShadowAtlas` UBO every frame), not on this system's timing.
+    /// writes [`ResolvedShadowAtlas::depth_pass_armed`](crate::shadow_atlas::ResolvedShadowAtlas::depth_pass_armed)
+    /// and so tracks the punctual depth pass to within 1–2 frames. What a sample can read
+    /// during that lag — including the one open point-light case — is spelled out in the
+    /// sync system's "What a punctual sample can read"; the boot layout seed only makes the
+    /// binding's LAYOUT valid and is not relied on for values.
     pub punctual_shadows: bool,
     /// The resolve's DDGI (SDF diffuse GI) sample gate — packed into light-header word 7
     /// bit [`DDGI_MODE_BIT`] by [`shadow_gate_word`](Self::shadow_gate_word). DEFAULT
