@@ -117,8 +117,18 @@ applies no impulse).
 
 ## The TGS-Soft solver
 
-The shipped default solver is `SoftStepSolver`. For each step it runs a velocity-
-level sequential-impulse solve over the deterministic manifold order:
+The crate ships two TGS-Soft solvers with the same contact model. They differ in the
+order in which they sweep the contacts:
+
+- **`ColoredSoftStepSolver` — the default.** The type alias `DefaultRigidSolver`
+  names it. It sweeps the contacts color by color over a constraint graph (see
+  [Scaling](#scaling--the-performance-paths)), with the AVX2 cohort kernel on
+  (`PhysicsConfig::simd_solve` defaults to `true`).
+- **`SoftStepSolver` — the reference.** It sweeps the contacts in the deterministic
+  manifold order. It stays in the tree as the oracle the colored solve is checked
+  against, and a world runs it only when it names it.
+
+For each step, both run a velocity-level sequential-impulse solve with:
 
 - **Inertia tensor** — the cold `RigidBodyMass::inv_inertia` is the *world-space*
   inverse inertia tensor, so angular response is `Δω = inv_inertia · τ_world`,
@@ -136,9 +146,23 @@ level sequential-impulse solve over the deterministic manifold order:
 - **Restitution** — a single post-loop pass, gated by an approach-speed threshold
   so a body resting under gravity does not creep upward frame after frame.
 
-The solver **owns integration**: it integrates simulated dynamic bodies inside its
+Both solvers **own integration**: each integrates simulated dynamic bodies inside its
 own substep loop, so the pipeline's standalone integrate stage is gated off (see
 [the pipeline](#the-pipeline)).
+
+### The default and the reference differ in value, not in validity
+
+The colored sweep visits the contacts in a different order than the manifold sweep,
+so the two solvers converge to **different, equally valid floats**. They are compared
+by tolerance acceptance gates (stacking, penetration, friction, restitution), never
+by bits. Two consequences follow:
+
+- Moving a world from one solver to the other changes its simulation values.
+- A world or a replay pinned to the reference must name `SoftStepSolver` explicitly
+  (see [the pipeline](#the-pipeline)).
+
+Each solver is bit-deterministic run to run on its own; see
+[Determinism](#determinism--the-contract).
 
 ### Contact shapes
 
@@ -185,37 +209,52 @@ The crate ships three solvers:
 
 | Solver | What it does | `owns_integration` |
 |--------|--------------|--------------------|
-| `NoopSolver` | The default seam-prover: `is_noop()` is `true`, the solve is skipped, the pipeline degenerates to integrate-only. | `false` |
-| `SoftStepSolver` | The real TGS-Soft solver (above). Solves in manifold order. | `true` |
-| `ColoredSoftStepSolver` | The colored/parallel/SIMD solve (below). | `true` |
+| `NoopSolver` | The foundation seam-prover: `is_noop()` is `true`, the solve is skipped, the pipeline degenerates to integrate-only. | `false` |
+| `SoftStepSolver` | The reference TGS-Soft solver (above). Solves in manifold order. Runs only when a world names it. | `true` |
+| `ColoredSoftStepSolver` | The default (`DefaultRigidSolver`). Solves in graph-color order, with the parallel and SIMD paths (below). Its trait `solve` is empty: the `physics_solve_colored` stage drives it, because the trait signature carries no constraint graph. | `true` |
+
+`DefaultRigidSolver` is a type alias for `ColoredSoftStepSolver`, not a fourth solver.
 
 ## The pipeline
 
 Physics is wired into a schedule as a block of ordinary systems, registered in a
 fixed order via `.after(...)`. The body-only pipeline (`add_physics_systems::<S>`)
-runs:
+runs the stages below. The solver **type** `S` picks the solve stage, once, at
+wire-up:
 
 ```mermaid
 flowchart LR
     A[physics_integrate] --> B[physics_gather]
-    B --> C[physics_broadphase]
+    B --> P[select_broadphase]
+    P --> C[physics_broadphase]
     C --> D[physics_narrowphase]
-    D --> E["physics_solve_step::&lt;S&gt;"]
+    D -->|"S = ColoredSoftStepSolver (default)"| G[physics_build_graph]
+    G --> E[physics_solve_colored]
+    D -->|"any other S"| R["physics_solve_step::&lt;S&gt;"]
     E --> F[physics_apply]
+    R --> F
 ```
 
 - **integrate** — `par_iter_mut` over simulated dynamic bodies: gravity, position
-  advance, quaternion advance. **Gated off** when the solver owns integration (the
-  TGS path), so the solver is the *sole* integrator and bodies are never double-
-  integrated. This gate is the `IntegrationMode::SolverOwned` vs
+  advance, quaternion advance. **Gated off** when the solver owns integration (both
+  TGS solvers do), so the solver is the *sole* integrator and bodies are never
+  double-integrated. This gate is the `IntegrationMode::SolverOwned` vs
   `IntegrationMode::Foundation` resource, derived from `owns_integration()` at wire-
   up time.
 - **gather** — snapshots `(RigidBody, RigidBodyMass, Collider)` in row order into
   the dense `SolverScratch`, derives each body's world inverse inertia, and stamps
   the step `dt` from the fixed clock (`FixedTime`) into `PhysicsConfig`.
+- **select_broadphase** — a cold density policy. In the default
+  `BroadphaseSelectMode::Manual` it only counts bodies and never changes
+  `PhysicsConfig::broadphase`.
 - **broadphase** — emits candidate pairs in deterministic `(min, max)` order.
 - **narrowphase** — produces `Manifold`s for the overlapping pairs.
-- **solve** — `if solver.is_noop() { return } else { S::solve(...) }`.
+- **build_graph** — registered only for the colored solver. Partitions this step's
+  manifolds into islands and greedy-colors them so no color shares a dynamic body.
+- **solve** — `physics_solve_colored` for the colored solver. For any other `S`,
+  `physics_solve_step::<S>`: `if solver.is_noop() { return } else { S::solve(...) }`.
+  The two stages never both run, and `NoopSolver` can never be paired with the
+  colored stage.
 - **apply** — writes the solved snapshot back through `Mut<RigidBody>`, but only for
   touched rows.
 
@@ -224,24 +263,38 @@ fixed step's `dt`, never a per-render-frame delta. See [Time and the fixed
 timestep](../app/time.md).
 
 ```rust,ignore
+use boyko_physics::{add_physics_systems, DefaultRigidSolver};
+
+// Inserts the physics resources on `world` and registers the pipeline stages on
+// `builder`, returning the stage handles. (The caller owns `builder.build`.)
+// `DefaultRigidSolver` wires the constraint graph and the colored solve.
+let keys = add_physics_systems::<DefaultRigidSolver>(&mut builder, &mut world);
+```
+
+Rust has no default type parameters on functions, so the alias `DefaultRigidSolver`
+is the one place the default is named. To run the reference solver instead, name it:
+
+```rust,ignore
 use boyko_physics::{add_physics_systems, SoftStepSolver};
 
-// Inserts the physics resources on `world` and registers the six stages on
-// `builder`, returning the stage handles. (The caller owns `builder.build`.)
+// The reference manifold-order solve: no constraint graph, no colored stage.
+// Its floats differ from the default's, so a world pinned to it must say so here.
 let keys = add_physics_systems::<SoftStepSolver>(&mut builder, &mut world);
 ```
 
-Wiring variants extend this block, each opt-in:
+Wiring variants extend this block, each opt-in. Every entry picks the solve stage
+from `S` the same way, so the scene-sync, SDF and soft-body variants all run the
+colored solve when given `DefaultRigidSolver`:
 
 | Function | Adds |
 |----------|------|
 | `add_physics_systems::<S>` | the body-only pipeline (above) |
 | `add_physics_systems_with_scene_sync::<S>` | the same, wrapped in `Transform ⇄ RigidBody` pose sync |
 | `add_physics_sdf::<S>` | a body-vs-SDF narrowphase stage + an (empty) `SdfField` to fill |
-| `add_physics_colored::<S>` | builds the constraint-graph islands/coloring (partition only) |
-| `add_physics_colored_solve` | the colored solve via `ColoredSoftStepSolver` |
-| `add_physics_soft` | the XPBD soft-body pass |
-| `add_physics_soft_colored` | the colored-parallel soft-body pass |
+| `add_physics_colored::<S>` | the constraint-graph stage for any `S`; with a non-colored solver it is a partition only and the solve is unchanged |
+| `add_physics_colored_solve` | kept for existing callers; forwards to `add_physics_systems::<ColoredSoftStepSolver>` |
+| `add_physics_soft::<S>` | the XPBD soft-body pass |
+| `add_physics_soft_colored::<S>` | the colored-parallel soft-body pass |
 
 ### Pose stays in one datum
 
@@ -264,39 +317,63 @@ parallel pose store — see [Transforms](transforms.md).
 | `contact_damping` | `10.0` | soft-constraint damping ratio (heavily overdamped, for stable resting contact) |
 | `dt` | stamped | the fixed step delta, written by the gather — a hand-set value is overwritten |
 
-## Scaling — the opt-in performance paths
+## Scaling — the performance paths
 
-These are the production-scale levers from the physics optimization campaign. Every
-one is **default-off and opt-in**, and each preserves the 0%-gate: a world that does
-not opt in is byte-identical to the shipped scalar path. Where a path *does* change
-the converged float values (the colored solve reorders the sweep), it is validated
-against tolerance acceptance gates, stays bit-deterministic run-to-run, and never
-moves a static body.
+These are the production-scale levers from the physics optimization campaign. The
+colored solve is the default solver, and two AVX2 kernels are **on by default**:
+`simd_solve` and `simd`. Both kernels are pure speed paths: each lane mirrors the
+scalar op sequence exactly (no FMA, no `rsqrt`/`rcp`), so turning one off changes
+performance, never a result bit. On a non-AVX2 build both are no-ops.
 
-- **Grid broadphase** (`broadphase = BroadphaseKind::Grid`) — a uniform-grid CSR
-  counting-sort replacing the O(n²) all-pairs loop. Its pair set is bit-identical
-  to all-pairs after the same feasibility filter and `(min, max)` sort.
-  `parallel_broadphase` fans the candidate emit across the threadpool.
+The rest are **default-off and opt-in**: `broadphase = Grid`, `parallel_broadphase`,
+`parallel_solve` and `sleeping`. Each one's off state leaves the default path
+byte-identical (the campaign's 0%-gate).
+
+- **Grid broadphase** (`broadphase = BroadphaseKind::Grid`, default `AllPairs`) — a
+  uniform-grid CSR counting-sort replacing the O(n²) all-pairs loop. Its pair set is
+  bit-identical to all-pairs after the same feasibility filter and `(min, max)`
+  sort. `parallel_broadphase` (default off) fans the candidate emit across the
+  threadpool.
 - **Constraint coloring** — islands + greedy graph coloring so no color shares a
-  dynamic body; the enabler for parallel and SIMD solving.
-- **Colored solve** (`ColoredSoftStepSolver` via `add_physics_colored_solve`) — a
-  Gauss-Seidel sweep across colors over SoA contact columns. `parallel_solve` runs
-  each color across workers; `simd_solve` widens the per-color sweep with 8-lane
-  AVX2 cohorts. Both are bit-identical to the single-threaded colored result for any
-  worker count.
-- **SIMD integrate/inertia** (`simd`) — AVX2 width-only kernels for the per-substep
-  inertia refresh and integrate. Each lane mirrors the scalar op sequence exactly
-  (no FMA, no `rsqrt`), so the SIMD output is **bit-identical** to scalar — toggling
-  it changes performance, never the result.
-- **Sleeping** (`sleeping`) — per-island deactivation: an island below a speed²
-  threshold for a debounce window freezes and skips its solve/integrate, while the
-  gather still walks every row (so warm keys stay valid and a new contact wakes the
-  island the same frame).
+  dynamic body; the enabler for parallel and SIMD solving. The colored solve
+  consumes it, so every world on the default solver builds it.
+- **Colored solve** — the default solver (`DefaultRigidSolver`, through any
+  `add_physics_*` entry). A Gauss-Seidel sweep across colors over SoA contact
+  columns. Its converged values differ from the reference solver's; they are
+  validated against tolerance acceptance gates, stay bit-deterministic run-to-run,
+  and never move a static body.
+  - `simd_solve` (**default on**) widens each color's sweep over cohorts of 8
+    body-disjoint manifold-groups with an AVX2 kernel. It is bit-identical to the
+    scalar colored oracle.
+  - `parallel_solve` (default off) runs each color's groups across workers, with a
+    barrier between colors. It is bit-identical to the single-threaded colored
+    result for any worker count.
+- **SIMD integrate/inertia** (`simd`, **default on**) — AVX2 width-only kernels for
+  the per-substep inertia refresh and the gravity integrate loop. The SIMD output is
+  **bit-identical** to scalar — toggling it changes performance, never the result.
+- **Sleeping** (`sleeping`, default off) — per-island deactivation: an island below a
+  speed² threshold for a debounce window freezes and skips its solve/integrate, while
+  the gather still walks every row (so warm keys stay valid and a new contact wakes
+  the island the same frame). Unlike the other levers, it changes results on
+  purpose — a frozen island stops integrating — so its gate is "rest state with
+  sleeping on equals rest state with sleeping off, to ε". Two combinations the
+  default solver makes reachable have no gate yet: sleeping with SDF contacts is
+  unmeasured, and with soft↔rigid coupling a soft→rigid reaction does not wake a
+  sleeping body.
 
-> **Targets, not measured results.** The campaign's headline numbers (grid
-> broadphase crossover, ~workers× on the colored solve, ~2–2.3× AVX2 on the contact
-> solve) are *targets to validate*, not claimed benchmark results. This page does
-> not quote a benchmark figure as a fact.
+`simd_solve`, `parallel_solve` and `sleeping` act only inside the colored solve. With
+the reference `SoftStepSolver` they are silent no-ops.
+
+> **What is measured, and what is not.** Two figures from
+> [`benches/colored_solve.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/benches/colored_solve.rs)
+> back the default. The AVX2 cohort kernel runs the colored step **1.96×** faster
+> than the scalar colored arm, on that bench's production-shaped sphere pile
+> (one-point manifolds, not box–box contacts). The scalar colored solve, graph build
+> included, runs **1.059×** faster than the reference solver at ~1k contacts and
+> **1.131×** at ~10k. The figures come from different bench groups, and neither
+> measures a whole default world. The campaign's other headline numbers (grid
+> broadphase crossover, ~workers× on the colored solve) remain *targets to
+> validate*, not claimed benchmark results.
 
 ## Soft bodies (XPBD)
 
@@ -334,13 +411,25 @@ soft↔rigid coupling; and a colored-parallel path. Each is its own opt-in flag 
 
 ## Determinism — the contract
 
-The shipped scalar path is bit-deterministic: single-threaded over the
-deterministic manifold order, fixed point order, normal-before-friction, fixed
-substep/relax counts, fixed float op order, no atomics, no `fast-math`. The parallel
-and SIMD opt-ins are bit-identical to it across `{1 thread, N threads, SIMD-on,
-SIMD-off}` — the disjoint-body coloring makes each body's accumulation independent
-of which worker runs which group, and the warm-start store is forced into canonical
-order regardless of solve-dispatch order.
+Each solver is bit-deterministic run to run: a fixed sweep order (graph colors for
+the default, manifold order for the reference), fixed point order,
+normal-before-friction, fixed substep/relax counts, fixed float op order, no
+atomics, no `fast-math`.
+
+On the default colored solve, the speed switches never change a bit. The AVX2 cohort
+kernel (`simd_solve`, on by default), the scalar colored oracle, and `parallel_solve`
+at any worker count all produce the same result — bit-identical across `{1 thread,
+N threads, SIMD-on, SIMD-off}`. The disjoint-body coloring makes each body's
+accumulation independent of which worker runs which group, and the warm-start store
+is forced into canonical order regardless of solve-dispatch order. So a replay does
+not depend on `simd_solve`. At scale, the release run of
+`tests/default_world_pyramid_determinism.rs` steps a 1240-box pyramid for 120 frames.
+Its per-frame hash of every `RigidBody` bit matches run to run, at 1, 2 and 8
+workers with `parallel_solve` off and on, and against the scalar colored oracle.
+
+The two solvers do **not** match each other bit for bit (see
+[above](#the-default-and-the-reference-differ-in-value-not-in-validity)), so a
+replay pinned to one solver must run under that solver.
 
 One precondition: dense-row order is the archetype row order, which is deterministic
 across runs only under a deterministic spawn/despawn order. Single-threaded spawning
@@ -358,5 +447,7 @@ satisfies this.
   [`components.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/components.rs#L1),
   [`solver/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/solver/mod.rs#L46),
   [`solver/soft_step.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/solver/soft_step.rs#L1),
+  [`solver/colored.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/solver/colored.rs#L1),
+  [`resources.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/resources.rs#L1),
   [`systems.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/systems.rs#L1),
   [`plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/plugin.rs#L159)
