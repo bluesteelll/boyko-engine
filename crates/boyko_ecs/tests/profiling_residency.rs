@@ -22,13 +22,16 @@
 //! substrate measured it). The gate's own rule is that tool absence is a **RED, never a SKIP**, so
 //! under the literal reading this row could not be green on this machine at all.
 //!
-//! ⚠ `PATH` was always the wrong place to look, and the tool is present now. MEASURED 2026-09-10:
-//! `llvm-tools` is installed on BOTH stable toolchains, and `boyko_diag::storage::resolve_tool`
-//! resolves it through `~/.rustup/toolchains/<toolchain>/lib/rustlib/<triple>/bin/`, not `PATH` —
-//! including on the `x86_64-pc-windows-msvc` toolchain this tree's recipes name since that date
-//! (the rustup default host is still gnu; `resolve_tool` answers correctly under either).
-//! The split below is kept on its own merits (an exact compile-time bound beats a shell-out), but
-//! the reason "the tool is absent" is no longer one of them.
+//! ⚠ **CORRECTED 2026-09-10 — the tool is present, and `PATH` was never the question.**
+//! `llvm-tools` is installed on BOTH stable toolchains: `llvm-nm`, `llvm-readobj` and
+//! `llvm-objdump` sit in `~/.rustup/toolchains/stable-x86_64-pc-windows-{gnu,msvc}/lib/rustlib/
+//! x86_64-pc-windows-{gnu,msvc}/bin/`, which is where `boyko_diag::storage::resolve_tool` looks
+//! after `PATH`. `objdump` and `nm` are on `PATH` too, from WinLibs' mingw64; only the `llvm-`
+//! spellings are off it. The instrument is green on both hosts — `boyko_diag`'s `gate::` suite,
+//! 8 tests with `--features section-gate`, including a live probe of its own test binary (gnu
+//! 2026-09-10, msvc 2026-09-18) — so "this row could not be green on this machine at all" no
+//! longer holds. The split below is kept on its own merits (an exact compile-time bound beats a
+//! shell-out), not on tool absence.
 //!
 //! The two things being conflated are separable. The tool proves **`.bss` residency** — that the
 //! image carries no raw data for a symbol. This gate needs the symbol's **bytes**, and the bytes of

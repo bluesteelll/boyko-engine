@@ -195,12 +195,21 @@ Three blockers travel with specific files and **must not be softened**:
   from its own 5 KiB of `last_seen`. Exactness follows from the shape of the datum rather than
   from every future producer remembering `fetch_add`, and `fetch_sub` leaves the design.
   `delta_since` ships at D0; `fold_into` does not exist. *(`substrate/03-LOSS.md`, Q2.)*
-- **`llvm-tools` — the blocker is DISCHARGED, and the gates are still unrun.** The finding as
-  recorded read *"not installed on this machine — MEASURED: no `llvm-readobj` / `objdump` / `nm` /
-  `llvm-nm` is on PATH, and the active `stable-x86_64-pc-windows-gnu` toolchain ships only
-  `rust-objcopy` and `rust-lld`"*. MEASURED 2026-09-10: `llvm-tools` is installed on BOTH stable toolchains (`rustup component list` reports `llvm-tools-x86_64-pc-windows-{gnu,msvc} (installed)`), and each carries `llvm-readobj.exe` / `llvm-nm.exe` / `llvm-objdump.exe` under `lib/rustlib/<triple>/bin/` — which is where `boyko_diag::storage::resolve_tool` looks, not `PATH`. UNBLOCKED IS NOT GREEN: no `.bss` gate has been run. The `PATH` half of the original finding is
-  still true and still irrelevant for the same reason: the probe resolves through the rustup
-  toolchain directory. The gate's rule that tool absence is a **RED, never a SKIP** is unchanged.
+- **`llvm-tools` — the blocker is DISCHARGED; the instrument is green, and the table gates are
+  still unrun.** The finding as recorded read *"not installed on this machine — MEASURED: no
+  `llvm-readobj` / `objdump` / `nm` / `llvm-nm` is on PATH, and the active
+  `stable-x86_64-pc-windows-gnu` toolchain ships only `rust-objcopy` and `rust-lld`"*. MEASURED
+  2026-09-10: `llvm-tools` is installed on BOTH stable toolchains (`rustup component list` reports
+  `llvm-tools-x86_64-pc-windows-{gnu,msvc} (installed)`), and each carries `llvm-readobj.exe` /
+  `llvm-nm.exe` / `llvm-objdump.exe` under `lib/rustlib/<triple>/bin/`, which is where
+  `boyko_diag::storage::resolve_tool` looks after `PATH`. `objdump` and `nm` are on `PATH` too,
+  from WinLibs' mingw64; only the `llvm-` spellings are off it, so the `PATH` half of the original
+  finding was never the question. The instrument itself is green: `boyko_diag`'s `gate::` suite,
+  including a live probe that finds `.bss` in its own test binary, passes on both hosts (8 tests,
+  `cargo test -p boyko-diag --features section-gate --lib -- gate::`; gnu 2026-09-10, msvc
+  2026-09-18). UNBLOCKED IS NOT GREEN for the gates the instrument serves: no `.bss` gate over the
+  real tables (DG6 here, profiling G22a/G22b, logging G3) has been run. The rule that tool
+  absence is a **RED, never a SKIP** is unchanged.
   *(`substrate/04-STORAGE.md`; DG6.)*
 
 Four calls need the **OWNER**, not the architect. They are collected in one place —
