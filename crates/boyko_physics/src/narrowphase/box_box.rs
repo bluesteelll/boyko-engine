@@ -11,12 +11,17 @@
 //!    one on that axis; the incident face is the other box's most anti-parallel
 //!    face; the incident polygon is Sutherland-Hodgman-clipped against the
 //!    reference face's 4 side planes, and points below the reference face are kept.
+//!    Every emitted vertex carries a feature id built from the features that
+//!    created it, so no two points of one manifold share a warm-start key (A7a —
+//!    see [`clip_against_plane`] and
+//!    [`feature_face_clip`](super::feature_face_clip)).
 //! 3. **Edge-edge** (min axis is a cross product): a single contact at the closest
 //!    points of the two contacting edges.
 //! 4. **Deterministic ≤4-point reduction**: keep the deepest point plus the three
-//!    that maximize the contact-patch spread, ties broken by lowest incident-vertex
-//!    index — a pure function of the clipped polygon, so the selection is
-//!    reproducible (no FP-tie nondeterminism).
+//!    that maximize the contact-patch spread, ties broken by the lowest
+//!    [`ClipVertex::tie_ord`] (the pre-A7a ordinal, retained so the reduction's
+//!    order is unchanged by the relabelling) — a pure function of the clipped
+//!    polygon, so the selection is reproducible (no FP-tie nondeterminism).
 //! 5. **Reference-axis hysteresis**: bias toward last frame's reference axis to
 //!    stop the min axis (hence the feature ids) from flickering under FP noise on a
 //!    near-parallel resting stack.
@@ -26,7 +31,7 @@
 use crate::manifold::{BodyIndex, ContactPoint, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
 
-use super::{feature_edge_edge, feature_face_face};
+use super::{feature_edge_edge, feature_face_clip, feature_face_face};
 
 /// Penetration ratio within which the current best SAT axis is considered "no
 /// better" than last frame's, so the hysteresis keeps last frame's axis (P2 W4 —
@@ -320,25 +325,62 @@ fn face_vertices(obb: &Obb, axis: usize, positive: bool) -> [(Vec3, usize); 4] {
     out
 }
 
-/// A clipped contact vertex carried through Sutherland-Hodgman (P2 W4).
+/// The `in_edge` label of an edge a clip pass created: `PLANE_EDGE_BASE + plane`.
+/// The gap at `4..8` is deliberate — bit 3 alone says "this edge lies in a
+/// reference side plane", which is what a reader of a dumped id needs.
+const PLANE_EDGE_BASE: u8 = 8;
+
+/// A clipped contact vertex carried through Sutherland-Hodgman (P2 W4 / A7a).
 #[derive(Clone, Copy)]
 struct ClipVertex {
     /// World position.
     pos: Vec3,
-    /// Incident-face source corner index (`0..8`) — its feature identity. An
-    /// interpolated vertex inherits the lower-index endpoint's corner so the id is
-    /// deterministic.
-    incident_vtx: usize,
+    /// TODAY'S ordinal, retained ONLY so [`reduce_points`]' tie-breaks stay
+    /// bit-identical to the committed behaviour. NOT an identity — for an
+    /// intersection it is still `min(prev, cur)`, which is exactly why it cannot
+    /// be a warm key (A7a). Never read for a feature id.
+    tie_ord: u8,
+    /// Identity of the polygon edge ENTERING this vertex, in a 4-bit edge space:
+    /// `0..4` = the incident face's ring edge `k` (ring position `k` → ring
+    /// position `(k + 1) % 4` — positions in the face's 4-vertex ring, not the
+    /// box corner indices `0..8` that `tie_ord` holds); `PLANE_EDGE_BASE + p` =
+    /// the edge a clip against reference side plane `p` created. It names the
+    /// edge an intersection is cut ON, so a vertex the clip creates can be named
+    /// by its two parent features.
+    in_edge: u8,
+    /// The feature id this vertex carries into the manifold — injective over one
+    /// manifold's points (see [`feature_face_clip`]).
+    feature_id: u32,
 }
 
 /// Clips the polygon `poly` (`len` vertices) against the half-space `{ x : (x −
 /// plane_point) · plane_normal ≤ 0 }` (keep the side the normal points AWAY from),
 /// writing the result into `out` and returning its length (Sutherland-Hodgman, P2
 /// W4). At most `len + 1` vertices are produced.
+///
+/// `ref_face` and `plane` (the reference side-plane index `0..4`) name the cut,
+/// so every emitted vertex carries an identity rather than an inherited ordinal.
+/// The rule is keyed by EMISSION, not by control-flow case, because the entering
+/// branch emits TWO vertices:
+///
+/// | case | emission | vertex | `in_edge` | `feature_id` |
+/// |---|---|---|---|---|
+/// | entering | 1 of 2 | the intersection | `PLANE_EDGE_BASE + plane` | `feature_face_clip(ref_face, cur.in_edge, plane)` |
+/// | entering | 2 of 2 | `cur` | unchanged | unchanged |
+/// | inside | 1 of 1 | `cur` | unchanged | unchanged |
+/// | leaving | 1 of 1 | the intersection | `cur.in_edge` | `feature_face_clip(ref_face, cur.in_edge, plane)` |
+///
+/// Both intersections lie on the edge `prev → cur`, whose label is `cur.in_edge`
+/// — that is the edge they are cut on, hence the id's second feature. Their own
+/// `in_edge` differs: the entering intersection is reached along the new boundary
+/// segment lying IN `plane`, while the leaving one is still reached along the
+/// original edge.
 fn clip_against_plane(
     poly: &[ClipVertex],
     plane_point: Vec3,
     plane_normal: Vec3,
+    ref_face: u32,
+    plane: u32,
     out: &mut [ClipVertex],
 ) -> usize {
     let n = poly.len();
@@ -359,8 +401,9 @@ fn clip_against_plane(
                 let t = prev_d / (prev_d - cur_d);
                 out[count] = ClipVertex {
                     pos: prev.pos + (cur.pos - prev.pos) * t,
-                    // Inherit the lower corner index for a deterministic id.
-                    incident_vtx: prev.incident_vtx.min(cur.incident_vtx),
+                    tie_ord: prev.tie_ord.min(cur.tie_ord),
+                    in_edge: PLANE_EDGE_BASE + plane as u8,
+                    feature_id: feature_face_clip(ref_face, cur.in_edge as u32, plane),
                 };
                 count += 1;
             }
@@ -371,7 +414,9 @@ fn clip_against_plane(
             let t = prev_d / (prev_d - cur_d);
             out[count] = ClipVertex {
                 pos: prev.pos + (cur.pos - prev.pos) * t,
-                incident_vtx: prev.incident_vtx.min(cur.incident_vtx),
+                tie_ord: prev.tie_ord.min(cur.tie_ord),
+                in_edge: cur.in_edge,
+                feature_id: feature_face_clip(ref_face, cur.in_edge as u32, plane),
             };
             count += 1;
         }
@@ -390,13 +435,30 @@ struct ScoredPoint {
     /// Signed separation along the contact normal (negative = penetrating). Only
     /// penetrating points are kept.
     separation: f32,
-    /// Incident-face source corner index (for the feature id + the tie-break).
-    incident_vtx: usize,
+    /// [`ClipVertex::tie_ord`] — the reduction's tie-break key, and nothing else.
+    /// It is carried SEPARATELY from `feature_id` so that, for a given clipped
+    /// point set, A7a only relabels: the reduction's induced order is a function
+    /// of this field alone, so it is byte-identical to the behaviour before A7a.
+    tie_ord: usize,
+    /// The point's warm-start identity, carried straight into the manifold.
+    feature_id: u32,
 }
 
 /// Reduces a clipped point set to at most 4 contacts: the DEEPEST point plus the
 /// up-to-3 that maximize the contact-patch spread, ties broken by the LOWEST
-/// incident-vertex index — a pure function of the input (P2 W4).
+/// [`ScoredPoint::tie_ord`] — a pure function of the input (P2 W4).
+///
+/// The tie-break reads `tie_ord` and NEVER `feature_id`: `tie_ord` is the
+/// pre-A7a ordinal, so for a GIVEN clipped point set the induced order, and so
+/// the kept points, are byte-identical to the behaviour before the ids became
+/// injective. Reading `feature_id` here would re-order the reduction, because a
+/// clipped vertex's id (bit 13 set) sorts above every corner's.
+///
+/// That is all the split preserves. The ids themselves are new wherever the old
+/// ones collided, so warm-start keys, seeds and impulses change there, and with
+/// them the trajectory, every later clipped point set, the points this function
+/// keeps from it, and every downstream number. Measured on a resting height-15
+/// pile at step 600: 12817 live contact points before A7a, 14605 after.
 ///
 /// `normal` is the contact normal (A→B); it defines the plane the patch lives in,
 /// so the "two points off the diameter, one per side" split is measured by the
@@ -416,13 +478,13 @@ fn reduce_points(points: &[ScoredPoint], normal: Vec3, out: &mut [ScoredPoint; 4
         return n;
     }
 
-    // 1) The deepest point (lowest separation); ties → lowest incident_vtx.
+    // 1) The deepest point (lowest separation); ties → lowest tie_ord.
     let mut deepest = 0usize;
     for i in 1..n {
         let p = points[i];
         let d = points[deepest];
         if p.separation < d.separation
-            || (p.separation == d.separation && p.incident_vtx < d.incident_vtx)
+            || (p.separation == d.separation && p.tie_ord < d.tie_ord)
         {
             deepest = i;
         }
@@ -438,7 +500,7 @@ fn reduce_points(points: &[ScoredPoint], normal: Vec3, out: &mut [ScoredPoint; 4
     for i in 0..n {
         let d2 = (points[i].pos - base).length_squared();
         let cur = points[far];
-        if d2 > far_d2 || (d2 == far_d2 && points[i].incident_vtx < cur.incident_vtx) {
+        if d2 > far_d2 || (d2 == far_d2 && points[i].tie_ord < cur.tie_ord) {
             far_d2 = d2;
             far = i;
         }
@@ -476,7 +538,7 @@ fn reduce_points(points: &[ScoredPoint], normal: Vec3, out: &mut [ScoredPoint; 4
                 if area > best_pos
                     || (area == best_pos
                         && best_pos_i != usize::MAX
-                        && points[i].incident_vtx < points[best_pos_i].incident_vtx)
+                        && points[i].tie_ord < points[best_pos_i].tie_ord)
                 {
                     best_pos = area;
                     best_pos_i = i;
@@ -484,7 +546,7 @@ fn reduce_points(points: &[ScoredPoint], normal: Vec3, out: &mut [ScoredPoint; 4
             } else if area > best_neg
                 || (area == best_neg
                     && best_neg_i != usize::MAX
-                    && points[i].incident_vtx < points[best_neg_i].incident_vtx)
+                    && points[i].tie_ord < points[best_neg_i].tie_ord)
             {
                 best_neg = area;
                 best_neg_i = i;
@@ -586,17 +648,25 @@ fn face_contact(
     let ref_face = face_vertices(reference, ref_axis, ref_positive);
     let inc_face = face_vertices(incident, inc_axis, inc_positive);
 
-    // Seed the clip polygon with the incident face (carrying corner ids).
+    // Seed the clip polygon with the incident face. An original corner keeps the
+    // id it has always had — only vertices the clip CREATES are relabelled (A7a).
+    // `face_vertices` winds the ring, so the edge ENTERING ring position `i` is
+    // ring edge `i - 1`.
+    let ref_face_id = ref_face_idx as u32;
     let mut buf_a = [ClipVertex {
         pos: Vec3::ZERO,
-        incident_vtx: 0,
+        tie_ord: 0,
+        in_edge: 0,
+        feature_id: 0,
     }; 8];
     let mut buf_b = buf_a;
     let mut poly_len = 4usize;
     for (i, &(pos, idx)) in inc_face.iter().enumerate() {
         buf_a[i] = ClipVertex {
             pos,
-            incident_vtx: idx,
+            tie_ord: idx as u8,
+            in_edge: ((i + 3) % 4) as u8,
+            feature_id: feature_face_face(ref_face_id, idx as u32),
         };
     }
 
@@ -636,7 +706,8 @@ fn face_contact(
         if (edge_mid - ref_face_center).dot(side_normal) < 0.0 {
             side_normal = side_normal * -1.0;
         }
-        let new_len = clip_against_plane(&src[..poly_len], edge_mid, side_normal, dst);
+        let new_len =
+            clip_against_plane(&src[..poly_len], edge_mid, side_normal, ref_face_id, e as u32, dst);
         core::mem::swap(&mut src, &mut dst);
         poly_len = new_len;
         if poly_len == 0 {
@@ -649,7 +720,8 @@ fn face_contact(
     let mut scored: [ScoredPoint; 8] = [ScoredPoint {
         pos: Vec3::ZERO,
         separation: 0.0,
-        incident_vtx: 0,
+        tie_ord: 0,
+        feature_id: 0,
     }; 8];
     let mut scored_len = 0usize;
     for &cv in &src[..poly_len] {
@@ -658,7 +730,8 @@ fn face_contact(
             scored[scored_len] = ScoredPoint {
                 pos: cv.pos,
                 separation,
-                incident_vtx: cv.incident_vtx,
+                tie_ord: cv.tie_ord as usize,
+                feature_id: cv.feature_id,
             };
             scored_len += 1;
         }
@@ -670,7 +743,8 @@ fn face_contact(
     let mut reduced = [ScoredPoint {
         pos: Vec3::ZERO,
         separation: 0.0,
-        incident_vtx: 0,
+        tie_ord: 0,
+        feature_id: 0,
     }; 4];
     // The manifold normal runs A→B regardless of which box was the reference; it
     // also defines the contact plane the patch reduction measures spread in.
@@ -693,7 +767,7 @@ fn face_contact(
             anchor_a,
             anchor_b,
             separation: p.separation,
-            feature_id: feature_face_face(ref_face_idx as u32, p.incident_vtx as u32),
+            feature_id: p.feature_id,
         };
     }
     manifold.count = count as u8;
@@ -908,6 +982,411 @@ mod tests {
         }
         // Either path (None or a capped manifold) is acceptable; the invariant is
         // simply that a degenerate face never yields an over-large point set.
+    }
+
+    /// `(ref_face, cut_edge, plane)` of a CLIPPED face-face feature id, or `None` for
+    /// every other id. Every decode is re-encoded through [`feature_face_clip`] and must
+    /// reproduce the id, so the A7-N1 floors that read it cannot drift from the layout.
+    fn clip_fields(id: u32) -> Option<(u32, u32, u32)> {
+        if id & super::super::TAG_NON_FACE != 0 || id & super::super::TAG_FACE_CLIP == 0 {
+            return None;
+        }
+        let fields = ((id >> 6) & 0x7, (id >> 2) & 0xF, id & 0x3);
+        assert_eq!(
+            feature_face_clip(fields.0, fields.1, fields.2),
+            id,
+            "clip id {id:#x} does not re-encode to itself: `clip_fields` no longer matches \
+             `feature_face_clip`'s layout"
+        );
+        Some(fields)
+    }
+
+    /// Scans one manifold's ids for A7-N1: every repeated id is pushed onto `duplicates`,
+    /// described by `at`. Returns `(shared_edge, shared_plane)`: whether two CLIPPED points
+    /// share `(ref_face, cut_edge)` — one polygon edge cut by two side planes, which only the
+    /// `plane` field tells apart — and whether two share `(ref_face, plane)` — two edges cut
+    /// by one plane, which only `cut_edge` tells apart. Both are read from the fields
+    /// themselves, so a mutation that drops either field still counts here and reds on the
+    /// duplicate instead.
+    fn scan_ids(
+        ids: &[u32],
+        duplicates: &mut Vec<String>,
+        at: impl Fn() -> String,
+    ) -> (bool, bool) {
+        let mut shared_edge = false;
+        let mut shared_plane = false;
+        for i in 1..ids.len() {
+            for j in 0..i {
+                if ids[i] == ids[j] {
+                    duplicates.push(format!(
+                        "{}: duplicate feature id {:#x} at points {j} and {i} (manifold ids \
+                         {ids:x?})",
+                        at(),
+                        ids[i]
+                    ));
+                }
+                if let (Some(a), Some(b)) = (clip_fields(ids[i]), clip_fields(ids[j])) {
+                    shared_edge |= a.0 == b.0 && a.1 == b.1;
+                    shared_plane |= a.0 == b.0 && a.2 == b.2;
+                }
+            }
+        }
+        (shared_edge, shared_plane)
+    }
+
+    /// A7-N1: EVERY point of EVERY box-box manifold carries a DISTINCT feature id — so no
+    /// two points of one manifold pack the same `warm_start::pack(a, b, feature_id)` key
+    /// and none of them loses its seed to the other on the table's open-addressed insert
+    /// (A7a).
+    ///
+    /// A duplicate id is a property of the clip's LABELLING, so it is swept, not sampled,
+    /// over two geometries. Each is the one that makes a field of [`feature_face_clip`]
+    /// load-bearing, and each has a floor proving it still does:
+    ///
+    /// * **Offset × yaw.** The incident face slides from a near-full overlap out to the
+    ///   pile's own quarter overlap at `(1, 1)`, so two incident edges are cut by ONE side
+    ///   plane and only `cut_edge` tells their intersections apart. The yawed rows clip to
+    ///   more than 4 candidates and carry the reduction through the relabelling. This
+    ///   contains A7-R0's `(1, 1)` case at yaw 0, NOT its other three sign cases — A7-R0
+    ///   is the only gate of those and is not redundant with this test.
+    /// * **Corner-spanning.** The incident face is centred on the reference face, yawed
+    ///   AND pitched, so one incident edge crosses two side planes beside a reference-face
+    ///   corner and the pitch keeps both of its intersections among the deepest. Only
+    ///   `plane` tells them apart. The first sweep never produces this (0 of its 1200
+    ///   manifolds, measured 2026-09-18), so without this sweep a dropped `plane` term
+    ///   stayed green here.
+    ///
+    /// The third field, `ref_face`, is constant over a manifold, so no sweep of this
+    /// property can gate it; [`clipped_ids_of_different_reference_faces_never_coincide`]
+    /// does.
+    #[test]
+    fn every_manifold_point_carries_a_distinct_feature_id() {
+        // ── Sweep 1: offset × yaw ──
+        //
+        // 20 × 20 offsets per yaw, from 0.05 to the quarter overlap at 1.0 inclusive. The
+        // contact is guaranteed BY CONSTRUCTION: the incident face's centre is the offset,
+        // so for an offset in the CLOSED reference face the incident face's inscribed disc
+        // (radius 1) overlaps the reference face with positive area — a quarter disc at
+        // (1, 1) — and with the 1 mm overlap in y the boxes intersect, so no separating axis
+        // exists. Past 1.0 that stops holding: at offset (1.75, 1.75), yaw 0.45, the
+        // cross-product axis `a.y × b.x` separates the pair by 2 mm.
+        const STEPS: usize = 20;
+        const YAWS: [f32; 3] = [0.0, 0.2, 0.45];
+        const OFFSET_LO: f32 = 0.05;
+        const OFFSET_HI: f32 = 1.0;
+        const OFFSET_SPAN: f32 = OFFSET_HI - OFFSET_LO;
+
+        let mut duplicates: Vec<String> = Vec::new();
+        let mut swept = 0usize;
+        let mut four_point = 0usize;
+        let mut one_plane_two_edges = 0usize;
+        for &yaw in &YAWS {
+            let half_angle = yaw * 0.5;
+            let rot = Quat::new(0.0, half_angle.sin(), 0.0, half_angle.cos());
+            for ix in 0..STEPS {
+                for iz in 0..STEPS {
+                    let dx = OFFSET_LO + OFFSET_SPAN * ix as f32 / (STEPS - 1) as f32;
+                    let dz = OFFSET_LO + OFFSET_SPAN * iz as f32 / (STEPS - 1) as f32;
+                    let contact = box_box_contact(
+                        A,
+                        B,
+                        Vec3::ZERO,
+                        Quat::IDENTITY,
+                        Vec3::new(1.0, 1.0, 1.0),
+                        Vec3::new(dx, 2.0 - 1.0e-3, dz),
+                        rot,
+                        Vec3::new(1.0, 1.0, 1.0),
+                        None,
+                    )
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "construction: offset ({dx}, {dz}) yaw {yaw} puts the incident face's \
+                             centre on the reference face and overlaps by 1 mm in y, so the \
+                             boxes intersect and no separating axis exists"
+                        )
+                    });
+                    let m = contact.manifold;
+                    let count = usize::from(m.count);
+                    swept += 1;
+                    if count == 4 {
+                        four_point += 1;
+                    }
+                    let ids: Vec<u32> =
+                        m.points[..count].iter().map(|p| p.feature_id).collect();
+                    let (_, shared_plane) = scan_ids(&ids, &mut duplicates, || {
+                        format!("offset ({dx}, {dz}) yaw {yaw}")
+                    });
+                    one_plane_two_edges += usize::from(shared_plane);
+                }
+            }
+        }
+
+        // ── Sweep 2: corner-spanning (yaw × pitch × offset) ──
+        //
+        // B is turned by yaw about y, then pitched about x, and placed so the centre of its
+        // incident (local -y) face sits 1 mm below A's top face at (ox, oz). That point is
+        // on B's surface and strictly inside A, so the boxes intersect BY CONSTRUCTION and
+        // no separating axis exists. Offsets stay near the centre so every incident edge
+        // runs past a reference-face corner.
+        const CORNER_YAWS: usize = 8; // 0.05 ..= 0.40
+        const CORNER_PITCHES: usize = 5; // 0.01 ..= 0.05
+        const CORNER_OFFSETS: [f32; 3] = [-0.2, 0.0, 0.2];
+        const DIP: f32 = 1.0e-3;
+
+        let mut corner_swept = 0usize;
+        let mut one_edge_two_planes = 0usize;
+        for iy in 0..CORNER_YAWS {
+            let yaw = 0.05 * (iy + 1) as f32;
+            let turn = Quat::new(0.0, (yaw * 0.5).sin(), 0.0, (yaw * 0.5).cos());
+            for ip in 0..CORNER_PITCHES {
+                let pitch = 0.01 * (ip + 1) as f32;
+                let tilt = Quat::new((pitch * 0.5).sin(), 0.0, 0.0, (pitch * 0.5).cos());
+                let rot = turn * tilt;
+                let incident_centre = rot.rotate(Vec3::new(0.0, -1.0, 0.0));
+                for &ox in &CORNER_OFFSETS {
+                    for &oz in &CORNER_OFFSETS {
+                        let centre = Vec3::new(ox, 1.0 - DIP, oz) - incident_centre;
+                        let contact = box_box_contact(
+                            A,
+                            B,
+                            Vec3::ZERO,
+                            Quat::IDENTITY,
+                            Vec3::new(1.0, 1.0, 1.0),
+                            centre,
+                            rot,
+                            Vec3::new(1.0, 1.0, 1.0),
+                            None,
+                        )
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "construction: yaw {yaw} pitch {pitch} offset ({ox}, {oz}) puts a \
+                                 point of B's incident face 1 mm inside A, so the boxes intersect \
+                                 and no separating axis exists"
+                            )
+                        });
+                        let m = contact.manifold;
+                        let ids: Vec<u32> = m.points[..usize::from(m.count)]
+                            .iter()
+                            .map(|p| p.feature_id)
+                            .collect();
+                        corner_swept += 1;
+                        let (shared_edge, _) = scan_ids(&ids, &mut duplicates, || {
+                            format!("yaw {yaw} pitch {pitch} offset ({ox}, {oz})")
+                        });
+                        one_edge_two_planes += usize::from(shared_edge);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            (swept, corner_swept),
+            (
+                STEPS * STEPS * YAWS.len(),
+                CORNER_YAWS * CORNER_PITCHES * CORNER_OFFSETS.len() * CORNER_OFFSETS.len()
+            ),
+            "construction: both sweeps must visit every cell"
+        );
+        // The property first, so a dropped field reds with the duplicate it makes rather
+        // than with a floor below.
+        assert!(duplicates.is_empty(), "{}", duplicates.join("; "));
+
+        // Anti-vacuity, one floor per sweep, each counting the configuration the sweep
+        // exists for. A manifold of one point is distinct for free: the axis-aligned rows
+        // alone clip every offset of sweep 1 to a proper rectangle, so one row's worth of
+        // 4-point manifolds is the floor. The field floors are one yaw row's worth (sweep
+        // 1) and one per yaw × pitch cell (sweep 2), against 1151 of 1200 and 215 of 360
+        // measured (2026-09-18) — low enough to survive a narrowphase change that merely
+        // moves which points the reduction keeps, and far above the 0 of a sweep that no
+        // longer reaches its configuration.
+        assert!(
+            four_point >= STEPS * STEPS,
+            "sweep 1 produced only {four_point} four-point manifolds out of {swept}: it is no \
+             longer measuring the clipped face path the duplicate ids live on"
+        );
+        assert!(
+            one_plane_two_edges >= STEPS * STEPS,
+            "sweep 1: only {one_plane_two_edges} of {swept} manifolds keep two intersections cut \
+             by one side plane on two edges, so it no longer shows that `cut_edge` is what \
+             separates them"
+        );
+        assert!(
+            one_edge_two_planes >= CORNER_YAWS * CORNER_PITCHES,
+            "sweep 2: only {one_edge_two_planes} of {corner_swept} manifolds keep two \
+             intersections of one edge cut by two side planes, so it no longer shows that \
+             `plane` is what separates them"
+        );
+    }
+
+    /// A7-N1 (third arm): a CLIPPED point's id never equals one from another reference
+    /// face of the SAME pair — so when a pair's reference face changes, its old seeds miss
+    /// instead of being handed to unrelated points. The corner ids get the same guarantee
+    /// from [`feature_face_face`]'s own `ref_face` field.
+    ///
+    /// This is the field of [`feature_face_clip`] that A7-N1's within-manifold sweeps cannot
+    /// gate: `ref_face` is constant over one manifold. So one pair `(A, B)` is put in face
+    /// contact across A's `+x`, `+y` and `+z` faces with B turned about the contact normal
+    /// only, which puts the reference face — whichever box owns it — on a different axis in
+    /// each group BY CONSTRUCTION. The groups' clipped ids must be pairwise disjoint, and
+    /// the anti-vacuity guard requires a `(cut_edge, plane)` label that occurs under two
+    /// reference faces: on those ids `ref_face` is the only field left to tell them apart.
+    #[test]
+    fn clipped_ids_of_different_reference_faces_never_coincide() {
+        const STEPS: usize = 5; // offsets 0.05 ..= 0.85 on the contact face
+        const TURNS: [f32; 3] = [0.0, 0.2, 0.45];
+
+        let mut groups: Vec<Vec<u32>> = Vec::with_capacity(3);
+        for axis in 0..3 {
+            let mut clipped: Vec<u32> = Vec::new();
+            for &turn in &TURNS {
+                let (s, c) = (turn * 0.5).sin_cos();
+                for iu in 0..STEPS {
+                    for iv in 0..STEPS {
+                        let u = 0.05 + 0.2 * iu as f32;
+                        let v = 0.05 + 0.2 * iv as f32;
+                        // B's face along `axis` stays exactly on `axis` under a turn about it,
+                        // and the incident face's centre sits on A's face 1 mm deep, so the
+                        // contact holds by A7-N1 sweep 1's argument.
+                        let (centre, rot) = match axis {
+                            0 => (Vec3::new(2.0 - 1.0e-3, u, v), Quat::new(s, 0.0, 0.0, c)),
+                            1 => (Vec3::new(u, 2.0 - 1.0e-3, v), Quat::new(0.0, s, 0.0, c)),
+                            _ => (Vec3::new(u, v, 2.0 - 1.0e-3), Quat::new(0.0, 0.0, s, c)),
+                        };
+                        let m = box_box_contact(
+                            A,
+                            B,
+                            Vec3::ZERO,
+                            Quat::IDENTITY,
+                            Vec3::new(1.0, 1.0, 1.0),
+                            centre,
+                            rot,
+                            Vec3::new(1.0, 1.0, 1.0),
+                            None,
+                        )
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "construction: axis {axis} offset ({u}, {v}) turn {turn} overlaps \
+                                 A's face by 1 mm with the incident face's centre on it"
+                            )
+                        })
+                        .manifold;
+                        for p in &m.points[..usize::from(m.count)] {
+                            if clip_fields(p.feature_id).is_none() {
+                                continue;
+                            }
+                            let n = [m.normal.x, m.normal.y, m.normal.z];
+                            assert!(
+                                n[axis] > 0.99,
+                                "construction: a clipped face contact across A's +axis-{axis} \
+                                 face must carry that axis as its normal, or its reference face \
+                                 is not on axis {axis}; normal {:?}",
+                                m.normal
+                            );
+                            if !clipped.contains(&p.feature_id) {
+                                clipped.push(p.feature_id);
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(
+                !clipped.is_empty(),
+                "construction: the face contacts across axis {axis} produced no clipped point, \
+                 so there is nothing to compare"
+            );
+            groups.push(clipped);
+        }
+
+        let mut shared: Vec<String> = Vec::new();
+        for i in 1..groups.len() {
+            for j in 0..i {
+                for &id in &groups[i] {
+                    if groups[j].contains(&id) {
+                        shared.push(format!(
+                            "{id:#x} under the axis-{j} and axis-{i} reference faces"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            shared.is_empty(),
+            "clipped feature ids repeat across reference faces of one pair: {}",
+            shared.join(", ")
+        );
+
+        let label = |id: u32| {
+            let (_, cut_edge, plane) =
+                clip_fields(id).expect("invariant: every grouped id is a clip id");
+            (cut_edge, plane)
+        };
+        let label_under_two_faces = (1..groups.len()).any(|i| {
+            (0..i).any(|j| {
+                groups[i]
+                    .iter()
+                    .any(|&a| groups[j].iter().any(|&b| label(a) == label(b)))
+            })
+        });
+        assert!(
+            label_under_two_faces,
+            "no (cut_edge, plane) label occurs under two reference faces, so `ref_face` \
+             separates nothing here and this arm gates nothing; groups {groups:x?}"
+        );
+    }
+
+    /// A7-N1 (second arm): every tie-break in [`reduce_points`] reads `tie_ord` —
+    /// the pre-A7a ordinal — and NEVER `feature_id`, so the injective ids are a
+    /// pure relabelling and the reduction's kept set and order are byte-identical
+    /// to the committed behaviour.
+    ///
+    /// The fixture is five coplanar candidates at one separation, so the ordinal
+    /// decides at every stage (deepest, farthest, and the two spread picks), with
+    /// the ordinal order and the feature-id order deliberately inverse. Reading
+    /// `feature_id` instead picks a different deepest point — every clipped id has
+    /// bit 13 set and therefore sorts above every corner id — and the whole kept
+    /// set follows it.
+    #[test]
+    fn reduction_tie_break_reads_the_ordinal_not_the_feature_id() {
+        let point = |x: f32, z: f32, tie_ord: usize, feature_id: u32| ScoredPoint {
+            pos: Vec3::new(x, 0.0, z),
+            separation: -0.5,
+            tie_ord,
+            feature_id,
+        };
+        let points = [
+            point(0.0, 0.0, 7, 0x2001),
+            point(2.0, 0.0, 5, 0x2002),
+            point(0.0, 2.0, 3, 0x2003),
+            point(2.0, 2.0, 1, 0x2004),
+            point(1.0, 1.0, 0, 0x2005),
+        ];
+        assert!(
+            points.iter().all(|p| p.separation == points[0].separation),
+            "construction: one separation for all five, or the deepest pick never reaches a \
+             tie-break and the test measures nothing"
+        );
+        let by_ord = (0..points.len())
+            .min_by_key(|&i| points[i].tie_ord)
+            .expect("invariant: the fixture is non-empty");
+        let by_id = (0..points.len())
+            .min_by_key(|&i| points[i].feature_id)
+            .expect("invariant: the fixture is non-empty");
+        assert_ne!(
+            by_ord, by_id,
+            "construction: the two keys must disagree on this fixture, or a tie-break reading the \
+             wrong one would be invisible"
+        );
+
+        let mut out = [point(0.0, 0.0, 0, 0); 4];
+        let kept = reduce_points(&points, Vec3::new(0.0, 1.0, 0.0), &mut out);
+        let kept_ord: Vec<usize> = out[..kept].iter().map(|p| p.tie_ord).collect();
+        let kept_ids: Vec<u32> = out[..kept].iter().map(|p| p.feature_id).collect();
+        assert_eq!(
+            kept_ord,
+            vec![0usize, 1, 5, 3],
+            "reduction order changed: kept ordinals {kept_ord:?} (feature ids {kept_ids:x?}); \
+             committed behaviour keeps ordinals [0, 1, 5, 3]"
+        );
     }
 
     /// A near-parallel resting pair keeps the SAME feature ids across a tiny

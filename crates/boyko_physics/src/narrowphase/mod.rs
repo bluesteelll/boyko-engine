@@ -39,6 +39,26 @@
 //! The id is derived from the CLIPPED-FEATURE identity, not the raw SAT axis
 //! index, so it does not flip when the SAT axis flips under FP noise — that, plus
 //! the reference-axis hysteresis in [`box_box`], is what holds a resting box stack.
+//!
+//! # Why a face-face manifold needs TWO id encoders (A7a)
+//!
+//! Only the incident face's ORIGINAL corners are named by a corner index. A
+//! Sutherland-Hodgman intersection is born on an edge and has no corner of its
+//! own, and naming it after one of its two endpoints is not an identity: a
+//! quarter-overlap face contact clips all four corners away and every surviving
+//! point inherits the same endpoint, so one manifold carries one id four times.
+//! `warm_start::pack` then packs equal keys and the open-addressed insert
+//! overwrites all but one of them. Measured on a resting height-15 pile: 1926 of
+//! 5044 manifolds (38.2 %) and 3682 of 12817 contact points (28.7 %) are exposed
+//! to it.
+//!
+//! An intersection is therefore named by the two features that CREATED it — the
+//! polygon edge it was cut on and the reference-face side plane that cut it —
+//! via [`feature_face_clip`], the shape Box2D Lite's four-field `FeaturePair`,
+//! Box2D v3's `B2_MAKE_ID` and Box3D's `b3MakeFeaturePair` all take. Both
+//! encoders live in the face-face class (bit 15 CLEAR) and are separated from
+//! each other by bit 13, so a corner and an intersection never alias while a
+//! class transition still misses warm-start.
 
 pub mod axis_cache;
 pub mod box_box;
@@ -53,21 +73,69 @@ const TAG_NON_FACE: u32 = 0x8000;
 /// selects edge-edge.
 const TAG_VERTEX_FACE: u32 = 0x4000;
 
+/// Bit 13: within the face-face class (bits 15 and 14 CLEAR), SET selects a
+/// CLIPPED intersection ([`feature_face_clip`]), CLEAR an original incident
+/// corner ([`feature_face_face`]).
+const TAG_FACE_CLIP: u32 = 0x2000;
+
 /// Packs a face-face contact's feature id from the reference-face index and the
-/// incident-face vertex index (P2 W3/W4).
+/// index of an ORIGINAL incident-face corner (P2 W3/W4).
 ///
-/// `ref_face ∈ 0..6` (the 6 box faces), `incident_vtx ∈ 0..8` (the clipped
-/// incident-face vertex). The high bit stays CLEAR (face-face class). The id is a
-/// pure function of the clipped feature identity, so it is stable as long as the
-/// same reference face clips the same incident vertex — independent of the raw
-/// SAT min-axis numbering.
+/// `ref_face ∈ 0..6` (the 6 box faces), `incident_vtx ∈ 0..8` (the incident
+/// face's own corner, the one that survived the clip). A vertex the clip
+/// CREATED has no corner of its own and is named by [`feature_face_clip`]
+/// instead. The high bit stays CLEAR (face-face class). The id is a pure
+/// function of the clipped feature identity, so it is stable as long as the same
+/// reference face keeps the same incident corner — independent of the raw SAT
+/// min-axis numbering.
 #[inline]
 pub fn feature_face_face(ref_face: u32, incident_vtx: u32) -> u32 {
     debug_assert!(ref_face < 6, "invariant: a box has 6 faces (ref_face < 6)");
     debug_assert!(incident_vtx < 8, "invariant: a box has 8 vertices (incident_vtx < 8)");
-    // 3 bits ref_face (0..6), 3 bits incident_vtx (0..8): max 0b101_101 = 0x2D,
-    // well below bit 15 — the face-face class is the low region.
+    // 3 bits ref_face (0..6), 3 bits incident_vtx (0..8): max 0b101_111 = 0x2F,
+    // below bit 13 — surviving corners are the low region of the face-face class.
     (ref_face << 3) | incident_vtx
+}
+
+/// Packs a CLIPPED face-face contact vertex's feature id from the two features
+/// that created it: the polygon edge it was cut on and the reference-face side
+/// plane that cut it (A7a).
+///
+/// `ref_face ∈ 0..6`, `cut_edge ∈ 0..12` (the incident face's ring edges `0..4`,
+/// or `8 + q` for an edge lying in reference side plane `q` — an edge a previous
+/// clip pass created), `plane ∈ 0..4` (the reference side plane index).
+///
+/// Layout, high → low: bit 13 `TAG_FACE_CLIP` | `ref_face` 3 bits << 6 |
+/// `cut_edge` 4 bits << 2 | `plane` 2 bits. The maximum is `0x216F`, so bits 15
+/// and 14 stay CLEAR — this is still the face-face class, disjoint from
+/// edge-edge and vertex-face — and the id fits the 16-bit feature field of
+/// [`warm_start::pack`](crate::solver::warm_start::pack).
+///
+/// # Injectivity within one manifold
+///
+/// The three arguments are the whole identity, and each is pinned:
+///
+/// - `ref_face` is a constant of the manifold (one reference face clips the
+///   whole incident polygon), so it never separates two points and never lets
+///   two manifolds of different reference faces share an id.
+/// - `plane` is clipped exactly once per manifold — the four side planes run in
+///   a fixed order — so two intersections cut by different planes differ here.
+/// - `cut_edge` separates the (at most two) intersections one plane creates: a
+///   convex polygon crosses a plane at most twice, on two DISTINCT edges, and
+///   the working ring holds at most one edge per label (each original ring edge
+///   survives as at most one segment, and a clip against plane `q` adds at most
+///   one new edge, labelled `8 + q` — none when the plane does not cut).
+///
+/// Distinct intersections therefore carry distinct ids under every clipping
+/// order, and bit 13 keeps them disjoint from the surviving corners' ids —
+/// which is the whole of A7a: every point of a face manifold gets its own
+/// warm-start key.
+#[inline]
+pub fn feature_face_clip(ref_face: u32, cut_edge: u32, plane: u32) -> u32 {
+    debug_assert!(ref_face < 6, "invariant: a box has 6 faces (ref_face < 6)");
+    debug_assert!(cut_edge < 12, "invariant: 4 incident ring edges + 4 clip-plane edges (cut_edge < 12)");
+    debug_assert!(plane < 4, "invariant: a reference face has 4 side planes (plane < 4)");
+    TAG_FACE_CLIP | (ref_face << 6) | (cut_edge << 2) | plane
 }
 
 /// Packs an edge-edge contact's feature id from the two crossed edge-axis indices
@@ -102,15 +170,22 @@ mod tests {
 
     use super::*;
 
-    /// The three feature-id classes are pairwise DISJOINT across their full index
-    /// ranges (no id produced by one class equals an id from another). This is the
-    /// warm-start-miss-on-class-transition guarantee (P2 W4).
-    #[test]
-    fn feature_id_classes_are_disjoint() {
+    /// Every id of every encoder, in index order: `(face_face, face_clip,
+    /// edge_edge, vertex_face)`. Exhaustive over each encoder's whole input
+    /// range, so the disjointness check below is a proof rather than a sample.
+    fn all_ids() -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
         let mut face_face = Vec::new();
         for rf in 0..6 {
             for v in 0..8 {
                 face_face.push(feature_face_face(rf, v));
+            }
+        }
+        let mut face_clip = Vec::new();
+        for rf in 0..6 {
+            for e in 0..12 {
+                for p in 0..4 {
+                    face_clip.push(feature_face_clip(rf, e, p));
+                }
             }
         }
         let mut edge_edge = Vec::new();
@@ -122,6 +197,32 @@ mod tests {
         let mut vertex_face = Vec::new();
         for v in 0..8 {
             vertex_face.push(feature_vertex_face(v));
+        }
+        (face_face, face_clip, edge_edge, vertex_face)
+    }
+
+    /// The four feature-id encoders are pairwise DISJOINT across their full index
+    /// ranges (no id produced by one equals an id from another). Across the three
+    /// CLASSES this is the warm-start-miss-on-class-transition guarantee (P2 W4);
+    /// between the two face-face encoders it is A7a's own guarantee — a surviving
+    /// incident corner never aliases a vertex the clip created.
+    #[test]
+    fn feature_id_classes_are_disjoint() {
+        let (face_face, face_clip, edge_edge, vertex_face) = all_ids();
+
+        for &fc in &face_clip {
+            assert!(fc & TAG_NON_FACE == 0, "face-clip must stay in the face-face class: {fc:#x}");
+            assert!(fc & TAG_VERTEX_FACE == 0, "face-clip must stay in the face-face class: {fc:#x}");
+            assert!(fc & TAG_FACE_CLIP != 0, "face-clip must set bit 13: {fc:#x}");
+            assert!(fc <= 0x216F, "face-clip must fit the documented maximum: {fc:#x}");
+            assert!(!face_face.contains(&fc), "face-clip aliases a face-face corner id: {fc:#x}");
+        }
+        for &ff in &face_face {
+            assert!(ff & TAG_FACE_CLIP == 0, "a corner id must clear bit 13: {ff:#x}");
+        }
+        // Every id of every encoder fits the 16-bit warm-start key field.
+        for &id in face_face.iter().chain(&face_clip).chain(&edge_edge).chain(&vertex_face) {
+            assert!(id <= 0xFFFF, "feature id must fit warm_start::pack's 16-bit field: {id:#x}");
         }
 
         for &ff in &face_face {
@@ -138,7 +239,7 @@ mod tests {
         }
     }
 
-    /// Each class is internally injective (distinct inputs → distinct ids), so
+    /// Each encoder is internally injective (distinct inputs → distinct ids), so
     /// distinct contact features warm-start independently.
     #[test]
     fn feature_id_is_injective_within_a_class() {
@@ -146,6 +247,17 @@ mod tests {
         for rf in 0..6 {
             for v in 0..8 {
                 assert!(seen.insert(feature_face_face(rf, v)), "face-face id collision");
+            }
+        }
+        seen.clear();
+        for rf in 0..6 {
+            for e in 0..12 {
+                for p in 0..4 {
+                    assert!(
+                        seen.insert(feature_face_clip(rf, e, p)),
+                        "face-clip id collision at (ref_face {rf}, cut_edge {e}, plane {p})"
+                    );
+                }
             }
         }
         seen.clear();

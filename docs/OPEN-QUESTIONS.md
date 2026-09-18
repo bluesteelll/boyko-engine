@@ -24,7 +24,8 @@ Found while closing defect A4 (the sleep latch that survived the loss of support
 (`physics_apply` writing into another body's row). **Neither is A4's or A5's to fix**, and both were
 about to exist only in `#[ignore]` reason strings, so they are written down here before the lane
 closes. This entry is the record a future session finds by grepping `docs/` for open physics
-defects; the four tests below are red BY DESIGN until the A7 lane lands.
+defects; the four tests below are red BY DESIGN until the A7 lane lands. Since A7a (2026-09-18),
+two of them, A7-R0 and G8, are green (see each).
 
 ### A7 — a resting box pyramid creeps sideways, and tall piles never come to rest
 
@@ -42,8 +43,8 @@ defects; the four tests below are red BY DESIGN until the A7 lane lands.
   awake. A future session must NOT re-open A4 for the height ≥ 7 non-settling; that reading was
   taken and it excludes A4.
 
-**Red-first tests** — all in `crates/boyko_physics/tests/sleep_settles_box_piles.rs`, each carrying
-`#[ignore = "deferred: …"]` with its own release-mode re-run command:
+**Red-first tests** — all in `crates/boyko_physics/tests/sleep_settles_box_piles.rs`. A7-R1 and
+A7-R2 each carry `#[ignore = "deferred: …"]` with its own release-mode re-run command:
 
 - `a_resting_jolt_pyramid_does_not_creep_with_sleeping_off` (A7-R1) — the creep bound above. Its
   window opens with a standing guard (`STANDING_DROP_M`) so a collapsed-and-resting pile cannot
@@ -51,6 +52,8 @@ defects; the four tests below are red BY DESIGN until the A7 lane lands.
 - `a_jolt_scale_box_pyramid_freezes` (A7-R2) — the height-15 pile freezes and holds.
 - `a_height_6_box_pyramid_freezes` (G8) — the height-6 pile freezes and holds; red today because
   onset flicker keeps it awake.
+  **Green since A7a (2026-09-18, msvc release).** Base `9f712204` did not freeze in 6000 steps;
+  with A7a it froze at step 128. Its `deferred:` ignore became the file's release-only `slow:` form.
 
 ### A7a — a quarter-overlap face contact repeats a feature id, so two warm-start keys collide
 
@@ -63,6 +66,8 @@ corner ids, which is where the collision comes from.
 
 **Red-first test:** `a_quarter_overlap_face_contact_has_distinct_feature_ids` (A7-R0), same file.
 It is device-free and schedule-free, so it runs in either profile and under Miri.
+**Green since A7a (2026-09-18).** A clipped point is now named by the two features that created it
+(`narrowphase::feature_face_clip`). The test has no `#[ignore]` any more.
 
 ### What is NOT decided
 
@@ -5177,6 +5182,12 @@ machine, its `PyramidScene.h` transcribed index for index) leaves the deficit in
 | 8 | 4.21 | 4.18 | 20.45 | 0.89 |
 | 16 | 3.95 | 4.45 | 25.07 | 0.73 |
 
+⚠ **Measured on the pre-A7 contact set** (noted 2026-09-18). Every boyko number here predates A7a,
+which gives each clipped face-contact point its own feature id. That changes the pile's contact set
+and warm-start keys: on A7-R1's height-15 pile at step 600, 12817 points before it and 14605 after.
+A re-run on a tree with A7a measures a different workload, so a difference from these numbers is
+not a solver or pool change until the same run on a tree without A7a (`9f712204`, for one) shows it.
+
 ⚠ **CORRECTED 2026-09-09 evening — the "within 4 %" this paragraph used to claim was an artifact of
 comparing across measurement sessions.** The boyko column above (18.27) was measured after the
 `BroadphaseGrid` migration; the Jolt column (17.59) was carried over from the earlier head-to-head.
@@ -5550,6 +5561,12 @@ one receipt and is marked DIRTY.
 | 16 | 5.037 | 3.93 | 13.237 | 1.54 | 2.38 |
 
 Medians of three passes. Pass 1 (cleanest) boyko scaling: 1.00 / 1.23 / 1.73 / **1.98** / 1.89.
+
+⚠ **Measured on the pre-A7 contact set** (noted 2026-09-18). Every boyko number here predates A7a,
+which gives each clipped face-contact point its own feature id. That changes the pile's contact set
+and warm-start keys: on A7-R1's height-15 pile at step 600, 12817 points before it and 14605 after.
+A re-run on a tree with A7a measures a different workload, so a difference from these numbers is
+not a solver or pool change until the same run on a tree without A7a (`9f712204`, for one) shows it.
 
 **What changed, drift-free.** The ratio boyko/Jolt is taken back to back within seconds and does not depend
 on the box's state: **2.16 → 1.15** (W=2), **3.51 → 1.73** (W=4), **5.16 → 2.47** (W=8), **6.69 → 2.38**

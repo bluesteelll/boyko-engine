@@ -178,8 +178,15 @@ cold remap needs a hash instead of sort + binary search. Correctness is gated by
 ⚠ `benches/sleeping.rs` CANNOT see this change: it drives the solver directly with no gather, so
 every consumer classifies `Identity`. Do not use it for this entry.
 
+⚠ **Arm B is the fix commit `b74f7ee8`, not a later tree** (pinned 2026-09-18). Its only parent is
+arm A. A7a, the first step of the A7 lane, gives each clipped face-contact point its own feature id.
+That changes the contact set every pile arm here measures: on A7-R1's height-15 pile at step 600 it
+goes from 5044 manifolds / 12817 points to 5223 / 14605, and the warm-start keys move with the ids. A B
+arm on a tree with A7a prices the fix plus a different workload. To measure on a later tree, port arm A
+onto the same narrowphase first.
+
 ```bash
-# Arms: A = d5782d43 (no fix), B = the fix. Idle-machine receipt first (§0). No RUSTFLAGS (§1).
+# Arms: A = d5782d43 (no fix), B = b74f7ee8 (the fix, before A7a; see above). Idle-machine receipt first (§0). No RUSTFLAGS (§1).
 # Run A twice interleaved with B to get the A/A spread.
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/4
@@ -233,8 +240,12 @@ iteration start. Expected B/A = 1.000.
 
 ⚠ `benches/sleeping.rs` and `benches/parallel_solve.rs` run no gather and no apply. Do not use them.
 
+⚠ **Arm B is the fix commit `a56007ab`, not a later tree** (pinned 2026-09-18). Its only parent is
+arm A. The reason is the one given in §6: A7a changes the pile's contact set, so a B arm with A7a
+prices a different workload.
+
 ```bash
-# Arms: A = d552be05 (the defect), B = the fix. Idle-machine receipt first (§0). No RUSTFLAGS (§1).
+# Arms: A = d552be05 (the defect), B = a56007ab (the fix, before A7a; see above). Idle-machine receipt first (§0). No RUSTFLAGS (§1).
 # Run A twice interleaved with B for the A/A spread.
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/4
@@ -250,8 +261,11 @@ cargo bench -p boyko-physics --bench soft_step_sp2 -- soft_step_sp2/coupled # fi
   the body set, so the fix removes no work there.
 - R3: `soft_step_sp2/coupled` B/A outside the A/A spread by > 2 % → the fixture migration changed the
   measured work; investigate before accepting it.
-- R4: if `alloc_frame_census` S1a/S1b/S1c or any `alloc_frame_attribution` row moves at all, stop —
-  the fix is specified to add zero allocations.
+- R4: if `alloc_frame_census` S1a/S1b/S1c or any `alloc_frame_attribution` row moves at all between
+  the two arms, stop — the fix is specified to add zero allocations. The S1c release pin itself moved on
+  2026-09-18, when A7a re-drew its deterministic window (re-pinned from a long-run adjudication, no new
+  allocation site; see the `alloc_frame_census.rs` header, "S1c after A7a"). That move is not A5's and
+  does not trigger R4. Compare the two arms' own census runs, never either arm against today's pin.
 
 **Report:** medians and the A/A spread, both worker counts, both sleeping settings.
 
@@ -295,7 +309,7 @@ bookkeeping, not dispatch):
 
 ```bash
 # Arms: A = d552be05 with the bench's `contact_wakes` helper body replaced by `0` (see below),
-# B = this tree. Idle-machine receipt first (§0). No RUSTFLAGS (§1).
+# B = a56007ab (the fix, before A7a; its only parent is d552be05; see §6 for why). Idle-machine receipt first (§0). No RUSTFLAGS (§1).
 # Run A twice interleaved with B to get the A/A spread.
 cargo bench -p boyko-physics --bench sleeping_pipeline   # all three arms
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1   # cross-check, no sleeping

@@ -42,22 +42,24 @@
 //!
 //! **Defect A7.** A resting box pyramid creeps sideways with a fixed (-x, -z) bias and its
 //! contact set keeps changing at rest, so piles of height 7 or more never reach a 60-step
-//! quiet window. A7-R0 (a face contact that repeats a feature id), A7-R1 (Jolt's pyramid
-//! creeps with sleeping off), A7-R2 (Jolt's pyramid freezes) and G8 (a height-6 pile
-//! freezes) are its red-first tests, `deferred:` until the A7 lane lands.
+//! quiet window. Its red-first tests are A7-R0 (a face contact that repeats a feature id),
+//! A7-R1 (Jolt's pyramid creeps with sleeping off), A7-R2 (Jolt's pyramid freezes) and G8
+//! (a height-6 pile freezes). A7a (clipped face-contact points carry injective feature ids)
+//! greened A7-R0 and G8, and their ignores are gone. A7-R1 and A7-R2 stay `deferred:`
+//! until the rest of the A7 lane lands.
 //!
 //! # Legs
 //!
 //! * G1, G3, G4 and G5 (height-4 piles, 30 boxes) run in both profiles, in the ordinary
 //!   `cargo test -p boyko-physics --test sleep_settles_box_piles` run.
-//! * G2, G6 (height 5, 55 boxes) and G7 (sixteen height-4 draws) run ONLY in release, as part
-//!   of the ordinary release run:
+//! * G2, G6 (height 5, 55 boxes), G7 (sixteen height-4 draws) and G8 (height 6, 91 boxes)
+//!   run ONLY in release, as part of the ordinary release run:
 //!   `cargo test --release -p boyko-physics --test sleep_settles_box_piles -- --test-threads=6`.
 //!   In a debug build they are ignored, and `-- --ignored` in a debug build is NOT their leg.
-//! * G8, A7-R1 and A7-R2 are `deferred:` and run by name with `--ignored`, in release:
+//! * A7-R1 and A7-R2 are `deferred:` and run by name with `--ignored`, in release:
 //!   `cargo test --release -p boyko-physics --test sleep_settles_box_piles -- --ignored --exact <name>`.
-//!   A7-R0 is device-free and schedule-free, so it runs by name in either profile and under
-//!   Miri.
+//! * A7-R0 is device-free and schedule-free. It runs in the ordinary run in both profiles,
+//!   and under Miri.
 //! * `flicker_redraw_distribution` is a `generator:`: it asserts nothing and prints the
 //!   numbers G2's and G7's budgets are sized from. Re-run it (release, `--ignored --exact`)
 //!   whenever a change re-draws pile trajectories, before touching a budget.
@@ -121,6 +123,7 @@ use boyko_physics::BodyIndex;
 use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::narrowphase::box_box::box_box_contact;
+use boyko_physics::narrowphase::{feature_face_clip, feature_face_face};
 use boyko_physics::plugin::add_physics_colored_solve;
 use boyko_physics::resources::{
     ConstraintGraph, ContactPairs, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
@@ -172,11 +175,20 @@ const G7_MAX_EVENTS: usize = 56;
 const MEASURED_P_HEIGHT_4: f64 = 48.0 / 78.0;
 /// The same at height 5, pooled over its 56 draws (160 events in 216 attempts).
 const MEASURED_P_HEIGHT_5: f64 = 160.0 / 216.0;
-/// G4's mover: layer 0's `j = 3, k = 0` corner, spawned at (2, 1, -4). Measured in the
-/// round-2 probe (`e2_movers.txt`, msvc release): it freezes at step 65 with no contact
-/// wake and has two face-face sideways manifolds (partners 9 and 14) whose reference box
-/// swaps to the mover when it moves into row 1. A pinned trajectory, not a structural
-/// property: 8 of the 16 layer-0 movers fail the premise.
+/// G4's mover: layer 0's `j = 3, k = 0` corner, spawned at (2, 1, -4). A pinned
+/// trajectory, not a structural property — every change to contact ids, impulses or
+/// ordering re-draws it, so the premise is re-measured over all 16 layer-0 movers each time
+/// and a failing mover is replaced from that probe, never by deleting the premise.
+///
+/// * Round-2 probe (`e2_movers.txt`, msvc release, before A7a): freezes at step 65 with no
+///   contact wake; two face-face sideways manifolds (partners 9 and 14) whose reference box
+///   swaps to the mover when it moves into row 1. 8 of the 16 movers failed the premise.
+/// * Re-measured after A7a gave clipped points their own feature ids (2026-09-18, msvc,
+///   debug and release printing identical lines): freezes at step 65 with no contact wake;
+///   ONE face-face sideways manifold, partner 9, reference box 9 -> 13 (the partner-14
+///   manifold no longer forms). Again 8 of 16 pass: 2, 3, 7, 10, 12, 13, 14, 15. Seven have
+///   no lateral manifold before the move (1, 4, 5, 6, 8, 9, 16) and one keeps its
+///   reference box (11). Only mover 7 swaps two (partners 6 and 11).
 const G4_MOVER_ID: u32 = 13;
 /// A7-R1's window: the vertical settle is over by `CREEP_FROM`.
 const CREEP_FROM: usize = 600;
@@ -926,11 +938,10 @@ impl Harness {
     /// For every face-face lateral manifold between `subject` and a body of `pile`, the
     /// partner id and the physical reference box's id, from the last step's manifolds.
     ///
-    /// A face-face contact (`feature_id & 0x8000 == 0`, `narrowphase/mod.rs`) packs the
-    /// reference face as `rf = feature_id >> 3 = ref_axis * 2 + ref_positive`
-    /// (`box_box.rs`): `rf` odd means the reference face is the reference box's `+axis`
-    /// face, so the reference box is the one with the LOWER centre coordinate along the
-    /// normal's dominant axis.
+    /// The reference face `rf = ref_axis * 2 + ref_positive` (`box_box.rs`) is read with
+    /// [`face_face_reference_face`] from EVERY live point, and the points must agree: `rf`
+    /// odd means the reference face is the reference box's `+axis` face, so the reference
+    /// box is the one with the LOWER centre coordinate along the normal's dominant axis.
     fn lateral_reference_boxes(&mut self, subject: u32, pile: &[u32]) -> Lateral {
         let walk = self.walk_ids();
         let subject_row = walk
@@ -964,11 +975,19 @@ impl Harness {
                 continue;
             }
             out.lateral += 1;
-            let fid = m.points[0].feature_id;
-            if fid & 0x8000 != 0 {
+            let ids: Vec<u32> = m.points[..usize::from(m.count)]
+                .iter()
+                .map(|p| p.feature_id)
+                .collect();
+            let Some(rf) = face_face_reference_face(ids[0]) else {
                 continue;
-            }
-            let rf = fid >> 3;
+            };
+            assert!(
+                ids.iter()
+                    .all(|&id| face_face_reference_face(id) == Some(rf)),
+                "harness: one reference face clips a whole face-face manifold, but the points of \
+                 ({subject}, {other_id}) name different ones; feature ids {ids:x?}"
+            );
             let n = m.normal;
             let axis = if n.x.abs() >= n.y.abs() && n.x.abs() >= n.z.abs() {
                 0
@@ -995,6 +1014,39 @@ struct Lateral {
     lateral: usize,
     /// `(partner id, reference box id)` for the face-face ones.
     face_face: Vec<(u32, u32)>,
+}
+
+/// The reference-face index `ref_axis * 2 + ref_positive` a face-face feature id carries, or
+/// `None` for the edge-edge and vertex-face classes (bit 15 set).
+///
+/// The two face-face encoders store the reference face at different bits:
+/// [`feature_face_face`] (an ORIGINAL incident corner, bit 13 clear) as `ref_face << 3 |
+/// corner`, [`feature_face_clip`] (a vertex the clip CREATED, bit 13 set) as `bit 13 |
+/// ref_face << 6 | cut_edge << 2 | plane`. Reading only the first layout named the wrong
+/// reference box for every clipped point once A7a gave clipped points their own ids. Every
+/// decode is re-encoded through the shipped encoder and must reproduce the id, so a future
+/// layout change reds on the first face-face contact instead of mis-naming a box.
+fn face_face_reference_face(feature_id: u32) -> Option<u32> {
+    if feature_id & 0x8000 != 0 {
+        return None;
+    }
+    let (rf, re_encoded) = if feature_id & 0x2000 != 0 {
+        let rf = (feature_id >> 6) & 0x7;
+        (
+            rf,
+            feature_face_clip(rf, (feature_id >> 2) & 0xF, feature_id & 0x3),
+        )
+    } else {
+        let rf = feature_id >> 3;
+        (rf, feature_face_face(rf, feature_id & 0x7))
+    };
+    assert_eq!(
+        re_encoded, feature_id,
+        "harness: face-face feature id {feature_id:#x} does not re-encode to itself as reference \
+         face {rf}; this decoder no longer matches `narrowphase::feature_face_face` / \
+         `feature_face_clip`"
+    );
+    Some(rf)
 }
 
 /// Floor first, then (optionally) a lone box at (40, 1, 0), then the pile of `height`.
@@ -1398,13 +1450,27 @@ fn sixteen_height_4_draws_freeze_within_the_onset_flicker_budget() {
     });
 }
 
-/// G8 (A7 / A4 Decision 3): a height-6 pile (91 boxes) freezes and holds. Red today: onset
-/// flicker keeps it awake.
+/// G8 (A7 / A4 Decision 3): a height-6 pile (91 boxes) freezes and holds.
+///
+/// A7a greened it, which is why the `deferred:` ignore is gone. Both readings are msvc
+/// release, 2026-09-18:
+///
+/// * Base `9f712204` (before A7a) is RED. It did not freeze within [`LONG_SETTLE_LIMIT`]
+///   steps. `contact_wakes` rose at steps [2315, 2614, 2744, 4550] (364 in total). On the
+///   last step all 91 rows were awake in one island, and the largest `|v|² + |ω|²` over
+///   the last 60 steps was 0.012338251, against a sleep threshold of 1e-4.
+/// * With A7a (clipped face-contact points carry injective feature ids) it is GREEN. It
+///   froze at step 128 with `contact_wakes` 91 and one rise event, at step 68. The same
+///   line prints in debug (1.52 s there, 0.16 s in release).
+///
+/// Every contact change re-draws that freeze step, so it is a reading, not a pin. The
+/// test's bound is [`LONG_SETTLE_LIMIT`].
 #[test]
-#[ignore = "deferred: A7 / A4 Decision 3 — onset flicker keeps this 91-box pile awake; red until A7 \
-            removes contacts that appear and vanish at rest, then it is the Decision 3 post-A7 \
-            check; release only: cargo test --release -p boyko-physics --test \
-            sleep_settles_box_piles -- --ignored --exact a_height_6_box_pyramid_freezes"]
+#[cfg_attr(
+    any(miri, debug_assertions),
+    ignore = "slow: a 91-box pile through the real schedule until frozen; release only, \
+              intractable under Miri"
+)]
 fn a_height_6_box_pyramid_freezes() {
     under_watchdog("G8", MEDIUM_TIMEOUT, || {
         let mut h = Harness::new();
@@ -1423,9 +1489,14 @@ fn a_height_6_box_pyramid_freezes() {
 /// A7-R0 (A7a): a face contact between two unit boxes overlapping by a quarter of a face
 /// (the pile's layer-to-layer contact) carries a distinct feature id on every point, so no
 /// two points of one manifold share a warm-start key.
+///
+/// Red until S1 of the A7 lane, which named a clipped vertex by the two features that
+/// created it ([`feature_face_clip`](boyko_physics::narrowphase::feature_face_clip)) instead
+/// of by `min(prev, cur)` of an endpoint's corner index. The `#[ignore]` comes off in the
+/// same commit that turns it green: a reason string saying "red until the lane lands" on a
+/// passing test is a false statement, and the census checks that a reason EXISTS, not that
+/// it is true.
 #[test]
-#[ignore = "deferred: A7a — one face-contact manifold repeats a feature id; red until the A7 lane \
-            fixes the id; device-free"]
 fn a_quarter_overlap_face_contact_has_distinct_feature_ids() {
     let mut repeats = Vec::new();
     for (sx, sz) in [(1.0f32, 1.0f32), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
@@ -1458,8 +1529,9 @@ fn a_quarter_overlap_face_contact_has_distinct_feature_ids() {
             repeats.push(format!(
                 "offset ({sx}, {sz}): {count} points carry feature ids {ids:?}: two points of one \
                  manifold share the warm-start key pack(a, b, feature_id), so \
-                 WarmStartTable::insert overwrites one with the other (clipped points inherit \
-                 min(prev, cur) corner ids)"
+                 WarmStartTable::insert overwrites one with the other. A clipped point's id must \
+                 name both features that created it (narrowphase::feature_face_clip); before \
+                 A7a they inherited min(prev, cur) corner ids and (1, 1) read [24, 24, 24, 24]"
             ));
         }
     }
