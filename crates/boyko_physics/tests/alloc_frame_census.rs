@@ -102,7 +102,7 @@
 //! more. The debug pile (height 10) does the same over the same 4,352 steps:
 //! 147..196 per step, 73..97 scope frames (6..8 colours), one chunk each,
 //! block means 171.2..181.3. These are the numbers BEFORE A7a; the tree's current
-//! numbers are in "S1c after A7a" below.
+//! numbers are in "S1c after A7b" below.
 //!
 //! (AFTER is identical to three decimals across nine release runs — five on
 //! 2026-09-10, four on 2026-09-11; S1c read 331.797 / 339 in every one, the
@@ -163,6 +163,66 @@
 //! the numbers above (147..196, 73..=97, block means 171.219..181.254). A7a never
 //! reaches six colours (73), and its top (97 / 97 / 195) is base's top.
 //!
+//! **S1c after A7b — wider colours dispatch one more colour; no new allocation site.**
+//! A7b (2026-09-18, the A7 lane's S5: the SAT keeps a resting face pair on its clipped
+//! face patch instead of a near-duplicate edge axis, `FACE_AXIS_PREFERENCE` in
+//! `narrowphase/box_box.rs`) carries up to four points where such a pair carried one, so
+//! the colours carry more slots. Measured on `fix/a7-pile-never-rests` (A7a + A7b, same
+//! scene and toolchain, release; the long run by this file's scene extended to 17 x 256
+//! steady steps):
+//!
+//! ```text
+//!                         A7a (08fe7b9f)              A7a + A7b
+//! census window, mean      336.109                     373.234
+//! census window, range     326..350                    362..375
+//! window histogram         326->39 327->5 338->184     362->19 374->205 375->32
+//!                          339->27 350->1
+//! window scope             121 on 255, 133 on 1        133 on 256
+//! window chunk             205 on 44, 217 on 212       229 on 19, 241 on 237
+//! long run, per step       314..350, mean 334.269      362..375, mean 374.074
+//! long run, block means    325.941..338.129            373.234..374.129
+//! long run, scope          109 x 678, 121 x 3673,      133 x 4352
+//!                          133 x 1
+//! long run, chunk          205 x 722, 217 x 3630       229 x 19, 241 x 4333
+//! OTHER / realloc          0 / 0                       0 / 0
+//! warm-up K (budget 64)    62                          57
+//! ```
+//!
+//! **The proxy FIRED, and a direct count replaced it.** The whole distribution moved up, so
+//! the proxy the A7a adjudication used for an extra fan-out (every block mean at least 12
+//! above base's 307..332) fires, and that protocol said STOP when it fires. The question it
+//! stands in for was measured directly instead: a temporary relaxed counter at the colour
+//! solve's own `pool.scope` (in `solve_color_parallel`; copied in and restored by copy,
+//! sha256-checked) was read around every step of the long run. On all 4,352 steady frames
+//! `scope = 1 + (counted colour dispatches)`, and the count is 132 = 12 passes x 11
+//! colours on every frame, so every scope frame is the install frame or a colour the
+//! solver itself dispatched: one more colour, not an extra fan-out. The chunks moved +24
+//! while the scopes moved +12 because a wider colour spawns more tasks (2,592..2,676 a
+//! frame) and grows its scope's cells past one chunk more often: 1.81 chunks per dispatch
+//! scope in the window, against 1.78 after A7a.
+//!
+//! Why the count outranks the proxy: the proxy reads a mean, and a +12 mean is what BOTH
+//! explanations produce — one extra fan-out per colour pass, or one more dispatched colour
+//! on every frame — so it cannot tell them apart; it was adequate after A7a only because
+//! there the alternative was a single eleven-colour frame in 256. The counter reads the
+//! quantity the proxy stands in for, per frame: an extra fan-out would break
+//! `scope = 1 + (counted colour dispatches)` on every frame, and it held on every frame. The
+//! orchestrator accepted this adjudication on that ground (review of the A7 lane's S5,
+//! 2026-09-18), on condition that this header record that the proxy fired, why the count
+//! replaced it, and the downward headroom the re-pin removed ("The gate", below).
+//!
+//! The kernel as finally committed adopts one more piece of Box3D's rule after that review
+//! (a held face hint that realizes no patch yields to the best face's already-built patch).
+//! Re-run on it, the census window reads the same — release 373.234 / 362..375, debug
+//! 196.250 / 195..219 — and every pin holds; the 17 x 256-step long run was not re-taken.
+//!
+//! The debug scene (height 10) under A7b: 195..219 in the window (mean 196.250), and
+//! 195..220 over the 4,352 steps (mean 200.862, block means 195.125..217.625), on 97 or
+//! 109 scope frames (8 colours on 3,312 frames, 9 on 1,040), one chunk each, `OTHER` 1 a
+//! frame. The window's MAX is 219 (dispatch 218); 133 later frames reach 220 (dispatch
+//! 219), so the debug pin's top is the long run's, not the window's. The same counter
+//! accounted for every non-install scope frame on every debug frame too.
+//!
 //! **S2 after EM2′ (same tree plus the entity-id recycling fix, 2026-09-11,
 //! release and debug alike): 4.031 / 5, `realloc` 0.** The 0.008 it lost is
 //! exactly the two free-list reallocs the AFTER column's window carried
@@ -195,23 +255,27 @@
 //! S2        2 exact      2 exact            2/63       0 (first touch)  0 (was 2, EM2′)
 //! S3        1 exact      1 exact            4/63       0 (first touch)  0
 //! S1a/S1b   1 exact      1 exact            ~7/63      0                0
-//! S1c     121..133 (window) 205..217 (1.78/scope) 0.125  0             0
-//! S1c long 109..133    205..217              —         0                0
+//! S1c     133 exact (window) 229..241 (1.81/scope) 0.125  0             0
+//! S1c long 133 exact   229..241              —         0                0
 //! ```
 //!
-//! (S1c's rows are the tree after A7a. Before it the window read 121 / 205..217 at 1.74
-//! chunks per scope, and the long run read 109..121 / 193..217.)
+//! (S1c's rows are the tree after A7b. After A7a alone the window read 121..133 /
+//! 205..217 at 1.78 chunks per scope and the long run 109..133 / 205..217; before A7a
+//! the window read 121 / 205..217 at 1.74 chunks per scope, and the long run read
+//! 109..121 / 193..217.)
 //!
 //! * `scope` = the `Box<ScopeShared>` of `Schedule::run`'s install frame, of each
 //!   `par_iter` fan-out, and of each dispatched colour in each of the solver's
 //!   12 colour passes: `1 + 12 x` the dispatched colours, asserted on every
-//!   steady frame. On the 1240-body pile that is `1 + 12 x 10 = 121` on 255 of
-//!   the census window's 256 frames and `1 + 12 x 11 = 133` on one (before A7a,
-//!   121 on all 256), and `1 + 12 x 9 = 109` once the pile settles further (the
-//!   long-run row). Per stage: `Schedule::run`'s install frame owns
+//!   steady frame. On the 1240-body pile that is `1 + 12 x 11 = 133` on every
+//!   frame of the census window and of the long run (after A7a alone,
+//!   `1 + 12 x 10 = 121` on 255 of the window's 256 frames and 133 on one, and
+//!   `1 + 12 x 9 = 109` later in the long run; before A7a, 121 on all 256). Per
+//!   stage: `Schedule::run`'s install frame owns
 //!   1 scope + 1 chunk of every step and `physics_solve_colored` owns every
-//!   other dispatch object. In the census window that is 120.047 scopes +
-//!   213.938 chunks of the 336.109 (before A7a, 120 + ~209.7 of the 331.8).
+//!   other dispatch object. In the census window that is 132 scopes +
+//!   239.109 chunks of the 373.234 (after A7a alone, 120.047 + 213.938 of the
+//!   336.109; before A7a, 120 + ~209.7 of the 331.8).
 //!   ⚠ The backtrace trace that charged `physics_solve_colored`
 //!   **99.5 %** was taken on a WARM-UP step, and the percentage belongs to that
 //!   step's own numbers: **145 scope frames (1 + 12 passes x 12 dispatched
@@ -240,12 +304,12 @@
 //! In a DEBUG build S1b and S1c carry one extra `OTHER` per step: the
 //! `cfg!(debug_assertions)`-gated `debug_assert_coloring` scratch in
 //! `ConstraintGraph::build` (the allocation `constraint_graph_o4_world.rs`
-//! already tolerates). The debug S1c scene is the height-10 pile: 85..=97
-//! scope frames (7 or 8 dispatched colours) in the census window and 73..=97
-//! over 4,352 steps before A7a (85..=97 after it), one chunk each, MAX 196 —
+//! already tolerates). The debug S1c scene is the height-10 pile: after A7b,
+//! 97..=109 scope frames (8 or 9 dispatched colours) in the census window and
+//! over 4,352 steps, one chunk each, MAX 220 (dispatch 219) over the long run —
 //! pinned with the release pin's shape: the long run's envelope, no upward
-//! headroom. The debug pin keeps base's downward reach (73): A7a's run sits
-//! inside it with the same top, so it was not re-pinned.
+//! headroom. (Before A7b it read 85..=97 in the window and 73..=97 over 4,352
+//! steps before A7a, 85..=97 after it, MAX 196, pinned 73..=97 / 195.)
 //!
 //! # The gate
 //!
@@ -262,12 +326,13 @@
 //!
 //! S1c's number is DATA-DEPENDENT: its warm-up spans 290..387 as the pile
 //! collapses, and after it the count moves in whole dispatched colours as the
-//! contact set settles (314..350 per step over 4,352 steps since A7a; 302..339
-//! before it). Quote it as a range, never as a figure. Its release pins are that
-//! long run's envelope with NO upward headroom — scope 109..=133, chunk 205..=217,
-//! dispatch MAX 350 (before A7a: 109..=121, 193..=217, 339):
+//! contact set settles (362..375 per step over 4,352 steps since A7b; 314..350
+//! after A7a alone; 302..339 before it). Quote it as a range, never as a figure.
+//! Its release pins are that long run's envelope with NO upward headroom — scope
+//! 133..=133, chunk 229..=241, dispatch MAX 375 (after A7a alone: 109..=133,
+//! 205..=217, 350; before A7a: 109..=121, 193..=217, 339):
 //!
-//! * **This is a re-pin from a long-run adjudication, not a widening.** A7a
+//! * **This is a re-pin from a long-run adjudication, not a widening — twice.** A7a
 //!   turned the old pin red on three lines (steady MAX 350 > 347, dispatch 350 >
 //!   339, scope 121..=133 outside 109..=121). The gate's own message forbids
 //!   widening a pin to make a red go away, and it prescribes this instead:
@@ -275,9 +340,20 @@
 //!   a narrowphase id change re-draws the window; no new allocation site), and
 //!   re-pin to what was measured with the numbers here. Every bound is a value the
 //!   A7a tree measured. The chunk floor went UP (193 -> 205), because the A7a run
-//!   never dropped to 16 chunks a pass.
-//! * **Downward** they keep what the long run reached (109 is one colour below the
-//!   census window's 121), so a pile that settles further does not red.
+//!   never dropped to 16 chunks a pass. A7b turned the A7a pins red again (release:
+//!   steady MAX 375 > 358, dispatch 375 > 350, chunks 229..=241 outside 205..=217;
+//!   debug: steady MAX 219 > 204, dispatch 218 > 195, scope and chunks 97..=109
+//!   outside 73..=97) and was adjudicated the same way, with the fan-out question
+//!   answered by a counter rather than by the block-mean proxy (header, "S1c after
+//!   A7b"). Every bound is a value the A7b tree measured.
+//! * **Downward** they keep what the long run reached. After A7b that is the
+//!   window's own value, because no step of the 4,352 dispatched fewer than eleven
+//!   colours in release (eight in debug). **So the downward headroom is gone:** the
+//!   release scope floor went 109 -> 133 (it was the A7a long run's nine-colour frames)
+//!   and the debug floor 73 -> 97. Keeping the old floors would be a reach nothing on
+//!   this tree measured, and the pin's rule is the long run's envelope. The cost:
+//!   a pile that settles further, to ten colours or fewer in release, reds downward,
+//!   and that red is a re-measure under this protocol, not an allocation regression.
 //! * **Upward** they keep nothing. The first form of this pin allowed one
 //!   dispatched colour either way, and no upward colour was ever observed in
 //!   4,352 steady steps — while that one-colour allowance was exactly the size
@@ -292,13 +368,18 @@
 //!   histogram 350->39 351->5 362->184 363->27 374->1. It reds four ways: steady
 //!   MAX 374 > 358, dispatch MAX 374 > 350 (217 frames above it), chunks 217..=229
 //!   outside 205..=217 (212 frames at 229), and scope 133..=145 outside 109..=133.
-//!   Only that last line rests on the one eleven-colour frame.
+//!   Only that last line rests on the one eleven-colour frame. On the A7b tree the
+//!   same mutation again moves every window frame by +24 (histogram 386->19
+//!   398->205 399->32) and reds four ways against the A7b pins: steady MAX 399 >
+//!   383, dispatch MAX 399 > 375, scope 145..=145 outside 133..=133 (every frame),
+//!   and chunks 241..=253 outside 229..=241 (2026-09-18, release).
 //! * **Why there is no pin on the NUMBER of frames at the top scope value.** Such a
 //!   pin counts eleven-colour frames inside one deterministic window. That is a
 //!   trajectory pin: every contact change re-draws it, which is the trap
 //!   `G4_MOVER_ID`'s doc in `sleep_settles_box_piles.rs` records. It would also add
-//!   no power, because the regression above already reds on 212 and 217 frames
-//!   through the chunk and dispatch pins. If a regression that those pins miss is
+//!   no power, because the regression above already reds through the chunk and
+//!   dispatch pins (on 212 and 217 frames on the A7a tree, on every frame on the
+//!   A7b tree). If a regression that those pins miss is
 //!   ever found, the trajectory-free form is a per-frame assertion
 //!   `scope = 1 + 12 x (dispatched colours)`, with the count READ from a counter
 //!   the solver exports. The objection below is to recomputing that count, not to
@@ -2085,7 +2166,9 @@ impl Pin {
 /// the window's own maximum. Its RELEASE pin was re-measured and re-pinned by the
 /// same long-run protocol after A7a (base `9f712204` + A7a, 2026-09-18,
 /// `stable-x86_64-pc-windows-msvc` rustc 1.98.1), where the window's maximum is
-/// also the long run's.
+/// also the long run's. Both S1c pins were re-measured and re-pinned again after
+/// A7b (A7a + A7b, 2026-09-18, same toolchain): release and debug now read the
+/// long run's envelope in both directions (header, "S1c after A7b").
 fn pins() -> [Pin; 12] {
     // An App frame: one install frame (a `ScopeShared` + one chunk) and at most
     // one injector block — the block arrives once per 63 dispatcher-side pushes,
@@ -2150,41 +2233,43 @@ fn pins() -> [Pin; 12] {
             ..app("S1b", 1, 4)
         },
         if RELEASE {
-            // 1240 bodies. RE-PINNED from the 4,352-step long run after A7a
-            // (2026-09-18), not widened: A7a re-drew the deterministic census
-            // window, and every bound below is a value that run measured
-            // (header, "S1c after A7a"). The window reads 121 scope frames on 255
-            // frames and 133 (an eleventh colour) on one, 205..=217 chunks,
-            // dispatch MAX 350; the long run reached 109 (9 colours) and never
-            // went below 205 chunks or above 133 / 217 / 350. ZERO upward
-            // headroom: the one-colour allowance an earlier form of this pin
-            // carried upward was exactly the size of one extra fan-out per colour
-            // pass, and that regression stayed green inside it (see "The gate"
-            // in the header). An upward colour is a red to re-measure, never a
-            // pin to widen.
+            // 1240 bodies. RE-PINNED from the 4,352-step long run after A7b
+            // (2026-09-18), not widened: A7b's face-versus-edge rule carries a
+            // resting face pair's clipped patch instead of one edge point, so the
+            // colours carry more slots, and every bound below is a value that run
+            // measured (header, "S1c after A7b"). Every one of its 4,352 steady
+            // frames dispatches eleven colours (scope 133) on 229 or 241 chunks,
+            // dispatch MAX 375, and a relaxed counter at the colour solve's own
+            // `pool.scope` accounted for every non-install scope frame on every
+            // frame, so the move is an extra colour, not an extra fan-out. ZERO
+            // upward headroom: the one-colour allowance an earlier form of this
+            // pin carried upward was exactly the size of one extra fan-out per
+            // colour pass, and that regression stayed green inside it (see "The
+            // gate" in the header). An upward colour is a red to re-measure,
+            // never a pin to widen.
             Pin {
                 scene: "S1c",
                 workers: 4,
-                scope: (109, 133),
-                chunk: (205, 217),
-                dispatch_max: 350,
+                scope: (133, 133),
+                chunk: (229, 241),
+                dispatch_max: 375,
                 other_per_frame: 0,
                 realloc_sum: 0,
             }
         } else {
-            // 385 bodies (height 10): 85..=97 scope frames (7 or 8 dispatched
-            // colours) with exactly one chunk each in the census window,
-            // dispatch MAX 195; a 4,352-step debug run (2026-09-11) reached 73
-            // (6 colours) and never went above 97 / 97 / 195. The release pin's
-            // shape: the long run's envelope, ZERO upward headroom. After A7a
-            // (2026-09-18) the same run reads 85..=97 throughout, top unchanged,
-            // so this pin was not re-pinned.
+            // 385 bodies (height 10). RE-PINNED from the 4,352-step debug long
+            // run after A7b (2026-09-18): 97 or 109 scope frames (8 or 9
+            // dispatched colours) with exactly one chunk each, dispatch MAX 219 —
+            // the census window's own MAX is 218, so the long run, not the
+            // window, sets the top. The same dispatch counter as the release pin
+            // accounted for every non-install scope frame on every frame. The
+            // release pin's shape: the long run's envelope, ZERO upward headroom.
             Pin {
                 scene: "S1c",
                 workers: 4,
-                scope: (85 - 12, 97),
-                chunk: (85 - 12, 97),
-                dispatch_max: 195,
+                scope: (97, 109),
+                chunk: (97, 109),
+                dispatch_max: 219,
                 other_per_frame: 1,
                 realloc_sum: 0,
             }

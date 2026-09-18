@@ -14,9 +14,11 @@
 //!   `flicker_redraw_distribution` generator prints, and a budget overrun is reported the
 //!   moment it happens rather than as a missed freeze.
 //!
-//! # What a red G2 or G7 means before A7 lands
+//! # What a red G2 or G7 means until A4's Decision 3 is decided again
 //!
-//! It is TRIAGED, never waived and never silenced by raising the budget (orchestrator ruling,
+//! A4's round-2 ruling (§3.4) decides the onset-flicker comparison again only after A7. A7
+//! has landed and that decision has not been taken, so this triage still stands. A red is
+//! TRIAGED, never waived and never silenced by raising the budget (orchestrator ruling,
 //! round 3). The failure message carries these four steps and the numbers step 3 needs:
 //!
 //! 1. Re-run the failing test under the M1 protocol (design-A4 §5.2 step 1, the wake block
@@ -28,36 +30,116 @@
 //!    `docs/OPEN-QUESTIONS.md` with its measured numbers — observed events, the measured wake
 //!    probability p for that height, and the negative-binomial tail P(>= budget+1 events | p, N
 //!    draws) — and does not block.
-//! 4. A budget is re-sized ONLY from a fresh run of the `flicker_redraw_distribution` generator,
-//!    and only once A7 has changed the trajectories. Never raise a budget to turn a red green.
-//! * **Hint changes** (design Decision 1 case 5, Known behaviour 2). Whether a knife-edge box
-//!   pair produces a manifold can depend on the axis hint the pair reads from the box-axis
-//!   cache, and a row move can change that hint while the poses stay put. G3 and G4 move one
-//!   pile row across the pile (a swap-remove); G5 and G6 shift every pile row by one (a spawn
-//!   into an archetype walked earlier). All four require that nothing wakes, and a failure
-//!   names the kind of wake that fired: "count changed" (with every pair whose manifold
-//!   appeared or vanished, each classed knife-edge or load-bearing), "count unchanged" or
-//!   "latch lost". Only a "count changed" wake whose pairs are all knife-edge is Known
-//!   behaviour 2; every other kind is a defect.
+//! 4. A budget is re-sized ONLY from a fresh run of the `flicker_redraw_distribution` generator.
+//!    The last run was on the A7b tree (msvc release, 2026-09-18): the pooled wake probability
+//!    fell from 160/216 to 20/76 at height 5 and from 48/78 to 2/32 at height 4, and the
+//!    budgets came down with it (G2 18 -> 3, G7 56 -> 6). Never raise a budget to turn a red
+//!    green.
+//! * **Row moves** (design Decision 1 case 5). A row move can change the axis hint a box pair
+//!   reads from the box-axis cache while the poses stay put. Before A7b that could change
+//!   whether a knife-edge pair had a manifold at all (A4's Known behaviour 2). Since A7b it
+//!   cannot: for boxes with non-zero extents a box-box manifold exists exactly when the two
+//!   poses overlap, whatever the hint, and the only exception is a reference face with a zero
+//!   in-plane extent (`narrowphase/box_box.rs`; A7-N11 pins it over every hint). Known
+//!   behaviour 2 is retired for box-box pairs: a hint change can still change WHICH contact a
+//!   pair carries, never whether it has one, so never an island's manifold count. G3 and G4
+//!   move one pile row across the pile (a swap-remove); G5 and G6 shift every pile row by one
+//!   (a spawn into an archetype walked earlier). All four require that nothing wakes, and a
+//!   failure names the kind of wake that fired: "count changed" (with every pair whose
+//!   manifold appeared or vanished, each classed knife-edge or load-bearing), "count
+//!   unchanged" or "latch lost". Every kind is a defect that blocks the commit — a
+//!   "count changed" wake on knife-edge pairs only included.
 //!
-//! **Defect A7.** A resting box pyramid creeps sideways with a fixed (-x, -z) bias and its
-//! contact set keeps changing at rest, so piles of height 7 or more never reach a 60-step
-//! quiet window. Its red-first tests are A7-R0 (a face contact that repeats a feature id),
+//! **Defect A7.** A resting box pyramid crept sideways with a fixed (-x, -z) bias and its
+//! contact set kept changing at rest, so piles of height 7 or more never reached a 60-step
+//! quiet window. It was two narrowphase defects. **A7a:** clipped face-contact points
+//! inherited `min(prev, cur)` corner ids, so points of one manifold shared a warm-start key;
+//! clipped points now carry injective ids. **A7b:** on a resting face pair the SAT took an
+//! edge axis that nearly duplicates the face normal, and replaced a 4-point support with one
+//! point on jitter; S5 applies Box3D's face-versus-edge rule (`FACE_AXIS_PREFERENCE` in
+//! `narrowphase/box_box.rs`). Its tests — A7-R0 (a face contact that repeats a feature id),
 //! A7-R1 (Jolt's pyramid creeps with sleeping off), A7-R2 (Jolt's pyramid freezes) and G8
-//! (a height-6 pile freezes). A7a (clipped face-contact points carry injective feature ids)
-//! greened A7-R0 and G8, and their ignores are gone. A7-R1 and A7-R2 stay `deferred:`
-//! until the rest of the A7 lane lands.
+//! (a height-6 pile freezes) — are all green, and none is `deferred:` any more.
+//!
+//! **What remains is a drift RATE, not a bounded offset.** One run of A7-R1's scene extended
+//! to 5400 steps (msvc release, 2026-09-18, the kernel as committed) read D_max = 0.7180 mm
+//! over steps 600-3000 and 1.0965 mm over 3000-5400 — on the same box in both windows (1227,
+//! layer 12), with layers 10-14 moving toward (-x, -z) on average in both — and 1.8138 mm over
+//! 600-5400: the windows add. That is ~0.38 mm per 1000 steps, ~2.3e-5 m/s, ~8 cm per hour of
+//! simulated time with sleeping off, which is the default. It is 14× under A7-R1's bound over
+//! A7-R1's window. It is not A7b: over steps 600-3000, 0 of 9 743 983 support manifold-steps
+//! were on the edge path (A7a alone: 33.3 %), so the mechanism A7b removed is not acting on
+//! the supports. It is an open question in `docs/OPEN-QUESTIONS.md`.
+//!
+//! ## S5's rung, pre-registered before any pile run of it (2026-09-18)
+//!
+//! S5 (A7b) makes the SAT prefer a face axis over an edge axis unless the edge is shallower
+//! than the face's REALIZED clipped patch by more than `FACE_AXIS_PREFERENCE` = 0.005 m, or
+//! the face realizes no patch — the form Box3D's live `convex_manifold.c` ships, except that
+//! here only an EMPTY clip counts as no face patch (Box3D: fewer than 3 vertices) and only
+//! points with `separation <= 0` are kept (Box3D keeps speculative points), two differences
+//! that predate S5. The C2 probe measured a different form, the edge against the face axis's
+//! SAT depth, at D_max =
+//! 0.0005157 m (0.0007534..0.0008507 m under ±1e-6 / ±2e-6 gravity perturbations). The
+//! shipped form is judged against its own bands, written here before its first pile run.
+//!
+//! Conditions: A7a + S5, height 15, substeps 4, relax 2, sleeping off, D_max = the largest
+//! horizontal displacement of any pile box between steps 600 and 3000 (A7-R1's reading),
+//! msvc release.
+//!
+//! | D_max | verdict |
+//! |---|---|
+//! | < 0.002 m | **Confirms** the realized form: the order of the SAT form's 0.0005157 m. |
+//! | [0.002, 0.01) m | **Acceptable, and reported** beside the SAT form's reading: green against A7-R1's bound, but not the probe's result. |
+//! | >= 0.01 m | **STOP.** The realized form fails A7-R1's bound. Reported; the choice between it and the SAT form, with a stated validity band, is the orchestrator's. |
+//!
+//! **Reading: D_max = 0.0008583 m** (box 1240, layer 14) on the form first implemented — the
+//! "confirms" row: 1.66× the SAT form's unperturbed 0.0005157 and 1.01× its worst perturbed
+//! run. The review of S5 then adopted one more piece of Box3D's behaviour: a held face hint
+//! that realizes no patch yields to the best face's patch when the choice already built it,
+//! instead of falling back to the edge. **On the form as committed the rung reads D_max =
+//! 0.0007180 m** (box 1227, layer 12), the same row. The receipts are that run's, taken on a
+//! temporary copy of the kernel carrying relaxed counters and a per-call pre-S5 oracle
+//! (restored by copy, sha256-checked); the first form's are in brackets:
+//!
+//! * Support manifold-steps on the edge path: 0 of 4060 supports at step 600, and 0 of
+//!   9 743 983 over the window [1 of 9 743 988] (A7a alone: 33.3 %).
+//! * Support point-count changes over the window: 1836 [2010] (A7a alone: 407 373; SAT form:
+//!   1854).
+//! * **The 5 mm comparison never chose the edge.** The SAT answered an edge 3 531 050 times
+//!   [3 425 959], and the realized rule took the edge 264 times [260] — every one of them a
+//!   face that realized no patch. The comparison against the patch chose the edge 0 times
+//!   [0]: on this pile the value of `FACE_AXIS_PREFERENCE` does nothing, and what moved the
+//!   supports off the edge path is comparing against the realized patch at all.
+//! * **Fallbacks: 12 572 over the window [13 615].** The SAT-form probe had no fallback, so
+//!   this is where the shipped form differs from the one measured. On 10 446 of them [11 294]
+//!   the pre-S5 rule, given the same poses and hint, built an edge contact too: it held the
+//!   edge hint that S5's class clause refuses. The other 2126 [2321], under one a step, are
+//!   manifolds S5 adds. 12 567 were knife-edge pairs whose own best face realized no patch and
+//!   5 a held face with no built patch to yield to; the yield itself ran once, before step
+//!   600. Of the 12 836 edge-path manifold-steps (the fallbacks plus the 264), 4048 are
+//!   same-layer face neighbours, 8788 same-layer diagonal neighbours and none a support; 3588
+//!   have a separation above 0, at most 1.96e-6 m.
+//! * Standing guard: worst drop 0.007229 m (box 1240) [0.007202 m].
+//! * Height 7: D_max = 0.0003023 m, unchanged by the yield (SAT form: 0.0001360).
+//! * At step 600: 6671 manifolds, 22 975 contact points [6678 / 22 974] (A7a alone: 5223 /
+//!   14 605; SAT form: 6647 / 22 899). The live manifold count changed on 1739 of 2400 steps
+//!   [1821 of 2399] (SAT form: 0.7338).
+//!
+//! A7-R1 itself, on the restored tree, then passed and printed the same D_max.
 //!
 //! # Legs
 //!
-//! * G1, G3, G4 and G5 (height-4 piles, 30 boxes) run in both profiles, in the ordinary
-//!   `cargo test -p boyko-physics --test sleep_settles_box_piles` run.
-//! * G2, G6 (height 5, 55 boxes), G7 (sixteen height-4 draws) and G8 (height 6, 91 boxes)
-//!   run ONLY in release, as part of the ordinary release run:
-//!   `cargo test --release -p boyko-physics --test sleep_settles_box_piles -- --test-threads=6`.
-//!   In a debug build they are ignored, and `-- --ignored` in a debug build is NOT their leg.
-//! * A7-R1 and A7-R2 are `deferred:` and run by name with `--ignored`, in release:
-//!   `cargo test --release -p boyko-physics --test sleep_settles_box_piles -- --ignored --exact <name>`.
+//! * G1, G3, G4, G5 (height-4 piles, 30 boxes) and G8 (height 6, 91 boxes) run in both
+//!   profiles, in the ordinary `cargo test -p boyko-physics --test sleep_settles_box_piles`
+//!   run. G8 takes 2.4 s in debug.
+//! * G2, G6 (height 5, 55 boxes), G7 (sixteen height-4 draws), A7-R1 and A7-R2 (height 15,
+//!   1240 boxes) run ONLY in release, as part of the physics release run that `CLAUDE.md`
+//!   names as their leg: `cargo test --release -p boyko-physics --no-fail-fast` (this file
+//!   alone: `cargo test --release -p boyko-physics --test sleep_settles_box_piles`). There
+//!   this binary prints `running 12 tests` and `11 passed; 0 failed; 1 ignored` (the
+//!   generator). In a debug build they are ignored, and `-- --ignored` in a debug build is NOT
+//!   their leg. A7-R1 is the long one: ~73 s in release, ~80 s for the whole binary.
 //! * A7-R0 is device-free and schedule-free. It runs in the ordinary run in both profiles,
 //!   and under Miri.
 //! * `flicker_redraw_distribution` is a `generator:`: it asserts nothing and prints the
@@ -154,27 +236,46 @@ const SMALL_SETTLE_LIMIT: usize = 1500;
 /// Settle budget (steps) for G8 and A7-R2.
 const LONG_SETTLE_LIMIT: usize = 6000;
 /// Settle budget (steps) for G2 and G6: twice the latest freeze of the 56 height-5 draws
-/// `flicker_redraw_distribution` measured (step 9987, msvc release, 2026-09-17), so that
-/// G2's event budget, not the step limit, is what a flicker overrun reaches first. G2's own
-/// draw froze at step 2574.
-const MEDIUM_SETTLE_LIMIT: usize = 20_000;
+/// `flicker_redraw_distribution` measured on the A7b tree (step 243, msvc release,
+/// 2026-09-18), so that G2's event budget, not the step limit, is what a flicker overrun
+/// reaches first: the most-woken draw took its four events by step 183. G2's own draw froze
+/// at step 67. Before A7b the latest freeze was step 9987 and this limit 20 000.
+const MEDIUM_SETTLE_LIMIT: usize = 2 * 243;
 /// Settle budget (steps) for each of G7's draws: eight times the latest freeze of the 30
-/// height-4 draws measured (step 750).
-const G7_SETTLE_LIMIT: usize = LONG_SETTLE_LIMIT;
-/// G2's cap on contact-change wake events (steps on which `contact_wakes` rose). With one
-/// draw of wake probability p per latch attempt, `P(>= 19 events) = p^19`: 0.3 % at the
-/// measured [`MEASURED_P_HEIGHT_5`], 0.7 % at p = 0.77 (one standard error above it). The
-/// most any of the 56 measured draws took was 13; G2's own draw takes 5.
-const G2_MAX_EVENTS: usize = 18;
-/// G7's cap on the contact-change wake events summed over its sixteen draws.
-/// `P(>= 57 events)` over sixteen draws is 0.1 % at the measured [`MEASURED_P_HEIGHT_4`] and
-/// 1.1 % at p = 0.66 (one standard error above it). G7's draws took 29.
-const G7_MAX_EVENTS: usize = 56;
+/// height-4 draws measured on the A7b tree (step 127, the same run). Eight, not two, because
+/// one draw may spend all of [`G7_MAX_EVENTS`]: seven latch attempts, the last near step
+/// 63 + 6 × 60 = 423, and the budget must fire before the step limit. Before A7b this was
+/// eight times step 750, [`LONG_SETTLE_LIMIT`].
+const G7_SETTLE_LIMIT: usize = 8 * 127;
+/// G2's cap on contact-change wake events (steps on which `contact_wakes` rose), re-derived
+/// from the generator's run on the A7b tree (msvc release, 2026-09-18). This file's rule is
+/// the smallest budget whose tail `P(>= budget + 1 events)` ([`tail_probability`]) is below
+/// 1 % at the measured wake probability plus one standard error, and it alone gives 3: with
+/// one draw the tail is `p^4`, 0.48 % at the measured [`MEASURED_P_HEIGHT_5`] = 20/76 and
+/// 0.97 % at p = 0.314 (one standard error above it).
+///
+/// The budget is 4 because the SAMPLE refutes 3. One of the 56 measured draws took 4 events,
+/// so a budget of 3 reds about 1 re-drawn trajectory in 56, where the pooled geometric
+/// model says 0.48 %: wake events cluster within a draw (that draw woke at steps 62, 63, 123
+/// and 183), and a model that treats them as independent understates the tail. A budget is
+/// therefore never set below the largest count its own generator sample produced. At 4 the
+/// model's tail is `p^5`: 0.13 % at p and 0.30 % at one standard error above it. G2's own draw
+/// takes 0. Before A7b this was 18, sized for p = 160/216; a budget sized for the pre-fix
+/// flicker is one the pre-fix flicker passes.
+const G2_MAX_EVENTS: usize = 4;
+/// G7's cap on the contact-change wake events summed over its sixteen draws, re-derived by
+/// the same rule from the same run: `P(>= 7 events)` over sixteen draws is 0.03 % at the
+/// measured [`MEASURED_P_HEIGHT_4`] = 2/32 and 0.59 % at p = 0.105 (one standard error above
+/// it); a budget of 5 would be 1.8 % there. G7's own draws take 2 (movers 2 and 9, one
+/// each). Before A7b this was 56, sized for p = 48/78.
+const G7_MAX_EVENTS: usize = 6;
 /// The per-latch-attempt wake probability at height 4, pooled over the 30 height-4 draws
-/// of `flicker_redraw_distribution` (48 events in 78 attempts).
-const MEASURED_P_HEIGHT_4: f64 = 48.0 / 78.0;
-/// The same at height 5, pooled over its 56 draws (160 events in 216 attempts).
-const MEASURED_P_HEIGHT_5: f64 = 160.0 / 216.0;
+/// of `flicker_redraw_distribution` on the A7b tree (2 events in 32 attempts, msvc release,
+/// 2026-09-18; before A7b, 48 in 78).
+const MEASURED_P_HEIGHT_4: f64 = 2.0 / 32.0;
+/// The same at height 5, pooled over its 56 draws (20 events in 76 attempts; before A7b,
+/// 160 in 216).
+const MEASURED_P_HEIGHT_5: f64 = 20.0 / 76.0;
 /// G4's mover: layer 0's `j = 3, k = 0` corner, spawned at (2, 1, -4). A pinned
 /// trajectory, not a structural property — every change to contact ids, impulses or
 /// ordering re-draws it, so the premise is re-measured over all 16 layer-0 movers each time
@@ -189,6 +290,12 @@ const MEASURED_P_HEIGHT_5: f64 = 160.0 / 216.0;
 ///   manifold no longer forms). Again 8 of 16 pass: 2, 3, 7, 10, 12, 13, 14, 15. Seven have
 ///   no lateral manifold before the move (1, 4, 5, 6, 8, 9, 16) and one keeps its
 ///   reference box (11). Only mover 7 swaps two (partners 6 and 11).
+/// * Re-measured after A7b (S5, the face-versus-edge rule; 2026-09-18, msvc, a temporary
+///   probe running this file's `swap_remove_scene` for each of the 16 movers, debug and
+///   release printing identical lines): mover 13 freezes at step 64 with no contact wake;
+///   TWO face-face sideways manifolds again, partners 9 and 14, whose reference boxes both
+///   swap to 13 (9 -> 13, 14 -> 13). 13 of 16 pass: 3 and 5..=16. Three have no lateral
+///   manifold before the move (1, 2, 4). Mover 13 is kept.
 const G4_MOVER_ID: u32 = 13;
 /// A7-R1's window: the vertical settle is over by `CREEP_FROM`.
 const CREEP_FROM: usize = 600;
@@ -314,7 +421,8 @@ fn flicker_triage(events: usize, attempts: usize, budget: &Budget) -> String {
          a re-drawn chaotic trajectory (re-size the budget from `flicker_redraw_distribution`); \
          one well above it means a flicker regression.\n\
          This red is TRIAGED, never waived and never silenced by raising the budget \
-         (orchestrator ruling, round 3). Until A7 lands:\n\
+         (orchestrator ruling, round 3). Until A4's Decision 3 is decided again (due now that \
+         A7 has landed):\n\
          1. Re-run this test under the M1 protocol (design-A4 §5.2 step 1, the wake block \
          deleted). M1 separates a flicker budget overrun from a pile that no longer comes to \
          rest.\n\
@@ -325,10 +433,10 @@ fn flicker_triage(events: usize, attempts: usize, budget: &Budget) -> String {
          docs/OPEN-QUESTIONS.md together with the numbers above (observed events, the measured p \
          for this height, and the negative-binomial tail) and does not block.\n\
          4. A budget is re-sized ONLY from a fresh run of the `flicker_redraw_distribution` \
-         generator, and only once A7 has changed the trajectories. Never raise a budget to turn \
-         a red green.\n\
-         Escalate to the orchestrator with these numbers: Decision 3 is decided again only after \
-         A7 (A4 round-2 ruling §3.4)",
+         generator (the last: the A7b tree, 2026-09-18). Never raise a budget to turn a red \
+         green.\n\
+         Escalate to the orchestrator with these numbers: Decision 3 is to be decided again now \
+         that A7 has landed (A4 round-2 ruling §3.4), and has not been yet",
         budget.measured_p,
         budget.max + 1,
         budget.draws
@@ -1175,9 +1283,12 @@ impl Trace {
 
     /// A pair is knife-edge when both bodies are pile boxes in the same layer (the pair
     /// carries no weight) whose centres touch: every axis-aligned gap is at most
-    /// [`TOUCH_GAP`]. Only such pairs are exposed to Known behaviour 2
-    /// (`IslandSleep::begin_step`, "Wakes from a box-axis hint change"); a floor pair or a
-    /// pair between layers is load-bearing.
+    /// [`TOUCH_GAP`]; a floor pair or a pair between layers is load-bearing. Before A7b only
+    /// knife-edge pairs were exposed to Known behaviour 2 (a hint change changing whether a
+    /// box pair has a manifold). Since A7b no box pair is: a box-box manifold exists exactly
+    /// when the poses overlap, except on a zero-extent reference face (`narrowphase/box_box.rs`,
+    /// pinned by A7-N11). The class is kept because it says which pairs a failure names, not
+    /// whether it may be deferred.
     fn is_knife_edge(&self, a: u32, b: u32) -> bool {
         let find = |id: u32| {
             self.centres_before
@@ -1276,17 +1387,22 @@ impl Trace {
             if knife_edge_only {
                 (
                     "count changed (knife-edge pairs only)",
-                    "Known behaviour 2 (A4 Decision 1 case 5): a hint change changed a knife-edge \
-                     pair's existence with the poses fixed; deferrable under the round-2 ruling \
-                     §5.2 step 3 only if the scene is green under M1",
+                    "a DEFECT: it blocks the commit. With the poses fixed a knife-edge box \
+                     pair's manifold appeared or vanished, and since A7b a box-box manifold \
+                     exists exactly when the poses overlap, whatever the axis hint \
+                     (narrowphase/box_box.rs, A7-N11), so this is not Known behaviour 2 (A4 \
+                     Decision 1 case 5), which is retired for box-box pairs and no longer \
+                     deferrable: look for a narrowphase input other than the poses, or a \
+                     row-identity defect that fed the wrong pose",
                     detail,
                 )
             } else {
                 (
                     "count changed (a load-bearing pair)",
-                    "NOT Known behaviour 2, which is scoped to knife-edge pairs: a load-bearing \
-                     manifold appeared or vanished with the poses fixed, a narrowphase or \
-                     row-identity defect; it blocks the commit",
+                    "a DEFECT: it blocks the commit. A load-bearing manifold appeared or \
+                     vanished with the poses fixed, a narrowphase or row-identity defect (Known \
+                     behaviour 2 never covered load-bearing pairs, and since A7b covers no box \
+                     pair at all)",
                     detail,
                 )
             }
@@ -1452,8 +1568,8 @@ fn sixteen_height_4_draws_freeze_within_the_onset_flicker_budget() {
 
 /// G8 (A7 / A4 Decision 3): a height-6 pile (91 boxes) freezes and holds.
 ///
-/// A7a greened it, which is why the `deferred:` ignore is gone. Both readings are msvc
-/// release, 2026-09-18:
+/// A7a greened it, which is why the `deferred:` ignore is gone. The readings are msvc,
+/// 2026-09-18, in release unless stated:
 ///
 /// * Base `9f712204` (before A7a) is RED. It did not freeze within [`LONG_SETTLE_LIMIT`]
 ///   steps. `contact_wakes` rose at steps [2315, 2614, 2744, 4550] (364 in total). On the
@@ -1462,14 +1578,20 @@ fn sixteen_height_4_draws_freeze_within_the_onset_flicker_budget() {
 /// * With A7a (clipped face-contact points carry injective feature ids) it is GREEN. It
 ///   froze at step 128 with `contact_wakes` 91 and one rise event, at step 68. The same
 ///   line prints in debug (1.52 s there, 0.16 s in release).
+/// * With A7a + A7b (S5, the face-versus-edge rule) it froze at step 185 with
+///   `contact_wakes` 182 and two rise events, at steps [65, 125]; 0.26 s in release, and
+///   2.43 s and 2.44 s in two debug runs, printing the same line. The kernel as committed
+///   (a held face that realizes no patch yields to the built best-face patch) prints the
+///   same line in release.
 ///
 /// Every contact change re-draws that freeze step, so it is a reading, not a pin. The
-/// test's bound is [`LONG_SETTLE_LIMIT`].
+/// test's bound is [`LONG_SETTLE_LIMIT`]. At 2.4 s in debug a `slow:` ignore would be a false
+/// statement, so it runs in both profiles, like G1; only Miri skips it.
 #[test]
 #[cfg_attr(
-    any(miri, debug_assertions),
-    ignore = "slow: a 91-box pile through the real schedule until frozen; release only, \
-              intractable under Miri"
+    miri,
+    ignore = "miri-slow: runs the real physics schedule on a boyko_threadpool until a 91-box \
+              pile freezes; intractable under Miri"
 )]
 fn a_height_6_box_pyramid_freezes() {
     under_watchdog("G8", MEDIUM_TIMEOUT, || {
@@ -1541,10 +1663,30 @@ fn a_quarter_overlap_face_contact_has_distinct_feature_ids() {
 /// A7-R1: Jolt's height-15 pyramid, sleeping off, does not creep sideways once the vertical
 /// settle is over. The window opens with a standing guard ([`STANDING_DROP_M`]), so a pile
 /// that collapsed before it cannot meet the creep bound by having nothing left to move.
+///
+/// Its readings, msvc release, D_max over steps 600-3000:
+///
+/// * Base `9f712204`: 0.6361069 m — red.
+/// * A7a (`08fe7b9f`): 0.0972966 m, box 1041 in layer 7 — red.
+/// * A7a + A7b (S5): 0.0008583 m, box 1240 in layer 14, on the form first implemented;
+///   0.0007180 m, box 1227 in layer 12, on the kernel as committed (a held face that
+///   realizes no patch yields to the built best-face patch). Green, in the pre-registered
+///   "confirms" band of the module header. The residue is a drift rate, not an offset: over
+///   steps 3000-5400 it adds another 1.0965 mm (module header).
+///
+/// [`CREEP_BOUND_M`] is not tightened toward the reading: it is an acceptance criterion at
+/// Box2D's slop scale, not a regression pin. A revert of A7b's selection alone (the edge taken
+/// whenever its SAT depth is below the face's by more than `SAT_EPS`) is caught at the kernel
+/// by A7-N9 (`narrowphase/box_box.rs`) and in the scene by THIS test: it read D_max =
+/// 0.10017 m under that mutation (msvc release, 2026-09-18), while A7-R2 still froze and
+/// stayed green. The mutation leaves no best-face patch built, so the held-face yield is
+/// unreachable under it and the reading holds for the kernel as committed.
 #[test]
-#[ignore = "deferred: A7 — a resting box pyramid creeps; red until the A7 lane lands; release \
-            only: cargo test --release -p boyko-physics --test sleep_settles_box_piles -- \
-            --ignored a_resting_jolt_pyramid_does_not_creep_with_sleeping_off"]
+#[cfg_attr(
+    any(miri, debug_assertions),
+    ignore = "slow: a 1240-box pile for 3000 steps through the real schedule; release only, \
+              intractable under Miri"
+)]
 fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
     under_watchdog("A7-R1", JOLT_TIMEOUT, || {
         let mut h = Harness::new();
@@ -1604,6 +1746,15 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
             }
         }
         let n = top_sum.2.max(1) as f64;
+        println!(
+            "A7-R1: D_max = {} m (box {}, layer {}); mean (dx, dz) of layers 10-14 = ({:.6}, \
+             {:.6}) m",
+            worst.0,
+            worst.1,
+            layer_of(JOLT, worst.1),
+            top_sum.0 / n,
+            top_sum.1 / n
+        );
         assert!(
             worst.0 <= CREEP_BOUND_M,
             "A7-R1: a resting height-15 box pyramid with sleeping off moved sideways by \
@@ -1621,10 +1772,28 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
 
 /// A7-R2: Jolt's height-15 pyramid (1240 boxes) freezes and holds; its contact-change wake
 /// events are recorded, not budgeted.
+///
+/// Its readings, msvc release:
+///
+/// * A7a (`08fe7b9f`): red. No freeze within [`LONG_SETTLE_LIMIT`] steps; the largest
+///   `|v|² + |ω|²` was 0.0069859.
+/// * A7a + A7b (S5): green. On the form first implemented it froze at step 188 with
+///   `contact_wakes` 2480 and two rise events, at steps [68, 128]; 4.95 s. On the kernel as
+///   committed (a held face that realizes no patch yields to the built best-face patch) it
+///   froze at step 248 with `contact_wakes` 3720 and three rise events, at [68, 128, 188].
+///
+/// The freeze step is a reading, not a pin: every contact change re-draws it — the two kernels
+/// differ only in that yield, so it fired in this scene and moved the freeze by one latch
+/// attempt — which is why [`LONG_SETTLE_LIMIT`] stays at 6000 rather than being sized from
+/// it. It does not catch
+/// a revert of A7b's selection alone: under that mutation it still froze (A7-R1 is the scene
+/// gate that reds).
 #[test]
-#[ignore = "deferred: A7 — box piles of height 7 and more never come to rest; red until the A7 \
-            lane lands; release only: cargo test --release -p boyko-physics --test \
-            sleep_settles_box_piles -- --ignored a_jolt_scale_box_pyramid_freezes"]
+#[cfg_attr(
+    any(miri, debug_assertions),
+    ignore = "slow: a 1240-box pile through the real schedule until frozen; release only, \
+              intractable under Miri"
+)]
 fn a_jolt_scale_box_pyramid_freezes() {
     under_watchdog("A7-R2", JOLT_TIMEOUT, || {
         let mut h = Harness::new();
@@ -1986,12 +2155,17 @@ fn shift_scene(what: &'static str, height: usize, settle_limit: usize, bound: Cl
          {off_island:?}",
         h.n_islands()
     );
-    // P2: at least one touching box pair with no manifold (necessary, not sufficient).
+    // P2: at least one touching box pair with no manifold. These knife-edge pairs are the
+    // ones a narrowphase input other than the poses could flip. Before A7b the axis hint was
+    // such an input (A4's Known behaviour 2); since A7b a box-box manifold exists exactly
+    // when the poses overlap, except on a zero-extent reference face (A7-N11 pins it), so a
+    // row shift must leave every one of them without a manifold — the property this scene
+    // holds the pile to.
     let n_set = touching_no_contact_pairs(&mut h, &pile);
     assert!(
         !n_set.is_empty(),
-        "scene-fitness: the settled pile has no touching no-contact box pair, so {what} cannot \
-         exercise a hint change on one — escalate"
+        "scene-fitness: the settled pile has no touching no-contact box pair, so {what} holds no \
+         pair whose existence a non-pose input could flip — escalate"
     );
     println!(
         "{what}: {} touching no-contact pairs (first ids and gaps: {:?})",

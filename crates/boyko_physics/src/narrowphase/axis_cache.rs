@@ -59,14 +59,18 @@
 //! flipped, or that names a new body, takes after a row move — while keeping the
 //! steady-state load bounded and every probe chain short.
 //!
-//! # A hint change can wake a sleeping island
+//! # A hint change picks the contact, never whether there is one
 //!
-//! With sleeping on, a hint change can also change whether a frozen island's box pair
-//! produces a manifold, and that wakes the island (`IslandSleep::begin_step`). The hint
-//! can change in two ways. It can be dropped by an order flip, a `Reset` or a clear. It
-//! can also be read from a different entry one step after a row move that the pair spent
-//! without a contact: the pre-read carries the hint for the move step only, and nothing
-//! writes it under the new key.
+//! The hint can change while the poses stay put, in two ways. It can be dropped by an
+//! order flip, a `Reset` or a clear. It can also be read from a different entry one step
+//! after a row move that the pair spent without a contact: the pre-read carries the hint
+//! for the move step only, and nothing writes it under the new key. Since A7b such a change
+//! can move a pair to another axis, and so change its feature ids for a step, but it cannot
+//! change whether the pair produces a manifold: that is a function of the two poses alone
+//! (`narrowphase/box_box.rs`), except on a chosen reference face with a zero in-plane extent.
+//! So it cannot change a frozen island's manifold count and does not wake it
+//! (`IslandSleep::begin_step`). Before A7b it could — a chosen face that realized no patch
+//! gave no manifold — which was A4's Known behaviour 2.
 
 use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
@@ -250,8 +254,9 @@ impl BoxAxisCache {
     /// A clear drops every entry to [`EMPTY`], costing one frame of warm-start misses
     /// (the same one-frame cost that a pair whose row order flipped, or that names a
     /// new body, takes after a row move) in exchange for a bounded steady-state load
-    /// and short probe chains. With sleeping on, a clear can also wake a frozen island
-    /// (module docs, "A hint change can wake a sleeping island"). When neither
+    /// and short probe chains. Since A7b a clear cannot wake a frozen island: it changes
+    /// hints, and a hint picks a box pair's contact, never whether it has one (module docs,
+    /// "A hint change picks the contact, never whether there is one"). When neither
     /// trigger fires, the table is left in place and allocates nothing.
     pub fn begin_frame(&mut self, pairs: usize) {
         let len = next_pow2(2 * pairs.max(1));
