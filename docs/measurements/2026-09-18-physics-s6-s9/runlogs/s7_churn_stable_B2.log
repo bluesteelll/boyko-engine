@@ -1,0 +1,44 @@
+Gnuplot not found, using plotters backend
+row_identity_churn/stable/sleeping_off: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+Benchmarking row_identity_churn/stable/sleeping_off
+Benchmarking row_identity_churn/stable/sleeping_off: Warming up for 3.0000 s
+
+Completed 255 iterations in 4486709100 nanoseconds, estimated execution time is 17594937.647058822 ns
+Benchmarking row_identity_churn/stable/sleeping_off: Collecting 20 samples in estimated 7.3899 s (420 iterations)
+Benchmarking row_identity_churn/stable/sleeping_off: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 10.982 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 1.8762 ms
+Criterion.rs DEBUG: Bootstrapping the T distribution took 2.9190 ms
+Criterion.rs DEBUG: Bootstrapping the relative statistics took 5.3306 ms
+row_identity_churn/stable/sleeping_off
+                        time:   [17.387 ms 17.542 ms 17.717 ms]
+                        change: [+1.1094% +2.2674% +3.3330%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+row_identity_churn/swap_churn/sleeping_off: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+row_identity_churn/archetype_shift/sleeping_off: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+row_identity_churn/first_archetype_spawn/sleeping_off: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+row_identity_churn/burst_despawn/sleeping_off: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+row_identity_churn/burst_migrate/sleeping_off: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+row_identity_churn/stable/sleeping_on: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+Benchmarking row_identity_churn/stable/sleeping_on
+Benchmarking row_identity_churn/stable/sleeping_on: Warming up for 3.0000 s
+
+Completed 255 iterations in 4465350400 nanoseconds, estimated execution time is 17511178.039215688 ns
+Benchmarking row_identity_churn/stable/sleeping_on: Collecting 20 samples in estimated 7.3547 s (420 iterations)
+Benchmarking row_identity_churn/stable/sleeping_on: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 10.987 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 1.8850 ms
+Criterion.rs DEBUG: Bootstrapping the T distribution took 2.6624 ms
+Criterion.rs DEBUG: Bootstrapping the relative statistics took 5.2957 ms
+row_identity_churn/stable/sleeping_on
+                        time:   [16.674 ms 16.730 ms 16.783 ms]
+                        change: [-2.6483% -1.8102% -0.9075%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+row_identity_churn/swap_churn/sleeping_on: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+row_identity_churn/archetype_shift/sleeping_on: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+row_identity_churn/first_archetype_spawn/sleeping_on: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+row_identity_churn/burst_despawn/sleeping_on: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+row_identity_churn/burst_migrate/sleeping_on: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+

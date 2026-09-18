@@ -1,0 +1,28 @@
+Gnuplot not found, using plotters backend
+Benchmarking soft_step_sp2/coupled/64
+Benchmarking soft_step_sp2/coupled/64: Warming up for 3.0000 s
+
+Completed 65535 iterations in 5717787500 nanoseconds, estimated execution time is 87247.8446631571 ns
+Benchmarking soft_step_sp2/coupled/64: Collecting 100 samples in estimated 5.2872 s (61k iterations)
+Benchmarking soft_step_sp2/coupled/64: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 36.675 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 4.7692 ms
+soft_step_sp2/coupled/64
+                        time:   [87.213 µs 87.270 µs 87.331 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) low mild
+  1 (1.00%) high mild
+Benchmarking soft_step_sp2/coupled/256
+Benchmarking soft_step_sp2/coupled/256: Warming up for 3.0000 s
+
+Completed 16383 iterations in 5877739300 nanoseconds, estimated execution time is 358770.6341939816 ns
+Benchmarking soft_step_sp2/coupled/256: Collecting 100 samples in estimated 5.4354 s (15k iterations)
+Benchmarking soft_step_sp2/coupled/256: Analyzing
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 34.568 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 4.8653 ms
+soft_step_sp2/coupled/256
+                        time:   [383.35 µs 383.92 µs 384.74 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+

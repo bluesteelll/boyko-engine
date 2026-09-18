@@ -1,0 +1,15 @@
+# reconstructed: stderr then stdout of run A1 (captured separately)
+Gnuplot not found, using plotters backend
+Benchmarking jolt_parity_pyramid/full_step/1
+Benchmarking jolt_parity_pyramid/full_step/1: Warming up for 3.0000 s
+Benchmarking jolt_parity_pyramid/full_step/1: Collecting 20 samples in estimated 7.4546 s (420 iterations)
+Benchmarking jolt_parity_pyramid/full_step/1: Analyzing
+
+Completed 255 iterations in 4526018400 nanoseconds, estimated execution time is 17749091.76470588 ns
+Criterion.rs DEBUG: Bootstrapping the absolute statistics. took 11.200 ms
+Criterion.rs DEBUG: Bootstrapped linear regression took 2.8902 ms
+jolt_parity_pyramid/full_step/1
+                        time:   [18.704 ms 18.943 ms 19.234 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

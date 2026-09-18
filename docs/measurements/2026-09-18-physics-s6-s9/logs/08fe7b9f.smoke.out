@@ -1,0 +1,83 @@
+### D:/wt/_targets/mq-08fe7b9f/release/deps/jolt_parity_pyramid-43b10ef74d0e3f27.exe
+Gnuplot not found, using plotters backend
+Testing jolt_parity_pyramid/full_step/1
+Success
+Testing jolt_parity_pyramid/full_step/2
+Success
+Testing jolt_parity_pyramid/full_step/4
+Success
+Testing jolt_parity_pyramid/full_step/8
+Success
+Testing jolt_parity_pyramid/full_step/16
+Success
+
+rc=0
+### D:/wt/_targets/mq-08fe7b9f/release/deps/row_identity_churn-a5d5ed5921338d69.exe
+Gnuplot not found, using plotters backend
+row_identity_churn/stable/sleeping_off: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+Testing row_identity_churn/stable/sleeping_off
+Success
+row_identity_churn/swap_churn/sleeping_off: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+Testing row_identity_churn/swap_churn/sleeping_off
+Success
+row_identity_churn/archetype_shift/sleeping_off: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+Testing row_identity_churn/archetype_shift/sleeping_off
+Success
+row_identity_churn/first_archetype_spawn/sleeping_off: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+Testing row_identity_churn/first_archetype_spawn/sleeping_off
+Success
+row_identity_churn/burst_despawn/sleeping_off: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+Testing row_identity_churn/burst_despawn/sleeping_off
+Success
+row_identity_churn/burst_migrate/sleeping_off: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+Testing row_identity_churn/burst_migrate/sleeping_off
+Success
+row_identity_churn/stable/sleeping_on: 4 churn steps built 0 maps and resolved 0 rows by stage 2
+Testing row_identity_churn/stable/sleeping_on
+Success
+row_identity_churn/swap_churn/sleeping_on: 4 churn steps built 4 maps and resolved 4 rows by stage 2
+Testing row_identity_churn/swap_churn/sleeping_on
+Success
+row_identity_churn/archetype_shift/sleeping_on: 4 churn steps built 4 maps and resolved 5 rows by stage 2
+Testing row_identity_churn/archetype_shift/sleeping_on
+Success
+row_identity_churn/first_archetype_spawn/sleeping_on: 4 churn steps built 4 maps and resolved 2 rows by stage 2
+Testing row_identity_churn/first_archetype_spawn/sleeping_on
+Success
+row_identity_churn/burst_despawn/sleeping_on: 4 churn steps built 4 maps and resolved 124 rows by stage 2
+Testing row_identity_churn/burst_despawn/sleeping_on
+Success
+row_identity_churn/burst_migrate/sleeping_on: 4 churn steps built 4 maps and resolved 2546 rows by stage 2
+Testing row_identity_churn/burst_migrate/sleeping_on
+Success
+
+rc=0
+### D:/wt/_targets/mq-08fe7b9f/release/deps/sleeping_pipeline-b79088505f0ef46b.exe
+Gnuplot not found, using plotters backend
+sleeping_pipeline/pyramid_frozen_sleeping_on: froze at step 61, manifolds 8555, islands 1
+sleeping_pipeline/pyramid_frozen_sleeping_on: contact_wakes 0
+Testing sleeping_pipeline/pyramid_sleeping_off
+Success
+Testing sleeping_pipeline/pyramid_awake_sleeping_on
+Success
+Testing sleeping_pipeline/pyramid_frozen_sleeping_on
+Success
+
+rc=0
+### D:/wt/_targets/mq-08fe7b9f/release/deps/soft_step_sp2-5eb4eb9741068bd6.exe
+Gnuplot not found, using plotters backend
+Testing soft_step_sp2/project_volume/distance_only/64
+Success
+Testing soft_step_sp2/project_volume/with_tets/64
+Success
+Testing soft_step_sp2/project_volume/distance_only/216
+Success
+Testing soft_step_sp2/project_volume/with_tets/216
+Success
+
+Testing soft_step_sp2/coupled/64
+Success
+Testing soft_step_sp2/coupled/256
+Success
+
+rc=0

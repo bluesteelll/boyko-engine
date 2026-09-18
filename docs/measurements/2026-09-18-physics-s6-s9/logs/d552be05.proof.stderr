@@ -1,0 +1,15 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+warning: unused variable: `pile`
+   --> crates\boyko_physics\benches\sleeping_pipeline.rs:248:18
+    |
+248 | fn contact_wakes(pile: &Pile) -> u64 {
+    |                  ^^^^ help: if this is intentional, prefix it with an underscore: `_pile`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `boyko-physics` (bench "sleeping_pipeline") generated 1 warning (run `cargo fix --bench "sleeping_pipeline" -p boyko-physics` to apply 1 suggestion)
+    Finished `bench` profile [optimized] target(s) in 0.76s
+rc=0 secs=1

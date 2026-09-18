@@ -1,0 +1,5 @@
+sleeping_pipeline/pyramid_frozen_sleeping_on: froze at step 61, manifolds 8555, islands 1
+sleeping_pipeline/pyramid_frozen_sleeping_on: contact_wakes 0
+probe: frozen pile live manifolds 8555, points 34220
+probe: fresh off pile replayed the first 300 steps identically
+rc=0 secs=262

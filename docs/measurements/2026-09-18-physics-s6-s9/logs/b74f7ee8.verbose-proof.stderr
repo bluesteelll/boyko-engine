@@ -1,0 +1,102 @@
+env RUSTFLAGS=[unset] CARGO_ENCODED_RUSTFLAGS=[unset] toolchain=stable-x86_64-pc-windows-msvc target=D:/wt/_targets/mq-b74f7ee8
+       Fresh unicode-ident v1.0.26
+       Fresh cfg-if v1.0.5
+       Fresh windows-link v0.2.1
+       Fresh autocfg v1.5.1
+       Fresh proc-macro2 v1.0.107
+       Fresh windows-sys v0.61.2
+       Fresh regex-syntax v0.8.11
+       Fresh static_assertions v1.1.0
+       Fresh quote v1.0.47
+       Fresh crossbeam-utils v0.8.23
+       Fresh boyko-diag v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_diag)
+       Fresh getrandom v0.3.4
+       Fresh serde_core v1.0.229
+       Fresh fixedbitset v0.5.7
+       Fresh once_cell v1.21.4
+       Fresh either v1.18.0
+       Fresh boyko-utils v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_utils)
+       Fresh getrandom v0.4.3
+       Fresh winapi-util v0.1.11
+       Fresh zmij v1.0.23
+       Fresh fastrand v2.5.0
+       Fresh syn v2.0.119
+       Fresh crossbeam-epoch v0.9.21
+       Fresh syn v3.0.6
+       Fresh boyko-log v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_log)
+       Fresh crossbeam-queue v0.3.14
+       Fresh rand_core v0.9.5
+       Fresh num-traits v0.2.19
+       Fresh ciborium-io v0.2.2
+       Fresh anstyle v1.0.14
+       Fresh itoa v1.0.18
+       Fresh memchr v2.8.3
+       Fresh plotters-backend v0.3.7
+       Fresh clap_lex v1.1.1
+       Fresh same-file v1.0.6
+       Fresh zerocopy-derive v0.8.57
+       Fresh crossbeam-deque v0.8.8
+       Fresh serde_derive v1.0.229
+       Fresh boyko-macros v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_macros)
+       Fresh clap_builder v4.6.7
+       Fresh plotters-svg v0.3.7
+       Fresh serde_json v1.0.151
+       Fresh itertools v0.10.5
+       Fresh tempfile v3.27.0
+       Fresh regex-automata v0.4.18
+       Fresh boyko_shaderdsl v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_shaderdsl)
+       Fresh quick-error v1.2.3
+       Fresh boyko-math v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_math)
+       Fresh fnv v1.0.7
+       Fresh wait-timeout v0.2.1
+       Fresh cast v0.3.0
+       Fresh zerocopy v0.8.57
+       Fresh boyko-threadpool v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_threadpool)
+       Fresh serde v1.0.229
+       Fresh rayon-core v1.13.0
+       Fresh bit-vec v0.8.0
+       Fresh regex v1.13.1
+       Fresh clap v4.6.7
+       Fresh plotters v0.3.7
+       Fresh criterion-plot v0.5.0
+       Fresh rusty-fork v0.3.1
+       Fresh boyko_sdf_math v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_sdf_math)
+       Fresh rand v0.9.5
+       Fresh walkdir v2.5.0
+       Fresh rand_xorshift v0.4.0
+       Fresh is-terminal v0.4.17
+       Fresh oorandom v11.1.5
+       Fresh boyko-ecs v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_ecs)
+       Fresh half v2.7.1
+       Fresh ppv-lite86 v0.2.21
+       Fresh rayon v1.12.0
+       Fresh tinytemplate v1.2.1
+       Fresh bit-set v0.8.0
+       Fresh anes v0.1.6
+       Fresh bitflags v2.13.2
+       Fresh unarray v0.1.4
+       Fresh boyko-input v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_input)
+       Fresh ciborium-ll v0.2.2
+       Fresh rand_chacha v0.9.0
+       Fresh boyko-scene v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_scene)
+       Fresh ciborium v0.2.2
+       Fresh proptest v1.11.0
+       Fresh criterion v0.5.1
+       Fresh boyko-physics v0.1.0 (D:\wt\mq-b74f7ee8\crates\boyko_physics)
+    Finished `bench` profile [optimized] target(s) in 0.22s
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\boyko_physics-bdcd30a612d65b85.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\broadphase-fed0a6b94a9647e1.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\colored_solve-38d7d059de69c246.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\constraint_graph-c9582773768d9fba.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\jolt_parity_pyramid-43b10ef74d0e3f27.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\ke16_solve_in_system-33979d2904225237.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\parallel_solve-bda2f7d0f2e28716.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\row_identity_churn-a5d5ed5921338d69.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\sdf_narrowphase_o9-8d36ec4775a7d692.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\simd_end_to_end-d7fc21d05ea14449.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\simd_o1-47284bdc1086f8f8.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\sleeping-2d2770d13867c5a0.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\soft_colored_sp4-f6f5ef257ef8b748.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\soft_step-3b3bfe481b9512ba.exe`
+  Executable `D:/wt/_targets/mq-b74f7ee8\release\deps\soft_step_sp2-5eb4eb9741068bd6.exe`
+rc=0 secs=1
