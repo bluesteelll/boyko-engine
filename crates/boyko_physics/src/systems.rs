@@ -20,8 +20,12 @@
 //!    so the seam is exercised end-to-end (OQ1).
 //! 4. [`physics_narrowphase`] — produces [`Manifold`]s (BodyIndex-keyed) into
 //!    [`Manifolds`] for the overlapping pairs.
-//! 5. [`physics_solve_step`] — `if solver.is_noop() { return }` else
-//!    `S::solve(..)` (the swappable seam, D2).
+//! 5. The solve, chosen by the solver type at wire-up:
+//!    [`physics_build_graph`] → [`physics_solve_colored`] for the default world's
+//!    [`ColoredSoftStepSolver`] (the O7 AVX2 cohort kernel on by default), or
+//!    [`physics_solve_step`] — `if solver.is_noop() { return }` else
+//!    `S::solve(..)` (the swappable seam, D2) — for any other solver, including the
+//!    reference [`SoftStepSolver`](crate::solver::SoftStepSolver).
 //! 6. [`physics_apply`] — writes the solved snapshot back through
 //!    `Mut<RigidBody>` for touched rows, selected with [`BodyQuery`], the same rows the
 //!    gather snapshots, under the "no structural change between gather and apply"
@@ -999,13 +1003,14 @@ fn insert_deepest(
 /// Builds the [`ConstraintGraph`] from this step's manifolds — constraint islands
 /// + greedy graph coloring (plan O4, Decision 2 / Decision 7).
 ///
-/// Registered ONLY by [`add_physics_colored`](crate::plugin::add_physics_colored)
-/// (gated on [`PhysicsConfig::colored`]), AFTER narrowphase and BEFORE the solve,
-/// so the partition reflects the same manifold set the solver consumes. **O4
-/// produces the partition only — it does NOT change the solve**: the shipped
-/// [`SoftStepSolver`](crate::solver::SoftStepSolver) still solves in manifold
-/// order, so the simulation output is byte-identical whether this stage runs or
-/// not (the 0%-gate; a future O5 stage consumes the graph).
+/// Registered for every world whose solver is [`ColoredSoftStepSolver`] (the
+/// default — the colored solve consumes the partition) and by
+/// [`add_physics_colored`](crate::plugin::add_physics_colored) with any solver,
+/// AFTER narrowphase and BEFORE the solve, so the partition reflects the same
+/// manifold set the solver consumes. With the reference
+/// [`SoftStepSolver`](crate::solver::SoftStepSolver) on the `add_physics_colored`
+/// path the partition is NOT consumed — that solver still solves in manifold order,
+/// so its output is byte-identical whether this stage runs or not (the O4 0%-gate).
 ///
 /// A body row is DYNAMIC iff its gathered `inv_mass != 0.0` (a static / kinematic
 /// body has `inv_mass == 0`); the [`SDF_SENTINEL`](crate::manifold::SDF_SENTINEL)
@@ -1040,9 +1045,10 @@ pub fn physics_build_graph(
 }
 
 /// Runs the colored TGS-Soft solver for one step over the prebuilt
-/// [`ConstraintGraph`] (Phase O5, Decision 7) — the SINGLE-THREADED colored
-/// solve that REPLACES the default [`physics_solve_step`] under
-/// [`add_physics_colored`](crate::plugin::add_physics_colored).
+/// [`ConstraintGraph`] (Phase O5, Decision 7) — the default world's solve since
+/// 2026-09-18, registered in place of the generic [`physics_solve_step`] whenever
+/// the pipeline is wired with `S = `[`ColoredSoftStepSolver`]
+/// ([`DefaultRigidSolver`](crate::solver::DefaultRigidSolver)).
 ///
 /// Calls [`ColoredSoftStepSolver::solve_colored`](crate::solver::ColoredSoftStepSolver::solve_colored)
 /// directly (not through [`RigidSolver::solve`], whose signature carries no
@@ -1050,10 +1056,12 @@ pub fn physics_build_graph(
 /// substep loop solving colors `0..n_colors` sequentially (a Gauss-Seidel sweep
 /// across colors), then stores the converged impulses in canonical order
 /// (IM-2b). Registered ONLY on the colored path, where it stands in for
-/// `physics_solve_step` — the default solver's stage is NOT registered, so the
-/// two never both run. A non-colored world never reaches this stage (the
-/// 0%-gate; the shipped [`SoftStepSolver`](crate::solver::SoftStepSolver) is
-/// byte-untouched).
+/// `physics_solve_step` — the generic step stage is NOT registered, so the two
+/// never both run. A world wired with the reference
+/// [`SoftStepSolver`](crate::solver::SoftStepSolver) never reaches this stage (that
+/// solver is byte-untouched). Per color the sweep runs the O7 AVX2 cohort kernel
+/// when [`PhysicsConfig::simd_solve`] is on (the default) and the scalar oracle
+/// otherwise; the two produce the same bits.
 ///
 /// The colored solve reorders the contact sweep vs the reference manifold-order
 /// sweep → DIFFERENT (but valid) converged values, validated against tolerance

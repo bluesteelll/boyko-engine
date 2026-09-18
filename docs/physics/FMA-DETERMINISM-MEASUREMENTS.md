@@ -377,6 +377,14 @@ consults when choosing between `solve_color_avx2` and the scalar `solve_color` m
 > the workspace is `tests/colored_acceptance_simd_o7.rs:132`. The decision file's section 3 works
 > through what the flip does and does not move.
 
+> **And since 2026-09-18 this arm is not the default either.** `PhysicsConfig::simd_solve`
+> defaults to `true` (`resources.rs:480`, owner decision), and the default world is the colored
+> solve (`DefaultRigidSolver`), so a default AVX2 build takes `solve_color_avx2` at
+> `solve_color_dispatch` (`solver/colored.rs:1900`). The scalar `solve_color` measured here is now
+> that kernel's bit-identity oracle, run when `simd_solve` is `false` or the build lacks AVX2. The
+> measurement is unaffected; which arm it prices is what moved. The decision file's section 3
+> re-derives the "arm that ships" argument for the 8-wide row.
+
 ### E — inertia refresh, scalar reference (10 011 bodies per pass)
 
 | Run | split median µs | fused median µs | ratio |

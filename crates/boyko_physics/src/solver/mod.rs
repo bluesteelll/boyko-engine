@@ -1,5 +1,7 @@
-//! The swappable solver seam — the [`RigidSolver`] trait + the default
-//! [`NoopSolver`] (plan D2), plus the real [`SoftStepSolver`] (P2 W2).
+//! The swappable solver seam — the [`RigidSolver`] trait + the foundation
+//! [`NoopSolver`] (plan D2), the reference [`SoftStepSolver`] (P2 W2), and the
+//! colored [`ColoredSoftStepSolver`] that the default world runs
+//! ([`DefaultRigidSolver`], 2026-09-18).
 //!
 //! # Static dispatch, deliberately NOT object-safe (D2)
 //!
@@ -44,6 +46,22 @@ pub use colored::ColoredSoftStepSolver;
 pub use soft_step::SoftStepSolver;
 pub use crate::row_identity::WarmSeedStats;
 
+/// The solver the default physics world runs: the colored TGS-Soft solve
+/// ([`ColoredSoftStepSolver`]) with the O7 AVX2 cohort kernel on
+/// ([`PhysicsConfig::simd_solve`] defaults to `true`). Owner decision, 2026-09-18.
+///
+/// Rust has no default type parameters on functions, so this alias is the single
+/// place the default is named: `add_physics_systems::<DefaultRigidSolver>` (or any
+/// other `add_physics_*` entry) wires the constraint graph and the colored solve
+/// stage, because the plugin selects the solve stage from the solver TYPE.
+///
+/// The previous default, [`SoftStepSolver`], stays in the tree as the reference
+/// oracle and is still selected by naming it: `add_physics_*::<SoftStepSolver>`.
+/// Its converged values differ from the colored solve's (a different, equally
+/// valid Gauss-Seidel sweep order), so the two are compared by tolerance, never by
+/// bits.
+pub type DefaultRigidSolver = ColoredSoftStepSolver;
+
 /// The swappable rigid-body solver seam (plan D2).
 ///
 /// A solver reads the ordered `manifolds` and mutates the dense
@@ -70,7 +88,7 @@ pub trait RigidSolver: Resource + 'static {
 
     /// Returns `true` when this solver does no work — lets the step system
     /// early-out before touching the scratch/manifolds (the 0%-gate for the
-    /// foundation's default [`NoopSolver`]). Defaults to `false`.
+    /// foundation [`NoopSolver`]). Defaults to `false`.
     #[inline]
     fn is_noop(&self) -> bool {
         false
@@ -92,7 +110,7 @@ pub trait RigidSolver: Resource + 'static {
     }
 }
 
-/// The default no-op solver — proves the seam compiles + integrates without
+/// The foundation no-op solver — proves the seam compiles + integrates without
 /// shipping any real solve (plan D2).
 ///
 /// [`is_noop`](RigidSolver::is_noop) returns `true`, so

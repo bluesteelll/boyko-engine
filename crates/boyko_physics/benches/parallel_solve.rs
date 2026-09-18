@@ -31,6 +31,15 @@
 //! Anti-vacuity: every scene asserts `> 0` contacts AND `> 1` color, and (for the
 //! pyramid) that its widest color exceeds the threshold so a real `pool.scope`
 //! dispatch occurs across `> 1` worker.
+//!
+//! # Gate 10 stays SCALAR (2026-09-18)
+//!
+//! `simd_solve` defaults to `true` since 2026-09-18. Gate 10's bar (>= 2.4x at 4
+//! workers) was set and measured on the scalar colored solve, so [`config`] pins
+//! `simd_solve: false` and every `single_O5` / `parallel_Nw` row keeps that meaning.
+//! The `pyramid/default_world` row is the single-threaded solve at
+//! `PhysicsConfig::default()` (the O7 cohort kernel on, `parallel_solve` off); it is
+//! reported, not gated.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
@@ -146,8 +155,15 @@ fn small_color_scene(n: u32) -> (Vec<BodyState>, Vec<Manifold>) {
     (bodies, manifolds)
 }
 
+/// Gate 10's config: the SCALAR colored solve, whatever the default (see the module
+/// docs).
 fn config(parallel: bool) -> PhysicsConfig {
-    PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: parallel, ..PhysicsConfig::default() }
+    PhysicsConfig {
+        dt: 1.0 / 60.0,
+        parallel_solve: parallel,
+        simd_solve: false,
+        ..PhysicsConfig::default()
+    }
 }
 
 fn build_graph(bodies: &[BodyState], manifolds: &[Manifold]) -> ConstraintGraph {
@@ -185,9 +201,22 @@ fn bench_one(
     } else {
         BenchmarkId::new(format!("{label}/parallel_{workers}w"), n_contacts)
     };
+    bench_with_config(group, id, n_contacts, bodies, manifolds, config(workers != 0), workers);
+}
+
+/// Times one warmed colored solve step under `cfg`, inside a `workers`-wide pool's
+/// `install` frame, or with NO pool when `workers == 0`.
+fn bench_with_config(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    id: BenchmarkId,
+    n_contacts: usize,
+    bodies: &[BodyState],
+    manifolds: &[Manifold],
+    cfg: PhysicsConfig,
+    workers: usize,
+) {
     group.bench_with_input(id, &n_contacts, |b, &_n| {
         let parallel = workers != 0;
-        let cfg = config(parallel);
         let graph = build_graph(bodies, manifolds);
         let mut solver = ColoredSoftStepSolver::default();
         let mut scratch = SolverScratch::with_capacity(bodies.len());
@@ -243,6 +272,16 @@ fn bench_pyramid_scaling(c: &mut Criterion) {
     for workers in [0usize, 1, 2, 4, 8] {
         bench_one(&mut group, "pyramid", n_contacts, &bodies, &manifolds, workers);
     }
+    // The default world's config, single-threaded: reported, not gated.
+    bench_with_config(
+        &mut group,
+        BenchmarkId::new("pyramid/default_world", n_contacts),
+        n_contacts,
+        &bodies,
+        &manifolds,
+        PhysicsConfig { dt: 1.0 / 60.0, ..PhysicsConfig::default() },
+        0,
+    );
     group.finish();
 }
 

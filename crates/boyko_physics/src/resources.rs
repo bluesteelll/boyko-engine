@@ -172,8 +172,10 @@ pub struct PhysicsConfig {
     /// gate). Set it to `false` to run the scalar bit-oracle instead: the two
     /// produce the same bits, so the flag changes performance, never the result.
     ///
-    /// It is also a no-op on a non-AVX2 build and under Miri — the dispatchers in
-    /// [`crate::solver::simd`] are `cfg`-gated and take the scalar arm there.
+    /// It is also a no-op on a non-AVX2 build — the dispatchers in
+    /// [`crate::solver::simd`] are `cfg(target_feature = "avx2")`-gated and take the
+    /// scalar arm there. The gate has no `not(miri)` term, so under Miri the arm
+    /// follows the Miri build's own target features, exactly as natively.
     ///
     /// **It does NOT gate the position/quaternion integrate**, which both solvers
     /// call with a hard-coded `false`: the SoA kernel MEASURED ~1.6× SLOWER on the
@@ -183,25 +185,28 @@ pub struct PhysicsConfig {
     /// narrowphase kernel ([`sdf_narrowphase`](Self::sdf_narrowphase)) — the latter
     /// deliberately, because that arm is not bit-identical.
     pub simd: bool,
-    /// Opt into the O7 AVX2 cohort-batched colored CONTACT SOLVE (default `false`),
-    /// independent of [`simd`](Self::simd) (which gates only the O1 integrate /
-    /// inertia kernels). This is the SEPARATE A/B + rollback knob for the
-    /// 8-lane-per-cohort [`solve_color_avx2`](crate::solver::ColoredSoftStepSolver)
-    /// kernel: when `true`, the colored solve widens its per-color sweep over
-    /// cohorts of 8 body-disjoint manifold-groups; when `false`, it runs the
-    /// byte-identical scalar `solve_color` oracle (the O6 0%-gate).
+    /// Run the O7 AVX2 cohort-batched colored CONTACT SOLVE (default `true` since
+    /// 2026-09-18, owner decision), independent of [`simd`](Self::simd) (which gates
+    /// only the O1 integrate / inertia kernels). This is the SEPARATE A/B + rollback
+    /// knob for the 8-lane-per-cohort
+    /// [`solve_color_avx2`](crate::solver::ColoredSoftStepSolver) kernel: when
+    /// `true`, the colored solve widens its per-color sweep over cohorts of 8
+    /// body-disjoint manifold-groups; when `false`, it runs the scalar `solve_color`
+    /// oracle (the O6 path).
     ///
     /// Like [`simd`](Self::simd) it is a PURE speed path — each AVX2 lane mirrors the
     /// scalar op sequence exactly (exact `mul`/`add`/`sub`/`div`/`sqrt`, NO FMA, NO
     /// `rsqrt`/`rcp`), so the widened solve is BIT-IDENTICAL to the scalar colored
     /// result for any cohort shape and worker count (the differential + the
-    /// `{1, N}×{simd}` parallel tests are the gate). It is effective only on the
-    /// colored-solve path ([`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver)
-    /// driven by [`physics_solve_colored`](crate::systems::physics_solve_colored));
-    /// it is a no-op for the shipped [`SoftStepSolver`](crate::solver::SoftStepSolver)
-    /// and on a non-AVX2 build / Miri (both arms then run the scalar oracle). Default
-    /// OFF so an un-opted world is byte-identical to the O6 colored solve; enabling
-    /// the O7 solve needs `simd_solve == true` (it does NOT follow [`simd`](Self::simd)).
+    /// `{1, N}×{simd}` parallel tests are the gate). Setting it to `false` changes
+    /// performance, never a result bit. It is effective only on the colored-solve
+    /// path ([`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver) — the
+    /// default world's solver — driven by
+    /// [`physics_solve_colored`](crate::systems::physics_solve_colored)); it is a
+    /// no-op for the reference [`SoftStepSolver`](crate::solver::SoftStepSolver) and
+    /// on a non-AVX2 build (both arms then run the scalar oracle). The dispatch gate
+    /// has no `not(miri)` term, so under Miri the arm follows the Miri build's own
+    /// target features, exactly as natively. It does NOT follow [`simd`](Self::simd).
     pub simd_solve: bool,
     /// Which kernel the box-vs-SDF narrowphase folds the field with (default
     /// [`SdfNarrowphaseKernel::Scalar`] = the frozen scalar oracle).
@@ -242,27 +247,29 @@ pub struct PhysicsConfig {
     /// [`build`](BroadphaseGrid::build), byte-identical to O2 (the campaign
     /// 0%-gate). Toggling it changes performance, never the result.
     pub parallel_broadphase: bool,
-    /// Opt into building the [`ConstraintGraph`] after narrowphase — constraint
-    /// islands + greedy graph coloring (plan O4, Decision 2 / Decision 7).
+    /// Whether the pipeline builds the [`ConstraintGraph`] after narrowphase —
+    /// constraint islands + greedy graph coloring (plan O4, Decision 2 / Decision 7).
     ///
-    /// When `true`, the [`physics_build_graph`](crate::systems::physics_build_graph)
+    /// Written by the plugin at wire-up: `true` for every world whose solver is
+    /// [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver) (the default,
+    /// [`DefaultRigidSolver`](crate::solver::DefaultRigidSolver)) and for
+    /// [`add_physics_colored`](crate::plugin::add_physics_colored) with any solver.
+    /// It records the schedule's shape and nothing reads it at runtime: the
+    /// [`physics_build_graph`](crate::systems::physics_build_graph) stage runs iff
+    /// it was registered, so setting this field after wire-up changes nothing. The
     /// stage partitions each step's manifolds into islands (connected components
     /// over DYNAMIC bodies, Box2D's ground rule) and greedy-colors them so no color
-    /// shares a dynamic body — the enabler for the future colored/SIMD/parallel
-    /// solve (O5+). **In O4 the partition is built and validated but NOT consumed:
-    /// the shipped [`SoftStepSolver`](crate::solver::SoftStepSolver) still solves
-    /// in manifold order**, so the simulation output is byte-identical whether this
-    /// flag is on or off (it is a pure pre-compute). The DEFAULT is `false`, so an
-    /// un-opted world never runs the stage (the campaign 0%-gate). The colored path
-    /// is registered ONLY by
-    /// [`add_physics_colored`](crate::plugin::add_physics_colored).
+    /// shares a dynamic body. The colored solve consumes the partition; with the
+    /// reference [`SoftStepSolver`](crate::solver::SoftStepSolver) on the
+    /// `add_physics_colored` path it is built but NOT consumed (the O4 shape,
+    /// byte-identical to the graph-free reference). The struct default is `false`.
     pub colored: bool,
     /// Opt into the O6 PARALLEL per-color solve (default `false`).
     ///
     /// Effective only on the colored-solve path (the
     /// [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver) driven by
-    /// the [`physics_solve_colored`](crate::systems::physics_solve_colored) stage);
-    /// it is a no-op for the shipped
+    /// the [`physics_solve_colored`](crate::systems::physics_solve_colored) stage —
+    /// the default world's solve); it is a no-op for the reference
     /// [`SoftStepSolver`](crate::solver::SoftStepSolver). When `true`, each color's
     /// manifold-groups are dispatched across the ambient
     /// [`ThreadPool`](boyko_threadpool::ThreadPool)'s workers via `pool.scope`,
@@ -284,8 +291,8 @@ pub struct PhysicsConfig {
     /// Effective only on the colored-solve path (the
     /// [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver) driven by
     /// [`physics_solve_colored`](crate::systems::physics_solve_colored)) — it consumes
-    /// the [`ConstraintGraph`] islands (O4), so it is a no-op for the shipped
-    /// [`SoftStepSolver`](crate::solver::SoftStepSolver). When `true`, the solver
+    /// the [`ConstraintGraph`] islands (O4), so it is a no-op — silently — for the
+    /// reference [`SoftStepSolver`](crate::solver::SoftStepSolver). When `true`, the solver
     /// tracks a per-island SPEED² metric (`max body |v|²+|ω|²`, mass-INDEPENDENT) with
     /// a per-row debounce counter; an island below
     /// [`sleep_threshold`](Self::sleep_threshold) for
@@ -460,14 +467,17 @@ impl Default for PhysicsConfig {
             // `running 0 tests` and the "green" proved nothing. With the gates
             // actually executing the AVX2 arms, the campaign 0%-gate is satisfied by
             // the bit-identity itself rather than by leaving the path unshipped.
-            // On a non-AVX2 build (or under Miri) the dispatchers still take the
-            // scalar arm, so this is a no-op there.
+            // On a non-AVX2 build the dispatchers still take the scalar arm, so
+            // this is a no-op there. There is no Miri-specific fallback: under Miri
+            // the arm follows the Miri build's target features.
             simd: true,
-            // Default OFF (independent of `simd`) so the colored solve runs the
-            // byte-identical scalar `solve_color` oracle (the O6 0%-gate); the O7
-            // cohort-batched solve is a pure opt-in speed path with a bit-identical
-            // result. Enabling it requires `simd_solve == true` explicitly.
-            simd_solve: false,
+            // Default ON since 2026-09-18 (owner decision), independent of `simd`.
+            // The O7 cohort kernel is bit-identical to the scalar colored oracle
+            // `solve_color` — no FMA, no `rcp`/`rsqrt`, the scalar op order per
+            // lane, and both `max` clamps are ±0-tie-free — and the `{1, N}×{simd}`
+            // differentials are the gate, so the flag changes performance, never a
+            // result bit. On a non-AVX2 build it is a no-op.
+            simd_solve: true,
             // Default SCALAR because the AVX2 arm is the ONE SIMD path in this crate
             // that is NOT bit-identical to its oracle: it returns `+0` where the
             // scalar fold returns `-0` at a `±0` tie (the standing RED gate
@@ -525,7 +535,8 @@ impl Default for PhysicsConfig {
 /// Inserted by [`add_physics_systems`](crate::plugin::add_physics_systems) from
 /// the chosen solver's
 /// [`RigidSolver::owns_integration`](crate::solver::RigidSolver::owns_integration):
-/// an owning TGS solver (the [`SoftStepSolver`](crate::solver::SoftStepSolver))
+/// an owning TGS solver (the [`SoftStepSolver`](crate::solver::SoftStepSolver) and
+/// the default [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver))
 /// integrates DYNAMIC bodies inside its own substep loop, so the pipeline stage
 /// must early-return to avoid double-integration. See the C2 contract block in
 /// [`crate::systems`].
@@ -3446,9 +3457,13 @@ impl IslandSleep {
     /// - a user write to a sleeping body that changes no contact;
     /// - a step whose changes to one frozen island add exactly as many manifolds as they
     ///   remove;
-    /// - a parked support resting on the SDF field (not reachable through the shipped
-    ///   plugin entries) loses its field contact, so its island wakes; the solve's
-    ///   effect on the load it carries is unmeasured.
+    /// - a parked support resting on the SDF field loses its field contact, so its
+    ///   island wakes; the solve's effect on the load it carries is unmeasured. Since
+    ///   2026-09-18 this is reachable through
+    ///   `add_physics_sdf::<DefaultRigidSolver>` with `sleeping` on, and no gate covers
+    ///   SDF + sleeping (a recorded gap; sleeping defaults off);
+    /// - a soft→rigid coupling reaction (`add_physics_soft(.., true)`) landing on a
+    ///   sleeping body does not wake it (a recorded gap, reachable the same way).
     ///
     /// `awake_rows[row]` is set for every body in an ACTIVE island and for every row
     /// with no island (static / out-of-island bodies — they cost nothing to keep

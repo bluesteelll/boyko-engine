@@ -4,18 +4,22 @@
 //! contact currency ([`Manifold`]), a swappable, zero-`dyn`-
 //! on-the-hot-path [`RigidSolver`] trait, a no-op default
 //! solver that proves the seam compiles + integrates
-//! ([`NoopSolver`]), the real TGS-Soft
+//! ([`NoopSolver`]), the reference TGS-Soft
 //! [`SoftStepSolver`] (P2 — sphere/box convex contacts
 //! with soft normal recovery, a 2-DOF Coulomb friction cone, and restitution),
+//! the colored TGS-Soft [`ColoredSoftStepSolver`] that the default world runs
+//! ([`DefaultRigidSolver`] — graph-colored Gauss-Seidel with the O7 AVX2 cohort
+//! kernel, owner decision 2026-09-18),
 //! the physics components
 //! ([`RigidBody`] / [`Collider`] /
 //! [`Contact`]) as ordinary `#[derive(Component)]` columns
 //! with a Phase-10-ready hot/cold split, the convex narrowphase contact
 //! generators ([`narrowphase`] — sphere-sphere / sphere-box / box-box), and the
 //! fixed step pipeline a user adds to their schedule via
-//! [`add_physics_systems`].
+//! [`add_physics_systems::<DefaultRigidSolver>`](add_physics_systems) (the solver
+//! type selects the solve stage).
 //!
-//! **Scope (through W5):** the [`SoftStepSolver`] resolves
+//! **Scope (through W5):** both solvers resolve
 //! sphere-sphere, sphere-box, and box-box (OBB) contacts with cross-frame
 //! warm-starting (W3) and feature-id-stable box manifolds (W4), plus body-vs-SDF
 //! contacts against the analytic [`SdfField`] (W5 — opt-in via
@@ -116,7 +120,10 @@ pub use soft::{
     ParticleColorGraph, SoftBody, SoftBodyError, SoftColorScratch, SoftRigidReaction,
     physics_soft_step_colored,
 };
-pub use solver::{ColoredSoftStepSolver, NoopSolver, RigidSolver, SoftStepSolver, WarmSeedStats};
+pub use solver::{
+    ColoredSoftStepSolver, DefaultRigidSolver, NoopSolver, RigidSolver, SoftStepSolver,
+    WarmSeedStats,
+};
 pub use systems::{
     body_bounding_radius, physics_apply, physics_broadphase, physics_build_graph, physics_gather,
     physics_integrate, physics_narrowphase, physics_narrowphase_sdf, physics_solve_colored,

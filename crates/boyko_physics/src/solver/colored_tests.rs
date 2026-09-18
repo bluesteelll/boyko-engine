@@ -1340,7 +1340,7 @@
     //       ragged ranks (a multi-point box manifold mixed with width-1 groups
     //       across the 8-lane boundary), incl. mixed cone activation (+avx2 only);
     //   (2) width-only: `solve_colored(simd=true) == solve_colored(simd=false)` over
-    //       a full step (on non-AVX2 / Miri both arms ARE the scalar oracle, so the
+    //       a full step (on a non-AVX2 build both arms ARE the scalar oracle, so the
     //       check holds trivially; under +avx2 it proves the widened path matches
     //       the O5/O6 scalar colored result bit-for-bit).
 

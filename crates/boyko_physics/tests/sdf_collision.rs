@@ -18,6 +18,15 @@
 //! - `sdf_solver_is_deterministic` runs an SDF scene twice and asserts the result
 //!   is bit-identical (the SDF narrowphase + sentinel path is deterministic).
 //!
+//! Each full-pipeline gate also has a COLORED arm on
+//! [`DefaultRigidSolver`](boyko_physics::solver::DefaultRigidSolver) — the default
+//! world's colored solve with the O7 AVX2 cohort kernel, which
+//! `add_physics_sdf::<DefaultRigidSolver>` wires since 2026-09-18 — held to the SAME
+//! bounds as the reference [`SoftStepSolver`] arm. The colored solve's values differ
+//! from the reference's (a different sweep order), so the arms are compared to the
+//! bounds, never to each other. A colored arm that misses a bound is a colored-solver
+//! defect, not a tolerance to re-measure.
+//!
 //! The full-pipeline tests drive a real `Schedule` (a `num_threads(1)` pool, the
 //! IM-2 determinism precondition). The `cpu_gpu_sdf_agreement` three-way
 //! conformance gate is INTENTIONALLY ABSENT here — it needs the GPU + boyko_rhi
@@ -39,7 +48,7 @@ use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_sdf;
 use boyko_physics::resources::{Manifolds, PhysicsConfig};
 use boyko_physics::sdf_query::{SdfField, sample_sdf};
-use boyko_physics::solver::{NoopSolver, RigidSolver, SoftStepSolver};
+use boyko_physics::solver::{DefaultRigidSolver, NoopSolver, RigidSolver, SoftStepSolver};
 
 use boyko_sdf_math::{SdfEdit, sdf_op};
 
@@ -362,6 +371,7 @@ fn sdf_collision_resolves() {
     }
 
     let (y_soft, contacts_soft) = final_y::<SoftStepSolver>();
+    let (y_colored, contacts_colored) = final_y::<DefaultRigidSolver>();
     let (y_noop, _) = final_y::<NoopSolver>();
 
     // Non-vacuity: the resting sphere must be in genuine SDF contact (else the body
@@ -376,6 +386,15 @@ fn sdf_collision_resolves() {
         y_soft > 0.3 && y_soft < 0.7,
         "SoftStep rests the sphere on the SDF floor (y ≈ 0.5): {y_soft}"
     );
+    // The colored arm (the default world's solver), held to the same bounds.
+    assert!(
+        contacts_colored >= 100,
+        "colored: the sphere must rest in sustained SDF contact (else vacuous): {contacts_colored}"
+    );
+    assert!(
+        y_colored > 0.3 && y_colored < 0.7,
+        "colored: the default solver rests the sphere on the SDF floor (y ≈ 0.5): {y_colored}"
+    );
     // Noop: falls straight through (no contact resolve) — far below the surface.
     assert!(
         y_noop < -5.0,
@@ -389,7 +408,11 @@ fn sdf_collision_resolves() {
 /// then returns its horizontal travel along the slope after `frames` of gravity-
 /// driven sliding under the given `friction`. A high-friction box should creep far
 /// less than a low-friction one (static friction holds it below the cone limit).
-fn box_sdf_incline_slide(friction: f32, incline: f32, frames: usize) -> (f32, usize) {
+fn box_sdf_incline_slide<S: RigidSolver + Default>(
+    friction: f32,
+    incline: f32,
+    frames: usize,
+) -> (f32, usize) {
     let mut world = EcsMaster::new();
     // The leaf's `sd_box` is axis-aligned (no per-edit rotation), so the incline is
     // realized as a large AXIS-ALIGNED SDF floor (top face at y = 0) under a GRAVITY
@@ -417,7 +440,7 @@ fn box_sdf_incline_slide(friction: f32, incline: f32, frames: usize) -> (f32, us
     spawn_body(&mut world, bb, bm, bc);
 
     let dt = 1.0 / 120.0;
-    let mut schedule = build_sdf_schedule::<SoftStepSolver>(&mut world, field, dt);
+    let mut schedule = build_sdf_schedule::<S>(&mut world, field, dt);
     // Tilt gravity by `incline` about +z: g = R_z(incline) · (0, -9.81, 0), giving a
     // tangential component along +x proportional to sin(incline) — the slope force.
     let g = quat_z(incline).rotate(Vec3::new(0.0, -9.81, 0.0));
@@ -441,6 +464,16 @@ fn box_sdf_incline_slide(friction: f32, incline: f32, frames: usize) -> (f32, us
 
 #[test]
 fn box_on_sdf_incline() {
+    assert_box_on_sdf_incline::<SoftStepSolver>();
+}
+
+/// The colored arm of [`box_on_sdf_incline`]: the default world's solver, same bounds.
+#[test]
+fn box_on_sdf_incline_on_the_default_solver() {
+    assert_box_on_sdf_incline::<DefaultRigidSolver>();
+}
+
+fn assert_box_on_sdf_incline<S: RigidSolver + Default>() {
     // The SDF variant of `box_box_friction_3d`: a box resting on an SDF floor under
     // a tilted gravity (the incline). HIGH friction holds it (the cone resists the
     // tangential slope force below its limit); LOW friction lets it slide. Proves
@@ -448,8 +481,8 @@ fn box_on_sdf_incline() {
     let incline = 0.3_f32; // ~17° slope.
     let frames = 240usize;
 
-    let (slide_high, contacts_high) = box_sdf_incline_slide(1.0, incline, frames);
-    let (slide_low, contacts_low) = box_sdf_incline_slide(0.0, incline, frames);
+    let (slide_high, contacts_high) = box_sdf_incline_slide::<S>(1.0, incline, frames);
+    let (slide_low, contacts_low) = box_sdf_incline_slide::<S>(0.0, incline, frames);
 
     // Non-vacuity: the box must be in genuine SDF contact while sliding.
     assert!(
@@ -474,11 +507,21 @@ fn box_on_sdf_incline() {
 
 #[test]
 fn sdf_solver_is_deterministic() {
+    assert_sdf_solver_is_deterministic::<SoftStepSolver>();
+}
+
+/// The colored arm of [`sdf_solver_is_deterministic`]: the default world's solver.
+#[test]
+fn sdf_default_solver_is_deterministic() {
+    assert_sdf_solver_is_deterministic::<DefaultRigidSolver>();
+}
+
+fn assert_sdf_solver_is_deterministic<S: RigidSolver + Default>() {
     // The SDF narrowphase + the C1 sentinel solve must be bit-reproducible: the same
     // SDF scene, spawned in the same order through a num_threads(1) pool, run twice
     // IN THIS PROCESS, ends bit-identical. Guards the sentinel body-fetch + the
     // `pack_sdf` warm-start key path against hidden run-to-run nondeterminism.
-    fn run_once() -> Vec<RigidBody> {
+    fn run_once<S: RigidSolver + Default>() -> Vec<RigidBody> {
         let mut world = EcsMaster::new();
         // A small cluster of dynamic spheres + a box, all dropped onto an SDF floor.
         let setup = [
@@ -501,7 +544,7 @@ fn sdf_solver_is_deterministic() {
         spawn_body(&mut world, bb, bm, bc);
 
         let dt = 1.0 / 60.0;
-        let mut schedule = build_sdf_schedule::<SoftStepSolver>(&mut world, sdf_floor(), dt);
+        let mut schedule = build_sdf_schedule::<S>(&mut world, sdf_floor(), dt);
         world.resource_mut::<PhysicsConfig>().gravity = Vec3::new(0.0, -9.81, 0.0);
         for _ in 0..60 {
             schedule.run(&mut world);
@@ -509,8 +552,8 @@ fn sdf_solver_is_deterministic() {
         all_bodies(&mut world)
     }
 
-    let a = run_once();
-    let b = run_once();
+    let a = run_once::<S>();
+    let b = run_once::<S>();
     assert_eq!(a.len(), b.len());
     for (i, (ba, bb)) in a.iter().zip(b.iter()).enumerate() {
         assert_eq!(ba.position.x.to_bits(), bb.position.x.to_bits(), "body {i} pos.x");

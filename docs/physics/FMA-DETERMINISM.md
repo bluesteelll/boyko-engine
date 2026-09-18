@@ -50,6 +50,18 @@ production site turns them on. That lever is orders of magnitude larger than any
 > produced the change; what it does to the section-3 verdicts is worked out in the note under that
 > section's table, and the short answer is that it moves none of them.
 
+> **Answered for the solve too, 2026-09-18 (owner decision), and both notes above are kept as
+> written.** `simd_solve` now defaults to **`true`** (`resources.rs:480`), and the default world is
+> the colored solve: `DefaultRigidSolver = ColoredSoftStepSolver` (`solver/mod.rs:63`), and every
+> `add_physics_*::<S>` entry wires the colored stage when `S` is that type (`plugin.rs:479`). So
+> the bit-exact 8-wide solve and inertia refresh BOTH ship on. `parallel_solve` still defaults to
+> `false`. The section-3 verdicts again move none; the "arm that ships" argument is re-derived for
+> the AVX2 arm in the second note under that section's table. One scope limit: in this lane nothing
+> in production calls physics, and the render line's App-level `PhysicsPlugin` still names
+> `SoftStepSolver` as its default until it is merged
+> (`tests/default_world_colored_simd.rs::physics_plugin_default_solver_tripwire` goes red if the
+> merge keeps it).
+
 ---
 
 ## 1. The question
@@ -69,9 +81,10 @@ That is two questions, and they get two different answers:
 2. **Does it run faster?** No, not where it counts. The contact-solve loop that the whole O5–O7
    campaign optimised does not speed up at all when 32 % of its vector arithmetic is fused,
    because the loop is latency-bound on the Gauss–Seidel chain and fusion removes only
-   multiplies that were already issuing in parallel. The scalar reference — which is what ships
-   by default — gets *slower*, because writing `mul_add` blocks LLVM's partial SLP packing of the
-   `Vec3` arithmetic.
+   multiplies that were already issuing in parallel. The scalar reference — which is what shipped
+   by default until 2026-09-18, and is the bit-identity oracle of the AVX2 arm that ships since —
+   gets *slower*, because writing `mul_add` blocks LLVM's partial SLP packing of the `Vec3`
+   arithmetic.
 
 The compile-flag half of the question rests on a premise that is true in C/C++ and false in Rust:
 there is no contraction to switch on. `rustc` never fuses `a * b + c` on its own — re-confirmed
@@ -183,7 +196,7 @@ latency-bound rows before treating them as universal.
 | Kernel (file · function) | Fusible sites | Share of FP ops fused | Measured split/fused | Verdict |
 |---|---|---|---|---|
 | **Colored contact solve, 8-wide** — `colored.rs::solve_color_avx2` over the `simd.rs` x8 helpers (`cross8`, `dot8`, `mat3mulvec8`, `pointvel_x8`, `effective_mass_x8`, `apply_impulse_blend_x8`) | 145 per 8 contacts (counted in the compiled loop: 3 per cross, 2 per dot, 28 per effective mass, 12 per impulse apply) | 32 % of vector FP arithmetic; 12.6 % of all loop instructions; spills fall 51→40 stores | **0.98–1.01×** (8 runs; median 1.00) | **No prize.** Latency-bound on the serial Gauss–Seidel chain; `mul→add→add` and `mul→fma→fma` have equal depth. Confirmed by an L1-resident-gather variant (memory is ~2.5 % of the loop) that still shows 0.97–1.01×. |
-| **Colored contact solve, scalar reference** — `colored.rs::solve_color` over `contact.rs::{effective_mass, point_velocity, apply_impulse}` and `boyko_math` | 145 per contact (identical sites) | LLVM SLP-packs the split form's `Vec3` arithmetic (transcription: 57 `vmulps`/30 `vaddps`; **in-tree `solve_color`, default release profile: 93 `vmulps`/38 `vaddps`/24 `vsubps`, every one of them `xmm`** — the symbol contains no `ymm` op at all, so none of it is an inlined AVX2 callee; the scalar/SIMD fork is in `solve_color_dispatch`) next to 92/49/28 scalar ops; the fused transcription has **zero packed ops** (145 `vfmadd*ss`) | **0.91–0.95×** in the transcription (7 clean runs of 8; the two arms never overlap) | **Regression.** The mechanism — partial packing that `mul_add` defeats — is confirmed on the in-tree kernel by disassembly; the *magnitude* is the transcription's, because the in-tree fused variant cannot be built without editing `crates/`. This is the arm that ships, and since 2026-09-03 that rests on `simd_solve` **alone** — see the note under the table. |
+| **Colored contact solve, scalar reference** — `colored.rs::solve_color` over `contact.rs::{effective_mass, point_velocity, apply_impulse}` and `boyko_math` | 145 per contact (identical sites) | LLVM SLP-packs the split form's `Vec3` arithmetic (transcription: 57 `vmulps`/30 `vaddps`; **in-tree `solve_color`, default release profile: 93 `vmulps`/38 `vaddps`/24 `vsubps`, every one of them `xmm`** — the symbol contains no `ymm` op at all, so none of it is an inlined AVX2 callee; the scalar/SIMD fork is in `solve_color_dispatch`) next to 92/49/28 scalar ops; the fused transcription has **zero packed ops** (145 `vfmadd*ss`) | **0.91–0.95×** in the transcription (7 clean runs of 8; the two arms never overlap) | **Regression.** The mechanism — partial packing that `mul_add` defeats — is confirmed on the in-tree kernel by disassembly; the *magnitude* is the transcription's, because the in-tree fused variant cannot be built without editing `crates/`. This is the arm that ships, and since 2026-09-03 that rests on `simd_solve` **alone** — see the note under the table. **Since 2026-09-18 it is not the shipping arm**: `simd_solve` defaults to `true`, so the 8-wide row above ships and this row is its bit-identity oracle (the second note under the table). |
 | **Inertia refresh, 8-wide** — `simd.rs::refresh_inertia_avx2` (`quat_to_mat3_x8` + `mat3_mul_x8` ×2) | 36 per 8 bodies (2 per 3-term dot × 18 dots) | ~34 % of vector FP ops | **1.14–1.23×** (8 runs; median 1.16) | **Real, in isolation.** 18 independent dot products, no chain to hide behind. |
 | **Inertia refresh, scalar reference** — `simd.rs::refresh_inertia_scalar` = `Mat3::from_quat`, `Mat3 * Mat3`, `transpose` in `boyko_math` | 36 per body | Transcription: not packed in either form (63 `vmulss`/60 `vaddss` split; 36 `vfmadd*ss` fused). **In-tree, the split form *is* partially packed** (7 `vmulps`/6 `vaddps`/2 `vsubps` on `xmm` **plus 3 `vmulps`/2 `vaddps` on `ymm`**, beside 21/18/4 scalar ops), which the transcription lacked | **1.14–1.16×** (3 runs, 1.136–1.161) — an **upper bound** for the in-tree kernel | **Real in the transcription; likely smaller in-tree**, because the same packing that `mul_add` defeats in the solve is present here too. |
 | **Inertia refresh, as a share of a step** — 4 refreshes vs 12 solve passes per step at the defaults (`substeps = 4`, `relax_iterations = 2`) | — | inertia is 2.2–2.6 % of solve+inertia time | fusing it saves **0.26–0.35 % of the step** (both paths; less if the in-tree scalar bound above binds) | **Below the noise floor** of every in-tree criterion bench (their run-to-run spreads are several percent). Counting broadphase, narrowphase, graph build, gather and apply shrinks the share further. |
@@ -224,6 +237,31 @@ value for the same reason: the "Inertia refresh, 8-wide" and "as a share of a st
 kernel that is now the one production runs rather than a dormant opt-in. Their verdicts stand as
 written — the share argument is stated for both paths — but a reader should no longer read them as
 pricing something nobody executes.
+
+**What "the arm that ships" rests on, after the 2026-09-18 default flip.** The note above ends
+"the scalar arm is still what a default build executes", and its second bullet is now false: on
+2026-09-18 `simd_solve` became `true` by default. The trace, re-taken on the tree:
+
+- The default world is the colored solve. `DefaultRigidSolver` is `ColoredSoftStepSolver`
+  (`solver/mod.rs:63`), and `add_physics_pipeline` registers `physics_solve_colored` whenever `S`
+  is that type (`plugin.rs:479`), through every entry; `SoftStepSolver` is selected only by naming
+  it.
+- `simd_solve` defaults to `true` (`resources.rs:480`); the pipeline inserts
+  `..PhysicsConfig::default()` and overrides neither flag. `use_simd_solve = config.simd_solve`
+  (`solver/colored.rs:3330`) still reaches only `solve_color_dispatch` (`:1900`), whose AVX2 branch
+  is compiled when `cfg(all(target_arch = "x86_64", target_feature = "avx2"))` holds (`:1912`),
+  which the `x86-64-v3` baseline in `.cargo/config.toml` makes true on every x86-64 target the
+  tree builds for. `tests/default_world_colored_simd.rs` (G1 legs c and d) pins both inputs of
+  that fork. So a default build executes `solve_color_avx2` — the **8-wide row**.
+- `use_simd` is unchanged: O1's gravity and inertia kernels, as in the note above.
+
+**The verdict is unaffected, and the reason now runs through the other row.** On the arm that
+ships, fusion measured **0.98–1.01×** (median 1.00): no prize. Fusing it without breaking the
+`{1, N}×{simd}` bit-identity gates means fusing the scalar oracle at the same sites, which is the
+row that measured **0.91–0.95×**, and the size of the re-bless below is unchanged. Both rows now
+argue for the split form: one buys nothing, the other loses. Two caveats carry over unchanged: the
+8-wide numbers are a transcription measured on Zen 3 (the latency note above the table), and a
+default build is the colored solve only where the application wires `DefaultRigidSolver`.
 
 **How much the value moves if the solver fuses** (the size of the re-bless, measured): 7 029 of
 29 752 converged normal impulses change (23.6 %), maximum gap **6 848 ULP** — not a last-bit
@@ -667,6 +705,20 @@ in 5.3, and the placement of the control-word probe in 7.
    > single-threaded **scalar** solve." Production runs the AVX2 integrate and inertia kernels and
    > the **scalar** contact solve. The remaining open half of the call is `simd_solve` — its
    > numbers above are untouched, and `parallel_solve` remains bounded by KE16 defect A.
+   >
+   > **RULED FOR `simd_solve`, 2026-09-18 (owner decision, translated: "turn simd_solve on").** The owner
+   > took it together with the solver: the default world now runs the colored solve
+   > (`DefaultRigidSolver = ColoredSoftStepSolver`), and `PhysicsConfig::default().simd_solve` is
+   > `true` (`resources.rs:480`). Taking the colored solve as the default is a VALUE change
+   > against the reference `SoftStepSolver` (a different, equally valid sweep order; the owner
+   > was told so before ruling), validated by tolerance gates; `simd_solve` itself is gated to
+   > change no bit — by the oracles this document keeps and by the schedule-level on/off
+   > differentials added with it (`bodytype_determinism_golden.rs::golden_scalar_colored_equals_golden`,
+   > `sleep_settles_box_piles.rs::simd_solve_on_off_bit_identical`). A default world therefore runs
+   > the AVX2 integrate, inertia AND contact-solve kernels (the scope limit on "default world" is in
+   > the second note at the top of this document). The item is closed except for
+   > `parallel_solve`, which this document left to the KE16 campaign and which still defaults to
+   > `false`. The "arm that ships" argument is re-derived in section 3.
 2. **`colored_columns_snapshot_matches_pre_p2_vec_baseline` reads a file on `D:/tmp` and passes
    silently without it.** Scope call: delete it (the {1,N} and run-to-run byte gates above it cover
    the property), or check the captured baseline into the repository so the test can actually

@@ -162,7 +162,7 @@ The engine has both patterns and the design must pick one deliberately.
 | pattern | in the tree | what it can promise | what it cannot |
 |---|---|---|---|
 | **Compile-time** | `hwrt` is a default-off cargo feature; a `not(hwrt)` build is TEXTUALLY the pre-feature code (`crates/boyko_app/Cargo.toml:44-48`) | a shipping game binary carries NOTHING: no code, no cost, no obligation | a player or a QA build cannot turn recording on without a rebuild — which, for a bug-reproduction feature, may be the whole point |
-| **Runtime** | `PhysicsConfig`'s `simd` / `simd_solve` / `parallel_solve` / `colored` / `broadphase` are default-off runtime flags: the code ships, a branch decides | anyone can turn it on in the field | it cannot make the shipping-binary promise, and a branch on the frame path is a cost the `not(replay)` case should not pay |
+| **Runtime** | `PhysicsConfig`'s `simd` / `simd_solve` / `parallel_solve` / `broadphase` / `sdf_narrowphase` are runtime selectors (`simd` and `simd_solve` default on, the rest off): the code ships, a branch decides | anyone can turn it on in the field | it cannot make the shipping-binary promise, and a branch on the frame path is a cost the `not(replay)` case should not pay |
 | **Hybrid** (chosen) | — | both halves: `not(replay)` is textually the pre-replay code, and a `replay` build (a QA build, a developer build, an opt-in beta) arms at runtime with no rebuild | it is two mechanisms rather than one, and the `replay` build pays an armed/disarmed branch |
 
 The two pure forms each fail one of the owner's requirements, which is why the hybrid is taken rather
@@ -195,7 +195,8 @@ mapped image once at arm time, not per frame.
 | field | why |
 |---|---|
 | `session_id` | already available (`boyko_diag::clock::session_id`, stamped into profiling artifacts) so a reader can prove which process wrote a file |
-| `PhysicsConfig` bytes | `simd` / `simd_solve` / `parallel_solve` / `colored` / `broadphase` change the arithmetic; they are runtime flags, so the exe hash does not cover them |
+| `PhysicsConfig` bytes | the tunables (`substeps`, `relax_iterations`, `contact_hertz`, `contact_damping`, `gravity`, the sleep fields) and `sdf_narrowphase` (its `Avx2` arm is not bit-identical to the scalar fold) change the arithmetic, and they are runtime values the exe hash does not cover. ⚠ This row used to name `simd` / `simd_solve` / `parallel_solve` / `colored` / `broadphase` as the arithmetic-changing fields, which is false: the first four are gated bit-identical to their oracles and `colored` is written at wire-up and read by nothing. Recording them is harmless; they are not why the bytes are recorded |
+| solver identity | the `RigidSolver` type the schedule was wired with, recorded from `TypeId`/type name or from the schedule shape (a `build_graph` stage ⇔ the colored solve), NOT from `PhysicsConfig` bytes, which do not name it. Since 2026-09-18 the default world is `DefaultRigidSolver` (the colored solve) and the reference is `SoftStepSolver`; they converge to different, equally valid floats, so a recording on one does not replay on the other |
 | `Time` config bytes | `max_delta`, `relative_speed` |
 | worker count | the {1, N}-worker determinism property is a property, not an assumption; recording the count makes a mismatch a stated difference rather than a silent one |
 | determinism-set manifest | the ordered list of `(stable_name, stable_name_hash)` the digest covers, so a replay under a build with a different set refuses instead of comparing different things |

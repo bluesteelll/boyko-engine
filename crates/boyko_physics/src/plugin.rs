@@ -9,6 +9,21 @@
 //!
 //! Per MINOR-1 it does NOT call `builder.build(world)` — that consumes the
 //! builder and is the caller's job.
+//!
+//! # The solve stage follows the solver type (2026-09-18)
+//!
+//! Every `add_physics_*::<S>` entry selects the solve stage from `S` alone, once,
+//! at wire-up (cold code). `S = `[`ColoredSoftStepSolver`] — the default world's
+//! solver, named [`DefaultRigidSolver`](crate::solver::DefaultRigidSolver) — wires
+//! the constraint graph ([`physics_build_graph`]), the colored solve
+//! ([`physics_solve_colored`]) and the per-island sleep state ([`IslandSleep`]);
+//! any other `S` wires the generic [`physics_solve_step::<S>`](physics_solve_step),
+//! unchanged. So the reference [`SoftStepSolver`](crate::solver::SoftStepSolver)
+//! is still selected by naming it, and the foundation
+//! [`NoopSolver`](crate::solver::NoopSolver) can never be paired with the colored
+//! stage (the colored solver owns integration; the no-op solver does not).
+
+use std::any::TypeId;
 
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
@@ -84,13 +99,16 @@ pub struct PhysicsStageKeys {
     /// Descriptor index of the [`physics_build_graph`] constraint-graph stage, or
     /// `None` for the non-colored paths (plan O4 / Decision 7).
     ///
-    /// Present only when the pipeline was wired by
-    /// [`add_physics_colored`](crate::plugin::add_physics_colored); it runs AFTER
-    /// the narrowphase stage(s) and BEFORE `solve`, building (but in O4 NOT
-    /// consuming) the islands + coloring. The solve stays byte-identical (the
-    /// 0%-gate).
+    /// Present when the pipeline was wired with `S = `[`ColoredSoftStepSolver`]
+    /// (the default, through ANY entry — the colored solve consumes the graph) or
+    /// by [`add_physics_colored`](crate::plugin::add_physics_colored) with any `S`.
+    /// It runs AFTER the narrowphase stage(s) and BEFORE `solve`. With another `S`
+    /// on the [`add_physics_colored`] path the graph is built but NOT consumed (the
+    /// O4 partition-only shape; that solve stays byte-identical).
     pub build_graph: Option<usize>,
-    /// Descriptor index of the [`physics_solve_step`] stage.
+    /// Descriptor index of the solve stage: [`physics_solve_colored`] when the
+    /// pipeline was wired with `S = `[`ColoredSoftStepSolver`], else
+    /// [`physics_solve_step::<S>`](physics_solve_step).
     pub solve: usize,
     /// Descriptor index of the [`physics_soft_step`](crate::soft::physics_soft_step)
     /// SP1 XPBD soft-body pass, or `None` for the non-soft paths (plan O11 SP1).
@@ -152,16 +170,34 @@ const INITIAL_BODY_CAPACITY: usize = 1024;
 ///
 /// Resources inserted: [`PhysicsConfig`], [`ContactPairs`], [`Manifolds`],
 /// [`SolverScratch`] (all reused, capacity-preserving), the chosen solver
-/// `S::default()` (the `ResMut<S>` the generic step system dispatches on, D2),
+/// `S::default()` (the `ResMut<S>` the solve stage reads, D2),
 /// and the [`IntegrationMode`] derived from `S::default().owns_integration()`
 /// (C2 — gates [`physics_integrate`] off for
 /// an owning TGS solver so it does not double-integrate).
 ///
 /// Stages registered in deterministic order via `.after(...)`:
-/// `integrate → gather → broadphase → narrowphase → solve_step::<S> → apply`
+/// `integrate → gather → broadphase → narrowphase → solve → apply`
 /// (D3). `integrate` carries no `.after` (it is the block head); each later stage
 /// `.after`s its predecessor — so the whole block runs in a fixed intra-order
 /// regardless of registration interleaving with the caller's own systems.
+///
+/// # What `S` selects
+///
+/// - `S = `[`DefaultRigidSolver`](crate::solver::DefaultRigidSolver) (=
+///   [`ColoredSoftStepSolver`]) — **the default world** (owner decision,
+///   2026-09-18). The [`ConstraintGraph`] + [`IslandSleep`] resources are inserted,
+///   [`PhysicsConfig::colored`] is set, and the solve is
+///   `build_graph →` [`physics_solve_colored`]: the colored TGS-Soft solve with the
+///   O7 AVX2 cohort kernel ([`PhysicsConfig::simd_solve`] defaults to `true`, and
+///   that kernel is bit-identical to the scalar colored oracle). This is the same
+///   wiring as [`add_physics_colored_solve`].
+/// - `S = `[`SoftStepSolver`](crate::solver::SoftStepSolver) — the REFERENCE
+///   oracle: the solve is [`physics_solve_step::<SoftStepSolver>`](physics_solve_step)
+///   in manifold order. Its converged values differ from the colored solve's
+///   (equally valid, compared by tolerance), so a world or a replay pinned to the
+///   reference must name it.
+/// - Any other `S` (the foundation [`NoopSolver`](crate::solver::NoopSolver), an
+///   external backend) — the solve is [`physics_solve_step::<S>`](physics_solve_step).
 ///
 /// Per MINOR-1 this does NOT call `builder.build(world)` — the caller owns the
 /// build (`runner.rs:325` precedent).
@@ -170,9 +206,10 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
     // `with_sdf = false`, `colored = false`, `soft = false`, `scene_sync = false`:
-    // body-only pipeline (no `SdfField`, no SDF stage, no constraint-graph stage,
-    // no soft pass, no pose sync) — byte-identical to the shipped path.
-    add_physics_pipeline::<S>(builder, world, false, false, false, false, false, false, false)
+    // body-only pipeline (no `SdfField`, no SDF stage, no soft pass, no pose sync).
+    // The constraint-graph stage is still wired when `S` is the colored solver
+    // (`add_physics_pipeline` derives it from the type).
+    add_physics_pipeline::<S>(builder, world, false, false, false, false, false, false)
 }
 
 /// Registers the physics pipeline WITH the std-lib S5 `Transform` ⇄ `RigidBody`
@@ -219,11 +256,15 @@ pub fn add_physics_systems<S: RigidSolver + Default>(
 /// plain field assignments (exact, no FMA, no re-normalize). The physics solve is
 /// byte-identical whether or not the sync is wired (the determinism suite, which
 /// uses [`add_physics_systems`], is unaffected).
+///
+/// The solve stage follows `S` exactly as in [`add_physics_systems`]:
+/// `S = `[`DefaultRigidSolver`](crate::solver::DefaultRigidSolver) wires the colored
+/// solve, any other `S` the generic step.
 pub fn add_physics_systems_with_scene_sync<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, false, false, false, false, false, true)
+    add_physics_pipeline::<S>(builder, world, false, false, false, false, false, true)
 }
 
 /// Inserts the physics resources INCLUDING the [`ConstraintGraph`] and registers
@@ -236,56 +277,53 @@ pub fn add_physics_systems_with_scene_sync<S: RigidSolver + Default>(
 ///   `narrowphase` and BEFORE `solve_step`, building the islands + coloring from
 ///   this step's manifolds.
 ///
-/// **O4 produces the partition only — it does NOT change the solve.** The shipped
+/// **With any `S` other than [`ColoredSoftStepSolver`], O4 produces the partition
+/// only — it does NOT change the solve.** The reference
 /// [`SoftStepSolver`](crate::solver::SoftStepSolver) still solves in manifold order
 /// over the unchanged manifold buffer, so the simulation output is byte-identical
-/// to [`add_physics_systems`] (the campaign 0%-gate; a future O5 stage consumes the
-/// graph). The opt-in is the entire gate: a world that never calls this never
-/// builds the graph. The returned [`PhysicsStageKeys::build_graph`] carries the
-/// stage's descriptor index.
+/// to `add_physics_systems::<SoftStepSolver>` (the O4 0%-gate). With
+/// `S = `[`ColoredSoftStepSolver`] this is exactly
+/// `add_physics_systems::<ColoredSoftStepSolver>`: the graph is consumed by the
+/// colored solve (see [`add_physics_systems`]). The returned
+/// [`PhysicsStageKeys::build_graph`] carries the stage's descriptor index.
 pub fn add_physics_colored<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, true, false, false, false, false, false)
+    add_physics_pipeline::<S>(builder, world, false, true, false, false, false, false)
 }
 
 /// Inserts the physics resources and registers the COLORED-SOLVE pipeline (Phase
-/// O5, Decision 7) — `physics_build_graph` (O4) followed by the single-threaded
+/// O5, Decision 7) — `physics_build_graph` (O4) followed by the
 /// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage, which
-/// REPLACES the default [`physics_solve_step`](crate::systems::physics_solve_step).
+/// stands in for the generic [`physics_solve_step`](crate::systems::physics_solve_step).
 ///
-/// Unlike [`add_physics_colored`] (which builds the graph but leaves the shipped
-/// [`SoftStepSolver`](crate::solver::SoftStepSolver) solving in manifold order —
-/// the O4 byte-identical, partition-only path), this wires the
-/// [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver): the solve
-/// runs in graph-COLOR order over the solver's SoA `ContactColumns` (a
+/// Since 2026-09-18 this is the DEFAULT world's wiring: it forwards to
+/// `add_physics_systems::<ColoredSoftStepSolver>` (the solver
+/// [`DefaultRigidSolver`](crate::solver::DefaultRigidSolver) names) and is kept so
+/// existing callers do not move.
+///
+/// The solve runs in graph-COLOR order over the solver's SoA `ContactColumns` (a
 /// Gauss-Seidel sweep across colors), with the converged impulses stored in
-/// canonical order (IM-2b). The shipped `SoftStepSolver` is byte-untouched and
-/// its solve stage is NOT registered on this path — the two solvers never both
-/// run (Decision 7).
+/// canonical order (IM-2b). The reference
+/// [`SoftStepSolver`](crate::solver::SoftStepSolver) is byte-untouched and its
+/// solve stage is NOT registered on this path — the two solvers never both run
+/// (Decision 7).
 ///
 /// # The value change (Phase O5)
 ///
 /// The colored sweep order differs from the reference manifold-order sweep, so
 /// the converged float values DIFFER (but are equally valid) — validated against
 /// tolerance acceptance gates, not a bit-baseline against `SoftStepSolver`. The
-/// colored solve is run-to-run bit-identical and never moves a static body. This
-/// path takes NO solver type parameter: the colored solver is fixed
-/// ([`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver)), since the
-/// colored solve consumes the graph through its own entry point, not the generic
-/// [`RigidSolver`] seam.
-///
-/// Opt-in: a world that does not call this is byte-for-byte unaffected (the
-/// colored stage is never registered — the campaign 0%-gate). The returned
-/// [`PhysicsStageKeys`] carries both the `build_graph` and `solve` stage indices.
+/// colored solve is run-to-run bit-identical and never moves a static body; the
+/// O7 AVX2 cohort kernel it runs by default ([`PhysicsConfig::simd_solve`]) is
+/// bit-identical to its scalar colored oracle. The returned [`PhysicsStageKeys`]
+/// carries both the `build_graph` and `solve` stage indices.
 pub fn add_physics_colored_solve(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<ColoredSoftStepSolver>(
-        builder, world, false, true, true, false, false, false, false,
-    )
+    add_physics_systems::<ColoredSoftStepSolver>(builder, world)
 }
 
 /// Inserts the physics resources INCLUDING an (empty) [`SdfField`] and registers
@@ -302,6 +340,13 @@ pub fn add_physics_colored_solve(
 /// Opt-in: a body-only scene uses [`add_physics_systems`] and is byte-for-byte
 /// unaffected (the SDF stage is never registered — the 0%-gate). The returned
 /// [`PhysicsStageKeys::narrowphase_sdf`] carries the SDF stage's descriptor index.
+/// The solve stage follows `S` as in [`add_physics_systems`]; with
+/// `S = `[`DefaultRigidSolver`](crate::solver::DefaultRigidSolver) the graph build
+/// runs after the SDF stage, so the colored solve sees the SDF contacts too.
+///
+/// ⚠ SDF + [`PhysicsConfig::sleeping`] on the colored solve is reachable through
+/// this entry and UNMEASURED: no gate covers a parked pile resting on the field
+/// (see `IslandSleep::begin_step`, "Not covered"). Sleeping defaults off.
 ///
 /// The box path folds the field with
 /// [`PhysicsConfig::sdf_narrowphase`](crate::resources::PhysicsConfig::sdf_narrowphase),
@@ -312,7 +357,7 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, true, false, false, false, false, false, false)
+    add_physics_pipeline::<S>(builder, world, true, false, false, false, false, false)
 }
 
 /// Inserts the physics resources and registers the physics pipeline WITH the SP1
@@ -353,12 +398,19 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
 /// per-particle coupling work is additionally gated by
 /// [`PhysicsConfig::soft_rigid_coupling`](crate::resources::PhysicsConfig) (set
 /// `true` here when `coupling == true`).
+///
+/// The rigid solve stage follows `S` as in [`add_physics_systems`]; the soft
+/// stages do not depend on it.
+///
+/// ⚠ Coupling + [`PhysicsConfig::sleeping`] on the colored solve is reachable and
+/// has a recorded gap: a soft→rigid reaction does not wake a sleeping body. No
+/// gate covers the combination. Sleeping defaults off.
 pub fn add_physics_soft<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
     coupling: bool,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, false, false, true, coupling, false, false)
+    add_physics_pipeline::<S>(builder, world, false, false, true, coupling, false, false)
 }
 
 /// Inserts the physics resources INCLUDING the SP4 [`SoftColorScratch`] and registers
@@ -390,39 +442,42 @@ pub fn add_physics_soft<S: RigidSolver + Default>(
 /// Opt-in: a world that does not call this is byte-for-byte unaffected (the colored
 /// soft stage + scratch are never registered — the campaign 0%-gate). The returned
 /// [`PhysicsStageKeys::soft_step`] carries the colored soft stage's descriptor index.
+/// The rigid solve stage follows `S` as in [`add_physics_systems`].
 pub fn add_physics_soft_colored<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
 ) -> PhysicsStageKeys {
-    add_physics_pipeline::<S>(builder, world, false, false, false, true, false, true, false)
+    add_physics_pipeline::<S>(builder, world, false, false, true, false, true, false)
 }
 
-/// Shared wiring for [`add_physics_systems`] (`with_sdf = false`,
-/// `colored = false`), [`add_physics_sdf`] (`with_sdf = true`),
-/// [`add_physics_colored`] (`colored = true`, graph-only — the default solve
-/// runs), and [`add_physics_colored_solve`] (`colored = true` + `colored_solve =
-/// true` — the Phase-O5 colored solve REPLACES the default solve): inserts the
-/// resources and registers the pipeline, optionally splicing the SDF-collision
-/// stage and/or the constraint-graph stage between narrowphase and solve, and
-/// selecting the default or the colored solve stage.
+/// Shared wiring for every `add_physics_*` entry: inserts the resources and
+/// registers the pipeline, optionally splicing the SDF-collision stage and/or the
+/// constraint-graph stage between narrowphase and solve, and selecting the
+/// generic or the colored solve stage.
+///
+/// The solve stage is selected by the solver TYPE (`S == ColoredSoftStepSolver`),
+/// not by a flag, so the colored stage only ever runs with the colored solver
+/// resource it reads and with the integration ownership that solver declares. The
+/// graph is implied by it (`colored |= colored_solve`); `colored` alone with
+/// another `S` is the O4 graph-only shape of [`add_physics_colored`].
 #[allow(clippy::too_many_arguments)]
 fn add_physics_pipeline<S: RigidSolver + Default>(
     builder: &mut ScheduleBuilder,
     world: &mut EcsMaster,
     with_sdf: bool,
     colored: bool,
-    colored_solve: bool,
     soft: bool,
     coupling: bool,
     soft_colored: bool,
     scene_sync: bool,
 ) -> PhysicsStageKeys {
-    // The colored solve requires the constraint graph; the type system cannot
-    // express it, so guard the invariant the callers uphold.
-    debug_assert!(
-        !colored_solve || colored,
-        "invariant: the colored solve stage requires the constraint graph (colored == true)"
-    );
+    // Once per world, at wire-up (cold). The colored solve stage reads
+    // `ResMut<ColoredSoftStepSolver>` by name, so tying it to `S` makes the solver
+    // resource inserted below (`S::default()`) exactly the one it reads, and the
+    // `IntegrationMode` stamped from `S` exactly the one it needs (it owns
+    // integration). The colored solve consumes the graph, hence the implication.
+    let colored_solve = TypeId::of::<S>() == TypeId::of::<ColoredSoftStepSolver>();
+    let colored = colored || colored_solve;
     debug_assert!(
         !coupling || soft,
         "invariant: soft↔rigid coupling requires the soft pass (soft == true)"
@@ -616,12 +671,13 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         None
     };
 
-    // O5: the colored-solve path registers `physics_solve_colored` (which CONSUMES
-    // the constraint graph) in place of the default generic `physics_solve_step::<S>`
-    // — the two solvers never both run (Decision 7). The default path keeps the
-    // shipped solve stage, byte-untouched. The `physics_solve_colored` stage's
-    // `Res<ConstraintGraph>` makes the `.after(build_graph)` edge load-bearing (not
-    // merely documentary as on the O4 graph-only path).
+    // O5: the colored-solve path (`S == ColoredSoftStepSolver`, the default world)
+    // registers `physics_solve_colored` (which CONSUMES the constraint graph) in
+    // place of the generic `physics_solve_step::<S>` — the two solvers never both
+    // run (Decision 7). Any other `S` keeps the generic solve stage, byte-untouched.
+    // The `physics_solve_colored` stage's `Res<ConstraintGraph>` makes the
+    // `.after(build_graph)` edge load-bearing (not merely documentary as on the O4
+    // graph-only path).
     let mut solve_cfg = if colored_solve {
         builder.add_system(physics_solve_colored).after(narrowphase)
     } else {

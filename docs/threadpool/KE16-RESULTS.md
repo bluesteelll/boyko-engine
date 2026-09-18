@@ -2294,10 +2294,20 @@ comparing numbers across this campaign will otherwise mix them with KE16's.
 | Switch | Shipped default | Worth | Confidence |
 |---|---|---|---|
 | `simd` (O1) | **TRUE** (`resources.rs:444`) | `refresh_inertia` **1.41×** (band 1.399–1.428); `gravity` **~1.0×** (three runs 1.03/0.89/0.95 straddling unity over an 11.5 % denominator spread — no measurable effect, and the noise does not support calling it a regression); `position_integrate` is **not gated by the flag at all** and its 1.44×-slower widened arm is context that corroborates why production hard-codes scalar there | HIGH on the ratio, MEDIUM on transfer |
-| `simd_solve` (O7) | **FALSE** (`resources.rs:449`) | **1.96×** on the production-shaped whole colored step (bounds 1.947–1.974, sub-1 % bands), clearing the bench's own documented ≥ 1.8× bar; **2.09×** at the Amdahl-free shape (substeps=8, relax=4) — **the largest priced win in that pass, and it ships DISABLED** | HIGH |
-| colored vs reference | reference | **1.059×** @1k, **1.131×** @10k on the honest ratio (`colored_solve_plus_graph`, i.e. graph build included). ⚠ **Not a drop-in speed swap** — the colored sweep order differs, so converged float values DIFFER (equally valid, gated on tolerance acceptance, not a bit-baseline) | HIGH on the numbers; speed does not decide it |
+| `simd_solve` (O7) | **FALSE** (`resources.rs:449`) — pre-default-SIMD; **TRUE** since 2026-09-18 | **1.96×** on the production-shaped whole colored step (bounds 1.947–1.974, sub-1 % bands), clearing the bench's own documented ≥ 1.8× bar; **2.09×** at the Amdahl-free shape (substeps=8, relax=4) — **the largest priced win in that pass, and it ships DISABLED** | HIGH |
+| colored vs reference | reference — pre-default-SIMD; the colored solve since 2026-09-18 | **1.059×** @1k, **1.131×** @10k on the honest ratio (`colored_solve_plus_graph`, i.e. graph build included). ⚠ **Not a drop-in speed swap** — the colored sweep order differs, so converged float values DIFFER (equally valid, gated on tolerance acceptance, not a bit-baseline) | HIGH on the numbers; speed does not decide it |
 | `parallel_4w` | — | 1.43× — **history, not a verdict.** It dispatches through `pool.scope`, the route KE16 is replacing, and enters via `pool.install` from the bench thread (the healthy dispatcher-labelled route), so it does not even exercise the defect KE16 targets | do not act on it |
 | broadphase `GRID_LO`/`GRID_HI` | 96 / 192, both labelled `[ESTIMATE:needs-calibration]` | Measured crossover **~1.1k** (uniform) and **~3.0k** (disparity), bracketed directly to 1000 < n ≤ 10000 on both fixtures. Both constants are too low by ~6–15× | ⚠ **The defect is LATENT, not shipping:** `broadphase_select` defaults to `Manual` and no production site sets `Auto` — only tests. The action is "do not enable Auto until recalibrated", not "we are shipping a regression" |
+
+> **Pre-default-SIMD (annotated 2026-09-18).** The "Shipped default" column is the tree these
+> figures were taken on. On 2026-09-18 the owner made the colored solve the default world
+> (`DefaultRigidSolver = ColoredSoftStepSolver`) and `simd_solve` default to `true`
+> (`resources.rs:480`). The figures are not re-measured and their scope is unchanged: the 1.96×
+> and 2.09× are the `o7_simd_ab` group of `benches/colored_solve.rs` on its sphere pile of
+> one-point manifolds (`pile_scene`), not box-box contacts; colored-vs-reference is keyed by
+> CONTACTS (~1k / ~10k, `BenchmarkId` = `n_contacts`), not bodies. Any figure for the default
+> world as a whole is a new, owner-approved timing run (the `default_world` rows the benches gained
+> that day).
 
 ⚠ **The circulating "3.8×" for `simd` is a KERNEL ratio from a transcription built outside the
 repository at a non-shipped profile.** Nothing in-repo lands near it: the in-repo kernel ratios are

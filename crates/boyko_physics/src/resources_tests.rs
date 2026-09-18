@@ -164,12 +164,20 @@
         assert_eq!(cfg.contact_hertz, 30.0);
         assert_eq!(cfg.contact_damping, 10.0);
         assert_eq!(cfg.dt, 0.0, "dt is a placeholder until gather stamps it");
-        assert!(!cfg.colored, "O4: colored is OFF by default (the 0%-gate)");
+        assert!(
+            !cfg.colored,
+            "O4: the struct default of `colored` is false; the plugin sets it from the solver type"
+        );
         assert!(!cfg.soft_body, "SP1: soft_body is OFF by default (the 0%-gate)");
         assert!(
             cfg.simd,
             "O1: simd is ON by default since 2026-09-03 — the AVX2 integrate / inertia kernels \
              are bit-identical to their scalar oracles and their gates are non-vacuous"
+        );
+        assert!(
+            cfg.simd_solve,
+            "O7: simd_solve is ON by default since 2026-09-18 (owner decision) — the AVX2 cohort \
+             kernel is bit-identical to the scalar colored oracle"
         );
         assert_eq!(
             cfg.sdf_narrowphase,
