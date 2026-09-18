@@ -557,30 +557,18 @@ pub type PfnVkGetBufferDeviceAddressKHR = unsafe extern "system" fn(
 // Instance-scope queries the `supports_ray_query` presence+feature+props path needs.
 // ---------------------------------------------------------------------------
 
-/// `VkPhysicalDeviceProperties2` — the head for `vkGetPhysicalDeviceProperties2` (Vulkan 1.1
-/// core). The `properties` member is the 824-byte `VkPhysicalDeviceProperties` block,
-/// reserved as an opaque ABI-exact footprint; the R2a-1 caps query reads only the chained
+/// `VkPhysicalDeviceProperties2`, its sType and `PFN_vkGetPhysicalDeviceProperties2` — MOVED to
+/// [`crate::ffi`] when the boot's subgroup-support query became a second caller present in every
+/// build (the [`PfnVkEnumerateDeviceExtensionProperties`] precedent below). Re-exported under
+/// their old paths so no `hwrt` caller changes; the R2a-1 caps query still reads only the chained
 /// `VkPhysicalDeviceAccelerationStructurePropertiesKHR.min…ScratchOffsetAlignment` via `p_next`.
-#[repr(C)]
-pub struct VkPhysicalDeviceProperties2 {
-    pub s_type: i32,
-    pub _pad: i32,
-    pub p_next: *mut c_void,
-    /// `VkPhysicalDeviceProperties properties` — opaque, driver-written (824 bytes).
-    pub properties: crate::ffi::VkPhysicalDeviceProperties,
-}
+pub use crate::ffi::{
+    PfnVkGetPhysicalDeviceProperties2, ST_PHYSICAL_DEVICE_PROPERTIES_2, VkPhysicalDeviceProperties2,
+};
 
-/// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2` — Vulkan 1.1 core.
-pub const ST_PHYSICAL_DEVICE_PROPERTIES_2: i32 = 1_000_059_001;
 /// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2` — Vulkan 1.1 core (matches
 /// `crate::ffi::VkStructureType::PhysicalDeviceFeatures2`, re-declared for self-containment).
 pub const ST_PHYSICAL_DEVICE_FEATURES_2: i32 = 1_000_059_000;
-
-/// `PFN_vkGetPhysicalDeviceProperties2` (Vulkan 1.1 core; the AS scratch-align props query).
-pub type PfnVkGetPhysicalDeviceProperties2 = unsafe extern "system" fn(
-    physical_device: crate::ffi::VkPhysicalDevice,
-    p_properties: *mut VkPhysicalDeviceProperties2,
-);
 
 /// `PFN_vkEnumerateDeviceExtensionProperties` — MOVED to [`crate::ffi`] at profiling rung 9.
 ///
@@ -589,9 +577,6 @@ pub type PfnVkGetPhysicalDeviceProperties2 = unsafe extern "system" fn(
 /// `hwrt` — so the declaration moved rather than being copied. Re-exported under its old path so
 /// no `hwrt` caller changes.
 pub use crate::ffi::PfnVkEnumerateDeviceExtensionProperties;
-
-const _: () = assert!(size_of::<VkPhysicalDeviceProperties2>() == 840);
-const _: () = assert!(align_of::<VkPhysicalDeviceProperties2>() == 8);
 
 // ---------------------------------------------------------------------------
 // ABI guards (belt-and-suspenders, mirroring the crate's other Vk-struct pins).

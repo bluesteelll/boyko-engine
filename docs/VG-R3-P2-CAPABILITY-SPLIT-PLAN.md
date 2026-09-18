@@ -514,7 +514,7 @@ later at `:4652+`, so moving the block *earlier* strengthens it), and
 
 ⚠️ **The configuration is not hypothetical.** G5 runs a marked scene under `HzbConfig::Build` with
 `BOYKO_HZB_DUMP` — armed-split **and** armed-poison in the same frame, by construction. The golden
-and gate runs are **dev profile** (`scripts/golden.ps1:183`/`:196` carry no `--release`;
+and gate runs are **dev profile** (`scripts/golden.ps1:207`/`:220` carry no `--release`;
 `goldens/PINS.toml:777` relies on it: *"The pin run itself exercises every new declare/record parity
 `debug_assert` (dev-profile build)"*), so the assert is live there. In a release binary
 (`Cargo.toml` declares only `[profile.bench]`, so `debug-assertions` are off) the assert is compiled
@@ -914,7 +914,7 @@ because its file list was short by five; with the list in Integration corrected,
   this repository"* and that is **false**: `crates/boyko_rhi_vulkan/src/device.rs:2164` is
   `VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT`, packed into `VkValidationFeaturesExt`
   at `:2153-2160` and chained as the instance `p_next` head at `:2187-2193`; `ffi.rs:1665`/`:1670`
-  define both; `scripts/golden.ps1:170` sets `BOYKO_ENABLE_VALIDATION=1` for every `-ValidationOn`
+  define both; `scripts/golden.ps1:185` sets `BOYKO_ENABLE_VALIDATION=1` for every `-ValidationOn`
   pin and `runner.rs:213` reads it; `crates/boyko_render/tests/sync_validation.rs:47-54` calls it
   *"the AUTHORITATIVE oracle"*. **But it degrades SILENTLY** when `VK_EXT_validation_features` is
   absent — `device.rs:2107-2111`, *"Its absence downgrades to plain validation rather than crashing
@@ -1023,8 +1023,8 @@ mixed-archetype case is exercised by G2's `vb_occ_multi` fixture, where the gate
 than a hash and an order change cannot produce a false red.
 
 ⚠️ **"Cannot be blessed wrong" — round 1's claim — is FALSE, and the harness prints the destroying
-advice.** `scripts/golden.ps1:248-262` overwrites `sha256_*` with whatever the run produced (the
-write is `Set-Content` at `:262`, inside `if ($Bless)` at `:243`), and `:286` prints *"re-run with
+advice.** `scripts/golden.ps1:272-286` overwrites `sha256_*` with whatever the run produced (the
+write is `Set-Content` at `:286`, inside `if ($Bless)` at `:267`), and `:310` prints *"re-run with
 -Bless"* on the very mismatch the pin exists to report. Nothing parses `PINS.toml` to check that two
 pins agree. The tree states this failure for the identical construction one pin above —
 `PINS.toml:333-336`, *"a lone re-bless here would silently convert the gate from 'inert' to
@@ -1189,7 +1189,7 @@ there"*) is falsified by this piece and is edited in P2-5. S4 asserts the same c
 | R2 | delete `vb_raster_late`'s `buffer_access(DRAW_INDIRECT, INDIRECT_COMMAND_READ)` | RED, count drops to 2 |
 | R3 | delete `vb_raster_late`'s `vb_depth` `image_access` | RED — the round-trip transitions vanish and the late scope would `LOAD_OP_LOAD` an image left in `SHADER_READ_ONLY_OPTIMAL` |
 | R4 | declare `vb_raster_late`'s `vb_id` access with `VK_IMAGE_LAYOUT_UNDEFINED` | RED — a first touch appears where a preserving transition must be |
-| R5 | move `hzb_build` **alone**, leaving `hzb_poison` at the old slot | RED, **and it must be shown reddening twice**: the `debug_assert!` at `graph_bridge.rs:4711-4717` fires in dev profile (which is what the golden runs use — `golden.ps1:183`/`:196` carry no `--release`, and `PINS.toml:777` relies on it), and in a release binary the clear runs after the dispatches and `hzb_engine_pyramid_gate.rs:507-517`'s clause 1 reds at every texel. |
+| R5 | move `hzb_build` **alone**, leaving `hzb_poison` at the old slot | RED, **and it must be shown reddening twice**: the `debug_assert!` at `graph_bridge.rs:4711-4717` fires in dev profile (which is what the golden runs use — `golden.ps1:207`/`:220` carry no `--release`, and `PINS.toml:777` relies on it), and in a release binary the clear runs after the dispatches and `hzb_engine_pyramid_gate.rs:507-517`'s clause 1 reds at every texel. |
 
 **Authoring order is mandatory:** the baseline (P2-4) precedes the machine (P2-5). P1-5a's C1/C2
 exists because *"Authoring them after the change would certify the new behaviour."*

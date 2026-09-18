@@ -903,11 +903,17 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         // The agnostic `ShaderStage` bits equal `VK_SHADER_STAGE_*` (plan D5,
         // asserted in `abi_guard.rs`).
         let stage_flags: VkFlags = stage.bits();
+        // The pipeline records its push range's stage flags, and a push must name exactly
+        // those (a missing stage is VUID-vkCmdPushConstants-offset-01796, an extra one -01795).
+        debug_assert_eq!(
+            stage_flags, pipeline.push_stages,
+            "invariant: a graphics push names exactly the pipeline's push-range stages"
+        );
         // SAFETY: recording is open; `pipeline.layout` is the graphics pipeline's own
-        // layout (created in `create_graphics_pipeline` with a VERTEX-stage push range
-        // at offset 0). The encoder does NOT carry the layout's declared push size, so
-        // it cannot statically bound `stage`/`offset`/`bytes` against it — an over-range
-        // or wrong-stage push is caught at runtime by the Vulkan validation layer (the
+        // layout (created by `build_graphics_pipeline` with a `pipeline.push_stages` push
+        // range at offset 0, stage-checked above). The encoder does NOT carry the layout's
+        // declared push size, so it cannot statically bound `offset`/`bytes` against it — an
+        // over-range push is caught at runtime by the Vulkan validation layer (the
         // GPU-half soundness oracle), not by a debug_assert here (contrast the compute
         // sibling, whose FIXED 4-byte/COMPUTE layout makes a static assert trivial).
         // `bytes.as_ptr()` points to `bytes.len()` bytes alive for the call; `self.fns`

@@ -28,8 +28,9 @@ impl Renderer<'_> {
     /// pass's passes 1 + 3 read it). `area_tex`/`search_tex` need NO barrier (boot-permanent
     /// `SHADER_READ_ONLY_OPTIMAL`).
     ///
-    /// `rt_metrics = [1/w, 1/h, w, h]` (16 bytes) is pushed FRAGMENT offset 0 to all three
-    /// pipelines.
+    /// `rt_metrics = [1/w, 1/h, w, h]` (16 bytes) is pushed at offset 0 to all three pipelines,
+    /// each with its own `push_stages` (FRAGMENT: `fullscreen_sample.vs` declares no push block,
+    /// so the pipelines are built with a FRAGMENT-only range).
     ///
     /// # Safety
     ///
@@ -135,8 +136,9 @@ impl Renderer<'_> {
         // `edges[fi]` view (now COLOR_ATTACHMENT_OPTIMAL); dynamic rendering is enabled on
         // this device. `activation.edge_pipeline` + its layout (`scene.present_layout`)
         // belong to this device (caller contract); `edge_set[fi]` binds `lit[fi]` (already
-        // SHADER_READ_ONLY_OPTIMAL) + `activation.sampler` at set 0. `rt_metrics` is pushed
-        // to the FRAGMENT subset of the pipeline's 16-byte push range.
+        // SHADER_READ_ONLY_OPTIMAL) + `activation.sampler` at set 0. `rt_metrics` covers the
+        // pipeline's whole 16-byte push range and is pushed with its `push_stages`, the range's
+        // own stage flags (VUID-01796).
         // `viewport`/`scissor`/`rt_metrics` outlive the bracketed calls; `draw(3, 1, 0, 0)`
         // is the `SV_VertexID` fullscreen triangle (no vertex buffer). Begin/End bracket the
         // pass exactly.
@@ -160,7 +162,7 @@ impl Renderer<'_> {
             (self.fns.cmd_push_constants)(
                 cmd,
                 activation.edge_pipeline.layout,
-                VK_SHADER_STAGE_FRAGMENT_BIT,
+                activation.edge_pipeline.push_stages,
                 0,
                 16,
                 rt_metrics.as_ptr().cast(),
@@ -231,7 +233,7 @@ impl Renderer<'_> {
             (self.fns.cmd_push_constants)(
                 cmd,
                 activation.weight_pipeline.layout,
-                VK_SHADER_STAGE_FRAGMENT_BIT,
+                activation.weight_pipeline.push_stages,
                 0,
                 16,
                 rt_metrics.as_ptr().cast(),
@@ -302,7 +304,7 @@ impl Renderer<'_> {
             (self.fns.cmd_push_constants)(
                 cmd,
                 activation.blend_pipeline.layout,
-                VK_SHADER_STAGE_FRAGMENT_BIT,
+                activation.blend_pipeline.push_stages,
                 0,
                 16,
                 rt_metrics.as_ptr().cast(),

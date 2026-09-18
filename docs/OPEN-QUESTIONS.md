@@ -18,6 +18,84 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-09-18 — An un-slotted punctual light samples another light's shadow map on armed frames
+
+Found by the vkval lane (round 3, the shadow-gate stage) while writing the punctual half of the
+unwritten-shadow-map gate. **It is pre-existing and that lane does not fix it.** The fix is
+decided (below): it is host-side only, and it lands in its own lane after this one. Line numbers
+below were verified on 2026-09-18.
+
+### What happens
+
+- A punctual light's atlas layer lives in its own light-table row: the slot field of the kind word,
+  read by `light_atlas_slot`. A row whose light got no slot — no `CastsPunctualShadow`, or it lost
+  the slot budget — should carry `SLOT_NONE` (`0x1F`). **It carries 0.** `collect_lights` builds
+  the row through `slot_pack` (`crates/boyko_render/src/light_system.rs`), which skips the pack
+  for a `SLOT_NONE` base to keep the 0%-gate bytes, so the field stays as
+  `GpuLight::from_point` / `from_spot` left it.
+- There are six shader sites, and every one checks the header's punctual bit and then ONLY
+  `slot != SLOT_NONE`:
+  - `crates/boyko_rhi_vulkan/shaders/deferred_pbr.hlsl:1332-1334`
+  - `crates/boyko_rhi_vulkan/shaders/forward_opaque.fs.hlsl:414-416`
+  - `crates/boyko_rhi_vulkan/shaders/sdf_forward_march.comp.hlsl:1108-1110`
+  - `crates/boyko_rhi_vulkan/shaders/vb_resolve.comp.hlsl:464-466`
+  - `crates/boyko_rhi_vulkan/shaders/vb_shade.comp.hlsl:619-621`
+  - `crates/boyko_rhi_vulkan/shaders/vb_shade_split.comp.hlsl:586-588`
+- So on an ARMED frame (header bit 3 on: some light holds a slot and casters exist), a light
+  without `CastsPunctualShadow`, or one that lost the slot budget, is read as slot 0. A spot
+  samples atlas **layer 0**: rendered that frame, but another light's map. A point takes
+  `gFaces[0]`, the slot-0 light's face record, and samples layers 0..5; any of those layers that
+  no pass rendered holds memory nothing wrote.
+- `crates/boyko_rhi_vulkan/shaders/light_table.hlsli:223-224` says the resolve reads the slot
+  only under `punctual_shadow_mode != 0` AND `casts_shadow`, "so a 0 slot is never sampled". None
+  of the six sites checks `casts_shadow`; the comment is false.
+
+### Who is exposed
+
+**No pinned scene.** This is static reading by two reviewers (the R1 fix design and its critique,
+2026-09-18); the fix lane confirms it on the device, where the two froxel pins must not move.
+
+- `vb_mesh_froxel` and `vb_mesh_tex_froxel` are NOT exposed. They do have 12 un-slotted rows among
+  14 point/spot lights, with `ShadowConfig` enabled. But neither spawns a `ShadowCaster`: their
+  meshes are plain `MeshBundle`s (`crates/boyko_app/tests/vb_mesh_froxel.rs:206`,
+  `crates/boyko_app/tests/vb_mesh_tex_froxel.rs:225`). So `CsmCasterScratch::batch_count() == 0`,
+  the punctual depth pass is not armed (`sync_punctual_light_gate` requires
+  `casters.batch_count() > 0`), and header bit 3 never arms there.
+- The one exposed scene is the unpinned `crates/boyko_app/examples/vb_lab.rs`. It has a flagged
+  spot (`:288-306`), an un-flagged point (`:309-313`) and `ShadowCaster` meshes (`:223`, `:240`).
+  The point's row decodes as slot 0, so it reads the spot's face record (`gFaces[0]`) and samples
+  layers 0..5. Layer 0 is the spot's map; layers 1..5 are never rendered.
+
+### The decided fix, and why it is its own lane
+
+The R1 fix design took this as an architecture call. The fix is **host-side**: an un-slotted
+punctual row is born `SLOT_NONE`.
+
+- `GpuLight::from_point` / `from_spot` (`crates/boyko_render/src/light.rs`) and their golden
+  mirrors `GoldenLight::point` / `spot` (`crates/boyko_rhi_vulkan/src/goldens.rs:1310`, `:1326`)
+  build the kind word with `SLOT_NONE` already in the slot field.
+- `slot_pack` (`crates/boyko_render/src/light_system.rs:451`) keeps its guard, and it only ever
+  writes a real assignment over that field.
+- The six existing checks then reject the row. No shader code changes, no `.spv` is re-emitted and
+  no pin moves. `light_table.hlsli`'s false comment is corrected in the same change, comment-only.
+
+The cost is intended. An un-slotted table stops being byte-identical to the pre-Inc-1 fold, so the
+0%-gate's byte identity ends. In the slotted encoding the old word means "slot 0", so that identity
+was the defect. The pixel 0%-gate still holds, and that is what the pins check.
+
+The shader-side alternative was rejected: the six sites would also test bit 16. That edits six sites,
+re-emits their `.spv` and adds ALU per light per pixel on armed frames. It also does not fix the
+class:
+
+- `GoldenLight::with_sdf_shadow()` (`goldens.rs:1371`) sets bit 16 without a slot.
+- `light_table.hlsli:56` defines bit 16 as "this light casts an SDF shadow", not as "slotted".
+
+The vkval lane's commits are split into a pixel-neutral one and a pixel-changing one, and this fix
+belongs to neither. It lands in its own lane after this one, and this entry is closed `RESOLVED`
+then.
+
+---
+
 ## 2026-09-17 — Physics defects A7 and A7a: a resting box pyramid creeps sideways, and a quarter-overlap face contact repeats a feature id
 
 Found while closing defect A4 (the sleep latch that survived the loss of support) and defect A5
@@ -2175,7 +2253,7 @@ questions; L7 can gate the first and nothing gates the second.
 > **saying that a golden run's validation was disabled is the entire reason the code exists.**
 > Suppressing it there would deliberately rebuild the defect the 2026-08-06 entry below describes.
 >
-> 1. **No collision is possible.** `scripts/golden.ps1:229` scans with the literal pattern
+> 1. **No collision is possible.** `scripts/golden.ps1:253` scans with the literal pattern
 >    `\[vk-validation\]`. `boyko-E2101` cannot match it.
 > 2. **In a golden run the line does not exist at all.** Measured: **no host calls
 >    `boyko_log::lifecycle::boot` or `enable`** — the only callers anywhere are `boyko_log`'s own

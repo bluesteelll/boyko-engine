@@ -1000,7 +1000,7 @@ pub struct ViewtFromVbDepthActivation<'a> {
 #[derive(Clone, Copy)]
 pub struct AaActivation<'a> {
     /// FXAA fullscreen graphics pipeline (`fullscreen_sample.vs` + `fxaa.fs`). Its pipeline
-    /// layout declares `present_layout` at set 0 plus an 8-byte VERTEX|FRAGMENT push range
+    /// layout declares `present_layout` at set 0 plus an 8-byte FRAGMENT push range
     /// (`rcp_frame`). `color_formats[0]` == `R8G8B8A8_UNORM` (`aa_out`'s format), NOT the
     /// swapchain format.
     pub pipeline: &'a VulkanGraphicsPipeline,
@@ -2910,9 +2910,12 @@ pub struct GBufferScene<'a> {
     /// sky/ground gradient + sun disc for uncovered pixels (`deferred_pbr.hlsl:1369-1414`).
     /// REUSES [`Self::forward_layout0`] as its ONLY set (its FS reads just `Camera`/`LightBuf`,
     /// a subset — the SAME "shader references a subset of what its layout declares" idiom
-    /// [`Self::forward_pipeline`]'s own Set-0 VS-only bindings already establish); `depth_format:
-    /// None` (no depth attachment declared — Vulkan permits this within a dynamic-rendering scope
-    /// that DOES bind one, the pipeline simply neither tests nor writes it), so
+    /// [`Self::forward_pipeline`]'s own Set-0 VS-only bindings already establish). It declares the
+    /// scope's `D32Sfloat` depth format with `VK_COMPARE_OP_ALWAYS` and depth write OFF
+    /// (`VulkanContext::create_graphics_pipeline_forward_sky`): an `UNDEFINED` depth format inside
+    /// a scope that binds a depth attachment needs `VK_EXT_dynamic_rendering_unused_attachments`
+    /// (VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08914), and ALWAYS + no write neither
+    /// rejects nor writes a fragment.
     /// [`Renderer::record_forward`](super::frame_driver::Renderer::record_forward) draws it
     /// FIRST inside `forward_opaque`'s SAME `begin_rendering` scope, before the opaque mesh loop
     /// (which keeps its own real depth test/write). Same `Option`/`None`-in-non-Forward-fixtures

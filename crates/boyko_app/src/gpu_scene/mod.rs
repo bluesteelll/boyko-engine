@@ -1320,8 +1320,9 @@ pub(crate) struct GpuSceneBundles {
     /// Set 2 to Set 1). Set 0 = [`Self::forward_layout0`] (the UNIFIED 7-binding layout).
     forward_pipeline: VulkanGraphicsPipeline,
     /// Code-review follow-up (rung R4b-b): the Forward-family sky background pipeline
-    /// (`forward_sky.{vs,fs}.hlsl`) — reuses [`Self::forward_layout0`], no depth attachment
-    /// declared (`boot`'s doc). Shared verbatim by `Forward` and `ForwardPlus`.
+    /// (`forward_sky.{vs,fs}.hlsl`) — reuses [`Self::forward_layout0`]; declares the forward
+    /// scope's depth format with `VK_COMPARE_OP_ALWAYS` and depth write OFF (`boot`'s doc,
+    /// VUID-08914). Shared verbatim by `Forward` and `ForwardPlus`.
     forward_sky_pipeline: VulkanGraphicsPipeline,
     /// The UNIFIED Forward-family Set-0 (core) bind-group layout — 7 bindings: instances @0,
     /// instance_materials @1, Camera @2, LightBuf @3, Materials @4, `ClusterGrid` @5,
@@ -1955,10 +1956,22 @@ impl GpuSceneBundles {
             .expect("invariant: mesh-MRT vertex shader module create");
         let fs = RhiDevice::create_shader_module(device, gbuffer_mrt_fs_spirv())
             .expect("invariant: mesh-MRT fragment shader module create");
+        // Each pipeline declares ONLY the vertex attributes its vertex shader reads (DXC strips an
+        // unread input, so an extra declared attribute is a fetch nothing consumes —
+        // WARNING-Shader-OutputNotConsumed). The stride stays `MESH_VERTEX_STRIDE` for all three.
+        // Full set, locations 0/1/2 (position, color, normal): `gbuffer_mrt.vs`.
         let attributes = [
             VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
             VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
             VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
+        ];
+        // Position only, location 0: `depth_prepass.vs`, `vb_raster.vs`.
+        let attributes_pos = [VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 }];
+        // Position + normal, locations 0/2: `forward_opaque.vs` (the Forward and ForwardPlus
+        // opaque pipelines).
+        let attributes_pos_normal = [
+            VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
         ];
         let raster_pipeline = RhiDevice::create_graphics_pipeline(
             device,
@@ -2242,6 +2255,9 @@ impl GpuSceneBundles {
                 },
             )
             .expect("invariant: HWRT deferred resolve compute pipeline create");
+            // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+            // destroy it once; no GPU work is in flight yet.
+            unsafe { RhiDevice::destroy_shader_module(device, hwrt_cs) };
             (hwrt_pipeline, hwrt_layout)
         });
 
@@ -2531,7 +2547,9 @@ impl GpuSceneBundles {
         // CombinedImageSampler shape); `color_formats[0]` is `aa_out`'s format
         // (`R8G8B8A8_UNORM`), NOT the swapchain format. Boot-time creation records no
         // command / writes no pixel — byte-identical to the golden regardless of this
-        // pipeline's existence.
+        // pipeline's existence. Built with a FRAGMENT-only push range (as are the three SMAA
+        // pipelines below): only `fxaa.fs` reads the push block — `sample_vs` declares none — and
+        // the recorder pushes with exactly the range's stages (VUID-vkCmdPushConstants-offset-01796).
         let fxaa_sampler = RhiDevice::create_sampler(
             device,
             &SamplerDesc {
@@ -2545,9 +2563,8 @@ impl GpuSceneBundles {
         .expect("invariant: FXAA linear/clamp sampler create");
         let fxaa_fs = RhiDevice::create_shader_module(device, fxaa_fs_spirv())
             .expect("invariant: FXAA fragment shader module create");
-        let fxaa_pipeline = RhiDevice::create_graphics_pipeline(
-            device,
-            &GraphicsPipelineDesc {
+        let fxaa_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
                 vertex_module: &sample_vs,
                 vertex_entry: c"main",
                 fragment_module: &fxaa_fs,
@@ -2563,9 +2580,8 @@ impl GpuSceneBundles {
                 blend: None,
                 cull_mode: CullMode::None,
                 depth_bias: None,
-            },
-        )
-        .expect("invariant: FXAA graphics pipeline create");
+            })
+            .expect("invariant: FXAA graphics pipeline create");
 
         // Anti-aliasing Stage 2: the SMAA 1x boot bundle — 2 dedicated layouts, 1 dedicated
         // sampler, 3 fullscreen pipelines, 2 boot-resident LUTs — built UNCONDITIONALLY here
@@ -2633,9 +2649,8 @@ impl GpuSceneBundles {
         .expect("invariant: SMAA linear/clamp sampler create");
         let smaa_edge_fs = RhiDevice::create_shader_module(device, smaa_edge_fs_spirv())
             .expect("invariant: SMAA edge fragment shader module create");
-        let smaa_edge_pipeline = RhiDevice::create_graphics_pipeline(
-            device,
-            &GraphicsPipelineDesc {
+        let smaa_edge_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
                 vertex_module: &sample_vs,
                 vertex_entry: c"main",
                 fragment_module: &smaa_edge_fs,
@@ -2650,14 +2665,12 @@ impl GpuSceneBundles {
                 blend: None,
                 cull_mode: CullMode::None,
                 depth_bias: None,
-            },
-        )
-        .expect("invariant: SMAA edge graphics pipeline create");
+            })
+            .expect("invariant: SMAA edge graphics pipeline create");
         let smaa_weight_fs = RhiDevice::create_shader_module(device, smaa_weight_fs_spirv())
             .expect("invariant: SMAA weight fragment shader module create");
-        let smaa_weight_pipeline = RhiDevice::create_graphics_pipeline(
-            device,
-            &GraphicsPipelineDesc {
+        let smaa_weight_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
                 vertex_module: &sample_vs,
                 vertex_entry: c"main",
                 fragment_module: &smaa_weight_fs,
@@ -2672,14 +2685,12 @@ impl GpuSceneBundles {
                 blend: None,
                 cull_mode: CullMode::None,
                 depth_bias: None,
-            },
-        )
-        .expect("invariant: SMAA weight graphics pipeline create");
+            })
+            .expect("invariant: SMAA weight graphics pipeline create");
         let smaa_blend_fs = RhiDevice::create_shader_module(device, smaa_blend_fs_spirv())
             .expect("invariant: SMAA blend fragment shader module create");
-        let smaa_blend_pipeline = RhiDevice::create_graphics_pipeline(
-            device,
-            &GraphicsPipelineDesc {
+        let smaa_blend_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
                 vertex_module: &sample_vs,
                 vertex_entry: c"main",
                 fragment_module: &smaa_blend_fs,
@@ -2694,9 +2705,8 @@ impl GpuSceneBundles {
                 blend: None,
                 cull_mode: CullMode::None,
                 depth_bias: None,
-            },
-        )
-        .expect("invariant: SMAA blend graphics pipeline create");
+            })
+            .expect("invariant: SMAA blend graphics pipeline create");
         let smaa_area_tex = upload_texture_2d_raw(
             device,
             AREA_TEX_W,
@@ -3305,7 +3315,7 @@ impl GpuSceneBundles {
                     topology: PrimitiveTopology::TriangleList,
                     vertex_layout: Some(VertexBufferLayout {
                         stride: MESH_VERTEX_STRIDE as u32,
-                        attributes: &attributes,
+                        attributes: &attributes_pos_normal,
                     }),
                     push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                     bind_group_layout: Some(&forward_layout0),
@@ -3329,13 +3339,15 @@ impl GpuSceneBundles {
         // inside `forward_opaque`'s SAME dynamic-rendering scope so opaque geometry then draws
         // over it. REUSES `forward_layout0` (its FS reads only Camera @2 + LightBuf @3, a subset
         // of that layout's 5 bindings — the SAME "bound-but-unread subset" idiom every other
-        // pipeline in this fn's set already relies on) via the ORDINARY `create_graphics_pipeline`
-        // (a plain 1-set pipeline — the sky FS never reads the shadow Set-1 layout, so
-        // `create_graphics_pipeline_forward`'s 2-set shape is unneeded here). `depth_format:
-        // None`: no depth attachment declared (Vulkan permits recording a pipeline with
-        // `depthAttachmentFormat == UNDEFINED` inside a rendering scope that DOES bind a depth
-        // attachment — this pipeline simply neither tests nor writes it), so `record_forward`
-        // draws it with depth test/write OFF while `forward_pipeline`'s own real
+        // pipeline in this fn's set already relies on) as its only set (the sky FS never reads
+        // the shadow Set-1 layout). `depth_format: Some(D32Sfloat)` — the forward scope's own
+        // depth format — because that scope ALWAYS binds `forward_depth`, and a pipeline
+        // declaring `depthAttachmentFormat == UNDEFINED` may be drawn in a scope with a depth
+        // attachment only under `VK_EXT_dynamic_rendering_unused_attachments`
+        // (VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08914), which this engine does not
+        // enable. `create_graphics_pipeline_forward_sky` pairs that format with
+        // `VK_COMPARE_OP_ALWAYS` and depth write OFF, so every sky fragment passes and none is
+        // written — the same observable result as no depth test — and `forward_pipeline`'s own
         // `VK_COMPARE_OP_GREATER` depth-write pass (drawn right after, same scope) is untouched.
         // No vertex buffer (`vertex_layout: None`, `SV_VertexID`-only fullscreen triangle) and no
         // push constants (`push_constant_bytes: 0`).
@@ -3343,15 +3355,14 @@ impl GpuSceneBundles {
             .expect("invariant: Forward sky vertex shader module create");
         let sky_fs = RhiDevice::create_shader_module(device, forward_sky_fs_spirv())
             .expect("invariant: Forward sky fragment shader module create");
-        let forward_sky_pipeline = RhiDevice::create_graphics_pipeline(
-            device,
-            &GraphicsPipelineDesc {
+        let forward_sky_pipeline = ctx
+            .create_graphics_pipeline_forward_sky(&GraphicsPipelineDesc {
                 vertex_module: &sky_vs,
                 vertex_entry: c"main",
                 fragment_module: &sky_fs,
                 fragment_entry: c"main",
                 color_formats: &[RASTER_COLOR_FORMAT],
-                depth_format: None,
+                depth_format: Some(Format::D32Sfloat),
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: None,
                 push_constant_bytes: 0,
@@ -3359,9 +3370,8 @@ impl GpuSceneBundles {
                 blend: None,
                 cull_mode: CullMode::None,
                 depth_bias: None,
-            },
-        )
-        .expect("invariant: Forward sky graphics pipeline create");
+            })
+            .expect("invariant: Forward sky graphics pipeline create");
         // SAFETY: both modules were created on `device` and are consumed by the pipeline
         // create; each is destroyed once; no GPU work is in flight yet.
         unsafe {
@@ -3394,7 +3404,7 @@ impl GpuSceneBundles {
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: Some(VertexBufferLayout {
                     stride: MESH_VERTEX_STRIDE as u32,
-                    attributes: &attributes,
+                    attributes: &attributes_pos,
                 }),
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(&forward_layout0),
@@ -3432,7 +3442,7 @@ impl GpuSceneBundles {
                     topology: PrimitiveTopology::TriangleList,
                     vertex_layout: Some(VertexBufferLayout {
                         stride: MESH_VERTEX_STRIDE as u32,
-                        attributes: &attributes,
+                        attributes: &attributes_pos_normal,
                     }),
                     push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                     bind_group_layout: Some(&forward_layout0),
@@ -4093,7 +4103,7 @@ impl GpuSceneBundles {
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: Some(VertexBufferLayout {
                     stride: MESH_VERTEX_STRIDE as u32,
-                    attributes: &attributes,
+                    attributes: &attributes_pos,
                 }),
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(&vb_layout0),

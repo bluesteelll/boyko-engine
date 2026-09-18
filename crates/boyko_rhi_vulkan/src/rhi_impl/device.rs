@@ -926,7 +926,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // depth_write: true` here reuses the IDENTICAL code path (not merely a `None`-gated
         // branch) every pre-T6c/pre-R4b-b caller took — byte-identical
         // `VkPipelineLayoutCreateInfo`/depth-stencil state by construction.
-        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_LESS, true)
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_LESS, true, GRAPHICS_PUSH_STAGES_DEFAULT)
     }
 
     unsafe fn destroy_graphics_pipeline(&self, pipeline: VulkanGraphicsPipeline) {
@@ -1623,12 +1623,19 @@ impl VulkanContext {
     /// `depth_compare` (rung R4b-b): the depth-test compare op, `VK_COMPARE_OP_LESS` for every
     /// pre-R4b-b caller (Deferred's custom-linear depth, nearer = smaller `z`) or
     /// `VK_COMPARE_OP_GREATER` for Forward's hardware reverse-Z (Decision 4, nearer = larger `z`).
+    ///
+    /// `push_stages`: the `stageFlags` of the push-constant range (ignored when
+    /// `desc.push_constant_bytes == 0`), a non-empty subset of `VERTEX | FRAGMENT`. It must name
+    /// every stage whose shader reads the push block, and every recorder must push with exactly
+    /// it (`VUID-vkCmdPushConstants-offset-01796`), which is why the pipeline carries it as
+    /// [`VulkanGraphicsPipeline::push_stages`].
     fn build_graphics_pipeline(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1: Option<VkDescriptorSetLayout>,
         depth_compare: i32,
         depth_write: bool,
+        push_stages: VkFlags,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         let device = self.device();
         let fns = self.device_fns();
@@ -1645,20 +1652,25 @@ impl VulkanContext {
         //     the error returns (reverse-order rollback). The `push_range` +
         //     `set_layouts` locals must outlive the create call, so they are bound
         //     here (the layout-info pointers below reference them). ---
-        // The push range spans `VERTEX | FRAGMENT`: every existing graphics shader pushes from the
-        // VERTEX stage only (the gbuffer/cascade/spot pipelines), and a fragment stage that declares
-        // no push block simply ignores the range — so widening the visibility is byte-neutral for
-        // them. The Shadow Phase 5 Inc-2 POINT depth FS (`punctual_depth.fs`) READS the `cam_eye@64`
-        // lane (`light_pos`/`inv_range`), which requires the range to cover `FRAGMENT`. Push-constant
-        // stage flags are part of the pipeline LAYOUT, not the recorded command stream, and the
-        // recorders keep pushing with `VK_SHADER_STAGE_VERTEX_BIT` (a subset), so the rendered output
-        // of every pre-Inc-2 pipeline is unchanged (the 0%-gate holds).
+        // The push range's visibility is the caller's `push_stages`. Most builders pass
+        // `GRAPHICS_PUSH_STAGES_DEFAULT` (`VERTEX | FRAGMENT`): the Shadow Phase 5 Inc-2 POINT depth
+        // FS (`punctual_depth.fs`) READS the `cam_eye@64` lane, and a stage that declares no push
+        // block simply ignores the range; their recorders push `VERTEX | FRAGMENT`. A recorder may
+        // NOT push a subset of the range's stages (VUID-vkCmdPushConstants-offset-01796), so a
+        // pipeline whose recorder pushes one stage is built with exactly that stage: the particle
+        // billboard (VERTEX: only `particle_draw.vs` reads the block) and the fullscreen AA passes
+        // (FRAGMENT: `fullscreen_sample.vs` declares no push block).
+        let has_push = desc.push_constant_bytes > 0;
+        debug_assert!(
+            !has_push
+                || (push_stages != 0 && push_stages & !GRAPHICS_PUSH_STAGES_DEFAULT == 0),
+            "invariant: a graphics push range is visible to a non-empty subset of VERTEX | FRAGMENT"
+        );
         let push_range = VkPushConstantRange {
-            stage_flags: VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            stage_flags: push_stages,
             offset: 0,
             size: desc.push_constant_bytes,
         };
-        let has_push = desc.push_constant_bytes > 0;
         let set0 = desc
             .bind_group_layout
             .map_or(VkDescriptorSetLayout::NULL, |bgl| bgl.set_layout);
@@ -2101,7 +2113,11 @@ impl VulkanContext {
             return Err(VulkanError::Vk("vkCreateGraphicsPipelines", result));
         }
 
-        Ok(VulkanGraphicsPipeline { pipeline, layout })
+        Ok(VulkanGraphicsPipeline {
+            pipeline,
+            layout,
+            push_stages: if has_push { push_stages } else { 0 },
+        })
     }
 
     /// Textured-PBR T6c (plan Decision D5): builds a 2-set graphics pipeline — set 0 exactly
@@ -2118,7 +2134,13 @@ impl VulkanContext {
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1_layout: VkDescriptorSetLayout,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
-        self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_LESS, true)
+        self.build_graphics_pipeline(
+            desc,
+            Some(set1_layout),
+            VK_COMPARE_OP_LESS,
+            true,
+            GRAPHICS_PUSH_STAGES_DEFAULT,
+        )
     }
 
     /// Multi-paradigm render-path plan, rung R4b-b (Set 0 unified at rung R5): builds plain
@@ -2144,7 +2166,13 @@ impl VulkanContext {
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1_layout: VkDescriptorSetLayout,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
-        self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_GREATER, true)
+        self.build_graphics_pipeline(
+            desc,
+            Some(set1_layout),
+            VK_COMPARE_OP_GREATER,
+            true,
+            GRAPHICS_PUSH_STAGES_DEFAULT,
+        )
     }
 
     /// Particles P0 (`docs/PARTICLES-PLAN.md` D7): builds the additive billboard draw pipeline —
@@ -2153,6 +2181,11 @@ impl VulkanContext {
     /// `Texture2D[]` + sampler set the FRAGMENT half samples through), and a `VERTEX`-stage push
     /// range of `desc.push_constant_bytes` — the 2-set shape
     /// [`Self::create_graphics_pipeline_bindless`] already establishes.
+    ///
+    /// The push range is VERTEX-only, not the default `VERTEX | FRAGMENT`, because only
+    /// `particle_draw.vs` declares the push block (`particle_draw.fs` reads none) and the recorder
+    /// pushes with [`VulkanGraphicsPipeline::push_stages`]; a range naming FRAGMENT too would make
+    /// that VERTEX push invalid (`VUID-vkCmdPushConstants-offset-01796`).
     ///
     /// # Why the compare op is a PARAMETER and the depth write is not
     ///
@@ -2176,7 +2209,35 @@ impl VulkanContext {
         set1_layout: VkDescriptorSetLayout,
         depth_compare: i32,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
-        self.build_graphics_pipeline(desc, Some(set1_layout), depth_compare, false)
+        self.build_graphics_pipeline(
+            desc,
+            Some(set1_layout),
+            depth_compare,
+            false,
+            VK_SHADER_STAGE_VERTEX_BIT,
+        )
+    }
+
+    /// Builds a pipeline exactly as [`RhiDevice::create_graphics_pipeline`] does — set 0 only,
+    /// `VK_COMPARE_OP_LESS`, depth write on — except that its push-constant range is visible to the
+    /// FRAGMENT stage only.
+    ///
+    /// For the fullscreen anti-aliasing passes (FXAA, and SMAA's edge / weight / blend): their
+    /// vertex shader, `fullscreen_sample.vs`, declares no push block, and their fragment shaders
+    /// read the whole range (`rt_metrics` / the FXAA texel size). The recorders push with
+    /// [`VulkanGraphicsPipeline::push_stages`], and `VUID-vkCmdPushConstants-offset-01796`
+    /// requires a push to name every stage of each range it overlaps — so a default
+    /// `VERTEX | FRAGMENT` range would make their FRAGMENT push invalid, and widening the push
+    /// instead would declare a VERTEX read no shader makes.
+    pub fn create_graphics_pipeline_fragment_push(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        debug_assert!(
+            desc.push_constant_bytes > 0,
+            "invariant: a FRAGMENT-push pipeline declares a push range"
+        );
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_LESS, true, VK_SHADER_STAGE_FRAGMENT_BIT)
     }
 
     /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): builds the `depth_prepass`
@@ -2194,7 +2255,31 @@ impl VulkanContext {
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
-        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_GREATER, true)
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_GREATER, true, GRAPHICS_PUSH_STAGES_DEFAULT)
+    }
+
+    /// Builds the Forward sky BACKGROUND pipeline (`forward_sky.{vs,fs}.hlsl`): a 1-set pipeline
+    /// (set 0 = `desc.bind_group_layout`) that DECLARES the forward scope's depth format but
+    /// neither rejects nor writes a fragment through it — `VK_COMPARE_OP_ALWAYS` with depth write
+    /// OFF, observationally identical to no depth test at all.
+    ///
+    /// The sky draws inside `forward_opaque`'s dynamic-rendering scope, which always binds
+    /// `forward_depth`. A pipeline whose `depthAttachmentFormat` is `UNDEFINED` may be drawn in a
+    /// scope that HAS a depth attachment only with `VK_EXT_dynamic_rendering_unused_attachments`
+    /// (VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08914), which this engine does not
+    /// enable; declaring the format keeps the draw legal without a new device requirement or a
+    /// second rendering scope per frame.
+    ///
+    /// `desc.depth_format` must therefore be `Some` — the scope's own depth format.
+    pub fn create_graphics_pipeline_forward_sky(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        debug_assert!(
+            desc.depth_format.is_some(),
+            "invariant: the sky pipeline declares the forward scope's depth format (VUID-08914)"
+        );
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_ALWAYS, false, GRAPHICS_PUSH_STAGES_DEFAULT)
     }
 
     /// Multi-paradigm render-path plan, rung R8: builds the `vb_raster` mesh id-raster pipeline
@@ -2215,7 +2300,7 @@ impl VulkanContext {
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
-        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_GREATER, true)
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_GREATER, true, GRAPHICS_PUSH_STAGES_DEFAULT)
     }
 
     /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): builds the `forward_opaque`
@@ -2238,7 +2323,13 @@ impl VulkanContext {
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1_layout: VkDescriptorSetLayout,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
-        self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_EQUAL, false)
+        self.build_graphics_pipeline(
+            desc,
+            Some(set1_layout),
+            VK_COMPARE_OP_EQUAL,
+            false,
+            GRAPHICS_PUSH_STAGES_DEFAULT,
+        )
     }
 
     /// Multi-paradigm render-path plan, rung R-SDFFWD: builds a 2-set COMPUTE pipeline — Set 0 =

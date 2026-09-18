@@ -793,10 +793,13 @@ impl Renderer<'_> {
         // DEPTH_ATTACHMENT_OPTIMAL); `lit_attachment`/`forward_depth_attachment` outlive the
         // bracketed calls; dynamic rendering is enabled on this device.
         //
-        // `forward_sky_pipeline` (declaring ONE color format + `depth_format: None` — no depth
-        // attachment at all, which Vulkan permits inside a rendering scope that DOES bind one;
-        // the SAME `forward_layout0` set-0 layout, no push constants) draws FIRST: bound-but-
-        // unread past its own 2-binding FS subset, `forward.set0[fi]` is a live descriptor set
+        // `forward_sky_pipeline` (declaring ONE color format + this scope's `D32Sfloat` depth
+        // format with `VK_COMPARE_OP_ALWAYS` and depth write OFF — an `UNDEFINED` depth format in
+        // a scope that binds `forward_depth` would need
+        // `VK_EXT_dynamic_rendering_unused_attachments`,
+        // VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08914; the SAME `forward_layout0` set-0
+        // layout, no push constants) draws FIRST: bound-but-unread past its own 2-binding FS
+        // subset, `forward.set0[fi]` is a live descriptor set
         // written once per extent; `draw(3, 1, 0, 0)` is the `SV_VertexID` fullscreen triangle
         // (no vertex buffer).
         //
@@ -827,10 +830,10 @@ impl Renderer<'_> {
         unsafe {
             (self.fns.cmd_begin_rendering)(cmd, &forward_rendering);
             // Code-review follow-up (rung R4b-b): draw the sky BACKGROUND first, inside this
-            // SAME `begin_rendering` scope — `forward_sky_pipeline` declares NO depth attachment
-            // (`depth_format: None` at boot), so it neither tests nor writes `forward_depth`;
-            // the opaque mesh loop below (its OWN real `VK_COMPARE_OP_GREATER` depth test/write)
-            // then draws over exactly the pixels it covers, leaving the sky's color everywhere
+            // SAME `begin_rendering` scope — `forward_sky_pipeline` declares `forward_depth`'s
+            // format but tests with `VK_COMPARE_OP_ALWAYS` and writes nothing, so it neither
+            // rejects a fragment nor touches `forward_depth`; the opaque mesh loop below (its
+            // OWN real `VK_COMPARE_OP_GREATER` depth test/write) then draws over exactly the pixels it covers, leaving the sky's color everywhere
             // else. `forward.set0[fi]` is REUSED (the sky FS reads only Camera @2 + LightBuf @3,
             // a subset of that layout's 5 bindings — `GBufferScene::forward_sky_pipeline`'s doc).
             // `forward_viewport`/`forward_area` (set once here) stay the active dynamic state for

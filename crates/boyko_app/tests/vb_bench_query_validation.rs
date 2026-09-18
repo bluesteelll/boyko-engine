@@ -157,7 +157,8 @@ const VALIDATION_PREFIX: &str = "[vk-validation] ";
 /// text carried the fact that refutes it: a boot WITHOUT the layer fails with
 /// `ValidationUnavailable` rather than running unvalidated, so silence means "it loaded and said
 /// nothing". It survived the `VkQueryPool` leak fix only because every validated boot still
-/// carries 18 start-up messages (2026-09-18); it would red the day the code became clean.
+/// carried start-up messages — 18 reported / 50 uncapped (2026-09-18); 0 after
+/// fix/boot-validation-errors — so it would red the day the code became clean.
 ///
 /// `VulkanContext::validation_enabled()` answers the property the set equality below actually
 /// needs. It is `debug_state.is_some()`, and that state exists only if BOTH halves happened:

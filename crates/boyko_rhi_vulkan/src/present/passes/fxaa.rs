@@ -30,8 +30,8 @@ impl Renderer<'_> {
     /// `targets.aa_out` / `targets.fxaa_set` must be `Some` (the caller gates on
     /// `targets.aa_out.is_some()`, kept in lockstep with `scene.aa.is_some()` by
     /// [`GBufferTargets::sync_gbuffer`]); `activation.pipeline` is live on this device and
-    /// its layout matches `fxaa_set`'s (`scene.present_layout`) plus an 8-byte
-    /// VERTEX|FRAGMENT push range; `present_extent` sizes `aa_out` (the extent
+    /// its layout matches `fxaa_set`'s (`scene.present_layout`) plus an 8-byte push range
+    /// (FRAGMENT-only, `create_graphics_pipeline_fragment_push`); `present_extent` sizes `aa_out` (the extent
     /// [`GBufferTargets::create`] allocated it at); `fi` is this frame's in-flight slot.
     pub(crate) unsafe fn record_fxaa(
         &self,
@@ -138,9 +138,9 @@ impl Renderer<'_> {
         // dynamic rendering is enabled on this device. `activation.pipeline` + its layout
         // belong to this device (caller contract); `set[fi]` binds `lit[fi]` (the FXAA
         // INPUT, already SHADER_READ_ONLY_OPTIMAL) + the LINEAR sampler at set 0 of that
-        // layout. `rcp_frame` is pushed to the FRAGMENT subset of the pipeline's
-        // VERTEX|FRAGMENT 8-byte push range (the present_blit UI-pass precedent pushes a
-        // stage subset against a wider range). `viewport`/`scissor`/`rcp_frame` outlive
+        // layout. `rcp_frame` is pushed with the pipeline's own `push_stages` (FRAGMENT — only
+        // `fxaa.fs` reads the block) over the whole 8-byte range, as VUID-01796 requires.
+        // `viewport`/`scissor`/`rcp_frame` outlive
         // the bracketed calls; `draw(3, 1, 0, 0)` is the `SV_VertexID` fullscreen triangle
         // (no vertex buffer). Begin/End bracket the pass exactly.
         unsafe {
@@ -163,7 +163,7 @@ impl Renderer<'_> {
             (self.fns.cmd_push_constants)(
                 cmd,
                 activation.pipeline.layout,
-                VK_SHADER_STAGE_FRAGMENT_BIT,
+                activation.pipeline.push_stages,
                 0,
                 8,
                 rcp_frame.as_ptr().cast(),

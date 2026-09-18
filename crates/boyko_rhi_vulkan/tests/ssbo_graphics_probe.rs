@@ -351,10 +351,10 @@ fn render_probe(device: &VulkanContext) -> Vec<u8> {
     encoder.bind_graphics_pipeline(&pipeline);
     encoder.bind_descriptor_set(&bind_group, &pipeline);
     // The ortho is read in the VERTEX stage only (the FS reads only the SSBO color), but
-    // `build_graphics_pipeline` widens every graphics layout's push range to VERTEX|FRAGMENT
-    // unconditionally (device.rs) — so the pipeline's actual push range is VERTEX|FRAGMENT,
-    // not VERTEX-only. A VERTEX-only push leaves the range's FRAGMENT bit undeclared,
-    // tripping VUID-vkCmdPushConstants-offset-01796.
+    // `RhiDevice::create_graphics_pipeline` declares its push range VERTEX|FRAGMENT
+    // (`GRAPHICS_PUSH_STAGES_DEFAULT`, rhi_impl/mod.rs) — so the pipeline's actual push range
+    // is VERTEX|FRAGMENT, not VERTEX-only. A VERTEX-only push leaves the range's FRAGMENT bit
+    // undeclared, tripping VUID-vkCmdPushConstants-offset-01796.
     encoder.push_graphics_constants(
         &pipeline,
         ShaderStage::VERTEX | ShaderStage::FRAGMENT,
