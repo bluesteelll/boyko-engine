@@ -531,12 +531,12 @@ static S5_DEFER: [bool; 12] = [false; 12];
 /// | 0 | `sync_instance_model_cols` (`instance_model.rs:110`) | one `Query` | no |
 /// | 1 | `snap_apply` (`snap_interpolation.rs:124`) | `Commands` + `Query` | **YES** |
 /// | 2 | `sync_ssao_light_gate` (`ssao_config.rs:272`) | 2 `Res` + 2 `ResMut` | no |
-/// | 3 | `sync_sv0_light_gate` (`light.rs:1139`) | `Res` + 2 `ResMut` | no |
-/// | 4 | `sync_cluster_light_gate` (`light.rs:1005`) | 2 `Res` + 2 `ResMut` | no |
-/// | 5 | `gather_shadow_casters` (`csm_caster.rs:187`) | `Query` + `NonSendRes` + `ResMut` | no |
-/// | 6 | `sync_csm_light_gate` (`csm_caster.rs:529`) | 2 `Res` + 2 `ResMut` | no |
-/// | 7 | `reduce_caster_bounds` (`csm_caster.rs:449`) | 3 `Res` + `NonSendRes` + `ResMut` | no |
-/// | 8 | `sync_punctual_light_gate` (`shadow_atlas.rs:1087`) | 2 `Res` + 2 `ResMut` | no |
+/// | 3 | `sync_sv0_light_gate` (`light.rs:1145`) | `Res` + 2 `ResMut` | no |
+/// | 4 | `sync_cluster_light_gate` (`light.rs:1011`) | 2 `Res` + 2 `ResMut` | no |
+/// | 5 | `gather_shadow_casters` (`csm_caster.rs:210`) | `Query` + `NonSendRes` + `ResMut` | no |
+/// | 6 | `sync_csm_light_gate` (`csm_caster.rs:565`) | 2 `Res` + 2 `ResMut` | no |
+/// | 7 | `reduce_caster_bounds` (`csm_caster.rs:472`) | 3 `Res` + `NonSendRes` + `ResMut` | no |
+/// | 8 | `sync_punctual_light_gate` (`shadow_atlas.rs:1168`) | 2 `Res` + 2 `ResMut` | no |
 /// | 9 | `collect_lights` (`light_system.rs:582`) | 8 `Query` + 2 `Res` + 3 `ResMut` | no |
 /// | 10 | `gather_mesh_draws` (`mesh_draw.rs:1238`/`:1356`) | `Query` + `NonSendRes` + `ResMut` | no |
 ///

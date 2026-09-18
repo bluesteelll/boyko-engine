@@ -5985,8 +5985,9 @@ fn engine_grand_showcase_512_screenshot_dump() {
 /// walls/floor) is skipped, and so are EVERY mesh-shadow producer it feeds — CSM cascade depth,
 /// the punctual spot/point atlas depth, and (under `hwrt`) the TLAS pack/build + the
 /// shadow_vis/à-trous/temporal denoise chain (mesh-shadow producers are mesh-leg-owned; the SDF
-/// leg's shadow is the marcher's own baked soft march, unaffected — see the P1 fix in
-/// `GpuSceneBundles::scene()`, `boyko_app/src/gpu_scene/mod.rs`, and this fn's own gate below).
+/// leg's shadow is the marcher's own baked soft march, unaffected — in production the gate is
+/// `ResolvedRenderPath::mesh_shadow_producers()` in `boyko_render`'s `resolve_csm_cascades` /
+/// `resolve_shadow_atlas`; this hand-built fixture applies the same predicate itself, below).
 /// Only the two SDF spheres remain, composited by the byte-UNCHANGED marcher against the new
 /// `mesh_depth_neutral_clear` pass's far-plane depth (see `graph_bridge.rs`'s doc for why no
 /// `HAS_MESH` shader variant was needed). Dumps a TRUE 512×512 BMP to [`DEFERRED_SDF_ONLY_BMP`]
@@ -9020,18 +9021,19 @@ fn run_showcase_body(
     let BootPresent { window, ctx, surface, mut swapchain, mut renderer, is_bgra, swap_color_format } =
         bp;
 
-    // Multi-paradigm render-path plan, rung R3 (P1 fix, code-review CHANGES_REQUIRED): mirror
-    // the production `GpuSceneBundles::scene()` gate -- CSM cascade depth + the punctual
-    // spot/point atlas depth are MESH-LEG-OWNED mesh-shadow producers (they rasterize MESH
-    // casters only; the SDF leg gets its shadows from the marcher's baked soft march). Under
-    // `!mesh_leg` (`Deferred x Sdf`) they must be structurally ABSENT, suppressed HERE before
-    // ANY use of `cfg.csm`/`cfg.spot_atlas` in this fn (incl. the light-header
-    // `with_csm_mode`/`with_punctual_shadow_mode` bits below, which would otherwise claim a
-    // shadow pass ran that this gate never records -- a header/pass mismatch). This hand-
-    // assembled test fixture shares the SAME single-source-of-truth gate the production seam
-    // uses (`resolved_render_path.mesh_leg`), so it cannot silently diverge from it. `Deferred ×
-    // Both`/`Mesh` keep `mesh_leg == true` ⇒ `.filter(|_| true)` is the identity ⇒
-    // byte-identical to every pre-R3 showcase test.
+    // Multi-paradigm render-path plan, rung R3: mirror the production gate -- CSM cascade depth
+    // + the punctual spot/point atlas depth are MESH-LEG-OWNED mesh-shadow producers (they
+    // rasterize MESH casters only; the SDF leg gets its shadows from the marcher's baked soft
+    // march). In production the gate is `boyko_render`'s
+    // `ResolvedRenderPath::mesh_shadow_producers()` (`== mesh_leg`), applied in the per-frame
+    // plan: `resolve_csm_cascades` / `resolve_shadow_atlas` publish DISABLED fits, so the host
+    // arms neither pass NOR either light-header bit. This hand-assembled fixture has no plan,
+    // so it applies the same predicate HERE, before ANY use of `cfg.csm`/`cfg.spot_atlas` in
+    // this fn -- including the light-header `with_csm_mode`/`with_punctual_shadow_mode` bits
+    // below, which would otherwise claim a shadow pass ran that this gate never records (the
+    // header/pass mismatch the production defect was). `declare_deferred_graph`'s
+    // `debug_assert!` checks this fixture. `Deferred × Both`/`Mesh` keep `mesh_leg == true` ⇒
+    // `.filter(|_| true)` is the identity ⇒ byte-identical to every pre-R3 showcase test.
     let mesh_leg = resolved_render_path.mesh_leg;
     let cfg = ShowcaseConfig {
         csm: cfg.csm.filter(|_| mesh_leg),

@@ -408,8 +408,8 @@ fn render_two_triangles(
         }),
     });
     encoder.bind_graphics_pipeline(&pipeline);
-    // `build_graphics_pipeline` widens every graphics layout's push range to VERTEX|FRAGMENT
-    // unconditionally (device.rs), so a VERTEX-only push leaves the range's FRAGMENT bit
+    // `RhiDevice::create_graphics_pipeline` declares its push range VERTEX|FRAGMENT
+    // (`GRAPHICS_PUSH_STAGES_DEFAULT`, rhi_impl/mod.rs), so a VERTEX-only push leaves the range's FRAGMENT bit
     // undeclared, tripping VUID-vkCmdPushConstants-offset-01796.
     encoder.push_graphics_constants(
         &pipeline,

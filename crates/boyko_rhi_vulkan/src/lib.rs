@@ -138,6 +138,11 @@ pub mod memory;
 pub mod mesh_sdf_texture;
 pub mod present;
 pub mod rhi_impl;
+/// Test-only: Gate B, the device-free census of every committed `.spv`'s SPIR-V capabilities
+/// against the device's required-feature tables. A unit test (not `tests/`) because it reads the
+/// crate-private `REQUIRED_CORE` / `REQUIRED_V13`.
+#[cfg(test)]
+mod spirv_capability_census;
 pub mod suballocator;
 pub mod swapchain;
 pub mod texture;

@@ -7166,7 +7166,11 @@ impl GBufferTargets {
     /// HW-RT Rung 3b: creates one slot of the temporal shadow-vis HISTORY ring
     /// `shadow_temporal_hist` — a 2D [`SHADOW_TEMPORAL_HIST_FORMAT`] (`R16G16B16A16_UNORM`) image at
     /// `extent`. `STORAGE` (the temporal pass reads/writes) | `SAMPLED` (the bilinear reproject of
-    /// the previous slot). Probe-gated like [`Self::create_shadow_vis_image`].
+    /// the previous slot) | `TRANSFER_DST` ([`Self::boot_clear_shadow_temporal_hist`] clears both
+    /// slots with `vkCmdClearColorImage`; without it that clear breaks
+    /// `VUID-vkCmdClearColorImage-image-00002` and its two transitions per slot break
+    /// `VUID-VkImageMemoryBarrier-oldLayout-01213` — the class `taa_hist` was fixed for).
+    /// Probe-gated like [`Self::create_shadow_vis_image`].
     #[cfg(feature = "hwrt")]
     fn create_shadow_temporal_hist_image(
         ctx: &VulkanContext,
@@ -7178,7 +7182,7 @@ impl GBufferTargets {
             depth: 1,
             format: SHADOW_TEMPORAL_HIST_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED,
+            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             array_layers: 1,
             mip_levels: 1,
             view_format: None,
@@ -7211,10 +7215,11 @@ impl GBufferTargets {
 
     /// Anti-aliasing Stage 4 (TAA W4): creates one slot of the `taa_hist` color-history ring — a
     /// 2D [`TAA_HIST_FORMAT`] (`R16G16B16A16_SFLOAT`) image at `extent`. `STORAGE` (the resolve
-    /// reads/writes it — v1's history reproject is a manual `Load`-based reconstruction, mirroring
-    /// [`Self::create_shadow_temporal_hist_image`]) | `SAMPLED` (reserved, unused by v1 — kept for
-    /// shape-parity with every other GBuffer image, matching the shadow-temporal precedent's own
-    /// `STORAGE | SAMPLED` usage even though it too reads via `Load`).
+    /// reads/writes it by `Load`, like [`Self::create_shadow_temporal_hist_image`]) | `SAMPLED`
+    /// (unused by v1, kept for shape-parity with the shadow-temporal precedent) | `TRANSFER_DST`
+    /// ([`Self::boot_clear_taa_hist`] clears both slots with `vkCmdClearColorImage`. Without it a
+    /// TAA boot drew 4× `VUID-VkImageMemoryBarrier-oldLayout-01213`, from the two transitions
+    /// per slot, and 2× `VUID-vkCmdClearColorImage-image-00002`).
     fn create_taa_hist_image(
         ctx: &VulkanContext,
         extent: VkExtent2D,
@@ -7225,7 +7230,7 @@ impl GBufferTargets {
             depth: 1,
             format: TAA_HIST_FORMAT,
             dimension: TextureDimension::D2,
-            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED,
+            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             array_layers: 1,
             mip_levels: 1,
             view_format: None,

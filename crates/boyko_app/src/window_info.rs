@@ -42,13 +42,16 @@ pub struct HostFrameStats {
     /// `frames` on any run longer than the catch-up window — the gating proof.
     pub light_uploads: u64,
     /// Frames on which the cascade depth pass was armed
-    /// (`GBufferScene::csm == Some` — a fitted sun AND live caster batches).
+    /// (`GBufferScene::csm == Some` — `ResolvedCsm::depth_pass_armed`: a leg set with a
+    /// mesh leg, a fitted sun AND live caster batches). Zero on every frame of a mesh-less
+    /// boot (`Deferred × Sdf`, `VB × Sdf`, …), whatever the CSM config says.
     pub csm_armed_frames: u64,
     /// Frames on which the punctual (spot/point) depth pass was armed
-    /// (`GBufferScene::atlas_punctual == Some` — a fitted shadow atlas
-    /// (`ResolvedShadowAtlas::mode_word == 1`, at least one `CastsPunctualShadow`
-    /// light slotted) AND live caster batches). Zero on a scene with no
-    /// `CastsPunctualShadow` light (punctual OFF — byte-identical to the pre-rung path).
+    /// (`GBufferScene::atlas_punctual == Some` — `ResolvedShadowAtlas::depth_pass_armed`:
+    /// a leg set with a mesh leg, a fitted shadow atlas (`mode_word == 1`, at least one
+    /// `CastsPunctualShadow` light slotted) AND live caster batches). Zero on a scene with no
+    /// `CastsPunctualShadow` light (punctual OFF — byte-identical to the pre-rung path) and on
+    /// every frame of a mesh-less boot.
     pub punctual_armed_frames: u64,
     /// Frames on which the interpolation pre-pass was armed (host plan R5): the
     /// pair gather produced instances (`MeshRenderScratch::pair_ring` non-empty),

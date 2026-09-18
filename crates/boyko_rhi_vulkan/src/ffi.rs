@@ -2698,18 +2698,63 @@ pub struct VkImageBlit {
 }
 
 /// `VkPhysicalDeviceFeatures2` — the head struct for `vkGetPhysicalDeviceFeatures2`
-/// (S0 fail-fast `dynamicRendering` support query). The `features` member is the
-/// large `VkPhysicalDeviceFeatures` block (55 `VkBool32`s = 220 bytes), reserved
-/// here as an ABI-exact opaque footprint: we only read the chained
-/// `VkPhysicalDeviceVulkan13Features.dynamic_rendering` written through `p_next`.
+/// (the device-feature support queries). The `features` member is the core
+/// [`VkPhysicalDeviceFeatures`] block (55 `VkBool32`s = 220 bytes), field-exact, so the
+/// required-feature query reads the core bits (`samplerAnisotropy`, `geometryShader`)
+/// from the SAME call that fills the chained `VkPhysicalDeviceVulkan13Features`.
 #[repr(C)]
 pub struct VkPhysicalDeviceFeatures2 {
     pub s_type: VkStructureType,
     pub p_next: *mut c_void,
-    /// `VkPhysicalDeviceFeatures features` — 55 `VkBool32`s (opaque, written by
-    /// the driver; we do not read it for the dynamic-rendering query).
-    pub features: [VkBool32; 55],
+    /// `VkPhysicalDeviceFeatures features` — written by the driver.
+    pub features: VkPhysicalDeviceFeatures,
 }
+
+/// `VkPhysicalDeviceProperties2` — the head for `vkGetPhysicalDeviceProperties2` (Vulkan 1.1
+/// core). The `properties` member is the 824-byte [`VkPhysicalDeviceProperties`] block; the
+/// callers read only what they chain through `p_next` (the subgroup properties on every boot,
+/// the acceleration-structure properties on an `hwrt` build).
+///
+/// **UNGATED**: it lived in the `hwrt`-only `accel_ffi` while ray query was its only caller.
+/// The boot's subgroup-support query is a second caller in every build, so the declaration moved
+/// here and `accel_ffi` re-exports it — one declaration of one ABI.
+#[repr(C)]
+pub struct VkPhysicalDeviceProperties2 {
+    pub s_type: i32,
+    pub _pad: i32,
+    pub p_next: *mut c_void,
+    /// `VkPhysicalDeviceProperties properties` — opaque, driver-written (824 bytes).
+    pub properties: VkPhysicalDeviceProperties,
+}
+
+/// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2` — Vulkan 1.1 core.
+pub const ST_PHYSICAL_DEVICE_PROPERTIES_2: i32 = 1_000_059_001;
+
+/// `VkPhysicalDeviceSubgroupProperties` — chained into [`VkPhysicalDeviceProperties2`] to read
+/// which subgroup operations and stages the device supports (Vulkan 1.1 core). Written BY the
+/// driver. These are PROPERTIES, not features: there is no enable bit, only a support check
+/// before any module that uses a subgroup operation is created.
+#[repr(C)]
+pub struct VkPhysicalDeviceSubgroupProperties {
+    pub s_type: i32,
+    pub p_next: *mut c_void,
+    /// `subgroupSize` — the default number of invocations per subgroup.
+    pub subgroup_size: u32,
+    /// `supportedStages` — `VkShaderStageFlags` in which subgroup operations may run.
+    pub supported_stages: VkFlags,
+    /// `supportedOperations` — `VkSubgroupFeatureFlags` (`VK_SUBGROUP_FEATURE_*_BIT`).
+    pub supported_operations: VkFlags,
+    /// `quadOperationsInAllStages`.
+    pub quad_operations_in_all_stages: VkBool32,
+}
+
+/// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES` — Vulkan 1.1 core.
+pub const ST_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES: i32 = 1_000_094_000;
+
+/// `VK_SUBGROUP_FEATURE_BASIC_BIT` — licenses the `GroupNonUniform` SPIR-V capability.
+pub const VK_SUBGROUP_FEATURE_BASIC_BIT: VkFlags = 0x0000_0001;
+/// `VK_SUBGROUP_FEATURE_BALLOT_BIT` — licenses the `GroupNonUniformBallot` SPIR-V capability.
+pub const VK_SUBGROUP_FEATURE_BALLOT_BIT: VkFlags = 0x0000_0008;
 
 /// `VkPhysicalDeviceVulkan13Features` — chained into `VkDeviceCreateInfo` to
 /// enable `dynamicRendering` + `synchronization2` (we use only `dynamicRendering`).
@@ -2993,10 +3038,22 @@ const _: () = assert!(core::mem::align_of::<VkBufferImageCopy>() == 8);
 // `i32`/`u32`, no 8-byte member).
 const _: () = assert!(core::mem::size_of::<VkImageBlit>() == 80);
 const _: () = assert!(core::mem::align_of::<VkImageBlit>() == 4);
-// 16-byte head (sType + 4 pad + pNext) + [VkBool32; 55] = 220 bytes → 236, rounded
-// up to the struct's 8-byte alignment = 240.
+// 16-byte head (sType + 4 pad + pNext) + `VkPhysicalDeviceFeatures` (55 `VkBool32`s =
+// 220 bytes, 4-byte aligned, asserted below) → 236, rounded up to the struct's 8-byte
+// alignment = 240.
 const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceFeatures2>() == 240);
 const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceFeatures2>() == 8);
+// 16-byte head (sType + 4 pad + pNext) + `VkPhysicalDeviceProperties` (824 bytes, 8-aligned,
+// asserted above) = 840.
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceProperties2>() == 840);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceProperties2>() == 8);
+// Written BY the driver through the `p_next` chain: the 16-byte head (sType + 4 pad + pNext) +
+// four 4-byte members (16 bytes) = 32, already 8-byte aligned.
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceSubgroupProperties>() == 32);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceSubgroupProperties>() == 8);
+const _: () = assert!(core::mem::offset_of!(VkPhysicalDeviceSubgroupProperties, p_next) == 8);
+const _: () = assert!(core::mem::offset_of!(VkPhysicalDeviceSubgroupProperties, supported_stages) == 20);
+const _: () = assert!(core::mem::offset_of!(VkPhysicalDeviceSubgroupProperties, supported_operations) == 24);
 // Render P1b device-caps query layout guards. `VkFormatProperties` is written BY the
 // driver; `VkPhysicalDeviceVulkan12Features` is written BY the driver through the
 // `p_next` chain — both must match the C ABI exactly. `VkFormatProperties` is three
@@ -3998,6 +4055,14 @@ pub type PfnVkCmdBlitImage = unsafe extern "system" fn(
 pub type PfnVkGetPhysicalDeviceFeatures2 = unsafe extern "system" fn(
     physical_device: VkPhysicalDevice,
     p_features: *mut VkPhysicalDeviceFeatures2,
+);
+
+/// `PFN_vkGetPhysicalDeviceProperties2` (Vulkan 1.1 core) — the boot's subgroup-support query,
+/// and the `hwrt` acceleration-structure properties query. Ungated for the reason
+/// [`VkPhysicalDeviceProperties2`] is.
+pub type PfnVkGetPhysicalDeviceProperties2 = unsafe extern "system" fn(
+    physical_device: VkPhysicalDevice,
+    p_properties: *mut VkPhysicalDeviceProperties2,
 );
 
 /// `PFN_vkGetPhysicalDeviceFormatProperties` — the Render P1b device-caps query for

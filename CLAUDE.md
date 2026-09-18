@@ -179,9 +179,12 @@ The repair belongs in those two crates, not in the gate.
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **310 sites (168 unconditional +
-142 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-18 on this line after the A7 lane merged.**
-The last move, 311 → 310, is that lane's four `deferred:` red-first tests: A7-R0 is no longer
+The four commands above run **none** of the `#[ignore]`d tests — **320 sites (178 unconditional +
+142 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-18 on this line after the boot-validation
+lane merged.** The last move, 310 → 320, is that lane's ten `gpu-windowed:` device tests: Gate A's
+driver and six workers in `boot_validation_clean.rs`, and the shadow gate's two drivers and one
+worker in `unwritten_shadow_map_gate.rs`. The move before it, 311 → 310, is the A7 lane's four
+`deferred:` red-first tests: A7-R0 is no longer
 ignored, A7-R1 and A7-R2 became `cfg_attr(any(miri, debug_assertions), "slow: …")`, and G8 became
 `cfg_attr(miri, "miri-slow: …")`. The move before it, from 2026-09-17's 280, is two things and not
 one: the A6 lane's three new test files brought **32**
@@ -289,11 +292,12 @@ a custom `#[global_allocator]` — where `miri-slow` means it would finish, give
 A6 lane's, all `cfg_attr(miri, …)`), `generator`, `deferred`, `flaky`. **The claim that the tree
 maps onto it "exactly" was true of a 143-site tree and is not true now:** that mapping (135
 `gpu*`/`feature`, 1 `solo`, 1 `miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky`) sums to 143
-against **168** plain sites today.
-The migration has started at the sites, not in this list: **21 of the 168 plain reasons already
-carry a prefix** — 17 `deferred:`, 2 `gpu-windowed:`, 1 `slow:`, 1 `generator:` (measured
-2026-09-18 after the A7 merge, which removed four `deferred:` plain sites by resolving them) — and
-the other 147 do not. So the migration is still mechanical *per site*, and afterwards each leg is a `grep` and
+against **178** plain sites today.
+The migration has started at the sites, not in this list: **31 of the 178 plain reasons already
+carry a prefix** — 17 `deferred:`, 12 `gpu-windowed:`, 1 `slow:`, 1 `generator:` (measured
+2026-09-18 after the boot-validation merge, whose ten new device tests all carry `gpu-windowed:`;
+the A7 merge before it removed four `deferred:` plain sites by resolving them) — and the other 147
+do not. So the migration is still mechanical *per site*, and afterwards each leg is a `grep` and
 every new ignore picks its own leg at the site; what it is not is bookkeeping already done.
 
 ⚠️ **One prefix is already being used against its own definition, and a mechanical leg built from

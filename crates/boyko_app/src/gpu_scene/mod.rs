@@ -1222,7 +1222,7 @@ pub(crate) struct GpuSceneBundles {
     /// Rung R9b: `vb_shade_split`'s Set-1 LAYOUT (9 bindings; 8 on the software leg): @0-3 =
     /// `forward_layout1`'s shadow table kinds verbatim, @4 `gSsao` STORAGE, @5/@6 the DDGI
     /// COMBINED image+sampler pair, @7 `ResolvedDdgi` UBO, @8 cfg(hwrt) `gShadowVis` STORAGE.
-    /// A DISTINCT object — `forward_layout1` stays byte-untouched.
+    /// A distinct COMPUTE-only object, not `forward_layout1`.
     vb_split_layout1: VulkanBindGroupLayout,
     /// Rung R9b: the split pair pipelines — deferred-built by [`Self::build_vb_split_pipelines`]
     /// (the SAME geometry-Set-2 dependency as [`Self::build_vb_resolve_pipeline`]).
@@ -1320,8 +1320,9 @@ pub(crate) struct GpuSceneBundles {
     /// Set 2 to Set 1). Set 0 = [`Self::forward_layout0`] (the UNIFIED 7-binding layout).
     forward_pipeline: VulkanGraphicsPipeline,
     /// Code-review follow-up (rung R4b-b): the Forward-family sky background pipeline
-    /// (`forward_sky.{vs,fs}.hlsl`) — reuses [`Self::forward_layout0`], no depth attachment
-    /// declared (`boot`'s doc). Shared verbatim by `Forward` and `ForwardPlus`.
+    /// (`forward_sky.{vs,fs}.hlsl`) — reuses [`Self::forward_layout0`]; declares the forward
+    /// scope's depth format with `VK_COMPARE_OP_ALWAYS` and depth write OFF (`boot`'s doc,
+    /// VUID-08914). Shared verbatim by `Forward` and `ForwardPlus`.
     forward_sky_pipeline: VulkanGraphicsPipeline,
     /// The UNIFIED Forward-family Set-0 (core) bind-group layout — 7 bindings: instances @0,
     /// instance_materials @1, Camera @2, LightBuf @3, Materials @4, `ClusterGrid` @5,
@@ -1333,8 +1334,10 @@ pub(crate) struct GpuSceneBundles {
     /// structurally-identical but DISTINCT `VkDescriptorSetLayout` handles are NOT
     /// interchangeable — an earlier revision's bug).
     forward_layout0: VulkanBindGroupLayout,
-    /// The Forward-family Set-1 (shadow) bind-group layout — 4 bindings (CSM + punctual atlas).
-    /// Shared verbatim by `Forward` and `ForwardPlus` (UNCHANGED by rung R5).
+    /// The Forward-family Set-1 (shadow) bind-group layout — 4 bindings (CSM + punctual atlas),
+    /// each `FRAGMENT | COMPUTE`. Shared verbatim by `Forward` and `ForwardPlus` AND, at Set 1, by
+    /// the `sdf_forward_march` and VB resolve/shade compute pipelines — hence the COMPUTE bit
+    /// (VUID-VkComputePipelineCreateInfo-layout-07988).
     forward_layout1: VulkanBindGroupLayout,
     // ── Multi-paradigm render-path plan, rung R5: ForwardPlus's depth prepass + froxel
     // opaque pipeline variant (see `boot`'s doc — same "built UNCONDITIONALLY, cheap"
@@ -1955,10 +1958,22 @@ impl GpuSceneBundles {
             .expect("invariant: mesh-MRT vertex shader module create");
         let fs = RhiDevice::create_shader_module(device, gbuffer_mrt_fs_spirv())
             .expect("invariant: mesh-MRT fragment shader module create");
+        // Each pipeline declares ONLY the vertex attributes its vertex shader reads (DXC strips an
+        // unread input, so an extra declared attribute is a fetch nothing consumes —
+        // WARNING-Shader-OutputNotConsumed). The stride stays `MESH_VERTEX_STRIDE` for all three.
+        // Full set, locations 0/1/2 (position, color, normal): `gbuffer_mrt.vs`.
         let attributes = [
             VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
             VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
             VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
+        ];
+        // Position only, location 0: `depth_prepass.vs`, `vb_raster.vs`.
+        let attributes_pos = [VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 }];
+        // Position + normal, locations 0/2: `forward_opaque.vs` (the Forward and ForwardPlus
+        // opaque pipelines).
+        let attributes_pos_normal = [
+            VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
         ];
         let raster_pipeline = RhiDevice::create_graphics_pipeline(
             device,
@@ -2242,6 +2257,9 @@ impl GpuSceneBundles {
                 },
             )
             .expect("invariant: HWRT deferred resolve compute pipeline create");
+            // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+            // destroy it once; no GPU work is in flight yet.
+            unsafe { RhiDevice::destroy_shader_module(device, hwrt_cs) };
             (hwrt_pipeline, hwrt_layout)
         });
 
@@ -2531,7 +2549,9 @@ impl GpuSceneBundles {
         // CombinedImageSampler shape); `color_formats[0]` is `aa_out`'s format
         // (`R8G8B8A8_UNORM`), NOT the swapchain format. Boot-time creation records no
         // command / writes no pixel — byte-identical to the golden regardless of this
-        // pipeline's existence.
+        // pipeline's existence. Built with a FRAGMENT-only push range (as are the three SMAA
+        // pipelines below): only `fxaa.fs` reads the push block — `sample_vs` declares none — and
+        // the recorder pushes with exactly the range's stages (VUID-vkCmdPushConstants-offset-01796).
         let fxaa_sampler = RhiDevice::create_sampler(
             device,
             &SamplerDesc {
@@ -2545,9 +2565,8 @@ impl GpuSceneBundles {
         .expect("invariant: FXAA linear/clamp sampler create");
         let fxaa_fs = RhiDevice::create_shader_module(device, fxaa_fs_spirv())
             .expect("invariant: FXAA fragment shader module create");
-        let fxaa_pipeline = RhiDevice::create_graphics_pipeline(
-            device,
-            &GraphicsPipelineDesc {
+        let fxaa_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
                 vertex_module: &sample_vs,
                 vertex_entry: c"main",
                 fragment_module: &fxaa_fs,
@@ -2563,9 +2582,8 @@ impl GpuSceneBundles {
                 blend: None,
                 cull_mode: CullMode::None,
                 depth_bias: None,
-            },
-        )
-        .expect("invariant: FXAA graphics pipeline create");
+            })
+            .expect("invariant: FXAA graphics pipeline create");
 
         // Anti-aliasing Stage 2: the SMAA 1x boot bundle — 2 dedicated layouts, 1 dedicated
         // sampler, 3 fullscreen pipelines, 2 boot-resident LUTs — built UNCONDITIONALLY here
@@ -2633,9 +2651,8 @@ impl GpuSceneBundles {
         .expect("invariant: SMAA linear/clamp sampler create");
         let smaa_edge_fs = RhiDevice::create_shader_module(device, smaa_edge_fs_spirv())
             .expect("invariant: SMAA edge fragment shader module create");
-        let smaa_edge_pipeline = RhiDevice::create_graphics_pipeline(
-            device,
-            &GraphicsPipelineDesc {
+        let smaa_edge_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
                 vertex_module: &sample_vs,
                 vertex_entry: c"main",
                 fragment_module: &smaa_edge_fs,
@@ -2650,14 +2667,12 @@ impl GpuSceneBundles {
                 blend: None,
                 cull_mode: CullMode::None,
                 depth_bias: None,
-            },
-        )
-        .expect("invariant: SMAA edge graphics pipeline create");
+            })
+            .expect("invariant: SMAA edge graphics pipeline create");
         let smaa_weight_fs = RhiDevice::create_shader_module(device, smaa_weight_fs_spirv())
             .expect("invariant: SMAA weight fragment shader module create");
-        let smaa_weight_pipeline = RhiDevice::create_graphics_pipeline(
-            device,
-            &GraphicsPipelineDesc {
+        let smaa_weight_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
                 vertex_module: &sample_vs,
                 vertex_entry: c"main",
                 fragment_module: &smaa_weight_fs,
@@ -2672,14 +2687,12 @@ impl GpuSceneBundles {
                 blend: None,
                 cull_mode: CullMode::None,
                 depth_bias: None,
-            },
-        )
-        .expect("invariant: SMAA weight graphics pipeline create");
+            })
+            .expect("invariant: SMAA weight graphics pipeline create");
         let smaa_blend_fs = RhiDevice::create_shader_module(device, smaa_blend_fs_spirv())
             .expect("invariant: SMAA blend fragment shader module create");
-        let smaa_blend_pipeline = RhiDevice::create_graphics_pipeline(
-            device,
-            &GraphicsPipelineDesc {
+        let smaa_blend_pipeline = ctx
+            .create_graphics_pipeline_fragment_push(&GraphicsPipelineDesc {
                 vertex_module: &sample_vs,
                 vertex_entry: c"main",
                 fragment_module: &smaa_blend_fs,
@@ -2694,9 +2707,8 @@ impl GpuSceneBundles {
                 blend: None,
                 cull_mode: CullMode::None,
                 depth_bias: None,
-            },
-        )
-        .expect("invariant: SMAA blend graphics pipeline create");
+            })
+            .expect("invariant: SMAA blend graphics pipeline create");
         let smaa_area_tex = upload_texture_2d_raw(
             device,
             AREA_TEX_W,
@@ -2962,8 +2974,8 @@ impl GpuSceneBundles {
         // compiled without the define on BOTH legs, so a `not(hwrt)` build's entry would be pure
         // dead surface (the layout stays EXACT-FILL at 8 there).
         let vb_split_layout1_base: [BindGroupLayoutEntry; 8] = [
-            // @0-3: forward_layout1's shadow-table kinds VERBATIM (a DISTINCT object —
-            // the Forward family's own layout stays byte-untouched).
+            // @0-3: forward_layout1's shadow-table kinds VERBATIM (a distinct COMPUTE-only
+            // object — the split shade's Set 1 is its own 8/9-binding shape).
             BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
             BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
             BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
@@ -3184,10 +3196,18 @@ impl GpuSceneBundles {
         // `forward_opaque.fs.hlsl`'s doc (bindings 5/6 declared only under `-D FROXEL=1`, but a
         // pipeline layout may always be a SUPERSET of what a given shader stage references).
         //
-        // Set 1 binding shape: `gCsm`+`gCsmCmp` @0 (FRAGMENT, combined), `CsmCascades` @1
-        // (FRAGMENT), `gShadowAtlas`+`gShadowAtlasCmp` @2 (FRAGMENT, combined), `ShadowAtlas`
-        // @3 (FRAGMENT) — `forward_opaque.fs.hlsl`'s OWN binding numbers (a DIFFERENT layout
-        // than the deferred resolve's single compute set, same underlying resources).
+        // Set 1 binding shape: `gCsm`+`gCsmCmp` @0 (combined), `CsmCascades` @1,
+        // `gShadowAtlas`+`gShadowAtlasCmp` @2 (combined), `ShadowAtlas` @3 — every binding
+        // `FRAGMENT | COMPUTE` — `forward_opaque.fs.hlsl`'s OWN binding numbers (a DIFFERENT
+        // layout than the deferred resolve's single compute set, same underlying resources).
+        // COMPUTE is load-bearing, not decoration: this ONE layout object (and so every
+        // `ForwardTargets::set1[fi]` allocated from it) is also Set 1 of the compute pipelines
+        // that read the shadow tables — `sdf_forward_march` and the VB resolve/shade family —
+        // and a compute pipeline whose shader reads a binding without COMPUTE in its
+        // `stageFlags` is invalid (VUID-VkComputePipelineCreateInfo-layout-07988). Widening
+        // the flags keeps ONE handle, so the graphics and compute bind sites stay compatible;
+        // a COMPUTE-only copy would need a second `set1` array written in lock-step with this
+        // one (the `vb_layout0` VERTEX|COMPUTE / FRAGMENT|COMPUTE precedent below).
         //
         // Boot-panic fix: renumbered from an original Set 2 design (with an empty Set-1
         // PLACEHOLDER layout in between, for Vulkan's contiguous-set-index rule). A zero-binding
@@ -3204,25 +3224,25 @@ impl GpuSceneBundles {
                         binding: 0,
                         count: 1,
                         kind: DescriptorKind::CombinedImageSampler,
-                        stage: ShaderStage::FRAGMENT,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
                     },
                     BindGroupLayoutEntry {
                         binding: 1,
                         count: 1,
                         kind: DescriptorKind::UniformBuffer,
-                        stage: ShaderStage::FRAGMENT,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
                     },
                     BindGroupLayoutEntry {
                         binding: 2,
                         count: 1,
                         kind: DescriptorKind::CombinedImageSampler,
-                        stage: ShaderStage::FRAGMENT,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
                     },
                     BindGroupLayoutEntry {
                         binding: 3,
                         count: 1,
                         kind: DescriptorKind::UniformBuffer,
-                        stage: ShaderStage::FRAGMENT,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
                     },
                 ],
             },
@@ -3305,7 +3325,7 @@ impl GpuSceneBundles {
                     topology: PrimitiveTopology::TriangleList,
                     vertex_layout: Some(VertexBufferLayout {
                         stride: MESH_VERTEX_STRIDE as u32,
-                        attributes: &attributes,
+                        attributes: &attributes_pos_normal,
                     }),
                     push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                     bind_group_layout: Some(&forward_layout0),
@@ -3329,13 +3349,15 @@ impl GpuSceneBundles {
         // inside `forward_opaque`'s SAME dynamic-rendering scope so opaque geometry then draws
         // over it. REUSES `forward_layout0` (its FS reads only Camera @2 + LightBuf @3, a subset
         // of that layout's 5 bindings — the SAME "bound-but-unread subset" idiom every other
-        // pipeline in this fn's set already relies on) via the ORDINARY `create_graphics_pipeline`
-        // (a plain 1-set pipeline — the sky FS never reads the shadow Set-1 layout, so
-        // `create_graphics_pipeline_forward`'s 2-set shape is unneeded here). `depth_format:
-        // None`: no depth attachment declared (Vulkan permits recording a pipeline with
-        // `depthAttachmentFormat == UNDEFINED` inside a rendering scope that DOES bind a depth
-        // attachment — this pipeline simply neither tests nor writes it), so `record_forward`
-        // draws it with depth test/write OFF while `forward_pipeline`'s own real
+        // pipeline in this fn's set already relies on) as its only set (the sky FS never reads
+        // the shadow Set-1 layout). `depth_format: Some(D32Sfloat)` — the forward scope's own
+        // depth format — because that scope ALWAYS binds `forward_depth`, and a pipeline
+        // declaring `depthAttachmentFormat == UNDEFINED` may be drawn in a scope with a depth
+        // attachment only under `VK_EXT_dynamic_rendering_unused_attachments`
+        // (VUID-vkCmdDraw-dynamicRenderingUnusedAttachments-08914), which this engine does not
+        // enable. `create_graphics_pipeline_forward_sky` pairs that format with
+        // `VK_COMPARE_OP_ALWAYS` and depth write OFF, so every sky fragment passes and none is
+        // written — the same observable result as no depth test — and `forward_pipeline`'s own
         // `VK_COMPARE_OP_GREATER` depth-write pass (drawn right after, same scope) is untouched.
         // No vertex buffer (`vertex_layout: None`, `SV_VertexID`-only fullscreen triangle) and no
         // push constants (`push_constant_bytes: 0`).
@@ -3343,15 +3365,14 @@ impl GpuSceneBundles {
             .expect("invariant: Forward sky vertex shader module create");
         let sky_fs = RhiDevice::create_shader_module(device, forward_sky_fs_spirv())
             .expect("invariant: Forward sky fragment shader module create");
-        let forward_sky_pipeline = RhiDevice::create_graphics_pipeline(
-            device,
-            &GraphicsPipelineDesc {
+        let forward_sky_pipeline = ctx
+            .create_graphics_pipeline_forward_sky(&GraphicsPipelineDesc {
                 vertex_module: &sky_vs,
                 vertex_entry: c"main",
                 fragment_module: &sky_fs,
                 fragment_entry: c"main",
                 color_formats: &[RASTER_COLOR_FORMAT],
-                depth_format: None,
+                depth_format: Some(Format::D32Sfloat),
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: None,
                 push_constant_bytes: 0,
@@ -3359,9 +3380,8 @@ impl GpuSceneBundles {
                 blend: None,
                 cull_mode: CullMode::None,
                 depth_bias: None,
-            },
-        )
-        .expect("invariant: Forward sky graphics pipeline create");
+            })
+            .expect("invariant: Forward sky graphics pipeline create");
         // SAFETY: both modules were created on `device` and are consumed by the pipeline
         // create; each is destroyed once; no GPU work is in flight yet.
         unsafe {
@@ -3394,7 +3414,7 @@ impl GpuSceneBundles {
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: Some(VertexBufferLayout {
                     stride: MESH_VERTEX_STRIDE as u32,
-                    attributes: &attributes,
+                    attributes: &attributes_pos,
                 }),
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(&forward_layout0),
@@ -3432,7 +3452,7 @@ impl GpuSceneBundles {
                     topology: PrimitiveTopology::TriangleList,
                     vertex_layout: Some(VertexBufferLayout {
                         stride: MESH_VERTEX_STRIDE as u32,
-                        attributes: &attributes,
+                        attributes: &attributes_pos_normal,
                     }),
                     push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                     bind_group_layout: Some(&forward_layout0),
@@ -3459,7 +3479,9 @@ impl GpuSceneBundles {
         // a Forward-family-resolved boot with the SDF leg present ever RECORDS the pass. ALL
         // pipeline variants are built against this ONE layout object (the code-review-fixed "one
         // layout per pipeline family" discipline `forward_layout0` already establishes) at Set 0,
-        // + `forward_layout1` at Set 1 (the shadow set, REUSED VERBATIM — no separate layout):
+        // + `forward_layout1` at Set 1 (the shadow set, REUSED VERBATIM — no separate layout; the
+        // reuse is legal because every one of its bindings carries `COMPUTE` in `stageFlags`,
+        // VUID-VkComputePipelineCreateInfo-layout-07988 — see its own block comment):
         // @12 is HAS_MESH-referenced only and @13 VIEWT-referenced only, bound-but-unread by the
         // other variants (the R2 contract).
         let sdf_forward_march_layout = RhiDevice::create_bind_group_layout(
@@ -4093,7 +4115,7 @@ impl GpuSceneBundles {
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: Some(VertexBufferLayout {
                     stride: MESH_VERTEX_STRIDE as u32,
-                    attributes: &attributes,
+                    attributes: &attributes_pos,
                 }),
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(&vb_layout0),
@@ -6075,10 +6097,11 @@ impl GpuSceneBundles {
     /// lighting is ECS-owned —
     /// `light_upload` is `Some(staged_bytes)` on a frame whose staging slot was
     /// just rewritten (the recorder then records the staging→table copy), and
-    /// `csm` is `Some(resolved)` when the runner's arming predicate holds (a
-    /// fitted sun AND live caster batches — the SAME predicate
-    /// `sync_csm_light_gate` drives the light-header gate with, so the resolve
-    /// samples the cascades only on frame streams where this depth pass runs).
+    /// `csm` is `Some(resolved)` when the runner's arming holds —
+    /// `ResolvedCsm::depth_pass_armed`, the SAME call `sync_csm_light_gate` drives
+    /// the light-header gate with (a fitted sun AND live caster batches, the fit
+    /// itself DISABLED on a leg set without mesh-shadow producers); `atlas` likewise
+    /// through `ResolvedShadowAtlas::depth_pass_armed`.
     ///
     /// # The O1 single-matrix pin
     ///
@@ -6328,26 +6351,35 @@ impl GpuSceneBundles {
             "invariant: ssao_atrous_levels > 0 requires ssao_variant.is_some() (resolve_ssao forces this)"
         );
 
-        // Multi-paradigm render-path plan, rung R3 (P1 fix — orchestrator architecture
-        // decision): mesh-shadow producers (CSM cascade depth, the punctual spot/point atlas
-        // depth, and under `hwrt` the per-frame TLAS pack/build + the shadow_vis/à-trous/
-        // temporal denoise chain) are MESH-LEG-OWNED — they rasterize/trace MESH casters only.
-        // The SDF leg gets its shadows from the marcher's baked soft march
-        // (`ShadowSources::SDF_SOFT_MARCH`), never from these. Under `!mesh_leg` (`Deferred ×
-        // Sdf`) they must be structurally ABSENT (capability = component presence, not a
-        // runtime flag), suppressed HERE — the single scene-assembly seam — so every downstream
-        // use in this fn (the `csm`/`atlas_punctual` `GBufferScene` fields below, and the
-        // `hwrt` `tlas`/`shadow` activations, which key off `csm.is_some()`/`tlas_enabled`)
-        // derives from the SAME gated locals and can never disagree. `Deferred × Both`/`Mesh`
-        // keep `mesh_leg == true` ⇒ `.filter(|_| true)` is the identity ⇒ byte-identical.
+        // Mesh-shadow producers (CSM cascade depth, the punctual spot/point atlas depth, and
+        // under `hwrt` the per-frame TLAS pack/build + the shadow_vis/à-trous/temporal denoise
+        // chain) are MESH-LEG-OWNED — they rasterize/trace MESH casters only; the SDF leg gets
+        // its shadows from its own soft march (`ShadowSources::SDF_SOFT_MARCH`).
+        //
+        // Shadow gate SG3: this seam keeps NO leg term of its own for the cascades and the
+        // atlas. The gate is upstream, in the per-frame plan: `resolve_csm_cascades` and
+        // `resolve_shadow_atlas` publish DISABLED under `!mesh_shadow_producers()`, so the
+        // runner's arming — the SAME `depth_pass_armed` call the light-header bits are written
+        // from — hands this fn `None` for both, and the header, both UBOs, the punctual light
+        // slot and these fields all derive from one fact. A suppression applied only here was
+        // the defect: it left the sampling side armed, and a mesh-less VB×Sdf frame sampled a
+        // cascade no pass had written. The assert below CHECKS the upstream gate; it does not
+        // replace it — a regression there now renders invisible-caster shadows (defined) and
+        // trips this in debug, instead of being hidden in release.
         let mesh_leg = resolved_render_path.mesh_leg;
-        let csm = csm.filter(|_| mesh_leg);
-        let atlas = atlas.filter(|_| mesh_leg);
+        debug_assert!(
+            resolved_render_path.mesh_shadow_producers() || (csm.is_none() && atlas.is_none()),
+            "invariant: a mesh-shadow producer armed on a leg set without one — the gate is \
+             ResolvedRenderPath::mesh_shadow_producers() in boyko_render's resolve_csm_cascades / \
+             resolve_shadow_atlas, not this seam"
+        );
+        // The TLAS is not planned by a resolve, so its leg term stays here, spelled through the
+        // SAME named predicate (byte-identical to the former `&& mesh_leg`).
         #[cfg(feature = "hwrt")]
-        let tlas_enabled = tlas_enabled && mesh_leg;
+        let tlas_enabled = tlas_enabled && resolved_render_path.mesh_shadow_producers();
 
-        // Multi-paradigm render-path plan, rung R3b — the SDF-owned-producer half of the R3
-        // scene-assembly seam (the mirror-image gate to `mesh_leg` above): SDFDDGI's probe-update
+        // Multi-paradigm render-path plan, rung R3b — the SDF-owned-producer gate (the mirror
+        // image of the mesh-shadow producer ownership above): SDFDDGI's probe-update
         // pass injects indirect irradiance onto `is_sdf_lit` pixels ONLY (the SDF leg's own
         // geometry) — it is SDF-OWNED, so it must be structurally ABSENT under `!sdf_leg`
         // (`Deferred × Mesh`), suppressed HERE at the same single seam. `Deferred × Both`/`Sdf`

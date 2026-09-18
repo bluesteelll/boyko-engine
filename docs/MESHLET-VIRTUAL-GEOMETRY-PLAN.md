@@ -725,7 +725,7 @@ statistic, and nothing reads the visibility buffer back to the host. `vb_id` is 
 | (c) Reuse the CPU rasterizer alone | zero engine change | Rejected **as the census** — it is a host mirror of the raster, not the shipped VB path, and the whole point of the census is to measure what the engine actually produces. Retained as R0c's cross-check |
 
 `copy_image_to_buffer` already exists in the RHI (`boyko_rhi/src/encoder.rs:115`; impl at
-`rhi_impl/encoder.rs:1031`). The readback is `[census].readback_retention` — streamed and hashed,
+`rhi_impl/encoder.rs:1037`). The readback is `[census].readback_retention` — streamed and hashed,
 never retained: at 3840×2160 × 8 B that is 66.4 MB per censused frame, and §11 records this volume
 at 16 GB free with `target/` at 58 GB, so retention would reproduce this project's standing hazard
 of disk exhaustion surfacing as mingw linker errors.
@@ -2432,7 +2432,7 @@ rows) · `crates/boyko_rhi_vulkan/tests/vb_raster_geo_classify_spv_sync.rs`'s
 **Targets / readback:** `crates/boyko_rhi_vulkan/src/present/targets.rs:851~-856` (`VbTargets`),
 **`:868~` (`COLOR_ATTACHMENT | SAMPLED` — no `TRANSFER_SRC`)** ·
 `crates/boyko_rhi/src/encoder.rs:115` (`copy_image_to_buffer`) ·
-`crates/boyko_rhi_vulkan/src/rhi_impl/encoder.rs:1031` (impl) ·
+`crates/boyko_rhi_vulkan/src/rhi_impl/encoder.rs:1037` (impl) ·
 `crates/boyko_rhi_vulkan/src/present/frame_driver.rs:750~` (no depth readback) ·
 `crates/boyko_app/src/host_dump.rs:1~-10`, `:67~` (`BOYKO_HOST_DUMP`).
 

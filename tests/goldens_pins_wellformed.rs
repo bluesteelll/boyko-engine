@@ -241,10 +241,11 @@ fn a_pin_that_names_its_own_dump_path_names_the_one_it_hashes() {
     // `BOYKO_HOST_DUMP`, the render lands somewhere else and the script either aborts on a missing
     // file or — with a stale artifact from an earlier run present — hashes the wrong image.
     //
-    // CONDITIONAL, and measured before it was written: 29 of the 32 pins name `BOYKO_HOST_DUMP` and
-    // all 29 agree; three (`grand_showcase`, `deferred_sdf_only`, `deferred_mesh_only`) omit the key
-    // and let their fixture's own default path stand. Omission is therefore legal and disagreement
-    // is not.
+    // CONDITIONAL, and measured before it was written: 31 of the 34 pins name `BOYKO_HOST_DUMP` and
+    // all 31 agree (recounted 2026-09-18, after `deferred_sdf_casters` and `vb_mesh_shadows` were
+    // added; it was 29 of 32 before); three (`grand_showcase`, `deferred_sdf_only`,
+    // `deferred_mesh_only`) omit the key and let their fixture's own default path stand. Omission is
+    // therefore legal and disagreement is not.
     let text = read_pins();
     let mut bmp: BTreeMap<String, String> = BTreeMap::new();
     let mut dump: BTreeMap<String, String> = BTreeMap::new();

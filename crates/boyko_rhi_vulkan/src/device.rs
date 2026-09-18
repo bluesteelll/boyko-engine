@@ -135,6 +135,24 @@ pub enum BootError {
         /// The device's per-stage limit for that kind.
         limit: u32,
     },
+    /// The chosen GPU does not advertise a feature every boot enables unconditionally — a row of
+    /// `REQUIRED_CORE` / `REQUIRED_V13`, which are the single source for the support query, the
+    /// enable and this refusal. The payload is the Vulkan spec name of the FIRST missing row in
+    /// table order (e.g. `"geometryShader"`, needed because `vb_raster.fs` reads
+    /// `SV_PrimitiveID`, which declares the `Geometry` SPIR-V capability). Checked before
+    /// `vkCreateDevice`, so a device without the bit gets this named refusal instead of an
+    /// opaque `VK_ERROR_FEATURE_NOT_PRESENT` — or, worse, a module that declares an unenabled
+    /// capability. Announced, never silently degraded (the `swapchain.rs` discipline).
+    RequiredFeatureUnsupported(&'static str),
+    /// The chosen GPU does not report a subgroup PROPERTY a committed shader relies on: a bit of
+    /// `REQUIRED_SUBGROUP_OPERATIONS` missing from `subgroupSupportedOperations`, or a stage of
+    /// `REQUIRED_SUBGROUP_STAGES` missing from `subgroupSupportedStages`. The payload names the
+    /// first missing row (e.g. `"VK_SUBGROUP_FEATURE_BALLOT_BIT"`, which `particle_sim.comp`'s
+    /// wave aggregation needs for the `GroupNonUniformBallot` SPIR-V capability). A property has
+    /// no enable bit, so this is a check, not a request; it runs before `vkCreateDevice` and
+    /// refuses the whole boot, whether or not particles are armed on it — the same discipline as
+    /// [`Self::RequiredFeatureUnsupported`].
+    RequiredSubgroupPropertyUnsupported(&'static str),
 }
 
 /// Bootstrap options for the instance.
@@ -502,6 +520,9 @@ struct InstanceFns {
     /// `vkGetPhysicalDeviceFeatures2` (Vulkan 1.1 core) — the S0 fail-fast
     /// `dynamicRendering` support query (Correction #2). Always present at API 1.3.
     get_physical_device_features2: PfnVkGetPhysicalDeviceFeatures2,
+    /// `vkGetPhysicalDeviceProperties2` (Vulkan 1.1 core) — the subgroup-support query
+    /// ([`query_subgroup_support`]). Always present at API 1.3.
+    get_physical_device_properties2: PfnVkGetPhysicalDeviceProperties2,
     /// `vkGetPhysicalDeviceFormatProperties` (Vulkan 1.0 core) — the Render P1b
     /// device-caps query for G-buffer storage-image format support. Always present.
     get_physical_device_format_properties: PfnVkGetPhysicalDeviceFormatProperties,
@@ -1063,6 +1084,7 @@ impl VulkanContext {
                 if !debug_messenger.is_null() {
                     if let Some(destroy) = instance_fns.destroy_debug_messenger {
                         unsafe { destroy(instance, debug_messenger, ptr::null()) };
+                        debug::note_messenger_destroyed();
                     }
                 }
                 drop(debug_state);
@@ -1652,6 +1674,9 @@ impl Drop for VulkanContext {
                 && let Some(destroy) = self.instance_fns.destroy_debug_messenger
             {
                 destroy(self.instance, self.debug_messenger, ptr::null());
+                // After `vkDestroyDevice` above, so a ledger reading `destroyed == created`
+                // proves the device-destroy window (leak reports) was listened to.
+                debug::note_messenger_destroyed();
             }
             (self.instance_fns.destroy_instance)(self.instance, ptr::null());
             free_vulkan_loader(self.module);
@@ -1905,6 +1930,12 @@ fn load_instance_fns(
                 instance,
                 c"vkGetPhysicalDeviceFeatures2",
             )?,
+            // Vulkan 1.1 core — always present on a 1.3 instance. The subgroup-support query.
+            get_physical_device_properties2: load_instance_command(
+                gipa,
+                instance,
+                c"vkGetPhysicalDeviceProperties2",
+            )?,
             // Vulkan 1.0 core — always present. The Render P1b G-buffer storage-image
             // format-support query.
             get_physical_device_format_properties: load_instance_command(
@@ -1940,6 +1971,7 @@ fn fallback_instance_fns(gipa: PfnVkGetInstanceProcAddr, instance: VkInstance) -
         get_physical_device_memory_properties: noop_get_mem_props,
         get_physical_device_queue_family_properties: noop_get_qf_props,
         get_physical_device_features2: noop_get_features2,
+        get_physical_device_properties2: noop_get_props2,
         get_physical_device_format_properties: noop_get_format_props,
         create_device: noop_create_device,
         get_device_proc_addr: noop_get_device_proc_addr,
@@ -1975,6 +2007,7 @@ unsafe extern "system" fn noop_get_features2(
     _: *mut VkPhysicalDeviceFeatures2,
 ) {
 }
+unsafe extern "system" fn noop_get_props2(_: VkPhysicalDevice, _: *mut VkPhysicalDeviceProperties2) {}
 unsafe extern "system" fn noop_get_format_props(
     _: VkPhysicalDevice,
     _: i32,
@@ -2319,14 +2352,6 @@ fn create_instance(
         ext_ptrs.as_ptr()
     };
 
-    // A create-time messenger threaded through `p_next` captures validation
-    // messages emitted DURING `vkCreateInstance` / `vkDestroyInstance` — the
-    // window the persistent messenger cannot cover (it does not exist before the
-    // instance, and is destroyed before it). Its `p_user_data` is null because
-    // the heap state Box does not exist yet at instance-creation time; the
-    // callback no-ops on a null user-data pointer but still logs the message
-    // text, so a create/destroy-time error is still surfaced to the log. The
-    // create-info lives on this stack frame and is only read during the call.
     // Plan G2: enable SYNCHRONIZATION validation via `VkValidationFeaturesEXT`,
     // chained into the instance `p_next`. Sync-validation is what flags a missing
     // / wrong pipeline barrier (a WARNING/ERROR), so the chained-barrier golden
@@ -2349,12 +2374,15 @@ fn create_instance(
     // A create-time messenger threaded through `p_next` captures validation
     // messages emitted DURING `vkCreateInstance` / `vkDestroyInstance` — the
     // window the persistent messenger cannot cover (it does not exist before the
-    // instance, and is destroyed before it). Its `p_user_data` is null because
-    // the heap state Box does not exist yet at instance-creation time; the
-    // callback no-ops on a null user-data pointer but still logs the message
-    // text, so a create/destroy-time error is still surfaced to the log. The
-    // create-info lives on this stack frame and is only read during the call. It is
-    // chained as the SECOND node, behind the validation-features struct.
+    // instance, and is destroyed before it). This is the ONLY messenger for that
+    // window; the process validation ledger reuses it rather than chaining a second
+    // one, which would deliver every instance-window message twice. Its
+    // `p_user_data` is null because the heap state Box does not exist yet at
+    // instance-creation time, so the callback counts these messages into the
+    // process ledger (`debug::validation_ledger`) and logs them, and touches no
+    // per-context counter. The create-info lives on this stack frame and is only
+    // read during the call. It is chained as the SECOND node, behind the
+    // validation-features struct.
     let ci_messenger = VkDebugUtilsMessengerCreateInfoExt {
         s_type: VkStructureType::DebugUtilsMessengerCreateInfoExt,
         p_next: ptr::null(),
@@ -2596,6 +2624,7 @@ fn create_debug_messenger(
         return Err(BootError::VkError("vkCreateDebugUtilsMessengerEXT", result));
     }
 
+    debug::note_messenger_created();
     Ok((messenger, Some(state)))
 }
 
@@ -2880,27 +2909,194 @@ fn zeroed_descriptor_indexing_features() -> VkPhysicalDeviceDescriptorIndexingFe
     }
 }
 
-/// Whether the GPU supports the Vulkan 1.3 `dynamicRendering` feature
-/// (Correction #2 / OQ-6 fail-fast). Queries `vkGetPhysicalDeviceFeatures2` with a
-/// chained [`VkPhysicalDeviceVulkan13Features`] and reads back `dynamic_rendering`.
+/// One device feature every boot enables unconditionally: its Vulkan spec name, how to read the
+/// supported bit from a query struct, and how to set the enable bit on a create struct.
 ///
-/// Both the headless and windowed device-creation paths request
-/// `dynamicRendering` (Correction #1), so this check must pass on either path or
-/// the first `cmd_begin_rendering` faults — a CLEAR error here beats an opaque
-/// `vkCreateDevice` failure.
-fn supports_dynamic_rendering(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> bool {
+/// The query and the enable read the SAME row, so they cannot drift apart — the shape of the
+/// P1-2 bug in `enable_vb_geometry_table`, where one bit was queried and two were enabled.
+/// `get`/`set` are non-capturing closures coerced to `fn` pointers.
+pub(crate) struct RequiredFeature<S> {
+    /// The Vulkan spec name — the [`BootError::RequiredFeatureUnsupported`] payload, and the key
+    /// the SPIR-V capability census resolves its `Required` rows against.
+    pub(crate) name: &'static str,
+    /// Reads the supported bit from a `vkGetPhysicalDeviceFeatures2` result.
+    pub(crate) get: fn(&S) -> VkBool32,
+    /// Sets the enable bit on the struct handed to `vkCreateDevice`.
+    pub(crate) set: fn(&mut S),
+}
+
+/// The core (Vulkan 1.0) features every boot enables, passed via `p_enabled_features`.
+///
+/// * `samplerAnisotropy` — the T2 aniso-sampler prerequisite.
+/// * `geometryShader` — `vb_raster.fs.hlsl` reads `SV_PrimitiveID`, for which DXC declares the
+///   `Geometry` SPIR-V capability (VUID-VkShaderModuleCreateInfo-pCode-08740). No pipeline has a
+///   geometry stage; the bit only makes that capability legal.
+pub(crate) const REQUIRED_CORE: [RequiredFeature<VkPhysicalDeviceFeatures>; 2] = [
+    RequiredFeature {
+        name: "samplerAnisotropy",
+        get: |f| f.sampler_anisotropy,
+        set: |f| f.sampler_anisotropy = VK_TRUE,
+    },
+    RequiredFeature {
+        name: "geometryShader",
+        get: |f| f.geometry_shader,
+        set: |f| f.geometry_shader = VK_TRUE,
+    },
+];
+
+/// The Vulkan 1.3 features every boot enables, chained as `VkPhysicalDeviceVulkan13Features`.
+///
+/// * `dynamicRendering` — every path records `cmd_begin_rendering`, headless included
+///   (Correction #1).
+/// * `shaderDemoteToHelperInvocation` — `smaa_edge.fs` lowers `discard` to
+///   `OpDemoteToHelperInvocation` (the `DemoteToHelperInvocation` capability). Demote is the
+///   correct semantics there: the shader samples with implicit LOD after the `discard`, which
+///   needs the helper lanes kept alive. Vulkan 1.3 mandates the feature.
+pub(crate) const REQUIRED_V13: [RequiredFeature<VkPhysicalDeviceVulkan13Features>; 2] = [
+    RequiredFeature {
+        name: "dynamicRendering",
+        get: |f| f.dynamic_rendering,
+        set: |f| f.dynamic_rendering = VK_TRUE,
+    },
+    RequiredFeature {
+        name: "shaderDemoteToHelperInvocation",
+        get: |f| f.shader_demote_to_helper_invocation,
+        set: |f| f.shader_demote_to_helper_invocation = VK_TRUE,
+    },
+];
+
+/// The name of the first required feature the device does not support, in table order
+/// ([`REQUIRED_CORE`] then [`REQUIRED_V13`]), or `None` when every row is supported.
+fn missing_required_feature(
+    core: &VkPhysicalDeviceFeatures,
+    v13: &VkPhysicalDeviceVulkan13Features,
+) -> Option<&'static str> {
+    REQUIRED_CORE
+        .iter()
+        .find(|row| (row.get)(core) != VK_TRUE)
+        .map(|row| row.name)
+        .or_else(|| REQUIRED_V13.iter().find(|row| (row.get)(v13) != VK_TRUE).map(|row| row.name))
+}
+
+/// Queries the support bits [`missing_required_feature`] reads — the core block and the chained
+/// Vulkan 1.3 block — with ONE `vkGetPhysicalDeviceFeatures2` call.
+///
+/// The returned 1.3 struct's `p_next` is reset to null: the pointer the driver saw targeted a
+/// stack local of this fn.
+fn query_required_feature_support(
+    fns: &InstanceFns,
+    physical_device: VkPhysicalDevice,
+) -> (VkPhysicalDeviceFeatures, VkPhysicalDeviceVulkan13Features) {
     let mut features13 = zeroed_features13();
     let mut features2 = VkPhysicalDeviceFeatures2 {
         s_type: VkStructureType::PhysicalDeviceFeatures2,
         p_next: (&mut features13 as *mut VkPhysicalDeviceVulkan13Features).cast(),
-        features: [VK_FALSE; 55],
+        features: VkPhysicalDeviceFeatures::default(),
     };
     // SAFETY: `physical_device` is a valid enumerated GPU; `features2` is a
     // fully-initialized `#[repr(C)]` struct whose `p_next` chains the live
     // `features13` local (both outlive the call). The driver writes the supported
     // feature bools through the out-pointer + the chained struct.
     unsafe { (fns.get_physical_device_features2)(physical_device, &mut features2) };
-    features13.dynamic_rendering == VK_TRUE
+    features13.p_next = ptr::null_mut();
+    (features2.features, features13)
+}
+
+/// The core enable block for `vkCreateDevice`: all-`VK_FALSE` plus every [`REQUIRED_CORE`] row.
+fn required_core_enables() -> VkPhysicalDeviceFeatures {
+    let mut features = VkPhysicalDeviceFeatures::default();
+    for row in &REQUIRED_CORE {
+        (row.set)(&mut features);
+    }
+    features
+}
+
+/// Sets every [`REQUIRED_V13`] row's enable bit on `features13`.
+fn apply_required_v13(features13: &mut VkPhysicalDeviceVulkan13Features) {
+    for row in &REQUIRED_V13 {
+        (row.set)(features13);
+    }
+}
+
+/// One subgroup operation class a committed shader uses: its `VkSubgroupFeatureFlagBits` name
+/// and bit. The Vulkan SPIR-V environment table licenses each `GroupNonUniform*` capability
+/// through a bit of `subgroupSupportedOperations` — a PROPERTY, so unlike [`RequiredFeature`]
+/// there is no `set`: the boot can only check it.
+pub(crate) struct RequiredSubgroupOperation {
+    /// The `VkSubgroupFeatureFlagBits` name — the [`BootError::RequiredSubgroupPropertyUnsupported`]
+    /// payload, and the key the SPIR-V capability census resolves its `SubgroupOperation` rows
+    /// against.
+    pub(crate) name: &'static str,
+    /// The bit in `VkPhysicalDeviceSubgroupProperties::supportedOperations`.
+    pub(crate) bit: VkFlags,
+}
+
+/// The subgroup operations every boot checks before `vkCreateDevice`.
+///
+/// * `VK_SUBGROUP_FEATURE_BASIC_BIT` — `GroupNonUniform` (`WaveIsFirstLane` lowers to
+///   `OpGroupNonUniformElect`). Core Vulkan guarantees it on any device with a graphics or compute
+///   queue, so this row cannot refuse a device the engine could otherwise boot on; it exists so
+///   the census checks the capability instead of asserting it.
+/// * `VK_SUBGROUP_FEATURE_BALLOT_BIT` — `GroupNonUniformBallot`: `particle_sim.comp`'s wave
+///   aggregation (`WaveActiveCountBits`, `WavePrefixCountBits`, `WaveReadLaneFirst`). NOT
+///   guaranteed by core Vulkan; Roadmap 2022 requires it.
+pub(crate) const REQUIRED_SUBGROUP_OPERATIONS: [RequiredSubgroupOperation; 2] = [
+    RequiredSubgroupOperation { name: "VK_SUBGROUP_FEATURE_BASIC_BIT", bit: VK_SUBGROUP_FEATURE_BASIC_BIT },
+    RequiredSubgroupOperation { name: "VK_SUBGROUP_FEATURE_BALLOT_BIT", bit: VK_SUBGROUP_FEATURE_BALLOT_BIT },
+];
+
+/// The shader stages in which subgroup operations must be supported (`subgroupSupportedStages`).
+///
+/// `VUID-RuntimeSpirv-None-06343` forbids a subgroup-scope operation in a stage missing from
+/// that field. Every committed module declaring a `GroupNonUniform*` capability is a compute
+/// shader, and the SPIR-V capability census fails if one runs in any stage outside this mask —
+/// so a fragment-stage wave operation must either add `FRAGMENT` here (and refuse devices
+/// without it) or be removed.
+pub(crate) const REQUIRED_SUBGROUP_STAGES: VkFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+/// The [`BootError::RequiredSubgroupPropertyUnsupported`] payload for a device whose
+/// `subgroupSupportedStages` lacks a stage of [`REQUIRED_SUBGROUP_STAGES`]. Names that mask's
+/// bits, so the two change together.
+const SUBGROUP_STAGES_ROW: &str = "subgroupSupportedStages: VK_SHADER_STAGE_COMPUTE_BIT";
+
+/// The first subgroup requirement the device does not meet: the first row of
+/// [`REQUIRED_SUBGROUP_OPERATIONS`] whose bit is missing from `supported_operations`, else the
+/// stage row when `supported_stages` lacks any bit of [`REQUIRED_SUBGROUP_STAGES`], else `None`.
+fn missing_subgroup_support(supported_operations: VkFlags, supported_stages: VkFlags) -> Option<&'static str> {
+    REQUIRED_SUBGROUP_OPERATIONS
+        .iter()
+        .find(|row| supported_operations & row.bit != row.bit)
+        .map(|row| row.name)
+        .or_else(|| {
+            (supported_stages & REQUIRED_SUBGROUP_STAGES != REQUIRED_SUBGROUP_STAGES).then_some(SUBGROUP_STAGES_ROW)
+        })
+}
+
+/// Reads `(supportedOperations, supportedStages)` of `VkPhysicalDeviceSubgroupProperties` with ONE
+/// `vkGetPhysicalDeviceProperties2` call. A query only: it chains nothing into `vkCreateDevice`
+/// and changes no device state.
+fn query_subgroup_support(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> (VkFlags, VkFlags) {
+    let mut subgroup = VkPhysicalDeviceSubgroupProperties {
+        s_type: ST_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+        p_next: ptr::null_mut(),
+        subgroup_size: 0,
+        supported_stages: 0,
+        supported_operations: 0,
+        quad_operations_in_all_stages: VK_FALSE,
+    };
+    let mut props2 = VkPhysicalDeviceProperties2 {
+        s_type: ST_PHYSICAL_DEVICE_PROPERTIES_2,
+        _pad: 0,
+        p_next: (&mut subgroup as *mut VkPhysicalDeviceSubgroupProperties).cast(),
+        // SAFETY: a fully-zeroed `VkPhysicalDeviceProperties` is a valid bit pattern (every field
+        // is an integer or a byte array); the driver overwrites it.
+        properties: unsafe { mem::zeroed() },
+    };
+    // SAFETY: `physical_device` is a valid enumerated GPU; `props2` is fully initialized and its
+    // `p_next` chains the live `subgroup` local (both outlive the call); the driver writes the
+    // subgroup properties through that chain.
+    unsafe { (fns.get_physical_device_properties2)(physical_device, &mut props2) };
+    (subgroup.supported_operations, subgroup.supported_stages)
 }
 
 /// A zeroed [`VkPhysicalDeviceHostQueryResetFeatures`] except for `s_type` (profiling rung 4) —
@@ -2917,16 +3113,17 @@ fn zeroed_host_query_reset_features() -> VkPhysicalDeviceHostQueryResetFeatures 
 
 /// Whether the GPU advertises `hostQueryReset` (profiling rung 4 / D18).
 ///
-/// Mirrors [`supports_dynamic_rendering`] exactly, except that the answer never fails a boot:
-/// the caller records it and passes it to [`create_device`], which requests the bit only when
-/// this returned `true` — the "query before request" precedent, because requesting an
-/// unsupported feature bit is a hard `vkCreateDevice` error rather than a silent no-op.
+/// Mirrors [`query_required_feature_support`]'s single-call query shape, except that the answer
+/// never fails a boot: the caller records it and passes it to [`create_device`], which requests
+/// the bit only when this returned `true` — the "query before request" precedent, because
+/// requesting an unsupported feature bit is a hard `vkCreateDevice` error rather than a silent
+/// no-op.
 fn supports_host_query_reset(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> bool {
     let mut host_reset = zeroed_host_query_reset_features();
     let mut features2 = VkPhysicalDeviceFeatures2 {
         s_type: VkStructureType::PhysicalDeviceFeatures2,
         p_next: (&mut host_reset as *mut VkPhysicalDeviceHostQueryResetFeatures).cast(),
-        features: [VK_FALSE; 55],
+        features: VkPhysicalDeviceFeatures::default(),
     };
     // SAFETY: `physical_device` is a valid enumerated GPU; `features2` is a fully-initialized
     // `#[repr(C)]` struct whose `p_next` chains the live `host_reset` local (both outlive the
@@ -3036,7 +3233,7 @@ pub(crate) struct RtCaps {
 /// non-core extension strings (`VK_KHR_acceleration_structure` + `VK_KHR_ray_query` +
 /// `VK_KHR_deferred_host_operations`) all present AND the feature bools
 /// (`accelerationStructure` / `rayQuery` / `bufferDeviceAddress`) all advertised via a
-/// `vkGetPhysicalDeviceFeatures2` p_next chain (mirroring [`supports_dynamic_rendering`]).
+/// `vkGetPhysicalDeviceFeatures2` p_next chain (mirroring [`query_required_feature_support`]).
 /// Also reads `minAccelerationStructureScratchOffsetAlignment` from a
 /// `vkGetPhysicalDeviceProperties2` chain. Absent ⇒ `ray_query == false` (NEVER a boot
 /// fail: a non-RT GPU boots on the software path). Gated `hwrt`.
@@ -3120,7 +3317,7 @@ fn supports_ray_query(
     let mut features2 = VkPhysicalDeviceFeatures2 {
         s_type: VkStructureType::PhysicalDeviceFeatures2,
         p_next: (&mut bda_feat as *mut VkPhysicalDeviceBufferDeviceAddressFeatures).cast(),
-        features: [VK_FALSE; 55],
+        features: VkPhysicalDeviceFeatures::default(),
     };
     debug_assert_eq!(features2.s_type as i32, ST_PHYSICAL_DEVICE_FEATURES_2);
     // SAFETY: `physical_device` is valid; `features2` is fully initialized and its `p_next`
@@ -3293,7 +3490,7 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         s_type: VkStructureType::PhysicalDeviceFeatures2,
         p_next: (&mut descriptor_indexing as *mut VkPhysicalDeviceDescriptorIndexingFeatures)
             .cast(),
-        features: [VK_FALSE; 55],
+        features: VkPhysicalDeviceFeatures::default(),
     };
     // SAFETY: `physical_device` is a valid enumerated GPU; `features2` is a
     // fully-initialized `#[repr(C)]` struct whose `p_next` chains the live
@@ -3642,17 +3839,20 @@ fn max_device_local_heap_bytes(mem_props: &VkPhysicalDeviceMemoryProperties) -> 
 
 /// Creates a logical device with one queue from `queue_family_index`.
 ///
-/// The Vulkan 1.3 `dynamicRendering` feature is ALWAYS requested through a
-/// `VkPhysicalDeviceVulkan13Features` chained into `p_next` — including the
-/// **headless** path (Correction #1): every S0 acceptance path records
-/// `cmd_begin_rendering`, which faults without the feature enabled. Support is
-/// verified up front by [`supports_dynamic_rendering`] (Correction #2). When
+/// Every row of [`REQUIRED_CORE`] (via `p_enabled_features`) and [`REQUIRED_V13`] (via a
+/// `VkPhysicalDeviceVulkan13Features` chained into `p_next`) is ALWAYS requested — including on
+/// the **headless** path (Correction #1: every S0 acceptance path records
+/// `cmd_begin_rendering`, which faults without `dynamicRendering`). Support is verified up front
+/// by [`missing_required_feature`] over ONE [`query_required_feature_support`] call, and a
+/// missing row refuses the boot with [`BootError::RequiredFeatureUnsupported`] naming it
+/// (Correction #2). The subgroup PROPERTIES of [`REQUIRED_SUBGROUP_OPERATIONS`] and
+/// [`REQUIRED_SUBGROUP_STAGES`] are checked the same way ([`query_subgroup_support`], refusing
+/// with [`BootError::RequiredSubgroupPropertyUnsupported`]); they have no enable bit. When
 /// `windowed`, the `VK_KHR_swapchain` device extension is additionally enabled.
 ///
-/// T-dev: ALSO enables core `samplerAnisotropy` (via `p_enabled_features`, the T2
-/// aniso-sampler prerequisite) and the 5-bit bindless `descriptorIndexing` granular
-/// struct (via `p_next`, the T4 bindless prerequisite) on BOTH the default and hwrt
-/// builds — device-state only, no pipeline/shader/descriptor change.
+/// T-dev: ALSO enables the 5-bit bindless `descriptorIndexing` granular struct (via `p_next`,
+/// the T4 bindless prerequisite) on BOTH the default and hwrt builds — device-state only, no
+/// pipeline/shader/descriptor change.
 /// The optional device capabilities [`create_device`] may request, as one named record.
 ///
 /// A struct rather than four trailing `bool` parameters, and profiling rung 9 is when it became
@@ -3700,14 +3900,20 @@ fn create_device(
         enable_calibrated_timestamps,
     } = enables;
     let _ = enable_ray_query; // read only on the hwrt arm below (silences the OFF build).
-    // Correction #2 (OQ-6): fail fast with a CLEAR error if the GPU does not
-    // support dynamic rendering, rather than letting `vkCreateDevice` fail opaquely
-    // (or, worse, succeed and fault at `cmd_begin_rendering`).
-    if !supports_dynamic_rendering(fns, physical_device) {
-        return Err(BootError::VkError(
-            "dynamicRendering (VkPhysicalDeviceVulkan13Features) unsupported",
-            VkResult::ERROR_FEATURE_NOT_PRESENT,
-        ));
+    // Correction #2 (OQ-6), generalised to every required row: fail fast with a NAMED error if
+    // the GPU lacks one, rather than letting `vkCreateDevice` fail opaquely (or, worse, succeed
+    // and fault at `cmd_begin_rendering`, or accept a shader module that declares an unenabled
+    // capability).
+    let (core_supported, v13_supported) = query_required_feature_support(fns, physical_device);
+    if let Some(name) = missing_required_feature(&core_supported, &v13_supported) {
+        return Err(BootError::RequiredFeatureUnsupported(name));
+    }
+    // The subgroup operations committed shaders use are device PROPERTIES with no enable bit:
+    // checked here, before any module is created, so a device without them gets a named refusal
+    // instead of an invalid module (VUID-VkShaderModuleCreateInfo-pCode-08740).
+    let (subgroup_operations, subgroup_stages) = query_subgroup_support(fns, physical_device);
+    if let Some(name) = missing_subgroup_support(subgroup_operations, subgroup_stages) {
+        return Err(BootError::RequiredSubgroupPropertyUnsupported(name));
     }
 
     let priority: f32 = 1.0;
@@ -3720,12 +3926,13 @@ fn create_device(
         p_queue_priorities: &priority,
     };
 
-    // Correction #1: chain `dynamicRendering` on BOTH the headless and windowed
-    // paths. The feature struct lives on this stack frame and is only read during
-    // the call; all feature bools except `dynamic_rendering` are zero. The
-    // `VK_KHR_swapchain` extension stays windowed-only.
+    // Correction #1: chain the `REQUIRED_V13` rows (`dynamicRendering` among them) on BOTH the
+    // headless and windowed paths — through the table's own `set`, the same row the support
+    // query above read. The feature struct lives on this stack frame and is only read during
+    // the call; every other feature bool is zero. The `VK_KHR_swapchain` extension stays
+    // windowed-only.
     let mut features13 = zeroed_features13();
-    features13.dynamic_rendering = VK_TRUE;
+    apply_required_v13(&mut features13);
 
     // The extension name pointers this device enables. The base set is the windowed-only
     // `VK_KHR_swapchain`; the hwrt arm appends the 3 RT strings when `enable_ray_query`; profiling
@@ -3867,13 +4074,10 @@ fn create_device(
         (&descriptor_indexing as *const VkPhysicalDeviceDescriptorIndexingFeatures).cast();
 
     // Core (Vulkan 1.0) features passed via `p_enabled_features`, NOT `pNext` (the two
-    // are mutually exclusive — VUID-VkDeviceCreateInfo-pNext-00373). `samplerAnisotropy`
-    // is the T2 aniso-sampler prerequisite; every other core bit stays `VK_FALSE`
-    // (`Default` on every `VkBool32` field is `0`).
-    let enabled_features = VkPhysicalDeviceFeatures {
-        sampler_anisotropy: VK_TRUE,
-        ..Default::default()
-    };
+    // are mutually exclusive — VUID-VkDeviceCreateInfo-pNext-00373). Exactly the
+    // `REQUIRED_CORE` rows (`samplerAnisotropy`, `geometryShader`), each queried above; every
+    // other core bit stays `VK_FALSE` (`Default` on every `VkBool32` field is `0`).
+    let enabled_features = required_core_enables();
 
     let create_info = VkDeviceCreateInfo {
         s_type: VkStructureType::DeviceCreateInfo,
@@ -4265,5 +4469,239 @@ mod tests {
         super::report_shadow_denoise_storage_unsupported(false, true);
         drain();
         assert_eq!(observed(), after_first, "a spent Once site let a second W2102 through");
+    }
+}
+
+/// The required-feature table is the single source for the support query, the enable and the
+/// refusal; these tests pin all three against it without a device.
+#[cfg(test)]
+mod required_feature_tests {
+    use super::{
+        REQUIRED_CORE, REQUIRED_V13, RequiredFeature, apply_required_v13, missing_required_feature,
+        required_core_enables, zeroed_features13,
+    };
+    use crate::ffi::{VK_FALSE, VK_TRUE, VkBool32, VkPhysicalDeviceFeatures, VkPhysicalDeviceVulkan13Features};
+
+    const CORE_WORDS: usize = 55;
+    const V13_BOOLS: usize = 15;
+
+    fn core_words(f: VkPhysicalDeviceFeatures) -> [VkBool32; CORE_WORDS] {
+        // SAFETY: `VkPhysicalDeviceFeatures` is `#[repr(C)]` with exactly 55 `VkBool32` (`u32`)
+        // fields and no padding (220 bytes, 4-byte aligned — both asserted in `ffi.rs`), so it has
+        // the layout of `[u32; 55]`, and every bit pattern is a valid `u32`.
+        unsafe { core::mem::transmute::<VkPhysicalDeviceFeatures, [VkBool32; CORE_WORDS]>(f) }
+    }
+
+    fn core_from_words(words: [VkBool32; CORE_WORDS]) -> VkPhysicalDeviceFeatures {
+        // SAFETY: the inverse of `core_words` — same size, same alignment, and every field is a
+        // `u32`, for which every bit pattern is valid.
+        unsafe { core::mem::transmute::<[VkBool32; CORE_WORDS], VkPhysicalDeviceFeatures>(words) }
+    }
+
+    fn v13_bools(f: &VkPhysicalDeviceVulkan13Features) -> [VkBool32; V13_BOOLS] {
+        [
+            f.robust_image_access,
+            f.inline_uniform_block,
+            f.descriptor_binding_inline_uniform_block_update_after_bind,
+            f.pipeline_creation_cache_control,
+            f.private_data,
+            f.shader_demote_to_helper_invocation,
+            f.shader_terminate_invocation,
+            f.subgroup_size_control,
+            f.compute_full_subgroups,
+            f.synchronization2,
+            f.texture_compression_astc_hdr,
+            f.shader_zero_initialize_workgroup_memory,
+            f.dynamic_rendering,
+            f.shader_integer_dot_product,
+            f.maintenance4,
+        ]
+    }
+
+    fn v13_from_bools(b: [VkBool32; V13_BOOLS]) -> VkPhysicalDeviceVulkan13Features {
+        let mut f = zeroed_features13();
+        f.robust_image_access = b[0];
+        f.inline_uniform_block = b[1];
+        f.descriptor_binding_inline_uniform_block_update_after_bind = b[2];
+        f.pipeline_creation_cache_control = b[3];
+        f.private_data = b[4];
+        f.shader_demote_to_helper_invocation = b[5];
+        f.shader_terminate_invocation = b[6];
+        f.subgroup_size_control = b[7];
+        f.compute_full_subgroups = b[8];
+        f.synchronization2 = b[9];
+        f.texture_compression_astc_hdr = b[10];
+        f.shader_zero_initialize_workgroup_memory = b[11];
+        f.dynamic_rendering = b[12];
+        f.shader_integer_dot_product = b[13];
+        f.maintenance4 = b[14];
+        f
+    }
+
+    /// The single core word `row.set` turns on, asserting it touches exactly one.
+    fn core_index_of(row: &RequiredFeature<VkPhysicalDeviceFeatures>) -> usize {
+        let mut f = VkPhysicalDeviceFeatures::default();
+        (row.set)(&mut f);
+        let on: Vec<usize> = (0..CORE_WORDS).filter(|&i| core_words(f)[i] == VK_TRUE).collect();
+        assert_eq!(on.len(), 1, "{}: `set` must enable exactly one core bit, enabled {on:?}", row.name);
+        on[0]
+    }
+
+    /// The single Vulkan 1.3 bool `row.set` turns on, asserting it touches exactly one.
+    fn v13_index_of(row: &RequiredFeature<VkPhysicalDeviceVulkan13Features>) -> usize {
+        let mut f = zeroed_features13();
+        (row.set)(&mut f);
+        let on: Vec<usize> = (0..V13_BOOLS).filter(|&i| v13_bools(&f)[i] == VK_TRUE).collect();
+        assert_eq!(on.len(), 1, "{}: `set` must enable exactly one 1.3 bit, enabled {on:?}", row.name);
+        on[0]
+    }
+
+    #[test]
+    fn a_device_supporting_every_row_is_accepted() {
+        let core = core_from_words([VK_TRUE; CORE_WORDS]);
+        let v13 = v13_from_bools([VK_TRUE; V13_BOOLS]);
+        assert_eq!(missing_required_feature(&core, &v13), None);
+    }
+
+    /// Clearing ONLY the bit a row's `set` enables must make the refusal name that row — which
+    /// also pins that each row's `get` reads the very field its `set` writes.
+    #[test]
+    fn clearing_one_row_refuses_with_exactly_that_rows_name() {
+        let all_v13 = v13_from_bools([VK_TRUE; V13_BOOLS]);
+        for row in &REQUIRED_CORE {
+            let mut words = [VK_TRUE; CORE_WORDS];
+            words[core_index_of(row)] = VK_FALSE;
+            assert_eq!(
+                missing_required_feature(&core_from_words(words), &all_v13),
+                Some(row.name),
+                "core row {}",
+                row.name
+            );
+        }
+        let all_core = core_from_words([VK_TRUE; CORE_WORDS]);
+        for row in &REQUIRED_V13 {
+            let mut bools = [VK_TRUE; V13_BOOLS];
+            bools[v13_index_of(row)] = VK_FALSE;
+            assert_eq!(
+                missing_required_feature(&all_core, &v13_from_bools(bools)),
+                Some(row.name),
+                "1.3 row {}",
+                row.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_missing_row_in_table_order_is_named() {
+        let none_core = VkPhysicalDeviceFeatures::default();
+        let none_v13 = zeroed_features13();
+        assert_eq!(missing_required_feature(&none_core, &none_v13), Some(REQUIRED_CORE[0].name));
+        let all_core = core_from_words([VK_TRUE; CORE_WORDS]);
+        assert_eq!(missing_required_feature(&all_core, &none_v13), Some(REQUIRED_V13[0].name));
+        assert_eq!(REQUIRED_CORE[0].name, "samplerAnisotropy");
+        assert_eq!(REQUIRED_V13[0].name, "dynamicRendering");
+    }
+
+    #[test]
+    fn the_core_enable_block_is_exactly_the_table() {
+        let expected = VkPhysicalDeviceFeatures {
+            sampler_anisotropy: VK_TRUE,
+            geometry_shader: VK_TRUE,
+            ..Default::default()
+        };
+        assert_eq!(core_words(required_core_enables()), core_words(expected));
+    }
+
+    #[test]
+    fn the_v13_enable_block_is_exactly_the_table() {
+        let mut enabled = zeroed_features13();
+        apply_required_v13(&mut enabled);
+        let mut expected = zeroed_features13();
+        expected.dynamic_rendering = VK_TRUE;
+        expected.shader_demote_to_helper_invocation = VK_TRUE;
+        assert_eq!(v13_bools(&enabled), v13_bools(&expected));
+        assert!(enabled.p_next.is_null(), "the enable leaves the chain pointer untouched");
+    }
+
+    #[test]
+    fn required_feature_names_are_unique_and_non_empty() {
+        let names: Vec<&str> =
+            REQUIRED_CORE.iter().map(|r| r.name).chain(REQUIRED_V13.iter().map(|r| r.name)).collect();
+        for (i, a) in names.iter().enumerate() {
+            assert!(!a.is_empty(), "row {i} has an empty name");
+            for b in &names[i + 1..] {
+                assert_ne!(a, b, "duplicate required-feature name");
+            }
+        }
+        assert_eq!(names.len(), 4);
+    }
+}
+
+/// The subgroup table is the single source for the boot's subgroup-property check and for the
+/// SPIR-V capability census's `SubgroupOperation` rows; these tests pin the check and the table
+/// without a device.
+#[cfg(test)]
+mod required_subgroup_tests {
+    use super::{REQUIRED_SUBGROUP_OPERATIONS, REQUIRED_SUBGROUP_STAGES, SUBGROUP_STAGES_ROW, missing_subgroup_support};
+    use crate::ffi::{
+        VK_SHADER_STAGE_COMPUTE_BIT, VK_SHADER_STAGE_FRAGMENT_BIT, VK_SUBGROUP_FEATURE_BALLOT_BIT,
+        VK_SUBGROUP_FEATURE_BASIC_BIT,
+    };
+
+    #[test]
+    fn a_device_without_ballot_is_refused_naming_ballot() {
+        assert_eq!(
+            missing_subgroup_support(VK_SUBGROUP_FEATURE_BASIC_BIT, VK_SHADER_STAGE_COMPUTE_BIT),
+            Some("VK_SUBGROUP_FEATURE_BALLOT_BIT")
+        );
+    }
+
+    #[test]
+    fn a_device_without_compute_subgroup_stages_is_refused_naming_the_stage_row() {
+        assert_eq!(
+            missing_subgroup_support(
+                VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT,
+                VK_SHADER_STAGE_FRAGMENT_BIT
+            ),
+            Some(SUBGROUP_STAGES_ROW)
+        );
+        assert_eq!(SUBGROUP_STAGES_ROW, "subgroupSupportedStages: VK_SHADER_STAGE_COMPUTE_BIT");
+    }
+
+    #[test]
+    fn a_device_with_basic_ballot_and_compute_is_accepted() {
+        assert_eq!(
+            missing_subgroup_support(
+                VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT,
+                VK_SHADER_STAGE_COMPUTE_BIT
+            ),
+            None
+        );
+    }
+
+    /// The table's contents and bits, pinned to the spec's `VkSubgroupFeatureFlagBits` /
+    /// `VkShaderStageFlagBits` values rather than to the constants that spell them.
+    #[test]
+    fn the_subgroup_table_is_exactly_basic_and_ballot_in_compute() {
+        let rows: Vec<(&str, u32)> = REQUIRED_SUBGROUP_OPERATIONS.iter().map(|r| (r.name, r.bit)).collect();
+        assert_eq!(rows, [("VK_SUBGROUP_FEATURE_BASIC_BIT", 0x1), ("VK_SUBGROUP_FEATURE_BALLOT_BIT", 0x8)]);
+        assert_eq!(VK_SUBGROUP_FEATURE_BASIC_BIT, 0x1);
+        assert_eq!(VK_SUBGROUP_FEATURE_BALLOT_BIT, 0x8);
+        assert_eq!(VK_SHADER_STAGE_COMPUTE_BIT, 0x20);
+        assert_eq!(REQUIRED_SUBGROUP_STAGES, 0x20);
+    }
+
+    /// Clearing ONLY one row's bit refuses with exactly that row's name.
+    #[test]
+    fn clearing_one_operation_refuses_with_exactly_that_rows_name() {
+        let all_ops = REQUIRED_SUBGROUP_OPERATIONS.iter().fold(0, |acc, r| acc | r.bit);
+        for row in &REQUIRED_SUBGROUP_OPERATIONS {
+            assert_eq!(
+                missing_subgroup_support(all_ops & !row.bit, REQUIRED_SUBGROUP_STAGES),
+                Some(row.name),
+                "row {}",
+                row.name
+            );
+        }
     }
 }

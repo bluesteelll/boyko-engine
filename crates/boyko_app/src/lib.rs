@@ -83,6 +83,11 @@ mod occlusion_arm;
 // device and no OS, and gating it would make the type invisible to a cross-target doc build.
 pub mod occlusion_force;
 mod runner;
+// The `BOYKO_SHADOW_POISON` diagnostic knob and its readback probe (the unwritten-shadow-map
+// gate's host half). `#[cfg(windows)]` for the same reason `hzb_dump` above is — its only callers
+// are the scene boot and the windowed frame loop.
+#[cfg(windows)]
+mod shadow_poison;
 // KE16 App-12: the `timeBeginPeriod(1)` RAII hold. NOT `#[cfg(windows)]`, unlike its neighbours
 // here: the module's own non-Windows arm is the platform statement (POSIX timed waits already
 // carry nanosecond deadlines, so there is nothing to raise), and gating the module instead would

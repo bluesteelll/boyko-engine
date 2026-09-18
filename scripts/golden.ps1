@@ -17,6 +17,17 @@
       4. After the render, assert the .bmp was FRESHLY written (LastWriteTime > run start).
       5. SHA-256 the .bmp and compare against goldens\PINS.toml -- the single source of truth
          (replaces the hash string formerly hand-copied across ~10 docs).
+      6. BUILD THIS SCRIPT'S OWN CHECKOUT, never the caller's. Every cargo call runs inside the
+         repository root the script lives in (Push-Location, popped in a finally), and every run
+         prints that root and cargo's own `locate-project --workspace` answer, aborting if they
+         differ. Until 2026-09-18 PINS.toml was read next to the script while cargo ran in the
+         CALLER's working directory, so a worktree lane's sweep launched from a shell parked in
+         the main checkout built and rendered the main checkout and compared it against the
+         lane's pins: six "moved" TAA pins were blamed on the lane's change and were a
+         measurement of another tree (the log's own receipt: `Compiling boyko-app ...
+         (D:\claude\BoykoEngine\crates\boyko_app)`). --manifest-path is NOT the fix: cargo finds
+         .cargo\config.toml (the target-cpu rustflags) and rustup finds rust-toolchain.toml from
+         the working directory, so it would still build one tree with the other tree's settings.
 
     Windows / single RTX-3060 / windows-msvc (the workstation's build host since 2026-09-10;
     every sha256 in PINS.toml was blessed on the preceding windows-gnu host and none has been
@@ -69,11 +80,14 @@ $ErrorActionPreference = 'Stop'
 # 'Stop' that terminates the script even though the exe returned exit code 0. Relaxing the
 # preference ONLY around the native call keeps the cmdlet-level 'Stop' intact, and the caller
 # still gates on `$LASTEXITCODE` afterwards, so no failure is masked.
+# -WorkDir is mandatory so no call can inherit the caller's directory (.DESCRIPTION item 6);
+# the Push-Location fails the script before the call if the directory is missing.
 function Invoke-Native {
-    param([Parameter(Mandatory)][string]$Exe, [string[]]$Args)
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Args, [Parameter(Mandatory)][string]$WorkDir)
+    Push-Location -LiteralPath $WorkDir -ErrorAction Stop
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { & $Exe $Args } finally { $ErrorActionPreference = $prev }
+    try { & $Exe $Args } finally { $ErrorActionPreference = $prev; Pop-Location }
 }
 
 # --- minimal, section-scoped TOML-subset reader (PS 5.1 has no TOML parser) ------------
@@ -98,7 +112,8 @@ function Read-Pins([string]$path) {
     return $map
 }
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
+$repoRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+Write-Host "[golden] repo root = $repoRoot (pins are read and every cargo call runs here)" -ForegroundColor Cyan
 $pinsPath = Join-Path $repoRoot 'goldens\PINS.toml'
 $pins = Read-Pins $pinsPath
 
@@ -178,10 +193,19 @@ if ($bmpDir -and -not (Test-Path -LiteralPath $bmpDir)) {
     New-Item -ItemType Directory -Force -Path $bmpDir | Out-Null
 }
 
+# --- (6) cargo's own answer to WHICH workspace it builds, asked from where it will build ----
+# Asked after the pin env is applied, so it runs under the pin's RUSTUP_TOOLCHAIN like the build.
+$located = "$(Invoke-Native -Exe 'cargo' -Args @('locate-project', '--workspace', '--message-format', 'plain') -WorkDir $repoRoot)".Trim()
+$rootManifest = Join-Path $repoRoot 'Cargo.toml'
+if ($LASTEXITCODE -ne 0 -or $located -eq '' -or [System.IO.Path]::GetFullPath($located) -ne $rootManifest) {
+    throw "[golden] cargo resolves the workspace to '$located', not '$rootManifest' - aborting: this run would not build the checkout whose PINS.toml it reads."
+}
+Write-Host "[golden] cargo workspace = $located" -ForegroundColor Cyan
+
 # --- (1) force-compile the test binary; ABORT on build error ---------------------------
 Write-Host "[golden] compiling test binary '$bin' (--no-run) ..." -ForegroundColor Cyan
 $buildArgs = @('test', '-p', $crate) + $featArgs + @('--test', $bin, '--no-run')
-Invoke-Native -Exe 'cargo' -Args $buildArgs
+Invoke-Native -Exe 'cargo' -Args $buildArgs -WorkDir $repoRoot
 if ($LASTEXITCODE -ne 0) {
     throw "[golden] test binary '$bin' FAILED TO COMPILE - aborting. This is the cargo-check-skips-tests false-green: fix the build before trusting any hash."
 }
@@ -202,13 +226,13 @@ if ($ValidationOn) {
     $valLog = Join-Path $env:TEMP ("golden_valon_{0}_{1}.log" -f $Pin, $leg)
     if (Test-Path -LiteralPath $valLog) { Remove-Item -LiteralPath $valLog -Force }
     $cmdLine = 'cargo ' + ($runArgs -join ' ') + ' --nocapture > "' + $valLog + '" 2>&1'
-    Invoke-Native -Exe 'cmd' -Args @('/c', $cmdLine)
+    Invoke-Native -Exe 'cmd' -Args @('/c', $cmdLine) -WorkDir $repoRoot
     if ($LASTEXITCODE -ne 0) {
         if ($valLog -and (Test-Path -LiteralPath $valLog)) { Get-Content -LiteralPath $valLog -Tail 25 | Write-Host }
         throw "[golden] render test '$name' returned non-zero under -ValidationOn - aborting (log: $valLog)."
     }
 } else {
-    Invoke-Native -Exe 'cargo' -Args $runArgs
+    Invoke-Native -Exe 'cargo' -Args $runArgs -WorkDir $repoRoot
     if ($LASTEXITCODE -ne 0) {
         throw "[golden] render test '$name' returned non-zero - aborting."
     }

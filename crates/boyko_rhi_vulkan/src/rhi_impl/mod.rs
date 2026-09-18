@@ -495,12 +495,18 @@ pub struct ComputePipeline {
     pub(crate) owns_layout: bool,
 }
 
+/// The stage visibility of a graphics pipeline's push-constant range unless its builder says
+/// otherwise: `VERTEX | FRAGMENT`. [`RhiDevice::create_graphics_pipeline`](boyko_rhi::RhiDevice::create_graphics_pipeline)
+/// and every inherent builder except the FRAGMENT-only and VERTEX-only ones declare it, so every
+/// push against such a pipeline must name BOTH stages (`VUID-vkCmdPushConstants-offset-01796`).
+const GRAPHICS_PUSH_STAGES_DEFAULT: VkFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
 /// An owned graphics pipeline ([`RhiApi::GraphicsPipeline`], Phase-6 S0 rung 2).
 ///
 /// Holds the `VkPipeline` **and** its own `VkPipelineLayout`. Unlike a compute
 /// pipeline (which shares the device's [`ComputeLayouts`]`::pipeline_layout`), a
-/// graphics pipeline uses a dedicated layout with no descriptor sets and either no
-/// push range (rung 2) or one `VERTEX`-stage push range (rung 3's MVP `float4x4`),
+/// graphics pipeline uses a dedicated layout with its own descriptor sets and either no
+/// push range or one push range at offset 0 whose stage visibility is [`Self::push_stages`],
 /// created at `create_graphics_pipeline` and torn down with the pipeline (reverse
 /// creation order: pipeline → layout) in `destroy_graphics_pipeline`. The layout is
 /// also the target of [`RhiCommandEncoder::push_graphics_constants`](boyko_rhi::RhiCommandEncoder::push_graphics_constants). Its shader
@@ -515,9 +521,14 @@ pub struct ComputePipeline {
 pub struct VulkanGraphicsPipeline {
     /// The `VkPipeline` handle; destroyed first by `destroy_graphics_pipeline`.
     pub(crate) pipeline: VkPipeline,
-    /// The dedicated `VkPipelineLayout` (no descriptor sets; either no push range
-    /// — rung 2 — or one VERTEX-stage push range — rung 3); destroyed after the pipeline.
+    /// The dedicated `VkPipelineLayout`; destroyed after the pipeline.
     pub(crate) layout: VkPipelineLayout,
+    /// The `stageFlags` of `layout`'s push-constant range, or `0` when it has none. A
+    /// `vkCmdPushConstants` against `layout` must pass exactly these flags: a stage the range
+    /// lacks is `VUID-vkCmdPushConstants-offset-01795`, a stage of the range left out is
+    /// `-01796`. Recorders whose pipeline is not built with [`GRAPHICS_PUSH_STAGES_DEFAULT`] push
+    /// with this field rather than a literal, so the two cannot drift apart.
+    pub(crate) push_stages: VkFlags,
 }
 
 /// An owned texture sampler ([`RhiApi::Sampler`], Phase-6 S0 rung 5).

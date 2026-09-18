@@ -952,8 +952,8 @@ one question. `tests/untested_codes.txt` loses the row.)*
     for another test, so a reader of an older review can still find what happened to it.
 17. **`[vk-validation]` liveness and byte-exactness — with a POSITIVE control, because zero messages
     is this machine's measured normal** *(fixes F1)*. v2's test 17 said "`golden.ps1`'s grep matches,
-    and the message is on the wire before the frame returns" — but `golden.ps1:229` matches nothing
-    and `:235` prints "clean (0 messages)" in green at **zero**, which is the steady state here (a
+    and the message is on the wire before the frame returns" — but `golden.ps1:253` matches nothing
+    and `:259` prints "clean (0 messages)" in green at **zero**, which is the steady state here (a
     genuine missed barrier produced zero messages, twice). It could not distinguish "the prefix
     survived" from "no message existed", and its second clause named no observation mechanism at
     all. v3:

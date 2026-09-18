@@ -519,6 +519,14 @@ fn taa_jitter_eval_screenshot_dump() {
         pcf_kernel,
         ..CsmConfig::default()
     });
+    // ⚠️ This hand-seed of the DERIVED `csm_shadows` bit STAYS, on purpose. `sync_csm_light_gate`
+    // owns the bit and runs one frame behind `collect_lights`, so the seed makes the header's CSM
+    // bit ON on frame 0 while the host, with no caster batch yet, is unarmed: a header-leads-host
+    // frame (measured 2026-09-18). Shadow gate SG4 makes that frame defined (the host uploads the
+    // DISABLED cascade UBO on every unarmed frame, where it used to sample a cascade no pass had
+    // written), and this seed is the ONLY witness of such a frame the goldens have. Removing it
+    // would delete that witness and move the four pins that carry frame 0 into TAA history again
+    // (`taa_armed`, `taa_armed_basis`, `taa_rcas`, `vb_both_taa`).
     app.insert_resource(LightingConfig { csm_shadows: csm_on, ..LightingConfig::default() });
     app.insert_resource(AaConfig { mode: aa_mode });
     // Overwrites `AaPlugin`'s default `TaaConfig` — same AFTER-`add_plugins` idiom as `CsmConfig`.

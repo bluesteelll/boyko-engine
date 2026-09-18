@@ -63,6 +63,7 @@ use boyko_math::Vec3;
 use boyko_scene::ViewUniform;
 
 use crate::light::DirectionalLight;
+use crate::render_path_config::ResolvedRenderPath;
 
 // ---- constants -----------------------------------------------------------------------
 
@@ -463,6 +464,32 @@ impl ResolvedCsm {
         pcf_kernel_word: 0,
         _pad: 0,
     };
+
+    /// The cascade UBO contents the host uploads for a frame: `self` when the frame's cascade
+    /// depth pass is armed, [`Self::DISABLED`] when it is not.
+    ///
+    /// An unarmed frame therefore reaches the resolve with `gCsmActive == 0`, and
+    /// `csm_visibility` returns full visibility before any texture read — whatever the
+    /// light-header sample bit says while it disagrees with the host's arming, trailing it or
+    /// leading it. That is what keeps a header-ON, pass-OFF frame from sampling a cascade the
+    /// frame did not render.
+    ///
+    /// Not pixel-neutral on every static scene: `taa_jitter_eval`'s frame 0 is such a frame (its
+    /// hand-seeded header bit leads the host's first arming, measured 2026-09-18). Before this
+    /// choice it sampled a cascade no pass had written through the live fit; with it the frame
+    /// is defined, and the four TAA pins that carry frame 0 into history (`taa_armed`,
+    /// `taa_armed_basis`, `taa_rcas`, `vb_both_taa`) moved and were re-blessed. See
+    /// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate)'s "The header can trail
+    /// OR lead the host".
+    ///
+    /// A named function rather than a select at the upload site, so the choice carries a unit
+    /// test and a later runner refactor cannot drop it silently. `depth_pass_armed` is the
+    /// host's [`ResolvedCsm::depth_pass_armed`] result for the same frame.
+    #[inline]
+    #[must_use]
+    pub const fn frame_uniform(&self, depth_pass_armed: bool) -> &Self {
+        if depth_pass_armed { self } else { &Self::DISABLED }
+    }
 }
 
 impl Default for ResolvedCsm {
@@ -1035,13 +1062,14 @@ pub fn latch_cell(raw: f32, prev_k: i32) -> i32 {
 ///
 /// # NOT a caster-presence authority
 ///
-/// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate) (`csm_mode_word == 1
-/// && batch_count() > 0`) remains the SINGLE predicate for "do we have casters" and is
-/// untouched by this type. The counters here exist ONLY to tell a future fit whether this
-/// frame's fold is usable as an input — a batch whose mesh has not yet resolved `Loaded`
-/// (streaming) is SKIPPED (the F6 never-deref invariant), which makes the fold
-/// INCOMPLETE, not caster-less. Never read `resolved_batches`/`total_batches` to decide
-/// whether shadows are on; that decision belongs exclusively to `sync_csm_light_gate`.
+/// [`ResolvedCsm::depth_pass_armed`] (`csm_mode_word == 1 && batch_count() > 0`) remains
+/// the SINGLE predicate for "are cascades rendered this frame" — the one spelling both the
+/// header gate ([`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate)) and the
+/// host's pass arming call — and is untouched by this type. The counters here exist ONLY to
+/// tell a future fit whether this frame's fold is usable as an input — a batch whose mesh has
+/// not yet resolved `Loaded` (streaming) is SKIPPED (the F6 never-deref invariant), which makes
+/// the fold INCOMPLETE, not caster-less. Never read `resolved_batches`/`total_batches` to
+/// decide whether shadows are on; that decision belongs exclusively to `depth_pass_armed`.
 ///
 /// Not `#[repr(C)]`, no size pin — this never reaches the GPU (a CPU-only fit input). 36 B.
 ///
@@ -1285,6 +1313,17 @@ fn select_fit(
 /// `select_fit` returns [`CsmFit::NONE`] immediately WITHOUT reading `bounds`/`state`, so a
 /// pinned scene that never sets `fit_mode` is byte-identical to before this rung (D10).
 ///
+/// # The mesh-shadow producer gate (shadow gate SG1)
+///
+/// The cascades are a MESH-shadow producer: the depth pass rasterizes `ShadowCaster` meshes
+/// and nothing else. On a boot whose leg set owns no mesh-shadow producer
+/// ([`ResolvedRenderPath::mesh_shadow_producers`] is `false` — `Deferred × Sdf`, `VB × Sdf`,
+/// …) this policy publishes [`ResolvedCsm::DISABLED`] before anything else, so every reader of
+/// the fit is off: the light-header sample bit, the host's pass arming, the cascade UBO, and
+/// under `hwrt` the directional TLAS trace keyed on that bit. The leg term lives HERE, once,
+/// so no consumer carries a spelling of its own that could drift. The carrier is
+/// boot-constant, so the arm is fixed before frame 0.
+///
 /// Cold by construction (zero hot-path cost): a single fit run once per frame; the per-row
 /// render path never reads [`CsmConfig`].
 //
@@ -1297,9 +1336,16 @@ pub fn resolve_csm_cascades(
     view: Res<ViewUniform>,
     suns: Query<&DirectionalLight>,
     bounds: Res<CsmCasterBounds>,
+    path: Res<ResolvedRenderPath>,
     mut state: ResMut<CsmFitState>,
     mut out: ResMut<ResolvedCsm>,
 ) {
+    // Shadow gate SG1 (see the doc above): no mesh-shadow producer on this leg set ⇒ no fit.
+    if !path.mesh_shadow_producers() {
+        *out = ResolvedCsm::DISABLED;
+        return;
+    }
+
     // The primary sun: the first directional light. No directional ⇒ the disabled selection
     // (a CSM pass with no sun has nothing to fit).
     let Some(sun) = suns.iter().next() else {
@@ -1391,8 +1437,9 @@ mod tests {
 
     /// `ShadowSources::CSM` is a boot record of "cascades MAY be sampled", derived from
     /// `CsmConfig::enabled()`. The frame loop's own gate is strictly stronger — `boyko_app`'s
-    /// `csm_armed = resolve_csm(..).csm_mode_word == 1 && casters.batch_count() > 0`, the same
-    /// predicate [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate) drives the
+    /// `csm_armed` is [`ResolvedCsm::depth_pass_armed`] (a live mode word, which
+    /// `resolve_csm_cascades` only publishes on a leg set with a mesh leg, AND caster batches),
+    /// the same call [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate) drives the
     /// light-header bit with — so the two are NOT equal and must not be wired together (a
     /// config-enabled CSM with zero caster batches records the bit but runs no cascade pass).
     ///
@@ -1463,6 +1510,35 @@ mod tests {
         for c in &resolved.cascades {
             assert_eq!(*c, CascadeData::ZERO);
         }
+    }
+
+    /// The raw bytes of a [`ResolvedCsm`] — exactly what `upload_csm_ring` memcpys into the
+    /// cascade UBO, so comparing these is comparing what the GPU would read.
+    fn csm_bytes(r: &ResolvedCsm) -> &[u8] {
+        // SAFETY: `ResolvedCsm` is `#[repr(C)]` with no padding holes — every lane is an explicit
+        // field and the 336-byte size is const-asserted to equal their sum — so all
+        // `RESOLVED_CSM_BYTES` bytes behind `r` are initialized. The slice borrows `r` read-only
+        // for its own lifetime.
+        unsafe { core::slice::from_raw_parts((r as *const ResolvedCsm).cast::<u8>(), RESOLVED_CSM_BYTES) }
+    }
+
+    /// Shadow gate SG4: the cascade UBO an UNARMED frame uploads is byte-for-byte
+    /// [`ResolvedCsm::DISABLED`], whatever the fit holds, and an ARMED frame uploads the fit
+    /// itself. The fit used is a real, live one whose bytes differ from `DISABLED` — otherwise
+    /// the first assertion would hold for any function at all.
+    #[test]
+    fn an_unarmed_frame_uploads_the_disabled_cascade_bytes() {
+        let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);
+        let live = resolve_csm(&enabled_cfg(), &view, [0.3, -1.0, 0.2], CsmFit::NONE);
+        assert_eq!(live.csm_mode_word, 1, "the fixture must be a live fit");
+        assert_ne!(csm_bytes(&live), csm_bytes(&ResolvedCsm::DISABLED));
+
+        assert_eq!(csm_bytes(live.frame_uniform(false)), csm_bytes(&ResolvedCsm::DISABLED));
+        assert!(core::ptr::eq(live.frame_uniform(true), &live), "armed uploads the fit itself");
+        assert_eq!(
+            csm_bytes(ResolvedCsm::DISABLED.frame_uniform(false)),
+            csm_bytes(&ResolvedCsm::DISABLED)
+        );
     }
 
     #[test]

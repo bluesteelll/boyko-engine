@@ -931,7 +931,7 @@ impl Renderer<'_> {
             (self.fns.cmd_push_constants)(
                 cmd,
                 act.draw_pipeline_alpha.layout,
-                VK_SHADER_STAGE_VERTEX_BIT,
+                act.draw_pipeline_alpha.push_stages,
                 0,
                 act.draw_push_alpha.len() as u32,
                 act.draw_push_alpha.as_ptr().cast(),
@@ -978,7 +978,7 @@ impl Renderer<'_> {
             (self.fns.cmd_push_constants)(
                 cmd,
                 act.draw_pipeline.layout,
-                VK_SHADER_STAGE_VERTEX_BIT,
+                act.draw_pipeline.push_stages,
                 0,
                 act.draw_push.len() as u32,
                 act.draw_push.as_ptr().cast(),

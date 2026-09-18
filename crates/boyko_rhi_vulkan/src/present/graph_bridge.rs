@@ -1294,25 +1294,34 @@ impl Renderer<'_> {
         // The marcher/SSAO storage-image read|write access on the G-buffer attributes.
         const RW: u32 = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 
-        // Multi-paradigm render-path plan, rung R3 (P1 fix invariant guard — orchestrator
-        // architecture decision): mesh-shadow producers (CSM cascade depth, the punctual
-        // spot/point atlas depth, and under `hwrt` the per-frame TLAS pack/build + the
-        // shadow_vis/à-trous/temporal denoise chain) are MESH-LEG-OWNED — they rasterize/trace
-        // MESH casters only, never SDF ones (the SDF leg's shadow is the marcher's baked soft
-        // march). `GpuSceneBundles::scene()` (`boyko_app::gpu_scene`) is the single
-        // scene-assembly seam that suppresses them to `None` under `!mesh_leg`; this
-        // `debug_assert!` is the framegraph-side belt-and-braces check that the seam was not
-        // missed (a scene fixture assembled elsewhere — e.g. a hand-built test harness — that
-        // forgets the gate trips here instead of silently rasterizing invisible mesh shadows
-        // into unused cascade/atlas targets).
+        // Multi-paradigm render-path plan, rung R3: mesh-shadow producers (CSM cascade depth,
+        // the punctual spot/point atlas depth, and under `hwrt` the per-frame TLAS pack/build +
+        // the shadow_vis/à-trous/temporal denoise chain) are MESH-LEG-OWNED — they
+        // rasterize/trace MESH casters only, never SDF ones (the SDF leg's shadow is its own
+        // soft march). The GATE is not in any scene-assembly seam: it is boyko_render's
+        // `ResolvedRenderPath::mesh_shadow_producers()`, read by `resolve_csm_cascades` and
+        // `resolve_shadow_atlas`, which publish DISABLED fits on a mesh-less leg set so the
+        // host never arms a pass or a header bit (the `hwrt` TLAS leg term sits at the
+        // `GpuSceneBundles::scene()` seam, spelled through the same predicate).
+        //
+        // Two checks of that gate exist, and both are kept because they cover different
+        // producers of a `GBufferScene`: `GpuSceneBundles::scene()` asserts it for the
+        // production host on EVERY path; this one asserts it for Deferred only, and is the
+        // only one a HAND-BUILT scene reaches (e.g. `window_present_gbuffer`'s showcase
+        // fixture, which mirrors the gate itself) — such a fixture that forgets it trips here
+        // instead of silently rasterizing invisible mesh shadows into unused targets.
         debug_assert!(
             scene.resolved_render_path.mesh_leg || (scene.csm.is_none() && scene.atlas_punctual.is_none()),
-            "invariant: mesh-shadow activation without mesh leg (scene-assembly gate missed)"
+            "invariant: mesh-shadow activation without a mesh leg — the gate is boyko_render's \
+             ResolvedRenderPath::mesh_shadow_producers() in resolve_csm_cascades / \
+             resolve_shadow_atlas; a hand-built GBufferScene must mirror it"
         );
         #[cfg(feature = "hwrt")]
         debug_assert!(
             scene.resolved_render_path.mesh_leg || (scene.tlas.is_none() && scene.shadow.is_none()),
-            "invariant: mesh-shadow activation without mesh leg (scene-assembly gate missed)"
+            "invariant: TLAS / shadow-denoise activation without a mesh leg — the gate is \
+             ResolvedRenderPath::mesh_shadow_producers() at GpuSceneBundles::scene()'s TLAS arming; \
+             a hand-built GBufferScene must mirror it"
         );
 
         // Multi-paradigm render-path plan, rung R3b (§E leg-disable / the R3b audit finding): the
