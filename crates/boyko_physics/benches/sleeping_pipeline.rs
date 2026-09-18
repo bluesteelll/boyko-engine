@@ -17,9 +17,14 @@
 //!   completes, with or without the wake, and freezes in its spawn pose. The frozen state is
 //!   therefore identical on a tree without A4, which is what lets the two trees' frozen
 //!   steps be compared (round-2 critique W3). With gravity on, a pile of this height never
-//!   comes to rest (defect A7), and a tree with the wake freezes a different contact set
-//!   from one without it. The setup asserts the freeze step, that no pose moved, and, on a
-//!   tree with A4, that no contact-change wake fired.
+//!   came to rest before the A7 lane (defect A7), and a tree with the wake froze a different
+//!   contact set from one without it; that holds on both of §8's arms, which predate the
+//!   lane. A7a (`08fe7b9f`, clipped points carry their own feature ids) did not change it.
+//!   Since A7b (S5, the face-versus-edge rule, the commit after `08fe7b9f`) the gravity-on
+//!   pile does come to rest: A7-R2 freezes it at step 248 (msvc release, 2026-09-18). The
+//!   arm stays gravity-free all the same, because moving it onto a tree with A7a or A7b also
+//!   moves the contact set it prices (MEASUREMENT-QUEUE §6). The setup asserts the freeze
+//!   step, that no pose moved, and, on a tree with A4, that no contact-change wake fired.
 //!
 //! # Anti-vacuity of the frozen arm (round-3 review W2)
 //!

@@ -3422,26 +3422,30 @@ impl IslandSleep {
     /// (defect A7). The comparison is kept because skipping it would leave a support
     /// removed on that step undetected for as long as the island stays frozen.
     ///
-    /// **Wakes from a box-axis hint change.** Whether a box-box manifold exists depends
-    /// on the two poses and on the hint the pair reads (`narrowphase/box_box.rs`). With
-    /// fixed poses and a stable pair key the chosen axis is constant, so a frozen
-    /// island's manifolds repeat on every frozen step. A hint change can change them and
-    /// wake the island. It can happen on the step after any row move that the pair
-    /// spends without a contact, on an order-reversing move, on an axis-cache reset, and
-    /// on a wholesale clear (a new all-pair high of any shape, or stale-key occupancy).
-    /// A despawn's swap-remove moves one row; a spawn, a despawn, or a migration into
-    /// or out of an archetype walked before the island's shifts every row of the island
-    /// by one, which re-keys every one of its pairs. Such a wake costs solve time, never
-    /// correctness, and only knife-edge box pairs, whose manifold's existence depends on
-    /// the reference box or axis, are exposed to it. Removing it is the box-axis cache's
-    /// work, not this function's.
+    /// **A box-axis hint change does not wake an island.** Since A7b, whether a box-box
+    /// manifold exists is a function of the two poses alone (`narrowphase/box_box.rs`):
+    /// past an overlapping SAT every path ends in a face patch or an edge contact. The one
+    /// exception is a chosen reference face with a zero in-plane extent (a zero-volume
+    /// collider), which gives no contact, so for such a collider the face a hint picks can
+    /// still decide it. The hint a pair reads can change while the poses stay put — on the
+    /// step after a row move the pair spent without a contact, on an order-reversing move,
+    /// on an axis-cache reset, and on a wholesale clear (a new all-pair high of any shape,
+    /// or stale-key occupancy); a despawn's swap-remove moves one row, and a spawn, a
+    /// despawn, or a migration into or out of an archetype walked before the island's
+    /// shifts every row of the island by one, re-keying every one of its pairs. Such a
+    /// change picks WHICH contact a pair carries, never whether it has one, so it never
+    /// changes an island's manifold count and never wakes it. Before A7b a chosen face that
+    /// realized no patch gave no manifold and the hint could decide which face was chosen,
+    /// so a hint change could add or remove a knife-edge pair's manifold and wake a frozen
+    /// island (A4's Known behaviour 2). That is retired for box-box pairs: a count change at
+    /// fixed poses is a defect.
     ///
     /// Not covered:
     /// - a support that moves but keeps its island's manifold count (Box2D's
     ///   `b2Body_SetTransform` does not wake either); call [`wake_all`](Self::wake_all);
     /// - a user write to a sleeping body that changes no contact;
-    /// - a step whose changes to one frozen island, real or caused by a hint change,
-    ///   add exactly as many manifolds as they remove;
+    /// - a step whose changes to one frozen island add exactly as many manifolds as they
+    ///   remove;
     /// - a parked support resting on the SDF field (not reachable through the shipped
     ///   plugin entries) loses its field contact, so its island wakes; the solve's
     ///   effect on the load it carries is unmeasured.

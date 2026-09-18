@@ -222,12 +222,30 @@ module header (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAME
 
 **Leg: Miri.** `cargo +nightly miri test` already carries **138** of the ignores (measured
 2026-09-18 on this line) — the **137** `cfg_attr` sites whose cfg is `miri` (134) or
-`any(miri, debug_assertions)` (3), which run *natively* and are skipped only under Miri, plus
-`miri_fixed_loop`'s one plain ignore. All 32 of the sites added since 2026-09-17 landed here, which
-is why this figure moved and the two above it did not. The two remaining `cfg_attr` sites are not
-Miri's: `profiling/reduce.rs`'s
+`any(miri, debug_assertions)` (3), plus `miri_fixed_loop`'s one plain ignore. The `miri` sites run
+*natively* in both profiles and are skipped only under Miri; the `any(miri, debug_assertions)`
+sites run natively in RELEASE only — their leg is the physics release run below, and after the A7
+lane there are five of them, not three. All 32 of the sites added since 2026-09-17 landed here,
+which is why this figure moved and the two above it did not. The two remaining `cfg_attr` sites are
+not Miri's: `profiling/reduce.rs`'s
 `not(debug_assertions)` and `tb_neg_m2w_block_reference.rs`'s `not(all(miri, feature = …))`. None of
 the 138 belong to either leg above.
+
+**Leg: physics release — the debug-ignored `slow:` tests.** Five tests are ignored in every debug
+build and under Miri by `#[cfg_attr(any(miri, debug_assertions), ignore = "slow: …")]`, so none of
+the four commands above runs them: G2, G6, G7, A7-R1 and A7-R2 in
+[`crates/boyko_physics/tests/sleep_settles_box_piles.rs`](crates/boyko_physics/tests/sleep_settles_box_piles.rs)
+— box piles through the real physics schedule, A7-R1 being the only scene-level gate on a resting
+pile's creep (defect A7). Their leg is the physics release run:
+
+```powershell
+cargo test --release -p boyko-physics --no-fail-fast
+```
+
+In it `sleep_settles_box_piles` must print `running 12 tests` and `11 passed; 0 failed; 1 ignored`
+(the one ignore is its `generator:`); that binary takes ~80 s, ~73 s of it A7-R1 (msvc,
+2026-09-18). `-- --ignored` in a debug build is NOT their leg: the debug build is exactly where
+they are ignored, and it would run them unoptimized.
 
 **At least 28 ignored tests belong to no leg at all**, and must not be swept into one. Six were
 enumerated when this section was written: three *generators* that assert nothing and emit source to

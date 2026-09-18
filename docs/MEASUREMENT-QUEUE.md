@@ -190,8 +190,18 @@ cold remap needs a hash instead of sort + binary search. Correctness is gated by
 ⚠ `benches/sleeping.rs` CANNOT see this change: it drives the solver directly with no gather, so
 every consumer classifies `Identity`. Do not use it for this entry.
 
+⚠ **Arm B is the fix commit `b74f7ee8`, not a later tree** (pinned 2026-09-18). Its only parent is
+arm A. A7a, the first step of the A7 lane, gives each clipped face-contact point its own feature id.
+That changes the contact set every pile arm here measures: on A7-R1's height-15 pile at step 600 it
+goes from 5044 manifolds / 12817 points to 5223 / 14605, and the warm-start keys move with the ids. A B
+arm on a tree with A7a prices the fix plus a different workload. To measure on a later tree, port arm A
+onto the same narrowphase first. A7b, the second step (S5: the face-versus-edge rule, the commit after
+`08fe7b9f`), changes it again and more: 6671 manifolds / 22 975 points at the same step, and a
+height-15 pile that never came to rest now freezes (A7-R2, step 248). The pin to `b74f7ee8` keeps
+both out of this entry.
+
 ```bash
-# Arms: A = d5782d43 (no fix), B = the fix. Idle-machine receipt first (§0). No RUSTFLAGS (§1).
+# Arms: A = d5782d43 (no fix), B = b74f7ee8 (the fix, before A7a; see above). Idle-machine receipt first (§0). No RUSTFLAGS (§1).
 # Run A twice interleaved with B to get the A/A spread.
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/4
@@ -245,8 +255,16 @@ iteration start. Expected B/A = 1.000.
 
 ⚠ `benches/sleeping.rs` and `benches/parallel_solve.rs` run no gather and no apply. Do not use them.
 
+⚠ **Arm B is the fix commit `a56007ab`, not a later tree** (pinned 2026-09-18). Its only parent is
+arm A. The reason is the one given in §6: A7a changes the pile's contact set, so a B arm with A7a
+prices a different workload — and A7b (S5) changes it again (§9). On A7-R1's resting height-15 pile
+the rule alone adds 17.1 % contact points on identical poses; the +57 % §9 also quotes compares two
+different trajectories at step 600. Neither ratio was measured on this entry's scenes, and neither
+may be carried to them: R1 below would fire on a B arm with A7b for a reason that is not the
+`physics_apply` filter fetch, by an amount nobody has measured.
+
 ```bash
-# Arms: A = d552be05 (the defect), B = the fix. Idle-machine receipt first (§0). No RUSTFLAGS (§1).
+# Arms: A = d552be05 (the defect), B = a56007ab (the fix, before A7a; see above). Idle-machine receipt first (§0). No RUSTFLAGS (§1).
 # Run A twice interleaved with B for the A/A spread.
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/4
@@ -262,8 +280,13 @@ cargo bench -p boyko-physics --bench soft_step_sp2 -- soft_step_sp2/coupled # fi
   the body set, so the fix removes no work there.
 - R3: `soft_step_sp2/coupled` B/A outside the A/A spread by > 2 % → the fixture migration changed the
   measured work; investigate before accepting it.
-- R4: if `alloc_frame_census` S1a/S1b/S1c or any `alloc_frame_attribution` row moves at all, stop —
-  the fix is specified to add zero allocations.
+- R4: if `alloc_frame_census` S1a/S1b/S1c or any `alloc_frame_attribution` row moves at all between
+  the two arms, stop — the fix is specified to add zero allocations. The S1c release pin itself moved on
+  2026-09-18, when A7a re-drew its deterministic window (re-pinned from a long-run adjudication, no new
+  allocation site; see the `alloc_frame_census.rs` header, "S1c after A7a"). That move is not A5's and
+  does not trigger R4. A7b (S5) changes the pile's contacts again, so the deterministic window is
+  re-drawn again; that move is not A5's either. Compare the two arms' own census runs, never either arm
+  against today's pin.
 
 **Report:** medians and the A/A spread, both worker counts, both sleeping settings.
 
@@ -303,11 +326,15 @@ bookkeeping, not dispatch):
   the step its debounce completes with or without the wake and freezes in its spawn pose. That is
   what makes the frozen state reachable identically on arm A and lets the two trees be compared.
   With gravity on, a pile of this height never comes to rest (defect A7) and the two trees freeze
-  different contact sets, so this arm is gravity-free by necessity, not by preference.
+  different contact sets, so this arm is gravity-free by necessity, not by preference. That holds on
+  both arms, which predate A7a and A7b. On a tree with A7b the gravity-on pile does freeze (A7-R2:
+  step 248 on the kernel as committed, 188 on the form first implemented; msvc release, 2026-09-18),
+  but moving this arm onto such a tree also moves the contact set (§6), so the gravity-free design
+  stands for this entry.
 
 ```bash
 # Arms: A = d552be05 with the bench's `contact_wakes` helper body replaced by `0` (see below),
-# B = this tree. Idle-machine receipt first (§0). No RUSTFLAGS (§1).
+# B = a56007ab (the fix, before A7a; its only parent is d552be05; see §6 for why). Idle-machine receipt first (§0). No RUSTFLAGS (§1).
 # Run A twice interleaved with B to get the A/A spread.
 cargo bench -p boyko-physics --bench sleeping_pipeline   # all three arms
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1   # cross-check, no sleeping
@@ -324,7 +351,7 @@ manifold/island structure, which is the point of the comparison.
   must be unreachable there; a move means the key loop leaked into the default path.
 - R2: `pyramid_awake_sleeping_on` B/A median > 1.01 and outside the A/A spread → the cheap lever
   first, before any behavioural change: the key sweep shares its loop with the freeze fold
-  (`resources.rs:3486-3519`) and calls `graph.island_of(row)` per row, which re-derives the
+  (`resources.rs:3490-3523`) and calls `graph.island_of(row)` per row, which re-derives the
   `island_of` read slice and does a bounds-checked `get` each time, while `island_starts()` is
   already hoisted. Hoist the `island_of` slice the same way — two flat slice loads per row — and
   re-measure.
@@ -337,6 +364,67 @@ manifold/island structure, which is the point of the comparison.
 
 **Report:** medians and the A/A spread for all three arms, plus both trees' frozen-arm receipts
 (freeze step, manifolds, islands, `contact_wakes`).
+
+---
+
+## 9. Physics — what the face-versus-edge rule costs in a default world (defect A7b, S5)
+
+**Decides:** what S5 costs, and whether that price calls for follow-up work. It does NOT decide whether
+S5 ships: a resting pile that creeps is wrong, and a 1-point edge contact on a face-face pair is wrong
+geometry, so the price is recorded, not traded against correctness. Correctness is gated by A7-N9..N11
+(`narrowphase/box_box.rs`) and A7-R1 / A7-R2 (`sleep_settles_box_piles.rs`); this is price only.
+
+**The default configuration is the primary number.** Sleeping is OFF by default
+(`resources.rs:494`, `sleeping: false`), so every resting pile in a default world pays S5 on every step.
+Measured structurally (msvc release, 2026-09-18; counts, not time), on A7-R1's resting height-15 pile,
+on the kernel as committed (the form first implemented in brackets):
+
+- at step 600, contact points 14 605 on arm A and 22 975 on arm B [22 974], manifolds 5223 and 6671
+  [6678]: +57 %. That compares two DIFFERENT trajectories, each arm's own pile at its own step 600,
+  so it is not the rule's price alone. **On identical poses the rule alone adds +17.1 %**: every
+  narrowphase call of arm B's run over steps 600-3000 was also asked of a frozen copy of arm A's rule
+  with the same poses and hint, and the two produced 54 989 018 and 46 942 494 contact points
+  [54.84 M against 47.14 M, +16.3 %]. The support pairs carry their clipped patch of up to four points
+  instead of one. Both ratios are this scene's; the bench's timed steps are another trajectory (R2).
+- where the SAT answers an edge, the narrowphase now builds the face patch first: 3 531 050 times over
+  steps 600-3000 (~1470 per step) [3 425 959]. It keeps the patch on all but 264 [260], every one of
+  them a face that realized no patch, so the clip is wasted only there. The 5 mm comparison against
+  the patch chose the edge 0 times: on this pile the constant's value does nothing.
+- the cold fallback builds 12 572 edge contacts over those 2400 steps, ~5.2 per step [13 615]. On
+  10 446 of those calls [11 294] arm A's rule, given the same poses and hint, built an edge contact
+  too. The other 2126 [2321], under one per step, are manifolds arm A lacked, all on no-load
+  same-layer knife-edge pairs.
+
+With sleeping ON the comparison is not like for like: arm A's gravity-on pile never freezes and arm B's
+does (A7-R2, step 248), so an opted-in world's steady cost falls to the sleeping floor on B alone. Report
+it beside the primary number; never quote it as S5's price.
+
+**NO TIMING HAS BEEN TAKEN.** Every figure above is a count.
+
+⚠ **Arm B is the S5 commit itself** — the commit whose only parent is `08fe7b9f` and which introduces
+`FACE_AXIS_PREFERENCE` — not a later tree. Pin its hash here once it exists.
+
+```bash
+# Arms: A = 08fe7b9f (A7a, before S5), B = the S5 commit (its only parent is 08fe7b9f; see above).
+# Idle-machine receipt first (§0). No RUSTFLAGS (§1). Run A twice interleaved with B for the A/A spread.
+cargo bench -p boyko-physics --bench sleeping_pipeline -- pyramid_sleeping_off       # PRIMARY: default config
+cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1              # Jolt's scene (gap 0.5)
+cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/4
+cargo bench -p boyko-physics --bench sleeping_pipeline -- pyramid_awake_sleeping_on  # sleeping on, never latching
+```
+
+**Rules:**
+- R1: `pyramid_sleeping_off` B/A median, with the A/A spread, IS the number this entry exists for. It has
+  no action threshold.
+- R2: the bench times from its 30th step onward, before the vertical settle A7-R1 waits 600 steps for,
+  so the row ratio that applies is the one over the bench's OWN timed steps, not A7-R1's step-600 census.
+  Count the live contact points over each arm's timed run (a probe, like §8's receipts) before reading
+  any ratio. A B/A time ratio above that row ratio by more than the A/A spread means the cost is not
+  the extra rows alone: profile the realized-patch check and the fallback before anything else.
+- R3: B/A below 1.0 on `pyramid_sleeping_off` → suspect the measurement: B solves strictly more rows.
+
+**Report:** medians and the A/A spread for every row, both arms' timed-run point counts, and the
+sleeping-on row labelled as not like for like.
 
 ---
 

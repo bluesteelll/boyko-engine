@@ -24,7 +24,10 @@ Found while closing defect A4 (the sleep latch that survived the loss of support
 (`physics_apply` writing into another body's row). **Neither is A4's or A5's to fix**, and both were
 about to exist only in `#[ignore]` reason strings, so they are written down here before the lane
 closes. This entry is the record a future session finds by grepping `docs/` for open physics
-defects; the four tests below are red BY DESIGN until the A7 lane lands.
+defects; the four tests below were red BY DESIGN until the A7 lane landed. A7a (2026-09-18) greened
+A7-R0 and G8; A7b (S5, the next commit) greened A7-R1 and A7-R2, so all four are green. What stays
+open is under "What is NOT decided" below — first of all a residual drift RATE, which is why no
+document may call A7 fixed without that rate beside it.
 
 ### A7 — a resting box pyramid creeps sideways, and tall piles never come to rest
 
@@ -42,15 +45,27 @@ defects; the four tests below are red BY DESIGN until the A7 lane lands.
   awake. A future session must NOT re-open A4 for the height ≥ 7 non-settling; that reading was
   taken and it excludes A4.
 
-**Red-first tests** — all in `crates/boyko_physics/tests/sleep_settles_box_piles.rs`, each carrying
-`#[ignore = "deferred: …"]` with its own release-mode re-run command:
+**Red-first tests** — all in `crates/boyko_physics/tests/sleep_settles_box_piles.rs`. A7-R1 and
+A7-R2 carried `deferred:` ignores until S5; they now take the file's release-only `slow:` form and run
+in the physics release run, `cargo test --release -p boyko-physics --no-fail-fast`, which `CLAUDE.md`
+names as the leg of the debug-ignored `slow:` tests:
 
 - `a_resting_jolt_pyramid_does_not_creep_with_sleeping_off` (A7-R1) — the creep bound above. Its
   window opens with a standing guard (`STANDING_DROP_M`) so a collapsed-and-resting pile cannot
   satisfy the bound by having nothing left to move.
+  **Green since A7b.** D_max over steps 600-3000: 0.6361069 m at base, 0.0972966 m with A7a,
+  0.0008583 m with A7b as first implemented (box 1240, the apex) and 0.0007180 m with A7b as
+  committed (box 1227, layer 12).
 - `a_jolt_scale_box_pyramid_freezes` (A7-R2) — the height-15 pile freezes and holds.
-- `a_height_6_box_pyramid_freezes` (G8) — the height-6 pile freezes and holds; red today because
-  onset flicker keeps it awake.
+  **Green since A7b.** With A7a alone it did not freeze in 6000 steps (largest `|v|² + |ω|²`
+  0.0069859); with A7b it froze at step 188 as first implemented (4.95 s) and at step 248 as
+  committed.
+- `a_height_6_box_pyramid_freezes` (G8) — the height-6 pile freezes and holds; red before A7a
+  because onset flicker kept it awake.
+  **Green since A7a (2026-09-18, msvc release).** Base `9f712204` did not freeze in 6000 steps;
+  with A7a it froze at step 128, and with A7b at step 185. Its `deferred:` ignore became the file's
+  release-only `slow:` form with A7a; with A7b it takes 2.4 s in debug, so it runs in both profiles
+  and only Miri skips it.
 
 ### A7a — a quarter-overlap face contact repeats a feature id, so two warm-start keys collide
 
@@ -63,22 +78,106 @@ corner ids, which is where the collision comes from.
 
 **Red-first test:** `a_quarter_overlap_face_contact_has_distinct_feature_ids` (A7-R0), same file.
 It is device-free and schedule-free, so it runs in either profile and under Miri.
+**Green since A7a (2026-09-18).** A clipped point is now named by the two features that created it
+(`narrowphase::feature_face_clip`). The test has no `#[ignore]` any more.
+
+### A7b — a resting face pair takes the 1-point edge path on jitter
+
+**What is measured** (the A7 lane's C2 probe, msvc release, 2026-09-18, on the A7a tree): on the
+resting height-15 pile, 33.3 % of load-bearing support manifold-steps were on the edge-edge path —
+one point instead of a clipped patch of four — and the supports changed point count 407 373 times
+over steps 600-3000. The edge axes taken were exclusively `A.x × B.z` and `A.z × B.x`
+(3 238 124 of 3 238 124): axes that nearly duplicate the face normal. Their SAT depth differs from
+the face axis's by about the relative tilt times the lateral centre offset — ~1.4e-5..2.8e-5 m on a
+quarter overlap at rest — which beat the old `SAT_EPS` = 1e-5 m face preference on jitter, and the
+5 % hysteresis then held whichever axis won.
+
+**The fix (S5, `narrowphase/box_box.rs`):** Box3D's rule as its live `convex_manifold.c` ships it,
+with two differences that predate S5: Box3D treats a clip left with fewer than 3 vertices as no face
+contact, where here only an empty clip counts, and Box3D keeps speculative points, where here only
+points with `separation <= 0` are kept. The face contact is built, and the edge replaces it only if
+the edge is shallower than the face's REALIZED clipped patch by more than `FACE_AXIS_PREFERENCE` =
+0.005 m, or if the face realizes no patch; an edge hint never holds a face; a held face hint that
+realizes no patch yields to the best face's patch when that was already built (Box3D re-runs its full
+query when a cached feature fails); any other chosen face whose clip is empty or has no penetrating
+point falls back to the edge contact. As a result a box pair's manifold exists exactly when the two
+poses overlap, whatever the axis hint, except on a reference face with a zero in-plane extent, which
+retires A4's Known behaviour 2 for box pairs. Gated by A7-N9, A7-N10, A7-N11 and
+`a_degenerate_reference_face_is_no_contact` in that file. Its rung was pre-registered in the
+pile-test header before the first run and read 0.0008583 m on the form first implemented and
+0.0007180 m on the form committed, both in the "confirms" band. On that pile the 5 mm comparison chose
+the edge 0 times in 3 531 050 SAT edge answers over steps 600-3000; every one of the 264 edges taken
+was a face that realized no patch, so the constant's value does nothing there.
 
 ### What is NOT decided
 
-1. **Whether A7 and A7a are one defect or two.** A repeated feature id costs warm-start impulse
-   every step on exactly the contacts the creep is measured on, which makes A7a a plausible cause
-   of A7 — but that is an inference, not a measurement. Nothing here establishes it.
-2. **Where the feature-id repair belongs** — the clipper that assigns ids, or the key packing that
-   consumes them. Not investigated.
+1. **Answered: A7 was two defects, A7a and A7b.** Measured on A7-R1's D_max: 0.6361069 m →
+   0.0972966 m with A7a (6.54×) → 0.0007180 m with A7b as committed (135× more; 0.0008583 m, 113×,
+   as first implemented). Only the residue below is left.
+2. **Answered: the feature-id repair belongs in the clipper** (A7a names a clipped point by the two
+   features that created it; the key packing is unchanged).
 3. **A4's Decision 3 (the onset-flicker comparison) is re-decided only AFTER A7**, per the A4
-   round-2 ruling §3.4. Until then a red G2 or G7 is triaged by the four steps in that file's
-   module header and in its failure message — never waived, and never silenced by raising a budget.
-4. **The flicker budgets `G2_MAX_EVENTS` / `G7_MAX_EVENTS` are sized against TODAY's trajectories**
-   (the `flicker_redraw_distribution` generator's 30 height-4 and 56 height-5 draws). A7 will
-   re-draw them; they are re-sized from a fresh generator run at that point, not before.
+   round-2 ruling §3.4. A7 has landed and it has NOT been re-decided. Until it is, a red G2 or G7 is
+   triaged by the four steps in that file's module header and in its failure message — never waived,
+   and never silenced by raising a budget.
+4. **Done with A7b: the flicker budgets were re-sized from a generator run on the A7b tree** (msvc
+   release, 2026-09-18; all 30 height-4 and all 56 height-5 draws froze, the latest at steps 127 and
+   243). The pooled wake probability fell from 48/78 to 2/32 at height 4 and from 160/216 to 20/76 at
+   height 5, and by the file's rule — the smallest budget whose tail is below 1 % at the measured p
+   plus one standard error — `G2_MAX_EVENTS` went 18 → 3 and `G7_MAX_EVENTS` 56 → 6;
+   `MEDIUM_SETTLE_LIMIT` went 20 000 → 486 (twice the latest height-5 freeze) and G7's per-draw limit
+   6000 → 1016 (eight times the latest height-4 freeze). Every one went DOWN. One height-5 draw took 4
+   events, one more than G2's new budget: the sample puts that tail at 1 in 56 where the pooled
+   geometric model puts it at 0.48 %.
 5. **No price is attached to any of this.** The A4 bench exists (`§8` of
-   [MEASUREMENT-QUEUE.md](MEASUREMENT-QUEUE.md)) and has never been run.
+   [MEASUREMENT-QUEUE.md](MEASUREMENT-QUEUE.md)) and has never been run. S5's own price is queued as
+   `§9`: on identical poses of a resting height-15 pile the rule alone adds 17.1 % contact points,
+   every step, in a default world (sleeping off). The +57 % at step 600 compares two different
+   trajectories and is not the rule's price.
+6. **The residue is a drift RATE, and it is unexplained.** One run of A7-R1's scene extended to 5400
+   steps (msvc release, 2026-09-18, the kernel as committed) read D_max = 0.7180 mm over steps
+   600-3000 and 1.0965 mm over 3000-5400, on the same box (1227, layer 12) in both windows, with layers
+   10-14 moving toward (−x, −z) on average in both; 1.8138 mm over 600-5400. (The form first
+   implemented read 0.8583 mm, 0.9262 mm and 1.7841 mm, on box 1240.) The windows add: ~0.38 mm per
+   1000 steps, ~2.3e-5 m/s, ~8 cm per hour of simulated time with sleeping off, the default. It is
+   14× under A7-R1's bound over A7-R1's window. It is not A7b: over steps 600-3000, 0 of 9 743 983
+   support manifold-steps were on the edge path (1 of 9 743 988 on the first form; 33.3 % with A7a
+   alone). **Test that decides the next step:** mirror the scene in x. If the drift mirrors too, a
+   world-anchored tie-break — a `>= 0.0` sign test such as `support_edge_point`'s, or a lowest-index
+   rule — is steering it.
+7. **T-h, the substep dependence: not measured.** On the A7a tree without S5, the support edge-path
+   share at substeps 4, 8, 16 and 32; on S5, D_max at substeps 4 and 8. If the edge-path flips
+   explain the pre-fix substep curve, the share falls monotonically with substeps and D_max(8) is not
+   2× or more below D_max(4).
+8. **Where a chosen face realizes no patch and no best-face patch was built, S5 builds the edge
+   contact** (the cold fallback). Before S5 a chosen face that realized nothing gave no manifold, but
+   most of these pairs still had one then, because the pre-S5 rule held an edge hint that S5's class
+   clause refuses. On the resting height-15 pile the fallback ran 12 572 times over steps 600-3000
+   (13 615 on the first form; 1133 at height 7): on 10 446 of those calls the pre-S5 rule, given the
+   same poses and hint, built an edge contact too, and 2126 — under one a step — are manifolds S5
+   adds. All are no-load same-layer knife-edge pairs, face and diagonal neighbours; 3588 of their
+   points lie at a separation above 0 (at most 1.96e-6 m). 12 567 were pairs whose own best face
+   realized no patch (A7-N11's family H); 5 were a held face with no built patch to yield to, where
+   Box3D would build the best face's patch instead — the one remaining difference on the held-hint
+   path. The C2 probe's form had no fallback, so this is where the shipped form differs from the
+   measured one. On generic poses a face hint held by the hysteresis can clip to nothing where the
+   pre-S5 rule had an edge contact (13 cells in a random census of 154 423 overlapping poses × 16
+   hints; A7-N11's family G); there S5 now yields to the best face's already-built patch, as Box3D
+   does, and the yield ran once on the pile, before step 600.
+9. **The clip id does not encode the incident face** (A7a review, open question 1). A cross-step
+   alias needs the incident face to change while the reference face is held, which takes a relative
+   rotation near 45°; a resting contact never makes one. Promotion trigger: a census of manifold-steps
+   that keep `ref_face` but change the incident face, over A7-R2 and G1-G8, reading > 0. The fix would
+   not change the 4-bit field: map ring edge k to box edge 0..11 through a 24-byte table, with
+   plane-created edges at 12..15.
+10. **The reference-axis hysteresis is relative** — 5 % of a resting depth near 1e-4 m is ~5e-6 m —
+    while Box3D keeps its cached feature within an absolute `linearSlop`. The live manifold count
+    still changes on 1739 of 2400 steps of the resting pile after S5 (0.725; 0.759 on the first
+    form; the SAT-form probe read 0.7338).
+11. **Parked, with their numbers:** S2 (the full 2×2 tangent block in the friction solve) — Step 0
+    read D = 0.6183357 m, 2.79 %, inside the ~10 % chaos band that gravity perturbations of 1e-6
+    measure on this scene. S3 — deferred; its triggers were defined on S4 (a speculative margin),
+    which the C2 probe withdrew.
 
 ---
 
@@ -5188,6 +5287,15 @@ machine, its `PyramidScene.h` transcribed index for index) leaves the deficit in
 | 8 | 4.21 | 4.18 | 20.45 | 0.89 |
 | 16 | 3.95 | 4.45 | 25.07 | 0.73 |
 
+⚠ **Measured on the pre-A7 contact set** (noted 2026-09-18). Every boyko number here predates A7a,
+which gives each clipped face-contact point its own feature id. That changes the pile's contact set
+and warm-start keys: on A7-R1's height-15 pile at step 600, 12817 points before it and 14605 after.
+A re-run on a tree with A7a measures a different workload, so a difference from these numbers is
+not a solver or pool change until the same run on a tree without A7a (`9f712204`, for one) shows it.
+A7b (S5, the face-versus-edge rule, the commit after `08fe7b9f`) changes the contact set again and
+by more: 22 975 points at the same step, since a resting support now carries its clipped patch
+instead of one edge point. The same rule applies to it, with `08fe7b9f` as the tree without A7b.
+
 ⚠ **CORRECTED 2026-09-09 evening — the "within 4 %" this paragraph used to claim was an artifact of
 comparing across measurement sessions.** The boyko column above (18.27) was measured after the
 `BroadphaseGrid` migration; the Jolt column (17.59) was carried over from the earlier head-to-head.
@@ -5561,6 +5669,15 @@ one receipt and is marked DIRTY.
 | 16 | 5.037 | 3.93 | 13.237 | 1.54 | 2.38 |
 
 Medians of three passes. Pass 1 (cleanest) boyko scaling: 1.00 / 1.23 / 1.73 / **1.98** / 1.89.
+
+⚠ **Measured on the pre-A7 contact set** (noted 2026-09-18). Every boyko number here predates A7a,
+which gives each clipped face-contact point its own feature id. That changes the pile's contact set
+and warm-start keys: on A7-R1's height-15 pile at step 600, 12817 points before it and 14605 after.
+A re-run on a tree with A7a measures a different workload, so a difference from these numbers is
+not a solver or pool change until the same run on a tree without A7a (`9f712204`, for one) shows it.
+A7b (S5, the face-versus-edge rule, the commit after `08fe7b9f`) changes the contact set again and
+by more: 22 975 points at the same step, since a resting support now carries its clipped patch
+instead of one edge point. The same rule applies to it, with `08fe7b9f` as the tree without A7b.
 
 **What changed, drift-free.** The ratio boyko/Jolt is taken back to back within seconds and does not depend
 on the box's state: **2.16 → 1.15** (W=2), **3.51 → 1.73** (W=4), **5.16 → 2.47** (W=8), **6.69 → 2.38**

@@ -2053,10 +2053,16 @@ that loses its support cannot stay asleep on a stale latch — that is defect A4
 [tests/support_loss_wakes_sleepers.rs](../crates/boyko_physics/tests/support_loss_wakes_sleepers.rs).
 Its price is unmeasured: the bench is
 [benches/sleeping_pipeline.rs](../crates/boyko_physics/benches/sleeping_pipeline.rs) and the entry
-that runs it is §8 of [MEASUREMENT-QUEUE.md](MEASUREMENT-QUEUE.md). Two defects found beside it —
-A7 (a resting box pyramid creeps; piles of height ≥ 7 never come to rest, with `contact_wakes == 0`,
-so A4 is not involved) and A7a (a quarter-overlap face contact repeats a feature id, so two
-warm-start keys collide) — are open and recorded in [OPEN-QUESTIONS.md](OPEN-QUESTIONS.md).
+that runs it is §8 of [MEASUREMENT-QUEUE.md](MEASUREMENT-QUEUE.md). A defect found beside it, A7 —
+a resting box pyramid crept sideways and piles of height ≥ 7 never came to rest, with
+`contact_wakes == 0`, so A4 was not involved — was two narrowphase defects, both fixed on the A7
+lane: A7a (`08fe7b9f`: a quarter-overlap face contact repeated a feature id, so two warm-start keys
+collided) and A7b (S5, the commit after `08fe7b9f`: on a resting face pair the SAT took an edge axis
+that nearly duplicates the face normal; now Box3D's face-versus-edge rule in `narrowphase/box_box.rs`).
+Before the lane the height-15 pile never froze and crept 0.636 m over steps 600-3000 with sleeping
+off; with both it freezes (A7-R2, step 248) and creeps 0.72 mm over that window (msvc release,
+2026-09-18). What stays open is recorded in [OPEN-QUESTIONS.md](OPEN-QUESTIONS.md): that creep is a
+steady drift RATE (~8 cm per simulated hour with sleeping off, the default), and it is unexplained.
 
 **Entry point:** `add_physics_systems` (+ `_soft` / `_soft_colored` / `_sdf` /
 `_with_scene_sync` variants) adds the fixed-step pipeline to a `ScheduleBuilder`.
