@@ -179,9 +179,12 @@ The repair belongs in those two crates, not in the gate.
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **311 sites (172 unconditional +
-139 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-18 on this line.** The move from
-2026-09-17's 280 is two things and not one: the A6 lane's three new test files brought **32**
+The four commands above run **none** of the `#[ignore]`d tests — **310 sites (168 unconditional +
+142 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-18 on this line after the A7 lane merged.**
+The last move, 311 → 310, is that lane's four `deferred:` red-first tests: A7-R0 is no longer
+ignored, A7-R1 and A7-R2 became `cfg_attr(any(miri, debug_assertions), "slow: …")`, and G8 became
+`cfg_attr(miri, "miri-slow: …")`. The move before it, from 2026-09-17's 280, is two things and not
+one: the A6 lane's three new test files brought **32**
 `cfg_attr` sites (`a6_schedule_panic_propagation.rs` 17, `a6_panic_propagation.rs` 14,
 `a6_panicked_scope_chunk_receipts.rs` 1, all `cfg_attr(miri, …)`), and the census stopped counting
 **two phantoms** — lines that BEGIN inside a `\`-continued string in a `panic!` and merely start
@@ -220,16 +223,16 @@ non-default cargo feature and are not even *compiled* otherwise (`--features hwr
 and vanish on Linux. There is no single command — each binary has its own env-var protocol in its
 module header (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
-**Leg: Miri.** `cargo +nightly miri test` already carries **138** of the ignores (measured
-2026-09-18 on this line) — the **137** `cfg_attr` sites whose cfg is `miri` (134) or
-`any(miri, debug_assertions)` (3), plus `miri_fixed_loop`'s one plain ignore. The `miri` sites run
+**Leg: Miri.** `cargo +nightly miri test` already carries **141** of the ignores (measured
+2026-09-18 on this line, after the A7 merge) — the **140** `cfg_attr` sites whose cfg is `miri`
+(135) or `any(miri, debug_assertions)` (5), plus `miri_fixed_loop`'s one plain ignore. The `miri` sites run
 *natively* in both profiles and are skipped only under Miri; the `any(miri, debug_assertions)`
 sites run natively in RELEASE only — their leg is the physics release run below, and after the A7
 lane there are five of them, not three. All 32 of the sites added since 2026-09-17 landed here,
 which is why this figure moved and the two above it did not. The two remaining `cfg_attr` sites are
 not Miri's: `profiling/reduce.rs`'s
 `not(debug_assertions)` and `tb_neg_m2w_block_reference.rs`'s `not(all(miri, feature = …))`. None of
-the 138 belong to either leg above.
+the 141 belong to either leg above.
 
 **Leg: physics release — the debug-ignored `slow:` tests.** Five tests are ignored in every debug
 build and under Miri by `#[cfg_attr(any(miri, debug_assertions), ignore = "slow: …")]`, so none of
@@ -255,9 +258,10 @@ the baselines the split is compared against), two *deferred milestones* that are
 M2's JCGT cubic lands (`brick_field_is_conservative_lower_bound`,
 `trilinear_reconstruct_is_a_tight_lower_bound_in_r1`), and one *timing probe* documented "NOT a CI
 gate" (`no_starvation_every_worker_makes_progress`). None of those six carries a vocabulary prefix.
-**A further 22 sites do carry one** (21 `deferred:`, 1 `generator:`, measured 2026-09-17), in
-`boyko_ecs` (9), `boyko_serialize` (5), `boyko_physics` (6 — five of them the A4/A7 lane's), and
-`boyko_ui` (2); each is red or silent by design and belongs to no routine leg either. 28 is a floor,
+**A further 18 sites do carry one** (17 `deferred:`, 1 `generator:`, measured 2026-09-18 after the
+A7 merge), in `boyko_ecs` (9), `boyko_serialize` (5), `boyko_physics` (2 — the flicker generator and
+the AVX2 signed-zero proptest; the A7 lane's four red-first tests are no longer plain ignores), and
+`boyko_ui` (2); each is red or silent by design and belongs to no routine leg either. 24 is a floor,
 not a census: the 147 plain reasons that carry no prefix have not been classified.
 
 ⚠️ **The device-free leg is one test, and it is an explicit invocation rather than a filter,
@@ -285,11 +289,11 @@ a custom `#[global_allocator]` — where `miri-slow` means it would finish, give
 A6 lane's, all `cfg_attr(miri, …)`), `generator`, `deferred`, `flaky`. **The claim that the tree
 maps onto it "exactly" was true of a 143-site tree and is not true now:** that mapping (135
 `gpu*`/`feature`, 1 `solo`, 1 `miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky`) sums to 143
-against **172** plain sites today.
-The migration has started at the sites, not in this list: **25 of the 172 plain reasons already
-carry a prefix** — 21 `deferred:`, 2 `gpu-windowed:`, 1 `slow:`, 1 `generator:` (measured
-2026-09-17; at HEAD 17 / 2 / 1 / 0, so the A4/A7 lane's five are the newest sample) — and the other
-147 do not. So the migration is still mechanical *per site*, and afterwards each leg is a `grep` and
+against **168** plain sites today.
+The migration has started at the sites, not in this list: **21 of the 168 plain reasons already
+carry a prefix** — 17 `deferred:`, 2 `gpu-windowed:`, 1 `slow:`, 1 `generator:` (measured
+2026-09-18 after the A7 merge, which removed four `deferred:` plain sites by resolving them) — and
+the other 147 do not. So the migration is still mechanical *per site*, and afterwards each leg is a `grep` and
 every new ignore picks its own leg at the site; what it is not is bookkeeping already done.
 
 ⚠️ **One prefix is already being used against its own definition, and a mechanical leg built from
