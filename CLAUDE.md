@@ -179,9 +179,13 @@ The repair belongs in those two crates, not in the gate.
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **321 sites (178 unconditional +
-143 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-19 on this line after the colored-solver-default
-lane merged.** The last move, 320 → 321, is that lane's `simd_solve_on_off_bit_identical`, a
+The four commands above run **none** of the `#[ignore]`d tests — **328 sites (178 unconditional +
+150 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-19 on the parallel-narrowphase lane after
+its L2 calibration.** The last move, 321 → 328, is that calibration's seven
+`cfg_attr(miri, "miri-slow: …")` sites in `broadphase_select_p3.rs`: `GRID_LO`/`GRID_HI` moved from
+96/192 to 2,700/3,000, so the six existing tests, which size their scenes from the band, now step
+2,692–3,016 spheres, and the new G-L2-1 steps the 1,241-body Jolt pyramid. The move before it,
+320 → 321, is the colored-solver-default lane's `simd_solve_on_off_bit_identical`, a
 `cfg_attr(any(miri, debug_assertions), "slow: …")` site. The move before it, 310 → 320, is the
 boot-validation lane's ten `gpu-windowed:` device tests: Gate A's driver and six workers in
 `boot_validation_clean.rs`, and the shadow gate's two drivers and one worker in
@@ -221,23 +225,26 @@ it, per-binary with `--test-threads=1`. It covered **135 tests** when it was wri
 `boyko_app`, `boyko_render` and `boyko_rhi_vulkan`; **that count has NOT been re-taken on this
 line**, and it cannot be re-derived from the reason strings (see the ⚠ below), so it is left as the
 historical figure rather than guessed forward. What IS mechanical today: those three crates hold
-**145 of the 172 plain sites** (`boyko_app` 88, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
-2026-09-17), which is the population this leg is drawn from, not the leg itself. Four of them need a
+**155 of the 178 plain sites** (`boyko_app` 98, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
+2026-09-19; 145 of 172 on 2026-09-17, the ten since being the boot-validation lane's `gpu-windowed:`
+tests in `boyko_app`), which is the population this leg is drawn from, not the leg itself. Four of them need a
 non-default cargo feature and are not even *compiled* otherwise (`--features hwrt` ×3,
 `--features spec_constant_smoke` ×1); most of the rest additionally sit behind `#![cfg(windows)]`
 and vanish on Linux. There is no single command — each binary has its own env-var protocol in its
 module header (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
-**Leg: Miri.** `cargo +nightly miri test` already carries **142** of the ignores (measured
-2026-09-19 on the colored-solver-default lane) — the **141** `cfg_attr` sites whose cfg is `miri`
-(135) or `any(miri, debug_assertions)` (6), plus `miri_fixed_loop`'s one plain ignore. The `miri` sites run
+**Leg: Miri.** `cargo +nightly miri test` already carries **149** of the ignores (measured
+2026-09-19 on the parallel-narrowphase lane after its L2 calibration) — the **148** `cfg_attr` sites
+whose cfg is `miri` (142) or `any(miri, debug_assertions)` (6), plus `miri_fixed_loop`'s one plain
+ignore. The `miri` sites run
 *natively* in both profiles and are skipped only under Miri; the `any(miri, debug_assertions)`
 sites run natively in RELEASE only — their leg is the physics release run below; there are six of
-them since the colored-solver-default lane (five after the A7 lane, three before it). All 32 of the sites added since 2026-09-17 landed here,
+them since the colored-solver-default lane (five after the A7 lane, three before it). All 32 of the
+A6 lane's sites (2026-09-17) landed here, and so did the L2 calibration's seven `miri-slow:` sites,
 which is why this figure moved and the two above it did not. The two remaining `cfg_attr` sites are
 not Miri's: `profiling/reduce.rs`'s
 `not(debug_assertions)` and `tb_neg_m2w_block_reference.rs`'s `not(all(miri, feature = …))`. None of
-the 142 belong to either leg above.
+the 149 belong to either leg above.
 
 **Leg: physics release — the debug-ignored `slow:` tests.** Six tests are ignored in every debug
 build and under Miri by `#[cfg_attr(any(miri, debug_assertions), ignore = "slow: …")]`, so none of
@@ -250,12 +257,12 @@ pile's creep (defect A7). Their leg is the physics release run:
 cargo test --release -p boyko-physics --no-fail-fast
 ```
 
-In it `sleep_settles_box_piles` must print `running 12 tests` and `11 passed; 0 failed; 1 ignored`
-(the one ignore is its `generator:`); that binary takes ~80 s, ~73 s of it A7-R1 (msvc,
+In it `sleep_settles_box_piles` must print `running 13 tests` and `12 passed; 0 failed; 1 ignored`
+(measured 2026-09-19; the one ignore is its `generator:`); that binary takes ~80 s, ~73 s of it A7-R1 (msvc,
 2026-09-18). `-- --ignored` in a debug build is NOT their leg: the debug build is exactly where
 they are ignored, and it would run them unoptimized.
 
-**At least 28 ignored tests belong to no leg at all**, and must not be swept into one. Six were
+**At least 24 ignored tests belong to no leg at all**, and must not be swept into one. Six were
 enumerated when this section was written: three *generators* that assert nothing and emit source to
 paste (`dump_maximal_frame_barrier_stream`, `dump_vb_unsplit_barrier_streams`,
 `dump_vb_split_barrier_streams` — the second's own doc warns that running it casually re-measures
@@ -272,7 +279,7 @@ not a census: the 147 plain reasons that carry no prefix have not been classifie
 ⚠️ **The device-free leg is one test, and it is an explicit invocation rather than a filter,
 because the partition CANNOT be derived from the reason strings.** A keyword classifier over
 `{GPU, RTX, Vulkan, windowed, device, dispatch}` put 10 on the device-free side — of the 143 plain
-sites the tree held when the experiment was run, 172 today — and **8 of those 10 are wrong**, wrong
+sites the tree held when the experiment was run, 178 today — and **8 of those 10 are wrong**, wrong
 in the direction that produces a green:
 
 - `negative_chained_barrier_hazard` and `a5_gpu_off_vs_on_wall_clock_ab` **do** need a device; their

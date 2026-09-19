@@ -153,7 +153,8 @@ cargo bench -p boyko-physics --bench colored_solve -- solve_step
 # 4. broadphase crossover — this is what CALIBRATES GRID_LO / GRID_HI.
 cargo bench -p boyko-physics --bench broadphase
 #    report the n where grid crosses all_pairs, and the same for the disparity fixture.
-#    Compare against GRID_LO=96 / GRID_HI=192, which are labelled UNMEASURED at their site.
+#    Compare against GRID_LO=2700 / GRID_HI=3000, labelled [MEASURED 2026-09-19, P0b §8] at
+#    their site, where a const assert keeps GRID_HI >= the 2,978-body disparity crossover.
 ```
 
 ⚠ **Pass no `RUSTFLAGS`** — see §1. Any bench header still telling you to is stale.
