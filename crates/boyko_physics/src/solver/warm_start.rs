@@ -22,6 +22,14 @@
 //!    FRESHLY-ZEROED `write` table, in deterministic manifold order;
 //! 3. swaps `read` ↔ `write` at frame end.
 //!
+//! A contact of a FROZEN (sleeping) island is not solved, so it has no converged
+//! impulse this frame. The colored solver re-inserts its entry from `read` under
+//! its current-row key, after the solved contacts and in ascending manifold
+//! order, so every entry is still rewritten every frame and the island wakes
+//! with the impulses it froze with (B1). Which frozen keys are carried depends on
+//! `read`'s key set (a miss drops the entry), never on its slot layout, so the
+//! determinism below still holds.
+//!
 //! Because the write table is a pure function of *this frame's* contact set
 //! (cleared then refilled in manifold order, no insertion history carried over),
 //! it is bit-deterministic regardless of the previous frame's occupancy — the
@@ -208,9 +216,14 @@ fn shift_for(len: usize) -> u32 {
 /// One side of the double buffer (the solver owns a `read` + a `write`). The
 /// backing `Vec` capacity is reused across frames; [`rebuild`](Self::rebuild)
 /// clears and resizes it (growing only when the contact count rises), so the
-/// steady state allocates nothing. Probing is a pure function of the key
-/// (Fibonacci-hashed linear probe), so a fixed key set lands in fixed slots
-/// regardless of insertion order — the determinism property.
+/// steady state allocates nothing. The home slot is a pure function of the key
+/// (Fibonacci hash) and collisions are resolved by a linear probe, so two
+/// properties hold for a fixed set of DISTINCT keys: the value a lookup returns
+/// depends only on the key set, not on the insertion order, while the slot each
+/// key lands in depends on the insertion SEQUENCE (a colliding key takes the next
+/// free slot, which an earlier insert may have filled). Bit-identical slot
+/// contents therefore need a deterministic insertion sequence, which the solvers'
+/// canonical store provides — the determinism property.
 pub struct WarmStartTable {
     /// The slots; length is always a power of two (`mask = len - 1`). Empty
     /// slots carry the [`EMPTY`] sentinel key. Backed by a [`ScratchColumn`]
@@ -274,6 +287,26 @@ impl WarmStartTable {
         self.shift = shift_for(len);
     }
 
+    /// The table's slot count (a power of two). A table holding `n` entries is
+    /// within its design load `≤ 0.5` while `2 · n ≤ slot_len()`.
+    #[inline]
+    pub fn slot_len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Test hook: every slot, empty ones included, in slot order, so a gate can
+    /// compare two tables' layouts bit for bit.
+    #[cfg(test)]
+    pub fn raw_slots(&self) -> &[WarmEntry] {
+        self.slots.as_read_slice()
+    }
+
+    /// Test hook: the number of occupied (non-[`EMPTY`]) slots.
+    #[cfg(test)]
+    pub fn occupied(&self) -> usize {
+        self.slots.as_read_slice().iter().filter(|e| e.key != EMPTY).count()
+    }
+
     /// The first probe slot for `key` — `(key · GOLDEN_64) >> shift`. The linear
     /// `+1` probe step lives in [`insert`](Self::insert) / [`get`](Self::get),
     /// NOT here (folding it in would skip the true home slot).
@@ -296,8 +329,9 @@ impl WarmStartTable {
     /// Linear-probes from the `home` slot to the first empty slot (or an
     /// existing entry for the same key, which it overwrites). Because the table
     /// is freshly zeroed each frame and the caller inserts each live key exactly
-    /// once in a fixed order, the resulting occupancy is a pure function of the
-    /// key set — independent of any previous frame.
+    /// once in a fixed order, the resulting slot layout is a pure function of that
+    /// insertion sequence, independent of any previous frame's occupancy; the
+    /// value a lookup returns is a function of the key set alone.
     ///
     /// # Panics (debug only)
     ///

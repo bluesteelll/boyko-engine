@@ -42,6 +42,11 @@ boyko-log = { path = "../boyko_log" }
 # depends only on `boyko_ecs` + `boyko_math` + `boyko_macros` + `boyko_utils` —
 # never on `boyko_physics` — so `boyko_physics -> boyko_scene` adds no cycle.
 boyko-scene = { path = "../boyko_scene" }
+# The physics step's own profiling zones (`src/profiling.rs`): `declare_zone!` / `zone!` and the
+# counter push the per-stage profile of the Jolt parity campaign reads. NOT a new node in the
+# graph -- `boyko-ecs` above already depends on `boyko_diag`, which has an empty `[dependencies]`,
+# so this edge makes the use visible here rather than adding a crate to the build.
+boyko-diag = { path = "../boyko_diag" }
 
 # Alloc A/B — optional bench-only global allocator, gated behind the
 # `bench-alloc` feature (OFF by default), mirroring `boyko_ecs`'s Phase X.E
@@ -89,6 +94,23 @@ harness = false
 # The census's attribution binary — the same counter, so the same reason.
 name = "alloc_frame_attribution"
 path = "tests/alloc_frame_attribution.rs"
+harness = false
+
+[[test]]
+# The physics profiling zones' exact per-step counts. `harness = false` is load-bearing: the arm
+# mask, the lane rings, the zone accumulators and the profiler's world bind are process-wide, so
+# the test must be the only thing in its process (libtest would run other physics tests beside
+# it and inflate the exact counts), and the bind admits one world per process.
+name = "profiling_zone_counts"
+path = "tests/profiling_zone_counts.rs"
+harness = false
+
+[[test]]
+# Arming the profiler changes no simulation bit, with armed samples > 0 and disarmed pushes = 0.
+# Its own process for the same reason as `profiling_zone_counts`, plus one more: the disarmed
+# run must happen while nothing in the process has ever armed.
+name = "profiling_bit_identity"
+path = "tests/profiling_bit_identity.rs"
 harness = false
 
 [[bench]]

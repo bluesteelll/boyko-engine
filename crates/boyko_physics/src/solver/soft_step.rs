@@ -362,7 +362,7 @@ impl SoftStepSolver {
         // Warm-seed diagnostic (defect A): the carried count is taken only on a step whose
         // rows changed; the unchanged step does no per-manifold work for it.
         let carried_rows = *warm_start_enabled && matches!(remap, RowRemap::Rows(_));
-        let (mut seeded, mut carried) = (0u32, 0u32);
+        let (mut seeded, mut carried, mut point_hits) = (0u32, 0u32, 0u32);
 
         for m in manifolds {
             let count = m.count as usize;
@@ -445,6 +445,7 @@ impl SoftStepSolver {
                 } else {
                     None
                 };
+                point_hits += u32::from(seed.is_some());
                 // Warm-seed the accumulated impulses (zero on miss / disabled).
                 let (normal_impulse, tangent_impulse1, tangent_impulse2) = match seed {
                     Some(e) => (e.normal_impulse, e.tangent_impulse[0], e.tangent_impulse[1]),
@@ -482,6 +483,11 @@ impl SoftStepSolver {
         *warm_stats = WarmSeedStats {
             manifolds: seeded,
             translated,
+            points: out_points.len() as u32,
+            point_hits,
+            // The reference solver has no sleep path, so it never freezes a manifold.
+            carry_points: 0,
+            carry_hits: 0,
             remap_resets: warm_cursor.resets(),
         };
     }

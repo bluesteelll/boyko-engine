@@ -129,3 +129,12 @@ pub use systems::{
     physics_integrate, physics_narrowphase, physics_narrowphase_sdf, physics_solve_colored,
     physics_solve_step,
 };
+
+/// The physics step's own profiling zones: the split inside the colored solve and the per-step
+/// counters the per-stage profile reads (see the module docs for the zone table).
+pub mod profiling;
+
+// This crate declares profiling zones (`profiling`), so it names its lane region -- the one line
+// every engine crate writes. `declare_zone!` reads `crate::__BOYKO_ZONE_PARTITION` from the
+// DECLARING crate's root. Placed at the end of the file so no line the internal docs cite moves.
+boyko_diag::profiling_partition!(Engine);

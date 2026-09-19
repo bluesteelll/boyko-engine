@@ -73,6 +73,7 @@ use crate::math::Vec3;
 use crate::narrowphase::box_box::box_box_contact;
 use crate::narrowphase::feature_vertex_face;
 use crate::narrowphase::sphere_box::sphere_box_contact;
+use crate::profiling::{PHYS_BP_PAIRS, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, counter};
 use crate::resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode,
     IslandSleep, Manifolds, PhysicsConfig, SdfNarrowphaseKernel, SolverScratch,
@@ -344,6 +345,7 @@ pub fn physics_broadphase(
         pairs.pairs().windows(2).all(|w| w[0] <= w[1]),
         "invariant: broadphase pairs must be emitted in sorted (min, max) order"
     );
+    counter!(PHYS_BP_PAIRS, pairs.pairs().len() as u64);
 }
 
 /// Produces a [`Manifold`] for each overlapping pair into [`Manifolds`]
@@ -463,6 +465,16 @@ pub fn physics_narrowphase(
             }
         }
     }
+
+    // Profiling: the step's narrowphase work, counted after the loop from what it emitted,
+    // so the loop itself carries no instrument. The point sum walks the solver's manifolds
+    // only while the profiler is armed.
+    counter!(PHYS_NP_PAIRS, pairs.pairs().len() as u64);
+    counter!(PHYS_NP_MANIFOLDS, out.len() as u64);
+    counter!(
+        PHYS_NP_POINTS,
+        out.as_slice().iter().map(|m| u64::from(m.count)).sum::<u64>()
+    );
 }
 
 /// Builds the single-point sphere-sphere manifold for the dense pair `(a, b)`, or
