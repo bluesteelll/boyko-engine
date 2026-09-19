@@ -104,8 +104,8 @@ fn scene(n: usize) -> Vec<BodyState> {
 /// that still measures the old container reads GREEN across exactly the change it
 /// was pointed at.
 ///
-/// The arm end-to-end is covered by `jolt_parity_pyramid`, which never sets
-/// `PhysicsConfig::broadphase` and therefore runs the DEFAULT `AllPairs` arm
+/// The arm end-to-end is covered by `jolt_parity_pyramid`, whose cfg-A sets
+/// `PhysicsConfig::broadphase = AllPairs` explicitly (cfg-B sets `Grid`) and runs it
 /// through the real system.
 fn all_pairs(bodies: &[BodyState], out: &mut ContactPairs) {
     let mut out = out.pairs_build();

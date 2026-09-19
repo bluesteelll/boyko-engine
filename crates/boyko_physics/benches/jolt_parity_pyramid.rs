@@ -1,115 +1,650 @@
-//! Jolt-parity pyramid: the SAME SCENE, run through boyko's FULL physics step, so
-//! the two engines' parallel scaling can be compared on this machine instead of
-//! against a published number measured on someone else's.
+//! Jolt parity pyramid: the FIXED-WINDOW RUNNER.
 //!
-//! # What is identical, exactly
+//! This is the runner of the physics perf campaign's P0 (`docs/physics/perf-campaign/01-PLAN-REV1.md`
+//! §1–§2 and implementation step 6, amended by `00-RULINGS.md`). It replaces the Criterion bench
+//! that stood here, whose timed window was broken (H1): 20 warm steps, then time-sampled iterations
+//! on a world that was never reset, so the stretch of the collapse it timed depended on W and
+//! `T(1)/T(W)` compared different windows. `docs/MEASUREMENT-QUEUE.md` §10 is the run sheet that
+//! drives it.
 //!
-//! Every geometric and integration parameter is transcribed from Jolt's own
-//! `PerformanceTest/PyramidScene.h` and `PerformanceTest.cpp` (v5.3.0):
+//! # What one run is
 //!
-//! * floor — a STATIC box with half-extents `(50, 1, 50)` centred at `(0, -1, 0)`;
-//! * boxes — half-extents `(1, 1, 1)`, no convex radius, `cBoxSize = 2.0`,
-//!   `cBoxSeparation = 0.5`, `cPyramidHeight = 15`;
-//! * the placement loop, index for index, including the odd-layer half-box offset;
-//! * **1240 dynamic bodies** + 1 static floor;
-//! * gravity `(0, -9.81, 0)` — already both engines' default, so this is a
-//!   coincidence worth stating rather than an alignment;
-//! * `dt = 1/60`, one step per `Update` (Jolt's `cDeltaTime`, `collision_steps = 1`);
-//! * sleeping DISABLED, which is what Jolt's scene forces (`mAllowSleeping = false`)
-//!   to keep the large island awake — and is boyko's default anyway.
+//! **One world per process** (rulings, open question 1): the profiler's store binds one world per
+//! process and refuses a second with `E9204`, while that world's fold then returns silently. So the
+//! runner builds exactly one world, the measured one, and never a throwaway (the Criterion bench's
+//! `build(1)` anti-vacuity world is gone; the body count is checked on the measured world).
 //!
-//! # ⚠ What CANNOT be made identical, and why the metric is a RATIO
+//! The world is spawned, then stepped `--steps` times from t = 0 with **no warm-up**, one `Instant`
+//! pair around each `Schedule::run` and nothing else inside it. That is Jolt's own timed window
+//! (`PerformanceTest.cpp`: 500 `Update`s from `StartTest`, each timed). The runner reports Jolt's
+//! metric over `--window` (steps / Σ t) and writes every step's wall time to the CSV, from which
+//! the driver takes sub-windows such as [0, 100) and [100, 500).
 //!
-//! The two solvers are different families. Jolt runs 10 velocity + 2 position
-//! iterations inside one collision step; boyko runs 4 TGS-soft substeps each with
-//! 1 + 2 relaxation sweeps. There is no assignment of one engine's iteration
-//! counts to the other's that means the same thing, so an absolute
-//! steps-per-second comparison would be comparing two different amounts of work
-//! and calling it a speed difference.
+//! Everything the runner reads between steps — the profiler fold, the receipts (manifold and pair
+//! counts, the top box's height, the awake count) and the anti-vacuity recount — happens AFTER the
+//! step's `Instant` pair closes. The disarmed and armed runs read the same receipts, so the only
+//! difference between them is the arming, the fold and the per-zone snapshot.
 //!
-//! Therefore the comparable quantity is **parallel scaling** — `T(1) / T(N)` — and
-//! efficiency per core derived from it. That ratio divides out each engine's own
-//! per-step constant, so it survives the iteration-count mismatch that an absolute
-//! number does not. Both engines are built for the same ISA baseline (AVX2 / FMA /
-//! LZCNT / TZCNT / F16C, no AVX-512; Jolt prints its set at startup and boyko's
-//! worktree pins `-C target-cpu=x86-64-v3`).
+//! # Scenes (`--scene`)
 //!
-//! # ⚠ And what this measures about boyko specifically
+//! | scene | bodies | layer gap (`--gap` default) | friction | what it is |
+//! |---|---|---|---|---|
+//! | `jolt` | 1240 + floor | 0.5 | 0.2 | Jolt's `PyramidScene.h`, index for index |
+//! | `rest` | 1240 + floor | 0 | 0.5 | `benches/sleeping_pipeline.rs`'s `pyramid_sleeping_off` pile: the same pyramid exactly touching, the A7-R1/R2 scene |
+//! | `s16` | 16 + floor | 0 | 0.5 | a single tower of 16 of the same boxes: the small-scene regression guard |
 //!
-//! The colored solve and the parallel dispatch are OPT-IN and ship OFF
-//! (`PhysicsConfig::{colored, parallel_solve, parallel_broadphase}` all default
-//! `false`). This bench turns them on. That is the configuration a game would
-//! choose for a pile like this, but it is not what a default world runs, and the
-//! numbers must never be quoted as "boyko's default physics".
+//! Transcribed from Jolt v5.3.0 (`PerformanceTest/PyramidScene.h`, `PerformanceTest.cpp`): a
+//! static floor box of half-extents (50, 1, 50) at (0, −1, 0); boxes of half-extent 1 with no
+//! convex radius, `cBoxSize = 2`, `cBoxSeparation = 0.5`, `cPyramidHeight = 15`; the placement
+//! loop including the odd-layer half-box offset; gravity (0, −9.81, 0); `dt = 1/60` with one
+//! collision step per `Update`. Friction is Jolt's default 0.2 on the `jolt` scene (H2): Jolt
+//! combines √(0.2·0.2) and boyko max(0.2, 0.2), which are equal. Jolt's 0.05 damping is removed on
+//! Jolt's side by the parity patch (H3), because boyko has no rigid-body damping and adding an
+//! engine feature to match a benchmark was rejected. The `jolt` scene holds exactly 1240 dynamic
+//! bodies, checked on the measured world: a drift there means the two engines no longer run the
+//! same scene.
+//!
+//! # Configurations (`--cfg`, `--solver`)
+//!
+//! The runner sets every knob it depends on explicitly, so a change of a shipped default (the
+//! colored solver and `simd_solve` becoming defaults is in flight on another lane) cannot change
+//! what a row measures:
+//!
+//! * `--cfg a` (cfg-A, H7): the colored solve; `parallel_solve = W > 1` (or forced on by
+//!   `--parallel-solve`); `broadphase = AllPairs` under `Manual` selection; `simd_solve` off.
+//!   `parallel_broadphase` follows `parallel_solve`, as in the Criterion bench, and does nothing
+//!   here: it is read only on the `Grid` path, and there only from `MIN_PARALLEL_BODIES` = 4096
+//!   bodies up (tree report C1 — the Criterion bench's comment claiming otherwise was wrong).
+//! * `--cfg b` (cfg-B): cfg-A plus `Grid` plus `simd_solve`. Both changes are bit-identical by
+//!   construction (`production_grid_equals_all_pairs`; the O7 bit suite), so cfg-A and cfg-B must
+//!   end in equal pose bytes: `--pose-out` on one run and `--expect-pose` on the other assert it.
+//! * `--cfg default` (the default): `PhysicsConfig::default()` as this tree ships it, except that
+//!   `--parallel-solve` and `--sleeping` force their knobs on. The `rest` rows use it.
+//! * `--solver reference` wires `add_physics_systems::<SoftStepSolver>` instead of
+//!   `add_physics_colored_solve` (R-ref, which prices D1). It takes `--cfg default` only, and no
+//!   sleeping, parallel solve or canary, none of which exists on that path.
+//!
+//! `substeps`, `relax_iterations`, `simd` and the soft-contact constants stay at the tree's
+//! defaults and are printed in the summary.
+//!
+//! # The profile (`--arm-profiler`)
+//!
+//! An armed run binds the process's profiler to the measured world, inserts and arms the store,
+//! and folds after every step, outside the timed pair. Every system span and every physics zone
+//! (`boyko_physics::profiling`) is then diffed per step and written to the CSV in nanoseconds
+//! (the clock's calibrated ticks-per-ns is printed). The driving thread claims a diagnostics lane
+//! first, because the fold's own `__fold` span is pushed from it and a push from an unclaimed
+//! thread is counted as a dropped sample.
+//!
+//! **Per-step anti-vacuity (ruling W4).** Each step, every zone's sample count is compared with
+//! its structural expectation, recomputed from the world rather than from the solver's columns:
+//! each system 1; `phys_solve_build`, `phys_restitution`, `phys_store`, `phys_write_back` 1;
+//! `phys_gravity`, `phys_warm_apply`, `phys_integrate`, `phys_pass_biased` = substeps;
+//! `phys_pass_relax` = substeps × relax; `phys_color_wide` / `phys_color_narrow` = (wide / narrow
+//! colors) × sweeps, the class recomputed from `ConstraintGraph` and `Manifolds` with the frozen
+//! islands' manifolds excluded exactly as the solve excludes them; the sleep zones 1 / 2 / 1 when
+//! sleeping is on; each counter once, with its value equal to the recomputed slots, pairs,
+//! manifolds and points. A step that differs is VOID: the CSV marks it, the summary names the first
+//! one, and the process exits 3. On the reference solver every in-solve zone must read zero.
+//! A disarmed run must push nothing at all into any lane (the ring traffic over every lane and both
+//! regions is compared before and after), or it too is void.
+//!
+//! Also per step, armed: `waves` (wide color spans: the solve's `pool.scope` dispatches when
+//! `parallel_solve` is on), the executor gap `g = wall − Σ system spans`, the unzoned residue
+//! `u = solve span − Σ in-solve zones` and `r = Σ pass spans − Σ color spans` (plan §2 identity,
+//! O2). The driver applies the closure rules to them; the runner only reports.
+//!
+//! # Thread counts (rulings, open question 2)
+//!
+//! boyko at `--workers W` runs a pool of W worker threads, plus the thread that calls
+//! `Schedule::run`, which becomes the pool's dispatcher. A system that is not exclusive runs on a
+//! worker, and while it runs the dispatcher is parked in the executor's step 5 (`schedule.rs`,
+//! "park until a worker unparks us"): it does not steal the solver's chunk tasks, whose joiner is
+//! the worker running the solve. Jolt at `-t=W` runs W − 1 job threads plus the calling thread,
+//! which executes jobs while it waits on a barrier. So both run W threads through the parallel
+//! work. The runner does not assume this; it records a witness per armed step: the samples pending
+//! on the dispatcher's lane against the physics zones the solve pushed. If the solve ran on the
+//! dispatcher, all of those samples land on its lane, and `threads.solve_on_dispatcher_steps` in
+//! the summary counts such steps.
+//!
+//! # The canary (`--canary-frac F --canary-ref-ns T`)
+//!
+//! Adds one system, `.after(narrowphase).before(build_graph)`, that spins F × T ns (J-C: F = 0.05
+//! and T the pass's J-A mean step time at the same W, which the driver passes). Every other
+//! physics system is ordered against it, so it sits on the critical path at every W: the step's
+//! wall time must rise by the spin, and its own system span must read it. The ordering uses the
+//! stage indices `add_physics_colored_solve` returns: `PhysicsStageKeys` documents each as its
+//! stage's `SystemKey` inner index, and `SystemKey`'s field is public while the type is not
+//! nameable outside the kernel, so the key is built by writing that index into a copy of the
+//! canary's own key.
+//!
+//! # Flags
+//!
+//! ```text
+//! --scene jolt|rest|s16        required; without it the binary runs its self-check (below)
+//! --workers W                  pool size (default 1)
+//! --steps N                    steps from spawn (default 500)
+//! --window A..B                the summary's window, A <= B <= N (default 0..N)
+//! --gap G                      layer gap (default per scene)
+//! --solver colored|reference   (default colored)
+//! --cfg a|b|default            (default default)
+//! --parallel-solve             force parallel_solve on (J-P1 at W=1; R at W=8)
+//! --sleeping                   sleeping on
+//! --threshold T                sleep threshold (speed², with --sleeping)
+//! --frozen-by K                void unless every dynamic row is frozen on step K (R-S: 300)
+//! --arm-profiler               the armed profile run
+//! --canary-frac F              with --canary-ref-ns T: the canary spins F*T ns
+//! --canary-ref-ns T
+//! --csv PATH                   the per-step CSV
+//! --pose-out PATH              write the final pose bytes (every dynamic body's full state)
+//! --expect-pose PATH           compare the final pose bytes with a file; exit 4 if they differ
+//! --label TEXT                 echoed into the summary
+//! --bench                      ignored (cargo bench passes it)
+//! ```
+//!
+//! # Output
+//!
+//! * stdout: a few readable lines, then one line `SUMMARY {json}` for the driver. The pose hash is
+//!   FNV-1a 64 over the final pose bytes: every dynamic body's `RigidBody` (position, linear
+//!   velocity, rotation, angular velocity) as little-endian `f32` bits, in spawn order.
+//! * `--csv`: one row per step. Always `step, wall_ns, manifolds, pairs, top_y, awake`; armed also
+//!   `void, colors, wide_colors, waves, g_ns, u_ns, r_ns, sys_sum_ns, disp_lane, worker_lane_max`
+//!   and, per system and per physics zone, `<name>_ns` and `<name>_n` (counters: `<name>` is the
+//!   value). `awake` is blank when sleeping is off.
+//! * exit code: 0 ok; 2 bad flags; 3 void (anti-vacuity, frozen-by, disarmed ring traffic,
+//!   dropped samples); 4 `--expect-pose` mismatch; 101 panic.
+//!
+//! # Self-check (no `--scene`)
+//!
+//! `cargo test --all-targets` runs this binary with libtest's arguments, and `cargo bench` with
+//! `--bench`. Without `--scene` it therefore ignores its arguments and runs a small self-check —
+//! the `s16` scene, W = 1, 3 steps, disarmed — so the workspace test run exercises it in about a
+//! second without timing anything. `--list` prints nothing.
+//!
+//! # Build (boyko)
+//!
+//! ```text
+//! cargo bench --no-run --profile parity -p boyko-physics --bench jolt_parity_pyramid
+//! ```
+//!
+//! `[profile.parity]` (root `Cargo.toml`) inherits `release` — fat LTO, default codegen units, the
+//! shipped profile (ruling W1). Every number names its profile. msvc host, no `RUSTFLAGS` (it would
+//! replace the `x86-64-v3` baseline in `.cargo/config.toml`). The exe is run by path, never through
+//! cargo. `BOYKO_PROFILE=shipping` builds the one disarmed `shipping` row (O6); `--arm-profiler` is
+//! refused on a build whose tier folds the zones.
+//!
+//! # Build (Jolt)
+//!
+//! `benches/jolt_parity/pyramid_scene.patch` applies to Jolt v5.3.0 and v5.6.0 alike. It:
+//!
+//! * sets `mLinearDamping = mAngularDamping = 0` in `PyramidScene.h` (H3);
+//! * adds `-no_pair_cache`: `PhysicsSettings::mUseBodyPairContactCache = false` (H10);
+//! * adds `-allow_sleep`, threaded into `StartTest` through `PerformanceTestScene::SetAllowSleeping`
+//!   (the scene hard-codes `mAllowSleeping = false` per body and only `-no_sleep` existed; O5). With
+//!   it, `-f`'s per-frame CSV gains an `Active Bodies` column, the awake count O5 compares tails on;
+//! * adds `-receipt` (untimed; H8): a counting `ContactListener` writes
+//!   `receipt_<quality>_th<N>.csv` with, per frame, the manifolds and points it reported (added +
+//!   persisted, cache hits included), the active body count and the top box's y;
+//! * prints one `boyko-parity-patch` line naming the options in force.
+//!
+//! ```text
+//! # WinLibs MinGW-w64 (g++, POSIX threads, UCRT) first on PATH: its bin directory holds
+//! # c++.exe, gcc.exe and mingw32-make.exe.
+//! cd D:/tmp/jolt/JoltPhysics            # the existing shallow clone at v5.3.0
+//! git worktree add --detach D:/tmp/jolt/wt-v5.3.0-parity v5.3.0
+//! git -C D:/tmp/jolt/wt-v5.3.0-parity apply <repo>/crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch
+//! cmake -S D:/tmp/jolt/wt-v5.3.0-parity/Build -B D:/tmp/jolt/build-v5.3.0-dist -G "MinGW Makefiles" \
+//!       -DCMAKE_BUILD_TYPE=Distribution -DTARGET_UNIT_TESTS=OFF -DTARGET_HELLO_WORLD=OFF \
+//!       -DTARGET_SAMPLES=OFF -DTARGET_VIEWER=OFF
+//! cmake --build D:/tmp/jolt/build-v5.3.0-dist --target PerformanceTest -j 6
+//! # the exe imports libstdc++-6.dll and libwinpthread-1.dll (which imports libgcc_s_seh-1.dll):
+//! # copy the three from the MinGW bin directory next to it, so a run by path needs no PATH.
+//! # The same with -DCMAKE_BUILD_TYPE=Release into build-v5.3.0-release (the -p stage shares).
+//! # v5.6.0: `git fetch --depth 1 origin tag v5.6.0` in the clone, a worktree at v5.6.0, the same
+//! # patch and recipe into build-v5.6.0-dist. It needed no extra option on this host; its new
+//! # compute options (JPH_USE_DX12 / _VK / _MTL / _CPU_COMPUTE) stay at their default ON and the
+//! # driver's manifest records them (plan open question 2: recorded, never patched away).
+//! ```
+//!
+//! The compiler installation is the one the 2026-09-10 binary's `CMakeCache.txt` names (g++ 16.1.0
+//! on 2026-09-19), and the configure matches it option for option: Distribution, LTO
+//! (`INTERPROCEDURAL_OPTIMIZATION`), and the AVX2/FMA/F16C/LZCNT/TZCNT set that is boyko's
+//! `x86-64-v3`. `tools/physics_parity/driver.py manifest` records every binary's sha256, the
+//! runtime DLLs beside it, its compiler, its CMake options and whether its source tree carries
+//! exactly this patch (H6). Run: `PerformanceTest.exe -s=Pyramid -q=Discrete -t=W -f` in a fresh
+//! working directory (it writes `per_frame_discrete_th<W>.csv` there). `-q=Discrete` only halves
+//! the runtime: `PyramidScene::StartTest` never reads the motion quality (O4). `-no_pair_cache` is
+//! NOT simulation-identical to the default run (its final hash differs after 5 steps): the cache
+//! replays manifolds, so Δ_J prices a different trajectory as well as the skipped work.
+//!
+//! # What cannot be made identical
+//!
+//! The two solvers are different families: Jolt runs 10 velocity + 2 position iterations per step,
+//! boyko 4 TGS-soft substeps of 1 + 2 sweeps — 12 sweeps each, different work per sweep. Each
+//! engine runs its own defaults (H9); the report carries time per manifold-sweep beside the ratio.
+//! Jolt keeps speculative contacts (0.02 m) and reduces manifolds, so the contact sets differ;
+//! `-receipt` and this runner's `manifolds` column measure by how much (H8). Jolt's body-pair
+//! cache stays on as an engine feature; `-no_pair_cache` prices it (H10).
 
-#![allow(clippy::missing_const_for_thread_local)]
-
-// Alloc A/B: opt-in low-variance allocator for A/B signal extraction, the same
-// arm `bench_bevy_vs_boyko/benches/comparison_v2.rs` carries (Phase X.E).
-// OFF by default (`cargo bench` keeps the production system heap for honest
-// absolutes); `cargo bench --features bench-alloc` swaps in mimalloc, which
-// is far more deterministic and exposes structural signals the system heap
-// masks (the documented ±20-30% variance source). Here the question is whether
-// the heap traffic of a parallel step costs time: a gap that grows with W would
-// mean cross-thread frees limit scaling, a flat gap only the malloc/free
-// instructions. Measured 2026-09-10: no gap at any W. On this tree (thread-pool
-// Stage 3b present) a step makes ~332 allocations at W=8, same-thread, not the
-// ~2.7k stealer-freed cells of the pre-3b pool the diagnostic was written for;
-// docs/OPEN-QUESTIONS.md records both. See docs/BENCHMARKING.md.
+// Alloc A/B: opt-in low-variance allocator, the same arm `bench_bevy_vs_boyko/benches/
+// comparison_v2.rs` carries (Phase X.E). OFF by default, so a run measures the production system
+// heap; `--features bench-alloc` swaps in mimalloc. Measured 2026-09-10 on this bench's Criterion
+// predecessor: no effect at any W (docs/OPEN-QUESTIONS.md, "the system heap against mimalloc").
 #[cfg(feature = "bench-alloc")]
 #[global_allocator]
 static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::sync::Arc;
+use std::fmt::Write as _;
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
+use boyko_diag::lane::{LANE_COUNT, LANE_DISPATCHER, claim_lane};
+use boyko_diag::profiling_abi::{ZoneHandle, zone_id};
+use boyko_diag::sample::{Region, overflow, pending};
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::entity::entity::Entity;
+use boyko_ecs::ecs::core::profiling::{
+    ArmOutcome, Profiler, ProfilerConfig, SYSTEM_ZONES_COMPILED, bind_world, fold_frame,
+};
 use boyko_ecs::ecs::core::schedule::{Schedule, ScheduleBuilder};
+use boyko_ecs::ecs::core::system::Res;
 use boyko_ecs::ecs::core::time::FixedTime;
-use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use boyko_macros::Resource;
+use boyko_threadpool::ThreadPoolBuilder;
 
 use boyko_physics::components::{
     Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
-use boyko_physics::plugin::add_physics_colored_solve;
-use boyko_physics::resources::PhysicsConfig;
+use boyko_physics::plugin::{PhysicsStageKeys, add_physics_colored_solve, add_physics_systems};
+use boyko_physics::profiling::{
+    COUNTER_ZONES, PHYS_BP_PAIRS, PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY,
+    PHYS_INTEGRATE, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_PASS_BIASED,
+    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE,
+    PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY,
+    PHYS_WRITE_BACK, SPAN_ZONES, WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
+};
+use boyko_physics::resources::{
+    BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
+    PhysicsConfig, SolverScratch,
+};
+use boyko_physics::solver::SoftStepSolver;
 
-// ── Jolt PyramidScene.h constants, transcribed ───────────────────────────────
+// ── Scene constants (Jolt `PyramidScene.h`, transcribed) ─────────────────────
 
-/// `cBoxSize` — the pitch between neighbouring boxes in a layer.
+/// `cBoxSize`: the pitch between neighbouring boxes in a layer.
 const BOX_SIZE: f32 = 2.0;
-/// `cBoxSeparation` — the vertical gap added on top of `cBoxSize` per layer.
-const BOX_SEPARATION: f32 = 0.5;
-/// `cHalfBoxSize` — the box half-extent on every axis.
+/// `cHalfBoxSize`: every box's half-extent on every axis.
 const HALF_BOX: f32 = 0.5 * BOX_SIZE;
-/// `cPyramidHeight` — the number of layers.
+/// `cBoxSeparation`: the `jolt` scene's default layer gap.
+const JOLT_SEPARATION: f32 = 0.5;
+/// `cPyramidHeight`: the number of layers, 1240 boxes.
 const PYRAMID_HEIGHT: i32 = 15;
-
+/// Dynamic bodies in the pyramid.
+const PYRAMID_BODIES: usize = 1240;
+/// Boxes in the `s16` tower.
+const TOWER_BODIES: usize = 16;
 /// The floor's half-extents, from Jolt's `BoxShape(Vec3(50, 1, 50))`.
 const FLOOR_HALF_EXTENTS: Vec3 = Vec3::new(50.0, 1.0, 50.0);
-
+/// Jolt's default friction (`BodyCreationSettings::mFriction`), the `jolt` scene's (H2).
+const JOLT_FRICTION: f32 = 0.2;
+/// The friction of the `rest` and `s16` scenes: `sleeping_pipeline.rs`'s and A7-R2's.
+const REST_FRICTION: f32 = 0.5;
 /// Jolt's `cDeltaTime`.
 const DT: f32 = 1.0 / 60.0;
+/// A unit-density cube of half-extent 1: m = 8.
+const BOX_INV_MASS: f32 = 0.125;
+/// Its inverse inertia, uniform on the diagonal: 1 / (m/12 · (2² + 2²)).
+const BOX_INV_INERTIA: f32 = 0.1875;
 
-/// Spawns one body through the raw `create_entity` path (the `Bundle` derive is
-/// consumable only through `Commands`), mirroring the seam tests' fixture.
-///
-/// `simulated` gates whether the integrate / solve stages advance the row: the
-/// floor is spawned WITHOUT it, which is how a static body is expressed here.
-fn spawn_body(
-    world: &mut EcsMaster,
-    body: RigidBody,
-    mass: RigidBodyMass,
-    collider: Collider,
-    simulated: bool,
-) {
-    // SAFETY-adjacent note: `as_bytes` reads a `#[repr(C)]` POD component as its
-    // own bytes for the raw column write; the slice cannot outlive the value.
-    fn as_bytes<T>(value: &T) -> &[u8] {
-        unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) }
+// ── Runner constants ──────────────────────────────────────────────────────────
+
+/// What the summary names the runner, so a receipt says which runner shape produced a row.
+const RUNNER_ID: &str = "jolt_parity_pyramid fixed-window runner v1";
+/// Exit code: bad flags.
+const EXIT_USAGE: u8 = 2;
+/// Exit code: the run is void.
+const EXIT_VOID: u8 = 3;
+/// Exit code: `--expect-pose` found different pose bytes.
+const EXIT_POSE_MISMATCH: u8 = 4;
+/// `RigidBody`'s thirteen `f32`s, as bytes: one body's share of the pose bytes.
+const POSE_BYTES_PER_BODY: usize = 13 * 4;
+/// FNV-1a 64 offset basis.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+/// FNV-1a 64 prime.
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+/// The self-check's step count.
+const SELF_CHECK_STEPS: usize = 3;
+
+// ── Command line ──────────────────────────────────────────────────────────────
+
+/// The scene a run spawns.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SceneKind {
+    /// Jolt's pyramid.
+    Jolt,
+    /// The exactly touching pyramid (`sleeping_pipeline.rs`'s `pyramid_sleeping_off`).
+    Rest,
+    /// A 16-box tower.
+    S16,
+}
+
+impl SceneKind {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "jolt" => Some(Self::Jolt),
+            "rest" => Some(Self::Rest),
+            "s16" => Some(Self::S16),
+            _ => None,
+        }
     }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Jolt => "jolt",
+            Self::Rest => "rest",
+            Self::S16 => "s16",
+        }
+    }
+
+    fn default_gap(self) -> f32 {
+        match self {
+            Self::Jolt => JOLT_SEPARATION,
+            Self::Rest | Self::S16 => 0.0,
+        }
+    }
+
+    fn friction(self) -> f32 {
+        match self {
+            Self::Jolt => JOLT_FRICTION,
+            Self::Rest | Self::S16 => REST_FRICTION,
+        }
+    }
+
+    fn bodies(self) -> usize {
+        match self {
+            Self::Jolt | Self::Rest => PYRAMID_BODIES,
+            Self::S16 => TOWER_BODIES,
+        }
+    }
+}
+
+/// Which solver pipeline is wired.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SolverKind {
+    /// `add_physics_colored_solve`.
+    Colored,
+    /// `add_physics_systems::<SoftStepSolver>`.
+    Reference,
+}
+
+/// Which configuration the run sets (see the module docs).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CfgKind {
+    /// cfg-A.
+    A,
+    /// cfg-B.
+    B,
+    /// The tree's `PhysicsConfig::default()`.
+    Default,
+}
+
+/// The parsed command line.
+#[derive(Debug)]
+struct Args {
+    workers: usize,
+    steps: usize,
+    window: Option<(usize, usize)>,
+    scene: SceneKind,
+    gap: f32,
+    solver: SolverKind,
+    cfg: CfgKind,
+    parallel_solve: bool,
+    sleeping: bool,
+    threshold: Option<f32>,
+    frozen_by: Option<usize>,
+    arm_profiler: bool,
+    canary_frac: Option<f64>,
+    canary_ref_ns: Option<u64>,
+    csv: Option<PathBuf>,
+    pose_out: Option<PathBuf>,
+    expect_pose: Option<PathBuf>,
+    label: Option<String>,
+    raw: Vec<String>,
+}
+
+/// What `main` does with the command line.
+enum Mode {
+    /// A measured run.
+    Run(Box<Args>),
+    /// No `--scene`: the self-check (or nothing, under `--list`).
+    SelfCheck { list: bool },
+}
+
+/// Prints `msg` and the usage line to stderr; the caller exits with [`EXIT_USAGE`].
+#[cold]
+#[inline(never)]
+fn usage_error(msg: &str) -> ExitCode {
+    eprintln!("jolt_parity_pyramid: {msg}");
+    eprintln!(
+        "usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] \
+         [--gap G] [--solver colored|reference] [--cfg a|b|default] [--parallel-solve] \
+         [--sleeping] [--threshold T] [--frozen-by K] [--arm-profiler] [--canary-frac F \
+         --canary-ref-ns T] [--csv PATH] [--pose-out PATH] [--expect-pose PATH] [--label TEXT]"
+    );
+    ExitCode::from(EXIT_USAGE)
+}
+
+fn parse_num<T: std::str::FromStr>(flag: &str, value: Option<String>) -> Result<T, String> {
+    let value = value.ok_or_else(|| format!("{flag} needs a value"))?;
+    value.parse().map_err(|_| format!("{flag}: cannot parse {value:?}"))
+}
+
+fn parse_window(value: Option<String>) -> Result<(usize, usize), String> {
+    let value = value.ok_or("--window needs a value A..B")?;
+    let (a, b) = value
+        .split_once("..")
+        .ok_or_else(|| format!("--window: expected A..B, got {value:?}"))?;
+    let a = a.parse().map_err(|_| format!("--window: cannot parse {a:?}"))?;
+    let b = b.parse().map_err(|_| format!("--window: cannot parse {b:?}"))?;
+    Ok((a, b))
+}
+
+fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
+    if !raw.iter().any(|a| a == "--scene") {
+        return Ok(Mode::SelfCheck { list: raw.iter().any(|a| a == "--list") });
+    }
+    let mut scene = None;
+    let mut workers = 1usize;
+    let mut steps = 500usize;
+    let mut window = None;
+    let mut gap = None;
+    let mut solver = SolverKind::Colored;
+    let mut cfg = CfgKind::Default;
+    let mut parallel_solve = false;
+    let mut sleeping = false;
+    let mut threshold = None;
+    let mut frozen_by = None;
+    let mut arm_profiler = false;
+    let mut canary_frac = None;
+    let mut canary_ref_ns = None;
+    let mut csv = None;
+    let mut pose_out = None;
+    let mut expect_pose = None;
+    let mut label = None;
+
+    let mut it = raw.iter().cloned();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--bench" => {}
+            "--scene" => {
+                let v = it.next().ok_or("--scene needs a value")?;
+                scene = Some(SceneKind::parse(&v).ok_or_else(|| format!("--scene: unknown {v:?}"))?);
+            }
+            "--workers" => workers = parse_num("--workers", it.next())?,
+            "--steps" => steps = parse_num("--steps", it.next())?,
+            "--window" => window = Some(parse_window(it.next())?),
+            "--gap" => gap = Some(parse_num::<f32>("--gap", it.next())?),
+            "--solver" => {
+                solver = match it.next().as_deref() {
+                    Some("colored") => SolverKind::Colored,
+                    Some("reference") => SolverKind::Reference,
+                    other => return Err(format!("--solver: expected colored|reference, got {other:?}")),
+                }
+            }
+            "--cfg" => {
+                cfg = match it.next().as_deref() {
+                    Some("a") => CfgKind::A,
+                    Some("b") => CfgKind::B,
+                    Some("default") => CfgKind::Default,
+                    other => return Err(format!("--cfg: expected a|b|default, got {other:?}")),
+                }
+            }
+            "--parallel-solve" => parallel_solve = true,
+            "--sleeping" => sleeping = true,
+            "--threshold" => threshold = Some(parse_num::<f32>("--threshold", it.next())?),
+            "--frozen-by" => frozen_by = Some(parse_num::<usize>("--frozen-by", it.next())?),
+            "--arm-profiler" => arm_profiler = true,
+            "--canary-frac" => canary_frac = Some(parse_num::<f64>("--canary-frac", it.next())?),
+            "--canary-ref-ns" => canary_ref_ns = Some(parse_num::<u64>("--canary-ref-ns", it.next())?),
+            "--csv" => csv = Some(PathBuf::from(it.next().ok_or("--csv needs a path")?)),
+            "--pose-out" => pose_out = Some(PathBuf::from(it.next().ok_or("--pose-out needs a path")?)),
+            "--expect-pose" => {
+                expect_pose = Some(PathBuf::from(it.next().ok_or("--expect-pose needs a path")?));
+            }
+            "--label" => label = Some(it.next().ok_or("--label needs a value")?),
+            other => return Err(format!("unknown argument {other:?}")),
+        }
+    }
+
+    let scene = scene.ok_or("--scene needs a value")?;
+    let args = Args {
+        workers,
+        steps,
+        window,
+        scene,
+        gap: gap.unwrap_or_else(|| scene.default_gap()),
+        solver,
+        cfg,
+        parallel_solve,
+        sleeping,
+        threshold,
+        frozen_by,
+        arm_profiler,
+        canary_frac,
+        canary_ref_ns,
+        csv,
+        pose_out,
+        expect_pose,
+        label,
+        raw,
+    };
+    validate(&args)?;
+    Ok(Mode::Run(Box::new(args)))
+}
+
+/// Refuses every combination a row could be mislabelled by.
+fn validate(a: &Args) -> Result<(), String> {
+    if a.workers == 0 || a.steps == 0 {
+        return Err("--workers and --steps must be at least 1".into());
+    }
+    if let Some((lo, hi)) = a.window
+        && !(lo < hi && hi <= a.steps)
+    {
+        return Err(format!("--window {lo}..{hi} is not a non-empty range inside 0..{}", a.steps));
+    }
+    if !a.gap.is_finite() || a.gap < 0.0 {
+        return Err(format!("--gap {} must be finite and >= 0", a.gap));
+    }
+    if a.solver == SolverKind::Reference {
+        if a.cfg != CfgKind::Default {
+            return Err("--solver reference takes --cfg default only: cfg-A/B are colored".into());
+        }
+        if a.sleeping || a.parallel_solve || a.canary_frac.is_some() {
+            return Err(
+                "--solver reference has no sleeping, no parallel solve and no build_graph stage \
+                 for the canary to precede"
+                    .into(),
+            );
+        }
+    }
+    if a.threshold.is_some() && !a.sleeping {
+        return Err("--threshold needs --sleeping".into());
+    }
+    if let Some(k) = a.frozen_by {
+        if !a.sleeping {
+            return Err("--frozen-by needs --sleeping".into());
+        }
+        if k == 0 || k > a.steps {
+            return Err(format!("--frozen-by {k} must name a step in 1..={}", a.steps));
+        }
+    }
+    match (a.canary_frac, a.canary_ref_ns) {
+        (None, None) => {}
+        (Some(f), Some(t)) => {
+            if !(f > 0.0 && f < 1.0) || t == 0 {
+                return Err(format!("--canary-frac {f} must be in (0, 1) and --canary-ref-ns {t} > 0"));
+            }
+        }
+        _ => return Err("--canary-frac and --canary-ref-ns go together".into()),
+    }
+    if a.arm_profiler && !(ZONES_COMPILED && SYSTEM_ZONES_COMPILED) {
+        return Err(format!(
+            "--arm-profiler on a build whose profile ({}) folds the zones: an armed run would \
+             record nothing",
+            boyko_diag::profile::PROFILE_NAME
+        ));
+    }
+    if let Some(p) = &a.expect_pose
+        && !p.is_file()
+    {
+        return Err(format!("--expect-pose: {} is not a file", p.display()));
+    }
+    Ok(())
+}
+
+// ── The scene ─────────────────────────────────────────────────────────────────
+
+/// Views a `#[repr(C)]` POD component as its bytes for the raw `create_entity` path.
+fn as_bytes<T>(value: &T) -> &[u8] {
+    // SAFETY: `value` is a live, initialised `#[repr(C)]` POD component borrowed for the returned
+    // slice's lifetime; the slice covers exactly its `size_of::<T>()` bytes, read-only, which is
+    // the layout the component pool stores for `T`.
+    unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) }
+}
+
+/// Spawns one box at rest into the `RigidBodyBundle` archetype. A dynamic one (`dynamic`) is
+/// enabled as `Simulated`; the floor is not, which is how a static body is expressed here.
+fn spawn_box(world: &mut EcsMaster, position: Vec3, friction: f32, dynamic: bool) -> Entity {
+    let body = RigidBody {
+        position,
+        linear_velocity: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        angular_velocity: Vec3::ZERO,
+    };
+    let (mass, half_extents) = if dynamic {
+        (
+            RigidBodyMass {
+                inv_inertia: Mat3::from_diagonal(Vec3::new(
+                    BOX_INV_INERTIA,
+                    BOX_INV_INERTIA,
+                    BOX_INV_INERTIA,
+                )),
+                inv_mass: BOX_INV_MASS,
+                restitution: 0.0,
+                friction,
+            },
+            Vec3::new(HALF_BOX, HALF_BOX, HALF_BOX),
+        )
+    } else {
+        (
+            RigidBodyMass { inv_inertia: Mat3::ZERO, inv_mass: 0.0, restitution: 0.0, friction },
+            FLOOR_HALF_EXTENTS,
+        )
+    };
+    let collider = Collider { shape: ColliderShape::Box { half_extents }, layer: 1, mask: 1 };
     let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
     let e = world
         .create_entity(
@@ -120,141 +655,864 @@ fn spawn_body(
                 (Collider::component_id(), as_bytes(&collider)),
             ],
         )
-        .expect("invariant: RigidBodyBundle archetype accepts the three columns");
-    if simulated {
+        .expect("construction: the RigidBodyBundle archetype accepts the three columns");
+    if dynamic {
         world.enable::<Simulated>(e);
     }
+    e
 }
 
-/// Builds Jolt's pyramid, index for index. Returns the dynamic body count.
-fn spawn_jolt_pyramid(world: &mut EcsMaster) -> usize {
-    // Floor: static (inv_mass 0, zero inverse inertia), not `Simulated`.
-    spawn_body(
-        world,
-        RigidBody {
-            position: Vec3::new(0.0, -1.0, 0.0),
-            linear_velocity: Vec3::ZERO,
-            rotation: Quat::IDENTITY,
-            angular_velocity: Vec3::ZERO,
-        },
-        RigidBodyMass {
-            inv_inertia: Mat3::ZERO,
-            inv_mass: 0.0,
-            restitution: 0.0,
-            friction: 0.5,
-        },
-        Collider {
-            shape: ColliderShape::Box { half_extents: FLOOR_HALF_EXTENTS },
-            layer: 1,
-            mask: 1,
-        },
-        false,
-    );
-
-    let mut n = 0usize;
-    for i in 0..PYRAMID_HEIGHT {
-        let lo = i / 2;
-        let hi = PYRAMID_HEIGHT - (i + 1) / 2;
-        for j in lo..hi {
-            for k in lo..hi {
-                let odd = if i & 1 != 0 { HALF_BOX } else { 0.0 };
-                let position = Vec3::new(
-                    -(PYRAMID_HEIGHT as f32) + BOX_SIZE * j as f32 + odd,
-                    1.0 + (BOX_SIZE + BOX_SEPARATION) * i as f32,
-                    -(PYRAMID_HEIGHT as f32) + BOX_SIZE * k as f32 + odd,
-                );
-                spawn_body(
-                    world,
-                    RigidBody {
-                        position,
-                        linear_velocity: Vec3::ZERO,
-                        rotation: Quat::IDENTITY,
-                        angular_velocity: Vec3::ZERO,
-                    },
-                    RigidBodyMass {
-                        // A unit-density cube of half-extent 1: m = 8, and the
-                        // inertia of a box is m/12 * (h^2 + w^2) per axis = 8/12 * 8.
-                        // Inverse of that, uniform on the diagonal.
-                        inv_inertia: Mat3::from_diagonal(Vec3::new(0.1875, 0.1875, 0.1875)),
-                        inv_mass: 0.125,
-                        restitution: 0.0,
-                        friction: 0.5,
-                    },
-                    Collider {
-                        shape: ColliderShape::Box {
-                            half_extents: Vec3::new(HALF_BOX, HALF_BOX, HALF_BOX),
-                        },
-                        layer: 1,
-                        mask: 1,
-                    },
-                    true,
-                );
-                n += 1;
+/// Spawns the floor and the scene's dynamic bodies. Returns the dynamic bodies in spawn order;
+/// the last one is the scene's top box.
+fn spawn_scene(world: &mut EcsMaster, scene: SceneKind, gap: f32) -> Vec<Entity> {
+    let friction = scene.friction();
+    spawn_box(world, Vec3::new(0.0, -1.0, 0.0), friction, false);
+    let mut boxes = Vec::with_capacity(scene.bodies());
+    match scene {
+        SceneKind::Jolt | SceneKind::Rest => {
+            // Jolt's placement loop, index for index.
+            for i in 0..PYRAMID_HEIGHT {
+                let lo = i / 2;
+                let hi = PYRAMID_HEIGHT - (i + 1) / 2;
+                for j in lo..hi {
+                    for k in lo..hi {
+                        let odd = if i & 1 != 0 { HALF_BOX } else { 0.0 };
+                        let position = Vec3::new(
+                            -(PYRAMID_HEIGHT as f32) + BOX_SIZE * j as f32 + odd,
+                            1.0 + (BOX_SIZE + gap) * i as f32,
+                            -(PYRAMID_HEIGHT as f32) + BOX_SIZE * k as f32 + odd,
+                        );
+                        boxes.push(spawn_box(world, position, friction, true));
+                    }
+                }
+            }
+        }
+        SceneKind::S16 => {
+            for i in 0..TOWER_BODIES {
+                let position = Vec3::new(0.0, 1.0 + (BOX_SIZE + gap) * i as f32, 0.0);
+                boxes.push(spawn_box(world, position, friction, true));
             }
         }
     }
-    n
+    boxes
 }
 
-fn pool(workers: usize) -> Arc<ThreadPool> {
-    ThreadPoolBuilder::new().num_threads(workers).build()
+/// The canary's spin, in ns.
+#[derive(Resource)]
+struct CanarySpin {
+    ns: u64,
 }
 
-/// Builds a world with the pyramid and the FULL colored physics pipeline wired.
-fn build(workers: usize) -> (EcsMaster, Schedule, usize) {
+/// The canary system: a busy wait of [`CanarySpin::ns`] on whichever thread runs it.
+fn parity_canary(spin: Res<CanarySpin>) {
+    let target = Duration::from_nanos(spin.ns);
+    let start = Instant::now();
+    while start.elapsed() < target {
+        std::hint::spin_loop();
+    }
+}
+
+/// The measured world.
+struct Rig {
+    world: EcsMaster,
+    physics: Schedule,
+    boxes: Vec<Entity>,
+}
+
+/// Sets the knobs `args` names (module docs, "Configurations").
+fn configure(cfg: &mut PhysicsConfig, args: &Args) {
+    cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
+    cfg.dt = DT;
+    match args.cfg {
+        CfgKind::A | CfgKind::B => {
+            let parallel = args.parallel_solve || args.workers > 1;
+            let b = args.cfg == CfgKind::B;
+            cfg.parallel_solve = parallel;
+            cfg.parallel_broadphase = parallel;
+            cfg.broadphase_select = BroadphaseSelectMode::Manual;
+            cfg.broadphase = if b { BroadphaseKind::Grid } else { BroadphaseKind::AllPairs };
+            cfg.simd_solve = b;
+            cfg.sleeping = args.sleeping;
+        }
+        CfgKind::Default => {
+            if args.parallel_solve {
+                cfg.parallel_solve = true;
+            }
+            if args.sleeping {
+                cfg.sleeping = true;
+            }
+        }
+    }
+    if let Some(t) = args.threshold {
+        cfg.sleep_threshold = t;
+    }
+}
+
+/// Spawns the scene and wires the schedule. The one world of the process.
+fn build(args: &Args, canary_ns: Option<u64>) -> Rig {
     let mut world = EcsMaster::new();
-    let n = spawn_jolt_pyramid(&mut world);
-    let mut builder = ScheduleBuilder::new(pool(workers));
-    let _keys = add_physics_colored_solve(&mut builder, &mut world);
-    world.insert_resource(FixedTime::new(std::time::Duration::from_secs_f32(DT)));
-    {
-        let cfg = world.resource_mut::<PhysicsConfig>();
-        cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
-        cfg.dt = DT;
-        // Opt in to the parallel paths — see the header: these ship OFF.
-        cfg.parallel_solve = workers > 1;
-        cfg.parallel_broadphase = workers > 1;
-        cfg.sleeping = false;
+    let boxes = spawn_scene(&mut world, args.scene, args.gap);
+    assert_eq!(
+        boxes.len(),
+        args.scene.bodies(),
+        "construction: the {} scene must hold exactly {} dynamic bodies; a drift means the two \
+         engines no longer run the same scene",
+        args.scene.name(),
+        args.scene.bodies()
+    );
+    let mut builder = ScheduleBuilder::new(ThreadPoolBuilder::new().num_threads(args.workers).build());
+    let keys: PhysicsStageKeys = match args.solver {
+        SolverKind::Colored => add_physics_colored_solve(&mut builder, &mut world),
+        SolverKind::Reference => add_physics_systems::<SoftStepSolver>(&mut builder, &mut world),
+    };
+    if let Some(ns) = canary_ns {
+        world.insert_resource(CanarySpin { ns });
+        let canary = builder.add_system(parity_canary);
+        // `PhysicsStageKeys` carries each stage's `SystemKey` inner index; the type is not
+        // nameable here but its field is public, so the stage keys are copies of the canary's own
+        // key with that index written in.
+        let mut after = canary.key();
+        after.0 = keys.narrowphase;
+        let mut before = canary.key();
+        before.0 = keys
+            .build_graph
+            .expect("invariant: the colored pipeline registers build_graph (validate() refuses the canary elsewhere)");
+        canary.after(after).before(before);
     }
-    let schedule = builder.build(&mut world);
-    (world, schedule, n)
+    world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
+    configure(world.resource_mut::<PhysicsConfig>(), args);
+    let physics = builder.build(&mut world);
+    Rig { world, physics, boxes }
 }
 
-fn bench_jolt_parity_pyramid(c: &mut Criterion) {
-    let mut group = c.benchmark_group("jolt_parity_pyramid");
-    group.sample_size(20);
+// ── The profile ──────────────────────────────────────────────────────────────
 
-    // Anti-vacuity: the transcribed loop must reproduce Jolt's body count exactly.
-    // If this drifts, the two engines are no longer running the same scene and
-    // every ratio below is comparing different work.
-    {
-        let (_w, _s, n) = build(1);
-        assert_eq!(
-            n, 1240,
-            "the transcribed pyramid must hold exactly Jolt's 1240 dynamic bodies"
-        );
+/// Short name of a system's `type_name`: generics dropped, last path segment.
+fn short_name(name: &str) -> String {
+    let base = name.split('<').next().unwrap_or(name);
+    base.rsplit("::").next().unwrap_or(base).to_owned()
+}
+
+/// Every zone the armed run diffs per step, in CSV column order.
+struct ZoneTable {
+    /// `(short name, id)` per system, in schedule order.
+    systems: Vec<(String, u16)>,
+    /// The solve system's index in `systems`, when the colored solve is wired.
+    solve: Option<usize>,
+    /// Ids of [`SPAN_ZONES`].
+    spans: Vec<u16>,
+    /// Ids of [`COUNTER_ZONES`].
+    counters: Vec<u16>,
+}
+
+impl ZoneTable {
+    fn new(physics: &Schedule) -> Self {
+        let systems: Vec<(String, u16)> =
+            physics.system_zones().map(|(name, id)| (short_name(name), id)).collect();
+        let solve = systems.iter().position(|(n, _)| n == "physics_solve_colored");
+        Self {
+            systems,
+            solve,
+            spans: SPAN_ZONES.iter().map(|&h| zone_id(h)).collect(),
+            counters: COUNTER_ZONES.iter().map(|&h| zone_id(h)).collect(),
+        }
     }
 
-    for workers in [1usize, 2, 4, 8, 16] {
-        group.bench_with_input(
-            BenchmarkId::new("full_step", workers),
-            &workers,
-            |b, &w| {
-                let (mut world, mut schedule, _n) = build(w);
-                // Warm: let the pile settle into its steady contact set so the
-                // timed region measures a representative step, not the first
-                // frame's graph build.
-                for _ in 0..20 {
-                    schedule.run(&mut world);
+    /// Every id, in column order: systems, spans, counters.
+    fn ids(&self) -> impl Iterator<Item = u16> + '_ {
+        self.systems
+            .iter()
+            .map(|&(_, id)| id)
+            .chain(self.spans.iter().copied())
+            .chain(self.counters.iter().copied())
+    }
+
+    fn len(&self) -> usize {
+        self.systems.len() + self.spans.len() + self.counters.len()
+    }
+}
+
+/// Position of `handle` in [`SPAN_ZONES`].
+fn span_index(handle: &ZoneHandle) -> usize {
+    SPAN_ZONES
+        .iter()
+        .position(|&h| std::ptr::eq(h, handle))
+        .expect("invariant: every physics span zone is listed in SPAN_ZONES")
+}
+
+/// Position of `handle` in [`COUNTER_ZONES`].
+fn counter_index(handle: &ZoneHandle) -> usize {
+    COUNTER_ZONES
+        .iter()
+        .position(|&h| std::ptr::eq(h, handle))
+        .expect("invariant: every physics counter is listed in COUNTER_ZONES")
+}
+
+/// One step's structure, recomputed from the world after the step: what the solve was handed,
+/// not what it built.
+#[derive(Debug, Default, Clone, Copy)]
+struct Shape {
+    colors: u64,
+    wide_colors: u64,
+    narrow_colors: u64,
+    wide_slots: u64,
+    narrow_slots: u64,
+    pairs: u64,
+    manifolds: u64,
+    points: u64,
+}
+
+/// Recomputes this step's color classes and narrowphase output. A frozen island's manifolds are
+/// excluded exactly as `build_columns` excludes them — the manifold's island is its dynamic side's
+/// — using the per-step decision `IslandSleep::is_island_frozen` reports (`end_step` does not
+/// change it, so it still describes the step that just ran).
+fn step_shape(world: &EcsMaster, colored: bool, sleeping: bool) -> Shape {
+    let manifolds = world.resource::<Manifolds>().manifolds();
+    let mut shape = Shape {
+        pairs: world.resource::<ContactPairs>().pairs().len() as u64,
+        manifolds: manifolds.len() as u64,
+        points: manifolds.iter().map(|m| u64::from(m.count)).sum(),
+        ..Shape::default()
+    };
+    if !colored {
+        return shape;
+    }
+    let graph = world.resource::<ConstraintGraph>();
+    let sleep = if sleeping { Some(world.resource::<IslandSleep>()) } else { None };
+    shape.colors = u64::from(graph.n_colors());
+    for c in 0..graph.n_colors() {
+        let slots: u32 = graph
+            .color(c)
+            .iter()
+            .map(|&mi| &manifolds[mi as usize])
+            .filter(|m| {
+                sleep.is_none_or(|s| {
+                    let isl_a = graph.island_of(m.body_a.0);
+                    let isl = if isl_a != ConstraintGraph::NO_ISLAND {
+                        isl_a
+                    } else {
+                        graph.island_of(m.body_b.0)
+                    };
+                    isl == ConstraintGraph::NO_ISLAND || !s.is_island_frozen(isl)
+                })
+            })
+            .map(|m| u32::from(m.count))
+            .sum();
+        if slots >= WIDE_COLOR_MIN_SLOTS {
+            shape.wide_colors += 1;
+            shape.wide_slots += u64::from(slots);
+        } else {
+            shape.narrow_colors += 1;
+            shape.narrow_slots += u64::from(slots);
+        }
+    }
+    shape
+}
+
+/// Σ over every lane and both regions of the samples pending and the samples refused: every push
+/// that got past a gate moves one of the two.
+fn ring_traffic() -> u64 {
+    (0..LANE_COUNT)
+        .flat_map(|lane| [Region::Engine, Region::User].map(|region| (lane, region)))
+        .map(|(lane, region)| u64::from(pending(lane, region)) + overflow(lane, region))
+        .sum()
+}
+
+/// The run's fixed structure: what the per-step expectations scale with.
+#[derive(Clone, Copy)]
+struct Structure {
+    /// The colored solve is wired (its zones exist).
+    colored: bool,
+    /// Sleeping is on (the sleep zones run, frozen manifolds are skipped).
+    sleeping: bool,
+    /// `PhysicsConfig::substeps`.
+    substeps: u64,
+    /// `PhysicsConfig::relax_iterations`.
+    relax: u64,
+}
+
+/// Checks one armed step's per-zone sample counts and counter values against `shape`. Returns
+/// the first mismatch.
+fn check_step(
+    zones: &ZoneTable,
+    counts: &[u64],
+    values: &[u64],
+    shape: &Shape,
+    st: Structure,
+) -> Result<(), String> {
+    let Structure { colored, sleeping, substeps, relax } = st;
+    let n_sys = zones.systems.len();
+    for (k, (name, _)) in zones.systems.iter().enumerate() {
+        if counts[k] != 1 {
+            return Err(format!("system `{name}` recorded {} spans, it runs once", counts[k]));
+        }
+    }
+    let sweeps = substeps * (1 + relax);
+    let c = u64::from(colored);
+    let sl = u64::from(colored && sleeping);
+    let spans = &counts[n_sys..n_sys + SPAN_ZONES.len()];
+    let expected: [(&ZoneHandle, u64); 14] = [
+        (&PHYS_SOLVE_BUILD, c),
+        (&PHYS_GRAVITY, c * substeps),
+        (&PHYS_WARM_APPLY, c * substeps),
+        (&PHYS_INTEGRATE, c * substeps),
+        (&PHYS_PASS_BIASED, c * substeps),
+        (&PHYS_PASS_RELAX, c * substeps * relax),
+        (&PHYS_COLOR_WIDE, shape.wide_colors * sweeps),
+        (&PHYS_COLOR_NARROW, shape.narrow_colors * sweeps),
+        (&PHYS_RESTITUTION, c),
+        (&PHYS_STORE, c),
+        (&PHYS_WRITE_BACK, c),
+        (&PHYS_SLEEP_BEGIN, sl),
+        (&PHYS_SLEEP_FREEZE, 2 * sl),
+        (&PHYS_SLEEP_END, sl),
+    ];
+    for &(handle, want) in &expected {
+        let got = spans[span_index(handle)];
+        if got != want {
+            return Err(format!("`{}` recorded {got} spans, the structure has {want}", handle.desc.name));
+        }
+    }
+    let base = n_sys + SPAN_ZONES.len();
+    let expected_counters: [(&ZoneHandle, u64, u64); 6] = [
+        (&PHYS_SLOTS_WIDE, c, shape.wide_slots),
+        (&PHYS_SLOTS_NARROW, c, shape.narrow_slots),
+        (&PHYS_NP_PAIRS, 1, shape.pairs),
+        (&PHYS_NP_MANIFOLDS, 1, shape.manifolds),
+        (&PHYS_NP_POINTS, 1, shape.points),
+        (&PHYS_BP_PAIRS, 1, shape.pairs),
+    ];
+    for &(handle, want_n, want_v) in &expected_counters {
+        let k = base + counter_index(handle);
+        let (n, v) = (counts[k], values[k]);
+        if (n, v) != (want_n, want_v * want_n) {
+            return Err(format!(
+                "counter `{}` recorded (samples, value) = ({n}, {v}), the step has ({want_n}, {})",
+                handle.desc.name,
+                want_v * want_n
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ── Recording ─────────────────────────────────────────────────────────────────
+
+/// What every step records, armed or not. All read after the step's `Instant` pair closed.
+struct StepRow {
+    wall_ns: u64,
+    manifolds: u64,
+    pairs: u64,
+    top_y: f32,
+    awake: Option<u64>,
+}
+
+/// What an armed step adds.
+struct ArmedRow {
+    void: bool,
+    shape: Shape,
+    waves: u64,
+    g_ns: i64,
+    u_ns: Option<i64>,
+    r_ns: i64,
+    sys_sum_ns: u64,
+    disp_lane: u64,
+    worker_lane_max: u64,
+}
+
+/// FNV-1a 64 over `bytes`.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(FNV_OFFSET, |h, &b| (h ^ u64::from(b)).wrapping_mul(FNV_PRIME))
+}
+
+/// Every dynamic body's full `RigidBody`, as little-endian `f32` bits, in spawn order.
+fn pose_bytes(world: &EcsMaster, boxes: &[Entity]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(boxes.len() * POSE_BYTES_PER_BODY);
+    for &e in boxes {
+        let b = world.get_component::<RigidBody>(e).expect("invariant: a spawned body is live");
+        let fields = [
+            b.position.x,
+            b.position.y,
+            b.position.z,
+            b.linear_velocity.x,
+            b.linear_velocity.y,
+            b.linear_velocity.z,
+            b.rotation.x,
+            b.rotation.y,
+            b.rotation.z,
+            b.rotation.w,
+            b.angular_velocity.x,
+            b.angular_velocity.y,
+            b.angular_velocity.z,
+        ];
+        for f in fields {
+            out.extend_from_slice(&f.to_bits().to_le_bytes());
+        }
+    }
+    out
+}
+
+/// Dynamic rows awake on the last step, or `None` when sleeping is off.
+fn awake_rows(world: &EcsMaster, sleeping: bool) -> Option<u64> {
+    if !sleeping {
+        return None;
+    }
+    let sleep = world.resource::<IslandSleep>();
+    let rows = world.resource::<SolverScratch>().bodies();
+    Some(
+        (0..rows.len())
+            .filter(|&r| rows[r].inv_mass != 0.0 && sleep.is_row_awake(r))
+            .count() as u64,
+    )
+}
+
+/// A JSON string literal.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A JSON number, or `null` for a non-finite value.
+fn json_f64(x: f64) -> String {
+    if x.is_finite() { format!("{x}") } else { "null".to_owned() }
+}
+
+// ── The run ───────────────────────────────────────────────────────────────────
+
+fn main() -> ExitCode {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    match parse_args(raw) {
+        Err(msg) => usage_error(&msg),
+        Ok(Mode::SelfCheck { list: true }) => ExitCode::SUCCESS,
+        Ok(Mode::SelfCheck { list: false }) => self_check(),
+        Ok(Mode::Run(args)) => run(&args),
+    }
+}
+
+/// The no-`--scene` path (module docs, "Self-check").
+fn self_check() -> ExitCode {
+    let args = Args {
+        workers: 1,
+        steps: SELF_CHECK_STEPS,
+        window: None,
+        scene: SceneKind::S16,
+        gap: SceneKind::S16.default_gap(),
+        solver: SolverKind::Colored,
+        cfg: CfgKind::A,
+        parallel_solve: false,
+        sleeping: false,
+        threshold: None,
+        frozen_by: None,
+        arm_profiler: false,
+        canary_frac: None,
+        canary_ref_ns: None,
+        csv: None,
+        pose_out: None,
+        expect_pose: None,
+        label: Some("self-check".to_owned()),
+        raw: Vec::new(),
+    };
+    println!(
+        "jolt_parity_pyramid: no --scene, so this is the self-check ({SELF_CHECK_STEPS} steps of \
+         s16, W=1, disarmed); pass --scene to run a row"
+    );
+    run(&args)
+}
+
+fn run(args: &Args) -> ExitCode {
+    let armed = args.arm_profiler;
+    let canary_ns = args
+        .canary_frac
+        .zip(args.canary_ref_ns)
+        .map(|(f, t)| (f * t as f64).round() as u64);
+    let window = args.window.unwrap_or((0, args.steps));
+
+    // The fold's own span is pushed from this thread, and a push from a thread without a lane is
+    // an `Unclaimed` drop.
+    let lane_claimed = claim_lane().is_some();
+    if armed && !lane_claimed {
+        eprintln!("jolt_parity_pyramid: no spare diagnostics lane for the driving thread");
+        return ExitCode::from(EXIT_VOID);
+    }
+
+    let traffic_before = ring_traffic();
+    let mut rig = build(args, canary_ns);
+    let colored = args.solver == SolverKind::Colored;
+    let (substeps, relax, sleeping, config_json) = {
+        let cfg = rig.world.resource::<PhysicsConfig>();
+        let json = format!(
+            "{{\"substeps\":{},\"relax_iterations\":{},\"broadphase\":{},\"broadphase_select\":{},\
+             \"simd\":{},\"simd_solve\":{},\"parallel_solve\":{},\"parallel_broadphase\":{},\
+             \"sleeping\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\"colored\":{},\
+             \"contact_hertz\":{},\"contact_damping\":{}}}",
+            cfg.substeps,
+            cfg.relax_iterations,
+            json_str(&format!("{:?}", cfg.broadphase)),
+            json_str(&format!("{:?}", cfg.broadphase_select)),
+            cfg.simd,
+            cfg.simd_solve,
+            cfg.parallel_solve,
+            cfg.parallel_broadphase,
+            cfg.sleeping,
+            json_f64(f64::from(cfg.sleep_threshold)),
+            cfg.sleep_frames,
+            cfg.colored,
+            json_f64(f64::from(cfg.contact_hertz)),
+            json_f64(f64::from(cfg.contact_damping)),
+        );
+        (u64::from(cfg.substeps), u64::from(cfg.relax_iterations), cfg.sleeping, json)
+    };
+
+    let zones = if armed {
+        bind_world(rig.world.world_id().get())
+            .expect("invariant: the runner builds exactly one world per process");
+        rig.world.insert_resource(Profiler::new());
+        let outcome = rig.world.resource_mut::<Profiler>().arm(ProfilerConfig::default());
+        assert_eq!(outcome, ArmOutcome::Armed, "invariant: the process's first arm");
+        Some(ZoneTable::new(&rig.physics))
+    } else {
+        None
+    };
+    let structure = Structure { colored, sleeping, substeps, relax };
+    let n_cols = zones.as_ref().map_or(0, ZoneTable::len);
+    let ids: Vec<u16> = zones.as_ref().map_or_else(Vec::new, |z| z.ids().collect());
+    let tpn = if armed { boyko_diag::clock::ticks_per_ns() } else { 0.0 };
+
+    let mut rows: Vec<StepRow> = Vec::with_capacity(args.steps);
+    let mut armed_rows: Vec<ArmedRow> = Vec::with_capacity(if armed { args.steps } else { 0 });
+    // Per step and column: (samples, Σ value). Spans are ticks, counters their value.
+    let mut deltas: Vec<(u64, u64)> = Vec::with_capacity(args.steps * n_cols);
+    let mut before: Vec<(u64, u64)> = vec![(0, 0); n_cols];
+    let mut counts = vec![0u64; n_cols];
+    let mut values = vec![0u64; n_cols];
+    let mut void_steps = 0usize;
+    let mut first_void: Option<String> = None;
+    let mut solve_on_dispatcher_steps = 0usize;
+    let mut first_frozen_step: Option<usize> = None;
+    let top = *rig.boxes.last().expect("invariant: every scene spawns dynamic bodies");
+
+    for step in 0..args.steps {
+        let t0 = Instant::now();
+        rig.physics.run(&mut rig.world);
+        let wall = t0.elapsed();
+        // ── Untimed from here. ──
+
+        let (disp_lane, worker_lane_max) = if armed {
+            let workers = u16::try_from(args.workers).unwrap_or(u16::MAX).min(LANE_DISPATCHER);
+            (
+                u64::from(pending(LANE_DISPATCHER, Region::Engine)),
+                (0..workers).map(|l| u64::from(pending(l, Region::Engine))).max().unwrap_or(0),
+            )
+        } else {
+            (0, 0)
+        };
+        fold_frame(&mut rig.world);
+
+        let manifolds = rig.world.resource::<Manifolds>().manifolds().len() as u64;
+        let pairs = rig.world.resource::<ContactPairs>().pairs().len() as u64;
+        let top_y = rig
+            .world
+            .get_component::<RigidBody>(top)
+            .expect("invariant: the top box is live")
+            .position
+            .y;
+        let awake = awake_rows(&rig.world, colored && sleeping);
+        if awake == Some(0) && first_frozen_step.is_none() {
+            first_frozen_step = Some(step + 1);
+        }
+        if let Some(k) = args.frozen_by
+            && step + 1 == k
+            && awake != Some(0)
+        {
+            void_steps += 1;
+            first_void.get_or_insert_with(|| {
+                format!("step {step}: --frozen-by {k}: {awake:?} dynamic rows still awake")
+            });
+        }
+        rows.push(StepRow { wall_ns: wall.as_nanos() as u64, manifolds, pairs, top_y, awake });
+
+        if let Some(zones) = &zones {
+            let profiler = rig.world.resource::<Profiler>();
+            for (k, id) in ids.iter().enumerate() {
+                let acc = profiler
+                    .lifetime(*id)
+                    .expect("invariant: every zone id of this process is inside the armed geometry");
+                counts[k] = acc.count - before[k].0;
+                values[k] = acc.total.wrapping_sub(before[k].1);
+                before[k] = (acc.count, acc.total);
+                deltas.push((counts[k], values[k]));
+            }
+            let shape = step_shape(&rig.world, colored, sleeping);
+            let verdict = check_step(zones, &counts, &values, &shape, structure);
+            let void = verdict.is_err();
+            if let Err(why) = verdict {
+                void_steps += 1;
+                first_void.get_or_insert_with(|| format!("step {step}: {why}"));
+            }
+
+            let ns = |ticks: u64| ticks as f64 / tpn;
+            let n_sys = zones.systems.len();
+            let span = |h: &ZoneHandle| n_sys + span_index(h);
+            let sys_sum: f64 = (0..n_sys).map(|k| ns(values[k])).sum();
+            let in_solve: f64 = [
+                &PHYS_SOLVE_BUILD,
+                &PHYS_GRAVITY,
+                &PHYS_WARM_APPLY,
+                &PHYS_INTEGRATE,
+                &PHYS_PASS_BIASED,
+                &PHYS_PASS_RELAX,
+                &PHYS_RESTITUTION,
+                &PHYS_STORE,
+                &PHYS_WRITE_BACK,
+                &PHYS_SLEEP_BEGIN,
+                &PHYS_SLEEP_FREEZE,
+                &PHYS_SLEEP_END,
+            ]
+            .iter()
+            .map(|h| ns(values[span(h)]))
+            .sum();
+            let passes = ns(values[span(&PHYS_PASS_BIASED)]) + ns(values[span(&PHYS_PASS_RELAX)]);
+            let colors = ns(values[span(&PHYS_COLOR_WIDE)]) + ns(values[span(&PHYS_COLOR_NARROW)]);
+            let solve_samples: u64 = (n_sys..n_sys + SPAN_ZONES.len()).map(|k| counts[k]).sum::<u64>()
+                + counts[n_sys + SPAN_ZONES.len() + counter_index(&PHYS_SLOTS_WIDE)]
+                + counts[n_sys + SPAN_ZONES.len() + counter_index(&PHYS_SLOTS_NARROW)];
+            if solve_samples > 0 && disp_lane >= solve_samples {
+                solve_on_dispatcher_steps += 1;
+            }
+            armed_rows.push(ArmedRow {
+                void,
+                shape,
+                waves: counts[span(&PHYS_COLOR_WIDE)],
+                g_ns: (wall.as_nanos() as f64 - sys_sum).round() as i64,
+                u_ns: zones.solve.map(|s| (ns(values[s]) - in_solve).round() as i64),
+                r_ns: (passes - colors).round() as i64,
+                sys_sum_ns: sys_sum.round() as u64,
+                disp_lane,
+                worker_lane_max,
+            });
+        }
+    }
+
+    // ── After the run. ──
+    let drops = rig.world.contains_resource::<Profiler>().then(|| rig.world.resource::<Profiler>().drops());
+    if let Some(d) = drops
+        && d.total() != 0
+    {
+        void_steps += 1;
+        first_void.get_or_insert_with(|| format!("the store dropped samples: {d:?}"));
+    }
+    let traffic = ring_traffic().wrapping_sub(traffic_before);
+    if !armed && traffic != 0 {
+        void_steps += 1;
+        first_void.get_or_insert_with(|| format!("the disarmed run pushed {traffic} samples"));
+    }
+
+    let pose = pose_bytes(&rig.world, &rig.boxes);
+    let pose_hash = fnv1a64(&pose);
+    let mut exit = if void_steps > 0 { EXIT_VOID } else { 0 };
+    if let Some(path) = &args.pose_out
+        && let Err(e) = std::fs::write(path, &pose)
+    {
+        eprintln!("jolt_parity_pyramid: writing {}: {e}", path.display());
+        exit = EXIT_USAGE;
+    }
+    let pose_verdict = match &args.expect_pose {
+        None => "none".to_owned(),
+        Some(path) => match std::fs::read(path) {
+            Err(e) => {
+                exit = EXIT_USAGE;
+                format!("unreadable: {e}")
+            }
+            Ok(want) if want == pose => "match".to_owned(),
+            Ok(want) => {
+                exit = exit.max(EXIT_POSE_MISMATCH);
+                let first = want
+                    .chunks(POSE_BYTES_PER_BODY)
+                    .zip(pose.chunks(POSE_BYTES_PER_BODY))
+                    .position(|(a, b)| a != b);
+                format!(
+                    "mismatch: {} vs {} bytes, first differing body {first:?}",
+                    want.len(),
+                    pose.len()
+                )
+            }
+        },
+    };
+
+    if let Some(path) = &args.csv
+        && let Err(e) = std::fs::write(path, csv_text(&rows, &armed_rows, zones.as_ref(), &deltas, tpn))
+    {
+        eprintln!("jolt_parity_pyramid: writing {}: {e}", path.display());
+        exit = EXIT_USAGE;
+    }
+
+    // The summary.
+    let win = &rows[window.0..window.1];
+    let win_ns: u64 = win.iter().map(|r| r.wall_ns).sum();
+    let win_mean = win_ns as f64 / win.len() as f64;
+    let steps_per_s = win.len() as f64 / (win_ns as f64 * 1e-9);
+    let last = rows.last().expect("invariant: --steps >= 1");
+    let waves_total: u64 = armed_rows.iter().map(|r| r.waves).sum();
+    let disp_max = armed_rows.iter().map(|r| r.disp_lane).max().unwrap_or(0);
+    let awake_after = args.frozen_by.map(|k| rows[k - 1..].iter().filter_map(|r| r.awake).max().unwrap_or(0));
+
+    println!(
+        "jolt_parity_pyramid: scene {} gap {} friction {} bodies {} workers {} solver {:?} cfg {:?} \
+         profile {} armed {armed}",
+        args.scene.name(),
+        args.gap,
+        args.scene.friction(),
+        rig.boxes.len(),
+        args.workers,
+        args.solver,
+        args.cfg,
+        boyko_diag::profile::PROFILE_NAME,
+    );
+    println!(
+        "steps {} window {}..{} final manifolds {} pairs {} top_y {} pose_hash {pose_hash:#018x}",
+        args.steps, window.0, window.1, last.manifolds, last.pairs, last.top_y
+    );
+    if armed {
+        println!(
+            "profile: void steps {void_steps}, waves {waves_total}, solve on dispatcher {solve_on_dispatcher_steps} of {} steps",
+            armed_rows.len()
+        );
+    }
+    if let Some(why) = &first_void {
+        println!("VOID: {why}");
+    }
+
+    let mut s = String::with_capacity(2048);
+    let _ = write!(
+        s,
+        "{{\"runner\":{},\"label\":{},\"args\":[{}],\"profile_name\":{},\"zones_compiled\":{},\
+         \"system_zones_compiled\":{},\"debug_assertions\":{},\"target_env\":{},\
+         \"scene\":{},\"gap\":{},\"friction\":{},\"bodies\":{},\"workers\":{},\"solver\":{},\
+         \"cfg\":{},\"config\":{config_json},\"armed\":{armed},\"canary_ns\":{},\
+         \"steps\":{},\"window\":[{},{}],\"window_mean_ns\":{},\"window_steps_per_s\":{},\
+         \"pose_hash\":\"{pose_hash:#018x}\",\"pose_bytes\":{},\"expect_pose\":{},\
+         \"final_manifolds\":{},\"final_pairs\":{},\"final_top_y\":{},\
+         \"void_steps\":{void_steps},\"first_void\":{},\"drops_total\":{},\
+         \"disarmed_ring_traffic\":{},\"ticks_per_ns\":{},\"waves_total\":{waves_total},\
+         \"first_frozen_step\":{},\"frozen_by\":{},\"awake_max_from_frozen_by\":{},\
+         \"threads\":{{\"pool_workers\":{},\"dispatcher\":1,\"solve_on_dispatcher_steps\":\
+         {solve_on_dispatcher_steps},\"armed_steps\":{},\"dispatcher_lane_samples_max\":{disp_max}}}}}",
+        json_str(RUNNER_ID),
+        args.label.as_deref().map_or_else(|| "null".to_owned(), json_str),
+        args.raw.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","),
+        json_str(boyko_diag::profile::PROFILE_NAME),
+        ZONES_COMPILED,
+        SYSTEM_ZONES_COMPILED,
+        cfg!(debug_assertions),
+        json_str(if cfg!(target_env = "msvc") { "msvc" } else if cfg!(target_env = "gnu") { "gnu" } else { "other" }),
+        json_str(args.scene.name()),
+        json_f64(f64::from(args.gap)),
+        json_f64(f64::from(args.scene.friction())),
+        rig.boxes.len(),
+        args.workers,
+        json_str(match args.solver {
+            SolverKind::Colored => "colored",
+            SolverKind::Reference => "reference",
+        }),
+        json_str(match args.cfg {
+            CfgKind::A => "a",
+            CfgKind::B => "b",
+            CfgKind::Default => "default",
+        }),
+        canary_ns.map_or_else(|| "null".to_owned(), |n| n.to_string()),
+        args.steps,
+        window.0,
+        window.1,
+        json_f64(win_mean),
+        json_f64(steps_per_s),
+        pose.len(),
+        json_str(&pose_verdict),
+        last.manifolds,
+        last.pairs,
+        json_f64(f64::from(last.top_y)),
+        first_void.as_deref().map_or_else(|| "null".to_owned(), json_str),
+        drops.map_or_else(|| "null".to_owned(), |d| d.total().to_string()),
+        if armed { "null".to_owned() } else { traffic.to_string() },
+        json_f64(tpn),
+        first_frozen_step.map_or_else(|| "null".to_owned(), |k| k.to_string()),
+        args.frozen_by.map_or_else(|| "null".to_owned(), |k| k.to_string()),
+        awake_after.map_or_else(|| "null".to_owned(), |k| k.to_string()),
+        args.workers,
+        armed_rows.len(),
+    );
+    println!("SUMMARY {s}");
+    ExitCode::from(exit)
+}
+
+/// The per-step CSV (module docs, "Output").
+fn csv_text(
+    rows: &[StepRow],
+    armed_rows: &[ArmedRow],
+    zones: Option<&ZoneTable>,
+    deltas: &[(u64, u64)],
+    tpn: f64,
+) -> String {
+    let n_cols = zones.map_or(0, ZoneTable::len);
+    let mut s = String::with_capacity(rows.len() * (64 + n_cols * 16));
+    s.push_str("step,wall_ns,manifolds,pairs,top_y,awake");
+    if let Some(z) = zones {
+        s.push_str(",void,colors,wide_colors,waves,g_ns,u_ns,r_ns,sys_sum_ns,disp_lane,worker_lane_max");
+        for (name, _) in &z.systems {
+            let _ = write!(s, ",sys_{name}_ns,sys_{name}_n");
+        }
+        for h in SPAN_ZONES.iter() {
+            let _ = write!(s, ",{0}_ns,{0}_n", h.desc.name);
+        }
+        for h in COUNTER_ZONES.iter() {
+            let _ = write!(s, ",{0},{0}_n", h.desc.name);
+        }
+    }
+    s.push('\n');
+    let n_ticks = zones.map_or(0, |z| z.systems.len() + z.spans.len());
+    for (i, r) in rows.iter().enumerate() {
+        let _ = write!(s, "{i},{},{},{},{},", r.wall_ns, r.manifolds, r.pairs, r.top_y);
+        if let Some(a) = r.awake {
+            let _ = write!(s, "{a}");
+        }
+        if let Some(a) = armed_rows.get(i) {
+            let _ = write!(
+                s,
+                ",{},{},{},{},{},{},{},{},{},{}",
+                u8::from(a.void),
+                a.shape.colors,
+                a.shape.wide_colors,
+                a.waves,
+                a.g_ns,
+                a.u_ns.map_or_else(String::new, |u| u.to_string()),
+                a.r_ns,
+                a.sys_sum_ns,
+                a.disp_lane,
+                a.worker_lane_max
+            );
+            for (k, &(n, v)) in deltas[i * n_cols..(i + 1) * n_cols].iter().enumerate() {
+                if k < n_ticks {
+                    let _ = write!(s, ",{},{n}", (v as f64 / tpn).round() as u64);
+                } else {
+                    let _ = write!(s, ",{v},{n}");
                 }
-                b.iter(|| {
-                    schedule.run(black_box(&mut world));
-                });
-            },
-        );
+            }
+        }
+        s.push('\n');
     }
-    group.finish();
+    s
 }
-
-criterion_group!(benches, bench_jolt_parity_pyramid);
-criterion_main!(benches);

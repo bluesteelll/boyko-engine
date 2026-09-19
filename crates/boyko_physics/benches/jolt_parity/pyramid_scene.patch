@@ -1,0 +1,242 @@
+boyko parity patch for Jolt's PerformanceTest (physics perf campaign, plan section 1: H3, H8, H10, O5).
+Applies with `git apply` to Jolt v5.3.0 and v5.6.0 (checked 2026-09-19; v5.6.0 at line offsets only).
+Build recipe, flags and what each change is for: the header of ../jolt_parity_pyramid.rs, "Build (Jolt)".
+
+  PyramidScene.h         damping 0 (boyko has no rigid-body damping); mAllowSleeping from SetAllowSleeping
+  PerformanceTestScene.h SetAllowSleeping, false for every scene that does not support it
+  PerformanceTest.cpp    -no_pair_cache, -allow_sleep (+ an Active Bodies column in -f's CSV),
+                         -receipt (a counting ContactListener: receipt_<quality>_th<N>.csv),
+                         and one "boyko-parity-patch v1" line naming the options in force
+
+Text above the first `diff --git a/PerformanceTest/PerformanceTest.cpp b/PerformanceTest/PerformanceTest.cpp
+index 15e3258..06ca0b4 100644
+--- a/PerformanceTest/PerformanceTest.cpp
++++ b/PerformanceTest/PerformanceTest.cpp
+@@ -31,6 +31,7 @@ JPH_SUPPRESS_WARNINGS_STD_BEGIN
+ #include <memory>
+ #include <cstdarg>
+ #include <filesystem>
++#include <atomic>
+ JPH_SUPPRESS_WARNINGS_STD_END
+ 
+ using namespace JPH;
+@@ -68,6 +69,30 @@ static void TraceImpl(const char *inFMT, ...)
+ #endif
+ }
+ 
++// boyko parity patch (-receipt): counts the manifolds the contact listener sees per update, cache hits
++// included (the body pair cache reports every cached manifold through OnContactPersisted). Callbacks
++// arrive from every job thread, hence the atomics. Untimed: it is only installed under -receipt.
++class ReceiptContactListener : public ContactListener
++{
++public:
++	virtual void			OnContactAdded([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, const ContactManifold &inManifold, [[maybe_unused]] ContactSettings &ioSettings) override { Count(inManifold); }
++	virtual void			OnContactPersisted([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, const ContactManifold &inManifold, [[maybe_unused]] ContactSettings &ioSettings) override { Count(inManifold); }
++
++	void					Reset()								{ mManifolds = 0; mPoints = 0; }
++	uint					GetManifolds() const				{ return mManifolds.load(memory_order_relaxed); }
++	uint					GetPoints() const					{ return mPoints.load(memory_order_relaxed); }
++
++private:
++	void					Count(const ContactManifold &inManifold)
++	{
++		mManifolds.fetch_add(1, memory_order_relaxed);
++		mPoints.fetch_add(uint(inManifold.mRelativeContactPointsOn1.size()), memory_order_relaxed);
++	}
++
++	atomic<uint>			mManifolds { 0 };
++	atomic<uint>			mPoints { 0 };
++};
++
+ // Program entry point
+ int main(int argc, char** argv)
+ {
+@@ -99,6 +124,9 @@ int main(int argc, char** argv)
+ 	unique_ptr<PerformanceTestScene> scene;
+ 	const char *validate_hash = nullptr;
+ 	int repeat = 1;
++	bool no_pair_cache = false; // boyko parity patch
++	bool allow_sleep = false; // boyko parity patch
++	bool receipt = false; // boyko parity patch
+ 	for (int argidx = 1; argidx < argc; ++argidx)
+ 	{
+ 		const char *arg = argv[argidx];
+@@ -160,6 +188,18 @@ int main(int argc, char** argv)
+ 		{
+ 			disable_sleep = true;
+ 		}
++		else if (strcmp(arg, "-no_pair_cache") == 0)
++		{
++			no_pair_cache = true;
++		}
++		else if (strcmp(arg, "-allow_sleep") == 0)
++		{
++			allow_sleep = true;
++		}
++		else if (strcmp(arg, "-receipt") == 0)
++		{
++			receipt = true;
++		}
+ 		else if (strcmp(arg, "-p") == 0)
+ 		{
+ 			enable_profiler = true;
+@@ -204,6 +244,9 @@ int main(int argc, char** argv)
+ 				  "-r: Record debug renderer output for JoltViewer\n"
+ 				  "-f: Record per frame timings\n"
+ 				  "-no_sleep: Disable sleeping\n"
++				  "-no_pair_cache: Disable the body pair contact cache (boyko parity patch)\n"
++				  "-allow_sleep: Let the Pyramid scene's bodies sleep (boyko parity patch)\n"
++				  "-receipt: Write receipt_<quality>_th<N>.csv with manifolds, points, active bodies and top box y per frame (boyko parity patch)\n"
+ 				  "-rs: Record state\n"
+ 				  "-vs: Validate state\n"
+ 				  "-validate_hash=<hash>: Validate hash (return 0 if successful, 1 if failed)\n"
+@@ -228,6 +271,19 @@ int main(int argc, char** argv)
+ 	// Output scene we're running
+ 	Trace("Running scene: %s", scene->GetName());
+ 
++	// boyko parity patch: the options in force, so every run's output names them
++	if (allow_sleep && disable_sleep)
++	{
++		Trace("-allow_sleep and -no_sleep contradict each other");
++		return 1;
++	}
++	if (allow_sleep && !scene->SetAllowSleeping(true))
++	{
++		Trace("-allow_sleep is only supported by the Pyramid scene");
++		return 1;
++	}
++	Trace("boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=%d, allow_sleep=%d, receipt=%d", no_pair_cache? 1 : 0, allow_sleep? 1 : 0, receipt? 1 : 0);
++
+ 	// Create temp allocator
+ 	TempAllocatorImpl temp_allocator(scene->GetTempAllocatorSizeMB() * 1024 * 1024);
+ 
+@@ -311,6 +367,19 @@ int main(int argc, char** argv)
+ 				PhysicsSystem physics_system;
+ 				physics_system.Init(scene->GetMaxBodies(), 0, scene->GetMaxBodyPairs(), scene->GetMaxContactConstraints(), broad_phase_layer_interface, object_vs_broadphase_layer_filter, object_vs_object_layer_filter);
+ 
++				// boyko parity patch (-no_pair_cache): price the body pair contact cache
++				if (no_pair_cache)
++				{
++					PhysicsSettings settings = physics_system.GetPhysicsSettings();
++					settings.mUseBodyPairContactCache = false;
++					physics_system.SetPhysicsSettings(settings);
++				}
++
++				// boyko parity patch (-receipt): the counting listener
++				ReceiptContactListener receipt_listener;
++				if (receipt)
++					physics_system.SetContactListener(&receipt_listener);
++
+ 				// Start test scene
+ 				scene->StartTest(physics_system, motion_quality);
+ 
+@@ -335,6 +404,23 @@ int main(int argc, char** argv)
+ 				// Optimize the broadphase to prevent an expensive first frame
+ 				physics_system.OptimizeBroadPhase();
+ 
++				// boyko parity patch (-receipt): the top box is the dynamic body with the highest starting y
++				BodyID receipt_top_body;
++				ofstream receipt_file;
++				if (receipt)
++				{
++					BodyInterface &rbi = physics_system.GetBodyInterfaceNoLock();
++					BodyIDVector receipt_ids;
++					physics_system.GetBodies(receipt_ids);
++					Real top_y = -FLT_MAX;
++					for (BodyID id : receipt_ids)
++						if (rbi.GetMotionType(id) != EMotionType::Static && rbi.GetPosition(id).GetY() > top_y)
++						{
++							top_y = rbi.GetPosition(id).GetY();
++							receipt_top_body = id;
++						}
++				}
++
+ 				// A tag used to identify the test
+ 				String tag = ToLower(motion_quality_str) + "_th" + ConvertToString(num_threads + 1);
+ 
+@@ -352,7 +438,15 @@ int main(int argc, char** argv)
+ 				if (enable_per_frame_recording)
+ 				{
+ 					per_frame_file.open(("per_frame_" + tag + ".csv").c_str(), ofstream::out | ofstream::trunc);
+-					per_frame_file << "Frame, Time (ms)" << endl;
++					per_frame_file << (allow_sleep? "Frame, Time (ms), Active Bodies" : "Frame, Time (ms)") << endl; // boyko parity patch: the awake count under -allow_sleep
++				}
++
++				// boyko parity patch (-receipt)
++				if (receipt)
++				{
++					receipt_file.open(("receipt_" + tag + ".csv").c_str(), ofstream::out | ofstream::trunc);
++					receipt_file.precision(9); // enough digits to round-trip a float
++					receipt_file << "Frame, Manifolds, Points, Active Bodies, Top Y" << endl;
+ 				}
+ 
+ 				ofstream record_state_file;
+@@ -398,7 +492,19 @@ int main(int argc, char** argv)
+ 
+ 					// Record time taken this iteration
+ 					if (enable_per_frame_recording)
+-						per_frame_file << iterations << ", " << (1.0e-6 * duration.count()) << endl;
++					{
++						if (allow_sleep) // boyko parity patch
++							per_frame_file << iterations << ", " << (1.0e-6 * duration.count()) << ", " << physics_system.GetNumActiveBodies(EBodyType::RigidBody) << endl;
++						else
++							per_frame_file << iterations << ", " << (1.0e-6 * duration.count()) << endl;
++					}
++
++					// boyko parity patch (-receipt)
++					if (receipt)
++					{
++						receipt_file << iterations << ", " << receipt_listener.GetManifolds() << ", " << receipt_listener.GetPoints() << ", " << physics_system.GetNumActiveBodies(EBodyType::RigidBody) << ", " << physics_system.GetBodyInterfaceNoLock().GetPosition(receipt_top_body).GetY() << endl;
++						receipt_listener.Reset();
++					}
+ 
+ 					// Dump profile information every 100 iterations
+ 					if (enable_profiler && iterations % 100 == 0)
+diff --git a/PerformanceTest/PerformanceTestScene.h b/PerformanceTest/PerformanceTestScene.h
+index 99fe6f5..06a6b91 100644
+--- a/PerformanceTest/PerformanceTestScene.h
++++ b/PerformanceTest/PerformanceTestScene.h
+@@ -29,6 +29,10 @@ public:
+ 	// Load assets for the scene
+ 	virtual bool			Load([[maybe_unused]] const String &inAssetPath)	{ return true; }
+ 
++	// boyko parity patch (-allow_sleep): let the next StartTest create bodies that may sleep.
++	// Returns false for a scene that does not support it, so the flag cannot be silently ignored.
++	virtual bool			SetAllowSleeping([[maybe_unused]] bool inAllowSleeping) { return false; }
++
+ 	// Start a new test by adding objects to inPhysicsSystem
+ 	virtual void			StartTest(PhysicsSystem &inPhysicsSystem, EMotionQuality inMotionQuality) = 0;
+ 
+diff --git a/PerformanceTest/PyramidScene.h b/PerformanceTest/PyramidScene.h
+index 469b902..de8b201 100644
+--- a/PerformanceTest/PyramidScene.h
++++ b/PerformanceTest/PyramidScene.h
+@@ -20,6 +20,13 @@ public:
+ 		return "Pyramid";
+ 	}
+ 
++	// boyko parity patch (-allow_sleep)
++	virtual bool			SetAllowSleeping(bool inAllowSleeping) override
++	{
++		mAllowSleeping = inAllowSleeping;
++		return true;
++	}
++
+ 	virtual void			StartTest(PhysicsSystem &inPhysicsSystem, EMotionQuality inMotionQuality) override
+ 	{
+ 		BodyInterface &bi = inPhysicsSystem.GetBodyInterface();
+@@ -41,8 +48,13 @@ public:
+ 				{
+ 					RVec3 position(Real(-cPyramidHeight + cBoxSize * j + (i & 1? cHalfBoxSize : 0.0f)), Real(1.0f + (cBoxSize + cBoxSeparation) * i), Real(-cPyramidHeight + cBoxSize * k + (i & 1? cHalfBoxSize : 0.0f)));
+ 					BodyCreationSettings settings(box_shape, position, Quat::sIdentity(), EMotionType::Dynamic, Layers::MOVING);
+-					settings.mAllowSleeping = false; // No sleeping to force the large island to stay awake
++					settings.mAllowSleeping = mAllowSleeping; // No sleeping (the default) to force the large island to stay awake
++					settings.mLinearDamping = 0.0f; // boyko parity patch: boyko has no rigid-body damping
++					settings.mAngularDamping = 0.0f;
+ 					bi.CreateAndAddBody(settings, EActivation::Activate);
+ 				}
+ 	}
++
++private:
++	bool					mAllowSleeping = false;
+ };

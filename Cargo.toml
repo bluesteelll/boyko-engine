@@ -126,6 +126,18 @@ codegen-units = 1
 # and must not be quoted as if it did.
 lto = false
 
+# The Jolt parity runner's profile (physics perf campaign, `docs/physics/perf-campaign/`
+# ruling W1): the SHIPPED codegen, because the headline boyko/Jolt ratio compares our shipped
+# build against Jolt's shipped Distribution build. `inherits = "release"` gives fat LTO with the
+# default codegen units; `bench` above (lto = false, codegen-units = 1) is a different codegen
+# configuration and the matrix above measured fat LTO + codegen-units = 1 as a regression, so
+# neither is borrowed here. Built with
+# `cargo bench --no-run --profile parity -p boyko-physics --bench jolt_parity_pyramid`; every
+# number it produces names this profile. A single-codegen-unit profile for lever A/Bs is NOT
+# defined until a lever needs one.
+[profile.parity]
+inherits = "release"
+
 [package]
 name = "boyko-engine"
 version = "0.1.0"

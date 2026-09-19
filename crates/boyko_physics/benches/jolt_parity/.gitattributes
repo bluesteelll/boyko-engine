@@ -1,0 +1,3 @@
+# The Jolt parity patch is applied with `git apply` to a foreign tree: keep it byte-exact (LF),
+# never EOL-converted on checkout, or its context lines stop matching.
+*.patch -text
