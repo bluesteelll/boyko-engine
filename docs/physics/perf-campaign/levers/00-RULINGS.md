@@ -71,3 +71,32 @@ because the pair count sizes the axis cache). Five Important remarks are substan
 - Optional O1–O5 adopted.
 - Because L10's frozen-pair skip in the broadphase is the broadphase design's C5, rev 2 of L10 is written
   against the broadphase rev 2.
+
+## Rev 2 (2026-09-19): both designs CLOSED by ruling
+
+Both second reviews found no blocking remark (broadphase: 2 Important; L10: 3 Important), each with an
+unambiguous "needed". The designs are closed; the implementing lane folds these in as rev 2.1 before its
+first commit. Order of lanes: L5 (approved above) → broadphase → L10.
+
+**Broadphase rev 2** (`broadphase/04-DESIGN-REV2.md`, review `05-REVIEW-OF-REV2.md`):
+- **W1 (the patch rule cascades on a high jumper that is the min endpoint of ≥ 2 entries):** the keep test
+  must not keep an entry with a non-monotone endpoint (jumper rows identified from `prev_row` during the
+  verify); D3.5 states the true bound; a G4 maintenance arm at 10k / 100k moves one member to the top row
+  with ≥ 2 higher-row partners under the same 2× stop rule; a unit test pins `a` for that case.
+- **W2:** anchor A is defined over the dynamic rows (or "Q is empty") and its existence is asserted
+  (A ≤ 300); a toggle-off script (sleeping on until frozen, then off with no row change) asserts
+  Δ`hint_candidates` == 0 and Δ`sleeper_rebuilds` == 0, with "drop the `cfg.sleeping` term" shown red; a void
+  in a cargo test is a red, never a pass.
+- Optional remarks adopted where cheap.
+
+**L10 rev 2** (`L10-sleeping/04-DESIGN-REV2.md`, review `05-REVIEW-OF-REV2.md`):
+- **W1:** the Tree's hint is PRE_HELD minus the prologue restore list (or `release` runs for every restore on
+  a Tree step); a debug assertion of Invariant V over `withheld` after the kind arm; the mutation
+  "prologue-restored rows left in the hint".
+- **W2:** restored runs are looked up by a key translation does not change (the t−1 ordinal through
+  `prev_row`, or local-index pairs), or every pair of a jumper-restored record is recomputed; the A2.5
+  filter runs before the A2.4 merge; the mutation "restored run searched by translated ordinal".
+- **W3:** the classify cost is bounded (R3 only for rows a record, a CAND island, the D2 scan or the SL list
+  can reach; skip the pass when nothing is held or CAND; or a narrower compare for static rows); a
+  static-heavy "not claimed slower" arm (J plus 10k statics).
+- Optional remarks adopted where cheap.
