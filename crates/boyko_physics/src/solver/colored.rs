@@ -2691,9 +2691,10 @@ impl ColoredSoftStepSolver {
     /// - `false` (O5): each color's contiguous slot span is solved slot-by-slot in
     ///   ascending order on the calling thread — BYTE-IDENTICAL to the committed O5
     ///   colored solve (the O6 0%-gate). This is the path taken when
-    ///   [`PhysicsConfig::parallel_solve`] is off OR when no
-    ///   [`ThreadPool`](boyko_threadpool::ThreadPool) is attached to the running
-    ///   thread.
+    ///   [`PhysicsConfig::parallel_solve`] is off, when the step's widest color is
+    ///   under `MIN_PARALLEL_SLOTS_PER_COLOR`, OR when the running thread's
+    ///   [`ThreadPool`](boyko_threadpool::ThreadPool) is absent or has one worker
+    ///   (the whole-step gate in `solve_colored_inner`).
     /// - `true` (O6): each color's manifold-GROUPS are partitioned into disjoint
     ///   worker chunks and dispatched across the ambient pool via `pool.scope`; the
     ///   scope-Drop join is the barrier BEFORE the next color (color `c + 1` may read
@@ -3541,8 +3542,19 @@ impl ColoredSoftStepSolver {
         // maximised over colors — read off the `color_offsets` CSR that
         // `build_columns` (above) has already filled, so it stays a single pass over
         // `n_colors + 1` u32s and no new state.
-        let parallel =
-            config.parallel_solve && self.columns.widest_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR;
+        //
+        // L4 lanes term: a pool of ONE worker has nothing to parallelise with, yet the
+        // per-color cut (`lanes × CHUNKS_PER_WORKER` chunks, `solve_color_parallel`)
+        // still yields ≥ 2 chunks at `lanes == 1` and would open a `pool.scope` for
+        // every wide color of every pass. Decided once per step here — one thread-local
+        // read, never per color — so with `parallel_solve` on by default a W=1 world
+        // runs exactly the path of `parallel_solve == false`. `num_threads()`, never
+        // `+ 1`, for the reason `BroadphaseGrid::build_parallel` gives (KE16 App-1).
+        // No pool attached ⇒ `None` ⇒ inline, as the per-color probe already did.
+        // Gated red-first by `one_worker_parallel_solve_takes_the_inline_path`.
+        let parallel = config.parallel_solve
+            && self.columns.widest_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR
+            && try_with_active_pool(|pool| pool.num_threads() >= 2) == Some(true);
 
         for _ in 0..substeps {
             // (1) Gravity integrate DYNAMIC bodies (shared O1 kernel). Single-

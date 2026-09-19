@@ -2186,6 +2186,13 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
     //
     // The chunk count is `lanes * CHUNKS_PER_WORKER` capped by work, so if the
     // budget is one cell per chunk it is roughly linear in the worker count.
+    // Since L4 the one-worker row dispatches nothing: the solver's whole-step
+    // gate refuses a one-lane dispatch, so that row reads the serial step. It is
+    // reported, never compared, because a dispatching row priced against a serial
+    // one cannot fail. The assertion compares the two rows that both dispatch,
+    // 4 workers against 2. It is strict in release, where a chunk count that
+    // does not rise with the lane count goes red, and `>=` in debug, where the
+    // two rows are equal by construction (see the assertion).
     let mut lane_points: Vec<(usize, f64)> = Vec::with_capacity(4);
     for w in [1usize, 2, 4] {
         let mut p = build_pile(w, true, 4, 2);
@@ -2212,13 +2219,35 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
         lane_points[2].0,
         lane_points[2].1
     );
-    assert!(
-        lane_points[2].1 >= lane_points[0].1,
-        "D: four workers ({:.1}) did not cost more than one ({:.1}); the per-chunk cell model \
-         predicts the chunk count rises with the lane count and it did not",
-        lane_points[2].1,
-        lane_points[0].1
-    );
+    let (four, two) = (lane_points[2].1, lane_points[1].1);
+    // Debug builds the pile at `pyramid_height()` = 10: 385 bodies, against
+    // 1240 at 15 in release. There the 2- and 4-worker rows are identical in
+    // every field (measured 2026-09-19, two runs), and that is by construction,
+    // not a defect. `solve_color_parallel` (colored.rs) spawns
+    // `min(lanes * CHUNKS_PER_WORKER, slots / MIN_SLOTS_PER_CHUNK)` chunks a
+    // color, and in that pile the work term is at most the 2-worker lane term
+    // (`2 * CHUNKS_PER_WORKER`, 12 today) for every color, so both rows spawn
+    // the same chunks. The equal rows are the evidence: a color whose work term
+    // exceeded it would get more chunks from 4 lanes than from 2. So debug
+    // asserts only `>=`. The strict form is gated by the physics release leg,
+    // `cargo test --release -p boyko-physics --no-fail-fast` (CLAUDE.md), which
+    // runs this binary at height 15, where the lane term binds.
+    if cfg!(debug_assertions) {
+        assert!(
+            four >= two,
+            "D: four workers ({four:.1}) cost less than two ({two:.1}); in debug every color is \
+             work-bound, so both rows should spawn the same chunks and cost the same (the strict \
+             form is gated in release only)"
+        );
+    } else {
+        assert!(
+            four > two,
+            "D: four workers ({four:.1}) did not cost more than two ({two:.1}); both rows \
+             dispatch, and the per-chunk cell model predicts the chunk count rises with the lane \
+             count, so it did not scale (the one-worker row takes the inline path since L4 and \
+             is not compared)"
+        );
+    }
 
     (off_mean, on_mean)
 }

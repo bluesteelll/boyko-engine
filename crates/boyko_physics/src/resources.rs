@@ -264,7 +264,7 @@ pub struct PhysicsConfig {
     /// `add_physics_colored` path it is built but NOT consumed (the O4 shape,
     /// byte-identical to the graph-free reference). The struct default is `false`.
     pub colored: bool,
-    /// Opt into the O6 PARALLEL per-color solve (default `false`).
+    /// The O6 PARALLEL per-color solve (default `true` since L4).
     ///
     /// Effective only on the colored-solve path (the
     /// [`ColoredSoftStepSolver`](crate::solver::ColoredSoftStepSolver) driven by
@@ -282,9 +282,13 @@ pub struct PhysicsConfig {
     /// the single-threaded colored solve for ANY worker count (the disjoint-body
     /// partition makes each body's accumulation independent of which worker runs
     /// which group, and the canonical IM-2b warm store is worker-count-independent).
-    /// When `false` — or when no pool is attached to the running thread — the
-    /// colored solve runs the O5 single-threaded path, BYTE-IDENTICAL to O5 (the
-    /// O6 0%-gate). Toggling it changes performance, never the result.
+    /// When `false` — or when no pool is attached to the running thread, or the
+    /// attached pool has a single worker — the colored solve runs the O5
+    /// single-threaded path, BYTE-IDENTICAL to O5 (the O6 0%-gate). The one-worker
+    /// case is decided once per step, before any color: a W=1 world with the flag on
+    /// takes exactly the path of a W=1 world with it off and opens no `pool.scope`
+    /// (gated by `one_worker_parallel_solve_takes_the_inline_path`). Toggling it
+    /// changes performance, never the result.
     pub parallel_solve: bool,
     /// Opt into the O8 per-island SLEEPING / deactivation (default `false`).
     ///
@@ -495,10 +499,12 @@ impl Default for PhysicsConfig {
             // (the campaign 0%-gate); O4 only PRODUCES the partition — the solve is
             // byte-identical whether on or off.
             colored: false,
-            // Default OFF so the colored solve runs the O5 single-threaded path,
-            // BYTE-IDENTICAL to O5 (the O6 0%-gate); the parallel dispatch is a pure
-            // opt-in speed path with a bit-identical result.
-            parallel_solve: false,
+            // Default ON since L4 (P0b §9, lever L4: with it off the wide colors run
+            // serially at every W). The result is bit-identical to the single-threaded
+            // path for any worker count, and a one-worker pool still takes that path
+            // exactly: the solver's whole-step gate refuses the dispatch below two
+            // lanes, so W=1 opens no scope.
+            parallel_solve: true,
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.
             sleeping: false,

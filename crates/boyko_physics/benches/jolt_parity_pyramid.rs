@@ -50,8 +50,9 @@
 //! colored solver and `simd_solve` became the defaults in `56c1e9e7`, 2026-09-18) cannot change
 //! what a row measures:
 //!
-//! * `--cfg a` (cfg-A, H7): the colored solve; `parallel_solve = W > 1` (or forced on by
-//!   `--parallel-solve`); `broadphase = AllPairs` under `Manual` selection; `simd_solve` off.
+//! * `--cfg a` (cfg-A, H7): the colored solve; `parallel_solve = W > 1` (`--parallel-solve` could
+//!   force it on at W = 1 until L4 retired J-P1); `broadphase = AllPairs` under `Manual` selection;
+//!   `simd_solve` off.
 //!   `parallel_broadphase` follows `parallel_solve`, as in the Criterion bench, and does nothing
 //!   here: it is read only on the `Grid` path, and there only from `MIN_PARALLEL_BODIES` = 4096
 //!   bodies up (tree report C1 — the Criterion bench's comment claiming otherwise was wrong).
@@ -59,10 +60,17 @@
 //!   construction (`production_grid_equals_all_pairs`; the O7 bit suite), so cfg-A and cfg-B must
 //!   end in equal pose bytes: `--pose-out` on one run and `--expect-pose` on the other assert it.
 //! * `--cfg default` (the default): `PhysicsConfig::default()` as this tree ships it, except that
-//!   `--parallel-solve` and `--sleeping` force their knobs on. The `rest` rows use it.
+//!   `--parallel-solve` and `--sleeping` force their knobs on. The `rest` rows use it. Since L4
+//!   that default has `parallel_solve` on, so `--parallel-solve` no longer changes a `--cfg
+//!   default` row, and such a row at W ≥ 2 dispatches its wide colors on its own.
 //! * `--solver reference` wires `add_physics_systems::<SoftStepSolver>` instead of
 //!   `add_physics_colored_solve` (R-ref, which prices D1). It takes `--cfg default` only, and no
 //!   sleeping, parallel solve or canary, none of which exists on that path.
+//!
+//! **J-P1 is retired (L4; lever rulings, L5 W2).** The solve now decides once per step that a
+//! one-worker pool runs inline, so `--parallel-solve` at W = 1 opens no scope while `waves` still
+//! counts every wide color: a J-P1 row would report ω₁ ≈ 0 with no void. `validate` refuses the
+//! combination, and ω₁ comes from a zero-work spawn/join microbench from L4 on.
 //!
 //! `substeps`, `relax_iterations`, `simd` and the soft-contact constants stay at the tree's
 //! defaults and are printed in the summary.
@@ -90,9 +98,11 @@
 //! regions is compared before and after), or it too is void.
 //!
 //! Also per step, armed: `waves` (wide color spans: the solve's `pool.scope` dispatches when
-//! `parallel_solve` is on), the executor gap `g = wall − Σ system spans`, the unzoned residue
-//! `u = solve span − Σ in-solve zones` and `r = Σ pass spans − Σ color spans` (plan §2 identity,
-//! O2). The driver applies the closure rules to them; the runner only reports.
+//! `parallel_solve` is on and W ≥ 2 — the span is opened by color class, not by dispatch, so at
+//! W = 1 it counts colors that ran inline), the executor gap `g = wall − Σ system spans`, the
+//! unzoned residue `u = solve span − Σ in-solve zones` and `r = Σ pass spans − Σ color spans`
+//! (plan §2 identity, O2). The driver applies the closure rules to them; the runner only
+//! reports.
 //!
 //! # Thread counts (rulings, open question 2)
 //!
@@ -128,7 +138,9 @@
 //! --gap G                      layer gap (default per scene)
 //! --solver colored|reference   (default colored)
 //! --cfg a|b|default            (default default)
-//! --parallel-solve             force parallel_solve on (J-P1 at W=1; R at W=8)
+//! --parallel-solve             force parallel_solve on; since L4 a no-op wherever it is accepted
+//!                              (cfg-A/B at W > 1 and --cfg default have it on), refused at
+//!                              W = 1 (J-P1 is retired, see "Configurations")
 //! --sleeping                   sleeping on
 //! --threshold T                sleep threshold (speed², with --sleeping)
 //! --frozen-by K                void unless every dynamic row is frozen on step K (R-S: 300)
@@ -569,6 +581,14 @@ fn validate(a: &Args) -> Result<(), String> {
                     .into(),
             );
         }
+    }
+    if a.parallel_solve && a.workers == 1 {
+        return Err(
+            "--parallel-solve at --workers 1 is J-P1, retired at L4: a one-worker pool solves \
+             inline, so the row would report waves with no dispatch behind them; take ω₁ from \
+             the zero-work spawn/join microbench"
+                .into(),
+        );
     }
     if a.threshold.is_some() && !a.sleeping {
         return Err("--threshold needs --sleeping".into());

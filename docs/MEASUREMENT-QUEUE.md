@@ -778,7 +778,7 @@ and J-S0 (L1's gate).
 |---|---|---|---|---|
 | J-A | `--scene jolt --gap 0.5 --cfg a` | 1, 2, 4, 8, 16 | 500 (0..500) | disarmed ×2: the parity row and A/A0; armed: the profile |
 | J-B | `--scene jolt --gap 0.5 --cfg b` | 1, 8 | 500 (0..500) | what `Grid` and `simd_solve` buy, per stage |
-| J-P1 | `--scene jolt --gap 0.5 --cfg a --parallel-solve` | 1 | 500 (0..500) | ω₁: the per-wave cost with no cross-thread wake |
+| J-P1 | `--scene jolt --gap 0.5 --cfg a --parallel-solve` | 1 | 500 (0..500) | ω₁: the per-wave cost with no cross-thread wake. **Retired at L4** (lever rulings, L5 W2): a one-worker pool now solves inline, so the runner refuses this row; ω₁ comes from a zero-work spawn/join microbench |
 | J-C | `--scene jolt --gap 0.5 --cfg a --canary-frac 0.05` | 1, 8 | 500 (0..500) | the canary: a system `.after(narrowphase).before(build_graph)` spinning 0.05·T(W) |
 | J-Son | `--scene jolt --gap 0.5 --cfg a --sleeping` | 1, 8 | 1000 (0..1000) | the sleeping floors, against Jolt `-allow_sleep` |
 | J-S0 | `--scene jolt --gap 0.5 --cfg a --sleeping --threshold 0` | 1 | 500 (0..500) | the sleep bookkeeping cost; L1's gate |
@@ -852,7 +852,8 @@ is a median over passes.
   - u = solve span − Σ in-solve zones.
 - E(W) = P(1)/(W·t_wide(W)). waves = wide spans per step.
 - The L6 fork compares a FIXED per-wave dispatch cost against L(8): ω₁ from J-P1, or a microbenched spawn/join at
-  zero work. The imbalance share (max chunk − mean chunk) is reported separately (W2).
+  zero work (the only source from L4 on, which retired J-P1). The imbalance share (max chunk − mean chunk) is
+  reported separately (W2).
 - The W=8 gap attribution: boyko's terms beside Jolt's `-p` stage shares, plus Δ_J = T_J(no pair cache) − T_J.
 
 **L1's gate (O7).** J-S0 at W=1, disarmed: pre-L1 (A) against the tip (B). In each pass, as in §8, run A twice

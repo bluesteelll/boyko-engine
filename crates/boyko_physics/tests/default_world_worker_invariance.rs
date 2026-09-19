@@ -23,7 +23,24 @@
 //!   allocates (a `pool.scope` was dispatched), under a thread-local counting
 //!   allocator.
 //! - The scene moves: the final hash differs from the spawn state's.
-//! - The SIMD arm is compiled in and on by default (G1 pins the same two inputs).
+//! - The SIMD arm is compiled in, and `simd_solve` is on in the `PhysicsConfig` resource of
+//!   the world `add_physics_systems` built, read the same way as G-L4-2 below, so a plugin-side
+//!   override of the flag reds here. Its twin asserts `PhysicsConfig::default()` itself (G1
+//!   pins the build configuration and that default).
+//! - G-L4-2: `parallel_solve` is on in the `PhysicsConfig` resource of the world
+//!   `add_physics_systems` built (L4), read before [`run`] applies its own flags, so the
+//!   default world is the parallel arm; reverting the default or overriding the flag in the
+//!   plugin reds here, not only in a census. Its twin asserts `PhysicsConfig::default()`
+//!   itself, the public default a host inherits when it builds its own config from it.
+//!
+//! # G-L4-1 — one lane never opens a scope
+//!
+//! [`one_worker_parallel_solve_takes_the_inline_path`]: the same warmed step on a ONE-worker
+//! pool with `parallel_solve` on allocates nothing, because the whole-step gate's `lanes >= 2`
+//! term sends it down the inline path. With L4's default flip every W=1 default world takes
+//! that arm, so without the term each wide color of every pass would pay a `pool.scope` for no
+//! parallelism. Its non-vacuity is the 4-worker witness above on the same step: the width term
+//! passes there, so a zero at one worker can only come from the lanes term.
 //!
 //! Spins real thread pools (intractable under Miri), so `cfg(not(miri))`.
 
@@ -185,6 +202,9 @@ struct Run {
     spawn_hash: u64,
     /// The last frame's gathered snapshot and manifolds, for the dispatch witness.
     last: (Vec<BodyState>, Vec<Manifold>),
+    /// The `PhysicsConfig` resource exactly as `add_physics_systems` and the schedule
+    /// build left it in this world, read before [`run`] applies its own flags.
+    built_config: PhysicsConfig,
 }
 
 /// Runs the default world on a `workers`-wide pool with the given flags.
@@ -197,6 +217,7 @@ fn run(workers: usize, parallel_solve: bool, simd_solve: bool) -> Run {
     assert!(keys.build_graph.is_some(), "construction: the default world is the colored solve");
     world.insert_resource(FixedTime::new(std::time::Duration::from_secs_f32(DT)));
     let mut schedule = builder.build(&mut world);
+    let built_config = *world.resource::<PhysicsConfig>();
     {
         let cfg = world.resource_mut::<PhysicsConfig>();
         cfg.parallel_solve = parallel_solve;
@@ -220,6 +241,7 @@ fn run(workers: usize, parallel_solve: bool, simd_solve: bool) -> Run {
         min_widest,
         spawn_hash,
         last,
+        built_config,
     }
 }
 
@@ -232,12 +254,38 @@ fn default_world_is_worker_count_invariant() {
         cfg!(all(target_arch = "x86_64", target_feature = "avx2")),
         "non-vacuity: without x86_64 + avx2 the SIMD arm is compiled out"
     );
+    // The twin of the SIMD check on the built world below, for the reason given at G-L4-2's
+    // twin: a host that builds its config from the default inherits this flag.
     assert!(
         PhysicsConfig::default().simd_solve,
-        "non-vacuity: the default world must run the SIMD arm"
+        "non-vacuity (twin): `PhysicsConfig::default()` must carry `simd_solve`; a host that \
+         builds its config from the default inherits this value, not the plugin's"
+    );
+    // The twin of G-L4-2 below. `PhysicsConfig::default()` is public API: a host that tunes
+    // the resource by re-inserting `PhysicsConfig { .., ..PhysicsConfig::default() }`
+    // inherits this flag, not the plugin's, so a plugin that forced the flag on over a
+    // reverted default would pass G-L4-2 and still hand such a host the serial arm.
+    assert!(
+        PhysicsConfig::default().parallel_solve,
+        "G-L4-2 (twin): `PhysicsConfig::default()` must carry `parallel_solve` (L4); a host \
+         that builds its config from the default inherits this value, not the plugin's"
     );
 
     let reference = run(1, false, true);
+    // G-L4-2: the config resource of the world the plugin built, which this test steps, so a
+    // plugin-side override of the flag reds here, not only a change to the default.
+    assert!(
+        reference.built_config.parallel_solve,
+        "G-L4-2: the world `add_physics_systems` built must dispatch its wide colors (L4: \
+         `parallel_solve` on by default); its `PhysicsConfig` resource has it off"
+    );
+    // The SIMD arm, read from the same resource: `run` sets `simd_solve` itself, so only the
+    // built config says whether the world the plugin hands a host runs the arm under test.
+    assert!(
+        reference.built_config.simd_solve,
+        "non-vacuity: the world `add_physics_systems` built must run the SIMD arm; its \
+         `PhysicsConfig` resource has `simd_solve` off"
+    );
     assert!(
         reference.min_widest >= 2 * MIN_PARALLEL_SLOTS_PER_COLOR,
         "non-vacuity: the narrowest per-frame widest color holds {} slots, under 2 × {} — \
@@ -284,6 +332,34 @@ fn default_world_is_worker_count_invariant() {
         "the default world is not worker-count invariant against 1w parallel_solve=false \
          (SIMD):\n  {}",
         diverged.join("\n  ")
+    );
+}
+
+/// G-L4-1 (module docs): with `parallel_solve` on, a one-worker pool takes the inline path
+/// and allocates nothing, while the same warmed step on four workers dispatches.
+#[test]
+fn one_worker_parallel_solve_takes_the_inline_path() {
+    let reference = run(1, false, true);
+    assert!(
+        reference.min_widest >= 2 * MIN_PARALLEL_SLOTS_PER_COLOR,
+        "non-vacuity: the narrowest per-frame widest color holds {} slots, under 2 × {} — the \
+         width term, not the lanes term, would decide the inline path",
+        reference.min_widest,
+        MIN_PARALLEL_SLOTS_PER_COLOR
+    );
+    let (bodies, manifolds) = &reference.last;
+    let at_four = dispatch::warmed_parallel_step_allocs(bodies, manifolds, 4);
+    assert!(
+        at_four > 0,
+        "non-vacuity: the same warmed step on 4 workers must dispatch a `pool.scope`; it \
+         allocated {at_four} times"
+    );
+    let at_one = dispatch::warmed_parallel_step_allocs(bodies, manifolds, 1);
+    assert_eq!(
+        at_one, 0,
+        "G-L4-1: a warmed colored step on a 1-worker pool with `parallel_solve` on allocated \
+         {at_one} times; one lane must take the inline path (the whole-step gate's `lanes >= 2` \
+         term), never a `pool.scope`"
     );
 }
 
