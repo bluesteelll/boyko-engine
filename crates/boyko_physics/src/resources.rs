@@ -2611,6 +2611,15 @@ impl ConstraintGraph {
         self.island_manifold_start.as_read_slice()
     }
 
+    /// The per-row island ids of the last build, one entry per dynamic row it was
+    /// given: `ids[row] == island_of(row)` for every `row < ids.len()`, and every row
+    /// at or past the end has no island ([`NO_ISLAND`](Self::NO_ISLAND)). Empty
+    /// before the first build.
+    #[inline]
+    pub(crate) fn island_ids(&self) -> &[u32] {
+        self.island_of.as_read_slice()
+    }
+
     /// Partitions `manifolds` (in manifold order) into islands + colors over the
     /// `n_dynamic` dynamic body rows, identifying static/sentinel bodies via the
     /// `is_dynamic` predicate (plan O4 — the independently callable pure builder).
@@ -3473,6 +3482,10 @@ impl IslandSleep {
         self.frozen_islands.clear();
         self.frozen_islands.resize(n_islands, true);
         let starts = graph.island_starts();
+        // Hoisted beside `starts`: `island_of(row)` re-derives this slice and
+        // bound-checks the row on every call, once per row of the sweep below
+        // (MEASUREMENT-QUEUE.md §8 R2).
+        let ids = graph.island_ids();
         debug_assert!(
             n_islands == 0 || starts.len() == n_islands + 1,
             "invariant: the island CSR holds n_islands + 1 offsets"
@@ -3487,8 +3500,13 @@ impl IslandSleep {
             // Re-sliced to `n_rows`: the loop visits exactly the rows the latch was
             // sized to.
             let keys = &mut key_view.as_mut_slice()[..n_rows];
-            for (row, stored) in keys.iter_mut().enumerate() {
-                let isl = graph.island_of(row as u32);
+            // A row past the graph's rows has no island, which is what `island_of`
+            // answers for it, so it takes the sentinel and touches no latch. The
+            // shipped wiring builds the graph over every row, so this tail is empty
+            // there; a graph built over fewer rows, or not yet built, reaches it.
+            let (keys, keys_past_graph) = keys.split_at_mut(n_rows.min(ids.len()));
+            keys_past_graph.fill(NO_ISLAND_KEY);
+            for (row, (stored, &isl)) in keys.iter_mut().zip(ids).enumerate() {
                 if isl == ConstraintGraph::NO_ISLAND {
                     // The sentinel is what unlatches a row that returns to an island
                     // after a static phase.
