@@ -5772,6 +5772,48 @@ A7b (S5, the face-versus-edge rule, the commit after `08fe7b9f`) changes the con
 by more: 22 975 points at the same step, since a resting support now carries its clipped patch
 instead of one edge point. The same rule applies to it, with `08fe7b9f` as the tree without A7b.
 
+⚠ **Four corrections, noted 2026-09-19** (the physics perf campaign, `docs/physics/perf-campaign/`:
+the tree report's C1–C3 and the plan's H1). Every number in this entry is labelled **"pre-A7, likely
+gnu"** and is never compared with a row from the fixed-window runner (`MEASUREMENT-QUEUE.md` §10).
+Line citations in C1 and H1 are to files under `crates/boyko_physics/` at `1c31aeac`, the tree the
+campaign was cut from and the one that still holds the Criterion bench; the campaign replaced the
+bench with the runner and shifted `systems.rs`. The bench statements cited are unchanged since this
+entry's own `ca582e72`, where they sit 16 lines higher: the one commit between the two, `d11962a9`,
+inserted the opt-in mimalloc arm above them.
+
+- **C1: the broadphase reason given below is wrong; the conclusion stands.** The bench never sets
+  `broadphase`, so it ran the default `AllPairs` (`1c31aeac:resources.rs:451`), an O(n²) serial double
+  loop at every W (`1c31aeac:systems.rs:304-322`). This file's 2026-09-09 Stage 4 entry already says
+  so. The bench's `parallel_broadphase = workers > 1` (`1c31aeac:jolt_parity_pyramid.rs:216`) is read
+  only on the `Grid` arm (`1c31aeac:systems.rs:331`), so it did nothing. `MIN_PARALLEL_BODIES = 4096`
+  (`1c31aeac:resources.rs:664`, tested at `:1734`) gates the Grid path's parallel emit, which was
+  never reached. The same goes for note (3) below: the W>1 arm turned on `parallel_solve` and nothing
+  else. The all-pairs pass is about 0.9 ms at 1240 bodies (the 2026-09-09 entry, derived from the
+  `broadphase` bench, not timed in the step), so about 4.4 % of T(1) and 7.5 % of T(8) here.
+- **C2: gnu, not msvc. boyko against Jolt at W>1 has never been measured on msvc.** The entry records
+  `rustc 1.98.1 (48a229cea)` without a host. The same day's allocator entry below, same harness,
+  records `x86_64-pc-windows-gnu`. The commit that moved the tree's recipes to the msvc host,
+  `97bcf826`, is not an ancestor of this entry's commit `ca582e72`. Two pool commits whose effect
+  depends on the host are ancestors: `e6115223` (one `thread_local` read per spawn instead of two, a
+  gnu cost) and `51631371` (the empty-victim steal gate, a gnu-only win and an msvc-only 2.2× loss,
+  since then a `cfg!` constant). So the timed pool ran gnu's side of that gate, and no number here
+  describes the msvc build at W>1.
+- **C3: the current ratio is unmeasured.** On top of the pre-A7 note above: on this bench's scene, S5
+  (A7b) alone cost +10.3 % at W=1 and +7.1 % at W=4 (`MEASUREMENT-QUEUE.md` §9, `full_step/1` and
+  `full_step/4`, msvc, taken on the window H1 describes). A boyko/Jolt ratio on a tree with A7 is a new
+  row, not an update of this one.
+- **H1: the timed window is broken.** For each W the bench builds a fresh world, runs 20 warm steps
+  (`1c31aeac:jolt_parity_pyramid.rs:247`), then lets Criterion sample by time on that world without
+  resetting it (`:250`). Which stretch of the collapse gets timed therefore depends on how fast the
+  steps run: on W, on the pass, on the box's load. The allocator entry below saw arms run 420 and 630
+  iterations and sample different windows. So T(1)/T(W) compares different stretches of the
+  simulation, while Jolt times steps 0..500 from t=0 (v5.3.0 `PerformanceTest/PerformanceTest.cpp:90`,
+  timed loop at `:368`). The fixed-window runner replaces it: 500 steps from spawn, one `Instant` pair
+  per step, no warm-up.
+
+The per-stage measurement this entry says is owed (below) is queued as `MEASUREMENT-QUEUE.md` §10. It
+uses the kernel's own profiler rather than one `Instant` per system (the plan's Decision 1).
+
 **What changed, drift-free.** The ratio boyko/Jolt is taken back to back within seconds and does not depend
 on the box's state: **2.16 → 1.15** (W=2), **3.51 → 1.73** (W=4), **5.16 → 2.47** (W=8), **6.69 → 2.38**
 (W=16) against 2026-09-09, reproducing in all three passes. boyko's own scaling went from

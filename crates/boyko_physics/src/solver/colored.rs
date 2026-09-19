@@ -3144,10 +3144,11 @@ impl ColoredSoftStepSolver {
     ///
     /// The store order is `columns.canonical` — the deterministic
     /// manifold-then-point sequence — NOT the color/slot order the solve used.
-    /// The open-addressed table is insertion-order-sensitive on home-slot
-    /// collisions, so a canonical store keeps next frame's seeds independent of
-    /// the color layout (and, in [O6], the thread count) — the load-bearing
-    /// determinism guarantee.
+    /// The open-addressed table's slot layout depends on the insertion sequence (a
+    /// colliding key takes the next free slot), so a canonical store keeps the table
+    /// bit-identical whatever the color layout (and, in [O6], the thread count) —
+    /// the load-bearing determinism guarantee. Lookup values alone would not need
+    /// it: for distinct keys they depend only on the key set.
     ///
     /// Then, while any manifold is frozen this step, it CARRIES the frozen points'
     /// entries (B1): a frozen manifold is not solved, so it has no converged impulse

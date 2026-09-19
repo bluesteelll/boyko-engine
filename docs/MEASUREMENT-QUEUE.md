@@ -383,6 +383,9 @@ stub.
 - **R2 fired:** +2.44 % against 1.01 and A/A 1.80 %; every pairing is at least 1.0125. Prescribed: hoist the
   `island_of` slice in the key sweep (the loop at `resources.rs:3486-3518` in `a56007ab`), then re-measure this row
   before any behavioural change. The row prices A4 + A5; the sleeping-off rows put A5's share at about 0.3 %.
+- **R2 follow-up, queued 2026-09-19.** The hoist is L1 of the physics perf campaign (`IslandSleep::begin_step`,
+  bit-identical). The tree before it has `resources.rs` as at `1c31aeac`. Its re-measure is §10's L1 gate: R2's rule
+  on J-S0, which is this row's scene (Jolt's pile, sleeping on, threshold 0, one worker) on the fixed-window runner.
 - **Frozen row:** B is 2.2 % faster. That is inside B/B, and no rule applies; it is not a cost.
 
 Receipts: `docs/measurements/2026-09-18-physics-s6-s9/` (`timing_raw.md`; `raw/s8/`; `runlogs/s8_*`;
@@ -432,6 +435,11 @@ bookkeeping, not dispatch):
 # Run A twice interleaved with B to get the A/A spread.
 cargo bench -p boyko-physics --bench sleeping_pipeline   # all three arms
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1   # cross-check, no sleeping
+# `-- full_step/N` is the Criterion bench's filter; it exists on both pinned arms. On a tree where
+# jolt_parity_pyramid is the fixed-window runner (§10) there is no such filter, and the cross-check
+# is §10's J-A row at W=1, disarmed:
+#   <runner exe> --scene jolt --gap 0.5 --cfg a --workers 1 --steps 500 --csv <file>
+# The two time different windows (§10, H1), so a runner number is never divided by a Criterion one.
 ```
 
 **Arm A.** `d552be05` has no `IslandSleep::contact_wakes` counter and no key loop. The bench is
@@ -545,6 +553,13 @@ cargo bench -p boyko-physics --bench sleeping_pipeline -- pyramid_sleeping_off  
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/1              # Jolt's scene (gap 0.5)
 cargo bench -p boyko-physics --bench jolt_parity_pyramid -- full_step/4
 cargo bench -p boyko-physics --bench sleeping_pipeline -- pyramid_awake_sleeping_on  # sleeping on, never latching
+# `-- full_step/N` is the Criterion bench's filter; it exists on both pinned arms. On a tree where
+# jolt_parity_pyramid is the fixed-window runner (§10) there is no such filter, and the two Jolt-scene
+# rows are §10's J-A row at W=1 and W=4, disarmed:
+#   <runner exe> --scene jolt --gap 0.5 --cfg a --workers 1 --steps 500 --csv <file>
+#   <runner exe> --scene jolt --gap 0.5 --cfg a --workers 4 --steps 500 --csv <file>
+# The runner times steps 0..500 from spawn, not Criterion's time-sampled window after 20 warm steps,
+# so a number from it is never divided by one of the Criterion numbers above.
 ```
 
 **Rules:**
@@ -559,6 +574,186 @@ cargo bench -p boyko-physics --bench sleeping_pipeline -- pyramid_awake_sleeping
 
 **Report:** medians and the A/A spread for every row, both arms' timed-run point counts, and the
 sleeping-on row labelled as not like for like.
+
+---
+
+## 10. Physics — the per-stage profile, and the Jolt parity row re-taken like for like (perf campaign P0)
+
+**NO TIMING HAS BEEN TAKEN.** Queued 2026-09-19. The design is `docs/physics/perf-campaign/01-PLAN-REV1.md` §1–§2
+together with `00-RULINGS.md`, which overrides the plan where the two differ. This entry is their run sheet. Where
+it disagrees with either of them, they win and this entry is stale.
+
+⚠ **Written before the things it runs existed.** `[profile.parity]`, the physics zone sites, the fixed-window
+runner (the rewrite of `benches/jolt_parity_pyramid.rs`), the Jolt patch and the `tools/` driver had not landed.
+The runner flags below are spelled as in the plan's implementation step 6. Check them against the runner's usage
+text before building the window's binaries.
+
+**Decides:**
+- which bit-identical levers (plan §3, L2–L7) are built, and in what order. Each has a "build if" on this
+  profile's spans. Each is then gated on median T(W), W ∈ {1, 2, 4, 8, 16}, on J and R, against the A/A0 band,
+  with I(W) reported before and after (W3);
+- the serial fraction as a measurement, f = S(1)/T(1), in place of the Amdahl fit behind the 0.43–0.53 in
+  `OPEN-QUESTIONS.md`'s 2026-09-10 Jolt entry;
+- the boyko/Jolt ratio per W, like for like (plan §1, H1–H12), on the msvc host. The 2026-09-09 and 2026-09-10
+  rows are labelled "pre-A7, likely gnu" and are never compared with it;
+- L1's gate (§8's R2 follow-up).
+
+**Precondition.** §0, and the owner confirms the window first. The plan's estimate is about 40 minutes: 5 passes
+of about 5.5 minutes each, plus receipts and polls. Nothing compiles inside the window.
+
+**Built before the window** (msvc host, no `RUSTFLAGS`, §1). Every arm builds to the same exe path, so copy each
+exe out and record its sha256 before the next build. A swapped source file is swapped and restored by copy, with
+sha256 proof both ways.
+
+| binary | tree | build | used for |
+|---|---|---|---|
+| runner | the tip | `parity`: inherits `release` (fat LTO, default codegen units), the shipped profile (W1) | every boyko row |
+| runner, pre-instrument | the tip without the physics zone sites | `parity` | A/A2 |
+| runner, pre-L1 | the tip with L1 reverted. `resources.rs` as at `1c31aeac` (blob `8ed4373a`) is that file if no later commit touched it; otherwise reverse-apply L1's diff | `parity` | L1's gate |
+| runner, `shipping` tier | the tip, `BOYKO_PROFILE=shipping` | `parity` | one disarmed row, because Jolt's Distribution compiles its profiler out (O6) |
+| `broadphase` bench | the tip | `bench` | the crossover (§4 step 4), which calibrates `GRID_LO` / `GRID_HI` |
+| Jolt v5.3.0 `PerformanceTest`, patched | `D:/tmp/jolt` | Distribution | the headline |
+| the same, patched | `D:/tmp/jolt` | Release | `-p` stage shares at W=1 and W=8; shares only, never times |
+| Jolt v5.6.x `PerformanceTest`, patched | — | Distribution, same recipe | a second column: Jolt's per-manifold friction on this box (its release notes: −15 % on Pyramid) |
+
+A single-codegen-unit profile may also exist for lever A/Bs. Every number names its profile (W1).
+
+The Jolt patch (`crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch`) does four things:
+- sets damping to 0 in `PyramidScene.h` (H3);
+- adds `-no_pair_cache`, which sets `mUseBodyPairContactCache = false` (H10);
+- threads `-allow_sleep` into `StartTest`. The scene hard-codes `mAllowSleeping = false` per body, and only
+  `-no_sleep` exists (O5);
+- adds `-receipt`, untimed, which records per frame the manifold count (through a counting `ContactListener`)
+  and the top box's y (H8).
+
+If v5.6.x needs other CMake options, or changed defaults beyond friction, record them in the receipt rather than
+patching them away.
+
+```bash
+# Before the window: one build per row of the table above, each exe copied out and hashed.
+cargo bench --no-run --profile parity -p boyko-physics --bench jolt_parity_pyramid
+cargo bench --no-run -p boyko-physics --bench broadphase
+# In the window every binary runs by path. J-A at W=8, disarmed, for example:
+<runner exe> --scene jolt --gap 0.5 --cfg a --workers 8 --steps 500 --csv <file>
+```
+
+**Receipts, per run (H6).** No receipt, no quoted ratio.
+- HEAD, and `rustc -vV`'s `host:` line, which must read `x86_64-pc-windows-msvc`.
+- `git merge-base --is-ancestor` for S5 (`8d656ad8`) and KE16 (`67563d3b`), both expected true, and for the B1 fix
+  and L1 commits.
+- Every binary's sha256, and the Jolt binary's compiler.
+- The thread counts on both sides at every W. Jolt runs W−1 workers plus the calling thread. Record whether boyko's
+  dispatcher thread runs scope tasks at W=16.
+- The load receipt before and after every timed region (§0).
+
+**The boyko rows.** Each is the runner at the tip, one world per process: the profiler store binds one world, and
+a second world is refused with E9204 while its fold returns silently. Windows are step ranges that the driver
+reduces from the per-step CSV. cfg-A is colored, `parallel_solve = (W > 1)`, `AllPairs`, `simd_solve` off. cfg-B
+is cfg-A plus `Grid` plus `simd_solve`, and the runner asserts that the two give equal final-pose bytes (H7). Every
+row runs armed for its profile. The rows compared on wall time also run disarmed: J-A (the parity row and A/A0)
+and J-S0 (L1's gate).
+
+| id | runner flags | W | steps (window) | purpose |
+|---|---|---|---|---|
+| J-A | `--scene jolt --gap 0.5 --cfg a` | 1, 2, 4, 8, 16 | 500 (0..500) | disarmed ×2: the parity row and A/A0; armed: the profile |
+| J-B | `--scene jolt --gap 0.5 --cfg b` | 1, 8 | 500 (0..500) | what `Grid` and `simd_solve` buy, per stage |
+| J-P1 | `--scene jolt --gap 0.5 --cfg a --parallel-solve` | 1 | 500 (0..500) | ω₁: the per-wave cost with no cross-thread wake |
+| J-C | `--scene jolt --gap 0.5 --cfg a --canary-frac 0.05` | 1, 8 | 500 (0..500) | the canary: a system `.after(narrowphase).before(build_graph)` spinning 0.05·T(W) |
+| J-Son | `--scene jolt --gap 0.5 --cfg a --sleeping` | 1, 8 | 1000 (0..1000) | the sleeping floors, against Jolt `-allow_sleep` |
+| J-S0 | `--scene jolt --gap 0.5 --cfg a --sleeping --threshold 0` | 1 | 500 (0..500) | the sleep bookkeeping cost; L1's gate |
+| R | `--scene rest --solver colored`; serial at W=1, `--parallel-solve` at W=8 | 1, 8 | 1100 (600..1100) | the resting cost per stage, `PhysicsConfig::default` |
+| R-ref | `--scene rest --solver reference` | 1 | 1100 (600..1100) | prices D1 |
+| R-S | `--scene rest --sleeping` | 1, 8 | 800 (300..800) | the sleeping floor F |
+| S16 | `--scene s16 --cfg a` | 1, 8 | 300 (0..300) | small-scene regression guard |
+
+`--scene rest` is `sleeping_pipeline.rs`'s `pyramid_sleeping_off` scene: the exactly touching (gap 0)
+height-15 pile.
+
+**The Jolt rows.** `-q=Discrete` is kept because it halves the runtime, not to match anything:
+`PyramidScene::StartTest` never reads the motion quality, and the default is Discrete (O4).
+
+| run | flags | W | pairs with |
+|---|---|---|---|
+| timed | `-s=Pyramid -q=Discrete -t=W -f` | 1, 2, 4, 8, 16 | J-A |
+| no pair cache | the timed flags + `-no_pair_cache` | 8 | Δ_J in the W=8 attribution |
+| sleeping | the timed flags + `-allow_sleep` | 1, 8 | J-Son |
+| stage shares | the Release build, the timed flags + `-p` | 1, 8 | the W=8 attribution (shares only) |
+| v5.6.x | the timed flags | 1, 2, 4, 8, 16 | the second column |
+| receipt | `-s=Pyramid -q=Discrete -receipt`, untimed | any, recorded | H8 |
+
+**Protocol (H12).** Prebuilt binaries are invoked by path, and their output is read as bytes, never with
+`text=True`. Interleave by W, Jolt then boyko, and reverse the order on alternate passes. 5 passes. Every statistic
+is a median over passes.
+
+**Void and stop rules.** Each one can fail.
+- **A/A0, the band.** Two disarmed J-A runs per pass, paired by step index. B(W) = max over passes of
+  |median_k(t₂/t₁) − 1|. If B(W) > 2 %, the window is not quiet: void it.
+- **A/A1, perturbation.** Armed against disarmed J-A, same pairing. Passes iff |median − 1| ≤ max(B(W), 0.5 %) at
+  every W.
+- **A/A2, the permanent sites.** The disarmed tip against the pre-instrument runner at W=1 and W=8, same criterion.
+  If it fails, the physics zones move to a tier that `dev` does not compile.
+- **The canary, J-C against J-A.** All three must hold:
+  - the canary span reads 0.05·T ± 5 %;
+  - the step's wall time rises by the same amount, within B(W);
+  - the A/A1 statistic computed on J-C against J-A FAILS.
+
+  The canary exceeds the 2 % ceiling by construction, so a green here means the gate is blind.
+- **Anti-vacuity, per run (W4).** Each zone's count per step must equal its structural expectation, otherwise the
+  row is void: build 1; gravity, warm apply, integrate and the biased pass 4 each; the relax pass 8; one span per
+  system. Armed runs record samples > 0, and disarmed runs record 0. The jolt scene holds exactly 1240 dynamic
+  bodies.
+- **Determinism.** Armed, disarmed, cfg-A and cfg-B final-pose bytes are all equal.
+- **Closure.** Any of these is an instrument defect and stops the analysis:
+  - u(W) > 3 % of the solve span, or u < 0;
+  - g < 0;
+  - Σ system spans > the step's wall time;
+  - the region overflow counter ≠ 0;
+  - wave counts that differ across W ≥ 2, or that disagree with 12 × (colors with ≥ 256 slots) from the
+    `phys_slots_*` counters.
+
+  The residue r = Σ pass spans − Σ color spans joins the identity and is bounded (O2). Its bound is not set yet.
+- **R-S.** If any dynamic row is not frozen at step 300, the row is void (A7-R2 froze at step 248 on the kernel as
+  committed), and D3 is priced from J-Son alone.
+- **H8.** If the two sides' resting-window manifold counts differ by more than 10 %, the headline also carries time
+  per manifold per step.
+- **O5.** The engines sleep by different rules: boyko at speed² below 1e-4 for 60 frames, Jolt at about 0.03 m/s for
+  0.5 s. Record the awake count per step on both sides for J-Son and `-allow_sleep`. Compare only the tails after
+  everything is asleep, never the window means.
+
+**Derived** (plan §2). t_s(W) is the median over passes of span s's window mean.
+- S(W) = Σ serial spans. f = S(1)/T(1). The fit f_fit, from T(1) and T(8), is printed beside it; f_fit − f is what
+  the fit misattributed.
+- P(1) = Σ wide-color spans at W=1 with `parallel_solve` off.
+- T(W) = S(1) + I(W) + P(1)/W + L(W) + g(W) + u(W) + r(W), where:
+  - I = S(W) − S(1);
+  - L = t_wide(W) − P(1)/W;
+  - g = T − Σ system spans;
+  - u = solve span − Σ in-solve zones.
+- E(W) = P(1)/(W·t_wide(W)). waves = wide spans per step.
+- The L6 fork compares a FIXED per-wave dispatch cost against L(8): ω₁ from J-P1, or a microbenched spawn/join at
+  zero work. The imbalance share (max chunk − mean chunk) is reported separately (W2).
+- The W=8 gap attribution: boyko's terms beside Jolt's `-p` stage shares, plus Δ_J = T_J(no pair cache) − T_J.
+
+**L1's gate (O7).** J-S0 at W=1, disarmed: pre-L1 (A) against the tip (B). In each pass, as in §8, run A twice
+interleaved with B for the A/A spread. L1 passes iff the B/A median is ≤ 1 within that spread. The correctness half
+is untimed: the suites §8 names (`sleep_settles_box_piles.rs`, `support_loss_wakes_sleepers.rs`, and
+`resources_tests.rs`'s `rekey_rows` group) are green on the tip.
+
+**Quoting** (plan §1, W1). boyko/Jolt is the median over passes of the mean step time (Jolt's metric, 500 / Σt),
+per W. It names the cfg and the profile, comes from the msvc host, and carries the H6 receipts. Report beside it the
+sub-windows [0, 100) and [100, 500) (H1), and the time per manifold-sweep (H9).
+
+**Report:**
+- per W and row: the medians and B(W);
+- the A/A1, A/A2, canary, anti-vacuity, determinism and closure verdicts;
+- f beside f_fit, and every term of the identity;
+- waves and ω;
+- Jolt's stage shares and Δ_J;
+- the H8 receipt, the v5.6.x column and the `shipping` row;
+- L1's B/A with its A/A spread;
+- the broadphase crossover n.
+
+Receipts go in `docs/measurements/<date>-physics-p0/`.
 
 ---
 
