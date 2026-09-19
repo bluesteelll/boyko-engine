@@ -100,3 +100,45 @@ first commit. Order of lanes: L5 (approved above) → broadphase → L10.
   can reach; skip the pass when nothing is held or CAND; or a narrower compare for static rows); a
   static-heavy "not claimed slower" arm (J plus 10k statics).
 - Optional remarks adopted where cheap.
+
+## Per-contact parity (owner, 2026-09-19): L9 and L11 designed and CLOSED by ruling
+
+The owner set the goal: parity with Jolt per contact, not only per step. Per manifold at W=1 the solve is
+already at parity (boyko with simd 1.24 µs against Jolt 1.30–1.49 µs); the gap is collision detection
+(broadphase 0.465 + narrowphase 0.695 µs per manifold) and the serial solve setup (0.425 µs). Two new designs,
+each with research and review (no blocking remark in either):
+
+**L9 — contact reuse** (`L9-contact-reuse/`): L9a exact (early SAT exit + a cached separating axis, bit-identical);
+L9b reuses a touching box pair's features within a tolerance and refreshes separation from the current poses
+(value-changing, owner-approved). No "no contact" caching and no speculative margin (it would inflate the
+manifold count). Rulings:
+- **Build-if (review OQ1):** the owner's per-contact goal overrides the W=8 build-if that §9 applied; L9 is
+  built and gated on its W=1 and per-contact gains (L9a gets a realized-gain rule on J-D, O6).
+- **W1:** the axis-hint table stays keyed for hit pairs on every step where the key set changes (prefetched,
+  cleared, grown) — the tag carries the axis through the row-translated join — so hysteresis survives and
+  L10's E5 mirror stays equal to Off.
+- **W2:** the spurious-wake path is CLOSED: records survive a row-order flip (the pose check is by the larger
+  and smaller body; only `REF_IS_B` flips); a box-pile arm moving the support by less than τ_eff joins the A4
+  tests so "all points lifted ⇒ no manifold ⇒ wake" can go red.
+- Optional O1–O7 adopted (τ_eff also clamped by the smallest half-extent; record memory stated; the
+  `row_frames` fill skips unread rows or runs in the parallel phase; the gate fixes — slab as body B, M-c3
+  re-specified, tolerance scaled by the incident body's extent; tags written for every pair kind every step;
+  one tag layout shared with L10). The Rapier description is corrected (parry keeps local normals, cos 1°,
+  1 mm). `pairs_prev` is stamped with the gather sequence (OQ4).
+
+**L11 — the solve setup per contact** (`L11-solve-setup/`): warm impulses stored per manifold (no per-point hash
+probe/insert), cohort-shaped constraint blocks instead of the 26-column push, SIMD warm apply; bit-identical;
+predicted setup 0.425 → 0.10–0.21 µs per manifold. Rulings:
+- **W1:** `plan` names the whole equal-key run; the P-c seed and the D3 carry go through the single lookup
+  routine D2 specifies; the mutation "fill/carry scan only the last equal-key record" is recorded red.
+- Optional O1–O5 adopted (the SIMD warm-apply mask is `active ∧ movable`, with a −0.0 scene; lanes ≥ nlanes
+  read no body row, with a Miri multi-thread case; the restitution predicate is `!(e <= 0.0)`; the test-port
+  inventory lists what is deleted; the L10 mapping uses t−1's stream index).
+- **OQ1/OQ2:** measure the C1 share and the kernel's gather/scatter share before the C2/C3 rewrites.
+- **L12 is commissioned** (the effective-mass cache per inertia epoch: 5 of 12 sweeps compute, 7 load;
+  bit-identical) as its own design after L11.
+
+**Lane order (ruled, replaces the order above):** L5 (in flight) → then, in parallel because their files are
+disjoint, the tree broadphase and L11 → L9 (after L5, which owns the narrowphase system) → L10 (rev 2.2: it
+adopts L11's per-manifold warm storage and L9's tag layout) → L8 (friction per patch, on L11's block layout)
+→ L12. Each lane is gated end to end and per contact under the P0 protocol.
