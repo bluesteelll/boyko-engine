@@ -79,6 +79,7 @@
 
 use std::marker::PhantomData;
 
+use boyko_diag::{zone, zone_enabled};
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn, ScratchSolveView};
 use boyko_macros::Resource as ResourceDerive;
 use boyko_threadpool::try_with_active_pool;
@@ -95,6 +96,12 @@ use super::warm_start::{self, WarmStartTable};
 use super::RigidSolver;
 use crate::manifold::{BodyIndex, Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
+use crate::profiling::{
+    PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE, PHYS_PASS_BIASED,
+    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE,
+    PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY,
+    PHYS_WRITE_BACK, counter,
+};
 use crate::resources::{
     BodyState, ConstraintGraph, IslandSleep, PhysicsConfig, SolverScratch,
 };
@@ -225,7 +232,10 @@ fn store3(regs: &[core::arch::x86_64::__m256; 3], out: &mut [[f32; 8]; 3]) {
 /// The metric is the color's total slot count (the sum over its groups, i.e. the
 /// color span width). The value `256` is a starting point the tester benches; a
 /// true zero-alloc reusable-scope threadpool API is a filed follow-up.
-const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
+///
+/// `pub(crate)` for one reader outside this file: the profiling zones class a color as
+/// wide or narrow by this same floor ([`crate::profiling::WIDE_COLOR_MIN_SLOTS`]).
+pub(crate) const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
 
 /// O6 perf (work-balanced chunking): how many group-chunks to emit per ambient
 /// worker lane when a color is dispatched parallel.
@@ -1224,6 +1234,23 @@ impl ContactColumns {
             .map(|w| w[1] - w[0])
             .max()
             .unwrap_or(0)
+    }
+
+    /// `(wide, narrow)` contact-slot totals over this step's colors, classed by the
+    /// same `MIN_PARALLEL_SLOTS_PER_COLOR` floor as the per-color profiling zones.
+    ///
+    /// Read only by the armed profiler's slot counters, once per step, so it is out
+    /// of line rather than folded into the build.
+    #[cold]
+    fn slots_by_width(&self) -> (u64, u64) {
+        self.color_offsets().windows(2).fold((0, 0), |(wide, narrow), w| {
+            let slots = w[1] - w[0];
+            if slots < MIN_PARALLEL_SLOTS_PER_COLOR {
+                (wide, narrow + u64::from(slots))
+            } else {
+                (wide + u64::from(slots), narrow)
+            }
+        })
     }
 
     /// The per-group CSR (`group_start`) as a read slice.
@@ -2681,6 +2708,15 @@ impl ColoredSoftStepSolver {
         let color_group_start = cols.color_group_start();
         let n_colors = color_offsets.len().saturating_sub(1);
         for c in 0..n_colors {
+            // Profiling: one span per color, on this (the calling) thread and never inside a
+            // worker's chunk task, classed by the inline floor's own predicate so the class
+            // does not depend on `parallel` or on the worker count.
+            let _color_zone =
+                if color_offsets[c + 1] - color_offsets[c] < MIN_PARALLEL_SLOTS_PER_COLOR {
+                    zone!(PHYS_COLOR_NARROW)
+                } else {
+                    zone!(PHYS_COLOR_WIDE)
+                };
             if parallel {
                 Self::solve_color_parallel(
                     cols,
@@ -3391,22 +3427,34 @@ impl ColoredSoftStepSolver {
         let n_rows = scratch.bodies_len();
         let sleeping_active = sleep.is_some();
         if let Some(sleep) = sleep.as_mut() {
+            let _z = zone!(PHYS_SLEEP_BEGIN);
             sleep.begin_step(graph, n_rows);
         }
         // An immutable view used by `build_columns` (SOLVE skip) + the integrate
         // freeze; `None` when sleeping is off so the path is byte-identical.
         let sleep_view: Option<&IslandSleep> = sleep.as_deref();
 
-        self.build_bodies(scratch.bodies());
-        // Warm start is classified only while it is enabled: a disabled solver never reads
-        // or stores the table, so `Identity` is a placeholder that takes no per-manifold
-        // branch, and its cursor never counts a phantom `Reset`.
-        let warm_remap = if self.warm_start_enabled {
-            self.warm_cursor.remap(&scratch.rows)
-        } else {
-            RowRemap::Identity
+        let warm_remap = {
+            let _z = zone!(PHYS_SOLVE_BUILD);
+            self.build_bodies(scratch.bodies());
+            // Warm start is classified only while it is enabled: a disabled solver never
+            // reads or stores the table, so `Identity` is a placeholder that takes no
+            // per-manifold branch, and its cursor never counts a phantom `Reset`.
+            let warm_remap = if self.warm_start_enabled {
+                self.warm_cursor.remap(&scratch.rows)
+            } else {
+                RowRemap::Identity
+            };
+            self.build_columns(manifolds, graph, scratch.bodies(), sleep_view, warm_remap);
+            warm_remap
         };
-        self.build_columns(manifolds, graph, scratch.bodies(), sleep_view, warm_remap);
+        // Profiling: this step's slot totals by color class, the denominators of the
+        // per-color spans. One pass over the color CSR, and only while armed.
+        if zone_enabled!(PHYS_SLOTS_WIDE) {
+            let (wide, narrow) = self.columns.slots_by_width();
+            counter!(PHYS_SLOTS_WIDE, wide);
+            counter!(PHYS_SLOTS_NARROW, narrow);
+        }
 
         // O8 integrate-freeze (INTEGRATE half): capture the pre-solve hot state of
         // every slept-island body so the per-substep integrate (which streams the
@@ -3418,6 +3466,7 @@ impl ColoredSoftStepSolver {
             let mut frozen = self.frozen.build_view();
             frozen.clear();
             if let Some(sleep) = sleep_view {
+                let _z = zone!(PHYS_SLEEP_FREEZE);
                 for (row, b) in scratch.bodies().iter().enumerate() {
                     if b.inv_mass == 0.0 {
                         // Static rows are no-ops to the integrate kernels (the
@@ -3477,6 +3526,7 @@ impl ColoredSoftStepSolver {
             // threaded — the BodyEffective build view's mut slice (no parallel
             // access in the integrate kernels).
             {
+                let _z = zone!(PHYS_GRAVITY);
                 let mut view = self.bodies.build_view();
                 simd::apply_gravity(view.as_mut_slice(), scratch.bodies(), gravity, h, use_simd);
             }
@@ -3486,40 +3536,50 @@ impl ColoredSoftStepSolver {
             // base+index) — single-threaded here, parallel in `solve_all_colors`; the
             // views are the SAME surface either way (the P1/P2 structural fix: no
             // whole-buffer reborrow on any contact / body path).
-            Self::warm_start_apply(self.columns.solve_view(), self.bodies.solve_view());
+            {
+                let _z = zone!(PHYS_WARM_APPLY);
+                Self::warm_start_apply(self.columns.solve_view(), self.bodies.solve_view());
+            }
 
             // (3)+(4) Soft normal + friction sweep ACROSS colors (Gauss-Seidel).
-            Self::solve_all_colors(
-                &self.columns,
-                self.bodies.solve_view(),
-                soft.bias_rate,
-                soft.mass_coeff,
-                soft.impulse_coeff,
-                true,
-                parallel,
-                use_simd_solve,
-            );
+            {
+                let _z = zone!(PHYS_PASS_BIASED);
+                Self::solve_all_colors(
+                    &self.columns,
+                    self.bodies.solve_view(),
+                    soft.bias_rate,
+                    soft.mass_coeff,
+                    soft.impulse_coeff,
+                    true,
+                    parallel,
+                    use_simd_solve,
+                );
+            }
 
             // (5) Position integrate (scalar — the reference's MEASURED-SCALAR
             // choice for the AoS `BodyState`) then refresh the world inertia. The
             // BodyEffective read slice + the BodyState mut slice are distinct
             // ScratchColumns (no borrow conflict).
             {
-                let mut snap_view = scratch.bodies.build_view();
-                simd::position_integrate(
-                    self.bodies.as_read_slice(),
-                    snap_view.as_mut_slice(),
-                    h,
-                    false,
-                );
-            }
-            {
-                let mut view = self.bodies.build_view();
-                simd::refresh_inertia(view.as_mut_slice(), scratch.bodies(), use_simd);
+                let _z = zone!(PHYS_INTEGRATE);
+                {
+                    let mut snap_view = scratch.bodies.build_view();
+                    simd::position_integrate(
+                        self.bodies.as_read_slice(),
+                        snap_view.as_mut_slice(),
+                        h,
+                        false,
+                    );
+                }
+                {
+                    let mut view = self.bodies.build_view();
+                    simd::refresh_inertia(view.as_mut_slice(), scratch.bodies(), use_simd);
+                }
             }
 
             // (6) Relax: re-solve bias-free to remove soft-bias energy.
             for _ in 0..config.relax_iterations {
+                let _z = zone!(PHYS_PASS_RELAX);
                 Self::solve_all_colors(
                     &self.columns,
                     self.bodies.solve_view(),
@@ -3534,11 +3594,17 @@ impl ColoredSoftStepSolver {
         }
 
         // Post-loop restitution (ONCE, velocity-only, bias-free).
-        Self::apply_restitution(&mut self.columns, self.bodies.solve_view());
+        {
+            let _z = zone!(PHYS_RESTITUTION);
+            Self::apply_restitution(&mut self.columns, self.bodies.solve_view());
+        }
 
         // IM-2b: store converged impulses in canonical order, carry the frozen
         // manifolds' entries (B1), then swap.
-        self.store_and_swap(&scratch.rows, manifolds, warm_remap);
+        {
+            let _z = zone!(PHYS_STORE);
+            self.store_and_swap(&scratch.rows, manifolds, warm_remap);
+        }
 
         // O8 integrate-freeze RESTORE: undo the integrate on slept rows by restoring
         // their captured pre-solve hot state into `scratch.bodies` (position /
@@ -3548,6 +3614,7 @@ impl ColoredSoftStepSolver {
         // told to SKIP slept rows, so `physics_apply` leaves the live component
         // untouched (frozen) — and the gather-walked-every-row IM-1 invariant holds.
         if sleeping_active {
+            let _z = zone!(PHYS_SLEEP_FREEZE);
             let mut snap_view = scratch.bodies.build_view();
             let snapshot = snap_view.as_mut_slice();
             let mut eff_view = self.bodies.build_view();
@@ -3564,10 +3631,13 @@ impl ColoredSoftStepSolver {
         // Write the solved velocities back and flag integrated DYNAMIC rows. With
         // sleeping on, slept rows are skipped (their `awake_rows` bit is clear), so the
         // frozen rows are never flagged touched — `physics_apply` leaves them be.
-        if let Some(sleep) = sleep.as_deref() {
-            self.write_back_awake(scratch, sleep);
-        } else {
-            self.write_back(scratch);
+        {
+            let _z = zone!(PHYS_WRITE_BACK);
+            if let Some(sleep) = sleep.as_deref() {
+                self.write_back_awake(scratch, sleep);
+            } else {
+                self.write_back(scratch);
+            }
         }
 
         // O8 phase 2 (AFTER the solve): accumulate this frame's per-island energy from
@@ -3575,6 +3645,7 @@ impl ColoredSoftStepSolver {
         // transition for next frame. The mutable reborrow is sound: `sleep_view` (the
         // immutable view) is dead after the freeze capture.
         if let Some(sleep) = sleep.as_mut() {
+            let _z = zone!(PHYS_SLEEP_END);
             sleep.end_step(scratch.bodies(), graph, config.sleep_threshold, config.sleep_frames);
         }
     }

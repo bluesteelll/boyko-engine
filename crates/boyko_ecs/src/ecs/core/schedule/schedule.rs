@@ -633,6 +633,36 @@ impl Schedule {
         self.may_defer.contains(index)
     }
 
+    /// Every system's name and profiling zone id, in post-topological order (the order
+    /// [`len`](Self::len) counts).
+    ///
+    /// The name is the one the builder cached for diagnostics (typically the system
+    /// function's `type_name`); the id is the one the builder minted into the system's
+    /// `SystemMeta`, which its `SystemSpan` samples carry. A reader of the profiler joins
+    /// per-zone rows back to systems through this rather than inferring ids from build
+    /// order: ids come from one process-wide counter shared by every schedule and every
+    /// static zone, so the order a schedule was built in does not determine them.
+    ///
+    /// Yields nothing when the compile tier folds system zones out
+    /// ([`SYSTEM_ZONES_COMPILED`](crate::ecs::core::profiling::SYSTEM_ZONES_COMPILED) is
+    /// `false`): no system has a zone then, and an empty answer says so rather than
+    /// listing ids that no sample will ever carry. A system whose mint was refused
+    /// because the registry was full (counted and reported as `boyko-W9201`) is yielded
+    /// with [`ZONE_ID_UNASSIGNED`](crate::ecs::core::profiling::ZONE_ID_UNASSIGNED).
+    ///
+    /// Cold: a setup / report-time call, never on the per-frame run path.
+    #[cold]
+    pub fn system_zones(&self) -> impl Iterator<Item = (&'static str, u16)> + '_ {
+        let listed = if crate::ecs::core::profiling::SYSTEM_ZONES_COMPILED {
+            self.systems.len()
+        } else {
+            0
+        };
+        self.systems[..listed]
+            .iter()
+            .map(|sb| (sb.name, sb.system.meta().zone()))
+    }
+
     /// Main executor loop. See module docs for the loop rhythm.
     ///
     /// The `'scope` lifetime on `scope` ties every spawned closure to the

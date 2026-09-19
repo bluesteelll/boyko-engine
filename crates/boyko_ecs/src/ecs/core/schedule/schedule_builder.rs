@@ -1894,6 +1894,70 @@ mod tests {
         assert_eq!(schedule.systems[0].system.meta().zone(), ZONE_ID_UNASSIGNED);
     }
 
+    /// The public [`Schedule::system_zones`] accessor lists every system once, in the
+    /// schedule's own order, each with a distinct assigned id — the same ids and names the
+    /// schedule holds internally — and lists nothing under a tier that folds system zones.
+    ///
+    /// The internal fields are the oracle, read here where they are visible: a reader outside
+    /// the crate has only the accessor, so an accessor that dropped, reordered or mislabelled
+    /// a system would attribute that system's samples to another system with no way to tell.
+    ///
+    /// RED, both run at implementation (2026-09-19, msvc, debug): the accessor iterating in
+    /// reverse ⇒ "entry 0 names another system"; the accessor yielding `ZONE_ID_UNASSIGNED` for
+    /// every system ⇒ "entry 0 carries an id its system's spans do not". The folded-tier branch
+    /// runs only under a `BOYKO_PROFILE` below `Deep` and was not exercised.
+    #[test]
+    fn system_zones_are_unique_and_assigned() {
+        use crate::ecs::core::profiling::{SYSTEM_ZONES_COMPILED, ZONE_ID_UNASSIGNED};
+
+        fn zoned_a() {}
+        fn zoned_b() {}
+        fn zoned_c() {}
+
+        let pool = fresh_pool();
+        let mut builder = ScheduleBuilder::new(pool);
+        builder.add_system(zoned_a);
+        builder.add_system(zoned_b);
+        builder.add_system(zoned_c);
+
+        let mut world = EcsMaster::new();
+        let schedule = builder.build(&mut world);
+        let listed: Vec<(&'static str, u16)> = schedule.system_zones().collect();
+
+        if !SYSTEM_ZONES_COMPILED {
+            // Not a skip: at a folded tier the correct answer is an empty list, and asserting
+            // it is what catches an accessor that lists ids no sample will ever carry.
+            assert!(
+                listed.is_empty(),
+                "the compile tier folds system zones out, yet the accessor listed {listed:?}"
+            );
+            return;
+        }
+
+        assert_eq!(listed.len(), schedule.len(), "one entry per system: {listed:?}");
+        for (i, &(name, zone)) in listed.iter().enumerate() {
+            assert_eq!(name, schedule.systems[i].name, "entry {i} names another system");
+            assert_eq!(
+                zone,
+                schedule.systems[i].system.meta().zone(),
+                "entry {i} carries an id its system's spans do not"
+            );
+            assert_ne!(zone, ZONE_ID_UNASSIGNED, "entry {i} ({name}) is unassigned");
+        }
+        for f in ["::zoned_a", "::zoned_b", "::zoned_c"] {
+            assert_eq!(
+                listed.iter().filter(|(name, _)| name.ends_with(f)).count(),
+                1,
+                "system `{f}` must be listed exactly once: {listed:?}"
+            );
+        }
+        for (i, (_, a)) in listed.iter().enumerate() {
+            for (_, b) in listed.iter().skip(i + 1) {
+                assert_ne!(a, b, "two systems share one zone id, so their rows would merge");
+            }
+        }
+    }
+
     /// **KE17 D3 — the `may_defer` fold, all three answers.**
     ///
     /// One schedule per case so index 0 is unambiguous under the topological
