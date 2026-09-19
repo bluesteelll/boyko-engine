@@ -115,12 +115,13 @@ const SKIP_DIRS: &[&str] = &["target", ".git", ".claude", "graphify-out", "book"
 /// stopped walking, not to track the count.
 const MIN_FILES: usize = 800;
 
-/// Floor on ignore sites found. The tree held 320 (178 plain + 142 `cfg_attr`) when measured on
-/// 2026-09-18 after the boot-validation lane merged; this is well below it and exists only to catch
-/// a detector that stopped detecting.
+/// Floor on ignore sites found. The tree held 321 (178 plain + 143 `cfg_attr`) when measured on
+/// 2026-09-19 on this line after the colored-solver-default lane merged; this is well below it and
+/// exists only to catch a detector that stopped detecting.
 /// The number above is a snapshot that moves with every campaign (it fell by one when A7 resolved
 /// its red-first tests, after growing for weeks, then rose by ten with the boot-validation lane's
-/// device gates) — do NOT read it as the current count, and
+/// device gates and by one with the colored-solver-default lane's release-only SIMD on/off test)
+/// — do NOT read it as the current count, and
 /// do not tune this floor to it. `every_ignore_attribute_states_a_reason` prints the live figure on
 /// every run (`-- --nocapture`), which is the only figure a reader should quote. Because this is a
 /// floor, a prose count that drifts upward — here or in `CLAUDE.md` — stays green forever; both

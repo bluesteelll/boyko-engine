@@ -137,9 +137,16 @@
 //!   1240 boxes) run ONLY in release, as part of the physics release run that `CLAUDE.md`
 //!   names as their leg: `cargo test --release -p boyko-physics --no-fail-fast` (this file
 //!   alone: `cargo test --release -p boyko-physics --test sleep_settles_box_piles`). There
-//!   this binary prints `running 12 tests` and `11 passed; 0 failed; 1 ignored` (the
+//!   this binary prints `running 13 tests` and `12 passed; 0 failed; 1 ignored` (the
 //!   generator). In a debug build they are ignored, and `-- --ignored` in a debug build is NOT
-//!   their leg. A7-R1 is the long one: ~73 s in release, ~80 s for the whole binary.
+//!   their leg. A7-R1 is the long one: ~73 s in release, ~80 s for the whole binary before
+//!   the SIMD on/off differential below was added (it runs A7-R1's scene twice more; its
+//!   time is not measured yet).
+//! * `simd_solve_on_off_bit_identical` (release only, like A7) runs G2's scene, G7's sixteen
+//!   draws and A7-R1's scene once with `simd_solve` on (the default since 2026-09-18) and
+//!   once off, and requires the per-frame state hash, the contact-change wake events and
+//!   A7-R1's D_max to be bit-identical: the O7 AVX2 cohort kernel is a pure speed path over
+//!   the scalar colored oracle, so no budget and no bound here may move with the flag.
 //! * A7-R0 is device-free and schedule-free. It runs in the ordinary run in both profiles,
 //!   and under Miri.
 //! * `flicker_redraw_distribution` is a `generator:`: it asserts nothing and prints the
@@ -149,7 +156,9 @@
 //! # Scene
 //!
 //! The real `add_physics_colored_solve` schedule on a serial pool, sleeping on with the
-//! default `sleep_frames` (60) and threshold, dt = 1/60, gravity (0, -9.81, 0). The archetype
+//! default `sleep_frames` (60) and threshold, dt = 1/60, gravity (0, -9.81, 0), and the
+//! default `simd_solve` (ON since 2026-09-18: the O7 AVX2 cohort kernel, bit-identical to the
+//! scalar colored oracle the budgets and bounds here were first measured on). The archetype
 //! `marked = {RigidBody, RigidBodyMass, Collider, BodyId, Marker}` is created FIRST, then
 //! `plain` without `Marker`, so anything spawned into `marked` is walked before every `plain`
 //! row. The floor is a static box of half-extents (50, 1, 50) at (0, -1, 0). The pile is the
@@ -1804,6 +1813,199 @@ fn a_jolt_scale_box_pyramid_freezes() {
             "construction: Jolt's pyramid holds 1240 boxes"
         );
         freeze_and_hold(&mut h, &pile, LONG_SETTLE_LIMIT, 60, "A7-R2", None);
+    });
+}
+
+/// What one scene run produced, for the SIMD on/off differential.
+#[derive(Debug, PartialEq, Eq)]
+struct SimdAbTrace {
+    /// FNV-1a over every body's [`body_bits`] in walk order, after every step.
+    hashes: Vec<u64>,
+    /// Steps on which `contact_wakes` rose.
+    rises: Vec<usize>,
+    /// `contact_wakes` after the last step.
+    contact_wakes: u64,
+    /// The step on which no dynamic row was awake, if one was reached.
+    freeze_step: Option<usize>,
+}
+
+/// FNV-1a over every body's [`body_bits`], in walk order.
+fn state_hash(h: &mut Harness) -> u64 {
+    let q = h.world.query::<&RigidBody, ()>();
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for body in q.iter() {
+        for word in body_bits(body) {
+            for byte in word.to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    hash
+}
+
+/// Runs a sleeping-on pile of `height` (with the lone box and `last` as in G7 when
+/// `lone`) with `simd_solve`, until it freezes or `limit` steps pass, then `hold` more
+/// steps, hashing the state after every step.
+fn sleeping_trace(
+    simd_solve: bool,
+    height: usize,
+    lone: bool,
+    last: Option<usize>,
+    limit: usize,
+    hold: usize,
+) -> SimdAbTrace {
+    let mut h = Harness::new();
+    h.world.resource_mut::<PhysicsConfig>().simd_solve = simd_solve;
+    spawn_scene(&mut h, height, lone, last);
+    let mut trace = SimdAbTrace {
+        hashes: Vec::with_capacity(limit + hold),
+        rises: Vec::new(),
+        contact_wakes: 0,
+        freeze_step: None,
+    };
+    let mut last_wakes = h.contact_wakes();
+    for step in 1..=limit {
+        h.step();
+        trace.hashes.push(state_hash(&mut h));
+        let now = h.contact_wakes();
+        if now != last_wakes {
+            trace.rises.push(step);
+            last_wakes = now;
+        }
+        if h.dynamic_rows_awake().is_empty() {
+            trace.freeze_step = Some(step);
+            break;
+        }
+    }
+    for _ in 0..hold {
+        h.step();
+        trace.hashes.push(state_hash(&mut h));
+    }
+    trace.contact_wakes = h.contact_wakes();
+    trace
+}
+
+/// A7-R1's scene with `simd_solve`: returns the per-step state hashes and the bits of
+/// D_max, the largest horizontal displacement of any pile box between steps
+/// [`CREEP_FROM`] and [`CREEP_TO`].
+fn creep_trace(simd_solve: bool) -> (Vec<u64>, u32) {
+    let mut h = Harness::new();
+    {
+        let cfg = h.world.resource_mut::<PhysicsConfig>();
+        cfg.sleeping = false;
+        cfg.simd_solve = simd_solve;
+    }
+    let pile = spawn_scene(&mut h, JOLT, false, None);
+    let mut hashes = Vec::with_capacity(CREEP_TO);
+    for _ in 0..CREEP_FROM {
+        h.step();
+        hashes.push(state_hash(&mut h));
+    }
+    let from = h.centres(&pile);
+    for _ in CREEP_FROM..CREEP_TO {
+        h.step();
+        hashes.push(state_hash(&mut h));
+    }
+    let to = h.centres(&pile);
+    let d_max = from
+        .iter()
+        .zip(&to)
+        .map(|(&(_, a), &(_, b))| {
+            let (dx, dz) = (b.x - a.x, b.z - a.z);
+            (dx * dx + dz * dz).sqrt()
+        })
+        .fold(0.0f32, f32::max);
+    (hashes, d_max.to_bits())
+}
+
+/// The first step on which two per-step hash sequences differ, for a failure message.
+fn first_divergence(on: &[u64], off: &[u64]) -> String {
+    match on.iter().zip(off).position(|(a, b)| a != b) {
+        Some(i) => format!("the state first differs after step {}", i + 1),
+        None => format!("the runs have {} and {} steps", on.len(), off.len()),
+    }
+}
+
+/// G2 of the default-world lane: the schedule-level SIMD on/off differential over the
+/// scenes that carry this file's measured budgets and bounds (G2's height-5 pile, G7's
+/// sixteen height-4 draws, A7-R1's height-15 pile with sleeping off).
+///
+/// `simd_solve` became the default on 2026-09-18 after G2's and G7's budgets and A7-R1's
+/// bound were measured on the scalar colored solve. The O7 kernel is bit-identical to that
+/// oracle, so every reading must be too: a difference here is a kernel defect, never a
+/// budget or a bound to re-measure. Non-vacuous only on an AVX2 build with the flag on by
+/// default, which the test asserts first (G1 in `default_world_colored_simd.rs` pins the
+/// same two inputs of the dispatch fork).
+#[test]
+#[cfg_attr(
+    any(miri, debug_assertions),
+    ignore = "slow: G2's, G7's and A7-R1's scenes twice each (1240 boxes for 3000 steps, twice) \
+              through the real schedule; release only, intractable under Miri"
+)]
+// `assertions_on_constants`: the `cfg!` is constant per build, and asserting it is the
+// point — it is the build-configuration witness that makes the on/off comparison
+// non-vacuous, and it reds exactly the build (no AVX2) where both arms are the oracle.
+#[allow(clippy::assertions_on_constants)]
+fn simd_solve_on_off_bit_identical() {
+    assert!(
+        cfg!(all(target_arch = "x86_64", target_feature = "avx2")),
+        "non-vacuity: without x86_64 + avx2 both arms are the scalar oracle"
+    );
+    assert!(
+        PhysicsConfig::default().simd_solve,
+        "non-vacuity: the default run must be the SIMD one"
+    );
+
+    under_watchdog("SIMD on/off: G2's scene", MEDIUM_TIMEOUT, || {
+        let on = sleeping_trace(true, MEDIUM, false, None, MEDIUM_SETTLE_LIMIT, 120);
+        let off = sleeping_trace(false, MEDIUM, false, None, MEDIUM_SETTLE_LIMIT, 120);
+        assert!(on.freeze_step.is_some(), "construction: G2's pile freezes: {:?}", on.rises);
+        assert!(
+            on == off,
+            "G2's scene: simd_solve on/off diverged ({}); on: freeze {:?}, rises {:?}, K {}; \
+             off: freeze {:?}, rises {:?}, K {}",
+            first_divergence(&on.hashes, &off.hashes),
+            on.freeze_step,
+            on.rises,
+            on.contact_wakes,
+            off.freeze_step,
+            off.rises,
+            off.contact_wakes
+        );
+    });
+
+    under_watchdog("SIMD on/off: G7's draws", G7_TIMEOUT, || {
+        for mover in 1..=16usize {
+            let on = sleeping_trace(true, SMALL, true, Some(mover - 1), G7_SETTLE_LIMIT, 0);
+            let off = sleeping_trace(false, SMALL, true, Some(mover - 1), G7_SETTLE_LIMIT, 0);
+            assert!(
+                on == off,
+                "G7 draw {mover}: simd_solve on/off diverged ({}); on: freeze {:?}, rises {:?}, \
+                 K {}; off: freeze {:?}, rises {:?}, K {}",
+                first_divergence(&on.hashes, &off.hashes),
+                on.freeze_step,
+                on.rises,
+                on.contact_wakes,
+                off.freeze_step,
+                off.rises,
+                off.contact_wakes
+            );
+        }
+    });
+
+    under_watchdog("SIMD on/off: A7-R1's scene", 2 * JOLT_TIMEOUT, || {
+        let (on, d_on) = creep_trace(true);
+        let (off, d_off) = creep_trace(false);
+        assert!(
+            on == off && d_on == d_off,
+            "A7-R1's scene: simd_solve on/off diverged ({}); D_max on {} m ({d_on:#010x}), off \
+             {} m ({d_off:#010x})",
+            first_divergence(&on, &off),
+            f32::from_bits(d_on),
+            f32::from_bits(d_off)
+        );
+        println!("SIMD on/off: A7-R1's scene D_max = {} m in both runs", f32::from_bits(d_on));
     });
 }
 

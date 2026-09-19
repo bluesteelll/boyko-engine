@@ -84,9 +84,11 @@
 //! [`refresh_inertia`], [`apply_gravity`], and [`position_integrate`] are the
 //! public entry points the solver calls. They run the AVX2 kernel ONLY when the
 //! compile-time gate is satisfied AND the runtime `simd` flag is set; otherwise
-//! (flag off, or a non-AVX2 build, or under Miri) they run the scalar kernel,
-//! which is byte-identical to the shipped `refresh_inertia` / integrate loop —
-//! the campaign 0%-gate. The scalar kernel is also the differential-test oracle.
+//! (flag off, or a non-AVX2 build) they run the scalar kernel, which is
+//! byte-identical to the shipped `refresh_inertia` / integrate loop — the
+//! campaign 0%-gate. The scalar kernel is also the differential-test oracle. The
+//! compile-time gate has no `not(miri)` term, so under Miri the arm follows the
+//! Miri build's own target features, exactly as natively.
 
 // A `#[cfg(target_feature = "fma")] compile_error!` stood here until 2026-09-02,
 // rejecting the whole build under `+fma`. It was removed when the owner enabled
@@ -134,7 +136,7 @@ pub fn refresh_inertia(
             return;
         }
     }
-    // Flag off / non-AVX2 build / Miri: the byte-identical scalar oracle.
+    // Flag off / non-AVX2 build: the byte-identical scalar oracle.
     #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     let _ = simd;
     refresh_inertia_scalar(bodies_eff, snapshot);

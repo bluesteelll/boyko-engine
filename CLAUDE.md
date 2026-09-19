@@ -179,11 +179,13 @@ The repair belongs in those two crates, not in the gate.
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **320 sites (178 unconditional +
-142 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-18 on this line after the boot-validation
-lane merged.** The last move, 310 → 320, is that lane's ten `gpu-windowed:` device tests: Gate A's
-driver and six workers in `boot_validation_clean.rs`, and the shadow gate's two drivers and one
-worker in `unwritten_shadow_map_gate.rs`. The move before it, 311 → 310, is the A7 lane's four
+The four commands above run **none** of the `#[ignore]`d tests — **321 sites (178 unconditional +
+143 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-19 on this line after the colored-solver-default
+lane merged.** The last move, 320 → 321, is that lane's `simd_solve_on_off_bit_identical`, a
+`cfg_attr(any(miri, debug_assertions), "slow: …")` site. The move before it, 310 → 320, is the
+boot-validation lane's ten `gpu-windowed:` device tests: Gate A's driver and six workers in
+`boot_validation_clean.rs`, and the shadow gate's two drivers and one worker in
+`unwritten_shadow_map_gate.rs`. The move before that, 311 → 310, is the A7 lane's four
 `deferred:` red-first tests: A7-R0 is no longer
 ignored, A7-R1 and A7-R2 became `cfg_attr(any(miri, debug_assertions), "slow: …")`, and G8 became
 `cfg_attr(miri, "miri-slow: …")`. The move before it, from 2026-09-17's 280, is two things and not
@@ -226,20 +228,20 @@ non-default cargo feature and are not even *compiled* otherwise (`--features hwr
 and vanish on Linux. There is no single command — each binary has its own env-var protocol in its
 module header (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
-**Leg: Miri.** `cargo +nightly miri test` already carries **141** of the ignores (measured
-2026-09-18 on this line, after the A7 merge) — the **140** `cfg_attr` sites whose cfg is `miri`
-(135) or `any(miri, debug_assertions)` (5), plus `miri_fixed_loop`'s one plain ignore. The `miri` sites run
+**Leg: Miri.** `cargo +nightly miri test` already carries **142** of the ignores (measured
+2026-09-19 on the colored-solver-default lane) — the **141** `cfg_attr` sites whose cfg is `miri`
+(135) or `any(miri, debug_assertions)` (6), plus `miri_fixed_loop`'s one plain ignore. The `miri` sites run
 *natively* in both profiles and are skipped only under Miri; the `any(miri, debug_assertions)`
-sites run natively in RELEASE only — their leg is the physics release run below, and after the A7
-lane there are five of them, not three. All 32 of the sites added since 2026-09-17 landed here,
+sites run natively in RELEASE only — their leg is the physics release run below; there are six of
+them since the colored-solver-default lane (five after the A7 lane, three before it). All 32 of the sites added since 2026-09-17 landed here,
 which is why this figure moved and the two above it did not. The two remaining `cfg_attr` sites are
 not Miri's: `profiling/reduce.rs`'s
 `not(debug_assertions)` and `tb_neg_m2w_block_reference.rs`'s `not(all(miri, feature = …))`. None of
-the 141 belong to either leg above.
+the 142 belong to either leg above.
 
-**Leg: physics release — the debug-ignored `slow:` tests.** Five tests are ignored in every debug
+**Leg: physics release — the debug-ignored `slow:` tests.** Six tests are ignored in every debug
 build and under Miri by `#[cfg_attr(any(miri, debug_assertions), ignore = "slow: …")]`, so none of
-the four commands above runs them: G2, G6, G7, A7-R1 and A7-R2 in
+the four commands above runs them: G2, G6, G7, A7-R1, A7-R2 and `simd_solve_on_off_bit_identical` in
 [`crates/boyko_physics/tests/sleep_settles_box_piles.rs`](crates/boyko_physics/tests/sleep_settles_box_piles.rs)
 — box piles through the real physics schedule, A7-R1 being the only scene-level gate on a resting
 pile's creep (defect A7). Their leg is the physics release run:

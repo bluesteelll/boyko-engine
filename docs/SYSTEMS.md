@@ -2064,9 +2064,17 @@ off; with both it freezes (A7-R2, step 248) and creeps 0.72 mm over that window 
 2026-09-18). What stays open is recorded in [OPEN-QUESTIONS.md](OPEN-QUESTIONS.md): that creep is a
 steady drift RATE (~8 cm per simulated hour with sleeping off, the default), and it is unexplained.
 
-**Entry point:** `add_physics_systems` (+ `_soft` / `_soft_colored` / `_sdf` /
+**Entry point:** `add_physics_systems::<S>` (+ `_soft` / `_soft_colored` / `_sdf` /
 `_with_scene_sync` variants) adds the fixed-step pipeline to a `ScheduleBuilder`.
-Deterministic, Miri-clean. The broadphase is **user-owned by default**:
+Deterministic, Miri-clean. **The solver type selects the solve stage** (2026-09-18,
+owner decision): `S = DefaultRigidSolver` (= `ColoredSoftStepSolver`) — the default
+world — wires the constraint graph and the colored solve with the O7 AVX2 cohort kernel
+on, through every entry; `S = SoftStepSolver` keeps the reference manifold-order solve,
+which stays in the tree as the oracle; any other `S` (e.g. `NoopSolver`) keeps the
+generic step. The colored and reference solves converge to different, equally valid
+floats, so a replay records the solver ([plugin.rs](../crates/boyko_physics/src/plugin.rs),
+[solver/mod.rs](../crates/boyko_physics/src/solver/mod.rs)).
+`add_physics_colored_solve` is kept and forwards to `add_physics_systems::<ColoredSoftStepSolver>`. The broadphase is **user-owned by default**:
 `BroadphaseSelectMode::Manual` is the default and `select_broadphase` returns without
 touching `PhysicsConfig::broadphase` unless the mode is `Auto`
 ([broadphase_policy.rs](../crates/boyko_physics/src/broadphase_policy.rs):186~). (This line read "broadphase auto-selected
@@ -2077,8 +2085,9 @@ campaign's 0 %-gate.)
 **Kernel selection is a runtime field, not a build flag** — the rule the crate now
 states in one place. `PhysicsConfig::simd` (default `true` since 2026-09-03) gates the
 O1 AVX2 gravity + inertia-refresh kernels, which are bit-identical to their scalar
-oracles; `simd_solve` (default `false`) gates the O7 cohort-batched colored contact
-solve, also bit-identical; `sdf_narrowphase` (default `SdfNarrowphaseKernel::Scalar`)
+oracles; `simd_solve` (default `true` since 2026-09-18) gates the O7 cohort-batched
+colored contact solve, also bit-identical (G2 pins the schedule-level on/off
+differential: `bodytype_determinism_golden.rs`, `sleep_settles_box_piles.rs`); `sdf_narrowphase` (default `SdfNarrowphaseKernel::Scalar`)
 picks the box-vs-SDF fold and is the one selector whose non-default arm is **NOT**
 bit-identical to its oracle (`+0` for `-0` at a `±0` tie; owner-deferred, standing RED
 gate `x8_bits_eq_scalar_bits_widened_proptest`). That last one was chosen by

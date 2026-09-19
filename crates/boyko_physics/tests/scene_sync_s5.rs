@@ -21,6 +21,12 @@
 //! `add_physics_systems_with_scene_sync`, then a single-threaded pool), mirroring
 //! the existing `physics_seam.rs` idiom; the per-frame `propagate_transforms` is
 //! driven directly (it is a plain `&mut EcsMaster` function, not a `SystemParam`).
+//!
+//! Gates 4 and 5 and the determinism cross-check also have a COLORED arm on
+//! [`DefaultRigidSolver`] — the default world's colored solve with the O7 AVX2 cohort
+//! kernel, which `add_physics_systems_with_scene_sync::<DefaultRigidSolver>` wires
+//! since 2026-09-18 — held to the SAME bounds as the reference arm. A colored arm that
+//! misses a bound is a colored-solver defect, not a tolerance to re-measure.
 
 use std::sync::Arc;
 
@@ -38,7 +44,7 @@ use boyko_physics::components::{
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_systems_with_scene_sync;
 use boyko_physics::resources::{Manifolds, PhysicsConfig};
-use boyko_physics::solver::{NoopSolver, RigidSolver, SoftStepSolver};
+use boyko_physics::solver::{DefaultRigidSolver, NoopSolver, RigidSolver, SoftStepSolver};
 
 use boyko_scene::propagation::propagate_transforms;
 use boyko_scene::transform::{GlobalTransform, Transform};
@@ -390,11 +396,11 @@ fn static_transform_drives_body() {
 
 // ── Gate 4: SENSOR reports without resolving; non-sensor resolves ─────────────
 
-/// Steps a single frame of the real (resolving) `SoftStepSolver` over two deeply
+/// Steps a single frame of a real (resolving) solver `S` over two deeply
 /// overlapping spheres, returning the dynamic body's post-step linear velocity
 /// plus the (manifold count, sensor-overlap count). `sensor` decides whether the
 /// SECOND (static wall) body carries the `Sensor` marker.
-fn run_overlap_frame(sensor: bool) -> (Vec3, usize, usize) {
+fn run_overlap_frame<S: RigidSolver + Default>(sensor: bool) -> (Vec3, usize, usize) {
     let mut world = EcsMaster::new();
 
     // Dynamic body moving toward the wall (no gravity, so the ONLY velocity
@@ -436,7 +442,7 @@ fn run_overlap_frame(sensor: bool) -> (Vec3, usize, usize) {
     // The real TGS solver RESOLVES contacts (changes velocity); it owns
     // integration, so `physics_integrate` is gated off and gravity rides inside
     // the substep loop (set to zero below to isolate the contact impulse).
-    let mut schedule = build_sync_schedule::<SoftStepSolver>(&mut world, dt);
+    let mut schedule = build_sync_schedule::<S>(&mut world, dt);
     world.resource_mut::<PhysicsConfig>().gravity = Vec3::ZERO;
 
     schedule.run(&mut world);
@@ -456,8 +462,18 @@ fn run_overlap_frame(sensor: bool) -> (Vec3, usize, usize) {
 /// dynamic body's approach velocity changes (an impulse opposed the approach).
 #[test]
 fn non_sensor_overlap_resolves_velocity() {
+    assert_non_sensor_overlap_resolves_velocity::<SoftStepSolver>();
+}
+
+/// The colored arm of [`non_sensor_overlap_resolves_velocity`]: the default solver.
+#[test]
+fn non_sensor_overlap_resolves_velocity_on_the_default_solver() {
+    assert_non_sensor_overlap_resolves_velocity::<DefaultRigidSolver>();
+}
+
+fn assert_non_sensor_overlap_resolves_velocity<S: RigidSolver + Default>() {
     let approach = Vec3::new(5.0, 0.0, 0.0);
-    let (vel, manifold_count, sensor_count) = run_overlap_frame(false);
+    let (vel, manifold_count, sensor_count) = run_overlap_frame::<S>(false);
 
     assert!(
         manifold_count >= 1,
@@ -486,8 +502,18 @@ fn non_sensor_overlap_resolves_velocity() {
 /// through).
 #[test]
 fn sensor_overlap_reports_without_resolving() {
+    assert_sensor_overlap_reports_without_resolving::<SoftStepSolver>();
+}
+
+/// The colored arm of [`sensor_overlap_reports_without_resolving`]: the default solver.
+#[test]
+fn sensor_overlap_reports_without_resolving_on_the_default_solver() {
+    assert_sensor_overlap_reports_without_resolving::<DefaultRigidSolver>();
+}
+
+fn assert_sensor_overlap_reports_without_resolving<S: RigidSolver + Default>() {
     let approach = Vec3::new(5.0, 0.0, 0.0);
-    let (vel, manifold_count, sensor_count) = run_overlap_frame(true);
+    let (vel, manifold_count, sensor_count) = run_overlap_frame::<S>(true);
 
     assert_eq!(
         manifold_count, 0,
@@ -508,8 +534,8 @@ fn sensor_overlap_reports_without_resolving() {
 /// not. (One assert per behavior; this binds the two arms to the same scene.)
 #[test]
 fn sensor_marker_is_the_only_difference() {
-    let (sensor_vel, _, sensor_overlaps) = run_overlap_frame(true);
-    let (solid_vel, solid_manifolds, _) = run_overlap_frame(false);
+    let (sensor_vel, _, sensor_overlaps) = run_overlap_frame::<SoftStepSolver>(true);
+    let (solid_vel, solid_manifolds, _) = run_overlap_frame::<SoftStepSolver>(false);
 
     assert_ne!(
         sensor_vel, solid_vel,
@@ -528,6 +554,18 @@ fn sensor_marker_is_the_only_difference() {
 /// fighting over a third store.
 #[test]
 fn no_parallel_pose_transform_and_body_agree() {
+    assert_no_parallel_pose::<NoopSolver>();
+}
+
+/// The colored arm of [`no_parallel_pose_transform_and_body_agree`]: on the default
+/// solver the body is integrated inside the colored solve (`SolverOwned`), not by
+/// `physics_integrate`, and the sync must still copy that pose out.
+#[test]
+fn no_parallel_pose_on_the_default_solver() {
+    assert_no_parallel_pose::<DefaultRigidSolver>();
+}
+
+fn assert_no_parallel_pose<S: RigidSolver + Default>() {
     let mut world = EcsMaster::new();
 
     let start = Vec3::new(1.0, 10.0, -3.0);
@@ -547,7 +585,7 @@ fn no_parallel_pose_transform_and_body_agree() {
     );
 
     let dt = 1.0 / 64.0;
-    let mut schedule = build_sync_schedule::<NoopSolver>(&mut world, dt);
+    let mut schedule = build_sync_schedule::<S>(&mut world, dt);
     world.resource_mut::<PhysicsConfig>().gravity = Vec3::new(0.0, -9.81, 0.0);
 
     const FRAMES: u32 = 5;
@@ -588,9 +626,20 @@ fn no_parallel_pose_transform_and_body_agree() {
 /// determinism suite (`cargo test -p boyko-physics`) is the authoritative check.
 #[test]
 fn scene_sync_does_not_perturb_solve_bit_identical() {
+    assert_scene_sync_does_not_perturb_solve::<SoftStepSolver>();
+}
+
+/// The colored arm of [`scene_sync_does_not_perturb_solve_bit_identical`]: the
+/// default solver.
+#[test]
+fn scene_sync_does_not_perturb_the_default_solve_bit_identical() {
+    assert_scene_sync_does_not_perturb_solve::<DefaultRigidSolver>();
+}
+
+fn assert_scene_sync_does_not_perturb_solve<S: RigidSolver + Default>() {
     /// Steps `frames` of a falling dynamic body and returns its `RigidBody`.
     /// `with_sync` selects the sync-wrapped pipeline vs the plain one.
-    fn run(with_sync: bool, frames: u32) -> RigidBody {
+    fn run<S: RigidSolver + Default>(with_sync: bool, frames: u32) -> RigidBody {
         let mut world = EcsMaster::new();
         let start = Vec3::new(0.0, 50.0, 0.0);
         let body = RigidBody {
@@ -611,12 +660,9 @@ fn scene_sync_does_not_perturb_solve_bit_identical() {
         let dt = 1.0 / 64.0;
         let mut builder = ScheduleBuilder::new(serial_pool());
         if with_sync {
-            let _ = add_physics_systems_with_scene_sync::<SoftStepSolver>(&mut builder, &mut world);
+            let _ = add_physics_systems_with_scene_sync::<S>(&mut builder, &mut world);
         } else {
-            let _ = boyko_physics::plugin::add_physics_systems::<SoftStepSolver>(
-                &mut builder,
-                &mut world,
-            );
+            let _ = boyko_physics::plugin::add_physics_systems::<S>(&mut builder, &mut world);
         }
         world.insert_resource(FixedTime::new(std::time::Duration::from_secs_f32(dt)));
         let mut schedule = builder.build(&mut world);
@@ -629,8 +675,8 @@ fn scene_sync_does_not_perturb_solve_bit_identical() {
     }
 
     const FRAMES: u32 = 16;
-    let with = run(true, FRAMES);
-    let without = run(false, FRAMES);
+    let with = run::<S>(true, FRAMES);
+    let without = run::<S>(false, FRAMES);
 
     assert_eq!(
         with, without,

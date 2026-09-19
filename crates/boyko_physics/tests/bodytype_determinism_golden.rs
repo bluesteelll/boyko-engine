@@ -40,6 +40,16 @@
 //! — like every `to_bits()` gate in this crate, it asserts same-binary
 //! reproducibility, which is what the refactor must preserve.
 //!
+//! ## The SIMD witness (2026-09-18)
+//!
+//! The scene runs `PhysicsConfig::default()`, whose `simd_solve` is ON since
+//! 2026-09-18, so on an AVX2 build [`GOLDEN`] is now produced by the O7 cohort
+//! kernel end to end — it was captured on the scalar colored solve. The value did
+//! not move and must not: the kernel is bit-identical to the scalar oracle.
+//! [`golden_scalar_colored_equals_golden`] runs the same scene with
+//! `simd_solve = false` and requires the same [`GOLDEN`], so a SIMD-only or a
+//! scalar-only drift each turn exactly one of the two red.
+//!
 //! Spins up `boyko_threadpool` (intractable under Miri — pool is loom+Miri proven
 //! in the ECS Phase-9 series), so `cfg(not(miri))`.
 
@@ -311,13 +321,21 @@ fn state_hash(bodies: &[RigidBody]) -> u64 {
     h
 }
 
-/// Runs the fixed scene for [`STEPS`] steps and returns the final state hash.
+/// Runs the fixed scene for [`STEPS`] steps on the default config and returns the
+/// final state hash.
 fn run_scene_hash() -> u64 {
+    run_scene_hash_with(PhysicsConfig::default().simd_solve)
+}
+
+/// Runs the fixed scene for [`STEPS`] steps with the colored contact solve's
+/// `simd_solve` flag set to `simd_solve`, and returns the final state hash.
+fn run_scene_hash_with(simd_solve: bool) -> u64 {
     let mut world = EcsMaster::new();
     mixed_scene(&mut world);
 
     let mut schedule = build_colored_schedule(&mut world, DT);
     world.resource_mut::<PhysicsConfig>().gravity = Vec3::new(0.0, -9.81, 0.0);
+    world.resource_mut::<PhysicsConfig>().simd_solve = simd_solve;
 
     for _ in 0..STEPS {
         schedule.run(&mut world);
@@ -340,6 +358,24 @@ fn bodytype_determinism_golden_hash_is_stable() {
          If this is the EnableTag (Simulated-bit) refactor, the SOLVE ORDER drifted \
          (Encoding A is violated) — fix the refactor, NOT the GOLDEN constant. \
          If this is a deliberate solver-math change, re-capture the golden."
+    );
+}
+
+/// G2: the scalar colored oracle (`simd_solve = false`) reproduces [`GOLDEN`] — the
+/// schedule-level SIMD on/off differential. The default config runs the O7 AVX2
+/// cohort kernel, so with [`bodytype_determinism_golden_hash_is_stable`] this pins
+/// both arms of the dispatch fork to the same value.
+///
+/// Non-vacuity rests on G1 (`default_world_colored_simd.rs`), which asserts that
+/// the default flag and the AVX2 `cfg` — the fork's two inputs — are both on.
+#[test]
+fn golden_scalar_colored_equals_golden() {
+    let actual = run_scene_hash_with(false);
+    assert_eq!(
+        actual, GOLDEN,
+        "the SCALAR colored solve no longer reproduces the golden: got {actual:#018X}, expected \
+         {GOLDEN:#018X}. The O7 kernel and its scalar oracle must produce the same bits — a \
+         defect, never a re-bless."
     );
 }
 

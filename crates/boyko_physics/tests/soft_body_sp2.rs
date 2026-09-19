@@ -1329,6 +1329,12 @@ mod pipeline {
     //! reads), and the rigid 0%-gate (a rigid-only scene with SP2 compiled in but all
     //! three soft flags false is byte-identical run-to-run, and the coupling-OFF
     //! schedule SHAPE equals the SP1 wiring).
+    //!
+    //! The coupling gate also has a COLORED arm on `DefaultRigidSolver` — the default
+    //! world's colored solve with the O7 AVX2 cohort kernel, which
+    //! `add_physics_soft::<DefaultRigidSolver>(.., true)` wires since 2026-09-18 — held
+    //! to the same bounds, plus run-to-run bit identity. A miss there is a
+    //! colored-solver defect, not a tolerance to re-measure.
 
     use std::sync::Arc;
 
@@ -1345,7 +1351,7 @@ mod pipeline {
     use boyko_physics::plugin::{add_physics_sdf, add_physics_soft};
     use boyko_physics::resources::{BroadphaseKind, PhysicsConfig};
     use boyko_physics::sdf_query::SdfField;
-    use boyko_physics::solver::{RigidSolver, SoftStepSolver};
+    use boyko_physics::solver::{DefaultRigidSolver, RigidSolver, SoftStepSolver};
 
     use boyko_sdf_math::{SdfEdit, sdf_op};
 
@@ -1453,6 +1459,67 @@ mod pipeline {
 
     #[test]
     fn coupling_pipeline_forces_grid_and_moves_body() {
+        assert_coupling_moves_body(run_coupling_pipeline::<SoftStepSolver>());
+    }
+
+    /// The colored arm of [`coupling_pipeline_forces_grid_and_moves_body`]: the default
+    /// world's solver, the same bounds, and run-to-run bit identity.
+    #[test]
+    fn coupling_pipeline_on_the_default_solver_moves_body_and_is_run_to_run_identical() {
+        let first = run_coupling_pipeline::<DefaultRigidSolver>();
+        assert_coupling_moves_body(first);
+        let second = run_coupling_pipeline::<DefaultRigidSolver>();
+        assert_eq!(
+            [rigid_bits(&first.0), rigid_bits(&first.1)],
+            [rigid_bits(&second.0), rigid_bits(&second.1)],
+            "colored: the coupled pipeline on the default solver is not run-to-run bit-identical"
+        );
+    }
+
+    /// Every field of a `RigidBody`, as bits.
+    fn rigid_bits(b: &RigidBody) -> [u32; 13] {
+        [
+            b.position.x.to_bits(),
+            b.position.y.to_bits(),
+            b.position.z.to_bits(),
+            b.linear_velocity.x.to_bits(),
+            b.linear_velocity.y.to_bits(),
+            b.linear_velocity.z.to_bits(),
+            b.rotation.x.to_bits(),
+            b.rotation.y.to_bits(),
+            b.rotation.z.to_bits(),
+            b.rotation.w.to_bits(),
+            b.angular_velocity.x.to_bits(),
+            b.angular_velocity.y.to_bits(),
+            b.angular_velocity.z.to_bits(),
+        ]
+    }
+
+    /// Asserts the coupling gate's bounds on a `(before, after)` rigid state.
+    fn assert_coupling_moves_body((rigid_before, rigid_after): (RigidBody, RigidBody)) {
+        let dv = rigid_after.linear_velocity - rigid_before.linear_velocity;
+        println!("coupling_pipeline: rigid Δlinear_velocity = {dv:?}");
+        assert!(
+            dv != Vec3::ZERO,
+            "the rigid body did not move — the M1 fix regressed (the grid was not built / \
+             the coupling silently resolved zero contacts)"
+        );
+        // The descending particle pushes the body DOWN (equal-and-opposite).
+        assert!(
+            dv.y < 0.0,
+            "the dynamic body must be pushed DOWN by the descending particle: Δv.y = {}",
+            dv.y
+        );
+        // Sanity: finite.
+        assert!(
+            rigid_after.linear_velocity.y.is_finite(),
+            "the rigid body velocity went non-finite"
+        );
+    }
+
+    /// Drives the REAL coupling schedule for solver `S` and returns the rigid body's
+    /// state before and after three frames, asserting the wiring prerequisites.
+    fn run_coupling_pipeline<S: RigidSolver + Default>() -> (RigidBody, RigidBody) {
         // Drive the REAL coupling schedule (`add_physics_soft(.., coupling = true)`):
         // the pipeline forces `BroadphaseKind::Grid`, `physics_broadphase` BUILDS the
         // grid, and the coupled step reads it. A soft particle resting on a LIGHT
@@ -1486,7 +1553,7 @@ mod pipeline {
 
         let dt = 1.0 / 60.0;
         let mut builder = ScheduleBuilder::new(serial_pool());
-        let keys = add_physics_soft::<SoftStepSolver>(&mut builder, &mut world, true);
+        let keys = add_physics_soft::<S>(&mut builder, &mut world, true);
         world.insert_resource(SdfField::default());
         world.insert_resource(FixedTime::new(std::time::Duration::from_secs_f32(dt)));
         let mut schedule = builder.build(&mut world);
@@ -1512,25 +1579,7 @@ mod pipeline {
             schedule.run(&mut world);
         }
         let rigid_after = all_bodies(&mut world)[0];
-
-        let dv = rigid_after.linear_velocity - rigid_before.linear_velocity;
-        println!("coupling_pipeline: rigid Δlinear_velocity = {dv:?}");
-        assert!(
-            dv != Vec3::ZERO,
-            "the rigid body did not move — the M1 fix regressed (the grid was not built / \
-             the coupling silently resolved zero contacts)"
-        );
-        // The descending particle pushes the body DOWN (equal-and-opposite).
-        assert!(
-            dv.y < 0.0,
-            "the dynamic body must be pushed DOWN by the descending particle: Δv.y = {}",
-            dv.y
-        );
-        // Sanity: finite.
-        assert!(
-            rigid_after.linear_velocity.y.is_finite(),
-            "the rigid body velocity went non-finite"
-        );
+        (rigid_before, rigid_after)
     }
 
     // ── Gate 7: schedule shape — coupling-OFF == SP1 ───────────────────────────

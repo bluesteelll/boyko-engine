@@ -147,10 +147,11 @@ fn cfg(parallel: bool) -> PhysicsConfig {
     PhysicsConfig {
         dt: 1.0 / 60.0,
         parallel_solve: parallel,
-        // Keep the SIMD solve OFF: the AVX2 kernel is `cfg(target_feature="avx2")`
-        // and Miri runs the scalar fallback anyway; the row-ptr access path is the
-        // same surface in both. The serial scalar `solve_color` over the view is
-        // exactly what Miri checks here.
+        // Keep the SIMD solve OFF (the default is ON since 2026-09-18): this file checks
+        // the serial scalar `solve_color` over the row-ptr view. The AVX2 kernel's
+        // dispatch gate has no `not(miri)` term, so an AVX2 Miri build would otherwise
+        // run the cohort kernel here; whether Miri covers that kernel is a separate
+        // leg, not this file's.
         simd_solve: false,
         ..PhysicsConfig::default()
     }

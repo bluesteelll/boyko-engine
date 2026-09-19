@@ -7,16 +7,18 @@
 //! [O6]: https://github.com/bluesteelll/boyko-engine
 //! [O7]: https://github.com/bluesteelll/boyko-engine
 //!
-//! # Why a separate solver (Decision 7, the 0%-gate)
+//! # Why a separate solver (Decision 7)
 //!
-//! The shipped [`SoftStepSolver`](super::SoftStepSolver) — its AoS
+//! The reference [`SoftStepSolver`](super::SoftStepSolver) — its AoS
 //! `PointConstraint` layout and the manifold-order `solve_velocities`
-//! Gauss-Seidel sweep — is **byte-untouched** and stays the default + the
-//! 0%-gate reference. This solver is opt-in via
-//! [`add_physics_colored`](crate::plugin::add_physics_colored)
-//! (`PhysicsConfig::colored == true`) and is wired as a distinct
+//! Gauss-Seidel sweep — is **byte-untouched** and stays in the tree as the
+//! reference oracle. Since 2026-09-18 (owner decision) THIS solver is the default
+//! world's ([`DefaultRigidSolver`](super::DefaultRigidSolver)), with the O7 AVX2
+//! cohort kernel on (`PhysicsConfig::simd_solve`). Every `add_physics_*::<S>`
+//! entry wires it when `S` is this type: the constraint graph plus a distinct
 //! [`physics_solve_colored`](crate::systems::physics_solve_colored) stage that
-//! REPLACES the default solve. A non-colored world is unaffected.
+//! stands in for the generic solve. A world wired with the reference solver is
+//! unaffected.
 //!
 //! # The value change (Phase O5 — isolated here on purpose)
 //!
@@ -1880,9 +1882,14 @@ impl ColoredSoftStepSolver {
     /// - `simd == true` on an AVX2 build → [`solve_color_avx2`](Self::solve_color_avx2)
     ///   over the manifold-GROUP range `[g_lo, g_hi)` as 8-group cohorts: the
     ///   bit-exact WIDTH-ONLY path (Decision 2).
-    /// - `simd == true` on a non-AVX2 build / Miri → falls back to
+    /// - `simd == true` on a non-AVX2 build → falls back to
     ///   [`solve_color`](Self::solve_color) over `span` (one fallback = the oracle;
     ///   bit-identical, simpler — the design's "choose the latter").
+    ///
+    /// The gate is `cfg(all(target_arch = "x86_64", target_feature = "avx2"))` with
+    /// no `not(miri)` term, on purpose: under Miri the fork follows the Miri build's
+    /// own target features, so an AVX2 Miri build exercises the `unsafe` kernel
+    /// rather than a scalar stand-in.
     ///
     /// `span` and `[g_lo, g_hi)` MUST describe the same contiguous slot region
     /// (`span == (group_start[g_lo], group_start[g_hi])`) so the two paths solve the
@@ -1925,8 +1932,8 @@ impl ColoredSoftStepSolver {
                 return;
             }
         }
-        // Flag off / non-AVX2 build / Miri: the byte-identical scalar oracle over
-        // the whole span (the 0%-gate AND the SIMD non-AVX2 fallback).
+        // Flag off / non-AVX2 build: the scalar oracle over the whole span (the
+        // `simd_solve == false` path AND the SIMD non-AVX2 fallback).
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         let _ = (g_lo, g_hi, simd);
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -2022,6 +2029,15 @@ impl ColoredSoftStepSolver {
                 -m_eff * vn
             };
             let new_lambda = (lambda_n + d_lambda).max(0.0);
+            // The AVX2 kernel's `_mm256_max_ps(sum, +0)` returns `+0` on a `±0` tie,
+            // while this `max` leaves the sign of such a tie unspecified; they agree
+            // bit-for-bit because the tie cannot occur. λ starts at `+0` and is always
+            // a `max(.., 0)` output, and in round-to-nearest a sum is `-0` only when
+            // both addends are `-0`, so by induction the clamp never sees `-0`.
+            debug_assert!(
+                new_lambda.to_bits() != 0x8000_0000,
+                "invariant: the normal-impulse clamp never yields -0 (the SIMD ±0-tie proof)"
+            );
             let applied_n = new_lambda - lambda_n;
             view.set_normal_impulse(i, new_lambda);
             {
@@ -3074,6 +3090,12 @@ impl ColoredSoftStepSolver {
             let d_lambda = m_eff * (v_target - vn);
             let lambda_n = cols.normal_impulse(i);
             let new_lambda = (lambda_n + d_lambda).max(0.0);
+            // Same `±0` invariant as `solve_color`'s clamp: this impulse is the next
+            // step's warm seed, which the AVX2 kernel clamps with a `+0`-on-tie `max`.
+            debug_assert!(
+                new_lambda.to_bits() != 0x8000_0000,
+                "invariant: the restitution clamp never yields -0 (the SIMD ±0-tie proof)"
+            );
             let applied = new_lambda - lambda_n;
             cols.set_normal_impulse(i, new_lambda);
             let impulse = normal * applied;
@@ -3302,8 +3324,9 @@ impl ColoredSoftStepSolver {
         // inertia refresh).
         let use_simd = config.simd;
         // O7: gates the cohort-batched colored CONTACT SOLVE — a SEPARATE flag from
-        // O1's `simd` so the solve widen has independent A/B + rollback. Default OFF
-        // ⇒ the scalar `solve_color` oracle (the O6 0%-gate, byte-identical).
+        // O1's `simd` so the solve widen has independent A/B + rollback. Default ON
+        // since 2026-09-18; `false` selects the scalar `solve_color` oracle, which
+        // produces the same bits.
         let use_simd_solve = config.simd_solve;
         // O6: parallel per-color dispatch when opted in. The result is bit-identical
         // to the single-threaded colored solve for any worker count (disjoint-body

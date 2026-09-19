@@ -1,0 +1,381 @@
+//! G3 — the default physics world is worker-count invariant, bit for bit.
+//!
+//! The default world (`add_physics_systems::<DefaultRigidSolver>`, default
+//! `PhysicsConfig`: the colored solve with the O7 AVX2 cohort kernel) runs a box-stack
+//! scene for [`FRAMES`] frames through the real schedule on pools of 1, 2, 4 and 8
+//! workers, each with `parallel_solve` off and on, plus one scalar run
+//! (`simd_solve = false`, 1 worker, `parallel_solve` off). The per-frame FNV-1a hash of
+//! every `RigidBody` bit must be identical across all nine runs: the pool size may
+//! change WHERE a color is solved, never which kernel, color set or order produces the
+//! numbers.
+//!
+//! The design listed a "serial" pool beside the 1-worker one. In this engine they are
+//! the same configuration — `ThreadPoolBuilder` clamps to at least one worker and
+//! `Schedule::run` always installs its pool — so the 1-worker pool is the serial arm.
+//!
+//! # Non-vacuity
+//!
+//! - Every frame's widest color, summed from `ConstraintGraph::color` and each
+//!   manifold's point count, holds at least `2 × MIN_PARALLEL_SLOTS_PER_COLOR` (512)
+//!   slots, so `parallel_solve` has a color to dispatch on every frame.
+//! - The dispatch witness of `large_island_gate_p2.rs`: the same scene's warmed
+//!   parallel step, replayed on the calling thread inside a 4-worker `install` frame,
+//!   allocates (a `pool.scope` was dispatched), under a thread-local counting
+//!   allocator.
+//! - The scene moves: the final hash differs from the spawn state's.
+//! - The SIMD arm is compiled in and on by default (G1 pins the same two inputs).
+//!
+//! Spins real thread pools (intractable under Miri), so `cfg(not(miri))`.
+
+#![cfg(not(miri))]
+// clippy 1.98.0 false positive: this file's `thread_local!` initialiser already uses
+// the `const { … }` form the lint asks for (all of them in the workspace do). See this
+// crate's lib.rs for the full account and the delete condition.
+#![allow(clippy::missing_const_for_thread_local)]
+
+use std::sync::Arc;
+
+use boyko_ecs::ecs::core::component::component::Component;
+use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
+use boyko_ecs::ecs::core::time::FixedTime;
+use boyko_threadpool::ThreadPoolBuilder;
+
+use boyko_physics::components::{
+    Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
+};
+use boyko_physics::manifold::Manifold;
+use boyko_physics::math::{Mat3, Quat, Vec3};
+use boyko_physics::plugin::add_physics_systems;
+use boyko_physics::resources::{
+    BodyState, ConstraintGraph, Manifolds, PhysicsConfig, SolverScratch,
+};
+use boyko_physics::solver::DefaultRigidSolver;
+
+/// Frames each run steps.
+const FRAMES: usize = 60;
+
+/// Fixed timestep.
+const DT: f32 = 1.0 / 60.0;
+
+/// Stacks per side of the square grid: 13 × 13 = 169 two-box stacks, 338 dynamic
+/// boxes. Every box-floor face contact carries 4 points, so the floor color holds
+/// about 676 slots.
+const GRID: usize = 13;
+
+/// The solver's per-color dispatch floor (`MIN_PARALLEL_SLOTS_PER_COLOR`, private to
+/// `solver/colored.rs`). The scene must clear it twice over on every frame.
+const MIN_PARALLEL_SLOTS_PER_COLOR: usize = 256;
+
+/// Returns the bytes of a `#[repr(C)]` POD value for the raw `create_entity` path.
+fn as_bytes<T>(value: &T) -> &[u8] {
+    // SAFETY: `value` is a live `#[repr(C)]` `T`; the slice views its
+    // `size_of::<T>()` bytes read-only for the duration of the borrow, which is
+    // the exact layout the component pool stores.
+    unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) }
+}
+
+fn spawn_box(world: &mut EcsMaster, position: Vec3, half_extents: Vec3, inv_mass: f32) {
+    let body = RigidBody {
+        position,
+        linear_velocity: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        angular_velocity: Vec3::ZERO,
+    };
+    let mass = RigidBodyMass {
+        // A unit cube of mass 1 has I = 1/6 on the diagonal.
+        inv_inertia: if inv_mass == 0.0 {
+            Mat3::ZERO
+        } else {
+            Mat3::from_diagonal(Vec3::new(6.0, 6.0, 6.0))
+        },
+        inv_mass,
+        restitution: 0.0,
+        friction: 0.5,
+    };
+    let collider = Collider {
+        shape: ColliderShape::Box { half_extents },
+        layer: 1,
+        mask: 1,
+    };
+    let archetype = world.bundle_archetype_id_for::<RigidBodyBundle>();
+    let e = world
+        .create_entity(
+            archetype,
+            &[
+                (RigidBody::component_id(), as_bytes(&body)),
+                (RigidBodyMass::component_id(), as_bytes(&mass)),
+                (Collider::component_id(), as_bytes(&collider)),
+            ],
+        )
+        .expect("invariant: RigidBodyBundle archetype accepts the three columns");
+    world.enable::<Simulated>(e);
+}
+
+/// A static floor and a `GRID × GRID` field of two-box stacks, each box overlapping
+/// what it rests on by 1 cm so every contact exists from the first frame.
+fn spawn_scene(world: &mut EcsMaster) {
+    spawn_box(world, Vec3::new(0.0, -0.5, 0.0), Vec3::new(40.0, 0.5, 40.0), 0.0);
+    let half = Vec3::new(0.5, 0.5, 0.5);
+    let origin = -0.75 * (GRID as f32 - 1.0);
+    for i in 0..GRID {
+        for k in 0..GRID {
+            let x = origin + 1.5 * i as f32;
+            let z = origin + 1.5 * k as f32;
+            spawn_box(world, Vec3::new(x, 0.49, z), half, 1.0);
+            spawn_box(world, Vec3::new(x, 1.48, z), half, 1.0);
+        }
+    }
+}
+
+/// FNV-1a over every bit of every `RigidBody`, in query order.
+fn state_hash(world: &mut EcsMaster) -> u64 {
+    let q = world.query::<&RigidBody, ()>();
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for b in q.iter() {
+        let words = [
+            b.position.x,
+            b.position.y,
+            b.position.z,
+            b.linear_velocity.x,
+            b.linear_velocity.y,
+            b.linear_velocity.z,
+            b.rotation.x,
+            b.rotation.y,
+            b.rotation.z,
+            b.rotation.w,
+            b.angular_velocity.x,
+            b.angular_velocity.y,
+            b.angular_velocity.z,
+        ];
+        for w in words {
+            for byte in w.to_bits().to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    hash
+}
+
+/// The slot count of the widest color of the last step: per color, the sum of its
+/// manifolds' point counts.
+fn widest_color_slots(world: &EcsMaster) -> usize {
+    let graph = world.resource::<ConstraintGraph>();
+    let manifolds = world.resource::<Manifolds>().manifolds();
+    (0..graph.n_colors())
+        .map(|c| {
+            graph
+                .color(c)
+                .iter()
+                .map(|&m| usize::from(manifolds[m as usize].count))
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// What one run produced.
+struct Run {
+    /// State hash after every frame.
+    hashes: Vec<u64>,
+    /// The narrowest per-frame widest color, in slots.
+    min_widest: usize,
+    /// The state hash of the spawn state, before any frame.
+    spawn_hash: u64,
+    /// The last frame's gathered snapshot and manifolds, for the dispatch witness.
+    last: (Vec<BodyState>, Vec<Manifold>),
+}
+
+/// Runs the default world on a `workers`-wide pool with the given flags.
+fn run(workers: usize, parallel_solve: bool, simd_solve: bool) -> Run {
+    let mut world = EcsMaster::new();
+    spawn_scene(&mut world);
+    let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+    let mut builder = ScheduleBuilder::new(Arc::clone(&pool));
+    let keys = add_physics_systems::<DefaultRigidSolver>(&mut builder, &mut world);
+    assert!(keys.build_graph.is_some(), "construction: the default world is the colored solve");
+    world.insert_resource(FixedTime::new(std::time::Duration::from_secs_f32(DT)));
+    let mut schedule = builder.build(&mut world);
+    {
+        let cfg = world.resource_mut::<PhysicsConfig>();
+        cfg.parallel_solve = parallel_solve;
+        cfg.simd_solve = simd_solve;
+    }
+
+    let spawn_hash = state_hash(&mut world);
+    let mut hashes = Vec::with_capacity(FRAMES);
+    let mut min_widest = usize::MAX;
+    for _ in 0..FRAMES {
+        schedule.run(&mut world);
+        hashes.push(state_hash(&mut world));
+        min_widest = min_widest.min(widest_color_slots(&world));
+    }
+    let last = (
+        world.resource::<SolverScratch>().bodies().to_vec(),
+        world.resource::<Manifolds>().manifolds().to_vec(),
+    );
+    Run {
+        hashes,
+        min_widest,
+        spawn_hash,
+        last,
+    }
+}
+
+#[test]
+// `assertions_on_constants`: the `cfg!` is constant per build, and asserting it is the
+// point — it is the build-configuration witness that the SIMD arm under test exists.
+#[allow(clippy::assertions_on_constants)]
+fn default_world_is_worker_count_invariant() {
+    assert!(
+        cfg!(all(target_arch = "x86_64", target_feature = "avx2")),
+        "non-vacuity: without x86_64 + avx2 the SIMD arm is compiled out"
+    );
+    assert!(
+        PhysicsConfig::default().simd_solve,
+        "non-vacuity: the default world must run the SIMD arm"
+    );
+
+    let reference = run(1, false, true);
+    assert!(
+        reference.min_widest >= 2 * MIN_PARALLEL_SLOTS_PER_COLOR,
+        "non-vacuity: the narrowest per-frame widest color holds {} slots, under 2 × {} — \
+         parallel_solve would have nothing to dispatch on some frame",
+        reference.min_widest,
+        MIN_PARALLEL_SLOTS_PER_COLOR
+    );
+    assert_ne!(
+        reference.hashes.last().copied(),
+        Some(reference.spawn_hash),
+        "non-vacuity: the scene must move"
+    );
+    let (bodies, manifolds) = &reference.last;
+    let allocs = dispatch::warmed_parallel_step_allocs(bodies, manifolds, 4);
+    assert!(
+        allocs > 0,
+        "non-vacuity: a warmed parallel step on this scene must dispatch a `pool.scope`; it \
+         allocated {allocs} times"
+    );
+
+    let mut runs = Vec::new();
+    for workers in [1usize, 2, 4, 8] {
+        for parallel_solve in [false, true] {
+            let label = format!("{workers}w parallel_solve={parallel_solve}");
+            runs.push((label, run(workers, parallel_solve, true)));
+        }
+    }
+    runs.push(("1w scalar (simd_solve=false)".to_owned(), run(1, false, false)));
+
+    let mut diverged = Vec::new();
+    for (label, r) in &runs {
+        if r.hashes != reference.hashes {
+            let frame = r
+                .hashes
+                .iter()
+                .zip(&reference.hashes)
+                .position(|(a, b)| a != b)
+                .map_or(FRAMES, |i| i + 1);
+            diverged.push(format!("{label}: first differs after frame {frame}"));
+        }
+    }
+    assert!(
+        diverged.is_empty(),
+        "the default world is not worker-count invariant against 1w parallel_solve=false \
+         (SIMD):\n  {}",
+        diverged.join("\n  ")
+    );
+}
+
+/// The dispatch witness of `large_island_gate_p2.rs`, replayed on this scene: one
+/// warmed colored step with `parallel_solve` on, on the calling thread inside a pool
+/// `install` frame, under a thread-local counting allocator. A `pool.scope` dispatch
+/// allocates; the inline path does not.
+mod dispatch {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    use boyko_threadpool::ThreadPoolBuilder;
+
+    use boyko_physics::manifold::Manifold;
+    use boyko_physics::resources::{BodyState, ConstraintGraph, PhysicsConfig, SolverScratch};
+    use boyko_physics::solver::ColoredSoftStepSolver;
+
+    use super::DT;
+
+    pub(super) fn warmed_parallel_step_allocs(
+        bodies: &[BodyState],
+        manifolds: &[Manifold],
+        workers: usize,
+    ) -> usize {
+        let cfg = PhysicsConfig {
+            dt: DT,
+            parallel_solve: true,
+            ..PhysicsConfig::default()
+        };
+        let inv_mass: Vec<f32> = bodies.iter().map(|b| b.inv_mass).collect();
+        let mut graph = ConstraintGraph::with_capacity(bodies.len());
+        graph.build(manifolds, bodies.len(), |row| {
+            (row as usize) < inv_mass.len() && inv_mass[row as usize] != 0.0
+        });
+        let mut solver = ColoredSoftStepSolver::default();
+        let mut scratch = SolverScratch::with_capacity(bodies.len());
+        scratch.set_bodies(bodies);
+
+        let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+        pool.install(|_scope| {
+            // Warm so every solver and scratch buffer reaches steady capacity.
+            for _ in 0..8 {
+                scratch.touched.reset(scratch.bodies().len());
+                solver.solve_colored(&cfg, manifolds, &graph, &mut scratch);
+            }
+            scratch.touched.reset(scratch.bodies().len());
+            let before = ALLOC.count();
+            solver.solve_colored(&cfg, manifolds, &graph, &mut scratch);
+            ALLOC.count().wrapping_sub(before)
+        })
+    }
+
+    thread_local! {
+        static ALLOC_COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) struct CountingAlloc;
+
+    impl CountingAlloc {
+        fn count(&self) -> usize {
+            ALLOC_COUNT.with(|c| c.get())
+        }
+    }
+
+    #[inline]
+    fn bump_alloc_count() {
+        let _ = ALLOC_COUNT.try_with(|c| c.set(c.get() + 1));
+    }
+
+    // SAFETY: every call forwards verbatim to the platform `System` allocator with the
+    // same layout; the wrapper only bumps a thread-local counter (via `try_with`, which
+    // no-ops if TLS is mid-init, so it never re-enters the allocator). `dealloc` is an
+    // unchanged pass-through, so the allocator contract is exactly `System`'s.
+    unsafe impl GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            bump_alloc_count();
+            // SAFETY: forwarded verbatim to the system allocator (same layout).
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr`/`layout` originate from `System.alloc` above.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            bump_alloc_count();
+            // SAFETY: `ptr`/`layout` originate from this allocator; `new_size` forwarded.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOC: CountingAlloc = CountingAlloc;
+}

@@ -182,8 +182,18 @@ fn snapshot_bits(scratch: &SolverScratch) -> Vec<u32> {
 
 /// `STEPS` colored solve steps over a fresh copy of the scene, with `parallel_solve` as given.
 /// Runs on the CALLING thread; used for the serial oracle, which needs no pool at all.
+///
+/// The oracle pins `simd_solve: false` — the SCALAR colored solve — while
+/// [`solve_in_scheduled_system`] runs the default config, whose `simd_solve` is ON since
+/// 2026-09-18. So every comparison below is the whole shipping route (worker-routed dispatch,
+/// chunked colors, the O7 AVX2 cohort kernel) against the scalar single-threaded oracle.
 fn solve_here(parallel_solve: bool) -> Vec<u32> {
-    let cfg = PhysicsConfig { dt: 1.0 / 60.0, parallel_solve, ..PhysicsConfig::default() };
+    let cfg = PhysicsConfig {
+        dt: 1.0 / 60.0,
+        parallel_solve,
+        simd_solve: false,
+        ..PhysicsConfig::default()
+    };
     let mut solver = ColoredSoftStepSolver::default();
     let bodies = floor_scene();
     let mut scratch = SolverScratch::with_capacity(bodies.len());

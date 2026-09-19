@@ -223,6 +223,49 @@
 //! 219), so the debug pin's top is the long run's, not the window's. The same counter
 //! accounted for every non-install scope frame on every debug frame too.
 //!
+//! **S1c after the default SIMD flip — cohort-snapped chunks spawn fewer tasks; the
+//! trajectory did not move.** On 2026-09-18 `PhysicsConfig::simd_solve` became `true` by
+//! default (lane `perf/physics-colored-simd-default`), so S1c now runs the O7 AVX2 cohort
+//! kernel. That kernel is bit-identical to the scalar colored oracle, so the pile's
+//! trajectory and its dispatched colours did not move — scope 133 on every frame and
+//! warm-up `K` 57, as before. What moved is the task count: with `simd` on, the chunk cut
+//! walk in `solve_color_parallel` advances in cohorts of 8 groups, so a dispatched colour
+//! is cut into fewer tasks and its scope's cells overflow the first `ScopeBlock` chunk less
+//! often. Measured on that lane (base `fdab6ae9` + the flip,
+//! `stable-x86_64-pc-windows-msvc` rustc 1.98.1, release; the long run by this file's scene
+//! extended to 17 x 256 steady steps, the extension copied in and restored by copy,
+//! sha256-checked):
+//!
+//! ```text
+//!                         A7a + A7b (scalar)          + default simd_solve
+//! census window, mean      373.234                     362.125
+//! census window, range     362..375                    362..363
+//! window histogram         362->19 374->205 375->32    362->224 363->32
+//! window scope             133 on 256                  133 on 256
+//! window chunk             229 on 19, 241 on 237       229 on 256
+//! long run, per step       362..375, mean 374.074      362..363, mean 362.127
+//! long run, histogram      —                           362->3800 363->552
+//! long run, scope          133 x 4352                  133 x 4352
+//! long run, chunk          229 x 19, 241 x 4333        229 x 4352
+//! OTHER / realloc          0 / 0                       0 / 0
+//! warm-up K (budget 64)    57                          57
+//! ```
+//!
+//! The move is DOWN only: 12 chunks a frame on exactly the frames that read 241, one chunk
+//! fewer on one colour in each of the 12 colour passes. It is the flag and nothing else:
+//! with `simd_solve = false` set in the S1c arm alone (a temporary copy, restored by
+//! sha256) the window reads back the A7b column to every digit (373.234 / 362..375,
+//! histogram 362->19 374->205 375->32, chunk 229..241, `K` 57) and the new pin reds three
+//! ways: steady MAX 375 > 371, dispatch MAX 375 > 363, chunks 229..=241 outside
+//! 229..=229 (2026-09-18, release).
+//! The release pin was re-pinned to the new long run's envelope under the rule in "The
+//! gate" below — chunk 229..=229, dispatch MAX 363 — which removes the upward headroom the
+//! old pin now left (241, 375: values nothing on this tree measured). The debug scene did
+//! NOT move: its census window read 196.250 / 195..219 and its 4,352-step long run
+//! 195..220 (mean 200.862; histogram 195->2893 196->419 219->907 220->133), scope and chunk
+//! 97..=109, dispatch MAX 219 — every figure the A7b debug runs above recorded, because a
+//! debug colour's scope holds one chunk whatever its task count. Its pin is unchanged.
+//!
 //! **S2 after EM2′ (same tree plus the entity-id recycling fix, 2026-09-11,
 //! release and debug alike): 4.031 / 5, `realloc` 0.** The 0.008 it lost is
 //! exactly the two free-list reallocs the AFTER column's window carried
@@ -255,11 +298,13 @@
 //! S2        2 exact      2 exact            2/63       0 (first touch)  0 (was 2, EM2′)
 //! S3        1 exact      1 exact            4/63       0 (first touch)  0
 //! S1a/S1b   1 exact      1 exact            ~7/63      0                0
-//! S1c     133 exact (window) 229..241 (1.81/scope) 0.125  0             0
-//! S1c long 133 exact   229..241              —         0                0
+//! S1c     133 exact (window) 229 exact (1.72/scope) 0.125  0             0
+//! S1c long 133 exact   229 exact             —         0                0
 //! ```
 //!
-//! (S1c's rows are the tree after A7b. After A7a alone the window read 121..133 /
+//! (S1c's rows are the tree after the default SIMD flip. After A7b on the scalar kernel
+//! the window and the long run read 133 / 229..241 at 1.81 chunks per scope. After A7a
+//! alone the window read 121..133 /
 //! 205..217 at 1.78 chunks per scope and the long run 109..133 / 205..217; before A7a
 //! the window read 121 / 205..217 at 1.74 chunks per scope, and the long run read
 //! 109..121 / 193..217.)
@@ -274,7 +319,8 @@
 //!   stage: `Schedule::run`'s install frame owns
 //!   1 scope + 1 chunk of every step and `physics_solve_colored` owns every
 //!   other dispatch object. In the census window that is 132 scopes +
-//!   239.109 chunks of the 373.234 (after A7a alone, 120.047 + 213.938 of the
+//!   228 chunks of the 362.125 (after A7b on the scalar kernel, 132 + 239.109 of the
+//!   373.234; after A7a alone, 120.047 + 213.938 of the
 //!   336.109; before A7a, 120 + ~209.7 of the 331.8).
 //!   ⚠ The backtrace trace that charged `physics_solve_colored`
 //!   **99.5 %** was taken on a WARM-UP step, and the percentage belongs to that
@@ -326,11 +372,20 @@
 //!
 //! S1c's number is DATA-DEPENDENT: its warm-up spans 290..387 as the pile
 //! collapses, and after it the count moves in whole dispatched colours as the
-//! contact set settles (362..375 per step over 4,352 steps since A7b; 314..350
+//! contact set settles (362..363 per step over 4,352 steps since the default SIMD flip;
+//! 362..375 after A7b on the scalar kernel; 314..350
 //! after A7a alone; 302..339 before it). Quote it as a range, never as a figure.
 //! Its release pins are that long run's envelope with NO upward headroom — scope
-//! 133..=133, chunk 229..=241, dispatch MAX 375 (after A7a alone: 109..=133,
+//! 133..=133, chunk 229..=229, dispatch MAX 363 (after A7b on the scalar kernel:
+//! 133..=133, 229..=241, 375; after A7a alone: 109..=133,
 //! 205..=217, 350; before A7a: 109..=121, 193..=217, 339):
+//!
+//! * **The third re-pin, after the default SIMD flip, is a NARROWING.** The long run moved
+//!   DOWN only (header, "S1c after the default SIMD flip"), and the rule below keeps no
+//!   upward headroom, so chunk 229..=241 became 229..=229 and dispatch MAX 375 became 363;
+//!   scope did not move. The fan-out regression this gate exists for (+24 a frame, below)
+//!   would land at 386 against 363 on every frame; that is arithmetic on the measured
+//!   window, not a re-run of that mutation.
 //!
 //! * **This is a re-pin from a long-run adjudication, not a widening — twice.** A7a
 //!   turned the old pin red on three lines (steady MAX 350 > 347, dispatch 350 >
@@ -1808,23 +1863,27 @@ fn run_pyramid_arm(
     ));
 }
 
-fn s1a_rigid_pile_default_pipeline_serial(rows: &mut Vec<Row>) {
+/// The REFERENCE pipeline (`add_physics_systems::<SoftStepSolver>`). It was the
+/// default until 2026-09-18, when the default world became the colored solve with
+/// `simd_solve` on (S1b's shape); its pin is unchanged by that.
+fn s1a_rigid_pile_reference_pipeline_serial(rows: &mut Vec<Row>) {
     run_pyramid_arm(
         rows,
-        "S1a — rigid pile, DEFAULT pipeline (add_physics_systems, serial pool)",
+        "S1a — rigid pile, REFERENCE pipeline (SoftStepSolver, serial pool)",
         false,
         1,
         false,
     );
 }
 
-/// The colored pipeline with the parallel switches OFF. Its only purpose is to
-/// be the CONTROL for `S1c`: if the two arms measure the same number, the
-/// parallel dispatch never engaged and `S1c`'s figure is about something else.
+/// The DEFAULT pipeline since 2026-09-18 — the colored solve with `simd_solve` on
+/// by default — with the parallel switches OFF. It is also the CONTROL for `S1c`: if
+/// the two arms measure the same number, the parallel dispatch never engaged and
+/// `S1c`'s figure is about something else.
 fn s1b_rigid_pile_colored_serial(rows: &mut Vec<Row>) {
     run_pyramid_arm(
         rows,
-        "S1b — rigid pile, COLORED solve, parallel switches OFF (control for S1c)",
+        "S1b — rigid pile, DEFAULT pipeline (colored + simd_solve), parallel OFF (control for S1c)",
         true,
         4,
         false,
@@ -2168,7 +2227,9 @@ impl Pin {
 /// `stable-x86_64-pc-windows-msvc` rustc 1.98.1), where the window's maximum is
 /// also the long run's. Both S1c pins were re-measured and re-pinned again after
 /// A7b (A7a + A7b, 2026-09-18, same toolchain): release and debug now read the
-/// long run's envelope in both directions (header, "S1c after A7b").
+/// long run's envelope in both directions (header, "S1c after A7b"). The RELEASE pin was
+/// re-pinned a third time, DOWN, after the default SIMD flip (2026-09-18, same
+/// toolchain): the new long run's envelope (header, "S1c after the default SIMD flip").
 fn pins() -> [Pin; 12] {
     // An App frame: one install frame (a `ScopeShared` + one chunk) and at most
     // one injector block — the block arrives once per 63 dispatcher-side pushes,
@@ -2247,12 +2308,18 @@ fn pins() -> [Pin; 12] {
             // colour pass, and that regression stayed green inside it (see "The
             // gate" in the header). An upward colour is a red to re-measure,
             // never a pin to widen.
+            // RE-PINNED DOWN after the default SIMD flip (2026-09-18): the O7 cohort
+            // kernel is bit-identical, so the colours did not move (scope 133 on all
+            // 4,352 long-run frames), but its cohort-snapped chunk cut spawns fewer
+            // tasks, and all 4,352 frames read 229 chunks, dispatch MAX 363. The rule
+            // keeps no upward headroom, so 241 / 375 went with it (header, "S1c after
+            // the default SIMD flip").
             Pin {
                 scene: "S1c",
                 workers: 4,
                 scope: (133, 133),
-                chunk: (229, 241),
-                dispatch_max: 375,
+                chunk: (229, 229),
+                dispatch_max: 363,
                 other_per_frame: 0,
                 realloc_sum: 0,
             }
@@ -2436,7 +2503,7 @@ fn frame_allocation_census() {
     s0b_executor_floor_with_fixed_substep(&mut rows);
     s2_spawn_despawn_churn_and_par_iter(&mut rows);
     s3_query_and_event_loop(&mut rows);
-    s1a_rigid_pile_default_pipeline_serial(&mut rows);
+    s1a_rigid_pile_reference_pipeline_serial(&mut rows);
     s1b_rigid_pile_colored_serial(&mut rows);
     s1c_rigid_pile_colored_parallel(&mut rows);
 

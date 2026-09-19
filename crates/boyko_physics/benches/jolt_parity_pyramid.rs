@@ -36,11 +36,14 @@
 //!
 //! # ⚠ And what this measures about boyko specifically
 //!
-//! The colored solve and the parallel dispatch are OPT-IN and ship OFF
-//! (`PhysicsConfig::{colored, parallel_solve, parallel_broadphase}` all default
-//! `false`). This bench turns them on. That is the configuration a game would
-//! choose for a pile like this, but it is not what a default world runs, and the
-//! numbers must never be quoted as "boyko's default physics".
+//! Since 2026-09-18 the colored solve is the default world's solver
+//! (`DefaultRigidSolver`), with the O7 AVX2 cohort kernel on (`simd_solve` defaults
+//! to `true`); numbers recorded before that date ran the scalar colored sweep. The
+//! parallel dispatch is still OPT-IN and ships OFF
+//! (`PhysicsConfig::{parallel_solve, parallel_broadphase}` default `false`). This
+//! bench turns it on. That is the configuration a game would choose for a pile like
+//! this, but it is not what a default world runs, and the numbers must never be
+//! quoted as "boyko's default physics".
 
 #![allow(clippy::missing_const_for_thread_local)]
 
