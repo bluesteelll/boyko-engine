@@ -142,3 +142,60 @@ predicted setup 0.425 → 0.10–0.21 µs per manifold. Rulings:
 disjoint, the tree broadphase and L11 → L9 (after L5, which owns the narrowphase system) → L10 (rev 2.2: it
 adopts L11's per-manifold warm storage and L9's tag layout) → L8 (friction per patch, on L11's block layout)
 → L12. Each lane is gated end to end and per contact under the P0 protocol.
+
+## L8 (friction per patch) and L12 (the effective-mass cache): designed and CLOSED by ruling (2026-09-19)
+
+Both reviews found no blocking remark (L8: 5 Important; L12: 4 Important). Each design is closed; the implementing
+lane folds these items in as rev 1.1 before its first commit.
+
+**L8 — friction per patch** (`L8-patch-friction/`; value-changing, owner-approved D2). Two tangent rows with a
+circular clamp at μΣλn and a twist row clamped at μΣd_iλn_i at the patch centre, on L11's block layout — the model
+Jolt adopted in v5.6.0 (#2039), Box3D, Bepu and Rapier's default. `SoftStepSolver` stays the per-point Coulomb
+reference. Rulings:
+- **W1:** every row that GATES the lever runs with `--sleeping off` pinned explicitly; sleeping-on rows are
+  witnesses. Before C0 a contact-set-robust pass rule is registered: the primary claim is the solve timed on one
+  recorded contact stream in both binaries (`solve_colored` is public), with per-sweep cost normalised by points and
+  by manifolds, each with its own SE. The end-to-end T(W) row is a secondary witness, because the lever moves the
+  trajectory and so the contact set (D1 moved it 12 %).
+- **W2:** the new counters stay off `WarmSeedStats` (a colored-solver-only accessor); G-S6 keeps its literal form,
+  no diff in `soft_step.rs`.
+- **W3:** a cohort in which no lane is multi-point skips the patch step uniformly (masked ops change no value, so
+  G-P5 holds), and a sphere-pile row is gated "not claimed slower".
+- **W4:** in every G-P gate the colored arm is the gate and the reference arm is a receipt; if the reference misses
+  a bound it is reported, and the colored bound is never adjusted to match it.
+- **W5:** pre-registered bands on the A7-R2, G8 and R-S freeze steps (confirm / report / STOP, as A7-R1).
+- **O1:** `vn0` stays cold, outside the RankBlock, so the slot is L12's. O2–O7 adopted (the C1 digest and the
+  multi-point pins join the red set; the FMA census covers `contact.rs`; `rc` blended by `present`; wording against
+  L10's `SleepSkip::Off`; A7-R1 reported against the C0 base reading; G-P4's stop time is linear AND angular rest).
+- **Review OQ1:** G-P2's band is registered at C0 from the base run, before any value change, and the registration
+  is the gate; a base reading outside the analytic [25, 33] is a finding, not a band change.
+- **Not in L8:** friction skipped in bias sweeps (Box2D main, Box3D) is a separate value change; it is a later
+  candidate (L8b), priced on its own.
+
+**L12 — effective masses cached per inertia epoch** (`L12-mass-cache/`; bit-identical). Rulings:
+- **W1, the build-if:** the per-contact override written for L9 extends to L12 — the owner's goal is parity per
+  contact and "squeeze maximum performance" — so the bar is the SE bar at W=1 per contact, not 5 % of T(W).
+- **W2:** T1's control arm has the parent's kernel shape (no store, no column); rolling back means reverting C1,
+  never a flag.
+- **W3:** the C0 decision uses a bench-only upper-bound probe (masses not recomputed on load sweeps; a value-changing
+  probe is allowed in a bench); if even that bound does not clear the SE bar, L12 closes at C0 without C1.
+- **W4:** every W>1 arm asserts that dispatch happened on a scene that dispatches (widest colour ≥ 256 and
+  n_chunks ≥ 2, or a scope/chunk delta > 0), and at least one cohort's compute and load sweeps run in different
+  tasks.
+- O1–O5 adopted (a control where inertia cannot change; G1 replays a recorded event trace; D6's coverage stated
+  truly; a census of mutable access sites; c′_R = Rl_off/8; the reserve formula in `MASS_LANES_PER_*` terms).
+- **Review OQs:** sleeping is pinned off for T1/T2; the per-contact denominator is solved (awake) manifolds, not
+  L10's logical view; L12's layout is fixed after L8 closes (L8 owns the friction-mass choice); if T2 fails its
+  claim with C1 landed, C1 is reverted.
+
+## L10 rev 2.2 (re-based on L11, L9 and L5): REVISE, rev 2.3 in progress
+
+`L10-sleeping/06-DESIGN-REV2.2.md` answers the three re-basing questions (the B1 carry and restore path on L11's
+per-manifold records; coexistence with L9's tags and records; the frozen-pair skip inside L5's chunked emit). The
+first review (`07`) was taken on the design's last text block only — the architect's answer arrived in two
+messages and only the second was passed on; the complete text was restored from the agent transcript and
+re-reviewed. That review (`07-REVIEW-OF-REV2.2.md`) found 1 blocking remark — the `row_frames` fill skips HELD rows
+while sensor pairs with a HELD endpoint are still computed, so after a row shift a box sensor over a held pile reads
+another body's frame — and 5 important ones (no W ≥ 2 sleeping-on census arm; sensor pairs in the kept unit; `dt`
+missing from the sleep epoch although L9 reads it; REC admitted on a "exactly zero" quaternion claim that
+`Quat::mul` does not satisfy; transitions into Off). Revision 2.3, a delta, is being written against those rulings.
