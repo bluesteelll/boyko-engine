@@ -1,0 +1,95 @@
+Gnuplot not found, using plotters backend
+Benchmarking broadphase/all_pairs/100
+Benchmarking broadphase/all_pairs/100: Warming up for 3.0000 s
+Benchmarking broadphase/all_pairs/100: Collecting 100 samples in estimated 5.0152 s (904k iterations)
+Benchmarking broadphase/all_pairs/100: Analyzing
+Benchmarking broadphase/grid/100
+Benchmarking broadphase/grid/100: Warming up for 3.0000 s
+Benchmarking broadphase/grid/100: Collecting 100 samples in estimated 5.2017 s (116k iterations)
+Benchmarking broadphase/grid/100: Analyzing
+Benchmarking broadphase/all_pairs/1000
+Benchmarking broadphase/all_pairs/1000: Warming up for 3.0000 s
+Benchmarking broadphase/all_pairs/1000: Collecting 100 samples in estimated 6.0515 s (10k iterations)
+Benchmarking broadphase/all_pairs/1000: Analyzing
+Benchmarking broadphase/grid/1000
+Benchmarking broadphase/grid/1000: Warming up for 3.0000 s
+Benchmarking broadphase/grid/1000: Collecting 100 samples in estimated 6.6954 s (10k iterations)
+Benchmarking broadphase/grid/1000: Analyzing
+Benchmarking broadphase/all_pairs/10000
+Benchmarking broadphase/all_pairs/10000: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.0s, or reduce sample count to 70.
+Benchmarking broadphase/all_pairs/10000: Collecting 100 samples in estimated 7.0169 s (100 iterations)
+Benchmarking broadphase/all_pairs/10000: Analyzing
+Benchmarking broadphase/grid/10000
+Benchmarking broadphase/grid/10000: Warming up for 3.0000 s
+Benchmarking broadphase/grid/10000: Collecting 100 samples in estimated 5.5900 s (700 iterations)
+Benchmarking broadphase/grid/10000: Analyzing
+Benchmarking broadphase_disparity/all_pairs/1000
+Benchmarking broadphase_disparity/all_pairs/1000: Warming up for 3.0000 s
+Benchmarking broadphase_disparity/all_pairs/1000: Collecting 100 samples in estimated 6.2550 s (10k iterations)
+Benchmarking broadphase_disparity/all_pairs/1000: Analyzing
+Benchmarking broadphase_disparity/grid/1000
+Benchmarking broadphase_disparity/grid/1000: Warming up for 3.0000 s
+Benchmarking broadphase_disparity/grid/1000: Collecting 100 samples in estimated 5.0881 s (2100 iterations)
+Benchmarking broadphase_disparity/grid/1000: Analyzing
+Benchmarking broadphase_disparity/all_pairs/10000
+Benchmarking broadphase_disparity/all_pairs/10000: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.2s, or reduce sample count to 60.
+Benchmarking broadphase_disparity/all_pairs/10000: Collecting 100 samples in estimated 7.1926 s (100 iterations)
+Benchmarking broadphase_disparity/all_pairs/10000: Analyzing
+Benchmarking broadphase_disparity/grid/10000
+Benchmarking broadphase_disparity/grid/10000: Warming up for 3.0000 s
+Benchmarking broadphase_disparity/grid/10000: Collecting 100 samples in estimated 6.3364 s (400 iterations)
+Benchmarking broadphase_disparity/grid/10000: Analyzing
+Benchmarking broadphase_parallel/serial_o2/1000
+Benchmarking broadphase_parallel/serial_o2/1000: Warming up for 3.0000 s
+Benchmarking broadphase_parallel/serial_o2/1000: Collecting 20 samples in estimated 5.0301 s (7560 iterations)
+Benchmarking broadphase_parallel/serial_o2/1000: Analyzing
+Benchmarking broadphase_parallel/w1/1000
+Benchmarking broadphase_parallel/w1/1000: Warming up for 3.0000 s
+Benchmarking broadphase_parallel/w1/1000: Collecting 20 samples in estimated 5.1377 s (7770 iterations)
+Benchmarking broadphase_parallel/w1/1000: Analyzing
+Benchmarking broadphase_parallel/w2/1000
+Benchmarking broadphase_parallel/w2/1000: Warming up for 3.0000 s
+Benchmarking broadphase_parallel/w2/1000: Collecting 20 samples in estimated 5.0035 s (7560 iterations)
+Benchmarking broadphase_parallel/w2/1000: Analyzing
+Benchmarking broadphase_parallel/w4/1000
+Benchmarking broadphase_parallel/w4/1000: Warming up for 3.0000 s
+Benchmarking broadphase_parallel/w4/1000: Collecting 20 samples in estimated 5.1371 s (7770 iterations)
+Benchmarking broadphase_parallel/w4/1000: Analyzing
+Benchmarking broadphase_parallel/serial_o2/10000
+Benchmarking broadphase_parallel/serial_o2/10000: Warming up for 3.0000 s
+Benchmarking broadphase_parallel/serial_o2/10000: Collecting 20 samples in estimated 5.0616 s (630 iterations)
+Benchmarking broadphase_parallel/serial_o2/10000: Analyzing
+Benchmarking broadphase_parallel/w1/10000
+Benchmarking broadphase_parallel/w1/10000: Warming up for 3.0000 s
+Benchmarking broadphase_parallel/w1/10000: Collecting 20 samples in estimated 5.0545 s (630 iterations)
+Benchmarking broadphase_parallel/w1/10000: Analyzing
+Benchmarking broadphase_parallel/w2/10000
+Benchmarking broadphase_parallel/w2/10000: Warming up for 3.0000 s
+Benchmarking broadphase_parallel/w2/10000: Collecting 20 samples in estimated 5.1159 s (840 iterations)
+Benchmarking broadphase_parallel/w2/10000: Analyzing
+Benchmarking broadphase_parallel/w4/10000
+Benchmarking broadphase_parallel/w4/10000: Warming up for 3.0000 s
+Benchmarking broadphase_parallel/w4/10000: Collecting 20 samples in estimated 5.4174 s (1260 iterations)
+Benchmarking broadphase_parallel/w4/10000: Analyzing
+Benchmarking broadphase_parallel/serial_o2/100000
+Benchmarking broadphase_parallel/serial_o2/100000: Warming up for 3.0000 s
+Benchmarking broadphase_parallel/serial_o2/100000: Collecting 20 samples in estimated 5.2977 s (60 iterations)
+Benchmarking broadphase_parallel/serial_o2/100000: Analyzing
+Benchmarking broadphase_parallel/w1/100000
+Benchmarking broadphase_parallel/w1/100000: Warming up for 3.0000 s
+Benchmarking broadphase_parallel/w1/100000: Collecting 20 samples in estimated 5.3146 s (60 iterations)
+Benchmarking broadphase_parallel/w1/100000: Analyzing
+Benchmarking broadphase_parallel/w2/100000
+Benchmarking broadphase_parallel/w2/100000: Warming up for 3.0000 s
+Benchmarking broadphase_parallel/w2/100000: Collecting 20 samples in estimated 5.4293 s (80 iterations)
+Benchmarking broadphase_parallel/w2/100000: Analyzing
+Benchmarking broadphase_parallel/w4/100000
+Benchmarking broadphase_parallel/w4/100000: Warming up for 3.0000 s
+
+Warning: Unable to complete 20 samples in 5.0s. You may wish to increase target time to 9.6s, enable flat sampling, or reduce sample count to 10.
+Benchmarking broadphase_parallel/w4/100000: Collecting 20 samples in estimated 9.5998 s (210 iterations)
+Benchmarking broadphase_parallel/w4/100000: Analyzing

@@ -1,0 +1,93 @@
+2026-09-19T06:13:28.091+03:00 DIAG START {"start": "2026-09-19T06:13:27.725+03:00", "machine_before": {"powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)", "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n236"}, "test": false}
+2026-09-19T06:13:28.092+03:00 pass 0: idle rule (wait_idle.ps1)
+2026-09-19T06:15:38.502+03:00 pass 0: idle reached
+2026-09-19T06:15:47.092+03:00   p0 warm-up boyko W=8: mean 9.0477192 ms
+2026-09-19T06:15:56.106+03:00   p0 [ 1] boyko W=2 P-none: mean 13.9558 ms median 13.7795 valid True mask 0xffff rb 1.42% ra 1.51% cpu_s 9.859 wall 6.99s
+2026-09-19T06:16:02.455+03:00   p0 [ 2] jolt  W=2 P-none: mean 8.6031 ms median 8.6472 valid True mask 0xffff rb 1.51% ra 1.17% cpu_s 8.562 wall 4.324s
+2026-09-19T06:16:08.811+03:00   p0 [ 3] jolt  W=2 P-phys: mean 8.6245 ms median 8.7293 valid True mask 0x5 rb 1.17% ra 1.56% cpu_s 8.562 wall 4.335s
+2026-09-19T06:16:17.731+03:00   p0 [ 4] boyko W=2 P-phys: mean 13.7663 ms median 13.6707 valid True mask 0x5 rb 1.56% ra 0.44% cpu_s 10.422 wall 6.895s
+2026-09-19T06:16:26.620+03:00   p0 [ 5] boyko W=2 P-full: mean 13.7098 ms median 13.7189 valid True mask 0xffff rb 0.44% ra 0.45% cpu_s 10.203 wall 6.866s
+2026-09-19T06:16:32.969+03:00   p0 [ 6] jolt  W=2 P-full: mean 8.6150 ms median 8.6948 valid True mask 0xffff rb 0.45% ra 1.91% cpu_s 8.656 wall 4.329s
+2026-09-19T06:16:36.793+03:00   p0 [ 7] jolt  W=8 P-none: mean 3.5582 ms median 3.6086 valid True mask 0xffff rb 1.91% ra 1.17% cpu_s 13.953 wall 1.8s
+2026-09-19T06:16:43.371+03:00   p0 [ 8] boyko W=8 P-none: mean 9.0850 ms median 9.0602 valid True mask 0xffff rb 1.17% ra 0.78% cpu_s 12.156 wall 4.554s
+2026-09-19T06:16:49.980+03:00   p0 [ 9] boyko W=8 P-phys: mean 9.1466 ms median 9.1076 valid True mask 0x5555 rb 0.78% ra 0.64% cpu_s 12.391 wall 4.585s
+2026-09-19T06:16:53.809+03:00   p0 [10] jolt  W=8 P-phys: mean 3.5741 ms median 3.6502 valid True mask 0x5555 rb 0.64% ra 0.44% cpu_s 14.281 wall 1.808s
+2026-09-19T06:16:57.567+03:00   p0 [11] jolt  W=8 P-full: mean 3.4331 ms median 3.4838 valid True mask 0xffff rb 0.44% ra 1.07% cpu_s 13.312 wall 1.738s
+2026-09-19T06:17:04.179+03:00   p0 [12] boyko W=8 P-full: mean 9.1504 ms median 9.1029 valid True mask 0xffff rb 1.07% ra 0.64% cpu_s 13.359 wall 4.587s
+2026-09-19T06:17:04.179+03:00 pass 1: idle rule (wait_idle.ps1)
+2026-09-19T06:19:14.622+03:00 pass 1: idle reached
+2026-09-19T06:19:23.302+03:00   p1 warm-up boyko W=8: mean 9.2242812 ms
+2026-09-19T06:19:27.169+03:00   p1 [ 1] jolt  W=8 P-phys: mean 3.6406 ms median 3.6273 valid True mask 0x5555 rb 1.08% ra 0.63% cpu_s 14.078 wall 1.845s
+2026-09-19T06:19:33.806+03:00   p1 [ 2] boyko W=8 P-phys: mean 9.2007 ms median 9.1448 valid True mask 0x5555 rb 0.63% ra 0.53% cpu_s 12.984 wall 4.612s
+2026-09-19T06:19:40.418+03:00   p1 [ 3] boyko W=8 P-full: mean 9.1498 ms median 9.0633 valid True mask 0xffff rb 0.53% ra 0.74% cpu_s 11.969 wall 4.587s
+2026-09-19T06:19:44.295+03:00   p1 [ 4] jolt  W=8 P-full: mean 3.6621 ms median 3.6671 valid True mask 0xffff rb 0.74% ra 0.49% cpu_s 14.312 wall 1.854s
+2026-09-19T06:19:48.100+03:00   p1 [ 5] jolt  W=8 P-none: mean 3.5222 ms median 3.5745 valid True mask 0xffff rb 0.49% ra 1.71% cpu_s 13.75 wall 1.785s
+2026-09-19T06:19:54.755+03:00   p1 [ 6] boyko W=8 P-none: mean 9.2338 ms median 9.1800 valid True mask 0xffff rb 1.71% ra 0.84% cpu_s 12.094 wall 4.628s
+2026-09-19T06:20:03.743+03:00   p1 [ 7] boyko W=2 P-phys: mean 13.9023 ms median 13.8163 valid True mask 0x5 rb 0.84% ra 1.43% cpu_s 10.297 wall 6.963s
+2026-09-19T06:20:10.338+03:00   p1 [ 8] jolt  W=2 P-phys: mean 9.0999 ms median 9.0810 valid True mask 0x5 rb 1.43% ra 3.28% cpu_s 8.75 wall 4.574s
+2026-09-19T06:20:16.713+03:00   p1 [ 9] jolt  W=2 P-full: mean 8.6592 ms median 8.6895 valid True mask 0xffff rb 3.28% ra 0.59% cpu_s 8.656 wall 4.354s
+2026-09-19T06:20:25.452+03:00   p1 [10] boyko W=2 P-full: mean 13.4072 ms median 13.4463 valid True mask 0xffff rb 0.59% ra 0.34% cpu_s 9.906 wall 6.715s
+2026-09-19T06:20:34.385+03:00   p1 [11] boyko W=2 P-none: mean 13.7937 ms median 13.7841 valid True mask 0xffff rb 0.34% ra 0.73% cpu_s 10.188 wall 6.909s
+2026-09-19T06:20:40.743+03:00   p1 [12] jolt  W=2 P-none: mean 8.6308 ms median 8.7250 valid True mask 0xffff rb 0.73% ra 2.38% cpu_s 8.578 wall 4.337s
+2026-09-19T06:20:40.744+03:00 pass 2: idle rule (wait_idle.ps1)
+2026-09-19T06:22:51.179+03:00 pass 2: idle reached
+2026-09-19T06:22:59.801+03:00   p2 warm-up boyko W=8: mean 9.114689 ms
+2026-09-19T06:23:08.667+03:00   p2 [ 1] boyko W=2 P-full: mean 13.6617 ms median 13.6915 valid True mask 0xffff rb 0.54% ra 1.09% cpu_s 9.891 wall 6.842s
+2026-09-19T06:23:14.983+03:00   p2 [ 2] jolt  W=2 P-full: mean 8.5434 ms median 8.6222 valid True mask 0xffff rb 1.09% ra 0.24% cpu_s 8.484 wall 4.295s
+2026-09-19T06:23:21.318+03:00   p2 [ 3] jolt  W=2 P-none: mean 8.5852 ms median 8.6640 valid True mask 0xffff rb 0.24% ra 0.39% cpu_s 8.516 wall 4.315s
+2026-09-19T06:23:30.224+03:00   p2 [ 4] boyko W=2 P-none: mean 13.7391 ms median 13.7246 valid True mask 0xffff rb 0.39% ra 0.93% cpu_s 10.156 wall 6.881s
+2026-09-19T06:23:39.126+03:00   p2 [ 5] boyko W=2 P-phys: mean 13.7342 ms median 13.7236 valid True mask 0x5 rb 0.93% ra 0.59% cpu_s 10.156 wall 6.879s
+2026-09-19T06:23:45.514+03:00   p2 [ 6] jolt  W=2 P-phys: mean 8.6886 ms median 8.7233 valid True mask 0x5 rb 0.59% ra 0.93% cpu_s 8.594 wall 4.366s
+2026-09-19T06:23:49.279+03:00   p2 [ 7] jolt  W=8 P-full: mean 3.4457 ms median 3.4954 valid True mask 0xffff rb 0.93% ra 1.61% cpu_s 13.125 wall 1.743s
+2026-09-19T06:23:55.850+03:00   p2 [ 8] boyko W=8 P-full: mean 9.0684 ms median 9.0341 valid True mask 0xffff rb 1.61% ra 0.59% cpu_s 11.672 wall 4.546s
+2026-09-19T06:24:02.455+03:00   p2 [ 9] boyko W=8 P-none: mean 9.1380 ms median 9.0715 valid True mask 0xffff rb 0.59% ra 0.73% cpu_s 12.938 wall 4.581s
+2026-09-19T06:24:06.266+03:00   p2 [10] jolt  W=8 P-none: mean 3.5376 ms median 3.5938 valid True mask 0xffff rb 0.73% ra 0.44% cpu_s 13.5 wall 1.789s
+2026-09-19T06:24:10.029+03:00   p2 [11] jolt  W=8 P-phys: mean 3.4444 ms median 3.5181 valid True mask 0x5555 rb 0.44% ra 1.71% cpu_s 13.594 wall 1.742s
+2026-09-19T06:24:16.658+03:00   p2 [12] boyko W=8 P-phys: mean 9.1862 ms median 9.1213 valid True mask 0x5555 rb 1.71% ra 1.18% cpu_s 11.859 wall 4.605s
+2026-09-19T06:24:16.659+03:00 pass 3: idle rule (wait_idle.ps1)
+2026-09-19T06:26:27.094+03:00 pass 3: idle reached
+2026-09-19T06:26:35.734+03:00   p3 warm-up boyko W=8: mean 9.1387726 ms
+2026-09-19T06:26:39.500+03:00   p3 [ 1] jolt  W=8 P-none: mean 3.4470 ms median 3.5029 valid True mask 0xffff rb 0.63% ra 0.34% cpu_s 13.578 wall 1.744s
+2026-09-19T06:26:46.082+03:00   p3 [ 2] boyko W=8 P-none: mean 9.0920 ms median 9.0407 valid True mask 0xffff rb 0.34% ra 0.59% cpu_s 12.188 wall 4.558s
+2026-09-19T06:26:52.679+03:00   p3 [ 3] boyko W=8 P-phys: mean 9.1224 ms median 9.0979 valid True mask 0x5555 rb 0.59% ra 0.69% cpu_s 12.219 wall 4.573s
+2026-09-19T06:26:56.519+03:00   p3 [ 4] jolt  W=8 P-phys: mean 3.5993 ms median 3.6702 valid True mask 0x5555 rb 0.69% ra 0.97% cpu_s 14.359 wall 1.819s
+2026-09-19T06:27:00.286+03:00   p3 [ 5] jolt  W=8 P-full: mean 3.4476 ms median 3.4855 valid True mask 0xffff rb 0.97% ra 2.74% cpu_s 13.188 wall 1.745s
+2026-09-19T06:27:06.892+03:00   p3 [ 6] boyko W=8 P-full: mean 9.1386 ms median 9.0830 valid True mask 0xffff rb 2.74% ra 1.9% cpu_s 11.531 wall 4.582s
+2026-09-19T06:27:15.839+03:00   p3 [ 7] boyko W=2 P-none: mean 13.8198 ms median 13.8012 valid True mask 0xffff rb 1.9% ra 0.4% cpu_s 10.25 wall 6.922s
+2026-09-19T06:27:22.224+03:00   p3 [ 8] jolt  W=2 P-none: mean 8.6833 ms median 8.7731 valid True mask 0xffff rb 0.4% ra 0.34% cpu_s 8.672 wall 4.363s
+2026-09-19T06:27:28.596+03:00   p3 [ 9] jolt  W=2 P-phys: mean 8.6559 ms median 8.6746 valid True mask 0x5 rb 0.34% ra 1.27% cpu_s 8.234 wall 4.351s
+2026-09-19T06:27:37.517+03:00   p3 [10] boyko W=2 P-phys: mean 13.7709 ms median 13.7444 valid True mask 0x5 rb 1.27% ra 0.74% cpu_s 10.266 wall 6.897s
+2026-09-19T06:27:46.513+03:00   p3 [11] boyko W=2 P-full: mean 13.9175 ms median 13.9461 valid True mask 0xffff rb 0.74% ra 1.62% cpu_s 10.172 wall 6.97s
+2026-09-19T06:27:52.825+03:00   p3 [12] jolt  W=2 P-full: mean 8.5349 ms median 8.6356 valid True mask 0xffff rb 1.62% ra 0.34% cpu_s 8.438 wall 4.29s
+2026-09-19T06:27:52.825+03:00 pass 4: idle rule (wait_idle.ps1)
+2026-09-19T06:30:03.258+03:00 pass 4: idle reached
+2026-09-19T06:30:11.855+03:00   p4 warm-up boyko W=8: mean 9.0601162 ms
+2026-09-19T06:30:20.758+03:00   p4 [ 1] boyko W=2 P-phys: mean 13.7325 ms median 13.6796 valid True mask 0x5 rb 3.28% ra 3.66% cpu_s 10.172 wall 6.878s
+2026-09-19T06:30:27.190+03:00   p4 [ 2] jolt  W=2 P-phys: mean 8.7730 ms median 8.7919 valid True mask 0x5 rb 3.66% ra 1.81% cpu_s 7.969 wall 4.41s
+2026-09-19T06:30:33.501+03:00   p4 [ 3] jolt  W=2 P-full: mean 8.5347 ms median 8.5834 valid True mask 0xffff rb 1.81% ra 1.18% cpu_s 8.484 wall 4.29s
+2026-09-19T06:30:42.382+03:00   p4 [ 4] boyko W=2 P-full: mean 13.6885 ms median 13.7005 valid True mask 0xffff rb 1.18% ra 1.22% cpu_s 10.031 wall 6.856s
+2026-09-19T06:30:51.282+03:00   p4 [ 5] boyko W=2 P-none: mean 13.7218 ms median 13.6841 valid True mask 0xffff rb 1.22% ra 0.68% cpu_s 10.156 wall 6.873s
+2026-09-19T06:30:57.802+03:00   p4 [ 6] jolt  W=2 P-none: mean 8.9474 ms median 8.9500 valid True mask 0xffff rb 0.68% ra 0.78% cpu_s 8.891 wall 4.498s
+2026-09-19T06:31:01.634+03:00   p4 [ 7] jolt  W=8 P-phys: mean 3.5788 ms median 3.6315 valid True mask 0x5555 rb 0.78% ra 1.18% cpu_s 13.797 wall 1.811s
+2026-09-19T06:31:08.250+03:00   p4 [ 8] boyko W=8 P-phys: mean 9.1583 ms median 9.1137 valid True mask 0x5555 rb 1.18% ra 0.94% cpu_s 11.844 wall 4.591s
+2026-09-19T06:31:14.889+03:00   p4 [ 9] boyko W=8 P-full: mean 9.2050 ms median 9.1145 valid True mask 0xffff rb 0.94% ra 1.61% cpu_s 13.078 wall 4.615s
+2026-09-19T06:31:18.669+03:00   p4 [10] jolt  W=8 P-full: mean 3.4719 ms median 3.5211 valid True mask 0xffff rb 1.61% ra 0.34% cpu_s 13.797 wall 1.757s
+2026-09-19T06:31:22.460+03:00   p4 [11] jolt  W=8 P-none: mean 3.4992 ms median 3.5354 valid True mask 0xffff rb 0.34% ra 0.44% cpu_s 13.547 wall 1.77s
+2026-09-19T06:31:29.059+03:00   p4 [12] boyko W=8 P-none: mean 9.1256 ms median 9.0681 valid True mask 0xffff rb 0.44% ra 0.78% cpu_s 12.938 wall 4.574s
+2026-09-19T06:31:29.059+03:00 pass 5: idle rule (wait_idle.ps1)
+2026-09-19T06:33:39.522+03:00 pass 5: idle reached
+2026-09-19T06:33:48.175+03:00   p5 warm-up boyko W=8: mean 9.1722752 ms
+2026-09-19T06:33:51.953+03:00   p5 [ 1] jolt  W=8 P-full: mean 3.4710 ms median 3.5162 valid True mask 0xffff rb 0.74% ra 2.69% cpu_s 13.469 wall 1.756s
+2026-09-19T06:33:58.555+03:00   p5 [ 2] boyko W=8 P-full: mean 9.1298 ms median 9.0431 valid True mask 0xffff rb 2.69% ra 0.39% cpu_s 12.969 wall 4.577s
+2026-09-19T06:34:05.166+03:00   p5 [ 3] boyko W=8 P-none: mean 9.1505 ms median 9.0727 valid True mask 0xffff rb 0.39% ra 0.44% cpu_s 12.484 wall 4.587s
+2026-09-19T06:34:09.001+03:00   p5 [ 4] jolt  W=8 P-none: mean 3.5799 ms median 3.5994 valid True mask 0xffff rb 0.44% ra 1.07% cpu_s 14.078 wall 1.813s
+2026-09-19T06:34:12.800+03:00   p5 [ 5] jolt  W=8 P-phys: mean 3.5120 ms median 3.5698 valid True mask 0x5555 rb 1.07% ra 1.61% cpu_s 13.562 wall 1.777s
+2026-09-19T06:34:19.483+03:00   p5 [ 6] boyko W=8 P-phys: mean 9.2940 ms median 9.2094 valid True mask 0x5555 rb 1.61% ra 1.28% cpu_s 11.781 wall 4.659s
+2026-09-19T06:34:28.563+03:00   p5 [ 7] boyko W=2 P-full: mean 14.0788 ms median 13.6285 valid True mask 0xffff rb 1.28% ra 39.11% cpu_s 10.125 wall 7.052s CONTAMINATED
+2026-09-19T06:34:59.443+03:00   p5 [ 7] RERUN (contaminated): mean 13.6547 ms valid True rb 0.39% ra 1.41%
+2026-09-19T06:35:05.937+03:00   p5 [ 8] jolt  W=2 P-full: mean 8.8913 ms median 8.9628 valid True mask 0xffff rb 1.41% ra 0.88% cpu_s 8.891 wall 4.472s
+2026-09-19T06:35:12.413+03:00   p5 [ 9] jolt  W=2 P-none: mean 8.8586 ms median 8.8908 valid True mask 0xffff rb 0.88% ra 2.2% cpu_s 8.828 wall 4.452s
+2026-09-19T06:35:21.298+03:00   p5 [10] boyko W=2 P-none: mean 13.6909 ms median 13.6864 valid True mask 0xffff rb 2.2% ra 1.93% cpu_s 10.125 wall 6.858s
+2026-09-19T06:35:30.289+03:00   p5 [11] boyko W=2 P-phys: mean 13.9040 ms median 13.8141 valid True mask 0x5 rb 1.93% ra 1.32% cpu_s 10.203 wall 6.965s
+2026-09-19T06:35:36.797+03:00   p5 [12] jolt  W=2 P-phys: mean 8.9249 ms median 8.9948 valid True mask 0x5 rb 1.32% ra 1.72% cpu_s 8.781 wall 4.486s
+2026-09-19T06:35:37.221+03:00 DIAG END {"start": "2026-09-19T06:13:27.725+03:00", "machine_before": {"powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)", "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n236"}, "test": false, "end": "2026-09-19T06:35:36.797+03:00", "machine_after": {"powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)", "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n245"}, "status": "complete"}

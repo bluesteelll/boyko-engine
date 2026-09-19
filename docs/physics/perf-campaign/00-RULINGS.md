@@ -43,3 +43,24 @@ loop.
   prediction).
 - **Open questions:** (1) the runner builds exactly one world per process, or arms only the measured world;
   (2) record whether the dispatcher executes scope tasks at W=16, and state the thread counts on both sides.
+
+## Rulings after P0 (2026-09-19)
+
+- **Timing protocol on this machine.** Window 1 voided on A/A0 because each process of the same binary draws
+  its own speed for its whole run (W=2: 5.2 % over six identical processes; the sign of d2/d1 flips between
+  replays); placement is not the cause (P0b's affinity diagnostic). So a cell's statistic is the MEDIAN over
+  K separate processes of the window mean; load receipts gate each process; no band-based whole-window void;
+  the canary must be seen.
+- **The claim gate is the median's standard error**, not the min–max range: a comparison is claimed when
+  |effect| > 2·√(SE_A² + SE_B²), with SE = 1.2533·SD/√K. The range and IQR are reported beside it as
+  context. Why: the min–max range grows with K (≈2.5σ at K=6, ≈3.1σ at K=10), so it gets stricter exactly
+  as the median gets more precise, and under it the canary at W=1 would read as invisible. K is sized from
+  the pooled worst-case SD of the rows compared (resolving 1 % needs K ≥ 12 on boyko rows; Jolt's rows
+  spread 2–3× more because its workers spin).
+- **Lever order from P0b** (`docs/measurements/2026-09-19-physics-p0/ANALYSIS.md` §9): L4 `parallel_solve`
+  default ON and L2's threshold recalibration first (config, bit-identical); then L5 parallel narrowphase;
+  a broadphase redesign (the serial AllPairs is 21 % of T(8), and Grid loses 2.5× on a scene with a large
+  static slab — not a plan lever, designed separately with web research); L10 sleeping default with the
+  frozen-pair skip in broadphase/narrowphase/graph (the sleeping floor is 5.3 ms against Jolt's 2 µs, 92 %
+  of it collision + graph); L8 friction per patch after L5. L6 is not built (8.2 % < 10 %); L7 stays gated
+  behind L6; L9 falls below its rule once L5 lands.

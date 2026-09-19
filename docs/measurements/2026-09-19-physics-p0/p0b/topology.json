@@ -1,0 +1,360 @@
+{
+ "physical_cores": [
+  {
+   "smt": true,
+   "efficiency_class": 0,
+   "masks": [
+    {
+     "group": 0,
+     "mask": "0x3",
+     "cpus": [
+      0,
+      1
+     ]
+    }
+   ]
+  },
+  {
+   "smt": true,
+   "efficiency_class": 0,
+   "masks": [
+    {
+     "group": 0,
+     "mask": "0xc",
+     "cpus": [
+      2,
+      3
+     ]
+    }
+   ]
+  },
+  {
+   "smt": true,
+   "efficiency_class": 0,
+   "masks": [
+    {
+     "group": 0,
+     "mask": "0x30",
+     "cpus": [
+      4,
+      5
+     ]
+    }
+   ]
+  },
+  {
+   "smt": true,
+   "efficiency_class": 0,
+   "masks": [
+    {
+     "group": 0,
+     "mask": "0xc0",
+     "cpus": [
+      6,
+      7
+     ]
+    }
+   ]
+  },
+  {
+   "smt": true,
+   "efficiency_class": 0,
+   "masks": [
+    {
+     "group": 0,
+     "mask": "0x300",
+     "cpus": [
+      8,
+      9
+     ]
+    }
+   ]
+  },
+  {
+   "smt": true,
+   "efficiency_class": 0,
+   "masks": [
+    {
+     "group": 0,
+     "mask": "0xc00",
+     "cpus": [
+      10,
+      11
+     ]
+    }
+   ]
+  },
+  {
+   "smt": true,
+   "efficiency_class": 0,
+   "masks": [
+    {
+     "group": 0,
+     "mask": "0x3000",
+     "cpus": [
+      12,
+      13
+     ]
+    }
+   ]
+  },
+  {
+   "smt": true,
+   "efficiency_class": 0,
+   "masks": [
+    {
+     "group": 0,
+     "mask": "0xc000",
+     "cpus": [
+      14,
+      15
+     ]
+    }
+   ]
+  }
+ ],
+ "caches": [
+  {
+   "level": 1,
+   "type": 2,
+   "size_kib": 32,
+   "cpus": [
+    0,
+    1
+   ]
+  },
+  {
+   "level": 1,
+   "type": 1,
+   "size_kib": 32,
+   "cpus": [
+    0,
+    1
+   ]
+  },
+  {
+   "level": 2,
+   "type": 0,
+   "size_kib": 512,
+   "cpus": [
+    0,
+    1
+   ]
+  },
+  {
+   "level": 3,
+   "type": 0,
+   "size_kib": 16384,
+   "cpus": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+   ]
+  },
+  {
+   "level": 1,
+   "type": 2,
+   "size_kib": 32,
+   "cpus": [
+    2,
+    3
+   ]
+  },
+  {
+   "level": 1,
+   "type": 1,
+   "size_kib": 32,
+   "cpus": [
+    2,
+    3
+   ]
+  },
+  {
+   "level": 2,
+   "type": 0,
+   "size_kib": 512,
+   "cpus": [
+    2,
+    3
+   ]
+  },
+  {
+   "level": 1,
+   "type": 2,
+   "size_kib": 32,
+   "cpus": [
+    4,
+    5
+   ]
+  },
+  {
+   "level": 1,
+   "type": 1,
+   "size_kib": 32,
+   "cpus": [
+    4,
+    5
+   ]
+  },
+  {
+   "level": 2,
+   "type": 0,
+   "size_kib": 512,
+   "cpus": [
+    4,
+    5
+   ]
+  },
+  {
+   "level": 1,
+   "type": 2,
+   "size_kib": 32,
+   "cpus": [
+    6,
+    7
+   ]
+  },
+  {
+   "level": 1,
+   "type": 1,
+   "size_kib": 32,
+   "cpus": [
+    6,
+    7
+   ]
+  },
+  {
+   "level": 2,
+   "type": 0,
+   "size_kib": 512,
+   "cpus": [
+    6,
+    7
+   ]
+  },
+  {
+   "level": 1,
+   "type": 2,
+   "size_kib": 32,
+   "cpus": [
+    8,
+    9
+   ]
+  },
+  {
+   "level": 1,
+   "type": 1,
+   "size_kib": 32,
+   "cpus": [
+    8,
+    9
+   ]
+  },
+  {
+   "level": 2,
+   "type": 0,
+   "size_kib": 512,
+   "cpus": [
+    8,
+    9
+   ]
+  },
+  {
+   "level": 1,
+   "type": 2,
+   "size_kib": 32,
+   "cpus": [
+    10,
+    11
+   ]
+  },
+  {
+   "level": 1,
+   "type": 1,
+   "size_kib": 32,
+   "cpus": [
+    10,
+    11
+   ]
+  },
+  {
+   "level": 2,
+   "type": 0,
+   "size_kib": 512,
+   "cpus": [
+    10,
+    11
+   ]
+  },
+  {
+   "level": 1,
+   "type": 2,
+   "size_kib": 32,
+   "cpus": [
+    12,
+    13
+   ]
+  },
+  {
+   "level": 1,
+   "type": 1,
+   "size_kib": 32,
+   "cpus": [
+    12,
+    13
+   ]
+  },
+  {
+   "level": 2,
+   "type": 0,
+   "size_kib": 512,
+   "cpus": [
+    12,
+    13
+   ]
+  },
+  {
+   "level": 1,
+   "type": 2,
+   "size_kib": 32,
+   "cpus": [
+    14,
+    15
+   ]
+  },
+  {
+   "level": 1,
+   "type": 1,
+   "size_kib": 32,
+   "cpus": [
+    14,
+    15
+   ]
+  },
+  {
+   "level": 2,
+   "type": 0,
+   "size_kib": 512,
+   "cpus": [
+    14,
+    15
+   ]
+  }
+ ],
+ "process_mask": "0xffff",
+ "system_mask": "0xffff",
+ "os_cpu_count": 16
+}

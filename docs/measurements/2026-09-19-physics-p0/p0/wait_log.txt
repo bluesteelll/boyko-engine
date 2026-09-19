@@ -1,0 +1,9 @@
+﻿# wait_idle.ps1 start 2026-09-19T05:16:02.9728439+03:00; poll every 60 s, max 240 polls; quiet = build procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-19T05:16:02.9840944+03:00 cpu10=13.95% procs=245 build_procs=2 [cargo(17940),cargo(28284)] D_free_GB=2.54 quiet=False streak=0 top3(cpu s in ~10s): m5_scroll_atlas-93583d4d1accbdd3(3372)=21.00s Taskmgr(28256)=0.59s powershell(24876)=0.41s
+poll   2 2026-09-19T05:17:03.0001930+03:00 cpu10=7.83% procs=245 build_procs=2 [cargo(17940),cargo(28284)] D_free_GB=2.54 quiet=False streak=0 top3(cpu s in ~10s): m5_scroll_atlas-93583d4d1accbdd3(3372)=10.05s Taskmgr(28256)=0.52s claude(34964)=0.22s
+poll   3 2026-09-19T05:18:03.0059118+03:00 cpu10=9.57% procs=245 build_procs=2 [cargo(17940),cargo(28284)] D_free_GB=2.54 quiet=False streak=0 top3(cpu s in ~10s): boyko_sdf_math-72203dde607cf4a0(18748)=4.28s Taskmgr(28256)=0.72s claude(34964)=0.47s
+poll   4 2026-09-19T05:19:03.0080885+03:00 cpu10=11.20% procs=260 build_procs=2 [cargo(17940),cargo(28284)] D_free_GB=2.54 quiet=False streak=0 top3(cpu s in ~10s): m3_dirty_pointer_grid-a17893fb0afc01e9(27856)=10.09s Taskmgr(28256)=0.77s python(8596)=0.44s
+poll   5 2026-09-19T05:20:03.0229337+03:00 cpu10=1.59% procs=241 build_procs=0 [] D_free_GB=2.54 quiet=True streak=1 top3(cpu s in ~10s): Taskmgr(28256)=0.61s steamwebhelper(6272)=0.27s claude(34964)=0.20s
+poll   6 2026-09-19T05:21:03.0290597+03:00 cpu10=2.28% procs=244 build_procs=0 [] D_free_GB=2.54 quiet=True streak=2 top3(cpu s in ~10s): Taskmgr(28256)=0.58s claude(34964)=0.34s steamwebhelper(6272)=0.30s
+poll   7 2026-09-19T05:22:03.0452521+03:00 cpu10=0.74% procs=249 build_procs=0 [] D_free_GB=2.54 quiet=True streak=3 top3(cpu s in ~10s): Taskmgr(28256)=0.39s claude(34964)=0.31s browser(19496)=0.05s
+# IDLE reached at 2026-09-19T05:22:13.1795200+03:00 after 7 polls

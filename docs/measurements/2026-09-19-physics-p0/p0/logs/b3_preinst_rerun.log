@@ -1,0 +1,28 @@
+warning: unused macro definition: `counter`
+   --> crates\boyko_physics\src\profiling.rs:149:14
+    |
+149 | macro_rules! counter {
+    |              ^^^^^^^
+    |
+    = note: `#[warn(unused_macros)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `counter`
+   --> crates\boyko_physics\src\profiling.rs:156:16
+    |
+156 | pub(crate) use counter;
+    |                ^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `push_counter` is never used
+   --> crates\boyko_physics\src\profiling.rs:165:15
+    |
+165 | pub(crate) fn push_counter(handle: &'static ZoneHandle, value: u64) {
+    |               ^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `boyko-physics` (lib) generated 3 warnings (run `cargo fix --lib -p boyko-physics` to apply 1 suggestion)
+    Finished `parity` profile [optimized] target(s) in 0.19s
+  Executable benches\jolt_parity_pyramid.rs (D:/wt/_targets/joltab-msvc\parity\deps\jolt_parity_pyramid-804617a1205f3459.exe)
+exit 0

@@ -1,0 +1,160 @@
+{
+ "generated": "2026-09-19T05:01:39.649+03:00",
+ "repo": "D:/wt/joltab",
+ "head": "dbd859771b4d7aee5f560c7d3cbceccd0f1af179",
+ "dirty_paths": [],
+ "toolchain": "stable-x86_64-pc-windows-msvc",
+ "rustc_vV": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+ "host": "x86_64-pc-windows-msvc",
+ "host_is_msvc": true,
+ "profile": "parity",
+ "ancestors": {
+  "S5": {
+   "commit": "8d656ad8",
+   "is_ancestor": true,
+   "git_exit": 0
+  },
+  "KE16": {
+   "commit": "67563d3b",
+   "is_ancestor": true,
+   "git_exit": 0
+  },
+  "B1": {
+   "commit": "aff98fe7",
+   "is_ancestor": true,
+   "git_exit": 0
+  },
+  "L1": {
+   "commit": "00c07d0f",
+   "is_ancestor": true,
+   "git_exit": 0
+  }
+ },
+ "boyko": {
+  "tip": {
+   "exe": "docs/measurements/2026-09-19-physics-p0/p0/bin/runner_tip.exe",
+   "sha256": "ef9325efa9a277274f602c59504b0856f75ae1ddec7d683b0ac5f8c5bf7968c3"
+  },
+  "pre_instrument": {
+   "exe": "docs/measurements/2026-09-19-physics-p0/p0/bin/runner_pre_instrument.exe",
+   "sha256": "b7c4233425d0d4a940045784d832ad8c40ebb34aaa0f57db3a94fe097be4cab3"
+  },
+  "pre_l1": {
+   "exe": "docs/measurements/2026-09-19-physics-p0/p0/bin/runner_pre_l1.exe",
+   "sha256": "a0da832f14157fadfbb47fd78db6c10182ca6a72362ac70eefce9c56c92486ec"
+  },
+  "shipping": {
+   "exe": "docs/measurements/2026-09-19-physics-p0/p0/bin/runner_shipping.exe",
+   "sha256": "fdcac07f8e576e63c4789e8662498641e730863b35f720a3d061bbe6d4aa02c2"
+  }
+ },
+ "jolt": {
+  "v530": {
+   "exe": "D:/tmp/jolt/build-v5.3.0-dist/PerformanceTest.exe",
+   "sha256": "29b23ad1cfc38b7fb39b484b8cc2cfad522a0a910fd03d6e3a15f8b90e0cefac",
+   "compiler": "C:/Users/flint/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin/c++.exe",
+   "compiler_version": "c++.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0",
+   "cmake": {
+    "CMAKE_BUILD_TYPE": "Distribution",
+    "CMAKE_GENERATOR": "MinGW Makefiles",
+    "CMAKE_HOME_DIRECTORY": "D:/tmp/jolt/wt-v5.3.0-parity/Build",
+    "INTERPROCEDURAL_OPTIMIZATION": "ON",
+    "USE_AVX2": "ON",
+    "USE_AVX512": "OFF",
+    "USE_FMADD": "ON",
+    "USE_F16C": "ON",
+    "USE_LZCNT": "ON",
+    "USE_TZCNT": "ON",
+    "GENERATE_DEBUG_SYMBOLS": "ON",
+    "FLOATING_POINT_EXCEPTIONS_ENABLED": "ON",
+    "CROSS_PLATFORM_DETERMINISTIC": "OFF",
+    "PROFILER_IN_DISTRIBUTION": "OFF",
+    "PROFILER_IN_DEBUG_AND_RELEASE": "ON",
+    "USE_ASSERTS": "OFF",
+    "DOUBLE_PRECISION": "OFF",
+    "BUILD_SHARED_LIBS": "OFF"
+   },
+   "source_describe": "v5.3.0-dirty",
+   "source_diff_sha256": "27df7f3b941d9d8d8724c65471db764eedba9bb5522ce6d6c2517633649ee210",
+   "dlls": {
+    "libgcc_s_seh-1.dll": "4dfa2c0d57e3dcd72b2a90cf6dfbffb5b6c985fc873bcc73ab60eff71cbc6b00",
+    "libstdc++-6.dll": "a36c2e6871cc90d1d336c0fcb616d84cdaa817d64ac1f883a002850a411bae03",
+    "libwinpthread-1.dll": "c29cbbe3a9c710df0dfecda4dbc1664b95658278511b961cbd2357c2a40d0494"
+   },
+   "source_is_repo_patch": true
+  },
+  "v530_release": {
+   "exe": "D:/tmp/jolt/build-v5.3.0-release/PerformanceTest.exe",
+   "sha256": "de00c882c5b667ab9b2029573548cc013450a38238268dc23353df3026b782f1",
+   "compiler": "C:/Users/flint/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin/c++.exe",
+   "compiler_version": "c++.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0",
+   "cmake": {
+    "CMAKE_BUILD_TYPE": "Release",
+    "CMAKE_GENERATOR": "MinGW Makefiles",
+    "CMAKE_HOME_DIRECTORY": "D:/tmp/jolt/wt-v5.3.0-parity/Build",
+    "INTERPROCEDURAL_OPTIMIZATION": "ON",
+    "USE_AVX2": "ON",
+    "USE_AVX512": "OFF",
+    "USE_FMADD": "ON",
+    "USE_F16C": "ON",
+    "USE_LZCNT": "ON",
+    "USE_TZCNT": "ON",
+    "GENERATE_DEBUG_SYMBOLS": "ON",
+    "FLOATING_POINT_EXCEPTIONS_ENABLED": "ON",
+    "CROSS_PLATFORM_DETERMINISTIC": "OFF",
+    "PROFILER_IN_DISTRIBUTION": "OFF",
+    "PROFILER_IN_DEBUG_AND_RELEASE": "ON",
+    "USE_ASSERTS": "OFF",
+    "DOUBLE_PRECISION": "OFF",
+    "BUILD_SHARED_LIBS": "OFF"
+   },
+   "source_describe": "v5.3.0-dirty",
+   "source_diff_sha256": "27df7f3b941d9d8d8724c65471db764eedba9bb5522ce6d6c2517633649ee210",
+   "dlls": {
+    "libgcc_s_seh-1.dll": "4dfa2c0d57e3dcd72b2a90cf6dfbffb5b6c985fc873bcc73ab60eff71cbc6b00",
+    "libstdc++-6.dll": "a36c2e6871cc90d1d336c0fcb616d84cdaa817d64ac1f883a002850a411bae03",
+    "libwinpthread-1.dll": "c29cbbe3a9c710df0dfecda4dbc1664b95658278511b961cbd2357c2a40d0494"
+   },
+   "source_is_repo_patch": true
+  },
+  "v560": {
+   "exe": "D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe",
+   "sha256": "918fd2b70ecc634cc0574cb676c56a3c929a46a51173cf9aa76fdd628e2ef0ad",
+   "compiler": "C:/Users/flint/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin/c++.exe",
+   "compiler_version": "c++.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0",
+   "cmake": {
+    "CMAKE_BUILD_TYPE": "Distribution",
+    "CMAKE_GENERATOR": "MinGW Makefiles",
+    "CMAKE_HOME_DIRECTORY": "D:/tmp/jolt/wt-v5.6.0-parity/Build",
+    "INTERPROCEDURAL_OPTIMIZATION": "ON",
+    "USE_AVX2": "ON",
+    "USE_AVX512": "OFF",
+    "USE_FMADD": "ON",
+    "USE_F16C": "ON",
+    "USE_LZCNT": "ON",
+    "USE_TZCNT": "ON",
+    "GENERATE_DEBUG_SYMBOLS": "ON",
+    "FLOATING_POINT_EXCEPTIONS_ENABLED": "ON",
+    "CROSS_PLATFORM_DETERMINISTIC": "OFF",
+    "PROFILER_IN_DISTRIBUTION": "OFF",
+    "PROFILER_IN_DEBUG_AND_RELEASE": "ON",
+    "USE_ASSERTS": "OFF",
+    "DOUBLE_PRECISION": "OFF",
+    "JPH_USE_DX12": "ON",
+    "JPH_USE_VK": "ON",
+    "JPH_USE_MTL": "ON",
+    "JPH_USE_CPU_COMPUTE": "ON",
+    "JPH_BUILD_SHARED_LIBS": "OFF"
+   },
+   "source_describe": "v5.6.0-dirty",
+   "source_diff_sha256": "27df7f3b941d9d8d8724c65471db764eedba9bb5522ce6d6c2517633649ee210",
+   "dlls": {
+    "libgcc_s_seh-1.dll": "4dfa2c0d57e3dcd72b2a90cf6dfbffb5b6c985fc873bcc73ab60eff71cbc6b00",
+    "libstdc++-6.dll": "a36c2e6871cc90d1d336c0fcb616d84cdaa817d64ac1f883a002850a411bae03",
+    "libwinpthread-1.dll": "c29cbbe3a9c710df0dfecda4dbc1664b95658278511b961cbd2357c2a40d0494"
+   },
+   "source_is_repo_patch": true
+  }
+ },
+ "logical_cpus": 16
+}

@@ -1,0 +1,1420 @@
+{
+ "generated": "2026-09-19T07:51:21.231+03:00",
+ "dry": false,
+ "passes": [
+  0,
+  1,
+  2,
+  3,
+  4,
+  5
+ ],
+ "runs": 258,
+ "nonzero_exits": [],
+ "contaminated": [],
+ "build_checks": [],
+ "h6": {
+  "head": "dbd859771b4d7aee5f560c7d3cbceccd0f1af179",
+  "dirty_paths": 0,
+  "host": "x86_64-pc-windows-msvc",
+  "host_is_msvc": true,
+  "ancestors": {
+   "S5": {
+    "commit": "8d656ad8",
+    "is_ancestor": true,
+    "git_exit": 0
+   },
+   "KE16": {
+    "commit": "67563d3b",
+    "is_ancestor": true,
+    "git_exit": 0
+   },
+   "B1": {
+    "commit": "aff98fe7",
+    "is_ancestor": true,
+    "git_exit": 0
+   },
+   "L1": {
+    "commit": "00c07d0f",
+    "is_ancestor": true,
+    "git_exit": 0
+   }
+  },
+  "profile": "parity",
+  "boyko": {
+   "tip": "ef9325efa9a277274f602c59504b0856f75ae1ddec7d683b0ac5f8c5bf7968c3",
+   "pre_instrument": "b7c4233425d0d4a940045784d832ad8c40ebb34aaa0f57db3a94fe097be4cab3",
+   "pre_l1": "a0da832f14157fadfbb47fd78db6c10182ca6a72362ac70eefce9c56c92486ec",
+   "shipping": "fdcac07f8e576e63c4789e8662498641e730863b35f720a3d061bbe6d4aa02c2"
+  },
+  "jolt": {
+   "v530": {
+    "sha256": "29b23ad1cfc38b7fb39b484b8cc2cfad522a0a910fd03d6e3a15f8b90e0cefac",
+    "compiler": "c++.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0",
+    "source": "v5.3.0-dirty",
+    "source_is_repo_patch": true
+   },
+   "v530_release": {
+    "sha256": "de00c882c5b667ab9b2029573548cc013450a38238268dc23353df3026b782f1",
+    "compiler": "c++.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0",
+    "source": "v5.3.0-dirty",
+    "source_is_repo_patch": true
+   },
+   "v560": {
+    "sha256": "918fd2b70ecc634cc0574cb676c56a3c929a46a51173cf9aa76fdd628e2ef0ad",
+    "compiler": "c++.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r4) 16.1.0",
+    "source": "v5.6.0-dirty",
+    "source_is_repo_patch": true
+   }
+  }
+ },
+ "anti_vacuity_void": [],
+ "determinism_boyko": {
+  "[\"jolt\", 0.5, \"colored\", false, 9.999999747378752e-05, 500]": {
+   "distinct_poses": 1,
+   "ok": true
+  },
+  "[\"jolt\", 0.5, \"colored\", true, 0, 500]": {
+   "distinct_poses": 1,
+   "ok": true
+  },
+  "[\"jolt\", 0.5, \"colored\", true, 9.999999747378752e-05, 1000]": {
+   "distinct_poses": 1,
+   "ok": true
+  },
+  "[\"rest\", 0, \"colored\", false, 9.999999747378752e-05, 1100]": {
+   "distinct_poses": 1,
+   "ok": true
+  },
+  "[\"rest\", 0, \"reference\", false, 9.999999747378752e-05, 1100]": {
+   "distinct_poses": 1,
+   "ok": true
+  },
+  "[\"rest\", 0, \"colored\", true, 9.999999747378752e-05, 800]": {
+   "distinct_poses": 1,
+   "ok": true
+  },
+  "[\"s16\", 0, \"colored\", false, 9.999999747378752e-05, 300]": {
+   "distinct_poses": 1,
+   "ok": true
+  }
+ },
+ "h7_expect_pose": [
+  [
+   "J-B",
+   1,
+   0,
+   "match"
+  ],
+  [
+   "J-B",
+   8,
+   0,
+   "match"
+  ],
+  [
+   "J-B",
+   1,
+   1,
+   "match"
+  ],
+  [
+   "J-B",
+   8,
+   1,
+   "match"
+  ],
+  [
+   "J-B",
+   1,
+   2,
+   "match"
+  ],
+  [
+   "J-B",
+   8,
+   2,
+   "match"
+  ],
+  [
+   "J-B",
+   8,
+   3,
+   "match"
+  ],
+  [
+   "J-B",
+   1,
+   3,
+   "match"
+  ],
+  [
+   "J-B",
+   8,
+   4,
+   "match"
+  ],
+  [
+   "J-B",
+   1,
+   4,
+   "match"
+  ],
+  [
+   "J-B",
+   8,
+   5,
+   "match"
+  ],
+  [
+   "J-B",
+   1,
+   5,
+   "match"
+  ]
+ ],
+ "determinism_jolt_per_W": {
+  "[\"v530\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-t=1\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v560\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-t=1\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v530\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-allow_sleep\", \"-t=1\", \"-i=1000\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v530_release\", [\"-s=Pyramid\", \"-q=Discrete\", \"-p\", \"-t=1\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v530\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-t=2\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v560\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-t=2\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v530\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-t=4\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v560\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-t=4\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v530\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-t=8\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v560\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-t=8\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v530\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-no_pair_cache\", \"-t=8\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v530\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-allow_sleep\", \"-t=8\", \"-i=1000\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v530_release\", [\"-s=Pyramid\", \"-q=Discrete\", \"-p\", \"-t=8\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v530\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-t=16\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  },
+  "[\"v560\", [\"-s=Pyramid\", \"-q=Discrete\", \"-f\", \"-t=16\", \"-i=500\"]]": {
+   "distinct_hashes": 1,
+   "ok": true
+  }
+ },
+ "headline": {
+  "1": {
+   "boyko_T_ns": 19670744.6,
+   "jolt_T_ns": 15722537.4,
+   "jolt56_T_ns": 9649686.8,
+   "boyko_over_jolt": 1.251117685368012,
+   "boyko_over_jolt56": 2.0384852905277713,
+   "sub_early": {
+    "boyko_T_ns": 19336552.5,
+    "jolt_T_ns": 14935982.5
+   },
+   "sub_late": {
+    "boyko_T_ns": 19742979.875,
+    "jolt_T_ns": 15923404.875
+   },
+   "boyko_ns_per_manifold_sweep": 362.32086333649113,
+   "aa0_per_pass": [],
+   "B": null,
+   "aa0_void": false,
+   "boyko_scaling": 1.0,
+   "jolt_scaling": 1.0
+  },
+  "2": {
+   "boyko_T_ns": 13710723.899999999,
+   "jolt_T_ns": 8793772.5,
+   "jolt56_T_ns": 5707734.0,
+   "boyko_over_jolt": 1.5591401642469143,
+   "boyko_over_jolt56": 2.4021308456210466,
+   "sub_early": {
+    "boyko_T_ns": 13551764.5,
+    "jolt_T_ns": 8271745.5
+   },
+   "sub_late": {
+    "boyko_T_ns": 13746079.5,
+    "jolt_T_ns": 8933664.625
+   },
+   "boyko_ns_per_manifold_sweep": 252.54160030201712,
+   "aa0_per_pass": [],
+   "B": null,
+   "aa0_void": false,
+   "boyko_scaling": 1.4346977405036947,
+   "jolt_scaling": 1.7879172334740296
+  },
+  "4": {
+   "boyko_T_ns": 10701328.0,
+   "jolt_T_ns": 5228636.5,
+   "jolt56_T_ns": 3557437.0,
+   "boyko_over_jolt": 2.046676604885423,
+   "boyko_over_jolt56": 3.0081567150732393,
+   "sub_early": {
+    "boyko_T_ns": 10516959.0,
+    "jolt_T_ns": 4873214.5
+   },
+   "sub_late": {
+    "boyko_T_ns": 10747420.25,
+    "jolt_T_ns": 5308174.625
+   },
+   "boyko_ns_per_manifold_sweep": 197.11070824471818,
+   "aa0_per_pass": [],
+   "B": null,
+   "aa0_void": false,
+   "boyko_scaling": 1.8381592079039164,
+   "jolt_scaling": 3.007005248882763
+  },
+  "8": {
+   "boyko_T_ns": 9162021.7,
+   "jolt_T_ns": 3532832.7,
+   "jolt56_T_ns": 2493216.0999999996,
+   "boyko_over_jolt": 2.5933924637869206,
+   "boyko_over_jolt56": 3.6747804171487584,
+   "sub_early": {
+    "boyko_T_ns": 9033948.0,
+    "jolt_T_ns": 3112270.0
+   },
+   "sub_late": {
+    "boyko_T_ns": 9194040.125,
+    "jolt_T_ns": 3637973.375
+   },
+   "boyko_ns_per_manifold_sweep": 168.75780148412204,
+   "aa0_per_pass": [],
+   "B": null,
+   "aa0_void": false,
+   "boyko_scaling": 2.1469873401413144,
+   "jolt_scaling": 4.4504053078992385
+  },
+  "16": {
+   "boyko_T_ns": 9172070.0,
+   "jolt_T_ns": 3209369.5999999996,
+   "jolt56_T_ns": 2446652.8,
+   "boyko_over_jolt": 2.8579039322862663,
+   "boyko_over_jolt56": 3.7488236990552974,
+   "sub_early": {
+    "boyko_T_ns": 9088114.5,
+    "jolt_T_ns": 2848747.5
+   },
+   "sub_late": {
+    "boyko_T_ns": 9191498.0,
+    "jolt_T_ns": 3306655.125
+   },
+   "boyko_ns_per_manifold_sweep": 168.94288388975016,
+   "aa0_per_pass": [],
+   "B": null,
+   "aa0_void": false,
+   "boyko_scaling": 2.1446352459150444,
+   "jolt_scaling": 4.898948815368602
+  }
+ },
+ "aa1": {
+  "1": {
+   "per_pass": [
+    1.0028135286595208,
+    1.032385125016912,
+    1.0013894629760969,
+    0.9979362829487048,
+    0.9971648279565233,
+    0.9971365034305147
+   ],
+   "median": 0.9996628729624009,
+   "bound": 0.005,
+   "pass": true
+  },
+  "2": {
+   "per_pass": [],
+   "median": null,
+   "bound": 0.005,
+   "pass": false
+  },
+  "4": {
+   "per_pass": [],
+   "median": null,
+   "bound": 0.005,
+   "pass": false
+  },
+  "8": {
+   "per_pass": [
+    1.0002548378031049,
+    1.006848124613245,
+    1.0004650094658485,
+    1.0099989668012164,
+    1.0020642663429475,
+    1.0053005613615964
+   ],
+   "median": 1.003682413852272,
+   "bound": 0.005,
+   "pass": true
+  },
+  "16": {
+   "per_pass": [],
+   "median": null,
+   "bound": 0.005,
+   "pass": false
+  }
+ },
+ "aa2": {
+  "1": {
+   "per_pass": [
+    1.0064455792327158,
+    0.9715743242686457,
+    1.0039382775088153,
+    0.9996653865814573,
+    1.0095434539999395,
+    1.0149406617715941
+   ],
+   "median": 1.0051919283707655,
+   "bound": 0.005,
+   "pass": false
+  },
+  "8": {
+   "per_pass": [
+    0.9921245223873845,
+    1.0021210299780972,
+    1.001970208710088,
+    0.9874430982540524,
+    1.0123684092721452,
+    1.0043169527582474
+   ],
+   "median": 1.0020456193440925,
+   "bound": 0.005,
+   "pass": true
+  }
+ },
+ "shipping": {
+  "1": {
+   "T_ns": 19563346.5,
+   "vs_tip_dev": 0.9956197652549901
+  },
+  "8": {
+   "T_ns": 9113748.6,
+   "vs_tip_dev": 0.994811253903397
+  }
+ },
+ "canary": {
+  "1": {
+   "canary_ns": [
+    984307,
+    984837,
+    984980,
+    984980,
+    983690,
+    983432
+   ],
+   "span_rel_err": 0.0003373614127503144,
+   "span_ok": true,
+   "rise_rel_err_of_T": 0.0011075631866066128,
+   "rise_ok": false,
+   "aa1_stat": 1.0519507699198818,
+   "aa1_gate_fails_as_required": true,
+   "pass": false
+  },
+  "8": {
+   "canary_ns": [
+    457775,
+    461957,
+    457805,
+    457805,
+    463809,
+    463267
+   ],
+   "span_rel_err": 0.0005140475962357449,
+   "span_ok": true,
+   "rise_rel_err_of_T": 0.0005335429109510743,
+   "rise_ok": false,
+   "aa1_stat": 1.0535991745179696,
+   "aa1_gate_fails_as_required": true,
+   "pass": false
+  }
+ },
+ "profile_J-A": {
+  "1": {
+   "wall_ns": 19691437.6,
+   "manifolds": 4524.246,
+   "pairs": 9561.196,
+   "colors": 10.79,
+   "wide_colors": 9.11,
+   "waves": 109.32,
+   "g_ns": 88975.93,
+   "u_ns": 1413.434,
+   "r_ns": 4322.097,
+   "sys_sum_ns": 19603235.858999997,
+   "disp_lane": 16.0,
+   "worker_lane_max": 171.48,
+   "sys_physics_integrate_ns": 110.55199999999999,
+   "sys_physics_gather_ns": 26918.288,
+   "sys_select_broadphase_ns": 122.287,
+   "sys_physics_broadphase_ns": 2100163.045,
+   "sys_physics_narrowphase_ns": 3142442.568,
+   "sys_physics_build_graph_ns": 139886.90899999999,
+   "sys_physics_solve_colored_ns": 14179155.050999999,
+   "sys_physics_apply_ns": 18057.806,
+   "phys_solve_build_ns": 969723.496,
+   "phys_gravity_ns": 7907.249,
+   "phys_warm_apply_ns": 612687.138,
+   "phys_integrate_ns": 65419.455,
+   "phys_pass_biased_ns": 4148928.299,
+   "phys_pass_relax_ns": 8097783.664999999,
+   "phys_color_wide_ns": 12205403.423,
+   "phys_color_narrow_ns": 37625.894,
+   "phys_restitution_ns": 7950.709,
+   "phys_store_ns": 265602.61600000004,
+   "phys_write_back_ns": 3280.93,
+   "phys_sleep_begin_ns": 0.0,
+   "phys_sleep_freeze_ns": 0.0,
+   "phys_sleep_end_ns": 0.0,
+   "phys_slots_wide": 16838.364,
+   "phys_slots_narrow": 49.468,
+   "phys_np_points": 16887.832
+  },
+  "8": {
+   "wall_ns": 9229495.9,
+   "manifolds": 4524.246,
+   "pairs": 9561.196,
+   "colors": 10.79,
+   "wide_colors": 9.11,
+   "waves": 109.32,
+   "g_ns": 34611.117,
+   "u_ns": 1366.771,
+   "r_ns": 4733.487,
+   "sys_sum_ns": 9194884.783,
+   "disp_lane": 16.0,
+   "worker_lane_max": 171.188,
+   "sys_physics_integrate_ns": 101.939,
+   "sys_physics_gather_ns": 25310.245000000003,
+   "sys_select_broadphase_ns": 77.547,
+   "sys_physics_broadphase_ns": 1944915.458,
+   "sys_physics_narrowphase_ns": 2945820.5530000003,
+   "sys_physics_build_graph_ns": 117005.91200000001,
+   "sys_physics_solve_colored_ns": 4144556.153,
+   "sys_physics_apply_ns": 13072.828000000001,
+   "phys_solve_build_ns": 920162.093,
+   "phys_gravity_ns": 12937.381000000001,
+   "phys_warm_apply_ns": 620710.597,
+   "phys_integrate_ns": 78234.638,
+   "phys_pass_biased_ns": 785556.952,
+   "phys_pass_relax_ns": 1501099.389,
+   "phys_color_wide_ns": 2241095.631,
+   "phys_color_narrow_ns": 40984.682,
+   "phys_restitution_ns": 8188.786,
+   "phys_store_ns": 208330.986,
+   "phys_write_back_ns": 2856.928,
+   "phys_sleep_begin_ns": 0.0,
+   "phys_sleep_freeze_ns": 0.0,
+   "phys_sleep_end_ns": 0.0,
+   "phys_slots_wide": 16838.364,
+   "phys_slots_narrow": 49.468,
+   "phys_np_points": 16887.832
+  }
+ },
+ "closure": {
+  "per_W": {
+   "1": {
+    "u_ns": 1413.434,
+    "u_share_of_solve": 9.968393708342418e-05,
+    "u_bad": false,
+    "g_ns": 88975.93,
+    "g_bad": false,
+    "sys_sum_over_wall": false,
+    "drops": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "drops_bad": false,
+    "r_ns": 4322.097
+   },
+   "8": {
+    "u_ns": 1366.771,
+    "u_share_of_solve": 0.00032977499870780495,
+    "u_bad": false,
+    "g_ns": 34611.117,
+    "g_bad": false,
+    "sys_sum_over_wall": false,
+    "drops": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "drops_bad": false,
+    "r_ns": 4733.487
+   }
+  },
+  "waves_differ_across_W": [],
+  "stop": false
+ },
+ "identity": {
+  "S1_ns": 7397898.942000001,
+  "P1_ns": 12205403.423,
+  "f": 0.37569115532732866,
+  "f_fit": 0.39280691217791025,
+  "omega1_ns": 854.7945481156294,
+  "1": {
+   "T": 19691437.6,
+   "S": 7397898.942000001,
+   "I": 0.0,
+   "P1_over_W": 12205403.423,
+   "L": 0.0,
+   "g": 88975.93,
+   "u": 1413.434,
+   "r": 4322.097,
+   "waves": 109.32,
+   "E": 1.0,
+   "omega": 0.0,
+   "identity_residual": -6576.225999999791
+  },
+  "8": {
+   "T": 9229495.9,
+   "S": 6938710.573000001,
+   "I": -459188.36899999995,
+   "P1_over_W": 1525675.427875,
+   "L": 715420.203125,
+   "g": 34611.117,
+   "u": 1366.771,
+   "r": 4733.487,
+   "waves": 109.32,
+   "E": 0.6807721218010799,
+   "omega": 6544.275549990853,
+   "identity_residual": 8978.321000000462
+  },
+  "L6_fork_fixed_wave_cost_over_L8": 0.1306171388392752,
+  "imbalance_share": "not measured: no zone may sit inside a worker chunk task (O1)"
+ },
+ "rows": {
+  "R": {
+   "1": {
+    "wall_ns": 14226271.3,
+    "manifolds": 6662.254,
+    "pairs": 9570.0,
+    "colors": 16.0,
+    "wide_colors": 14.0,
+    "waves": 168.0,
+    "g_ns": 81343.96100000001,
+    "u_ns": 1427.875,
+    "r_ns": 5990.804,
+    "sys_sum_ns": 14148266.022,
+    "disp_lane": 16.0,
+    "worker_lane_max": 234.0,
+    "sys_physics_integrate_ns": 116.02199999999999,
+    "sys_physics_gather_ns": 26202.429,
+    "sys_select_broadphase_ns": 106.31,
+    "sys_physics_broadphase_ns": 2075087.358,
+    "sys_physics_narrowphase_ns": 3630736.4110000003,
+    "sys_physics_build_graph_ns": 218102.45,
+    "sys_physics_solve_colored_ns": 8173023.187,
+    "sys_physics_apply_ns": 19109.83,
+    "phys_solve_build_ns": 1486654.12,
+    "phys_gravity_ns": 8054.869000000001,
+    "phys_warm_apply_ns": 842833.523,
+    "phys_integrate_ns": 65195.59299999999,
+    "phys_pass_biased_ns": 1806396.81,
+    "phys_pass_relax_ns": 3523862.3109999998,
+    "phys_color_wide_ns": 5271365.445,
+    "phys_color_narrow_ns": 52891.604,
+    "phys_restitution_ns": 10796.861,
+    "phys_store_ns": 461574.414,
+    "phys_write_back_ns": 3415.603,
+    "phys_sleep_begin_ns": 0.0,
+    "phys_sleep_freeze_ns": 0.0,
+    "phys_sleep_end_ns": 0.0,
+    "phys_slots_wide": 22721.954,
+    "phys_slots_narrow": 235.752,
+    "phys_np_points": 22957.706
+   },
+   "8": {
+    "wall_ns": 9932861.7,
+    "manifolds": 6662.254,
+    "pairs": 9570.0,
+    "colors": 16.0,
+    "wide_colors": 14.0,
+    "waves": 168.0,
+    "g_ns": 35677.925,
+    "u_ns": 1395.272,
+    "r_ns": 6826.290999999999,
+    "sys_sum_ns": 9892145.969,
+    "disp_lane": 16.0,
+    "worker_lane_max": 233.712,
+    "sys_physics_integrate_ns": 97.518,
+    "sys_physics_gather_ns": 25682.046000000002,
+    "sys_select_broadphase_ns": 110.045,
+    "sys_physics_broadphase_ns": 1940167.383,
+    "sys_physics_narrowphase_ns": 3491502.986,
+    "sys_physics_build_graph_ns": 188809.47,
+    "sys_physics_solve_colored_ns": 4221616.988,
+    "sys_physics_apply_ns": 11542.573,
+    "phys_solve_build_ns": 1391312.598,
+    "phys_gravity_ns": 12945.034,
+    "phys_warm_apply_ns": 850418.047,
+    "phys_integrate_ns": 79577.20300000001,
+    "phys_pass_biased_ns": 501698.28500000003,
+    "phys_pass_relax_ns": 964990.6070000001,
+    "phys_color_wide_ns": 1400641.582,
+    "phys_color_narrow_ns": 59791.852,
+    "phys_restitution_ns": 11055.451000000001,
+    "phys_store_ns": 396620.315,
+    "phys_write_back_ns": 3144.089,
+    "phys_sleep_begin_ns": 0.0,
+    "phys_sleep_freeze_ns": 0.0,
+    "phys_sleep_end_ns": 0.0,
+    "phys_slots_wide": 22721.954,
+    "phys_slots_narrow": 235.752,
+    "phys_np_points": 22957.706
+   }
+  },
+  "R-ref": {
+   "1": {
+    "wall_ns": 23929340.1,
+    "manifolds": 5948.548,
+    "pairs": 9570.0,
+    "colors": 0.0,
+    "wide_colors": 0.0,
+    "waves": 0.0,
+    "g_ns": 77403.139,
+    "u_ns": null,
+    "r_ns": 0.0,
+    "sys_sum_ns": 23851360.384,
+    "disp_lane": 14.0,
+    "worker_lane_max": 11.0,
+    "sys_physics_integrate_ns": 168.89600000000002,
+    "sys_physics_gather_ns": 27428.097,
+    "sys_select_broadphase_ns": 147.07100000000003,
+    "sys_physics_broadphase_ns": 2107234.346,
+    "sys_physics_narrowphase_ns": 3554121.1059999997,
+    "sys_physics_solve_step_ns": 18137903.243,
+    "sys_physics_apply_ns": 20206.269,
+    "phys_solve_build_ns": 0.0,
+    "phys_gravity_ns": 0.0,
+    "phys_warm_apply_ns": 0.0,
+    "phys_integrate_ns": 0.0,
+    "phys_pass_biased_ns": 0.0,
+    "phys_pass_relax_ns": 0.0,
+    "phys_color_wide_ns": 0.0,
+    "phys_color_narrow_ns": 0.0,
+    "phys_restitution_ns": 0.0,
+    "phys_store_ns": 0.0,
+    "phys_write_back_ns": 0.0,
+    "phys_sleep_begin_ns": 0.0,
+    "phys_sleep_freeze_ns": 0.0,
+    "phys_sleep_end_ns": 0.0,
+    "phys_slots_wide": 0.0,
+    "phys_slots_narrow": 0.0,
+    "phys_np_points": 20697.222
+   }
+  },
+  "R-S": {
+   "1": {
+    "wall_ns": 6048514.1,
+    "manifolds": 6675.0,
+    "pairs": 9570.0,
+    "colors": 16.0,
+    "wide_colors": 0.0,
+    "waves": 0.0,
+    "g_ns": 35611.229999999996,
+    "u_ns": 787.098,
+    "r_ns": 3164.87,
+    "sys_sum_ns": 6012621.041999999,
+    "disp_lane": 16.0,
+    "worker_lane_max": 238.0,
+    "sys_physics_integrate_ns": 60.212,
+    "sys_physics_gather_ns": 24433.841,
+    "sys_select_broadphase_ns": 88.007,
+    "sys_physics_broadphase_ns": 1934459.477,
+    "sys_physics_narrowphase_ns": 3420155.616,
+    "sys_physics_build_graph_ns": 184030.58899999998,
+    "sys_physics_solve_colored_ns": 450468.32999999996,
+    "sys_physics_apply_ns": 4794.187,
+    "phys_solve_build_ns": 34086.562,
+    "phys_gravity_ns": 5655.242,
+    "phys_warm_apply_ns": 45.852,
+    "phys_integrate_ns": 64379.627,
+    "phys_pass_biased_ns": 1853.161,
+    "phys_pass_relax_ns": 3489.444,
+    "phys_color_wide_ns": 0.0,
+    "phys_color_narrow_ns": 2172.476,
+    "phys_restitution_ns": 12.41,
+    "phys_store_ns": 316104.088,
+    "phys_write_back_ns": 877.013,
+    "phys_sleep_begin_ns": 2385.124,
+    "phys_sleep_freeze_ns": 16566.487,
+    "phys_sleep_end_ns": 4228.845,
+    "phys_slots_wide": 0.0,
+    "phys_slots_narrow": 0.0,
+    "phys_np_points": 22968.0
+   },
+   "8": {
+    "wall_ns": 6122554.0,
+    "manifolds": 6675.0,
+    "pairs": 9570.0,
+    "colors": 16.0,
+    "wide_colors": 0.0,
+    "waves": 0.0,
+    "g_ns": 36549.831999999995,
+    "u_ns": 801.039,
+    "r_ns": 3195.124,
+    "sys_sum_ns": 6085974.991,
+    "disp_lane": 16.0,
+    "worker_lane_max": 237.81799999999998,
+    "sys_physics_integrate_ns": 63.533,
+    "sys_physics_gather_ns": 24793.242,
+    "sys_select_broadphase_ns": 69.792,
+    "sys_physics_broadphase_ns": 1935279.893,
+    "sys_physics_narrowphase_ns": 3427325.4639999997,
+    "sys_physics_build_graph_ns": 184709.161,
+    "sys_physics_solve_colored_ns": 502012.179,
+    "sys_physics_apply_ns": 4772.391,
+    "phys_solve_build_ns": 35225.319,
+    "phys_gravity_ns": 5719.284,
+    "phys_warm_apply_ns": 45.609,
+    "phys_integrate_ns": 64008.011,
+    "phys_pass_biased_ns": 1897.11,
+    "phys_pass_relax_ns": 3554.366,
+    "phys_color_wide_ns": 0.0,
+    "phys_color_narrow_ns": 2250.932,
+    "phys_restitution_ns": 14.744,
+    "phys_store_ns": 365687.899,
+    "phys_write_back_ns": 870.279,
+    "phys_sleep_begin_ns": 2405.176,
+    "phys_sleep_freeze_ns": 16138.074,
+    "phys_sleep_end_ns": 4240.155,
+    "phys_slots_wide": 0.0,
+    "phys_slots_narrow": 0.0,
+    "phys_np_points": 22968.0
+   }
+  },
+  "S16": {
+   "1": {
+    "wall_ns": 81422.0,
+    "manifolds": 16.0,
+    "pairs": 31.0,
+    "colors": 2.0,
+    "wide_colors": 0.0,
+    "waves": 0.0,
+    "g_ns": 17845.723333333335,
+    "u_ns": 421.1933333333333,
+    "r_ns": 493.8883333333333,
+    "sys_sum_ns": 63422.573333333334,
+    "disp_lane": 16.0,
+    "worker_lane_max": 66.0,
+    "sys_physics_integrate_ns": 35.20166666666667,
+    "sys_physics_gather_ns": 642.4766666666667,
+    "sys_select_broadphase_ns": 28.233333333333334,
+    "sys_physics_broadphase_ns": 449.40666666666664,
+    "sys_physics_narrowphase_ns": 9450.771666666667,
+    "sys_physics_build_graph_ns": 624.3083333333334,
+    "sys_physics_solve_colored_ns": 51856.99666666667,
+    "sys_physics_apply_ns": 214.77333333333334,
+    "phys_solve_build_ns": 2683.153333333333,
+    "phys_gravity_ns": 203.19,
+    "phys_warm_apply_ns": 2338.463333333333,
+    "phys_integrate_ns": 1010.7716666666666,
+    "phys_pass_biased_ns": 15098.783333333333,
+    "phys_pass_relax_ns": 29597.011666666665,
+    "phys_color_wide_ns": 0.0,
+    "phys_color_narrow_ns": 44201.721666666665,
+    "phys_restitution_ns": 49.81666666666667,
+    "phys_store_ns": 375.6,
+    "phys_write_back_ns": 36.35,
+    "phys_sleep_begin_ns": 0.0,
+    "phys_sleep_freeze_ns": 0.0,
+    "phys_sleep_end_ns": 0.0,
+    "phys_slots_wide": 0.0,
+    "phys_slots_narrow": 63.99666666666667,
+    "phys_np_points": 63.99666666666667
+   },
+   "8": {
+    "wall_ns": 79355.16666666666,
+    "manifolds": 16.0,
+    "pairs": 31.0,
+    "colors": 2.0,
+    "wide_colors": 0.0,
+    "waves": 0.0,
+    "g_ns": 14805.763333333332,
+    "u_ns": 487.75333333333333,
+    "r_ns": 511.75666666666666,
+    "sys_sum_ns": 64614.03666666667,
+    "disp_lane": 16.0,
+    "worker_lane_max": 64.49000000000001,
+    "sys_physics_integrate_ns": 47.85333333333333,
+    "sys_physics_gather_ns": 666.3499999999999,
+    "sys_select_broadphase_ns": 44.235,
+    "sys_physics_broadphase_ns": 475.55833333333334,
+    "sys_physics_narrowphase_ns": 9791.885,
+    "sys_physics_build_graph_ns": 738.2516666666667,
+    "sys_physics_solve_colored_ns": 52573.90666666666,
+    "sys_physics_apply_ns": 306.03999999999996,
+    "phys_solve_build_ns": 3120.4833333333336,
+    "phys_gravity_ns": 202.08333333333331,
+    "phys_warm_apply_ns": 2349.6983333333337,
+    "phys_integrate_ns": 1007.2566666666667,
+    "phys_pass_biased_ns": 15186.9,
+    "phys_pass_relax_ns": 29692.41,
+    "phys_color_wide_ns": 0.0,
+    "phys_color_narrow_ns": 44356.886666666665,
+    "phys_restitution_ns": 51.233333333333334,
+    "phys_store_ns": 464.55833333333334,
+    "phys_write_back_ns": 56.42,
+    "phys_sleep_begin_ns": 0.0,
+    "phys_sleep_freeze_ns": 0.0,
+    "phys_sleep_end_ns": 0.0,
+    "phys_slots_wide": 0.0,
+    "phys_slots_narrow": 63.99666666666667,
+    "phys_np_points": 63.99666666666667
+   }
+  },
+  "J-B": {
+   "1": {
+    "wall_ns": 14206494.7,
+    "manifolds": 4524.246,
+    "pairs": 9561.196,
+    "colors": 10.79,
+    "wide_colors": 9.11,
+    "waves": 109.32,
+    "g_ns": 87645.043,
+    "u_ns": 1453.1100000000001,
+    "r_ns": 4196.7880000000005,
+    "sys_sum_ns": 14118762.4,
+    "disp_lane": 16.0,
+    "worker_lane_max": 171.48,
+    "sys_physics_integrate_ns": 107.199,
+    "sys_physics_gather_ns": 26949.994,
+    "sys_select_broadphase_ns": 115.265,
+    "sys_physics_broadphase_ns": 5171018.432,
+    "sys_physics_narrowphase_ns": 3157095.361,
+    "sys_physics_build_graph_ns": 142529.693,
+    "sys_physics_solve_colored_ns": 5619457.982000001,
+    "sys_physics_apply_ns": 17120.77,
+    "phys_solve_build_ns": 1038170.855,
+    "phys_gravity_ns": 7759.893,
+    "phys_warm_apply_ns": 613681.6969999999,
+    "phys_integrate_ns": 65821.31,
+    "phys_pass_biased_ns": 1211749.0129999998,
+    "phys_pass_relax_ns": 2383964.389,
+    "phys_color_wide_ns": 3575701.134,
+    "phys_color_narrow_ns": 16511.451999999997,
+    "phys_restitution_ns": 7959.387000000001,
+    "phys_store_ns": 269612.32,
+    "phys_write_back_ns": 2974.7,
+    "phys_sleep_begin_ns": 0.0,
+    "phys_sleep_freeze_ns": 0.0,
+    "phys_sleep_end_ns": 0.0,
+    "phys_slots_wide": 16838.364,
+    "phys_slots_narrow": 49.468,
+    "phys_np_points": 16887.832
+   },
+   "8": {
+    "wall_ns": 11163962.8,
+    "manifolds": 4524.246,
+    "pairs": 9561.196,
+    "colors": 10.79,
+    "wide_colors": 9.11,
+    "waves": 109.32,
+    "g_ns": 40156.774000000005,
+    "u_ns": 1495.8980000000001,
+    "r_ns": 4775.35,
+    "sys_sum_ns": 11123422.407000002,
+    "disp_lane": 16.0,
+    "worker_lane_max": 170.798,
+    "sys_physics_integrate_ns": 125.50300000000001,
+    "sys_physics_gather_ns": 25924.515,
+    "sys_select_broadphase_ns": 77.049,
+    "sys_physics_broadphase_ns": 5031731.086999999,
+    "sys_physics_narrowphase_ns": 2959018.248,
+    "sys_physics_build_graph_ns": 124729.221,
+    "sys_physics_solve_colored_ns": 2982741.3109999998,
+    "sys_physics_apply_ns": 13338.705,
+    "phys_solve_build_ns": 1021097.0260000001,
+    "phys_gravity_ns": 12605.921,
+    "phys_warm_apply_ns": 623734.0449999999,
+    "phys_integrate_ns": 81570.553,
+    "phys_pass_biased_ns": 342477.9,
+    "phys_pass_relax_ns": 637783.041,
+    "phys_color_wide_ns": 956505.283,
+    "phys_color_narrow_ns": 18897.934,
+    "phys_restitution_ns": 8466.722,
+    "phys_store_ns": 254314.174,
+    "phys_write_back_ns": 2955.7749999999996,
+    "phys_sleep_begin_ns": 0.0,
+    "phys_sleep_freeze_ns": 0.0,
+    "phys_sleep_end_ns": 0.0,
+    "phys_slots_wide": 16838.364,
+    "phys_slots_narrow": 49.468,
+    "phys_np_points": 16887.832
+   }
+  },
+  "J-Son": {
+   "1": {
+    "wall_ns": 9174177.05,
+    "manifolds": 4521.019,
+    "pairs": 9560.098,
+    "colors": 10.895,
+    "wide_colors": 2.431,
+    "waves": 29.172,
+    "g_ns": 49233.348,
+    "u_ns": 950.76,
+    "r_ns": 2391.4975,
+    "sys_sum_ns": 9125025.819,
+    "disp_lane": 16.0,
+    "worker_lane_max": 176.74,
+    "sys_physics_integrate_ns": 63.920500000000004,
+    "sys_physics_gather_ns": 26077.4235,
+    "sys_select_broadphase_ns": 100.2415,
+    "sys_physics_broadphase_ns": 1976859.328,
+    "sys_physics_narrowphase_ns": 2973042.7654999997,
+    "sys_physics_build_graph_ns": 122249.5905,
+    "sys_physics_solve_colored_ns": 4022336.5215,
+    "sys_physics_apply_ns": 8587.866,
+    "phys_solve_build_ns": 280227.685,
+    "phys_gravity_ns": 6270.993,
+    "phys_warm_apply_ns": 160140.279,
+    "phys_integrate_ns": 64777.7005,
+    "phys_pass_biased_ns": 1109090.6354999999,
+    "phys_pass_relax_ns": 2165236.448,
+    "phys_color_wide_ns": 3258681.4354999997,
+    "phys_color_narrow_ns": 13304.435000000001,
+    "phys_restitution_ns": 2109.94,
+    "phys_store_ns": 211452.8425,
+    "phys_write_back_ns": 1566.1325000000002,
+    "phys_sleep_begin_ns": 2838.252,
+    "phys_sleep_freeze_ns": 11535.6515,
+    "phys_sleep_end_ns": 4240.563,
+    "phys_slots_wide": 4399.567,
+    "phys_slots_narrow": 15.774,
+    "phys_np_points": 16964.141
+   },
+   "8": {
+    "wall_ns": 6421974.85,
+    "manifolds": 4521.019,
+    "pairs": 9560.098,
+    "colors": 10.895,
+    "wide_colors": 2.431,
+    "waves": 29.172,
+    "g_ns": 36726.383,
+    "u_ns": 1002.8015,
+    "r_ns": 2625.4115,
+    "sys_sum_ns": 6385083.4605,
+    "disp_lane": 16.0,
+    "worker_lane_max": 176.5095,
+    "sys_physics_integrate_ns": 86.229,
+    "sys_physics_gather_ns": 27738.5315,
+    "sys_select_broadphase_ns": 66.445,
+    "sys_physics_broadphase_ns": 1974584.224,
+    "sys_physics_narrowphase_ns": 2920128.2860000003,
+    "sys_physics_build_graph_ns": 116068.513,
+    "sys_physics_solve_colored_ns": 1339480.989,
+    "sys_physics_apply_ns": 6459.295,
+    "phys_solve_build_ns": 263059.3915,
+    "phys_gravity_ns": 7464.211499999999,
+    "phys_warm_apply_ns": 162125.76750000002,
+    "phys_integrate_ns": 68711.027,
+    "phys_pass_biased_ns": 211574.085,
+    "phys_pass_relax_ns": 403843.3225,
+    "phys_color_wide_ns": 598488.779,
+    "phys_color_narrow_ns": 14293.990000000002,
+    "phys_restitution_ns": 2164.542,
+    "phys_store_ns": 193782.066,
+    "phys_write_back_ns": 1444.096,
+    "phys_sleep_begin_ns": 2786.4660000000003,
+    "phys_sleep_freeze_ns": 13152.542000000001,
+    "phys_sleep_end_ns": 4254.1705,
+    "phys_slots_wide": 4399.567,
+    "phys_slots_narrow": 15.774,
+    "phys_np_points": 16964.141
+   }
+  },
+  "J-S0": {
+   "1": {
+    "wall_ns": 19706772.2,
+    "manifolds": 4524.246,
+    "pairs": 9561.196,
+    "colors": 10.79,
+    "wide_colors": 9.11,
+    "waves": 109.32,
+    "g_ns": 89068.455,
+    "u_ns": 1471.266,
+    "r_ns": 4147.121,
+    "sys_sum_ns": 19617816.487000003,
+    "disp_lane": 16.0,
+    "worker_lane_max": 175.48,
+    "sys_physics_integrate_ns": 108.596,
+    "sys_physics_gather_ns": 27412.839,
+    "sys_select_broadphase_ns": 133.977,
+    "sys_physics_broadphase_ns": 2099656.0039999997,
+    "sys_physics_narrowphase_ns": 3135087.803,
+    "sys_physics_build_graph_ns": 138365.874,
+    "sys_physics_solve_colored_ns": 14182142.541000001,
+    "sys_physics_apply_ns": 18371.031000000003,
+    "phys_solve_build_ns": 965632.939,
+    "phys_gravity_ns": 7610.357,
+    "phys_warm_apply_ns": 612799.566,
+    "phys_integrate_ns": 65911.943,
+    "phys_pass_biased_ns": 4147203.431,
+    "phys_pass_relax_ns": 8096894.311000001,
+    "phys_color_wide_ns": 12202336.774,
+    "phys_color_narrow_ns": 37590.675,
+    "phys_restitution_ns": 7935.151,
+    "phys_store_ns": 260511.54700000002,
+    "phys_write_back_ns": 3242.079,
+    "phys_sleep_begin_ns": 3953.179,
+    "phys_sleep_freeze_ns": 1491.466,
+    "phys_sleep_end_ns": 4819.781000000001,
+    "phys_slots_wide": 16838.364,
+    "phys_slots_narrow": 49.468,
+    "phys_np_points": 16887.832
+   }
+  }
+ },
+ "rs_void": [],
+ "rs_first_frozen_step": [
+  [
+   1,
+   0,
+   248
+  ],
+  [
+   8,
+   0,
+   248
+  ],
+  [
+   1,
+   1,
+   248
+  ],
+  [
+   8,
+   1,
+   248
+  ],
+  [
+   1,
+   2,
+   248
+  ],
+  [
+   8,
+   2,
+   248
+  ],
+  [
+   8,
+   3,
+   248
+  ],
+  [
+   1,
+   3,
+   248
+  ],
+  [
+   8,
+   4,
+   248
+  ],
+  [
+   1,
+   4,
+   248
+  ],
+  [
+   8,
+   5,
+   248
+  ],
+  [
+   1,
+   5,
+   248
+  ]
+ ],
+ "jolt_stage_share_profiles": [
+  [
+   1,
+   0,
+   [
+    "profile_chart_discrete_th1_it0.html",
+    "profile_chart_discrete_th1_it100.html",
+    "profile_chart_discrete_th1_it200.html",
+    "profile_chart_discrete_th1_it300.html",
+    "profile_chart_discrete_th1_it400.html"
+   ]
+  ],
+  [
+   8,
+   0,
+   [
+    "profile_chart_discrete_th8_it0.html",
+    "profile_chart_discrete_th8_it100.html",
+    "profile_chart_discrete_th8_it200.html",
+    "profile_chart_discrete_th8_it300.html",
+    "profile_chart_discrete_th8_it400.html"
+   ]
+  ],
+  [
+   1,
+   1,
+   [
+    "profile_chart_discrete_th1_it0.html",
+    "profile_chart_discrete_th1_it100.html",
+    "profile_chart_discrete_th1_it200.html",
+    "profile_chart_discrete_th1_it300.html",
+    "profile_chart_discrete_th1_it400.html"
+   ]
+  ],
+  [
+   8,
+   1,
+   [
+    "profile_chart_discrete_th8_it0.html",
+    "profile_chart_discrete_th8_it100.html",
+    "profile_chart_discrete_th8_it200.html",
+    "profile_chart_discrete_th8_it300.html",
+    "profile_chart_discrete_th8_it400.html"
+   ]
+  ],
+  [
+   1,
+   2,
+   [
+    "profile_chart_discrete_th1_it0.html",
+    "profile_chart_discrete_th1_it100.html",
+    "profile_chart_discrete_th1_it200.html",
+    "profile_chart_discrete_th1_it300.html",
+    "profile_chart_discrete_th1_it400.html"
+   ]
+  ],
+  [
+   8,
+   2,
+   [
+    "profile_chart_discrete_th8_it0.html",
+    "profile_chart_discrete_th8_it100.html",
+    "profile_chart_discrete_th8_it200.html",
+    "profile_chart_discrete_th8_it300.html",
+    "profile_chart_discrete_th8_it400.html"
+   ]
+  ],
+  [
+   8,
+   3,
+   [
+    "profile_chart_discrete_th8_it0.html",
+    "profile_chart_discrete_th8_it100.html",
+    "profile_chart_discrete_th8_it200.html",
+    "profile_chart_discrete_th8_it300.html",
+    "profile_chart_discrete_th8_it400.html"
+   ]
+  ],
+  [
+   1,
+   3,
+   [
+    "profile_chart_discrete_th1_it0.html",
+    "profile_chart_discrete_th1_it100.html",
+    "profile_chart_discrete_th1_it200.html",
+    "profile_chart_discrete_th1_it300.html",
+    "profile_chart_discrete_th1_it400.html"
+   ]
+  ],
+  [
+   8,
+   4,
+   [
+    "profile_chart_discrete_th8_it0.html",
+    "profile_chart_discrete_th8_it100.html",
+    "profile_chart_discrete_th8_it200.html",
+    "profile_chart_discrete_th8_it300.html",
+    "profile_chart_discrete_th8_it400.html"
+   ]
+  ],
+  [
+   1,
+   4,
+   [
+    "profile_chart_discrete_th1_it0.html",
+    "profile_chart_discrete_th1_it100.html",
+    "profile_chart_discrete_th1_it200.html",
+    "profile_chart_discrete_th1_it300.html",
+    "profile_chart_discrete_th1_it400.html"
+   ]
+  ],
+  [
+   8,
+   5,
+   [
+    "profile_chart_discrete_th8_it0.html",
+    "profile_chart_discrete_th8_it100.html",
+    "profile_chart_discrete_th8_it200.html",
+    "profile_chart_discrete_th8_it300.html",
+    "profile_chart_discrete_th8_it400.html"
+   ]
+  ],
+  [
+   1,
+   5,
+   [
+    "profile_chart_discrete_th1_it0.html",
+    "profile_chart_discrete_th1_it100.html",
+    "profile_chart_discrete_th1_it200.html",
+    "profile_chart_discrete_th1_it300.html",
+    "profile_chart_discrete_th1_it400.html"
+   ]
+  ]
+ ],
+ "delta_J_pair_cache_ns": 1552168.3999999994,
+ "l1_gate": null,
+ "h8": null,
+ "o5": {
+  "1": {
+   "boyko_all_asleep_from": 264,
+   "jolt_all_asleep_from": 127,
+   "tail": [
+    264,
+    1000
+   ],
+   "boyko_tail_T_ns": 5333604.891304348,
+   "jolt_tail_T_ns": 2173.301630434783
+  },
+  "8": {
+   "boyko_all_asleep_from": 264,
+   "jolt_all_asleep_from": 127,
+   "tail": [
+    264,
+    1000
+   ],
+   "boyko_tail_T_ns": 5406864.605978261,
+   "jolt_tail_T_ns": 2284.7146739130435
+  }
+ },
+ "threads": {
+  "1": {
+   "boyko_pool_workers": 1,
+   "boyko_dispatcher": 1,
+   "boyko_solve_on_dispatcher_steps": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "jolt_threads_printed": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "jolt_job_threads": 0,
+   "jolt_calling_thread": 1
+  },
+  "2": {
+   "boyko_pool_workers": 2,
+   "boyko_dispatcher": 1,
+   "boyko_solve_on_dispatcher_steps": [],
+   "jolt_threads_printed": [
+    2,
+    2,
+    2,
+    2,
+    2,
+    2
+   ],
+   "jolt_job_threads": 1,
+   "jolt_calling_thread": 1
+  },
+  "4": {
+   "boyko_pool_workers": 4,
+   "boyko_dispatcher": 1,
+   "boyko_solve_on_dispatcher_steps": [],
+   "jolt_threads_printed": [
+    4,
+    4,
+    4,
+    4,
+    4,
+    4
+   ],
+   "jolt_job_threads": 3,
+   "jolt_calling_thread": 1
+  },
+  "8": {
+   "boyko_pool_workers": 8,
+   "boyko_dispatcher": 1,
+   "boyko_solve_on_dispatcher_steps": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "jolt_threads_printed": [
+    8,
+    8,
+    8,
+    8,
+    8,
+    8
+   ],
+   "jolt_job_threads": 7,
+   "jolt_calling_thread": 1
+  },
+  "16": {
+   "boyko_pool_workers": 16,
+   "boyko_dispatcher": 1,
+   "boyko_solve_on_dispatcher_steps": [],
+   "jolt_threads_printed": [
+    16,
+    16,
+    16,
+    16,
+    16,
+    16
+   ],
+   "jolt_job_threads": 15,
+   "jolt_calling_thread": 1
+  }
+ }
+}

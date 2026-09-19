@@ -1,0 +1,98 @@
+broadphase/all_pairs/100
+                        time:   [5.5068 µs 5.5151 µs 5.5248 µs]
+Found 11 outliers among 100 measurements (11.00%)
+  6 (6.00%) high mild
+  5 (5.00%) high severe
+broadphase/grid/100     time:   [44.623 µs 44.641 µs 44.661 µs]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+broadphase/all_pairs/1000
+                        time:   [597.54 µs 597.83 µs 598.15 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+broadphase/grid/1000    time:   [661.42 µs 661.66 µs 661.93 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+broadphase/all_pairs/10000
+                        time:   [70.216 ms 70.267 ms 70.321 ms]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+broadphase/grid/10000   time:   [8.0138 ms 8.0199 ms 8.0273 ms]
+Found 20 outliers among 100 measurements (20.00%)
+  1 (1.00%) low severe
+  9 (9.00%) low mild
+  4 (4.00%) high mild
+  6 (6.00%) high severe
+
+broadphase_disparity/all_pairs/1000
+                        time:   [617.72 µs 618.04 µs 618.41 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+broadphase_disparity/grid/1000
+                        time:   [2.4177 ms 2.4187 ms 2.4198 ms]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+broadphase_disparity/all_pairs/10000
+                        time:   [71.725 ms 71.858 ms 72.003 ms]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+broadphase_disparity/grid/10000
+                        time:   [15.809 ms 15.817 ms 15.826 ms]
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+
+broadphase_parallel/serial_o2/1000
+                        time:   [662.01 µs 663.37 µs 664.79 µs]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+broadphase_parallel/w1/1000
+                        time:   [660.61 µs 662.11 µs 664.18 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+broadphase_parallel/w2/1000
+                        time:   [662.57 µs 666.13 µs 670.58 µs]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+broadphase_parallel/w4/1000
+                        time:   [660.27 µs 661.02 µs 662.07 µs]
+broadphase_parallel/serial_o2/10000
+                        time:   [8.0164 ms 8.0231 ms 8.0296 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+broadphase_parallel/w1/10000
+                        time:   [7.9817 ms 7.9915 ms 8.0034 ms]
+broadphase_parallel/w2/10000
+                        time:   [6.1032 ms 6.1163 ms 6.1348 ms]
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) low mild
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+broadphase_parallel/w4/10000
+                        time:   [4.3194 ms 4.3310 ms 4.3421 ms]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high severe
+broadphase_parallel/serial_o2/100000
+                        time:   [88.327 ms 88.722 ms 89.382 ms]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+broadphase_parallel/w1/100000
+                        time:   [88.263 ms 88.554 ms 88.886 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+broadphase_parallel/w2/100000
+                        time:   [67.575 ms 67.716 ms 67.872 ms]
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+broadphase_parallel/w4/100000
+                        time:   [45.783 ms 45.948 ms 46.070 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+

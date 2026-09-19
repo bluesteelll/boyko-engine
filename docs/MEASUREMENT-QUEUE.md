@@ -577,9 +577,130 @@ sleeping-on row labelled as not like for like.
 
 ---
 
-## 10. Physics — the per-stage profile, and the Jolt parity row re-taken like for like (perf campaign P0)
+## 10. Physics — the per-stage profile, and the Jolt parity row re-taken like for like (perf campaign P0) — TIMED 2026-09-19 (window 1 VOID; window 2 under the ruled protocol)
 
-**NO TIMING HAS BEEN TAKEN.** Queued 2026-09-19. The design is `docs/physics/perf-campaign/01-PLAN-REV1.md` §1–§2
+**RESULT, 2026-09-19.** Two windows. Window 1 VOID (below); window 2 ("P0b") timed under the orchestrator's
+ruled protocol and complete. Owner's workstation: Ryzen 9 5900HS, 8C/16T (core k = CPUs {2k,2k+1}, 512 KiB L2
+per core, 16 MiB L3), High performance, AC; Task Manager, Steam and a browser open. `D:/wt/joltab` at `dbd85977`,
+clean; rustc 1.98.1 `host: x86_64-pc-windows-msvc`, no RUSTFLAGS, `x86-64-v3` baseline. Ancestors true: S5
+`8d656ad8`, KE16 `67563d3b`, B1 `aff98fe7`, L1 `00c07d0f`; D1 + `simd_solve` default = `56c1e9e7`.
+boyko runner: cargo `parity` (inherits `release`: fat LTO, default CGU), zone tier `dev` (SHIP: `shipping`);
+sha256 tip `ef9325ef`, pre-instrument `b7c42334`, pre-L1 `a0da832f`, shipping `fdcac07f`. broadphase bench:
+cargo `bench` (lto=false, CGU=1), `3c5cd8b4`. Jolt v5.3.0 Distribution `29b23ad1` / Release (`-p`) `de00c882`,
+v5.6.0 Distribution `918fd2b7`; WinLibs GCC 16.1.0, IPO on, AVX2; source = the repository's `pyramid_scene.patch`.
+
+**Window 1 — VOID (05:22:15–05:46:53 +03:00, passes 0–2 of 5).** A/A0 fired at W=2: B(2) = 2.311 % > 2 %
+(d2/d1 = 0.98168, 0.98093, 0.97689). Not load: 307 of 308 receipts ≤ 4.9 % busy. Cause: each process of the
+SAME binary draws its own speed for its whole run (W=2: 6 identical processes span 5.2 %; replaying the group
+flips the sign of d2/d1); the band gated a median of paired step ratios while the quote is a window mean. No
+timed number from window 1 is used. **Protocol ruling:** a cell's statistic is the median over K separate
+processes of the window mean; resolution = the process spread (min–max, IQR; the median's SE
+1.2533·SD/√K supplementary); a comparison is claimed only if |effect| > 2·hypot(spread_A, spread_B);
+receipts gate each process (> 5 % ⇒ re-run once); no band-based void; the canary must be seen. **Placement
+diagnostic** (06:13–06:36): pinning one thread per physical core did not narrow the spread in any
+(engine, W∈{2,8}) cell (largest variance ratio 3.3 against F(5,5)₀.₀₅ = 7.15) and moved no median beyond
+resolution ⇒ P-none (no affinity) for both engines.
+
+**Window 2 (06:49:05–07:51:05).** K = 6 in all 43 cells (2 passes × 3 rounds, interleaved; pass 1 reversed;
+one untimed warm-up per pass); 258 processes, 0 non-zero exits; 2 contaminated (after-receipts 14.0 % and
+7.17 %) and re-run once. Receipts: 266, median 1.26 % busy; idle polls 9/9 quiet. Structural checks all
+green: 0 void steps, drops 0, disarmed ring traffic 0; H7 12/12; 7 boyko pose groups with one pose each
+(J family, sleep-off = sleep threshold 0 = pre-L1 = `0x32d5e235342b4143`); Jolt one hash per (row, W); waves
+109.32 per step, identical at W=1 and 8, = 12 × wide colours on every step; closure: u ≤ 0.48 % of solve,
+u, g ≥ 0; R-S first frozen step 248 (12/12); Jolt threads = W.
+
+| W | boyko J-A (cfg-A, disarmed) ms | Jolt v5.3.0 | Jolt v5.6.0 | boyko/v5.3.0 | boyko/v5.6.0 |
+|---|---|---|---|---|---|
+| 1 | 19.671 [19.079–19.835] | 15.723 [14.987–16.088] | 9.650 [9.545–10.042] | 1.251 | 2.038 |
+| 2 | 13.711 [13.445–13.819] | 8.794 [8.514–9.005] | 5.708 [5.666–5.785] | 1.559 | 2.402 |
+| 4 | 10.701 [10.653–10.869] | 5.229 [5.139–5.374] | 3.557 [3.540–3.639] | 2.047 | 3.008 |
+| 8 | 9.162 [9.103–9.250] | 3.533 [3.452–3.583] | 2.493 [2.467–2.589] | 2.593 | 3.675 |
+| 16 | 9.172 [9.136–9.210] | 3.209 [3.189–3.277] | 2.447 [2.371–2.480] | 2.858 | 3.749 |
+
+- Every ratio is claimed under range, IQR and SE. **cfg-A is not the tip's default**: it pins `simd_solve`
+  off (default on since `56c1e9e7`) and sets `parallel_solve = W>1` (default off). Derived from J-B's spans,
+  NOT a measured row: cfg-A + `simd_solve` ≈ 11.0–11.1 ms at W=1 (0.70× v5.3.0) and 7.9–8.1 ms at W=8
+  (2.24–2.29× v5.3.0). Queue a measured row before quoting this.
+- H8 fired, and it is the contact set: over [100,500) Jolt has 8,456 manifolds (receipt; confirmed by Jolt's
+  own profiler, 8,456 cached-manifold adds per frame), boyko 4,519.3 (1.871×). Per manifold per step,
+  boyko/v5.3.0 = 2.32, 2.88, 3.79, 4.73, 5.20 at W = 1–16; the truth lies between that and the raw ratio.
+  v5.6.0's own count is not receipted.
+- H1, boyko/v5.3.0 over [0,100) / [100,500): 1.295/1.240 at W=1, 2.903/2.527 at W=8.
+- Scaling T(1)/T(8): boyko 2.147 (T(16) = T(8), +0.11 %, not claimed), v5.3.0 4.450, v5.6.0 3.870.
+
+**Profile (armed J-A, W=1 / W=8).** S(1) = 7.398 ms; **f = S(1)/T(1) = 0.376**, f_fit = 0.393 (0.390 from
+disarmed T), so f_fit − f = +0.017. P(1) = 12.205 ms. S(8) = 6.939 ms (75 % of T(8)); **I(8) = −0.459 ms**
+(broadphase −7.4 %, narrowphase −6.3 %, both claimed). L(8) = 0.715 ms; E(8) = 0.681; ω(8) = 6.54 µs;
+ω₁ = 0.855 µs (claimed only under SE). g = 89.0 / 34.6 µs; u = 1.41 / 1.37 µs; r = 4.32 / 4.73 µs;
+identity residual −6.6 / +9.0 µs. The L6 fork ω₁·waves/L(8) = 0.13 (≤ 0.28 over every process pairing).
+Armed J-A was run at W = 1 and 8 only, so I, E and L at W = 2, 4, 16 are not measured.
+
+**W=8 gap (5.63 ms) beside Jolt `-p` (Release; profiled T is +24 % at W=1 and +15 % at W=8 over timed).**
+- Collision: boyko bp + np is 4.891 ms and serial, against Jolt FindCollisions 0.67–0.90 ms (parallel, a
+  cache replay of 8,456 of 8,541 pairs). That is 71–75 % of the gap.
+- Solve: 4.145 ms against 2.62–2.84 ms, 23–27 % of the gap. boyko's serial in-solve work is 1.89 ms.
+- Jolt's wall-coverage shares: SolveVelocity 66.19 %, FindCollisions 25.48 %, SolvePosition 6.93 %.
+- Δ_J = +1.552 ms (+43.9 %, claimed).
+
+**Rows.**
+- J-B against J-A-a: −27.9 % at W=1, **+21.0 % (slower) at W=8**. Grid adds +3.07 and +3.09 ms;
+  `simd_solve` makes the colour spans 3.41× and 2.34× faster.
+- D1: R-ref/R = 1.682 (+68.2 %): the colored default saves 9.70 ms per step at W=1 on the gap-0 pile.
+- Sleeping floor F (R-S): 6.049 ms (W=1) and 6.123 ms (W=8); 92 % of it is collision + graph.
+  L10 on R: −57.5 % (W=1), −38.4 % (W=8).
+- O5 tails [264, 1000): boyko 5.334 / 5.407 ms against Jolt 2.17 / 2.29 µs (≈2,400×).
+- S16: 81.4 / 79.4 µs.
+
+**Gates.**
+- A/A1 (arming): +0.11 % at W=1, +0.74 % at W=8. Not claimed: pass.
+- A/A2: +0.51 %, +0.30 %. Not claimed: pass, and the zones stay in `dev`.
+- SHIP against dev: −0.55 %, −0.53 %. Not claimed.
+- Canary (J-C against J-A-a): +5.06 % and +4.81 % against 5.00 % and 4.98 % injected. Seen under every
+  reading; the span reads within +0.05 %. Against the disarmed J-A at W=1, the min–max bar (7.9 %) would
+  hide it.
+- L1's gate (J-S0 disarmed, pre-L1 against the tip): +0.68 %, not claimed ⇒ no regression. Bars: 8.9 %
+  (range), 2.8 % (IQR), 1.7 % (SE). The +2.44 % L1 targets is not seen; under SE, a gain of 1 % or more is
+  excluded.
+
+**Broadphase crossover (K=1).** Uniform n\* ≈ 1,109; size-disparity n\* ≈ 2,978; the in-scene
+Grid/AllPairs at n = 1240 is 2.46 (W=1) and 2.59 (W=8). `GRID_LO` = 96 and `GRID_HI` = 192 sit 6–31× below
+the crossovers. O3 Gate 7 read 1.92× at 100k (w4 against w1), against ≥ 2.8×; this is not ruled on.
+
+**Resolution at K=6.** The smallest claimable end-to-end change, as range / IQR / SE, is:
+- J at W=1: 10.9 / 1.4 / 2.0 %;
+- J at W=8: 4.5 / 0.5 / 0.75 %;
+- R at W=1: 17.8 / 3.3 % (range / SE);
+- R at W=8: 7.0 / 1.3 %.
+
+Which spread the claim rule means (min–max against IQR against SE) is still OPEN
+(`p0b/diag_report.md` §6). Resolving 1 % under SE needs K ≥ 12. A witness, not a gate: the fast W=1
+processes are the ones whose thread stayed on one CPU (occupancy against deviation, r = −0.67, n = 48).
+
+**Levers (plan §3 as amended by W2/W3).**
+- L4 `parallel_solve` default: build.
+- L5 parallel narrowphase: build, predicted 2.4–2.6 ms (26–28 % of T(8)).
+- L2: do not flip; recalibrate `GRID_LO`/`GRID_HI`.
+- L6: not built (L(8) + t_narrow(8) = 8.2 % < 10 %).
+- L7: blocked (gated after L6; 2.8–5.1 % predicted).
+- L9: fails its rule once L5 lands (t_np(8) → 8.7 % < 20 %; Δ_J = 43.9 %).
+- L8 (D2): clears after L5; ≤ 1.16 ms (cfg-A), ≤ 0.64 ms (simd).
+- L10 (D3): parity 0; −38 to −58 % on the resting world.
+- L3: shipped.
+- Not a plan lever: the serial AllPairs broadphase is 21 % of T(8).
+
+Receipts: `docs/measurements/2026-09-19-physics-p0/`:
+- `p0/` (window 1 and the builds): `build_report.md`, `window_report.md`, `manifest.json`, `bin/SHA256SUMS`,
+  `raw/runs_all.jsonl`, `raw/runs.jsonl`, `raw/reduction.json`, `raw/pass-0{0,1,2}/`, `raw/diag_w2/`.
+- `p0b/` (the diagnostic and window 2): `diag_report.md`, `window_report.md`, `raw/runs.jsonl`,
+  `raw/analysis*.json`, `raw/window/runs.jsonl`, `raw/window/pass-0{0,1}/`, `raw/window/broadphase/`,
+  `raw/window/window_state.json`, `raw/window/wait_log.txt`.
+- `p0/dry/`, `p0/wtest/` and `p0b/test/` are rehearsals, not measurements. Leave out `__pycache__/`.
+
+---
+
+**The run sheet as queued** (kept as history):
+
+~~NO TIMING HAS BEEN TAKEN.~~ Timed 2026-09-19; see the RESULT block above. Queued 2026-09-19. The design is `docs/physics/perf-campaign/01-PLAN-REV1.md` §1–§2
 together with `00-RULINGS.md`, which overrides the plan where the two differ. This entry is their run sheet. Where
 it disagrees with either of them, they win and this entry is stale.
 

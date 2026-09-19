@@ -1,0 +1,30 @@
+﻿# wait_idle.ps1 start 2026-09-19T06:13:28.3285208+03:00; poll every 60 s, max 179 polls; quiet = build procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-19T06:13:28.3375411+03:00 cpu10=1.47% procs=235 build_procs=0 [] D_free_GB=2.54 quiet=True streak=1 top3(cpu s in ~10s): Taskmgr(28256)=0.63s powershell(22084)=0.30s steamwebhelper(6272)=0.23s
+poll   2 2026-09-19T06:14:28.3495585+03:00 cpu10=1.33% procs=241 build_procs=0 [] D_free_GB=2.54 quiet=True streak=2 top3(cpu s in ~10s): Taskmgr(28256)=0.42s claude(34964)=0.30s claude(20256)=0.06s
+poll   3 2026-09-19T06:15:28.3593715+03:00 cpu10=0.79% procs=241 build_procs=0 [] D_free_GB=2.54 quiet=True streak=3 top3(cpu s in ~10s): Taskmgr(28256)=0.48s claude(34964)=0.30s steamwebhelper(6272)=0.16s
+# IDLE reached at 2026-09-19T06:15:38.4862008+03:00 after 3 polls
+# wait_idle.ps1 start 2026-09-19T06:17:04.4130535+03:00; poll every 60 s, max 176 polls; quiet = build procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-19T06:17:04.4211929+03:00 cpu10=2.04% procs=238 build_procs=0 [] D_free_GB=2.54 quiet=True streak=1 top3(cpu s in ~10s): Taskmgr(28256)=0.72s steamwebhelper(6272)=0.58s powershell(25064)=0.23s
+poll   2 2026-09-19T06:18:04.4288680+03:00 cpu10=0.98% procs=238 build_procs=0 [] D_free_GB=2.54 quiet=True streak=2 top3(cpu s in ~10s): Taskmgr(28256)=0.42s steamwebhelper(6272)=0.17s claude(34964)=0.13s
+poll   3 2026-09-19T06:19:04.4300658+03:00 cpu10=3.34% procs=248 build_procs=0 [] D_free_GB=2.54 quiet=True streak=3 top3(cpu s in ~10s): Taskmgr(28256)=0.52s claude(34964)=0.47s steamwebhelper(6272)=0.42s
+# IDLE reached at 2026-09-19T06:19:14.6058806+03:00 after 3 polls
+# wait_idle.ps1 start 2026-09-19T06:20:40.9894616+03:00; poll every 60 s, max 172 polls; quiet = build procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-19T06:20:40.9986890+03:00 cpu10=1.54% procs=242 build_procs=0 [] D_free_GB=2.54 quiet=True streak=1 top3(cpu s in ~10s): Taskmgr(28256)=0.64s steamwebhelper(6272)=0.31s powershell(28912)=0.28s
+poll   2 2026-09-19T06:21:41.0075482+03:00 cpu10=1.76% procs=242 build_procs=0 [] D_free_GB=2.54 quiet=True streak=2 top3(cpu s in ~10s): Taskmgr(28256)=0.50s steamwebhelper(6272)=0.38s claude(34964)=0.33s
+poll   3 2026-09-19T06:22:41.0161154+03:00 cpu10=0.88% procs=242 build_procs=0 [] D_free_GB=2.54 quiet=True streak=3 top3(cpu s in ~10s): Taskmgr(28256)=0.59s steamwebhelper(6272)=0.25s claude(34964)=0.19s
+# IDLE reached at 2026-09-19T06:22:51.1620366+03:00 after 3 polls
+# wait_idle.ps1 start 2026-09-19T06:24:16.8925467+03:00; poll every 60 s, max 169 polls; quiet = build procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-19T06:24:16.9010199+03:00 cpu10=0.94% procs=239 build_procs=0 [] D_free_GB=2.54 quiet=True streak=1 top3(cpu s in ~10s): Taskmgr(28256)=0.55s powershell(22464)=0.27s claude(34964)=0.11s
+poll   2 2026-09-19T06:25:16.9142312+03:00 cpu10=0.75% procs=239 build_procs=0 [] D_free_GB=2.54 quiet=True streak=2 top3(cpu s in ~10s): Taskmgr(28256)=0.55s steamwebhelper(6272)=0.20s claude(34964)=0.13s
+poll   3 2026-09-19T06:26:16.9174202+03:00 cpu10=1.47% procs=238 build_procs=0 [] D_free_GB=2.54 quiet=True streak=3 top3(cpu s in ~10s): Taskmgr(28256)=0.55s steamwebhelper(6272)=0.23s nvsphelper64(10840)=0.09s
+# IDLE reached at 2026-09-19T06:26:27.0783115+03:00 after 3 polls
+# wait_idle.ps1 start 2026-09-19T06:27:53.0638182+03:00; poll every 60 s, max 165 polls; quiet = build procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-19T06:27:53.0718423+03:00 cpu10=1.75% procs=237 build_procs=0 [] D_free_GB=2.54 quiet=True streak=1 top3(cpu s in ~10s): Taskmgr(28256)=0.53s steamwebhelper(6272)=0.38s powershell(20036)=0.27s
+poll   2 2026-09-19T06:28:53.0819161+03:00 cpu10=3.10% procs=244 build_procs=0 [] D_free_GB=2.54 quiet=True streak=2 top3(cpu s in ~10s): Taskmgr(28256)=0.55s steamwebhelper(6272)=0.19s claude(34964)=0.14s
+poll   3 2026-09-19T06:29:53.0951109+03:00 cpu10=0.92% procs=241 build_procs=0 [] D_free_GB=2.54 quiet=True streak=3 top3(cpu s in ~10s): Taskmgr(28256)=0.56s claude(34964)=0.22s steamwebhelper(6272)=0.20s
+# IDLE reached at 2026-09-19T06:30:03.2413333+03:00 after 3 polls
+# wait_idle.ps1 start 2026-09-19T06:31:29.2965430+03:00; poll every 60 s, max 161 polls; quiet = build procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-19T06:31:29.3046132+03:00 cpu10=1.22% procs=240 build_procs=0 [] D_free_GB=2.54 quiet=True streak=1 top3(cpu s in ~10s): Taskmgr(28256)=0.70s powershell(19156)=0.23s steamwebhelper(6272)=0.23s
+poll   2 2026-09-19T06:32:29.3245998+03:00 cpu10=1.37% procs=241 build_procs=0 [] D_free_GB=2.54 quiet=True streak=2 top3(cpu s in ~10s): Taskmgr(28256)=0.61s steamwebhelper(6272)=0.23s claude(34964)=0.11s
+poll   3 2026-09-19T06:33:29.3421645+03:00 cpu10=1.05% procs=244 build_procs=0 [] D_free_GB=2.54 quiet=True streak=3 top3(cpu s in ~10s): Taskmgr(28256)=0.56s steamwebhelper(6272)=0.23s claude(34964)=0.16s
+# IDLE reached at 2026-09-19T06:33:39.5050573+03:00 after 3 polls
