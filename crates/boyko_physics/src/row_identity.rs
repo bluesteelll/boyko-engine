@@ -253,7 +253,8 @@ impl RemapCursor {
     }
 }
 
-/// Per-solve diagnostic of a solver's warm-start lookup side. 16 B, one per solver.
+/// Per-solve diagnostic of a solver's warm-start lookup side. 32 B, no padding, one per
+/// solver.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WarmSeedStats {
     /// Manifolds whose points were pushed this solve.
@@ -262,10 +263,33 @@ pub struct WarmSeedStats {
     /// all of them on a step whose rows are unchanged, the carried ones on a step whose
     /// rows changed, and `0` after a `Reset` or with warm start disabled.
     pub translated: u32,
+    /// Contact points pushed this solve: the denominator of [`point_hits`](Self::point_hits).
+    pub points: u32,
+    /// Of those, the points whose read key found an entry in the previous step's warm table,
+    /// so the points that were actually warm-started. `translated` counts manifolds whose
+    /// lookup was ATTEMPTED; this counts per-point lookups that SUCCEEDED. A hit may still
+    /// seed a zero impulse (the entry stored one). `0` after a `Reset` or with warm start
+    /// disabled.
+    pub point_hits: u32,
+    /// Live contact points of the manifolds FROZEN this solve (the colored solver's sleep
+    /// skip): points that are not solved, whose warm entries the solver carries into the
+    /// next table instead. `0` with sleeping off or warm start disabled, and always for the
+    /// reference solver, which has no sleep path.
+    pub carry_points: u32,
+    /// Of those, the points whose entry was found in the previous step's table and
+    /// re-inserted under this gather's rows, so a frozen island wakes warm. A miss (a pair
+    /// whose row order flipped, a `Reset`, a feature id that changed) drops the entry, and
+    /// the island then wakes without it.
+    pub carry_hits: u32,
     /// This solver's warm-start cursor `Reset` count. The cursor is never classified or
     /// stamped while warm start is disabled.
     pub remap_resets: u64,
 }
+
+const _: () = assert!(
+    size_of::<WarmSeedStats>() == 32,
+    "WarmSeedStats is six u32 counters and one u64, with no padding"
+);
 
 /// Test-only walk counters. Outside `cfg(test)` this is a zero-sized type whose methods
 /// are empty, so the walk carries no counting cost in a shipping build.

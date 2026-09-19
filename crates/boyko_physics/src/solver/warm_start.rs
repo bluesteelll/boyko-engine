@@ -22,6 +22,14 @@
 //!    FRESHLY-ZEROED `write` table, in deterministic manifold order;
 //! 3. swaps `read` ↔ `write` at frame end.
 //!
+//! A contact of a FROZEN (sleeping) island is not solved, so it has no converged
+//! impulse this frame. The colored solver re-inserts its entry from `read` under
+//! its current-row key, after the solved contacts and in ascending manifold
+//! order, so every entry is still rewritten every frame and the island wakes
+//! with the impulses it froze with (B1). Which frozen keys are carried depends on
+//! `read`'s key set (a miss drops the entry), never on its slot layout, so the
+//! determinism below still holds.
+//!
 //! Because the write table is a pure function of *this frame's* contact set
 //! (cleared then refilled in manifold order, no insertion history carried over),
 //! it is bit-deterministic regardless of the previous frame's occupancy — the
@@ -272,6 +280,26 @@ impl WarmStartTable {
         }
         self.mask = len - 1;
         self.shift = shift_for(len);
+    }
+
+    /// The table's slot count (a power of two). A table holding `n` entries is
+    /// within its design load `≤ 0.5` while `2 · n ≤ slot_len()`.
+    #[inline]
+    pub fn slot_len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Test hook: every slot, empty ones included, in slot order, so a gate can
+    /// compare two tables' layouts bit for bit.
+    #[cfg(test)]
+    pub fn raw_slots(&self) -> &[WarmEntry] {
+        self.slots.as_read_slice()
+    }
+
+    /// Test hook: the number of occupied (non-[`EMPTY`]) slots.
+    #[cfg(test)]
+    pub fn occupied(&self) -> usize {
+        self.slots.as_read_slice().iter().filter(|e| e.key != EMPTY).count()
     }
 
     /// The first probe slot for `key` — `(key · GOLDEN_64) >> shift`. The linear

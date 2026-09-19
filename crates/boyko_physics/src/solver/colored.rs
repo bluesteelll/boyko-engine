@@ -918,7 +918,9 @@ struct ContactColumns {
     /// Reused scratch: per-manifold-index base slot + live-point count, written as
     /// each manifold is appended in the build walk so the canonical order is
     /// recovered WITHOUT a second replay walk (W1/O1/O3 fold). `(u32::MAX, 0)` for
-    /// a manifold absent from every color or with no live point. Capacity-reused
+    /// a manifold absent from every color or with no live point. `(u32::MAX, n)`
+    /// with `n ≥ 1` for a manifold FROZEN this step with `n` live points: not
+    /// solved, its warm entries are carried by the store (B1). Capacity-reused
     /// (`clear()` + per-build `manifold_fill` refill), never `vec!` per step.
     manifold_base: ScratchColumn<(u32, u32)>,
 }
@@ -1287,7 +1289,10 @@ impl ContactColumns {
     /// data. The column is `clear`-ed then refilled to exactly `n` rows of the
     /// sentinel `(u32::MAX, 0)`; the committed pages are capacity-reused (no free,
     /// no per-frame alloc in steady state). The caller (`build_columns`) then
-    /// sparse-overwrites the manifold-start rows with `(base, count)`.
+    /// sparse-overwrites the manifold-start rows with `(base, count)`, and the rows
+    /// of manifolds frozen this step with the carry tag `(u32::MAX, count)`: the
+    /// canonical emission skips every `u32::MAX` base, so the tag is read only by
+    /// the warm store's carry.
     fn manifold_fill(&mut self, n: usize) {
         let mut view = self.manifold_base.build_view();
         view.clear();
@@ -1425,6 +1430,10 @@ pub struct ColoredSoftStepSolver {
     warm_write: WarmStartTable,
     /// Whether warm-starting is active (production default `true`).
     warm_start_enabled: bool,
+    /// Live points of the manifolds FROZEN this step: the bound on the entries the
+    /// store carries (B1), so the table is sized for them. Written by `build_columns`
+    /// (`0` when sleeping is off or warm start is disabled), read by `store_and_swap`.
+    frozen_points: u32,
     /// O8 integrate-freeze scratch: the pre-solve `(row, BodyState)` snapshot of each
     /// slept body, captured before the substep loop and restored after — so a slept
     /// island's bodies are NOT integrated (their hot state is frozen) without masking
@@ -1463,6 +1472,7 @@ impl ColoredSoftStepSolver {
             warm_read: WarmStartTable::with_capacity(warm_table_id(2), contacts),
             warm_write: WarmStartTable::with_capacity(warm_table_id(3), contacts),
             warm_start_enabled: true,
+            frozen_points: 0,
             frozen: ScratchColumn::new(
                 colored_frozen_rows_id(),
                 bodies.max(scratch_reserve_rows(size_of::<(u32, BodyState)>())),
@@ -1570,6 +1580,7 @@ impl ColoredSoftStepSolver {
             warm_start_enabled,
             warm_cursor,
             warm_stats,
+            frozen_points: carry_bound,
             ..
         } = self;
         // Reset the push-filled point columns + the three CSR columns, seeding each
@@ -1592,7 +1603,9 @@ impl ColoredSoftStepSolver {
         // Warm-seed diagnostic (defect A): the carried count is taken only on a step whose
         // rows changed; the unchanged step does no per-manifold work for it.
         let carried_rows = *warm_start_enabled && matches!(remap, RowRemap::Rows(_));
-        let (mut seeded, mut carried) = (0u32, 0u32);
+        let (mut seeded, mut carried, mut point_hits) = (0u32, 0u32, 0u32);
+        // Live points of the manifolds frozen this step (B1): the carry set's size.
+        let mut frozen_points = 0u32;
 
         for color in 0..graph.n_colors() {
             for &mi in graph.color(color) {
@@ -1604,10 +1617,16 @@ impl ColoredSoftStepSolver {
                 // byte-identical O6/O7 path. The island is the manifold's dynamic side
                 // (the same resolution the graph build uses).
                 if sleep.is_some_and(|s| Self::manifold_frozen(m, graph, s)) {
+                    // The freeze is decided here, once: the carry tag marks the
+                    // manifold for the warm store, which only consumes it (B1).
+                    if *warm_start_enabled && m.count != 0 {
+                        cols.set_manifold_base(mi as usize, u32::MAX, u32::from(m.count));
+                        frozen_points += u32::from(m.count);
+                    }
                     continue;
                 }
                 let base = cols.len() as u32;
-                let count = Self::push_manifold_points(
+                let (count, hits) = Self::push_manifold_points(
                     cols,
                     m,
                     bodies,
@@ -1616,6 +1635,7 @@ impl ColoredSoftStepSolver {
                     *warm_start_enabled,
                     remap,
                 );
+                point_hits += hits;
                 if count != 0 {
                     // One manifold-group per appended manifold with ≥1 live point;
                     // its contiguous slot run is `[base, base + count)` (C1).
@@ -1642,6 +1662,11 @@ impl ColoredSoftStepSolver {
         *warm_stats = WarmSeedStats {
             manifolds: seeded,
             translated,
+            points: cols.len() as u32,
+            point_hits,
+            carry_points: frozen_points,
+            // Counted by the store, which runs the carry after the solve.
+            carry_hits: 0,
             remap_resets: warm_cursor.resets(),
         };
 
@@ -1670,13 +1695,16 @@ impl ColoredSoftStepSolver {
             *cols.color_group_start().last().unwrap_or(&0) + 1,
             "invariant: the per-color group CSR must tile every manifold-group exactly once"
         );
+
+        *carry_bound = frozen_points;
     }
 
     /// Appends one manifold's live points to the SoA columns (the per-point
     /// build, factored out so it borrows `cols` mutably without aliasing
     /// `self.bodies` / `self.warm_read`). Returns the number of live points
     /// appended (`0` when the manifold has no live point), so the caller can
-    /// record the manifold-group's slot run (C1).
+    /// record the manifold-group's slot run (C1), and how many of them found a
+    /// warm entry (the [`WarmSeedStats::point_hits`] share).
     fn push_manifold_points(
         cols: &mut ContactColumns,
         m: &Manifold,
@@ -1685,11 +1713,12 @@ impl ColoredSoftStepSolver {
         warm_read: &WarmStartTable,
         warm_start_enabled: bool,
         remap: RowRemap<'_>,
-    ) -> u32 {
+    ) -> (u32, u32) {
         let count = m.count as usize;
         if count == 0 {
-            return 0;
+            return (0, 0);
         }
+        let mut hits = 0u32;
         let ia = m.body_a.0 as usize;
         let b_is_sentinel = m.body_b == SDF_SENTINEL;
         let ib = if b_is_sentinel { ia } else { m.body_b.0 as usize };
@@ -1708,8 +1737,8 @@ impl ColoredSoftStepSolver {
         // Defect A (interim): the rows this manifold's bodies held when `warm_read` was
         // keyed. The stored key stays in current rows; only the lookup is translated. On
         // `Identity` it is `(a, b)` itself, and each point still packs its read key
-        // separately from its stored key.
-        let lookup = remap.manifold_pair(m);
+        // separately from its stored key. A disabled solver looks nothing up.
+        let lookup = if warm_start_enabled { remap.manifold_pair(m) } else { None };
 
         // One single-thread build view over the 26 push-filled columns for the
         // whole manifold's points (the CSR / `manifold_base` columns are filled by
@@ -1725,21 +1754,13 @@ impl ColoredSoftStepSolver {
             let bb = if b_is_sentinel { &IMMOVABLE_AT_REST } else { &bodies_eff[ib] };
             let vn_initial = (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal);
 
-            let warm_key = if b_is_sentinel {
-                warm_start::pack_sdf(m.body_a, cp.feature_id)
-            } else {
-                warm_start::pack(m.body_a, m.body_b, cp.feature_id)
-            };
-            let seed = if warm_start_enabled
-                && let Some((la, lb)) = lookup
-            {
-                let read_key = if b_is_sentinel {
-                    warm_start::pack_sdf(BodyIndex(la), cp.feature_id)
-                } else {
-                    warm_start::pack(BodyIndex(la), BodyIndex(lb), cp.feature_id)
-                };
+            let (warm_key, read_key) = Self::point_keys(m, p, lookup);
+            let seed = if let Some(read_key) = read_key {
                 match warm_read.get(read_key) {
-                    Some(e) => (e.normal_impulse, e.tangent_impulse[0], e.tangent_impulse[1]),
+                    Some(e) => {
+                        hits += 1;
+                        (e.normal_impulse, e.tangent_impulse[0], e.tangent_impulse[1])
+                    }
                     None => (0.0, 0.0, 0.0),
                 }
             } else {
@@ -1763,7 +1784,33 @@ impl ColoredSoftStepSolver {
                 vn_initial,
             );
         }
-        count as u32
+        (count as u32, hits)
+    }
+
+    /// Point `p` of manifold `m`'s warm keys: the STORE key, packed from the current
+    /// rows, and the READ key, packed from `lookup` (the rows the pair held when the
+    /// previous table was keyed, from [`RowRemap::manifold_pair`]; `None` when the pair
+    /// cannot be translated or nothing is looked up, which is then a miss).
+    ///
+    /// The one packing both the solved points ([`push_manifold_points`]) and the frozen
+    /// carry ([`carry_frozen`]) use, so the two paths cannot key a point differently.
+    ///
+    /// [`push_manifold_points`]: Self::push_manifold_points
+    /// [`carry_frozen`]: Self::carry_frozen
+    #[inline]
+    fn point_keys(m: &Manifold, p: usize, lookup: Option<(u32, u32)>) -> (u64, Option<u64>) {
+        let feature_id = m.points[p].feature_id;
+        if m.body_b == SDF_SENTINEL {
+            (
+                warm_start::pack_sdf(m.body_a, feature_id),
+                lookup.map(|(la, _)| warm_start::pack_sdf(BodyIndex(la), feature_id)),
+            )
+        } else {
+            (
+                warm_start::pack(m.body_a, m.body_b, feature_id),
+                lookup.map(|(la, lb)| warm_start::pack(BodyIndex(la), BodyIndex(lb), feature_id)),
+            )
+        }
     }
 
     /// Whether a manifold belongs to a FROZEN island this frame (plan O8) — the
@@ -3102,17 +3149,33 @@ impl ColoredSoftStepSolver {
     /// the color layout (and, in [O6], the thread count) — the load-bearing
     /// determinism guarantee.
     ///
+    /// Then, while any manifold is frozen this step, it CARRIES the frozen points'
+    /// entries (B1): a frozen manifold is not solved, so it has no converged impulse
+    /// to store, and without the carry the rebuild would drop its entries and the
+    /// island would wake cold. [`carry_frozen`](Self::carry_frozen) re-inserts each
+    /// one from `warm_read`, read through `remap` and stored under this gather's rows,
+    /// after the solved points and in ascending manifold order. Frozen and solved keys
+    /// are disjoint (a dynamic row belongs to one island and every key names it), so
+    /// the carry never overwrites a solved entry. The table is sized for both sets.
+    ///
     /// After the swap it stamps the warm cursor with `rows`: `warm_read` has just been
-    /// rebuilt from this step's columns, keyed by this gather's rows, and this is its only
-    /// writer (defect A, interim). A disabled solver neither stores nor stamps.
+    /// rebuilt from this step's columns and carried entries, keyed by this gather's rows,
+    /// and this is its only writer (defect A, interim). A disabled solver neither stores
+    /// nor stamps.
+    ///
+    /// `remap` is the classification `build_columns` read the table with this step; the
+    /// cursor has not been stamped since, so it still describes `warm_read`.
     ///
     /// [O6]: https://github.com/bluesteelll/boyko-engine
-    fn store_and_swap(&mut self, rows: &RowIdentity) {
+    fn store_and_swap(&mut self, rows: &RowIdentity, manifolds: &[Manifold], remap: RowRemap<'_>) {
         if !self.warm_start_enabled {
             return;
         }
         let cols = &self.columns;
-        self.warm_write.rebuild(cols.len());
+        // `+ frozen_points`: the carry inserts up to that many more entries, and islands
+        // that froze on different steps would otherwise overflow a table sized from the
+        // awake count alone (a full table loops forever in `insert` in release).
+        self.warm_write.rebuild(cols.len() + self.frozen_points as usize);
         for k in 0..cols.canonical().len() {
             let i = cols.canonical()[k] as usize;
             self.warm_write.insert(
@@ -3121,8 +3184,79 @@ impl ColoredSoftStepSolver {
                 [cols.tangent1_impulse(i), cols.tangent2_impulse(i)],
             );
         }
+        let mut carry_hits = 0u32;
+        if self.frozen_points != 0 {
+            carry_hits = Self::carry_frozen(
+                &self.warm_read,
+                &mut self.warm_write,
+                cols.manifold_base(),
+                manifolds,
+                remap,
+            );
+            self.warm_stats.carry_hits = carry_hits;
+        }
+        debug_assert!(
+            carry_hits <= self.frozen_points,
+            "invariant: the carry re-inserts at most the frozen manifolds' live points"
+        );
+        debug_assert!(
+            2 * (cols.len() + carry_hits as usize) <= self.warm_write.slot_len(),
+            "invariant: the warm table's load stays ≤ 0.5 after the store and the carry"
+        );
         core::mem::swap(&mut self.warm_read, &mut self.warm_write);
         self.warm_cursor.stamp(rows);
+    }
+
+    /// The frozen half of the warm store (B1): for each manifold tagged frozen in
+    /// `manifold_base` (`(u32::MAX, n ≥ 1)`), in ascending manifold order, looks each
+    /// live point up in `warm_read` through `remap` and re-inserts a found entry into
+    /// `warm_write` under its current-row key. Returns the number re-inserted.
+    ///
+    /// A miss drops the entry, as on the solved path: a pair whose rows cannot be
+    /// translated (a row-order flip, a `Reset`) or a point whose feature id changed. The
+    /// inputs are the serial freeze set, the manifold list and the previous table, so
+    /// the result does not depend on the worker count.
+    ///
+    /// Out of line: it runs at most once per step, and keeping it out of the store
+    /// keeps that common body small.
+    #[inline(never)]
+    fn carry_frozen(
+        warm_read: &WarmStartTable,
+        warm_write: &mut WarmStartTable,
+        manifold_base: &[(u32, u32)],
+        manifolds: &[Manifold],
+        remap: RowRemap<'_>,
+    ) -> u32 {
+        debug_assert_eq!(
+            manifold_base.len(),
+            manifolds.len(),
+            "invariant: manifold_base holds one row per manifold of this step"
+        );
+        let mut hits = 0u32;
+        for (m, &(base, n)) in manifolds.iter().zip(manifold_base) {
+            if base != u32::MAX || n == 0 {
+                continue;
+            }
+            debug_assert_eq!(
+                n,
+                u32::from(m.count),
+                "invariant: a carry tag holds its manifold's live-point count"
+            );
+            let lookup = remap.manifold_pair(m);
+            if lookup.is_none() {
+                continue;
+            }
+            for p in 0..n as usize {
+                let (store_key, read_key) = Self::point_keys(m, p, lookup);
+                if let Some(read_key) = read_key
+                    && let Some(e) = warm_read.get(read_key)
+                {
+                    warm_write.insert(store_key, e.normal_impulse, e.tangent_impulse);
+                    hits += 1;
+                }
+            }
+        }
+        hits
     }
 
     /// Writes the solved velocities back into the gather snapshot and flags every
@@ -3401,8 +3535,9 @@ impl ColoredSoftStepSolver {
         // Post-loop restitution (ONCE, velocity-only, bias-free).
         Self::apply_restitution(&mut self.columns, self.bodies.solve_view());
 
-        // IM-2b: store converged impulses in canonical order, then swap.
-        self.store_and_swap(&scratch.rows);
+        // IM-2b: store converged impulses in canonical order, carry the frozen
+        // manifolds' entries (B1), then swap.
+        self.store_and_swap(&scratch.rows, manifolds, warm_remap);
 
         // O8 integrate-freeze RESTORE: undo the integrate on slept rows by restoring
         // their captured pre-solve hot state into `scratch.bodies` (position /
