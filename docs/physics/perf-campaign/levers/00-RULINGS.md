@@ -188,7 +188,7 @@ reference. Rulings:
   L10's logical view; L12's layout is fixed after L8 closes (L8 owns the friction-mass choice); if T2 fails its
   claim with C1 landed, C1 is reverted.
 
-## L10 rev 2.2 (re-based on L11, L9 and L5): REVISE, rev 2.3 in progress
+## L10 rev 2.2 (re-based on L11, L9 and L5): REVISE → rev 2.3 CLOSED by ruling (2026-09-21)
 
 `L10-sleeping/06-DESIGN-REV2.2.md` answers the three re-basing questions (the B1 carry and restore path on L11's
 per-manifold records; coexistence with L9's tags and records; the frozen-pair skip inside L5's chunked emit). The
@@ -199,3 +199,41 @@ while sensor pairs with a HELD endpoint are still computed, so after a row shift
 another body's frame — and 5 important ones (no W ≥ 2 sleeping-on census arm; sensor pairs in the kept unit; `dt`
 missing from the sleep epoch although L9 reads it; REC admitted on a "exactly zero" quaternion claim that
 `Quat::mul` does not satisfy; transitions into Off). Revision 2.3, a delta, is being written against those rulings.
+
+**Rev 2.3** (`L10-sleeping/08-DESIGN-REV2.3.md`, a delta to 06) closes every remark of `07` — the reviewer
+verified each answer against the tree and the arithmetic (`09-REVIEW-OF-REV2.3.md`: 0 blocking, 4 important,
+5 optional, 3 open questions). No blocking remark remains, so L10 is closed by ruling; the implementing developer
+applies these to 06 + 08:
+- **W1 (S8b's scope pin):** at W=4 the colored solver (`colored.rs:215`, one scope per wide colour per pass) and the
+  Grid-parallel emit (`resources.rs:1982`, `:2074`) open scopes the formula `S8 + [chunk_count ≥ 2]` does not count, so
+  the exact count is red on correct code. S8b pins in L5 C4's structural form on BOTH arms (`scope_delta −
+  Δnp_dispatches − Δbp_dispatches ≡ 0 mod passes`, or the measured envelope, as G-L5-5 does); the Tree arm
+  additionally asserts `widest < MIN` on every step and pins the exact count there. The 0-heap-beyond-scopes pin
+  stays exact on both arms.
+- **W2 (jumper pairs on the Restore route):** the Restore route reuses L9's `PairJoin` (the monotone cursor plus the
+  `jumper_bits` binary search) over `restore_idx.keys`; a plain cursor is not an implementation of D1. Mutation:
+  "jumper pair merged on the restore cursor" (L9 M-c2's twin), red via a swap-remove despawn of a held member's
+  tail-row neighbour, joins the S3 table.
+- **W3 (arm 9 is vacuous in a gravity pile):** with τ = 0 every pair with residual velocity is fast and never REC, so
+  the arm exercised M3′ on zero REC pairs. Arm 9 is rebuilt at exactly-zero relative velocity (gravity off, bodies
+  placed at rest) and counts REC pairs admitted with HIT = 0 ∧ SETTLED = 1; a count of 0 is a void, and a void is red.
+- **W4 (`RowCls` on a Sets step with nothing held):** A1.3 rewrites every row's flags on every step L10 runs — the
+  rev 2 W3 option "skip the pass when nothing is held or CAND" is withdrawn (a skipped pass would have to zero
+  `row_cls`, which is the same pass with a constant). Mutation: "flags not rewritten on a nothing-held step", red on
+  the step after any restore arm's wake.
+- **O-1..O-5 adopted:** the Lemma 2 amendment says the held pair's slot is left to the mirror (D-C's argument, not
+  Lemma 2's); N32 becomes a debug spec assert (`len == 0` on a Reset flush) because the described mutation cannot
+  go red; the `& SENSOR` grep gate exempts (or routes through `sensor_pair`) the routing `debug_assert_eq!`; the
+  `unsafe` delta is stated explicitly (0 new sites if Skip reuses L9's tag write and L5's commit write; otherwise
+  each listed with the partition SAFETY); D-F records that its edge is under Grid (Tree already fills ~0 held rows
+  through L9's ruled O3 mask) and the fill predicate's composition with L9's mask (AND) joins the Q2 cross-lane
+  contract.
+- **Open questions:** (1) D-F composes with L9's fill as a per-row predicate (AND); if L9 C1 lands a lazy fill in the
+  parallel phase, the predicate moves into that fill's guard and D-F has no separate site — decided at L9 C1, recorded
+  in Q2. (2) The sleeping-off solve arm keeps its signature and access set (zero cost when sleeping is off — the same
+  bar as UG-15's "zero without mods"); the D-H flush with `m = Off` is drained by L10's own system before the solve,
+  never by the solve. (3) Cross pairs are REC-without-manifold or SEP only (a manifold would have unioned the islands);
+  B3 states it, since it is what makes `restore_rec` keys unique (A3′) and the per-record hit count well-defined.
+
+Lane order stands: L5 (C1/C2 committed, C3/C4 in progress) → tree broadphase ∥ L11 → L9 → L10 (rev 2.3 + these
+rulings) → L8 → L12. L10's implementation brief is 04 + 06 + 08 + this section; 05/07/09 are the reviews it answers.
