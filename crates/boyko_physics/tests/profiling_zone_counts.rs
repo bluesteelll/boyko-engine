@@ -5,7 +5,8 @@
 //! # What is asserted, per step
 //!
 //! Armed, on the shared scene (`support/profiling_harness.rs`: one wide color and two narrow ones,
-//! a 4-worker pool, `parallel_solve` on), with the shipped 4 substeps and 2 relax passes. After each
+//! a 4-worker pool, `parallel_solve` and `parallel_narrowphase` on), with the shipped 4 substeps
+//! and 2 relax passes. After each
 //! step the profiler is folded and each zone's lifetime accumulator is diffed against its value
 //! before the step:
 //!
@@ -16,7 +17,8 @@
 //! | `phys_pass_relax` | substeps × relax = 8 |
 //! | `phys_color_wide` / `phys_color_narrow` | (wide / narrow colors) × 12 sweeps |
 //! | `phys_sleep_begin` / `phys_sleep_freeze` / `phys_sleep_end` | 0 / 0 / 0 sleeping off; 1 / 2 / 1 on |
-//! | each of the six counters | 1, with the step's value as its total |
+//! | `phys_np_dispatch` / `phys_np_compact` / `phys_np_axis_commit` | 1 each when the recomputed narrowphase chunk count is at least 2, else 0 |
+//! | each of the seven counters | 1, with the step's value as its total |
 //! | every system of the schedule (its `SystemSpan`) | 1 |
 //!
 //! The first [`STEPS_OFF`] steps run with sleeping off, the parity configuration; summed over
@@ -37,6 +39,11 @@
 //! the class predicate in `solve_all_colors` passed this test.) The narrowphase counters are recomputed from `Manifolds` and
 //! `ContactPairs`, the broadphase counter from `ContactPairs`.
 //!
+//! The narrowphase's chunk count is recomputed from the pair count, the pool's worker count and the
+//! exported `NP_*` constants — with the `lanes < 2` term, as the engine's rule has it — and the
+//! scene must dispatch on every step (at least two chunks), or the three L5 zones would be checked
+//! against zero. `Manifolds::narrowphase_dispatches` must rise by one per step as well.
+//!
 //! Also asserted: the physics zones' ids are distinct from each other and from every system's,
 //! so no two rows are one row; and the store reports no dropped sample.
 //!
@@ -44,6 +51,9 @@
 //! is what is asserted instead.
 //!
 //! # Shown red (2026-09-19, msvc, debug), each on the assertion it targets
+//!
+//! Measured on the harness scene as it stood then, nine rows deep (90 floor bodies); the figures
+//! are that scene's. L5 grew it to twenty rows, so today's counts differ.
 //!
 //! * the class predicate inverted at the color zone in `solve_all_colors`: `phys_color_wide`
 //!   24 spans against 12 on step 0;
@@ -68,18 +78,20 @@ mod harness;
 
 use boyko_diag::profiling_abi::{ZoneHandle, zone_id};
 use boyko_ecs::ecs::core::profiling::SYSTEM_ZONES_COMPILED;
+use boyko_physics::narrowphase::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};
 use boyko_physics::profiling::{
     COUNTER_ZONES, PHYS_BP_PAIRS, PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE,
-    PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_PASS_BIASED, PHYS_PASS_RELAX,
-    PHYS_RESTITUTION, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLOTS_NARROW,
-    PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONES,
+    PHYS_NP_AXIS_COMMIT, PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_MANIFOLDS,
+    PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION,
+    PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE,
+    PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONES,
     WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
 };
 use boyko_physics::resources::{
     ConstraintGraph, ContactPairs, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
 };
 
-use harness::{Scene, run_single_test};
+use harness::{Scene, WORKERS, run_single_test};
 
 /// The name libtest would list this test under.
 const TEST_NAME: &str = "physics_zones_count_exactly";
@@ -149,14 +161,26 @@ fn name_of(handle: &ZoneHandle) -> &'static str {
     handle.desc.name
 }
 
+/// The narrowphase's chunk count for `pairs` candidate pairs on `lanes` workers, or 0 for the
+/// serial loop: a copy of the engine's rule from its exported constants, lanes term included.
+fn expected_np_chunks(parallel_np: bool, pairs: u64, lanes: usize) -> u64 {
+    if !parallel_np || lanes < 2 {
+        return 0;
+    }
+    let pairs = usize::try_from(pairs).expect("a pair count fits usize");
+    let chunks = (lanes * NP_CHUNKS_PER_LANE).min(pairs / NP_MIN_PAIRS_PER_CHUNK).min(NP_MAX_CHUNKS);
+    if chunks < 2 { 0 } else { chunks as u64 }
+}
+
 fn physics_zones_count_exactly() {
     let mut scene = Scene::spawn();
     scene.arm_profiler();
 
-    let (substeps, relax) = {
+    let (substeps, relax, parallel_np) = {
         let cfg = scene.world.resource::<PhysicsConfig>();
-        (u64::from(cfg.substeps), u64::from(cfg.relax_iterations))
+        (u64::from(cfg.substeps), u64::from(cfg.relax_iterations), cfg.parallel_narrowphase)
     };
+    assert!(parallel_np, "the harness requests the parallel narrowphase");
     assert_eq!(
         (substeps, relax),
         (4, 2),
@@ -193,6 +217,7 @@ fn physics_zones_count_exactly() {
         let spans_before = snapshot(&scene, &span_ids);
         let counters_before = snapshot(&scene, &counter_ids);
         let systems_before = snapshot(&scene, &system_ids);
+        let dispatches_before = scene.world.resource::<Manifolds>().narrowphase_dispatches();
         scene.step();
         scene.fold();
         let spans_after = snapshot(&scene, &span_ids);
@@ -230,9 +255,23 @@ fn physics_zones_count_exactly() {
             }
         }
 
+        let np_chunks = expected_np_chunks(parallel_np, shape.pairs, WORKERS);
+        assert!(
+            np_chunks >= 2,
+            "step {step}: the scene must dispatch the narrowphase, or its zones are checked \
+             against zero: {} pairs make {np_chunks} chunks",
+            shape.pairs
+        );
+        assert_eq!(
+            scene.world.resource::<Manifolds>().narrowphase_dispatches() - dispatches_before,
+            1,
+            "step {step}: one narrowphase dispatch per step"
+        );
+        let np = u64::from(np_chunks >= 2);
+
         let on = u64::from(ZONES_COMPILED);
         let sl = u64::from(sleeping);
-        let expected_spans: [(&ZoneHandle, u64); 14] = [
+        let expected_spans: [(&ZoneHandle, u64); 17] = [
             (&PHYS_SOLVE_BUILD, 1),
             (&PHYS_GRAVITY, substeps),
             (&PHYS_WARM_APPLY, substeps),
@@ -247,6 +286,9 @@ fn physics_zones_count_exactly() {
             (&PHYS_SLEEP_BEGIN, sl),
             (&PHYS_SLEEP_FREEZE, 2 * sl),
             (&PHYS_SLEEP_END, sl),
+            (&PHYS_NP_DISPATCH, np),
+            (&PHYS_NP_COMPACT, np),
+            (&PHYS_NP_AXIS_COMMIT, np),
         ];
         for (k, &(handle, want)) in expected_spans.iter().enumerate() {
             assert!(
@@ -264,13 +306,14 @@ fn physics_zones_count_exactly() {
             );
         }
 
-        let expected_counters: [(&ZoneHandle, u64); 6] = [
+        let expected_counters: [(&ZoneHandle, u64); 7] = [
             (&PHYS_SLOTS_WIDE, shape.wide_slots),
             (&PHYS_SLOTS_NARROW, shape.narrow_slots),
             (&PHYS_NP_PAIRS, shape.pairs),
             (&PHYS_NP_MANIFOLDS, shape.manifolds),
             (&PHYS_NP_POINTS, shape.points),
             (&PHYS_BP_PAIRS, shape.pairs),
+            (&PHYS_NP_CHUNKS, np_chunks),
         ];
         for (k, &(handle, value)) in expected_counters.iter().enumerate() {
             assert!(

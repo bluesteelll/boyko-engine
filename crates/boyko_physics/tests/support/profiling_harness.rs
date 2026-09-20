@@ -19,7 +19,12 @@
 //! contact on the first step. Most are unit boxes (half-extent [`HALF_BOX`]); every
 //! [`STACK_EVERY`]-th is a slab twice as long in `x` carrying two unit boxes side by side, each
 //! sunk [`SINK`] into its top face and clear of the other. On the real `add_physics_colored_solve`
-//! schedule over a [`WORKERS`]-worker pool with `parallel_solve` on.
+//! schedule over a [`WORKERS`]-worker pool with `parallel_solve` and `parallel_narrowphase` on.
+//!
+//! The grid is [`FLOOR_ROWS`] rows deep so the step has about 300 candidate pairs: at least two
+//! narrowphase chunks of `NP_MIN_PAIRS_PER_CHUNK` (128), so the parallel narrowphase dispatches on
+//! every step and its three zones open. At the nine rows the scene had before L5 it made 135 pairs,
+//! one chunk, and ran the serial loop.
 //!
 //! The coloring is first-fit in manifold order, and the rows are spawned so the order is fixed:
 //!
@@ -67,8 +72,9 @@ pub const HALF_BOX: f32 = 0.5;
 pub const FLOOR_BOXES: usize = FLOOR_COLS * FLOOR_ROWS;
 /// Grid columns.
 const FLOOR_COLS: usize = 10;
-/// Grid rows.
-const FLOOR_ROWS: usize = 9;
+/// Grid rows: twenty, so every step has at least two narrowphase chunks' worth of pairs (see the
+/// module docs).
+const FLOOR_ROWS: usize = 20;
 /// Centre-to-centre spacing: a slab's bounding radius (≈ 1.39) plus a box's (≈ 0.87) is below it,
 /// so no two neighbours are even broadphase candidates.
 const PITCH: f32 = 3.0;
@@ -281,8 +287,8 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// Builds the scene with sleeping off, `parallel_solve` on, dt = [`DT`] and gravity
-    /// (0, -9.81, 0). Nothing else in the configuration is touched.
+    /// Builds the scene with sleeping off, `parallel_solve` and `parallel_narrowphase` on,
+    /// dt = [`DT`] and gravity (0, -9.81, 0). Nothing else in the configuration is touched.
     pub fn spawn() -> Self {
         let mut world = EcsMaster::new();
         let mut builder = ScheduleBuilder::new(ThreadPoolBuilder::new().num_threads(WORKERS).build());
@@ -293,6 +299,7 @@ impl Scene {
             let cfg = world.resource_mut::<PhysicsConfig>();
             cfg.sleeping = false;
             cfg.parallel_solve = true;
+            cfg.parallel_narrowphase = true;
             cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
             cfg.dt = DT;
         }

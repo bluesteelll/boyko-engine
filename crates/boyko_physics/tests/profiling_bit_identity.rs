@@ -7,14 +7,15 @@
 //! A zone writes no simulation data, so two runs of the same scene agree whether or not the zones
 //! are armed, compiled, or wired at all: the pose comparison alone cannot fail. What makes it a
 //! test of the instrument is its two companions. The armed run must have recorded at least one
-//! sample on each of the twenty physics zones and on each system span — so the comparison was
+//! sample on each of the twenty-four physics zones and on each system span — so the comparison was
 //! made with the instrument live — and the disarmed run must have pushed nothing at all into any
 //! lane — so the "disarmed" arm was not quietly armed.
 //!
 //! # The runs
 //!
 //! The shared scene (`support/profiling_harness.rs`: one wide color and two narrow ones, a
-//! 4-worker pool, `parallel_solve` on), [`STEPS`] steps each: sleeping off for the first [`STEPS_OFF`]
+//! 4-worker pool, `parallel_solve` and `parallel_narrowphase` on, enough pairs for the
+//! narrowphase to dispatch, so its three zones open), [`STEPS`] steps each: sleeping off for the first [`STEPS_OFF`]
 //! (the parity configuration), then on, so the three sleep zones run too. The two worlds get the
 //! same toggles at the same steps, and every dynamic box's full `RigidBody` is compared as bits
 //! after every step.

@@ -35,9 +35,18 @@
 //! | [`PHYS_SLEEP_BEGIN`] | `IslandSleep::begin_step` | 1, sleeping on only |
 //! | [`PHYS_SLEEP_FREEZE`] | the frozen-row capture, then the restore | 2, sleeping on only |
 //! | [`PHYS_SLEEP_END`] | `IslandSleep::end_step` | 1, sleeping on only |
+//! | [`PHYS_NP_DISPATCH`] | the parallel narrowphase's stage growth, spawn and join | 1 when it dispatched, else 0 |
+//! | [`PHYS_NP_COMPACT`] | its join of the chunks' runs into the two streams | 1 when it dispatched, else 0 |
+//! | [`PHYS_NP_AXIS_COMMIT`] | its serial replay of the axis writes | 1 when it dispatched, else 0 |
 //!
-//! Each of the six counters is emitted exactly once per step, including when its value is zero, so
-//! its per-step sample count is 1 and its per-step `total` is the value:
+//! The narrowphase dispatches when `parallel_narrowphase` is on, a pool of at least two workers
+//! is attached and the pair count yields at least two chunks — the chunk count
+//! [`PHYS_NP_CHUNKS`] reports, recomputed from the exported `NP_*` constants
+//! (`narrowphase/dispatch.rs`). Its three zones open only after that decision, so a step that
+//! runs the serial loop opens none of them.
+//!
+//! Each of the seven counters is emitted exactly once per step, including when its value is zero,
+//! so its per-step sample count is 1 and its per-step `total` is the value:
 //!
 //! | Counter | Value |
 //! |---|---|
@@ -47,6 +56,7 @@
 //! | [`PHYS_NP_MANIFOLDS`] | manifolds the narrowphase handed to the solver (sensor overlaps excluded) |
 //! | [`PHYS_NP_POINTS`] | live contact points over those manifolds |
 //! | [`PHYS_BP_PAIRS`] | candidate pairs the broadphase emitted |
+//! | [`PHYS_NP_CHUNKS`] | chunks the narrowphase dispatched (0 when it ran the serial loop) |
 //!
 //! A step with no simulated dynamic body returns from the solve before its first zone, so the
 //! solve zones and the two slot counters are absent on that step; the broadphase and narrowphase
@@ -62,9 +72,9 @@
 //!
 //! # No zone inside a worker's chunk task
 //!
-//! Every site here runs on the thread that called the solve. A zone's guard does two `lock`-prefixed
-//! adds on its handle's shared accumulators when it closes, which is harmless on one thread and a
-//! contended line if every worker's chunk task closed one. The color zones therefore bracket the
+//! Every site here runs on the thread that called the solve or the narrowphase. A zone's guard does
+//! two `lock`-prefixed adds on its handle's shared accumulators when it closes, which is harmless on
+//! one thread and a contended line if every worker's chunk task closed one. The color zones therefore bracket the
 //! whole per-color call — the dispatch and the join included — from the calling thread.
 
 use boyko_diag::profiling_abi::{GLOBAL_TIER, ZoneHandle, ZoneTier, zone_id};
@@ -89,6 +99,12 @@ declare_zone!(PHYS_SLEEP_BEGIN, name = "phys_sleep_begin", scope = ROOT_SCOPE, t
 declare_zone!(PHYS_SLEEP_FREEZE, name = "phys_sleep_freeze", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_SLEEP_END, name = "phys_sleep_end", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 
+// ── The parallel narrowphase's zones (L5) ─────────────────────────────────────
+
+declare_zone!(PHYS_NP_DISPATCH, name = "phys_np_dispatch", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_NP_COMPACT, name = "phys_np_compact", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_NP_AXIS_COMMIT, name = "phys_np_axis_commit", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+
 // ── The per-step counters ─────────────────────────────────────────────────────
 
 declare_zone!(PHYS_SLOTS_WIDE, name = "phys_slots_wide", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
@@ -97,13 +113,14 @@ declare_zone!(PHYS_NP_PAIRS, name = "phys_np_pairs", scope = ROOT_SCOPE, tier = 
 declare_zone!(PHYS_NP_MANIFOLDS, name = "phys_np_manifolds", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_NP_POINTS, name = "phys_np_points", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_BP_PAIRS, name = "phys_bp_pairs", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_NP_CHUNKS, name = "phys_np_chunks", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 
 /// Every span zone this crate declares, in the order of the table in the module docs.
 ///
 /// A reader resolves each one's id with [`zone_id`] and its name from `desc.name`, so it never
 /// infers an id from declaration order: ids come from one process-wide counter shared with every
 /// other zone and every system span.
-pub static SPAN_ZONES: [&ZoneHandle; 14] = [
+pub static SPAN_ZONES: [&ZoneHandle; 17] = [
     &PHYS_SOLVE_BUILD,
     &PHYS_GRAVITY,
     &PHYS_WARM_APPLY,
@@ -118,21 +135,25 @@ pub static SPAN_ZONES: [&ZoneHandle; 14] = [
     &PHYS_SLEEP_BEGIN,
     &PHYS_SLEEP_FREEZE,
     &PHYS_SLEEP_END,
+    &PHYS_NP_DISPATCH,
+    &PHYS_NP_COMPACT,
+    &PHYS_NP_AXIS_COMMIT,
 ];
 
 /// Every counter this crate declares, in the order of the counter table in the module docs.
-pub static COUNTER_ZONES: [&ZoneHandle; 6] = [
+pub static COUNTER_ZONES: [&ZoneHandle; 7] = [
     &PHYS_SLOTS_WIDE,
     &PHYS_SLOTS_NARROW,
     &PHYS_NP_PAIRS,
     &PHYS_NP_MANIFOLDS,
     &PHYS_NP_POINTS,
     &PHYS_BP_PAIRS,
+    &PHYS_NP_CHUNKS,
 ];
 
 /// Whether this build compiles the physics zones at all. Every zone is `Deep`, so one `const`
-/// answers for all twenty; `false` under a profile whose tier ceiling is below `Deep`, where every
-/// site folds to nothing and an armed profiler records none of them.
+/// answers for all twenty-four; `false` under a profile whose tier ceiling is below `Deep`, where
+/// every site folds to nothing and an armed profiler records none of them.
 pub const ZONES_COMPILED: bool = (PHYS_SOLVE_BUILD::TIER as u8) <= (GLOBAL_TIER as u8);
 
 /// The slot count at and above which a color is [`PHYS_COLOR_WIDE`] rather than

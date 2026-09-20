@@ -875,18 +875,23 @@ fn register_solver_tail_layouts() {
     register_layout::<(u32, BodyState)>(SCRATCH_ID_COLORED_FROZEN_ROWS);
 }
 
-// —— The NARROWPHASE cohort (audit Stage 4) ——————————————————————
+// —— The NARROWPHASE cohort (audit Stage 4; L5) ———————————————————
 //
-// `Manifolds`' three buffers are swept together by the narrowphase: one pass over
-// the candidate pairs writes a manifold into either `manifolds` or
-// `sensor_overlaps` and probes `box_axis_cache` for the box-box reference axis.
-// One cohort, so their ids must be pairwise distinct mod `POOL_STAGGER_LINES`;
-// they MAY reuse the solver / graph / broadphase slots, since those loops never
-// run at the same index at the same moment.
+// `Manifolds`' buffers are swept together by the narrowphase: one pass over the
+// candidate pairs writes a manifold into either `manifolds` or `sensor_overlaps`
+// and probes `box_axis_cache` for the box-box reference axis. The parallel
+// narrowphase (L5, `narrowphase/dispatch.rs`) adds two columns to the same
+// cohort: its chunk loop writes the staging column and the per-pair axis commit
+// beside `pairs` and the axis slots, and its compaction reads the staging column
+// beside `manifolds` and `sensor_overlaps`. One cohort, so their ids must be
+// pairwise distinct mod `POOL_STAGGER_LINES`; they MAY reuse the solver / graph /
+// broadphase slots, since those loops never run at the same index at the same
+// moment.
 
 /// Number of `ScratchColumn`s backing [`Manifolds`](crate::resources::Manifolds):
-/// the solver buffer, the sensor-overlap buffer, and the box-axis cache slots.
-pub(crate) const NARROWPHASE_COLUMN_COUNT: usize = 3;
+/// the solver buffer, the sensor-overlap buffer, the box-axis cache slots, the
+/// parallel narrowphase's staging column and its per-pair axis commit.
+pub(crate) const NARROWPHASE_COLUMN_COUNT: usize = 5;
 
 /// Top of the narrowphase cohort — one id below the broadphase cohort's bottom.
 pub(crate) const SCRATCH_ID_NARROWPHASE_TOP: usize = BROADPHASE_COHORT_BOTTOM - 1;
@@ -932,7 +937,8 @@ const _: () = assert!(
 );
 
 /// The [`ComponentId`] for narrowphase column `k` (`0` = `manifolds`,
-/// `1` = `sensor_overlaps`, `2` = the box-axis cache slots).
+/// `1` = `sensor_overlaps`, `2` = the box-axis cache slots, `3` = the parallel
+/// narrowphase's staging column, `4` = its per-pair axis commit).
 #[inline]
 pub(crate) fn narrowphase_column_id(k: usize) -> ComponentId {
     debug_assert!(k < NARROWPHASE_COLUMN_COUNT, "narrowphase column index out of cohort");
@@ -941,13 +947,16 @@ pub(crate) fn narrowphase_column_id(k: usize) -> ComponentId {
 
 /// Registers the element layout of every [`Manifolds`] column, idempotently.
 ///
-/// Two `Manifold` columns under DIFFERENT ids — the solver buffer and the
-/// sensor-overlap buffer are written in the same pass, so a shared id would put
-/// element `i` of both in one cache set — plus the `AxisEntry` slot table.
+/// Three `Manifold` columns under DIFFERENT ids — the solver buffer, the
+/// sensor-overlap buffer and the parallel narrowphase's staging column are swept
+/// in the same passes, so a shared id would put element `i` of two of them in one
+/// cache set — plus the `AxisEntry` slot table and the `u8` axis commit.
 pub(crate) fn register_narrowphase_column_layouts() {
     register_layout::<Manifold>(narrowphase_column_id(0).get());
     register_layout::<Manifold>(narrowphase_column_id(1).get());
     register_layout::<AxisEntry>(narrowphase_column_id(2).get());
+    register_layout::<Manifold>(narrowphase_column_id(3).get());
+    register_layout::<u8>(narrowphase_column_id(4).get());
     register_row_identity_layouts();
 }
 
@@ -968,6 +977,21 @@ pub(crate) fn sensor_overlaps_id() -> ComponentId {
 #[inline]
 pub(crate) fn box_axis_cache_id() -> ComponentId {
     narrowphase_column_id(2)
+}
+
+/// The [`ComponentId`] for `Manifolds::np_stage`, the parallel narrowphase's staging
+/// column (L5 D1).
+#[inline]
+pub(crate) fn np_stage_id() -> ComponentId {
+    narrowphase_column_id(3)
+}
+
+/// The [`ComponentId`] for the
+/// [`BoxAxisCache`](crate::narrowphase::axis_cache::BoxAxisCache)'s per-pair axis
+/// commit (L5 D3).
+#[inline]
+pub(crate) fn axis_commit_id() -> ComponentId {
+    narrowphase_column_id(4)
 }
 
 /// The [`ComponentId`] wrapper for [`SCRATCH_ID_SERIAL_MANIFOLD_CONSTRAINTS`].

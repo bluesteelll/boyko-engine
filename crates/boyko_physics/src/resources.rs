@@ -21,7 +21,8 @@ use crate::narrowphase::axis_cache::BoxAxisCache;
 use crate::row_identity::{NO_ISLAND_KEY, NO_ROW, RemapCursor, RowIdentity, RowRemap, SleepLatch};
 use crate::scratch_ids::{
     body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
-    box_axis_cache_id, contact_pairs_id, manifolds_id, register_narrowphase_column_layouts,
+    box_axis_cache_id, contact_pairs_id, manifolds_id, np_stage_id,
+    register_narrowphase_column_layouts,
     register_graph_column_layouts, register_scratch_layouts, scratch_reserve_rows,
     sensor_overlaps_id, sleep_island_key_id, sleep_latch_prev_id, touched_awake_id,
     touched_solver_id, vn_initial_id,
@@ -290,6 +291,28 @@ pub struct PhysicsConfig {
     /// (gated by `one_worker_parallel_solve_takes_the_inline_path`). Toggling it
     /// changes performance, never the result.
     pub parallel_solve: bool,
+    /// Request the L5 PARALLEL narrowphase (default `false`).
+    ///
+    /// When `true`, [`physics_narrowphase`](crate::systems::physics_narrowphase) splits
+    /// the step's candidate pairs into contiguous chunks and collides them across the
+    /// ambient [`ThreadPool`](boyko_threadpool::ThreadPool)'s workers via one
+    /// `pool.scope`. Each chunk writes its manifolds into its own rows of an ECS-owned
+    /// staging column and its chosen box-box axes into its own rows of a per-pair
+    /// commit; after the join the calling thread joins the chunks' runs in pair order
+    /// and replays the axis writes into the hysteresis table serially, in pair order.
+    ///
+    /// **Bit-identity is the gate:** the manifold stream, the sensor-overlap stream,
+    /// the hysteresis table state and so every pose are identical to the serial loop
+    /// for any worker count, any chunk partition and any steal order
+    /// ([`BoxAxisCache`]'s Lemmas 1 and 2; `narrowphase/dispatch.rs`, Lemma 3).
+    ///
+    /// It is a request. The step still runs the serial loop, byte-identical to a world
+    /// with the flag off, when no pool is attached to the running thread, when the pool
+    /// has a single worker, or when the pair count yields fewer than two chunks of
+    /// [`NP_MIN_PAIRS_PER_CHUNK`](crate::narrowphase::NP_MIN_PAIRS_PER_CHUNK) pairs. A
+    /// dispatched step costs one `pool.scope` (a boxed shared frame plus its task
+    /// blocks). Toggling it changes performance, never the result.
+    pub parallel_narrowphase: bool,
     /// Opt into the O8 per-island SLEEPING / deactivation (default `false`).
     ///
     /// Effective only on the colored-solve path (the
@@ -505,6 +528,10 @@ impl Default for PhysicsConfig {
             // exactly: the solver's whole-step gate refuses the dispatch below two
             // lanes, so W=1 opens no scope.
             parallel_solve: true,
+            // Default OFF while L5 is dormant: an un-opted world runs today's serial
+            // narrowphase loop, byte-identical and with no `pool.scope`. The parallel path
+            // is a same-binary A/B until the default flips.
+            parallel_narrowphase: false,
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.
             sleeping: false,
@@ -2303,6 +2330,20 @@ pub struct Manifolds {
     /// Persisted in place across frames; the box-box generator feeds the stored
     /// axis back to bias against feature-id flicker on a resting stack.
     pub box_axis_cache: BoxAxisCache,
+    /// The parallel narrowphase's staging column (L5 D1): chunk `c`, owning pairs
+    /// `[lo, hi)`, writes its solver manifolds upward from row `lo` and its sensor
+    /// overlaps downward from row `hi − 1`, and the compaction joins the runs in pair
+    /// order into [`manifolds`](Self::manifolds) and
+    /// [`sensor_overlaps`](Self::sensor_overlaps).
+    ///
+    /// Its length only grows (to the largest pair count a dispatched step has seen,
+    /// filled only on growth); rows outside a chunk's written runs are stale and never
+    /// read. Untouched while `parallel_narrowphase` is off.
+    pub(crate) np_stage: ScratchColumn<Manifold>,
+    /// Steps whose narrowphase dispatched chunks across the pool — monotonic, written
+    /// only by the calling thread after the join. A structural witness, read through
+    /// [`narrowphase_dispatches`](Self::narrowphase_dispatches).
+    np_dispatches: u64,
 }
 
 impl Default for Manifolds {
@@ -2329,7 +2370,26 @@ impl Manifolds {
             manifolds: ScratchColumn::new(manifolds_id(), reserve),
             sensor_overlaps: ScratchColumn::new(sensor_overlaps_id(), reserve),
             box_axis_cache: BoxAxisCache::with_capacity(box_axis_cache_id(), capacity),
+            // The same ceiling: the stage holds at most one manifold per candidate pair,
+            // and a reservation is address space, not commit, until a dispatch grows it.
+            np_stage: ScratchColumn::new(np_stage_id(), reserve),
+            np_dispatches: 0,
         }
+    }
+
+    /// Diagnostic: the number of steps whose narrowphase dispatched its pairs across the
+    /// pool (L5). It stays flat while `parallel_narrowphase` is off, on a one-worker pool,
+    /// and on a step with fewer than two chunks' worth of pairs; each dispatched step adds
+    /// exactly one. O(1).
+    #[inline]
+    pub fn narrowphase_dispatches(&self) -> u64 {
+        self.np_dispatches
+    }
+
+    /// Records one dispatched narrowphase step. Called by the dispatch after its join.
+    #[inline]
+    pub(crate) fn note_np_dispatch(&mut self) {
+        self.np_dispatches += 1;
     }
 
     /// The contiguous read slice over this step's solver manifolds, in the

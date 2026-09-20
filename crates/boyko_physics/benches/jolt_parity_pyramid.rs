@@ -51,7 +51,9 @@
 //! what a row measures:
 //!
 //! * `--cfg a` (cfg-A, H7): the colored solve; `parallel_solve = W > 1` (`--parallel-solve` could
-//!   force it on at W = 1 until L4 retired J-P1); `broadphase = AllPairs` under `Manual` selection;
+//!   force it on at W = 1 until L4 retired J-P1); `parallel_narrowphase` follows `parallel_solve`
+//!   (L5; from L5 on cfg-A parallelises the narrowphase at W > 1, so a P0 cfg-A row is comparable
+//!   only as the "before" of that pairing); `broadphase = AllPairs` under `Manual` selection;
 //!   `simd_solve` off.
 //!   `parallel_broadphase` follows `parallel_solve`, as in the Criterion bench, and does nothing
 //!   here: it is read only on the `Grid` path, and there only from `MIN_PARALLEL_BODIES` = 4096
@@ -63,6 +65,9 @@
 //!   `--parallel-solve` and `--sleeping` force their knobs on. The `rest` rows use it. Since L4
 //!   that default has `parallel_solve` on, so `--parallel-solve` no longer changes a `--cfg
 //!   default` row, and such a row at W ≥ 2 dispatches its wide colors on its own.
+//! * `--parallel-np on|off` sets `parallel_narrowphase` under every `--cfg`, after the rest: the
+//!   same-binary A/B of the parallel narrowphase (L5), e.g. cfg-A at W = 8 with the solve parallel
+//!   and the narrowphase serial.
 //! * `--solver reference` wires `add_physics_systems::<SoftStepSolver>` instead of
 //!   `add_physics_colored_solve` (R-ref, which prices D1). It takes `--cfg default` only, and no
 //!   sleeping, parallel solve or canary, none of which exists on that path.
@@ -91,8 +96,12 @@
 //! `phys_pass_relax` = substeps × relax; `phys_color_wide` / `phys_color_narrow` = (wide / narrow
 //! colors) × sweeps, the class recomputed from `ConstraintGraph` and `Manifolds` with the frozen
 //! islands' manifolds excluded exactly as the solve excludes them; the sleep zones 1 / 2 / 1 when
-//! sleeping is on; each counter once, with its value equal to the recomputed slots, pairs,
-//! manifolds and points. A step that differs is VOID: the CSV marks it, the summary names the first
+//! sleeping is on; `phys_np_dispatch`, `phys_np_compact` and `phys_np_axis_commit` 1 each when the
+//! recomputed narrowphase chunk count C is at least 2, else 0; each counter once, with its value
+//! equal to the recomputed slots, pairs, manifolds, points and C. C is recomputed by
+//! [`expected_np_chunks`], this runner's copy of the narrowphase's chunk rule, from the exported
+//! `NP_*` constants, the step's pair count, `--workers` and `parallel_narrowphase` — the lanes
+//! term included (lever ruling W1), so a narrowphase that dispatched on one worker voids the row. A step that differs is VOID: the CSV marks it, the summary names the first
 //! one, and the process exits 3. On the reference solver every in-solve zone must read zero.
 //! A disarmed run must push nothing at all into any lane (the ring traffic over every lane and both
 //! regions is compared before and after), or it too is void.
@@ -141,6 +150,7 @@
 //! --parallel-solve             force parallel_solve on; since L4 a no-op wherever it is accepted
 //!                              (cfg-A/B at W > 1 and --cfg default have it on), refused at
 //!                              W = 1 (J-P1 is retired, see "Configurations")
+//! --parallel-np on|off         set parallel_narrowphase (L5), under any --cfg
 //! --sleeping                   sleeping on
 //! --threshold T                sleep threshold (speed², with --sleeping)
 //! --frozen-by K                void unless every dynamic row is frozen on step K (R-S: 300)
@@ -270,13 +280,15 @@ use boyko_physics::components::{
     Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
+use boyko_physics::narrowphase::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};
 use boyko_physics::plugin::{PhysicsStageKeys, add_physics_colored_solve, add_physics_systems};
 use boyko_physics::profiling::{
     COUNTER_ZONES, PHYS_BP_PAIRS, PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY,
-    PHYS_INTEGRATE, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_PASS_BIASED,
-    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE,
-    PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY,
-    PHYS_WRITE_BACK, SPAN_ZONES, WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
+    PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT, PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH,
+    PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_PASS_BIASED, PHYS_PASS_RELAX,
+    PHYS_RESTITUTION, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLOTS_NARROW,
+    PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONES,
+    WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
 };
 use boyko_physics::resources::{
     BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
@@ -414,6 +426,7 @@ struct Args {
     solver: SolverKind,
     cfg: CfgKind,
     parallel_solve: bool,
+    parallel_np: Option<bool>,
     sleeping: bool,
     threshold: Option<f32>,
     frozen_by: Option<usize>,
@@ -443,7 +456,7 @@ fn usage_error(msg: &str) -> ExitCode {
     eprintln!(
         "usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] \
          [--gap G] [--solver colored|reference] [--cfg a|b|default] [--parallel-solve] \
-         [--sleeping] [--threshold T] [--frozen-by K] [--arm-profiler] [--canary-frac F \
+         [--parallel-np on|off] [--sleeping] [--threshold T] [--frozen-by K] [--arm-profiler] [--canary-frac F \
          --canary-ref-ns T] [--csv PATH] [--pose-out PATH] [--expect-pose PATH] [--label TEXT]"
     );
     ExitCode::from(EXIT_USAGE)
@@ -476,6 +489,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut solver = SolverKind::Colored;
     let mut cfg = CfgKind::Default;
     let mut parallel_solve = false;
+    let mut parallel_np = None;
     let mut sleeping = false;
     let mut threshold = None;
     let mut frozen_by = None;
@@ -515,6 +529,13 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
                 }
             }
             "--parallel-solve" => parallel_solve = true,
+            "--parallel-np" => {
+                parallel_np = match it.next().as_deref() {
+                    Some("on") => Some(true),
+                    Some("off") => Some(false),
+                    other => return Err(format!("--parallel-np: expected on|off, got {other:?}")),
+                }
+            }
             "--sleeping" => sleeping = true,
             "--threshold" => threshold = Some(parse_num::<f32>("--threshold", it.next())?),
             "--frozen-by" => frozen_by = Some(parse_num::<usize>("--frozen-by", it.next())?),
@@ -541,6 +562,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         solver,
         cfg,
         parallel_solve,
+        parallel_np,
         sleeping,
         threshold,
         frozen_by,
@@ -749,6 +771,7 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
             let b = args.cfg == CfgKind::B;
             cfg.parallel_solve = parallel;
             cfg.parallel_broadphase = parallel;
+            cfg.parallel_narrowphase = parallel;
             cfg.broadphase_select = BroadphaseSelectMode::Manual;
             cfg.broadphase = if b { BroadphaseKind::Grid } else { BroadphaseKind::AllPairs };
             cfg.simd_solve = b;
@@ -765,6 +788,9 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
     }
     if let Some(t) = args.threshold {
         cfg.sleep_threshold = t;
+    }
+    if let Some(np) = args.parallel_np {
+        cfg.parallel_narrowphase = np;
     }
 }
 
@@ -949,6 +975,25 @@ struct Structure {
     substeps: u64,
     /// `PhysicsConfig::relax_iterations`.
     relax: u64,
+    /// `PhysicsConfig::parallel_narrowphase`.
+    parallel_np: bool,
+    /// The pool's worker count, `--workers`: the narrowphase's lanes.
+    lanes: usize,
+}
+
+/// The narrowphase's chunk count for a step of `pairs` candidate pairs, or 0 when it runs the
+/// serial loop: this runner's copy of `narrowphase/dispatch.rs`'s `chunk_count`, from the exported
+/// constants, so a step whose zones disagree with it is void (ruling W4). It carries every term
+/// the engine's carries — the flag, the `lanes < 2` term (lever ruling W1), the work term, the cap
+/// and the two-chunk floor — so the two copies cannot agree by sharing an omission. The stage's
+/// reserve ceiling (7.06M pairs) is not copied: no scene here comes near it.
+fn expected_np_chunks(parallel_np: bool, pairs: u64, lanes: usize) -> u64 {
+    if !parallel_np || lanes < 2 {
+        return 0;
+    }
+    let pairs = usize::try_from(pairs).unwrap_or(usize::MAX);
+    let chunks = (lanes * NP_CHUNKS_PER_LANE).min(pairs / NP_MIN_PAIRS_PER_CHUNK).min(NP_MAX_CHUNKS);
+    if chunks < 2 { 0 } else { chunks as u64 }
 }
 
 /// Checks one armed step's per-zone sample counts and counter values against `shape`. Returns
@@ -960,7 +1005,7 @@ fn check_step(
     shape: &Shape,
     st: Structure,
 ) -> Result<(), String> {
-    let Structure { colored, sleeping, substeps, relax } = st;
+    let Structure { colored, sleeping, substeps, relax, parallel_np, lanes } = st;
     let n_sys = zones.systems.len();
     for (k, (name, _)) in zones.systems.iter().enumerate() {
         if counts[k] != 1 {
@@ -970,8 +1015,10 @@ fn check_step(
     let sweeps = substeps * (1 + relax);
     let c = u64::from(colored);
     let sl = u64::from(colored && sleeping);
+    let np_chunks = expected_np_chunks(parallel_np, shape.pairs, lanes);
+    let np = u64::from(np_chunks >= 2);
     let spans = &counts[n_sys..n_sys + SPAN_ZONES.len()];
-    let expected: [(&ZoneHandle, u64); 14] = [
+    let expected: [(&ZoneHandle, u64); 17] = [
         (&PHYS_SOLVE_BUILD, c),
         (&PHYS_GRAVITY, c * substeps),
         (&PHYS_WARM_APPLY, c * substeps),
@@ -986,6 +1033,9 @@ fn check_step(
         (&PHYS_SLEEP_BEGIN, sl),
         (&PHYS_SLEEP_FREEZE, 2 * sl),
         (&PHYS_SLEEP_END, sl),
+        (&PHYS_NP_DISPATCH, np),
+        (&PHYS_NP_COMPACT, np),
+        (&PHYS_NP_AXIS_COMMIT, np),
     ];
     for &(handle, want) in &expected {
         let got = spans[span_index(handle)];
@@ -994,13 +1044,14 @@ fn check_step(
         }
     }
     let base = n_sys + SPAN_ZONES.len();
-    let expected_counters: [(&ZoneHandle, u64, u64); 6] = [
+    let expected_counters: [(&ZoneHandle, u64, u64); 7] = [
         (&PHYS_SLOTS_WIDE, c, shape.wide_slots),
         (&PHYS_SLOTS_NARROW, c, shape.narrow_slots),
         (&PHYS_NP_PAIRS, 1, shape.pairs),
         (&PHYS_NP_MANIFOLDS, 1, shape.manifolds),
         (&PHYS_NP_POINTS, 1, shape.points),
         (&PHYS_BP_PAIRS, 1, shape.pairs),
+        (&PHYS_NP_CHUNKS, 1, np_chunks),
     ];
     for &(handle, want_n, want_v) in &expected_counters {
         let k = base + counter_index(handle);
@@ -1135,6 +1186,7 @@ fn self_check() -> ExitCode {
         solver: SolverKind::Colored,
         cfg: CfgKind::A,
         parallel_solve: false,
+        parallel_np: None,
         sleeping: false,
         threshold: None,
         frozen_by: None,
@@ -1173,12 +1225,12 @@ fn run(args: &Args) -> ExitCode {
     let traffic_before = ring_traffic();
     let mut rig = build(args, canary_ns);
     let colored = args.solver == SolverKind::Colored;
-    let (substeps, relax, sleeping, config_json) = {
+    let (substeps, relax, sleeping, parallel_np, config_json) = {
         let cfg = rig.world.resource::<PhysicsConfig>();
         let json = format!(
             "{{\"substeps\":{},\"relax_iterations\":{},\"broadphase\":{},\"broadphase_select\":{},\
              \"simd\":{},\"simd_solve\":{},\"parallel_solve\":{},\"parallel_broadphase\":{},\
-             \"sleeping\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\"colored\":{},\
+             \"parallel_narrowphase\":{},\"sleeping\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\"colored\":{},\
              \"contact_hertz\":{},\"contact_damping\":{}}}",
             cfg.substeps,
             cfg.relax_iterations,
@@ -1188,6 +1240,7 @@ fn run(args: &Args) -> ExitCode {
             cfg.simd_solve,
             cfg.parallel_solve,
             cfg.parallel_broadphase,
+            cfg.parallel_narrowphase,
             cfg.sleeping,
             json_f64(f64::from(cfg.sleep_threshold)),
             cfg.sleep_frames,
@@ -1195,7 +1248,13 @@ fn run(args: &Args) -> ExitCode {
             json_f64(f64::from(cfg.contact_hertz)),
             json_f64(f64::from(cfg.contact_damping)),
         );
-        (u64::from(cfg.substeps), u64::from(cfg.relax_iterations), cfg.sleeping, json)
+        (
+            u64::from(cfg.substeps),
+            u64::from(cfg.relax_iterations),
+            cfg.sleeping,
+            cfg.parallel_narrowphase,
+            json,
+        )
     };
 
     let zones = if armed {
@@ -1208,7 +1267,8 @@ fn run(args: &Args) -> ExitCode {
     } else {
         None
     };
-    let structure = Structure { colored, sleeping, substeps, relax };
+    let structure =
+        Structure { colored, sleeping, substeps, relax, parallel_np, lanes: args.workers };
     let n_cols = zones.as_ref().map_or(0, ZoneTable::len);
     let ids: Vec<u16> = zones.as_ref().map_or_else(Vec::new, |z| z.ids().collect());
     let tpn = if armed { boyko_diag::clock::ticks_per_ns() } else { 0.0 };
@@ -1308,7 +1368,13 @@ fn run(args: &Args) -> ExitCode {
             .sum();
             let passes = ns(values[span(&PHYS_PASS_BIASED)]) + ns(values[span(&PHYS_PASS_RELAX)]);
             let colors = ns(values[span(&PHYS_COLOR_WIDE)]) + ns(values[span(&PHYS_COLOR_NARROW)]);
-            let solve_samples: u64 = (n_sys..n_sys + SPAN_ZONES.len()).map(|k| counts[k]).sum::<u64>()
+            // The solve's own samples: every span but the narrowphase's, which the narrowphase
+            // system pushes from whichever thread runs it.
+            let np_spans = [&PHYS_NP_DISPATCH, &PHYS_NP_COMPACT, &PHYS_NP_AXIS_COMMIT].map(span);
+            let solve_samples: u64 = (n_sys..n_sys + SPAN_ZONES.len())
+                .filter(|k| !np_spans.contains(k))
+                .map(|k| counts[k])
+                .sum::<u64>()
                 + counts[n_sys + SPAN_ZONES.len() + counter_index(&PHYS_SLOTS_WIDE)]
                 + counts[n_sys + SPAN_ZONES.len() + counter_index(&PHYS_SLOTS_NARROW)];
             if solve_samples > 0 && disp_lane >= solve_samples {
