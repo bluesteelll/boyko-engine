@@ -30,6 +30,24 @@ applies these to rev 1:
 - **Open question 3:** L2 is exempt from the end-to-end T(W) gate, because no measured row runs `Auto`; its
   gates are the structural ones in the plan.
 
+**T(W) gate measured 2026-09-21** (window 3, `docs/measurements/2026-09-21-physics-window3/analysis.md` §3; the
+2026-09-21 block of `docs/MEASUREMENT-QUEUE.md` §10). On the shipped default row (`--cfg default`: simd on,
+AllPairs under `Manual`, sleeping off) C4 `de06b6c9` against C2 `aac562a7` reads **−2.435 ms at W=8 (−31.3 %)**,
+claimed under range, IQR and SE (bars 15.7 / 5.3 / 3.0 %), and the same-binary A/B (`--parallel-np off` against
+on, W=8) reads **+2.626 ms (+49.1 %)**, claimed under all three (36.3 / 9.6 / 7.0 %) — L5's rule (realized
+ΔT(8) ≥ 1.33 ms, claimed) is cleared by 2×, at the top of the 2.4–2.6 ms prediction. At W = 2 / 4 / 16: −13.6 /
+−25.5 / −32.0 %, claimed under IQR and SE (the min–max reading is inflated by one contaminated pass-0 process per
+cell). One pose `0x32d5e235342b4143` across C2, C4 and every W (77/77 timed processes plus the untimed 500-step
+gate with its 501-step red control); equal knobs across the two binaries (`--parallel-np off` against C2, W=8)
++2.4 %, not claimed. **At W=1 C4 reads +1.34 % (+0.142 ms) over C2, claimed under SE only** (bars 4.5 / 1.5 /
+1.0 %; K = 5 and 6 against the design's K = 12 at W=1): a one-worker pool takes the serial loop by design
+(`one_worker_parallel_narrowphase_runs_the_serial_loop`), so this is a C3 + C4 binary difference, not the flag,
+and whether it is "a claimed regression at any W" turns on which spread the claim rule means — `../00-RULINGS.md`
+names SE, §10's RESULT block keeps range / IQR with SE beside them and calls the question OPEN. That is the
+orchestrator's call; a same-binary `--parallel-np off` W=1 row at K = 12 (about 2.5 minutes) settles it. Not
+exercised by the window: the design's own row for the rule (J-A, cfg-A, at C2 and C4), the armed rows (I(W),
+E(W) at W = 2, 4, 16), the R rows and the J-C canary on C4 — those gate rows stay open.
+
 ## Broadphase redesign (`BroadphaseKind::Tree`): REVISE (rev 2) before implementation
 
 No blocking remark; the exactness and determinism core holds (only the exact AllPairs set is bit-identical,

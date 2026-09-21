@@ -1,0 +1,18 @@
+=== expect_pose fields ===
+tip-cfgA@W1        cfg=a        W= 1 steps=500 pose=0x32d5e235342b4143 expect_pose=none void=0 ring=0 bodies=1240 manifolds=4515 pairs=9559
+l4l2-default@W1    cfg=default  W= 1 steps=500 pose=0x32d5e235342b4143 expect_pose=match void=0 ring=0 bodies=1240 manifolds=4515 pairs=9559
+l4l2-default@W8    cfg=default  W= 8 steps=500 pose=0x32d5e235342b4143 expect_pose=match void=0 ring=0 bodies=1240 manifolds=4515 pairs=9559
+l4l2-default@W16   cfg=default  W=16 steps=500 pose=0x32d5e235342b4143 expect_pose=match void=0 ring=0 bodies=1240 manifolds=4515 pairs=9559
+l4l2-default@W2    cfg=default  W= 2 steps=500 pose=0x32d5e235342b4143 expect_pose=match void=0 ring=0 bodies=1240 manifolds=4515 pairs=9559
+l4l2-default@W4    cfg=default  W= 4 steps=500 pose=0x32d5e235342b4143 expect_pose=match void=0 ring=0 bodies=1240 manifolds=4515 pairs=9559
+=== pose file sha256 ===
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *l4l2_default_W1.pose.bin
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *l4l2_default_W16.pose.bin
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *l4l2_default_W2.pose.bin
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *l4l2_default_W4.pose.bin
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *l4l2_default_W8.pose.bin
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *tip_cfga_W1.pose.bin
+=== RED control: l4l2 W=8 501 steps vs 500-step pose (must exit 4) ===
+jolt_parity_pyramid: scene jolt gap 0.5 friction 0.2 bodies 1240 workers 8 solver Colored cfg Default profile dev armed false
+steps 501 window 0..501 final manifolds 4514 pairs 9559 top_y 28.990126 pose_hash 0x9336b30a06a7d8af
+exit=4

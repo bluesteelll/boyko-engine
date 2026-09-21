@@ -1,0 +1,85 @@
+=== GRID_LO / GRID_HI ===
+crates/boyko_physics/src/broadphase_policy.rs:51://! The selector is banded: Grid switches ON at `count >= `[`GRID_HI`] and OFF at
+crates/boyko_physics/src/broadphase_policy.rs:52://! `count <= `[`GRID_LO`], keeping the current side ([`PhysicsStats::broadphase_band`])
+crates/boyko_physics/src/broadphase_policy.rs:75:/// band must clear. Only [`GRID_HI`]'s const-assert reads it.
+crates/boyko_physics/src/broadphase_policy.rs:80:/// live active-body count drops to `<= GRID_LO`.
+crates/boyko_physics/src/broadphase_policy.rs:83:/// [`GRID_HI`]. A size-disparity scene held on Grid inside the band loses at most about 1.13×
+crates/boyko_physics/src/broadphase_policy.rs:85:/// on UNIFORM scenes between the uniform crossover (1,109) and [`GRID_HI`], Auto keeps
+crates/boyko_physics/src/broadphase_policy.rs:89:pub const GRID_LO: u32 = 2_700;
+crates/boyko_physics/src/broadphase_policy.rs:93:/// active-body count rises to `>= GRID_HI`.
+crates/boyko_physics/src/broadphase_policy.rs:97:/// `bench` profile supports. `GRID_LO < GRID_HI` is the hysteresis gap that prevents boundary
+crates/boyko_physics/src/broadphase_policy.rs:101:pub const GRID_HI: u32 = 3_000;
+crates/boyko_physics/src/broadphase_policy.rs:103:const _: () = assert!(GRID_LO < GRID_HI, "hysteresis: the OFF edge must sit below the ON edge");
+crates/boyko_physics/src/broadphase_policy.rs:105:    GRID_HI >= DISPARITY_CROSSOVER_BODIES,
+crates/boyko_physics/src/broadphase_policy.rs:106:    "GRID_HI must not sit below the measured size-disparity crossover (2,978 bodies, P0b §8): \
+crates/boyko_physics/src/broadphase_policy.rs:140:        // `BroadphaseKind::AllPairs`, so the first Auto evaluation below `GRID_HI` keeps
+crates/boyko_physics/src/broadphase_policy.rs:151:/// thrash; the const-assert on [`GRID_LO`]/[`GRID_HI`] enforces this for the shipped band,
+crates/boyko_physics/src/broadphase_policy.rs:183:///    [`GRID_LO`]/[`GRID_HI`] [`banded`] hysteresis to the count and writes the result to
+crates/boyko_physics/src/broadphase_policy.rs:208:    let band = banded(stats.broadphase_band, count, GRID_LO, GRID_HI);
+crates/boyko_physics/src/broadphase_policy.rs:220:        assert!(!banded(true, GRID_LO, GRID_LO, GRID_HI));
+crates/boyko_physics/src/broadphase_policy.rs:221:        assert!(!banded(false, 0, GRID_LO, GRID_HI));
+crates/boyko_physics/src/broadphase_policy.rs:223:        assert!(banded(false, GRID_HI, GRID_LO, GRID_HI));
+crates/boyko_physics/src/broadphase_policy.rs:224:        assert!(banded(false, GRID_HI + 1000, GRID_LO, GRID_HI));
+crates/boyko_physics/src/broadphase_policy.rs:226:        let mid = GRID_LO + 1;
+crates/boyko_physics/src/broadphase_policy.rs:227:        assert!(mid < GRID_HI, "test fixture: mid must lie inside the band");
+crates/boyko_physics/src/broadphase_policy.rs:228:        assert!(banded(true, mid, GRID_LO, GRID_HI), "was-on stays on inside the band");
+crates/boyko_physics/src/broadphase_policy.rs:229:        assert!(!banded(false, mid, GRID_LO, GRID_HI), "was-off stays off inside the band");
+crates/boyko_physics/src/lib.rs:97:pub use broadphase_policy::{GRID_HI, GRID_LO, PhysicsStats, select_broadphase};
+
+=== parallel_solve / simd_solve in resources.rs ===
+23:    body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
+43:/// [`physics_broadphase`](crate::systems::physics_broadphase) (the one-branch
+50:    /// The uniform-grid CSR counting-sort broadphase (opt-in, O2). Produces a
+55:/// Who drives [`PhysicsConfig::broadphase`] — the user (Manual, the 0%-gate) or
+56:/// the cold [`select_broadphase`](crate::broadphase_policy::select_broadphase)
+61:/// anchor: the policy NEVER writes [`PhysicsConfig::broadphase`], so the
+62:/// broadphase stays exactly config-controlled (byte-identical to pre-P3 — every
+67:/// broadphase runs, never a single physics result bit.
+70:    /// The user owns [`PhysicsConfig::broadphase`] (DEFAULT). The policy only
+151:    /// opt into the O2 uniform-grid broadphase, whose pair set is bit-identical to
+153:    /// [`physics_broadphase`](crate::systems::physics_broadphase)).
+154:    pub broadphase: BroadphaseKind,
+155:    /// Who drives [`broadphase`](Self::broadphase) — the user
+157:    /// cold [`select_broadphase`](crate::broadphase_policy::select_broadphase)
+160:    /// `Manual` keeps the broadphase exactly config-controlled (byte-identical to
+164:    /// broadphase, never a physics result bit.
+165:    pub broadphase_select: BroadphaseSelectMode,
+184:    /// colored solve ([`simd_solve`](Self::simd_solve)) or the box-vs-SDF
+210:    pub simd_solve: bool,
+219:    /// ⚠ Unlike [`simd`](Self::simd) and [`simd_solve`](Self::simd_solve), which are
+228:    /// Effective only on the grid broadphase path
+231:    /// [`physics_broadphase`](crate::systems::physics_broadphase) routes the grid
+249:    pub parallel_broadphase: bool,
+255:    /// [`DefaultRigidSolver`](crate::solver::DefaultRigidSolver)) and for
+290:    /// (gated by `one_worker_parallel_solve_takes_the_inline_path`). Toggling it
+292:    pub parallel_solve: bool,
+462:            broadphase: BroadphaseKind::AllPairs,
+463:            // Default Manual so the user owns `broadphase` (the P3 0%-gate): the
+465:            broadphase_select: BroadphaseSelectMode::Manual,
+484:            simd_solve: true,
+497:            parallel_broadphase: false,
+507:            parallel_solve: true,
+561:/// Candidate collision pairs emitted by broadphase (plan D4).
+572:    /// broadphase can hand `BroadphaseGrid::build` the column itself: the O3
+591:        register_broadphase_column_layouts();
+601:    /// deterministic `(min, max)` order the broadphase emitted.
+611:    /// pairs itself — the all-pairs transcription in `benches/broadphase.rs`, whose
+683:/// Uniform spatial grid broadphase, CSR counting-sort (plan O2, Decision 1).
+816:        register_broadphase_column_layouts();
+821:            cell_start: ScratchColumn::new(broadphase_column_id(0), u32_rows),
+822:            cell_bodies: ScratchColumn::new(broadphase_column_id(1), u32_rows),
+823:            counts: ScratchColumn::new(broadphase_column_id(2), u32_rows),
+824:            cursor: ScratchColumn::new(broadphase_column_id(3), u32_rows),
+825:            oversized: ScratchColumn::new(broadphase_column_id(4), u32_rows),
+826:            coarse_cell_start: ScratchColumn::new(broadphase_column_id(5), u32_rows),
+827:            coarse_cell_bodies: ScratchColumn::new(broadphase_column_id(6), u32_rows),
+828:            coarse_counts: ScratchColumn::new(broadphase_column_id(7), u32_rows),
+829:            coarse_cursor: ScratchColumn::new(broadphase_column_id(8), u32_rows),
+830:            scratch_radii: ScratchColumn::new(broadphase_column_id(9), f32_rows),
+831:            candidates: ScratchColumn::new(broadphase_column_id(10), pair_rows),
+832:            pair_count: ScratchColumn::new(broadphase_column_id(11), u32_rows),
+833:            pair_offset: ScratchColumn::new(broadphase_column_id(12), u32_rows),
+3478:    ///   `add_physics_sdf::<DefaultRigidSolver>` with `sleeping` on, and no gate covers
+3736:    /// body's real geometry (P2 W2). The broadphase reads its bounding radius
+3951:/// The broadphase / narrowphase / apply consumers read [`bodies`](Self::bodies);
+4016:    /// and in archetype-row order — the same `&[BodyState]` the broadphase /

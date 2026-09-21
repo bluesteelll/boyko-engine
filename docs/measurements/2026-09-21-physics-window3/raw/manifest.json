@@ -1,0 +1,297 @@
+{
+ "generated": "2026-09-21T03:47:46.180+03:00",
+ "rows_json": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win3\\rows.json",
+ "rows_l5_json": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win3\\rows_l5.json",
+ "toolchain": "stable-x86_64-pc-windows-msvc",
+ "profile": "parity",
+ "logical_cpus": 16,
+ "boyko": {
+  "l4l2": {
+   "exe": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win3\\bin\\runner_l4l2.exe",
+   "sha256": "368d4104578bd621a2eccc3be99e903a9843e070a118e94c90d4b354d1410aeb",
+   "commit": "aac562a7101451e6aee077b81fc1fb80c61b4587"
+  },
+  "tip": {
+   "exe": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win3\\bin\\runner_tip.exe",
+   "sha256": "ef9325efa9a277274f602c59504b0856f75ae1ddec7d683b0ac5f8c5bf7968c3",
+   "commit": "dbd859771b4d7aee5f560c7d3cbceccd0f1af179"
+  },
+  "l5": {
+   "exe": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win3\\bin\\runner_l5.exe",
+   "sha256": "26d17a102814bccbd5f1d2ab2ddd696fd4f14c90ed10069d0d9ee3788901a8ab",
+   "commit": "de06b6c952ea396e1380bf7045b7df77793b3def"
+  }
+ },
+ "jolt": {
+  "v530": {
+   "exe": "D:/tmp/jolt/build-v5.3.0-dist/PerformanceTest.exe",
+   "sha256": "29b23ad1cfc38b7fb39b484b8cc2cfad522a0a910fd03d6e3a15f8b90e0cefac"
+  },
+  "v560": {
+   "exe": "D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe",
+   "sha256": "918fd2b70ecc634cc0574cb676c56a3c929a46a51173cf9aa76fdd628e2ef0ad"
+  }
+ },
+ "rows": {
+  "D-L4L2": {
+   "id": "D-L4L2",
+   "engine": "boyko",
+   "role": "l4l2",
+   "ws": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": "J-A",
+   "once": false,
+   "timed": true,
+   "what": "the default configuration at aac562a7 = f236ebdd + C1 (L4: parallel_solve default on, lanes<2 inline) + C2 (L2: GRID_LO/GRID_HI 2,700/3,000). Printed knobs (logs/07): colored, simd_solve on, parallel_solve on, broadphase AllPairs under broadphase_select Manual, sleeping off, substeps 4, relax 2."
+  },
+  "J-A": {
+   "id": "J-A",
+   "engine": "boyko",
+   "role": "tip",
+   "ws": [
+    1,
+    8
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": null,
+   "once": false,
+   "timed": true,
+   "what": "the P0b bridge: runner_tip (dbd85977) cfg-A = colored, simd_solve OFF, parallel_solve = (W>1), AllPairs/Manual. P0b's J-A-d1 cell, re-taken in this window so the bridge to the P0b table is same-window."
+  },
+  "JOLT-T": {
+   "id": "JOLT-T",
+   "engine": "jolt",
+   "role": "v530",
+   "ws": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "args": [
+    "-s=Pyramid",
+    "-q=Discrete",
+    "-f"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "once": false,
+   "timed": true,
+   "per_frame": true,
+   "armed": false,
+   "what": "Jolt v5.3.0 Distribution, the repository's pyramid_scene.patch (banner 'boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0')."
+  },
+  "JOLT56-T": {
+   "id": "JOLT56-T",
+   "engine": "jolt",
+   "role": "v560",
+   "ws": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "args": [
+    "-s=Pyramid",
+    "-q=Discrete",
+    "-f"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "once": false,
+   "timed": true,
+   "per_frame": true,
+   "armed": false,
+   "what": "Jolt v5.6.0 Distribution, same patch."
+  },
+  "D-L5": {
+   "id": "D-L5",
+   "engine": "boyko",
+   "role": "l5",
+   "ws": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": "D-L4L2",
+   "once": false,
+   "timed": true,
+   "what": "the default configuration at the l5np HEAD after C4: L4 + L2 + L5 (parallel narrowphase on by default)."
+  },
+  "D-L5-npoff": {
+   "id": "D-L5-npoff",
+   "engine": "boyko",
+   "role": "l5",
+   "ws": [
+    8
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--parallel-np",
+    "off"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": "D-L4L2",
+   "once": false,
+   "timed": true,
+   "what": "the same binary with --parallel-np off: the same-binary A/B of the parallel narrowphase at W=8."
+  }
+ },
+ "expect_pose": {
+  "D-L4L2": "0x32d5e235342b4143",
+  "J-A": "0x32d5e235342b4143",
+  "D-L5": "0x32d5e235342b4143",
+  "D-L5-npoff": "0x32d5e235342b4143"
+ },
+ "expect_jolt_hash": {
+  "JOLT-T": "0xee15b89965ec747",
+  "JOLT56-T": "0xb8522b4e3fc62cfe"
+ },
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "order": "pass 0: W ascending, Jolt/boyko alternating inside a W group; pass 1: the whole list reversed",
+  "warmup_per_pass": {
+   "exe": "bin/runner_l4l2.exe",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--workers",
+    "8",
+    "--steps",
+    "500"
+   ],
+   "timed": false
+  },
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "rerun_contaminated_once_at_end_of_pass": true,
+  "band_void": false,
+  "placement": "P-none",
+  "steps": 500,
+  "window": [
+   0,
+   500
+  ],
+  "subwindows_reported": [
+   [
+    0,
+    100
+   ],
+   [
+    100,
+    500
+   ]
+  ]
+ }
+}

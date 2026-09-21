@@ -1,0 +1,12 @@
+### runner_l4l2 --scene jolt --gap 0.5 --cfg default --workers 1 --steps 12 --arm-profiler --csv armed_W1.csv (UNTIMED)
+jolt_parity_pyramid: scene jolt gap 0.5 friction 0.2 bodies 1240 workers 1 solver Colored cfg Default profile dev armed true
+steps 12 window 0..12 final manifolds 4054 pairs 9570 top_y 35.79971 pose_hash 0x6976399d3f4d3199
+profile: void steps 0, waves 1164, solve on dispatcher 0 of 12 steps
+exit=0
+### runner_l4l2 --scene jolt --gap 0.5 --cfg default --workers 8 --steps 12 --arm-profiler --csv armed_W8.csv (UNTIMED)
+jolt_parity_pyramid: scene jolt gap 0.5 friction 0.2 bodies 1240 workers 8 solver Colored cfg Default profile dev armed true
+steps 12 window 0..12 final manifolds 4054 pairs 9570 top_y 35.79971 pose_hash 0x6976399d3f4d3199
+profile: void steps 0, waves 1164, solve on dispatcher 0 of 12 steps
+exit=0
+armed-default@W1 pose 0x6976399d3f4d3199 void_steps 0 drops 0 waves_total 1164 threads {'pool_workers': 1, 'dispatcher': 1, 'solve_on_dispatcher_steps': 0, 'armed_steps': 12, 'dispatcher_lane_samples_max': 16}
+armed-default@W8 pose 0x6976399d3f4d3199 void_steps 0 drops 0 waves_total 1164 threads {'pool_workers': 8, 'dispatcher': 1, 'solve_on_dispatcher_steps': 0, 'armed_steps': 12, 'dispatcher_lane_samples_max': 16}

@@ -1,0 +1,15 @@
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/win3/dry/l4l2_default_W1.pose.bin
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/win3/dry/l4l2_default_W8.pose.bin
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/win3/dry/l4l2_default_W16.pose.bin
+### runner_l5 --cfg default W=1 500 steps --pose-out l5_default_W1.pose.bin --expect-pose <runner_l4l2 W1 pose> (UNTIMED)
+steps 500 window 0..500 final manifolds 4515 pairs 9559 top_y 28.990126 pose_hash 0x32d5e235342b4143 "workers":1 "parallel_narrowphase":true "pose_hash":"0x32d5e235342b4143" "expect_pose":"match" "final_manifolds":4515 "final_pairs":9559 "void_steps":0 "disarmed_ring_traffic":0  exit=0
+### runner_l5 --cfg default W=8 500 steps --pose-out l5_default_W8.pose.bin --expect-pose <runner_l4l2 W1 pose> (UNTIMED)
+steps 500 window 0..500 final manifolds 4515 pairs 9559 top_y 28.990126 pose_hash 0x32d5e235342b4143 "workers":8 "parallel_narrowphase":true "pose_hash":"0x32d5e235342b4143" "expect_pose":"match" "final_manifolds":4515 "final_pairs":9559 "void_steps":0 "disarmed_ring_traffic":0  exit=0
+### runner_l5 --cfg default W=16 500 steps --pose-out l5_default_W16.pose.bin --expect-pose <runner_l4l2 W1 pose> (UNTIMED)
+steps 500 window 0..500 final manifolds 4515 pairs 9559 top_y 28.990126 pose_hash 0x32d5e235342b4143 "workers":16 "parallel_narrowphase":true "pose_hash":"0x32d5e235342b4143" "expect_pose":"match" "final_manifolds":4515 "final_pairs":9559 "void_steps":0 "disarmed_ring_traffic":0  exit=0
+### RED CONTROL: 501 steps W=8 against the 500-step pose
+"pose_hash":"0x9336b30a06a7d8af" "expect_pose":"mismatch: 64480 vs 64480 bytes, first differing body Some(0)"  exit=4
+### pose file hashes
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *l5_default_W1.pose.bin
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *l5_default_W16.pose.bin
+eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f *l5_default_W8.pose.bin
