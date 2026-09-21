@@ -678,8 +678,8 @@ Which spread the claim rule means (min–max against IQR against SE) is still OP
 processes are the ones whose thread stayed on one CPU (occupancy against deviation, r = −0.67, n = 48).
 
 **Levers (plan §3 as amended by W2/W3).**
-- L4 `parallel_solve` default: build.
-- L5 parallel narrowphase: build, predicted 2.4–2.6 ms (26–28 % of T(8)).
+- L4 `parallel_solve` default: build. **Built (`caac7d06`, on by default); untimed until the L4/L5 window.**
+- L5 parallel narrowphase: build, predicted 2.4–2.6 ms (26–28 % of T(8)). **Built (`b8d9ab8f`, dormant) and on by default from L5 C4; untimed until the window (C2 against C4).**
 - L2: do not flip; recalibrate `GRID_LO`/`GRID_HI`.
 - L6: not built (L(8) + t_narrow(8) = 8.2 % < 10 %).
 - L7: blocked (gated after L6; 2.8–5.1 % predicted).
@@ -770,7 +770,9 @@ cargo bench --no-run -p boyko-physics --bench broadphase
 
 **The boyko rows.** Each is the runner at the tip, one world per process: the profiler store binds one world, and
 a second world is refused with E9204 while its fold returns silently. Windows are step ranges that the driver
-reduces from the per-step CSV. cfg-A is colored, `parallel_solve = (W > 1)`, `AllPairs`, `simd_solve` off. cfg-B
+reduces from the per-step CSV. cfg-A is colored, `parallel_solve = (W > 1)`, `AllPairs`, `simd_solve` off — and from
+L5 C3 on `parallel_narrowphase = (W > 1)` too, so a P0 cfg-A row is comparable with a post-L5 cfg-A row only as the
+"before" of the L5 pairing (C2 against C4), never quoted against it directly. cfg-B
 is cfg-A plus `Grid` plus `simd_solve`, and the runner asserts that the two give equal final-pose bytes (H7). Every
 row runs armed for its profile. The rows compared on wall time also run disarmed: J-A (the parity row and A/A0)
 and J-S0 (L1's gate).

@@ -121,7 +121,8 @@ const MIN_FILES: usize = 800;
 /// The number above is a snapshot that moves with every campaign (it fell by one when A7 resolved
 /// its red-first tests, after growing for weeks, then rose by ten with the boot-validation lane's
 /// device gates, by one with the colored-solver-default lane's release-only SIMD on/off test and
-/// by seven with the L2 calibration's `miri-slow` broadphase-policy tests)
+/// by seven with the L2 calibration's `miri-slow` broadphase-policy tests, and by one with
+/// L5 C3's `slow:` Jolt-pyramid arm of `narrowphase_parallel_equivalence.rs`, to 329 / 179)
 /// — do NOT read it as the current count, and
 /// do not tune this floor to it. `every_ignore_attribute_states_a_reason` prints the live figure on
 /// every run (`-- --nocapture`), which is the only figure a reader should quote. Because this is a

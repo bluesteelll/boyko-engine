@@ -64,7 +64,9 @@
 //! * `--cfg default` (the default): `PhysicsConfig::default()` as this tree ships it, except that
 //!   `--parallel-solve` and `--sleeping` force their knobs on. The `rest` rows use it. Since L4
 //!   that default has `parallel_solve` on, so `--parallel-solve` no longer changes a `--cfg
-//!   default` row, and such a row at W ≥ 2 dispatches its wide colors on its own.
+//!   default` row, and such a row at W ≥ 2 dispatches its wide colors on its own; since L5 C4 it
+//!   has `parallel_narrowphase` on too, so such a row also dispatches its narrowphase at W ≥ 2
+//!   (the W4 check reads the flag from the built config, so the `NP_*` expectations follow).
 //! * `--parallel-np on|off` sets `parallel_narrowphase` under every `--cfg`, after the rest: the
 //!   same-binary A/B of the parallel narrowphase (L5), e.g. cfg-A at W = 8 with the solve parallel
 //!   and the narrowphase serial.

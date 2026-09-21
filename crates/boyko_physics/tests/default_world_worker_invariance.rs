@@ -3,11 +3,11 @@
 //! The default world (`add_physics_systems::<DefaultRigidSolver>`, default
 //! `PhysicsConfig`: the colored solve with the O7 AVX2 cohort kernel) runs a box-stack
 //! scene for [`FRAMES`] frames through the real schedule on pools of 1, 2, 4 and 8
-//! workers, each with `parallel_solve` off and on, plus one scalar run
-//! (`simd_solve = false`, 1 worker, `parallel_solve` off). The per-frame FNV-1a hash of
-//! every `RigidBody` bit must be identical across all nine runs: the pool size may
-//! change WHERE a color is solved, never which kernel, color set or order produces the
-//! numbers.
+//! workers, each with `parallel_solve` off and on and `parallel_narrowphase` off and on,
+//! plus one scalar run (`simd_solve = false`, 1 worker, both off). The per-frame FNV-1a
+//! hash of every `RigidBody` bit must be identical across all seventeen runs: the pool
+//! size may change WHERE a color is solved or a pair is collided, never which kernel,
+//! color set, chunk partition or order produces the numbers.
 //!
 //! The design listed a "serial" pool beside the 1-worker one. In this engine they are
 //! the same configuration — `ThreadPoolBuilder` clamps to at least one worker and
@@ -32,6 +32,14 @@
 //!   default world is the parallel arm; reverting the default or overriding the flag in the
 //!   plugin reds here, not only in a census. Its twin asserts `PhysicsConfig::default()`
 //!   itself, the public default a host inherits when it builds its own config from it.
+//! - G-L5-4: `parallel_narrowphase` is on in the same built resource (L5 C4), with the same
+//!   twin on `PhysicsConfig::default()`. And the flag reaches the dispatch: on every
+//!   flag-on arm of two or more workers `Manifolds::narrowphase_dispatches` rises by one per
+//!   frame — the scene has [`MIN_PAIRS`] candidate pairs or more on every frame, two chunks of
+//!   `NP_MIN_PAIRS_PER_CHUNK` at any lane count — and on every flag-off arm and on the
+//!   one-worker flag-on arm it does not move (the `lanes < 2` term; the twin of G-L4-1 for
+//!   the narrowphase is `narrowphase_parallel_equivalence.rs`'s
+//!   `one_worker_parallel_narrowphase_runs_the_serial_loop`).
 //!
 //! # G-L4-1 — one lane never opens a scope
 //!
@@ -63,9 +71,10 @@ use boyko_physics::components::{
 };
 use boyko_physics::manifold::Manifold;
 use boyko_physics::math::{Mat3, Quat, Vec3};
+use boyko_physics::narrowphase::NP_MIN_PAIRS_PER_CHUNK;
 use boyko_physics::plugin::add_physics_systems;
 use boyko_physics::resources::{
-    BodyState, ConstraintGraph, Manifolds, PhysicsConfig, SolverScratch,
+    BodyState, ConstraintGraph, ContactPairs, Manifolds, PhysicsConfig, SolverScratch,
 };
 use boyko_physics::solver::DefaultRigidSolver;
 
@@ -83,6 +92,14 @@ const GRID: usize = 13;
 /// The solver's per-color dispatch floor (`MIN_PARALLEL_SLOTS_PER_COLOR`, private to
 /// `solver/colored.rs`). The scene must clear it twice over on every frame.
 const MIN_PARALLEL_SLOTS_PER_COLOR: usize = 256;
+
+/// The fewest candidate pairs any frame may have: two chunks of the narrowphase's per-chunk
+/// floor, so `parallel_narrowphase` dispatches on every frame at every lane count of two or
+/// more (`chunk_count` is `min(lanes x NP_CHUNKS_PER_LANE, pairs / NP_MIN_PAIRS_PER_CHUNK)`,
+/// and two lanes give twelve by the lane term). The scene holds 1,131 on every frame (measured
+/// 2026-09-21 with the count printed per run): the 169 stacks' box-floor and box-box pairs plus
+/// the AABB overlaps between neighbouring stacks, 4.4x this floor.
+const MIN_PAIRS: usize = 2 * NP_MIN_PAIRS_PER_CHUNK;
 
 /// Returns the bytes of a `#[repr(C)]` POD value for the raw `create_entity` path.
 fn as_bytes<T>(value: &T) -> &[u8] {
@@ -198,6 +215,10 @@ struct Run {
     hashes: Vec<u64>,
     /// The narrowest per-frame widest color, in slots.
     min_widest: usize,
+    /// The fewest candidate pairs any frame had.
+    min_pairs: usize,
+    /// How far `Manifolds::narrowphase_dispatches` moved over the [`FRAMES`] frames.
+    np_dispatches: u64,
     /// The state hash of the spawn state, before any frame.
     spawn_hash: u64,
     /// The last frame's gathered snapshot and manifolds, for the dispatch witness.
@@ -208,7 +229,7 @@ struct Run {
 }
 
 /// Runs the default world on a `workers`-wide pool with the given flags.
-fn run(workers: usize, parallel_solve: bool, simd_solve: bool) -> Run {
+fn run(workers: usize, parallel_solve: bool, parallel_narrowphase: bool, simd_solve: bool) -> Run {
     let mut world = EcsMaster::new();
     spawn_scene(&mut world);
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();
@@ -221,17 +242,22 @@ fn run(workers: usize, parallel_solve: bool, simd_solve: bool) -> Run {
     {
         let cfg = world.resource_mut::<PhysicsConfig>();
         cfg.parallel_solve = parallel_solve;
+        cfg.parallel_narrowphase = parallel_narrowphase;
         cfg.simd_solve = simd_solve;
     }
 
     let spawn_hash = state_hash(&mut world);
+    let np_before = world.resource::<Manifolds>().narrowphase_dispatches();
     let mut hashes = Vec::with_capacity(FRAMES);
     let mut min_widest = usize::MAX;
+    let mut min_pairs = usize::MAX;
     for _ in 0..FRAMES {
         schedule.run(&mut world);
         hashes.push(state_hash(&mut world));
         min_widest = min_widest.min(widest_color_slots(&world));
+        min_pairs = min_pairs.min(world.resource::<ContactPairs>().pairs().len());
     }
+    let np_dispatches = world.resource::<Manifolds>().narrowphase_dispatches() - np_before;
     let last = (
         world.resource::<SolverScratch>().bodies().to_vec(),
         world.resource::<Manifolds>().manifolds().to_vec(),
@@ -239,6 +265,8 @@ fn run(workers: usize, parallel_solve: bool, simd_solve: bool) -> Run {
     Run {
         hashes,
         min_widest,
+        min_pairs,
+        np_dispatches,
         spawn_hash,
         last,
         built_config,
@@ -270,14 +298,30 @@ fn default_world_is_worker_count_invariant() {
         "G-L4-2 (twin): `PhysicsConfig::default()` must carry `parallel_solve` (L4); a host \
          that builds its config from the default inherits this value, not the plugin's"
     );
+    assert!(
+        PhysicsConfig::default().parallel_narrowphase,
+        "G-L5-4 (twin): `PhysicsConfig::default()` must carry `parallel_narrowphase` (L5 C4); \
+         a host that builds its config from the default inherits this value, not the plugin's"
+    );
 
-    let reference = run(1, false, true);
+    let reference = run(1, false, false, true);
     // G-L4-2: the config resource of the world the plugin built, which this test steps, so a
     // plugin-side override of the flag reds here, not only a change to the default.
     assert!(
         reference.built_config.parallel_solve,
         "G-L4-2: the world `add_physics_systems` built must dispatch its wide colors (L4: \
          `parallel_solve` on by default); its `PhysicsConfig` resource has it off"
+    );
+    assert!(
+        reference.built_config.parallel_narrowphase,
+        "G-L5-4: the world `add_physics_systems` built must dispatch its narrowphase (L5 C4: \
+         `parallel_narrowphase` on by default); its `PhysicsConfig` resource has it off"
+    );
+    assert!(
+        reference.min_pairs >= MIN_PAIRS,
+        "non-vacuity: the fewest candidate pairs on a frame is {}, under {MIN_PAIRS} — \
+         parallel_narrowphase would run the serial loop on some frame",
+        reference.min_pairs
     );
     // The SIMD arm, read from the same resource: `run` sets `simd_solve` itself, so only the
     // built config says whether the world the plugin hands a host runs the arm under test.
@@ -309,14 +353,37 @@ fn default_world_is_worker_count_invariant() {
     let mut runs = Vec::new();
     for workers in [1usize, 2, 4, 8] {
         for parallel_solve in [false, true] {
-            let label = format!("{workers}w parallel_solve={parallel_solve}");
-            runs.push((label, run(workers, parallel_solve, true)));
+            for parallel_narrowphase in [false, true] {
+                let label = format!(
+                    "{workers}w parallel_solve={parallel_solve} \
+                     parallel_narrowphase={parallel_narrowphase}"
+                );
+                // The narrowphase dispatches on every frame of a flag-on arm of two or
+                // more workers, and on no frame otherwise (the `lanes < 2` term).
+                let dispatches = parallel_narrowphase && workers >= 2;
+                let r = run(workers, parallel_solve, parallel_narrowphase, true);
+                runs.push((label, dispatches, r));
+            }
         }
     }
-    runs.push(("1w scalar (simd_solve=false)".to_owned(), run(1, false, false)));
+    runs.push(("1w scalar (simd_solve=false)".to_owned(), false, run(1, false, false, false)));
+
+    // G-L5-4's dispatch-counter non-vacuity: the flag reaches the dispatch on every frame of
+    // every arm that can dispatch, and nowhere else. Checked before the hash comparison, so
+    // an arm that silently ran the serial loop cannot pass as "invariant".
+    for (label, dispatches, r) in &runs {
+        let expected = if *dispatches { FRAMES as u64 } else { 0 };
+        assert_eq!(
+            r.np_dispatches, expected,
+            "G-L5-4: {label}: `narrowphase_dispatches` moved {} over {FRAMES} frames, expected \
+             {expected} (one per frame on a flag-on arm of two or more workers, none on a \
+             flag-off arm or at one worker)",
+            r.np_dispatches
+        );
+    }
 
     let mut diverged = Vec::new();
-    for (label, r) in &runs {
+    for (label, _, r) in &runs {
         if r.hashes != reference.hashes {
             let frame = r
                 .hashes
@@ -330,7 +397,7 @@ fn default_world_is_worker_count_invariant() {
     assert!(
         diverged.is_empty(),
         "the default world is not worker-count invariant against 1w parallel_solve=false \
-         (SIMD):\n  {}",
+         parallel_narrowphase=false (SIMD):\n  {}",
         diverged.join("\n  ")
     );
 }
@@ -339,7 +406,7 @@ fn default_world_is_worker_count_invariant() {
 /// and allocates nothing, while the same warmed step on four workers dispatches.
 #[test]
 fn one_worker_parallel_solve_takes_the_inline_path() {
-    let reference = run(1, false, true);
+    let reference = run(1, false, false, true);
     assert!(
         reference.min_widest >= 2 * MIN_PARALLEL_SLOTS_PER_COLOR,
         "non-vacuity: the narrowest per-frame widest color holds {} slots, under 2 × {} — the \

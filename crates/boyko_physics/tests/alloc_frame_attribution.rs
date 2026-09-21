@@ -98,6 +98,14 @@
 //!   worker's own Chase-Lev ring and allocate nothing (0.125 injector blocks a
 //!   step; BEFORE, 38). `parallel_broadphase` is +0.000 — inert below its body
 //!   floor.
+//! * **A parallel narrowphase step (`parallel_narrowphase`, on by default since L5
+//!   C4) is exactly +1 scope frame and +[`NP_BLOCKS`] chunk(s) over the serial step,
+//!   on EVERY frame** (D2′, 2026-09-21, release and debug): the one `pool.scope` its
+//!   dispatch opens and the block its 24 task cells share (W = 4). The narrowphase's own
+//!   counter says on which frames it dispatched — every ON frame, no OFF frame — so the
+//!   delta is attributed to the dispatch, not to two means that happened to differ. Every
+//!   other D arm prices the solve against a baseline with this flag OFF, so the serial
+//!   step it quotes is still the whole serial step.
 //! * **`OTHER` in steady state is exactly one site**: crossbeam-epoch's
 //!   `Collector::register`, a pool thread's thread-local `LocalHandle` created on
 //!   its first steal (36 of 36 `OTHER` captures across 24 fresh Apps). Once per
@@ -758,6 +766,14 @@ const PHYS_WARM: usize = 48;
 /// Measured frames per physics window. Deliberately modest: this is a count,
 /// and the machine it runs on is a workstation with other work on it.
 const PHYS_REPS: usize = 24;
+/// `ScopeBlock` chunks the narrowphase's one `pool.scope` takes on the D arm's scene
+/// (1240 bodies, W = 4, so `min(4 x NP_CHUNKS_PER_LANE, pairs / NP_MIN_PAIRS_PER_CHUNK)`
+/// = 24 tasks a step). Each task captures `&ctx` and its chunk index — a 32-byte cell —
+/// so all 24 fit the scope's first 4 KiB block. MEASURED 2026-09-21 on the L5 C4 tree
+/// (release and debug; the debug pile is 385 bodies, 22 tasks), by the D2′ arm itself
+/// with this constant unset. Two blocks here is a task cell that grew past the block
+/// (`dispatch.rs`, the `&ctx` capture), which the D2′ per-frame assertion reds.
+const NP_BLOCKS: u64 = 1;
 
 /// One row of the closing attribution table.
 struct Row {
@@ -1933,6 +1949,9 @@ fn build_pile(workers: usize, colored: bool, substeps: u32, relax: u32) -> Pile 
         cfg.relax_iterations = relax;
         cfg.parallel_solve = false;
         cfg.parallel_broadphase = false;
+        // ON by default since L5 C4. Off here so the baseline every D arm prices against
+        // is the whole serial step; D2′ prices the narrowphase's own dispatch.
+        cfg.parallel_narrowphase = false;
         cfg.sleeping = false;
     }
     let schedule = builder.build(&mut world);
@@ -1954,6 +1973,15 @@ impl Pile {
         self.world
             .resource_mut::<PhysicsConfig>()
             .parallel_broadphase = on;
+    }
+    fn set_parallel_narrowphase(&mut self, on: bool) {
+        self.world
+            .resource_mut::<PhysicsConfig>()
+            .parallel_narrowphase = on;
+    }
+    /// The narrowphase's own count of dispatched steps (`Manifolds::narrowphase_dispatches`).
+    fn np_dispatches(&self) -> u64 {
+        self.world.resource::<Manifolds>().narrowphase_dispatches()
     }
     /// Both loop counts at once. `PhysicsConfig` is read at the top of every
     /// step, so this takes effect on the next `step()` without a rebuild.
@@ -2078,6 +2106,81 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
          floor here, and that ground has moved",
         bp_on.mean - bp_off.mean
     );
+
+    // ── D2′: parallel_narrowphase alone, same world (L5) ──
+    //
+    // The solve and the broadphase stay serial, so the whole delta is the narrowphase's
+    // dispatch: one `pool.scope` a step, whose task cells share one block. The arm does
+    // not rest on two means agreeing: the narrowphase's own counter
+    // (`Manifolds::narrowphase_dispatches`) says on which frames it dispatched, and it
+    // must move by one on every ON frame and by none on every OFF frame — so a flag that
+    // stopped reaching the dispatch would red here, not read as "free". The serial step
+    // is the install frame alone (1 scope + 1 chunk), asserted on every OFF frame, and
+    // every ON frame is that plus the narrowphase's scope and its `NP_BLOCKS` block(s).
+    pile.set_parallel_narrowphase(true);
+    let np_before = pile.np_dispatches();
+    let np_on_frames = frames(4, PHYS_REPS, || pile.step());
+    let np_on_dispatched = pile.np_dispatches() - np_before;
+    pile.set_parallel_narrowphase(false);
+    let np_before = pile.np_dispatches();
+    let np_off_frames = frames(4, PHYS_REPS, || pile.step());
+    let np_off_dispatched = pile.np_dispatches() - np_before;
+    let np_on = summarise(&np_on_frames);
+    let np_off = summarise(&np_off_frames);
+    push(
+        rows,
+        "D",
+        "physics step, parallel_narrowphase ON alone".to_string(),
+        np_on,
+        verdict::SHOULD_NOT,
+    );
+    say!(
+        "  ⇒ parallel_narrowphase alone costs {:+.3} a step: {:+.3} scope, {:+.3} chunk, \
+         {:+.3} injector, {:+.3} OTHER; its counter moved {np_on_dispatched} over the ON \
+         window's {} frames and {np_off_dispatched} over the OFF window's {}",
+        np_on.mean - np_off.mean,
+        np_on.scope - np_off.scope,
+        np_on.chunk - np_off.chunk,
+        np_on.inj - np_off.inj,
+        np_on.other - np_off.other,
+        4 + PHYS_REPS,
+        4 + PHYS_REPS
+    );
+    assert_eq!(
+        np_on_dispatched,
+        (4 + PHYS_REPS) as u64,
+        "D2′: `narrowphase_dispatches` moved {np_on_dispatched} over {} frames with the flag on \
+         and the solve serial; the scene has {contacts} contacts on 4 workers, so every step \
+         must dispatch (at least two chunks of NP_MIN_PAIRS_PER_CHUNK pairs) — a step that did \
+         not is one the flag no longer reaches",
+        4 + PHYS_REPS
+    );
+    assert_eq!(
+        np_off_dispatched, 0,
+        "D2′: `narrowphase_dispatches` moved {np_off_dispatched} with the flag OFF; the serial \
+         loop must never count a dispatch"
+    );
+    for (i, f) in np_off_frames.iter().enumerate() {
+        assert!(
+            f.scope == 1 && f.chunk == 1,
+            "D2′: OFF frame {i} opened {} scope frame(s) on {} chunk(s); the serial step is the \
+             install frame alone (1 + 1), and this arm's ON side is priced against it",
+            f.scope,
+            f.chunk
+        );
+    }
+    for (i, f) in np_on_frames.iter().enumerate() {
+        assert!(
+            f.scope == 2 && f.chunk == 1 + NP_BLOCKS,
+            "D2′: ON frame {i} opened {} scope frame(s) on {} chunk(s); the narrowphase's \
+             dispatch is ONE `pool.scope` (the install frame's 1 + 1) whose {NP_BLOCKS} block(s) \
+             hold every task cell (1 + {NP_BLOCKS} chunks). More scopes is a second fan-out; \
+             more blocks is a task cell that grew past the block (dispatch.rs, the `&ctx` \
+             capture)",
+            f.scope,
+            f.chunk
+        );
+    }
 
     // ── D3: what UNIT the parallel budget is charged per ──
     //
@@ -2861,9 +2964,11 @@ fn frame_allocation_attribution() {
             "the event lane, change detection, query iteration, every physics buffer",
             verdict::FREE,
             "Measured zero HEAP acquisitions. `update_events` with the EveryFrame policy, 4096 \
-             `Mut<T>` writes plus a `Changed<T>` query, and a 1240-body physics step all add \
-             +0.000 over an identical no-op baseline. Every buffer in the step is \
-             capacity-reused; the arena's premise holds everywhere except the dispatch objects. \
+             `Mut<T>` writes plus a `Changed<T>` query, and a 1240-body SERIAL physics step all \
+             add +0.000 over an identical no-op baseline. Every buffer in the step is \
+             capacity-reused; the arena's premise holds everywhere except the dispatch objects \
+             (the narrowphase's staging and commit columns included: its parallel step adds the \
+             one scope and the block(s) of D2′, never a buffer). \
              Coverage boundary: the counter sees `GlobalAlloc` only, and the ECS columns grow by \
              `VmReservation::commit` (`VirtualAlloc(MEM_COMMIT)`), which it does not see — so \
              this is zero heap allocations, not zero memory growth.",

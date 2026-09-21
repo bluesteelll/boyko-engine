@@ -2,9 +2,10 @@
 //!
 //! The default world (`add_physics_systems::<DefaultRigidSolver>`, default `PhysicsConfig`) runs a
 //! mixed box/sphere pile with static sensor boxes through the real schedule on pools of 1, 2, 4, 8
-//! and 16 workers, each with `parallel_narrowphase` off and on — the flag forced on, since its
-//! default is off while L5 is dormant. Every [`CHURN_EVERY`] steps [`CHURN_BODIES`] bodies of the
-//! pile are despawned and as many new ones spawned into a later archetype, so rows move. After
+//! and 16 workers, each with `parallel_narrowphase` off and on — on is the default since L5 C4,
+//! and [`Rig::new`] asserts the built world carries it before the arm sets its own value, so the
+//! flag-off arms are the explicit override. Every [`CHURN_EVERY`] steps [`CHURN_BODIES`] bodies of
+//! the pile are despawned and as many new ones spawned into a later archetype, so rows move. After
 //! every step four hashes must equal the oracle's, the 1-worker flag-off run:
 //!
 //! * the solver manifold stream (`Manifolds::manifolds`), every field of every manifold in order;
@@ -179,8 +180,9 @@ impl Rig {
         let physics = builder.build(&mut world);
         let cfg = world.resource_mut::<PhysicsConfig>();
         assert!(
-            !cfg.parallel_narrowphase,
-            "L5 is dormant: the default world must not request the parallel narrowphase"
+            cfg.parallel_narrowphase,
+            "L5 C4: the default world must request the parallel narrowphase; the flag-off arms \
+             of this gate are the override, not the default"
         );
         cfg.parallel_narrowphase = parallel_np;
         let mut rig =

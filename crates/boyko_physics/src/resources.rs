@@ -291,7 +291,7 @@ pub struct PhysicsConfig {
     /// (gated by `one_worker_parallel_solve_takes_the_inline_path`). Toggling it
     /// changes performance, never the result.
     pub parallel_solve: bool,
-    /// Request the L5 PARALLEL narrowphase (default `false`).
+    /// The L5 PARALLEL narrowphase (default `true` since L5 C4).
     ///
     /// When `true`, [`physics_narrowphase`](crate::systems::physics_narrowphase) splits
     /// the step's candidate pairs into contiguous chunks and collides them across the
@@ -309,9 +309,12 @@ pub struct PhysicsConfig {
     /// It is a request. The step still runs the serial loop, byte-identical to a world
     /// with the flag off, when no pool is attached to the running thread, when the pool
     /// has a single worker, or when the pair count yields fewer than two chunks of
-    /// [`NP_MIN_PAIRS_PER_CHUNK`](crate::narrowphase::NP_MIN_PAIRS_PER_CHUNK) pairs. A
-    /// dispatched step costs one `pool.scope` (a boxed shared frame plus its task
-    /// blocks). Toggling it changes performance, never the result.
+    /// [`NP_MIN_PAIRS_PER_CHUNK`](crate::narrowphase::NP_MIN_PAIRS_PER_CHUNK) pairs. So
+    /// a one-worker world takes exactly the path of a world with the flag off and opens
+    /// no `pool.scope` (gated by `one_worker_parallel_narrowphase_runs_the_serial_loop`).
+    /// A dispatched step costs one `pool.scope` (a boxed shared frame plus its task
+    /// blocks), pinned by the frame allocation census. Toggling it changes performance,
+    /// never the result.
     pub parallel_narrowphase: bool,
     /// Opt into the O8 per-island SLEEPING / deactivation (default `false`).
     ///
@@ -528,10 +531,13 @@ impl Default for PhysicsConfig {
             // exactly: the solver's whole-step gate refuses the dispatch below two
             // lanes, so W=1 opens no scope.
             parallel_solve: true,
-            // Default OFF while L5 is dormant: an un-opted world runs today's serial
-            // narrowphase loop, byte-identical and with no `pool.scope`. The parallel path
-            // is a same-binary A/B until the default flips.
-            parallel_narrowphase: false,
+            // Default ON since L5 C4 (P0b, lever L5: the narrowphase is the largest
+            // parallelisable serial stage at W = 8). The result is bit-identical to the
+            // serial loop for any worker count, partition and steal order, and a
+            // one-worker pool still runs that loop exactly: `chunk_count` yields zero
+            // chunks below two lanes, so W=1 opens no scope. The serial loop stays the
+            // same-binary A/B (`parallel_narrowphase = false`).
+            parallel_narrowphase: true,
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.
             sleeping: false,

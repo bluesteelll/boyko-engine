@@ -378,10 +378,11 @@ pub fn physics_broadphase(
 ///
 /// # The serial loop and the parallel chunks (L5)
 ///
-/// With [`PhysicsConfig::parallel_narrowphase`] on, the step first offers its pairs to
-/// the parallel narrowphase (`narrowphase/dispatch.rs`): contiguous chunks collided
-/// across the ambient pool's workers, joined back in pair order, with the box-box axis
-/// writes replayed serially in pair order. The dispatch declines — and this system runs
+/// With [`PhysicsConfig::parallel_narrowphase`] on (the default since L5 C4), the step
+/// first offers its pairs to the parallel narrowphase (`narrowphase/dispatch.rs`):
+/// contiguous chunks collided across the ambient pool's workers, joined back in pair
+/// order, with the box-box axis writes replayed serially in pair order. The dispatch
+/// declines — and this system runs
 /// [`narrowphase_serial`], today's loop — when the flag is off, when no pool of at least
 /// two workers is attached, or when the pairs make fewer than two chunks. Both paths
 /// collide a pair through the one [`collide_pair`], and the parallel path's manifold

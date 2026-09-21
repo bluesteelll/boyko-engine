@@ -266,6 +266,67 @@
 //! 97..=109, dispatch MAX 219 — every figure the A7b debug runs above recorded, because a
 //! debug colour's scope holds one chunk whatever its task count. Its pin is unchanged.
 //!
+//! **S1c after the default parallel narrowphase (L5 C4) — one scope and one block more
+//! on every frame; the trajectory did not move.** On 2026-09-21
+//! `PhysicsConfig::parallel_narrowphase` became `true` by default (lane
+//! `perf/physics-parallel-narrowphase`, L5 C4; the code landed dormant in C3), and the S1c
+//! arm sets it with the other two parallel flags, so S1c now dispatches its narrowphase:
+//! the step's candidate pairs (about 9.5k on the parity runner's copy of this scene; any
+//! count from 3,072 up is lane-bound here) cut into 24 chunks (4 lanes x
+//! `NP_CHUNKS_PER_LANE`) and collided across the workers under ONE `pool.scope`, whose 24
+//! task cells (each captures `&ctx` and a chunk index) share ONE 4 KiB block. The
+//! parallel loop is bit-identical to the serial one
+//! (`narrowphase_parallel_equivalence.rs`), so the pile's trajectory, its contact set
+//! and its dispatched colours did not move: what moved is exactly +1 scope and +1 chunk
+//! on EVERY frame. S1b sets the flag OFF and stays the control at 1 / 1 (without that
+//! override it dispatches too and reds its own "1 exact" three ways: scope 2, chunk 2,
+//! dispatch 5 — run once as the red-first, 2026-09-21, release). Measured on this tree
+//! (`b8d9ab8f` + the C4 working tree,
+//! `stable-x86_64-pc-windows-msvc` rustc 1.98.1, release; the long run by this file's
+//! scene extended to 17 x 256 steady steps, the extension copied in and restored by
+//! copy, sha256-checked):
+//!
+//! ```text
+//!                         + default simd_solve        + default parallel_narrowphase
+//! census window, mean      362.125                     364.125
+//! census window, range     362..363                    364..365
+//! window histogram         362->224 363->32            364->224 365->32
+//! window scope             133 on 256                  134 on 256
+//! window chunk             229 on 256                  230 on 256
+//! long run, per step       362..363, mean 362.127      364..365, mean 364.127
+//! long run, histogram      362->3800 363->552          364->3800 365->552
+//! long run, scope          133 x 4352                  134 x 4352
+//! long run, chunk          229 x 4352                  230 x 4352
+//! long run, block means    362.125..362.129            364.125..364.129
+//! OTHER / realloc          0 / 0                       0 / 0
+//! warm-up K (budget 64)    57                          57
+//! ```
+//!
+//! Every figure moved by exactly +2, frame for frame: the histogram keeps its shape (the
+//! 552 frames that carry the periodic injector block are the same 552), the block-mean
+//! alternation is the same, `K` is the same, and `134 = 1 + 1 + 12 x 11` — the install
+//! frame, the narrowphase's scope and the same eleven colours. The per-frame structural
+//! assertion now reads the narrowphase's own counter (`Manifolds::narrowphase_dispatches`,
+//! +1 on all 4,352 frames, printed per scene) and subtracts it before the modulo, so an
+//! extra fan-out in the solve still breaks it, and a narrowphase that dispatched twice in
+//! a step would too. The attribution binary's D2′ arm prices the same dispatch on one
+//! warmed world, A/B against the serial loop: +1.000 scope, +1.000 chunk, +0.000 in
+//! every other class, on every ON frame, in release and debug. The release pins are the
+//! new long run's envelope under the rule in "The gate" below — scope 134..=134, chunk
+//! 230..=230, dispatch MAX 365 — with NO upward headroom, so the fan-out regression that
+//! gate exists for (+24 a frame) still reds: it would land at 388 against 365 on every
+//! frame (arithmetic on the measured window, not a re-run of that mutation).
+//!
+//! The debug scene (height 10, 385 bodies, 22 chunks a step) moved the same way. Its
+//! census window read 197..221 (mean 198.250; histogram 197->212 198->32 221->12; 98 or
+//! 110 scope frames, one chunk each; dispatch MAX 220), and its 4,352-step long run
+//! 197..222 (mean 202.862; histogram 197->2893 198->419 221->907 222->133; block means
+//! 197.125..219.625; scope and chunk 98 on 3,312 frames and 110 on 1,040; dispatch MAX
+//! 221, reached only past the window) — every frame +1 scope and +1 chunk over the A7b
+//! debug runs above, with the same 3,312 / 1,040 split of eight- and nine-colour frames,
+//! and the narrowphase's counter +1 on every frame. Its pin is re-pinned to that long
+//! run's envelope: scope 98..=110, chunk 98..=110, dispatch MAX 221.
+//!
 //! **S2 after EM2′ (same tree plus the entity-id recycling fix, 2026-09-11,
 //! release and debug alike): 4.031 / 5, `realloc` 0.** The 0.008 it lost is
 //! exactly the two free-list reallocs the AFTER column's window carried
@@ -298,11 +359,13 @@
 //! S2        2 exact      2 exact            2/63       0 (first touch)  0 (was 2, EM2′)
 //! S3        1 exact      1 exact            4/63       0 (first touch)  0
 //! S1a/S1b   1 exact      1 exact            ~7/63      0                0
-//! S1c     133 exact (window) 229 exact (1.72/scope) 0.125  0             0
-//! S1c long 133 exact   229 exact             —         0                0
+//! S1c     134 exact (window) 230 exact (1.72/scope) 0.125  0             0
+//! S1c long 134 exact   230 exact             —         0                0
 //! ```
 //!
-//! (S1c's rows are the tree after the default SIMD flip. After A7b on the scalar kernel
+//! (S1c's rows are the tree after the default parallel narrowphase (L5 C4): 1 of the 134
+//! scopes and 1 of the 230 chunks are the narrowphase's. After the default SIMD flip they
+//! read 133 / 229. After A7b on the scalar kernel
 //! the window and the long run read 133 / 229..241 at 1.81 chunks per scope. After A7a
 //! alone the window read 121..133 /
 //! 205..217 at 1.78 chunks per scope and the long run 109..133 / 205..217; before A7a
@@ -310,17 +373,20 @@
 //! 109..121 / 193..217.)
 //!
 //! * `scope` = the `Box<ScopeShared>` of `Schedule::run`'s install frame, of each
-//!   `par_iter` fan-out, and of each dispatched colour in each of the solver's
-//!   12 colour passes: `1 + 12 x` the dispatched colours, asserted on every
-//!   steady frame. On the 1240-body pile that is `1 + 12 x 11 = 133` on every
-//!   frame of the census window and of the long run (after A7a alone,
+//!   `par_iter` fan-out, of the narrowphase's one dispatch (L5, on by default since
+//!   C4), and of each dispatched colour in each of the solver's 12 colour passes:
+//!   `1 + np + 12 x` the dispatched colours, asserted on every steady frame with `np`
+//!   READ from the narrowphase's own counter (1 on every frame here). On the
+//!   1240-body pile that is `1 + 1 + 12 x 11 = 134` on every frame of the census
+//!   window and of the long run (before L5 C4, 133; after A7a alone,
 //!   `1 + 12 x 10 = 121` on 255 of the window's 256 frames and 133 on one, and
 //!   `1 + 12 x 9 = 109` later in the long run; before A7a, 121 on all 256). Per
-//!   stage: `Schedule::run`'s install frame owns
-//!   1 scope + 1 chunk of every step and `physics_solve_colored` owns every
-//!   other dispatch object. In the census window that is 132 scopes +
-//!   228 chunks of the 362.125 (after A7b on the scalar kernel, 132 + 239.109 of the
-//!   373.234; after A7a alone, 120.047 + 213.938 of the
+//!   stage: `Schedule::run`'s install frame owns 1 scope + 1 chunk of every step,
+//!   `physics_narrowphase` owns 1 scope + 1 chunk of every step that dispatches (its
+//!   24 task cells fit the scope's first block; the attribution binary's D2′), and
+//!   `physics_solve_colored` owns every other dispatch object. In the census window
+//!   that is 132 scopes + 228 chunks of the 364.125 (after A7b on the scalar kernel,
+//!   132 + 239.109 of the 373.234; after A7a alone, 120.047 + 213.938 of the
 //!   336.109; before A7a, 120 + ~209.7 of the 331.8).
 //!   ⚠ The backtrace trace that charged `physics_solve_colored`
 //!   **99.5 %** was taken on a WARM-UP step, and the percentage belongs to that
@@ -330,8 +396,10 @@
 //!   the 50th step of a fresh pile, after 48 serial warm-up steps and one
 //!   parallel one; re-run 2026-09-11, 386 of 386 captured, the solve's 384 =
 //!   144 scope boxes + 240 chunk grows).
-//!   Every other physics system, the event lane, change detection and every
-//!   system body own ZERO heap acquisitions (see "Coverage boundary").
+//!   Every other physics system (the narrowphase's staging and commit columns
+//!   included — its parallel step adds the one scope and the one block above, never
+//!   a buffer), the event lane, change detection and every system body own ZERO heap
+//!   acquisitions (see "Coverage boundary").
 //! * `OTHER` = everything that is not a dispatch object, and in steady state it
 //!   is exactly one site: crossbeam-epoch's `Collector::register`, the
 //!   thread-local `LocalHandle` a pool thread creates on its FIRST steal
@@ -350,12 +418,14 @@
 //! In a DEBUG build S1b and S1c carry one extra `OTHER` per step: the
 //! `cfg!(debug_assertions)`-gated `debug_assert_coloring` scratch in
 //! `ConstraintGraph::build` (the allocation `constraint_graph_o4_world.rs`
-//! already tolerates). The debug S1c scene is the height-10 pile: after A7b,
-//! 97..=109 scope frames (8 or 9 dispatched colours) in the census window and
-//! over 4,352 steps, one chunk each, MAX 220 (dispatch 219) over the long run —
-//! pinned with the release pin's shape: the long run's envelope, no upward
-//! headroom. (Before A7b it read 85..=97 in the window and 73..=97 over 4,352
-//! steps before A7a, 85..=97 after it, MAX 196, pinned 73..=97 / 195.)
+//! already tolerates). The debug S1c scene is the height-10 pile: after L5 C4,
+//! 98..=110 scope frames (the install frame, the narrowphase's scope and 8 or 9
+//! dispatched colours) in the census window and over 4,352 steps, one chunk each,
+//! dispatch MAX 221 over the long run — pinned with the release pin's shape: the
+//! long run's envelope, no upward headroom (header, "S1c after the default parallel
+//! narrowphase"). (After A7b it read 97..=109 / 97..=109, MAX 220, dispatch 219; before
+//! A7b it read 85..=97 in the window and 73..=97 over 4,352 steps before A7a, 85..=97
+//! after it, MAX 196, pinned 73..=97 / 195.)
 //!
 //! # The gate
 //!
@@ -372,13 +442,21 @@
 //!
 //! S1c's number is DATA-DEPENDENT: its warm-up spans 290..387 as the pile
 //! collapses, and after it the count moves in whole dispatched colours as the
-//! contact set settles (362..363 per step over 4,352 steps since the default SIMD flip;
-//! 362..375 after A7b on the scalar kernel; 314..350
+//! contact set settles (364..365 per step over 4,352 steps since L5 C4; 362..363
+//! after the default SIMD flip; 362..375 after A7b on the scalar kernel; 314..350
 //! after A7a alone; 302..339 before it). Quote it as a range, never as a figure.
 //! Its release pins are that long run's envelope with NO upward headroom — scope
-//! 133..=133, chunk 229..=229, dispatch MAX 363 (after A7b on the scalar kernel:
+//! 134..=134, chunk 230..=230, dispatch MAX 365 (after the default SIMD flip:
+//! 133..=133, 229..=229, 363; after A7b on the scalar kernel:
 //! 133..=133, 229..=241, 375; after A7a alone: 109..=133,
 //! 205..=217, 350; before A7a: 109..=121, 193..=217, 339):
+//!
+//! * **The fourth re-pin, after L5 C4, is a +1 / +1 shift, and it is attributed by a
+//!   counter, not by a mean.** The narrowphase's own dispatch counter moved by one on
+//!   every one of the 4,352 frames, the per-frame structural assertion subtracts it,
+//!   and the solve's colours did not move (header, "S1c after the default parallel
+//!   narrowphase"). The pin moved by exactly the object the lane added, in both
+//!   directions, and keeps no headroom either way.
 //!
 //! * **The third re-pin, after the default SIMD flip, is a NARROWING.** The long run moved
 //!   DOWN only (header, "S1c after the default SIMD flip"), and the rule below keeps no
@@ -1766,6 +1844,9 @@ fn run_pyramid_arm(
         cfg.dt = DT;
         cfg.parallel_solve = parallel;
         cfg.parallel_broadphase = parallel;
+        // Since L5 C4 the default is ON; the serial arm (S1b) overrides it so that it
+        // stays the control, and the parallel arm carries the dispatch it prices.
+        cfg.parallel_narrowphase = parallel;
         cfg.sleeping = false;
     }
     let mut schedule = builder.build(&mut world);
@@ -1794,16 +1875,35 @@ fn run_pyramid_arm(
     schedule.run(&mut world);
     let setup = Snap::now().since(setup_before);
 
-    drive(|| schedule.run(&mut world), &mut samples);
-    let (control, live) = liveness_probe(label, &samples, || schedule.run(&mut world));
+    // The narrowphase's own dispatch counter, read after every driven frame so the
+    // structural claim below can subtract the scope its dispatch opens. Pre-sized
+    // for every frame `drive` and `liveness_probe` run, so the push never allocates
+    // inside a window; the resource read allocates nothing either (S1b's exact 1 / 1
+    // pin would see it).
+    let np_after_setup = world.resource::<Manifolds>().narrowphase_dispatches();
+    let mut np_log: Vec<u64> = Vec::with_capacity(TOTAL_FRAMES + 2);
+    drive(
+        || {
+            schedule.run(&mut world);
+            np_log.push(world.resource::<Manifolds>().narrowphase_dispatches());
+        },
+        &mut samples,
+    );
+    let (control, live) = liveness_probe(label, &samples, || {
+        schedule.run(&mut world);
+        np_log.push(world.resource::<Manifolds>().narrowphase_dispatches());
+    });
+    assert_eq!(np_log.len(), TOTAL_FRAMES + 2, "one counter reading per driven frame");
 
-    // ── The structural claim, per frame: a parallel step opens ONE install frame
-    // plus one nested scope per dispatched colour per colour pass, and every pass
-    // walks the same colours (the constraint graph is built once per step). So on
-    // EVERY steady frame `scope - 1` is a multiple of the pass count
-    // `substeps * (1 + relax_iterations)` — the relax loop is nested inside the
+    // ── The structural claim, per frame: a parallel step opens ONE install frame,
+    // ONE nested scope when the narrowphase dispatches (L5; its own counter says
+    // whether it did), plus one nested scope per dispatched colour per colour pass,
+    // and every pass walks the same colours (the constraint graph is built once per
+    // step). So on EVERY steady frame `scope - 1 - np` is a multiple of the pass
+    // count `substeps * (1 + relax_iterations)` — the relax loop is nested inside the
     // substep loop. A frame that breaks this has an allocation source the class
-    // accounting does not know about.
+    // accounting does not know about. The narrowphase runs once per step, so its
+    // counter moves by at most one per frame.
     if parallel {
         let (substeps, relax) = {
             let cfg = world.resource::<PhysicsConfig>();
@@ -1811,15 +1911,23 @@ fn run_pyramid_arm(
         };
         let passes = substeps * (1 + relax);
         for (i, f) in samples[WARM_BUDGET..].iter().enumerate() {
+            let j = WARM_BUDGET + i;
+            let np = np_log[j] - if j == 0 { np_after_setup } else { np_log[j - 1] };
             assert!(
-                f.scope > passes && (f.scope - 1) % passes == 0,
-                "{label}: steady frame {i} opened {} scope frames; with {passes} colour passes \
-                 (substeps {substeps} x (1 + relax {relax})) it must be 1 + {passes} x (dispatched \
-                 colours >= 1)",
+                np <= 1,
+                "{label}: steady frame {i} moved `narrowphase_dispatches` by {np}; the \
+                 narrowphase runs once per step, so it dispatches at most once"
+            );
+            assert!(
+                f.scope > passes + np && (f.scope - 1 - np).is_multiple_of(passes),
+                "{label}: steady frame {i} opened {} scope frames with {np} narrowphase \
+                 dispatch(es); with {passes} colour passes (substeps {substeps} x (1 + relax \
+                 {relax})) it must be 1 + {np} + {passes} x (dispatched colours >= 1)",
                 f.scope
             );
         }
     }
+    let np_window = np_log[TOTAL_FRAMES - 1] - np_log[WARM_BUDGET - 1];
 
     // ── Anti-vacuity: the scene is DOING something ──
     let contacts = world.resource::<Manifolds>().manifolds().len();
@@ -1853,7 +1961,8 @@ fn run_pyramid_arm(
         &format!(
             "{} dynamic bodies + 1 static floor, {workers} worker(s), sleeping OFF, \
              dt=1/60. Frame = ONE fixed step = one real physics `Schedule::run`. \
-             Steady-state contacts = {contacts}; sampled bodies moved up to {max_move:.3} m.",
+             Steady-state contacts = {contacts}; sampled bodies moved up to {max_move:.3} m; \
+             the narrowphase dispatched on {np_window} of the {STEADY_FRAMES} steady frames.",
             bodies.len()
         ),
         setup,
@@ -1877,9 +1986,10 @@ fn s1a_rigid_pile_reference_pipeline_serial(rows: &mut Vec<Row>) {
 }
 
 /// The DEFAULT pipeline since 2026-09-18 — the colored solve with `simd_solve` on
-/// by default — with the parallel switches OFF. It is also the CONTROL for `S1c`: if
-/// the two arms measure the same number, the parallel dispatch never engaged and
-/// `S1c`'s figure is about something else.
+/// by default — with the parallel switches OFF (`parallel_solve`, `parallel_broadphase`
+/// and, since L5 C4, `parallel_narrowphase`, all overridden to `false`). It is also the
+/// CONTROL for `S1c`: if the two arms measure the same number, the parallel dispatch
+/// never engaged and `S1c`'s figure is about something else.
 fn s1b_rigid_pile_colored_serial(rows: &mut Vec<Row>) {
     run_pyramid_arm(
         rows,
@@ -1890,10 +2000,13 @@ fn s1b_rigid_pile_colored_serial(rows: &mut Vec<Row>) {
     );
 }
 
+/// The default pipeline with every parallel switch ON — the shipped default for
+/// `parallel_solve` (L4) and `parallel_narrowphase` (L5 C4); `parallel_broadphase` is
+/// inert below its body floor on this scene.
 fn s1c_rigid_pile_colored_parallel(rows: &mut Vec<Row>) {
     run_pyramid_arm(
         rows,
-        "S1c — rigid pile, COLORED solve + parallel_solve/parallel_broadphase ON",
+        "S1c — rigid pile, COLORED solve + parallel_solve/broadphase/narrowphase ON",
         true,
         4,
         true,
@@ -2230,6 +2343,11 @@ impl Pin {
 /// long run's envelope in both directions (header, "S1c after A7b"). The RELEASE pin was
 /// re-pinned a third time, DOWN, after the default SIMD flip (2026-09-18, same
 /// toolchain): the new long run's envelope (header, "S1c after the default SIMD flip").
+/// Both S1c pins were re-pinned again, +1 scope and +1 chunk, after the default
+/// parallel narrowphase (L5 C4, 2026-09-21, same toolchain) — the release pin's fourth
+/// re-pin, the debug pin's second: the narrowphase's one dispatch scope and its one
+/// block, on every frame of both long runs (header, "S1c after the default parallel
+/// narrowphase").
 fn pins() -> [Pin; 12] {
     // An App frame: one install frame (a `ScopeShared` + one chunk) and at most
     // one injector block — the block arrives once per 63 dispatcher-side pushes,
@@ -2314,12 +2432,17 @@ fn pins() -> [Pin; 12] {
             // tasks, and all 4,352 frames read 229 chunks, dispatch MAX 363. The rule
             // keeps no upward headroom, so 241 / 375 went with it (header, "S1c after
             // the default SIMD flip").
+            // RE-PINNED +1 / +1 after the default parallel narrowphase (L5 C4,
+            // 2026-09-21): the narrowphase's one `pool.scope` and its one block on
+            // every one of 4,352 long-run frames (134 / 230, dispatch MAX 365), its own
+            // counter +1 on each, the colours unmoved (header, "S1c after the default
+            // parallel narrowphase"). No headroom either way.
             Pin {
                 scene: "S1c",
                 workers: 4,
-                scope: (133, 133),
-                chunk: (229, 229),
-                dispatch_max: 363,
+                scope: (134, 134),
+                chunk: (230, 230),
+                dispatch_max: 365,
                 other_per_frame: 0,
                 realloc_sum: 0,
             }
@@ -2331,12 +2454,16 @@ fn pins() -> [Pin; 12] {
             // window, sets the top. The same dispatch counter as the release pin
             // accounted for every non-install scope frame on every frame. The
             // release pin's shape: the long run's envelope, ZERO upward headroom.
+            // RE-PINNED +1 / +1 after the default parallel narrowphase (L5 C4,
+            // 2026-09-21): the narrowphase's one scope and one block on every frame
+            // of the 4,352-step debug long run, its counter +1 on each (header, "S1c
+            // after the default parallel narrowphase").
             Pin {
                 scene: "S1c",
                 workers: 4,
-                scope: (97, 109),
-                chunk: (97, 109),
-                dispatch_max: 219,
+                scope: (98, 110),
+                chunk: (98, 110),
+                dispatch_max: 221,
                 other_per_frame: 1,
                 realloc_sum: 0,
             }
