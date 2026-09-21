@@ -179,9 +179,18 @@ The repair belongs in those two crates, not in the gate.
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **328 sites (178 unconditional +
-150 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-19 on the parallel-narrowphase lane after
-its L2 calibration.** The last move, 321 → 328, is that calibration's seven
+The four commands above run **none** of the `#[ignore]`d tests — **333 sites (183 unconditional +
+150 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-21 on `merge/ke16-into-ecsnative` @
+`ff64c6be`, the union of the light-table and parallel-narrowphase lanes.** The last move,
+328 → 333, is that union and nothing else: five plain sites, none removed, none `cfg_attr`,
+attributed by `git diff` against each merge's second parent — the light-table lane's **+4
+`gpu-windowed:`** in `boyko_app` (`sdf_marcher_sun.rs` ×3 and `unwritten_shadow_map_gate.rs`'s
+`unslotted_punctual_lights_never_sample_the_atlas`) and the narrowphase lane's **+1 plain `slow:`**
+in `boyko_physics/tests/narrowphase_parallel_equivalence.rs`
+(`jolt_pyramid_parallel_narrowphase_is_bit_identical`, L5 C3). The light-table lane's own "324"
+was 320 + 4 on its branch point, which predates the L2 calibration's +7 and the simd_solve +1; an
+independent enumeration reproduces 333 / 183 / 150 across 10 crates and 1,642 `.rs` files walked.
+The move before it, 321 → 328, is the parallel-narrowphase lane's L2 calibration: seven
 `cfg_attr(miri, "miri-slow: …")` sites in `broadphase_select_p3.rs`: `GRID_LO`/`GRID_HI` moved from
 96/192 to 2,700/3,000, so the six existing tests, which size their scenes from the band, now step
 2,692–3,016 spheres, and the new G-L2-1 steps the 1,241-body Jolt pyramid. The move before it,
@@ -225,16 +234,25 @@ it, per-binary with `--test-threads=1`. It covered **135 tests** when it was wri
 `boyko_app`, `boyko_render` and `boyko_rhi_vulkan`; **that count has NOT been re-taken on this
 line**, and it cannot be re-derived from the reason strings (see the ⚠ below), so it is left as the
 historical figure rather than guessed forward. What IS mechanical today: those three crates hold
-**155 of the 178 plain sites** (`boyko_app` 98, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
-2026-09-19; 145 of 172 on 2026-09-17, the ten since being the boot-validation lane's `gpu-windowed:`
-tests in `boyko_app`), which is the population this leg is drawn from, not the leg itself. Four of them need a
-non-default cargo feature and are not even *compiled* otherwise (`--features hwrt` ×3,
-`--features spec_constant_smoke` ×1); most of the rest additionally sit behind `#![cfg(windows)]`
-and vanish on Linux. There is no single command — each binary has its own env-var protocol in its
-module header (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
+**159 of the 183 plain sites** (`boyko_app` 102, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
+2026-09-21 on the union; 155 of 178 on 2026-09-19, the four since being the light-table lane's
+`gpu-windowed:` tests in `boyko_app`; 145 of 172 on 2026-09-17, the ten between being the
+boot-validation lane's), which is the population this leg is drawn from, not the leg itself. The
+other 24 plain sites are `boyko_ecs` 10, `boyko_serialize` 5, `boyko_physics` 3, `boyko_sdf_math` 2,
+`boyko_ui` 2, `boyko_log` 1, `boyko_threadpool` 1. **Five** of the 159 need a non-default cargo
+feature and are not even *compiled* otherwise: `--features hwrt` ×4
+(`boyko_rhi_vulkan/tests/hwrt_blas_smoke.rs` 3, and `boyko_app/tests/asset_streaming_f7_rt_cap_headless.rs`
+1 — a `#![cfg(feature = "hwrt")]` file present since `b8d8b162`, 2026-07-10, so the "×3" this
+paragraph carried until 2026-09-21 was an undercount from the day it was written, not a new site)
+and `--features spec_constant_smoke` ×1. **121 of the 183** plain sites sit in files under
+`#![cfg(windows)]` and vanish on Linux (the earlier "most of the rest" was never counted). There is
+no single command — each binary has its own env-var protocol in its module header
+(`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
 **Leg: Miri.** `cargo +nightly miri test` already carries **149** of the ignores (measured
-2026-09-19 on the parallel-narrowphase lane after its L2 calibration) — the **148** `cfg_attr` sites
+2026-09-19 on the parallel-narrowphase lane after its L2 calibration and re-measured unchanged
+2026-09-21 on the union: neither merged lane added a `cfg_attr` site, so the 150 did not move and
+the per-cfg split 142 / 6 / 2 is the same) — the **148** `cfg_attr` sites
 whose cfg is `miri` (142) or `any(miri, debug_assertions)` (6), plus `miri_fixed_loop`'s one plain
 ignore. The `miri` sites run
 *natively* in both profiles and are skipped only under Miri; the `any(miri, debug_assertions)`
@@ -258,8 +276,15 @@ cargo test --release -p boyko-physics --no-fail-fast
 ```
 
 In it `sleep_settles_box_piles` must print `running 13 tests` and `12 passed; 0 failed; 1 ignored`
-(measured 2026-09-19; the one ignore is its `generator:`); that binary takes ~80 s, ~73 s of it A7-R1 (msvc,
-2026-09-18). `-- --ignored` in a debug build is NOT their leg: the debug build is exactly where
+(measured 2026-09-19 and again 2026-09-21 on the union; the one ignore is its `generator:`); that
+binary took ~80 s, ~73 s of it A7-R1 (msvc, 2026-09-18), and 141 s on 2026-09-21 — wall time, not a
+gate. The whole leg on 2026-09-21: 52 binaries, **505 passed; 0 failed; 3 ignored** — the
+`deferred:` AVX2 signed-zero proptest, the `generator:` flicker histogram, and the narrowphase lane's
+`jolt_pyramid_parallel_narrowphase_is_bit_identical`, a **plain** `slow:` site this leg does NOT
+run: its own reason says "run in release with `-- --ignored`", so its leg is
+`cargo test --release -p boyko-physics --test narrowphase_parallel_equivalence -- --ignored`, the
+second plain `slow:` site in the tree after `boyko_app/tests/app12_timer_resolution.rs`.
+`-- --ignored` in a debug build is NOT the six's leg: the debug build is exactly where
 they are ignored, and it would run them unoptimized.
 
 **At least 24 ignored tests belong to no leg at all**, and must not be swept into one. Six were
@@ -279,7 +304,7 @@ not a census: the 147 plain reasons that carry no prefix have not been classifie
 ⚠️ **The device-free leg is one test, and it is an explicit invocation rather than a filter,
 because the partition CANNOT be derived from the reason strings.** A keyword classifier over
 `{GPU, RTX, Vulkan, windowed, device, dispatch}` put 10 on the device-free side — of the 143 plain
-sites the tree held when the experiment was run, 178 today — and **8 of those 10 are wrong**, wrong
+sites the tree held when the experiment was run, 183 today — and **8 of those 10 are wrong**, wrong
 in the direction that produces a green:
 
 - `negative_chained_barrier_hazard` and `a5_gpu_off_vs_on_wall_clock_ab` **do** need a device; their
@@ -301,22 +326,38 @@ a custom `#[global_allocator]` — where `miri-slow` means it would finish, give
 A6 lane's, all `cfg_attr(miri, …)`), `generator`, `deferred`, `flaky`. **The claim that the tree
 maps onto it "exactly" was true of a 143-site tree and is not true now:** that mapping (135
 `gpu*`/`feature`, 1 `solo`, 1 `miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky`) sums to 143
-against **178** plain sites today.
-The migration has started at the sites, not in this list: **31 of the 178 plain reasons already
-carry a prefix** — 17 `deferred:`, 12 `gpu-windowed:`, 1 `slow:`, 1 `generator:` (measured
-2026-09-18 after the boot-validation merge, whose ten new device tests all carry `gpu-windowed:`;
-the A7 merge before it removed four `deferred:` plain sites by resolving them) — and the other 147
-do not. So the migration is still mechanical *per site*, and afterwards each leg is a `grep` and
-every new ignore picks its own leg at the site; what it is not is bookkeeping already done.
+against **183** plain sites today.
+The migration has started at the sites, not in this list: **36 of the 183 plain reasons already
+carry a prefix** — 17 `deferred:`, 16 `gpu-windowed:`, 2 `slow:`, 1 `generator:` (measured
+2026-09-21 on the union; 31 of 178 on 2026-09-18 after the boot-validation merge, whose ten new
+device tests all carry `gpu-windowed:`; the light-table lane then added four `gpu-windowed:` and
+the narrowphase lane one `slow:`, so every plain site the two lanes brought arrived prefixed; the
+A7 merge before them removed four `deferred:` plain sites by resolving them) — and the other 147
+do not, the same 147 as on 2026-09-18. The 16 `gpu-windowed:` are `boot_validation_clean.rs` 7,
+`unwritten_shadow_map_gate.rs` 4, `sdf_marcher_sun.rs` 3, `forward_teardown_destroys_forward_sets.rs`
+1, `vb_teardown_destroys_boot_resources.rs` 1. So the migration is still mechanical *per site*, and
+afterwards each leg is a `grep` and every new ignore picks its own leg at the site; what it is not
+is bookkeeping already done.
+
+The `cfg_attr` side is further along and has already outgrown the list. Of the 150 (measured
+2026-09-21): **92 `miri-slow:`, 19 `instrument:`, 9 `tractability:`, 6 `miri-unsupported:`, 6
+`slow:`, 1 `miri-arm:`, 17 with no prefix.** `instrument:` (the `boyko_threadpool` `block.rs`
+recording-allocator tape), `tractability:` and `miri-arm:` — **29 sites** — are prefixes the closed
+vocabulary above does not contain, and the census's own error text uses `tractability:` as its
+example; the census enforces non-emptiness only, so nothing flags them. Either the list grows or
+those sites are re-prefixed — a ruling to take before the partition becomes a `grep`, not
+bookkeeping.
 
 ⚠️ **One prefix is already being used against its own definition, and a mechanical leg built from
 it would run those tests in the wrong place.** `slow` is defined above as *device-free, wall-clock
 budget*, i.e. a `--ignored` leg — but `sleep_settles_box_piles.rs`'s G2, G6 and G7 spell
 `#[cfg_attr(any(miri, debug_assertions), ignore = "slow: …")]`, and that file's module header says
 the opposite for them: they run in the ordinary **release** test run, and `-- --ignored` in a debug
-build is NOT their leg. Harmless while the census only enforces non-emptiness; it bites the day the
-partition becomes a `grep`. Whichever ruling makes the prefixes mechanical has to say which class a
-release-only-but-device-free test takes.
+build is NOT their leg. The two **plain** `slow:` sites (`app12_timer_resolution.rs`,
+`narrowphase_parallel_equivalence.rs`) use the prefix as defined; the six `cfg_attr(any(miri,
+debug_assertions))` `slow:` sites do not — the same word names two legs. Harmless while the census
+only enforces non-emptiness; it bites the day the partition becomes a `grep`. Whichever ruling
+makes the prefixes mechanical has to say which class a release-only-but-device-free test takes.
 
 ## Target platform
 

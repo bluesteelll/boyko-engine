@@ -18,6 +18,121 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## RESOLVED 2026-09-21 — Rung A0: both `claude/trusting-ramanujan-0f8927` commits are OBSOLETE; nothing is cherry-picked, one idea is owed in E4's shape
+
+Rung A0 of the unified plan asked whether the two non-equivalent commits on
+`claude/trusting-ramanujan-0f8927` — `6a9871bb` "fix(ecs): event-lane width hazard + worker-panic
+propagation" and `867dd734` "docs: OPEN-QUESTIONS.md seed", base `e65a5673` — merge into this line
+or are ruled obsolete. The code-reviewer read the worktree, this line (`D:/wt/joltab` @ `ff64c6be`)
+and the plan; no cargo was run (timing window). Ancestry by `git`: `e65a5673` IS an ancestor of
+`ff64c6be`; the two commits are NOT; A2 (`1693234d`, `fix/pool-panic-and-reservoir-loom`) IS, via
+`e3d077c9` → `cb5fbf4c`.
+
+**Ruling: both OBSOLETE.** Nothing is cherry-picked. The branch is pushed, so the commits stay
+reachable after the worktree is pruned; the prune is allowed once the orchestrator accepts the two
+verdicts (04 s4).
+
+**`6a9871bb` — obsolete in all three halves, each for a different reason.**
+
+* *Worker-panic half — superseded by A2, a strict superset.* The commit wraps the system body in
+  `catch_unwind(AssertUnwindSafe(..))`, publishes completion unconditionally, then `resume_unwind`s
+  into `Scope`; A2 does it with `SystemRunGuard` (a Drop guard: `finish()` on the normal path, the
+  unwind path publishes, restores the TLS depth first, claims `panicked` first-wins), adds
+  `cancel_after_panic` so the FIRST panic is the one delivered and the apply window does not run
+  over a panicked frame (the commit leaves it free to — its dispatcher keeps going and applies the
+  panicked system's commands), and `Scope::drop` decides by `body_returned`, not
+  `thread::panicking()`. Tests: the commit's one test with no watchdog (a regression HANGS it red)
+  against A2's 18 under an in-test 10 s `DEADLINE` in
+  `crates/boyko_ecs/tests/a6_schedule_panic_propagation.rs` plus the threadpool's 14 + loom + Miri
+  receipts; the commit's test is contained in two of them. Both hunks edit the same `scope.spawn`
+  closure, so a cherry-pick conflicts and the resolution is "take the line's side" in full.
+* *Constants half — superseded by KE8.* `MAX_EVENT_THREADS = 65` plus
+  `const _: () = assert!(MAX_WORKERS < MAX_EVENT_THREADS)` is already on the line
+  (`crates/boyko_ecs/src/ecs/constants.rs`); the commit's `MAX_WORKERS as u32 + 1` is the same value
+  on the same lines — conflict, redundant.
+* *Lane-gate half — the hazard is CONFIRMED live on the line, and the commit's CONTRACT contradicts
+  ruling E4.* Live: `EcsMaster::new` hard-wires `EventDispatcher::new(1)`, `default_thread_count`
+  has no setter, `App::with_pool` does not tell the dispatcher the pool width; an `EventWriter` on
+  worker `k >= n` indexes lane `k` of `n` — debug assert, release out-of-bounds panic, and which
+  worker the scheduler picks decides whether it fires (the flaky-red class; before A2 a silent
+  hang). Four `aether_tests` files (`a1_bundle_event.rs`, `a3_machine.rs`,
+  `a4_machine_hierarchy.rs`, `r2_chart_arbitration.rs`) work around it with
+  `MAX_EVENT_LANES = 64`, which fails the same way on a 64-worker box. Ruling **E4**
+  (`docs/aether-v2/DECISIONS.md:482-537`, 2026-08-30, delegated from ballot AB-2) measured the same
+  hazard (release, 4-worker pool, `preregister_event_default`, 64 sends → 3 panicked) and ruled
+  RAISE: effective lanes `max(N, worker_count + 1)`, resolved where the pool is first known,
+  reported once at boot — and REJECTED boot refusal by name ("one source that is correct on a
+  4-core laptop becomes unbootable on a 64-core server, machine-dependently … strictly worse").
+  The commit refuses boot: `preregister` returns `Err(EventConfigTooFewLanes { lanes, required })`,
+  and its two gate tests assert exactly that, so they cannot be kept either. Its argument against a
+  clamp ("silently reintroduce contention") does not apply to E4's shape: raising ADDS lanes and is
+  reported. Merging it would settle a fork silently against the line's own decisions record. Of the
+  commit's 13 files, five conflict textually with the line, one hunk drops wholesale, and
+  `docs/FEATURE_MAP.md` / `docs/SYSTEMS.md` are anchor docs to be redone by hand, never UNION.
+
+**Carried forward as owed work in E4's shape — NOT a merge (rung unassigned; question 1 below):**
+
+1. `EventDispatcher::set_default_thread_count(n)` in `event_dispatcher.rs`; keep the commit's
+   ordering rule "refuse after a registration" — it makes the `App` wiring site the only site, and
+   E4's feasibility argument depends on that order.
+2. `App::with_pool` wires `pool.worker_count() + 1` before any plugin runs. `worker_count()` is
+   `u32`, clamped to `[1, 64]`, so `+1 <= 65 = MAX_EVENT_THREADS` holds; the commit's
+   `expect("invariant: …")` form is honest.
+3. In `preregister`: RAISE `cfg.thread_count` to `max(cfg.thread_count, default_thread_count)` and
+   report once — not `Err`. The raise also puts `send_event`'s dispatcher lane
+   (`default_thread_count - 1`) on a real lane in `App`-hosted worlds, which E4's probe showed it
+   never reaches today.
+4. Red-first tests rewritten, not copied: `App::with_threads(2)` + `preregister_event_default` →
+   `events().default_thread_count() == 3` and events flow from both workers
+   (`preregister_event_default_sizes_to_pool_and_flows` is reusable as-is); `App::with_threads(2)`
+   + `default_for(2)` → registers with 3 lanes and one boot log line, not an `Err`. The A2 suite's
+   `DEADLINE` form, not a "run with a timeout wrapper" header.
+5. Sweep: the four `aether_tests` `MAX_EVENT_LANES = 64` sites become
+   `default_thread_count()`-derived; `app_multi_schedule.rs:217`, `:332` →
+   `preregister_event_default`. There is NO production `preregister_event` site on the line (grep
+   of `crates/*/src`, `src/`): the hazard bites test authors, not the shipped engine, and A2 already
+   makes their failure loud.
+
+Scope note the assignee carries: D-E20 (`02-ORDER-OF-WORK.md:181`; U-21; H-02) keys lanes by
+WRITER at `init_state` in registration order and makes `send_event` dispatcher-only — under it
+there is no `worker_count + 1` requirement, so items 1–3 are interim and D-E20 deletes them (the
+plan's A1/A1b "interim code, U5/U7 delete it" pattern). `app.rs` is locked by D-E8/D-E9/D-E22, not
+D-E20; landing item 2 adds `app.rs` to D-E20's deletion surface and must be named there.
+
+**`867dd734` — obsolete.** This file already cites the seed by hash and names both its entries
+(the 2026-08-21 entry "The owner channel exists twice", below, now marked resolved); an add/add
+merge of a 40-line file with its own H1 and its own convention ("resolved entries move to the
+bottom") into a 7,700-line descending-chronology file is exactly the "union re-imports pre-ruling
+text" hazard (04 s2). Entry 1's DECISION was closed by history — `master` fast-forwarded on
+2026-09-07 carrying `clippy.toml` — and its MECHANISM paragraph, the only thing at risk of loss, is
+now appended to the 2026-08-21 entry. Entry 2, the observation that `send_event` routes the
+dispatcher to `default_thread_count - 1` while `EventWriter::send` routes it to
+`buffer.thread_count - 1` — two lanes when a type is registered wider than required, both
+single-writer, no race — is not on the line in this form; E4's probe recorded the adjacent,
+stronger fact (`send_event` never reaches the reserved lane at all today). After E4 it stays true
+for over-wide registrations (the `aether_tests` 64-lane sites on an 8-worker pool: lanes 8 and 63);
+D-E20 dissolves it. Worth one sentence in the E4 implementation notes, nothing else.
+
+**Two questions this ruling leaves open — orchestrator's, not the reviewer's:**
+
+1. **Which rung owns E4's setter + wiring (items 1–3)?** The unified plan does not reference
+   E4 / AB-2 / KE8, and D-E20 retires the worker-id lane model the floor exists for. Three
+   consistent options: (a) fold E4 into D-E20 and let writer lanes make the floor moot (the aether
+   `MAX_EVENT_LANES = 64` sites stay as they are until then); (b) land items 1–3 as an interim S
+   rung in A5's batch, deletion named in D-E20, `app.rs` added to its lock set; (c) leave it on
+   Aether's KE8 row (`docs/aether-v2/KERNEL-BACKLOG.md:47`) outside the plan. The fact that settles
+   it: whether any rung before D-E20 adds a PRODUCTION `preregister_event` site on an `App` with
+   W >= 2 — today there is none.
+2. **Does ruling E4 survive rev 6.1 of the plan at all, given D-E20?** If "D-E20 supersedes E4",
+   `docs/aether-v2/KERNEL-BACKLOG.md:47` and `docs/aether-v2/DECISIONS.md:482` should say so, or a
+   later reader implements E4 into a lane model that no longer exists.
+
+The plan's A0 row (`UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md`) lives on the main checkout, not on
+this line, and is updated at A8. The review itself is on the orchestrator's board, not in the tree;
+everything load-bearing from it is reproduced above.
+
+---
+
 ## 2026-09-21 — What R4 / R4b leave to the kernel lane K: the pairs the light-table lane did not order, and why
 
 Lane `fix/light-table-defects`, R4-frame-order and R4b-open-edges. The diagnosis behind R4 (an
@@ -5334,7 +5449,7 @@ both directions and the shipped form's soundness rests on the derivation.
 
 ---
 
-## The owner channel exists twice, and the copies have diverged (2026-08-21)
+## The owner channel exists twice, and the copies have diverged (2026-08-21) — RESOLVED 2026-09-21 (rung A0: both commits OBSOLETE, neither merge)
 
 **Measured, not suspected.** `git merge-tree --write-tree feat/multi-paradigm-render
 claude/trusting-ramanujan-0f8927` reports five conflicts, and one of them is an **add/add on this
@@ -5365,6 +5480,27 @@ The kernel conflict is the same either way; the difference is which history carr
 **Not started because** the main checkout currently holds ~484 lines of live uncommitted work in
 `crates/boyko_rhi_vulkan/src/present/targets.rs` and `device.rs`. A kernel merge wants a clean
 tree and its own worktree.
+
+**Ruled 2026-09-21 (rung A0 of the unified plan; the code-reviewer's review, accepted by the
+orchestrator): neither route.** Both `claude/trusting-ramanujan-0f8927` commits are OBSOLETE —
+`6a9871bb`'s panic half is a strict subset of A2, its lane gate contradicts ruling E4, and
+`867dd734`'s seed is exactly the union hazard this entry names; the full ruling is the 2026-09-21
+A0 entry at the top of this file. What the seed held, appended here so the branch's prune loses
+nothing:
+
+* **Entry 1 (clippy config leaks across nested worktrees) — resolved by history, not by a merge.**
+  Its option 1, "merge the hot-path ban to master", happened when `master` fast-forwarded on
+  2026-09-07 (`7e908c87` carries `clippy.toml` from `3b3f9ee6`; the seed's base `e65a5673` did
+  not), so every branch cut from `master` now carries the same config, and the plan's lanes live in
+  `D:/wt/*`, outside the ancestor walk from `D:/claude/BoykoEngine`.
+* **Mechanism (recorded nowhere else on this line):** a worktree nested under `.claude/worktrees/`
+  inherits the parent checkout's `clippy.toml` through clippy's ancestor-directory search;
+  `CLIPPY_CONF_DIR` does NOT stop the walk; a local empty `clippy.toml` does (nearest wins).
+  Measured as 73 false `disallowed_types` errors across `boyko-macros`, `boyko-threadpool` and
+  `boyko_shaderdsl`, whose aborted lib lints then masked their dependents.
+* **Residual exposure: nested worktrees only** — a worktree under the checkout on a branch whose
+  `clippy.toml` differs from the parent's. Entry 2 (two distinct dispatcher-owned lanes) is carried
+  in the A0 entry, where it belongs with ruling E4 and D-E20.
 
 ---
 
