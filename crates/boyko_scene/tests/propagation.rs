@@ -28,7 +28,7 @@
 //! fully exercised. Run under tree-borrows with `-Zmiri-ignore-leaks`:
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-scene descent_two_deep_matches_hand_computed
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-scene descent_two_deep_matches_hand_computed
 //! ```
 //! `-Zmiri-ignore-leaks` isolates the Tree-Borrows signal from the `App` →
 //! `ThreadPool` `Arc` teardown leak — an allocator artifact orthogonal to TB,

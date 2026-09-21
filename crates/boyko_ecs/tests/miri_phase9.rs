@@ -1,6 +1,6 @@
 //! Phase 9 Wave 7 Step 19 — Miri test suite for the parallel scheduler.
 //!
-//! Designed for execution under `cargo +nightly miri test --test miri_phase9`
+//! Designed for execution under `cargo +nightly-x86_64-pc-windows-msvc miri test --test miri_phase9`
 //! with `MIRIFLAGS=-Zmiri-tree-borrows` (workspace `.cargo/config.toml`).
 //! The tests exercise the Phase 9 unsafe surface that Miri can validate
 //! cheaply on a single thread:

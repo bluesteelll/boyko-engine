@@ -1,6 +1,6 @@
 //! Phase 12.5 Track B — Miri suite for the direct query API and cache.
 //!
-//! Run under `cargo +nightly miri test --test miri_phase12_5_track_b`. The
+//! Run under `cargo +nightly-x86_64-pc-windows-msvc miri test --test miri_phase12_5_track_b`. The
 //! tests are NOT `#[cfg(miri)]`-gated; they double as cheap smoke tests
 //! under the regular `cargo test` harness (mirrors
 //! `tests/miri_phase8_5.rs`).

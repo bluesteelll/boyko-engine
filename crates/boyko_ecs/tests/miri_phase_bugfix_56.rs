@@ -4,7 +4,7 @@
 //! Run via:
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test miri_phase_bugfix_56
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_phase_bugfix_56
 //! ```
 //!
 //! `-Zmiri-ignore-leaks` masks the pre-existing #53 by-design spawn-cache leak

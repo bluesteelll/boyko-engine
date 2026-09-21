@@ -4,7 +4,7 @@
 //! Run via:
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test miri_pool_growth
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_pool_growth
 //! ```
 //!
 //! `-Zmiri-ignore-leaks` is needed ONLY for the EcsMaster churn test, which

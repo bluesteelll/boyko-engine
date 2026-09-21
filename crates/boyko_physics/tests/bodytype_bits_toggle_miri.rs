@@ -5,7 +5,7 @@
 //! The full pipeline (`bodytype_bits_toggle.rs`) spins up `boyko_threadpool`, whose
 //! spin loop is intractable under Miri (the pool is already loom + Miri proven in
 //! the ECS Phase-9 series). These tests drive ONLY `&mut EcsMaster` + `world.query`
-//! directly — NO threadpool — so `cargo +nightly miri test` validates the new
+//! directly — NO threadpool — so `cargo +nightly-x86_64-pc-windows-msvc miri test` validates the new
 //! `IsEnabled` fetch path, the toggle RMW, and the column NULL / page deref for UB
 //! under Tree Borrows.
 //!

@@ -1049,7 +1049,7 @@ impl IndexMut<ArchetypeId> for ArchetypeBundle {
 mod miri_tests {
     //! Miri-targeted tests for Phase 7 Step 4 invariants. Compiled in normal
     //! `cargo test` runs (acting as smoke tests) and exercised under
-    //! `cargo +nightly miri test` for UB / retag detection.
+    //! `cargo +nightly-x86_64-pc-windows-msvc miri test` for UB / retag detection.
 
     use super::*;
     use crate::ecs::core::component::component_registry;
@@ -1301,7 +1301,7 @@ mod miri_tests {
         // Drop the bundle: the bitset walk must hit only id1's and id3's
         // slots. Miri's pointer-validity check trips on `drop_in_place` of
         // an uninitialised slot, so if the walk were to visit id2's freed
-        // slot, this test would fail under `cargo +nightly miri test`.
+        // slot, this test would fail under `cargo +nightly-x86_64-pc-windows-msvc miri test`.
         drop(bundle);
     }
 

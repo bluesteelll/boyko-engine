@@ -1,7 +1,7 @@
 //! Phase 8c+8d Step 12 — Miri test suite for the `Command` / `CommandQueue`
 //! / `Bundle` / `FunctionSystem` subsystem.
 //!
-//! These tests are written to be run under `cargo +nightly miri test`. They
+//! These tests are written to be run under `cargo +nightly-x86_64-pc-windows-msvc miri test`. They
 //! exercise the unsafe code paths added in Steps 6, 7, and the apply/glue
 //! pipeline; they assert that no UB (uninit reads, retag failures, double-
 //! frees, aliased mutable references, padded-bytes / packed-reference
@@ -354,7 +354,7 @@ fn miri_command_queue_padded_command_no_uninit_ub() {
 ///
 /// Miri's Tree Borrows + Stacked Borrows models would surface such a
 /// regression as a retag failure on the `&mut C` mint. The success of
-/// this test under `cargo +nightly miri test` is the CQ-PACK1 lock-down.
+/// this test under `cargo +nightly-x86_64-pc-windows-msvc miri test` is the CQ-PACK1 lock-down.
 #[test]
 fn miri_command_queue_no_packed_reference_creation() {
     let _serial = acquire_test_lock();

@@ -72,6 +72,17 @@
 # launched. A receipt without that line is reported as LAUNCH-FAILED and is NOT
 # counted as red.
 #
+# The exit-code term itself can go VACUOUS on the gate host, and did. Under
+# Windows PowerShell 5.1 (the only PowerShell on the workstation; `pwsh` is not
+# installed) a `Start-Process -PassThru` object reports `ExitCode` as $null
+# after `WaitForExit()` unless its `Handle` was read first, and PowerShell
+# evaluates `$null -ne 0` as $true. MEASURED 2026-09-21: every seed printed
+# `exit=` (empty) and the term passed -- including on a copy of this script
+# pointed at a binary that exits 0. The verdict was carried by the other
+# predicates. The drive loop below reads `$proc.Handle` before waiting (the
+# documented idiom) and the term is written so that a $null exit code can
+# never satisfy it.
+#
 # SPELLED IN FULL, because what a bare `+nightly` selects on this box has flipped
 # twice with no commit to notice: rustup's default_host_tuple was msvc until
 # 2026-09-07 13:56, gnu until 2026-09-17 14:27, and msvc since (both by
@@ -107,6 +118,7 @@
 # Usage
 # =============================================================================
 #
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tb_neg_gate.ps1   # Windows PowerShell 5.1, the gate host
 #   pwsh -NoProfile -File scripts/tb_neg_gate.ps1
 #
 # Receipts are written to `docs/threadpool/receipts/tb-neg-m2w-<seed>.stderr` and
@@ -269,8 +281,13 @@ try {
             -NoNewWindow -PassThru `
             -RedirectStandardError $receipt `
             -RedirectStandardOutput $stdoutTmp
+        # Read the handle BEFORE waiting: on Windows PowerShell 5.1 a `-PassThru`
+        # process whose Handle was never touched reports `ExitCode` as $null
+        # after `WaitForExit()`, and `$null -ne 0` is $true (see the header).
+        $null = $proc.Handle
         $proc.WaitForExit()
         $exitCode = $proc.ExitCode
+        $exitText = if ($null -eq $exitCode) { '<none>' } else { "$exitCode" }
 
         if (Test-Path -LiteralPath $stdoutTmp) {
             Get-Content -LiteralPath $stdoutTmp | ForEach-Object { Write-Host $_ }
@@ -335,11 +352,14 @@ try {
         $freedBy = (Test-AnyLine $lines 'boyko_threadpool::block::ScopeBlock::free_all') `
             -and (Test-AnyLine $lines 'as std::ops::Drop>::drop')
 
-        $red = ($exitCode -ne 0) -and $launched -and $ub -and $kind -and $protector -and $accessed -and $freedBy
+        # A $null exit code is NOT "non-zero": the term requires a real code.
+        $exitedNonZero = ($null -ne $exitCode) -and ($exitCode -ne 0)
+
+        $red = $exitedNonZero -and $launched -and $ub -and $kind -and $protector -and $accessed -and $freedBy
 
         $results += [pscustomobject]@{
             Seed      = $seed
-            Exit      = $exitCode
+            Exit      = $exitText
             Launched  = $launched
             LinkDeath = $linkDeath
             Ub        = $ub
@@ -352,11 +372,11 @@ try {
         }
 
         if ($red) {
-            Write-Host "seed $seed : RED, attributed (exit=$exitCode)" -ForegroundColor Green
+            Write-Host "seed $seed : RED, attributed (exit=$exitText)" -ForegroundColor Green
         } elseif (-not $launched) {
-            Write-Host "seed $seed : LAUNCH-FAILED -- the binary never ran; exit=$exitCode is NOT a verdict$(if ($linkDeath) { ' (linker death detected)' })" -ForegroundColor Yellow
+            Write-Host "seed $seed : LAUNCH-FAILED -- the binary never ran; exit=$exitText is NOT a verdict$(if ($linkDeath) { ' (linker death detected)' })" -ForegroundColor Yellow
         } else {
-            Write-Host "seed $seed : NOT RED FOR THE DECLARED REASON (exit=$exitCode ub=$ub kind=$kind protector=$protector accessed=$accessed freed_by=$freedBy)" -ForegroundColor Red
+            Write-Host "seed $seed : NOT RED FOR THE DECLARED REASON (exit=$exitText ub=$ub kind=$kind protector=$protector accessed=$accessed freed_by=$freedBy)" -ForegroundColor Red
         }
     }
 }

@@ -4,7 +4,7 @@
 //!
 //! ```powershell
 //! $env:MIRIFLAGS = "-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test miri_fixed_loop
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_fixed_loop
 //! ```
 //!
 //! `-Zmiri-ignore-leaks` for the usual `Arc<ThreadPool>` worker-thread

@@ -4,7 +4,7 @@
 //! Run via (NOTE the `-Zmiri-ignore-leaks` — see below):
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test miri_phase22
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_phase22
 //! ```
 //!
 //! # Why `-Zmiri-ignore-leaks`

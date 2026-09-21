@@ -154,7 +154,7 @@ mod tests {
     //! These drive `tangent_basis`, `effective_mass`, and the `BodyEffective`
     //! point-velocity / apply-impulse pair purely through `core` f32 arithmetic —
     //! NO threadpool, NO schedule — so they run both as native `cargo test` and
-    //! under `cargo +nightly miri test --lib` (the schedule-driven W2 acceptance
+    //! under `cargo +nightly-x86_64-pc-windows-msvc miri test --lib` (the schedule-driven W2 acceptance
     //! tests in `tests/softstep.rs` spawn a worker thread and are native-only).
     //! W2 has ZERO `unsafe`, so Miri is only asserting the math touches no UB.
 

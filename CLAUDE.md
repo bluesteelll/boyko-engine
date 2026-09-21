@@ -35,7 +35,7 @@ cargo build --release                                            # release build
 cargo clippy --workspace --all-targets -- -D warnings            # linter
 cargo test --workspace --all-targets --no-fail-fast              # tests
 cargo bench                                                      # benchmarks
-cargo +nightly miri test                                         # UB detector (if nightly is installed)
+cargo +nightly-x86_64-pc-windows-msvc miri test                  # UB detector (if nightly is installed)
 ```
 
 **On the workstation, a gate run sets `TMP`/`TEMP` to `D:/wt/_targets/tmp` first** (RK-18 of the
@@ -271,7 +271,7 @@ and `--features spec_constant_smoke` ×1. **121 of the 183** plain sites sit in 
 no single command — each binary has its own env-var protocol in its module header
 (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
-**Leg: Miri.** `cargo +nightly miri test` already carries **149** of the ignores (measured
+**Leg: Miri.** `cargo +nightly-x86_64-pc-windows-msvc miri test` already carries **149** of the ignores (measured
 2026-09-19 on the parallel-narrowphase lane after its L2 calibration and re-measured unchanged
 2026-09-21 on the union: neither merged lane added a `cfg_attr` site, so the 150 did not move and
 the per-cfg split 142 / 6 / 2 is the same) — the **148** `cfg_attr` sites
