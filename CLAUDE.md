@@ -201,9 +201,13 @@ The repair belongs in those two crates, not in the gate.
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **334 sites (184 unconditional +
-150 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-21 on `merge/ke16-into-ecsnative` @
-`6b29c400`, after the A1b, hwrt shadow-origin and A3 merges.** The last move, 333 → 334, is
+The four commands above run **none** of the `#[ignore]`d tests — **335 sites (184 unconditional +
+151 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-22 on `merge/ke16-into-ecsnative` @
+`c52ad183`, after the tree-broadphase merge.** The last move, 334 → 335, is one `cfg_attr(miri,
+ignore = "miri-slow: …")` on `rent_admission_of_64_reaches_within_the_bench_cap_at_the_design_sizes`
+in `boyko_physics/tests/broadphase_tree_direct_drive.rs` (tree broadphase C3, `a46b8287`); the plain
+count did not move. The move before it, 333 → 334 (2026-09-21 @ `6b29c400`, after the A1b, hwrt
+shadow-origin and A3 merges), was
 +3 plain `gpu-windowed:` in `boyko_app/tests/taa_jitter_eval.rs` (the three hwrt shadow-origin
 gates, `978625a1`, inside `#[cfg(feature = "hwrt")]`) and −2 plain `deferred:` in
 `boyko_ecs/tests/ke13_query_view_get_ignores_dense_filter.rs` (A3, `1aaadfdc`: the KE13 `get_mut`
@@ -216,7 +220,7 @@ attributed by `git diff` against each merge's second parent — the light-table 
 in `boyko_physics/tests/narrowphase_parallel_equivalence.rs`
 (`jolt_pyramid_parallel_narrowphase_is_bit_identical`, L5 C3). The light-table lane's own "324"
 was 320 + 4 on its branch point, which predates the L2 calibration's +7 and the simd_solve +1; an
-independent enumeration reproduces 334 / 184 / 150 across 10 crates and 1,652 `.rs` files walked.
+independent enumeration reproduces 335 / 184 / 151 across 10 crates and 1,658 `.rs` files walked.
 The move before it, 321 → 328, is the parallel-narrowphase lane's L2 calibration: seven
 `cfg_attr(miri, "miri-slow: …")` sites in `broadphase_select_p3.rs`: `GRID_LO`/`GRID_HI` moved from
 96/192 to 2,700/3,000, so the six existing tests, which size their scenes from the band, now step
@@ -278,11 +282,11 @@ and `--features spec_constant_smoke` ×1. **124 of the 184** plain sites sit in 
 no single command — each binary has its own env-var protocol in its module header
 (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
-**Leg: Miri.** `cargo +nightly-x86_64-pc-windows-msvc miri test` already carries **149** of the ignores (measured
-2026-09-19 on the parallel-narrowphase lane after its L2 calibration and re-measured unchanged
-2026-09-21 on the union: neither merged lane added a `cfg_attr` site, so the 150 did not move and
-the per-cfg split 142 / 6 / 2 is the same) — the **148** `cfg_attr` sites
-whose cfg is `miri` (142) or `any(miri, debug_assertions)` (6), plus `miri_fixed_loop`'s one plain
+**Leg: Miri.** `cargo +nightly-x86_64-pc-windows-msvc miri test` already carries **150** of the ignores (measured
+2026-09-19 on the parallel-narrowphase lane after its L2 calibration as 149, re-measured unchanged
+2026-09-21 on the union, and 150 on 2026-09-22 @ `c52ad183`: the tree broadphase's C3 added one
+`cfg_attr(miri, …)` site, so the split is now 143 / 6 / 2) — the **149** `cfg_attr` sites
+whose cfg is `miri` (143) or `any(miri, debug_assertions)` (6), plus `miri_fixed_loop`'s one plain
 ignore. The `miri` sites run
 *natively* in both profiles and are skipped only under Miri; the `any(miri, debug_assertions)`
 sites run natively in RELEASE only — their leg is the physics release run below; there are six of
@@ -291,7 +295,7 @@ A6 lane's sites (2026-09-17) landed here, and so did the L2 calibration's seven 
 which is why this figure moved and the two above it did not. The two remaining `cfg_attr` sites are
 not Miri's: `profiling/reduce.rs`'s
 `not(debug_assertions)` and `tb_neg_m2w_block_reference.rs`'s `not(all(miri, feature = …))`. None of
-the 149 belong to either leg above.
+the 150 belong to either leg above.
 
 **Leg: physics release — the debug-ignored `slow:` tests.** Six tests are ignored in every debug
 build and under Miri by `#[cfg_attr(any(miri, debug_assertions), ignore = "slow: …")]`, so none of
@@ -371,8 +375,8 @@ do not, the same 147 as on 2026-09-18. The 19 `gpu-windowed:` are `boot_validati
 afterwards each leg is a `grep` and every new ignore picks its own leg at the site; what it is not
 is bookkeeping already done.
 
-The `cfg_attr` side is further along and has already outgrown the list. Of the 150 (measured
-2026-09-21): **92 `miri-slow:`, 19 `instrument:`, 9 `tractability:`, 6 `miri-unsupported:`, 6
+The `cfg_attr` side is further along and has already outgrown the list. Of the 151 (measured
+2026-09-22): **93 `miri-slow:`, 19 `instrument:`, 9 `tractability:`, 6 `miri-unsupported:`, 6
 `slow:`, 1 `miri-arm:`, 17 with no prefix.** `instrument:` (the `boyko_threadpool` `block.rs`
 recording-allocator tape), `tractability:` and `miri-arm:` — **29 sites** — are prefixes the closed
 vocabulary above does not contain, and the census's own error text uses `tractability:` as its
