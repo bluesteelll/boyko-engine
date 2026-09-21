@@ -125,7 +125,7 @@ pub(crate) fn run_check_ticks_scan(world: &mut EcsMaster) {
         // Materialise the id list onto the stack (cold path; allocation
         // budget is dominated by the per-row clamp work) to break the
         // borrow.
-        let component_ids: Vec<_> = archetype.component_ids().to_vec();
+        let component_ids: Vec<_> = archetype.table_component_ids().to_vec();
 
         let pools = archetype.component_pools_mut();
         for component_id in component_ids {
@@ -570,18 +570,30 @@ mod tests {
 
         // The premise the dense arm rests on, ASSERTED rather than assumed — and
         // the two halves point in opposite directions on purpose. A SPAWN-built
-        // archetype RETAINS the dense id in `component_ids()` (so the table walk
-        // does reach the id) but owns NO per-archetype `ComponentPool` for it
-        // (so `get_pool_mut` drops it). That second fact is what makes the dense
-        // pass purely ADDITIVE: no store can be visited by both arms.
+        // archetype RETAINS the dense id in its DECLARATION record
+        // (`all_component_ids()`), but the table walk above iterates
+        // `table_component_ids()` (KE14 D1: the signature-storage subsequence,
+        // every member owning a `ComponentPool`), which excludes the dense id
+        // by construction. That second fact is what makes the dense pass purely
+        // ADDITIVE: no store can be visited by both arms.
         assert!(
             world
                 .archetype_master()
                 .get_archetype(archetype)
                 .expect("invariant: the archetype resolves")
-                .component_ids()
+                .all_component_ids()
                 .contains(&CLAMP_DENSE_ID),
-            "premise: a spawn-built archetype RETAINS a dense id in component_ids()",
+            "premise: a spawn-built archetype RETAINS a dense id in all_component_ids()",
+        );
+        assert!(
+            !world
+                .archetype_master()
+                .get_archetype(archetype)
+                .expect("invariant: the archetype resolves")
+                .table_component_ids()
+                .contains(&CLAMP_DENSE_ID),
+            "premise: a dense id is NOT in table_component_ids(), so the archetype \
+             arm's walk never reaches it",
         );
         assert!(
             world

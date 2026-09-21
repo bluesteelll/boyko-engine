@@ -427,15 +427,15 @@ the same `test`/`jz`, so the no-callback hot path stays byte-identical (the
 0%-gate, bench-verified).
 
 **Dynamic bit maintenance** — `ArchetypeMaster::add_observer`
-([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):842)
+([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):848)
 runs an add-first walk (`iter_archetypes_mut`, raise the bit on archetypes
 containing `cid`) only when the `(kind, cid)` list went empty → non-empty;
-`remove_observer` ([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):875) runs a remove-last recompute (`flags = (flags &
+`remove_observer` ([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):892) runs a remove-last recompute (`flags = (flags &
 !bit) | (any_sibling_observes_kind ? bit : 0)`, preserving the hook bit) only
 when the list became empty. Both seed sites (`create_archetype`,
 `add_existing_archetype` [archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):477) and both walks are cross-checked by the
 `#[cfg(debug_assertions)]` bit⇔registry tripwire
-`debug_assert_observer_flags_consistent` ([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):929).
+`debug_assert_observer_flags_consistent` ([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):980).
 
 **Dispatch (the 4 `#[cold] #[inline(never)]` fire fns)** —
 [core/component/observers/dispatch.rs](../crates/boyko_ecs/src/ecs/core/component/observers/dispatch.rs):
@@ -464,16 +464,16 @@ migration paths — counted against this ledger per the Phase-14b lesson):
 
 | Site | File:line (observer calls) | Kinds |
 |------|----------------------------|-------|
-| `EcsMaster::create_entity` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):139, fires 282/302 | add, insert |
-| `EcsMaster::create_entity_at` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):357, fires 464/484 | add, insert |
-| `EcsMaster::fire_despawn_hooks` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):707, fires 790/802 | replace, remove |
-| `SpawnAtCommand::apply` | [commands/spawn_at_command.rs](../crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs):115, fires 386/406 | add, insert |
-| `InsertCommand::apply_replace_in_place` | [commands/insert_command.rs](../crates/boyko_ecs/src/ecs/core/commands/insert_command.rs):113, fires 176/201 | replace, insert |
-| `migrate_entity_insert` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):384, fires 951/970 | add, insert |
-| `migrate_entity_remove` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1166, fires 1184/1190 | replace, remove |
-| `migrate_entity_attach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1558, fires 1667/1679 | add, insert |
-| `migrate_entity_detach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1846, fires 1892/1902 | replace, remove |
-| `retag_in_place` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):2110, fires 2006/2042 | replace, insert |
+| `EcsMaster::create_entity` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):128, fires 265/279 | add, insert |
+| `EcsMaster::create_entity_at` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):334, fires 435/449 | add, insert |
+| `EcsMaster::fire_despawn_hooks` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):672, fires 754/766 | replace, remove |
+| `SpawnAtCommand::apply` | [commands/spawn_at_command.rs](../crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs):114, fires 466/480 | add, insert |
+| `InsertCommand::apply_replace_in_place` | [commands/insert_command.rs](../crates/boyko_ecs/src/ecs/core/commands/insert_command.rs):115, fires 178/203 | replace, insert |
+| `migrate_entity_insert` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):507, fires 1232/1251 | add, insert |
+| `migrate_entity_remove` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1313, fires 1471/1477 | replace, remove |
+| `migrate_entity_attach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1724, fires 1977/1989 | add, insert |
+| `migrate_entity_detach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):2022, fires 2205/2215 | replace, remove |
+| `retag_in_place` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):2291, fires 2321/2357 | replace, insert |
 
 The plan's original "6 fire sites" undercounted: Phase 14a also fires at the 4
 deferred-command apply sites (rows 4–7), so observers were silent for
@@ -549,18 +549,18 @@ via the POD `AddTagCommand`/`RemoveTagCommand`
 
 **Dynamic migration (D9)** — allocation-free id-keyed helpers in
 [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):
-`merged_archetype_id_dyn` (:1416) / `without_ids_archetype_id` (:1491, maps
+`merged_archetype_id_dyn` (:1573) / `without_ids_archetype_id` (:1654, maps
 `kept.is_empty()` → the EMPTY archetype — O3) / `migrate_entity_attach_ids`
-(:1558, zero-retained attach-FROM-empty is first-class) /
-`migrate_entity_detach_ids` (:1846) / `retag_in_place` (:2110, the present-tag
+(:1724, zero-retained attach-FROM-empty is first-class) /
+`migrate_entity_detach_ids` (:2022) / `retag_in_place` (:2291, the present-tag
 replace path). All three fire hooks + observers (ledger rows 8–10 in §3.6)
 with Phase-14a §3.4 reborrow confinement. `MAX_BUNDLE_ARITY` raised 8 → 16
-(:58, lock-step with the derive and `spawn_at_command.rs`).
+(:59, lock-step with the derive and `spawn_at_command.rs`).
 
 **Empty archetype (D5)** — entities may hold zero components. Lazy: resolved
 through `get_or_create_archetype(&[])` on first demand (no reserved constant,
 preserves the Phase-12.6 lazy `EcsMaster::new` budget). `EcsMaster::spawn_empty`
-([ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):683);
+([ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):648);
 `Commands::spawn_empty`
 ([params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):190)
 = `spawn(EmptyBundle)` — the hand-written zero-component bundle
@@ -646,19 +646,19 @@ compile-reject change detection on a bitset tag.
 
 **Signature filtering (Step 4)** — archetype construction skips any id with
 `storage_kind == Bitset`. The signature mask is built through the single shared
-`filtered_signature_mask` helper ([archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):353 — every
+`filtered_signature_mask` helper ([archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):392 — every
 non-signature-storage id is skipped there, so the registry-minted signature
 matches bit-for-bit), and the pool bundle skips the same ids at
-`Archetype::create_by_ids` (:365) and `register_component_inplace` (:527). The
+`Archetype::create_by_ids` (:405) and `register_component_inplace` (:583). The
 `enable_store` field
 ([archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):154~)
 sits on every `Archetype` (`EnableStore::new()` at both construction sites);
-`set_enable_bit` (archetype.rs:656) flips the paged bit and returns
+`set_enable_bit` (archetype.rs:759) flips the paged bit and returns
 `newly_allocated == true` only on the first column for the tag; `enable_column_ptr`
-(archetype.rs:634) hands the query fetch a borrowed `*const EnableColumn` (or
+(archetype.rs:737) hands the query fetch a borrowed `*const EnableColumn` (or
 NULL). `swap_remove_row` / remove paths fire `enable_store.swap_remove_row` only
 when `!enable_store.is_empty()` (the 0%-gate for enable-free archetypes,
-archetype.rs:1243~/:1275~/:1333~/:1356~).
+archetype.rs:1357~/:1275~/:1333~/:1356~).
 
 **The cull oracle (D2)** —
 [component/enable/enable_presence.rs](../crates/boyko_ecs/src/ecs/core/component/enable/enable_presence.rs)
@@ -702,8 +702,8 @@ before touching `archetype_master`) → flips the bit → fires
 whose `apply` calls `enable_id`/`disable_id` at the apply window. Cross-archetype
 migration copies the enable bits via the borrow-free two-phase snapshot in
 [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs)
-(`read_source_enable_bits` :137 PHASE-1 / `write_target_enable_bits` :162
-PHASE-2 / `fire_enable_column_alloc_bookkeeping` :195 O2), each gated by
+(`read_source_enable_bits` :140 PHASE-1 / `write_target_enable_bits` :165
+PHASE-2 / `fire_enable_column_alloc_bookkeeping` :198 O2), each gated by
 `EnableStore::is_empty` so an enable-free entity is byte-identical to before.
 
 **Query integration (D2/D4/D7)** — three shapes, all archetype-granularity cull
@@ -724,7 +724,7 @@ PHASE-2 / `fire_enable_column_alloc_bookkeeping` :195 O2), each gated by
   `EnableTerms` (per-view, ≤ `MAX_ENABLE_TERMS = 8`,
   [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):449) populated by
   `with_enabled` / `without_enabled` on `Query`
-  ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):200/:215)
+  ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):201/:216)
   and `QueryView`
   ([query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):283/:298);
   NEVER stored in the shared interned `QueryState` (QS1 stays term-agnostic —
@@ -1010,7 +1010,7 @@ The dual-generation design (Phase 5c) is the ArchetypeId-ABA fix:
 discovery `find_*`, `archetype_generation()` / `structural_generation()`,
 `add_existing_archetype` (477), `iter_archetypes` / `iter_archetypes_mut`,
 `clear()`, plus the observer surface documented in §3.6:
-`add_observer` (842) / `remove_observer` (875).
+`add_observer` (848) / `remove_observer` (892).
 
 ---
 
@@ -1053,10 +1053,10 @@ that declares it:
 - Construction — [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):
   `new()` (426) / `with_capacity(entity_cap, arch_cap)` (473).
 - Archetypes / spawn / despawn — [entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):
-  `create_archetype` (48) / `get_or_create_archetype` (55);
-  `create_entity(arch, &[(id, bytes)]) -> EcsResult<Entity>` (139);
-  `spawn_one::<A>` (598) / `spawn_two::<A, B>` (634) / `spawn_empty` (683);
-  `delete_entity` (814).
+  `create_archetype` (37) / `get_or_create_archetype` (44);
+  `create_entity(arch, &[(id, bytes)]) -> EcsResult<Entity>` (128);
+  `spawn_one::<A>` (563) / `spawn_two::<A, B>` (599) / `spawn_empty` (648);
+  `delete_entity` (778).
 - Bulk spawn — `spawn_batch::<B, I>` ([ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):1079).
 - Component access — [component_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs):
   `get_component_raw` (176) / `set_component_raw` (461);
@@ -1157,9 +1157,9 @@ re-export surface). The Phase-5c `QueryState` archetype-match cache and
 ### 8.1. Query / QueryView
 
 ```rust
-// query/query.rs:67
+// query/query.rs:68
 pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> { /* SystemParam */ }
-// query/query_view.rs:83
+// query/query_view.rs:84
 pub struct QueryView<'w, D: QueryData, F: QueryFilter = ()> { /* direct API */ }
 ```
 
@@ -1261,7 +1261,7 @@ pub(crate) fn archetype_passes_tag_terms(&TagTerms, &Archetype) -> bool; // :150
 ```
 
 `Query::with_tag`/`without_tag`
-([query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):168/:178)
+([query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):169/:179)
 and the `QueryView` mirrors
 ([query/query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):249/:259)
 push into a per-view, stack-only, `Copy` `TagTerms`. The shared interned
@@ -1372,7 +1372,7 @@ silently no-op). Leaf params:
 | `ResMut<'w, R>` | [params/resmut.rs](../crates/boyko_ecs/src/ecs/core/system/params/resmut.rs):42 | exclusive resource write |
 | `Local<'s, T>` | [params/local.rs](../crates/boyko_ecs/src/ecs/core/system/params/local.rs):62 | per-system state (Phase 13) |
 | `Commands<'s>` | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):97 | deferred mutation (§10) |
-| `Query<'w, 's, D, F>` | [iters/query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):67 | typed query (§8) |
+| `Query<'w, 's, D, F>` | [iters/query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):68 | typed query (§8) |
 | `EventReader<'s, E>` / `EventWriter<'s, E>` | [params/event_reader.rs](../crates/boyko_ecs/src/ecs/core/system/params/event_reader.rs):87 / [event_writer.rs](../crates/boyko_ecs/src/ecs/core/system/params/event_writer.rs):89 | events (§14) |
 
 - `UnsafeEcsCell<'w>`

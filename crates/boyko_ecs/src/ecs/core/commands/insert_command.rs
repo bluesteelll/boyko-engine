@@ -18,25 +18,23 @@ use std::ptr::NonNull;
 
 use crate::ecs::core::bundle::Bundle;
 use crate::ecs::core::commands::command::Command;
-use crate::ecs::core::commands::migration_helpers::{merged_archetype_id, migrate_entity_insert};
+use crate::ecs::core::commands::migration_helpers::{
+    DenseFireSink, MAX_DENSE_FIRE, construct_required_dense_one, merged_archetype_id,
+    migrate_entity_insert,
+};
 use crate::ecs::core::component::component_registry::{self, StorageKind};
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::component::hooks::dispatch::{
     trigger_on_add, trigger_on_insert, trigger_on_replace,
 };
+use crate::ecs::core::component::observers::ObserverKind;
 use crate::ecs::core::component::observers::dispatch::{
     fire_on_add_observers, fire_on_insert_observers, fire_on_replace_observers,
 };
-use crate::ecs::core::component::observers::ObserverKind;
 use crate::ecs::core::component::observers::entity_store::fire_entity_observers;
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::entity::entity::Entity;
 use crate::ecs::identifiers::primitives::ComponentId;
-
-/// Stack capacity for the dense-fire scratch (Dense plan D2). Mirrors the
-/// derive macro's per-bundle arity ceiling and the sibling `MAX_BUNDLE_ARITY`
-/// constants in `spawn_at_command.rs` / `migration_helpers.rs`.
-const MAX_BUNDLE_ARITY: usize = 16;
 
 /// Deferred "insert bundle `B` into existing entity" command.
 ///
@@ -61,7 +59,11 @@ impl<B: Bundle> Command for InsertCommand<B> {
         let inland = match world.entity_master.entities_inland.get(entity.id().0) {
             Some(slot) => *slot,
             None => {
-                debug_assert!(false, "InsertCommand::apply: entity {:?} never registered", entity);
+                debug_assert!(
+                    false,
+                    "InsertCommand::apply: entity {:?} never registered",
+                    entity
+                );
                 return; // EC8 silent no-op in release
             }
         };
@@ -243,7 +245,12 @@ impl<B: Bundle> InsertCommand<B> {
         // Reach `world.dense_registry` from the closure via this separate
         // `&mut *world` capture (`archetype_ptr` is a disjoint raw reborrow).
         let world_ref: &mut EcsMaster = world;
-        let mut dense_fire_buf = [(ComponentId(0), false); MAX_BUNDLE_ARITY];
+        // KE14 D3/W5: sized `MAX_DENSE_FIRE`, not `MAX_BUNDLE_ARITY`. The
+        // required pass below appends CONSTRUCTED dense required ids to this
+        // same buffer, and bundle arity is not their bound — the identical
+        // widening KE11 made on the migrating insert path, carried here with
+        // the same fail-loud overflow site instead of a bounds-check panic.
+        let mut dense_fire_buf = [(ComponentId(0), false); MAX_DENSE_FIRE];
         let mut dense_fire_n = 0usize;
         let entity_id_for_dense = entity.id();
 
@@ -258,7 +265,11 @@ impl<B: Bundle> InsertCommand<B> {
                 let newly_added =
                     store.insert_or_replace(entity_id_for_dense, bytes, current_tick);
                 store.mark_arch_present(source_archetype_id_for_dense);
-                debug_assert!(dense_fire_n < MAX_BUNDLE_ARITY);
+                if dense_fire_n >= MAX_DENSE_FIRE {
+                    crate::ecs::core::commands::migration_helpers::required_dense_fire_overflow_panic(
+                        dense_fire_n,
+                    );
+                }
                 dense_fire_buf[dense_fire_n] = (component_id, newly_added);
                 dense_fire_n += 1;
                 return;
@@ -312,6 +323,90 @@ impl<B: Bundle> InsertCommand<B> {
                 pool.write_changed_tick(row, current_tick);
             }
         });
+
+        // ── KE14 D3: the required-component pass ───────────────────────────
+        // This path had NO required pass at all, so a `#[require]` of a dense
+        // component was silently never constructed when the insert happened to
+        // resolve to the source archetype. It never panicked, which is why
+        // neither KE11 site's coverage could see it.
+        //
+        // 0%-gated by `any_requires` — alloc-free for a require-free bundle,
+        // and it is the same gate `migrate_entity_insert` uses.
+        if component_registry::any_requires(B::component_ids()) {
+            let bundle_supplied = B::component_ids();
+            let required_dense_reg = &mut world.dense_registry;
+            component_registry::for_each_required_id_excluding(bundle_supplied, |req_id| {
+                match component_registry::storage_kind(req_id.0) {
+                    StorageKind::Table => {
+                        // A required TABLE id cannot be missing here: were it
+                        // absent, `merged_archetype_id` would have produced a
+                        // target ≠ source and this insert would have migrated
+                        // instead of reaching the in-place path. Asserted rather
+                        // than handled — handling it would mean writing a column
+                        // into an archetype that does not host it.
+                        #[cfg(debug_assertions)]
+                        {
+                            // SAFETY (F1, BUG-MIGRATE-TB-1): a SINGLE-STATEMENT
+                            //   shared reborrow of ONE field through stable,
+                            //   interior-mutable slab provenance. It does not
+                            //   outlive the statement, so it cannot freeze a
+                            //   sibling-written `current_index`, and it borrows
+                            //   nothing from `world` (the `&mut dense_registry`
+                            //   above is a disjoint field).
+                            let hosted = unsafe {
+                                (*core::ptr::addr_of!((*archetype_ptr).table_component_ids))
+                                    .contains(&req_id)
+                            };
+                            assert!(
+                                hosted,
+                                "apply_replace_in_place: required TABLE id {req_id:?} absent                                  from the source archetype, yet merged_archetype_id returned                                  the source — get_or_create_archetype regression?"
+                            );
+                        }
+                    }
+                    StorageKind::Dense => {
+                        // `source_archetype_id_for_dense` IS the target here:
+                        // this path runs only when the two are equal.
+                        construct_required_dense_one(
+                            required_dense_reg,
+                            bundle_supplied,
+                            req_id,
+                            entity_id_for_dense,
+                            source_archetype_id_for_dense,
+                            current_tick,
+                            DenseFireSink {
+                                buf: &mut dense_fire_buf,
+                                len: &mut dense_fire_n,
+                            },
+                        );
+                    }
+                    StorageKind::Bitset => component_registry::required_bitset_panic(
+                        "InsertCommand::apply_replace_in_place (required-component pass)",
+                        req_id,
+                    ),
+                }
+            });
+        }
+
+        // KE14 D4b: initial enable-bit states for the NEWLY-added dense ids.
+        // This path called NO attach-flag pass whatsoever, so a dense bundle
+        // member (or a constructed dense requirement) lost its declared
+        // `flags (…)` state entirely. Applied BEFORE every POST fire in this
+        // method, so any hook observes the initial state and may override it — the ordering
+        // `migrate_entity_insert` and `EcsMaster::create_entity` both use.
+        //
+        // The table half needs no equivalent: on the in-place replace every
+        // table bundle id was already present, so nothing is newly ATTACHED and
+        // re-applying an initial state would clobber a bit the game has since
+        // toggled (the reason `apply_attach_flags_for` exists at all).
+        //
+        // `apply_attach_flags_for` self-gates on `declares_flags`, so this loop
+        // costs one cold table load per newly-added dense id in a flag-free
+        // world.
+        for &(cid, newly_added) in &dense_fire_buf[..dense_fire_n] {
+            if newly_added {
+                world.apply_attach_flags_for(entity, &[cid]);
+            }
+        }
 
         // POST-overwrite (Q7): fire `on_insert` for each TABLE bundle component
         // now that the row holds the NEW value. The closure's per-invocation
@@ -371,6 +466,10 @@ impl<B: Bundle> InsertCommand<B> {
         }
 
         // Silence unused-import warnings now that the two-pass scratch is gone.
-        let _ = (mem::size_of::<()>(), MaybeUninit::<()>::uninit, ComponentId(0));
+        let _ = (
+            mem::size_of::<()>(),
+            MaybeUninit::<()>::uninit,
+            ComponentId(0),
+        );
     }
 }

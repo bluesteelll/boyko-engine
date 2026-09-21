@@ -103,7 +103,7 @@ pub(crate) fn select_clone_ids(
         // SAFETY: `source_ptr` is stable slab provenance (caller guarantees the
         // source is live); the shared `&Archetype` view is scoped to this block.
         let source_arch: &Archetype = unsafe { &*source_ptr };
-        for &id in source_arch.component_ids() {
+        for &id in source_arch.table_component_ids() {
             // BUG-RELATIONS-CLONE-1: deny ANY relationship-target reverse index
             // generically (Children, LikedBy, …) — never byte-copied; rebuilt when the
             // source FKs clone and their link hooks fire. Subsumes the old literal
@@ -115,12 +115,9 @@ pub(crate) fn select_clone_ids(
             if Some(id) == extra_excluded {
                 continue; // S7 Decision 5: ChildOf excluded from the prefab root
             }
-            // W1 / Dense: a non-signature-storage id (Bitset OR Dense) is RETAINED
-            // in `component_ids()` but has NO per-archetype pool — skip it so it
-            // never enters the table row clone (parity with `materialize_clone`).
-            if !component_registry::is_signature_storage(component_registry::storage_kind(id.0)) {
-                continue;
-            }
+            // W1 / Dense: the per-consumer non-signature screen that used to sit
+            // here is gone — KE14 D1 made `table_component_ids()` the list, and
+            // it IS the signature-storage subsequence by mint invariant.
             if !cloner.filter_allows(id) {
                 continue; // denied by allow/deny filter
             }
@@ -589,63 +586,46 @@ fn materialize_clone_into(
             //   slice is transient and not aliased by any live `&mut` (hooks receive
             //   `world_ptr`, not the slice).
             // Dense plan D2: the clone's archetype RETAINS non-signature ids in
-            // `component_ids` (it dedups to the source's archetype, which kept the
-            // dense id since D0), so these table-fire loops SKIP dense via
-            // `is_signature_id` — dense is fired by `materialize_dense_memberships`,
-            // never here (no double-fire). For a dense-free clone the skip is never
-            // taken (the 0%-gate).
+            // its DECLARATION record (it dedups to the source's archetype, which
+            // kept the dense id since D0), so these table-fire loops walk
+            // `table_component_ids` — dense is fired by
+            // `materialize_dense_memberships`, never here (no double-fire).
+            // KE14 D1 replaced the per-loop `is_signature_id` screens with that
+            // list, which is the same set by mint invariant.
             if flags.contains(ArchetypeFlags::ON_ADD_ANY) {
-                let ids = unsafe { (*target_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*target_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_ADD_HOOK) {
                     for &cid in ids {
-                        if !component_registry::is_signature_id(cid) {
-                            continue;
-                        }
                         trigger_on_add(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_ADD_OBSERVER) {
                     for &cid in ids {
-                        if !component_registry::is_signature_id(cid) {
-                            continue;
-                        }
                         fire_on_add_observers(world_ptr, cid, entity);
                     }
                 }
             }
             if flags.contains(ArchetypeFlags::ON_INSERT_ANY) {
                 // SAFETY: same as the on_add slice read above.
-                let ids = unsafe { (*target_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*target_ptr).table_component_ids.as_slice() };
                 if flags.contains(ArchetypeFlags::ON_INSERT_HOOK) {
                     for &cid in ids {
-                        if !component_registry::is_signature_id(cid) {
-                            continue;
-                        }
                         trigger_on_insert(world_ptr, cid, entity);
                     }
                 }
                 if flags.contains(ArchetypeFlags::ON_INSERT_OBSERVER) {
                     for &cid in ids {
-                        if !component_registry::is_signature_id(cid) {
-                            continue;
-                        }
                         fire_on_insert_observers(world_ptr, cid, entity);
                     }
                 }
             }
             if flags.contains(ArchetypeFlags::HAS_ENTITY_OBSERVER) {
                 // SAFETY: same as the on_add slice read above.
-                let ids = unsafe { (*target_ptr).component_ids.as_slice() };
+                let ids = unsafe { (*target_ptr).table_component_ids.as_slice() };
                 for &cid in ids {
-                    if !component_registry::is_signature_id(cid) {
-                        continue;
-                    }
                     fire_entity_observers(world_ptr, ObserverKind::Add, cid, entity);
                 }
                 for &cid in ids {
-                    if !component_registry::is_signature_id(cid) {
-                        continue;
-                    }
                     fire_entity_observers(world_ptr, ObserverKind::Insert, cid, entity);
                 }
             }
