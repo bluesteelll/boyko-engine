@@ -977,12 +977,102 @@ this entry repairs.
 | **GB-9** | standing rule | **RESOLVED — option (b): the `Or<(Changed<A>, Changed<B>)>`-over-dense emission ban is DELETED, with a record.** Its original ground was fixed and gated by Aether R0 / KE1; the fallback ground (D4) was measured and rejected — **D4 reserves the Aether *surface* `or(...)` while the ban governed *generated code*, and ratified GN2 says the baker emits no Rust**, so the ban had no subject. It could not be re-grounded on KE13 either: `Or` folds `NEEDS_CHANGE_DETECTION` and `EcsMaster::query` const-refuses it, so the banned shape cannot reach a `QueryView` at all. ⚠ **Its deadline expired unanswered** — R0 landed with GB-9 open |
 
 **The Aether `AB` series closed on the same day and on the same branch.** Every `AB` ballot except
-**AB-12** (which blocks nothing) is ruled — seven by the owner, eleven under the standing rule —
-indexed on `feat/threadpool-ke16` at `docs/OPEN-QUESTIONS.md` §*2026-08-30 — the owner's rulings, and
-the Aether ladder closes*. The four with direct Gaia consequences are marked at their bodies in the
-2026-08-29 entry below (**AB-6**, **AB-10**, **AB-11**, **AB-13**). The rest are not individually
-rewritten here: this pass verified the Gaia side and the index, not each Aether ground, and a
-register that restates what it did not check is how the next false claim enters.
+**AB-12** (which blocks nothing) is ruled — **six by the owner** (AB-1, AB-6, AB-7, AB-10, AB-11,
+AB-13) and **six delegated** (AB-2, AB-3, AB-4, AB-5, AB-8, AB-9); index ported verbatim, citations
+verified against this branch, in §*2026-09-10* below. ⚠ Until 2026-09-10 this sentence read *"seven
+by the owner, eleven under the standing rule"* — the source section's SESSION count (its seven owner
+answers include the Gaia ballot GB-2; only six AB ballots are delegated), copied here as if it were
+an AB count: 7 + 11 + 1 ≠ 13. The four with direct Gaia consequences are marked at their bodies in
+the 2026-08-29 entry below (**AB-6**, **AB-10**, **AB-11**, **AB-13**). The 2026-09-10 pass ported
+the index and verified each cited site on this branch; it did not re-check the Aether grounds
+themselves.
+
+### 2026-09-10 — the Aether AB index, ported verbatim from `feat/threadpool-ke16` and checked against this branch
+
+> *[A5 batch merge, 2026-09-22.* This sub-entry was written on `feat/multi-paradigm-render` at
+> 2026-09-10, a branch that lacked ke16's 2026-08-29 ballot bodies and `docs/aether-v2/`. The line it
+> now sits on descends from `feat/threadpool-ke16` (`5550a3da` is an ancestor of the merge), so every
+> site this entry names as "not on this branch" / "no … here" IS present here, at the ke16 line
+> numbers it cites "there" (`aether-v2/DECISIONS.md` **E4** at `:482`, **C5a** at `:165`, the
+> §Sequencing rulings heading at `:722` — verified by grep at the merge), and the bodies Table B quotes
+> stand in full in the 2026-08-29 entry below. Read its "this branch" clauses as the 2026-09-10 record
+> of the render branch, not of this tree. Its ke16 `docs/OPEN-QUESTIONS.md` spans are written
+> `lines N-M` rather than `:N-M` here, and its `(:N there)` cells `(line N there)`, so the anchors gate does not bind them to the nearest file a row
+> cites; nothing else in the entry was changed. What the entry adds on this line is Table A's `who`
+> column, which is what lets the ruled-vs-open census read AB-1, AB-6, AB-7, AB-10, AB-11 and AB-13
+> as ruled — the ke16 table at §*2026-08-30* has no such column.*]*
+
+**Source.** `feat/threadpool-ke16`, `docs/OPEN-QUESTIONS.md` §*2026-08-30 — the owner's rulings, and
+the Aether ladder closes* (lines 201-252 of that worktree, read 2026-09-10). **Table A** is that
+section's table **verbatim**, with one added `who` column: the source has no `who` column; its seven
+rows ARE the seven owner answers its own preamble counts (ke16 lines 203); the AB-7 and AB-11 cells
+additionally say so themselves (*Owner: "…"*, *"what made it the owner's"*), and AB-10's attribution
+is also carried by this file's own 2026-09-03 annotation of its body (*"on the owner's own ground"*).
+**Table B** indexes the six delegated `AB` rulings, which have
+NO row on ke16 — their rulings live only in that branch's 2026-08-29 bodies — quoting each body's
+opening ruling sentences verbatim with `[…]` marking every elision (the ke16 line span is named per
+row). Every *where the ground lives* cell was opened on THIS branch; where a site does not exist
+here, the branch is named instead of linked — the 2026-09-03 rule above, now applied to the Aether
+half it had left unapplied. The ke16 ground cells that were replaced by a branch name read:
+AB-1: `[aether-v2/DECISIONS.md](aether-v2/DECISIONS.md) C3`; AB-6: `[aether-v2/KERNEL-BACKLOG.md](aether-v2/KERNEL-BACKLOG.md) AB-6 + **KE14**`; AB-7: `[aether-v2/KERNEL-BACKLOG.md](aether-v2/KERNEL-BACKLOG.md) **KE15**`; AB-10: `[aether-v2/AI-ORIENTATION.md](aether-v2/AI-ORIENTATION.md) AIR-10 / AB-10`; AB-11: `[aether-v2/CAMPAIGN.md](aether-v2/CAMPAIGN.md) AB-11 row; red test ab11_flag_filter_polarity.rs`; AB-13: `[aether-v2/CAMPAIGN.md](aether-v2/CAMPAIGN.md) AB-13 row`; GB-2: `[gaia/DECISIONS.md](gaia/DECISIONS.md) §Colour`.
+
+*The source section's own preamble, verbatim (ke16 lines 203-208) — a SESSION count, whose "seven" includes
+the Gaia ballot GB-2, see the correction above:*
+
+> Seven ballots answered by the owner in one session, plus eleven decided by the orchestrator under
+> the standing rule that performance and architecture forks are settled with numbers. **Every `AB`
+> ballot is now closed except AB-12**, which blocks nothing.
+>
+> Recorded here as the single index; each ruling's full ground and rejected alternative live at the
+> site named in its row.
+
+**Table A — the ke16 index, verbatim, plus `who`.**
+
+| ballot | who | ruling | where the ground lives |
+|---|---|---|---|
+| **AB-1** | owner | **RATIFIED as specified** — event auto-registration adopted on ergonomic grounds; the STAGE-under-D4 alternative rejected. ⚠ The reopen was licensed because C3's recorded ground — *"the unregistered case fails silently on both ends"* — was **refuted by measurement**: both generated ends are a loud init-time panic. The grant now stands on a stated ground (ergonomics), not on the refuted one | [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) C3 |
+| **AB-6** | owner | **Option (b), and the class split in two.** The ballot's premise was refuted first: hand-written Rust could not do it either, so there was no ratified surface to narrow — only a promise the kernel did not keep. **Dense**: build the construct-and-commit route. **Bitset/flag**: refuse in the **derive**, since a flag has no bytes and `FLAGS_DIRECT` is the mechanism. Refusing in Aether alone was ruled out because it would make Aether reject what the derive accepts | [`aether-v2/KERNEL-BACKLOG.md`](aether-v2/KERNEL-BACKLOG.md) AB-6 row; **KE14** exists on `feat/threadpool-ke16` only — this branch's backlog ends at KE12 |
+| **AB-7** | owner | **R-DENSE LIFTED, and the ballot's framing rejected.** Owner: *"that there is no parallelism is just wrong."* The candidate driver-independent ground had already been measured and **refuted on both conjuncts**; the owner then declined to treat the driver limitation as a constraint at all. Measured: the refusal is a `const assert` whose own comment says the chunk runner *"has no world cell"* — unwired plumbing, not a design limit, and the same gap blocks `Related` joins | **KE15** — a `feat/threadpool-ke16` `aether-v2/KERNEL-BACKLOG.md` row; not on this branch (backlog ends at KE12) |
+| **AB-10** | owner | **(a) the measurement script IS required** when the audit branch is taken. **(b) the widening to the joint Aether+Gaia vocabulary is RATIFIED** — if the two languages are one body of work, the vocabulary is one vocabulary, and a word meaning different things across them is a false friend between the author's own languages. Price accepted: the risk list grows with Gaia's vocabulary, and a collision there may force a rename in Aether | [`aether-v2/AI-ORIENTATION.md`](aether-v2/AI-ORIENTATION.md) AIR-10 / AB-10 |
+| **AB-11** | owner | **The recommended option — a parse refusal** with a did-you-mean pointing at `enabled` / `disabled`. ⚠ Adds a refusal where v1 documents non-refusal, which is what made it the owner's. Ground, measured with R0's fix already in the tree: over a `flag`, `with F` matches nothing and `without F` excludes nothing — two different silent wrong answers — and the defect is in the **leaves**, so R0's `Or` fix does not reach it | [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) AB-11 row; red test: `feat/threadpool-ke16` `crates/boyko_ecs/tests/ab11_flag_filter_polarity.rs` — absent on this branch |
+| **AB-13** | owner | **`true` / `false`.** Settles all four interacting parts at once: the values are Rust keywords already, so nothing new is reserved; the three-way `on` collision (`machine … on entity`, `on E => T`, `flags (X = on)`) **does not arise**, so neither a reader nor a generator needs lookahead; and the group keeps the name `flags`, PENDING Tier 3's withdrawal of the `flags → initial` rename standing on its own sound ground. Spelling: `flags (Stunned = false, Burning = true)` | [`aether-v2/CAMPAIGN.md`](aether-v2/CAMPAIGN.md) AB-13 row |
+| **GB-2** | owner | **`#RRGGBB` is `#RRGGBBAA` with maximal `AA`** — a defaulted field, not a second literal kind, which dissolves the reopen question rather than answering it. **And the arity direction the clause did not cover: REFUSE AT BAKE** — an 8-digit literal at a 3-component field (`PointLight.color` is `[f32; 3]`) is a coded refusal naming the field, never a silent alpha drop | `feat/threadpool-ke16` `gaia/DECISIONS.md` §Language shape, the two *Colour* bullets — this branch's `gaia/DECISIONS.md` has no colour line (this file's own F/GB table above already cites §Language shape) |
+
+**Table B — the six delegated `AB` rulings that have no index row on ke16, plus AB-12.** None of
+the six rulings named in the ground column (E4, E5, E6, M4a/D6a, C5a, §Sequencing rulings) exists in
+this branch's `aether-v2/DECISIONS.md` — verified by grep: no `**E4.` … `**C5a.` ruling lines and no
+§Sequencing rulings heading here.
+
+| ballot | who | ruling (verbatim from the ke16 body; `[…]` = elided) | where the ground lives |
+|---|---|---|---|
+| **AB-2** | delegated | ✅ **RESOLVED 2026-08-30 [delegated]** → ruling **E4** […] **`lanes N` is redefined from a count to a MINIMUM**: the effective count is `max(N, worker_count + 1)`, resolved where the worker count is first known, and the raise is **reported once at boot**, not silent. (ke16 lines 1086-1089) | `feat/threadpool-ke16` `aether-v2/DECISIONS.md` **E4** (line 482 there) |
+| **AB-3** | delegated | ✅ **RESOLVED 2026-08-30 [delegated]** → ruling **E5**. **Per-thread claimed host lane, one claimer enforced.** `MAX_EVENT_THREADS` 65 → **66**, const-assert strengthening to `MAX_WORKERS + 2 <= MAX_EVENT_THREADS`. (ke16 lines 1104-1106) | `feat/threadpool-ke16` `aether-v2/DECISIONS.md` **E5** (line 539 there) |
+| **AB-4** | delegated | ✅ **RESOLVED 2026-08-30 [delegated]** → ruling **E6**. **Registrant: the generated path**, calling a new `register_ordered_emitter(event_id, system_id)` at plugin build, beside the `preregister_event[_default]` it already emits. **Predicate** (the half the ballot said was missing): at build end, any `ordered` event id with an emitter count **> 1** is a hard boot failure naming both systems. **Verbatim escape: refused at the param list** — a hand-written `EventWriter<E>` for an `ordered` `E` is refused at `EventWriter::init_state`, the site that already panics loudly for an unregistered event and already has `E::event_id()` and the dispatcher in hand. (ke16 lines 1127-1134) | `feat/threadpool-ke16` `aether-v2/DECISIONS.md` **E6** (line 582 there) |
+| **AB-5** | delegated | **RESOLVED 2026-08-30** (orchestrator ruling under the owner's delegation of the perf/architecture forks). Original question: the machine event router's random-access mechanism and the tick visibility following from it — (a) amend M4 to `Query::get_mut`; (b) keep `get_component_mut`. **Decision: (a).** Full ruling with the measurements: […] **M4a**, with M7 and **D6a** amended in the same edit and […] §Event routing + CAMPAIGN R5's Depends cell moved with them. (ke16 lines 1145-1151) | `feat/threadpool-ke16` `aether-v2/DECISIONS.md` **M4a** (line 264 there) with **D6a** (line 437 there, a blockquote rather than a numbered ruling); [`aether-v2/MACHINES.md`](aether-v2/MACHINES.md) §Event routing — the heading exists on this branch (:63), the amendment is on ke16 |
+| **AB-8** | delegated | **RESOLVED 2026-08-30** (orchestrator ruling; a performance fork, so it is decided with numbers rather than escalated). Original question: the `each par` driver, plus three riders. Full ruling: […] **C5a**. […] **Decision: `each par` → `par_iter_mut`.** (ke16 lines 1226-1231) | `feat/threadpool-ke16` `aether-v2/DECISIONS.md` **C5a** (line 165 there) |
+| **AB-9** | delegated | **RESOLVED 2026-08-30** (orchestrator ruling under the same delegation). Original question: `boyko_reflect` sequencing for AIR-06(b). Options were: R8 waits on the merge / AIR-06(b) is descoped to the reflection-free halves (asserted to still satisfy the oracle) / the merge is pulled forward. Ruling recorded in the campaign's own decision log: […] §Sequencing rulings, entry **AB-9**. […] **RULING, three parts.** 1. **Pull the merge forward** […] 2. **AIR-06(b) is NOT descoped.** The descope buys a vacuous green. 3. **A fourth item, which no option on the ballot named, is the real precondition and is attached to R8's Lands**: engine components must opt into reflection […] (ke16 lines 1258-1262, 1295-1303) | `feat/threadpool-ke16` `aether-v2/DECISIONS.md` §Sequencing rulings, entry **AB-9** (lines 722-728 there) |
+| **AB-12** | — | ⚠ **STILL OPEN — a query, not a values call; blocks nothing.** Evidence gathered 2026-08-30 points at option (b) — see the paragraph below | the AB-12 body in §2026-08-29 |
+
+*The source section's two closing paragraphs, verbatim (ke16 lines 220-228):*
+
+> **Still open on the Aether side: AB-12 only**, and it blocks nothing. Evidence gathered 2026-08-30
+> points at option (b): every `G1`/`G2` occurrence in the 2026-08-29 plan session is a **Gaia rung**,
+> not a defect body, and the surviving `AD1..AD4` all have subjects. That is evidence, not proof — the
+> search was a grep over a 7 MB transcript, an instrument this campaign has had lie to it three times
+> in one day.
+>
+> **Not ballots, and not the owner's: K8 and K9** — the bundle-with-`link Entity` spawn spelling and
+> the relationship macro's private-field demand — are architecture gaps routed to R3's own design
+> pass. R3's `bundle` and `relation` constructs may not be declared done while they stand.
+
+**Found while porting, recorded and not repaired.** (i) ke16's own AB-7 body (lines 1194-1225 there)
+still opens with the words "STILL OPEN — STILL THE OWNER'S" against its own index row (:214), which
+says the owner lifted R-DENSE — the GB-5 defect class on the source branch, in the Aether half; this
+pass writes nothing on that branch. (ii) This branch's `aether-v2/DECISIONS.md:32` still says
+"Ballot AB-13 (open — do not settle by edit)" and `aether-v2/CONSTRUCTS.md:135` still points AB-11
+at "§Open"; both are outside the census's target files and are owed to whoever owns
+`docs/aether-v2/` here. (iii) This branch's AB-6 body below already cites KE14, a backlog row that
+does not exist here.
 
 ### GB-5 — the one answer the register lost outright
 
@@ -1029,6 +1119,13 @@ landed. GB-8's ruling already puts the census file on the G0 row — but that fi
 (`tests/gaia_g0_citation_census.rs`) exists on `feat/threadpool-ke16` and **not here**, so writing
 the check on this branch would mean porting a gate across a branch boundary. Recorded as owed and
 deliberately not done inside a register-sync commit.
+✅ **Delivered 2026-09-10, on this branch, written here rather than ported:**
+[`tests/gaia_ruled_vs_open_census.rs`](../tests/gaia_ruled_vs_open_census.rs) — root package,
+hand-rolled, no per-site waivers (GB-8). Its RULED set is read from the RULED headings of
+[`gaia/DECISIONS.md`](gaia/DECISIONS.md) and from the `who` column of this file's ruling tables; its
+OPEN set is read from bold spans and headings in this file and [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md).
+The Russian twin is not scanned: `docs/ru/` is frozen by owner decision of 2026-09-07. Proven red by
+mutation on both a table row and a ballot body; the red output is in the file's header.
 
 ### F2 — the ruling is CONFIRMED and its original ground is SUPERSEDED
 
@@ -2537,20 +2634,20 @@ red tests land regardless of its disposition). Everything above them waits on a 
 
 ### Aether v2 — the `AB` series
 
-> ✅ **STATUS, 2026-09-03.** Every `AB` ballot except **AB-12** was closed on 2026-08-30 — seven
-> by the owner and eleven under the standing perf/architecture rule — on `feat/threadpool-ke16`,
-> which this branch had not received. The per-ballot index with each ruling's ground is that
-> branch's `docs/OPEN-QUESTIONS.md` §*2026-08-30 — the owner's rulings, and the Aether ladder
-> closes*. **AB-12 blocks nothing.** Only the four with a direct Gaia consequence are annotated
-> individually below (AB-6, AB-10, AB-11, AB-13): this pass verified the Gaia side and the index,
-> not each Aether ground, and a register that restates what it did not check is how the next false
-> claim enters.
+> ✅ **STATUS, 2026-09-03.** Every `AB` ballot except **AB-12** was closed on 2026-08-30 — six by
+> the owner and six delegated (see §*2026-09-10* above for the corrected count; this note read
+> *"seven by the owner and eleven under the standing perf/architecture rule"* until 2026-09-10) — on
+> `feat/threadpool-ke16`, which this branch had not received. The per-ballot index is now ported
+> into this file at §*2026-09-10*; the original stays on that branch. **AB-12 blocks nothing.**
+> Every body below now carries a one-line pointer to its index row; the four with a direct Gaia
+> consequence (AB-6, AB-10, AB-11, AB-13) keep their fuller 2026-09-03 annotation.
 
 - **AB-1** — auto-registration of events: ratify on ergonomics alone, or STAGE it under D4 until an
   in-tree consumer exists. ⚠ **reopens the ratified C3 grant, and the reopen is licensed by
   measurement**: the grant's recorded ground was that the unregistered case "fails silently on both
   ends", and both generated ends are in fact a loud init-time panic. Blocks **R3**'s event
   construct.
+  ✅ **RULED 2026-08-30 BY THE OWNER — RATIFIED as specified**; text and ground: §*2026-09-10* row AB-1.
 - **AB-2** — ✅ **RESOLVED 2026-08-30 [delegated]** → ruling **E4** in
   [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md). **`lanes N` is redefined from a count to a
   MINIMUM**: the effective count is `max(N, worker_count + 1)`, resolved where the worker count is
@@ -2672,10 +2769,13 @@ red tests land regardless of its disposition). Everything above them waits on a 
   ~~STILL OPEN — STILL THE OWNER'S.~~ **Struck 2026-09-10 by the merge `merge/ke16-into-render`:
   the owner LIFTED it — see the ruling table above, `docs/OPEN-QUESTIONS.md:587`, "R-DENSE LIFTED,
   and the ballot's framing rejected", with his own words. This paragraph is the record of the state
-  BEFORE that ruling, not a live status. ⚠ The RULED-vs-OPEN census cannot see this one: the table
-  at `:583` is headed `| ballot | ruling | where the ground lives |` with no `who` column, so it is
-  not a ruling SOURCE by the predicate, and AB-7 stays in the census's `open` set without reddening
-  it. Found by hand while repairing the ten sites the census did catch.** What was delegated was not the choice but the *measurement*
+  BEFORE that ruling, not a live status.** ⚠ When it was struck, the ruled-vs-open census could not
+  see this one: the table at `:583` is headed `| ballot | ruling | where the ground lives |` with no
+  `who` column, so it was not a ruling SOURCE by the predicate, and AB-7 sat in the census's `open`
+  set without reddening it — found by hand while repairing the ten sites the census did catch. Since
+  the A5 batch merge (2026-09-22) the §*2026-09-10* index above carries the same ruling in a `who`
+  row, so the census reads AB-7 as ruled and this bullet may not spell the marker in bold: the
+  sentence that did is the one you are reading, un-bolded. What was delegated was not the choice but the *measurement*
   underneath it, and it was taken on **2026-08-30**: **the candidate driver-independent ground is
   REFUTED, on both of its conjuncts.** The ballot therefore goes to the owner with a refuted premise
   rather than an open question. Evidence, all read or run in this tree at `01a4436e`:
