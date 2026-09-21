@@ -56,3 +56,7 @@ graphify-out/
 # It was already untracked before this line existed; the line is here so that "absent" is a
 # DECISION with a reason rather than an omission nobody noticed.
 /docs/PROFILING-FLOOR.toml
+
+# Python bytecode caches from the repository scripts (check_hotpath_exceptions.py self-test imports, tools/)
+__pycache__/
+*.pyc
