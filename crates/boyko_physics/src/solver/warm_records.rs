@@ -37,9 +37,9 @@
 //! points in point order within a manifold". Five facts make the record lookup
 //! return the same value and the same hit count:
 //!
-//! 1. `recs[mi]` holds exactly manifold `mi`'s inserts, in point order (the store
-//!    writes them from the solved slots; the carry compacts the hits in point
-//!    order).
+//! 1. `recs[mi]` holds exactly manifold `mi`'s inserts, in point order (the fill
+//!    writes a solved record's shape and the store its impulses from the solved
+//!    lanes, L11 C2; the carry compacts the hits in point order).
 //! 2. `ord` is injective over pairs, so a run of equal keys is exactly the set of
 //!    manifolds that keyed the same pair.
 //! 3. Manifolds with equal pairs share an island, so they are all frozen or all
@@ -133,8 +133,12 @@ impl WarmRecord {
         _pad: [0; 7],
     };
 
-    /// The record of a SOLVED manifold: its `count` points' feature ids beside the
-    /// converged impulses of slots `base..base + count` of the three impulse columns.
+    /// The record of a SOLVED manifold from per-point impulse columns: its `count`
+    /// points' feature ids beside the converged impulses of slots `base..base +
+    /// count`. The G2 oracle's constructor; the solver writes a solved record in two
+    /// halves — [`set_shape`](Self::set_shape) at the fill, [`set_impulses`](Self::set_impulses)
+    /// at the store (L11 C2).
+    #[cfg(test)]
     #[inline]
     pub(crate) fn solved(m: &Manifold, base: usize, count: usize, impulses: [&[f32]; 3]) -> Self {
         debug_assert!(
@@ -153,6 +157,36 @@ impl WarmRecord {
         rec
     }
 
+    /// The shape of a SOLVED manifold's record, written by the fill (L11 D3/D4): its
+    /// live points' feature ids and count, the impulses zero until the store writes
+    /// them. Every byte is written, so the padding is zero.
+    #[inline]
+    pub(crate) fn set_shape(&mut self, m: &Manifold) {
+        let count = m.count as usize;
+        debug_assert!(
+            count <= MAX_CONTACT_POINTS,
+            "invariant: a manifold has at most four points"
+        );
+        *self = Self::EMPTY;
+        for p in 0..count {
+            self.fid[p] = point_fid(m, p);
+        }
+        self.count = count as u8;
+    }
+
+    /// Writes stored point `p`'s converged impulses (the store, after
+    /// [`set_shape`](Self::set_shape)).
+    #[inline]
+    pub(crate) fn set_impulses(&mut self, p: usize, seed: [f32; 3]) {
+        debug_assert!(
+            p < self.count as usize,
+            "invariant: the store writes a stored point of the record's shape"
+        );
+        self.n[p] = seed[0];
+        self.t1[p] = seed[1];
+        self.t2[p] = seed[2];
+    }
+
     /// Appends one point (the carry's compaction).
     #[inline]
     fn push(&mut self, fid: u16, seed: [f32; 3]) {
@@ -168,11 +202,34 @@ impl WarmRecord {
         self.count = (j + 1) as u8;
     }
 
-    /// Stored points (the G2 / G8 gates read it).
-    #[cfg(test)]
+    /// Stored points.
     #[inline]
     pub(crate) fn count(&self) -> u8 {
         self.count
+    }
+
+    /// The record's 64 bytes as sixteen little-endian words, field by field (the G3
+    /// layout-bytes gate): the three impulse rows, the feature ids in pairs, then
+    /// the count with its zero padding.
+    #[cfg(test)]
+    pub(crate) fn words(&self) -> [u32; 16] {
+        let mut w = [0u32; 16];
+        for p in 0..MAX_CONTACT_POINTS {
+            w[p] = self.n[p].to_bits();
+            w[4 + p] = self.t1[p].to_bits();
+            w[8 + p] = self.t2[p].to_bits();
+        }
+        w[12] = u32::from(self.fid[0]) | (u32::from(self.fid[1]) << 16);
+        w[13] = u32::from(self.fid[2]) | (u32::from(self.fid[3]) << 16);
+        w[14] = u32::from(self.count)
+            | (u32::from(self._pad[0]) << 8)
+            | (u32::from(self._pad[1]) << 16)
+            | (u32::from(self._pad[2]) << 24);
+        w[15] = u32::from(self._pad[3])
+            | (u32::from(self._pad[4]) << 8)
+            | (u32::from(self._pad[5]) << 16)
+            | (u32::from(self._pad[6]) << 24);
+        w
     }
 
     /// The stored impulses of the LAST stored point whose feature id is `fid`, or

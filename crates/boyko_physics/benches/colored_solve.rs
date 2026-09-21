@@ -1,8 +1,9 @@
 //! Phase O5 Gate 9 — colored-vs-default solve A/B at ~1k / 10k contacts.
 //!
 //! Measures one full solver step (build + substep loop + warm store + write-back)
-//! for the colored [`ColoredSoftStepSolver`] (color-order sweep over the SoA
-//! `ContactColumns`, single-threaded in O5) against the reference
+//! for the colored [`ColoredSoftStepSolver`] (color-order sweep over the solver's
+//! contact columns — the per-point `ContactColumns` SoA in O5, the AoSoA
+//! `CohortColumns` since L11 C2 — single-threaded in O5) against the reference
 //! [`SoftStepSolver`] (manifold-order Gauss-Seidel), on the IDENTICAL warmed
 //! resting-stack contact set. Both are driven DIRECTLY (no schedule, no
 //! threadpool) so the bench isolates the solver, not the ECS dispatch.

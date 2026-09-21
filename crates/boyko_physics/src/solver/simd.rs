@@ -530,13 +530,14 @@ fn mat3_transpose_x8(m: [core::arch::x86_64::__m256; 9]) -> [core::arch::x86_64:
 // These widen `contact.rs` / `math.rs` op-for-op to 8 lanes for the colored
 // solver's `solve_color_avx2` kernel (Phase O7). Each is a pure-register function
 // (no memory access) `#[target_feature(enable = "avx2")]`-gated like the O1
-// helpers above, and is `pub(super)` so `colored.rs` (which owns `ContactColumns`
-// and the oracle `solve_color`) can call them next to the oracle. Every `a*b + c`
-// is a SEPARATE `_mm256_mul_ps` then `_mm256_add_ps` (NO FMA — the module-doc
-// no-FMA invariant, enforced by the `solver_simd_has_no_fma_or_approx_callsites`
-// source census; the ISA baseline does carry FMA), and the op ORDER matches the
-// scalar source line-for-line, so the 8-lane result is `f32`-bit-identical to the
-// scalar per-lane result (Decision 2's per-lane op-identity premise).
+// helpers above, and is `pub(super)` so `colored.rs` (which owns the AoSoA
+// `CohortColumns` and the oracle `solve_color`) can call them next to the oracle.
+// Every `a*b + c` is a SEPARATE `_mm256_mul_ps` then `_mm256_add_ps` (NO FMA —
+// the module-doc no-FMA invariant, enforced by the
+// `solver_simd_has_no_fma_or_approx_callsites` source census; the ISA baseline
+// does carry FMA), and the op ORDER matches the scalar source line-for-line, so
+// the 8-lane result is `f32`-bit-identical to the scalar per-lane result
+// (Decision 2's per-lane op-identity premise).
 
 /// 8-wide `Vec3::cross` (right-handed), bit-identical to the scalar
 /// [`Vec3::cross`](crate::math::Vec3::cross): `x = a.y*b.z - a.z*b.y`,

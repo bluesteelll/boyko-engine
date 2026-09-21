@@ -51,36 +51,41 @@ use crate::resources::BodyState;
 use crate::row_identity::{RowKey, SleepLatch};
 use crate::solver::contact::BodyEffective;
 use crate::solver::soft_step::{ManifoldConstraint, PointConstraint};
+use crate::solver::colored::{CohortCold, CohortHead, ManifoldTag, RankBlock};
 use crate::solver::warm_records::{WarmRecord, WarmRun};
 use crate::solver::warm_start::WarmEntry;
 
 /// Top of the rigid colored solver's contact-column band (audit Stage P — P2).
 ///
-/// The colored solver's SoA contact working set (`ContactColumns`) moved off
+/// The colored solver's contact working set (`CohortColumns`, the cohort-shaped
+/// tables since L11 C2; the per-point `ContactColumns` SoA before) moved off
 /// parallel `std::Vec`s onto kernel-native [`ScratchColumn`]s, killing the
 /// whole-struct `&mut *self.cols` reborrow each parallel worker performed (the
 /// rigid Tree-Borrows race). The band is a CONTIGUOUS descending run starting one
 /// id BELOW the three body-mirror ids ([`SCRATCH_ID_BODY_EFF_SERIAL`] == 509), so
-/// the rigid columns occupy `508 ..= 479` (30 ids) with no overlap.
+/// the rigid columns occupy `508 ..= 499` (10 ids) with no overlap; the band keeps
+/// its top, and the ids the per-point columns freed are headroom below the cohorts.
 ///
 /// [`ScratchColumn`]: boyko_ecs::ecs::core::component::scratch::ScratchColumn
 pub(crate) const SCRATCH_ID_CONTACT_BAND_TOP: usize = MAX_COMPONENTS - 4;
 
-/// Number of `ScratchColumn`s backing the colored solver's `ContactColumns`.
+/// Number of `ScratchColumn`s backing the colored solver's `CohortColumns`.
 ///
-/// 31 before L11 C1, which deleted the per-point `warm_key` and the `canonical`
-/// order (the warm store is per manifold now, `solver/warm_records.rs`) and added
-/// the per-manifold `plan`.
-pub(crate) const CONTACT_COLUMN_COUNT: usize = 30;
+/// 31 before L11 C1 (which deleted the per-point `warm_key` and the `canonical`
+/// order — the warm store is per manifold now, `solver/warm_records.rs` — and added
+/// the per-manifold `plan`), 30 before L11 C2, which replaced the 25 per-point SoA
+/// columns and `manifold_base` with the four cohort tables (`heads`, `blocks`,
+/// `cold`, `rank_cold`), the per-manifold `tags` and the per-color cohort CSR.
+pub(crate) const CONTACT_COLUMN_COUNT: usize = 10;
 
-/// Bottom of the contact-column band (inclusive): `508 - (30 - 1) == 479`.
+/// Bottom of the contact-column band (inclusive): `508 - (10 - 1) == 499`.
 pub(crate) const SCRATCH_ID_CONTACT_BAND_BOTTOM: usize =
     SCRATCH_ID_CONTACT_BAND_TOP - (CONTACT_COLUMN_COUNT - 1);
 
-/// The [`ComponentId`] for contact column `k` (`0`-based, in `ContactColumns`
+/// The [`ComponentId`] for contact column `k` (`0`-based, in `CohortColumns`
 /// field order), descending from [`SCRATCH_ID_CONTACT_BAND_TOP`].
 ///
-/// `k == 0` -> id `508`, ascending `k` -> descending id, `k == 29` -> id `479`.
+/// `k == 0` -> id `508`, ascending `k` -> descending id, `k == 9` -> id `499`.
 #[inline]
 pub(crate) fn contact_column_id(k: usize) -> ComponentId {
     debug_assert!(k < CONTACT_COLUMN_COUNT, "contact column index out of band");
@@ -173,9 +178,9 @@ const SOLVER_COHORT_WIDTH: usize = SOLVER_COHORT_TOP - SOLVER_COHORT_BOTTOM + 1;
 // That distinction is load-bearing. Migrating physics' remaining `std::Vec` bulk
 // brings the live column count to ~94, and 94 consecutive ids CANNOT have
 // pairwise-distinct residues mod 64 — a single global band would be impossible on
-// arithmetic alone. Per cohort it is comfortable: the solver sweeps 30 contact
-// columns, the graph 8, the broadphase 13, the soft scratch 19, each far under
-// the 64-slot period.
+// arithmetic alone. Per cohort it is comfortable: the solver sweeps 10 contact
+// columns (30 before L11 C2), the graph 8, the broadphase 13, the soft scratch 19,
+// each far under the 64-slot period.
 //
 // Each cohort therefore gets its OWN contiguous run, and a run of at most
 // `POOL_STAGGER_LINES` consecutive integers has pairwise-distinct residues — so
@@ -242,10 +247,10 @@ const SOLVER_TAIL_COLUMN_COUNT: usize = SOLVER_TAIL_NAMED_COUNT + WARM_TABLE_COL
 /// serial TGS solver captures before its substep loop and consumes in the
 /// post-loop restitution pass.
 ///
-/// The COLORED solver has its own `vn_initial` inside `ContactColumns`
-/// (`contact_column_id(24)`); the two are different columns of different length
-/// (per-point in the colored SoA build vs per-point in the serial build) and must
-/// not share an id.
+/// The COLORED solver has its own `vn0` rows inside `CohortColumns`
+/// (`contact_column_id(3)`, one `[f32; 8]` per cohort rank); the two are different
+/// columns of different shape (per rank in the colored cohort layout vs per point
+/// in the serial build) and must not share an id.
 pub(crate) const SCRATCH_ID_VN_INITIAL: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM - 1;
 
 /// Synthetic id for the chunk column behind
@@ -821,41 +826,37 @@ pub(crate) fn register_scratch_layouts() {
 }
 
 /// Registers the [`Layout`](std::alloc::Layout) of every contact column's element
-/// type under its band id (audit Stage P — P2), in `ContactColumns` field order.
+/// type under its band id (audit Stage P — P2), in `CohortColumns` field order.
 ///
-/// The 30 columns and their element types (field order, descending from
-/// [`SCRATCH_ID_CONTACT_BAND_TOP`]):
-/// * `ra_{x,y,z}`, `rb_{x,y,z}`, `normal_{x,y,z}`, `tangent1_{x,y,z}`,
-///   `tangent2_{x,y,z}` — 15 × `f32`;
-/// * `separation`, `friction`, `restitution`, `normal_impulse`,
-///   `tangent1_impulse`, `tangent2_impulse` — 6 × `f32`;
-/// * `body_a`, `body_b` — 2 × `u32`;
-/// * `b_is_sentinel` — `bool`;
-/// * `vn_initial` — `f32`;
-/// * `color_offsets`, `group_start`, `color_group_start` — 3 × `u32`;
-/// * `manifold_base` — `(u32, u32)`;
-/// * `plan` — `WarmRun` (L11 C1: each manifold's warm-source run).
+/// The 10 columns and their element types (field order, descending from
+/// [`SCRATCH_ID_CONTACT_BAND_TOP`]; L11 C2):
+/// * `heads` — `CohortHead` (320 B, one per cohort);
+/// * `blocks` — `RankBlock` (320 B, one per cohort rank);
+/// * `cold` — `CohortCold` (64 B, one per cohort);
+/// * `rank_cold` — `[f32; 8]` (the `vn0` row of each cohort rank);
+/// * `plan` — `WarmRun` (L11 C1: each manifold's warm-source run);
+/// * `tags` — `ManifoldTag` (each manifold's point count and frozen flag);
+/// * `color_offsets`, `group_start`, `color_group_start`, `color_cohort_start` —
+///   4 × `u32`.
 ///
 /// Idempotent + process-global (each `register_layout` is write-once): re-entry
 /// from another world / solver costs one branch per id after the first.
 #[inline]
 fn register_contact_column_layouts() {
-    // Field order MUST match `ContactColumns` so `contact_column_id(k)` lines up
+    // Field order MUST match `CohortColumns` so `contact_column_id(k)` lines up
     // with the `k`-th declared column.
     let mut k = SCRATCH_ID_CONTACT_BAND_TOP;
-    // ra/rb/normal/tangent1/tangent2 (15) + separation/friction/restitution +
-    // the three impulses (6) = 21 f32 columns.
-    for _ in 0..21 {
-        register_layout::<f32>(k);
-        k -= 1;
-    }
-    register_layout::<u32>(k); // body_a
+    register_layout::<CohortHead>(k); // heads
     k -= 1;
-    register_layout::<u32>(k); // body_b
+    register_layout::<RankBlock>(k); // blocks
     k -= 1;
-    register_layout::<bool>(k); // b_is_sentinel
+    register_layout::<CohortCold>(k); // cold
     k -= 1;
-    register_layout::<f32>(k); // vn_initial
+    register_layout::<[f32; 8]>(k); // rank_cold
+    k -= 1;
+    register_layout::<WarmRun>(k); // plan
+    k -= 1;
+    register_layout::<ManifoldTag>(k); // tags
     k -= 1;
     register_layout::<u32>(k); // color_offsets
     k -= 1;
@@ -863,9 +864,7 @@ fn register_contact_column_layouts() {
     k -= 1;
     register_layout::<u32>(k); // color_group_start
     k -= 1;
-    register_layout::<(u32, u32)>(k); // manifold_base
-    k -= 1;
-    register_layout::<WarmRun>(k); // plan
+    register_layout::<u32>(k); // color_cohort_start
     debug_assert_eq!(
         k, SCRATCH_ID_CONTACT_BAND_BOTTOM,
         "contact column band must end exactly at the reserved bottom id"

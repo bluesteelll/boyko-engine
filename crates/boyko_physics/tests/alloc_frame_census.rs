@@ -327,6 +327,82 @@
 //! and the narrowphase's counter +1 on every frame. Its pin is re-pinned to that long
 //! run's envelope: scope 98..=110, chunk 98..=110, dispatch MAX 221.
 //!
+//! **S1c after L11 C2 (the cohort closure shrank) — every colour scope fits its first
+//! block; the trajectory did not move.** L11 C2 (2026-09-21, lane
+//! `perf/physics-l11-solve-setup`: `CohortColumns`, the design's D4-D6 and D9) replaces the
+//! 25-word `ContactSolveView` the colour task captured with a 5-word `CohortSolveView`, so
+//! the closure `solve_color_parallel` spawns per chunk cut shrank from 264 B to 104 B
+//! (`size_of_val` at the spawn site: `ColorSolvePtrs` 216 -> 56, the cut 32 -> 16, plus
+//! `ColorCtx` 16 and the step scalars) and its `ScopedCell` from 280 B to 120 B
+//! (`SCOPED_CELL_HEADER` 16): 34 cells per 4 KiB `CHUNK0` where 14 fitted before
+//! (34 x 120 = 4,080; 14 x 280 = 3,920). The dispatch did not move — the same colours, the
+//! same cut walk, the same task count per scope: the attribution binary's spawns-per-colour-
+//! scope histogram is byte-identical on the two trees at every lane count (3..=12 at W=2,
+//! 3..=23 at W=4, 3..=32 at W=8, over 3,840 colour scopes each). So a scope that spawned
+//! 15..=23 tasks needed a second chunk before (> 14 cells) and needs none now (< 34): on this
+//! scene that is 8 of the 11 colours in each of the 12 passes, -96 chunks a frame on EVERY
+//! frame of the long run. Measured on that lane (`691891c4` = C1 as the control, rebuilt from
+//! `git archive`, and `691891c4` + the C2 working tree; `stable-x86_64-pc-windows-msvc`
+//! rustc 1.98.1, release; the long run by this file's scene extended to 17 x 256 steady
+//! steps, the extension copied in and restored by copy, sha256-checked):
+//!
+//! ```text
+//!                         C1 (691891c4)               + L11 C2
+//! census window, mean      364.125                     268.125
+//! census window, range     364..365                    268..269
+//! window histogram         364->224 365->32            268->224 269->32
+//! window scope             134 on 256                  134 on 256
+//! window chunk             230 on 256                  134 on 256
+//! long run, per step       364..365, mean 364.127      268..269, mean 268.127
+//! long run, histogram      364->3800 365->552          268->3800 269->552
+//! long run, scope          134 x 4352                  134 x 4352
+//! long run, chunk          230 x 4352                  134 x 4352
+//! long run, block means    364.125..364.129            268.125..268.129
+//! bytes acquired / step    1,369,792.8                 583,360.8
+//! OTHER / realloc          0 / 0                       0 / 0
+//! warm-up K (budget 64)    57                          57
+//! ```
+//!
+//! The control column reproduces the L5 C4 column above to every printed digit, so the
+//! instrument did not move. Every figure moved by exactly -96, frame for frame — the
+//! per-step delta over the 4,352 steps is scope 0 on every step, chunk -96 on every step,
+//! and the periodic injector block lands on the same 552 frames in both trees — so the
+//! histogram keeps its shape, the block-mean alternation is the same, `K` is the same,
+//! scope is 134 = 1 + 1 + 12 x 11 on all 4,352 frames, and the per-frame structural
+//! assertion held on every one of them. The attribution binary's D arm prices the same
+//! change on one warmed world: at W=4 chunks per scope 1.710 -> 1.000 (232.500 -> 136.000
+//! chunks a step, 368.625 -> 272.125 acquisitions), at W=2 unchanged (1.000, 272.125 on
+//! both trees). The release pins are the new long run's envelope under the rule in "The
+//! gate" below — scope 134..=134, chunk 134..=134, dispatch MAX 269 — a NARROWING with NO
+//! headroom either way, so the fan-out regression that gate exists for (+12 scope and +12
+//! chunks a frame) still reds: it would land at 292..293 against 269 on every frame, scope
+//! 146 outside 134..=134 and chunk 146 outside 134..=134 (arithmetic on the measured long
+//! run, red on 4,352 of 4,352 steps and on 256 of the window's 256 — not a re-run of that
+//! mutation).
+//!
+//! One premise of the re-pin ruling did NOT survive the run and is corrected here: at W=8
+//! a colour scope was expected to spawn up to `8 x CHUNKS_PER_WORKER` = 48 tasks (> 34
+//! cells) and so to take a second chunk again. It spawns at most 32 — at W=8 and at W=16 —
+//! because `n_chunks = min(lanes x 6, span / 64).clamp(1, groups)` is a CEILING on the cut
+//! count, and the O7 cohort-snapped cut walk rounds every cut up to whole cohorts (the
+//! widest colour of the D arm's pile, 2,880 slots, is 45 by work and yields 32 cuts of
+//! about three cohorts). 32 x 120 = 3,840 B fits the first block, so on the shipped kernel
+//! no colour scope exceeds one chunk at ANY lane count and the D arm's W=8 row equals its
+//! W=4 row (272.125; on the C1 tree too, 368.625 = 368.625). Fan-out growth with lanes is
+//! measurable on that pile only with `simd_solve = false`, where the cut walk advances in
+//! single groups: at W=8 the widest colours reach 35..=38 tasks (312 of 3,840 scopes cross
+//! 34), chunk 145..=157 against 133..=145 at W=4, 283.125 against 272.125. The
+//! attribution binary's D arm pins `chunk == scope` on every frame at W = 2 / 4 / 8 (no
+//! headroom: a closure past 112 B or a colour past 34 tasks reds it) and keeps its strict
+//! lane-growth assertion on that scalar pair (2026-09-21, release).
+//!
+//! The debug scene did NOT move: its census window read 198.250 / 197..221 (histogram
+//! 197->212 198->32 221->12; dispatch MAX 220) and its 4,352-step long run 197..222 (mean
+//! 202.862; histogram 197->2893 198->419 221->907 222->133; block means 197.125..219.625;
+//! scope and chunk 98 on 3,312 frames and 110 on 1,040; dispatch MAX 221) — every figure
+//! the L5 C4 debug run above recorded, because a debug colour's scope holds one chunk
+//! whatever its task count. Its pin is unchanged.
+//!
 //! **S2 after EM2′ (same tree plus the entity-id recycling fix, 2026-09-11,
 //! release and debug alike): 4.031 / 5, `realloc` 0.** The 0.008 it lost is
 //! exactly the two free-list reallocs the AFTER column's window carried
@@ -359,13 +435,14 @@
 //! S2        2 exact      2 exact            2/63       0 (first touch)  0 (was 2, EM2′)
 //! S3        1 exact      1 exact            4/63       0 (first touch)  0
 //! S1a/S1b   1 exact      1 exact            ~7/63      0                0
-//! S1c     134 exact (window) 230 exact (1.72/scope) 0.125  0             0
-//! S1c long 134 exact   230 exact             —         0                0
+//! S1c     134 exact (window) 134 exact (1.00/scope) 0.125  0             0
+//! S1c long 134 exact   134 exact             —         0                0
 //! ```
 //!
-//! (S1c's rows are the tree after the default parallel narrowphase (L5 C4): 1 of the 134
-//! scopes and 1 of the 230 chunks are the narrowphase's. After the default SIMD flip they
-//! read 133 / 229. After A7b on the scalar kernel
+//! (S1c's rows are the tree after L11 C2: 1 of the 134 scopes and 1 of the 134 chunks are
+//! the narrowphase's, and every scope holds exactly one chunk. After the default parallel
+//! narrowphase (L5 C4), on the 25-word view, they read 134 / 230 at 1.72 chunks per scope;
+//! after the default SIMD flip 133 / 229. After A7b on the scalar kernel
 //! the window and the long run read 133 / 229..241 at 1.81 chunks per scope. After A7a
 //! alone the window read 121..133 /
 //! 205..217 at 1.78 chunks per scope and the long run 109..133 / 205..217; before A7a
@@ -385,7 +462,8 @@
 //!   `physics_narrowphase` owns 1 scope + 1 chunk of every step that dispatches (its
 //!   24 task cells fit the scope's first block; the attribution binary's D2′), and
 //!   `physics_solve_colored` owns every other dispatch object. In the census window
-//!   that is 132 scopes + 228 chunks of the 364.125 (after A7b on the scalar kernel,
+//!   that is 132 scopes + 132 chunks of the 268.125 (after L5 C4 on the 25-word view,
+//!   132 + 228 of the 364.125; after A7b on the scalar kernel,
 //!   132 + 239.109 of the 373.234; after A7a alone, 120.047 + 213.938 of the
 //!   336.109; before A7a, 120 + ~209.7 of the 331.8).
 //!   ⚠ The backtrace trace that charged `physics_solve_colored`
@@ -423,9 +501,10 @@
 //! dispatched colours) in the census window and over 4,352 steps, one chunk each,
 //! dispatch MAX 221 over the long run — pinned with the release pin's shape: the
 //! long run's envelope, no upward headroom (header, "S1c after the default parallel
-//! narrowphase"). (After A7b it read 97..=109 / 97..=109, MAX 220, dispatch 219; before
-//! A7b it read 85..=97 in the window and 73..=97 over 4,352 steps before A7a, 85..=97
-//! after it, MAX 196, pinned 73..=97 / 195.)
+//! narrowphase"); L11 C2's debug long run reproduced every one of those figures, so
+//! the cell shrink moved nothing here. (After A7b it read 97..=109 / 97..=109, MAX
+//! 220, dispatch 219; before A7b it read 85..=97 in the window and 73..=97 over 4,352
+//! steps before A7a, 85..=97 after it, MAX 196, pinned 73..=97 / 195.)
 //!
 //! # The gate
 //!
@@ -442,14 +521,28 @@
 //!
 //! S1c's number is DATA-DEPENDENT: its warm-up spans 290..387 as the pile
 //! collapses, and after it the count moves in whole dispatched colours as the
-//! contact set settles (364..365 per step over 4,352 steps since L5 C4; 362..363
+//! contact set settles (268..269 per step over 4,352 steps since L11 C2; 364..365
+//! after L5 C4 on the 25-word view; 362..363
 //! after the default SIMD flip; 362..375 after A7b on the scalar kernel; 314..350
 //! after A7a alone; 302..339 before it). Quote it as a range, never as a figure.
 //! Its release pins are that long run's envelope with NO upward headroom — scope
-//! 134..=134, chunk 230..=230, dispatch MAX 365 (after the default SIMD flip:
+//! 134..=134, chunk 134..=134, dispatch MAX 269 (after L5 C4 on the 25-word view:
+//! 134..=134, 230..=230, 365; after the default SIMD flip:
 //! 133..=133, 229..=229, 363; after A7b on the scalar kernel:
 //! 133..=133, 229..=241, 375; after A7a alone: 109..=133,
 //! 205..=217, 350; before A7a: 109..=121, 193..=217, 339):
+//!
+//! * **The fifth re-pin, after L11 C2, is a NARROWING, and it is attributed by a size,
+//!   not by a mean.** The colour task's closure shrank from 264 B to 104 B with the view
+//!   it captures, its cell from 280 B to 120 B, and 34 cells fit a chunk where 14 did;
+//!   the task counts did not move (the spawns-per-scope histogram is identical on the
+//!   two trees), so the 96 scopes a frame that spawned 15..=23 tasks stopped taking a
+//!   second chunk. The long run moved DOWN only (header, "S1c after L11 C2"): chunk
+//!   230..=230 became 134..=134 and dispatch MAX 365 became 269; scope did not move.
+//!   The rule below keeps no upward headroom, so the fan-out regression (+24 a frame)
+//!   would land at 292..293 against 269, and 146 against 134..=134 on both classes, on
+//!   every frame; that is arithmetic on the measured long run, not a re-run of that
+//!   mutation.
 //!
 //! * **The fourth re-pin, after L5 C4, is a +1 / +1 shift, and it is attributed by a
 //!   counter, not by a mean.** The narrowphase's own dispatch counter moved by one on
@@ -520,10 +613,10 @@
 //! * **Why not pin EXACTLY against the dispatched colour count.** The count is
 //!   not observable from outside `boyko_physics/src`: whether a colour is
 //!   dispatched is decided from private constants (`MIN_PARALLEL_SLOTS_PER_COLOR`,
-//!   `MIN_SLOTS_PER_CHUNK`, `CHUNKS_PER_WORKER`) over `ContactColumns`' private
-//!   CSR. Recomputing it here would be a replica of the code under test, not an
-//!   observation of it — the replica drifts with the solver and the gate then
-//!   checks the replica.
+//!   `MIN_SLOTS_PER_CHUNK`, `CHUNKS_PER_WORKER`) over `CohortColumns`' private
+//!   CSRs (`color_offsets`, `group_start`). Recomputing it here would be a
+//!   replica of the code under test, not an observation of it — the replica
+//!   drifts with the solver and the gate then checks the replica.
 //!
 //! # Coverage boundary — the Rust heap, and only the Rust heap
 //!
@@ -2347,7 +2440,11 @@ impl Pin {
 /// parallel narrowphase (L5 C4, 2026-09-21, same toolchain) — the release pin's fourth
 /// re-pin, the debug pin's second: the narrowphase's one dispatch scope and its one
 /// block, on every frame of both long runs (header, "S1c after the default parallel
-/// narrowphase").
+/// narrowphase"). The RELEASE pin was re-pinned a fifth time, DOWN, after L11 C2
+/// (2026-09-21, same toolchain): the colour task's cell shrank from 280 B to 120 B and
+/// every colour scope fits its first block, so chunk 230 -> 134 and dispatch MAX 365 ->
+/// 269 on every frame of the long run; scope unmoved, and the debug pin unmoved because
+/// its long run reproduced every figure (header, "S1c after L11 C2").
 fn pins() -> [Pin; 12] {
     // An App frame: one install frame (a `ScopeShared` + one chunk) and at most
     // one injector block — the block arrives once per 63 dispatcher-side pushes,
@@ -2437,12 +2534,22 @@ fn pins() -> [Pin; 12] {
             // every one of 4,352 long-run frames (134 / 230, dispatch MAX 365), its own
             // counter +1 on each, the colours unmoved (header, "S1c after the default
             // parallel narrowphase"). No headroom either way.
+            // RE-PINNED DOWN after L11 C2 (2026-09-21): the colour task captures a 5-word
+            // `CohortSolveView` instead of the 25-word `ContactSolveView`, so its cell is
+            // 120 B, not 280, and 34 fit a chunk where 14 did; the task counts did not
+            // move, so the 96 colour scopes a frame that took a second chunk take none,
+            // and all 4,352 long-run frames read 134 chunks, dispatch MAX 269, -96 on
+            // every frame against the C1 control (header, "S1c after L11 C2"). The rule
+            // keeps no headroom either way, so 230 / 365 went with it: a chunk above 134
+            // is a colour scope that overflowed its first block again (a closure past
+            // 112 B at W=8's 32 tasks, or a colour past 34 tasks), and a red to
+            // re-measure.
             Pin {
                 scene: "S1c",
                 workers: 4,
                 scope: (134, 134),
-                chunk: (230, 230),
-                dispatch_max: 365,
+                chunk: (134, 134),
+                dispatch_max: 269,
                 other_per_frame: 0,
                 realloc_sum: 0,
             }
@@ -2457,7 +2564,10 @@ fn pins() -> [Pin; 12] {
             // RE-PINNED +1 / +1 after the default parallel narrowphase (L5 C4,
             // 2026-09-21): the narrowphase's one scope and one block on every frame
             // of the 4,352-step debug long run, its counter +1 on each (header, "S1c
-            // after the default parallel narrowphase").
+            // after the default parallel narrowphase"). UNCHANGED by L11 C2 (2026-09-21):
+            // its 4,352-step debug long run reproduced every figure digit for digit — a
+            // debug colour's scope holds one chunk whatever its cell size (header, "S1c
+            // after L11 C2").
             Pin {
                 scene: "S1c",
                 workers: 4,

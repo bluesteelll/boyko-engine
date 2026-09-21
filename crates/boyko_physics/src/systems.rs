@@ -1140,7 +1140,7 @@ pub fn physics_build_graph(
 ///
 /// Calls [`ColoredSoftStepSolver::solve_colored`](crate::solver::ColoredSoftStepSolver::solve_colored)
 /// directly (not through [`RigidSolver::solve`], whose signature carries no
-/// graph): the solver builds its SoA `ContactColumns` in color order, runs the
+/// graph): the solver builds its cohort tables (`CohortColumns`) in color order, runs the
 /// substep loop solving colors `0..n_colors` sequentially (a Gauss-Seidel sweep
 /// across colors), then stores the converged impulses by manifold index
 /// (`solver::warm_records`, L11 C1). Registered ONLY on the colored path, where it

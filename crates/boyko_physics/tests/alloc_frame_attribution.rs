@@ -106,6 +106,20 @@
 //!   delta is attributed to the dispatch, not to two means that happened to differ. Every
 //!   other D arm prices the solve against a baseline with this flag OFF, so the serial
 //!   step it quotes is still the whole serial step.
+//! * **Since L11 C2 a colour scope's task cells fit its first block at every lane
+//!   count** (D4, 2026-09-21, release): the colour task captures a 5-word
+//!   `CohortSolveView` instead of the 25-word `ContactSolveView`, so its closure is
+//!   104 B (was 264), its cell 120 B (was 280) and 34 cells fit a 4 KiB chunk (14 did),
+//!   while the task counts did not move — at most 12 a colour at W=2, 23 at W=4 and 32
+//!   at W=8 and at W=16 (`n_chunks` is a ceiling on the cut count; the cohort-snapped
+//!   cut walk rounds every cut up to whole cohorts). So `chunk == scope` on every frame
+//!   at W = 2 / 4 / 8 — 272.125 a step on all three rows, where the C1 tree read
+//!   368.625 at W=4 and at W=8 on 1.710 chunks per scope — and D4's first lane
+//!   assertion, `four > two`, is no longer a property of the tree. Fan-out still grows
+//!   with lanes once a scope exceeds one chunk, and D4 asserts it where the model
+//!   predicts it: with `simd_solve = false` the cut walk advances in single groups, the
+//!   widest colours reach 38 tasks at W=8, and the scalar W=8 row costs 283.125 against
+//!   the scalar W=4 row's 272.125 (chunk 145..=157 against 133..=145).
 //! * **`OTHER` in steady state is exactly one site**: crossbeam-epoch's
 //!   `Collector::register`, a pool thread's thread-local `LocalHandle` created on
 //!   its first steal (36 of 36 `OTHER` captures across 24 fresh Apps). Once per
@@ -1979,6 +1993,12 @@ impl Pile {
             .resource_mut::<PhysicsConfig>()
             .parallel_narrowphase = on;
     }
+    /// The O7 cohort kernel (on by default) against the scalar one. Bit-identical, so
+    /// the trajectory does not move; what moves is the cut walk (cohort-snapped or
+    /// single-group), hence the task count per colour scope.
+    fn set_simd_solve(&mut self, on: bool) {
+        self.world.resource_mut::<PhysicsConfig>().simd_solve = on;
+    }
     /// The narrowphase's own count of dispatched steps (`Manifolds::narrowphase_dispatches`).
     fn np_dispatches(&self) -> u64 {
         self.world.resource::<Manifolds>().narrowphase_dispatches()
@@ -2287,24 +2307,62 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
 
     // ── D4: how it scales with worker count ──
     //
-    // The chunk count is `lanes * CHUNKS_PER_WORKER` capped by work, so if the
-    // budget is one cell per chunk it is roughly linear in the worker count.
-    // Since L4 the one-worker row dispatches nothing: the solver's whole-step
-    // gate refuses a one-lane dispatch, so that row reads the serial step. It is
-    // reported, never compared, because a dispatching row priced against a serial
-    // one cannot fail. The assertion compares the two rows that both dispatch,
-    // 4 workers against 2. It is strict in release, where a chunk count that
-    // does not rise with the lane count goes red, and `>=` in debug, where the
-    // two rows are equal by construction (see the assertion).
-    let mut lane_points: Vec<(usize, f64)> = Vec::with_capacity(4);
-    for w in [1usize, 2, 4] {
+    // What the lane count buys is TASKS per colour scope, not chunks. A chunk is one
+    // 4 KiB `ScopeBlock`, it holds `4096 / (closure + SCOPED_CELL_HEADER)` task
+    // cells, and a scope takes a second chunk only once its task count crosses that
+    // budget; the task count is `min(lanes * CHUNKS_PER_WORKER, slots /
+    // MIN_SLOTS_PER_CHUNK)` cuts a colour (`solve_color_parallel`, colored.rs), a
+    // CEILING: the cohort-snapped cut walk rounds every cut up to whole cohorts and
+    // so produces fewer cuts than it. Since L4
+    // the one-worker row dispatches nothing: the solver's whole-step gate refuses a
+    // one-lane dispatch, so that row reads the serial step. It is reported, never
+    // compared, because a dispatching row priced against a serial one cannot fail.
+    //
+    // Until L11 C2 the colour task captured the 25-word `ContactSolveView` — a 264 B
+    // closure, a 280 B cell, 14 per chunk — and this arm's first form asserted
+    // `four > two` strictly in release on that budget: at W=2 a colour spawns at most
+    // 12 tasks (one chunk), at W=4 up to 23 (two), so the 4-worker row cost more
+    // (368.625 against 272.125 on the C1 tree, 2026-09-21). L11 C2 (`CohortColumns`)
+    // replaced the view with the 5-word `CohortSolveView`: the closure is 104 B, the
+    // cell 120 B, 34 per chunk, and the task counts did not move (the spawns-per-scope
+    // histogram is byte-identical on the two trees at every W). So W=2 == W=4 NOW —
+    // and W=8 too: on the shipped kernel a colour spawns at most 32 tasks at W=8 (and
+    // at W=16), not `8 * CHUNKS_PER_WORKER` = 48, because the widest colour here
+    // (2,880 slots) is 45 cuts by work and cohort snapping rounds each cut up to whole
+    // cohorts, 32 in all; 32 x 120 = 3,840 B fits the first block. Every dispatching
+    // row reads 272.125 with `chunk == scope` on every frame (measured 2026-09-21,
+    // release, W = 2 / 4 / 8 / 16), and THAT is what is pinned here, with no headroom:
+    // it reds if the closure grows past 4096 / 32 - 16 = 112 B (8 B of headroom at
+    // W=8's 32 tasks) or a colour's task count crosses 34. The scope means of the
+    // three dispatching rows are asserted equal as well: the dispatch decision reads
+    // only the contact set and the trajectory is bit-identical across lane counts, so
+    // the same colours dispatch on the same frames at every W.
+    //
+    // The property the first form asserted — fan-out grows with lanes once a scope
+    // exceeds one chunk — is still asserted, where the model predicts it: with
+    // `simd_solve = false` the cut walk advances in single groups, the widest colours
+    // reach 35..=38 tasks at W=8 (312 of the 3,840 colour scopes in this window cross
+    // 34) and take a second chunk, so the scalar W=8 row carries more chunks than the
+    // scalar W=4 row on the same scopes (147.000 against 136.000 a step; chunk
+    // 145..=157 against 133..=145; 283.125 against 272.125 acquisitions). That is
+    // strict in release. Debug builds the pile at `pyramid_height()` = 10 (385
+    // bodies), where every colour's work term is under the 4-worker lane term (24
+    // tasks) at any lane count and on either cut walk — well inside one block — so the
+    // scalar W=8 row spawns exactly what the scalar W=4 row spawns, and the pair
+    // asserts only `>=` (the 2- and 4-worker rows were measured identical in every
+    // field there on 2026-09-19, two runs; the equal rows are the evidence). The
+    // strict form is gated by the physics release leg, `cargo test --release -p
+    // boyko-physics --no-fail-fast` (CLAUDE.md), which runs this binary at height 15.
+    let mut lane_points: Vec<(usize, Meas)> = Vec::with_capacity(4);
+    for w in [1usize, 2, 4, 8] {
         let mut p = build_pile(w, true, 4, 2);
         for _ in 0..PHYS_WARM {
             p.step();
         }
         p.set_parallel_solve(true);
-        let m = window(4, PHYS_REPS, || p.step());
-        lane_points.push((w, m.mean));
+        let per_frame = frames(4, PHYS_REPS, || p.step());
+        let m = summarise(&per_frame);
+        lane_points.push((w, m));
         push(
             rows,
             "D",
@@ -2312,43 +2370,104 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
             m,
             verdict::SHOULD_NOT,
         );
+        if w >= 2 {
+            for (i, f) in per_frame.iter().enumerate() {
+                assert!(
+                    f.chunk == f.scope,
+                    "D: W={w}, frame {i}: {} chunks for {} scope frames — since L11 C2 every \
+                     colour scope's task cells (at most 32 x 120 B, at W=8) fit its first 4 KiB \
+                     block, so a dispatching frame holds exactly one chunk per scope; a second \
+                     block means the spawned closure grew past 112 B or a colour's task count \
+                     crossed 34 (see the D4 comment)",
+                    f.chunk,
+                    f.scope
+                );
+            }
+        }
     }
-    say!(
-        "  ⇒ by worker count: {} → {:.0}, {} → {:.0}, {} → {:.0} acquisitions a step",
-        lane_points[0].0,
-        lane_points[0].1,
-        lane_points[1].0,
-        lane_points[1].1,
-        lane_points[2].0,
-        lane_points[2].1
+    say_inline!("  ⇒ by worker count: ");
+    for (w, m) in &lane_points {
+        say_inline!(
+            "{w} → {:.3} ({:.3} chunks per scope)  ",
+            m.mean,
+            m.chunk / m.scope.max(1.0)
+        );
+    }
+    say!("acquisitions a step; chunk == scope on every frame of every dispatching row");
+    let (two, four, eight) = (lane_points[1].1, lane_points[2].1, lane_points[3].1);
+    assert!(
+        two.scope == four.scope && four.scope == eight.scope,
+        "D: the dispatching rows opened {:.3} / {:.3} / {:.3} scope frames a step at W = 2 / 4 / \
+         8 — the dispatch decision reads only the contact set and the trajectory is \
+         bit-identical across lane counts, so the same colours dispatch on the same frames at \
+         every W; a difference is a trajectory or a dispatch-decision that depends on the lane \
+         count",
+        two.scope,
+        four.scope,
+        eight.scope
     );
-    let (four, two) = (lane_points[2].1, lane_points[1].1);
-    // Debug builds the pile at `pyramid_height()` = 10: 385 bodies, against
-    // 1240 at 15 in release. There the 2- and 4-worker rows are identical in
-    // every field (measured 2026-09-19, two runs), and that is by construction,
-    // not a defect. `solve_color_parallel` (colored.rs) spawns
-    // `min(lanes * CHUNKS_PER_WORKER, slots / MIN_SLOTS_PER_CHUNK)` chunks a
-    // color, and in that pile the work term is at most the 2-worker lane term
-    // (`2 * CHUNKS_PER_WORKER`, 12 today) for every color, so both rows spawn
-    // the same chunks. The equal rows are the evidence: a color whose work term
-    // exceeded it would get more chunks from 4 lanes than from 2. So debug
-    // asserts only `>=`. The strict form is gated by the physics release leg,
-    // `cargo test --release -p boyko-physics --no-fail-fast` (CLAUDE.md), which
-    // runs this binary at height 15, where the lane term binds.
+
+    // The scalar pair: the same window with the scalar kernel at W=4 and W=8, warmed
+    // on the default kernel (bit-identical, so the pile is the same pile) and flipped
+    // before the window, as the 2026-09-21 measurement was taken.
+    let mut scalar_points: Vec<(usize, Meas)> = Vec::with_capacity(2);
+    for w in [4usize, 8] {
+        let mut p = build_pile(w, true, 4, 2);
+        for _ in 0..PHYS_WARM {
+            p.step();
+        }
+        p.set_parallel_solve(true);
+        p.set_simd_solve(false);
+        let m = window(4, PHYS_REPS, || p.step());
+        scalar_points.push((w, m));
+        push(
+            rows,
+            "D",
+            format!("physics step, parallel_solve ON, simd_solve OFF, {w} worker(s)"),
+            m,
+            verdict::SHOULD_NOT,
+        );
+    }
+    let (four_scalar, eight_scalar) = (scalar_points[0].1, scalar_points[1].1);
+    say!(
+        "  ⇒ scalar cut walk (simd_solve OFF): 4 → {:.3} ({:.3} chunks per scope), 8 → {:.3} \
+         ({:.3} chunks per scope) acquisitions a step",
+        four_scalar.mean,
+        four_scalar.chunk / four_scalar.scope.max(1.0),
+        eight_scalar.mean,
+        eight_scalar.chunk / eight_scalar.scope.max(1.0)
+    );
+    assert!(
+        four_scalar.scope == eight_scalar.scope && four_scalar.scope == four.scope,
+        "D: the scalar rows opened {:.3} / {:.3} scope frames a step at W = 4 / 8 against \
+         {:.3} on the default kernel — the scalar kernel is bit-identical and the dispatch \
+         decision is lane-independent, so the chunk comparison below is not over the same \
+         scopes",
+        four_scalar.scope,
+        eight_scalar.scope,
+        four.scope
+    );
     if cfg!(debug_assertions) {
         assert!(
-            four >= two,
-            "D: four workers ({four:.1}) cost less than two ({two:.1}); in debug every color is \
-             work-bound, so both rows should spawn the same chunks and cost the same (the strict \
-             form is gated in release only)"
+            eight_scalar.chunk >= four_scalar.chunk,
+            "D: eight workers on the scalar kernel ({:.3} chunks a step) took fewer chunks than \
+             four ({:.3}); in debug every colour is work-bound below the 2-worker lane term, so \
+             both rows should spawn the same tasks and take the same chunks (the strict form is \
+             gated in release only)",
+            eight_scalar.chunk,
+            four_scalar.chunk
         );
     } else {
         assert!(
-            four > two,
-            "D: four workers ({four:.1}) did not cost more than two ({two:.1}); both rows \
-             dispatch, and the per-chunk cell model predicts the chunk count rises with the lane \
-             count, so it did not scale (the one-worker row takes the inline path since L4 and \
-             is not compared)"
+            eight_scalar.chunk > four_scalar.chunk,
+            "D: eight workers on the scalar kernel ({:.3} chunks a step) did not take more \
+             chunks than four ({:.3}) over the same scopes; the single-group cut walk gives the \
+             widest colours 35..=38 tasks at W=8 against at most 24 at W=4, past the 34 cells a \
+             first block holds, so the per-chunk cell model predicts a second chunk on those \
+             scopes at W=8 and none at W=4 — fan-out no longer grows with lanes once a scope \
+             exceeds one chunk (see the D4 comment)",
+            eight_scalar.chunk,
+            four_scalar.chunk
         );
     }
 

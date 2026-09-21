@@ -2435,7 +2435,7 @@ const OCC_WORD_BITS: u32 = 64;
 /// trigger).
 ///
 /// ⚠ **RETIRED AS THE DISPATCH GATE.** The whole-solve gate now reads the widest
-/// COLOR's slot count (`ContactColumns::widest_color_slots`, colored.rs) against
+/// COLOR's slot count (`CohortColumns::widest_color_slots`, colored.rs) against
 /// the solver's own `MIN_PARALLEL_SLOTS_PER_COLOR`. This const survives as the
 /// island-size threshold the P2 tests are written against; nothing in the solve
 /// path reads it.
@@ -2639,7 +2639,7 @@ impl ConstraintGraph {
     /// is a set of body-disjoint manifolds, and manifolds in different islands are
     /// always body-disjoint, so `n` disjoint pairs give `max_island_constraints ==
     /// 1` and a single color of `n` slots. The whole-solve gate reads
-    /// `ContactColumns::widest_color_slots` instead — see
+    /// `CohortColumns::widest_color_slots` instead — see
     /// [`LARGE_ISLAND_CONSTRAINTS`](crate::resources::LARGE_ISLAND_CONSTRAINTS) for
     /// the full account.
     ///

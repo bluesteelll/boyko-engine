@@ -135,6 +135,16 @@ predicted setup 0.425 → 0.10–0.21 µs per manifold. Rulings:
   read no body row, with a Miri multi-thread case; the restitution predicate is `!(e <= 0.0)`; the test-port
   inventory lists what is deleted; the L10 mapping uses t−1's stream index).
 - **OQ1/OQ2:** measure the C1 share and the kernel's gather/scatter share before the C2/C3 rewrites.
+- **Ruling after C2 (2026-09-21, the census adjudication):** the S1c release pins moved with C2 — chunk 230 → 134,
+  dispatch MAX 365 → 269, scope unmoved, the debug pins unmoved — because the colour task's cell shrank with the
+  view it captures (280 → 120 B; 34 cells per chunk, not 14) and no colour scope needs a second block any more.
+  This is the census's own re-pin case (the 17 × 256-step long run against a C1 control, the per-frame structural
+  assertion, the attribution binary's A/B arm, then the envelope with no headroom either way), NOT a widening; the
+  design's G7 sentence "scope/chunk pins unchanged (C1–C3)" is corrected in place. Row D of the attribution binary
+  is not loosened: it pins `chunk == scope` per frame at W = 2/4/8 and keeps its strict lane-growth assertion where
+  the model predicts growth — on the scalar cut walk (`simd_solve = false`) at W=8 against W=4 — because on the
+  shipped kernel a colour spawns at most 32 tasks at any lane count (the ruling's "48 at W=8" was the ceiling
+  `lanes × CHUNKS_PER_WORKER`, not the count the cohort-snapped cut walk produces).
 - **L12 is commissioned** (the effective-mass cache per inertia epoch: 5 of 12 sweeps compute, 7 load;
   bit-identical) as its own design after L11.
 

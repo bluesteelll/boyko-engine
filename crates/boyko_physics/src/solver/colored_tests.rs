@@ -328,30 +328,37 @@
         }
         assert_eq!(groups_seen, cols.group_start().len() - 1, "every group belongs to exactly one color");
 
-        // The 4-point box manifold (rows 2,3) must appear as ONE contiguous group
-        // of 4 slots — never split. Locate it by its body pair in the columns.
+        // The 4-point box manifold (rows 2,3) must appear as ONE group of width 4 —
+        // never split. A group is one lane of one cohort of its color (L11 C2): the
+        // lane's body pair is the manifold's and its width the group's point count.
         let mut box_group_len = None;
-        for g in 0..(cols.group_start().len() - 1) {
-            let gs = cols.group_start()[g] as usize;
-            let ge = cols.group_start()[g + 1] as usize;
-            if cols.body_a(gs) == 2 && cols.body_b(gs) == 3 {
-                // Every slot of the run shares the SAME body pair (the C1 contract).
-                for s in gs..ge {
-                    assert_eq!(cols.body_a(s), 2, "box group body A is shared across its points");
-                    assert_eq!(cols.body_b(s), 3, "box group body B is shared across its points");
+        for c in 0..n_colors {
+            let ctx = cols.color_ctx(c);
+            let g_lo = cols.color_group_start()[c] as usize;
+            let g_hi = cols.color_group_start()[c + 1] as usize;
+            for g in g_lo..g_hi {
+                let (k, l) = ctx.lane_of(g);
+                let head = &cols.heads()[k];
+                assert!(l < head.nlanes as usize, "a group maps to a live lane of its cohort");
+                assert_eq!(
+                    u32::from(head.width[l]),
+                    cols.group_start()[g + 1] - cols.group_start()[g],
+                    "the lane's width is the group's point count"
+                );
+                if head.body_a[l] == 2 && head.body_b[l] == 3 {
+                    box_group_len = Some(head.width[l] as usize);
                 }
-                box_group_len = Some(ge - gs);
             }
         }
-        assert_eq!(box_group_len, Some(4), "the 4-point box manifold forms ONE 4-slot group");
+        assert_eq!(box_group_len, Some(4), "the 4-point box manifold forms ONE 4-point group");
     }
 
     // ── Tester additions (Phase O5 formal gates) ─────────────────────────────
     //
     // These extend the dev's stand-in sanity tests into the exhaustive O5 gates.
     // They live in the lib test module because the rigorous group-CSR tiling gate
-    // (Gate 4) needs access to the PRIVATE `ContactColumns` fields (`group_start`,
-    // `color_group_start`, `color_offsets`, `body_a`/`body_b`). They
+    // (Gate 4) needs access to the PRIVATE `CohortColumns` tables (`group_start`,
+    // `color_group_start`, `color_cohort_start`, `color_offsets`, the heads). They
     // touch only `Vec` scratch (no pool, no int-to-ptr), so they run native AND
     // under `cargo miri test -p boyko-physics --lib` (Gate 7).
 
@@ -454,28 +461,39 @@
             );
             prop_assert_eq!(cols.group_start().first().copied(), Some(0u32), "group CSR starts at 0");
 
-            // Build the expected slot->body-pair from each appended group, and
-            // verify the tiling per color.
+            // Verify the tiling per color: the groups tile the color's point span, and
+            // the color's cohorts tile its groups (L11 C2) — each group is one lane of
+            // one cohort, the cohorts are 8-group windows from the color's first group,
+            // and the cohorts' rank tables are contiguous.
             let mut groups_seen = 0usize;
             let mut covered = vec![false; cols.len()];
+            let mut ranks_seen = 0u32;
             for c in 0..n_colors {
                 let span_start = cols.color_offsets()[c];
                 let span_end = cols.color_offsets()[c + 1];
                 let g_lo = cols.color_group_start()[c] as usize;
                 let g_hi = cols.color_group_start()[c + 1] as usize;
+                let k_lo = cols.color_cohort_start()[c] as usize;
+                let k_hi = cols.color_cohort_start()[c + 1] as usize;
                 prop_assert!(g_lo <= g_hi, "color {} group range well-ordered", c);
+                prop_assert_eq!(k_hi - k_lo, (g_hi - g_lo).div_ceil(COHORT), "color {} cohorts are 8-group windows", c);
+                let ctx = cols.color_ctx(c);
                 let mut cursor = span_start;
                 for g in g_lo..g_hi {
                     let gs = cols.group_start()[g];
                     let ge = cols.group_start()[g + 1];
                     prop_assert!(ge > gs, "group {} must be non-empty", g);
                     prop_assert_eq!(gs, cursor, "group {} tiles color {} span with no gap/overlap", g, c);
-                    // Every slot of the group shares the SAME body pair (the C1
-                    // contract: a manifold's ≥2 points are never split).
-                    let (ba, bb) = (cols.body_a(gs as usize), cols.body_b(gs as usize));
+                    // The group is one lane of one cohort of its color, and the lane's
+                    // width is the group's point count (the C1 contract: a manifold's
+                    // ≥2 points are never split).
+                    let (k, l) = ctx.lane_of(g);
+                    prop_assert!(k >= k_lo && k < k_hi, "group {} maps into color {}'s cohorts", g, c);
+                    let head = &cols.heads()[k];
+                    prop_assert!(l < head.nlanes as usize, "group {} maps to a live lane", g);
+                    prop_assert_eq!(u32::from(head.width[l]), ge - gs, "group {} width is its lane's", g);
+                    prop_assert!(head.width[l] <= head.depth, "lane width within the cohort's depth");
                     for s in gs..ge {
-                        prop_assert_eq!(cols.body_a(s as usize), ba, "group {} body A shared", g);
-                        prop_assert_eq!(cols.body_b(s as usize), bb, "group {} body B shared", g);
                         prop_assert!(!covered[s as usize], "slot {} covered by >1 group", s);
                         covered[s as usize] = true;
                     }
@@ -483,26 +501,36 @@
                     groups_seen += 1;
                 }
                 prop_assert_eq!(cursor, span_end, "color {} groups exactly fill its slot span", c);
+                for k in k_lo..k_hi {
+                    let head = &cols.heads()[k];
+                    let expected_lanes = (g_hi - (g_lo + (k - k_lo) * COHORT)).min(COHORT);
+                    prop_assert_eq!(head.nlanes as usize, expected_lanes, "cohort {} lane count", k);
+                    prop_assert_eq!(head.rank_base, ranks_seen, "cohort {} rank table is contiguous", k);
+                    let depth = (0..COHORT).map(|l| head.width[l]).max().unwrap_or(0);
+                    prop_assert_eq!(head.depth, depth, "cohort {} depth is its widest lane", k);
+                    ranks_seen += u32::from(head.depth);
+                }
             }
+            prop_assert_eq!(ranks_seen as usize, cols.blocks().len(), "the rank blocks are exactly the cohorts' ranks");
+            prop_assert_eq!(cols.heads().len(), *cols.color_cohort_start().last().unwrap_or(&0) as usize, "every cohort belongs to a color");
             prop_assert_eq!(groups_seen, cols.group_start().len() - 1, "every group in exactly one color");
             // Every slot is covered by exactly one group.
             prop_assert!(covered.iter().all(|&c| c), "every slot belongs to a group");
 
             // A multi-point manifold (count >= 2 over a dyn-dyn pair) appears as
-            // ONE contiguous group of exactly `count` slots — never split.
+            // ONE lane of exactly `count` points — never split.
             for m in &manifolds {
                 if m.count >= 2 && m.body_b != SDF_SENTINEL {
                     let ia = m.body_a.0;
                     let ib = m.body_b.0;
-                    // Locate the group whose first slot matches this body pair AND
-                    // whose length equals the manifold's live point count.
+                    // Locate the lane whose body pair is this manifold's AND whose
+                    // width equals the manifold's live point count.
                     let mut found = false;
-                    for g in 0..(cols.group_start().len() - 1) {
-                        let gs = cols.group_start()[g] as usize;
-                        let ge = cols.group_start()[g + 1] as usize;
-                        if cols.body_a(gs) == ia && cols.body_b(gs) == ib && (ge - gs) == m.count as usize {
-                            found = true;
-                            break;
+                    for head in cols.heads() {
+                        for l in 0..head.nlanes as usize {
+                            if head.body_a[l] == ia && head.body_b[l] == ib && head.width[l] == m.count {
+                                found = true;
+                            }
                         }
                     }
                     prop_assert!(
@@ -711,51 +739,123 @@
             .collect()
     }
 
-    /// Byte-identical snapshot of ALL 30 `ContactColumns` (audit Stage P — P2,
-    /// Gate 1). Emits each column's raw bits in `ContactColumns` field order, so two
-    /// builds (e.g. the `ScratchColumn` backend vs a reference) over the same scene
-    /// must produce a BIT-FOR-BIT equal vector.
-    ///
-    /// Covers every column — the 25 push-filled point/CSR-seed columns AND the 5
-    /// CSR / per-manifold columns (`color_offsets`, `group_start`,
-    /// `color_group_start`, `manifold_base` including its retained `(u32::MAX, 0)`
-    /// sentinels, and the L11 C1 `plan`).
-    #[allow(dead_code)]
-    fn columns_snapshot(cols: &ContactColumns) -> Vec<u32> {
+    /// Byte-complete snapshot of the cohort layout (L11 C2, G3): every field of every
+    /// head (its zero padding bytes included), cold record, rank block and `vn0` row,
+    /// then the per-manifold tags and plan, then the four CSRs — in
+    /// `CohortColumns` field order, so two builds over the same scene must produce a
+    /// BIT-FOR-BIT equal vector. Padding lanes and ranks are part of it, so a stale
+    /// byte in a padding lane moves the vector.
+    fn layout_snapshot(cols: &CohortColumns) -> Vec<u32> {
         let mut out = Vec::new();
-        let mut push_f32 = |s: &[f32]| out.extend(s.iter().map(|v| v.to_bits()));
-        push_f32(cols.ra_x.as_read_slice());
-        push_f32(cols.ra_y.as_read_slice());
-        push_f32(cols.ra_z.as_read_slice());
-        push_f32(cols.rb_x.as_read_slice());
-        push_f32(cols.rb_y.as_read_slice());
-        push_f32(cols.rb_z.as_read_slice());
-        push_f32(cols.normal_x.as_read_slice());
-        push_f32(cols.normal_y.as_read_slice());
-        push_f32(cols.normal_z.as_read_slice());
-        push_f32(cols.tangent1_x.as_read_slice());
-        push_f32(cols.tangent1_y.as_read_slice());
-        push_f32(cols.tangent1_z.as_read_slice());
-        push_f32(cols.tangent2_x.as_read_slice());
-        push_f32(cols.tangent2_y.as_read_slice());
-        push_f32(cols.tangent2_z.as_read_slice());
-        push_f32(cols.separation.as_read_slice());
-        push_f32(cols.friction.as_read_slice());
-        push_f32(cols.restitution.as_read_slice());
-        push_f32(cols.normal_impulse.as_read_slice());
-        push_f32(cols.tangent1_impulse.as_read_slice());
-        push_f32(cols.tangent2_impulse.as_read_slice());
-        push_f32(cols.vn_initial.as_read_slice());
-        // Integer / flag / key / CSR / pair columns.
-        out.extend(cols.body_a.as_read_slice().iter().copied());
-        out.extend(cols.body_b.as_read_slice().iter().copied());
-        out.extend(cols.b_is_sentinel.as_read_slice().iter().map(|&b| b as u32));
+        let bits = |row: &[f32; COHORT]| row.iter().map(|v| v.to_bits()).collect::<Vec<u32>>();
+        for h in cols.heads() {
+            for c in 0..3 {
+                out.extend(bits(&h.n[c]));
+            }
+            for c in 0..3 {
+                out.extend(bits(&h.t1[c]));
+            }
+            out.extend(bits(&h.friction));
+            out.extend(h.body_a);
+            out.extend(h.body_b);
+            out.extend(h.width.iter().map(|&w| u32::from(w)));
+            out.extend([
+                h.rank_base,
+                u32::from(h.depth),
+                u32::from(h.nlanes),
+                u32::from(h.sentinel),
+                u32::from(h._p),
+            ]);
+            out.extend(h._pad.iter().map(|&b| u32::from(b)));
+        }
+        for c in cols.cold.as_read_slice() {
+            out.extend(bits(&c.restitution));
+            out.extend(c.mi);
+        }
+        for b in cols.blocks() {
+            for c in 0..3 {
+                out.extend(bits(&b.ra[c]));
+            }
+            for c in 0..3 {
+                out.extend(bits(&b.rb[c]));
+            }
+            out.extend(bits(&b.sep));
+            out.extend(bits(&b.ni));
+            out.extend(bits(&b.ti1));
+            out.extend(bits(&b.ti2));
+        }
+        for v in cols.rank_cold.as_read_slice() {
+            out.extend(bits(v));
+        }
+        out.extend(cols.tags().iter().map(|t| u32::from(t.count) | (u32::from(t.flags) << 8)));
+        out.extend(cols.plan().iter().flat_map(|r| [r.lo, r.hi]));
         out.extend(cols.color_offsets().iter().copied());
         out.extend(cols.group_start().iter().copied());
         out.extend(cols.color_group_start().iter().copied());
-        out.extend(cols.manifold_base().iter().flat_map(|&(a, b)| [a, b]));
-        out.extend(cols.plan().iter().flat_map(|r| [r.lo, r.hi]));
+        out.extend(cols.color_cohort_start().iter().copied());
         out
+    }
+
+    /// The warm store's read side after a step (the side the step just wrote): its
+    /// keys, its records word by word, and its strictness (G3: the records are
+    /// byte-equal across worker counts).
+    fn records_snapshot(solver: &ColoredSoftStepSolver) -> Vec<u32> {
+        let side = &solver.warm[solver.warm_cur as usize];
+        let mut out: Vec<u32> = side.keys().iter().flat_map(|&k| [k as u32, (k >> 32) as u32]).collect();
+        for r in side.recs() {
+            out.extend(r.words());
+        }
+        out.push(u32::from(side.strict()));
+        out
+    }
+
+    /// What one padding audit of the layout found: whether every padding lane and
+    /// rank is zero, and how many partial cohorts and padded ranks the layout has (the
+    /// audit's own anti-vacuity).
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct PaddingAudit {
+        zero: bool,
+        partial_cohorts: usize,
+        padded_ranks: usize,
+    }
+
+    /// Audits every cohort's padding (G3's release half: the same predicate as the
+    /// fill's debug assertion, evaluated here in every profile).
+    fn audit_padding(cols: &CohortColumns) -> PaddingAudit {
+        let blocks = cols.blocks();
+        let vn0 = cols.rank_cold.as_read_slice();
+        let mut audit = PaddingAudit { zero: true, partial_cohorts: 0, padded_ranks: 0 };
+        for (head, cold) in cols.heads().iter().zip(cols.cold.as_read_slice()) {
+            let nlanes = head.nlanes as usize;
+            let depth = head.depth as usize;
+            let rank_base = head.rank_base as usize;
+            audit.partial_cohorts += usize::from(nlanes < COHORT);
+            for (l, &width) in head.width.iter().enumerate() {
+                let width = width as usize;
+                if l >= nlanes {
+                    audit.zero &= width == 0
+                        && (0..3).all(|c| head.n[c][l].to_bits() == 0 && head.t1[c][l].to_bits() == 0)
+                        && head.friction[l].to_bits() == 0
+                        && head.body_a[l] == 0
+                        && head.body_b[l] == 0
+                        && !head.is_sentinel(l)
+                        && cold.restitution[l].to_bits() == 0
+                        && cold.mi[l] == 0;
+                } else {
+                    audit.padded_ranks += depth - width;
+                }
+                for (blk, vn) in blocks[rank_base..rank_base + depth].iter().zip(&vn0[rank_base..rank_base + depth]).skip(width) {
+                    audit.zero &= (0..3).all(|c| blk.ra[c][l].to_bits() == 0 && blk.rb[c][l].to_bits() == 0)
+                        && blk.sep[l].to_bits() == 0
+                        && blk.ni[l].to_bits() == 0
+                        && blk.ti1[l].to_bits() == 0
+                        && blk.ti2[l].to_bits() == 0
+                        && vn[l].to_bits() == 0;
+                }
+            }
+            audit.zero &= head._p == 0 && head._pad == [0; 16];
+        }
+        audit
     }
 
     /// A forced-collision DENSE scene: `n` dynamic spheres packed in a tight line
@@ -801,6 +901,30 @@
         out
     }
 
+    /// The dense scene's stream with a LAYOUT CHURN at step 6 (G3): every seventh
+    /// body also meets the body two places on with a box manifold of four points
+    /// before the churn and two after, and the odd bodies lose their floor contact
+    /// at the churn — so cohorts that were full become partial and lanes that were
+    /// four ranks deep become two, and a fill that skipped its padding would leave
+    /// the earlier bytes behind. Sorted by pair, so the stream stays strict.
+    #[cfg(not(miri))]
+    fn layout_churn_manifolds(bodies: &[BodyState], step: usize) -> Vec<Manifold> {
+        let churned = step >= 6;
+        let n = bodies.len() - 1;
+        let mut out: Vec<Manifold> = dense_collision_manifolds(bodies)
+            .into_iter()
+            .filter(|m| !(churned && m.body_b.0 == n as u32 && m.body_a.0 % 2 == 1))
+            .collect();
+        for a in (0..n).step_by(7) {
+            if a + 2 < n {
+                let up = Vec3::new(0.0, 1.0, 0.0);
+                out.push(box_manifold(a as u32, (a + 2) as u32, up, -0.05, bodies[a].position, if churned { 2 } else { 4 }));
+            }
+        }
+        out.sort_by_key(|m| (m.body_a.0, m.body_b.0));
+        out
+    }
+
     /// Runs the colored solve for `steps` over the dense scene with the given
     /// `parallel_solve` flag, inside an N-worker `ThreadPool::install` frame so the
     /// parallel path finds the ambient pool. Returns the final body snapshot bits.
@@ -830,21 +954,30 @@
         snapshot_bits(&scratch)
     }
 
-    /// Like [`run_dense_in_pool`] but returns the FULL 30-column
-    /// [`columns_snapshot`] of the solver's `ContactColumns` after the final step
-    /// (audit Stage P — P2, Gate 1). The columns are clear+refilled each
-    /// `solve_colored`, so after the last step they hold that step's complete
-    /// gathered SoA working set (all 25 point/CSR-seed columns + the 5
-    /// CSR/per-manifold columns). This is the load-bearing "pure backing swap"
-    /// probe: it reads the actual `ScratchColumn` bytes the parallel workers wrote,
-    /// not just the body state derived from them.
+    /// One G3 run: the layout and record bytes after the last step, and the padding
+    /// audit of that layout.
     #[cfg(not(miri))]
-    fn run_dense_columns_in_pool(n: usize, steps: usize, parallel_solve: bool, workers: usize) -> Vec<u32> {
+    struct LayoutRun {
+        layout: Vec<u32>,
+        records: Vec<u32>,
+        padding: PaddingAudit,
+    }
+
+    /// Like [`run_dense_in_pool`] but over the churned stream, with `simd_solve` as
+    /// given, and returning the FULL layout and record bytes after the final step
+    /// (L11 C2, G3). The tables are rebuilt each `solve_colored`, so after the last
+    /// step they hold that step's complete layout: every head, block and `vn0` row
+    /// the fill wrote and the sweeps updated, the records the store wrote. This is
+    /// the load-bearing "pure layout swap" probe: it reads the actual bytes the
+    /// parallel workers wrote, not just the body state derived from them.
+    #[cfg(not(miri))]
+    fn run_layout_in_pool(n: usize, steps: usize, parallel_solve: bool, simd_solve: bool, workers: usize) -> LayoutRun {
         use boyko_threadpool::ThreadPoolBuilder;
 
         let cfg = PhysicsConfig {
             dt: 1.0 / 60.0,
             parallel_solve,
+            simd_solve,
             ..PhysicsConfig::default()
         };
         let mut solver = ColoredSoftStepSolver::default();
@@ -854,120 +987,88 @@
 
         let pool = ThreadPoolBuilder::new().num_threads(workers).build();
         pool.install(|_scope| {
-            for _ in 0..steps {
-                let manifolds = dense_collision_manifolds(scratch.bodies());
+            for step in 0..steps {
+                let manifolds = layout_churn_manifolds(scratch.bodies(), step);
                 let graph = build_graph(scratch.bodies(), &manifolds);
                 scratch.touched.reset(scratch.bodies().len());
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
         });
-        columns_snapshot(&solver.columns)
+        LayoutRun {
+            layout: layout_snapshot(&solver.columns),
+            records: records_snapshot(&solver),
+            padding: audit_padding(&solver.columns),
+        }
     }
 
-    /// Gate 1 (audit Stage P — P2, the load-bearing "pure backing swap" proof):
-    /// the FULL 30-column `ContactColumns` SoA — backed by kernel `ScratchColumn`s
-    /// instead of `std::Vec`s — is BIT-FOR-BIT identical across (a) run-to-run
-    /// repeats (determinism) and (b) {1,2,4,8}-worker parallel runs versus the
-    /// single-threaded (`parallel_solve == false`) solve.
+    /// G3 (L11 C2): the cohort layout — every head, cold record, rank block and `vn0`
+    /// row — and the warm records are BYTE-FOR-BYTE identical across (a) run-to-run
+    /// repeats, (b) {1, 2, 4, 8, 16}-worker parallel runs versus the single-threaded
+    /// solve, and (c) the scalar and SIMD kernels; and every padding lane and padded
+    /// rank is zero after a layout churn that shrank cohorts and lanes (so a fill
+    /// that skipped the zeroing, M6, leaves the earlier step's bytes behind and goes
+    /// red here).
     ///
-    /// This reads the actual bytes the workers wrote into the 30 `ScratchColumn`s
-    /// (`columns_snapshot` covers all 30: the 21 worker/build f32 columns incl. the
-    /// three worker-MUTABLE impulse columns, the integer/flag columns, and the
-    /// five CSR/per-manifold columns). The body-state snapshot
-    /// (`parallel_solve_is_bit_identical_across_worker_counts`) only checks the 9
-    /// derived float fields per body; this checks the storage the backing swap
-    /// actually touched — so a parallel write going to the wrong column / a stale
-    /// base / a torn impulse accumulation would be caught here even if it happened
-    /// to cancel out in the body integration.
+    /// The body-state snapshot (`parallel_solve_is_bit_identical_across_worker_counts`)
+    /// only checks the 9 derived float fields per body; this checks the storage the
+    /// workers actually touched — so a parallel write going to the wrong lane / a
+    /// stale base / a torn impulse row would be caught here even if it happened to
+    /// cancel out in the body integration.
     ///
     /// Scene `n == 400` is sized so the widest color exceeds
     /// `MIN_PARALLEL_SLOTS_PER_COLOR` (asserted), so the parallel `pool.scope`
-    /// dispatch genuinely fires (the rigid parallel solve path the P2 reborrow
-    /// removal protects) — a sub-threshold scene would only exercise the inline
-    /// path and the {1,N} claim would be vacuous.
+    /// dispatch genuinely fires — a sub-threshold scene would only exercise the
+    /// inline path and the {1,N} claim would be vacuous.
     #[test]
     #[cfg(not(miri))]
-    fn colored_columns_snapshot_is_byte_identical_across_workers_and_runs() {
+    fn cohort_layout_bytes_are_identical_across_workers_and_runs() {
         let n = 400;
         let widest = max_color_slot_span(n);
         assert!(
             widest >= MIN_PARALLEL_SLOTS_PER_COLOR,
             "anti-vacuity: the widest color ({widest} slots) must exceed the threshold \
              ({MIN_PARALLEL_SLOTS_PER_COLOR}) so the parallel dispatch path is exercised, \
-             else the {{1,N}} column-byte-identity claim is vacuous"
+             else the {{1,N}} layout-byte-identity claim is vacuous"
         );
 
-        // (a) Determinism: the single-threaded path, run twice, must produce a
-        // bit-identical 30-column snapshot (the colored partition + sweep + the
-        // per-manifold warm store are deterministic; the ScratchColumn refill is
-        // order-stable).
-        let single_a = run_dense_columns_in_pool(n, 12, false, 1);
-        let single_b = run_dense_columns_in_pool(n, 12, false, 1);
-        assert_eq!(
-            single_a, single_b,
-            "Gate 1 (determinism): the full 30-column ContactColumns snapshot must be \
-             bit-identical run-to-run on the single-threaded path"
-        );
+        // (a) Determinism: the single-threaded scalar path, run twice.
+        let single_a = run_layout_in_pool(n, 12, false, false, 1);
+        let single_b = run_layout_in_pool(n, 12, false, false, 1);
+        assert_eq!(single_a.layout, single_b.layout, "G3 (determinism): the layout bytes are run-to-run identical");
+        assert_eq!(single_a.records, single_b.records, "G3 (determinism): the record bytes are run-to-run identical");
+        assert!(!single_a.layout.is_empty() && !single_a.records.is_empty(), "G3 anti-vacuity: a real layout");
 
-        // Anti-vacuity: the snapshot must be non-empty (a real built column set).
+        // The churn's own anti-vacuity: partial cohorts AND padded ranks exist after it,
+        // and every one of them is zero.
         assert!(
-            !single_a.is_empty(),
-            "Gate 1 anti-vacuity: the 30-column snapshot must be non-empty (columns were built)"
+            single_a.padding.partial_cohorts > 0 && single_a.padding.padded_ranks > 0,
+            "anti-vacuity: the churned layout must have partial cohorts and padded ranks: {:?}",
+            single_a.padding
         );
+        assert!(single_a.padding.zero, "G3: every padding lane and padded rank is zero: {:?}", single_a.padding);
 
-        // (b) Parallel == serial, byte-for-byte, across {1,2,4,8} workers. This is
-        // the core "pure backing swap" assertion: every worker writes the SAME bytes
-        // into the SAME columns regardless of worker count, and identical to the
-        // single-threaded reference.
-        let p1 = run_dense_columns_in_pool(n, 12, true, 1);
-        let p2 = run_dense_columns_in_pool(n, 12, true, 2);
-        let p4 = run_dense_columns_in_pool(n, 12, true, 4);
-        let p8 = run_dense_columns_in_pool(n, 12, true, 8);
+        // (b) Parallel == serial, byte for byte, across {1, 2, 4, 8, 16} workers, on
+        // both kernels. Every worker writes the SAME bytes into the SAME lanes
+        // regardless of worker count, and identical to the single-threaded reference.
+        for simd in [false, true] {
+            for workers in [1usize, 2, 4, 8, 16] {
+                let run = run_layout_in_pool(n, 12, true, simd, workers);
+                assert_eq!(
+                    single_a.layout, run.layout,
+                    "G3: the layout bytes at {workers} workers (simd {simd}) must equal the single-threaded scalar layout"
+                );
+                assert_eq!(
+                    single_a.records, run.records,
+                    "G3: the record bytes at {workers} workers (simd {simd}) must equal the single-threaded ones"
+                );
+                assert_eq!(single_a.padding, run.padding, "G3: the padding audit at {workers} workers (simd {simd})");
+            }
+        }
 
-        assert_eq!(
-            single_a, p1,
-            "Gate 1: 1-worker parallel 30-column snapshot must be byte-identical to the \
-             single-threaded solve (the parallel path must not perturb any column byte)"
-        );
-        assert_eq!(p1, p2, "Gate 1: 30-column snapshot must be byte-identical at 1 vs 2 workers");
-        assert_eq!(p1, p4, "Gate 1: 30-column snapshot must be byte-identical at 1 vs 4 workers");
-        assert_eq!(p1, p8, "Gate 1: 30-column snapshot must be byte-identical at 1 vs 8 workers");
-
-        // Run-to-run determinism of the parallel path itself (worker-count-independent
-        // bits AND repeat-stable bits).
-        let p4_again = run_dense_columns_in_pool(n, 12, true, 4);
-        assert_eq!(
-            p4, p4_again,
-            "Gate 1: the parallel 30-column snapshot must be run-to-run bit-identical"
-        );
-    }
-
-    /// Gate 1 A/B (the STRONGEST pure-backing-swap proof): the post-P2
-    /// `ScratchColumn`-backed 31-column snapshot is BYTE-IDENTICAL to a pre-P2
-    /// `std::Vec`-backed baseline captured (by the tester) from the SAME scene /
-    /// step count / worker count, BEFORE the backing swap. Reads the baseline file
-    /// the tester wrote while the P2 diff was git-stashed. If the baseline file is
-    /// absent the test is a no-op (the run-to-run + {1,N} byte gate above stands).
-    #[test]
-    #[cfg(not(miri))]
-    fn colored_columns_snapshot_matches_pre_p2_vec_baseline() {
-        let path = "D:/tmp/p2_baseline_columns.txt";
-        let baseline = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(_) => return, // no captured baseline in this environment — skip.
-        };
-        let expected: Vec<u32> = baseline
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| l.parse::<u32>().expect("baseline line is a u32"))
-            .collect();
-        // Same scene / steps / workers as the baseline capture (n=400, 12 steps, 4 workers).
-        let post = run_dense_columns_in_pool(400, 12, true, 4);
-        assert_eq!(
-            post, expected,
-            "Gate 1 A/B: post-P2 ScratchColumn 31-column snapshot must be BYTE-IDENTICAL \
-             to the pre-P2 std::Vec baseline (pure backing swap — no value drift)"
-        );
+        // Run-to-run determinism of the parallel path itself.
+        let p4 = run_layout_in_pool(n, 12, true, true, 4);
+        let p4_again = run_layout_in_pool(n, 12, true, true, 4);
+        assert_eq!(p4.layout, p4_again.layout, "G3: the parallel SIMD layout bytes are run-to-run identical");
     }
 
     /// O6 0%-gate: with `parallel_solve == false` the colored solve is
@@ -1401,11 +1502,12 @@
         (bodies, manifolds)
     }
 
-    /// Captures the full body + impulse-column bit state after solving each color's
-    /// groups with the supplied per-color kernel. Returns `(body_bits,
-    /// impulse_bits)`. Used only by the +avx2 differential.
+    /// Captures the full body + impulse bit state after solving each color's
+    /// groups with the supplied per-color kernel: `(body_bits, impulse_bits)`, the
+    /// impulses in slot order (cohorts in color order, lanes, ranks). Used only by
+    /// the +avx2 differential.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    fn body_impulse_bits(bodies: &[BodyEffective], cols: &ContactColumns) -> (Vec<u32>, Vec<u32>) {
+    fn body_impulse_bits(bodies: &[BodyEffective], cols: &CohortColumns) -> (Vec<u32>, Vec<u32>) {
         let body_bits = bodies
             .iter()
             .flat_map(|b| {
@@ -1419,15 +1521,16 @@
                 ]
             })
             .collect();
-        let impulse_bits = (0..cols.len())
-            .flat_map(|i| {
-                [
-                    cols.normal_impulse(i).to_bits(),
-                    cols.tangent1_impulse(i).to_bits(),
-                    cols.tangent2_impulse(i).to_bits(),
-                ]
-            })
-            .collect();
+        let blocks = cols.blocks();
+        let mut impulse_bits = Vec::with_capacity(cols.len() * 3);
+        for head in cols.heads() {
+            let rank_base = head.rank_base as usize;
+            for l in 0..head.nlanes as usize {
+                for blk in &blocks[rank_base..rank_base + head.width[l] as usize] {
+                    impulse_bits.extend([blk.ni[l].to_bits(), blk.ti1[l].to_bits(), blk.ti2[l].to_bits()]);
+                }
+            }
+        }
         (body_bits, impulse_bits)
     }
 
@@ -1457,9 +1560,9 @@
             // The pristine pre-solve body state shared by both arms.
             let pristine_bodies: Vec<BodyEffective> = bodies.iter().map(eff_of).collect();
 
-            // Each arm builds its OWN columns from a fresh solver (an empty
-            // warm-start table ⇒ identical zero-seeded pristine columns) and its OWN
-            // body ScratchColumn, then solves through the per-element solve views.
+            // Each arm builds its OWN layout from a fresh solver (an empty warm store
+            // ⇒ identical zero-seeded pristine blocks) and its OWN body
+            // ScratchColumn, then solves through the solve views.
 
             // ── Scalar arm ──────────────────────────────────────────────────
             let mut solver_scalar = ColoredSoftStepSolver::default();
@@ -1472,12 +1575,14 @@
                 let view = cols_scalar.solve_view();
                 let body_view = bodies_scalar.solve_view();
                 for c in 0..n_colors {
-                    let start = cols_scalar.color_offsets()[c] as usize;
-                    let end = cols_scalar.color_offsets()[c + 1] as usize;
+                    let ctx = cols_scalar.color_ctx(c);
+                    let g_hi = cols_scalar.color_group_start()[c + 1] as usize;
                     ColoredSoftStepSolver::solve_color(
                         view,
                         body_view,
-                        (start, end),
+                        ctx,
+                        ctx.g_base,
+                        g_hi,
                         soft.bias_rate,
                         soft.mass_coeff,
                         soft.impulse_coeff,
@@ -1496,23 +1601,18 @@
                 let view = cols_simd.solve_view();
                 let body_view = bodies_simd.solve_view();
                 for c in 0..n_colors {
-                    let g_lo = cols_simd.color_group_start()[c] as usize;
+                    let ctx = cols_simd.color_ctx(c);
                     let g_hi = cols_simd.color_group_start()[c + 1] as usize;
-                    let span = (
-                        cols_simd.color_offsets()[c] as usize,
-                        cols_simd.color_offsets()[c + 1] as usize,
-                    );
+                    let (k_lo, k_hi) = ctx.cohorts_of(ctx.g_base, g_hi);
                     // SAFETY: the test target is gated `target_feature = "avx2"`, so
-                    //   the host running these tests supports AVX2; the group range is a
-                    //   color's own (body-disjoint) groups, and `span` is exactly that
-                    //   range's slot run (the kernel's own-span contract).
+                    //   the host running these tests supports AVX2; the cohort range is a
+                    //   color's own (body-disjoint) cohorts.
                     unsafe {
                         ColoredSoftStepSolver::solve_color_avx2(
                             view,
                             body_view,
-                            span,
-                            g_lo,
-                            g_hi,
+                            k_lo,
+                            k_hi,
                             soft.bias_rate,
                             soft.mass_coeff,
                             soft.impulse_coeff,
@@ -1532,7 +1632,7 @@
             );
             assert_eq!(
                 i_scalar, i_simd,
-                "O7 impulse column bits must match scalar (bias_active={bias_active})"
+                "O7 impulse bits must match scalar (bias_active={bias_active})"
             );
         }
     }
@@ -1557,48 +1657,23 @@
         col
     }
 
-    /// Deep-copies `src` into a fresh `ContactColumns` (each column refilled from the
+    /// Deep-copies `src` into a fresh `CohortColumns` (each column refilled from the
     /// source's read slice). Used by the +avx2 differential so the two kernel arms
-    /// solve over independent column buffers. Copies the columns the kernels read /
-    /// write plus the CSR columns they navigate.
+    /// solve over independent tables. Copies every column: the tables the kernels
+    /// read / write, the per-manifold columns and the CSRs they navigate.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    fn clone_columns(src: &ContactColumns) -> ContactColumns {
-        let mut dst = ContactColumns::with_capacity(src.len());
-        {
-            let mut v = dst.build_view();
-            v.clear();
-            v.ra_x.extend_from_slice(src.ra_x.as_read_slice());
-            v.ra_y.extend_from_slice(src.ra_y.as_read_slice());
-            v.ra_z.extend_from_slice(src.ra_z.as_read_slice());
-            v.rb_x.extend_from_slice(src.rb_x.as_read_slice());
-            v.rb_y.extend_from_slice(src.rb_y.as_read_slice());
-            v.rb_z.extend_from_slice(src.rb_z.as_read_slice());
-            v.normal_x.extend_from_slice(src.normal_x.as_read_slice());
-            v.normal_y.extend_from_slice(src.normal_y.as_read_slice());
-            v.normal_z.extend_from_slice(src.normal_z.as_read_slice());
-            v.tangent1_x.extend_from_slice(src.tangent1_x.as_read_slice());
-            v.tangent1_y.extend_from_slice(src.tangent1_y.as_read_slice());
-            v.tangent1_z.extend_from_slice(src.tangent1_z.as_read_slice());
-            v.tangent2_x.extend_from_slice(src.tangent2_x.as_read_slice());
-            v.tangent2_y.extend_from_slice(src.tangent2_y.as_read_slice());
-            v.tangent2_z.extend_from_slice(src.tangent2_z.as_read_slice());
-            v.separation.extend_from_slice(src.separation.as_read_slice());
-            v.friction.extend_from_slice(src.friction.as_read_slice());
-            v.restitution.extend_from_slice(src.restitution.as_read_slice());
-            v.normal_impulse.extend_from_slice(src.normal_impulse.as_read_slice());
-            v.tangent1_impulse.extend_from_slice(src.tangent1_impulse.as_read_slice());
-            v.tangent2_impulse.extend_from_slice(src.tangent2_impulse.as_read_slice());
-            v.body_a.extend_from_slice(src.body_a.as_read_slice());
-            v.body_b.extend_from_slice(src.body_b.as_read_slice());
-            v.b_is_sentinel.extend_from_slice(src.b_is_sentinel.as_read_slice());
-            v.vn_initial.extend_from_slice(src.vn_initial.as_read_slice());
-        }
-        // The CSR columns the kernels navigate (group_start) + the dispatcher CSRs.
+    fn clone_columns(src: &CohortColumns) -> CohortColumns {
+        let mut dst = CohortColumns::with_capacity(src.len());
+        dst.heads.build_view().extend_from_slice(src.heads());
+        dst.blocks.build_view().extend_from_slice(src.blocks());
+        dst.cold.build_view().extend_from_slice(src.cold.as_read_slice());
+        dst.rank_cold.build_view().extend_from_slice(src.rank_cold.as_read_slice());
+        dst.plan.build_view().extend_from_slice(src.plan());
+        dst.tags.build_view().extend_from_slice(src.tags());
         dst.color_offsets.build_view().extend_from_slice(src.color_offsets());
         dst.group_start.build_view().extend_from_slice(src.group_start());
-        dst.color_group_start
-            .build_view()
-            .extend_from_slice(src.color_group_start());
+        dst.color_group_start.build_view().extend_from_slice(src.color_group_start());
+        dst.color_cohort_start.build_view().extend_from_slice(src.color_cohort_start());
         dst
     }
 
@@ -1650,26 +1725,63 @@
         );
     }
 
+    /// G8 (L11 C2): the fill, both kernels and the store at small `n`, pool-free —
+    /// the ragged scene (a partial cohort, a four-rank lane beside one-rank lanes)
+    /// for three steps on each kernel, so Miri walks every raw projection and
+    /// aligned row access of the build, the sweeps and the store. The two kernels'
+    /// layouts and records are byte-equal and every padding lane and rank is zero.
+    #[test]
+    fn cohort_layout_small_n_matches_across_kernels() {
+        let (bodies, manifolds) = ragged_colored_scene(11);
+        let run = |simd_solve: bool| -> (Vec<u32>, Vec<u32>, PaddingAudit) {
+            let cfg = PhysicsConfig { dt: 1.0 / 60.0, simd_solve, ..PhysicsConfig::default() };
+            let mut solver = ColoredSoftStepSolver::default();
+            let mut scratch = SolverScratch::with_capacity(bodies.len());
+            scratch.set_bodies(&bodies);
+            scratch.touched.reset(scratch.bodies().len());
+            for _ in 0..3 {
+                let graph = build_graph(scratch.bodies(), &manifolds);
+                scratch.touched.reset(scratch.bodies().len());
+                solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+            }
+            (layout_snapshot(&solver.columns), records_snapshot(&solver), audit_padding(&solver.columns))
+        };
+        let (layout_scalar, records_scalar, padding_scalar) = run(false);
+        let (layout_simd, records_simd, padding_simd) = run(true);
+        assert_eq!(layout_scalar, layout_simd, "the two kernels leave byte-equal layouts");
+        assert_eq!(records_scalar, records_simd, "the two kernels leave byte-equal records");
+        assert!(
+            padding_scalar.zero && padding_simd.zero,
+            "every padding lane and rank is zero: {padding_scalar:?} / {padding_simd:?}"
+        );
+        assert!(
+            padding_scalar.partial_cohorts > 0 && padding_scalar.padded_ranks > 0,
+            "anti-vacuity: the ragged scene has a partial cohort and padded ranks: {padding_scalar:?}"
+        );
+    }
+
     // ── O1 (regression-pin): cone / degenerate adversarial differential ──────
     //
-    // Test 1c/1d build a SINGLE one-color, one-cohort `ContactColumns` BY HAND so
+    // Test 1c/1d build a SINGLE one-color `CohortColumns` from explicit group specs
+    // — through P-b and the fill, with the specs' seeds written into the lanes — so
     // every lane's geometry / impulse seed / body state is exact, forcing the
     // adversarial friction-cone + degenerate paths to fire NON-VACUOUSLY, then
     // assert `solve_color_avx2 == solve_color` bit-for-bit. The non-vacuity counts
-    // come from `cone_probe`, a single-slot replay of the EXACT scalar op sequence
+    // come from `cone_probe`, a single-lane replay of the EXACT scalar op sequence
     // (the authoritative oracle for "did this lane clamp / was len_sq zero /
     // denormal"). A splitmix64 proptest then sweeps random cohort shapes.
 
-    /// One built group spec for a hand-rolled single-color cohort: a body pair
-    /// (`ia`, `ib`/sentinel) and its contact points. Each point carries explicit
-    /// geometry, friction, separation, and an impulse seed.
+    /// One group spec for a hand-rolled single-color layout: a body pair (`ia`,
+    /// `ib`/sentinel), the manifold's normal and friction, and its contact points.
+    /// Each point carries explicit anchors, separation and an impulse seed.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[derive(Clone)]
     struct GroupSpec {
         ia: u32,
         ib: u32,
         sentinel: bool,
-        /// `(ra, rb, normal, t1, t2, separation, friction, seed_ni, seed_t1, seed_t2)`.
+        normal: Vec3,
+        friction: f32,
         points: Vec<PointSpec>,
     }
 
@@ -1678,78 +1790,113 @@
     struct PointSpec {
         ra: Vec3,
         rb: Vec3,
-        normal: Vec3,
-        t1: Vec3,
-        t2: Vec3,
         separation: f32,
-        friction: f32,
         seed: (f32, f32, f32),
     }
 
-    /// Builds a single-COLOR, single-cohort (`groups.len() <= 8`) `ContactColumns`
-    /// from the group specs, appending groups in order with the C1 CSR
-    /// (`group_start` / `color_group_start` / `color_offsets`). Body-disjointness of
-    /// the groups is the CALLER's responsibility (the cohort kernel's precondition).
+    /// Builds a single-COLOR layout from the group specs through the production P-b
+    /// and fill: the specs become manifolds over bodies at the origin (so a point's
+    /// anchor IS its lane anchor) carrying the group's friction on both rows and the
+    /// given effective state, and the specs' seeds are then written into the lanes
+    /// (a fresh warm store seeds zero). Body-disjointness of the groups is the
+    /// CALLER's responsibility (the cohort kernel's precondition); it is what makes
+    /// the graph put every group in one color, in spec order.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    fn build_cohort_columns(groups: &[GroupSpec]) -> ContactColumns {
-        let mut cols = ContactColumns::with_capacity(0);
-        cols.begin_build();
+    fn build_cohort_solver(groups: &[GroupSpec], bodies: &[BodyEffective]) -> ColoredSoftStepSolver {
+        let mut states: Vec<BodyState> = bodies
+            .iter()
+            .map(|b| BodyState {
+                inv_inertia: b.inv_inertia,
+                inv_inertia_local: b.inv_inertia,
+                position: Vec3::ZERO,
+                linear_velocity: b.linear_velocity,
+                angular_velocity: b.angular_velocity,
+                rotation: Quat::IDENTITY,
+                inv_mass: b.inv_mass,
+                restitution: 0.0,
+                friction: 0.0,
+                simulated: true,
+                kinematic: false,
+                is_sensor: false,
+                shape: ColliderShape::Sphere { radius: 1.0 },
+            })
+            .collect();
+        let mut manifolds = Vec::with_capacity(groups.len());
         for g in groups {
-            {
-                let mut view = cols.build_view();
-                for ps in g.points.iter() {
-                    view.push_point(
-                        ps.ra,
-                        ps.rb,
-                        ps.normal,
-                        ps.t1,
-                        ps.t2,
-                        ps.separation,
-                        ps.friction,
-                        0.0, // restitution (the kernels do not read it)
-                        ps.seed,
-                        g.ia,
-                        g.ib,
-                        g.sentinel,
-                        0.0,
-                    );
+            states[g.ia as usize].friction = g.friction;
+            if !g.sentinel {
+                states[g.ib as usize].friction = g.friction;
+            }
+            let mut m = Manifold::new(BodyIndex(g.ia), if g.sentinel { SDF_SENTINEL } else { BodyIndex(g.ib) });
+            m.normal = g.normal;
+            for (p, ps) in g.points.iter().enumerate() {
+                m.points[p] = ContactPoint {
+                    anchor_a: ps.ra,
+                    anchor_b: ps.rb,
+                    separation: ps.separation,
+                    feature_id: p as u32,
+                };
+            }
+            m.count = g.points.len() as u8;
+            manifolds.push(m);
+        }
+        let graph = build_graph(&states, &manifolds);
+        let mut solver = ColoredSoftStepSolver::default();
+        solver.build_bodies(&states);
+        solver.build_columns(&manifolds, &graph, &states, None, RowRemap::Identity);
+        assert_eq!(solver.columns.color_offsets().len(), 2, "body-disjoint specs form one color");
+        assert_eq!(solver.columns.group_start().len(), groups.len() + 1, "one group per spec");
+        // The seeds are the specs' (the fresh warm store seeded zero).
+        let ctx = solver.columns.color_ctx(0);
+        let heads = solver.columns.heads();
+        let rank_bases: Vec<usize> = heads.iter().map(|h| h.rank_base as usize).collect();
+        {
+            let mut blocks = solver.columns.blocks.build_view();
+            let blocks = blocks.as_mut_slice();
+            for (g, spec) in groups.iter().enumerate() {
+                let (k, l) = ctx.lane_of(g);
+                for (r, ps) in spec.points.iter().enumerate() {
+                    let blk = &mut blocks[rank_bases[k] + r];
+                    blk.ni[l] = ps.seed.0;
+                    blk.ti1[l] = ps.seed.1;
+                    blk.ti2[l] = ps.seed.2;
                 }
             }
-            let len = cols.len() as u32;
-            cols.push_group_start(len);
         }
-        let len = cols.len() as u32;
-        cols.push_color_offset(len);
-        cols.push_color_group_start((cols.group_start().len() - 1) as u32);
-        cols
+        solver
     }
 
-    /// Replays the EXACT scalar `solve_color` friction-cone evaluation for ONE slot
-    /// against the pristine pre-solve state, reporting `(clamped, zero_cone,
+    /// Replays the EXACT scalar `solve_color` friction-cone evaluation for ONE lane
+    /// rank against the pristine pre-solve state, reporting `(clamped, zero_cone,
     /// denorm_len_sq)`. The kernel is bit-identical to `solve_color`, so this is the
-    /// authoritative non-vacuity oracle for that slot. `len_sq == 0` ⇒ `zero_cone`;
+    /// authoritative non-vacuity oracle for that point. `len_sq == 0` ⇒ `zero_cone`;
     /// `0 < len_sq < f32::MIN_POSITIVE` ⇒ `denorm_len_sq`; the scalar clamp branch
     /// (`len_sq > mf² && len_sq > 0`) firing ⇒ `clamped`.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[allow(clippy::too_many_arguments)]
     fn cone_probe(
-        cols: &ContactColumns,
+        cols: &CohortColumns,
         bodies: &[BodyEffective],
-        slot: usize,
+        k: usize,
+        l: usize,
+        r: usize,
         bias_rate: f32,
         mass_coeff: f32,
         impulse_coeff: f32,
         bias_active: bool,
     ) -> (bool, bool, bool) {
-        let ra = cols.ra(slot);
-        let rb = cols.rb(slot);
-        let normal = cols.normal(slot);
-        let t1 = cols.tangent1(slot);
-        let t2 = cols.tangent2(slot);
-        let ia = cols.body_a(slot) as usize;
-        let b_sent = cols.b_is_sentinel(slot);
-        let ib = cols.body_b(slot) as usize;
-        let friction = cols.friction.as_read_slice()[slot];
-        let separation = cols.separation.as_read_slice()[slot];
+        let head = &cols.heads()[k];
+        let blk = &cols.blocks()[head.rank_base as usize + r];
+        let ra = blk.ra(l);
+        let rb = blk.rb(l);
+        let normal = head.normal(l);
+        let t1 = head.tangent1(l);
+        let t2 = normal.cross(t1);
+        let ia = head.body_a[l] as usize;
+        let b_sent = head.is_sentinel(l);
+        let ib = head.body_b[l] as usize;
+        let friction = head.friction[l];
+        let separation = blk.sep[l];
         let bb = if b_sent { IMMOVABLE_AT_REST } else { bodies[ib] };
         let ba = bodies[ia];
 
@@ -1761,7 +1908,7 @@
         } else {
             0.0
         };
-        let lambda_n = cols.normal_impulse(slot);
+        let lambda_n = blk.ni[l];
         let d_lambda = if bias_active {
             -mass_coeff * m_eff * (vn + bias) - impulse_coeff * lambda_n
         } else {
@@ -1787,8 +1934,8 @@
         let m_eff_t2 = effective_mass(t2, ra, rb, &ba_m, &bb_m);
         let dv = bb_m.point_velocity(rb) - ba_m.point_velocity(ra);
         let (vt1, vt2) = (dv.dot(t1), dv.dot(t2));
-        let new_t1 = cols.tangent1_impulse(slot) - m_eff_t1 * vt1;
-        let new_t2 = cols.tangent2_impulse(slot) - m_eff_t2 * vt2;
+        let new_t1 = blk.ti1[l] - m_eff_t1 * vt1;
+        let new_t2 = blk.ti2[l] - m_eff_t2 * vt2;
         let len_sq = new_t1 * new_t1 + new_t2 * new_t2;
         let clamped = len_sq > max_friction * max_friction && len_sq > 0.0;
         let zero_cone = len_sq == 0.0;
@@ -1798,11 +1945,11 @@
 
     /// Solves the single color of `cols` with the scalar oracle and with the AVX2
     /// cohort kernel (each on a fresh clone seeded to the same pristine state), and
-    /// asserts the body + impulse bits match bit-for-bit. Returns the per-slot
+    /// asserts the body + impulse bits match bit-for-bit. Returns the per-point
     /// `(clamped, zero_cone, denorm)` counts from the scalar probe for non-vacuity.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     fn assert_cohort_differential(
-        cols: &ContactColumns,
+        cols: &CohortColumns,
         bodies: &[BodyEffective],
         bias_active: bool,
     ) -> (usize, usize, usize) {
@@ -1812,26 +1959,33 @@
             (1.0 / 60.0) / 4.0,
         );
 
-        // Non-vacuity counts from the pristine state (the probe is read-only).
+        // Non-vacuity counts from the pristine state (the probe is read-only), over
+        // every live lane rank of the color's cohorts.
         let (mut clamped, mut zero_cone, mut denorm) = (0usize, 0usize, 0usize);
-        for s in 0..cols.len() {
-            let (c, z, d) = cone_probe(
-                cols,
-                bodies,
-                s,
-                soft.bias_rate,
-                soft.mass_coeff,
-                soft.impulse_coeff,
-                bias_active,
-            );
-            clamped += c as usize;
-            zero_cone += z as usize;
-            denorm += d as usize;
+        for (k, head) in cols.heads().iter().enumerate() {
+            for l in 0..head.nlanes as usize {
+                for r in 0..head.width[l] as usize {
+                    let (c, z, d) = cone_probe(
+                        cols,
+                        bodies,
+                        k,
+                        l,
+                        r,
+                        soft.bias_rate,
+                        soft.mass_coeff,
+                        soft.impulse_coeff,
+                        bias_active,
+                    );
+                    clamped += c as usize;
+                    zero_cone += z as usize;
+                    denorm += d as usize;
+                }
+            }
         }
 
-        let g_lo = cols.color_group_start()[0] as usize;
+        let ctx = cols.color_ctx(0);
         let g_hi = cols.color_group_start()[1] as usize;
-        let span = (cols.color_offsets()[0] as usize, cols.color_offsets()[1] as usize);
+        let (k_lo, k_hi) = ctx.cohorts_of(ctx.g_base, g_hi);
 
         // Scalar arm — a fresh deep copy of `cols` + its own body buffer.
         let cols_scalar = clone_columns(cols);
@@ -1839,7 +1993,9 @@
         ColoredSoftStepSolver::solve_color(
             cols_scalar.solve_view(),
             bodies_scalar.solve_view(),
-            span,
+            ctx,
+            ctx.g_base,
+            g_hi,
             soft.bias_rate,
             soft.mass_coeff,
             soft.impulse_coeff,
@@ -1850,15 +2006,14 @@
         let cols_simd = clone_columns(cols);
         let bodies_simd = body_scratch_from(bodies);
         // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host
-        //   supports AVX2; `[g_lo, g_hi)` is the single color's body-disjoint groups
-        //   and `span` is exactly that group range's slot run (the own-span contract).
+        //   supports AVX2; `[k_lo, k_hi)` are the single color's body-disjoint
+        //   cohorts.
         unsafe {
             ColoredSoftStepSolver::solve_color_avx2(
                 cols_simd.solve_view(),
                 bodies_simd.solve_view(),
-                span,
-                g_lo,
-                g_hi,
+                k_lo,
+                k_hi,
                 soft.bias_rate,
                 soft.mass_coeff,
                 soft.impulse_coeff,
@@ -1894,7 +2049,6 @@
     fn cone_adversarial_differential_test_1c() {
         // Build 5 body-disjoint single-point groups (one cohort), bodies 0..10.
         let n = Vec3::new(0.0, 1.0, 0.0);
-        let (t1, t2) = tangent_basis(n);
         let mk = |ia: u32,
                   ib: u32,
                   friction: f32,
@@ -1907,14 +2061,12 @@
                 ia,
                 ib,
                 sentinel: false,
+                normal: n,
+                friction,
                 points: vec![PointSpec {
                     ra,
                     rb: ra,
-                    normal: n,
-                    t1,
-                    t2,
                     separation: -0.2,
-                    friction,
                     seed: (seed_ni, seed_t1, seed_t2),
                 }],
             }
@@ -1938,7 +2090,6 @@
         g4.ib = u32::MAX;
 
         let groups = vec![g0, g1, g2, g3, g4];
-        let cols = build_cohort_columns(&groups);
         // 10 real bodies; spins so the angular term is non-vacuous. Lane-2 (g2)
         // bodies are zero-velocity so its tangent stays exactly zero.
         let bodies: Vec<BodyEffective> = (0..10)
@@ -1958,12 +2109,13 @@
                 }
             })
             .collect();
+        let solver = build_cohort_solver(&groups, &bodies);
 
         let mut total_clamped = 0;
         let mut total_zero = 0;
         let mut total_denorm = 0;
         for bias_active in [true, false] {
-            let (c, z, d) = assert_cohort_differential(&cols, &bodies, bias_active);
+            let (c, z, d) = assert_cohort_differential(&solver.columns, &bodies, bias_active);
             total_clamped += c;
             total_zero += z;
             total_denorm += d;
@@ -1987,15 +2139,10 @@
     #[test]
     fn degenerate_lane_differential_test_1d() {
         let n = Vec3::new(0.0, 1.0, 0.0);
-        let (t1, t2) = tangent_basis(n);
-        let pt = |friction: f32, seed: (f32, f32, f32), ra: Vec3| PointSpec {
+        let pt = |seed: (f32, f32, f32), ra: Vec3| PointSpec {
             ra,
             rb: ra,
-            normal: n,
-            t1,
-            t2,
             separation: -0.25,
-            friction,
             seed,
         };
 
@@ -2004,7 +2151,9 @@
             ia: 0,
             ib: 1,
             sentinel: false,
-            points: vec![pt(0.5, (0.1, 0.2, -0.1), Vec3::new(0.2, 0.0, 0.1))],
+            normal: n,
+            friction: 0.5,
+            points: vec![pt((0.1, 0.2, -0.1), Vec3::new(0.2, 0.0, 0.1))],
         };
         // Lane 1 — SENTINEL body B: body B is IMMOVABLE_AT_REST, never indexed; a
         // live dynamic A with a clamp-forcing tangent seed.
@@ -2012,7 +2161,9 @@
             ia: 2,
             ib: u32::MAX,
             sentinel: true,
-            points: vec![pt(0.05, (0.05, 6.0, 6.0), Vec3::new(-0.1, 0.0, 0.3))],
+            normal: n,
+            friction: 0.05,
+            points: vec![pt((0.05, 6.0, 6.0), Vec3::new(-0.1, 0.0, 0.3))],
         };
         // Lane 2 — DEGENERATE k<=0: both bodies static (inv_mass 0, inertia ZERO) ⇒
         // effective_mass returns 0 ⇒ a no-op solve.
@@ -2020,11 +2171,12 @@
             ia: 3,
             ib: 4,
             sentinel: false,
-            points: vec![pt(0.5, (0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.2))],
+            normal: n,
+            friction: 0.5,
+            points: vec![pt((0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 0.2))],
         };
 
         let groups = vec![g0, g1, g2];
-        let cols = build_cohort_columns(&groups);
         // Bodies: 0 static-A, 1 dynamic, 2 dynamic (sentinel lane's A), 3+4 static.
         let bodies = vec![
             // 0: static A (inv_mass 0 ⇒ inertia ZERO to match the build invariant).
@@ -2037,10 +2189,11 @@
             BodyEffective { inv_mass: 0.0, inv_inertia: Mat3::ZERO, linear_velocity: Vec3::ZERO, angular_velocity: Vec3::ZERO },
             BodyEffective { inv_mass: 0.0, inv_inertia: Mat3::ZERO, linear_velocity: Vec3::ZERO, angular_velocity: Vec3::ZERO },
         ];
+        let solver = build_cohort_solver(&groups, &bodies);
 
         let mut total_clamped = 0;
         for bias_active in [true, false] {
-            let (c, _z, _d) = assert_cohort_differential(&cols, &bodies, bias_active);
+            let (c, _z, _d) = assert_cohort_differential(&solver.columns, &bodies, bias_active);
             total_clamped += c;
         }
         eprintln!("test_1d non-vacuity: clamped={total_clamped}");
@@ -2074,13 +2227,14 @@
     /// O1 proptest (+avx2 only): random cohort shapes (group count 1..=32, width
     /// 1..=MAX_CONTACT_POINTS, masses incl. statics + sentinels, denormal-scale
     /// velocities) must be `solve_color_avx2 == solve_color` bit-for-bit, AND the
-    /// cone clamp + zero-cone paths must fire non-vacuously across the corpus.
+    /// cone clamp + zero-cone paths must fire non-vacuously across the corpus. The
+    /// friction is per group (a manifold constant in the cohort layout); the
+    /// seeds, anchors and separations stay per point.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[test]
     fn cohort_shape_proptest_bit_exact_and_non_vacuous() {
         use crate::math::MAX_CONTACT_POINTS;
         let n = Vec3::new(0.0, 1.0, 0.0);
-        let (t1, t2) = tangent_basis(n);
 
         let mut rng = SplitMix64(0x0BAD_F00D_DEAD_BEEF);
         let mut corpus_clamped = 0usize;
@@ -2113,21 +2267,19 @@
                     });
                     row
                 };
+                // Occasionally zero friction (the zero-cone path) — per group.
+                let zero_fric = rng.f01() < 0.1;
+                let friction = if zero_fric { 0.0 } else { rng.f01() * 2.0 };
                 let width = rng.range(1, MAX_CONTACT_POINTS as u32 + 1) as usize;
                 let mut points = Vec::with_capacity(width);
                 for _ in 0..width {
-                    // Occasionally a denormal-scale tangent seed + zero friction.
+                    // Occasionally a denormal-scale tangent seed.
                     let denorm = rng.f01() < 0.1;
-                    let zero_fric = rng.f01() < 0.1;
                     let seed_scale = if denorm { 1e-22 } else { 4.0 };
                     points.push(PointSpec {
                         ra: rand_vel(&mut rng) * 0.3,
                         rb: rand_vel(&mut rng) * 0.3,
-                        normal: n,
-                        t1,
-                        t2,
                         separation: -(rng.f01() * 0.5),
-                        friction: if zero_fric { 0.0 } else { rng.f01() * 2.0 },
                         seed: (
                             rng.f01() * 0.5,
                             (rng.f01() - 0.5) * seed_scale,
@@ -2135,14 +2287,14 @@
                         ),
                     });
                 }
-                groups.push(GroupSpec { ia, ib, sentinel, points });
+                groups.push(GroupSpec { ia, ib, sentinel, normal: n, friction, points });
             }
 
-            // build_cohort_columns packs ALL groups into ONE color (multi-cohort
-            // when n_groups > 8); the kernel solves them as 8-group cohorts.
-            let cols = build_cohort_columns(&groups);
+            // The specs form ONE color (multi-cohort when n_groups > 8); the kernel
+            // solves them as 8-group cohorts.
+            let solver = build_cohort_solver(&groups, &bodies);
             for bias_active in [true, false] {
-                let (c, z, _d) = assert_cohort_differential(&cols, &bodies, bias_active);
+                let (c, z, _d) = assert_cohort_differential(&solver.columns, &bodies, bias_active);
                 corpus_clamped += c;
                 corpus_zero += z;
             }
