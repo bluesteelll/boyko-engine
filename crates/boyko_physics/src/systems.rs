@@ -71,9 +71,12 @@ use crate::components::{ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use crate::math::Vec3;
 use crate::narrowphase::box_box::box_box_contact;
+use crate::narrowphase::dispatch::try_parallel;
 use crate::narrowphase::feature_vertex_face;
 use crate::narrowphase::sphere_box::sphere_box_contact;
-use crate::profiling::{PHYS_BP_PAIRS, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, counter};
+use crate::profiling::{
+    PHYS_BP_PAIRS, PHYS_NP_CHUNKS, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, counter,
+};
 use crate::resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode,
     IslandSleep, Manifolds, PhysicsConfig, SdfNarrowphaseKernel, SolverScratch,
@@ -341,9 +344,12 @@ pub fn physics_broadphase(
         }
     }
 
+    // Strict: the pairs are unique as well as sorted. The narrowphase's hysteresis
+    // table is keyed by pair, and the parallel narrowphase's hint argument (Lemma 1 in
+    // `narrowphase/axis_cache.rs`) needs every key to appear once per frame.
     debug_assert!(
-        pairs.pairs().windows(2).all(|w| w[0] <= w[1]),
-        "invariant: broadphase pairs must be emitted in sorted (min, max) order"
+        pairs.pairs().windows(2).all(|w| w[0] < w[1]),
+        "invariant: broadphase pairs must be emitted unique and in sorted (min, max) order"
     );
     counter!(PHYS_BP_PAIRS, pairs.pairs().len() as u64);
 }
@@ -369,39 +375,87 @@ pub fn physics_broadphase(
 /// the sphere or the SAT reference — so the solver's sign handling is uniform.
 /// The buffer is cleared and refilled each step; the hysteresis cache persists in
 /// place across frames (capacity reused).
+///
+/// # The serial loop and the parallel chunks (L5)
+///
+/// With [`PhysicsConfig::parallel_narrowphase`] on (the default since L5 C4), the step
+/// first offers its pairs to the parallel narrowphase (`narrowphase/dispatch.rs`):
+/// contiguous chunks collided across the ambient pool's workers, joined back in pair
+/// order, with the box-box axis writes replayed serially in pair order. The dispatch
+/// declines — and this system runs
+/// [`narrowphase_serial`], today's loop — when the flag is off, when no pool of at least
+/// two workers is attached, or when the pairs make fewer than two chunks. Both paths
+/// collide a pair through the one [`collide_pair`], and the parallel path's manifold
+/// stream, sensor stream and hysteresis table state equal the serial path's (the
+/// dispatch module's Lemma 3 and the axis cache's Lemmas 1 and 2).
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_narrowphase(
     scratch: Res<SolverScratch>,
     pairs: Res<ContactPairs>,
+    cfg: Res<PhysicsConfig>,
     mut manifolds: ResMut<Manifolds>,
 ) {
     let bodies = scratch.bodies();
+    let pairs = pairs.pairs();
     let manifolds = &mut *manifolds;
-    manifolds.manifolds.build_view().clear();
-    // S5: the sensor-overlap signal is rebuilt every step alongside the solver
-    // buffer (capacity reused). Empty in any world with no `Sensor` id.
-    manifolds.sensor_overlaps.build_view().clear();
     // Ensure the per-pair hysteresis cache can hold this frame's pairs; it is NOT
     // cleared (a single in-place table — this frame reads last frame's axes). When the
     // rows changed since the cache was last keyed, every box pair's previous axis is
     // pre-read through the row identity map first, before any write of this step
     // (defect A, interim).
-    let prefetched =
-        manifolds.box_axis_cache.begin_frame_synced(pairs.pairs(), bodies, &scratch.rows);
+    let prefetched = manifolds.box_axis_cache.begin_frame_synced(pairs, bodies, &scratch.rows);
+    // L5: the flag is a request; the dispatch returns 0 whenever it runs no chunk, and
+    // then the serial loop below produces the step's streams.
+    let chunks = if cfg.parallel_narrowphase {
+        try_parallel(manifolds, bodies, pairs, prefetched)
+    } else {
+        0
+    };
+    if chunks == 0 {
+        narrowphase_serial(manifolds, bodies, pairs, prefetched);
+    }
+
+    // Profiling: the step's narrowphase work, counted after the loop from what it emitted,
+    // so the loop itself carries no instrument. The point sum walks the solver's manifolds
+    // only while the profiler is armed.
+    counter!(PHYS_NP_PAIRS, pairs.len() as u64);
+    counter!(PHYS_NP_MANIFOLDS, manifolds.manifolds().len() as u64);
+    counter!(
+        PHYS_NP_POINTS,
+        manifolds.manifolds().iter().map(|m| u64::from(m.count)).sum::<u64>()
+    );
+    counter!(PHYS_NP_CHUNKS, chunks as u64);
+}
+
+/// The serial narrowphase loop: every candidate pair in `(min, max)` order, the
+/// manifold pushed into the solver buffer or the sensor-overlap buffer, and a box-box
+/// pair's chosen axis written into the hysteresis table in the same iteration.
+///
+/// The path a step takes whenever the parallel narrowphase does not dispatch, and the
+/// oracle that path's gates compare against. `prefetched` is what
+/// `BoxAxisCache::begin_frame_synced` returned for this frame.
+pub(crate) fn narrowphase_serial(
+    manifolds: &mut Manifolds,
+    bodies: &[BodyState],
+    pairs: &[(BodyIndex, BodyIndex)],
+    prefetched: bool,
+) {
     // Three disjoint field borrows of one `Manifolds`: two refill views plus the
     // hysteresis cache. The views are taken once for the whole pair loop, not per
     // push.
     let mut out = manifolds.manifolds.build_view();
+    out.clear();
+    // S5: the sensor-overlap signal is rebuilt every step alongside the solver
+    // buffer (capacity reused). Empty in any world with no `Sensor` id.
     let mut sensor_out = manifolds.sensor_overlaps.build_view();
+    sensor_out.clear();
     let axis_cache = &mut manifolds.box_axis_cache;
 
-    for (k, &(a, b)) in pairs.pairs().iter().enumerate() {
-        let ia = a.0 as usize;
-        let ib = b.0 as usize;
-        let ba = &bodies[ia];
-        let bb = &bodies[ib];
+    for (k, &(a, b)) in pairs.iter().enumerate() {
+        let ba = &bodies[a.0 as usize];
+        let bb = &bodies[b.0 as usize];
         // S5: a pair where EITHER body is a sensor is an OVERLAP, not a contact —
         // the manifold is generated identically (same geometry) but diverted to
         // `sensor_overlaps` below so the solver never resolves it. Computed once
@@ -410,42 +464,13 @@ pub fn physics_narrowphase(
         // the pre-S5 push).
         let is_overlap = ba.is_sensor || bb.is_sensor;
 
-        let manifold = match (ba.shape, bb.shape) {
-            (ColliderShape::Sphere { radius: ra }, ColliderShape::Sphere { radius: rb }) => {
-                sphere_sphere_manifold(a, b, ba, bb, ra, rb)
-            }
-            (ColliderShape::Sphere { radius }, ColliderShape::Box { half_extents }) => {
-                // A is the sphere, B is the box: the generator already emits
-                // normal A→B with body_a = sphere, body_b = box.
-                sphere_box_contact(
-                    a, b, ba.position, radius, bb.position, bb.rotation, half_extents,
-                )
-            }
-            (ColliderShape::Box { half_extents }, ColliderShape::Sphere { radius }) => {
-                // A is the box, B is the sphere: call the generator with the
-                // sphere as A / box as B (keyed b, a), then remap to (a, b) order
-                // so the dense rows match and the normal runs A(box)→B(sphere).
-                sphere_box_contact(
-                    b, a, bb.position, radius, ba.position, ba.rotation, half_extents,
-                )
-                .map(flip_manifold)
-            }
-            (
-                ColliderShape::Box { half_extents: ha },
-                ColliderShape::Box { half_extents: hb },
-            ) => {
-                let last_axis = axis_cache.read_hint(prefetched, k, a, b);
-                box_box_contact(
-                    a, b, ba.position, ba.rotation, ha, bb.position, bb.rotation, hb, last_axis,
-                )
-                .map(|c| {
-                    // Persist this frame's chosen reference axis for next frame's
-                    // hysteresis bias (per body pair, deterministic).
-                    axis_cache.set(a, b, c.reference_axis);
-                    c.manifold
-                })
-            }
-        };
+        let (manifold, axis) =
+            collide_pair(a, b, ba, bb, || axis_cache.read_hint(prefetched, k, a, b));
+        if let Some(axis) = axis {
+            // Persist this frame's chosen reference axis for next frame's
+            // hysteresis bias (per body pair, deterministic).
+            axis_cache.set(a, b, axis);
+        }
 
         if let Some(manifold) = manifold {
             debug_assert!(
@@ -465,16 +490,56 @@ pub fn physics_narrowphase(
             }
         }
     }
+}
 
-    // Profiling: the step's narrowphase work, counted after the loop from what it emitted,
-    // so the loop itself carries no instrument. The point sum walks the solver's manifolds
-    // only while the profiler is armed.
-    counter!(PHYS_NP_PAIRS, pairs.pairs().len() as u64);
-    counter!(PHYS_NP_MANIFOLDS, out.len() as u64);
-    counter!(
-        PHYS_NP_POINTS,
-        out.as_slice().iter().map(|m| u64::from(m.count)).sum::<u64>()
-    );
+/// Collides one candidate pair `(a, b)` by the two bodies' shapes, returning the
+/// manifold (or `None` when the shapes do not touch) and, for a box-box pair that
+/// produced a contact, the SAT axis it chose.
+///
+/// A pure function of the two bodies and the hint, which is what lets the parallel
+/// narrowphase run it per pair on any thread. `hint` is called only for a box-box pair
+/// — the only generator that reads the hysteresis — so a caller's hint read costs
+/// nothing on the other shape pairs. Both narrowphase paths call this one function.
+///
+/// - **sphere-sphere**: inline single-point center-to-center contact (the W2 path).
+/// - **sphere-box**: [`sphere_box_contact`], which emits normal A→B with
+///   body_a = sphere, body_b = box.
+/// - **box-sphere**: the same generator with the sphere as A and the box as B (keyed
+///   `b, a`), remapped to `(a, b)` order so the dense rows match and the normal runs
+///   A(box)→B(sphere).
+/// - **box-box**: [`box_box_contact`], biased by the hint; the returned axis is the one
+///   to persist for next frame's hysteresis.
+#[inline]
+pub(crate) fn collide_pair(
+    a: BodyIndex,
+    b: BodyIndex,
+    ba: &BodyState,
+    bb: &BodyState,
+    hint: impl FnOnce() -> Option<usize>,
+) -> (Option<Manifold>, Option<usize>) {
+    match (ba.shape, bb.shape) {
+        (ColliderShape::Sphere { radius: ra }, ColliderShape::Sphere { radius: rb }) => {
+            (sphere_sphere_manifold(a, b, ba, bb, ra, rb), None)
+        }
+        (ColliderShape::Sphere { radius }, ColliderShape::Box { half_extents }) => (
+            sphere_box_contact(a, b, ba.position, radius, bb.position, bb.rotation, half_extents),
+            None,
+        ),
+        (ColliderShape::Box { half_extents }, ColliderShape::Sphere { radius }) => (
+            sphere_box_contact(b, a, bb.position, radius, ba.position, ba.rotation, half_extents)
+                .map(flip_manifold),
+            None,
+        ),
+        (ColliderShape::Box { half_extents: ha }, ColliderShape::Box { half_extents: hb }) => {
+            let last_axis = hint();
+            match box_box_contact(
+                a, b, ba.position, ba.rotation, ha, bb.position, bb.rotation, hb, last_axis,
+            ) {
+                Some(c) => (Some(c.manifold), Some(c.reference_axis)),
+                None => (None, None),
+            }
+        }
+    }
 }
 
 /// Builds the single-point sphere-sphere manifold for the dense pair `(a, b)`, or

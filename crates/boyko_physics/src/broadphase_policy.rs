@@ -63,31 +63,49 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 
 use crate::resources::{BroadphaseKind, BroadphaseSelectMode, PhysicsConfig, SolverScratch};
 
-// ---- provisional banded thresholds (P10 calibrates these) ----------------------------
+// ---- banded thresholds, calibrated on the size-disparity crossover (P0b §8) -----------
+
+/// The measured size-disparity crossover of the two broadphases, in bodies: Grid is faster
+/// than AllPairs above it. `[MEASURED 2026-09-19, P0b §8, bench profile, K=1]` —
+/// `benches/broadphase.rs`'s `broadphase_disparity` group, one process: t_grid / t_all_pairs =
+/// 3.908 at 1,000 bodies and 0.220 at 10,000, so the log-log interpolation crosses 1 at 2,978
+/// (`docs/measurements/2026-09-19-physics-p0/ANALYSIS.md` §8). The uniform lattice crosses
+/// at 1,109, but the Jolt pyramid (1240 boxes on a 50 × 50 slab) behaves like the disparity
+/// family — Grid is 2.46× slower there at W=1 — so the disparity crossover is the one the
+/// band must clear. Only [`GRID_HI`]'s const-assert reads it.
+const DISPARITY_CROSSOVER_BODIES: u32 = 2_978;
 
 /// Banded LOW edge: in [`Auto`](crate::resources::BroadphaseSelectMode::Auto) mode the
 /// broadphase switches to [`AllPairs`](crate::resources::BroadphaseKind::AllPairs) when the
 /// live active-body count drops to `<= GRID_LO`.
 ///
-/// `[ESTIMATE:needs-calibration]` — UNMEASURED. The uniform-grid broadphase amortizes its
-/// geometry recompute + CSR count/prefix-sum/scatter only across MANY bodies; below a couple
-/// hundred its build + sort overhead loses to the flat AllPairs double loop (Part 3.3 derives
-/// the crossover band: AllPairs is `n(n-1)/2` tests, Grid is ~O(n) but pays a per-step build,
-/// so Grid wins only for large `n`). This is a sane engineering band, NOT a measured crossover;
-/// **P10 (offline criterion calibration) replaces it with a `[MEASURED]` break-even**
-/// (`docs/ARCHITECTURE-HYBRID-PERF.md` Part 5, P10 is a HARD dependency of P3).
-pub const GRID_LO: u32 = 96;
+/// `[MEASURED 2026-09-19, P0b §8, bench profile, K=1]` — a 10 % dead band under
+/// [`GRID_HI`]. A size-disparity scene held on Grid inside the band loses at most about 1.13×
+/// on the broadphase (the §8 disparity slope, interpolated at 2,700 bodies). The price, stated:
+/// on UNIFORM scenes between the uniform crossover (1,109) and [`GRID_HI`], Auto keeps
+/// AllPairs where Grid would be faster — by up to about 2.7× at 3,000 bodies (the §8 uniform
+/// slope, interpolated). Two measured scene families cannot calibrate a disparity classifier;
+/// the better policy belongs to the broadphase redesign.
+pub const GRID_LO: u32 = 2_700;
 
 /// Banded HIGH edge: in [`Auto`](crate::resources::BroadphaseSelectMode::Auto) mode the
 /// broadphase switches to [`Grid`](crate::resources::BroadphaseKind::Grid) when the live
 /// active-body count rises to `>= GRID_HI`.
 ///
-/// `[ESTIMATE:needs-calibration]` — UNMEASURED (see [`GRID_LO`]). `GRID_LO < GRID_HI` is the
-/// hysteresis gap that prevents boundary thrash; both consts are provisional and **gated on
-/// P10** for their calibrated values.
-pub const GRID_HI: u32 = 192;
+/// `[MEASURED 2026-09-19, P0b §8, bench profile, K=1]` — the size-disparity crossover
+/// (2,978 bodies) to two significant figures, which is all the precision one process in the
+/// `bench` profile supports. `GRID_LO < GRID_HI` is the hysteresis gap that prevents boundary
+/// thrash. The provisional 96 / 192 it replaces sat 6–31× below both crossovers, and Auto
+/// switched the Jolt pyramid to Grid at +3.07 ms per step (gated by
+/// `auto_keeps_all_pairs_on_the_jolt_pyramid`).
+pub const GRID_HI: u32 = 3_000;
 
 const _: () = assert!(GRID_LO < GRID_HI, "hysteresis: the OFF edge must sit below the ON edge");
+const _: () = assert!(
+    GRID_HI >= DISPARITY_CROSSOVER_BODIES,
+    "GRID_HI must not sit below the measured size-disparity crossover (2,978 bodies, P0b §8): \
+     Auto would pick Grid where it measured slower"
+);
 
 // ---- PhysicsStats (the cold cost-model carrier) --------------------------------------
 

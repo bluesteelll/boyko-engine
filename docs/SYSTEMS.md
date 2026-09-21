@@ -2037,7 +2037,7 @@ split (no parallel data system — the SP4 race remediation put both solvers on 
 **Modules:**
 - [components.rs](../crates/boyko_physics/src/components.rs) — `RigidBody` / `Collider` / `Contact` columns; `bundles.rs` — `DynamicBody` / `Trigger`.
 - [manifold.rs](../crates/boyko_physics/src/manifold.rs) — `Manifold` / `ContactPoint` (the contact currency, `SDF_SENTINEL`).
-- [narrowphase/](../crates/boyko_physics/src/narrowphase/) — convex contact generators (`sphere_box`, `box_box` with a feature-id-stable OBB cache in `axis_cache.rs`).
+- [narrowphase/](../crates/boyko_physics/src/narrowphase/) — convex contact generators (`sphere_box`, `box_box` with a feature-id-stable OBB cache in `axis_cache.rs`); `dispatch.rs` is the L5 parallel narrowphase: the step's candidate pairs cut into contiguous chunks, collided on the pool's workers, joined in pair order and their axis writes replayed serially — bit-identical to the serial loop for any worker count (gate `narrowphase_parallel_equivalence.rs`).
 - [solver/](../crates/boyko_physics/src/solver/) — `SoftStepSolver` / `ColoredSoftStepSolver` / `NoopSolver` (`soft_step.rs`, `warm_start.rs`, `contact.rs`, `simd.rs`, `colored.rs`).
 - [soft/](../crates/boyko_physics/src/soft/) — soft-body (`component.rs`, `collide.rs`, `self_collision.rs`, `coupling.rs`, `colored.rs`).
 - [sdf_query.rs](../crates/boyko_physics/src/sdf_query.rs) — body-vs-SDF via `boyko_sdf_math` (zero readback, zero graphics deps).
@@ -2077,7 +2077,7 @@ floats, so a replay records the solver ([plugin.rs](../crates/boyko_physics/src/
 `add_physics_colored_solve` is kept and forwards to `add_physics_systems::<ColoredSoftStepSolver>`. The broadphase is **user-owned by default**:
 `BroadphaseSelectMode::Manual` is the default and `select_broadphase` returns without
 touching `PhysicsConfig::broadphase` unless the mode is `Auto`
-([broadphase_policy.rs](../crates/boyko_physics/src/broadphase_policy.rs):186~). (This line read "broadphase auto-selected
+([broadphase_policy.rs](../crates/boyko_physics/src/broadphase_policy.rs):204~). (This line read "broadphase auto-selected
 (`select_broadphase`)" until 2026-09-03, which described the `Auto` arm as though it
 were the default; the policy has always been opt-in, and its `Manual` arm is the
 campaign's 0 %-gate.)
@@ -2087,7 +2087,15 @@ states in one place. `PhysicsConfig::simd` (default `true` since 2026-09-03) gat
 O1 AVX2 gravity + inertia-refresh kernels, which are bit-identical to their scalar
 oracles; `simd_solve` (default `true` since 2026-09-18) gates the O7 cohort-batched
 colored contact solve, also bit-identical (G2 pins the schedule-level on/off
-differential: `bodytype_determinism_golden.rs`, `sleep_settles_box_piles.rs`); `sdf_narrowphase` (default `SdfNarrowphaseKernel::Scalar`)
+differential: `bodytype_determinism_golden.rs`, `sleep_settles_box_piles.rs`); `parallel_solve`
+(default `true` since L4, 2026-09-19) and `parallel_narrowphase` (default `true` since L5 C4,
+2026-09-21) dispatch the wide colours and the candidate pairs across the pool, bit-identical for
+any worker count (`default_world_worker_invariance.rs`, `narrowphase_parallel_equivalence.rs`)
+and inline at one lane (no `pool.scope`: `one_worker_parallel_solve_takes_the_inline_path`,
+`one_worker_parallel_narrowphase_runs_the_serial_loop`); each dispatch costs one `pool.scope`
+— the solve's one per dispatched colour per colour pass, the narrowphase's one a step —
+pinned per frame by `alloc_frame_census.rs` (`scope = 1 + np + passes x colours`);
+`sdf_narrowphase` (default `SdfNarrowphaseKernel::Scalar`)
 picks the box-vs-SDF fold and is the one selector whose non-default arm is **NOT**
 bit-identical to its oracle (`+0` for `-0` at a `±0` tie; owner-deferred, standing RED
 gate `x8_bits_eq_scalar_bits_widened_proptest`). That last one was chosen by

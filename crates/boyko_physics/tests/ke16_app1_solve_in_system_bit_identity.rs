@@ -340,9 +340,11 @@ fn solve_in_scheduled_system_is_bit_identical_to_the_serial_oracle() {
 }
 
 /// The same property across worker counts. This is the App-1-sensitive sweep: `lanes` IS the
-/// worker count, so each arm cuts the color into a DIFFERENT number of chunks
+/// worker count, so each arm at W ≥ 2 cuts the color into a DIFFERENT number of chunks
 /// (`lanes * CHUNKS_PER_WORKER`, clamped to the group count) and every arm must still land on
-/// the same bits.
+/// the same bits. Since L4 the W = 1 arm cuts nothing: the solver's whole-step gate refuses a
+/// one-lane dispatch, so that arm is the inline path on the scheduled route, and the chunk-count
+/// sweep is the W = 2, 4, 8 arms.
 #[test]
 #[cfg_attr(
     miri,

@@ -153,7 +153,8 @@ cargo bench -p boyko-physics --bench colored_solve -- solve_step
 # 4. broadphase crossover — this is what CALIBRATES GRID_LO / GRID_HI.
 cargo bench -p boyko-physics --bench broadphase
 #    report the n where grid crosses all_pairs, and the same for the disparity fixture.
-#    Compare against GRID_LO=96 / GRID_HI=192, which are labelled UNMEASURED at their site.
+#    Compare against GRID_LO=2700 / GRID_HI=3000, labelled [MEASURED 2026-09-19, P0b §8] at
+#    their site, where a const assert keeps GRID_HI >= the 2,978-body disparity crossover.
 ```
 
 ⚠ **Pass no `RUSTFLAGS`** — see §1. Any bench header still telling you to is stale.
@@ -677,8 +678,8 @@ Which spread the claim rule means (min–max against IQR against SE) is still OP
 processes are the ones whose thread stayed on one CPU (occupancy against deviation, r = −0.67, n = 48).
 
 **Levers (plan §3 as amended by W2/W3).**
-- L4 `parallel_solve` default: build.
-- L5 parallel narrowphase: build, predicted 2.4–2.6 ms (26–28 % of T(8)).
+- L4 `parallel_solve` default: build. **Built (`caac7d06`, on by default); untimed until the L4/L5 window.**
+- L5 parallel narrowphase: build, predicted 2.4–2.6 ms (26–28 % of T(8)). **Built (`b8d9ab8f`, dormant) and on by default from L5 C4; untimed until the window (C2 against C4).**
 - L2: do not flip; recalibrate `GRID_LO`/`GRID_HI`.
 - L6: not built (L(8) + t_narrow(8) = 8.2 % < 10 %).
 - L7: blocked (gated after L6; 2.8–5.1 % predicted).
@@ -769,7 +770,9 @@ cargo bench --no-run -p boyko-physics --bench broadphase
 
 **The boyko rows.** Each is the runner at the tip, one world per process: the profiler store binds one world, and
 a second world is refused with E9204 while its fold returns silently. Windows are step ranges that the driver
-reduces from the per-step CSV. cfg-A is colored, `parallel_solve = (W > 1)`, `AllPairs`, `simd_solve` off. cfg-B
+reduces from the per-step CSV. cfg-A is colored, `parallel_solve = (W > 1)`, `AllPairs`, `simd_solve` off — and from
+L5 C3 on `parallel_narrowphase = (W > 1)` too, so a P0 cfg-A row is comparable with a post-L5 cfg-A row only as the
+"before" of the L5 pairing (C2 against C4), never quoted against it directly. cfg-B
 is cfg-A plus `Grid` plus `simd_solve`, and the runner asserts that the two give equal final-pose bytes (H7). Every
 row runs armed for its profile. The rows compared on wall time also run disarmed: J-A (the parity row and A/A0)
 and J-S0 (L1's gate).
@@ -778,7 +781,7 @@ and J-S0 (L1's gate).
 |---|---|---|---|---|
 | J-A | `--scene jolt --gap 0.5 --cfg a` | 1, 2, 4, 8, 16 | 500 (0..500) | disarmed ×2: the parity row and A/A0; armed: the profile |
 | J-B | `--scene jolt --gap 0.5 --cfg b` | 1, 8 | 500 (0..500) | what `Grid` and `simd_solve` buy, per stage |
-| J-P1 | `--scene jolt --gap 0.5 --cfg a --parallel-solve` | 1 | 500 (0..500) | ω₁: the per-wave cost with no cross-thread wake |
+| J-P1 | `--scene jolt --gap 0.5 --cfg a --parallel-solve` | 1 | 500 (0..500) | ω₁: the per-wave cost with no cross-thread wake. **Retired at L4** (lever rulings, L5 W2): a one-worker pool now solves inline, so the runner refuses this row; ω₁ comes from a zero-work spawn/join microbench |
 | J-C | `--scene jolt --gap 0.5 --cfg a --canary-frac 0.05` | 1, 8 | 500 (0..500) | the canary: a system `.after(narrowphase).before(build_graph)` spinning 0.05·T(W) |
 | J-Son | `--scene jolt --gap 0.5 --cfg a --sleeping` | 1, 8 | 1000 (0..1000) | the sleeping floors, against Jolt `-allow_sleep` |
 | J-S0 | `--scene jolt --gap 0.5 --cfg a --sleeping --threshold 0` | 1 | 500 (0..500) | the sleep bookkeeping cost; L1's gate |
@@ -852,7 +855,8 @@ is a median over passes.
   - u = solve span − Σ in-solve zones.
 - E(W) = P(1)/(W·t_wide(W)). waves = wide spans per step.
 - The L6 fork compares a FIXED per-wave dispatch cost against L(8): ω₁ from J-P1, or a microbenched spawn/join at
-  zero work. The imbalance share (max chunk − mean chunk) is reported separately (W2).
+  zero work (the only source from L4 on, which retired J-P1). The imbalance share (max chunk − mean chunk) is
+  reported separately (W2).
 - The W=8 gap attribution: boyko's terms beside Jolt's `-p` stage shares, plus Δ_J = T_J(no pair cache) − T_J.
 
 **L1's gate (O7).** J-S0 at W=1, disarmed: pre-L1 (A) against the tip (B). In each pass, as in §8, run A twice

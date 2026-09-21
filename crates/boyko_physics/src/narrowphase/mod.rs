@@ -7,6 +7,12 @@
 //! generator stays inline in [`physics_narrowphase`](crate::systems::physics_narrowphase);
 //! the box generators live here because they are the heavy correctness surface.
 //!
+//! The one module here that is not a generator is `dispatch`, the parallel narrowphase (L5):
+//! it runs the same per-pair collision over contiguous chunks of the candidate pairs on the
+//! ambient pool's workers and joins their output back in pair order. Its `unsafe` is the three
+//! per-row writes of a chunk into rows no other chunk owns; its public surface is the three
+//! chunking constants re-exported below.
+//!
 //! # OBB convention
 //!
 //! A [`ColliderShape::Box`](crate::components::ColliderShape::Box) is an ORIENTED
@@ -62,7 +68,10 @@
 
 pub mod axis_cache;
 pub mod box_box;
+pub(crate) mod dispatch;
 pub mod sphere_box;
+
+pub use dispatch::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};
 
 /// High bit (bit 15): SET for the non-face-face classes (edge-edge, vertex-face),
 /// CLEAR for face-face. Keeps the three classes' feature ids disjoint so a

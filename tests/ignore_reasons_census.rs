@@ -115,12 +115,14 @@ const SKIP_DIRS: &[&str] = &["target", ".git", ".claude", "graphify-out", "book"
 /// stopped walking, not to track the count.
 const MIN_FILES: usize = 800;
 
-/// Floor on ignore sites found. The tree held 321 (178 plain + 143 `cfg_attr`) when measured on
-/// 2026-09-19 on this line after the colored-solver-default lane merged; this is well below it and
+/// Floor on ignore sites found. The tree held 328 (178 plain + 150 `cfg_attr`) when measured on
+/// 2026-09-19 on the parallel-narrowphase lane after its L2 calibration; this is well below it and
 /// exists only to catch a detector that stopped detecting.
 /// The number above is a snapshot that moves with every campaign (it fell by one when A7 resolved
 /// its red-first tests, after growing for weeks, then rose by ten with the boot-validation lane's
-/// device gates and by one with the colored-solver-default lane's release-only SIMD on/off test)
+/// device gates, by one with the colored-solver-default lane's release-only SIMD on/off test and
+/// by seven with the L2 calibration's `miri-slow` broadphase-policy tests, and by one with
+/// L5 C3's `slow:` Jolt-pyramid arm of `narrowphase_parallel_equivalence.rs`, to 329 / 179)
 /// — do NOT read it as the current count, and
 /// do not tune this floor to it. `every_ignore_attribute_states_a_reason` prints the live figure on
 /// every run (`-- --nocapture`), which is the only figure a reader should quote. Because this is a

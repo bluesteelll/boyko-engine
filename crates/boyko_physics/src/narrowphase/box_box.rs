@@ -749,6 +749,12 @@ thread_local! {
     /// to prove the fallback branch is exercised; outside `cfg(test)` it does not exist, so
     /// the fallback carries no counting cost in a shipping build. Per-thread because the
     /// test harness runs each test on its own thread.
+    ///
+    /// Per-thread also means a count taken through the narrowphase SYSTEM sees only the pairs
+    /// its own thread collided: with `parallel_narrowphase` on and a pool of two or more
+    /// workers, the chunks run on other threads. A system-level reader of this counter or of
+    /// [`HELD_FACE_YIELDS`] must run with one worker or with the flag off; the one reader today
+    /// calls [`box_box_contact`] directly on the test thread.
     static FALLBACKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Test-only, like [`FALLBACKS`]: how many times a held face hint that realized no patch
     /// yielded to the best face's already-built patch in [`box_box_contact`].

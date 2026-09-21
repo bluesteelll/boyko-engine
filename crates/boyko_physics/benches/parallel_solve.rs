@@ -38,8 +38,15 @@
 //! workers) was set and measured on the scalar colored solve, so [`config`] pins
 //! `simd_solve: false` and every `single_O5` / `parallel_Nw` row keeps that meaning.
 //! The `pyramid/default_world` row is the single-threaded solve at
-//! `PhysicsConfig::default()` (the O7 cohort kernel on, `parallel_solve` off); it is
-//! reported, not gated.
+//! `PhysicsConfig::default()` (the O7 cohort kernel on); it runs with no pool, so it stays
+//! single-threaded although `parallel_solve` defaults on since L4. It is reported, not gated.
+//!
+//! # The 1-worker row since L4
+//!
+//! The colored solve refuses a dispatch on a one-worker pool (the whole-step gate's lanes
+//! term), so every `<scene>/parallel_1w` row now runs the inline path and reads as the
+//! single-threaded solve plus one ambient-pool probe per step. Rows measured before L4
+//! dispatched at one worker and are not comparable with it.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
