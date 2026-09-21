@@ -283,13 +283,16 @@ use boyko_physics::components::{
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::narrowphase::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};
+use boyko_physics::broadphase_tree::{BroadphaseTree, TreeDiag};
 use boyko_physics::plugin::{PhysicsStageKeys, add_physics_colored_solve, add_physics_systems};
 use boyko_physics::profiling::{
-    COUNTER_ZONES, PHYS_BP_PAIRS, PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY,
-    PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT, PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH,
-    PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_PASS_BIASED, PHYS_PASS_RELAX,
-    PHYS_RESTITUTION, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLOTS_NARROW,
-    PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONES,
+    COUNTER_ZONE_COUNT, COUNTER_ZONES, PHYS_BP_ASSEMBLE, PHYS_BP_BUILD, PHYS_BP_MEMBERS,
+    PHYS_BP_PAIRS, PHYS_BP_QUERIED, PHYS_BP_QUERY, PHYS_BP_REBUILDS, PHYS_BP_VERIFY,
+    PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT,
+    PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS,
+    PHYS_NP_POINTS, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN,
+    PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
+    PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
     WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
 };
 use boyko_physics::resources::{
@@ -908,20 +911,35 @@ struct Shape {
     pairs: u64,
     manifolds: u64,
     points: u64,
+    /// Gathered rows.
+    rows: u64,
+    /// The tree broadphase's `|S| + |Z|` after the step.
+    bp_members: u64,
+    /// Its admissions and compactions this step.
+    bp_rebuilds: u64,
+    /// Whether it classed a Wide or Excluded row this step (never, on these scenes).
+    bp_kinds_moved: bool,
 }
 
 /// Recomputes this step's color classes and narrowphase output. A frozen island's manifolds are
 /// excluded exactly as `build_columns` excludes them — the manifold's island is its dynamic side's
 /// — using the per-step decision `IslandSleep::is_island_frozen` reports (`end_step` does not
 /// change it, so it still describes the step that just ran).
-fn step_shape(world: &EcsMaster, colored: bool, sleeping: bool) -> Shape {
+fn step_shape(world: &EcsMaster, colored: bool, sleeping: bool, bp_prev: &mut TreeDiag) -> Shape {
     let manifolds = world.resource::<Manifolds>().manifolds();
+    let bp = world.resource::<BroadphaseTree>().diag();
     let mut shape = Shape {
         pairs: world.resource::<ContactPairs>().pairs().len() as u64,
         manifolds: manifolds.len() as u64,
         points: manifolds.iter().map(|m| u64::from(m.count)).sum(),
+        rows: world.resource::<SolverScratch>().bodies_len() as u64,
+        bp_members: bp.members,
+        bp_rebuilds: (bp.static_rebuilds + bp.sleeper_rebuilds)
+            - (bp_prev.static_rebuilds + bp_prev.sleeper_rebuilds),
+        bp_kinds_moved: bp.wide_rows != bp_prev.wide_rows || bp.excluded_rows != bp_prev.excluded_rows,
         ..Shape::default()
     };
+    *bp_prev = bp;
     if !colored {
         return shape;
     }
@@ -981,6 +999,10 @@ struct Structure {
     parallel_np: bool,
     /// The pool's worker count, `--workers`: the narrowphase's lanes.
     lanes: usize,
+    /// `PhysicsConfig::broadphase`.
+    broadphase: BroadphaseKind,
+    /// `BroadphaseTree::brute_max_rows()`: with `Tree`, the tree path runs above it.
+    brute_max_rows: u32,
 }
 
 /// The narrowphase's chunk count for a step of `pairs` candidate pairs, or 0 when it runs the
@@ -1007,7 +1029,8 @@ fn check_step(
     shape: &Shape,
     st: Structure,
 ) -> Result<(), String> {
-    let Structure { colored, sleeping, substeps, relax, parallel_np, lanes } = st;
+    let Structure { colored, sleeping, substeps, relax, parallel_np, lanes, broadphase, brute_max_rows } =
+        st;
     let n_sys = zones.systems.len();
     for (k, (name, _)) in zones.systems.iter().enumerate() {
         if counts[k] != 1 {
@@ -1019,8 +1042,16 @@ fn check_step(
     let sl = u64::from(colored && sleeping);
     let np_chunks = expected_np_chunks(parallel_np, shape.pairs, lanes);
     let np = u64::from(np_chunks >= 2);
+    // The tree path, derived from the configuration and the row count — never from the
+    // implementation: `Tree` above `brute_max_rows` opens the four spans and emits the three
+    // structural counters once; `AllPairs`, `Grid` and the Tree's brute path open none.
+    let tree_path = broadphase == BroadphaseKind::Tree && shape.rows > u64::from(brute_max_rows);
+    let tp = u64::from(tree_path);
+    if tree_path && shape.bp_kinds_moved {
+        return Err("the tree broadphase classed a Wide or Excluded row on a finite scene".to_owned());
+    }
     let spans = &counts[n_sys..n_sys + SPAN_ZONES.len()];
-    let expected: [(&ZoneHandle, u64); 17] = [
+    let expected: [(&ZoneHandle, u64); SPAN_ZONE_COUNT] = [
         (&PHYS_SOLVE_BUILD, c),
         (&PHYS_GRAVITY, c * substeps),
         (&PHYS_WARM_APPLY, c * substeps),
@@ -1038,6 +1069,10 @@ fn check_step(
         (&PHYS_NP_DISPATCH, np),
         (&PHYS_NP_COMPACT, np),
         (&PHYS_NP_AXIS_COMMIT, np),
+        (&PHYS_BP_VERIFY, tp),
+        (&PHYS_BP_BUILD, tp),
+        (&PHYS_BP_QUERY, tp),
+        (&PHYS_BP_ASSEMBLE, tp),
     ];
     for &(handle, want) in &expected {
         let got = spans[span_index(handle)];
@@ -1046,7 +1081,9 @@ fn check_step(
         }
     }
     let base = n_sys + SPAN_ZONES.len();
-    let expected_counters: [(&ZoneHandle, u64, u64); 7] = [
+    // On a tree-path step every row is queried or a member (`q + m == N`: these scenes have no
+    // Wide or Excluded row), so the queried value is `N − members`.
+    let expected_counters: [(&ZoneHandle, u64, u64); COUNTER_ZONE_COUNT] = [
         (&PHYS_SLOTS_WIDE, c, shape.wide_slots),
         (&PHYS_SLOTS_NARROW, c, shape.narrow_slots),
         (&PHYS_NP_PAIRS, 1, shape.pairs),
@@ -1054,6 +1091,9 @@ fn check_step(
         (&PHYS_NP_POINTS, 1, shape.points),
         (&PHYS_BP_PAIRS, 1, shape.pairs),
         (&PHYS_NP_CHUNKS, 1, np_chunks),
+        (&PHYS_BP_QUERIED, tp, shape.rows - shape.bp_members),
+        (&PHYS_BP_MEMBERS, tp, shape.bp_members),
+        (&PHYS_BP_REBUILDS, tp, shape.bp_rebuilds),
     ];
     for &(handle, want_n, want_v) in &expected_counters {
         let k = base + counter_index(handle);
@@ -1269,8 +1309,21 @@ fn run(args: &Args) -> ExitCode {
     } else {
         None
     };
-    let structure =
-        Structure { colored, sleeping, substeps, relax, parallel_np, lanes: args.workers };
+    let (broadphase, brute_max_rows) = (
+        rig.world.resource::<PhysicsConfig>().broadphase,
+        rig.world.resource::<BroadphaseTree>().brute_max_rows(),
+    );
+    let structure = Structure {
+        colored,
+        sleeping,
+        substeps,
+        relax,
+        parallel_np,
+        lanes: args.workers,
+        broadphase,
+        brute_max_rows,
+    };
+    let mut bp_prev = rig.world.resource::<BroadphaseTree>().diag();
     let n_cols = zones.as_ref().map_or(0, ZoneTable::len);
     let ids: Vec<u16> = zones.as_ref().map_or_else(Vec::new, |z| z.ids().collect());
     let tpn = if armed { boyko_diag::clock::ticks_per_ns() } else { 0.0 };
@@ -1339,7 +1392,7 @@ fn run(args: &Args) -> ExitCode {
                 before[k] = (acc.count, acc.total);
                 deltas.push((counts[k], values[k]));
             }
-            let shape = step_shape(&rig.world, colored, sleeping);
+            let shape = step_shape(&rig.world, colored, sleeping, &mut bp_prev);
             let verdict = check_step(zones, &counts, &values, &shape, structure);
             let void = verdict.is_err();
             if let Err(why) = verdict {

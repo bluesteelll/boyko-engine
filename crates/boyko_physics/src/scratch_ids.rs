@@ -44,6 +44,8 @@ use boyko_ecs::ecs::constants::{
 use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
+use crate::broadphase_tree::RowRec;
+use crate::broadphase_tree::bvh::{Item, Node8};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::Vec3;
 use crate::narrowphase::axis_cache::AxisEntry;
@@ -703,6 +705,109 @@ pub(crate) fn register_row_identity_layouts() {
     register_layout::<u32>(SCRATCH_ID_SLEEP_ISLAND_KEY);
 }
 
+// ── The BROADPHASE-TREE cohort (the tree broadphase, `broadphase_tree/`) ─────
+//
+// `BroadphaseTree`'s eleven ids: the nine columns of commit C1 — two packed trees, the radix
+// ping-pong pair, the item list, two record buffers, the static pair list and the scratch
+// stream — and two reserved for commit C5, the sleeper tree and its pair list. The verify
+// sweeps a record buffer beside `BodyState` (slot 63) and, on a `Rows` step, `prev_row` (slot
+// 19); the assembly writes `ContactPairs` (slot 62) beside the stream and the records; commit
+// C5's hint reads `TOUCHED_AWAKE` (in the solver cohort, slots 20..=63). The cohort sits
+// directly below the row-identity cohort, ids 399..=389, slots 15..=5, so every one of those
+// co-swept families is clear of it — each is asserted below.
+
+/// Number of `ScratchColumn`s backing [`BroadphaseTree`](crate::broadphase_tree::BroadphaseTree).
+pub(crate) const TREE_COLUMN_COUNT: usize = 11;
+
+/// Tree column `k`: the active tree's nodes.
+pub(crate) const TREE_ACTIVE: usize = 0;
+/// Tree column `k`: the static tree's nodes.
+pub(crate) const TREE_STATICS: usize = 1;
+/// Tree column `k`: the sleeper tree's nodes (commit C5; the id is reserved now).
+pub(crate) const TREE_SLEEPERS: usize = 2;
+/// Tree column `k`: radix ping-pong A, the diverted entries, the admission's additions.
+pub(crate) const TREE_SORT_A: usize = 3;
+/// Tree column `k`: radix ping-pong B.
+pub(crate) const TREE_SORT_B: usize = 4;
+/// Tree column `k`: the items of a build.
+pub(crate) const TREE_ITEMS: usize = 5;
+/// Tree column `k`: record buffer 0.
+pub(crate) const TREE_REC0: usize = 6;
+/// Tree column `k`: record buffer 1.
+pub(crate) const TREE_REC1: usize = 7;
+/// Tree column `k`: the static–static pair list.
+pub(crate) const TREE_SS: usize = 8;
+/// Tree column `k`: the sleeper pair list (commit C5; the id is reserved now).
+pub(crate) const TREE_SL: usize = 9;
+/// Tree column `k`: the scratch stream (inverse map, segments, buckets).
+pub(crate) const TREE_AUX: usize = 10;
+
+/// Top of the broadphase-tree cohort — one id below the row-identity cohort's bottom.
+pub(crate) const SCRATCH_ID_TREE_TOP: usize = SCRATCH_ID_ROW_IDENTITY_BOTTOM - 1;
+
+/// Bottom of the broadphase-tree cohort (inclusive).
+pub(crate) const SCRATCH_ID_TREE_BOTTOM: usize = SCRATCH_ID_TREE_TOP - (TREE_COLUMN_COUNT - 1);
+
+const _: () = assert!(
+    TREE_COLUMN_COUNT <= POOL_STAGGER_LINES,
+    "the broadphase-tree cohort is wider than one stagger period"
+);
+
+const _: () = assert!(
+    SCRATCH_ID_TREE_TOP < SCRATCH_ID_ROW_IDENTITY_BOTTOM,
+    "the broadphase-tree cohort overlaps the row-identity cohort"
+);
+
+// The verify: a record buffer beside the BodyState snapshot.
+const _: () = assert!(
+    !shares_stagger_slot(SCRATCH_ID_BODY_STATE, SCRATCH_ID_TREE_TOP, SCRATCH_ID_TREE_BOTTOM),
+    "the tree's verify streams BodyState beside its records, and one of the cohort's slots is BODY_STATE's"
+);
+
+// The assembly: the pair list beside the stream and the records.
+const _: () = assert!(
+    !shares_stagger_slot(SCRATCH_ID_CONTACT_PAIRS, SCRATCH_ID_TREE_TOP, SCRATCH_ID_TREE_BOTTOM),
+    "the tree's assembly writes ContactPairs beside its stream, and one of the cohort's slots is CONTACT_PAIRS's"
+);
+
+// A `Rows` step: `prev_row` beside the records and the inverse map.
+const _: () = assert!(
+    !shares_stagger_slot(SCRATCH_ID_ROW_PREV, SCRATCH_ID_TREE_TOP, SCRATCH_ID_TREE_BOTTOM),
+    "the tree's verify reads prev_row beside its records on a Rows step, and one of the cohort's slots is ROW_PREV's"
+);
+
+// The hint (C5): the awake mask beside the records.
+const _: () = assert!(
+    !shares_stagger_slot(SCRATCH_ID_TOUCHED_AWAKE, SCRATCH_ID_TREE_TOP, SCRATCH_ID_TREE_BOTTOM),
+    "the tree's verify reads the awake mask beside its records on a hint step, and one of the cohort's slots is TOUCHED_AWAKE's"
+);
+
+/// The [`ComponentId`] for tree column `k` (one of the `TREE_*` indices), descending from
+/// [`SCRATCH_ID_TREE_TOP`].
+#[inline]
+pub(crate) fn tree_column_id(k: usize) -> ComponentId {
+    debug_assert!(k < TREE_COLUMN_COUNT, "tree column index out of cohort");
+    ComponentId::new(SCRATCH_ID_TREE_TOP - k)
+}
+
+/// Registers the element layout of every [`BroadphaseTree`] column, idempotently: three
+/// `Node8` columns, four `u64`, one `Item`, two `RowRec` and one `u32`. The two C5 ids are
+/// registered with the type they will hold, so the cohort's shape is fixed now.
+///
+/// [`BroadphaseTree`]: crate::broadphase_tree::BroadphaseTree
+pub(crate) fn register_tree_column_layouts() {
+    for k in [TREE_ACTIVE, TREE_STATICS, TREE_SLEEPERS] {
+        register_layout::<Node8>(tree_column_id(k).get());
+    }
+    for k in [TREE_SORT_A, TREE_SORT_B, TREE_SS, TREE_SL] {
+        register_layout::<u64>(tree_column_id(k).get());
+    }
+    register_layout::<Item>(tree_column_id(TREE_ITEMS).get());
+    register_layout::<RowRec>(tree_column_id(TREE_REC0).get());
+    register_layout::<RowRec>(tree_column_id(TREE_REC1).get());
+    register_layout::<u32>(tree_column_id(TREE_AUX).get());
+}
+
 /// The lowest id the physics scratch region may occupy.
 ///
 /// The region grows DOWNWARD from the top of the id space while production
@@ -728,11 +833,11 @@ pub(crate) fn register_row_identity_layouts() {
 /// and the census above is the thing to re-run before moving this number again.
 const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;
 
-// The row-identity cohort is the region's lowest edge today. The floor is asserted
+// The broadphase-tree cohort is the region's lowest edge today. The floor is asserted
 // against the LOWEST cohort rather than against whichever one happened to be last
 // when this was written — add a cohort below and move this assert with it.
 const _: () = assert!(
-    SCRATCH_ID_ROW_IDENTITY_BOTTOM >= SCRATCH_REGION_MIN_ID,
+    SCRATCH_ID_TREE_BOTTOM >= SCRATCH_REGION_MIN_ID,
     "the physics scratch region has grown below SCRATCH_REGION_MIN_ID; production \
      ids climb from 0 and the reserved region is no longer comfortably out of \
      their reach. Re-run the census in that constant's docs before lowering it"

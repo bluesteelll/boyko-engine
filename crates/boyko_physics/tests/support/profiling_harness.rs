@@ -19,7 +19,12 @@
 //! contact on the first step. Most are unit boxes (half-extent [`HALF_BOX`]); every
 //! [`STACK_EVERY`]-th is a slab twice as long in `x` carrying two unit boxes side by side, each
 //! sunk [`SINK`] into its top face and clear of the other. On the real `add_physics_colored_solve`
-//! schedule over a [`WORKERS`]-worker pool with `parallel_solve` and `parallel_narrowphase` on.
+//! schedule over a [`WORKERS`]-worker pool with `parallel_solve` and `parallel_narrowphase` on,
+//! and the tree broadphase forced onto its tree path (`BroadphaseKind::Tree`,
+//! `brute_max_rows = 0`), so the four `phys_bp_*` spans and the three `phys_bp_*` structural
+//! counters open on every step — `profiling_bit_identity` requires every zone to open, and
+//! `profiling_zone_counts` pins their structural values (the floor is the one static: pending
+//! at step 1, admitted at step 2, a member from then on).
 //!
 //! The grid is [`FLOOR_ROWS`] rows deep so the step has about 300 candidate pairs: at least two
 //! narrowphase chunks of `NP_MIN_PAIRS_PER_CHUNK` (128), so the parallel narrowphase dispatches on
@@ -59,8 +64,9 @@ use boyko_physics::components::{
     Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
+use boyko_physics::broadphase_tree::BroadphaseTree;
 use boyko_physics::plugin::add_physics_colored_solve;
-use boyko_physics::resources::PhysicsConfig;
+use boyko_physics::resources::{BroadphaseKind, PhysicsConfig};
 
 // ── Scene constants ──────────────────────────────────────────────────────────
 
@@ -287,8 +293,9 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// Builds the scene with sleeping off, `parallel_solve` and `parallel_narrowphase` on,
-    /// dt = [`DT`] and gravity (0, -9.81, 0). Nothing else in the configuration is touched.
+    /// Builds the scene with sleeping off, `parallel_solve` and `parallel_narrowphase` on, the
+    /// tree broadphase forced onto its tree path, dt = [`DT`] and gravity (0, -9.81, 0). Nothing
+    /// else in the configuration is touched.
     pub fn spawn() -> Self {
         let mut world = EcsMaster::new();
         let mut builder = ScheduleBuilder::new(ThreadPoolBuilder::new().num_threads(WORKERS).build());
@@ -302,7 +309,9 @@ impl Scene {
             cfg.parallel_narrowphase = true;
             cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
             cfg.dt = DT;
+            cfg.broadphase = BroadphaseKind::Tree;
         }
+        world.resource_mut::<BroadphaseTree>().set_brute_max_rows(0);
 
         spawn_box(
             &mut world,
@@ -341,6 +350,23 @@ impl Scene {
     /// Turns sleeping on or off for the following steps.
     pub fn set_sleeping(&mut self, on: bool) {
         self.world.resource_mut::<PhysicsConfig>().sleeping = on;
+    }
+
+    /// Selects the broadphase for the following steps.
+    //
+    // `dead_code`: the harness is compiled into every test binary that includes it, and only
+    // `profiling_zone_counts` calls this.
+    #[allow(dead_code)]
+    pub fn set_broadphase(&mut self, kind: BroadphaseKind) {
+        self.world.resource_mut::<PhysicsConfig>().broadphase = kind;
+    }
+
+    /// The gathered row count of the last step.
+    //
+    // `dead_code`: as for `set_broadphase`.
+    #[allow(dead_code)]
+    pub fn rows(&self) -> u64 {
+        self.world.resource::<boyko_physics::resources::SolverScratch>().bodies_len() as u64
     }
 
     /// Binds the process's profiler to this world, gives the world the store, and arms it.

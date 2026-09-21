@@ -67,6 +67,7 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::core::time::FixedTime;
 
 use crate::body_set::{BodyApplyData, BodyGatherData, BodyQuery};
+use crate::broadphase_tree::BroadphaseTree;
 use crate::components::{ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use crate::math::Vec3;
@@ -278,15 +279,16 @@ pub fn physics_gather(
 }
 
 /// Fills [`ContactPairs`] with candidate `(BodyIndex, BodyIndex)` pairs in
-/// deterministic `(min, max)` order (plan D3 stage 2 / D4 / OQ1; O2 grid path).
+/// deterministic `(min, max)` order (plan D3 stage 2 / D4 / OQ1; O2 grid path;
+/// the tree broadphase).
 ///
 /// A pair is a candidate when the bodies' bounding spheres overlap
 /// (`delta.length_squared() <= (rA + rB)²`). Emitting `(min, max)` keeps the
 /// order content-defined and reproducible (float add is non-associative →
 /// contact iteration order must be deterministic, D4).
 ///
-/// Two interchangeable paths, selected by [`PhysicsConfig::broadphase`] (a single
-/// runtime branch — the one-branch floor):
+/// Three interchangeable paths, selected by [`PhysicsConfig::broadphase`] (a
+/// single runtime branch — the one-branch floor):
 ///
 /// - [`BroadphaseKind::AllPairs`] (DEFAULT): the shipped O(n²) double loop,
 ///   byte-identical to before O2 (the campaign 0%-gate).
@@ -294,6 +296,15 @@ pub fn physics_gather(
 ///   ([`BroadphaseGrid::build`]) that emits candidates then applies the SAME
 ///   sphere-bound predicate and sorts by `(min, max)`. Its pair set is
 ///   bit-identical to all-pairs.
+/// - [`BroadphaseKind::Tree`] (opt-in): the packed-BVH broadphase with a
+///   persistent static set ([`BroadphaseTree::step`]), serial, heap-free per step.
+///   Its pair set is all-pairs' exact set by construction (the same predicate on
+///   the same bits, one owner per pair, an integer-count assembly), so it is
+///   bit-identical too; at or below [`BroadphaseTree::brute_max_rows`] rows it
+///   runs [`all_pairs_into`](crate::broadphase_tree::all_pairs_into) instead.
+///   It reads the gather's row identity to carry its static set through row
+///   changes, and opens the four `phys_bp_*` profiling spans on every tree-path
+///   step.
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
@@ -301,6 +312,7 @@ pub fn physics_broadphase(
     scratch: Res<SolverScratch>,
     cfg: Res<PhysicsConfig>,
     mut grid: ResMut<BroadphaseGrid>,
+    mut tree: ResMut<BroadphaseTree>,
     mut pairs: ResMut<ContactPairs>,
 ) {
     let bodies = scratch.bodies();
@@ -342,6 +354,10 @@ pub fn physics_broadphase(
                 grid.build(bodies, pairs);
             }
         }
+        // The tree broadphase: the exact set, serial, on the calling thread. The row
+        // identity is the gather's (`scratch.rows`), which the tree's verify uses to
+        // carry its static set through a row change.
+        BroadphaseKind::Tree => tree.step(bodies, &scratch.rows, pairs),
     }
 
     // Strict: the pairs are unique as well as sorted. The narrowphase's hysteresis
