@@ -18,7 +18,56 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
-## 2026-09-18 — An un-slotted punctual light samples another light's shadow map on armed frames
+## RESOLVED 2026-09-18 — An un-slotted punctual light samples another light's shadow map on armed frames
+
+✅ **RESOLVED 2026-09-18 by the light-table-defects lane (`fix/light-table-defects`), as an
+architecture call — not an owner decision, and not a question to the owner.** The fork below
+("which side owns the value") was taken on cost and on whether a gate could be shown able to fail:
+
+- **Taken: the host builds every point/spot row with `SLOT_NONE` in the slot field.**
+  `GpuLight::from_point` / `from_spot` and their golden mirrors `GoldenLight::point` / `spot` OR in
+  `SLOT_NONE_FIELD` (`0x003E_0000`, defined next to `GpuLight` in
+  `crates/boyko_render/src/light.rs`; `shadow_atlas.rs` pins it to `SLOT_NONE << ATLAS_SLOT_SHIFT`
+  at compile time). `slot_pack` keeps its guard, so the constructor is the value's single owner and
+  the fold only ever adds a real assignment on top. The six shader sites already reject the
+  sentinel: no shader code changed, no `.spv` was re-emitted, no manifest row moved;
+  `light_table.hlsli`'s false comment was corrected comment-only. On an armed frame an un-slotted
+  light now skips its PCF instead of paying for a wrong one.
+- **Rejected: the six sites also test bit 16.** Two more ALU ops per light per pixel on armed
+  frames, six hand-edited sites and up to 20 `.spv` re-emitted — and it does not fix the class,
+  because `GoldenLight::with_sdf_shadow()` sets bit 16 with no slot.
+- **Rejected: store `slot + 1`, so 0 means "none".** One more integer add per light per pixel,
+  the same `.spv` churn, and a new encoding for every slotted row, to protect rows only `from_*` /
+  `GoldenLight::*` ever build.
+- **Rejected: the fold always packs.** A row built outside the fold would still decode slot 0,
+  and the value would have two owners — so no single mutation could reintroduce the defect, and
+  no gate could be shown able to fail.
+
+What the call cost, on purpose: an un-slotted table is no longer byte-identical to the pre-Inc-1
+fold. In the slotted encoding the old word MEANT "slot 0", so that identity was the defect; the
+pixel 0%-gate is what the pins check, and it is unaffected by design.
+
+**The exposure claim was refuted by reading, before any run.** The brief said the two froxel pins
+were exposed; they are not. Neither `vb_mesh_froxel` nor `vb_mesh_tex_froxel` spawns a
+`ShadowCaster`, so the punctual depth pass never arms and header bit 3 stays off there (the section
+"Who is exposed" below). The only exposed scene is the unpinned
+`crates/boyko_app/examples/vb_lab.rs`, whose un-flagged blue point read the spot's face record.
+
+The gates that pin it (`docs/render/light-table-defects/R1-DESIGN.md` section 4):
+`light_system.rs`'s `every_punctual_row_decodes_exactly_its_assignment` (every assignment of three
+points and three spots), `mesh_shadow_arming_agreement.rs` (the production resolve → assignment →
+`collect_lights` path, with an un-flagged point, an un-flagged spot and a budget loser),
+`lighting_l1_host_oracle.rs`'s `every_light_row_producer_emits_the_slot_none_sentinel` (both
+producers, plus the shader's own spelling of the field, with a negative control), and the device
+gate `unwritten_shadow_map_gate.rs`'s `unslotted_punctual_lights_never_sample_the_atlas`. The
+poison probe now also records `sampled_rows` — the rows the shader's own predicate
+`light_atlas_slot(kind) != SLOT_NONE` would sample — beside the `CASTS_SHADOW_BIT` count the last
+paragraph of this entry explains.
+
+Out of scope and not an owner question: bit 16 means "slotted" to the host and "casts an SDF
+shadow" to the shader (follow-up R1-F1 in the design); it moves no pixel today.
+
+### The record as written before the fix
 
 Found by the vkval lane (round 3, the shadow-gate stage) while writing the punctual half of the
 unwritten-shadow-map gate. **It is pre-existing and that lane does not fix it.** The fix is

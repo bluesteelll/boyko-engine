@@ -25,7 +25,7 @@
 
 use std::collections::BTreeSet;
 
-use boyko_rhi_vulkan::compute::{composite_pixel_ray, CompositeCamera, SDF_IMG_H, SDF_IMG_W};
+use boyko_rhi_vulkan::compute::{composite_pixel_ray, CompositeCamera, GOLDEN_ATLAS_SLOT_MASK, GOLDEN_ATLAS_SLOT_SHIFT, GOLDEN_SLOT_NONE, SDF_IMG_H, SDF_IMG_W};
 use boyko_rhi_vulkan::goldens::{golden_cluster_cull, golden_cluster_cull_hier, golden_cluster_index, golden_cluster_xy_tile, golden_cluster_z_slice, golden_deferred_resolve_clustered, golden_deferred_resolve_table, golden_froxel_aabb, golden_hier_groups_per_slice, golden_hier_thread_map, GoldenClusterConfig, GoldenLight, GoldenLightHeader, GoldenMaterial, MarcherAttributes, HIER_GROUP_THREADS};
 
 /// The ortho ray-gen the resolve uses: `ro=(0,0,2)`, `rd=(0,0,-1)`, so `view_z == view_t`
@@ -1465,4 +1465,152 @@ fn hier_cull_truncates_the_same_prefix_as_flat_when_the_cap_binds() {
         "the truncation short-circuit never actually fired at N_ps={n_ps} \
          (max_per_froxel={max_per_froxel}) -- raise N_ps or check the rig"
     );
+}
+
+// ============================================================================
+// R1 — every light-row producer emits the SLOT_NONE sentinel in an un-slotted row.
+// ============================================================================
+
+/// The un-slotted POINT kind word: kind tag 1, bit 16 clear, `SLOT_NONE == 0x1F` in the 5-bit
+/// atlas-slot field at bits 17..22. A literal on purpose: built through a `*_SLOT_NONE_FIELD`
+/// constant or `pack_atlas_slot`, the check would agree with a producer by sharing its arithmetic.
+const UNSLOTTED_POINT_WORD: u32 = 0x003E_0001;
+/// The un-slotted SPOT kind word (kind tag 2); see [`UNSLOTTED_POINT_WORD`].
+const UNSLOTTED_SPOT_WORD: u32 = 0x003E_0002;
+
+/// Parses an HLSL `uint` literal as `light_table.hlsli` writes them (`17u`, `0x1Fu`).
+fn parse_hlsl_uint(lit: &str) -> Option<u32> {
+    let digits = lit.trim().trim_end_matches(['u', 'U']);
+    match digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+        None => digits.parse().ok(),
+    }
+}
+
+/// The `light_table.hlsli` text the shader's `light_atlas_slot(L.kind) != SLOT_NONE` predicate is
+/// made of, checked against BOTH host spellings (`boyko_render` and the golden mirror): each of
+/// `ATLAS_SLOT_SHIFT` / `ATLAS_SLOT_MASK` / `SLOT_NONE` defined exactly once with the host's value,
+/// and `light_atlas_slot` defined exactly once as the host's shift-then-mask. The text is
+/// whitespace-normalised (every whitespace run, CRLF included, becomes one space), so alignment
+/// padding is not part of the contract. Returns findings rather than panicking, so the negative
+/// control in [`every_light_row_producer_emits_the_slot_none_sentinel`] can show it fails.
+fn hlsl_slot_contract_findings(hlsli: &str) -> Vec<String> {
+    let text = hlsli.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut findings = Vec::new();
+    let constants = [
+        ("ATLAS_SLOT_SHIFT", boyko_render::ATLAS_SLOT_SHIFT, GOLDEN_ATLAS_SLOT_SHIFT),
+        ("ATLAS_SLOT_MASK", boyko_render::ATLAS_SLOT_MASK, GOLDEN_ATLAS_SLOT_MASK),
+        ("SLOT_NONE", boyko_render::SLOT_NONE, GOLDEN_SLOT_NONE),
+    ];
+    for (name, render_value, golden_value) in constants {
+        let decl = format!("static const uint {name} = ");
+        let values: Vec<&str> = text
+            .match_indices(&decl)
+            .map(|(at, _)| {
+                let rest = &text[at + decl.len()..];
+                rest.split_once(';').map_or(rest, |(v, _)| v)
+            })
+            .collect();
+        let &[value] = values.as_slice() else {
+            findings.push(format!("light_table.hlsli defines `{name}` {} time(s), want exactly once", values.len()));
+            continue;
+        };
+        match parse_hlsl_uint(value) {
+            Some(v) if v == render_value && v == golden_value => {}
+            parsed => findings.push(format!(
+                "light_table.hlsli `{name} = {value}` (parsed {parsed:?}) differs from the host: \
+                 boyko_render {render_value:#x}, golden mirror {golden_value:#x}"
+            )),
+        }
+    }
+    let decode = "uint light_atlas_slot(uint kind_word) { return (kind_word >> ATLAS_SLOT_SHIFT) & ATLAS_SLOT_MASK; }";
+    let decoders = text.matches("uint light_atlas_slot(").count();
+    if decoders != 1 || !text.contains(decode) {
+        findings.push(format!(
+            "light_table.hlsli must define `light_atlas_slot` exactly once as `{decode}` \
+             ({decoders} definition(s) found)"
+        ));
+    }
+    findings
+}
+
+/// Gate G3 (R1): every producer of a point/spot light row builds it with `SLOT_NONE` in the slot
+/// field, and that value is the one the shader tests. An un-slotted row is one the fold does not
+/// pack, so it keeps its constructor's word verbatim; a constructor that left the field `0` made
+/// every un-slotted light read as slot 0 on an armed frame (the shader samples by the field alone).
+///
+/// * (a) the golden mirror, `GoldenLight::point` / `spot`: the raw words equal the literals, bit 16
+///   clear.
+/// * (b) the production constructors, `boyko_render::GpuLight::from_point` / `from_spot`: the same
+///   literals, and equal to (a) for the same inputs (mirror parity).
+/// * (c) `light_table.hlsli` spells the field and the sentinel as the host does — the only
+///   device-free link between the host value and the shader predicate — with (c') its negative
+///   control: the same matcher over an in-memory copy whose `SLOT_NONE` drifted to `0x1Eu` must
+///   report it, so a normalisation mismatch cannot turn (c) into a check that passes unread.
+#[test]
+fn every_light_row_producer_emits_the_slot_none_sentinel() {
+    let mut findings: Vec<String> = Vec::new();
+
+    // (a) + (b): the same point and spot through both producers.
+    let (pos, color, power, range) = ([0.0, 1.0, 0.0], [1.0, 0.8, 0.6], 300.0, 9.0);
+    let (spos, dir, spower, srange, inner, outer) = ([0.0, 3.0, 0.0], [0.0, -1.0, 0.0], 200.0, 8.0, 20.0, 30.0);
+    let golden_point = GoldenLight::point(pos, color, power, range);
+    let golden_spot = GoldenLight::spot(spos, dir, color, spower, srange, inner, outer);
+    let render_point = boyko_render::GpuLight::from_point(&boyko_render::PointLight::new(pos, color, power, range));
+    let render_spot = boyko_render::GpuLight::from_spot(&boyko_render::SpotLight::new(
+        spos, dir, color, spower, srange, inner, outer,
+    ));
+    let words = [
+        ("(a) GoldenLight::point", golden_point.dir_kind[3].to_bits(), UNSLOTTED_POINT_WORD),
+        ("(a) GoldenLight::spot", golden_spot.dir_kind[3].to_bits(), UNSLOTTED_SPOT_WORD),
+        ("(b) GpuLight::from_point", render_point.dir_kind[3].to_bits(), UNSLOTTED_POINT_WORD),
+        ("(b) GpuLight::from_spot", render_spot.dir_kind[3].to_bits(), UNSLOTTED_SPOT_WORD),
+    ];
+    for (producer, word, want) in words {
+        if word != want {
+            findings.push(format!(
+                "{producer} builds kind word {word:#010x}, want {want:#010x} (slot field {} — \
+                 an un-slotted row must decode SLOT_NONE {GOLDEN_SLOT_NONE:#x})",
+                (word >> 17) & 0x1F
+            ));
+        }
+        if word & 0x0001_0000 != 0 {
+            findings.push(format!("{producer} sets bit 16 on an un-slotted row ({word:#010x})"));
+        }
+    }
+    if golden_point.casts_sdf_shadow() || golden_spot.casts_sdf_shadow() {
+        findings.push("(a) an un-slotted GoldenLight reads as an SDF-shadow caster".to_owned());
+    }
+    for (what, golden, render) in [
+        ("point", golden_point.dir_kind[3].to_bits(), render_point.dir_kind[3].to_bits()),
+        ("spot", golden_spot.dir_kind[3].to_bits(), render_spot.dir_kind[3].to_bits()),
+    ] {
+        if golden != render {
+            findings.push(format!(
+                "(b) mirror parity: the {what} kind word is {render:#010x} in boyko_render and \
+                 {golden:#010x} in the golden mirror"
+            ));
+        }
+    }
+
+    // (c) the shader's own spelling of the field and the sentinel.
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/light_table.hlsli");
+    let hlsli = std::fs::read_to_string(path)
+        .expect("invariant: shaders/light_table.hlsli must exist next to this crate");
+    findings.extend(hlsl_slot_contract_findings(&hlsli).into_iter().map(|f| format!("(c) {f}")));
+
+    // (c') negative control: the matcher must reject a drifted sentinel.
+    let normalised = hlsli.split_whitespace().collect::<Vec<_>>().join(" ");
+    let drifted = normalised.replacen("static const uint SLOT_NONE = 0x1Fu;", "static const uint SLOT_NONE = 0x1Eu;", 1);
+    if drifted == normalised {
+        findings.push(
+            "(c') negative control: `static const uint SLOT_NONE = 0x1Fu;` is not in the normalised \
+             light_table.hlsli, so no drifted copy could be built"
+                .to_owned(),
+        );
+    } else if !hlsl_slot_contract_findings(&drifted).iter().any(|f| f.contains("SLOT_NONE")) {
+        findings.push("(c') negative control: the matcher ACCEPTED `SLOT_NONE = 0x1Eu`".to_owned());
+    }
+
+    assert!(findings.is_empty(), "{} finding(s):\n{}", findings.len(), findings.join("\n"));
 }

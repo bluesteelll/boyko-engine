@@ -25,7 +25,8 @@
 //!   1 + [`crate::hzb_dump::DRAIN_FRAMES`] presented frames), the device is idled and the CENTRE
 //!   texel of every layer of both maps is copied back, beside the host's own view of the frame
 //!   stream (the resolved path and legs, the armed-frame counters, header word 7, the slotted
-//!   light rows, the active cascade / atlas counts). One TOML file; the probe is a loop-exit
+//!   light rows and the rows the shader would sample the atlas for, the active cascade / atlas
+//!   counts). One TOML file; the probe is a loop-exit
 //!   driver like `VbCullProbe`, so the run ends once it and every other armed capture finished.
 //!
 //! The centre texels are what let the gate prove its poison REACHED the maps: on a boot that
@@ -138,6 +139,10 @@ pub(crate) struct ShadowProbeRecord<'a> {
     pub(crate) header_word7: u32,
     /// Staged point/spot rows whose kind word carries `CASTS_SHADOW_BIT`, i.e. a real atlas slot.
     pub(crate) slotted_rows: u32,
+    /// Staged point/spot rows the shader WOULD sample the atlas for on an armed frame: its own
+    /// predicate, `light_atlas_slot(kind) != SLOT_NONE`, which does not read `CASTS_SHADOW_BIT`.
+    /// Equal to `slotted_rows` exactly when every un-slotted row carries the `SLOT_NONE` field.
+    pub(crate) sampled_rows: u32,
     /// `ResolvedCsm::active_count` at the capture.
     pub(crate) csm_active_count: u32,
     /// `ResolvedShadowAtlas::active_layers` at the capture.
@@ -150,12 +155,17 @@ pub(crate) struct ShadowProbeRecord<'a> {
     pub(crate) atlas_center_bits: &'a [u32],
 }
 
-/// Reads header word 7 and counts the slotted punctual rows off the STAGED light table — the
-/// bytes the next upload would ship. The layout is `LightHeaderGpu` (16 words, word 7 =
-/// `sky_diffuse.w`) followed by 12-word `GpuLight` rows whose word 3 is the kind word; the
-/// directional and sky rows never carry `CASTS_SHADOW_BIT`, so counting over every row counts
-/// exactly the punctual rows that were packed with a real slot.
-pub(crate) fn staged_shadow_words(bytes: &[u8]) -> (u32, u32) {
+/// Reads header word 7 and counts two kinds of punctual row off the STAGED light table — the
+/// bytes the next upload would ship — returning `(word7, slotted, sampled)`. The layout is
+/// `LightHeaderGpu` (16 words, word 7 = `sky_diffuse.w`) followed by 12-word `GpuLight` rows whose
+/// word 3 is the kind word.
+///
+/// * `slotted` — rows carrying `CASTS_SHADOW_BIT`, i.e. packed with a real slot. The directional
+///   and sky rows never carry it, so counting over every row counts exactly those.
+/// * `sampled` — point/spot rows whose slot field is not `SLOT_NONE`: the shader's own predicate
+///   (header bit 3, then `light_atlas_slot(kind) != SLOT_NONE`). The kind filter is required,
+///   because the directional and sky rows keep a `0` field that nothing reads.
+pub(crate) fn staged_shadow_words(bytes: &[u8]) -> (u32, u32, u32) {
     const HEADER_BYTES: usize = 64;
     const ROW_BYTES: usize = 48;
     let word = |off: usize| -> u32 {
@@ -167,10 +177,20 @@ pub(crate) fn staged_shadow_words(bytes: &[u8]) -> (u32, u32) {
     };
     let header_word7 = word(7 * 4);
     let rows = bytes.len().saturating_sub(HEADER_BYTES) / ROW_BYTES;
+    let kind_word = |r: usize| word(HEADER_BYTES + r * ROW_BYTES + 3 * 4);
     let slotted = (0..rows)
-        .filter(|r| word(HEADER_BYTES + r * ROW_BYTES + 3 * 4) & boyko_render::CASTS_SHADOW_BIT != 0)
+        .filter(|&r| kind_word(r) & boyko_render::CASTS_SHADOW_BIT != 0)
         .count();
-    (header_word7, u32::try_from(slotted).expect("invariant: the light table holds < 2^32 rows"))
+    let sampled = (0..rows)
+        .filter(|&r| {
+            let k = kind_word(r);
+            let kind = k & 0xFFFF;
+            (kind == boyko_render::LIGHT_KIND_POINT || kind == boyko_render::LIGHT_KIND_SPOT)
+                && boyko_render::light_atlas_slot(k) != boyko_render::SLOT_NONE
+        })
+        .count();
+    let count = |n: usize| u32::try_from(n).expect("invariant: the light table holds < 2^32 rows");
+    (header_word7, count(slotted), count(sampled))
 }
 
 /// Renders a record as the probe's TOML. Integers only (bits in hex), so the reader needs no
@@ -192,6 +212,7 @@ pub(crate) fn format_record(r: &ShadowProbeRecord<'_>) -> String {
          punctual_armed_frames = {}\n\
          header_word7 = 0x{:08x}\n\
          slotted_rows = {}\n\
+         sampled_rows = {}\n\
          csm_active_count = {}\n\
          atlas_active_layers = {}\n\
          poison_bits = 0x{:08x}\n\
@@ -206,6 +227,7 @@ pub(crate) fn format_record(r: &ShadowProbeRecord<'_>) -> String {
         r.punctual_armed_frames,
         r.header_word7,
         r.slotted_rows,
+        r.sampled_rows,
         r.csm_active_count,
         r.atlas_active_layers,
         r.poison_bits,
@@ -317,11 +339,23 @@ mod tests {
     }
 
     #[test]
-    fn staged_words_read_word7_and_count_slotted_rows() {
-        let mut bytes = vec![0u8; 64 + 3 * 48];
+    fn staged_words_read_word7_and_count_slotted_and_sampled_rows() {
+        // Row 0 stays zero: a directional row, whose `0` slot field no shader reads.
+        let rows = [
+            0,
+            // A spot packed at slot 0: slotted, and sampled.
+            boyko_render::CASTS_SHADOW_BIT | 2,
+            // An un-slotted point as `from_point` builds it (`SLOT_NONE` in the field): neither.
+            0x003E_0001,
+            // An un-slotted point whose field decodes 0 (the pre-R1 word): sampled, not slotted.
+            1,
+        ];
+        let mut bytes = vec![0u8; 64 + rows.len() * 48];
         bytes[28..32].copy_from_slice(&0b1100u32.to_le_bytes());
-        let kind = boyko_render::CASTS_SHADOW_BIT | 2;
-        bytes[64 + 48 + 12..64 + 48 + 16].copy_from_slice(&kind.to_le_bytes());
-        assert_eq!(staged_shadow_words(&bytes), (0b1100, 1));
+        for (r, kind) in rows.iter().enumerate() {
+            let off = 64 + r * 48 + 12;
+            bytes[off..off + 4].copy_from_slice(&kind.to_le_bytes());
+        }
+        assert_eq!(staged_shadow_words(&bytes), (0b1100, 1, 2));
     }
 }

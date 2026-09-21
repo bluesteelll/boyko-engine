@@ -104,7 +104,9 @@ pub const fn cluster_index(x: u32, y: u32, z: u32) -> u32 {
 ///
 /// - `dir_kind` (off 0): `xyz` = the light's world axis (DIRECTIONAL: the direction
 ///   TO the light, `dot(n, dir)`; SPOT: the SHINE axis, `dot(-l, dir)`) | unused
-///   (POINT); `w` = bit-cast `u32` kind tag ([`LIGHT_KIND_DIRECTIONAL`] etc.).
+///   (POINT); `w` = bit-cast `u32` kind WORD: the kind tag ([`LIGHT_KIND_DIRECTIONAL`] etc.) in
+///   bits `0..16`, and on a POINT/SPOT row the shadow-atlas fields above it — bit 16 set iff the
+///   row holds a real slot, the 5-bit slot in bits `17..22`, born [`SLOT_NONE_FIELD`].
 /// - `pos_range` (off 16): `xyz` = world position (POINT/SPOT) | unused (DIRECTIONAL);
 ///   `w` = cull-sphere radius (POINT/SPOT) | `+inf` (DIRECTIONAL).
 /// - `color_cone` (off 32): `rgb` = LINEAR color × baked intensity (directional =
@@ -115,7 +117,9 @@ pub const fn cluster_index(x: u32, y: u32, z: u32) -> u32 {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuLight {
-    /// `xyz` = light world axis (DIRECTIONAL: to-light; SPOT: shine axis), `w` = bit-cast kind tag.
+    /// `xyz` = light world axis (DIRECTIONAL: to-light; SPOT: shine axis), `w` = bit-cast kind word
+    /// (the kind tag, plus the atlas-slot fields on a POINT/SPOT row — compare it as `to_bits()`,
+    /// never as an `f32`: the words are subnormal).
     pub dir_kind: [f32; 4],
     /// `xyz` = world position (POINT/SPOT), `w` = cull radius (`+inf` directional).
     pub pos_range: [f32; 4],
@@ -127,6 +131,22 @@ pub struct GpuLight {
 /// shader's `static const uint GPU_LIGHT_WORDS = 12u`; a desync is a build error
 /// host-side (the const-asserts below) and a documented pin shader-side.
 pub const GPU_LIGHT_WORDS: usize = core::mem::size_of::<GpuLight>() / 4;
+
+/// The atlas-slot field of a point/spot kind word holding the "no map" sentinel: `0x1F` in bits
+/// `17..22`, i.e. [`SLOT_NONE`](crate::shadow_atlas::SLOT_NONE)` <<
+/// `[`ATLAS_SLOT_SHIFT`](crate::shadow_atlas::ATLAS_SLOT_SHIFT) `== 0x003E_0000`. Bit 16 and the
+/// kind tag are clear.
+///
+/// Every point/spot row is BORN with it: [`GpuLight::from_point`] / [`GpuLight::from_spot`] OR it
+/// into the kind tag, and the light-table fold only ever overwrites it with a real assignment
+/// ([`pack_atlas_slot`](crate::shadow_atlas::pack_atlas_slot)). The shader samples the atlas by
+/// this field alone (header bit 3, then `light_atlas_slot(kind) != SLOT_NONE`), so a row built
+/// with `0` here would read as slot 0 — another light's layer — on an armed frame.
+///
+/// A literal here, so the row constructor does not depend on the shadow-policy module;
+/// [`shadow_atlas`](crate::shadow_atlas) pins it to `SLOT_NONE << ATLAS_SLOT_SHIFT` at compile
+/// time. The directional and sky rows keep a `0` field, which nothing reads.
+pub const SLOT_NONE_FIELD: u32 = 0x1F << 17;
 
 // ---- std430 / repr(C) layout fingerprint (mirrors the shader's GpuLight) -------------
 //
@@ -1319,12 +1339,13 @@ impl GpuLight {
 
     /// Folds a [`PointLight`] into a [`GpuLight`], baking `I = Φ / (4π)` (Decision 2,
     /// the point-source normalization) into `color_cone.rgb`. The L0b resolve consumes
-    /// `pos_range` + the baked intensity.
+    /// `pos_range` + the baked intensity. The kind word is `LIGHT_KIND_POINT | SLOT_NONE_FIELD`:
+    /// the row is born with no atlas map, and only the light-table fold assigns one.
     #[inline]
     pub fn from_point(l: &PointLight) -> Self {
         let intensity = l.power / (4.0 * PI);
         Self {
-            dir_kind: [0.0, 0.0, 0.0, f32::from_bits(LIGHT_KIND_POINT)],
+            dir_kind: [0.0, 0.0, 0.0, f32::from_bits(LIGHT_KIND_POINT | SLOT_NONE_FIELD)],
             pos_range: [l.position[0], l.position[1], l.position[2], l.range],
             color_cone: [
                 l.color[0] * intensity,
@@ -1338,7 +1359,9 @@ impl GpuLight {
     /// Folds a [`SpotLight`] into a [`GpuLight`], baking `I = Φ / (2π(1 − cos(outer)))`
     /// (Decision 2, the reflector model) into `color_cone.rgb` and packing the cone
     /// cosines (`cos_inner`, `cos_outer`) into `color_cone.w`. `dir_kind.xyz` carries the
-    /// spot SHINE axis (un-negated). The L0b resolve consumes all three lanes.
+    /// spot SHINE axis (un-negated). The L0b resolve consumes all three lanes. The kind word is
+    /// `LIGHT_KIND_SPOT | SLOT_NONE_FIELD`: the row is born with no atlas map, and only the
+    /// light-table fold assigns one.
     #[inline]
     pub fn from_spot(l: &SpotLight) -> Self {
         let cos_inner = l.inner_deg.to_radians().cos();
@@ -1347,7 +1370,7 @@ impl GpuLight {
         let intensity = l.power / denom;
         let d = normalize3(l.direction);
         Self {
-            dir_kind: [d[0], d[1], d[2], f32::from_bits(LIGHT_KIND_SPOT)],
+            dir_kind: [d[0], d[1], d[2], f32::from_bits(LIGHT_KIND_SPOT | SLOT_NONE_FIELD)],
             pos_range: [l.position[0], l.position[1], l.position[2], l.range],
             color_cone: [
                 l.color[0] * intensity,
@@ -1868,7 +1891,7 @@ mod tests {
         let phi = 100.0_f32;
         let l = PointLight::new([1.0, 2.0, 3.0], [1.0, 1.0, 1.0], phi, 10.0);
         let g = GpuLight::from_point(&l);
-        assert_eq!(g.dir_kind[3].to_bits(), LIGHT_KIND_POINT);
+        assert_eq!(g.dir_kind[3].to_bits(), LIGHT_KIND_POINT | SLOT_NONE_FIELD);
         let i = phi / (4.0 * PI);
         assert!(approx(g.color_cone[0], i));
         assert_eq!([g.pos_range[0], g.pos_range[1], g.pos_range[2]], [1.0, 2.0, 3.0]);
@@ -1881,7 +1904,7 @@ mod tests {
         let outer = 30.0_f32;
         let l = SpotLight::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0], phi, 5.0, 15.0, outer);
         let g = GpuLight::from_spot(&l);
-        assert_eq!(g.dir_kind[3].to_bits(), LIGHT_KIND_SPOT);
+        assert_eq!(g.dir_kind[3].to_bits(), LIGHT_KIND_SPOT | SLOT_NONE_FIELD);
         let cos_outer = outer.to_radians().cos();
         let i = phi / (2.0 * PI * (1.0 - cos_outer));
         assert!(approx(g.color_cone[0], i), "expected I={i}, got {}", g.color_cone[0]);

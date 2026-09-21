@@ -3386,7 +3386,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 .expect("invariant: the probe is armed only through the boot's poison knob");
             let world = app.world();
             let stats = *world.resource::<HostFrameStats>();
-            let (header_word7, slotted_rows) =
+            let (header_word7, slotted_rows, sampled_rows) =
                 crate::shadow_poison::staged_shadow_words(world.resource::<LightTableStaging>().bytes());
             let rp = host.resolved_render_path;
             let (path, legs) = (format!("{:?}", rp.path), format!("{:?}", rp.legs));
@@ -3405,6 +3405,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 punctual_armed_frames: stats.punctual_armed_frames,
                 header_word7,
                 slotted_rows,
+                sampled_rows,
                 csm_active_count: world.resource::<ResolvedCsm>().active_count,
                 atlas_active_layers: world.resource::<ResolvedShadowAtlas>().active_layers,
                 poison_bits,

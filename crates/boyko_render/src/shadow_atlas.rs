@@ -43,7 +43,7 @@ use boyko_math::{Mat4, Vec3, Vec4};
 use boyko_scene::{GlobalTransform, ViewUniform};
 
 use crate::csm_caster::CsmCasterScratch;
-use crate::light::{LightTableDirty, LightingConfig, PointLight, SpotLight};
+use crate::light::{LightTableDirty, LightingConfig, PointLight, SLOT_NONE_FIELD, SpotLight};
 use crate::render_path_config::ResolvedRenderPath;
 use crate::shadow_marker::CastsPunctualShadow;
 
@@ -77,8 +77,13 @@ pub const ATLAS_SLOT_MASK: u32 = 0x1F;
 
 /// The "this light casts an exact (mapped) shadow" bit in a light's kind word — bit `16`,
 /// directly below the slot field and above the 16-bit kind tag. Set when a light was assigned
-/// an atlas slot (`slot != SLOT_NONE`); the resolve tests it to branch onto the map sample vs
-/// the analytic fallback.
+/// an atlas slot (`slot != SLOT_NONE`), so on the host it reads "slotted".
+///
+/// The punctual shader sites do NOT test it: they branch onto the map sample on header bit 3 and
+/// `light_atlas_slot(kind) != SLOT_NONE` alone, which is why an un-slotted row must carry
+/// [`SLOT_NONE_FIELD`] (every point/spot row is built with it). In the shader bit 16 is
+/// `LIGHT_FLAG_CASTS_SHADOW`, the SDF-shadow flag of the multi-light `shadow_mode` — follow-up
+/// R1-F1 (`docs/render/light-table-defects/R1-DESIGN.md`).
 pub const CASTS_SHADOW_BIT: u32 = 1 << 16;
 
 /// Priority denominator floor — guards the `range² / dist²` screen-coverage proxy against a
@@ -136,6 +141,12 @@ const _: () = assert!(
 // and stay distinct from `SLOT_NONE`. `16 - 6 == 10 < 31` — proven at compile time.
 const _: () = assert!((M_SLOTS - POINT_FACE_COUNT) < (ATLAS_SLOT_MASK as usize));
 const _: () = assert!((M_SLOTS - POINT_FACE_COUNT) != (SLOT_NONE as usize));
+
+// The field every point/spot row is born with (`light.rs`'s `SLOT_NONE_FIELD`, a literal there so
+// the row constructor does not depend on this module) IS this module's sentinel at this module's
+// offset, and it touches neither the kind tag nor `CASTS_SHADOW_BIT`.
+const _: () = assert!(SLOT_NONE_FIELD == SLOT_NONE << ATLAS_SLOT_SHIFT);
+const _: () = assert!(SLOT_NONE_FIELD & (0xFFFF | CASTS_SHADOW_BIT) == 0);
 
 /// Rec. 709 luminance weights (linear RGB → relative luminance) for the priority proxy.
 const LUMA_R: f32 = 0.2126;
@@ -402,8 +413,8 @@ pub struct PunctualSlotAssignment {
 
 impl PunctualSlotAssignment {
     /// The empty handoff — no winners. The value a disabled resolve (0%-gate) publishes and the
-    /// [`Default`], so the fold reads [`SLOT_NONE`] for every light (byte-identical to the
-    /// pre-wiring path).
+    /// [`Default`], so the fold reads [`SLOT_NONE`] for every light and packs nothing: every
+    /// point/spot row keeps the [`SLOT_NONE_FIELD`] its constructor built it with.
     pub const EMPTY: Self = Self { winners: [(EntityId(0), 0); M_SLOTS], len: 0 };
 
     /// Looks up the assigned atlas base for `entity`, or [`SLOT_NONE`] when the light won no slot
@@ -462,8 +473,9 @@ impl Default for PunctualSlotAssignment {
 ///
 /// The slot occupies the field above the kind tag and the casts-shadow bit, so it NEVER
 /// collides with either (proven by `pack_atlas_slot_never_collides`). A `slot == SLOT_NONE`
-/// (the "no map" sentinel) leaves [`CASTS_SHADOW_BIT`] clear, so the resolve falls back to the
-/// analytic term for that light.
+/// (the "no map" sentinel) writes [`SLOT_NONE_FIELD`] and leaves [`CASTS_SHADOW_BIT`] clear; the
+/// resolve falls back to the analytic term for that light because the FIELD decodes
+/// `SLOT_NONE` — the shader sites do not read the bit.
 ///
 /// `slot` MUST be `< M_SLOTS` or exactly [`SLOT_NONE`]; a debug build asserts it (a larger
 /// value would overflow the 5-bit field and corrupt the kind tag).
@@ -946,9 +958,9 @@ pub fn spot_priority(color: [f32; 3], range: f32, position: [f32; 3], camera_pos
 /// bit (a `DISABLED` fit never arms [`sync_punctual_light_gate`]) and the light-table slot,
 /// which no UBO can reach: [`collect_lights`](crate::light_system::collect_lights) runs
 /// `.after_set(PunctualResolveSet)`, so in the SAME frame every punctual row is folded
-/// un-slotted (see [`sync_punctual_light_gate`]'s "What a punctual sample can read" for why the
-/// header bit is the check that holds for an un-slotted row). The carrier is boot-constant, so
-/// the arm is fixed before frame 0.
+/// un-slotted, its slot field [`SLOT_NONE`] (see [`sync_punctual_light_gate`]'s "What a punctual
+/// sample can read": the header bit and the field each hold on their own). The carrier is
+/// boot-constant, so the arm is fixed before frame 0.
 ///
 /// Cold by construction (zero hot-path cost): a single fit run once per frame; the per-row
 /// render path never reads [`ShadowConfig`].
@@ -973,9 +985,9 @@ pub fn resolve_shadow_atlas(
     // config-disabled world at every consumer.
     if !cfg.enabled() || !path.mesh_shadow_producers() {
         *out = ResolvedShadowAtlas::DISABLED;
-        // 0%-gate: publish the empty handoff so the fold packs NOTHING (every punctual row's
-        // `dir_kind.w` stays byte-identical to the pre-wiring path). Value-gated so a static
-        // disabled frame never dirties the light table.
+        // 0%-gate: publish the empty handoff so the fold packs NOTHING (every punctual row keeps
+        // the `SLOT_NONE_FIELD` it was built with). Value-gated so a static disabled frame never
+        // dirties the light table.
         publish_assignment(&mut assignment, &mut table_dirty, PunctualSlotAssignment::EMPTY);
         return;
     }
@@ -1117,23 +1129,24 @@ fn publish_assignment(
 ///
 /// A punctual sample takes its atlas LAYER from the light table (the row's kind word,
 /// [`light_atlas_slot`]), not from the UBO. Every shader site checks header bit 3 and then
-/// `light_atlas_slot(kind) != SLOT_NONE` — but that second check does NOT reject an
-/// UN-slotted row: `collect_lights` leaves such a row's kind word exactly as
-/// `GpuLight::from_point`/`from_spot` built it (`slot_pack` skips the pack to keep the
-/// 0%-gate bytes), so its slot field decodes as `0`, not [`SLOT_NONE`]. Bit 3 is therefore
-/// the gate that holds for every un-slotted row. Three cases:
+/// `light_atlas_slot(kind) != SLOT_NONE`, and nothing else. The second check rejects every
+/// UN-slotted row: each point/spot row is built with [`SLOT_NONE_FIELD`]
+/// (`GpuLight::from_point`/`from_spot`), and `collect_lights` overwrites that field only for a
+/// light the resolve assigned a layer. So an un-slotted row is held by its own field whatever
+/// bit 3 says, and a slotted row by bit 3. Three cases:
 ///
 /// 1. **No plan** — `ShadowConfig` off, or a leg set without mesh-shadow producers:
 ///    [`resolve_shadow_atlas`] publishes the EMPTY [`PunctualSlotAssignment`], so in the SAME
 ///    frame every punctual row is folded un-slotted (`collect_lights` runs
-///    `.after_set(PunctualResolveSet)`), and bit 3 is off (the plan is `DISABLED`, so
-///    [`ResolvedShadowAtlas::depth_pass_armed`] is `false`). Structural; bit 3 is what holds.
+///    `.after_set(PunctualResolveSet)`) and carries `SLOT_NONE`, and bit 3 is off (the plan is
+///    `DISABLED`, so [`ResolvedShadowAtlas::depth_pass_armed`] is `false`). Structural; both hold.
 /// 2. **Armed** — every assigned layer is a bump-allocated layer `< active_layers`, and the
-///    punctual depth pass renders it earlier in the same command buffer. An UN-slotted row on
-///    an armed frame (a light without `CastsPunctualShadow`, or a slot loser) decodes slot 0
-///    and samples layer 0: rendered this frame, but another light's map. Defined values, wrong
-///    owner — pre-existing and outside this gate.
-/// 3. **Unarmed while bit 3 is ON** — the header disagreeing with the host for 1–2 frames:
+///    punctual depth pass renders it earlier in the same command buffer. An un-slotted row on an
+///    armed frame (a light without `CastsPunctualShadow`, or a slot loser) decodes `SLOT_NONE`,
+///    so its atlas term stays `1.0` and it samples nothing. (What else bit 3 does to such a light
+///    in `deferred_pbr.hlsl` is the open owner decision F3, not this gate's.)
+/// 3. **Unarmed while bit 3 is ON** — the header disagreeing with the host for 1–2 frames, which
+///    concerns SLOTTED rows only (an un-slotted row is held by its field, above):
 ///    trailing a disarm, or leading the first arming. A static scene is not exempt: a derived
 ///    field set before the sync system first runs leads the host on frame 0 (the CSM bit is
 ///    measured doing so in `taa_jitter_eval`; see

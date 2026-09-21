@@ -35,8 +35,11 @@
 //!   proves the poison REACHED the maps: one texel cannot equal both `0.0` and `1.0`, so a dead
 //!   poison or a dead readback fails here instead of letting I1 pass vacuously.
 //! * **I4** — the probe reports the requested path, legs = Sdf, `mesh_leg == false` (no silent
-//!   degrade), zero armed frames for either pass, header word 7 bits 2 and 3 clear, and no staged
-//!   light row carrying a real atlas slot.
+//!   degrade), zero armed frames for either pass, header word 7 bits 2 and 3 clear, no staged
+//!   light row carrying a real atlas slot, and (R1) no staged point/spot row the shader would
+//!   sample the atlas for (`sampled_rows == 0`, the shader's own predicate
+//!   `light_atlas_slot(kind) != SLOT_NONE`). Under the EMPTY handoff both flagged rows are
+//!   un-slotted, so a row whose slot field decoded `0` instead of `SLOT_NONE` counts here.
 //! * Exactly 12 runs executed.
 //!
 //! ## `mesh_legs_write_their_shadow_maps_before_sampling` (the positive controls)
@@ -49,8 +52,43 @@
 //!   the point's six), and every ACTIVE layer's centre texel differs from the `0.0` poison — the
 //!   passes really wrote.
 //! * **C3** — in d and e, both armed-frame counters are non-zero and header bits 2 and 3 are set.
+//!   It also requires `sampled_rows == slotted_rows`, as a CONSISTENCY CHECK between the probe's two
+//!   row counts, not an R1 gate: every punctual row of this scene is slotted, so no R1 mutation can
+//!   turn it red.
 //! * **C4** — `frame(d) != frame(f)`: the shadows are visible, which is what proves I2 CAN fail.
 //! * Exactly 6 runs executed.
+//!
+//! ## `unslotted_punctual_lights_never_sample_the_atlas` (R1)
+//!
+//! `BOYKO_SHADOW_GATE_SCENE` picks the punctual lights: `flagged` (the spot and the point both carry
+//! `CastsPunctualShadow` — the scene of the two tests above), `point_unflagged` (the point without
+//! it, so the resolve never assigns it a slot) or `no_point`. With legs = Both and shadows on, for
+//! P ∈ {Deferred, Forward, ForwardPlus, VisibilityBuffer}: **u0** = `point_unflagged` @ 0.0 and
+//! **u1** = `point_unflagged` @ 1.0. For P ∈ {Deferred, VisibilityBuffer} also **n0** = `no_point`
+//! @ 0.0; for P ∈ {Forward, ForwardPlus} also the `flagged` pair **d** @ 0.0 and **e** @ 1.0.
+//!
+//! Only the spot holds a slot, so the atlas pass renders layer 0 and layers 1..15 keep the poison. A
+//! point row whose slot field decoded `0` would take the spot's face record and read a cube face in
+//! layers 0..5 — five of them never rendered.
+//!
+//! * **U1** — `frame(u0) == frame(u1)`: the un-slotted point never reads the atlas.
+//! * **U2** — each u-run is the armed frame asked for: `punctual_armed_frames > 0`, header bit 3
+//!   set, `atlas_active_layers == 1`, `slotted_rows == 1` and `sampled_rows == 1` (the spot only).
+//! * **U3** — in u0 and u1 the atlas centre texels `[1..16)` equal the poison's bits, so the layers a
+//!   defective read lands on DO hold the poison; and `atlas[0]` in u0 is not the `0.0` poison, so the
+//!   spot's layer was written.
+//! * **U5** — `frame(u0) != frame(n0)` (Deferred, VB): the point lights visible pixels, which is what
+//!   proves U1 CAN fail.
+//! * **UC** — `frame(d) == frame(e)` (Forward, ForwardPlus): C1 on the two paths the positive
+//!   controls do not run. If either path depended on the poison for another reason (the cascades,
+//!   say), U1 would be red there for a reason that is not R1's; a red UC makes a U1 red on the same
+//!   path unattributable.
+//! * Exactly 14 runs executed.
+//!
+//! The un-slotted SPOT is outside this test: a spot row whose field decoded `0` reads layer 0, which
+//! IS written, so no poison can show it. The device-free gates cover it (`light_system.rs`'s
+//! `every_punctual_row_decodes_exactly_its_assignment`, `mesh_shadow_arming_agreement.rs`); both
+//! kinds reach the shaders through the same predicate line.
 //!
 //! # Mutation receipts (release builds, so the pixel invariants decide, not a `debug_assert!`)
 //!
@@ -81,6 +119,15 @@
 //! I4 and I2). Only the shape where the term survives on the recording side alone (SG-M3) is the
 //! poison-dependent one, and I1 catches it.
 //!
+//! R1's receipts, named R1-M* after its design (`docs/render/light-table-defects/R1-DESIGN.md`):
+//!
+//! * **The pre-R1 tree** (point/spot rows built with slot field `0`): U1 red on every path, U2 red
+//!   (`sampled_rows` 2), I4 red (`sampled_rows` 2 under the EMPTY handoff). A U1 that is GREEN
+//!   there refutes the premise that the defective read reaches the poison: stop and read the run,
+//!   do not adjust the gate.
+//! * **R1-M1**, `GpuLight::from_point` back to the raw kind: U1, U2 and I4 red.
+//! * **R1-M2**, `GpuLight::from_spot` back to the raw kind: I4 red (U cannot see a spot, above).
+//!
 //! # What it cannot claim
 //!
 //! * **I2 depends on an open owner decision (F3).** Header bit 3 has a second meaning in
@@ -96,13 +143,18 @@
 //!   discard-legal `UNDEFINED → SHADER_READ_ONLY` transitions (measured on the development RTX
 //!   machine; the investigation's poison runs moved pixels through exactly that path). On a driver
 //!   that discards, I3 goes red — correctly, since the gate then cannot prove its poison arrived.
+//!   U3 relies on the same preservation on ARMED frames, across the atlas pass's access over the
+//!   whole array (`SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32)` in `graph_bridge.rs`); I3
+//!   never measured that path, so
+//!   U3's first run on a machine is what does.
 //! * Other GPUs and drivers.
 //!
 //! # Running it
 //!
 //! ```text
 //! cargo test -p boyko-app --test unwritten_shadow_map_gate -- --ignored --test-threads=1 \
-//!     mesh_less_legs_never_sample_an_unwritten_shadow_map mesh_legs_write_their_shadow_maps_before_sampling
+//!     mesh_less_legs_never_sample_an_unwritten_shadow_map mesh_legs_write_their_shadow_maps_before_sampling \
+//!     unslotted_punctual_lights_never_sample_the_atlas
 //! ```
 //!
 //! The drivers scrub every `BOYKO_*` variable from each child and set exactly what the gate needs
@@ -131,6 +183,8 @@ const ENV_LEGS: &str = "BOYKO_SHADOW_GATE_LEGS";
 /// `on` inserts `CsmConfig { cascade_count: 3 }` + an enabled `ShadowConfig`; `off` keeps the
 /// plugins' disabled defaults with the SAME entities.
 const ENV_SHADOWS: &str = "BOYKO_SHADOW_GATE_SHADOWS";
+/// The worker's punctual lights: `flagged` | `point_unflagged` | `no_point` (see [`GateScene`]).
+const ENV_SCENE: &str = "BOYKO_SHADOW_GATE_SCENE";
 /// The runner's frame dump (the frame the invariants compare).
 const ENV_HOST_DUMP: &str = "BOYKO_HOST_DUMP";
 /// The poison knob.
@@ -177,11 +231,42 @@ fn on_sun_ray(t: f32) -> Vec3 {
     )
 }
 
+/// Which punctual lights the worker's scene spawns (`ENV_SCENE`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GateScene {
+    /// The spot and the point both carry `CastsPunctualShadow`: the SG1–SG5 scene.
+    Flagged,
+    /// Only the spot carries it, so the point's row is never assigned a slot (R1).
+    PointUnflagged,
+    /// The spot alone: the control that shows the point lights visible pixels.
+    NoPoint,
+}
+
+/// [`scene`] with [`GateScene::Flagged`], as a startup system.
+fn scene_flagged(commands: Commands, meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
+    scene(GateScene::Flagged, commands, meshes, dev);
+}
+
+/// [`scene`] with [`GateScene::PointUnflagged`], as a startup system.
+fn scene_point_unflagged(commands: Commands, meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
+    scene(GateScene::PointUnflagged, commands, meshes, dev);
+}
+
+/// [`scene`] with [`GateScene::NoPoint`], as a startup system.
+fn scene_no_point(commands: Commands, meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
+    scene(GateScene::NoPoint, commands, meshes, dev);
+}
+
 /// The gate's scene: a receiver floor, an SDF sphere, two `ShadowCaster` cubes — one on the sun
 /// ray (which the point light sits further along, so it occludes both), one between the spot and
-/// the sphere — a `CastsPunctualShadow` spot aimed at the sphere, a `CastsPunctualShadow` point
-/// in range of it, the sun, a sky fill and the camera.
-fn scene(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
+/// the sphere — a `CastsPunctualShadow` spot aimed at the sphere, a point in range of it (flagged,
+/// un-flagged or absent per `which`), the sun, a sky fill and the camera.
+fn scene(
+    which: GateScene,
+    mut commands: Commands,
+    mut meshes: NonSendResMut<Assets<MeshGpu>>,
+    dev: NonSendRes<GpuDevice>,
+) {
     let floor = meshes.plane(dev.get(), 12.0);
     let cube = meshes.cube(dev.get(), 0.6);
     commands.spawn(MeshBundle::new(floor, Transform::IDENTITY));
@@ -235,13 +320,20 @@ fn scene(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev
         .insert(CastsPunctualShadow);
 
     let point = on_sun_ray(3.2);
-    commands
-        .spawn(PointLightObject {
-            transform: Transform::from_translation(point),
-            global: GlobalTransform::IDENTITY,
-            light: PointLight::new([point.x, point.y, point.z], [1.0, 0.72, 0.45], 220.0, 8.0),
-        })
-        .insert(CastsPunctualShadow);
+    let point_light = PointLightObject {
+        transform: Transform::from_translation(point),
+        global: GlobalTransform::IDENTITY,
+        light: PointLight::new([point.x, point.y, point.z], [1.0, 0.72, 0.45], 220.0, 8.0),
+    };
+    match which {
+        GateScene::Flagged => {
+            commands.spawn(point_light).insert(CastsPunctualShadow);
+        }
+        GateScene::PointUnflagged => {
+            commands.spawn(point_light);
+        }
+        GateScene::NoPoint => {}
+    }
 
     let eye = Affine3A::look_at_rh(Vec3::new(0.0, 1.7, 6.0), Vec3::new(0.0, 0.5, 0.0), Vec3::new(0.0, 1.0, 0.0));
     commands.spawn(CameraRig {
@@ -294,16 +386,32 @@ fn shadow_poison_worker() {
         "off" => false,
         other => panic!("{ENV_SHADOWS}={other:?} is neither on nor off"),
     };
+    let which = match required_env(ENV_SCENE).as_str() {
+        "flagged" => GateScene::Flagged,
+        "point_unflagged" => GateScene::PointUnflagged,
+        "no_point" => GateScene::NoPoint,
+        other => panic!("{ENV_SCENE}={other:?} names no scene"),
+    };
     let dump = PathBuf::from(required_env(ENV_HOST_DUMP));
     let probe = PathBuf::from(required_env(ENV_PROBE));
     let _ = required_env(ENV_POISON);
-    eprintln!("SHADOW-GATE worker: path={path:?} legs={legs:?} shadows={shadows}");
+    eprintln!("SHADOW-GATE worker: path={path:?} legs={legs:?} shadows={shadows} scene={which:?}");
 
     let mut app = App::new();
     // `add_plugins` FIRST, then the startup system: the order a scene carrying an `SdfPrimitive`
     // needs (`sdf_room_smoke.rs`, `taa_jitter_eval.rs`).
     app.add_plugins(EnginePlugins::window(WORKER, WIN, WIN));
-    app.add_startup_system(scene);
+    match which {
+        GateScene::Flagged => {
+            app.add_startup_system(scene_flagged);
+        }
+        GateScene::PointUnflagged => {
+            app.add_startup_system(scene_point_unflagged);
+        }
+        GateScene::NoPoint => {
+            app.add_startup_system(scene_no_point);
+        }
+    }
     // Configuration after `add_plugins`, so it overwrites the plugins' defaults.
     app.insert_resource(RenderPathConfig { path, legs });
     if shadows {
@@ -344,17 +452,20 @@ struct RunSpec {
     shadows: bool,
     /// The poison depth.
     poison: f32,
+    /// The worker's `ENV_SCENE` value.
+    scene: &'static str,
 }
 
 impl RunSpec {
     /// A file-name-safe label, unique per spec within one gate.
     fn label(&self) -> String {
         format!(
-            "{}_{}_{}_{}",
+            "{}_{}_{}_{}_{}",
             self.path,
             self.legs,
             if self.shadows { "on" } else { "off" },
-            if self.poison == 0.0 { "p0" } else { "p1" }
+            if self.poison == 0.0 { "p0" } else { "p1" },
+            self.scene
         )
     }
 }
@@ -370,6 +481,7 @@ struct Probe {
     punctual_armed_frames: u64,
     header_word7: u32,
     slotted_rows: u32,
+    sampled_rows: u32,
     csm_active_count: u32,
     atlas_active_layers: u32,
     poison_bits: u32,
@@ -435,6 +547,7 @@ fn read_probe(file: &Path) -> Probe {
         punctual_armed_frames: int("punctual_armed_frames"),
         header_word7: word("header_word7"),
         slotted_rows: word("slotted_rows"),
+        sampled_rows: word("sampled_rows"),
         csm_active_count: word("csm_active_count"),
         atlas_active_layers: word("atlas_active_layers"),
         poison_bits: word("poison_bits"),
@@ -481,6 +594,7 @@ fn run(spec: RunSpec, out_dir: &Path) -> Run {
         .env(ENV_PATH, spec.path)
         .env(ENV_LEGS, spec.legs)
         .env(ENV_SHADOWS, if spec.shadows { "on" } else { "off" })
+        .env(ENV_SCENE, spec.scene)
         .env(ENV_POISON, spec.poison.to_string())
         .env(ENV_PROBE, &probe)
         .env(ENV_HOST_DUMP, &dump)
@@ -612,7 +726,7 @@ fn mesh_less_legs_never_sample_an_unwritten_shadow_map() {
     let mut findings: Vec<String> = Vec::new();
     let mut runs = 0usize;
     for path in ["deferred", "forward", "forwardplus", "vb"] {
-        let spec = |shadows: bool, poison: f32| RunSpec { path, legs: "sdf", shadows, poison };
+        let spec = |shadows: bool, poison: f32| RunSpec { path, legs: "sdf", shadows, poison, scene: "flagged" };
         let a = run(spec(true, 0.0), &dir);
         let b = run(spec(true, 1.0), &dir);
         let c = run(spec(false, 0.0), &dir);
@@ -626,16 +740,19 @@ fn mesh_less_legs_never_sample_an_unwritten_shadow_map() {
                 || p.punctual_armed_frames != 0
                 || p.header_word7 & (CSM_BIT | PUNCTUAL_BIT) != 0
                 || p.slotted_rows != 0
+                || p.sampled_rows != 0
             {
                 findings.push(format!(
                     "{} I4: a mesh-less leg set armed a shadow producer — csm_armed_frames {}, \
                      punctual_armed_frames {}, header word 7 {:#010x} (bits 2/3 must be clear), \
-                     slotted light rows {}",
+                     slotted light rows {}, rows whose slot field the shader would sample {} \
+                     (R1: an un-slotted row must carry SLOT_NONE)",
                     r.spec.label(),
                     p.csm_armed_frames,
                     p.punctual_armed_frames,
                     p.header_word7,
-                    p.slotted_rows
+                    p.slotted_rows,
+                    p.sampled_rows
                 ));
             }
         }
@@ -698,7 +815,7 @@ fn mesh_legs_write_their_shadow_maps_before_sampling() {
     let mut findings: Vec<String> = Vec::new();
     let mut runs = 0usize;
     for path in ["deferred", "vb"] {
-        let spec = |shadows: bool, poison: f32| RunSpec { path, legs: "both", shadows, poison };
+        let spec = |shadows: bool, poison: f32| RunSpec { path, legs: "both", shadows, poison, scene: "flagged" };
         let d = run(spec(true, 0.0), &dir);
         let e = run(spec(true, 1.0), &dir);
         let f = run(spec(false, 0.0), &dir);
@@ -721,6 +838,16 @@ fn mesh_legs_write_their_shadow_maps_before_sampling() {
                     p.csm_armed_frames,
                     p.punctual_armed_frames,
                     p.header_word7
+                ));
+            }
+            // A consistency check between the probe's two row counts, not an R1 gate: every
+            // punctual row of this scene is slotted, so both counts see the same two rows.
+            if p.sampled_rows != p.slotted_rows {
+                findings.push(format!(
+                    "{} C3: the probe counts {} slotted row(s) but {} row(s) the shader would sample",
+                    r.spec.label(),
+                    p.slotted_rows,
+                    p.sampled_rows
                 ));
             }
         }
@@ -778,6 +905,123 @@ fn mesh_legs_write_their_shadow_maps_before_sampling() {
     assert!(
         findings.is_empty(),
         "{} finding(s) over {runs} mesh-leg runs (artifacts: {}):\n{}",
+        findings.len(),
+        dir.display(),
+        findings.join("\n")
+    );
+}
+
+/// **U1–U5 and UC**, R1's device gate: an un-slotted point never samples the atlas. See the module
+/// doc.
+#[test]
+#[ignore = "gpu-windowed: re-executes its worker on a windowed GPU with poisoned shadow maps; --test-threads=1"]
+fn unslotted_punctual_lights_never_sample_the_atlas() {
+    let dir = out_dir();
+    let mut findings: Vec<String> = Vec::new();
+    let mut runs = 0usize;
+    for path in ["deferred", "forward", "forwardplus", "vb"] {
+        let spec = |scene: &'static str, poison: f32| RunSpec { path, legs: "both", shadows: true, poison, scene };
+        let u0 = run(spec("point_unflagged", 0.0), &dir);
+        let u1 = run(spec("point_unflagged", 1.0), &dir);
+        runs += 2;
+
+        for r in [&u0, &u1] {
+            findings.extend(instrument_findings(r, true));
+            // U2: the armed frame asked for, with the spot as the only slotted and sampled row.
+            let p = &r.probe;
+            if p.punctual_armed_frames == 0
+                || p.header_word7 & PUNCTUAL_BIT == 0
+                || p.atlas_active_layers != 1
+                || p.slotted_rows != 1
+                || p.sampled_rows != 1
+            {
+                findings.push(format!(
+                    "{} U2: want an armed frame with the spot as the only slotted and sampled row — \
+                     punctual_armed_frames {}, header word 7 {:#010x} (bit 3 must be set), \
+                     atlas_active_layers {} (want 1), slotted rows {} (want 1), rows the shader \
+                     would sample {} (want 1; the un-slotted point must carry SLOT_NONE)",
+                    r.spec.label(),
+                    p.punctual_armed_frames,
+                    p.header_word7,
+                    p.atlas_active_layers,
+                    p.slotted_rows,
+                    p.sampled_rows
+                ));
+            }
+            // U3: the layers a defective point read lands on still hold the poison.
+            let bits = r.spec.poison.to_bits();
+            let off: Vec<String> = p
+                .atlas
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter(|(_, t)| **t != bits)
+                .map(|(i, t)| format!("atlas[{i}]={t:#010x}"))
+                .collect();
+            if !off.is_empty() {
+                findings.push(format!(
+                    "{} U3: {} never-rendered atlas layer(s) do not hold the poison ({bits:#010x}): \
+                     {}. U1 cannot see a read of memory that does not carry the poison.",
+                    r.spec.label(),
+                    off.len(),
+                    off.join(", ")
+                ));
+            }
+        }
+        // U3: the spot's own layer was written over the 0.0 poison.
+        if u0.probe.atlas.first() == Some(&0.0f32.to_bits()) {
+            findings.push(format!(
+                "{} U3: atlas[0] still holds the 0.0 poison at its centre — the spot's layer was not \
+                 written",
+                u0.spec.label()
+            ));
+        }
+        // U1: the un-slotted point does not read the atlas.
+        let d_u = differing_bytes(&u0.frame, &u1.frame);
+        if d_u != 0 {
+            findings.push(format!(
+                "{path} × Both U1: with an un-slotted point the frame DEPENDS ON THE POISON ({d_u} \
+                 byte(s) differ between poison 0.0 and 1.0) — the point sampled atlas layers no pass \
+                 wrote"
+            ));
+        }
+        let controls = if matches!(path, "deferred" | "vb") {
+            // U5: the point lights visible pixels, so U1 can fail.
+            let n0 = run(spec("no_point", 0.0), &dir);
+            runs += 1;
+            findings.extend(instrument_findings(&n0, true));
+            let d_un = differing_bytes(&u0.frame, &n0.frame);
+            if d_un == 0 {
+                findings.push(format!(
+                    "{path} × Both U5: the un-flagged point renders byte-identical to no point — it \
+                     lights no visible pixel, so U1's equality would prove nothing"
+                ));
+            }
+            format!(", u0/n0 differ {d_un}")
+        } else {
+            // UC: the flagged scene is poison-independent on this path, so a U1 red here is R1's.
+            let d = run(spec("flagged", 0.0), &dir);
+            let e = run(spec("flagged", 1.0), &dir);
+            runs += 2;
+            for r in [&d, &e] {
+                findings.extend(instrument_findings(r, true));
+            }
+            let d_de = differing_bytes(&d.frame, &e.frame);
+            if d_de != 0 {
+                findings.push(format!(
+                    "{path} × Both UC: the FLAGGED scene's frame depends on the poison ({d_de} \
+                     byte(s)) — this path reads unwritten shadow memory for a reason that is not \
+                     R1's, so a U1 red on it is not attributable to R1"
+                ));
+            }
+            format!(", flagged d/e differ {d_de}")
+        };
+        eprintln!("SHADOW-GATE {path} × Both, un-slotted point: u0/u1 differ {d_u}{controls}");
+    }
+    assert_eq!(runs, 14, "the un-slotted sweep must execute exactly 14 runs");
+    assert!(
+        findings.is_empty(),
+        "{} finding(s) over {runs} un-slotted runs (artifacts: {}):\n{}",
         findings.len(),
         dir.display(),
         findings.join("\n")
