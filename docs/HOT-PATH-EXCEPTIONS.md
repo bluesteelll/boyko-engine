@@ -70,6 +70,35 @@ real production state, gate red again) and once by planting a genuinely producti
 
 Registered count after the fix: **32 across 11 files**.
 
+**The same hole, one spelling over (2026-09-21).** `item_is_cfg_test` and `cfg_test_spans` both
+recognised *only* the bare `#[cfg(test)]`, so a module written `#[cfg(all(test, not(loom)))] mod
+tests { #![allow(clippy::disallowed_types)] .. }` — test-only by construction, and the correct
+spelling once a loom model shares the file — read as production, and its inner `#![allow]` as an
+unregistered blanket suppression. Gate **RED**, exit 1, at
+`crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs` from the commit that added the loom cfg.
+The tree carries the shape at eight more sites in four more spellings (`all(test, not(miri))`,
+`all(test, windows)`, `all(test, debug_assertions)`, `all(test, target_feature = "avx2")`);
+measured against the old predicate, two (`archetype.rs`) sat inside a span the bare form had
+already opened and the other six were invisible too — but none of the eight carries an
+`#[allow(clippy::disallowed_types)]`, which is why only `entity_reservoir.rs` turned the gate.
+`scripts/check_hotpath_exceptions.py::cfg_requires_test` now parses the predicate and asks the one
+question that matters — *is it false whenever `test` is false?* — so `all(test, ..)` qualifies in
+any position, `any(test, feature = "goldens")` does **not** (the feature arm ships; `boyko_rhi_vulkan`'s
+`goldens` module stays production), and `not(..)` never does. The checker also grew a **self-test
+that runs on every invocation before the tree is scanned** (exit 2, distinct from drift): an
+18-row predicate truth table plus fixtures under `scripts/fixtures/hotpath_exceptions/` run through
+the same `scan_file` as production. Shown red first — with the old regex the `all(test, ..)`
+fixture reported 2 items / 2 blanket sites / no test-only sibling against an expected 0 / 0 / 1 —
+and shown red in the *other* direction by two in-process mutations (a substring match, and `any`
+treated as `all`), both caught by the `any(test, ..)` fixture in all three of its assertions. The
+fixture set is closed: every `.rs` there is either an `EXPECT` fixture or a `// SIBLING-OF: <fixture>`
+file that the named fixture must declare with `mod <stem>;` — so a malformed `EXPECT` line (a typo,
+a BOM from a Windows editor) is a red, not a file the self-test silently skips. Shown red first:
+five such headers, all silent under the previous self-test, all red under this one.
+
+Registered count after the fix: **34 across 12 files**, unchanged from before it — the one delta
+is the `entity_reservoir.rs` blanket site, which was never a production exception.
+
 ## Exceptions
 
 | file | symbol | type | class | why this is cold and why a boyko-native structure cannot serve |

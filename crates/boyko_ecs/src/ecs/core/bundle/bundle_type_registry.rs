@@ -138,73 +138,23 @@ pub fn register_new() -> BundleTypeId {
     BundleTypeId(id)
 }
 
-/// Test-only escape hatch: forces the next [`register_new`] call to return
-/// `BundleTypeId(value)`.
-///
-/// Exists solely to exercise the exhaustion branch in
-/// `register_new_exhaustion_panics` without burning ~1024 real minter
-/// slots. Never call from production code.
-#[cfg(test)]
-pub(crate) fn set_next_id_for_test(value: usize) {
-    BUNDLE_NEXT_ID.store(value, Ordering::Relaxed);
-}
-
 #[cfg(test)]
 mod tests {
-    // Test-only serialisation of the process-global bundle-id minter: the
-    // `Mutex` is the test harness's exclusion lock (registry tests mutate a
-    // process-wide counter and must not run concurrently), not engine data.
-    // Compiled out of every shipping build.
-    #![allow(clippy::disallowed_types)]
-
     use super::*;
 
     use std::mem;
-    use std::panic::{self, AssertUnwindSafe};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::OnceLock;
 
     use crate::ecs::identifiers::primitives::ArchetypeId;
 
-    // ── Test serialization ───────────────────────────────────────────────────
-    //
-    // The tests below mutate `BUNDLE_NEXT_ID` (a process-global
-    // `AtomicUsize`). Rust's default test harness runs tests in parallel
-    // threads, so without serialization
-    // `register_new_assigns_distinct_ids` and `register_new_exhaustion_panics`
-    // would race: the exhaustion test would `set_next_id_for_test` to the
-    // edge while the distinct-ids test was mid-`fetch_add`, producing
-    // spurious panics. The mutex serializes the in-file test bodies;
-    // `acquire_test_lock` is panic-tolerant because
-    // `register_new_exhaustion_panics` poisons the mutex by design.
-    static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-    fn acquire_test_lock() -> MutexGuard<'static, ()> {
-        match TEST_MUTEX.lock() {
-            Ok(g) => g,
-            // The exhaustion test panics inside `register_new`. The unwind
-            // poisons the mutex; we recover the guard so subsequent tests
-            // keep running. Each test resets shared state up front, so
-            // inheriting a "dirty" counter is fine.
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
-    /// Snapshot the counter on entry so we can restore it on exit. Without
-    /// this the exhaustion test would leave the global counter clamped at
-    /// `MAX_BUNDLE_TYPES`, poisoning any later test added to this module.
-    struct CounterSnapshot(usize);
-
-    impl CounterSnapshot {
-        fn take() -> Self {
-            Self(BUNDLE_NEXT_ID.load(Ordering::Relaxed))
-        }
-    }
-
-    impl Drop for CounterSnapshot {
-        fn drop(&mut self) {
-            BUNDLE_NEXT_ID.store(self.0, Ordering::Relaxed);
-        }
-    }
+    // Nothing here STORES to `BUNDLE_NEXT_ID`. The lib-test binary runs every src/ test module in
+    // one process, and the ones that spawn a first-sight bundle (`bundle_api.rs`,
+    // `hierarchy/bundles.rs`, `migration_helpers.rs`, `spawn_batch_command.rs`, ...) mint through
+    // their per-type `static INFO: OnceLock<BundleStaticInfo>` closure without any lock this
+    // module could take: a test that parked the counter at the cap redded a sibling's unrelated
+    // test with the exhaustion panic, and one that parked it at 0 handed a sibling a
+    // `BundleTypeId` the dispenser had already given out -- the per-world cache's index (A4b).
+    // The exhaustion contract lives in `tests/bundle_table_exhaustion.rs`, a process of its own.
 
     #[test]
     fn bundle_type_id_newtype_layout() {
@@ -225,65 +175,21 @@ mod tests {
         );
     }
 
+    /// Three mints on one thread come back distinct and strictly increasing. Strictly increasing,
+    /// not contiguous: other harness threads mint from the same counter, and the gaps are theirs.
     #[test]
     fn register_new_assigns_distinct_ids() {
-        let _guard = acquire_test_lock();
-        let _snap = CounterSnapshot::take();
-
-        // Park the counter well below the cap so this test never trips the
-        // panic branch even if previous tests in the same binary advanced
-        // BUNDLE_NEXT_ID via real Bundle derives.
-        set_next_id_for_test(0);
-
         let a = register_new();
         let b = register_new();
         let c = register_new();
 
-        assert_ne!(a, b, "register_new must return distinct ids (a vs b)");
-        assert_ne!(b, c, "register_new must return distinct ids (b vs c)");
-        assert_ne!(a, c, "register_new must return distinct ids (a vs c)");
-
-        // Bonus: contiguity from a known base. `fetch_add` from 0 yields
-        // 0, 1, 2 — anything else means the counter slipped under us.
-        assert_eq!(a, BundleTypeId(0));
-        assert_eq!(b, BundleTypeId(1));
-        assert_eq!(c, BundleTypeId(2));
-    }
-
-    #[test]
-    fn register_new_exhaustion_panics() {
-        let _guard = acquire_test_lock();
-        let _snap = CounterSnapshot::take();
-
-        // Park the counter one slot below the cap: the first call must
-        // succeed and return the last legal id; the second call must
-        // observe `id >= MAX_BUNDLE_TYPES`, saturate, and panic.
-        set_next_id_for_test(MAX_BUNDLE_TYPES - 1);
-
-        let last = register_new();
-        assert_eq!(
-            last,
-            BundleTypeId(MAX_BUNDLE_TYPES - 1),
-            "edge call must return the final legal id"
-        );
-
-        // The exhaustion call panics. `AssertUnwindSafe` is correct because
-        // we touch no `&mut` borrows that the panic could leave in a
-        // logically-inconsistent state — the only side-effect is the
-        // saturate `store` on the global counter, which `CounterSnapshot`
-        // restores via Drop on exit.
-        let result = panic::catch_unwind(AssertUnwindSafe(register_new));
         assert!(
-            result.is_err(),
-            "register_new must panic once the counter reaches MAX_BUNDLE_TYPES"
+            a.0 < b.0 && b.0 < c.0,
+            "the dispenser is monotonic: expected {a:?} < {b:?} < {c:?}"
         );
-
-        // The W1 saturate clamp: even if a future caller squeezes past
-        // the `catch_unwind` boundary, the counter is pinned at the cap.
-        let pinned = BUNDLE_NEXT_ID.load(Ordering::Relaxed);
-        assert_eq!(
-            pinned, MAX_BUNDLE_TYPES,
-            "counter must be saturated at MAX_BUNDLE_TYPES after exhaustion"
+        assert!(
+            c.0 < MAX_BUNDLE_TYPES,
+            "the lib-test binary must stay well below the cap; got {c:?}"
         );
     }
 
@@ -318,5 +224,4 @@ mod tests {
             total
         );
     }
-
 }
