@@ -35,8 +35,30 @@ cargo build --release                                            # release build
 cargo clippy --workspace --all-targets -- -D warnings            # linter
 cargo test --workspace --all-targets --no-fail-fast              # tests
 cargo bench                                                      # benchmarks
-cargo +nightly miri test                                         # UB detector (if nightly is installed)
+cargo +nightly-x86_64-pc-windows-msvc miri test                  # UB detector (if nightly is installed)
 ```
+
+**On the workstation, a gate run sets `TMP`/`TEMP` to `D:/wt/_targets/tmp` first** (RK-18 of the
+unification plan), and the directory must exist before cargo starts — `link.exe` writes its own
+temporaries there, and a missing path is `LINK : fatal error LNK1104: cannot open file
+'…\lnk{…}.tmp'` (MEASURED 2026-09-21 on a one-file crate under `stable-x86_64-pc-windows-msvc`):
+
+```powershell
+$env:TMP = 'D:/wt/_targets/tmp'; $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null
+```
+```bash
+mkdir -p D:/wt/_targets/tmp && export TMP=D:/wt/_targets/tmp TEMP=D:/wt/_targets/tmp
+```
+
+The reason: `crates/profile_fixture/tests/profile_axis_census.rs` roots its six fat-LTO builds
+(three fixture binaries × two profiles) in two target trees keyed by profile and host (`:226`), and
+its refusal probe's `cargo check` tree (`:760`), at `std::env::temp_dir()`, which on Windows is
+`%TMP%`/`%TEMP%`, i.e. drive C:. RK-11 puts every build product under `D:/wt/_targets`; without this
+line the census is the one exception, and the other 47 files that write artifacts through
+`temp_dir()` follow it. Measured 2026-09-21 on C:: four census trees (the two host-keyed ones plus
+the two left from before `27ac8904` keyed them), 11–17 MB each, and the refusal tree at 803 MB
+(675 MB of it `incremental/`, from runs without `CARGO_INCREMENTAL=0`) — the rule is one drive for
+every build product, whatever the size.
 
 ⚠️ **`--workspace` and `--no-fail-fast` are both load-bearing, and each was added after a
 measurement, not for tidiness.**
@@ -249,7 +271,7 @@ and `--features spec_constant_smoke` ×1. **121 of the 183** plain sites sit in 
 no single command — each binary has its own env-var protocol in its module header
 (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
-**Leg: Miri.** `cargo +nightly miri test` already carries **149** of the ignores (measured
+**Leg: Miri.** `cargo +nightly-x86_64-pc-windows-msvc miri test` already carries **149** of the ignores (measured
 2026-09-19 on the parallel-narrowphase lane after its L2 calibration and re-measured unchanged
 2026-09-21 on the union: neither merged lane added a `cfg_attr` site, so the 150 did not move and
 the per-cfg split 142 / 6 / 2 is the same) — the **148** `cfg_attr` sites

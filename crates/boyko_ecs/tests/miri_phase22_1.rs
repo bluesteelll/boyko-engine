@@ -37,7 +37,7 @@
 //!
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows"
-//! cargo +nightly miri test -p boyko-ecs --test miri_phase22_1
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_phase22_1
 //! ```
 //!
 //! (No `-Zmiri-ignore-leaks` is needed: the protocol's bounded retire/reclaim

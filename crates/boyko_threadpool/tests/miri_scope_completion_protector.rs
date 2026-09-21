@@ -114,7 +114,7 @@
 //! ```text
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance \
 //!   -Zmiri-ignore-leaks -Zmiri-preemption-rate=0" \
-//!   cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool \
+//!   cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-threadpool \
 //!   --test miri_scope_completion_protector -- --nocapture
 //! ```
 //!
@@ -131,7 +131,7 @@
 //!   MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation \
 //!     -Zmiri-permissive-provenance -Zmiri-ignore-leaks \
 //!     -Zmiri-preemption-rate=0 -Zmiri-seed=$S" \
-//!     cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool \
+//!     cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-threadpool \
 //!     --test miri_scope_completion_protector -- --nocapture
 //! done
 //! ```

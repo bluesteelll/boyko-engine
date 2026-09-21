@@ -1,6 +1,6 @@
 //! Phase 10 Wave E Step 15 — Miri tests for change-detection unsafe code.
 //!
-//! Run via `cargo +nightly miri test --test miri_phase10`.
+//! Run via `cargo +nightly-x86_64-pc-windows-msvc miri test --test miri_phase10`.
 //!
 //! See plan §13.3.
 //!

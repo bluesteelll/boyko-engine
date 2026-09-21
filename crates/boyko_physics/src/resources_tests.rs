@@ -327,7 +327,7 @@
     // forced `n_chunks ∈ {1, 2, 4, 8}`, single-threaded (NO pool), so they:
     //   * exercise the restructured Pass A count / serial prefix-sum / Pass B
     //     `pair_offset` arithmetic + the `EmitPtrs` disjoint raw writes,
-    //   * run under `cargo +nightly miri test` (the pool spin is Miri-intractable;
+    //   * run under `cargo +nightly-x86_64-pc-windows-msvc miri test` (the pool spin is Miri-intractable;
     //     the shaped path needs no pool — `pool = None`),
     //   * prove byte-identity to the O2 serial `build` AND non-vacuity (the W2
     //     anti-vacuity bar: it ran the shaped passes, not a `build` delegate).
@@ -668,7 +668,7 @@
         }
 
         // ── Gate 5 (Miri): the curated small-scene shaped sweep at every chunk
-        //    count. `cargo +nightly miri test` runs THIS (no pool needed — the
+        //    count. `cargo +nightly-x86_64-pc-windows-msvc miri test` runs THIS (no pool needed — the
         //    shaped path runs `pool = None`); it checks the restructured offset
         //    arithmetic + the `EmitPtrs` disjoint raw writes for TB/aliasing UB.
         //    Kept small (≈ 64 bodies) so the interpreter stays tractable. ───────

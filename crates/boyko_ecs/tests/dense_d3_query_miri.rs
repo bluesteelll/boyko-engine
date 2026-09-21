@@ -30,9 +30,9 @@
 //! PRE-EXISTING (see the phase-19 / command-queue memory) and unrelated to D3;
 //! they are suppressed by `-Zmiri-ignore-leaks` per the run line below.
 //!
-//! Run (toolchain note — nightly GNU):
+//! Run (toolchain note — nightly MSVC):
 //! ```text
-//! RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-gnu \
+//! RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc \
 //!   MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-disable-isolation" \
 //!   cargo miri test -p boyko-ecs --test dense_d3_query_miri
 //! ```

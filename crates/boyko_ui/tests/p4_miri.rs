@@ -20,8 +20,8 @@
 //!
 //! Small fixtures (few entities, few frames) so Miri stays tractable.
 //!
-//! Run (windows-gnu nightly, Tree-Borrows via .cargo/config):
-//!   RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-gnu \
+//! Run (windows-msvc nightly, Tree-Borrows via .cargo/config):
+//!   RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc \
 //!     cargo miri test -p boyko-ui --test p4_miri
 
 // Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for

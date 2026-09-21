@@ -32,14 +32,14 @@
 # Remove-Items stray BOYKO_* vars) plus the head of the set loop, and stops one line SHORT of the
 # `Set-Item` the sentence is about -- it cited neither of the two things it names.
 #
-# ⚠ THE sha256_* VALUES BELOW WERE ALL BLESSED ON THE windows-gnu HOST. Whether an msvc build
-# of the same source dumps the same bytes is UNMEASURED at this commit (no golden was run in
-# the change that moved the pins). A MISMATCH on the first msvc run is therefore not
-# automatically a regression -- and -Bless is NOT the reflex: re-blessing would silently
-# convert "the compiler changed" into a new baseline. Diagnose first -- build the same pin with
-# RUSTUP_TOOLCHAIN overridden back to the gnu stable toolchain, dump it, and compare the two,
-# which separates "the host changed the bytes" from "the render changed" -- and re-bless only on
-# an owner sign-off, as this header already requires.
+# HOST BYTE-IDENTITY, MEASURED (rung AH (4), 2026-09-21; the ledger is docs/measurements/
+# 2026-09-21-msvc-pin-ledger.md, row 25). Every sha256_* below was ORIGINALLY blessed on the
+# windows-gnu host, and an msvc build dumps the SAME bytes: the owner's run of 2026-09-10 (32/32),
+# 8668b9c7 (2026-09-18: software 32/32 PASS at e3cebe2d's gnu-blessed values, msvc, RTX 3060) and
+# 54e186d9 (61/61 check-only, 34 software + 27 hwrt). No golden was re-blessed for the host switch;
+# every re-bless since is on msvc, for a RENDER cause its own section states (2026-09-18 0973eec2,
+# 2026-09-19 429b6698, 2026-09-21 0759d193). A mismatch is a render change until a gnu build of the
+# same pin shows otherwise -- and -Bless is still NOT the reflex: owner sign-off first, as above.
 #
 # Format is a flat, section-scoped TOML subset (see scripts\golden.ps1 :: Read-Pins).
 # `sha256_hwrt` may equal `sha256_software` (the HW-RT shadow path was made

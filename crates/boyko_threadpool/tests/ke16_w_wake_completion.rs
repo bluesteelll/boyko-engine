@@ -442,7 +442,7 @@ fn w_b_a_worker_spawned_wave_runs_every_task_exactly_once() {
 /// — see `tests/loom_pool.rs`'s header), so route (b) has its exhaustive model
 /// and this row is corroboration on real hardware rather than a substitute.
 ///
-/// That Miri run is a `cargo +nightly miri test` run. `miri_scope.rs` carries a
+/// That Miri run is a `cargo +nightly-x86_64-pc-windows-msvc miri test` run. `miri_scope.rs` carries a
 /// file-level `#![cfg(miri)]`, so a NATIVE `cargo test` of that target lists
 /// nothing and prints `running 0 tests` — that native reading is not evidence
 /// about this gate in either direction, and must not be read as one.

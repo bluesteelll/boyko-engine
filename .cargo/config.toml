@@ -12,53 +12,53 @@
 # Miri to accept the `*const Arena` raw provenance pattern used throughout the
 # ECS core (audit finding C-001 / Phase 3a).
 #
-# MIRI STAYS ON THE GNU NIGHTLY, ON PURPOSE -- AND ON 2026-09-18 THE REASON INVERTED
-# WHILE THE PIN DID NOT. This tree's build recipes moved from
-# `stable-x86_64-pc-windows-gnu` to `stable-x86_64-pc-windows-msvc` on 2026-09-10, and
-# rustup's default host followed on 2026-09-17; every Miri recipe that spells a host
-# at all still spells `nightly-x86_64-pc-windows-gnu` / `+nightly-x86_64-pc-windows-gnu`
-# -- 22 source/script files as of 2026-09-18 (Miri test headers across boyko_ecs,
-# boyko_threadpool, boyko_physics, boyko_scene and boyko_ui, two boyko_threadpool
-# `src/` headers, and both `scripts/tb_neg_gate.*`), plus 8 docs and the 4 committed
-# receipts. ⚠ NOT every Miri recipe does. CI's Miri job runs on
-# `ubuntu-latest`, where a bare `+nightly` is unambiguous, and several Windows-facing
-# headers still spell a bare `+nightly` (`crates/boyko_ecs/tests/miri_phase22_1.rs`'s
-# Run block among them) -- which on this box now selects the MSVC nightly, i.e. NOT
-# the checker the receipts below came from.
+# THE MIRI RECIPES SPELL `nightly-x86_64-pc-windows-msvc`, SINCE 2026-09-21 (rung AH of
+# the unification plan). Before that date every Miri recipe in this tree that spelled a
+# host spelled `nightly-x86_64-pc-windows-gnu`, and this paragraph argued for keeping it
+# there. The argument moved three times while the spelling did not:
 #
-# WHAT WAS WRITTEN HERE, and was true on its date: MEASURED 2026-09-10, the gnu
-# nightly carried miri 2026-08-20 and the msvc nightly miri 2026-05-29 -- three
-# months older -- so the pin was also buying Tree-Borrows currency.
+#   2026-09-04  a bare `+nightly` picked an msvc nightly with no linker (exit 1, the same
+#               as a red gate), so the gnu nightly was spelled in full.
+#   2026-09-10  msvc linked; the pin was re-justified on currency -- gnu's miri was
+#               2026-08-20, msvc's 2026-05-29, three months older.
+#   2026-09-18  currency INVERTED and the pin stayed on receipt continuity alone.
+#               MEASURED that day, RUSTUP_TOOLCHAIN unset (and unchanged on 2026-09-21):
 #
-# WHAT IS TRUE NOW: that comparison is INVERTED. MEASURED 2026-09-18, with
-# RUSTUP_TOOLCHAIN unset:
+#     cargo +nightly-x86_64-pc-windows-gnu  miri --version -> miri 0.1.0 (8925ea358a 2026-08-20)
+#     cargo +nightly-x86_64-pc-windows-msvc miri --version -> miri 0.1.0 (a36d05efab 2026-09-09)
 #
-#   cargo +nightly-x86_64-pc-windows-gnu  miri --version -> miri 0.1.0 (8925ea358a 2026-08-20)
-#   cargo +nightly-x86_64-pc-windows-msvc miri --version -> miri 0.1.0 (a36d05efab 2026-09-09)
+# The msvc nightly's miri is the NEWER of the two, by three weeks; this tree's build
+# recipes have spelled `stable-x86_64-pc-windows-msvc` since 2026-09-10 and rustup's
+# default host has been msvc since 2026-09-17 14:27. What kept the checker on gnu after
+# that was that the four receipts under `docs/threadpool/receipts/` had been produced by
+# the gnu miri, so re-spelling the recipes would have swapped the instrument under a
+# result on disk. That is discharged the only way it could be: on 2026-09-21 all four
+# seeds were re-run on BOTH nightlies from one tree. The msvc run is now the committed
+# `tb-neg-m2w-<seed>.stderr`, the gnu run sits beside each as
+# `tb-neg-m2w-<seed>.gnu.stderr`, and the README there records that the diagnostic, both
+# creation sites and the deallocating frame are identical across the pair and that what
+# differs is instrument identity (tag ids, the toolchain and target-dir paths, a newer
+# cargo's manifest lints). The checker and the gate host are the same toolchain family
+# again, which is the state this comment used to explain the absence of.
 #
-# The msvc nightly's miri is now the NEWER of the two, by three weeks. Currency has
-# therefore stopped arguing for this pin and started arguing against it -- and the
-# pin STAYS, on the reason that never depended on which nightly was fresher:
-# RECEIPT CONTINUITY. The receipts committed under `docs/threadpool/receipts/` were
-# produced by the gnu nightly's miri. Re-spelling these recipes would swap the
-# CHECKER under every Tree-Borrows gate those receipts discharge, so a receipt on
-# disk and the checker that would re-derive it would no longer be the same
-# instrument and any difference between them would be unattributable. Moving the
-# checker is its own change, carrying its own re-run of every receipt; it must not
-# ride along inside a host move or a comment repair.
+# What that change touched: the recipe sites -- Miri test headers across boyko_ecs,
+# boyko_threadpool, boyko_physics, boyko_scene and boyko_ui, both `scripts/tb_neg_gate.*`,
+# and the runnable commands in `docs/ecs/POOL-SUBGRANULAR-PACKING-PLAN.md` and
+# `docs/threadpool/KE16-TASKREP-ALLOCATION.md`. A DATED MEASUREMENT keeps its spelling: a
+# line that says a number was measured on the gnu nightly on some date (`src/block.rs`,
+# `src/scope.rs`, `tests/block_allocation_receipts.rs` in boyko_threadpool, the KE16
+# results and evidence documents, `docs/RUST-FRONTIER.md`, `docs/rust-ergonomics/`)
+# still says so, because it is a record and not a recipe.
 #
-# ⚠ WHAT A BARE `cargo +nightly miri` RESOLVES TO HAS NOW FLIPPED TWICE, WHICH IS THE
-# REASON TO SPELL IT. Until 2026-09-07 13:56 rustup's `default_host_tuple` was msvc and a
-# bare `+nightly` selected the msvc nightly (which then had no linker — measured
-# 2026-09-04); that rewrite made it gnu; and `rustup set default-host` made it msvc again
-# on 2026-09-17 14:27 (settings-file mtime), MEASURED 2026-09-18 as
-# `default_host_tuple = "x86_64-pc-windows-msvc"` with
-# `stable-x86_64-pc-windows-msvc (active, default)`. So a bare `+nightly miri` today runs
-# the MSVC nightly's miri -- NOT the gnu one the Tree-Borrows recipes pin. The sentence
-# that stood in this paragraph said the reverse ("today a bare `+nightly` happens to select
-# the gnu nightly, i.e. the NEWER miri"), and called it luck rather than a guarantee that
-# would change the day `rustup set default-host` ran. It did, ten days later, and both
-# halves of the claim expired at once. Prefer the fully-spelled toolchain, as the recipes do.
+# ⚠ STILL SPELL THE TOOLCHAIN IN FULL. What a bare `cargo +nightly miri` resolves to has
+# flipped twice on this box -- rustup's `default_host_tuple` was msvc until 2026-09-07
+# 13:56, gnu until 2026-09-17 14:27, and msvc since (settings-file mtimes) -- and every
+# sentence written here about what a bare `+nightly` "happens to" select expired within
+# ten days. Today it selects the msvc nightly, the checker the receipts came from: a
+# coincidence of the current default, not a guarantee, and the recipes do not rely on it.
+# CI's Miri job runs on `ubuntu-latest`, where a bare `+nightly` is unambiguous; several
+# Windows-facing headers still spell a bare `+nightly` (`crates/boyko_ecs/tests/miri_phase22_1.rs`'s
+# Run block among them) and on this box now run the same checker as the spelled ones.
 [env]
 MIRIFLAGS = "-Zmiri-tree-borrows"
 

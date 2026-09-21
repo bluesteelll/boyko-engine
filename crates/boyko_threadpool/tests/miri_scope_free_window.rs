@@ -111,7 +111,7 @@
 //! ```text
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance
 //!   -Zmiri-ignore-leaks -Zmiri-many-seeds=0..12 -Zmiri-preemption-rate=0.5"
-//!   cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool
+//!   cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-threadpool
 //!   --test miri_scope_free_window -- --nocapture
 //! ```
 //!

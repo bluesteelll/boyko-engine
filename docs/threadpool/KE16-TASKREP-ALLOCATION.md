@@ -47,7 +47,18 @@ plan5 — **nine of them, across four plan5 sections, are corrected below** (§C
 
 ### Toolchain, for every command in this file
 
-⚠ **Every Miri command below spells `+nightly-x86_64-pc-windows-gnu`.** The reason recorded here
+⚠ **Since 2026-09-21 every Miri command below spells `+nightly-x86_64-pc-windows-msvc`** (rung AH
+of the unification plan). The results recorded in this file were produced by the gnu nightly's miri
+(`8925ea358a 2026-08-20`), and the paragraphs that follow are the dated record of why the recipes
+spelled that nightly until then. The checker moved after all four seeds of the M2w negative control
+were re-run on both nightlies from one tree — the msvc receipts are the committed
+`docs/threadpool/receipts/tb-neg-m2w-<seed>.stderr`, the gnu run sits beside each as
+`.gnu.stderr`, and the README there lists what differs (instrument identity only) and what does not
+(the diagnostic, both creation sites, the deallocating frame). A recipe below run on the gnu nightly
+reproduces this file's numbers on the instrument that produced them; run on the msvc nightly it is
+the standing gate.
+
+⚠ **Until 2026-09-21 every Miri command below spelled `+nightly-x86_64-pc-windows-gnu`.** The reason recorded here
 during the campaign — "`cargo +nightly` resolves to `nightly-x86_64-pc-windows-MSVC` on this box and
 dies in the linker with exit 1, which is indistinguishable from *the gate is red*" — went **false on
 2026-09-10** in both halves, and one of those halves has since gone true again. Bare `+nightly` DID
@@ -61,14 +72,15 @@ later, owner-run step". The step ran. The linker half stays dead: the msvc toolc
 `KE16-RESULTS.md` §0 for both receipts). What never moved through any of this is the recipes'
 explicit triples, which is the entire argument for spelling them.
 
-The full spelling stays — but **not** for the reason written here until 2026-09-18 ("the gnu nightly
-carries miri **2026-08-20** and the msvc nightly **2026-05-29**"). MEASURED 2026-09-18 with
-`RUSTUP_TOOLCHAIN` unset, `cargo +nightly-x86_64-pc-windows-gnu miri --version` answers
-`miri 0.1.0 (8925ea358a 2026-08-20)` and `cargo +nightly-x86_64-pc-windows-msvc miri --version`
-answers `miri 0.1.0 (a36d05efab 2026-09-09)` — the msvc one is three weeks **newer**, so currency now
-argues against the pin rather than for it. It holds on **receipt continuity**: every Tree-Borrows
-result in this file came from the gnu nightly's miri, and re-spelling the recipes would swap the
-checker underneath those results instead of re-deriving them.
+The gnu spelling stayed until 2026-09-21 — but from 2026-09-18 **not** for the reason written here
+before that ("the gnu nightly carries miri **2026-08-20** and the msvc nightly **2026-05-29**").
+MEASURED 2026-09-18 with `RUSTUP_TOOLCHAIN` unset, `cargo +nightly-x86_64-pc-windows-gnu miri
+--version` answers `miri 0.1.0 (8925ea358a 2026-08-20)` and `cargo +nightly-x86_64-pc-windows-msvc
+miri --version` answers `miri 0.1.0 (a36d05efab 2026-09-09)` — the msvc one is three weeks
+**newer**, so currency argued against the pin rather than for it. It held on **receipt continuity**:
+every Tree-Borrows result in this file came from the gnu nightly's miri, and re-spelling the recipes
+would have swapped the checker underneath those results instead of re-deriving them. The re-derivation
+is what rung AH did (first paragraph of this section).
 
 ⚠ **`RUSTFLAGS` must never be set** — `.cargo/config.toml` in this worktree carries the ISA
 baseline on a `[target.<host triple>] rustflags` key (one for each Windows triple), and setting the
@@ -514,7 +526,7 @@ no allocation. **The remaining half is NOT DECIDABLE FROM THIS TREE**: whether M
 
 ```
 MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-preemption-rate=0" \
-  cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool \
+  cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-threadpool \
   --test miri_scope_completion_protector -- --nocapture
 ```
 
@@ -785,7 +797,7 @@ and calls `block.free_all()` at `:267`/`:308`), with detached siblings at
 CI's Miri job sets no `MIRIFLAGS` at all).
 
 ```
-cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool --lib -- task::scoped::tests
+cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-threadpool --lib -- task::scoped::tests
 ```
 
 ⚠ **The filter is not optional.** Unfiltered, this recipe is red for a reason unrelated to the
@@ -807,7 +819,7 @@ must be run in plan4's form on this tree:
 
 ```
 MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-preemption-rate=0" \
-  cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-threadpool \
+  cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-threadpool \
   --features ke16-w-count,ke16-a2 --test miri_scope_completion_protector -- --nocapture
 ```
 
@@ -980,7 +992,7 @@ configuration in which the second entry point is actually tested.
 allocation in the process lands at `(2^k >= 4096, 64)` — **cannot be settled by reading at all**;
 R0b and R2's exact equalities are the decision.
 
-**10. ⚠ Every Miri command in this file spells `+nightly-x86_64-pc-windows-gnu`.** The reason given
+**10. ⚠ Every Miri command in this file spelled `+nightly-x86_64-pc-windows-gnu` until 2026-09-21; since then `+nightly-x86_64-pc-windows-msvc` (rung AH, see §Toolchain above).** The reason given
 here during the campaign ("`cargo +nightly` resolves to MSVC on this box and dies in the linker with
 exit 1, indistinguishable from a red gate") no longer holds — corrected 2026-09-10, receipt in
 `KE16-RESULTS.md` §0 — and its 2026-09-10 replacement ("the two installed nightlies' miri builds are

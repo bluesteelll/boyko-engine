@@ -37,7 +37,7 @@
 //!
 //! ```powershell
 //! $env:MIRIFLAGS = "-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test dense_d2_reentrancy
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test dense_d2_reentrancy
 //! ```
 //!
 //! `-Zmiri-ignore-leaks` is required for the SAME reason as every other

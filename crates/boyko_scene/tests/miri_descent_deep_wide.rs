@@ -19,7 +19,7 @@
 //!
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-scene --test miri_descent_deep_wide
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-scene --test miri_descent_deep_wide
 //! ```
 //!
 //! Every test in THIS FILE runs the descent (`propagate_transforms` over a
