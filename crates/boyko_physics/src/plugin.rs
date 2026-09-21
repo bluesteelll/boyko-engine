@@ -812,7 +812,8 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
 /// `builder.add_system(spawner).before_set(PhysicsGatherSet)` runs `spawner` before the
 /// gather. The executor applies a system's `Commands` before it dispatches that system's
 /// successors, so a body spawned there is in the same run's gather. Its `RigidBody` is
-/// flagged added one gather late, the one-step bound stated on [`IslandSleep`].
+/// flagged added one gather late; the row key carries the entity's generation, so it is
+/// still a new row to every row-keyed consumer on that gather (`row_identity.rs`).
 ///
 /// Membership adds no ordering edge. This crate configures no run condition on the set;
 /// a condition configured on it would skip the gather while the later stages still run.

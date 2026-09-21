@@ -735,18 +735,16 @@
     // cursor stamped with that gather (invariant P). Red under M4 (the `Reset` arm does not
     // stamp) and M5 (the `Identity` arm does not stamp).
     mod rekey_rows {
-        use boyko_ecs::ecs::identifiers::primitives::EntityId;
-
         use crate::resources::IslandSleep;
-        use crate::row_identity::{RemapCursor, RowIdentity, RowRemap};
+        use crate::row_identity::{RemapCursor, RowIdentity, RowKey, RowRemap};
 
-        /// Feeds one scripted gather into `rows`.
+        /// Feeds one scripted gather into `rows`: `ids` are slots at generation 0.
         fn gather(rows: &mut RowIdentity, ids: &[usize], added: &[u32]) {
             rows.begin_gather();
             {
                 let (mut cur, mut add) = rows.gather_views();
                 for &id in ids {
-                    cur.push(EntityId(id));
+                    cur.push(RowKey::new(id, 0));
                 }
                 for &r in added {
                     add.push(r);

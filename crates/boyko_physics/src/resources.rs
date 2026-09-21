@@ -342,10 +342,10 @@ pub struct PhysicsConfig {
     /// moving island. A latched body whose island's manifold count changes, for example
     /// because its support was removed, wakes on the first step whose contacts show the
     /// change (wake-on-contact-change, `IslandSleep::begin_step`). A row move cannot
-    /// spuriously freeze an island either, within one bound: a body spawned by a command
-    /// applied inside the physics schedule run, before the gather, is flagged as added
-    /// one gather late, so if it recycled a despawned body's id it carries that body's
-    /// latch for that one step (`row_identity.rs`).
+    /// spuriously freeze an island either: rows are keyed by the entity's slot AND
+    /// generation, so a body spawned by a command applied inside the physics schedule
+    /// run, before the gather — which is flagged as added one gather late — starts with a
+    /// fresh latch even when it recycled a despawned body's slot (`row_identity.rs`).
     ///
     /// **Determinism:** the speed² compare is EXACT (no `sqrt`/`rsqrt`/`algebraic_*`),
     /// the debounce is a per-row integer, and the freeze decision is a pure function of
@@ -4002,10 +4002,12 @@ impl TouchedMask {
 /// [`physics_apply`](crate::systems::physics_apply) writes back. Every buffer is
 /// cleared and refilled each step, capacity reused.
 ///
-/// The gather records row → `EntityId` through `Query::iter_entities` for the row
-/// identity map (`rows`, defect A, interim), which the row-keyed consumers carry their
-/// state through when rows move. A row → entity projection for the gameplay
-/// [`Contact`](crate::components::Contact) producer is still not carried.
+/// The gather records row → [`RowKey`](crate::row_identity::RowKey) — the entity's slot
+/// index and generation, the slot from `Query::iter_entities` and the generation through
+/// `Entities::get` — for the row identity map (`rows`, defect A, interim), which the
+/// row-keyed consumers carry their state through when rows move. A row → entity
+/// projection for the gameplay [`Contact`](crate::components::Contact) producer is still
+/// not carried.
 /// # `bodies` is a [`ScratchColumn`], not a `std::Vec` (audit Stage P)
 ///
 /// The gather snapshot lives in the engine's OWN storage — one address-stable

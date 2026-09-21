@@ -846,10 +846,9 @@ mod tests {
 
     // —— Defect A interim fix: the axis carry (T5, T5b, T10) ——————————————————
 
-    use boyko_ecs::ecs::identifiers::primitives::EntityId;
-
     use crate::components::{Collider, RigidBody, RigidBodyMass};
     use crate::math::{Mat3, Quat, Vec3};
+    use crate::row_identity::RowKey;
 
     /// `n` unit-mass unit cubes at the origin: every candidate pair among them is a box pair.
     fn box_bodies(n: usize) -> Vec<BodyState> {
@@ -877,13 +876,13 @@ mod tests {
             .collect()
     }
 
-    /// Feeds one scripted gather into `rows`.
+    /// Feeds one scripted gather into `rows`: `ids` are slots at generation 0.
     fn gather(rows: &mut RowIdentity, ids: &[usize], added: &[u32]) {
         rows.begin_gather();
         {
             let (mut cur, mut add) = rows.gather_views();
             for &id in ids {
-                cur.push(EntityId(id));
+                cur.push(RowKey::new(id, 0));
             }
             for &r in added {
                 add.push(r);
