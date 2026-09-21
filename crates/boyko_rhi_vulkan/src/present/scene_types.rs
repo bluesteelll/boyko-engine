@@ -2349,7 +2349,9 @@ pub struct GBufferScene<'a> {
     pub coarse_mode: CoarseMode,
     /// The A1/A2 lighting flags stamped into the marcher's [`FineMarcherPush`] `lighting_flags`
     /// (offset 8) THIS frame: `LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO` for the on-screen demo's
-    /// soft-shadow + AO shading, or `0` for the byte-identical Lambert path.
+    /// soft-shadow + AO shading, `LIGHTING_FLAG_AO` alone — what the production host pushes on a
+    /// frame whose light table has no primary directional (no sun, no sun shadow) — or `0` for the
+    /// byte-identical Lambert path.
     ///
     /// This is a per-frame push field (NOT a descriptor), so flipping it needs no re-record and the
     /// OFF (`coarse == None`) command stream stays byte-identical for any fixed value.
@@ -2374,9 +2376,13 @@ pub struct GBufferScene<'a> {
     /// direction (the first directional in the light table, the one whose `vis` reads
     /// `gMaterial.r`): the marcher bakes the cast shadow toward `light_dir`, and the resolve
     /// consumes it as the primary directional's visibility — a mismatch detaches the shadow from
-    /// the light. A per-frame push field (no re-record on a change). For a head-on scene use the
-    /// legacy [`DEFAULT_LIGHT_DIR`](crate::compute::DEFAULT_LIGHT_DIR) `[0, 0, 1]`; an angled /
-    /// floor-and-object scene supplies the real sun direction so a real cast shadow lands.
+    /// the light. A per-frame push field (no re-record on a change). The production host
+    /// (`boyko_app`'s `gpu_scene`) fills it every frame from
+    /// `boyko_render::LightTableStaging::primary_directional_dir` — the staged table's first
+    /// directional row, bits verbatim; with no primary the caller clears `LIGHTING_FLAG_SHADOWS`
+    /// and this value is unread. A harness without a light table uses the legacy
+    /// [`DEFAULT_LIGHT_DIR`](crate::compute::DEFAULT_LIGHT_DIR) `[0, 0, 1]` for a head-on scene, or
+    /// supplies its scene's real sun so a real cast shadow lands.
     pub light_dir: [f32; 3],
     /// The Render P7 SSAO compute pass activation. `None` = the OFF path (the default): the
     /// recorder records NOTHING new (no SSAO set-write, no transition / dispatch / barrier), so

@@ -33,8 +33,8 @@ use boyko_log::codes::{OnceSite, W2201, W2204};
 use boyko_macros::{Resource, SystemSet};
 
 use crate::light::{
-    DirectionalLight, GpuLight, LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig,
-    MAX_LIGHTS, PointLight, SkyLight, SpotLight,
+    DirectionalLight, GpuLight, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_MASK, LightEnabled,
+    LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS, PointLight, SkyLight, SpotLight,
 };
 use crate::shadow_atlas::{PunctualSlotAssignment, SLOT_NONE, pack_atlas_slot};
 
@@ -166,6 +166,13 @@ impl LightTableStaging {
     pub fn mark_uploaded(&mut self) {
         self.dirty = false;
     }
+
+    /// The staged table's primary directional light — [`primary_directional_dir`] over
+    /// [`Self::bytes`], the bytes the device table mirrors this frame.
+    #[inline]
+    pub fn primary_directional_dir(&self) -> Option<[f32; 3]> {
+        primary_directional_dir(self.bytes())
+    }
 }
 
 /// Writes `[LightHeaderGpu || GpuLight[]]` into `dst`, returning the valid byte length.
@@ -194,6 +201,49 @@ pub fn write_light_table(
         spots.iter(),
         cfg,
     )
+}
+
+/// Byte offset of the header's `l0a_count` word (`counts_exposure.z`).
+const L0A_COUNT_OFFSET: usize = core::mem::offset_of!(LightHeaderGpu, counts_exposure) + 2 * 4;
+/// Byte offset, within a row, of the `dir_kind` lane (`xyz` = direction, `w` = kind word).
+const DIR_KIND_OFFSET: usize = core::mem::offset_of!(GpuLight, dir_kind);
+/// Byte offset, within a row, of the kind word (`dir_kind.w`).
+const KIND_WORD_OFFSET: usize = DIR_KIND_OFFSET + 3 * 4;
+
+/// The native-endian `u32` at byte `off` of a staged table — the bytes are `write_pod`'s POD image —
+/// or `None` past the end, so a parser built on it cannot panic.
+#[inline]
+fn table_word(table: &[u8], off: usize) -> Option<u32> {
+    let word: [u8; 4] = table.get(off..off.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_ne_bytes(word))
+}
+
+/// The PRIMARY directional light of a staged `[LightHeaderGpu || GpuLight[]]` table: the first row in
+/// `[0, l0a_count)` whose kind word, masked by [`LIGHT_KIND_MASK`], is [`LIGHT_KIND_DIRECTIONAL`] —
+/// the host copy of the shaders' `primary_dir_seen` latch (`deferred_pbr.hlsl`,
+/// `sdf_forward_march.comp.hlsl` and the other table readers). Returns that row's `dir_kind.xyz` bits
+/// VERBATIM, the direction TO the light: the fold has already normalised it and every shader
+/// normalises it again, so a consumer that pushes these bits hands the GPU the exact input the
+/// resolve normalises. Do not normalise or negate them on the host.
+///
+/// `None` when no row of the front block is directional, and when `table` is shorter than its
+/// header. The scan is also clamped to the rows `table` actually holds, so a header whose
+/// `l0a_count` overstates them cannot read past the end: this is a parser, and it never panics.
+///
+/// Cost: one header word, then one kind word per row until the first directional — which the fold
+/// writes first ([`fold_light_table_slotted`]), so a table with a sun stops at row 0. No allocation.
+#[inline]
+pub fn primary_directional_dir(table: &[u8]) -> Option<[f32; 3]> {
+    let rows = table.len().checked_sub(LIGHT_HEADER_BYTES)? / GPU_LIGHT_BYTES;
+    let l0a_count = table_word(table, L0A_COUNT_OFFSET)? as usize;
+    (0..l0a_count.min(rows)).find_map(|row| {
+        let base = LIGHT_HEADER_BYTES + row * GPU_LIGHT_BYTES;
+        if table_word(table, base + KIND_WORD_OFFSET)? & LIGHT_KIND_MASK != LIGHT_KIND_DIRECTIONAL {
+            return None;
+        }
+        let lane = |i: usize| table_word(table, base + DIR_KIND_OFFSET + i * 4).map(f32::from_bits);
+        Some([lane(0)?, lane(1)?, lane(2)?])
+    })
 }
 
 /// Folds the live lights — taken as four borrowing iterators — directly into `dst` as

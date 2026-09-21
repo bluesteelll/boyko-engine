@@ -18,6 +18,102 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-09-19 — What R2 leaves behind: sibling defect R2c, and what the `grand_showcase_2mat` re-bless carried
+
+R2 (`docs/render/light-table-defects/R2-DESIGN.md`, lane `fix/light-table-defects`) makes the
+Deferred SDF marcher shadow toward the light table's primary directional, read every frame
+(`LightTableStaging::primary_directional_dir`, turned into the push by `gpu_scene`'s `MarcherSun`),
+and bake no sun shadow at all on a frame without a directional. Four things are left over. None of
+them is R2's to do, and none is a question to the owner yet; they are written down here so they are
+not lost. Two of them, the stale digest citations and the two one-pixel pins, were closed by the
+re-bless on 2026-09-19 and stay below as the record.
+
+### R2c — on a sunlit frame, other lights take the PRIMARY sun's shadow mask (open)
+
+On Deferred, `gMaterial.r` holds the marcher's shadow toward the primary sun, and the resolve
+applies it to lights that are not that sun:
+
+- **Every extra directional** gets it by default (`deferred_pbr.hlsl:982`, `float vis = shadow;`).
+  Only an extra directional flagged as an SDF caster, in multi-light mode, marches its own shadow.
+- **Every point and spot light** gets it while punctual shadows are off (`deferred_pbr.hlsl:1371`,
+  `vis = (punctual_shadow_mode != PUNCTUAL_SHADOW_MODE_OFF) ? 1.0 : shadow`).
+
+So a point light goes dark wherever the sun is occluded, and a second sun is shadowed toward the
+first. R2 fixed only the sunless half: with no directional the marcher clears `SHADOWS`, so
+`gMaterial.r` is `1` and the punctual lights are unmasked. On a sunlit frame the mask is now the real
+sun's instead of the boot constant's, so in an unpinned scene with punctual lights the masked region
+MOVES rather than disappears. The punctual half is the same rule `unwritten_shadow_map_gate.rs`'s F3
+note describes, from the other side: header bit 3 decides whether a punctual light takes `shadow` or
+owns its visibility. Not designed; whoever takes it starts from those two lines.
+
+### The hand-copied `f6147f90` citations, repaired at the re-bless (2026-09-19)
+
+`f6147f90` is the pin's pre-R2 digest. R2 moves the pin by design (a thin terminator crescent on
+four of the five spheres); the owner signed off the change on 2026-09-19 and both legs were
+re-blessed to `7e71e2a6`. Every hit was re-derived by grep on the lane and sorted by what it claims:
+
+- **Re-pointed to `7e71e2a6`**, because each names the pin as the CURRENT Deferred golden:
+  `crates/boyko_app/tests/grand_showcase_2mat.rs:191`, `:226`;
+  `crates/boyko_app/tests/forward_mesh.rs:16`, `:85`; `crates/boyko_app/tests/vb_mesh.rs:6`;
+  `crates/boyko_app/tests/vb_mesh_ssao.rs:7`; and `[forward_mesh]`'s two comments in
+  `goldens/PINS.toml` (now `:177` and `:185`). The second says Forward's sky matches the Deferred
+  golden's background; R2 changed no sky pixel, so it holds for the new digest.
+- **Left as written**, because each is a dated plan record, not a current value:
+  `docs/MULTI-PARADIGM-RENDER-PLAN.md:26`, `:480` and `docs/RENDER-PARITY-PLAN.md:46`, `:362` give
+  their rungs' gate set next to `58f6c6c3`, a digest retired on 2026-07-12 (`8e48f7fe`), so the set
+  was already history before R2; `docs/RENDER-AA-AND-TAILS-PLAN.md:33` names "the current goldens"
+  of its 2026-07-12 mandate, the day `f6147f90` was blessed. Re-pointing the one digest would put a
+  2026-09-19 value into a July record. The light-table design documents
+  (`docs/render/light-table-defects/`) cite `f6147f90` as the pre-R2 value, which it is.
+
+The review also named `PARTICLES-PLAN`; that file carries no `f6147f90` on this tree.
+
+### Two more pins R2 moves, one pixel each: `taa_armed` and `particle_sdf_collide` (re-blessed 2026-09-19)
+
+`grand_showcase_2mat` is not the only pin the re-bless had to carry. In both of these scenes the sun
+IS the old boot constant, `[-0.45, 0.82, 0.36]` (`crates/boyko_app/tests/taa_jitter_eval.rs:171`,
+`crates/boyko_app/tests/particle_scene/mod.rs:196`), so the marcher shadowed toward that direction
+before R2 as well. What changed is its bits. The old push was the raw, non-unit constant, which the
+shader normalises. After R2 the push is the table's value: the pose's direction after the
+quaternion round-trip, normalised by `GpuLight::from_directional`. The two are the same direction to
+rounding, not bit for bit, and that difference crosses one 8-bit rounding step in each frame.
+
+Measured on the lane on 2026-09-19 with `golden.ps1 -Pin <pin> [-Hwrt]` (never `-Bless`):
+
+| pin | leg | before (the pin) | after R2 | diff |
+|---|---|---|---|---|
+| `taa_armed` | software | `765de1d9866f37748bcf4182a21cd4d3307f94c140fb54300d6fd85adefa1b62` | `31ce517879f042eb2579a5f666155193cf488f1f4da66e9ece12147fc65ffb31` | 1 px at (236, 191), 1 LSB darker |
+| `taa_armed` | hwrt | `0acc66b55dcbf6ccdbdade9b55e1861ac24a649df179bb1bbb74437058026b45` | `c6429c3ed8d87ac27b1603404f787e7f2cca275a683ee011517ac2fda91c9235` | 1 px at (236, 191), 1 LSB darker |
+| `particle_sdf_collide` | software | `729f5ad69846b146dcd07dc840943234af3781b8b127fd5da760b918a6784704` | `c6a055a1518ca4deef97dd942a1b3592ff68e471733643f417b6336135b23bc3` | 1 px at (463, 385), 1 LSB brighter |
+| `particle_sdf_collide` | hwrt (`PENDING` in `PINS.toml` until the re-bless; "before" is a pre-R2 run) | `729f5ad6…` | `c6a055a1…` | the same pixel |
+
+**The A/B that attributes it.** The same R2 build was run with the old raw constant pushed through
+the new path whenever the table has a sun. It restored every old digest: `taa_armed` `765de1d9…`
+(software) and `0acc66b5…` (hwrt), `particle_sdf_collide` `729f5ad6…` on both legs, and
+`grand_showcase_2mat` `f6147f90…` on both legs. So on a sunlit frame the sun's bits are the only
+difference, and these two moves are rounding, not a behaviour change. This is the class the rulings
+put `deferred_sdf_casters` in (`docs/render/light-table-defects/00-RULINGS.md`, R2 W3). That pin did
+not move.
+
+Re-blessed on this basis on 2026-09-19, together with `grand_showcase_2mat`: `taa_armed` on both
+legs, and `particle_sdf_collide` on both legs, its hwrt leg pinned for the first time, at the
+software value the table above measured (the re-bless's own run rendered `c6a055a1…` again).
+Each pin's note in `goldens/PINS.toml` records the reason. `particle_sdf_collide` still waits for
+the owner's look at its image, as it did before R2.
+
+### Unpinned owner reference dumps that change by design
+
+These scenes render Deferred × Both (the default) with a sun that is not the old boot constant, and
+none of them asserts anything. A new image from one of them after R2 is the fix, not a regression:
+
+- `crates/boyko_app/tests/pbr_material_showcase.rs:77` — sun `[-0.55, 0.30, 0.42]`, about 31° from
+  the constant, so its change is the largest.
+- `crates/boyko_app/tests/pbr_showcase.rs:30`, `crates/boyko_app/tests/textured_smoke.rs:34`,
+  `crates/boyko_app/tests/grand_showcase_mvpm.rs:32` — sun `[-0.40, 0.78, 0.48]`, 7.8° off, the same
+  thin crescent `grand_showcase_2mat` shows.
+
+---
+
 ## RESOLVED 2026-09-18 — An un-slotted punctual light samples another light's shadow map on armed frames
 
 ✅ **RESOLVED 2026-09-18 by the light-table-defects lane (`fix/light-table-defects`), as an

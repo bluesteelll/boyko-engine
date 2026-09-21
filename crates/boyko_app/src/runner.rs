@@ -1884,6 +1884,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             } else {
                 None
             };
+            // R2: the Deferred marcher's sun — the staged table's primary directional, read EVERY
+            // frame (not only on upload frames) from the same bytes the device table mirrors, so
+            // the marcher and the resolve take one sun and a rotating sun moves the shadow on the
+            // next frame. `Copy`, so no borrow of the World outlives this line.
+            let primary_sun = world.resource::<LightTableStaging>().primary_directional_dir();
 
             // 5d-pre. The two shadow depth-pass armings (shadow gate SG2), computed HERE —
             //     before the two UBO uploads below — because each upload carries its pass's
@@ -2618,6 +2623,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 s,
                 &draws,
                 light_upload,
+                primary_sun,
                 csm_armed.then_some(resolved_csm),
                 punctual_armed.then_some(resolved_atlas),
                 interp_count,

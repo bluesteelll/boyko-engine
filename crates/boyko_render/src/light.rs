@@ -37,6 +37,11 @@ pub const LIGHT_KIND_POINT: u32 = 1;
 pub const LIGHT_KIND_SPOT: u32 = 2;
 /// Tag value for a [`SkyLight`] (L0a resolve path — hemisphere ambient).
 pub const LIGHT_KIND_SKY: u32 = 3;
+/// The kind-tag bits of a [`GpuLight::dir_kind`]`.w` kind word — mirrors `light_table.hlsli`'s
+/// `LIGHT_KIND_MASK`. The tag lives in bits `0..16`; a point/spot row carries its shadow fields above
+/// them (bit 16 = the SDF-caster flag, bits `17..22` = the atlas slot), so every `kind ==` compare
+/// masks with this first, exactly as the shaders' `light_kind()` does.
+pub const LIGHT_KIND_MASK: u32 = 0xFFFF;
 
 // ---- L1 cluster constants (mirror docs/LIGHTING-L0-L1-PLAN.md Decision 6) -------------
 

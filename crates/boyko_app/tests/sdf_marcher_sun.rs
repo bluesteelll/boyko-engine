@@ -854,7 +854,7 @@ fn verdict(test: &str, runs: usize, findings: &[String]) {
 
 /// **T10.** See the module doc.
 #[test]
-#[ignore = "deferred: R2 - red by design on this tree, the Deferred marcher still takes the boot-constant sun (the fix is the next commit; then gpu-windowed: needs a Vulkan device + window; re-executes its worker per scene; --test-threads=1)"]
+#[ignore = "gpu-windowed: needs a Vulkan device + window; re-executes its worker per scene; --test-threads=1"]
 fn marcher_shadow_follows_the_table_sun_after_runtime_rotation() {
     let dir = out_dir();
     let subject = run(GateScene::Sun, &dir);
@@ -926,7 +926,7 @@ fn marcher_shadow_follows_the_table_sun_after_runtime_rotation() {
 
 /// **T11.** See the module doc.
 #[test]
-#[ignore = "deferred: R2 - red by design on this tree, the Deferred marcher still takes the boot-constant sun (the fix is the next commit; then gpu-windowed: needs a Vulkan device + window; re-executes its worker per scene; --test-threads=1)"]
+#[ignore = "gpu-windowed: needs a Vulkan device + window; re-executes its worker per scene; --test-threads=1"]
 fn sunless_scene_has_no_phantom_marcher_shadow() {
     let dir = out_dir();
     let subject = run(GateScene::Point, &dir);

@@ -3758,7 +3758,9 @@ pub struct SdfForwardMarchPush {
     pub view_z_a: f32,
     /// HAS_MESH reverse-Z decode `B`.
     pub view_z_b: f32,
-    /// The primary directional light direction (un-normalized; the shader normalizes it).
+    /// The primary directional light direction — UNREAD by `sdf_forward_march`, which takes the sun
+    /// from the light table itself (its `primary_dir_seen` loop). Kept only so the push layout and
+    /// the four `.spv` variants stay stable; removing it is a refactor.
     pub light_dir: [f32; 3],
     /// M1 empty-space-skip gate: non-zero reads the pointer-grid bindings. `0` = OFF (the
     /// analytic-only march — this rung's host default; see this struct's doc).

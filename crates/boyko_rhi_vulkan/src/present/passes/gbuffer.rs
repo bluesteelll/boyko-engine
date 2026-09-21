@@ -1470,8 +1470,8 @@ impl Renderer<'_> {
         // (skipping empty tiles). Either way the marcher DECLARES binding 6, so the (valid) Tiles descriptor
         // is always bound in the vocabulary set. `omega` carries the B1 over-relaxation
         // factor (`DEFAULT_MARCHER_OMEGA`, the provably hole-free speedup). Render A1/A2:
-        // the on-screen demo turns lighting ON (A1 soft shadows + A2 AO) with the default
-        // directional light.
+        // the on-screen demo turns lighting ON (A1 soft shadows + A2 AO) with the scene's
+        // primary directional (none ⇒ shadows off).
         // SDF brick-cache activation (campaign M1/M2/M4): the empty-skip + trilinear/cubic surface
         // cache + clip-map LOD gates live ENTIRELY in this per-frame push (the bound descriptors at
         // 9..=14 are static), so `scene.brick` selects ON/OFF at runtime with no re-record — the

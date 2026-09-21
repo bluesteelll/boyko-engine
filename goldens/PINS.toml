@@ -73,14 +73,30 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # low-roughness gold metal, a blue metal); the material drives BOTH albedo (base_color) and
 # metallic/roughness. Blessed by the orchestrator (delegated visual oracle) after a sign-off on the
 # freshly-dumped BMP (two visibly distinct surfaces) â€” do NOT hand-edit the sha256_* values.
+#
+# LIGHT-TABLE R2 MOVED THESE BYTES (lane fix/light-table-defects; re-blessed 2026-09-19 on the msvc
+# host after the owner's sign-off on the change -- f6147f90 -> 7e71e2a6, both legs). The Deferred
+# SDF marcher used to shadow toward a boot constant, [-0.45, 0.82, 0.36], whatever the scene's sun
+# was. It now takes the light table's primary sun, the first enabled directional the fold wrote,
+# every frame (LightTableStaging::primary_directional_dir, turned into the push by
+# crates/boyko_app/src/gpu_scene/marcher_sun.rs). This scene's sun is not that constant
+# (crates/boyko_app/tests/grand_showcase_2mat.rs, SUN_DIR = [-0.40, 0.78, 0.48]), so the old push
+# darkened a thin, hard-edged crescent on the lit side of four of the five spheres; that cut is gone
+# and the lit side falls off smoothly. 1,420 pixels changed, all on the spheres and none on the sky,
+# max channel delta 28 (the gold metal's 33 of them are scattered, not a crescent). Over those
+# pixels the L1 distance to [forward_mesh] (this scene on Forward, which never used the constant)
+# fell from 26,155 to 2,009. One of the 1,420 is darker: (237, 281) [3,69,33] ->
+# [2,69,33], 1 LSB of red lost to ACES cross-talk as green rises, which moves it toward
+# [forward_mesh]'s [0,70,33]. An A/B that pushed the old constant through the new path restored
+# f6147f90 on both legs, so the sun is the whole change. software == hwrt still holds.
 crate           = "boyko-app"
 test_binary     = "grand_showcase_2mat"
 test_name       = "grand_showcase_2mat_screenshot_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat.bmp"
 width           = 512
 height          = 512
-sha256_software = "f6147f9033fe3ffe6b468088211d4f25e5ba7ff84fdcca3b017bca16c4800684"
-sha256_hwrt     = "f6147f9033fe3ffe6b468088211d4f25e5ba7ff84fdcca3b017bca16c4800684"
+sha256_software = "7e71e2a6435de9581a7218f62c5aa9db89ca6229a6aeea01751246791163ff9b"
+sha256_hwrt     = "7e71e2a6435de9581a7218f62c5aa9db89ca6229a6aeea01751246791163ff9b"
 
 [grand_showcase_2mat.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -158,7 +174,7 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # RenderPathConfig{path: Forward, legs: Mesh} inserted as a Resource before app.run() --
 # see crates/boyko_app/tests/forward_mesh.rs. Reuses grand_showcase_2mat's EXACT five-sphere
 # scene verbatim (same mesh/materials/sun/sky/camera), so the dumped BMP is a DIRECT visual
-# comparator against the Deferred f6147f90 golden -- only the render path differs.
+# comparator against the Deferred 7e71e2a6 golden -- only the render path differs.
 # forward_opaque.fs.hlsl shades every mesh pixel inline (all-lights, no froxel) against the SAME
 # shared BRDF + combined CSM/punctual shadow visibility the deferred resolve uses (Set 1, this
 # scene has no CSM/atlas armed so those bindings are bound-but-unread).
@@ -166,7 +182,7 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # BACKGROUND = analytic sky (code-review follow-up): forward_sky.{vs,fs}.hlsl replicates the
 # deferred resolve's mask==0 sky/ground gradient + visible sun disc (deferred_pbr.hlsl:1369-1414)
 # token-for-token, drawn first inside forward_opaque's own begin_rendering scope (depth test/write
-# off) so opaque mesh geometry then draws over it -- matching the Deferred f6147f90 golden's
+# off) so opaque mesh geometry then draws over it -- matching the Deferred 7e71e2a6 golden's
 # background instead of a flat clear color, confirmed on real GPU (owner-verified render: five
 # spheres, correct materials/highlights, all 6 Deferred pins byte-identical).
 #
@@ -854,14 +870,25 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # same 5 pixels and deltas on both legs. The seed STAYS: it is the goldens' only witness of a
 # header-LEADS-host frame, and it refutes the shadow design's D4 premise that a static scene's
 # header only ever trails the host.
+#
+# LIGHT-TABLE R2 MOVED THESE BYTES BY ONE PIXEL (lane fix/light-table-defects; re-blessed
+# 2026-09-19 on the msvc host -- software 765de1d9 -> 31ce5178, hwrt 0acc66b5 -> c6429c3e). R2
+# makes the Deferred SDF marcher take the light table's primary sun instead of a boot constant (see
+# [grand_showcase_2mat]). This scene's sun IS that constant, [-0.45, 0.82, 0.36]
+# (crates/boyko_app/tests/taa_jitter_eval.rs, SUN_DIR), so the direction did not change, only its
+# bits. The old push was the raw, non-unit constant, normalised in the shader; the new one is the
+# table's value, the pose's direction after the quaternion round-trip, normalised by
+# GpuLight::from_directional. The two agree to rounding, and that difference crosses one 8-bit step
+# at one pixel: (236, 191), 1 LSB darker, the same pixel on both legs. An A/B that pushed the raw
+# constant through the new path restored 765de1d9 and 0acc66b5, so the rounding is the whole change.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_armed.bmp"
 width           = 512
 height          = 512
-sha256_software = "765de1d9866f37748bcf4182a21cd4d3307f94c140fb54300d6fd85adefa1b62"
-sha256_hwrt     = "0acc66b55dcbf6ccdbdade9b55e1861ac24a649df179bb1bbb74437058026b45"
+sha256_software = "31ce517879f042eb2579a5f666155193cf488f1f4da66e9ece12147fc65ffb31"
+sha256_hwrt     = "c6429c3ed8d87ac27b1603404f787e7f2cca275a683ee011517ac2fda91c9235"
 
 [taa_armed.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1421,14 +1448,20 @@ test_name       = "particle_lab_screenshot_dump"
 bmp             = "D:\\tmp\\particle_sdf_collide.bmp"
 width           = 512
 height          = 512
-# PENDING owner visual sign-off, captured 2026-08-20 (two byte-identical runs). The value is the
-# real digest, not the unblessed sentinel, so -Check regressions are caught from today; what is
+# PENDING owner visual sign-off, captured 2026-08-20 at 729f5ad6 (two byte-identical runs). The
+# value is the real digest, not the unblessed sentinel, so -Check regressions are caught; what is
 # outstanding is the OWNER's look at the BMP -- the only thing that can say the image is RIGHT
 # rather than merely stable and merely different from its control.
-sha256_software = "729f5ad69846b146dcd07dc840943234af3781b8b127fd5da760b918a6784704"
-# The HW-RT leg was NOT run for this pin. Seeded with the mechanically-checked unblessed sentinel
-# rather than a copy of the software digest, which would be a claim nobody made.
-sha256_hwrt     = "PENDING"
+# LIGHT-TABLE R2 moved it by ONE pixel (lane fix/light-table-defects; re-pinned 2026-09-19 on the
+# msvc host, 729f5ad6 -> c6a055a1): (463, 385), 1 LSB brighter. This scene's sun is the old boot
+# constant (crates/boyko_app/tests/particle_scene/mod.rs, SUN_DIR), so the marcher's sun changed
+# only in its bits -- the rounding recorded in [taa_armed]. An A/B that pushed the raw constant
+# through the new path restored 729f5ad6. The re-pin carries that rounding; it is not the sign-off.
+sha256_software = "c6a055a1518ca4deef97dd942a1b3592ff68e471733643f417b6336135b23bc3"
+# The HW-RT leg was first run during R2's testing (2026-09-19): 729f5ad6 on the pre-R2 tree and
+# c6a055a1 after, equal to the software leg both times; this re-pin's own run rendered c6a055a1
+# again. Pinned from that run, with the same owner sign-off outstanding as the software leg.
+sha256_hwrt     = "c6a055a1518ca4deef97dd942a1b3592ff68e471733643f417b6336135b23bc3"
 
 [particle_sdf_collide.env]
 BOYKO_DISABLE_VALIDATION = "1"

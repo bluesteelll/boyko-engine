@@ -577,7 +577,8 @@ pub use light::{
     CLUSTER_NEAR_DEFAULT, CSM_MODE_BIT, ClusterCell, ClusterConfig, ClusterSelectMode,
     DDGI_MODE_BIT, DirectionalLight, GPU_LIGHT_WORDS, GpuLight, INDEX_LIST_CAP,
     LIGHT_HEADER_BASE_WORDS,
-    LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT,
+    LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_MASK, LIGHT_KIND_POINT, LIGHT_KIND_SKY,
+    LIGHT_KIND_SPOT,
     LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS,
     MAX_LIGHTS_PER_CLUSTER, PUNCTUAL_MODE_BIT, PointLight, SLOT_NONE_FIELD, SPOT_COS_OUTER_MAX,
     SkyLight, SpotLight,
@@ -589,8 +590,8 @@ pub use light_policy::{CLUSTER_HI, CLUSTER_LO, LightStats, select_lighting_cull}
 pub use light_system::{
     GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightCollectSet, LightSeedState,
     LightTableGeneration, LightTableStaging, SetLightEnabledById, collect_lights, evict_light,
-    fold_light_table, fold_light_table_slotted, light_seed_state, set_light_enabled_now,
-    write_light_table,
+    fold_light_table, fold_light_table_slotted, light_seed_state, primary_directional_dir,
+    set_light_enabled_now, write_light_table,
 };
 pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree, mesh_view_t_norm};
 pub use loaders::{ObjMeshLoader, PngTextureLoader, RonMaterialLoader};

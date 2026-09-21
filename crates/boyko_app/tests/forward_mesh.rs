@@ -13,7 +13,7 @@
 //!
 //! Reuses [`grand_showcase_2mat`]'s EXACT five-sphere scene (same mesh, same five materials,
 //! same sun/sky, same camera) verbatim — so the dumped BMP is a DIRECT visual comparator against
-//! the Deferred `f6147f90` golden: same geometry/lighting/shadows, only the render PATH differs
+//! the Deferred `7e71e2a6` golden: same geometry/lighting/shadows, only the render PATH differs
 //! (Forward's inline all-lights shading vs Deferred's fat-gbuffer + compute resolve). The ONE
 //! delta from that test is inserting [`boyko_render::RenderPathConfig`] (`Forward` × `Mesh`) as a
 //! `World` resource before `app.run()` — `boyko_app::runner` reads it via `world.try_resource`
@@ -82,7 +82,7 @@ fn uv_sphere(radius: f32, stacks: u32, slices: u32, color: [f32; 4]) -> (Vec<Ver
 }
 
 /// Verbatim copy of `grand_showcase_2mat.rs::setup` — the SAME five-sphere scene, so the dumped
-/// BMP is a direct Forward-vs-Deferred visual comparator against `f6147f90`.
+/// BMP is a direct Forward-vs-Deferred visual comparator against `7e71e2a6`.
 fn setup(
     mut commands: Commands,
     mut meshes: NonSendResMut<Assets<MeshGpu>>,
