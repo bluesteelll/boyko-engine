@@ -10,7 +10,7 @@
 //! D8); the runner's non-Windows arm exits gracefully before this module is
 //! ever needed.
 
-use boyko_render::ResolvedRenderPath;
+use boyko_render::{ResolvedDdgi, ResolvedRenderPath};
 use boyko_rhi::Format;
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::{VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
@@ -136,6 +136,14 @@ pub(crate) struct WindowHost {
     /// `light_uploaded_gen[s] != generation` (the deterministic writer-side
     /// gate — see `crate::light_gate::light_upload_due`).
     pub(crate) light_uploaded_gen: [u64; FRAMES_IN_FLIGHT],
+    /// SDFDDGI host-hook: the last `ResolvedDdgi` image written into the SINGLE binding-18
+    /// grid UBO (`GpuSceneBundles::ddgi_ubo`) — the value gate for that write. Seeded
+    /// `DISABLED`, which IS the buffer's zero boot seed, so the first ENABLED carrier differs
+    /// and uploads; thereafter the runner writes only when the carrier is enabled AND differs
+    /// (a static frame does one 48-byte compare and no write; the zero image is never written
+    /// after boot — see `upload_ddgi_grid`'s single-buffer discipline). Cold: read once per
+    /// frame on the host path, 48 bytes.
+    pub(crate) last_ddgi_grid: ResolvedDdgi,
     /// Particles P0: per-in-flight-slot record of the `ParticleEffectScratch::rows_gen()` whose
     /// baked bytes were last written into that slot's effect staging.
     ///
@@ -277,6 +285,9 @@ impl WindowHost {
             // u64::MAX ≠ any real generation ⇒ both slots upload the ECS light
             // table on their first frames (host plan D5/R4).
             light_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],
+            // DISABLED == the b18 buffer's zero boot seed: the first enabled carrier differs
+            // from it and is uploaded; a never-enabled run never writes the buffer at all.
+            last_ddgi_grid: ResolvedDdgi::DISABLED,
             // Same `u64::MAX ≠ any real generation` seed, same reason: both slots upload the
             // baked particle effect table on their first frames.
             particle_effects_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],
