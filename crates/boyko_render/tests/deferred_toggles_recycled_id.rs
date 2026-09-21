@@ -81,7 +81,7 @@ enum ClaimOrder {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Site 1 — `validate_asset_refs`'s stale-mesh disable (`DisableStaleMeshCommand`).
+// Site 1 — `validate_asset_refs`'s stale-mesh mark (`SetStaleCommand` SETS the `RenderStale` bit).
 // ════════════════════════════════════════════════════════════════════════════
 
 /// A device-inert `MeshGpu` — see the module doc.

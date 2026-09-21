@@ -964,10 +964,10 @@ pub fn register_main_frame_systems(b: &mut ScheduleBuilder) {
     // run after validation or a gather draws a row the validation marked stale this
     // frame — the same order the gather helpers pin per consumer with
     // `.after_set(AssetValidateSet)`; this set edge covers the instance packs as well.
-    // Validation after the sync: since the prereq lane validation no longer reads
+    // Validation after the sync: since the prereq lane, validation no longer reads
     // `RenderEnabled` (its queries do not filter on it, so a hidden row's stale bit is
-    // maintained while hidden), so this edge carries no data today; it stays as the
-    // declared phase order R4b introduced, pinned by
+    // maintained while hidden), and this edge therefore carries no data today; it stays
+    // as the declared phase order R4b introduced, pinned by
     // `tests/host_orders_asset_validation_after_visibility_sync.rs`, and dropping it
     // is a ruling for the host's owner, not a merge. Validation cannot simply join
     // `Read`: a member shared by two ordered sets is rejected (`boyko-B9004`).
