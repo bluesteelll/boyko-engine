@@ -23,6 +23,9 @@
 //!  4. A manual `RenderEnabled` toggle on an entity whose `Visibility` did NOT
 //!     change is NOT overridden by `visibility_sync` (the system acts only on
 //!     `Changed<Visibility>`).
+//!  5. H-06 (unification plan 02, row A9): a toggle pending for `E` does NOT
+//!     land on `F`, spawned on `E`'s recycled id in the SAME frame — `F`'s bit
+//!     is unchanged and equals a run where `F` takes a fresh id.
 //!
 //! # How a `Visibility` change is driven
 //!
@@ -35,12 +38,13 @@
 //! `Mut<Transform>` via `apply_pending_move`. We therefore drive everything
 //! through a real `Schedule`.
 
+use boyko_ecs::ecs::core::commands::Command;
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::{Changed, Mut, Query};
 use boyko_ecs::ecs::core::schedule::{Schedule, ScheduleBuilder};
-use boyko_ecs::ecs::core::system::ResMut;
+use boyko_ecs::ecs::core::system::{Commands, ResMut};
 use boyko_ecs::ecs::identifiers::primitives::ArchetypeId;
 use boyko_threadpool::ThreadPoolBuilder;
 
@@ -386,5 +390,211 @@ fn manual_toggle_is_not_fought_on_unchanged_visibility() {
     assert!(
         world.is_enabled::<RenderEnabled>(e),
         "a real Visibility change DOES drive the bit (the bridge is live, not inert)"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Gate 5 — H-06: a toggle pending for E must not land on F, spawned on E's
+//          recycled id in the SAME frame (unification plan 02, row A9).
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The interleaving under test is: `visibility_sync` enqueues a toggle for E
+// while E is live → E is despawned and F is registered on E's id → the toggle
+// drains. Only the apply window can stage the middle step, so the harness
+// runs a second system, `killer`, CONCURRENTLY with `visibility_sync` (no
+// ordering edge; disjoint access) and lets the drain order do the rest:
+//
+// * `killer` is added FIRST and the pool has ONE worker. The dispatcher runs
+//   on the test thread (no worker lane), so both systems are pushed to the
+//   global FIFO injector in index order and the single worker runs `killer`
+//   then `visibility_sync`; `ScheduleBuilder::build`'s Kahn sort is
+//   insertion-stable, so index order is add order. Completions land in a
+//   FIFO `ArrayQueue`, and the apply-window gate fires only once BOTH have
+//   completed, so `killer`'s queue drains first — by construction, not by
+//   timing.
+// * `visibility_sync`'s body ran BEFORE any despawn applied (SCH7), so its
+//   query still yielded E, and E's toggle is in its queue when `killer`'s
+//   commands run.
+// * F is spawned by a command that calls `EcsMaster::create_entity` AT APPLY,
+//   on the dispatcher: `allocate_entity` pops the recycled stack before it
+//   mints, so the id `despawn(E)` pushed one command earlier is reused. (A
+//   worker-side `Commands::spawn` claims its id at ENQUEUE, before any despawn
+//   of this frame has applied, so it cannot stage the same-frame reuse.)
+//
+// Every run pins the recycle it relies on (`F.id == E.id`, generation + 1), so
+// a scheduler change that broke the interleaving would fail loudly rather than
+// pass on an F that never took E's slot.
+
+/// Which order `killer` enqueues its two commands in — the ONLY thing that
+/// differs between the recycled run and the fresh-id control.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum ClaimOrder {
+    /// `despawn(E)`, then spawn F at apply: F pops E's slot (same id,
+    /// generation + 1).
+    #[default]
+    Recycled,
+    /// Spawn F at apply, then `despawn(E)`: the free stack is empty when F is
+    /// allocated, so F mints a fresh id.
+    Fresh,
+}
+
+/// The frame's structural request: `killer` consumes `doomed` on the frame it
+/// runs; `SpawnHiddenAtApply` reports the handle F was registered under.
+#[derive(boyko_macros::Resource, Default)]
+struct KillRequest {
+    doomed: Option<Entity>,
+    arch: Option<ArchetypeId>,
+    order: ClaimOrder,
+    spawned: Option<Entity>,
+}
+
+/// Spawns a `Visibility::Hidden` row through the DISPATCHER's allocator, at
+/// apply time (see the gate's header for why the enqueue-time claim of
+/// `Commands::spawn` cannot stand in for this).
+struct SpawnHiddenAtApply {
+    arch: ArchetypeId,
+}
+
+impl Command for SpawnHiddenAtApply {
+    fn apply(self, world: &mut EcsMaster) {
+        let f = spawn_vis(world, self.arch, Visibility::Hidden);
+        world.resource_mut::<KillRequest>().spawned = Some(f);
+    }
+}
+
+/// Concurrent with `visibility_sync` (`ResMut<KillRequest>` + `Commands` vs
+/// `Query<&Visibility>` + `Commands`: no conflict, no edge). Enqueues the
+/// despawn of E and the apply-time spawn of F in the requested order.
+#[allow(clippy::needless_pass_by_value)]
+fn killer(mut commands: Commands, mut req: ResMut<KillRequest>) {
+    let Some(e) = req.doomed.take() else { return };
+    let arch = req.arch.expect("invariant: `arch` is set together with `doomed`");
+    match req.order {
+        ClaimOrder::Recycled => {
+            commands.despawn(e);
+            commands.add(SpawnHiddenAtApply { arch });
+        }
+        ClaimOrder::Fresh => {
+            commands.add(SpawnHiddenAtApply { arch });
+            commands.despawn(e);
+        }
+    }
+}
+
+/// What one H-06 frame left behind.
+#[derive(Debug)]
+struct H06Outcome {
+    e: Entity,
+    /// `None` when the frame despawned nothing (the toggle-is-live control).
+    f: Option<Entity>,
+    /// `is_enabled::<RenderEnabled>` on F after the frame (`false` if no F).
+    f_enabled: bool,
+    /// `is_enabled::<RenderEnabled>` on E after the frame (a dead E reads
+    /// `false`).
+    e_enabled: bool,
+    /// Whether the world's `enable_generation` moved across the frame — it is
+    /// bumped exactly once, on the FIRST toggle into an archetype, so on a
+    /// world whose only toggle is E's it says whether that toggle was applied
+    /// to a live row (any row) or dropped.
+    enable_generation_moved: bool,
+}
+
+/// One frame: E is spawned `Visible` (its Added `Visibility` is the pending
+/// toggle — an `enable`), then `killer` and `visibility_sync` run
+/// concurrently on a one-worker pool. `order == None` runs the control frame
+/// in which nothing is despawned.
+fn run_h06_frame(order: Option<ClaimOrder>) -> H06Outcome {
+    let mut world = EcsMaster::new();
+    world.insert_resource(KillRequest::default());
+    let arch = vis_archetype(&mut world);
+    let e = spawn_vis(&mut world, arch, Visibility::Visible);
+    {
+        let req = world.resource_mut::<KillRequest>();
+        req.doomed = order.map(|_| e);
+        req.arch = Some(arch);
+        req.order = order.unwrap_or_default();
+    }
+
+    // ONE worker + `killer` added FIRST: the dispatch and drain order the gate
+    // header derives.
+    let pool = ThreadPoolBuilder::new().num_threads(1).build();
+    let mut b = ScheduleBuilder::new(pool);
+    b.add_system(killer);
+    b.add_system(visibility_sync);
+    let mut sched = b.build(&mut world);
+
+    let gen_before = world.archetype_master().enable_generation();
+    sched.run(&mut world);
+    let gen_after = world.archetype_master().enable_generation();
+
+    let f = world.resource::<KillRequest>().spawned;
+    H06Outcome {
+        e,
+        f,
+        f_enabled: f.is_some_and(|f| world.is_enabled::<RenderEnabled>(f)),
+        e_enabled: world.is_enabled::<RenderEnabled>(e),
+        enable_generation_moved: gen_after != gen_before,
+    }
+}
+
+#[test]
+fn toggle_pending_for_a_despawned_entity_does_not_land_on_its_recycled_id() {
+    // Anti-vacuity 1 — the frame really carries a live `enable` for E: with
+    // nothing despawned, E's bit is SET after the frame.
+    let live = run_h06_frame(None);
+    assert!(live.f.is_none(), "control: nothing was spawned");
+    assert!(
+        live.e_enabled,
+        "control: the spawn frame's Added Visible drives E's bit — the toggle under test is live"
+    );
+    assert!(
+        live.enable_generation_moved,
+        "control: the first toggle into the archetype bumps enable_generation (the drain-order \
+         probe below reads this signal)"
+    );
+
+    // The recycled run.
+    let a = run_h06_frame(Some(ClaimOrder::Recycled));
+    let fa = a.f.expect("recycled run: SpawnHiddenAtApply registered F");
+    // Anti-vacuity 2 — the recycle happened as staged: F sits on E's id, one
+    // generation up (F3: the recycled entry carries the bumped generation).
+    assert_eq!(fa.id(), a.e.id(), "recycled run: F must take E's id (killer drained before the toggle)");
+    assert_eq!(
+        fa.generation(),
+        a.e.generation() + 1,
+        "recycled run: F carries E's slot generation + 1"
+    );
+    assert_ne!(fa, a.e, "recycled run: F and E are distinct handles on one id");
+
+    // THE H-06 ASSERTION. F was spawned `Hidden` and has never been toggled;
+    // E's pending `enable`, keyed by E's id, must not reach it.
+    assert!(
+        !a.f_enabled,
+        "H-06: a toggle pending for the despawned E landed on F, spawned on E's recycled id in \
+         the same frame — F ({fa:?}) was spawned Hidden, never toggled, and reads ENABLED",
+    );
+    // Drain-order pin, read on the fixed tree: E's toggle was DROPPED (no
+    // column allocation, so no bump). Had it resolved before `killer`'s
+    // despawn — E live — it would have allocated the archetype's column and
+    // bumped the generation, and this run would be green for the wrong
+    // reason.
+    assert!(
+        !a.enable_generation_moved,
+        "recycled run: the stale toggle must be dropped at apply, not applied to a live row"
+    );
+
+    // The fresh-id control: identical frame, F allocated BEFORE E's despawn.
+    let b = run_h06_frame(Some(ClaimOrder::Fresh));
+    let fb = b.f.expect("fresh run: SpawnHiddenAtApply registered F");
+    assert_ne!(fb.id(), b.e.id(), "fresh run: F must NOT take E's id (nothing was recycled yet)");
+    assert_eq!(fb.generation(), 0, "fresh run: a minted id starts at generation 0");
+    assert!(!b.f_enabled, "fresh run: F was spawned Hidden and never toggled");
+
+    // The plan's equality: the recycled run reads exactly what the fresh-id
+    // run reads.
+    assert_eq!(
+        (a.f_enabled, a.enable_generation_moved),
+        (b.f_enabled, b.enable_generation_moved),
+        "H-06: F's bit (and the toggle's fate) must not depend on whether F recycled E's id"
     );
 }
