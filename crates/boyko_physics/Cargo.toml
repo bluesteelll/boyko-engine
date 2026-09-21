@@ -116,7 +116,13 @@ harness = false
 [[bench]]
 # O2 A/B: the grid broadphase vs the shipped all-pairs loop at {100, 1k, 10k}
 # bodies — reports the measured crossover (the plan promises only "expect
-# O(100s)", not a number).
+# O(100s)", not a number). Plus gate G4 of the tree broadphase design (the
+# `bp_g4_*` groups, commit C3): all_pairs / grid_w1 / grid_w8 / tree at the
+# design's sizes over uniform, size-disparity and in-scene (J, J snapshot, 10k,
+# 100k) bodies, and the maintenance arms at 1 240 / 10k / 100k members
+# (build from empty, admission of 64, eviction filter, one-row shift, compaction,
+# ruling W1's high jumper). Its constants (TREE_BRUTE_MAX_ROWS, ADMIT_BUILD_RATIO,
+# AUTO_TREE_LO/HI) are read off this bench in the quiet window (C4).
 name = "broadphase"
 harness = false
 
@@ -241,7 +247,8 @@ harness = false
 # Defect A (interim): what the row identity map costs per kind of structural change, on the
 # real colored schedule over the Jolt pyramid plus two sphere churn pools — stable /
 # swap_churn / archetype_shift / first_archetype_spawn / burst_despawn / burst_migrate, each
-# × sleeping {off, on}. Only `Schedule::run` is timed; the structural change between steps is
+# × sleeping {off, on} × broadphase {allpairs, tree} (the tree broadphase design's G4 churn
+# row, commit C3). Only `Schedule::run` is timed; the structural change between steps is
 # not. docs/MEASUREMENT-QUEUE.md §6 holds the arms and the rules (R2, R3).
 name = "row_identity_churn"
 harness = false

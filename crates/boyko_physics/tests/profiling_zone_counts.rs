@@ -18,14 +18,23 @@
 //! | `phys_color_wide` / `phys_color_narrow` | (wide / narrow colors) × 12 sweeps |
 //! | `phys_sleep_begin` / `phys_sleep_freeze` / `phys_sleep_end` | 0 / 0 / 0 sleeping off; 1 / 2 / 1 on |
 //! | `phys_np_dispatch` / `phys_np_compact` / `phys_np_axis_commit` | 1 each when the recomputed narrowphase chunk count is at least 2, else 0 |
-//! | each of the seven counters | 1, with the step's value as its total |
+//! | `phys_bp_verify` / `phys_bp_build` / `phys_bp_query` / `phys_bp_assemble` | 1 each on a tree-path step, 0 on the AllPairs step |
+//! | each of the seven step counters | 1, with the step's value as its total |
+//! | `phys_bp_queried` / `phys_bp_members` / `phys_bp_rebuilds` | tree path: (1, N − members) / (1, [step ≥ 2]) / (1, [step == 2]); AllPairs: (0, 0) |
 //! | every system of the schedule (its `SystemSpan`) | 1 |
 //!
 //! The first [`STEPS_OFF`] steps run with sleeping off, the parity configuration; summed over
 //! them the counts are the plan's literals — build 3, gravity = warm = integrate = biased = 12,
-//! relax 24. The last [`STEPS_ON`] steps run with sleeping on, so the three sleep zones are
+//! relax 24. The next [`STEPS_ON`] steps run with sleeping on, so the three sleep zones are
 //! counted too; no island can freeze that early (the debounce is 60 steps), and the test asserts
-//! every dynamic row awake, so every manifold is still solved and the recomputation holds.
+//! every dynamic row awake, so every manifold is still solved and the recomputation holds. The
+//! next [`STEPS_BRUTE`] step keeps the Tree but raises `brute_max_rows` above the row count (the
+//! brute loop), and the last [`STEPS_ALLPAIRS`] step switches the broadphase to `AllPairs`; on
+//! both every tree zone and counter must read zero.
+//!
+//! The tree counters are pinned to the scene's structure, not read back from the tree's own
+//! `diag()`: the floor is the scene's one static, so it is pending at step 1 and admitted at
+//! step 2 (rent 2 ≥ 1 + 1/4), after which it is the one member; every other row is queried.
 //!
 //! # The independent recomputation
 //!
@@ -80,15 +89,19 @@ use boyko_diag::profiling_abi::{ZoneHandle, zone_id};
 use boyko_ecs::ecs::core::profiling::SYSTEM_ZONES_COMPILED;
 use boyko_physics::narrowphase::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};
 use boyko_physics::profiling::{
-    COUNTER_ZONES, PHYS_BP_PAIRS, PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE,
-    PHYS_NP_AXIS_COMMIT, PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_MANIFOLDS,
-    PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION,
-    PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE,
-    PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONES,
+    COUNTER_ZONE_COUNT, COUNTER_ZONES, PHYS_BP_ASSEMBLE, PHYS_BP_BUILD, PHYS_BP_MEMBERS,
+    PHYS_BP_PAIRS, PHYS_BP_QUERIED, PHYS_BP_QUERY, PHYS_BP_REBUILDS, PHYS_BP_VERIFY,
+    PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT,
+    PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS,
+    PHYS_NP_POINTS, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN,
+    PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
+    PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
     WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
 };
+use boyko_physics::broadphase_tree::BroadphaseTree;
 use boyko_physics::resources::{
-    ConstraintGraph, ContactPairs, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
+    BroadphaseKind, ConstraintGraph, ContactPairs, IslandSleep, Manifolds, PhysicsConfig,
+    SolverScratch,
 };
 
 use harness::{Scene, WORKERS, run_single_test};
@@ -99,6 +112,14 @@ const TEST_NAME: &str = "physics_zones_count_exactly";
 const STEPS_OFF: usize = 3;
 /// Steps with sleeping on after them, for the sleep zones.
 const STEPS_ON: usize = 2;
+/// One step on the Tree's brute path (`brute_max_rows` raised above the row count): the tree
+/// zones and counters read zero there too — the "Tree with N ≤ brute" row of the design's
+/// per-path table (W5).
+const STEPS_BRUTE: usize = 1;
+/// One last step on the `AllPairs` broadphase: the tree zones and counters read zero.
+const STEPS_ALLPAIRS: usize = 1;
+/// Every step.
+const STEPS: usize = STEPS_OFF + STEPS_ON + STEPS_BRUTE + STEPS_ALLPAIRS;
 
 fn main() {
     run_single_test(TEST_NAME, physics_zones_count_exactly);
@@ -210,9 +231,26 @@ fn physics_zones_count_exactly() {
 
     let mut literal = [0u64; 6]; // build, gravity, warm, integrate, biased, relax over STEPS_OFF
 
-    for step in 0..STEPS_OFF + STEPS_ON {
+    for step in 0..STEPS {
         let sleeping = step >= STEPS_OFF;
         scene.set_sleeping(sleeping);
+        // The path is derived from the configuration, the row count and `brute_max_rows()`,
+        // never from the implementation: tree-path steps, then one Tree step with
+        // `brute_max_rows` above N (the brute loop), then one `AllPairs` step.
+        let tree_path = step < STEPS_OFF + STEPS_ON;
+        if step == STEPS_OFF + STEPS_ON {
+            scene.world.resource_mut::<BroadphaseTree>().set_brute_max_rows(u32::MAX);
+        }
+        if step >= STEPS_OFF + STEPS_ON + STEPS_BRUTE {
+            scene.set_broadphase(BroadphaseKind::AllPairs);
+        }
+        {
+            let cfg = scene.world.resource::<PhysicsConfig>().broadphase;
+            let brute = scene.world.resource::<BroadphaseTree>().brute_max_rows();
+            let rows = scene.world.resource::<SolverScratch>().bodies_len() as u32;
+            let derived = cfg == BroadphaseKind::Tree && (step == 0 || rows > brute);
+            assert_eq!(derived, tree_path, "step {step}: the path derived from cfg / N / brute_max_rows");
+        }
 
         let spans_before = snapshot(&scene, &span_ids);
         let counters_before = snapshot(&scene, &counter_ids);
@@ -269,9 +307,19 @@ fn physics_zones_count_exactly() {
         );
         let np = u64::from(np_chunks >= 2);
 
+        // The tree broadphase's structure: the harness scene's one static (the floor) is pending
+        // at step 1 and admitted at step 2 — one rebuild there, one member from then on, every
+        // other row queried. Recomputed from the row count and the step, not from `diag()`.
+        let rows = scene.rows();
+        assert_eq!(rows, scene.boxes.len() as u64 + 1, "step {step}: the floor and every box are rows");
+        let tp = u64::from(tree_path);
+        let bp_members = tp * u64::from(step >= 2);
+        let bp_rebuilds = tp * u64::from(step == 2);
+        let bp_queried = tp * (rows - bp_members);
+
         let on = u64::from(ZONES_COMPILED);
         let sl = u64::from(sleeping);
-        let expected_spans: [(&ZoneHandle, u64); 17] = [
+        let expected_spans: [(&ZoneHandle, u64); SPAN_ZONE_COUNT] = [
             (&PHYS_SOLVE_BUILD, 1),
             (&PHYS_GRAVITY, substeps),
             (&PHYS_WARM_APPLY, substeps),
@@ -289,6 +337,10 @@ fn physics_zones_count_exactly() {
             (&PHYS_NP_DISPATCH, np),
             (&PHYS_NP_COMPACT, np),
             (&PHYS_NP_AXIS_COMMIT, np),
+            (&PHYS_BP_VERIFY, tp),
+            (&PHYS_BP_BUILD, tp),
+            (&PHYS_BP_QUERY, tp),
+            (&PHYS_BP_ASSEMBLE, tp),
         ];
         for (k, &(handle, want)) in expected_spans.iter().enumerate() {
             assert!(
@@ -306,16 +358,21 @@ fn physics_zones_count_exactly() {
             );
         }
 
-        let expected_counters: [(&ZoneHandle, u64); 7] = [
-            (&PHYS_SLOTS_WIDE, shape.wide_slots),
-            (&PHYS_SLOTS_NARROW, shape.narrow_slots),
-            (&PHYS_NP_PAIRS, shape.pairs),
-            (&PHYS_NP_MANIFOLDS, shape.manifolds),
-            (&PHYS_NP_POINTS, shape.points),
-            (&PHYS_BP_PAIRS, shape.pairs),
-            (&PHYS_NP_CHUNKS, np_chunks),
+        // (samples per step, value): the seven step counters sample once per step; the three
+        // tree counters once per tree-path step and never otherwise.
+        let expected_counters: [(&ZoneHandle, u64, u64); COUNTER_ZONE_COUNT] = [
+            (&PHYS_SLOTS_WIDE, 1, shape.wide_slots),
+            (&PHYS_SLOTS_NARROW, 1, shape.narrow_slots),
+            (&PHYS_NP_PAIRS, 1, shape.pairs),
+            (&PHYS_NP_MANIFOLDS, 1, shape.manifolds),
+            (&PHYS_NP_POINTS, 1, shape.points),
+            (&PHYS_BP_PAIRS, 1, shape.pairs),
+            (&PHYS_NP_CHUNKS, 1, np_chunks),
+            (&PHYS_BP_QUERIED, tp, bp_queried),
+            (&PHYS_BP_MEMBERS, tp, bp_members),
+            (&PHYS_BP_REBUILDS, tp, bp_rebuilds),
         ];
-        for (k, &(handle, value)) in expected_counters.iter().enumerate() {
+        for (k, &(handle, samples, value)) in expected_counters.iter().enumerate() {
             assert!(
                 std::ptr::eq(handle, COUNTER_ZONES[k]),
                 "the expectation table follows COUNTER_ZONES' order"
@@ -324,9 +381,9 @@ fn physics_zones_count_exactly() {
             let total = counters_after[k].1 - counters_before[k].1;
             assert_eq!(
                 (count, total),
-                (on, value * on),
+                (samples * on, value * samples * on),
                 "step {step}: counter `{}` recorded (samples, total) = ({count}, {total}), the \
-                 step has (1, {value})",
+                 step has ({samples}, {value})",
                 name_of(handle)
             );
         }
@@ -351,8 +408,13 @@ fn physics_zones_count_exactly() {
     // first step or between the per-step snapshots.
     assert_eq!(
         scene.lifetime(&PHYS_SOLVE_BUILD).count,
-        (STEPS_OFF + STEPS_ON) as u64 * u64::from(ZONES_COMPILED),
+        STEPS as u64 * u64::from(ZONES_COMPILED),
         "one build span per step since the arm"
+    );
+    assert_eq!(
+        scene.lifetime(&PHYS_BP_VERIFY).count,
+        (STEPS_OFF + STEPS_ON) as u64 * u64::from(ZONES_COMPILED),
+        "one verify span per tree-path step since the arm, none on the AllPairs step"
     );
 
     let drops = scene.profiler().drops();

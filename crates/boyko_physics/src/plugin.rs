@@ -29,6 +29,7 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 
 use crate::broadphase_policy::{PhysicsStats, select_broadphase};
+use crate::broadphase_tree::BroadphaseTree;
 use crate::resources::{
     BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode, IslandSleep,
     Manifolds, PhysicsConfig, SolverScratch,
@@ -524,6 +525,10 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // so `physics_broadphase`'s `ResMut<BroadphaseGrid>` param always resolves; it
     // stays untouched while `PhysicsConfig::broadphase` is the default `AllPairs`.
     world.insert_resource(BroadphaseGrid::with_capacity(INITIAL_BODY_CAPACITY));
+    // The tree broadphase's state (capacity-reused). Inserted unconditionally so
+    // `physics_broadphase`'s `ResMut<BroadphaseTree>` param always resolves; it
+    // stays untouched while `PhysicsConfig::broadphase` is not `Tree`.
+    world.insert_resource(BroadphaseTree::with_capacity(INITIAL_BODY_CAPACITY));
     // P3: the cold broadphase-policy cost-model carrier (the `select_broadphase`
     // density selector's situation key + hysteresis band). Inserted unconditionally
     // so the policy's `ResMut<PhysicsStats>` param always resolves; it cold-starts

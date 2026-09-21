@@ -38,6 +38,10 @@
 //! | [`PHYS_NP_DISPATCH`] | the parallel narrowphase's stage growth, spawn and join | 1 when it dispatched, else 0 |
 //! | [`PHYS_NP_COMPACT`] | its join of the chunks' runs into the two streams | 1 when it dispatched, else 0 |
 //! | [`PHYS_NP_AXIS_COMMIT`] | its serial replay of the axis writes | 1 when it dispatched, else 0 |
+//! | [`PHYS_BP_VERIFY`] | the tree broadphase's verify pass and maintenance | 1 on a tree-path step, else 0 |
+//! | [`PHYS_BP_BUILD`] | its active-tree build | 1 on a tree-path step, else 0 |
+//! | [`PHYS_BP_QUERY`] | its queries and Wide-row loops | 1 on a tree-path step, else 0 |
+//! | [`PHYS_BP_ASSEMBLE`] | its pair assembly | 1 on a tree-path step, else 0 |
 //!
 //! The narrowphase dispatches when `parallel_narrowphase` is on, a pool of at least two workers
 //! is attached and the pair count yields at least two chunks — the chunk count
@@ -45,8 +49,15 @@
 //! (`narrowphase/dispatch.rs`). Its three zones open only after that decision, so a step that
 //! runs the serial loop opens none of them.
 //!
-//! Each of the seven counters is emitted exactly once per step, including when its value is zero,
-//! so its per-step sample count is 1 and its per-step `total` is the value:
+//! A **tree-path step** is one with `PhysicsConfig::broadphase == Tree` and more rows than
+//! `BroadphaseTree::brute_max_rows()`; the `AllPairs` and `Grid` arms, and the Tree's brute
+//! path at or below that count, open none of the four `phys_bp_*` spans and emit none of the
+//! three `phys_bp_*` structural counters (`broadphase_tree/mod.rs`). A reader derives the path
+//! from the configuration, the row count and `brute_max_rows()` — never from the implementation.
+//!
+//! Each of the seven step counters is emitted exactly once per step, including when its value is
+//! zero, so its per-step sample count is 1 and its per-step `total` is the value; the three
+//! tree counters are emitted once per tree-path step and not otherwise:
 //!
 //! | Counter | Value |
 //! |---|---|
@@ -57,6 +68,9 @@
 //! | [`PHYS_NP_POINTS`] | live contact points over those manifolds |
 //! | [`PHYS_BP_PAIRS`] | candidate pairs the broadphase emitted |
 //! | [`PHYS_NP_CHUNKS`] | chunks the narrowphase dispatched (0 when it ran the serial loop) |
+//! | [`PHYS_BP_QUERIED`] | rows the tree broadphase queried or looped (`\|Q\| + \|Wide\|`), tree path only |
+//! | [`PHYS_BP_MEMBERS`] | rows in its persistent sets (`\|S\| + \|Z\|`), tree path only |
+//! | [`PHYS_BP_REBUILDS`] | its admissions and compactions this step, tree path only |
 //!
 //! A step with no simulated dynamic body returns from the solve before its first zone, so the
 //! solve zones and the two slot counters are absent on that step; the broadphase and narrowphase
@@ -105,6 +119,13 @@ declare_zone!(PHYS_NP_DISPATCH, name = "phys_np_dispatch", scope = ROOT_SCOPE, t
 declare_zone!(PHYS_NP_COMPACT, name = "phys_np_compact", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_NP_AXIS_COMMIT, name = "phys_np_axis_commit", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 
+// ── The tree broadphase's zones ───────────────────────────────────────────────
+
+declare_zone!(PHYS_BP_VERIFY, name = "phys_bp_verify", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_BP_BUILD, name = "phys_bp_build", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_BP_QUERY, name = "phys_bp_query", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_BP_ASSEMBLE, name = "phys_bp_assemble", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+
 // ── The per-step counters ─────────────────────────────────────────────────────
 
 declare_zone!(PHYS_SLOTS_WIDE, name = "phys_slots_wide", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
@@ -114,13 +135,23 @@ declare_zone!(PHYS_NP_MANIFOLDS, name = "phys_np_manifolds", scope = ROOT_SCOPE,
 declare_zone!(PHYS_NP_POINTS, name = "phys_np_points", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_BP_PAIRS, name = "phys_bp_pairs", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_NP_CHUNKS, name = "phys_np_chunks", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_BP_QUERIED, name = "phys_bp_queried", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_BP_MEMBERS, name = "phys_bp_members", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_BP_REBUILDS, name = "phys_bp_rebuilds", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+
+/// Span zones this crate declares: the length of [`SPAN_ZONES`], so a reader's expectation
+/// table is typed by it and a zone without an expectation does not compile.
+pub const SPAN_ZONE_COUNT: usize = 21;
+
+/// Counter zones this crate declares: the length of [`COUNTER_ZONES`].
+pub const COUNTER_ZONE_COUNT: usize = 10;
 
 /// Every span zone this crate declares, in the order of the table in the module docs.
 ///
 /// A reader resolves each one's id with [`zone_id`] and its name from `desc.name`, so it never
 /// infers an id from declaration order: ids come from one process-wide counter shared with every
 /// other zone and every system span.
-pub static SPAN_ZONES: [&ZoneHandle; 17] = [
+pub static SPAN_ZONES: [&ZoneHandle; SPAN_ZONE_COUNT] = [
     &PHYS_SOLVE_BUILD,
     &PHYS_GRAVITY,
     &PHYS_WARM_APPLY,
@@ -138,10 +169,14 @@ pub static SPAN_ZONES: [&ZoneHandle; 17] = [
     &PHYS_NP_DISPATCH,
     &PHYS_NP_COMPACT,
     &PHYS_NP_AXIS_COMMIT,
+    &PHYS_BP_VERIFY,
+    &PHYS_BP_BUILD,
+    &PHYS_BP_QUERY,
+    &PHYS_BP_ASSEMBLE,
 ];
 
 /// Every counter this crate declares, in the order of the counter table in the module docs.
-pub static COUNTER_ZONES: [&ZoneHandle; 7] = [
+pub static COUNTER_ZONES: [&ZoneHandle; COUNTER_ZONE_COUNT] = [
     &PHYS_SLOTS_WIDE,
     &PHYS_SLOTS_NARROW,
     &PHYS_NP_PAIRS,
@@ -149,10 +184,13 @@ pub static COUNTER_ZONES: [&ZoneHandle; 7] = [
     &PHYS_NP_POINTS,
     &PHYS_BP_PAIRS,
     &PHYS_NP_CHUNKS,
+    &PHYS_BP_QUERIED,
+    &PHYS_BP_MEMBERS,
+    &PHYS_BP_REBUILDS,
 ];
 
 /// Whether this build compiles the physics zones at all. Every zone is `Deep`, so one `const`
-/// answers for all twenty-four; `false` under a profile whose tier ceiling is below `Deep`, where
+/// answers for all thirty-one; `false` under a profile whose tier ceiling is below `Deep`, where
 /// every site folds to nothing and an armed profiler records none of them.
 pub const ZONES_COMPILED: bool = (PHYS_SOLVE_BUILD::TIER as u8) <= (GLOBAL_TIER as u8);
 
