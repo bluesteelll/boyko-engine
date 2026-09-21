@@ -188,7 +188,7 @@ fn grand_showcase_2mat_screenshot_dump() {
     app.add_startup_system(setup);
     // Owner-eval AA oracle: `BOYKO_AA=fxaa`/`smaa` arms the FXAA/SMAA post-process pass on
     // this high-contrast 5-sphere scene (real silhouette edges for AA to smooth). Unset ⇒
-    // the `AaPlugin` default (`AaMode::Off`) ⇒ the pinned `f6147f90` golden is unchanged.
+    // the `AaPlugin` default (`AaMode::Off`) ⇒ the pinned `7e71e2a6` golden is unchanged.
     if std::env::var("BOYKO_AA").as_deref() == Ok("fxaa") {
         app.insert_resource(AaConfig { mode: AaMode::Fxaa });
     } else if std::env::var("BOYKO_AA").as_deref() == Ok("smaa") {
@@ -223,7 +223,7 @@ fn grand_showcase_2mat_screenshot_dump() {
     // Render P7-Q2 owner-eval SSAO oracle: `BOYKO_SSAO=low`/`medium`/`high` arms the SSAO
     // compute pass on this 5-sphere scene (mirrors the `BOYKO_AA` knob above). Unset ⇒ the
     // `SsaoPlugin` default (`SsaoQuality::Off`) ⇒ `scene.ssao == None` ⇒ the pinned
-    // `f6147f90` golden is unchanged (the 0%-gate).
+    // `7e71e2a6` golden is unchanged (the 0%-gate).
     let ssao_quality = match std::env::var("BOYKO_SSAO").as_deref() {
         Ok("low") => SsaoQuality::Low,
         Ok("medium") => SsaoQuality::Medium,

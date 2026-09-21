@@ -26,7 +26,7 @@ use crate::compute::{
     ALPHA_MARGIN, AO_FALLOFF, AO_STEP, AO_STRENGTH, BRICK_CLASS_EMPTY_OUTSIDE, BrickLevelParams,
     CompositeCamera, DEFAULT_LIGHT_DIR, EPS_COARSE, FIELD_LIPSCHITZ_L, GOLDEN_ATLAS_SLOT_MASK, GOLDEN_ATLAS_SLOT_SHIFT,
     GOLDEN_LIGHT_FLAG_CASTS_SHADOW, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_MASK, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SKY, GOLDEN_LIGHT_KIND_SPOT,
-    GOLDEN_SLOT_NONE, GOLDEN_SPOT_COS_OUTER_MAX, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, M2_GRID_DIM, M2_REFINE_ITERS, M2_REFINE_RELAX, M4GridParams, MAX_IT_COARSE, MAX_SDF_SHADOW_CASTERS_PER_PIXEL,
+    GOLDEN_SLOT_NONE, GOLDEN_SLOT_NONE_FIELD, GOLDEN_SPOT_COS_OUTER_MAX, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, M2_GRID_DIM, M2_REFINE_ITERS, M2_REFINE_RELAX, M4GridParams, MAX_IT_COARSE, MAX_SDF_SHADOW_CASTERS_PER_PIXEL,
     MESH_COLOR, MESH_DEPTH_CLEAR, MESH_DEPTH_T_MAX, MESH_RASTER_ALBEDO, PBR_FAR, PBR_LIGHT_COLOR, PBR_LIGHT_DIR,
     PBR_SKY_DIFFUSE, PBR_SKY_SPEC, SDF_CAM_Z, SDF_EPS, SDF_HALF_EXTENT, SDF_MAX_IT,
     SDF_T_MAX, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, SHADOW_NDOTL_EPS,
@@ -1305,12 +1305,13 @@ impl GoldenLight {
     /// A point light (mirrors `GpuLight::from_point`, Lighting L0b): position + range in
     /// `pos_range`, the baked intensity `I = Φ / (4π)` premultiplied into the color lane.
     /// `power` is the luminous power `Φ`. The L0b resolve oracle consumes `pos_range` (the
-    /// world position + the cull radius) + the baked color.
+    /// world position + the cull radius) + the baked color. The kind word carries
+    /// [`GOLDEN_SLOT_NONE_FIELD`] (no atlas map) until [`Self::with_atlas_slot`] assigns one.
     #[inline]
     pub fn point(position: [f32; 3], color: [f32; 3], power: f32, range: f32) -> Self {
         let i = power / (4.0 * core::f32::consts::PI);
         Self {
-            dir_kind: [0.0, 0.0, 0.0, f32::from_bits(GOLDEN_LIGHT_KIND_POINT)],
+            dir_kind: [0.0, 0.0, 0.0, f32::from_bits(GOLDEN_LIGHT_KIND_POINT | GOLDEN_SLOT_NONE_FIELD)],
             pos_range: [position[0], position[1], position[2], range],
             color_cone: [color[0] * i, color[1] * i, color[2] * i, 0.0],
         }
@@ -1321,7 +1322,9 @@ impl GoldenLight {
     /// `I = Φ / (2π(1 − cos(outer)))` premultiplied into the color lane, and the cone
     /// cosines packed (two f16) into `color_cone.w`. `inner_deg`/`outer_deg` are cone
     /// half-angles in degrees; `cos(outer)` is clamped to `SPOT_COS_OUTER_MAX` (0.9999) so
-    /// the intensity stays bounded — mirroring the host constructor's release safety net.
+    /// the intensity stays bounded — mirroring the host constructor's release safety net. The
+    /// kind word carries [`GOLDEN_SLOT_NONE_FIELD`] (no atlas map) until
+    /// [`Self::with_atlas_slot`] assigns one.
     #[inline]
     pub fn spot(
         position: [f32; 3],
@@ -1338,7 +1341,7 @@ impl GoldenLight {
         let i = power / denom;
         let d = v_normalize(direction);
         Self {
-            dir_kind: [d[0], d[1], d[2], f32::from_bits(GOLDEN_LIGHT_KIND_SPOT)],
+            dir_kind: [d[0], d[1], d[2], f32::from_bits(GOLDEN_LIGHT_KIND_SPOT | GOLDEN_SLOT_NONE_FIELD)],
             pos_range: [position[0], position[1], position[2], range],
             color_cone: [
                 color[0] * i,
@@ -1378,7 +1381,10 @@ impl GoldenLight {
     /// host mirror of `boyko_render::shadow_atlas::pack_atlas_slot` (the SAME bit layout the resolve
     /// reads via `light_table.hlsli::light_atlas_slot`). The kind tag (bits 0..16) is preserved; a
     /// real slot (`slot != GOLDEN_SLOT_NONE`) also sets [`GOLDEN_LIGHT_FLAG_CASTS_SHADOW`] (bit 16),
-    /// so the resolve branches onto the map sample. `slot` MUST be `< 16` (the layer budget) or
+    /// as the host does. The resolve branches onto the map sample on the header's punctual bit and
+    /// the slot field alone (`light_atlas_slot(kind) != SLOT_NONE`), never on bit 16, which is why
+    /// [`Self::point`] / [`Self::spot`] build the field as [`GOLDEN_SLOT_NONE_FIELD`] and this
+    /// builder replaces it. `slot` MUST be `< 16` (the layer budget) or
     /// exactly [`GOLDEN_SLOT_NONE`]; a debug build asserts it. The demo hand-builds the light table,
     /// so it stamps the slot directly with this builder; the real-app path is the
     /// `resolve_shadow_atlas` → light-table-assembly seam (`boyko_render::shadow_atlas`).

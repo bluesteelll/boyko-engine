@@ -4,6 +4,7 @@
 use boyko_ecs::ecs::core::app::{App, Plugin};
 
 use crate::propagation::{ensure_detach_observer, propagate_transforms};
+use crate::sets::VisibilitySet;
 use crate::visibility_sync::visibility_sync;
 
 /// Registers [`propagate_transforms`](crate::propagation::propagate_transforms)
@@ -21,11 +22,11 @@ use crate::visibility_sync::visibility_sync;
 ///
 /// `visibility_sync` is registered `.after(propagate_transforms)` so the durable
 /// `Visibility` → `RenderEnabled` bridge sits in the documented per-frame chain
-/// (authoring intent → effective pose → GPU pack). It must run BEFORE the render
-/// pack (`sync_gpu_3d_instances`, which filters `Enabled<RenderEnabled>`); that
-/// cross-crate edge is contract-documented — add `Render3dPlugin` together with
-/// this plugin (see [`visibility_sync`](crate::visibility_sync::visibility_sync)
-/// for the full add-order contract).
+/// (authoring intent → effective pose → GPU pack). It must run BEFORE every
+/// `RenderEnabled` reader (`sync_gpu_3d_instances` and the other systems that filter
+/// `Enabled<RenderEnabled>`), so it joins [`VisibilitySet::Sync`]; the composing host
+/// orders `VisibilitySet::Read` after it (see
+/// [`visibility_sync`] for the full contract).
 ///
 /// The scratch resource ([`TransformPropagationScratch`]) is lazily inserted by
 /// the system on first run (no explicit `init_resource` is required), keeping
@@ -52,7 +53,7 @@ impl Plugin for TransformPlugin {
         // dependency). Both keys are captured in this single closure.
         app.add_systems_cfg(|b| {
             let propagate = b.add_system(propagate_transforms).key();
-            b.add_system(visibility_sync).after(propagate);
+            b.add_system(visibility_sync).after(propagate).in_set(VisibilitySet::Sync);
         });
     }
 

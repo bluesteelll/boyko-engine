@@ -45,6 +45,7 @@
 //! `position = GlobalTransform.translation`.
 
 use boyko_ecs::ecs::core::iters::query::{Changed, Mut, Query};
+use boyko_macros::SystemSet;
 use boyko_math::Vec3;
 use boyko_scene::GlobalTransform;
 
@@ -55,6 +56,28 @@ use crate::light::{DirectionalLight, PointLight, SpotLight};
 /// world `-Z` (a directional's to-light dir; a spot's shine axis — see the
 /// module docs).
 const LOCAL_FORWARD: Vec3 = Vec3::new(0.0, 0.0, -1.0);
+
+/// The `Main`-schedule ordering seam that names [`light_reconcile`] for the systems OUTSIDE
+/// [`LightingPlugin`](crate::light_plugin::LightingPlugin) that write what it reads and read
+/// what it writes.
+///
+/// `light_reconcile` reads each light's [`GlobalTransform`], which `propagate_transforms` (in
+/// `CameraSet::Resolve`, `boyko_scene`'s `CameraPlugin`) writes, and writes each light's
+/// `direction` / `position`, which two systems read: the CSM fit
+/// ([`resolve_csm_cascades`](crate::csm_config::resolve_csm_cascades), in
+/// [`CsmPlugin`](crate::csm_plugin::CsmPlugin)) reads the sun's `direction`, and the punctual
+/// atlas resolve ([`resolve_shadow_atlas`](crate::shadow_atlas::resolve_shadow_atlas), in
+/// [`ShadowAtlasPlugin`](crate::shadow_plugin::ShadowAtlasPlugin)) ranks and fits the spots and
+/// points by their `position` / `direction`. All four are registered by different plugins, so
+/// their `SystemKey`s are not co-visible: the edges are pinned by name. `LightingPlugin` joins
+/// `light_reconcile` to this set (membership only), and the composing host configures
+/// `LightReconcileSet.after(CameraSet::Resolve)`, `CsmResolveSet.after(LightReconcileSet)` and
+/// `PunctualResolveSet.after(LightReconcileSet)` (`boyko_app::EnginePlugins` does) — declared
+/// there, like `CsmResolveSet.after(CsmFitSet)`, because a world may compose `LightingPlugin`
+/// without `CsmPlugin` or `ShadowAtlasPlugin`, and an edge naming a memberless set warns
+/// `boyko-W1501`.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LightReconcileSet;
 
 /// Derives the light's world `direction` from a `GlobalTransform`:
 /// `normalize(matrix3 · (0, 0, -1))` — the transform's world `-Z`. This is the
@@ -94,9 +117,10 @@ fn bits_ne(a: [f32; 3], b: [f32; 3]) -> bool {
 }
 
 /// Writes each light's `GlobalTransform`-derived pose into its component, value-
-/// and `Changed`-gated (see the module docs). Runs BEFORE `collect_lights` and
-/// AFTER transform propagation (wired by
-/// [`LightingPlugin`](crate::light_plugin::LightingPlugin)).
+/// and `Changed`-gated (see the module docs). Runs BEFORE `collect_lights` (wired
+/// by key in [`LightingPlugin`](crate::light_plugin::LightingPlugin)) and AFTER
+/// transform propagation (wired by name through [`LightReconcileSet`] by the
+/// composing host).
 ///
 /// A `SkyLight` has no pose dependency and is not reconciled. A light without a
 /// `GlobalTransform` is not matched by any query here, so its self-contained pose

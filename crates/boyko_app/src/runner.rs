@@ -1884,6 +1884,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             } else {
                 None
             };
+            // R2: the Deferred marcher's sun — the staged table's primary directional, read EVERY
+            // frame (not only on upload frames) from the same bytes the device table mirrors, so
+            // the marcher and the resolve take one sun and a rotating sun moves the shadow on the
+            // next frame. `Copy`, so no borrow of the World outlives this line.
+            let primary_sun = world.resource::<LightTableStaging>().primary_directional_dir();
 
             // 5d-pre. The two shadow depth-pass armings (shadow gate SG2), computed HERE —
             //     before the two UBO uploads below — because each upload carries its pass's
@@ -2618,6 +2623,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 s,
                 &draws,
                 light_upload,
+                primary_sun,
                 csm_armed.then_some(resolved_csm),
                 punctual_armed.then_some(resolved_atlas),
                 interp_count,
@@ -3386,7 +3392,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 .expect("invariant: the probe is armed only through the boot's poison knob");
             let world = app.world();
             let stats = *world.resource::<HostFrameStats>();
-            let (header_word7, slotted_rows) =
+            let (header_word7, slotted_rows, sampled_rows) =
                 crate::shadow_poison::staged_shadow_words(world.resource::<LightTableStaging>().bytes());
             let rp = host.resolved_render_path;
             let (path, legs) = (format!("{:?}", rp.path), format!("{:?}", rp.legs));
@@ -3405,6 +3411,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 punctual_armed_frames: stats.punctual_armed_frames,
                 header_word7,
                 slotted_rows,
+                sampled_rows,
                 csm_active_count: world.resource::<ResolvedCsm>().active_count,
                 atlas_active_layers: world.resource::<ResolvedShadowAtlas>().active_layers,
                 poison_bits,

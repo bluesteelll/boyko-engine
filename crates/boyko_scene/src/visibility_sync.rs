@@ -119,20 +119,24 @@ impl Command for SetRenderEnabledById {
 /// `enable`/`disable::<RenderEnabled>()` on an entity whose `Visibility` did NOT
 /// change is left untouched — the system does not fight a manual override.
 ///
-/// # Add-order contract (cross-schedule ordering vs. the render pack)
+/// # Ordering contract (vs. every `RenderEnabled` reader)
 ///
 /// The toggle is **deferred**: the bit flips at the next command-apply window,
-/// after this system's body returns. For a `Hidden` entity to be excluded from
-/// the pack the frame after its byte changes, `visibility_sync` (and its apply
-/// window) must run BEFORE
-/// [`sync_gpu_3d_instances`](../../boyko_render/gpu3d_system/fn.sync_gpu_3d_instances.html),
-/// which filters on `Enabled<RenderEnabled>`. That edge cannot be expressed in
-/// `boyko_scene` (the pack system's `SystemKey` lives in `boyko_render`'s
-/// `Render3dPlugin`), so — exactly as `Render3dPlugin` / `LightingPlugin`
-/// document — **add `Render3dPlugin` together with `TransformPlugin` or
-/// `CameraPlugin`** so the host schedule runs propagation + this sync first and
-/// the pack last. The `Changed`-driven gate makes a loose one-frame stagger
-/// self-correcting (a missed toggle re-fires the frame after the byte changes).
+/// after this system's body returns. For the bit a reader sees to be THIS frame's,
+/// `visibility_sync` (and its apply window) must run BEFORE every system that
+/// filters on `Enabled<RenderEnabled>` — the instance packs
+/// ([`sync_gpu_3d_instances`](../../boyko_render/gpu3d_system/fn.sync_gpu_3d_instances.html)
+/// among them), the mesh and shadow-caster gathers, and the asset-ref validation.
+/// Their `SystemKey`s live in `boyko_render`'s plugins, so the edges are pinned by
+/// name: this system joins [`VisibilitySet::Sync`](crate::sets::VisibilitySet::Sync),
+/// the validation — which also clears the bit on a stale mesh row, through a command
+/// of its own — joins [`VisibilitySet::Validate`](crate::sets::VisibilitySet::Validate),
+/// the other readers join [`VisibilitySet::Read`](crate::sets::VisibilitySet::Read), and
+/// the composing host configures `Validate.after(Sync)`, `Read.after(Validate)` and
+/// `Read.after(Sync)` (`boyko_app::EnginePlugins` does).
+/// The `Changed` gate does NOT make a missing edge self-correcting on a
+/// spawn: a reader that runs first sees the bit clear on the entity's first frame,
+/// and in the shipped host that was a frame 0 with no meshes drawn.
 ///
 /// Within `boyko_scene` the system is registered `.after(propagate_transforms)`
 /// (see `TransformPlugin` / `CameraPlugin`) to keep the documented per-frame

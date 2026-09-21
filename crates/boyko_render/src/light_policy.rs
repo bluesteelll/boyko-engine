@@ -17,7 +17,8 @@
 //!
 //! [`select_lighting_cull`] runs at the gather/setup boundary — scheduled BEFORE
 //! `collect_lights` so the fresh decision feeds the header fold the SAME frame
-//! (no one-frame staleness) — and it is the SINGLE owner of every field it writes
+//! (no one-frame staleness), and AFTER the light seed so a light added this frame is
+//! counted this frame — and it is the SINGLE owner of every field it writes
 //! (`LightStats.point_spot_count`, `LightStats.cluster_band`, and, in
 //! [`Auto`](crate::light::ClusterSelectMode::Auto) mode, `LightingConfig.clusters_enabled`).
 //! The per-row resolve never reads [`LightStats`]; the only hot consumer is the header
@@ -179,7 +180,10 @@ fn banded(current: bool, value: u32, lo: u32, hi: u32) -> bool {
 /// [`LightingConfig::clusters_enabled`](crate::light::LightingConfig).
 ///
 /// Scheduled BEFORE `collect_lights` (so this frame's decision feeds the header fold —
-/// no one-frame staleness). It is the SINGLE owner of the fields it writes (Part 2.2
+/// no one-frame staleness) and AFTER the light seed
+/// ([`LightSeedState::seed`](crate::light_system::LightSeedState::seed)), which sets the
+/// `LightEnabled` bit of a light added this frame; before the seed that light reads
+/// disabled and is not counted. It is the SINGLE owner of the fields it writes (Part 2.2
 /// write discipline):
 ///
 /// 1. Counts entities with a `PointLight` OR a `SpotLight` whose

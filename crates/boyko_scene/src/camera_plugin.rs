@@ -5,7 +5,7 @@ use boyko_ecs::ecs::core::app::{App, Plugin};
 
 use crate::camera::{ActiveCamera, ViewUniform, resolve_active_camera};
 use crate::propagation::{ensure_detach_observer, propagate_transforms};
-use crate::sets::CameraSet;
+use crate::sets::{CameraSet, VisibilitySet};
 use crate::visibility_sync::visibility_sync;
 
 /// Registers [`resolve_active_camera`](crate::camera::resolve_active_camera) into
@@ -51,9 +51,10 @@ impl Plugin for CameraPlugin {
         // the ordering edges: the resolver runs AFTER propagation so it reads the
         // freshly-composed world pose, and `visibility_sync` (S4 follow-up) is
         // ordered AFTER propagation too so the durable `Visibility` →
-        // `RenderEnabled` bridge sits in the documented per-frame chain (it must
-        // run BEFORE the render pack — that cross-crate edge is contract-documented;
-        // see `crate::visibility_sync::visibility_sync`). All keys are captured in
+        // `RenderEnabled` bridge sits in the documented per-frame chain. It must run
+        // BEFORE every `RenderEnabled` reader: it joins `VisibilitySet::Sync`, and the
+        // composing host orders `VisibilitySet::Read` after it by name (the readers'
+        // keys live in other plugins; see `VisibilitySet`). All keys are captured in
         // this single closure.
         //
         // R6 camera seam: `propagate_transforms` + `resolve_active_camera` join
@@ -70,7 +71,7 @@ impl Plugin for CameraPlugin {
             b.add_system(resolve_active_camera)
                 .after(propagate)
                 .in_set(CameraSet::Resolve);
-            b.add_system(visibility_sync).after(propagate);
+            b.add_system(visibility_sync).after(propagate).in_set(VisibilitySet::Sync);
         });
     }
 

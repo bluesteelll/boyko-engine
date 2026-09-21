@@ -185,6 +185,24 @@ impl DdgiAtlas {
     /// `SHADER_READ_ONLY_OPTIMAL` (fence-waited, before the first frame). On any partial failure
     /// every object created so far is torn down before the error returns.
     pub fn create(ctx: &VulkanContext) -> Result<Self, VulkanError> {
+        Self::create_with_extra_usage(ctx, ImageUsage::NONE)
+    }
+
+    /// [`Self::create`] with `TRANSFER_SRC` added to BOTH atlases' usage, so a TEST can copy an
+    /// atlas into a buffer and read it back: `vkCmdCopyImageToBuffer` requires it of its source
+    /// image (`VUID-vkCmdCopyImageToBuffer-srcImage-00186`). Everything else — format, extent,
+    /// the `ddgi_storage_ok` STORAGE gate, the boot clear and the boot transition to
+    /// `SHADER_READ_ONLY_OPTIMAL` — is `create`'s.
+    ///
+    /// Test-only by contract: the host boots its atlas through [`Self::create`], whose usage is
+    /// not widened for a readback nothing in the engine performs.
+    pub fn create_for_readback(ctx: &VulkanContext) -> Result<Self, VulkanError> {
+        Self::create_with_extra_usage(ctx, ImageUsage::TRANSFER_SRC)
+    }
+
+    /// The body of [`Self::create`] / [`Self::create_for_readback`]: `extra_usage` is OR-ed into
+    /// both atlases' usage (`ImageUsage::NONE` for the production atlas).
+    fn create_with_extra_usage(ctx: &VulkanContext, extra_usage: ImageUsage) -> Result<Self, VulkanError> {
         // SDFDDGI I2 — the STORAGE re-add + its GRACEFUL-DEGRADATION gate (plan §3). The probe-
         // update pass writes both atlases via storage images, but B10G11R11 storage is a device-
         // OPTIONAL format feature. DDGI is OPT-IN (unlike the always-used `gViewT`), so a device
@@ -193,11 +211,12 @@ impl DdgiAtlas {
         // cannot panic. `resolve_ddgi_grid` clamps DDGI permanently disabled on the same
         // predicate (`ddgi_storage_ok`), so an atlas-without-storage is never dispatched into.
         let storage_ok = ctx.device_caps().ddgi_storage_ok();
-        let atlas_usage = if storage_ok {
+        let base_usage = if storage_ok {
             ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST | ImageUsage::STORAGE
         } else {
             ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST
         };
+        let atlas_usage = base_usage | extra_usage;
 
         let irradiance = RhiDevice::create_texture(
             ctx,

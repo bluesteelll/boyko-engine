@@ -550,8 +550,8 @@ pub use particle_system::{
 pub use occlusion_marker::{OcclusionCulling, VB_INST_FLAG_OCCLUSION_CULLING};
 pub use occlusion_plugin::OcclusionPlugin;
 pub use instance_model::{
-    INSTANCE_MODEL_COL_BYTES, InstanceModelCol, VB_INSTANCE_ROW_BYTES, VbInstanceRow,
-    sync_instance_model_cols,
+    INSTANCE_MODEL_COL_BYTES, InstanceModelCol, InstancePackSet, VB_INSTANCE_ROW_BYTES,
+    VbInstanceRow, sync_instance_model_cols,
 };
 // HW-RT rung 3b / TAA rung D1: the previous-frame model-affine sibling + its copy system
 // (temporal motion vectors). Un-walled from `hwrt` (D1) — see `PrevInstanceModelCol`'s own doc
@@ -568,7 +568,7 @@ pub use mesh_draw::{
     PerInstanceMaterial, PerInstanceMaterialTex, gather_mesh_draws, sync_vb_instance_ring_system,
 };
 pub use light_plugin::LightingPlugin;
-pub use light_reconcile::light_reconcile;
+pub use light_reconcile::{LightReconcileSet, light_reconcile};
 pub use render3d_plugin::Render3dPlugin;
 pub use gpu_column::{GpuColumnManager, GpuColumnMeta, LOCAL_SIZE_X, ResolvedColumn, RhiContext};
 pub use gpu_system::{GpuSystem, gpu_integrate_spirv};
@@ -577,19 +577,22 @@ pub use light::{
     CLUSTER_NEAR_DEFAULT, CSM_MODE_BIT, ClusterCell, ClusterConfig, ClusterSelectMode,
     DDGI_MODE_BIT, DirectionalLight, GPU_LIGHT_WORDS, GpuLight, INDEX_LIST_CAP,
     LIGHT_HEADER_BASE_WORDS,
-    LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT,
+    LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_MASK, LIGHT_KIND_POINT, LIGHT_KIND_SKY,
+    LIGHT_KIND_SPOT,
     LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS,
-    MAX_LIGHTS_PER_CLUSTER, PUNCTUAL_MODE_BIT, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight,
+    MAX_LIGHTS_PER_CLUSTER, PUNCTUAL_MODE_BIT, PointLight, SLOT_NONE_FIELD, SPOT_COS_OUTER_MAX,
+    SkyLight, SpotLight,
     TERMINATOR_SOFT_MASK, TERMINATOR_SOFT_SHIFT, TONEMAP_MODE_MASK, TONEMAP_MODE_SHIFT, Tonemapper,
     VB_SDF_MESH_AO_BIT, VB_SDF_MESH_MODE_MASK, VB_SDF_MESH_MODE_SHIFT, VB_SDF_MESH_SHADOW_BIT,
     cluster_index, sync_cluster_light_gate, sync_sv0_light_gate,
 };
 pub use light_policy::{CLUSTER_HI, CLUSTER_LO, LightStats, select_lighting_cull};
 pub use light_system::{
-    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightCollectSet, LightSeedState,
+    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightCollectSet, LightSeedSet,
+    LightSeedState,
     LightTableGeneration, LightTableStaging, SetLightEnabledById, collect_lights, evict_light,
-    fold_light_table, fold_light_table_slotted, light_seed_state, set_light_enabled_now,
-    write_light_table,
+    fold_light_table, fold_light_table_slotted, light_seed_state, primary_directional_dir,
+    set_light_enabled_now, write_light_table,
 };
 pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree, mesh_view_t_norm};
 pub use loaders::{ObjMeshLoader, PngTextureLoader, RonMaterialLoader};

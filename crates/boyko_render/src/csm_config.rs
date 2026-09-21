@@ -56,13 +56,13 @@
 
 use boyko_macros::{Resource, SystemSet};
 
-use boyko_ecs::ecs::core::iters::query::Query;
+use boyko_ecs::ecs::core::iters::query::{IsEnabled, Query};
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 
 use boyko_math::Vec3;
 use boyko_scene::ViewUniform;
 
-use crate::light::DirectionalLight;
+use crate::light::{DirectionalLight, LightEnabled};
 use crate::render_path_config::ResolvedRenderPath;
 
 // ---- constants -----------------------------------------------------------------------
@@ -1211,6 +1211,11 @@ impl CsmFit {
 /// [`CsmPlugin`](crate::csm_plugin::CsmPlugin) joins `resolve_csm_cascades`
 /// `.in_set(CsmResolveSet)`; the owning app (rung C5) configures
 /// `CsmResolveSet.after(CsmFitSet)`.
+///
+/// The owning app also configures `CsmResolveSet.after(LightSeedSet)`
+/// ([`LightSeedSet`](crate::light_system::LightSeedSet)): the fit takes the first ENABLED sun,
+/// and the light seed is what enables a newly added one (see [`resolve_csm_cascades`],
+/// "Primary sun selection").
 #[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct CsmResolveSet;
 
@@ -1300,11 +1305,42 @@ fn select_fit(
 ///
 /// # Primary sun selection
 ///
-/// The fit needs ONE light direction. The primary directional is the FIRST
-/// [`DirectionalLight`] the query yields — the same "first/primary directional" the SDF
-/// marcher writes into `gMaterial.R` and the lighting resolve treats as the sun. With no
-/// directional light present, [`ResolvedCsm`] is left at [`ResolvedCsm::DISABLED`] (no sun
-/// ⇒ no cascades).
+/// The fit needs ONE light direction: the first ENABLED [`DirectionalLight`] — the first
+/// row whose [`LightEnabled`] bit is set, in the order a
+/// `Query<(&DirectionalLight, IsEnabled<LightEnabled>)>` yields rows. That is the query and
+/// the filter [`collect_lights`](crate::light_system::collect_lights) folds the light table
+/// with, and the fold writes directionals first, so this sun is the table's primary
+/// directional ([`primary_directional_dir`](crate::light_system::primary_directional_dir)):
+/// the row the lighting resolve treats as the sun and the Deferred SDF marcher shadows
+/// toward. A disabled sun is skipped here exactly as the fold drops it. (Before defect R2b
+/// this took the first sun UNFILTERED, so a disabled first sun had cascades fitted to a
+/// light nothing rendered, while this doc claimed the consumers agreed.) No enabled
+/// directional ⇒ [`ResolvedCsm::DISABLED`] (no sun ⇒ no cascades).
+///
+/// The fit reads the components, not the staged table, because the table's header carries
+/// the cascade bit this fit drives (through `sync_csm_light_gate`), so the fit belongs
+/// before the fold, not after it.
+///
+/// The bit has a writer this fit must follow: the light seed, which sets a newly added
+/// light's [`LightEnabled`] bit (a row the seed has not reached reads disabled), and which
+/// the fold is ordered after. This fit is ordered after it
+/// too, through `CsmResolveSet.after(LightSeedSet)`
+/// ([`LightSeedSet`](crate::light_system::LightSeedSet)), so on the frame a sun is first
+/// enabled the fit and the table already name it. [`LightingPlugin`](crate::light_plugin::LightingPlugin)
+/// and [`CsmPlugin`](crate::csm_plugin::CsmPlugin) declare set membership only; the edge
+/// belongs to the composing app, as `CsmFitSet`'s does ([`CsmResolveSet`]). `boyko_app`'s
+/// `EnginePlugins` declares it, and a world composing the two plugins without `boyko_app`
+/// must declare it itself.
+///
+/// Without the edge (measured 2026-09-19 in a `LightingPlugin` + `CsmPlugin` world, one sun
+/// spawned before the first update) this fit ran before the seed every time and published
+/// [`ResolvedCsm::DISABLED`] on that first frame while the table already lit with the sun:
+/// 300 of 300 runs in a probe, 30 of 30 runs of the spawn-frame case in
+/// `tests/csm_primary_sun_agreement.rs` with its edge line removed. That case is green with
+/// the edge.
+///
+/// The other writer of the sun input is still unordered: `light_reconcile`, which rewrites a
+/// posed sun's `direction` — the one-frame stagger `CsmPlugin`'s doc accepts.
 ///
 /// # The caster fit gate (rung C3)
 ///
@@ -1334,7 +1370,7 @@ fn select_fit(
 pub fn resolve_csm_cascades(
     cfg: Res<CsmConfig>,
     view: Res<ViewUniform>,
-    suns: Query<&DirectionalLight>,
+    suns: Query<(&DirectionalLight, IsEnabled<LightEnabled>)>,
     bounds: Res<CsmCasterBounds>,
     path: Res<ResolvedRenderPath>,
     mut state: ResMut<CsmFitState>,
@@ -1346,9 +1382,10 @@ pub fn resolve_csm_cascades(
         return;
     }
 
-    // The primary sun: the first directional light. No directional ⇒ the disabled selection
-    // (a CSM pass with no sun has nothing to fit).
-    let Some(sun) = suns.iter().next() else {
+    // The primary sun: the first ENABLED directional, the fold's own filter (see the doc
+    // above). No enabled directional ⇒ the disabled selection (a CSM pass with no sun has
+    // nothing to fit).
+    let Some(sun) = suns.iter().find_map(|(l, enabled)| enabled.then_some(l)) else {
         *out = ResolvedCsm::DISABLED;
         return;
     };

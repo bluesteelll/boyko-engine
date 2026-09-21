@@ -33,7 +33,7 @@ use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, CAM_MODE_ORTHO, CAM_MODE_PERSPECTIVE, COMPOSITE_PUSH_CONSTANT_BYTES,
     CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, ClusterCullHierPush, ClusterCullPush,
     CoarseMode, EDITLIST_BUFFER_WORDS,
-    INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
+    INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_SHADOWS,
     LOCAL_SIZE_X, M4_LEVEL_PARAMS_BYTES, RCAS_PUSH_BYTES, SDF_FORWARD_MARCH_PUSH_BYTES,
     TILE_BOUND_BYTES, TILE_SIZE,
     cluster_cull_hier_spirv, cluster_cull_spirv,
@@ -138,6 +138,8 @@ use boyko_scene::render_caps::MeshHandle;
 // is NOT split out — its creation is inlined into (and interleaved with) `boot`.
 mod csm;
 mod interp;
+// R2: the Deferred marcher's per-frame sun, derived from the staged table's primary directional.
+mod marcher_sun;
 // Particles P0: the GPU-side bundle (buffers, pipelines, the two parity sets) + its one
 // fence-waited boot fill. Built ONLY when the owner armed the subsystem.
 mod particle;
@@ -146,6 +148,7 @@ mod tlas;
 
 use csm::CsmResources;
 use interp::InterpGpuProd;
+use marcher_sun::MarcherSun;
 // Particles P0: the runner assembles the frame's inputs, so both of these leave this module — as
 // does the raw readback the gate-#7 probe decodes.
 pub(crate) use particle::{ParticleCountersRaw, ParticleFrameInputs, ParticleFramePush};
@@ -599,15 +602,6 @@ const RASTER_COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
 /// Textured-PBR T6c: the `gPbr` 4th MRT color format the TEXTURED raster pipeline declares
 /// — MUST equal `GBufferTargets`'s `gPbr` ring format (T6a's `R16G16B16A16_SFLOAT`).
 const TEX_GPBR_COLOR_FORMAT: Format = Format::R16G16B16A16Sfloat;
-
-/// The MARCHER's cast-shadow direction (`L`, direction TO the light) — the A1
-/// analytic SDF soft-shadow march lane of the marcher push. The host's SDF edit
-/// list is EMPTY in v1 (no pixel takes the SDF path), so this lane is
-/// bound-but-inert; it mirrors the showcase's `SHOWCASE_SUN_DIR` so a future
-/// SDF instance path (host plan R7) starts from the familiar sun. The RESOLVE's
-/// lighting is ECS-owned since host plan R4 (the light table uploads from
-/// `LightTableStaging`); this constant no longer seeds any light-table row.
-const DEFAULT_SUN_DIR: [f32; 3] = [-0.45, 0.82, 0.36];
 
 /// The full staged-light-table capacity (`[LightHeaderGpu || GpuLight[MAX_LIGHTS]]`)
 /// — the size of the device light table AND each staging ring slot, so ANY table
@@ -1117,7 +1111,6 @@ pub(crate) struct GpuSceneBundles {
     /// comment for the race pin). The runner writes slot `token.slot()` through
     /// `boyko_render::upload_light_table` iff its uploaded generation lags.
     pub(crate) light_staging: [BoundBuffer; FRAMES_IN_FLIGHT],
-    light_dir: [f32; 3],
     // ── Present (pass D) ─────────────────────────────────────────────────────
     present_pipeline: VulkanGraphicsPipeline,
     present_layout: VulkanBindGroupLayout,
@@ -4632,7 +4625,6 @@ impl GpuSceneBundles {
             ray_shadow_ubo,
             light_table,
             light_staging,
-            light_dir: DEFAULT_SUN_DIR,
             present_pipeline,
             present_layout,
             present_sampler,
@@ -6091,12 +6083,15 @@ impl GpuSceneBundles {
     /// refs, zero alloc): the static bundles + this frame's `mvp` push, the
     /// fenced slot's instance bind group, and the gathered draw batch list.
     ///
-    /// R4 wiring: SDF empty, brick/coarse/atlas/interp OFF (their always-bound resources
+    /// R4 wiring: brick/coarse/atlas/interp OFF (their always-bound resources
     /// are valid placeholders); Render P7-Q2 SSAO is armed from `ssao_variant` (see its
     /// param doc) — OFF (`None`) unless the owner resolved a non-`Off` `SsaoQuality`;
     /// lighting is ECS-owned —
     /// `light_upload` is `Some(staged_bytes)` on a frame whose staging slot was
-    /// just rewritten (the recorder then records the staging→table copy), and
+    /// just rewritten (the recorder then records the staging→table copy), the Deferred
+    /// marcher's sun is `primary_sun` — the staged table's primary directional, the row the
+    /// resolve reads as its primary this frame (`None` ⇒ the marcher bakes no sun shadow; see
+    /// [`MarcherSun::from_primary`]), and
     /// `csm` is `Some(resolved)` when the runner's arming holds —
     /// `ResolvedCsm::depth_pass_armed`, the SAME call `sync_csm_light_gate` drives
     /// the light-header gate with (a fitted sun AND live caster batches, the fit
@@ -6134,6 +6129,10 @@ impl GpuSceneBundles {
         slot: usize,
         mesh_draw: &'a [GBufferMeshDraw<'a>],
         light_upload: Option<u64>,
+        // R2: the staged table's primary directional, read by the runner this frame
+        // (`LightTableStaging::primary_directional_dir`) — the `dir_kind.xyz` bits of the first
+        // directional row, the one the resolve takes as its primary. `None` on a sunless table.
+        primary_sun: Option<[f32; 3]>,
         csm: Option<&ResolvedCsm>,
         atlas: Option<&ResolvedShadowAtlas>,
         interp_count: u32,
@@ -6277,15 +6276,6 @@ impl GpuSceneBundles {
         // and `VisibilityBuffer × Sdf` (no mesh leg), plus a VB boot on a device without the
         // descriptor-indexing cap (which resolves to `Deferred` anyway).
         vb_mesh_bounds: Option<&'a BoundBuffer>,
-        // VB-SV0 rung S1.5: THIS frame's `FineMarcherPush::lighting_flags`, when the S1.5 bench
-        // is driving an interleaved paired A/B over it. `None` (every non-bench frame — the
-        // DEFAULT) keeps the shipped `LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO` literal, so the
-        // pushed bytes are byte-identical to the pre-S1.5 path. `Some(f)` stamps `f` verbatim:
-        // the bench alternates `SHADOWS|AO` (the ARMED phase) with `0` (the CLEARED phase), which
-        // is exactly the `sdf_gbuffer_composite.hlsl:1865` / `:1805` gate around the shadow + AO
-        // marches SV0 proposes to inline. A per-frame PUSH CONSTANT, not a descriptor and not a
-        // pipeline key — flipping it needs no re-record and no pipeline rebuild, which is what
-        // makes the two phases of a pair comparable (see `GBufferScene::lighting_flags`).
         // VG R3 piece 1 step P1-2: THIS frame's hierarchical-Z pyramid plan — the level count and
         // per-level extents `boyko_render::hzb::HzbLayout` derived from the composite extent,
         // computed ONCE in `boyko_app::runner` (`crate::hzb_plan::hzb_plan_for`) and threaded as
@@ -6349,6 +6339,13 @@ impl GpuSceneBundles {
         debug_assert!(
             ssao_variant.is_some() || ssao_atrous_levels == 0,
             "invariant: ssao_atrous_levels > 0 requires ssao_variant.is_some() (resolve_ssao forces this)"
+        );
+        let marcher = MarcherSun::from_primary(primary_sun);
+        debug_assert!(
+            marcher.lighting_flags & LIGHTING_FLAG_SHADOWS == 0
+                || (marcher.light_dir.iter().all(|c| c.is_finite())
+                    && marcher.light_dir.iter().map(|c| c * c).sum::<f32>() > 1e-12),
+            "invariant: the marcher marches a sun shadow only toward a finite, non-degenerate direction"
         );
 
         // Mesh-shadow producers (CSM cascade depth, the punctual spot/point atlas depth, and
@@ -6698,15 +6695,14 @@ impl GpuSceneBundles {
             brick: None,
             coarse: None,
             coarse_mode: CoarseMode::EmptySkipOnly,
-            // VB-SV0 rung S1.5: the bench's per-frame A/B value when it is driving, else the
-            // shipped literal (the `None` default — byte-identical push bytes).
-            // Unconditional since profiling rung 7 step 6c. This was
-            // `sv0_bench_lighting_flags.unwrap_or(SHADOWS | AO)`: the S1.5 bench drove an ABBA
-            // phase counter through here and cleared the flags on two frames in four, so the
-            // harness did not merely REPORT its A/B — it WAS the A/B. Retiring the harness retires
-            // the driver, and every frame now pushes what every non-bench frame always pushed.
-            lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
-            light_dir: self.light_dir,
+            // R2: the Deferred marcher shadows toward the resolve's own primary directional, read
+            // from the staged table this frame — a sun that rotates moves the shadow on the next
+            // frame. A sunlit frame pushes `SHADOWS | AO`, the value every frame pushed before R2;
+            // a sunless frame pushes `AO` alone, so no phantom sun shadow masks its point and spot
+            // lights. The Forward/VB `SdfForwardMarchPush` receives the same `light_dir` and never
+            // reads it (`sdf_forward_march` takes the sun from the table itself).
+            lighting_flags: marcher.lighting_flags,
+            light_dir: marcher.light_dir,
             // Render P7-Q2: `ssao_variant.is_some()` (the owner-resolved `SsaoQuality != Off`)
             // ⇒ `Some` — arms the SSAO compute activation against the selected pre-compiled
             // variant pipeline (`Self::ssao_pipelines[v]`) + the SHARED `ssao_layout`. `None`

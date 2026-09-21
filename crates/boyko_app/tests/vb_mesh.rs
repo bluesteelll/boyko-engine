@@ -3,7 +3,7 @@
 //!
 //! Reuses [`grand_showcase_2mat`]'s EXACT five-sphere scene (same mesh, same five materials,
 //! same sun/sky, same camera) verbatim — mirrors `forward_mesh.rs`'s own precedent: the dumped
-//! BMP is a DIRECT visual comparator against the Deferred `f6147f90` / Forward `f93b5aad`
+//! BMP is a DIRECT visual comparator against the Deferred `7e71e2a6` / Forward `f93b5aad`
 //! goldens (same geometry/lighting/shadows; only the render PATH differs — VB's id-raster +
 //! compute-resolve re-fetch vs Forward's inline raster shade). Byte-identity is NOT expected
 //! (the geometry re-fetch's analytic barycentric interpolation is a genuinely different

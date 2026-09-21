@@ -19,8 +19,18 @@
 //! A test/exe name containing "update" (etc.) triggers Windows os-error-740 (UAC elevation) on the
 //! target box; this file is `ddgi_probe_gi_arm`.
 //!
+//! # The validation oracle
+//!
+//! Boots with validation ON and asserts the messenger recorded ZERO messages after teardown, like
+//! `device_local_copy.rs`. The readback is why the atlas comes from
+//! [`DdgiAtlas::create_for_readback`], not the host's `DdgiAtlas::create`: the copy below needs
+//! `TRANSFER_SRC` on its source image (`VUID-vkCmdCopyImageToBuffer-srcImage-00186`), and the
+//! production atlas does not carry it (nothing in the engine reads the atlas back). This test booted
+//! with validation off until 2026-09-19, which is how that copy went unreported.
+//!
 //! Run: `cargo test -p boyko_rhi_vulkan --test ddgi_probe_gi_arm -- --ignored --nocapture
-//! --test-threads=1` with `BOYKO_DISABLE_VALIDATION=1`.
+//! --test-threads=1` with `BOYKO_DISABLE_VALIDATION` UNSET. Setting it (the box-level escape hatch)
+//! still runs the dispatch and the non-zero check, and skips the oracle with a NOTE.
 
 use core::ptr::NonNull;
 
@@ -52,18 +62,42 @@ const UBO_BYTES: usize = 48;
 /// The irradiance atlas texel byte size (`B10G11R11_UFLOAT_PACK32` = 4 bytes/texel).
 const IRR_TEXEL_BYTES: u64 = 4;
 
-/// Boots an offscreen context (validation off), or `None` with a SKIP log when no GPU/loader.
+/// Boots a validation-enabled offscreen context, or `None` with a SKIP log when no GPU / loader /
+/// validation layer is available.
 fn boot_or_skip() -> Option<VulkanContext> {
     match VulkanContext::boot(InstanceConfig {
-        enable_validation: false,
+        enable_validation: true,
         ..InstanceConfig::default()
     }) {
         Ok(ctx) => Some(ctx),
         Err(e) => {
-            eprintln!("SKIP ddgi_probe_gi_arm: GPU / loader unavailable ({e:?})");
+            eprintln!("SKIP ddgi_probe_gi_arm: validation layer / GPU / loader unavailable ({e:?})");
             None
         }
     }
+}
+
+/// Asserts the validation messenger recorded ZERO messages. Without a messenger it demands the
+/// escape hatch that removed it, so a layer that silently failed to load cannot read as clean.
+fn assert_validation_clean(ctx: &VulkanContext) {
+    if !ctx.validation_enabled() {
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) - messenger oracle skipped");
+        return;
+    }
+    let state = ctx
+        .debug_state()
+        .expect("invariant: validation enabled => a debug-messenger state is present");
+    assert_eq!(
+        state.total(),
+        0,
+        "validation layer reported {} message(s) during the DDGI probe dispatch + atlas readback — see \
+         the [vk-validation] log",
+        state.total()
+    );
 }
 
 /// Writes `words` `u32`s into a host-coherent mapping (valid before the submit).
@@ -160,8 +194,9 @@ fn probe_update_dispatch_writes_nonzero_irradiance() {
     let queue = ctx.rhi_queue();
 
     // The persistent atlas (STORAGE irradiance/depth + classification), created WITH the storage
-    // views (the caps gate above guarantees the STORAGE usage bit was added).
-    let atlas = DdgiAtlas::create(device).expect("DDGI atlas create");
+    // views (the caps gate above guarantees the STORAGE usage bit was added), plus TRANSFER_SRC for
+    // the readback below — the one usage this test adds to the host's atlas (see the module doc).
+    let atlas = DdgiAtlas::create_for_readback(device).expect("DDGI atlas create");
 
     // The Fibonacci ray table (128 float4s).
     let ray_table = device
@@ -388,4 +423,7 @@ fn probe_update_dispatch_writes_nonzero_irradiance() {
         device.destroy_buffer(ray_table);
         atlas.destroy(device);
     }
+
+    // After teardown, so a message the destroys raise is counted too.
+    assert_validation_clean(device);
 }

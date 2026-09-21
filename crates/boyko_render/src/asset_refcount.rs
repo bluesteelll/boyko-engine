@@ -23,7 +23,7 @@ use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::swapchain::FRAMES_IN_FLIGHT;
 use boyko_scene::{
     AssetRefKind, DeferredFree, FreeEntry, MaterialRefGen, MeshHandle, MeshRefGen, RefcountDeltas,
-    RenderEnabled,
+    RenderEnabled, VisibilitySet,
 };
 
 use crate::bindless::BindlessTextureTable;
@@ -446,31 +446,32 @@ pub fn validate_asset_refs(
 /// published" sentinel such as `u64::MAX` would stamp such a value `u64::MAX`,
 /// which only the shutdown force-drain reaches.
 ///
-/// # The apply → validate edge is expressible; the validate → gather edge is NOT
+/// # The apply → validate edge is by key; the sync → validate → gather edges are by name
 ///
 /// Both systems are registered in the SAME [`App::add_systems_cfg`] closure
 /// here, so the `SystemKey`-based `.before` edge between them is directly
-/// expressible. The FURTHER edge this rung's design calls for — validation
-/// running before `boyko_render::gather_mesh_draws` /
-/// `gather_shadow_casters` — is **not** expressible from inside this plugin:
-/// those systems are registered by a LATER, separate
-/// `App::add_systems_cfg` closure in the composing host
-/// (`boyko_app::plugins::EnginePlugins::build`), and a `SystemKey` cannot be
-/// obtained for a system that does not exist yet at this plugin's build time
-/// (mirrors the documented `CsmPlugin`/`ShadowAtlasPlugin`/`LightingPlugin`
-/// cross-plugin limitation — "a `.after(key)` edge needs the target's
-/// `SystemKey`, only obtainable inside the target's own builder closure").
-/// The correctness this gap could threaten is bounded exactly like those:
-/// `EnginePlugins::build` already composes `AssetRefcountPlugin` BEFORE the
-/// mesh/CSM gather closure (add-order), and — as this system's own doc notes
-/// — its churn-frame effect (disable a stale mesh row) is a bounded,
-/// self-correcting one-frame-at-most visual transient, never a soundness
-/// hazard (the durable refcount/gen-check guards do not depend on this
-/// system's timing at all). Closing this gap
-/// with a hard scheduler edge (e.g. a `add_asset_validate_systems(&mut
-/// ScheduleBuilder) -> SystemKey` helper the host calls directly inside its
-/// own gather closure, mirroring `add_gpu_transform_pack`) is host-composition
-/// work, out of this crate's scope.
+/// expressible. The two FURTHER edges this rung's design calls for — the
+/// validation after `visibility_sync`'s apply window (it walks only the rows
+/// that system enabled), and before `boyko_render::gather_mesh_draws` /
+/// `gather_shadow_casters` (they filter on the bit it clears) — are **not**
+/// expressible by key from inside this plugin: those systems are registered
+/// by other plugins and by a LATER, separate `App::add_systems_cfg` closure in
+/// the composing host (`boyko_app::plugins::EnginePlugins::build`), and a
+/// `SystemKey` cannot be obtained for a system that does not exist yet at this
+/// plugin's build time (the documented `CsmPlugin`/`ShadowAtlasPlugin`/
+/// `LightingPlugin` cross-plugin limitation — "a `.after(key)` edge needs the
+/// target's `SystemKey`, only obtainable inside the target's own builder
+/// closure"). They are pinned by name instead: `validate_asset_refs` joins
+/// [`VisibilitySet::Validate`], and the composing host configures
+/// `VisibilitySet::Validate.after(VisibilitySet::Sync)` and
+/// `VisibilitySet::Read.after(VisibilitySet::Validate)` (`EnginePlugins` does;
+/// each is pinned by a `boyko_app/tests/host_orders_*.rs` cycle gate). Add-order
+/// is NOT a pin: the executor orders two systems that have no path between
+/// them by its wave packing, which any unrelated edge can reshuffle (measured
+/// on the mesh gather vs. `visibility_sync`). A host composing this plugin by
+/// hand declares the same two edges; the fence-gate proof in
+/// [`retire_deferred_frees`]' doc ("after `apply`, before any gather") rests
+/// on the second one.
 #[derive(Default)]
 pub struct AssetRefcountPlugin;
 
@@ -482,7 +483,18 @@ impl Plugin for AssetRefcountPlugin {
         app.insert_resource(RenderEpoch::default());
         app.add_systems_cfg(|b| {
             let apply = b.add_system(apply_refcount_deltas).key();
-            b.add_system(validate_asset_refs).after(apply);
+            // `VisibilitySet::Validate`, its own phase between `Sync` and `Read`, because the
+            // validation is on BOTH sides of the `RenderEnabled` bit. It reads the bit: it walks
+            // only `Enabled<RenderEnabled>` rows, so it must see this frame's bits — run before
+            // `visibility_sync`'s apply window, a row it skips as not-yet-enabled is enabled
+            // right after, and a stale mesh stays enabled until `free_epoch` next advances (the
+            // cursor early-out). It writes the bit: `DisableStaleMeshCommand` clears it on a
+            // stale row, and the gathers filter on it, so a gather that runs before this
+            // system's apply window draws the stale row for one more frame. Membership only;
+            // the composing host orders `Validate.after(Sync)` and `Read.after(Validate)`. It
+            // cannot join `Read` as well: two ordered sets that share a member are rejected
+            // (`boyko-B9004`).
+            b.add_system(validate_asset_refs).after(apply).in_set(VisibilitySet::Validate);
         });
     }
 
@@ -533,7 +545,9 @@ impl Plugin for AssetRefcountPlugin {
 /// `N` (stamped `retire_frame = N + `[`RETIRE_DELAY`]` by [`apply_one`]). This
 /// fn frees `S` at the first `epoch M` with `N + RETIRE_DELAY <= M`. The SAME
 /// frame `N` that enqueued `S` also ran `validate_asset_refs` (after `apply`,
-/// before any gather) — `dec_ref`'s `Retiring` transition already bumped
+/// by key; before any gather, by the composing host's
+/// `VisibilitySet::Read.after(VisibilitySet::Validate)` edge — see
+/// [`AssetRefcountPlugin`]) — `dec_ref`'s `Retiring` transition already bumped
 /// `free_epoch`, so validation (same frame) or the entity's own despawn
 /// disables every carrier of `S` before frame `N`'s own gather/submit runs;
 /// `S`'s LAST possible GPU reference is therefore submit `<= N - 1 < N`, i.e.

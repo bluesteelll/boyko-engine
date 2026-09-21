@@ -3758,7 +3758,9 @@ pub struct SdfForwardMarchPush {
     pub view_z_a: f32,
     /// HAS_MESH reverse-Z decode `B`.
     pub view_z_b: f32,
-    /// The primary directional light direction (un-normalized; the shader normalizes it).
+    /// The primary directional light direction — UNREAD by `sdf_forward_march`, which takes the sun
+    /// from the light table itself (its `primary_dir_seen` loop). Kept only so the push layout and
+    /// the four `.spv` variants stay stable; removing it is a refactor.
     pub light_dir: [f32; 3],
     /// M1 empty-space-skip gate: non-zero reads the pointer-grid bindings. `0` = OFF (the
     /// analytic-only march — this rung's host default; see this struct's doc).
@@ -5456,12 +5458,19 @@ pub const GOLDEN_ATLAS_SLOT_MASK: u32 = 0x1F;
 /// The "no map" 5-bit sentinel (`0x1F == 31`) — a light on the analytic fallback. Mirrors
 /// `boyko_render::shadow_atlas::SLOT_NONE` and the shader's `SLOT_NONE`.
 pub const GOLDEN_SLOT_NONE: u32 = 0x1F;
+/// The atlas-slot field holding [`GOLDEN_SLOT_NONE`] (`0x003E_0000`) — the field every
+/// `GoldenLight::point` / `spot` row is born with, so an un-slotted light decodes the sentinel
+/// rather than slot 0. Mirrors `boyko_render::light::SLOT_NONE_FIELD`; `with_atlas_slot` replaces
+/// it with a real slot.
+pub const GOLDEN_SLOT_NONE_FIELD: u32 = GOLDEN_SLOT_NONE << GOLDEN_ATLAS_SLOT_SHIFT;
 
 /// The kind-enum mask (low 16 bits) — mirrors the shader's `LIGHT_KIND_MASK`. The P6 R1
 /// `casts_sdf_shadow` flag occupies bit 16, so the enum + the flag coexist in one word.
 pub const GOLDEN_LIGHT_KIND_MASK: u32 = 0xFFFF;
 /// Bit 16 of the kind word: the P6 R1 per-light `casts_sdf_shadow` flag (mirrors the shader's
-/// `LIGHT_FLAG_CASTS_SHADOW`).
+/// `LIGHT_FLAG_CASTS_SHADOW`). The host ALSO sets it on every row packed with a real atlas slot
+/// (`boyko_render::shadow_atlas::pack_atlas_slot`, mirrored by `GoldenLight::with_atlas_slot`), so
+/// there it reads "slotted"; the punctual atlas sample never tests it (it tests the slot field).
 pub const GOLDEN_LIGHT_FLAG_CASTS_SHADOW: u32 = 0x1_0000;
 
 /// The maximum `cos(outer)` the spot bake clamps to (mirrors

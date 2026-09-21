@@ -18,7 +18,307 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
-## 2026-09-18 — An un-slotted punctual light samples another light's shadow map on armed frames
+## 2026-09-21 — What R4 / R4b leave to the kernel lane K: the pairs the light-table lane did not order, and why
+
+Lane `fix/light-table-defects`, R4-frame-order and R4b-open-edges. The diagnosis behind R4 (an
+ordering edge that carried no data moved six hwrt TAA goldens, because `gather_mesh_draws` and
+`visibility_sync` had no ordering path and frame 0 drew no meshes) listed every unordered pair of
+the hwrt `taa_jitter_eval` host's `Main` schedule: 236 pairs, 33 of them with a declared access
+conflict. This lane declared the cross-plugin reader → writer pairs it could show in code, and
+hands the rest to lane K.
+
+**Declared here**, each as a named set edge in `EnginePlugins::build`
+(`crates/boyko_app/src/plugins.rs`) with a `crates/boyko_app/tests/host_orders_*.rs` cycle gate:
+the `RenderEnabled` readers after `visibility_sync` and after `validate_asset_refs`
+(`VisibilitySet::{Sync, Validate, Read}`; the validation both reads the bit and clears it on a
+stale row), the instance packs after propagation, `light_reconcile` after propagation, and the CSM
+fit and the punctual atlas resolve after the camera resolve and after `light_reconcile`.
+
+Two of these edges moved goldens: the 14 TAA pin-legs re-blessed on 2026-09-21 (`goldens/PINS.toml`,
+the `[taa_armed]` note and its siblings) had pinned a frame 0 that drew no meshes (the
+`visibility_sync` / reader order, R4's E1) AND was lit from the sun's identity `GlobalTransform`
+(`light_reconcile` before `propagate_transforms`, the 2026-09-19 (b) measurement below, R4b's edge
+C); every note states both causes, the pixel count, and, for hwrt, the mesh-only value the G2 edge
+alone had produced.
+
+**Left unordered, by ruling (2026-09-20, R4 §6), with the reason:**
+
+- `select_lighting_cull` vs `light_reconcile`: **unordered, no shared data.** The cull
+  (`crates/boyko_render/src/light_policy.rs`, `select_lighting_cull`'s two queries) reads
+  `IsEnabled<LightEnabled>` under structural `With<PointLight>` / `With<SpotLight>` filters and
+  reads no field of either component; the reconcile (`crates/boyko_render/src/light_reconcile.rs`,
+  `light_reconcile`'s three loops) writes only `position` / `direction` and never touches
+  `LightEnabled`. The diagnosis flagged the pair only because `With<C>` conservatively declares a
+  read of `C` (`crates/boyko_ecs/src/ecs/core/iters/query/filter.rs`, `With`'s "Access surface"
+  doc); the bytes the two systems touch are disjoint, so no order between them changes any output.
+- Every other pair in that list — the `LightingConfig` / `LightTableDirty` write/write cluster
+  among the lighting gates, `sync_csm_light_gate` vs the CSM fit on `ResolvedCsm`, `snap_apply`
+  vs the camera and caster controllers on `Transform`, the particle pack vs tick on
+  `ParticleClock`, and every pair one side of which is an exclusive system — is the class, not
+  the instance. **Lane K** makes the class a kernel gate (ambiguity detection, deterministic
+  apply, complete access declarations): `docs/scheduler/determinism-K/` (`00-DIAGNOSIS.md` is the
+  bisection, `00-RULINGS.md` the rulings; its "Lane order" cuts K after this lane merges, so the
+  ratchet's frozen set is taken with R4's edges in). Those documents landed on the integration
+  line as commit `d4213813` (`merge/ke16-into-ecsnative`) and are not on this lane's base
+  `1c31aeac`.
+
+**Nothing here is a question for the owner**; the entry is the hand-off record, so the next reader
+of an ambiguous pair in this schedule finds the ruling that left it and the lane that owns it.
+
+---
+
+## 2026-09-19 — Three pre-existing findings the light-table lane surfaced and did not fix
+
+Lane `fix/light-table-defects` (R1, R2, R2b, R3, and the R2b seed → fit edge). All three predate
+the lane and none is fixed by it. (a) and (b) are questions; (c) adds a failure mode and a rate to an
+entry that already exists.
+
+### (a) A light spawned between frames through a world-level `run_system` is never enabled, and nothing says so
+
+**Measured.** `crates/boyko_render/tests/primary_directional.rs`, as first written for R2, spawned
+its suns with `app.world_mut().run_system(|mut cmds: Commands| …)`. T1's sun was spawned before the
+first `app.update()`, and the seed enabled it. T2's two suns were spawned between `app.update()`
+calls several frames later, and the seed never enabled them, so neither reached the light table and
+the test panicked at `:272` ("T2: two enabled suns") for both the R2 and the R2b tester. A copy that
+set the bits itself passed. The test now sets them itself (review C1), so it no longer shows the gap.
+
+**Why, read from the code (not separately measured).** After its one first-run full scan,
+`LightSeedState::seed` (`crates/boyko_render/src/light_system.rs`) finds new lights only through
+four `Added<*Light>` sub-systems, and `run_added` stamps their window itself:
+`(previous pass's end, world.current_tick()]`. The second pass is the exception: the sub-systems
+are first initialized there, with a start `MAX_CHANGE_AGE` ticks back, so it catches everything
+spawned since the first pass. From the third pass on the window is as stated. Inside
+`Schedule::run` the world tick is bumped
+twice before any system runs — `this_run` at `schedule.rs:383`, then the apply-window bump at
+`schedule.rs:478` — so each seed pass ends its window at `this_run + 1`, and the world keeps that
+tick until the next `Schedule::run`. A `run_system` between frames applies its commands at that same
+tick (`EcsMaster::run_cached_system` → `System::apply`, `system_api.rs:142-157`), and
+`Tick::is_newer_than` (`tick.rs:168`) excludes a tick equal to the window's start. So the next pass
+starts its window exactly at the spawn's tick and skips it; no later pass looks again. The seed's
+own doc (`collect_added_light_ids`) says `current_tick()` is the frame's `this_run`; after the
+apply-window bump it is `this_run + 1`.
+
+Two consequences of the same arithmetic, neither measured:
+- A light spawned by a `Main` system whose commands are applied AFTER the seed has run that frame
+  lands on the same tick and should be skipped the same way. Ordered or applied before the seed, it
+  is caught.
+- A schedule that runs between the spawn and the next `Main` run (`Fixed`, on a frame where it runs
+  a substep) advances the tick and should make the spawn visible. If so, whether such a light ever
+  renders depends on the frame rate.
+
+**Who is exposed.** Every in-tree example spawns its lights in a startup system, which runs before
+the seed's first pass, and the full scan catches them. Not checked: scene load, deserialisation
+(`boyko_serialize`), Aether-expanded spawns (`crates/aether_lang/src/expand.rs` emits light
+spawns), and any editor that spawns into a running world.
+
+**Question.** Does any production path spawn lights between frames, or from a `Main` system that
+runs after the seed? If one does, those lights are never rendered and no warning, counter or assert
+reports it. A probe that spawns a light through each such path and checks its `LightEnabled` bit
+one frame later would answer it.
+
+### (b) The frame-0 light table carries `[0, 0, -1]` for a sun spawned with an identity `GlobalTransform`
+
+**Measured** (R2 tester, the behaviour-neutral M7p probe in `crates/boyko_app/tests/sdf_marcher_sun.rs`,
+under `EnginePlugins::window`). The suns were spawned in a startup system with a posed `Transform`
+and `GlobalTransform::IDENTITY`. The first `scene()` call — the frame-0 table — received
+`Some([0.0, 0.0, -1.0])`, the identity pose's direction; the second call and every later one
+received the posed direction.
+
+**What the code says.** `LightingPlugin`'s doc ("Add-order contract", `light_plugin.rs`) requires
+`light_reconcile` to run after `propagate_transforms` and says the plugin cannot express that edge.
+`EnginePlugins` adds `CameraPlugin` (`plugins.rs:430`) before `LightingPlugin` (`plugins.rs:476`)
+and declares no edge between `CameraSet::Resolve` and `light_reconcile`, so the order is add-order
+alone. The same file's `ParticleTickSet` comment records that add-order is not a pin: a pose written
+in `Main` was measured drawn one frame late for exactly that reason.
+
+**Not known.** Whether `light_reconcile` runs before propagation only on frame 0 or on every frame.
+If every frame, a moving light's direction or position trails its transform by one frame for as long
+as it moves; the `Changed<GlobalTransform>` gate makes a static light catch up, not a moving one.
+The gates in this lane now spawn their suns with a posed `GlobalTransform`
+(`sdf_marcher_sun.rs`, `csm_primary_sun_agreement.rs`, `primary_directional.rs`), so none of them
+sees frame 0 any more.
+
+**Question.** Is this an accepted one-frame lag, or a missing edge? The workspace already has a
+precedent for the edge: `ParticleTickSet`, where the plugin declares set membership and the
+composing app declares `.after(CameraSet::Resolve)`. It blocks nothing today: the pinned dumps are
+taken well after frame 0.
+
+**RESOLVED 2026-09-20 — a missing edge** (the orchestrator's R4 ruling §6(c): add it where the
+`GlobalTransform` read is shown in code, which it is — the three `&GlobalTransform` queries in
+`light_reconcile`'s signature). R4b-open-edges declares `LightReconcileSet.after(CameraSet::Resolve)`
+in `EnginePlugins::build`, gated by
+`crates/boyko_app/tests/host_orders_light_reconcile_after_propagation.rs`. The "only frame 0 or
+every frame" question above was never measured and is moot under the edge. The measurement above
+turned out to be in the goldens as well: the 14 TAA pin-legs re-blessed on 2026-09-21 had carried
+that identity-lit frame 0 in their TAA history (the second of the two causes in each
+`goldens/PINS.toml` note; see the 2026-09-21 entry above), and with the edge in place they render
+the posed sun on frame 0 too.
+
+### (c) `boyko_rhi_vulkan --test sdf_gbuffer_hybrid` crashes with `0xC0000005` under a six-thread run
+
+This binary is already recorded under **KNOWN FRICTIONS** ("⚠️ A KNOWN-RED TARGET IS A SHADOW",
+2026-08-10), in the bullet "Not red at all, but FAILING UNDER THE FULL PARALLEL SWEEP" (43/43 in
+isolation). That entry stands; this adds what the failure is and how often it happens.
+
+- **Mode:** the process exits `0xC0000005` (STATUS_ACCESS_VIOLATION) about 3–4 s in, with
+  `RUST_TEST_THREADS=6`, while six GPU tests boot at once.
+- **Rate (R2b/R3 tester, interleaved, 20 runs per arm):** 1 of 20 with R3's `ddgi.rs` reverted to
+  HEAD, 2 of 20 on the lane tree. Earlier reruns crashed 2 of 8.
+- **Every run that did not crash:** 43 passed, 0 failed, 8 ignored.
+- The lane's R1 and R2 workspace runs, at the default thread count, did not hit it.
+- **Root cause:** unknown.
+
+**Question.** For the lane-wide gate: run this binary with `--test-threads=1`, or root-cause the
+concurrent boot first?
+
+---
+
+## 2026-09-19 — What R2 leaves behind: sibling defect R2c, and what the `grand_showcase_2mat` re-bless carried
+
+R2 (`docs/render/light-table-defects/R2-DESIGN.md`, lane `fix/light-table-defects`) makes the
+Deferred SDF marcher shadow toward the light table's primary directional, read every frame
+(`LightTableStaging::primary_directional_dir`, turned into the push by `gpu_scene`'s `MarcherSun`),
+and bake no sun shadow at all on a frame without a directional. Four things are left over. None of
+them is R2's to do, and none is a question to the owner yet; they are written down here so they are
+not lost. Two of them, the stale digest citations and the two one-pixel pins, were closed by the
+re-bless on 2026-09-19 and stay below as the record.
+
+### R2c — on a sunlit frame, other lights take the PRIMARY sun's shadow mask (open)
+
+On Deferred, `gMaterial.r` holds the marcher's shadow toward the primary sun, and the resolve
+applies it to lights that are not that sun:
+
+- **Every extra directional** gets it by default (`deferred_pbr.hlsl:982`, `float vis = shadow;`).
+  Only an extra directional flagged as an SDF caster, in multi-light mode, marches its own shadow.
+- **Every point and spot light** gets it while punctual shadows are off (`deferred_pbr.hlsl:1371`,
+  `vis = (punctual_shadow_mode != PUNCTUAL_SHADOW_MODE_OFF) ? 1.0 : shadow`).
+
+So a point light goes dark wherever the sun is occluded, and a second sun is shadowed toward the
+first. R2 fixed only the sunless half: with no directional the marcher clears `SHADOWS`, so
+`gMaterial.r` is `1` and the punctual lights are unmasked. On a sunlit frame the mask is now the real
+sun's instead of the boot constant's, so in an unpinned scene with punctual lights the masked region
+MOVES rather than disappears. The punctual half is the same rule `unwritten_shadow_map_gate.rs`'s F3
+note describes, from the other side: header bit 3 decides whether a punctual light takes `shadow` or
+owns its visibility. Not designed; whoever takes it starts from those two lines.
+
+### The hand-copied `f6147f90` citations, repaired at the re-bless (2026-09-19)
+
+`f6147f90` is the pin's pre-R2 digest. R2 moves the pin by design (a thin terminator crescent on
+four of the five spheres); the owner signed off the change on 2026-09-19 and both legs were
+re-blessed to `7e71e2a6`. Every hit was re-derived by grep on the lane and sorted by what it claims:
+
+- **Re-pointed to `7e71e2a6`**, because each names the pin as the CURRENT Deferred golden:
+  `crates/boyko_app/tests/grand_showcase_2mat.rs:191`, `:226`;
+  `crates/boyko_app/tests/forward_mesh.rs:16`, `:85`; `crates/boyko_app/tests/vb_mesh.rs:6`;
+  `crates/boyko_app/tests/vb_mesh_ssao.rs:7`; and `[forward_mesh]`'s two comments in
+  `goldens/PINS.toml` (now `:177` and `:185`). The second says Forward's sky matches the Deferred
+  golden's background; R2 changed no sky pixel, so it holds for the new digest.
+- **Left as written**, because each is a dated plan record, not a current value:
+  `docs/MULTI-PARADIGM-RENDER-PLAN.md:26`, `:480` and `docs/RENDER-PARITY-PLAN.md:46`, `:362` give
+  their rungs' gate set next to `58f6c6c3`, a digest retired on 2026-07-12 (`8e48f7fe`), so the set
+  was already history before R2; `docs/RENDER-AA-AND-TAILS-PLAN.md:33` names "the current goldens"
+  of its 2026-07-12 mandate, the day `f6147f90` was blessed. Re-pointing the one digest would put a
+  2026-09-19 value into a July record. The light-table design documents
+  (`docs/render/light-table-defects/`) cite `f6147f90` as the pre-R2 value, which it is.
+
+The review also named `PARTICLES-PLAN`; that file carries no `f6147f90` on this tree.
+
+### Two more pins R2 moves, one pixel each: `taa_armed` and `particle_sdf_collide` (re-blessed 2026-09-19)
+
+`grand_showcase_2mat` is not the only pin the re-bless had to carry. In both of these scenes the sun
+IS the old boot constant, `[-0.45, 0.82, 0.36]` (`crates/boyko_app/tests/taa_jitter_eval.rs:171`,
+`crates/boyko_app/tests/particle_scene/mod.rs:196`), so the marcher shadowed toward that direction
+before R2 as well. What changed is its bits. The old push was the raw, non-unit constant, which the
+shader normalises. After R2 the push is the table's value: the pose's direction after the
+quaternion round-trip, normalised by `GpuLight::from_directional`. The two are the same direction to
+rounding, not bit for bit, and that difference crosses one 8-bit rounding step in each frame.
+
+Measured on the lane on 2026-09-19 with `golden.ps1 -Pin <pin> [-Hwrt]` (never `-Bless`):
+
+| pin | leg | before (the pin) | after R2 | diff |
+|---|---|---|---|---|
+| `taa_armed` | software | `765de1d9866f37748bcf4182a21cd4d3307f94c140fb54300d6fd85adefa1b62` | `31ce517879f042eb2579a5f666155193cf488f1f4da66e9ece12147fc65ffb31` | 1 px at (236, 191), 1 LSB darker |
+| `taa_armed` | hwrt | `0acc66b55dcbf6ccdbdade9b55e1861ac24a649df179bb1bbb74437058026b45` | `c6429c3ed8d87ac27b1603404f787e7f2cca275a683ee011517ac2fda91c9235` | 1 px at (236, 191), 1 LSB darker |
+| `particle_sdf_collide` | software | `729f5ad69846b146dcd07dc840943234af3781b8b127fd5da760b918a6784704` | `c6a055a1518ca4deef97dd942a1b3592ff68e471733643f417b6336135b23bc3` | 1 px at (463, 385), 1 LSB brighter |
+| `particle_sdf_collide` | hwrt (`PENDING` in `PINS.toml` until the re-bless; "before" is a pre-R2 run) | `729f5ad6…` | `c6a055a1…` | the same pixel |
+
+**The A/B that attributes it.** The same R2 build was run with the old raw constant pushed through
+the new path whenever the table has a sun. It restored every old digest: `taa_armed` `765de1d9…`
+(software) and `0acc66b5…` (hwrt), `particle_sdf_collide` `729f5ad6…` on both legs, and
+`grand_showcase_2mat` `f6147f90…` on both legs. So on a sunlit frame the sun's bits are the only
+difference, and these two moves are rounding, not a behaviour change. This is the class the rulings
+put `deferred_sdf_casters` in (`docs/render/light-table-defects/00-RULINGS.md`, R2 W3). That pin did
+not move.
+
+Re-blessed on this basis on 2026-09-19, together with `grand_showcase_2mat`: `taa_armed` on both
+legs, and `particle_sdf_collide` on both legs, its hwrt leg pinned for the first time, at the
+software value the table above measured (the re-bless's own run rendered `c6a055a1…` again).
+Each pin's note in `goldens/PINS.toml` records the reason. `particle_sdf_collide` still waits for
+the owner's look at its image, as it did before R2.
+
+### Unpinned owner reference dumps that change by design
+
+These scenes render Deferred × Both (the default) with a sun that is not the old boot constant, and
+none of them asserts anything. A new image from one of them after R2 is the fix, not a regression:
+
+- `crates/boyko_app/tests/pbr_material_showcase.rs:77` — sun `[-0.55, 0.30, 0.42]`, about 31° from
+  the constant, so its change is the largest.
+- `crates/boyko_app/tests/pbr_showcase.rs:30`, `crates/boyko_app/tests/textured_smoke.rs:34`,
+  `crates/boyko_app/tests/grand_showcase_mvpm.rs:32` — sun `[-0.40, 0.78, 0.48]`, 7.8° off, the same
+  thin crescent `grand_showcase_2mat` shows.
+
+---
+
+## RESOLVED 2026-09-18 — An un-slotted punctual light samples another light's shadow map on armed frames
+
+✅ **RESOLVED 2026-09-18 by the light-table-defects lane (`fix/light-table-defects`), as an
+architecture call — not an owner decision, and not a question to the owner.** The fork below
+("which side owns the value") was taken on cost and on whether a gate could be shown able to fail:
+
+- **Taken: the host builds every point/spot row with `SLOT_NONE` in the slot field.**
+  `GpuLight::from_point` / `from_spot` and their golden mirrors `GoldenLight::point` / `spot` OR in
+  `SLOT_NONE_FIELD` (`0x003E_0000`, defined next to `GpuLight` in
+  `crates/boyko_render/src/light.rs`; `shadow_atlas.rs` pins it to `SLOT_NONE << ATLAS_SLOT_SHIFT`
+  at compile time). `slot_pack` keeps its guard, so the constructor is the value's single owner and
+  the fold only ever adds a real assignment on top. The six shader sites already reject the
+  sentinel: no shader code changed, no `.spv` was re-emitted, no manifest row moved;
+  `light_table.hlsli`'s false comment was corrected comment-only. On an armed frame an un-slotted
+  light now skips its PCF instead of paying for a wrong one.
+- **Rejected: the six sites also test bit 16.** Two more ALU ops per light per pixel on armed
+  frames, six hand-edited sites and up to 20 `.spv` re-emitted — and it does not fix the class,
+  because `GoldenLight::with_sdf_shadow()` sets bit 16 with no slot.
+- **Rejected: store `slot + 1`, so 0 means "none".** One more integer add per light per pixel,
+  the same `.spv` churn, and a new encoding for every slotted row, to protect rows only `from_*` /
+  `GoldenLight::*` ever build.
+- **Rejected: the fold always packs.** A row built outside the fold would still decode slot 0,
+  and the value would have two owners — so no single mutation could reintroduce the defect, and
+  no gate could be shown able to fail.
+
+What the call cost, on purpose: an un-slotted table is no longer byte-identical to the pre-Inc-1
+fold. In the slotted encoding the old word MEANT "slot 0", so that identity was the defect; the
+pixel 0%-gate is what the pins check, and it is unaffected by design.
+
+**The exposure claim was refuted by reading, before any run.** The brief said the two froxel pins
+were exposed; they are not. Neither `vb_mesh_froxel` nor `vb_mesh_tex_froxel` spawns a
+`ShadowCaster`, so the punctual depth pass never arms and header bit 3 stays off there (the section
+"Who is exposed" below). The only exposed scene is the unpinned
+`crates/boyko_app/examples/vb_lab.rs`, whose un-flagged blue point read the spot's face record.
+
+The gates that pin it (`docs/render/light-table-defects/R1-DESIGN.md` section 4):
+`light_system.rs`'s `every_punctual_row_decodes_exactly_its_assignment` (every assignment of three
+points and three spots), `mesh_shadow_arming_agreement.rs` (the production resolve → assignment →
+`collect_lights` path, with an un-flagged point, an un-flagged spot and a budget loser),
+`lighting_l1_host_oracle.rs`'s `every_light_row_producer_emits_the_slot_none_sentinel` (both
+producers, plus the shader's own spelling of the field, with a negative control), and the device
+gate `unwritten_shadow_map_gate.rs`'s `unslotted_punctual_lights_never_sample_the_atlas`. The
+poison probe now also records `sampled_rows` — the rows the shader's own predicate
+`light_atlas_slot(kind) != SLOT_NONE` would sample — beside the `CASTS_SHADOW_BIT` count the last
+paragraph of this entry explains.
+
+Out of scope and not an owner question: bit 16 means "slotted" to the host and "casts an SDF
+shadow" to the shader (follow-up R1-F1 in the design); it moves no pixel today.
+
+### The record as written before the fix
 
 Found by the vkval lane (round 3, the shadow-gate stage) while writing the punctual half of the
 unwritten-shadow-map gate. **It is pre-existing and that lane does not fix it.** The fix is
