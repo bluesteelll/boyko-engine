@@ -592,7 +592,7 @@ fn toggle_pending_for_a_despawned_entity_does_not_land_on_its_recycled_id() {
 
     // The recycled run.
     let a = run_h06_frame(Some(ClaimOrder::Recycled), PendingToggle::Enable);
-    let fa = a.f.expect("recycled run: SpawnHiddenAtApply registered F");
+    let fa = a.f.expect("recycled run: SpawnFAtApply registered F");
     // Anti-vacuity 2 — the recycle happened as staged: F sits on E's id, one
     // generation up (F3: the recycled entry carries the bumped generation).
     assert_eq!(fa.id(), a.e.id(), "recycled run: F must take E's id (killer drained before the toggle)");
@@ -622,7 +622,7 @@ fn toggle_pending_for_a_despawned_entity_does_not_land_on_its_recycled_id() {
 
     // The fresh-id control: identical frame, F allocated BEFORE E's despawn.
     let b = run_h06_frame(Some(ClaimOrder::Fresh), PendingToggle::Enable);
-    let fb = b.f.expect("fresh run: SpawnHiddenAtApply registered F");
+    let fb = b.f.expect("fresh run: SpawnFAtApply registered F");
     assert_ne!(fb.id(), b.e.id(), "fresh run: F must NOT take E's id (nothing was recycled yet)");
     assert_eq!(fb.generation(), 0, "fresh run: a minted id starts at generation 0");
     assert!(!b.f_enabled, "fresh run: F was spawned Hidden and never toggled");
