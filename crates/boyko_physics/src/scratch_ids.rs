@@ -41,14 +41,14 @@ use boyko_ecs::ecs::core::component::component_registry::{MAX_COMPONENTS, regist
 use boyko_ecs::ecs::constants::{
     POOL_MAX_ROWS, POOL_MIN_ROWS, POOL_STAGGER_LINES, POOL_TARGET_DATA_BYTES,
 };
-use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::Vec3;
 use crate::narrowphase::axis_cache::AxisEntry;
 use crate::resources::BodyState;
-use crate::row_identity::SleepLatch;
+use crate::row_identity::{RowKey, SleepLatch};
 use crate::solver::contact::BodyEffective;
 use crate::solver::soft_step::{ManifoldConstraint, PointConstraint};
 use crate::solver::warm_start::WarmEntry;
@@ -518,14 +518,15 @@ pub(crate) fn register_soft_graph_column_layouts() {
 
 // —— The ROW-IDENTITY cohort (defect A, interim) ————————————————————
 //
-// `RowIdentity` (row_identity.rs) records the gather's per-row `EntityId`s and builds the
-// previous-row map; `IslandSleep` and `BoxAxisCache` each keep one carry scratch. Seven
+// `RowIdentity` (row_identity.rs) records the gather's per-row `RowKey`s (slot index +
+// generation, one `u64`) and builds the previous-row map; `IslandSleep` and `BoxAxisCache`
+// each keep one carry scratch. Seven
 // columns in TWO runs, plus `IslandSleep`'s island contact key in the gap between them,
 // because the loops they are swept in differ:
 //
 // * UPPER run (3 ids, directly below the soft-graph cohort): the current and previous
-//   row ids and the added rows. The gather pushes the ids and the added rows at row `i`
-//   in the loop that pushes the BodyState snapshot, and the two id columns swap roles
+//   row keys and the added rows. The gather pushes the keys and the added rows at row `i`
+//   in the loop that pushes the BodyState snapshot, and the two key columns swap roles
 //   every gather, so all three must clear `SCRATCH_ID_BODY_STATE`'s slot.
 // * LOWER run (4 ids): `prev_row`, the stage-2 sort pool, the latch carry and the axis
 //   carry. `prev_row` is read inside both solvers' constraint builds, which sweep the
@@ -582,10 +583,10 @@ const ROW_IDENTITY_LOWER_COUNT: usize = 4;
 /// Top of the row-identity cohort — one id below the soft-graph cohort's bottom.
 pub(crate) const SCRATCH_ID_ROW_IDENTITY_TOP: usize = SCRATCH_ID_SOFT_GRAPH_BOTTOM - 1;
 
-/// Synthetic id for `RowIdentity`'s current row → `EntityId` column. Top of the upper run.
+/// Synthetic id for `RowIdentity`'s current row → `RowKey` column. Top of the upper run.
 pub(crate) const SCRATCH_ID_ROW_ENTITY: usize = SCRATCH_ID_ROW_IDENTITY_TOP;
 
-/// Synthetic id for `RowIdentity`'s previous row → `EntityId` column.
+/// Synthetic id for `RowIdentity`'s previous row → `RowKey` column.
 pub(crate) const SCRATCH_ID_ROW_ENTITY_PREV: usize = SCRATCH_ID_ROW_IDENTITY_TOP - 1;
 
 /// Synthetic id for `RowIdentity`'s added-rows column. Bottom of the upper run.
@@ -689,15 +690,15 @@ const _: () = assert!(
 
 /// Registers the element layout of every row-identity column, idempotently.
 ///
-/// Two `EntityId` columns, three `u32` columns (the added rows, `prev_row` and the island
-/// contact key), the `(EntityId, u32)` sort pool, the `SleepLatch` carry and the `u8` axis
+/// Two `RowKey` columns, three `u32` columns (the added rows, `prev_row` and the island
+/// contact key), the `(RowKey, u32)` sort pool, the `SleepLatch` carry and the `u8` axis
 /// carry.
 pub(crate) fn register_row_identity_layouts() {
-    register_layout::<EntityId>(SCRATCH_ID_ROW_ENTITY);
-    register_layout::<EntityId>(SCRATCH_ID_ROW_ENTITY_PREV);
+    register_layout::<RowKey>(SCRATCH_ID_ROW_ENTITY);
+    register_layout::<RowKey>(SCRATCH_ID_ROW_ENTITY_PREV);
     register_layout::<u32>(SCRATCH_ID_ROW_ADDED);
     register_layout::<u32>(SCRATCH_ID_ROW_PREV);
-    register_layout::<(EntityId, u32)>(SCRATCH_ID_ROW_REMAP_SORT);
+    register_layout::<(RowKey, u32)>(SCRATCH_ID_ROW_REMAP_SORT);
     register_layout::<SleepLatch>(SCRATCH_ID_SLEEP_LATCH_PREV);
     register_layout::<u8>(SCRATCH_ID_AXIS_REMAP);
     register_layout::<u32>(SCRATCH_ID_SLEEP_ISLAND_KEY);
@@ -1455,11 +1456,11 @@ mod tests {
     fn row_identity_layouts_register_each_element_size() {
         register_row_identity_layouts();
         for (id, size) in [
-            (SCRATCH_ID_ROW_ENTITY, size_of::<EntityId>()),
-            (SCRATCH_ID_ROW_ENTITY_PREV, size_of::<EntityId>()),
+            (SCRATCH_ID_ROW_ENTITY, size_of::<RowKey>()),
+            (SCRATCH_ID_ROW_ENTITY_PREV, size_of::<RowKey>()),
             (SCRATCH_ID_ROW_ADDED, size_of::<u32>()),
             (SCRATCH_ID_ROW_PREV, size_of::<u32>()),
-            (SCRATCH_ID_ROW_REMAP_SORT, size_of::<(EntityId, u32)>()),
+            (SCRATCH_ID_ROW_REMAP_SORT, size_of::<(RowKey, u32)>()),
             // The widened (defect A4) carry element: latch + island contact key.
             (SCRATCH_ID_SLEEP_LATCH_PREV, 8),
             (SCRATCH_ID_AXIS_REMAP, size_of::<u8>()),

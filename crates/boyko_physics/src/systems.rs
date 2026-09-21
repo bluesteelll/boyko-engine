@@ -63,7 +63,7 @@
 
 use boyko_ecs::ecs::core::iters::query::data_is_enabled::IsEnabled;
 use boyko_ecs::ecs::core::iters::query::query::Query;
-use boyko_ecs::ecs::core::system::{Res, ResMut};
+use boyko_ecs::ecs::core::system::{Entities, Res, ResMut};
 use boyko_ecs::ecs::core::time::FixedTime;
 
 use crate::body_set::{BodyApplyData, BodyGatherData, BodyQuery};
@@ -81,6 +81,7 @@ use crate::resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode,
     IslandSleep, Manifolds, PhysicsConfig, SdfNarrowphaseKernel, SolverScratch,
 };
+use crate::row_identity::RowKey;
 use crate::sdf_query::{SdfField, sample_sdf};
 use crate::solver::colored::ColoredSoftStepSolver;
 use crate::solver::contact::is_dynamic_row;
@@ -200,11 +201,13 @@ pub fn physics_integrate(
 /// system, and the TGS solver later reads `h = dt / substeps`. The stamp is
 /// gather-time so a hand-set `cfg.dt` is overwritten.
 ///
-/// It also records each row's `EntityId` (through `Query::iter_entities`, which walks
-/// exactly the `iter()` order) and the rows whose `RigidBody` was added since the last
-/// gather into [`SolverScratch`]'s row identity map, so the row-keyed consumers can carry
-/// their state when rows move (defect A, interim). A row → entity projection for the
-/// gameplay [`Contact`](crate::components::Contact) producer is still not carried.
+/// It also records each row's [`RowKey`] — the entity's slot index AND generation, the
+/// latter read through [`Entities`] — and the rows whose `RigidBody` was added since the
+/// last gather into [`SolverScratch`]'s row identity map, so the row-keyed consumers can
+/// carry their state when rows move (defect A, interim) and a body on a recycled slot never
+/// inherits the dead body's state (hazard H-03). `Query::iter_entities` walks exactly the
+/// `iter()` order but yields the slot only. A row → entity projection for the gameplay
+/// [`Contact`](crate::components::Contact) producer is still not carried.
 //
 // `clippy::needless_pass_by_value`: `ResMut<_>` / `Res<_>` are by-value
 // `SystemParam`s mutated/read through reborrows — the same false-positive as the
@@ -212,6 +215,7 @@ pub fn physics_integrate(
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_gather(
     query: BodyQuery<BodyGatherData>,
+    entities: Entities,
     mut scratch: ResMut<SolverScratch>,
     mut cfg: ResMut<PhysicsConfig>,
     fixed_time: Res<FixedTime>,
@@ -244,10 +248,12 @@ pub fn physics_gather(
     // The refill view is SCOPED: it publishes its frontier on `Drop`, so the borrow
     // of `scratch.bodies` has to end before `scratch.touched` is reached.
     //
-    // Defect A (interim): the same walk records each row's `EntityId` and the rows whose
-    // `RigidBody` was added (`Ref` is a plain read, so the access set is unchanged), so
-    // `finish_gather` can tell where every body sat one gather ago. `iter_entities`
-    // yields exactly the `iter()` sequence.
+    // Defect A (interim): the same walk records each row's `RowKey` (slot + generation,
+    // through `Entities`: one 16 B fast-store slot load per row, whose address depends on
+    // the id alone, so it issues beside the column reads) and the rows whose `RigidBody`
+    // was added (`Ref` is a plain read and `Entities` declares no access, so the access
+    // set is unchanged), so `finish_gather` can tell where every body sat one gather ago.
+    // `iter_entities` yields exactly the `iter()` sequence.
     scratch.rows.begin_gather();
     let n = {
         let SolverScratch { bodies, rows, .. } = &mut *scratch;
@@ -259,7 +265,12 @@ pub fn physics_gather(
             if body.is_added() {
                 added.push(bodies.len() as u32);
             }
-            ids.push(entity);
+            // The gather runs strictly after the apply window that registered every row's
+            // entity, so a row the body query yields is live.
+            let live = entities
+                .get(entity)
+                .expect("invariant: a row the body query yields is a live entity");
+            ids.push(RowKey::of(live));
             bodies.push(BodyState::from_columns(
                 &body,
                 mass,

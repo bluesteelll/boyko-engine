@@ -10,9 +10,11 @@
 //!
 //! | test | what goes red |
 //! |---|---|
-//! | T1 `recycled_id_respawned_into_the_same_row_is_fresh` | a recycled id respawned into its dead body's own row inherits the dead body's latch (M3b) |
+//! | T1 `recycled_id_respawned_into_the_same_row_is_fresh` | a recycled id respawned between runs at its dead body's settled pose, into the dead body's own row, inherits the dead body's latch and is frozen on its first step. Measured: red only when BOTH the key compare (M-A: a slot-only `RowKey`) and the added flag (M3b: `added_rows.is_empty()` dropped from `stable`) call E unchanged; green under either alone — M-A is killed by U1 and the H-03 pair, M3b by `row_identity.rs`'s edge case "same key in its own row, flagged" |
 //! | T1b `recycled_id_spawned_in_the_same_run_is_fresh_within_one_step` | a spawn applied inside the run before the gather stays frozen longer than the one-step O1 bound |
 //! | `gather_set_after_edge_sees_the_same_runs_gather` | the gather is not ordered by `PhysicsGatherSet`, the hook T1b orders its spawner through |
+//! | H-03 `recycled_id_in_the_o1_window_carries_nothing_from_the_dead_body` | a body spawned inside the O1 window on a recycled id inherits the dead body's latch and island key (a slot-only row key) |
+//! | H-03 `recycled_id_in_the_o1_window_seeds_no_warm_entries` | the same spawn is warm-started from the dead body's entries (a slot-only row key) |
 //! | T2 `sleeping_toggle_gap_resets_rather_than_carries` | a latch that missed gathers is read in place or carried by a one-step map |
 //! | T3 `row_remap_builds_only_on_structural_change` | a map built on a step with no change, a stage-2 cost bound exceeded (M10, M10b), a consumer reset on a live schedule (M5, M9) |
 //! | T4 `structural_churn_is_run_to_run_bit_deterministic` | two runs of one scripted churn differ in any bit |
@@ -300,6 +302,9 @@ mod schedule {
         marked: ArchetypeId,
         /// `{RigidBody, RigidBodyMass, Collider, BodyId}`.
         plain: ArchetypeId,
+        /// `{BodyId}` only, created LAST: it holds no `RigidBody`, so no body walk sees it.
+        /// H-03's pre-claim entity lives here.
+        claimant: ArchetypeId,
         solve: Solve,
     }
 
@@ -323,6 +328,7 @@ mod schedule {
                 Collider::component_id(),
                 BodyId::component_id(),
             ]);
+            let claimant = world.create_archetype(&[BodyId::component_id()]);
 
             let mut builder = ScheduleBuilder::new(serial_pool());
             // Ordered against the gather by the physics plugin's named set (module doc,
@@ -362,8 +368,19 @@ mod schedule {
                 physics,
                 marked,
                 plain,
+                claimant,
                 solve,
             }
+        }
+
+        /// Creates a body-less entity through the dispatcher's own allocation, which takes
+        /// the top of the recycled-id stack before minting fresh: the next spawn cannot
+        /// recycle the id this one took.
+        fn claim_id(&mut self, id: u32) -> Entity {
+            let id = BodyId { id };
+            self.world
+                .create_entity(self.claimant, &[(BodyId::component_id(), as_bytes(&id))])
+                .expect("construction: the claimant archetype accepts its one column")
         }
 
         fn spawn(&mut self, spec: Spec, marked: bool) -> Entity {
@@ -568,10 +585,25 @@ mod schedule {
     // ── T1: a recycled id in its dead body's own row is a new body ───────────
 
     /// T1: the last row P4 of a latched pile is despawned (nothing swap-moves) and body E is
-    /// spawned at rest in mid-air. E recycles P4's `EntityId` and lands in P4's row, so the id
-    /// compare alone calls the rows unchanged; only the added row makes the gather rebuild the
-    /// map and start E awake. Red under M3b (`added_rows.is_empty()` dropped from `stable`):
-    /// E inherits P4's latch and hangs at `y = 4`.
+    /// spawned between runs at P4's settled pose, moving into P3 at `Y_SPAWN_VELOCITY` (the
+    /// H-03 construction). E recycles P4's slot at the next generation and lands in P4's row,
+    /// and its island `{P3, E}` files the two manifolds P4's did, so a latch carried from P4
+    /// keeps its island contact key and is not cleared by wake-on-contact-change: it would
+    /// freeze E on its first step. On the fixed tree E's `RowKey` alone makes the gather
+    /// rebuild the map and send row 4 to `NO_ROW`; the added flag (the spawn is applied
+    /// between runs, so the gather sees it) says the same thing a second time. E's row is
+    /// awake on step 1, its contact with P3 is solved (`v.y = +0.0034`, up from `-0.25`), and
+    /// one map is built.
+    ///
+    /// Measured: RED under M3b (`added_rows.is_empty()` dropped from `stable`) together with
+    /// M-A (a slot-only key) — the gather is `stable`, no map is built, E's row 4 inherits
+    /// P4's latch and key, and E is frozen at its spawn velocity (`awake false`,
+    /// `v = (0, -0.25, 0)`). GREEN under M3b alone (the key differs, so the map is built) and
+    /// under M-A alone (the flag builds it); those are killed elsewhere: M3b by
+    /// `row_identity.rs`'s edge case "same key in its own row, flagged" (the flag's remaining
+    /// job, a `RigidBody` re-inserted on a live entity), M-A by U1 and, at the schedule
+    /// level, by the H-03 pair below. A mid-air spawn (the previous scene) cannot go red
+    /// under any of them: a row with no island is awake whatever latch it carries.
     #[test]
     fn recycled_id_respawned_into_the_same_row_is_fresh() {
         let mut h = Harness::new(Solve::Colored, true);
@@ -585,17 +617,28 @@ mod schedule {
             "construction: walk before the change"
         );
         let p4_row = h.row_of(P4);
-        let p4_id = pile[3].id();
+        let p4 = pile[3];
+        // P4's SETTLED pose, as in `h03_variant`: a body at the spawn pose y = 1.5 would not
+        // touch P3 and would form no island with it, and a row with no island is awake
+        // whatever latch it inherits (`IslandSleep::begin_step`'s no-island rule), so an
+        // isolated E cannot show a carried latch.
+        let p4_pose = h.body(p4).position;
 
         assert!(
-            h.world.delete_entity(pile[3]),
+            h.world.delete_entity(p4),
             "construction: P4 must be despawnable"
         );
-        let e = h.spawn(ball(NEWCOMER, Vec3::new(5.0, 4.0, 0.0)), false);
-        assert_eq!(
-            e.id(),
-            p4_id,
-            "construction: E must recycle P4's EntityId, or the test does not exercise a recycled id"
+        let e = h.spawn(
+            Spec {
+                velocity: Y_SPAWN_VELOCITY,
+                ..ball(NEWCOMER, p4_pose)
+            },
+            false,
+        );
+        assert!(
+            e.id() == p4.id() && e.generation() == p4.generation().wrapping_add(1),
+            "construction: E must recycle P4's EntityId with a bumped generation, or the test \
+             does not exercise a recycled id; P4 {p4:?}, E {e:?}"
         );
         assert_eq!(
             h.walk_ids(),
@@ -607,14 +650,19 @@ mod schedule {
         h.step();
         let built_on_first_step = h.scratch().row_remap_builds() - builds_before;
         let awake_on_first_step = h.awake(NEWCOMER);
-        h.steps(29);
-        let y = h.body(e).position.y;
+        let v_1 = h.body(e).linear_velocity;
+        eprintln!(
+            "T1: E's row awake on step 1: {awake_on_first_step}; v after step 1: {v_1:?}; \
+             previous-row maps built on step 1: {built_on_first_step}"
+        );
         assert!(
-            y < 3.0,
-            "T1: body E, spawned at rest at y = 4 into P4's row {p4_row} with P4's recycled EntityId, \
-             must fall; after 30 steps E.y = {y} (expected < 3.0). E's row awake on its first step: \
-             {awake_on_first_step}; previous-row maps built on that step: {built_on_first_step}; pile \
-             latched after {settle_steps} steps"
+            awake_on_first_step && v_1.y > Y_SPAWN_VELOCITY.y,
+            "T1: body E, spawned between runs at P4's settled pose {p4_pose:?} into P4's row {p4_row} \
+             with P4's recycled EntityId, must be a new body: its row awake and its contact with P3 \
+             solved on its first step. E's row awake: {awake_on_first_step}; E's velocity after \
+             step 1: {v_1:?}, spawned at {Y_SPAWN_VELOCITY:?} (unchanged: frozen under P4's latch; \
+             more negative: no contact); previous-row maps built on that step: \
+             {built_on_first_step}; pile latched after {settle_steps} steps"
         );
     }
 
@@ -623,8 +671,9 @@ mod schedule {
     /// T1b: P4, the last row of a latched pile, is despawned between runs; on step s a system
     /// that runs before the gather spawns E at rest at (5, 4, 0) through `Commands`, recycling
     /// P4's id into P4's row. That spawn is stamped `this_run + 1`, so step s's gather cannot
-    /// see it as added and E may carry P4's latch for that one step (printed, not asserted).
-    /// Step s + 1 flags it: E's row must be awake, and E must then fall.
+    /// see it as added. E's row on step s is printed, not asserted here: the H-03 pair below
+    /// asserts it (the row key carries the generation, so E never carries P4's latch). Step
+    /// s + 1 flags it: E's row must be awake, and E must then fall.
     #[test]
     fn recycled_id_spawned_in_the_same_run_is_fresh_within_one_step() {
         let mut h = Harness::build(Solve::Colored, true, Some(GatherProbe::SpawnerBefore));
@@ -721,6 +770,196 @@ mod schedule {
             Some(2),
             "a recorder ordered after_set(PhysicsGatherSet) ran before this run's gather: the \
              gather is not ordered by its set (recorded {recorded:?}, the gather produced 2 rows)"
+        );
+    }
+
+    // ── H-03 (A1b): a recycled id inside the O1 window carries nothing ───────
+
+    /// The body id of the pre-claim entity; it holds no `RigidBody`, so no walk sees it.
+    const CLAIMANT: u32 = 9;
+    /// The spawn velocity of the H-03 pair's Y and of T1's E, into P3: the contact it lands in
+    /// is solved on its first step, so a solved body and a frozen one have different velocity
+    /// bits after that step.
+    const Y_SPAWN_VELOCITY: Vec3 = Vec3::new(0.0, -0.25, 0.0);
+
+    /// What one variant of the H-03 pair observed.
+    struct Outcome {
+        settle_steps: usize,
+        x: Entity,
+        y: Entity,
+        /// Y's row on step s; `None` on a schedule without `IslandSleep`.
+        awake_on_s: Option<bool>,
+        /// Y's linear velocity after step s.
+        v_s: Vec3,
+        /// Y's position 29 steps after step s.
+        pos_30: Vec3,
+        /// The solver's warm-start point hits on step s.
+        point_hits: u32,
+    }
+
+    /// One variant of the H-03 pair: a settled pile; X = P4 (the last row) is despawned
+    /// between runs; on step s a system ordered before the gather spawns Y at X's settled
+    /// pose, moving into P3, through `Commands`. That spawn is applied inside the run, so
+    /// step s's gather sees `is_added == false` (the O1 window). Without `pre_claim` Y takes
+    /// X's recycled id with a bumped generation (variant A); with it, a body-less entity
+    /// takes that id first and Y is minted fresh (variant B).
+    fn h03_variant(solve: Solve, sleeping: bool, pre_claim: bool) -> Outcome {
+        let mut h = Harness::build(solve, sleeping, Some(GatherProbe::SpawnerBefore));
+        h.spawn(floor(FLOOR_HALF_EXTENTS), false);
+        let pile = h.spawn_pile();
+        let settle_steps = match solve {
+            Solve::Colored => h.settle_until_latched(&PILE),
+            // No `IslandSleep` on the serial schedule: a fixed settle.
+            Solve::Serial => {
+                h.steps(MIN_SETTLE_STEPS);
+                MIN_SETTLE_STEPS
+            }
+        };
+        h.assert_walk_matches_gather();
+        assert_eq!(
+            h.walk_ids(),
+            vec![FLOOR, P1, P2, P3, P4],
+            "construction: walk before the change"
+        );
+
+        let x = pile[3];
+        // X's SETTLED pose, not its spawn pose: the sphere-sphere narrowphase has no
+        // speculative margin, and P3 rests a soft-contact penetration below y = 0.5, so a
+        // body at the spawn pose y = 1.5 would not touch P3 and would form no island with it.
+        let x_pose = h.body(x).position;
+        assert!(h.world.delete_entity(x), "construction: X must be despawnable");
+        if pre_claim {
+            let z = h.claim_id(CLAIMANT);
+            assert!(
+                z.id() == x.id() && z.generation() == x.generation().wrapping_add(1),
+                "construction: the pre-claim must take X's recycled id with its bumped \
+                 generation; X {x:?}, claimant {z:?}"
+            );
+        }
+        h.world.resource_mut::<SpawnRequest>().spec = Some(Spec {
+            velocity: Y_SPAWN_VELOCITY,
+            ..ball(NEWCOMER, x_pose)
+        });
+
+        // Step s.
+        h.step();
+        let y = h
+            .world
+            .resource::<SpawnRequest>()
+            .spawned
+            .expect("construction: the spawning system must have run on step s");
+        assert_eq!(
+            h.scratch().bodies_len(),
+            5,
+            "construction: Y's spawn command must land before step s's gather (the O1 window)"
+        );
+        assert_eq!(
+            h.walk_ids(),
+            vec![FLOOR, P1, P2, P3, NEWCOMER],
+            "construction: Y must be walk row 4, X's old row"
+        );
+        h.assert_walk_matches_gather();
+        if pre_claim {
+            assert_ne!(
+                y.id(),
+                x.id(),
+                "construction: with X's id pre-claimed, Y must be minted fresh (X {x:?}, Y {y:?})"
+            );
+        } else {
+            assert!(
+                y.id() == x.id() && y.generation() == x.generation().wrapping_add(1),
+                "construction: Y must recycle X's id with a bumped generation; X {x:?}, Y {y:?}"
+            );
+        }
+        let awake_on_s = (solve == Solve::Colored).then(|| h.awake(NEWCOMER));
+        let v_s = h.body(y).linear_velocity;
+        let point_hits = h.warm_stats().point_hits;
+        h.steps(29);
+        let pos_30 = h.body(y).position;
+        Outcome {
+            settle_steps,
+            x,
+            y,
+            awake_on_s,
+            v_s,
+            pos_30,
+            point_hits,
+        }
+    }
+
+    /// H-03 on the colored schedule with sleeping: Y's velocity after step s and its pose
+    /// 30 steps on must not depend on whether its id is X's recycled one. Red on a slot-only
+    /// row key: variant A's row 4 compares equal to X's, the gather is `stable`, the latch
+    /// is read in place, the island `{P3, Y}` still files two manifolds so
+    /// wake-on-contact-change stays quiet, and Y is frozen on step s at its spawn velocity
+    /// while variant B's Y is solved.
+    #[test]
+    fn recycled_id_in_the_o1_window_carries_nothing_from_the_dead_body() {
+        let a = h03_variant(Solve::Colored, true, false);
+        let b = h03_variant(Solve::Colored, true, true);
+        assert_eq!(
+            a.settle_steps, b.settle_steps,
+            "construction: both variants settle in the same number of steps"
+        );
+        assert!(
+            b.awake_on_s == Some(true) && !bits_eq(b.v_s, Y_SPAWN_VELOCITY),
+            "anti-vacuity: B's Y must be solved on step s (awake {:?}, v_s {:?}); a pair where \
+             both rows froze would agree for the wrong reason",
+            b.awake_on_s,
+            b.v_s
+        );
+        assert!(
+            bits_eq(a.v_s, b.v_s) && bits_eq(a.pos_30, b.pos_30),
+            "H-03: Y spawned inside the O1 window on X's recycled id differs from Y on a fresh \
+             id. A (recycled): v_s {:?}, pos_30 {:?}, awake on step s {:?}, X gen {} -> Y gen {}. \
+             B (fresh): v_s {:?}, pos_30 {:?}, awake on step s {:?}, X gen {} -> Y gen {}. Pile \
+             settled after {} steps",
+            a.v_s,
+            a.pos_30,
+            a.awake_on_s,
+            a.x.generation(),
+            a.y.generation(),
+            b.v_s,
+            b.pos_30,
+            b.awake_on_s,
+            b.x.generation(),
+            b.y.generation(),
+            a.settle_steps
+        );
+    }
+
+    /// H-03 on the serial schedule with sleeping off: the warm table must not seed Y's
+    /// manifold from X's entries. Red on a slot-only row key: variant A's `(P3, Y)` pair
+    /// resolves as `Identity` to `(P3, X)`'s stored impulse, one more point hit than B and a
+    /// different solved velocity.
+    #[test]
+    fn recycled_id_in_the_o1_window_seeds_no_warm_entries() {
+        let a = h03_variant(Solve::Serial, false, false);
+        let b = h03_variant(Solve::Serial, false, true);
+        assert_eq!(
+            a.settle_steps, b.settle_steps,
+            "construction: both variants settle in the same number of steps"
+        );
+        assert!(
+            b.point_hits >= 1 && !bits_eq(b.v_s, Y_SPAWN_VELOCITY),
+            "anti-vacuity: B's step s must warm-start the surviving manifolds (point hits {}) and \
+             solve Y (v_s {:?})",
+            b.point_hits,
+            b.v_s
+        );
+        assert!(
+            a.point_hits == b.point_hits && bits_eq(a.v_s, b.v_s),
+            "H-03 warm start: Y on X's recycled id took the dead body's entries. A (recycled): \
+             point hits {}, v_s {:?}, X gen {} -> Y gen {}. B (fresh): point hits {}, v_s {:?}, \
+             X gen {} -> Y gen {}",
+            a.point_hits,
+            a.v_s,
+            a.x.generation(),
+            a.y.generation(),
+            b.point_hits,
+            b.v_s,
+            b.x.generation(),
+            b.y.generation()
         );
     }
 

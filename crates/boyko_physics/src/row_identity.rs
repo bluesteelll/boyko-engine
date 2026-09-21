@@ -8,23 +8,30 @@
 //! start tables of both solvers and the box-box axis cache ([`BoxAxisCache`]). Without
 //! this map each of them reads the state of whichever body used to hold the row.
 //!
-//! The gather records the [`EntityId`] of every row and the rows whose `RigidBody` was
-//! added since it last ran. When the rows changed, [`RowIdentity::finish_gather`] builds
+//! The gather records the [`RowKey`] of every row (the entity's slot index and generation)
+//! and the rows whose `RigidBody` was added since it last ran. When the rows changed,
+//! [`RowIdentity::finish_gather`] builds
 //! `prev_row[r]`: the row the body now in row `r` held one gather ago, or [`NO_ROW`] for
 //! a body that is new. Each consumer carries its state through that map — the latch and
 //! its island contact key are permuted, warm-start and axis reads are translated — and
 //! classifies itself through a [`RemapCursor`], stamped where its state becomes keyed by
 //! the current rows.
 //!
-//! # `is_added` can arrive one gather late
+//! # The key is the entity, not its slot
 //!
-//! `EntityId` carries no generation, so a recycled id would impersonate the dead body
-//! it replaced; the added rows are what force a new body to [`NO_ROW`]. A deferred spawn
-//! applied *inside* the physics schedule run, before the gather, is stamped `this_run + 1`
-//! and that same run's gather sees `is_added == false`. For that one gather a recycled
-//! id carries the dead body's latch, warm entries and axis hint; the next gather flags it.
-//! The bound is exactly one step for any body that lives at least two steps. Spawns
-//! applied between runs are flagged on their first gather.
+//! A row is matched on its [`RowKey`]: the entity's slot index AND generation, packed into
+//! one `u64`. A body that recycles a dead body's slot has a different key, so to the
+//! compare it is a different row: the aligned walk does not pair it with the dead row,
+//! stage 2 misses, and it resolves to [`NO_ROW`] — a new body to every consumer (a fresh
+//! latch, no warm seed, no axis hint) — whether or not the gather saw its `RigidBody` as
+//! added. That covers the one gather where `is_added` is false: a deferred spawn applied
+//! *inside* the physics schedule run, before the gather, is stamped `this_run + 1`, and
+//! that same run's gather sees `is_added == false` (the O1 window; hazard H-03).
+//!
+//! The added rows keep one job: a `RigidBody` removed and re-inserted on a *live* entity
+//! between two gathers keeps its key, and only the flag makes it a new body. Its O1
+//! window (the re-insert applied inside the run before the gather) remains, confined to
+//! that case: for that one gather the re-inserted body carries its own previous row.
 //!
 //! # Degrade classes of the aligned walk
 //!
@@ -58,7 +65,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
-use boyko_ecs::ecs::identifiers::primitives::EntityId;
+use boyko_ecs::ecs::core::entity::entity::Entity;
 
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::scratch_ids::{
@@ -108,6 +115,56 @@ const CONSUMED: u32 = 1 << 31;
 /// Touched once per [`RowIdentity`] construction (setup), never per step. It starts at
 /// `1`, so every `base` is at least `2^40` and `0` is never a valid stamp.
 static ROW_IDENTITY_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+/// The identity a row is matched on across gathers: the entity's slot index in the high
+/// 32 bits, its generation in the low 32. One `u64`, so a compare is one instruction and
+/// [`keys_equal`] folds one lane per row.
+///
+/// Invariant: slot index `< 2^32`. A `2^32`-slot entity fast store is 64 GiB of
+/// reservation (the default holds `2^26`); [`of`](Self::of) debug-asserts it per row, and a
+/// release build past it would alias slots `2^32` apart, never read out of bounds. A
+/// generation wrap (`2^32` recycles of one slot) is the kernel's own ABA window, inherited
+/// unchanged.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct RowKey(u64);
+
+impl RowKey {
+    /// The key of a live entity handle.
+    #[inline]
+    pub(crate) fn of(entity: Entity) -> Self {
+        let id = entity.id().0;
+        debug_assert!(
+            id <= u32::MAX as usize,
+            "invariant: an entity slot index fits 32 bits (a 2^32-slot fast store is 64 GiB)"
+        );
+        Self(((id as u64) << 32) | u64::from(entity.generation()))
+    }
+
+    /// Test scripts: the key of slot `id` at `generation`.
+    #[cfg(test)]
+    pub(crate) const fn new(id: usize, generation: u32) -> Self {
+        Self(((id as u64) << 32) | generation as u64)
+    }
+
+    /// The slot index half of the key.
+    #[cfg(test)]
+    pub(crate) fn id(self) -> usize {
+        (self.0 >> 32) as usize
+    }
+
+    /// The generation half of the key.
+    #[cfg(test)]
+    pub(crate) fn generation(self) -> u32 {
+        // Truncation is the point: the low 32 bits are the generation.
+        self.0 as u32
+    }
+}
+
+const _: () = assert!(
+    size_of::<RowKey>() == 8 && align_of::<RowKey>() == 8,
+    "RowKey is one u64: the 8 B, align 8 row id element"
+);
 
 /// How a row-keyed consumer's state relates to the rows of the current gather.
 #[derive(Clone, Copy, Debug)]
@@ -353,16 +410,16 @@ pub(crate) struct RowIdentity {
     base: u64,
     /// Whether the current gather's rows equal the previous gather's and none was added.
     stable: bool,
-    /// Row → `EntityId` of the current gather, in gather order. 8 B/row.
-    cur: ScratchColumn<EntityId>,
-    /// Row → `EntityId` of the previous gather; swapped with `cur` at each gather. 8 B/row.
-    prev: ScratchColumn<EntityId>,
+    /// Row → [`RowKey`] of the current gather, in gather order. 8 B/row.
+    cur: ScratchColumn<RowKey>,
+    /// Row → [`RowKey`] of the previous gather; swapped with `cur` at each gather. 8 B/row.
+    prev: ScratchColumn<RowKey>,
     /// Rows whose `RigidBody` was added, ascending. Empty in the steady state.
     added_rows: ScratchColumn<u32>,
     /// `prev_row[r]` for the current gather; valid iff `!stable`. 4 B/row.
     prev_row: ScratchColumn<u32>,
     /// Stage 2's pool of previous rows the aligned walk left unconsumed. Cold only.
-    sort_buf: ScratchColumn<(EntityId, u32)>,
+    sort_buf: ScratchColumn<(RowKey, u32)>,
     /// Previous-row maps built (steps whose rows changed). Structural diagnostic.
     remap_builds: u64,
     /// Current rows resolved by stage 2. Structural cost diagnostic.
@@ -384,9 +441,9 @@ impl RowIdentity {
             "invariant: at most 2^24 RowIdentity instances per process, or sequence ranges alias"
         );
         let base = epoch << SEQ_BITS;
-        let id_reserve = rows.max(scratch_reserve_rows(size_of::<EntityId>()));
+        let id_reserve = rows.max(scratch_reserve_rows(size_of::<RowKey>()));
         let row_reserve = rows.max(scratch_reserve_rows(size_of::<u32>()));
-        let sort_reserve = rows.max(scratch_reserve_rows(size_of::<(EntityId, u32)>()));
+        let sort_reserve = rows.max(scratch_reserve_rows(size_of::<(RowKey, u32)>()));
         Self {
             gather_seq: base,
             base,
@@ -414,12 +471,12 @@ impl RowIdentity {
         );
     }
 
-    /// The refill views the gather pushes into: one `EntityId` per row, and the row index
+    /// The refill views the gather pushes into: one [`RowKey`] per row, and the row index
     /// of every row whose `RigidBody` was added, in ascending order.
     #[inline]
     pub(crate) fn gather_views(
         &mut self,
-    ) -> (ScratchBuildView<'_, EntityId>, ScratchBuildView<'_, u32>) {
+    ) -> (ScratchBuildView<'_, RowKey>, ScratchBuildView<'_, u32>) {
         (self.cur.build_view(), self.added_rows.build_view())
     }
 
@@ -435,9 +492,10 @@ impl RowIdentity {
                 .all(|w| w[0] < w[1]),
             "invariant: added rows are pushed in ascending gather order"
         );
-        // The added term catches a recycled id respawned into the dead body's own row,
-        // which the id compare alone calls unchanged.
-        let stable = self.added_rows.is_empty() && cur.len() == prev.len() && ids_equal(cur, prev);
+        // The added term catches a `RigidBody` removed and re-inserted on one live entity
+        // between two gathers, whose key the compare alone calls unchanged. A recycled slot
+        // needs no flag: its key differs from the dead body's.
+        let stable = self.added_rows.is_empty() && cur.len() == prev.len() && keys_equal(cur, prev);
         self.stable = stable;
         if !stable {
             self.build_prev_row();
@@ -508,13 +566,13 @@ impl RowIdentity {
     }
 }
 
-/// Whether two id slices of equal length hold the same ids, as a branch-free OR fold with
-/// no early exit so it vectorises.
+/// Whether two key slices of equal length hold the same keys, as a branch-free OR fold
+/// with no early exit so it vectorises.
 #[inline]
-fn ids_equal(cur: &[EntityId], prev: &[EntityId]) -> bool {
+fn keys_equal(cur: &[RowKey], prev: &[RowKey]) -> bool {
     cur.iter()
         .zip(prev)
-        .fold(0usize, |acc, (c, p)| acc | (c.0 ^ p.0))
+        .fold(0u64, |acc, (c, p)| acc | (c.0 ^ p.0))
         == 0
 }
 
@@ -526,17 +584,18 @@ fn ids_equal(cur: &[EntityId], prev: &[EntityId]) -> bool {
 /// from their cursor. Every iteration advances `j` (E1, E2, E6), both cursors (E3), or `i`
 /// by at least 1 (E4, E5), so `n + m` iterations always reach `j == n`.
 ///
-/// **Stage 2.** The previous rows the walk did not consume are sorted by id, and every
+/// **Stage 2.** The previous rows the walk did not consume are sorted by key, and every
 /// row the walk marked [`SEARCH`] takes its old row by binary search, or [`NO_ROW`].
 ///
-/// A previous row is consumed only on exact id equality with a non-added current row, and
-/// ids are unique within a gather, so the result is exact whatever the walk resolves.
+/// A previous row is consumed only on exact key equality with a non-added current row, and
+/// keys are unique within a gather (one live entity per slot), so the result is exact
+/// whatever the walk resolves.
 fn build_prev_row_into(
-    cur: &[EntityId],
-    prev: &[EntityId],
+    cur: &[RowKey],
+    prev: &[RowKey],
     added: &[u32],
     prev_row: &mut ScratchBuildView<'_, u32>,
-    pool: &mut ScratchBuildView<'_, (EntityId, u32)>,
+    pool: &mut ScratchBuildView<'_, (RowKey, u32)>,
     walk: &mut WalkCounters,
 ) -> usize {
     let n = cur.len();
@@ -626,14 +685,14 @@ fn build_prev_row_into(
 
     if searched != 0 {
         let pool = pool.as_mut_slice();
-        // Ids are unique within one gather, so the order is total and the result is
+        // Keys are unique within one gather, so the order is total and the result is
         // deterministic.
-        pool.sort_unstable_by_key(|&(id, _)| id);
+        pool.sort_unstable_by_key(|&(key, _)| key);
         for (r, slot) in out.iter_mut().enumerate() {
             if *slot != SEARCH {
                 continue;
             }
-            *slot = match pool.binary_search_by_key(&cur[r], |&(id, _)| id) {
+            *slot = match pool.binary_search_by_key(&cur[r], |&(key, _)| key) {
                 Ok(hit) => take_pool_row(pool, hit),
                 Err(_) => NO_ROW,
             };
@@ -656,10 +715,10 @@ fn build_prev_row_into(
 /// greater than `j`. Charges one budget unit per examined row, added rows included.
 #[inline]
 fn scan_cur(
-    cur: &[EntityId],
+    cur: &[RowKey],
     added: &[u32],
     j: usize,
-    target: EntityId,
+    target: RowKey,
     budget: &mut usize,
     exhausted: &mut bool,
 ) -> Option<usize> {
@@ -669,7 +728,7 @@ fn scan_cur(
     );
     let mut skip = added.iter().map(|&r| r as usize).peekable();
     let mut examined = 0usize;
-    for (offset, &id) in cur[j + 1..].iter().enumerate() {
+    for (offset, &key) in cur[j + 1..].iter().enumerate() {
         if examined == REMAP_WINDOW {
             return None;
         }
@@ -684,7 +743,7 @@ fn scan_cur(
             continue;
         }
         examined += 1;
-        if id == target {
+        if key == target {
             return Some(k - j);
         }
     }
@@ -695,43 +754,39 @@ fn scan_cur(
 /// `prev[k] == target`. Requires `i < m`. Charges one budget unit per examined row.
 #[inline]
 fn scan_prev(
-    prev: &[EntityId],
+    prev: &[RowKey],
     i: usize,
-    target: EntityId,
+    target: RowKey,
     budget: &mut usize,
     exhausted: &mut bool,
 ) -> Option<usize> {
     let end = (i + REMAP_WINDOW + 1).min(prev.len());
-    for (offset, &id) in prev[i + 1..end].iter().enumerate() {
+    for (offset, &key) in prev[i + 1..end].iter().enumerate() {
         if *budget == 0 {
             *exhausted = true;
             return None;
         }
         *budget -= 1;
-        if id == target {
+        if key == target {
             return Some(offset + 1);
         }
     }
     None
 }
 
-/// Pushes the previous rows `rows` into stage 2's pool as `(id, row)`.
+/// Pushes the previous rows `rows` into stage 2's pool as `(key, row)`.
 #[inline]
-fn push_pool(
-    pool: &mut ScratchBuildView<'_, (EntityId, u32)>,
-    prev: &[EntityId],
-    rows: Range<usize>,
-) {
+fn push_pool(pool: &mut ScratchBuildView<'_, (RowKey, u32)>, prev: &[RowKey], rows: Range<usize>) {
     let start = rows.start;
-    for (offset, &id) in prev[rows].iter().enumerate() {
-        pool.push((id, (start + offset) as u32));
+    for (offset, &key) in prev[rows].iter().enumerate() {
+        pool.push((key, (start + offset) as u32));
     }
 }
 
 /// The previous row of pool entry `hit`; in debug builds, also marks it consumed and
 /// asserts it was not consumed before.
 #[inline]
-fn take_pool_row(pool: &mut [(EntityId, u32)], hit: usize) -> u32 {
+fn take_pool_row(pool: &mut [(RowKey, u32)], hit: usize) -> u32 {
     let entry = &mut pool[hit].1;
     let row = *entry & !CONSUMED;
     if cfg!(debug_assertions) {
@@ -746,9 +801,10 @@ fn take_pool_row(pool: &mut [(EntityId, u32)], hit: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    //! T6, T6c and T12 of the defect A interim fix (Design v1 + Rev 2 + Rev 3), plus the
-    //! `RowRemap` lookups. Every test here is device-free and allocation-light, so it runs
-    //! under Miri as it is (the property test shrinks its case count there).
+    //! T6, T6c and T12 of the defect A interim fix (Design v1 + Rev 2 + Rev 3), the
+    //! `RowRemap` lookups, and U1/U2 of A1b (the key carries the generation, hazard H-03).
+    //! Every test here is device-free and allocation-light, so it runs under Miri as it is
+    //! (the property test shrinks its case count there).
 
     use std::cell::Cell;
 
@@ -769,14 +825,25 @@ mod tests {
     /// `NO_ROW`, short enough for a literal map.
     const X: u32 = NO_ROW;
 
-    /// Feeds one gather: `ids` in walk order and the ascending rows whose `RigidBody` was
-    /// added.
+    /// The keys of `ids` at generation 0: the fixed scripts name slots only.
+    fn keys(ids: &[usize]) -> Vec<RowKey> {
+        ids.iter().map(|&id| RowKey::new(id, 0)).collect()
+    }
+
+    /// Feeds one gather: `ids` (slots at generation 0) in walk order and the ascending rows
+    /// whose `RigidBody` was added.
     fn gather(rows: &mut RowIdentity, ids: &[usize], added: &[u32]) {
+        gather_keys(rows, &keys(ids), added);
+    }
+
+    /// Feeds one gather: `keys` in walk order and the ascending rows whose `RigidBody` was
+    /// added.
+    fn gather_keys(rows: &mut RowIdentity, keys: &[RowKey], added: &[u32]) {
         rows.begin_gather();
         {
             let (mut cur, mut add) = rows.gather_views();
-            for &id in ids {
-                cur.push(EntityId(id));
+            for &key in keys {
+                cur.push(key);
             }
             for &r in added {
                 add.push(r);
@@ -840,26 +907,26 @@ mod tests {
     }
 
     /// The previous-row map as the design defines it, computed with no walk at all:
-    /// `NO_ROW` for an added row, otherwise the row the same id held in `prev`, or `NO_ROW`.
-    /// Also returns the `stable` decision.
+    /// `NO_ROW` for an added row, otherwise the row the same key (slot AND generation) held
+    /// in `prev`, or `NO_ROW`. Also returns the `stable` decision.
     // `clippy::disallowed_types`: test oracle. The std `HashMap` is the independent reference
     // model the aligned walk and stage 2 are checked against; it exists in test builds only.
     #[allow(clippy::disallowed_types)]
-    fn oracle(prev: &[usize], cur: &[usize], added: &[u32]) -> (bool, Vec<u32>) {
-        let row_of: std::collections::HashMap<usize, u32> = prev
+    fn oracle(prev: &[RowKey], cur: &[RowKey], added: &[u32]) -> (bool, Vec<u32>) {
+        let row_of: std::collections::HashMap<RowKey, u32> = prev
             .iter()
             .enumerate()
-            .map(|(r, &id)| (id, r as u32))
+            .map(|(r, &key)| (key, r as u32))
             .collect();
         let stable = added.is_empty() && prev == cur;
         let map = cur
             .iter()
             .enumerate()
-            .map(|(r, id)| {
+            .map(|(r, key)| {
                 if added.contains(&(r as u32)) {
                     NO_ROW
                 } else {
-                    row_of.get(id).copied().unwrap_or(NO_ROW)
+                    row_of.get(key).copied().unwrap_or(NO_ROW)
                 }
             })
             .collect();
@@ -876,18 +943,28 @@ mod tests {
         }
     }
 
-    /// Feeds one gather of `cur` after `prev` and checks it against the oracle: the `stable`
-    /// decision, the published map, what a cursor stamped one gather ago classifies as, and
-    /// that the walk made progress.
+    /// [`check_gather_keys`] over slots at generation 0.
     fn check_gather(
         rows: &mut RowIdentity,
         prev: &[usize],
         cur: &[usize],
         added: &[u32],
     ) -> Result<(), String> {
+        check_gather_keys(rows, &keys(prev), &keys(cur), added)
+    }
+
+    /// Feeds one gather of `cur` after `prev` and checks it against the oracle: the `stable`
+    /// decision, the published map, what a cursor stamped one gather ago classifies as, and
+    /// that the walk made progress.
+    fn check_gather_keys(
+        rows: &mut RowIdentity,
+        prev: &[RowKey],
+        cur: &[RowKey],
+        added: &[u32],
+    ) -> Result<(), String> {
         let mut cursor = RemapCursor::default();
         cursor.stamp(rows);
-        gather(rows, cur, added);
+        gather_keys(rows, cur, added);
         let (stable, expected) = oracle(prev, cur, added);
         if rows.stable != stable {
             return Err(format!("stable {} (oracle {stable})", rows.stable));
@@ -982,7 +1059,7 @@ mod tests {
             },
         ];
         for t in &traces {
-            let (_, oracle_map) = oracle(t.prev, t.cur, t.added);
+            let (_, oracle_map) = oracle(&keys(t.prev), &keys(t.cur), t.added);
             assert_eq!(
                 oracle_map, t.prev_row,
                 "{}: the hand trace disagrees with the oracle - fix the trace, not the walk",
@@ -1011,10 +1088,11 @@ mod tests {
         }
     }
 
-    /// T6 edge cases: empty walks on either side, `n != m`, every row added, a recycled id in
-    /// its dead body's own row flagged and not flagged (O1), and a full reversal that runs
-    /// the lookahead budget out. Each is checked against the oracle; the reversal must also
-    /// exhaust the budget, or it does not exercise the cut-off.
+    /// T6 edge cases: empty walks on either side, `n != m`, every row added, the same key in
+    /// its own row flagged and not flagged (a `RigidBody` re-inserted on a live entity, the
+    /// residual O1 case the flag alone covers), and a full reversal that runs the lookahead
+    /// budget out. Each is checked against the oracle; the reversal must also exhaust the
+    /// budget, or it does not exercise the cut-off.
     #[test]
     fn walk_matches_the_oracle_on_edge_cases() {
         /// One edge case: the walks either side of the gather and the added rows.
@@ -1039,9 +1117,14 @@ mod tests {
             case("n = 0, every body despawned", &[1, 2, 3], &[], &[]),
             case("n < m", &[1, 2, 3, 4, 5], &[1, 5, 3], &[]),
             case("n > m, one late-flagged fresh id", &[1, 2, 3], &[4, 1, 2, 3, 5], &[4]),
-            case("every row added over recycled ids", &[1, 2, 3], &[3, 2, 1], &[0, 1, 2]),
-            case("recycled id in its own row, flagged", &[7], &[7], &[0]),
-            case("recycled id in its own row, not flagged (O1)", &[7], &[7], &[]),
+            case("every row added over the same keys", &[1, 2, 3], &[3, 2, 1], &[0, 1, 2]),
+            case("same key in its own row, flagged", &[7], &[7], &[0]),
+            case(
+                "same key in its own row, not flagged (a RigidBody re-inserted inside the O1 window)",
+                &[7],
+                &[7],
+                &[],
+            ),
             case("full reversal of 64 rows", &reversed_prev, &reversed_cur, &[]),
         ];
         for EdgeCase {
@@ -1070,6 +1153,103 @@ mod tests {
         }
     }
 
+    /// U1 (H-03): a recycled slot in its dead body's own row, not flagged — the O1 window of
+    /// a deferred spawn — is a new body on the key alone: the gather is not stable, the
+    /// published map is `[NO_ROW]`, a cursor stamped one gather ago reads `Rows([NO_ROW])`,
+    /// and one map was built. Red under M-A (`RowKey::of` packs generation 0 — through the
+    /// `RowKey` round trip below) and M-B (`keys_equal` masks the generation: the gather
+    /// reads stable). The expected map is a literal, cross-checked by a linear search over
+    /// `prev` rather than by the hash-map oracle.
+    #[test]
+    fn recycled_slot_in_its_own_row_is_a_new_body_without_the_flag() {
+        let dead = RowKey::new(7, 0);
+        let recycled = RowKey::of(Entity::new(
+            boyko_ecs::ecs::identifiers::primitives::EntityId(7),
+            1,
+        ));
+        assert_eq!(
+            (recycled.id(), recycled.generation()),
+            (7, 1),
+            "construction: `RowKey::of` packs the slot and the generation"
+        );
+        assert_ne!(dead, recycled, "construction: a bumped generation is a different key");
+        let prev = [dead];
+        let cur = [recycled];
+        assert_eq!(
+            prev.iter().position(|&k| k == cur[0]),
+            None,
+            "the linear cross-check: the recycled key held no previous row"
+        );
+
+        let mut rows = RowIdentity::with_capacity(0);
+        gather_keys(&mut rows, &prev, &[0]);
+        let mut cursor = RemapCursor::default();
+        cursor.stamp(&rows);
+        let builds = rows.remap_builds();
+        gather_keys(&mut rows, &cur, &[]);
+        assert!(
+            !rows.stable,
+            "U1: a recycled slot in its own row, not flagged, must not read as a stable gather"
+        );
+        assert_eq!(published_map(&rows), [X], "U1: the recycled slot's row maps to NO_ROW");
+        let remap = cursor.remap(&rows);
+        assert!(
+            matches!(remap, RowRemap::Rows(map) if map == [X]),
+            "U1: a cursor stamped one gather ago must read Rows([NO_ROW]); got {remap:?}"
+        );
+        assert_eq!(rows.remap_builds(), builds + 1, "U1: exactly one map built");
+    }
+
+    /// U2 (H-03): prev `[F, P1, X, P3, P4]`, cur `[F, P1, P4, P3, X']` with `X'` = X's slot at
+    /// the next generation, nothing flagged: X despawned, P4 swap-moved into its row, X'
+    /// spawned at the tail inside the O1 window. Hand trace: E3 F, E3 P1; E4 pushes X (X' is
+    /// not X); E6 marks P4; E3 P3; E4 pushes P4; E2 marks X'; stage 2: P4 → 4, X' → miss.
+    /// Map `[0, 1, 4, 3, NO_ROW]`, 2 stage-2 rows, branches `[0, 1, 3, 2, 0, 1]`, no
+    /// exhaustion, no stall. Red under M-D (stage 2 and E3 compare the slot half only: X'
+    /// takes X's row 2, and E3 pairs them so P4 reaches stage 2 alone). The expected map is
+    /// a literal, cross-checked by a linear search over `prev`.
+    #[test]
+    fn recycled_slot_after_a_swap_remove_resolves_to_no_row() {
+        let x = RowKey::new(P2, 0);
+        let x_next = RowKey::new(P2, 1);
+        let prev = [
+            RowKey::new(F, 0),
+            RowKey::new(P1, 0),
+            x,
+            RowKey::new(P3, 0),
+            RowKey::new(P4, 0),
+        ];
+        let cur = [
+            RowKey::new(F, 0),
+            RowKey::new(P1, 0),
+            RowKey::new(P4, 0),
+            RowKey::new(P3, 0),
+            x_next,
+        ];
+        const EXPECTED: [u32; 5] = [0, 1, 4, 3, X];
+        let linear: Vec<u32> = cur
+            .iter()
+            .map(|k| prev.iter().position(|p| p == k).map_or(X, |r| r as u32))
+            .collect();
+        assert_eq!(
+            linear, EXPECTED,
+            "the hand trace disagrees with the linear cross-check - fix the trace, not the walk"
+        );
+
+        let mut rows = RowIdentity::with_capacity(0);
+        gather_keys(&mut rows, &prev, &[0, 1, 2, 3, 4]);
+        let before = Counts::of(&rows);
+        check_gather_keys(&mut rows, &prev, &cur, &[]).unwrap_or_else(|e| panic!("U2: {e}"));
+        assert_eq!(rows.prev_row.as_read_slice(), EXPECTED, "U2: prev_row");
+        let d = Counts::of(&rows).since(before);
+        assert_eq!(
+            (d.searched, d.branches, d.exhaustions, d.stalls, d.builds),
+            (2, [0, 1, 3, 2, 0, 1], 0, 0, 1),
+            "U2: (stage-2 rows, branches E1..E6, budget exhaustions, walk stalls, maps built) \
+             differ from the hand trace"
+        );
+    }
+
     /// A deterministic generator over one `u64` seed (splitmix64), so a failing case is
     /// reproduced from its seed alone.
     struct Rng(u64);
@@ -1093,12 +1273,15 @@ mod tests {
     }
 
     /// The ECS side the walk is fed from: archetypes walked in order, swap-remove despawns,
-    /// LIFO id recycling, and the ids whose `RigidBody` counts as added on the next gather.
+    /// LIFO slot recycling with the kernel's generation bump on despawn, and the keys whose
+    /// `RigidBody` counts as added on the next gather.
     struct Model {
-        archetypes: Vec<Vec<usize>>,
+        archetypes: Vec<Vec<RowKey>>,
         free: Vec<usize>,
+        /// The generation of each slot, bumped when its body despawns.
+        generation: Vec<u32>,
         next_id: usize,
-        added: Vec<usize>,
+        added: Vec<RowKey>,
     }
 
     impl Model {
@@ -1106,6 +1289,7 @@ mod tests {
             let mut model = Self {
                 archetypes: vec![Vec::new(); 3 + rng.below(2)],
                 free: Vec::new(),
+                generation: Vec::new(),
                 next_id: 0,
                 added: Vec::new(),
             };
@@ -1117,43 +1301,51 @@ mod tests {
             model
         }
 
-        fn walk(&self) -> Vec<usize> {
+        fn walk(&self) -> Vec<RowKey> {
             self.archetypes.concat()
         }
 
-        fn added_rows(&self, walk: &[usize]) -> Vec<u32> {
+        fn added_rows(&self, walk: &[RowKey]) -> Vec<u32> {
             walk.iter()
                 .enumerate()
-                .filter(|(_, id)| self.added.contains(id))
+                .filter(|(_, key)| self.added.contains(key))
                 .map(|(r, _)| r as u32)
                 .collect()
         }
 
-        /// Appends a body to archetype `a`, recycling the most recently freed id most of the
-        /// time. One spawn in five is not flagged: a recycled id then carries its dead body's
-        /// row in the oracle, which is the O1 (flagged one gather late) case.
+        /// A fresh slot at generation 0.
+        fn mint(&mut self) -> usize {
+            self.next_id += 1;
+            self.generation.resize(self.next_id + 1, 0);
+            self.next_id
+        }
+
+        /// Appends a body to archetype `a`, recycling the most recently freed slot most of
+        /// the time; a recycled slot carries its bumped generation, so its key never equals
+        /// the dead body's. One spawn in five is not flagged: over a recycled slot that is
+        /// the O1 case (a deferred spawn the gather sees as not added), which the key alone
+        /// must send to `NO_ROW`.
         fn spawn(&mut self, rng: &mut Rng, a: usize) {
             let id = match self.free.pop() {
                 Some(id) if rng.percent(70) => id,
                 Some(id) => {
                     self.free.push(id);
-                    self.next_id += 1;
-                    self.next_id
+                    self.mint()
                 }
-                None => {
-                    self.next_id += 1;
-                    self.next_id
-                }
+                None => self.mint(),
             };
-            self.archetypes[a].push(id);
+            let key = RowKey::new(id, self.generation[id]);
+            self.archetypes[a].push(key);
             if rng.percent(80) {
-                self.added.push(id);
+                self.added.push(key);
             }
         }
 
         fn despawn(&mut self, a: usize, idx: usize) {
-            let id = self.archetypes[a].swap_remove(idx);
-            self.added.retain(|&x| x != id);
+            let key = self.archetypes[a].swap_remove(idx);
+            self.added.retain(|&k| k != key);
+            let id = key.id();
+            self.generation[id] = self.generation[id].wrapping_add(1);
             self.free.push(id);
         }
 
@@ -1231,11 +1423,13 @@ mod tests {
     const GATHERS_PER_CASE: usize = 12;
 
     /// T6 property: over random swap-removes, fresh and recycled spawns (flagged, and not
-    /// flagged per O1), migrations across three or four archetypes, bursts of more than
+    /// flagged per O1 — a recycled slot at its bumped generation, which the key alone must
+    /// resolve), migrations across three or four archetypes, bursts of more than
     /// `REMAP_WINDOW` removals, migrations and spawns, and random permutations, the published
     /// map, the `stable` decision and the cursor classification equal a `HashMap` oracle
-    /// after every gather, and no walk stalls. Anti-vacuity: across the run every branch
-    /// E1..E6, the budget cut-off and stage 2 are each taken at least once.
+    /// keyed by `(slot, generation)` after every gather, and no walk stalls. Anti-vacuity:
+    /// across the run every branch E1..E6, the budget cut-off and stage 2 are each taken at
+    /// least once.
     #[test]
     fn walk_matches_a_hash_map_oracle_on_random_structural_churn() {
         let totals = Cell::new(Counts::default());
@@ -1248,14 +1442,14 @@ mod tests {
             let mut rng = Rng(seed);
             let mut model = Model::new(&mut rng);
             let mut rows = RowIdentity::with_capacity(0);
-            let mut prev: Vec<usize> = Vec::new();
+            let mut prev: Vec<RowKey> = Vec::new();
             for g in 0..GATHERS_PER_CASE {
                 if g > 0 {
                     model.mutate(&mut rng);
                 }
                 let walk = model.walk();
                 let added = model.added_rows(&walk);
-                if let Err(e) = check_gather(&mut rows, &prev, &walk, &added) {
+                if let Err(e) = check_gather_keys(&mut rows, &prev, &walk, &added) {
                     prop_assert!(false, "seed {:#x}, gather {}: {}", seed, g, e);
                 }
                 prev = walk;

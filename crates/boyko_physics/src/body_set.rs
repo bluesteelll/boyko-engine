@@ -79,7 +79,7 @@ use boyko_ecs::ecs::core::iters::query::data::{Mut, QueryData, Ref};
 use boyko_ecs::ecs::core::iters::query::data_is_enabled::IsEnabled;
 use boyko_ecs::ecs::core::iters::query::filter::{QueryFilter, With};
 use boyko_ecs::ecs::core::iters::query::query::Query;
-use boyko_ecs::ecs::core::system::{Res, ResMut};
+use boyko_ecs::ecs::core::system::{Entities, Res, ResMut};
 use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 
@@ -237,8 +237,9 @@ const _: () = {
 // Signature pins: each stage must take its `BodyQuery` with its own data alias, or this file
 // stops compiling. The full parameter list is spelled, so a signature edit in either place is a
 // one-line edit of the matching alias here.
-type GatherSignature = for<'w, 's, 'a, 'b, 'c> fn(
+type GatherSignature = for<'w, 's, 'e, 'a, 'b, 'c> fn(
     BodyQuery<'w, 's, BodyGatherData>,
+    Entities<'e>,
     ResMut<'a, SolverScratch>,
     ResMut<'b, PhysicsConfig>,
     Res<'c, FixedTime>,
