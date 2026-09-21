@@ -149,6 +149,13 @@
 //! BOYKO_AA=taa BOYKO_TAA_PHASE=4 BOYKO_HOST_DUMP=D:\tmp\phase4.bmp \
 //!   cargo test -p boyko-app --test taa_jitter_eval -- --ignored --test-threads=1
 //! # then diff the SDF sphere / wall / floor regions between phase0.bmp and phase4.bmp.
+//!
+//! # A per-frame burst: 8 consecutive presented frames (30..37, one full Halton cycle) of ONE
+//! # free-running run, each `<stem>_<frame>.bmp` plus `<stem>_frames.txt` with one state line
+//! # per frame (frame, slot, jitter phase, CSM arming vs the header's CSM bit, hwrt seed).
+//! BOYKO_AA=taa BOYKO_HOST_DUMP=D:\tmp\burst.bmp BOYKO_HOST_DUMP_FRAMES=8 \
+//!   cargo test -p boyko-app --test taa_jitter_eval -- --ignored --test-threads=1
+//! # `BOYKO_HOST_DUMP_SETTLE=0` starts the burst at presented frame 0 (the start-up frames).
 //! ```
 //!
 //! `#[ignore]`: needs a real windowed GPU device; the orchestrator runs it. Run with

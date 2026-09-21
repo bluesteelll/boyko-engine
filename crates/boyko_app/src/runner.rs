@@ -1536,6 +1536,15 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // the light flag is set on the gated branch; the csm flag is assigned
         // exactly once inside the block (definite-initialization, no dead seed).
         let mut frame_light_uploaded = false;
+        // The light-header word 7 this frame uploaded (`None` when the gen-gate did not fire,
+        // or when no dump is armed — the read is gated so the steady path stays untouched).
+        // Latched here because `readback` holds the dump's `&mut` borrow across the render
+        // call; the dump consumes it beside its `after_present` below.
+        let mut frame_light_header_w7: Option<u32> = None;
+        // The hwrt half of the dump's per-frame state line — `Some` once 5d'' uploads the
+        // shadow-params UBO this frame (an RT device). Read ONLY under `if let Some(d) = dump`.
+        #[cfg(feature = "hwrt")]
+        let mut dump_ray_upload: Option<crate::host_dump::RayShadowUpload> = None;
         let frame_csm_armed;
         // The punctual-armed probe (the punctual host rung): assigned exactly once inside the
         // block (definite-initialization, no dead seed), mirroring `frame_csm_armed`.
@@ -1576,7 +1585,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // minimized (0×0 client) iteration never gets here at all; it `continue`s far above.
         let vb_cull_capture: bool;
         // The dump's readback request (cold; `None` without the env knob). The
-        // returned borrow holds `dump` until the render call consumes it.
+        // returned borrow holds `dump` until the render call consumes it, so the
+        // light-header latch below reads this flag instead of `dump` itself.
+        let dump_armed = dump.is_some();
         let readback = match dump.as_mut() {
             Some(d) => d.request(ctx, host.swapchain.extent()),
             None => None,
@@ -1880,6 +1891,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     upload_light_table(&token, &host.gpu.light_staging[s], bytes);
                 }
                 frame_light_uploaded = true;
+                if dump_armed {
+                    frame_light_header_w7 = Some(u32::from_le_bytes(
+                        bytes[28..32]
+                            .try_into()
+                            .expect("invariant: the staged table holds whole words"),
+                    ));
+                }
                 Some(bytes.len() as u64)
             } else {
                 None
@@ -1991,6 +2009,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         resolved_ray_shadow,
                         frame_index,
                     );
+                }
+                if dump_armed {
+                    dump_ray_upload = Some(crate::host_dump::RayShadowUpload { seed: frame_index });
                 }
 
                 // 5d'''. HW-RT rung 3a step 7: the à-trous edge-stop UBO (`sigma_z`/`sigma_n`)
@@ -3162,11 +3183,32 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
         }
 
-        // Diagnostic dump (cold): advance settle → request → drain; once the
-        // drained readback is host-readable, print the frame-stream state the
-        // GPU actually consumed beside the image, write it, and exit the loop.
+        // Diagnostic dump (cold): advance settle → burst → drain; every capture whose
+        // drain elapsed this frame is written with its state line; once all N are
+        // written, print the frame-stream state the GPU actually consumed beside the
+        // images and exit the loop. The per-frame meta is built ONLY inside the armed
+        // branch (`dump_frame_meta` is `#[cold]`), so the steady path pays the one
+        // `Option` check it always has.
         let dump_ready = match dump.as_mut() {
-            Some(d) => d.after_present(presented_ok),
+            Some(d) => {
+                if let Some(w7) = frame_light_header_w7 {
+                    d.note_light_header(w7);
+                }
+                #[cfg(feature = "hwrt")]
+                let ray_upload = dump_ray_upload;
+                #[cfg(not(feature = "hwrt"))]
+                let ray_upload = None;
+                let meta = dump_frame_meta(
+                    app,
+                    d,
+                    frame_index,
+                    s,
+                    frame_csm_armed,
+                    frame_light_uploaded,
+                    ray_upload,
+                );
+                d.after_present(ctx, presented_ok, meta)
+            }
             None => false,
         };
         if dump_ready {
@@ -3504,6 +3546,39 @@ fn word_set<T: Copy>(variants: &[T], seen: u8, word: impl Fn(T) -> &'static str)
 
 
 
+
+/// The dump's per-frame state line — the values the GPU consumed on THIS frame
+/// (`JitterState` post-advance, the host's CSM arming, the last uploaded light
+/// header's CSM bit, the hwrt shadow-params upload). Called ONLY when the dump is
+/// armed, so the steady path builds none of it. `JitterState` is read through
+/// `try_resource` (the runner's M1 convention: a host without `AaPlugin` has no
+/// jitter state and reports phase 0 / disarmed).
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn dump_frame_meta(
+    app: &App,
+    dump: &crate::host_dump::HostDump,
+    frame_index: u32,
+    slot: usize,
+    csm_armed: bool,
+    light_uploaded: bool,
+    ray_upload: Option<crate::host_dump::RayShadowUpload>,
+) -> crate::host_dump::FrameMeta {
+    let jitter = app.world().try_resource::<JitterState>().copied().unwrap_or_default();
+    crate::host_dump::FrameMeta {
+        frame_index,
+        slot: slot as u32,
+        jitter_phase: jitter.phase,
+        jitter_armed: jitter.armed,
+        csm_armed,
+        header_csm: dump.header_csm(),
+        light_uploaded,
+        seed: ray_upload.map(|r| r.seed),
+        origin_mode: None,
+        raster_fwd: None,
+    }
+}
 
 /// One-shot frame-stream diagnostics printed beside the dump image — the
 /// values the GPU consumed on the captured frame stream: the live CSM
