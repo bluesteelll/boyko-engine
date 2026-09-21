@@ -180,7 +180,7 @@ The steps from the edge to the flip:
 **Data flow, from reading the code:**
 - `MeshBundle` has no `RenderEnabled` (`bundles.rs:43-58`).
 - `RenderEnabled` is an `EnableTag` bitset whose bit is **clear until set**: "No directory slot or no page yet ⇒ the bit is clear" (`enable_store.rs:209`).
-- `visibility_sync` (`visibility_sync.rs:143`) is `Changed<Visibility>`-gated. On its first run after spawn it enqueues a `SetRenderEnabledById` command per mesh, which **enables** the bit in its apply window.
+- `visibility_sync` (`visibility_sync.rs:143`) is `Changed<Visibility>`-gated. On its first run after spawn it enqueues a `SetRenderEnabledById` command per mesh, which **enables** the bit in its apply window. ⚠ **Superseded 2026-09-21 (rungs A9 / A9b)**: `SetRenderEnabledById` no longer exists — it is `SetRenderEnabled`, keyed by the full `Entity` resolved at enqueue through the `Entities` param. The by-id form re-resolved the row at apply and was hazard H-06: a toggle pending for a despawned `E` landed on the `F` spawned on `E`'s recycled id in the same frame (`boyko_scene/tests/visibility_sync_gates.rs` gates 5–6). `boyko_render`'s two copies of the pattern (`asset_refcount.rs` `DisableStaleMeshCommand`, `snap_interpolation.rs` `DisableSnap`) were fixed the same way (`boyko_render/tests/deferred_toggles_recycled_id.rs`). The mechanism this bullet describes — the bit is enabled in the apply window — is unchanged.
 - `gather_mesh_draws` filters on `Enabled<RenderEnabled>` (`mesh_draw.rs:1253` / hwrt `:1368`).
 - So a gather that runs before `visibility_sync`'s apply sees the **previous frame's** bits, which on frame 0 are none.
 
