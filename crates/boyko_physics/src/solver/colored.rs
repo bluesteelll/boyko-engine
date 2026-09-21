@@ -331,6 +331,229 @@ const MIN_SLOTS_PER_CHUNK: usize = 64;
 /// the [`solve_color_avx2`](ColoredSoftStepSolver::solve_color_avx2) kernel uses.
 const COHORT: usize = 8;
 
+/// The colored solver's anti-vacuity counters (L11 C0): what the G1 identity gate
+/// reads to show that a pinned scene exercised the path it claims to. Crate-internal;
+/// outside `cfg(test)` this is a zero-sized type whose methods are empty, so the
+/// step carries no counting cost in a shipping build (the `WalkCounters` pattern in
+/// `row_identity.rs`: one impl whose counting statements are `#[cfg(test)]`-gated,
+/// never a `not(test)` predicate).
+///
+/// Every count is cumulative over the solver's lifetime; a scene asserts a delta over
+/// its steps. Two of them are C0 proxies for a search that does not exist yet:
+/// `backward_searches` and `cold_index_steps` describe the previous-stream key
+/// order D2's merge-join will see, computed here from the same `ord` and the same
+/// row translation, so the scenes S-c and S-e are shown non-vacuous BEFORE C1
+/// lands. C1 replaces the two proxies with D2's own counts.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SetupCounters {
+    /// Points of frozen manifolds whose entry the store carried (B1 hits): the sum of
+    /// [`WarmSeedStats::carry_hits`] over the steps.
+    #[cfg(test)]
+    pub(crate) carry_hits: u64,
+    /// Manifolds whose translated ordinal is below the previous manifold's translated
+    /// ordinal, in stream order, on a step that looks the table up: a descent D2's
+    /// forward gallop cannot follow, so it binary-searches backward.
+    #[cfg(test)]
+    pub(crate) backward_searches: u64,
+    /// Per-point lookups that found no entry: an untranslatable pair (a flipped order,
+    /// a `Reset`), or a key the previous table did not hold.
+    #[cfg(test)]
+    pub(crate) misses: u64,
+    /// Steps that looked up a previous stream whose ordinals were NOT strictly
+    /// increasing (unsorted, or a duplicate pair): D2's cold sorted index in C1.
+    #[cfg(test)]
+    pub(crate) cold_index_steps: u64,
+    /// Manifolds met with two live points sharing a (masked) feature id, solved or
+    /// carried: the last-write-wins case Lemma W's in-record scan must reproduce.
+    #[cfg(test)]
+    pub(crate) duplicate_fids_met: u64,
+    /// Solves run with warm start disabled (no lookup, no store, no stamp).
+    #[cfg(test)]
+    pub(crate) disabled_steps: u64,
+    /// Points the restitution pass applied an impulse to (both of its gates passed).
+    #[cfg(test)]
+    pub(crate) restitution_applied: u64,
+    /// Whether the previous stored stream's ordinals were NOT strictly increasing:
+    /// the read side the next step's lookups run against. `false` before any store.
+    #[cfg(test)]
+    prev_non_strict: bool,
+}
+
+impl SetupCounters {
+    /// Adds the store's carry hits of one step.
+    #[inline]
+    fn carry(&mut self, hits: u32) {
+        #[cfg(test)]
+        {
+            self.carry_hits += u64::from(hits);
+        }
+        // The only other reader of `hits` is the gated statement above.
+        let _ = hits;
+    }
+
+    /// Adds one manifold's per-point lookup misses.
+    #[inline]
+    fn miss(&mut self, points: u32) {
+        #[cfg(test)]
+        {
+            self.misses += u64::from(points);
+        }
+        // The only other reader of `points` is the gated statement above.
+        let _ = points;
+    }
+
+    /// Counts a manifold with two live points sharing a masked feature id.
+    #[inline]
+    fn duplicate_fids(&mut self, m: &Manifold) {
+        #[cfg(test)]
+        {
+            let n = m.count as usize;
+            let fid = |p: usize| m.points[p].feature_id & FEATURE_ID_MASK;
+            let dup = (0..n).any(|p| (p + 1..n).any(|q| fid(p) == fid(q)));
+            self.duplicate_fids_met += u64::from(dup);
+        }
+        // The only other reader of `m` is the gated statement above.
+        let _ = m;
+    }
+
+    /// Counts one solve; `warm_start_enabled` false is a disabled step.
+    #[inline]
+    fn step(&mut self, warm_start_enabled: bool) {
+        #[cfg(test)]
+        {
+            self.disabled_steps += u64::from(!warm_start_enabled);
+        }
+        // The only other reader of the flag is the gated statement above.
+        let _ = warm_start_enabled;
+    }
+
+    /// Counts one point the restitution pass applied to.
+    #[inline]
+    fn restitution(&mut self) {
+        #[cfg(test)]
+        {
+            self.restitution_applied += 1;
+        }
+    }
+
+    /// Observes one step's manifold stream in stream order: the strictness of the
+    /// ordinals this step will store, the descents of the translated ordinals this
+    /// step looks up, and whether the lookup ran against a non-strict previous stream.
+    ///
+    /// `looks_up` is whether this step reads the table (warm start on, not a `Reset`);
+    /// `stores` is whether it rewrites the read side (warm start on), which is when the
+    /// strictness of THIS stream becomes the next step's read-side property.
+    #[inline]
+    fn observe_stream(
+        &mut self,
+        manifolds: &[Manifold],
+        remap: RowRemap<'_>,
+        looks_up: bool,
+        stores: bool,
+    ) {
+        #[cfg(test)]
+        {
+            let mut strict = true;
+            let mut prev_key: Option<u64> = None;
+            let mut prev_lookup: Option<u64> = None;
+            for m in manifolds {
+                let key = stream_ord(m.body_a.0, m.body_b.0);
+                if prev_key.is_some_and(|p| key <= p) {
+                    strict = false;
+                }
+                prev_key = Some(key);
+                if looks_up && let Some((la, lb)) = remap.manifold_pair(m) {
+                    let lookup = stream_ord(la, lb);
+                    if prev_lookup.is_some_and(|p| lookup < p) {
+                        self.backward_searches += 1;
+                    }
+                    prev_lookup = Some(lookup);
+                }
+            }
+            if looks_up && self.prev_non_strict {
+                self.cold_index_steps += 1;
+            }
+            if stores {
+                self.prev_non_strict = !strict;
+            }
+        }
+        // The only other reader of the arguments is the gated block above.
+        let _ = (manifolds, remap, looks_up, stores);
+    }
+}
+
+/// The feature-id bits a warm key carries (`warm_start::pack`'s field width): the
+/// mask under which two feature ids of one manifold collide.
+#[cfg(test)]
+const FEATURE_ID_MASK: u32 = 0xFFFF;
+
+/// L10's D6 ordinal of a manifold's pair, monotone with the sorted stream order: the
+/// body-body stream sorts by `(a, b)`, and the SDF manifolds (`body_b` the sentinel)
+/// follow it in row order. The key D1 stores per manifold; C1 moves it to
+/// `warm_records.rs`.
+#[cfg(test)]
+#[inline]
+fn stream_ord(a: u32, b: u32) -> u64 {
+    if b == SDF_SENTINEL.0 {
+        (1u64 << 63) | u64::from(a)
+    } else {
+        (u64::from(a) << 32) | u64::from(b)
+    }
+}
+
+/// FNV-1a 64 offset basis (the runner's pose-hash function, reused for the C0 digest).
+#[cfg(test)]
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a 64 prime.
+#[cfg(test)]
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Folds one `u32` into an FNV-1a 64 hash, byte by byte, little-endian.
+#[cfg(test)]
+#[inline]
+fn fnv_u32(mut h: u64, v: u32) -> u64 {
+    for b in v.to_le_bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
+/// Folds one `u64` into an FNV-1a 64 hash, byte by byte, little-endian.
+#[cfg(test)]
+#[inline]
+fn fnv_u64(h: u64, v: u64) -> u64 {
+    // Truncation is the point: the low and high halves, in that order.
+    fnv_u32(fnv_u32(h, v as u32), (v >> 32) as u32)
+}
+
+/// Folds a `u32` slice, length first, into an FNV-1a 64 hash.
+#[cfg(test)]
+fn fnv_u32s(mut h: u64, vs: &[u32]) -> u64 {
+    h = fnv_u32(h, vs.len() as u32);
+    for &v in vs {
+        h = fnv_u32(h, v);
+    }
+    h
+}
+
+/// Folds a [`WarmSeedStats`] into an FNV-1a 64 hash, field by field in declaration order.
+#[cfg(test)]
+fn fnv_warm_stats(mut h: u64, s: &WarmSeedStats) -> u64 {
+    for v in [
+        s.manifolds,
+        s.translated,
+        s.points,
+        s.point_hits,
+        s.carry_points,
+        s.carry_hits,
+    ] {
+        h = fnv_u32(h, v);
+    }
+    fnv_u64(h, s.remap_resets)
+}
+
 /// `Send` + `Sync`-marked raw pointers to the SoA columns + per-body buffer
 /// dispatched into the O6 per-color worker closures.
 ///
@@ -1347,6 +1570,35 @@ impl ContactColumns {
     fn manifold_base(&self) -> &[(u32, u32)] {
         self.manifold_base.as_read_slice()
     }
+
+    /// L11 C0: the FNV-1a 64 digest of the built columns' LOGICAL per-point values in
+    /// slot order — the three warm seeds, and `vn_initial` masked to `0.0` wherever
+    /// the restitution pass would never read it (`restitution <= 0.0`; a NaN
+    /// coefficient keeps it, the exact complement D9/O3 rule) — then the group and
+    /// colour CSRs, each length-first. Layout-free by construction: C2 re-derives the
+    /// same values from the cohort blocks, and a changed seed, mask rule or CSR
+    /// boundary moves the digest. Taken right after the build, before any sweep
+    /// touches the impulse columns.
+    #[cfg(test)]
+    fn setup_digest(&self) -> u64 {
+        let n = self.len();
+        let ni = self.normal_impulse.as_read_slice();
+        let t1 = self.tangent1_impulse.as_read_slice();
+        let t2 = self.tangent2_impulse.as_read_slice();
+        let e = self.restitution.as_read_slice();
+        let vn0 = self.vn_initial.as_read_slice();
+        let mut h = fnv_u32(FNV_OFFSET, n as u32);
+        for i in 0..n {
+            h = fnv_u32(h, ni[i].to_bits());
+            h = fnv_u32(h, t1[i].to_bits());
+            h = fnv_u32(h, t2[i].to_bits());
+            let masked = if e[i] <= 0.0 { 0.0 } else { vn0[i] };
+            h = fnv_u32(h, masked.to_bits());
+        }
+        h = fnv_u32s(h, self.group_start());
+        h = fnv_u32s(h, self.color_group_start());
+        fnv_u32s(h, self.color_offsets())
+    }
 }
 
 impl ContactBuildView<'_> {
@@ -1478,6 +1730,12 @@ pub struct ColoredSoftStepSolver {
     /// Solves that ran past the no-dynamic-body early return. Diagnostic (defect A,
     /// interim).
     solved_steps: u64,
+    /// The G1 anti-vacuity counters (L11 C0). Zero-sized outside `cfg(test)`.
+    counters: SetupCounters,
+    /// The last solve's setup digest (L11 C0): the built columns' logical values,
+    /// then the step's [`WarmSeedStats`], folded after the store. Test-only.
+    #[cfg(test)]
+    step_digest: u64,
 }
 
 impl Default for ColoredSoftStepSolver {
@@ -1509,6 +1767,9 @@ impl ColoredSoftStepSolver {
             warm_cursor: RemapCursor::default(),
             warm_stats: WarmSeedStats::default(),
             solved_steps: 0,
+            counters: SetupCounters::default(),
+            #[cfg(test)]
+            step_digest: 0,
         }
     }
 
@@ -1535,6 +1796,21 @@ impl ColoredSoftStepSolver {
     #[inline]
     pub fn solved_steps(&self) -> u64 {
         self.solved_steps
+    }
+
+    /// The G1 anti-vacuity counters, cumulative since construction (L11 C0).
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn setup_counters(&self) -> SetupCounters {
+        self.counters
+    }
+
+    /// The last solve's setup digest (L11 C0): `0` before the first solve that built
+    /// columns; unchanged by a solve that took the no-dynamic-body early return.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn step_digest(&self) -> u64 {
+        self.step_digest
     }
 
     /// Rebuilds the per-body solver views from the gather snapshot (mirrors the
@@ -1610,6 +1886,7 @@ impl ColoredSoftStepSolver {
             warm_cursor,
             warm_stats,
             frozen_points: carry_bound,
+            counters,
             ..
         } = self;
         // Reset the push-filled point columns + the three CSR columns, seeding each
@@ -1651,6 +1928,7 @@ impl ColoredSoftStepSolver {
                     if *warm_start_enabled && m.count != 0 {
                         cols.set_manifold_base(mi as usize, u32::MAX, u32::from(m.count));
                         frozen_points += u32::from(m.count);
+                        counters.duplicate_fids(m);
                     }
                     continue;
                 }
@@ -1665,6 +1943,10 @@ impl ColoredSoftStepSolver {
                     remap,
                 );
                 point_hits += hits;
+                if *warm_start_enabled {
+                    counters.miss(count - hits);
+                    counters.duplicate_fids(m);
+                }
                 if count != 0 {
                     // One manifold-group per appended manifold with ≥1 live point;
                     // its contiguous slot run is `[base, base + count)` (C1).
@@ -1681,6 +1963,15 @@ impl ColoredSoftStepSolver {
             // (the per-color CSR indexes into `group_start`).
             cols.push_color_group_start((cols.group_start().len() - 1) as u32);
         }
+
+        // L11 C0: the stream-order view of this step's keys and lookups (a test-only
+        // walk; the method is empty in a shipping build).
+        counters.observe_stream(
+            manifolds,
+            remap,
+            *warm_start_enabled && !matches!(remap, RowRemap::Reset),
+            *warm_start_enabled,
+        );
 
         let translated = match remap {
             _ if !*warm_start_enabled => 0,
@@ -3139,7 +3430,11 @@ impl ColoredSoftStepSolver {
     /// current relative normal velocity to `-e·vn_initial`, keeping `λn ≥ 0`.
     /// Walks in color order (the bodies within a color are disjoint; cross-color
     /// the result is order-fixed). A zero-restitution contact is skipped.
-    fn apply_restitution(cols: &mut ContactColumns, bodies_eff: ScratchSolveView<'_, BodyEffective>) {
+    fn apply_restitution(
+        cols: &mut ContactColumns,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        counters: &mut SetupCounters,
+    ) {
         // Single-threaded (run after the parallel solve has joined), so direct
         // `&mut ContactColumns` per-element access is sound — `restitution` /
         // `vn_initial` are ST-only columns absent from the worker-facing view.
@@ -3151,6 +3446,7 @@ impl ColoredSoftStepSolver {
             if vn0 > -RESTITUTION_THRESHOLD {
                 continue;
             }
+            counters.restitution();
             let ra = cols.ra(i);
             let rb = cols.rb(i);
             let normal = cols.normal(i);
@@ -3254,6 +3550,7 @@ impl ColoredSoftStepSolver {
                 remap,
             );
             self.warm_stats.carry_hits = carry_hits;
+            self.counters.carry(carry_hits);
         }
         debug_assert!(
             carry_hits <= self.frozen_points,
@@ -3441,6 +3738,7 @@ impl ColoredSoftStepSolver {
             return;
         }
         self.solved_steps += 1;
+        self.counters.step(self.warm_start_enabled);
 
         // O8 phase 1 (BEFORE the solve): apply the wake conditions and build the
         // body→awake mask from last frame's sleep flags. This decides which islands
@@ -3471,6 +3769,12 @@ impl ColoredSoftStepSolver {
             self.build_columns(manifolds, graph, scratch.bodies(), sleep_view, warm_remap);
             warm_remap
         };
+        // L11 C0: the setup digest is taken here, over the seeds the sweeps have not
+        // yet touched; the step's warm stats are folded in after the store.
+        #[cfg(test)]
+        {
+            self.step_digest = self.columns.setup_digest();
+        }
         // Profiling: this step's slot totals by color class, the denominators of the
         // per-color spans. One pass over the color CSR, and only while armed.
         if zone_enabled!(PHYS_SLOTS_WIDE) {
@@ -3631,7 +3935,11 @@ impl ColoredSoftStepSolver {
         // Post-loop restitution (ONCE, velocity-only, bias-free).
         {
             let _z = zone!(PHYS_RESTITUTION);
-            Self::apply_restitution(&mut self.columns, self.bodies.solve_view());
+            Self::apply_restitution(
+                &mut self.columns,
+                self.bodies.solve_view(),
+                &mut self.counters,
+            );
         }
 
         // IM-2b: store converged impulses in canonical order, carry the frozen
@@ -3639,6 +3947,10 @@ impl ColoredSoftStepSolver {
         {
             let _z = zone!(PHYS_STORE);
             self.store_and_swap(&scratch.rows, manifolds, warm_remap);
+        }
+        #[cfg(test)]
+        {
+            self.step_digest = fnv_warm_stats(self.step_digest, &self.warm_stats);
         }
 
         // O8 integrate-freeze RESTORE: undo the integrate on slept rows by restoring

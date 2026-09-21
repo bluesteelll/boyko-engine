@@ -58,6 +58,10 @@
 //!   `parallel_broadphase` follows `parallel_solve`, as in the Criterion bench, and does nothing
 //!   here: it is read only on the `Grid` path, and there only from `MIN_PARALLEL_BODIES` = 4096
 //!   bodies up (tree report C1 — the Criterion bench's comment claiming otherwise was wrong).
+//! * `--cfg as` (cfg-As, the L11 `J-As` row): cfg-A plus `simd_solve`, i.e. AllPairs with the AVX2
+//!   cohort kernel on and `parallel_solve = W > 1`. It isolates the solve kernel from the
+//!   broadphase (cfg-B changes both), which is what L11's per-stage gates are read on. Bit-identical
+//!   to cfg-A by the O7 bit suite, so it must end in cfg-A's pose bytes too.
 //! * `--cfg b` (cfg-B): cfg-A plus `Grid` plus `simd_solve`. Both changes are bit-identical by
 //!   construction (`production_grid_equals_all_pairs`; the O7 bit suite), so cfg-A and cfg-B must
 //!   end in equal pose bytes: `--pose-out` on one run and `--expect-pose` on the other assert it.
@@ -148,7 +152,7 @@
 //! --window A..B                the summary's window, A <= B <= N (default 0..N)
 //! --gap G                      layer gap (default per scene)
 //! --solver colored|reference   (default colored)
-//! --cfg a|b|default            (default default)
+//! --cfg a|as|b|default         (default default)
 //! --parallel-solve             force parallel_solve on; since L4 a no-op wherever it is accepted
 //!                              (cfg-A/B at W > 1 and --cfg default have it on), refused at
 //!                              W = 1 (J-P1 is retired, see "Configurations")
@@ -411,6 +415,8 @@ enum SolverKind {
 enum CfgKind {
     /// cfg-A.
     A,
+    /// cfg-As: cfg-A plus `simd_solve` (the L11 `J-As` row).
+    As,
     /// cfg-B.
     B,
     /// The tree's `PhysicsConfig::default()`.
@@ -457,7 +463,7 @@ fn usage_error(msg: &str) -> ExitCode {
     eprintln!("jolt_parity_pyramid: {msg}");
     eprintln!(
         "usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] \
-         [--gap G] [--solver colored|reference] [--cfg a|b|default] [--parallel-solve] \
+         [--gap G] [--solver colored|reference] [--cfg a|as|b|default] [--parallel-solve] \
          [--parallel-np on|off] [--sleeping] [--threshold T] [--frozen-by K] [--arm-profiler] [--canary-frac F \
          --canary-ref-ns T] [--csv PATH] [--pose-out PATH] [--expect-pose PATH] [--label TEXT]"
     );
@@ -525,9 +531,10 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
             "--cfg" => {
                 cfg = match it.next().as_deref() {
                     Some("a") => CfgKind::A,
+                    Some("as") => CfgKind::As,
                     Some("b") => CfgKind::B,
                     Some("default") => CfgKind::Default,
-                    other => return Err(format!("--cfg: expected a|b|default, got {other:?}")),
+                    other => return Err(format!("--cfg: expected a|as|b|default, got {other:?}")),
                 }
             }
             "--parallel-solve" => parallel_solve = true,
@@ -596,7 +603,7 @@ fn validate(a: &Args) -> Result<(), String> {
     }
     if a.solver == SolverKind::Reference {
         if a.cfg != CfgKind::Default {
-            return Err("--solver reference takes --cfg default only: cfg-A/B are colored".into());
+            return Err("--solver reference takes --cfg default only: cfg-A/As/B are colored".into());
         }
         if a.sleeping || a.parallel_solve || a.canary_frac.is_some() {
             return Err(
@@ -768,7 +775,7 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
     cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
     cfg.dt = DT;
     match args.cfg {
-        CfgKind::A | CfgKind::B => {
+        CfgKind::A | CfgKind::As | CfgKind::B => {
             let parallel = args.parallel_solve || args.workers > 1;
             let b = args.cfg == CfgKind::B;
             cfg.parallel_solve = parallel;
@@ -776,7 +783,8 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
             cfg.parallel_narrowphase = parallel;
             cfg.broadphase_select = BroadphaseSelectMode::Manual;
             cfg.broadphase = if b { BroadphaseKind::Grid } else { BroadphaseKind::AllPairs };
-            cfg.simd_solve = b;
+            // cfg-As and cfg-B run the AVX2 cohort kernel; cfg-A the scalar oracle.
+            cfg.simd_solve = args.cfg != CfgKind::A;
             cfg.sleeping = args.sleeping;
         }
         CfgKind::Default => {
@@ -1519,6 +1527,7 @@ fn run(args: &Args) -> ExitCode {
         }),
         json_str(match args.cfg {
             CfgKind::A => "a",
+            CfgKind::As => "as",
             CfgKind::B => "b",
             CfgKind::Default => "default",
         }),

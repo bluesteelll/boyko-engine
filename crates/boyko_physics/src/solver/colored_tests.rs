@@ -3554,3 +3554,681 @@
              now alone: (latched, awake, contact_wakes)"
         );
     }
+
+        // ── L11 C0: the G1 identity pins — the setup digest and the body bits, per step ──
+        //
+        // The per-contact solve setup (L11) rewrites the warm store, the column build, the
+        // kernel's layout and the warm apply WITHOUT changing a value. These pins are what
+        // C1–C4 must reproduce: for each of the seven scenes S-a…S-g the hash of every
+        // step's `ColoredSoftStepSolver::step_digest` (the warm seeds, the masked `vn0`,
+        // the group / colour CSRs, then the step's `WarmSeedStats`) followed by every
+        // row's post-step body bits (position, rotation, both velocities), folded with
+        // FNV-1a 64 over the run. The body bits are layout-free and authoritative; the
+        // digest localises a failure to the setup. Each scene runs the four arms W ∈ {1, 8}
+        // × `simd_solve` ∈ {off, on}, which the {1, N} and scalar/SIMD bit contracts make
+        // equal, so one constant per scene pins all four — an arm that differs from the
+        // others is as red as an arm that differs from the pin.
+        //
+        // A red pin is a defect, never a re-bless (`00-RULINGS.md`, per-contact parity).
+        // Every scene also asserts the anti-vacuity counter G1 names for it
+        // (`SetupCounters`), so a scene that stopped exercising its path goes red too.
+        // The eight-worker arms need a pool, so the suite is native only.
+
+    #[cfg(not(miri))]
+    mod g1_pins {
+        use super::*;
+        use crate::components::{Collider, RigidBody, RigidBodyMass};
+        use crate::narrowphase::feature_vertex_face;
+        use crate::resources::{BroadphaseGrid, ContactPairs, Manifolds};
+        use crate::row_identity::RowKey;
+        use crate::systems::narrowphase_serial;
+
+        /// S-a: the six-layer Jolt pyramid (91 boxes, gap 0.5, friction 0.2), 300 steps.
+        const PIN_S_A: u64 = 0xa9bd_a9e4_ee00_d272;
+        /// S-b: a resting three-layer pile that freezes under sleeping, then `wake_all`.
+        const PIN_S_B: u64 = 0x40e4_a08c_7eb6_f631;
+        /// S-c: spawn / despawn / migrate with order flips and jumpers (`Rows` and `Reset`).
+        const PIN_S_C: u64 = 0x8378_83c0_d3d6_6662;
+        /// S-d: a two-layer box pile on a plane SDF (box-box plus SDF manifolds).
+        const PIN_S_D: u64 = 0x288c_4d92_c2d6_410a;
+        /// S-e: a hand-built unsorted stream with duplicate keys and duplicate feature ids.
+        const PIN_S_E: u64 = 0x68db_ef7f_775d_42ba;
+        /// S-f: warm start toggled off for one step, then on again.
+        const PIN_S_F: u64 = 0xd611_7ee9_4919_701d;
+        /// S-g: bouncing spheres with restitution 0.6.
+        const PIN_S_G: u64 = 0x246a_964a_2b43_e9c1;
+
+        /// One arm of a G1 scene: the pool size and the kernel selection.
+        #[derive(Clone, Copy, Debug)]
+        struct Arm {
+            workers: usize,
+            simd_solve: bool,
+        }
+
+        /// The four arms every scene runs: W ∈ {1, 8} × `simd_solve` ∈ {off, on}.
+        const ARMS: [Arm; 4] = [
+            Arm { workers: 1, simd_solve: false },
+            Arm { workers: 1, simd_solve: true },
+            Arm { workers: 8, simd_solve: false },
+            Arm { workers: 8, simd_solve: true },
+        ];
+
+        /// What one arm of a scene produced: the pin hash, the counters at the end and
+        /// at the scene's own phase mark (zero when it has none), the last step's warm
+        /// stats, and how many steps had a colour wide enough for the parallel dispatch
+        /// (the W = 8 witness).
+        #[derive(Clone, Copy, Debug)]
+        struct ArmResult {
+            hash: u64,
+            counters: SetupCounters,
+            marked: SetupCounters,
+            stats: WarmSeedStats,
+            wide_steps: usize,
+        }
+
+        /// Runs `scene` on `arm`: inside an installed pool of `arm.workers` threads when
+        /// the arm is parallel, else on the calling thread with no pool attached.
+        fn run_arm(arm: Arm, scene: fn(Arm) -> ArmResult) -> ArmResult {
+            use boyko_threadpool::ThreadPoolBuilder;
+            if arm.workers > 1 {
+                let pool = ThreadPoolBuilder::new().num_threads(arm.workers).build();
+                pool.install(move |_scope| scene(arm))
+            } else {
+                scene(arm)
+            }
+        }
+
+        /// Runs every arm of `scene` and checks each against `pin`, reporting all four
+        /// hashes on a mismatch so the report can quote the measured values.
+        fn assert_pinned(name: &str, pin: u64, scene: fn(Arm) -> ArmResult) -> [ArmResult; 4] {
+            let results = ARMS.map(|arm| run_arm(arm, scene));
+            for (arm, r) in ARMS.iter().zip(&results) {
+                eprintln!(
+                    "{name} {arm:?}: hash {:#018x}, wide steps {}, {:?}",
+                    r.hash, r.wide_steps, r.counters
+                );
+            }
+            let hashes: Vec<String> = results.iter().map(|r| format!("{:#018x}", r.hash)).collect();
+            assert!(
+                results.iter().all(|r| r.hash == pin),
+                "{name}: the per-step setup digest + body bits hash must equal the C0 pin \
+                 {pin:#018x} on every arm (W {{1, 8}} × simd {{off, on}}); measured {hashes:?} \
+                 for arms {ARMS:?}. A red pin is a defect, not a re-bless."
+            );
+            results
+        }
+
+        /// Folds every row's post-step body bits: position, rotation, linear and angular
+        /// velocity, in row order, length first.
+        fn fold_body_bits(mut h: u64, bodies: &[BodyState]) -> u64 {
+            h = fnv_u32(h, bodies.len() as u32);
+            for b in bodies {
+                for v in [
+                    b.position.x,
+                    b.position.y,
+                    b.position.z,
+                    b.rotation.x,
+                    b.rotation.y,
+                    b.rotation.z,
+                    b.rotation.w,
+                    b.linear_velocity.x,
+                    b.linear_velocity.y,
+                    b.linear_velocity.z,
+                    b.angular_velocity.x,
+                    b.angular_velocity.y,
+                    b.angular_velocity.z,
+                ] {
+                    h = fnv_u32(h, v.to_bits());
+                }
+            }
+            h
+        }
+
+        /// A box body through the gather's own constructor, so its inertia is the
+        /// production tensor. `simulated == false` with `inv_mass == 0` is the static floor.
+        fn box_body(
+            position: Vec3,
+            half_extents: Vec3,
+            inv_mass: f32,
+            friction: f32,
+            restitution: f32,
+        ) -> BodyState {
+            let body = RigidBody {
+                position,
+                linear_velocity: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                angular_velocity: Vec3::ZERO,
+            };
+            let mass = RigidBodyMass { inv_inertia: Mat3::ZERO, inv_mass, restitution, friction };
+            let collider = Collider { shape: ColliderShape::Box { half_extents }, layer: 1, mask: 1 };
+            BodyState::from_columns(&body, &mass, &collider, false, inv_mass != 0.0, false)
+        }
+
+        /// A sphere body through the gather's constructor (a real inertia tensor, unlike
+        /// `dyn_sphere`'s zero one).
+        fn sphere_body(
+            position: Vec3,
+            radius: f32,
+            inv_mass: f32,
+            friction: f32,
+            restitution: f32,
+        ) -> BodyState {
+            let body = RigidBody {
+                position,
+                linear_velocity: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+                angular_velocity: Vec3::ZERO,
+            };
+            let mass = RigidBodyMass { inv_inertia: Mat3::ZERO, inv_mass, restitution, friction };
+            let collider = Collider { shape: ColliderShape::Sphere { radius }, layer: 1, mask: 1 };
+            BodyState::from_columns(&body, &mass, &collider, false, inv_mass != 0.0, false)
+        }
+
+        /// The runner's floor: Jolt's `BoxShape(Vec3(50, 1, 50))` at `(0, −1, 0)`, static.
+        fn floor_body(friction: f32) -> BodyState {
+            box_body(Vec3::new(0.0, -1.0, 0.0), Vec3::new(50.0, 1.0, 50.0), 0.0, friction, 0.0)
+        }
+
+        /// Jolt's pyramid placement loop (`PyramidScene.h`, the runner's transcription) at
+        /// `height` layers: unit-density cubes of half-extent 1 (`inv_mass` 1/8), pitch 2,
+        /// the odd-layer half-box offset, `gap` between layers. The floor is row 0.
+        fn pyramid_bodies(height: i32, gap: f32, friction: f32) -> Vec<BodyState> {
+            let mut bodies = vec![floor_body(friction)];
+            for i in 0..height {
+                let lo = i / 2;
+                let hi = height - (i + 1) / 2;
+                for j in lo..hi {
+                    for k in lo..hi {
+                        let odd = if i & 1 != 0 { 1.0 } else { 0.0 };
+                        let position = Vec3::new(
+                            -(height as f32) + 2.0 * j as f32 + odd,
+                            1.0 + (2.0 + gap) * i as f32,
+                            -(height as f32) + 2.0 * k as f32 + odd,
+                        );
+                        bodies.push(box_body(position, Vec3::new(1.0, 1.0, 1.0), 0.125, friction, 0.0));
+                    }
+                }
+            }
+            bodies
+        }
+
+        /// The plane-SDF stand-in for `box_sdf_manifold` (`systems.rs`), the field `y = 0`
+        /// with gradient `(0, 1, 0)`: every world corner below the plane is a candidate with
+        /// `separation = y`, the deepest four are kept (ties by the lowest corner index),
+        /// `normal = −∇ = (0, −1, 0)`, both anchors at the corner, the production
+        /// vertex-face feature id. `None` when no corner penetrates.
+        fn plane_sdf_box_manifold(row: u32, b: &BodyState, half: Vec3) -> Option<Manifold> {
+            use crate::math::MAX_CONTACT_POINTS;
+            let mut candidates: Vec<(f32, u32, Vec3)> = Vec::new();
+            for corner in 0u32..8 {
+                let sx = if corner & 1 != 0 { half.x } else { -half.x };
+                let sy = if corner & 2 != 0 { half.y } else { -half.y };
+                let sz = if corner & 4 != 0 { half.z } else { -half.z };
+                let world = b.position + b.rotation.rotate(Vec3::new(sx, sy, sz));
+                if world.y < 0.0 {
+                    candidates.push((world.y, corner, world));
+                }
+            }
+            if candidates.is_empty() {
+                return None;
+            }
+            candidates.sort_by(|p, q| p.0.total_cmp(&q.0).then(p.1.cmp(&q.1)));
+            candidates.truncate(MAX_CONTACT_POINTS);
+            let mut m = Manifold::new(BodyIndex(row), SDF_SENTINEL);
+            m.normal = Vec3::new(0.0, -1.0, 0.0);
+            for (p, &(d, corner, world)) in candidates.iter().enumerate() {
+                m.points[p] = ContactPoint {
+                    anchor_a: world,
+                    anchor_b: world,
+                    separation: d,
+                    feature_id: feature_vertex_face(corner),
+                };
+            }
+            m.count = candidates.len() as u8;
+            Some(m)
+        }
+
+        /// The drive of one G1 scene arm: the solver, its scratch, the optional sleep
+        /// state, the real broadphase + narrowphase resources, and the running hash.
+        struct G1 {
+            cfg: PhysicsConfig,
+            solver: ColoredSoftStepSolver,
+            scratch: SolverScratch,
+            sleep: Option<IslandSleep>,
+            grid: BroadphaseGrid,
+            pairs: ContactPairs,
+            manifolds: Manifolds,
+            hash: u64,
+            wide_steps: usize,
+            marked: SetupCounters,
+        }
+
+        impl G1 {
+            /// A drive over `bodies` on `arm`; `sleeping` selects the O8 entry.
+            fn new(bodies: &[BodyState], arm: Arm, sleeping: bool) -> Self {
+                let cfg = PhysicsConfig {
+                    dt: 1.0 / 60.0,
+                    simd_solve: arm.simd_solve,
+                    sleeping,
+                    ..PhysicsConfig::default()
+                };
+                let mut scratch = SolverScratch::with_capacity(bodies.len());
+                scratch.set_bodies(bodies);
+                scratch.touched.reset(scratch.bodies().len());
+                let sleep = sleeping.then(|| IslandSleep::with_capacity(bodies.len(), bodies.len()));
+                Self {
+                    cfg,
+                    solver: ColoredSoftStepSolver::default(),
+                    scratch,
+                    sleep,
+                    grid: BroadphaseGrid::with_capacity(bodies.len()),
+                    pairs: ContactPairs::with_capacity(bodies.len() * 4),
+                    manifolds: Manifolds::with_capacity(bodies.len() * 4),
+                    hash: FNV_OFFSET,
+                    wide_steps: 0,
+                    marked: SetupCounters::default(),
+                }
+            }
+
+            /// Snapshots the counters at the scene's phase mark.
+            fn mark(&mut self) {
+                self.marked = self.solver.setup_counters();
+            }
+
+            /// One step over `manifolds`: the graph, the solve, then the digest and the body
+            /// bits folded into the hash.
+            fn solve(&mut self, manifolds: &[Manifold]) {
+                let Self { cfg, solver, scratch, sleep, hash, wide_steps, .. } = self;
+                Self::solve_parts(cfg, solver, scratch, sleep.as_mut(), manifolds, hash, wide_steps);
+            }
+
+            fn solve_parts(
+                cfg: &PhysicsConfig,
+                solver: &mut ColoredSoftStepSolver,
+                scratch: &mut SolverScratch,
+                sleep: Option<&mut IslandSleep>,
+                manifolds: &[Manifold],
+                hash: &mut u64,
+                wide_steps: &mut usize,
+            ) {
+                let graph = build_graph(scratch.bodies(), manifolds);
+                scratch.touched.reset(scratch.bodies().len());
+                match sleep {
+                    Some(sleep) => solver.solve_colored_sleeping(cfg, manifolds, &graph, scratch, sleep),
+                    None => solver.solve_colored(cfg, manifolds, &graph, scratch),
+                }
+                if solver.columns.widest_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR {
+                    *wide_steps += 1;
+                }
+                *hash = fnv_u64(*hash, solver.step_digest());
+                *hash = fold_body_bits(*hash, scratch.bodies());
+            }
+
+            /// One step through the production collision pipeline: the grid broadphase, the
+            /// serial narrowphase (its box-box axis hysteresis synced to the scratch rows),
+            /// then, with `sdf_plane`, the plane-SDF stand-in appended for every dynamic
+            /// box in row order — the stream shape `physics_narrowphase_sdf` produces.
+            fn step_pipeline(&mut self, sdf_plane: bool) {
+                let Self {
+                    cfg,
+                    solver,
+                    scratch,
+                    sleep,
+                    grid,
+                    pairs,
+                    manifolds,
+                    hash,
+                    wide_steps,
+                    ..
+                } = self;
+                grid.build(scratch.bodies(), pairs);
+                let prefetched = manifolds
+                    .box_axis_cache
+                    .begin_frame_synced(pairs.pairs(), scratch.bodies(), &scratch.rows);
+                narrowphase_serial(manifolds, scratch.bodies(), pairs.pairs(), prefetched);
+                if sdf_plane {
+                    let mut out = manifolds.manifolds.build_view();
+                    for (row, b) in scratch.bodies().iter().enumerate() {
+                        if !b.simulated || !is_dynamic_row(b.inv_mass) {
+                            continue;
+                        }
+                        if let ColliderShape::Box { half_extents } = b.shape
+                            && let Some(m) = plane_sdf_box_manifold(row as u32, b, half_extents)
+                        {
+                            out.push(m);
+                        }
+                    }
+                }
+                Self::solve_parts(
+                    cfg,
+                    solver,
+                    scratch,
+                    sleep.as_mut(),
+                    manifolds.manifolds(),
+                    hash,
+                    wide_steps,
+                );
+            }
+
+            fn finish(self) -> ArmResult {
+                ArmResult {
+                    hash: self.hash,
+                    counters: self.solver.setup_counters(),
+                    marked: self.marked,
+                    stats: self.solver.warm_seed_stats(),
+                    wide_steps: self.wide_steps,
+                }
+            }
+        }
+
+        /// S-a: the six-layer Jolt pyramid (the runner's `jolt` placement at height 6: 91
+        /// boxes, gap 0.5, friction 0.2) for 300 steps through the real pipeline.
+        fn scene_s_a(arm: Arm) -> ArmResult {
+            let mut g = G1::new(&pyramid_bodies(6, 0.5, 0.2), arm, false);
+            for _ in 0..300 {
+                g.step_pipeline(false);
+            }
+            g.finish()
+        }
+
+        /// S-b: a three-layer resting pile (gap 0, friction 0.5) under sleeping with a
+        /// short debounce; it freezes, is stepped frozen (the store carries its entries),
+        /// then `wake_all` and 40 more steps.
+        fn scene_s_b(arm: Arm) -> ArmResult {
+            let mut g = G1::new(&pyramid_bodies(3, 0.0, 0.5), arm, true);
+            g.cfg.sleep_frames = 10;
+            for _ in 0..120 {
+                g.step_pipeline(false);
+            }
+            let frozen_rows = (0..g.scratch.bodies_len())
+                .filter(|&r| !g.sleep.as_ref().expect("sleeping arm").is_row_awake(r))
+                .count();
+            assert!(frozen_rows > 0, "anti-vacuity: S-b's pile must be frozen after 120 steps");
+            g.sleep.as_mut().expect("sleeping arm").wake_all();
+            for _ in 0..40 {
+                g.step_pipeline(false);
+            }
+            g.finish()
+        }
+
+        /// S-c's world: entities with an identity, gathered by hand each step so the row
+        /// identity map sees spawns (appends with an `added` row), despawns (swap-removes:
+        /// the last row jumps into the hole), migrations (a reversed run: order flips) and a
+        /// missed gather (`Reset`). The floor is row 0; the spheres overlap their neighbours.
+        struct Churn {
+            ents: Vec<(RowKey, BodyState)>,
+            next_id: usize,
+        }
+
+        impl Churn {
+            fn new(n: usize) -> Self {
+                let mut ents = vec![(RowKey::new(0, 0), floor_body(0.5))];
+                for i in 0..n {
+                    let p = Vec3::new(i as f32 * 1.5, 1.0, 0.0);
+                    ents.push((RowKey::new(i + 1, 0), sphere_body(p, 1.0, 1.0, 0.5, 0.0)));
+                }
+                Self { ents, next_id: n + 1 }
+            }
+
+            /// Loads the entities into the scratch (bodies and one hand gather) with `added`
+            /// naming the rows whose body was spawned since the last gather.
+            fn gather(&self, scratch: &mut SolverScratch, added: &[u32]) {
+                let bodies: Vec<BodyState> = self.ents.iter().map(|(_, b)| *b).collect();
+                scratch.set_bodies(&bodies);
+                scratch.rows.begin_gather();
+                {
+                    let (mut cur, mut add) = scratch.rows.gather_views();
+                    for (key, _) in &self.ents {
+                        cur.push(*key);
+                    }
+                    for &r in added {
+                        add.push(r);
+                    }
+                }
+                scratch.rows.finish_gather();
+            }
+
+            /// Copies the solved state back from the scratch, row for row.
+            fn write_back(&mut self, scratch: &SolverScratch) {
+                for ((_, b), s) in self.ents.iter_mut().zip(scratch.bodies()) {
+                    *b = *s;
+                }
+            }
+
+            /// The sorted body-body stream: floor contacts `(0, a)` and neighbour contacts
+            /// `(a, a + 1)` where the spheres overlap, in `(a, b)` order.
+            fn manifolds(&self) -> Vec<Manifold> {
+                let mut ms = Vec::new();
+                let bodies: Vec<&BodyState> = self.ents.iter().map(|(_, b)| b).collect();
+                for (a, body) in bodies.iter().enumerate().skip(1) {
+                    let sep = body.position.y - 1.0;
+                    if sep < 0.0 {
+                        ms.push(manifold(0, a as u32, Vec3::new(0.0, 1.0, 0.0), sep, body.position));
+                    }
+                }
+                for a in 1..bodies.len() {
+                    for b in a + 1..bodies.len() {
+                        let delta = bodies[b].position - bodies[a].position;
+                        let dist = delta.length();
+                        if dist - 2.0 < 0.0 && dist > 1e-6 {
+                            let normal = delta * dist.recip();
+                            ms.push(manifold(a as u32, b as u32, normal, dist - 2.0, bodies[a].position + normal));
+                        }
+                    }
+                }
+                ms.sort_by_key(|m| (m.body_a.0, m.body_b.0));
+                ms
+            }
+        }
+
+        /// S-c: 60 steps of a sphere line on a floor; at step 20 row 3 is despawned (row 9
+        /// jumps into it), at 25 two spheres are spawned (one on a recycled slot at
+        /// generation 1), at 30 rows 4..8 are reversed (order flips), at 35 a gather is
+        /// missed (`Reset`). Hand-built sorted streams, the row identity fed by hand. The
+        /// phase mark is taken before the first churn, so the gate counts churn misses
+        /// only, not the first step's cold table.
+        fn scene_s_c(arm: Arm) -> ArmResult {
+            let mut world = Churn::new(9);
+            let bodies: Vec<BodyState> = world.ents.iter().map(|(_, b)| *b).collect();
+            let mut g = G1::new(&bodies, arm, false);
+            let mut added: Vec<u32> = Vec::new();
+            for step in 0..60 {
+                match step {
+                    20 => {
+                        g.mark();
+                        world.ents.swap_remove(3);
+                    }
+                    25 => {
+                        let n = world.ents.len();
+                        let p = |i: usize| Vec3::new(i as f32 * 1.5, 1.0, 0.0);
+                        // The despawned slot 3 comes back at generation 1 (A1b's case) and a
+                        // fresh slot follows it.
+                        world.ents.push((RowKey::new(3, 1), sphere_body(p(n), 1.0, 1.0, 0.5, 0.0)));
+                        world.ents.push((RowKey::new(world.next_id, 0), sphere_body(p(n + 1), 1.0, 1.0, 0.5, 0.0)));
+                        world.next_id += 1;
+                        added.extend([n as u32, n as u32 + 1]);
+                    }
+                    30 => world.ents[4..9].reverse(),
+                    35 => {
+                        // A gather the solver never sees: its cursor then misses one.
+                        world.gather(&mut g.scratch, &[]);
+                    }
+                    _ => {}
+                }
+                world.gather(&mut g.scratch, &added);
+                added.clear();
+                let ms = world.manifolds();
+                g.solve(&ms);
+                world.write_back(&g.scratch);
+            }
+            g.finish()
+        }
+
+        /// S-d: a 9 × 9 layer of unit-half-extent boxes resting on the plane SDF (81 SDF
+        /// manifolds of 4 points: one colour of 324 slots, above the parallel floor) with an
+        /// 8 × 8 second layer on top (box-box manifolds through the real narrowphase), 120
+        /// steps. The only static surface is the SDF plane.
+        fn scene_s_d(arm: Arm) -> ArmResult {
+            let mut bodies = Vec::new();
+            let half = Vec3::new(1.0, 1.0, 1.0);
+            for j in 0..9 {
+                for k in 0..9 {
+                    let p = Vec3::new(-8.0 + 2.0 * j as f32, 0.98, -8.0 + 2.0 * k as f32);
+                    bodies.push(box_body(p, half, 0.125, 0.5, 0.0));
+                }
+            }
+            for j in 0..8 {
+                for k in 0..8 {
+                    let p = Vec3::new(-7.0 + 2.0 * j as f32, 3.0, -7.0 + 2.0 * k as f32);
+                    bodies.push(box_body(p, half, 0.125, 0.5, 0.0));
+                }
+            }
+            let mut g = G1::new(&bodies, arm, false);
+            for _ in 0..120 {
+                g.step_pipeline(true);
+            }
+            g.finish()
+        }
+
+        /// S-e: the dense sphere line's UNSORTED hand-built stream (`(a, floor)` before
+        /// `(a, a + 1)`), plus the same pair twice with different point counts (a duplicate
+        /// key whose later manifold has fewer points, review W1) and a manifold with two
+        /// points sharing a feature id. 40 steps.
+        fn scene_s_e(arm: Arm) -> ArmResult {
+            let n = 6;
+            let mut g = G1::new(&dense_collision_scene(n), arm, false);
+            for _ in 0..40 {
+                let bodies = g.scratch.bodies().to_vec();
+                let mut ms = dense_collision_manifolds(&bodies);
+                let up = Vec3::new(0.0, 1.0, 0.0);
+                ms.push(box_manifold(0, 1, up, -0.05, bodies[0].position, 4));
+                ms.push(box_manifold(0, 1, up, -0.05, bodies[0].position, 2));
+                let mut dup = box_manifold(2, 3, up, -0.05, bodies[2].position, 3);
+                dup.points[2].feature_id = dup.points[0].feature_id;
+                ms.push(dup);
+                g.solve(&ms);
+            }
+            g.finish()
+        }
+
+        /// S-f: the three-layer pile for 45 steps with warm start disabled on step 20 only.
+        fn scene_s_f(arm: Arm) -> ArmResult {
+            let mut g = G1::new(&pyramid_bodies(3, 0.5, 0.5), arm, false);
+            for step in 0..45 {
+                g.solver.warm_start_enabled = step != 20;
+                g.step_pipeline(false);
+            }
+            g.finish()
+        }
+
+        /// S-g: sixteen spheres with restitution 0.6 dropped from 3–9 m onto the floor
+        /// (impact speeds well above `RESTITUTION_THRESHOLD`), sliding sideways at 6 m/s on
+        /// friction 0.05 so the friction cone CLAMPS at every bounce (a sticking contact
+        /// never reads the coefficient's value); 150 steps.
+        fn scene_s_g(arm: Arm) -> ArmResult {
+            let mut bodies = vec![floor_body(0.05)];
+            for i in 0..16 {
+                let p = Vec3::new(-12.0 + 3.0 * (i % 8) as f32, 3.0 + 0.4 * i as f32, if i < 8 { -2.0 } else { 2.0 });
+                let mut b = sphere_body(p, 1.0, 1.0, 0.05, 0.6);
+                b.linear_velocity = Vec3::new(6.0, 0.0, 1.5);
+                bodies.push(b);
+            }
+            let mut g = G1::new(&bodies, arm, false);
+            for _ in 0..150 {
+                g.step_pipeline(false);
+            }
+            g.finish()
+        }
+
+        #[test]
+        fn g1_s_a_pyramid_pins() {
+            let results = assert_pinned("S-a", PIN_S_A, scene_s_a);
+            for r in &results {
+                assert!(
+                    r.counters.misses > 0 && r.counters.carry_hits == 0 && r.counters.disabled_steps == 0,
+                    "anti-vacuity: S-a has misses (the first step) and neither a carry nor a disabled \
+                     step: {:?}",
+                    r.counters
+                );
+            }
+        }
+
+        #[test]
+        fn g1_s_b_sleep_wake_pins() {
+            let results = assert_pinned("S-b", PIN_S_B, scene_s_b);
+            for r in &results {
+                assert!(
+                    r.counters.carry_hits > 0,
+                    "anti-vacuity: S-b's frozen pile must have its warm entries carried (B1): {:?}",
+                    r.counters
+                );
+            }
+        }
+
+        #[test]
+        fn g1_s_c_churn_pins() {
+            let results = assert_pinned("S-c", PIN_S_C, scene_s_c);
+            for r in &results {
+                assert!(
+                    r.counters.backward_searches > 0
+                        && r.counters.misses > r.marked.misses
+                        && r.stats.remap_resets == 1,
+                    "anti-vacuity: S-c's jumpers and flips must produce a backward search and a \
+                     miss after the phase mark, and its missed gather one Reset: {:?} after {:?}, \
+                     resets {}",
+                    r.counters,
+                    r.marked,
+                    r.stats.remap_resets
+                );
+            }
+        }
+
+        #[test]
+        fn g1_s_d_sdf_pile_pins() {
+            let results = assert_pinned("S-d", PIN_S_D, scene_s_d);
+            for (arm, r) in ARMS.iter().zip(&results) {
+                assert!(
+                    r.wide_steps > 0,
+                    "anti-vacuity: S-d's SDF colour must clear the parallel floor \
+                     ({MIN_PARALLEL_SLOTS_PER_COLOR} slots) so the W = 8 arm dispatches: {arm:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn g1_s_e_unsorted_duplicates_pins() {
+            let results = assert_pinned("S-e", PIN_S_E, scene_s_e);
+            for r in &results {
+                assert!(
+                    r.counters.cold_index_steps > 0 && r.counters.duplicate_fids_met > 0,
+                    "anti-vacuity: S-e must look up a non-strict stream and meet a duplicate feature \
+                     id: {:?}",
+                    r.counters
+                );
+            }
+        }
+
+        #[test]
+        fn g1_s_f_warm_toggle_pins() {
+            let results = assert_pinned("S-f", PIN_S_F, scene_s_f);
+            for r in &results {
+                assert_eq!(
+                    r.counters.disabled_steps, 1,
+                    "anti-vacuity: S-f runs exactly one step with warm start disabled: {:?}",
+                    r.counters
+                );
+            }
+        }
+
+        #[test]
+        fn g1_s_g_restitution_pins() {
+            let results = assert_pinned("S-g", PIN_S_G, scene_s_g);
+            for r in &results {
+                assert!(
+                    r.counters.restitution_applied > 0,
+                    "anti-vacuity: S-g's restitution pass must apply an impulse: {:?}",
+                    r.counters
+                );
+            }
+        }
+    }
