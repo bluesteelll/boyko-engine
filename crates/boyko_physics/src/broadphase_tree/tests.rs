@@ -16,12 +16,11 @@
 use proptest::prelude::*;
 
 use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
-use boyko_ecs::ecs::identifiers::primitives::EntityId;
 
 use crate::components::ColliderShape;
 use crate::math::Vec3;
 use crate::resources::{BodyState, ContactPairs};
-use crate::row_identity::{NO_ROW, RowIdentity, RowRemap};
+use crate::row_identity::{NO_ROW, RowIdentity, RowKey, RowRemap};
 
 use super::bvh::{Item, LANES, LEAF_R, LEAF_ROW, LEAF_X, LEAF_Y, LEAF_Z, Node8, PackedBvh8};
 use super::kernel::{QueryBox, box_mask, box_mask_scalar, leaf_mask, leaf_mask_scalar};
@@ -57,6 +56,9 @@ fn boxed(pos: [f32; 3], half: [f32; 3], inv_mass: f32) -> BodyState {
 }
 
 /// A tree, a row identity, the tree's output and the oracle's, plus the scene the scripts edit.
+///
+/// The rows are keyed the way the engine keys them (A1b, H-03): a [`RowKey`] is the slot
+/// index AND its generation, so a recycled slot never carries the dead body's key.
 struct Sim {
     tree: BroadphaseTree,
     rows: RowIdentity,
@@ -65,6 +67,10 @@ struct Sim {
     bodies: Vec<BodyState>,
     ids: Vec<usize>,
     next_id: usize,
+    /// The generation of each slot ever minted, indexed by id. The kernel bumps it when the
+    /// slot's entity despawns; a dead slot's key is never pushed, so the harness folds the
+    /// bump into [`respawn_at`](Self::respawn_at), the one place the slot's key reappears.
+    generation: Vec<u32>,
     /// Ids whose `RigidBody` is flagged added at the next gather.
     fresh: Vec<usize>,
 }
@@ -82,6 +88,7 @@ impl Sim {
             bodies,
             ids: (0..n).collect(),
             next_id: n,
+            generation: vec![0; n],
             fresh: Vec::new(),
         }
     }
@@ -92,7 +99,7 @@ impl Sim {
         {
             let (mut cur, mut add) = self.rows.gather_views();
             for (r, &id) in self.ids.iter().enumerate() {
-                cur.push(EntityId(id));
+                cur.push(RowKey::new(id, self.generation[id]));
                 if self.fresh.contains(&id) {
                     add.push(r as u32);
                 }
@@ -130,14 +137,22 @@ impl Sim {
     fn spawn_at(&mut self, row: usize, body: BodyState) -> usize {
         let id = self.next_id;
         self.next_id += 1;
+        debug_assert_eq!(self.generation.len(), id, "harness: one generation per minted id");
+        self.generation.push(0);
         self.bodies.insert(row, body);
         self.ids.insert(row, id);
         self.fresh.push(id);
         id
     }
 
-    /// Spawns `body` at `row` under a recycled `id`.
+    /// Spawns `body` at `row` under a recycled `id`: the slot at its next generation, so its
+    /// key is a new one to the map, as the kernel's despawn-time bump guarantees.
     fn respawn_at(&mut self, row: usize, id: usize, body: BodyState) {
+        assert!(
+            id < self.next_id && !self.ids.contains(&id),
+            "harness: a recycled id is a dead one"
+        );
+        self.generation[id] = self.generation[id].wrapping_add(1);
         self.bodies.insert(row, body);
         self.ids.insert(row, id);
         self.fresh.push(id);
@@ -686,7 +701,8 @@ fn script_recycled_id_respawned_at_the_same_pose() {
     let d = sim.step();
     assert_eq!(d.evictions, 1);
     assert_eq!(d.members, 3);
-    // The same id, the same pose, back in row 2, flagged added: a new body to the map.
+    // The same slot at a bumped generation, the same pose, back in row 2, flagged added: a
+    // new body to the map by its key alone (A1b), and by the flag besides.
     sim.respawn_at(2, id, pose);
     let d = sim.step();
     assert_eq!(d.members, 3, "a fresh row is not a member on its first step");
