@@ -51,32 +51,36 @@ use crate::resources::BodyState;
 use crate::row_identity::{RowKey, SleepLatch};
 use crate::solver::contact::BodyEffective;
 use crate::solver::soft_step::{ManifoldConstraint, PointConstraint};
+use crate::solver::warm_records::{WarmRecord, WarmRun};
 use crate::solver::warm_start::WarmEntry;
 
 /// Top of the rigid colored solver's contact-column band (audit Stage P — P2).
 ///
-/// The colored solver's SoA contact working set (`ContactColumns`) moved off 31
-/// parallel `std::Vec`s onto 31 kernel-native [`ScratchColumn`]s, killing the
+/// The colored solver's SoA contact working set (`ContactColumns`) moved off
+/// parallel `std::Vec`s onto kernel-native [`ScratchColumn`]s, killing the
 /// whole-struct `&mut *self.cols` reborrow each parallel worker performed (the
 /// rigid Tree-Borrows race). The band is a CONTIGUOUS descending run starting one
 /// id BELOW the three body-mirror ids ([`SCRATCH_ID_BODY_EFF_SERIAL`] == 509), so
-/// the rigid columns occupy `508 ..= 478` (31 ids) with no overlap.
+/// the rigid columns occupy `508 ..= 479` (30 ids) with no overlap.
 ///
 /// [`ScratchColumn`]: boyko_ecs::ecs::core::component::scratch::ScratchColumn
 pub(crate) const SCRATCH_ID_CONTACT_BAND_TOP: usize = MAX_COMPONENTS - 4;
 
 /// Number of `ScratchColumn`s backing the colored solver's `ContactColumns`.
-pub(crate) const CONTACT_COLUMN_COUNT: usize = 31;
+///
+/// 31 before L11 C1, which deleted the per-point `warm_key` and the `canonical`
+/// order (the warm store is per manifold now, `solver/warm_records.rs`) and added
+/// the per-manifold `plan`.
+pub(crate) const CONTACT_COLUMN_COUNT: usize = 30;
 
-/// Bottom of the contact-column band (inclusive): `508 - (31 - 1) == 478`.
-/// Headroom below this id remains free for future physics scratch columns.
+/// Bottom of the contact-column band (inclusive): `508 - (30 - 1) == 479`.
 pub(crate) const SCRATCH_ID_CONTACT_BAND_BOTTOM: usize =
     SCRATCH_ID_CONTACT_BAND_TOP - (CONTACT_COLUMN_COUNT - 1);
 
 /// The [`ComponentId`] for contact column `k` (`0`-based, in `ContactColumns`
 /// field order), descending from [`SCRATCH_ID_CONTACT_BAND_TOP`].
 ///
-/// `k == 0` -> id `508`, ascending `k` -> descending id, `k == 30` -> id `478`.
+/// `k == 0` -> id `508`, ascending `k` -> descending id, `k == 29` -> id `479`.
 #[inline]
 pub(crate) fn contact_column_id(k: usize) -> ComponentId {
     debug_assert!(k < CONTACT_COLUMN_COUNT, "contact column index out of band");
@@ -143,7 +147,7 @@ pub(crate) const SCRATCH_ID_BODY_EFF_SERIAL: usize = MAX_COMPONENTS - 3;
 // allocate a column OUTSIDE the run and `scratch_band_stagger_slots_are_distinct`
 // fires at test time.
 
-/// Highest id in the SOLVER cohort (inclusive) — the body mirrors plus the 31
+/// Highest id in the SOLVER cohort (inclusive) — the body mirrors plus the
 /// contact columns, which the colored solve sweeps together at slot `i`.
 const SOLVER_COHORT_TOP: usize = SCRATCH_ID_BODY_STATE;
 
@@ -169,7 +173,7 @@ const SOLVER_COHORT_WIDTH: usize = SOLVER_COHORT_TOP - SOLVER_COHORT_BOTTOM + 1;
 // That distinction is load-bearing. Migrating physics' remaining `std::Vec` bulk
 // brings the live column count to ~94, and 94 consecutive ids CANNOT have
 // pairwise-distinct residues mod 64 — a single global band would be impossible on
-// arithmetic alone. Per cohort it is comfortable: the solver sweeps 31 contact
+// arithmetic alone. Per cohort it is comfortable: the solver sweeps 30 contact
 // columns, the graph 8, the broadphase 13, the soft scratch 19, each far under
 // the 64-slot period.
 //
@@ -221,12 +225,14 @@ const _: () = assert!(
 // is exactly the pair that shares a loop.
 
 /// Number of ids in the solver tail that are named one by one below: three above
-/// the warm-start run and three under it.
+/// the warm-store run and three under it.
 const SOLVER_TAIL_NAMED_COUNT: usize = 6;
 
-/// Number of `ScratchColumn`s backing the double-buffered warm-start tables:
-/// a `read` + a `write` for each of the two solvers.
-pub(crate) const WARM_TABLE_COLUMN_COUNT: usize = 4;
+/// Number of `ScratchColumn`s backing the double-buffered warm stores: the serial
+/// solver's `read` + `write` [`WarmStartTable`](crate::solver::warm_start::WarmStartTable)s,
+/// then the colored solver's per-manifold records (L11 C1): two record columns, two
+/// key columns and the cold sorted index. See [`warm_table_id`].
+pub(crate) const WARM_TABLE_COLUMN_COUNT: usize = 7;
 
 /// Number of ids in the solver tail.
 const SOLVER_TAIL_COLUMN_COUNT: usize = SOLVER_TAIL_NAMED_COUNT + WARM_TABLE_COLUMN_COUNT;
@@ -237,7 +243,7 @@ const SOLVER_TAIL_COLUMN_COUNT: usize = SOLVER_TAIL_NAMED_COUNT + WARM_TABLE_COL
 /// post-loop restitution pass.
 ///
 /// The COLORED solver has its own `vn_initial` inside `ContactColumns`
-/// (`contact_column_id(25)`); the two are different columns of different length
+/// (`contact_column_id(24)`); the two are different columns of different length
 /// (per-point in the colored SoA build vs per-point in the serial build) and must
 /// not share an id.
 pub(crate) const SCRATCH_ID_VN_INITIAL: usize = SCRATCH_ID_CONTACT_BAND_BOTTOM - 1;
@@ -297,17 +303,26 @@ const _: () = assert!(
     "the solver tail's lowest id is not its declared bottom: the contiguous run has a hole, and SOLVER_COHORT_WIDTH stops covering every tail column"
 );
 
-/// The [`ComponentId`] for warm-start table `k`: `0` = the serial solver's read
-/// table, `1` its write, `2` = the colored solver's read, `3` its write.
+/// The [`ComponentId`] for warm-store column `k`:
 ///
-/// The read/write BINDING is only true at construction: `store_and_swap` swaps the
-/// two tables wholesale, so after the first step the field named `warm_read` owns
-/// the column built under the write id. That is harmless and deliberate — the
-/// point of separate ids is that the two columns keep DIFFERENT cache-set
-/// staggers while they alternate roles, not that a role owns an id.
+/// | `k` | column | element |
+/// |---|---|---|
+/// | 0 | the serial solver's read table | `WarmEntry` |
+/// | 1 | its write table | `WarmEntry` |
+/// | 2 | the colored solver's records, side 0 | `WarmRecord` |
+/// | 3 | its records, side 1 | `WarmRecord` |
+/// | 4 | its keys, side 0 | `u64` |
+/// | 5 | its keys, side 1 | `u64` |
+/// | 6 | its cold sorted index | `(u64, u32)` |
+///
+/// The read/write BINDING is only true at construction: each solver's store swaps
+/// its two sides wholesale, so after the first step the side read is the one built
+/// under the other id. That is harmless and deliberate — the point of separate ids
+/// is that the two columns keep DIFFERENT cache-set staggers while they alternate
+/// roles, not that a role owns an id.
 #[inline]
 pub(crate) fn warm_table_id(k: usize) -> ComponentId {
-    debug_assert!(k < WARM_TABLE_COLUMN_COUNT, "warm table index out of cohort");
+    debug_assert!(k < WARM_TABLE_COLUMN_COUNT, "warm store index out of cohort");
     ComponentId::new(SCRATCH_ID_WARM_TABLE_TOP - k)
 }
 
@@ -808,7 +823,7 @@ pub(crate) fn register_scratch_layouts() {
 /// Registers the [`Layout`](std::alloc::Layout) of every contact column's element
 /// type under its band id (audit Stage P — P2), in `ContactColumns` field order.
 ///
-/// The 31 columns and their element types (field order, descending from
+/// The 30 columns and their element types (field order, descending from
 /// [`SCRATCH_ID_CONTACT_BAND_TOP`]):
 /// * `ra_{x,y,z}`, `rb_{x,y,z}`, `normal_{x,y,z}`, `tangent1_{x,y,z}`,
 ///   `tangent2_{x,y,z}` — 15 × `f32`;
@@ -816,10 +831,10 @@ pub(crate) fn register_scratch_layouts() {
 ///   `tangent1_impulse`, `tangent2_impulse` — 6 × `f32`;
 /// * `body_a`, `body_b` — 2 × `u32`;
 /// * `b_is_sentinel` — `bool`;
-/// * `warm_key` — `u64`;
 /// * `vn_initial` — `f32`;
-/// * `color_offsets`, `canonical`, `group_start`, `color_group_start` — 4 × `u32`;
-/// * `manifold_base` — `(u32, u32)`.
+/// * `color_offsets`, `group_start`, `color_group_start` — 3 × `u32`;
+/// * `manifold_base` — `(u32, u32)`;
+/// * `plan` — `WarmRun` (L11 C1: each manifold's warm-source run).
 ///
 /// Idempotent + process-global (each `register_layout` is write-once): re-entry
 /// from another world / solver costs one branch per id after the first.
@@ -840,19 +855,17 @@ fn register_contact_column_layouts() {
     k -= 1;
     register_layout::<bool>(k); // b_is_sentinel
     k -= 1;
-    register_layout::<u64>(k); // warm_key
-    k -= 1;
     register_layout::<f32>(k); // vn_initial
     k -= 1;
     register_layout::<u32>(k); // color_offsets
-    k -= 1;
-    register_layout::<u32>(k); // canonical
     k -= 1;
     register_layout::<u32>(k); // group_start
     k -= 1;
     register_layout::<u32>(k); // color_group_start
     k -= 1;
     register_layout::<(u32, u32)>(k); // manifold_base
+    k -= 1;
+    register_layout::<WarmRun>(k); // plan
     debug_assert_eq!(
         k, SCRATCH_ID_CONTACT_BAND_BOTTOM,
         "contact column band must end exactly at the reserved bottom id"
@@ -861,16 +874,23 @@ fn register_contact_column_layouts() {
 
 /// Registers the element layout of every solver-tail column, idempotently.
 ///
-/// One `f32` (`vn_initial`), two `BitSet256` chunk columns and four `WarmEntry`
-/// tables. Every same-typed pair is registered under DIFFERENT ids on purpose —
-/// see [`SCRATCH_ID_TOUCHED_AWAKE`] for the failure a shared id would produce.
+/// One `f32` (`vn_initial`), two `BitSet256` chunk columns, the warm-store run
+/// (two `WarmEntry` tables, two `WarmRecord` columns, two `u64` key columns and the
+/// `(u64, u32)` cold index — the slot table at [`warm_table_id`]) and the three
+/// constraint / freeze columns. Every same-typed pair is registered under DIFFERENT
+/// ids on purpose — see [`SCRATCH_ID_TOUCHED_AWAKE`] for the failure a shared id
+/// would produce.
 fn register_solver_tail_layouts() {
     register_layout::<f32>(SCRATCH_ID_VN_INITIAL);
     register_layout::<BitSet256>(SCRATCH_ID_TOUCHED_SOLVER);
     register_layout::<BitSet256>(SCRATCH_ID_TOUCHED_AWAKE);
-    for k in 0..WARM_TABLE_COLUMN_COUNT {
-        register_layout::<WarmEntry>(warm_table_id(k).get());
-    }
+    register_layout::<WarmEntry>(warm_table_id(0).get());
+    register_layout::<WarmEntry>(warm_table_id(1).get());
+    register_layout::<WarmRecord>(warm_table_id(2).get());
+    register_layout::<WarmRecord>(warm_table_id(3).get());
+    register_layout::<u64>(warm_table_id(4).get());
+    register_layout::<u64>(warm_table_id(5).get());
+    register_layout::<(u64, u32)>(warm_table_id(6).get());
     register_layout::<ManifoldConstraint>(SCRATCH_ID_SERIAL_MANIFOLD_CONSTRAINTS);
     register_layout::<PointConstraint>(SCRATCH_ID_SERIAL_POINT_CONSTRAINTS);
     register_layout::<(u32, BodyState)>(SCRATCH_ID_COLORED_FROZEN_ROWS);

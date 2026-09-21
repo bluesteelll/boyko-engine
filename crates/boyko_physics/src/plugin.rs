@@ -304,8 +304,8 @@ pub fn add_physics_colored<S: RigidSolver + Default>(
 /// existing callers do not move.
 ///
 /// The solve runs in graph-COLOR order over the solver's SoA `ContactColumns` (a
-/// Gauss-Seidel sweep across colors), with the converged impulses stored in
-/// canonical order (IM-2b). The reference
+/// Gauss-Seidel sweep across colors), with the converged impulses stored by
+/// manifold index (`solver::warm_records`, L11 C1). The reference
 /// [`SoftStepSolver`](crate::solver::SoftStepSolver) is byte-untouched and its
 /// solve stage is NOT registered on this path — the two solvers never both run
 /// (Decision 7).

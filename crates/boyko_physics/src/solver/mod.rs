@@ -34,6 +34,7 @@ pub mod colored;
 pub mod contact;
 pub mod simd;
 pub mod soft_step;
+pub(crate) mod warm_records;
 pub mod warm_start;
 
 use boyko_ecs::ecs::core::resources::resource::Resource;

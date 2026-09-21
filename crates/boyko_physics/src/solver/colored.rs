@@ -66,18 +66,18 @@
 //! intra-group coupling for free — the group CSR is additive data O5 does not
 //! consume.)
 //!
-//! # IM-2b canonical warm-store (LOAD-BEARING for O6)
+//! # The warm store: one record per manifold, in stream order (L11 C1)
 //!
-//! The velocity accumulation is order-independent within a color, but the
-//! warm-start STORE is NOT — the open-addressed [`WarmStartTable`] is
-//! linear-probed, so two keys with colliding home slots resolve in INSERTION
-//! order. A solve-dispatch-order store would make next frame's seeds depend on
-//! the color layout (and, in [O6], the thread count) — a frame-delayed
-//! determinism break. So after the substeps this solver walks the contacts in
-//! CANONICAL `(manifold order, point index)` order — independent of the color
-//! layout — and stores each point's converged impulse under its own per-point
-//! key. The canonical order is materialized once (per build) in
-//! [`ContactColumns::canonical`].
+//! The velocity accumulation is order-independent within a color, and so is the
+//! warm store: each manifold's converged impulses go to `recs[mi]` of the write
+//! side of a double-buffered [`WarmRecords`] — a write by the manifold index, whose
+//! layout is a pure function of the stream and never of the color layout or (in
+//! [O6]) the thread count. The next step finds each manifold's source record by
+//! a merge-join over the previous stream's ordinals (`warm_records::plan_sources`,
+//! D2) and matches points by feature id inside the record, through the one lookup
+//! routine the B1 carry also uses (`WarmLookup::seed`, ruling W1). No hash, no
+//! per-point key, no table refill. `warm_records.rs` states Lemma W, the argument
+//! that every seed and hit count equals the per-point table's it replaced.
 
 use std::marker::PhantomData;
 
@@ -94,9 +94,11 @@ use super::simd;
 // 0%-gate reference). These are `pub(crate)` re-uses (visibility-widened only,
 // no value/layout change to `soft_step.rs`).
 use super::soft_step::{IMMOVABLE_AT_REST, MAX_BIAS_VELOCITY, RESTITUTION_THRESHOLD, SoftCoefficients};
-use super::warm_start::{self, WarmStartTable};
+use super::warm_records::{
+    self, WarmIndex, WarmLookup, WarmRecord, WarmRecords, WarmRun, point_fid,
+};
 use super::RigidSolver;
-use crate::manifold::{BodyIndex, Manifold, SDF_SENTINEL};
+use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::profiling::{
     PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE, PHYS_PASS_BIASED,
@@ -287,8 +289,9 @@ const CHUNKS_PER_WORKER: usize = 6;
 /// catching up with it.
 ///
 /// Bit-identity is unaffected: the `{1, N}` property holds for ANY partition
-/// (distinct chunks touch disjoint dynamic bodies and the canonical warm store is
-/// order-independent), so this changes only WHERE work runs, never the values.
+/// (distinct chunks touch disjoint dynamic bodies, and the warm store is a write by
+/// manifold index — a pure function of the stream, never of the partition), so this
+/// changes only WHERE work runs, never the values.
 ///
 /// # ⚠ The value is 64 because 256 was MEASURED to be better on one scene and to
 /// # BREAK another — a single global constant cannot serve both
@@ -339,28 +342,25 @@ const COHORT: usize = 8;
 /// never a `not(test)` predicate).
 ///
 /// Every count is cumulative over the solver's lifetime; a scene asserts a delta over
-/// its steps. Two of them are C0 proxies for a search that does not exist yet:
-/// `backward_searches` and `cold_index_steps` describe the previous-stream key
-/// order D2's merge-join will see, computed here from the same `ord` and the same
-/// row translation, so the scenes S-c and S-e are shown non-vacuous BEFORE C1
-/// lands. C1 replaces the two proxies with D2's own counts.
+/// its steps. `backward_searches` and `cold_index_steps` are D2's own counts (C1):
+/// what `warm_records::plan_sources` reports of the merge-join it ran.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SetupCounters {
-    /// Points of frozen manifolds whose entry the store carried (B1 hits): the sum of
+    /// Points of frozen manifolds whose record the store carried (B1 hits): the sum of
     /// [`WarmSeedStats::carry_hits`] over the steps.
     #[cfg(test)]
     pub(crate) carry_hits: u64,
-    /// Manifolds whose translated ordinal is below the previous manifold's translated
-    /// ordinal, in stream order, on a step that looks the table up: a descent D2's
-    /// forward gallop cannot follow, so it binary-searches backward.
+    /// Lookups on a strict read side that the cursor could not gallop forward to (a
+    /// descent of the translated ordinals), served by a backward binary search.
     #[cfg(test)]
     pub(crate) backward_searches: u64,
-    /// Per-point lookups that found no entry: an untranslatable pair (a flipped order,
-    /// a `Reset`), or a key the previous table did not hold.
+    /// Per-point lookups that found no stored point: an untranslatable pair (a flipped
+    /// order, a `Reset`), a pair the previous stream did not hold, or a feature id its
+    /// record does not carry.
     #[cfg(test)]
     pub(crate) misses: u64,
-    /// Steps that looked up a previous stream whose ordinals were NOT strictly
-    /// increasing (unsorted, or a duplicate pair): D2's cold sorted index in C1.
+    /// Steps that looked up a read side whose ordinals were NOT strictly increasing
+    /// (an unsorted stream, or a duplicate pair) and built D2's cold sorted index.
     #[cfg(test)]
     pub(crate) cold_index_steps: u64,
     /// Manifolds met with two live points sharing a (masked) feature id, solved or
@@ -373,10 +373,6 @@ pub(crate) struct SetupCounters {
     /// Points the restitution pass applied an impulse to (both of its gates passed).
     #[cfg(test)]
     pub(crate) restitution_applied: u64,
-    /// Whether the previous stored stream's ordinals were NOT strictly increasing:
-    /// the read side the next step's lookups run against. `false` before any store.
-    #[cfg(test)]
-    prev_non_strict: bool,
 }
 
 impl SetupCounters {
@@ -408,8 +404,7 @@ impl SetupCounters {
         #[cfg(test)]
         {
             let n = m.count as usize;
-            let fid = |p: usize| m.points[p].feature_id & FEATURE_ID_MASK;
-            let dup = (0..n).any(|p| (p + 1..n).any(|q| fid(p) == fid(q)));
+            let dup = (0..n).any(|p| (p + 1..n).any(|q| point_fid(m, p) == point_fid(m, q)));
             self.duplicate_fids_met += u64::from(dup);
         }
         // The only other reader of `m` is the gated statement above.
@@ -436,68 +431,17 @@ impl SetupCounters {
         }
     }
 
-    /// Observes one step's manifold stream in stream order: the strictness of the
-    /// ordinals this step will store, the descents of the translated ordinals this
-    /// step looks up, and whether the lookup ran against a non-strict previous stream.
-    ///
-    /// `looks_up` is whether this step reads the table (warm start on, not a `Reset`);
-    /// `stores` is whether it rewrites the read side (warm start on), which is when the
-    /// strictness of THIS stream becomes the next step's read-side property.
+    /// Adds what one step's `plan_sources` counted: its backward searches, and whether
+    /// it built the cold index.
     #[inline]
-    fn observe_stream(
-        &mut self,
-        manifolds: &[Manifold],
-        remap: RowRemap<'_>,
-        looks_up: bool,
-        stores: bool,
-    ) {
+    fn plan(&mut self, counts: warm_records::PlanCounts) {
         #[cfg(test)]
         {
-            let mut strict = true;
-            let mut prev_key: Option<u64> = None;
-            let mut prev_lookup: Option<u64> = None;
-            for m in manifolds {
-                let key = stream_ord(m.body_a.0, m.body_b.0);
-                if prev_key.is_some_and(|p| key <= p) {
-                    strict = false;
-                }
-                prev_key = Some(key);
-                if looks_up && let Some((la, lb)) = remap.manifold_pair(m) {
-                    let lookup = stream_ord(la, lb);
-                    if prev_lookup.is_some_and(|p| lookup < p) {
-                        self.backward_searches += 1;
-                    }
-                    prev_lookup = Some(lookup);
-                }
-            }
-            if looks_up && self.prev_non_strict {
-                self.cold_index_steps += 1;
-            }
-            if stores {
-                self.prev_non_strict = !strict;
-            }
+            self.backward_searches += u64::from(counts.backward_searches);
+            self.cold_index_steps += u64::from(counts.cold_index);
         }
-        // The only other reader of the arguments is the gated block above.
-        let _ = (manifolds, remap, looks_up, stores);
-    }
-}
-
-/// The feature-id bits a warm key carries (`warm_start::pack`'s field width): the
-/// mask under which two feature ids of one manifold collide.
-#[cfg(test)]
-const FEATURE_ID_MASK: u32 = 0xFFFF;
-
-/// L10's D6 ordinal of a manifold's pair, monotone with the sorted stream order: the
-/// body-body stream sorts by `(a, b)`, and the SDF manifolds (`body_b` the sentinel)
-/// follow it in row order. The key D1 stores per manifold; C1 moves it to
-/// `warm_records.rs`.
-#[cfg(test)]
-#[inline]
-fn stream_ord(a: u32, b: u32) -> u64 {
-    if b == SDF_SENTINEL.0 {
-        (1u64 << 63) | u64::from(a)
-    } else {
-        (u64::from(a) << 32) | u64::from(b)
+        // The only other reader of `counts` is the gated block above.
+        let _ = counts;
     }
 }
 
@@ -1000,8 +944,8 @@ impl<'a> ContactSolveView<'a> {
     }
 }
 
-/// Single-thread build / refill view over all 31 contact [`ScratchColumn`]s
-/// (audit Stage P — P2).
+/// Single-thread build / refill view over the 25 push-filled contact
+/// [`ScratchColumn`]s (audit Stage P — P2).
 ///
 /// `!Send` (`PhantomData<*mut ()>`): the build/push phase runs on ONE thread, so
 /// holding `&mut` build views over whole columns is sound — no other thread is
@@ -1033,7 +977,6 @@ struct ContactBuildView<'a> {
     body_a: ScratchBuildView<'a, u32>,
     body_b: ScratchBuildView<'a, u32>,
     b_is_sentinel: ScratchBuildView<'a, bool>,
-    warm_key: ScratchBuildView<'a, u64>,
     vn_initial: ScratchBuildView<'a, f32>,
     _not_send: PhantomData<*mut ()>,
 }
@@ -1060,13 +1003,13 @@ struct ContactBuildView<'a> {
 /// (`normal_impulse`, `tangent1_impulse`, `tangent2_impulse`) are warm-SEEDED at
 /// build and accumulate across substeps.
 ///
-/// # Canonical order (IM-2b)
+/// # The warm store's view (L11 C1)
 ///
-/// `canonical[k]` is the slot index of the `k`-th contact in canonical
-/// `(manifold order, point index)` order — the deterministic order the warm
-/// store walks, INDEPENDENT of the color layout. Each slot also carries its
-/// `warm_key` and gather-time approach velocity `vn_initial` so the restitution
-/// pass and warm store need no parallel buffer.
+/// The store is a write by manifold index (`warm_records.rs`): `manifold_base[mi]`
+/// names the slots a solved manifold's converged impulses sit in, and `plan[mi]` the
+/// run of the previous stream's records its seeds came from. Neither depends on the
+/// color layout. Each slot also carries its gather-time approach velocity
+/// `vn_initial` so the restitution pass needs no parallel buffer.
 ///
 /// # Manifold-group boundaries (C1 — load-bearing for O6/O7)
 ///
@@ -1131,16 +1074,12 @@ struct ContactColumns {
     /// `true` for an SDF contact (`body_b == SDF_SENTINEL`): body B is
     /// [`IMMOVABLE_AT_REST`], never `bodies[body_b]`.
     b_is_sentinel: ScratchColumn<bool>,
-    /// Per-point warm-start key (`pack`/`pack_sdf` with this point's feature id).
-    warm_key: ScratchColumn<u64>,
     /// Gather-time relative normal APPROACH velocity (B−A on the normal),
     /// captured before the first substep for the restitution pass.
     vn_initial: ScratchColumn<f32>,
     /// CSR color offsets: `color_offsets[c] .. color_offsets[c + 1]` is color
     /// `c`'s contiguous slot span (`len == n_colors + 1`).
     color_offsets: ScratchColumn<u32>,
-    /// Slot indices in canonical `(manifold, point)` order (IM-2b warm store).
-    canonical: ScratchColumn<u32>,
     /// CSR manifold-group boundaries in solve (slot) order (C1): group `g`'s slot
     /// run is `group_start[g] .. group_start[g + 1]` (`len == n_groups + 1`). One
     /// group per appended manifold with ≥1 live point.
@@ -1150,18 +1089,25 @@ struct ContactColumns {
     /// each value indexing `group_start`. Lets O6/O7 enumerate, per color, the
     /// groups and (via `group_start`) each group's slot range.
     color_group_start: ScratchColumn<u32>,
-    /// Reused scratch: per-manifold-index base slot + live-point count, written as
-    /// each manifold is appended in the build walk so the canonical order is
-    /// recovered WITHOUT a second replay walk (W1/O1/O3 fold). `(u32::MAX, 0)` for
-    /// a manifold absent from every color or with no live point. `(u32::MAX, n)`
-    /// with `n ≥ 1` for a manifold FROZEN this step with `n` live points: not
-    /// solved, its warm entries are carried by the store (B1). Capacity-reused
-    /// (`clear()` + per-build `manifold_fill` refill), never `vec!` per step.
+    /// Reused scratch: the store's view of the solved slots and the B1 carry tag
+    /// (L11 D3) — per-manifold-index base slot + live-point count, written as each
+    /// manifold is appended in the build walk, so the store reads a solved
+    /// manifold's converged impulses from `[base, base + count)` by manifold index
+    /// WITHOUT a second replay walk. `(u32::MAX, 0)` for a manifold absent from
+    /// every color or with no live point. `(u32::MAX, n)` with `n ≥ 1` is the carry
+    /// tag: a manifold FROZEN this step with `n` live points, not solved, its warm
+    /// record carried by the store (B1). Capacity-reused (`clear()` + per-build
+    /// `manifold_fill` refill), never `vec!` per step.
     manifold_base: ScratchColumn<(u32, u32)>,
+    /// Per-manifold-index warm source (L11 D2, ruling W1): the run of the previous
+    /// stream's records whose key is this manifold's translated pair, written by
+    /// `plan_sources` in stream order, read by the seed of every solved point and by
+    /// the store's carry. `WarmRun::MISS` when nothing was looked up.
+    plan: ScratchColumn<WarmRun>,
 }
 
 impl ContactColumns {
-    /// Builds the 31 contact columns, each on its own band id, reserving
+    /// Builds the 30 contact columns, each on its own band id, reserving
     /// `contacts` rows (clamped up to the kernel's adaptive per-element budget so
     /// a freshly-built solver never regrows in steady state).
     ///
@@ -1179,8 +1125,8 @@ impl ContactColumns {
         let f32_rows = contacts.max(scratch_reserve_rows(size_of::<f32>()));
         let u32_rows = contacts.max(scratch_reserve_rows(size_of::<u32>()));
         let bool_rows = contacts.max(scratch_reserve_rows(size_of::<bool>()));
-        let u64_rows = contacts.max(scratch_reserve_rows(size_of::<u64>()));
         let pair_rows = contacts.max(scratch_reserve_rows(size_of::<(u32, u32)>()));
+        let run_rows = contacts.max(scratch_reserve_rows(size_of::<WarmRun>()));
 
         // `k` walks the band in struct field order (see `register_contact_column_layouts`).
         let mut k = 0usize;
@@ -1214,13 +1160,12 @@ impl ContactColumns {
             body_a: ScratchColumn::<u32>::new(contact_column_id(21), u32_rows),
             body_b: ScratchColumn::<u32>::new(contact_column_id(22), u32_rows),
             b_is_sentinel: ScratchColumn::<bool>::new(contact_column_id(23), bool_rows),
-            warm_key: ScratchColumn::<u64>::new(contact_column_id(24), u64_rows),
-            vn_initial: ScratchColumn::<f32>::new(contact_column_id(25), f32_rows),
-            color_offsets: ScratchColumn::<u32>::new(contact_column_id(26), u32_rows),
-            canonical: ScratchColumn::<u32>::new(contact_column_id(27), u32_rows),
-            group_start: ScratchColumn::<u32>::new(contact_column_id(28), u32_rows),
-            color_group_start: ScratchColumn::<u32>::new(contact_column_id(29), u32_rows),
-            manifold_base: ScratchColumn::<(u32, u32)>::new(contact_column_id(30), pair_rows),
+            vn_initial: ScratchColumn::<f32>::new(contact_column_id(24), f32_rows),
+            color_offsets: ScratchColumn::<u32>::new(contact_column_id(25), u32_rows),
+            group_start: ScratchColumn::<u32>::new(contact_column_id(26), u32_rows),
+            color_group_start: ScratchColumn::<u32>::new(contact_column_id(27), u32_rows),
+            manifold_base: ScratchColumn::<(u32, u32)>::new(contact_column_id(28), pair_rows),
+            plan: ScratchColumn::<WarmRun>::new(contact_column_id(29), run_rows),
         }
     }
 
@@ -1260,7 +1205,6 @@ impl ContactColumns {
             body_a: self.body_a.build_view(),
             body_b: self.body_b.build_view(),
             b_is_sentinel: self.b_is_sentinel.build_view(),
-            warm_key: self.warm_key.build_view(),
             vn_initial: self.vn_initial.build_view(),
             _not_send: PhantomData,
         }
@@ -1403,22 +1347,19 @@ impl ContactColumns {
         self.normal_impulse.as_read_slice()[i]
     }
 
-    /// Reads slot `i`'s first tangent impulse (single-thread passes only).
+    /// Reads slot `i`'s first tangent impulse — used ONLY by the +avx2 differential
+    /// oracles since the store reads the impulse columns as slices (L11 C1).
+    #[cfg(all(test, target_arch = "x86_64", target_feature = "avx2"))]
     #[inline]
     fn tangent1_impulse(&self, i: usize) -> f32 {
         self.tangent1_impulse.as_read_slice()[i]
     }
 
-    /// Reads slot `i`'s second tangent impulse (single-thread passes only).
+    /// Reads slot `i`'s second tangent impulse — the +avx2 differential oracles only.
+    #[cfg(all(test, target_arch = "x86_64", target_feature = "avx2"))]
     #[inline]
     fn tangent2_impulse(&self, i: usize) -> f32 {
         self.tangent2_impulse.as_read_slice()[i]
-    }
-
-    /// Reads slot `i`'s warm-start key (single-thread passes only — `store_and_swap`).
-    #[inline]
-    fn warm_key(&self, i: usize) -> u64 {
-        self.warm_key.as_read_slice()[i]
     }
 
     /// Writes slot `i`'s normal impulse (single-thread passes only —
@@ -1490,10 +1431,16 @@ impl ContactColumns {
         self.color_group_start.as_read_slice()
     }
 
-    /// The canonical-order slot list as a read slice.
+    /// The per-manifold warm-source runs as a read slice.
     #[inline]
-    fn canonical(&self) -> &[u32] {
-        self.canonical.as_read_slice()
+    fn plan(&self) -> &[WarmRun] {
+        self.plan.as_read_slice()
+    }
+
+    /// Sizes `plan` to exactly `n` manifolds for `plan_sources` to write by index
+    /// (fills only on growth; every entry is then overwritten).
+    fn plan_fill(&mut self, n: usize) {
+        self.plan.build_view().resize(n, WarmRun::MISS);
     }
 
     /// Resets the push-filled point columns AND the CSR columns for a fresh build,
@@ -1503,7 +1450,6 @@ impl ContactColumns {
         self.color_offsets.build_view().clear();
         self.group_start.build_view().clear();
         self.color_group_start.build_view().clear();
-        self.canonical.build_view().clear();
         self.color_offsets.build_view().push(0);
         self.group_start.build_view().push(0);
         self.color_group_start.build_view().push(0);
@@ -1527,12 +1473,6 @@ impl ContactColumns {
         self.color_group_start.build_view().push(v);
     }
 
-    /// Appends a canonical-order slot index.
-    #[inline]
-    fn push_canonical(&mut self, v: u32) {
-        self.canonical.build_view().push(v);
-    }
-
     /// Reproduces the prior `manifold_base.resize(n, (u32::MAX, 0))` then runs the
     /// sparse manifold-start write (audit Stage P — P2, critic note O1).
     ///
@@ -1543,8 +1483,7 @@ impl ContactColumns {
     /// no per-frame alloc in steady state). The caller (`build_columns`) then
     /// sparse-overwrites the manifold-start rows with `(base, count)`, and the rows
     /// of manifolds frozen this step with the carry tag `(u32::MAX, count)`: the
-    /// canonical emission skips every `u32::MAX` base, so the tag is read only by
-    /// the warm store's carry.
+    /// store writes a solved record from a real base and carries a tagged one (B1).
     fn manifold_fill(&mut self, n: usize) {
         let mut view = self.manifold_base.build_view();
         view.clear();
@@ -1565,7 +1504,7 @@ impl ContactColumns {
         self.manifold_base.build_view().as_mut_slice()[mi] = (base, count);
     }
 
-    /// The `manifold_base` column as a read slice (the canonical-order emit reads it).
+    /// The `manifold_base` column as a read slice (the store reads it).
     #[inline]
     fn manifold_base(&self) -> &[(u32, u32)] {
         self.manifold_base.as_read_slice()
@@ -1629,11 +1568,10 @@ impl ContactBuildView<'_> {
         self.body_a.clear();
         self.body_b.clear();
         self.b_is_sentinel.clear();
-        self.warm_key.clear();
         self.vn_initial.clear();
     }
 
-    /// Appends one contact-point slot in lockstep across the 26 push-filled
+    /// Appends one contact-point slot in lockstep across the 25 push-filled
     /// columns. Order is identical to the prior `Vec::push` order, so the byte
     /// layout is bit-for-bit identical.
     #[allow(clippy::too_many_arguments)]
@@ -1651,7 +1589,6 @@ impl ContactBuildView<'_> {
         body_a: u32,
         body_b: u32,
         b_is_sentinel: bool,
-        warm_key: u64,
         vn_initial: f32,
     ) {
         self.ra_x.push(ra.x);
@@ -1678,7 +1615,6 @@ impl ContactBuildView<'_> {
         self.body_a.push(body_a);
         self.body_b.push(body_b);
         self.b_is_sentinel.push(b_is_sentinel);
-        self.warm_key.push(warm_key);
         self.vn_initial.push(vn_initial);
     }
 }
@@ -1686,7 +1622,7 @@ impl ContactBuildView<'_> {
 /// The colored TGS-Soft rigid-body solver (Phase O5, Decision 7).
 ///
 /// A `Resource` owning its [`ContactColumns`] SoA scratch + the double-buffered
-/// warm-start cache. Solves contacts in color order (a Gauss-Seidel sweep across
+/// per-manifold warm store. Solves contacts in color order (a Gauss-Seidel sweep across
 /// colors) over the columns, single-threaded in O5. Like the reference
 /// [`SoftStepSolver`](super::SoftStepSolver) it
 /// [`owns_integration`](RigidSolver::owns_integration), so the pipeline's
@@ -1704,17 +1640,17 @@ pub struct ColoredSoftStepSolver {
     bodies: ScratchColumn<BodyEffective>,
     /// The SoA contact columns, grouped by color (rebuilt each solve, reused).
     columns: ContactColumns,
-    /// Last frame's converged impulses — probed to seed this frame's contacts.
-    warm_read: WarmStartTable,
-    /// This frame's converged impulses — freshly zeroed, filled in canonical
-    /// order after the solve (IM-2b), then swapped into `warm_read`.
-    warm_write: WarmStartTable,
+    /// The two sides of the warm store (L11 D1): `warm[warm_cur]` holds the previous
+    /// step's records and is read this step; the other side is written by
+    /// `plan_sources` (the keys) and the store (the records), then becomes current.
+    warm: [WarmRecords; 2],
+    /// Which side of `warm` is read this step (`0` or `1`).
+    warm_cur: u8,
+    /// The cold sorted index over the read side's keys, built by `plan_sources` on a
+    /// step whose read side is not strictly increasing (D2; hand-built streams only).
+    warm_index: WarmIndex,
     /// Whether warm-starting is active (production default `true`).
     warm_start_enabled: bool,
-    /// Live points of the manifolds FROZEN this step: the bound on the entries the
-    /// store carries (B1), so the table is sized for them. Written by `build_columns`
-    /// (`0` when sleeping is off or warm start is disabled), read by `store_and_swap`.
-    frozen_points: u32,
     /// O8 integrate-freeze scratch: the pre-solve `(row, BodyState)` snapshot of each
     /// slept body, captured before the substep loop and restored after — so a slept
     /// island's bodies are NOT integrated (their hot state is frozen) without masking
@@ -1722,8 +1658,8 @@ pub struct ColoredSoftStepSolver {
     /// empty when sleeping is off (the byte-identical O6/O7 path). Backed by a
     /// [`ScratchColumn`] (audit Stage 4).
     frozen: ScratchColumn<(u32, BodyState)>,
-    /// The warm table's place in the gather sequence, stamped where `warm_read` is
-    /// rebuilt (defect A, interim; U7 deletes it).
+    /// The warm store's place in the gather sequence, stamped where the read side
+    /// is swapped in (defect A, interim; U7 deletes it).
     warm_cursor: RemapCursor,
     /// The last solve's warm-start lookup diagnostic (defect A, interim; U7 deletes it).
     warm_stats: WarmSeedStats,
@@ -1756,10 +1692,16 @@ impl ColoredSoftStepSolver {
         Self {
             bodies: ScratchColumn::new(body_eff_colored_id(), reserve),
             columns: ContactColumns::with_capacity(contacts),
-            warm_read: WarmStartTable::with_capacity(warm_table_id(2), contacts),
-            warm_write: WarmStartTable::with_capacity(warm_table_id(3), contacts),
+            // One record per manifold; a manifold has at least one point in every
+            // stream the narrowphase emits, so `contacts` bounds the manifold count
+            // there, and the reserve floor covers the hand-built streams that do not.
+            warm: [
+                WarmRecords::with_capacity(warm_table_id(4), warm_table_id(2), contacts),
+                WarmRecords::with_capacity(warm_table_id(5), warm_table_id(3), contacts),
+            ],
+            warm_cur: 0,
+            warm_index: WarmIndex::with_capacity(warm_table_id(6), contacts),
             warm_start_enabled: true,
-            frozen_points: 0,
             frozen: ScratchColumn::new(
                 colored_frozen_rows_id(),
                 bodies.max(scratch_reserve_rows(size_of::<(u32, BodyState)>())),
@@ -1842,24 +1784,21 @@ impl ColoredSoftStepSolver {
     /// Builds the SoA [`ContactColumns`] in COLOR order from the graph's CSR,
     /// warm-SEEDS each point, and captures `vn_initial` (Phase O5).
     ///
-    /// Iterates colors `0..n_colors`; for each color the graph yields its
-    /// manifold indices in ascending order (D4); each manifold's points are
-    /// appended in point order. The result is one contiguous SoA span per color
-    /// (recorded in `color_offsets`). The same walk records each manifold's base
-    /// slot (in `manifold_base`) and its group boundary (`group_start` /
-    /// `color_group_start`, C1); the `canonical` index list is then emitted from
-    /// `manifold_base` so the warm store walks the points in canonical `(manifold,
-    /// point)` order regardless of the color layout (IM-2b) — no second walk.
+    /// First P-a (L11 D4), in stream order: this step's ordinals go to the warm
+    /// store's write side and every manifold's source run to `plan`
+    /// (`warm_records::plan_sources`). Then the color walk: colors `0..n_colors`;
+    /// for each color the graph yields its manifold indices in ascending order
+    /// (D4); each manifold's points are appended in point order, seeded from its
+    /// run by feature id. The result is one contiguous SoA span per color (recorded
+    /// in `color_offsets`). The same walk records each manifold's base slot (in
+    /// `manifold_base`, the store's view) and its group boundary (`group_start` /
+    /// `color_group_start`, C1).
     ///
     /// Mirrors the reference `build_constraints` per-point math: anchors relative
-    /// to each body's gather center, the degeneracy-safe tangent basis, the
-    /// per-point warm key (`pack` / `pack_sdf`), and the seeded accumulated
-    /// impulses (zero on a miss / when disabled).
+    /// to each body's gather center, the degeneracy-safe tangent basis, and the
+    /// seeded accumulated impulses (zero on a miss / when disabled).
     ///
-    /// W1/O1/O3 fold: the manifold-group boundaries (C1), the per-manifold base
-    /// slot, and the canonical `(manifold, point)` order are ALL recorded inside
-    /// this single append walk — there is no separate replay pass and no per-step
-    /// heap allocation (all scratch is capacity-reused).
+    /// No per-step heap allocation: all scratch is capacity-reused.
     fn build_columns(
         &mut self,
         manifolds: &[Manifold],
@@ -1875,17 +1814,18 @@ impl ColoredSoftStepSolver {
                 "invariant: the warm remap maps exactly the gathered rows"
             );
         }
-        // Disjoint-field borrows: `columns` is written while `bodies` /
-        // `warm_read` are read. Destructure `self` so the borrow checker sees the
+        // Disjoint-field borrows: `columns` is written while `bodies` / the warm
+        // read side are read. Destructure `self` so the borrow checker sees the
         // fields are distinct (a re-borrow alias through a method call would not).
         let Self {
             columns: cols,
             bodies: bodies_eff,
-            warm_read,
+            warm,
+            warm_cur,
+            warm_index,
             warm_start_enabled,
             warm_cursor,
             warm_stats,
-            frozen_points: carry_bound,
             counters,
             ..
         } = self;
@@ -1896,10 +1836,30 @@ impl ColoredSoftStepSolver {
         cols.begin_build();
 
         // Reused per-manifold base map (no `vec!` per step): base slot + live count
-        // recorded as each manifold is first appended, consumed below to emit the
-        // canonical order in manifold index ascending order (D4). `manifold_fill`
-        // reproduces `resize(n, (u32::MAX, 0))` on the address-stable column (O1).
+        // recorded as each manifold is first appended, the store's view of the
+        // solved slots (D3). `manifold_fill` reproduces `resize(n, (u32::MAX, 0))` on
+        // the address-stable column (O1).
         cols.manifold_fill(manifolds.len());
+
+        // P-a (D4): stream order. The write side takes this step's ordinals; every
+        // manifold's warm source run goes to `plan`. The read side is `warm[cur]`,
+        // the write side the other one — two elements of one array, borrowed apart.
+        let (read, write) = Self::warm_sides(warm, *warm_cur);
+        cols.plan_fill(manifolds.len());
+        if *warm_start_enabled {
+            write.resize(manifolds.len());
+        }
+        let plan_counts = warm_records::plan_sources(
+            manifolds,
+            remap,
+            *warm_start_enabled,
+            read,
+            write,
+            warm_index,
+            cols.plan.build_view().as_mut_slice(),
+        );
+        counters.plan(plan_counts);
+        let lookup = WarmLookup { read, index: warm_index };
 
         // The BodyEffective rows read by the per-point build are a SINGLE-THREADED
         // read here (the build runs before any parallel dispatch); take one read
@@ -1933,15 +1893,9 @@ impl ColoredSoftStepSolver {
                     continue;
                 }
                 let base = cols.len() as u32;
-                let (count, hits) = Self::push_manifold_points(
-                    cols,
-                    m,
-                    bodies,
-                    bodies_eff,
-                    warm_read,
-                    *warm_start_enabled,
-                    remap,
-                );
+                let run = cols.plan()[mi as usize];
+                let (count, hits) =
+                    Self::push_manifold_points(cols, m, bodies, bodies_eff, lookup, run);
                 point_hits += hits;
                 if *warm_start_enabled {
                     counters.miss(count - hits);
@@ -1964,15 +1918,6 @@ impl ColoredSoftStepSolver {
             cols.push_color_group_start((cols.group_start().len() - 1) as u32);
         }
 
-        // L11 C0: the stream-order view of this step's keys and lookups (a test-only
-        // walk; the method is empty in a shipping build).
-        counters.observe_stream(
-            manifolds,
-            remap,
-            *warm_start_enabled && !matches!(remap, RowRemap::Reset),
-            *warm_start_enabled,
-        );
-
         let translated = match remap {
             _ if !*warm_start_enabled => 0,
             RowRemap::Identity => seeded,
@@ -1990,49 +1935,35 @@ impl ColoredSoftStepSolver {
             remap_resets: warm_cursor.resets(),
         };
 
-        // Canonical `(manifold, point)` order for the IM-2b warm store — emitted
-        // from the base map recorded above, in ascending manifold index, WITHOUT a
-        // second color→manifold→point replay walk (W1/O1/O3 fold). The base map is
-        // read into a fixed-capacity stack-free pass; pull each `(base, count)` by
-        // value so no `&[_]` borrow into `cols` is held across the `push_canonical`.
-        let n_manifolds = cols.manifold_base().len();
-        for mi in 0..n_manifolds {
-            let (base, count) = cols.manifold_base()[mi];
-            if base == u32::MAX {
-                continue;
-            }
-            for p in 0..count {
-                cols.push_canonical(base + p);
-            }
-        }
-        debug_assert_eq!(
-            cols.canonical().len(),
-            cols.len(),
-            "invariant: canonical order must cover every built contact-point slot exactly once"
-        );
         debug_assert_eq!(
             cols.group_start().len() as u32,
             *cols.color_group_start().last().unwrap_or(&0) + 1,
             "invariant: the per-color group CSR must tile every manifold-group exactly once"
         );
+    }
 
-        *carry_bound = frozen_points;
+    /// The read side and the write side of the warm store: `warm[cur]` is read this
+    /// step, the other side written.
+    #[inline]
+    fn warm_sides(warm: &mut [WarmRecords; 2], cur: u8) -> (&WarmRecords, &mut WarmRecords) {
+        let [side0, side1] = warm;
+        if cur == 0 { (side0, side1) } else { (side1, side0) }
     }
 
     /// Appends one manifold's live points to the SoA columns (the per-point
     /// build, factored out so it borrows `cols` mutably without aliasing
-    /// `self.bodies` / `self.warm_read`). Returns the number of live points
-    /// appended (`0` when the manifold has no live point), so the caller can
+    /// `self.bodies` / the warm read side). Each point's seed comes from `run`, the
+    /// manifold's warm source (`plan`), by feature id. Returns the number of live
+    /// points appended (`0` when the manifold has no live point), so the caller can
     /// record the manifold-group's slot run (C1), and how many of them found a
-    /// warm entry (the [`WarmSeedStats::point_hits`] share).
+    /// stored point (the [`WarmSeedStats::point_hits`] share).
     fn push_manifold_points(
         cols: &mut ContactColumns,
         m: &Manifold,
         bodies: &[BodyState],
         bodies_eff: &[BodyEffective],
-        warm_read: &WarmStartTable,
-        warm_start_enabled: bool,
-        remap: RowRemap<'_>,
+        lookup: WarmLookup<'_>,
+        run: WarmRun,
     ) -> (u32, u32) {
         let count = m.count as usize;
         if count == 0 {
@@ -2054,13 +1985,7 @@ impl ColoredSoftStepSolver {
         let pa = bodies[ia].position;
         let pb = if b_is_sentinel { Vec3::ZERO } else { bodies[ib].position };
 
-        // Defect A (interim): the rows this manifold's bodies held when `warm_read` was
-        // keyed. The stored key stays in current rows; only the lookup is translated. On
-        // `Identity` it is `(a, b)` itself, and each point still packs its read key
-        // separately from its stored key. A disabled solver looks nothing up.
-        let lookup = if warm_start_enabled { remap.manifold_pair(m) } else { None };
-
-        // One single-thread build view over the 26 push-filled columns for the
+        // One single-thread build view over the 25 push-filled columns for the
         // whole manifold's points (the CSR / `manifold_base` columns are filled by
         // the caller, not here).
         let mut view = cols.build_view();
@@ -2074,17 +1999,15 @@ impl ColoredSoftStepSolver {
             let bb = if b_is_sentinel { &IMMOVABLE_AT_REST } else { &bodies_eff[ib] };
             let vn_initial = (bb.point_velocity(rb) - ba.point_velocity(ra)).dot(normal);
 
-            let (warm_key, read_key) = Self::point_keys(m, p, lookup);
-            let seed = if let Some(read_key) = read_key {
-                match warm_read.get(read_key) {
-                    Some(e) => {
-                        hits += 1;
-                        (e.normal_impulse, e.tangent_impulse[0], e.tangent_impulse[1])
-                    }
-                    None => (0.0, 0.0, 0.0),
+            // The seed: the last stored point of the manifold's run carrying this
+            // feature id (Lemma W), zero on a miss or when nothing was looked up (an
+            // empty run).
+            let seed = match lookup.seed(run, point_fid(m, p)) {
+                Some([n, t1, t2]) => {
+                    hits += 1;
+                    (n, t1, t2)
                 }
-            } else {
-                (0.0, 0.0, 0.0)
+                None => (0.0, 0.0, 0.0),
             };
 
             view.push_point(
@@ -2100,37 +2023,10 @@ impl ColoredSoftStepSolver {
                 ia as u32,
                 ib as u32,
                 b_is_sentinel,
-                warm_key,
                 vn_initial,
             );
         }
         (count as u32, hits)
-    }
-
-    /// Point `p` of manifold `m`'s warm keys: the STORE key, packed from the current
-    /// rows, and the READ key, packed from `lookup` (the rows the pair held when the
-    /// previous table was keyed, from [`RowRemap::manifold_pair`]; `None` when the pair
-    /// cannot be translated or nothing is looked up, which is then a miss).
-    ///
-    /// The one packing both the solved points ([`push_manifold_points`]) and the frozen
-    /// carry ([`carry_frozen`]) use, so the two paths cannot key a point differently.
-    ///
-    /// [`push_manifold_points`]: Self::push_manifold_points
-    /// [`carry_frozen`]: Self::carry_frozen
-    #[inline]
-    fn point_keys(m: &Manifold, p: usize, lookup: Option<(u32, u32)>) -> (u64, Option<u64>) {
-        let feature_id = m.points[p].feature_id;
-        if m.body_b == SDF_SENTINEL {
-            (
-                warm_start::pack_sdf(m.body_a, feature_id),
-                lookup.map(|(la, _)| warm_start::pack_sdf(BodyIndex(la), feature_id)),
-            )
-        } else {
-            (
-                warm_start::pack(m.body_a, m.body_b, feature_id),
-                lookup.map(|(la, lb)| warm_start::pack(BodyIndex(la), BodyIndex(lb), feature_id)),
-            )
-        }
     }
 
     /// Whether a manifold belongs to a FROZEN island this frame (plan O8) — the
@@ -3113,9 +3009,11 @@ impl ColoredSoftStepSolver {
     ///   points are solved in the SAME sequence as single-threaded.
     /// - **Barrier between colors:** the scope-Drop join completes color `c` before
     ///   color `c + 1` starts (cross-color Gauss-Seidel order is fixed).
-    /// - **Worker-count-independent warm store:** the converged impulses are stored
-    ///   in CANONICAL `(manifold, point)` order after the solve (IM-2b), so next
-    ///   frame's seeds do not depend on the dispatch / thread count.
+    /// - **Worker-count-independent warm store:** after the solve each manifold's
+    ///   converged impulses are written to the warm store's record for its MANIFOLD
+    ///   INDEX ([`store_and_swap`](Self::store_and_swap), L11 D3) — a layout that is
+    ///   a pure function of the stream, so next step's seeds do not depend on the
+    ///   dispatch / thread count.
     ///
     /// Hence the per-body result — and the full body snapshot — is BIT-FOR-BIT
     /// identical to the single-threaded colored solve for ANY worker count. Any
@@ -3493,127 +3391,76 @@ impl ColoredSoftStepSolver {
         }
     }
 
-    /// Stores every contact point's converged impulses into the freshly-zeroed
-    /// `write` table in CANONICAL `(manifold, point)` order (IM-2b), then swaps
-    /// `read` ↔ `write`.
+    /// The store (L11 D3): writes every manifold's record into the warm store's
+    /// write side by manifold index, then swaps the sides.
     ///
-    /// The store order is `columns.canonical` — the deterministic
-    /// manifold-then-point sequence — NOT the color/slot order the solve used.
-    /// The open-addressed table's slot layout depends on the insertion sequence (a
-    /// colliding key takes the next free slot), so a canonical store keeps the table
-    /// bit-identical whatever the color layout (and, in [O6], the thread count) —
-    /// the load-bearing determinism guarantee. Lookup values alone would not need
-    /// it: for distinct keys they depend only on the key set.
+    /// In manifold order, from `manifold_base`: a SOLVED manifold's record is its
+    /// converged impulses from the slots `[base, base + count)` beside its feature
+    /// ids (C1 reads them from the `Manifold` here; D3's fill pre-write of the
+    /// record's shape lands with the C2 layout, so the store touches only the
+    /// impulses); a manifold FROZEN this step (B1) carries — each of its live points
+    /// looked up by feature id in the read side through the run `plan_sources` found
+    /// for it, the hits compacted into the record, a miss dropping its point (a pair
+    /// whose rows cannot be translated, a `Reset`, a feature id that changed) — so
+    /// the island wakes with the impulses it froze with; any other manifold stores
+    /// an empty record. The layout is a pure function of the stream and the solved
+    /// values, never of the color layout or (in [O6]) the thread count, and the
+    /// write side's keys were written in stream order by `plan_sources`.
     ///
-    /// Then, while any manifold is frozen this step, it CARRIES the frozen points'
-    /// entries (B1): a frozen manifold is not solved, so it has no converged impulse
-    /// to store, and without the carry the rebuild would drop its entries and the
-    /// island would wake cold. [`carry_frozen`](Self::carry_frozen) re-inserts each
-    /// one from `warm_read`, read through `remap` and stored under this gather's rows,
-    /// after the solved points and in ascending manifold order. Frozen and solved keys
-    /// are disjoint (a dynamic row belongs to one island and every key names it), so
-    /// the carry never overwrites a solved entry. The table is sized for both sets.
-    ///
-    /// After the swap it stamps the warm cursor with `rows`: `warm_read` has just been
-    /// rebuilt from this step's columns and carried entries, keyed by this gather's rows,
-    /// and this is its only writer (defect A, interim). A disabled solver neither stores
-    /// nor stamps.
-    ///
-    /// `remap` is the classification `build_columns` read the table with this step; the
-    /// cursor has not been stamped since, so it still describes `warm_read`.
+    /// After the swap it stamps the warm cursor with `rows`: the read side has just
+    /// been written from this step's columns and carried records, keyed by this
+    /// gather's rows, and this is its only writer (defect A, interim). A disabled
+    /// solver neither stores nor stamps.
     ///
     /// [O6]: https://github.com/bluesteelll/boyko-engine
-    fn store_and_swap(&mut self, rows: &RowIdentity, manifolds: &[Manifold], remap: RowRemap<'_>) {
+    fn store_and_swap(&mut self, rows: &RowIdentity, manifolds: &[Manifold]) {
         if !self.warm_start_enabled {
             return;
         }
         let cols = &self.columns;
-        // `+ frozen_points`: the carry inserts up to that many more entries, and islands
-        // that froze on different steps would otherwise overflow a table sized from the
-        // awake count alone (a full table loops forever in `insert` in release).
-        self.warm_write.rebuild(cols.len() + self.frozen_points as usize);
-        for k in 0..cols.canonical().len() {
-            let i = cols.canonical()[k] as usize;
-            self.warm_write.insert(
-                cols.warm_key(i),
-                cols.normal_impulse(i),
-                [cols.tangent1_impulse(i), cols.tangent2_impulse(i)],
-            );
-        }
+        let (read, write) = Self::warm_sides(&mut self.warm, self.warm_cur);
+        let lookup = WarmLookup { read, index: &self.warm_index };
+        let manifold_base = cols.manifold_base();
+        let plan = cols.plan();
+        debug_assert!(
+            manifold_base.len() == manifolds.len() && plan.len() == manifolds.len(),
+            "invariant: manifold_base and plan hold one row per manifold of this step"
+        );
+        let impulses = [
+            cols.normal_impulse.as_read_slice(),
+            cols.tangent1_impulse.as_read_slice(),
+            cols.tangent2_impulse.as_read_slice(),
+        ];
         let mut carry_hits = 0u32;
-        if self.frozen_points != 0 {
-            carry_hits = Self::carry_frozen(
-                &self.warm_read,
-                &mut self.warm_write,
-                cols.manifold_base(),
-                manifolds,
-                remap,
-            );
-            self.warm_stats.carry_hits = carry_hits;
-            self.counters.carry(carry_hits);
+        {
+            let mut recs_w = write.recs_mut();
+            let recs_w = recs_w.as_mut_slice();
+            debug_assert_eq!(recs_w.len(), manifolds.len(), "invariant: one record per manifold");
+            for (mi, (m, &(base, count))) in manifolds.iter().zip(manifold_base).enumerate() {
+                recs_w[mi] = if base != u32::MAX {
+                    WarmRecord::solved(m, base as usize, count as usize, impulses)
+                } else if count != 0 {
+                    debug_assert_eq!(
+                        count,
+                        u32::from(m.count),
+                        "invariant: a carry tag holds its manifold's live-point count"
+                    );
+                    let (rec, hits) = lookup.carry(plan[mi], m, count as usize);
+                    carry_hits += hits;
+                    rec
+                } else {
+                    WarmRecord::EMPTY
+                };
+            }
         }
+        self.warm_stats.carry_hits = carry_hits;
+        self.counters.carry(carry_hits);
         debug_assert!(
-            carry_hits <= self.frozen_points,
-            "invariant: the carry re-inserts at most the frozen manifolds' live points"
+            carry_hits <= self.warm_stats.carry_points,
+            "invariant: the carry keeps at most the frozen manifolds' live points"
         );
-        debug_assert!(
-            2 * (cols.len() + carry_hits as usize) <= self.warm_write.slot_len(),
-            "invariant: the warm table's load stays ≤ 0.5 after the store and the carry"
-        );
-        core::mem::swap(&mut self.warm_read, &mut self.warm_write);
+        self.warm_cur ^= 1;
         self.warm_cursor.stamp(rows);
-    }
-
-    /// The frozen half of the warm store (B1): for each manifold tagged frozen in
-    /// `manifold_base` (`(u32::MAX, n ≥ 1)`), in ascending manifold order, looks each
-    /// live point up in `warm_read` through `remap` and re-inserts a found entry into
-    /// `warm_write` under its current-row key. Returns the number re-inserted.
-    ///
-    /// A miss drops the entry, as on the solved path: a pair whose rows cannot be
-    /// translated (a row-order flip, a `Reset`) or a point whose feature id changed. The
-    /// inputs are the serial freeze set, the manifold list and the previous table, so
-    /// the result does not depend on the worker count.
-    ///
-    /// Out of line: it runs at most once per step, and keeping it out of the store
-    /// keeps that common body small.
-    #[inline(never)]
-    fn carry_frozen(
-        warm_read: &WarmStartTable,
-        warm_write: &mut WarmStartTable,
-        manifold_base: &[(u32, u32)],
-        manifolds: &[Manifold],
-        remap: RowRemap<'_>,
-    ) -> u32 {
-        debug_assert_eq!(
-            manifold_base.len(),
-            manifolds.len(),
-            "invariant: manifold_base holds one row per manifold of this step"
-        );
-        let mut hits = 0u32;
-        for (m, &(base, n)) in manifolds.iter().zip(manifold_base) {
-            if base != u32::MAX || n == 0 {
-                continue;
-            }
-            debug_assert_eq!(
-                n,
-                u32::from(m.count),
-                "invariant: a carry tag holds its manifold's live-point count"
-            );
-            let lookup = remap.manifold_pair(m);
-            if lookup.is_none() {
-                continue;
-            }
-            for p in 0..n as usize {
-                let (store_key, read_key) = Self::point_keys(m, p, lookup);
-                if let Some(read_key) = read_key
-                    && let Some(e) = warm_read.get(read_key)
-                {
-                    warm_write.insert(store_key, e.normal_impulse, e.tangent_impulse);
-                    hits += 1;
-                }
-            }
-        }
-        hits
     }
 
     /// Writes the solved velocities back into the gather snapshot and flags every
@@ -3667,9 +3514,10 @@ impl ColoredSoftStepSolver {
     /// friction sweep (here: a Gauss-Seidel sweep ACROSS colors via
     /// [`solve_all_colors`](Self::solve_all_colors)), position integrate + the
     /// inertia refresh, then the bias-free relax passes. After the substeps: the
-    /// restitution pass, the canonical-order warm store (IM-2b), and the
-    /// write-back. The integrate / inertia kernels are the SAME `simd::*`
-    /// helpers the reference calls (no duplicated inertia math).
+    /// restitution pass, the warm store's write by manifold index
+    /// ([`store_and_swap`](Self::store_and_swap), L11 D3), and the write-back. The
+    /// integrate / inertia kernels are the SAME `simd::*` helpers the reference
+    /// calls (no duplicated inertia math).
     ///
     /// `solve` (the [`RigidSolver`] entry) cannot reach the graph through the
     /// trait signature, so the [`physics_solve_colored`](crate::systems::physics_solve_colored)
@@ -3755,11 +3603,11 @@ impl ColoredSoftStepSolver {
         // freeze; `None` when sleeping is off so the path is byte-identical.
         let sleep_view: Option<&IslandSleep> = sleep.as_deref();
 
-        let warm_remap = {
+        {
             let _z = zone!(PHYS_SOLVE_BUILD);
             self.build_bodies(scratch.bodies());
             // Warm start is classified only while it is enabled: a disabled solver never
-            // reads or stores the table, so `Identity` is a placeholder that takes no
+            // reads or stores the records, so `Identity` is a placeholder that takes no
             // per-manifold branch, and its cursor never counts a phantom `Reset`.
             let warm_remap = if self.warm_start_enabled {
                 self.warm_cursor.remap(&scratch.rows)
@@ -3767,8 +3615,7 @@ impl ColoredSoftStepSolver {
                 RowRemap::Identity
             };
             self.build_columns(manifolds, graph, scratch.bodies(), sleep_view, warm_remap);
-            warm_remap
-        };
+        }
         // L11 C0: the setup digest is taken here, over the seeds the sweeps have not
         // yet touched; the step's warm stats are folded in after the store.
         #[cfg(test)]
@@ -3819,7 +3666,8 @@ impl ColoredSoftStepSolver {
         let use_simd_solve = config.simd_solve;
         // O6: parallel per-color dispatch when opted in. The result is bit-identical
         // to the single-threaded colored solve for any worker count (disjoint-body
-        // groups + canonical warm store); when off it is BYTE-IDENTICAL to O5.
+        // groups + a warm store written by manifold index); when off it is
+        // BYTE-IDENTICAL to O5.
         //
         // P2 whole-solve dispatch gate: even with `parallel_solve` opted in, a step
         // whose WIDEST COLOR cannot clear the solver's own per-color
@@ -3942,11 +3790,11 @@ impl ColoredSoftStepSolver {
             );
         }
 
-        // IM-2b: store converged impulses in canonical order, carry the frozen
-        // manifolds' entries (B1), then swap.
+        // D3: store every manifold's record by index, carry the frozen manifolds'
+        // points (B1), then swap the sides.
         {
             let _z = zone!(PHYS_STORE);
-            self.store_and_swap(&scratch.rows, manifolds, warm_remap);
+            self.store_and_swap(&scratch.rows, manifolds);
         }
         #[cfg(test)]
         {

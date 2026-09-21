@@ -1,0 +1,540 @@
+//! The colored solver's warm store (L11 D1–D3): one 64 B record per manifold of
+//! the stored step, indexed by that step's manifold index, beside a hot column of
+//! stream ordinals. The next step finds each manifold's source record by a
+//! merge-join over the ordinals (D2) and matches points by feature id inside the
+//! record. There is no hash: the lookup of a sorted stream against a sorted store
+//! is one compare per manifold, and the store is a write by index.
+//!
+//! # The layout
+//!
+//! A [`WarmRecords`] is one side of the solver's double buffer: `keys[mi]` is the
+//! ordinal ([`ord`]) of manifold `mi`'s pair in the rows of the step that wrote it,
+//! `recs[mi]` its stored points (the three accumulated impulses and the feature id
+//! of each), and `strict` whether `keys` is strictly increasing — which it is for
+//! every stream the narrowphase emits (body-body pairs sorted by `(a, b)`, then the
+//! SDF manifolds in row order). A hand-built stream may be unsorted or repeat a
+//! pair; the store records that, and the next step's lookups then go through the
+//! cold sorted [`WarmIndex`] instead of the cursor search.
+//!
+//! # The lookup (D2, ruling W1)
+//!
+//! [`plan_sources`] runs once per step in stream order: it writes this step's
+//! ordinals into the write side and, for every manifold, searches the read side for
+//! the ordinal of the rows its pair held when the read side was written
+//! ([`RowRemap::manifold_pair`]). The result is a [`WarmRun`]: the whole run of
+//! read-side positions whose key equals the translated ordinal. On a strict read
+//! side that run is one record (or empty); on a non-strict one it is a run of
+//! cold-index positions, which may name several records. The seed of a point and
+//! the B1 carry both go through [`WarmLookup::seed`], the single routine that walks
+//! a run: records by descending manifold index, points last to first, first
+//! feature-id match wins.
+//!
+//! # Lemma W (why the values equal the per-point table's)
+//!
+//! The table this replaces held one entry per point, keyed by
+//! `pack(a, b, fid & 0xFFFF)`, and its value for a key was the last insert of that
+//! key in the order "solved manifolds ascending, then frozen manifolds ascending,
+//! points in point order within a manifold". Five facts make the record lookup
+//! return the same value and the same hit count:
+//!
+//! 1. `recs[mi]` holds exactly manifold `mi`'s inserts, in point order (the store
+//!    writes them from the solved slots; the carry compacts the hits in point
+//!    order).
+//! 2. `ord` is injective over pairs, so a run of equal keys is exactly the set of
+//!    manifolds that keyed the same pair.
+//! 3. Manifolds with equal pairs share an island, so they are all frozen or all
+//!    solved; within one class ascending `mi` is the insert order, so "descending
+//!    `mi`, last point first" walks the inserts of a key in reverse and the first
+//!    feature-id match is the last insert.
+//! 4. A carried point is the value the previous lookup returned, by induction on
+//!    steps.
+//! 5. The row translation is the table's own (`manifold_pair`); an untranslatable
+//!    pair is a miss on both sides.
+
+use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
+
+use crate::manifold::{Manifold, SDF_SENTINEL};
+use crate::math::MAX_CONTACT_POINTS;
+use crate::row_identity::RowRemap;
+use crate::scratch_ids::{register_scratch_layouts, scratch_reserve_rows};
+
+/// The feature-id bits a record keeps: the field width of the per-point table's
+/// `pack`, so two points of one manifold that collide under the table's key collide
+/// under the record's feature id as well.
+pub(crate) const FEATURE_ID_MASK: u32 = 0xFFFF;
+
+/// The stored feature id of point `p` of `m` (its feature id under
+/// [`FEATURE_ID_MASK`]).
+#[inline]
+pub(crate) fn point_fid(m: &Manifold, p: usize) -> u16 {
+    let f = m.points[p].feature_id;
+    debug_assert!(
+        f <= FEATURE_ID_MASK,
+        "invariant: a feature id fits in 16 bits"
+    );
+    // Truncation is the point: the low 16 bits are the stored id.
+    (f & FEATURE_ID_MASK) as u16
+}
+
+/// L10's D6 ordinal of a manifold's pair, monotone with the sorted stream order:
+/// the body-body stream sorts by `(a, b)`, and the SDF manifolds (`body_b` the
+/// sentinel) follow it in row order. Injective over pairs: bit 63 separates the two
+/// classes, and a row never reaches 2³¹.
+#[inline]
+pub(crate) fn ord(a: u32, b: u32) -> u64 {
+    debug_assert!(a >> 31 == 0, "invariant: a row index stays below 2^31");
+    if b == SDF_SENTINEL.0 {
+        (1u64 << 63) | u64::from(a)
+    } else {
+        (u64::from(a) << 32) | u64::from(b)
+    }
+}
+
+/// One manifold's stored points: the accumulated impulses of each, its feature id,
+/// and how many are stored. One cache line; index = the manifold index of the
+/// writing step.
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WarmRecord {
+    /// Accumulated normal impulse per stored point, point order.
+    n: [f32; MAX_CONTACT_POINTS],
+    /// Accumulated first-tangent impulse per stored point.
+    t1: [f32; MAX_CONTACT_POINTS],
+    /// Accumulated second-tangent impulse per stored point.
+    t2: [f32; MAX_CONTACT_POINTS],
+    /// Feature id per stored point ([`point_fid`]).
+    fid: [u16; MAX_CONTACT_POINTS],
+    /// Stored points `0..=MAX_CONTACT_POINTS`. A carried record holds its hits only,
+    /// compacted.
+    count: u8,
+    /// Zero, so two records with equal contents are byte-equal.
+    _pad: [u8; 7],
+}
+
+const _: () = assert!(
+    size_of::<WarmRecord>() == 64 && align_of::<WarmRecord>() == 64,
+    "a warm record is exactly one 64 B cache line"
+);
+
+const _: () = assert!(
+    MAX_CONTACT_POINTS == 4,
+    "the record's point arrays are sized for the manifold's four points"
+);
+
+impl WarmRecord {
+    /// A record with no stored point, every field zero.
+    pub(crate) const EMPTY: Self = Self {
+        n: [0.0; MAX_CONTACT_POINTS],
+        t1: [0.0; MAX_CONTACT_POINTS],
+        t2: [0.0; MAX_CONTACT_POINTS],
+        fid: [0; MAX_CONTACT_POINTS],
+        count: 0,
+        _pad: [0; 7],
+    };
+
+    /// The record of a SOLVED manifold: its `count` points' feature ids beside the
+    /// converged impulses of slots `base..base + count` of the three impulse columns.
+    #[inline]
+    pub(crate) fn solved(m: &Manifold, base: usize, count: usize, impulses: [&[f32]; 3]) -> Self {
+        debug_assert!(
+            count <= MAX_CONTACT_POINTS,
+            "invariant: a manifold has at most four points"
+        );
+        let mut rec = Self::EMPTY;
+        for p in 0..count {
+            let s = base + p;
+            rec.fid[p] = point_fid(m, p);
+            rec.n[p] = impulses[0][s];
+            rec.t1[p] = impulses[1][s];
+            rec.t2[p] = impulses[2][s];
+        }
+        rec.count = count as u8;
+        rec
+    }
+
+    /// Appends one point (the carry's compaction).
+    #[inline]
+    fn push(&mut self, fid: u16, seed: [f32; 3]) {
+        let j = self.count as usize;
+        debug_assert!(
+            j < MAX_CONTACT_POINTS,
+            "invariant: a record holds at most four points"
+        );
+        self.fid[j] = fid;
+        self.n[j] = seed[0];
+        self.t1[j] = seed[1];
+        self.t2[j] = seed[2];
+        self.count = (j + 1) as u8;
+    }
+
+    /// Stored points (the G2 / G8 gates read it).
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn count(&self) -> u8 {
+        self.count
+    }
+
+    /// The stored impulses of the LAST stored point whose feature id is `fid`, or
+    /// `None` (Lemma W: the last insert of a key wins).
+    #[inline]
+    fn seed_of(&self, fid: u16) -> Option<[f32; 3]> {
+        let live = &self.fid[..self.count as usize];
+        live.iter()
+            .rposition(|&f| f == fid)
+            .map(|p| [self.n[p], self.t1[p], self.t2[p]])
+    }
+}
+
+/// Where a manifold's warm seeds come from (D2, ruling W1): the run `[lo, hi)` of
+/// read-side positions whose key is the manifold's translated ordinal — record
+/// indices on a strict read side (one at most), cold-index positions otherwise. A
+/// miss is the empty run.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WarmRun {
+    /// First position of the run.
+    pub(crate) lo: u32,
+    /// One past the last position of the run.
+    pub(crate) hi: u32,
+}
+
+impl WarmRun {
+    /// No source: the seeds are zero and the carry drops every point.
+    pub(crate) const MISS: Self = Self { lo: 0, hi: 0 };
+}
+
+const _: () = assert!(size_of::<WarmRun>() == 8, "a plan entry is 8 B");
+
+/// The strict-side search's result: the run, and whether the cursor could not
+/// gallop forward to it (a descent of the translated ordinals, served by a binary
+/// search over the prefix).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Found {
+    /// The run holding the key (one record or empty).
+    pub(crate) run: WarmRun,
+    /// Whether the search went backward.
+    pub(crate) backward: bool,
+}
+
+/// What [`plan_sources`] counted for the G1 anti-vacuity counters.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PlanCounts {
+    /// Lookups the strict-side cursor served by a backward binary search.
+    pub(crate) backward_searches: u32,
+    /// Whether the read side was non-strict and the cold index was built.
+    pub(crate) cold_index: bool,
+}
+
+/// One side of the colored solver's double-buffered warm store.
+pub(crate) struct WarmRecords {
+    /// HOT: the searched column. `keys[mi]` is [`ord`] of manifold `mi`'s pair in the
+    /// rows of the step that wrote it.
+    keys: ScratchColumn<u64>,
+    /// Read on a hit, written by the store: `recs[mi]` is manifold `mi`'s points.
+    recs: ScratchColumn<WarmRecord>,
+    /// Whether `keys` is strictly increasing (the cursor search applies); else the
+    /// cold index serves the lookups. `true` for an empty side.
+    strict: bool,
+}
+
+impl WarmRecords {
+    /// An empty side pre-sized for `manifolds` records, its two columns under
+    /// `keys_id` and `recs_id` (two ids, so the two columns keep distinct cache-set
+    /// staggers). Registers the scratch layouts (idempotent) first.
+    pub(crate) fn with_capacity(
+        keys_id: ComponentId,
+        recs_id: ComponentId,
+        manifolds: usize,
+    ) -> Self {
+        register_scratch_layouts();
+        Self {
+            keys: ScratchColumn::new(
+                keys_id,
+                manifolds.max(scratch_reserve_rows(size_of::<u64>())),
+            ),
+            recs: ScratchColumn::new(
+                recs_id,
+                manifolds.max(scratch_reserve_rows(size_of::<WarmRecord>())),
+            ),
+            strict: true,
+        }
+    }
+
+    /// Stored manifolds (the G2 / G8 gates read it).
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Whether the keys are strictly increasing.
+    #[inline]
+    pub(crate) fn strict(&self) -> bool {
+        self.strict
+    }
+
+    /// The key column.
+    #[inline]
+    pub(crate) fn keys(&self) -> &[u64] {
+        self.keys.as_read_slice()
+    }
+
+    /// The records.
+    #[inline]
+    pub(crate) fn recs(&self) -> &[WarmRecord] {
+        self.recs.as_read_slice()
+    }
+
+    /// Sizes both columns to exactly `n` manifolds for a step that writes this side
+    /// by index. Fills only on growth (O(1) in the steady state); every entry is then
+    /// overwritten by [`plan_sources`] (the keys) and the store (the records).
+    pub(crate) fn resize(&mut self, n: usize) {
+        self.keys.build_view().resize(n, 0);
+        self.recs.build_view().resize(n, WarmRecord::EMPTY);
+    }
+
+    /// The key column for writing by index (after [`resize`](Self::resize)).
+    #[inline]
+    pub(crate) fn keys_mut(&mut self) -> ScratchBuildView<'_, u64> {
+        self.keys.build_view()
+    }
+
+    /// The records for writing by index (after [`resize`](Self::resize)).
+    #[inline]
+    pub(crate) fn recs_mut(&mut self) -> ScratchBuildView<'_, WarmRecord> {
+        self.recs.build_view()
+    }
+
+    /// Records whether the keys written this step are strictly increasing.
+    #[inline]
+    pub(crate) fn set_strict(&mut self, strict: bool) {
+        self.strict = strict;
+    }
+
+    /// D2's search on a STRICT read side. The cursor sits after the last result, so
+    /// every key before it is at most the last key looked up: a key above the key
+    /// just before the cursor lies at or after the cursor and is found by galloping
+    /// forward; a key at or below it (a descent of the translated ordinals) lies
+    /// before the cursor and is found by a binary search over `[0, cursor)`, which
+    /// the result reports. The cursor then moves past the hit, or to the insertion
+    /// point on a miss. A few compares on the steady-state Identity step, where every
+    /// lookup is the key at the cursor.
+    #[inline]
+    pub(crate) fn find(&self, cursor: &mut usize, key: u64) -> Found {
+        debug_assert!(
+            self.strict,
+            "invariant: the cursor search serves strict read sides only"
+        );
+        let keys = self.keys.as_read_slice();
+        let len = keys.len();
+        let cur = *cursor;
+        let (i, backward) = if cur == 0 || keys[cur - 1] < key {
+            // Gallop for the first position at or above `key`: every index below `lo`
+            // holds a smaller key; the stride doubles until a probe reaches `key` or
+            // the end, and the last bracket is bisected.
+            let mut lo = cur;
+            let mut hi = cur;
+            let mut step = 1usize;
+            while hi < len && keys[hi] < key {
+                lo = hi + 1;
+                hi += step;
+                step <<= 1;
+            }
+            let hi = hi.min(len);
+            (lo + keys[lo..hi].partition_point(|&k| k < key), false)
+        } else {
+            (keys[..cur].partition_point(|&k| k < key), true)
+        };
+        if i < len && keys[i] == key {
+            *cursor = i + 1;
+            Found {
+                run: WarmRun {
+                    lo: i as u32,
+                    hi: i as u32 + 1,
+                },
+                backward,
+            }
+        } else {
+            *cursor = i;
+            Found {
+                run: WarmRun::MISS,
+                backward,
+            }
+        }
+    }
+}
+
+/// The cold sorted index of a NON-STRICT read side: `(key, mi)` pairs sorted, so an
+/// equal-key run is contiguous and ascending in `mi`. Built once per step that looks
+/// such a side up (hand-built streams only), in place, no heap.
+pub(crate) struct WarmIndex {
+    /// The sorted pairs.
+    sorted: ScratchColumn<(u64, u32)>,
+}
+
+impl WarmIndex {
+    /// An empty index pre-sized for `manifolds` pairs under `id`.
+    pub(crate) fn with_capacity(id: ComponentId, manifolds: usize) -> Self {
+        register_scratch_layouts();
+        Self {
+            sorted: ScratchColumn::new(
+                id,
+                manifolds.max(scratch_reserve_rows(size_of::<(u64, u32)>())),
+            ),
+        }
+    }
+
+    /// Rebuilds the index over `keys`.
+    pub(crate) fn build(&mut self, keys: &[u64]) {
+        let mut view = self.sorted.build_view();
+        view.resize(keys.len(), (0, 0));
+        let sorted = view.as_mut_slice();
+        for (i, (&k, e)) in keys.iter().zip(sorted.iter_mut()).enumerate() {
+            *e = (k, i as u32);
+        }
+        // Tuple order: by key, then by manifold index — the run of a key is ascending
+        // in `mi`, which the lookup walks in reverse. Unstable is exact here (the
+        // pairs are distinct), and it is the in-place sort.
+        sorted.sort_unstable();
+    }
+
+    /// The run of index positions whose key is `key`, [`WarmRun::MISS`] when none.
+    #[inline]
+    pub(crate) fn run(&self, key: u64) -> WarmRun {
+        let sorted = self.sorted.as_read_slice();
+        let lo = sorted.partition_point(|e| e.0 < key);
+        let hi = lo + sorted[lo..].partition_point(|e| e.0 == key);
+        if lo == hi {
+            WarmRun::MISS
+        } else {
+            WarmRun {
+                lo: lo as u32,
+                hi: hi as u32,
+            }
+        }
+    }
+
+    /// The sorted pairs.
+    #[inline]
+    pub(crate) fn sorted(&self) -> &[(u64, u32)] {
+        self.sorted.as_read_slice()
+    }
+}
+
+/// The read side of a step, with the cold index that serves it when it is not
+/// strict: the ONE lookup surface both the seed of a solved point and the B1 carry
+/// go through (ruling W1).
+#[derive(Clone, Copy)]
+pub(crate) struct WarmLookup<'a> {
+    /// The records the previous store wrote.
+    pub(crate) read: &'a WarmRecords,
+    /// The cold index over `read`'s keys, built by [`plan_sources`] when `read` is
+    /// not strict.
+    pub(crate) index: &'a WarmIndex,
+}
+
+impl WarmLookup<'_> {
+    /// The stored impulses for feature `fid` inside `run`: records by descending
+    /// manifold index, points last to first, the first match wins (Lemma W). `None`
+    /// when no stored point of the run carries `fid` (an empty run misses at once).
+    #[inline]
+    pub(crate) fn seed(self, run: WarmRun, fid: u16) -> Option<[f32; 3]> {
+        let recs = self.read.recs();
+        for pos in (run.lo..run.hi).rev() {
+            let mi = if self.read.strict() {
+                pos as usize
+            } else {
+                self.index.sorted()[pos as usize].1 as usize
+            };
+            if let Some(seed) = recs[mi].seed_of(fid) {
+                return Some(seed);
+            }
+        }
+        None
+    }
+
+    /// The record of a FROZEN manifold (B1): each of its `count` points looked up by
+    /// feature id through [`seed`](Self::seed); the hits compact into the record in
+    /// point order, a miss drops its point. Returns the record and the hit count.
+    pub(crate) fn carry(self, run: WarmRun, m: &Manifold, count: usize) -> (WarmRecord, u32) {
+        let mut rec = WarmRecord::EMPTY;
+        for p in 0..count {
+            let fid = point_fid(m, p);
+            if let Some(seed) = self.seed(run, fid) {
+                rec.push(fid, seed);
+            }
+        }
+        let hits = u32::from(rec.count);
+        (rec, hits)
+    }
+}
+
+/// P-a (D4): the stream-order pass of the build. Writes every manifold's ordinal
+/// into `write` (and its strictness), and the source run of every manifold into
+/// `plan[mi]` from `read` through `remap`. With warm start disabled nothing is
+/// written to `write` and every run is a miss; on a `Reset` the ordinals are still
+/// written (the store follows) and every run is a miss without a search. Builds
+/// `index` first when `read` is not strict and is looked up.
+///
+/// `plan` and `write` must be sized for `manifolds.len()` entries.
+pub(crate) fn plan_sources(
+    manifolds: &[Manifold],
+    remap: RowRemap<'_>,
+    warm_start_enabled: bool,
+    read: &WarmRecords,
+    write: &mut WarmRecords,
+    index: &mut WarmIndex,
+    plan: &mut [WarmRun],
+) -> PlanCounts {
+    debug_assert_eq!(
+        plan.len(),
+        manifolds.len(),
+        "invariant: one plan entry per manifold"
+    );
+    let mut counts = PlanCounts::default();
+    if !warm_start_enabled {
+        plan.fill(WarmRun::MISS);
+        return counts;
+    }
+    let looks_up = !matches!(remap, RowRemap::Reset);
+    if looks_up && !read.strict() {
+        index.build(read.keys());
+        counts.cold_index = true;
+    }
+    let mut strict = true;
+    {
+        let mut keys_w = write.keys_mut();
+        let keys_w = keys_w.as_mut_slice();
+        debug_assert_eq!(
+            keys_w.len(),
+            manifolds.len(),
+            "invariant: one key per manifold"
+        );
+        let mut prev = 0u64;
+        let mut cursor = 0usize;
+        for (mi, m) in manifolds.iter().enumerate() {
+            let key = ord(m.body_a.0, m.body_b.0);
+            strict &= mi == 0 || key > prev;
+            prev = key;
+            keys_w[mi] = key;
+            // `manifold_pair` is `None` on a `Reset` and for an untranslatable pair:
+            // both miss without a search.
+            plan[mi] = match remap.manifold_pair(m) {
+                Some((la, lb)) => {
+                    let lookup = ord(la, lb);
+                    if read.strict() {
+                        let found = read.find(&mut cursor, lookup);
+                        counts.backward_searches += u32::from(found.backward);
+                        found.run
+                    } else {
+                        index.run(lookup)
+                    }
+                }
+                None => WarmRun::MISS,
+            };
+        }
+    }
+    write.set_strict(strict);
+    counts
+}

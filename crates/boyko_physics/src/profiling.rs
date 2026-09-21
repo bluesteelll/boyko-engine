@@ -30,7 +30,7 @@
 //! | [`PHYS_COLOR_WIDE`] | one color of at least [`WIDE_COLOR_MIN_SLOTS`] slots, in a sweep | wide colors × sweeps |
 //! | [`PHYS_COLOR_NARROW`] | one color below it, in a sweep | narrow colors × sweeps |
 //! | [`PHYS_RESTITUTION`] | the post-loop restitution pass | 1 |
-//! | [`PHYS_STORE`] | the canonical warm store (and the frozen carry) + swap | 1 |
+//! | [`PHYS_STORE`] | the warm store's write by manifold index (and the frozen carry) + swap | 1 |
 //! | [`PHYS_WRITE_BACK`] | the velocity write-back | 1 |
 //! | [`PHYS_SLEEP_BEGIN`] | `IslandSleep::begin_step` | 1, sleeping on only |
 //! | [`PHYS_SLEEP_FREEZE`] | the frozen-row capture, then the restore | 2, sleeping on only |

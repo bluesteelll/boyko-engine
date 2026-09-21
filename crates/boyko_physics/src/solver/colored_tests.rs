@@ -200,7 +200,8 @@
     #[test]
     fn colored_solve_is_run_to_run_bit_identical() {
         // The same scene solved twice must produce bit-identical body state — the
-        // colored partition + sweep + canonical warm store are deterministic.
+        // colored partition + sweep + warm store (a write by manifold index) are
+        // deterministic.
         let make = || {
             vec![
                 dyn_sphere(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.5, 0.0),
@@ -343,9 +344,6 @@
             }
         }
         assert_eq!(box_group_len, Some(4), "the 4-point box manifold forms ONE 4-slot group");
-
-        // Canonical order still covers every slot exactly once.
-        assert_eq!(cols.canonical().len(), cols.len(), "canonical covers every slot");
     }
 
     // ── Tester additions (Phase O5 formal gates) ─────────────────────────────
@@ -353,7 +351,7 @@
     // These extend the dev's stand-in sanity tests into the exhaustive O5 gates.
     // They live in the lib test module because the rigorous group-CSR tiling gate
     // (Gate 4) needs access to the PRIVATE `ContactColumns` fields (`group_start`,
-    // `color_group_start`, `color_offsets`, `body_a`/`body_b`, `canonical`). They
+    // `color_group_start`, `color_offsets`, `body_a`/`body_b`). They
     // touch only `Vec` scratch (no pool, no int-to-ptr), so they run native AND
     // under `cargo miri test -p boyko-physics --lib` (Gate 7).
 
@@ -438,7 +436,7 @@
     /// (`color_group_start` → `group_start`) must TILE each color's slot span
     /// EXACTLY — no gap, no overlap, every group non-empty and contiguous; every
     /// slot in a group shares the SAME body pair; a multi-point manifold is ONE
-    /// group (never split across groups/colors); `canonical` covers every slot once.
+    /// group (never split across groups/colors).
     #[test]
     fn group_csr_tiles_every_color_span_on_random_scenes() {
         proptest!(ProptestConfig::with_cases(400), |(seed in any::<u64>())| {
@@ -489,16 +487,6 @@
             prop_assert_eq!(groups_seen, cols.group_start().len() - 1, "every group in exactly one color");
             // Every slot is covered by exactly one group.
             prop_assert!(covered.iter().all(|&c| c), "every slot belongs to a group");
-
-            // Canonical order covers every slot EXACTLY once (a permutation of 0..len).
-            prop_assert_eq!(cols.canonical().len(), cols.len(), "canonical covers every slot");
-            let mut canon_seen = vec![false; cols.len()];
-            for k in 0..cols.canonical().len() {
-                let s = cols.canonical()[k];
-                prop_assert!(!canon_seen[s as usize], "canonical visits slot {} twice", s);
-                canon_seen[s as usize] = true;
-            }
-            prop_assert!(canon_seen.iter().all(|&c| c), "canonical is a full permutation");
 
             // A multi-point manifold (count >= 2 over a dyn-dyn pair) appears as
             // ONE contiguous group of exactly `count` slots — never split.
@@ -723,15 +711,15 @@
             .collect()
     }
 
-    /// Byte-identical snapshot of ALL 31 `ContactColumns` (audit Stage P — P2,
+    /// Byte-identical snapshot of ALL 30 `ContactColumns` (audit Stage P — P2,
     /// Gate 1). Emits each column's raw bits in `ContactColumns` field order, so two
     /// builds (e.g. the `ScratchColumn` backend vs a reference) over the same scene
     /// must produce a BIT-FOR-BIT equal vector.
     ///
-    /// Covers every column — the 26 push-filled point/CSR-seed columns AND the 5
-    /// CSR / `manifold_base` columns (`color_offsets`, `canonical`, `group_start`,
-    /// `color_group_start`, `manifold_base`, the last including its retained
-    /// `(u32::MAX, 0)` sentinels) — closing the prior 26-of-31 coverage gap.
+    /// Covers every column — the 25 push-filled point/CSR-seed columns AND the 5
+    /// CSR / per-manifold columns (`color_offsets`, `group_start`,
+    /// `color_group_start`, `manifold_base` including its retained `(u32::MAX, 0)`
+    /// sentinels, and the L11 C1 `plan`).
     #[allow(dead_code)]
     fn columns_snapshot(cols: &ContactColumns) -> Vec<u32> {
         let mut out = Vec::new();
@@ -762,12 +750,11 @@
         out.extend(cols.body_a.as_read_slice().iter().copied());
         out.extend(cols.body_b.as_read_slice().iter().copied());
         out.extend(cols.b_is_sentinel.as_read_slice().iter().map(|&b| b as u32));
-        out.extend(cols.warm_key.as_read_slice().iter().flat_map(|&k| [k as u32, (k >> 32) as u32]));
         out.extend(cols.color_offsets().iter().copied());
-        out.extend(cols.canonical().iter().copied());
         out.extend(cols.group_start().iter().copied());
         out.extend(cols.color_group_start().iter().copied());
         out.extend(cols.manifold_base().iter().flat_map(|&(a, b)| [a, b]));
+        out.extend(cols.plan().iter().flat_map(|r| [r.lo, r.hi]));
         out
     }
 
@@ -843,12 +830,12 @@
         snapshot_bits(&scratch)
     }
 
-    /// Like [`run_dense_in_pool`] but returns the FULL 31-column
+    /// Like [`run_dense_in_pool`] but returns the FULL 30-column
     /// [`columns_snapshot`] of the solver's `ContactColumns` after the final step
     /// (audit Stage P — P2, Gate 1). The columns are clear+refilled each
     /// `solve_colored`, so after the last step they hold that step's complete
-    /// gathered SoA working set (all 26 point/CSR-seed columns + the 5
-    /// CSR/`manifold_base` columns). This is the load-bearing "pure backing swap"
+    /// gathered SoA working set (all 25 point/CSR-seed columns + the 5
+    /// CSR/per-manifold columns). This is the load-bearing "pure backing swap"
     /// probe: it reads the actual `ScratchColumn` bytes the parallel workers wrote,
     /// not just the body state derived from them.
     #[cfg(not(miri))]
@@ -878,16 +865,15 @@
     }
 
     /// Gate 1 (audit Stage P — P2, the load-bearing "pure backing swap" proof):
-    /// the FULL 31-column `ContactColumns` SoA — now backed by 31 kernel
-    /// `ScratchColumn`s instead of 31 `std::Vec`s — is BIT-FOR-BIT identical
-    /// across (a) run-to-run repeats (determinism) and (b) {1,2,4,8}-worker
-    /// parallel runs versus the single-threaded (`parallel_solve == false`)
-    /// solve.
+    /// the FULL 30-column `ContactColumns` SoA — backed by kernel `ScratchColumn`s
+    /// instead of `std::Vec`s — is BIT-FOR-BIT identical across (a) run-to-run
+    /// repeats (determinism) and (b) {1,2,4,8}-worker parallel runs versus the
+    /// single-threaded (`parallel_solve == false`) solve.
     ///
-    /// This reads the actual bytes the workers wrote into the 31 `ScratchColumn`s
-    /// (`columns_snapshot` covers all 31: the 21 worker/build f32 columns incl. the
-    /// three worker-MUTABLE impulse columns, the integer/flag/key columns, and the
-    /// five CSR/`manifold_base` columns). The body-state snapshot
+    /// This reads the actual bytes the workers wrote into the 30 `ScratchColumn`s
+    /// (`columns_snapshot` covers all 30: the 21 worker/build f32 columns incl. the
+    /// three worker-MUTABLE impulse columns, the integer/flag columns, and the
+    /// five CSR/per-manifold columns). The body-state snapshot
     /// (`parallel_solve_is_bit_identical_across_worker_counts`) only checks the 9
     /// derived float fields per body; this checks the storage the backing swap
     /// actually touched — so a parallel write going to the wrong column / a stale
@@ -912,20 +898,21 @@
         );
 
         // (a) Determinism: the single-threaded path, run twice, must produce a
-        // bit-identical 31-column snapshot (the colored partition + sweep + canonical
-        // warm store are deterministic; the ScratchColumn refill is order-stable).
+        // bit-identical 30-column snapshot (the colored partition + sweep + the
+        // per-manifold warm store are deterministic; the ScratchColumn refill is
+        // order-stable).
         let single_a = run_dense_columns_in_pool(n, 12, false, 1);
         let single_b = run_dense_columns_in_pool(n, 12, false, 1);
         assert_eq!(
             single_a, single_b,
-            "Gate 1 (determinism): the full 31-column ContactColumns snapshot must be \
+            "Gate 1 (determinism): the full 30-column ContactColumns snapshot must be \
              bit-identical run-to-run on the single-threaded path"
         );
 
         // Anti-vacuity: the snapshot must be non-empty (a real built column set).
         assert!(
             !single_a.is_empty(),
-            "Gate 1 anti-vacuity: the 31-column snapshot must be non-empty (columns were built)"
+            "Gate 1 anti-vacuity: the 30-column snapshot must be non-empty (columns were built)"
         );
 
         // (b) Parallel == serial, byte-for-byte, across {1,2,4,8} workers. This is
@@ -939,19 +926,19 @@
 
         assert_eq!(
             single_a, p1,
-            "Gate 1: 1-worker parallel 31-column snapshot must be byte-identical to the \
+            "Gate 1: 1-worker parallel 30-column snapshot must be byte-identical to the \
              single-threaded solve (the parallel path must not perturb any column byte)"
         );
-        assert_eq!(p1, p2, "Gate 1: 31-column snapshot must be byte-identical at 1 vs 2 workers");
-        assert_eq!(p1, p4, "Gate 1: 31-column snapshot must be byte-identical at 1 vs 4 workers");
-        assert_eq!(p1, p8, "Gate 1: 31-column snapshot must be byte-identical at 1 vs 8 workers");
+        assert_eq!(p1, p2, "Gate 1: 30-column snapshot must be byte-identical at 1 vs 2 workers");
+        assert_eq!(p1, p4, "Gate 1: 30-column snapshot must be byte-identical at 1 vs 4 workers");
+        assert_eq!(p1, p8, "Gate 1: 30-column snapshot must be byte-identical at 1 vs 8 workers");
 
         // Run-to-run determinism of the parallel path itself (worker-count-independent
         // bits AND repeat-stable bits).
         let p4_again = run_dense_columns_in_pool(n, 12, true, 4);
         assert_eq!(
             p4, p4_again,
-            "Gate 1: the parallel 31-column snapshot must be run-to-run bit-identical"
+            "Gate 1: the parallel 30-column snapshot must be run-to-run bit-identical"
         );
     }
 
@@ -1019,10 +1006,11 @@
 
     /// O6 headline gate (dev stand-in): the parallel colored solve is BIT-FOR-BIT
     /// identical at 1 worker vs N workers on a FORCED-COLLISION dense scene — the
-    /// load-bearing determinism property (disjoint-body groups + canonical warm
-    /// store ⇒ worker-count-independent bits). Also checks the parallel 4-worker
-    /// result matches the single-threaded (`parallel_solve == false`) result, so
-    /// the parallel dispatch does not change the converged value.
+    /// load-bearing determinism property (disjoint-body groups + a warm store
+    /// written by manifold index ⇒ worker-count-independent bits). Also checks the
+    /// parallel 4-worker result matches the single-threaded
+    /// (`parallel_solve == false`) result, so the parallel dispatch does not change
+    /// the converged value.
     #[test]
     #[cfg(not(miri))]
     fn parallel_solve_is_bit_identical_across_worker_counts() {
@@ -1603,7 +1591,6 @@
             v.body_a.extend_from_slice(src.body_a.as_read_slice());
             v.body_b.extend_from_slice(src.body_b.as_read_slice());
             v.b_is_sentinel.extend_from_slice(src.b_is_sentinel.as_read_slice());
-            v.warm_key.extend_from_slice(src.warm_key.as_read_slice());
             v.vn_initial.extend_from_slice(src.vn_initial.as_read_slice());
         }
         // The CSR columns the kernels navigate (group_start) + the dispatcher CSRs.
@@ -1612,7 +1599,6 @@
         dst.color_group_start
             .build_view()
             .extend_from_slice(src.color_group_start());
-        dst.canonical.build_view().extend_from_slice(src.canonical());
         dst
     }
 
@@ -1708,7 +1694,6 @@
     fn build_cohort_columns(groups: &[GroupSpec]) -> ContactColumns {
         let mut cols = ContactColumns::with_capacity(0);
         cols.begin_build();
-        let mut warm_key = 0u64;
         for g in groups {
             {
                 let mut view = cols.build_view();
@@ -1726,17 +1711,11 @@
                         g.ia,
                         g.ib,
                         g.sentinel,
-                        warm_key,
                         0.0,
                     );
-                    warm_key = warm_key.wrapping_add(1);
                 }
             }
-            // `canonical` covers the slots appended for this group, in order.
             let len = cols.len() as u32;
-            for s in (len - g.points.len() as u32)..len {
-                cols.push_canonical(s);
-            }
             cols.push_group_start(len);
         }
         let len = cols.len() as u32;
@@ -3553,6 +3532,475 @@
             "a latched row inside an active island must be compared: its support left and it is \
              now alone: (latched, awake, contact_wakes)"
         );
+    }
+
+    // ── L11 C1: G2, the warm-record differential against the per-point table ──
+    //
+    // The records (`warm_records.rs`) replace the per-point `WarmStartTable` the
+    // colored solver kept until C1. Lemma W says every seed and every hit count is
+    // equal; this module checks it against a canonical-insert oracle written from
+    // the C0 code — the table, `pack` / `pack_sdf`, the store in canonical order and
+    // the B1 carry — over random streams with duplicate keys, duplicate feature ids,
+    // SDF manifolds, frozen subsets and every remap class, chained over steps so
+    // the carry feeds the next lookup. Pool-free and column-backed, so it runs
+    // native and under Miri (G8: the store, the carry and the cold index at small n).
+
+    mod g2_records {
+        use std::cell::Cell;
+
+        use super::*;
+        use crate::row_identity::NO_ROW;
+        use crate::scratch_ids::warm_table_id;
+        use crate::solver::warm_records::{
+            WarmIndex, WarmLookup, WarmRecord, WarmRecords, WarmRun, ord, plan_sources, point_fid,
+        };
+        use crate::solver::warm_start::{WarmStartTable, pack, pack_sdf};
+
+        /// How a step's rows relate to the previous step's.
+        enum RemapSpec {
+            Identity,
+            Rows(Vec<u32>),
+            Reset,
+        }
+
+        impl RemapSpec {
+            fn remap(&self) -> RowRemap<'_> {
+                match self {
+                    Self::Identity => RowRemap::Identity,
+                    Self::Rows(prev) => RowRemap::Rows(prev),
+                    Self::Reset => RowRemap::Reset,
+                }
+            }
+        }
+
+        /// One generated step: the stream, which manifolds are frozen, and the remap.
+        struct Step {
+            manifolds: Vec<Manifold>,
+            frozen: Vec<bool>,
+            remap: RemapSpec,
+        }
+
+        /// What the differential met over a run, so a green run is shown to have
+        /// exercised every path Lemma W argues about.
+        #[derive(Default)]
+        struct Tally {
+            point_hits: Cell<u64>,
+            carry_hits: Cell<u64>,
+            misses: Cell<u64>,
+            duplicate_keys: Cell<u64>,
+            duplicate_fids: Cell<u64>,
+            unsorted_streams: Cell<u64>,
+            rows_steps: Cell<u64>,
+            reset_steps: Cell<u64>,
+            cold_index_steps: Cell<u64>,
+            backward_searches: Cell<u64>,
+            sdf_manifolds: Cell<u64>,
+            /// Seeds whose source is an earlier record of an equal-key run than the
+            /// last one (review W1: the run, not one record).
+            w1_cases: Cell<u64>,
+            frozen_manifolds: Cell<u64>,
+        }
+
+        impl Tally {
+            fn bump(cell: &Cell<u64>, n: u64) {
+                cell.set(cell.get() + n);
+            }
+        }
+
+        /// A stable per-key coin, so every manifold of one pair is frozen or none is
+        /// (Lemma W fact 3: equal pairs share an island).
+        fn frozen_by_key(key: u64, salt: u64) -> bool {
+            let mut z = key ^ salt;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            (z ^ (z >> 31)).is_multiple_of(3)
+        }
+
+        /// A random stream over `n_rows` rows: at most 64 manifolds, SDF ones among
+        /// them, 0..=4 points with small feature ids (duplicates likely), sorted by
+        /// ordinal half of the time.
+        fn random_step(rng: &mut Lcg, n_rows: u32, salt: u64) -> Step {
+            let m_count = rng.range(0, 65) as usize;
+            let mut manifolds = Vec::with_capacity(m_count);
+            for _ in 0..m_count {
+                let a = rng.range(0, n_rows);
+                let (a, b) = if rng.f01() < 0.2 {
+                    (a, SDF_SENTINEL.0)
+                } else {
+                    let mut b = rng.range(0, n_rows);
+                    if b == a {
+                        b = (a + 1) % n_rows;
+                    }
+                    (a.min(b), a.max(b))
+                };
+                let count = rng.range(0, 5) as usize;
+                let mut m = Manifold::new(BodyIndex(a), BodyIndex(b));
+                m.normal = Vec3::new(0.0, 1.0, 0.0);
+                for p in 0..count {
+                    m.points[p] = ContactPoint {
+                        anchor_a: Vec3::ZERO,
+                        anchor_b: Vec3::ZERO,
+                        separation: -0.01,
+                        feature_id: rng.range(0, 6),
+                    };
+                }
+                m.count = count as u8;
+                manifolds.push(m);
+            }
+            if rng.f01() < 0.5 {
+                manifolds.sort_by_key(|m| ord(m.body_a.0, m.body_b.0));
+            }
+            let frozen = manifolds
+                .iter()
+                .map(|m| frozen_by_key(ord(m.body_a.0, m.body_b.0), salt))
+                .collect();
+            let remap = match rng.range(0, 5) {
+                0 | 1 => RemapSpec::Identity,
+                2 | 3 => {
+                    // An injective partial map onto the previous rows: a random
+                    // permutation with some rows sent to NO_ROW (new bodies), which
+                    // flips some pairs' order (a miss on both sides).
+                    let mut perm: Vec<u32> = (0..n_rows).collect();
+                    for i in (1..perm.len()).rev() {
+                        let j = rng.range(0, i as u32 + 1) as usize;
+                        perm.swap(i, j);
+                    }
+                    let prev = perm
+                        .into_iter()
+                        .map(|p| if rng.f01() < 0.8 { p } else { NO_ROW })
+                        .collect();
+                    RemapSpec::Rows(prev)
+                }
+                _ => RemapSpec::Reset,
+            };
+            Step { manifolds, frozen, remap }
+        }
+
+        /// The synthetic converged impulse of slot `s` on `step`: distinct per slot
+        /// and per step, so a seed read from the wrong source is visible.
+        fn impulse(step: u32, s: usize, k: u32) -> f32 {
+            (step * 4096 + s as u32 * 4 + k) as f32 + 0.25
+        }
+
+        /// The C0 point keys: the store key in current rows and the read key in the
+        /// translated rows (`ColoredSoftStepSolver::point_keys` before C1).
+        fn point_keys(m: &Manifold, p: usize, lookup: Option<(u32, u32)>) -> (u64, Option<u64>) {
+            let feature_id = m.points[p].feature_id;
+            if m.body_b == SDF_SENTINEL {
+                (
+                    pack_sdf(m.body_a, feature_id),
+                    lookup.map(|(la, _)| pack_sdf(BodyIndex(la), feature_id)),
+                )
+            } else {
+                (
+                    pack(m.body_a, m.body_b, feature_id),
+                    lookup.map(|(la, lb)| pack(BodyIndex(la), BodyIndex(lb), feature_id)),
+                )
+            }
+        }
+
+        /// Drives `steps` chained steps through both stores and compares every seed
+        /// (as bits), the per-step point hits and the carry hits.
+        fn differential(steps: &[Step], tally: &Tally) {
+            // The records under test, on the solver's own ids (independent pools).
+            let mut warm = [
+                WarmRecords::with_capacity(warm_table_id(4), warm_table_id(2), 64),
+                WarmRecords::with_capacity(warm_table_id(5), warm_table_id(3), 64),
+            ];
+            let mut cur = 0usize;
+            let mut index = WarmIndex::with_capacity(warm_table_id(6), 64);
+            let mut plan: Vec<WarmRun> = Vec::new();
+            // The oracle: the C0 double-buffered per-point table.
+            let mut table_read = WarmStartTable::with_capacity(warm_table_id(0), 64);
+            let mut table_write = WarmStartTable::with_capacity(warm_table_id(1), 64);
+
+            for (step_no, step) in steps.iter().enumerate() {
+                let manifolds = &step.manifolds;
+                let n = manifolds.len();
+                let remap = step.remap.remap();
+                match step.remap {
+                    RemapSpec::Rows(_) => Tally::bump(&tally.rows_steps, 1),
+                    RemapSpec::Reset => Tally::bump(&tally.reset_steps, 1),
+                    RemapSpec::Identity => {}
+                }
+                {
+                    let mut keys: Vec<u64> = manifolds.iter().map(|m| ord(m.body_a.0, m.body_b.0)).collect();
+                    if keys.windows(2).any(|w| w[1] <= w[0]) {
+                        Tally::bump(&tally.unsorted_streams, 1);
+                    }
+                    keys.sort_unstable();
+                    Tally::bump(&tally.duplicate_keys, keys.windows(2).filter(|w| w[0] == w[1]).count() as u64);
+                }
+                Tally::bump(
+                    &tally.sdf_manifolds,
+                    manifolds.iter().filter(|m| m.body_b == SDF_SENTINEL).count() as u64,
+                );
+                for m in manifolds {
+                    let c = m.count as usize;
+                    if (0..c).any(|p| (p + 1..c).any(|q| point_fid(m, p) == point_fid(m, q))) {
+                        Tally::bump(&tally.duplicate_fids, 1);
+                    }
+                }
+
+                // The step's slot layout: solved manifolds get slots in manifold
+                // order (the store's view), frozen ones the carry tag.
+                let mut manifold_base = vec![(u32::MAX, 0u32); n];
+                let mut slots = 0u32;
+                let mut frozen_points = 0u32;
+                for (mi, m) in manifolds.iter().enumerate() {
+                    let c = u32::from(m.count);
+                    if c == 0 {
+                        continue;
+                    }
+                    if step.frozen[mi] {
+                        manifold_base[mi] = (u32::MAX, c);
+                        frozen_points += c;
+                        Tally::bump(&tally.frozen_manifolds, 1);
+                    } else {
+                        manifold_base[mi] = (slots, c);
+                        slots += c;
+                    }
+                }
+                let ni: Vec<f32> = (0..slots as usize).map(|s| impulse(step_no as u32, s, 0)).collect();
+                let t1: Vec<f32> = (0..slots as usize).map(|s| impulse(step_no as u32, s, 1)).collect();
+                let t2: Vec<f32> = (0..slots as usize).map(|s| impulse(step_no as u32, s, 2)).collect();
+
+                // ── records: P-a, the seeds, the store, the swap ──
+                let (read, write) = {
+                    let [s0, s1] = &mut warm;
+                    if cur == 0 { (&*s0, s1) } else { (&*s1, s0) }
+                };
+                plan.clear();
+                plan.resize(n, WarmRun::MISS);
+                write.resize(n);
+                let counts = plan_sources(manifolds, remap, true, read, write, &mut index, &mut plan);
+                Tally::bump(&tally.backward_searches, u64::from(counts.backward_searches));
+                Tally::bump(&tally.cold_index_steps, u64::from(counts.cold_index));
+                let lookup = WarmLookup { read, index: &index };
+                let mut rec_seeds: Vec<[u32; 3]> = Vec::new();
+                let mut rec_hits = 0u32;
+                for (mi, m) in manifolds.iter().enumerate() {
+                    let (base, c) = manifold_base[mi];
+                    if base == u32::MAX {
+                        continue;
+                    }
+                    let run = plan[mi];
+                    for p in 0..c as usize {
+                        let fid = point_fid(m, p);
+                        let seed = lookup.seed(run, fid);
+                        if seed.is_some() {
+                            rec_hits += 1;
+                            // W1: the whole run was needed — the last record alone misses.
+                            if run.hi - run.lo >= 2
+                                && lookup.seed(WarmRun { lo: run.hi - 1, hi: run.hi }, fid).is_none()
+                            {
+                                Tally::bump(&tally.w1_cases, 1);
+                            }
+                        }
+                        let [a, b, d] = seed.unwrap_or([0.0; 3]);
+                        rec_seeds.push([a.to_bits(), b.to_bits(), d.to_bits()]);
+                    }
+                }
+                let mut rec_carry_hits = 0u32;
+                {
+                    let mut recs_w = write.recs_mut();
+                    let recs_w = recs_w.as_mut_slice();
+                    for (mi, (m, &(base, c))) in manifolds.iter().zip(&manifold_base).enumerate() {
+                        recs_w[mi] = if base != u32::MAX {
+                            WarmRecord::solved(m, base as usize, c as usize, [&ni, &t1, &t2])
+                        } else if c != 0 {
+                            let (rec, hits) = lookup.carry(plan[mi], m, c as usize);
+                            rec_carry_hits += hits;
+                            rec
+                        } else {
+                            WarmRecord::EMPTY
+                        };
+                        assert!(
+                            recs_w[mi].count() as u32 <= c,
+                            "a record never holds more points than its manifold"
+                        );
+                    }
+                }
+                assert_eq!(write.len(), n, "one record per manifold of the stream");
+                cur ^= 1;
+
+                // ── the oracle: the per-point table, seeds then the canonical store ──
+                let mut ora_seeds: Vec<[u32; 3]> = Vec::new();
+                let mut ora_hits = 0u32;
+                for (mi, m) in manifolds.iter().enumerate() {
+                    let (base, c) = manifold_base[mi];
+                    if base == u32::MAX {
+                        continue;
+                    }
+                    let translated = remap.manifold_pair(m);
+                    for p in 0..c as usize {
+                        let (_, read_key) = point_keys(m, p, translated);
+                        let seed = read_key.and_then(|k| table_read.get(k));
+                        if let Some(e) = seed {
+                            ora_hits += 1;
+                            ora_seeds.push([
+                                e.normal_impulse.to_bits(),
+                                e.tangent_impulse[0].to_bits(),
+                                e.tangent_impulse[1].to_bits(),
+                            ]);
+                        } else {
+                            ora_seeds.push([0; 3]);
+                        }
+                    }
+                }
+                table_write.rebuild(slots as usize + frozen_points as usize);
+                for (mi, m) in manifolds.iter().enumerate() {
+                    let (base, c) = manifold_base[mi];
+                    if base == u32::MAX {
+                        continue;
+                    }
+                    for p in 0..c as usize {
+                        let (store_key, _) = point_keys(m, p, None);
+                        let s = base as usize + p;
+                        table_write.insert(store_key, ni[s], [t1[s], t2[s]]);
+                    }
+                }
+                let mut ora_carry_hits = 0u32;
+                for (mi, m) in manifolds.iter().enumerate() {
+                    let (base, c) = manifold_base[mi];
+                    if base != u32::MAX || c == 0 {
+                        continue;
+                    }
+                    let translated = remap.manifold_pair(m);
+                    if translated.is_none() {
+                        continue;
+                    }
+                    for p in 0..c as usize {
+                        let (store_key, read_key) = point_keys(m, p, translated);
+                        if let Some(read_key) = read_key
+                            && let Some(e) = table_read.get(read_key)
+                        {
+                            table_write.insert(store_key, e.normal_impulse, e.tangent_impulse);
+                            ora_carry_hits += 1;
+                        }
+                    }
+                }
+                core::mem::swap(&mut table_read, &mut table_write);
+
+                // ── the comparison ──
+                assert_eq!(
+                    rec_seeds, ora_seeds,
+                    "step {step_no}: every seed from the records must equal the per-point \
+                     table's (Lemma W)"
+                );
+                assert_eq!(rec_hits, ora_hits, "step {step_no}: point hits");
+                assert_eq!(rec_carry_hits, ora_carry_hits, "step {step_no}: carry hits");
+                Tally::bump(&tally.point_hits, u64::from(rec_hits));
+                Tally::bump(&tally.carry_hits, u64::from(rec_carry_hits));
+                Tally::bump(&tally.misses, u64::from(slots - rec_hits));
+            }
+        }
+
+        /// The steps of one case: a fixed row count, four chained random steps.
+        fn case_steps(seed: u64) -> Vec<Step> {
+            let mut rng = Lcg(seed ^ 0x5851_F42D_4C95_7F2D);
+            let n_rows = rng.range(2, 9);
+            let salt = rng.next_u64();
+            (0..4).map(|_| random_step(&mut rng, n_rows, salt)).collect()
+        }
+
+        /// Every path the tally names must have been met, or the green proves less
+        /// than it claims.
+        fn assert_non_vacuous(tally: &Tally) {
+            let counts = [
+                ("point hits", tally.point_hits.get()),
+                ("carry hits", tally.carry_hits.get()),
+                ("misses", tally.misses.get()),
+                ("duplicate keys", tally.duplicate_keys.get()),
+                ("duplicate feature ids", tally.duplicate_fids.get()),
+                ("unsorted streams", tally.unsorted_streams.get()),
+                ("Rows steps", tally.rows_steps.get()),
+                ("Reset steps", tally.reset_steps.get()),
+                ("cold-index steps", tally.cold_index_steps.get()),
+                ("backward searches", tally.backward_searches.get()),
+                ("SDF manifolds", tally.sdf_manifolds.get()),
+                ("W1 cases (an earlier equal-key record was the source)", tally.w1_cases.get()),
+                ("frozen manifolds", tally.frozen_manifolds.get()),
+            ];
+            for (name, n) in counts {
+                assert!(n > 0, "anti-vacuity: the differential met no {name}: {counts:?}");
+            }
+        }
+
+        /// G2: random ≤ 64-manifold streams over four chained steps, remap in
+        /// {Identity, Rows with flips and NO_ROW, Reset}, SDF, duplicate feature ids
+        /// and keys, frozen subsets — seeds and hit counts from the records equal the
+        /// canonical-insert oracle's, and every path is met. Native only: proptest's
+        /// failure persistence reads the cwd, which Miri's isolation refuses; the
+        /// fixed-seed twin below is the Miri leg.
+        #[test]
+        #[cfg(not(miri))]
+        fn warm_records_match_the_per_point_table_on_random_streams() {
+            let tally = Tally::default();
+            proptest!(ProptestConfig::with_cases(256), |(seed in any::<u64>())| {
+                differential(&case_steps(seed), &tally);
+            });
+            assert_non_vacuous(&tally);
+        }
+
+        /// G8: the same differential on fixed seeds, small enough for Miri — the
+        /// store, the carry, the cursor search and the cold index under the borrow
+        /// checker. The seeds are chosen so the tally is non-vacuous on their own.
+        #[test]
+        fn warm_records_differential_fixed_seeds() {
+            let tally = Tally::default();
+            for seed in 0..24u64 {
+                differential(&case_steps(seed), &tally);
+            }
+            assert_non_vacuous(&tally);
+        }
+
+        /// D2's strict-side search, walked with a cursor: a lookup above the key
+        /// before the cursor gallops forward (a miss included); one at or below it
+        /// binary-searches the prefix and reports so; a miss leaves the cursor at the
+        /// insertion point.
+        #[test]
+        fn find_gallops_forward_and_binary_searches_backward() {
+            let mut side = WarmRecords::with_capacity(warm_table_id(4), warm_table_id(2), 8);
+            let keys = [1u64, 3, 5, 9, 10, 20, 21, 40];
+            side.resize(keys.len());
+            side.keys_mut().as_mut_slice().copy_from_slice(&keys);
+            side.set_strict(true);
+            let mut cursor = 0usize;
+            let expect = [
+                // (key, run, backward, cursor after)
+                (3u64, WarmRun { lo: 1, hi: 2 }, false, 2usize),
+                (9, WarmRun { lo: 3, hi: 4 }, false, 4),
+                (40, WarmRun { lo: 7, hi: 8 }, false, 8),
+                (1, WarmRun { lo: 0, hi: 1 }, true, 1),
+                (4, WarmRun::MISS, false, 2),
+                (6, WarmRun::MISS, false, 3),
+                (21, WarmRun { lo: 6, hi: 7 }, false, 7),
+                (5, WarmRun { lo: 2, hi: 3 }, true, 3),
+                (0, WarmRun::MISS, true, 0),
+                (50, WarmRun::MISS, false, 8),
+                (20, WarmRun { lo: 5, hi: 6 }, true, 6),
+            ];
+            for (key, run, backward, after) in expect {
+                let found = side.find(&mut cursor, key);
+                assert_eq!((found.run, found.backward, cursor), (run, backward, after), "key {key}");
+            }
+        }
+
+        /// The cold index names the WHOLE equal-key run, ascending in manifold index.
+        #[test]
+        fn cold_index_runs_cover_every_equal_key() {
+            let mut index = WarmIndex::with_capacity(warm_table_id(6), 8);
+            let keys = [7u64, 3, 7, 1, 3, 7];
+            index.build(&keys);
+            assert_eq!(index.run(7), WarmRun { lo: 3, hi: 6 });
+            assert_eq!(index.run(3), WarmRun { lo: 1, hi: 3 });
+            assert_eq!(index.run(1), WarmRun { lo: 0, hi: 1 });
+            assert_eq!(index.run(2), WarmRun::MISS);
+            assert_eq!(index.run(9), WarmRun::MISS);
+            let mis: Vec<u32> = index.sorted()[3..6].iter().map(|e| e.1).collect();
+            assert_eq!(mis, [0, 2, 5], "an equal-key run is ascending in manifold index");
+        }
     }
 
         // ── L11 C0: the G1 identity pins — the setup digest and the body bits, per step ──

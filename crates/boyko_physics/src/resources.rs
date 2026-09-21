@@ -282,7 +282,8 @@ pub struct PhysicsConfig {
     /// **Bit-identity is the gate:** the parallel result is BIT-FOR-BIT identical to
     /// the single-threaded colored solve for ANY worker count (the disjoint-body
     /// partition makes each body's accumulation independent of which worker runs
-    /// which group, and the canonical IM-2b warm store is worker-count-independent).
+    /// which group, and the warm store — a write by manifold index — is
+    /// worker-count-independent).
     /// When `false` — or when no pool is attached to the running thread, or the
     /// attached pool has a single worker — the colored solve runs the O5
     /// single-threaded path, BYTE-IDENTICAL to O5 (the O6 0%-gate). The one-worker
