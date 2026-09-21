@@ -7,11 +7,12 @@
 //! reason rather than its own. The unit test that used to sit beside the dispenser
 //! (`bundle_type_registry.rs`, `register_new_exhaustion_panics`) did exactly that to the lib-test
 //! binary's other modules: it parked the counter one below the cap under a lock only its own module
-//! took (A4b). What that test checked, this binary checks: **both edges of the cap** -- exactly
-//! `MAX_BUNDLE_TYPES` ids are mintable, `0..MAX_BUNDLE_TYPES` in order, and the mint after the last
-//! legal id is the panic -- the message, and -- from outside the module, where the counter itself
-//! is private -- the one observable consequence of its saturate clamp: every call after the first
-//! panic is the same panic.
+//! took (A4b). What that test checked, this binary checks with one exception: **both edges of
+//! the cap** -- exactly `MAX_BUNDLE_TYPES` ids are mintable, `0..MAX_BUNDLE_TYPES` in order, and
+//! the mint after the last legal id is the panic -- the message, and that the panic is terminal:
+//! every call after the first is the same panic. The exception is the saturate clamp, which no
+//! binary can observe from outside the module; the query twin's module doc ("What this binary
+//! cannot claim") has the measurement, and it holds for this dispenser too.
 //!
 //! # One test, on purpose
 //!
@@ -81,10 +82,10 @@ fn exactly_max_bundle_types_ids_are_mintable_and_the_next_mint_is_the_terminal_p
     );
 
     // Terminal: every call after the first panic is the same panic -- never a fresh id, never a
-    // different message. This is what the dispenser's saturate clamp buys from the outside: the
-    // counter is pinned at the cap, so a re-entry (a retried `OnceLock` init closure -- `OnceLock`
-    // does not poison on panic -- or a second bundle asked for after the first died) cannot walk
-    // it past the cap or hand out an id above it.
+    // different message -- so a re-entry (a retried `OnceLock` init closure -- `OnceLock` does not
+    // poison on panic -- or a second bundle asked for after the first died) cannot hand out an id
+    // above the cap. This is the `>=` comparison at work, not the saturate store: the store is
+    // unobservable from here (the query twin's module doc, "What this binary cannot claim").
     for attempt in 0..3 {
         let again = match catch_unwind(register_new) {
             Ok(id) => {

@@ -10,11 +10,23 @@
 //! below the cap under a lock that only its own module took, while seven other src/ test modules
 //! in the same lib-test binary minted first-sight `(D, F)` shapes through `world.query::<D, F>()`
 //! -- a sibling that minted inside that window redded with `boyko-B0502`, one lib run in eleven
-//! (A4b). What that test checked, this binary checks: **both edges of the cap** -- exactly
-//! `MAX_QUERY_TYPES` ids are mintable, `0..MAX_QUERY_TYPES` in order, and the mint after the last
-//! legal id is the panic -- the code, the message, and -- from outside the module, where the
-//! counter itself is private -- the one observable consequence of its saturate clamp: every call
-//! after the first panic is the same panic.
+//! (A4b). What that test checked, this binary checks with one exception: **both edges of the
+//! cap** -- exactly `MAX_QUERY_TYPES` ids are mintable, `0..MAX_QUERY_TYPES` in order, and the
+//! mint after the last legal id is the panic -- the code, the message, and that the panic is
+//! terminal: every call after the first is the same panic.
+//!
+//! # What this binary cannot claim: the saturate clamp
+//!
+//! The deleted unit test also read the private counter after the panic and pinned it at
+//! `MAX_QUERY_TYPES` -- the dispenser's saturate store. From outside the module that store is
+//! unobservable: with `id >= MAX_QUERY_TYPES` as the cap check, a counter left unclamped at
+//! `MAX + 1, MAX + 2, ..` produces the identical terminal panic, so the re-entry leg below pins
+//! the comparison, not the store. Measured 2026-09-21 (the A4b retest): both `store(MAX_*,
+//! Relaxed)` lines deleted, both binaries 1/1 green. The clamp is therefore unpinned on this
+//! line; its only failure mode is a wrap after `usize::MAX - MAX_QUERY_TYPES` re-entries into a
+//! process that is already dying. Pinning it again needs either a read hook in the shipped
+//! library or the cap check factored over a caller-supplied counter -- a change to the dispenser
+//! body, not to this file.
 //!
 //! # One test, on purpose
 //!
@@ -90,9 +102,10 @@ fn exactly_max_query_types_ids_are_mintable_and_the_next_mint_is_b0502_forever()
     );
 
     // Terminal: every call after the first panic is the same panic -- never a fresh id, never a
-    // different message. This is what the dispenser's saturate clamp buys from the outside: the
-    // counter is pinned at the cap, so a re-entry (a retried init closure, a second shape asked
-    // for after the first died) cannot walk it past the cap or hand out an id above it.
+    // different message -- so a re-entry (a retried init closure, a second shape asked for after
+    // the first died) cannot hand out an id above the cap. This is the `>=` comparison at work,
+    // not the saturate store: the store is unobservable from here (module doc, "What this binary
+    // cannot claim").
     for attempt in 0..3 {
         let again = match catch_unwind(register_new) {
             Ok(id) => {
