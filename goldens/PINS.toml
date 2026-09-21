@@ -881,14 +881,40 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # GpuLight::from_directional. The two agree to rounding, and that difference crosses one 8-bit step
 # at one pixel: (236, 191), 1 LSB darker, the same pixel on both legs. An A/B that pushed the raw
 # constant through the new path restored 765de1d9 and 0acc66b5, so the rounding is the whole change.
+#
+# R4-FRAME-ORDER + R4b-OPEN-EDGES MOVED THESE BYTES, AND THE PINNED ONES WERE WRONG ON TWO COUNTS
+# (lane fix/light-table-defects; ruled and re-blessed 2026-09-21 on the msvc host -- software
+# 31ce5178 -> b1e3b254 (7,275 px changed, max channel delta 15), hwrt c6429c3e -> ebddcd7d
+# (5,031 px, max 14)). Two orders the shipped host never declared decided the pinned frame 0, and
+# both ran the wrong way:
+#  * Frame 0 drew 0 meshes under the undeclared `visibility_sync` / reader order: the mesh and
+#    caster gathers filter on `Enabled<RenderEnabled>`, which `visibility_sync` sets through a
+#    deferred command, and nothing ordered the readers after that writer -- the executor's wave
+#    packing ran the gathers first (measured: 0 draw rows on frame 0, 7 on every later frame).
+#    R4's E1, `VisibilitySet::Read.after(VisibilitySet::Sync)` in crates/boyko_app/src/plugins.rs.
+#  * Frame 0 was lit from the sun's identity `GlobalTransform`, because `light_reconcile` ran before
+#    `propagate_transforms`: the fixture spawns the sun with a posed `Transform` and
+#    `GlobalTransform::IDENTITY` (crates/boyko_app/tests/taa_jitter_eval.rs, the
+#    `DirectionalLightObject` spawn), and the reconcile (`Changed<GlobalTransform>`,
+#    crates/boyko_render/src/light_reconcile.rs) copied the identity pose's direction into the
+#    light table -- measured in 34 of 34 frames of the order dump, the docs/OPEN-QUESTIONS.md
+#    2026-09-19 (b) finding. R4b's edge C, `LightReconcileSet.after(CameraSet::Resolve)`, in the
+#    same file.
+# TAA carried that frame into its history; what survives the settle frames sits on the mesh
+# silhouettes and on the SDF sphere's terminator. Attribution by single-edge A/B on the lane tree:
+# the hwrt value with edge C removed equals the G2-edge value
+# (1dde137bc09f5fa0ba0f06824990e1be6f179cc8c720ff5164cef48208f9c261), which is the mesh-only move;
+# the software value with edge C removed is the mesh-only value ae67351d. Removing only the G2 edge
+# (the light seed's `.before(cull)`) moves nothing on either leg any more -- the pair it used to
+# flip is declared now.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_armed.bmp"
 width           = 512
 height          = 512
-sha256_software = "31ce517879f042eb2579a5f666155193cf488f1f4da66e9ece12147fc65ffb31"
-sha256_hwrt     = "c6429c3ed8d87ac27b1603404f787e7f2cca275a683ee011517ac2fda91c9235"
+sha256_software = "b1e3b254835e8d445130d3d9a3ec3aa375ca5ea930220dfff0e5783833d95130"
+sha256_hwrt     = "ebddcd7d93bd91e0a55672e6fcfdf8ceeedb6b5628bb74010de0c9eaccd9d450"
 
 [taa_armed.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -946,14 +972,25 @@ BOYKO_TAA_SCOPE          = "raster"
 # the DISABLED cascade UBO; TAA carries that frame into history. On the software leg that is 2
 # pixels at max channel delta 1/255 on the SDF sphere's rim, measured against the e3cebe2d frame.
 # These bytes still differ from [taa_armed]'s, so the shear is still live.
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong on two counts,
+# for the reasons recorded in [taa_armed] (lane fix/light-table-defects; ruled and re-blessed
+# 2026-09-21 on the msvc host -- software 456b4060 -> 53ba8049 (4,444 px changed, max channel
+# delta 13), hwrt 0809d4b9 -> 32ba8e29 (2,100 px, max 14)): frame 0 drew 0 meshes under the
+# undeclared `visibility_sync` / reader order (R4's E1), and frame 0 was lit from the sun's identity
+# `GlobalTransform` because `light_reconcile` ran before `propagate_transforms` (R4b's edge C); TAA
+# carried that frame. The hwrt value with edge C removed equals the G2-edge value
+# (ee8701b257f19ec7e4d68707aca0905c56d4c8fc4ff3479b97fbf903676889ec), which is the mesh-only move;
+# the software value with edge C removed is the mesh-only value 114767d1. These bytes still differ
+# from [taa_armed]'s, so the shear is still live.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_armed_basis.bmp"
 width           = 512
 height          = 512
-sha256_software = "456b4060d2ad265d08dc9ab3d973e5841fceab67321e743681f35b9f7d5c3645"
-sha256_hwrt     = "0809d4b9ca45eb2ded58a823737e068a9ef19795c3df911be61c09b40493496d"
+sha256_software = "53ba8049cf35b0ba5d0ebbfca941fdee2ea04697b45e073d24ae2661e81d3a29"
+sha256_hwrt     = "32ba8e290a6abd0588aeb9d4d0b09a6324daf0f867adf80b621be405d72d2b43"
 
 [taa_armed_basis.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -988,14 +1025,25 @@ BOYKO_WIN                = "512"
 # result. On the software leg that is 2 pixels at max channel delta 2/255 on the SDF sphere's rim,
 # measured against the e3cebe2d frame. These bytes still differ from [taa_armed_basis]'s, so RCAS
 # still runs.
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong on two counts,
+# for the reasons recorded in [taa_armed] (lane fix/light-table-defects; ruled and re-blessed
+# 2026-09-21 on the msvc host -- software 063d4b0e -> 304adbfa (7,172 px changed, max channel
+# delta 18), hwrt 0168e5c4 -> 6daa4b74 (3,127 px, max 19)): frame 0 drew 0 meshes under the
+# undeclared `visibility_sync` / reader order (R4's E1), and frame 0 was lit from the sun's identity
+# `GlobalTransform` because `light_reconcile` ran before `propagate_transforms` (R4b's edge C); TAA
+# carried that frame and the sharpen runs over the result. The hwrt value with edge C removed equals
+# the G2-edge value (da521c743b5ca8ddc0706f548e7ef413bde2f681074bb813fab3ee08c7492b01), which is the
+# mesh-only move; the software value with edge C removed is the mesh-only value 3041775e. These
+# bytes still differ from [taa_armed_basis]'s, so RCAS still runs.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_rcas.bmp"
 width           = 512
 height          = 512
-sha256_software = "063d4b0ebbb19518eaaf21f404b567542fa1c5c5e419f2d61ff474f758531349"
-sha256_hwrt     = "0168e5c40b06c6bbb445ea7ab297f272b2a65e4adcf70e11c515b2878bfa5383"
+sha256_software = "304adbfad32f7512162db15e03aec9a0cda5eb144b8521e86bf070ee5eb262d2"
+sha256_hwrt     = "6daa4b7408f2cb3034e5dc8a8eab8af0582348e1f3c63bf882453d0d2bf9bf63"
 
 [taa_rcas.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1026,7 +1074,7 @@ BOYKO_TAA_SHARPEN        = "rcas"
 # raster is the honest scope to freeze; RasterAndBasis renders identically here today and
 # becomes load-bearing only at the VBxBoth TAA follow-up. The AA-off frame that alarm compares
 # against is now a pin of its own: [vb_mesh_shadows] is this scene, path and legs with BOYKO_AA
-# unset, so the alarm reads 637e8d34 here against 32c73274 there.
+# unset, so the alarm reads 5be729a8 here against 32c73274 there.
 #
 # THESE BYTES CARRY CASCADED SHADOWS (vkval lane; owner-approved and re-blessed 2026-09-18 on the
 # msvc host, c4d3f817 -> 637e8d34): VB now renders the mesh casters' CSM shadows. Before the lane,
@@ -1043,14 +1091,26 @@ BOYKO_TAA_SHARPEN        = "rcas"
 # b695fe80 for [vb_taa_rcas], 61dc2630 for [vb_both_taa] -- were STALE, not a host difference: at
 # base e3cebe2d the hwrt leg rendered these pins' SOFTWARE hashes on the msvc host AND on the gnu
 # host, so none of the three reproduced anywhere.
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong on two counts,
+# for the reasons recorded in [taa_armed] (lane fix/light-table-defects; ruled and re-blessed
+# 2026-09-21 on the msvc host -- 637e8d34 -> 5be729a8 on BOTH legs, 2,541 px changed, max channel
+# delta 13): frame 0 drew 0 meshes under the undeclared `visibility_sync` / reader order (R4's E1),
+# and frame 0 was lit from the sun's identity `GlobalTransform` because `light_reconcile` ran before
+# `propagate_transforms` (R4b's edge C); TAA carried that frame. The hwrt value with edge C removed
+# equals the G2-edge value (1f8853ccf243f630d0219d19f3a6915aecb4a171b64024e9a51e8098248e665d), which
+# is the mesh-only move, and the software leg lands on that same value with edge C removed.
+# sha256_hwrt still EQUALS sha256_software: the G2 edge alone had split the legs (1f8853cc on hwrt
+# against 637e8d34 on software, because it flipped the gather / `visibility_sync` pair on the hwrt
+# leg only); with the pair declared on both legs, parity is regained.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\vb_taa.bmp"
 width           = 512
 height          = 512
-sha256_software = "637e8d3433a93d2be3d7acf394a8542670040cef55ca903bc30dd7e9112e074f"
-sha256_hwrt     = "637e8d3433a93d2be3d7acf394a8542670040cef55ca903bc30dd7e9112e074f"
+sha256_software = "5be729a8f42834c2709bf511597eaf2baf43362bdda5fb90f8a3cb831e629899"
+sha256_hwrt     = "5be729a8f42834c2709bf511597eaf2baf43362bdda5fb90f8a3cb831e629899"
 
 [vb_taa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1074,14 +1134,26 @@ BOYKO_GEOMETRY_LEGS      = "mesh"
 # 2026-09-18 on the msvc host, 01e06ef8 -> 6b59bcee). sha256_hwrt EQUALS sha256_software --
 # measured, each leg blessed on its own run; the hwrt value committed before the lane (b695fe80)
 # was stale, see [vb_taa].
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong on two counts,
+# for the reasons recorded in [taa_armed] (lane fix/light-table-defects; ruled and re-blessed
+# 2026-09-21 on the msvc host -- 6b59bcee -> 23d4d7e7 on BOTH legs, 4,631 px changed, max channel
+# delta 18): frame 0 drew 0 meshes under the undeclared `visibility_sync` / reader order (R4's E1),
+# and frame 0 was lit from the sun's identity `GlobalTransform` because `light_reconcile` ran before
+# `propagate_transforms` (R4b's edge C); TAA carried that frame and the sharpen runs over the
+# result. The hwrt value with edge C removed equals the G2-edge value
+# (3e873c4b3122e1ad8e5bf864239e8df54a5f8ad0a97d16116dbf86463746b2ca), which is the mesh-only move,
+# and the software leg lands on that same value with edge C removed. sha256_hwrt still EQUALS
+# sha256_software (parity regained, see [vb_taa]). These bytes still differ from [vb_taa]'s, so RCAS
+# still runs under VB.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\vb_taa_rcas.bmp"
 width           = 512
 height          = 512
-sha256_software = "6b59bcee81534aae96f094ab0c654332612f697257ed7ebf911b4fc8754832f1"
-sha256_hwrt     = "6b59bcee81534aae96f094ab0c654332612f697257ed7ebf911b4fc8754832f1"
+sha256_software = "23d4d7e7969306b30eedfbf43997362d091e6a5caded27ec561228822b962fce"
+sha256_hwrt     = "23d4d7e7969306b30eedfbf43997362d091e6a5caded27ec561228822b962fce"
 
 [vb_taa_rcas.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1229,14 +1301,25 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # against the inherited 2x budget (docs/VB-SV0-SDF-SHADOW-PLAN.md, "DP4 ADJUDICATED"). An
 # SV0-armed pin is planned separately. When SV0 is armed, THIS frame will change -- that move is
 # the feature arriving, not a regression.
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong on two counts,
+# for the reasons recorded in [taa_armed] (lane fix/light-table-defects; ruled and re-blessed
+# 2026-09-21 on the msvc host -- bf490908 -> 025830c5 on BOTH legs, 6,393 px changed, max channel
+# delta 18): frame 0 drew 0 meshes under the undeclared `visibility_sync` / reader order (R4's E1),
+# and frame 0 was lit from the sun's identity `GlobalTransform` because `light_reconcile` ran before
+# `propagate_transforms` (R4b's edge C); TAA carried that frame. The hwrt value with edge C removed
+# equals the G2-edge value (d648618d8560104277ec07b60c61988224ce83267f8ccc8e69ba942ca6fb112e), which
+# is the mesh-only move, and the software leg lands on that same value with edge C removed.
+# sha256_hwrt still EQUALS sha256_software (parity regained, see [vb_taa]). These bytes still differ
+# from [vb_taa]'s, so the marcher leg is still live.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\vb_both_taa.bmp"
 width           = 512
 height          = 512
-sha256_software = "bf490908f79494511b750a9e2ec6a07190756a6ea065907864d047d4998bbbff"
-sha256_hwrt     = "bf490908f79494511b750a9e2ec6a07190756a6ea065907864d047d4998bbbff"
+sha256_software = "025830c5440d346364dda739209e1c123981f345ab5ddcea58c5b79f5e3e4e9a"
+sha256_hwrt     = "025830c5440d346364dda739209e1c123981f345ab5ddcea58c5b79f5e3e4e9a"
 
 [vb_both_taa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1259,14 +1342,26 @@ BOYKO_GEOMETRY_LEGS      = "both"
 # These bytes MUST differ from the SAME scene/legs with BOYKO_AA unset (dead-chain alarm -
 # verified at bless time against a fresh AA-off render, not a stored pin). sha256_hwrt EQUALS
 # sha256_software on this scene (each leg blessed on its own run - the [vb_taa] precedent).
+#
+# R4-frame-order + R4b-open-edges moved these bytes, and the pinned ones were wrong (lane
+# fix/light-table-defects; ruled and re-blessed 2026-09-21 on the msvc host -- 00da6769 -> e4f88703
+# on BOTH legs, 6,826 px changed, max channel delta 14). The family's two causes are recorded in
+# [taa_armed]: frame 0 drew 0 meshes under the undeclared `visibility_sync` / reader order (R4's
+# E1), and frame 0 was lit from the sun's identity `GlobalTransform` because `light_reconcile` ran
+# before `propagate_transforms` (R4b's edge C). This pin has NO mesh (legs=sdf), so the first cause
+# moves nothing here and the G2 edge never moved it: with edge C removed both legs render the old
+# 00da6769 unchanged, so there is no mesh-only value to cite. The whole move is the second cause --
+# the sun now points where the fixture posed it on frame 0 too, and TAA carried the identity-lit
+# frame: the diff is the SDF sphere's terminator, 6,743 px brighter and 83 darker, inside x 128-239,
+# y 155-266. sha256_hwrt still EQUALS sha256_software.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\vb_sdf_taa.bmp"
 width           = 512
 height          = 512
-sha256_software = "00da67699d2d4615e5d7fd9196ab4671db044915463a0b4dce6f9531a50373de"
-sha256_hwrt     = "00da67699d2d4615e5d7fd9196ab4671db044915463a0b4dce6f9531a50373de"
+sha256_software = "e4f88703874b5a8a4ba0c396c97c12dbeff0b7cc0ff3911714fdb8254f88d2f6"
+sha256_hwrt     = "e4f88703874b5a8a4ba0c396c97c12dbeff0b7cc0ff3911714fdb8254f88d2f6"
 
 [vb_sdf_taa.env]
 BOYKO_DISABLE_VALIDATION = "1"

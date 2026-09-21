@@ -82,7 +82,7 @@ pub use identity::{Name, NameId, intern, resolve};
 pub use plugin::TransformPlugin;
 pub use propagation::{TransformPropagationScratch, compute_global_transform, propagate_transforms};
 pub use render_caps::{MaterialHandle, MaterialRefGen, MeshHandle, MeshRefGen, RenderEnabled, Visibility};
-pub use sets::{CameraSet, FixedSet};
+pub use sets::{CameraSet, FixedSet, VisibilitySet};
 pub use transform::{GlobalTransform, Transform};
 pub use visibility_sync::visibility_sync;
 
@@ -106,7 +106,7 @@ pub mod prelude {
     pub use crate::render_caps::{
         MaterialHandle, MaterialRefGen, MeshHandle, MeshRefGen, RenderEnabled, Visibility,
     };
-    pub use crate::sets::{CameraSet, FixedSet};
+    pub use crate::sets::{CameraSet, FixedSet, VisibilitySet};
     pub use crate::transform::{GlobalTransform, Transform};
     pub use crate::visibility_sync::visibility_sync;
 }

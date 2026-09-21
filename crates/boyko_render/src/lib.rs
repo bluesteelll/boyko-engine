@@ -550,8 +550,8 @@ pub use particle_system::{
 pub use occlusion_marker::{OcclusionCulling, VB_INST_FLAG_OCCLUSION_CULLING};
 pub use occlusion_plugin::OcclusionPlugin;
 pub use instance_model::{
-    INSTANCE_MODEL_COL_BYTES, InstanceModelCol, VB_INSTANCE_ROW_BYTES, VbInstanceRow,
-    sync_instance_model_cols,
+    INSTANCE_MODEL_COL_BYTES, InstanceModelCol, InstancePackSet, VB_INSTANCE_ROW_BYTES,
+    VbInstanceRow, sync_instance_model_cols,
 };
 // HW-RT rung 3b / TAA rung D1: the previous-frame model-affine sibling + its copy system
 // (temporal motion vectors). Un-walled from `hwrt` (D1) — see `PrevInstanceModelCol`'s own doc
@@ -568,7 +568,7 @@ pub use mesh_draw::{
     PerInstanceMaterial, PerInstanceMaterialTex, gather_mesh_draws, sync_vb_instance_ring_system,
 };
 pub use light_plugin::LightingPlugin;
-pub use light_reconcile::light_reconcile;
+pub use light_reconcile::{LightReconcileSet, light_reconcile};
 pub use render3d_plugin::Render3dPlugin;
 pub use gpu_column::{GpuColumnManager, GpuColumnMeta, LOCAL_SIZE_X, ResolvedColumn, RhiContext};
 pub use gpu_system::{GpuSystem, gpu_integrate_spirv};

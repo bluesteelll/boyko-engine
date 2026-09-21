@@ -9,7 +9,9 @@ use boyko_ecs::ecs::core::app::CoreSchedule;
 use boyko_ecs::ecs::core::log::LogPlugin;
 use boyko_ecs::ecs::core::profiling::{ArmOutcome, Profiler, ProfilerConfig, ProfilerPlugin};
 use boyko_ecs::{App, Plugin};
-use boyko_render::instance_model::sync_instance_model_cols;
+use boyko_render::instance_model::{InstancePackSet, sync_instance_model_cols};
+use boyko_render::light_reconcile::LightReconcileSet;
+use boyko_render::shadow_atlas::PunctualResolveSet;
 // HW-RT rung 3b: the prev-frame model-affine copy system (temporal motion vectors), ordered
 // `.before` the affine pack below. `not(hwrt)` never compiles it.
 #[cfg(feature = "hwrt")]
@@ -28,7 +30,7 @@ use boyko_render::{
     gather_shadow_casters, reduce_caster_bounds, snap_apply, sync_cluster_light_gate,
     sync_csm_light_gate, sync_punctual_light_gate, sync_ssao_light_gate, sync_sv0_light_gate,
 };
-use boyko_scene::{CameraPlugin, CameraSet, FixedSet};
+use boyko_scene::{CameraPlugin, CameraSet, FixedSet, VisibilitySet};
 
 use crate::runner::{self, WindowDesc};
 use crate::timer_resolution::TimerResolutionGuard;
@@ -44,13 +46,19 @@ use crate::timer_resolution::TimerResolutionGuard;
 /// `resolve_active_camera` + `visibility_sync` with their ordering edges) and
 /// [`Render3dPlugin`], then registers the R3 mesh path —
 /// `sync_instance_model_cols` → `gather_mesh_draws` (edge-ordered) — AFTER
-/// them. The propagation → pack edge cannot be expressed explicitly
-/// (`propagate_transforms`'s `SystemKey` is only obtainable inside
-/// `CameraPlugin`'s own builder closure), so it is pinned by the documented
-/// cross-crate ADD-ORDER contract — and unlike the `Changed`-gated systems
-/// that contract usually covers, `sync_instance_model_cols` is UNCONDITIONAL:
-/// a wrong order would be a PERMANENT one-frame pose lag, not a
-/// self-correcting stagger. The add-order here IS the pin; do not reorder.
+/// them. Add-order is NOT an ordering pin: the executor orders two systems that
+/// have no path between them by its wave packing, which any unrelated edge can
+/// reshuffle (measured: one added edge between two lighting systems flipped the mesh
+/// gather and `visibility_sync` on the `hwrt` leg, and with them whether frame 0 drew
+/// any mesh). Every cross-plugin reader → writer
+/// dependency of the render path is therefore a named set edge declared in `build`:
+/// `VisibilitySet::Validate` after `VisibilitySet::Sync` and `VisibilitySet::Read` after
+/// both (the `RenderEnabled` bit: set by `visibility_sync`, cleared on a stale row by
+/// `validate_asset_refs`), `InstancePackSet` after `CameraSet::Resolve` (the propagated
+/// `GlobalTransform`), `LightReconcileSet` after `CameraSet::Resolve` (the light's
+/// `GlobalTransform`), the CSM fit / punctual resolve after `CameraSet::Resolve`
+/// (`ViewUniform`), and both of those after `LightReconcileSet` (the sun direction; the
+/// point / spot poses the atlas ranks).
 /// Do NOT also add `CameraPlugin` / `TransformPlugin` / `Render3dPlugin` /
 /// `LightingPlugin` / `CsmPlugin` yourself — a duplicate plugin panics.
 ///
@@ -646,9 +654,10 @@ impl Plugin for EnginePlugins {
         // The R3 mesh path: pack GlobalTransform → InstanceModelCol, then
         // bucket the visible instances into the reused MeshRenderScratch the
         // runner uploads from. The pack → gather edge is explicit; the
-        // propagation → pack edge is the ADD-ORDER pin above (the pack is
-        // UNCONDITIONAL, so a wrong order would be a permanent one-frame pose
-        // lag — see the type-level Composition doc).
+        // propagation → pack and `visibility_sync` → reader edges are the named
+        // set edges at the end of this closure (the pack is UNCONDITIONAL, so a
+        // wrong order would be a permanent one-frame pose lag — see the
+        // type-level Composition doc).
         //
         // R4 adds the caster half in the SAME closure so its edges are
         // expressible: `gather_shadow_casters` (the `With<ShadowCaster>`
@@ -661,7 +670,7 @@ impl Plugin for EnginePlugins {
         // (static + interpolated), so `snap_apply` must run BEFORE it: the collapsed
         // `curr == prev` a teleport lands is what the unified gather reads into the
         // pair lanes THIS frame. The single gather runs `.after(pack)` (the affine
-        // pack — add-order cross-schedule note above) AND `.after(snap)`; it emits
+        // pack) AND `.after(snap)`; it emits
         // ONE batch list + ONE ring, recording each interpolated row's pair +
         // out-slot, so the runner arms interp only when `dynamic_count() > 0`.
         app.insert_resource(MeshRenderScratch::default());
@@ -673,15 +682,20 @@ impl Plugin for EnginePlugins {
         #[cfg(feature = "hwrt")]
         app.insert_resource(MotionCamState::default());
         app.add_systems_cfg(|b| {
-            let pack = b.add_system(sync_instance_model_cols).key();
+            let pack = b
+                .add_system(sync_instance_model_cols)
+                .in_set(InstancePackSet)
+                .in_set(VisibilitySet::Read)
+                .key();
             // HW-RT rung 3b: `prev := curr` MUST run BEFORE the affine pack refreshes `curr`
             // from this frame's moving `GlobalTransform`, so a mesh's motion vector is this
             // frame's true per-object displacement (else `prev == curr`, zero motion, every
             // box ghosts under its own motion). Dormant until a scene carries the
             // `PrevInstanceModelCol` column (0%-gate).
             #[cfg(feature = "hwrt")]
-            b.add_system(sync_prev_instance_model_cols).before(pack);
-            let casters = b.add_system(gather_shadow_casters).after(pack).key();
+            b.add_system(sync_prev_instance_model_cols).before(pack).in_set(VisibilitySet::Read);
+            let casters =
+                b.add_system(gather_shadow_casters).after(pack).in_set(VisibilitySet::Read).key();
             b.add_system(sync_csm_light_gate).after(casters);
             // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5: `reduce_caster_bounds`
             // is the UNWIRED EXPORTED API `CsmPlugin` deliberately does not register (mirrors
@@ -763,7 +777,73 @@ impl Plugin for EnginePlugins {
             // collapse (snap-before-gather is load-bearing — the gather reads the
             // collapsed pair).
             let snap = b.add_system(snap_apply).key();
-            b.add_system(gather_mesh_draws).after(pack).after(snap);
+            b.add_system(gather_mesh_draws).after(pack).after(snap).in_set(VisibilitySet::Read);
+
+            // ── Every render reader runs after its writer (R4-frame-order) ──────────────────────
+            //
+            // Each edge below orders a reader after the system that writes what it reads, where
+            // the two are registered by different plugins and so can only meet by set name. None
+            // of these pairs had an ordering path before: each was decided by the executor's wave
+            // packing, which is a function of the whole graph, so an unrelated edge could flip
+            // it. MEASURED on the golden host: `gather_mesh_draws` ran before `visibility_sync`,
+            // drew 0 of 7 meshes on frame 0, and TAA carried that frame into its history on both
+            // feature legs; one edge added between two lighting systems flipped the pair on the
+            // `hwrt` leg only. Declared here, not in the plugins, because this is the one
+            // composition that populates every set named (an edge naming a memberless set warns
+            // `boyko-W1501`). Each is pinned by a `tests/host_orders_*.rs` gate that declares the
+            // reverse edge and expects the ordering cycle; `tests/host_frame_zero_draws_every_mesh.rs`
+            // pins the frame-0 consequence.
+            //
+            // `RenderEnabled`: `visibility_sync` (`VisibilitySet::Sync`) sets the bit through a
+            // deferred command; every system that only filters on `Enabled<RenderEnabled>` joins
+            // `VisibilitySet::Read`: both instance packs, `sync_prev_instance_model_cols`, and the
+            // caster and mesh gathers. The readers declare their writer here; the same order is
+            // also implied by the two `Validate` edges below, so this line alone cannot be made
+            // to fail (its gate goes red with this line and one of those deleted) — it stays as
+            // the readers' own declaration, which a transitive path is not.
+            b.configure_set(VisibilitySet::Read).after(VisibilitySet::Sync);
+            // `RenderEnabled`, the other writer (R4b-open-edges): `validate_asset_refs`
+            // (`VisibilitySet::Validate`) walks the rows `visibility_sync` enabled and clears the
+            // bit on a stale mesh row (`asset_refcount.rs`, `DisableStaleMeshCommand`), both
+            // through deferred commands. Validation after the sync, so a row it would skip as
+            // not-yet-enabled is not enabled right after it (a stale mesh would then stay enabled
+            // until `free_epoch` next advanced); the readers after validation, so a gather does
+            // not draw a row the validation disabled this frame. Validation cannot simply join
+            // `Read`: a member shared by two ordered sets is rejected (`boyko-B9004`).
+            b.configure_set(VisibilitySet::Validate).after(VisibilitySet::Sync);
+            b.configure_set(VisibilitySet::Read).after(VisibilitySet::Validate);
+            // `GlobalTransform`: both instance packs copy it into their instance columns, and
+            // `propagate_transforms` (in `CameraSet::Resolve`) writes it. The packs are also after
+            // propagation through `visibility_sync` (itself `.after(propagate)`), but that edge
+            // carries no data and is not this dependency's declaration.
+            b.configure_set(InstancePackSet).after(CameraSet::Resolve);
+            // `GlobalTransform`, the lights' (R4b-open-edges): `light_reconcile` derives each
+            // light's `direction` / `position` from it (`light_reconcile.rs`, the three
+            // `&GlobalTransform` queries in its signature, read in its three loops), and
+            // `propagate_transforms` writes it. Unordered, the frame-0 light table carried the
+            // identity pose's direction for a sun spawned with a posed `Transform` and an identity
+            // `GlobalTransform` (measured, `docs/OPEN-QUESTIONS.md` 2026-09-19 (b)); wherever the
+            // wrong order holds on a later frame (not measured), a moving light's pose trails its
+            // transform by one frame for as long as it moves.
+            b.configure_set(LightReconcileSet).after(CameraSet::Resolve);
+            // `ViewUniform`: written by `resolve_active_camera` (in `CameraSet::Resolve`), read by
+            // the CSM fit and by the punctual atlas ranking. Both halves are also implied today by
+            // other chains — the CSM half by the pack edge above (`InstancePackSet →
+            // gather_shadow_casters → reduce_caster_bounds → CsmResolveSet`) and, since R4b, both
+            // halves by the reconcile edges (`LightReconcileSet` after `CameraSet::Resolve`, and
+            // the fit / the resolve after `LightReconcileSet`, below) — so their gates pin the
+            // order rather than these lines alone (each goes red only with every path cut). They
+            // stay as the fit's and the resolve's own declarations, which those unrelated chains
+            // are not.
+            b.configure_set(CsmResolveSet).after(CameraSet::Resolve);
+            b.configure_set(PunctualResolveSet).after(CameraSet::Resolve);
+            // `DirectionalLight::direction`: written by `light_reconcile`, read by the CSM fit.
+            b.configure_set(CsmResolveSet).after(LightReconcileSet);
+            // `SpotLight` / `PointLight` `position` and `SpotLight::direction` (R4b-open-edges):
+            // written by `light_reconcile`, read by the punctual atlas ranking and fit
+            // (`shadow_atlas.rs`, `spot_priority` / `spot_input_from`). A ranking that runs first
+            // ranks a moving light from last frame's pose.
+            b.configure_set(PunctualResolveSet).after(LightReconcileSet);
         });
 
         // The D4 ordering seam: engine Fixed snapshots run AFTER user Fixed

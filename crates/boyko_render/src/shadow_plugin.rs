@@ -22,7 +22,7 @@ use crate::shadow_atlas::{
 /// `resolve_csm_cascades`. This plugin is the spot/point analogue: owner-set `ShadowConfig`
 /// plus derived `ResolvedShadowAtlas` plus the cold `resolve_shadow_atlas`.
 ///
-/// # Add-order contract (cross-plugin ordering vs. camera + light)
+/// # Ordering contract (cross-plugin ordering vs. camera + light)
 ///
 /// `resolve_shadow_atlas` reads the engine-derived
 /// [`ViewUniform`](boyko_scene::ViewUniform) (written by `resolve_active_camera` in
@@ -30,17 +30,22 @@ use crate::shadow_atlas::{
 /// [`SpotLight`](crate::light::SpotLight) + [`GlobalTransform`](boyko_scene::GlobalTransform)
 /// poses (reconciled by `light_reconcile` in
 /// [`LightingPlugin`](crate::light_plugin::LightingPlugin)), so it should run AFTER both. Those
-/// ordering edges CANNOT be expressed here: a `.after(key)` edge needs the target system's
+/// edges CANNOT be expressed by key here: a `.after(key)` edge needs the target system's
 /// `SystemKey`, obtainable only at the `add_system` call site inside the OWNING plugin's
 /// closure (and `add_system` does NOT dedup — re-registering those systems here would
-/// double-run them). This is the SAME add-order discipline
-/// [`CsmPlugin`](crate::csm_plugin::CsmPlugin) documents.
+/// double-run them).
+///
+/// Both edges are pinned by name: the resolve joins [`PunctualResolveSet`], and the
+/// composing app configures `PunctualResolveSet.after(CameraSet::Resolve)` and
+/// `PunctualResolveSet.after(LightReconcileSet)`
+/// ([`LightReconcileSet`](crate::light_reconcile::LightReconcileSet); `boyko_app::EnginePlugins`
+/// does both), so the priority ranking uses THIS frame's camera position and THIS frame's
+/// light `position` / `direction`. Unordered, the light-pose pair was whatever the executor's
+/// wave packing made it, and a light that moves could be ranked from last frame's pose.
 ///
 /// **Add `ShadowAtlasPlugin` together with [`CameraPlugin`](boyko_scene::CameraPlugin) and
-/// [`LightingPlugin`](crate::light_plugin::LightingPlugin)** so the host schedule resolves the
-/// camera + reconciles the spot poses before the atlas fit. The fit is recomputed every frame
-/// from cold owner state, so a loose one-frame stagger (a fit off a one-frame-stale view /
-/// pose) is self-correcting — and the default config is DISABLED, so until the owner enables
+/// [`LightingPlugin`](crate::light_plugin::LightingPlugin)**, and declare those two set edges
+/// if you compose them by hand. The default config is DISABLED, so until the owner enables
 /// shadows the policy writes the all-zero selection regardless of order.
 ///
 /// When the Inc-1-GPU depth pass + resolve land, the consumer that READS

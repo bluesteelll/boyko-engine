@@ -18,6 +18,55 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-09-21 — What R4 / R4b leave to the kernel lane K: the pairs the light-table lane did not order, and why
+
+Lane `fix/light-table-defects`, R4-frame-order and R4b-open-edges. The diagnosis behind R4 (an
+ordering edge that carried no data moved six hwrt TAA goldens, because `gather_mesh_draws` and
+`visibility_sync` had no ordering path and frame 0 drew no meshes) listed every unordered pair of
+the hwrt `taa_jitter_eval` host's `Main` schedule: 236 pairs, 33 of them with a declared access
+conflict. This lane declared the cross-plugin reader → writer pairs it could show in code, and
+hands the rest to lane K.
+
+**Declared here**, each as a named set edge in `EnginePlugins::build`
+(`crates/boyko_app/src/plugins.rs`) with a `crates/boyko_app/tests/host_orders_*.rs` cycle gate:
+the `RenderEnabled` readers after `visibility_sync` and after `validate_asset_refs`
+(`VisibilitySet::{Sync, Validate, Read}`; the validation both reads the bit and clears it on a
+stale row), the instance packs after propagation, `light_reconcile` after propagation, and the CSM
+fit and the punctual atlas resolve after the camera resolve and after `light_reconcile`.
+
+Two of these edges moved goldens: the 14 TAA pin-legs re-blessed on 2026-09-21 (`goldens/PINS.toml`,
+the `[taa_armed]` note and its siblings) had pinned a frame 0 that drew no meshes (the
+`visibility_sync` / reader order, R4's E1) AND was lit from the sun's identity `GlobalTransform`
+(`light_reconcile` before `propagate_transforms`, the 2026-09-19 (b) measurement below, R4b's edge
+C); every note states both causes, the pixel count, and, for hwrt, the mesh-only value the G2 edge
+alone had produced.
+
+**Left unordered, by ruling (2026-09-20, R4 §6), with the reason:**
+
+- `select_lighting_cull` vs `light_reconcile`: **unordered, no shared data.** The cull
+  (`crates/boyko_render/src/light_policy.rs`, `select_lighting_cull`'s two queries) reads
+  `IsEnabled<LightEnabled>` under structural `With<PointLight>` / `With<SpotLight>` filters and
+  reads no field of either component; the reconcile (`crates/boyko_render/src/light_reconcile.rs`,
+  `light_reconcile`'s three loops) writes only `position` / `direction` and never touches
+  `LightEnabled`. The diagnosis flagged the pair only because `With<C>` conservatively declares a
+  read of `C` (`crates/boyko_ecs/src/ecs/core/iters/query/filter.rs`, `With`'s "Access surface"
+  doc); the bytes the two systems touch are disjoint, so no order between them changes any output.
+- Every other pair in that list — the `LightingConfig` / `LightTableDirty` write/write cluster
+  among the lighting gates, `sync_csm_light_gate` vs the CSM fit on `ResolvedCsm`, `snap_apply`
+  vs the camera and caster controllers on `Transform`, the particle pack vs tick on
+  `ParticleClock`, and every pair one side of which is an exclusive system — is the class, not
+  the instance. **Lane K** makes the class a kernel gate (ambiguity detection, deterministic
+  apply, complete access declarations): `docs/scheduler/determinism-K/` (`00-DIAGNOSIS.md` is the
+  bisection, `00-RULINGS.md` the rulings; its "Lane order" cuts K after this lane merges, so the
+  ratchet's frozen set is taken with R4's edges in). Those documents landed on the integration
+  line as commit `d4213813` (`merge/ke16-into-ecsnative`) and are not on this lane's base
+  `1c31aeac`.
+
+**Nothing here is a question for the owner**; the entry is the hand-off record, so the next reader
+of an ambiguous pair in this schedule finds the ruling that left it and the lane that owns it.
+
+---
+
 ## 2026-09-19 — What R2 leaves behind: sibling defect R2c, and what the `grand_showcase_2mat` re-bless carried
 
 R2 (`docs/render/light-table-defects/R2-DESIGN.md`, lane `fix/light-table-defects`) makes the

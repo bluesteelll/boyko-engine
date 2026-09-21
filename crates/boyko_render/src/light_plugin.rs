@@ -7,7 +7,7 @@ use boyko_ecs::ecs::core::app::{App, Plugin};
 
 use crate::light::{DirectionalLight, LightTableDirty, PointLight, SkyLight, SpotLight};
 use crate::light_policy::{LightStats, select_lighting_cull};
-use crate::light_reconcile::light_reconcile;
+use crate::light_reconcile::{LightReconcileSet, light_reconcile};
 use crate::light_system::{
     LightCollectSet, LightTableGeneration, collect_lights, evict_light, light_seed_state,
 };
@@ -45,16 +45,25 @@ use crate::shadow_atlas::{PunctualResolveSet, PunctualSlotAssignment};
 /// [`CameraPlugin`](boyko_scene::CameraPlugin) co-registers `propagate_transforms`
 /// + `resolve_active_camera`.
 ///
-/// # Add-order contract (cross-schedule ordering vs. propagation)
+/// # Ordering contract (vs. propagation, and the pose's readers outside this plugin)
 ///
 /// `light_reconcile` reads the propagated `GlobalTransform`, so it must run AFTER
-/// `propagate_transforms`. That edge cannot be expressed here (the propagation
-/// system's key lives in `TransformPlugin` / `CameraPlugin`). **Add
-/// `LightingPlugin` together with `TransformPlugin` or `CameraPlugin`** so the
-/// host schedule runs propagation first. The `Changed<GlobalTransform>` gate on
-/// `light_reconcile` makes a loose one-frame ordering stagger self-correcting (a
-/// stale read re-fires next frame), but the intended order is propagate →
-/// reconcile → seed → collect.
+/// `propagate_transforms`. That edge cannot be expressed by key here (the propagation
+/// system's key lives in `TransformPlugin` / `CameraPlugin`), so it is pinned by name:
+/// `light_reconcile` joins [`LightReconcileSet`], and the composing host configures
+/// `LightReconcileSet.after(CameraSet::Resolve)` (`boyko_app::EnginePlugins` does; a host
+/// composing this plugin by hand declares the same edge). Add-order is NOT a pin: unordered,
+/// the pair is decided by the executor's wave packing, and the `Changed<GlobalTransform>`
+/// gate does not make a wrong order self-correcting — measured, the frame-0 light table
+/// carried the identity pose's direction for a sun spawned with a posed `Transform` and an
+/// identity `GlobalTransform` (`docs/OPEN-QUESTIONS.md`, 2026-09-19 (b)); wherever the wrong
+/// order holds on a later frame, a moving light's pose trails its transform by one frame for
+/// as long as it moves. The same set orders the pose's readers outside this plugin after the
+/// reconcile (the CSM fit and the punctual atlas resolve; see [`LightReconcileSet`]). Within
+/// this plugin the order is reconcile → seed → collect; `select_lighting_cull` and
+/// `light_reconcile` share no data (the cull counts `IsEnabled<LightEnabled>` rows under
+/// `With<PointLight>` / `With<SpotLight>` and reads no light field; the reconcile writes only
+/// `position` / `direction`), so that pair is left unordered.
 #[derive(Default)]
 pub struct LightingPlugin;
 
@@ -117,7 +126,11 @@ impl Plugin for LightingPlugin {
             // the GPU — see `LightCollectSet`'s own doc).
             let collect =
                 b.add_system(collect_lights).after_set(PunctualResolveSet).in_set(LightCollectSet).key();
-            b.add_system(light_reconcile).before(collect);
+            // `.in_set(LightReconcileSet)` is membership only, for the edges this plugin cannot
+            // express by key: after propagation (the pose's writer, in `CameraPlugin`), and before
+            // the pose's readers OUTSIDE this plugin (the CSM fit, the punctual atlas resolve).
+            // The composing app declares those set edges. See the set's doc.
+            b.add_system(light_reconcile).before(collect).in_set(LightReconcileSet);
             b.add_system(select_lighting_cull).before(collect);
             let mut seed_state = light_seed_state();
             b.add_system(move |w: &mut boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster| {

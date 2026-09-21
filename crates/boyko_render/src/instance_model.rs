@@ -31,7 +31,7 @@
 
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
-use boyko_macros::Component;
+use boyko_macros::{Component, SystemSet};
 use boyko_scene::GlobalTransform;
 use boyko_scene::render_caps::RenderEnabled;
 use bytemuck::{Pod, Zeroable};
@@ -114,6 +114,26 @@ pub fn sync_instance_model_cols(
         *col = InstanceModelCol::from_global(g);
     }
 }
+
+/// The `Main`-schedule ordering seam for the instance PACKS — the systems that copy the
+/// propagated [`GlobalTransform`] into a per-instance GPU column:
+/// [`sync_instance_model_cols`] and
+/// [`sync_gpu_3d_instances`](crate::gpu3d_system::sync_gpu_3d_instances).
+///
+/// # Why a named set, not add-order
+///
+/// Both packs read `GlobalTransform`, which `propagate_transforms` writes, so they must run
+/// after it — otherwise the instance column trails the transform by one frame, permanently
+/// (the packs are unconditional, not `Changed`-gated). Propagation's `SystemKey` lives in
+/// [`CameraPlugin`](boyko_scene::CameraPlugin) and the packs are registered elsewhere
+/// ([`Render3dPlugin`](crate::render3d_plugin::Render3dPlugin) and the composing host), so
+/// the edge is pinned by name: the packs join this set, and the composing host configures
+/// `InstancePackSet.after(CameraSet::Resolve)` (`boyko_app::EnginePlugins` does).
+///
+/// [`sync_prev_instance_model_cols`] is NOT a member: it copies the previous
+/// [`InstanceModelCol`], not `GlobalTransform`, and must run before the pack.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InstancePackSet;
 
 /// The per-entity PREVIOUS-frame model affine — a byte-identical dense sibling of
 /// [`InstanceModelCol`], carrying the transform the entity had LAST frame.

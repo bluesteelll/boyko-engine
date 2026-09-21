@@ -22,28 +22,28 @@ use crate::render_path_config::ResolvedRenderPath;
 /// cold `resolve_ssao_policy`. This plugin is the CSM analogue: owner-set `CsmConfig` plus
 /// derived `ResolvedCsm` plus the cold `resolve_csm_cascades`.
 ///
-/// # Add-order contract (cross-plugin ordering vs. camera + light)
+/// # Ordering contract (cross-plugin ordering vs. camera + light)
 ///
 /// `resolve_csm_cascades` reads the engine-derived [`ViewUniform`](boyko_scene::ViewUniform)
 /// (written by `resolve_active_camera` in
 /// [`CameraPlugin`](boyko_scene::CameraPlugin)) and the primary
 /// [`DirectionalLight`](crate::light::DirectionalLight) direction (reconciled by
 /// `light_reconcile` in [`LightingPlugin`](crate::light_plugin::LightingPlugin)), so it
-/// should run AFTER both. Those ordering edges CANNOT be expressed here: a `.after(key)`
-/// edge needs the target system's `SystemKey`, which is obtainable only at the `add_system`
-/// call site inside the OWNING plugin's closure (`SystemKey` is a per-builder descriptor
-/// index, and `add_system` does NOT dedup — re-registering `resolve_active_camera` /
-/// `light_reconcile` here would double-run them). This is the SAME add-order discipline
-/// [`LightingPlugin`](crate::light_plugin::LightingPlugin) documents for `light_reconcile`
-/// (after propagation) and [`Render3dPlugin`](crate::render3d_plugin::Render3dPlugin) for
-/// `sync_gpu_3d_instances`.
+/// must run AFTER both. Those edges CANNOT be expressed by key here: a `.after(key)` edge
+/// needs the target system's `SystemKey`, which is obtainable only at the `add_system` call
+/// site inside the OWNING plugin's closure (`SystemKey` is a per-builder descriptor index,
+/// and `add_system` does NOT dedup — re-registering `resolve_active_camera` /
+/// `light_reconcile` here would double-run them). They are pinned by name instead: the fit
+/// joins [`CsmResolveSet`], and the composing app
+/// configures `CsmResolveSet.after(CameraSet::Resolve)` and
+/// `CsmResolveSet.after(LightReconcileSet)` ([`LightReconcileSet`](crate::light_reconcile::LightReconcileSet))
+/// — `boyko_app::EnginePlugins` does. They live in the app, not here: each names a set this
+/// plugin does not populate, and an edge naming a memberless set warns `boyko-W1501`.
 ///
 /// **Add `CsmPlugin` together with [`CameraPlugin`](boyko_scene::CameraPlugin) and
-/// [`LightingPlugin`](crate::light_plugin::LightingPlugin)** so the host schedule resolves
-/// the camera + reconciles the sun before the cascade fit. The fit is recomputed every
-/// frame from cold owner state, so a loose one-frame stagger (a fit off a one-frame-stale
-/// view / sun) is self-correcting — and the default config is DISABLED, so until the owner
-/// enables CSM the policy writes the all-zero selection regardless of order.
+/// [`LightingPlugin`](crate::light_plugin::LightingPlugin)**, and declare those two set edges
+/// if you compose them by hand. The default config is DISABLED, so until the owner enables
+/// CSM the policy writes the all-zero selection regardless of order.
 ///
 /// When the Inc-1b depth pass + resolve land, the consumer that READS [`ResolvedCsm`]
 /// should be co-registered with `resolve_csm_cascades` in one closure so the

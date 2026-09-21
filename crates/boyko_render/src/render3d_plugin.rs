@@ -4,24 +4,29 @@
 //! [`LightingPlugin`](crate::light_plugin::LightingPlugin).
 
 use boyko_ecs::ecs::core::app::{App, Plugin};
+use boyko_scene::VisibilitySet;
 
 use crate::gpu3d_system::sync_gpu_3d_instances;
+use crate::instance_model::InstancePackSet;
 
 /// Registers
 /// [`sync_gpu_3d_instances`] — the
 /// system that packs each visible entity's `GlobalTransform` into its
 /// `Gpu3dInstance` column for upload.
 ///
-/// # Add-order contract (cross-schedule ordering vs. propagation)
+/// # Ordering contract (vs. propagation and `visibility_sync`)
 ///
 /// `sync_gpu_3d_instances` reads the propagated `GlobalTransform`, so it must run
-/// AFTER `propagate_transforms`. That ordering edge cannot be expressed here (the
-/// propagation system's `SystemKey` lives in `TransformPlugin` / `CameraPlugin`),
-/// so **add `Render3dPlugin` together with `TransformPlugin` or `CameraPlugin`** so
-/// the host schedule runs propagation first — the same add-order discipline
-/// [`LightingPlugin`](crate::light_plugin::LightingPlugin) documents for
-/// `light_reconcile`. The system's `Changed`-driven inputs make a loose one-frame
-/// stagger self-correcting (a stale read re-packs next frame).
+/// AFTER `propagate_transforms`; it filters on `Enabled<RenderEnabled>`, so it must
+/// run AFTER `visibility_sync`'s apply window. Neither edge can be expressed by key
+/// here (both systems' `SystemKey`s live in `TransformPlugin` / `CameraPlugin`), so
+/// the pack declares membership by name: it joins [`InstancePackSet`] and
+/// [`VisibilitySet::Read`], and the composing host configures
+/// `InstancePackSet.after(CameraSet::Resolve)` and `VisibilitySet::Read.after(VisibilitySet::Sync)`
+/// (`boyko_app::EnginePlugins` does). A host composing this plugin by hand declares
+/// the same two edges; without them the pack's position is whatever the executor's wave
+/// packing makes it, and the pack is unconditional, so a wrong position is a permanent
+/// one-frame lag, not a self-correcting stagger.
 ///
 /// # Scope
 ///
@@ -35,7 +40,9 @@ pub struct Render3dPlugin;
 impl Plugin for Render3dPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems_cfg(|b| {
-            b.add_system(sync_gpu_3d_instances);
+            b.add_system(sync_gpu_3d_instances)
+                .in_set(InstancePackSet)
+                .in_set(VisibilitySet::Read);
         });
     }
 
