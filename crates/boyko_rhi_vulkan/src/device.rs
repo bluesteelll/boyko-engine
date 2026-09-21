@@ -3176,7 +3176,7 @@ fn report_shadow_denoise_storage_unsupported(rg16_ok: bool, rg8_ok: bool) {
     if FIRED.claim() {
         boyko_log::warn!(
             boyko_log::RhiVulkan,
-            W2102.number(),
+            W2102,
             "shadow denoise disabled: RG16 UNORM storage unsupported (rg16_ok={}, rg8_ok={})",
             rg16_ok,
             rg8_ok

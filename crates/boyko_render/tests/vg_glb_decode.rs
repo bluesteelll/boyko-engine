@@ -146,16 +146,6 @@ fn every_out_of_subset_document_is_refused() {
             ),
         ),
         (
-            "u8 indices",
-            glb(
-                &triangle_json("", "").replace(
-                    r#"{"bufferView": 2, "componentType": 5123, "count": 3, "type": "SCALAR"}"#,
-                    r#"{"bufferView": 2, "componentType": 5121, "count": 3, "type": "SCALAR"}"#,
-                ),
-                &bin,
-            ),
-        ),
-        (
             "a missing NORMAL",
             glb(
                 &triangle_json("", "").replace(r#", "NORMAL": 1"#, ""),
@@ -173,6 +163,75 @@ fn every_out_of_subset_document_is_refused() {
              measuring a different scene than the manifest describes."
         );
     }
+}
+
+/// `u8` (`UNSIGNED_BYTE`) indices decode — and decode to the SAME triangle the `u16`
+/// fixture does.
+///
+/// This row used to sit in [`every_out_of_subset_document_is_refused`]. It was a gap, not a
+/// scope cut: `UNSIGNED_BYTE` is a legal glTF index type, exporters emit it for small
+/// primitives, and nothing about a one-byte index changes what the buffer holds. Asserting
+/// the decoded INDICES (not merely `is_ok`) is what makes this a widening rather than a
+/// permission — a decoder that read the bytes at the wrong stride would still be `Ok`.
+#[test]
+fn u8_indices_decode_to_the_same_triangle_as_u16() {
+    // Same bin, plus a 3-byte index block appended; the accessor points at it.
+    let mut bin = triangle_bin();
+    let u8_off = bin.len();
+    bin.extend_from_slice(&[0u8, 1, 2]);
+    let json = triangle_json("", "")
+        .replace(
+            r#"{"bufferView": 2, "componentType": 5123, "count": 3, "type": "SCALAR"}"#,
+            r#"{"bufferView": 3, "componentType": 5121, "count": 3, "type": "SCALAR"}"#,
+        )
+        .replace(
+            r#"{"buffer": 0, "byteOffset": 72, "byteLength": 6}"#,
+            &format!(
+                r#"{{"buffer": 0, "byteOffset": 72, "byteLength": 6}},
+    {{"buffer": 0, "byteOffset": {u8_off}, "byteLength": 3}}"#
+            ),
+        );
+    let mesh = GlbMeshLoader::decode(&glb(&json, &bin)).expect("u8 indices are in the subset now");
+    assert_eq!(mesh.indices, vec![0, 1, 2], "the u8 accessor must read as 0,1,2");
+    assert_eq!(mesh.vertices.len(), 3);
+}
+
+/// A SKINNED document: `decode` still refuses it, `decode_static_pose` returns its bind pose.
+///
+/// Both halves matter. The refusal is the contract §3.3 states — a rig the engine does not
+/// play must not be half-decoded behind the caller's back. The named opt-in is how a caller
+/// says "I want the bind pose, as a static mesh", which is a different request, not a
+/// weaker one.
+#[test]
+fn a_skinned_document_is_refused_by_decode_and_posed_by_decode_static_pose() {
+    let bin = triangle_bin();
+    let bytes = glb(
+        &triangle_json("", r#", "skins": [{"joints": [0]}], "animations": [{"channels": []}]"#),
+        &bin,
+    );
+    assert!(
+        GlbMeshLoader::decode(&bytes).is_err(),
+        "RED: the default decode accepted a skinned document — §3.3's refusal is the contract"
+    );
+    let posed = GlbMeshLoader::decode_static_pose(&bytes)
+        .expect("the bind pose is decodable through the named entry point");
+    assert_eq!(posed.indices, vec![0, 1, 2]);
+    assert_eq!(posed.vertices.len(), 3);
+}
+
+/// `decode_static_pose` relaxes exactly two rows — a required extension still fails, because
+/// Draco/meshopt make the buffers something this decoder cannot read at all.
+#[test]
+fn decode_static_pose_still_refuses_a_required_extension() {
+    let bin = triangle_bin();
+    let bytes = glb(
+        &triangle_json("", r#", "extensionsRequired": ["KHR_draco_mesh_compression"]"#),
+        &bin,
+    );
+    assert!(
+        GlbMeshLoader::decode_static_pose(&bytes).is_err(),
+        "RED: the bind-pose path accepted a Draco document"
+    );
 }
 
 /// A truncated or corrupt container must fail rather than read out of bounds.

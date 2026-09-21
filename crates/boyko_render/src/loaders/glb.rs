@@ -12,13 +12,48 @@
 //! # The subset, stated as a scope cut rather than discovered as a bug
 //!
 //! **Supported:** `mode == TRIANGLES`, `POSITION`, `NORMAL`, `TEXCOORD_0`,
-//! `TANGENT`, `COLOR_0`, and indexed primitives with `u16`/`u32` indices.
+//! `TANGENT`, `COLOR_0`, and indexed primitives with `u8`/`u16`/`u32` indices.
 //!
 //! **Unsupported, and a hard [`AssetError`] rather than a silent fallback:**
 //! sparse accessors, Draco/meshopt compression (any non-empty
 //! `extensionsRequired`), animation, skins, morph targets, non-triangle modes,
-//! non-indexed primitives, `u8` indices, and a scene graph that reaches one node twice
+//! non-indexed primitives, and a scene graph that reaches one node twice
 //! (a cycle or a shared subtree — this decoder emits each mesh exactly once).
+//!
+//! # `u8` indices, added 2026-08-26
+//!
+//! `UNSIGNED_BYTE` is a legal glTF index type and real exporters emit it for small
+//! primitives; refusing it was a gap in the subset, not a scope cut — nothing about a
+//! one-byte index makes the buffer something else. It widens to `u32` on read like the
+//! other two widths. MEASURED on a downloaded model whose four primitives mixed `u8` and
+//! `u16` indices: refused before, decodes now.
+//!
+//! # Materials and textures: [`GlbMeshLoader::decode_scene`]
+//!
+//! [`AssetLoader::decode`] concatenates every primitive into ONE mesh, which is what a
+//! density census wants and exactly wrong for a textured model: a glTF splits primitives
+//! BY MATERIAL, so the concatenation is the one operation that destroys the material
+//! assignment. [`GlbMeshLoader::decode_scene`] keeps them apart — one [`GlbPart`] per
+//! primitive, each naming its [`GlbMaterial`], plus the file's embedded images as RAW
+//! bytes.
+//!
+//! The images are handed over UNDECODED on purpose: this module decodes containers, not
+//! pictures, and the caller already owns an image path (`PngTextureLoader`) and the device
+//! it would upload to. A caller that cannot decode a given `mimeType` skips that slot and
+//! keeps the material's scalar factor — which is why [`GlbImage`] carries the MIME string
+//! rather than assuming.
+//!
+//! # Deformable files: [`GlbMeshLoader::decode_static_pose`]
+//!
+//! A rigged character's `POSITION` accessor holds its BIND POSE, which is a perfectly good
+//! static mesh — but reading it while ignoring `skins` is exactly the silent half-decode
+//! this subset exists to forbid, because the file describes something the engine did not
+//! render. So the default [`AssetLoader::decode`] keeps refusing, and the caller who wants
+//! the rest shape asks for it BY NAME through [`GlbMeshLoader::decode_static_pose`]: the
+//! same decode, with the three DEFORMATION rows (`skins`, `animations`, morph `targets`)
+//! tolerated and joints / weights / blend-shape deltas dropped. Per the glTF
+//! spec a skinned node's own transform is ignored (joint matrices already carry it), so
+//! that path places a skinned mesh at identity rather than baking the node's TRS.
 //!
 //! # The node transform is BAKED, not refused — and that distinction is the point
 //!
@@ -478,11 +513,15 @@ impl<'a> Accessor<'a> {
         out
     }
 
-    /// Reads element `i` as an index. `u8` is deliberately absent: §3.3's subset
-    /// is `u16`/`u32`.
+    /// Reads element `i` as an index, widening `u8`/`u16` to the engine's `u32`.
+    ///
+    /// All three unsigned widths are legal glTF index types (`UNSIGNED_BYTE` /
+    /// `UNSIGNED_SHORT` / `UNSIGNED_INT`); a float accessor in the index slot is not, and
+    /// stays a refusal.
     fn read_index(&self, i: usize) -> Result<u32, AssetError> {
         let o = self.base + i * self.stride;
         match self.comp {
+            Comp::U8 => Ok(u32::from(self.bin[o])),
             Comp::U16 => Ok(u16::from_le_bytes([self.bin[o], self.bin[o + 1]]) as u32),
             Comp::U32 => Ok(u32::from_le_bytes([
                 self.bin[o],
@@ -490,9 +529,6 @@ impl<'a> Accessor<'a> {
                 self.bin[o + 2],
                 self.bin[o + 3],
             ])),
-            Comp::U8 => Err(err(
-                "u8 indices are outside this decoder's subset (§3.3 names u16/u32)".to_string(),
-            )),
             Comp::F32 => Err(err("index accessor has a float componentType".to_string())),
         }
     }
@@ -738,7 +774,13 @@ fn resolve_instance_transform(root: &Json) -> Result<Vec<(usize, Mat4)>, AssetEr
         let node = &nodes[ni];
         let world = mat_mul(&parent, &node_matrix(node));
         if let Some(m) = node.usize_at("mesh") {
-            out.push((m, world));
+            // glTF §3.7.4: a SKINNED mesh node's own transform must be ignored — the joint
+            // matrices already carry the placement, so applying the node's TRS on top would
+            // transform the bind pose twice. Only reachable through `decode_static_pose`
+            // (`decode` refuses `skins` outright), and in practice exporters leave these
+            // nodes at identity anyway; the rule costs one lookup and removes the class.
+            let placement = if node.get("skin").is_some() { IDENTITY } else { world };
+            out.push((m, placement));
         }
         for c in node.arr_at("children") {
             if let Some(ci) = c.num().map(|n| n as usize) {
@@ -783,12 +825,18 @@ fn decode_primitive(
     bin: &[u8],
     prim: &Json,
     what: &str,
+    static_pose: bool,
 ) -> Result<(Vec<Vertex>, Vec<u32>), AssetError> {
     let mode = prim.u64_at("mode").unwrap_or(MODE_TRIANGLES);
     if mode != MODE_TRIANGLES {
         return Err(err(format!("{what}: mode {mode} is not TRIANGLES (§3.3)")));
     }
-    if !prim.arr_at("targets").is_empty() {
+    // Morph targets are DELTAS applied at animation-time weights; `POSITION` itself is the
+    // neutral shape. The static-pose path drops them for the same reason it drops joints —
+    // it decodes the geometry the file describes at rest — while the default decode keeps
+    // refusing, because silently ignoring a blend shape is silently rendering something
+    // else.
+    if !static_pose && !prim.arr_at("targets").is_empty() {
         return Err(err(format!("{what}: morph targets are outside this subset (§3.3)")));
     }
     let index_accessor = prim
@@ -876,12 +924,157 @@ fn decode_primitive(
 /// Decodes a `.glb` into the engine's [`MeshData`] intermediate.
 pub struct GlbMeshLoader;
 
+/// One embedded image from the file's `images` array, still in its container encoding.
+///
+/// `mime` is the glTF `mimeType` verbatim (`"image/png"`, `"image/jpeg"`, …) so the caller
+/// decides what it can decode; `bytes` is the exact `bufferView` slice.
+#[derive(Clone, Debug)]
+pub struct GlbImage {
+    /// The glTF `mimeType` string, verbatim.
+    pub mime: String,
+    /// The image's encoded bytes (PNG / JPEG / … container included).
+    pub bytes: Vec<u8>,
+}
+
+/// A glTF material, reduced to the channels this engine's PBR shading consumes.
+///
+/// Every texture field is an index into [`GlbScene::images`], not a texture index: the
+/// `texture` → `sampler` indirection carries wrap/filter state this engine does not vary,
+/// so it is resolved away here rather than handed on for the caller to re-resolve.
+#[derive(Clone, Copy, Debug)]
+pub struct GlbMaterial {
+    /// `pbrMetallicRoughness.baseColorFactor`, default opaque white.
+    pub base_color_factor: [f32; 4],
+    /// `pbrMetallicRoughness.metallicFactor`, default 1.0 (the glTF default).
+    pub metallic: f32,
+    /// `pbrMetallicRoughness.roughnessFactor`, default 1.0 (the glTF default).
+    pub roughness: f32,
+    /// `emissiveFactor`, default black.
+    pub emissive_factor: [f32; 3],
+    /// Image index of `baseColorTexture`, if any.
+    pub base_color_image: Option<usize>,
+    /// Image index of `normalTexture`, if any.
+    pub normal_image: Option<usize>,
+    /// Image index of `metallicRoughnessTexture` (glTF packs G = roughness, B = metallic).
+    pub metallic_roughness_image: Option<usize>,
+    /// Image index of `occlusionTexture` (R = occlusion).
+    pub occlusion_image: Option<usize>,
+    /// Image index of `emissiveTexture`.
+    pub emissive_image: Option<usize>,
+}
+
+impl Default for GlbMaterial {
+    /// The glTF defaults, which are NOT all-zero: an absent `pbrMetallicRoughness` means
+    /// white, fully metallic, fully rough.
+    fn default() -> Self {
+        Self {
+            base_color_factor: [1.0; 4],
+            metallic: 1.0,
+            roughness: 1.0,
+            emissive_factor: [0.0; 3],
+            base_color_image: None,
+            normal_image: None,
+            metallic_roughness_image: None,
+            occlusion_image: None,
+            emissive_image: None,
+        }
+    }
+}
+
+/// One primitive's geometry plus the material it names — the unit a textured model is
+/// drawn in.
+#[derive(Clone, Debug)]
+pub struct GlbPart {
+    /// Model-space geometry, with this primitive's node placement already baked in.
+    pub mesh: MeshData,
+    /// Index into [`GlbScene::materials`], or `None` for a primitive with no material.
+    pub material: Option<usize>,
+}
+
+/// A decoded `.glb`, kept in the pieces the file describes.
+#[derive(Clone, Debug)]
+pub struct GlbScene {
+    /// One entry per primitive, in file order.
+    pub parts: Vec<GlbPart>,
+    /// The file's materials, indexed by [`GlbPart::material`].
+    pub materials: Vec<GlbMaterial>,
+    /// The file's embedded images, indexed by [`GlbMaterial`]'s image fields.
+    pub images: Vec<GlbImage>,
+}
+
 impl AssetLoader for GlbMeshLoader {
     type Out = MeshGpu;
 
     const EXTENSIONS: &'static [&'static str] = &["glb"];
 
     fn decode(bytes: &[u8]) -> Result<<Self::Out as Asset>::Cpu, AssetError> {
+        decode_document(bytes, false)
+    }
+}
+
+impl GlbMeshLoader {
+    /// Decodes a deformable file's REST SHAPE as a static mesh — `skins`, `animations` and
+    /// morph `targets` tolerated; joints, weights and blend-shape deltas dropped (see the
+    /// module doc for why this is a separate, named entry point rather than a relaxation of
+    /// [`AssetLoader::decode`]).
+    ///
+    /// Everything else is the same decode and the same refusals; a required extension
+    /// (Draco / meshopt) still fails here, because that one changes what the buffers are.
+    ///
+    /// # Errors
+    ///
+    /// Same set as [`AssetLoader::decode`] minus the `skins` / `animations` rows.
+    pub fn decode_static_pose(bytes: &[u8]) -> Result<MeshData, AssetError> {
+        decode_document(bytes, true)
+    }
+
+    /// Decodes the file into per-primitive parts + its materials + its embedded images —
+    /// what a TEXTURED model needs (see the module doc).
+    ///
+    /// # Errors
+    ///
+    /// The same set as [`AssetLoader::decode`].
+    pub fn decode_scene(bytes: &[u8]) -> Result<GlbScene, AssetError> {
+        decode_scene_impl(bytes, false)
+    }
+
+    /// [`Self::decode_scene`] with the deformation rows tolerated — the rest-shape twin of
+    /// [`Self::decode_static_pose`].
+    ///
+    /// # Errors
+    ///
+    /// The same set as [`Self::decode_static_pose`].
+    pub fn decode_scene_static_pose(bytes: &[u8]) -> Result<GlbScene, AssetError> {
+        decode_scene_impl(bytes, true)
+    }
+}
+
+/// The concatenating decode: every part's geometry appended into one mesh, indices
+/// offset — the shape `AssetLoader::decode` has always returned.
+///
+/// Byte-identical to the pre-split behaviour: `decode_scene_impl` walks the same
+/// placements in the same order and bakes the same transforms, so appending its parts in
+/// order reproduces the old buffer exactly.
+fn decode_document(bytes: &[u8], allow_skinned: bool) -> Result<MeshData, AssetError> {
+    let scene = decode_scene_impl(bytes, allow_skinned)?;
+    let mut vertices: Vec<Vertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    for part in scene.parts {
+        let base = vertices.len() as u32;
+        vertices.extend(part.mesh.vertices);
+        indices.extend(part.mesh.indices.into_iter().map(|k| k + base));
+    }
+    if indices.is_empty() {
+        return Err(err("the document decodes to zero triangles"));
+    }
+    Ok(MeshData { vertices, indices })
+}
+
+/// The shared decode. `allow_skinned` relaxes exactly the three DEFORMATION rows —
+/// `skins`, `animations`, and per-primitive morph `targets` — and nothing else; see
+/// [`GlbMeshLoader::decode_static_pose`].
+fn decode_scene_impl(bytes: &[u8], allow_skinned: bool) -> Result<GlbScene, AssetError> {
+    {
         let (json_bytes, bin) = split_chunks(bytes)?;
         let root = parse_json(json_bytes).map_err(|e| err(format!("glb JSON: {e}")))?;
 
@@ -899,6 +1092,11 @@ impl AssetLoader for GlbMeshLoader {
             ("animations", "animation"),
             ("skins", "skins"),
         ] {
+            // `decode_static_pose` keeps the extension row and drops the two animation rows:
+            // a rig it does not play is not a reason to refuse the geometry it poses.
+            if allow_skinned && (key == "animations" || key == "skins") {
+                continue;
+            }
             if !root.arr_at(key).is_empty() {
                 return Err(err(format!(
                     "{why} is outside this decoder's subset (§3.3): `{key}` is non-empty"
@@ -912,8 +1110,7 @@ impl AssetLoader for GlbMeshLoader {
             return Err(err("the document contains no mesh"));
         }
 
-        let mut vertices: Vec<Vertex> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
+        let mut parts: Vec<GlbPart> = Vec::new();
 
         for (mesh_index, xform) in &placements {
             let mesh = meshes
@@ -921,8 +1118,7 @@ impl AssetLoader for GlbMeshLoader {
                 .ok_or_else(|| err(format!("node references mesh {mesh_index}, which does not exist")))?;
             for (pi, prim) in mesh.arr_at("primitives").iter().enumerate() {
                 let what = format!("mesh {mesh_index} primitive {pi}");
-                let base = vertices.len() as u32;
-                let (mut vs, is) = decode_primitive(&root, bin, prim, &what)?;
+                let (mut vs, is) = decode_primitive(&root, bin, prim, &what, allow_skinned)?;
 
                 // BAKE this placement into model space. The engine places instances itself, so a
                 // transform left in the file would be data nothing consumes -- and DROPPING it is
@@ -947,17 +1143,99 @@ impl AssetLoader for GlbMeshLoader {
                     }
                 }
 
-                vertices.extend(vs);
-                indices.extend(is.into_iter().map(|k| k + base));
+                parts.push(GlbPart {
+                    mesh: MeshData { vertices: vs, indices: is },
+                    material: prim.usize_at("material"),
+                });
             }
         }
 
-        if indices.is_empty() {
+        if parts.iter().all(|p| p.mesh.indices.is_empty()) {
             return Err(err("the document decodes to zero triangles"));
         }
 
-        Ok(MeshData { vertices, indices })
+        let materials = decode_materials(&root);
+        let images = decode_images(&root, bin);
+        Ok(GlbScene { parts, materials, images })
     }
+}
+
+/// Reads the `materials` array into [`GlbMaterial`]s, resolving every texture reference
+/// through `textures[i].source` to an image index.
+///
+/// Never fails: an out-of-range or malformed reference yields `None` for that slot and the
+/// material keeps its factor. A file whose material table is broken should render untextured,
+/// not refuse to load — the geometry is still exactly what the file says.
+fn decode_materials(root: &Json) -> Vec<GlbMaterial> {
+    let textures = root.arr_at("textures");
+    let image_of = |tex_ref: Option<&Json>| -> Option<usize> {
+        let index = tex_ref?.usize_at("index")?;
+        textures.get(index)?.usize_at("source")
+    };
+    let vec4 = |v: Option<&Json>, fallback: [f32; 4]| -> [f32; 4] {
+        let Some(arr) = v.and_then(Json::arr) else {
+            return fallback;
+        };
+        let mut out = fallback;
+        for (i, slot) in out.iter_mut().enumerate() {
+            if let Some(n) = arr.get(i).and_then(Json::num) {
+                *slot = n as f32;
+            }
+        }
+        out
+    };
+    root.arr_at("materials")
+        .iter()
+        .map(|m| {
+            let pbr = m.get("pbrMetallicRoughness");
+            let mut out = GlbMaterial {
+                base_color_factor: vec4(pbr.and_then(|p| p.get("baseColorFactor")), [1.0; 4]),
+                metallic: pbr
+                    .and_then(|p| p.get("metallicFactor"))
+                    .and_then(Json::num)
+                    .unwrap_or(1.0) as f32,
+                roughness: pbr
+                    .and_then(|p| p.get("roughnessFactor"))
+                    .and_then(Json::num)
+                    .unwrap_or(1.0) as f32,
+                ..GlbMaterial::default()
+            };
+            let emissive = vec4(m.get("emissiveFactor"), [0.0, 0.0, 0.0, 0.0]);
+            out.emissive_factor = [emissive[0], emissive[1], emissive[2]];
+            out.base_color_image = image_of(pbr.and_then(|p| p.get("baseColorTexture")));
+            out.metallic_roughness_image =
+                image_of(pbr.and_then(|p| p.get("metallicRoughnessTexture")));
+            out.normal_image = image_of(m.get("normalTexture"));
+            out.occlusion_image = image_of(m.get("occlusionTexture"));
+            out.emissive_image = image_of(m.get("emissiveTexture"));
+            out
+        })
+        .collect()
+}
+
+/// Slices the `images` array out of the BIN chunk, in file order.
+///
+/// An image referenced by `uri` rather than `bufferView` yields an EMPTY entry (kept, so
+/// the indices materials carry stay valid) — a `.glb` may legally point at a file next to
+/// it, and this decoder reads one container, not a directory.
+fn decode_images(root: &Json, bin: &[u8]) -> Vec<GlbImage> {
+    let views = root.arr_at("bufferViews");
+    root.arr_at("images")
+        .iter()
+        .map(|img| {
+            let mime = img.str_at("mimeType").unwrap_or_default().to_string();
+            let bytes = img
+                .usize_at("bufferView")
+                .and_then(|vi| views.get(vi))
+                .and_then(|view| {
+                    let off = view.usize_at("byteOffset").unwrap_or(0);
+                    let len = view.usize_at("byteLength")?;
+                    bin.get(off..off.checked_add(len)?).map(<[u8]>::to_vec)
+                })
+                .unwrap_or_default();
+            GlbImage { mime, bytes }
+        })
+        .collect()
 }
 
 #[cfg(test)]

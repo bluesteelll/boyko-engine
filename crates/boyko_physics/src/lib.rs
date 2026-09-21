@@ -70,7 +70,7 @@ pub use components::{
 pub use manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 pub use math::{MAX_CONTACT_POINTS, Mat3, Quat, Vec3};
 pub use plugin::{
-    PhysicsStageKeys, SceneSyncKeys, add_physics_colored, add_physics_colored_solve,
+    PhysicsPlugin, PhysicsStageKeys, SceneSyncKeys, add_physics_colored, add_physics_colored_solve,
     add_physics_sdf, add_physics_soft, add_physics_soft_colored, add_physics_systems,
     add_physics_systems_with_scene_sync,
 };

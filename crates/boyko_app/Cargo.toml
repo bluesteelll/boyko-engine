@@ -58,6 +58,18 @@ profiling-census = ["boyko-render/profiling-census"]
 profiling-alloc = []
 
 [dev-dependencies]
+# The interactive playground example (`examples/playground.rs`) — the first scene to
+# drive the in-house rigid solver from the windowed host, via `boyko_physics::PhysicsPlugin`.
+# DEV-ONLY on purpose: the host's layering invariant (see the manifest header) says
+# `boyko_app` sequences the frame and mints tokens; it owns no simulation. An example is a
+# CONSUMER of the engine, not part of it, so this edge exists for `--examples`/`--tests`
+# builds and never for a shipping host build.
+boyko-physics = { path = "../boyko_physics" }
+# The playground example's on-screen key hints: the text is rasterised at startup from
+# this crate's MTSDF bake (`bake_font`) into an ordinary RGBA8 texture, because the ECS UI
+# stack cannot reach the windowed screen yet (see the example's module doc). A leaf crate
+# with no deps of its own, and dev-only like the physics edge above.
+boyko-fontbake = { path = "../boyko_fontbake" }
 # Rung L8b: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` block in `diag.rs`
 # that asserts each migrated reporter emits, emits ONCE where its row says `Once`, and carries its
 # arguments. A dev-dependency, so the feature reaches this crate's test targets and never a
