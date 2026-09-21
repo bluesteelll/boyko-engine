@@ -32,7 +32,18 @@ profiling-census = []
 # the test targets compile, because the integration tests are separate crates
 # where the lib's `cfg(test)` guard is NOT active.
 default = []
-goldens = []
+# GOLDEN-EDSL P0 (step 1): the feature also arms the OPTIONAL `boyko_shaderdsl` edge below, so
+# `goldens::golden_ssao_attributes_derived` can instantiate the eDSL's generic SSAO bodies over
+# the `f32` Eval backend. What the gate actually buys, stated precisely: a default/production
+# build links no oracle module and no DIRECT `boyko_shaderdsl` edge — but it does NOT keep the
+# eDSL crate out of the shipped binary, because `boyko_sdf_math` (an UNCONDITIONAL normal dep of
+# this crate) depends on `boyko_shaderdsl` unconditionally and delegates its `f32` Eval paths to
+# it (`boyko_sdf_math/src/brick.rs` → `boyko_shaderdsl::brick::decode_snorm8`). MEASURED:
+# `cargo tree -p boyko_rhi_vulkan -e normal` with NO features prints
+# `boyko_sdf_math → boyko_shaderdsl`; `--depth 1` prints zero direct `boyko_shaderdsl` rows
+# without the feature and one with it. So the feature adds NO crate to a shipped build that was
+# not already there; it gates the host-mirror code and this crate's own direct use of the eDSL.
+goldens = ["dep:boyko_shaderdsl"]
 # HW-RT rung R2a-1: the hardware ray-tracing FFI surface (the RT extension enable,
 # the raw-FFI acceleration-structure structs/PFNs in `accel_ffi.rs`, the
 # `BoundAccelStruct` + the Vulkan AS verb overrides in `accel.rs`, and the real
@@ -59,6 +70,16 @@ boyko_rhi = { path = "../boyko_rhi" }
 # the rung-8/9/10/11 golden mirror in `compute.rs` folds and that `boyko_physics`
 # (W5) reuses for CPU SDF-collision queries WITHOUT depending on this crate.
 boyko_sdf_math = { path = "../boyko_sdf_math" }
+
+# GOLDEN-EDSL P0 (step 1): the in-house shader eDSL, OPTIONAL and armed ONLY by the `goldens`
+# feature (see `[features]`), so the derived SSAO oracle in `crate::goldens` can instantiate the
+# same generic `<C: Cf>` bodies the HLSL is emitted from over the `f32` Eval backend. The
+# rationale is the `boyko_sdf_math` block above's: a leaf with ZERO third-party deps (its
+# `[dependencies]` table is empty), so it breaches no constraint this crate holds itself to. The
+# `emit` feature is deliberately NOT named here: the lib needs only the Eval path; the dev-dep
+# below (with `emit`) stays, and Cargo unifies both rows into ONE copy with `emit` ON for the
+# crate's own test targets only. `compute.rs` (the shipped surface) still never names the eDSL.
+boyko_shaderdsl = { path = "../boyko_shaderdsl", optional = true, default-features = false }
 
 # The profiling substrate (profiling rung 5). The SECOND new edge in this campaign, and the
 # rationale is the `boyko_sdf_math` block above's: a `no_std`, graphics-free leaf with ZERO
