@@ -67,6 +67,112 @@ of an ambiguous pair in this schedule finds the ruling that left it and the lane
 
 ---
 
+## 2026-09-19 — Three pre-existing findings the light-table lane surfaced and did not fix
+
+Lane `fix/light-table-defects` (R1, R2, R2b, R3, and the R2b seed → fit edge). All three predate
+the lane and none is fixed by it. (a) and (b) are questions; (c) adds a failure mode and a rate to an
+entry that already exists.
+
+### (a) A light spawned between frames through a world-level `run_system` is never enabled, and nothing says so
+
+**Measured.** `crates/boyko_render/tests/primary_directional.rs`, as first written for R2, spawned
+its suns with `app.world_mut().run_system(|mut cmds: Commands| …)`. T1's sun was spawned before the
+first `app.update()`, and the seed enabled it. T2's two suns were spawned between `app.update()`
+calls several frames later, and the seed never enabled them, so neither reached the light table and
+the test panicked at `:272` ("T2: two enabled suns") for both the R2 and the R2b tester. A copy that
+set the bits itself passed. The test now sets them itself (review C1), so it no longer shows the gap.
+
+**Why, read from the code (not separately measured).** After its one first-run full scan,
+`LightSeedState::seed` (`crates/boyko_render/src/light_system.rs`) finds new lights only through
+four `Added<*Light>` sub-systems, and `run_added` stamps their window itself:
+`(previous pass's end, world.current_tick()]`. The second pass is the exception: the sub-systems
+are first initialized there, with a start `MAX_CHANGE_AGE` ticks back, so it catches everything
+spawned since the first pass. From the third pass on the window is as stated. Inside
+`Schedule::run` the world tick is bumped
+twice before any system runs — `this_run` at `schedule.rs:383`, then the apply-window bump at
+`schedule.rs:478` — so each seed pass ends its window at `this_run + 1`, and the world keeps that
+tick until the next `Schedule::run`. A `run_system` between frames applies its commands at that same
+tick (`EcsMaster::run_cached_system` → `System::apply`, `system_api.rs:142-157`), and
+`Tick::is_newer_than` (`tick.rs:168`) excludes a tick equal to the window's start. So the next pass
+starts its window exactly at the spawn's tick and skips it; no later pass looks again. The seed's
+own doc (`collect_added_light_ids`) says `current_tick()` is the frame's `this_run`; after the
+apply-window bump it is `this_run + 1`.
+
+Two consequences of the same arithmetic, neither measured:
+- A light spawned by a `Main` system whose commands are applied AFTER the seed has run that frame
+  lands on the same tick and should be skipped the same way. Ordered or applied before the seed, it
+  is caught.
+- A schedule that runs between the spawn and the next `Main` run (`Fixed`, on a frame where it runs
+  a substep) advances the tick and should make the spawn visible. If so, whether such a light ever
+  renders depends on the frame rate.
+
+**Who is exposed.** Every in-tree example spawns its lights in a startup system, which runs before
+the seed's first pass, and the full scan catches them. Not checked: scene load, deserialisation
+(`boyko_serialize`), Aether-expanded spawns (`crates/aether_lang/src/expand.rs` emits light
+spawns), and any editor that spawns into a running world.
+
+**Question.** Does any production path spawn lights between frames, or from a `Main` system that
+runs after the seed? If one does, those lights are never rendered and no warning, counter or assert
+reports it. A probe that spawns a light through each such path and checks its `LightEnabled` bit
+one frame later would answer it.
+
+### (b) The frame-0 light table carries `[0, 0, -1]` for a sun spawned with an identity `GlobalTransform`
+
+**Measured** (R2 tester, the behaviour-neutral M7p probe in `crates/boyko_app/tests/sdf_marcher_sun.rs`,
+under `EnginePlugins::window`). The suns were spawned in a startup system with a posed `Transform`
+and `GlobalTransform::IDENTITY`. The first `scene()` call — the frame-0 table — received
+`Some([0.0, 0.0, -1.0])`, the identity pose's direction; the second call and every later one
+received the posed direction.
+
+**What the code says.** `LightingPlugin`'s doc ("Add-order contract", `light_plugin.rs`) requires
+`light_reconcile` to run after `propagate_transforms` and says the plugin cannot express that edge.
+`EnginePlugins` adds `CameraPlugin` (`plugins.rs:430`) before `LightingPlugin` (`plugins.rs:476`)
+and declares no edge between `CameraSet::Resolve` and `light_reconcile`, so the order is add-order
+alone. The same file's `ParticleTickSet` comment records that add-order is not a pin: a pose written
+in `Main` was measured drawn one frame late for exactly that reason.
+
+**Not known.** Whether `light_reconcile` runs before propagation only on frame 0 or on every frame.
+If every frame, a moving light's direction or position trails its transform by one frame for as long
+as it moves; the `Changed<GlobalTransform>` gate makes a static light catch up, not a moving one.
+The gates in this lane now spawn their suns with a posed `GlobalTransform`
+(`sdf_marcher_sun.rs`, `csm_primary_sun_agreement.rs`, `primary_directional.rs`), so none of them
+sees frame 0 any more.
+
+**Question.** Is this an accepted one-frame lag, or a missing edge? The workspace already has a
+precedent for the edge: `ParticleTickSet`, where the plugin declares set membership and the
+composing app declares `.after(CameraSet::Resolve)`. It blocks nothing today: the pinned dumps are
+taken well after frame 0.
+
+**RESOLVED 2026-09-20 — a missing edge** (the orchestrator's R4 ruling §6(c): add it where the
+`GlobalTransform` read is shown in code, which it is — the three `&GlobalTransform` queries in
+`light_reconcile`'s signature). R4b-open-edges declares `LightReconcileSet.after(CameraSet::Resolve)`
+in `EnginePlugins::build`, gated by
+`crates/boyko_app/tests/host_orders_light_reconcile_after_propagation.rs`. The "only frame 0 or
+every frame" question above was never measured and is moot under the edge. The measurement above
+turned out to be in the goldens as well: the 14 TAA pin-legs re-blessed on 2026-09-21 had carried
+that identity-lit frame 0 in their TAA history (the second of the two causes in each
+`goldens/PINS.toml` note; see the 2026-09-21 entry above), and with the edge in place they render
+the posed sun on frame 0 too.
+
+### (c) `boyko_rhi_vulkan --test sdf_gbuffer_hybrid` crashes with `0xC0000005` under a six-thread run
+
+This binary is already recorded under **KNOWN FRICTIONS** ("⚠️ A KNOWN-RED TARGET IS A SHADOW",
+2026-08-10), in the bullet "Not red at all, but FAILING UNDER THE FULL PARALLEL SWEEP" (43/43 in
+isolation). That entry stands; this adds what the failure is and how often it happens.
+
+- **Mode:** the process exits `0xC0000005` (STATUS_ACCESS_VIOLATION) about 3–4 s in, with
+  `RUST_TEST_THREADS=6`, while six GPU tests boot at once.
+- **Rate (R2b/R3 tester, interleaved, 20 runs per arm):** 1 of 20 with R3's `ddgi.rs` reverted to
+  HEAD, 2 of 20 on the lane tree. Earlier reruns crashed 2 of 8.
+- **Every run that did not crash:** 43 passed, 0 failed, 8 ignored.
+- The lane's R1 and R2 workspace runs, at the default thread count, did not hit it.
+- **Root cause:** unknown.
+
+**Question.** For the lane-wide gate: run this binary with `--test-threads=1`, or root-cause the
+concurrent boot first?
+
+---
+
 ## 2026-09-19 — What R2 leaves behind: sibling defect R2c, and what the `grand_showcase_2mat` re-bless carried
 
 R2 (`docs/render/light-table-defects/R2-DESIGN.md`, lane `fix/light-table-defects`) makes the
