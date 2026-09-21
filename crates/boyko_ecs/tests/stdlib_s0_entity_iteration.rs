@@ -506,7 +506,7 @@ fn zero_pct_gate_non_entity_variants_unchanged() {
 /// the per-archetype `entity_ids` raw-base re-capture and the per-row
 /// `*entity_ids.add(row)` raw read. The grid is small so Miri stays fast.
 ///
-/// Run: `RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-gnu cargo miri test -p
+/// Run: `RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc cargo miri test -p
 /// boyko-ecs --test stdlib_s0_entity_iteration miri_tb`
 /// (the repo's `.cargo/config` supplies `-Zmiri-tree-borrows`).
 #[test]

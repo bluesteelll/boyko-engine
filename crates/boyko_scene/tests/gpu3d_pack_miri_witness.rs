@@ -30,7 +30,7 @@
 //! Run (the gate command):
 //! ```text
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" \
-//!   RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-gnu \
+//!   RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc \
 //!   cargo miri test -p boyko-scene --test gpu3d_pack_miri_witness
 //! ```
 //! It is also a normal (non-Miri) test, so it runs under `cargo test` too.

@@ -38,6 +38,26 @@ cargo bench                                                      # benchmarks
 cargo +nightly miri test                                         # UB detector (if nightly is installed)
 ```
 
+**On the workstation, a gate run sets `TMP`/`TEMP` to `D:/wt/_targets/tmp` first** (RK-18 of the
+unification plan), and the directory must exist before cargo starts — `link.exe` writes its own
+temporaries there, and a missing path is `LINK : fatal error LNK1104: cannot open file
+'…\lnk{…}.tmp'` (MEASURED 2026-09-21 on a one-file crate under `stable-x86_64-pc-windows-msvc`):
+
+```powershell
+$env:TMP = 'D:/wt/_targets/tmp'; $env:TEMP = $env:TMP; New-Item -ItemType Directory -Force $env:TMP | Out-Null
+```
+```bash
+mkdir -p D:/wt/_targets/tmp && export TMP=D:/wt/_targets/tmp TEMP=D:/wt/_targets/tmp
+```
+
+The reason: `crates/profile_fixture/tests/profile_axis_census.rs` roots its six fat-LTO target
+trees (three fixture binaries × two profiles, each keyed by profile and host — `:226`) and its
+refusal probe (`:760`) at `std::env::temp_dir()`, which on Windows is `%TMP%`/`%TEMP%`, i.e. drive
+C:. RK-11 puts every build product under `D:/wt/_targets`; without this line the census is the one
+exception, and the other 47 files that write artifacts through `temp_dir()` follow it. Measured
+2026-09-21: four census trees on C:, 11–17 MB each — the rule is one drive for every build product,
+not a space emergency at that size.
+
 ⚠️ **`--workspace` and `--no-fail-fast` are both load-bearing, and each was added after a
 measurement, not for tidiness.**
 

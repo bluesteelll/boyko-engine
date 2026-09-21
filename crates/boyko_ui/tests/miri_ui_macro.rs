@@ -13,7 +13,7 @@
 //! Run (NOTE the `-Zmiri-ignore-leaks`):
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-gnu cargo miri test -p boyko-ui \
+//! RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc cargo miri test -p boyko-ui \
 //!   --test miri_ui_macro
 //! ```
 //!

@@ -15,7 +15,7 @@
 //! Miri suites):
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! rustup run nightly-x86_64-pc-windows-gnu cargo miri test -p boyko-ecs --test miri_relations_edge_observers
+//! rustup run nightly-x86_64-pc-windows-msvc cargo miri test -p boyko-ecs --test miri_relations_edge_observers
 //! ```
 //!
 //! `#![cfg(miri)]` — only compiles under Miri; native runs ignore this file (the

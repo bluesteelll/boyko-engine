@@ -60,7 +60,7 @@ said `.cargo/config.toml` carries "the ISA baseline AND two mandatory linker fla
 checkout the worktree file carries the **ISA baseline only**; the linker flags live in
 `~/.cargo/config.toml`. The no-`RUSTFLAGS` rule still stands, for the ISA reason.
 
-⚠ **Every Miri command spells `+nightly-x86_64-pc-windows-gnu`.** As written during the campaign,
+⚠ **Every Miri command in this file spells `+nightly-x86_64-pc-windows-gnu`, the nightly it ran under; the tree's recipes spell the msvc one since 2026-09-21 (end of this paragraph).** As written during the campaign,
 the reason given here was "`cargo +nightly` resolves to `nightly-x86_64-pc-windows-MSVC` on this box
 (msvc stable is the rustup default host) and dies in the linker with exit 1, which is
 indistinguishable from *the gate is red*".
@@ -91,12 +91,12 @@ reason was currency: the two installed nightlies carried miri **2026-08-20** (gn
 answers `miri 0.1.0 (a36d05efab 2026-09-09)`: the msvc nightly's miri is now the **newer** of the
 two, by three weeks. Currency has inverted and now argues *against* the pin.
 
-The pin holds on the reason that was never a fact about version dates — **receipt continuity.** Every
-Tree-Borrows result in this campaign, and every committed receipt under `docs/threadpool/receipts/`,
-came from the gnu nightly's miri. Re-spelling the recipes would swap the checker underneath those
-receipts, so a disagreement between one on disk and a fresh run could not be attributed to the code
-rather than to the instrument. Moving the checker is its own change, carrying its own re-run of the
-receipts.
+The pin held on the reason that was never a fact about version dates — **receipt continuity**: every
+Tree-Borrows result here, and every receipt under `docs/threadpool/receipts/` before 2026-09-21, came
+from the gnu nightly's miri, and re-spelling the recipes would have swapped the checker underneath them.
+Moving the checker was its own change with its own re-run — **and it ran on 2026-09-21 (rung AH):** all
+four seeds on both nightlies from one tree, msvc receipts committed, gnu beside as `.gnu.stderr`, the pairs
+identical in diagnostic, creation sites and freeing frame (`receipts/README.md`). **The tree's recipes spell `+nightly-x86_64-pc-windows-msvc` from that date**; this file's commands are dated rows.
 
 ### ⚠ msvc is a THIRD compiler line — added 2026-09-10, no row below was touched
 

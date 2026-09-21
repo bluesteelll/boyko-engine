@@ -11,7 +11,7 @@
 //!
 //! Run (per the task toolchain):
 //! ```text
-//! RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-gnu \
+//! RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc \
 //!   MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" \
 //!   cargo miri test -p boyko-physics --test bodytype_bits_toggle_miri
 //! ```

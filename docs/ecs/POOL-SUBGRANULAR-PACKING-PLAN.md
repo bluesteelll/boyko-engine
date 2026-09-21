@@ -592,9 +592,12 @@ bundles and dense stores — for Gaia's load budgeting. Owner-scope; not require
   a base would show as `% COMMIT_PAGE == 0`). The identity holds on every arm: the reservation base
   is granule-aligned, `data_len`/`tick_len` are granule multiples, and `COMMIT_PAGE | COMMIT_GRANULE`.
 * **G6 — Miri (fallback arm).** The pool module's existing suite under
-  `cargo +nightly-x86_64-pc-windows-gnu miri test` (per the machine note: bare `+nightly` resolves
-  to MSVC and dies in the linker): the layout/provenance proofs must still hold with `COMMIT_PAGE ==
-  COMMIT_GRANULE` on that arm. Tree Borrows is the relevant rule for the tick-base derivations.
+  `cargo +nightly-x86_64-pc-windows-msvc miri test` (the toolchain spelled in full because what a
+  bare `+nightly` selects on the workstation has moved twice — `.cargo/config.toml`'s Miri
+  paragraph; until 2026-09-21 this line spelled the gnu nightly, then the checker moved to msvc
+  with the receipts re-derived, rung AH): the layout/provenance proofs must still hold with
+  `COMMIT_PAGE == COMMIT_GRANULE` on that arm. Tree Borrows is the relevant rule for the tick-base
+  derivations.
 * **G7 — grow-event count.** For stride 40 growing to 1 M rows the number of `grow_rows` events is
   `≤ log2(1M·40 / COMMIT_PAGE) + 2 == 16`; a batch `reserve_capacity(n)` is exactly **one** event
   (request dominance). This is the gate that catches D3 being weakened.
