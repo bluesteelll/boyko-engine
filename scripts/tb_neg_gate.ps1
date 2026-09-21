@@ -56,8 +56,9 @@
 #    REPLACES that value rather than extending it -- the same asymmetry `RUSTFLAGS`
 #    has against `[target.*.rustflags]`. Every flag the run needs, including
 #    tree-borrows, is therefore re-stated below. The ISA baseline in
-#    `[target.x86_64-pc-windows-gnu].rustflags` is untouched because this script
-#    never sets RUSTFLAGS.
+#    `[target.x86_64-pc-windows-msvc].rustflags` (the block cargo reads under
+#    `$Toolchain`; the gnu twin applies on the comparison leg) is untouched
+#    because this script never sets RUSTFLAGS.
 #
 # =============================================================================
 # Why the exit code is not the verdict

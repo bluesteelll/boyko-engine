@@ -50,13 +50,15 @@ $env:TMP = 'D:/wt/_targets/tmp'; $env:TEMP = $env:TMP; New-Item -ItemType Direct
 mkdir -p D:/wt/_targets/tmp && export TMP=D:/wt/_targets/tmp TEMP=D:/wt/_targets/tmp
 ```
 
-The reason: `crates/profile_fixture/tests/profile_axis_census.rs` roots its six fat-LTO target
-trees (three fixture binaries × two profiles, each keyed by profile and host — `:226`) and its
-refusal probe (`:760`) at `std::env::temp_dir()`, which on Windows is `%TMP%`/`%TEMP%`, i.e. drive
-C:. RK-11 puts every build product under `D:/wt/_targets`; without this line the census is the one
-exception, and the other 47 files that write artifacts through `temp_dir()` follow it. Measured
-2026-09-21: four census trees on C:, 11–17 MB each — the rule is one drive for every build product,
-not a space emergency at that size.
+The reason: `crates/profile_fixture/tests/profile_axis_census.rs` roots its six fat-LTO builds
+(three fixture binaries × two profiles) in two target trees keyed by profile and host (`:226`), and
+its refusal probe's `cargo check` tree (`:760`), at `std::env::temp_dir()`, which on Windows is
+`%TMP%`/`%TEMP%`, i.e. drive C:. RK-11 puts every build product under `D:/wt/_targets`; without this
+line the census is the one exception, and the other 47 files that write artifacts through
+`temp_dir()` follow it. Measured 2026-09-21 on C:: four census trees (the two host-keyed ones plus
+the two left from before `27ac8904` keyed them), 11–17 MB each, and the refusal tree at 803 MB
+(675 MB of it `incremental/`, from runs without `CARGO_INCREMENTAL=0`) — the rule is one drive for
+every build product, whatever the size.
 
 ⚠️ **`--workspace` and `--no-fail-fast` are both load-bearing, and each was added after a
 measurement, not for tidiness.**

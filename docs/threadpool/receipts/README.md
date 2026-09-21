@@ -32,7 +32,9 @@ it the property:
 - the toolchain path in the two `core` backtrace frames (`…\toolchains\nightly-x86_64-pc-windows-msvc\…`
   vs `…-gnu\…`; the `core` line numbers are the same, `ptr/mod.rs:848` and `mem/mod.rs:1049`);
 - the target-dir path in the `Running` and `process didn't exit successfully` lines;
-- Miri's tag and allocation ids (`<176340>`, `alloc60834`, …), which are per-run;
+- Miri's tag and allocation ids (`<176340>`, `alloc60834`, …), which belong to the build, not the
+  run: a second run of the same build reproduces every id (MEASURED 2026-09-21 on seeds 0 and 7,
+  only the `Finished` time moved), and a different nightly renumbers them;
 - a cargo preamble of `non_kebab_case_bins` manifest warnings on the msvc receipts only — the
   2026-09-09 cargo lints workspace bin names, the 2026-08-20 one did not;
 - `Finished … in N.NNs`.
