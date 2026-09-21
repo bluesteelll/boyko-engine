@@ -10,31 +10,36 @@
 //! below the cap under a lock that only its own module took, while seven other src/ test modules
 //! in the same lib-test binary minted first-sight `(D, F)` shapes through `world.query::<D, F>()`
 //! -- a sibling that minted inside that window redded with `boyko-B0502`, one lib run in eleven
-//! (A4b). What that test checked, this binary checks: the trigger (the mint past
-//! `MAX_QUERY_TYPES`), the code, the message, and -- from outside the module, where the counter
-//! itself is private -- the one observable consequence of its saturate clamp, in
-//! [`b0502_is_terminal_every_call_after_the_first_is_the_same_panic`].
+//! (A4b). What that test checked, this binary checks: **both edges of the cap** -- exactly
+//! `MAX_QUERY_TYPES` ids are mintable, `0..MAX_QUERY_TYPES` in order, and the mint after the last
+//! legal id is the panic -- the code, the message, and -- from outside the module, where the
+//! counter itself is private -- the one observable consequence of its saturate clamp: every call
+//! after the first panic is the same panic.
+//!
+//! # One test, on purpose
+//!
+//! The lower edge ("the 1024th mint succeeds and hands out `QueryTypeId(1023)`") is only
+//! observable from a known counter, and the counter is known -- zero -- exactly once: at process
+//! start, before the first mint. This binary's only mints are this test's, so the one test owns
+//! the counter from 0 to the cap. Two tests sharing the counter could each still see the panic,
+//! but neither could say which mint was the last legal one, and a cap that is off by one in the
+//! downward direction (`id + 1 >= MAX_QUERY_TYPES`, cap 1023) would be green: the message prints
+//! the constant, not the id, so the upper-edge legs cannot tell 1023 from 1024. The deleted unit
+//! test pinned that edge with `set_next_id_for_test(MAX - 1); assert_eq!(register_new(), MAX - 1)`;
+//! this is the same pin without the hook.
 //!
 //! **This is also the gate on `PanicCode`'s `Display`.** L6 replaced the string literal
 //! `"boyko-B0502: …"` with the registry constant so the identifier reaches the walker's CODE
-//! stream; the `expected` substring below is what proves the rendered text did not move with it.
-//! Delete the `Display` impl's `boyko-` prefix, or write the code as an inline `{B0502}` format
-//! argument, and this reds.
+//! stream; the `boyko-B0502` substring assertion below is what proves the rendered text did not
+//! move with it. Delete the `Display` impl's `boyko-` prefix, or write the code as an inline
+//! `{B0502}` format argument, and this reds.
 
 use std::any::Any;
 use std::panic::catch_unwind;
 
-use boyko_ecs::ecs::core::iters::query::query_type_registry::{MAX_QUERY_TYPES, register_new};
-
-#[test]
-#[should_panic(expected = "boyko-B0502")]
-fn b0502_is_the_terminal_panic_when_the_table_is_exhausted() {
-    // One past the cap. `register_new` saturates the counter before panicking, so the loop cannot
-    // run it further even if the panic were caught.
-    for _ in 0..=MAX_QUERY_TYPES {
-        let _ = register_new();
-    }
-}
+use boyko_ecs::ecs::core::iters::query::query_type_registry::{
+    MAX_QUERY_TYPES, QueryTypeId, register_new,
+};
 
 /// The panic payload as text, whichever of the two payload types `panic!` produced.
 fn payload_text(payload: &(dyn Any + Send)) -> &str {
@@ -45,21 +50,31 @@ fn payload_text(payload: &(dyn Any + Send)) -> &str {
         .unwrap_or("<non-string panic payload>")
 }
 
-/// Every call after the terminal panic is the same terminal panic -- never a fresh id, never a
-/// different message. This is what the dispenser's saturate clamp buys from the outside: the
-/// counter is pinned at the cap, so a re-entry (a retried init closure, a second shape asked for
-/// after the first died) cannot walk it past the cap or hand out an id above it.
-///
-/// Order-independent with the `#[should_panic]` test above: both drive the same monotonic counter
-/// to the cap, and both accept `boyko-B0502` at whichever call reaches it first.
 #[test]
-fn b0502_is_terminal_every_call_after_the_first_is_the_same_panic() {
-    let first = catch_unwind(|| {
-        for _ in 0..=MAX_QUERY_TYPES {
-            let _ = register_new();
-        }
-    })
-    .expect_err("MAX_QUERY_TYPES + 1 mints must reach the terminal panic");
+fn exactly_max_query_types_ids_are_mintable_and_the_next_mint_is_b0502_forever() {
+    // Lower edge: every id below the cap is mintable, in order, from a counter that starts at 0.
+    // A panic here is a cap that fired early; a wrong id at `expected == 0` is another mint in
+    // this process before the test -- which this binary must not contain.
+    for expected in 0..MAX_QUERY_TYPES {
+        let id = match catch_unwind(register_new) {
+            Ok(id) => id,
+            Err(payload) => panic!(
+                "mint {expected} is a legal id (below MAX_QUERY_TYPES = {MAX_QUERY_TYPES}) but \
+                 panicked instead: {}",
+                payload_text(&*payload)
+            ),
+        };
+        assert_eq!(
+            id,
+            QueryTypeId(expected),
+            "mint {expected} of {MAX_QUERY_TYPES} handed out {id:?}"
+        );
+    }
+
+    // Upper edge: the mint after the last legal id is the terminal panic, with the registry code,
+    // the cap's name and value, and the recovery the operator is told about.
+    let first = catch_unwind(register_new)
+        .expect_err("mint MAX_QUERY_TYPES (one past the last legal id) must be the terminal panic");
     let first_text = payload_text(&*first);
     assert!(
         first_text.contains("boyko-B0502"),
@@ -74,9 +89,15 @@ fn b0502_is_terminal_every_call_after_the_first_is_the_same_panic() {
         "the exhaustion panic must name the feature that raises the cap; got: {first_text}"
     );
 
+    // Terminal: every call after the first panic is the same panic -- never a fresh id, never a
+    // different message. This is what the dispenser's saturate clamp buys from the outside: the
+    // counter is pinned at the cap, so a re-entry (a retried init closure, a second shape asked
+    // for after the first died) cannot walk it past the cap or hand out an id above it.
     for attempt in 0..3 {
         let again = match catch_unwind(register_new) {
-            Ok(id) => panic!("re-entry {attempt} after exhaustion minted {id:?} instead of panicking"),
+            Ok(id) => {
+                panic!("re-entry {attempt} after exhaustion minted {id:?} instead of panicking")
+            }
             Err(payload) => payload,
         };
         let again_text = payload_text(&*again);

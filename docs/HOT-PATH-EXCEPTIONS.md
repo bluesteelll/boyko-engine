@@ -90,7 +90,11 @@ that runs on every invocation before the tree is scanned** (exit 2, distinct fro
 the same `scan_file` as production. Shown red first — with the old regex the `all(test, ..)`
 fixture reported 2 items / 2 blanket sites / no test-only sibling against an expected 0 / 0 / 1 —
 and shown red in the *other* direction by two in-process mutations (a substring match, and `any`
-treated as `all`), both caught by the `any(test, ..)` fixture in all three of its assertions.
+treated as `all`), both caught by the `any(test, ..)` fixture in all three of its assertions. The
+fixture set is closed: every `.rs` there is either an `EXPECT` fixture or a `// SIBLING-OF: <fixture>`
+file that the named fixture must declare with `mod <stem>;` — so a malformed `EXPECT` line (a typo,
+a BOM from a Windows editor) is a red, not a file the self-test silently skips. Shown red first:
+five such headers, all silent under the previous self-test, all red under this one.
 
 Registered count after the fix: **34 across 12 files**, unchanged from before it — the one delta
 is the `entity_reservoir.rs` blanket site, which was never a production exception.

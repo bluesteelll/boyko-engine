@@ -1,3 +1,4 @@
+// SIBLING-OF: cfg_any_test.rs
 // Sibling of `cfg_any_test.rs`, declared there as `#[cfg(any(test, feature = "goldens"))] mod
 // cfg_any_test_goldens;`. The `goldens` feature compiles it into the library, so it is production
 // and must NOT be classified test-only — which is what `cfg_any_test.rs`'s empty `test-only=`

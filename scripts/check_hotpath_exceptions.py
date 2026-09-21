@@ -107,6 +107,10 @@ FIXTURES = REPO / FIXTURES_REL
 FIXTURE_EXPECT_RE = re.compile(
     r"^// EXPECT: items=(?P<items>\d+) blanket=(?P<blanket>\d+) test-only=(?P<test_only>[\w.,]*)$"
 )
+# A fixture that asserts nothing itself and exists to be resolved from another fixture's `mod x;`.
+# The header is mandatory, so that a file whose EXPECT line is malformed (a typo, a BOM from a
+# Windows editor) is a red and not a silently skipped set of assertions.
+FIXTURE_SIBLING_RE = re.compile(r"^// SIBLING-OF: (?P<of>[\w.]+)$")
 
 
 def _cfg_predicate(line: str) -> str | None:
@@ -216,10 +220,12 @@ def test_only_files(sources: list[Path]) -> set[Path]:
     `#[cfg(test)]` and the `#[cfg(all(test, not(loom)))]` family alike.
 
     These live under `src/` (so the directory filter misses them) but never compile into a
-    library or binary target — `boyko_physics/src/resources_tests.rs` and
-    `boyko_rhi_vulkan/src/compute/tests.rs` are the two in-tree cases. Resolved from the
-    DECLARATION rather than from a filename convention, so a production file that merely happens
-    to be named `tests.rs` is not silently exempted.
+    library or binary target. Resolved from the DECLARATION rather than from a filename
+    convention, so a production file that merely happens to be named `tests.rs` is not silently
+    exempted — and so the two layouts beyond the plain `name.rs` / `name/mod.rs` pair are found:
+    `boyko_physics/src/resources_tests.rs` (`#[path = ".."]` between the cfg and the `mod`) and
+    `boyko_rhi_vulkan/src/compute/tests.rs` (`foo.rs` + `foo/` sibling directory). Those two are
+    the layouts, not a census — the tree had eight such files when this was written.
     """
     out: set[Path] = set()
     for path in sources:
@@ -441,15 +447,35 @@ def self_test() -> list[str]:
 
     if not FIXTURES.is_dir():
         return failures + [f"fixture directory missing: {FIXTURES_REL}"]
-    fixtures = sorted(FIXTURES.glob("*.rs"))
+    by_name = {
+        p.name: p.read_text(encoding="utf-8").splitlines() for p in sorted(FIXTURES.glob("*.rs"))
+    }
     seen = 0
-    for path in fixtures:
-        lines = path.read_text(encoding="utf-8").splitlines()
-        m = FIXTURE_EXPECT_RE.match(lines[0]) if lines else None
+    for name, lines in by_name.items():
+        head = lines[0] if lines else ""
+        m = FIXTURE_EXPECT_RE.match(head)
         if m is None:
-            continue  # a declared sibling; asserted through its declaring fixture's `test-only=`
+            # The set is closed: a file is an EXPECT fixture or a declared sibling, and a sibling
+            # must be resolvable from the EXPECT fixture it names -- otherwise a malformed header
+            # would turn a fixture into a "sibling" and its assertions into nothing.
+            sib = FIXTURE_SIBLING_RE.match(head)
+            if sib is None:
+                failures.append(
+                    f"{name}: first line is neither an EXPECT header nor `// SIBLING-OF: <fixture>`"
+                    f" (got {head[:60]!r}) -- a malformed header would otherwise skip the file"
+                )
+                continue
+            of, stem = sib.group("of"), name.removesuffix(".rs")
+            of_lines = by_name.get(of, [])
+            declared = bool(of_lines) and FIXTURE_EXPECT_RE.match(of_lines[0]) is not None and any(
+                (d := MOD_DECL_RE.match(l)) is not None and d.group("name") == stem for l in of_lines
+            )
+            if not declared:
+                failures.append(
+                    f"{name}: SIBLING-OF names {of!r}, which is not an EXPECT fixture declaring `mod {stem};`"
+                )
+            continue
         seen += 1
-        name = path.name
         items, blanket = scan_file(lines)
         want_items, want_blanket = int(m.group("items")), int(m.group("blanket"))
         if items != want_items:
@@ -458,7 +484,7 @@ def self_test() -> list[str]:
             shown = ", ".join(f"line {ln} ({kind})" for ln, kind in blanket) or "none"
             failures.append(f"{name}: {len(blanket)} blanket site(s) [{shown}], want {want_blanket}")
         want_test_only = {s for s in m.group("test_only").split(",") if s}
-        got_test_only = {p.name for p in test_only_files([path])}
+        got_test_only = {p.name for p in test_only_files([FIXTURES / name])}
         if got_test_only != want_test_only:
             failures.append(
                 f"{name}: test-only siblings {sorted(got_test_only)}, want {sorted(want_test_only)}"
