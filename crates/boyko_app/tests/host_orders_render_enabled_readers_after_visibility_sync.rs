@@ -60,7 +60,8 @@ use host_order_cycle::assert_finish_rejects_cycle;
 /// both.
 const CYCLE: &[&str] = &[
     "boyko_scene::visibility_sync::visibility_sync [in: VisibilitySet::Sync]",
-    "boyko_render::asset_refcount::validate_asset_refs [in: VisibilitySet::Validate]",
+    "boyko_render::asset_refcount::validate_asset_refs \
+     [in: VisibilitySet::Validate, boyko_render::asset_refcount::AssetValidateSet]",
     "boyko_render::gpu3d_system::sync_gpu_3d_instances \
      [in: VisibilitySet::Read, boyko_render::instance_model::InstancePackSet]",
     "boyko_render::instance_model::sync_instance_model_cols \

@@ -56,7 +56,8 @@ fn the_shipped_host_orders_the_asset_validation_after_visibility_sync() {
         &mut app,
         &[
             "boyko_scene::visibility_sync::visibility_sync [in: VisibilitySet::Sync]",
-            "boyko_render::asset_refcount::validate_asset_refs [in: VisibilitySet::Validate]",
+            "boyko_render::asset_refcount::validate_asset_refs \
+     [in: VisibilitySet::Validate, boyko_render::asset_refcount::AssetValidateSet]",
         ],
     );
 }

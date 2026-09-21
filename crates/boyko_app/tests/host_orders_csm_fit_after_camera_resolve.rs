@@ -55,7 +55,8 @@ const CYCLE: &[&str] = &[
     "boyko_scene::propagation::propagate_transforms [in: CameraSet::Resolve]",
     "boyko_scene::camera::resolve_active_camera [in: CameraSet::Resolve]",
     "boyko_scene::visibility_sync::visibility_sync [in: VisibilitySet::Sync]",
-    "boyko_render::asset_refcount::validate_asset_refs [in: VisibilitySet::Validate]",
+    "boyko_render::asset_refcount::validate_asset_refs \
+     [in: VisibilitySet::Validate, boyko_render::asset_refcount::AssetValidateSet]",
     "boyko_render::instance_model::sync_instance_model_cols \
      [in: VisibilitySet::Read, boyko_render::instance_model::InstancePackSet]",
     "boyko_render::csm_caster::gather_shadow_casters [in: VisibilitySet::Read]",

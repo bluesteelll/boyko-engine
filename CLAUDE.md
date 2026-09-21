@@ -220,8 +220,9 @@ attributed by `git diff` against each merge's second parent — the light-table 
 in `boyko_physics/tests/narrowphase_parallel_equivalence.rs`
 (`jolt_pyramid_parallel_narrowphase_is_bit_identical`, L5 C3). The light-table lane's own "324"
 was 320 + 4 on its branch point, which predates the L2 calibration's +7 and the simd_solve +1; an
-independent enumeration reproduces 335 / 184 / 151 across 10 crates and 1,659 `.rs` files walked
-(1,652 at `6b29c400`, +6 from the tree-broadphase merge and +1 root test from A5.1).
+independent enumeration reproduces 335 / 184 / 151 across 10 crates and 1,661 `.rs` files walked
+(1,652 at `6b29c400`, +6 from the tree-broadphase merge, +1 root test from A5.1, +2 `boyko_render`
+tests from A5.2 — no ignore site among them).
 The move before it, 321 → 328, is the parallel-narrowphase lane's L2 calibration: seven
 `cfg_attr(miri, "miri-slow: …")` sites in `broadphase_select_p3.rs`: `GRID_LO`/`GRID_HI` moved from
 96/192 to 2,700/3,000, so the six existing tests, which size their scenes from the band, now step

@@ -104,6 +104,13 @@ boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan", features = ["goldens"] }
 # physics pipeline fans across.
 boyko-physics = { path = "../boyko_physics" }
 boyko-threadpool = { path = "../boyko_threadpool" }
+# Asset-streaming plan "HARD PREREQ" item (e) (branch fix/asset-validate-prereqs): the
+# serialize version-skew gates (`tests/asset_streaming_prereq_validate.rs`) save a carrier
+# row with its `MeshRefGen` lane removed and `load_world` it back, then prove
+# `validate_asset_refs` flags the lane-less row and the gather never draws it. TEST-ONLY
+# and acyclic: `boyko_render` (dev) -> `boyko_serialize` -> `boyko_ecs`; the production
+# edge stays absent (no shipped render code loads a save file).
+boyko-serialize = { path = "../boyko_serialize" }
 # GUI P6b screenshot test ONLY: the HUD test drives the SHIPPED data-binding chain
 # (`BindText` -> `UiTextBuffer` -> `emit_glyphs`) that lives in boyko-ui, then renders
 # the bound glyphs through this crate's reused `pack_ui_instance` / `record_ui_rects`

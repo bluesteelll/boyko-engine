@@ -46,7 +46,8 @@ use host_order_cycle::assert_finish_rejects_cycle;
 /// The cycle's members on both feature legs: the validation and every `VisibilitySet::Read`
 /// member `EnginePlugins` registers on both.
 const CYCLE: &[&str] = &[
-    "boyko_render::asset_refcount::validate_asset_refs [in: VisibilitySet::Validate]",
+    "boyko_render::asset_refcount::validate_asset_refs \
+     [in: VisibilitySet::Validate, boyko_render::asset_refcount::AssetValidateSet]",
     "boyko_render::gpu3d_system::sync_gpu_3d_instances \
      [in: VisibilitySet::Read, boyko_render::instance_model::InstancePackSet]",
     "boyko_render::instance_model::sync_instance_model_cols \

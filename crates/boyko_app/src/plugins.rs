@@ -26,9 +26,10 @@ use boyko_render::{
     AssetRefcountPlugin, ClusterConfig, CsmCasterScratch, CsmFitSet, CsmPlugin, CsmResolveSet,
     LightCollectSet, LightSeedSet, LightingConfig, LightingPlugin, MeshRenderScratch,
     ParticlePlugin, ParticleTickSet, RayPlugin, Render3dPlugin, RenderPathPlugin, SdfPlugin,
-    ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin, add_gpu_transform_pack, gather_mesh_draws,
-    gather_shadow_casters, reduce_caster_bounds, snap_apply, sync_cluster_light_gate,
-    sync_csm_light_gate, sync_punctual_light_gate, sync_ssao_light_gate, sync_sv0_light_gate,
+    ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin, add_gather_mesh_draws,
+    add_gather_shadow_casters, add_gpu_transform_pack, reduce_caster_bounds, snap_apply,
+    sync_cluster_light_gate, sync_csm_light_gate, sync_punctual_light_gate, sync_ssao_light_gate,
+    sync_sv0_light_gate,
 };
 use boyko_scene::{CameraPlugin, CameraSet, FixedSet, VisibilitySet};
 
@@ -53,8 +54,9 @@ use crate::timer_resolution::TimerResolutionGuard;
 /// any mesh). Every cross-plugin reader → writer
 /// dependency of the render path is therefore a named set edge declared in `build`:
 /// `VisibilitySet::Validate` after `VisibilitySet::Sync` and `VisibilitySet::Read` after
-/// both (the `RenderEnabled` bit: set by `visibility_sync`, cleared on a stale row by
-/// `validate_asset_refs`), `InstancePackSet` after `CameraSet::Resolve` (the propagated
+/// both (`RenderEnabled`, set by `visibility_sync`; `RenderStale` / `MaterialStale`, written by
+/// `validate_asset_refs` and filtered on by the gathers, which additionally pin that edge per
+/// consumer with `.after_set(AssetValidateSet)`), `InstancePackSet` after `CameraSet::Resolve` (the propagated
 /// `GlobalTransform`), `LightReconcileSet` after `CameraSet::Resolve` (the light's
 /// `GlobalTransform`), the CSM fit / punctual resolve after `CameraSet::Resolve`
 /// (`ViewUniform`), and both of those after `LightReconcileSet` (the sun direction; the
@@ -440,10 +442,14 @@ impl Plugin for EnginePlugins {
 
         // Asset-streaming plan F2: the refcount lifetime pipeline. Inserts
         // `RefcountDeltas`/`DeferredFree` and registers `apply_refcount_deltas`
-        // (no ordering edge needed yet — see that system's doc). The `Assets<
-        // MeshGpu>`/`Assets<Material>` resources it reads are inserted by
-        // `runner::run_windowed` before the frame loop starts, well after this
-        // `build()` call, so add-order here does not matter.
+        // `.before(validate_asset_refs)`, the latter joining `AssetValidateSet`. The
+        // validate -> gather edge is pinned BY NAME: the two gathers below are
+        // registered through `add_gather_mesh_draws` / `add_gather_shadow_casters`,
+        // which chain `.after_set(AssetValidateSet)` (asset-streaming plan prereq (c)),
+        // so this plugin's position in the add-order is no longer load-bearing for
+        // that edge. The `Assets<MeshGpu>`/`Assets<Material>` resources it reads are
+        // inserted by `runner::run_windowed` before the frame loop starts, well after
+        // this `build()` call, so add-order here does not matter either.
         app.add_plugin(AssetRefcountPlugin);
 
         // The R4 lighting stack. LightingPlugin registers the light eviction
@@ -664,6 +670,12 @@ impl Plugin for EnginePlugins {
         // production gather) runs after the pack, and `sync_csm_light_gate`
         // (the header-gate ⇄ depth-pass lock-step) after the caster gather, so
         // the gate's caster predicate is THIS frame's.
+        // Asset-streaming plan prereq (c): BOTH gathers are registered through their
+        // `boyko_render` helpers (`add_gather_shadow_casters` / `add_gather_mesh_draws`),
+        // which pin each `.after_set(AssetValidateSet)` — the validate -> gather edge
+        // is a by-name contract, not the add-order accident it was under F5. The
+        // helpers return the `SystemConfig`, so this closure chains its own `.after(pack)`
+        // / `.after(snap)` edges exactly as before (the `add_gpu_transform_pack` shape).
         // R5 adds the INTERPOLATION Main system `snap_apply` (the zero-streak
         // collapse for teleported bodies) in the SAME closure. Refined-B unifies
         // the two former gathers into ONE `gather_mesh_draws` over ALL drawables
@@ -694,8 +706,13 @@ impl Plugin for EnginePlugins {
             // `PrevInstanceModelCol` column (0%-gate).
             #[cfg(feature = "hwrt")]
             b.add_system(sync_prev_instance_model_cols).before(pack).in_set(VisibilitySet::Read);
+            // `add_gather_shadow_casters`, not `add_system(gather_shadow_casters)`: the helper
+            // chains `.after_set(AssetValidateSet)` (asset-streaming prereq (c)), the
+            // consumer-side pin of the validate -> gather edge that holds in any host; the
+            // `VisibilitySet::Read` membership is this host's own pin of the same order, plus
+            // the sync edge (R4b, the `configure_set` block below).
             let casters =
-                b.add_system(gather_shadow_casters).after(pack).in_set(VisibilitySet::Read).key();
+                add_gather_shadow_casters(b).after(pack).in_set(VisibilitySet::Read).key();
             b.add_system(sync_csm_light_gate).after(casters);
             // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5: `reduce_caster_bounds`
             // is the UNWIRED EXPORTED API `CsmPlugin` deliberately does not register (mirrors
@@ -788,7 +805,9 @@ impl Plugin for EnginePlugins {
             // collapse (snap-before-gather is load-bearing — the gather reads the
             // collapsed pair).
             let snap = b.add_system(snap_apply).key();
-            b.add_system(gather_mesh_draws).after(pack).after(snap).in_set(VisibilitySet::Read);
+            // `add_gather_mesh_draws`: the helper chains `.after_set(AssetValidateSet)` (see the
+            // caster gather above); `VisibilitySet::Read` is this host's pin.
+            add_gather_mesh_draws(b).after(pack).after(snap).in_set(VisibilitySet::Read);
 
             // ── Every render reader runs after its writer (R4-frame-order) ──────────────────────
             //
@@ -813,13 +832,19 @@ impl Plugin for EnginePlugins {
             // to fail (its gate goes red with this line and one of those deleted) — it stays as
             // the readers' own declaration, which a transitive path is not.
             b.configure_set(VisibilitySet::Read).after(VisibilitySet::Sync);
-            // `RenderEnabled`, the other writer (R4b-open-edges): `validate_asset_refs`
-            // (`VisibilitySet::Validate`) walks the rows `visibility_sync` enabled and clears the
-            // bit on a stale mesh row (`asset_refcount.rs`, `DisableStaleMeshCommand`), both
-            // through deferred commands. Validation after the sync, so a row it would skip as
-            // not-yet-enabled is not enabled right after it (a stale mesh would then stay enabled
-            // until `free_epoch` next advanced); the readers after validation, so a gather does
-            // not draw a row the validation disabled this frame. Validation cannot simply join
+            // `RenderStale` / `MaterialStale` (R4b-open-edges, re-based on the asset-validate
+            // prereqs): `validate_asset_refs` (`VisibilitySet::Validate`) writes the two stale
+            // bits through deferred commands (`asset_refcount.rs`, `SetStaleCommand`), and the
+            // readers filter on them (`Disabled<RenderStale>` in both gathers), so the readers
+            // run after validation or a gather draws a row the validation marked stale this
+            // frame — the same order the gather helpers pin per consumer with
+            // `.after_set(AssetValidateSet)`; this set edge covers the instance packs as well.
+            // Validation after the sync: since the prereq lane validation no longer reads
+            // `RenderEnabled` (its queries do not filter on it, so a hidden row's stale bit is
+            // maintained while hidden), so this edge carries no data today; it stays as the
+            // declared phase order R4b introduced, pinned by
+            // `tests/host_orders_asset_validation_after_visibility_sync.rs`, and dropping it
+            // is a ruling for the host's owner, not a merge. Validation cannot simply join
             // `Read`: a member shared by two ordered sets is rejected (`boyko-B9004`).
             b.configure_set(VisibilitySet::Validate).after(VisibilitySet::Sync);
             b.configure_set(VisibilitySet::Read).after(VisibilitySet::Validate);
