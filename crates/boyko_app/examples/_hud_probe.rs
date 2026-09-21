@@ -654,7 +654,7 @@ fn setup(
     //
     //    Probe override: this probe locks the look UNCONDITIONALLY (`sensitivity: 0.0` in the
     //    bundle below), so the knob's value is computed but not consumed here; the binding
-    //    is kept so this file stays a four-hunk diff against `playground.rs`.
+    //    is kept so this file stays a small diff against `playground.rs`.
     let _sensitivity = if std::env::var_os("BOYKO_LOCK_LOOK").is_some() {
         0.0
     } else {
