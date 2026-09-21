@@ -794,8 +794,9 @@ impl Plugin for EnginePlugins {
 /// with its two ordering edges, rather than trusting a doc comment that says so. The gate
 /// cannot be a `#[cfg(test)] mod` in this file: `tests/host_ecs_entry_points_are_guarded.rs`
 /// forbids `app.update()` anywhere under `src/` as raw text, and the root reachability
-/// census's controls need `add_plugin(CsmPlugin)` to occur exactly once in this file — both
-/// walk source as text and neither strips `cfg(test)`, by design.
+/// census's controls need the `CsmPlugin` registration to be spelled exactly once in this
+/// file (comments included — this sentence deliberately does not spell it) — both walk source
+/// as text and neither strips `cfg(test)`, by design.
 pub fn register_main_frame_systems(b: &mut ScheduleBuilder) {
     let pack = b
         .add_system(sync_instance_model_cols)

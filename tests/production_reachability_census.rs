@@ -279,10 +279,13 @@ const KNOWN_UNREACHABLE_MEMBERS: [RecordedMember; 5] = [
     },
     RecordedMember {
         package: "boyko-serialize",
-        class: Reach::Unreferenced,
-        note: "Found by this census, and the strongest form: ZERO reverse edges of any kind. No \
-               member names boyko-serialize in [dependencies] OR [dev-dependencies]. It is built \
-               only because it is a workspace member.",
+        class: Reach::DevOnlyReferenced,
+        note: "Found by this census as `Unreferenced` — ZERO reverse edges of any kind, built \
+               only because it is a workspace member. Reclassified when fix/asset-validate-prereqs \
+               (419aaf2d, merged as A5.2) added it to crates/boyko_render/Cargo.toml's \
+               [dev-dependencies] for the serialize version-skew gates \
+               (tests/asset_streaming_prereq_validate.rs). Now the boyko_ui shape: its ONLY \
+               reverse edge is a dev one, and no shipped path loads a save file.",
     },
     RecordedMember {
         package: "aether",
@@ -351,18 +354,18 @@ struct RecordedPlugin {
 
 /// The measured class-2 baseline at `59009f8a`, asserted for exact equality.
 ///
-/// **One row has been struck since that measurement**, in the commit that removed the defect it
-/// recorded: `ParticlePlugin`, now composed by `EnginePlugins::build`. The baseline is asserted in
-/// BOTH directions, so a repair reds this class exactly as a new defect does — deliberately, so
-/// that "improved" can never be confused with "the scanner stopped seeing it". Striking the row is
-/// part of the same act as the wiring, never a reaction to the red.
-const KNOWN_UNREGISTERED_PLUGINS: [RecordedPlugin; 6] = [
-    RecordedPlugin {
-        ty: "DdgiPlugin",
-        note: "boyko_render — inserts DdgiConfig / ResolvedDdgi / DdgiUpdateConfig / DdgiCaps and \
-               resolve_ddgi_grid_gated. boyko_app builds the DDGI atlas, UBOs and update pipeline \
-               in gpu_scene/csm.rs, so the device side is wired and the ECS side is not.",
-    },
+/// **Two rows have been struck since that measurement**, each in the commit that removed the
+/// defect it recorded: `ParticlePlugin`, now composed by `EnginePlugins::build`; and `DdgiPlugin`
+/// (inserts `DdgiConfig` / `ResolvedDdgi` / `DdgiUpdateConfig` / `DdgiCaps` and
+/// `resolve_ddgi_grid_gated` — the device side was wired in `gpu_scene/csm.rs` while the ECS side
+/// was not), composed by `EnginePlugins::build` since fix/ddgi-host-hook (230585d0, merged as
+/// A5.4; `boyko_app/tests/ddgi_plugin_composed.rs` pins it). The baseline is asserted in BOTH
+/// directions, so a repair reds this class exactly as a new defect does — deliberately, so that
+/// "improved" can never be confused with "the scanner stopped seeing it". Striking the row is part
+/// of the same act as the wiring, never a reaction to the red — the `DdgiPlugin` strike is the one
+/// exception, because the wiring and this gate met for the first time in a merge (the gate was not
+/// on the lane), and the strike is the merge's follow-up.
+const KNOWN_UNREGISTERED_PLUGINS: [RecordedPlugin; 5] = [
     RecordedPlugin {
         ty: "UiPlugin",
         note: "boyko_ui — the layout/text/clipping subsystem's App entry point.",
@@ -1816,8 +1819,8 @@ fn a_member_referenced_only_as_a_dev_dependency_is_reported() {
     assert_eq!(
         classify_members(&alone).get("ghost-subsystem"),
         Some(&Reach::Unreferenced),
-        "a member no manifest names at all was not classified Unreferenced — the `boyko-serialize` \
-         shape must stay distinct from the dev-only one"
+        "a member no manifest names at all was not classified Unreferenced — the zero-edge shape \
+         (`boyko-serialize`'s until A5.2 gave it a dev edge) must stay distinct from the dev-only one"
     );
 }
 
