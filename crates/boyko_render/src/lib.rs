@@ -588,7 +588,8 @@ pub use light::{
 };
 pub use light_policy::{CLUSTER_HI, CLUSTER_LO, LightStats, select_lighting_cull};
 pub use light_system::{
-    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightCollectSet, LightSeedState,
+    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightCollectSet, LightSeedSet,
+    LightSeedState,
     LightTableGeneration, LightTableStaging, SetLightEnabledById, collect_lights, evict_light,
     fold_light_table, fold_light_table_slotted, light_seed_state, primary_directional_dir,
     set_light_enabled_now, write_light_table,

@@ -24,9 +24,9 @@ use boyko_render::MotionCamState;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     AssetRefcountPlugin, ClusterConfig, CsmCasterScratch, CsmFitSet, CsmPlugin, CsmResolveSet,
-    LightCollectSet, LightingConfig, LightingPlugin, MeshRenderScratch, ParticlePlugin,
-    ParticleTickSet, RayPlugin, Render3dPlugin, RenderPathPlugin, SdfPlugin, ShadowAtlasPlugin,
-    ShadowDenoisePlugin, SsaoPlugin, add_gpu_transform_pack, gather_mesh_draws,
+    LightCollectSet, LightSeedSet, LightingConfig, LightingPlugin, MeshRenderScratch,
+    ParticlePlugin, ParticleTickSet, RayPlugin, Render3dPlugin, RenderPathPlugin, SdfPlugin,
+    ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin, add_gpu_transform_pack, gather_mesh_draws,
     gather_shadow_casters, reduce_caster_bounds, snap_apply, sync_cluster_light_gate,
     sync_csm_light_gate, sync_punctual_light_gate, sync_ssao_light_gate, sync_sv0_light_gate,
 };
@@ -717,6 +717,17 @@ impl Plugin for EnginePlugins {
             // this edge resolves against `CsmFitSet`'s membership above and `CsmResolveSet`'s
             // membership in `CsmPlugin` regardless of registration order.
             b.configure_set(CsmResolveSet).after(CsmFitSet);
+            // `LightSeedSet → CsmResolveSet`: the fit takes the first ENABLED sun (defect R2b), and
+            // the exclusive light seed is what enables a newly added light. Unordered, on the first
+            // frame of a sun spawned before the first update, the fit ran before the seed in 300 of
+            // 300 measured runs and published `ResolvedCsm::DISABLED` while `collect_lights`
+            // (ordered after the seed) already lit with that sun. Declared here for the same memberless-set reason as the edge above:
+            // `LightingPlugin` and `CsmPlugin` each declare membership only, and this closure runs
+            // in the one composition that holds both. No cycle: nothing is ordered after
+            // `resolve_csm_cascades` (its key is never taken, and no edge names `CsmResolveSet` as
+            // a predecessor), so no path leads from it back to the seed. Pinned by
+            // `tests/host_orders_csm_fit_after_light_seed.rs`, which goes red without this line.
+            b.configure_set(CsmResolveSet).after(LightSeedSet);
             // The punctual header-gate ⇄ depth-pass lock-step (mirrors the csm sync): after the
             // SAME caster gather so the gate's caster predicate is THIS frame's. It reads
             // `ResolvedShadowAtlas.mode_word` (written by `resolve_shadow_atlas` in

@@ -156,6 +156,10 @@ fn header_bits_pass_arming_and_slots_agree_on_every_leg_set() {
     app.add_systems_cfg(|b| {
         b.add_system(sync_csm_light_gate);
         b.add_system(sync_punctual_light_gate);
+        // The seed → fit edge `EnginePlugins` declares (`boyko_app/src/plugins.rs`): the two
+        // plugins declare set membership only, so a world composing them without `boyko_app`
+        // declares the edge itself, or the fit can read a new sun as disabled.
+        b.configure_set(boyko_render::CsmResolveSet).after(boyko_render::LightSeedSet);
     });
     app.insert_resource(CsmConfig { cascade_count: 3, ..CsmConfig::default() });
     app.insert_resource(ShadowConfig { enabled: true, ..ShadowConfig::default() });

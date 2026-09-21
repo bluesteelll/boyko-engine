@@ -615,6 +615,42 @@ fn write_pod<T: Copy>(dst: &mut [u8], off: usize, value: &T) {
 #[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LightCollectSet;
 
+/// The `Main`-schedule ordering seam that makes the exclusive light seed
+/// ([`LightSeedState::seed`]) visible to a cross-plugin ordering edge. Its one member is the
+/// seed [`LightingPlugin`](crate::light_plugin::LightingPlugin) registers.
+///
+/// # Why a reader must be ordered after it
+///
+/// The seed is what sets a newly added light's [`LightEnabled`] bit, and a row it has not
+/// seeded yet reads DISABLED. A system that reads lights through `IsEnabled<LightEnabled>` and
+/// is not ordered after the seed can therefore run before it on the frame a light is added and
+/// see that light as disabled, while [`collect_lights`] already folds it into the table.
+///
+/// Every such reader in the workspace is ordered after the seed:
+///
+/// - **Inside `LightingPlugin`, by key, not through this set:** [`collect_lights`] and
+///   [`select_lighting_cull`](crate::light_policy::select_lighting_cull). The second one was
+///   unordered until R2b-edge and counted 0 of 3 lights on the frame they were added;
+///   `tests/light_policy_spawn_frame.rs` pins its edge.
+/// - **Outside it, through this set:**
+///   [`resolve_csm_cascades`](crate::csm_config::resolve_csm_cascades). The composing app
+///   declares `CsmResolveSet.after(LightSeedSet)`; for the shipped host that is
+///   `boyko_app`'s `EnginePlugins`, pinned by
+///   `boyko_app/tests/host_orders_csm_fit_after_light_seed.rs`.
+///
+/// A new reader of `LightEnabled` needs the same edge: a key edge if `LightingPlugin` registers
+/// it, a set edge from its composing app otherwise.
+///
+/// # Why a named set, not a key
+///
+/// The seed is a closure registered inside `LightingPlugin`'s own builder closure, so its
+/// `SystemKey` is invisible to any other registration site, exactly as for
+/// [`LightCollectSet`]. `LightingPlugin` declares membership only: an edge referencing a set
+/// with no members warns `boyko-W1501`, so the edge is declared where both sets have members
+/// (the `CsmFitSet` / `ParticleTickSet` precedent).
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LightSeedSet;
+
 /// The L0 collection system (Decision 4) — `Changed`-gated.
 ///
 /// On a frame where any light component or [`LightingConfig`] changed, folds the live

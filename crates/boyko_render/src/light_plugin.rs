@@ -9,7 +9,8 @@ use crate::light::{DirectionalLight, LightTableDirty, PointLight, SkyLight, Spot
 use crate::light_policy::{LightStats, select_lighting_cull};
 use crate::light_reconcile::{LightReconcileSet, light_reconcile};
 use crate::light_system::{
-    LightCollectSet, LightTableGeneration, collect_lights, evict_light, light_seed_state,
+    LightCollectSet, LightSeedSet, LightTableGeneration, collect_lights, evict_light,
+    light_seed_state,
 };
 use crate::shadow_atlas::{PunctualResolveSet, PunctualSlotAssignment};
 
@@ -60,10 +61,11 @@ use crate::shadow_atlas::{PunctualResolveSet, PunctualSlotAssignment};
 /// order holds on a later frame, a moving light's pose trails its transform by one frame for
 /// as long as it moves. The same set orders the pose's readers outside this plugin after the
 /// reconcile (the CSM fit and the punctual atlas resolve; see [`LightReconcileSet`]). Within
-/// this plugin the order is reconcile → seed → collect; `select_lighting_cull` and
-/// `light_reconcile` share no data (the cull counts `IsEnabled<LightEnabled>` rows under
-/// `With<PointLight>` / `With<SpotLight>` and reads no light field; the reconcile writes only
-/// `position` / `direction`), so that pair is left unordered.
+/// this plugin the order is reconcile → seed → collect, with `select_lighting_cull` between
+/// the seed and collect; `select_lighting_cull` and `light_reconcile` share no data (the cull
+/// counts `IsEnabled<LightEnabled>` rows under `With<PointLight>` / `With<SpotLight>` and
+/// reads no light field; the reconcile writes only `position` / `direction`), so that pair
+/// is left unordered.
 #[derive(Default)]
 pub struct LightingPlugin;
 
@@ -109,7 +111,8 @@ impl Plugin for LightingPlugin {
         // + the reused scratch) is owned here, in the registering closure; capturing it once
         // is what makes the per-frame system `initialize` cost amortise to zero (W1).
         // `select_lighting_cull` (P1) also runs `.before(collect)` so this frame's banded
-        // cluster decision feeds the header fold (no one-frame staleness).
+        // cluster decision feeds the header fold (no one-frame staleness), and after the seed so
+        // the lights it counts are this frame's too.
         app.add_systems_cfg(|b| {
             // `collect_lights` runs `.after_set(PunctualResolveSet)` — the by-name cross-plugin
             // edge that guarantees the punctual shadow resolve (in `ShadowAtlasPlugin`) has
@@ -131,12 +134,25 @@ impl Plugin for LightingPlugin {
             // the pose's readers OUTSIDE this plugin (the CSM fit, the punctual atlas resolve).
             // The composing app declares those set edges. See the set's doc.
             b.add_system(light_reconcile).before(collect).in_set(LightReconcileSet);
-            b.add_system(select_lighting_cull).before(collect);
+            let cull = b.add_system(select_lighting_cull).before(collect).key();
+            // Every system this plugin registers that reads `LightEnabled` runs after the seed,
+            // ordered here by key: `collect_lights` and `select_lighting_cull`. A reader that is
+            // not ordered after the seed sees a light added this frame as disabled while the fold
+            // already writes it. For `select_lighting_cull` that was measured: on the frame three
+            // point lights were added it counted 0 of them, in 30 of 30 runs
+            // (`tests/light_policy_spawn_frame.rs`). Its edge is declared here, on the seed, so the
+            // registration order stays as it was.
+            //
+            // `.in_set(LightSeedSet)` is membership only, for readers OUTSIDE this plugin: their
+            // composing app declares the set edge (`CsmResolveSet.after(LightSeedSet)`). See
+            // `LightSeedSet`'s doc.
             let mut seed_state = light_seed_state();
             b.add_system(move |w: &mut boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster| {
                 seed_state.seed(w);
             })
-            .before(collect);
+            .before(collect)
+            .before(cull)
+            .in_set(LightSeedSet);
         });
     }
 
