@@ -183,3 +183,25 @@ pub fn visibility_sync(
         commands.add(SetRenderEnabled { entity, value });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the layout the struct doc and the A9 cost statement rely on:
+    /// `Entity` (16 B) + `bool`, `#[repr(C)]` ⇒ 24 B, 8-aligned — 8 B more per
+    /// toggle than the 16 B by-id form it replaced.
+    #[test]
+    fn set_render_enabled_is_24_bytes_8_aligned() {
+        assert_eq!(
+            size_of::<SetRenderEnabled>(),
+            24,
+            "Entity (16 B) + bool (1 B), repr(C), padded to the 8 B alignment"
+        );
+        assert_eq!(
+            align_of::<SetRenderEnabled>(),
+            8,
+            "alignment follows Entity's usize id"
+        );
+    }
+}

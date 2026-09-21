@@ -26,6 +26,9 @@
 //!  5. H-06 (unification plan 02, row A9): a toggle pending for `E` does NOT
 //!     land on `F`, spawned on `E`'s recycled id in the SAME frame — `F`'s bit
 //!     is unchanged and equals a run where `F` takes a fresh id.
+//!  6. H-06, the `disable` direction: a stale `disable` pending for `E` does
+//!     NOT clear the bit `F` set for itself on `E`'s recycled id (gate 5 covers
+//!     only the `enable` branch of the command's apply).
 //!
 //! # How a `Visibility` change is driven
 //!
@@ -157,7 +160,7 @@ fn spawn_hidden_clears_bit_visible_and_inherited_set_it() {
 
     let mut sched = build_sync_only_schedule(&mut world);
     // First run: Added-Visibility ⊆ Changed, so the bridge reconciles all three;
-    // the deferred SetRenderEnabledById commands flush in the apply window of the
+    // the deferred SetRenderEnabled commands flush in the apply window of the
     // SAME run.
     sched.run(&mut world);
 
@@ -438,26 +441,52 @@ enum ClaimOrder {
     Fresh,
 }
 
+/// Which pending toggle the frame carries for E, and how F is spawned so that
+/// a stale toggle that DID land would be observable on F's bit:
+///
+/// * `Enable` — E is spawned `Visible` (its Added byte is a pending `enable`);
+///   F is spawned `Hidden` with its bit CLEAR. A landed toggle SETS F's bit.
+/// * `Disable` — E is spawned `Hidden` with its bit pre-SET (so the control
+///   frame can show the `disable` is live); F is spawned `Visible` and its bit
+///   is SET through the dispatcher inside the same apply. A landed toggle
+///   CLEARS F's bit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum PendingToggle {
+    #[default]
+    Enable,
+    Disable,
+}
+
 /// The frame's structural request: `killer` consumes `doomed` on the frame it
-/// runs; `SpawnHiddenAtApply` reports the handle F was registered under.
+/// runs; `SpawnFAtApply` reports the handle F was registered under.
 #[derive(boyko_macros::Resource, Default)]
 struct KillRequest {
     doomed: Option<Entity>,
     arch: Option<ArchetypeId>,
     order: ClaimOrder,
+    pending: PendingToggle,
     spawned: Option<Entity>,
 }
 
-/// Spawns a `Visibility::Hidden` row through the DISPATCHER's allocator, at
-/// apply time (see the gate's header for why the enqueue-time claim of
-/// `Commands::spawn` cannot stand in for this).
-struct SpawnHiddenAtApply {
+/// Spawns F through the DISPATCHER's allocator, at apply time (see the gate's
+/// header for why the enqueue-time claim of `Commands::spawn` cannot stand in
+/// for this), shaped by [`PendingToggle`] so a landed stale toggle would show.
+struct SpawnFAtApply {
     arch: ArchetypeId,
 }
 
-impl Command for SpawnHiddenAtApply {
+impl Command for SpawnFAtApply {
     fn apply(self, world: &mut EcsMaster) {
-        let f = spawn_vis(world, self.arch, Visibility::Hidden);
+        let f = match world.resource::<KillRequest>().pending {
+            PendingToggle::Enable => spawn_vis(world, self.arch, Visibility::Hidden),
+            PendingToggle::Disable => {
+                let f = spawn_vis(world, self.arch, Visibility::Visible);
+                // Same apply, same `&mut EcsMaster`: F's bit is SET before
+                // any queue behind `killer`'s drains.
+                world.enable::<RenderEnabled>(f);
+                f
+            }
+        };
         world.resource_mut::<KillRequest>().spawned = Some(f);
     }
 }
@@ -472,10 +501,10 @@ fn killer(mut commands: Commands, mut req: ResMut<KillRequest>) {
     match req.order {
         ClaimOrder::Recycled => {
             commands.despawn(e);
-            commands.add(SpawnHiddenAtApply { arch });
+            commands.add(SpawnFAtApply { arch });
         }
         ClaimOrder::Fresh => {
-            commands.add(SpawnHiddenAtApply { arch });
+            commands.add(SpawnFAtApply { arch });
             commands.despawn(e);
         }
     }
@@ -499,20 +528,28 @@ struct H06Outcome {
     enable_generation_moved: bool,
 }
 
-/// One frame: E is spawned `Visible` (its Added `Visibility` is the pending
-/// toggle — an `enable`), then `killer` and `visibility_sync` run
-/// concurrently on a one-worker pool. `order == None` runs the control frame
-/// in which nothing is despawned.
-fn run_h06_frame(order: Option<ClaimOrder>) -> H06Outcome {
+/// One frame: E is spawned so its Added `Visibility` is the pending toggle
+/// (`Visible` ⇒ `enable`; `Hidden` with the bit pre-set ⇒ `disable`), then
+/// `killer` and `visibility_sync` run concurrently on a one-worker pool.
+/// `order == None` runs the control frame in which nothing is despawned.
+fn run_h06_frame(order: Option<ClaimOrder>, pending: PendingToggle) -> H06Outcome {
     let mut world = EcsMaster::new();
     world.insert_resource(KillRequest::default());
     let arch = vis_archetype(&mut world);
-    let e = spawn_vis(&mut world, arch, Visibility::Visible);
+    let e = match pending {
+        PendingToggle::Enable => spawn_vis(&mut world, arch, Visibility::Visible),
+        PendingToggle::Disable => {
+            let e = spawn_vis(&mut world, arch, Visibility::Hidden);
+            world.enable::<RenderEnabled>(e);
+            e
+        }
+    };
     {
         let req = world.resource_mut::<KillRequest>();
         req.doomed = order.map(|_| e);
         req.arch = Some(arch);
         req.order = order.unwrap_or_default();
+        req.pending = pending;
     }
 
     // ONE worker + `killer` added FIRST: the dispatch and drain order the gate
@@ -541,7 +578,7 @@ fn run_h06_frame(order: Option<ClaimOrder>) -> H06Outcome {
 fn toggle_pending_for_a_despawned_entity_does_not_land_on_its_recycled_id() {
     // Anti-vacuity 1 — the frame really carries a live `enable` for E: with
     // nothing despawned, E's bit is SET after the frame.
-    let live = run_h06_frame(None);
+    let live = run_h06_frame(None, PendingToggle::Enable);
     assert!(live.f.is_none(), "control: nothing was spawned");
     assert!(
         live.e_enabled,
@@ -554,7 +591,7 @@ fn toggle_pending_for_a_despawned_entity_does_not_land_on_its_recycled_id() {
     );
 
     // The recycled run.
-    let a = run_h06_frame(Some(ClaimOrder::Recycled));
+    let a = run_h06_frame(Some(ClaimOrder::Recycled), PendingToggle::Enable);
     let fa = a.f.expect("recycled run: SpawnHiddenAtApply registered F");
     // Anti-vacuity 2 — the recycle happened as staged: F sits on E's id, one
     // generation up (F3: the recycled entry carries the bumped generation).
@@ -584,7 +621,7 @@ fn toggle_pending_for_a_despawned_entity_does_not_land_on_its_recycled_id() {
     );
 
     // The fresh-id control: identical frame, F allocated BEFORE E's despawn.
-    let b = run_h06_frame(Some(ClaimOrder::Fresh));
+    let b = run_h06_frame(Some(ClaimOrder::Fresh), PendingToggle::Enable);
     let fb = b.f.expect("fresh run: SpawnHiddenAtApply registered F");
     assert_ne!(fb.id(), b.e.id(), "fresh run: F must NOT take E's id (nothing was recycled yet)");
     assert_eq!(fb.generation(), 0, "fresh run: a minted id starts at generation 0");
@@ -596,5 +633,73 @@ fn toggle_pending_for_a_despawned_entity_does_not_land_on_its_recycled_id() {
         (a.f_enabled, a.enable_generation_moved),
         (b.f_enabled, b.enable_generation_moved),
         "H-06: F's bit (and the toggle's fate) must not depend on whether F recycled E's id"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Gate 6 — H-06, the `disable` direction: the command's apply has two
+//          branches, and gate 5 exercises only `enable`. Same harness, same
+//          interleaving; E's pending toggle is a `disable`, and F sets its own
+//          bit at spawn so a landed stale `disable` would CLEAR it.
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The drain order (killer's queue before visibility_sync's) is pinned by gate
+// 5's `enable_generation` probe on this exact harness (one worker, `killer`
+// added first). It cannot be re-pinned here: a `disable` never allocates a
+// column, and E's pre-set bit already allocated it, so the generation is
+// still in both orders — this gate relies on gate 5 for that fact.
+
+#[test]
+fn stale_disable_for_a_despawned_entity_does_not_clear_its_recycled_ids_bit() {
+    // Anti-vacuity 1 — the frame really carries a live `disable` for E: with
+    // nothing despawned, E's pre-set bit is CLEAR after the frame.
+    let live = run_h06_frame(None, PendingToggle::Disable);
+    assert!(live.f.is_none(), "control: nothing was spawned");
+    assert!(
+        !live.e_enabled,
+        "control: the spawn frame's Added Hidden clears E's pre-set bit — the disable under test is live"
+    );
+
+    // The recycled run.
+    let a = run_h06_frame(Some(ClaimOrder::Recycled), PendingToggle::Disable);
+    let fa = a.f.expect("recycled run: SpawnFAtApply registered F");
+    // Anti-vacuity 2 — the recycle happened as staged.
+    assert_eq!(
+        fa.id(),
+        a.e.id(),
+        "recycled run: F must take E's id (killer drained before the toggle)"
+    );
+    assert_eq!(
+        fa.generation(),
+        a.e.generation() + 1,
+        "recycled run: F carries E's slot generation + 1"
+    );
+
+    // THE ASSERTION. F set its own bit at spawn and has never been toggled;
+    // E's pending `disable`, keyed by E's id, must not reach it.
+    assert!(
+        a.f_enabled,
+        "H-06 (disable): a stale disable pending for the despawned E landed on F, spawned on E's \
+         recycled id in the same frame — F ({fa:?}) set its bit at spawn, was never toggled, and \
+         reads DISABLED",
+    );
+
+    // The fresh-id control.
+    let b = run_h06_frame(Some(ClaimOrder::Fresh), PendingToggle::Disable);
+    let fb = b.f.expect("fresh run: SpawnFAtApply registered F");
+    assert_ne!(
+        fb.id(),
+        b.e.id(),
+        "fresh run: F must NOT take E's id (nothing was recycled yet)"
+    );
+    assert!(
+        b.f_enabled,
+        "fresh run: F set its bit at spawn and was never toggled"
+    );
+
+    // The plan's equality, disable direction.
+    assert_eq!(
+        a.f_enabled, b.f_enabled,
+        "H-06 (disable): F's bit must not depend on whether F recycled E's id"
     );
 }
