@@ -176,14 +176,20 @@ pub(crate) fn run_check_ticks_scan(world: &mut EcsMaster) {
     // structural rather than a convention: a dense id gets NO per-archetype
     // `ComponentPool` at ANY of the three mint funnels — `Archetype::create_by_ids`,
     // `register_component` and `register_component_inplace` all screen on
-    // `is_signature_storage` BEFORE `add_pool`. A spawn-built archetype does
-    // still NAME the dense id in `component_ids()` (retained since Dense plan
-    // D0), so the loop above reaches the id and then drops it at
-    // `get_pool_mut(cid) == None`; a loaded archetype does not even name it.
-    // Under either shape the dense column is unreachable from an archetype, so
-    // this arm is purely ADDITIVE — no store can be clamped twice, and a double
-    // clamp would in any case be idempotent (`check_tick` is a floor, not a
-    // shift).
+    // `is_signature_storage` BEFORE `add_pool` — and the loop above walks
+    // `table_component_ids()` (KE14 D1: the signature-storage subsequence, every
+    // member owning a pool), which excludes every poolless id by that same
+    // mint invariant, so the walk never REACHES a dense id at all. Whether the
+    // archetype's DECLARATION record (`all_component_ids()`) names it is
+    // immaterial to the walk: a spawn-built archetype retains it there (Dense
+    // plan D0) while a freshly loaded one does not, and neither record is what
+    // the walk iterates. The `get_pool_mut(cid) == None` bail above is a
+    // backstop, not the mechanism. Under either shape the dense column is
+    // unreachable from an archetype, so this arm is purely ADDITIVE — no store
+    // can be clamped twice, and a double clamp would in any case be idempotent
+    // (`check_tick` is a floor, not a shift). Both halves — retained in the
+    // declaration record, absent from the table list — are asserted, not
+    // assumed, by `check_ticks_clamps_dense_slot_ticks`.
     //
     // The id list is FIXED for the duration of the scan (nothing here creates a
     // store), so it is re-read per turn under a short shared borrow instead of
