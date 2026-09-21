@@ -70,6 +70,14 @@
 //! * `--parallel-np on|off` sets `parallel_narrowphase` under every `--cfg`, after the rest: the
 //!   same-binary A/B of the parallel narrowphase (L5), e.g. cfg-A at W = 8 with the solve parallel
 //!   and the narrowphase serial.
+//! * `--broadphase allpairs|tree|grid` sets `broadphase` under every `--cfg`, after the rest, and
+//!   pins `broadphase_select` to `Manual` so the policy cannot override it: the same-binary A/B of
+//!   the tree broadphase (gate G5 of `docs/physics/perf-campaign/levers/broadphase/04-DESIGN-REV2.md`,
+//!   commit C3). All three kinds emit the same pair set, so the pose bytes must be equal across
+//!   them (`--expect-pose`). The Tree runs its brute all-pairs loop at or below
+//!   `BroadphaseTree::brute_max_rows()` rows (printed in the summary as `tree_brute_max_rows`), so
+//!   on `s16` a `--broadphase tree` row is the brute path; the per-step check derives the path
+//!   from the kind, the row count and that threshold.
 //! * `--solver reference` wires `add_physics_systems::<SoftStepSolver>` instead of
 //!   `add_physics_colored_solve` (R-ref, which prices D1). It takes `--cfg default` only, and no
 //!   sleeping, parallel solve or canary, none of which exists on that path.
@@ -153,6 +161,9 @@
 //!                              (cfg-A/B at W > 1 and --cfg default have it on), refused at
 //!                              W = 1 (J-P1 is retired, see "Configurations")
 //! --parallel-np on|off         set parallel_narrowphase (L5), under any --cfg
+//! --broadphase allpairs|tree|grid
+//!                              set broadphase (tree broadphase C3) under Manual selection, under
+//!                              any --cfg
 //! --sleeping                   sleeping on
 //! --threshold T                sleep threshold (speed², with --sleeping)
 //! --frozen-by K                void unless every dynamic row is frozen on step K (R-S: 300)
@@ -170,7 +181,11 @@
 //!
 //! * stdout: a few readable lines, then one line `SUMMARY {json}` for the driver. The pose hash is
 //!   FNV-1a 64 over the final pose bytes: every dynamic body's `RigidBody` (position, linear
-//!   velocity, rotation, angular velocity) as little-endian `f32` bits, in spawn order.
+//!   velocity, rotation, angular velocity) as little-endian `f32` bits, in spawn order. The
+//!   summary's `config` carries `tree_brute_max_rows`, and `broadphase_tree` carries the tree
+//!   broadphase's cumulative `TreeDiag` after the last step (all zero unless the kind is `Tree`):
+//!   on J and R a `Tree` row reads `static_rebuilds 1`, `members 1`, `evictions 0`, and
+//!   `sleeper_rebuilds 0` (the structural receipts of gates G2 and G5).
 //! * `--csv`: one row per step. Always `step, wall_ns, manifolds, pairs, top_y, awake`; armed also
 //!   `void, colors, wide_colors, waves, g_ns, u_ns, r_ns, sys_sum_ns, disp_lane, worker_lane_max`
 //!   and, per system and per physics zone, `<name>_ns` and `<name>_n` (counters: `<name>` is the
@@ -432,6 +447,7 @@ struct Args {
     cfg: CfgKind,
     parallel_solve: bool,
     parallel_np: Option<bool>,
+    broadphase: Option<BroadphaseKind>,
     sleeping: bool,
     threshold: Option<f32>,
     frozen_by: Option<usize>,
@@ -461,8 +477,9 @@ fn usage_error(msg: &str) -> ExitCode {
     eprintln!(
         "usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] \
          [--gap G] [--solver colored|reference] [--cfg a|b|default] [--parallel-solve] \
-         [--parallel-np on|off] [--sleeping] [--threshold T] [--frozen-by K] [--arm-profiler] [--canary-frac F \
-         --canary-ref-ns T] [--csv PATH] [--pose-out PATH] [--expect-pose PATH] [--label TEXT]"
+         [--parallel-np on|off] [--broadphase allpairs|tree|grid] [--sleeping] [--threshold T] \
+         [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] [--csv PATH] \
+         [--pose-out PATH] [--expect-pose PATH] [--label TEXT]"
     );
     ExitCode::from(EXIT_USAGE)
 }
@@ -495,6 +512,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut cfg = CfgKind::Default;
     let mut parallel_solve = false;
     let mut parallel_np = None;
+    let mut broadphase = None;
     let mut sleeping = false;
     let mut threshold = None;
     let mut frozen_by = None;
@@ -541,6 +559,18 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
                     other => return Err(format!("--parallel-np: expected on|off, got {other:?}")),
                 }
             }
+            "--broadphase" => {
+                broadphase = match it.next().as_deref() {
+                    Some("allpairs") => Some(BroadphaseKind::AllPairs),
+                    Some("tree") => Some(BroadphaseKind::Tree),
+                    Some("grid") => Some(BroadphaseKind::Grid),
+                    other => {
+                        return Err(format!(
+                            "--broadphase: expected allpairs|tree|grid, got {other:?}"
+                        ));
+                    }
+                }
+            }
             "--sleeping" => sleeping = true,
             "--threshold" => threshold = Some(parse_num::<f32>("--threshold", it.next())?),
             "--frozen-by" => frozen_by = Some(parse_num::<usize>("--frozen-by", it.next())?),
@@ -568,6 +598,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         cfg,
         parallel_solve,
         parallel_np,
+        broadphase,
         sleeping,
         threshold,
         frozen_by,
@@ -796,6 +827,10 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
     }
     if let Some(np) = args.parallel_np {
         cfg.parallel_narrowphase = np;
+    }
+    if let Some(kind) = args.broadphase {
+        cfg.broadphase_select = BroadphaseSelectMode::Manual;
+        cfg.broadphase = kind;
     }
 }
 
@@ -1229,6 +1264,7 @@ fn self_check() -> ExitCode {
         cfg: CfgKind::A,
         parallel_solve: false,
         parallel_np: None,
+        broadphase: None,
         sleeping: false,
         threshold: None,
         frozen_by: None,
@@ -1269,8 +1305,10 @@ fn run(args: &Args) -> ExitCode {
     let colored = args.solver == SolverKind::Colored;
     let (substeps, relax, sleeping, parallel_np, config_json) = {
         let cfg = rig.world.resource::<PhysicsConfig>();
+        let tree_brute_max_rows = rig.world.resource::<BroadphaseTree>().brute_max_rows();
         let json = format!(
             "{{\"substeps\":{},\"relax_iterations\":{},\"broadphase\":{},\"broadphase_select\":{},\
+             \"tree_brute_max_rows\":{tree_brute_max_rows},\
              \"simd\":{},\"simd_solve\":{},\"parallel_solve\":{},\"parallel_broadphase\":{},\
              \"parallel_narrowphase\":{},\"sleeping\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\"colored\":{},\
              \"contact_hertz\":{},\"contact_damping\":{}}}",
@@ -1511,6 +1549,23 @@ fn run(args: &Args) -> ExitCode {
     let waves_total: u64 = armed_rows.iter().map(|r| r.waves).sum();
     let disp_max = armed_rows.iter().map(|r| r.disp_lane).max().unwrap_or(0);
     let awake_after = args.frozen_by.map(|k| rows[k - 1..].iter().filter_map(|r| r.awake).max().unwrap_or(0));
+    // The tree broadphase's structural receipt (module docs, "Output"); all zero off the Tree.
+    let bp = rig.world.resource::<BroadphaseTree>().diag();
+    let bp_json = format!(
+        "{{\"static_rebuilds\":{},\"sleeper_rebuilds\":{},\"evictions\":{},\"translations\":{},\
+         \"patches\":{},\"hint_candidates\":{},\"wide_rows\":{},\"excluded_rows\":{},\
+         \"locator_resets\":{},\"members\":{}}}",
+        bp.static_rebuilds,
+        bp.sleeper_rebuilds,
+        bp.evictions,
+        bp.translations,
+        bp.patches,
+        bp.hint_candidates,
+        bp.wide_rows,
+        bp.excluded_rows,
+        bp.locator_resets,
+        bp.members,
+    );
 
     println!(
         "jolt_parity_pyramid: scene {} gap {} friction {} bodies {} workers {} solver {:?} cfg {:?} \
@@ -1551,6 +1606,7 @@ fn run(args: &Args) -> ExitCode {
          \"void_steps\":{void_steps},\"first_void\":{},\"drops_total\":{},\
          \"disarmed_ring_traffic\":{},\"ticks_per_ns\":{},\"waves_total\":{waves_total},\
          \"first_frozen_step\":{},\"frozen_by\":{},\"awake_max_from_frozen_by\":{},\
+         \"broadphase_tree\":{bp_json},\
          \"threads\":{{\"pool_workers\":{},\"dispatcher\":1,\"solve_on_dispatcher_steps\":\
          {solve_on_dispatcher_steps},\"armed_steps\":{},\"dispatcher_lane_samples_max\":{disp_max}}}}}",
         json_str(RUNNER_ID),

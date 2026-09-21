@@ -102,6 +102,10 @@ mod tests;
 /// replaces it.
 pub const TREE_BRUTE_MAX_ROWS: u32 = 64;
 
+/// In a previous-row map handed to [`BroadphaseTree::step_translated`]: the row had no previous
+/// row (a spawn). The gather's own sentinel.
+pub const NO_PREV_ROW: u32 = NO_ROW;
+
 /// The rent rule's build-to-query ratio, as `(numerator, denominator)`: a set admits its pending
 /// rows when `rent ≥ pending + (num / den) · (members + pending)`. Starts at `1 / 4`; G4
 /// measures it (D3.5).
@@ -349,6 +353,53 @@ impl BroadphaseTree {
     #[inline]
     pub fn brute_max_rows(&self) -> u32 {
         self.brute_max_rows
+    }
+
+    /// One step under direct drive, for a harness outside the crate that holds no gather (the
+    /// G4 bench): the identity locator on every step, no cursor. Row `r`'s record is the record
+    /// row `r` wrote on the previous step, so a row that keeps its bits keeps its membership and
+    /// a row that changes them is evicted; a row past the previous step's count is new. Runs the
+    /// brute loop at or below `brute_max_rows`, as [`physics_broadphase`] does.
+    ///
+    /// Not to be mixed with the gather-driven step on one instance: the cursor is never stamped
+    /// here, so the next gather-driven step would classify as `Rows` against a stale gather.
+    ///
+    /// [`physics_broadphase`]: crate::systems::physics_broadphase
+    pub fn step_direct(&mut self, bodies: &[BodyState], out: &mut ContactPairs) {
+        let n = bodies.len();
+        debug_assert!(n < 1 << 24, "invariant: rows stay below 2^24");
+        if n <= self.brute_max_rows as usize {
+            all_pairs_into(bodies, out);
+            return;
+        }
+        self.run(bodies, RowRemap::Identity, out);
+    }
+
+    /// One `Rows` step under direct drive with an explicit previous-row map, for a harness
+    /// outside the crate (the G4 maintenance arms): `prev_row[r]` is the row body `r` had on
+    /// the previous step, or [`NO_PREV_ROW`] for a row that had none. A value past the previous
+    /// step's count locates nothing. The map must be injective on its located values — a second
+    /// row naming the same previous row is not carried (the consumed mark), so it becomes Q.
+    /// Runs the brute loop at or below `brute_max_rows`, and never stamps the cursor (see
+    /// [`step_direct`](Self::step_direct)).
+    ///
+    /// # Panics
+    ///
+    /// If `prev_row.len() != bodies.len()`.
+    pub fn step_translated(
+        &mut self,
+        bodies: &[BodyState],
+        prev_row: &[u32],
+        out: &mut ContactPairs,
+    ) {
+        let n = bodies.len();
+        assert_eq!(prev_row.len(), n, "invariant: prev_row is indexed by the current rows");
+        debug_assert!(n < 1 << 24, "invariant: rows stay below 2^24");
+        if n <= self.brute_max_rows as usize {
+            all_pairs_into(bodies, out);
+            return;
+        }
+        self.run(bodies, RowRemap::Rows(prev_row), out);
     }
 
     /// One step: fills `out` with the exact pair set of `bodies`, in `(min, max)` order.

@@ -14,10 +14,24 @@
 //! * PLAIN `{RigidBody, RigidBodyMass, Collider}` holds the floor, the pyramid and 32
 //!   spheres at its tail.
 //!
-//! # Arms, each × sleeping {off, on}
+//! # Arms, each × sleeping {off, on} × broadphase {allpairs, tree}
 //!
 //! The structural change is applied between steps and is NOT timed: every sample times
 //! exactly one `Schedule::run`, whose gather pays for the row identity map.
+//!
+//! The broadphase dimension is gate G4's churn row of the tree broadphase design
+//! (`docs/physics/perf-campaign/levers/broadphase/04-DESIGN-REV2.md`, commit C3): the same
+//! arms under `BroadphaseKind::AllPairs` and under `BroadphaseKind::Tree` (both `Manual`), so
+//! what a change step costs the Tree's persistent static set is read as Tree(arm) −
+//! Tree(stable) beside AllPairs(arm) − AllPairs(stable). The design's claim rules: the Tree
+//! must be faster than AllPairs, claimed, on every arm, and Tree(arm) − Tree(stable) is not
+//! claimed above 0.05 ms. With sleeping on the settle is [`SETTLE_STEPS_SLEEPING`] steps, so
+//! the pile is frozen before the churn starts (the sleeper set is the design's commit C5; on
+//! this tree the Tree still queries a frozen pile, so those rows price the churn alone).
+//!
+//! The Tree's receipt adds its own structure: on every receipt step the floor is a member
+//! (`members >= 1`) and no static rebuild happens (`static_rebuilds` unchanged), which is G2's
+//! non-dissolution property; a Tree that rebuilt its set on a row change cannot run.
 //!
 //! * `stable` — no structural change.
 //! * `swap_churn` — despawn one PLAIN sphere that is not PLAIN's last row and respawn it at
@@ -59,10 +73,11 @@ use boyko_macros::{Component, Resource};
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
+use boyko_physics::broadphase_tree::BroadphaseTree;
 use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_colored_solve;
-use boyko_physics::resources::{PhysicsConfig, SolverScratch};
+use boyko_physics::resources::{BroadphaseKind, BroadphaseSelectMode, PhysicsConfig, SolverScratch};
 
 // ── Scene constants ──────────────────────────────────────────────────────────
 
@@ -97,6 +112,9 @@ const SPHERE_RADIUS: f32 = 0.5;
 /// Steps run before the receipt, so the first gather's map and the initial contact
 /// settle are out of the way.
 const SETTLE_STEPS: usize = 30;
+/// The settle with sleeping on: the pile is frozen before the churn starts (the parity runner's
+/// R-S row freezes by step 300; the tree broadphase design's G4 churn row asks for this).
+const SETTLE_STEPS_SLEEPING: usize = 300;
 /// Churn steps the structural receipt covers.
 const RECEIPT_STEPS: u64 = 4;
 
@@ -216,7 +234,7 @@ struct Churn {
 }
 
 impl Churn {
-    fn new(sleeping: bool) -> Self {
+    fn new(sleeping: bool, broadphase: BroadphaseKind) -> Self {
         let mut world = EcsMaster::new();
         let marked = world.create_archetype(&[
             RigidBody::component_id(),
@@ -239,6 +257,8 @@ impl Churn {
             cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
             cfg.dt = DT;
             cfg.sleeping = sleeping;
+            cfg.broadphase_select = BroadphaseSelectMode::Manual;
+            cfg.broadphase = broadphase;
         }
 
         world.insert_resource(MarkerPlan::default());
@@ -482,11 +502,16 @@ impl Churn {
     }
 
     /// Runs `RECEIPT_STEPS` churn steps, asserting each builds exactly the maps the arm
-    /// implies, and returns what they built and searched.
-    fn receipt(&mut self, arm: Arm) -> (u64, u64) {
+    /// implies, and returns what they built and searched. Under the Tree it also asserts, on
+    /// every step, that the floor stays a member and no static rebuild happens (the set is not
+    /// dissolved by the churn), and returns the Tree's counter deltas over the receipt.
+    fn receipt(&mut self, arm: Arm) -> Receipt {
         let (built0, searched0) = self.counters();
+        let tree = self.world.resource::<PhysicsConfig>().broadphase == BroadphaseKind::Tree;
+        let tree0 = self.world.resource::<BroadphaseTree>().diag();
         for _ in 0..RECEIPT_STEPS {
             let before = self.counters().0;
+            let rebuilds_before = self.world.resource::<BroadphaseTree>().diag().static_rebuilds;
             self.churn_step(arm);
             self.physics.run(&mut self.world);
             let built = self.counters().0 - before;
@@ -497,33 +522,93 @@ impl Churn {
                 "anti-vacuity: arm {} must build {expected} previous-row map per step, built {built}",
                 arm.name()
             );
+            if tree {
+                let d = self.world.resource::<BroadphaseTree>().diag();
+                assert!(d.members >= 1, "arm {}: the floor is a member of the static set", arm.name());
+                assert_eq!(
+                    d.static_rebuilds, rebuilds_before,
+                    "arm {}: a churn step must not rebuild the static set (G2)",
+                    arm.name()
+                );
+            }
         }
         let (built1, searched1) = self.counters();
-        (built1 - built0, searched1 - searched0)
+        let tree1 = self.world.resource::<BroadphaseTree>().diag();
+        let tree_deltas = tree.then(|| TreeDeltas {
+            translations: tree1.translations - tree0.translations,
+            evictions: tree1.evictions - tree0.evictions,
+            patches: tree1.patches - tree0.patches,
+        });
+        Receipt { built: built1 - built0, searched: searched1 - searched0, tree_deltas }
+    }
+}
+
+/// What the receipt steps did.
+struct Receipt {
+    /// Previous-row maps built.
+    built: u64,
+    /// Rows resolved by stage 2.
+    searched: u64,
+    /// The Tree's counter deltas, under the Tree.
+    tree_deltas: Option<TreeDeltas>,
+}
+
+/// The tree broadphase's cumulative counters, as deltas over the receipt steps.
+struct TreeDeltas {
+    translations: u64,
+    evictions: u64,
+    patches: u64,
+}
+
+/// The broadphase dimension's label.
+fn broadphase_label(kind: BroadphaseKind) -> &'static str {
+    match kind {
+        BroadphaseKind::AllPairs => "allpairs",
+        BroadphaseKind::Tree => "tree",
+        BroadphaseKind::Grid => "grid",
     }
 }
 
 fn bench_row_identity_churn(c: &mut Criterion) {
     let mut group = c.benchmark_group("row_identity_churn");
     group.sample_size(20);
-    for sleeping in [false, true] {
-        let label = if sleeping {
-            "sleeping_on"
-        } else {
-            "sleeping_off"
-        };
+    for (sleeping, broadphase) in [
+        (false, BroadphaseKind::AllPairs),
+        (false, BroadphaseKind::Tree),
+        (true, BroadphaseKind::AllPairs),
+        (true, BroadphaseKind::Tree),
+    ] {
+        let label = format!(
+            "{}_{}",
+            if sleeping { "sleeping_on" } else { "sleeping_off" },
+            broadphase_label(broadphase)
+        );
+        let settle = if sleeping { SETTLE_STEPS_SLEEPING } else { SETTLE_STEPS };
         for arm in Arm::ALL {
-            let mut churn = Churn::new(sleeping);
-            for _ in 0..SETTLE_STEPS {
+            let mut churn = Churn::new(sleeping, broadphase);
+            for _ in 0..settle {
                 churn.physics.run(&mut churn.world);
             }
-            let (built, searched) = churn.receipt(arm);
+            let Receipt { built, searched, tree_deltas } = churn.receipt(arm);
             eprintln!(
                 "row_identity_churn/{}/{label}: {RECEIPT_STEPS} churn steps built {built} maps and \
                  resolved {searched} rows by stage 2",
                 arm.name()
             );
-            group.bench_function(BenchmarkId::new(arm.name(), label), |b| {
+            if let Some(t) = tree_deltas {
+                let d = churn.world.resource::<BroadphaseTree>().diag();
+                eprintln!(
+                    "row_identity_churn/{}/{label}: tree over the receipt: translations +{} \
+                     evictions +{} patches +{}; static_rebuilds {} members {}",
+                    arm.name(),
+                    t.translations,
+                    t.evictions,
+                    t.patches,
+                    d.static_rebuilds,
+                    d.members
+                );
+            }
+            group.bench_function(BenchmarkId::new(arm.name(), &label), |b| {
                 b.iter_custom(|iters| {
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
