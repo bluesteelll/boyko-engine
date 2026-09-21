@@ -14,7 +14,78 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
----
+## 2026-09-21 — D2: the b5 basis shear points the ray the WRONG way against the raster jitter; fixing it moves two software goldens (owner decision)
+
+Lane `fix/hwrt-shadow-ray-origin`. `composite_perspective_from_view_sheared`
+(`crates/boyko_render/src/view.rs`) shears the b5 forward to `fwd + right*sx - up*sy`, i.e. the
+ray through raster-NDC `q + j`; the raster (`marcher_view_proj_rows_jittered`, `row0 += jx*row3;
+row1 += jy*row3`) puts at pixel `q` the content of unjittered `q - j`. Under the DEFAULT
+`JitterScope::RasterAndBasis` the two producers therefore sample sub-pixel positions `2j` apart —
+the mechanism note's model predicts 132,510 false-shadow px at phase 4 with the shear as coded vs
+53,531 for `RasterOnly`, and the probe measured 134,055 / 55,508; a correctly-signed shear predicts
+0. The industry convention (Falcor `p += (-jitterX, +jitterY)`, Bevy / HDRP / donut inverting the
+JITTERED projection) is the raster's direction. Pinned now by
+`view::tests::basis_shear_mirrors_the_raster_jitter_pinned_until_owner_ruling` (the shear equals
+the new `raster_ray_forward` at the NEGATED jitter), and Gate 1b
+(`raster_ray_forward_passes_through_the_raster_sample`) proves the correct sign against the
+raster rows — the `docs/TAA-PLAN.md` Decision 1 "marcher-sample-pos == raster-sample-pos" check
+that was never written.
+
+**Why not fixed on the lane:** the lane's gate is that no software golden moves, and correcting
+the shear moves `taa_armed_basis` and `taa_rcas` on the SOFTWARE leg (the CSM receiver `P` shifts
+sub-pixel; the SDF sphere is sampled at the mirrored offset). The HWRT origin fix is independent
+of it (`SHADOW_RASTER_FWD` is derived from the UNJITTERED view, exact under either sign).
+
+**Options.** (a) Flip the shear: `composite_perspective_from_view_sheared` calls
+`raster_ray_forward`, Gate 1 (`view.rs`) flips its `(jx, -jy)` to `(-jx, +jy)`, the D2 pin test is
+deleted, `taa_armed_basis` + `taa_rcas` are re-blessed on BOTH legs (hwrt: the SDF-owned pixels'
+sample position moves; the mesh-owned origin is already exact). (b) Flip the raster instead —
+moves every TAA pin on both legs. (c) Leave it — the marcher's SDF/mesh depth composite
+(`sdf_gbuffer_composite.hlsl`, `own_pixel`) keeps comparing distances along rays `2j` apart, and
+`docs/TAA-PLAN.md`'s consumer-audit row "sdf_depth_composite EXACT to fp" stays false.
+Recommendation: (a). **Decision needed:** whether re-blessing two software goldens is granted.
+
+## 2026-09-21 — H-blink1: the light header's CSM bit trails the host by two frames, so the `taa_jitter_eval` pins blink ON/OFF/ON at frames 0..2 (owner decision)
+
+Lane `fix/hwrt-shadow-ray-origin`, measured with the new burst dump
+(`BOYKO_HOST_DUMP_SETTLE=0 BOYKO_HOST_DUMP_FRAMES=3` on `vb_mesh_shadows`, software leg): the
+state lines read `csm_armed=1 header_csm=1` / `csm_armed=1 header_csm=0` / `csm_armed=1
+header_csm=1` on frames 0, 1, 2. `sync_csm_light_gate` (`crates/boyko_render/src/csm_caster.rs`)
+has no ordering edge against `resolve_csm_cascades` nor against `collect_lights`
+(`crates/boyko_app/src/plugins.rs`; the order dumps show `gate < fit` and `collect < gate`, both
+NO PATH, 34/34 frames), so at frame k it reads frame k-1's fit and its write is folded at k+1:
+`header(k+1) = armed(fit(k-1))` while `host(k+1) = fit(k+1)`. The fixture hand-seeds
+`LightingConfig::csm_shadows = true` (`taa_jitter_eval.rs`), so frame 0 is ON (the seed), frame 1
+OFF (the gate wrote `false` off the DISABLED seed fit), frame 2 ON. Pre-R4 the host was unarmed
+on frame 0 (0 casters), so the sequence was OFF/OFF/ON and no blink; R4's frame-0 edges exposed
+the pre-existing stagger.
+
+**Fix shape:** `sync_csm_light_gate.after_set(CsmResolveSet).before_set(LightCollectSet)` (the
+`sync_sv0_light_gate` / `sync_cluster_light_gate` shape in `plugins.rs`), or derive the header bit
+from the runner's own `csm_armed`. Either re-blesses the seven pins with `csm_shadows` hand-seeded
+and mesh casters, on BOTH legs (`taa_armed`, `taa_armed_basis`, `taa_rcas`, `vb_taa`,
+`vb_taa_rcas`, `vb_both_taa`, `vb_mesh_shadows` — frame 1 enters the TAA history at 10 %), which
+is why it is not on this lane. The follow-up gate: `header_csm == csm_armed` on every burst line
+with `frame >= 1`. **Decision needed:** grant the seven re-blesses (a one-frame start-up blink is
+the cost of leaving it).
+
+## 2026-09-21 — VB D7 (latent): `vb_shadow_vis` has the same b5-ray origin the Deferred HWRT resolve just fixed
+
+`crates/boyko_rhi_vulkan/shaders/vb_shadow_vis.comp.hlsl` casts its cone from
+`P = ro + rd*view_t` on the b5 ray; VB's `viewt_from_depth_rz` puts `P` on the right view-z plane
+but laterally `t*Δθ` off under TAA — the same self-hit class the Deferred fix removed, once the
+VB geo/shade split is armed (no pin arms it today; `vb_taa` renders identically on both legs). The
+`RayShadowUbo` fields the lane added (`SHADOW_ORIGIN_MODE`, `SHADOW_RASTER_FWD`) are uploaded on
+VB × TAA hwrt frames too and are the forward seam: every VB pixel with hardware depth is
+raster-owned, so no depth producer test is needed there. Do it when the split is armed. Two
+related notes, not decisions: the RTG ch. 6 ulp offset stays deferred until a large-world
+(|P| ≳ 1e3) need appears (it needs the geometric normal the G-buffer does not carry); the
+SDF-cast shadow onto mesh pixels (`sdf_gbuffer_composite.hlsl`, `P_mesh = ro + rd*t_mesh`,
+software-shared) carries the same reconstruction error under a 20-mm normal lift — safe at
+≥ 512 px (`1/h` scaling), worth a row in `docs/TAA-PLAN.md`'s consumer-audit table, whose
+"sdf_depth_composite EXACT to fp" row is false under D2. The software leg's
+`csm_visibility(P, ...)` receives the same b5-reconstructed `P` on raster-owned pixels (≤ 11 mm
+at 512 px), swallowed today by the CSM normal offset / PCF — the same table row.
 
 ---
 
