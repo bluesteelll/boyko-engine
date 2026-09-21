@@ -149,6 +149,13 @@
 //! BOYKO_AA=taa BOYKO_TAA_PHASE=4 BOYKO_HOST_DUMP=D:\tmp\phase4.bmp \
 //!   cargo test -p boyko-app --test taa_jitter_eval -- --ignored --test-threads=1
 //! # then diff the SDF sphere / wall / floor regions between phase0.bmp and phase4.bmp.
+//!
+//! # A per-frame burst: 8 consecutive presented frames (30..37, one full Halton cycle) of ONE
+//! # free-running run, each `<stem>_<frame>.bmp` plus `<stem>_frames.txt` with one state line
+//! # per frame (frame, slot, jitter phase, CSM arming vs the header's CSM bit, hwrt seed).
+//! BOYKO_AA=taa BOYKO_HOST_DUMP=D:\tmp\burst.bmp BOYKO_HOST_DUMP_FRAMES=8 \
+//!   cargo test -p boyko-app --test taa_jitter_eval -- --ignored --test-threads=1
+//! # `BOYKO_HOST_DUMP_SETTLE=0` starts the burst at presented frame 0 (the start-up frames).
 //! ```
 //!
 //! `#[ignore]`: needs a real windowed GPU device; the orchestrator runs it. Run with
@@ -550,4 +557,551 @@ fn taa_jitter_eval_screenshot_dump() {
     }
 
     app.run();
+}
+
+// ===============================================================================================
+// Lane fix/hwrt-shadow-ray-origin: the HWRT shadow-ray ORIGIN gates (Deferred x hwrt x TAA).
+//
+// The defect (measured 2026-09-21): the HWRT resolve reconstructed the cone-trace origin on the
+// b5 pixel ray while a raster-owned pixel's `gViewT` is the Euclidean distance the JITTERED
+// raster wrote, so on the +y Halton phases the origin sat under the receiver beyond an
+// iso-line and every cone ray self-hit -- a false-shadow region of 11k..102k px on 6 of the 8
+// phases, jumping every frame. These gates compare hwrt frames of ONE binary against each other
+// (a test cannot spawn the other feature's binary; the hwrt-vs-software receipt is the golden
+// sweep's), on the fixed 512x512 scene, with the false-shadow blob surviving a 3x3 erosion that
+// removes the <= 2-px jitter/penumbra rims. Each gate writes its numbers to
+// `<out_dir>/<gate>.txt` BEFORE asserting, so a red run leaves its measurement behind.
+//
+// Compiled ONLY under `--features hwrt` (a software build carries none of them -- no vacuous
+// pass); each spawns `taa_jitter_eval_screenshot_dump` workers of this same binary, the
+// `unwritten_shadow_map_gate` driver shape. `BOYKO_SHADOW_ORIGIN_GATE_OUT=<dir>` overrides the
+// output directory (default `%TEMP%/boyko_hwrt_shadow_origin_gate`).
+// ===============================================================================================
+
+/// One decoded 32-bpp BMP frame: luminance `(R+G+B)/3` per pixel, row-major TOP-DOWN.
+#[cfg(feature = "hwrt")]
+struct LumFrame {
+    w: usize,
+    h: usize,
+    lum: Vec<f32>,
+}
+
+#[cfg(feature = "hwrt")]
+impl LumFrame {
+    /// Decodes the host dump's 32-bpp bottom-up BGRA BMP (`host_dump::write_bmp_into`).
+    fn from_bmp(bytes: &[u8], label: &str) -> Self {
+        assert!(bytes.len() > 54 && &bytes[0..2] == b"BM", "{label}: not a BMP ({} bytes)", bytes.len());
+        let w = i32::from_le_bytes(bytes[18..22].try_into().expect("invariant: 4 bytes")) as usize;
+        let h = i32::from_le_bytes(bytes[22..26].try_into().expect("invariant: 4 bytes")) as usize;
+        let bpp = u16::from_le_bytes(bytes[28..30].try_into().expect("invariant: 2 bytes"));
+        assert_eq!(bpp, 32, "{label}: expected a 32-bpp BMP");
+        let data_off = u32::from_le_bytes(bytes[10..14].try_into().expect("invariant: 4 bytes")) as usize;
+        assert!(bytes.len() >= data_off + w * h * 4, "{label}: truncated pixel data");
+        let mut lum = vec![0.0f32; w * h];
+        for y in 0..h {
+            // Bottom-up rows: file row `h - 1 - y` is image row `y`.
+            let src_row = (h - 1 - y) * w * 4 + data_off;
+            for x in 0..w {
+                let p = &bytes[src_row + x * 4..src_row + x * 4 + 4];
+                lum[y * w + x] = (f32::from(p[0]) + f32::from(p[1]) + f32::from(p[2])) / 3.0;
+            }
+        }
+        Self { w, h, lum }
+    }
+
+    fn at(&self, x: usize, y: usize) -> f32 {
+        self.lum[y * self.w + x]
+    }
+}
+
+/// A rectangular pixel band `[x0, x1) x [y0, y1)`.
+#[cfg(feature = "hwrt")]
+#[derive(Clone, Copy)]
+struct Band {
+    x0: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+}
+
+/// Band F (512x512): the far floor + the cube tops, below the wall base (row ~225) and above
+/// phase 7's lowest boundary rows (367..505) and phase 4's (345..384) -- the whole band lies
+/// inside the phase-7 / phase-4 false-shadow regions on the unfixed tree.
+#[cfg(feature = "hwrt")]
+const BAND_F: Band = Band { x0: 20, x1: 490, y0: 230, y1: 350 };
+
+/// The whole 512x512 frame.
+#[cfg(feature = "hwrt")]
+const FULL: Band = Band { x0: 0, x1: 512, y0: 0, y1: 512 };
+
+/// The luminance step (LSB, 0..255) below which a per-pixel difference is jitter/penumbra noise.
+#[cfg(feature = "hwrt")]
+const LSB_THRESHOLD: f32 = 30.0;
+
+/// Mean luminance over `band`.
+#[cfg(feature = "hwrt")]
+fn band_mean(f: &LumFrame, band: Band) -> f32 {
+    let mut sum = 0.0f64;
+    let mut n = 0u64;
+    for y in band.y0..band.y1 {
+        for x in band.x0..band.x1 {
+            sum += f64::from(f.at(x, y));
+            n += 1;
+        }
+    }
+    assert!(n > 0, "invariant: a non-empty band");
+    (sum / n as f64) as f32
+}
+
+/// Pixels of `band` (as a full-frame mask) where `pred(a, b)` holds -- the raw per-pixel mask.
+#[cfg(feature = "hwrt")]
+fn mask_where(a: &LumFrame, b: &LumFrame, band: Band, pred: impl Fn(f32, f32) -> bool) -> Vec<bool> {
+    assert_eq!((a.w, a.h), (b.w, b.h), "invariant: frames of one run share an extent");
+    let mut m = vec![false; a.w * a.h];
+    for y in band.y0..band.y1.min(a.h) {
+        for x in band.x0..band.x1.min(a.w) {
+            m[y * a.w + x] = pred(a.at(x, y), b.at(x, y));
+        }
+    }
+    m
+}
+
+/// The count of pixels whose FULL 3x3 neighbourhood is inside `mask` (a 1-px erosion: the
+/// <= 2-px jitter / penumbra rims vanish, a blob of tens of thousands of pixels survives).
+#[cfg(feature = "hwrt")]
+fn eroded_count(mask: &[bool], w: usize, h: usize) -> usize {
+    let mut n = 0;
+    for y in 1..h.saturating_sub(1) {
+        for x in 1..w.saturating_sub(1) {
+            let all = (0..3).all(|dy| (0..3).all(|dx| mask[(y + dy - 1) * w + (x + dx - 1)]));
+            n += usize::from(all);
+        }
+    }
+    n
+}
+
+/// `|eroded(darker(a, b))|` over `band`: pixels of `a` darker than `b` by more than
+/// [`LSB_THRESHOLD`], 3x3-eroded -- the probe's false-shadow metric.
+#[cfg(feature = "hwrt")]
+fn eroded_darker(a: &LumFrame, b: &LumFrame, band: Band) -> usize {
+    let m = mask_where(a, b, band, |la, lb| la < lb - LSB_THRESHOLD);
+    eroded_count(&m, a.w, a.h)
+}
+
+/// `|eroded(changed(a, b))|` over `band`: pixels differing by more than [`LSB_THRESHOLD`] in
+/// either direction, 3x3-eroded.
+#[cfg(feature = "hwrt")]
+fn eroded_changed(a: &LumFrame, b: &LumFrame, band: Band) -> usize {
+    let m = mask_where(a, b, band, |la, lb| (la - lb).abs() > LSB_THRESHOLD);
+    eroded_count(&m, a.w, a.h)
+}
+
+/// The gates' output directory (`BOYKO_SHADOW_ORIGIN_GATE_OUT` or a temp default), created.
+#[cfg(feature = "hwrt")]
+fn gate_out_dir() -> std::path::PathBuf {
+    let dir = std::env::var_os("BOYKO_SHADOW_ORIGIN_GATE_OUT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("boyko_hwrt_shadow_origin_gate"));
+    std::fs::create_dir_all(&dir).expect("invariant: the gate's output dir is creatable");
+    dir
+}
+
+/// Whether an environment variable must not reach a worker (Windows names are case-insensitive).
+#[cfg(feature = "hwrt")]
+fn scrubbed(name: &str) -> bool {
+    name.to_ascii_uppercase().starts_with("BOYKO_")
+}
+
+/// Spawns one `taa_jitter_eval_screenshot_dump` worker of THIS binary on the `taa_armed`
+/// environment (512x512, TAA armed, `raster` scope, denoise none, validation off) plus `extra`,
+/// with `BOYKO_HOST_DUMP=<out_dir>/<label>.bmp`, and returns the bytes of `produced` -- the
+/// file the worker must have written (the dump itself, or the FIRST frame of a burst, whose
+/// stem path is never written). A worker that does not exit 0 or does not write `produced` is
+/// RED here, never a skip (an exit 0 with no file is the `running 0 tests` shape -- filtered
+/// out, not rendered).
+#[cfg(feature = "hwrt")]
+fn run_worker(
+    out_dir: &std::path::Path,
+    label: &str,
+    extra: &[(&str, String)],
+    produced: &std::path::Path,
+) -> Vec<u8> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const WORKER: &str = "taa_jitter_eval_screenshot_dump";
+    const WORKER_DEADLINE: Duration = Duration::from_secs(300);
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+    let dump = out_dir.join(format!("{label}.bmp"));
+    let stdout_path = out_dir.join(format!("{label}.stdout.txt"));
+    let stderr_path = out_dir.join(format!("{label}.stderr.txt"));
+    let _ = std::fs::remove_file(produced);
+    assert!(!produced.exists(), "a stale {} could not be deleted", produced.display());
+    let stdout = std::fs::File::create(&stdout_path).expect("invariant: the gate's out dir accepts files");
+    let stderr = std::fs::File::create(&stderr_path).expect("invariant: the gate's out dir accepts files");
+
+    let exe = std::env::current_exe().expect("invariant: the test binary knows its own path");
+    let mut cmd = Command::new(&exe);
+    // `--nocapture`: the worker's own boot report must reach the stdout file.
+    cmd.args([WORKER, "--ignored", "--exact", "--test-threads=1", "--nocapture"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    for (key, _) in std::env::vars_os() {
+        if scrubbed(&key.to_string_lossy()) {
+            cmd.env_remove(&key);
+        }
+    }
+    cmd.env("BOYKO_DISABLE_VALIDATION", "1")
+        .env("BOYKO_SHADOW_DENOISE", "none")
+        .env("BOYKO_WINDOW_FRAMES", "400")
+        .env("BOYKO_WIN", "512")
+        .env("BOYKO_AA", "taa")
+        .env("BOYKO_TAA_SCOPE", "raster")
+        .env("BOYKO_HOST_DUMP", &dump);
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().unwrap_or_else(|e| panic!("{label}: the worker did not spawn ({e})"));
+    let deadline = Instant::now() + WORKER_DEADLINE;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "{label}: HUNG after {} s and killed (output: {}, {})",
+                    WORKER_DEADLINE.as_secs(),
+                    stdout_path.display(),
+                    stderr_path.display()
+                );
+            }
+            Ok(None) => std::thread::sleep(POLL_INTERVAL),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{label}: waiting on the worker failed ({e})");
+            }
+        }
+    };
+    assert!(
+        status.success(),
+        "{label}: the worker exited {status:?}. A missing device or a failed boot is RED here, never a \
+         skip. Output: {}, {}",
+        stdout_path.display(),
+        stderr_path.display()
+    );
+    let frame = std::fs::read(produced).unwrap_or_else(|e| {
+        panic!(
+            "{label}: no frame at {} ({e}) -- the worker exited 0 without rendering (filtered out?). \
+             Output: {}, {}",
+            produced.display(),
+            stdout_path.display(),
+            stderr_path.display()
+        )
+    });
+    assert!(frame.len() > 54, "{label}: the frame dump at {} is empty", produced.display());
+    frame
+}
+
+/// Renders the `taa_armed` scene with the jitter phase pinned at `phase` and decodes it.
+#[cfg(feature = "hwrt")]
+fn phase_frame(out_dir: &std::path::Path, phase: u32) -> LumFrame {
+    let label = format!("phase{phase}");
+    let dump = out_dir.join(format!("{label}.bmp"));
+    let bytes = run_worker(out_dir, &label, &[("BOYKO_TAA_PHASE", phase.to_string())], &dump);
+    LumFrame::from_bmp(&bytes, &label)
+}
+
+/// Writes the gate's numbers file (`<out_dir>/<gate>.txt`) BEFORE the gate asserts.
+#[cfg(feature = "hwrt")]
+fn write_numbers(out_dir: &std::path::Path, gate: &str, body: &str) {
+    let path = out_dir.join(format!("{gate}.txt"));
+    std::fs::write(&path, body).unwrap_or_else(|e| panic!("{gate}: could not write {} ({e})", path.display()));
+    println!("{gate}: numbers -> {}\n{body}", path.display());
+}
+
+/// G-PH7 -- the phase-7 false shadow on band F. Phase 7 (`jy = +0.389 px`, `jx = -0.4375`) is
+/// the worst phase (102,269 px darker than the software leg on the unfixed tree); phase 0
+/// (`jy = -0.167 px`, `jx = 0`) has its origin ABOVE the floor and is lit by the mechanism's
+/// model. Asserts on band F: `|mean_7 - mean_0| <= 4 LSB` and `|eroded(darker(7, 0))| <= 200`.
+/// Phase 5 (`jy = -0.278`, also lit) is the recorded CONTROL: `|mean_5 - mean_0|` and
+/// `eroded(darker(5, 0))` bound the two-lit-phases noise the tolerance must exceed by >= 4x.
+/// The absolute anchor (critic O3): band F's phase-0 mean on the FIXED tree must not fall below
+/// its RED-FIRST value (measured on the unfixed tree, this gate's own red receipt) by more than
+/// 4 LSB -- closing the "every phase equally dark" class the pairwise form cannot see.
+///
+/// Cannot claim: anything outside band F; the absolute match to the software leg (the pins'
+/// receipt); a phase-INDEPENDENT origin error.
+#[cfg(feature = "hwrt")]
+#[test]
+#[ignore = "gpu-windowed: hwrt leg (--features hwrt); spawns three taa_jitter_eval_screenshot_dump workers on a real RT device; --test-threads=1"]
+fn hwrt_shadow_origin_phase7() {
+    /// Band F's phase-0 mean luminance on the UNFIXED tree (the red-first receipt: 159.958
+    /// LSB, `mean_phase0` in the gate's numbers file, 2026-09-21; phase 7 read 117.811 there,
+    /// `delta_mean_7_vs_0 = 42.147`, `eroded_darker_7_vs_0 = 29,951`).
+    const BAND_F_MEAN_PHASE0_RED_FIRST: f32 = 159.958;
+    const MEAN_TOL_LSB: f32 = 4.0;
+    const DARK_TOL_PX: usize = 200;
+
+    let out = gate_out_dir();
+    let p7 = phase_frame(&out, 7);
+    let p0 = phase_frame(&out, 0);
+    let p5 = phase_frame(&out, 5);
+    assert_eq!((p7.w, p7.h), (512, 512), "band F is defined for the 512x512 window");
+
+    let mean_7 = band_mean(&p7, BAND_F);
+    let mean_0 = band_mean(&p0, BAND_F);
+    let mean_5 = band_mean(&p5, BAND_F);
+    let dark_7_vs_0 = eroded_darker(&p7, &p0, BAND_F);
+    let dark_5_vs_0 = eroded_darker(&p5, &p0, BAND_F);
+    let delta_7 = (mean_7 - mean_0).abs();
+    let delta_5 = (mean_5 - mean_0).abs();
+    write_numbers(
+        &out,
+        "hwrt_shadow_origin_phase7",
+        &format!(
+            "band_f x=[{},{}) y=[{},{})\nmean_phase7={mean_7:.3}\nmean_phase0={mean_0:.3}\n\
+             mean_phase5_control={mean_5:.3}\ndelta_mean_7_vs_0={delta_7:.3}\n\
+             delta_mean_5_vs_0_control={delta_5:.3}\neroded_darker_7_vs_0={dark_7_vs_0}\n\
+             eroded_darker_5_vs_0_control={dark_5_vs_0}\n\
+             mean_phase0_red_first_anchor={BAND_F_MEAN_PHASE0_RED_FIRST:.3}\n",
+            BAND_F.x0, BAND_F.x1, BAND_F.y0, BAND_F.y1,
+        ),
+    );
+    assert!(
+        delta_7 <= MEAN_TOL_LSB,
+        "G-PH7: band F mean differs between phase 7 and phase 0 by {delta_7:.3} LSB (> {MEAN_TOL_LSB}): \
+         the phase-7 false shadow is present (control 5 vs 0: {delta_5:.3})"
+    );
+    assert!(
+        dark_7_vs_0 <= DARK_TOL_PX,
+        "G-PH7: {dark_7_vs_0} eroded band-F pixels are > {LSB_THRESHOLD} LSB darker at phase 7 than \
+         at phase 0 (> {DARK_TOL_PX}); control 5 vs 0: {dark_5_vs_0}"
+    );
+    assert!(
+        mean_0 >= BAND_F_MEAN_PHASE0_RED_FIRST - MEAN_TOL_LSB,
+        "G-PH7: band F at phase 0 is {mean_0:.3} LSB, below the red-first anchor \
+         {BAND_F_MEAN_PHASE0_RED_FIRST:.3} by more than {MEAN_TOL_LSB}: every phase went dark together"
+    );
+}
+
+/// G-PHASES -- every pair of the 8 pinned Halton phases agrees over the FULL frame:
+/// `|eroded(darker(a, b))| < 1,000` for all `(a, b)`. On the unfixed tree the max pair is
+/// ~1e5 (7 vs 0) and >= 1e4 on 4/1/6/3/2 vs 0 (the mechanism's per-phase totals 12k..102k);
+/// on the fixed tree the recorded max is expected <= 100 (the rule `T >= 4 x max_fixed`).
+///
+/// Cannot claim: a phase-INDEPENDENT origin error (identical on all phases); the absolute
+/// match to the software leg.
+#[cfg(feature = "hwrt")]
+#[test]
+#[ignore = "gpu-windowed: hwrt leg (--features hwrt); spawns eight taa_jitter_eval_screenshot_dump workers on a real RT device; --test-threads=1"]
+fn hwrt_shadow_origin_all_phases() {
+    const PAIR_TOL_PX: usize = 1_000;
+
+    let out = gate_out_dir();
+    let frames: Vec<LumFrame> = (0..8).map(|k| phase_frame(&out, k)).collect();
+    let mut body = String::new();
+    let mut worst = (0usize, 0usize, 0usize);
+    for a in 0..8 {
+        for b in 0..8 {
+            if a == b {
+                continue;
+            }
+            let n = eroded_darker(&frames[a], &frames[b], FULL);
+            body.push_str(&format!("eroded_darker_{a}_vs_{b}={n}\n"));
+            if n > worst.0 {
+                worst = (n, a, b);
+            }
+        }
+    }
+    body.push_str(&format!(
+        "max_pair={} ({} vs {})\ntolerance={PAIR_TOL_PX}\n",
+        worst.0, worst.1, worst.2
+    ));
+    write_numbers(&out, "hwrt_shadow_origin_all_phases", &body);
+    assert!(
+        worst.0 < PAIR_TOL_PX,
+        "G-PHASES: phase {} is darker than phase {} on {} eroded pixels (>= {PAIR_TOL_PX}): a per-phase \
+         false shadow is present",
+        worst.1,
+        worst.2,
+        worst.0
+    );
+}
+
+/// G-FRAMES -- 8 CONSECUTIVE presented frames (30..37, one full Halton cycle) of ONE free-running
+/// `taa_armed` run through the burst instrument (`BOYKO_HOST_DUMP_FRAMES=8`): for every
+/// consecutive pair `|eroded(changed(k, k+1))| < 300` over the full frame, and the sidecar must
+/// carry exactly 8 lines, `frame=30..37`, phases continuing `(phase + 1) % 8` (critic O4 -- the
+/// property the gate is about; `slot` is recorded, not asserted), `origin_mode=1`, `csm_armed=1`
+/// and `header_csm=1` on every line (the line-count check guards a vacuous run). On the unfixed
+/// tree the LIT/DARK flips between phases give >= 1e4 on the flip pairs; on the fixed tree the
+/// TAA-damped jitter rims are eroded away (expected <= 50).
+///
+/// Cannot claim: which phase caused a change; a false shadow that is constant across frames.
+#[cfg(feature = "hwrt")]
+#[test]
+#[ignore = "gpu-windowed: hwrt leg (--features hwrt); spawns one taa_jitter_eval_screenshot_dump worker with an 8-frame burst dump on a real RT device; --test-threads=1"]
+fn hwrt_shadow_origin_consecutive_frames() {
+    const PAIR_TOL_PX: usize = 300;
+    const FIRST: u32 = 30;
+    const COUNT: u32 = 8;
+
+    let out = gate_out_dir();
+    let label = "burst";
+    // The burst writes `<out>/burst_<frame>.bmp` + `<out>/burst_frames.txt`; the stem
+    // `<out>/burst.bmp` itself is never written, so the worker's proof of rendering is frame 30.
+    for k in FIRST..FIRST + COUNT {
+        let _ = std::fs::remove_file(out.join(format!("{label}_{k}.bmp")));
+    }
+    let sidecar = out.join(format!("{label}_frames.txt"));
+    let _ = std::fs::remove_file(&sidecar);
+    let first_frame = out.join(format!("{label}_{FIRST}.bmp"));
+    let bytes = run_worker(
+        &out,
+        label,
+        &[("BOYKO_HOST_DUMP_FRAMES", COUNT.to_string())],
+        &first_frame,
+    );
+    let mut frames: Vec<LumFrame> = Vec::with_capacity(COUNT as usize);
+    frames.push(LumFrame::from_bmp(&bytes, &format!("{label}_{FIRST}")));
+    for k in FIRST + 1..FIRST + COUNT {
+        let p = out.join(format!("{label}_{k}.bmp"));
+        let b = std::fs::read(&p).unwrap_or_else(|e| panic!("G-FRAMES: no frame at {} ({e})", p.display()));
+        frames.push(LumFrame::from_bmp(&b, &format!("{label}_{k}")));
+    }
+    let text = std::fs::read_to_string(&sidecar)
+        .unwrap_or_else(|e| panic!("G-FRAMES: no sidecar at {} ({e})", sidecar.display()));
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+
+    let mut body = String::new();
+    let mut worst = (0usize, 0u32);
+    for k in 0..(COUNT as usize - 1) {
+        let n = eroded_changed(&frames[k], &frames[k + 1], FULL);
+        let fk = FIRST + k as u32;
+        body.push_str(&format!("eroded_changed_{fk}_vs_{}={n}\n", fk + 1));
+        if n > worst.0 {
+            worst = (n, fk);
+        }
+    }
+    body.push_str(&format!(
+        "max_pair={} ({} vs {})\ntolerance={PAIR_TOL_PX}\nsidecar_lines={}\n",
+        worst.0,
+        worst.1,
+        worst.1 + 1,
+        lines.len()
+    ));
+    for l in &lines {
+        body.push_str(l);
+        body.push('\n');
+    }
+    write_numbers(&out, "hwrt_shadow_origin_consecutive_frames", &body);
+
+    assert_eq!(lines.len(), COUNT as usize, "G-FRAMES: the sidecar must carry exactly {COUNT} state lines");
+    let field = |line: &str, key: &str| -> String {
+        line.split_whitespace()
+            .find_map(|tok| tok.strip_prefix(key).and_then(|v| v.strip_prefix('=')).map(str::to_owned))
+            .unwrap_or_else(|| panic!("G-FRAMES: no `{key}=` field in state line `{line}`"))
+    };
+    let mut prev_phase: Option<u32> = None;
+    for (i, l) in lines.iter().enumerate() {
+        let frame: u32 = field(l, "frame").parse().expect("invariant: frame= is an integer");
+        let expected = FIRST + i as u32;
+        assert_eq!(frame, expected, "G-FRAMES: line {i} is frame {frame}, expected {expected}");
+        let phase: u32 = field(l, "phase").parse().expect("invariant: phase= is an integer");
+        if let Some(p) = prev_phase {
+            assert_eq!(phase, (p + 1) % 8, "G-FRAMES: frame {frame} phase {phase} does not continue phase {p}");
+        }
+        prev_phase = Some(phase);
+        assert_eq!(field(l, "jitter_armed"), "1", "G-FRAMES: frame {frame} is not TAA-armed");
+        assert_eq!(field(l, "csm_armed"), "1", "G-FRAMES: frame {frame} has no CSM depth pass armed");
+        assert_eq!(field(l, "header_csm"), "1", "G-FRAMES: frame {frame}'s light header has the CSM bit OFF");
+        assert_eq!(
+            field(l, "origin_mode"),
+            "1",
+            "G-FRAMES: frame {frame} did not upload SHADOW_ORIGIN_MODE=1 (the raster-ray origin)"
+        );
+    }
+    assert!(
+        worst.0 < PAIR_TOL_PX,
+        "G-FRAMES: frames {} and {} differ on {} eroded pixels by > {LSB_THRESHOLD} LSB (>= {PAIR_TOL_PX}): \
+         the shadow moves between consecutive frames",
+        worst.1,
+        worst.1 + 1,
+        worst.0
+    );
+}
+
+#[cfg(feature = "hwrt")]
+mod shadow_origin_metric_tests {
+    use super::*;
+
+    const FULL_16: Band = Band { x0: 0, x1: 16, y0: 0, y1: 16 };
+    const FULL_8: Band = Band { x0: 0, x1: 8, y0: 0, y1: 8 };
+
+    fn frame(w: usize, h: usize, f: impl Fn(usize, usize) -> f32) -> LumFrame {
+        let mut lum = vec![0.0; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                lum[y * w + x] = f(x, y);
+            }
+        }
+        LumFrame { w, h, lum }
+    }
+
+    /// A 1-px rim is eroded away; a 5x5 blob survives as its 3x3 interior.
+    #[test]
+    fn erosion_removes_rims_and_keeps_blobs() {
+        let bright = frame(16, 16, |_, _| 200.0);
+        // A 1-px-wide dark line at y == 8 and a 5x5 dark blob at (10..15, 10..15).
+        let dark = frame(16, 16, |x, y| {
+            if y == 8 || ((10..15).contains(&x) && (10..15).contains(&y)) { 100.0 } else { 200.0 }
+        });
+        assert_eq!(eroded_darker(&dark, &bright, FULL_16), 9);
+        assert_eq!(eroded_darker(&bright, &dark, FULL_16), 0, "the brighter frame is never darker");
+        assert_eq!(eroded_changed(&dark, &bright, FULL_16), 9);
+        assert_eq!(eroded_changed(&bright, &dark, FULL_16), 9, "changed is symmetric");
+    }
+
+    /// Differences at or under the LSB threshold do not count.
+    #[test]
+    fn sub_threshold_differences_are_noise() {
+        let a = frame(8, 8, |_, _| 150.0);
+        let b = frame(8, 8, |_, _| 150.0 + LSB_THRESHOLD);
+        assert_eq!(eroded_darker(&a, &b, FULL_8), 0);
+        let c = frame(8, 8, |_, _| 150.0 + LSB_THRESHOLD + 1.0);
+        assert_eq!(eroded_darker(&a, &c, FULL_8), 36, "the 6x6 interior of an 8x8 frame");
+    }
+
+    /// The BMP decoder reads the host dump's bottom-up BGRA layout top-down.
+    #[test]
+    fn bmp_decode_is_top_down() {
+        let (w, h) = (2u32, 2u32);
+        let mut bmp = Vec::new();
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&(54u32 + 16).to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&(w as i32).to_le_bytes());
+        bmp.extend_from_slice(&(h as i32).to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&32u16.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&16u32.to_le_bytes());
+        bmp.extend_from_slice(&[0u8; 16]);
+        // File row 0 (= image row 1): lum 30, 60; file row 1 (= image row 0): lum 90, 120.
+        for l in [30u8, 60, 90, 120] {
+            bmp.extend_from_slice(&[l, l, l, 255]);
+        }
+        let f = LumFrame::from_bmp(&bmp, "t");
+        assert_eq!((f.w, f.h), (2, 2));
+        assert_eq!(f.at(0, 0), 90.0);
+        assert_eq!(f.at(1, 0), 120.0);
+        assert_eq!(f.at(0, 1), 30.0);
+        assert_eq!(f.at(1, 1), 60.0);
+    }
 }

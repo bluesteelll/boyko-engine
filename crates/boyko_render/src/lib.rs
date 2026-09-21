@@ -655,6 +655,10 @@ pub use upload::{
     upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring,
     upload_vb_instance_rows,
 };
+// Lane fix/hwrt-shadow-ray-origin: the HOT per-frame tail of the HWRT `RayShadowUbo` (seed +
+// shadow-ray origin mode + the raster's jittered forward). Un-walled like `ResolvedRayShadow`
+// itself: the type is plain POD the software build can name; only the UPLOAD call is `hwrt`-gated.
+pub use upload::{RAY_SHADOW_FRAME_BYTES, RayShadowFrame};
 // HW-RT rung R2a-3 / rung 3b: `upload_mesh_ids` is genuinely `hwrt`-only (feeds the TLAS-instance
 // packer's BLAS-address resolve). `upload_prev_instance_models` STAYS `hwrt`-gated too, despite
 // `PrevInstanceModelCol` itself being un-walled (TAA rung D1) — it reads
@@ -670,7 +674,7 @@ pub use view::{
     composite_perspective_from_view_sheared, demo_view_proj_from_view,
     forward_gbuffer_push_from_view, forward_view_proj_rows, gbuffer_push_from_view,
     gbuffer_push_from_view_jittered, marcher_view_proj_rows, marcher_view_proj_rows_jittered,
-    view_proj_columns,
+    raster_ray_forward, view_proj_columns,
 };
 pub use ui::{
     pack_ui_instance, premultiply_rgba8, record_ui_rects, ui_rect_fs_spirv, ui_rect_vs_spirv,

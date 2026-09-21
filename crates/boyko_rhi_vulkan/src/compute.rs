@@ -370,9 +370,9 @@ embed_spirv! {
     /// inline `rayQuery` Vogel-disk cone trace as [`DEFERRED_PBR_HWRT_SPV`] (RESOLVE_INLINE) — same
     /// `SHADOW_RAY_COUNT` spec-const, same live inputs, so `mesh_vis` is bit-identical — but instead of
     /// combining it into the lighting it **writes** `gShadowVis[px,py] = RG(mesh_vis, validity)` to the
-    /// 22nd descriptor (`RWTexture2D<float2>` @21) and RETURNS (lighting stripped). Non-mesh-arm pixels
-    /// write `RG(1.0, 0.0)`. This is the à-trous pre-pass. Bound to the 22-binding VIS/DENOISED layout
-    /// (the 21-binding RESOLVE_INLINE-hwrt layout + `gShadowVis` @21); gated behind `feature = "hwrt"` +
+    /// 23rd descriptor (`RWTexture2D<float2>` @22) and RETURNS (lighting stripped). Non-mesh-arm pixels
+    /// write `RG(1.0, 0.0)`. This is the à-trous pre-pass. Bound to the 23-binding VIS/DENOISED layout
+    /// (the 22-binding RESOLVE_INLINE-hwrt layout + `gShadowVis` @22); gated behind `feature = "hwrt"` +
     /// `ctx.ray_query_enabled()` and only ever dispatched when `scene.shadow.is_some()`.
     #[cfg(feature = "hwrt")]
     DEFERRED_PBR_VIS_SPV,
@@ -384,9 +384,9 @@ embed_spirv! {
     /// (`shaders/deferred_pbr_hwrt_denoised.comp.spv`, compiled from `deferred_pbr.hlsl` with
     /// `SHADOW_STAGE=2`). Identical to [`DEFERRED_PBR_HWRT_SPV`] (RESOLVE_INLINE) except the inline
     /// Vogel trace is replaced by a single `mesh_vis = gShadowVis.Load(px,py).r` (reading the FINAL
-    /// à-trous output at descriptor @21), then the identical `vis = min(vis, mesh_vis)` combine and
+    /// à-trous output at descriptor @22), then the identical `vis = min(vis, mesh_vis)` combine and
     /// full lighting. It does NOT trace, so it references no acceleration structure and declares no
-    /// `SHADOW_RAY_COUNT` spec-const. Bound to the SAME 22-binding VIS/DENOISED layout; selected as the
+    /// `SHADOW_RAY_COUNT` spec-const. Bound to the SAME 23-binding VIS/DENOISED layout; selected as the
     /// resolve pipeline only when `scene.shadow.is_some()`.
     #[cfg(feature = "hwrt")]
     DEFERRED_PBR_DENOISED_SPV,
@@ -397,12 +397,12 @@ embed_spirv! {
     /// The Rung-3b step-5b MOTION_VECTORS VIS-variant deferred-resolve SPIR-V
     /// (`shaders/deferred_pbr_hwrt_vis_mv.comp.spv`, compiled from `deferred_pbr.hlsl` with
     /// `SHADOW_STAGE=1 + MOTION_VECTORS`). Identical to [`DEFERRED_PBR_VIS_SPV`] (writes `gShadowVis`
-    /// @21) except it ALSO writes each SDF pixel's CAMERA-ONLY motion vector `Δuv` to a `motion_vec`
-    /// STORAGE image @23 (rg16), reprojecting the reconstructed surface `P` through a `MotionCam` UBO
-    /// @22 (cur+prev marcher-aligned view-proj — the SAME 128 B pair the raster MV variant reads). Mesh
+    /// @22) except it ALSO writes each SDF pixel's CAMERA-ONLY motion vector `Δuv` to a `motion_vec`
+    /// STORAGE image @24 (rg16), reprojecting the reconstructed surface `P` through a `MotionCam` UBO
+    /// @23 (cur+prev marcher-aligned view-proj — the SAME 128 B pair the raster MV variant reads). Mesh
     /// pixels are raster-owned (the gbuffer MV variant); the two producers write disjoint pixels of one
-    /// `motion_vec`. Bound to a 24-binding VIS-MV layout (the 22 VIS bindings + `MotionCam` @22 +
-    /// `motion_vec` @23); selected instead of [`DEFERRED_PBR_VIS_SPV`] only when the temporal denoiser
+    /// `motion_vec`. Bound to a 25-binding VIS-MV layout (the 23 VIS bindings + `MotionCam` @23 +
+    /// `motion_vec` @24); selected instead of [`DEFERRED_PBR_VIS_SPV`] only when the temporal denoiser
     /// is active. The base VIS `.spv` stays the byte-frozen 8032-byte golden.
     #[cfg(feature = "hwrt")]
     DEFERRED_PBR_VIS_MV_SPV,
@@ -462,7 +462,7 @@ embed_spirv! {
     /// G=conf/CONF_MAX, B=depth/DEPTH_NORM, A=_), variance-clamps to the current 3×3 AABB (Salvi),
     /// velocity-adaptive `k = lerp(feedback_max, feedback_min, |Δuv|·extent/VELOCITY_REF)`, and hard-
     /// resets on disocclusion (off-screen / conf==0 / prev-vs-cur depth swap, W2). Writes the history
-    /// `[fi]` + `gTemporalOut` (the DENOISED reads it at `gShadowVis` @21). Bound to its OWN 8-binding
+    /// `[fi]` + `gTemporalOut` (the DENOISED reads it at `gShadowVis` @22). Bound to its OWN 8-binding
     /// layout { @0 `gVisIn` RG read, @1 `gMotionVec` RG16F read, @2 `gViewT` r32f read, @3 `gHistIn`
     /// RGBA16 read (`hist[1-fi]`), @4 `gHistOut` RGBA16 write (`hist[fi]`), @5 `gTemporalOut` RG16 write,
     /// @6 `ResolvedTemporalShadow` UBO (16 B), @7 the shared 80-byte Camera UBO }. NEW `.spv` (no base
@@ -1625,8 +1625,8 @@ pub fn deferred_pbr_hwrt_spirv() -> &'static [u32] {
 ///
 /// The à-trous pre-pass: runs the inline Vogel `rayQuery` trace exactly as the RESOLVE_INLINE-hwrt
 /// resolve does (bit-identical `mesh_vis`, same `SHADOW_RAY_COUNT` spec-const) but writes
-/// `gShadowVis[px,py] = RG(mesh_vis, validity)` to descriptor @21 and returns. Bound to the
-/// 22-binding VIS/DENOISED layout; dispatched only when `scene.shadow.is_some()`. See
+/// `gShadowVis[px,py] = RG(mesh_vis, validity)` to descriptor @22 and returns. Bound to the
+/// 23-binding VIS/DENOISED layout; dispatched only when `scene.shadow.is_some()`. See
 /// [`DEFERRED_PBR_VIS_SPV`]; the const-asserted length is the anti-drift guard.
 #[cfg(feature = "hwrt")]
 #[inline]
@@ -1638,9 +1638,9 @@ pub fn deferred_pbr_vis_spirv() -> &'static [u32] {
 /// (`SHADOW_STAGE=1 + MOTION_VECTORS`) as a `u32` word stream, ready for
 /// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
 ///
-/// Identical to [`deferred_pbr_vis_spirv`] (writes `gShadowVis` @21) plus a per-SDF-pixel
-/// camera-only motion vector `Δuv` written to a `motion_vec` STORAGE image @23, reprojecting the
-/// reconstructed surface `P` through a `MotionCam` UBO @22. Bound to the 24-binding VIS-MV layout;
+/// Identical to [`deferred_pbr_vis_spirv`] (writes `gShadowVis` @22) plus a per-SDF-pixel
+/// camera-only motion vector `Δuv` written to a `motion_vec` STORAGE image @24, reprojecting the
+/// reconstructed surface `P` through a `MotionCam` UBO @23. Bound to the 25-binding VIS-MV layout;
 /// selected instead of [`deferred_pbr_vis_spirv`] only when the temporal shadow denoiser is active.
 /// See [`DEFERRED_PBR_VIS_MV_SPV`]; the const-asserted length is the anti-drift guard.
 #[cfg(feature = "hwrt")]
@@ -1653,9 +1653,9 @@ pub fn deferred_pbr_vis_mv_spirv() -> &'static [u32] {
 /// ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
 ///
 /// Identical to the RESOLVE_INLINE-hwrt resolve except the inline trace is replaced by one
-/// `gShadowVis.Load(px,py).r` read of the FILTERED vis at descriptor @21, then the identical
+/// `gShadowVis.Load(px,py).r` read of the FILTERED vis at descriptor @22, then the identical
 /// `min`-combine + full lighting. Declares no `SHADOW_RAY_COUNT` spec-const (it never traces).
-/// Bound to the SAME 22-binding VIS/DENOISED layout; selected as the resolve pipeline only when
+/// Bound to the SAME 23-binding VIS/DENOISED layout; selected as the resolve pipeline only when
 /// `scene.shadow.is_some()`. See [`DEFERRED_PBR_DENOISED_SPV`].
 #[cfg(feature = "hwrt")]
 #[inline]

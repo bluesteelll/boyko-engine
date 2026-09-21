@@ -907,6 +907,28 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # the software value with edge C removed is the mesh-only value ae67351d. Removing only the G2 edge
 # (the light seed's `.before(cull)`) moves nothing on either leg any more -- the pair it used to
 # flip is declared now.
+# HWRT SHADOW-RAY ORIGIN MOVED THESE BYTES (lane fix/hwrt-shadow-ray-origin; re-blessed 2026-09-21 on the
+# msvc host -- hwrt ebddcd7d -> 6f6cb89e; the software hash b1e3b254 is unchanged). The pinned hwrt
+# frame carried a false-shadow region -- 100,916 px (38.5 % of the frame) darker than the software
+# leg by > 30 LSB on the far floor, the cube tops and the wall -- from deferred_pbr.hlsl
+# reconstructing the cone-trace origin on the b5 pixel ray while a raster-owned pixel's gViewT is the
+# Euclidean distance the JITTERED raster wrote (frame 30 is Halton phase 7, jy = +0.389 px; the origin
+# sat up to 6.9 mm under the floor beyond t ~ 2.9 m, and every one of the 16 cone rays self-hit the
+# receiver from below). The origin now uses the ray through the raster's own sub-pixel sample
+# (`SHADOW_RASTER_FWD` / `SHADOW_ORIGIN_MODE` in the 48-B RayShadowUbo, `boyko_render::RayShadowFrame`,
+# `raster_ray_forward` in view.rs) on raster-owned pixels, told apart from SDF-owned ones bit-exactly
+# (`gViewT == md*64` against the raster depth `gDepthHw` @21). Measured against the software leg on
+# the new frame (exact bytes): 109 px darker by > 30 LSB, all within the two legs' intrinsic
+# difference -- 96 px on one contact-shadow line at the right cube's wall base (x 422-452,
+# y 196-201; the cone trace draws it, the CSM never does; present in the old pin and on the TAA-off
+# hwrt frame, 95 of the 96 coincident) plus 13 px in the penumbra strip (x 162-185, y 203-315; the
+# soft cone vs Tent13 PCF). The TAA-off hwrt-vs-software difference, the regime without the defect,
+# is 125 px on exact bytes (the probe's window-resampled figure was 270). The earlier note's "the
+# two legs render genuinely different shadows" was this artefact, not the trace's softness. Gates:
+# taa_jitter_eval::{hwrt_shadow_origin_phase7,hwrt_shadow_origin_all_phases,
+# hwrt_shadow_origin_consecutive_frames} (gpu-windowed, --features hwrt) -- red on the tree before
+# the fix (band-F delta 42.1 LSB / 29,951 px; max phase pair 97,853 px; max consecutive-frame
+# change 95,748 px), green after (0.236 LSB / 0 px; 0 px; 0 px).
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
@@ -914,7 +936,7 @@ bmp             = "D:\\tmp\\taa_armed.bmp"
 width           = 512
 height          = 512
 sha256_software = "b1e3b254835e8d445130d3d9a3ec3aa375ca5ea930220dfff0e5783833d95130"
-sha256_hwrt     = "ebddcd7d93bd91e0a55672e6fcfdf8ceeedb6b5628bb74010de0c9eaccd9d450"
+sha256_hwrt     = "6f6cb89ec4854d7587b1417e136127c09c5280881ea953bded1e507154a41bd4"
 
 [taa_armed.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -983,6 +1005,18 @@ BOYKO_TAA_SCOPE          = "raster"
 # (ee8701b257f19ec7e4d68707aca0905c56d4c8fc4ff3479b97fbf903676889ec), which is the mesh-only move;
 # the software value with edge C removed is the mesh-only value 114767d1. These bytes still differ
 # from [taa_armed]'s, so the shear is still live.
+# HWRT SHADOW-RAY ORIGIN MOVED THESE BYTES (lane fix/hwrt-shadow-ray-origin; re-blessed 2026-09-21 on the
+# msvc host -- hwrt 32ba8e29 -> 3af811ff; the software hash 53ba8049 is unchanged). The pinned hwrt
+# frame carried a false-shadow region -- 148,056 px (56.5 % of the frame) darker than the software
+# leg by > 30 LSB -- the same b5-ray origin defect as [taa_armed], DOUBLED under the basis scope: the
+# b5 shear (`composite_perspective_from_view_sheared`) points the resolve ray through raster-NDC
+# q + j while the raster samples q - j (docs/OPEN-QUESTIONS.md, the 2026-09-21 D2 item; a pin test
+# records the sign), so the mesh-owned origin was 2j off instead of j. The fix derives
+# `SHADOW_RASTER_FWD` from the UNJITTERED view + the raster's own jitter, so it is exact under either
+# scope and does not inherit D2. Measured against the software leg on the new frame (exact bytes):
+# 107 px darker by > 30 LSB, all within the legs' intrinsic difference -- 96 px on the contact-shadow
+# line at the right cube's wall base (x 422-452, y 196-201; in the old pin and on the TAA-off frame)
+# plus 11 px in the penumbra strip (x 162-183, y 203-315). Same gates as [taa_armed].
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
@@ -990,7 +1024,7 @@ bmp             = "D:\\tmp\\taa_armed_basis.bmp"
 width           = 512
 height          = 512
 sha256_software = "53ba8049cf35b0ba5d0ebbfca941fdee2ea04697b45e073d24ae2661e81d3a29"
-sha256_hwrt     = "32ba8e290a6abd0588aeb9d4d0b09a6324daf0f867adf80b621be405d72d2b43"
+sha256_hwrt     = "3af811ffd75b035c2b7c3c21474403a2fdf7e097ef5dbe38a9eef559242ac4be"
 
 [taa_armed_basis.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1036,6 +1070,14 @@ BOYKO_WIN                = "512"
 # the G2-edge value (da521c743b5ca8ddc0706f548e7ef413bde2f681074bb813fab3ee08c7492b01), which is the
 # mesh-only move; the software value with edge C removed is the mesh-only value 3041775e. These
 # bytes still differ from [taa_armed_basis]'s, so RCAS still runs.
+# HWRT SHADOW-RAY ORIGIN MOVED THESE BYTES (lane fix/hwrt-shadow-ray-origin; re-blessed 2026-09-21 on the
+# msvc host -- hwrt 6daa4b74 -> cd1b86ab; the software hash 304adbfa is unchanged). The pinned hwrt
+# frame carried the same false-shadow region as [taa_armed_basis] (147,919 px, 56.4 % of the frame
+# darker than the software leg by > 30 LSB), RCAS-sharpened. Measured against the software leg on the
+# new frame (exact bytes): 120 px darker by > 30 LSB, all within the legs' intrinsic difference --
+# 98 px on the contact-shadow line at the right cube's wall base (x 422-453, y 196-201; in the old
+# pin and on the TAA-off frame) plus 22 px in the RCAS-widened penumbra strip (x 162-188,
+# y 203-315). Same gates as [taa_armed].
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
@@ -1043,7 +1085,7 @@ bmp             = "D:\\tmp\\taa_rcas.bmp"
 width           = 512
 height          = 512
 sha256_software = "304adbfad32f7512162db15e03aec9a0cda5eb144b8521e86bf070ee5eb262d2"
-sha256_hwrt     = "6daa4b7408f2cb3034e5dc8a8eab8af0582348e1f3c63bf882453d0d2bf9bf63"
+sha256_hwrt     = "cd1b86abdbcbbbf74d509f5cc100159b9c9de1da735dd96ba8ec1bd8e07d0e95"
 
 [taa_rcas.env]
 BOYKO_DISABLE_VALIDATION = "1"

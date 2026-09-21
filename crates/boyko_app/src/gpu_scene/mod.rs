@@ -126,7 +126,7 @@ use boyko_render::{MeshAssetsExt, MeshGpu};
 #[cfg(feature = "hwrt")]
 use boyko_render::MOTION_CAM_UBO_BYTES;
 #[cfg(feature = "hwrt")]
-use boyko_render::{RESOLVED_RAY_SHADOW_BYTES, RayShadowConfig};
+use boyko_render::{RAY_SHADOW_FRAME_BYTES, RESOLVED_RAY_SHADOW_BYTES, RayShadowConfig};
 #[cfg(feature = "hwrt")]
 use boyko_scene::render_caps::MeshHandle;
 
@@ -624,13 +624,14 @@ pub(crate) const CSM_SHADOW_DIM: u32 = 2048;
 /// Byte size of one host cascade-UBO ring slot — `size_of::<ResolvedCsm>()`
 /// via [`RESOLVED_CSM_BYTES`] (the resolve's binding-13 shape).
 const CSM_UBO_BYTES: u64 = RESOLVED_CSM_BYTES as u64;
-/// HW-RT rung 1b/3b: byte size of one HWRT shadow-params-UBO ring slot — the resolved
-/// [`RESOLVED_RAY_SHADOW_BYTES`] mirror (cone/tmax/tmin/bias, 16 B) PLUS the runner-injected
-/// rung-3b `SHADOW_FRAME_SEED` at offset 16 (4 B, see `upload_ray_shadow_ring`), rounded up to
-/// the HLSL `RayShadowUbo` cbuffer's 32-byte std140 block (two vec4 slots; the trailing 12 B is
-/// bound-but-unread pad). The +16 over the bare resolved size is negligible (×2 FIF ring).
+/// HW-RT rung 1b/3b + lane fix/hwrt-shadow-ray-origin: byte size of one HWRT shadow-params-UBO
+/// ring slot — the cold resolved [`RESOLVED_RAY_SHADOW_BYTES`] mirror (cone/tmax/tmin/bias,
+/// 16 B) PLUS the runner-injected hot [`RAY_SHADOW_FRAME_BYTES`] tail at offset 16 (the rung-3b
+/// `SHADOW_FRAME_SEED`, `SHADOW_ORIGIN_MODE`, the std140 pad and `SHADOW_RASTER_FWD`, 32 B; see
+/// `upload_ray_shadow_ring`) = the HLSL `RayShadowUbo` cbuffer's 48-byte std140 block (three
+/// vec4 slots, every byte written). ×2 FIF ring; negligible.
 #[cfg(feature = "hwrt")]
-const RAY_SHADOW_UBO_BYTES: u64 = RESOLVED_RAY_SHADOW_BYTES as u64 + 16;
+const RAY_SHADOW_UBO_BYTES: u64 = (RESOLVED_RAY_SHADOW_BYTES + RAY_SHADOW_FRAME_BYTES) as u64;
 /// HW-RT rung 3a: the à-trous filter's push-constant size — a single `{ uint step }` (4 B). The
 /// recorder pushes `step = 1 << level` per dispatch.
 #[cfg(feature = "hwrt")]
@@ -773,14 +774,15 @@ pub(crate) struct MotionVecResources {
     layout: VulkanBindGroupLayout,
     /// HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve pipeline
     /// (`deferred_pbr_hwrt_vis_mv.comp` / [`deferred_pbr_vis_mv_spirv`]) — identical to the base VIS
-    /// resolve (`deferred_pbr_hwrt_vis.comp`, writes `gShadowVis` @21) EXCEPT it ALSO writes each SDF
-    /// pixel's camera-only motion vector `Δuv` to the `motion_vec` STORAGE image @23, reprojecting the
-    /// reconstructed surface `P` through the `MotionCam` UBO @22. Bound instead of the base VIS
+    /// resolve (`deferred_pbr_hwrt_vis.comp`, writes `gShadowVis` @22) EXCEPT it ALSO writes each SDF
+    /// pixel's camera-only motion vector `Δuv` to the `motion_vec` STORAGE image @24, reprojecting the
+    /// reconstructed surface `P` through the `MotionCam` UBO @23. Bound instead of the base VIS
     /// pipeline (in the VIS pass) ONLY when the temporal denoiser is active (`sdf_mv_active()`).
     vis_mv_pipeline: ComputePipeline,
-    /// HW-RT Rung 3b step 5b: the 24-binding VIS-MV resolve layout — the 22-binding VIS/DENOISED
-    /// layout (0..=21, incl. `gShadowVis` @21) PLUS the `MotionCam` UNIFORM buffer @22 + the
-    /// `motion_vec` STORAGE image @23 (both COMPUTE). Threaded (as `scene.vis_mv_layout`) into
+    /// HW-RT Rung 3b step 5b: the 25-binding VIS-MV resolve layout — the 23-binding VIS/DENOISED
+    /// layout (0..=22, incl. the raster depth @21 + `gShadowVis` @22) PLUS the `MotionCam` UNIFORM
+    /// buffer @23 + the `motion_vec` STORAGE image @24 (both COMPUTE). Threaded (as
+    /// `scene.vis_mv_layout`) into
     /// [`GBufferTargets::build_shadow_vis_mv_resolve_set`] so the per-FIF VIS-MV set is written once
     /// per extent, decoupled from the per-frame gate.
     vis_mv_layout: VulkanBindGroupLayout,
@@ -1051,15 +1053,16 @@ pub(crate) struct GpuSceneBundles {
     /// (the byte-identical 0%-gate — `deferred_pbr.hlsl`'s frozen-base discipline).
     resolve_pipeline_wrap: ComputePipeline,
     /// HW-RT rung R2a-4b: the HWRT-variant deferred resolve pipeline (`deferred_pbr_hwrt.comp`)
-    /// paired with its 20-binding layout (the 19 software bindings plus binding 19
-    /// `AccelerationStructure`). Built at boot ONLY on an RT device (`ray_query_enabled`) under
+    /// paired with its 22-binding layout (the 19 software bindings plus binding 19
+    /// `AccelerationStructure`, binding 20 the soft-shadow UBO and binding 21 the raster depth
+    /// image). Built at boot ONLY on an RT device (`ray_query_enabled`) under
     /// `feature = "hwrt"`, the same capability gate as [`Self::tlas`]; `None` otherwise (the
     /// byte-identical software path). Its mesh-shadow term traces the per-FIF TLAS with `rayQuery`
     /// instead of sampling the CSM map.
     #[cfg(feature = "hwrt")]
     resolve_pipeline_hwrt: Option<(ComputePipeline, VulkanBindGroupLayout)>,
-    /// HW-RT rung 3a: the spatial-denoise VIS + DENOISED resolve pipelines + their SHARED 22-binding
-    /// layout (the 21-binding RESOLVE_INLINE-hwrt layout + `gShadowVis` STORAGE image @21). `.0` =
+    /// HW-RT rung 3a: the spatial-denoise VIS + DENOISED resolve pipelines + their SHARED 23-binding
+    /// layout (the 22-binding RESOLVE_INLINE-hwrt layout + `gShadowVis` STORAGE image @22). `.0` =
     /// the VIS pipeline (`deferred_pbr_hwrt_vis.comp`, writes `gShadowVis`), `.1` = the DENOISED
     /// pipeline (`deferred_pbr_hwrt_denoised.comp`, reads it), `.2` = the shared layout. Built at boot
     /// ONLY on an RT device (`ray_query_enabled`) under `feature = "hwrt"`, the same gate as
@@ -2200,13 +2203,14 @@ impl GpuSceneBundles {
         )
         .expect("invariant: terminator-wrap deferred resolve compute pipeline create");
 
-        // ── HW-RT rung R2a-4b: the HWRT-variant resolve pipeline + its 20-binding layout.
+        // ── HW-RT rung R2a-4b: the HWRT-variant resolve pipeline + its 22-binding layout.
         // Built ONLY on an RT device (`ray_query_enabled`) under `feature = "hwrt"` — the SAME
         // capability gate the TLAS resources use (`RayBackendConfig` resolves the mesh-shadow cell
         // to `HardwareTri` on exactly this device tier, so presence == the routing decision).
         // `None` on the software path ⇒ the render binds the software pipeline ⇒ byte-identical. The
         // layout is the 19 software bindings + binding 19 (`AccelerationStructure`) the
-        // `deferred_pbr_hwrt.comp` `rayQuery` mesh-shadow trace reads.
+        // `deferred_pbr_hwrt.comp` `rayQuery` mesh-shadow trace reads + binding 20 (the soft-shadow
+        // UBO) + binding 21 (the raster depth image the shadow-ray origin's producer test reads).
         #[cfg(feature = "hwrt")]
         let resolve_pipeline_hwrt = ctx.ray_query_enabled().then(|| {
             let hwrt_cs = RhiDevice::create_shader_module(device, deferred_pbr_hwrt_spirv())
@@ -2225,6 +2229,19 @@ impl GpuSceneBundles {
                 binding: 20,
                 count: 1,
                 kind: DescriptorKind::UniformBuffer,
+                stage: ShaderStage::COMPUTE,
+            });
+            // Lane fix/hwrt-shadow-ray-origin: binding 21 = the raster DEPTH image (`gDepthHw`,
+            // SAMPLED — the same depth-aspect view + `depth_sampler` the marcher binds at its
+            // @1), read by the trace to tell a raster-owned pixel (`gViewT == md*64`) from an
+            // SDF-owned one before placing the shadow-ray origin on the raster's jittered ray.
+            // Inserted at 21 on EVERY HWRT resolve-family layout (the VIS/DENOISED/VIS-MV
+            // layouts below renumber `gShadowVis`/`MotionCamVis`/`gMotionVec` to 22/23/24), so
+            // the `[0..18 shared][19 TLAS][20 UBO][21 depth]` prefix is identical across them.
+            hwrt_entries.push(BindGroupLayoutEntry {
+                binding: 21,
+                count: 1,
+                kind: DescriptorKind::SampledImage,
                 stage: ShaderStage::COMPUTE,
             });
             let hwrt_layout = RhiDevice::create_bind_group_layout(
@@ -2257,7 +2274,7 @@ impl GpuSceneBundles {
         });
 
         // ── HW-RT rung 3a: the spatial-denoise VIS + DENOISED resolve pipelines (their SHARED
-        // 22-binding layout = the RESOLVE_INLINE-hwrt 21 bindings + `gShadowVis` STORAGE image @21) +
+        // 23-binding layout = the RESOLVE_INLINE-hwrt 22 bindings + `gShadowVis` STORAGE image @22) +
         // the à-trous filter pipeline (its own 6-binding layout + a 4-byte `{ uint step }` push).
         // Built under the SAME `ray_query_enabled` gate as `resolve_pipeline_hwrt` (the à-trous stack
         // lives on exactly this RT tier). `None` on the software path ⇒ the scene never wires
@@ -2268,10 +2285,11 @@ impl GpuSceneBundles {
             ComputePipeline,
             VulkanBindGroupLayout,
         )> = ctx.ray_query_enabled().then(|| {
-            // The 22-binding VIS/DENOISED layout: the 19 software resolve bindings (0..=18),
+            // The 23-binding VIS/DENOISED layout: the 19 software resolve bindings (0..=18),
             // binding 19 (`AccelerationStructure` — the VIS trace target), binding 20 (the rung-1b
-            // soft-shadow-params UBO), binding 21 (`gShadowVis` STORAGE image). Rebuilt here (the
-            // `hwrt_entries` above lives inside its own closure).
+            // soft-shadow-params UBO), binding 21 (the raster depth image — the shadow-ray origin's
+            // producer test, lane fix/hwrt-shadow-ray-origin), binding 22 (`gShadowVis` STORAGE
+            // image). Rebuilt here (the `hwrt_entries` above lives inside its own closure).
             let mut denoise_entries = resolve_entries.to_vec();
             denoise_entries.push(BindGroupLayoutEntry {
                 binding: 19,
@@ -2287,6 +2305,12 @@ impl GpuSceneBundles {
             });
             denoise_entries.push(BindGroupLayoutEntry {
                 binding: 21,
+                count: 1,
+                kind: DescriptorKind::SampledImage,
+                stage: ShaderStage::COMPUTE,
+            });
+            denoise_entries.push(BindGroupLayoutEntry {
+                binding: 22,
                 count: 1,
                 kind: DescriptorKind::StorageImage,
                 stage: ShaderStage::COMPUTE,
@@ -3686,11 +3710,12 @@ impl GpuSceneBundles {
                 }
 
                 // ── HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve pipeline +
-                // its 24-binding layout. The layout = the 22-binding VIS/DENOISED entries (the 19
-                // software resolve bindings + TLAS @19 + soft-shadow UBO @20 + `gShadowVis` @21,
-                // rebuilt here from `resolve_entries`) PLUS the `MotionCam` UBO @22 + the
-                // `motion_vec` STORAGE image @23 (both COMPUTE). Built under the SAME `mv` gate
-                // (`ray_query_enabled && shadow_denoise_storage_ok`); bound only when temporal is on.
+                // its 25-binding layout. The layout = the 23-binding VIS/DENOISED entries (the 19
+                // software resolve bindings + TLAS @19 + soft-shadow UBO @20 + the raster depth
+                // @21 (lane fix/hwrt-shadow-ray-origin) + `gShadowVis` @22, rebuilt here from
+                // `resolve_entries`) PLUS the `MotionCam` UBO @23 + the `motion_vec` STORAGE image
+                // @24 (both COMPUTE). Built under the SAME `mv` gate (`ray_query_enabled &&
+                // shadow_denoise_storage_ok`); bound only when temporal is on.
                 let mut vis_mv_entries = resolve_entries.to_vec();
                 vis_mv_entries.push(BindGroupLayoutEntry {
                     binding: 19,
@@ -3707,17 +3732,23 @@ impl GpuSceneBundles {
                 vis_mv_entries.push(BindGroupLayoutEntry {
                     binding: 21,
                     count: 1,
-                    kind: DescriptorKind::StorageImage,
+                    kind: DescriptorKind::SampledImage,
                     stage: ShaderStage::COMPUTE,
                 });
                 vis_mv_entries.push(BindGroupLayoutEntry {
                     binding: 22,
                     count: 1,
-                    kind: DescriptorKind::UniformBuffer,
+                    kind: DescriptorKind::StorageImage,
                     stage: ShaderStage::COMPUTE,
                 });
                 vis_mv_entries.push(BindGroupLayoutEntry {
                     binding: 23,
+                    count: 1,
+                    kind: DescriptorKind::UniformBuffer,
+                    stage: ShaderStage::COMPUTE,
+                });
+                vis_mv_entries.push(BindGroupLayoutEntry {
+                    binding: 24,
                     count: 1,
                     kind: DescriptorKind::StorageImage,
                     stage: ShaderStage::COMPUTE,
@@ -3727,7 +3758,7 @@ impl GpuSceneBundles {
                     &BindGroupLayoutDesc { entries: &vis_mv_entries },
                 )
                 .expect("invariant: rung-3b VIS-MV resolve bind-group layout create");
-                // The VIS-MV variant TRACES (it writes `gShadowVis` @21 like the base VIS), so bake
+                // The VIS-MV variant TRACES (it writes `gShadowVis` @22 like the base VIS), so bake
                 // the SAME `SHADOW_RAY_COUNT` spec-const (id 0) as the VIS / RESOLVE_INLINE resolve
                 // so `mesh_vis` stays bit-identical.
                 let vis_mv_ray_count = RayShadowConfig::default().ray_count.max(1);
@@ -7978,14 +8009,14 @@ impl GpuSceneBundles {
             // before its layout (reverse creation order).
             RhiDevice::destroy_compute_pipeline(ctx, self.viewt_from_vb_depth_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.viewt_from_vb_depth_layout);
-            // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 21-binding layout, `Option`-guarded
+            // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 22-binding layout, `Option`-guarded
             // (present only on an RT device under `feature = "hwrt"`). Pipeline before layout.
             #[cfg(feature = "hwrt")]
             if let Some((pipeline, layout)) = self.resolve_pipeline_hwrt {
                 RhiDevice::destroy_compute_pipeline(ctx, pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
             }
-            // HW-RT rung 3a: the VIS + DENOISED resolve pipelines + their shared 22-binding layout,
+            // HW-RT rung 3a: the VIS + DENOISED resolve pipelines + their shared 23-binding layout,
             // and the à-trous filter pipeline + its 6-binding layout. `Option`-guarded (present only
             // on an RT device). Pipelines before their layout.
             #[cfg(feature = "hwrt")]
@@ -8075,7 +8106,7 @@ impl GpuSceneBundles {
                 }
                 RhiDevice::destroy_graphics_pipeline(ctx, mv.pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, mv.layout);
-                // step 5b: the SDF motion-vector VIS resolve pipeline + its 24-binding layout
+                // step 5b: the SDF motion-vector VIS resolve pipeline + its 25-binding layout
                 // (pipeline before layout; no bind groups — the VIS-MV set lives in `GBufferTargets`).
                 RhiDevice::destroy_compute_pipeline(ctx, mv.vis_mv_pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, mv.vis_mv_layout);

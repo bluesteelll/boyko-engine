@@ -144,6 +144,56 @@ pub fn composite_perspective_from_view_sheared(
     )
 }
 
+/// The ray-gen forward that makes `ray_gen.hlsli`'s `generate_ray` pass through the sub-pixel
+/// position the JITTERED raster sampled at every pixel — the HWRT resolve's `SHADOW_RASTER_FWD`
+/// (lane fix/hwrt-shadow-ray-origin; `boyko_render::upload::RayShadowFrame`).
+///
+/// # Derivation
+///
+/// [`marcher_view_proj_rows_jittered`] shifts the raster's final NDC by `+j` (`row0 += jx*row3;
+/// row1 += jy*row3`, `row2 == row3`), so the image moves by `+j` and pixel `q` holds the world
+/// point whose UNJITTERED raster NDC is `q - j`. `ray_gen.hlsli`'s `ndc_y` is the NEGATION of the
+/// raster's final NDC.y (the y-flip [`composite_perspective_from_view_sheared`]'s doc derives:
+/// `NDC.y_raster == -ndc_y_raygen`), so the ray that produced pixel `q`'s depth is the ray-gen
+/// ray through `(ndc_x - jx, ndc_y + jy)`. By the shear identity (linear in `ndc`) that is
+/// `dir(fwd_r, ndc)` with
+///
+/// ```text
+/// fwd_r = fwd - right * (jx * aspect * tan_half_fov) + up * (jy * tan_half_fov)
+/// ```
+///
+/// For a raster-owned Deferred pixel the depth is the Euclidean eye distance
+/// (`gbuffer_mrt.fs.hlsl`: `length(eye_rel) / 64`), so `eye + normalize(dir(fwd_r, ndc)) * gViewT`
+/// is the rasterised surface point up to the rasteriser's own sub-pixel snap and fp rounding —
+/// <= ~0.05 mm at 10 m / 512 px, >= 30x under the trace's 1.82 mm self-hit guard (bias + TMin) —
+/// the shadow-ray origin the HWRT resolve needs. Derived from the UNJITTERED `view` (never from the b5 push), so it is the same
+/// under `JitterScope::RasterOnly` and `RasterAndBasis`.
+///
+/// NOTE: this is NOT the sign [`composite_perspective_from_view_sheared`] applies (`+ right*sx
+/// - up*sy`): that shear points the b5 ray through raster-NDC `q + j`, the raster samples `q - j`
+/// — the two producers under `RasterAndBasis` sample sub-pixel positions `2j` apart. Pinned by
+/// `basis_shear_mirrors_the_raster_jitter_pinned_until_owner_ruling` below; resolving it is
+/// `docs/OPEN-QUESTIONS.md`'s D2 item (an owner decision — it moves two software goldens).
+///
+/// PERSPECTIVE-only (`fov_y > 0`, debug-asserted); `aspect` is extent-derived like every other
+/// bridge fn here. A `{0, 0}` jitter returns the unjittered forward up to an additive zero.
+#[inline]
+pub fn raster_ray_forward(view: &ViewUniform, w: u32, h: u32, jitter: NdcJitter) -> [f32; 3] {
+    debug_assert!(view.fov_y > 0.0, "invariant: the raster-ray forward is PERSPECTIVE-only (fov_y > 0)");
+    debug_assert!(w > 0 && h > 0, "invariant: the composite extent is non-zero");
+    let tan_half_fov = (view.fov_y * 0.5).tan();
+    // Extent-derived, matching every other bridge fn in this module -- NOT `view.aspect`.
+    let aspect = (w as f32) / (h as f32);
+    let sx = jitter.jx * aspect * tan_half_fov;
+    let sy = jitter.jy * tan_half_fov;
+    let (fwd, right, up) = (view.cam_forward, view.cam_right, view.cam_up);
+    [
+        fwd.x - right.x * sx + up.x * sy,
+        fwd.y - right.y * sx + up.y * sy,
+        fwd.z - right.z * sx + up.z * sy,
+    ]
+}
+
 /// Builds the marcher's PERSPECTIVE [`CompositePushConstants`] from a resolved
 /// [`ViewUniform`] and a `w × h` extent.
 ///
@@ -1271,5 +1321,121 @@ mod tests {
         // A non-negative finite measurement -- guards against a vacuous sweep (e.g. every case
         // skipped) silently passing at `max_err == 0.0`.
         assert!(max_err.is_finite());
+    }
+
+    // ---- Lane fix/hwrt-shadow-ray-origin: `raster_ray_forward` (Gate 1b) + the D2 pin. -------
+
+    /// The Gate 1 sweep (yaws x FOVs x extents x jitters x pixels) with the jitters in NDC
+    /// units, as `NdcJitter`.
+    fn gate1_sweep() -> impl Iterator<Item = (ViewUniform, u32, u32, NdcJitter)> {
+        let jitters = [[0.0_f32, 0.0_f32], [0.001, -0.0015], [0.01, 0.02], [-0.03, 0.015], [0.02, -0.02]];
+        let extents = [(640_u32, 480_u32), (1920, 1080), (256, 1024), (64, 64)];
+        let fovs = [0.35_f32, core::f32::consts::FRAC_PI_3, 1.9];
+        let yaws = [0.0_f32, 0.7, -1.2];
+        yaws.into_iter().flat_map(move |yaw| {
+            fovs.into_iter().flat_map(move |fov_y| {
+                let (global, projection) = yawed_perspective_camera(yaw, fov_y);
+                let view = ViewUniform::from_camera(global, projection);
+                extents.into_iter().flat_map(move |(w, h)| {
+                    jitters.into_iter().map(move |[jx, jy]| (view, w, h, NdcJitter { jx, jy }))
+                })
+            })
+        })
+    }
+
+    /// Gate 1b (the raster <-> ray consistency Gate 1 is not; `docs/TAA-PLAN.md`'s Decision 1
+    /// risk mitigation "assert marcher-sample-pos == raster-sample-pos"): for a world point `Q`
+    /// on each pixel's UNJITTERED ray at `t in {1, 5, 20}`, project `Q` through the JITTERED
+    /// raster rows (`marcher_view_proj_rows_jittered`) to raster NDC `(x_r, y_r)`, feed
+    /// `(x_r, -y_r)` (the ray-gen y-flip) to the ray-gen mirror with `raster_ray_forward`'s
+    /// forward, and the direction must be `normalize(Q - eye)` within `1e-5` per component (the
+    /// shear's own measured ~1-ULP class, the Gate 1 tolerance). I.e. the ray through the pixel
+    /// the raster put `Q` at, generated with `fwd_r`, points back at `Q` -- the exactness the
+    /// HWRT shadow-ray origin `eye + rd_r * gViewT` rests on.
+    #[test]
+    fn raster_ray_forward_passes_through_the_raster_sample() {
+        const TOL: f32 = 1e-5;
+        let mut max_err = 0.0_f32;
+        let mut cases = 0usize;
+
+        for (view, w, h, jitter) in gate1_sweep() {
+            let tan_half_fov = (view.fov_y * 0.5).tan();
+            let aspect = w as f32 / h as f32;
+            let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
+            let fwd = [view.cam_forward.x, view.cam_forward.y, view.cam_forward.z];
+            let right = [view.cam_right.x, view.cam_right.y, view.cam_right.z];
+            let up = [view.cam_up.x, view.cam_up.y, view.cam_up.z];
+            let fwd_r = raster_ray_forward(&view, w, h, jitter);
+            let rows = marcher_view_proj_rows_jittered(&view, w, h, jitter);
+
+            let pixels = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1), (w / 2, h / 2), (w / 4, 3 * h / 4)];
+            for &(px, py) in &pixels {
+                let (ndc_x, ndc_y) = pixel_to_ndc(px, py, w, h);
+                let rd = ray_gen_dir_mirror(fwd, right, up, ndc_x, ndc_y, aspect, tan_half_fov);
+                for t in [1.0_f32, 5.0, 20.0] {
+                    let q = [eye[0] + rd[0] * t, eye[1] + rd[1] * t, eye[2] + rd[2] * t];
+                    // Where the JITTERED raster puts Q (final NDC, y-down).
+                    let (ndc_r, _clip_w) = apply_row_major(rows, q);
+                    // The ray-gen ray through that raster position, generated with fwd_r.
+                    let dir = ray_gen_dir_mirror(fwd_r, right, up, ndc_r[0], -ndc_r[1], aspect, tan_half_fov);
+                    let to_q = [q[0] - eye[0], q[1] - eye[1], q[2] - eye[2]];
+                    let len = (to_q[0] * to_q[0] + to_q[1] * to_q[1] + to_q[2] * to_q[2]).sqrt();
+                    for k in 0..3 {
+                        let err = (dir[k] - to_q[k] / len).abs();
+                        max_err = max_err.max(err);
+                    }
+                    cases += 1;
+                }
+            }
+        }
+
+        assert!(cases > 0, "Gate 1b: the sweep is empty");
+        assert!(
+            max_err <= TOL,
+            "Gate 1b: the fwd_r ray through the jittered raster's pixel misses the rasterised point \
+             by {max_err} (> TOL {TOL}) across {cases} cases"
+        );
+        assert!(max_err.is_finite());
+    }
+
+    /// The D2 pin (`docs/OPEN-QUESTIONS.md`, lane fix/hwrt-shadow-ray-origin): the b5 basis
+    /// shear `composite_perspective_from_view_sheared(.., Some([jx, jy]))` equals
+    /// `raster_ray_forward` at the NEGATED jitter, i.e. it points the b5 ray through raster-NDC
+    /// `q + j` while the raster samples `q - j` (the two producers under `RasterAndBasis` sample
+    /// sub-pixel positions `2j` apart). This test RECORDS the current sign; it must be EDITED by
+    /// the D2 fix (which makes the shear call `raster_ray_forward` and re-blesses the two
+    /// software basis pins) -- an owner decision, not this lane's.
+    #[test]
+    fn basis_shear_mirrors_the_raster_jitter_pinned_until_owner_ruling() {
+        const TOL: f32 = 1e-6;
+        let mut max_err = 0.0_f32;
+        let mut cases = 0usize;
+        for (view, w, h, jitter) in gate1_sweep() {
+            let pc = composite_perspective_from_view_sheared(&view, w, h, Some([jitter.jx, jitter.jy]));
+            let negated = raster_ray_forward(&view, w, h, NdcJitter { jx: -jitter.jx, jy: -jitter.jy });
+            for (sheared, mirrored) in pc.cam_forward.iter().zip(negated.iter()) {
+                max_err = max_err.max((sheared - mirrored).abs());
+            }
+            cases += 1;
+        }
+        assert!(cases > 0);
+        assert!(
+            max_err <= TOL,
+            "D2 pin: the b5 shear no longer equals raster_ray_forward at the negated jitter \
+             (max err {max_err}) -- if the shear sign was deliberately fixed, delete this pin and \
+             fold `composite_perspective_from_view_sheared` onto `raster_ray_forward` (OPEN-QUESTIONS D2)"
+        );
+    }
+
+    /// A zero jitter returns the unjittered forward (an additive zero, bit-identical for a basis
+    /// with no `-0.0` lanes), and a nonzero one perturbs all three lanes of an oblique basis.
+    #[test]
+    fn raster_ray_forward_zero_jitter_is_the_unjittered_forward() {
+        let (global, projection) = yawed_perspective_camera(0.7, FRAC_PI_3);
+        let view = ViewUniform::from_camera(global, projection);
+        let zero = raster_ray_forward(&view, 640, 480, NdcJitter::default());
+        assert_eq!(zero, [view.cam_forward.x, view.cam_forward.y, view.cam_forward.z]);
+        let some = raster_ray_forward(&view, 640, 480, NdcJitter { jx: 0.01, jy: -0.02 });
+        assert!(some.iter().zip(zero.iter()).all(|(a, b)| a != b), "every lane of an oblique basis moves");
     }
 }
