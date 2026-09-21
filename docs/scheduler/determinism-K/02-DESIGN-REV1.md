@@ -140,7 +140,7 @@ No param writes the enable column from a worker. D1 therefore fixes their order.
 - **Typed param `EnableCommands<'s, T>`** (new file `system/params/enable_commands.rs`):
   - It owns a `CommandQueue` and has `HAS_DEFERRED = true`.
   - Its `init_access` calls `meta.declare_deferred_write(T::component_id())`.
-  - Methods: `set(Entity, bool)` and `set_by_id(EntityId, bool)`. The second resolves the entity at apply time and does nothing if it is dead. This is `boyko_scene`'s `SetRenderEnabledById` contract (`boyko_scene/src/visibility_sync.rs:84-106`), moved into the kernel as `EnableTagByIdCommand`.
+  - Methods: `set(Entity, bool)` and `set_by_id(EntityId, bool)`. The second resolves the entity at apply time and does nothing if it is dead. This is `boyko_scene`'s `SetRenderEnabledById` contract (`boyko_scene/src/visibility_sync.rs:84-106`), moved into the kernel as `EnableTagByIdCommand`. ⚠ **Superseded 2026-09-21 (rungs A9 / A9b)**: `SetRenderEnabledById` no longer exists — it is `SetRenderEnabled`, keyed by the full `Entity` resolved at enqueue through the `Entities` param. The by-id form re-resolved the row at apply and was hazard H-06: a toggle pending for a despawned `E` landed on the `F` spawned on `E`'s recycled id in the same frame (`boyko_scene/tests/visibility_sync_gates.rs` gates 5–6). `boyko_render`'s two copies of the pattern (`asset_refcount.rs` `DisableStaleMeshCommand`, `snap_interpolation.rs` `DisableSnap`) were fixed the same way (`boyko_render/tests/deferred_toggles_recycled_id.rs`). A kernel `set_by_id` that resolves at apply would move H-06 into the kernel; a by-id surface, if it is still wanted, resolves the generation at ENQUEUE.
   - The declaration is exact because the param cannot touch any other tag.
 - **Untyped `Commands`:** `init_access` (`commands.rs:405-415`) calls `meta.mark_deferred_untyped()`, which makes the system open.
 - **Hand-written `System` impls** with `has_deferred() == true` are open unless their `initialize` calls the public `SystemMeta::declare_deferred_write`. That makes them closed. This is trusted, in the same way `has_deferred` already is (`system/system.rs:190`).
@@ -434,4 +434,4 @@ Each commit is green at the workspace level (`cargo test --workspace --all-targe
 - Cache-line padding against false sharing: no new cross-thread state is added.
 - Loom: no new atomics.
 - Drop order: `OrderMeta` and `ScheduleAnalysis` are plain owned boxes, and the lifetime of `ApplyDrainGuard` is unchanged.
-- Generation checks: `set_by_id` resolves the live `Entity` at apply time and does nothing if it is dead, the same contract as `SetRenderEnabledById`.
+- Generation checks: `set_by_id` resolves the live `Entity` at apply time and does nothing if it is dead, the same contract as `SetRenderEnabledById`. ⚠ **Superseded 2026-09-21 (rungs A9 / A9b)**: that contract is hazard H-06 (see the note on D7 above); the generation is captured at enqueue, never re-resolved at apply.
