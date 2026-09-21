@@ -110,6 +110,10 @@ pub(crate) struct FrameMeta {
 pub(crate) struct RayShadowUpload {
     /// The uploaded `SHADOW_FRAME_SEED` (the runner's `frame_index`).
     pub seed: u32,
+    /// The uploaded `SHADOW_ORIGIN_MODE` (`0` legacy `P`, `1` the raster-ray origin).
+    pub origin_mode: u32,
+    /// The uploaded `SHADOW_RASTER_FWD.xyz` (zero under mode 0).
+    pub raster_fwd: [f32; 3],
 }
 
 /// A captured frame whose staging is draining: the metadata to write beside it

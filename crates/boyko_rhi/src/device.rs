@@ -66,7 +66,14 @@ use crate::error::RhiError;
 /// argument: only the 24-binding VIS-MV layout fills the two new tail slots, and it is bound solely
 /// when the temporal denoiser is active; every other set (software 19, RESOLVE_INLINE-hwrt 21, base
 /// VIS/DENOISED 22) is untouched.
-pub const MAX_BIND_GROUP_BINDINGS: usize = 24;
+///
+/// Lane fix/hwrt-shadow-ray-origin: raised 24 → 25 to INSERT binding 21 (`gDepthHw`, the raster
+/// depth image the HWRT resolve reads to tell a raster-owned pixel from an SDF-owned one before
+/// placing the shadow-ray origin on the raster's jittered ray) into every HWRT resolve-family set,
+/// renumbering `gShadowVis`/`MotionCamVis`/`gMotionVec` to 22/23/24. BYTE-NEUTRAL by the same
+/// argument: the software resolve still fills 19; the HWRT sets grow by one (RESOLVE_INLINE-hwrt
+/// 22, VIS/DENOISED 23, VIS-MV 25 = the cap), and the cap governs only the fixed inline arrays.
+pub const MAX_BIND_GROUP_BINDINGS: usize = 25;
 
 /// Parameters for [`RhiDevice::create_texture`] (Phase-6 S0 graphics surface).
 ///

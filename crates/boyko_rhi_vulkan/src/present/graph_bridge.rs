@@ -2065,6 +2065,21 @@ impl Renderer<'_> {
                     SubRange::COLOR,
                 );
             }
+            // Lane fix/hwrt-shadow-ray-origin: the VIS trace reads the raster DEPTH image
+            // (`gDepthHw` @21, SAMPLED at SHADER_READ_ONLY_OPTIMAL — the SAME stage/access/layout
+            // the marcher / `viewt_from_depth` / `coarse` read it at, so this is a read-after-read
+            // the RDG derives NO barrier for) to tell a raster-owned pixel from an SDF-owned one
+            // before placing the shadow-ray origin on the raster's jittered ray. Declared whenever
+            // the VIS set is bound (this arm), the 09600 rule: the statically-referenced descriptor's
+            // image must sit in a valid layout even on a frame whose `SHADOW_ORIGIN_MODE == 0` gate
+            // never executes the `.Load`.
+            g.image_access(
+                depth,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::DEPTH,
+            );
             g.buffer_access(
                 tlas_instances,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -2319,6 +2334,28 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_READ_BIT,
                 VK_IMAGE_LAYOUT_GENERAL,
                 SubRange::COLOR,
+            );
+        }
+        // Lane fix/hwrt-shadow-ray-origin: every HWRT resolve-family set binds the raster DEPTH
+        // image at `gDepthHw` @21 (SAMPLED, SHADER_READ_ONLY_OPTIMAL — the SAME stage/access/layout
+        // the marcher / `viewt_from_depth` / `coarse` already read it at this frame, so the RDG
+        // derives NO barrier: a read-after-read; the software stream cannot change since the
+        // declaration is `hwrt`-gated). Declared under the HWRT PIPELINE predicate
+        // (`scene.resolve_pipeline_hwrt.is_some()`), a SUPERSET of the predicate the recorder binds
+        // the HWRT set under (`scene.tlas.is_some() && resolve_pipeline_hwrt.is_some()`,
+        // `passes/gbuffer.rs`): on a zero-mesh frame the software set is bound instead and the
+        // superset declares a same-layout read that derives nothing (W1: inert by direction). The
+        // 09600 rule is what makes the declaration unconditional on the HWRT device: the statically
+        // referenced descriptor's image must sit in a valid layout even on a TAA-off frame whose
+        // `SHADOW_ORIGIN_MODE == 0` gate never executes the `.Load`.
+        #[cfg(feature = "hwrt")]
+        if scene.resolve_pipeline_hwrt.is_some() {
+            g.image_access(
+                depth,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::DEPTH,
             );
         }
         // Textured-PBR T6a: the resolve ALWAYS declares this read (UNLIKE `ssao` below, which is

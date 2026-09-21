@@ -8,7 +8,7 @@
 // feedback `k`, and resets hard to the current single-frame value on disocclusion (off-screen /
 // unconfident history / a prev-vs-current depth swap). The accumulated visibility is written to BOTH
 // the history ring (for the next frame) AND `gTemporalOut` (the RESOLVE_DENOISED reads it at its
-// `gShadowVis` @21 slot, exactly as it read the à-trous output in Rung 3a).
+// `gShadowVis` @22 slot, exactly as it read the à-trous output in Rung 3a).
 //
 // # The history ring (R16G16B16A16_UNORM, GENERAL, per-FIF, cross-frame seeded)
 //
@@ -53,7 +53,7 @@
 // `hist[fi]`. Both RGBA16 UNORM (the uniform pin matches whichever ring slot is bound each parity).
 [[vk::image_format("rgba16")]] RWTexture2D<float4> gHistIn  : register(u3);
 [[vk::image_format("rgba16")]] RWTexture2D<float4> gHistOut : register(u4);
-// binding 5 (WRITE): the temporal-out the RESOLVE_DENOISED reads at `gShadowVis` @21 (RG16 UNORM,
+// binding 5 (WRITE): the temporal-out the RESOLVE_DENOISED reads at `gShadowVis` @22 (RG16 UNORM,
 // R=accumulated vis, G=validity=1). A DEDICATED target (not an in-place `gVisIn` write-back) so the
 // 3×3 neighbourhood read cannot race the accumulate write.
 [[vk::image_format("rg16")]] RWTexture2D<float2> gTemporalOut : register(u5);

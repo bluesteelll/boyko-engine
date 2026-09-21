@@ -88,9 +88,13 @@ const MAX_VERTEX_ATTRIBUTES: usize = 8;
 /// raised it 22 → 24 to reserve bindings 22/23 for the VIS-MV variant's `MotionCam` UBO + `motion_vec`
 /// STORAGE image (the SDF camera-only motion vector) — BYTE-NEUTRAL by the same argument: only the
 /// 24-binding VIS-MV layout fills the two new tail slots; the software resolve still fills 19, the
-/// RESOLVE_INLINE-hwrt resolve still fills 21, and the base VIS/DENOISED set still fills 22. A
-/// `debug_assert!` traps an over-count at `create_bind_group_layout`/`create_bind_group`.
-const MAX_BIND_GROUP_BINDINGS: usize = 24;
+/// RESOLVE_INLINE-hwrt resolve still fills 21, and the base VIS/DENOISED set still fills 22. Lane
+/// fix/hwrt-shadow-ray-origin raised it 24 → 25 to INSERT the raster depth image (`gDepthHw`) at
+/// binding 21 of every HWRT resolve-family set (`gShadowVis`/`MotionCamVis`/`gMotionVec` move to
+/// 22/23/24) — BYTE-NEUTRAL by the same argument: the software resolve still fills 19; the HWRT
+/// sets now fill 22 / 23 / 25. A `debug_assert!` traps an over-count at
+/// `create_bind_group_layout`/`create_bind_group`.
+const MAX_BIND_GROUP_BINDINGS: usize = 25;
 
 // The bind-group create path keeps its own copy of the cap so a future divergence
 // from the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` (the desc-side cap) breaks
