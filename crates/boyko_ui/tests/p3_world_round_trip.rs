@@ -55,7 +55,8 @@ use boyko_ecs::ecs::core::system::Commands;
 use boyko_ui::binding::{BindText, BindValue};
 use boyko_ui::components::{
     Bar, BarFill, Button, ComputedClip, ContentSize, StackIndex, UiAbsolute, UiAlign, UiAnchor,
-    UiGrid, UiImage, UiLayout, UiName, UiRoot, UiSpacing,
+    UiGrid, UiImage, UiLayout, UiName, UiNineSlice, UiRoot, UiSpacing, UiSpriteAnim,
+    UiSpriteSheet,
 };
 use boyko_ui::interaction::{OnClick, OnHover, OnSubmit};
 use boyko_ui::reload::tree_view::UiTreeView;
@@ -85,6 +86,9 @@ version=1
     UiImage { texture: 9, uv_min: [0.125, 0.25], uv_max: [0.75, 0.875], tint: 16711935 }
     UiGrid { columns: 4, rows: 5 }
     UiAnchor { edge: BottomRight, offset_x: 23.5, offset_y: 24.5, use_safe_area: true }
+    UiNineSlice { border_px: [2, 3, 4, 5], border_uv: [0.125, 0.1875, 0.25, 0.3125], mode: Tile, fill_center: false }
+    UiSpriteSheet { sheet: 6, index: 7 }
+    UiSpriteAnim { first: 2, last: 9, fps: 24.5, mode: PingPong, repeats: 3 }
     Button
     Bar
     BarFill
@@ -267,7 +271,8 @@ macro_rules! declare_comparison {
 declare_comparison! {
     data: [
         UiLayout, UiSpacing, UiAlign, UiAbsolute, ContentSize, StackIndex, ComputedClip, UiText,
-        UiImage, UiGrid, UiAnchor, OnClick, OnHover, OnSubmit,
+        UiImage, UiGrid, UiAnchor, OnClick, OnHover, OnSubmit, UiNineSlice, UiSpriteSheet,
+        UiSpriteAnim,
     ],
     zst: [UiRoot, Button, Bar, BarFill],
     bind: [

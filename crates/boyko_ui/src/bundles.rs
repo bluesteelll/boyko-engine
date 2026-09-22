@@ -10,7 +10,8 @@ use boyko_macros::Bundle;
 
 use crate::binding::{UiTextBuffer, UiValue};
 use crate::components::{
-    Bar, Button, ComputedRect, ContentSize, UiBackground, UiGrid, UiImage, UiLayout,
+    Bar, Button, ComputedRect, ContentSize, UiBackground, UiGrid, UiImage, UiLayout, UiSpriteAnim,
+    UiSpriteCursor, UiSpriteSheet,
 };
 use crate::interaction::{Focusable, Interaction, OnClick};
 use crate::text::UiText;
@@ -132,6 +133,49 @@ pub struct ImageBundle {
     pub rect: ComputedRect,
     /// Image fill (texture handle + UV + tint).
     pub image: UiImage,
+}
+
+/// An ANIMATED sprite node (UI-ADVANCED S5): an image node plus the sprite-sheet
+/// trio, in ONE spawn.
+///
+/// # Ergonomics, no longer the requirement itself
+///
+/// [`ui_sprite_flipbook`](crate::sprite::ui_sprite_flipbook) queries all three of
+/// [`UiSpriteAnim`], [`UiSpriteCursor`] and [`UiSpriteSheet`], so an animation
+/// missing the cursor would silently never tick — a frozen sprite with no error
+/// and no failing assertion. Until UI-ADVANCED S6 this bundle WAS the only remedy
+/// (`#[require(UiSpriteCursor)]` panics on a dense target on this kernel — see
+/// [`UiSpriteAnim`]'s doc and `docs/OPEN-QUESTIONS.md`).
+///
+/// S6 moved the guarantee to the component:
+/// `sprite::ui_sprite_anim_on_add` materializes
+/// the cursor wherever a `UiSpriteAnim` is added, so a `.ui` file, a `ui!` tree
+/// and a hand-spawn all get one. What this bundle still buys is ONE spawn into
+/// one archetype rather than a sequence of inserts.
+///
+/// The hook fires on the animation's add and its deferred insert lands AFTER this
+/// bundle's own `cursor` field, so that field is replaced by a fresh `Default` at
+/// the drain. On a spawn frame the two values are equal, so this is inert; it
+/// would become a visible reset if a caller ever spawned a non-default cursor
+/// here. `dir` is `+1` either way — [`UiSpriteCursor::default`]'s value, the one
+/// `PingPong` needs.
+#[derive(Bundle)]
+pub struct AnimatedSpriteBundle {
+    /// Primary layout input.
+    pub layout: UiLayout,
+    /// Resolved screen-space rectangle.
+    pub rect: ComputedRect,
+    /// Image fill — the CAPABILITY (the tint, and the fallback texture/UV when
+    /// the sheet is inert). Its authored default tint is alpha 0, so an animated
+    /// sprite still needs an opaque tint to show.
+    pub image: UiImage,
+    /// Which sheet, and which frame right now. The flipbook writes `index`.
+    pub sheet: UiSpriteSheet,
+    /// The animation's configuration — author-written, never system-written.
+    pub anim: UiSpriteAnim,
+    /// The flipbook's private per-frame state (DENSE). Spawned here so it cannot
+    /// be forgotten.
+    pub cursor: UiSpriteCursor,
 }
 
 /// A grid container: a [`UiLayout`]`{ layout_type: Grid }` + the [`UiGrid`] track

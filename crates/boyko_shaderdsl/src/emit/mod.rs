@@ -196,6 +196,23 @@ enum Node {
         #[allow(dead_code)]
         val: f32,
     },
+    /// A NAMED `uint` constant that types as [`EmitTy::Uint`] — `FLAG_TILED`,
+    /// `UI_TILE_X_SHIFT`, `UI_TILE_MASK` (UI-ADVANCED S5's `ui_tile_uv`).
+    ///
+    /// DISTINCT from [`Node::NamedLit`], which types `Float`: `NamedLit` was minted for a
+    /// symbol whose only consumer is a bare `Stmt::Return` (no `chk`), and the S5 leaf's
+    /// symbols are operands of [`Node::And`] / [`Node::Shr`], which `chk` their operands
+    /// `Uint`. Spelling them as bare `uint` literals instead would put a SECOND copy of the
+    /// bit layout in the leaf body, next to the copy `emit_hlsl_ui_flag_consts` already
+    /// generates from the layout — the drift class S-D2 / S-D10 exist to close.
+    ///
+    /// `val` is the concrete value the Eval backend uses (through
+    /// [`crate::cf::Cf::named_uint_val`], not through a node); the printer spells the symbol.
+    NamedUint {
+        sym_id: u32,
+        #[allow(dead_code)]
+        val: u32,
+    },
     /// A call to the hand-written field function `sdf(<arg>)`. The operand is a
     /// VECTOR-expression handle into the separate [`VNode`] arena (the `float3`
     /// argument), so the printer emits `sdf(<vexpr>)`. The field is NOT inlined: the
@@ -591,6 +608,97 @@ enum Node {
     /// [`Node::Vec3Dot`] it carries no byte-identity contract. Result type [`EmitTy::Float`]
     /// (the default arm, as for [`Node::Sqrt`]).
     Rsqrt(u32),
+
+    // ---- UI-ADVANCED S1: the `ui_rect` leaf nodes (`docs/UI-PLAN-SPRITES-S0-S2.md` rung S1) ----
+    //
+    // The six UI fragment leaves (`crate::ui`) are the first `float2`/`float4` VALUE math in the
+    // eDSL: a rounded-box SDF over a `float2` point with a per-corner `float4` radius, a clip
+    // coverage over `smoothstep(float2, float2, float2)`, an MSDF screen-px range over
+    // `fwidth(float2)`, and a premultiplied-over composite over `float4`s. Each node below is one
+    // committed spelling in `boyko_render/shaders/ui_rect.fs.hlsl`; the printer arms reproduce
+    // the generated text and the re-DXC byte gate (`ui_rect_spv_sync`) pins the binary.
+
+    /// A `float2` PARAMETER reference — the UI leaves' `p` / `half_size` / `pos` / `uv`, printed
+    /// by NAME. Indexes the SAME [`Names::vec_in`] table [`Node::Vec3Param`] uses (the table
+    /// carries names, not types; the result type comes from THIS node). Result type
+    /// [`EmitTy::Float2`].
+    Vec2Param(u32),
+    /// A `float4` → `float2` TWO-LANE swizzle — `r.yz` / `r.xw` (the rounded-box per-corner
+    /// radius select) and `clip.xy` / `clip.zw` (the clip AABB halves). `(src, mask)` where
+    /// `mask` indexes [`VEC4_SWIZZLES_V2`] (0=`xy`, 1=`zw`, 2=`yz`, 3=`xw`). DISTINCT from
+    /// [`Node::Vec2Swizzle`] (whose source is a `float2`/`float3` and whose mask table is the
+    /// frozen 2-entry G2 one). Printed INLINE (`<src>.yz`). Result type [`EmitTy::Float2`].
+    Vec4SwizzleV2(u32, u8),
+    /// `v.a` — a `float4` → `float` ALPHA read (`src.a`, the premultiplied-over source alpha).
+    /// Spelled `.a` (the committed color-vector spelling), NOT `.w` — the same component, a
+    /// different token. Printed INLINE. Result type [`EmitTy::Float`].
+    Vec4Alpha(u32),
+    /// `(cond) ? t : e` with `float2` ARMS — the rounded-box radius-pair select
+    /// (`(p.x > 0.0) ? r.yz : r.xw`). The condition is a Mask leaf (wrapped, like
+    /// [`Node::Select`]); the arms spell at Root (both are swizzle leaves in the committed
+    /// text). Result type [`EmitTy::Float2`].
+    SelectVec2(u32, u32, u32),
+    /// `a - b` over two `float2`s (`abs(p) - half_size`) — component-wise. ADDITIVE (wraps
+    /// under a multiplicative parent / in the additive-RIGHT position, stays flat on the LEFT —
+    /// the committed `abs(p) - half_size + rr` relies on the flat-left rule). Result type
+    /// [`EmitTy::Float2`].
+    Vec2Sub(u32, u32),
+    /// `v - s` — a `float2` MINUS a `float` scalar broadcast (`clip.xy - fw`), vector on the
+    /// LEFT. `(vec, scalar)`. The operand-order complement of [`Node::Vec2RSubScalar`]
+    /// (`s - v`). ADDITIVE. Result type [`EmitTy::Float2`].
+    Vec2SubScalar(u32, u32),
+    /// `max(v, s)` — a `float2` max against a `float` scalar broadcast (`max(q, 0.0)`, the
+    /// rounded-box outside-distance clamp). `(vec, scalar)`; HLSL promotes the scalar arg.
+    /// Printed as the intrinsic call. Result type [`EmitTy::Float2`].
+    Vec2MaxScalar(u32, u32),
+    /// `length(v)` over a `float2` (`length(max(q, 0.0))`, the rounded-box corner distance) —
+    /// `OpExtInst GLSL.std.450 Length`. Result type [`EmitTy::Float`].
+    Vec2Length(u32),
+    /// `dot(a, b)` over two `float2`s (`dot(unit_range, screen_tex_sz)`, the MSDF range fold) —
+    /// `OpDot`, free to contract like [`Node::Vec3Dot`], so it carries no bit-exact oracle
+    /// contract. Result type [`EmitTy::Float`].
+    Vec2Dot(u32, u32),
+    /// `smoothstep(e0, e1, x)` over three `float2`s (`smoothstep(clip.xy - fw, clip.xy + fw,
+    /// pos)`, the clip AA band) — `OpExtInst GLSL.std.450 SmoothStep`, component-wise. Result
+    /// type [`EmitTy::Float2`].
+    Vec2Smoothstep(u32, u32, u32),
+    /// `fwidth(v)` over a `float2` (`fwidth(uv)`, the MSDF screen-space texel footprint) — the
+    /// FRAGMENT-stage derivative `OpFwidth`. NO host semantics: the Eval backend cannot
+    /// evaluate a device derivative, so the leaf that records this node is not oracle-swept
+    /// (see [`crate::ui::ui_screen_px_range_body`]). Result type [`EmitTy::Float2`].
+    Vec2Fwidth(u32),
+    /// `frac(v)` over a `float2` (`frac(local_uv * tiles)`, UI-ADVANCED S5's tile wrap) —
+    /// `OpExtInst GLSL.std.450 Fract`, component-wise. Exact on both backends
+    /// (`x - floor(x)`, one subtract, no rounding step), so unlike [`Node::Vec2RDivScalar`]
+    /// it CAN carry a bit-exact oracle contract. Result type [`EmitTy::Float2`].
+    Vec2Frac(u32),
+    /// `lerp(a, b, t)` over three `float2`s (`lerp(uv.xy, uv.zw, t)`, the UNTILED arm of
+    /// `ui_tile_uv`) — `OpExtInst GLSL.std.450 FMix`, component-wise. Spelled as the
+    /// intrinsic rather than decomposed into `a + t * (b - a)`: `FMix` is specified as
+    /// `x * (1 - t) + y * t` and the six committed UI image pins were blessed against the
+    /// intrinsic, so the decomposition would move the sprite's pixel by ~1 ULP with no gate
+    /// able to see it. Result type [`EmitTy::Float2`].
+    Vec2Lerp(u32, u32, u32),
+    /// `s / v` — a `float` scalar (broadcast) DIVIDED by a `float2`, scalar on the LEFT
+    /// (`g_atlas_ubo.px_range / g_atlas_ubo.atlas_size`, `1.0 / fwidth(uv)`). `(scalar, vec)`.
+    /// A DIVIDE — per the house rule it is never part of a bit-exact oracle contract
+    /// (`OpFDiv` carries 2.5 ULP); it exists because the committed MSDF range math spells it.
+    /// Result type [`EmitTy::Float2`].
+    Vec2RDivScalar(u32, u32),
+    /// `float4(<x>, <y>, <z>, <w>)` from FOUR already-`float` scalar expressions (the
+    /// `ui_unpack_rgba8` channel ctor). Each component checked `Float`. Result type
+    /// [`EmitTy::Float4`].
+    Vec4FromScalars(u32, u32, u32, u32),
+    /// `v * s` — a `float4` times a `float` scalar (`bc * border_cov`, `float4(...) * (1.0 /
+    /// 255.0)`). `(vec, scalar)`. The scalar operand is spelled WRAPPED when it is a non-leaf
+    /// (`(1.0 / 255.0)`, `(1.0 - src.a)`) — the committed parenthesization, which the
+    /// position-aware rule alone cannot reproduce for a `Div` child (a `Div` under a
+    /// multiplicative parent normally stays flat, but `v * 1.0 / 255.0` would DIVIDE the
+    /// vector — a different `.spv`). Result type [`EmitTy::Float4`].
+    Vec4MulScalar(u32, u32),
+    /// `a + b` over two `float4`s (`src + dst * (1.0 - src.a)`, the premultiplied OVER) —
+    /// component-wise. ADDITIVE. Result type [`EmitTy::Float4`].
+    Vec4Add(u32, u32),
 }
 
 /// One VECTOR (`float3`/`float2`) SSA node — the normal leaf is a vector expression
@@ -726,6 +834,9 @@ fn var_type(id: u32) -> EmitTy {
 fn type_of(node: Node) -> EmitTy {
     match node {
         Node::UintInput(_) | Node::UintLit(_) | Node::And(_, _) | Node::Shr(_, _) => EmitTy::Uint,
+        // UI-ADVANCED S5: the named `uint` constant types `Uint` (the whole reason it is a
+        // separate node from `NamedLit`, which types `Float`).
+        Node::NamedUint { .. } => EmitTy::Uint,
         // Increment 3 `uint`-result nodes: the cell index math, the buffer load, the
         // `(uint)` cast, the `uint3` swizzle, and a named `uint` constant.
         Node::Uint3Swizzle(_, _)
@@ -760,6 +871,26 @@ fn type_of(node: Node) -> EmitTy {
         | Node::Vec2AddScalar(_, _)
         | Node::Vec2RSubScalar(_, _) => EmitTy::Float2,
         Node::Vec2Comp(_, _) => EmitTy::Float,
+        // UI-ADVANCED S1: the `ui_rect` leaf nodes. The `float2`-result family (the `float2`
+        // param ref, the `float4`→`float2` swizzle, the vec2 select/arithmetic/intrinsics)
+        // types `Float2`; the `float4`-result family (`float4(...)` ctor, `* s`, `+`) types
+        // `Float4`; the scalar reductions (`length`, `dot`, `.a`) type `Float`.
+        Node::Vec2Param(_)
+        | Node::Vec4SwizzleV2(_, _)
+        | Node::SelectVec2(_, _, _)
+        | Node::Vec2Sub(_, _)
+        | Node::Vec2SubScalar(_, _)
+        | Node::Vec2MaxScalar(_, _)
+        | Node::Vec2Smoothstep(_, _, _)
+        | Node::Vec2Fwidth(_)
+        // UI-ADVANCED S5: the two `float2` primitives `ui_tile_uv` adds.
+        | Node::Vec2Frac(_)
+        | Node::Vec2Lerp(_, _, _)
+        | Node::Vec2RDivScalar(_, _) => EmitTy::Float2,
+        Node::Vec4FromScalars(_, _, _, _) | Node::Vec4MulScalar(_, _) | Node::Vec4Add(_, _) => {
+            EmitTy::Float4
+        }
+        Node::Vec2Length(_) | Node::Vec2Dot(_, _) | Node::Vec4Alpha(_) => EmitTy::Float,
         // Rung E: the `uint`-RESULT nodes — the three bitwise/shift ops, the `float -> uint`
         // bit-cast, and the half-precision NARROW (whose 16 result bits live in a `uint`). The
         // float-result members of the same rung (`AsFloat` / `F16ToF32` / `Vec3Dot`) take the
@@ -1273,6 +1404,8 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::UintLit(_)
             | Node::VecIndex(_, _)
             | Node::NamedLit { .. }
+            // UI-ADVANCED S5: a named `uint` constant spells its SYMBOL at every use.
+            | Node::NamedUint { .. }
             | Node::VecParamRef(_)
             | Node::VarRef(_)
             | Node::TempRef(_)
@@ -1329,6 +1462,14 @@ fn is_inline_leaf(node: Node) -> bool {
             // inline within the `n = ...;` / `e = ...;` / `return ...;` statements).
             | Node::Vec2Swizzle(_, _)
             | Node::Vec2Comp(_, _)
+            // UI-ADVANCED S1: a `float2` parameter (`p`), a `float4`→`float2` swizzle
+            // (`r.yz`), and the `.a` alpha read (`src.a`) spell inline at every use, like
+            // the other param refs and swizzles. The vec2/vec4 ARITHMETIC nodes are NOT
+            // leaves — they compose inline via `define_str` (the UI leaves temp exactly
+            // the named locals the committed text names, nothing else).
+            | Node::Vec2Param(_)
+            | Node::Vec4SwizzleV2(_, _)
+            | Node::Vec4Alpha(_)
     )
 }
 
@@ -1414,6 +1555,9 @@ fn operand_str(
         Node::VecIndex(vec_id, iv_id) => format!("{}[{}]", names.vec_in[vec_id as usize], opl(iv_id)),
         // The named literal prints the SYMBOL (`BRICK_EXIT_EPS`), not its `val`.
         Node::NamedLit { sym_id, .. } => names.named_lit[sym_id as usize].to_string(),
+        // UI-ADVANCED S5: a named `uint` constant (`FLAG_TILED`, `UI_TILE_MASK`) spells the
+        // SYMBOL, exactly like `NamedLit` — it differs only in typing `Uint` (see the node).
+        Node::NamedUint { sym_id, .. } => names.named_lit[sym_id as usize].to_string(),
         // A mutable-local read prints the variable NAME (`exit`), not a `tN` temp.
         Node::VarRef(v) => names.vars[v as usize].to_string(),
         // A materialized-temp reference prints its NAME (`rel`/`ix`, a named brick-cell
@@ -1444,6 +1588,13 @@ fn operand_str(
         // `<src>.x`/`<src>.y`. Both spell inline at each use, matching the committed `oct_encode`.
         Node::Vec2Swizzle(v, mask) => format!("{}.{}", opl(v), VEC2_SWIZZLES[mask as usize]),
         Node::Vec2Comp(v, axis) => format!("{}.{}", opl(v), AXIS[axis as usize]),
+        // UI-ADVANCED S1 inline leaves: a `float2` parameter spells its NAME (`p`, `uv` — the
+        // same `vec_in` table the `float3` params index); the `float4`→`float2` swizzle spells
+        // `<src>.yz` (the source is itself an inline leaf — a `Vec4Param`/`TempRef`); the alpha
+        // read spells `<src>.a` (the committed color spelling, not `.w`).
+        Node::Vec2Param(n) => names.vec_in[n as usize].to_string(),
+        Node::Vec4SwizzleV2(v, mask) => format!("{}.{}", opl(v), VEC4_SWIZZLES_V2[mask as usize]),
+        Node::Vec4Alpha(v) => format!("{}.a", opl(v)),
         // `grid[idx]` — the buffer name + the index (an inline leaf, the `idx` temp ref).
         Node::BufferLoad(buf, idx) => format!("{}[{}]", names.buf_in[buf as usize], opl(idx)),
         // The `>=` / `||` masks appear only inside a guard condition (inlined like `Gt`).
@@ -1533,6 +1684,11 @@ const AXIS: [&str; 3] = ["x", "y", "z"];
 /// (Track B Increment G2). `0 = "xy"` (the `n.xy` lane-keep), `1 = "yx"` (the `e.yx` lane-swap).
 const VEC2_SWIZZLES: [&str; 2] = ["xy", "yx"];
 
+/// The `float4` → `float2` TWO-LANE swizzle masks, indexed by a [`Node::Vec4SwizzleV2`] mask id
+/// (UI-ADVANCED S1). `0 = "xy"` / `1 = "zw"` (the clip AABB halves), `2 = "yz"` / `3 = "xw"`
+/// (the rounded-box per-side radius pairs `(tr, br)` / `(tl, bl)`).
+const VEC4_SWIZZLES_V2: [&str; 4] = ["xy", "zw", "yz", "xw"];
+
 /// True for a node whose inline spelling must be PARENTHESIZED in the parent `pos`.
 ///
 /// PRECEDENCE-AND-ASSOCIATIVITY-AWARE (Increment 3): the precedence comes from the
@@ -1578,7 +1734,15 @@ fn needs_paren_as_operand(node: Node, pos: OperandPos) -> bool {
         // `(1.0 - abs(e.yx)) * float2(...)` keystone) or in the additive-RIGHT position, like the
         // scalar/`float3` additive nodes.
         | Node::Vec2AddScalar(..)
-        | Node::Vec2RSubScalar(..) => matches!(pos, OperandPos::MulSide | OperandPos::AddRight),
+        | Node::Vec2RSubScalar(..)
+        // UI-ADVANCED S1: the additive `float2`/`float4` nodes — vec2 `-` (both forms) and
+        // vec4 `+` — follow the same additive rule (wrap under a multiplicative parent or in
+        // the additive-RIGHT position; flat on the LEFT — `abs(p) - half_size + rr`).
+        | Node::Vec2Sub(..)
+        | Node::Vec2SubScalar(..)
+        | Node::Vec4Add(..) => matches!(pos, OperandPos::MulSide | OperandPos::AddRight),
+        // UI-ADVANCED S1: the vec2 ternary groups like the other ternaries (side-independent).
+        Node::SelectVec2(..) => true,
         // Rung E: the bitwise/shift family binds LOOSER than `+ - * /` and its members differ in
         // precedence among themselves (`<<`/`>>` > `&` > `^` > `|`), so ANY infix parent gets an
         // explicit wrap — `(state << 13u) ^ state`, `(a ^ b) * c`, `(a | b) & c`. At
@@ -1645,12 +1809,19 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::UintLit(_)
         | Node::VecIndex(_, _)
         | Node::NamedLit { .. }
+        | Node::NamedUint { .. }
         | Node::VecParamRef(_)
         | Node::VarRef(_)
         | Node::TempRef(_)
         // A `bool` literal (`true`/`false`) is inlined as the operand of a `Stmt::Return`
         // (Increment 4b.2), never materialized as a temp.
-        | Node::BoolLit(_) => {
+        | Node::BoolLit(_)
+        // UI-ADVANCED S1: the `float2` param ref, the `float4`→`float2` swizzle, and the `.a`
+        // alpha read are inline leaves (`is_inline_leaf`), spelled by `operand_str` at every
+        // use — never defined as a temp.
+        | Node::Vec2Param(_)
+        | Node::Vec4SwizzleV2(_, _)
+        | Node::Vec4Alpha(_) => {
             // Leaves are inlined, never defined as a temp.
             unreachable!("leaf nodes are inlined, not defined")
         }
@@ -1934,6 +2105,117 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
             chk(s, EmitTy::Float);
             chk(v, EmitTy::Float2);
             format!("{} - {}", opl(s), opr(v))
+        }
+        // ---- UI-ADVANCED S1: the `ui_rect` leaf nodes (composed, non-leaf) ----------------
+        // `(cond) ? t : e` with `float2` arms (`(p.x > 0.0) ? r.yz : r.xw`). The condition is a
+        // Mask leaf (a `Gt` node, spelled at Root inside the wrap); the arms are swizzle leaves
+        // spelled at Root — the committed cond-wrapped/arms-bare form (the `Node::Select` shape,
+        // typed `Float2`).
+        Node::SelectVec2(c, t, e) => {
+            chk(t, EmitTy::Float2);
+            chk(e, EmitTy::Float2);
+            format!("({}) ? {} : {}", op(c), op(t), op(e))
+        }
+        // `a - b` over two `float2`s (`abs(p) - half_size`). Additive: LEFT flat, RIGHT wraps a
+        // same-class child.
+        Node::Vec2Sub(a, b) => {
+            chk(a, EmitTy::Float2);
+            chk(b, EmitTy::Float2);
+            format!("{} - {}", opl(a), opr(b))
+        }
+        // `v - s` — `float2 - float` broadcast (`clip.xy - fw`). The vector is the additive-LEFT
+        // operand (a swizzle leaf), the scalar the additive-RIGHT (an `Input` leaf).
+        Node::Vec2SubScalar(v, s) => {
+            chk(v, EmitTy::Float2);
+            chk(s, EmitTy::Float);
+            format!("{} - {}", opl(v), opr(s))
+        }
+        // `max(v, s)` — the `float2`-vs-scalar max (`max(q, 0.0)`). A function-call form: args
+        // spell at Root, no wrap.
+        Node::Vec2MaxScalar(v, s) => {
+            chk(v, EmitTy::Float2);
+            chk(s, EmitTy::Float);
+            format!("max({}, {})", op(v), op(s))
+        }
+        // `length(v)` over a `float2` (`length(max(q, 0.0))`). A function-call form.
+        Node::Vec2Length(v) => {
+            chk(v, EmitTy::Float2);
+            format!("length({})", op(v))
+        }
+        // `dot(a, b)` over two `float2`s (`dot(unit_range, screen_tex_sz)`). A function-call form.
+        Node::Vec2Dot(a, b) => {
+            chk(a, EmitTy::Float2);
+            chk(b, EmitTy::Float2);
+            format!("dot({}, {})", op(a), op(b))
+        }
+        // `smoothstep(e0, e1, x)` over three `float2`s (`smoothstep(clip.xy - fw, clip.xy + fw,
+        // pos)`). A function-call form: the additive `Vec2SubScalar`/`Vec2AddScalar` args spell
+        // FLAT at Root — the committed un-wrapped call-argument spelling.
+        Node::Vec2Smoothstep(e0, e1, x) => {
+            chk(e0, EmitTy::Float2);
+            chk(e1, EmitTy::Float2);
+            chk(x, EmitTy::Float2);
+            format!("smoothstep({}, {}, {})", op(e0), op(e1), op(x))
+        }
+        // `fwidth(v)` over a `float2` (`fwidth(uv)`). A function-call form.
+        Node::Vec2Fwidth(v) => {
+            chk(v, EmitTy::Float2);
+            format!("fwidth({})", op(v))
+        }
+        // `frac(v)` over a `float2` (`frac(local_uv * tiles)`). A function-call form: the
+        // multiplicative `Vec2Mul` argument spells FLAT at Root.
+        Node::Vec2Frac(v) => {
+            chk(v, EmitTy::Float2);
+            format!("frac({})", op(v))
+        }
+        // `lerp(a, b, t)` over three `float2`s (`lerp(uv.xy, uv.zw, t)`). A function-call
+        // form; all three arguments spell FLAT at Root, which is the committed spelling the
+        // S3 sprite branch already carried inline.
+        Node::Vec2Lerp(a, b, t) => {
+            chk(a, EmitTy::Float2);
+            chk(b, EmitTy::Float2);
+            chk(t, EmitTy::Float2);
+            format!("lerp({}, {}, {})", op(a), op(b), op(t))
+        }
+        // `s / v` — `float / float2`, scalar on the LEFT (`1.0 / fwidth(uv)`). Both operands
+        // spell at MulSide (an additive child would wrap; the committed operands are leaves and
+        // call forms, so nothing wraps).
+        Node::Vec2RDivScalar(s, v) => {
+            chk(s, EmitTy::Float);
+            chk(v, EmitTy::Float2);
+            format!("{} / {}", opm(s), opm(v))
+        }
+        // `float4(<x>, <y>, <z>, <w>)` from four already-`float` scalars (the `ui_unpack_rgba8`
+        // channel ctor). Ctor args spell at Root.
+        Node::Vec4FromScalars(x, y, z, w) => {
+            chk(x, EmitTy::Float);
+            chk(y, EmitTy::Float);
+            chk(z, EmitTy::Float);
+            chk(w, EmitTy::Float);
+            format!("float4({}, {}, {}, {})", op(x), op(y), op(z), op(w))
+        }
+        // `v * s` — `float4 * float` (`bc * border_cov`, `float4(...) * (1.0 / 255.0)`). The
+        // scalar operand wraps UNCONDITIONALLY when non-leaf: the committed text parenthesizes
+        // `(1.0 / 255.0)` and `(1.0 - src.a)`, and the position-aware rule cannot produce the
+        // first (a `Div` child of a `*` parent normally stays flat — but `v * 1.0 / 255.0`
+        // DIVIDES the vector, a different expression and a different `.spv`). The vector side
+        // spells at MulSide (an additive child wraps normally).
+        Node::Vec4MulScalar(v, s) => {
+            chk(v, EmitTy::Float4);
+            chk(s, EmitTy::Float);
+            let s_str = if is_inline_leaf(arena[s as usize]) {
+                operand_str(arena, names, temps, s, OperandPos::Root)
+            } else {
+                format!("({})", define_str(arena, names, temps, s))
+            };
+            format!("{} * {}", opm(v), s_str)
+        }
+        // `a + b` over two `float4`s (`src + dst * (1.0 - src.a)`). Additive: LEFT flat (`src`,
+        // a `TempRef` leaf), RIGHT a multiplicative child (`Vec4MulScalar`) that needs no wrap.
+        Node::Vec4Add(a, b) => {
+            chk(a, EmitTy::Float4);
+            chk(b, EmitTy::Float4);
+            format!("{} + {}", opl(a), opr(b))
         }
         // ---- Rung E: the particle-leaf prerequisite nodes -------------------------------
         // The three infix bitwise/shift ops. Both operands spell at `BitSide`, so a nested
@@ -2582,6 +2864,14 @@ pub struct RetCellI;
 /// facets stay separate at the call site; the recorded `Stmt::Return` is identical.
 #[derive(Clone, Copy)]
 pub struct RetCellV2;
+
+/// The `float4` RETURN-VALUE cell handle on the Emit backend — a ZST (the `float4` expression
+/// travels in the recorded [`Stmt::Return`], not in a cell). The [`EmitCf`]'s [`Cf::RetCellV4`]
+/// associated type (UI-ADVANCED S1: the `ui_unpack_rgba8` / `ui_premultiplied_over` returns).
+/// Distinct type from [`RetCellV2`] only so the `float4` / `float2` return facets stay separate
+/// at the call site; the recorded `Stmt::Return` is identical.
+#[derive(Clone, Copy)]
+pub struct RetCellV4;
 
 /// A NAMED-LOCAL-ARRAY name handle (Increment 5c) — indexes the printer's [`Names::array`] table.
 /// The [`EmitCf`]'s [`Cf::IntArr`] AND [`Cf::FloatArr`] associated types (both are a `u32` array-id;

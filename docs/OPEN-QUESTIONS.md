@@ -14,6 +14,64 @@ numbers; what lands here is VALUES, SCOPE, and anything genuinely unclear.
 
 ---
 
+## 2026-09-22 — SCOPE: the A1 tween scratch's generation-free key lost its load-bearing fact when EM2′ landed, and closing it properly is a KERNEL change
+
+Surfaced by the A7 merge (`feat/ui-advanced` into the integration line), where the
+lane's own tripwire fired on contact.
+
+`UiTweenScratch` (`crates/boyko_ui/src/animation.rs`) queues completions as
+`(EntityId, ComponentId)` — a key with NO generation — and `ui_tween_reap` hands
+that bare id to `DenseStore::remove`, which performs no liveness check (MEASURED
+at A1: it removed a live, unrelated row and returned `true`). A1 argued the key
+safe from three independently-measured facts. **Fact 2 — "this kernel does not
+recycle `EntityId`" — is dead**: EM2′ (`0afcbd7d`, on this line) landed id
+recycling on the deferred route.
+
+The lane anticipated exactly this. Its gate `entity_ids_are_not_recycled_today`
+carried the instruction *"Do not 'fix' it as a gate with no red. Its red IS the
+fact changing … `ui_tween_reap` must carry `Entity` (generation included) from
+here on"*, and it went red the moment the two branches met. It is succeeded in
+this merge by `entity_ids_are_recycled_on_this_kernel` (pins the new fact) and
+`a_completion_pair_never_outlives_its_frame_so_a_recycle_cannot_replay_it` (gates
+the consequence directly, and constructs the id collision rather than assuming
+it).
+
+**What is NOT done, and why it is yours.** The key is still safe — on facts 1 and
+3 ALONE. A despawn removes the entity's dense rows itself, and the completion list
+is filled and drained inside one frame with nothing in the shipped schedule
+occupying the window between `ui_visual_tick` and `ui_tween_reap`. That is a
+SCHEDULE-shaped guarantee where fact 2 was a KERNEL-shaped one: an exclusive
+system a host deliberately schedules between the tick and the reap can now despawn
+an entity, have its id recycled onto a new owner carrying the same channel, and
+watch the reap delete the new owner's row — damage that was unreachable before
+`0afcbd7d` and is reachable now.
+
+The options, with their prices:
+
+- **(a) Carry the generation in the pair.** `(Entity, ComponentId)` is 12 B against
+  8 B (+50 % on a buffer that peaks at one entry per completion) — the price A1
+  already computed and declined. The blocker is not the bytes: `Query::iter_entities_mut`
+  yields a bare `EntityId`, so the tick cannot mint a generation at all. This needs
+  an `Entity`-yielding query iterator in `boyko_ecs`, which is a kernel API
+  addition and is why it is not taken here.
+- **(b) Make `ui_tween_reap` refuse an unfinished row.** The reap has
+  `&mut EcsMaster`; a row whose `elapsed` has not reached its duration is by
+  construction not the row the tick completed, and a freshly started tween on a
+  recycled id has `elapsed == 0`. Generation-free and local, but it changes the
+  reap's contract from "remove what the tick named" to "remove what the tick named
+  IF it is still finished", and the removal currently goes through the type-erased
+  `dense_registry_mut()`, which cannot read `elapsed` without naming the four
+  concrete channel types.
+- **(c) Leave it on facts 1 + 3 and say so at the site.** What this merge does. The
+  source no longer claims a false fact and the gates pin what is actually true; the
+  residual exposure is the exclusive-system window above.
+
+Blocks nothing — the shipped schedule is safe today. What it blocks is anyone
+scheduling an exclusive system between the tick and the reap without knowing the
+window is now live.
+
+---
+
 ## 2026-09-21 — D2: the b5 basis shear points the ray the WRONG way against the raster jitter; fixing it moves two software goldens (owner decision)
 
 Lane `fix/hwrt-shadow-ray-origin`. `composite_perspective_from_view_sheared`
@@ -1561,7 +1619,7 @@ same question the kernel finding above answers for `par_iter`, from the other si
 
 ### Owner ballots still open
 
-⚠ **DATED NOTE, 2026-09-10 (`merge/ke16-into-render`) — this heading and the paragraph under it are `feat/threadpool-ke16`'s record of 2026-08-30, and are no longer a live list.** GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`. GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`). `F8`, `F10` and `AB-12` are untouched by this note.
+⚠ **DATED NOTE, 2026-09-10 (`merge/ke16-into-render`) — this heading and the paragraph under it are `feat/threadpool-ke16`'s record of 2026-08-30, and are no longer a live list.** GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:1031`. GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:1032` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:1306`). `F8`, `F10` and `AB-12` are untouched by this note.
 
 **F8** (name-vs-id) and **F10** (bundle expand-or-refuse) — untouched, and no ruling above settles
 either. ~~**GB-5** and **GB-6** carry analyses, deliberately not rulings: the owner asked for
@@ -1604,7 +1662,7 @@ two ~~stay OPEN~~, with the analysis attached to their bodies in §2026-08-29 so
 reading. ~~**A ruling written for either would be a defect.**~~ Unanswered: **F8** and **F10**, plus
 **F9's residual VALUES question**, which the delegated ruling deliberately did not settle.
 
-⚠ **DATED NOTE, 2026-09-10 (`merge/ke16-into-render`).** The two ballots this paragraph and the table below send back for analysis have since been ruled, and every sentence here and in that table which says otherwise is struck in place: GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`; GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`). `F8`, `F10` and F9's residual VALUES question are untouched by this note.
+⚠ **DATED NOTE, 2026-09-10 (`merge/ke16-into-render`).** The two ballots this paragraph and the table below send back for analysis have since been ruled, and every sentence here and in that table which says otherwise is struck in place: GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:1031`; GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:1032` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:1306`). `F8`, `F10` and F9's residual VALUES question are untouched by this note.
 
 | ballot | who | ruling | where the ground lives |
 |---|---|---|---|
@@ -1618,8 +1676,8 @@ reading. ~~**A ruling written for either would be a defect.**~~ Unanswered: **F8
 | **F2** | delegated | **(a) rows are entities — AMENDED**: `StorageKind::Table` (not dense), eager at load, own explicit load and pinned. (b) saves 0.13 MB and costs the entire per-`ResourceId` serialize seam from scratch | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Data tables |
 | **F9** | delegated, **partly** | **Three eliminations RULED** — do not fire `FLAGS_DIRECT` on load; the refusal option contradicts ratified **AB-6**; the spelling, if a carrier lands, is `flags (X = true)` shared verbatim with Aether. ⚠ **The residual is a VALUES call and is escalated back:** may a document set a flag on an *individual authored object*? | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §Flags in the byte format |
 | **GB-4** | delegated | **(a) linkage-in-slot, and the linkage word is MANDATORY**: `instance <name> extends|copy <base-ref>`. `from` deleted (head-position occurrences measured: **zero**) | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) §The instance spelling |
-| **GB-5** | **owner asked for ANALYSIS** | ⚠ ~~STAYS OPEN.~~ **Struck 2026-09-10 by the merge `merge/ke16-into-render`: GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`. This row is the record of 2026-08-30, not a live status.** The analysis is attached to the ballot body below. It settles one thing only, and it is a refutation of the ballot's own mechanism: **all 12 measured engine-derived field members are *conditionally* derived**, and both dispositions are pinned by green committed tests today | §2026-08-29, the GB-5 body |
-| **GB-6** | **owner asked for ANALYSIS** | ⚠ ~~STAYS OPEN.~~ **Struck 2026-09-10 by the merge `merge/ke16-into-render`: GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`). This row is the record of 2026-08-30, not a live status.** Analysis attached below: (a) the disposition is already declarative in four documents with four downstream reassignments filed against it, and its rejected alternative is **its own only witness**; (b) the valve's runtime already ships three times over and the whole gap is **one Aether construct** | §2026-08-29, the GB-6 body |
+| **GB-5** | **owner asked for ANALYSIS** | ⚠ ~~STAYS OPEN.~~ **Struck 2026-09-10 by the merge `merge/ke16-into-render`: GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:1031`. This row is the record of 2026-08-30, not a live status.** The analysis is attached to the ballot body below. It settles one thing only, and it is a refutation of the ballot's own mechanism: **all 12 measured engine-derived field members are *conditionally* derived**, and both dispositions are pinned by green committed tests today | §2026-08-29, the GB-5 body |
+| **GB-6** | **owner asked for ANALYSIS** | ⚠ ~~STAYS OPEN.~~ **Struck 2026-09-10 by the merge `merge/ke16-into-render`: GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:1032` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:1306`). This row is the record of 2026-08-30, not a live status.** Analysis attached below: (a) the disposition is already declarative in four documents with four downstream reassignments filed against it, and its rejected alternative is **its own only witness**; (b) the valve's runtime already ships three times over and the whole gap is **one Aether construct** | §2026-08-29, the GB-6 body |
 
 
 ## 2026-08-29 — Corpus audit of the aether-v2 + gaia plans: THIRTY-TWO open ballots, listed here because a plan that settles a fork silently is the defect
@@ -1652,7 +1710,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
 > §*2026-09-03 — the Gaia register catches up with the owner*, above. Each body below now carries its
 > own disposition line, so no body has to be read against a stale header.
 >
-> *— and the STATUS as `feat/threadpool-ke16` wrote it on 2026-08-30, kept by the merge `merge/ke16-into-render`, 2026-09-10. It is the earlier of the two; where they disagree — GB-5 and GB-6, which it lists as open — the 2026-09-03 paragraph above is the later state.* ⚠ **Both have since been ruled, and every sentence below that says otherwise is struck in place:** GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`; GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`).
+> *— and the STATUS as `feat/threadpool-ke16` wrote it on 2026-08-30, kept by the merge `merge/ke16-into-render`, 2026-09-10. It is the earlier of the two; where they disagree — GB-5 and GB-6, which it lists as open — the 2026-09-03 paragraph above is the later state.* ⚠ **Both have since been ruled, and every sentence below that says otherwise is struck in place:** GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:1031`; GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:1032` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:1306`).
 >
 > ✅ **STATUS, 2026-08-30 — read this before any ballot body below.** The bodies in this section are
 > kept verbatim as the record of what was open and why; **they are not a to-do list any more.**
@@ -1669,7 +1727,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
 > VALUES question** (may a document set a flag on an individual authored object). Plus **AB-12**,
 > which blocks nothing. The per-ballot index is the table in
 > §*2026-08-30* above, subsection *The Gaia side, same day*.
-> ⚠ *Struck 2026-09-10 by the merge `merge/ke16-into-render`, which imported this 2026-08-30 paragraph from `feat/threadpool-ke16`.* GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`; GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`). `F8`, `F10` and F9's residual VALUES question keep the status the 2026-09-03 STATUS paragraph at the head of this blockquote gives them.
+> ⚠ *Struck 2026-09-10 by the merge `merge/ke16-into-render`, which imported this 2026-08-30 paragraph from `feat/threadpool-ke16`.* GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:1031`; GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:1032` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:1306`). `F8`, `F10` and F9's residual VALUES question keep the status the 2026-09-03 STATUS paragraph at the head of this blockquote gives them.
 
 ### Gaia — the `F` series (F1..F7 raised 2026-08-28, full bodies in the entry below; F8..F10 born in this review)
 
@@ -1877,7 +1935,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
   > | carrier | fields | what the source says |
   > |---|---|---|
   > | LINEAR float | `PointLight::color` (`boyko_render/src/light.rs:309-310`), `DirectionalLight::color` (`:289-290`), `SpotLight::color` (`:336-337`), `SkyLight::sky_color`/`ground_color` (`:357-360`), `MaterialGpu::base_color`/`emissive` (`material.rs:51,54,64-69`) | `/// LINEAR rgb color`; `light.rs:114` *"All radiometric values are LINEAR"*; `material.rs:56` *"All values are LINEAR"* |
-  > | 8-bit encoded RGBA | `UiBackground::color`/`border_color` (`boyko_ui/src/components.rs:211,220-223`), `UiText::color` (`text/components.rs:39-47`) | `u32`, *"authored STRAIGHT RGBA8 (`byte0=R .. byte3=A`)"* — **"straight" here means NON-PREMULTIPLIED, not "not decoded"**: `boyko_ui/src/components.rs:211` continues *"the pack system premultiplies them"*, and `premultiply_rgba8` (`boyko_render/src/ui/instance.rs:196`) is the operation named. No sRGB decode exists anywhere on the UI path — `ui_rect.fs.hlsl:130` unpacks the byte word and composites it directly |
+  > | 8-bit encoded RGBA | `UiBackground::color`/`border_color` (`boyko_ui/src/components.rs:211,220-223`), `UiText::color` (`text/components.rs:39-47`) | `u32`, *"authored STRAIGHT RGBA8 (`byte0=R .. byte3=A`)"* — **"straight" here means NON-PREMULTIPLIED, not "not decoded"**: `boyko_ui/src/components.rs:211` continues *"the pack system premultiplies them"*, and `premultiply_rgba8` (`boyko_render/src/ui/instance.rs:330`) is the operation named. No sRGB decode exists anywhere on the UI path — `ui_rect.fs.hlsl:252` unpacks the byte word and composites it directly |
   > | device-encoded packed | `ParticleEffect::color_keys: [u32; 4]` (`boyko_render/src/particle_effect.rs:120-143`) | byte order is **`0xAABBGGRR`**, *"the opposite of the `0xRRGGBBAA` an author reaches for by habit"* — and its own doc records that both in-tree presets were authored wrong exactly that way, *"and neither was caught by anything"* |
   >
   > That table settles the ratified-text worry before it starts: the ratified *"`#RRGGBBAA` →
@@ -2111,7 +2169,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
 
   > *Body kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16` — the record as it stood when the ruling was taken. Where it says a ballot is STILL OPEN, the disposition line above it is the later state.*
   >
-  > ⚠ **HEADER NOTE, 2026-09-10 (`merge/ke16-into-render`) — nothing in this block is a live status.** Every sentence in it that calls the ballot open is struck in place and dated. GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:80`.
+  > ⚠ **HEADER NOTE, 2026-09-10 (`merge/ke16-into-render`) — nothing in this block is a live status.** Every sentence in it that calls the ballot open is struck in place and dated. GB-5 was RULED BY THE OWNER on 2026-08-30 — PERMIT AS SEED, recorded 2026-08-31 by `b6c41237`; ground at `docs/gaia/DECISIONS.md:1262` and the who-table row `docs/OPEN-QUESTIONS.md:1031`.
   >
   > ⚠ ~~STILL OPEN — 2026-08-30. The owner asked for the TRADE-OFFS, not a ruling, and a ruling
   > written here would be a defect.~~ What follows is the analysis, written so he can rule from one
@@ -2271,7 +2329,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
 
   > *Body kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16` — the record as it stood when the ruling was taken. Where it says a ballot is STILL OPEN, the disposition line above it is the later state.*
   >
-  > ⚠ **HEADER NOTE, 2026-09-10 (`merge/ke16-into-render`) — nothing in this block is a live status.** Every sentence in it that calls the ballot open is struck in place and dated. GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:2285`).
+  > ⚠ **HEADER NOTE, 2026-09-10 (`merge/ke16-into-render`) — nothing in this block is a live status.** Every sentence in it that calls the ballot open is struck in place and dated. GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:1032` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:2343`).
   >
   > ⚠ ~~STILL OPEN — 2026-08-30. The owner asked for the ANALYSIS, not a ruling.~~ Below is what was
   > measured; nothing in it is a decision.
@@ -2294,7 +2352,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
   > G6; §Identity + the GN1 lint). *A question still open cannot have had four consequences filed
   > against it.*
   >
-  > ⚠ *De-bolded 2026-09-10 by the merge `merge/ke16-into-render`: the sentence is the 2026-08-30 analysis's own argument, kept verbatim, and is no longer set in the bold disposition voice a reader — or the `gaia_ruled_vs_open_census` gate — reads a live status out of.* GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:2301`).
+  > ⚠ *De-bolded 2026-09-10 by the merge `merge/ke16-into-render`: the sentence is the 2026-08-30 analysis's own argument, kept verbatim, and is no longer set in the bold disposition voice a reader — or the `gaia_ruled_vs_open_census` gate — reads a live status out of.* GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:1032` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:2359`).
   >
   > ⚠ **The one thing missing is the price of the rejected alternative.** Measured:
   > `grep -rn "SceneModel" docs/ crates/` returns **exactly one line in the whole repository** — the
@@ -2767,10 +2825,10 @@ red tests land regardless of its disposition). Everything above them waits on a 
 - **AB-7** — R-DENSE: unconditional with a driver-independent ground that must be ESTABLISHED rather
   than asserted, or lifted by `publish tracked`. ⚠ **re-grounds a ratified refusal**. Blocks **R5**.
   ~~STILL OPEN — STILL THE OWNER'S.~~ **Struck 2026-09-10 by the merge `merge/ke16-into-render`:
-  the owner LIFTED it — see the ruling table above, `docs/OPEN-QUESTIONS.md:1583`, "R-DENSE LIFTED,
+  the owner LIFTED it — see the ruling table above, `docs/OPEN-QUESTIONS.md:1641`, "R-DENSE LIFTED,
   and the ballot's framing rejected", with his own words. This paragraph is the record of the state
   BEFORE that ruling, not a live status.** ⚠ When it was struck, the ruled-vs-open census could not
-  see this one: the table at `docs/OPEN-QUESTIONS.md:1579` is headed `| ballot | ruling | where the ground lives |` with no
+  see this one: the table at `docs/OPEN-QUESTIONS.md:1637` is headed `| ballot | ruling | where the ground lives |` with no
   `who` column, so it was not a ruling SOURCE by the predicate, and AB-7 sat in the census's `open`
   set without reddening it — found by hand while repairing the ten sites the census did catch. Since
   the A5 batch merge (2026-09-22) the §*2026-09-10* index above carries the same ruling in a `who`
@@ -3351,6 +3409,465 @@ Two things a reader should not have to rediscover:
 
 ---
 
+## 2026-08-28 — RECORD: **the no-syntax edge class is a LIST, not a closure — a FOURTH member, a residue guarantee WITHDRAWN, and the anti-rot annotation's own prose measured false at 21 sites**
+
+**Status: RECORDED — no new question, and the SCOPE call below is unchanged.** Found by the
+**eleventh** adversarial pass, classified *(c) — four positive assertions still false*, and closed by
+a code landing again confined to `crates/boyko_ui/tests/ui_a1_source_census.rs` (**3913 → 4134
+lines**; no tracked file touched) plus this record. Full detail and every measurement:
+[`docs/UI-PLAN-ANIMATION-A1.md`'s A1 landing note, part 11](UI-PLAN-ANIMATION-A1.md#part-11--the-eleventh-pass-classified-c-four-positive-assertions-still-false).
+
+### 1 — the class is a LIST, not a closure, and the FOURTH member is DESUGARING
+
+`for x in it` is a walked node; the `Iterator`/`IntoIterator` impl behind it is **not**. The same
+shape reaches `From` through `?`, `Display` through macro interpolation, and `Deref` through `*`. The
+probe — an `impl Iterator` carrying a fourth termination condition, driven from the opacity arm —
+left the crate at **EXIT=0, 53 targets, 354 passed, identical to the clean tree**, *including after
+its one `SITES` row was paid*. Widened rather than filed as residue, because it measured free:
+`DESUGARED_IMPLS` is a **sibling table** over 8 traits, served by the same scanner, so
+`OPERATOR_SITES` stays **43** and `OPERATOR_IMPLS` stays **3 over 28** and no external citation of
+those numbers was invalidated. Population, measured with the table empty: **ONE**.
+
+⚠️ **The transferable half.** Four members across four passes — drop glue (8th), hook registration
+(8th), operator dispatch (10th), desugaring (11th) — **and every one was found by a PROBE, never by
+construction.** Nothing here derives the class from the language, so a green run means *"none of the
+four known no-syntax edges is unaccounted for"* and never *"there is no no-syntax edge"*. Costs:
+drop glue and operator dispatch **zero rows** each, desugaring **zero rows for the body**.
+
+### 2 — residue item 14's guarantee is WITHDRAWN: the cross-crate population is NOT zero
+
+The item that exists to state the cross-crate blind spot asserted the population was **zero**,
+"because the region's operands are `f32`/`u32`/`u8`/`[f32;2]`, all primitives". Measured: **at least
+five**, all reached on every armed frame, and **two of them carry no operator syntax at the site at
+all** — so the withdrawn sentence named the wrong *mechanism*, not merely the wrong count. It is
+reached through a **deref**: `Mut`'s, `Res`'s and `ResMut`'s. Details in item 14 below.
+
+### 3 — ⚠️ the anti-rot annotation's own PROSE is the thing that rots, at 21 sites and five descriptions
+
+The tenth pass ruled that the annotation stops asserting currency and becomes a dated transcript. **It
+applied the ruling to the pointer and not to the sentence that says where the pointer used to land** —
+and the eleventh pass measured every one of those sentences false. The three live coordinates
+(`:2857`, `:3105`, `:1696`) all still resolve; **the descriptions of the discarded values do not.**
+
+* **The ripple that the tenth pass measured for the live pointer hit the description in the same
+  sentence.** Its own warning — *"a document cannot record a coordinate into itself without moving
+  it"* — was written about `:2506 → :2706`, a **+200** drift in four steps inside one landing. Part
+  10's description of the *stale* value sat two lines above that warning and moved by the same 200:
+  read at `:2530` on the tree part 11 inherited, the D7 prose part 10 quoted for it stood **200 lines
+  below**. *(Quoted as content with a tree attached, never as a line: writing this record moved the
+  lines again, which is the finding restated as a fact about this very paragraph.)*
+* **Two of the three descriptions are *"is a blank line"*, and a blank line cannot be re-resolved by
+  content, because it has none.** The repair this campaign prescribes for a rotted anchor — open the
+  target and read it — is **structurally inapplicable** to exactly the descriptions that rotted
+  hardest. For those, a dated transcript is not the better form; it is the only available one.
+* **The population was undercounted by every pass, and the reason is mechanical.** Part 10 wrote
+  *three*; the eleventh pass's refuter counted *thirteen*; enumerated by grep over the five
+  documents, the answer is **21 carriers of five false descriptions**. **3 counts the coordinates,
+  13 counts the documents each bullet names, and 21 counts the sentences** — and only the last can be
+  false. A grep for the *coordinate* misses [`UI-PLAN-SPRITES-DECISIONS.md` S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) — pre-split `UI-PLAN-SPRITES.md:1647` — entirely, because that site <!-- doc-anchor-ignore -->
+  names no stale coordinate at all; a grep for the *document* misses the second copy each
+  `OPEN-QUESTIONS` twin carries.
+* **Two of the five were in nobody's list.** `UI-PLAN-SPRITES.md` said `UI-PLAN-SPRITES.md:663` is *"today a sentence <!-- doc-anchor-ignore -->
+  about `UI_FALLBACK_MAX_DELTA`"* — it is not, and that carried the word "today", the strongest
+  currency claim in the cluster. And part 10 wrote that `UI-PLAN-SPRITES.md:1656` *"is today the F2 ordering-axis <!-- doc-anchor-ignore -->
+  red-ledger row"* **in the same sentence in which it disclaimed the quote it was correcting** — the
+  wrong line and the wrong ledger row.
+
+**The generalisation.** Every pass treated *the anchor* as the thing that rots and re-aimed it. A
+re-aim writes **three** claims, not one: the new coordinate, the old coordinate's content, and often
+a passing remark about a third line. **Only the first is ever re-read, and only the first has never
+been found false. The rot is not in the pointers this campaign maintains — it is in the prose it
+writes about them, which nothing has re-read even once**, and the descriptions outnumber the
+coordinates **21 to 3**. This reinforces the SCOPE call already filed below rather than raising a new
+one: nothing here is mechanical until the **594** bare-basename citations become link form.
+
+### 4 — ⚠️ the hazard that is not about this rung: A KILLED AGENT LEAVES ITS PROBE APPLIED
+
+Three instances in one day across two lanes. One was a one-token swap the suite is green over *by
+construction*; one was a loud panic nothing ran to see; and one sat **between an `#[allow]` attribute
+and the function it was written for, silently re-attaching the attribute to the probe struct**.
+`git status` showed nothing (the probe was inside an already-modified file), the untracked list
+showed nothing, and a name-based grep misses it unless you guess the name right. **The check that
+caught all three was `git diff --numstat` against a known baseline.** The corollary: every figure in
+the reports written before the removal had been measured against a tree nobody re-measured, so the
+eleventh pass re-read all of them from the instrument rather than carrying one forward.
+
+---
+
+## 2026-08-28 — RECORD: **the A1 residue is FIFTEEN, not thirteen — a third execution edge with no syntax at the call site, and the campaign's own anti-rot annotation measured FALSE**
+
+**Status: RECORDED — three items, none of them a new question.** The SCOPE call the item below files
+is unchanged and is reinforced by item 3. Found by the **tenth** adversarial pass over
+[`docs/UI-PLAN-ANIMATION-A1.md`'s A1 rung](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) and closed by the **tenth** landing. Full detail and every
+measurement: that document's A1 landing note, part 10.
+
+### 1 — the class, extended: the third execution edge is an OPERATOR, and it costs NOTHING to hide there
+
+The eighth pass found two edges with no syntax at the call site — drop glue and a kernel-registered
+hook. **The tenth found a third, and it is cheaper than both.** `Walk::visit_expr` matched
+`Expr::Binary` only for `And`/`Or`; `Index`, `Unary`, `Assign` and `AssignOp` matched no arm at all.
+An overloaded operator therefore calls a body that is **not a branch node, not a call node, not a
+callee, not a call site**, and carries no `Drop`. A `Mul` impl holding a fourth termination
+condition, invoked from the opacity arm, left every headline count **bit-identical** and the whole
+crate at EXIT=0; an `Index` impl — a structurally different node — did the same. **The recorded
+cross-module escape costs two rows and the factory escape costs two rows; this one costs zero.**
+
+Dispositioned by two scans that are blind to different things, both shipped: `OPERATOR_SITES` pins
+all **43** operator expressions of the walked region, and `OPERATOR_IMPLS` pins every user operator
+`impl` in `boyko_ui/src` over **28** traits. ⚠️ **"Closed" was the wrong word and the eleventh pass
+proved it: a FOURTH edge — DESUGARING — walked straight past both scans**, and the class now carries
+a THIRD scan (`DESUGARED_IMPLS`, 8 traits, measured population **one**). **The class is a LIST, not a
+closure** — four members across four passes, every one found by a probe rather than by construction,
+and nothing derives it from the language. See the eleventh-pass record above. ⚠️ **The pass that
+prescribed the second scan asserted
+the crate holds zero such impls. It holds three** — `PartialEq for UiTextBuffer`, `PartialEq for
+UiVisual`, `PartialOrd for UiName` — and the middle one is AD11's bitwise sink equality, five `&&`
+and four `Index` operations, reached by `set_if_neq` from the walked region's **last line**. It is a
+disposition rather than a hole (`the_sinks_equality_is_idempotent_under_nan` gates it), but *a
+predicted-zero population that measures three is the same defect as a coverage table nobody planted
+a `panic!` into.*
+
+Two further things the ninth landing asserted in the positive were measured **false** and are fixed
+rather than caveated: a nested item was recorded as one node and **not walked**, under a comment
+claiming the definition table compensated — the compensation is call-gated and there is no call; and
+a witness could be **laundered through the allowlist**, one row buying back "reachable" without
+buying back execution. The sentence *"a witness that exists and is never called … reds exactly as
+loudly as one that was deleted"* is **deleted at all three sites where it appeared**, not narrowed.
+
+### 2 — the residue is FIFTEEN, and item 9's stated REASON was refuted
+
+Source of truth: `crates/boyko_ui/tests/ui_a1_source_census.rs:168-363` (the `# THE RESIDUE`
+section; `:168` is its heading, `:363` its last line — *read at its target 2026-08-28, part 11. This
+record said `:148-300`, correct on the 3913-line tree it was written against and stale within hours
+of part 11's landing; on the 4134-line tree both ends land on plausible content*). Items 1–13 are
+unchanged in substance. **Item
+9 kept its disposition and lost its reason**: it excused straight-line code as introducing *"no path
+and no callee"*, which an operator overload refutes — it introduces both while looking like
+straight-line code at the site. It now reads *"straight-line code that is neither a call nor an
+operator"*, and the line is drawn by construct.
+
+* **14 — a no-syntax `impl` that is in ANOTHER CRATE.** `lerp1(from: f32, …)` becoming
+  `lerp1(from: Px, …)` leaves `from + (to - from) * t` printed identically while `+` starts calling
+  `Px`'s `Add`. This is item 1's class reached through an operator instead of a call. ⚠️ **This
+  item's guarantee was WITHDRAWN by the eleventh pass, and it is the item that exists to state it.**
+  It said *"measured population: zero cross-crate, because the region's operands are `f32`, `u32`,
+  `u8` and `[f32; 2]` — all primitives, which is exactly what makes a first non-primitive one red the
+  expression pin."* **The operand list is wrong and the population is at least FIVE**, every one
+  reached on every armed frame: three auto-derefs (`*sink` on `Mut<'w, UiVisual>`; `clock.dt_real()`
+  on `Res<'_, UiClock>`; `done.done.push(…)` on `ResMut<'_, UiTweenScratch>`) and two cross-crate
+  `Iterator` bodies driven by `for` (`q.iter_entities_mut()`, and `&done` via `impl IntoIterator for
+  &Vec<T>`). **Two of the three derefs carry no operator syntax at the site at all**, so no widening
+  of `OPERATOR_SITES` could have listed them — the withdrawn sentence named the wrong *mechanism*,
+  not merely the wrong count. What holds, as a property and not a promise: *`OPERATOR_SITES` reds
+  when the printed TOKENS of an operator expression of the walked region change — that and nothing
+  more.*
+* **15 — the observer scan's SCOPE is `CARGO_MANIFEST_DIR/src`.** A registration from a sibling
+  crate leaves *"0 observer registrations"* true and irrelevant. **Measured population: zero, so it
+  is latent and not live** — no crate outside `boyko_ecs` calls any `OBSERVER_VERB`, and every
+  cross-crate `#[component(on_*)]` in the tree sits in `boyko_ecs` fixtures or `aether_lang`
+  expander tests, none naming a `boyko_ui` path. The hook scan shares the scope but covers all four
+  hook kinds within it.
+
+**Items 1 and 6 remain the two a next pass should attack**, unchanged.
+
+### 3 — ⚠️ the campaign's own anti-rot annotation, *"re-measured by CONTENT"*, is UNCHECKED PROSE and it measured FALSE
+
+This is the part that generalizes past this rung. Three sweeps adopted the annotation as the
+discipline that replaces arithmetic offsets, and it is a **positive assertion that nothing checks**.
+Measured over the whole corpus rather than sampled: **41 annotation sites across seven documents**,
+and the false population is **larger than the four the pass reported**.
+
+* **Six sites in [`UI-PLAN-ANIMATION-A1.md`](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) (rows E1, H1, H1-arm, H4, H8, and two prose paragraphs)**
+  carry part-7 coordinates into `crates/boyko_ui/tests/ui_a1_zero_alloc.rs` that part 9's own
+  landing invalidated. **E1 alone was stale at thirteen coordinates, eight of them on plausible
+  content** — `:297` is `const VIRTUAL_SPEED: f32 = 0.5;`, *a different `const`*; `:509` is a
+  `.collect::<Vec<_>>()`; and `:839`, cited as the per-index comparison loop, is `fn armed_once(` —
+  **the right shape for a neighbouring row of the same list.**
+* ⚠️ **The row whose whole subject is stale anchors had itself FORKED.** H4 exists to record where
+  the per-index `min` really is. Part 7 moved it to `:640` and updated the **E1** row but not this
+  one, so for two parts the document carried two different answers — `:531` here, `:640` there — and
+  part 9 invalidated both. True today: `:980`. **A document that repairs one citation of a fact and
+  not its twin has forked the fact, and a sweep that walks ROWS cannot see that; only one that walks
+  FACTS can.**
+* **Three cross-document coordinates, two of them cited four times each.** The dead
+  `benches/ui_animation.rs` path — true [`UI-PLAN-ANIMATION-A2-A8.md` A8](UI-PLAN-ANIMATION-A2-A8.md#a8--the-measurement-rung-what-the-tick-actually-costs--size-s--depends-on-a1a5) (pre-split `:2857`); the D7 owner self-citation — <!-- doc-anchor-ignore -->
+  true [`UI-PLAN-ANIMATION.md` §8](UI-PLAN-ANIMATION.md#8--dependencies-stated-explicitly) (pre-split `:3105`); and that document's sibling self-citation, rotted a **fourth** time and this time OUT <!-- doc-anchor-ignore -->
+  of content — true [`UI-PLAN-ANIMATION-A1.md` A1](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) (pre-split `:1696`). ⚠️ **Part 11 re-read all three at their targets 2026-08-28: the three <!-- doc-anchor-ignore -->
+  LIVE values still hold. What had gone false is the description of each STALE value** — part 10
+  wrote that `:2282` and `:1673` *"are blank lines"* and `:2530` *"is prose about an unrelated <!-- doc-anchor-ignore -->
+  axis"*, and none of those three sentences is true on today's tree. **They are anchors into the same
+  moving document, and the ruling below was applied to the pointer and not to them.** Measured: part
+  10's D7 quote stood exactly **200 lines** below the value it describes — the same ripple
+  the warning two paragraphs down measures for the live pointer, arriving at the description that sat
+  in the same sentence. Full accounting in [`UI-PLAN-ANIMATION-A1.md`'s Cluster B](UI-PLAN-ANIMATION-A1.md#u4--the-anti-rot-annotation-is-unchecked-prose-and-it-was-false-at-more-sites-than-the-pass-found).
+* **Eight census coordinates went stale inside the tenth landing itself**, within hours, because it
+  took `ui_a1_source_census.rs` from 3181 to 3913 lines. Every one of part 9's values was correct on
+  the tree part 9 read; every one is plausible content now. **The `ADVANCE_PIN` / termination-test
+  pair has now been re-aimed by parts 8, 9 and 10 and landed on plausible content each time.**
+
+**The ruling, and it is not a widening.** The annotation **stops asserting currency**. Every site now
+reads as *what was read, when, and by which part* — a dated transcript, under the same rule this
+campaign already applies to red ledgers — and the rows most exposed additionally say in words that
+nothing gates them. It is deliberately **not** made mechanical here, and the reason is measured
+rather than asserted: the existing `internal_docs_anchors` gate widened to these five documents
+produces **405 misbindings out of 541 flags**, and its sensitivity control moved the stale count
+**92 → 92** when a real-rot site was repointed 999 458 lines past EOF (item 1 of the SCOPE record
+below). The prerequisite is the **594** bare-basename citations that must become link form first —
+**that is the owner-facing budget, and it is unchanged.** Until it lands, a dated transcript is the
+honest form.
+
+⚠️ **One more thing, measured on this landing rather than argued.** Writing this record moved the two
+cross-document coordinates **four times**: `:2506`/`:2754` → `:2686`/`:2934` when the landing note <!-- doc-anchor-ignore -->
+was inserted, → `:2696`/`:2944` when the warning about the first move was added, and → <!-- doc-anchor-ignore -->
+**`:2706`/`:2954`** when a seventh finding and this sentence were added. **A document cannot record a <!-- doc-anchor-ignore -->
+coordinate into itself without moving it, so the re-read has to be the LAST action of a landing,
+never a step inside it** — and the fix for the ripple is to make the last edit
+**line-count-neutral**, which is what finally converged this one.
+
+---
+
+## 2026-08-28 — RECORD: **rung A1's source census now claims only what it MEASURES, and the difference is a THIRTEEN-item residue** — plus, the repository's anchor gate is green over a file set DISJOINT from this landing
+
+> ⚠️ **Superseded in two numbers by the record above, 2026-08-28 (tenth pass): the residue is
+> FIFTEEN, and the census section it points at is now `:148-300`, not `:126-221` — `:126` is today a
+> module-doc line.** Everything else in this record stands as measured.
+
+**Status: RECORDED — three items, none of them a new question.** Item 3 restates the SCOPE
+recommendation already open in the item below, with its price re-measured, so it can be weighed
+without opening a test file. Found by the **eighth** adversarial pass over [`docs/UI-PLAN-ANIMATION-A1.md`'s
+A1 rung](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) and closed by the **ninth** landing. Full detail and every measurement: that document's A1
+landing note, parts 8 and 9.
+
+### 1 — the class, because it is reusable: an execution edge can have NO SYNTAX AT THE CALL SITE
+
+A1's defence is a **source census** — it parses `crates/boyko_ui/src/animation.rs` and asserts that
+the set of control-flow nodes, callees and call sites is exactly a written-down table, so a new
+member fails the build by EXISTING rather than by being noticed. Seven passes hardened it against
+things *written* in the file, the last of them replacing a regex scanner with an AST walk. The eighth
+pass found the edges that are written nowhere:
+
+* **`impl Drop`.** A fourth termination cap — same threshold as a macro form the census DOES catch —
+  placed in a guard object dropped at the end of the opacity arm. Drop glue is called by no syntax at
+  all, so every census was blind: **EXIT=0, 53 targets, 349 passed.**
+* **A kernel-registered hook.** `ui_visual_sink_on_add` runs on every `Tween*` insert; its
+  registration is an attribute one module over, written INSIDE a `macro_rules!` body. It appeared in
+  no census — no walked entry, no site row, no call row — while already carrying an unenumerated live
+  branch. A second branch plus a heap allocation planted in it: **EXIT=0, 349 passed.**
+* **And an "EXECUTABLE witness" was satisfied by MENTIONING its name.** One token —
+  `witness_…(&mut world, …)` → `let _ = witness_…;` — left five covered paths executed **zero** times
+  at EXIT=0, because the reachability scan was a *mention set*, not a call graph.
+
+All three are closed by measurement: three new tests, and the whole-crate comparator that read
+EXIT=0 / 349 passed now reads **EXIT=101, 53 targets, 351 passed, 1 failed**. **The transferable part
+is the question, not the fix** — *what calls this code where I cannot see a call?* Drop glue, hooks,
+observers, trait dispatch selected by type, macro expansion. Each is an edge no syntactic gate sees.
+
+### 2 — the residue: THIRTEEN things the instrument does not measure, written down at the instrument
+
+**This is the rung's honest close, and it is the part worth carrying to other gates.** The census's
+claim used to be *"every executable branch of the A1/A0 systems and their intra-file callees"* — a
+claim about a **runtime reachability set**, checked by a **syntactic walk of nine bodies in one
+file**. Two of those are not the same thing, and eight passes' worth of defects lived in the gap. The
+claim now describes the walk, and the gap is an enumerated list instead of a sentence asserting
+closure. *(The previous spelling of that section ended "this is now the WHOLE residue" and was wrong
+three separate ways.)*
+
+Source of truth, with each item's full reasoning:
+`crates/boyko_ui/tests/ui_a1_source_census.rs:148-300` (the `# THE RESIDUE` section; `:148` is its
+heading, `:300` its last line — *read at its target 2026-08-28 by the tenth pass; this record was
+written with `:126-221`, and `:126` is today a module-doc line*). Digest, **for THIRTEEN items; the
+list is fifteen — see the record above**:
+
+1. **Branches inside a callee in another module or crate.** Enumerating a callee makes its branches
+   *enumerable*, not *visible*. MEASURED: a `pub(crate) fn zz_cap` in `components.rs` called from the
+   opacity arm reds two census tests — and **adding the two rows those failures ask for gives EXIT=0,
+   352 passed, with the cap still live**, because neither the `local` flag nor the `note` prose is
+   checked against anything. *The answer to a new cross-module callee is a place to write a sentence.*
+2. **Trait impls selected by type.** Nothing here resolves a receiver's type or a blanket impl; the
+   drop scan is over-approximate in the fail-closed direction precisely because it cannot resolve.
+3. **Macro EXPANSIONS.** The invocation is a node and the walk descends into a parseable body, but
+   what a `macro_rules!` body expands to is not. An unparseable body is a RED, not a silent skip —
+   fail-closed, not sighted.
+4. **`#[cfg]`-dead code is COUNTED.** MEASURED: a branch under a feature that exists in no profile
+   reds the census and demands a coverage row. Right direction, **at the price of a row whose
+   justification cannot be falsified.**
+5. **A `Drop` impl the scan cannot reach** — in another crate, inside a `macro_rules!` body, or on a
+   type obtained from `make_guard()`. The scan sees struct literals and `T::assoc(…)`, nothing else.
+6. **A coverage row pins an OBSERVABLE, not an EXECUTION COUNT.** MEASURED: a one-token edit
+   (`let mut shift = 0;` → `= 32;`) drives a loop body to zero iterations while its node key does not
+   move, and **both the census and the allocation gate stay green**. One unrelated test elsewhere
+   catches that particular neuter, so it is a coverage-column defect, not an escape. **The exposure
+   is concentrated and now printed rather than folklore: one witness is the sole defence of
+   SEVENTEEN of the 50 paths and observes four liveness counts.**
+7. **The weaker coverage variant** asserts the named `#[test]` *exists*; it does not assert that gate
+   would fail if the path stopped executing. Both rows using it carry a hand-taken measurement of
+   exactly that.
+8. **The PATH decomposition of a node** is authored, not derived. What is mechanical is that no node
+   may exist without a row and no row without a node.
+9. **Straight-line code that calls nothing** — `*elapsed += dt;` introduces no path and no callee.
+10. **Row ORDER.** Two structurally identical nodes are told apart only by position; reordering reds,
+    but the message says "edited", not "reordered".
+11. **String CONTENT.** Literals are emptied before comparison, so a message that has become FALSE
+    does not red. This has already bitten once.
+12. **`macro_rules!` bodies as trees.** Pinned as printed TOKENS — whitespace-, comment- and
+    line-ending-immune, which raw bytes would not be — never as a tree.
+13. **Anchor currency outside this crate** — item 3 below.
+
+**Items 1 and 6 are the two a next pass should attack.** Closing 6 means witnesses that assert *this
+path executed N times*, which needs per-branch instrumentation the fixture does not have; closing 1
+means checking a callee's prose against its body. Neither is cheap, and neither is pretended closed.
+
+### 3 — the anchor gate's green is about OTHER FILES (P6), and what gating the UI plans costs
+
+Re-measured for this record on this tree, each number from the command beside it.
+
+* `cargo test -p boyko-engine --test internal_docs_anchors -- --nocapture` ⇒ **EXIT=0, 5 passed**;
+  `ARCHITECTURE.md` 6 + `FEATURE_MAP.md` 222 + `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` 177 +
+  `SYSTEMS.md` 330 = **735 anchor(s) checked, 0 stale**.
+* **Line-numbered citations from those four documents into any of this landing's TEN moved source
+  files** — `gather.rs`, `ui_a1_sink_reaches_discovery.rs`, `animation.rs`, `layout.rs`, `sprite.rs`,
+  `text/measure.rs`, `miri_a1_tween.rs`, `ui_a1_tween.rs`, `ui_a1_zero_alloc.rs`,
+  `ui_a1_source_census.rs`: **0, 0, 0, 0, 0, 0, 0, 0, 0, 0** (`grep -oE "<basename>:[0-9]+"` over the
+  four). The member-table `(N)` form cannot reach them either — no `**File:**` header in the four
+  names any of the ten. The only contact of any kind is **two link-form path mentions** of
+  `crates/boyko_ui/src/layout.rs` (`FEATURE_MAP.md:137`, `SYSTEMS.md:2162`), checked for EXISTENCE,
+  carrying no line number.
+* **The gate is NOT vacuous, measured here rather than transported.** `SYSTEMS.md:597`/`:599`'s two
+  live anchors swapped (`enable_store.rs:206` ↔ `:299`) ⇒ **EXIT=101**, *"docs/SYSTEMS.md: 330
+  anchor(s) checked, 2 stale"*, each message naming the symbol it failed to find. Restored by inverse
+  `Edit`, `cmp` EXIT=0, SHA-256 identical, `git status` does not list the file, gate back to EXIT=0.
+
+**So "735 anchors, 0 stale" is true and says nothing whatever about the sixteen files this landing
+changed.** And part 9 supplied the counter-example in the same session: the only file this round
+moved is `ui_a1_source_census.rs` (2267 → 3181 lines), and **eight coordinates citing it inside
+`UI-PLAN-ANIMATION.md` went stale — every one onto plausible content — including three test names the
+rewrite had renamed out of existence** (`grep -c` = 0 for each). A renamed test is the rot a
+coordinate sweep cannot repair by re-reading a line: the citing *text* is wrong, not just its number.
+None of it is visible to a green anchor gate, because the gate does not read that document.
+
+**⚠️ And a correction to the sweep doctrine this campaign adopted three passes ago: driven by the
+diff is NECESSARY and NOT SUFFICIENT.** Part 7 replaced "sweep the anchors you TOUCHED" with "sweep
+the anchors your landing MOVED" — computable, bounded, mechanical, and right. Part 9 found the class
+it leaves out. Two coordinates into `crates/boyko_ui/tests/ui_a1_zero_alloc.rs` — **a file this round
+did not move at all** — were stale and both had landed on plausible content: `:203`, cited as a named
+constant, reads `const WARM_FRAMES: usize = 8;`, a different constant eighteen lines above it (true:
+`:221`); `:685`, cited as a pointer, reads a doc line of an unrelated test (true: `:46`). **A
+coordinate that goes stale in landing N and is missed there survives every later sweep**, because
+each later sweep is scoped to its own diff and that file is not in it. The shift-driven scope filters
+*new* rot and has no term for *inherited* rot — and inherited rot is the half that accumulates. The
+eighth pass's `docs/**` sweep (197 spans, 2 out of range) could not see these either: **both are in
+range.** The honest scope is the union — *what this landing moved* plus *a rotating re-read of the
+rest* — and only the first half is mechanical.
+
+**The recommendation, with its price.** Unchanged from the item below — **(1a): convert the five UI
+documents' bare-basename citations to link form FIRST, then widen `GATED_DOCS`.** Widening without
+that step is measured below to produce 405 misbindings out of 541 flags, i.e. noise, not rot. The
+conversion is the whole cost, and it is now sized: over the five documents there are **825**
+line-numbered citations, of which **594 are bare basenames** with no path component and **231**
+already carry one *(measured 2026-08-28 on this tree, after part 9's landing:
+`grep -oE '[A-Za-z0-9_./-]+\.(rs|toml|md|hlsl|spv):[0-9]+'` per document, split on whether the match
+contains `/`)*. **594 citations is the document-surgery budget the owner is being asked to approve**,
+and it buys the weaker in-file property (item 2 below explains why a `cargo test` cannot check the
+real one) rather than the class this campaign keeps hitting.
+
+---
+
+## 2026-08-28 — SCOPE: **widening `GATED_DOCS` to the UI plans does NOT close the anchor-rot class — measured — and the class may not be closable by a test at all**
+
+**Status: OPEN — four items. Item 1 supersedes the 2026-08-27 item's option list below and needs an
+owner call; items 2–4 are recorded, not asked.** Found by the eighth adversarial pass, whose whole
+job was to close the anchor class rather than its instances.
+
+### 1 — the measurement that refutes the options already on the table
+
+The 2026-08-27 item below offers "add the five and repair the 96" or "add them and waive the
+backlog". Both assume the 96 are ROT. **Re-measured on today's tree, they are not.**
+
+`GATED_DOCS` widened to the five UI documents, run unpiped, then the test file restored by `cp` and
+proved byte-identical by `cmp` + SHA-256:
+
+| | anchors | flagged |
+|---|---|---|
+| the four already gated | **735** | **0** |
+| the five UI documents | **618** | **541** |
+
+The 618 is not the 143 the older table records: this landing added ~756 lines to
+`UI-PLAN-ANIMATION.md`, which took that document alone from 4 bound anchors to 463. The
+decomposition is what matters:
+
+| class | count | what it is |
+|---|---|---|
+| **MISBOUND** | **405 (74.9 %)** | the gate checked a file whose basename **does not appear on the citing line at all** |
+| shape-only | 132 | "is not a definition" — the gate models an anchor as pointing at a DEFINITION; these plans cite EVIDENCE lines |
+| out of range | 4 | **and all four are misbindings too** |
+
+The misbinding is structural, not incidental. This gate binds an anchor to the nearest resolvable
+**path** mention to its left; the UI plans cite **bare basenames** in prose (`` `gather.rs:272` ``,
+`` `boyko_render/Cargo.toml:80-82` ``), which are not path mentions, so anchors attach to whatever
+was last linked. Dozens of `ui_a1_zero_alloc.rs` citations were checked against
+`crates/boyko_render/Cargo.toml`. The four "past end of file" findings are the same defect: the gate
+reported `components.rs:1117` and `ui_a1_tween.rs:1116` past EOF *"(996 lines)"* — that is
+`animation.rs`'s length; `components.rs` is 1310 lines and `ui_a1_tween.rs` is 1301, so **both
+coordinates are in range and the verdict was about the wrong file.** Same for
+`UI-PLAN-ANIMATION.md`'s self-citation — `:1673` when the gate ran — judged against `gather.rs`'s <!-- doc-anchor-ignore -->
+541 lines in a document that was **2564** lines at the time. *(Both halves are transcript figures and
+both have since moved: part 11 re-read `gather.rs` at **541**, unchanged, and the plan at **3111**
+lines, and the self-citation is now `:1696`. Dated rather than updated, because the sentence is about <!-- doc-anchor-ignore -->
+what the gate reported, not about the tree today.)* The gate's own module doc records this exact
+failure from the meshlet plan's
+first attempt — *"83 'stale' of 146, dominated by misbindings"* — and names the prerequisite that
+fixed it: converting the citations to link form.
+
+**And the sensitivity control says widening would not have caught the rot this pass actually
+found.** `gather.rs:272` — cited four times in `UI-PLAN-SPRITES.md` for `text_uv: None`, whose true
+line is `:389` — was repointed to `gather.rs:999999` with the gate widened. Anchor count <!-- doc-anchor-ignore -->
+**130 → 130**, stale count **92 → 92**, and no report mentions it. A coordinate 999 458 lines past
+the end of a 541-line file, at one of the four real-rot sites, is **completely invisible**.
+
+So the options are: **(1a)** convert the five documents' bare-basename citations to link form
+*first* — the meshlet plan's own prerequisite, a document-surgery rung with its own budget — and
+only then widen; **(1b)** widen anyway and blanket-`~` the 541, which buys the in-file bounds check
+and nothing else, on documents where the bounds check is already proven blind to the real rot;
+**(1c)** leave the five ungated and record why. **This pass recommends (1a) and did not weaken the
+check to make the corpus quiet.**
+
+### 2 — the class may be structurally ungateable by a `cargo test`
+
+Rot here is *"the coordinate no longer holds the content it was written against"*. That is a
+property of a **diff** — it needs the tree the citation was written against and the tree today. A
+test sees one tree, so it can only check the weaker property *"the coordinate holds something
+definition-shaped that matches a symbol on the citing line"*. Every sweep in this campaign has been
+manual for that reason, not for lack of diligence. If the class is to be closed mechanically it
+belongs in a **pre-commit / CI diff check** — "for every file this change moved, re-verify every
+`docs/**` citation into it" — which is exactly the sweep this pass ran by hand, and which took a
+line-shift table plus a basename-exact matcher.
+
+### 3 — the scope rule that produced three consecutive misses, stated so it is not re-derived
+
+Three sweeps in a row scoped themselves to **documents the landing edited**. Rot is a property of
+the **(target file, coordinate)** pair, so the correct scope is **every document that cites a file
+the landing MOVED, wherever it lives**. Measured this pass over all of `docs/**` (224 markdown
+files): **218 citation spans / 220 coordinates** into the sixteen files this landing changed, of
+which **36 were inherited coordinates the landing invalidated** — spread across `UI-PLAN-SPRITES.md`,
+`UI-PLAN-INTERACTION.md`, `UI-PLAN-AETHER.md`, `UI-ADVANCED-RESEARCH-ANIMATION.md`,
+`AUDIT-2026-07-PLAN.md` and three `docs/archive/` plans, **none of which any previous sweep opened**.
+
+### 4 — two findings in passing, neither asked
+
+* **[`UI-PLAN-SPRITES-S5.md`](UI-PLAN-SPRITES-S5.md#s5--sprite-sheets-and-the-flipbook--size-m) §S5's probe census rests on a stale list length.** It says *"the list holds
+  six pack inputs today"* and derives `ui_pack_inputs!(count) + 1` = **7.00 probes/node/frame**.
+  Measured: `__ui_pack_inputs_list!` (`gather.rs:126-138`) holds **seven** members — S5's
+  `UiSpriteSheet` landed after the S4 build that paragraph measured. The `7.00` is left as measured
+  and the derived increment is owed a re-measurement before that rung reports leg 10.8(c).
+* **A "correct" verdict expires.** The seventh pass's M9 measured this repository's two census
+  citations and reported them CORRECT — and they were, on the tree it read. The same landing that
+  drifted M9's own prose coordinates rewrote `ui_a1_source_census.rs` from 1379 to 2267 lines, and
+  `:705` / `:733` became `Path` fields inside `SITES` — **plausible content**. Both re-aimed this <!-- doc-anchor-ignore -->
+  pass to `:1150` / `:1188`. A verification result is only valid against the tree it was taken on, <!-- doc-anchor-ignore -->
+  and the tree moved between the review and the landing.
+
+---
+
 ## 2026-08-27 — The event participant context is a DEAD DATUM: computed, leaked, stored, never read — RESOLVED 2026-08-28
 
 Found while designing the Aether sugar for `event`, when the owner asked whether a participant could
@@ -3529,6 +4046,153 @@ these two functions**: `S1` is specified as *"a bytes-carrying sibling of
 
 I did not choose. **(a)** is what the directional rule points at, and it is the reason this is here
 rather than in a report.
+
+## 2026-08-27 — SCOPE + VALUES: **the UI animation sink has no production reader to be ordered after, and the linter gate that would have said so was RED at HEAD**
+
+**Status: OPEN — five items. Item 1 BLOCKS rung A4; items 2 and 3 are VALUES calls that block
+nothing; items 4 and 5 are recorded, not asked.** Found at the [`UI-PLAN-ANIMATION-A1.md`](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) A1 red-ledger
+and adversarial passes (2026-08-27) and their remediation. Full detail and every measurement:
+[`docs/UI-PLAN-ANIMATION-A1.md`, the A1 landing note](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency).
+
+### 1 — SCOPE, and it BLOCKS A4: nothing in production registers `ui_render_discovery`
+
+Rung A1 MEASURED that a system filtering on `Changed<UiVisual>` and ordered BEFORE `ui_visual_tick`
+does not read the sink one frame late — **it never reads it**. Over 20 animating frames the reader
+after the tick hit 20 times and the reader before hit **1**, and that one was an out-of-schedule
+insert stamp. *(Of the 20, **19** are attributable to the sink: frame 1 is true through BOTH `Or`
+arms, because the spawn stamps the pack-input component in that frame too. The gate asserts the 19
+frame-by-frame and asserts frame 1 separately, crediting it to neither arm — corrected 2026-08-27,
+it used to assert the total and silently credit the sink with a hit its control could not exclude.)*
+The mechanism is that `Changed`'s window `(last_run, this_run]` is HALF-OPEN — `schedule.rs:288`
+(`let this_run = world.bump_change_tick();`) and `:342`
+(`sys_box.system.set_change_ticks(prev_this_run, this_run)`), with the comparison itself in
+`change_detection/tick.rs:169-171` (`ticks_since_system > ticks_since_insert`), consumed at
+`query/filter.rs:1205`, `:1225`, `:1493` and `:1503`. So a write stamped in frame N is above frame N's
+reader and at-or-below the exclusive lower bound of frame N+1's — it falls in neither. **A golden
+blessed under the wrong order pins a picture that never updates, not one that lags.**
+
+> ⚠️ **This entry cited `schedule.rs:152` as the mechanism until 2026-08-27, and that is a doc
+> comment about gated-system dispatch which merely contains the `(last_run, this_run]` notation.**
+> The half-open semantics is real and is measured by the gate; only the pointer was to prose. The
+> wrong pointer had been replicated into `animation.rs`, `sprite.rs` and both copies of this file —
+> **a citation that reads plausibly is copied without being opened.**
+
+The natural fix is `.after_set(UiAnimationSet)` on `ui_render_discovery`. It cannot be written today:
+
+* **Verified 2026-08-27** — all **12** `add_system(ui_render_discovery)` sites in the tree are in
+  `crates/boyko_render/tests/`. `src/` has **zero**. There is no production registration for an edge
+  to be attached to.
+* `boyko_ui` could not declare it in any case: `crates/boyko_render/Cargo.toml:94` depends on
+  `boyko-ui`, and `boyko_ui` names no render crate. The edge, if it existed, would belong to whoever
+  registers the system.
+
+So A1 shipped the edge as a **contract stated at four sites plus a gate over the contract**
+(`crates/boyko_render/tests/ui_a1_sink_reaches_discovery.rs`). **Rung A4 is where that becomes a real
+defect** — A4 puts `UiVisual` into `ui_pack_inputs!`, which is what makes the discovery filter watch
+the sink at all. A4 has been given a blocking precondition in the plan.
+
+**The call.** Creating a render-side UI plugin that registers `ui_render_discovery` is a new design
+decision, not a remediation: which schedule, which set, how it interacts with `AaPlugin` /
+`Render3dPlugin`, and whether `.after_set` on a set no plugin registered is even legal on this
+builder. **Options:** (a) build that plugin before A4; (b) land A4 with the contract still prose and
+say so in A4's landing note; (c) something else the owner has in mind for how UI gets wired into a
+real app schedule. A remediation rung must not invent (a) on its own, which is why it is here.
+
+### 2 — VALUES: closing the last degenerate-duration route costs +3.8 % on every animating row
+
+A1 found that `duration_ms` of `+inf`, `-inf`, `-0.0` or **any negative finite value** produced a row
+that never completes — the reap can never reach it. The guard for it was only a `debug_assert!`,
+which compiles out. Measured, release, 50 frames: `±inf` freeze the node silently; a
+**negative** duration is worse than the code's own doc claimed — the sink diverged to `-49.999977`
+from a `0.0 → 1.0` tween and bumped `set_if_neq` on **49 of 49** frames, which disarms the whole UI's
+repaint skip rather than spoiling one node.
+
+> ⚠️ **Corrected 2026-08-27: `NaN` is NOT one of the immortal shapes**, and this entry (with three
+> source doc blocks) said it was. Under the shipped `advance`, `t` is NaN and the `t < 1.0` spelling
+> puts a NaN `t` on the COMPLETING side — the row completes on frame 1, assigns its endpoint and is
+> reaped. **Four of the five refused shapes are immortal; `NaN` is refused as an authoring mistake,
+> not as an immortal row.** The two defences OVERLAP on that member, which is exactly what let the
+> gate's NaN arm pass with the guard disabled. `-0.0` is the shape that was never enumerated at all
+> and is genuinely immortal (`1000.0 / -0.0` is `-inf`).
+
+That is now closed at the entry point: `start_tween_*` **refuses** such a duration in release (no row
+is created), and `advance`'s completion test was inverted to put NaN on the completing side — the
+latter MEASURED **free** (14.002 vs 14.008 ns/row).
+
+> ⚠️ **And the refusal's first spelling was itself a regression, fixed 2026-08-27.** It read
+> `is_finite() && duration_ms > 0.0`, and `0.0f32 > 0.0` is **false**, so a `+0.0` duration created
+> no row and no sink at all — a node authored with a zero duration silently never animated, where
+> before the guard it SNAPPED to its endpoint. Reachable from the safe `pub` API (a `duration *
+> speed_multiplier` with a zero multiplier, a config value, a computed 0), and the denormals were
+> unaffected, which is what hid it. The shipped predicate is `is_finite() && is_sign_positive()`:
+> `+0.0` snaps, `-0.0` stays refused, and the sign bit is the only thing separating them.
+
+**What is left open** is the hand-inserted-`TweenXBundle` route, where an author writes the row's
+`pub` fields directly. Closing that in code needs a per-row `inv_duration > 0.0` term inside
+`advance`, and it is NOT free: **14.544 ns/row against a 14.008 floor — +0.536 ns/row, +3.8 %**,
+forever, on every animating row (4096 nodes × 4 channels, release, floor across five process
+invocations). It was declined because the same struct's `from`, `to` and `elapsed` are equally
+undefended on that route, so the tax buys one field out of four. **The call is whether the owner wants
+belt-and-braces at that price**; the edit is one clause.
+
+### 3 — VALUES, pre-existing: `UiTweenScratch.done` is a `std::Vec` inside a `Resource`, and the exception is nowhere written down
+
+Principle 0 says durable subsystem data lives in the kernel's own storage. This buffer is
+`Resource`-owned per-frame scratch on the established `UiBarScratch` shape, filled and drained inside
+one frame — so it is arguably a legitimate exception. But it is **also** the exact shape the O11-SP4
+colored-solve data race came from, and unlike the `unsafe` blocks and the `disallowed_types` allows,
+this class of exception has no written rationale anywhere and no way to enumerate its instances.
+
+Not A1's to fix, and A1 did not create it. **The call is whether "`Resource`-owned per-frame scratch"
+is a named, greppable exception to principle 0** — the way `#[allow(clippy::disallowed_types)] +
+rationale` is — or whether these should migrate to kernel storage.
+
+### 4 — Recorded, not asked: the mandated clippy gate was RED at `e7a16fd9` and masked FOUR crates
+
+`cargo clippy --workspace --all-targets --keep-going -- -D warnings` **exited 101** at commit
+`e7a16fd9`. Cache-matched A/B (`cargo clean -p boyko-ui` before both runs, one edit apart), measured
+twice by two independent passes with identical results:
+
+| | red (at HEAD) | green (after the fix) |
+|---|---|---|
+| EXIT | **101** | 0 |
+| crates reaching a `Checking` line | `boyko-input`, `boyko-threadpool`, `boyko-ui` | **+ `boyko-render`, `boyko-app`, `boyko_rhi_vulkan`, `aether-tests`** |
+
+So **four** crates were never linted at all, and `boyko-ui` is not one of them — it is the crate that
+errored. **Every clippy claim made on this branch between `e7a16fd9` and 2026-08-27 was vacuum-green
+for those four.** With the fix applied the four are clean (0 warnings, 0 errors), so nothing was
+hiding — but the reporting window was blind, and the owner should know its width. *(This is the same
+shape as a red `const` assert masking a whole crate's compile, measured separately in the same pass.)*
+
+### 5 — Recorded, not asked: three gates that do not cover what a reader would assume
+
+* **The UI plans are not anchor-gated.** `tests/internal_docs_anchors.rs:349` (`GATED_DOCS`; fifteen at the A7 merge, still no UI plan) gated exactly four at `2a10f3a4`, the
+  documents — `FEATURE_MAP.md`, `SYSTEMS.md`, `ARCHITECTURE.md`,
+  `MESHLET-VIRTUAL-GEOMETRY-PLAN.md`. `UI-PLAN-ANIMATION.md`, `UI-PLAN-SPRITES.md`,
+  `UI-PLAN-INTERACTION.md` and `UI-PLAN-AETHER.md` are **not** among them, so none of their
+  `file:line` citations is mechanically checked. A sibling lane measured **96 of 143** UI-plan
+  anchors already stale, with nothing gating them. Adding the UI plans to `GATED_DOCS` is a SCOPE
+  call — it would red immediately and loudly, which is the point and also the cost.
+* **`tests/ignore_reasons_census.rs` does not exist on `feat/ui-advanced`.** It lives on
+  `feat/multi-paradigm-render` and `fix/inherited-red-gates`. It is NOT RUN on this branch by
+  construction and must not be reported green in any landing note here.
+* **The new `ui_pack_inputs!(assert_table)` const-assert cannot fire for the regression it reads as
+  guarding** *(added 2026-08-27)*. It turns "a dense member of the pack-input list is invisible to
+  `ui_render_discovery`" into a compile error, and for a **NEW** dense member it does exactly that
+  (`error[E0080]` naming the member, reproduced). But for an **EXISTING** member flipped to dense —
+  the realistic regression — the `E0277 … : Bundle` errors from that member's direct-insert sites in
+  `boyko_ui` arrive first, `boyko-render` never compiles, and the const never evaluates. Measured on
+  `StackIndex` (nothing else catches it) and on `UiVisual` (caught loudly, but by `UiVisual`'s OWN
+  const-assert at `crates/boyko_ui/src/components.rs:1117`, a different guard in a different crate).
+  It also guards **one** of the five production `Or<..>` lists in the workspace, not all five —
+  `light_system.rs:989`, `layout.rs:88`, `layout.rs:118` and `text/measure.rs:61` carry no
+  equivalent. Both limits are now written at the macro; **the point for the owner is that a guard
+  reads as covering a class and covers one direction of it.**
+
+### What it blocks
+
+Item 1 blocks [**rung A4**](UI-PLAN-ANIMATION-A2-A8.md#a4--the-pack-fold--size-m--depends-on-a1-depends-on-the-sprites-plans-seam-rung-d31-gather--d6-gate) of `UI-PLAN-ANIMATION-A2-A8.md` (or forces A4 to land with the ordering contract
+still unwired and to say so). Items 2–5 block nothing; they are calls and records.
 
 ---
 
@@ -3739,6 +4403,769 @@ a kernel question, not a reflection one.
 
 
 ---
+
+## 2026-08-26 — VALUES: **the UI hitch clamp is 100 ms, it was never measured, and it SHIPPED before the question was ever asked**
+
+**Status: OPEN — a VALUES call. Blocks nothing, because the number is already load-bearing in
+shipped, gated code.** Found at the [`UI-PLAN-ANIMATION-A0.md`](UI-PLAN-ANIMATION-A0.md#a0--the-ui-clock-and-the-one-consumer-that-already-exists--size-s--m--no-cross-plan-dependency) A0 pre-build audit.
+
+### The situation
+
+[`UI-PLAN-ANIMATION.md` §7](UI-PLAN-ANIMATION.md#7--open-questions-for-the-owner-values--scope--also-to-be-filed-in-docsopen-questionsmd) has carried this as its question 1 since 2026-08-21, and that section's
+own heading promises its questions are *"also to be filed in `docs/OPEN-QUESTIONS.md`"*. **This one
+never was.** In the meantime the sprites ladder's S5 rung landed the value:
+
+```rust
+pub const UI_FALLBACK_MAX_DELTA: f32 = 0.1;   // crates/boyko_ui/src/sprite.rs:320
+```
+
+It is `pub` inside `pub mod sprite` (`boyko_ui/src/lib.rs:64`), i.e. **public API**. It was applied INLINE inside
+`ui_sprite_flipbook` until animation rung **A0b** (landed 2026-08-26) moved that system onto
+`Res<UiClock>` and DELETED the inline `min` *(no line anchor for it: a coordinate into deleted
+state resolves to whatever live line now occupies it)*; since then the clamp is taken once per
+frame by `ui_clock_tick`
+(`crates/boyko_ui/src/animation.rs`) and this const has exactly one reader, `UiClock::default()`.
+One leg of a shipped gate asserts its effect
+(`g5_2_the_clock_fallback_is_clamped_scaled_and_pause_aware` (a), `ui_s5_sprite_sheet.rs:534`: a
+two-second alt-tab stall advances the flipbook ONE frame, not twenty). So a VALUES question was
+answered by landing it — the shape this file exists to prevent.
+
+### What the number decides
+
+It is a **UI-local** clamp applied on top of the kernel's own `Time::max_delta` (250 ms,
+`time/time.rs:23`), and it is what a user sees after a stall: below it, a transition that was running
+when the game hitched resumes mid-flight; above it, the transition jumps to its end, which reads as a
+glitch rather than as an animation. 100 ms is the plan's proposal *"because it is below the shortest
+hitch a user perceives as a stall and above any frame time a shipping build targets"* — the plan says
+outright that this is not measured, and no instrument in the tree measures perception.
+
+### The options
+
+1. **Accept 100 ms.** The value ships today; nothing changes.
+2. **Name another number.** It is **one** line: [`UI-PLAN-ANIMATION-DECISIONS.md` AD9](UI-PLAN-ANIMATION-DECISIONS.md#ad9--which-field-a-consumer-reads-is-decided-by-whether-it-carries-d15s-flags-bit-and-the-clamp-has-exactly-one-definition) (3) makes
+   `UiClock::default()` *reference* this const rather than restate `0.1`, so the flipbook and the
+   tweens cannot come to disagree about what a hitch is.
+3. **Make it per-app rather than a constant.** A0 **landed** a validated
+   `UiClock::set_max_delta(f32)` (mirroring `Time::set_max_delta`, `time/time.rs:155-160`; panics on
+   non-finite or non-positive input, gated by four unit legs in `boyko_ui::animation::tests`), so a
+   host can already override it TODAY; the question is only what the DEFAULT is.
+   *(2026-08-26 — **"already TODAY" was itself ungated until the A0 verification.** The setter
+   worked, but `UiAnimationPlugin` inserts `UiClock` only if the world has none, and nothing tested
+   that: MEASURED, replacing that guard with an unconditional `insert_resource` left the rung's
+   whole gate at 7/7 while silently restoring the 0.1 default over any host value. A host that set
+   its clamp BEFORE `add_plugin` — the exact shape this option describes — would have lost it.
+   `a_host_configured_clock_survives_the_plugin` (`crates/boyko_ui/tests/ui_a0_clock.rs`) now runs
+   that shape and reads the host's clamp back out of a truncated 2 s hitch, so the override is
+   behavioural, not merely a field that retained a number.)*
+
+### What it blocks
+
+Nothing. Recorded because a VALUES call that was promised to the owner, never delivered, and then
+settled by an implementation is worse than an open question — the owner cannot weigh in on a decision
+he was never shown.
+
+## 2026-08-26 — SCOPE: **the doc-anchor gate covers four documents; the five UI campaign plans are not among them, and 96 of their 143 anchors are STALE**
+
+**Status: OPEN — a SCOPE call. Blocks nothing; it is what makes every other measurement in those
+five documents unverifiable.** Found at the `UI-PLAN-SPRITES-DECISIONS.md` S6 pre-build audit ([S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (11))
+while trying to CERTIFY the amendments rather than trust them.
+
+### The measurement
+
+`tests/internal_docs_anchors.rs` is the only thing in the tree that checks a `file.rs:N` citation.
+Its scope is a hand list of four: `GATED_DOCS` (`:231`) = `FEATURE_MAP.md`, `SYSTEMS.md`,
+`ARCHITECTURE.md`, `MESHLET-VIRTUAL-GEOMETRY-PLAN.md`. **PROVEN vacuous for the UI corpus:** an
+anchor deliberately repointed to `insert_command.rs:999999` inside `docs/UI-PLAN-SPRITES.md` left the <!-- doc-anchor-ignore -->
+gate at `5 passed`, exit 0.
+
+Widening `GATED_DOCS` to the five UI documents for one run (then restoring the test file
+byte-identically, `cmp`):
+
+| Document | anchors checked | STALE |
+|---|---|---|
+| the four already gated | **735** | **0** |
+| `UI-PLAN-SPRITES.md` | 118 | **80** |
+| `UI-ADVANCED-ARCHITECTURE.md` | 7 | **7** |
+| `UI-PLAN-AETHER.md` | 6 | **4** |
+| `UI-PLAN-ANIMATION.md` | 4 | **3** |
+| `UI-PLAN-INTERACTION.md` | 8 | **2** |
+| **the five UI documents** | **143** | **96 (67%)** |
+
+⚠️ **SUPERSEDED 2026-08-28 — see the item above.** These numbers were measured on the tree of the
+day and are kept as the record. Re-measured after this landing: **618 anchors, 541 flagged**, of
+which **405 are misbindings** (the gate checked a file whose basename is not on the citing line),
+132 are the definition-shape model against evidence-line citations, and 4 are misbound *and* out of
+range. **Zero are rot**, and a sensitivity probe proved the widened gate blind to the rot this
+campaign did find. The three options below rest on the 96 being real; they are not.
+
+Three dead PATHS as well: `crates/boyko_ui/benches/ui_animation.rs` ([`UI-PLAN-ANIMATION-A2-A8.md` A8](UI-PLAN-ANIMATION-A2-A8.md#a8--the-measurement-rung-what-the-tick-actually-costs--size-s--depends-on-a1a5), pre-split `:2857`, read at its target 2026-08-28 by the tenth pass and re-read by the eleventh — *"**Lands.** `crates/boyko_ui/benches/ui_animation.rs` + its `[[bench]]` entry in `Cargo.toml` —"*; it read `:663`, then `:2282`, **read as a BLANK line on the part-10 tree** and carried through two re-aims of this sentence without being re-opened. ⚠️ **Part 11 re-read `:2282` and that description had itself rotted**: on the tree part 11 inherited it was *"defence out of the fixture and into a **source census** — and the seventh showed that a"*, not a blank line. A description of a stale value is an anchor too) and <!-- doc-anchor-ignore -->
+`crates/boyko_render/shaders/ui_rect` twice ([`UI-PLAN-SPRITES-S5.md` S5](UI-PLAN-SPRITES-S5.md#s5--sprite-sheets-and-the-flipbook--size-m) and [`UI-PLAN-SPRITES-S6-S7.md` S6 · LANDED, "the landed set, file by file"](UI-PLAN-SPRITES-S6-S7.md#the-landed-set-file-by-file) — pre-split `UI-PLAN-SPRITES.md:3067`, `:3470`). <!-- doc-anchor-ignore -->
+
+**0 of 735 against 96 of 143 is the gate, not the authors.** The gate's own module doc already
+records the same shape from the other side: 75% of `FEATURE_MAP`/`SYSTEMS`/`ARCHITECTURE`'s anchors
+were wrong before it existed, and *"a wrong anchor is worse than no anchor — it sends a reader, human
+or agent, to a plausible-looking but unrelated line"*.
+
+### The options
+
+1. **Add the five to `GATED_DOCS` and repair the 96** — a repair rung with its own protocol and
+   budget. The gate's `~` waiver and `<!-- doc-anchor-ignore -->` marker exist for the anchors that
+   should not be shape-checked, so the repair has an escape hatch and does not have to be perfect.
+2. **Add them and waive the backlog**, arming the gate for NEW anchors only. Cheaper, and it stops
+   the bleeding at the cost of leaving 96 wrong pointers in place.
+3. **Leave the five ungated** and stop writing `file.rs:N` in them — the anchors are the value, so
+   this is really "accept that the plans' evidence is unverifiable".
+
+**What it blocks:** nothing mechanically. It decides whether "MEASURED at `file.rs:NN`" in a plan
+means anything a week later.
+
+---
+
+## 2026-08-26 — SCOPE: **D7, the `.ui` registration table, has no owning document** — three plans name three different owners and none of them builds it
+
+**Status: OPEN — a SCOPE call. Blocks nothing today** because [`UI-PLAN-SPRITES-S6-S7.md`'s S6](UI-PLAN-SPRITES-S6-S7.md#s6--the-ui-authoring-landing-for-the-sprite-vocabulary--size-s) carries a
+hand-written fallback, but the fallback is now the path rather than the contingency, and it is
+roughly twice the size the plans say.
+
+### The sweep
+
+| Document | What it says about D7 |
+|---|---|
+| [`UI-PLAN-SPRITES.md` §0](UI-PLAN-SPRITES.md#0--what-this-plan-owns-and-what-it-does-not), [§6](UI-PLAN-SPRITES.md#6--what-this-plan-exposes-to-its-siblings) | owner is **`UI-PLAN-AETHER.md`**; §0 explicitly **Rejects** sprites owning it |
+| `UI-PLAN-AETHER.md:73` | files D7 in its own **INBOUND** dependency table, *"soft"*, *"**D7 does not gate any rung here**"*; no rung U0–U8 lands a registration table |
+| [`UI-PLAN-ANIMATION.md` §8](UI-PLAN-ANIMATION.md#8--dependencies-stated-explicitly) (pre-split `:3105`; read at its target 2026-08-28 by the tenth pass and re-read by the eleventh — the D7 row whose owner cell is verbatim the quote below; it read `:846`, then `:2530`, **read on the part-10 tree as the prose *"than deleted, because an implementer who builds the axis measures a flat line and reports it as"*** — plausible content carried through one re-aim of this row. ⚠️ **Part 11 re-read `:2530` and that description had itself rotted**: on the tree part 11 inherited it was *"*N+1* renders a strictly-moved value. The failure this catches is one frame of nothing at the head"*, with the prose part 10 quoted **exactly 200 lines below** — the same ripple this landing measured for the live pointer, arriving at the description in the same sentence) | owner is *"`docs/UI-PLAN-SPRITES.md` (rung 1) or wherever it is sequenced"* — the option SPRITES §0 rejected. ⚠️ That plan's own D7 row counts FOUR naming sites and one of them, its self-citation `UI-PLAN-ANIMATION.md:846`, no longer resolves; measured, there are three | <!-- doc-anchor-ignore -->
+| `UI-PLAN-INTERACTION.md:512-521` | names no owner; *"This plan does not block on D7"* |
+| `UI-ADVANCED-ARCHITECTURE.md:371`, `:1773` | D7 is §11 **sequencing item 1** — an architecture ladder no plan file claims |
+
+`grep -rn UiVocab docs/` finds the derive named only in the architecture and the research corpus,
+never in a rung. **Exactly one rung in the whole campaign is behind D7** — SPRITES' S6 — and
+`grep -rn "\bS6\b"` across the siblings, the architecture and the book returns one passing citation,
+so nobody outside `UI-PLAN-SPRITES.md` knows that rung exists either.
+
+### What it costs to leave it
+
+Two numbers moved when the landing count was traced site-by-site ([`UI-PLAN-SPRITES-DECISIONS.md` S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (6)):
+a hand-written component is **nine** landings, not five, so S6's fallback is ~30 rather than 15 and
+D7's own justification figure is ~108 rather than 60. The argument for doing D7 gets STRONGER; the
+schedule for doing it still does not exist.
+
+Also: `UI-ADVANCED-ARCHITECTURE.md` §11 item 1 pins *"§10.9 must be green — all 19 existing
+components — before **rung 4** adds the twentieth"*, and rung 4 is D1, which adds no vocabulary
+member. The rung that adds the twentieth `.ui` name is S6, which §11 does not list. Landing S6 on the
+fallback spends that pin and makes the literal "19" stale at 22 in three places.
+
+### The options
+
+1. **Give D7 to a document and schedule it.** `UI-PLAN-AETHER.md` is the natural home only if it
+   wants it — today it explicitly does not, and its reason is sound (the construct emits Rust, never
+   `.ui` text). A fifth plan file, or the architecture's own ladder, are the alternatives.
+2. **Declare D7 out of scope for this campaign** and delete the dependency rows. S6 then lands
+   hand-written by decision rather than by default, the "cost of not doing it" arithmetic becomes
+   historical, and §11's pin is retired explicitly instead of being quietly spent.
+3. **Leave it.** What happens today. The cost is that four documents keep pointing at each other and
+   the one rung behind it lands on a fallback nobody chose.
+
+**What it blocks:** nothing today. It decides whether ~30 landings are written once for sprites and
+then again for animation and interaction.
+
+---
+
+## 2026-08-26 — SCOPE: **ten of the nineteen `.ui` components already round-trip and hot-reload SILENTLY WRONG**, and D7's pin would reproduce it
+
+**Status: OPEN — a SCOPE call. Pre-existing; found at the [`UI-PLAN-SPRITES-DECISIONS.md` S6 pre-build audit](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree)
+(S-D20 (4)) and MEASURED, not inferred.**
+
+### The measurement
+
+A `.ui` source spelling `UiImage { texture: 7, uv_min: [0, 0], uv_max: [1, 1], tint: 4294967295 }`
+parses and inserts — `UiImage present after parse = true` — and `serialize_ui` then emits the node's
+`UiLayout` line **and nothing else**: `round-trip contains UiImage = false`. (Probe test, written,
+run and deleted; the worktree was restored byte-identically.)
+
+`parse_and_insert` has **19** component arms. `serialize_ui` writes **8** of them plus `UiName` from
+the `#name` sigil, because `write_node` reads only `LiveNode`'s seven component fields
+(`reload/tree_view.rs:49-56`); `ComputedRect` is deliberately excluded (Decision 14, documented in
+place). `patch_node` reconciles the same 8. The remaining **ten** — `UiText`, `Button`, `Bar`,
+`BarFill`, `UiImage`, `UiGrid`, `UiAnchor`, `OnClick`, `OnHover`, `OnSubmit` — have neither a
+serializer nor a reconcile arm.
+
+**Why no gate sees it.** The round-trip corpus asserts a FIXED POINT —
+`assert_serialize_fixed_point` compares `s1` to `s2` (`p3_round_trip.rs:66-78`) — and a component the
+serializer drops is dropped from both sides. A fixed point cannot see a missing `serialize.rs` arm.
+
+### Why it matters now
+
+This is precisely the failure `UI-ADVANCED-ARCHITECTURE.md`'s D7 cites as its own justification
+(*"a silent failure mode — hot reload drops the component; the round trip loses it"*), and **D7c
+pins "same round-trip bytes" for all 19**, which would reproduce the loss rather than remove it. It
+also lands on sprites directly: a realistic sprite node carries `UiImage` (the sheet only substitutes
+its slot and UV), so S6's three components would be landed MORE completely than the component they
+modify, and S6's own round-trip gate has to use a `UiImage`-free fixture to be achievable at all.
+
+### The options
+
+1. **Land the missing halves for the ten** — ~9 landings each on today's hand-written path, ~90.
+2. **Land only `UiImage`'s** (~9), because it is the one an S6 sprite node actually needs, and record
+   the other nine as known.
+3. **Declare the ten write-only by decision** — they are authorable but never serialized, and the
+   round-trip contract covers the 8 + `UiName` only. Cheap and honest, and it makes D7c's pin
+   expressible without reproducing a bug; it also means a `.ui` file is not a faithful save format.
+
+**What it blocks:** nothing today; S6 works around it with a `UiImage`-free round-trip fixture. It
+decides what `.ui` round-trip MEANS.
+
+---
+
+## 2026-08-26 — KERNEL DEFECT: `#[require(C)]` where `C` is a DENSE component PANICS at insert, and the panic names an expansion that never happened
+
+**Status: OPEN — a real kernel bug, found while BUILDING UI-ADVANCED S5 and reproduced on every
+insert. Not blocking S5**, which routes around it with a `Bundle`. Filed because the next subsystem
+to pair a table component with a dense one will reach for exactly this attribute, and because the
+panic message points away from the cause.
+
+### The measurement
+
+`UiSpriteAnim` (table) with `#[require(UiSpriteCursor)]` where `UiSpriteCursor` is
+`#[component(storage = "dense")]`. Every spawn that inserts the animation panics:
+
+```
+crates\boyko_ecs\src\ecs\core\commands\migration_helpers.rs:728:22:
+invariant: target hosts every required id (expanded archetype)
+```
+
+Three S5 gates failed this way before the attribute was removed; nothing about the message suggests
+the storage kind.
+
+### The cause, and why it is structural rather than a slip
+
+The require pass resolves each required id's `ComponentPool` **in the target ARCHETYPE**
+(`tgt!().component_pools_mut().get_pool_mut(req_id)`), because it materialises the required value
+into that pool's next row. A dense id **has no per-archetype pool**: dense plan D0 makes it a
+NON-SIGNATURE storage kind — "excluded from every archetype signature, owns NO per-archetype
+`ComponentPool`; its global `DenseStore` is owned by the per-world `DenseRegistry`"
+(`dense_d0_spawn_rejection.rs`'s own module doc). So the archetype expansion the `.expect` names
+cannot have included the id, and the `.expect` is the first thing to notice.
+
+Note that the SPAWN path already handles the mix correctly — dense plan D2 PARTITIONS a component
+list, routing the table subset into the archetype and the dense subset to its `DenseStore`. The
+require pass is the one structural path that did not learn the partition.
+
+### The three options, and what each costs
+
+1. **Route required dense ids to the `DenseStore`**, the way D2 already routes a spawn list. The
+   honest fix, and it makes `#[require]` mean the same thing for both storage kinds.
+2. **Reject it at COMPILE time** — the derive knows the target's `STORAGE_IS_DENSE` and could refuse
+   with a message naming the storage kind. Cheaper than (1) and strictly better than today, but it
+   leaves the capability missing rather than fixed.
+3. **Leave it, and document it.** What S5 did, because the rung is not the place to change kernel
+   structural ops: `AnimatedSpriteBundle` carries the animation, the sheet AND the cursor in one
+   spawn, so the pairing is structural at the AUTHORING site instead of at the component. Gate
+   G5-12 pins both halves — the bundle animates, and a hand-spawned animation without a cursor is
+   frozen, silently.
+
+**What it blocks:** nothing today. It costs every future dense/table pairing the same discovery,
+and today that discovery is a panic message about archetypes on a line that never touches storage
+kind. Option (2) alone would turn a runtime panic into a compile error for one afternoon's work;
+whether (1) is worth doing is a SCOPE call.
+
+**Addendum 2026-08-26 (S6 pre-build audit — [`UI-PLAN-SPRITES-DECISIONS.md` S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (1)): there is a FOURTH
+option, and it is buildable today.** A TABLE component's `#[component(on_add = …)]` hook can
+deferred-insert the dense component through a one-field `#[derive(Bundle)]` wrapper. MEASURED in a
+probe: after the apply, `has_component` reports the dense `UiSpriteCursor` present with its correct
+`Default`. It works because `InsertCommand` **partitions** the bundle's ids and routes the dense
+subset off the table path (`commands/insert_command.rs:128-137`) — the same partition (dense plan
+D2) the require pass never learned. Note the trap: the BARE type does not work —
+`insert(UiSpriteCursor::default())` is `error[E0277]: UiSpriteCursor: Bundle is not satisfied`,
+because dense storage suppresses the single-component `Bundle` impl
+(`boyko_macros/src/component.rs:413`). This does not close the defect — `#[require]` still panics,
+and the hook is more code and DEFERRED rather than synchronous — but it means **no rung has to wait
+for this entry to resolve**, and "the capability is missing" is now only true of the attribute.
+
+---
+
+## 2026-08-21 — KERNEL DEFECT: a dense `Changed<C>` / `Added<C>` inside `Or<..>` can NEVER be true, and it fails SILENTLY
+
+**Status: OPEN — a real kernel bug, found at the UI-ADVANCED S5 pre-build audit and MEASURED. Not
+blocking S5**, which routes around it ([`UI-PLAN-SPRITES-DECISIONS.md` **S-D16**](UI-PLAN-SPRITES-DECISIONS.md#s-d16--the-flipbook-writes-uispritesheetindex-and-it-must-a-dense-changedc-inside-or-is-measurably-dead): the flipbook's per-frame write
+lands on a TABLE column and the dense cursor is never a discovery term). Filed because the next
+subsystem to reach for it will not know, and because there is no diagnostic — the query compiles,
+runs, and quietly matches nothing.
+
+### The measurement
+
+A three-frame schedule on a `boyko-ecs` world with one entity carrying a table `TSheet` and a dense
+`DCursor` (rustc 1.97.1, this tree at `b2318ac5`; the probe was deleted after reading):
+
+| frame | `Query<(), Changed<DCursor>>` | `Query<(), Or<(Changed<TSheet>, Changed<DCursor>)>>` |
+|---|---|---|
+| 1 — insert | 1 | 1 |
+| 2 — idle | 0 | 0 |
+| 3 — **dense write through `Mut`** | **1** | **0** |
+
+Frame 1's `1` in the right-hand column comes from the TABLE arm. The dense arm is never true.
+
+### The cause
+
+`Changed<C>` and `Added<C>` support dense storage completely — `HAS_DENSE`, `HAS_DENSE_INCLUDE`,
+`resolve_dense`, `dense_include_candidates` and a per-slot tick read
+(`crates/boyko_ecs/src/ecs/core/iters/query/filter.rs:1000-1060`, `:1321-1390`). The `Or<(..)>`
+`QueryFilter` impl **overrides none of them** (`filter.rs:1834-2030` sets `IS_ARCHETYPAL`,
+`NEEDS_CHANGE_DETECTION`, `CONTAINS_ENABLE_TERM`, `CONTAINS_CHANGE_DETECTION` and nothing else), so
+they all take the trait defaults: `HAS_DENSE = false`, `HAS_DENSE_INCLUDE = false`, `resolve_dense`
+an empty body. The cursor therefore never resolves the inner term's `DenseStore`, its
+`ChangedFetch.dense` stays the `init_fetch` NULL, and `filter_fetch`'s first line is
+`if fetch.dense.is_null() { return false; }` (`filter.rs:1483-1484`). The tuple-as-AND impl should be
+checked for the same omission.
+
+Note that `matches_component_set` for a dense `Changed<C>` returns `true` unconditionally
+("signature-excluded; the exact per-row gate is `filter_fetch`"), so the `Or`'s per-arm `matches`
+flag is set and the dead arm IS evaluated — it just always answers `false`. Nothing anywhere reports
+it.
+
+### Why it matters beyond the UI
+
+Two in-flight plans were writing against the property this refutes.
+`UI-ADVANCED-ARCHITECTURE.md`'s tier table listed the **dense** `UiSpriteCursor` as "a term of
+`ui_render_discovery`'s `Or<…>`", and `UI-PLAN-ANIMATION-DECISIONS.md` plans `UiVisual` as a dense include
+(`AM2`, ~~`:112`~~ — the claim is the *cost model* paragraph, not the bench-axis line the anchor
+pointed at) while `ui_render_discovery`'s filter is a flat `Or` — so `Changed<UiVisual>` would
+have been dead too, and the symptom in both cases is a frozen picture with no error, no panic and no
+failing assertion. ~~Both documents are amended.~~
+
+⚠️ **"Both documents are amended" was FALSE for the `UiVisual` half, and stayed false for six days.**
+Verified 2026-08-27 at the A1 pre-build audit: [`UI-PLAN-ANIMATION-DECISIONS.md`'s AM2](UI-PLAN-ANIMATION-DECISIONS.md#am2--d9bs-a-uivisual-row-with-no-live-channel-is-skipped-is-false-for-an-all-dense-anyof) still asserted
+*"`Mut<UiVisual>` is a dense include"* and derived its whole per-frame cost model, A8's bystander
+bench axis and AD7's `dense_registry().store(UiVisual::component_id())` guard from it; A1's landing
+list named the storage kind of the four `Tween*` and **not** of the sink; and
+`UI-ADVANCED-ARCHITECTURE.md`'s D9 still spelled `#[component(storage = "dense")] pub struct
+UiVisual`. Only the `UiSpriteCursor` half had been applied — to the tier table's row 1, which names
+`UiVisual` in the same cell. The shipped tree, meanwhile, had ruled and said so:
+*"Animation adds `UiVisual` HERE (a table component — **the animation plan's own text is corrected to
+say so**)"* (`crates/boyko_render/src/ui/gather.rs:121-122`) — a claim about a document, made in source,
+and untrue at the moment it was written. **Both documents are amended NOW** (2026-08-27):
+`UI-PLAN-ANIMATION-DECISIONS.md` [**AM8**](UI-PLAN-ANIMATION-DECISIONS.md#am8--d9-declares-uivisual-dense-and-d10-makes-it-a-term-of-ui_render_discoverys-or-those-two-cannot-both-be-true) and [**AD10**](UI-PLAN-ANIMATION-DECISIONS.md#ad10--uivisual-is-a-table-component-the-four-tween-are-dense) rule the sink TABLE and the four channels dense, with the
+measurement; `UI-ADVANCED-ARCHITECTURE.md`'s D9 attribute and D9b's query are struck and corrected in
+the same change. *(The lesson is the entry's own: a cross-document amendment is not landed when it is
+decided, and "amended" written in a shared record is a claim that needs the same verification as any
+other. This corpus is outside the anchors census's `GATED_DOCS`, so nothing reddened.)*
+
+### The options, for the owner
+
+1. **Fix the `Or` impl** — OR-fold `HAS_DENSE` / `HAS_DENSE_INCLUDE` over the members, forward
+   `resolve_dense` and `dense_include_candidates` to each. It is the same paired-ident macro that
+   already forwards `set_table_*`, so the shape exists; the gate is a runtime test per the existing
+   `dense_d4_change_detection.rs` shape, since a type-level test cannot see it.
+2. **Forbid it at compile time** — a sealed `OrComposable`-style bound that a dense `Changed`/`Added`
+   does not satisfy, turning a silent no-op into `error[E0277]`. Cheaper, and it is the `M1`
+   precedent this same impl already uses to keep `Enabled<T>` out of an `Or`.
+3. **Document it and move on** — the S5 route: keep repaint-driving data in table columns. This is
+   the status quo plus a written warning, and it leaves the trap armed for the next reader.
+
+**Recommendation: (2) now, (1) when a subsystem actually needs it.** A silent always-false filter term
+is the campaign's own headline defect class — a gate that cannot fire — and (2) removes the
+possibility rather than handling it, which is the discipline `ui_node_sub_codes` was rewritten under.
+This is a VALUES/SCOPE call because (1) touches the kernel's query core and its cost is a real design
+review, not a patch.
+
+---
+
+## 2026-08-21 — SCOPE: `host_upload_frame` + `pack_sort_upload` are public API with no caller in the workspace — delete them, or wire the host that `APP-HOST-PLAN.md` already specifies?
+
+**Status: OPEN — SCOPE, owner's call. Not blocking S4**, which routes around them
+([`UI-PLAN-SPRITES-DECISIONS.md` **S-D13 (2)**](UI-PLAN-SPRITES-DECISIONS.md#2-s4-does-not-expand-the-legacy-loop--it-has-no-caller-in-this-workspace): the nine-slice expansion lands in `gather_into_staging` only).
+
+### The measurement
+
+Four greps, all re-runnable, all over `crates/` + `src/` + `tests/`:
+
+* **`pack_sort_upload`'s only non-doc caller is `host_upload_frame`** (`upload.rs:526`).
+* **`host_upload_frame`'s only non-doc occurrence in the entire tree is its own definition**
+  (`upload.rs:509`). Every other hit is a doc comment, and two of those (`ui/upload.rs:39`,
+  `boyko_ecs/src/ecs/core/system/dispatcher_token.rs:531`) describe the already-DELETED
+  `host_upload_frame_from_world`. **The tests do not reach it either** — which is a change since the
+  research corpus's finding 3 (`UI-ADVANCED-RESEARCH-SPRITES.md:210`), written when it was
+  test-driven.
+* **Neither name is re-exported** from `crates/boyko_render/src/lib.rs` or `src/ui/mod.rs`. They are
+  public only as inherent methods on the re-exported `UiUploadSystem`, so they ARE public API — with
+  zero in-workspace callers.
+* The only mention of `UiUploadSystem` outside `boyko_render` is a doc comment
+  (`dispatcher_token.rs:531`).
+
+This is the surviving half of the path **S0 already replaced** with the two-phase seam. Its
+world-facing sibling `host_upload_frame_from_world` was deleted at S0 for having no possible caller
+(the entry below); this half was left standing.
+
+### Why it is not simply deletable — the counter-evidence, stated so the call is made on both halves
+
+**`docs/APP-HOST-PLAN.md` still prescribes it.** Op 5 of the per-frame sequence is
+`if has_ui { pack_sort_upload(&token) }` (`APP-HOST-PLAN.md:316`), and R0b's token-discipline churn list names
+`pack_sort_upload` among the borrow-taking writers to migrate (`APP-HOST-PLAN.md:136`), with the `has_ui` boot gate
+at `APP-HOST-PLAN.md:230` and the token rule at `APP-HOST-PLAN.md:343`. That prescription is **unimplemented** — `boyko_app` does not
+drive the UI pass at all — but it is a live plan, not dead prose. So the two functions are either
+*dead code awaiting deletion* or *a landed API awaiting its caller*, and which one they are is a
+scope decision about the host, not about the UI.
+
+### The options
+
+1. **Delete both.** Removes ~70 lines of unexercised public API and one of the two pack encodings,
+   which is the source of the "two loops, two append encodings" hazard that has now cost this
+   campaign three separate gate re-pointings (S3's reconciliations, S-D12's G4-1, S-D13 (2)).
+   Requires striking `APP-HOST-PLAN.md` op 5 and re-specifying the host's UI upload on the two-phase
+   seam.
+2. **Keep and wire.** Implement `APP-HOST-PLAN.md` op 5 so the legacy loop has a caller and the
+   golden/host path is real. Then S4's expansion would owe that loop a second implementation after
+   all — but with a gate that can be run, which is what S-D13 (2) actually objected to.
+3. **Keep, unwired, documented as such.** The status quo, with a doc note at the definition. Cheapest
+   now; it is also how this pair reached its current state.
+
+**What it blocks:** nothing today. What it costs if left: every UI rung from here on must re-derive
+the reachability before it can decide whether "in both loops" is an instruction or a trap. S4 is the
+third rung to pay that cost.
+
+---
+
+## 2026-08-21 — UI-ADVANCED S4 stopped BEFORE the first line: the nine slices are painted, then covered by the image they slice
+
+**RESOLVED 2026-08-21 (architect's ruling, recorded as [`UI-PLAN-SPRITES-DECISIONS.md` **S-D12**](UI-PLAN-SPRITES-DECISIONS.md#s-d12--a-nine-sliced-nodes-slices-are-its-image-sub-10-is-suppressed-the-source-split-is-an-authored-border_uv-and-a-slice-with-no-texture-is-a-structural-skip); still no S4
+code written). All four questions ruled; ~~S4 is buildable as amended.~~ **RE-OPENED THE SAME DAY and
+resolved a second time by [`UI-PLAN-SPRITES-DECISIONS.md` **S-D13**](UI-PLAN-SPRITES-DECISIONS.md#s-d13--the-ruling-that-had-no-red-the-loop-that-has-no-caller-and-ten-sentences-that-could-not-be-written-as-spelled) — the implementer refused the S-D12-amended
+rung as well, and was right a second time.** The findings below stand as
+raised — every premise was re-verified at source before being ruled on, and two of them turned out
+stronger than reported. The resolution is at the end of this item.
+
+> **✅ THIRD BLOCK CLEARED — S4 IS BUILT AND LANDED, 2026-08-21.** The third implementer built
+> the S-D13-amended rung. Ten further corrections were needed and are ruled as
+> [`UI-PLAN-SPRITES-DECISIONS.md` **S-D14**](UI-PLAN-SPRITES-DECISIONS.md#s-d14--the-ten-corrections-landing-found-and-the-two-reds-that-could-not-fire-as-ruled); **two of them are this campaign's own headline class, and neither
+> was visible to reading — both were found by applying the mutation and watching the wrong thing
+> happen:**
+> **(a)** **M4-c2's ruled sub pair fires for the wrong reason.** Sub 0 is pushed for EVERY node, so
+> swapping the decode arms for sub 0 and sub 9 sends every node's background record — including
+> nodes with no `UiNineSlice`, one of which G4-2's scene contains by construction — into an arm that
+> resolves `nine_slice` and PANICS before any order assertion runs. The pair is **sub 1 (TL) and
+> sub 9 (BR)**: total on the sliced node, count unchanged, and it reds G4-2 on the per-slice `min_px`
+> the row already reads.
+> **(b)** **M4-d's ruled bound is a red that cannot fire.** `assert!(scratch.pack.capacity() <
+> 2 * emitted)` was applied against a setup-time reserve and came back GREEN — `sort_by_stack` ends
+> in `core::mem::swap(&mut self.pack, gather)`, so the two buffers rotate every frame and the reserve
+> was parked in the caller's `gather` (measured: `pack 4 096 / gather 22 528`). The bound belongs on
+> the PAIR.
+> The other eight: `fill_center` had no ruled `Default` and `bool::default()` falsifies the picture
+> ruled one field earlier; `UI_NINE_SLICE_MODE_COUNT` was named by a ruling and minted by no Lands
+> item; the gate table's preamble over-claimed (three of eight rows drive no pack loop, not one);
+> Lands item 2's emitter shape is not writable as spelled; G4-3 stated no TINT and `UiImage`'s
+> default tint is alpha 0, which disarms two reds; G4-3 could pass without comparing anything
+> (`BOYKO_UI_GOLDEN_REQUIRE_DEVICE=1` now makes a skip fail); G4-8's "either build profile" had no
+> release invocation; and the measurement paragraph's noun was off by the probe that is not a pack
+> input.
+> **All eight gates green with exit codes seen unpiped, all eight reds applied and OBSERVED, both
+> mutated sources restored byte-identically (`cmp` + SHA-256), the five existing image pins
+> unmoved, and the new pin blessed with all ten of its colours counted.** Full record:
+> [`UI-PLAN-SPRITES-DECISIONS.md` **S-D14**](UI-PLAN-SPRITES-DECISIONS.md#s-d14--the-ten-corrections-landing-found-and-the-two-reds-that-could-not-fire-as-ruled) and the [**S4 · LANDED**](UI-PLAN-SPRITES-S4.md#s4--landed-2026-08-21--the-landed-set-the-red-ledger-the-golden-and-what-the-build-found) section.
+
+> **⚠️ Second block, 2026-08-21, AFTER the resolution below was written.** S-D12 ruled these four
+> questions correctly and introduced two blocking defects of its own, both confirmed by an
+> adversarial pass:
+> **(a)** its truth table made the image record and the BR sub-quad **mutually exclusive**, which
+> rendered **M4-c unapplicable** — leaving **G4-2**, the row carrying S-D12 (1)'s own headline claim,
+> with **no red at all** (G4-5 and G4-7 turned out to be named by none either). Split into M4-c1
+> (emit sub 10 as well) + M4-c2 (swap the decode's arms for sub 0 and sub 9 — **not** the key push,
+> which the sort normalizes away).
+> **(b)** `pack_sort_upload`, the loop that both Lands item 2 and G4-1 required the expansion to land
+> in, **has no caller anywhere in this workspace** — the surviving half of the path S0 replaced. S4
+> now expands `gather_into_staging` only. Its deletion is a public-API SCOPE question and is filed as
+> its own item above.
+> Twelve amend-level findings came with them, including one this entry must own: **S-D12 changed
+> G4-3's border to `[16,24,16,24]` in one row and left M4-b's margin — and two of its own
+> sentences — computing from `[16,16,16,16]`.** The doc-rot-repair class, committed by the repair.
+> Full record: [`UI-PLAN-SPRITES-DECISIONS.md` **S-D13**](UI-PLAN-SPRITES-DECISIONS.md#s-d13--the-ruling-that-had-no-red-the-loop-that-has-no-caller-and-ten-sentences-that-could-not-be-written-as-spelled) and ledger rows **20-33**.
+
+~~**Status: BLOCKING. Two contradictions and one wrong number, in the rung as AMENDED by the
+2026-08-21 pre-build audit. No S4 code was written; the protocol's stop condition ("a gate that
+cannot fail, a red that cannot fire, a contradiction") is met three times over.**~~
+
+⚠️ **Two coordinates in this entry are DEAD, and they were dead BEFORE the 2026-08-28 plan split —
+so they are MARKED, not repaired.** `UI-PLAN-SPRITES.md:917` (cited twice below, in §1 and §2) and <!-- doc-anchor-ignore -->
+`UI-PLAN-SPRITES.md:1019` (cited once, in §1) do not hold what the citing sentences attribute to <!-- doc-anchor-ignore -->
+them, and re-reading the pre-split blob `2a10f3a4` — the last tree on which that file existed as one
+document — shows they did not hold it there either:
+
+* `:917` sits mid-sentence inside **S0's discovery-test note**; its readable remainder on that tree <!-- doc-anchor-ignore -->
+  is *"with a message naming the three places to add it"* — `ui_pack_inputs!` and `PackInput::ALL`,
+  nothing to do with `UiNineSlice`'s field list.
+* `:1019` reads *"frames — the sheet bleed S-D7 designed a guard around, reproduced by the mechanism <!-- doc-anchor-ignore -->
+  that retired"* — the S-D11 tiling argument, not the G4-4 self-gating quote attributed to it.
+
+**Neither repair the neighbouring sites use is available here.** Stamping them "pre-split `:917`", <!-- doc-anchor-ignore -->
+the form every re-aimed coordinate in this document carries, would assert the coordinate was good on
+the pre-split tree — a NEW falsehood, written by the repair. Silently re-aiming them at whatever now
+holds the quoted text is what this document's own ruling forbids: a dangling coordinate and a
+re-aimed one are different facts, and only the first says the referent was never at that address.
+They stand as written, marked dead, for the owner to re-source. ⚠️ **No gate can catch either**:
+neither this document nor the UI plans are in the anchors census's `GATED_DOCS`, and that census
+reads `file.rs:N` anchors, not `file.md:N`.
+
+### 1 — the emission contract occludes itself (BLOCKING)
+
+**S-D11 (3)** fixed the record count as ADD and stated the consequence "so no gate has to guess"
+([`UI-PLAN-SPRITES-DECISIONS.md` S-D11](UI-PLAN-SPRITES-DECISIONS.md#s-d11--tiling-is-frac-inside-the-sub-rect-it-belongs-to-s5-and-the-nine-sub-quads-are-added-to-the-background-rect-not-substituted-for-it), pre-split `:389-392`): sub **0** background, subs **1..=9** the nine-slice regions,
+sub **10** the image — *"A nine-sliced node emits **10** records …, **11** with an image."*
+
+Four facts in the tree turn that arithmetic into a self-cancelling picture:
+
+* **The only texture a sub-quad can sample is the node's own `UiImage`.** `UiNineSlice` as ruled
+  (`UI-PLAN-SPRITES.md:917` — ⚠️ dead, and dead pre-split; see the note at the head of this entry) <!-- doc-anchor-ignore -->
+  carries `border_px`, `mode`, `fill_center`, `_pad` — **no slot and no UV**. So a *visible*
+  nine-slice REQUIRES the node to carry `UiImage`.
+* **The image record is the WHOLE node rect at the WHOLE authored sub-rect.**
+  `pack_ui_image_instance` covers "the SAME `ComputedRect` as the node's background"
+  (`ui/pack.rs:289-292`) and packs `input.rect` verbatim with `uv: image.uv` (`ui/pack.rs:332-342`).
+* **It paints LAST.** D4's order is *background → nine-slice sub-quads → image*
+  (`UI-ADVANCED-ARCHITECTURE.md:250`), and both pack loops emit in ascending append order
+  (`ui/upload.rs:428-436`, `ui/upload.rs:554-565`), so sub 10 lands after subs 1..=9.
+* **Premultiplied-alpha blend means an opaque source REPLACES the destination**
+  (`ui/resources.rs:439`, `BlendState::PREMULTIPLIED_ALPHA`).
+
+**Therefore, on G4-3's own scene** (96×96 node, 3×3 opaque source, opaque tint, `border_px = 16`):
+the nine slices cover 9 216 px and the sub-10 image covers the same 9 216 px on top of them. The
+pinned image IS a plain stretched sprite, and:
+
+* **G4-3 cannot fail as a pin** — it would bless the picture that proves nine-slice does NOT work;
+* **M4-b cannot fire** (`UI-PLAN-SPRITES-S4.md:304`) — moving a corner from 16×16 to 32×32 moves only occluded geometry;
+* **M4-e cannot fire** (`UI-PLAN-SPRITES-S4.md:397`) — permuting two sub-quads' source UVs moves only occluded geometry.
+
+*(The `border_px = 16` and the 16×16 corner above are the scene **as it stood when this was raised**.
+The resolution's own ruling (2) changed the border to `[16, 24, 16, 24]` in the same day's edit, which
+makes a correct corner 16 × 24 = 384 px and M4-b's delta 2 560 of 9 216 — recorded here because
+leaving the old arithmetic to be discovered downstream is exactly the doc-rot the second block below
+had to correct in three other places. The finding is unaffected: an occluded delta of any size is
+still zero.)*
+
+Note the audit ledger's own row 3 caught the mirror-image of this for glyphs and the focus ring
+("subject unconstructible") but did not ask whether the two terms it KEPT can coexist.
+
+**The escape hatch is closed too.** G4-3 could avoid the occlusion by hand-packing nine
+`UiInstance`s directly (the shape `ui_sprite_gpu_golden.rs:130-149` already uses), never
+constructing an ECS node and so never emitting sub 10. But that is the *self-gating* defect this
+same audit flagged one row later for G4-4 — "its `build_frame` calls `pack_ui_instance` directly, so
+extending it would re-implement the expansion policy inside the test and gate the test against
+itself" (`UI-PLAN-SPRITES.md:1019` — ⚠️ dead, and dead pre-split; see the note at the head of this <!-- doc-anchor-ignore -->
+entry). So G4-3 either drives the production emitter and is occluded,
+or hand-rolls the expansion and tests itself. **Both branches are defective; there is no third.**
+
+**The decision needed (architect's, not the implementer's — S-D11 (3) is where the record count was
+ruled).** Does `UiNineSlice` **suppress** the sub-10 image record — the slices ARE the image, sliced
+— leaving a nine-sliced node at 10 records (9 without the centre) and `UI_RECORDS_PER_NODE = 11` as
+the *stride*? That is the only reading found in which the rung draws what it exists to draw, it
+leaves D4's ORDER intact (the image term is simply absent when slicing is on, the way a rect-only
+node has no image term), and it keeps S-D8's default-OFF row byte-for-byte. But it contradicts
+S-D11's stated arithmetic, and S-D11's ADD reasoning ("the background is the surface the frame sits
+on") argues only about the BACKGROUND — it never contemplated the image record surviving beside the
+slices.
+
+### 2 — the SOURCE-side UV split is stated nowhere (BLOCKING)
+
+Nine destination rects come from `border_px`. Nine **source** sub-rects come from nothing:
+
+* `UiNineSlice` carries no source inset (`UI-PLAN-SPRITES.md:917` — ⚠️ dead, and dead pre-split; see <!-- doc-anchor-ignore -->
+  the note at the head of this entry);
+* `UiImageInput` is `{ slot, uv, tint }` — **no texture dimensions** (`ui/pack.rs:28-40`), and
+  `border_px` is a *destination* quantity, so px → UV is not convertible without them;
+* the dimensions cannot be fetched at S4 even in principle: the bindless table lives behind
+  `RhiContext`, which is **Phase 2's `!Send` projection** (`ui/upload.rs:774`) and is structurally
+  unreachable from the Phase-1 pack — and reading them in the shader is a shader change, which S4
+  is defined not to make (S-D11 (2)).
+
+Unity and Bevy both specify the border in **source texels** and both have the texture size; this
+pack has neither. A grep across the plan, the architecture and the research corpus returns **no
+statement of the rule** (`UiSheet.inset_uv` at `UI-PLAN-SPRITES-S5.md:19` is S5's half-texel bleed guard, a different
+thing). Meanwhile **M4-e presupposes it exists** ("swap the TL and TR sub-quads' *source UV
+sub-rects*"), and G4-3 pins a 3×3 source without saying why 3×3.
+
+Only one rule is implementable at S4 from data the node carries: **split the node's `uv` rect into
+equal thirds**. It is exact for G4-3's 3×3 source and it makes M4-b and M4-e fire. It is also
+genuinely restrictive (a 32×32 chrome with an 8 px border wants 1/4, not 1/3). The degenerate
+alternative — source fractions = destination fractions — is excluded by measurement-free reasoning:
+it makes slicing a no-op and M4-b unable to fire. **This is a decision by elimination, and the
+campaign's own rule is that an undetermined datum gets ruled, not guessed** — it is the same class
+as the record count the audit itself escalated (ledger row 4).
+
+### 3 — M4-f's threshold is a category error (recorded, non-blocking)
+
+`:1074` — *"the box overflows at 187 nine-sliced imaged nodes"*. At stride 11 into a 4 096-row box,
+**187 nodes emit 2 057 records and do not overflow**; the first overflowing node is **373**
+(11 × 372 = 4 092 ≤ 4 096 < 4 103). `187 = ceil(2048 / 11)` — the NODE budget divided by the stride
+instead of the ROW budget. The red still fires because G4-6 drives `UI_MAX_NODES = 2048` nodes
+(22 528 records), so only the explanatory number is wrong; but it is a number asserted rather than
+computed, in a rung whose own ledger opens with that class.
+
+### What is NOT in dispute
+
+Lands items 6 (`ui_pack_inputs!` gains `UiNineSlice`), 7 (the decode becomes a match, the key push
+becomes a loop) and 8 (`UI_STAGING_ROWS = UI_MAX_NODES * UI_RECORDS_PER_NODE` = 22 528 rows =
+1.72 MiB) are all verified correct against the tree and are buildable the moment (1) and (2) are
+ruled. G4-6's scene fits the derived box exactly (2 048 × 11 = 22 528).
+
+### RESOLUTION — 2026-08-21, [`UI-PLAN-SPRITES-DECISIONS.md` **S-D12**](UI-PLAN-SPRITES-DECISIONS.md#s-d12--a-nine-sliced-nodes-slices-are-its-image-sub-10-is-suppressed-the-source-split-is-an-authored-border_uv-and-a-slice-with-no-texture-is-a-structural-skip)
+
+**(1) SUPPRESS.** `UiNineSlice` + `UiImage` ⇒ the image is drawn **sliced**: subs 1..=9 are the whole
+of its rendering and **sub 10 is not emitted**. 10 records (9 without the centre);
+`UI_RECORDS_PER_NODE = 11` stays, now explicitly as the **stride**, with a hole in the sub space that
+costs nothing. *Reason:* nine-slicing is a rendering **mode of an image**, not a layer above one —
+Unity's `type = Sliced`, Godot's `NinePatchRect` and Bevy's `NodeImageMode::Sliced` all slice the
+image *instead of* drawing it, and all three keep the node's own background beneath, which is the half
+S-D11 ruled correctly. A node wanting a sliced frame **and** an unsliced picture is **two nodes** — a
+nine-sliced parent with an imaged child, exactly as in all three engines — which the DFS gather over
+`Children` already supports with no new datum, and which is what "capability is component presence"
+requires: `UiNineSlice`'s presence *is* "draw my image sliced".
+
+**(2) An authored `border_uv: [f32; 4]`** — the source inset per side, as a **fraction of the current
+UV sub-rect**, `[l, t, r, b]` (matching `PackInput::border_width`, not `corner_radius`). Component
+**20 B → 36 B** (measured under rustc 1.97.1, both spellings; the two trailing bytes are implicit tail
+padding again, so `_pad` stays), **zero GPU bytes** — the split resolves at pack into each sub-quad's
+`uv`. Equal thirds is its `Default`, so option (a) survives as the zero-configuration case and G4-3
+authors no new field, but is not the rule — a 32×32 chrome with an 8 px border wants 1/4, and a rule
+right only for third-sized cells is one an author discovers wrong, not a gate. **Fractions of the
+sub-rect rather than absolute UVs** is the load-bearing half: at S5 the sub-rect becomes a flipbook
+frame that changes every tick, and a fraction is frame-invariant — the same "wrap and inset both
+belong to the sub-rect" property S-D11 (1) found for `frac`. *One premise came back stronger than
+raised:* the texel size is not merely unreachable behind the `!Send` projection — **the engine never
+records it**. `BindlessTextureTable::register` takes a bare `VkImageView` (`boyko_render/src/bindless.rs:287`) and the
+table holds no dimension map (`:217-221`), so Unity's and Godot's texel-border shape is unavailable
+rather than deferred. Validity is ruled too (it was unstated): each side in `[0,1)`, `l + r < 1` and
+`t + b < 1`, `debug_assert!` in dev and a proportional shrink in release, with the same shrink for the
+destination twin `border_px[0] + border_px[2] > rect.w` — a 96×96 chrome tweened to 8×8 is an ordinary
+animation and without it the corners overlap and the edges invert.
+
+**(3) A nine-sliced node with no `UiImage` emits its background and nothing else** — `UiNineSlice`
+alone is a **no-op**, not nine invisible quads. It is the structural-skip rule S3 already spells at
+`pack.rs:205`. The rule that discharges Lands item 7 properly: **the key push is the sole authority on
+which subs exist**, so every arm of the decode's `match` has its precondition established at the push
+and **no `.expect` is reachable for any of the four component combinations**. New gate **G4-8** (all
+four rows of the truth table in one world, derived count, no panic) and new red **M4-g** — because
+item 7 fixed a release panic and no gate constructed the node that panics.
+
+**(4) 410**, not 187 and not 373. `187 = ceil(2048/11)` was the NODE budget over the stride;
+correcting only that gives 373; ruling (1) makes it 10 records/node, so **410**
+(`10 × 409 = 4 090 ≤ 4 096 < 4 100`). Computed. The red is unaffected — G4-6 drives 20 480 records
+into a 4 096-row box — and item 8's derivation stays on the **stride** (22 528 rows, 1.72 MiB): the
+160 KiB of slack over the true worst case buys a constant that cannot go stale when a later rung adds
+a sub code.
+
+**Two further findings folded in.** **G4-1** was wrong on one loop and unobservable on the other —
+`pack_sort_upload`'s `append` is the running record index (`ui/upload.rs:549-553`), not the `(node, sub)`
+code, and `UiUploadSystem.keys` is private (`ui/upload.rs:206`) — so it now asserts the **consequence** in
+`staged()`, which is strictly stronger: reading the key lane before the sort would go green on exactly
+M4-a's duplication-and-loss. No accessor was added. **G4-3's `border_px = [16,16,16,16]`** repeated
+the amendment's own symmetry blindness one axis over (`[l,t,r,b]` and `[t,l,b,r]` hash identically,
+and no site stated the order at all) and becomes `[16, 24, 16, 24]`. **G4-7's instrument** was already
+repaired in the tree at `50a724ac` and the row now names the `PackInput` enum so the property is not
+re-lost.
+
+---
+
+## 2026-08-21 — UI-ADVANCED S0 stopped at a plan defect: `host_upload_frame_from_world` has no POSSIBLE caller, and S0's observer + two gates are specified against it
+
+**RESOLVED 2026-08-21 (architect's WorldView ruling; landed the same day).** The finding, in
+substance:
+
+* **Option (a) (`EcsMaster::world_view`) is SOUND — and REFUSED as a dead datum at birth, not as
+  unsound.** `WorldView` is ptr + `PhantomData` + a debug `ThreadId` — no tick, no epochs, no
+  command queue — so a `&mut EcsMaster` mint discharges its invariants at least as strongly as the
+  token's (`DispatcherToken::new`'s own Safety block, `dispatcher_token.rs:87-92`, blesses
+  "`&mut EcsMaster` ⇒ `running == 0` at the language level"). But it does NOT unblock:
+  `RhiContext` is a NonSend resource inside the SAME `EcsMaster`, so `world_view()` +
+  `nonsend_resource_mut()` conflict on the master exactly as `world()` + `nonsend_resource_mut()`
+  conflict on the token — the same E0502 one level up. The conflict is SEMANTIC, not syntactic:
+  both operands of the fused signature are projections of one object.
+  `run_closure_once` already serves host-time reads.
+* **Option (c) (unsafe smuggling) confirmed rejected** against `dispatcher_token.rs:13-18` — the
+  previously hand-asserted form of this property was UB on two axes (C1 worker reachability, M1
+  aliasing).
+* **The fix: sequence, never fuse, inside one `run_dispatcher`** (mirroring the shipped
+  `GpuSystem` ordering). Phase 1 (shared borrow): the generation gate + `gather_into_staging`
+  against the token's read-only view, the view dropped at the phase's closing brace, only the
+  packed COUNT crossing. Phase 2 (exclusive borrow): `nonsend_resource_mut::<RhiContext>()` +
+  `upload_staging` — no world type in the signature. `host_upload_frame_from_world` DELETED, not
+  re-signed — its parameter list WAS the defect.
+
+**Landed:** the two-phase `run_dispatcher` + `gather_into_staging`/`upload_staging` split + the
+preallocated staging `Box` in `boyko_render/src/ui/upload.rs`; the fused fn deleted; the plan's
+ten edit sites re-pointed ([`docs/UI-PLAN-SPRITES-S0-S2.md` S0](UI-PLAN-SPRITES-S0-S2.md#s0--the-seam-the-gate-the-observer--size-l)); the observer + G0-2 + G0-3 re-pointed at
+Phase 1 (device-free, bare `EcsMaster` — `tests/ui_s0_seam.rs`, green); G0-5 as the SEAM GATE
+(signature pins + the trybuild fixture `tests/ui_s0_seam_fusion/refused_refusion.rs`, E0502,
+blessed and green); measurement legs §10.8(d)/§10.3 run headless (static dispatch median
+0.2–0.4 µs, probes = 0 asserted; changed-frame full cost 231.7 µs @ 256 / 2250.3 µs @ 2048,
+unreduced by the gate — reported honestly). S2 is unblocked as written.
+
+**One claim of the ruling REFUTED by the compiler, recorded rather than landed.** The re-specified
+M0-a — "hoist Phase 1's braces (delete the view drop) ⇒ E0502 AT COMPILE TIME" — is FALSE under
+NLL: the view's borrow ends at its last use, so the hoisted-brace form COMPILES (probed in-tree
+2026-08-21, `cargo check -p boyko-render --lib` exit 0, no diagnostic). The compile-time tripwire
+exists on the shape that HOLDS the view across Phase 2 — M0-b (probed: E0502, exit 101) and the
+G0-5 fixture (blessed E0502) both red as ruled. The brace is landed as scope hygiene with a
+comment saying exactly this; the plan's M0-a row carries the refutation. The architect may want to
+re-rule M0-a (e.g. as a `#[deny]`-able lint shape or drop it in favour of M0-b + G0-5, which
+already cover the property).
+
+*(Original entry follows, unedited — the record of why the call was made outlives the call.)*
+
+**The situation.** [`UI-PLAN-SPRITES-S0-S2.md` rung S0](UI-PLAN-SPRITES-S0-S2.md#s0--the-seam-the-gate-the-observer--size-l) item 7 wires the observer through
+`UiUploadSystem::host_upload_frame_from_world`, item 5 hoists the D6a per-slot generation gate to
+the top of that same function, and gates G0-2/G0-3 (with reds M0-a/M0-b) drive it across frames.
+The plan's own fact table records the seam has "zero callers outside its own doc comments" — as a
+symptom. The cause turns out to be structural: **no caller can exist**. The signature demands a
+`WorldView<'_>` and a `&mut RhiContext` alive at the same call site, and every route dies in the
+compiler (all three probed in-tree on 2026-08-21, errors captured verbatim):
+
+1. **In-schedule shape** (`RhiContext` as the NonSend resource it already is,
+   `boyko_app/src/runner.rs:239`): inside `System::run_dispatcher`, `token.world()` borrows the
+   token shared and `token.nonsend_resource_mut::<RhiContext>()` needs it mutable —
+   **E0502** (`cannot borrow token as mutable because it is also borrowed as immutable`). This is
+   M1 working as designed (`dispatcher_token.rs` — "a `WorldView` cannot coexist with
+   `nonsend_resource_mut`").
+2. **Host shape, owning adapter** (`RhiContext`/`Renderer` as host locals, minted into a
+   `run_system_once` adapter): `System: Send + Sync + 'static` (`system/system.rs:57`) vs `RhiContext`'s
+   `*mut c_void` / `OnceCell` / `RefCell` — **E0277** (not `Send`, not `Sync`).
+3. **Host shape, borrowing adapter**: the same `'static` bound — **E0521/E0505** ("argument
+   requires that … is borrowed for `'static`").
+
+`WorldView` has private fields and exactly one constructor (`DispatcherToken::world`);
+`DispatcherToken::new` is `pub(crate)` with two mint sites (scheduler dispatch, `run_system_once`)
+— both put the caller inside a `Send + Sync + 'static` system. The set of shapes is exhaustive.
+
+Note the endgame recorded in `upload.rs`'s own doc ("until an ECS-resident swapchain handle
+exists") does not rescue the signature: shape 1 IS that endgame, and it is the E0502 case. The
+`WorldView`-taking form is unsalvageable even after the Renderer becomes a resource — an
+in-schedule body must gather, END the view borrow, then project the context, i.e. it can only ever
+call the split form (`host_upload_frame` on the gathered nodes).
+
+**What S0 landed anyway (defect-free half, gated, all green):** the `boyko-ui` Cargo promotion
+(item 1); `ui_pack_inputs!` with the one-spelling list (item 2); `gather_ui_nodes` + host-owned
+`UiGatherScratch` (item 3); `ui_render_discovery` (item 4); the per-slot
+`last_seen_generation: [u64; FRAMES_IN_FLIGHT]` + hoisted compare as specified (item 5 — compiles,
+but see below); both diagnostic counters (item 6). Gates G0-1 and G0-4 run green
+(`boyko_render/tests/ui_s0_discovery.rs`); M0-c redded as specified (E0308 "expected a tuple with
+3 elements" AT the gather); M0-d redded on G0-1's settle assert (its declared gate G0-2 cannot
+run). **Blocked by the defect:** item 7 (observer), G0-2, G0-3, G0-5, M0-a, M0-b, and measurements
+§10.8(a,d)/§10.3. Item 5's hoisted compare is therefore LANDED BUT UNGATED — a gate inside a
+function nothing can call is exactly the "gate that could not fail" class this plan warns about,
+which is why this entry exists instead of a quiet green report.
+
+**The options (architecture fork — but it edits the KERNEL's capability surface and re-specifies a
+plan rung, so it is recorded before anyone lands it):**
+
+- **(a) One kernel API:** `EcsMaster::world_view(&mut self) -> WorldView<'_>` — sound by the same
+  argument `run_system_once` already makes (`&mut self` ⇒ `running == 0` at the language level);
+  the host then holds the view + its own locals, and item 7 lands as written. One function in
+  `boyko_ecs`, no unsafe surface for callers.
+- **(b) Re-specify the seam:** drop the `WorldView` parameter; the gather half takes `&EcsMaster`
+  (whose `&self` read surface is exactly what `WorldView` forwards to), or the plan's item 7 is
+  re-worded to the callable decomposition (gate → `run_system_once(gather)` → `host_upload_frame`).
+- **(c) Not an option:** an adapter smuggling `*mut RhiContext` behind `unsafe impl Send/Sync` —
+  production wiring routing around M1/M2 through the exact hole they exist to close.
+
+Blocks: the rest of S0 (observer, G0-2/G0-3/G0-5, M0-a/M0-b, §10.3/§10.8), and therefore the S2
+image-hash protocol's "the observer exists before the gate" sequencing argument (SR1).
 
 ## 2026-08-20 — Gate #17: two findings about the INSTRUMENT, one fixed in this commit and one still open
 
@@ -9080,6 +10507,295 @@ The pass-7 verifier's `v8/` is the source of (A)-(E): `debt.py`, `leadin.py`, `i
 
 ---
 
+## 2026-08-21: UI-ADVANCED S3 — `NonUniformResourceIndex` is UNGATED on this box, and the reason is the same one that made §10.1 flat
+
+**Status: recorded, not blocking. Owner-facing because it is a gate that CANNOT fail here, which is
+the class this project keeps finding late.**
+
+S3's red mutation **M3-b** — drop `NonUniformResourceIndex` from the `ui_rect.fs` sprite branch,
+re-emit, re-DXC — was run on this box (RTX 3060 Laptop, validation on). It **did not red**. Not the
+new 64-slot gate (`ui_sprite_divergence.rs`: 256 dense 4×4-px quads over 64 distinct bindless slots,
+every quad asserted against its own texture), not either sprite golden, not the validation
+messenger.
+
+**The cause is structural, and it is the same fact behind §10.1's flat measurement.** The descriptor
+index is `nointerpolation`, i.e. per INSTANCE. This rasterizer does not pack one warp from two
+primitives, so a per-instance index is wave-uniform *by construction* here — there is no divergence
+to punish, which is also why 1 / 8 / 64 distinct slots timed identically. Two observations, one
+cause; each makes the other believable.
+
+**Why the qualifier stays anyway.** A non-uniform descriptor index without it is **undefined
+behaviour by the Vulkan spec**, not "usually fine". Another driver, another vendor, or a future
+rasterizer that packs warps differently is free to resolve one lane's descriptor for the whole wave.
+Removing it because this box tolerates it would be trading a spec guarantee for one machine's
+observation.
+
+**What IS live on it:** the byte gate. `ui_rect_spv_sync` sees the qualifier's removal (the `.spv`
+moves 8760 → 8680 B) even though no pixel does, and `ui_rect_edsl_sync` sees a hand-edit of the
+span. So the qualifier is pinned to the generator — which catches an accidental removal, but is not
+the same thing as a test that catches its CONSEQUENCE.
+
+**The open half, for the owner:** whether this campaign should acquire a hardware leg that can
+actually make a divergent-descriptor read wrong (a vendor whose warps span primitives, or a
+synthetic shader that forces one wave across two indices), or whether "spec-required, byte-gated,
+consequence-unobservable-here" is the honest resting place. Nothing in S3–S5 depends on the answer;
+S7's Model-A disposition already has its number from §10.1.
+
+---
+
+## 2026-08-26: UI-ADVANCED S6 — a component's `on_remove` hook CANNOT enqueue a removal, because despawn fires it too and the entity is dead by the drain
+
+**Status: KERNEL DEFECT, worked around in S6. Owner-facing because the workaround leaves a capability
+missing, and because the shape generalises to every `on_remove` hook anyone writes.**
+
+S6 closes the sprite-cursor hole with `#[component(on_add = …)]` on `UiSpriteAnim`: the hook
+deferred-inserts the dense `UiSpriteCursor` through a one-field `Bundle` wrapper. That half works on
+every construction path (MEASURED: a fresh `Commands::spawn`, and `cmds.entity(e).insert(anim)` onto
+a live entity, both leave `has_component(e, UiSpriteCursor::component_id()) == true` with
+`dir: 1` after the apply).
+
+**The symmetric `on_remove` hook does not, and the failure is a panic rather than a no-op.**
+
+```
+thread '…' panicked at crates/boyko_ecs/src/ecs/core/commands/remove_command.rs:75:13:
+RemoveCommand::apply: stale entity Entity { id: EntityId(0), generation: 0 }
+```
+
+MEASURED, in this order:
+
+1. `on_remove` fires on an ordinary `cmds.entity(e).remove::<Anim>()` and the enqueued
+   `remove::<Cursor>()` applies correctly. That is the case the hook is for.
+2. `on_remove` ALSO fires on the per-component pass of a DESPAWN. At hook time the entity is still
+   live — `w.is_alive(ctx.entity)` reads **`true`** — so the obvious guard does not help. By the time
+   the outermost drain runs the enqueued `RemoveCommand`, the entity is gone, and
+   `RemoveCommand::apply` panics on the stale handle rather than treating it as a no-op.
+3. A despawn already reclaims the dense row on its own (`has_component` after despawn = `false`), so
+   the hook would buy nothing at despawn even if it could run.
+
+**So the hook is safe only for components nobody ever despawns**, which is not a property a component
+author can check. Today the only hazard is the one S6 declined to take, but any future
+`on_remove` hook that touches `commands()` inherits it silently.
+
+**Three options, and the SCOPE call is the owner's:**
+
+1. **Make `RemoveCommand::apply` (and `InsertCommand::apply`) tolerate a stale entity** — a dead
+   entity's component removal is already a no-op semantically. This is the smallest change and the
+   one that makes `on_remove` hooks generally usable. It weakens a deliberate liveness assertion,
+   which is presumably there to catch a different class of bug, so it is not free.
+2. **Give the hook a way to know it is firing inside a despawn** — an `on_despawn`-in-progress flag
+   on `HookContext`, or simply documenting that `on_remove` must not enqueue anything and enforcing
+   it. This keeps the assertion and makes the restriction visible instead of latent.
+3. **Leave it, and document `on_remove` + `commands()` as unsupported.** That is effectively the
+   status quo, and it is what S6 assumed once the measurement came back.
+
+**What it blocks today:** nothing. S6 lands `on_add` alone. An animation removed from a SURVIVING
+node (a `.ui` deletion that keeps the node) leaves an 8 B dense cursor row behind; it is inert (the
+flipbook queries all three components) and self-healing (a re-added animation gets a fresh `Default`
+cursor — MEASURED). Recorded in `docs/UI-PLAN-SPRITES-DECISIONS.md` [S-D20](UI-PLAN-SPRITES-DECISIONS.md#s-d20--the-s6-pre-build-audit-the-cursor-hole-closes-with-a-hook-and-six-of-the-rungs-own-sentences-did-not-survive-the-tree) (1) and [S-D21](UI-PLAN-SPRITES-DECISIONS.md#s-d21--the-six-corrections-building-s6-found-and-the-pre-existing-bug-the-rung-could-not-build-around) (1).
+
+---
+
+## 2026-08-26: UI-ADVANCED S6 — `.ui` bracketed values had NEVER parsed, and the test that should have caught it was green by coincidence
+
+**Status: FIXED in S6, recorded because the FALSE DOC and the coincidental green are the interesting
+half, not the one-line fix.**
+
+`crates/boyko_ui/src/text/split.rs`'s `split_top_level` tracked paren depth and quotes but not
+`[`/`]`. Its own doc said the P3 field list is *"provably free of `{`/`[`/quoted-comma values …
+locked by a rejection test"*. **Both halves were false**: GUI P6a added `UiImage`'s
+`uv_min`/`uv_max`, which are `[u, v]`, and `grep` finds no such rejection test anywhere in the tree.
+
+MEASURED consequence: `UiImage { texture: 7, uv_min: [0, 0], uv_max: [1, 1], tint: … }` split into
+`uv_min: [0` / `0]` / `uv_max: [1` / `1]`; `parse_f32_pair` rejected both UV fields; both kept their
+`Default`s; four recoverable errors went into the LOWERING report.
+
+**`p6a_equivalence::image_widget_three_ways_equivalent` was green over it for two independent
+reasons, and closing either one alone would not have been enough:**
+
+* `p3_common::spawn_dot_ui` asserts the PARSE report and hands the lowering an
+  `owned.report.clone()` that is dropped, so the four errors were unobservable through the harness;
+* the authored UVs happen to EQUAL `UiImage::default()`'s (`[0,0]` / `[1,1]`), so the mis-parse
+  landed back on the right values.
+
+A test that meant to prove "the `.ui` path carries these UVs" proved that the defaults are
+`[0,0]`/`[1,1]`.
+
+**Fixed** by making `(` and `[` open the same depth counter (and `)`/`]` close it). The
+`boyko_input` copy of the function is untouched — `.keys` has no bracketed values — so the file's
+"COPIED VERBATIM" header now reads "copied, then DIVERGED, and here is why".
+
+**The open half, for the owner:** the *harness* defect is still there. `spawn_dot_ui` drops the
+lowering report, so any `.ui` corpus test can be green over a per-field parse error. S6's own gates
+route around it (`ui_s6_authoring` captures the lowering report itself), but the shared harness is
+what most `.ui` tests use. Making `spawn_dot_ui` assert the lowering report would red today on
+anything else already mis-parsing, which is a repair rung with its own budget rather than a line in
+S6.
+
+## 2026-08-27: UI-ADVANCED A1 — a tween duration above ~6 days is accepted and is IMMORTAL, and the bound is a VALUES call
+
+**Status: OPEN — a VALUES call, deliberately NOT decided by the rung.** The behaviour is documented
+at the site and gated; what is not decided is whether to refuse it.
+
+`crates/boyko_ui/src/animation.rs`'s `invalid_tween_duration` guard closes **degenerate
+reciprocals** — `duration_ms` non-finite or not positively signed. It does **not** close the
+"immortal row" class, and A1 part 4 retracts any reading that it does.
+
+**The mechanism, MEASURED by exact `f32` simulation 2026-08-27.** `elapsed` is an `f32` accumulating
+`+= dt`, so absorption gives it a HARD CEILING — past it, `elapsed += dt` is a no-op and the value
+never grows again:
+
+| `dt` | `elapsed` ceiling | in days | frames to reach |
+|---|---|---|---|
+| 1/60 s | **524288 s** (`2^19`) | **6.068** | 24,986,955 |
+| 16 ms | 524288 s (`2^19`) | 6.068 | 25,150,895 |
+| 100 ms — the `UiClock` clamp ceiling | **2097152 s** (`2^21`) | **24.273** | 18,073,720 |
+
+A row completes only when `elapsed` reaches `duration_ms / 1000`. **Above the ceiling it never can,
+no matter how long the process runs.** At 60 Hz that boundary is `duration_ms > 5.24288e8`
+(≈ 6.07 days) — ⚠️ **STRICTLY above: the operator is `>`, not `>=`, because the boundary value
+itself COMPLETES.** Re-measured at THIS site 2026-08-27 (`rustc -O`, exact `f32`), because the
+number was first measured elsewhere and carried here: at `duration_ms = 5.24288e8` (bits
+`0x4dfa0000`, exactly `524288000`) `inv_duration` is bits `0x36000000` — exactly `2^-19` — so `t`
+at the ceiling is `524288.0 * 2^-19` = exactly `1.0` (bits `0x3f800000`), and `advance`'s `t < 1.0`
+spelling puts exactly `1.0` on the COMPLETING side. The first genuinely never-completing duration is
+ONE ULP ABOVE it: `5.24288032e8`, bits **`0x4dfa0001`**, whose `t` at the ceiling is `0.99999994`.
+The 100 ms clamp behaves identically — `2.097152e9` (bits `0x4efa0000`) reaches exactly `1.0` at
+`2^21` and completes; `0x4efa0001` is the first that does not. `1e10` ("115 days"), `1e30` and
+`f32::MAX` are **all** above it — so all three are
+immortal in exactly the sense the guard claims to have closed.
+
+**Why this is worse than the shape that IS refused.** An accepted over-ceiling row bumps
+`set_if_neq` on **every** frame. The REFUSED `+inf` bumps **zero** times after the first (its `t` is
+a constant). So `f32::MAX` — accepted — is strictly worse for the A4 repaint skip than `+inf` —
+refused — while the opacity it renders never leaves the neighbourhood of its START endpoint, which
+is visually the same picture as the refusal.
+
+⚠️ **The opacity figure, RE-MEASURED at THIS site 2026-08-28.** This sentence used to name
+`3.673e-36`, and that number belonged to **no frame of any fixture** — it is corrected rather than
+dropped. Read back FROM THE ENGINE through the gate's own `f32::MAX` arm
+(`start_tween_opacity(.., 0.0, 1.0, f32::MAX, LINEAR, 0)` at `FRAME = 100 ms`) and, independently,
+by exact `f32` simulation of `advance` — the two agreeing bit-for-bit on every frame and every arm:
+
+| frame | opacity | bits |
+|---|---|---|
+| 1 | **2.938736e-37** | `0x02c80001` |
+| 5 | **1.469368e-36** | `0x03fa0001` |
+
+⚠️ **`2.938736e-37` shares all seven mantissa digits with the `2.938736e-36` in the paragraph
+below**, and that is not a coincidence: `1000.0 / f32::MAX` is bits `0x047a0001`, the same bit
+pattern named there as the smallest duration with a finite reciprocal. A rendered opacity and a
+stored reciprocal are different quantities one decade apart — tell them apart by BITS, never by the
+printed digits. This adjacency is the most likely origin of the wrong figure above.
+
+**A second, benign boundary sits far below**, and is recorded only so it is not confused with the
+first: `1000.0 / duration_ms` overflows to `+inf` only for `duration_ms` below bits **`0x047a0001`**
+(`2.9387360564219222e-36`) — that is the SMALLEST duration with a finite reciprocal. ⚠️ **`250.0 ×
+f32::MIN_POSITIVE` is NOT that value.** Re-measured at THIS site 2026-08-27: the product is bits
+`0x047a0000` (`2.9387358770557188e-36`), ONE ULP BELOW, and it is the LARGEST duration that still
+overflows — the closed form named the value on the wrong side of the boundary it defines. ⚠️
+**State it by BITS** — the two
+floats bracketing that boundary both print `2.938736e-36` at 7 significant figures (`{:.6e}`), so
+**no decimal AT THAT WIDTH** can name it. ⚠️ The unqualified form of that sentence — *"so a decimal
+cannot name it"* — is FALSE, and the same paragraph refutes it: the two 17-digit decimals printed
+above round-trip **exactly** to their stated bits (re-verified 2026-08-28), and even the
+shortest-round-trip form distinguishes them (`2.9387359e-36` vs `2.938736e-36`). The limit is the
+WIDTH, not decimal. That regime is where `+0.0` and the denormals live, and it is benign: those SNAP
+to the endpoint.
+
+**The concrete option, if the owner wants the class closed.** Add a second conjunct
+`duration_ms < UI_MAX_TWEEN_MS` to the existing `if` in `tween_helpers!`
+(`crates/boyko_ui/src/animation.rs:885` — `if !(duration_ms.is_finite() &&
+duration_ms.is_sign_positive())`; the macro begins at `:828`, and the call it guards,
+`invalid_tween_duration(duration_ms);`, is at `:886`. All re-read by CONTENT 2026-08-28 for the
+third time: they were `:839` / `:782`, then `:857` / `:800` after this entry's own opacity
+correction added 18 doc lines above them, and the animation census landing later that day added a
+further **+28**. ⚠️ Two successive re-readings by content, one day apart, and the second was stale
+within hours — an anchor into a file under active edit is a measurement with a shelf life, not a
+fact. The class this entry asks the owner about is now ALSO pinned mechanically, by
+`the_termination_condition_is_pinned_to_the_disclosure` in
+`crates/boyko_ui/tests/ui_a1_source_census.rs`, which reds if this guard is weakened, clamped,
+or bounded — so a stale coordinate here no longer means the question is unguarded).
+
+> **Price note, because this campaign's two cautionary prices do NOT transfer.** That guard is on
+> the `start_*` path — **once per tween start**, not per row per frame. The two prices on record
+> (+15 ns / +5 %, and +0.536 ns / +3.8 %) were both **per-row** guards on the TICK path. If the
+> answer is yes, price it anyway with the FLOOR statistic, interleaved A/B/A/B across process
+> invocations (a one-shot read on this box spreads 14.0–22.9 ns for identical code), and add an arm
+> to `a_degenerate_duration_creates_no_row`.
+
+**What is NOT open:** the boundary is `dt`-dependent (6.07 d at 60 Hz vs 24.27 d at the clamp
+ceiling), so any compile-time constant is a conservative policy choice rather than a derived one —
+which is exactly why the rung did not pick one silently. The disclosure is gated meanwhile by
+`crates/boyko_ui/tests/ui_a1_tween.rs`'s
+`an_over_ceiling_duration_is_accepted_and_never_completes`, so if a later rung adds an upper bound
+that test reds and the documentation must be rewritten in the same edit.
+
+## 2026-08-27: the crate's PRE-EXISTING `zero_alloc` suite is FLAKY in release — A1 neither introduced nor fixed it
+
+**Filed as a SEPARATE defect and deliberately NOT fixed inside the A1 landing.** It is recorded
+because A1's release certification is intermittently red and the red is not A1's; a reader who
+re-runs the suite has to be able to tell the two apart without re-deriving this.
+
+**MEASURED at THIS site 2026-08-27** (`rustc 1.97.1`, release, the pre-existing binary
+`target/release/deps/zero_alloc-*.exe` run standalone, `--test-threads=1`, each run a separate
+process): **5 red in 60 runs**. Sites: `crates/boyko_ui/tests/zero_alloc.rs:238` alone 4 runs,
+`:296` alone 1 run, both together 0. Verbatim:
+
+```
+thread 'unchanged_frame_layout_pair_allocates_zero_over_baseline' panicked at crates\boyko_ui\tests\zero_alloc.rs:238:5:
+steady-state: layout pair must allocate no more than the scheduler baseline (baseline 5, pair 6; the layout pair's own per-frame allocs = 1)
+```
+
+`:296` is the sibling `resize_frame_layout_pair_allocates_zero_over_baseline`. What first surfaced
+it was three whole-package release runs (`cargo test -p boyko-ui --all-targets --release`) reading
+`0, 101, 0`; the 60-run tally above is the re-measurement that pins the rate and both sites.
+[`docs/UI-PLAN-ANIMATION-A1.md`'s part-4 landing note](UI-PLAN-ANIMATION-A1.md#a1--the-sink-the-four-channels-the-fused-tick--size-l--no-cross-plan-dependency) already recorded the `boyko_ui/tests/zero_alloc.rs:296` half independently at
+**6 red / 100 standalone runs**; this entry is the owner-facing filing of the same defect, widened to
+`boyko_ui/tests/zero_alloc.rs:238` and given the per-site mechanism. **The rate is load-dependent and the site mix moves with it**
+— 6 % at `boyko_ui/tests/zero_alloc.rs:296` there, 6.7 % at `:238` and 1.7 % at `:296` here — so treat the rate as a range, not a
+constant.
+
+**A1 neither introduced nor fixed it, and that is PROVEN rather than asserted.**
+`crates/boyko_ui/tests/zero_alloc.rs` is untouched by the landing (`git status` on that path is
+empty, so the file is at `e7a16fd9`), and `crates/boyko_ui/src/layout.rs` — the code these two
+assertions measure — has **zero non-comment changed lines** in the landing.
+
+**The mechanism — and ⚠️ the two sites do NOT share a statistic, so they are stated separately
+rather than one measurement being carried to the other.** Both assertions are `assert!(pair <= base)`
+with ZERO slack, and A1's D1/E1 measured, on ITS OWN fixture, that the parallel executor contributes
+a sporadic **+1** allocation per frame (idle rate 0.20–0.34 per frame per index). What differs is how
+each side is sampled:
+
+* **`boyko_ui/tests/zero_alloc.rs:238`** takes each side from `warmed_idle_allocs` (`boyko_ui/tests/zero_alloc.rs:189-194`; call sites `:216`
+  and `:220`), which reduces four samples with **`.max()`** — the statistic A1's own D1/E1 was
+  convened to replace:
+
+  ```rust
+  (0..4).map(|_| count_allocs(|| sched.run(world))).max().unwrap_or(0)
+  ```
+
+  so ONE noisy sample anywhere in the pair's four promotes `pair` to `base + 1` for the whole test.
+* **`:296`** does not use `warmed_idle_allocs` at all: `base` and `pair` are each a **single**
+  `count_allocs` of ONE frame (`:286` and `:294`). One sample against one sample — strictly weaker
+  than max-against-max, and it reds whenever that one pair frame is the noisy one.
+
+**The file's own comment at `:231-237` already saw half of this**: it relaxed
+`assert_eq!` to `<=` in 2026-08-11 after catching `baseline 6, pair 5`, and states that
+"`warmed_idle_allocs` takes the MAX of four samples on each side independently". But it reasons only
+about the BASELINE's max drifting above the pair's, which `<=` absorbs. **The direction that
+actually reds is the opposite one, and `<=` does not absorb it.**
+
+**The remedy is on the shelf, not invented here.** `ui_a1_zero_alloc.rs` replaced exactly this
+statistic with a floor over independent REPETITIONS of the same frame index (`REPS = 8`), which
+removes per-frame-random noise while keeping per-site resolution — `.max()` does neither. Applying
+it here is a mechanical change to `warmed_idle_allocs` and its call sites.
+
+**VALUES call for the owner.** Does the `zero_alloc` suite get re-based on the repetition floor now,
+or stay flaky until the rung that owns it lands? It was left alone here on purpose: re-basing
+another rung's gate from inside the A1 landing is the "the repair for the previous pass carried the
+next defect" pattern this campaign has already paid for twice, and a suite that reds ~8 % of release
+runs is a known quantity where a silently re-based one is not.
+
 ## ANSWERED 2026-08-27 — B.13 #2 (the four by-id kernel items): **APPROVED, all four**
 
 The owner approved the seam in full: **S1** `add_component_by_id`, **S2**
@@ -9257,7 +10973,7 @@ wrong by the time they were re-measured here.** (i) The site count was **327**, 
 `g12c` ignore this rung just wrote is itself the 327th, so the figure moved *because of* the change
 it was describing, and it moved again for the same reason: EG2-R round 3's `g17` takes it to
 **328** (`grep -rn '#\[ignore' --include=*.rs crates/ | wc -l` → 328, re-measured at that round).
-It is **401** on the tree today too <!-- measure: tree-lines crates rs #[ignore = 401 -->, and that
+It is **404** on the tree today too (401 at `2431c570`; the A7 merge adds three) <!-- measure: tree-lines crates rs #[ignore = 404 -->, and that
 half is no longer prose: the round stamp keeps the historical sentence true, and the marker keeps
 the live one checkable — a paragraph whose whole subject is that a count rots should not carry one
 that nothing re-takes.
@@ -9464,10 +11180,10 @@ sat in the owner's own document across two rounds.
 NON-BLANKNESS** — `looks_like_definition` returns `true` for every non-`.rs` extension after the
 empty-line test — so such an anchor can be wrong from birth and stay green forever.~~ **CLOSED at
 EG2-R round 4:** `doc_to_doc_anchors_carry_the_text_they_quote`
-(`tests/internal_docs_anchors.rs:3240`) now requires the words a citation quotes to BEGIN inside the
-lines it names, and `doc_to_doc_anchors_without_a_quotation_are_pinned` (`:3247`) pins the
+(`tests/internal_docs_anchors.rs:3250`) now requires the words a citation quotes to BEGIN inside the
+lines it names, and `doc_to_doc_anchors_without_a_quotation_are_pinned` (`:3257`) pins the
 population it cannot reach. It found **five** further stale doc-to-doc anchors on its first run; all
-five are now repaired and `KNOWN_STALE` (`:3170`) is empty. **How the hole was found is the part
+five are now repaired and `KNOWN_STALE` (`:3180`) is empty. **How the hole was found is the part
 worth keeping.** `REFLECTION-PLAN-CORE.md` cited `REFLECTION-PLAN-ECS.md:1567` three times for an
 EG3 item, and that citation went red **only** because a round's edits pushed 1514 onto a blank line
 — bounds fired, not content. ⚠️ **The repair then landed on `REFLECTION-PLAN-ECS.md:1851`, a plausible sibling row of the
@@ -9593,12 +11309,12 @@ mistake it for one.
 ## 2026-08-28 — TWELVE `.rs` → `.rs` line citations are out of bounds, in the direction no census read at all until this round
 
 **The blind spot was structural, not an oversight.** The forward census scans `.md` → `.rs`/`.md`.
-The reverse census (`md_citations_in_rust_sources`, `tests/internal_docs_anchors.rs:4073`) scans
+The reverse census (`md_citations_in_rust_sources`, `tests/internal_docs_anchors.rs:4105`) scans
 `.rs` → `.md` and **filters its targets to `.md` by construction**. A Rust source citing a line of
 another Rust source fell between the two and was read by nothing.
 
 `rs_line_citations_written_inside_rust_sources_are_bounds_checked`
-(`tests/internal_docs_anchors.rs:4459`) now reads it — named-only, line-local. Its own stdout,
+(`tests/internal_docs_anchors.rs:4491`) now reads it — named-only, line-local. Its own stdout,
 re-taken **2026-08-29**:
 
 ```
@@ -9653,7 +11369,7 @@ Live population **0** — latent, which is why nothing in the corpus could have 
 invariant *"every shape the binder will BIND, the prefilter must READ"* is now asserted directly.
 
 **Twelve of the 242 are past the end of the file they name.** They are pinned in `RS_KNOWN_STALE`
-(`tests/internal_docs_anchors.rs:4465`) **rather than repaired**, and the pin has both halves: a
+(`tests/internal_docs_anchors.rs:4497`) **rather than repaired**, and the pin has both halves: a
 listed entry that stops reporting also reds, so a silent repair cannot quietly empty the list.
 
 | citing file | line | target as the census reports it | that file's length |

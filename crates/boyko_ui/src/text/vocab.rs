@@ -37,7 +37,9 @@
 //! A variant's Rust identifier IS its `.ui` text name, and by the P3 invariant
 //! that is also the component's Rust type name ([`UiTextComponent::name`] is
 //! `stringify!` of the variant). `UiName` is deliberately NOT a member: it is
-//! authored by the `#name` sigil, never as a component literal.
+//! authored by the `#name` sigil, never as a component literal. `UiSpriteCursor`
+//! is not a member either: it is the flipbook's runtime state, inserted by
+//! `UiSpriteAnim`'s `on_add` hook and never authorable.
 
 /// Whether the canonical writer emits a vocabulary member, or omits it on purpose.
 ///
@@ -194,6 +196,20 @@ ui_text_vocabulary! {
     BindValue => writer: WriterPolicy::Emit, reload: ReloadPolicy::PatchKeepOnOmit(
         "preserve-by-omission, same decision as `BindText`",
     );
+    /// UI-ADVANCED S6 — the sprite vocabulary. All three are ordinary author-owned
+    /// components: the writer emits them and a deleted line removes them, the uniform
+    /// rule. They are declared HERE rather than beside the parser so the S6 members
+    /// answer to the same one list as the other twenty-one, and a consumer that
+    /// forgets one is an `E0004` in the parser, the writer and the reconcile alike.
+    ///
+    /// `UiSpriteCursor` is deliberately NOT a member, for the same reason `UiName` is
+    /// not: it is the flipbook's private per-frame state, so a `.ui` file must be
+    /// unable to NAME it or give it a value. It appears beside an authored
+    /// `UiSpriteAnim` from that component's `on_add` hook, at its `Default`, on every
+    /// authoring path alike.
+    UiNineSlice => writer: WriterPolicy::Emit, reload: ReloadPolicy::PatchAndRemove;
+    UiSpriteSheet => writer: WriterPolicy::Emit, reload: ReloadPolicy::PatchAndRemove;
+    UiSpriteAnim => writer: WriterPolicy::Emit, reload: ReloadPolicy::PatchAndRemove;
     /// Layout OUTPUT, not authored state: `spawn_ui_tree` seeds it and the very
     /// next `ui_layout_apply` overwrites it, so writing it back would pin a
     /// stale rect into the document (P3 Decision 14 / §6).

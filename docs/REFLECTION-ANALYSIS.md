@@ -949,7 +949,7 @@ zero mechanism risk.
 >   discovery gate. **It has ZERO callers anywhere in the tree.**
 > * `C::register_bind_accessor()` — the raw half, which installs the accessor and
 >   *not* the gate id. This is what all five call sites actually use:
->   `boyko_render/tests/ui_hud_screenshot.rs:507~`, `boyko_ui/tests/p4_bind.rs:87~`,
+>   `boyko_render/tests/ui_hud_screenshot.rs:509~`, `boyko_ui/tests/p4_bind.rs:87~`,
 >   `p4_bind_zero_alloc.rs:148~`, `p4_miri.rs:116~`, `text_bind_emit.rs:115~`.
 >
 > All five are **tests**, and every one registers the same fixture type (`Health`) — so
@@ -1841,7 +1841,7 @@ boyko_app          hwrt = ["boyko-render/hwrt"]      default OFF at every level)
 `hwrt` is a non-default feature on three **non-leaf** shipping crates, forwarded twice, and it
 does **not** reach any ship build — because nothing enables it. `boyko_render`'s
 `test-readback` is the same shape with a different enabler (a self-referential
-dev-dependency, `crates/boyko_render/Cargo.toml:103~`). Both are load-bearing today.
+dev-dependency, `crates/boyko_render/Cargo.toml:124~`). Both are load-bearing today.
 
 The one thing wrong with `hwrt` is **F17**: `grep -c hwrt .github/workflows/ci.yml` = **0**, so
 every `#[cfg(feature = "hwrt")]` body in the tree is compiled by no CI leg. That is a *coverage*

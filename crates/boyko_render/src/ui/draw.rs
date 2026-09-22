@@ -39,13 +39,18 @@ use crate::ui::plan::UiFramePlan;
 ///   VERTEX-stage push range of at least 16 bytes, and `bind_group` is the
 ///   current-frame ring slot's group bound at set0/binding0 against that layout;
 /// - `bind_group`'s backing STORAGE buffer holds at least `plan.instance_count`
-///   valid `UiInstance` records (uploaded for THIS frame index before this draw).
+///   valid `UiInstance` records (uploaded for THIS frame index before this draw);
+/// - `sprite_group` is the set-1 group `pipeline`'s layout declares at index 1 —
+///   `RhiContext::ui_sprite_group()`, the SAME accessor the on-screen recorder reads
+///   (decision S-D9). It is not optional: `ui_rect.fs` statically uses set 1, so a
+///   draw with set 1 unbound is `VUID-vkCmdDraw-None-08600` even for a plain rect.
 pub unsafe fn record_ui_rects<A: RhiApi>(
     enc: &mut impl RhiCommandEncoder<A>,
     full_area: &RenderArea,
     plan: &UiFramePlan,
     pipeline: &A::GraphicsPipeline,
     bind_group: &A::BindGroup,
+    sprite_group: &A::BindGroup,
 ) {
     if plan.instance_count == 0 {
         return;
@@ -53,6 +58,11 @@ pub unsafe fn record_ui_rects<A: RhiApi>(
 
     enc.bind_graphics_pipeline(pipeline);
     enc.bind_descriptor_set(bind_group, pipeline);
+    // UI-ADVANCED S3 (S-D3): the sprite lane's set 1, through the GENERIC set-index verb
+    // this rung added to `boyko_rhi` — which is what keeps this trait-driven offscreen
+    // recorder able to draw a sprite at all, and therefore keeps the sprite path testable
+    // on a device with no display.
+    enc.bind_descriptor_set_at(1, sprite_group, pipeline);
     // VUID-vkCmdPushConstants-offset-01796: the graphics layout declares its push range
     // over VERTEX | FRAGMENT, and the call must name ALL stages of the overlapping range.
     enc.push_graphics_constants(

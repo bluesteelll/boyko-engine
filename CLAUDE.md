@@ -201,15 +201,21 @@ The repair belongs in those two crates, not in the gate.
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **352 sites (188 unconditional +
-164 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-22 on `merge/a6-reflection` after the A6
-reflection merge**, by `tests/ignore_reasons_census.rs`'s own printed line. The last move,
-336 → 352, is the reflection lane's: **+16, none removed** — **+3 plain**
+The four commands above run **none** of the `#[ignore]`d tests — **355 sites (191 unconditional +
+164 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-23 on `merge/ke16-into-ecsnative` after
+the A6 reflection and A7 advanced-UI merges**, by `tests/ignore_reasons_census.rs`'s own printed
+line (`355 sites (191 plain, 164 cfg_attr) across 12 crates, 1767 .rs files walked, 0 waivers`).
+The last move, 336 → 355, is those two lanes and nothing else, both measured against the same
+`6a733f26` and disjoint in files: the reflection lane's **+16** — **+3 plain**
 (`boyko_ecs/tests/seam_by_id.rs` ×2, `reflect_fixture/tests/reflect_absence_census.rs` ×1) and
 **+13 `cfg_attr(miri, …)`** (`boyko_reflect/tests/c1_scalar.rs` ×11, the full-range proptests;
-`boyko_reflect/tests/c6_nested.rs` ×2, the `Box::leak` fixtures). ⚠️ The last two are written in
-the MULTI-LINE `#[cfg_attr(` form, so a single-line grep reproduces 11 of the 13 and not 13 —
-the census parses the block and is the figure to trust. Every one of the 16 lives in a file that
+`boyko_reflect/tests/c6_nested.rs` ×2, the `Box::leak` fixtures) — and the advanced-UI lane's
+**+3 plain** measurement harnesses in `boyko_render/tests/ui_s0_measure.rs`
+(`measure_gather_baseline`, `measure_gather_with_sprite_components`,
+`measure_seam_static_and_changed`, all reading "measurement harness - run explicitly with
+`--ignored --nocapture`"), DEVICE-FREE and unprefixed. ⚠️ The two `c6_nested` sites are written
+in the MULTI-LINE `#[cfg_attr(` form, so a single-line grep reproduces 11 of the 13 and not 13 —
+the census parses the block and is the figure to trust. Every one of the 19 lives in a file that
 does not exist at `6a733f26`, so the attribution is a set difference against that tree rather
 than a reading of the diff. The move before it, 335 → 336, is +1 plain `gpu-windowed:` in
 `boyko_app/tests/sdf_room_ddgi_dump.rs` (`sdf_room_ddgi_screenshot_dump`, the SDFDDGI host-hook
@@ -232,10 +238,12 @@ attributed by `git diff` against each merge's second parent — the light-table 
 in `boyko_physics/tests/narrowphase_parallel_equivalence.rs`
 (`jolt_pyramid_parallel_narrowphase_is_bit_identical`, L5 C3). The light-table lane's own "324"
 was 320 + 4 on its branch point, which predates the L2 calibration's +7 and the simd_solve +1; an
-independent enumeration reproduced 336 / 185 / 151 across 10 crates and 1,667 `.rs` files walked
-at that revision — 352 / 188 / 164 across **12** crates and **1,738** files after the A6 merge
-added `boyko_reflect`, `reflect_fixture` and `reflect_dogfood` —
-(1,652 at `6b29c400`, +6 from the tree-broadphase merge, +1 root test from A5.1, +2 `boyko_render`
+independent enumeration reproduces 355 / 191 / 164 across **12** crates and **1,767** `.rs` files
+walked (1,667 at `6a733f26`; +71 from the A6 merge, which added `boyko_reflect`, `reflect_fixture`
+and `reflect_dogfood`; +29 from the A7 merge — 14 `boyko_render` tests, 7 `boyko_ui` tests,
+2 `boyko_ui` sources, 3 `boyko_shaderdsl`, 2 `boyko_render` sources and 1 `boyko_render` bench, of
+which only `ui_s0_measure.rs` carries ignore sites;
+1,652 at `6b29c400`, +6 from the tree-broadphase merge, +1 root test from A5.1, +2 `boyko_render`
 tests from A5.2, +1 `boyko_rhi_vulkan` test from A5.3, +4 from A5.4 — the dump gate above, its
 composed-plugin twin, the octahedral-border host oracle and the probe-update `spv_sync` — and +1
 from the batch's own follow-up `04e69776`, which moved the host-hook gate out of `src/plugins.rs`
@@ -284,20 +292,24 @@ it, per-binary with `--test-threads=1`. It covered **135 tests** when it was wri
 `boyko_app`, `boyko_render` and `boyko_rhi_vulkan`; **that count has NOT been re-taken on this
 line**, and it cannot be re-derived from the reason strings (see the ⚠ below), so it is left as the
 historical figure rather than guessed forward. What IS mechanical today: those three crates hold
-**163 of the 188 plain sites** (`boyko_app` 106, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
-2026-09-21 on `merge/a5-batch` after A5.4, whose dump gate is the one since; 162 of 184 @
+**166 of the 191 plain sites** (`boyko_app` 106, `boyko_rhi_vulkan` 51, `boyko_render` 9, measured
+2026-09-22 on `merge/a7-ui-advanced` and unchanged by the A6 merge, whose three plain sites sit in
+`boyko_ecs` and `reflect_fixture`; the three since `6a733f26` are `boyko_render/tests/ui_s0_measure.rs`'s
+measurement harnesses — and those three are DEVICE-FREE, so they raise this population without
+joining this leg; 163 of 185 @ `6a733f26` and on `merge/a5-batch` after A5.4, whose dump gate is
+the one before them; 162 of 184 @
 `6b29c400`; 159 of 183 on the union earlier that day, the three since being the
 hwrt shadow-origin gates; 155 of 178 on 2026-09-19, the four since being the light-table lane's
 `gpu-windowed:` tests in `boyko_app`; 145 of 172 on 2026-09-17, the ten between being the
 boot-validation lane's), which is the population this leg is drawn from, not the leg itself. The
 other 22 plain sites are `boyko_ecs` 8, `boyko_serialize` 5, `boyko_physics` 3, `boyko_sdf_math` 2,
-`boyko_ui` 2, `boyko_log` 1, `boyko_threadpool` 1. **Eight** of the 163 need a non-default cargo
+`boyko_ui` 2, `boyko_log` 1, `boyko_threadpool` 1. **Eight** of the 166 need a non-default cargo
 feature and are not even *compiled* otherwise: `--features hwrt` ×7
 (`boyko_rhi_vulkan/tests/hwrt_blas_smoke.rs` 3, `boyko_app/tests/taa_jitter_eval.rs` 3 — the
 shadow-origin gates — and `boyko_app/tests/asset_streaming_f7_rt_cap_headless.rs`
 1 — a `#![cfg(feature = "hwrt")]` file present since `b8d8b162`, 2026-07-10, so the "×3" this
 paragraph carried until 2026-09-21 was an undercount from the day it was written, not a new site)
-and `--features spec_constant_smoke` ×1. **125 of the 188** plain sites sit in files under
+and `--features spec_constant_smoke` ×1. **125 of the 191** plain sites sit in files under
 `#![cfg(windows)]` and vanish on Linux (the earlier "most of the rest" was never counted). There is
 no single command — each binary has its own env-var protocol in its module header
 (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
@@ -341,7 +353,7 @@ second plain `slow:` site in the tree after `boyko_app/tests/app12_timer_resolut
 `-- --ignored` in a debug build is NOT the six's leg: the debug build is exactly where
 they are ignored, and it would run them unoptimized.
 
-**At least 24 ignored tests belong to no leg at all**, and must not be swept into one. Six were
+**At least 27 ignored tests belong to no leg at all**, and must not be swept into one. Six were
 enumerated when this section was written: three *generators* that assert nothing and emit source to
 paste (`dump_maximal_frame_barrier_stream`, `dump_vb_unsplit_barrier_streams`,
 `dump_vb_split_barrier_streams` — the second's own doc warns that running it casually re-measures
@@ -355,14 +367,18 @@ A7 merge and RE-MEASURED 2026-09-22 on `merge/a6-reflection` — still 18, and s
 `deferred:` in `boyko_ecs` and the A6 reflection lane brought two more there, `seam_by_id.rs:1308`
 and `:2217`), in `boyko_ecs` (9), `boyko_serialize` (5), `boyko_physics` (2 — the flicker generator
 and the AVX2 signed-zero proptest; the A7 lane's four red-first tests are no longer plain ignores),
-and `boyko_ui` (2); each is red or silent by design and belongs to no routine leg either. 24 is a
-floor, not a census: the 148 plain reasons that carry no vocabulary prefix have not been
-classified.
+and `boyko_ui` (2); each is red or silent by design and belongs to no routine leg either. **Three
+more arrived with the advanced-UI merge** (2026-09-22): `ui_s0_measure.rs`'s §10.8 legs,
+device-free `Instant` harnesses that report wall-clock and carry no prefix. They are timing probes
+of the `no_starvation_every_worker_makes_progress` genre — one of the three does also assert (leg
+(d) requires ZERO probes on a static frame), so it is a gate wearing a harness's clothes and would
+need `slow:` if it ever joined a leg. 27 is a floor, not a census: the 151 plain reasons that carry
+no vocabulary prefix have not been classified.
 
 ⚠️ **The device-free leg is one test, and it is an explicit invocation rather than a filter,
 because the partition CANNOT be derived from the reason strings.** A keyword classifier over
 `{GPU, RTX, Vulkan, windowed, device, dispatch}` put 10 on the device-free side — of the 143 plain
-sites the tree held when the experiment was run, 188 today — and **8 of those 10 are wrong**, wrong
+sites the tree held when the experiment was run, 191 today — and **8 of those 10 are wrong**, wrong
 in the direction that produces a green:
 
 - `negative_chained_barrier_hazard` and `a5_gpu_off_vs_on_wall_clock_ab` **do** need a device; their
@@ -386,12 +402,12 @@ that A6 and not the reflection merge dated below — all `cfg_attr(miri, …)`),
 `deferred`, `flaky`. **The claim that the tree
 maps onto it "exactly" was true of a 143-site tree and is not true now:** that mapping (135
 `gpu*`/`feature`, 1 `solo`, 1 `miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky`) sums to 143
-against **188** plain sites today.
-The migration has started at the sites, not in this list: **40 of the 188 plain reasons already
-carry a prefix** — 17 `deferred:`, 20 `gpu-windowed:`, 2 `slow:`, 1 `generator:` (measured
-2026-09-22 on `merge/a6-reflection`, by the same `ignore_reasons_census` walk that produced the
-352 / 188 / 164 at `:204-205`; the A6 reflection lane brought three plain sites, two of them
-`deferred:` and one `calibration:`; 38 of 185 on `merge/a5-batch` 2026-09-21 after A5.4, whose one new site arrived prefixed `gpu-windowed:`;
+against **191** plain sites today.
+The migration has started at the sites, not in this list: **40 of the 191 plain reasons already
+carry a prefix** — 17 `deferred:`, 20 `gpu-windowed:`, 2 `slow:`, 1 `generator:` (2026-09-23 on
+the integration line after the A6 and A7 merges: the reflection lane's three plain sites are two
+`deferred:` and one `calibration:`, which is not in the closed vocabulary; the advanced-UI lane's
+three carry no prefix; 38 of 185 on `merge/a5-batch` 2026-09-21 after A5.4, whose one new site arrived prefixed `gpu-windowed:`;
 37 of 184 @ `6b29c400`: 36 of 183 on the union earlier that day, then the hwrt shadow-origin
 lane added three `gpu-windowed:` and A3 resolved two `deferred:`; 31 of 178 on 2026-09-18 after
 the boot-validation merge, whose ten new

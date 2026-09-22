@@ -54,7 +54,7 @@ pub fn discover_ui_roots(world: &EcsMaster) -> Vec<Entity> {
 
 use boyko_ui::components::{
     ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign, UiLayout, UiName,
-    UiRoot, UiSpacing,
+    UiNineSlice, UiRoot, UiSpacing, UiSpriteAnim, UiSpriteSheet,
 };
 use boyko_ui::reload::tree_view::UiTreeView;
 use boyko_ui::text::{parse_ui, spawn_ui_tree};
@@ -105,6 +105,15 @@ fn presence_vector(world: &EcsMaster, e: Entity) -> Vec<(&'static str, bool)> {
         ("ComputedClip", world.has_component(e, ComputedClip::component_id())),
         ("UiRoot", world.has_component(e, UiRoot::component_id())),
         ("UiName", world.has_component(e, UiName::component_id())),
+        // UI-ADVANCED S6 — the sprite vocabulary. One of the TWO hand lists a new
+        // `.ui` component has to join; the other is `p6a_equivalence`'s local
+        // `pres!`/`valeq!`, and a name in one is not in the other. `UiSpriteCursor`
+        // is deliberately absent: it is not authorable, and the `on_add` hook puts
+        // it on BOTH sides alike, so it is not a divergence either comparator
+        // could report.
+        ("UiNineSlice", world.has_component(e, UiNineSlice::component_id())),
+        ("UiSpriteSheet", world.has_component(e, UiSpriteSheet::component_id())),
+        ("UiSpriteAnim", world.has_component(e, UiSpriteAnim::component_id())),
     ]
 }
 
@@ -138,6 +147,12 @@ fn assert_same_values(world: &EcsMaster, a: Entity, b: Entity, what: &str) {
     eqc!(StackIndex);
     eqc!(ComputedClip);
     eqc!(UiName);
+    // UI-ADVANCED S6 — the sprite vocabulary's VALUES. Presence alone is not
+    // enough: two nodes can both carry a `UiSpriteSheet` and disagree on which
+    // frame it names.
+    eqc!(UiNineSlice);
+    eqc!(UiSpriteSheet);
+    eqc!(UiSpriteAnim);
 }
 
 /// Reads a node's `UiName` string, if present.

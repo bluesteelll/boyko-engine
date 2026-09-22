@@ -11,8 +11,89 @@
 use boyko_macros::Resource;
 
 use crate::ui::instance::{
-    premultiply_rgba8, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, UiInstance,
+    premultiply_rgba8, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, FLAG_TEXTURED, FLAG_TILED,
+    UiInstance, UI_SLOT_MASK, UI_SLOT_SHIFT, UI_TILE_MAX, UI_TILE_X_SHIFT, UI_TILE_Y_SHIFT,
 };
+
+/// The SPRITE half of one node's pack inputs (UI-ADVANCED S3): the `UiImage`
+/// component's three render-relevant values, flattened so the pack stays free of
+/// any `boyko_ui` type (`boyko-render` reads the component in the gather and passes
+/// values here — the same shape `text_uv` already takes).
+///
+/// Its presence is the capability: a node WITHOUT `UiImage` emits no sprite record
+/// at all (structural skip), and one WITH it emits a sprite quad whose default tint
+/// is fully transparent, so an authored-but-untextured Image costs one invisible
+/// instance and ZERO pixels (S-D8's default-OFF row for this rung).
+#[derive(Clone, Copy, Debug)]
+pub struct UiImageInput {
+    /// The bindless texture slot (`UiImage.texture`) — MUST be
+    /// `< BINDLESS_TEXTURE_CAPACITY`; it is packed into `flags` bits
+    /// [`UI_SLOT_SHIFT`]`..32` and `debug_assert!`ed at the pack (gate G3-5).
+    pub slot: u32,
+    /// The sprite's normalized UV sub-rect `(u0, v0, u1, v1)` in `[0, 1]`
+    /// (`UiImage.uv_min`/`uv_max`), written VERBATIM into [`UiInstance::uv`] —
+    /// never scale-folded, exactly like the glyph UV.
+    pub uv: [f32; 4],
+    /// The tint, STRAIGHT RGBA8 (`UiImage.tint`); premultiplied at pack into
+    /// [`UiInstance::color`], the same convention `UiBackground.color` follows.
+    pub tint: u32,
+}
+
+/// The NINE-SLICE half of one node's pack inputs (UI-ADVANCED S4): the
+/// `UiNineSlice` component's four render-relevant values, flattened so the pack
+/// stays free of any `boyko_ui` type (the [`UiImageInput`] shape, one rung on).
+///
+/// Its presence is HALF the capability: nine sub-quads are emitted only when
+/// this AND [`PackInput::image`] are both present — a nine-sliced node with no
+/// image is a structural no-op that emits its background alone (S-D12 (3)).
+#[derive(Clone, Copy, Debug)]
+pub struct UiNineSliceInput {
+    /// DESTINATION inset per side, logical px, `[l, t, r, b]`. `debug_assert!`ed
+    /// non-negative and finite. An axis whose two sides exceed the node's extent
+    /// is shrunk proportionally at pack (a chrome tweened below its own border is
+    /// ordinary, not an error); a NEGATIVE side is clamped to zero.
+    pub border_px: [f32; 4],
+    /// SOURCE inset per side as a fraction of [`UiImageInput::uv`], `[l, t, r, b]`.
+    /// `debug_assert!`ed into `[0, 1)` with `l + r < 1` / `t + b < 1`.
+    ///
+    /// In release the domain's two edges get the two remedies the pack's axis
+    /// split carries, and they are not the same remedy: an axis whose
+    /// sides **sum to 1 or more** is scaled down proportionally, so the centre
+    /// source region degenerates to zero width; a side **below 0** is clamped to
+    /// zero, because a negative inset is not a proportion of anything and the sum
+    /// test cannot see it. Both land on the same guarantee — degenerate, never
+    /// invert into a negative-extent UV rect.
+    pub border_uv: [f32; 4],
+    /// The `NineSliceMode` discriminant as a RAW `u8` — the
+    /// [`UiImageInput::slot`] precedent, and for the same reason: a typed
+    /// one-variant enum cannot carry an out-of-range value without a
+    /// `transmute`, which is instant UB and therefore cannot be a gate. The
+    /// AUTHORED component keeps the typed enum, where the type system forbids
+    /// the value; this raw byte is `debug_assert!`ed
+    /// `< `[`UI_NINE_SLICE_MODE_COUNT`] at the pack boundary.
+    pub mode: u8,
+    /// Emit the centre sub-quad (region 4 / sub [`UI_NINE_SLICE_CENTER_SUB`])?
+    pub fill_center: bool,
+}
+
+/// The number of legal [`UiNineSliceInput::mode`] values — the bound the pack
+/// `debug_assert!`s a raw discriminant against (gate G4-5).
+///
+/// It was `1` at S4 and is `2` since S5's `Tile`, and it is BOUND to
+/// `boyko_ui`'s `NineSliceMode` by the EXHAUSTIVE conversion match in
+/// [`gather_ui_nodes`](crate::ui::gather::gather_ui_nodes) — the one site that
+/// turns the authored enum into this raw byte. Adding a variant there is
+/// `error[E0004]`, which is what walked the author to this line at S5. (The
+/// count cannot be derived: `std::mem::variant_count` is nightly-only on 1.97.1,
+/// and the enum lives in the crate this module is deliberately type-free of.)
+pub const UI_NINE_SLICE_MODE_COUNT: u8 = 2;
+
+/// The [`UiNineSliceInput::mode`] discriminant of `NineSliceMode::Tile`
+/// (UI-ADVANCED S5). The pack's ONE mode comparison; `Stretch` is `0` and needs
+/// no name because it is the absence of this one.
+pub const UI_NINE_SLICE_MODE_TILE: u8 = 1;
+
+const _: () = assert!(UI_NINE_SLICE_MODE_TILE < UI_NINE_SLICE_MODE_COUNT);
 
 /// One source node's pack inputs (logical-px component values + the node's z key),
 /// the testable boundary of [`pack_ui_instance`] (no Arena/world dependency, so the
@@ -34,12 +115,26 @@ pub struct PackInput {
     pub clip: Option<[f32; 4]>,
     /// GUI P5b text lane (Decision T4-G): when `Some`, this node is a GLYPH quad, not
     /// a rect. The value is the glyph's NORMALIZED atlas UV rect `(left, top, right,
-    /// bottom)` in `[0, 1]`, written verbatim (NOT scale-folded) into the
-    /// `corner_radius` alias with `FLAG_TEXT` set; `rect` is then the glyph quad
-    /// (already physical-or-logical px, scale-folded like a rect), `color` the
+    /// bottom)` in `[0, 1]`, written verbatim (NOT scale-folded) into
+    /// [`UiInstance::uv`] with `FLAG_TEXT` set (its OWN field since the UI-ADVANCED
+    /// S2 widening — the `corner_radius` alias is retired, and a glyph packs
+    /// `corner_radius` ZERO); `rect` is then the glyph quad (already
+    /// physical-or-logical px, scale-folded like a rect), `color` the
     /// premultiplied-at-pack foreground, and `border_*` are ignored. `None` ⇒ the
-    /// rect path (P5a, unchanged).
+    /// rect path (P5a, unchanged; packs the identity `uv = (0, 0, 1, 1)`).
     pub text_uv: Option<[f32; 4]>,
+    /// UI-ADVANCED S3 sprite lane: `Some` iff the node carries a `UiImage`. It does
+    /// NOT change what [`pack_ui_instance`] returns — the node's background rect is
+    /// packed exactly as before — it makes the node emit a SECOND record via
+    /// [`pack_ui_image_instance`], per D4's per-node emission contract
+    /// (*background rect → … → image → glyphs*).
+    pub image: Option<UiImageInput>,
+    /// UI-ADVANCED S4 nine-slice lane: `Some` iff the node carries a
+    /// `UiNineSlice`. Together with [`image`](Self::image) it selects the node's
+    /// emission from S-D12 (1)'s four-row truth table — and when BOTH are
+    /// present it SUPPRESSES the whole-rect image record, because the nine
+    /// sub-quads ARE that image, sliced.
+    pub nine_slice: Option<UiNineSliceInput>,
 }
 
 /// Folds one node's logical-px inputs into a physical-px, premultiplied
@@ -77,9 +172,11 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
         None => [0.0; 4],
     };
 
-    // GUI P5b text branch (Decision T4-G): a glyph quad. The UV rect aliases
-    // `corner_radius` (written verbatim, NOT scale-folded — it is already normalized);
-    // `FLAG_TEXT` selects the MSDF branch in the FS. Border is N/A for a glyph.
+    // GUI P5b text branch (Decision T4-G): a glyph quad. The UV rect goes into the
+    // record's OWN `uv` field (UI-ADVANCED S2 — the `corner_radius` alias is retired;
+    // a glyph packs the radius ZERO, gate G2-5), written verbatim, NOT scale-folded —
+    // it is already normalized. `FLAG_TEXT` selects the MSDF branch in the FS. Border
+    // is N/A for a glyph.
     if let Some(uv) = input.text_uv {
         debug_assert!(
             uv.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
@@ -90,7 +187,8 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
             min_px,
             size_px,
             clip,
-            corner_radius: uv,
+            corner_radius: [0.0; 4],
+            uv,
             color: premultiply_rgba8(input.color),
             border_color: 0,
             border_width: 0.0,
@@ -126,6 +224,11 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
         size_px,
         clip,
         corner_radius,
+        // The identity UV (S-D8): a plain rect's shader branch never reads it, so
+        // every pre-S2 node packs a constant and the widening is pixel-invisible
+        // (gate G2-3); when S3's textured lane lands, `(0,0,1,1)` is also the
+        // correct whole-texture default.
+        uv: [0.0, 0.0, 1.0, 1.0],
         color: premultiply_rgba8(input.color),
         border_color: premultiply_rgba8(input.border_color),
         border_width,
@@ -133,11 +236,566 @@ pub fn pack_ui_instance(input: &PackInput, scale_factor: f32) -> UiInstance {
     }
 }
 
+/// The number of nine-slice SUB-QUADS a sliced node can emit — the sub space
+/// `UI_NINE_SLICE_SUB_BASE ..= UI_NINE_SLICE_SUB_BASE + UI_NINE_SLICE_REGIONS - 1`,
+/// **row-major**: TL, T, TR, L, **C**, R, BL, B, BR.
+pub const UI_NINE_SLICE_REGIONS: u32 = 9;
+
+/// The sub code of the FIRST nine-slice sub-quad (TL). Sub `0` is always the
+/// node's background rect, so the slices start at `1`.
+pub const UI_NINE_SLICE_SUB_BASE: u32 = 1;
+
+/// The sub code of the CENTRE sub-quad (region 4 of 9), skipped when
+/// `UiNineSliceInput::fill_center` is `false`.
+pub const UI_NINE_SLICE_CENTER_SUB: u32 = UI_NINE_SLICE_SUB_BASE + 4;
+
+/// The sub code of the WHOLE-RECT image record. It is emitted only when the node
+/// carries a `UiImage` and NO `UiNineSlice` — when both are present the nine
+/// sub-quads ARE that image and this code is not pushed (S-D12 (1)).
+pub const UI_IMAGE_SUB: u32 = UI_NINE_SLICE_SUB_BASE + UI_NINE_SLICE_REGIONS;
+
+/// The STRIDE of the `(node, sub)` append code
+/// [`UiUploadSystem::gather_into_staging`](crate::ui::upload::UiUploadSystem::gather_into_staging)
+/// sorts on — the one loop that packs directly in SORTED order and therefore has to
+/// find each record's SOURCE node from its key alone.
+///
+/// **It is DERIVED from the largest sub code, and it is a stride rather than a
+/// per-node emission count.** UI-ADVANCED S4 severed the two: the sub space is a
+/// fixed layout with a HOLE in it (a sliced node uses `0` and `1..=9` and never
+/// `10`; an unsliced imaged node uses `0` and `10` and never `1..=9`), so the
+/// per-node emission is 10 / 9 / 2 / 1 by S-D12 (1)'s truth table while the stride
+/// stays `UI_IMAGE_SUB + 1`. The hole costs nothing: the key push only pushes codes
+/// for records that exist, and the decode is `append % UI_RECORDS_PER_NODE`.
+///
+/// Deriving it from [`UI_IMAGE_SUB`] pins the one relation the hole made
+/// non-obvious — a rung that adds a sub code moves the stride with it, and every
+/// record count in the S4 gates is an expression over these constants rather than
+/// a literal. (The pre-S4 doc claimed "S4's nine-slice raises this constant;
+/// nothing else changes at that call site". The second half was false: the key
+/// push was hard-coded to at most two sub-records and the decode was a BINARY
+/// `if`, both of which S4 replaces.)
+pub const UI_RECORDS_PER_NODE: u32 = UI_IMAGE_SUB + 1;
+
+// The sub space is CONTIGUOUS and the image record sits directly above the last
+// slice: the three literals above are not independently choosable, and this is
+// the relation that says so.
+const _: () = assert!(UI_NINE_SLICE_SUB_BASE + UI_NINE_SLICE_REGIONS == UI_IMAGE_SUB);
+const _: () = assert!(UI_NINE_SLICE_CENTER_SUB > UI_NINE_SLICE_SUB_BASE);
+const _: () = assert!(UI_NINE_SLICE_CENTER_SUB < UI_IMAGE_SUB);
+
+/// Folds one node's SPRITE half into the second [`UiInstance`] that node emits
+/// (UI-ADVANCED S3), or `None` when the node carries no `UiImage` — absence is the
+/// structural skip, so an image-less world's record stream is byte-identical to S2's.
+///
+/// The sprite quad covers the SAME `ComputedRect` as the node's background (D4's
+/// contract paints it directly over the background, and layout is untouched by the
+/// image), so `min_px`/`size_px`/`clip` are the background record's verbatim — only
+/// the flags, the UV and the color differ:
+///
+/// * `FLAG_TEXTURED` + the slot in `flags` bits [`UI_SLOT_SHIFT`]`..32` (S-D2),
+/// * `uv` = the image's normalized sub-rect, written verbatim (never scale-folded),
+/// * `color` = the premultiplied tint; `corner_radius`/`border_*` are N/A for a
+///   sprite and pack ZERO (a rounded sprite is nine-slice's job, S4).
+///
+/// The default `UiImage` tint is alpha 0, so this record is INVISIBLE until an
+/// author writes an opaque tint — the rung's default-OFF guarantee (gate G3-2, red
+/// mutation M3-e).
+pub fn pack_ui_image_instance(input: &PackInput, scale_factor: f32) -> Option<UiInstance> {
+    let image = input.image?;
+    debug_assert!(scale_factor > 0.0, "invariant: UI scale_factor is positive");
+    debug_assert!(
+        input.text_uv.is_none(),
+        "invariant: a GLYPH row carries no sprite — FLAG_TEXT and FLAG_TEXTURED are \
+         different quads with different shader branches, never one record wearing both"
+    );
+    debug_assert!(
+        image.slot < boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY,
+        "invariant: a UI sprite slot is a live bindless slot (< BINDLESS_TEXTURE_CAPACITY); \
+         flags bits {UI_SLOT_SHIFT}..32 hold only {} of them",
+        UI_SLOT_MASK + 1
+    );
+    debug_assert!(
+        image.uv.iter().all(|v| v.is_finite()),
+        "invariant: a UI sprite UV rect is finite"
+    );
+
+    let s = scale_factor;
+    let mut flags = FLAG_TEXTURED | ((image.slot & UI_SLOT_MASK) << UI_SLOT_SHIFT);
+    let clip = match input.clip {
+        Some(c) => {
+            flags |= FLAG_CLIP_PRESENT;
+            [c[0] * s, c[1] * s, (c[0] + c[2]) * s, (c[1] + c[3]) * s]
+        }
+        None => [0.0; 4],
+    };
+
+    Some(UiInstance {
+        min_px: [input.rect[0] * s, input.rect[1] * s],
+        size_px: [input.rect[2] * s, input.rect[3] * s],
+        clip,
+        corner_radius: [0.0; 4],
+        uv: image.uv,
+        color: premultiply_rgba8(image.tint),
+        border_color: 0,
+        border_width: 0.0,
+        flags,
+    })
+}
+
+/// Splits one axis into its three extents from an inset pair. **Its whole
+/// contract is that the three extents it returns are non-negative and sum to
+/// `extent`** — S-D12 (2)'s ruled release behaviour, "degenerate, never invert",
+/// for an inset pair outside the domain the pack `debug_assert!`s.
+///
+/// The domain has TWO edges and each needs its own remedy, which is the
+/// correction this function carries:
+///
+/// * **A side BELOW zero is clamped to zero.** A negative inset is not a
+///   proportion of anything, so there is nothing to scale: `-0.5` and `0.25` sum
+///   to `-0.25`, which no `sum > extent` test can see, and the raw value would
+///   put the first cut BEHIND the axis's own origin — a negative-extent
+///   destination rect and a `u1 < u0` source rect, the exact picture S-D12 (2)
+///   exists to forbid. (MEASURED in `--release` before this clamp existed, and
+///   pinned by `ui_s4_nine_slice.rs`'s
+///   `s_d12_2_a_negative_inset_degenerates_in_release_instead_of_inverting`,
+///   which is release-only because in debug the pack's `debug_assert!` fires
+///   first.)
+/// * **A PAIR that overruns `extent` is shrunk proportionally.** Not optional and
+///   not an error path: a 96×96 chrome animated to 8×8 is an ordinary tween, and
+///   without it the corners overlap and the edges invert. Unity and Godot both do
+///   exactly this. At `lo + hi == extent` the middle degenerates to zero rather
+///   than inverting.
+///
+/// Used for BOTH sides of the split — the destination against the rect's extent
+/// in logical px, and the source against `1.0`, because `border_uv` is already a
+/// fraction of the sub-rect.
+#[inline]
+fn split_axis(lo: f32, hi: f32, extent: f32) -> [f32; 3] {
+    // Clamp FIRST: the proportional shrink below is a proportion, and a negative
+    // side has none. `max` also maps NaN to `0.0` here (`f32::max` returns the
+    // non-NaN operand), so no NaN inset can reach the cumulative cuts.
+    let lo = lo.max(0.0);
+    let hi = hi.max(0.0);
+    let sum = lo + hi;
+    let (lo, hi) = if sum > extent && sum > 0.0 {
+        let k = extent / sum;
+        (lo * k, hi * k)
+    } else {
+        (lo, hi)
+    };
+    [lo, extent - lo - hi, hi]
+}
+
+/// One axis's REPEAT COUNT for a `Tile` nine-slice — S-D15 (3)'s derivation,
+/// factored out so the CPU gate (G5-11) can drive the arithmetic directly
+/// instead of reading it back out of a packed `flags` word.
+///
+/// All four arguments come from the SAME [`split_axis`] pair the region cuts use,
+/// so a border shrunk by S4's proportional overrun remedy is the one that counts:
+///
+/// * `dest_centre` — the centre region's DESTINATION extent (logical px);
+/// * `dest_border_sum` — the two destination insets, after the shrink;
+/// * `src_centre` — the centre region's SOURCE extent as a fraction of the
+///   sub-rect;
+/// * `src_border_sum` — the two source insets, as fractions.
+///
+/// ```text
+/// tiles = round( dest_centre * src_border_sum / (src_centre * dest_border_sum) )
+/// ```
+///
+/// # Why this needs no texture size, and why it is the same under a sheet
+///
+/// The engine records a texture's dimensions NOWHERE, so the reference engines'
+/// `dest_px / source_px` is unavailable. It is not needed: `border_px` is a
+/// corner's destination size and `border_uv` is the same corner's source extent,
+/// so their ratio IS the source→destination scale. The ratio is dimensionless
+/// and the sub-rect's own extent CANCELS out of it — which is exactly what makes
+/// the count identical under a whole texture and under a sprite-sheet frame, and
+/// therefore what makes "the same sub-rect arithmetic" true rather than hoped.
+///
+/// # The degenerate inputs, and why each is `1`
+///
+/// A zero source border, a zero destination border, a non-positive centre source
+/// extent, or a non-finite ratio all yield `1` (i.e. `Stretch`): a nine-slice
+/// with no border on an axis states no scale on that axis, and it does not get to
+/// guess one. The result is clamped into `1..=`[`UI_TILE_MAX`] because that is
+/// the field's width; the clamp is a `min` and is NOT counted — the S4 ledger's
+/// finding still holds that the pack's five entry points are receiverless free
+/// functions with nowhere to put a counter, and S5 moved only the GATHER's
+/// arithmetic (and therefore only the gather's clamp) to a place that has one.
+// NaN handling is an EXPLICIT first guard rather than an artefact of comparison spelling.
+//
+// Every argument here is derived from AUTHOR-WRITTEN floats (`border_px`, `border_uv`), so a
+// NaN is reachable, and it must take the degenerate `Stretch` arm rather than reach the divide
+// and the `as u32` cast — whose result for a NaN is 0, a repeat count the shader would turn
+// into `frac(local_uv * 0) == 0`, one texel smeared across the region.
+//
+// ~~This was written as `!(x > 0.0)` under an `#[allow(clippy::neg_cmp_op_on_partial_ord)]`,
+// justified as "the negated form is what routes a NaN into the degenerate arm, and
+// `g5_11_every_degenerate_tile_input_is_stretch` asserts the NaN row directly, so this
+// exception is gated rather than merely argued."~~ **Both halves were false, MEASURED at the S5
+// verification.** Replacing all three guards with the plain `x <= 0.0` left every test green,
+// because a NaN in any of them propagates through the multiply and the divide and is caught by
+// `!n.is_finite()` two lines below — so the negated spelling routed nothing the plain one did
+// not. And the gate's NaN row passes `f32::NAN` as `dest_centre`, which is not one of the three
+// guarded arguments at all: it exercised `is_finite`, never the spelling the exception existed
+// for. An exception argued as measured, whose subject the gate never constructs.
+//
+// The repair is not a better rationale — it is not needing one. The finiteness check is now
+// stated once, first, over ALL FOUR inputs, so the property no longer rides on NaN surviving
+// two arithmetic steps (which a later reordering could silently break), and the comparisons are
+// the plain form clippy asks for. One fewer entry in the `#[allow]` census.
+#[inline]
+pub fn ui_nine_slice_tiles_axis(
+    dest_centre: f32,
+    dest_border_sum: f32,
+    src_centre: f32,
+    src_border_sum: f32,
+) -> u32 {
+    // A non-finite INPUT takes the degenerate arm here, stated rather than inferred from the
+    // divide below. `dest_centre` is guarded too: the gate's NaN row passes it, and under the
+    // previous spelling it was the one argument no guard covered.
+    if !dest_centre.is_finite()
+        || !dest_border_sum.is_finite()
+        || !src_centre.is_finite()
+        || !src_border_sum.is_finite()
+    {
+        return 1;
+    }
+    if src_border_sum <= 0.0 || dest_border_sum <= 0.0 || src_centre <= 0.0 {
+        return 1;
+    }
+    // Still needed after the input guard: `0.0 / 0.0` and `inf / inf` are NaN, and a finite
+    // numerator over a denormal denominator overflows to infinity.
+    let n = (dest_centre * src_border_sum) / (src_centre * dest_border_sum);
+    if !n.is_finite() {
+        return 1;
+    }
+    let n = n.round();
+    if n <= 1.0 {
+        return 1;
+    }
+    if n >= UI_TILE_MAX as f32 {
+        return UI_TILE_MAX;
+    }
+    n as u32
+}
+
+/// Both axes' repeat counts for one nine-sliced node — `(1, 1)` unless the mode
+/// is [`UI_NINE_SLICE_MODE_TILE`]. See [`ui_nine_slice_tiles_axis`].
+///
+/// `tiles.0` applies to the centre COLUMN (regions T, C, B) and `tiles.1` to the
+/// centre ROW (L, C, R); every other axis of every other region is `1`, so the
+/// four corners are `1×1` and untiled by construction.
+#[inline]
+pub fn ui_nine_slice_tiles(input: &PackInput, ns: &UiNineSliceInput) -> (u32, u32) {
+    if ns.mode != UI_NINE_SLICE_MODE_TILE {
+        return (1, 1);
+    }
+    let dw = split_axis(ns.border_px[0], ns.border_px[2], input.rect[2]);
+    let dh = split_axis(ns.border_px[1], ns.border_px[3], input.rect[3]);
+    let fu = split_axis(ns.border_uv[0], ns.border_uv[2], 1.0);
+    let fv = split_axis(ns.border_uv[1], ns.border_uv[3], 1.0);
+    (
+        ui_nine_slice_tiles_axis(dw[1], dw[0] + dw[2], fu[1], fu[0] + fu[2]),
+        ui_nine_slice_tiles_axis(dh[1], dh[0] + dh[2], fv[1], fv[0] + fv[2]),
+    )
+}
+
+/// The `flags` contribution of one region's repeat counts — [`FLAG_TILED`] plus
+/// the two 7-bit fields, or ZERO when neither count exceeds `1`.
+///
+/// Zero-when-untiled is the whole reason a `Tile` corner is BYTE-IDENTICAL to its
+/// `Stretch` corner: the flag AND both fields stay clear, so the record differs in
+/// no bit at all.
+#[inline]
+fn tile_flag_bits(rx: u32, ry: u32) -> u32 {
+    if rx <= 1 && ry <= 1 {
+        return 0;
+    }
+    FLAG_TILED | (rx << UI_TILE_X_SHIFT) | (ry << UI_TILE_Y_SHIFT)
+}
+
+/// Folds one nine-slice REGION of a node into the [`UiInstance`] that draws it
+/// (UI-ADVANCED S4), or `None` when the node is missing either half of the
+/// capability — absence is the structural skip, exactly as in
+/// [`pack_ui_image_instance`], so a node carrying `UiNineSlice` and no `UiImage`
+/// emits its background and nothing else.
+///
+/// `region` is `0..`[`UI_NINE_SLICE_REGIONS`], **row-major**: TL, T, TR, L, C, R,
+/// BL, B, BR. It is the sub code minus [`UI_NINE_SLICE_SUB_BASE`].
+///
+/// The record is the sprite record's shape — `FLAG_TEXTURED` + the slot in
+/// `flags`, the premultiplied tint in `color`, zero `corner_radius`/`border_*` —
+/// narrowed to one of nine destination sub-rects sampling one of nine source
+/// sub-rects:
+///
+/// * **destination**: the node's rect cut by [`UiNineSliceInput::border_px`],
+///   `[l, t, r, b]` in logical px, scale-folded like any other length. A corner
+///   is exactly `border_px` in size, NOT a fraction of the rect — that is the
+///   whole of what nine-slicing is.
+/// * **source**: the image's UV sub-rect cut by
+///   [`UiNineSliceInput::border_uv`], per side as a FRACTION of that sub-rect.
+///   Written verbatim into [`UiInstance::uv`], never scale-folded.
+///
+/// The three cuts on each axis come from cumulative boundaries with the OUTER
+/// edges pinned to the node's own rect and the image's own UV, so the nine
+/// regions TILE their parents exactly — no seam, no overlap, no accumulated
+/// drift at the far edge.
+///
+/// # `Tile` (UI-ADVANCED S5)
+///
+/// Under [`UI_NINE_SLICE_MODE_TILE`] the record additionally carries
+/// [`FLAG_TILED`] and a REPEAT COUNT per axis, derived by
+/// [`ui_nine_slice_tiles`] and applied per region (the centre column gets the X
+/// count, the centre row the Y count). The source rect is UNCHANGED — the wrap
+/// happens in the fragment shader, on the quad parameter, inside this same
+/// sub-rect. The four corners are `1×1` and therefore pack BYTE-IDENTICALLY
+/// under both modes.
+pub fn pack_ui_nine_slice_instance(
+    input: &PackInput,
+    region: u32,
+    scale_factor: f32,
+) -> Option<UiInstance> {
+    let image = input.image?;
+    let ns = input.nine_slice?;
+    debug_assert!(scale_factor > 0.0, "invariant: UI scale_factor is positive");
+    debug_assert!(
+        region < UI_NINE_SLICE_REGIONS,
+        "invariant: a UI nine-slice region is one of the {UI_NINE_SLICE_REGIONS} \
+         row-major sub-quads"
+    );
+    debug_assert!(
+        ns.mode < UI_NINE_SLICE_MODE_COUNT,
+        "invariant: a UI nine-slice mode is a legal NineSliceMode discriminant \
+         (< {UI_NINE_SLICE_MODE_COUNT}); the authored component carries the typed enum, \
+         this is the raw byte that crossed the crate boundary"
+    );
+    debug_assert!(
+        input.text_uv.is_none(),
+        "invariant: a GLYPH row is never nine-sliced — FLAG_TEXT and FLAG_TEXTURED are \
+         different quads with different shader branches, never one record wearing both"
+    );
+    debug_assert!(
+        image.slot < boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY,
+        "invariant: a UI sprite slot is a live bindless slot (< BINDLESS_TEXTURE_CAPACITY); \
+         flags bits {UI_SLOT_SHIFT}..32 hold only {} of them",
+        UI_SLOT_MASK + 1
+    );
+    debug_assert!(
+        ns.border_px.iter().all(|v| v.is_finite() && *v >= 0.0),
+        "invariant: a nine-slice destination border is finite and non-negative"
+    );
+    debug_assert!(
+        ns.border_uv.iter().all(|v| v.is_finite() && (0.0..1.0).contains(v)),
+        "invariant: each nine-slice source inset is a fraction of the sub-rect in [0, 1)"
+    );
+    debug_assert!(
+        ns.border_uv[0] + ns.border_uv[2] < 1.0 && ns.border_uv[1] + ns.border_uv[3] < 1.0,
+        "invariant: a nine-slice source split does not invert — each axis's two insets \
+         sum to less than the whole sub-rect (release scales the axis down instead)"
+    );
+
+    let s = scale_factor;
+    let col = (region % 3) as usize;
+    let row = (region / 3) as usize;
+
+    // Destination: cumulative cuts, outer edges pinned to the node's own rect.
+    let dw = split_axis(ns.border_px[0], ns.border_px[2], input.rect[2]);
+    let dh = split_axis(ns.border_px[1], ns.border_px[3], input.rect[3]);
+    let xs = [
+        input.rect[0],
+        input.rect[0] + dw[0],
+        input.rect[0] + dw[0] + dw[1],
+        input.rect[0] + input.rect[2],
+    ];
+    let ys = [
+        input.rect[1],
+        input.rect[1] + dh[0],
+        input.rect[1] + dh[0] + dh[1],
+        input.rect[1] + input.rect[3],
+    ];
+
+    // Source: the same construction against the image's UV sub-rect, with the
+    // insets read as fractions OF THAT SUB-RECT (never of the whole texture —
+    // which is what keeps this correct when S5 makes the sub-rect a flipbook
+    // frame that moves every tick).
+    let du = image.uv[2] - image.uv[0];
+    let dv = image.uv[3] - image.uv[1];
+    let fu = split_axis(ns.border_uv[0], ns.border_uv[2], 1.0);
+    let fv = split_axis(ns.border_uv[1], ns.border_uv[3], 1.0);
+    let us = [
+        image.uv[0],
+        image.uv[0] + du * fu[0],
+        image.uv[0] + du * (fu[0] + fu[1]),
+        image.uv[2],
+    ];
+    let vs = [
+        image.uv[1],
+        image.uv[1] + dv * fv[0],
+        image.uv[1] + dv * (fv[0] + fv[1]),
+        image.uv[3],
+    ];
+
+    // UI-ADVANCED S5 (S-D15): the repeat counts, DERIVED from the two borders and
+    // applied PER REGION — `tiles.0` to the centre column, `tiles.1` to the centre
+    // row, `1` everywhere else. A corner is `1×1` and packs no tile bits at all.
+    let (tx, ty) = ui_nine_slice_tiles(input, &ns);
+    let rx = if col == 1 { tx } else { 1 };
+    let ry = if row == 1 { ty } else { 1 };
+
+    let mut flags =
+        FLAG_TEXTURED | ((image.slot & UI_SLOT_MASK) << UI_SLOT_SHIFT) | tile_flag_bits(rx, ry);
+    let clip = match input.clip {
+        Some(c) => {
+            flags |= FLAG_CLIP_PRESENT;
+            [c[0] * s, c[1] * s, (c[0] + c[2]) * s, (c[1] + c[3]) * s]
+        }
+        None => [0.0; 4],
+    };
+
+    Some(UiInstance {
+        min_px: [xs[col] * s, ys[row] * s],
+        size_px: [(xs[col + 1] - xs[col]) * s, (ys[row + 1] - ys[row]) * s],
+        clip,
+        corner_radius: [0.0; 4],
+        uv: [us[col], vs[row], us[col + 1], vs[row + 1]],
+        color: premultiply_rgba8(image.tint),
+        border_color: 0,
+        border_width: 0.0,
+        flags,
+    })
+}
+
+/// The largest number of records ONE node can emit — the size of the sub-code
+/// scratch [`ui_node_sub_codes`] fills. It is the EMISSION maximum (background +
+/// every region), not the stride: the sub space has a hole in it, because
+/// `UiNineSlice`'s presence suppresses the image record.
+pub const UI_MAX_SUBS_PER_NODE: usize = 1 + UI_NINE_SLICE_REGIONS as usize;
+
+/// **The SOLE authority on which sub-records a node emits** (S-D12 (3)) — the
+/// one place S-D12 (1)'s truth table is written as code, and the one thing every
+/// pack loop asks before it packs anything.
+///
+/// Writes the node's sub codes into `out` in D4's per-node emission order and
+/// returns how many. Reading it is the whole of the truth table:
+///
+/// | `UiNineSlice` | `UiImage` | emits | subs |
+/// |---|---|---|---|
+/// | absent | absent | 1 | `0` |
+/// | absent | present | 2 | `0`, [`UI_IMAGE_SUB`] |
+/// | present | absent | 1 | `0` |
+/// | present | present | 10 (9 without the centre) | `0`, `1..=9` |
+///
+/// # Why the PUSH and not the decode carries this
+///
+/// Because every decode arm's precondition is then established here, and no arm
+/// can fail for any authored component set. The pre-S4 loop dispatched on a
+/// BINARY `if` and ended its else-arm in `.expect(..)` over
+/// [`pack_ui_image_instance`], which opens `let image = input.image?` — so a node
+/// carrying `UiNineSlice` and no `UiImage` panicked in RELEASE as well as debug.
+/// Widening the decode's `match` would have left the push free to emit a code
+/// whose arm still had to cope; making the push the authority removes the
+/// possibility instead of handling it (gate G4-8, red mutation M4-g).
+pub fn ui_node_sub_codes(input: &PackInput, out: &mut [u32; UI_MAX_SUBS_PER_NODE]) -> usize {
+    // Sub 0 — the node's own background rect. Every packable node has one.
+    out[0] = 0;
+    let mut n = 1;
+
+    match (input.nine_slice, input.image) {
+        // Sliced AND imaged: the nine sub-quads ARE the image, sliced, so the
+        // whole-rect image record is NOT emitted (S-D12 (1)).
+        (Some(ns), Some(_)) => {
+            for r in 0..UI_NINE_SLICE_REGIONS {
+                let sub = UI_NINE_SLICE_SUB_BASE + r;
+                if sub == UI_NINE_SLICE_CENTER_SUB && !ns.fill_center {
+                    continue;
+                }
+                out[n] = sub;
+                n += 1;
+            }
+        }
+        // Imaged only: S3's behaviour, byte-identical.
+        (None, Some(_)) => {
+            out[n] = UI_IMAGE_SUB;
+            n += 1;
+        }
+        // Sliced only: a structural NO-OP. With no image there is no texture, no
+        // source rect, and nothing for nine quads to be (S-D12 (3)).
+        (Some(_), None) => {}
+        (None, None) => {}
+    }
+    n
+}
+
+/// **The decode**: packs ONE of a node's sub-records, chosen by its sub code.
+///
+/// `sub` MUST be one [`ui_node_sub_codes`] emitted for this same `input` — which
+/// is what makes every arm total and every `.expect` below unreachable for all
+/// four component combinations (gate G4-8). It is a PURE function of
+/// `(input, sub, scale_factor)`, which is what lets the in-schedule loop pack
+/// directly in SORTED order, recovering each record's source from its key alone.
+pub fn pack_ui_sub_record(input: &PackInput, sub: u32, scale_factor: f32) -> UiInstance {
+    match sub {
+        0 => pack_ui_instance(input, scale_factor),
+        UI_IMAGE_SUB => pack_ui_image_instance(input, scale_factor).expect(
+            "invariant: the image sub code is emitted only for a node carrying UiImage and \
+             no UiNineSlice — ui_node_sub_codes is the sole authority",
+        ),
+        s => pack_ui_nine_slice_instance(input, s - UI_NINE_SLICE_SUB_BASE, scale_factor).expect(
+            "invariant: a nine-slice sub code is emitted only for a node carrying BOTH \
+             UiNineSlice and UiImage — ui_node_sub_codes is the sole authority",
+        ),
+    }
+}
+
+/// The **loop-agnostic emitter**: appends every record of one node, in D4's
+/// per-node emission order, into a caller-supplied sink; returns how many.
+///
+/// This is the seam the expansion policy lives behind. **There are THREE routes
+/// through the pack, and two of them are correct:**
+///
+/// 1. **This one.** It `push`es in `subs[..n]` order and never sorts, so its push
+///    order IS the emission order — the only route on which that is observable,
+///    and the reason `ui_no_realloc.rs`'s
+///    `ui_nine_slice_emitter_pushes_in_d4_order` exists.
+/// 2. **The in-schedule loop**
+///    ([`UiUploadSystem::gather_into_staging`](crate::ui::upload::UiUploadSystem::gather_into_staging)).
+///    It does not call this one — it must write into a FIXED box by sorted index,
+///    so it drives the same two functions ([`ui_node_sub_codes`] then
+///    [`pack_ui_sub_record`]) directly. Same authority, same decode, which is what
+///    lets a test drive the production expansion into its own scratch instead of
+///    hand-rolling it (gate G4-4). Because it sorts on the sub CODE, its output is
+///    invariant to the order the codes were pushed in.
+/// 3. ⚠️ **[`UiUploadSystem::pack_sort_upload`](crate::ui::upload::UiUploadSystem::pack_sort_upload),
+///    which re-implements the expansion at S3 semantics and is therefore WRONG** —
+///    a node with both `UiNineSlice` and `UiImage` gets an unsliced whole-rect
+///    image, the picture S-D12 (1) rules out. It has no caller in the workspace
+///    and whether it is deleted or wired is an owner SCOPE call already filed
+///    (`docs/OPEN-QUESTIONS.md`, entry 2026-08-21), so it is left standing rather
+///    than given a second, unrunnable copy of this policy. If it is ever wired it
+///    must be replaced by a call to THIS function.
+///
+/// Allocation-free in steady state: it only `push`es, so a warmed sink never
+/// grows.
+pub fn emit_ui_node_records(
+    input: &PackInput,
+    scale_factor: f32,
+    sink: &mut Vec<UiInstance>,
+) -> usize {
+    let mut subs = [0u32; UI_MAX_SUBS_PER_NODE];
+    let n = ui_node_sub_codes(input, &mut subs);
+    for &sub in &subs[..n] {
+        sink.push(pack_ui_sub_record(input, sub, scale_factor));
+    }
+    n
+}
+
 /// Reused per-frame UI render scratch (Principle 0 storage — a `Resource`, NOT a
 /// side store). Allocated/grown ONLY at setup or on a capacity-crossing frame; a
 /// steady-state frame only `clear()`s + `extend`s + sorts in place (capacity
 /// persists), so there is zero steady-state allocation.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct UiRenderScratch {
     /// Packed records, sorted by `StackIndex`; `clear()` + `extend`, never `Vec::new`.
     pub pack: Vec<UiInstance>,
@@ -150,9 +808,33 @@ pub struct UiRenderScratch {
     pub keys: Vec<(u32, u32)>,
     /// The instance count uploaded last frame (for the change gate / debug).
     pub last_count: u32,
-    /// The last generation seen — the O(1) change gate (A1 step 1): a static frame
-    /// short-circuits on `gen == last_seen_generation`.
-    pub last_seen_generation: u64,
+    /// DIAGNOSTIC (S0 item 6, deliberately NOT `#[cfg(test)]` — the §10.4
+    /// `relayout_count` lesson): repacks ever executed by
+    /// [`pack_sort_upload`](crate::ui::upload::UiUploadSystem::pack_sort_upload)
+    /// (the LEGACY path — which has NO caller in the workspace, so this counter
+    /// reads zero in every process; see that method's doc), wrapping. Sample
+    /// before/after a frame for
+    /// a per-frame count. The in-schedule two-phase seam keeps its OWN census
+    /// on the system ([`UiUploadSystem::repacks`]) — the D6a per-slot gate and
+    /// its `[u64; FRAMES_IN_FLIGHT]` state live there too, because Phase 1
+    /// reads the world through a read-only [`WorldView`] that cannot project
+    /// `&mut` to this `Resource`.
+    ///
+    /// [`UiUploadSystem::repacks`]: crate::ui::upload::UiUploadSystem::repacks
+    /// [`WorldView`]: boyko_ecs::ecs::core::system::dispatcher_token::WorldView
+    pub repacks: u64,
+}
+
+impl Default for UiRenderScratch {
+    /// Empty buffers; capacity arrives with the first pack and persists.
+    fn default() -> Self {
+        UiRenderScratch {
+            pack: Vec::new(),
+            keys: Vec::new(),
+            last_count: 0,
+            repacks: 0,
+        }
+    }
 }
 
 impl UiRenderScratch {
@@ -186,12 +868,17 @@ impl UiRenderScratch {
     }
 }
 
-/// The monotonic UI-render generation counter (A1 step 1) — a `Resource` bumped by
-/// any writer of the pack inputs (`ComputedRect` via the layout system,
-/// `UiBackground` / `StackIndex` / `ComputedClip` via authoring/commands, and the
-/// viewport/swapchain extent). The upload system's gate is one `u64` compare:
-/// `if gen == scratch.last_seen_generation { return; }` — the 0%-when-static
-/// guarantee is an O(1) compare, not an O(N) Changed scan.
+/// The monotonic UI-render generation counter (A1 step 1) — a `Resource` bumped
+/// once per changed frame by
+/// [`ui_render_discovery`](crate::ui::gather::ui_render_discovery) (the ONE
+/// production bump site since UI-ADVANCED S0; the host additionally bumps on a
+/// DPI/scale change, which no component carries). The two-phase upload seam's
+/// gate is one `u64` compare PER frame-in-flight slot, hoisted AHEAD of the
+/// gather in Phase 1 of
+/// [`UiUploadSystem::run_dispatcher`](crate::ui::upload::UiUploadSystem):
+/// a static frame costs one compare and ZERO component probes — an O(1) skip,
+/// not an O(N) Changed scan (the discovery system pays that scan once,
+/// archetype-filtered, for the whole set).
 #[derive(Resource, Default)]
 pub struct UiRenderGeneration {
     /// The current generation; bumped on any pack-input change.

@@ -3082,7 +3082,17 @@ fn unbindable_fragments_are_reported_and_pinned() {
         // existed on its own branch. The six below are therefore a FIRST measurement, taken on the
         // merged tree - they are what the run reports, not a target. See `OVER_WAIVED_MAX`, the one
         // per-document map both sides had, for the same note in the line's own words.
-        ("OPEN-QUESTIONS.md", 32),
+        //
+        // ⚠️ **32 -> 36 in the A7 merge, and all four are the UI campaign's.** The union inserted
+        // A7's register sections, which no census in this file had read, and every member was
+        // attributed to the side that inserted its citing line: the line's 32 are unchanged and
+        // A7's sections brought 16. Twelve of those were made unique and re-derived by exact text
+        // from the commit that wrote them. The four left are a grep record of
+        // `host_upload_frame`'s callers whose two `upload.rs` numbers did not hold even at their
+        // authoring commit, the gate's own misreport quoted verbatim as a finding (`components.rs`
+        // 1117), and a `pack.rs` 205 whose authoring text is not the rule its sentence names.
+        // Naming a file for those four would bind a number nobody can vouch for.
+        ("OPEN-QUESTIONS.md", 36),
         ("AETHER-GAIA-REVISION-2026-08-29.md", 0),
         ("gaia/CAMPAIGN.md", 0),
         ("gaia/DECISIONS.md", 2),
@@ -3362,7 +3372,14 @@ fn doc_to_doc_anchors_without_a_quotation_are_pinned() {
         // existed on its own branch. The six below are therefore a FIRST measurement, taken on the
         // merged tree - they are what the run reports, not a target. See `OVER_WAIVED_MAX`, the one
         // per-document map both sides had, for the same note in the line's own words.
-        ("OPEN-QUESTIONS.md", 55),
+        //
+        // ⚠️ **55 -> 71 in the A7 merge; the line's 55 are unchanged and all 16 are A7's.** Nine
+        // are the UI campaign's own bounds-only citations. Seven were REFUSED continuations - a
+        // bare `:N` inheriting a document named lines above, capped at zero - that this merge
+        // repaired by naming the document beside the anchor, which is what moves them from
+        // uncounted into this ledger: four into `APP-HOST-PLAN.md`, and three re-derived from the
+        // pre-split sprite plan into its S4 and S5 parts by exact text.
+        ("OPEN-QUESTIONS.md", 71),
         ("AETHER-GAIA-REVISION-2026-08-29.md", 0),
         ("gaia/CAMPAIGN.md", 15),
         ("gaia/DECISIONS.md", 0),
@@ -3547,7 +3564,15 @@ fn anchor_ignore_markers_are_reported_and_pinned() {
         // existed on its own branch. The six below are therefore a FIRST measurement, taken on the
         // merged tree - they are what the run reports, not a target. See `OVER_WAIVED_MAX`, the one
         // per-document map both sides had, for the same note in the line's own words.
-        ("OPEN-QUESTIONS.md", 522),
+        //
+        // ⚠️ **522 -> 550 in the A7 merge: 21 are A7's own and 7 were added by the merge, each on
+        // a line that quotes a stale coordinate ON PURPOSE** - a pre-split sprite-plan coordinate
+        // (four lines), a quotation of what that plan said (one), a citation deliberately
+        // repointed past the end of a file to prove a gate vacuous (one), and a coordinate its
+        // own entry calls "dead, and dead pre-split" (one). The alternative for each was to re-aim
+        // a number the sentence records as historical, which is the falsification this marker
+        // exists to prevent. The line's 522 are unchanged.
+        ("OPEN-QUESTIONS.md", 550),
         ("AETHER-GAIA-REVISION-2026-08-29.md", 0),
         ("gaia/CAMPAIGN.md", 0),
         ("gaia/DECISIONS.md", 0),
@@ -3951,7 +3976,11 @@ fn ignore_markers_are_measured_by_what_they_silence() {
         // existed on its own branch. The six below are therefore a FIRST measurement, taken on the
         // merged tree - they are what the run reports, not a target. See `OVER_WAIVED_MAX`, the one
         // per-document map both sides had, for the same note in the line's own words.
-        ("OPEN-QUESTIONS.md", 743),
+        //
+        // 743 -> 798 in the A7 merge, every one of the 55 on a line the merge inserted: what A7's
+        // 21 markers and the 7 the merge added silence, measured by the scan rather than
+        // estimated. The line's 743 are unchanged.
+        ("OPEN-QUESTIONS.md", 798),
         ("AETHER-GAIA-REVISION-2026-08-29.md", 0),
         ("gaia/CAMPAIGN.md", 0),
         ("gaia/DECISIONS.md", 0),
@@ -3984,7 +4013,10 @@ fn ignore_markers_are_measured_by_what_they_silence() {
         ("REFLECTION-PLAN-ECS.md", 0),
         ("REFLECTION-PLAN-GATES.md", 0),
         ("SYSTEMS.md", 0),
-        ("OPEN-QUESTIONS.md", 140),
+        // 140 -> 141 in the A7 merge. The one is A7's "The options" bullet, which names the
+        // marker in prose and is therefore read as a marker silencing nothing - the class most of
+        // the 140 belong to, pinned for the reason the doc comment above gives.
+        ("OPEN-QUESTIONS.md", 141),
         ("AETHER-GAIA-REVISION-2026-08-29.md", 0),
         ("gaia/CAMPAIGN.md", 0),
         ("gaia/DECISIONS.md", 0),
@@ -5312,12 +5344,15 @@ fn measured_claims() -> (Vec<MeasuredClaim>, Vec<String>) {
 ///   a document (*"N of the 25 test names appear in this file verbatim"*), and
 ///   `llvm-nm --defined-only` over a linked binary (*"six defined symbols"*). There is nothing to
 ///   re-read: one needs a `cargo test` process, the other a release build and a symbol table.
-/// * **The census's OWN figures, quoted back into the documents** — 335 bound `.rs` citations, 188
+/// * **The census's OWN figures, quoted back into the documents** — 367 bound `.rs` citations, 188
 ///   unbindable, 12 dead, 179 formerly dropped, 12 known-stale. (242/174/5 until the A6 merge
 ///   brought the line's crates under the same scan, then 331 until the A6 follow-up added four
 ///   citations — two into `migration_helpers` and two into the archetype module — each written
 ///   with enough path to BIND: the bare file name of the second matches two files in the tree
-///   and would have landed in the unbindable ledger, where nothing checks it. The figures
+///   and would have landed in the unbindable ledger, where nothing checks it. Then 335 until the
+///   A7 merge: the UI campaign's sources brought 26 bound citations and 3 ambiguous plus 3 dead
+///   fragments, and the merge's repair bound those six by writing enough path — every cited line
+///   read in the union first — so both ledgers are back at 188 and 12. The figures
 ///   that moved are re-derived from the run, and `179 formerly dropped` is left as the
 ///   historical figure it always was.) ⚠️ The first read **240** until
 ///   2026-08-29, two behind a tree the same landing had moved, and it is the one figure in this
@@ -5362,12 +5397,13 @@ fn measured_claims() -> (Vec<MeasuredClaim>, Vec<String>) {
 /// it.
 ///
 /// ⚠️ **And one gap that is NOT about figures at all, recorded here because this round hit it three
-/// times.** Both `OPEN-QUESTIONS.md` twins cite THIS file by line — **9 in the EN twin and 0 in
-/// the RU one, 9 between them** at this revision (it read 8/8/16 before the A6 merge, which
+/// times.** Both `OPEN-QUESTIONS.md` twins cite THIS file by line — **10 in the EN twin and 0 in
+/// the RU one, 10 between them** at this revision (9/0/9 until the A7 merge brought the UI
+/// campaign's "not anchor-gated" bullet; it read 8/8/16 before the A6 merge, which
 /// froze the RU twin on the line's side) — and **no check in
 /// this tree reads them.** `GATED_DOCS` excludes both twins, so the forward `.md` → `.rs` direction
 /// never sees them; [`md_citations_in_rust_sources`] runs the other way and filters to `.md`
-/// besides. Every edit to this file that moves a line silently rots those 9, and this round
+/// besides. Every edit to this file that moves a line silently rots those 10, and this round
 /// repaired them by hand three times because nothing would have said
 /// so. The fix is a scope decision, not a code one — adding a 260 KB question log to `GATED_DOCS`
 /// arms every check in this file over it at once — so it is named rather than taken.

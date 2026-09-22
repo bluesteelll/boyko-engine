@@ -1,4 +1,4 @@
-//! The UI upload system (`UiUploadSystem`) — GUI P5a Rung 4.
+//! The UI upload system (`UiUploadSystem`) — GUI P5a Rung 4 + UI-ADVANCED S0.
 //!
 //! A `GpuSystem`-shaped consumer (EMPTY [`Access`], [`is_gpu`](System::is_gpu) →
 //! `SystemKind::GpuCompute`, dispatcher-solo) that, on a UI-change frame:
@@ -6,48 +6,78 @@
 //! 1. **O(1) generation gate** — short-circuits on `gen == last_seen_generation`
 //!    (the [`UiRenderGeneration`] resource, A1 step 1); a static frame does nothing.
 //! 2. **packs** every visible node `(ComputedRect, UiBackground, ComputedClip?,
-//!    StackIndex?)` into the reused [`UiRenderScratch`] (`clear()` + `extend`,
-//!    never `Vec::new`),
+//!    StackIndex?)` into a reused scratch (`clear()` + `extend`, never `Vec::new`),
 //! 3. **stable z-sorts** by `(StackIndex, append_order)` in place (zero alloc),
-//! 4. **uploads** the packed scratch into the current-FIF host-mapped ring via
+//! 4. **uploads** the packed records into the current-FIF host-mapped ring via
 //!    [`RhiContext::ui_upload`], and
 //! 5. **stashes** the POD-by-value [`UiFramePlan`] the swapchain recorder reads
 //!    (Decision 9: it borrows NO RHI handle, so nothing `!Send` crosses the token
 //!    drop; the recorder re-resolves the pipeline + bind-group by `frame_index`).
 //!
-//! # The world-access seam (Rung-4 integration boundary)
+//! # The world-access seam — TWO PHASES, SEQUENCED, NEVER FUSED (UI-ADVANCED S0)
 //!
-//! The pure pack→sort→upload pipeline is the world-AGNOSTIC core
-//! [`UiUploadSystem::pack_sort_upload`], which takes the per-node inputs as an
-//! iterator plus the scratch, the ortho, the current `frame_index`, and an
-//! `&mut RhiContext`. It is fully unit-/Miri-testable (no Arena / world) and is what
-//! the host render loop and the goldens drive directly.
+//! The in-schedule seam is [`System::run_dispatcher`], and it is the mirror of
+//! the shipped [`GpuSystem`](crate::GpuSystem) ordering — world read first,
+//! `!Send` projection second, never both at once:
 //!
-//! The shipped end-to-end ON-SCREEN path is the render host calling
-//! [`host_upload_frame`](UiUploadSystem::host_upload_frame) (read the swapchain slot →
-//! fence it → [`pack_sort_upload`](UiUploadSystem::pack_sort_upload)), which returns
-//! the plan AND the minted [`FrameWriteToken`]; then
-//! [`RhiContext::ui_pass`](crate::RhiContext::ui_pass) on the plan, then
-//! [`Renderer::present_sampled`](boyko_rhi_vulkan::swapchain::Renderer::present_sampled)
-//! with the token (consumed BY VALUE — R0b) and `Some(&pass)` — the
-//! `record_present_sampled` UI sub-pass records the one draw.
+//! * **Phase 1 (shared borrow):** [`DispatcherToken::world`]'s read-only
+//!   [`WorldView`] carries the D6a generation gate (structural skip: an
+//!   unchanged generation returns before ONE component is probed) and, on a
+//!   changed frame, [`gather_into_staging`](UiUploadSystem::gather_into_staging)
+//!   — gather + pack + z-sort into the system-owned `staging` box. The view is
+//!   dropped at the phase's closing brace; only the packed COUNT crosses.
+//! * **Phase 2 (exclusive borrow):** [`DispatcherToken::nonsend_resource_mut`]
+//!   projects the `!Send` [`RhiContext`] and
+//!   [`upload_staging`](UiUploadSystem::upload_staging) memcpys
+//!   `staging[..n]` into the fenced ring slot. No world type appears in this
+//!   phase's signature, so the fusion cannot be re-written (rung S0 gate G0-5).
 //!
-//! The host-drivable
-//! [`host_upload_frame_from_world`](UiUploadSystem::host_upload_frame_from_world)
-//! seam (#31) gathers the visible nodes from a [`DispatcherToken::world`]
-//! [`WorldView`] (a read-only ECS
-//! projection, #30) FIRST, ends that borrow, then delegates to `host_upload_frame`
-//! with only the `!Send` borrows live. `WorldView` (#30) supplies the
-//! column/resource-read HALF of the world access the in-schedule site needs.
+//! The two phases borrow the SAME token — `world()` takes `&self`,
+//! `nonsend_resource_mut` takes `&mut self` — so a body holding both at once is
+//! the M1 conflict borrowck refuses (`dispatcher_token.rs:185-190`, and the
+//! per-route probes in `docs/OPEN-QUESTIONS.md`, entry 2026-08-21). The fused
+//! predecessor of this seam (`host_upload_frame_from_world`, whose parameter
+//! list demanded a live `WorldView` AND a `&mut RhiContext` at one call site)
+//! had NO possible caller and is DELETED, not re-signed.
 //!
-//! The `impl System` shell ([`System::run_dispatcher`]) is registered for its
-//! scheduler SHAPE only (EMPTY access, `is_gpu()`, dispatcher-solo) and is an honest
-//! no-op here: it does NOT project-and-drop the `!Send` [`RhiContext`]. The one
-//! capability still missing for the in-schedule upload is the swapchain `Renderer`
-//! slot index + in-flight fence — the `Renderer` is not yet an ECS resource — so the
-//! host drives the path through `host_upload_frame_from_world` until an ECS-resident
-//! swapchain handle exists (the remaining architectural decision for the
-//! orchestrator).
+//! The pure pack→sort→upload pipeline additionally remains available as the
+//! world-AGNOSTIC core [`UiUploadSystem::pack_sort_upload`], which takes the
+//! per-node inputs as an iterator plus the scratch, the ortho, the current
+//! `frame_index`, and an `&mut RhiContext`. It is fully unit-/Miri-testable
+//! (no Arena / world).
+//!
+//! ⚠️ **It is UNREACHED and it is now WRONG.** Nothing drives it — its only
+//! non-doc caller is [`UiUploadSystem::host_upload_frame`], whose only occurrence
+//! in the tree is its own definition; the render host does not call it and
+//! neither does any test or golden, which is a change since the research corpus
+//! recorded it as test-driven. Since UI-ADVANCED S4 it also re-implements the
+//! per-node expansion with S3 semantics, so for a node carrying BOTH
+//! `UiNineSlice` and `UiImage` it emits the picture S-D12 (1) rules out. Whether
+//! it is deleted or wired is a SCOPE call already filed
+//! (`docs/OPEN-QUESTIONS.md`, entry 2026-08-21); until it is answered, read every
+//! "in both loops" instruction against that entry rather than against this
+//! sentence.
+//!
+//! # Driving the seam from a host (until the `Renderer` is an ECS resource)
+//!
+//! The swapchain [`Renderer`] is host-held, so the host mints the write proof
+//! and stages it BEFORE dispatching the system:
+//!
+//! 1. `let token = renderer.wait_frame_in_flight()?;` — fence the slot (the
+//!    write-after-read contract) and mint the [`FrameWriteToken`];
+//! 2. `sys.stage_frame(token, ortho);` — stage the POD frame inputs into the
+//!    system (both are `Send + 'static`; no `!Send` state enters the system);
+//! 3. `ecs.run_system_once(&mut sys);` — the dispatcher-solo run: Phase 1 then
+//!    Phase 2;
+//! 4. `let (plan, token) = sys.take_frame_output()…;` — the plan for
+//!    [`RhiContext::ui_pass`] and the token for the frame-ending
+//!    `present_sampled` consume (BY VALUE — R0b).
+//!
+//! A run with no staged frame (a bare [`EcsMaster`], the scheduler, a
+//! device-free test) executes Phase 1 alone and returns at Phase 2's
+//! projection — which is exactly what makes the S0 observer and gates
+//! G0-2/G0-3 device-free: Phase 1 is unit-testable with a bare `EcsMaster`
+//! through [`EcsMaster::run_system_once`], no graphics type in sight.
 
 use boyko_ecs::ecs::core::change_detection::Tick;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
@@ -60,13 +90,14 @@ use boyko_rhi_vulkan::swapchain::{FrameWriteToken, Renderer};
 
 use crate::error::GpuColumnError;
 use crate::gpu_column::RhiContext;
+use crate::ui::gather::{gather_ui_nodes, UiGatherScratch};
 use crate::ui::instance::{UiInstance, UiOrtho};
-use crate::ui::pack::{pack_ui_instance, PackInput, UiRenderScratch};
-// `UiRenderGeneration` is referenced only in doc links across this module; importing
-// it lets the bare `[`UiRenderGeneration`]` intra-doc links resolve.
-#[allow(unused_imports)]
-use crate::ui::pack::UiRenderGeneration;
+use crate::ui::pack::{
+    pack_ui_image_instance, pack_ui_instance, pack_ui_sub_record, ui_node_sub_codes, PackInput,
+    UiRenderGeneration, UiRenderScratch, UI_MAX_SUBS_PER_NODE, UI_RECORDS_PER_NODE,
+};
 use crate::ui::plan::UiFramePlan;
+use crate::ui::FRAMES_IN_FLIGHT;
 
 /// One source node's pack inputs plus its painter's-order z key — the world-agnostic
 /// row the [`UiUploadSystem::pack_sort_upload`] core consumes (so the pack is driven
@@ -79,18 +110,132 @@ pub struct UiNode {
     pub stack: u32,
 }
 
-/// The UI upload system (Rung 4): a `GpuSystem`-shaped `impl System` (EMPTY access,
-/// `is_gpu()`, dispatcher-solo) carrying the SETUP-class state the upload needs.
+/// The NODE budget the staging box is sized for — the plan's own measurement
+/// scene, stated once so [`UI_STAGING_ROWS`] is a derivation rather than a
+/// number.
+pub const UI_MAX_NODES: usize = 2048;
+
+/// Rows in the preallocated [`UiUploadSystem`] staging box (sized at
+/// [`System::initialize`], never grown in the frame loop):
+/// [`UI_MAX_NODES`] × [`UI_RECORDS_PER_NODE`] = 22 528 × 80 B = **1.72 MiB**, one
+/// host allocation at initialize, never grown, never walked beyond the live
+/// prefix.
 ///
-/// The per-frame pack→sort→upload is the world-agnostic core
-/// [`pack_sort_upload`](Self::pack_sort_upload); the `impl System` shell projects the
-/// `!Send` [`RhiContext`] through the [`DispatcherToken`]. See the module docs for
-/// the world-access seam.
+/// # Why the whole budget rather than a "typical" mix
+///
+/// The overflow arm is a `debug_assert!(false, …)` and, in release, a `truncate`
+/// of the emission TAIL with [`UiUploadSystem::staging_overflows`] bumped. A box
+/// sized for a typical composition therefore overflows as a function of *what
+/// the scene contains* — which is exactly the composition-dependent silent
+/// truncation the clamp exists to make loud. A constant that cannot overflow
+/// within the stated node budget is worth 1.4 MiB of host RAM.
+///
+/// The pre-S4 constant was a bare `4096` whose doc claimed "2× the plan's own
+/// N = 2048 measurement scene". That was already false at S3: two records per
+/// node × 2 048 nodes is 4 096 — exactly **1×**, overflowing at node 2 049 with
+/// zero margin. At S4 a nine-sliced imaged node emits ten records and the old
+/// box would have overflowed at the **410th** such node (10 × 409 = 4 090 ≤
+/// 4 096 < 4 100).
+///
+/// # Why the derivation is on the STRIDE
+///
+/// [`UI_RECORDS_PER_NODE`] is 11 while the true worst case is 10 records/node
+/// (20 480 rows, 1.56 MiB). The 160 KiB of slack is deliberate: a constant
+/// derived from the stride cannot go stale when a later rung adds a sub code,
+/// whereas one derived from today's maximum emission must be re-audited every
+/// time S-D12 (1)'s truth table gains a row.
+///
+/// *(The GPU ring needs no change: `UiRingSlot` is grow-only pow2 on overflow,
+/// so this CPU box is the sole hard cap.)*
+pub const UI_STAGING_ROWS: usize = UI_MAX_NODES * UI_RECORDS_PER_NODE as usize;
+
+/// The all-zero [`UiInstance`] the staging box is seeded with at initialize.
+const UI_INSTANCE_ZERO: UiInstance = UiInstance {
+    min_px: [0.0; 2],
+    size_px: [0.0; 2],
+    clip: [0.0; 4],
+    corner_radius: [0.0; 4],
+    uv: [0.0; 4],
+    color: 0,
+    border_color: 0,
+    border_width: 0.0,
+    flags: 0,
+};
+
+/// Host-staged per-frame inputs for Phase 2 (see the module doc's "Driving the
+/// seam from a host"): the fenced slot's write proof + this frame's ortho. Both
+/// POD and `Send + 'static` — nothing `!Send` enters the system's state.
+struct PendingFrame {
+    /// The write proof minted by [`Renderer::wait_frame_in_flight`] — the ONLY
+    /// source of the ring slot index (R0b), returned to the host with the plan
+    /// for the frame-ending `present_sampled` consume.
+    token: FrameWriteToken,
+    /// [`UiOrtho::for_extent`] of the swapchain extent this frame presents into.
+    ortho: UiOrtho,
+}
+
+/// The UI upload system (Rung 4 + UI-ADVANCED S0): a `GpuSystem`-shaped
+/// `impl System` (EMPTY access, `is_gpu()`, dispatcher-solo) carrying the
+/// SETUP-class state the two-phase upload needs — the staging box (the one
+/// staging mirror for the GPU-contiguity ring write; Principle 0's named
+/// legitimate exception), the gather scratch, and the per-slot generation gate.
+///
+/// The per-frame seam is the two-phase [`System::run_dispatcher`]. The
+/// world-agnostic core [`pack_sort_upload`](Self::pack_sort_upload) is public API
+/// with **no caller anywhere in the workspace** — not the host, not a test, not a
+/// golden — and since UI-ADVANCED S4 its pack loop is also semantically WRONG for
+/// a nine-sliced node; see its own doc and `docs/OPEN-QUESTIONS.md` (entry
+/// 2026-08-21, "delete them, or wire the host"). See the module docs.
 pub struct UiUploadSystem {
     /// The logical→physical DPI scale folded into every length at pack (so the shader
     /// works in physical px and `fwidth` AA is one device pixel). The host updates it
     /// when the viewport scale factor changes (and bumps the generation).
     scale_factor: f32,
+    /// Phase 1's pack target: the preallocated staging mirror for the ring
+    /// memcpy — sized ONCE at [`System::initialize`] ([`UI_STAGING_ROWS`]),
+    /// never grown in the frame loop. Durable per-entity data stays in ECS
+    /// columns; this box holds one frame's packed, z-sorted GPU records only.
+    staging: Box<[UiInstance]>,
+    /// Records staged by the LAST gather (the prefix of `staging` that is live).
+    staged: usize,
+    /// Gather output scratch (cleared + refilled per changed frame; capacity
+    /// persists — zero steady-state allocation).
+    node_buf: Vec<UiNode>,
+    /// Parallel `(stack, append)` sort-key lane — the same total-order key
+    /// [`UiRenderScratch::sort_by_stack`] uses, reused per changed frame.
+    keys: Vec<(u32, u32)>,
+    /// The DFS gather scratch + the S0 probe census
+    /// ([`UiGatherScratch::probes`]).
+    gather_scratch: UiGatherScratch,
+    /// DIAGNOSTIC (S0 item 6): packs executed by
+    /// [`gather_into_staging`](Self::gather_into_staging), ever (wrapping).
+    /// With [`UiGatherScratch::probes`] this is the seam's COMMAND CENSUS: over
+    /// a static run both counters must record ZERO work (gate G0-2 asserts the
+    /// census, not a timing delta).
+    repacks: u64,
+    /// DIAGNOSTIC: frames whose gather emitted more than [`UI_STAGING_ROWS`]
+    /// records (release-clamped to the box; loud in debug). A non-zero value
+    /// means the staging box is undersized for the scene.
+    staging_overflows: u64,
+    /// The last generation seen, PER frame-in-flight ring slot — the O(1) D6a
+    /// change gate, hoisted ahead of the gather (S0 item 5). Per slot because a
+    /// skip re-serves the SLOT's ring contents: a single scalar would skip the
+    /// second slot onto stale bytes. `u64::MAX` = "never seen", so a fresh
+    /// system always packs. A run with no staged frame gates on lane 0 — one
+    /// system instance serves ONE driving mode (host-staged or device-free);
+    /// do not interleave them on one instance.
+    last_seen_generation: [u64; FRAMES_IN_FLIGHT],
+    /// The record count last uploaded into each ring slot — what a skipped
+    /// frame's [`UiFramePlan`] re-serves (the ortho is rebuilt from the live
+    /// extent each frame; only the count is slot-resident state).
+    last_counts: [u32; FRAMES_IN_FLIGHT],
+    /// The host-staged frame inputs (write proof + ortho), taken by the next
+    /// `run_dispatcher`. `None` ⇒ Phase 1 only (device-free / in-schedule run).
+    pending_frame: Option<PendingFrame>,
+    /// The last host-driven run's output: the upload verdict (the plan, or the
+    /// ring-grow error the host must see) + the write proof handed back for the
+    /// frame-ending `present_sampled` consume.
+    frame_output: Option<(Result<UiFramePlan, GpuColumnError>, FrameWriteToken)>,
     /// Per-system metadata (name, EMPTY access, tick snapshots). The `Access` stays
     /// EMPTY — the GpuSystem-shaped consumer adds no conflict-graph edges (MF-5).
     meta: SystemMeta,
@@ -102,7 +247,8 @@ impl UiUploadSystem {
     /// The system declares EMPTY [`Access`] (it touches no CPU column through the
     /// conflict graph) and is expected to be registered `SystemConfig::gpu()` so the
     /// scheduler resolves it to `SystemKind::GpuCompute` (dispatcher-solo), like
-    /// [`GpuSystem`](crate::GpuSystem).
+    /// [`GpuSystem`](crate::GpuSystem). The staging box is allocated at
+    /// [`System::initialize`], not here — construction stays allocation-free.
     pub fn new(scale_factor: f32) -> Self {
         debug_assert!(scale_factor > 0.0, "invariant: UI scale_factor is positive");
         // `Tick::new(1)` is the construction sentinel (the dispatcher overwrites the
@@ -111,6 +257,17 @@ impl UiUploadSystem {
         let meta = SystemMeta::new(std::any::type_name::<UiUploadSystem>(), Tick::new(1));
         Self {
             scale_factor,
+            staging: Box::new([]),
+            staged: 0,
+            node_buf: Vec::new(),
+            keys: Vec::new(),
+            gather_scratch: UiGatherScratch::default(),
+            repacks: 0,
+            staging_overflows: 0,
+            last_seen_generation: [u64::MAX; FRAMES_IN_FLIGHT],
+            last_counts: [0; FRAMES_IN_FLIGHT],
+            pending_frame: None,
+            frame_output: None,
             meta,
         }
     }
@@ -121,6 +278,190 @@ impl UiUploadSystem {
     pub fn set_scale_factor(&mut self, scale_factor: f32) {
         debug_assert!(scale_factor > 0.0, "invariant: UI scale_factor is positive");
         self.scale_factor = scale_factor;
+    }
+
+    /// Stages the host-minted frame inputs for the NEXT dispatch (module doc's
+    /// "Driving the seam from a host"): the [`FrameWriteToken`] from
+    /// [`Renderer::wait_frame_in_flight`] (the fenced slot's write proof — the
+    /// only source of the slot index, R0b) and this frame's `ortho`.
+    #[inline]
+    pub fn stage_frame(&mut self, token: FrameWriteToken, ortho: UiOrtho) {
+        debug_assert!(
+            self.pending_frame.is_none(),
+            "invariant: one staged frame per dispatch — the previous frame was \
+             never dispatched"
+        );
+        self.pending_frame = Some(PendingFrame { token, ortho });
+    }
+
+    /// Takes the last host-driven run's output: the upload verdict (the
+    /// [`UiFramePlan`], or the ring error the host must handle) and the
+    /// [`FrameWriteToken`] handed back for the frame-ending `present_sampled`
+    /// consume (BY VALUE — R0b). `None` if the last run had no staged frame.
+    #[inline]
+    pub fn take_frame_output(
+        &mut self,
+    ) -> Option<(Result<UiFramePlan, GpuColumnError>, FrameWriteToken)> {
+        self.frame_output.take()
+    }
+
+    /// The records staged by the last [`gather_into_staging`](Self::gather_into_staging)
+    /// — packed, z-sorted, ready for [`upload_staging`](Self::upload_staging).
+    /// The S0 observer + gate G0-3 read the packed-count (and the rows) here.
+    #[inline]
+    pub fn staged(&self) -> &[UiInstance] {
+        &self.staging[..self.staged]
+    }
+
+    /// COMMAND CENSUS, gather half: component probes ever issued by this
+    /// system's gathers (forwards [`UiGatherScratch::probes`]). A static run
+    /// must not advance it (G0-2).
+    #[inline]
+    pub fn probes(&self) -> u64 {
+        self.gather_scratch.probes
+    }
+
+    /// DIAGNOSTIC (UI-ADVANCED S5, gate G5-6): sprite-sheet frame indices this
+    /// system's gathers ever CLAMPED to the sheet's last frame (forwards
+    /// [`UiGatherScratch::sheet_index_clamps`]). Sample before/after a frame for
+    /// a per-frame count.
+    #[inline]
+    pub fn sheet_index_clamps(&self) -> u64 {
+        self.gather_scratch.sheet_index_clamps
+    }
+
+    /// COMMAND CENSUS, pack half: packs ever executed by
+    /// [`gather_into_staging`](Self::gather_into_staging). A static run must
+    /// not advance it (G0-2).
+    #[inline]
+    pub fn repacks(&self) -> u64 {
+        self.repacks
+    }
+
+    /// DIAGNOSTIC: staging-box overflow clamps (see the field doc).
+    #[inline]
+    pub fn staging_overflows(&self) -> u64 {
+        self.staging_overflows
+    }
+
+    /// **Phase 1 (device-free):** gather + pack + z-sort into the system-owned
+    /// staging box, returning the packed COUNT — the only thing that crosses
+    /// the seam to Phase 2 (never the view's borrow; red mutation M0-b).
+    ///
+    /// No `!Send` type in the signature: the phase reads the world exclusively
+    /// through the [`WorldView`] `&self` surface and writes only `self`'s own
+    /// buffers, so it is unit-testable with a bare [`EcsMaster`] (through
+    /// [`EcsMaster::run_system_once`], which mints the token) — no device, no
+    /// graphics type (rung S0 gate G0-5 pins this signature).
+    ///
+    /// A gather that emits more than the staging box holds is clamped to the
+    /// box in release (loud `debug_assert!` in dev, counted in
+    /// [`staging_overflows`](Self::staging_overflows)) — the S-D7 house
+    /// pattern: fail loudly in dev, degrade visibly-but-safely in release.
+    pub fn gather_into_staging(&mut self, view: &WorldView<'_>) -> usize {
+        // COMMAND CENSUS (S0 item 6): one pack executed. Counted at the pack
+        // itself, not at the gate, so a wrongly-placed gate that still gathers
+        // but skips the pack keeps this at zero while the probe census moves.
+        self.repacks = self.repacks.wrapping_add(1);
+
+        self.node_buf.clear();
+        gather_ui_nodes(view, &mut self.gather_scratch, &mut self.node_buf);
+
+        // z-sort via the (stack, append) key lane — the same TOTAL order
+        // `UiRenderScratch::sort_by_stack` argues (append is unique, so an
+        // unstable sort IS the stable permutation, zero alloc) — then pack the
+        // records into `staging` directly in sorted order.
+        //
+        // UI-ADVANCED S3/S4: a node emits SEVERAL records — its background rect,
+        // then either its nine slice sub-quads or its whole-rect sprite (D4's
+        // per-node paint order; S-D12 (1)'s truth table) — so `append` is not the
+        // node index. It is the `(node, sub)` CODE
+        // `node * UI_RECORDS_PER_NODE + sub`, unique and strictly increasing in
+        // emission order (so the key stays TOTAL and the sorted result is still
+        // painter's order, one node's sub-records contiguous and in contract
+        // order) — and, unlike a running record counter, it lets this loop find
+        // each record's SOURCE node from the key alone, which is what packing
+        // directly in sorted order requires.
+        //
+        // The stride is `UI_RECORDS_PER_NODE` (11) while the emission is 10 / 9 /
+        // 2 / 1: the sub space is a fixed layout with a HOLE in it. The hole
+        // costs nothing here, because the push emits codes only for records that
+        // exist and the decode is `append % UI_RECORDS_PER_NODE`.
+        let Self {
+            staging,
+            node_buf,
+            keys,
+            scale_factor,
+            ..
+        } = self;
+        keys.clear();
+        let mut subs = [0u32; UI_MAX_SUBS_PER_NODE];
+        for (node_idx, node) in node_buf.iter().enumerate() {
+            let base = node_idx as u32 * UI_RECORDS_PER_NODE;
+            // `ui_node_sub_codes` is the SOLE authority on which subs exist, so
+            // every code pushed here has a total decode arm below (G4-8, M4-g).
+            let n = ui_node_sub_codes(&node.input, &mut subs);
+            for &sub in &subs[..n] {
+                keys.push((node.stack, base + sub));
+            }
+        }
+
+        let emitted = keys.len();
+        let overflowed = emitted > staging.len();
+        let n = if overflowed {
+            debug_assert!(
+                false,
+                "UiUploadSystem staging box overflow: gather emitted {emitted} \
+                 records into a {}-row box (raise UI_STAGING_ROWS)",
+                staging.len()
+            );
+            // Drop the TAIL of the emission order (the pre-S3 clamp semantics),
+            // which keeps whole nodes' sub-records together at the boundary
+            // only by luck — a clamped frame is a misconfiguration, counted so
+            // it is visible rather than silently half-drawn.
+            keys.truncate(staging.len());
+            staging.len()
+        } else {
+            emitted
+        };
+
+        keys.sort_unstable_by_key(|&k| k);
+        for (dst, &(_, append)) in keys.iter().enumerate() {
+            let node = &node_buf[(append / UI_RECORDS_PER_NODE) as usize];
+            staging[dst] = pack_ui_sub_record(
+                &node.input,
+                append % UI_RECORDS_PER_NODE,
+                *scale_factor,
+            );
+        }
+
+        if overflowed {
+            self.staging_overflows = self.staging_overflows.wrapping_add(1);
+        }
+        self.staged = n;
+        n
+    }
+
+    /// **Phase 2 (exclusive):** memcpy the staged records into the fenced ring
+    /// slot via [`RhiContext::ui_upload`], returning the POD-by-value plan.
+    ///
+    /// No world type in the signature — no [`WorldView`], no [`EcsMaster`] —
+    /// so the gather/upload fusion cannot be re-written here (rung S0 gate
+    /// G0-5 pins this signature; the trybuild fixture
+    /// `tests/ui_s0_seam_fusion/` pins that a call site holding both borrows
+    /// does not compile). Deliberately an associated fn with no `self`: Phase 2
+    /// cannot reach the gather state at all.
+    ///
+    /// # Errors
+    /// [`GpuColumnError`] on a ring grow / mapping failure (or if
+    /// [`RhiContext::ui_setup`](crate::RhiContext::ui_setup) was never called).
+    pub fn upload_staging(
+        rhi: &mut RhiContext,
+        packed: &[UiInstance],
+        ortho: UiOrtho,
+        token: &FrameWriteToken,
+    ) -> Result<UiFramePlan, GpuColumnError> {
+        rhi.ui_upload(packed, ortho, token)
     }
 
     /// The world-AGNOSTIC pack → stable z-sort → upload core (A1 steps 2-6). Drives
@@ -147,6 +488,25 @@ impl UiUploadSystem {
     /// Returns the [`UiFramePlan`] to stash for the swapchain recorder. An empty node
     /// set yields an empty plan (the recorder draws nothing).
     ///
+    /// # ⚠️ Unreached, and wrong for a nine-sliced node
+    ///
+    /// **Nothing in the workspace calls this.** Its only non-doc caller is
+    /// [`host_upload_frame`](Self::host_upload_frame), whose only occurrence in
+    /// the tree is its own definition; no test and no golden reaches either.
+    ///
+    /// **And since UI-ADVANCED S4 its pack loop is semantically wrong**, not
+    /// merely unused: it emits background + whole-rect image for a node carrying
+    /// both `UiNineSlice` and `UiImage`, which is the picture S-D12 (1) rules out.
+    /// The in-schedule seam ([`gather_into_staging`](Self::gather_into_staging))
+    /// and the loop-agnostic emitter
+    /// ([`emit_ui_node_records`](crate::ui::pack::emit_ui_node_records)) both go
+    /// through the sole authority `ui_node_sub_codes`; this loop does not.
+    ///
+    /// Deleting it or wiring it is an owner SCOPE call, already filed
+    /// (`docs/OPEN-QUESTIONS.md`, entry 2026-08-21). It is left standing and
+    /// wrong rather than half-fixed, because a fixed copy would be a second,
+    /// unrunnable implementation of the expansion policy. See the body comment.
+    ///
     /// # Errors
     /// [`GpuColumnError`] on a ring grow / mapping failure (or if
     /// [`RhiContext::ui_setup`](crate::RhiContext::ui_setup) was never called).
@@ -159,12 +519,49 @@ impl UiUploadSystem {
         token: &FrameWriteToken,
         ctx: &mut RhiContext,
     ) -> Result<UiFramePlan, GpuColumnError> {
+        // DIAGNOSTIC (S0 item 6): one repack executed on the LEGACY host path.
+        // Counted HERE — at the pack itself, not at a gate — so a wrongly-placed
+        // gate that still gathers but skips the pack keeps this at zero while
+        // the probe counter moves.
+        scratch.repacks = scratch.repacks.wrapping_add(1);
+
         // (2) pack — clear + extend into the preallocated scratch, never Vec::new.
+        //
+        // ⚠️ **THIS LOOP IS WRONG SINCE UI-ADVANCED S4, and it is left wrong on
+        // purpose.** It re-implements the per-node expansion at S3 semantics —
+        // background, then `pack_ui_image_instance` — and that helper opens
+        // `let image = input.image?` WITHOUT consulting `nine_slice`. So a node
+        // carrying BOTH components gets its background plus an UNSLICED
+        // whole-rect image: exactly the picture S-D12 (1) rules out, and the one
+        // the sole authority (`ui_node_sub_codes`) exists to make unrepresentable.
+        // The correct expansion is one call to `emit_ui_node_records`.
+        //
+        // It is not fixed here because this whole function has NO caller in the
+        // workspace (see the method doc and `docs/OPEN-QUESTIONS.md`, entry
+        // 2026-08-21) and whether it is deleted or wired is an owner SCOPE call.
+        // Fixing an unreachable loop would land a second, ungatable copy of the
+        // expansion policy — the "two loops, two append encodings" hazard that has
+        // already cost this campaign three gate re-pointings. **If it is ever
+        // wired, this loop must be replaced by `emit_ui_node_records` in the same
+        // edit**, and the note in `UiNineSlice`'s own docs about presence
+        // suppressing the image record is the property to gate.
+        //
+        // The append key is the RUNNING RECORD index here, not the `(node, sub)` code
+        // `gather_into_staging` uses, because `sort_by_stack`'s gather indexes
+        // `pack[idx]` by it: both encodings are unique and strictly increasing in
+        // emission order, so both yield the same painter's order — this one has to
+        // BE the pack index, and that one has to LOCATE the source node.
         scratch.pack.clear();
         scratch.keys.clear();
-        for (append, node) in nodes.into_iter().enumerate() {
+        for node in nodes {
+            let record = scratch.pack.len() as u32;
             scratch.pack.push(pack_ui_instance(&node.input, self.scale_factor));
-            scratch.keys.push((node.stack, append as u32));
+            scratch.keys.push((node.stack, record));
+            if let Some(sprite) = pack_ui_image_instance(&node.input, self.scale_factor) {
+                let record = scratch.pack.len() as u32;
+                scratch.pack.push(sprite);
+                scratch.keys.push((node.stack, record));
+            }
         }
 
         // (3) stable z-sort in place (zero alloc — the (stack, append) key is total).
@@ -227,61 +624,20 @@ impl UiUploadSystem {
         let plan = self.pack_sort_upload(nodes, scratch, gather, ortho, &token, ctx)?;
         Ok((plan, token))
     }
-
-    /// Host-drivable per-frame upload that gathers the visible UI nodes from the
-    /// ECS [`WorldView`] FIRST (a read-only world borrow), lets that borrow end,
-    /// then drives the `!Send`-only upload via
-    /// [`host_upload_frame`](Self::host_upload_frame).
-    ///
-    /// This is the world-read half of the Rung-4 seam (#30/#31): `gather_nodes`
-    /// fills `node_buf` (reused, never `Vec::new`) using ONLY the view's `&self`
-    /// read surface ([`WorldView::resource`], [`WorldView::get_component_raw`],
-    /// [`WorldView::query_entities_buf`]). The world-read borrow ENDS with the
-    /// closure; only `&mut RhiContext` + `&Renderer` are live during the upload,
-    /// so the world-read and `!Send` borrows are sequential, never simultaneous.
-    ///
-    /// The swapchain `Renderer` is still host-supplied (it is not yet an ECS
-    /// resource), so this is a host driver, not the in-schedule site — see the
-    /// module docs' world-access seam.
-    ///
-    /// Like [`host_upload_frame`](Self::host_upload_frame), returns the minted
-    /// [`FrameWriteToken`] alongside the plan — the host passes it BY VALUE to the
-    /// frame-ending `present_sampled` consume (R0b).
-    ///
-    /// # Errors
-    /// [`GpuColumnError::Swapchain`] on the fence wait, or any
-    /// [`pack_sort_upload`](Self::pack_sort_upload) upload error.
-    #[allow(clippy::too_many_arguments)]
-    pub fn host_upload_frame_from_world<F>(
-        &self,
-        world: WorldView<'_>,
-        node_buf: &mut Vec<UiNode>,
-        gather_nodes: F,
-        scratch: &mut UiRenderScratch,
-        gather: &mut Vec<UiInstance>,
-        ortho: UiOrtho,
-        renderer: &Renderer<'_>,
-        ctx: &mut RhiContext,
-    ) -> Result<(UiFramePlan, FrameWriteToken), GpuColumnError>
-    where
-        F: FnOnce(WorldView<'_>, &mut Vec<UiNode>),
-    {
-        node_buf.clear();
-        gather_nodes(world, node_buf);
-        // The `world` view (the read borrow) is consumed by the closure above; only
-        // the `!Send` `&mut RhiContext` + `&Renderer` borrows are live below.
-        self.host_upload_frame(node_buf.drain(..), scratch, gather, ortho, renderer, ctx)
-    }
 }
 
-// SAFETY (S1' + MF-5 / Option C): this system records NO CPU component access (the
-//   declared `Access` is empty) and, in P5a, its `run_dispatcher` body is an honest
-//   no-op that mints no reference (the on-screen upload is host-driven via
-//   `host_upload_frame`). The S1' aliasing contract is therefore vacuously upheld: the
-//   scheduler runs a `GpuCompute` system dispatcher-solo at `running == 0`, the token
-//   is mintable only there, and the body neither projects the token nor touches world
-//   state. `run_unsafe` is unreachable-by-design (a worker holds no token, so the
-//   `!Send` `RhiContext` is structurally unreachable on the worker path).
+// SAFETY (S1' + MF-5 / Option C, mirroring `GpuSystem`): `run_dispatcher` reaches
+//   the world ONLY through the token's blessed projections, in sequence — Phase 1
+//   reads through the read-only `WorldView` (`&self` of the token), whose borrow
+//   ends at the phase's closing brace; Phase 2 projects the `!Send` `RhiContext`
+//   through `nonsend_resource_mut` (`&mut self` of the token). Borrowck forbids
+//   the two coexisting (M1, dispatcher_token.rs:185-190), and the scheduler runs
+//   a `GpuCompute` system dispatcher-solo at `running == 0`, where the token is
+//   mintable — so no worker aliases either projection. The declared `Access` is
+//   EMPTY: the world reads go through the view, which is dispatcher-solo by
+//   construction, not through the conflict graph. `run_unsafe` is
+//   unreachable-by-design (a worker holds no token, so both the view and the
+//   `!Send` `RhiContext` are structurally unreachable on the worker path).
 unsafe impl System for UiUploadSystem {
     type Out = ();
 
@@ -305,8 +661,14 @@ unsafe impl System for UiUploadSystem {
         true
     }
 
-    /// No two-phase init — the access surface is EMPTY by construction.
-    fn initialize(&mut self, _world: &mut EcsMaster) {}
+    /// Allocates the staging box ONCE ([`UI_STAGING_ROWS`] rows) — the one
+    /// setup-time allocation the seam owns; the frame loop never grows it.
+    /// Idempotent (re-`initialize` keeps the existing box).
+    fn initialize(&mut self, _world: &mut EcsMaster) {
+        if self.staging.is_empty() {
+            self.staging = vec![UI_INSTANCE_ZERO; UI_STAGING_ROWS].into_boxed_slice();
+        }
+    }
 
     /// The worker path. A `UiUploadSystem` is `SystemKind::GpuCompute`, dispatched
     /// SOLO on the dispatcher via [`run_dispatcher`](System::run_dispatcher); it must
@@ -325,33 +687,117 @@ unsafe impl System for UiUploadSystem {
         );
     }
 
-    /// The dispatcher-solo entry point. This shell is REGISTERED for its scheduler
-    /// SHAPE (EMPTY access, `is_gpu()`, dispatcher-solo) but, in P5a, performs NO work
-    /// here — and deliberately does NOT project-and-drop the `!Send` [`RhiContext`]
-    /// (a project-then-discard would be a misleading "looks wired, does nothing").
+    /// The dispatcher-solo entry point — the UI-ADVANCED S0 two-phase seam
+    /// (sequence, never fuse; the shipped `GpuSystem::run_dispatcher` ordering):
     ///
-    /// # Why the upload is host-driven, not done here (Rung-4 world-access seam)
+    /// * **Phase 1 (shared):** the D6a generation gate, hoisted ahead of the
+    ///   gather (a static frame costs one `u64` compare and ZERO component
+    ///   probes — the structural skip), then
+    ///   [`gather_into_staging`](Self::gather_into_staging) on a changed frame.
+    ///   The [`WorldView`] lives only inside the phase's braces.
+    /// * **Phase 2 (exclusive):** project the `!Send` [`RhiContext`] and
+    ///   [`upload_staging`](Self::upload_staging) into the host-staged fenced
+    ///   slot. With no staged frame (bare world / scheduler / device-free
+    ///   test) or no registered `RhiContext`, the phase returns — Phase 1
+    ///   alone IS the device-free observer surface (S0).
     ///
-    /// The pack→sort→upload reads the world's CPU columns (`ComputedRect`, …) and the
-    /// [`UiRenderScratch`] / [`UiRenderGeneration`] `Resource`s AND the swapchain's
-    /// per-frame slot index + in-flight fence (for the write-after-read upload
-    /// contract). The column/resource-read HALF is now reachable through
-    /// [`DispatcherToken::world`]'s
-    /// [`WorldView`] (#30); the host-drivable
-    /// [`host_upload_frame_from_world`](Self::host_upload_frame_from_world) (#31)
-    /// gathers nodes through it before the `!Send` upload. The one capability still
-    /// missing in-schedule is the swapchain `Renderer` slot index + in-flight fence —
-    /// the `Renderer` is not yet an ECS resource — so the on-screen path is still
-    /// driven by the render host through `host_upload_frame_from_world` (gather via the
-    /// view → [`host_upload_frame`](Self::host_upload_frame): fence the slot →
-    /// [`pack_sort_upload`](Self::pack_sort_upload)) + [`RhiContext::ui_pass`] +
-    /// [`Renderer::present_sampled`]. This shell becomes the in-schedule upload site
-    /// once an ECS-resident swapchain handle exists (tracked for the orchestrator).
+    /// The gate is PER ring slot: after one change, each slot repacks once
+    /// (its ring holds stale bytes until its own repack) and only then skips.
+    /// The gate commit is rolled back on an upload error so the next frame
+    /// retries instead of re-serving a count the ring never received.
+    ///
+    /// # Panics
+    /// If the world has no [`UiRenderGeneration`] resource. The gate refuses to
+    /// guess: a host that never registered
+    /// [`ui_render_discovery`](crate::ui::gather::ui_render_discovery) (and its
+    /// resource) would otherwise silently repack every frame — the "gate that
+    /// cannot fail" shape this project keeps recording.
     ///
     /// # Safety
-    /// **S1'** — Vacuous: this body touches no world state and mints no aliasing
-    /// reference (it does not even project the token).
-    unsafe fn run_dispatcher(&mut self, _token: DispatcherToken<'_>) -> Self::Out {}
+    /// **S1'** — The token witnesses `running == 0` (dispatcher-solo mint); the
+    /// body holds at most ONE token projection at a time (see the `unsafe impl`
+    /// SAFETY block).
+    unsafe fn run_dispatcher(&mut self, mut token: DispatcherToken<'_>) -> Self::Out {
+        // The host-staged frame inputs, if any. Taken FIRST so a panic or an
+        // early return never leaves a stale write proof armed for a later
+        // frame. No staged frame ⇒ the device-free lane (slot 0).
+        let pending = self.pending_frame.take();
+        let slot = pending.as_ref().map_or(0, |f| f.token.slot());
+        debug_assert!(
+            slot < FRAMES_IN_FLIGHT,
+            "invariant: the staged write proof addresses a UI ring slot"
+        );
+
+        // ── Phase 1 (shared borrow): gate, then gather into staging. ──
+        let n = {
+            let view = token.world();
+            let generation = view.resource::<UiRenderGeneration>().generation;
+
+            // The per-slot gate, AHEAD of the gather (D6a): nothing changed
+            // since this SLOT last packed ⇒ its ring bytes are current — skip
+            // the gather AND the pack (zero probes, zero packs, zero upload
+            // commands — the G0-2 census). A host-staged frame still gets a
+            // plan re-serving the slot's count under THIS frame's ortho (the
+            // ortho is extent-derived per frame; the packed bytes are not).
+            if generation == self.last_seen_generation[slot] {
+                if let Some(frame) = pending {
+                    self.frame_output = Some((
+                        Ok(UiFramePlan {
+                            instance_count: self.last_counts[slot],
+                            ortho: frame.ortho,
+                            frame_index: slot,
+                        }),
+                        frame.token,
+                    ));
+                }
+                return;
+            }
+            self.last_seen_generation[slot] = generation;
+            self.gather_into_staging(&view)
+        };
+        // ^ This closing brace drops `view`, ending the token's shared borrow
+        // BEFORE Phase 2's `&mut` projection — the M1 discipline
+        // (dispatcher_token.rs:185-190: a `WorldView` cannot coexist with
+        // `nonsend_resource_mut`). Only the packed COUNT `n` crosses the seam —
+        // never the view's borrow: a view-read placed AFTER Phase 2's
+        // projection is E0502 (red mutation M0-b, ledger 2026-08-21). NOTE the
+        // brace alone is NOT compile-load-bearing — NLL already ends the
+        // borrow at the view's last use (M0-a's ruled E0502 was probed
+        // 2026-08-21 and the hoisted-brace form COMPILES) — so the brace is
+        // scope hygiene against a future edit that HOLDS the view, and the
+        // compile-time tripwire is the M0-b shape + the G0-5 trybuild fixture
+        // (`tests/ui_s0_seam_fusion/`), which does red. A brace whose purpose
+        // is invisible is a brace someone deletes; this comment is its purpose.
+        self.last_counts[slot] = n as u32;
+
+        // ── Phase 2 (exclusive borrow): project the !Send context, upload. ──
+        let Some(rhi) = token.nonsend_resource_mut::<RhiContext>() else {
+            // Device-free world (the S0 observer / G0-2 / G0-3 harness, or a
+            // host that never inserted the context): Phase 1 already did all
+            // the device-free work. Not a defect — the seam's honest floor.
+            return;
+        };
+        let Some(frame) = pending else {
+            // In-schedule run with a live context but no host-staged write
+            // proof: the swapchain `Renderer` is not yet an ECS resource, so
+            // there is no fenced slot to write. The staging is packed and
+            // waiting; the host drive (stage_frame → run_system_once →
+            // take_frame_output) is the shipped route.
+            return;
+        };
+        let verdict = match Self::upload_staging(rhi, &self.staging[..n], frame.ortho, &frame.token)
+        {
+            Ok(plan) => Ok(plan),
+            Err(e) => {
+                // Roll back the gate commit: the ring never received this
+                // generation's bytes, so the next frame must retry rather than
+                // skip onto stale contents.
+                self.last_seen_generation[slot] = u64::MAX;
+                Err(e)
+            }
+        };
+        self.frame_output = Some((verdict, frame.token));
+    }
 
     /// No deferred mutations — the upload's effects live entirely in the VRAM ring +
     /// the stashed POD `UiFramePlan`. No-op `apply` (MF-5).

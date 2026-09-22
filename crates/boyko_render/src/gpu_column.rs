@@ -256,23 +256,50 @@ impl RhiContext {
     /// swapchain surface format for the on-screen path, `R8G8B8A8Unorm` for the
     /// offscreen golden — Decision 9). `spirv_vs`/`spirv_fs` are the committed
     /// `ui_rect.{vs,fs}.spv` word streams; `initial_rows` each ring's starting
-    /// `UiInstance` capacity (grows pow2 on overflow). `font` is the loaded `.bfont`
-    /// (GUI P5b): its MTSDF atlas is uploaded ONCE here as a sampled image + the
-    /// per-atlas UBO, then sampled by every glyph (`FLAG_TEXT`) on the shared draw.
+    /// `UiInstance` capacity (grows pow2 on overflow).
+    ///
+    /// `font` is the loaded `.bfont` (GUI P5b): its MTSDF atlas is uploaded ONCE here as a
+    /// sampled image + the per-atlas UBO, then sampled by every glyph (`FLAG_TEXT`) on the
+    /// shared draw. Since UI-ADVANCED S3 it is OPTIONAL (architecture D8e): `None`
+    /// default-fills that binding with a 1×1 TRANSPARENT texture, so a SPRITE-ONLY UI boots
+    /// (gate G3-3) — before S3 a `&BakedFont` was unconditional and a font-less UI could
+    /// not exist at all.
+    ///
+    /// `bindless` is the host's shared
+    /// [`BindlessTextureTable`](crate::bindless::BindlessTextureTable)'s descriptor set,
+    /// bound at set 1 so `UiImage` nodes sample it; `None` gives the UI a PRIVATE fallback
+    /// set 1 holding one transparent texel, so a host with no table still boots and still
+    /// draws rects and text (gate G3-4). `sampler_mode` picks the UI's OWN sprite sampler's
+    /// filter (decision S-D4), once, for the whole pass.
+    ///
+    /// # The `bindless` BORROW is not retained — its HANDLES are
+    ///
+    /// `Some(set)` copies that set's raw `(pool, set)` handles into the UI capability, which
+    /// never destroys them. The caller MUST keep the table alive for as long as this
+    /// capability lives and MUST re-run `ui_setup` if it tears the table down — the same
+    /// un-tied raw-handle contract every other RHI resource in this engine carries.
     ///
     /// Calling it twice tears down the prior resources first (idempotent setup), so
     /// a swapchain recreate that re-runs setup never leaks.
     ///
     /// # Errors
-    /// [`GpuColumnError`] on any shader / pipeline / layout / buffer / bind-group
-    /// create failure (every partially-created resource is torn down before return).
+    /// [`GpuColumnError`] on any shader / pipeline / layout / buffer / bind-group /
+    /// sampler create failure (every partially-created resource is torn down before return).
+    // `clippy::too_many_arguments` (8 with `&mut self`): this is the public face of
+    // `UiRenderResources::create` and carries the same rationale — eight independent
+    // SETUP-time decisions with no natural grouping, called once per process (or once per
+    // swapchain recreate). A `UiSetupDesc` is the right refactor when S4/S5 add the next
+    // knob; introducing it here would move six call sites for no behaviour change.
+    #[allow(clippy::too_many_arguments)]
     pub fn ui_setup(
         &mut self,
         color_format: boyko_rhi::Format,
         spirv_vs: &[u32],
         spirv_fs: &[u32],
         initial_rows: u32,
-        font: &boyko_fontbake::atlas::BakedFont,
+        font: Option<&boyko_fontbake::atlas::BakedFont>,
+        sampler_mode: crate::ui::UiSamplerMode,
+        bindless: Option<&boyko_rhi_vulkan::bindless::VulkanBindlessSet>,
     ) -> Result<(), GpuColumnError> {
         // Idempotent re-setup: drop the prior capability (its own `destroy` drains
         // the device + frees every resource) before building anew.
@@ -287,9 +314,28 @@ impl RhiContext {
             spirv_fs,
             initial_rows,
             font,
+            sampler_mode,
+            bindless,
         )?;
         self.ui = Some(resources);
         Ok(())
+    }
+
+    /// The set-1 sprite descriptor group the UI draws through (UI-ADVANCED S3): the host's
+    /// shared bindless table or the UI-owned fallback, whichever
+    /// [`ui_setup`](Self::ui_setup) was given.
+    ///
+    /// BOTH recorders bind exactly this, resolved through this ONE accessor so they cannot
+    /// drift into binding different sets (decision S-D9, red mutation M3-c): the offscreen
+    /// [`record_ui_rects`](crate::record_ui_rects) through the generic
+    /// `bind_descriptor_set_at(1, …)`, the on-screen `present_blit` through the
+    /// [`UiPass`](boyko_rhi_vulkan::swapchain::UiPass) that [`ui_pass`](Self::ui_pass)
+    /// builds.
+    ///
+    /// Returns `None` if [`ui_setup`](Self::ui_setup) was never called.
+    #[inline]
+    pub fn ui_sprite_group(&self) -> Option<&boyko_rhi_vulkan::rhi_impl::VulkanBindGroup> {
+        self.ui.as_ref().map(|ui| ui.sprite_group())
     }
 
     /// Frame path (GUI P5a Rung 3 / A1 steps 4-6): ensures slot `token.slot()`'s
@@ -377,6 +423,13 @@ impl RhiContext {
         Some(boyko_rhi_vulkan::swapchain::UiPass {
             pipeline,
             bind_group,
+            // UI-ADVANCED S3: the on-screen recorder binds set 1 too, from the SAME
+            // accessor the offscreen recorder uses (S-D9). It is never `None` once
+            // `ui_setup` has run — `ui_handles` returning `Some` above proves that — so
+            // the on-screen path cannot silently draw with set 1 unbound while the
+            // offscreen one binds it (red mutation M3-c is what proves this is not a
+            // description).
+            sprite_group: self.ui_sprite_group()?,
             instance_count: plan.instance_count,
             ortho_bytes: plan.ortho.as_bytes(),
         })

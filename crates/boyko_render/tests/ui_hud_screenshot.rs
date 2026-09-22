@@ -323,6 +323,8 @@ fn glyph_quad(x: f32, y: f32, w: f32, h: f32, color: u32, uv: [f32; 4]) -> UiIns
             border_width: [0.0; 4],
             clip: None,
             text_uv: Some(uv),
+            image: None,
+            nine_slice: None,
         },
         1.0,
     )
@@ -654,9 +656,17 @@ fn hud_glyph_packing_golden() {
             "char {c:?}: emitter UV {shaped:?} must match the atlas cell UV {expected:?}"
         );
 
-        // The GPU pack lane carries that same UV verbatim into the `corner_radius` alias.
+        // The GPU pack lane carries that same UV verbatim into the record's own `uv`
+        // field (UI-ADVANCED S2: the `corner_radius` alias is retired — a glyph now
+        // packs the radius ZERO, and this test is the lockstep site the S2 plan's
+        // ten-site list missed, found by the full-suite gate).
         let inst = glyph_quad(X0 + i as f32 * GADV, Y0, GW, GH, FG, expected);
-        assert_eq!(inst.corner_radius, expected, "char {c:?} packs its atlas cell UV");
+        assert_eq!(inst.uv, expected, "char {c:?} packs its atlas cell UV");
+        assert_eq!(
+            inst.corner_radius,
+            [0.0; 4],
+            "char {c:?}: a glyph's corner_radius is zero — the alias is retired"
+        );
         assert_eq!(inst.size_px, [GW, GH], "char {c:?} packs the fixed glyph quad size");
     }
 }
@@ -824,6 +834,8 @@ fn msdf_hud_instances(text: &str, font: &BakedFont) -> Vec<UiInstance> {
                     border_width: [0.0; 4],
                     clip: None,
                     text_uv: Some(g.uv),
+                    image: None,
+                    nine_slice: None,
                 },
                 1.0,
             )
@@ -902,7 +914,9 @@ mod gpu {
             boyko_render::ui_rect_vs_spirv(),
             boyko_render::ui_rect_fs_spirv(),
             4,
-            font,
+            Some(font),
+            boyko_render::UiSamplerMode::Smooth,
+            None,
         )
         .expect("ui_setup (UI pipeline + atlas upload + per-FIF rings)");
 
@@ -922,6 +936,9 @@ mod gpu {
         let (pipeline, bind_group) = rhi
             .ui_handles(plan.frame_index)
             .expect("ui_handles after ui_setup");
+        // UI-ADVANCED S3: set 1 — the sprite lane. Resolved through the SAME accessor
+        // the on-screen `ui_pass` reads (S-D9), so both recorders bind one set.
+        let sprite_group = rhi.ui_sprite_group().expect("ui_sprite_group after ui_setup");
 
         let device = rhi.context();
         let queue = device.rhi_queue();
@@ -1008,7 +1025,7 @@ mod gpu {
         // bind-group layout (binding 0 SSBO, binding 1 atlas, binding 2 UBO) and a
         // 16-byte VERTEX push range.
         unsafe {
-            record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group);
+            record_ui_rects(&mut encoder, &full, &plan, pipeline, bind_group, sprite_group);
         }
         encoder.end_rendering();
 

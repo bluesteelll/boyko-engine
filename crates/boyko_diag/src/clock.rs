@@ -554,28 +554,57 @@ mod tests {
     /// This is the assertion that catches an inverted ratio (ns-per-tick published as
     /// ticks-per-ns), which no plausibility band can catch: on a 3 GHz TSC the inverse is 0.33,
     /// comfortably inside any honest band, but it reconstructs the interval ~9x wrong.
+    ///
+    /// # Why it takes the BEST of a few attempts
+    ///
+    /// The two clocks cannot be read at the same instant, so the wall-clock interval always
+    /// brackets the tick interval and every scheduler delay inside that bracket lands on ONE
+    /// side of the ratio. MEASURED 2026-09-22 on a box compiling three lanes at once: this test
+    /// failed with relative error 0.3687 against a band of 0.05 while the scale was correct --
+    /// roughly 3 ms of foreign time inside a 5 ms interval, on the wall-clock side only.
+    ///
+    /// Foreign time can only push this error UP, never down, so the smallest of a handful of
+    /// attempts is the attempt that carried the least of it. The falsifying power is unchanged:
+    /// an inverted ratio (~9x) or a missing calibration (~1000x) is wrong in EVERY attempt, so
+    /// best-of cannot rescue either. A tight first attempt exits the loop, so the usual cost
+    /// stays one 5 ms sleep.
     #[test]
     fn published_scale_reconstructs_an_independently_measured_interval() {
         calibrate();
-
-        let t0 = Instant::now();
-        let c0 = ticks();
-        thread::sleep(Duration::from_millis(5));
-        let c1 = ticks();
-        let measured_ns = t0.elapsed().as_nanos() as f64;
-
         let scale = ticks_per_ns();
-        let reconstructed_ns = (c1 - c0) as f64 / scale;
-        let relative_error = (reconstructed_ns - measured_ns).abs() / measured_ns;
 
         // A non-invariant TSC may be rescaled by the CPU mid-interval or read from a different
         // core, so the tight band is only claimed where the hardware says it is claimable. The
         // loose band still fails an inversion (~9x) and a missing calibration (~1000x).
         let band = if invariant_tsc() { 0.05 } else { 0.25 };
+
+        const ATTEMPTS: usize = 5;
+        let mut best = f64::INFINITY;
+        let mut best_reconstructed_ns = 0.0_f64;
+        let mut best_measured_ns = 0.0_f64;
+        for _ in 0..ATTEMPTS {
+            let t0 = Instant::now();
+            let c0 = ticks();
+            thread::sleep(Duration::from_millis(5));
+            let c1 = ticks();
+            let measured_ns = t0.elapsed().as_nanos() as f64;
+
+            let reconstructed_ns = (c1 - c0) as f64 / scale;
+            let relative_error = (reconstructed_ns - measured_ns).abs() / measured_ns;
+            if relative_error < best {
+                best = relative_error;
+                best_reconstructed_ns = reconstructed_ns;
+                best_measured_ns = measured_ns;
+            }
+            if best < band {
+                break;
+            }
+        }
+
         assert!(
-            relative_error < band,
-            "scale {scale} reconstructs {reconstructed_ns} ns for a {measured_ns} ns interval \
-             (relative error {relative_error}, band {band})"
+            best < band,
+            "scale {scale} reconstructs {best_reconstructed_ns} ns for a {best_measured_ns} ns \
+             interval (relative error {best}, band {band}, best of {ATTEMPTS} attempts)"
         );
     }
 

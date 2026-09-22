@@ -724,8 +724,8 @@ statistic, and nothing reads the visibility buffer back to the host. `vb_id` is 
 | (b) A compute pass that histograms `vb_id` into an SSBO | a new `.spv`, a new `SHADER-VARIANT-MANIFEST.md` row, a new binding, a new barrier | Rejected — buys nothing (a) does not, and enlarges the very blast radius R0 exists to keep at zero |
 | (c) Reuse the CPU rasterizer alone | zero engine change | Rejected **as the census** — it is a host mirror of the raster, not the shipped VB path, and the whole point of the census is to measure what the engine actually produces. Retained as R0c's cross-check |
 
-`copy_image_to_buffer` already exists in the RHI (`boyko_rhi/src/encoder.rs:115`; impl at
-`rhi_impl/encoder.rs:1037`). The readback is `[census].readback_retention` — streamed and hashed,
+`copy_image_to_buffer` already exists in the RHI (`crates/boyko_rhi/src/encoder.rs:115`; impl at
+`crates/boyko_rhi_vulkan/src/rhi_impl/encoder.rs:1039`). The readback is `[census].readback_retention` — streamed and hashed,
 never retained: at 3840×2160 × 8 B that is 66.4 MB per censused frame, and §11 records this volume
 at 16 GB free with `target/` at 58 GB, so retention would reproduce this project's standing hazard
 of disk exhaustion surfacing as mingw linker errors.
@@ -1113,7 +1113,7 @@ that R0's harness must be built to avoid:
 
 * **A null control that read a third of the signal.** Strict `A,B,A,B` interleaving aliased the A/B
   phase with the frame-in-flight slot, because `FRAMES_IN_FLIGHT == 2`
-  (`crates/boyko_render/src/ui/mod.rs:87`). Each phase therefore always landed on the same query
+  (`crates/boyko_render/src/ui/mod.rs:97`). Each phase therefore always landed on the same query
   pool, descriptor ring slot and staging region. The fix is a counterbalanced **ABBA quadruple**
   whose statistic is `(d1 + d2)/2` and whose *residual* `(d1 − d2)/2` is **printed, not hidden**
   ([`sv0_deferred_term_bench.rs`](../crates/boyko_app/tests/sv0_deferred_term_bench.rs):53~-77).
@@ -1585,7 +1585,7 @@ trusted**;
 > (i) a new layout transition of a **ring** image — `COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
 > →` its `SAMPLED` read — inside the RDG auto-barrier system, and (ii) a **host read of a per-FIF
 > resource**, which is the exact shape of this project's recorded cross-frame bug class (host
-> access racing the fence on per-FIF rings, with `FRAMES_IN_FLIGHT == 2` at `boyko_render/src/ui/mod.rs:87`).
+> access racing the fence on per-FIF rings, with `FRAMES_IN_FLIGHT == 2` at `boyko_render/src/ui/mod.rs:97`).
 > Neither is visible to gate (a), because both exist only on **armed** frames — the frames the
 > goldens never render. The readback must therefore wait on the frame's own fence before mapping.
 >
@@ -2432,7 +2432,7 @@ rows) · `crates/boyko_rhi_vulkan/tests/vb_raster_geo_classify_spv_sync.rs`'s
 **Targets / readback:** `crates/boyko_rhi_vulkan/src/present/targets.rs:851~-856` (`VbTargets`),
 **`:868~` (`COLOR_ATTACHMENT | SAMPLED` — no `TRANSFER_SRC`)** ·
 `crates/boyko_rhi/src/encoder.rs:115` (`copy_image_to_buffer`) ·
-`crates/boyko_rhi_vulkan/src/rhi_impl/encoder.rs:1037` (impl) ·
+`crates/boyko_rhi_vulkan/src/rhi_impl/encoder.rs:1039` (impl) ·
 `crates/boyko_rhi_vulkan/src/present/frame_driver.rs:750~` (no depth readback) ·
 `crates/boyko_app/src/host_dump.rs:1~-10`, `:67~` (`BOYKO_HOST_DUMP`).
 
@@ -2477,7 +2477,7 @@ block and lines 350/378 in another; **the `357`/`373`/`385` set is the correct o
 down by ten lines, and `357`/`373`/`385` after step 6c deleted this file's windowed driver — the
 same three constants, moved twice in one day by two different deletions), and the
 contradiction is direct evidence that the older block was never re-verified ·
-`crates/boyko_render/src/ui/mod.rs:87` (`FRAMES_IN_FLIGHT = 2`) ·
+`crates/boyko_render/src/ui/mod.rs:97` (`FRAMES_IN_FLIGHT = 2`) ·
 `crates/boyko_render/src/mesh_draw.rs:81-98` (`DrawBatch`) ·
 `crates/boyko_rhi_vulkan/src/window.rs:252` (`Window::open`), `:310~` (`AdjustWindowRectEx`),
 `:342~-352` (`BOYKO_WIN_HIDDEN` — hidden, but still created at the requested size).

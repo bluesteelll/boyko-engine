@@ -1374,7 +1374,7 @@ learned that lesson — which is why the instruction is to take the list from th
     * **`dense_contains` is kept in the body as a TRAP, not as a check.** It is `true` whichever
       archetype was marked present, so it holds under the defect — which is precisely why gate 13b,
       whose dense assertion is membership, is green over this and why the leg exists. The survey
-      behind that claim covers **54** call sites <!-- measure: tree-lines crates rs .dense_contain%73( = 54 -->, and the figure is written here because round 4's
+      behind that claim covers **54** call sites at `2431c570` and **56** after the A7 merge <!-- measure: tree-lines crates rs .dense_contain%73( = 56 -->, the two new ones A7's `ui_s5_sprite_sheet.rs`, and the figure is written here because round 4's
       own report said **45** and no landed artifact carried either number:
 
       ```
@@ -1810,7 +1810,7 @@ dynamic-tag rows; re-read everything.
    **LANDED 2026-08-21, ahead of this rung and wider than it.** Add `REFLECTION-PLAN-ECS.md` and its
    three siblings to `GATED_DOCS` (`tests/internal_docs_anchors.rs:349`, which held exactly four
    documents when this rung was written, none of them a reflection plan) and give each a
-   `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX` (`:3147-3198`). **What actually landed
+   `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX` (`:3157-3208`). **What actually landed
    registers five documents, not four** — `REFLECTION-ANALYSIS.md` alongside the four plans — each
    with its `0` row, and it also carried the `GATES` Appendix GC caveat deletion this rung owed.
    Whether EG8 keeps a gate-6 line item is bookkeeping for the campaign owner. The gate then checks, on every `cargo test`, that every `crates/...` path these

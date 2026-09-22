@@ -783,7 +783,7 @@ Three things are wrong with the gate as written, and the third is the one the au
 
 1. **The subject set is empty tree-wide.** Every `#[derive(…Bindable…)]` site
    (`boyko_ui/tests/p4_bind.rs:40~`, `p4_bind_zero_alloc.rs:94~`, `p4_miri.rs:63~`,
-   `text_bind_emit.rs:50~`, `boyko_render/tests/ui_hud_screenshot.rs:472~`) carries no
+   `text_bind_emit.rs:50~`, `boyko_render/tests/ui_hud_screenshot.rs:474~`) carries no
    `#[component(reflect)]`, and every `#[component(reflect)]` site carries no `Bindable`. The only
    file holding both strings is `boyko_macros/src/lib.rs`, where they are two unrelated rustdoc
    examples (`boyko_macros/src/lib.rs:583~` and the reflect key's own docs).
@@ -826,7 +826,7 @@ plan delivers at C8"* — but it is respecified as what it can see, and given a 
   reflect surface. None of G1's six manifest clauses touch it (C2/C3/C4 are about `boyko-reflect`
   edges and `features = […]` arrays; a plain dev edge with no features array is outside all of
   them). The alternative host — a test target in `boyko_render`, which already has both a
-  non-default `reflect` feature (`boyko_render/Cargo.toml:44~`) and `boyko-ui` as a dev dep (`:132~`) at **zero**
+  non-default `reflect` feature (`boyko_render/Cargo.toml:44~`) and `boyko-ui` as a dependency (a dev dep when this was written; a `[dependencies]` edge since the A7 merge, `:94~`) at **zero**
   manifest cost — was **rejected**: no CI leg builds `-p boyko-render --features reflect`, so the
   test would be compiled by nothing (F17's measured class), and buying it back costs a CI job plus a
   `reflect_ci_coverage` row — more than the one line it saves.

@@ -65,7 +65,8 @@ use boyko_ecs::ecs::core::system::Commands;
 use boyko_ui::binding::{BindText, BindValue};
 use boyko_ui::components::{
     Bar, BarFill, Button, ComputedClip, ComputedRect, ContentSize, StackIndex, UiAbsolute, UiAlign,
-    UiAnchor, UiGrid, UiImage, UiLayout, UiName, UiRoot, UiSpacing,
+    UiAnchor, UiGrid, UiImage, UiLayout, UiName, UiNineSlice, UiRoot, UiSpacing, UiSpriteAnim,
+    UiSpriteSheet,
 };
 use boyko_ui::interaction::{OnClick, OnHover, OnSubmit};
 use boyko_ui::reload::UiHotReload;
@@ -97,6 +98,9 @@ version=1
     UiImage { texture: 9, uv_min: [0.125, 0.25], uv_max: [0.75, 0.875], tint: 16711935 }
     UiGrid { columns: 4, rows: 5 }
     UiAnchor { edge: BottomRight, offset_x: 23.5, offset_y: 24.5, use_safe_area: true }
+    UiNineSlice { border_px: [2, 3, 4, 5], border_uv: [0.125, 0.1875, 0.25, 0.3125], mode: Tile, fill_center: false }
+    UiSpriteSheet { sheet: 6, index: 7 }
+    UiSpriteAnim { first: 2, last: 9, fps: 24.5, mode: PingPong, repeats: 3 }
     Button
     Bar
     BarFill
@@ -111,7 +115,9 @@ version=1
 /// The reloaded document: the SAME node keys, EVERY authored value different from
 /// [`DOC_V1`] and still non-default (arrangement 1). `use_safe_area` stays `true`
 /// in both because `false` is its default; the fields that move are `edge` and the
-/// two offsets.
+/// two offsets. `UiNineSlice`'s `mode: Tile` / `fill_center: false` stay put for the
+/// same reason (`Stretch` / `true` are the defaults), and the fields that move there
+/// are the two border quads.
 const DOC_V2: &str = "\
 version=1
 #root  UiLayout { layout_type: Overlay, position_type: Absolute, width: Px(654), height: Pct(77.25), min_width: Px(6), min_height: Px(8), max_width: Px(888), max_height: Stretch(4.5) }
@@ -127,6 +133,9 @@ version=1
     UiImage { texture: 11, uv_min: [0.375, 0.5], uv_max: [0.625, 0.9375], tint: 65535 }
     UiGrid { columns: 6, rows: 7 }
     UiAnchor { edge: TopCenter, offset_x: 43.5, offset_y: 44.5, use_safe_area: true }
+    UiNineSlice { border_px: [6, 7, 8, 9], border_uv: [0.0625, 0.375, 0.4375, 0.125], mode: Tile, fill_center: false }
+    UiSpriteSheet { sheet: 12, index: 13 }
+    UiSpriteAnim { first: 4, last: 11, fps: 30.5, mode: Reverse, repeats: 5 }
     Button
     Bar
     BarFill
@@ -377,7 +386,8 @@ macro_rules! declare_patch_probe {
 declare_patch_probe! {
     data: [
         UiLayout, UiSpacing, UiAlign, UiAbsolute, ContentSize, StackIndex, ComputedClip, UiText,
-        UiImage, UiGrid, UiAnchor, OnClick, OnHover, OnSubmit,
+        UiImage, UiGrid, UiAnchor, OnClick, OnHover, OnSubmit, UiNineSlice, UiSpriteSheet,
+        UiSpriteAnim,
     ],
     zst: [UiRoot, Button, Bar, BarFill],
     bind: [

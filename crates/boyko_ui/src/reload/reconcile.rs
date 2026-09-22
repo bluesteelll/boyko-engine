@@ -75,7 +75,8 @@ use boyko_ecs::ecs::core::system::Commands;
 
 use crate::components::{
     Bar, BarFill, Button, ComputedClip, ContentSize, StackIndex, UiAbsolute, UiAlign, UiAnchor,
-    UiGrid, UiImage, UiName, UiRoot, UiSourceOrder, UiSpacing,
+    UiGrid, UiImage, UiName, UiNineSlice, UiRoot, UiSourceOrder, UiSpacing, UiSpriteAnim,
+    UiSpriteSheet,
 };
 use crate::interaction::action::{OnClick, OnHover, OnSubmit};
 use crate::reload::state::UiHotReload;
@@ -562,6 +563,21 @@ fn patch_member(
         // a DELETED bind is preserved. See the two functions for the reason.
         UiTextComponent::BindText => patch_bind_text(new, entity, cmds, report, bind_ctx),
         UiTextComponent::BindValue => patch_bind_value(new, entity, cmds, report, bind_ctx),
+
+        // UI-ADVANCED S6 — the sprite vocabulary, on the uniform `PatchAndRemove` rule.
+        // `UiSpriteCursor` is absent on purpose: it is not text-owned, so it is preserved
+        // by omission exactly like the transient components, and a reload that edits an
+        // animation's `fps` therefore does not reset the running phase (the `on_add` hook
+        // does not re-fire on a re-insert — MEASURED).
+        UiTextComponent::UiNineSlice => {
+            patch_value::<UiNineSlice>(new, name, node.nine_slice, entity, cmds, report)
+        }
+        UiTextComponent::UiSpriteSheet => {
+            patch_value::<UiSpriteSheet>(new, name, node.sprite_sheet, entity, cmds, report)
+        }
+        UiTextComponent::UiSpriteAnim => {
+            patch_value::<UiSpriteAnim>(new, name, node.sprite_anim, entity, cmds, report)
+        }
     }
 }
 
@@ -840,6 +856,20 @@ impl_text_value! {
     OnClick => dispatch::parse_on_click_public,
     OnHover => dispatch::parse_on_hover_public,
     OnSubmit => dispatch::parse_on_submit_public,
+    // UI-ADVANCED S6 — the sprite vocabulary. These three land through the macro
+    // rather than as hand-written impls so the insert/remove bodies cannot diverge
+    // from the other thirteen.
+    UiNineSlice => dispatch::parse_ui_nine_slice_public,
+    UiSpriteSheet => dispatch::parse_ui_sprite_sheet_public,
+    // Removing the ANIMATION leaves its dense `UiSpriteCursor` row behind — 8 B, inert
+    // without the animation (the flipbook needs all three components), and self-healing
+    // (a re-added animation gets a fresh `Default` cursor from the `on_add` hook). The
+    // symmetric `on_remove` hook that would tidy it is unlandable on this kernel: it also
+    // fires on a DESPAWN's per-component pass, where the deferred removal then panics
+    // `RemoveCommand::apply: stale entity` — MEASURED, and a liveness guard does not help
+    // because the entity is still live at hook time. See `crate::sprite::ui_sprite_anim_on_add`
+    // and `docs/OPEN-QUESTIONS.md`.
+    UiSpriteAnim => dispatch::parse_ui_sprite_anim_public,
 }
 
 impl_text_marker!(UiRoot, Button, Bar, BarFill);

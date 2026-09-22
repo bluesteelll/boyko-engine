@@ -156,7 +156,7 @@ The tree then built the general case, three crates deep and all shared:
 (`crates/boyko_render/Cargo.toml:31~`) → `boyko_app` `hwrt = ["boyko-render/hwrt"]`
 (`crates/boyko_app/Cargo.toml:48~`). Default OFF at every level, in no ship build,
 because **nothing enables it**. `boyko_render`'s `test-readback` is the same shape with a different
-enabler (a self-referential dev-dependency, `crates/boyko_render/Cargo.toml:103~`). The property that
+enabler (a self-referential dev-dependency, `crates/boyko_render/Cargo.toml:124~`). The property that
 defeats unification is *"nothing enables it"*, not *"nobody declares it"*.
 
 The one thing wrong with `hwrt` is **F17** — `grep -c hwrt .github/workflows/ci.yml` = **0**, so every

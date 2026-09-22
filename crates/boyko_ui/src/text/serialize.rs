@@ -38,8 +38,9 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 
 use crate::binding::components::{BindText, BindValue, TemplateId, NO_FIELD};
 use crate::components::{
-    AnchorEdge, ComputedClip, ComputedRect, ContentSize, UiAbsolute, UiAlign, UiAnchor, UiGrid,
-    UiImage, UiLayout, UiSpacing,
+    AnchorEdge, ComputedClip, ComputedRect, ContentSize, NineSliceMode, SpriteAnimMode,
+    UiAbsolute, UiAlign, UiAnchor, UiGrid, UiImage, UiLayout, UiNineSlice, UiSpacing,
+    UiSpriteAnim, UiSpriteSheet,
 };
 use crate::reload::tree_view::{LiveNode, UiTreeView};
 use crate::text::components::{TextAlign, UiText};
@@ -224,6 +225,26 @@ fn write_attached(
         UiTextComponent::BindValue => {
             if let Some(v) = node.bind_value {
                 line(out, indent, |o| write_bind_value(view, &v, o));
+            }
+        }
+
+        // UI-ADVANCED S6 — the sprite vocabulary. `UiSpriteCursor` is absent by
+        // construction: it is not a `LiveNode` field and not a vocabulary member, so an
+        // auto-inserted cursor is never written back and the round trip is untouched by
+        // the `on_add` hook.
+        UiTextComponent::UiNineSlice => {
+            if let Some(v) = node.nine_slice {
+                line(out, indent, |o| write_ui_nine_slice(&v, o));
+            }
+        }
+        UiTextComponent::UiSpriteSheet => {
+            if let Some(v) = node.sprite_sheet {
+                line(out, indent, |o| write_ui_sprite_sheet(&v, o));
+            }
+        }
+        UiTextComponent::UiSpriteAnim => {
+            if let Some(v) = node.sprite_anim {
+                line(out, indent, |o| write_ui_sprite_anim(&v, o));
             }
         }
     }
@@ -427,6 +448,35 @@ fn write_f32_pair(v: [f32; 2], out: &mut String) {
     out.push(']');
 }
 
+/// Writes a [`UiNineSlice`] (UI-ADVANCED S6). `_pad` is private and NOT written —
+/// it is not authorable either, so the round trip is closed over the four
+/// authored fields.
+fn write_ui_nine_slice(v: &UiNineSlice, out: &mut String) {
+    out.push_str("UiNineSlice { border_px: ");
+    write_f32_quad(&v.border_px, out);
+    out.push_str(", border_uv: ");
+    write_f32_quad(&v.border_uv, out);
+    out.push_str(", mode: ");
+    out.push_str(nine_slice_mode_str(v.mode));
+    out.push_str(", fill_center: ");
+    out.push_str(if v.fill_center { "true" } else { "false" });
+    out.push_str(" }");
+}
+
+/// Writes a [`UiSpriteSheet`] (UI-ADVANCED S6).
+fn write_ui_sprite_sheet(v: &UiSpriteSheet, out: &mut String) {
+    let _ = write!(out, "UiSpriteSheet {{ sheet: {}, index: {} }}", v.sheet, v.index);
+}
+
+/// Writes a [`UiSpriteAnim`] (UI-ADVANCED S6). `_pad` is private and NOT written.
+fn write_ui_sprite_anim(v: &UiSpriteAnim, out: &mut String) {
+    let _ = write!(out, "UiSpriteAnim {{ first: {}, last: {}, fps: ", v.first, v.last);
+    write_f32_ui(v.fps, out);
+    out.push_str(", mode: ");
+    out.push_str(sprite_anim_mode_str(v.mode));
+    let _ = write!(out, ", repeats: {} }}", v.repeats);
+}
+
 /// Writes a [`ComputedRect`] (only used by tests / completeness — the serializer
 /// omits authored rects per §6, but the writer is provided for symmetry).
 #[allow(dead_code)]
@@ -501,6 +551,38 @@ fn align_main_str(a: AlignMain) -> &'static str {
         AlignMain::SpaceBetween => "SpaceBetween",
         AlignMain::SpaceAround => "SpaceAround",
         AlignMain::SpaceEvenly => "SpaceEvenly",
+    }
+}
+
+/// Writes a `[f32; 4]` in the `.ui` bracketed form `[a, b, c, d]`, each component
+/// through the `.ui` float rule — the inverse of [`parse_f32_quad`], so the four
+/// values re-parse bit-identically.
+///
+/// [`parse_f32_quad`]: crate::text::dispatch
+fn write_f32_quad(v: &[f32; 4], out: &mut String) {
+    out.push('[');
+    for (i, c) in v.iter().enumerate() {
+        if i != 0 {
+            out.push_str(", ");
+        }
+        write_f32_ui(*c, out);
+    }
+    out.push(']');
+}
+
+fn nine_slice_mode_str(m: NineSliceMode) -> &'static str {
+    match m {
+        NineSliceMode::Stretch => "Stretch",
+        NineSliceMode::Tile => "Tile",
+    }
+}
+
+fn sprite_anim_mode_str(m: SpriteAnimMode) -> &'static str {
+    match m {
+        SpriteAnimMode::Forward => "Forward",
+        SpriteAnimMode::Reverse => "Reverse",
+        SpriteAnimMode::PingPong => "PingPong",
+        SpriteAnimMode::Once => "Once",
     }
 }
 
