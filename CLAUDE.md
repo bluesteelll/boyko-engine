@@ -201,8 +201,17 @@ The repair belongs in those two crates, not in the gate.
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **336 sites (185 unconditional +
-151 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-22 on `merge/ke16-into-ecsnative` after the A5 batch merge.** The last move, 335 → 336, is +1 plain `gpu-windowed:` in
+The four commands above run **none** of the `#[ignore]`d tests — **352 sites (188 unconditional +
+164 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-22 on `merge/a6-reflection` after the A6
+reflection merge**, by `tests/ignore_reasons_census.rs`'s own printed line. The last move,
+336 → 352, is the reflection lane's: **+16, none removed** — **+3 plain**
+(`boyko_ecs/tests/seam_by_id.rs` ×2, `reflect_fixture/tests/reflect_absence_census.rs` ×1) and
+**+13 `cfg_attr(miri, …)`** (`boyko_reflect/tests/c1_scalar.rs` ×11, the full-range proptests;
+`boyko_reflect/tests/c6_nested.rs` ×2, the `Box::leak` fixtures). ⚠️ The last two are written in
+the MULTI-LINE `#[cfg_attr(` form, so a single-line grep reproduces 11 of the 13 and not 13 —
+the census parses the block and is the figure to trust. Every one of the 16 lives in a file that
+does not exist at `6a733f26`, so the attribution is a set difference against that tree rather
+than a reading of the diff. The move before it, 335 → 336, is +1 plain `gpu-windowed:` in
 `boyko_app/tests/sdf_room_ddgi_dump.rs` (`sdf_room_ddgi_screenshot_dump`, the SDFDDGI host-hook
 A/B device gate, under `#![cfg(windows)]`), the only ignore site the five A5 lanes brought; the
 `cfg_attr` count did not move. The move before it, 334 → 335 (measured after A5.1, which added no
@@ -223,7 +232,9 @@ attributed by `git diff` against each merge's second parent — the light-table 
 in `boyko_physics/tests/narrowphase_parallel_equivalence.rs`
 (`jolt_pyramid_parallel_narrowphase_is_bit_identical`, L5 C3). The light-table lane's own "324"
 was 320 + 4 on its branch point, which predates the L2 calibration's +7 and the simd_solve +1; an
-independent enumeration reproduces 336 / 185 / 151 across 10 crates and 1,667 `.rs` files walked
+independent enumeration reproduced 336 / 185 / 151 across 10 crates and 1,667 `.rs` files walked
+at that revision — 352 / 188 / 164 across **12** crates and **1,738** files after the A6 merge
+added `boyko_reflect`, `reflect_fixture` and `reflect_dogfood` —
 (1,652 at `6b29c400`, +6 from the tree-broadphase merge, +1 root test from A5.1, +2 `boyko_render`
 tests from A5.2, +1 `boyko_rhi_vulkan` test from A5.3, +4 from A5.4 — the dump gate above, its
 composed-plugin twin, the octahedral-border host oracle and the probe-update `spv_sync` — and +1
@@ -273,7 +284,7 @@ it, per-binary with `--test-threads=1`. It covered **135 tests** when it was wri
 `boyko_app`, `boyko_render` and `boyko_rhi_vulkan`; **that count has NOT been re-taken on this
 line**, and it cannot be re-derived from the reason strings (see the ⚠ below), so it is left as the
 historical figure rather than guessed forward. What IS mechanical today: those three crates hold
-**163 of the 185 plain sites** (`boyko_app` 106, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
+**163 of the 188 plain sites** (`boyko_app` 106, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
 2026-09-21 on `merge/a5-batch` after A5.4, whose dump gate is the one since; 162 of 184 @
 `6b29c400`; 159 of 183 on the union earlier that day, the three since being the
 hwrt shadow-origin gates; 155 of 178 on 2026-09-19, the four since being the light-table lane's
@@ -286,16 +297,17 @@ feature and are not even *compiled* otherwise: `--features hwrt` ×7
 shadow-origin gates — and `boyko_app/tests/asset_streaming_f7_rt_cap_headless.rs`
 1 — a `#![cfg(feature = "hwrt")]` file present since `b8d8b162`, 2026-07-10, so the "×3" this
 paragraph carried until 2026-09-21 was an undercount from the day it was written, not a new site)
-and `--features spec_constant_smoke` ×1. **125 of the 185** plain sites sit in files under
+and `--features spec_constant_smoke` ×1. **125 of the 188** plain sites sit in files under
 `#![cfg(windows)]` and vanish on Linux (the earlier "most of the rest" was never counted). There is
 no single command — each binary has its own env-var protocol in its module header
 (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
-**Leg: Miri.** `cargo +nightly-x86_64-pc-windows-msvc miri test` already carries **150** of the ignores (149 measured
+**Leg: Miri.** `cargo +nightly-x86_64-pc-windows-msvc miri test` already carries **163** of the ignores (149 measured
 2026-09-19 on the parallel-narrowphase lane after its L2 calibration and unchanged on the
 2026-09-21 union; +1 at the tree-broadphase merge `bbd5d12c`, the `miri-slow:` site named above,
-so the per-cfg split is now 143 / 6 / 2) — the **149** `cfg_attr` sites
-whose cfg is `miri` (143) or `any(miri, debug_assertions)` (6), plus `miri_fixed_loop`'s one plain
+so the per-cfg split was 143 / 6 / 2, and is **156 / 6 / 2** after the A6 merge's +13, all of
+them `miri`) — the **162** `cfg_attr` sites
+whose cfg is `miri` (156) or `any(miri, debug_assertions)` (6), plus `miri_fixed_loop`'s one plain
 ignore. The `miri` sites run
 *natively* in both profiles and are skipped only under Miri; the `any(miri, debug_assertions)`
 sites run natively in RELEASE only — their leg is the physics release run below; there are six of
@@ -346,7 +358,7 @@ not a census: the 147 plain reasons that carry no prefix have not been classifie
 ⚠️ **The device-free leg is one test, and it is an explicit invocation rather than a filter,
 because the partition CANNOT be derived from the reason strings.** A keyword classifier over
 `{GPU, RTX, Vulkan, windowed, device, dispatch}` put 10 on the device-free side — of the 143 plain
-sites the tree held when the experiment was run, 185 today — and **8 of those 10 are wrong**, wrong
+sites the tree held when the experiment was run, 188 today — and **8 of those 10 are wrong**, wrong
 in the direction that produces a green:
 
 - `negative_chained_barrier_hazard` and `a5_gpu_off_vs_on_wall_clock_ab` **do** need a device; their

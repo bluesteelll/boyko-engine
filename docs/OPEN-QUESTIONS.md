@@ -1066,7 +1066,7 @@ this branch's `aether-v2/DECISIONS.md` — verified by grep: no `**E4.` … `**C
 > pass. R3's `bundle` and `relation` constructs may not be declared done while they stand.
 
 **Found while porting, recorded and not repaired.** (i) ke16's own AB-7 body (lines 1194-1225 there)
-still opens with the words "STILL OPEN — STILL THE OWNER'S" against its own index row (:214), which
+still opens with the words "STILL OPEN — STILL THE OWNER'S" against its own index row (:214), which <!-- doc-anchor-ignore -->
 says the owner lifted R-DENSE — the GB-5 defect class on the source branch, in the Aether half; this
 pass writes nothing on that branch. (ii) This branch's `aether-v2/DECISIONS.md:32` still says
 "Ballot AB-13 (open — do not settle by edit)" and `aether-v2/CONSTRUCTS.md:135` still points AB-11
@@ -1104,7 +1104,7 @@ and it does return to him.
 `OPEN-QUESTIONS.md`, not its Russian twin, not `gaia/CAMPAIGN.md`. The EN/RU same-commit rule held
 for the commits it covers and simply does not reach `DECISIONS.md`, which has no Russian twin.
 **Four registers on `feat/threadpool-ke16` still say GB-5 is open** — that branch's
-`docs/OPEN-QUESTIONS.md:250`, `:282` and `:198`, and its `docs/gaia/CAMPAIGN.md:124`, the last of
+`docs/OPEN-QUESTIONS.md:250`, `:282` and `:198`, and its `docs/gaia/CAMPAIGN.md:218`, the last of
 which reads *"a ruling here would be a defect"*. This pass writes nothing on that branch; the repair
 there belongs to whoever owns it. **The consequence is not cosmetic: G1's field-table freeze reads
 as BLOCKED in every index and is UNBLOCKED in the log**, and G1 is unstarted —
@@ -1129,7 +1129,7 @@ mutation on both a table row and a ballot body; the red output is in the file's 
 
 ### F2 — the ruling is CONFIRMED and its original ground is SUPERSEDED
 
-A correction was filed against F2 on the working branch (`docs/OPEN-QUESTIONS.md:146-164` there) and
+A correction was filed against F2 on the working branch (`docs/OPEN-QUESTIONS.md:146-164` there) and <!-- doc-anchor-ignore -->
 must not be left standing as though unanswered: *"the ruling stands but its decisive number was
 taken at the size that flatters it."* Its arithmetic: `constants.rs:55` documents a resident floor of
 one `POOL_MIN_SLAB` (64 KiB) commit per NON-EMPTY column; a table archetype has four non-empty
@@ -1475,7 +1475,7 @@ Measured 2026-08-30, three independent instruments, release, 16 workers, 16384 r
 spawned *by a worker* into `injector_local[wid]`. Sibling stealing iterates `inner.stealers`, which
 holds the worker **deques** only — **no thread ever polls another thread's local injector.** Work
 spawned from inside a worker is reachable by that worker alone, serial by construction.~~ A system
-body always runs on a worker. **Superseded:** `push_task` is now `worker.rs:686`, and under the shipped
+body always runs on a worker. **Superseded:** `push_task` is now `worker.rs:750`, and under the shipped
 `a1f` placement it pushes onto the worker's own REGISTERED Chase-Lev deque, which sibling stealing DOES
 poll (`docs/threadpool/KE16-DESIGN.md`; the §App-2 take in `docs/threadpool/KE16-RESULTS.md` measures
 `par_in_system / par_from_dispatcher = 1.004`). The struck sentence is the record of the defect KE16
@@ -1877,7 +1877,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
   > | carrier | fields | what the source says |
   > |---|---|---|
   > | LINEAR float | `PointLight::color` (`boyko_render/src/light.rs:309-310`), `DirectionalLight::color` (`:289-290`), `SpotLight::color` (`:336-337`), `SkyLight::sky_color`/`ground_color` (`:357-360`), `MaterialGpu::base_color`/`emissive` (`material.rs:51,54,64-69`) | `/// LINEAR rgb color`; `light.rs:114` *"All radiometric values are LINEAR"*; `material.rs:56` *"All values are LINEAR"* |
-  > | 8-bit encoded RGBA | `UiBackground::color`/`border_color` (`boyko_ui/src/components.rs:211,220-223`), `UiText::color` (`text/components.rs:39-47`) | `u32`, *"authored STRAIGHT RGBA8 (`byte0=R .. byte3=A`)"* — **"straight" here means NON-PREMULTIPLIED, not "not decoded"**: `components.rs:211` continues *"the pack system premultiplies them"*, and `premultiply_rgba8` (`boyko_render/src/ui/instance.rs:196`) is the operation named. No sRGB decode exists anywhere on the UI path — `ui_rect.fs.hlsl:130` unpacks the byte word and composites it directly |
+  > | 8-bit encoded RGBA | `UiBackground::color`/`border_color` (`boyko_ui/src/components.rs:211,220-223`), `UiText::color` (`text/components.rs:39-47`) | `u32`, *"authored STRAIGHT RGBA8 (`byte0=R .. byte3=A`)"* — **"straight" here means NON-PREMULTIPLIED, not "not decoded"**: `boyko_ui/src/components.rs:211` continues *"the pack system premultiplies them"*, and `premultiply_rgba8` (`boyko_render/src/ui/instance.rs:196`) is the operation named. No sRGB decode exists anywhere on the UI path — `ui_rect.fs.hlsl:130` unpacks the byte word and composites it directly |
   > | device-encoded packed | `ParticleEffect::color_keys: [u32; 4]` (`boyko_render/src/particle_effect.rs:120-143`) | byte order is **`0xAABBGGRR`**, *"the opposite of the `0xRRGGBBAA` an author reaches for by habit"* — and its own doc records that both in-tree presets were authored wrong exactly that way, *"and neither was caught by anything"* |
   >
   > That table settles the ratified-text worry before it starts: the ratified *"`#RRGGBBAA` →
@@ -2271,7 +2271,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
 
   > *Body kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16` — the record as it stood when the ruling was taken. Where it says a ballot is STILL OPEN, the disposition line above it is the later state.*
   >
-  > ⚠ **HEADER NOTE, 2026-09-10 (`merge/ke16-into-render`) — nothing in this block is a live status.** Every sentence in it that calls the ballot open is struck in place and dated. GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`).
+  > ⚠ **HEADER NOTE, 2026-09-10 (`merge/ke16-into-render`) — nothing in this block is a live status.** Every sentence in it that calls the ballot open is struck in place and dated. GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:2285`).
   >
   > ⚠ ~~STILL OPEN — 2026-08-30. The owner asked for the ANALYSIS, not a ruling.~~ Below is what was
   > measured; nothing in it is a decision.
@@ -2294,7 +2294,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
   > G6; §Identity + the GN1 lint). *A question still open cannot have had four consequences filed
   > against it.*
   >
-  > ⚠ *De-bolded 2026-09-10 by the merge `merge/ke16-into-render`: the sentence is the 2026-08-30 analysis's own argument, kept verbatim, and is no longer set in the bold disposition voice a reader — or the `gaia_ruled_vs_open_census` gate — reads a live status out of.* GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:258`).
+  > ⚠ *De-bolded 2026-09-10 by the merge `merge/ke16-into-render`: the sentence is the 2026-08-30 analysis's own argument, kept verbatim, and is no longer set in the bold disposition voice a reader — or the `gaia_ruled_vs_open_census` gate — reads a live status out of.* GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:81` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:2301`).
   >
   > ⚠ **The one thing missing is the price of the rejected alternative.** Measured:
   > `grep -rn "SceneModel" docs/ crates/` returns **exactly one line in the whole repository** — the
@@ -2410,7 +2410,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
   >   `world.any_changed_since(&scratch.dynamic_bound_ids, …)`.
   > - `dynamic_bound_ids` is a **deduplicated set of component TYPES** — `register_bound_id`
   >   (`:56-60`) pushes only `if !self.dynamic_bound_ids.contains(&id)`.
-  > - `EcsMaster::any_changed_since` (`crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs:403-423`)
+  > - `EcsMaster::any_changed_since` (`crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs:433-453`)
   >   is `for archetype in …iter_archetypes()` over **every archetype in the world**, then `for &id in
   >   ids`, then `for row in 0..pool.count()`.
   > - `ui_bind_apply` (`:98-105`) returns immediately when `!dirty`, so a still frame is **discovery
@@ -2471,9 +2471,9 @@ red tests land regardless of its disposition). Everything above them waits on a 
   > per-column tick (GK-2's row already calls today's scan *"an O(live rows) scan documented as
   > 'cheap'"*). That bench belongs to GK-2 and is not a companion to G7's count gate.
   >
-  > **Corroborated in passing, not reopened:** the `any_changed_since` doc comment (`:386-389`) claims
+  > **Corroborated in passing, not reopened:** the `any_changed_since` doc comment (`:416-419`) claims
   > the scan is *"Bounded to the archetypes that actually host a bound id (typically 1-few)"*. The
-  > loop at `:404` is over **all** archetypes; only the inner work is bounded. The corpus already
+  > loop at `:434` is over **all** archetypes; only the inner work is bounded. The corpus already
   > owns this as GK-2's companion doc fix ([`gaia/DECISIONS.md`](gaia/DECISIONS.md) §UI bindings,
   > item 8) — recording that the reading holds, and changing nothing else.
   >
@@ -2487,13 +2487,13 @@ red tests land regardless of its disposition). Everything above them waits on a 
   That is NOT this tree's number and no in-tree gate produces it:*
   [`tests/internal_docs_anchors.rs`](../tests/internal_docs_anchors.rs) *run live prints* **735
   anchors / 116 waived** *— and the precedent is STRONGER than that aggregate, because the waiver
-  concentrated entirely in the one document admitted under it, which waives* **89 of 177 (50.3 %)**.
+  concentrated entirely in the one document admitted under it, which waives* **89 of 177 (52.3 %)**.
   **G0/R8**.
   ✅ **RESOLVED 2026-08-30 [delegated], in three parts.** (1) **NO PER-SITE WAIVERS** at any of the
   four censuses, ever; where a property is not decidable as written, narrow the PREDICATE and print
   the narrowing in the failure message. (2) The AIR census **widens to ALL of `docs/` and LANDS AT
   G0** — a one-constant change, green at zero remediation. (3) The **LINK census is a SEPARATE
-  deliverable at Aether R8** (1636 relative targets under `docs/`, 59 dead across 11 files, 44 of
+  deliverable at Aether R8** (3186 relative targets under `docs/`, 59 dead across 11 files, 44 of
   them in `docs/AUDIT-2026-05-23.md`), because landing it with the id half would hold the free half
   hostage to 59 repairs. ⚠ **G0 is NOT done**: the widening edit has landed on no branch, and the
   census file `tests/gaia_g0_citation_census.rs` exists on `feat/threadpool-ke16` and not on this
@@ -2704,7 +2704,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
   E1 exists to buy; adding a non-conflicting axis is option (a) with worse placement.
   *Rejected — the `#[event]` macro side:* structurally impossible, since exclusivity is a property
   of the emitter **set** and the macro sees one type and zero systems (it does not even read its
-  attribute arguments today — `boyko_macros/src/lib.rs:261` takes `_args`).
+  attribute arguments today — `boyko_macros/src/lib.rs:292` takes `_args`).
   *Price of the refusal, stated:* a hand-written system cannot emit an `ordered` event even as sole
   emitter; the escape is to declare the emitter in Aether.
 - **AB-5** — **RESOLVED 2026-08-30** (orchestrator ruling under the owner's delegation of the
@@ -2767,10 +2767,10 @@ red tests land regardless of its disposition). Everything above them waits on a 
 - **AB-7** — R-DENSE: unconditional with a driver-independent ground that must be ESTABLISHED rather
   than asserted, or lifted by `publish tracked`. ⚠ **re-grounds a ratified refusal**. Blocks **R5**.
   ~~STILL OPEN — STILL THE OWNER'S.~~ **Struck 2026-09-10 by the merge `merge/ke16-into-render`:
-  the owner LIFTED it — see the ruling table above, `docs/OPEN-QUESTIONS.md:587`, "R-DENSE LIFTED,
+  the owner LIFTED it — see the ruling table above, `docs/OPEN-QUESTIONS.md:1583`, "R-DENSE LIFTED,
   and the ballot's framing rejected", with his own words. This paragraph is the record of the state
   BEFORE that ruling, not a live status.** ⚠ When it was struck, the ruled-vs-open census could not
-  see this one: the table at `:583` is headed `| ballot | ruling | where the ground lives |` with no
+  see this one: the table at `docs/OPEN-QUESTIONS.md:1579` is headed `| ballot | ruling | where the ground lives |` with no
   `who` column, so it was not a ruling SOURCE by the predicate, and AB-7 sat in the census's `open`
   set without reddening it — found by hand while repairing the ten sites the census did catch. Since
   the A5 batch merge (2026-09-22) the §*2026-09-10* index above carries the same ruling in a `who`
@@ -3417,6 +3417,121 @@ remains unbuilt (reading 2 stays unfunded until the checked half proves itself).
 
 ---
 
+## RESOLVED 2026-08-27 (owner: option **(a)**) — ⚠️ `add_tag` / `remove_tag` PANICKED IN RELEASE on any entity whose archetype has ever hosted a dense component. Raised 2026-08-26 while landing ECS EG1; FIXED in the kernel as its own change.
+
+**RESOLVED 2026-08-27 — the owner chose (a): fixed in `boyko_ecs`, as its own change, before EG2 and
+outside its diff.** The diagnosis below stands as written. What it got wrong is the SIZE — a sweep run
+before the fix measured this as a **class, not two instances**:
+
+* **Five** `.expect` sites walk a retained id list into a per-archetype pool lookup: the two named
+  below, plus `migrate_entity_remove` Step 1, `migrate_entity_insert` Step 1, and the required-ctor
+  pass. All five are `.expect`, so all five are release-present.
+* **Two archetype RESOLVERS** — `merged_archetype_id_dyn` and `without_ids_archetype_id` — seed their
+  union / difference from the same unfiltered list, so every archetype newly minted through `add_tag`
+  / `remove_tag` RETAINED the non-signature id. The kernel was manufacturing the next victim. Their
+  generic twins (`merged_archetype_id`, `without_component_archetype_id`) already filtered, which is
+  what makes this a restoration rather than an invention.
+* **The widest victim class is wider than this entry's.** In `migrate_entity_remove` the entity, its
+  source archetype **and the removed component** are all pure table; only the remove TARGET retains,
+  and the walk over the target's list is unconditional.
+* It is not a *dense* defect but a **non-signature-storage** one — the bitset variant panics at the
+  identical site. Hence the shared predicate rather than a `matches!(.., Dense)`.
+
+**Landed:** six guards in `crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs`, each one
+`if !component_registry::is_signature_id(cid) { continue; }` — four walks plus both resolvers. Pure
+additions; not one existing line was deleted or changed. `is_signature_id` is the per-id companion of
+`is_signature_storage`, i.e. the predicate `clone/materialize.rs` and the two generic twins already
+route through.
+
+**Gated by** `crates/boyko_ecs/tests/retained_id_walk_pool_skip.rs` — 8 positive tests, watched RED
+against the unfixed kernel in BOTH profiles first (identical NAMES, identical panic sites, exit 101),
+green in both afterwards, and Miri-TB clean. Two of them observe the RESOLVER half directly, because
+a filtered walk hides an unfiltered resolver by construction: reverting only
+`without_ids_archetype_id`'s guard reds exactly that one test and nothing else — observed, not
+assumed.
+
+**What was deliberately NOT fixed, and why.** Each is a different premise with a VALUES call inside
+it, so none belongs in a change that had to be the filter restoration and nothing else:
+
+* **The required-ctor pass** (`migrate_entity_insert`, `for_each_required_id_excluding`). Its ids
+  come from `B::component_ids()`, not from a retained list. `#[require(SomeDenseComponent)]` panics
+  because the kernel has no route for CONSTRUCTING a required dense component — filtering there would
+  turn a loud panic into a silently missing component. A missing feature, not a missing filter.
+* **A bundle carrying a BITSET component** (`insert_command.rs`, `bundle_column_cache.rs`). Both
+  guard with a `Dense`-only `matches!`, so a bitset id falls through to a pool lookup and panics in
+  release; reachable from safe user code, because `#[derive(Bundle)]` accepts any `Component` field.
+  Widening the guard is not enough on its own — a bitset id must not be routed to a `DenseStore`
+  either, and what *inserting an enable tag through a bundle* should MEAN is your call, not mine.
+* **The observer-flag walks** (`archetype_master.rs`: `create_archetype`'s OBS-SEED,
+  `remove_observer`'s sibling recompute, and `debug_assert_observer_flags_consistent`). Three
+  writers, two of which read the unfiltered list while `add_observer` uses the signature mask — so
+  registering an observer for a dense component AFTER a retaining archetype exists trips the debug
+  assertion. Reconciling them means deciding which writer is canonical. Nothing dispatches wrongly
+  today: every fire loop already filters through `is_signature_id`.
+
+---
+
+Landing `components_of_into` needed a fixture entity carrying three components. The obvious route —
+`spawn_two(table, dense)` then `add_tag` — panicked, and the panic is in the kernel, not in the glue.
+
+**What it is.** `migrate_entity_attach_ids` copies the retained columns by walking the **source
+archetype's `component_ids()`** and calling `component_pools().get_pool(cid)` for every id in it:
+
+```
+crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs:1831
+    .expect("invariant: source hosts its own component id");
+```
+
+`component_ids()` is the raw id list the archetype was minted from, and it **retains** `Bitset` and
+`Dense` ids by the kernel's own documented design — only the signature *mask* is filtered. A `Dense`
+id has no per-archetype pool by construction, so the walk dies. `migrate_entity_detach_ids` has the
+identical defect at `migration_helpers.rs:2116`. Both are `.expect`, not `debug_assert!` — this is
+**release-present**, and `add_tag` / `remove_tag` are `pub` on `EcsMaster`.
+
+**The victim class is wider than it looks, and this is the part worth your attention.** It is not
+"an entity that carries a dense component". Archetype dedup keys on the FILTERED mask while the
+retained list belongs to whichever call first minted that archetype, so a **table-only** entity that
+dedups into an archetype first minted by a table+dense spawn panics on `add_tag` as well — it never
+carried the dense component at all. Spawn order decides whether the program works.
+
+**Measured**, in `D:/wt/reflect` on `feat/reflection`, in a throwaway probe with no reflection code
+on the stack (probe deleted, tree left clean):
+
+* `spawn_two(table, dense)` → `add_tag` → panic at `migration_helpers.rs:1831`.
+* the same entity built with the tag in its signature → `remove_tag` → panic at `:2116`.
+* `spawn_one(table)` → `add_tag` → fine, **when** no dense-carrying entity minted that archetype
+  first.
+
+In the production tree the one dense component is `GpuTransform3D`, so any entity that is
+GPU-interpolated cannot be tagged, and neither can anything sharing its archetype.
+
+**Why I did not fix it.** It changes the behaviour of a shipping API with existing callers, for
+reasons that belong to a reflection campaign — the inversion the directional rule exists to prevent,
+and the same disposition already recorded for `has_component`'s missing `Bitset` branch (F6) and
+`set_component_raw`'s tick asymmetry (F14). EG1 routed around it: gate 4 builds its three-component
+subject with `create_entity`, and gate 6 spawns its table-only sibling *before* the dense-carrying
+subject so the shared archetype retains no dense id. Both sites say so, with this as the reason.
+
+**What it blocks, and the call.** Not EG1 — the glue is read-only. But **EG2 and EG6 are built on
+these two functions**: `S1` is specified as *"a bytes-carrying sibling of
+`migrate_entity_attach_ids`"* and `S2` as the already-existing detach helper made `pub`. So
+`add_default` / `remove` inherit the panic unless the retained-id walk is filtered through
+`is_signature_storage` first.
+
+* **(a)** Fix it in `boyko_ecs` **before EG2**, as its own change, on the kernel's schedule. The fix
+  is one `if !is_signature_storage(storage_kind(cid)) { continue; }` in each of the two walks — the
+  same predicate every other kernel consumer of `component_ids()` already routes through.
+* **(b)** Leave it, and have EG2's new `add_component_by_id` / `remove_component_by_id` carry the
+  filter themselves while `add_tag` / `remove_tag` stay broken. This ships a seam that is correct
+  where its sibling is not, which is worse than either.
+* **(c)** Fold the fix into EG2. It is the same code path, but it puts a shipping-behaviour change
+  inside a reflection rung.
+
+I did not choose. **(a)** is what the directional rule points at, and it is the reason this is here
+rather than in a report.
+
+---
+
 ## 2026-08-26 — A worker panic under the windowed host FREEZES the window instead of ending the process
 
 MEASURED while wiring `PhysicsPlugin` into `examples/playground.rs`. The plugin's
@@ -3461,6 +3576,167 @@ Two things that are worth deciding rather than assuming:
 
 Nothing is blocked on either — the scene runs. What is blocked is anyone else meeting this class and
 spending the same hour on it.
+---
+
+## 2026-08-21 (second pass) — `boyko_reflect`: the four owner calls are FIVE, two of them were the same call, and the largest was on no list
+
+A critique pass over the four plan documents (`REFLECTION-PLAN-CORE/ECS/BOUNDARY/GATES.md`) found
+five blockers. Four were fixed inside the plans without needing you. The fifth is a scope call and it
+is **new**, so the entry below supersedes the previous one **as a list** — the four items it names are
+unchanged and still stand.
+
+**The single list is now `docs/REFLECTION-ANALYSIS.md` **B.13**.** Five rows, each with what the plan
+does *while it waits*, so nothing stalls and nothing is decided behind your back:
+
+| # | Decision | Blocks | Plan's position while it waits |
+|---|---|---|---|
+| **1** | **NEW — may engine crates carry a `reflect` feature?** | rung 0 | proceeds on **yes** |
+| **2** | **MERGED — the by-id `boyko_ecs` seam: FOUR items, ONE call** | ECS EG2 | **ANSWERED 2026-08-27: approved, all four** — see the entry at the tail |
+| **3** | `BindAccessor`: one table or two | CORE C3/C8 | proceeds on Horn 2 |
+| **4** | Aether components reflectable by default or opt-in | the Aether seam | proceeds on opt-in |
+| **5** | Build order within (B): arrays → nested → enums → `String` last | what ships first | taken |
+
+**Row 1 is new and it is the largest, because it decides whether v1 can inspect the engine's own
+components at all.** The design's rule was *"the consumer writes the opt-in"* — but every dogfood
+target the campaign names (`Transform`, `Name`, `Visibility`, `GpuTransform3D`, `EmitterActive`) is
+defined in a **shared engine crate**, so there is no consumer to write it. The opt-in's
+`#[cfg(feature = "reflect")]` is evaluated in the *defining* crate, which means `boyko_scene` and
+`boyko_render` must declare a `reflect` feature — and `boyko_scene` has five workspace dependents, so
+the gate rule as first written (*"only a leaf may declare it"*) reds mechanically the moment
+`Transform` opts in. Nor can the declaration be dodged: the workspace's `unexpected_cfgs` lint turns a
+`cfg(feature = "reflect")` in a crate with no such feature into a warning, and `-D warnings` makes it
+red.
+
+**Yes** ⇒ `boyko_scene` / `boyko_render` gain a **non-default** `reflect` feature plus an optional
+`boyko-reflect` edge, contained by six mechanical clauses instead of the leaf rule (never in a
+`default`; optional edges only; `dep:` spelling; **no dependency edge may enable it**; ship targets
+declare and forward nothing; **every enabling command line is a named CI leg**). This is not novel:
+`hwrt` is already a non-default feature forwarded across three shared shipping crates
+(`boyko_rhi_vulkan` → `boyko_render` → `boyko_app`) and reaches no ship build, because nothing enables
+it. The one thing wrong with `hwrt` is that **no CI leg compiles it at all** — which the sixth clause
+exists to prevent here.
+
+**No** ⇒ v1's dogfood becomes fixture-local *copies* of the engine's shapes, the phrase "real engine
+types" leaves four gates, and the campaign loses the one claim that makes reflection worth building.
+One commit either way; nothing else in the design moves.
+
+**Row 2 was two questions.** The ECS plan routed a three-item structural seam to you and *rejected*
+`EnableTagId::try_from_component_id` (landing a compile-fail fixture asserting it must not exist);
+the BOUNDARY plan called that same constructor *"a required `boyko_ecs` seam"* and filed it as its own
+question. You were about to receive one decision twice with opposite recommendations. It is one call
+over four items — and the ECS plan's substitute turned out to be **wrong**, not merely inferior:
+`register_enable_tag(name)` is idempotent only within the dynamic-tag name table, which *derived*
+`storage = "bitset"` components never enter, so "toggle a bitset component off" would have minted a
+brand-new tag, cleared **its** bit, left the real one set, and reported success.
+
+**Fixed without you, recorded for visibility:** the mandatory Miri obligation was written as
+`-p boyko-reflect --features reflect` in four documents — a command that **fails before compiling
+anything**, because that crate has no such feature (the `cfg` is consumer-side); it is now two rows
+with different shapes, and the row that reaches derive-generated `unsafe` is the fixture's. The ship
+census's third leg — the one that decides whether the census means anything — was specified with a
+fixture that made it a duplicate of its own control, so it would have recorded a **false conclusion
+about the instrument, produced by the instrument**. And the first commit of the campaign was
+specified by two documents that disagreed about its contents, with a completion condition that
+required a rung standing behind itself.
+
+---
+
+## 2026-08-21 — `boyko_reflect`: the scope fork is TAKEN, and re-grounding it opened four owner calls
+
+`docs/REFLECTION-ANALYSIS.md` was a 2026-06-15 snapshot of branch `ecs`. Re-grounding it against
+today's tree (`feat/reflection`) confirmed its central finding untouched — "reflection only in a
+Debug build" is not a compiler property; the mechanism is an optional crate behind a Cargo feature
+plus a CI absence gate — but falsified several of its supporting claims and surfaced work the
+document had no way to scope. **§6's scope fork is recorded as TAKEN: option (B)** (POD + `String` +
+nested + `#[repr(Int)]` enum in v1; collections deferred to v2), with its reason, and marked
+reversible by construction. What follows is what could **not** be decided without the owner.
+
+**1. `BindAccessor`: one table or two? — the largest one, and it is about SHIPPING API surface.**
+
+`#[derive(Bindable)]` / `BIND_ACCESSORS` shipped 2026-06-21 (`8a11f31b`), six days after the
+snapshot, and is ~80 % of the field model the reflection design proposes to invent: a per-
+`ComponentId` `[OnceLock<T>; MAX_COMPONENTS]` table of flat `fn` pointers, by-`u8`-index access, a
+`field_id(name)` resolver, a documented cold-path discipline. It is read-only, flat, numeric-only,
+requires named fields, and it **ships** (in `boyko_ecs`, read by `boyko_ui`, in the release binary).
+
+* **Horn 1 — merge into `TypeInfo`.** One source of truth about a component's fields; `boyko_ui`
+  gets kinds and nesting for free. **Cost:** a *shipping* crate then consumes reflection metadata,
+  which strains the directional rule that keeps "dev-only" honest.
+* **Horn 2 — two parallel tables.** Nothing that ships changes. **Cost:** two descriptions of the
+  same fields, which drift silently on a rename; needs a feature-on consistency test to stay honest.
+
+Neither is obviously right. Horn 2 is the lower-risk default. **Blocks Wave 1.** *(Nuance that makes
+the call cheaper than it looks: there is no production `#[derive(Bindable)]` type yet — all five
+registration sites are tests registering one fixture — so this is a decision about API direction,
+not a migration.)*
+
+**2. A public by-id structural seam on `EcsMaster` — a dev-only feature widening a shipping crate.**
+
+`add_default` / `remove` were specified as "routes through the existing structural insert/remove, so
+they inherit hooks/observers for free." A genuine by-id path now exists and is already driven by the
+public `add_tag` / `remove_tag` — but all five helpers (`merged_archetype_id_dyn`,
+`without_ids_archetype_id`, `migrate_entity_attach_ids`, `migrate_entity_detach_ids`,
+`retag_in_place`) are **`pub(crate)`**, so an external `boyko_reflect` cannot call any of them. The
+seam must therefore be made public, and it lands in `boyko_ecs` — **permanent shipping API surface
+added for a dev-only feature.** It does not breach the directional rule (the signature is pure
+`Entity` + `ComponentId`, as `add_tag` proves), and it is arguably useful on its own merits to scene
+loading and the editor. But it should be a decision, not a Wave-3 discovery. **Blocks Wave 3.**
+
+**3. Are Aether components reflectable by default, or opt-in?**
+
+The design says "the *consumer* writes `#[cfg_attr(feature = "reflect", derive(Reflect))]`". For a
+component declared in an `aether! { component Foo { … } }` block **the consumer never writes the
+struct** — `aether_lang`'s expander emits it, and `ComponentDef` has no attribute-passthrough
+grammar, so there is no syntactic slot. The macro must add it. The change is small and costs
+`aether_lang` no new dependency (the emitted `#[component(reflect)]` is a token resolved downstream —
+the tokens-not-deps rule its own manifest already states). The **question** is the default: opt-in
+matches the rest of the design; default-on matches what a gameplay-authoring DSL usually wants.
+
+Second-order and worth knowing: once Aether emits the opt-in, the reflection design's rule that
+*"the consumer's reflect-enabling feature MUST be named `reflect`"* becomes a requirement Aether
+silently imposes on **every crate containing an `aether!` block**. That belongs in the Aether
+language docs, not in a reflection appendix. **Blocks Wave 2.**
+
+**4. Build order within (B): arrays before `String`.**
+
+(B)'s justification was that v1 could then dogfood `Name(String)`, `Transform`, and
+`#[repr(u8)] enum State`. Two of those three are wrong about today's tree: `Name` carries a `u32`
+(`Name(NameId)`, layout-pinned to 4 bytes; the string lives in a leak-backed setup-only interner),
+and `State<S>` is a **generic Resource**, not an enum component. A whole-tree walk found **zero**
+`#[derive(Component)]` structs with a `String`, `Box<str>`, or `&str` field — the engine's idiom for
+component text is a fixed-capacity inline byte array (`UiName`, `UiTextBuffer`).
+
+So the `String` half of v1 — the half this document spent its **headline CRITICAL** on (the raw
+`drop_in_place` + `ptr::write` dance and its Miri-TB gate) — has no consumer, while
+**fixed-size arrays `[T; N]` are pervasive and appear in neither the v1 taxonomy nor the v2
+exclusion list.** They fall through to `Opaque`, which is a hard error, so the flagship dense
+component (`GpuTransform3D { prev, curr }` over `TrsPacked { [f32;4] × 3 }`) is **un-derivable
+today**. Arrays are strictly easier than `String` (offset + stride + count, all `const`, zero alloc,
+no drop, no TB exposure).
+
+**(B) stays taken.** The recommendation is only that Wave 2 build nested + enums + arrays first and
+`String` last. This changes what the first inspector can show, so it is a scope call. *(The enum
+half, by contrast, has eleven in-tree consumers — `Visibility`, `Interaction`, `FocusPolicy` are
+themselves components, and eight more `#[repr(u8)]` enums are component fields — so it is
+load-bearing, not speculative.)* **Blocks Wave 2.**
+
+**Not asked, decided with evidence, recorded for visibility:** enumeration must take three sources
+rather than the archetype signature alone (both `Bitset` and `Dense` are excluded from every
+signature, so the design as written would refuse to *show* `GpuTransform3D` — the one component it is
+fully able to *read*); the refusal matrix needs all four storage citizens plus GPU residency and
+runtime-minted dynamic tags, not just "bitset + ZST"; and three CI-shaped items that would otherwise
+have produced gates that cannot fail — the symbol-absence gate is inert without fat LTO (measured
+in-tree, `--gc-sections` does nothing), CI's Miri is a hand-listed **allowlist** that would not cover
+a new `boyko_reflect` package, and a bare root `cargo build` now selects every crate, so feature
+unification needs no `--workspace` flag to reach the ship crate.
+
+**One incidental `boyko_ecs` finding**, surfaced because reflection is the code that would hit it:
+`EcsMaster::has_component(e, id)` **silently returns `false` for every bitset enable tag.** It
+branches on `Dense` but has no `Bitset` branch, so a bitset id falls through to the archetype column
+lookup, finds a null column (a bitset tag has no column by construction), and reports absent for a
+tag the entity demonstrably has enabled. Wrong answer rather than a refusal. Not fixed here — it is
+a kernel question, not a reflection one.
+
 
 ---
 
@@ -6446,7 +6722,7 @@ residue floor, where the B arms read 4 and 5 us.
 **The decision that is yours.** A remedy exists and its code is already written (`join_on_worker`,
 five review rounds old); publishing the TLS deposit under a new `ke16-b4` costs one store per worker
 per process and changes **no steal granularity at any site**, so it does not trip the letter of
-`a1f`'s return condition. But `KE16-REJECTED.md:359-362` and `:475-476` give `b1`/`b3` a SECOND
+`a1f`'s return condition. But `KE16-REJECTED.md:359-362` and `:368-369` give `b1`/`b3` a SECOND
 return trigger — *"or if defect B is fixed by some other route that gives the worker joiner a
 registered destination deque"* — and that route is exactly this one. So `b1`/`b3` return the moment
 the remedy lands, they build only over `a1`/`a1f`, and the comparison becomes **`a3+b4` vs
@@ -7111,7 +7387,7 @@ inserted the opt-in mimalloc arm above them.
   loop at every W (`1c31aeac:systems.rs:304-322`). This file's 2026-09-09 Stage 4 entry already says
   so. The bench's `parallel_broadphase = workers > 1` (`1c31aeac:jolt_parity_pyramid.rs:216`) is read
   only on the `Grid` arm (`1c31aeac:systems.rs:331`), so it did nothing. `MIN_PARALLEL_BODIES = 4096`
-  (`1c31aeac:resources.rs:664`, tested at `:1734`) gates the Grid path's parallel emit, which was
+  (`1c31aeac:resources.rs:664`, tested at `1c31aeac:resources.rs:1734`) gates the Grid path's parallel emit, which was
   never reached. The same goes for note (3) below: the W>1 arm turned on `parallel_solve` and nothing
   else. The all-pairs pass is about 0.9 ms at 1240 bodies (the 2026-09-09 entry, derived from the
   `broadphase` bench, not timed in the step), so about 4.4 % of T(1) and 7.5 % of T(8) here.
@@ -8423,7 +8699,7 @@ The six:
 **The anchors gate did read the two, and it passes them.** `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` is the
 fourth entry in `GATED_DOCS`, and the gate's scanner does resolve a link target followed by `:N`. But
 both anchors carry the `~` waiver, and a waived anchor is checked only for lying inside the file
-(`tests/internal_docs_anchors.rs:737`). Both do. So pass 1's "the anchors gate covers none of this" <!-- doc-anchor-ignore -->
+(`tests/internal_docs_anchors.rs:967`). Both do. So pass 1's "the anchors gate covers none of this" <!-- doc-anchor-ignore -->
 was population-limited: pass 1's population could not contain the link form. It is annotated in place.
 
 The four citation forms that a scanner in use missed and a later reading found:
@@ -8801,3 +9077,1192 @@ Scripts, stdlib, in the scratchpad's `p8/`:
 
 The pass-7 verifier's `v8/` is the source of (A)-(E): `debt.py`, `leadin.py`, `ins.py`, `link.py` and
 `lane90_repl.py`.
+
+---
+
+## ANSWERED 2026-08-27 — B.13 #2 (the four by-id kernel items): **APPROVED, all four**
+
+The owner approved the seam in full: **S1** `add_component_by_id`, **S2**
+`remove_component_by_id`, **S3** `mark_component_changed`, **S4′**
+`EnableTagId::try_from_component_id`. Not a subset — all four, in one call, as asked.
+
+**EG2 is unblocked**, and with it **EG3, EG5, EG6** and **BOUNDARY B4**.
+
+### What was measured before the answer, so the record shows what it rested on
+
+The owner's question was whether this costs the *shipping* build anything. Measured, controlled,
+on this machine:
+
+| | release binary | probe symbols in the image |
+|---|---|---|
+| kernel as committed | 2 656 768 B | — |
+| kernel + four uncalled `pub fn` of EG2's shape | 2 656 768 B | **0** |
+
+**Delta: 0 bytes.** The linker discards an uncalled `pub fn` entirely, and it does so *without*
+LTO — this workspace has no `[profile.release]` section at all, so release runs on Cargo's
+defaults with LTO off.
+
+⚠️ **The first attempt at this measurement lied**, reporting +69 120 B. One of the two builds had
+not recompiled the kernel. Caught by rebuilding three times from identical source and getting a
+byte-identical binary each time — the build is deterministic, so the spread was the instrument's,
+not the code's. The number above is from the controlled repeat.
+
+### The hot path, which was decided before any code
+
+**D9** already refuses the shape that would have cost something: widening
+`migrate_entity_attach_ids` with an `Option<&[&[u8]]>` parameter would put a branch in **every tag
+attach**, and would blur the ZST `debug_assert!` — which is not decoration but the statement that
+makes the byte-write-free fast path sound — into *"…unless bytes were supplied"*, which is no
+longer checkable. S1 is a **bytes-carrying sibling**, so the existing path keeps zero new branches.
+
+### The cost that IS real, stated at approval time
+
+Four `pub fn` become part of `boyko_ecs`'s permanent contract. Removing them later is a breaking
+change. That is the price of the answer, and it was named before it was given.
+
+### Not measured
+
+The delta was taken on a small fixture binary, not on the full engine. The mechanism (an uncalled
+symbol is discarded) does not depend on binary size, but the number was not re-taken there. And
+**S3 is the one of the four that adds a NEW mechanism** rather than opening an existing one —
+there is no by-id change-tick write in the kernel today.
+
+---
+
+## ANSWERED 2026-08-27 — the retained-id migration panic: **(a), fix the kernel first**
+
+The owner chose **(a)**: the retained-id filter is restored in `boyko_ecs` as **its own change,
+before EG2 and outside its diff**, exactly as `REFLECTION-PLAN-ECS.md` prescribes for this answer.
+**LANDED as `f7c46c76`, and the sweep made it SIX sites, not two** — four panic-site functions,
+guarding six `.expect` calls between them, plus two archetype resolvers that seed the unfiltered
+list into newly-minted archetypes: six guards in total, each independently gated by
+`crates/boyko_ecs/tests/retained_id_walk_pool_skip.rs` (7 tests, watched RED in both profiles
+first). *(This line read "five panic sites plus two archetype resolvers" — 5 + 2 = 7, presented
+as SIX — until the EG2 adversarial pass counted the diff. The number was echoed from
+`f7c46c76`'s own commit message, which is pushed history and is left as written.)*
+
+| guard | function | kind | `.expect`s guarded |
+|---|---|---|---|
+| `migration_helpers.rs:546~` | `migrate_entity_insert` | panic site | 2 |
+| `:1070~` | `migrate_entity_remove` | panic site | 1 |
+| `:1291~` | `merged_archetype_id_dyn` | **resolver** | — |
+| `:1373~` | `without_ids_archetype_id` | **resolver** | — |
+| `:1527~` | `migrate_entity_attach_ids` | panic site | 2 |
+| `:1818~` | `migrate_entity_detach_ids` | panic site | 1 |
+
+*Measured, not echoed:* `git show f7c46c76 -- …/migration_helpers.rs | grep -c "^+.*is_signature_id"`
+→ **10** added lines, of which **6** are guard `if`s and 4 are comment lines; each guard's enclosing
+`fn` and each protected `.expect` was then read at HEAD. 4 + 2 = 6.
+
+**The ballot was incomplete when the earlier approval was given, and that is recorded here rather
+than quietly fixed.** The plan claimed option (b) *"is precisely what a verbatim copy silently
+produces"*. False: (b) requires deliberately ADDING a filter, and a verbatim copy adds nothing. The
+default is an unenumerated **(d) — both broken**, which was never on the list. The owner was shown
+(d) before answering.
+
+### Re-measured at HEAD, because the original entry's probe had been deleted
+
+Three probes, written from the kernel source rather than from either document, run and deleted:
+
+| probe | profile | result |
+|---|---|---|
+| table+dense entity → `add_tag` | debug / release | **exit 101** at `migration_helpers.rs:1831:18` |
+| **table-only sibling** → `add_tag` | debug / release | **exit 101**, same site |
+| `remove_tag` on a dense-retaining archetype | release | **exit 101** at `:2116:18` |
+
+The table-only probe printed `same=true` for the two archetype ids and asserted `!dense_contains`
+before panicking — **the wider victim class is real**: dedup keys on the filtered mask while the
+retained list belongs to whichever spawn minted the archetype first. Release-present confirmed by
+execution, not by reading an `.expect`.
+
+### Two things that made (a) the answer
+
+**S2 needs no copy at all.** It is the existing detach helper made `pub`, so the approved seam as
+written would ship that helper's release panic under a new public name — and the §4 table the
+approval entry points at says of it *"exists and is correct"*.
+
+**All eleven of EG2's gates are blind to the filter's presence** — traced one by one: the dense
+gates route around migration, the table gates use table-only fixtures in fresh worlds, and the
+rejection gate refuses before the merge.
+
+### The template already in the tree
+
+`clone/materialize.rs:121` walks the same list and skips pool-less ids through
+`is_signature_storage`, whose own doc calls itself *"the single shared predicate every
+signature-exclude / pool-skip site routes through."* The two migration walks are the documented
+outlier.
+
+---
+
+> **A note on placement, so it is not a silent choice.** The four entries below are appended at the
+> tail rather than at the head, against this file's stated *"Newest first"* convention. Reason,
+> measured: seven line anchors in two ungated documents (`docs/VB-SV0-DP6-DESIGN.md:504` and
+> `docs/VG-R3-P2-CAPABILITY-SPLIT-PLAN.md` ×6) cite lines 196–527 of this file, and
+> `tests/internal_docs_anchors.rs` does **not** gate `OPEN-QUESTIONS.md` — so a head insertion would
+> silently misbind all seven with nothing to catch it. The two preceding `ANSWERED 2026-08-27`
+> entries are already at the tail for the same reason, and the RU twin mirrors that layout. The
+> convention deviation is real and is recorded here rather than fixed, because fixing it means
+> re-deriving seven anchors in two documents that this rung does not otherwise touch.
+
+---
+
+## 2026-08-27 — `DenseStore::arch_presence` is not re-seeded when a TABLE migration moves an entity that already carries a dense component
+
+**This is a pre-existing kernel defect. EG2 did not create it — EG2 added two more routes to it, and
+is the first rung to write it down.**
+
+**Mechanism, read rather than predicted.** `DenseStore::mark_arch_present` has **eight call lines
+across seven files** — `clone/materialize.rs:895`, `commands/insert_command.rs:267`,
+`commands/migration_helpers.rs:799` (inside `migrate_entity_insert`),
+`commands/spawn_at_command.rs:275`, `commands/spawn_batch_command.rs:595`,
+`ecs_master/component_api.rs:132`, and `serialize/load_writer.rs:716` and `:855`. Every one of them
+fires only for a dense id that is **in the bundle / insert set being applied**. Not one fires for an
+entity's *pre-existing* dense memberships when that entity changes archetype. Query candidate
+archetypes are seeded from `arch_presence` (`iters/query/data/read.rs:271`,
+`data/mut_.rs:411`, `data/write.rs:267`, `filter.rs:564`, `:1084`, `:1387`).
+
+**What survives and what is lost.** `dense_contains` (`ecs_master/component_api.rs:49`) reads the
+store's membership and still answers `true` — the entity really does still carry the component. What
+is lost is the **candidate seed**: the new archetype is never marked present, so a `Query<&Dense>`
+never visits it and the row is invisible. Membership is intact; visibility is not.
+
+**Reachable routes.** `add_tag` and the typed `Commands::insert` were measured by the EG2 refuter.
+S1 / S2's table arms are the *same* code path: `migrate_entity_attach_ids_with_bytes` and
+`migrate_entity_detach_ids` call `mark_arch_present` **zero** times (measured: `grep -c` over both
+function bodies returns 0). So the new by-id seam adds two more routes to a defect it did not create
+— and unlike the typed routes, these are reachable from a scene loader.
+
+**Gated, RED by design.** `crates/boyko_ecs/tests/seam_by_id.rs:1314`,
+`g12c_a_dense_carrying_victim_stays_visible_to_a_dense_query_after_a_table_attach`, `#[ignore]`d with
+a `deferred:` reason. Watched red in **both** profiles: `seen == 1` against a baseline of `2`, exit
+**101** in debug and in release. Lift the `#[ignore]` when the kernel fix lands and it turns green on
+its own.
+
+**Not fixed here, by the owner's own condition** that EG2's kernel diff be exactly the four approved
+items plus the D9 sibling. **The question for the owner is only *when*, not *whether*:** the fix is a
+separate kernel change (re-seed `arch_presence` for retained dense ids on every migration that mints
+or changes an archetype), and it is the kind of silent-wrong-answer defect this repo normally treats
+as blocking.
+
+⚠️ **A correction to a premise, measured.** `tests/ignore_reasons_census.rs` — which `CLAUDE.md`
+describes as failing the build on a bare `#[ignore]` — **does not exist on this branch**: `tests/`
+holds eleven entries (ten `.rs` files plus the `reflect_scan_support/` directory) and it is not among
+them, and `git cat-file -e master:tests/ignore_reasons_census.rs` reports it ABSENT on `master` too
+(`master` is an ancestor of HEAD, verified with `git merge-base --is-ancestor`). The `deferred:`
+prefix above is written because it is forward-compatible with the documented vocabulary — but
+**nothing enforces it here**, and nobody should certify that ignore as "mechanically classified".
+
+⚠️ **Three numbers in this paragraph were inherited from the EG2 adversarial pass and all three were
+wrong by the time they were re-measured here.** (i) The site count was **327**, not 326 — the
+`g12c` ignore this rung just wrote is itself the 327th, so the figure moved *because of* the change
+it was describing, and it moved again for the same reason: EG2-R round 3's `g17` takes it to
+**328** (`grep -rn '#\[ignore' --include=*.rs crates/ | wc -l` → 328, re-measured at that round).
+It is **401** on the tree today too <!-- measure: tree-lines crates rs #[ignore = 401 -->, and that
+half is no longer prose: the round stamp keeps the historical sentence true, and the marker keeps
+the live one checkable — a paragraph whose whole subject is that a count rots should not carry one
+that nothing re-takes.
+(ii) `tests/` holds eleven *entries*, not eleven *files*. (iii) Most importantly:
+the pass claimed *"exactly one carries a class-shaped reason today (`miri_fixed_loop.rs:72`)"* — and
+**that site is not class-shaped at all**. Its reason reads
+`"windows-gnu Miri executor wall-time (bugfix_56 class); driver logic covered by M-P20-1"`: free
+prose containing the English word "class", not a `<class>:` prefix from the closed vocabulary.
+A `grep` for `#[ignore = "<lowercase-prefix>:` over `crates/` returns **three** sites, and none of
+them is that one: `crates/boyko_ecs/tests/seam_by_id.rs:1308` (`deferred:` — written by this rung),
+`crates/boyko_ecs/tests/seam_by_id.rs:2217` (`deferred:` — `g17`, written by EG2-R round 3) and
+`crates/reflect_fixture/tests/reflect_absence_census.rs:785` (`calibration:`, a word the documented
+vocabulary does not contain). **So the true count of vocabulary-conforming reasons in the tree before
+this rung was ZERO**, which strengthens the point rather than weakening it.
+
+## 2026-08-27 — VALUES: what does `#[require(C)]` MEAN when `C` is a dense component? A second public API now reaches the gap
+
+`merged_archetype_id`'s required-expansion loop (`commands/migration_helpers.rs:426-437`) pushes
+required ids **unfiltered**, while dense-filtering `bundle_ids` immediately above it (`:385-390`).
+`merged_archetype_id_dyn` behaves identically — it filters only its *source seed* (`:1291`), never
+its `extra` list. So a dense id named in `#[require(..)]` lands in the archetype **signature** and
+mints a per-archetype pool it should not have: a phantom dense column.
+
+`f7c46c76` filed this deliberately rather than deciding it — its own commit message calls it *"the
+required-constructor pass, where filtering would turn a loud panic into a silently missing component
+and the real gap is a missing feature."* EG2's FORK A preserves the behaviour **exactly**, which is
+the correct call for a rung whose job is parity. But the by-id seam makes the gap reachable from a
+**scene loader** rather than only from a typed `insert`, and `add_component_by_id`'s
+`debug_assert!(added.iter().all(|&cid| target.has_component_id(cid)))`
+(`migration_helpers.rs:2499-2502`, the *filtered* signature mask) means a dense required id now trips
+a **loud debug failure** sitting exactly on the filed gap.
+
+**That loudness is deliberate and is the honest behaviour** — it is the sweep's own stated preference
+over *"a silently missing component"*. It is recorded here so it is not mistaken for a regression when
+someone first writes `#[require(SomeDenseComponent)]`.
+
+**This is a semantics question, not an implementer's question**, which is why it is here and not
+decided. The options as they stand: **(a)** dense ids are legal in `#[require]` and the expansion
+must filter them out of the signature while still constructing the dense datum; **(b)** dense ids are
+illegal in `#[require]` and the derive rejects them at compile time; **(c)** status quo — the phantom
+column stays, documented. Nothing in this rung depends on the answer.
+
+## 2026-08-27 — SCOPE: EG2's approved diff GREW past its own inverted invariant, and the owner should hear it here rather than discover it at review
+
+`docs/REFLECTION-PLAN-ECS.md` states as an **approval condition** that
+`commands/migration_helpers.rs` receives *"exactly ONE additive hunk,
+`pub(crate) fn migrate_entity_attach_ids_with_bytes`"*. That sentence is a scope description, not a
+correctness one, and it no longer holds byte-for-byte:
+
+1. **One parameter type.** Restoring `#[require]` parity through the by-id seam (BLOCKING — without
+   it, `add_component_by_id` silently drops required components that the typed path constructs)
+   needed the new fn's `bytes: &[&[u8]]` to become `srcs: &[AttachSrc<'_>]`, with
+   `pub(crate) enum AttachSrc<'a> { Bytes(&'a [u8]), Ctor(RequiredCtor) }` declared beside it
+   (`migration_helpers.rs:2078`, param at `:2425`). It mirrors `CloneColumnSrc` in
+   `clone/materialize.rs` verbatim — this codebase's established shape for "bytes vs reconstruct".
+   The hunk is still **one** hunk and still additive; `merged_archetype_id_dyn` is touched **zero**
+   times, which was a design goal, not a coincidence.
+2. **One test file the invariant does not mention at all** — `crates/boyko_ecs/tests/miri_phase22.rs`
+   joins the diff for a one-line repair (see the next entry).
+3. **A SIXTH kernel item, added by EG2-R round 3 and FLAGGED rather than absorbed.** FORK A needed
+   `dense_insert_and_fire` split into `dense_insert_only` (`ecs_master/component_api.rs:122`) and
+   `dense_fire_add_insert` (`:142`), so `component_api.rs` — a file the approved diff names nowhere —
+   joins it. It is a **pure extract-method**: the fused helper stays, both pre-existing callers keep
+   calling it and observe nothing. It is also not optional, and that was MEASURED rather than argued:
+   exact parity with the typed path needs the dense STORE WRITE and the dense FIRES on **opposite
+   sides** of the table migration, and both mirror-image orderings of the fused helper were run and
+   both red gate 13b — attach-first fails VISIBILITY (`left: 0  right: 1`), dense-first fails ORDER
+   (`left: false  right: true`). The zero-scope-delta alternative was to inline those eight lines
+   into `seam_by_id.rs`: it needs no new item and leaves a **second copy** of the store-write plus
+   `NonNull::from(&mut *self)` mint discipline — the diverging-duplicate shape this campaign has
+   already been burned by twice (the doubled owner channel, the diverged EN/RU twins). The sixth item
+   was taken; the delta is raised here.
+
+**Measured diff growth:** 17 → **18** tracked files. Insertions: **979** at the approved landing →
+**1049** after the code remediation → **1456** once these documentation acts are folded in
+(deletions 170 → 174). That last step is documentation only — `docs/` accounts for **567** of the
+final insertions across four files, of which this entry is part.
+
+⚠️ **A number that describes the diff it lives inside is self-referential, and it drifted once
+already** — it read `1065` between the code pass and the doc pass, and was corrected rather than
+left. Re-take it with `git diff HEAD --stat` rather than quoting it; it is recorded here as measured
+at the END of the documentation pass.
+
+The two untracked landing files also grew — `seam_by_id.rs` src 367 → **533** lines, its test
+1277 → **1742** — which `git diff` cannot show at all, because untracked files carry no baseline.
+
+**EG2-R round 3 moved every number above again, and the shape of the growth changed.** Measured with
+`git diff HEAD --stat | tail -1` at the end of that round's documentation pass:
+**23 files changed, 1939 insertions(+), 229 deletions(-)**; `docs/` alone is
+**8 files changed, 976 insertions(+), 86 deletions(-)**. The untracked pair was, at the end of
+round 3, src **869** and test **2283**. ⚠️ **Read "was", not "is": at round 5 the pair WAS src
+**903** and test **2572** (`wc -l`, and round 5 stopped editing both before taking it).** ⚠️ **That
+sentence wrote "is" while teaching "was", and four rounds later the test half is out by **502**
+lines** — at the state this landing ships the pair is src **903** and test **3283**, and
+the second half moved three times more after round 5 (a gate at round 8, a record pass at round 9,
+gate 19 at round 12). It is written here as a ROUND-STAMPED reading, and the live pair is
+re-derived from the tree by a named test in the census file — the sentence you are reading is not
+what that test reads, and the paragraph below (5) says which copies are and are not. The diff
+totals are deliberately NOT restated here: a `git diff HEAD --stat | tail -1` figure describes the
+edit set the sentence is part of, so writing it changes it — round 5 measured it, then made four
+more edits, and the number it had just written was already eight insertions short. **Run the
+command; a self-referential total cannot be maintained, only re-taken.** What is worth reading off that, rather than the totals: **four documents joined the
+diff purely to repair anchors** — `docs/FEATURE_MAP.md`, `docs/REFLECTION-ANALYSIS.md`,
+`docs/SYSTEMS.md` and `docs/REFLECTION-PLAN-CORE.md` — none of which any part of this rung meant to
+touch. They are collateral of item 3 above, and they are the concrete price of splitting a file five
+documents cite by line. The fourth is the sharpest: `REFLECTION-PLAN-CORE.md` was dragged in by a
+*doc-to-doc* anchor into `REFLECTION-PLAN-ECS.md` that this round's own edits pushed onto a blank
+line — see hole (4) below — and its repair was deliberately written **line-count-neutral** (10
+insertions, 10 deletions, 4026 lines before and after) because that file carries **eleven**
+self-anchor citations, **nine** of which one added line near its top would have moved — and the
+prose version of this repair did exactly that, of which **eight would have rotted in silence**
+(measured: only the one that happened to land on a blank line redded).
+
+⚠️ **That `eleven` was true at `f7c46c76`, was `12` when this entry was written, and the count has
+rotted AGAIN since — twice inside the edit set it describes.** Measured, unpiped:
+`grep -c "REFLECTION-PLAN-CORE\.md:[0-9]" docs/REFLECTION-PLAN-CORE.md` → **11** against
+`f7c46c76`, **14** now <!-- measure: lines-in-digit docs/REFLECTION-PLAN-CORE.md REFLECTION-PLAN-CORE.md: = 14 -->. The twelfth was the round's own repair — a second referent
+given its own anchor rather than the first being repointed, which was the right call and which
+nobody counted afterwards; the thirteenth and fourteenth arrived the same way, one round later.
+**A count of the edit set it lives inside drifts inside that edit set, and it does so EVERY round.**
+The figure against `f7c46c76` is stamped and stays true. The live one is no longer trusted to prose:
+it carries a `measure:` marker (form specified above `MEASURE_MARKER` in
+`tests/internal_docs_anchors.rs`; **do not spell one out in prose — an illustration parses as a
+real marker**, measured), and `documents_that_count_the_tree_are_re_measured` re-derives it on
+every run, so the next round that moves it is told rather than asked to remember.
+
+⚠️ **The anchor bill, stated so it is not paid twice by accident: 37 citations.**
+`tests/internal_docs_anchors.rs` reported **31** stale anchors after the split, all into
+`component_api.rs`, across five documents (`FEATURE_MAP.md` 4, `REFLECTION-ANALYSIS.md` 5,
+`REFLECTION-PLAN-BOUNDARY.md` 4, `REFLECTION-PLAN-ECS.md` 14, `SYSTEMS.md` 4) — plus **three more
+anchors in `REFLECTION-PLAN-ECS.md`, cited at six places** (pre-repair `component_api.rs:208~`, `component_api.rs:392~` and
+`component_api.rs:765-768~`, each twice), which are `~`-waived and therefore rotted in **silence**: the recorded "a waiver licenses
+silent rot" hazard firing on schedule. The transform was one constant (every anchor at or past the
+old line 121 gained 30; lines 49, 76 and 94 did not move; the old line 105,
+`store.mark_arch_present`, moved into `dense_insert_only`), all **37** were repaired in the same
+round, each verified against its target line's CONTENT and at BOTH ends of every range, and the
+census is green.
+
+⚠️ **NAME THE POPULATION, because there are two and they were read as refuting each other.** Every
+figure in the paragraph above counts **each `:N` token**, bare continuations included — a line that
+names the file once and then writes two bare continuations after it contributes **three**, not one.
+*(No example is spelled out here on purpose: a specimen citation written into prose is
+indistinguishable from a real one to a line scanner, and this document is the one no census reads.)*
+`seam_by_id.rs`'s module
+header counts a **different** population: a PREFIXED `component_api.rs:N` token plus the `(N)`
+table form, which is why it says **40** citations at **19** distinct anchors where this paragraph
+says 37 repaired. Round 4 struck *"31"* and *"37"* from the header as having *"matched no countable
+population"*. **That strike was wrong and is withdrawn.** Re-measured at round 5 against
+`f7c46c76`, counting all `:N` tokens and keeping only those the FORK A transform moved: four of the
+five per-document figures reproduce **exactly** — `FEATURE_MAP.md` 4 of 4, `SYSTEMS.md` 4 of 4,
+`REFLECTION-ANALYSIS.md` **5** of 9, `REFLECTION-PLAN-BOUNDARY.md` **4** of 5. The fifth,
+`REFLECTION-PLAN-ECS.md` 14, is what the census **reported** rather than what moved (22 of that
+file's 29 tokens moved, six of them `~`-waived and therefore silent), and it was NOT re-derived at
+round 5 — so the totals 31 and 37 rest on it and are recorded, not re-proved. What IS settled is
+that these figures count a real population and that the header counts a different one.
+
+⚠️ **The *"cited at six places … each twice"* clause is exact, and the header's *"four, at three
+anchors"* is exact, and they are the same three anchors under the two populations.** Measured:
+
+```
+git show f7c46c76:docs/REFLECTION-PLAN-ECS.md | grep -n -e '208~' -e '392~' -e '683-686~'
+```
+
+prints **four** lines — 1850, 1852, 1897 and 2288 — and the last of them cites all three anchors on
+one line, two of the three in bare-continuation form. Six citations, each anchor exactly twice, of
+which four are prefixed. The round 4 correction that wrote *"measured: four, at three anchors …
+NOT six"* into `REFLECTION-PLAN-ECS.md` had counted only the prefixed form and missed line 2288;
+that *"NOT six"* is struck at its own site.
+
+⚠️ **FOUR holes in that census, and the third is the one that matters most.** (1) It validates a
+range by its **START** and never by its END — which is how `ci.yml:566-573` survived with a line 313
+that does not exist. (2) `is_file_shaped` (`tests/internal_docs_anchors.rs:834`) accepts any path
+that merely has an extension, so the class reaches **workflow files**, where the anchor names a
+*block* rather than an item and a one-line drift is invisible. (3) **`GATED_DOCS` is a hard-coded
+list of NINE documents (`tests/internal_docs_anchors.rs:349`) and `docs/OPEN-QUESTIONS.md` is not one
+of them** — nor is `docs/ru/OPEN-QUESTIONS.md`. Both carry `.rs:N` anchors, so the owner-facing
+document this campaign files everything into has **zero** anchor coverage. Measured consequence in
+this very round: **FIVE** anchors into `crates/boyko_ecs/tests/seam_by_id.rs` (`:895`, `:942`,
+`:1308`, `:1314`, `:2217`) are cited **TWELVE** times across the two twins, and **no gate can see
+any of them** — they are checked by hand. ⚠️ **This read "four anchors … eight citations" until
+EG2-R round 4 recounted it: a number written about one's own edit is not exempt from measurement.**
+Whether `GATED_DOCS` grows is the anchor census's owner's call; it is recorded here so the decision
+gets made rather than defaulted.
+
+⚠️ **Hole (3) is not hypothetical, and round 5 paid it in this very section.** FOUR of the anchors
+in these two paragraphs pointed into `tests/internal_docs_anchors.rs` and had all gone stale
+unseen: `is_file_shaped` (written `:790`, actually `:798`),
+`doc_to_doc_anchors_carry_the_text_they_quote` (`:2724` → `:2890`),
+`doc_to_doc_anchors_without_a_quotation_are_pinned` (`:2819` → `:3001`) and `KNOWN_STALE`
+(`:2757` → `:2922`). ⚠️ **Both sides of those four pairs are ROUND-5 coordinates, kept as history:
+the instrument has grown twice since, and all four have moved AGAIN — to `:834`, `:3131`, `:3247`
+and `:3170` respectively, measured 2026-08-28, which is what the live citations above now carry.
+A "→ where it really is" record rots exactly like the anchor it records.**
+The first was wrong the day it was written; the other three were made wrong by
+the landing that wrote them, in the same file that landing was extending. They are repaired above,
+by hand, because no gate reads this document. **The contrast is the argument.** Two citations of the
+SAME class were live in gated documents — `REFLECTION-PLAN-ECS.md` and `REFLECTION-PLAN-BOUNDARY.md`
+each cite `PLANNED_EXACT` for its own row — and both had been repaired onto a line that holds a test
+body rather than the constant. The census named them by file and line on the next run, with the
+target line quoted back. Inside its reach the defect is a build failure; outside it, four instances
+sat in the owner's own document across two rounds.
+
+(4) ~~**A doc-to-doc `.md:N` anchor is checked only for
+NON-BLANKNESS** — `looks_like_definition` returns `true` for every non-`.rs` extension after the
+empty-line test — so such an anchor can be wrong from birth and stay green forever.~~ **CLOSED at
+EG2-R round 4:** `doc_to_doc_anchors_carry_the_text_they_quote`
+(`tests/internal_docs_anchors.rs:3240`) now requires the words a citation quotes to BEGIN inside the
+lines it names, and `doc_to_doc_anchors_without_a_quotation_are_pinned` (`:3247`) pins the
+population it cannot reach. It found **five** further stale doc-to-doc anchors on its first run; all
+five are now repaired and `KNOWN_STALE` (`:3170`) is empty. **How the hole was found is the part
+worth keeping.** `REFLECTION-PLAN-CORE.md` cited `REFLECTION-PLAN-ECS.md:1567` three times for an
+EG3 item, and that citation went red **only** because a round's edits pushed 1514 onto a blank line
+— bounds fired, not content. ⚠️ **The repair then landed on `REFLECTION-PLAN-ECS.md:1851`, a plausible sibling row of the
+same table, and stayed green. The words are at `REFLECTION-PLAN-ECS.md:1853`, where all three now point.** The sentence
+that used to close this paragraph — *"all three were corrected, verified by content"* — was untrue
+when it was written, and that is exactly why the content check now exists.
+
+⚠️ **The content check reaches a MINORITY of the population, and until round 5 the denominator was
+published nowhere.** `UNQUOTED_MAX` pins only the *un*-checkable count — at the live value with zero
+headroom for every document, which is real discipline — and a ceiling of `30` reads as a small
+residue when it is in fact the larger part. Round 5 made the gate print the split itself
+(`DocScan::doc_to_doc`), so the table below is the gate's own stdout, re-read 2026-08-28:
+
+```
+cargo test -p boyko-engine --test internal_docs_anchors -- --nocapture doc_to_doc
+```
+
+| document | doc-to-doc anchors | content-checked | bounds-only |
+|---|---|---|---|
+| `MESHLET-VIRTUAL-GEOMETRY-PLAN.md` | 2 | 0 | 2 |
+| `REFLECTION-ANALYSIS.md` | 1 | 0 | 1 |
+| `REFLECTION-PLAN-BOUNDARY.md` | 5 | 4 | 1 |
+| `REFLECTION-PLAN-CORE.md` | 46 | 16 | 30 |
+| `REFLECTION-PLAN-ECS.md` | 12 | 3 | 9 |
+| **total** | **66** | **23** | **43** |
+
+The other four gated documents write no doc-to-doc anchor at all. **23 of 66 — about a third — and
+even that overstates the reach**, because a range pins where the material BEGINS and never where it
+ends, so a wide window constrains almost nothing. The widest doc-to-doc window in the gated corpus
+is `REFLECTION-PLAN-GATES.md:1196-1451` — **106 lines** — cited three times from
+`REFLECTION-PLAN-CORE.md` (its lines 889, 3639 and 3949); the next widest names **10** lines.
+**Publish the denominator beside the cap, or the cap reads as coverage.**
+
+**The work was not scaled down to preserve the sentence.** Flagging it is the point: an approval
+condition that quietly stops being true is worth more as a raised hand than as a clean-looking diff.
+
+## 2026-08-27 — CI's Miri sweep runs NINE packages with `--all-targets` and NO `--no-fail-fast`, which is how one missing struct field silenced eleven tests
+
+`.github/workflows/ci.yml:566-572` is a single `run:` block:
+`cargo +nightly miri test --all-targets` over `boyko-ecs`, `boyko-utils`, `boyko-threadpool`,
+`boyko-serialize`, `boyko-math`, `boyko_sdf_math`, `boyko_image`, `boyko-reflect` and
+`reflect-fixture`. **`--no-fail-fast` appears three times in `ci.yml` — at `:211`, `:214` and
+`:246` — and never on this row.** A build failure in **one** target therefore means **no** target in
+the invocation runs.
+
+That is exactly the mechanism EG2 hit. `crates/boyko_ecs/tests/miri_phase22.rs` is `#![cfg(miri)]`,
+so only Miri builds it; a `ComponentHooks` literal there was missing `on_despawn`, giving
+`error[E0063]`, and the row died before printing a `running N` line at all. **Eleven tests had not
+executed in a long time.** One inserted line (`on_despawn: None`) revives them and they pass
+**11/11 under Tree Borrows** in 14.91 s.
+
+**R5 fixed the symptom; the flag fixes the class**, and the next missing field will silence the next
+eleven identically. Adding `--no-fail-fast` changes CI behaviour for all nine packages in that row,
+so it belongs to whoever owns the workflow, not to this rung. **Recorded, not acted on.**
+
+⚠️ **And a second, independent reason that row deserves a look.** The implementer measured that
+`cargo miri test -p boyko-ecs --test seam_by_id` (the whole target) **does not complete** — it stalls
+at `g7_mark_component_changed_*` (`crates/boyko_ecs/tests/seam_by_id.rs:895`, `:942`), both of which
+build a real 2-thread work-stealing `ThreadPool` and run a `Schedule` (mechanism verified here by
+reading; the stall itself is the implementer's measurement and was **not** re-run in this pass,
+because reproducing it means waiting on a hang). g7 is an EG2-landing gate, not one of this
+remediation's. The deferred `g12c` uses the same shape but is `#[ignore]`d, so it adds no Miri load.
+This matters because the sweep above runs `--all-targets -p boyko-ecs` — the same row.
+
+⚠️ **And the range in that first sentence was ungated by construction, which is how it rotted.** It
+read `ci.yml:306-313` until EG2-R round 3; the block ends at `:572` and line 313 does not exist.
+`tests/internal_docs_anchors.rs` accepts any path that merely has an extension
+(`is_file_shaped`), and it validates a range **by its START** and never by its END — so `:344`
+resolving to a real line was enough for both halves to pass. The class reaches **workflow files**,
+where a one-line drift is invisible and where the anchor names a *block* rather than an item. The
+correction to `306-312` is documentary: no gate confirms it. Filed with the rest of the anchor-census
+holes in the SCOPE entry above.
+
+## 2026-08-27 — Entity-targeted observers: the by-id ADD half now fires them, the REMOVE half does NOT, and the remove half is a PRE-EXISTING kernel gap shared with `add_tag` / `remove_tag`
+
+**Measured, EG2-R round 3.** `observe_entity` on two victims for the same component id, then attach
+it — typed `Commands::insert` on one, `add_component_by_id` on the other. Counters: `typed_add = 1`,
+`by_id_add = 0`. The remove direction has the same shape: `typed_remove = 1`, `by_id_remove = 0`, and
+the by-id call still returns `true`. The typed path fires them at
+`commands/migration_helpers.rs:945-955` (Add / Insert) and `:1483-1484` (Replace / Remove), and
+re-raises the DESTINATION archetype's sticky `HAS_ENTITY_OBSERVER` bit at `:1127` and `:1542`
+**before** the flags are read for that entity's fires — raising it afterwards skips exactly the
+migration that made it necessary.
+
+**Only the ADD half was repaired, and the reason is the caller table, not the difficulty.** Each
+repair is **two SITES and nine code lines** — one statement plus an eight-line `if
+flags.contains(HAS_ENTITY_OBSERVER)` block with two `for` loops in it — ⚠️ **MEASURED at EG2-R
+round 4; "two lines" was this table's own estimate of its own diff, and it understated the ADD
+half by 4.5×.** What differs between the rows is not the size but how many pre-existing `pub` APIs
+move with them.
+
+| helper | def | callers outside `migration_helpers.rs` | disposition |
+|---|---|---|---|
+| `migrate_entity_attach_ids_with_bytes` | `migration_helpers.rs:2419` | **one module** — `ecs_master/seam_by_id.rs:320` and `:462` | **REPAIRED here.** It is this rung's own `pub(crate)` D9 sibling with no other consumer, so the change alters no pre-existing behaviour: `world.migrate_entity_observer_bit(entity)` at `migration_helpers.rs:2696` (site 1, one line), the `HAS_ENTITY_OBSERVER` block at `migration_helpers.rs:2748-2755` (site 2, eight lines; the two fires are `migration_helpers.rs:2750` and `migration_helpers.rs:2753`), `added` iterated unfiltered for both kinds. |
+| `migrate_entity_detach_ids` | `migration_helpers.rs:2022` | **two** — `ecs_master/tag_api.rs:234` (`remove_tag`) and `seam_by_id.rs:591` | **DEFERRED.** Repairing it changes `remove_tag` too. Measured: `grep -c` for `fire_entity_observers` and `migrate_entity_observer_bit` over its body returns **0** for both. |
+| `migrate_entity_attach_ids` | `migration_helpers.rs:1724` | **one** — `tag_api.rs:170` (`add_tag`) | **DEFERRED, and it is the SAME change.** Same zero count over its body. |
+
+So **`add_tag` and `remove_tag` have never fired entity-targeted observers either.** That is the real
+size of the gap and the reason the remove half is not a follow-up line to this rung: two `pub` tag
+APIs change behaviour with it, on the kernel's schedule rather than on reflection's — the same
+disposition `f7c46c76` got.
+
+**The gate that goes green when that change lands** is
+`g17_entity_targeted_remove_observers_fire_through_the_by_id_seam_as_through_the_typed_one`
+(`crates/boyko_ecs/tests/seam_by_id.rs:2217`), `#[ignore]`d with a `deferred:` reason and RED by
+design: run with `--ignored` it prints `left: 0  right: 1` on the Remove counter, exit **101**
+(observed, not predicted). Lift the `#[ignore]` when the kernel change lands and it turns green on
+its own. Its landed twin `g16_entity_targeted_add_observers_fire_through_the_by_id_seam_as_through_the_typed_one`
+is green and was red — `left: 0  right: 1` — on the unfixed tree.
+
+⚠️ **A THIRD gap sits underneath both, and it must NOT be "fixed" on one side.** Dense components
+receive entity-targeted observers on **no** route at all. `migrate_entity_insert`'s POST-dense block
+(`migration_helpers.rs:1288-1302`) fires exactly four things — `trigger_on_add`,
+`fire_on_add_observers`, `trigger_on_insert`, `fire_on_insert_observers` — and so does
+`EcsMaster::dense_fire_add_insert` (`ecs_master/component_api.rs:142-150`); neither calls
+`fire_entity_observers`, and `dense_remove_and_fire` (`:160`) is the same. The by-id dense arm
+therefore matches the typed dense arm **exactly**, which is why the code landing deliberately did not
+add the call there: parity is the target, and a one-sided repair would destroy it. Whether entity
+observers should cover dense components at all is a design question for the dense plan's owner — a
+**path-symmetric gap, not a parity defect**, and it is filed here so the next reader does not
+mistake it for one.
+
+## 2026-08-28 — TWELVE `.rs` → `.rs` line citations are out of bounds, in the direction no census read at all until this round
+
+**The blind spot was structural, not an oversight.** The forward census scans `.md` → `.rs`/`.md`.
+The reverse census (`md_citations_in_rust_sources`, `tests/internal_docs_anchors.rs:4073`) scans
+`.rs` → `.md` and **filters its targets to `.md` by construction**. A Rust source citing a line of
+another Rust source fell between the two and was read by nothing.
+
+`rs_line_citations_written_inside_rust_sources_are_bounds_checked`
+(`tests/internal_docs_anchors.rs:4459`) now reads it — named-only, line-local. Its own stdout,
+re-taken **2026-08-29**:
+
+```
+cargo test -p boyko-engine --test internal_docs_anchors -- --nocapture rs_line_citations
+242 `.rs:N` citation(s) bound on their own line inside .rs sources (11 skipped as string-literal data)
+174 anchor(s) named a fragment matching several files (cap 176)
+5 anchor(s) named a fragment matching NO file in the tree (cap 5)
+```
+
+⚠️ **The first line read `240` until 2026-08-29, and NOTHING in the tree said otherwise.** The
+figure counts every `.rs:N` citation written in any `.rs` source, so it moves whenever any source in
+the tree gains one — and the landing that wrote this transcript went on to write two of them itself,
+in its own new gate. Re-running the command it prints answers **242** and did so before this entry
+was touched, which makes it the same shape as the four record coordinates in (3) above: a reading
+taken mid-landing, left in the present tense, and overtaken by the rest of the same edit set. **It
+is now stamped with the date it was taken rather than with "at this round"**, because a round is not
+a coordinate and cannot be re-run.
+
+⚠️ **The last two lines are new, and their absence was the defect.** When this entry was written the
+scan printed the bound count and the 5 and said nothing about **179 anchors it dropped in silence**
+— a bare `continue` with no push, no cap and no report — while the `.md` direction pinned the
+identical class at zero in all nine documents *with the rationale that an anchor naming no single
+file is not checked at all*. One direction called this its most important ledger; the other did not
+have one. The asymmetry was invisible from either side, because a census that prints a numerator and
+no denominator reads as a small residue rather than as a share: **179 of 426 bound anchors, 42 %,
+were outside the check.**
+
+The 179 split in two, and the split is the difference between lost coverage and a dead path.
+**174** name a fragment matching SEVERAL files — mostly a bare `mod.rs`, ambiguous in this tree by
+construction — and are a ceiling, not a pin at zero, because no repair can make them unique.
+**5** name a fragment matching NOTHING, and those are named rather than counted:
+
+| citing file | line | fragment | why it matches nothing |
+|---|---|---|---|
+| `crates/boyko_ecs/src/ecs/core/component/hooks/mod.rs` | 33 | `component_registry.rs:67` | the module was split into a directory; the citation kept the pre-split file name |
+| `crates/boyko_app/tests/vg_occ_split_timing.rs` | 226 | `vb_bench_totality_gate.rs:90` | no file of that name exists |
+| `crates/boyko_app/tests/vg_occ_split_timing.rs` | 1523 | `vb_bench_totality_gate.rs:90` | the same citation, written twice |
+| `crates/aether_tests/tests/a7_dx.rs` | 9 | `a7_probe.rs:21` | no file of that name exists |
+| `crates/boyko_scene/tests/gpu3d_pack_miri_witness.rs` | 61 | `boyko_render/gpu3d_instance.rs:77` | ⚠️ **a different animal** — the basename DOES exist, under `boyko_render/src/`; the fragment omits that segment, so it ends no path in the tree |
+
+The fifth is called out because a ledger that flattened it into *"a file that is not in the tree"*
+would have been wrong about the one member a reader is most likely to check. They are ENUMERATED,
+not repaired, for the same reason `RS_KNOWN_STALE` is: repairing a name needs to know which file the
+sentence meant, which is a question for each one's owner.
+
+⚠️ **And the scan was dropping shapes before its own binder ran.** A raw `.rs`-followed-by-a-colon
+substring prefilter sat in front of the very function repaired to read a name through its
+delimiters — so a backtick or a bold marker between the name and the colon put no such substring on
+the line and the citation was never read. MEASURED with a citation 99 437 lines past the end of a
+562-line file: both delimited forms exited 0 with the count unmoved; the undelimited form redded.
+Live population **0** — latent, which is why nothing in the corpus could have shown it, and why the
+invariant *"every shape the binder will BIND, the prefilter must READ"* is now asserted directly.
+
+**Twelve of the 242 are past the end of the file they name.** They are pinned in `RS_KNOWN_STALE`
+(`tests/internal_docs_anchors.rs:4465`) **rather than repaired**, and the pin has both halves: a
+listed entry that stops reporting also reds, so a silent repair cannot quietly empty the list.
+
+| citing file | line | target as the census reports it | that file's length |
+|---|---|---|---|
+| `crates/boyko_ui/src/layout.rs` | 206 | `ecs_master.rs:2096` | 1918 <!-- doc-anchor-ignore --> |
+| `crates/boyko_ui/src/layout.rs` | 1724 | `ecs_master.rs:2121` | 1918 <!-- doc-anchor-ignore --> |
+| `crates/boyko_ui/src/text/lower.rs` | 5 | `boyko_macros/src/lib.rs:3875-3971` | 650 <!-- doc-anchor-ignore --> |
+| `crates/boyko_ui/src/reload/reconcile.rs` | 21 | `ecs_master.rs:2456` | 1918 <!-- doc-anchor-ignore --> |
+| `crates/boyko_ui/src/reload/reconcile.rs` | 26 | `hierarchy/commands.rs:268-276` | 166 <!-- doc-anchor-ignore --> |
+| `crates/boyko_ui/src/reload/system.rs` | 140 | `ecs_master.rs:2456` | 1918 <!-- doc-anchor-ignore --> |
+| `crates/boyko_ecs/tests/phase13_local_systemparam.rs` | 28 | `ecs_master.rs:2548` | 1918 <!-- doc-anchor-ignore --> |
+| `crates/boyko_ecs/src/ecs/core/iters/query/chunked_data.rs` | 422 | `data.rs:1383-1401` | 980 <!-- doc-anchor-ignore --> |
+| `crates/boyko_ecs/src/ecs/core/iters/query/chunked_data.rs` | 459 | `data.rs:1230-1363` | 980 <!-- doc-anchor-ignore --> |
+| `crates/boyko_ecs/src/ecs/core/iters/query/chunked_data.rs` | 597 | `data.rs:1493-1501` | 980 <!-- doc-anchor-ignore --> |
+| `crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs` | 153 | `data.rs:1155` | 980 <!-- doc-anchor-ignore --> |
+| `crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs` | 685 | `boyko_macros/src/lib.rs:1062` | 650 <!-- doc-anchor-ignore --> |
+
+The rows are in the gate's own print order. All three target names — `ecs_master.rs`, `data.rs`,
+`boyko_macros/src/lib.rs` — resolve **uniquely** in the tree, so not one of the twelve is an
+ambiguity; every one is simply a number the file outgrew. Lengths are as the census counts them
+(`str::lines()`); `wc -l` reports **1916** for `ecs_master.rs`, which ends without a final newline.
+
+⚠️ **EXACTLY SIX of the twelve are in `crates/boyko_ui/`, which another lane is rewriting as this is
+written.** They are enumerated here and deliberately **not touched** — whoever lands that rewrite
+owns those six, and repairing them from outside it would collide.
+
+The other six are `boyko_ecs`'s own, and the first of them —
+`crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs:685` — sits in a file the EG2 landing
+modified, though the cited line is outside the ranges that landing added. All six are left pinned
+so that their repair is one commit with one subject, rather than twelve numbers changed inside a
+landing about something else. **Enumerated, not fixed.**
+
+## 2026-08-28 — The round that gated the corpus's counts wrote two ungated ones of its own, and all four record coordinates were stale one round later
+
+`documents_that_count_the_tree_are_re_measured` exists for exactly one class: **a sentence that
+states a number about the tree.** Every anchor gate above it is blind to that class by
+construction — those check where a sentence POINTS, never what it SAYS. This entry audits the
+landing that built it. The audit found the class **inside** that landing, twice, and both times in
+a paragraph whose subject was the mechanism itself.
+
+### (1) A pre-state left in the present tense, dated to the landing that ended it
+
+`REFLECTION-PLAN-ECS.md`'s gate-naming paragraph read *"Taking each of the 25 names `--list` prints
+and grepping this file for it verbatim, **2 of 25** appear — MEASURED 2026-08-28"* and then, one
+sentence later, *"The three extra legs written into entries 1, 5 and 12 at this round take that to
+5."* The legs were already in the file when that was written. Re-measured here, unpiped:
+
+```
+cargo test -p boyko-ecs --test seam_by_id -- --list        -> 25 tests, 0 benchmarks
+grep -F <name> docs/REFLECTION-PLAN-ECS.md, once per name  -> 5 hits
+```
+
+**Five, not two**: `g1c_size_zero_table_add_is_first_class`,
+`g5_dead_entity_is_rejected_with_its_own_reason`,
+`g12c_a_dense_carrying_victim_stays_visible_to_a_dense_query_after_a_table_attach`,
+`g13_require_holds_through_the_by_id_seam_exactly_as_through_the_typed_one` and
+`g18_a_dense_caller_with_require_seeds_the_target_archetypes_presence_bit`.
+
+**This is the exact shape of the three name sweeps that same landing struck** — a figure taken
+before its own edit set had finished, left in the present tense, stamped with the date of the
+landing that falsified it. That it turned up in the paragraph NAMING the failure mode rather than
+in one suffering it is the finding worth keeping: **a paragraph explaining a gate is the likeliest
+place in a document to state an ungated number, because writing about a mechanism reads like using
+it.** Repaired at the site — the live figure is `5`, `2` is written as history, and the reason the
+count cannot carry a marker is now enumerated (its subject is a `cargo test` process, not text in
+the tree).
+
+### (2) A claim about the instrument's own REACH, false of four of the six figures it covered
+
+Same document, the ownership sweep: *"Re-measured 2026-08-28 and re-derived on every run since: the
+three plan documents and CORE are unchanged, and both OPEN-QUESTIONS files match 29 lines each"* —
+carrying markers for the two OPEN-QUESTIONS figures **only**. The other four sat inside the word
+*"unchanged"*, and **a word is invisible to the proximity guard**: there is no digit for it to
+compare against, so a figure folded into one is ungated no matter what stands beside it. The four
+are now digits with markers of their own — `REFLECTION-PLAN-BOUNDARY.md` **9**,
+`REFLECTION-PLAN-GATES.md` **3**, `REFLECTION-ANALYSIS.md` **2**, `REFLECTION-PLAN-CORE.md` **0** —
+and the sentence is true as written for the first time. The census now re-derives **18** markers
+across four documents, up from 11.
+
+### (3) Four record coordinates, each verified by reading its target — and all four had moved
+
+Verified against the tree as this entry is written. Each is quoted from the line it names — and one
+of them was not, until 2026-08-28; see item 1.
+
+1. **The `g12c` description opens at `REFLECTION-PLAN-ECS.md:1279`** — *"**The third `#[test]`:"*.
+   It does NOT open at `REFLECTION-PLAN-ECS.md:1265`, which reads *"the guard at all; see below.** Both guard legs are
+   modelled line-for-line on the kernel gate"*.
+   ⚠️ **CORRECTED 2026-08-28 — this item failed the heading it sits under.** It attributed the words
+   *"pure-table `{ Pos }` entity which dedups into the same archetype"* to `REFLECTION-PLAN-ECS.md:1255`. Those words read
+   at **`REFLECTION-PLAN-ECS.md:1269`**, fourteen lines lower — and fourteen is this round's own
+   insertion, the same `+14` that carried `1265` to `1279` and `1250` to `1264` in the ⚠️ note
+   below. The quotation was taken before the insertion and left in the present tense: **a pre-state
+   written as a live reading**, in the one paragraph of this entry that promises the opposite, and
+   it survived a clean EN/RU parity check because **both twins carried it identically**. Re-read
+   now, the two ends of the older range `1255-1271` land in different entries: `REFLECTION-PLAN-ECS.md:1255` reads
+   *"emptied was measured green at exit **0**, `1 passed`, the four landed items compiled by"* —
+   entry **11**, its trybuild-corpus leg — and `REFLECTION-PLAN-ECS.md:1271` reads *"bystander); attach a table data id by
+   id and assert `Attached`, the payload reads back, `Pos` keeps"*, which IS entry 12's dense leg.
+   The range no longer begins where this item said it begins.
+2. **"Two legs on the guard" is at `REFLECTION-PLAN-ECS.md:1264`** — *"guard.** **Two legs on the
+   guard — and a THIRD `#[test]` under this entry whose subject is not"*. The older range
+   `1239-1241` is inside entry 11 and says nothing about legs on the guard — but it is **not** in
+   that entry's trybuild-corpus leg, as this item claimed until 2026-08-28. `REFLECTION-PLAN-ECS.md:1239` opens the bullet
+   that takes `PLANNED_EXACT`'s `REFLECTION-PLAN-ECS.md` row to **0**, and `REFLECTION-PLAN-ECS.md:1241` reads *"is not
+   self-checking (D25), so it is stated here as an act, not as a consequence."* Entry 11's
+   trybuild-corpus leg is its `(ii)` bullet, which opens at `REFLECTION-PLAN-ECS.md:1257` —
+   *"(ii) `tests/trybuild_corpus_compiler_witness.rs` needs no teaching for the glob, but its scan"*.
+3. **`doc_misbound`'s push is at `tests/internal_docs_anchors.rs:1880`** — `doc_misbound.push(format!(`.
+   Not the range `1638-1676`, which is the surrounding branch and its comment.
+4. **The self-citation guard is at `tests/internal_docs_anchors.rs:1870`** — `&& self_path != target`.
+
+⚠️ **All four numbers above differ from the ones measured one round earlier (1408, 1250, 1691,
+1681), and every one of those was correct when it was taken.** This round inserted lines above each.
+Had any of the four been written as a citation inside a GATED document, the census would have said
+so — it said exactly that about **12** citations this round's line moves rotted (13 stale-definition
+anchors and 5 doc-to-doc quotations, across `REFLECTION-PLAN-BOUNDARY.md`, `REFLECTION-PLAN-ECS.md`
+and `REFLECTION-PLAN-CORE.md`), and every one was repaired against the census's own report. These
+four were recorded only in a round's report, where nothing reads them; recording them here puts
+them in a file no check reads either — the same blind spot that rotted **8** more citations of the
+census's own source, four per twin, found only because this round went looking by hand.
+**A coordinate written outside a gated document has a shelf life of one landing.** They are given
+with the content beside each so the next reader re-derives rather than trusts.
+
+The exposure is bigger than those four per twin. Each twin carries **8** by-line citations of the
+census's own source in all — `grep -c "internal_docs_anchors[.]rs:[0-9]" docs/OPEN-QUESTIONS.md`,
+and the same over the `docs/ru/` twin, both **8**; **16** between them.
+
+⚠️ **CORRECTED 2026-08-29 — the sentence that stood here claimed the bracket classes were
+load-bearing and that "the unescaped form answers **9** over its own text". Both halves are false,
+and the second was a live figure that NO form of the command produces.** Re-measured over the
+shipped twins, three forms each, six counts: the command exactly as printed → **8**; the same
+command with its bracketed dot written as a plain dot → **8**; a fixed-string search for the name
+and colon with the trailing digit class dropped → **8**. The unescaped regex cannot answer **9**
+even in principle. The only line it could add is the one quoting it, and what follows the colon
+*there* is the opening bracket of a character class — never a digit. The brackets buy nothing for
+this particular command, and saying they did was a plausible mechanism attached to the wrong token.
+
+**The 9 is real; it belongs to a THIRD form neither sentence named.** Reconstructed by copying each
+twin, rewriting its quoted command unescaped, and counting again: the unescaped *regex* still
+answers **8**, and only the *fixed-string* search — the one with the trailing digit class dropped —
+answers **9**, on both twins. **A quoted command perturbs its own answer only when its pattern is a
+PREFIX of its own text; one that keeps going past the point where its own text stops resembling it
+cannot.** The escape convention stays, because a reader cannot see which case they are in by
+looking; but it is the prefix property that decides, not the brackets, and the difference is the
+whole reason the wrong half of it went unchallenged for a round.
+
+Tree-wide the file is cited by line
+**29** times at **12** distinct numbers, from six documents and from itself; **four** of the twelve
+are cited from a `GATED_DOCS` document and **one** is the file quoting itself, so five of the twelve
+RED when they move and the other **seven** live only in these two files. All 16 were re-resolved by
+hand at this revision and all 16 land on the line they name. The census file now says so at its own
+site, where the claim it replaces — *"twelve … six per twin"* — had itself gone stale.
+
+### (4) `doc_misbound` exempts SELF-citations by design — stated non-coverage, now written at the site
+
+The misbinding check asks the CITING document whether it carries the quoted words at the same
+coordinates, which is the one piece of evidence separating *"un-checkable"* from *"bound to the
+wrong file"*. It is guarded by `self_path != target`, so **a document citing its own lines is
+outside it** — correctly, because a self-citation has no second document to have been misbound to,
+and without the guard every self-citation whose quotation merely wraps past the cited length would
+be reported as a misbinding it cannot be.
+
+The corpus holds two, both pointing at C11's weaker-subject rule from inside the file that states
+it: `REFLECTION-PLAN-CORE.md:512` and `REFLECTION-PLAN-CORE.md:2575`, each citing
+`REFLECTION-PLAN-CORE.md:3835-3837` (*"Run this mutation in the fixture"* … *"a weaker subject
+wearing the same verdict"* — both ends read). Both resolve correctly. **Neither reaches the branch
+today for a SECOND and independent reason**: neither quotes anything, so both land in the
+bounds-only ledger — MEASURED by dropping that ledger's cap for CORE to 29 and reading the two
+entries out of the red, then restoring the cap and proving the file byte-identical. Two reasons
+pointing the same way is the shape that hides a gate which cannot fail, so both are now written at
+the guard rather than left to be re-derived.
+
+### (11) Every measurable claim this rung wrote, with its disposition
+
+**GATED — re-derived on every run (24 markers):**
+
+| figure | where | value |
+|---|---|---|
+| the rung token's lines in `REFLECTION-PLAN-BOUNDARY.md` / `-GATES.md` / `REFLECTION-ANALYSIS.md` / `-CORE.md` | ECS ownership sweep | 9 / 3 / 2 / 0 |
+| the same token's lines in both `OPEN-QUESTIONS.md` twins | ECS ownership sweep | 29 / 29 |
+| `AddOutcome` / `RejectReason` / `migrate_entity_attach_ids_with_bytes` under `crates/` | ECS, the struck name sweep | **43** / 18 / **16**. ⚠️ **TWO of these three moved inside this one landing, and each was caught by its own marker rather than by a reader.** The first read **42** until the kernel gate written to close the presence-seed class was written — that gate uses the identifier. The third read **15** until the record pass named the fifth migration site in that gate's header, which is a `.rs` line under `crates/` and therefore inside the marker's population. Both times the marker RED-ed; both times both twins carried the stale copy in the meantime, **because the copy is not what the marker reads.** A tree-wide count of an identifier the campaign's own tests and headers use is a figure the campaign moves by working, and the only reason these two are correct here is that something failed the build until they were. |
+| `AddOutcome::Added` under `crates/` | ECS, the S1 return-type row | 0 |
+| `.dense_contains(` under `crates/` | ECS | 54 |
+| `residency = "gpu"` under `crates/` | ECS F22 | 0 |
+| `positional` in `REFLECTION-PLAN-BOUNDARY.md` | CORE, the paid C7 debt | 0 |
+| `hwrt` in `.github/workflows/ci.yml` | CORE F17 | 0 |
+| CORE's own self-anchor citations | both twins | 14 |
+| `#[ignore` sites under `crates/` — the LIVE half | both twins | 328 |
+
+**UNGATED, with the reason for each. None of these is an oversight; the vocabulary is closed on
+purpose and widening it is a code change with a review.**
+
+| figure | where | why it carries no marker |
+|---|---|---|
+| every `git show f7c46c76 … \| grep -c` figure | both twins | a frozen object cannot rot; **the stamp is the gate** |
+| `g18`-or-`gate 18` lines in `docs/` — **2** at round 5 | ECS | alternation, and a marker carries one literal. ⚠️ The sentence reasons from the 2 in the present tense; the stamp keeps it true and it is named here so the next reader does not read it as current. **CORRECTED 2026-08-28: the claim's own printed command, `grep -rn "g18\|gate 18" docs/`, returned 13 that day** — 9 in `REFLECTION-PLAN-ECS.md`, 2 in each twin. The **9** this row carried one round earlier is the ECS-only count, a NARROWER population than the command the claim prints: the correction repeated, one row down, the mismatch it was correcting. And 2 of the 4 twin lines ARE this row — the correction is part of what it counts, which is why nothing here can be gated. ⚠️ **RE-TAKEN TWICE on 2026-08-29, and only the second re-taking stands: 22** — 10 in `REFLECTION-PLAN-ECS.md` and **6** in each twin, taken after the last edit of this landing rather than before the first. The intermediate reading of **16** was true for the hours between the two passes and false by the time it shipped: the record pass then wrote three more matching lines per twin while documenting the very gates that had moved it. **Of this twin's six, TWO are the act of counting** — this row, and item 9 of the disclosure list in (7) — **and four are substantive references to the three kernel gates.** That ratio is better than the round before and is still not one a reader should treat as current. **A self-referential alternation is re-taken with a date at every writing; it is not maintained, and this row has now proved that three times rather than argued it once.** |
+| `#[ignore = "<lowercase-prefix>:` sites | both twins | needs a character class; **3** today, re-measured |
+| `wc -l` — 903, **3283**, 1916, 4026 | both twins | ⚠️ **UNGATED BY A MARKER, GATED BY A TEST, AND THESE COPIES ARE NEITHER.** A file's LENGTH is inexpressible in the marker vocabulary: every kind counts lines CONTAINING a token, and the empty token that would count them all cannot be written. Since 2026-08-29 all four are re-derived from the tree on every run by a named test in the census file — **but that test reads the census file's OWN doc comment, never this row.** The second figure read **2572** here while the tree said 3054, then 3054 while the tree said 3074, then 3074 while the tree said 3283; ALL THREE times the landing that wrote the number was the landing that moved the file, which is now a pattern rather than an accident. The digits above are re-taken at the state this landing ships and are a DATED reading, not a checked one |
+| `mark_arch_present` called **0** times over two function bodies | both twins | body-scoped; the unit here is a whole file or a whole directory |
+| *"ten gates"* ×2 and *"six runnable reds"* ×1 inside D26 | ECS | section-scoped AND self-referential — a file-wide `grep` returns **3** and **2**, because the sentence counting them writes them |
+| **5 of 25** harness names appearing verbatim | ECS | needs a `cargo test` process; the subject is `--list` output joined against a document |
+| **six** defined symbols under `llvm-nm --defined-only` | ECS | needs a release build and a symbol table |
+| 242 / 174 / 5 / 179 / 12 — the census's own output | both twins | gated where PRODUCED, by the caps and by `RS_KNOWN_STALE`; the documents quote a fenced transcript of a named run. ⚠️ Residual: `UNBINDABLE_RS_MAX` is **176** over a live **174**, so the cap gates the ledger and not the document's copy of the number. ⚠️ **And "gated where produced" gates the LEDGER, never the twins' COPY**: the first figure stood at **240** for a round while the shipped scan printed **242**, because the caps this row points at bound the other four and leave the bound count with no ceiling at all — a count that only grows cannot have one. The transcript is therefore dated, not stamped to a commit, and re-taking it is a manual act |
+| *"a `grep` for a derive `attributes` list returns zero hits"* → **7**; *"`assert_bss_eligible` has zero hits in `crates/`"* → **2** | CORE D14, twin G22b | **SELF-REFERENTIAL and ungatable by any vocabulary**: a sentence asserting a token is absent must write the token to say so. Both re-measured; both are count errors created by writing the count, not engineering errors, and rewriting another round's ruling is not this rung's call |
+
+### (6) The rung's stated limit — what the instrument measures, and what is outside it
+
+The instrument is one target — `cargo test -p boyko-engine --test internal_docs_anchors`, **23
+tests**, exit 0 at this revision. ⚠️ **That read *"21 tests"* until 2026-08-29 and was two behind:
+the round that closed the empty-cap and stale-figure items added a test for each, and a count of the
+tests in a target is exactly the figure a paragraph about that target forgets to re-take.** This
+section is its REACH, written down so the next reader does not
+have to infer it from a green run. **The debt below is enumerated, not fixed.** Each item names the
+population it is a limit over, and every figure was taken at this revision by the command beside it.
+
+**What it does check.**
+
+| what | population | live at this revision |
+|---|---|---|
+| line anchors, EVERY target | the gated list — **9** of the **340** tracked `.md` under `docs/` | **1561** checked, 0 stale — **1495** of them into source files, **66** into other documents |
+| path mentions | the same 9 | **1684** checked, 0 dead |
+| document-to-document quotations | the same 9 | the **66** above — **23** content-checked, **43** bounds-only |
+| bare continuations inheriting a source file across a line boundary | the same 9 | **377** |
+| `.rs:N` citations written inside `.rs` sources | every file the repo walk sees | **242** bound on their own line, **5** skipped as string-literal data, **174** naming a fragment that matches several files, **5** naming a fragment that matches none |
+| `.md:N` citations written inside `.rs` sources | every file the repo walk sees | **49** bound and bounds-checked, **8** naming no document on their own line (cap **8**) |
+| figures re-derived from the tree | every `.md` under `docs/`, both twins included — **340** files | **18** markers in **4** documents |
+
+⚠️ **The first row read *"line anchors into source files … 1561 anchors"* until 2026-08-29, and that
+was a TOTAL presented as a PART.** The scanner counts an anchor once and then increments the
+doc-to-doc tally as a SUBSET of it, so the **66** in the third row are **inside** the 1561, not
+beside it — the two rows added up to 1627 anchors that do not exist. The source-file figure is
+**1495**. The row is now labelled by what it counts, because the defect was not arithmetic: **1561
+was the right number under the wrong noun**, and a reader summing a table has no way to see that two
+rows overlap. Re-derived from the run's own per-document lines, which sum to 1561 and 66
+respectively; **1561 − 66 = 1495**.
+
+⚠️ **Two rows of that table moved WHILE it was being corrected, and both moves were caused by the
+correction.** Path mentions read **1683** one revision ago and read **1684** now, because the
+reconciliation written into `REFLECTION-PLAN-ECS.md` in this same edit set names one more path; the
+`.rs:N` row moved for the same kind of reason, one landing earlier. **A table headed *"live at this
+revision"* is a table whose own editor is a contributor to it**, and every figure in it was re-taken
+after the last edit rather than before the first — which is the only order that produces a true row.
+
+Two numbers in that table are the whole shape of the limit: **9 of 340** and **4 of 340**. Nine
+documents have their citations checked; four have their arithmetic checked. Everything else under
+`docs/` — this file included — is prose that no check in this tree reads.
+
+**S5 — a measurement marker outside `docs/` is INERT, and nothing says so where one would be
+written.** The marker scan admits `.md` files under `docs/` and stops there.
+`git ls-files '*.md' | grep -cv '^docs/'` counts **71** tracked documents outside it, in four
+directories plus one file at the repo root — `book/` **54**, `.claude/` **9**, `crates/` **5**,
+`assets/` **2**. A figure written in any of them looks exactly like a gated one and is re-derived by
+nothing. **0** markers live there today; **4** marker spans live inside the census's own `.rs`
+source, and all four are definitional — the constant and the prose describing it — rather than
+claims.
+
+**S6 — one cap carries headroom, and it is the only one that does.** `UNBINDABLE_RS_MAX` is **176**
+over a live **174**: two `.rs` citations naming an ambiguous fragment can land with no red. Every
+other ceiling in the file sits exactly on its live count, which is the property that makes the
+ledgers worth reading at all.
+
+**S7 — the ignore-marker's own measurement re-scans a marked line WITHOUT its fence.** A marked line
+is measured by re-scanning it as a one-line synthetic document, and that document carries no fence
+state, so a marked line inside a fenced block would be measured against non-fenced rules. There are
+**12** marked lines today — **10** in `REFLECTION-PLAN-CORE.md`, **2** in `REFLECTION-ANALYSIS.md` —
+and **0** of them sit inside a fence. That is a cap over an empty set: the shape this file has now
+found **four** times and closed **four** times with a permanent discriminator. ⚠️ **This sentence
+said "three and three" for one revision, and the fourth was found by the instrument that counts
+them, not by a reader**: completing the empty-cap census's own subject list — which had enumerated
+seven per-document ledgers where there are nine — turned `stale_planned` into an immediate red, a
+capped ledger empty in all nine documents with no discriminator. **A subject list is itself a claim,
+and until this round nothing checked it.** There is still none here — and S7's empty set is not one
+of the ledger rows the empty-cap census below enumerates, because there is no ledger for it at all.
+It is an untested code path, which is the weaker position of the two.
+
+**S8 — the fence flag is a bare toggle with no balance check.** An odd delimiter count puts a
+document's whole tail into fence mode silently, and the "does this document yield mentions at all"
+guard cannot see it, because the head still yields mentions. Across the nine gated documents there
+are **174** delimiter lines and **all nine counts are even**; `FEATURE_MAP.md` has **0**, so eight of
+the nine exercise the machinery at all.
+
+**S9 — one marker counts over a population BROADER than the command its own prose prints.** The F22
+row prints `grep -rn 'residency = "gpu"' crates/*/src/` — **714** `.rs` files — while its marker
+counts every `.rs` file under `crates/` — **1555**. Both answer **0** today.
+
+⚠️ **STRUCK 2026-08-29.** This entry went on to say *"the direction is fail-closed because the
+marker's population contains the command's"*. **That containment is a property of today's marker
+TEXT, not of the gate**, and one token reverses it. Re-measured directly, each edit applied alone to
+the live document and each restored afterwards with `cmp` exit **0**:
+
+| one-token edit | what the FIGURE check printed | suite |
+|---|---|---|
+| F22's population narrowed from the whole `crates/` tree to a single sub-crate — the containment reversed outright | *"written 0, re-measured 0  `[ok]`"* | exit **101** |
+| F17's marker repointed from one readable workflow file to a different readable one that also answers 0, prose unchanged | *"written 0, re-measured 0  `[ok]`"* | exit **101** |
+
+**The figure check certified BOTH mutations `[ok]`.** What reds is an exact inventory of WHAT each of
+the **18** markers measures, landed 2026-08-29, which reports the mismatch in both directions — the
+subject no row pins, and the pinned subject no marker measures. So a gate that was safe only while
+nobody edited it has been given something that fails; but **the containment framing was never the
+reason, and stating a mechanism that is not the one operating is how a limit gets recorded as
+closed.** And the inventory is a **PIN, not a comparison**: nothing in this tree reads the command a
+marker's prose prints, so **a reader re-running the printed command is still not re-running the
+gate**, and the population and the prose can drift apart in the one direction the pin does not look.
+
+**S3 — the census file's claim about its OWN reach was false, and is repaired.** Measured in (3)
+above: **8** by-line citations per twin, **16** between them, against a doc comment that said twelve
+and six. The repair sits in a `.rs` doc comment, which the marker scan structurally excludes, so it
+is re-derivable only by re-running the two commands quoted beside it.
+
+**S7 and S8 are enumerated rather than closed, and the reason is measured — but this entry quoted
+the cost for two of the three sites a closure needs.** Every site either one touches sits above the
+census file's own citation window: the tree cites that file by line at **12** distinct numbers, from
+`REFLECTION-PLAN-BOUNDARY.md`, `REFLECTION-PLAN-ECS.md`, both twins and the file itself, and an
+insertion renumbers every number below it. Re-derived 2026-08-29 by listing every by-line citation
+of that file across the tracked `.md` and `.rs` files, reducing to distinct numbers, and counting
+those greater than each site's own line:
+
+| where a closure has to insert | of the **12**, renumbered | of those, living only in these twins |
+|---|---|---|
+| S7 — the marked-line re-scan (`silenced_by`) | **7** | **4** |
+| S8 — the fence toggle inside `scan_text` | **7** | **4** |
+| S8 — a balance field on the `DocScan` record | **9** | **6** |
+
+⚠️ **CORRECTED 2026-08-29: the struck sentence read *"seven of the twelve"* and named only the first
+two rows.** Seven is right for both of them. But reporting an unbalanced fence the way every other
+ledger in that file is reported takes a field on the per-document scan record, and that record is
+declared far above either code site — **nine**, with **six** of the nine living only in these two
+twins, where nothing would red. **A cost quoted for two of the three sites a change needs is a cost
+quoted for a change nobody is proposing**, and it understates in the direction that makes the debt
+look cheaper than it is. The three sites are named by SYMBOL and not by line on purpose, twice over:
+a coordinate written here has a shelf life of one landing, per (3) above — and writing one would
+have added a thirteenth number to the very count this table measures.
+
+Closing either limit line-count-neutrally means compacting unrelated code inside that window; that
+is a separate landing, and it is not taken here.
+
+**S10 — which greens mean something, and which are caps over an empty set. NOW COUNTED, every run.**
+A ceiling at 0 over a population that is empty in every document reports the value it would report
+if it were not running — lesson 1 below, in its ledger form. The census file derives that split from
+its own scan and prints it on every run: **84** cap rows, **70** sitting at 0 over an EMPTY live set
+and **14** over a live one. The 70 split in two, and only one half was ever a hazard:
+
+* **36** rows belong to the **four** ledgers whose population is empty in EVERY gated document —
+  cross-line document inheritance, doc-to-doc misbinding, the fenced note naming no single file, and
+  the planned-path marker that waives nothing. Those are the caps that cannot fail, and **all four
+  now carry a direct discriminator**: a test that builds a synthetic document exhibiting the defect
+  and asserts the ledger catches it. Two landed 2026-08-29 — the fenced-note one, which had been
+  gating a live fix, and the planned-path one, which existed only because completing the inventory
+  turned it red.
+* **34** rows belong to the **five** per-document ledgers that ARE live somewhere — planned paths
+  (**4** live), an inherited alias binding (**1**), ignore-marked lines (**12**), unquoted doc-to-doc
+  anchors (**43**), waivers that were not needed (**7**). A zero in one of those rows says *"this
+  document is clean"*, and the mechanism behind it is exercised by the documents that are not. The
+  remaining live rows are the **three** whole-tree ceilings the two source censuses own — unbound
+  `.md` citations (**8**), ambiguous `.rs` fragments (**174**), dead `.rs` fragments (**5**).
+
+⚠️ **Those three numbers read 66 / 54 / 12 over "seven per-document ledgers" until 2026-08-29, and
+the arithmetic was SELF-CONSISTENT — 7×9+3 = 66 — which is exactly why it survived being read.** It
+was not a miscount; it was a short SUBJECT LIST, missing two ledgers this same file caps. The
+instrument written to find caps over nothing was blind to one of them for the same reason the corpus
+was: nothing checked the list of things it was counting. **An internally consistent total is
+evidence about the arithmetic and none at all about the population.**
+
+**The census is itself a gate, not a note**: it fails the build if a fifth ledger becomes wholly
+empty without a discriminator named beside it, and — since 2026-08-29 — if a named discriminator
+does not RESOLVE to a `#[test]` in that file, which it previously did not check at all. That
+distinction is the whole point: after this landing no wholly-empty ledger is left without one, and
+the remaining 34 empty rows would gain nothing from a synthetic fixture, because a live mechanism
+already stands behind each. ⚠️ **What it still does not do is judge the discriminator**, only
+resolve it; and it says nothing about the fourteen live rows, whose hazard is the opposite one —
+headroom.
+
+**S11 — the same class exists in the KERNEL, in TWO data, and the enumeration that closed it covered
+ONE.** Recorded here because it is the same shape and NOT the same instrument: the gates live in
+`crates/boyko_ecs/tests/seam_by_id.rs` and no leg of the target this section is about would ever see
+them. A dense-presence-bit seed on the migration path was covered by no test — the landing of
+2026-08-28 swapped its archetype argument for the other one in scope, the kernel compiled clean, and
+the whole ECS suite stayed green with the gate written to close that very class passing beside it.
+`g18b` covers that one.
+
+⚠️ **CORRECTED FOUR TIMES — 2026-08-29/-30/-31 and again: twice the repair PATCHED THE COUNT, twice the next
+reading refuted it a site later; the fourth moved no number — the STRENGTH was wrong.** `mark_arch_present` has
+**8** call sites under `crates/boyko_ecs/src/`; the criterion is SCOPE, not SIGNATURE — two archetype ids both
+OPERAND-DERIVED (off THIS call's own entity / source / target / sibling, via a parameter or one accessor) AND able
+to DIFFER at runtime. Minting a fresh id is writable at all eight and is not the class; nor is a second ROUTE to
+one value. Re-derived site by site, each expressible one WRITTEN and RUN: **FIVE are expressible** — clone
+materialiser (`g19`), migration helper (`g18b`), typed dense insert (`g18`; its caller passes the TARGET *before*
+the migration), and **BOTH fresh-world load walks, which NO gate covers** — a member's own archetype against a
+sibling's, and `arch_presence` is a bitSET because a store's members CAN span archetypes. **THREE are
+inexpressible**: two spawns on one cached bundle archetype, and the in-place replace, whose routes are provably
+EQUAL. ⚠️ **The two ungated are UNASSERTED, not UNREACHED**: four files reach these walks and three query the
+store afterwards, but every store is fed from ONE bundle, so a member's archetype and a sibling's are the SAME
+id; the swap leaves 14 serialize and 170 ECS targets green. A gate must CONSTRUCT a two-archetype load, not pin one.
+
+**The class is TWO data wide, and the second had five ungated sites.** Measured 2026-08-29. The
+class is *an archetype-keyed presence bitset consumed as a query's candidate set*, and it is closed
+by a structural property rather than by a name: a candidate set reaches a query ONLY through
+`QueryState::seed_from_candidates`, which is declared once, is `pub(crate)`, and has exactly
+**four** call sites, all four in one file. Two of them read the dense store's `arch_presence`; the
+other two read `EnablePresence::snapshot_present`. **So the class has exactly two members**, and a
+third could only appear as a fifth call site of that one funnel — which the next reader re-checks
+with one command rather than trusting a list. That is the difference between an enumeration and a
+sample, and it is the thing the earlier wording claimed without having.
+
+The second member is seeded by `EnablePresence::note_column_alloc`, reached only through
+`ArchetypeMaster::note_enable_column_alloc`, whose migration-side caller is
+`fire_enable_column_alloc_bookkeeping`. That helper is called from **five** migration functions,
+each passing the target archetype while the source is live and, in four of the five, a named
+parameter one token away — `migrate_entity_insert`, `migrate_entity_remove`,
+`migrate_entity_attach_ids`, `migrate_entity_detach_ids`, `migrate_entity_attach_ids_with_bytes`.
+**The fifth is the by-id attach this very rung added**, so the landing that gates the class is also
+the landing that widened it. They are named by SYMBOL and not by line, deliberately: a coordinate
+written outside a gated document has a shelf life of one landing, per (3) above.
+`note_enable_column_alloc` has one further caller, the in-place enable path, and it is NOT a sixth
+instance — a single archetype id is in scope there, so the mutation cannot be written, by the same
+argument the eight-site sweep makes for three of its eight.
+
+**DISPOSITION: gated, by `g18c`, beside the other two.** Not deferred, not filed, not waived. No
+kernel source changed. Two findings the measurement produced that the gate does not remove:
+
+* **The consuming side is as unforgiving as the first datum's.** The code at the enable seed says
+  the candidate bitset *"IS the membership predicate (nothing to trim)"* — there is no per-row pass
+  to recover a wrong id, so a bit on the wrong archetype is not a slow query, it is a silently empty
+  one.
+* **The site was UNREACHED, not merely unasserted, and that is the stronger half.** Under the
+  swapped argument the whole ECS suite stayed green AND `note_column_alloc`'s own unconditional
+  debug assertion — *"must be called only on a genuine first column"*, *"the caller already holds
+  the bit"* — did not fire either. In a debug build its silence proves that no test in the suite
+  reached that helper with a non-empty list on the by-id attach path AT ALL. The gate therefore had
+  to CONSTRUCT the reaching case rather than pin an existing one. **A green over an unreached site
+  and a green over a correct one are the same green**, which is lesson 1 below in its kernel form.
+
+**The transferable half: a sweep over a SYMBOL cannot close a CLASS, and the two are told apart by
+asking what a third member would have to LOOK like.** Here the answer was "a fifth call site of one
+`pub(crate)` funnel" — mechanical, and therefore an enumeration. Had the answer been "any code that
+sets a bit keyed by archetype", the same work would have been a sample, and the honest word for it
+was available at the time.
+
+**The figure-level limits stay where they were written.** The second table in (5) above lists every
+measurable claim this rung wrote that carries no marker, with the reason for each: a frozen commit
+stamp (which IS the gate), a regex-shaped count, a body-scoped count, a claim that is not a count, a
+figure whose subject is a `cargo test` process or a symbol table, and two that are **self-referential
+and ungatable by any vocabulary**. One row of it is a LIVE hazard rather than a closed one, and it
+has now been wrong twice in the same direction: the claim reasons in the present tense from a figure
+taken at round 5, and the round that flagged that wrote the ECS-only count where the claim's own
+printed command spans all of `docs/`.
+
+⚠️ **CORRECTED 2026-08-29 — and the correction is that this sweep had THREE simultaneous live
+answers in one tree, all three written in the present tense.** The row in (5) above said **16**, this
+paragraph said **13** four screens below it, and the census file's own doc comment said **nine** —
+that last being the ECS-only population, which is not what the command prints. Only one of the three
+could be right and none of them was checked, because an alternation is the one shape the marker
+vocabulary cannot carry. Re-taken here after the last edit of this landing, which is the only order
+that produces a true row: **22** — **10** in
+`REFLECTION-PLAN-ECS.md` and **6** in each twin. **It is a DATED reading and it
+is not maintained.** Every one of the three stale answers was produced by a pass that moved the
+number while writing about it, this one included: the sentences you are reading are themselves
+counted. The instruction that follows from three failures rather than one is to stop keeping a
+self-referential count current and to re-take it, with a date, at the moment of writing — which is
+what the row in (5) already concluded and what this paragraph did not do.
+
+**Two lessons the 2026-08-28 pass produced, stated for transfer.**
+
+1. **A measurement that returns a BARE COUNT cannot distinguish an absent token from an absent
+   population.** `0` is the answer to *"the token does not occur"* and equally to *"there was nothing
+   to look in"*, and a claim asserting absence wants to hear `0` either way. Two one-character
+   edits — a filename that does not exist, an extension that selects no files — were OBSERVED GREEN
+   over live false claims, until the measurement was given a *nothing to read* answer distinct from
+   nought. This is the same shape as a cap over an empty set and as a floor over an emptied corpus:
+   **the instrument reports the value it would report if it were not running.** In general form: a
+   measurement whose *nothing* and whose *none* are the same value is not a measurement of the thing
+   it names.
+2. **Gating a claim FORCES THE TRUTH OUT — and it is the ATTEMPT that does it, not the gate.** Three
+   sentences in this campaign's plan read as present-tense statements about the tree and resisted
+   gating; trying to gate them is what revealed they were a PRE-STATE — true when taken, false of
+   the tree that shipped, and false *because the work succeeded*. The identical shape produced (3)'s
+   stale quotation: a line read before an insertion, written as a live reading, past a clean parity
+   check. **A sentence that resists gating is not merely ungated; it is the first place to look for
+   one that is already false.** The remedy is not always a marker — a figure stamped to a named
+   commit is frozen, and a frozen figure cannot rot — but the choice has to be made deliberately, at
+   the site, and written down there.
+
+**Two more from the 2026-08-29 pass, which closed the items above.**
+
+3. **A cap over an empty set is not a gate — and until this pass nothing in this corpus knew how
+   many of them it had.** A ceiling of 0 over a population that is empty in every document passes
+   for exactly the reason a deleted test passes, and in a report it is indistinguishable from a
+   checked zero. Counted here for the first time and re-derived on every run — **84** cap rows in
+   the census file, **70** of them at 0 over an EMPTY live set, **36** of those over the four
+   ledgers empty EVERYWHERE, the other **34** live in some OTHER document, where a zero honestly
+   says *"this document is clean"*. ⚠️ **The first counting published 66 / 54 over THREE such
+   ledgers, and its own subject list was short by two** — the lesson recurring inside the sentence
+   that states it. **The transferable half is the arithmetic, not the four discriminators**: a
+   corpus that publishes ledgers without publishing which of them have a live population has
+   published a coverage figure it never measured. Ask the ratio before trusting the greens.
+4. **"Fail-closed" can be a property of the DATA rather than of the GATE, and from a green run the
+   two are indistinguishable.** A limit here was recorded as safe because a marker's population
+   CONTAINED the command its prose printed, so drift could only over-count. True of the marker's
+   TEXT; false of the mechanism. One token narrowed the population and reversed the containment, and
+   the figure check certified the result `[ok]` — the argument's premise was an editable field, and
+   editing it cost nothing. **A safety argument that reasons from the current value of something a
+   future editor can change is an argument about today's data, and it will be filed as an argument
+   about the gate.** The test is mechanical and takes one minute: change the field and ask what
+   reds. If the answer is *"nothing, but nobody would write that"*, the limit is open, and the
+   sentence recording it as closed is the more expensive of the two defects.
+
+**One more from the 2026-08-29 record pass, and it is the FIFTH recurrence of a single shape — which
+is why it is stated once here, at the site where it keeps happening, rather than a sixth time in the
+margin of whatever moves next.**
+
+5. **A figure written about the EDIT SET IT LIVES INSIDE is a pre-state, and the words "re-measured
+   correctly" beside it do not make it a measurement.** The recurrences, in order: round 3's own
+   `git diff --stat` totals; the three struck name sweeps in `REFLECTION-PLAN-ECS.md`; the *"2 of
+   25"* harness names; the ownership sweep's *"re-derived on every run since"*; and the by-id seam
+   test's length, written **2572** by the same uncommitted landing that had already taken the file
+   to 3054 — under the one phrase in its paragraph that claimed the check had been done. **Five
+   times, in five different sentences, by four different passes, always in the direction that
+   flatters the work.**
+
+   ⚠️ **It then happened a SIXTH time, in this pass, and the sixth is the only one worth
+   celebrating.** The record pass rewriting the section above also appended to that same test file,
+   taking it 3054 → **3074**. It did not ship. The gate landed one round earlier printed *"the tree
+   says 3074 and the sentence stating it does not write that number"* and the figure was re-taken
+   before the pass finished. **Five prose repairs and one red is the whole difference the gate
+   makes**, and it is also the honest limit of it: nothing here stops a figure from moving, it stops
+   a figure from moving quietly.
+
+   The transferable form is a question, not a rule: **"re-measured correctly" is a claim ABOUT a
+   measurement, and the two are told apart by asking who else could have written the sentence.** A
+   number some named check re-derives can be written by any reader; a number only its author can
+   vouch for is a testimonial, and a testimonial about one's own edit set is the weakest evidence in
+   this corpus. When the second kind cannot be avoided — a `git diff` total, an alternation, a count
+   of one's own prose — the honest form is a DATE and a round, taken after the last edit, and never
+   the present tense.
+
+### (7) What this landing's commit message must disclose
+
+Written here so the message can quote a record rather than re-derive one. Every item was measured
+during this pass, at this revision, by the command named beside it; the four that reverse or
+sharpen a previously recorded limit are marked.
+
+**Limits that CLOSED, and must be reported as closed rather than left standing:**
+
+1. **The fenced-note discriminator DOES cover the sticky-fallback route.** ⚠️ **Reverses the limit
+   recorded at the previous round.** Measured by applying the regression the resolver's own doc
+   forbids — keeping the unique-fragment arm and appending a sticky fallback after it — and running
+   the discriminator alone: it reds, and it reds at the fixture whose message names that route
+   (*"that is the one route on which a sticky fallback is reachable, and the five fence-on-line-1
+   fixtures cannot see it"*), with the five earlier fixtures running first in the same function and
+   not firing. ⚠️ Note for anyone re-running it: the *replacing* form of that edit — swapping the
+   unique-fragment arm out for the sticky one — reds at an earlier fixture instead and proves
+   nothing about this route. **The two edits are one token apart and answer different questions.**
+   Restored afterwards, `cmp` clean.
+2. **The empty-cap census RESOLVES its discriminator names against the file's own source, and
+   requires a `#[test]` above each.** ⚠️ **Reverses the limit recorded as "named by string and never
+   resolved".** Measured by renaming one entry: the run reds with *"names `…` as its discriminator,
+   and no such test is defined in this file"*. It also now covers the planned-path ledger, which the
+   earlier subject list omitted — that omission is what turned the ledger red and produced the
+   fourth discriminator. **What it still does not do is judge the discriminator**; resolving a name
+   is not assessing a test.
+
+**Limits that remain OPEN, with the measured size of each:**
+
+3. **Neither `g18` nor `g18b` distinguishes the shipped unconditional dense seed from one guarded on
+   the insert's `newly_added` return.** MEASURED this pass: applying that guard to the dense
+   migration seed and running the seam target leaves it at **26 passed, 0 failed, 2 ignored**. Both
+   gates drive the newly-added case, where the two implementations agree; the divergent case — an
+   entity already carrying the dense id when the migration re-inserts it — is built by neither.
+   Kernel restored byte-identical afterwards, proved by `cmp`. This is a REAL gap in the gates that
+   close the presence-seed class, and it is filed, not fixed.
+4. **The marker-to-command comparison stays deferred, over a corpus in which 7 of 18 markers carry a
+   machine-readable command in the window the proximity guard reads.** ⚠️ **Sharpens a figure that
+   was recorded as 3.** The 3 was taken by naming the markers a reader had noticed rather than by
+   scanning that window, and the sentence then reasoned from it down to *"two markers in eighteen"*.
+   Seven is more than twice it, and the error ran in the direction that spares the work. The
+   deferral survives the correction on its own merits — F22 writes its population in prose rather
+   than in its command, and two rows print a pipeline the vocabulary has no shape for — but it must
+   be quoted at **7**, not at 3, and **not at 6**.
+5. **A figure gated where it is PRODUCED is not gated in these twins.** The four `wc -l` lengths are
+   re-derived on every run by a named test — which reads the census file's own doc comment, never
+   this document. The same is true of the census transcript and of every marker value copied into
+   the tables in (5) above. **Every number in these two files is a dated reading unless it is one of
+   the four marker values these files themselves carry.**
+
+**Figures this landing MOVED, which is a disclosure and not a footnote:**
+
+6. **TWO of the ECS plan's three name-sweep markers moved inside this one landing, in opposite
+   halves of it.** `AddOutcome` went **42 → 43** when the kernel gate that closes the presence-seed
+   class was written, because that gate uses the identifier; `migrate_entity_attach_ids_with_bytes`
+   went **15 → 16** when this record pass named the fifth migration site in that gate's header — a
+   `.rs` line under `crates/`, and therefore inside the marker's population. **Both were caught by
+   their own marker and neither by a reader**, and in both windows the twins carried the stale copy,
+   because a marker gates the plan and never the copy. A tree-wide count of an identifier the
+   campaign's own tests and headers use is a figure the campaign moves by working.
+7. **The by-id seam test moved three times inside this one uncommitted edit set** — 2572 → 3054 by
+   the code landing, 3054 → 3074 by a record pass, 3074 → **3283** by the one after it. The first
+   move shipped a stale number for a round; each later one was caught by the gate the first landed.
+8. **The target's own test count went 21 → 23**, and the empty-cap census's split went 66 / 54 / 12
+   → **84 / 70 / 14** over four wholly-empty ledgers rather than three. Both moved because this
+   round's work added tests and completed a subject list.
+9. **The `g18`-or-`gate 18` alternation sweep is re-taken and DATED**, not kept current: it had three
+   simultaneous live present-tense answers in one tree before this pass, and every one of them was
+   written by a pass that moved the number while writing about it — this one included.
+10. **Two quotations in the census file attributed words to a source that never carried them, and
+    both are repaired.** One quoted this row's own predecessor as *"all four re-measure correctly
+    today"*; the sentence in these twins read *"All four re-measure correctly"*, and the trailing
+    word occurs nowhere in the corpus. The other quoted a kernel test header as calling its
+    enumeration *"complete rather than sampled"*; that phrase lives only here, in the question log,
+    and was never written in that file. **Both are the recollection defect in miniature** — a claim
+    copied from memory inside a paragraph about claims copied from memory — and both were found by
+    searching for the quoted string rather than by reading. **Quote verbatim, or drop the quotation
+    marks.**

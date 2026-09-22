@@ -261,7 +261,7 @@ struct RecordedMember {
 ///
 /// Asserted for exact equality in both directions, so this list cannot rot: a new unreachable
 /// member reds the gate, and so does wiring one of these up.
-const KNOWN_UNREACHABLE_MEMBERS: [RecordedMember; 5] = [
+const KNOWN_UNREACHABLE_MEMBERS: [RecordedMember; 7] = [
     RecordedMember {
         package: "boyko-ui",
         class: Reach::DevOnlyReferenced,
@@ -301,6 +301,16 @@ const KNOWN_UNREACHABLE_MEMBERS: [RecordedMember; 5] = [
         note: "The transpiler half. Normal-depended-on by `aether` alone, which is itself \
                unreachable — so it is dead by transitivity rather than by its own edges. Resolves \
                the moment `aether` does.",
+    },
+    RecordedMember {
+        package: "reflect-fixture",
+        class: Reach::Unreferenced,
+        note: "Entered with the A6 reflection merge. ZERO reverse edges, and that is the point                rather than a defect: it is the feature-absence fixture whose G0 gates compile it                twice, once with `reflect-fixture/reflect` and once without, and compare the two                images. Its own manifest records the rule - 'adding any second dependency here                destroys the gate's ARGUMENT' - so a reverse edge from a product would INVALIDATE                it. CI reaches it by `-p reflect-fixture`, which creates no edge for this census                to see; the leg exists in .github/workflows/ci.yml.",
+    },
+    RecordedMember {
+        package: "reflect-dogfood",
+        class: Reach::Unreferenced,
+        note: "Entered with the A6 reflection merge, same shape and same reason: the leaf umbrella                that turns `reflect` on for boyko-scene and boyko-render so D3's permission is                exercised, named in the comments of BOTH those manifests as the only thing in the                workspace that enables the feature. Nothing depends on it BY DESIGN - an edge would                put `reflect` on in the shipped graph, which is exactly what the feature must not                do. CI reaches it by `-p reflect-dogfood --features reflect-dogfood/reflect`.",
     },
 ];
 

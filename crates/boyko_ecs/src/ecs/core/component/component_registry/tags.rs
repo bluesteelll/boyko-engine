@@ -205,3 +205,31 @@ pub(crate) fn tag_by_name(name: &str) -> Option<TagId> {
         .get(name)
         .copied()
 }
+
+// S4' (§4) — the inbound half of a bridge this type already advertises
+// outbound. A second inherent `impl` block rather than an append inside the
+// one at `:95`: every doc anchor into this file is at or below `:192`, three of
+// them waived, and a waived anchor rots SILENTLY on a line shift.
+impl EnableTagId {
+    /// The inverse of [`EnableTagId::component_id`]: `Some` iff `id` is
+    /// classified [`StorageKind::Bitset`], `None` otherwise.
+    ///
+    /// Total and safe. It mints no capability the crate does not already have —
+    /// every enable/disable it unlocks is reachable from inside `boyko_ecs`
+    /// today — and it is a PROOF, not a cast: the kind check is what makes an
+    /// `EnableTagId` mean "this id really is an enable tag".
+    ///
+    /// The bounds guard is not decoration: without it an out-of-range id trips
+    /// [`storage_kind`](super::storage_kind)'s `debug_assert!` and the
+    /// totality claim above would be false in debug.
+    pub fn try_from_component_id(id: ComponentId) -> Option<Self> {
+        if id.0 >= MAX_COMPONENTS {
+            return None;
+        }
+        if super::storage_kind(id.0) == StorageKind::Bitset {
+            Some(Self(id))
+        } else {
+            None
+        }
+    }
+}

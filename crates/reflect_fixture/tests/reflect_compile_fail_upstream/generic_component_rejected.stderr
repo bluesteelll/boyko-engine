@@ -1,0 +1,21 @@
+error[E0425]: cannot find type `T` in this scope
+  --> tests/reflect_compile_fail_upstream/generic_component_rejected.rs:33:16
+   |
+33 |     pub value: T,
+   |                ^ not found in this scope
+
+error[E0107]: missing generics for struct `GenericComponent`
+  --> tests/reflect_compile_fail_upstream/generic_component_rejected.rs:31:12
+   |
+31 | pub struct GenericComponent<T: Default + 'static> {
+   |            ^^^^^^^^^^^^^^^^ expected 1 generic argument
+   |
+note: struct defined here, with 1 generic parameter: `T`
+  --> tests/reflect_compile_fail_upstream/generic_component_rejected.rs:31:12
+   |
+31 | pub struct GenericComponent<T: Default + 'static> {
+   |            ^^^^^^^^^^^^^^^^ -
+help: add missing generic argument
+   |
+31 | pub struct GenericComponent<T><T: Default + 'static> {
+   |                            +++

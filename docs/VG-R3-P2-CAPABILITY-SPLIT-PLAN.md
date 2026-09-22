@@ -5,7 +5,7 @@ at the end of this document as the record of how the design got here. Every bloc
 folded into the text above it — a reader gets the corrected design by reading top to bottom, and
 must not reconstruct it by diffing against the critique.
 
-Scope fixed by `docs/OPEN-QUESTIONS.md:167-212` ("RESOLVED 2026-08-03 — decomposed"), piece 2
+Scope fixed by `docs/OPEN-QUESTIONS.md:219-264` ("RESOLVED 2026-08-03 — decomposed"), piece 2
 verbatim: *"The capability and the raster split alone, inert — the second scope drawing nothing,
 proven byte-identical on the pins."*
 
@@ -122,7 +122,7 @@ an archetype filter" never argued for bitset):
 |---|---|---|
 | non-filtering per-row read | `Option<&OcclusionCulling>` — `matches_component_set` is unconditionally true (`option.rs:96-101`), `aggregate_include` is a no-op (`:104-107`), so it never drops or reorders a row | only `IsEnabled<T>`; `Option<&T>` cannot resolve (no column, `data_is_enabled.rs:12-15`) and `With<T>` matches zero archetypes (bitset ids are stripped from every signature, `archetype.rs:314-324`, `archetype_master.rs:144-150`) |
 | spawnable in a bundle | yes | **no** — `boyko_macros/src/component.rs:315` (`hooks.no_bundle \|\| hooks.storage_bitset \|\| hooks.storage_dense`) suppresses the `Bundle` impl, so `spawn((MeshBundle, OcclusionCulling))` and `insert` do not compile |
-| `#[require(...)]` reachable | yes | **no** — a required ctor is `unsafe fn(dst: *mut u8)` (`required.rs:49`) writing into a pool a bitset id has none of; it reaches `migration_helpers.rs:725-728` and panics on `.expect("invariant: target hosts every required id")` |
+| `#[require(...)]` reachable | yes | **no** — a required ctor is `unsafe fn(dst: *mut u8)` (`required.rs:49`) writing into a pool a bitset id has none of; it reaches `migration_helpers.rs:739-742` and panics on `.expect("invariant: target hosts every required id")` |
 | default for a never-touched entity | **absent** — genuinely no marker | **`false`** — every never-toggled row reads disabled, so "presence is the datum" is false in both halves |
 | declares scheduler access | yes, a real read | **no** — `IsEnabled::init_access` is a documented no-op (`data_is_enabled.rs:170-176`) |
 | **cost paid** | **a marked subset FRAGMENTS the mesh archetype in two, shortening per-archetype runs in the gather** | none (bitset ids never fragment) |
@@ -919,7 +919,7 @@ because its file list was short by five; with the list in Integration corrected,
   *"the AUTHORITATIVE oracle"*. **But it degrades SILENTLY** when `VK_EXT_validation_features` is
   absent — `device.rs:2107-2111`, *"Its absence downgrades to plain validation rather than crashing
   on an unrecognized chained struct"*, arm at `:2119-2122` — and the published 19-message baseline
-  (`OPEN-QUESTIONS.md:144-151`) is entirely `vkCreate*`-time entries, so **nothing in the tree
+  (`OPEN-QUESTIONS.md:196-203`) is entirely `vkCreate*`-time entries, so **nothing in the tree
   establishes the feature was ever live on this device.**
   *The probe:* delete `hzb_build_0`'s `vb_depth` `image_access` (`graph_bridge.rs:3986-3992`), run
   `scripts\golden.ps1 -Pin vb_mesh_hzb -ValidationOn`, record whether a `SYNC-HAZARD-*` message
@@ -1343,12 +1343,12 @@ permanently, and names the consumer knob as pieces 3/4's. No `OcclusionConfig` i
 
 **No change to `first_instance`, to `drawIndirectFirstInstance`, or to `multiDrawIndirect`.**
 
-**No perf claim.** None is measurable in this tree (`OPEN-QUESTIONS.md:260-279`); the Sponza fixture
+**No perf claim.** None is measurable in this tree (`OPEN-QUESTIONS.md:312-331`); the Sponza fixture
 is not built. Piece 2 adds cost and removes none, and the Cost table in the Goal is a *description*,
 not a measurement.
 
 **No fix for the 19 outstanding validation messages.** Owner-deferred
-(`OPEN-QUESTIONS.md:157-163`), option (b).
+(`OPEN-QUESTIONS.md:209-215`), option (b).
 
 ## Open questions
 
@@ -1497,7 +1497,7 @@ PassId is strictly monotonic declare order (`graph.rs:441-451`) and `compile()` 
 
 ## (3) MAJORs
 
-**M1 — `:369`'s sync-val premise is false, and G3's true capability is unknown.** `VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT` is at `crates/boyko_rhi_vulkan/src/device.rs:2152`, packed into `VkValidationFeaturesExt` (`:2153-2160`) and chained as the instance `p_next` head (`:2187-2193`) whenever validation is on and `VK_EXT_validation_features` is present. `golden.ps1:167` → `runner.rs:213` satisfies the first conjunct on every `-ValidationOn` pin. All three of the plan's own grep terms hit. But `:2110-2111` degrades **silently** when the extension is absent, and the published 19-message baseline (`OPEN-QUESTIONS.md:144-151`) is entirely `vkCreate*`-time entries — nothing establishes the feature was ever live. *Change:* delete `:369`'s three sentences; move the "sees a missing barrier" label from G4 (`:371`) to G3; re-label G4 honestly as a **synthetic-declaration pin** (a hand-written replica — `declare_vb_graph` is `pub(crate)` on a `Renderer` no test constructs, and `framegraph_gbuffer_equiv.rs:2405-2412` says so about itself). *Settle first, before trusting any green:* delete `hzb_build_0`'s `vb_depth` `image_access` (`graph_bridge.rs:3986-3992`), run `scripts\golden.ps1 -Pin vb_mesh_hzb -ValidationOn`, record whether a `SYNC-HAZARD-*` appears. If not, the limitation to write in the commit is "the extension is absent on this device", not "sync-val does not exist in the repo".
+**M1 — `:369`'s sync-val premise is false, and G3's true capability is unknown.** `VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT` is at `crates/boyko_rhi_vulkan/src/device.rs:2152`, packed into `VkValidationFeaturesExt` (`:2153-2160`) and chained as the instance `p_next` head (`:2187-2193`) whenever validation is on and `VK_EXT_validation_features` is present. `golden.ps1:167` → `runner.rs:213` satisfies the first conjunct on every `-ValidationOn` pin. All three of the plan's own grep terms hit. But `:2110-2111` degrades **silently** when the extension is absent, and the published 19-message baseline (`OPEN-QUESTIONS.md:196-203`) is entirely `vkCreate*`-time entries — nothing establishes the feature was ever live. *Change:* delete `:369`'s three sentences; move the "sees a missing barrier" label from G4 (`:371`) to G3; re-label G4 honestly as a **synthetic-declaration pin** (a hand-written replica — `declare_vb_graph` is `pub(crate)` on a `Renderer` no test constructs, and `framegraph_gbuffer_equiv.rs:2405-2412` says so about itself). *Settle first, before trusting any green:* delete `hzb_build_0`'s `vb_depth` `image_access` (`graph_bridge.rs:3986-3992`), run `scripts\golden.ps1 -Pin vb_mesh_hzb -ValidationOn`, record whether a `SYNC-HAZARD-*` appears. If not, the limitation to write in the commit is "the extension is absent on this device", not "sync-val does not exist in the repo".
 
 **M2 — `occlusion_instances` has no per-frame reset, so the arming predicate is sticky-true for the process.** `:220` declares it a scalar on `MeshRenderScratch`, which is `#[derive(Resource)]` (`mesh_draw.rs:265-266`); `:288` specifies only `occlusion_instances += that`; `grep -i "reset|sticky"` over the plan = 0 hits. Every sibling per-frame reduce in the *same function* is reset first, with the reason written down: `mesh_draw.rs:609-612`, the first statement of `gather_mixed_into` — *"a persistent `Resource` field must not stay sticky-true after a material is removed"*. This falsifies `:219`'s own contract ("`> 0` ⇔ present in **this** frame's ring") and D3's per-frame reasoning at `:89`. The per-instance lane is re-scattered, so no geometry is lost — bounded damage is a permanently-armed split. Note `:272` cites `CsmCasterScratch::batch_count()` as its model, and that is a **derived** count over a per-frame-cleared column (`csm_caster.rs:95-97`) — structurally incapable of going sticky. *Change:* specify `self.occlusion_instances = 0;` beside `mesh_draw.rs:612`, and add the two-gather regression test to `:392-397`, modelled on the sibling at `mesh_draw.rs:1864-1884`. The plan's single-gather count check at `:394` is green with or without the reset.
 
@@ -1539,7 +1539,7 @@ PassId is strictly monotonic declare order (`graph.rs:441-451`) and `compile()` 
 
 **F-2 — `Has<T>` does not exist.** One occurrence workspace-wide: a doc comment about resources at `common_conditions.rs:11`. `HasRelation<R>` (`relation/filter.rs:40`) is unrelated. For a bitset id, `Option<&T>` cannot resolve (no column, `data_is_enabled.rs:12-15`), `With<T>` matches zero archetypes (bitset ids are dropped from every signature, `archetype.rs:314-324`, `archetype_master.rs:144-150`), and `Enabled<T>` **drops rows** (incompatible with the lock-step invariant). The only non-filtering bitset read is `IsEnabled<T>`, which reads the BIT and defaults false.
 
-**F-3 — bitset suppresses `Bundle`.** `component.rs:315`: `if hooks.no_bundle || hooks.storage_bitset || hooks.storage_dense { … }`. The insertion verb is `EntityCommands::enable::<T>()` — deferred, chainable, ordinary system (`entity_commands.rs:220`), used at `structural_zero_substep.rs:96` and `bundles_s6_integration.rs:106-107`. **Not** exclusive `&mut EcsMaster`, and **not** `#[require]` (a required ctor writes bytes into a pool a bitset id does not have: `required.rs:49`, `migration_helpers.rs:725-728`).
+**F-3 — bitset suppresses `Bundle`.** `component.rs:315`: `if hooks.no_bundle || hooks.storage_bitset || hooks.storage_dense { … }`. The insertion verb is `EntityCommands::enable::<T>()` — deferred, chainable, ordinary system (`entity_commands.rs:220`), used at `structural_zero_substep.rs:96` and `bundles_s6_integration.rs:106-107`. **Not** exclusive `&mut EcsMaster`, and **not** `#[require]` (a required ctor writes bytes into a pool a bitset id does not have: `required.rs:49`, `migration_helpers.rs:739-742`).
 
 **F-4 — `vb_indirect: None` does NOT skip a scope.** `vb.rs:1428-1446` keeps `begin_rendering`/`end_rendering` and swaps `cmd_draw_indexed_indirect` → `cmd_draw_indexed`; only the `vb_indirect_upload` *pass* is gated (`graph_bridge.rs:3517`). And `vb_indirect` cannot be `None` on a VB boot: `gpu_scene/mod.rs:1164` is a plain array, `:3763` `.expect()`s the create, `:6393` wires unconditional `Some`. The four `None` literals are all `window_present_gbuffer.rs` fixtures that never resolve VB.
 
@@ -1565,7 +1565,7 @@ PassId is strictly monotonic declare order (`graph.rs:441-451`) and `compile()` 
 
 **F-15 — the plan's D4 record shape is already specified, contra a plausible misreading.** `:100`'s "changes ONE WORD'S producer … Nothing structural" fixes that the late records carry the early records' real `index_count`/`first_index`/`vertex_offset`; only `instance_count` is the inert constant. `:401`'s assert mirrors the early fill at `vb.rs:955-982`. Do not implement an all-zero record.
 
-**F-16 — no perf claim is measurable here, by owner decision.** `OPEN-QUESTIONS.md:269`: *"no occlusion speed-up can be demonstrated on any content in this tree"*; `:277-279` keeps the perf fixture **out** of the density corpus deliberately. OQ2's A/B is a synthetic microbenchmark, never a pin.
+**F-16 — no perf claim is measurable here, by owner decision.** `OPEN-QUESTIONS.md:321`: *"no occlusion speed-up can be demonstrated on any content in this tree"*; `:329-331` keeps the perf fixture **out** of the density corpus deliberately. OQ2's A/B is a synthetic microbenchmark, never a pin.
 
 ---
 

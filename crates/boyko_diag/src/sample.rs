@@ -157,6 +157,11 @@ pub const ENGINE_PACKAGES: &[&str] = &[
     "boyko-macros",
     "boyko-math",
     "boyko-physics",
+    // Reflection GATES G0 (docs/REFLECTION-PLAN-GATES.md D15): the editor-only reflection
+    // layer. Engine code — a zone it ever declares is an engine zone. Its absence from ship
+    // builds is a feature-closure property (nothing enables `reflect`), not a
+    // package-classification one.
+    "boyko-reflect",
     "boyko-render",
     "boyko-scene",
     "boyko-serialize",
