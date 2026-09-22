@@ -724,8 +724,8 @@ statistic, and nothing reads the visibility buffer back to the host. `vb_id` is 
 | (b) A compute pass that histograms `vb_id` into an SSBO | a new `.spv`, a new `SHADER-VARIANT-MANIFEST.md` row, a new binding, a new barrier | Rejected — buys nothing (a) does not, and enlarges the very blast radius R0 exists to keep at zero |
 | (c) Reuse the CPU rasterizer alone | zero engine change | Rejected **as the census** — it is a host mirror of the raster, not the shipped VB path, and the whole point of the census is to measure what the engine actually produces. Retained as R0c's cross-check |
 
-`copy_image_to_buffer` already exists in the RHI (`boyko_rhi/src/encoder.rs:115`; impl at
-`rhi_impl/encoder.rs:1037`). The readback is `[census].readback_retention` — streamed and hashed,
+`copy_image_to_buffer` already exists in the RHI (`crates/boyko_rhi/src/encoder.rs:115`; impl at
+`crates/boyko_rhi_vulkan/src/rhi_impl/encoder.rs:1039`). The readback is `[census].readback_retention` — streamed and hashed,
 never retained: at 3840×2160 × 8 B that is 66.4 MB per censused frame, and §11 records this volume
 at 16 GB free with `target/` at 58 GB, so retention would reproduce this project's standing hazard
 of disk exhaustion surfacing as mingw linker errors.
