@@ -2808,7 +2808,7 @@ length red — which is the whole point: the defect moves the index and touches 
 >    re-blessed by a targeted textual edit rather than `TRYBUILD=overwrite`, so a second
 >    unrelated drift could not have been swept in with it. This is the `OPT_IN_TOKENS` shape
 >    one level down: **the rung changes a diagnostic, and a corpus somewhere pins that
->    diagnostic.**
+>    diagnostic.** **(Read on the merged line 2026-09-22: `on_despawn_rejected.stderr` no longer exists — the line's KM2 rung retired `on_despawn_rejected.rs` because the key it pinned became a VALID key, so the fixture guarded nothing, and `bitset_on_despawn_rejected.rs` pins the refusal KM2 CREATES instead (`compile_fail_hooks.rs`'s own header says so). The record above is the corpus of 2026-08-21 and is left as written.)**
 >
 > *Regression, all exit 0, all `running [1-9]`.* `c7_derive_bake` **16** · `c7_alloc_delta`
 > **2** (positive control: `deliberate allocations observed = 1`) · `c6_nested_descend` **4** ·
