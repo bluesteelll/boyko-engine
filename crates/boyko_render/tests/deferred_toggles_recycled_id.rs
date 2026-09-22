@@ -1,14 +1,16 @@
 //! H-06 in `boyko_render`'s two deferred bit toggles (rung A9b — the class
 //! rung A9 fixed in `boyko_scene::visibility_sync`, found by name at two more
-//! sites): a deferred `disable` pending for `E` must NOT land on `F`, spawned
+//! sites): a deferred toggle pending for `E` must NOT land on `F`, spawned
 //! on `E`'s recycled id before the toggle drains. Each site's command carries
 //! the full `Entity` (id + generation) captured when the intent was formed,
 //! and the kernel's `live_inland` resolve at apply drops a stale generation.
 //!
 //! The two sites and the two harnesses:
 //!
-//! 1. **`validate_asset_refs`'s stale-mesh disable** (`asset_refcount.rs`,
-//!    `DisableStaleMeshCommand`). The system reads `NonSendRes<Assets<MeshGpu>>`,
+//! 1. **`validate_asset_refs`'s stale-mesh mark** (`asset_refcount.rs`,
+//!    `SetStaleCommand`, which SETS the `RenderStale` bit on a stale carrier —
+//!    since the asset-validate prereqs the verdict is its own bit, not a clear
+//!    of `RenderEnabled`). The system reads `NonSendRes<Assets<MeshGpu>>`,
 //!    which declares universal access, so it resolves to `CpuExclusive` and the
 //!    scheduler runs it dispatcher-solo with its apply INLINE after its body
 //!    (`schedule.rs`'s exclusive path). No other system's apply can land
@@ -34,7 +36,9 @@
 //! run the fresh-id twin (`F` allocated BEFORE `E`'s despawn), and assert the
 //! plan's equality: `F`'s bit must not depend on whether `F` recycled `E`'s id.
 //! `F` is a `spawn_empty` row in both: an `EnableTag` bit is per row in any
-//! archetype, and a landed stale disable would CLEAR the bit `F` set at spawn.
+//! archetype. At site 1 a landed stale mark would SET a `RenderStale` bit `F`
+//! never had (it was never validated); at site 2 a landed stale disable would
+//! CLEAR the `SnapInterpolation` bit `F` set at spawn.
 //!
 //! # `MeshGpu` without a device
 //!
@@ -55,7 +59,7 @@ use boyko_rhi_vulkan::ffi::VkBuffer;
 use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_threadpool::ThreadPoolBuilder;
 
-use boyko_render::asset_refcount::{ValidateCursor, validate_asset_refs};
+use boyko_render::asset_refcount::{RenderStale, ValidateCursor, validate_asset_refs};
 use boyko_render::snap_interpolation::snap_apply;
 use boyko_render::{
     GpuTransform3D, Material, MeshGpu, RenderEpoch, SnapInterpolation, TrsPacked,
@@ -77,7 +81,7 @@ enum ClaimOrder {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Site 1 — `validate_asset_refs`'s stale-mesh disable (`DisableStaleMeshCommand`).
+// Site 1 — `validate_asset_refs`'s stale-mesh mark (`SetStaleCommand` SETS the `RenderStale` bit).
 // ════════════════════════════════════════════════════════════════════════════
 
 /// A device-inert `MeshGpu` — see the module doc.
@@ -174,28 +178,29 @@ struct ValidateOutcome {
     e: Entity,
     /// `None` when the window despawned nothing (the toggle-is-live control).
     f: Option<Entity>,
-    /// `is_enabled::<RenderEnabled>` on `E` after the body ran and BEFORE the
-    /// apply — `true` says the disable is deferred, not applied by the body
+    /// `is_enabled::<RenderStale>` on `E` after the body ran and BEFORE the
+    /// apply — `false` says the stale mark is deferred, not applied by the body
     /// (the anti-vacuity pin of the split).
-    e_enabled_before_apply: bool,
-    /// `is_enabled::<RenderEnabled>` on `E` after the apply (a dead `E` reads
+    e_stale_before_apply: bool,
+    /// `is_enabled::<RenderStale>` on `E` after the apply (a dead `E` reads
     /// `false`).
-    e_enabled: bool,
-    /// `is_enabled::<RenderEnabled>` on `F` after the apply (`false` if no `F`).
-    f_enabled: bool,
+    e_stale: bool,
+    /// `is_enabled::<RenderStale>` on `F` after the apply (`false` if no `F`).
+    f_stale: bool,
 }
 
 /// One window: `validate_asset_refs`'s body runs against a live, stale `E`
-/// and queues its disable; then, before that queue drains, `E` is despawned
-/// and `F` spawned in the requested order with its bit SET; then the queue
-/// drains. `order == None` runs the control in which nothing is despawned.
+/// and queues its stale mark; then, before that queue drains, `E` is despawned
+/// and `F` spawned in the requested order with its `RenderStale` bit CLEAR (a
+/// fresh row, never validated); then the queue drains. `order == None` runs the
+/// control in which nothing is despawned.
 fn run_validate_window(order: Option<ClaimOrder>) -> ValidateOutcome {
     let (mut world, e) = stale_mesh_world();
 
     let mut validate = system_of(validate_asset_refs);
     // Body only: `run_system_once` does not flush the deferred buffers.
     world.run_system_once(&mut validate);
-    let e_enabled_before_apply = world.is_enabled::<RenderEnabled>(e);
+    let e_stale_before_apply = world.is_enabled::<RenderStale>(e);
 
     let f = order.map(|order| {
         let f = match order {
@@ -209,47 +214,46 @@ fn run_validate_window(order: Option<ClaimOrder>) -> ValidateOutcome {
                 f
             }
         };
-        world.enable::<RenderEnabled>(f);
         assert!(
-            world.is_enabled::<RenderEnabled>(f),
-            "F's bit is SET before the drain"
+            !world.is_enabled::<RenderStale>(f),
+            "F's stale bit is CLEAR before the drain (a fresh row, never validated)"
         );
         f
     });
 
-    // The drain: the disable queued for E lands now.
+    // The drain: the stale mark queued for E lands now.
     validate.apply(&mut world);
 
     ValidateOutcome {
         e,
         f,
-        e_enabled_before_apply,
-        e_enabled: world.is_enabled::<RenderEnabled>(e),
-        f_enabled: f.is_some_and(|f| world.is_enabled::<RenderEnabled>(f)),
+        e_stale_before_apply,
+        e_stale: world.is_enabled::<RenderStale>(e),
+        f_stale: f.is_some_and(|f| world.is_enabled::<RenderStale>(f)),
     }
 }
 
 #[test]
 fn stale_mesh_disable_pending_for_a_despawned_entity_does_not_clear_its_recycled_ids_bit() {
-    // Anti-vacuity 1 — the window really carries a live, DEFERRED disable for
-    // E: the body leaves E's bit SET, the apply clears it.
+    // Anti-vacuity 1 — the window really carries a live, DEFERRED stale mark
+    // for E: the body leaves E's `RenderStale` bit CLEAR, the apply sets it.
     let live = run_validate_window(None);
     assert!(live.f.is_none(), "control: nothing was spawned");
     assert!(
-        live.e_enabled_before_apply,
-        "control: the body only QUEUES the disable (the split stages a real window)"
+        !live.e_stale_before_apply,
+        "control: the body only QUEUES the stale mark (the split stages a real window)"
     );
     assert!(
-        !live.e_enabled,
-        "control: the apply clears the stale carrier's bit — the disable under test is live"
+        live.e_stale,
+        "control: the apply sets the stale carrier's bit — the mark under test is live"
     );
 
     // The recycled run.
     let a = run_validate_window(Some(ClaimOrder::Recycled));
     let fa = a.f.expect("recycled run: F was spawned");
     assert!(
-        a.e_enabled_before_apply,
-        "recycled run: the disable was pending when E was despawned"
+        !a.e_stale_before_apply,
+        "recycled run: the stale mark was pending when E was despawned"
     );
     // Anti-vacuity 2 — the recycle happened as staged: F sits on E's id, one
     // generation up.
@@ -268,13 +272,12 @@ fn stale_mesh_disable_pending_for_a_despawned_entity_does_not_clear_its_recycled
         "recycled run: F and E are distinct handles on one id"
     );
 
-    // THE H-06 ASSERTION. F set its own bit at spawn and has never been
-    // validated; E's pending disable, keyed by E, must not reach it.
+    // THE H-06 ASSERTION. F is a fresh row that has never been validated;
+    // E's pending stale mark, keyed by E, must not reach it.
     assert!(
-        a.f_enabled,
-        "H-06 (validate_asset_refs): a stale disable pending for the despawned E landed on F, spawned \
-         on E's recycled id before the drain — F ({fa:?}) set its bit at spawn, was never validated, \
-         and reads DISABLED",
+        !a.f_stale,
+        "H-06 (validate_asset_refs): a stale mark pending for the despawned E landed on F, spawned \
+         on E's recycled id before the drain — F ({fa:?}) was never validated and reads STALE",
     );
 
     // The fresh-id twin: identical window, F allocated BEFORE E's despawn.
@@ -291,13 +294,13 @@ fn stale_mesh_disable_pending_for_a_despawned_entity_does_not_clear_its_recycled
         "fresh run: a minted id starts at generation 0"
     );
     assert!(
-        b.f_enabled,
-        "fresh run: F set its bit at spawn and was never validated"
+        !b.f_stale,
+        "fresh run: F was never validated and reads clean"
     );
 
     // The plan's equality.
     assert_eq!(
-        a.f_enabled, b.f_enabled,
+        a.f_stale, b.f_stale,
         "H-06 (validate_asset_refs): F's bit must not depend on whether F recycled E's id"
     );
 }

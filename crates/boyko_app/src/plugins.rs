@@ -8,6 +8,7 @@
 use boyko_ecs::ecs::core::app::CoreSchedule;
 use boyko_ecs::ecs::core::log::LogPlugin;
 use boyko_ecs::ecs::core::profiling::{ArmOutcome, Profiler, ProfilerConfig, ProfilerPlugin};
+use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 use boyko_ecs::{App, Plugin};
 use boyko_render::instance_model::{InstancePackSet, sync_instance_model_cols};
 use boyko_render::light_reconcile::LightReconcileSet;
@@ -24,11 +25,12 @@ use boyko_render::MotionCamState;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     AssetRefcountPlugin, ClusterConfig, CsmCasterScratch, CsmFitSet, CsmPlugin, CsmResolveSet,
-    LightCollectSet, LightSeedSet, LightingConfig, LightingPlugin, MeshRenderScratch,
-    ParticlePlugin, ParticleTickSet, RayPlugin, Render3dPlugin, RenderPathPlugin, SdfPlugin,
-    ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin, add_gpu_transform_pack, gather_mesh_draws,
-    gather_shadow_casters, reduce_caster_bounds, snap_apply, sync_cluster_light_gate,
-    sync_csm_light_gate, sync_punctual_light_gate, sync_ssao_light_gate, sync_sv0_light_gate,
+    DdgiPlugin, DdgiResolveSet, LightCollectSet, LightSeedSet, LightingConfig, LightingPlugin,
+    MeshRenderScratch, ParticlePlugin, ParticleTickSet, RayPlugin, Render3dPlugin,
+    RenderPathPlugin, SdfPlugin, ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin,
+    add_gather_mesh_draws, add_gather_shadow_casters, add_gpu_transform_pack,
+    reduce_caster_bounds, snap_apply, sync_cluster_light_gate, sync_csm_light_gate,
+    sync_ddgi_light_gate, sync_punctual_light_gate, sync_ssao_light_gate, sync_sv0_light_gate,
 };
 use boyko_scene::{CameraPlugin, CameraSet, FixedSet, VisibilitySet};
 
@@ -53,8 +55,9 @@ use crate::timer_resolution::TimerResolutionGuard;
 /// any mesh). Every cross-plugin reader → writer
 /// dependency of the render path is therefore a named set edge declared in `build`:
 /// `VisibilitySet::Validate` after `VisibilitySet::Sync` and `VisibilitySet::Read` after
-/// both (the `RenderEnabled` bit: set by `visibility_sync`, cleared on a stale row by
-/// `validate_asset_refs`), `InstancePackSet` after `CameraSet::Resolve` (the propagated
+/// both (`RenderEnabled`, set by `visibility_sync`; `RenderStale` / `MaterialStale`, written by
+/// `validate_asset_refs` and filtered on by the gathers, which additionally pin that edge per
+/// consumer with `.after_set(AssetValidateSet)`), `InstancePackSet` after `CameraSet::Resolve` (the propagated
 /// `GlobalTransform`), `LightReconcileSet` after `CameraSet::Resolve` (the light's
 /// `GlobalTransform`), the CSM fit / punctual resolve after `CameraSet::Resolve`
 /// (`ViewUniform`), and both of those after `LightReconcileSet` (the sun direction; the
@@ -440,10 +443,14 @@ impl Plugin for EnginePlugins {
 
         // Asset-streaming plan F2: the refcount lifetime pipeline. Inserts
         // `RefcountDeltas`/`DeferredFree` and registers `apply_refcount_deltas`
-        // (no ordering edge needed yet — see that system's doc). The `Assets<
-        // MeshGpu>`/`Assets<Material>` resources it reads are inserted by
-        // `runner::run_windowed` before the frame loop starts, well after this
-        // `build()` call, so add-order here does not matter.
+        // `.before(validate_asset_refs)`, the latter joining `AssetValidateSet`. The
+        // validate -> gather edge is pinned BY NAME: the two gathers below are
+        // registered through `add_gather_mesh_draws` / `add_gather_shadow_casters`,
+        // which chain `.after_set(AssetValidateSet)` (asset-streaming plan prereq (c)),
+        // so this plugin's position in the add-order is no longer load-bearing for
+        // that edge. The `Assets<MeshGpu>`/`Assets<Material>` resources it reads are
+        // inserted by `runner::run_windowed` before the frame loop starts, well after
+        // this `build()` call, so add-order here does not matter either.
         app.add_plugin(AssetRefcountPlugin);
 
         // The R4 lighting stack. LightingPlugin registers the light eviction
@@ -494,6 +501,25 @@ impl Plugin for EnginePlugins {
         // expressible across plugins; a loose one-frame stagger off cold owner state is
         // self-correcting, and the default DISABLED config gates the whole path off).
         app.add_plugin(ShadowAtlasPlugin);
+
+        // SDFDDGI host-hook (Decision 4): `DdgiPlugin` — the GI config substrate — composed
+        // UNCONDITIONALLY, here after `ShadowAtlasPlugin` (its `Resolved*` sibling) and before
+        // `RayPlugin` (whose `RayCaps` boot override sits next to the `DdgiCaps` one in the
+        // runner). It seeds the owner-set `DdgiConfig` (default DISABLED — the 0%-gate;
+        // overwrite it AFTER `add_plugins` to enable GI), the derived `ResolvedDdgi` carrier
+        // (the SINGLE truth for the header bit, the b18 grid bytes and the update-pass arming),
+        // `DdgiUpdateConfig`, `DdgiCaps` (the runner overrides it at boot with the real
+        // `ddgi_storage_ok()` query) and an inert `RenderPathFrozenConsumers` (a harmless
+        // double-insert with `SsaoPlugin`'s — the runner overwrites both at boot), and
+        // registers `resolve_ddgi_grid_gated` in `DdgiResolveSet`. Safe to compose
+        // unconditionally for the same reason `SsaoPlugin`/`AaPlugin` are: the default carrier
+        // is the all-zero DISABLED image (== the b18 buffer's boot seed), the gate keeps the
+        // header bit 0, `ddgi_update` stays `None` — the command stream is byte-identical.
+        //
+        // Before this line NO host composed the plugin: for the whole I0..I7 ladder the
+        // production world carried no carrier, the runner's `DdgiCaps` override landed in a
+        // world with no reader, and `resolve_ddgi_grid_gated` never ran.
+        app.add_plugin(DdgiPlugin);
 
         // HW-RT rung R1 — the dormant unified ray / acceleration-structure seam.
         // RayPlugin seeds the derived `RayBackendConfig` carrier (default DISABLED —
@@ -664,6 +690,12 @@ impl Plugin for EnginePlugins {
         // production gather) runs after the pack, and `sync_csm_light_gate`
         // (the header-gate ⇄ depth-pass lock-step) after the caster gather, so
         // the gate's caster predicate is THIS frame's.
+        // Asset-streaming plan prereq (c): BOTH gathers are registered through their
+        // `boyko_render` helpers (`add_gather_shadow_casters` / `add_gather_mesh_draws`),
+        // which pin each `.after_set(AssetValidateSet)` — the validate -> gather edge
+        // is a by-name contract, not the add-order accident it was under F5. The
+        // helpers return the `SystemConfig`, so this closure chains its own `.after(pack)`
+        // / `.after(snap)` edges exactly as before (the `add_gpu_transform_pack` shape).
         // R5 adds the INTERPOLATION Main system `snap_apply` (the zero-streak
         // collapse for teleported bodies) in the SAME closure. Refined-B unifies
         // the two former gathers into ONE `gather_mesh_draws` over ALL drawables
@@ -681,181 +713,13 @@ impl Plugin for EnginePlugins {
         // the temporal denoiser is on (0%-gate). `not(hwrt)` never inserts it.
         #[cfg(feature = "hwrt")]
         app.insert_resource(MotionCamState::default());
-        app.add_systems_cfg(|b| {
-            let pack = b
-                .add_system(sync_instance_model_cols)
-                .in_set(InstancePackSet)
-                .in_set(VisibilitySet::Read)
-                .key();
-            // HW-RT rung 3b: `prev := curr` MUST run BEFORE the affine pack refreshes `curr`
-            // from this frame's moving `GlobalTransform`, so a mesh's motion vector is this
-            // frame's true per-object displacement (else `prev == curr`, zero motion, every
-            // box ghosts under its own motion). Dormant until a scene carries the
-            // `PrevInstanceModelCol` column (0%-gate).
-            #[cfg(feature = "hwrt")]
-            b.add_system(sync_prev_instance_model_cols).before(pack).in_set(VisibilitySet::Read);
-            let casters =
-                b.add_system(gather_shadow_casters).after(pack).in_set(VisibilitySet::Read).key();
-            b.add_system(sync_csm_light_gate).after(casters);
-            // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5: `reduce_caster_bounds`
-            // is the UNWIRED EXPORTED API `CsmPlugin` deliberately does not register (mirrors
-            // `gather_shadow_casters` itself) — this is the app that co-registers it. `.after
-            // (casters)` folds THIS frame's finished gather output, not last frame's scratch
-            // (D7 — `CsmCasterScratch` is single-writer, `gather_shadow_casters` owns it).
-            // `.in_set(CsmFitSet)` gives `resolve_csm_cascades` (which joins `CsmResolveSet` in
-            // `CsmPlugin`, csm_plugin.rs:76) something to order against below. Without this
-            // registration `CsmCasterBounds` stays the `EMPTY` seed `CsmPlugin` inserts, so
-            // every `CsmFitMode` renders as `Fixed` (D7/T15) — never a panic, always a no-op.
-            b.add_system(reduce_caster_bounds).after(casters).in_set(CsmFitSet);
-            // `CsmFitSet → CsmResolveSet`: `resolve_csm_cascades` must observe THIS frame's
-            // folded bounds, not a one-frame-stale value (D11 — no accepted stagger, unlike
-            // the cold-owner-state cross-plugin staggers documented elsewhere in this file).
-            // Declared HERE (not inside `CsmPlugin`) because this closure is the first one that
-            // gives `CsmFitSet` a member; a `configure_set` inside `CsmPlugin` alone would warn
-            // W1501 (memberless set) in a bare-`CsmPlugin` world (D11). `App::add_systems_cfg`
-            // threads the SAME Main builder through every closure/plugin (app.rs:313-319), so
-            // this edge resolves against `CsmFitSet`'s membership above and `CsmResolveSet`'s
-            // membership in `CsmPlugin` regardless of registration order.
-            b.configure_set(CsmResolveSet).after(CsmFitSet);
-            // `LightSeedSet → CsmResolveSet`: the fit takes the first ENABLED sun (defect R2b), and
-            // the exclusive light seed is what enables a newly added light. Unordered, on the first
-            // frame of a sun spawned before the first update, the fit ran before the seed in 300 of
-            // 300 measured runs and published `ResolvedCsm::DISABLED` while `collect_lights`
-            // (ordered after the seed) already lit with that sun. Declared here for the same memberless-set reason as the edge above:
-            // `LightingPlugin` and `CsmPlugin` each declare membership only, and this closure runs
-            // in the one composition that holds both. No cycle: nothing is ordered after
-            // `resolve_csm_cascades` (its key is never taken, and no edge names `CsmResolveSet` as
-            // a predecessor), so no path leads from it back to the seed. Pinned by
-            // `tests/host_orders_csm_fit_after_light_seed.rs`, which goes red without this line.
-            b.configure_set(CsmResolveSet).after(LightSeedSet);
-            // The punctual header-gate ⇄ depth-pass lock-step (mirrors the csm sync): after the
-            // SAME caster gather so the gate's caster predicate is THIS frame's. It reads
-            // `ResolvedShadowAtlas.mode_word` (written by `resolve_shadow_atlas` in
-            // ShadowAtlasPlugin, ordered earlier by add-order) — the resolve→sync edge follows the
-            // same cross-plugin add-order discipline as csm (self-correcting under a one-frame lag,
-            // gated off by the default DISABLED ShadowConfig).
-            b.add_system(sync_punctual_light_gate).after(casters);
-            // Render P7-Q2: the SSAO header-gate bridge — mirrors `sync_csm_light_gate`/
-            // `sync_punctual_light_gate`'s cross-plugin registration (it bridges
-            // `SsaoPlugin`'s `SsaoConfig` and `LightingPlugin`'s `LightingConfig`), but
-            // reads `SsaoConfig` directly (no `ResolvedSsao`/caster dependency — mirrors
-            // `sync_ddgi_light_gate`'s shape), so it carries no ordering edge here.
-            b.add_system(sync_ssao_light_gate);
-            // VB-SV0 rung S4: the SDF-on-mesh header-gate bridge — reads the boot-committed
-            // `ResolvedRenderPath`, RESOLVES `LightingConfig`'s two SV0 request bits against
-            // `vb_sdf_mesh_armable()`, and publishes the pair into the `_armed` fields the header
-            // packer reads. Same cross-plugin registration rationale as the gates above (it
-            // bridges `RenderPathPlugin`'s resolved carrier and `LightingPlugin`'s
-            // `LightingConfig`). The resolve is monotone downward — `request && capability` — so
-            // a world that never sets the request is untouched.
-            //
-            // It DOES carry an ordering edge (code-review P2-b), for the reason
-            // `sync_cluster_light_gate` below carries one and `sync_ssao_light_gate` above does
-            // not. Those two publish a bit that FOLLOWS an owner-set config, so an unordered fold
-            // packs a value one frame late and self-corrects. This gate publishes the result of a
-            // CAPABILITY resolve against a request the owner may set at any time: run after the
-            // fold, the first armed frame packs the PRE-resolve `_armed` pair — the wrong state,
-            // not a late one. `[vb_both_sdf]`-shaped fixtures dump a small fixed number of
-            // frames, so "one frame" is a frame that can be the measured one. `LightCollectSet`
-            // is the same by-name cross-plugin seam `sync_cluster_light_gate` uses (see its own
-            // comment below for why `collect_lights`' `SystemKey` is not nameable here).
-            b.add_system(sync_sv0_light_gate).before_set(LightCollectSet);
-            // VB-P1b-0: the L1 cluster header-gate bridge — reads `ClusterConfig` directly (no
-            // caster/resolved-carrier dependency, the SAME "no edge" shape `sync_ssao_light_gate`
-            // above carries for ITS OWN inputs). `ClusterConfig` is seeded by THIS fn (mirrors
-            // `LightingConfig` itself), so this bridge belongs alongside the other
-            // `sync_*_light_gate`s in this SAME closure rather than inside `LightingPlugin`/any
-            // render-path plugin.
-            //
-            // UNLIKE the sibling gates, this one DOES carry an explicit `.before_set` edge
-            // (code-review C1): `sync_csm_light_gate`/`sync_ssao_light_gate` feed the fold with
-            // only a SCALAR HEADER BIT, so a one-frame-stale read is merely a wrong bit (benign,
-            // self-correcting). This gate feeds a GPU BUFFER INDEX (`cluster_packed_dims`): on the
-            // very first frame `clusters_enabled` goes `true`, an unordered fold could pack
-            // `clusters_enabled=1` with STALE/ZERO dims (this gate hasn't run yet that frame), and
-            // the froxel resolve's `cluster_z_slice`/`cluster_linear_index` would then underflow to
-            // an out-of-bounds `ClusterGrid` index. That WAS real GPU UB with
-            // `robust_buffer_access` disabled (`device.rs`); as of VB-P1k all four `ClusterGrid`
-            // readers reject a zero-dims (or over-capacity) header and fall back to the in-bounds
-            // flat light scan, so the residue is a one-frame LIGHTING artefact rather than a
-            // device fault — this edge is now a correctness edge, not the only line against UB,
-            // and it stays for that reason. `.before_set(LightCollectSet)` is the SAME cross-plugin
-            // by-name seam `resolve_shadow_atlas`/`PunctualResolveSet` uses (`collect_lights`'s
-            // `SystemKey` is a closure-local in `LightingPlugin::build`, invisible here) — see
-            // `LightCollectSet`'s own doc.
-            b.add_system(sync_cluster_light_gate).before_set(LightCollectSet);
-            // The unified gather runs after BOTH the affine pack and the snap
-            // collapse (snap-before-gather is load-bearing — the gather reads the
-            // collapsed pair).
-            let snap = b.add_system(snap_apply).key();
-            b.add_system(gather_mesh_draws).after(pack).after(snap).in_set(VisibilitySet::Read);
-
-            // ── Every render reader runs after its writer (R4-frame-order) ──────────────────────
-            //
-            // Each edge below orders a reader after the system that writes what it reads, where
-            // the two are registered by different plugins and so can only meet by set name. None
-            // of these pairs had an ordering path before: each was decided by the executor's wave
-            // packing, which is a function of the whole graph, so an unrelated edge could flip
-            // it. MEASURED on the golden host: `gather_mesh_draws` ran before `visibility_sync`,
-            // drew 0 of 7 meshes on frame 0, and TAA carried that frame into its history on both
-            // feature legs; one edge added between two lighting systems flipped the pair on the
-            // `hwrt` leg only. Declared here, not in the plugins, because this is the one
-            // composition that populates every set named (an edge naming a memberless set warns
-            // `boyko-W1501`). Each is pinned by a `tests/host_orders_*.rs` gate that declares the
-            // reverse edge and expects the ordering cycle; `tests/host_frame_zero_draws_every_mesh.rs`
-            // pins the frame-0 consequence.
-            //
-            // `RenderEnabled`: `visibility_sync` (`VisibilitySet::Sync`) sets the bit through a
-            // deferred command; every system that only filters on `Enabled<RenderEnabled>` joins
-            // `VisibilitySet::Read`: both instance packs, `sync_prev_instance_model_cols`, and the
-            // caster and mesh gathers. The readers declare their writer here; the same order is
-            // also implied by the two `Validate` edges below, so this line alone cannot be made
-            // to fail (its gate goes red with this line and one of those deleted) — it stays as
-            // the readers' own declaration, which a transitive path is not.
-            b.configure_set(VisibilitySet::Read).after(VisibilitySet::Sync);
-            // `RenderEnabled`, the other writer (R4b-open-edges): `validate_asset_refs`
-            // (`VisibilitySet::Validate`) walks the rows `visibility_sync` enabled and clears the
-            // bit on a stale mesh row (`asset_refcount.rs`, `DisableStaleMeshCommand`), both
-            // through deferred commands. Validation after the sync, so a row it would skip as
-            // not-yet-enabled is not enabled right after it (a stale mesh would then stay enabled
-            // until `free_epoch` next advanced); the readers after validation, so a gather does
-            // not draw a row the validation disabled this frame. Validation cannot simply join
-            // `Read`: a member shared by two ordered sets is rejected (`boyko-B9004`).
-            b.configure_set(VisibilitySet::Validate).after(VisibilitySet::Sync);
-            b.configure_set(VisibilitySet::Read).after(VisibilitySet::Validate);
-            // `GlobalTransform`: both instance packs copy it into their instance columns, and
-            // `propagate_transforms` (in `CameraSet::Resolve`) writes it. The packs are also after
-            // propagation through `visibility_sync` (itself `.after(propagate)`), but that edge
-            // carries no data and is not this dependency's declaration.
-            b.configure_set(InstancePackSet).after(CameraSet::Resolve);
-            // `GlobalTransform`, the lights' (R4b-open-edges): `light_reconcile` derives each
-            // light's `direction` / `position` from it (`light_reconcile.rs`, the three
-            // `&GlobalTransform` queries in its signature, read in its three loops), and
-            // `propagate_transforms` writes it. Unordered, the frame-0 light table carried the
-            // identity pose's direction for a sun spawned with a posed `Transform` and an identity
-            // `GlobalTransform` (measured, `docs/OPEN-QUESTIONS.md` 2026-09-19 (b)); wherever the
-            // wrong order holds on a later frame (not measured), a moving light's pose trails its
-            // transform by one frame for as long as it moves.
-            b.configure_set(LightReconcileSet).after(CameraSet::Resolve);
-            // `ViewUniform`: written by `resolve_active_camera` (in `CameraSet::Resolve`), read by
-            // the CSM fit and by the punctual atlas ranking. Both halves are also implied today by
-            // other chains — the CSM half by the pack edge above (`InstancePackSet →
-            // gather_shadow_casters → reduce_caster_bounds → CsmResolveSet`) and, since R4b, both
-            // halves by the reconcile edges (`LightReconcileSet` after `CameraSet::Resolve`, and
-            // the fit / the resolve after `LightReconcileSet`, below) — so their gates pin the
-            // order rather than these lines alone (each goes red only with every path cut). They
-            // stay as the fit's and the resolve's own declarations, which those unrelated chains
-            // are not.
-            b.configure_set(CsmResolveSet).after(CameraSet::Resolve);
-            b.configure_set(PunctualResolveSet).after(CameraSet::Resolve);
-            // `DirectionalLight::direction`: written by `light_reconcile`, read by the CSM fit.
-            b.configure_set(CsmResolveSet).after(LightReconcileSet);
-            // `SpotLight` / `PointLight` `position` and `SpotLight::direction` (R4b-open-edges):
-            // written by `light_reconcile`, read by the punctual atlas ranking and fit
-            // (`shadow_atlas.rs`, `spot_priority` / `spot_input_from`). A ranking that runs first
-            // ranks a moving light from last frame's pose.
-            b.configure_set(PunctualResolveSet).after(LightReconcileSet);
-        });
+        // SDFDDGI host-hook: the Main frame systems are registered by a NAMED fn (a verbatim
+        // code motion of the former closure) so a headless test can run the PRODUCTION
+        // registration in a subset-composed world -- `app.update()` on a bare `EnginePlugins`
+        // panics (the runner, not `build`, inserts the world residents), and the ECS exposes no
+        // system-name introspection, so this is the only device-free way to prove a gate is
+        // registered (`sync_ddgi_light_gate` was not, for the whole I0..I7 ladder).
+        app.add_systems_cfg(register_main_frame_systems);
 
         // The D4 ordering seam: engine Fixed snapshots run AFTER user Fixed
         // gameplay, pinned BY NAME (no topological accident). R5 makes the seam
@@ -917,6 +781,230 @@ impl Plugin for EnginePlugins {
     fn name(&self) -> &'static str {
         "boyko_app::EnginePlugins"
     }
+}
+
+/// The `Main`-schedule frame systems `EnginePlugins` registers -- the affine pack, the caster
+/// gather, every `sync_*_light_gate` header bridge, the snap collapse and the unified draw
+/// gather -- as ONE builder fn (the body of the former `add_systems_cfg` closure, moved verbatim).
+///
+/// `pub` so an INTEGRATION test can run the PRODUCTION registration in a world composed of
+/// the same render plugins minus the window/runner (the `tests/camera_resolve.rs` subset
+/// precedent). That is what lets the SDFDDGI host-hook gate
+/// (`tests/ddgi_host_hook_registration.rs`) assert `sync_ddgi_light_gate` is registered HERE
+/// with its two ordering edges, rather than trusting a doc comment that says so. The gate
+/// cannot be a `#[cfg(test)] mod` in this file: `tests/host_ecs_entry_points_are_guarded.rs`
+/// forbids `app.update()` anywhere under `src/` as raw text, and the root reachability
+/// census's controls need the `CsmPlugin` registration to be spelled exactly once in this
+/// file (comments included — this sentence deliberately does not spell it) — both walk source
+/// as text and neither strips `cfg(test)`, by design.
+pub fn register_main_frame_systems(b: &mut ScheduleBuilder) {
+    let pack = b
+        .add_system(sync_instance_model_cols)
+        .in_set(InstancePackSet)
+        .in_set(VisibilitySet::Read)
+        .key();
+    // HW-RT rung 3b: `prev := curr` MUST run BEFORE the affine pack refreshes `curr`
+    // from this frame's moving `GlobalTransform`, so a mesh's motion vector is this
+    // frame's true per-object displacement (else `prev == curr`, zero motion, every
+    // box ghosts under its own motion). Dormant until a scene carries the
+    // `PrevInstanceModelCol` column (0%-gate).
+    #[cfg(feature = "hwrt")]
+    b.add_system(sync_prev_instance_model_cols).before(pack).in_set(VisibilitySet::Read);
+    // `add_gather_shadow_casters`, not `add_system(gather_shadow_casters)`: the helper
+    // chains `.after_set(AssetValidateSet)` (asset-streaming prereq (c)), the
+    // consumer-side pin of the validate -> gather edge that holds in any host; the
+    // `VisibilitySet::Read` membership is this host's own pin of the same order, plus
+    // the sync edge (R4b, the `configure_set` block below).
+    let casters =
+        add_gather_shadow_casters(b).after(pack).in_set(VisibilitySet::Read).key();
+    b.add_system(sync_csm_light_gate).after(casters);
+    // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5: `reduce_caster_bounds`
+    // is the UNWIRED EXPORTED API `CsmPlugin` deliberately does not register (mirrors
+    // `gather_shadow_casters` itself) — this is the app that co-registers it. `.after
+    // (casters)` folds THIS frame's finished gather output, not last frame's scratch
+    // (D7 — `CsmCasterScratch` is single-writer, `gather_shadow_casters` owns it).
+    // `.in_set(CsmFitSet)` gives `resolve_csm_cascades` (which joins `CsmResolveSet` in
+    // `CsmPlugin`, csm_plugin.rs:76) something to order against below. Without this
+    // registration `CsmCasterBounds` stays the `EMPTY` seed `CsmPlugin` inserts, so
+    // every `CsmFitMode` renders as `Fixed` (D7/T15) — never a panic, always a no-op.
+    b.add_system(reduce_caster_bounds).after(casters).in_set(CsmFitSet);
+    // `CsmFitSet → CsmResolveSet`: `resolve_csm_cascades` must observe THIS frame's
+    // folded bounds, not a one-frame-stale value (D11 — no accepted stagger, unlike
+    // the cold-owner-state cross-plugin staggers documented elsewhere in this file).
+    // Declared HERE (not inside `CsmPlugin`) because this closure is the first one that
+    // gives `CsmFitSet` a member; a `configure_set` inside `CsmPlugin` alone would warn
+    // W1501 (memberless set) in a bare-`CsmPlugin` world (D11). `App::add_systems_cfg`
+    // threads the SAME Main builder through every closure/plugin (app.rs:313-319), so
+    // this edge resolves against `CsmFitSet`'s membership above and `CsmResolveSet`'s
+    // membership in `CsmPlugin` regardless of registration order.
+    b.configure_set(CsmResolveSet).after(CsmFitSet);
+    // `LightSeedSet → CsmResolveSet`: the fit takes the first ENABLED sun (defect R2b), and
+    // the exclusive light seed is what enables a newly added light. Unordered, on the first
+    // frame of a sun spawned before the first update, the fit ran before the seed in 300 of
+    // 300 measured runs and published `ResolvedCsm::DISABLED` while `collect_lights`
+    // (ordered after the seed) already lit with that sun. Declared here for the same memberless-set reason as the edge above:
+    // `LightingPlugin` and `CsmPlugin` each declare membership only, and this closure runs
+    // in the one composition that holds both. No cycle: nothing is ordered after
+    // `resolve_csm_cascades` (its key is never taken, and no edge names `CsmResolveSet` as
+    // a predecessor), so no path leads from it back to the seed. Pinned by
+    // `tests/host_orders_csm_fit_after_light_seed.rs`, which goes red without this line.
+    b.configure_set(CsmResolveSet).after(LightSeedSet);
+    // The punctual header-gate ⇄ depth-pass lock-step (mirrors the csm sync): after the
+    // SAME caster gather so the gate's caster predicate is THIS frame's. It reads
+    // `ResolvedShadowAtlas.mode_word` (written by `resolve_shadow_atlas` in
+    // ShadowAtlasPlugin, ordered earlier by add-order) — the resolve→sync edge follows the
+    // same cross-plugin add-order discipline as csm (self-correcting under a one-frame lag,
+    // gated off by the default DISABLED ShadowConfig).
+    b.add_system(sync_punctual_light_gate).after(casters);
+    // Render P7-Q2: the SSAO header-gate bridge — mirrors `sync_csm_light_gate`/
+    // `sync_punctual_light_gate`'s cross-plugin registration (it bridges
+    // `SsaoPlugin`'s `SsaoConfig` and `LightingPlugin`'s `LightingConfig`), but
+    // reads `SsaoConfig` directly (no `ResolvedSsao`/caster dependency), so it
+    // carries no ordering edge here — UNLIKE `sync_ddgi_light_gate` below, which reads
+    // a resolved carrier and needs both edges.
+    b.add_system(sync_ssao_light_gate);
+    // SDFDDGI host-hook (the defect this line repairs): the GI header-gate bridge — the SOLE
+    // production writer of `LightingConfig::ddgi_indirect` (LightBuf word-7 bit 4). It was
+    // registered by NO host for the whole I0..I7 ladder, so the bit was never set, the resolve
+    // never entered `if (ddgi_mode != 0u)`, and the probe atlas the update pass wrote every
+    // enabled frame was never sampled — the feature drew zero pixels.
+    //
+    // BOTH edges are load-bearing, and neither is decoration:
+    //
+    // * `.after_set(DdgiResolveSet)` — the gate reads the `ResolvedDdgi` CARRIER (config + the
+    //   R9c boot freeze + the device caps, folded once by `resolve_ddgi_grid_gated`), not any
+    //   config of its own. Run before the resolve it would read LAST frame's carrier and the
+    //   bit would land a frame late on every flip.
+    // * `.before_set(LightCollectSet)` — `collect_lights` consumes `LightTableDirty` and packs
+    //   word 7 in the SAME pass, so without this edge the flipped bit reaches the GPU header a
+    //   frame late. That matters here more than for `sync_ssao_light_gate` (which carries no
+    //   edge): a late bit of 1 over a carrier that has already gone DISABLED is a frame whose
+    //   header says "sample the grid" — the exact shape the single-carrier design exists to
+    //   make impossible. Same by-name cross-plugin seam `sync_cluster_light_gate`/
+    //   `sync_sv0_light_gate` use (`collect_lights`' `SystemKey` is not nameable here).
+    b.add_system(sync_ddgi_light_gate).after_set(DdgiResolveSet).before_set(LightCollectSet);
+    // VB-SV0 rung S4: the SDF-on-mesh header-gate bridge — reads the boot-committed
+    // `ResolvedRenderPath`, RESOLVES `LightingConfig`'s two SV0 request bits against
+    // `vb_sdf_mesh_armable()`, and publishes the pair into the `_armed` fields the header
+    // packer reads. Same cross-plugin registration rationale as the gates above (it
+    // bridges `RenderPathPlugin`'s resolved carrier and `LightingPlugin`'s
+    // `LightingConfig`). The resolve is monotone downward — `request && capability` — so
+    // a world that never sets the request is untouched.
+    //
+    // It DOES carry an ordering edge (code-review P2-b), for the reason
+    // `sync_cluster_light_gate` below carries one and `sync_ssao_light_gate` above does
+    // not. Those two publish a bit that FOLLOWS an owner-set config, so an unordered fold
+    // packs a value one frame late and self-corrects. This gate publishes the result of a
+    // CAPABILITY resolve against a request the owner may set at any time: run after the
+    // fold, the first armed frame packs the PRE-resolve `_armed` pair — the wrong state,
+    // not a late one. `[vb_both_sdf]`-shaped fixtures dump a small fixed number of
+    // frames, so "one frame" is a frame that can be the measured one. `LightCollectSet`
+    // is the same by-name cross-plugin seam `sync_cluster_light_gate` uses (see its own
+    // comment below for why `collect_lights`' `SystemKey` is not nameable here).
+    b.add_system(sync_sv0_light_gate).before_set(LightCollectSet);
+    // VB-P1b-0: the L1 cluster header-gate bridge — reads `ClusterConfig` directly (no
+    // caster/resolved-carrier dependency, the SAME "no edge" shape `sync_ssao_light_gate`
+    // above carries for ITS OWN inputs). `ClusterConfig` is seeded by THIS fn (mirrors
+    // `LightingConfig` itself), so this bridge belongs alongside the other
+    // `sync_*_light_gate`s in this SAME closure rather than inside `LightingPlugin`/any
+    // render-path plugin.
+    //
+    // UNLIKE the sibling gates, this one DOES carry an explicit `.before_set` edge
+    // (code-review C1): `sync_csm_light_gate`/`sync_ssao_light_gate` feed the fold with
+    // only a SCALAR HEADER BIT, so a one-frame-stale read is merely a wrong bit (benign,
+    // self-correcting). This gate feeds a GPU BUFFER INDEX (`cluster_packed_dims`): on the
+    // very first frame `clusters_enabled` goes `true`, an unordered fold could pack
+    // `clusters_enabled=1` with STALE/ZERO dims (this gate hasn't run yet that frame), and
+    // the froxel resolve's `cluster_z_slice`/`cluster_linear_index` would then underflow to
+    // an out-of-bounds `ClusterGrid` index. That WAS real GPU UB with
+    // `robust_buffer_access` disabled (`device.rs`); as of VB-P1k all four `ClusterGrid`
+    // readers reject a zero-dims (or over-capacity) header and fall back to the in-bounds
+    // flat light scan, so the residue is a one-frame LIGHTING artefact rather than a
+    // device fault — this edge is now a correctness edge, not the only line against UB,
+    // and it stays for that reason. `.before_set(LightCollectSet)` is the SAME cross-plugin
+    // by-name seam `resolve_shadow_atlas`/`PunctualResolveSet` uses (`collect_lights`'s
+    // `SystemKey` is a closure-local in `LightingPlugin::build`, invisible here) — see
+    // `LightCollectSet`'s own doc.
+    b.add_system(sync_cluster_light_gate).before_set(LightCollectSet);
+    // The unified gather runs after BOTH the affine pack and the snap
+    // collapse (snap-before-gather is load-bearing — the gather reads the
+    // collapsed pair).
+    let snap = b.add_system(snap_apply).key();
+    // `add_gather_mesh_draws`: the helper chains `.after_set(AssetValidateSet)` (see the
+    // caster gather above); `VisibilitySet::Read` is this host's pin.
+    add_gather_mesh_draws(b).after(pack).after(snap).in_set(VisibilitySet::Read);
+
+    // ── Every render reader runs after its writer (R4-frame-order) ──────────────────────
+    //
+    // Each edge below orders a reader after the system that writes what it reads, where
+    // the two are registered by different plugins and so can only meet by set name. None
+    // of these pairs had an ordering path before: each was decided by the executor's wave
+    // packing, which is a function of the whole graph, so an unrelated edge could flip
+    // it. MEASURED on the golden host: `gather_mesh_draws` ran before `visibility_sync`,
+    // drew 0 of 7 meshes on frame 0, and TAA carried that frame into its history on both
+    // feature legs; one edge added between two lighting systems flipped the pair on the
+    // `hwrt` leg only. Declared here, not in the plugins, because this is the one
+    // composition that populates every set named (an edge naming a memberless set warns
+    // `boyko-W1501`). Each is pinned by a `tests/host_orders_*.rs` gate that declares the
+    // reverse edge and expects the ordering cycle; `tests/host_frame_zero_draws_every_mesh.rs`
+    // pins the frame-0 consequence.
+    //
+    // `RenderEnabled`: `visibility_sync` (`VisibilitySet::Sync`) sets the bit through a
+    // deferred command; every system that only filters on `Enabled<RenderEnabled>` joins
+    // `VisibilitySet::Read`: both instance packs, `sync_prev_instance_model_cols`, and the
+    // caster and mesh gathers. The readers declare their writer here; the same order is
+    // also implied by the two `Validate` edges below, so this line alone cannot be made
+    // to fail (its gate goes red with this line and one of those deleted) — it stays as
+    // the readers' own declaration, which a transitive path is not.
+    b.configure_set(VisibilitySet::Read).after(VisibilitySet::Sync);
+    // `RenderStale` / `MaterialStale` (R4b-open-edges, re-based on the asset-validate
+    // prereqs): `validate_asset_refs` (`VisibilitySet::Validate`) writes the two stale
+    // bits through deferred commands (`asset_refcount.rs`, `SetStaleCommand`), and the
+    // readers filter on them (`Disabled<RenderStale>` in both gathers), so the readers
+    // run after validation or a gather draws a row the validation marked stale this
+    // frame — the same order the gather helpers pin per consumer with
+    // `.after_set(AssetValidateSet)`; this set edge covers the instance packs as well.
+    // Validation after the sync: since the prereq lane, validation no longer reads
+    // `RenderEnabled` (its queries do not filter on it, so a hidden row's stale bit is
+    // maintained while hidden), and this edge therefore carries no data today; it stays
+    // as the declared phase order R4b introduced, pinned by
+    // `tests/host_orders_asset_validation_after_visibility_sync.rs`, and dropping it
+    // is a ruling for the host's owner, not a merge. Validation cannot simply join
+    // `Read`: a member shared by two ordered sets is rejected (`boyko-B9004`).
+    b.configure_set(VisibilitySet::Validate).after(VisibilitySet::Sync);
+    b.configure_set(VisibilitySet::Read).after(VisibilitySet::Validate);
+    // `GlobalTransform`: both instance packs copy it into their instance columns, and
+    // `propagate_transforms` (in `CameraSet::Resolve`) writes it. The packs are also after
+    // propagation through `visibility_sync` (itself `.after(propagate)`), but that edge
+    // carries no data and is not this dependency's declaration.
+    b.configure_set(InstancePackSet).after(CameraSet::Resolve);
+    // `GlobalTransform`, the lights' (R4b-open-edges): `light_reconcile` derives each
+    // light's `direction` / `position` from it (`light_reconcile.rs`, the three
+    // `&GlobalTransform` queries in its signature, read in its three loops), and
+    // `propagate_transforms` writes it. Unordered, the frame-0 light table carried the
+    // identity pose's direction for a sun spawned with a posed `Transform` and an identity
+    // `GlobalTransform` (measured, `docs/OPEN-QUESTIONS.md` 2026-09-19 (b)); wherever the
+    // wrong order holds on a later frame (not measured), a moving light's pose trails its
+    // transform by one frame for as long as it moves.
+    b.configure_set(LightReconcileSet).after(CameraSet::Resolve);
+    // `ViewUniform`: written by `resolve_active_camera` (in `CameraSet::Resolve`), read by
+    // the CSM fit and by the punctual atlas ranking. Both halves are also implied today by
+    // other chains — the CSM half by the pack edge above (`InstancePackSet →
+    // gather_shadow_casters → reduce_caster_bounds → CsmResolveSet`) and, since R4b, both
+    // halves by the reconcile edges (`LightReconcileSet` after `CameraSet::Resolve`, and
+    // the fit / the resolve after `LightReconcileSet`, below) — so their gates pin the
+    // order rather than these lines alone (each goes red only with every path cut). They
+    // stay as the fit's and the resolve's own declarations, which those unrelated chains
+    // are not.
+    b.configure_set(CsmResolveSet).after(CameraSet::Resolve);
+    b.configure_set(PunctualResolveSet).after(CameraSet::Resolve);
+    // `DirectionalLight::direction`: written by `light_reconcile`, read by the CSM fit.
+    b.configure_set(CsmResolveSet).after(LightReconcileSet);
+    // `SpotLight` / `PointLight` `position` and `SpotLight::direction` (R4b-open-edges):
+    // written by `light_reconcile`, read by the punctual atlas ranking and fit
+    // (`shadow_atlas.rs`, `spot_priority` / `spot_input_from`). A ranking that runs first
+    // ranks a moving light from last frame's pose.
+    b.configure_set(PunctualResolveSet).after(LightReconcileSet);
 }
 
 /// Parses the `BOYKO_RENDER_PATH` / `BOYKO_GEOMETRY_LEGS` dev/test launch env vars into a

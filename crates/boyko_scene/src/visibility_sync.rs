@@ -143,14 +143,17 @@ impl Command for SetRenderEnabled {
 /// `visibility_sync` (and its apply window) must run BEFORE every system that
 /// filters on `Enabled<RenderEnabled>` — the instance packs
 /// ([`sync_gpu_3d_instances`](../../boyko_render/gpu3d_system/fn.sync_gpu_3d_instances.html)
-/// among them), the mesh and shadow-caster gathers, and the asset-ref validation.
+/// among them) and the mesh and shadow-caster gathers.
 /// Their `SystemKey`s live in `boyko_render`'s plugins, so the edges are pinned by
 /// name: this system joins [`VisibilitySet::Sync`](crate::sets::VisibilitySet::Sync),
-/// the validation — which also clears the bit on a stale mesh row, through a command
-/// of its own — joins [`VisibilitySet::Validate`](crate::sets::VisibilitySet::Validate),
-/// the other readers join [`VisibilitySet::Read`](crate::sets::VisibilitySet::Read), and
-/// the composing host configures `Validate.after(Sync)`, `Read.after(Validate)` and
-/// `Read.after(Sync)` (`boyko_app::EnginePlugins` does).
+/// the readers join [`VisibilitySet::Read`](crate::sets::VisibilitySet::Read), and the
+/// asset-ref validation — which neither reads nor writes this bit since the
+/// asset-validate prerequisites, but writes the `RenderStale` / `MaterialStale` bits
+/// the gathers ALSO filter on, through a command of its own — joins
+/// [`VisibilitySet::Validate`](crate::sets::VisibilitySet::Validate). The composing host
+/// configures `Read.after(Sync)`, `Read.after(Validate)` and `Validate.after(Sync)`
+/// (`boyko_app::EnginePlugins` does; the last edge carries no data today and stays as
+/// the declared phase order, pending the host owner's ruling).
 /// The `Changed` gate does NOT make a missing edge self-correcting on a
 /// spawn: a reader that runs first sees the bit clear on the entity's first frame,
 /// and in the shipped host that was a frame 0 with no meshes drawn.

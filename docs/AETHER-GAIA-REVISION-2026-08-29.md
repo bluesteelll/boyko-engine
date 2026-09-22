@@ -5,9 +5,13 @@ revision changed, what it refuted, and in what order the remaining work can proc
 themselves live in [`aether-v2/`](aether-v2/CAMPAIGN.md) and [`gaia/`](gaia/CAMPAIGN.md); this file
 does not duplicate them — it says what is now true across both, and what is owed.
 
-> **Nothing in this revision is committed.** Owner instruction 2026-08-28: nothing is committed
-> without explicit approval. Owner instruction 2026-08-29: *update all the plans and write them
-> down*. The plans are written into the working tree; `HEAD` is unchanged at `a4591c56`.
+> **Written under the instruction that nothing is committed without explicit approval** (owner,
+> 2026-08-28), then *update all the plans and write them down* (owner, 2026-08-29).
+> ⚠ **CORRECTED 2026-09-03: this paragraph used to end "the plans are written into the working
+> tree; `HEAD` is unchanged at `a4591c56`", and that has been false since the day after it was
+> written.** `97c504c8` committed exactly these files — including this one, as an `A` — and is the
+> head of `feat/multi-paradigm-render`. A record that misstates its own commit state is the same
+> defect class this revision exists to remove, one layer up.
 
 ## What was done
 
@@ -137,7 +141,7 @@ and finds out only by acting on the stale one.
 | [`gaia/CAMPAIGN.md`](gaia/CAMPAIGN.md) | G4's vacuous gate replaced; G1/G2 gates made text-free; G7's count oracle; ballots F8/F9/F10 added; F4 widened |
 | [`gaia/DECISIONS.md`](gaia/DECISIONS.md) | the reference taxonomy's missing third kind recorded (→ GB-3); a third forbidden binding-source row (dense/bitset sources are invisible to the change gate); per-axis bake-budget fixtures |
 | [`gaia/LANGUAGE.md`](gaia/LANGUAGE.md) | **ratified-stale**; interim drift-reduction annotations only — `power`, `range`, the colour arity, the `position` ballot. The rewrite into the reworked syntax is owner-gated |
-| [`gaia/PENDING-SYNTAX-PLAN.md`](gaia/PENDING-SYNTAX-PLAN.md) | **new, untracked.** REV 2: rulings R1–R7 as amended, fix Tiers 0–4, the K1–K16 record, and the id-namespace notes |
+| [`gaia/PENDING-SYNTAX-PLAN.md`](gaia/PENDING-SYNTAX-PLAN.md) | REV 2: rulings R1–R7 as amended, fix Tiers 0–4, the K1–K16 record, and the id-namespace notes. ⚠ **CORRECTED 2026-09-03: this cell said "new, untracked".** `git log --name-status 97c504c8` shows the file as an `A` — it is tracked on both branches. What it lacks is the owner's APPROVAL, not a commit |
 | [`OPEN-QUESTIONS.md`](OPEN-QUESTIONS.md) + [`ru/`](ru/OPEN-QUESTIONS.md) | the 32 ballot bodies; five that were cited but never written; F4 rewritten to the widened question; a corrupted Russian entry restored |
 
 ## Work order
@@ -146,20 +150,37 @@ and finds out only by acting on the stale one.
 — `KE11`'s *disposition* is on ballot AB-6, but its red tests land regardless), `R2`
 (`state_chart!` and the route merge).
 
-**Blocked, with the blocker named:**
+**Blocked, with the blocker named.** ⚠ **This table had FIVE filing errors, repaired 2026-09-03
+and left visible with strikethrough rather than silently rewritten** — two rungs whose blocker was
+omitted (G6 ← F5, G7 ← F6), one ballot filed against no rung at all (F9), one filed against half
+its own scope (GB-2, whose G5 half was dropped), and one filed against half its own scope in the
+other direction (GB-8, whose G0 half turned out to carry the work). A sixth, GB-6 against G7 while
+its body names G6, had been caught only on `feat/threadpool-ke16`. Twelve of the fourteen Gaia
+ballots have since been answered; the strikethroughs record which:
 
 | Rung | Waits on |
 |---|---|
 | Aether R3 | AB-1, ~~AB-2~~ (event construct) · AB-6, ~~AB-8~~, AB-11, AB-13 (the rest of the surface) · AB-10 on its keyword surface. ~~AB-8~~ ✅ **RULED 2026-08-30** → [`aether-v2/DECISIONS.md`](aether-v2/DECISIONS.md) **C5a**: `each par` → `par_iter_mut` (measured 2048/2048 tracked vs 0/2048 chunked; 1.17–1.47× ≈ 1–2 % of the pass); `soa par` exists and is the only route to the chunked driver; batching key not author-visible |
 | Aether R4 | AB-3, AB-4 |
 | Aether R5 | ~~AB-5~~, AB-7. ~~AB-5~~ ✅ **RULED 2026-08-30** → **M4a**: the router uses `Query::get_mut`; the decisive ground is that `get_component_mut` forces an **exclusive** system, which takes **no param tuple** and so cannot hold `EventReader<E>` — it would have to read via `events_of`, silent on an unregistered type and one frame stale. **AB-7 remains the owner's**, but its candidate driver-independent ground was **measured and REFUTED** (both deposit APIs carry working dense arms; no layout const-assert exists) |
-| Aether R8 | ~~AB-9~~ ✅ **RULED 2026-08-30** (merge pulled forward as its own rung before R8; AIR-06(b) not descoped; engine-crate reflection opt-in attached to R8's Lands) · ~~GB-8~~ ✅ **RULED 2026-08-30** — and the ruling **splits it**: the id census widens to all of `docs/` at **G0**, not R8; only the **link** census lands at R8, with 59 measured dead targets as its red-first evidence. R8 is no longer blocked by either |
-| Gaia G1 | F1, GB-5 |
-| Gaia G2–G3 | ~~GB-2~~ ✅ **RULED 2026-08-30** — the colour transfer function is a property of the **destination field**, not of the literal (sRGB EOTF into a linear float colour, identity into a `u32` STRAIGHT-RGBA8 field, coded refusal into a device-encoded packed carrier); the arity half, which nothing carried, is settled on the same ruling by mirroring Aether's shipped `ColorLit`. ⚠ Carries a **fixture constraint** into G2: the two routes agree at bytes 0 and 255 only, so a white or black colour fixture cannot fail · GB-3 |
-| Gaia G4 | ~~GB-1~~ ✅ **RULED 2026-08-30** — a template expansion occupies **no ladder layer**: it is one step on the inheritance-**depth** axis, ranked where `extends` ranks, and resolution is depth-then-ladder; an unlabeled write is `base`. The ratified ladder is untouched, and finding K2 is dissolved rather than diagnosed · GB-4 |
-| Gaia G5 | F2, F3 |
-| Gaia G6 | F4 (widened) |
-| Gaia G7 | GB-6 · ~~GB-7~~ ✅ **RULED 2026-08-30** — **no wall-clock companion; the count gate stands alone.** Measured: the timed loop's inputs are archetype count, bound-**type** count and row count, and **not** the binding count (`dynamic_bound_ids` is a deduplicated type set), so the still frame is 332 ns at **+0% for 10× the bindings** but **+82% for 2× the rows**; at a 100 ns timer step the frame is ~3.3 ticks with a 15-25× single-call tail, and the red-first delta (0 → 1 sink write) sits at signal-to-noise 0.05-0.50. A clock over the **scan itself**, world pinned, belongs to GK-2 · ~~GB-9~~ ✅ **RULED 2026-08-30** — the `Or`-over-dense emission ban is **deleted** and replaced by a ban on a bind source or change-gate over a dense/bitset component (GK-2's still-live ground); the three `Or`-dense shapes R0 left uncovered, plus KE13, are filed against G7's codegen rules as the shapes with no oracle |
+| Aether R8 | ~~AB-9~~ ✅ **RULED 2026-08-30** (merge pulled forward as its own rung before R8; AIR-06(b) not descoped; engine-crate reflection opt-in attached to R8's Lands) · ~~GB-8~~ ✅ **RULED 2026-08-30** — and the ruling **splits it**: the id census widens to all of `docs/` at **G0**, not R8; only the **link** census lands at R8, with 59 measured dead targets as its red-first evidence. R8 is no longer blocked by either — **Filing repair kept from `feat/multi-paradigm-render` (2026-09-03):** AB-9 · ~~GB-8~~ — ⚠ **MIS-FILED, and the ruling splits it**: GB-8's ID census lands at **Gaia G0**, and only the LINK census rides R8. Filing it against R8 alone dropped the half that carries the work |
+| Gaia G0 | — (GB-8's id-census half, per its ruling) |
+| Gaia G1 | ~~F1~~ · ~~GB-5~~ — both RULED 2026-08-30; the field-table freeze is unblocked |
+| Gaia G2–G3 | ~~GB-2~~ · ~~GB-3~~ — both RULED. ⚠ **MIS-FILED**: GB-2's own body says it blocks **G2/G5**, and this row dropped the G5 half. Still open on G2: **F9's residual**, and on G3: **F8** — **Ruling body kept from `feat/threadpool-ke16` by the merge, 2026-09-10:** ~~GB-2~~ ✅ **RULED 2026-08-30** — the colour transfer function is a property of the **destination field**, not of the literal (sRGB EOTF into a linear float colour, identity into a `u32` STRAIGHT-RGBA8 field, coded refusal into a device-encoded packed carrier); the arity half, which nothing carried, is settled on the same ruling by mirroring Aether's shipped `ColorLit`. ⚠ Carries a **fixture constraint** into G2: the two routes agree at bytes 0 and 255 only, so a white or black colour fixture cannot fail · GB-3 |
+| Gaia G4 | ~~GB-1~~ · ~~GB-4~~ — both RULED — **Ruling body kept from `feat/threadpool-ke16` by the merge, 2026-09-10:** ~~GB-1~~ ✅ **RULED 2026-08-30** — a template expansion occupies **no ladder layer**: it is one step on the inheritance-**depth** axis, ranked where `extends` ranks, and resolution is depth-then-ladder; an unlabeled write is `base`. The ratified ladder is untouched, and finding K2 is dissolved rather than diagnosed · GB-4 |
+| Gaia G5 | ~~F2~~ · ~~F3~~ — both ANSWERED. ⚠ Plus **GB-2**'s G5 half, which this table never filed |
+| Gaia G6 | ~~F4 (widened)~~ · ⚠ **AND F5, which this row omitted** — F5 blocks G6 by its own body, and its ruling REWRITES G6's scope. Both ANSWERED 2026-08-30 |
+| Gaia G7 | ~~GB-7~~ · ~~GB-9~~ — both RESOLVED. ⚠ **AND F6, which this row omitted** (F6 blocks G7 by its own body; RULED 2026-08-30). ⚠ **GB-6 was MIS-FILED here**: its own body names **G6**, not G7 — and it is now DISPOSED (2026-09-03), its (b) half moving to **Aether R3**. ⚠ **G7's POSITION changed 2026-09-03**: the owner ruled that editor v1 authors UI documents too, so G7 moves UP the ladder rather than sitting after G6, and the `.ui` deletion census is written before the windowed pass. Its blocker is unchanged — UI reaching the screen, which is a wiring gap, not a missing plugin — **Ruling body kept from `feat/threadpool-ke16` by the merge, 2026-09-10:** GB-6 · ~~GB-7~~ ✅ **RULED 2026-08-30** — **no wall-clock companion; the count gate stands alone.** Measured: the timed loop's inputs are archetype count, bound-**type** count and row count, and **not** the binding count (`dynamic_bound_ids` is a deduplicated type set), so the still frame is 332 ns at **+0% for 10× the bindings** but **+82% for 2× the rows**; at a 100 ns timer step the frame is ~3.3 ticks with a 15-25× single-call tail, and the red-first delta (0 → 1 sink write) sits at signal-to-noise 0.05-0.50. A clock over the **scan itself**, world pinned, belongs to GK-2 · ~~GB-9~~ ✅ **RULED 2026-08-30** — the `Or`-over-dense emission ban is **deleted** and replaced by a ban on a bind source or change-gate over a dense/bitset component (GK-2's still-live ground); the three `Or`-dense shapes R0 left uncovered, plus KE13, are filed against G7's codegen rules as the shapes with no oracle |
+| Gaia G2 / G6 | ⚠ **F9, which appeared against NO rung in this table at all** though its own body, `gaia/CAMPAIGN.md` and PENDING Part D all say G2/G6. Partly ruled; its residual VALUES question is still the owner's and blocks **G2** |
+| Aether R3 | ⚠ **GB-6(b)**, moved here 2026-09-03: an Aether construct that toggles a flag |
+
+> **Merge note, 2026-09-10 (`merge/ke16-into-render`).** The two branches both edited this
+> table. `feat/threadpool-ke16` carried the RULING BODIES written where the rulings were
+> decided; `feat/multi-paradigm-render` carried the 2026-09-03 FILING REPAIRS and the later
+> dispositions. Both are kept above, row by row. Three of ke16's rows stated only the
+> pre-ruling open state and are superseded by the repaired rows above rather than repeated:
+> `| Gaia G1 | F1, GB-5 |`, `| Gaia G5 | F2, F3 |` and `| Gaia G6 | F4 (widened) |`. They are
+> recorded here verbatim so nothing this merge removed is unrecoverable from the file itself.
 
 **Not a ballot — design debt inside R3**, routed to the architect rather than the owner. Neither
 `bundle` nor `relation` may be declared done while these stand:

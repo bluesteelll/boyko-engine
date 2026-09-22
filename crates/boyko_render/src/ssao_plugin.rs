@@ -32,8 +32,8 @@ use crate::ssao_config::{ResolvedSsao, SsaoConfig, resolve_ssao_policy};
 ///
 /// The resolve's `ssao_mode` header gate is a SEPARATE seam armed by
 /// [`sync_ssao_light_gate`](crate::ssao_config::sync_ssao_light_gate), registered by the
-/// composing app (NOT by this plugin — see that system's doc for why), mirroring
-/// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate).
+/// composing app (NOT by this plugin — see that system's doc for why), the same app-wired
+/// bridge shape as [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate).
 #[derive(Default)]
 pub struct SsaoPlugin;
 

@@ -103,7 +103,7 @@ pub(crate) struct FrameMeta {
     pub raster_fwd: Option<[f32; 3]>,
 }
 
-/// The hwrt half of a frame's state line — what the runner's 5d'' step uploaded
+/// The hwrt half of a frame's state line — what the runner's 5d''' step uploaded
 /// into the HWRT shadow-params UBO this frame. `None` on a software build or a
 /// non-RT device (the UBO ring is not minted there).
 #[derive(Clone, Copy, Debug)]

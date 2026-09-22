@@ -22,7 +22,8 @@
 //!
 //! Whether the GI resolve runs is keyed off [`DdgiConfig::ddgi_indirect`], the 0%-gate
 //! anchor (default `false`). [`DdgiConfig::enabled`] is a derived predicate, not stored
-//! state — later rungs also fold in "dims nonzero".
+//! state — it ANDs in [`DdgiConfig::grid_is_sampleable`] ("dims nonzero" plus the spacing
+//! validity the whole GI path's `mode_word == 1 ⇒ inv_spacing > 0` invariant rests on).
 //!
 //! # The 0%-gate
 //!
@@ -74,13 +75,15 @@ pub struct DdgiConfig {
     /// The minimum world corner of probe `(0,0,0)` — the grid AABB origin (Decision D1,
     /// world-fixed). The AABB spans `origin .. origin + spacing * (dims - 1)`.
     pub origin: [f32; 3],
-    /// The world-space distance between adjacent probes (uniform on all axes). `> 0`;
-    /// the resolve's world→probe index divides by this (carried as `inv_spacing` in
-    /// [`ResolvedDdgi`] so the per-pixel path is div-free).
+    /// The world-space distance between adjacent probes (uniform on all axes). MUST be
+    /// normal and positive — the resolve's world→probe index divides by this (carried as
+    /// `inv_spacing` in [`ResolvedDdgi`] so the per-pixel path is div-free). Anything else
+    /// (zero, negative, NaN, ±inf, subnormal) DISABLES the config via
+    /// [`Self::grid_is_sampleable`] rather than reaching the GPU.
     pub spacing: f32,
     /// The probe count per axis (`[x, y, z]`). Owner-locked default `[16, 8, 16]` = 2048
-    /// probes. A zero dimension is a degenerate (empty) grid — later rungs fold "dims
-    /// nonzero" into [`Self::enabled`].
+    /// probes. A zero dimension is a degenerate (empty) grid and DISABLES the config —
+    /// [`Self::grid_is_sampleable`] folds "dims nonzero" into [`Self::enabled`].
     pub dims: [u32; 3],
 }
 
@@ -101,14 +104,53 @@ impl Default for DdgiConfig {
 }
 
 impl DdgiConfig {
-    /// Whether the GI resolve runs — the structural predicate. At I0 this is exactly
-    /// [`Self::ddgi_indirect`] (the 0%-gate anchor); a later rung ANDs in "dims nonzero"
-    /// (a degenerate grid resolves nothing to sample). False ⇒ the 0%-gate (no probe
+    /// Whether the GI resolve runs — the structural predicate: the [`Self::ddgi_indirect`]
+    /// 0%-gate anchor AND [`Self::grid_is_sampleable`] (the promised "dims nonzero" fold, plus
+    /// the spacing validity the lane's invariant rests on). False ⇒ the 0%-gate (no probe
     /// update, the resolve's GI term off). Mirrors
     /// [`CsmConfig::enabled`](crate::csm_config::CsmConfig::enabled).
+    ///
+    /// THIS is where the degenerate clamp lives (W1), and it is the only place: every
+    /// downstream predicate — [`resolve_ddgi`], the caps clamp
+    /// ([`resolve_ddgi_grid_clamped`](crate::ddgi_update::resolve_ddgi_grid_clamped)), the R9c
+    /// freeze fold ([`resolve_ddgi_grid_frozen`](crate::ddgi_update::resolve_ddgi_grid_frozen))
+    /// and the host's boot freeze snapshot — funnels through it, so a config the resolve
+    /// cannot sample is DISABLED everywhere rather than at each reader's discretion.
     #[inline]
     pub fn enabled(&self) -> bool {
-        self.ddgi_indirect
+        self.ddgi_indirect && self.grid_is_sampleable()
+    }
+
+    /// Whether the grid params yield a sampleable volume — i.e. whether an ENABLED carrier
+    /// derived from this config would carry a FINITE, POSITIVE `inv_spacing` over a non-empty
+    /// probe lattice.
+    ///
+    /// # Why this is a correctness clamp and not a nicety (W1)
+    ///
+    /// The lane's load-bearing invariant is `header bit == 1 ⇒ ddgi_mode_word == 1 ⇒
+    /// inv_spacing > 0`: the resolve shader recomputes `spacing = 1.0 / inv_spacing`
+    /// (`ddgi_resolve.hlsli`) and then `origin + float3(c) * spacing`. An `inv_spacing` of `0`
+    /// makes that `+inf` and the probe position NaN at `c == 0`; a NaN inverts under fast-math
+    /// `NMin`/`NMax`, so `clamp(NaN, 0, 1)` is `0` — a BLACK pixel on every `is_sdf_lit`
+    /// receiver. Zeroing the reciprocal at the pack site would produce exactly that carrier, so
+    /// the config is DISABLED instead.
+    ///
+    /// `is_normal()` is the exact predicate wanted, not a stylistic choice: it rejects NaN,
+    /// ±inf, ±0 AND subnormals, and a positive subnormal is the non-obvious case — `1.0 /
+    /// 1.0e-40` overflows to `+inf`, and `(p - origin) * inf` is NaN at `p == origin`. Over the
+    /// remaining (normal, positive) domain the reciprocal is finite and positive for every
+    /// input: `1.0 / f32::MIN_POSITIVE` ≈ `8.5e37` and `1.0 / f32::MAX` ≈ `2.9e-39` (subnormal
+    /// but nonzero), so both ends stay in range.
+    ///
+    /// A zero dimension is an empty grid: there is no probe to blend, and the shader's
+    /// `max(dims, 1u)` would silently sample probe 0 as if the volume existed.
+    #[inline]
+    pub fn grid_is_sampleable(&self) -> bool {
+        self.spacing.is_normal()
+            && self.spacing > 0.0
+            && self.dims[0] != 0
+            && self.dims[1] != 0
+            && self.dims[2] != 0
     }
 }
 
@@ -122,13 +164,19 @@ impl DdgiConfig {
 ///
 /// The grid is WORLD-FIXED (Decision D1), so this carrier is CAMERA-INDEPENDENT: unlike
 /// [`ResolvedCsm`](crate::csm_config::ResolvedCsm) /
-/// [`ResolvedShadowAtlas`](crate::shadow_atlas::ResolvedShadowAtlas) it
-/// needs no per-FIF ring (one buffer, written once per frame, read by every in-flight
-/// frame with no Write-After-Read hazard on a static config — but at I0 it is
-/// bound-but-unread anyway, so even a dynamic config is benign).
+/// [`ResolvedShadowAtlas`](crate::shadow_atlas::ResolvedShadowAtlas) it is uploaded into ONE
+/// binding-18 buffer, not a per-FIF ring — and the reason is the DESCRIPTOR contract, not the
+/// config's staticness: the resolve descriptor sets are built once at G-buffer creation and
+/// capture the boot buffer, so a host ring would never be observed by the GPU. A single
+/// buffer read by an in-flight frame is a Write-After-Read hazard on every transition, so the
+/// host write ([`upload_ddgi_grid`](crate::upload_ddgi_grid)) is MONOTONE and value-gated:
+/// written only when `ddgi_mode_word != 0` and the carrier changed, and the DISABLED (zero)
+/// image is never written after boot — a sibling in-flight frame can then observe only finite
+/// grids, never the zero one (see the upload's doc for the three-case argument).
 ///
-/// DISABLED == [`Default`] == all-zero: the resolve gates on `ddgi_mode_word` (mirrored
-/// from the LightBuf word-7 bit-4 gate the single writer sets), so all-zero is "off".
+/// DISABLED == [`Default`] == all-zero: the resolve gates on the LightBuf word-7 bit-4 header
+/// gate, which [`sync_ddgi_light_gate`] sets from THIS carrier's `ddgi_mode_word`, so all-zero
+/// is "off" and the bit can be 1 only over a non-zero grid.
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct ResolvedDdgi {
@@ -172,6 +220,29 @@ impl ResolvedDdgi {
         ddgi_mode_word: 0,
         _pad: [0; 3],
     };
+
+    /// This carrier as its 48 raw bytes — EXACTLY what [`upload_ddgi_grid`](crate::upload_ddgi_grid)
+    /// memcpys into the resolve's binding-18 UBO (the mirror of
+    /// [`DdgiUpdateUbo::as_bytes`](crate::ddgi_update::DdgiUpdateUbo::as_bytes)). Twelve
+    /// little-endian words: `origin` ×4, `inv_spacing_dims` ×4, `ddgi_mode_word`, `_pad` ×3 —
+    /// field-for-field the shader's `gDdgiOrigin`@0 / `gDdgiInvSpacDims`@16 / `gDdgiMode`@32 /
+    /// `_gDdgiPad`@36 block (member 3 `Offset 36`, name `_gDdgiPad`, in every committed b18
+    /// RESOLVE `.spv` — `deferred_pbr*.comp.spv` and `vb_shade_split*.comp.spv`).
+    ///
+    /// The scope of that pin is the b18 resolve consumers ONLY. The standalone probe-GI
+    /// harness `ddgi_probe_gi_resolve.comp.hlsl` mirrors the same 48-byte block at its own
+    /// `b0`, but splits the trailing pad: member 3 there is `uint gSampleCount` @36 (the
+    /// invocation bound, which cannot ride push-constants against that shared layout) with
+    /// `uint2 _gDdgiPad` @40. Offsets 0/16/32 still match byte-for-byte — only the meaning of
+    /// the first pad word differs, and this carrier writes it as zero.
+    #[inline]
+    pub fn as_bytes(&self) -> [u8; RESOLVED_DDGI_BYTES] {
+        // SAFETY: `ResolvedDdgi` is `#[repr(C)]` with the pinned 48-byte layout (size and every
+        // field offset const-asserted above — 16 + 16 + 4 + 12, no padding holes), and every
+        // field is a POD `f32`/`u32` lane, so all 48 bytes are initialized and every bit
+        // pattern is a valid `u8`. The transmute reads only those bytes.
+        unsafe { core::mem::transmute::<Self, [u8; RESOLVED_DDGI_BYTES]>(*self) }
+    }
 }
 
 impl Default for ResolvedDdgi {
@@ -193,16 +264,24 @@ impl Default for ResolvedDdgi {
 /// Disabled (`!cfg.enabled()`) ⇒ [`ResolvedDdgi::DISABLED`] (all-zero, `ddgi_mode_word ==
 /// 0` — the 0%-gate). Else it packs `origin`, `inv_spacing = 1/spacing`, the three `u32`
 /// dims (bit-cast into the `f32` lanes), and `ddgi_mode_word == 1`.
+///
+/// A degenerate grid (non-positive / non-finite / subnormal spacing, or a zero dimension) is
+/// DISABLED, not packed with a zeroed reciprocal — [`DdgiConfig::grid_is_sampleable`] carries
+/// the reason. That is what makes `ddgi_mode_word == 1 ⇒ inv_spacing > 0` true BY
+/// CONSTRUCTION for every carrier this function can return (W1).
 #[inline]
 pub fn resolve_ddgi(cfg: &DdgiConfig) -> ResolvedDdgi {
     if !cfg.enabled() {
         return ResolvedDdgi::DISABLED;
     }
 
-    // `enabled()` does not yet guarantee `spacing > 0`; guard the reciprocal so a
-    // misconfigured non-positive spacing yields a finite `inv_spacing` of 0 (the resolve
-    // then maps everything to probe 0 — a benign degenerate, never a NaN/inf in the UBO).
-    let inv_spacing = if cfg.spacing > 0.0 { 1.0 / cfg.spacing } else { 0.0 };
+    // `enabled()` folds `grid_is_sampleable()`, so `spacing` is normal and positive here and
+    // the reciprocal is finite and positive (see that predicate's doc for both range ends).
+    let inv_spacing = 1.0 / cfg.spacing;
+    debug_assert!(
+        inv_spacing.is_finite() && inv_spacing > 0.0,
+        "invariant: an enabled config carries a sampleable spacing (grid_is_sampleable)"
+    );
 
     ResolvedDdgi {
         origin: [cfg.origin[0], cfg.origin[1], cfg.origin[2], 0.0],
@@ -251,34 +330,51 @@ pub fn resolve_ddgi_grid(cfg: Res<DdgiConfig>, mut out: ResMut<ResolvedDdgi>) {
     *out = resolve_ddgi(&cfg);
 }
 
-/// Bridges the [`DdgiConfig`] gate and the [`LightingConfig`] header gate — the GI
-/// analogue of
-/// [`sync_punctual_light_gate`](crate::shadow_atlas::sync_punctual_light_gate). It is the
-/// SOLE production writer of [`LightingConfig::ddgi_indirect`], keeping the header's
-/// word-7 DDGI bit ([`DDGI_MODE_BIT`], bit 4) in lock-step with the structural GI
-/// predicate [`DdgiConfig::enabled`].
+/// Bridges the resolved [`ResolvedDdgi`] carrier and the [`LightingConfig`] header gate —
+/// the GI analogue of
+/// [`sync_punctual_light_gate`](crate::shadow_atlas::sync_punctual_light_gate) (which likewise
+/// reads its `Resolved*` carrier's `mode_word`, not the owner config). It is the SOLE
+/// production writer of [`LightingConfig::ddgi_indirect`], keeping the header's word-7 DDGI
+/// bit ([`DDGI_MODE_BIT`], bit 4) in lock-step with `ResolvedDdgi::ddgi_mode_word`.
+///
+/// # Why the carrier, not `DdgiConfig` (the SDFDDGI host-hook defect)
+///
+/// The carrier is written by ONE system
+/// ([`resolve_ddgi_grid_gated`](crate::ddgi_update::resolve_ddgi_grid_gated)) that folds the
+/// config, the rung-R9c boot freeze AND the device caps. Reading it here means the header bit
+/// can be 1 ONLY when the carrier — the exact bytes [`upload_ddgi_grid`](crate::upload_ddgi_grid)
+/// puts in the resolve's b18 UBO — is a non-zero grid: `bit == 1 ⇒ mode_word == 1 ⇒
+/// inv_spacing > 0`. The last implication is enforced at ONE site,
+/// [`DdgiConfig::grid_is_sampleable`] (folded into [`DdgiConfig::enabled`], which every
+/// resolve variant funnels through): a degenerate spacing or a zero dimension DISABLES the
+/// config rather than packing `mode_word == 1` over a zeroed reciprocal (W1). The
+/// [`debug_assert`] in the host's b18 upload step codifies the invariant; the clamp is what
+/// enforces it in release. The previous shape recomputed its own predicate from
+/// `DdgiConfig` + the freeze and ignored caps, so a no-storage device could open the gate over a
+/// zero grid (NaN through the resolve's `1 / inv_spacing`).
 ///
 /// # Value-gated write
 ///
 /// `cfg.ddgi_indirect` is written only on an actual flip, so a static frame does zero work
 /// and never dirties the light table (mirrors `sync_punctual_light_gate`'s value gate).
 ///
-/// # Registration — app-wired (matches `sync_punctual_light_gate`)
+/// # Registration — app-wired, with BOTH ordering edges
 ///
-/// NOT registered by any plugin here: it bridges the DDGI plugin's [`DdgiConfig`] and the
-/// lighting plugin's [`LightingConfig`] / [`LightTableDirty`], so only the composing app
-/// (which adds BOTH) may register it — after `resolve_ddgi_grid`, in the same builder
-/// closure as the other light-gate sync systems.
+/// NOT registered by any plugin here: it bridges the DDGI plugin's carrier and the lighting
+/// plugin's [`LightingConfig`] / [`LightTableDirty`], so only the composing app (which adds
+/// BOTH) registers it — `boyko_app::plugins::register_main_frame_systems`, in the same `Main`
+/// builder as the other `sync_*_light_gate`s, as
+/// `.after_set(DdgiResolveSet).before_set(LightCollectSet)`: after the resolve so it reads
+/// THIS frame's carrier, and before `collect_lights` so the header packs the bit in the SAME
+/// frame it flips (the `sync_cluster_light_gate` / `sync_sv0_light_gate` precedent).
 #[allow(clippy::needless_pass_by_value)]
 pub fn sync_ddgi_light_gate(
-    ddgi: Res<DdgiConfig>,
-    frozen: Res<crate::render_path_config::RenderPathFrozenConsumers>,
+    resolved: Res<ResolvedDdgi>,
     mut cfg: ResMut<LightingConfig>,
     mut dirty: ResMut<LightTableDirty>,
 ) {
-    // Rung R9c: the SAME boot-freeze clamp the runner's per-frame `ddgi_enabled` applies —
-    // the header word and the update-pass arming read ONE effective bit by construction.
-    let on = crate::render_path_config::effective_ddgi_enabled(ddgi.enabled(), &frozen);
+    // ONE predicate: the carrier's mode word (config + R9c freeze + caps, folded upstream).
+    let on = resolved.ddgi_mode_word != 0;
     // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
     if cfg.ddgi_indirect != on {
         cfg.ddgi_indirect = on;
@@ -328,5 +424,185 @@ mod tests {
         assert_eq!(r.inv_spacing_dims[1].to_bits(), cfg.dims[0]);
         assert_eq!(r.inv_spacing_dims[2].to_bits(), cfg.dims[1]);
         assert_eq!(r.inv_spacing_dims[3].to_bits(), cfg.dims[2]);
+    }
+
+    // ---- SDFDDGI host-hook defect gates (b) + (c) ---------------------------------------
+    //
+    // These pin the ONE carrier the host uploads into the resolve's b18 UBO and the ONE
+    // predicate the header gate reads. Before the fix the b18 buffer was never written after
+    // its zero seed, `sync_ddgi_light_gate` recomputed its own predicate from `DdgiConfig` +
+    // the freeze (ignoring `DdgiCaps`), and nothing registered it — the atlas was written and
+    // never read (`docs/RENDER-SDFDDGI-PLAN.md`, "Defects found after SHIPPED").
+
+    /// Gate (b): the 48 bytes the b18 upload writes for an ENABLED default resolve are the
+    /// twelve little-endian words the shader's `ResolvedDdgi` cbuffer reads
+    /// (`deferred_pbr.hlsl` b18: `gDdgiOrigin`@0, `gDdgiInvSpacDims`@16, `gDdgiMode`@32,
+    /// `_gDdgiPad`@36 — member 3 `Offset 36` pinned in every committed b18 resolve `.spv`,
+    /// i.e. `deferred_pbr*` / `vb_shade_split*`; the standalone `ddgi_probe_gi_resolve`
+    /// harness splits that pad into `gSampleCount`@36 + `uint2`@40, see `as_bytes`).
+    #[test]
+    fn enabled_default_as_bytes_is_the_twelve_expected_le_words() {
+        let cfg = DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() };
+        let bytes = resolve_ddgi(&cfg).as_bytes();
+        let words: [u32; 12] = core::array::from_fn(|i| {
+            u32::from_le_bytes([bytes[4 * i], bytes[4 * i + 1], bytes[4 * i + 2], bytes[4 * i + 3]])
+        });
+        // The owner-locked default grid: origin (-16, -2, -16), spacing 2.0 ⇒ inv 0.5, dims
+        // 16×8×16, mode 1, three zero pad words. Literal values on purpose — a drift in the
+        // default is a pixel change and must be a deliberate edit here too.
+        let expected = [
+            (-16.0f32).to_bits(),
+            (-2.0f32).to_bits(),
+            (-16.0f32).to_bits(),
+            0,
+            (1.0f32 / 2.0).to_bits(),
+            16,
+            8,
+            16,
+            1,
+            0,
+            0,
+            0,
+        ];
+        assert_eq!(words, expected, "b18 byte image of the enabled default grid");
+    }
+
+    /// Gate (b): the DISABLED carrier's byte image is all zero — the boot seed of the b18
+    /// buffer IS this image, which is what lets the host never write DISABLED after boot.
+    #[test]
+    fn disabled_as_bytes_is_all_zero() {
+        assert!(ResolvedDdgi::DISABLED.as_bytes().iter().all(|&b| b == 0));
+    }
+
+    /// Gate (b): `as_bytes` is exactly the `#[repr(C)]` byte image (the transmute the
+    /// existing `disabled_resolved_is_all_zero_bytes` pin uses) — no reordering, no gaps.
+    #[test]
+    fn as_bytes_equals_the_repr_c_transmute() {
+        let r = resolve_ddgi(&DdgiConfig {
+            ddgi_indirect: true,
+            origin: [1.5, -2.25, 3.0],
+            spacing: 0.75,
+            dims: [4, 3, 2],
+        });
+        // SAFETY: `ResolvedDdgi` is `#[repr(C)]`, 48 bytes with const-asserted offsets and
+        // no padding holes; every lane is a POD `f32`/`u32`, so every byte is initialized.
+        let raw: [u8; RESOLVED_DDGI_BYTES] = unsafe { core::mem::transmute(r) };
+        assert_eq!(r.as_bytes(), raw);
+    }
+
+    /// W1: a grid whose params cannot be sampled without a non-finite probe coordinate is
+    /// DISABLED at the ONE carrier, so no downstream reader can open the header gate over it.
+    ///
+    /// The load-bearing invariant of the whole lane is `bit == 1 ⇒ mode_word == 1 ⇒
+    /// inv_spacing > 0` — the header gate, the b18 bytes and the update arming all derive from
+    /// `ddgi_mode_word`, and the resolve shader recomputes `spacing = 1 / inv_spacing`. An
+    /// `inv_spacing` of 0 makes that `+inf`, and `origin + float3(0) * inf` is NaN, which
+    /// inverts under fast-math `NMin`/`NMax` into a BLACK pixel on every `is_sdf_lit` receiver.
+    /// So a non-positive / non-finite / subnormal spacing (and a zero dimension — a grid with
+    /// no probes to blend) must resolve to the all-zero carrier, not to `mode_word == 1` with
+    /// a zeroed reciprocal.
+    #[test]
+    fn a_degenerate_grid_resolves_disabled() {
+        let base = DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() };
+
+        // `1/spacing` is not finite-and-positive for any of these.
+        for spacing in [
+            0.0f32,
+            -0.0,
+            -2.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            // Subnormal: positive and finite, yet `1.0 / 1e-40` overflows to `+inf`, and
+            // `(p - origin) * inf` is NaN at `p == origin`.
+            1.0e-40,
+        ] {
+            let cfg = DdgiConfig { spacing, ..base };
+            assert!(!cfg.enabled(), "spacing {spacing:?} is not a sampleable grid");
+            assert_eq!(
+                resolve_ddgi(&cfg),
+                ResolvedDdgi::DISABLED,
+                "spacing {spacing:?} must resolve to the all-zero carrier"
+            );
+        }
+
+        // A zero dimension is an empty grid — the promise `DdgiConfig::enabled`'s doc has
+        // carried since I0 ("a later rung ANDs in dims nonzero").
+        for dims in [[0, 8, 16], [16, 0, 16], [16, 8, 0], [0, 0, 0]] {
+            let cfg = DdgiConfig { dims, ..base };
+            assert!(!cfg.enabled(), "dims {dims:?} is an empty grid");
+            assert_eq!(resolve_ddgi(&cfg), ResolvedDdgi::DISABLED, "dims {dims:?} ⇒ DISABLED");
+        }
+
+        // The enabled path is untouched: every carrier with `mode_word == 1` carries a
+        // finite, positive `inv_spacing` — the invariant stated as a property, not as prose.
+        for spacing in [f32::MIN_POSITIVE, 0.01, 0.75, 2.0, 1.0e30] {
+            let r = resolve_ddgi(&DdgiConfig { spacing, ..base });
+            assert_eq!(r.ddgi_mode_word, 1, "spacing {spacing:?} is sampleable");
+            assert!(
+                r.inv_spacing_dims[0].is_finite() && r.inv_spacing_dims[0] > 0.0,
+                "spacing {spacing:?} ⇒ inv_spacing {} must be finite and positive",
+                r.inv_spacing_dims[0]
+            );
+        }
+    }
+
+    /// W1: the degenerate clamp is at the ONE carrier, so the DEVICE-caps and R9c-freeze folds
+    /// inherit it — a frozen-ON boot cannot resurrect a grid the config cannot sample.
+    #[test]
+    fn a_degenerate_grid_stays_disabled_through_the_frozen_fold() {
+        use crate::ddgi_update::{DdgiCaps, resolve_ddgi_grid_frozen};
+        use crate::render_path_config::RenderPathFrozenConsumers;
+        use crate::ssao_config::SsaoConfig;
+
+        let bad = DdgiConfig { ddgi_indirect: true, spacing: 0.0, ..DdgiConfig::default() };
+        let frozen_on = RenderPathFrozenConsumers::new(SsaoConfig::default(), true, true);
+        assert_eq!(
+            resolve_ddgi_grid_frozen(&bad, &DdgiCaps::new(true), &frozen_on),
+            ResolvedDdgi::DISABLED,
+            "the boot bit re-enables the config, but the grid is still not sampleable"
+        );
+    }
+
+    /// Gate (c): the header gate reads ONLY the carrier. Over `DISABLED` the bit stays 0 and
+    /// the table is not dirtied; an enabled carrier sets both; a second run over the same
+    /// carrier does NOT re-dirty (the value gate); a DISABLED carrier drops the bit again.
+    ///
+    /// This is the property that makes "the upload precedes the first open gate" hold by
+    /// construction: the bit cannot be 1 while the carrier (the only thing the host uploads)
+    /// is the zero image.
+    #[test]
+    fn sync_ddgi_light_gate_follows_the_carrier_and_value_gates_the_dirty_bit() {
+        use boyko_ecs::ecs::core::app::App;
+
+        let mut app = App::new();
+        app.insert_resource(ResolvedDdgi::DISABLED);
+        app.insert_resource(LightingConfig::default());
+        app.insert_resource(LightTableDirty(false));
+
+        app.world_mut().run_system(sync_ddgi_light_gate);
+        assert!(!app.world().resource::<LightingConfig>().ddgi_indirect, "DISABLED ⇒ bit 0");
+        assert!(!app.world().resource::<LightTableDirty>().0, "DISABLED ⇒ table untouched");
+
+        let on = resolve_ddgi(&DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() });
+        *app.world_mut().resource_mut::<ResolvedDdgi>() = on;
+        app.world_mut().run_system(sync_ddgi_light_gate);
+        {
+            let cfg = app.world().resource::<LightingConfig>();
+            assert!(cfg.ddgi_indirect, "enabled carrier ⇒ bit 1");
+            assert_eq!((cfg.shadow_gate_word() >> DDGI_MODE_BIT) & 1, 1, "word-7 bit 4 packed");
+        }
+        assert!(app.world().resource::<LightTableDirty>().0, "the flip dirties the table");
+
+        // Value gate: the same carrier again must NOT re-dirty.
+        app.world_mut().resource_mut::<LightTableDirty>().0 = false;
+        app.world_mut().run_system(sync_ddgi_light_gate);
+        assert!(!app.world().resource::<LightTableDirty>().0, "static carrier ⇒ zero work");
+
+        // A DISABLED carrier drops the bit (the DISABLE transition) and dirties once.
+        *app.world_mut().resource_mut::<ResolvedDdgi>() = ResolvedDdgi::DISABLED;
+        app.world_mut().run_system(sync_ddgi_light_gate);
+        assert!(!app.world().resource::<LightingConfig>().ddgi_indirect, "DISABLED ⇒ bit 0");
+        assert!(app.world().resource::<LightTableDirty>().0, "the drop dirties the table");
     }
 }

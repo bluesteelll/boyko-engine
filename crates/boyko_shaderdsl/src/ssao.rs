@@ -40,9 +40,16 @@
 //!
 //! Instantiated two ways (the established control-axis discipline):
 //!   - `<EvalCf>` — the CPU oracle (`f32` arithmetic + the host `tap` closure), the
-//!     bit-comparable host mirror the golden gather calls.
+//!     bit-comparable host mirror the golden gather calls. GOLDEN-EDSL P0: the
+//!     `*_params` forms ([`ssao_estimate_body_params`] and the two it folds) take the
+//!     quality preset as a [`SsaoParams`] value, and are what the DERIVED golden
+//!     (`boyko_rhi_vulkan::goldens::golden_ssao_attributes_derived`) instantiates over
+//!     `EvalCf` for each of the three pre-compiled variants.
 //!   - `<EmitCf>` — the HLSL recorder (`crate::emit::emit_hlsl_ssao`) walking the STMT
-//!     IR into the GENERATED span spliced into `sdf_ssao.comp.hlsl`.
+//!     IR into the GENERATED span spliced into `sdf_ssao.comp.hlsl`. The preset value is
+//!     INVISIBLE on this axis: Emit ignores `runtime_for`'s bound VALUE (it prints the bound
+//!     SYMBOL) and a `named_lit`'s value (it prints the symbol), so the legacy Medium-const
+//!     signatures and the `*_params` forms record the SAME span text.
 
 use crate::cf::{Cf, Flow};
 use crate::scalar::FieldScalar;
@@ -304,12 +311,19 @@ pub fn variant_hlsl(base: &str, params: SsaoParams) -> String {
 /// raises `elev > 0` → AO < 1. `dot` is INLINE (`delta.x*N.x + ...`); `length =
 /// sqrt(dot(delta,delta))`. Returns the updated `hc` value (a `Scalar`) — the slice body
 /// threads it through the steps.
+///
+/// GOLDEN-EDSL P0: the preset-taking form. `params.radius` / `params.eps` are the two scalars
+/// this tap reads; they are fed as the VALUE side of the `SSAO_RADIUS` / `SSAO_EPS` named
+/// literals, so on Eval the variant's scalars drive the arithmetic while on Emit the printed
+/// span is unchanged (the symbol is spelled, never the value). The legacy
+/// [`ssao_horizon_step_body`] delegates here with the Medium row.
 #[inline]
-pub fn ssao_horizon_step_body<C: Cf>(
+pub fn ssao_horizon_step_body_params<C: Cf>(
     p: C::Vec3f,
     pp: C::Vec3f,
     n: C::Vec3f,
     hc: C::Scalar,
+    params: &SsaoParams,
 ) -> C::Scalar {
     // float3 delta = P' - P;  (a NAMED `float3 delta` temp — the committed materialization).
     let delta = C::temp_vec3("delta", C::vec3_sub(pp, p));
@@ -323,7 +337,7 @@ pub fn ssao_horizon_step_body<C: Cf>(
     // float r2 = SSAO_RADIUS * SSAO_RADIUS;  (a NAMED temp — materialized so the divisor
     // prints `d2 / r2`, NOT the precedence-wrong inline `d2 / SSAO_RADIUS * SSAO_RADIUS`
     // which HLSL parses left-to-right as `(d2 / SSAO_RADIUS) * SSAO_RADIUS`).
-    let r = C::named_lit("SSAO_RADIUS", SSAO_RADIUS);
+    let r = C::named_lit("SSAO_RADIUS", params.radius);
     let r2 = C::temp_float("r2", r.mul(r));
     // float falloff = clamp(1.0 - d2 / r2, 0.0, 1.0);
     let falloff = C::temp_float("falloff", C::Scalar::lit(1.0).sub(d2.div(r2)).clamp01());
@@ -339,7 +353,7 @@ pub fn ssao_horizon_step_body<C: Cf>(
     // elevation above the tangent plane, clamped non-negative so neighbours BELOW the
     // tangent do not occlude. `length(delta) = sqrt(d2)` reuses the `d2` temp so the host/GPU
     // sqrt operand is bit-identical, NOT a recomputed component sum.
-    let eps = C::named_lit("SSAO_EPS", SSAO_EPS);
+    let eps = C::named_lit("SSAO_EPS", params.eps);
     let elev = C::temp_float(
         "elev",
         dn.div(d2.sqrt().max(eps)).max(C::Scalar::lit(0.0)),
@@ -348,6 +362,19 @@ pub fn ssao_horizon_step_body<C: Cf>(
     // hc = max(hc, elev * falloff);  (the running horizon max; the slice body owns the
     // `hc` mutable local, so this returns the updated value to assign.)
     hc.max(elev.mul(falloff))
+}
+
+/// The legacy Medium-const form of [`ssao_horizon_step_body_params`] (the signature
+/// `crate::emit::emit_hlsl_ssao` traces and the `ssao_edsl_sync` drift gate evaluates): the
+/// preset is [`SsaoQuality::Medium`]'s row, i.e. the module `SSAO_RADIUS` / `SSAO_EPS` consts.
+#[inline]
+pub fn ssao_horizon_step_body<C: Cf>(
+    p: C::Vec3f,
+    pp: C::Vec3f,
+    n: C::Vec3f,
+    hc: C::Scalar,
+) -> C::Scalar {
+    ssao_horizon_step_body_params::<C>(p, pp, n, hc, &SsaoQuality::Medium.params())
 }
 
 /// Reduces ONE rotated slice's two half-slices into an occlusion contribution
@@ -366,25 +393,36 @@ pub fn ssao_horizon_step_body<C: Cf>(
 /// oracle and recorded as `[unroll] for` spans on Emit (via [`Cf::runtime_for`] with the
 /// `SSAO_STEPS` bound symbol), so the emitted HLSL spells the two `for` loops the committed
 /// shader carries.
+///
+/// GOLDEN-EDSL P0: the preset-taking form. `params.steps` is the Eval trip count of BOTH
+/// half-slice loops (the bound SYMBOL `SSAO_STEPS` is unchanged, so Emit records the same
+/// `[unroll] for` spans); the per-tap horizon reads `params.radius` / `params.eps` through
+/// [`ssao_horizon_step_body_params`]. The legacy [`ssao_slice_body`] delegates here with the
+/// Medium row.
 #[inline]
-pub fn ssao_slice_body<C: Cf, T: Fn(C::Iv, bool) -> C::Vec3f>(
+pub fn ssao_slice_body_params<C: Cf, T: Fn(C::Iv, bool) -> C::Vec3f>(
     p: C::Vec3f,
     n: C::Vec3f,
     tap: &T,
+    params: &SsaoParams,
 ) -> C::Scalar {
+    // The Eval trip count of each half-slice loop — the `[unroll]` bound the variant's
+    // `.spv` bakes as its `static const SSAO_STEPS`.
+    let steps = params.steps as usize;
+
     // float hc_pos = 0.0;  — the + half-slice horizon max accumulator.
     let hc_pos = C::decl_var("hc_pos", C::Scalar::lit(0.0));
     // The loop's `Flow` is discarded: the body never `ret`s (no early return), so on Eval it
     // always completes naturally (`Continue`) and on Emit `runtime_for` always returns
     // `Continue` after recording. (Shadow's IIFE consumes it via `?`; this body has none.)
-    let _ = C::runtime_for("[unroll]", "sp", "SSAO_STEPS", SSAO_STEPS, |iv| -> Flow {
+    let _ = C::runtime_for("[unroll]", "sp", "SSAO_STEPS", steps, |iv| -> Flow {
         // `iv` is the host `usize` step on Eval and the recorded SSA iv on Emit; the `tap`
         // seam reads it (Eval) or ignores it (Emit — it returns a per-call `Vec3Param`). The
         // unroll records the body ONCE (DXC unrolls it).
         let pp = tap(iv, false);
         C::set_var(
             &hc_pos,
-            ssao_horizon_step_body::<C>(p, pp, n, C::get_var(&hc_pos)),
+            ssao_horizon_step_body_params::<C>(p, pp, n, C::get_var(&hc_pos), params),
         );
         Flow::Continue(())
     });
@@ -393,17 +431,28 @@ pub fn ssao_slice_body<C: Cf, T: Fn(C::Iv, bool) -> C::Vec3f>(
     // center normal `n` is the SAME for both half-slices (the elevation reference is the
     // surface tangent plane, not the screen slice direction).
     let hc_neg = C::decl_var("hc_neg", C::Scalar::lit(0.0));
-    let _ = C::runtime_for("[unroll]", "sn", "SSAO_STEPS", SSAO_STEPS, |iv| -> Flow {
+    let _ = C::runtime_for("[unroll]", "sn", "SSAO_STEPS", steps, |iv| -> Flow {
         let pp = tap(iv, true);
         C::set_var(
             &hc_neg,
-            ssao_horizon_step_body::<C>(p, pp, n, C::get_var(&hc_neg)),
+            ssao_horizon_step_body_params::<C>(p, pp, n, C::get_var(&hc_neg), params),
         );
         Flow::Continue(())
     });
 
     // occ_slice = hc_pos + hc_neg;  (the two half-slice horizon maxes summed).
     C::get_var(&hc_pos).add(C::get_var(&hc_neg))
+}
+
+/// The legacy Medium-const form of [`ssao_slice_body_params`]: the preset is
+/// [`SsaoQuality::Medium`]'s row (`SSAO_STEPS` taps per half-slice, the module scalars).
+#[inline]
+pub fn ssao_slice_body<C: Cf, T: Fn(C::Iv, bool) -> C::Vec3f>(
+    p: C::Vec3f,
+    n: C::Vec3f,
+    tap: &T,
+) -> C::Scalar {
+    ssao_slice_body_params::<C, T>(p, n, tap, &SsaoQuality::Medium.params())
 }
 
 /// Folds the `SSAO_SLICES` rotated slices into the final `ao` factor — the top-level
@@ -421,29 +470,46 @@ pub fn ssao_slice_body<C: Cf, T: Fn(C::Iv, bool) -> C::Vec3f>(
 /// step (the hand-written seam folds the slice's screen DIRECTION into the neighbour-pixel
 /// pick — the horizon math no longer reads it). Returns the `ao` factor a caller stores
 /// (the shader writes `ssao[px,py] = ao`).
+///
+/// GOLDEN-EDSL P0: the preset-taking form — the body the DERIVED golden
+/// (`boyko_rhi_vulkan::goldens::golden_ssao_attributes_derived`) instantiates over `EvalCf`
+/// per variant. `params.slices` is the Eval trip count of the slice loop (bound SYMBOL
+/// `SSAO_SLICES` unchanged), `params.strength` / `params.slices as f32` are the VALUE side of
+/// the `SSAO_STRENGTH` / `SSAO_SLICES_F` named literals, and the per-slice fold is
+/// [`ssao_slice_body_params`]. The legacy [`ssao_estimate_body`] delegates here with the
+/// Medium row.
 #[inline]
-pub fn ssao_estimate_body<C, T>(p: C::Vec3f, n: C::Vec3f, tap: &T) -> C::Scalar
+pub fn ssao_estimate_body_params<C, T>(
+    p: C::Vec3f,
+    n: C::Vec3f,
+    tap: &T,
+    params: &SsaoParams,
+) -> C::Scalar
 where
     C: Cf,
     T: Fn(C::Iv, C::Iv, bool) -> C::Vec3f,
 {
+    // The Eval trip count of the slice loop — the `[unroll]` bound the variant's `.spv`
+    // bakes as its `static const SSAO_SLICES`.
+    let slices_n = params.slices as usize;
+
     // float occ = 0.0;  — the slice-occlusion accumulator.
     let occ = C::decl_var("occ", C::Scalar::lit(0.0));
     // The slice loop's `Flow` is discarded for the same reason as the step loops (no `ret`).
-    let _ = C::runtime_for("[unroll]", "sl", "SSAO_SLICES", SSAO_SLICES, |s| -> Flow {
-        // Bind the slice index into the per-step seam so `ssao_slice_body`'s `tap(step,
-        // sign)` resolves the right slice's neighbour.
+    let _ = C::runtime_for("[unroll]", "sl", "SSAO_SLICES", slices_n, |s| -> Flow {
+        // Bind the slice index into the per-step seam so `ssao_slice_body_params`'s
+        // `tap(step, sign)` resolves the right slice's neighbour.
         let slice_tap = |step: C::Iv, sign: bool| tap(s, step, sign);
         C::set_var(
             &occ,
-            C::get_var(&occ).add(ssao_slice_body::<C, _>(p, n, &slice_tap)),
+            C::get_var(&occ).add(ssao_slice_body_params::<C, _>(p, n, &slice_tap, params)),
         );
         Flow::Continue(())
     });
 
     // float ao = clamp(1.0 - SSAO_STRENGTH * occ / SSAO_SLICES_F, 0.0, 1.0);
-    let strength = C::named_lit("SSAO_STRENGTH", SSAO_STRENGTH);
-    let slices = C::named_lit("SSAO_SLICES_F", SSAO_SLICES as f32);
+    let strength = C::named_lit("SSAO_STRENGTH", params.strength);
+    let slices = C::named_lit("SSAO_SLICES_F", params.slices as f32);
     let ao = C::temp_float(
         "ao",
         C::Scalar::lit(1.0)
@@ -453,6 +519,18 @@ where
 
     // ao = ao * ao;  (the integer self-mul strength power, NOT `pow(ao, 2)`).
     ao.mul(ao)
+}
+
+/// The legacy Medium-const form of [`ssao_estimate_body_params`] — the top-level body
+/// `crate::emit::emit_hlsl_ssao` traces: the preset is [`SsaoQuality::Medium`]'s row
+/// (`SSAO_SLICES` slices, `SSAO_STRENGTH`, `SSAO_SLICES as f32`).
+#[inline]
+pub fn ssao_estimate_body<C, T>(p: C::Vec3f, n: C::Vec3f, tap: &T) -> C::Scalar
+where
+    C: Cf,
+    T: Fn(C::Iv, C::Iv, bool) -> C::Vec3f,
+{
+    ssao_estimate_body_params::<C, T>(p, n, tap, &SsaoQuality::Medium.params())
 }
 
 // ---- The SSAO edge-avoiding à-trous denoise (moved OUT of the resolve) ----------
@@ -710,7 +788,8 @@ pub fn ssao_blur_combine_body<C: Cf>(
 }
 
 /// ONE à-trous pass's full filter — the Eval/Track-1 HOST oracle body `golden_ssao_atrous`
-/// (`boyko_rhi_vulkan`, which cannot import this crate) chains `N` times, and the structural
+/// (`boyko_rhi_vulkan`, which links this crate's Eval path only under its `goldens` feature)
+/// chains `N` times, and the structural
 /// mirror of `ssao_atrous.comp.hlsl`'s `main()` for ONE dispatch (`step = 1 << level`).
 ///
 /// `step` is the pass's à-trous hole width; `fetch(dx, dy) -> (z, s)` is the hand-written

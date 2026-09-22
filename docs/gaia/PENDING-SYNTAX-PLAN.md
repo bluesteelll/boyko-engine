@@ -1,8 +1,18 @@
 # PENDING — syntax rulings and the conflict-audit fix plan
 
-> **STATUS: NOT APPROVED, NOT COMMITTED.** Owner instruction 2026-08-28: nothing is committed
-> without explicit approval. Owner instruction 2026-08-29: *update all the plans and write them
-> down* — this file is written, not committed.
+> **STATUS: NOT APPROVED — but COMMITTED.** ⚠ **Corrected 2026-09-03: this header used to read
+> "NOT APPROVED, NOT COMMITTED", and the second half was false.** `git log --name-status`
+> shows this file added by `97c504c8` (2026-08-29) as an `A`; it is tracked on both branches.
+> Committed text describing itself as uncommitted is precisely the state in which a reader
+> cannot tell a proposal from a ruling.
+>
+> **What is and is not ratified here.** The syntax ruling series **R1–R7 remain PROPOSED** — the
+> owner instruction of 2026-08-28 (nothing without explicit approval) is unchanged and no
+> approval has been given for them. What IS ratified are the owner ballots whose outcome this
+> file now records at the affected rows: **GB-1, GB-2, GB-3, GB-4, GB-5** and the `F` series,
+> ruled 2026-08-30 and indexed in [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md)
+> §*2026-09-03*. A row marked RESOLVED below carries an owner ruling; every other row is still
+> a proposal.
 >
 > **The repo's Gaia syntax is still pre-R1.** [`LANGUAGE.md`](LANGUAGE.md) shows
 > `abstract template`, `entity @gate_01`, colon-less `Transform pos=`, `row @iron_sword`,
@@ -75,7 +85,7 @@ bookkeeping deferred until the M6 rewrite lands.
 
 ### Tier 3 — Aether-internal (found by the same audits)
 
-`state` twice inside one `machine` (group vs chart node) → rename the group `fields { }` · `after` twice (order edge vs machine timer) · `when` twice (run-condition vs polled transition) · **`on` three times** (`machine … on entity`, `on E => T`, `flags (X = on)`) · singular/plural pairs where the plural is not the plural: `flag/flags`, `tag/tags`, `set/sets` — `sets → in` is the cheap rename; ⚠️ **`flags → initial` is WITHDRAWN** — `initial` is already the machine's initial-state keyword, so the rename recreates the exact defect it fixes. The value vocabulary and the three `on` positions go to ballot **AB-13** · `mut` in three positions · `requires (X = expr)` vs `flags (X = on)` — same shape, disjoint value spaces; pre-check both so the span lands on the author's token · group placement (before/after body) differs per construct — state the law and say which side `each` is on · **M2**: scope the `hooks` and `relation` claims in CONSTRUCTS.md to hook-fired spawns; until F4 lands, a hook-dependent component in a baked asset is a coded bake warning naming F4 · **M8**: specify the `stable_name` resolution axis once (authored text uses the Rust type name; bake resolves through the same-build manifest; rename = loud bake error listing affected files) · **M10**: bake refusal for any `Entity`-carrying field authored without `link` (the R-RES twin) · **M14**: the derive emits bundle types into the manifest so `Pawn:` is refused with the truth, not "unknown component" about a type that exists (ballot **F10** — and Part D vs this row disagree on whether M14 is a ballot at all; that pre-question is the ballot's first item) · **M19**: **AIR-14 is unimplementable for Aether as specified** — `//` comments are gone at lex time before `aether_lang` sees the TokenStream, so the shared comment-survival oracle is red by construction or silently Gaia-only. Split it: Gaia carries it via the CST; Aether's half is priced separately or scoped out
+`state` twice inside one `machine` (group vs chart node) → rename the group `fields { }` · `after` twice (order edge vs machine timer) · `when` twice (run-condition vs polled transition) · **`on` three times** (`machine … on entity`, `on E => T`, `flags (X = on)`) · singular/plural pairs where the plural is not the plural: `flag/flags`, `tag/tags`, `set/sets` — `sets → in` is the cheap rename; ⚠️ **`flags → initial` is WITHDRAWN** — `initial` is already the machine's initial-state keyword, so the rename recreates the exact defect it fixes. The value vocabulary and the three `on` positions go to ballot **AB-13** · `mut` in three positions · `requires (X = expr)` vs `flags (X = on)` — same shape, disjoint value spaces; pre-check both so the span lands on the author's token · group placement (before/after body) differs per construct — state the law and say which side `each` is on · **M2**: scope the `hooks` and `relation` claims in CONSTRUCTS.md to hook-fired spawns; until F4 lands, a hook-dependent component in a baked asset is a coded bake warning naming F4 · **M8**: specify the `stable_name` resolution axis once (authored text uses the Rust type name; bake resolves through the same-build manifest; rename = loud bake error listing affected files) · **M10**: bake refusal for any `Entity`-carrying field authored without `link` (the R-RES twin) · **M14**: the derive emits bundle types into the manifest so `Pawn:` is refused with the truth, not "unknown component" about a type that exists (ballot **F10**). ⚠ **The pre-question — *is F10 a ballot at all* — is UNANSWERABLE BY READING, recorded here 2026-09-03 rather than left as a mutual notice**: this row and Part D were each rewritten to say the other disagrees, neither now states a POSITION, and the original text was never in git (`git log --all -- docs/gaia/PENDING-SYNTAX-PLAN.md` returns the commit that ADDED this file in its present form, and one later touch). It can only be settled by ruling. F10 is **still open**; the pricing pass RECOMMENDS — as a recommendation, not a ruling — that it is not a ballot but an architecture fork, decided by F4's own ratified provenance criterion: a bundle is a CODE fact, so it expands from the LIVE derive-emitted manifest at load and is never frozen at bake. ⚠ Note the ladder consequence either way: M14 puts the fix in the DERIVE, and that manifest IS G1's GK-4 field table, so F10 reaches **G1's table contents**, not merely "owner scoping" · **M19**: **AIR-14 is unimplementable for Aether as specified** — `//` comments are gone at lex time before `aether_lang` sees the TokenStream, so the shared comment-survival oracle is red by construction or silently Gaia-only. Split it: Gaia carries it via the CST; Aether's half is priced separately or scoped out
 
 ### Tier 4 — cheap wins
 
@@ -85,24 +95,38 @@ Header divergence (`aether! {` vs `gaia 1 profile=scene`) — pick one version-t
 
 `link` as the shared spelling · UpperCamel = type / snake_case = instance in both · `//` comments · `=` means "assign a value" everywhere · Gaia `use … as` matching Rust's import semantics · **and the owner's own ruling: the two languages SHOULD look different** — commas, braces, bracelessness and overall shape are loud-on-error differences that reinforce "you are in the other language". C3 (`for` bake vs runtime), C4 (brace content model), C6 (`entity` type vs keyword), C7 (bracelessness) are all **document-the-difference, do not align** — forcing alignment there damages a correct design.
 
-## Part D — what is NOT decided
+## Part D — the ballots reaching this file, and what became of them
 
 **Ballot bodies live in [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md)** (one destination; the
-[`CAMPAIGN.md`](CAMPAIGN.md) table is the index). Gaia-side ballots reaching this file:
+[`CAMPAIGN.md`](CAMPAIGN.md) table is the index). ⚠ **This section was headed "what is NOT decided"
+and every row read as open. Corrected 2026-09-03:** most of them were ruled on 2026-08-30, on
+`feat/threadpool-ke16`, which this branch had not received. Rows are struck through where the ballot
+is closed and left standing where it is not; **still open are F8, F10 and F9's residual**:
 
 | Ballot | Question | Blocks |
 |---|---|---|
-| F1 | bake route into the byte format | G1 |
-| F4 | what "loaded" means — **widened** to every insert-path mechanism, with M1's measured `requires` fact as its second bullet | G6 |
-| F2 · F3 | DataAsset runtime home · table file shape | G5 |
+| ~~F1~~ | ~~bake route into the byte format~~ **RULED BY THE OWNER 2026-08-30: macro-time GK-4, NOW, with streaming not foreclosed** | ~~G1~~ unblocked |
+| ~~F4~~ | ~~what "loaded" means — **widened** to every insert-path mechanism, with M1's measured `requires` fact as its second bullet~~ **RULED 2026-08-30 [delegated]: (a), suppress-then-fixup, four ordered sub-passes — sub-pass 4 later SPLIT into 4a relink / 4b hooks** | ~~G6~~ unblocked |
+| ~~F2 · F3~~ | ~~DataAsset runtime home · table file shape~~ **F2 RULED [delegated] 2026-08-30: rows are entities, `StorageKind::Table` (not dense), eager at load, pinned. F3 RULED BY THE OWNER: both file shapes over ONE schema** | ~~G5~~ unblocked |
 | F8 | name-vs-id for objects. ⚠️ **reopens** a ratified identity ruling | G3 candidate — owner scoping |
-| F9 | flags carrier vs coded refusal (M4) | G2 / G6 |
-| F10 | bundle expand-vs-refuse (M14) — first item: *is this a ballot at all?* Tier 3 and this table disagreed | owner scoping |
-| ~~**GB-1**~~ | ~~which ladder layer a template expansion, and an UNLABELED write, occupy (K2)~~ **RESOLVED 2026-08-30 (standing rule): expansion occupies NO layer — it is one inheritance-DEPTH step ranked where `extends` ranks, resolution is depth-then-ladder; an unlabeled write is `base`. Ladder untouched** | ~~G4~~ unblocked |
-| ~~**GB-2**~~ | ~~colour transfer function: `#RRGGBBAA` sRGB-decoded at bake, or raw into a LINEAR field (K12)~~ **RESOLVED 2026-08-30 (standing rule): neither — the transfer function is a property of the DESTINATION FIELD. Arity settled with it** | ~~G2 / G5~~ unblocked |
-| **GB-3** | the reference taxonomy's **third kind** — asset-ref spelling, style-ref kind, `$hole` disposition, "declared-node ⇒ `@`" withdrawn (K3 + K15 + K16). Settle jointly so R4 is rewritten **once**. ⚠️ amends ratified §Identity (an extension consistent with its own rationale, not a reversal) | G2 / G3, and Tiers 1–2 here |
-| **GB-4** | `instance` linkage: (a) linkage-in-slot `instance wall_east extends\|copy "…"` vs (b) linkage-in-head (`instance` ≡ live link, `copy` its own head). `from` is deleted either way (K14) | G4 / Tier 2 |
-| **GB-5** | are engine-derived fields (`PointLight::position`) declarable in the scene profile? | G1 table freeze |
+| F9 | flags carrier vs coded refusal (M4). ⚠ **PARTLY RULED 2026-08-30 [delegated]** — three eliminations ruled (`FLAGS_DIRECT` never on the load path; the refusal option contradicts ratified AB-6; the spelling, if a carrier lands, is `flags (X = true)`). **The residual is still the owner's:** may a document set a flag on an individual authored object? | **G2** (the residual). ⚠ **Kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16`:** that side's Blocks column read **G2 / G6**; the G6 half is not struck by the partial ruling |
+| F10 | bundle expand-vs-refuse (M14) — first item: *is this a ballot at all?* ⚠ **Still open. The pre-question cannot be answered by reading**: Tier 3 and this table were each rewritten into a notice that the other disagrees, neither states a position, and the original text was never in git. Recorded 2026-09-03; see Tier 3 for the recommendation offered as a recommendation | owner scoping · and **G1's table contents**, per M14 |
+| ~~**GB-1**~~ | ~~which ladder layer a template expansion, and an UNLABELED write, occupy (K2)~~ **RESOLVED 2026-08-30 (standing rule): expansion occupies NO layer — it is one inheritance-DEPTH step ranked where `extends` ranks, resolution depth-then-ladder; an unlabeled write is `base`. The ladder is untouched** | ~~G4~~ unblocked |
+| ~~**GB-2**~~ | ~~colour transfer function: `#RRGGBBAA` sRGB-decoded at bake, or raw into a LINEAR field (K12)~~ **RULED BY THE OWNER 2026-08-30: `#RRGGBB` is `#RRGGBBAA` with maximal `AA`, a DEFAULTED FIELD rather than a second literal kind; and an 8-digit literal at a 3-component field is a coded bake refusal naming the field, never a silent alpha drop** | ~~G2 / G5~~ unblocked. ⚠ **Kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16`:** the same ruling's second half — **the transfer function is a property of the DESTINATION FIELD, not of the literal**, and the arity is settled with it |
+| ~~**GB-3**~~ | ~~the reference taxonomy's **third kind**~~ **THIRD KIND ADOPTED BY THE OWNER 2026-08-30; the four-part rewrite RULED [delegated]** — sigil (uniform, position-independent) / styles are the FIRST kind / `$hole` STAYS, lexical in every position / "declared node ⇒ `@`" WITHDRAWN. ⚠ **The glyph is NOT minted**: it is closed at G2 jointly with the arithmetic operator vocabulary. **R4/R5/R7 and Tiers 1–2 here are REGENERATED by this ruling** | ~~G2 / G3~~ unblocked; Tiers 1–2 here owe the rewrite. ⚠ **Kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16`:** the question as that side framed it — asset-ref spelling, style-ref kind, `$hole` disposition and the withdrawn “declared-node ⇒ `@`” (K3 + K15 + K16), to be settled jointly so R4 is rewritten **once**; it amends ratified §Identity as an extension consistent with its own rationale, not a reversal |
+| ~~**GB-4**~~ | ~~`instance` linkage: (a) linkage-in-slot vs (b) linkage-in-head~~ **RULED 2026-08-30 [delegated]: (a), and the linkage word is MANDATORY** — `instance <name> extends\|copy <base-ref>`, no default; `from` deleted (head-position occurrences measured: zero). ⚠ Rider owed to G2: an undeclared `from=` → `source=` rename on `bind` | ~~G4 / Tier 2~~ unblocked. ⚠ **Kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16`:** the question as that side framed it — (a) linkage-in-slot `instance wall_east extends\|copy "…"` vs (b) linkage-in-head (`instance` ≡ live link, `copy` its own head), with `from` deleted either way (K14) |
+| ~~**GB-5**~~ | ~~are engine-derived fields (`PointLight::position`) declarable in the scene profile?~~ **RULED BY THE OWNER 2026-08-30 (recorded 2026-08-31): PERMIT AS SEED — the authored value is the INITIAL value, and the field table's disposition column records the CONDITION and the WRITER, never a boolean** | ~~G1 table freeze~~ **UNBLOCKED** |
+
+> **Merge note, 2026-09-10 (`merge/ke16-into-render`).** Both branches edited this table.
+> `feat/multi-paradigm-render` carried the struck, ruled rows (its 2026-09-03 correction of the
+> section head); `feat/threadpool-ke16` carried three rows still in their pre-ruling state, whose
+> distinct wording is folded into the rows above. Three of its rows added nothing the ruled rows
+> do not already say and are recorded here verbatim rather than repeated as a contradicting row:
+> `| F10 | bundle expand-vs-refuse (M14) — first item: *is this a ballot at all?* Tier 3 and this
+> table disagreed | owner scoping |`; GB-1 in the same wording as above but ending “Ladder
+> untouched”; and `| **GB-5** | are engine-derived fields (`PointLight::position`) declarable in
+> the scene profile? | G1 table freeze |`, whose question text survives struck inside the GB-5
+> row above.
 
 ## Part E — the K-record
 

@@ -4,16 +4,23 @@
 //!
 //! # Why this file exists (R4b-open-edges)
 //!
-//! `validate_asset_refs` is not only a reader of the `RenderEnabled` bit: on a churn frame it
-//! DISABLES every mesh row whose handle went stale, through a deferred command
-//! (`boyko_render/src/asset_refcount.rs`, `DisableStaleMeshCommand`). The instance packs and the
-//! mesh and shadow-caster gathers filter on that bit, so a gather that runs before the
-//! validation's apply window draws the stale row for one more frame. `AssetRefcountPlugin`'s doc
-//! recorded this edge as inexpressible from the plugin and left it to add-order, and the
-//! fence-gate proof in `retire_deferred_frees`' doc assumes it ("after `apply`, before any
-//! gather"). Add-order is not a pin (the executor packs unordered systems by wave), so R4b
-//! declares it by name: the validation joins `VisibilitySet::Validate`, the readers stay in
-//! `VisibilitySet::Read`, and this line orders the set after the phase.
+//! `validate_asset_refs` writes the two bits the gathers filter on beside `RenderEnabled`: on a
+//! churn frame it marks every mesh row whose handle went stale `RenderStale` (a material row
+//! `MaterialStale`), and clears the bit again once the handle is valid, through a deferred
+//! command (`boyko_render/src/asset_refcount.rs`, `SetStaleCommand`, emitted on a transition
+//! only). It never touches `RenderEnabled` itself — that bit is `visibility_sync`'s and the
+//! user's (asset-validate prerequisites (a)/(b), A5.2). The mesh and shadow-caster gathers
+//! filter on `Enabled<RenderEnabled>` AND `Disabled<RenderStale>`, so a gather that runs before
+//! the validation's apply window draws a row the validation marked stale THIS frame for one more
+//! frame. `AssetRefcountPlugin`'s doc recorded this edge as inexpressible from the plugin by
+//! `SystemKey`, and the fence-gate proof in `retire_deferred_frees`' doc assumes it ("after
+//! `apply`, before any gather"). Add-order is not a pin (the executor packs unordered systems
+//! by wave), so R4b declares it by name: the validation joins `VisibilitySet::Validate`, the
+//! readers stay in `VisibilitySet::Read`, and this line orders the set after the phase. The
+//! consumer-side pin of the same order — the gather helpers' `.after_set(AssetValidateSet)`
+//! (prereq (c)) — is independent and does not reach the instance packs; this set edge does.
+//! Unlike its sibling `Validate.after(Sync)` (`host_orders_asset_validation_after_visibility_sync.rs`),
+//! this edge carries data today.
 //!
 //! # How it catches the line
 //!
@@ -46,7 +53,8 @@ use host_order_cycle::assert_finish_rejects_cycle;
 /// The cycle's members on both feature legs: the validation and every `VisibilitySet::Read`
 /// member `EnginePlugins` registers on both.
 const CYCLE: &[&str] = &[
-    "boyko_render::asset_refcount::validate_asset_refs [in: VisibilitySet::Validate]",
+    "boyko_render::asset_refcount::validate_asset_refs \
+     [in: VisibilitySet::Validate, boyko_render::asset_refcount::AssetValidateSet]",
     "boyko_render::gpu3d_system::sync_gpu_3d_instances \
      [in: VisibilitySet::Read, boyko_render::instance_model::InstancePackSet]",
     "boyko_render::instance_model::sync_instance_model_cols \

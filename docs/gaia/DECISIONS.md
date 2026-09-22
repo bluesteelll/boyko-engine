@@ -329,6 +329,10 @@ must not be left half-renamed. That edit is **owed to G2** and is not made here.
   `gaia fmt --assign-ids` writes ids INTO the text; bake refuses a referenced node without one.
   **An anonymous node can never be the target of a cross-file reference, an override, or a patch**
   — ordinals re-key on insertion (the Terraform-count class).
+- **Two reference kinds, two syntaxes** *(ratified)*: value references (templates, `let`) are
+  lexical, copy-semantics; entity references (`@asset/object`) are identity, remapped at load. No
+  config language in the survey has object identity at all — one spelling would invite authors to
+  assume one behaviour.
 - **THREE reference kinds, three sigils** *(the two-kind rule as ratified 2026-08-28, extended by
   ballot **GB-3** — third kind **ADOPTED BY THE OWNER 2026-08-30**, the four-part rewrite ruled the
   same day [delegated]; body in [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29)*. The
@@ -337,6 +341,11 @@ must not be left half-renamed. That edit is **owed to G2** and is not made here.
   third kind, and it is the column the other two do not have:** an asset reference is the only one
   whose referent can **stop being valid after load**, because streaming retires slots — which under
   the owner's F5 ruling is the normal case, not an edge.
+  *Duplicate reduced by the merge `merge/ke16-into-render`, 2026-09-10.* `feat/multi-paradigm-render`
+  carried the same paragraph headed **THREE reference kinds** without the sigil count and without
+  the [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29 body pointer; it asserted no fact
+  the bullet above does not. Both sides' bullets are kept: the first is the 2026-08-28 two-kind
+  ratification, which `feat/threadpool-ke16` had replaced rather than kept.
 
   | kind | sigil | at bake | at load | after load |
   |---|---|---|---|---|
@@ -451,6 +460,17 @@ must not be left half-renamed. That edit is **owed to G2** and is not made here.
   `ratified-stale` in its own head, gated by
   [`tests/gaia_g0_citation_census.rs`](../../tests/gaia_g0_citation_census.rs) — so the divergence
   is *marked*, not silent. The edits belong to **G2**.
+
+  ⚠ **One FOLLOW-ON FINDING kept by the merge `merge/ke16-into-render`, 2026-09-10, from
+  `feat/multi-paradigm-render`, which recorded this ruling on 2026-09-03 — it is not a ballot and
+  is not closed:**
+  the asset-ref dangle check is structurally unreachable downstream of the sigil pass as the engine
+  stands — `AssetServer::load` logs `E0801` and returns a LIVE handle in the `Failed` state which it
+  inserts into the path index, and `validate_asset_refs` early-returns unless `free_epoch` advanced,
+  which a never-loaded asset never makes happen.
+  *That branch's restatement of this ruling is otherwise reduced to this note. Its own closing line
+  sent the reader to `feat/threadpool-ke16` `gaia/DECISIONS.md` §Identity and references for the
+  full ground — which is the text above, and is now in this file.*
 
 - **GN1's coverage, stated per kind — and the ballot's premise about it is REFUTED.** The ballot
   asserted *"GN1 resolves every reference form in the binary to a name hash at load — WITHOUT
@@ -952,12 +972,22 @@ The answer is already shipped and gated at zero allocations in this repo; Gaia g
      is the cost the deadline existed to avoid, and it is recorded rather than smoothed away.
      Full body, measurements and rejected alternative:
      [`../OPEN-QUESTIONS.md`](../OPEN-QUESTIONS.md) §2026-08-29.
+
+     ⚠ *Kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/multi-paradigm-render`'s
+     shorter statement of the same ruling — the one clause that side carried and this one does not:*
+     the work order in the same commit that carried the deadline already declared R0 *"buildable
+     now, no ballot in the way"*.
    - **A bind source on a dense (or bitset) component.** `any_changed_since`
      (`boyko_ecs` `component_api.rs:403`) resolves per-archetype pools, and non-signature storage
      owns none (`archetype.rs:389-395`), so the gate is **never true** — the sink never updates and nothing is
      logged. Red fixtures cover BOTH spellings: an explicit `kernel (storage = dense)` component
-     and a `table`-derived dense column, since Gaia's own `table` bakes to dense — the second
-     spelling is the one an author reaches by accident. Companion doc fix in the same commit:
+     and a `table`-derived one. ⚠ **The premise of that second spelling was CORRECTED 2026-08-30 by
+     F2's ruling and is dated here:** Gaia's `table` bakes to **`StorageKind::Table`**, not to dense,
+     so a table row is not the accidental entrance this row assumed. The row's hazard is unchanged
+     and still live — a bind source on a dense OR bitset component is invisible to the gate — and the
+     dense spelling is reached deliberately, through `kernel (storage = dense)`, or by a row
+     component that is ALSO carried by entities outside the table, which is the one case F2 leaves
+     to `Dense`. Companion doc fix in the same commit:
      the `any_changed_since` doc comment (`component_api.rs:386-389`) claims the scan is bounded
      to hosting archetypes, which is false for exactly this case. The remedy (a bake refusal keyed on the GK-4 storage kind vs
      routing dense through `DenseStore` ticks) is the implementer's engineering choice, per the
@@ -999,6 +1029,12 @@ The answer is already shipped and gated at zero allocations in this repo; Gaia g
    count and row count pinned and the number reported per row rather than per frame. That is the
    bench **GK-2**'s design pass needs to justify a per-column tick, and it is not a companion to
    this gate.
+
+   *Duplicate reduced by the merge `merge/ke16-into-render`, 2026-09-10.* `feat/multi-paradigm-render`
+   carried a shorter restatement of this same GB-7 ground, written by its 2026-09-03 sync. Every
+   number in it — 332 ns, +0% / +82% / +101%, the 100 ns timer step, the 0.05-0.50
+   signal-to-noise, and the clock's legitimate return over the scan itself — is above, so it is
+   reduced to this line rather than repeated.
 
 ## Census discipline — ballot GB-8, ruled 2026-08-30 [delegated]
 
@@ -1076,8 +1112,13 @@ no path/name/positional identity · no multiple inheritance · no bespoke patch 
 `{node_id, key, value}` edits are applied by a TOOL) · no per-file pragmas that change parsing (the
 RON `#![enable]` class) · no comment directives · **no layout at bake** (even Slint solves layout
 at runtime; constraints bake into POD components, the solver is a runtime system) · no structural
-reactivity · no external-mod pipeline in v1 (the format carries layer names from day one so the
-retrofit is additive) · no merge driver (mergeability comes from the format: stable ids, keyed
+reactivity · **no external-mod pipeline in v1** — *ratified by the owner 2026-08-30 (ballot F7), and dated
+here because until that date this line was a ratified refusal answering half of an OPEN ballot,
+which is the settle-by-proximity shape [`CAMPAIGN.md`](CAMPAIGN.md) forbids on this page. The
+ruling makes it correct; it did not make it legitimate at the time.* The constraint is recorded
+in its NARROW form — no reflection in the GAME BINARY — so a later mod campaign is not blocked
+by a sentence that never meant to block it; the format carries layer names from day one, so the
+retrofit is additive · no merge driver (mergeability comes from the format: stable ids, keyed
 collections, small files, bake as the post-merge validator) · **no second front-end**.
 
 ✅ **F7 RATIFIED BY THE OWNER, 2026-08-30: mods are NOT supported for now — option (a), stated
@@ -1093,6 +1134,24 @@ option: v1's format gains a compatibility surface for a consumer that does not e
 dead-datum class. Price of the ruling: if a mod campaign is ever taken, the stability guarantees are
 retrofitted rather than designed in — accepted knowingly, and the "for now" in the owner's answer is
 what makes that a schedule rather than a prohibition.
+
+## GB-5 — this branch's 2026-09-03 note; the ruling itself is at §GB-5 below
+
+> **Merge note, 2026-09-10 (`merge/ke16-into-render`).** Both branches carried a `§GB-5` section.
+> `feat/threadpool-ke16`'s is the ruling written where it was taken, and it is the primary text:
+> it stands **below**, unedited, as the last section of this file. `feat/multi-paradigm-render`'s
+> was its 2026-09-03 sync restating the same ruling from a distance, and it is reduced to this
+> pointer plus the one thing it recorded that the primary does not — its provenance paragraph,
+> kept verbatim here.
+
+*Recorded on this branch 2026-09-03. The ruling landed on `feat/threadpool-ke16` in `b6c41237`
+(2026-08-31), a commit that touched that branch's `gaia/DECISIONS.md` and nothing else — which is why
+every index, on both branches, went on printing GB-5 as OPEN. The full ground is at that branch's
+`gaia/DECISIONS.md` §GB-5.*
+
+⚠ **2026-09-10: that ground is now IN THIS FILE**, at §GB-5 below, brought here by the merge
+`merge/ke16-into-render`. The paragraph above is the record of why the 2026-09-03 sync was written,
+not a live pointer at another branch.
 
 ## Rejected models, for the record
 
@@ -1225,7 +1284,8 @@ it was reasoned from:
   `DirectionalLight.direction`, `Transform.translation`/`.rotation`, the two whole-`Transform`
   camera cases, `RigidBody.position`/`.rotation`) — a seed is a starting pose. Direct fit, and the
   engine already ships this exact semantics: `SpotLight::new`'s `direction` is documented as *"only
-  a SEED: `light_reconcile` overwrites it"*.
+  a SEED: `light_reconcile` overwrites it"*
+  ([`light.rs:1207`](../../crates/boyko_render/src/light.rs)).
 * **`ContentSize.width`/`.height`** — this is where seed stops being a concession and becomes the
   only correct answer: **until the font loads there is no measurement at all**, so the authored
   value is the only value there is, and it is what prevents a layout pop.

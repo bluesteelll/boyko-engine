@@ -201,13 +201,16 @@ The repair belongs in those two crates, not in the gate.
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **335 sites (184 unconditional +
-151 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-22 on `merge/ke16-into-ecsnative` @
-`c52ad183`, after the tree-broadphase merge.** The last move, 334 → 335, is one `cfg_attr(miri,
-ignore = "miri-slow: …")` on `rent_admission_of_64_reaches_within_the_bench_cap_at_the_design_sizes`
-in `boyko_physics/tests/broadphase_tree_direct_drive.rs` (tree broadphase C3, `a46b8287`); the plain
-count did not move. The move before it, 333 → 334 (2026-09-21 @ `6b29c400`, after the A1b, hwrt
-shadow-origin and A3 merges), was
+The four commands above run **none** of the `#[ignore]`d tests — **336 sites (185 unconditional +
+151 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-22 on `merge/ke16-into-ecsnative` after the A5 batch merge.** The last move, 335 → 336, is +1 plain `gpu-windowed:` in
+`boyko_app/tests/sdf_room_ddgi_dump.rs` (`sdf_room_ddgi_screenshot_dump`, the SDFDDGI host-hook
+A/B device gate, under `#![cfg(windows)]`), the only ignore site the five A5 lanes brought; the
+`cfg_attr` count did not move. The move before it, 334 → 335 (measured after A5.1, which added no
+site), is
++1 `cfg_attr(miri, "miri-slow: …")` in `boyko_physics/tests/broadphase_tree_direct_drive.rs`
+(`rent_admission_of_64_reaches_within_the_bench_cap_at_the_design_sizes`, the tree-broadphase
+lane's `a46b8287`, merged into the line at `bbd5d12c` after the 334 was taken at `6b29c400`); the
+plain count did not move. The move before it, 333 → 334, is
 +3 plain `gpu-windowed:` in `boyko_app/tests/taa_jitter_eval.rs` (the three hwrt shadow-origin
 gates, `978625a1`, inside `#[cfg(feature = "hwrt")]`) and −2 plain `deferred:` in
 `boyko_ecs/tests/ke13_query_view_get_ignores_dense_filter.rs` (A3, `1aaadfdc`: the KE13 `get_mut`
@@ -220,7 +223,12 @@ attributed by `git diff` against each merge's second parent — the light-table 
 in `boyko_physics/tests/narrowphase_parallel_equivalence.rs`
 (`jolt_pyramid_parallel_narrowphase_is_bit_identical`, L5 C3). The light-table lane's own "324"
 was 320 + 4 on its branch point, which predates the L2 calibration's +7 and the simd_solve +1; an
-independent enumeration reproduces 335 / 184 / 151 across 10 crates and 1,658 `.rs` files walked.
+independent enumeration reproduces 336 / 185 / 151 across 10 crates and 1,667 `.rs` files walked
+(1,652 at `6b29c400`, +6 from the tree-broadphase merge, +1 root test from A5.1, +2 `boyko_render`
+tests from A5.2, +1 `boyko_rhi_vulkan` test from A5.3, +4 from A5.4 — the dump gate above, its
+composed-plugin twin, the octahedral-border host oracle and the probe-update `spv_sync` — and +1
+from the batch's own follow-up `04e69776`, which moved the host-hook gate out of `src/plugins.rs`
+into `crates/boyko_app/tests/ddgi_host_hook_registration.rs`; the site count did not move with it).
 The move before it, 321 → 328, is the parallel-narrowphase lane's L2 calibration: seven
 `cfg_attr(miri, "miri-slow: …")` sites in `broadphase_select_p3.rs`: `GRID_LO`/`GRID_HI` moved from
 96/192 to 2,700/3,000, so the six existing tests, which size their scenes from the band, now step
@@ -265,27 +273,28 @@ it, per-binary with `--test-threads=1`. It covered **135 tests** when it was wri
 `boyko_app`, `boyko_render` and `boyko_rhi_vulkan`; **that count has NOT been re-taken on this
 line**, and it cannot be re-derived from the reason strings (see the ⚠ below), so it is left as the
 historical figure rather than guessed forward. What IS mechanical today: those three crates hold
-**162 of the 184 plain sites** (`boyko_app` 105, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
-2026-09-21 @ `6b29c400`; 159 of 183 on the union earlier that day, the three since being the
+**163 of the 185 plain sites** (`boyko_app` 106, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
+2026-09-21 on `merge/a5-batch` after A5.4, whose dump gate is the one since; 162 of 184 @
+`6b29c400`; 159 of 183 on the union earlier that day, the three since being the
 hwrt shadow-origin gates; 155 of 178 on 2026-09-19, the four since being the light-table lane's
 `gpu-windowed:` tests in `boyko_app`; 145 of 172 on 2026-09-17, the ten between being the
 boot-validation lane's), which is the population this leg is drawn from, not the leg itself. The
 other 22 plain sites are `boyko_ecs` 8, `boyko_serialize` 5, `boyko_physics` 3, `boyko_sdf_math` 2,
-`boyko_ui` 2, `boyko_log` 1, `boyko_threadpool` 1. **Eight** of the 162 need a non-default cargo
+`boyko_ui` 2, `boyko_log` 1, `boyko_threadpool` 1. **Eight** of the 163 need a non-default cargo
 feature and are not even *compiled* otherwise: `--features hwrt` ×7
 (`boyko_rhi_vulkan/tests/hwrt_blas_smoke.rs` 3, `boyko_app/tests/taa_jitter_eval.rs` 3 — the
 shadow-origin gates — and `boyko_app/tests/asset_streaming_f7_rt_cap_headless.rs`
 1 — a `#![cfg(feature = "hwrt")]` file present since `b8d8b162`, 2026-07-10, so the "×3" this
 paragraph carried until 2026-09-21 was an undercount from the day it was written, not a new site)
-and `--features spec_constant_smoke` ×1. **124 of the 184** plain sites sit in files under
+and `--features spec_constant_smoke` ×1. **125 of the 185** plain sites sit in files under
 `#![cfg(windows)]` and vanish on Linux (the earlier "most of the rest" was never counted). There is
 no single command — each binary has its own env-var protocol in its module header
 (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
-**Leg: Miri.** `cargo +nightly-x86_64-pc-windows-msvc miri test` already carries **150** of the ignores (measured
-2026-09-19 on the parallel-narrowphase lane after its L2 calibration as 149, re-measured unchanged
-2026-09-21 on the union, and 150 on 2026-09-22 @ `c52ad183`: the tree broadphase's C3 added one
-`cfg_attr(miri, …)` site, so the split is now 143 / 6 / 2) — the **149** `cfg_attr` sites
+**Leg: Miri.** `cargo +nightly-x86_64-pc-windows-msvc miri test` already carries **150** of the ignores (149 measured
+2026-09-19 on the parallel-narrowphase lane after its L2 calibration and unchanged on the
+2026-09-21 union; +1 at the tree-broadphase merge `bbd5d12c`, the `miri-slow:` site named above,
+so the per-cfg split is now 143 / 6 / 2) — the **149** `cfg_attr` sites
 whose cfg is `miri` (143) or `any(miri, debug_assertions)` (6), plus `miri_fixed_loop`'s one plain
 ignore. The `miri` sites run
 *natively* in both profiles and are skipped only under Miri; the `any(miri, debug_assertions)`
@@ -337,7 +346,7 @@ not a census: the 147 plain reasons that carry no prefix have not been classifie
 ⚠️ **The device-free leg is one test, and it is an explicit invocation rather than a filter,
 because the partition CANNOT be derived from the reason strings.** A keyword classifier over
 `{GPU, RTX, Vulkan, windowed, device, dispatch}` put 10 on the device-free side — of the 143 plain
-sites the tree held when the experiment was run, 184 today — and **8 of those 10 are wrong**, wrong
+sites the tree held when the experiment was run, 185 today — and **8 of those 10 are wrong**, wrong
 in the direction that produces a green:
 
 - `negative_chained_barrier_hazard` and `a5_gpu_off_vs_on_wall_clock_ab` **do** need a device; their
@@ -359,24 +368,25 @@ a custom `#[global_allocator]` — where `miri-slow` means it would finish, give
 A6 lane's, all `cfg_attr(miri, …)`), `generator`, `deferred`, `flaky`. **The claim that the tree
 maps onto it "exactly" was true of a 143-site tree and is not true now:** that mapping (135
 `gpu*`/`feature`, 1 `solo`, 1 `miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky`) sums to 143
-against **184** plain sites today.
-The migration has started at the sites, not in this list: **37 of the 184 plain reasons already
-carry a prefix** — 15 `deferred:`, 19 `gpu-windowed:`, 2 `slow:`, 1 `generator:` (measured
-2026-09-21 @ `6b29c400`: 36 of 183 on the union earlier that day, then the hwrt shadow-origin
+against **185** plain sites today.
+The migration has started at the sites, not in this list: **38 of the 185 plain reasons already
+carry a prefix** — 15 `deferred:`, 20 `gpu-windowed:`, 2 `slow:`, 1 `generator:` (measured
+2026-09-21 on `merge/a5-batch` after A5.4, whose one new site arrived prefixed `gpu-windowed:`;
+37 of 184 @ `6b29c400`: 36 of 183 on the union earlier that day, then the hwrt shadow-origin
 lane added three `gpu-windowed:` and A3 resolved two `deferred:`; 31 of 178 on 2026-09-18 after
 the boot-validation merge, whose ten new
 device tests all carry `gpu-windowed:`; the light-table lane then added four `gpu-windowed:` and
 the narrowphase lane one `slow:`, so every plain site the two lanes brought arrived prefixed; the
 A7 merge before them removed four `deferred:` plain sites by resolving them) — and the other 147
-do not, the same 147 as on 2026-09-18. The 19 `gpu-windowed:` are `boot_validation_clean.rs` 7,
+do not, the same 147 as on 2026-09-18. The 20 `gpu-windowed:` are `boot_validation_clean.rs` 7,
 `unwritten_shadow_map_gate.rs` 4, `sdf_marcher_sun.rs` 3, `taa_jitter_eval.rs` 3,
 `forward_teardown_destroys_forward_sets.rs`
-1, `vb_teardown_destroys_boot_resources.rs` 1. So the migration is still mechanical *per site*, and
+1, `vb_teardown_destroys_boot_resources.rs` 1, `sdf_room_ddgi_dump.rs` 1. So the migration is still mechanical *per site*, and
 afterwards each leg is a `grep` and every new ignore picks its own leg at the site; what it is not
 is bookkeeping already done.
 
 The `cfg_attr` side is further along and has already outgrown the list. Of the 151 (measured
-2026-09-22): **93 `miri-slow:`, 19 `instrument:`, 9 `tractability:`, 6 `miri-unsupported:`, 6
+2026-09-21 on `merge/a5-batch`): **93 `miri-slow:`, 19 `instrument:`, 9 `tractability:`, 6 `miri-unsupported:`, 6
 `slow:`, 1 `miri-arm:`, 17 with no prefix.** `instrument:` (the `boyko_threadpool` `block.rs`
 recording-allocator tape), `tractability:` and `miri-arm:` — **29 sites** — are prefixes the closed
 vocabulary above does not contain, and the census's own error text uses `tractability:` as its
