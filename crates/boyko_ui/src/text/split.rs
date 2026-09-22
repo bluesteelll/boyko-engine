@@ -6,14 +6,13 @@
 //!
 //! # What is copied vs. new
 //!
-//! * [`split_top_level`] began as a VERBATIM copy of the `.keys` parser
-//!   (`boyko_input::persist::grammar::split_top_level`). Copying (not depending
-//!   on `boyko_input`) avoids a `boyko_ui → boyko_input` crate edge for a
-//!   ~20-line pure function. It has since DIVERGED by one clause — bracket
-//!   depth — because P6a introduced `[f32; 2]` field values; see the function
-//!   docs. It is still NOT brace-aware, so P3 uses it strictly on the
-//!   already-extracted INNER field list (Decision 5), never to isolate a
-//!   component span.
+//! * [`split_top_level`] was copied from the `.keys` parser
+//!   (`boyko_input::persist::grammar::split_top_level`) and has since DIVERGED —
+//!   see its own doc. Copying (not depending on `boyko_input`) avoids a
+//!   `boyko_ui → boyko_input` crate edge for a ~20-line pure function. It tracks
+//!   paren + BRACKET depth and quote state; it is NOT brace-aware, so P3 uses it
+//!   strictly on the already-extracted INNER field list (Decision 5), never to
+//!   isolate a component span.
 //! * [`strip_comment_slashslash`] is NEW: the `.keys` strip-comment is a
 //!   single-byte `#` rule, but `.ui` reserves `#` for the name sigil, so the
 //!   comment lead is the two-byte `//` (Decision 2). It returns the PRE-TRIM
@@ -24,27 +23,43 @@
 /// The canonical indentation step: 4 spaces per nesting level (P3 §1).
 pub(crate) const STEP: u32 = 4;
 
-/// Splits a top-level comma-separated list while tracking paren AND bracket
-/// depth plus quote state. A comma inside `(...)`, inside `[...]` or inside
-/// `"…"` does not split. The returned slices borrow from `s`.
+/// Splits a top-level comma-separated list while tracking paren and BRACKET
+/// depth plus quotes. A comma inside `(...)`, inside `[...]`, or inside `"…"`
+/// does not split. The returned slices borrow from `s`.
 ///
-/// Adapted from `boyko_input::persist::grammar::split_top_level` (Decision 5),
-/// with ONE divergence: `[`/`]` count toward the same depth as `(`/`)`.
+/// Used ONLY on the inner field list of a component body (Decision 5), never to
+/// isolate a component span — that is [`extract_component_span`]'s brace-matching
+/// job.
 ///
-/// # Why the divergence exists
+/// # The bracket rule is a FIX, and the doc it replaces was false twice
 ///
-/// The `.keys` original tracks parens only, and P3's copy inherited a doc line
-/// claiming the `.ui` field list is "provably free of `[` values". P6a made that
-/// false when it gave `UiImage` two `[f32; 2]` UV fields: `uv_min: [0.1, 0.2]`
-/// split at the comma INSIDE the brackets, so `parse_f32_pair` saw `[0.1`, failed,
-/// and the field kept `UiImage::default()` while the orphan `0.2]` was reported as
-/// a missing `key: value`. A `.ui` document could not carry a non-default UV at
-/// all. The `[` clause is what makes the field values the format already accepts
-/// actually reachable.
+/// This function was copied from
+/// `boyko_input::persist::grammar::split_top_level`, whose grammar has no
+/// bracketed values, and its doc claimed the P3 field list was *"provably free of
+/// `{`/`[`/quoted-comma values … locked by a rejection test"*. Neither half held:
+/// GUI P6a added `UiImage`'s `uv_min`/`uv_max`, which are `[u, v]`, and no such
+/// rejection test exists anywhere in the tree.
 ///
-/// A stray closing delimiter saturates at depth 0 (the original's tolerance),
-/// so a malformed body degrades into extra splits rather than swallowing the
-/// rest of the line.
+/// The consequence was silent. MEASURED at the UI-ADVANCED S6 build: a `.ui`
+/// source spelling `UiImage { texture: 7, uv_min: [0, 0], uv_max: [1, 1], tint: … }`
+/// split into `uv_min: [0` / `0]` / `uv_max: [1` / `1]`, so `parse_f32_pair`
+/// rejected both UV fields, they kept their `Default`s, and four recoverable
+/// errors went into the LOWERING report — the report `p3_common::spawn_dot_ui`
+/// clones and drops. `p6a_equivalence::image_widget_three_ways_equivalent` was
+/// green over it only because the authored UVs happened to EQUAL the defaults
+/// (`[0,0]`/`[1,1]`). Bracketed values in a `.ui` file had never parsed.
+///
+/// # One depth counter, not two
+///
+/// `(` and `[` both open and `)` and `]` both close the same counter. A crossed
+/// pair (`[a)`) is not diagnosed here — it is a malformed value that the
+/// type-directed leaf parser rejects one step later with a per-field error, which
+/// is the layer that owns value shape. Two independent counters would trade one
+/// pathological mis-split for another, at the same cost.
+///
+/// A stray closing delimiter saturates at depth 0 (the `.keys` original's
+/// tolerance), so a malformed body degrades into extra splits rather than
+/// swallowing the rest of the line.
 pub(crate) fn split_top_level(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut out = Vec::new();

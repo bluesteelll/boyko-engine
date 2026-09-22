@@ -52,8 +52,16 @@ use super::shape::shape_into;
 /// Scheduled BEFORE the layout discovery pass.
 //
 // `clippy::type_complexity`: the `Query<.., Or<(Changed<…>, …)>>` change-set type IS
-// the SystemParam signature (resolved positionally), so it cannot be a `type` alias
-// without losing the SystemParam impl. Allowed (mirrors `ui_layout_discovery`).
+// the SystemParam signature, which the engine reads to derive access. A `type` alias
+// is declined because it would only hide the change set from a reader, at the cost of
+// spelling the lifetimes this signature elides. Allowed (mirrors
+// `ui_layout_discovery`).
+//
+// NOT MEASURED HERE. This query is `(&,&,&, Mut<ContentSize>)` behind an `Or`
+// filter — three lifetimes, which happens to MATCH `ui_visual_tick`'s arity, and
+// that coincidence is exactly why a false "identically-shaped" reads plausibly
+// here. The data tuples still differ (`AnyOf` of four `&mut` channels there, three
+// shared refs plus one `Mut` here), and no alias was compiled at THIS site.
 #[allow(clippy::type_complexity)]
 pub fn ui_text_measure_system(
     mut nodes: Query<

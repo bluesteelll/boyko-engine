@@ -58,10 +58,12 @@
 //! **Class 3, the host-seam class ([`every_declared_host_seam_is_named_outside_its_own_crate`]).**
 //! A short, explicit [`HOST_SEAMS`] roster of entry points documented as "the host calls this" —
 //! each must be named in production source of a crate *other* than the one defining it. A seam
-//! whose only callers are inside its own crate is not a seam. `UiUploadSystem::
-//! host_upload_frame_from_world` is documented at `crates/boyko_render/src/ui/upload.rs:180-182` as
-//! "the single call the render host makes each frame" and has **zero callers anywhere, tests
-//! included**.
+//! whose only callers are inside its own crate is not a seam. `UiUploadSystem::host_upload_frame`
+//! is the shape: documented as the render host's per-frame UI call, and with **zero callers
+//! anywhere, tests included**. Its sibling `host_upload_frame_from_world` used to head this
+//! roster and was DELETED by the advanced-UI campaign's S0 rung (it had no possible caller — the
+//! two-phase seam cannot be re-fused), so the row went with it rather than reporting a vanished
+//! symbol dead.
 //!
 //! # Production vs test — the exclusion that is load-bearing
 //!
@@ -261,14 +263,7 @@ struct RecordedMember {
 ///
 /// Asserted for exact equality in both directions, so this list cannot rot: a new unreachable
 /// member reds the gate, and so does wiring one of these up.
-const KNOWN_UNREACHABLE_MEMBERS: [RecordedMember; 5] = [
-    RecordedMember {
-        package: "boyko-ui",
-        class: Reach::DevOnlyReferenced,
-        note: "PRECEDENT 2. Only reverse edge in the workspace is crates/boyko_render/Cargo.toml's \
-               [dev-dependencies], annotated 'GUI P6b screenshot test ONLY'. boyko-app names it in \
-               neither table. A complete UI subsystem no shipped path draws.",
-    },
+const KNOWN_UNREACHABLE_MEMBERS: [RecordedMember; 4] = [
     RecordedMember {
         package: "boyko-physics",
         class: Reach::DevOnlyReferenced,
@@ -365,7 +360,7 @@ struct RecordedPlugin {
 /// of the same act as the wiring, never a reaction to the red — the `DdgiPlugin` strike is the one
 /// exception, because the wiring and this gate met for the first time in a merge (the gate was not
 /// on the lane), and the strike is the merge's follow-up.
-const KNOWN_UNREGISTERED_PLUGINS: [RecordedPlugin; 5] = [
+const KNOWN_UNREGISTERED_PLUGINS: [RecordedPlugin; 6] = [
     RecordedPlugin {
         ty: "UiPlugin",
         note: "boyko_ui — the layout/text/clipping subsystem's App entry point.",
@@ -385,6 +380,14 @@ const KNOWN_UNREGISTERED_PLUGINS: [RecordedPlugin; 5] = [
         note: "boyko_ui — the widget layer's App entry point.",
     },
     RecordedPlugin {
+        ty: "UiAnimationPlugin",
+        note: "boyko_ui — the A1 tween/clock subsystem App entry point, landed by the \
+               advanced-UI campaign and merged at A7. Recorded rather than registered: the \
+               lane's own escalation (docs/OPEN-QUESTIONS.md, 2026-08-27, 'the UI animation \
+               sink has no production reader to be ordered after') is unresolved, so where it \
+               sits in EnginePlugins order is an owner call, not a merge one.",
+    },
+    RecordedPlugin {
         ty: "ProfilingOverlayPlugin",
         note: "boyko_ui — the profiler's on-screen overlay: the last of the fifteen profiler rungs, \
                and it is dead for the SECOND time, now because the crate that hosts it is.",
@@ -402,12 +405,12 @@ struct HostSeam {
     reason: &'static str,
 }
 
-/// The declared host seams. Fourteen rows — deliberately small, deliberately hand-maintained.
+/// The declared host seams. Thirteen rows — deliberately small, deliberately hand-maintained.
 ///
-/// Six are healthy and six-plus-two are the UI chain, so the class proves BOTH directions on every
+/// Six are healthy and seven are the UI chain, so the class proves BOTH directions on every
 /// run: a class whose every row is in the defect baseline never demonstrates that it can go green,
 /// and one with no red row never demonstrates that it can go red.
-const HOST_SEAMS: [HostSeam; 14] = [
+const HOST_SEAMS: [HostSeam; 13] = [
     // ── Healthy: `boyko_app` crosses these every frame or at boot ──────────────────────────────
     HostSeam {
         symbol: "upload_light_table",
@@ -451,11 +454,6 @@ const HOST_SEAMS: [HostSeam; 14] = [
     },
     // ── The UI chain: every row measured dead at 59009f8a ──────────────────────────────────────
     HostSeam {
-        symbol: "host_upload_frame_from_world",
-        defined_in: "crates/boyko_render/src/ui/upload.rs",
-        reason: "documented at :180-182 as 'the single call the render host makes each frame'",
-    },
-    HostSeam {
         symbol: "host_upload_frame",
         defined_in: "crates/boyko_render/src/ui/upload.rs",
         reason: "the world-free sibling of the above: read slot -> fence -> pack_sort_upload",
@@ -495,9 +493,8 @@ const HOST_SEAMS: [HostSeam; 14] = [
 ];
 
 /// The measured class-3 baseline at `59009f8a`, asserted for exact equality.
-const KNOWN_DEAD_SEAMS: [&str; 8] = [
+const KNOWN_DEAD_SEAMS: [&str; 7] = [
     "host_upload_frame",
-    "host_upload_frame_from_world",
     "pack_ui_instance",
     "record_ui_rects",
     "ui_handles",
@@ -1748,12 +1745,23 @@ fn synthetic(path: &str, member_dir: &str, text: &str) -> SourceFile {
 /// splices the row into the MIDDLE of the header line and the injected edge silently disappears.
 /// Measured while writing this control: it reported `Unreferenced` and read as a classifier bug.
 fn with_dep_row(text: &str, table: &str, row: &str) -> String {
-    let at = text
-        .find(table)
-        .unwrap_or_else(|| panic!("control anchor: no `{table}` table in the manifest"));
-    let eol = at
-        + text[at..].find('\n').expect("invariant: a table header is followed by a newline")
-        + 1;
+    // The anchor is a LINE whose trimmed content IS the header, not the first substring match.
+    // MEASURED at the A7 merge: `boyko_render`'s `[dependencies]` table carries a comment
+    // reading "PROMOTED from `[dev-dependencies]`", and a bare `text.find(table)` landed on
+    // THAT — so the ghost row went into `[dependencies]` while the control asserted
+    // `DevOnlyReferenced`. The control read `ProductionReachable` and the class looked blind
+    // when it was not. A control a COMMENT can aim at the wrong table proves nothing.
+    let mut offset = 0usize;
+    let eol = loop {
+        let rest = &text[offset..];
+        let line_len = rest
+            .find('\n')
+            .unwrap_or_else(|| panic!("control anchor: no `{table}` header line in the manifest"));
+        if rest[..line_len].trim() == table {
+            break offset + line_len + 1;
+        }
+        offset += line_len + 1;
+    };
     let mut out = text.to_string();
     out.insert_str(eol, row);
     out

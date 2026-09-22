@@ -80,6 +80,7 @@ pub mod shadow;
 pub mod sor;
 pub mod ssao;
 pub mod surface;
+pub mod ui;
 pub mod vb;
 
 #[cfg(feature = "emit")]

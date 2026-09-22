@@ -681,8 +681,15 @@ pub use view::{
     raster_ray_forward, view_proj_columns,
 };
 pub use ui::{
-    pack_ui_instance, premultiply_rgba8, record_ui_rects, ui_rect_fs_spirv, ui_rect_vs_spirv,
-    FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT, FRAMES_IN_FLIGHT as UI_FRAMES_IN_FLIGHT,
-    PackInput, UiFramePlan, UiInstance, UiNode, UiOrtho, UiRenderGeneration, UiRenderScratch,
-    UiUploadSystem, UI_INSTANCE_SIZE,
+    emit_ui_node_records, gather_ui_nodes, pack_ui_image_instance, pack_ui_instance,
+    pack_ui_nine_slice_instance, pack_ui_sub_record, premultiply_rgba8, record_ui_rects,
+    ui_nine_slice_tiles, ui_nine_slice_tiles_axis, ui_node_sub_codes, ui_rect_fs_spirv,
+    ui_rect_vs_spirv, ui_render_discovery, FLAG_BORDER_ANY, FLAG_CLIP_PRESENT, FLAG_TEXT,
+    FLAG_TEXTURED, FLAG_TILED, FRAMES_IN_FLIGHT as UI_FRAMES_IN_FLIGHT,
+    PackInput, UiFramePlan, UiGatherScratch, UiImageInput, UiInstance, UiNineSliceInput, UiNode,
+    UiOrtho, UiRenderGeneration, UiRenderScratch, UiSamplerMode, UiUploadSystem, UI_IMAGE_SUB,
+    UI_INSTANCE_SIZE, UI_MAX_NODES, UI_MAX_SUBS_PER_NODE, UI_NINE_SLICE_CENTER_SUB,
+    UI_NINE_SLICE_MODE_COUNT, UI_NINE_SLICE_MODE_TILE, UI_NINE_SLICE_REGIONS,
+    UI_NINE_SLICE_SUB_BASE, UI_RECORDS_PER_NODE, UI_SLOT_BITS, UI_SLOT_MASK, UI_SLOT_SHIFT,
+    UI_STAGING_ROWS, UI_TILE_BITS, UI_TILE_MASK, UI_TILE_MAX, UI_TILE_X_SHIFT, UI_TILE_Y_SHIFT,
 };

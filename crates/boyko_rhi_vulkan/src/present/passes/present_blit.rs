@@ -315,6 +315,24 @@ impl Renderer<'_> {
                     0,
                     ptr::null(),
                 );
+                // UI-ADVANCED S3: set 1 — the sprite lane's bindless texture array. The UI
+                // pipeline's layout declares it at boot (the
+                // `create_graphics_pipeline_bindless` shape), so this is purely a per-frame
+                // set bind, mirroring the set-0 bind immediately above and the textured
+                // gbuffer's own set-1 bind. It is UNCONDITIONAL: `ui_rect.fs` statically
+                // uses set 1, so an unbound set 1 is a validation error on EVERY UI draw,
+                // sprite or not. `&ui.sprite_group.descriptor_set` is a single-element
+                // pointer into the caller's live group.
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    ui.pipeline.layout,
+                    1,
+                    1,
+                    &ui.sprite_group.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
                 (self.fns.cmd_push_constants)(
                     cmd,
                     ui.pipeline.layout,

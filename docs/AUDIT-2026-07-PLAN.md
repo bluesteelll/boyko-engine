@@ -82,7 +82,7 @@ instead of unconditional `undefined()`. Keeps the graph the single sync authorit
 |---|-----|-------|--------|-----|
 | B1 | CRITICAL | boyko_render/light_system.rs:163-196 | >MAX_LIGHTS enabled lights ⇒ release-mode heap OOB write through safe API (debug_assert-only bounds; check fires after writes) | clamp/saturate inside the fold before writes |
 | B2 | HIGH | boyko_physics/narrowphase/axis_cache.rs:131-208 | BoxAxisCache saturates (never cleared/evicted; grow preserves stale entries without rehash) ⇒ `set` probe loop can hang in release on the DEFAULT box-box path | occupancy counter + clear-on-grow (or epoch stamps) + release probe bound in `set` |
-| B3 | HIGH | boyko_ui/text/measure.rs:68-77 | `&mut ContentSize` never bumps ticks ⇒ `Changed<ContentSize>` relayout gate never fires for text changes (Auto-sized labels stay stale) | `Mut<ContentSize>` + `set_if_neq` + one scheduled end-to-end test |
+| B3 | HIGH | boyko_ui/text/measure.rs:76-85 | `&mut ContentSize` never bumps ticks ⇒ `Changed<ContentSize>` relayout gate never fires for text changes (Auto-sized labels stay stale) | `Mut<ContentSize>` + `set_if_neq` + one scheduled end-to-end test |
 | B4 | HIGH | framegraph graph.rs/sync.rs + swapchain.rs:2682/2988 | cross-frame WAR on non-ringed resources (see Part I) | persistent seed-state table |
 | B5 | MED | boyko_ui/components.rs:295-319 | `UiName::new` release clamp can split a UTF-8 char ⇒ `as_str()` `from_utf8_unchecked` UB from safe code | back off to char boundary (const-compatible loop) |
 | B6 | MED | boyko_threadpool/worker.rs:125-132 | fire-and-forget task panic unwinds worker_main ⇒ silent permanent worker loss (comment claims rayon parity, wrongly) | catch_unwind + explicit policy + fix comment |
