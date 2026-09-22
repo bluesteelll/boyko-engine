@@ -572,7 +572,7 @@ accepts and D15's refusal later upgrades to a spanned error.
 GATES schedules the swap at C7 on the ground that the annotation *"puts needle A and needle B in the
 feature-ON image by the same mechanism the annotation will"*. **Needle B is the literal name
 `install_type_info`** (~~`reflect_absence_census.rs:124~`~~ → ~~`:181~`, re-measured at the C8
-audit~~ → **`reflect_absence_census.rs:228`, re-derived after C8 landed — the landing rewrote that file's header and moved
+audit~~ → **`reflect_absence_census.rs:259`, re-derived after C8 landed — the landing rewrote that file's header and moved
 its own re-measurement**; GATES D5 calls it the LTO-sensitivity
 probe), and the only thing that will ever reference it from the derive is **C8's** install slot —
 C7 says so itself: *"No install call is emitted at this rung. The static exists and is inert."* A
@@ -585,8 +585,8 @@ in its purest form.
 its existing `reflect_linkage()` — so the derive key is exercised in the fixture, the G3 calibration
 re-run that C2 and GATES both scheduled at C7 has the annotation it was scheduled for, and
 `OPT_IN_TOKENS`'s live assertion (~~`reflect_absence_census.rs:314~,339-349`~~ → ~~`:371~` for the
-const, `:397~-402` for the assertion, re-measured at the C8 audit~~ → **`reflect_absence_census.rs:571` for the const,
-`reflect_absence_census.rs:622~-630` for the L2 assertion and `reflect_absence_census.rs:601~-610` for the L3 one, re-derived after the C8 landing and
+const, `:397~-402` for the assertion, re-measured at the C8 audit~~ → **`reflect_absence_census.rs:769` for the const,
+`reflect_absence_census.rs:820~-828` for the L2 assertion and `reflect_absence_census.rs:799~-808` for the L3 one, re-derived after the C8 landing and
 its follow-up**) stays green. At **C8**
 the linkage is deleted and `OPT_IN_TOKENS` is updated to the annotation form **in the same change**,
 which is what that assertion's own failure text instructs.
@@ -626,7 +626,7 @@ deleted without voiding the probe."* **MEASURED FALSE.** The seventh slot lives 
 `FixturePod::component_id()` — it constructs the value and black-boxes one field
 (`reflect_on.rs:43~-51`). An uncalled non-generic `#[inline]` method is dropped before the linker
 sees it, exactly as C7's descriptor already is (*"at C7 the descriptor is referenced by nothing and
-is dropped"*, ~~`reflect_absence_census.rs:127~-137`~~ → **`reflect_absence_census.rs:171~-184`**, re-derived after the landing
+is dropped"*, ~~`reflect_absence_census.rs:127~-137`~~ → **`reflect_absence_census.rs:172~-185`**, re-derived after the landing
 rewrote that header).
 
 `llvm-nm` over the three images the census itself builds
@@ -645,10 +645,10 @@ The whole funnel is absent in every link configuration; the **six existing slots
 image's absence and the seventh would join them there**. The single `install_type_info` hit is
 `_RNvNtCsd7WGKwjPoHP_13boyko_reflect8registry17install_type_info`, referenced only by
 `reflect_on.rs:70~`'s `reflect_linkage()` — and by the pulled-object rule the census header states
-(~~`reflect_absence_census.rs:78~-84`~~ → **`reflect_absence_census.rs:86~-94`**) it is also the sole reason the other `boyko_reflect` symbols are there.
+(~~`reflect_absence_census.rs:78~-84`~~ → **`reflect_absence_census.rs:87~-95`**) it is also the sole reason the other `boyko_reflect` symbols are there.
 **Deleting the linkage as D26 schedules it therefore takes needle B to 0 AND needle A to 0,
-reddening both `l2_b > 0` (~~`reflect_absence_census.rs:475~-484`~~ → **`reflect_absence_census.rs:727~-738`**) and `l2_a > 0` (~~`:445~-451`~~ →
-**`reflect_absence_census.rs:673~-679`**)** — a census that was green at the audit (`cargo test -p reflect-fixture --features
+reddening both `l2_b > 0` (~~`reflect_absence_census.rs:475~-484`~~ → **`reflect_absence_census.rs:925~-936`**) and `l2_a > 0` (~~`:445~-451`~~ →
+**`reflect_absence_census.rs:871~-877`**)** — a census that was green at the audit (`cargo test -p reflect-fixture --features
 reflect-fixture/reflect --test reflect_absence_census`, exit 0, ~~`running 2 tests`~~ →
 **`running 3 tests`** since the C8 follow-up added `code_only_keeps_code_and_drops_prose`).
 
@@ -671,7 +671,7 @@ the first time. Today the funnel is in neither image, so `l1_a == 0 && l1_b == 0
 funnel's absence; after the touch the funnel is in **both** images and only the emitted
 `#[cfg(feature = "reflect")]` separates them — which is precisely the property gate 2 claims. The
 census's re-calibration, already scheduled at C8 by its own header (~~`reflect_absence_census.rs:134~-137`~~ → the schedule
-line is now **`reflect_absence_census.rs:180~-181`** and the table it produced is **`reflect_absence_census.rs:137~-184`**), is where the new cells are
+line is now **`reflect_absence_census.rs:181~-182`** and the table it produced is **`reflect_absence_census.rs:138~-185`**), is where the new cells are
 recorded; **they are not predicted here.**
 
 ### D28 — C8's gate 1 reads an ADDRESS, not `is_some()`. The install seam's two characteristic failures are wrong-descriptor and wrong-id, and `is_some()` sees neither.
@@ -2452,12 +2452,12 @@ which are two different failures.
 [`REFLECTION-PLAN-GATES.md`](REFLECTION-PLAN-GATES.md):504-507 schedules *"CORE C7 swaps the
 linkage for the real `#[component(reflect)]` annotation"* on the ground that the annotation *"puts
 needle A and needle B in the feature-ON image by the same mechanism"*. **Needle B is the literal
-name `install_type_info`** (`reflect_absence_census.rs:228`, GATES D5's LTO-sensitivity probe) and
+name `install_type_info`** (`reflect_absence_census.rs:259`, GATES D5's LTO-sensitivity probe) and
 the only thing that will ever reference it from the derive is **C8's** install slot. So at C7 the
 sentence is false and at C8 it is true. **C7 therefore ADDS the annotation and KEEPS the linkage;
 C8 deletes the linkage and updates `OPT_IN_TOKENS`.** Concretely, at C7 `src/bin/reflect_on.rs`
 gains `#[component(reflect)]` on `FixturePod` **beside** its existing `reflect_linkage()`, so
-`reflect_absence_census.rs:571`'s `OPT_IN_TOKENS = ["reflect_linkage", "boyko_reflect::"]` and its
+`reflect_absence_census.rs:769`'s `OPT_IN_TOKENS = ["reflect_linkage", "boyko_reflect::"]` and its
 live assertion at :622~-630 stay green — the assertion whose own failure text says *"if CORE C7 has
 landed the `#[component(reflect)]` key, update `OPT_IN_TOKENS` … in the same change"*, an
 instruction C7's `Lands` and regression list did not carry. **Implementer trap, named because the
@@ -2612,13 +2612,13 @@ opt-in".
    decidability inside a pulled object … becomes the census's whole question"*). D26 keeps the
    annotation landing at C7, so the schedule stands. Invocation: `cargo test -p reflect-fixture
    --test reflect_absence_census -- --ignored --nocapture measure_link_configuration_table`
-   (`reflect_absence_census.rs:784~-804`) — **nine `--release` builds into per-leg
+   (`reflect_absence_census.rs:982~-1002`) — **nine `--release` builds into per-leg
    `CARGO_TARGET_DIR`s, and a missing `llvm-nm` is a hard RED, not a skip** (:299~-310); budget the
    disk. ~~**And the instrument must be extended in the same change**: it prints six aggregate
    columns, `| link configuration | L1 A | L2 A | L3 A | L1 B | L3 B |` (:787~), with **no L2
    needle-B column** — so "per-symbol sharpness", the property it is being re-run for, is not
    something the table can report today. Add the L2-B column.~~ **DISCHARGED — the column landed,
-   and this sentence outlived it.** `reflect_absence_census.rs:787~` now prints **seven** columns,
+   and this sentence outlived it.** `reflect_absence_census.rs:985~` now prints **seven** columns,
    `| link configuration | L1 A | L2 A | L3 A | L1 B | L2 B | L3 B |`, with seven separators at
    `:788~` and seven values at `:793~-801`. *(Struck 2026-08-21 at the anchor sweep. The coordinate
    `(:787~)` was re-pointed to this line during the sweep **without the line being read** — so a

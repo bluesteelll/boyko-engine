@@ -9269,7 +9269,7 @@ prose containing the English word "class", not a `<class>:` prefix from the clos
 A `grep` for `#[ignore = "<lowercase-prefix>:` over `crates/` returns **three** sites, and none of
 them is that one: `crates/boyko_ecs/tests/seam_by_id.rs:1308` (`deferred:` — written by this rung),
 `crates/boyko_ecs/tests/seam_by_id.rs:2217` (`deferred:` — `g17`, written by EG2-R round 3) and
-`crates/reflect_fixture/tests/reflect_absence_census.rs:785` (`calibration:`, a word the documented
+`crates/reflect_fixture/tests/reflect_absence_census.rs:983` (`calibration:`, a word the documented
 vocabulary does not contain). **So the true count of vocabulary-conforming reasons in the tree before
 this rung was ZERO**, which strengthens the point rather than weakening it.
 

@@ -37,7 +37,8 @@
 //! three bins carry the touch, because L3 and G7a's control must not differ from L2 in a
 //! second way.
 //!
-//! # THE MEASURED LINK-CONFIGURATION TABLE (this box, `x86_64-pc-windows-gnu`)
+//! # THE MEASURED LINK-CONFIGURATION TABLE (`x86_64-pc-windows-gnu`, and the MSVC
+//! re-measurement of 2026-09-22 at the end of the section)
 //!
 //! Filled by running `measure_link_configuration_table` (`--ignored --nocapture`);
 //! pasted into `docs/REFLECTION-PLAN-GATES.md` §G3 as that rung requires.
@@ -187,6 +188,36 @@
 //! DID resolve, compile and link the crate. That is G1/G2's question and not this
 //! gate's (see "what this gate cannot claim").
 //!
+//! **RE-MEASURED on `x86_64-pc-windows-msvc` (2026-09-22), because the host moved under
+//! this instrument on 2026-09-17 and it had been reading nothing ever since.** Every row
+//! above was taken on windows-gnu. On MSVC `llvm-nm` reads **no symbols at all** from a
+//! `link.exe` image — the PE carries no COFF symbol table — so all six cells read 0 and
+//! gate 2 refused with *"census inert"*, which is the instrument declining to answer
+//! rather than answering wrongly. The symbols are now taken from the linker's own `/MAP`
+//! (see [`SymbolSubject`] for why the twin's object-reading repair would have destroyed
+//! this gate's question instead of transferring to it), and the fat-LTO row — the one the
+//! gate asserts — comes back **cell for cell identical to the C8 windows-gnu row**:
+//!
+//! | link configuration | L1 A | L2 A | L3 A | L1 B | L2 B | L3 B |
+//! |---|---|---|---|---|---|---|
+//! | `lto = "fat"`, `codegen-units = 1` (msvc) | 0 | **7** | **0** | 0 | **1** | **0** |
+//!
+//! Two facts that only this host shows, both measured while writing the route:
+//!
+//! * **All seven needle-A hits sit in the map's `Static symbols` section and none in
+//!   `Publics by Value`.** Fat LTO internalises them, so a map reader that took only the
+//!   public list would have reported 0 — inert a second time, and silently.
+//! * **`/MAP:` has to travel through `cargo rustc`, not `RUSTFLAGS`.** In `RUSTFLAGS` it
+//!   reaches every unit, several build scripts link concurrently against one path, and the
+//!   build dies with `LNK1104: cannot open file`. Measured, not reasoned about.
+//!
+//! The two non-LTO rows are NOT re-measured here: the gate does not read them, and
+//! `-C link-arg=-Wl,--gc-sections` is a GNU `ld` flag that `link.exe` only warns about
+//! (LNK4044), so the `gc-sections` leg is not a distinct link configuration on this host
+//! at all. Re-filling those two rows for MSVC means choosing its own dead-strip flag
+//! (`/OPT:REF`), which is a calibration decision for whoever next runs
+//! `measure_link_configuration_table` on this box — not something to invent here.
+//!
 //! # Cost, stated rather than hidden
 //!
 //! The calibration run (9 builds, 3 link configurations, cold per-leg target dirs) took
@@ -247,25 +278,131 @@ impl LinkCfg {
     }
 }
 
+/// What the symbol census reads for one leg — and it is not the same artifact on both
+/// hosts.
+///
+/// **MEASURED 2026-09-22 on `x86_64-pc-windows-msvc`:** `llvm-nm` run on an image linked
+/// by `link.exe` exits **0**, prints nothing to stdout and `<image>: no symbols` to
+/// stderr, because a PE image from MSVC carries no COFF symbol table at all (the symbols
+/// go to the `.pdb`). Every cell of this census then read `0`, and gate 2 refused with
+/// *"census inert"* — correctly: a tool that censused nothing must never be recorded as
+/// the answer `no symbol matches the needle`. The instrument was gnu-only, and the host
+/// moved under it on 2026-09-17.
+///
+/// **The twin's repair does not transfer, and that is a ruling rather than an omission.**
+/// `crates/profile_fixture/tests/profile_axis_census.rs` met the same MSVC wall and moved
+/// its subject to the post-LTO OBJECT rustc hands the linker. That answers *its* question
+/// (did the zone emit fold away before the link?) and would destroy this one: L2's whole
+/// meaning is that **one referenced symbol pulls the rlib's object into the image**, which
+/// is the linker's act, not rustc's — under the two non-LTO legs the final crate's own
+/// object contains no `boyko_reflect` symbol at all, so the present control would read 0
+/// and the gate would refuse on a perfectly good tree. L3's zero is the same rule seen
+/// from the other side. **The subject stays the linked image on both hosts.**
+///
+/// What changes is how the image's symbols are obtained where the image does not carry
+/// them: MSVC's `link.exe` writes the list it linked into a `/MAP` file, statics included
+/// (MEASURED: under `lto = "fat"` all seven `boyko_reflect` hits sit in the map's
+/// `Static symbols` section, none in `Publics by Value` — an instrument reading only the
+/// public list would have read 0 and been inert in a second way).
+enum SymbolSubject {
+    /// The linked image itself, read with `llvm-nm`. GNU `ld` leaves a symbol table in it.
+    Image(PathBuf),
+    /// The linker's `/MAP` file, written by the same link step that produced the image.
+    LinkerMap(PathBuf),
+}
+
+/// One built leg: the image the gate RUNS, and the artifact the needles are counted in.
+struct Leg {
+    /// The image. Gate 5 executes it — the behavioural half, which no symbol answers.
+    exe: PathBuf,
+    /// What [`symbols_matching`] reads. See [`SymbolSubject`] for why it is host-dependent.
+    symbols: SymbolSubject,
+}
+
+/// True for a `/MAP` line that describes a symbol: `  0001:000017f0  <name> <rva> f  <obj>`.
+///
+/// The address form is what separates the symbol rows from the map's headers, its section
+/// table and its `entry point at` line. It is checked rather than assumed, because "the
+/// file exists and my needle is not in it" and "the file holds no symbols at all" are the
+/// two answers this campaign keeps having to tell apart.
+fn is_map_symbol_row(line: &str) -> bool {
+    let Some(first) = line.split_whitespace().next() else { return false; };
+    let Some((section, offset)) = first.split_once(':') else { return false; };
+    section.len() == 4
+        && offset.len() == 8
+        && section.chars().all(|c| c.is_ascii_hexdigit())
+        && offset.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Builds one fixture bin in one feature state under one link configuration and returns
-/// the image path. Panics rather than returns on failure: a census whose artifact could
-/// not be produced has not measured anything (RED-not-SKIP, applied to the build step).
+/// the image plus its symbol subject. Panics rather than returns on failure: a census
+/// whose artifact could not be produced has not measured anything (RED-not-SKIP, applied
+/// to the build step).
 ///
 /// Per-leg `CARGO_TARGET_DIR` under the system temp dir; `RUSTFLAGS` removed because an
 /// inherited `-C embed-bitcode=no` is incompatible with `-C lto`.
+///
+/// On MSVC the link needs `/MAP`, which means `cargo rustc` rather than `cargo build`:
+/// only `cargo rustc` passes extra arguments, and only to the ONE selected target, so the
+/// map is the final image's and no build script fights for the same path (MEASURED: with
+/// the flag in `RUSTFLAGS` instead, several build scripts link concurrently against one
+/// `/MAP:` path and the build dies with `LNK1104: cannot open file`).
 ///
 /// **Log-scraper caveat, permanent (G0):** every build of this package prints Cargo's
 /// *"found to be present in multiple build targets"* notice for the shared twin source.
 /// It is a Cargo notice, not a rustc lint; nothing here treats build-log `warning:`
 /// presence as failure — failure is the exit status.
-fn build(bin: &str, feature_on: bool, link: LinkCfg) -> PathBuf {
+fn build(bin: &str, feature_on: bool, link: LinkCfg) -> Leg {
     let target = std::env::temp_dir().join(format!(
         "boyko-reflect-census-{bin}-{}-{}",
         if feature_on { "on" } else { "off" },
         link.tag()
     ));
+    let exe = target.join("release").join(format!("{bin}{}", std::env::consts::EXE_SUFFIX));
+    let map = target.join("release").join(format!("{bin}.map"));
+
+    cargo(bin, feature_on, link, &target, &map);
+
+    if cfg!(target_env = "msvc") && !map.is_file() {
+        // `-C link-arg` goes into the unit's fingerprint, so an identical recipe finds the
+        // unit FRESH, spawns no rustc, and re-links nothing — a map that is missing stays
+        // missing, and a gate stuck red until someone clears a temp directory is a gate
+        // nobody keeps. Removing cargo's real output for the unit dirties it; the uplifted
+        // `release/<bin>` is only a hardlink and removing it merely re-links from `deps/`.
+        // One retry, then the hard RED below.
+        for stale in deps_images(&target, bin) {
+            let _ = std::fs::remove_file(&stale);
+        }
+        cargo(bin, feature_on, link, &target, &map);
+    }
+
+    assert!(exe.is_file(), "{} was not produced", exe.display());
+    let symbols = if cfg!(target_env = "msvc") {
+        assert!(
+            map.is_file(),
+            "the linker wrote no {} for {bin} (feature_on={feature_on}, {}). On MSVC that \
+             map IS the image's symbol table — the image carries none — so without it this \
+             census has no subject, and a missing subject is a RED, never a zero. If `build` \
+             no longer passes `-C link-arg=/MAP:` through `cargo rustc`, that is the cause.",
+            map.display(),
+            link.tag()
+        );
+        SymbolSubject::LinkerMap(map)
+    } else {
+        SymbolSubject::Image(exe.clone())
+    };
+    Leg { exe, symbols }
+}
+
+/// The one cargo invocation [`build`] makes, factored out so the retry above runs the
+/// SAME recipe rather than a re-spelling of it.
+fn cargo(bin: &str, feature_on: bool, link: LinkCfg, target: &Path, map: &Path) {
     let mut cmd = Command::new(env!("CARGO"));
-    cmd.args(["build", "-p", "reflect-fixture", "--bin", bin, "--release"]);
+    if cfg!(target_env = "msvc") {
+        cmd.args(["rustc", "-p", "reflect-fixture", "--bin", bin, "--release"]);
+    } else {
+        cmd.args(["build", "-p", "reflect-fixture", "--bin", bin, "--release"]);
+    }
     if feature_on {
         cmd.args(["--features", "reflect"]);
     }
@@ -282,8 +419,12 @@ fn build(bin: &str, feature_on: bool, link: LinkCfg) -> PathBuf {
     if !matches!(link, LinkCfg::GcSections) {
         cmd.env_remove("RUSTFLAGS");
     }
+    if cfg!(target_env = "msvc") {
+        cmd.arg("--");
+        cmd.arg(format!("-Clink-arg=/MAP:{}", map.display()));
+    }
     let status = cmd
-        .env("CARGO_TARGET_DIR", &target)
+        .env("CARGO_TARGET_DIR", target)
         .status()
         .unwrap_or_else(|e| panic!("could not spawn cargo to build {bin}: {e}"));
     assert!(
@@ -291,29 +432,86 @@ fn build(bin: &str, feature_on: bool, link: LinkCfg) -> PathBuf {
         "building {bin} (feature_on={feature_on}, {}) failed, so the census has no artifact",
         link.tag()
     );
-    let exe = target.join("release").join(format!("{bin}{}", std::env::consts::EXE_SUFFIX));
-    assert!(exe.is_file(), "{} was not produced", exe.display());
-    exe
 }
 
-/// Counts symbols in `image` whose name contains `needle`. **Tool absence is a RED,
-/// never a SKIP** (GATES D6): a gate that passes on every machine lacking its tool is a
-/// gate that passes.
-fn symbols_matching(image: &Path, needle: &str) -> usize {
-    let tool = resolve_tool("llvm-nm").unwrap_or_else(|| {
-        panic!(
-            "llvm-nm is on neither PATH nor any rustup toolchain's rustlib bin. That is a \
-             RED, not a skip: without it this gate cannot distinguish an absent crate from \
-             a present one. Install it with `rustup component add llvm-tools`."
-        )
-    });
-    let out = Command::new(&tool)
-        .arg(image)
-        .output()
-        .unwrap_or_else(|e| panic!("{} could not be run: {e}", tool.display()));
-    assert!(out.status.success(), "{} exited non-zero on {}", tool.display(), image.display());
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines().filter(|l| l.contains(needle)).count()
+/// Every `deps/` image of `bin` in this leg's target dir, by exact path.
+fn deps_images(target: &Path, bin: &str) -> Vec<PathBuf> {
+    let deps = target.join("release").join("deps");
+    let Ok(entries) = std::fs::read_dir(&deps) else { return Vec::new() };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|e| e == std::env::consts::EXE_EXTENSION)
+                && p.file_stem().is_some_and(|s| {
+                    let s = s.to_string_lossy();
+                    s == bin || s.starts_with(&format!("{bin}-"))
+                })
+        })
+        .collect()
+}
+
+/// Counts symbols of the linked image whose name contains `needle`.
+///
+/// **Tool absence is a RED, never a SKIP** (GATES D6): a gate that passes on every machine
+/// lacking its tool is a gate that passes.
+///
+/// **An empty census is a RED too, and under its own name** — the rule the twin
+/// (`profile_axis_census.rs`) learned on 2026-09-10 and this copy did not carry until
+/// 2026-09-22. `llvm-nm` on an image with no symbol table exits 0 and prints nothing, so a
+/// version that checked only the exit status reported `0`, indistinguishable from *"the
+/// tool read the whole table and your needle is not in it"*. Both the stderr diagnostic
+/// and a stdout with no symbol line at all are checked BEFORE the filter; the map arm has
+/// the same guard on its own terms.
+fn symbols_matching(subject: &SymbolSubject, needle: &str) -> usize {
+    match subject {
+        SymbolSubject::LinkerMap(map) => {
+            let text = std::fs::read_to_string(map)
+                .unwrap_or_else(|e| panic!("{} could not be read: {e}", map.display()));
+            let rows = text.lines().filter(|l| is_map_symbol_row(l)).count();
+            assert!(
+                rows > 0,
+                "{} holds no symbol row at all, so this census READ NOTHING — which is not \
+                 the answer `no symbol matches {needle}` and must never be recorded as that \
+                 number. The linker writes the map after the link; an empty one means the \
+                 link did not happen or `/MAP:` reached a different path.",
+                map.display()
+            );
+            text.lines().filter(|l| is_map_symbol_row(l) && l.contains(needle)).count()
+        }
+        SymbolSubject::Image(image) => {
+            let tool = resolve_tool("llvm-nm").unwrap_or_else(|| {
+                panic!(
+                    "llvm-nm is on neither PATH nor any rustup toolchain's rustlib bin. That \
+                     is a RED, not a skip: without it this gate cannot distinguish an absent \
+                     crate from a present one. Install it with `rustup component add \
+                     llvm-tools`."
+                )
+            });
+            let out = Command::new(&tool)
+                .arg(image)
+                .output()
+                .unwrap_or_else(|e| panic!("{} could not be run: {e}", tool.display()));
+            assert!(
+                out.status.success(),
+                "{} exited non-zero on {}",
+                tool.display(),
+                image.display()
+            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                !stderr.contains("no symbols"),
+                "{} reported `no symbols` for {}: the tool CENSUSED NOTHING, which is not \
+                 the answer `no symbol matches {needle}`. On MSVC that is the expected reply \
+                 and this arm is the wrong one -- see `SymbolSubject`. stderr was:\n{}",
+                tool.display(),
+                image.display(),
+                stderr.trim()
+            );
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.lines().filter(|l| l.contains(needle)).count()
+        }
+    }
 }
 
 /// Runs a built fixture and returns its one stdout line (GATES G3 gate 5).
@@ -635,7 +833,7 @@ fn reflect_absence_census_three_legs_under_fat_lto() {
     let l3 = build(l3_bin, true, LinkCfg::FatLto);
 
     // Gate 5: each artifact reports the configuration this test asked for.
-    let l1_line = run(&l1);
+    let l1_line = run(&l1.exe);
     assert!(
         l1_line.contains("bin=reflect_off_twin")
             && l1_line.contains("reflect_feature=off")
@@ -643,7 +841,7 @@ fn reflect_absence_census_three_legs_under_fat_lto() {
         "L1's artifact reports {l1_line:?} -- the build did not use the leg this test \
          asked for (ship cell: reflect_off_twin, feature off)"
     );
-    let l2_line = run(&l2);
+    let l2_line = run(&l2.exe);
     assert!(
         l2_line.contains("bin=reflect_on")
             && l2_line.contains("reflect_feature=on")
@@ -651,7 +849,7 @@ fn reflect_absence_census_three_legs_under_fat_lto() {
         "L2's artifact reports {l2_line:?} -- the build did not use the leg this test \
          asked for (present control: reflect_on, feature on)"
     );
-    let l3_line = run(&l3);
+    let l3_line = run(&l3.exe);
     assert!(
         l3_line.contains("bin=reflect_never")
             && l3_line.contains("reflect_feature=on")
@@ -661,12 +859,12 @@ fn reflect_absence_census_three_legs_under_fat_lto() {
     );
 
     // ── The counts. ──────────────────────────────────────────────────────────────────
-    let l1_a = symbols_matching(&l1, NEEDLE_A);
-    let l1_b = symbols_matching(&l1, NEEDLE_B);
-    let l2_a = symbols_matching(&l2, NEEDLE_A);
-    let l2_b = symbols_matching(&l2, NEEDLE_B);
-    let l3_a = symbols_matching(&l3, NEEDLE_A);
-    let l3_b = symbols_matching(&l3, NEEDLE_B);
+    let l1_a = symbols_matching(&l1.symbols, NEEDLE_A);
+    let l1_b = symbols_matching(&l1.symbols, NEEDLE_B);
+    let l2_a = symbols_matching(&l2.symbols, NEEDLE_A);
+    let l2_b = symbols_matching(&l2.symbols, NEEDLE_B);
+    let l3_a = symbols_matching(&l3.symbols, NEEDLE_A);
+    let l3_b = symbols_matching(&l3.symbols, NEEDLE_B);
 
     // Gate 2 runs before gate 1: an absent control makes L1's zero mean nothing, so its
     // failure must not be reported as the ship cell's success.
@@ -793,12 +991,12 @@ fn measure_link_configuration_table() {
         println!(
             "| {} | {} | {} | {} | {} | {} | {} |",
             link.tag(),
-            symbols_matching(&l1, NEEDLE_A),
-            symbols_matching(&l2, NEEDLE_A),
-            symbols_matching(&l3, NEEDLE_A),
-            symbols_matching(&l1, NEEDLE_B),
-            symbols_matching(&l2, NEEDLE_B),
-            symbols_matching(&l3, NEEDLE_B),
+            symbols_matching(&l1.symbols, NEEDLE_A),
+            symbols_matching(&l2.symbols, NEEDLE_A),
+            symbols_matching(&l3.symbols, NEEDLE_A),
+            symbols_matching(&l1.symbols, NEEDLE_B),
+            symbols_matching(&l2.symbols, NEEDLE_B),
+            symbols_matching(&l3.symbols, NEEDLE_B),
         );
     }
 }

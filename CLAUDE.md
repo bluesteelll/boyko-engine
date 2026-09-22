@@ -401,7 +401,7 @@ A7 merge before them removed four `deferred:` plain sites by resolving them) —
 do not: the 147 that stood from 2026-09-18 through A5, plus the one plain site the A6 lane brought
 whose prefix the vocabulary does not contain. **Three of those 148 do carry a prefix**, just not one
 from the list — `M2:` ×2 (`boyko_sdf_math/src/brick/tests.rs:140`, `:461`) and `calibration:` ×1
-(`reflect_fixture/tests/reflect_absence_census.rs:785`) — the plain-side twin of the 29 counted
+(`reflect_fixture/tests/reflect_absence_census.rs:983`) — the plain-side twin of the 29 counted
 below. The 20 `gpu-windowed:` are `boot_validation_clean.rs` 7,
 `unwritten_shadow_map_gate.rs` 4, `sdf_marcher_sun.rs` 3, `taa_jitter_eval.rs` 3,
 `forward_teardown_destroys_forward_sets.rs`
