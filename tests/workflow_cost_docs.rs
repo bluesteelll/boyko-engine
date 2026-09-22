@@ -201,6 +201,26 @@ fn roots() -> [(&'static str, PathBuf); 6] {
 /// external roots — see the module header.
 const EXECUTED_ROWS: usize = 43;
 
+/// The reason all seven agent-transcript coordinates in [`CITATION_EXEMPTIONS`] carry.
+///
+/// They name documents that lived only in the lane session's scratchpad, under the SYSTEM TEMP
+/// dir: `%LOCALAPPDATA%/Temp/claude/D--claude-BoykoEngine/<session>/scratchpad`. That directory is
+/// gone — MEASURED 2026-09-22 on this box: the session's `workflows/` and `subagents/` siblings
+/// survive and the `scratchpad` child does not — so the coordinates resolve against no tree and
+/// against no commit, here or on any other machine. This is the `ZzIter` entry's class one step
+/// further along: that one was never committed; these were never committed AND their carrier has
+/// since been deleted. Exempting them RECORDS that; it does not excuse it.
+///
+/// ONE row of the provenance table has the same cause and is deliberately NOT resolved with it:
+/// P27 runs `head -1 a1r_refute.md` in that same directory, so it cannot run at all, and
+/// [`EXECUTED_ROWS`] states in its own doc comment that the floor must never be lowered to match a
+/// green. Choosing between lowering it, deleting the row and leaving the target red is a ruling for
+/// the owner rather than a repair, so it is left red and reported.
+const SCRATCH_IS_GONE: &str =
+    "an agent transcript that lived only in the lane session's scratchpad under the system temp \
+     dir; that directory no longer exists (measured 2026-09-22), so the coordinate resolves \
+     against no tree and no commit anywhere";
+
 /// `file:line` coordinates that deliberately do not resolve against the working tree, each with the
 /// reason. Asserted **exact**: an entry that stops being needed reds as loudly as a new miss.
 const CITATION_EXEMPTIONS: &[(&str, &str)] = &[
@@ -214,6 +234,13 @@ const CITATION_EXEMPTIONS: &[(&str, &str)] = &[
         "a `ZzIter` probe that lived only in pass 11's uncommitted working tree; it resolves \
          against no commit, and EVIDENCE says so at its own site",
     ),
+    ("a1r4_refute.md:125", SCRATCH_IS_GONE),
+    ("a1_attack.md:13", SCRATCH_IS_GONE),
+    ("eg2_refute.md:115", SCRATCH_IS_GONE),
+    ("a1r6_landCode.md:7", SCRATCH_IS_GONE),
+    ("a1r3_ruling.md:21", SCRATCH_IS_GONE),
+    ("split_refute.md:117", SCRATCH_IS_GONE),
+    ("split_rerun.md:33", SCRATCH_IS_GONE),
 ];
 
 /// Whitespace-insensitive containment.
@@ -262,8 +289,21 @@ fn docs_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs")
 }
 
+/// Reads a document, NORMALISING CRLF to LF.
+///
+/// Not a nicety: every parser below is written against LF — `provenance_rows` splits on the
+/// fence plus a newline, and the citation scan works line by line — while a
+/// `core.autocrlf=true` checkout, which is what this repository gets on Windows, follows that
+/// fence with CR LF. The split therefore matched nothing and the gate refused with
+/// *"WORKFLOW-COST-EVIDENCE.md has no ```provenance block"*, a sentence about the DOCUMENT for
+/// a fact about the CHECKOUT. MEASURED 2026-09-22 at byte offset 64536 of that file, where the
+/// fence really is. A gate whose answer depends on how git materialised the working tree is
+/// deciding on a checkout artifact, and the normalisation therefore happens once, here, rather
+/// than at each parse site.
 fn read(p: &Path) -> String {
-    std::fs::read_to_string(p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
+    std::fs::read_to_string(p)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
+        .replace("\r\n", "\n")
 }
 
 /// GitHub's heading-anchor slug: lowercase, drop everything that is not alphanumeric, space,

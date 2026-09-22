@@ -957,7 +957,7 @@ doc: WORKFLOW-COST-PROCEDURE.md
 ctx: **1121 of `docs/UI-PLAN-ANIMATION-A1.md`'s 1426 lines**
 fig: 1121
 cwd: ui
-cmd: awk 'END{print NR-305}' docs/UI-PLAN-ANIMATION-A1.md
+cmd: git show 615cda8f:docs/UI-PLAN-ANIMATION-A1.md | awk 'END{print NR-305}'
 out: 1121
 
 id:  P13
@@ -997,7 +997,7 @@ doc: WORKFLOW-COST-BRIEFS.md
 ctx: migration_helpers.rs:3054-3056
 fig: 3054-3056
 cwd: reflect
-cmd: awk 'NR>=3054 && NR<=3056' crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs | grep -c "takes ownership" | sed "s/^1$/3054-3056/"
+cmd: git show 0e0b4c68:crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs | awk 'NR>=3054 && NR<=3056' | grep -c "takes ownership" | sed "s/^1$/3054-3056/"
 out: 3054-3056
 
 id:  P18
@@ -1029,7 +1029,7 @@ doc: WORKFLOW-COST-EVIDENCE.md
 ctx: **6167 lines / 23 tests**
 fig: 6167
 cwd: reflect
-cmd: wc -l < tests/internal_docs_anchors.rs | tr -d " "
+cmd: git show 0e0b4c68:tests/internal_docs_anchors.rs | wc -l | tr -d " "
 out: 6167
 
 id:  P22
