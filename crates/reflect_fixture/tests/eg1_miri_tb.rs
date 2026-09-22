@@ -15,9 +15,9 @@
 //!
 //! Both outcomes have a disposition, stated by the plan (D23) so this rung cannot invent
 //! one at build time: **green** — D2 stands on the corrected reason; **red** — source 1 has
-//! no legal form (F8 makes the raw projection inexpressible and `component_ids()` requires
-//! an `&Archetype`), and the only remedy is a fifth shipping-API item, which is an OWNER
-//! call of B.13 #2's class. EG1 escalates; it does not widen the seam on its own.
+//! no legal form (F8 makes the raw projection inexpressible and `table_component_ids()`
+//! requires an `&Archetype`), and the only remedy is a fifth shipping-API item, which is an
+//! OWNER call of B.13 #2's class. EG1 escalates; it does not widen the seam on its own.
 //!
 //! # The RED MUTATION this file carries — **R3″**, because R3′ does not fire
 //!
@@ -41,9 +41,9 @@
 //!
 //! ```text
 //! let frozen = unsafe { &*archetype_ptr };          // BEFORE the migration
-//! let before = frozen.component_ids().len();
+//! let before = frozen.table_component_ids().len();
 //! ecs.add_tag(sibling, tag);                        // the foreign write
-//! let after = frozen.component_ids().len();         // <-- must be UB
+//! let after = frozen.table_component_ids().len();   // <-- must be UB
 //! ```
 //!
 //! MEASURED under `-Zmiri-tree-borrows`:
@@ -140,9 +140,9 @@ fn enumerate(ecs: &EcsMaster, entity: Entity) -> ([IdEntry; 8], usize) {
 /// in an unrelated archetype would make it vacuous, so the shared archetype is asserted.
 ///
 /// ⚠️ **The SPAWN ORDER below is forced, and the reason is a MEASURED kernel defect.**
-/// `EcsMaster::add_tag` walks the *source archetype's* RETAINED `component_ids()` and asks
-/// for a per-archetype pool for every id in it — but a **dense** id is retained in that list
-/// and structurally has no pool, so the walk hits
+/// `EcsMaster::add_tag` walks the *source archetype's* RETAINED `all_component_ids()` and
+/// asks for a per-archetype pool for every id in it — but a **dense** id is retained in that
+/// list and structurally has no pool, so the walk hits
 /// `.expect("invariant: source hosts its own component id")` and panics in RELEASE
 /// (`migrate_entity_attach_ids`; `remove_tag` is broken identically in
 /// `migrate_entity_detach_ids`). The victim is not "an entity carrying a dense component" —
@@ -150,11 +150,18 @@ fn enumerate(ecs: &EcsMaster, entity: Entity) -> ([IdEntry; 8], usize) {
 /// the filtered mask and the retained list is the minting caller's. Measured in this
 /// worktree with no reflection code on the stack.
 ///
+/// → **REPAIRED on the merge line by KE14 D1, and the paragraph above is kept as the record
+/// of what it measured.** Both helpers now walk `source.table_component_ids()`
+/// (`migration_helpers.rs:1827` and `:2109`) — the signature subsequence whose every member
+/// owns a `ComponentPool` (`archetype/archetype.rs:213-223`) — so a dense id can no longer
+/// reach the pool lookup at all.
+///
 /// Spawning the table-only sibling **first** mints a clean `[table]` archetype that the
 /// table+dense subject then dedups into, so the shared archetype retains no dense id and the
-/// migration is expressible. It is `boyko_ecs`'s defect to fix, not this campaign's — and
-/// EG2/EG6 build `add_component_by_id` / `remove_component_by_id` on exactly those two
-/// helpers, so it is theirs to carry.
+/// migration is expressible. The forced order STAYS after the repair: this gate's subject is
+/// Tree Borrows and not the migration's id list, so re-shaping the fixture would re-measure
+/// something else. EG2/EG6 build `add_component_by_id` / `remove_component_by_id` on exactly
+/// those two helpers, so the repaired shape is theirs to carry.
 #[test]
 fn the_enumeration_survives_a_sibling_structural_migration() {
     // ⚠️ MEASURED, and it is why this is not a bare `MIRIFLAGS` echo. Under
@@ -229,9 +236,16 @@ fn the_enumeration_survives_a_sibling_structural_migration() {
         //   in the glue itself the same reference is derived from `&EcsMaster`, so borrowck
         //   forbids a `&mut EcsMaster` existing while it lives.
         let archetype = unsafe { &*archetype_ptr };
-        archetype.component_ids().len()
+        // `table_component_ids()`, not `all_component_ids()`: this block MODELS the glue's
+        // source-1 read (`boyko_reflect::ecs`, which walks `table_component_ids()`), and a
+        // model that dereferences a different field answers about a different access. Under
+        // Tree Borrows either field exercises the same whole-struct `&Archetype`, so the
+        // choice is fidelity to the route under test and not a UB question.
+        archetype.table_component_ids().len()
     };
-    println!("EG1 gate 6: retained component_ids().len() before the migration = {deref_before}");
+    println!(
+        "EG1 gate 6: retained table_component_ids().len() before the migration = {deref_before}"
+    );
 
     // ── the sibling structural migration ─────────────────────────────────────────────
     let tag = ecs.register_tag("eg1_tb_sibling_marker");

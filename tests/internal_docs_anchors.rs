@@ -5312,10 +5312,14 @@ fn measured_claims() -> (Vec<MeasuredClaim>, Vec<String>) {
 ///   a document (*"N of the 25 test names appear in this file verbatim"*), and
 ///   `llvm-nm --defined-only` over a linked binary (*"six defined symbols"*). There is nothing to
 ///   re-read: one needs a `cargo test` process, the other a release build and a symbol table.
-/// * **The census's OWN figures, quoted back into the documents** — 331 bound `.rs` citations, 188
+/// * **The census's OWN figures, quoted back into the documents** — 335 bound `.rs` citations, 188
 ///   unbindable, 12 dead, 179 formerly dropped, 12 known-stale. (242/174/5 until the A6 merge
-///   brought the line's crates under the same scan; the three that moved are re-derived from
-///   the run, and `179 formerly dropped` is left as the historical figure it always was.) ⚠️ The first read **240** until
+///   brought the line's crates under the same scan, then 331 until the A6 follow-up added four
+///   citations — two into `migration_helpers` and two into the archetype module — each written
+///   with enough path to BIND: the bare file name of the second matches two files in the tree
+///   and would have landed in the unbindable ledger, where nothing checks it. The figures
+///   that moved are re-derived from the run, and `179 formerly dropped` is left as the
+///   historical figure it always was.) ⚠️ The first read **240** until
 ///   2026-08-29, two behind a tree the same landing had moved, and it is the one figure in this
 ///   bullet a marker genuinely cannot reach — re-deriving it means running the census, so it is
 ///   now compared against [`rs_citations_in_rust_sources`] itself by

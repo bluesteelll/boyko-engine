@@ -29,7 +29,7 @@
 //!
 //! # The route is the safe accessor (plan D2)
 //!
-//! `entity_archetype_id` → `archetype_master().get_archetype(id)` → `component_ids()`.
+//! `entity_archetype_id` → `archetype_master().get_archetype(id)` → `table_component_ids()`.
 //! `Archetype`'s fields are `pub(crate)`, so the raw-projection form the analysis
 //! prescribed is not expressible from this crate at all (plan F8). What sanctions the
 //! whole-struct `&Archetype` read is the kernel's own precedent

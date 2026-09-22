@@ -160,7 +160,7 @@ use boyko_ecs::prelude::{EcsMaster, Entity};
 /// `boyko_reflect`, against `boyko_ecs`'s **public** surface only.
 ///
 /// The route is D1/D2/D14's, walked in order: entity → archetype id → archetype →
-/// `component_ids()` (source 1, F7 — never `EntityInland::archetype_ptr()`, which F8 makes
+/// `table_component_ids()` (source 1, F7 — never `EntityInland::archetype_ptr()`, which F8 makes
 /// inexpressible from an external crate anyway); `dense_registry().dense_ids()` ×
 /// `dense_contains` (source 2, F4/F3); then the per-id classification and byte access.
 ///

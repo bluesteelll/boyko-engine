@@ -65,8 +65,8 @@ struct Eg1Opaque {
 
 /// The `Dense` citizen — the `GpuTransform3D` **shape**, not the type: three `[f32; 4]`
 /// lanes twice over, `#[repr(C)]`, 96 bytes. Dense storage is excluded from every
-/// archetype signature *mask* while its id is RETAINED in `component_ids()`, which is the
-/// whole reason source 1 needs a filter.
+/// archetype signature *mask* while its id is RETAINED in `all_component_ids()`, which is
+/// the whole reason source 1 needs a filter.
 #[derive(Component, Default)]
 #[component(reflect, storage = "dense")]
 #[repr(C)]
@@ -133,7 +133,7 @@ fn classify_the_gpu_shapes() {
 /// Spawns an entity carrying the table shape **and** the dense shape.
 ///
 /// ⚠️ **The spawn ORDER is load-bearing and this is the polluting one.** The archetype
-/// minted here keeps `component_ids() == [table, dense]` while its signature mask is
+/// minted here keeps `all_component_ids() == [table, dense]` while its signature mask is
 /// `{table}` only, so any later table-only entity dedups into it. Gate 1b spawns exactly
 /// that entity afterwards.
 fn spawn_table_and_dense(ecs: &mut EcsMaster) -> Entity {
@@ -164,15 +164,22 @@ fn bytes_of<T>(value: &T) -> &[u8] {
 /// kernel finding rather than a preference.** `EcsMaster::add_tag` on an entity that
 /// carries a **dense** component panics in RELEASE, and so does `remove_tag`: both
 /// `migrate_entity_attach_ids` and `migrate_entity_detach_ids` walk the source archetype's
-/// **retained** `component_ids()` and ask for a per-archetype pool for every id in it —
+/// **retained** `all_component_ids()` and ask for a per-archetype pool for every id in it —
 /// but a dense id is retained in that list and structurally has no pool, so the walk hits
 /// `.expect("invariant: source hosts its own component id")`. Measured in this worktree
-/// with no reflection code on the stack. It is `boyko_ecs`'s to fix, not this campaign's;
-/// EG1 routes around it, and EG2/EG6 build `add_component_by_id` / `remove_component_by_id`
-/// on exactly those two helpers, so the finding is theirs to carry.
+/// with no reflection code on the stack.
+///
+/// → **REPAIRED on the merge line by KE14 D1**, which is why the paragraph above is a record
+/// rather than a live hazard: both helpers now walk `source.table_component_ids()`
+/// (`migration_helpers.rs:1827` and `:2109`), the signature subsequence whose every member
+/// owns a `ComponentPool` (`archetype/archetype.rs:213-223`). EG1 still routes around the shape
+/// — the route-around costs nothing and these gates measure the enumeration, not the migration
+/// and EG2/EG6 build `add_component_by_id` / `remove_component_by_id` on exactly those two
+/// helpers, so the repaired shape is theirs to carry.
 ///
 /// The id list is passed **canonically sorted** — the detach path debug-asserts that
-/// property of `component_ids()`, while `get_or_create_archetype` stores the caller's order
+/// property of `all_component_ids()`, while `get_or_create_archetype` stores the caller's
+/// order
 /// verbatim.
 fn spawn_table_opaque_and_dense(ecs: &mut EcsMaster) -> Entity {
     let (table, opaque, dense) = (id_of::<Eg1Table>(), id_of::<Eg1Opaque>(), id_of::<Eg1Dense>());
@@ -290,7 +297,7 @@ fn dense_component_is_enumerated() {
 ///
 /// This is the gate that catches the real defect rather than a cosmetic one. Archetype
 /// dedup keys on the FILTERED signature mask, so both entities share one archetype whose
-/// `component_ids()` is `[table, dense]`. An unfiltered source 1 therefore reports the
+/// `all_component_ids()` is `[table, dense]`. An unfiltered source 1 therefore reports the
 /// dense component on an entity that does not carry it — while `dense_contains` says
 /// `false` — which is a *"wrong answer that looks like an answer"* (D15), not a duplicate.
 /// The spawn order below is the one a fresh test binary takes.
@@ -668,10 +675,15 @@ fn the_numbers_this_rung_owes() {
          sources 1+2, {} table id(s) scanned + {dense_len} dense id(s) probed)",
         elapsed.as_nanos() as f64 / reps as f64,
         reps,
+        // `table_component_ids()`, not `all_component_ids()`: the sentence above calls this
+        // number the TABLE ids `components_of_into` scanned, and the table list is exactly
+        // what source 1 walks. `all_component_ids()` additionally retains the dense id
+        // (race-dependently, per `archetype.rs`'s field doc), so it would double-count the
+        // very component the same line reports separately as `dense_len`.
         ecs.archetype_master()
             .get_archetype(ecs.entity_archetype_id(entity).expect("live"))
             .expect("live")
-            .component_ids()
+            .table_component_ids()
             .len()
     );
 }
