@@ -111,9 +111,12 @@ fn retained_scratch_survives_a_despawn() {
 
     world.run_system(move |mut cmds: Commands| cmds.despawn(a));
 
-    // This kernel hands out fresh ids (measured); see
-    // `entity_ids_are_not_recycled_today`, which is what makes the bare key safe
-    // and which reds if that changes.
+    // `b` may or may not carry `a`'s recycled id: since EM2' (`0afcbd7d`) this kernel
+    // DOES reissue ids, so nothing here rests on it not doing so. What makes the bare
+    // key safe is stated by the two successor gates below —
+    // `entity_ids_are_recycled_on_this_kernel` (the kernel fact) and
+    // `a_completion_pair_never_outlives_its_frame_so_a_recycle_cannot_replay_it` (the
+    // consequence, with the collision CONSTRUCTED). This row stays smoke either way.
     let b = spawn_node(&mut world);
     world.run_system(move |mut cmds: Commands| {
         start_tween_tint(&mut cmds, b, 0x0000_0000, 0xFFFF_FFFF, 10_000.0, EasingId::LINEAR, 0);

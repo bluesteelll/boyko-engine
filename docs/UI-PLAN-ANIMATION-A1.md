@@ -349,7 +349,7 @@ to three, with SET edges between them.
 | F9-b | `advance`'s completion test inverted to `if t < 1.0 { Some(t) } else { None }`, putting NaN on the COMPLETING side. MEASURED free: **14.002 vs 14.008 ns/row** (4096 nodes × 4 channels, release, floor of five process invocations). ⚠️ **This fix OVERLAPS the F9-a guard on the NaN member, and the overlap is what made C2's gate vacuous** — see the corrected red ledger | `animation.rs:583` (the test itself; its doc paragraph is `:551-555`. Was `:457`, then `:486`; re-measured by CONTENT 2026-08-28, part 7) |
 | F9-c | The falsified "bounded damage" paragraph on `advance` | `animation.rs:557-562` (was `:439-450`, then `:474-479`, then `:494-499`; re-measured by CONTENT 2026-08-28, part 7) |
 | F7-a | The generation-free scratch key's real safety argument — three measured facts, replacing one sentence that ruled out a window nothing was ever going to use | `animation.rs:438-468` (the `# Why the generation-free key is safe` block; `:469` is `#[derive(Resource, Default)]`. Was `:326-356`, then `:355-386`, then `:375-406`; re-measured by CONTENT 2026-08-28, part 7) |
-| F7-b | `entity_ids_are_not_recycled_today` — the trip-wire under fact 2 | `crates/boyko_ui/tests/miri_a1_tween.rs:137-178` |
+| F7-b | `entity_ids_are_not_recycled_today` — the trip-wire under fact 2. ⚠️ **It FIRED, and the act it gated is GONE**: EM2′ (`0afcbd7d`) landed id recycling on the deferred route, so the A7 merge deleted this test and put TWO in its place — `entity_ids_are_recycled_on_this_kernel` (pins the new kernel fact) and `a_completion_pair_never_outlives_its_frame_so_a_recycle_cannot_replay_it` (gates the consequence directly, CONSTRUCTING the id collision rather than assuming it). The key is still safe, on facts 1 and 3 ALONE; carrying the generation is escalated in `docs/OPEN-QUESTIONS.md` | ⚠️ **The old range `miri_a1_tween.rs:137-178` is DEAD** — on `merge/a7-ui-advanced` those lines are a DIFFERENT test's doc comment, and the test they named exists nowhere in the tree. The successors are `crates/boyko_ui/tests/miri_a1_tween.rs:140-188` (`entity_ids_are_recycled_on_this_kernel`; `:163` is `#[test]`, `:164` the `fn`) and `:190-262` (`a_completion_pair_never_outlives_its_frame_so_a_recycle_cannot_replay_it`; `:204` is `#[test]`, `:205` the `fn`) — both re-measured by CONTENT at BOTH ENDS 2026-09-22 |
 | F2-i | The ordering CONTRACT, stated at four sites | `animation.rs:60-66` (module, appended — A0's clock sentence at `:51-58` deliberately untouched, it is TRUE for `Res<UiClock>`), `animation.rs:657-687` (`# Ordering` on `ui_visual_tick`; `:688` begins the `#[allow]` rationale. Was `:531-555`, then `:560-590`), `animation.rs:350-362` (`UiAnimationSet`'s doc; `:363` is `#[derive]`, `:364` the struct. Was `:246-250`, then `:267-279`), `crates/boyko_render/src/ui/gather.rs:506-520` (the reciprocal, the only site that can name both; was `:486-500`) |
 | F2-ii | The ordering GATE | `crates/boyko_render/tests/ui_a1_sink_reaches_discovery.rs` |
 | F2-iii | `sprite.rs`'s `# Ordering` — the measurably false "a repaint one frame late" | `crates/boyko_ui/src/sprite.rs:36-63` |
@@ -431,7 +431,7 @@ vacuity shape.* Enumerated with `-- --list | sort` and run unpiped with `$?` on 
 | `boyko-ui` `ui_a1_tween` (debug) | ~~11~~ **12** | `running 12` · `ok. 12 passed` |
 | `boyko-ui` `ui_a1_tween` (release) | ~~12~~ **13** — the same 12 **plus** `a_degenerate_duration_creates_no_row`, which is `#[cfg(not(debug_assertions))]` because the debug build asserts | `running 13` · `ok. 13 passed` |
 | `boyko-ui` `ui_a1_zero_alloc` | 1 | `running 1` · `ok. 1 passed`, debug **and** release. `--test-threads=1` is load-bearing: the file arms a process-global allocator |
-| `boyko-ui` `miri_a1_tween` | 4 (was 3 — `entity_ids_are_not_recycled_today`) | `running 4` · `ok. 4 passed` |
+| `boyko-ui` `miri_a1_tween` | ~~4~~ **5** — A1's four **minus** `entity_ids_are_not_recycled_today` (deleted: it fired) **plus** A7's two successors, `entity_ids_are_recycled_on_this_kernel` and `a_completion_pair_never_outlives_its_frame_so_a_recycle_cannot_replay_it` | `running 5` · `ok. 5 passed`. ⚠️ **RE-TAKEN, not edited**, 2026-09-22 on `merge/a7-ui-advanced`: `cargo test -q -p boyko-ui --test miri_a1_tween -- --list` ⇒ the five names above, then the same binary run unpiped ⇒ EXIT 0. The row that stood here certified a `running 4` that no longer exists |
 | `boyko-render` `ui_a1_sink_reaches_discovery` | 3 (was 2 — `the_reader_must_be_ordered_after_the_tick_or_every_write_is_lost`) | `running 3` · `ok. 3 passed` |
 | `boyko-render` `ui_s0_discovery` / `ui_s0_seam` | 2 / 6, unchanged | `ok. 2 passed` / `ok. 6 passed` |
 
@@ -440,7 +440,9 @@ vacuity shape.* Enumerated with `-- --list | sort` and run unpiped with `$?` on 
 > 2026-08-27 by NAMES, not counts** — `cargo test -q -p boyko-ui --test ui_a1_tween -- --list`,
 > `grep ': test'`, `sort`, `diff`: debug **12**, release **13**, and the diff is exactly the one
 > line `a_degenerate_duration_creates_no_row`. `miri_a1_tween` 4, `ui_a1_zero_alloc` 1 and
-> `ui_a1_sink_reaches_discovery` 3 re-enumerated the same way and unchanged.
+> `ui_a1_sink_reaches_discovery` 3 re-enumerated the same way and unchanged. ⚠️ **That
+> enumeration is DATED**: `miri_a1_tween` holds **5** names since the A7 merge — the row above
+> carries the re-taken receipt.
 
 `cargo clippy --workspace --all-targets --keep-going -- -D warnings` ⇒ **EXIT=0**, 0 warnings,
 0 errors, `Checking boyko-render` present, run after `cargo clean -p boyko-ui -p boyko-render`
