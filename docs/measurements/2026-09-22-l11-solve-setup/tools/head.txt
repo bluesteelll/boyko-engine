@@ -1,0 +1,52 @@
+DONE — 452 timed processes (410 originals + 42 re-runs), 5 untimed warm-ups; 0 invalid, 0 dropped slots; K = 12 in every cell except the canary (K = 1 per binary, by design).
+
+# Window 4b — L11 C2 (tip f8873aae) against its parent C0 (146a1125), G9 timing under the P0 protocol (2026-09-22)
+
+Timed 08:20:42–10:12:19 +03:00 on the owner's workstation. No claims are made here; every number is a cell, an effect under the two readings, or gate arithmetic on them. Raw: `raw/runs.jsonl` (one record per process), `raw/main-p0/`, `raw/main-p1/`, `raw/armed-p0/`, `raw/armed-p1/`, `raw/canary-p0/` (per-process `stdout.txt`, `stderr.txt`, `run.csv`, `pose.bin`), `raw/manifest.json`, `raw/window_state.json`, `raw/window_log.txt`, `raw/wait_log.txt`, `raw/analysis.json`, `raw/tables.md`, `raw/sensitivity.md`.
+
+## 0. What ran
+
+| item | value |
+|---|---|
+| tip | `bin/runner_tip.exe` sha256 `29dbd993ea817c1125f36a09e1b06efc65116ae0e0edadaeb9d602991eac3df0`, commit `f8873aaeef02474e95a205f543d57511fe010691` (branch `perf/physics-l11-solve-setup`: C0 146a1125 + C1 691891c4 + C2 f8873aae, `git status` clean), built in `D:/wt/lighttable` into `D:/wt/_targets/vkval-msvc` — `Compiling boyko-physics v0.1.0 (D:\wt\lighttable\crates\boyko_physics)` (`logs/03_build_tip.log`) |
+| parent | `bin/runner_parent.exe` sha256 `8dfd01435495a7e38956fbe04b07eca918438c8948c45b5288bc2000e419970c`, commit `146a1125edffdfbfd078e5343d6226379ed04a70` (C0: test-only digest + the J-As runner row), `git archive 146a1125 \| tar -x` into `scratchpad/win4b/parent_tree/`, the tip's `Cargo.lock` copied in (the archive carries none; the freshly resolved lock differed only in `libredox` 0.1.24→0.1.25, a redox-only crate, and the copy recompiled nothing), built into `D:/wt/_targets/l11-parent-msvc` (cold, 47 s) — `Compiling boyko-physics v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\scratchpad\win4b\parent_tree\crates\boyko_physics)` (`logs/01_build_parent.log`) |
+| build prefix | `PATH="$HOME/.cargo/bin:$PATH" RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=6 TMP=D:/wt/_targets/tmp TEMP=D:/wt/_targets/tmp`, `cargo bench --no-run --profile parity -p boyko-physics --bench jolt_parity_pyramid`; rustc 1.98.1 (48a229cea 2026-09-01) msvc; no `RUSTFLAGS` (`x86-64-v3` from `.cargo/config.toml`, byte-identical in both trees) |
+| hashes / commits | `bin/SHA256SUMS`, `bin/COMMIT.txt`; the binaries were re-verified against both before every pass and after the window (`all match`) |
+| window-4 runner | none running at 08:05 (no `runner_c3.exe`, `window4_run.py`, cargo/rustc/link/miri process; CPU 3–10 % background); the builds started at 08:06 |
+| disk | D: 82 GB free before and after (`df -h`), C: 29 GB |
+| machine | 16 logical CPUs, `High performance` scheme, AC (battery 100 %), affinity mask read back `0xffff` in all 452 processes (P-none) |
+| tools | `tools/window4b_run.py` (adapted from window 3's `window3_run.py`), `tools/wait_idle4b.ps1` (window 3's idle script + `miri`, `cargo-miri`, `runner_c3`, the bench exe name), `tools/pose_gate.py`, `tools/reduce.py`; `tools/lib/driver.py` = window 3's copy (helpers only) |
+| rows | `rows.json`: J-As (`--cfg as`) and J-A (`--cfg a`) at W 1/2/4/8/16, 500 steps, window [0,500); R (`--scene rest --solver colored`, plus `--parallel-solve` at W=8 as P0's row spelled it — a no-op since L4) at W 1/8, 1100 steps, window [600,1100), armed; R-S (`--scene rest --sleeping --frozen-by 300`) at W 1/8, 800 steps, window [300,800), armed; S16 (`--scene s16 --cfg a`) at W 1, 300 steps, armed; J-As-a (`--cfg as --arm-profiler`) at W 1/8; J-C (`--cfg as --arm-profiler --canary-frac 0.05 --canary-ref-ns <this binary's latest J-As-a W1 window mean>`) once per binary at W 1. `--parallel-np` not passed (as window 3's rows). Jolt not run (v5.6.0's window-3 cells are the comparison, never re-run) |
+| protocol | window-3 block: cell = MEDIAN over K of the process window mean (ms/step); 5-s receipt before/after every process, > 5 % or a build process ⇒ re-run once at the end of the pass; 10-s receipt and the idle rule (0 build/miri/lane-test processes on 3 consecutive 60-s polls with 10-s CPU < 5 %) before every pass; one untimed warm-up (tip J-As W=8) per pass; parent/tip interleaved inside a W group, row by row; pass 1 the whole list reversed; K=12 = 2 passes × 6 rounds in the main block AND in the armed block (time did not press); the canary block after the armed block |
+| pose assertion | every process ran with `--expect-pose gate/<row>_W1_parent.pose` (the parent's untimed gate pose) and its summary `pose_hash` was compared with `rows.json`: 452/452 `expect_pose: "match"`, 452/452 pose = the C0 tester's value, 452/452 exit 0, 452/452 `void_steps 0`; armed: `drops_total 0` and `solve_on_dispatcher_steps 0` in all 187; R-S `first_frozen_step 248` in all 54; J-As-a `waves_total 54660` in all 49 |
+
+## 1. Pose gate (untimed, `logs/04_pose_gate.log`, `gate/gate.json`)
+
+Every row on the parent at its own step count, W=1 and W=8, then the tip with `--expect-pose` against the parent's pose file; the runner's printed config compared field by field between the binaries (equal in all 14 pairs).
+
+| row | steps | parent pose W1 / W8 | tip `--expect-pose` W1 / W8 | task-expected (C0 tester) |
+|---|---|---|---|---|
+| J-As | 500 | `0x32d5e235342b4143` / same | exit 0 `match` / exit 0 `match` | `0x32d5e235342b4143` = |
+| J-A | 500 | `0x32d5e235342b4143` / same | exit 0 `match` / exit 0 `match` | `0x32d5e235342b4143` = |
+| R | 1100 | `0x87e561d20589d4a5` / same | exit 0 `match` / exit 0 `match` | `0x87e561d20589d4a5` = |
+| R-S | 800 | `0x2a2b7926a48aab00` / same | exit 0 `match` / exit 0 `match` | `0x2a2b7926a48aab00` = |
+| S16 | 300 | `0x8877dbb1192e9b92` / same | exit 0 `match` / exit 0 `match` | `0x8877dbb1192e9b92` = |
+| J-As-a (armed) | 500 | `0x32d5e235342b4143` / same | exit 0 `match` / exit 0 `match` | = |
+| J-C (armed, no canary at the gate) | 500 | `0x32d5e235342b4143` / same | exit 0 `match` / exit 0 `match` | = |
+
+Red control: the tip at **501** steps against the parent's 500-step J-As pose → **exit 4**, `expect_pose: "mismatch: 64480 vs 64480 bytes, first differing body Some(0)"`, pose `0x9336b30a06a7d8af`. The gate can fail.
+
+The pose.bin files are W-independent (one sha256 per row across W=1 and W=8 on both binaries: J `eff361e1…`, R `c133a50e…`, R-S `100975d7…`, S16 `43d18f22…`), which is why one gate file per row serves every W in the timed passes.
+
+## 2. Load receipts and contamination
+
+- 452 timed processes; 5-s receipt BEFORE: median 1.31 %, max 4.96 %, > 5 %: **0** (the runner waits while the last receipt is busy — 1626 s of such waiting in total, all inside pass main-p1); AFTER: median 1.35 %, max 12.35 %, > 5 %: **42** ⇒ 42 re-runs at the end of their pass (main-p0: 4, main-p1: 37, armed-p1: 1, canary: 0). Every re-run came back clean, so no slot was dropped and every cell has K = 12.
+- Build processes: none in any receipt, none seen during any process (the during-process CPU table names no cargo / rustc / link / miri / lane-test process).
+- During-process witness `others_busy_pct` (CPU-seconds of every other process over wall × 16): median 0.36 %, max 8.71 %, > 5 % in 13 processes, of which 5 are in the chosen set (the other 8 were re-run for their receipt anyway). The protocol reports this witness and does not gate on it (window 3 § 6.3); § 4 shows every cell with those 5 excluded — no median moves by more than 0.016 ms and no effect changes sign or claim status.
+- What was busy: the receipts' top processes are `claude.exe` (2–3 % of the machine each, two instances — the Claude Code host, not this window's runner), `Telegram.exe` (up to 2.9 %), `browser.exe`, `explorer.exe`, `steam.exe`; the > 5 % receipts are single 0.5-s samples of 30–47 % (a burst the per-process CPU table does not attribute — likely a process whose times this user cannot read). Pass main-p1 (08:55–09:57) carried most of it; pass main-p0 (08:20–08:52) and the armed block (09:59–10:12) were quiet. § 4 splits every cell by pass: the parent's W ≥ 2 medians are 0.4–1.4 ms higher in pass 1 than in pass 0, the tip's 0.1–0.4 ms higher, so the pass-1 effects are larger than the pass-0 ones; the all-K medians sit between, and every gate below passes under pass 0 alone as well.
+- Idle rule: 5 waits, each reached after exactly 3 polls (cpu10 0.7–4.1 %, build procs 0, lane-target procs 0, D: 81.6 GB).
+- Effective clock witness (PDH `% Processor Performance`, `perf %` column): 122–135 % of nominal in every cell, parent and tip alike within a cell (AC, High performance).
+
+## 3. Cells, effects, per-stage spans, gates, canary (`tools/reduce.py` → `raw/tables.md`, reproduced verbatim)
+
+Per-stage spans: per process the median over the steps named of `<zone>_ns` from the armed CSV, then the median over K; the µs-per-manifold columns divide by the design's 4,524.2 (the [0,500) mean manifold count; this window's [0,500) mean is 4,524.246 and its [100,500) median 4,519 on both binaries). The `warm_apply` gate rows are C3's lever (not in the C2 tip) — reported, not gated, as the task states. `2*SE` is `2*hypot(SE_parent, SE_tip)`.

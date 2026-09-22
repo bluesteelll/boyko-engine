@@ -1,0 +1,13 @@
+{
+  "_doc": "D-L5 block when only C3 (dormant flag) has landed on l5np: the flag forced on at W in {1, 8}. Fill sha256/commit after the build.",
+  "rows": [
+    {
+      "id": "D-L5-npon", "engine": "boyko", "role": "l5",
+      "what": "the C3 runner (L4 + L2 + L5 dormant) with --parallel-np on: the parallel narrowphase forced on.",
+      "exe": "bin/runner_l5.exe", "sha256": "FILL", "commit": "FILL",
+      "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "default", "--parallel-np", "on"],
+      "workers": [1, 8], "steps": 500, "window": [0, 500], "armed": false,
+      "expected_pose": "0x32d5e235342b4143", "expect_pose_of": "D-L4L2", "timed": true
+    }
+  ]
+}
