@@ -42,15 +42,23 @@
 //!     The kernel's contract is that a padding lane (`lane >= nlanes`) reads NO
 //!     body row; a violation is value-identical (the lane is masked) and visible
 //!     only to Miri's data-race detector — L11 C2, review O2.
+//!   * **(d) pool-free, SIMD warm apply** — L11 C3's `warm_apply_avx2` at small n:
+//!     the aligned head / block row loads and the `body_mut` scatter of the 8-lane
+//!     warm apply, on a PARTIAL cohort, from a warm store the previous step seeded.
+//!     The apply is SERIAL by D7, so this case is about its unsafe surface, not
+//!     about a race; the padding lanes' read contract for the apply is witnessed by
+//!     a concurrent writer in the crate's unit tests
+//!     (`warm_apply_padding_lane_reads_no_body_row_under_concurrent_writer`).
 //!
 //! Run (the load-bearing command). `-Zmiri-ignore-leaks` is here for the reason
-//! `boyko_threadpool/tests/miri_scope.rs` documents: the three tests pass clean,
+//! `boyko_threadpool/tests/miri_scope.rs` documents: this file's tests pass clean,
 //! and the only "memory leaked" reports are crossbeam-epoch's at-exit GC residue
 //! from the pool's worker teardown (`crossbeam-epoch/src/atomic.rs`), which case
 //! (b) alone reproduces; nothing this file allocates is reported. Without the flag
-//! the process exits 1 after `3 passed` (measured L11 C2, msvc nightly miri
-//! a36d05efab 2026-09-09 - the host every Miri recipe in this tree spells since
-//! rung AH, 2026-09-21; see `.cargo/config.toml`):
+//! the process exits 1 after `3 passed` (measured L11 C2, when this file held the
+//! three cases (a)-(c); C3's (d) is pool-free and brings no teardown of its own,
+//! msvc nightly miri a36d05efab 2026-09-09 - the host every Miri recipe in this
+//! tree spells since rung AH, 2026-09-21; see `.cargo/config.toml`):
 //! ```text
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-ignore-leaks" \
 //!   cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-physics \
@@ -293,4 +301,53 @@ fn miri_multiworker_simd_padding_lanes_read_no_body_row() {
     // Row 0 — the padding lanes' id — is a dynamic body cohort 0 solved: it moved.
     assert_ne!(scratch.bodies()[0].linear_velocity, bodies[0].linear_velocity, "row 0 was solved by cohort 0");
     assert!(pos_sum(&scratch).is_finite(), "the multi-worker SIMD colored solve produced finite state");
+}
+
+// ── (d) pool-free, SIMD — the 8-lane WARM APPLY at small n (L11 C3, D7) ───────────
+
+/// C3's own Miri case: the SIMD warm apply (`warm_apply_avx2`) under Tree-Borrows
+/// at small n, pool-free.
+///
+/// D7's apply is SERIAL — it runs on the calling thread before the first sweep's
+/// dispatch — so a race witness is impossible here by construction (the padding
+/// lanes' read contract has its own concurrent-writer case in the crate's unit
+/// tests). What this case covers is the apply's UNSAFE surface: the aligned
+/// `[f32; 8]` row loads off the 64 B-aligned `CohortHead` and `RankBlock`s, the
+/// 8-byte `width` load, and the per-row `body_mut` scatter through the
+/// `ScratchSolveView` — all of it on a cohort that is PARTIAL (six groups ⇒ one
+/// cohort of six lanes, so two padding lanes) and, from step 2 on, seeded with the
+/// previous step's impulses, which is the only state in which the apply computes
+/// anything at all.
+///
+/// Three steps: step 1 seeds zero (a fresh warm store), steps 2 and 3 apply the
+/// stored impulses.
+#[test]
+fn miri_inline_simd_warm_apply_small_n() {
+    let (bodies, manifolds) = shared_floor_scene(6);
+    let graph = build_graph(&bodies, &manifolds);
+    let mut solver = ColoredSoftStepSolver::default();
+    let mut scratch = SolverScratch::with_capacity(bodies.len());
+    scratch.set_bodies(&bodies);
+    scratch.touched.reset(scratch.bodies().len());
+
+    let cfg = PhysicsConfig { simd_solve: true, ..cfg(false) };
+    for _ in 0..3 {
+        scratch.touched.reset(scratch.bodies().len());
+        solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+    }
+
+    // The shared static floor is byte-frozen: the apply's scatter writes MOVABLE
+    // rows only, so a shared static body B is never touched.
+    let floor_spawn = Vec3::new(0.0, -1.0, 0.0);
+    let floor = scratch.bodies()[6];
+    assert_eq!(floor.linear_velocity, Vec3::ZERO, "the warm apply must not write a static row");
+    assert_eq!(floor.angular_velocity, Vec3::ZERO, "the warm apply must not write a static row (angular)");
+    assert_eq!(floor.position, floor_spawn, "shared static floor position must stay put");
+    // Non-vacuity: warm start is on by default, so the second and third steps DID
+    // carry impulses into the apply — every dynamic row moved off its spawn state.
+    assert!(
+        solver.warm_seed_stats().point_hits > 0,
+        "non-vacuity: the warm store must have seeded the apply (else it applied zeros)"
+    );
+    assert!(pos_sum(&scratch).is_finite(), "the inline SIMD colored solve produced finite state");
 }

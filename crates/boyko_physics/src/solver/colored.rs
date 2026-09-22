@@ -1981,15 +1981,55 @@ impl ColoredSoftStepSolver {
     }
 
     /// Applies every contact point's seeded accumulated impulse to both bodies'
-    /// velocities (the warm-start apply, run once per substep after gravity).
+    /// velocities (the warm-start apply, run once per substep after gravity) — the
+    /// D7 dispatch fork, the SINGLE site that chooses the apply's shape.
+    ///
+    /// - `simd == false`, or a non-AVX2 build →
+    ///   [`warm_apply_scalar`](Self::warm_apply_scalar), the group-major oracle.
+    /// - `simd == true` on an AVX2 build →
+    ///   [`warm_apply_avx2`](Self::warm_apply_avx2) over the same cohorts, eight
+    ///   lanes at a time and bit-identical (L11 C3, D7).
+    ///
+    /// The flag is [`PhysicsConfig::simd_solve`] — the same one that forks the
+    /// sweep kernel, so a step never mixes the two shapes, and the `simd_solve`
+    /// arms of every G1 scene gate this fork. Both paths are SERIAL (C3): the apply
+    /// runs on the calling thread with no worker live, before the first sweep's
+    /// dispatch.
+    #[inline]
+    fn warm_start_apply(
+        cols: &CohortColumns,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        simd: bool,
+    ) {
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            if simd {
+                // SAFETY: the `target_feature = "avx2"` compile-time gate guarantees the
+                //   executing CPU supports every AVX2 intrinsic the apply uses (a non-AVX2
+                //   host cannot reach this branch — the `cfg` excludes it). `cols` is the
+                //   cohort table `build_columns` filled this step, so every head's
+                //   `rank_base + depth` is in bounds and every head and block is live and
+                //   64 B-aligned; no worker is live here, so this thread alone reads and
+                //   writes the body rows the apply touches.
+                unsafe { Self::warm_apply_avx2(cols, bodies_eff) };
+                return;
+            }
+        }
+        // Flag off / non-AVX2 build: the group-major oracle.
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        let _ = simd;
+        Self::warm_apply_scalar(cols, bodies_eff);
+    }
+
+    /// The scalar warm-start apply — the ORACLE the AVX2 apply is gated against
+    /// (G4), and the path a `simd_solve == false` step takes.
     ///
     /// Mirrors the reference `warm_start_apply`, but reads the cohort tables
     /// group-major — cohorts in color order, lanes, then ranks — which is the slot
     /// order the per-point columns had, so every body's add sequence is unchanged.
     /// The apply is a pure accumulation onto velocities and, within a color, the
-    /// bodies are disjoint; across colors the seed is independent of order. (C2 is
-    /// single-threaded; C3 widens it per cohort under `simd_solve`.)
-    fn warm_start_apply(cols: &CohortColumns, bodies_eff: ScratchSolveView<'_, BodyEffective>) {
+    /// bodies are disjoint; across colors the seed is independent of order.
+    fn warm_apply_scalar(cols: &CohortColumns, bodies_eff: ScratchSolveView<'_, BodyEffective>) {
         let blocks = cols.blocks();
         for head in cols.heads() {
             let rank_base = head.rank_base as usize;
@@ -2014,7 +2054,10 @@ impl ColoredSoftStepSolver {
                 //   disjoint, and it must land BEFORE the parallel dispatch, not with it.
                 //
                 // `is_dynamic_row` is the same predicate the O4 coloring uses, so the two
-                // cannot drift into disagreeing about which rows are shared.
+                // cannot drift into disagreeing about which rows are shared. It is the
+                // IEEE `inv_mass != 0.0`, so a `-0.0` row is immovable on this path and on
+                // the AVX2 one (review O1, gated by
+                // `negative_zero_inv_mass_row_is_immovable_in_both_warm_applies`).
                 let ia = head.body_a[l] as usize;
                 let ia_movable = is_dynamic_row(body_ref(bodies_eff, ia).inv_mass);
                 let ib = head.body_b[l] as usize;
@@ -2028,6 +2071,272 @@ impl ColoredSoftStepSolver {
                     if ib_movable {
                         body_mut(bodies_eff, ib).apply_impulse(blk.rb(l), impulse);
                     }
+                }
+            }
+        }
+    }
+
+    /// The 8-lane warm-start apply (L11 C3, D7): one cohort at a time, serial,
+    /// under `simd_solve`. BIT-IDENTICAL to
+    /// [`warm_apply_scalar`](Self::warm_apply_scalar).
+    ///
+    /// # Why the bits are the same
+    ///
+    /// * **The impulse associates left to right.** The scalar
+    ///   `normal * ni + t1 * ti1 + t2 * ti2` is `((n·λn + t1·λt1) + t2·λt2)` per
+    ///   component, and each product is a separate `mul` then `add` here (NO FMA —
+    ///   the module's no-FMA invariant, censused by
+    ///   `colored_has_no_fma_or_approx_callsites`). Mutation M7 re-associates it and
+    ///   is recorded red.
+    /// * **`t2 = n × t1`** via [`cross8`](super::simd::cross8), op for op the
+    ///   `Vec3::cross` the scalar calls and the one `tangent_basis` derived the
+    ///   stored tangent with.
+    /// * **The register carry is the scalar's read-modify-write.** The A/B
+    ///   velocities are gathered once per cohort, carried across the ranks and
+    ///   scattered at cohort exit. Within a color the manifold-groups are
+    ///   body-disjoint (the O4 invariant), so lane `l`'s two rows are touched by no
+    ///   other lane of the cohort; each lane therefore sees exactly its own adds, in
+    ///   ascending rank order, which is the scalar's sequence for that body. The
+    ///   scatter lands before the next cohort's gather, so the cross-cohort order is
+    ///   the scalar's too — and cohorts are walked in color order on both paths.
+    /// * **The mask is `active ∧ movable`** (review O1): `active = width[l] > r`
+    ///   reproduces the scalar's `r < width[l]` rank bound, and `movable` is the
+    ///   IEEE `inv_mass != 0.0` of [`is_dynamic_row`] — an
+    ///   `_mm256_cmp_ps::<_CMP_NEQ_OQ>` against zero, NOT a bit test, so a `-0.0`
+    ///   `inv_mass` row is immovable here exactly as it is on the scalar path.
+    ///   [`apply_impulse_blend_x8`](super::simd::apply_impulse_blend_x8) blends, so
+    ///   a masked-off lane keeps its original velocity bits.
+    ///
+    /// # O2 — a padding lane reads no body row
+    ///
+    /// A lane `>= nlanes` is skipped by the gather (its staged state is written
+    /// zero, never read from a row) and by the scatter. Its `width` is 0, so
+    /// `active` is false at every rank and every blended write is discarded. The
+    /// fill zeroes a padding lane's `body_a`, so gathering it would read row 0 — a
+    /// real, dynamic row the solve writes. That read is value-identical (the lane is
+    /// masked), which is why only the contract, the Miri case and mutation M12 can
+    /// see it.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee AVX2 (the `cfg` + `target_feature` gate), that
+    /// `cols` is a fully built cohort table — every head's `rank_base + depth`
+    /// within `blocks`, every head and block live and 64 B-aligned — and that no
+    /// other thread reads or writes the body rows of `bodies_eff` while this runs
+    /// (C3 is serial: the apply owns them).
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[target_feature(enable = "avx2")]
+    unsafe fn warm_apply_avx2(
+        cols: &CohortColumns,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+    ) {
+        use core::arch::x86_64::{
+            _CMP_NEQ_OQ, _mm_loadl_epi64, _mm256_add_ps, _mm256_and_ps, _mm256_castsi256_ps,
+            _mm256_cmp_ps, _mm256_cmpgt_epi32, _mm256_cvtepu8_epi32, _mm256_mul_ps,
+            _mm256_set1_epi32, _mm256_set1_ps,
+        };
+        use crate::solver::simd::{apply_impulse_blend_x8, cross8};
+
+        const W: usize = COHORT;
+
+        // ── Per-cohort stack scratch (zero heap; the kernel's gather-once shape) ──
+        let mut ia = [0usize; W]; // body-A row index
+        let mut ib = [0usize; W]; // body-B row index (== ia for a sentinel)
+        let mut sent = [false; W]; // sentinel per lane (padding lanes: false)
+        let mut a_invm_s = [0.0f32; W];
+        let mut b_invm_s = [0.0f32; W];
+        let mut a_ii_s = [[0.0f32; W]; 9];
+        let mut b_ii_s = [[0.0f32; W]; 9];
+        let mut a_lin_s = [[0.0f32; W]; 3];
+        let mut a_ang_s = [[0.0f32; W]; 3];
+        let mut b_lin_s = [[0.0f32; W]; 3];
+        let mut b_ang_s = [[0.0f32; W]; 3];
+        // a_static[lane] = 1.0 when A is NOT movable (`inv_mass == 0.0`, IEEE — so a
+        // `-0.0` row lands here). Always-dynamic by manifold convention, but kept for
+        // scalar-exactness: the scalar guards both sides.
+        let mut a_static_s = [0.0f32; W];
+        let mut not_sent_f = [0.0f32; W];
+        // Velocity scatter staging (written only at cohort exit).
+        let mut out_a_lin = [[0.0f32; W]; 3];
+        let mut out_a_ang = [[0.0f32; W]; 3];
+        let mut out_b_lin = [[0.0f32; W]; 3];
+        let mut out_b_ang = [[0.0f32; W]; 3];
+
+        // SAFETY (target_feature): every intrinsic below is AVX2; this fn is
+        //   `#[target_feature(enable = "avx2")]`-gated and only reached on an AVX2
+        //   build (the `cfg` gate), so the CPU supports them.
+        let zero = _mm256_set1_ps(0.0);
+        let one = _mm256_set1_ps(1.0);
+        let neg_one = _mm256_set1_ps(-1.0);
+
+        let blocks = cols.blocks();
+        for head in cols.heads() {
+            let nlanes = head.nlanes as usize;
+            let depth = head.depth as usize;
+            let rank_base = head.rank_base as usize;
+            debug_assert!((1..=W).contains(&nlanes), "cohort has 1..=8 lanes");
+            debug_assert!(
+                rank_base + depth <= blocks.len(),
+                "invariant: the cohort's ranks are built"
+            );
+
+            // ── Gather-ONCE (cohort entry) ──────────────────────────────────────
+            for lane in 0..W {
+                // Review O2: a padding lane (`lane >= nlanes`) reads NO body row.
+                let b_sent = head.is_sentinel(lane);
+                sent[lane] = b_sent;
+                not_sent_f[lane] = if b_sent { 0.0 } else { 1.0 };
+                if lane < nlanes {
+                    let lane_ia = head.body_a[lane] as usize;
+                    let lane_ib = head.body_b[lane] as usize;
+                    // A sentinel reads IMMOVABLE_AT_REST, never `bodies_eff[lane_ib]`,
+                    // mirroring the scalar's short-circuited `!is_sentinel(l) && …`, so
+                    // only assert B's row when it is a real body.
+                    debug_assert!(lane_ia < bodies_eff.len());
+                    debug_assert!(b_sent || lane_ib < bodies_eff.len());
+                    ia[lane] = lane_ia;
+                    ib[lane] = lane_ib;
+
+                    let ba = body_ref(bodies_eff, lane_ia);
+                    a_invm_s[lane] = ba.inv_mass;
+                    a_static_s[lane] = if is_dynamic_row(ba.inv_mass) { 0.0 } else { 1.0 };
+                    Self::stage_body_state(ba, lane, &mut a_ii_s, &mut a_lin_s, &mut a_ang_s);
+
+                    let bb =
+                        if b_sent { &IMMOVABLE_AT_REST } else { body_ref(bodies_eff, lane_ib) };
+                    b_invm_s[lane] = bb.inv_mass;
+                    Self::stage_body_state(bb, lane, &mut b_ii_s, &mut b_lin_s, &mut b_ang_s);
+                } else {
+                    ia[lane] = 0;
+                    ib[lane] = 0;
+                    a_invm_s[lane] = 0.0;
+                    b_invm_s[lane] = 0.0;
+                    a_static_s[lane] = 1.0;
+                    for c in 0..9 {
+                        a_ii_s[c][lane] = 0.0;
+                        b_ii_s[c][lane] = 0.0;
+                    }
+                    for c in 0..3 {
+                        a_lin_s[c][lane] = 0.0;
+                        a_ang_s[c][lane] = 0.0;
+                        b_lin_s[c][lane] = 0.0;
+                        b_ang_s[c][lane] = 0.0;
+                    }
+                }
+            }
+
+            let a_invm = load1(&a_invm_s);
+            let b_invm = load1(&b_invm_s);
+            let a_ii = load9(&a_ii_s);
+            let b_ii = load9(&b_ii_s);
+            // movable masks (constant within the cohort), the kernel's guard table:
+            // A movable = `inv_mass != 0.0`; B movable = !sentinel AND `inv_mass != 0.0`.
+            let not_sent = _mm256_cmp_ps::<_CMP_NEQ_OQ>(load1(&not_sent_f), zero);
+            let a_movable = _mm256_cmp_ps::<_CMP_NEQ_OQ>(load1(&a_static_s), one);
+            let b_movable = _mm256_and_ps(not_sent, _mm256_cmp_ps::<_CMP_NEQ_OQ>(b_invm, zero));
+
+            // The head's per-lane constants: aligned rows of the 64 B-aligned head.
+            // SAFETY: `head` is a live `&CohortHead`; its `n` / `t1` rows sit at offsets
+            //   0 / 96, both 32 B-aligned.
+            let (n, t1) = unsafe { (load_rows3(&raw const head.n), load_rows3(&raw const head.t1)) };
+            let t2 = cross8(n[0], n[1], n[2], t1[0], t1[1], t1[2]);
+            // The per-lane widths, widened to 8 × i32 for the per-rank `active` compare.
+            // SAFETY: `head.width` is a live 8 B array; `_mm_loadl_epi64` reads 8 bytes
+            //   with no alignment requirement.
+            let width = unsafe { _mm256_cvtepu8_epi32(_mm_loadl_epi64(head.width.as_ptr().cast())) };
+
+            // A/B velocity: REGISTER-CARRIED across the whole rank loop.
+            let mut a_lin = load3(&a_lin_s);
+            let mut a_ang = load3(&a_ang_s);
+            let mut b_lin = load3(&b_lin_s);
+            let mut b_ang = load3(&b_ang_s);
+
+            // ── Rank loop (register-carry velocity) ─────────────────────────────
+            for r in 0..depth {
+                // SAFETY: `rank_base + r < rank_base + depth <= blocks.len()` (asserted
+                //   above), so this is a built block of THIS cohort; `blocks` is a shared
+                //   slice of the 64 B-aligned column, so each row sits at offset
+                //   0 / 96 / 224 / 256 / 288 of a 64 B-aligned block and the aligned
+                //   vector loads below are in bounds and aligned. The apply never writes
+                //   a block, and no worker is live.
+                let blk: *const RankBlock = &blocks[rank_base + r];
+                // active = width[lane] > r as a lane mask (an integer compare, cast) —
+                // the scalar's `r < width[l]` rank bound.
+                let active =
+                    _mm256_castsi256_ps(_mm256_cmpgt_epi32(width, _mm256_set1_epi32(r as i32)));
+                let mask_a = _mm256_and_ps(active, a_movable);
+                let mask_b = _mm256_and_ps(active, b_movable);
+
+                // Nine aligned loads: the rank's two anchors and three impulse rows.
+                // SAFETY: see the block's contract above.
+                let (ra, rb, ni, ti1, ti2) = unsafe {
+                    (
+                        load_rows3(&raw const (*blk).ra),
+                        load_rows3(&raw const (*blk).rb),
+                        load_row(&raw const (*blk).ni),
+                        load_row(&raw const (*blk).ti1),
+                        load_row(&raw const (*blk).ti2),
+                    )
+                };
+
+                // impulse = ((n·λn + t1·λt1) + t2·λt2), component by component: the
+                // scalar `normal * ni + t1 * ti1 + t2 * ti2` associates left to right.
+                // Separate mul then add, NO FMA. (Mutation M7 re-associates this.)
+                let imp = [
+                    _mm256_add_ps(
+                        _mm256_add_ps(_mm256_mul_ps(n[0], ni), _mm256_mul_ps(t1[0], ti1)),
+                        _mm256_mul_ps(t2[0], ti2),
+                    ),
+                    _mm256_add_ps(
+                        _mm256_add_ps(_mm256_mul_ps(n[1], ni), _mm256_mul_ps(t1[1], ti1)),
+                        _mm256_mul_ps(t2[1], ti2),
+                    ),
+                    _mm256_add_ps(
+                        _mm256_add_ps(_mm256_mul_ps(n[2], ni), _mm256_mul_ps(t1[2], ti1)),
+                        _mm256_mul_ps(t2[2], ti2),
+                    ),
+                ];
+                // A gets -impulse, B gets +impulse (the scalar's `impulse * -1.0`).
+                let neg_imp = [
+                    _mm256_mul_ps(imp[0], neg_one),
+                    _mm256_mul_ps(imp[1], neg_one),
+                    _mm256_mul_ps(imp[2], neg_one),
+                ];
+                let (na_lin, na_ang) =
+                    apply_impulse_blend_x8(a_lin, a_ang, ra, neg_imp, a_invm, a_ii, mask_a);
+                a_lin = na_lin;
+                a_ang = na_ang;
+                let (nb_lin, nb_ang) =
+                    apply_impulse_blend_x8(b_lin, b_ang, rb, imp, b_invm, b_ii, mask_b);
+                b_lin = nb_lin;
+                b_ang = nb_ang;
+            }
+
+            // ── Scatter-ONCE (cohort exit): A/B velocity registers → body rows ───
+            // Only MOVABLE lanes BELOW `nlanes` are written (D7): a static / sentinel
+            // row is never touched (its register held the unchanged gathered value
+            // anyway, since `mask_*` masked it off), and a padding lane is not a lane —
+            // its `body_a` is the fill's zero, i.e. row 0. Mutation M12 drops both
+            // halves of that guard and is recorded red.
+            // SAFETY: the stores write 8 `f32` into in-bounds `[f32; 8]` stack buffers.
+            store3(&a_lin, &mut out_a_lin);
+            store3(&a_ang, &mut out_a_ang);
+            store3(&b_lin, &mut out_b_lin);
+            store3(&b_ang, &mut out_b_ang);
+            for lane in 0..nlanes {
+                if a_static_s[lane] == 0.0 {
+                    let b = body_mut(bodies_eff, ia[lane]);
+                    b.linear_velocity =
+                        Vec3::new(out_a_lin[0][lane], out_a_lin[1][lane], out_a_lin[2][lane]);
+                    b.angular_velocity =
+                        Vec3::new(out_a_ang[0][lane], out_a_ang[1][lane], out_a_ang[2][lane]);
+                }
+                if !sent[lane] && is_dynamic_row(b_invm_s[lane]) {
+                    let b = body_mut(bodies_eff, ib[lane]);
+                    b.linear_velocity =
+                        Vec3::new(out_b_lin[0][lane], out_b_lin[1][lane], out_b_lin[2][lane]);
+                    b.angular_velocity =
+                        Vec3::new(out_b_ang[0][lane], out_b_ang[1][lane], out_b_ang[2][lane]);
                 }
             }
         }
@@ -3637,10 +3946,13 @@ impl ColoredSoftStepSolver {
             // SOLVE VIEW — single-threaded here, parallel in `solve_all_colors`; the
             // body view is the SAME surface either way (the P1 structural fix: no
             // whole-buffer reborrow on any body path). The cohort tables are read
-            // through shared slices: no worker is live.
+            // through shared slices: no worker is live. `use_simd_solve` forks the
+            // apply's SHAPE only (C3, D7): the 8-lane apply is bit-identical to the
+            // group-major oracle, and it is the same flag the sweep kernel forks on,
+            // so a step never mixes the two.
             {
                 let _z = zone!(PHYS_WARM_APPLY);
-                Self::warm_start_apply(&self.columns, self.bodies.solve_view());
+                Self::warm_start_apply(&self.columns, self.bodies.solve_view(), use_simd_solve);
             }
 
             // (3)+(4) Soft normal + friction sweep ACROSS colors (Gauss-Seidel).

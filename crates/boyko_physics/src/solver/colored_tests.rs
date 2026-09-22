@@ -2224,6 +2224,75 @@
         }
     }
 
+    /// Draws one random cohort-shape case: group count 1..=32 (⇒ multi-cohort,
+    /// and a PARTIAL trailing cohort whenever the count is not a multiple of 8),
+    /// width 1..=`MAX_CONTACT_POINTS`, masses including statics and sentinels, and
+    /// occasional zero friction and denormal-scale seeds. Each group owns two
+    /// disjoint dynamic rows (or one plus a sentinel), so the specs form ONE color
+    /// in spec order.
+    ///
+    /// One corpus definition, two properties over it: the O7 kernel proptest below
+    /// and C3's warm-apply proptest both draw from it. The manifold normal `n` is
+    /// the CALLER's, not a draw, so adding a caller cannot move an existing corpus:
+    /// the kernel proptest keeps its axis-aligned `(0, 1, 0)` and the warm-apply one
+    /// passes [`OBLIQUE_NORMAL`], for the reason that constant documents.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn random_cohort_corpus(
+        rng: &mut SplitMix64,
+        n: Vec3,
+    ) -> (Vec<GroupSpec>, Vec<BodyEffective>) {
+        use crate::math::MAX_CONTACT_POINTS;
+        let n_groups = rng.range(1, 33) as usize; // 1..=32 ⇒ multi-cohort
+        let mut groups: Vec<GroupSpec> = Vec::with_capacity(n_groups);
+        // Body rows: each group owns 2 disjoint dynamic rows (or 1 + sentinel).
+        let mut bodies: Vec<BodyEffective> = Vec::with_capacity(n_groups * 2);
+        for _gi in 0..n_groups {
+            let ia = bodies.len() as u32;
+            // Body A: mostly dynamic, sometimes static (the *_movable guard).
+            let a_static = rng.f01() < 0.15;
+            bodies.push(if a_static {
+                BodyEffective { inv_mass: 0.0, inv_inertia: Mat3::ZERO, linear_velocity: rand_vel(rng), angular_velocity: rand_vel(rng) }
+            } else {
+                dyn_eff(0.5 + rng.f01(), 0.5 + rng.f01() * 2.0, rand_vel(rng), rand_vel(rng))
+            });
+            let sentinel = rng.f01() < 0.25;
+            let ib = if sentinel {
+                u32::MAX
+            } else {
+                let row = bodies.len() as u32;
+                let b_static = rng.f01() < 0.15;
+                bodies.push(if b_static {
+                    BodyEffective { inv_mass: 0.0, inv_inertia: Mat3::ZERO, linear_velocity: rand_vel(rng), angular_velocity: rand_vel(rng) }
+                } else {
+                    dyn_eff(0.5 + rng.f01(), 0.5 + rng.f01() * 2.0, rand_vel(rng), rand_vel(rng))
+                });
+                row
+            };
+            // Occasionally zero friction (the zero-cone path) — per group.
+            let zero_fric = rng.f01() < 0.1;
+            let friction = if zero_fric { 0.0 } else { rng.f01() * 2.0 };
+            let width = rng.range(1, MAX_CONTACT_POINTS as u32 + 1) as usize;
+            let mut points = Vec::with_capacity(width);
+            for _ in 0..width {
+                // Occasionally a denormal-scale tangent seed.
+                let denorm = rng.f01() < 0.1;
+                let seed_scale = if denorm { 1e-22 } else { 4.0 };
+                points.push(PointSpec {
+                    ra: rand_vel(rng) * 0.3,
+                    rb: rand_vel(rng) * 0.3,
+                    separation: -(rng.f01() * 0.5),
+                    seed: (
+                        rng.f01() * 0.5,
+                        (rng.f01() - 0.5) * seed_scale,
+                        (rng.f01() - 0.5) * seed_scale,
+                    ),
+                });
+            }
+            groups.push(GroupSpec { ia, ib, sentinel, normal: n, friction, points });
+        }
+        (groups, bodies)
+    }
+
     /// O1 proptest (+avx2 only): random cohort shapes (group count 1..=32, width
     /// 1..=MAX_CONTACT_POINTS, masses incl. statics + sentinels, denormal-scale
     /// velocities) must be `solve_color_avx2 == solve_color` bit-for-bit, AND the
@@ -2233,62 +2302,12 @@
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[test]
     fn cohort_shape_proptest_bit_exact_and_non_vacuous() {
-        use crate::math::MAX_CONTACT_POINTS;
-        let n = Vec3::new(0.0, 1.0, 0.0);
-
         let mut rng = SplitMix64(0x0BAD_F00D_DEAD_BEEF);
         let mut corpus_clamped = 0usize;
         let mut corpus_zero = 0usize;
 
         for _ in 0..200 {
-            let n_groups = rng.range(1, 33) as usize; // 1..=32 ⇒ multi-cohort
-            let mut groups: Vec<GroupSpec> = Vec::with_capacity(n_groups);
-            // Body rows: each group owns 2 disjoint dynamic rows (or 1 + sentinel).
-            let mut bodies: Vec<BodyEffective> = Vec::with_capacity(n_groups * 2);
-            for _gi in 0..n_groups {
-                let ia = bodies.len() as u32;
-                // Body A: mostly dynamic, sometimes static (the *_movable guard).
-                let a_static = rng.f01() < 0.15;
-                bodies.push(if a_static {
-                    BodyEffective { inv_mass: 0.0, inv_inertia: Mat3::ZERO, linear_velocity: rand_vel(&mut rng), angular_velocity: rand_vel(&mut rng) }
-                } else {
-                    dyn_eff(0.5 + rng.f01(), 0.5 + rng.f01() * 2.0, rand_vel(&mut rng), rand_vel(&mut rng))
-                });
-                let sentinel = rng.f01() < 0.25;
-                let ib = if sentinel {
-                    u32::MAX
-                } else {
-                    let row = bodies.len() as u32;
-                    let b_static = rng.f01() < 0.15;
-                    bodies.push(if b_static {
-                        BodyEffective { inv_mass: 0.0, inv_inertia: Mat3::ZERO, linear_velocity: rand_vel(&mut rng), angular_velocity: rand_vel(&mut rng) }
-                    } else {
-                        dyn_eff(0.5 + rng.f01(), 0.5 + rng.f01() * 2.0, rand_vel(&mut rng), rand_vel(&mut rng))
-                    });
-                    row
-                };
-                // Occasionally zero friction (the zero-cone path) — per group.
-                let zero_fric = rng.f01() < 0.1;
-                let friction = if zero_fric { 0.0 } else { rng.f01() * 2.0 };
-                let width = rng.range(1, MAX_CONTACT_POINTS as u32 + 1) as usize;
-                let mut points = Vec::with_capacity(width);
-                for _ in 0..width {
-                    // Occasionally a denormal-scale tangent seed.
-                    let denorm = rng.f01() < 0.1;
-                    let seed_scale = if denorm { 1e-22 } else { 4.0 };
-                    points.push(PointSpec {
-                        ra: rand_vel(&mut rng) * 0.3,
-                        rb: rand_vel(&mut rng) * 0.3,
-                        separation: -(rng.f01() * 0.5),
-                        seed: (
-                            rng.f01() * 0.5,
-                            (rng.f01() - 0.5) * seed_scale,
-                            (rng.f01() - 0.5) * seed_scale,
-                        ),
-                    });
-                }
-                groups.push(GroupSpec { ia, ib, sentinel, normal: n, friction, points });
-            }
+            let (groups, bodies) = random_cohort_corpus(&mut rng, Vec3::new(0.0, 1.0, 0.0));
 
             // The specs form ONE color (multi-cohort when n_groups > 8); the kernel
             // solves them as 8-group cohorts.
@@ -2315,6 +2334,415 @@
             (rng.f01() - 0.5) * 4.0,
             (rng.f01() - 0.5) * 4.0,
         )
+    }
+
+    // ── G4 (L11 C3): the {scalar, simd} warm-apply differential ──────────────
+    //
+    // D7 forks ONE function into two shapes: `warm_apply_scalar`, the group-major
+    // ORACLE the `simd_solve = false` step takes, and `warm_apply_avx2`, eight
+    // lanes at a time. The design's claim is BIT-identity, so every test below runs
+    // both over the same cohort table from the same pristine bodies and compares
+    // body bits — the arm shape `assert_cohort_differential` uses for the kernel,
+    // minus the soft coefficients (the apply has none).
+    //
+    // The impulse columns are an INPUT here, never an output: the apply reads a
+    // block and writes only body rows, so each arm gets its own deep copy and the
+    // impulse bits are compared too. Named mutation M7 (re-associating the impulse)
+    // and M12 (scattering all 8 lanes) are recorded red against these tests.
+
+    /// A unit manifold normal with three NON-ZERO components — the only shape in
+    /// which the warm apply's ASSOCIATION is observable.
+    ///
+    /// With an axis-aligned normal the contact basis is sparse: `n = (0, 1, 0)`
+    /// forces `t1.y == t2.y == 0` (both are perpendicular to `n`) and `n.x == n.z
+    /// == 0`, so in every component one of the three products is a zero and
+    /// `(a + b) + c == a + (b + c)` EXACTLY. Mutation M7 — which re-associates the
+    /// impulse as `n·λn + (t1·λt1 + t2·λt2)` — is then bit-invisible. MEASURED on
+    /// this tree: with `(0, 1, 0)` the entire warm-apply corpus passes under M7
+    /// while four G1 pins go red, so a gate built on axis-aligned scenes alone
+    /// would have reported the mutation caught when it was not.
+    ///
+    /// `0.48² + 0.64² + 0.6² == 1` in exact arithmetic (f32 rounds the sum to
+    /// within an ulp, which is all a real manifold normal offers either).
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    const OBLIQUE_NORMAL: Vec3 = Vec3::new(0.48, 0.64, 0.6);
+
+    /// The six velocity words of one body row — the unit every warm-apply
+    /// assertion below compares, bit for bit (`-0.0` and `+0.0` are DISTINCT here,
+    /// which is what makes the O1 scene load-bearing).
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn vel_bits(b: &BodyEffective) -> [u32; 6] {
+        [
+            b.linear_velocity.x.to_bits(),
+            b.linear_velocity.y.to_bits(),
+            b.linear_velocity.z.to_bits(),
+            b.angular_velocity.x.to_bits(),
+            b.angular_velocity.y.to_bits(),
+            b.angular_velocity.z.to_bits(),
+        ]
+    }
+
+    /// Runs BOTH warm applies over `cols` from the same pristine `bodies` and
+    /// asserts the two results are bit-identical. Returns how many body rows the
+    /// apply MOVED (velocity bits differing from pristine), the non-vacuity count.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn assert_warm_apply_differential(cols: &CohortColumns, bodies: &[BodyEffective]) -> usize {
+        // Independent tables AND body buffers per arm, so a block written by either
+        // apply surfaces as an impulse-bit difference instead of being shared.
+        let cols_scalar = clone_columns(cols);
+        let bodies_scalar = body_scratch_from(bodies);
+        ColoredSoftStepSolver::warm_apply_scalar(&cols_scalar, bodies_scalar.solve_view());
+
+        let cols_simd = clone_columns(cols);
+        let bodies_simd = body_scratch_from(bodies);
+        // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host
+        //   running it supports AVX2; `cols_simd` is a deep copy of a fully built
+        //   cohort table (every head's `rank_base + depth` within its blocks), and
+        //   this thread is the only accessor of `bodies_simd`.
+        unsafe { ColoredSoftStepSolver::warm_apply_avx2(&cols_simd, bodies_simd.solve_view()) };
+
+        let (b_scalar, i_scalar) = body_impulse_bits(bodies_scalar.as_read_slice(), &cols_scalar);
+        let (b_simd, i_simd) = body_impulse_bits(bodies_simd.as_read_slice(), &cols_simd);
+        assert_eq!(b_scalar, b_simd, "warm-apply differential: body velocity bits");
+        assert_eq!(i_scalar, i_simd, "warm-apply differential: impulse bits");
+        let (_, i_orig) = body_impulse_bits(bodies, cols);
+        assert_eq!(i_orig, i_scalar, "neither warm apply may write an impulse column");
+
+        bodies
+            .iter()
+            .zip(bodies_scalar.as_read_slice().iter())
+            .filter(|(pristine, applied)| vel_bits(pristine) != vel_bits(applied))
+            .count()
+    }
+
+    /// Writes pseudo-random warm seeds into every LIVE `(lane, rank)` slot of every
+    /// cohort, leaving padding lanes and padding ranks at the fill's zero (G3's
+    /// invariant). A fresh warm store seeds zero, so without this the apply would be
+    /// a value no-op and the differential vacuous.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn seed_live_lanes(solver: &mut ColoredSoftStepSolver, rng: &mut SplitMix64) {
+        let shape: Vec<(usize, usize, [u8; COHORT])> = solver
+            .columns
+            .heads()
+            .iter()
+            .map(|h| (h.rank_base as usize, h.nlanes as usize, h.width))
+            .collect();
+        let mut blocks = solver.columns.blocks.build_view();
+        let blocks = blocks.as_mut_slice();
+        for (rank_base, nlanes, width) in shape {
+            for (l, &w) in width[..nlanes].iter().enumerate() {
+                for r in 0..w as usize {
+                    let blk = &mut blocks[rank_base + r];
+                    blk.ni[l] = 0.25 + rng.f01();
+                    blk.ti1[l] = (rng.f01() - 0.5) * 2.0;
+                    blk.ti2[l] = (rng.f01() - 0.5) * 2.0;
+                }
+            }
+        }
+    }
+
+    /// G4/C3 test 1: the warm apply is bit-identical on the O7 ragged scene — 11
+    /// width-1 floor groups (one color crossing the 8-lane cohort boundary, so the
+    /// trailing cohort has PADDING lanes) plus the width-4 box manifold, with the
+    /// shared static floor as body B on every floor lane.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn warm_apply_bits_match_scalar_on_the_ragged_scene() {
+        let (bodies, manifolds) = ragged_colored_scene(11);
+        let graph = build_graph(&bodies, &manifolds);
+        let mut solver = ColoredSoftStepSolver::default();
+        solver.build_bodies(&bodies);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+        let mut rng = SplitMix64(0x11C3_5EED_A1B2_C3D4);
+        seed_live_lanes(&mut solver, &mut rng);
+
+        let pristine: Vec<BodyEffective> = bodies.iter().map(eff_of).collect();
+        let moved = assert_warm_apply_differential(&solver.columns, &pristine);
+        assert!(moved > 0, "non-vacuity: the warm apply must move at least one body row");
+    }
+
+    /// G4/C3 test 2: the warm apply is bit-identical over the O7 cohort-shape
+    /// corpus — random group counts 1..=32 (multi-cohort, partial trailing
+    /// cohorts), ragged widths, static A rows, sentinel B rows and denormal-scale
+    /// seeds, all generated by [`random_cohort_corpus`], the same generator the
+    /// kernel proptest draws from.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn warm_apply_proptest_bits_match_scalar_and_non_vacuous() {
+        let mut rng = SplitMix64(0x11C3_0BAD_F00D_5EED);
+        let mut corpus_moved = 0usize;
+        let mut padded_cohorts = 0usize;
+        for _ in 0..200 {
+            let (groups, bodies) = random_cohort_corpus(&mut rng, OBLIQUE_NORMAL);
+            let solver = build_cohort_solver(&groups, &bodies);
+            padded_cohorts += solver
+                .columns
+                .heads()
+                .iter()
+                .filter(|h| (h.nlanes as usize) < COHORT)
+                .count();
+            corpus_moved += assert_warm_apply_differential(&solver.columns, &bodies);
+        }
+        eprintln!("warm-apply proptest non-vacuity: moved={corpus_moved} padded={padded_cohorts}");
+        assert!(
+            corpus_moved > 0 && padded_cohorts > 0,
+            "non-vacuity over the random corpus: the apply must move rows ({corpus_moved}) and \
+             the corpus must contain padded cohorts ({padded_cohorts})"
+        );
+    }
+
+    /// G4/C3 test 3 (review O1, the `-0.0` scene): an `inv_mass` of `-0.0` is
+    /// IMMOVABLE on both warm-apply paths.
+    ///
+    /// The movability predicate is the IEEE `inv_mass != 0.0`
+    /// ([`is_dynamic_row`]), which is FALSE for `-0.0`; a bit test
+    /// (`to_bits() != 0`) would call the row movable instead. The two differ only
+    /// where writing back is not a value no-op, so the scene is built to make the
+    /// write visible: the row's velocity words are `-0.0`, and the impulse it would
+    /// receive is signed so that `-0.0 + (-p)·(-0.0) == +0.0` — a different BIT
+    /// pattern. The test asserts that flip WOULD happen (non-vacuity) and that
+    /// neither path performs it.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn negative_zero_inv_mass_row_is_immovable_in_both_warm_applies() {
+        let n = OBLIQUE_NORMAL;
+        let seed = (0.75f32, 0.5f32, -0.25f32);
+        // Lane 0: body A carries `inv_mass == -0.0` (a static row by the IEEE
+        // predicate, so `inv_inertia` is ZERO — the build invariant), body B is a
+        // plain dynamic row that MUST move (the arm's non-vacuity).
+        let groups = vec![GroupSpec {
+            ia: 0,
+            ib: 1,
+            sentinel: false,
+            normal: n,
+            friction: 0.4,
+            points: vec![PointSpec {
+                ra: Vec3::new(0.2, 0.0, 0.1),
+                rb: Vec3::new(0.2, 0.0, 0.1),
+                separation: -0.25,
+                seed,
+            }],
+        }];
+        let neg_zero_row = BodyEffective {
+            inv_mass: -0.0,
+            inv_inertia: Mat3::ZERO,
+            linear_velocity: Vec3::new(-0.0, -0.0, -0.0),
+            angular_velocity: Vec3::new(-0.0, -0.0, -0.0),
+        };
+        let bodies = vec![
+            neg_zero_row,
+            dyn_eff(1.0, 1.25, Vec3::new(0.3, -0.2, 0.1), Vec3::new(0.05, -0.1, 0.02)),
+        ];
+
+        // Non-vacuity: replay the scalar impulse for this lane and show that writing
+        // body A back WOULD change its bits. `t2 = n × t1` and the left-to-right
+        // association are the oracle's own (`warm_apply_scalar`).
+        let (t1, _) = tangent_basis(n);
+        let t2 = n.cross(t1);
+        let impulse = n * seed.0 + t1 * seed.1 + t2 * seed.2;
+        let p = impulse * -1.0; // body A receives the negated impulse
+        let would_be = Vec3::new(
+            -0.0f32 + p.x * -0.0f32,
+            -0.0f32 + p.y * -0.0f32,
+            -0.0f32 + p.z * -0.0f32,
+        );
+        assert_ne!(
+            [would_be.x.to_bits(), would_be.y.to_bits(), would_be.z.to_bits()],
+            [(-0.0f32).to_bits(); 3],
+            "the `-0.0` scene must DISTINGUISH the two predicates: writing the row back has to \
+             flip at least one sign bit, or this test cannot see a bit-test mask"
+        );
+
+        let solver = build_cohort_solver(&groups, &bodies);
+        let moved = assert_warm_apply_differential(&solver.columns, &bodies);
+        assert_eq!(moved, 1, "exactly body B moves: the `-0.0` row must not");
+
+        // And the `-0.0` row is byte-frozen on the ORACLE path too (the differential
+        // above only pins the two paths to each other).
+        let scalar = body_scratch_from(&bodies);
+        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, scalar.solve_view());
+        assert_eq!(
+            vel_bits(&scalar.as_read_slice()[0]),
+            vel_bits(&bodies[0]),
+            "an `inv_mass == -0.0` row must keep its exact `-0.0` velocity words"
+        );
+    }
+
+    /// G4/C3 test 4 (review O2, the value half): a PADDING lane is not a lane — the
+    /// scatter writes lanes `< nlanes` only.
+    ///
+    /// The fill zeroes a padding lane's `body_a`, so lanes `>= nlanes` name row `0`.
+    /// Here row 0 is also lane 0's body A, a real dynamic row the apply moves:
+    /// a scatter that walked all 8 lanes would write the padding lanes' registers —
+    /// the state gathered at cohort entry — OVER lane 0's result, because the
+    /// scatter walks lanes ascending. That is mutation M12, and it is recorded red
+    /// against this test.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn warm_apply_padding_lane_is_not_a_lane() {
+        let n = OBLIQUE_NORMAL;
+        let pt = |seed: (f32, f32, f32), ra: Vec3| PointSpec { ra, rb: ra, separation: -0.3, seed };
+        // Three groups ⇒ ONE cohort with nlanes = 3 and five padding lanes, all
+        // naming row 0 — which is group 0's body A.
+        let groups = vec![
+            GroupSpec {
+                ia: 0,
+                ib: 1,
+                sentinel: false,
+                normal: n,
+                friction: 0.5,
+                points: vec![pt((0.8, 0.3, -0.2), Vec3::new(0.2, 0.0, 0.1)), pt((0.4, -0.1, 0.25), Vec3::new(-0.1, 0.0, 0.2))],
+            },
+            GroupSpec {
+                ia: 2,
+                ib: 3,
+                sentinel: false,
+                normal: n,
+                friction: 0.3,
+                points: vec![pt((0.6, -0.4, 0.1), Vec3::new(0.05, 0.0, -0.15))],
+            },
+            GroupSpec {
+                ia: 4,
+                ib: u32::MAX,
+                sentinel: true,
+                normal: n,
+                friction: 0.2,
+                points: vec![pt((0.5, 0.2, 0.2), Vec3::new(-0.2, 0.0, 0.05))],
+            },
+        ];
+        let bodies: Vec<BodyEffective> = (0..5)
+            .map(|i| {
+                let f = i as f32;
+                dyn_eff(
+                    0.6 + 0.2 * f,
+                    0.8 + 0.3 * f,
+                    Vec3::new(0.3 - 0.1 * f, -0.4 + 0.05 * f, 0.2),
+                    Vec3::new(0.05 * f, -0.02 * f, 0.1),
+                )
+            })
+            .collect();
+
+        let solver = build_cohort_solver(&groups, &bodies);
+        {
+            let heads = solver.columns.heads();
+            assert_eq!(heads.len(), 1, "three groups form one cohort");
+            assert_eq!(heads[0].nlanes as usize, 3, "the cohort must have padding lanes");
+            assert_eq!(heads[0].body_a[0], 0, "lane 0's body A is row 0");
+            assert!(
+                heads[0].body_a[3..].iter().all(|&r| r == 0),
+                "the fill zeroes a padding lane's body id, so a padding lane names row 0"
+            );
+        }
+
+        let moved = assert_warm_apply_differential(&solver.columns, &bodies);
+        assert_eq!(moved, 5, "every one of the five rows is dynamic and moves");
+    }
+
+    /// G4/C3 test 5 (review O2, the read half — the Miri case): a lane `>= nlanes`
+    /// reads NO body row, witnessed by a CONCURRENT writer of the row those lanes
+    /// name.
+    ///
+    /// Row 0 belongs to no lane here, so on the shipped apply the two threads touch
+    /// disjoint memory and the test is a plain pass. Were the gather to stage a
+    /// padding lane (which names row 0), it would read a row another thread is
+    /// writing — value-identical, since the lane is masked at every rank, and so
+    /// invisible to every bit oracle. Only a race detector can see it:
+    ///
+    /// ```text
+    /// MIRIFLAGS="-Zmiri-tree-borrows" cargo +nightly-x86_64-pc-windows-msvc miri test \
+    ///   -p boyko-physics --lib -- --test-threads=1 --exact \
+    ///   solver::colored::tests::warm_apply_padding_lane_reads_no_body_row_under_concurrent_writer
+    /// ```
+    ///
+    /// `--exact` is load-bearing: the four `*_has_no_fma_or_approx_callsites`
+    /// censuses in this crate read their own source from disk, which Miri's
+    /// isolation aborts the BINARY over, so a whole-lib Miri run never reaches this
+    /// test (see `.cargo/config.toml`). Mutation M12 is recorded red here.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn warm_apply_padding_lane_reads_no_body_row_under_concurrent_writer() {
+        let n = OBLIQUE_NORMAL;
+        let pt = |seed: (f32, f32, f32), ra: Vec3| PointSpec { ra, rb: ra, separation: -0.2, seed };
+        // Two groups over rows 1..=4 ⇒ one cohort, nlanes = 2, six padding lanes —
+        // all naming row 0, which NO lane uses.
+        let groups = vec![
+            GroupSpec {
+                ia: 1,
+                ib: 2,
+                sentinel: false,
+                normal: n,
+                friction: 0.5,
+                points: vec![pt((0.7, 0.2, -0.3), Vec3::new(0.15, 0.0, 0.1))],
+            },
+            GroupSpec {
+                ia: 3,
+                ib: 4,
+                sentinel: false,
+                normal: n,
+                friction: 0.25,
+                points: vec![pt((0.45, -0.2, 0.15), Vec3::new(-0.05, 0.0, 0.2))],
+            },
+        ];
+        let bodies: Vec<BodyEffective> = (0..5)
+            .map(|i| {
+                let f = i as f32;
+                dyn_eff(
+                    0.7 + 0.1 * f,
+                    0.9 + 0.2 * f,
+                    Vec3::new(0.1 * f, -0.3, 0.2 - 0.05 * f),
+                    Vec3::new(-0.05 * f, 0.03, 0.01 * f),
+                )
+            })
+            .collect();
+
+        let solver = build_cohort_solver(&groups, &bodies);
+        assert_eq!(solver.columns.heads()[0].nlanes as usize, 2, "the cohort must be padded");
+        assert!(
+            solver.columns.heads()[0].body_a[..2].iter().all(|&r| r != 0),
+            "row 0 must belong to no lane, so the writer thread owns it alone"
+        );
+
+        // The oracle's answer for the lanes, computed with no writer in sight.
+        let oracle = body_scratch_from(&bodies);
+        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, oracle.solve_view());
+
+        const WRITES: usize = 32;
+        let simd = body_scratch_from(&bodies);
+        let view = simd.solve_view();
+        std::thread::scope(|s| {
+            s.spawn(move || {
+                // SAFETY (the `body_mut` contract): row 0 is named by no lane of the
+                //   cohort, so the apply running on the other thread never derives a
+                //   pointer to it; this closure is its only accessor for the scope.
+                for _ in 0..WRITES {
+                    body_mut(view, 0).linear_velocity.x += 1.0;
+                }
+            });
+            // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host
+            //   supports AVX2; `solver.columns` is a fully built cohort table; the rows
+            //   this apply touches are the cohort's two lanes' (rows 1..=4), disjoint
+            //   from the writer's row 0.
+            unsafe { ColoredSoftStepSolver::warm_apply_avx2(&solver.columns, view) };
+        });
+
+        let applied = simd.as_read_slice();
+        for (row, (got, want)) in applied.iter().zip(oracle.as_read_slice()).enumerate().skip(1) {
+            assert_eq!(
+                vel_bits(got),
+                vel_bits(want),
+                "row {row} must match the scalar oracle under a concurrent writer of row 0"
+            );
+        }
+        assert_eq!(
+            applied[0].linear_velocity.x,
+            bodies[0].linear_velocity.x + WRITES as f32,
+            "row 0 carries the writer's increments only: the apply must not have written it"
+        );
+        assert_ne!(
+            vel_bits(&applied[1]),
+            vel_bits(&bodies[1]),
+            "non-vacuity: the apply moved the cohort's lanes"
+        );
     }
 
     // ── O8 sleeping sanity tests ─────────────────────────────────────────────
