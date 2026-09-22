@@ -201,8 +201,17 @@ The repair belongs in those two crates, not in the gate.
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **336 sites (185 unconditional +
-151 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-22 on `merge/ke16-into-ecsnative` after the A5 batch merge.** The last move, 335 → 336, is +1 plain `gpu-windowed:` in
+The four commands above run **none** of the `#[ignore]`d tests — **352 sites (188 unconditional +
+164 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-22 on `merge/a6-reflection` after the A6
+reflection merge**, by `tests/ignore_reasons_census.rs`'s own printed line. The last move,
+336 → 352, is the reflection lane's: **+16, none removed** — **+3 plain**
+(`boyko_ecs/tests/seam_by_id.rs` ×2, `reflect_fixture/tests/reflect_absence_census.rs` ×1) and
+**+13 `cfg_attr(miri, …)`** (`boyko_reflect/tests/c1_scalar.rs` ×11, the full-range proptests;
+`boyko_reflect/tests/c6_nested.rs` ×2, the `Box::leak` fixtures). ⚠️ The last two are written in
+the MULTI-LINE `#[cfg_attr(` form, so a single-line grep reproduces 11 of the 13 and not 13 —
+the census parses the block and is the figure to trust. Every one of the 16 lives in a file that
+does not exist at `6a733f26`, so the attribution is a set difference against that tree rather
+than a reading of the diff. The move before it, 335 → 336, is +1 plain `gpu-windowed:` in
 `boyko_app/tests/sdf_room_ddgi_dump.rs` (`sdf_room_ddgi_screenshot_dump`, the SDFDDGI host-hook
 A/B device gate, under `#![cfg(windows)]`), the only ignore site the five A5 lanes brought; the
 `cfg_attr` count did not move. The move before it, 334 → 335 (measured after A5.1, which added no
@@ -223,7 +232,9 @@ attributed by `git diff` against each merge's second parent — the light-table 
 in `boyko_physics/tests/narrowphase_parallel_equivalence.rs`
 (`jolt_pyramid_parallel_narrowphase_is_bit_identical`, L5 C3). The light-table lane's own "324"
 was 320 + 4 on its branch point, which predates the L2 calibration's +7 and the simd_solve +1; an
-independent enumeration reproduces 336 / 185 / 151 across 10 crates and 1,667 `.rs` files walked
+independent enumeration reproduced 336 / 185 / 151 across 10 crates and 1,667 `.rs` files walked
+at that revision — 352 / 188 / 164 across **12** crates and **1,738** files after the A6 merge
+added `boyko_reflect`, `reflect_fixture` and `reflect_dogfood` —
 (1,652 at `6b29c400`, +6 from the tree-broadphase merge, +1 root test from A5.1, +2 `boyko_render`
 tests from A5.2, +1 `boyko_rhi_vulkan` test from A5.3, +4 from A5.4 — the dump gate above, its
 composed-plugin twin, the octahedral-border host oracle and the probe-update `spv_sync` — and +1
@@ -273,7 +284,7 @@ it, per-binary with `--test-threads=1`. It covered **135 tests** when it was wri
 `boyko_app`, `boyko_render` and `boyko_rhi_vulkan`; **that count has NOT been re-taken on this
 line**, and it cannot be re-derived from the reason strings (see the ⚠ below), so it is left as the
 historical figure rather than guessed forward. What IS mechanical today: those three crates hold
-**163 of the 185 plain sites** (`boyko_app` 106, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
+**163 of the 188 plain sites** (`boyko_app` 106, `boyko_rhi_vulkan` 51, `boyko_render` 6, measured
 2026-09-21 on `merge/a5-batch` after A5.4, whose dump gate is the one since; 162 of 184 @
 `6b29c400`; 159 of 183 on the union earlier that day, the three since being the
 hwrt shadow-origin gates; 155 of 178 on 2026-09-19, the four since being the light-table lane's
@@ -286,16 +297,17 @@ feature and are not even *compiled* otherwise: `--features hwrt` ×7
 shadow-origin gates — and `boyko_app/tests/asset_streaming_f7_rt_cap_headless.rs`
 1 — a `#![cfg(feature = "hwrt")]` file present since `b8d8b162`, 2026-07-10, so the "×3" this
 paragraph carried until 2026-09-21 was an undercount from the day it was written, not a new site)
-and `--features spec_constant_smoke` ×1. **125 of the 185** plain sites sit in files under
+and `--features spec_constant_smoke` ×1. **125 of the 188** plain sites sit in files under
 `#![cfg(windows)]` and vanish on Linux (the earlier "most of the rest" was never counted). There is
 no single command — each binary has its own env-var protocol in its module header
 (`BOYKO_DISABLE_VALIDATION`, `BOYKO_HZB_DUMP`, `BOYKO_WINDOW_FRAMES`, …).
 
-**Leg: Miri.** `cargo +nightly-x86_64-pc-windows-msvc miri test` already carries **150** of the ignores (149 measured
+**Leg: Miri.** `cargo +nightly-x86_64-pc-windows-msvc miri test` already carries **163** of the ignores (149 measured
 2026-09-19 on the parallel-narrowphase lane after its L2 calibration and unchanged on the
 2026-09-21 union; +1 at the tree-broadphase merge `bbd5d12c`, the `miri-slow:` site named above,
-so the per-cfg split is now 143 / 6 / 2) — the **149** `cfg_attr` sites
-whose cfg is `miri` (143) or `any(miri, debug_assertions)` (6), plus `miri_fixed_loop`'s one plain
+so the per-cfg split was 143 / 6 / 2, and is **156 / 6 / 2** after the A6 merge's +13, all of
+them `miri`) — the **162** `cfg_attr` sites
+whose cfg is `miri` (156) or `any(miri, debug_assertions)` (6), plus `miri_fixed_loop`'s one plain
 ignore. The `miri` sites run
 *natively* in both profiles and are skipped only under Miri; the `any(miri, debug_assertions)`
 sites run natively in RELEASE only — their leg is the physics release run below; there are six of
@@ -338,15 +350,19 @@ M2's JCGT cubic lands (`brick_field_is_conservative_lower_bound`,
 `trilinear_reconstruct_is_a_tight_lower_bound_in_r1`), and one *timing probe* documented "NOT a CI
 gate" (`no_starvation_every_worker_makes_progress`). None of those six carries a vocabulary prefix.
 **A further 18 sites do carry one** (17 `deferred:`, 1 `generator:`, measured 2026-09-18 after the
-A7 merge), in `boyko_ecs` (9), `boyko_serialize` (5), `boyko_physics` (2 — the flicker generator and
-the AVX2 signed-zero proptest; the A7 lane's four red-first tests are no longer plain ignores), and
-`boyko_ui` (2); each is red or silent by design and belongs to no routine leg either. 24 is a floor,
-not a census: the 147 plain reasons that carry no prefix have not been classified.
+A7 merge and RE-MEASURED 2026-09-22 on `merge/a6-reflection` — still 18, and still `boyko_ecs` (9),
+`boyko_serialize` (5), `boyko_physics` (2), `boyko_ui` (2), but NOT the same 18: A3 resolved two
+`deferred:` in `boyko_ecs` and the A6 reflection lane brought two more there, `seam_by_id.rs:1308`
+and `:2217`), in `boyko_ecs` (9), `boyko_serialize` (5), `boyko_physics` (2 — the flicker generator
+and the AVX2 signed-zero proptest; the A7 lane's four red-first tests are no longer plain ignores),
+and `boyko_ui` (2); each is red or silent by design and belongs to no routine leg either. 24 is a
+floor, not a census: the 148 plain reasons that carry no vocabulary prefix have not been
+classified.
 
 ⚠️ **The device-free leg is one test, and it is an explicit invocation rather than a filter,
 because the partition CANNOT be derived from the reason strings.** A keyword classifier over
 `{GPU, RTX, Vulkan, windowed, device, dispatch}` put 10 on the device-free side — of the 143 plain
-sites the tree held when the experiment was run, 185 today — and **8 of those 10 are wrong**, wrong
+sites the tree held when the experiment was run, 188 today — and **8 of those 10 are wrong**, wrong
 in the direction that produces a green:
 
 - `negative_chained_barrier_hazard` and `a5_gpu_off_vs_on_wall_clock_ab` **do** need a device; their
@@ -365,29 +381,41 @@ checked by the same census: `#[ignore = "<class>: <prose>"]` with `class` one of
 `solo` (device-free, needs `--test-threads=1`), `slow` (device-free, wall-clock budget),
 `miri-slow`, `miri-unsupported` (Miri cannot execute what the test needs AT ALL — a child process,
 a custom `#[global_allocator]` — where `miri-slow` means it would finish, given time; 6 sites, the
-A6 lane's, all `cfg_attr(miri, …)`), `generator`, `deferred`, `flaky`. **The claim that the tree
+THREADPOOL A6 lane's — `a6_panic_propagation.rs` ×5 and `a6_panicked_scope_chunk_receipts.rs` ×1,
+that A6 and not the reflection merge dated below — all `cfg_attr(miri, …)`), `generator`,
+`deferred`, `flaky`. **The claim that the tree
 maps onto it "exactly" was true of a 143-site tree and is not true now:** that mapping (135
 `gpu*`/`feature`, 1 `solo`, 1 `miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky`) sums to 143
-against **185** plain sites today.
-The migration has started at the sites, not in this list: **38 of the 185 plain reasons already
-carry a prefix** — 15 `deferred:`, 20 `gpu-windowed:`, 2 `slow:`, 1 `generator:` (measured
-2026-09-21 on `merge/a5-batch` after A5.4, whose one new site arrived prefixed `gpu-windowed:`;
+against **188** plain sites today.
+The migration has started at the sites, not in this list: **40 of the 188 plain reasons already
+carry a prefix** — 17 `deferred:`, 20 `gpu-windowed:`, 2 `slow:`, 1 `generator:` (measured
+2026-09-22 on `merge/a6-reflection`, by the same `ignore_reasons_census` walk that produced the
+352 / 188 / 164 at `:204-205`; the A6 reflection lane brought three plain sites, two of them
+`deferred:` and one `calibration:`; 38 of 185 on `merge/a5-batch` 2026-09-21 after A5.4, whose one new site arrived prefixed `gpu-windowed:`;
 37 of 184 @ `6b29c400`: 36 of 183 on the union earlier that day, then the hwrt shadow-origin
 lane added three `gpu-windowed:` and A3 resolved two `deferred:`; 31 of 178 on 2026-09-18 after
 the boot-validation merge, whose ten new
 device tests all carry `gpu-windowed:`; the light-table lane then added four `gpu-windowed:` and
 the narrowphase lane one `slow:`, so every plain site the two lanes brought arrived prefixed; the
-A7 merge before them removed four `deferred:` plain sites by resolving them) — and the other 147
-do not, the same 147 as on 2026-09-18. The 20 `gpu-windowed:` are `boot_validation_clean.rs` 7,
+A7 merge before them removed four `deferred:` plain sites by resolving them) — and the other 148
+do not: the 147 that stood from 2026-09-18 through A5, plus the one plain site the A6 lane brought
+whose prefix the vocabulary does not contain. **Three of those 148 do carry a prefix**, just not one
+from the list — `M2:` ×2 (`boyko_sdf_math/src/brick/tests.rs:140`, `:461`) and `calibration:` ×1
+(`reflect_fixture/tests/reflect_absence_census.rs:983`) — the plain-side twin of the 29 counted
+below. The 20 `gpu-windowed:` are `boot_validation_clean.rs` 7,
 `unwritten_shadow_map_gate.rs` 4, `sdf_marcher_sun.rs` 3, `taa_jitter_eval.rs` 3,
 `forward_teardown_destroys_forward_sets.rs`
 1, `vb_teardown_destroys_boot_resources.rs` 1, `sdf_room_ddgi_dump.rs` 1. So the migration is still mechanical *per site*, and
 afterwards each leg is a `grep` and every new ignore picks its own leg at the site; what it is not
 is bookkeeping already done.
 
-The `cfg_attr` side is further along and has already outgrown the list. Of the 151 (measured
-2026-09-21 on `merge/a5-batch`): **93 `miri-slow:`, 19 `instrument:`, 9 `tractability:`, 6 `miri-unsupported:`, 6
-`slow:`, 1 `miri-arm:`, 17 with no prefix.** `instrument:` (the `boyko_threadpool` `block.rs`
+The `cfg_attr` side is further along and has already outgrown the list. Of the 164 (measured
+2026-09-22 on `merge/a6-reflection`): **93 `miri-slow:`, 19 `instrument:`, 9 `tractability:`, 6
+`miri-unsupported:`, 6 `slow:`, 1 `miri-arm:`, 30 with no prefix.** It was 151 with 17 unprefixed on
+`merge/a5-batch` (2026-09-21), and the whole difference is the A6 reflection lane: its **13** new
+`cfg_attr` sites are all in `crates/boyko_reflect` and **every one of them arrived without a
+prefix** — so this side moved backwards in the same merge that added `miri-unsupported` to the
+vocabulary. `instrument:` (the `boyko_threadpool` `block.rs`
 recording-allocator tape), `tractability:` and `miri-arm:` — **29 sites** — are prefixes the closed
 vocabulary above does not contain, and the census's own error text uses `tractability:` as its
 example; the census enforces non-emptiness only, so nothing flags them. Either the list grows or
@@ -447,7 +475,7 @@ The main Claude in the chat acts as the **orchestrator** — chooses the right a
 
 - Chat messages between Claude and the user can be in Russian.
 - **Every artifact written into the repository is in English**: code, doc comments, inline comments, commit messages, internal docs, agent prompts, mdBook content, audit reports — everything. No mixed-language files.
-- **ONE EXCEPTION: [`docs/ru/`](docs/ru/).** Owner-granted 2026-08-02. That directory holds Russian versions of documents the owner reads and edits himself. The files there are NOT a rule violation and must not be "fixed" back to English. Everything outside it stays English, including the originals. The English version is the SOURCE OF TRUTH and the Russian one follows it; editing either side updates the other **in the same commit**, because a diverged pair is worse than a missing one — the reader cannot tell which is current and finds out only by acting on the stale one. See [`docs/ru/README.md`](docs/ru/README.md).
+- **ONE EXCEPTION: [`docs/ru/`](docs/ru/).** Owner-granted 2026-08-02. That directory holds Russian versions of documents the owner reads and edits himself. The files there are NOT a rule violation and must not be "fixed" back to English. Everything outside it stays English, including the originals. The English version is the SOURCE OF TRUTH and the Russian one follows it; editing either side updates the other **in the same commit**, because a diverged pair is worse than a missing one — the reader cannot tell which is current and finds out only by acting on the stale one. See [`docs/ru/README.md`](docs/ru/README.md). ⚠️ **MEASURED 2026-09-22, at the A6 reflection merge: that directory is not what a report about one of its files says it is.** `docs/ru/OPEN-QUESTIONS.md` conflicted and was resolved to this line's side verbatim (blob `494a0751`, byte-identical) — but `docs/ru/README.md` moved from `b063d115` to the lane's `2471df73`, **+21 lines**, with no conflict raised at all, because this line had not touched the file since the merge base and git took the lane's side silently. Two reports then said *"the frozen directory held"* on the strength of the file that did hold. **The text is KEPT**: it was written by lane commit `d272e1fd` on 2026-08-29, nine days before the 2026-09-07 freeze, and it is a lesson about twin parity (that comparing the two sides tests SAMENESS, not TRUTH) rather than a translation update — refusing it would delete a lane's own record to satisfy a rule that did not exist when it was written. What was wrong was the reporting, not the resolution. **And the freeze is not on this line at all:** this bullet, on both A6 merge parents and on the merge base, still states the pairing rule the owner WITHDREW on 2026-09-07; that paragraph lives only on `feat/multi-paradigm-render` (`49f2fcfb`), which is not an ancestor here. So a reader checking this tree is told the opposite, the A6 merge could not have decided the question from its own parents, and when this line meets that branch **this bullet WILL conflict and the owner's side (the freeze) is the newer decision and wins.** One more thing to expect there: the owner's CLAUDE.md says the freeze *"is announced in `docs/ru/README.md` itself"*, and that file carries **zero** mentions of the freeze or its date in either parent's version. Writing one is an owner call on a frozen directory, so nothing in the A6 line touches that file.
 
 ## Rules for agents
 

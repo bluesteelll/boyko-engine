@@ -61,7 +61,7 @@ this is the load-bearing correction.
 ### FIX C1/X1 — the insert path does NOT fire over the full archetype (the headline bug)
 Grounded: `SpawnAtCommand::apply` (spawn_at_command.rs:275,289) iterates the FULL
 archetype `component_ids` → required rows fire automatically there (✓, do NOT add a
-second fire). BUT `migrate_entity_insert` (migration_helpers.rs:593,600,616) fires over
+second fire). BUT `migrate_entity_insert` (migration_helpers.rs:607,614,630) fires over
 `bundle_id_set = &bundle_ids[..bundle_id_count]` ONLY (gathered in `for_each_component_bytes`),
 on_add additionally filtered by `bundle_added[i]`. A required component auto-inserted by
 the constructor pass is NOT a bundle id → under the current loop it fires **neither on_add

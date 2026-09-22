@@ -1,0 +1,68 @@
+[package]
+name = "reflect-dogfood"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# GATES G0 / D15 (docs/REFLECTION-PLAN-GATES.md): the REAL-ENGINE-TYPES acceptance
+# package — the dogfood claim, proved separately from `reflect-fixture` (which must stay
+# FFI-free because it is the package the CI Miri row names; THIS package reaches
+# `boyko_render` → `boyko_rhi_vulkan`, so it is NEVER on that allowlist). Empty except
+# this manifest until REFLECTION-PLAN-ECS.md EG8 fills it with the acceptance test
+# against the real `Transform` / `Name` / `Visibility` / `GpuTransform3D` /
+# `EmitterActive`.
+#
+# Exists because the owner sheet's B.13 #1 proceeds on option (b) — engine crates may
+# carry a non-default `reflect` feature (REFLECTION-ANALYSIS.md B.12). If the owner
+# declines, this package and its umbrella are deleted together and nothing else moves
+# (B.12 "Reversibility").
+[dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+# OPTIONAL (GATES D3 C2), pulled only by the `dep:` form below (D3 C3).
+boyko-reflect = { path = "../boyko_reflect", optional = true }
+# The engine crates whose components the dogfood inspects. PLAIN, NON-OPTIONAL edges
+# with NO `features` array (GATES D3 C4 — an edge is the one enabler nothing can switch
+# off: "an explicit `features = [...]` survives `--no-default-features` by design").
+# Enablement happens ONLY through the leaf umbrella below or a command line.
+boyko-scene = { path = "../boyko_scene" }
+boyko-render = { path = "../boyko_render" }
+# CORE C6 gate 1's dogfood half descends `Transform -> Vec3 -> f32`, so it must name
+# `Vec3`/`Quat` to bake their REAL `offset_of!` / `size_of` / `align_of` — the whole point
+# of a dogfood is that the numbers are the compiler's own and not transcribed constants.
+# `boyko_scene` does not re-export them (`transform.rs:33` imports them from here), and
+# `boyko-render`'s edge does not put the crate in scope. `boyko-math` is a leaf with no
+# third-party deps and no FFI, so this changes neither the Miri disposition (this package
+# is already off that allowlist) nor any `reflect` feature surface: plain, non-optional,
+# no `features` array, exactly like the two edges above (GATES D3 C4).
+boyko-math = { path = "../boyko_math" }
+
+[dev-dependencies]
+# CORE C8 gate 5 / D30 — Horn 2's generator-agreement subject needs BOTH derives on one
+# struct, and `#[derive(Bindable)]` emits `impl ::boyko_ui::binding::Bindable` (see
+# `boyko_macros/src/bindable.rs:70`), so the trait must be nameable from the test target.
+#
+# **DEV, deliberately, and the distinction is the whole argument.** A dev edge is
+# test-only: it enters no ship closure, so G2's censuses do not move; `boyko-ui` names no
+# `boyko-reflect`, so it moves no reflect surface; and it carries no `features = [...]`
+# array, so none of G1's six manifest clauses (which are about `boyko-reflect` edges and
+# feature arrays) touch it. The alternative host — a test target in `boyko_render`, which
+# already has both a non-default `reflect` feature and this same dev edge at ZERO manifest
+# cost — was rejected on a different ground: no CI leg builds
+# `-p boyko-render --features reflect`, so the gate would be compiled by nothing (F17's
+# measured class). This package's leg (`cargo test -p reflect-dogfood --all-targets
+# --features reflect-dogfood/reflect`) already exists and already enforces non-vacuity.
+boyko-ui = { path = "../boyko_ui" }
+
+[features]
+default = []
+# The LEAF UMBRELLA (GATES D15): the one place the engine crates' non-default `reflect`
+# features are forwarded. `cargo test -p reflect-dogfood --features
+# reflect-dogfood/reflect` is the dogfood invocation; it unifies workspace-wide when the
+# root selects every member — WHICH IS EXPECTED and is not a leak: it is not the ship
+# invocation, and G2's harness asserts the ship-closure gate never runs under a feature
+# selection.
+reflect = ["dep:boyko-reflect", "boyko-scene/reflect", "boyko-render/reflect"]
+
+[lints]
+workspace = true

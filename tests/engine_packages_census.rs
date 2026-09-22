@@ -62,6 +62,16 @@ const USER_PACKAGES: &[&str] = &[
     // grows a zone it is a consumer of the engine, not part of it — the `bench-bevy-vs-boyko`
     // precedent exactly.
     "aether-tests",
+    // Reflection GATES G0 (docs/REFLECTION-PLAN-GATES.md D15). `reflect-fixture` is the
+    // reflection campaign's PRIMARY gated subject: a consumer stand-in for a game's own crate
+    // (the `profile-fixture` argument, verbatim), deps `boyko-ecs` / `boyko-macros` / optional
+    // `boyko-reflect` and nothing else — it is also the package the CI Miri row names, and Miri
+    // cannot execute FFI.
+    "reflect-fixture",
+    // Reflection GATES G0/D15. The real-engine-types dogfood package (REFLECTION-PLAN-ECS.md
+    // EG8 fills it): it consumes engine crates the way a game does, so it is a consumer of the
+    // engine, not part of it — the `bench-bevy-vs-boyko` precedent exactly.
+    "reflect-dogfood",
 ];
 
 fn repo_root() -> PathBuf {

@@ -78,7 +78,7 @@ record; engine claims were verified line-by-line in this checkout).
      `UiText::color`, `text/components.rs:46-47`) → **the identity**, because source and destination
      are the same space. Measured: decode-then-re-encode drifts **0 of 256 bytes**, so the uniform
      rule changes no shipped UI colour. Note that "STRAIGHT RGBA8" in those doc comments means
-     NON-PREMULTIPLIED (`components.rs:211` names `premultiply_rgba8` as the next step), not
+     NON-PREMULTIPLIED (`boyko_ui/src/components.rs:211` names `premultiply_rgba8` as the next step), not
      "undecoded" — the phrase says nothing about a transfer function.
   3. **Device-encoded packed** (`ParticleEffect::color_keys`, `particle_effect.rs:120-143`, byte
      order `0xAABBGGRR`) → **a coded `GA####` bake refusal.** Its own doc records two shipped
@@ -978,7 +978,7 @@ The answer is already shipped and gated at zero allocations in this repo; Gaia g
      the work order in the same commit that carried the deadline already declared R0 *"buildable
      now, no ballot in the way"*.
    - **A bind source on a dense (or bitset) component.** `any_changed_since`
-     (`boyko_ecs` `component_api.rs:403`) resolves per-archetype pools, and non-signature storage
+     (`boyko_ecs` `component_api.rs:433`) resolves per-archetype pools, and non-signature storage
      owns none (`archetype.rs:389-395`), so the gate is **never true** — the sink never updates and nothing is
      logged. Red fixtures cover BOTH spellings: an explicit `kernel (storage = dense)` component
      and a `table`-derived one. ⚠ **The premise of that second spelling was CORRECTED 2026-08-30 by
@@ -988,7 +988,7 @@ The answer is already shipped and gated at zero allocations in this repo; Gaia g
      dense spelling is reached deliberately, through `kernel (storage = dense)`, or by a row
      component that is ALSO carried by entities outside the table, which is the one case F2 leaves
      to `Dense`. Companion doc fix in the same commit:
-     the `any_changed_since` doc comment (`component_api.rs:386-389`) claims the scan is bounded
+     the `any_changed_since` doc comment (`component_api.rs:416-419`) claims the scan is bounded
      to hosting archetypes, which is false for exactly this case. The remedy (a bake refusal keyed on the GK-4 storage kind vs
      routing dense through `DenseStore` ticks) is the implementer's engineering choice, per the
      standing rule.

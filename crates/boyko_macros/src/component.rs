@@ -157,6 +157,48 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
         };
 
+    // Reflection CORE C7: `#[component(reflect)]` emits a free `static TypeInfo` plus the
+    // `impl boyko_reflect::Reflect` pointing at it, and D20's `ReflectDefault` witness.
+    // The whole emission is `#[cfg(feature = "reflect")]` evaluated in the EXPANDING
+    // crate (D2), so an un-annotated derive and a feature-off consumer both emit nothing,
+    // and this crate keeps no edge to `boyko_reflect` (D17). CORE C8 adds the install
+    // call in `component_id()` below, which is what makes the descriptor reachable.
+    //
+    // CORE C9 / D37 — D29's `!hooks.storage_bitset` term is REPLACED here, not joined.
+    //
+    // C8 landed a *silent* suppression: `hooks.reflect && !hooks.storage_bitset`, so a
+    // `#[component(reflect, storage = "bitset")]` tag compiled and published nothing. C9
+    // makes the combination a spanned `compile_error!`, which leaves that term unreachable
+    // in its suppressing branch and its only witness (`reflect_fixture`'s
+    // `c8_bitset_suppression.rs`) unable to compile — a dead datum whose gate has just been
+    // deleted, and a RED (*"drop the `storage_bitset` term"*) with no subject left to
+    // observe it. So the term goes with the gate it served. Nothing is lost: feature off,
+    // the whole emission is `cfg`-stripped and nothing installs; feature on, the refusal
+    // stops the compile. ECS D5's *"two mechanisms at two boundaries"* is the compile-time
+    // refusal plus the release `assert!` inside `install_type_info` — not three.
+    //
+    // The bitset condition is now an ARGUMENT rather than a suppression: `codegen` needs
+    // the `reflect` key's span to put the caret on it (D37), and a `bool` cannot carry one.
+    //
+    // Computed BEFORE `input.ident` moves below, like every other codegen that needs to
+    // walk the fields.
+    let (reflect_items, reflect_default_witness, reflect_refused) = if hooks.reflect {
+        let no_default = match crate::reflect::parse_reflect_no_default(&input.attrs) {
+            Ok(v) => v,
+            Err(ts) => return ts,
+        };
+        let bitset_reflect_key = if hooks.storage_bitset { hooks.reflect_span } else { None };
+        crate::reflect::codegen(&input, &input.ident, no_default, bitset_reflect_key)
+    } else {
+        (TokenStream2::new(), TokenStream2::new(), false)
+    };
+    // A REFUSED item emits refusals and no descriptor, so the install slot below must go
+    // with it: `<Self as Reflect>::TYPE_INFO` on a type with no `impl Reflect` is an
+    // E0277 that would land in every refused fixture's blessed `.stderr` beside the real
+    // message, freezing rustc's rendering of a second, derived error. One refusal, one
+    // error.
+    let reflect_enabled = hooks.reflect && !reflect_refused;
+
     let name = input.ident;
 
     // Emit `const HAS_HOOKS = true;` + a `register_hooks` impl only when at
@@ -321,6 +363,43 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
+    // Reflection CORE C8 — the SEVENTH install slot, and the campaign's central claim in
+    // one line. `component_id()` is the funnel every other per-type datum is published
+    // through; the descriptor C7 baked is inert until it joins them, because nothing else
+    // in the expansion references it (MEASURED at C7: zero `__REFLECT_TYPE_INFO` symbols
+    // in every link configuration — an uncalled static is dropped before the linker sees
+    // it).
+    //
+    // The paths are ABSOLUTE, and that is a decision rather than a copy of the neighbours.
+    // The six slots above use the non-absolute `boyko_ecs::…` form and matching them would
+    // be defensible — but this is the one path whose ABSENCE IN A SHIP BUILD is what the
+    // whole campaign claims, and a bare first segment resolves through the consumer's own
+    // scope before the extern prelude, so a consumer `mod boyko_reflect` or
+    // `use x as boyko_reflect` would shadow it. Every other path the reflect emission puts
+    // into a consumer crate is already absolute (`reflect.rs:190`, `:249`, `:378`, `:463`);
+    // this closes the last one.
+    //
+    // `#[cfg(feature = "reflect")]` on the STATEMENT, evaluated in the crate the derive
+    // expanded into (D2) — the same gate the descriptor itself carries. Feature-off, the
+    // statement is not merely dead, it does not exist: `boyko_reflect` is not in the
+    // consumer's resolved graph at all, so an un-`cfg`'d form would be `E0433` rather than
+    // a silent leak (which is exactly what C8's first RED observes).
+    //
+    // No `IS_REFLECT` const (D7): "is `T` reflectable?" has one carrier, and it is
+    // `type_info_of(id).is_some()`. `boyko_macros` gains NO dependency on `boyko_reflect`
+    // (D17) — this is a token stream, not a call site in this crate.
+    let reflect_install = if reflect_enabled {
+        quote! {
+            #[cfg(feature = "reflect")]
+            ::boyko_reflect::install_type_info(
+                raw,
+                <Self as ::boyko_reflect::Reflect>::TYPE_INFO,
+            );
+        }
+    } else {
+        TokenStream2::new()
+    };
+
     // Phase 22 D7: single-component Bundle emission (suppressed by
     // `#[component(no_bundle)]`). EnableTag D6: `storage = "bitset"` ALSO
     // suppresses it — a bitset tag has no `ComponentPool` and must not be
@@ -339,6 +418,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #bundle_items
+
+        #reflect_items
+
+        #reflect_default_witness
 
         #require_ctor_fns
 
@@ -390,6 +473,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     #relationship_install
                     #residency_install
                     #serialize_install
+                    #reflect_install
                     boyko_ecs::ecs::identifiers::primitives::ComponentId(raw)
                 })
             }
@@ -479,6 +563,20 @@ pub(crate) struct ComponentHookPaths {
     /// Serialization S0 (§3.5): `Some(v)` iff `format_version = N` was supplied —
     /// the human-facing layout/semantic version. Default `0` when omitted.
     format_version: Option<u16>,
+    /// Reflection CORE C7: `true` iff the bare `reflect` flag was supplied — opts the
+    /// component into the EDITOR-ONLY reflection layer. The emission it turns on is
+    /// itself `#[cfg(feature = "reflect")]`, evaluated in the crate the derive expanded
+    /// into (CORE D2), so the key is inert in a consumer that has not enabled the
+    /// feature and this crate never gains an edge to `boyko_reflect` (CORE D17).
+    reflect: bool,
+    /// Reflection CORE C9 / D37: the span of the `reflect` key itself, kept so the
+    /// `storage = "bitset"` refusal can put its caret **on that token**.
+    ///
+    /// A `bool` cannot carry a caret, and the caret is the deliverable here: three
+    /// census-gated documents specified three different ones for this single refusal, and
+    /// the blessed `.stderr` freezes whichever is emitted. `storage = "bitset"` is
+    /// legitimate on its own; `reflect` is the token that is wrong.
+    reflect_span: Option<proc_macro2::Span>,
 }
 
 impl ComponentHookPaths {
@@ -702,6 +800,24 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 return Ok(());
             }
 
+            // Reflection CORE C7: bare flag key `reflect` — opt this component into the
+            // editor-only reflection layer. `no_bundle` (just above) is the precedent
+            // for the shape: no `= <value>` follows, and a repeat is an error rather
+            // than a silent second `true`.
+            if meta.path.is_ident("reflect") {
+                if paths.reflect {
+                    return Err(meta.error(
+                        "duplicate #[component(...)] key; reflect may be set at most once",
+                    ));
+                }
+                paths.reflect = true;
+                // CORE C9 / D37 -- the caret for the `storage = "bitset"` refusal. Taken
+                // from the key's own path so it survives whatever else the attribute
+                // carries and however it is formatted.
+                paths.reflect_span = Some(meta.path.span());
+                return Ok(());
+            }
+
             // Feature 3: bare flag key `no_clone` — opt out of cloning.
             if meta.path.is_ident("no_clone") {
                 if paths.no_clone {
@@ -825,7 +941,7 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                     "unknown #[component(...)] key; \
                      valid keys: on_add, on_insert, on_replace, on_remove, on_despawn, \
                      no_bundle, no_clone, clone = <fn>, storage = \"bitset\", \
-                     no_serialize, stable_name = \"..\", format_version = N",
+                     no_serialize, stable_name = \"..\", format_version = N, reflect",
                 ));
             };
 

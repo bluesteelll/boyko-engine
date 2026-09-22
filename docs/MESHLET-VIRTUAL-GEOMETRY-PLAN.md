@@ -549,7 +549,7 @@ VB-visible. The **host-authored** primitives pass `None` at their own call site
 **Decision: glTF 2.0 binary (`.glb`), in-house decoder, deliberately narrow subset.**
 
 * **Why not extend OBJ.** Licence-clean high-poly corpora ship as `.glb`/`.gltf`. OBJ carries no
-  tangents, no index buffer (the loader sort-dedups every corner — `loaders/obj.rs:39`), and is a
+  tangents, no index buffer (the loader sort-dedups every corner — `loaders/obj.rs:39~`), and is a
   text parse over hundreds of megabytes.
 * **Why in-house.** A `.glb` is a 12-byte header + a JSON chunk + a BIN chunk; only the JSON chunk
   needs a new reader. That is loader code, not hot-path code, and the same class of work
@@ -1405,7 +1405,7 @@ byte-identity holds by construction as well as by measurement.
 
 **Lands:** the `.glb` decoder (§3.3) registered as a second `LoaderEntry` on `MeshGpu::LOADERS`;
 `assets/vg_corpus/CORPUS.toml` + the `.gitignore` rule + `fetch_corpus`;
-`crates/boyko_app/tests/vg_corpus_ingest.rs`. <!-- doc-anchor-ignore -->
+`crates/boyko_app/tests/vg_corpus_ingest.rs`.
 
 > ✅ **LANDED AT REV 36 EXCEPT THE PAYLOAD ITSELF, and the exception is a deliberate stop.** The
 > decoder ships with its own gate (one valid document decodes; **twelve** mutations, each changing
@@ -1553,7 +1553,7 @@ readback armed by env knob; the host-side histogram + triangles-per-pixel reduce
 the 2× SSAA composite is the route to it, **decided from §9.1's measured grant table** (on this
 box: rungs 0–1 direct, rungs 2–3 via the armed composite), with **SSAA arming ASSERTED rather than
 trusted**;
-`crates/boyko_app/tests/vg_density_census.rs`. <!-- doc-anchor-ignore -->
+`crates/boyko_app/tests/vg_density_census.rs`.
 
 > ⚠️ **The extent route is Rev 28's, and its absence was a precondition with no producer — the
 > §3.4 shape on a different axis.** `[census].assert_achieved_extent` gates every rung, and the
@@ -1585,7 +1585,7 @@ trusted**;
 > (i) a new layout transition of a **ring** image — `COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC_OPTIMAL
 > →` its `SAMPLED` read — inside the RDG auto-barrier system, and (ii) a **host read of a per-FIF
 > resource**, which is the exact shape of this project's recorded cross-frame bug class (host
-> access racing the fence on per-FIF rings, with `FRAMES_IN_FLIGHT == 2` at `ui/mod.rs:87~`).
+> access racing the fence on per-FIF rings, with `FRAMES_IN_FLIGHT == 2` at `boyko_render/src/ui/mod.rs:87`).
 > Neither is visible to gate (a), because both exist only on **armed** frames — the frames the
 > goldens never render. The readback must therefore wait on the frame's own fence before mapping.
 >
@@ -2497,7 +2497,7 @@ contradiction is direct evidence that the older block was never re-verified ·
 
 **Rev 2/Rev 3 additions, verified this session:**
 `crates/boyko_rhi_vulkan/src/present/targets.rs:851~-856` (`VbTargets` doc — the ring is **one
-`R32G32_UINT` texel per pixel**, which is what caps §5.4's statistic (1~) at 1), **`:866~`
+`R32G32_UINT` texel per pixel**, which is what caps §5.4's statistic (1) at 1), **`:866~`
 (`format: Format::R32G32Uint` — Rev 2 cited `:865~`, which is `depth: 1`)**, `:868~` (the usage bits,
 correct) · `crates/boyko_app/tests/sv0_scene/mod.rs:162` (`DUMP_EXTENT = 512`) ·
 `crates/boyko_app/tests/sv0_oracle/mod.rs:279-287` (**`rasterize` takes ONE indexed mesh and

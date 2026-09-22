@@ -98,21 +98,51 @@ impl EcsMaster {
         component_id: ComponentId,
         bytes: &[u8],
     ) {
+        self.dense_insert_only(entity, archetype_id, component_id, bytes);
+        self.dense_fire_add_insert(entity, component_id);
+    }
+
+    /// Store half of [`Self::dense_insert_and_fire`]: inserts `bytes` into the
+    /// `component_id` dense store (creating it lazily) and seeds `arch_presence`
+    /// with `archetype_id`. **Fires nothing.**
+    ///
+    /// Split out because `migrate_entity_insert` writes the dense store in its
+    /// Phase 1 — BEFORE the migration's `on_add` fires — and a caller that must
+    /// reproduce that phase order (`add_component_by_id`'s dense `#[require]`
+    /// arm) cannot use the fused form: a hook reading
+    /// `DeferredEcsMaster::get_component::<Dense>` would observe the value
+    /// absent, because `get_component_raw` HAS a dense arm (the
+    /// `StorageKind::Dense` early return below). MEASURED on the typed path: the
+    /// required column's `on_add` sees the dense component present.
+    ///
+    /// The `&mut DenseStore` borrow of `self.dense_registry` ends at this fn's
+    /// exit, so no `self`-derived `&mut` into storage is live when the caller
+    /// mints a `world_ptr` for the fire half (the archetypal SAFETY-1
+    /// discipline, now enforced by the split rather than by a block scope).
+    pub(crate) fn dense_insert_only(
+        &mut self,
+        entity: Entity,
+        archetype_id: ArchetypeId,
+        component_id: ComponentId,
+        bytes: &[u8],
+    ) {
         let current_tick = self.current_tick();
-        {
-            let store = self.dense_registry.store_mut(component_id);
-            store.insert(entity.id(), bytes, current_tick);
-            store.mark_arch_present(archetype_id);
-            // <-- the `&mut DenseStore` borrow of `self.dense_registry` ends here,
-            // BEFORE `world_ptr` is minted (no `self`-derived `&mut` is live at
-            // the fire, mirroring the archetypal SAFETY-1 discipline).
-        }
-        // MINT: no `self`-derived `&mut` into storage is live (the store borrow
-        // above dropped at the block close).
+        let store = self.dense_registry.store_mut(component_id);
+        store.insert(entity.id(), bytes, current_tick);
+        store.mark_arch_present(archetype_id);
+    }
+
+    /// Fire half of [`Self::dense_insert_and_fire`]: on_add THEN on_insert (Bevy
+    /// add-before-insert ordering), hooks first then observers, per component.
+    /// Both self-gate to a no-op when nothing is registered.
+    ///
+    /// NOT entity-targeted: `migrate_entity_insert`'s POST dense block fires no
+    /// `fire_entity_observers` either, and matching it IS the parity target. The
+    /// dense entity-observer gap is path-symmetric and filed, not fixed here.
+    pub(crate) fn dense_fire_add_insert(&mut self, entity: Entity, component_id: ComponentId) {
+        // MINT: no `self`-derived `&mut` into storage is live (the store borrow,
+        // if any, ended before this call — see `dense_insert_only`).
         let world_ptr = NonNull::from(&mut *self);
-        // on_add THEN on_insert (Bevy add-before-insert ordering). Hooks first,
-        // then observers, per component (both self-gate to a no-op when nothing
-        // is registered).
         trigger_on_add(world_ptr, component_id, entity);
         fire_on_add_observers(world_ptr, component_id, entity);
         trigger_on_insert(world_ptr, component_id, entity);
