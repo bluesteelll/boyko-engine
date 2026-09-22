@@ -1,0 +1,67 @@
+--- window3_run.py	2026-09-22 01:49:55.319485600 +0300
++++ window4_run.py	2026-09-22 01:50:48.874937200 +0300
+@@ -1,4 +1,9 @@
+-"""WINDOW 3 (L4+L2 default against the P0b bridge and Jolt) under P0b's ruled protocol.
++"""WINDOW 4 (tree broadphase C3, G5) under the window-3 protocol block. window3_run.py with FOUR edits
++(diffable: tools/window4_run.diff): the tree driver path, the canary_of field threaded into D.B (the recipe's
++one field), the warm-up row (T-D-tree W=8, this rows.json), the initial idle budget (90 min, the task's rule),
++and the rehearsal cell set. Everything else is window 3's, verbatim.
++
++WINDOW 3 (L4+L2 default against the P0b bridge and Jolt) under P0b's ruled protocol.
+ 
+ Adapted from P0b's window_run.py (same launch path, receipts, witnesses, ordering and record layout);
+ the row list comes from win3/rows.json (+ rows_l5.json if the C4 runner exists), not from the driver's
+@@ -44,9 +49,9 @@
+ import driver as D  # noqa: E402  (a byte-identical copy of the tree driver, checked in main)
+ from pdhperf import PerfSampler  # noqa: E402
+ 
+-TREE_DRIVER = r'D:/wt/joltab/tools/physics_parity/driver.py'
++TREE_DRIVER = r'D:/wt/mq-de06b6c9/tools/physics_parity/driver.py'
+ WAIT_PS1 = os.path.join(HERE, 'wait_idle3.ps1')
+-TEST = os.environ.get('WIN3_TEST') == '1'
++TEST = os.environ.get('WIN4_TEST') == '1'
+ RAW = os.path.join(W3, 'test', 'window') if TEST else os.path.join(W3, 'raw')
+ WAIT_LOG = os.path.join(RAW, 'wait_log.txt')
+ BIN = os.path.join(W3, 'bin')
+@@ -54,7 +59,7 @@
+ RECEIPT_S = 0.5 if TEST else 5.0
+ PASS_RECEIPT_S = 0.5 if TEST else 10.0
+ QUIET_BUDGET_S = 420.0
+-IDLE_BUDGET_S = 3 * 3600.0
++IDLE_BUDGET_S = 90 * 60.0
+ PASSES = 1 if TEST else 2
+ ROUNDS = 1 if TEST else 3
+ J_POSE = '0x32d5e235342b4143'
+@@ -74,7 +79,8 @@
+     exe = rd['exe'] if os.path.isabs(rd['exe']) else os.path.join(W3, rd['exe'].replace('bin/', 'bin' + os.sep, 1))
+     if rd['engine'] == 'boyko':
+         r = D.B(rd['id'], role, tuple(rd['workers']), list(rd['args']), steps=rd['steps'], window=tuple(rd['window']),
+-                armed=rd.get('armed', False), expect_pose_of=rd.get('expect_pose_of'))
++                armed=rd.get('armed', False), expect_pose_of=rd.get('expect_pose_of'),
++                canary_of=rd.get('canary_of'))
+         EXPECT_POSE[rd['id']] = rd['expected_pose']
+         MANIFEST_ENTRIES['boyko'][role] = {'exe': exe, 'sha256': rd['sha256'], 'commit': rd.get('commit')}
+     else:
+@@ -89,7 +95,9 @@
+ JOLT_IDS = [r['id'] for r in ROW_DEFS if r['engine'] == 'jolt']
+ BOYKO_CELLS = {w: [rid for rid in BOYKO_IDS if w in ROWS[rid]['ws']] for w in (1, 2, 4, 8, 16)}
+ JOLT_CELLS = {w: [rid for rid in JOLT_IDS if w in ROWS[rid]['ws']] for w in (1, 2, 4, 8, 16)}
+-TEST_CELLS = {('D-L4L2', 1), ('J-A', 1), ('JOLT-T', 1), ('JOLT56-T', 8), ('D-L4L2', 8)}
++TEST_CELLS = {('T-A-tree', 1), ('T-A-allpairs', 1), ('T-A-tree', 8), ('T-A-allpairs', 8), ('T-A-tree-armed', 8),
++              ('T-A-allpairs-armed', 8), ('T-C-tree', 8), ('T-D-tree', 8), ('T-D-allpairs', 8), ('S16-tree', 1),
++              ('S16-allpairs', 1), ('R-tree', 1), ('R-allpairs', 1)}
+ 
+ CREATE_SUSPENDED = 0x4
+ k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+@@ -502,9 +510,9 @@
+         order = order0 if p % 2 == 0 else order0[::-1]
+         receipt = D.load_receipt(PASS_RECEIPT_S)
+         log(f'pass {p}: opening receipt {receipt["cpu_avg"]}% (build procs {receipt["build_procs_busy"]})')
+-        wrec, receipt, st = run_one(m, 'D-L4L2', 8, p, -1, 0, 'warmup', pdir, {}, receipt, env, sampler, deadline)
++        wrec, receipt, st = run_one(m, 'T-D-tree', 8, p, -1, 0, 'warmup', pdir, {}, receipt, env, sampler, deadline)
+         append(runs_path, wrec)
+-        log(f'  p{p} warm-up D-L4L2 W=8 (untimed): {tag_of(wrec) if st == "ok" else wrec.get("aborted")}')
++        log(f'  p{p} warm-up T-D-tree W=8 (untimed): {tag_of(wrec) if st == "ok" else wrec.get("aborted")}')
+         if st == 'abort':
+             status = f'ABORT in pass {p}: {wrec.get("aborted")}'
+             break

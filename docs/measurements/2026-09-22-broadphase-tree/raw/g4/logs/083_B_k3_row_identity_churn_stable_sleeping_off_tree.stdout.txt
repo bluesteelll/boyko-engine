@@ -1,0 +1,3 @@
+row_identity_churn/stable/sleeping_off_tree
+                        time:   [9.6062 ms 9.6338 ms 9.6596 ms]
+

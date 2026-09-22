@@ -107,6 +107,22 @@ first commit. Order of lanes: L5 (approved above) → broadphase → L10.
   in a cargo test is a red, never a pass.
 - Optional remarks adopted where cheap.
 
+**G4 / G5 measured 2026-09-22 (window 4, `docs/measurements/2026-09-22-broadphase-tree/analysis.md`; the 2026-09-22
+block of `docs/MEASUREMENT-QUEUE.md` §11; C3 binary `a46b8287`, K=6, Jolt v5.6.0 only). Every directional gate passes:
+the Tree is claimed faster than AllPairs on the same binary at every W on J cfg-A (−8.6 … −24.4 %), on the shipped
+default row (−14.5 % at W=1, −32.6 % at W=8), on R (−11.5 / −22.5 %) and on all 12 churn arms, S16 unchanged, one
+pose per scene, structure clean, canary seen; the headline Δbp(8) = 1.488 ms clears the 1.03 ms bar; `T-D-tree` at
+W=8 reads **3.699 ms = 1.440× Jolt v5.6.0** (0.918× at W=1; a projection until the default ships). **But the stop
+rules FIRED** — G4 rule 1 `J snapshot` 0.443 ms > 0.30, the G5 tree-span gate 0.476 / 0.466 ms > 0.36 / 0.35, rule 6
+`compaction` at every m and rule 9 `high jumper` at 100k — all on one quantity, the J-scale query at 334 ns per row
+against the design's 100–150 — **so C4 (the default flip) is DEFERRED by the recipe's letter until the query-cost
+investigation of `analysis.md` §8 has run and the J snapshot cell and the armed rows are re-taken.** Constants:
+`TREE_BRUTE_MAX_ROWS` = 64 (derived, unchanged); `AUTO_TREE_LO/HI` 64 / 256 by the recipe's grid rule (126 / 140 by
+L2's procedure), committed only after the refinement run between 64 and 256; `ADMIT_BUILD_RATIO` and C2 (D6)
+DEFERRED — the recipe's `c_build` formula contains c_q and must be corrected first, and C2 is built iff the
+post-investigation t_q(J, W=1) ≥ 0.235 ms on the default row (0.316 on cfg-A) at E = 0.68. The investigation can
+change the flip's size, not its sign, unless it finds the excess is work the design forbids.
+
 **L10 rev 2** (`L10-sleeping/04-DESIGN-REV2.md`, review `05-REVIEW-OF-REV2.md`):
 - **W1:** the Tree's hint is PRE_HELD minus the prologue restore list (or `release` runs for every restore on
   a Tree step); a debug assertion of Invariant V over `withheld` after the kind arm; the mutation

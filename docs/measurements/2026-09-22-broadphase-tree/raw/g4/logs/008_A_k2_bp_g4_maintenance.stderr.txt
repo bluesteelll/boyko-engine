@@ -1,0 +1,129 @@
+Gnuplot not found, using plotters backend
+bp_g4_uniform/17: rows 17 pairs 30 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_uniform/64: rows 64 pairs 141 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_uniform/128: rows 128 pairs 275 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_uniform/256: rows 256 pairs 568 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_uniform/1000: rows 1000 pairs 2400 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_uniform/10000: rows 10000 pairs 28599 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_uniform/100000: rows 100000 pairs 293501 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_disparity/17: rows 21 pairs 104 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_disparity/64: rows 68 pairs 406 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_disparity/128: rows 132 pairs 820 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_disparity/256: rows 260 pairs 1670 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_disparity/1000: rows 1004 pairs 6706 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_disparity/10000: rows 10004 pairs 68605 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_disparity/100000: rows 100004 pairs 574763 tree members 0 static_rebuilds 0 wide 0 excluded 0
+bp_g4_scene/1240: rows 1241 pairs 9570 tree members 1 static_rebuilds 1 wide 0 excluded 0
+bp_g4_scene/10000: rows 10001 pairs 83559 tree members 1 static_rebuilds 1 wide 0 excluded 0
+bp_g4_scene/100000: rows 100001 pairs 840494 tree members 1 static_rebuilds 1 wide 0 excluded 0
+bp_g4_scene/j100: rows 1241 pairs 9564 tree members 1 static_rebuilds 1 wide 0 excluded 0
+bp_g4_maintenance/stable/1240: timed step: evictions +0 translations +0 patches +0 static_rebuilds +0; members 1240; pairs 9464 (oracle ok)
+Benchmarking bp_g4_maintenance/stable/1240
+Benchmarking bp_g4_maintenance/stable/1240: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/stable/1240: Collecting 10 samples in estimated 5.0003 s (149k iterations)
+Benchmarking bp_g4_maintenance/stable/1240: Analyzing
+bp_g4_maintenance/admission_from_empty/1240: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 1240; pairs 9464 (oracle ok)
+Benchmarking bp_g4_maintenance/admission_from_empty/1240
+Benchmarking bp_g4_maintenance/admission_from_empty/1240: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/admission_from_empty/1240: Collecting 10 samples in estimated 5.0013 s (3910 iterations)
+Benchmarking bp_g4_maintenance/admission_from_empty/1240: Analyzing
+bp_g4_maintenance/admission_of_64/1240: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 1304; pairs 9824 (oracle ok)
+Benchmarking bp_g4_maintenance/admission_of_64/1240
+Benchmarking bp_g4_maintenance/admission_of_64/1240: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/admission_of_64/1240: Collecting 10 samples in estimated 5.0021 s (14k iterations)
+Benchmarking bp_g4_maintenance/admission_of_64/1240: Analyzing
+bp_g4_maintenance/eviction_filter/1240: timed step: evictions +1 translations +0 patches +0 static_rebuilds +0; members 1239; pairs 9458 (oracle ok)
+Benchmarking bp_g4_maintenance/eviction_filter/1240
+Benchmarking bp_g4_maintenance/eviction_filter/1240: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/eviction_filter/1240: Collecting 10 samples in estimated 5.0003 s (100k iterations)
+Benchmarking bp_g4_maintenance/eviction_filter/1240: Analyzing
+bp_g4_maintenance/shift_translation/1240: timed step: evictions +0 translations +1 patches +0 static_rebuilds +0; members 1240; pairs 9464 (oracle ok)
+Benchmarking bp_g4_maintenance/shift_translation/1240
+Benchmarking bp_g4_maintenance/shift_translation/1240: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/shift_translation/1240: Collecting 10 samples in estimated 5.0001 s (85k iterations)
+Benchmarking bp_g4_maintenance/shift_translation/1240: Analyzing
+bp_g4_maintenance/compaction/1240: timed step: evictions +1 translations +0 patches +0 static_rebuilds +1; members 620; pairs 9464 (oracle ok)
+Benchmarking bp_g4_maintenance/compaction/1240
+Benchmarking bp_g4_maintenance/compaction/1240: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/compaction/1240: Collecting 10 samples in estimated 5.0018 s (4730 iterations)
+Benchmarking bp_g4_maintenance/compaction/1240: Analyzing
+bp_g4_maintenance/high_jumper/1240: the mover (row 620) has 9 higher-row partners
+bp_g4_maintenance/high_jumper/1240: timed step: evictions +0 translations +1 patches +18 static_rebuilds +0; members 1240; pairs 9464 (oracle ok)
+Benchmarking bp_g4_maintenance/high_jumper/1240
+Benchmarking bp_g4_maintenance/high_jumper/1240: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/high_jumper/1240: Collecting 10 samples in estimated 5.0006 s (81k iterations)
+Benchmarking bp_g4_maintenance/high_jumper/1240: Analyzing
+bp_g4_maintenance/stable/10000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +0; members 10000; pairs 83149 (oracle ok)
+Benchmarking bp_g4_maintenance/stable/10000
+Benchmarking bp_g4_maintenance/stable/10000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/stable/10000: Collecting 10 samples in estimated 5.0028 s (18k iterations)
+Benchmarking bp_g4_maintenance/stable/10000: Analyzing
+bp_g4_maintenance/admission_from_empty/10000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 10000; pairs 83149 (oracle ok)
+Benchmarking bp_g4_maintenance/admission_from_empty/10000
+Benchmarking bp_g4_maintenance/admission_from_empty/10000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/admission_from_empty/10000: Collecting 10 samples in estimated 5.1003 s (380 iterations)
+Benchmarking bp_g4_maintenance/admission_from_empty/10000: Analyzing
+bp_g4_maintenance/admission_of_64/10000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 10064; pairs 83509 (oracle ok)
+Benchmarking bp_g4_maintenance/admission_of_64/10000
+Benchmarking bp_g4_maintenance/admission_of_64/10000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/admission_of_64/10000: Collecting 10 samples in estimated 5.0400 s (400 iterations)
+Benchmarking bp_g4_maintenance/admission_of_64/10000: Analyzing
+bp_g4_maintenance/eviction_filter/10000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +0; members 9999; pairs 83143 (oracle ok)
+Benchmarking bp_g4_maintenance/eviction_filter/10000
+Benchmarking bp_g4_maintenance/eviction_filter/10000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/eviction_filter/10000: Collecting 10 samples in estimated 5.0003 s (12k iterations)
+Benchmarking bp_g4_maintenance/eviction_filter/10000: Analyzing
+bp_g4_maintenance/shift_translation/10000: timed step: evictions +0 translations +1 patches +0 static_rebuilds +0; members 10000; pairs 83149 (oracle ok)
+Benchmarking bp_g4_maintenance/shift_translation/10000
+Benchmarking bp_g4_maintenance/shift_translation/10000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/shift_translation/10000: Collecting 10 samples in estimated 5.0024 s (10k iterations)
+Benchmarking bp_g4_maintenance/shift_translation/10000: Analyzing
+bp_g4_maintenance/compaction/10000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +1; members 5000; pairs 83149 (oracle ok)
+Benchmarking bp_g4_maintenance/compaction/10000
+Benchmarking bp_g4_maintenance/compaction/10000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/compaction/10000: Collecting 10 samples in estimated 5.1040 s (430 iterations)
+Benchmarking bp_g4_maintenance/compaction/10000: Analyzing
+bp_g4_maintenance/high_jumper/10000: the mover (row 5000) has 9 higher-row partners
+bp_g4_maintenance/high_jumper/10000: timed step: evictions +0 translations +1 patches +18 static_rebuilds +0; members 10000; pairs 83149 (oracle ok)
+Benchmarking bp_g4_maintenance/high_jumper/10000
+Benchmarking bp_g4_maintenance/high_jumper/10000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/high_jumper/10000: Collecting 10 samples in estimated 5.0018 s (9580 iterations)
+Benchmarking bp_g4_maintenance/high_jumper/10000: Analyzing
+bp_g4_maintenance/stable/100000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +0; members 100000; pairs 867834 (oracle ok)
+Benchmarking bp_g4_maintenance/stable/100000
+Benchmarking bp_g4_maintenance/stable/100000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/stable/100000: Collecting 10 samples in estimated 5.0268 s (1140 iterations)
+Benchmarking bp_g4_maintenance/stable/100000: Analyzing
+bp_g4_maintenance/admission_from_empty/100000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 100000; pairs 867834 (oracle ok)
+Benchmarking bp_g4_maintenance/admission_from_empty/100000
+Benchmarking bp_g4_maintenance/admission_from_empty/100000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/admission_from_empty/100000: Collecting 10 samples in estimated 5.1204 s (30 iterations)
+Benchmarking bp_g4_maintenance/admission_from_empty/100000: Analyzing
+bp_g4_maintenance/admission_of_64/100000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 100064; pairs 868194 (oracle ok)
+Benchmarking bp_g4_maintenance/admission_of_64/100000
+Benchmarking bp_g4_maintenance/admission_of_64/100000: Warming up for 1.0000 s
+
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 17.6s.
+Benchmarking bp_g4_maintenance/admission_of_64/100000: Collecting 10 samples in estimated 17.609 s (10 iterations)
+Benchmarking bp_g4_maintenance/admission_of_64/100000: Analyzing
+bp_g4_maintenance/eviction_filter/100000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +0; members 99999; pairs 867828 (oracle ok)
+Benchmarking bp_g4_maintenance/eviction_filter/100000
+Benchmarking bp_g4_maintenance/eviction_filter/100000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/eviction_filter/100000: Collecting 10 samples in estimated 5.0134 s (760 iterations)
+Benchmarking bp_g4_maintenance/eviction_filter/100000: Analyzing
+bp_g4_maintenance/shift_translation/100000: timed step: evictions +0 translations +1 patches +0 static_rebuilds +0; members 100000; pairs 867834 (oracle ok)
+Benchmarking bp_g4_maintenance/shift_translation/100000
+Benchmarking bp_g4_maintenance/shift_translation/100000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/shift_translation/100000: Collecting 10 samples in estimated 5.0798 s (430 iterations)
+Benchmarking bp_g4_maintenance/shift_translation/100000: Analyzing
+bp_g4_maintenance/compaction/100000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +1; members 50000; pairs 867834 (oracle ok)
+Benchmarking bp_g4_maintenance/compaction/100000
+Benchmarking bp_g4_maintenance/compaction/100000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/compaction/100000: Collecting 10 samples in estimated 6.2363 s (40 iterations)
+Benchmarking bp_g4_maintenance/compaction/100000: Analyzing
+bp_g4_maintenance/high_jumper/100000: the mover (row 50000) has 9 higher-row partners
+bp_g4_maintenance/high_jumper/100000: timed step: evictions +0 translations +1 patches +18 static_rebuilds +0; members 100000; pairs 867834 (oracle ok)
+Benchmarking bp_g4_maintenance/high_jumper/100000
+Benchmarking bp_g4_maintenance/high_jumper/100000: Warming up for 1.0000 s
+Benchmarking bp_g4_maintenance/high_jumper/100000: Collecting 10 samples in estimated 5.0322 s (480 iterations)
+Benchmarking bp_g4_maintenance/high_jumper/100000: Analyzing

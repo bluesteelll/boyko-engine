@@ -1,0 +1,7 @@
+row_identity_churn/archetype_shift/sleeping_on_tree
+                        time:   [4.1466 ms 4.1534 ms 4.1609 ms]
+Found 5 outliers among 20 measurements (25.00%)
+  2 (10.00%) low mild
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+
