@@ -1,4 +1,4 @@
-# Unified system plan — 00 Overview (rev 6.1)
+# Unified system plan — 00 Overview (rev 6.2)
 
 ## Index
 
@@ -482,6 +482,18 @@ Apply the V-61 rule to every allocator citation carried from rev ≤ 5.1. Record
 - `FixedTime::discard_overstep()` stays `pub` after D-E23 (V-71). It empties the tick accumulator (`[J]…/time/fixed_time.rs:156-158`), so a caller changes how many ticks later frames run. Rule B's read clause does not cover that write, and the patch does not say whether a replay session must refuse it.
 
 ## 10. Revision log
+
+### Rev 6.2 (2026-09-22): one rung added by the owner's instruction
+
+- **SI1 — a spatial index as a first-class kernel feature** (02 §2, Phase E, "Kernel-feature lane"; 02 §3
+  DAG line `SI:`). Owner, 2026-09-22, after asking how the physics campaign's tree broadphase relates to the
+  ECS: it is ECS-native but physics-owned (its row source, sink, predicate, scratch ids and identity are the
+  physics crate's), and principle 0 says a capability one subsystem needs becomes a kernel feature every system
+  uses. SI1 lifts the packed 8-wide BVH, the persistent static set and the segment-stream assembly into the
+  kernel — any dense column view as the row source, a caller-owned sink, the predicate as a parameter with an
+  8-wide kernel per shape, per-instance scratch ids, `Entity` identity — with the physics tree broadphase as its
+  first client (bit-identity with AllPairs kept). Prerequisites U7, D-S2, D-E8 and the tree's own C4/C5; size L;
+  before F4 or after it, never during. No other rung, gate or number in this plan changes.
 
 ### Rev 6 critic pass 2 log (final)
 

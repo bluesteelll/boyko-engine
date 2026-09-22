@@ -508,6 +508,19 @@ KC-35); UG-01..UG-05, UG-15 and UG-22 are green, with every UG-22 arm enabled; R
 
 These rungs retire R4 (156 rows).
 
+**Kernel-feature lane** (one worktree; added 2026-09-22 by the owner's instruction: "write into the plan that a
+spatial index must be implemented as a kernel feature").
+
+| Rung | Scope | Prereq | Red-first tests | Gates | Size |
+|---|---|---|---|---|---|
+| SI1 | **Spatial index as a first-class kernel feature (principle 0: "a capability a subsystem needs is made a kernel feature used uniformly by all systems").** Today the tree broadphase (`boyko_physics/src/broadphase_tree/`, C1 `ecbfe416` + C3 `a46b8287`, on the line since `bbd5d12c`) is ECS-native but physics-owned: its row source is `&[BodyState]`, its sink `ContactPairs`, its predicate the sphere bound, its `ScratchColumn`s sit on reserved ids of the physics cohort (`scratch_ids.rs`, compile-time budget), and its persistence rides `RowIdentity`. SI1 lifts the packed 8-wide BVH, the persistent static set with its rent rule and the segment-stream assembly into a kernel feature: (a) the row source is any dense column view yielding `(position, bound)` — a `QueryData` over user components, not a physics struct; (b) the pair sink is a caller-owned `ScratchColumn`-backed stream with the same exact-set contract (every pair once, `(min, max)` order, placement by integer counts); (c) the predicate is a parameter with an 8-wide kernel per shape (sphere bound today; AABB and a user predicate as the two other arms, each with its own scalar oracle and no-FMA census); (d) each instance owns its scratch ids from a kernel-side allocation, so gameplay (proximity queries, triggers), render (volume culling) and physics can each hold one; (e) row identity comes from the kernel's `Entity` (slot + generation, the A1b/U5–U7 line), so a recycled id is a new key for every client. **The physics tree broadphase becomes the first client**: `BroadphaseKind::Tree` calls the kernel feature and keeps its bit-identity with AllPairs (G0–G2 unchanged, poses unchanged). Design route as every kernel feature: researcher (web: Bevy/flecs/Unity DOTS spatial hashing and BVH services, Jolt's `BroadPhaseQuadTree` API surface) → architect → architecture-critic → the closed design's commit sequence. | Tree broadphase C4 and C5 landed on the trunk (the default flip and the sleeper set: SI1 generalises a finished structure, not a moving one); U7 (`PairCache`: the physics client's persistent ids); D-S2 (the store contract the column view reads through); D-E8 (the entity contract the key rides on). The mapping of these prerequisites to rung ids is confirmed at the design step, not here. | The exact-set differential of the physics client against `all_pairs_into` on J / R / S16 and the churn arms (the C1 gates, re-run through the feature); a second client (a gameplay proximity query over user components) with its own oracle; two instances alive at once with disjoint scratch ids; the no-FMA census per kernel arm; the recycled-id test per client. | UG-01, UG-03 (0 heap per step per instance), UG-10, UG-15 (`size_of` of the node and record types re-blessed with the numbers), the physics pose/golden pins unchanged, G4/G5 of the tree re-measured through the feature (P0 protocol, quiet window) with the design's "not slower than the physics-owned tree" bar. | L |
+
+- **Order.** After the physics lane's U7 and after the tree broadphase's own C4/C5 (which are lever commits on
+  the physics campaign, not plan rungs); it does not block Phase F. The refactor campaign F4 treats the feature's
+  files as kernel files (RF-K waves), so SI1 lands before F4 or waits for it — never during.
+- **Size.** L. It retires nothing in the ledger by itself; the physics client's `broadphase_tree/` rows move to
+  the kernel's ledger group when the client is rewired.
+
 ### Phase F — tail
 
 | Rung | Scope |
@@ -548,6 +561,7 @@ F4:     RF-0 → {RF-K1, RF-K2, RF-K3, RF-L} → RF-V, RF-R (both need O4) → R
 MQ:     D-M6 → MQ-13 → {D-M6r, D-M6w} (only if a U-19 overturn fires) ; D-S2 → MQ-03 ;
         D-E0 → MQ-18 ; D-E20 → MQ-21 ; RP-0 → MQ-22 ; RP-2 → MQ-23          (none blocks a rung)
 M:      Stage 1 = D-S1(ii) (+ MS-08 with A6); Stage 3 after Phase-D exit (05 §7)
+SI:     {U7, D-S2, D-E8, tree broadphase C4/C5 on the trunk} → SI1   (kernel-feature lane, §2 Phase E; before F4 or after it, never during)
 ```
 
 ## 4. Worktrees, file locks and the order of shared edits
