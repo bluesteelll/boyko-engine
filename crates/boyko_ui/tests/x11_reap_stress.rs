@@ -272,8 +272,12 @@ fn reload_over_recycled_roots_leaves_the_strangers_untouched() {
          root(s) — without this the gate below would pass over a reload that never happened",
         fresh.len()
     );
+    // The disjunct `!wanted.contains(&e.id()) ||` stood here and was DEAD:
+    // `churn_until_recycled` returns ONLY entities whose id is in `wanted`, so for every
+    // stranger the left side is false and the right side is the only one that ever decides -
+    // it could weaken this assertion and could never strengthen it.
     assert!(
-        fresh.iter().all(|e| !wanted.contains(&e.id()) || !strangers.contains(e)),
+        fresh.iter().all(|e| !strangers.contains(e)),
         "the respawned document must not BE one of the strangers"
     );
 
