@@ -201,8 +201,14 @@ The repair belongs in those two crates, not in the gate.
 
 ### The ignored suite — legs by what the machine has
 
-The four commands above run **none** of the `#[ignore]`d tests — **336 sites (185 unconditional +
-151 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-22 on `merge/ke16-into-ecsnative` after the A5 batch merge.** The last move, 335 → 336, is +1 plain `gpu-windowed:` in
+The four commands above run **none** of the `#[ignore]`d tests — **339 sites (188 unconditional +
+151 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-22 on `merge/a7-ui-advanced` after the advanced-UI merge.** The last move, 336 → 339, is +3 plain measurement harnesses in
+`boyko_render/tests/ui_s0_measure.rs` (`measure_gather_baseline`,
+`measure_gather_with_sprite_components`, `measure_seam_static_and_changed`, all reading
+"measurement harness - run explicitly with `--ignored --nocapture`"), the only ignore sites the
+advanced-UI lane brought; they are DEVICE-FREE and carry no class prefix, so they are three more
+of the unclassified plain reasons the closed vocabulary below counts. The `cfg_attr` count did not
+move. The move before it, 335 → 336, is +1 plain `gpu-windowed:` in
 `boyko_app/tests/sdf_room_ddgi_dump.rs` (`sdf_room_ddgi_screenshot_dump`, the SDFDDGI host-hook
 A/B device gate, under `#![cfg(windows)]`), the only ignore site the five A5 lanes brought; the
 `cfg_attr` count did not move. The move before it, 334 → 335 (measured after A5.1, which added no
@@ -223,8 +229,10 @@ attributed by `git diff` against each merge's second parent — the light-table 
 in `boyko_physics/tests/narrowphase_parallel_equivalence.rs`
 (`jolt_pyramid_parallel_narrowphase_is_bit_identical`, L5 C3). The light-table lane's own "324"
 was 320 + 4 on its branch point, which predates the L2 calibration's +7 and the simd_solve +1; an
-independent enumeration reproduces 336 / 185 / 151 across 10 crates and 1,667 `.rs` files walked
-(1,652 at `6b29c400`, +6 from the tree-broadphase merge, +1 root test from A5.1, +2 `boyko_render`
+independent enumeration reproduces 339 / 188 / 151 across 10 crates and 1,696 `.rs` files walked
+(1,667 at `6a733f26`, +29 from the advanced-UI merge — 14 `boyko_render` tests, 7 `boyko_ui` tests,
+2 `boyko_ui` sources, 3 `boyko_shaderdsl`, 2 `boyko_render` sources and 1 `boyko_render` bench, of
+which only `ui_s0_measure.rs` carries ignore sites; 1,652 at `6b29c400`, +6 from the tree-broadphase merge, +1 root test from A5.1, +2 `boyko_render`
 tests from A5.2, +1 `boyko_rhi_vulkan` test from A5.3, +4 from A5.4 — the dump gate above, its
 composed-plugin twin, the octahedral-border host oracle and the probe-update `spv_sync` — and +1
 from the batch's own follow-up `04e69776`, which moved the host-hook gate out of `src/plugins.rs`
@@ -351,7 +359,7 @@ not a census: the 150 plain reasons that carry no prefix have not been classifie
 ⚠️ **The device-free leg is one test, and it is an explicit invocation rather than a filter,
 because the partition CANNOT be derived from the reason strings.** A keyword classifier over
 `{GPU, RTX, Vulkan, windowed, device, dispatch}` put 10 on the device-free side — of the 143 plain
-sites the tree held when the experiment was run, 185 today — and **8 of those 10 are wrong**, wrong
+sites the tree held when the experiment was run, 188 today — and **8 of those 10 are wrong**, wrong
 in the direction that produces a green:
 
 - `negative_chained_barrier_hazard` and `a5_gpu_off_vs_on_wall_clock_ab` **do** need a device; their
