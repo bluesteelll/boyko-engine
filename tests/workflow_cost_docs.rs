@@ -201,6 +201,29 @@ fn roots() -> [(&'static str, PathBuf); 6] {
 /// external roots — see the module header.
 const EXECUTED_ROWS: usize = 43;
 
+/// Rows that CANNOT run on any machine, each with the reason — the floor's one escape hatch, and
+/// a narrow one.
+///
+/// **It does not lower [`EXECUTED_ROWS`].** The assertion below is `executed + exempted ==
+/// EXECUTED_ROWS`, so the population stays 43 and a row that silently stops running still reds;
+/// what an entry here buys is the right for ONE named row to be counted as unrunnable instead of
+/// as a miss. Every entry is asserted to have actually been unrunnable: an entry whose row runs
+/// again — because its evidence came back, or because someone re-pointed it at a live tree —
+/// reds as loudly as a new miss, so this list can only shrink.
+///
+/// P27's figure `1204/138` is a working-tree state of a document that lived only in the lane
+/// session's scratchpad (see [`SCRATCH_IS_GONE`]); it is in no commit, here or anywhere, so the
+/// row can never reproduce and re-taking it is not possible. The three candidate repairs were:
+/// lower the floor (forbidden by [`EXECUTED_ROWS`]'s own doc, and it is this campaign's signature
+/// defect), delete the row (the document would then carry the figure with no provenance at all),
+/// or record what is true — that the row is unrunnable by construction. The third is taken.
+const UNRUNNABLE_ROWS: &[(&str, &str)] = &[(
+    "P27",
+    "`head -1 a1r_refute.md` in the lane session's scratchpad, which no longer exists (measured \
+     2026-09-22); the figure 1204/138 is a working-tree state committed nowhere, so the row \
+     cannot reproduce on this or any machine — orchestrator ruling 2026-09-23",
+)];
+
 /// The reason all seven agent-transcript coordinates in [`CITATION_EXEMPTIONS`] carry.
 ///
 /// They name documents that lived only in the lane session's scratchpad, under the SYSTEM TEMP
@@ -211,11 +234,9 @@ const EXECUTED_ROWS: usize = 43;
 /// further along: that one was never committed; these were never committed AND their carrier has
 /// since been deleted. Exempting them RECORDS that; it does not excuse it.
 ///
-/// ONE row of the provenance table has the same cause and is deliberately NOT resolved with it:
-/// P27 runs `head -1 a1r_refute.md` in that same directory, so it cannot run at all, and
-/// [`EXECUTED_ROWS`] states in its own doc comment that the floor must never be lowered to match a
-/// green. Choosing between lowering it, deleting the row and leaving the target red is a ruling for
-/// the owner rather than a repair, so it is left red and reported.
+/// ONE row of the provenance table has the same cause: P27 runs `head -1 a1r_refute.md` in that
+/// same directory, so it cannot run at all. It is handled by [`UNRUNNABLE_ROWS`], not by lowering
+/// [`EXECUTED_ROWS`] — the ruling and its shape are written there (orchestrator, 2026-09-23).
 const SCRATCH_IS_GONE: &str =
     "an agent transcript that lived only in the lane session's scratchpad under the system temp \
      dir; that directory no longer exists (measured 2026-09-22), so the coordinate resolves \
@@ -517,6 +538,7 @@ fn every_provenance_row_reproduces() {
     let mut bad = Vec::new();
     let mut executed = 0usize;
     let mut unrunnable = Vec::new();
+    let mut exempted: Vec<&str> = Vec::new();
 
     for r in &rows {
         // Link 1: the prose fragment is in the document it claims.
@@ -541,7 +563,16 @@ fn every_provenance_row_reproduces() {
             continue;
         };
         if !root.is_dir() {
-            unrunnable.push(format!("{} (root `{}` = {} is absent)", r.id, r.cwd, root.display()));
+            if let Some((id, _)) = UNRUNNABLE_ROWS.iter().find(|(id, _)| *id == r.id) {
+                exempted.push(id);
+            } else {
+                unrunnable.push(format!(
+                    "{} (root `{}` = {} is absent)",
+                    r.id,
+                    r.cwd,
+                    root.display()
+                ));
+            }
             continue;
         }
         match Command::new("bash").arg("-c").arg(&r.cmd).current_dir(root).output() {
@@ -569,10 +600,25 @@ fn every_provenance_row_reproduces() {
         rows.len(),
         bad.join("\n  ")
     );
+    let stale: Vec<&str> = UNRUNNABLE_ROWS
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| !exempted.contains(id))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "UNRUNNABLE_ROWS names {stale:?}, which this run did NOT find unrunnable — either the row \
+         ran (delete the entry) or it is not in the table any more (delete the entry). The list \
+         only shrinks."
+    );
     assert_eq!(
-        executed, EXECUTED_ROWS,
-        "the provenance table ran {executed} rows, not the {EXECUTED_ROWS} this machine must run. \
-         Rows it could not run: {unrunnable:?}. This assertion exists because a check that quietly \
-         skips a population is this campaign's signature defect — do not lower it to match a green."
+        executed + exempted.len(),
+        EXECUTED_ROWS,
+        "the provenance table ran {executed} rows and accounts for {} as unrunnable by \
+         construction ({exempted:?}), which is not the {EXECUTED_ROWS} this machine must reach. \
+         Rows it could not run and nothing names: {unrunnable:?}. This assertion exists because a \
+         check that quietly skips a population is this campaign's signature defect — do not lower \
+         it to match a green; name the row in UNRUNNABLE_ROWS with its reason instead.",
+        exempted.len()
     );
 }
