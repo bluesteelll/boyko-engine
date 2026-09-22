@@ -25,6 +25,19 @@
 //!   1 / 8 / 64 distinct slots at N ∈ {256, 2048}. No threshold: the point of the number
 //!   is whether Model A (a runtime atlas) ever becomes worth reaching for, and that is a
 //!   judgement recorded in S7, not a CI gate. A timing assert here would be a flake.
+//!
+//! # CI gate
+//!
+//! A GPU-less / loader-less host makes `VulkanContext::boot` return `Err` and both tests
+//! skip gracefully (the `ui_rect_gpu_golden` convention). **A skip is not a pass**: set
+//! `BOYKO_UI_GOLDEN_REQUIRE_DEVICE=1` and a skip becomes a failure. ADDED 2026-09-22 (A7
+//! follow-up) - this file had no such guard.
+//!
+//! **`BOYKO_DISABLE_VALIDATION=1` is NOT a skip** either, since the same repair. It removes
+//! the messenger, not the device, so the grid is still rendered, read back and asserted, and
+//! only the messenger oracle degrades to a NOTE (`common::assert_validation_clean`'s rule).
+//! Until then the M3-b vehicle above reported `ok` under the very env var CLAUDE.md
+//! prescribes for GPU work, having read back nothing.
 
 mod common;
 
@@ -287,19 +300,33 @@ fn render_leg(rhi: &mut RhiContext, instances: &[UiInstance], repeats: u32) -> L
 }
 
 /// Boots, builds the table + `MAX_SLOTS` distinct solid textures, and runs `body` with the
-/// issued slots. Returns `false` on a device-less / validation-less host.
+/// issued slots. Returns `false` only on a DEVICE-LESS host; a device whose validation layer
+/// is off still renders, and the grid is still read back and asserted.
 fn with_many_slots(test: &str, body: impl FnOnce(&mut RhiContext, &[u32])) -> bool {
     let Some(ctx) = boot_or_skip(test) else {
         return false;
     };
-    println!("Vulkan device (validation on): {}", ctx.device_name());
+    println!(
+        "Vulkan device: {} (validation {})",
+        ctx.device_name(),
+        if ctx.validation_enabled() { "ON" } else { "OFF - BOYKO_DISABLE_VALIDATION" }
+    );
     if !ctx.validation_enabled() {
+        // The box-level escape hatch removes the MESSENGER, not the device: the picture is
+        // still renderable, and the picture is what this gate exists for. Returning `false`
+        // here abandoned the whole comparison under `BOYKO_DISABLE_VALIDATION=1` - the
+        // convention CLAUDE.md prescribes for GPU work - so the test printed the device name,
+        // printed a SKIP and reported `ok` without looking at a pixel. The validation oracle
+        // degrades to a NOTE instead, exactly as `common::assert_validation_clean` already
+        // does for this case, and the body below still runs.
         assert!(
             std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
             "validation must be active when enable_validation is set and the escape hatch is absent"
         );
-        eprintln!("SKIP {test}: validation disabled (BOYKO_DISABLE_VALIDATION)");
-        return false;
+        eprintln!(
+            "NOTE {test}: validation disabled (BOYKO_DISABLE_VALIDATION) - the messenger oracle \
+             is skipped, the picture is still compared"
+        );
     }
 
     let mut rhi = RhiContext::new(ctx);
@@ -390,7 +417,13 @@ fn ui_sprite_divergent_slots_each_quad_samples_its_own_texture() {
         },
     );
     if !ran {
-        eprintln!("SKIP: no device / no validation layer");
+        eprintln!("SKIP: no device");
+        assert!(
+            std::env::var_os("BOYKO_UI_GOLDEN_REQUIRE_DEVICE").is_none(),
+            "BOYKO_UI_GOLDEN_REQUIRE_DEVICE is set: this run demanded the device leg and \
+             the leg SKIPPED. A skip is not a pass - the grid was never read back, so M3-b \
+             was never given a chance to red."
+        );
     }
 }
 
@@ -441,6 +474,12 @@ fn ui_sprite_slot_divergence_measurement_10_1() {
         }
     });
     if !ran {
-        eprintln!("SKIP: no device / no validation layer");
+        eprintln!("SKIP: no device");
+        assert!(
+            std::env::var_os("BOYKO_UI_GOLDEN_REQUIRE_DEVICE").is_none(),
+            "BOYKO_UI_GOLDEN_REQUIRE_DEVICE is set: this run demanded the device leg and \
+             the leg SKIPPED. Nothing is asserted here, but a skip still prints no numbers - \
+             10.1 was never measured."
+        );
     }
 }

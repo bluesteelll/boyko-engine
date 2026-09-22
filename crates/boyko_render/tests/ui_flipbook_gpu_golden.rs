@@ -46,11 +46,15 @@
 //!
 //! # CI gate
 //!
-//! A GPU-less / loader-less / validation-less host skips gracefully. **A skip is
-//! not a pass**: set `BOYKO_UI_GOLDEN_REQUIRE_DEVICE=1` and a skip becomes a
-//! failure. The guard is replicated here rather than inherited, because
-//! `boot_or_skip` exits 0 and `BOYKO_UI_GOLDEN_REQUIRE_DEVICE` is not a shared
-//! helper.
+//! A GPU-less / loader-less host skips gracefully. **A skip is not a pass**: set
+//! `BOYKO_UI_GOLDEN_REQUIRE_DEVICE=1` and a skip becomes a failure. The guard is
+//! replicated here rather than inherited, because `boot_or_skip` exits 0 and
+//! `BOYKO_UI_GOLDEN_REQUIRE_DEVICE` is not a shared helper.
+//!
+//! **`BOYKO_DISABLE_VALIDATION=1` is NOT a skip** (repaired 2026-09-22, A7 follow-up):
+//! it removes the messenger, not the device, so both pictures are still rendered and
+//! compared and only the messenger oracle degrades to a NOTE
+//! (`common::assert_validation_clean`'s rule).
 
 mod common;
 
@@ -467,19 +471,33 @@ fn render(
 }
 
 /// Boots, builds the table + the 16×16 procedural sheet, and runs `body`.
-/// Returns `false` when the host has no device / no validation layer.
+/// Returns `false` only when the host has NO DEVICE; a device whose validation layer
+/// is off still renders, and the picture is still compared.
 fn with_sheet(test: &str, body: impl FnOnce(&mut RhiContext, &BindlessTextureTable, u32)) -> bool {
     let Some(ctx) = boot_or_skip(test) else {
         return false;
     };
-    println!("Vulkan device (validation on): {}", ctx.device_name());
+    println!(
+        "Vulkan device: {} (validation {})",
+        ctx.device_name(),
+        if ctx.validation_enabled() { "ON" } else { "OFF - BOYKO_DISABLE_VALIDATION" }
+    );
     if !ctx.validation_enabled() {
+        // The box-level escape hatch removes the MESSENGER, not the device: the picture is
+        // still renderable, and the picture is what this gate exists for. Returning `false`
+        // here abandoned the whole comparison under `BOYKO_DISABLE_VALIDATION=1` - the
+        // convention CLAUDE.md prescribes for GPU work - so the test printed the device name,
+        // printed a SKIP and reported `ok` without looking at a pixel. The validation oracle
+        // degrades to a NOTE instead, exactly as `common::assert_validation_clean` already
+        // does for this case, and the body below still runs.
         assert!(
             std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
             "validation must be active when enable_validation is set and the escape hatch is absent"
         );
-        eprintln!("SKIP {test}: validation disabled (BOYKO_DISABLE_VALIDATION)");
-        return false;
+        eprintln!(
+            "NOTE {test}: validation disabled (BOYKO_DISABLE_VALIDATION) - the messenger oracle \
+             is skipped, the picture is still compared"
+        );
     }
 
     let mut rhi = RhiContext::new(ctx);
