@@ -1308,9 +1308,9 @@ static G12C_SEEN: AtomicUsize = AtomicUsize::new(0);
 #[ignore = "deferred: DenseStore::arch_presence is not re-seeded when an entity that already \
             carries a dense component is migrated by a TABLE attach — a pre-existing kernel \
             defect (routes: add_tag, the typed Commands::insert, and now S1's table arm). \
-            RED by design until that kernel change lands; see docs/OPEN-QUESTIONS.md. \
-            NOTE: no `ignore_reasons_census.rs` exists on this branch, so this class prefix is \
-            forward-compatible convention only — nothing mechanically checks it here."]
+            RED by design until that kernel change lands; see docs/OPEN-QUESTIONS.md. NOTE: \
+            `tests/ignore_reasons_census.rs` exists here and counts this site, but it enforces a \
+            non-empty reason only, so this class prefix is convention with no check behind it."]
 fn g12c_a_dense_carrying_victim_stays_visible_to_a_dense_query_after_a_table_attach() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
     let mut world = EcsMaster::new();
@@ -2219,9 +2219,9 @@ unsafe fn g17_byid_remove(_w: DeferredEcsMaster<'_>, _c: ObserverContext) {
             remove_tag (tag_api.rs:234), so repairing it changes remove_tag too and belongs \
             to its own kernel change, not to this rung. The add_tag half \
             (migrate_entity_attach_ids) has the same gap and lands with it. RED by design \
-            until that change lands; see docs/OPEN-QUESTIONS.md. NOTE: no \
-            `ignore_reasons_census.rs` exists on this branch, so this class prefix is \
-            forward-compatible convention only — nothing mechanically checks it here."]
+            until that change lands; see docs/OPEN-QUESTIONS.md. NOTE: \
+            `tests/ignore_reasons_census.rs` DOES exist here and counts this site, but it \
+            enforces a non-empty reason only, so the class prefix is convention only."]
 fn g17_entity_targeted_remove_observers_fire_through_the_by_id_seam_as_through_the_typed_one() {
     let mut ecs = EcsMaster::new();
     let gone_id = G17Gone::component_id();

@@ -350,10 +350,14 @@ M2's JCGT cubic lands (`brick_field_is_conservative_lower_bound`,
 `trilinear_reconstruct_is_a_tight_lower_bound_in_r1`), and one *timing probe* documented "NOT a CI
 gate" (`no_starvation_every_worker_makes_progress`). None of those six carries a vocabulary prefix.
 **A further 18 sites do carry one** (17 `deferred:`, 1 `generator:`, measured 2026-09-18 after the
-A7 merge), in `boyko_ecs` (9), `boyko_serialize` (5), `boyko_physics` (2 — the flicker generator and
-the AVX2 signed-zero proptest; the A7 lane's four red-first tests are no longer plain ignores), and
-`boyko_ui` (2); each is red or silent by design and belongs to no routine leg either. 24 is a floor,
-not a census: the 147 plain reasons that carry no prefix have not been classified.
+A7 merge and RE-MEASURED 2026-09-22 on `merge/a6-reflection` — still 18, and still `boyko_ecs` (9),
+`boyko_serialize` (5), `boyko_physics` (2), `boyko_ui` (2), but NOT the same 18: A3 resolved two
+`deferred:` in `boyko_ecs` and the A6 reflection lane brought two more there, `seam_by_id.rs:1308`
+and `:2217`), in `boyko_ecs` (9), `boyko_serialize` (5), `boyko_physics` (2 — the flicker generator
+and the AVX2 signed-zero proptest; the A7 lane's four red-first tests are no longer plain ignores),
+and `boyko_ui` (2); each is red or silent by design and belongs to no routine leg either. 24 is a
+floor, not a census: the 148 plain reasons that carry no vocabulary prefix have not been
+classified.
 
 ⚠️ **The device-free leg is one test, and it is an explicit invocation rather than a filter,
 because the partition CANNOT be derived from the reason strings.** A keyword classifier over
@@ -377,29 +381,41 @@ checked by the same census: `#[ignore = "<class>: <prose>"]` with `class` one of
 `solo` (device-free, needs `--test-threads=1`), `slow` (device-free, wall-clock budget),
 `miri-slow`, `miri-unsupported` (Miri cannot execute what the test needs AT ALL — a child process,
 a custom `#[global_allocator]` — where `miri-slow` means it would finish, given time; 6 sites, the
-A6 lane's, all `cfg_attr(miri, …)`), `generator`, `deferred`, `flaky`. **The claim that the tree
+THREADPOOL A6 lane's — `a6_panic_propagation.rs` ×5 and `a6_panicked_scope_chunk_receipts.rs` ×1,
+that A6 and not the reflection merge dated below — all `cfg_attr(miri, …)`), `generator`,
+`deferred`, `flaky`. **The claim that the tree
 maps onto it "exactly" was true of a 143-site tree and is not true now:** that mapping (135
 `gpu*`/`feature`, 1 `solo`, 1 `miri-slow`, 3 `generator`, 2 `deferred`, 1 `flaky`) sums to 143
-against **185** plain sites today.
-The migration has started at the sites, not in this list: **38 of the 185 plain reasons already
-carry a prefix** — 15 `deferred:`, 20 `gpu-windowed:`, 2 `slow:`, 1 `generator:` (measured
-2026-09-21 on `merge/a5-batch` after A5.4, whose one new site arrived prefixed `gpu-windowed:`;
+against **188** plain sites today.
+The migration has started at the sites, not in this list: **40 of the 188 plain reasons already
+carry a prefix** — 17 `deferred:`, 20 `gpu-windowed:`, 2 `slow:`, 1 `generator:` (measured
+2026-09-22 on `merge/a6-reflection`, by the same `ignore_reasons_census` walk that produced the
+352 / 188 / 164 at `:204-205`; the A6 reflection lane brought three plain sites, two of them
+`deferred:` and one `calibration:`; 38 of 185 on `merge/a5-batch` 2026-09-21 after A5.4, whose one new site arrived prefixed `gpu-windowed:`;
 37 of 184 @ `6b29c400`: 36 of 183 on the union earlier that day, then the hwrt shadow-origin
 lane added three `gpu-windowed:` and A3 resolved two `deferred:`; 31 of 178 on 2026-09-18 after
 the boot-validation merge, whose ten new
 device tests all carry `gpu-windowed:`; the light-table lane then added four `gpu-windowed:` and
 the narrowphase lane one `slow:`, so every plain site the two lanes brought arrived prefixed; the
-A7 merge before them removed four `deferred:` plain sites by resolving them) — and the other 147
-do not, the same 147 as on 2026-09-18. The 20 `gpu-windowed:` are `boot_validation_clean.rs` 7,
+A7 merge before them removed four `deferred:` plain sites by resolving them) — and the other 148
+do not: the 147 that stood from 2026-09-18 through A5, plus the one plain site the A6 lane brought
+whose prefix the vocabulary does not contain. **Three of those 148 do carry a prefix**, just not one
+from the list — `M2:` ×2 (`boyko_sdf_math/src/brick/tests.rs:140`, `:461`) and `calibration:` ×1
+(`reflect_fixture/tests/reflect_absence_census.rs:785`) — the plain-side twin of the 29 counted
+below. The 20 `gpu-windowed:` are `boot_validation_clean.rs` 7,
 `unwritten_shadow_map_gate.rs` 4, `sdf_marcher_sun.rs` 3, `taa_jitter_eval.rs` 3,
 `forward_teardown_destroys_forward_sets.rs`
 1, `vb_teardown_destroys_boot_resources.rs` 1, `sdf_room_ddgi_dump.rs` 1. So the migration is still mechanical *per site*, and
 afterwards each leg is a `grep` and every new ignore picks its own leg at the site; what it is not
 is bookkeeping already done.
 
-The `cfg_attr` side is further along and has already outgrown the list. Of the 151 (measured
-2026-09-21 on `merge/a5-batch`): **93 `miri-slow:`, 19 `instrument:`, 9 `tractability:`, 6 `miri-unsupported:`, 6
-`slow:`, 1 `miri-arm:`, 17 with no prefix.** `instrument:` (the `boyko_threadpool` `block.rs`
+The `cfg_attr` side is further along and has already outgrown the list. Of the 164 (measured
+2026-09-22 on `merge/a6-reflection`): **93 `miri-slow:`, 19 `instrument:`, 9 `tractability:`, 6
+`miri-unsupported:`, 6 `slow:`, 1 `miri-arm:`, 30 with no prefix.** It was 151 with 17 unprefixed on
+`merge/a5-batch` (2026-09-21), and the whole difference is the A6 reflection lane: its **13** new
+`cfg_attr` sites are all in `crates/boyko_reflect` and **every one of them arrived without a
+prefix** — so this side moved backwards in the same merge that added `miri-unsupported` to the
+vocabulary. `instrument:` (the `boyko_threadpool` `block.rs`
 recording-allocator tape), `tractability:` and `miri-arm:` — **29 sites** — are prefixes the closed
 vocabulary above does not contain, and the census's own error text uses `tractability:` as its
 example; the census enforces non-emptiness only, so nothing flags them. Either the list grows or
