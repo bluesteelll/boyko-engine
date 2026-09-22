@@ -1206,17 +1206,17 @@ pub struct RcasActivation<'a> {
 pub struct ShadowVisActivation<'a> {
     /// The VIS-variant resolve pipeline (`deferred_pbr_hwrt_vis.comp` /
     /// [`crate::compute::deferred_pbr_vis_spirv`]) — runs the inline Vogel `rayQuery` trace and
-    /// WRITES `gShadowVis` (the 22-binding VIS/DENOISED layout's binding 21) instead of lighting.
+    /// WRITES `gShadowVis` (the 23-binding VIS/DENOISED layout's binding 22) instead of lighting.
     /// Dispatched as the à-trous pre-pass at the resolve's 1D group count BEFORE the à-trous
     /// passes. Its layout is [`Self::resolve_layout`].
     pub vis_pipeline: &'a ComputePipeline,
     /// The DENOISED-variant resolve pipeline (`deferred_pbr_hwrt_denoised.comp` /
-    /// [`crate::compute::deferred_pbr_denoised_spirv`]) — reads the FILTERED `gShadowVis` (@21) and
+    /// [`crate::compute::deferred_pbr_denoised_spirv`]) — reads the FILTERED `gShadowVis` (@22) and
     /// runs the full lighting. Bound as the resolve pipeline (in place of the RESOLVE_INLINE-hwrt
     /// pipeline) when this activation is `Some`. Its layout is [`Self::resolve_layout`].
     pub denoised_pipeline: &'a ComputePipeline,
-    /// The 22-binding VIS/DENOISED resolve bind-group LAYOUT (the 21-binding RESOLVE_INLINE-hwrt
-    /// layout + `gShadowVis` STORAGE image @21). BOTH [`Self::vis_pipeline`] +
+    /// The 23-binding VIS/DENOISED resolve bind-group LAYOUT (the 22-binding RESOLVE_INLINE-hwrt
+    /// layout + `gShadowVis` STORAGE image @22). BOTH [`Self::vis_pipeline`] +
     /// [`Self::denoised_pipeline`] declare it at set 0. The renderer writes the per-FIF VIS +
     /// DENOISED resolve sets against it once per extent.
     pub resolve_layout: &'a VulkanBindGroupLayout,
@@ -2268,8 +2268,9 @@ pub struct GBufferScene<'a> {
     /// a `not(hwrt)` build has it absent entirely.
     #[cfg(feature = "hwrt")]
     pub resolve_pipeline_hwrt: Option<&'a ComputePipeline>,
-    /// R2a-4b: the 20-binding bind-group LAYOUT [`Self::resolve_pipeline_hwrt`] declares at set 0
-    /// (the 19 software bindings + binding 19 `AccelerationStructure`). `Some` iff
+    /// R2a-4b: the 22-binding bind-group LAYOUT [`Self::resolve_pipeline_hwrt`] declares at set 0
+    /// (the 19 software bindings + binding 19 `AccelerationStructure` + binding 20 the soft-shadow
+    /// UBO + binding 21 the raster depth image, lane fix/hwrt-shadow-ray-origin). `Some` iff
     /// [`Self::resolve_pipeline_hwrt`] is `Some` (they are built + selected in lock-step); the
     /// record-site binds [`GBufferTargets::resolve_set_hwrt`] against THIS layout when routing is
     /// Hardware, never the software [`Self::resolve_layout`].
@@ -2285,8 +2286,10 @@ pub struct GBufferScene<'a> {
     /// (no AS descriptor is written).
     #[cfg(feature = "hwrt")]
     pub resolve_tlas_hwrt: Option<[&'a BoundAccelStruct; FRAMES_IN_FLIGHT]>,
-    /// HW-RT rung 1b: the HWRT soft-shadow-params UBO ring
-    /// (`boyko_render::ResolvedRayShadow`, 16 B — cone/tmax/tmin/bias) the HWRT resolve set
+    /// HW-RT rung 1b: the HWRT soft-shadow-params UBO ring — 48 B: the cold
+    /// `boyko_render::ResolvedRayShadow` head (cone/tmax/tmin/bias, 16 B) + the hot per-frame
+    /// `boyko_render::RayShadowFrame` tail (the rung-3b seed, the shadow-ray origin mode and the
+    /// raster's jittered forward, 32 B; lane fix/hwrt-shadow-ray-origin) — the HWRT resolve set
     /// binds at binding 20. Written ONLY into the HWRT resolve set (the software resolve set
     /// stays EXACT at 19 bindings). The whole field is `#[cfg(hwrt)]`, so a `not(hwrt)` build
     /// has it absent entirely; the host supplies it only on an RT device
@@ -2713,7 +2716,7 @@ pub struct GBufferScene<'a> {
     /// `not(hwrt)` build has it absent entirely.
     #[cfg(feature = "hwrt")]
     pub shadow: Option<ShadowVisActivation<'a>>,
-    /// HW-RT rung 3a: the STABLE 22-binding VIS/DENOISED resolve bind-group LAYOUT (the same layout
+    /// HW-RT rung 3a: the STABLE 23-binding VIS/DENOISED resolve bind-group LAYOUT (the same layout
     /// [`ShadowVisActivation::resolve_layout`] carries when the per-frame gate opens). Populated from
     /// the boot VIS/DENOISED pipelines REGARDLESS of the per-frame [`Self::shadow`] activation —
     /// `Some` on EVERY frame the boot denoise pipelines exist (an RT + `hwrt` device), including the
@@ -2749,7 +2752,7 @@ pub struct GBufferScene<'a> {
     /// `atrous_levels == 0` ⇒ `shadow_vis` = the raw VIS). Derived from the runner's `atrous_levels`
     /// (`spatial ? clamped_levels() : 0` — the SAME parity the record + graph +
     /// [`ShadowVisActivation::final_is_vis2`] use — W1 consistency), threaded stably so the DENOISED
-    /// resolve set binds `gShadowVis` @21 + the temporal set binds `gVisIn` @0 to the correct final
+    /// resolve set binds `gShadowVis` @22 + the temporal set binds `gVisIn` @0 to the correct final
     /// ring at CREATE time, independent of the per-frame [`Self::shadow`] activation. When the
     /// activation IS present, it MUST equal [`ShadowVisActivation::final_is_vis2`] (asserted at the
     /// set-build site).
@@ -2791,16 +2794,16 @@ pub struct GBufferScene<'a> {
     #[cfg(feature = "hwrt")]
     pub mvpm_bind_group: Option<&'a VulkanBindGroup>,
     /// HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve pipeline
-    /// (`deferred_pbr_hwrt_vis_mv.comp`) — writes `gShadowVis` @21 (like the base VIS) AND each SDF
-    /// pixel's camera-only `Δuv` to `motion_vec` @23. Bound instead of
+    /// (`deferred_pbr_hwrt_vis_mv.comp`) — writes `gShadowVis` @22 (like the base VIS) AND each SDF
+    /// pixel's camera-only `Δuv` to `motion_vec` @24. Bound instead of
     /// [`ShadowVisActivation::vis_pipeline`] in the VIS pass ONLY when [`Self::sdf_mv_active`] (and
     /// the VIS pass runs, i.e. `Self::shadow.is_some()`). The recorder's ref — `Some` only on a
     /// temporal frame with the MV resources (mirrors [`Self::raster_pipeline_mv`]).
     /// `#[cfg(feature = "hwrt")]`.
     #[cfg(feature = "hwrt")]
     pub vis_mv_pipeline: Option<&'a ComputePipeline>,
-    /// HW-RT Rung 3b step 5b: the STABLE 24-binding VIS-MV resolve bind-group LAYOUT (the 22-binding
-    /// VIS/DENOISED layout + the `MotionCam` UBO @22 + the `motion_vec` STORAGE image @23). Populated
+    /// HW-RT Rung 3b step 5b: the STABLE 25-binding VIS-MV resolve bind-group LAYOUT (the 23-binding
+    /// VIS/DENOISED layout + the `MotionCam` UBO @23 + the `motion_vec` STORAGE image @24). Populated
     /// whenever the boot MV resources exist (an RT + storage device), REGARDLESS of the per-frame
     /// temporal gate (mirrors [`Self::resolve_layout_denoise_hwrt`]) — so
     /// [`GBufferTargets::build_shadow_vis_mv_resolve_set`](crate::present::targets) can write the
@@ -2808,7 +2811,7 @@ pub struct GBufferScene<'a> {
     /// non-hwrt device. `#[cfg(feature = "hwrt")]`.
     #[cfg(feature = "hwrt")]
     pub vis_mv_layout: Option<&'a VulkanBindGroupLayout>,
-    /// HW-RT Rung 3b step 5b: the STABLE `MotionCam` UBO ring the VIS-MV set binds @22 (the runner
+    /// HW-RT Rung 3b step 5b: the STABLE `MotionCam` UBO ring the VIS-MV set binds @23 (the runner
     /// uploads `MotionCam` into slot `frame_index` under the same temporal gate that feeds the mesh MV
     /// pass). Populated whenever the boot MV resources exist, like [`Self::vis_mv_layout`]; the VIS-MV
     /// set-build reads slot `fi`. `None` on a non-storage / non-hwrt device. `#[cfg(feature =
@@ -3955,7 +3958,7 @@ impl GBufferScene<'_> {
     /// declaration (`declare_deferred_graph`) and the VIS-pass recording (`record_gbuffer`) can never
     /// diverge (the W1 lesson, mirroring [`Self::mesh_mv_active`]).
     ///
-    /// True iff temporal is on AND the VIS-MV pipeline + its build-time inputs (the 24-binding
+    /// True iff temporal is on AND the VIS-MV pipeline + its build-time inputs (the 25-binding
     /// layout + the `MotionCam` UBO ring) all exist (an RT + RG16-storage device built them at boot).
     /// The pipeline/layout/ring presence is NOT implied by `temporal_enabled` alone: a device with
     /// RG16 storage but no ray-query (e.g. `BOYKO_FORCE_SOFTWARE=1`) allocates the `motion_vec`

@@ -116,12 +116,12 @@ TEST_NAME='tb_neg_m2w_block_reference'
 # it resolves to whatever rustup's default host tuple is, so the triple is spelled
 # in full there -- the same pin `tb_neg_gate.ps1` hard-codes.
 #
-# THE REASON FOR THE PIN HAS NOW CHANGED TWICE AND THE PIN HAS NOT MOVED ONCE,
-# which is the best argument there is for spelling it.
+# THE REASON FOR THE PIN CHANGED THREE TIMES BEFORE THE PIN MOVED ONCE, which is
+# the best argument there is for spelling it.
 #
 # Rev 1 (written 2026-09-04): a bare `+nightly` resolved to nightly-MSVC, for which
 # this box had no linker, so it died with exit 1 -- indistinguishable from a red
-# gate.
+# gate. The pin was `+nightly-x86_64-pc-windows-gnu`.
 #
 # Rev 2 (2026-09-10): both halves of rev 1 were gone -- rustup's default_host_tuple
 # had been rewritten to gnu on 2026-09-07 13:56 (file mtime), so a bare `+nightly`
@@ -130,28 +130,35 @@ TEST_NAME='tb_neg_m2w_block_reference'
 # installed nightlies were three months apart (`nightly-x86_64-pc-windows-gnu` miri
 # 2026-08-20 vs `nightly-x86_64-pc-windows-msvc` miri 2026-05-29).
 #
-# Rev 3, the live one: BOTH of rev 2's facts have flipped. MEASURED 2026-09-18 with
+# Rev 3 (2026-09-18): BOTH of rev 2's facts had flipped. MEASURED that day with
 # RUSTUP_TOOLCHAIN unset:
 #
 #   cargo +nightly-x86_64-pc-windows-gnu  miri --version -> miri 0.1.0 (8925ea358a 2026-08-20)
 #   cargo +nightly-x86_64-pc-windows-msvc miri --version -> miri 0.1.0 (a36d05efab 2026-09-09)
 #
-# The msvc nightly's miri is now three weeks NEWER, not three months older; and
-# `rustup set default-host x86_64-pc-windows-msvc` ran on 2026-09-17 14:27, so on
-# this box a bare `+nightly` selects the MSVC nightly once more. Currency has
-# stopped arguing for this pin and now argues against it.
+# The msvc nightly's miri was three weeks NEWER, not three months older, and
+# `rustup set default-host x86_64-pc-windows-msvc` had run on 2026-09-17 14:27, so
+# a bare `+nightly` selected the MSVC nightly once more. The pin stayed on gnu on
+# the one reason that was never a fact about version dates -- RECEIPT CONTINUITY:
+# the committed receipts had been produced by the gnu miri, and re-spelling this
+# line would have swapped the CHECKER under the receipts this script writes and
+# `tests/tb_neg_m2w_arm_present.rs` censuses, leaving a disagreement between a
+# committed receipt and a fresh run unattributable to code or instrument.
 #
-# THE PIN STAYS ANYWAY, on the one reason that was never a fact about version
-# dates: RECEIPT CONTINUITY. The receipts committed under
-# `docs/threadpool/receipts/` were produced by the gnu nightly's miri, and
-# `tests/tb_neg_m2w_arm_present.rs` censuses their existence and content.
-# Re-spelling this line would swap the CHECKER under the very receipts this script
-# writes and that census reads, so a disagreement between a committed receipt and a
-# fresh run could no longer be attributed to the code rather than to the
-# instrument. Moving the checker is its own change, carrying its own re-run of all
-# four receipts. Override with TB_NEG_TOOLCHAIN to try the other one.
+# Rev 4, the live one (2026-09-21, rung AH of the unification plan): THE PIN IS
+# `+nightly-x86_64-pc-windows-msvc`, and receipt continuity was discharged the only
+# way it could be -- all four seeds re-run on BOTH nightlies from one tree on one
+# day (the miri versions above, unchanged). The msvc receipts are the committed
+# `tb-neg-m2w-<seed>.stderr`; the gnu run sits beside each as
+# `tb-neg-m2w-<seed>.gnu.stderr`; `docs/threadpool/receipts/README.md` records
+# what differs between a pair (tag and allocation ids, the target-dir and
+# toolchain paths, a newer cargo's manifest lints) and what does not (the
+# diagnostic, both creation sites, the deallocating frame). The checker now
+# matches the gate host, msvc since 2026-09-10 (build recipes) and 2026-09-17
+# (rustup default). Override with TB_NEG_TOOLCHAIN for a gnu comparison run --
+# into a target dir of its own, and move the receipts aside before the msvc run.
 case "$(uname -s 2>/dev/null || echo unknown)" in
-    MINGW* | MSYS* | CYGWIN*) DEFAULT_TOOLCHAIN='+nightly-x86_64-pc-windows-gnu' ;;
+    MINGW* | MSYS* | CYGWIN*) DEFAULT_TOOLCHAIN='+nightly-x86_64-pc-windows-msvc' ;;
     *) DEFAULT_TOOLCHAIN='+nightly' ;;
 esac
 TOOLCHAIN="${TB_NEG_TOOLCHAIN:-$DEFAULT_TOOLCHAIN}"

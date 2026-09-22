@@ -1,0 +1,49 @@
+bp_g4_scene/all_pairs/1240
+                        time:   [1.8477 ms 1.8523 ms 1.8585 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+bp_g4_scene/grid_w1/1240
+                        time:   [5.4061 ms 5.4102 ms 5.4143 ms]
+bp_g4_scene/grid_w8/1240
+                        time:   [5.4156 ms 5.4466 ms 5.4955 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/tree/1240   time:   [441.11 µs 441.42 µs 441.72 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low severe
+  1 (10.00%) high mild
+bp_g4_scene/all_pairs/10000
+                        time:   [123.10 ms 123.22 ms 123.35 ms]
+bp_g4_scene/grid_w1/10000
+                        time:   [36.716 ms 36.832 ms 36.948 ms]
+bp_g4_scene/grid_w8/10000
+                        time:   [14.424 ms 14.668 ms 14.962 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+bp_g4_scene/tree/10000  time:   [4.8011 ms 4.8085 ms 4.8153 ms]
+bp_g4_scene/all_pairs/100000
+                        time:   [17.468 s 17.565 s 17.664 s]
+bp_g4_scene/grid_w1/100000
+                        time:   [335.87 ms 337.82 ms 340.22 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+bp_g4_scene/grid_w8/100000
+                        time:   [123.08 ms 124.18 ms 125.30 ms]
+bp_g4_scene/tree/100000 time:   [59.410 ms 59.710 ms 60.073 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+bp_g4_scene/all_pairs/j100
+                        time:   [1.8513 ms 1.8550 ms 1.8613 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/grid_w1/j100
+                        time:   [4.9763 ms 4.9811 ms 4.9863 ms]
+bp_g4_scene/grid_w8/j100
+                        time:   [4.9871 ms 4.9940 ms 5.0025 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/tree/j100   time:   [442.07 µs 442.82 µs 443.97 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+

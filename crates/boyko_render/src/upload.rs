@@ -922,32 +922,95 @@ pub unsafe fn upload_csm_ring(
     }
 }
 
+/// The HOT per-frame tail of the HWRT `RayShadowUbo` (UBO bytes @16..48) — written every HWRT
+/// frame by the runner, never resolve-derived (the cold/hot split
+/// [`upload_ray_shadow_ring`]'s doc states: the cold [`ResolvedRayShadow`] @0..16 is author
+/// policy re-derived by `resolve_ray_shadow_system`; these are the runner's own per-frame
+/// values).
+///
+/// `#[repr(C)]` POD, byte-mirroring `deferred_pbr.hlsl`'s `RayShadowUbo` fields
+/// `SHADOW_FRAME_SEED` @16, `SHADOW_ORIGIN_MODE` @20, the explicit std140 pad @24..32 and
+/// `SHADOW_RASTER_FWD` @32 (a `float4` cannot straddle a 16-B slot, so it lands at 32 whatever
+/// the packing — the pad makes the HLSL and Rust offsets agree by inspection; both are
+/// const-asserted below).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RayShadowFrame {
+    /// `SHADOW_FRAME_SEED` — the runner's monotonic frame index; advances the shadow ray's
+    /// Vogel-disk cone rotation by the golden angle every frame (rung 3b). UBO @16.
+    pub seed: u32,
+    /// `SHADOW_ORIGIN_MODE`: `0` = the legacy origin `P` on the b5 pixel ray (a STRUCTURAL
+    /// skip in the shader — `P_shadow` is a copy of `P`); `1` = the shadow-ray origin is
+    /// re-placed on the RASTER's jittered pixel ray for raster-owned pixels
+    /// (`eye + rd_r * gViewT`, exact for the Euclidean depth encode). The runner sets `1` iff
+    /// TAA is armed on a perspective camera. UBO @20.
+    pub origin_mode: u32,
+    /// std140 pad so `raster_fwd` lands at UBO @32 (asserted below). Always zero.
+    pub _pad: [u32; 2],
+    /// `SHADOW_RASTER_FWD`: `xyz` = [`raster_ray_forward`](crate::view::raster_ray_forward)
+    /// when `origin_mode == 1`, else zero; `w = 0`, unread. UBO @32.
+    pub raster_fwd: [f32; 4],
+}
+
+impl RayShadowFrame {
+    /// The `origin_mode == 0` frame: the legacy `P` origin, `raster_fwd` a structural zero.
+    #[inline]
+    #[must_use]
+    pub const fn legacy(seed: u32) -> Self {
+        Self { seed, origin_mode: 0, _pad: [0; 2], raster_fwd: [0.0; 4] }
+    }
+
+    /// The `origin_mode == 1` frame: the raster-ray origin with `fwd_r` from
+    /// [`raster_ray_forward`](crate::view::raster_ray_forward).
+    #[inline]
+    #[must_use]
+    pub const fn raster_ray(seed: u32, fwd_r: [f32; 3]) -> Self {
+        Self { seed, origin_mode: 1, _pad: [0; 2], raster_fwd: [fwd_r[0], fwd_r[1], fwd_r[2], 0.0] }
+    }
+}
+
+/// The byte size of the hot per-frame tail — `size_of::<RayShadowFrame>()` (32 B). The HWRT
+/// `RayShadowUbo` block is `RESOLVED_RAY_SHADOW_BYTES + RAY_SHADOW_FRAME_BYTES` (48 B); hosts
+/// size their per-FIF ring slots from that sum (single source — no hand-copied `48`).
+pub const RAY_SHADOW_FRAME_BYTES: usize = core::mem::size_of::<RayShadowFrame>();
+
+// Layout pins: the tail is exactly two std140 vec4 slots, and `raster_fwd` sits at UBO @32
+// (`RESOLVED_RAY_SHADOW_BYTES` (16) + 16). A change is a deliberate decision (the HWRT resolve's
+// binding-20 cbuffer reads these offsets).
+const _: () = assert!(RAY_SHADOW_FRAME_BYTES == 32);
+const _: () = assert!(core::mem::offset_of!(RayShadowFrame, seed) == 0);
+const _: () = assert!(core::mem::offset_of!(RayShadowFrame, origin_mode) == 4);
+const _: () = assert!(core::mem::offset_of!(RayShadowFrame, raster_fwd) == 16);
+const _: () = assert!(RESOLVED_RAY_SHADOW_BYTES + core::mem::offset_of!(RayShadowFrame, raster_fwd) == 32);
+
 /// Copies the resolved [`ResolvedRayShadow`] (the HWRT `rayQuery` mesh-shadow tuning —
 /// cone/tmax/tmin/bias, byte-identical to the HWRT resolve's binding-20 UBO shape, see
-/// [`RESOLVED_RAY_SHADOW_BYTES`]) PLUS the rung-3b `frame_index` seed into ONE HWRT
+/// [`RESOLVED_RAY_SHADOW_BYTES`]) PLUS the hot per-frame [`RayShadowFrame`] tail (the rung-3b
+/// seed, the shadow-ray origin mode and the raster's jittered forward) into ONE HWRT
 /// shadow-params-UBO ring slot — the per-frame upload of the HWRT resolve path (mirroring
 /// [`upload_csm_ring`]).
 ///
-/// `frame_index` lands at UBO byte offset [`RESOLVED_RAY_SHADOW_BYTES`] (16), matching the
-/// HLSL `RayShadowUbo.SHADOW_FRAME_SEED` field — it advances the shadow ray's Vogel-disk cone
-/// rotation by the golden angle every frame so the temporal shadow denoiser has something to
-/// average. It is packed HERE, not routed through the cold [`ResolvedRayShadow`] resolve: it
-/// is a HOT per-frame counter (the runner's monotonic frame index), not author-tunable policy,
-/// so folding it into the cold resolve would force a needless extra write of the other four
-/// scalars every frame for no benefit (one-producer-per-field, cold/hot separation).
+/// `frame` lands at UBO byte offset [`RESOLVED_RAY_SHADOW_BYTES`] (16), matching the HLSL
+/// `RayShadowUbo` fields `SHADOW_FRAME_SEED` @16, `SHADOW_ORIGIN_MODE` @20 and
+/// `SHADOW_RASTER_FWD` @32. It is packed HERE, not routed through the cold
+/// [`ResolvedRayShadow`] resolve: these are HOT per-frame values (the runner's monotonic frame
+/// index, this frame's TAA arm state and jitter), not author-tunable policy, so folding them
+/// into the cold resolve would force a needless extra write of the other four scalars every
+/// frame for no benefit (one-producer-per-field, cold/hot separation).
 ///
 /// Uploaded every HWRT frame (the runner gates the CALL on `feature = "hwrt"` +
 /// `ray_query_enabled()`, the SAME gate that mints the ring), exactly like
 /// [`upload_csm_ring`]: `resolve_ray_shadow_system` re-derives the 16-byte UBO from the cold
 /// [`RayShadowConfig`](crate::ray_shadow_config::RayShadowConfig) each frame, so a boot-seed
-/// would go stale the moment the author retunes, and the 20-byte memcpy pair is cheaper than a
-/// change gate. A default config + `frame_index == 0` uploads the byte-identical R2a-4b consts.
+/// would go stale the moment the author retunes, and the 48-byte memcpy pair is cheaper than a
+/// change gate. A default config + [`RayShadowFrame::legacy`]`(0)` uploads the byte-identical
+/// R2a-4b consts with the legacy origin.
 ///
 /// # Panics
 ///
-/// Panics if `ring_slot.size` is smaller than `RESOLVED_RAY_SHADOW_BYTES + 4` (20 B — the
-/// resolved mirror plus the `frame_index` seed): the memcpy pair would be out-of-bounds (UB),
-/// so the guard is a hard assert in every build.
+/// Panics if `ring_slot.size` is smaller than `RESOLVED_RAY_SHADOW_BYTES + RAY_SHADOW_FRAME_BYTES`
+/// (48 B): the memcpy pair would be out-of-bounds (UB), so the guard is a hard assert in every
+/// build.
 ///
 /// # Safety
 ///
@@ -961,17 +1024,17 @@ pub unsafe fn upload_ray_shadow_ring(
     token: &FrameWriteToken,
     ring_slot: &BoundBuffer,
     resolved: &ResolvedRayShadow,
-    frame_index: u32,
+    frame: &RayShadowFrame,
 ) {
     // The borrow IS the fence proof — see `upload_camera_ring`.
     let _ = token;
 
     // Hard bound BEFORE the memcpy pair (review P1 discipline): an undersized slot would make
-    // the 20-byte write out-of-bounds. One compare per frame.
-    const RAY_SHADOW_UBO_WRITE_BYTES: usize = RESOLVED_RAY_SHADOW_BYTES + 4;
+    // the 48-byte write out-of-bounds. One compare per frame.
+    const RAY_SHADOW_UBO_WRITE_BYTES: usize = RESOLVED_RAY_SHADOW_BYTES + RAY_SHADOW_FRAME_BYTES;
     assert!(
         ring_slot.size as usize >= RAY_SHADOW_UBO_WRITE_BYTES,
-        "HWRT shadow-params UBO slot too small: {} bytes < the {}-byte ResolvedRayShadow + frame-seed mirror",
+        "HWRT shadow-params UBO slot too small: {} bytes < the {}-byte ResolvedRayShadow + RayShadowFrame mirror",
         ring_slot.size,
         RAY_SHADOW_UBO_WRITE_BYTES
     );
@@ -980,16 +1043,16 @@ pub unsafe fn upload_ray_shadow_ring(
         .mapped
         .expect("invariant: the HWRT shadow-params UBO slot is host-visible mapped");
     // SAFETY: `resolved` is a live `#[repr(C)]` POD of exactly `RESOLVED_RAY_SHADOW_BYTES`
-    // (const-asserted at its definition) with no padding holes (4 packed `f32`s), so reading its
-    // raw bytes is defined. `frame_index.to_le_bytes()` is a 4-byte stack array, always valid to
-    // read. `mapped` targets >= `ring_slot.size >= RAY_SHADOW_UBO_WRITE_BYTES` (20) valid mapped
-    // host-coherent bytes (hard-asserted above), so both writes — `[0..16)` then `[16..20)` via
-    // `mapped.add(RESOLVED_RAY_SHADOW_BYTES)` — are in-bounds and non-overlapping. The borrowed
-    // `FrameWriteToken` + the slot-identity contract prove this slot's in-flight fence was
-    // waited THIS frame (the previous occupant's resolve finished its UBO reads; the sibling
-    // frame binds the other slot) — race-free, lock-free. Within `mapped` the two destination
-    // ranges `[0..16)` and `[16..20)` are non-overlapping, and each copy's src and dst are
-    // distinct allocations.
+    // (const-asserted at its definition) with no padding holes (4 packed `f32`s), and `frame` a
+    // live `#[repr(C)]` POD of exactly `RAY_SHADOW_FRAME_BYTES` (const-asserted above) whose
+    // only "padding" is the explicit, always-written `_pad` field — so reading either's raw
+    // bytes is defined. `mapped` targets >= `ring_slot.size >= RAY_SHADOW_UBO_WRITE_BYTES` (48)
+    // valid mapped host-coherent bytes (hard-asserted above), so both writes — `[0..16)` then
+    // `[16..48)` via `mapped.add(RESOLVED_RAY_SHADOW_BYTES)` — are in-bounds and
+    // non-overlapping. The borrowed `FrameWriteToken` + the slot-identity contract prove this
+    // slot's in-flight fence was waited THIS frame (the previous occupant's resolve finished its
+    // UBO reads; the sibling frame binds the other slot) — race-free, lock-free. Each copy's src
+    // and dst are distinct allocations.
     unsafe {
         core::ptr::copy_nonoverlapping(
             (resolved as *const ResolvedRayShadow).cast::<u8>(),
@@ -997,9 +1060,9 @@ pub unsafe fn upload_ray_shadow_ring(
             RESOLVED_RAY_SHADOW_BYTES,
         );
         core::ptr::copy_nonoverlapping(
-            frame_index.to_le_bytes().as_ptr(),
+            (frame as *const RayShadowFrame).cast::<u8>(),
             mapped.as_ptr().add(RESOLVED_RAY_SHADOW_BYTES),
-            4,
+            RAY_SHADOW_FRAME_BYTES,
         );
     }
 }
@@ -1467,12 +1530,28 @@ mod tests {
         }
     }
 
-    /// The rung-3b write footprint — `RESOLVED_RAY_SHADOW_BYTES` (the resolved mirror)
-    /// plus the 4-byte `frame_index` seed `upload_ray_shadow_ring` appends — is 20 B,
-    /// the minimum a host ring slot must be minted at for the upload to not panic.
+    /// The write footprint — `RESOLVED_RAY_SHADOW_BYTES` (the cold resolved mirror) plus the
+    /// 32-byte hot `RayShadowFrame` tail `upload_ray_shadow_ring` appends — is 48 B, the
+    /// minimum a host ring slot must be minted at for the upload to not panic.
     #[test]
-    fn ray_shadow_ring_write_is_20_bytes() {
-        assert_eq!(RESOLVED_RAY_SHADOW_BYTES + 4, 20);
+    fn ray_shadow_ring_write_is_48_bytes() {
+        assert_eq!(RESOLVED_RAY_SHADOW_BYTES + RAY_SHADOW_FRAME_BYTES, 48);
+        assert_eq!(RAY_SHADOW_FRAME_BYTES, 32);
+        assert_eq!(core::mem::offset_of!(RayShadowFrame, raster_fwd), 16);
+    }
+
+    /// An undersized slot (the pre-lane 32-byte block) is refused BEFORE the memcpy.
+    #[test]
+    #[should_panic(expected = "HWRT shadow-params UBO slot too small")]
+    fn ray_shadow_ring_refuses_a_32_byte_slot() {
+        let mut storage = [0u8; 32];
+        let slot = fake_slot(&mut storage);
+        // SAFETY: no GPU device exists in this process (see the test below).
+        let token = unsafe { FrameWriteToken::forge_unfenced(0) };
+        // SAFETY: `slot.mapped` targets live storage; the size assert fires before any write.
+        unsafe {
+            upload_ray_shadow_ring(&token, &slot, &ResolvedRayShadow::default(), &RayShadowFrame::legacy(0));
+        }
     }
 
     /// The resolved mirror stays exactly 16 B: the rung-3b frame seed rides in the SAME
@@ -1484,34 +1563,52 @@ mod tests {
         assert_eq!(RESOLVED_RAY_SHADOW_BYTES, 16);
     }
 
-    /// `upload_ray_shadow_ring` packs the resolved mirror into `[0..16)` and
-    /// `frame_index` (little-endian) into `[16..20)` — the exact byte shape the HLSL
+    /// `upload_ray_shadow_ring` packs the resolved mirror into `[0..16)`, the seed
+    /// (little-endian) into `[16..20)`, the origin mode into `[20..24)`, zeroes into
+    /// `[24..32)` and the raster forward into `[32..48)` — the exact byte shape the HLSL
     /// `RayShadowUbo` cbuffer reads (`cone_radius/tmax/tmin/bias` @0, `SHADOW_FRAME_SEED`
-    /// @16).
+    /// @16, `SHADOW_ORIGIN_MODE` @20, `SHADOW_RASTER_FWD` @32).
     #[test]
-    fn ray_shadow_ring_packs_resolved_and_frame_seed() {
-        let mut storage = [0xAAu8; 32];
+    fn ray_shadow_ring_packs_resolved_and_frame_tail() {
+        let mut storage = [0xAAu8; 48];
         let slot = fake_slot(&mut storage);
         let resolved = ResolvedRayShadow { cone_radius: 0.035, tmax: 1e4, tmin: 1e-3, bias: 1e-3 };
-        let frame_index = 0x1234_5678u32;
+        let frame = RayShadowFrame::raster_ray(0x1234_5678, [0.25, -0.5, 0.75]);
 
         // SAFETY: no GPU device exists in this process, so no submitted work can
         // reference slot 0 — the `forge_unfenced` no-fence-needed setup contract holds
         // trivially (mirrors `boyko_app`'s `zero_alloc.rs` test usage).
         let token = unsafe { FrameWriteToken::forge_unfenced(0) };
-        // SAFETY: `slot.mapped` targets `storage`'s live 32-byte backing (owned by this
-        // stack frame, outliving the call) — `slot.size == 32 >= 20` satisfies the hard
-        // bound the fn asserts. The token/slot contract holds trivially (see above).
+        // SAFETY: `slot.mapped` targets `storage`'s live 48-byte backing (owned by this
+        // stack frame, outliving the call) — `slot.size == 48` satisfies the hard bound
+        // the fn asserts. The token/slot contract holds trivially (see above).
         unsafe {
-            upload_ray_shadow_ring(&token, &slot, &resolved, frame_index);
+            upload_ray_shadow_ring(&token, &slot, &resolved, &frame);
         }
 
-        let mut expected = [0u8; 16];
+        let mut expected = [0u8; 48];
         expected[0..4].copy_from_slice(&resolved.cone_radius.to_le_bytes());
         expected[4..8].copy_from_slice(&resolved.tmax.to_le_bytes());
         expected[8..12].copy_from_slice(&resolved.tmin.to_le_bytes());
         expected[12..16].copy_from_slice(&resolved.bias.to_le_bytes());
-        assert_eq!(&storage[0..16], &expected);
-        assert_eq!(&storage[16..20], &frame_index.to_le_bytes());
+        expected[16..20].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        expected[20..24].copy_from_slice(&1u32.to_le_bytes());
+        // [24..32) stays zero (the explicit std140 pad).
+        expected[32..36].copy_from_slice(&0.25f32.to_le_bytes());
+        expected[36..40].copy_from_slice(&(-0.5f32).to_le_bytes());
+        expected[40..44].copy_from_slice(&0.75f32.to_le_bytes());
+        expected[44..48].copy_from_slice(&0.0f32.to_le_bytes());
+        assert_eq!(&storage[..], &expected[..]);
+    }
+
+    /// The legacy frame carries mode 0 and an all-zero forward (a structural zero, so the
+    /// shader's `SHADOW_ORIGIN_MODE == 0` skip never reads it).
+    #[test]
+    fn ray_shadow_frame_legacy_is_mode_zero() {
+        let f = RayShadowFrame::legacy(7);
+        assert_eq!(f, RayShadowFrame { seed: 7, origin_mode: 0, _pad: [0; 2], raster_fwd: [0.0; 4] });
+        let r = RayShadowFrame::raster_ray(7, [1.0, 2.0, 3.0]);
+        assert_eq!(r.origin_mode, 1);
+        assert_eq!(r.raster_fwd, [1.0, 2.0, 3.0, 0.0]);
     }
 }

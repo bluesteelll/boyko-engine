@@ -1,0 +1,5 @@
+row_identity_churn/stable/sleeping_on_tree
+                        time:   [4.0578 ms 4.0646 ms 4.0718 ms]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+

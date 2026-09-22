@@ -478,7 +478,7 @@ impl ArchetypeMaster {
         let archetype_id = archetype.id();
 
         // Extract component IDs before moving the archetype
-        let component_ids = archetype.component_ids().to_vec();
+        let component_ids = archetype.all_component_ids().to_vec();
 
         // Register with the bundle
         self.archetypes.add_archetype(archetype);
@@ -739,7 +739,11 @@ impl ArchetypeMaster {
         let source_archetype = self.get_archetype(source_archetype_id)?;
 
         // Get all component IDs from the source archetype
-        let mut new_components = source_archetype.component_ids().to_vec();
+        // KE14 D1: DELIBERATELY the declaration record. `get_or_create_archetype`
+        // filters this list into a signature itself, and carrying the poolless ids
+        // through is what keeps a dense/bitset declarer's `flags (…)` reaching the
+        // derived archetype (KE10). Screening here would re-open D4 on a new path.
+        let mut new_components = source_archetype.all_component_ids().to_vec();
 
         // Check if the component already exists in the archetype
         if new_components.contains(&component_id) {
@@ -764,14 +768,16 @@ impl ArchetypeMaster {
         let source_archetype = self.get_archetype(source_archetype_id)?;
         
         // Get all component IDs from the source archetype
-        let new_components: Vec<ComponentId> = source_archetype.component_ids()
+        // KE14 D1: the declaration record, for the same reason as
+        // `add_component_to_archetype` above.
+        let new_components: Vec<ComponentId> = source_archetype.all_component_ids()
             .iter()
             .filter(|&&c| c != component_id)
             .copied()
             .collect();
         
         // If no components were removed, return the source archetype
-        if new_components.len() == source_archetype.component_ids().len() {
+        if new_components.len() == source_archetype.all_component_ids().len() {
             return Some(source_archetype_id);
         }
         
@@ -835,7 +841,7 @@ impl ArchetypeMaster {
     /// stable [`ObserverId`] for later [`Self::remove_observer`] (Phase 14b).
     ///
     /// On the FIRST observer for `(kind, cid)` (the `(kind, cid)` list goes
-    /// empty → non-empty), this walks every archetype containing `cid` and
+    /// empty → non-empty), this walks every archetype that DECLARES `cid` and
     /// raises its `ON_{kind}_OBSERVER` bit so the structural-op fire sites
     /// dispatch to the new observer (Bevy's `Archetypes::update_flags`). On a
     /// non-first add the bit is already set, so no walk runs (O(1)).
@@ -847,13 +853,24 @@ impl ArchetypeMaster {
     ) -> ObserverId {
         let (id, became_nonempty) = self.observer_registry.add(kind, cid, runner);
         if became_nonempty {
-            // Add-first walk: raise the bit on every archetype containing `cid`.
-            // Idempotent OR — preserves the hook bit and every other kind's bit.
-            // `iter_archetypes_mut` borrows `self.archetypes`; the registry
-            // mutation above has already ended, so no registry borrow is live.
+            // Add-first walk: raise the bit on every archetype that DECLARES
+            // `cid`. Idempotent OR — preserves the hook bit and every other
+            // kind's bit. `iter_archetypes_mut` borrows `self.archetypes`; the
+            // registry mutation above has already ended, so no registry borrow
+            // is live.
+            //
+            // KE14 D1: `declares_component_id` (the declaration record), NOT
+            // `has_component_id` (the signature mask). A dense `cid` is absent
+            // from every mask by construction, so the mask test made this walk
+            // skip exactly the archetypes that needed the bit — the observer
+            // then never fired for any archetype minted BEFORE it was
+            // registered. Matches the two mint seeds, which OR
+            // `insert_from_observers` over the full declaration list
+            // (`create_archetype`'s caller slice, `add_existing_archetype`'s
+            // `all_component_ids()`).
             let bit = Self::observer_bit(kind);
             for archetype in self.iter_archetypes_mut() {
-                if archetype.has_component_id(cid) {
+                if archetype.declares_component_id(cid) {
                     archetype.flags.insert(bit);
                 }
             }
@@ -867,11 +884,11 @@ impl ArchetypeMaster {
     /// (Phase 14b).
     ///
     /// On removal of the LAST observer for its `(kind, cid)` pair, this
-    /// recomputes the `ON_{kind}_OBSERVER` bit on every archetype containing
-    /// `cid`: the bit stays set iff some *sibling* component in that archetype
-    /// still has a `kind` observer; otherwise it is cleared (the hook bit and
-    /// the other kinds' bits are preserved by the masked write). On a non-last
-    /// removal no walk runs (the bit stays correct, O(1)).
+    /// recomputes the `ON_{kind}_OBSERVER` bit on every archetype that DECLARES
+    /// `cid`: the bit stays set iff some *sibling* DECLARED component in that
+    /// archetype still has a `kind` observer; otherwise it is cleared (the hook
+    /// bit and the other kinds' bits are preserved by the masked write). On a
+    /// non-last removal no walk runs (the bit stays correct, O(1)).
     pub fn remove_observer(&mut self, id: ObserverId) -> bool {
         let Some((kind, cid, became_empty)) = self.observer_registry.remove(id) else {
             return false;
@@ -883,12 +900,40 @@ impl ArchetypeMaster {
             let bit = Self::observer_bit(kind);
             let reg = &self.observer_registry;
             for archetype in self.archetypes.iter_mut() {
-                if archetype.has_component_id(cid) {
+                // KE14 D1: `declares_component_id`, not `has_component_id` —
+                // see `add_observer`. Skipping a dense declarer here leaves the
+                // bit RAISED with nothing observing it (the mirror of the
+                // add-side face).
+                if archetype.declares_component_id(cid) {
                     // `cid`'s list is now empty (removed above), so this is true
                     // iff some OTHER component in the archetype still observes
                     // `kind`.
+                    //
+                    // KE14 D1: the DECLARATION record, matching the mint seed
+                    // (`insert_from_observers`, which walks the full id list at
+                    // both funnels). Reading `table_component_ids` here makes a
+                    // dense sibling invisible, so the bit is CLEARED on an
+                    // archetype one of whose DECLARED components still has a
+                    // `kind` observer — a state no mint can produce, i.e. the
+                    // same divergence the tripwire fires on, reached from the
+                    // other side.
+                    //
+                    // Note what this is NOT: it does not silence a dense
+                    // observer. Every dense fire path is flag-free by
+                    // construction (`dense_insert_and_fire`,
+                    // `dense_remove_and_fire`,
+                    // `dense_despawn_fire_and_tombstone`, the `dense_fire_buf`
+                    // drains, `materialize_dense_memberships`), and every
+                    // flag-gated loop iterates a table-only id set. The bit is
+                    // kept on the declaration record because it is a GATE: an
+                    // extra raise costs one early-out pass, a missing raise
+                    // loses fires, and a future gated loop carrying a dense id
+                    // would be KE10 verbatim. Gated in release by
+                    // `tests/ke14_dense_observer_flag_declaration_membership.rs`,
+                    // whose assertions survive `--release` (the tripwire does
+                    // not).
                     let any_sibling = archetype
-                        .component_ids()
+                        .all_component_ids()
                         .iter()
                         .any(|&sib| reg.has_observer(kind, sib));
                     if any_sibling {
@@ -918,7 +963,13 @@ impl ArchetypeMaster {
 
     /// Debug-only tripwire (Phase 14b §1): asserts that every archetype's
     /// `ON_*_OBSERVER` bits exactly reflect the registry — a bit is set iff some
-    /// component in the archetype has ≥1 observer of that kind.
+    /// DECLARED component of the archetype has ≥1 observer of that kind.
+    ///
+    /// "Declared", not "columned": the invariant is stated over
+    /// [`Archetype::all_component_ids`] because that is the set the two mint
+    /// seeds OR over (`insert_from_observers` at `create_archetype` and
+    /// `add_existing_archetype`) and the set the fire sites dispatch over. See
+    /// [`Archetype::declares_component_id`] (KE14 D1).
     ///
     /// Walks the SHARED `iter_archetypes()` iterator (read-only). Called at the
     /// three sites that can change a bit: both seed sites (`create_archetype`,
@@ -936,8 +987,21 @@ impl ArchetypeMaster {
         ];
         for archetype in self.iter_archetypes() {
             for (kind, bit) in KINDS {
+                // KE14 D1: the DECLARATION list — the same set the OBSERVER
+                // seed (`insert_from_observers`) walks at both mint funnels,
+                // which is what makes this an oracle rather than a second
+                // opinion.
+                //
+                // The pre-fix comment here cited `insert_from_hooks`, which is
+                // the wrong seed: that one raises the ON_*_HOOK bits, and it is
+                // table-only precisely because it runs PAST `create_by_ids`'s
+                // `is_signature_storage` screen. The OBSERVER seed sits above
+                // any such screen. Checking this assertion against the table
+                // list therefore compared the observer bits to a set their
+                // writer never used, and fired on every archetype whose dense
+                // declarer had an observer.
                 let expected = archetype
-                    .component_ids()
+                    .all_component_ids()
                     .iter()
                     .any(|&cid| self.observer_registry.has_observer(kind, cid));
                 debug_assert_eq!(

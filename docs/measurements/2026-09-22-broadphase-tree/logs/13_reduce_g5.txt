@@ -1,0 +1,280 @@
+records 159 warm-ups 2 attempts 157 used 156 re-runs 1 contaminated 0 excluded slots 0
+| cell | K | median ms | min | max | range % | IQR % | SE % | [0,100) med | [100,500) med | poses | expect_pose | void max |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| R-allpairs@W1 | 6 | 13.9059 | 13.6707 | 14.0529 | 2.75 | 0.32 | 0.46 | 13.989104000000001 | 13.88489925 | 0xee2a67a98434919a | none | 0 |
+| R-tree@W1 | 6 | 12.3082 | 12.2217 | 12.7038 | 3.92 | 1.17 | 0.75 | 12.4395045 | 12.292036249999999 | 0xee2a67a98434919a | match none | 0 |
+| S16-allpairs@W1 | 6 | 0.0450 | 0.0445 | 0.0459 | 3.01 | 1.59 | 0.60 | 0.048449 | 0.044077375 | 0x71313833f6a8e645 | none | 0 |
+| S16-tree@W1 | 6 | 0.0448 | 0.0445 | 0.0458 | 3.08 | 1.83 | 0.65 | 0.048821 | 0.043899 | 0x71313833f6a8e645 | match none | 0 |
+| T-A-allpairs@W1 | 6 | 19.5711 | 19.4435 | 19.6971 | 1.30 | 0.34 | 0.22 | 19.307986999999997 | 19.62904 | 0x32d5e235342b4143 | none | 0 |
+| T-A-allpairs-armed@W1 | 6 | 19.5546 | 19.2706 | 19.7255 | 2.33 | 0.71 | 0.41 | 19.194523 | 19.63019675 | 0x32d5e235342b4143 | none | 0 |
+| T-A-tree@W1 | 6 | 17.8887 | 17.7909 | 18.1075 | 1.77 | 0.48 | 0.32 | 17.567967 | 17.955778875 | 0x32d5e235342b4143 | match none | 0 |
+| T-A-tree-armed@W1 | 6 | 17.8700 | 17.7608 | 18.1505 | 2.18 | 1.08 | 0.44 | 17.692348000000003 | 17.945561374999997 | 0x32d5e235342b4143 | match none | 0 |
+| T-C-tree@W1 | 6 | 18.7639 | 18.6803 | 18.9201 | 1.28 | 0.45 | 0.24 | 18.539049 | 18.824414625000003 | 0x32d5e235342b4143 | match | 0 |
+| T-D-allpairs@W1 | 6 | 10.5537 | 10.4639 | 10.7378 | 2.60 | 1.05 | 0.49 | 10.44483 | 10.580865625000001 | 0x32d5e235342b4143 | none | 0 |
+| T-D-tree@W1 | 6 | 9.0262 | 8.9176 | 9.0917 | 1.93 | 0.97 | 0.38 | 8.9661645 | 9.034236374999999 | 0x32d5e235342b4143 | match none | 0 |
+| T-A-allpairs@W2 | 6 | 12.2700 | 12.1556 | 12.2920 | 1.11 | 0.80 | 0.26 | 12.096851000000001 | 12.308054375000001 | 0x32d5e235342b4143 | none | 0 |
+| T-A-tree@W2 | 6 | 10.5878 | 10.5113 | 10.6917 | 1.70 | 0.76 | 0.32 | 10.4738065 | 10.621708125 | 0x32d5e235342b4143 | match none | 0 |
+| T-A-allpairs@W4 | 6 | 8.5305 | 8.5081 | 8.7359 | 2.67 | 1.46 | 0.59 | 8.4633495 | 8.54671525 | 0x32d5e235342b4143 | none | 0 |
+| T-A-tree@W4 | 6 | 6.8738 | 6.8258 | 7.0866 | 3.79 | 1.37 | 0.73 | 6.82385 | 6.88640425 | 0x32d5e235342b4143 | match none | 0 |
+| R-allpairs@W8 | 6 | 6.8474 | 6.6937 | 7.4401 | 10.90 | 2.65 | 2.00 | 6.92734 | 6.78108 | 0xee2a67a98434919a | none | 0 |
+| R-tree@W8 | 6 | 5.3097 | 5.0855 | 5.4814 | 7.46 | 5.38 | 1.65 | 5.2036155 | 5.3200775 | 0xee2a67a98434919a | match none | 0 |
+| T-A-allpairs@W8 | 6 | 6.6421 | 6.5817 | 6.7404 | 2.39 | 1.26 | 0.47 | 6.5866245 | 6.6560063750000005 | 0x32d5e235342b4143 | none | 0 |
+| T-A-allpairs-armed@W8 | 6 | 6.6947 | 6.6057 | 7.0288 | 6.32 | 2.19 | 1.21 | 6.6348275 | 6.709665375 | 0x32d5e235342b4143 | none | 0 |
+| T-A-tree@W8 | 6 | 5.0234 | 5.0006 | 5.0812 | 1.60 | 0.51 | 0.29 | 4.9907865000000005 | 5.03156625 | 0x32d5e235342b4143 | match none | 0 |
+| T-A-tree-armed@W8 | 6 | 5.0186 | 5.0118 | 5.2985 | 5.71 | 2.85 | 1.28 | 5.020258999999999 | 5.02102675 | 0x32d5e235342b4143 | match none | 0 |
+| T-C-tree@W8 | 6 | 5.3397 | 5.2935 | 6.0387 | 13.96 | 1.74 | 2.78 | 5.336271 | 5.308177499999999 | 0x32d5e235342b4143 | match | 0 |
+| T-D-allpairs@W8 | 6 | 5.4905 | 5.3267 | 5.5493 | 4.05 | 2.15 | 0.84 | 5.3120575 | 5.534973375 | 0x32d5e235342b4143 | none | 0 |
+| T-D-tree@W8 | 6 | 3.6987 | 3.6880 | 3.7706 | 2.23 | 0.79 | 0.44 | 3.6967775 | 3.69945675 | 0x32d5e235342b4143 | match none | 0 |
+| T-A-allpairs@W16 | 6 | 6.4863 | 6.4383 | 6.5832 | 2.23 | 0.90 | 0.42 | 6.4692205000000005 | 6.489746125 | 0x32d5e235342b4143 | none | 0 |
+| T-A-tree@W16 | 6 | 4.9258 | 4.8693 | 5.1730 | 6.17 | 0.91 | 1.15 | 4.916115 | 4.925286375 | 0x32d5e235342b4143 | match none | 0 |
+
+| comparison (B vs A) | A median | B median | ratio | effect % | bar range % | bar IQR % | bar SE % | claimed (range / IQR / SE) |
+|---|---|---|---|---|---|---|---|---|
+| T-A-tree vs T-A-allpairs @W1 | 19.5711 (K=6) | 17.8887 (K=6) | 0.9140 | -8.60 | 4.39 | 1.18 | 0.78 | True / True / True |
+| T-A-tree vs T-A-allpairs @W2 | 12.2700 (K=6) | 10.5878 (K=6) | 0.8629 | -13.71 | 4.07 | 2.19 | 0.83 | True / True / True |
+| T-A-tree vs T-A-allpairs @W4 | 8.5305 (K=6) | 6.8738 (K=6) | 0.8058 | -19.42 | 9.28 | 4.00 | 1.88 | True / True / True |
+| T-A-tree vs T-A-allpairs @W8 | 6.6421 (K=6) | 5.0234 (K=6) | 0.7563 | -24.37 | 5.75 | 2.72 | 1.11 | True / True / True |
+| T-A-tree vs T-A-allpairs @W16 | 6.4863 (K=6) | 4.9258 (K=6) | 0.7594 | -24.06 | 13.12 | 2.56 | 2.45 | True / True / True |
+| T-D-tree vs T-D-allpairs @W1 | 10.5537 (K=6) | 9.0262 (K=6) | 0.8553 | -14.47 | 6.47 | 2.86 | 1.23 | True / True / True |
+| R-tree vs R-allpairs @W1 | 13.9059 (K=6) | 12.3082 (K=6) | 0.8851 | -11.49 | 9.57 | 2.43 | 1.75 | True / True / True |
+| T-A-tree-armed vs T-A-allpairs-armed @W1 | 19.5546 (K=6) | 17.8700 (K=6) | 0.9139 | -8.61 | 6.38 | 2.59 | 1.20 | True / True / True |
+| T-C-tree vs T-A-tree @W1 | 17.8887 (K=6) | 18.7639 (K=6) | 1.0489 | +4.89 | 4.37 | 1.31 | 0.79 | True / True / True |
+| T-A-tree-armed vs T-A-tree (arming cost) @W1 | 17.8887 (K=6) | 17.8700 (K=6) | 0.9990 | -0.10 | 5.62 | 2.36 | 1.08 | False / False / False |
+| T-D-tree vs T-D-allpairs @W8 | 5.4905 (K=6) | 3.6987 (K=6) | 0.6737 | -32.63 | 9.26 | 4.59 | 1.91 | True / True / True |
+| R-tree vs R-allpairs @W8 | 6.8474 (K=6) | 5.3097 (K=6) | 0.7754 | -22.46 | 26.41 | 12.00 | 5.19 | False / True / True |
+| T-A-tree-armed vs T-A-allpairs-armed @W8 | 6.6947 (K=6) | 5.0186 (K=6) | 0.7496 | -25.04 | 17.04 | 7.19 | 3.52 | True / True / True |
+| T-C-tree vs T-A-tree @W8 | 5.0234 (K=6) | 5.3397 (K=6) | 1.0630 | +6.30 | 28.10 | 3.62 | 5.60 | False / True / True |
+| T-A-tree-armed vs T-A-tree (arming cost) @W8 | 5.0234 (K=6) | 5.0186 (K=6) | 0.9990 | -0.10 | 11.87 | 5.79 | 2.62 | False / False / False |
+| S16-tree vs S16-allpairs @W1 | 0.0450 (K=6) | 0.0448 (K=6) | 0.9962 | -0.38 | 8.61 | 4.84 | 1.77 | False / False / False |
+| T-D-allpairs (this binary) vs window-3 D-L5 @W1 (the bridge) | 10.7379 (K=6) | 10.5537 (K=6) | 0.9828 | -1.72 | 5.57 | 2.57 | 1.08 | False / False / True |
+| T-D-tree vs window-3 Jolt v5.6.0 @W1 | 9.8282 (K=6) | 9.0262 (K=6) | 0.9184 | -8.16 | 37.76 | 6.89 | 7.04 | False / True / True |
+| T-D-allpairs (this binary) vs window-3 D-L5 @W8 (the bridge) | 5.3474 (K=6) | 5.4905 (K=6) | 1.0268 | +2.68 | 15.20 | 5.49 | 3.00 | False / False / False |
+| T-D-tree vs window-3 Jolt v5.6.0 @W8 | 2.5693 (K=6) | 3.6987 (K=6) | 1.4396 | +43.96 | 48.73 | 6.37 | 9.56 | False / True / True |
+| T-A-tree vs window-3 Jolt v5.6.0 @W1 | 9.8282 (K=6) | 17.8887 (K=6) | 1.8201 | +82.01 | 37.73 | 6.69 | 7.03 | True / True / True |
+| T-A-tree vs window-3 Jolt v5.6.0 @W2 | 5.7705 (K=6) | 10.5878 (K=6) | 1.8348 | +83.48 | 5.24 | 2.31 | 1.00 | True / True / True |
+| T-A-tree vs window-3 Jolt v5.6.0 @W4 | 3.5814 (K=6) | 6.8738 (K=6) | 1.9193 | +91.93 | 11.06 | 5.46 | 2.21 | True / True / True |
+| T-A-tree vs window-3 Jolt v5.6.0 @W8 | 2.5693 (K=6) | 5.0234 (K=6) | 1.9552 | +95.52 | 48.64 | 6.26 | 9.54 | True / True / True |
+| T-A-tree vs window-3 Jolt v5.6.0 @W16 | 2.3885 (K=6) | 4.9258 (K=6) | 2.0623 | +106.23 | 16.29 | 7.07 | 3.21 | True / True / True |
+
+GATE INPUTS
+{
+ "Delta-bp @W1": {
+  "allpairs_bp_span_mean_0_500_ms": 2.034062789,
+  "tree_bp_span_mean_0_500_ms": 0.516688568,
+  "allpairs_bp_span_med_100_500_ms": 2.0291335,
+  "tree_bp_span_med_100_500_ms": 0.47622575,
+  "Delta_bp_mean_ms": 1.517374221,
+  "Delta_bp_med_ms": 1.55290775
+ },
+ "tree span @W1": {
+  "median_over_K_of_per_process_median_100_500_ms": 0.475557,
+  "per_process": [
+   0.4755735,
+   0.472724,
+   0.473409,
+   0.4780725,
+   0.4755405,
+   0.479451
+  ],
+  "limit_ms": 0.36
+ },
+ "t_q @W1": {
+  "median_over_K_of_per_process_median_100_500_ms": 0.41396350000000004,
+  "mean_100_500_ms": 0.452424545
+ },
+ "structure T-A-tree-armed @W1": {
+  "void_steps_max": 0,
+  "first_void": [
+   "None"
+  ],
+  "span_n_sets": [
+   "[(1.0, 1.0, 1.0, 1.0)]"
+  ],
+  "queried_plus_members_set": [
+   "[1241.0]"
+  ],
+  "members_set": [
+   "[0.0, 1.0]"
+  ]
+ },
+ "structure T-A-allpairs-armed @W1": {
+  "void_steps_max": 0,
+  "first_void": [
+   "None"
+  ],
+  "span_n_sets": [
+   "[(0.0, 0.0, 0.0, 0.0)]"
+  ],
+  "queried_plus_members_set": [
+   "[0]"
+  ],
+  "members_set": [
+   "[0.0]"
+  ]
+ },
+ "structure T-C-tree @W1": {
+  "void_steps_max": 0,
+  "first_void": [
+   "None"
+  ],
+  "span_n_sets": [
+   "[(1.0, 1.0, 1.0, 1.0)]"
+  ],
+  "queried_plus_members_set": [
+   "[1241.0]"
+  ],
+  "members_set": [
+   "[0.0, 1.0]"
+  ]
+ },
+ "canary @W1": {
+  "canary_ns_per_process": [
+   905374,
+   895721,
+   889545,
+   889545,
+   893153,
+   891253
+  ],
+  "canary_span_med_ms_per_process": [
+   0.905714,
+   0.896092,
+   0.889842,
+   0.889924,
+   0.893509,
+   0.89159
+  ],
+  "T-C-tree_median_ms": 18.7639403,
+  "T-A-tree_median_ms": 17.8887469,
+  "step_rise_ms": 0.8751934000000006,
+  "canary_ns_median_ms": 0.892203
+ },
+ "Delta-bp @W8": {
+  "allpairs_bp_span_mean_0_500_ms": 1.9540550909999999,
+  "tree_bp_span_mean_0_500_ms": 0.469965044,
+  "allpairs_bp_span_med_100_500_ms": 1.954266,
+  "tree_bp_span_med_100_500_ms": 0.4665125,
+  "Delta_bp_mean_ms": 1.4840900469999998,
+  "Delta_bp_med_ms": 1.4877535000000002
+ },
+ "tree span @W8": {
+  "median_over_K_of_per_process_median_100_500_ms": 0.4662455,
+  "per_process": [
+   0.4687205,
+   0.467209,
+   0.4658925,
+   0.4642735,
+   0.466425,
+   0.466066
+  ],
+  "limit_ms": 0.35
+ },
+ "t_q @W8": {
+  "median_over_K_of_per_process_median_100_500_ms": 0.411025,
+  "mean_100_500_ms": 0.41262902749999997
+ },
+ "structure T-A-tree-armed @W8": {
+  "void_steps_max": 0,
+  "first_void": [
+   "None"
+  ],
+  "span_n_sets": [
+   "[(1.0, 1.0, 1.0, 1.0)]"
+  ],
+  "queried_plus_members_set": [
+   "[1241.0]"
+  ],
+  "members_set": [
+   "[0.0, 1.0]"
+  ]
+ },
+ "structure T-A-allpairs-armed @W8": {
+  "void_steps_max": 0,
+  "first_void": [
+   "None"
+  ],
+  "span_n_sets": [
+   "[(0.0, 0.0, 0.0, 0.0)]"
+  ],
+  "queried_plus_members_set": [
+   "[0]"
+  ],
+  "members_set": [
+   "[0.0]"
+  ]
+ },
+ "structure T-C-tree @W8": {
+  "void_steps_max": 0,
+  "first_void": [
+   "None"
+  ],
+  "span_n_sets": [
+   "[(1.0, 1.0, 1.0, 1.0)]"
+  ],
+  "queried_plus_members_set": [
+   "[1241.0]"
+  ],
+  "members_set": [
+   "[0.0, 1.0]"
+  ]
+ },
+ "canary @W8": {
+  "canary_ns_per_process": [
+   250030,
+   251948,
+   254059,
+   254059,
+   250707,
+   250537
+  ],
+  "canary_span_med_ms_per_process": [
+   0.250293,
+   0.252208,
+   0.254284,
+   0.254287,
+   0.250982,
+   0.250753
+  ],
+  "T-C-tree_median_ms": 5.3397461,
+  "T-A-tree_median_ms": 5.0234103,
+  "step_rise_ms": 0.31633580000000006,
+  "canary_ns_median_ms": 0.2513275
+ },
+ "poses_per_row": {
+  "T-A-tree": [
+   "0x32d5e235342b4143"
+  ],
+  "T-A-allpairs": [
+   "0x32d5e235342b4143"
+  ],
+  "T-D-tree": [
+   "0x32d5e235342b4143"
+  ],
+  "T-D-allpairs": [
+   "0x32d5e235342b4143"
+  ],
+  "R-tree": [
+   "0xee2a67a98434919a"
+  ],
+  "R-allpairs": [
+   "0xee2a67a98434919a"
+  ],
+  "S16-tree": [
+   "0x71313833f6a8e645"
+  ],
+  "S16-allpairs": [
+   "0x71313833f6a8e645"
+  ],
+  "T-A-tree-armed": [
+   "0x32d5e235342b4143"
+  ],
+  "T-A-allpairs-armed": [
+   "0x32d5e235342b4143"
+  ],
+  "T-C-tree": [
+   "0x32d5e235342b4143"
+  ]
+ },
+ "expect_pose_not_match_or_none": [],
+ "tree_diag_violations": []
+}

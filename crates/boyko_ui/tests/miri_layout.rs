@@ -13,7 +13,7 @@
 //! borrow protocol + the recursive nested `get_component` / `get_component_mut`
 //! walk. Trees are kept small so Miri stays fast.
 //!
-//! Run: `RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-gnu cargo miri test -p
+//! Run: `RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc cargo miri test -p
 //! boyko-ui --test miri_layout` (the repo's `.cargo/config.toml` already sets
 //! `MIRIFLAGS=-Zmiri-tree-borrows`).
 

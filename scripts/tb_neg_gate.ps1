@@ -56,8 +56,9 @@
 #    REPLACES that value rather than extending it -- the same asymmetry `RUSTFLAGS`
 #    has against `[target.*.rustflags]`. Every flag the run needs, including
 #    tree-borrows, is therefore re-stated below. The ISA baseline in
-#    `[target.x86_64-pc-windows-gnu].rustflags` is untouched because this script
-#    never sets RUSTFLAGS.
+#    `[target.x86_64-pc-windows-msvc].rustflags` (the block cargo reads under
+#    `$Toolchain`; the gnu twin applies on the comparison leg) is untouched
+#    because this script never sets RUSTFLAGS.
 #
 # =============================================================================
 # Why the exit code is not the verdict
@@ -65,47 +66,59 @@
 #
 # A build or link failure exits 1 exactly like a red gate does -- indistinguishable
 # from "the gate is red" if the exit code is all you read. Two defences: the
-# toolchain is spelled in full (`+nightly-x86_64-pc-windows-gnu`), and a seed only
+# toolchain is spelled in full (`+nightly-x86_64-pc-windows-msvc`), and a seed only
 # counts as red once its receipt shows cargo's own
 # `Running ...tb_neg_m2w_block_reference` line, i.e. the binary was built AND
 # launched. A receipt without that line is reported as LAUNCH-FAILED and is NOT
 # counted as red.
 #
-# When this comment was written the concrete failure was that `cargo +nightly`
-# resolved to `nightly-x86_64-pc-windows-msvc`, for which this box had no linker
-# (MEASURED 2026-09-04). Both halves of that instance are gone -- msvc links since
-# Build Tools 2022 was installed, and the whole workspace builds under
-# `stable-x86_64-pc-windows-msvc` (MEASURED 2026-09-18) -- while the ambiguity it
-# came from is very much alive: rustup's default_host_tuple was rewritten to gnu on
-# 2026-09-07 13:56 and BACK to msvc on 2026-09-17 14:27 (both by settings-file
-# mtime), so a bare `+nightly` picks the MSVC nightly again today. The paragraph
-# that stood here said it "now picks the gnu nightly"; ten days later that was
-# false, with no edit to this file in between. `$Toolchain` is spelled in full for
-# exactly that reason and needed no edit either time.
+# The exit-code term itself can go VACUOUS on the gate host, and did. Under
+# Windows PowerShell 5.1 (the only PowerShell on the workstation; `pwsh` is not
+# installed) a `Start-Process -PassThru` object reports `ExitCode` as $null
+# after `WaitForExit()` unless its `Handle` was read first, and PowerShell
+# evaluates `$null -ne 0` as $true. MEASURED 2026-09-21: every seed printed
+# `exit=` (empty) and the term passed -- including on a copy of this script
+# pointed at a binary that exits 0. The verdict was carried by the other
+# predicates. The drive loop below reads `$proc.Handle` before waiting (the
+# documented idiom) and the term is written so that a $null exit code can
+# never satisfy it.
 #
-# WHY IT IS THE GNU ONE, restated because the old reason INVERTED. This file used
-# to argue the pin from currency: the receipts came from the gnu nightly's miri
-# (2026-08-20) and the msvc nightly's was 2026-05-29 (MEASURED 2026-09-10), three
-# months older. MEASURED 2026-09-18, with RUSTUP_TOOLCHAIN unset:
+# SPELLED IN FULL, because what a bare `+nightly` selects on this box has flipped
+# twice with no commit to notice: rustup's default_host_tuple was msvc until
+# 2026-09-07 13:56, gnu until 2026-09-17 14:27, and msvc since (both by
+# settings-file mtime). When this comment was first written (2026-09-04) a bare
+# `+nightly` picked an msvc nightly that had no linker and died with exit 1 --
+# the failure the first defence above was written against. `$Toolchain` needed
+# no edit on either flip.
 #
-#   cargo +nightly-x86_64-pc-windows-gnu  miri --version -> miri 0.1.0 (8925ea358a 2026-08-20)
-#   cargo +nightly-x86_64-pc-windows-msvc miri --version -> miri 0.1.0 (a36d05efab 2026-09-09)
+# THE MSVC ONE, since 2026-09-21 (rung AH of the unification plan). Until then
+# this line pinned `+nightly-x86_64-pc-windows-gnu`, and the reason moved three
+# times while the pin did not: no msvc linker (2026-09-04); then currency -- the
+# gnu nightly's miri was 2026-08-20 and the msvc nightly's 2026-05-29 (MEASURED
+# 2026-09-10); then, after that inverted (MEASURED 2026-09-18: gnu still
+# `miri 0.1.0 (8925ea358a 2026-08-20)`, msvc `miri 0.1.0 (a36d05efab 2026-09-09)`,
+# three weeks NEWER), receipt continuity alone -- the committed receipts had been
+# produced by the gnu miri, and swapping the checker underneath them would have
+# made any disagreement unattributable. That last reason is discharged the only
+# way it could be: all four seeds re-run on BOTH nightlies from one tree, on one
+# day. The msvc receipts are the committed `tb-neg-m2w-<seed>.stderr`; the gnu
+# run sits beside each as `tb-neg-m2w-<seed>.gnu.stderr`; and
+# `docs/threadpool/receipts/README.md` records what differs between a pair (tag
+# and allocation ids, the target-dir and toolchain paths, a newer cargo's manifest
+# lints) and what does not (the diagnostic, both creation sites, the deallocating
+# frame). The gate host has been msvc since 2026-09-10 (build recipes) and
+# 2026-09-17 (rustup default), and the checker now matches it.
 #
-# The msvc nightly's miri is now three weeks NEWER, so currency argues against this
-# pin rather than for it. The pin STAYS on RECEIPT CONTINUITY: the receipts
-# committed under `docs/threadpool/receipts/` were produced by the gnu nightly's
-# miri and are censused by
-# `crates/boyko_threadpool/tests/tb_neg_m2w_arm_present.rs`. Re-spelling
-# `$Toolchain` would swap the CHECKER under the receipts this script writes and
-# that census reads, leaving any disagreement between a committed receipt and a
-# fresh run unattributable. Moving the checker is its own change, with its own
-# re-run of all four receipts -- never a passenger on a host move or a comment
-# repair.
+# A gnu comparison run is one edit away: set `$Toolchain` to
+# `+nightly-x86_64-pc-windows-gnu` for that invocation (or run `tb_neg_gate.sh`
+# with `TB_NEG_TOOLCHAIN` set) into a target dir of its own, and move the four
+# receipts to `.gnu.stderr` before the msvc run, which overwrites the same names.
 #
 # =============================================================================
 # Usage
 # =============================================================================
 #
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tb_neg_gate.ps1   # Windows PowerShell 5.1, the gate host
 #   pwsh -NoProfile -File scripts/tb_neg_gate.ps1
 #
 # Receipts are written to `docs/threadpool/receipts/tb-neg-m2w-<seed>.stderr` and
@@ -131,7 +144,7 @@ $Seeds = @(0, 1, 7, 15)
 $Feature   = 'tb-neg-m2w'
 $Package   = 'boyko-threadpool'
 $TestName  = 'tb_neg_m2w_block_reference'
-$Toolchain = '+nightly-x86_64-pc-windows-gnu'
+$Toolchain = '+nightly-x86_64-pc-windows-msvc'
 
 $RepoRoot   = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $ReceiptDir = Join-Path $RepoRoot 'docs/threadpool/receipts'
@@ -268,8 +281,13 @@ try {
             -NoNewWindow -PassThru `
             -RedirectStandardError $receipt `
             -RedirectStandardOutput $stdoutTmp
+        # Read the handle BEFORE waiting: on Windows PowerShell 5.1 a `-PassThru`
+        # process whose Handle was never touched reports `ExitCode` as $null
+        # after `WaitForExit()`, and `$null -ne 0` is $true (see the header).
+        $null = $proc.Handle
         $proc.WaitForExit()
         $exitCode = $proc.ExitCode
+        $exitText = if ($null -eq $exitCode) { '<none>' } else { "$exitCode" }
 
         if (Test-Path -LiteralPath $stdoutTmp) {
             Get-Content -LiteralPath $stdoutTmp | ForEach-Object { Write-Host $_ }
@@ -334,11 +352,14 @@ try {
         $freedBy = (Test-AnyLine $lines 'boyko_threadpool::block::ScopeBlock::free_all') `
             -and (Test-AnyLine $lines 'as std::ops::Drop>::drop')
 
-        $red = ($exitCode -ne 0) -and $launched -and $ub -and $kind -and $protector -and $accessed -and $freedBy
+        # A $null exit code is NOT "non-zero": the term requires a real code.
+        $exitedNonZero = ($null -ne $exitCode) -and ($exitCode -ne 0)
+
+        $red = $exitedNonZero -and $launched -and $ub -and $kind -and $protector -and $accessed -and $freedBy
 
         $results += [pscustomobject]@{
             Seed      = $seed
-            Exit      = $exitCode
+            Exit      = $exitText
             Launched  = $launched
             LinkDeath = $linkDeath
             Ub        = $ub
@@ -351,11 +372,11 @@ try {
         }
 
         if ($red) {
-            Write-Host "seed $seed : RED, attributed (exit=$exitCode)" -ForegroundColor Green
+            Write-Host "seed $seed : RED, attributed (exit=$exitText)" -ForegroundColor Green
         } elseif (-not $launched) {
-            Write-Host "seed $seed : LAUNCH-FAILED -- the binary never ran; exit=$exitCode is NOT a verdict$(if ($linkDeath) { ' (linker death detected)' })" -ForegroundColor Yellow
+            Write-Host "seed $seed : LAUNCH-FAILED -- the binary never ran; exit=$exitText is NOT a verdict$(if ($linkDeath) { ' (linker death detected)' })" -ForegroundColor Yellow
         } else {
-            Write-Host "seed $seed : NOT RED FOR THE DECLARED REASON (exit=$exitCode ub=$ub kind=$kind protector=$protector accessed=$accessed freed_by=$freedBy)" -ForegroundColor Red
+            Write-Host "seed $seed : NOT RED FOR THE DECLARED REASON (exit=$exitText ub=$ub kind=$kind protector=$protector accessed=$accessed freed_by=$freedBy)" -ForegroundColor Red
         }
     }
 }

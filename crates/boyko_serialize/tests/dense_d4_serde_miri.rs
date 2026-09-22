@@ -27,7 +27,7 @@
 //!
 //! ```text
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-disable-isolation" \
-//!   cargo +nightly miri test --test dense_d4_serde_miri
+//!   cargo +nightly-x86_64-pc-windows-msvc miri test --test dense_d4_serde_miri
 //! ```
 
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;

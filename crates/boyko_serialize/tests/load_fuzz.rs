@@ -597,7 +597,11 @@ fn assert_report_consistent(report: &LoadReport, dst: &EcsMaster, iter: usize, o
     let total_pools: u64 = dst
         .archetype_master()
         .iter_archetypes()
-        .map(|a| a.component_ids().len() as u64)
+        // KE14 D1: the TABLE list — this counter's name is "pool-bearing
+        // columns", and the declaration record would also count a dense /
+        // bitset id that owns no column, inflating the left-hand side into a
+        // false failure.
+        .map(|a| a.table_component_ids().len() as u64)
         .sum();
     let pool_producing = report.columns_blitted as u64
         + report.columns_decoded as u64

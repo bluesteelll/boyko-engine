@@ -1,0 +1,69 @@
+{
+  "_doc": "D-L5 block, FILLED 2026-09-21 03:50: C4 landed on l5np as de06b6c9 (parallel_narrowphase on by default). runner_l5.exe built from D:/wt/mq-de06b6c9 into D:/wt/_targets/mq-de06b6c9 (logs/13); sha256 in bin/SHA256SUMS; usage text and knobs in logs/14 (flag spelling --parallel-np on|off confirmed); 500-step pose gate at W=1/8/16 = 0x32d5e235342b4143 = runner_l4l2 pose, files sha256 eff361e1..., red control exit 4 (logs/15).",
+  "rows": [
+    {
+      "id": "D-L5",
+      "engine": "boyko",
+      "role": "l5",
+      "what": "the default configuration at the l5np HEAD after C4: L4 + L2 + L5 (parallel narrowphase on by default).",
+      "exe": "bin/runner_l5.exe",
+      "sha256": "26d17a102814bccbd5f1d2ab2ddd696fd4f14c90ed10069d0d9ee3788901a8ab",
+      "commit": "de06b6c952ea396e1380bf7045b7df77793b3def",
+      "args": [
+        "--scene",
+        "jolt",
+        "--gap",
+        "0.5",
+        "--cfg",
+        "default"
+      ],
+      "workers": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "steps": 500,
+      "window": [
+        0,
+        500
+      ],
+      "armed": false,
+      "expected_pose": "0x32d5e235342b4143",
+      "expect_pose_of": "D-L4L2",
+      "timed": true
+    },
+    {
+      "id": "D-L5-npoff",
+      "engine": "boyko",
+      "role": "l5",
+      "what": "the same binary with --parallel-np off: the same-binary A/B of the parallel narrowphase at W=8.",
+      "exe": "bin/runner_l5.exe",
+      "sha256": "26d17a102814bccbd5f1d2ab2ddd696fd4f14c90ed10069d0d9ee3788901a8ab",
+      "commit": "de06b6c952ea396e1380bf7045b7df77793b3def",
+      "args": [
+        "--scene",
+        "jolt",
+        "--gap",
+        "0.5",
+        "--cfg",
+        "default",
+        "--parallel-np",
+        "off"
+      ],
+      "workers": [
+        8
+      ],
+      "steps": 500,
+      "window": [
+        0,
+        500
+      ],
+      "armed": false,
+      "expected_pose": "0x32d5e235342b4143",
+      "expect_pose_of": "D-L4L2",
+      "timed": true
+    }
+  ]
+}

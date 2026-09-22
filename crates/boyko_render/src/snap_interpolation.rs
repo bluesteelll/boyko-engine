@@ -49,10 +49,10 @@
 
 use boyko_ecs::ecs::core::commands::Command;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
-use boyko_ecs::ecs::core::system::{Commands, EntityCommands};
-use boyko_ecs::ecs::identifiers::primitives::EntityId;
+use boyko_ecs::ecs::core::system::{Commands, Entities, EntityCommands};
 use boyko_macros::Component;
 use boyko_scene::Transform;
 
@@ -123,6 +123,7 @@ pub struct SnapInterpolation;
 #[allow(clippy::needless_pass_by_value)]
 pub fn snap_apply(
     mut commands: Commands,
+    entities: Entities,
     mut q: Query<(&Transform, &mut GpuTransform3D), Enabled<SnapInterpolation>>,
 ) {
     for (id, (transform, pair)) in q.iter_entities_mut() {
@@ -134,32 +135,62 @@ pub fn snap_apply(
         pair.curr = packed;
         pair.prev = packed;
         // Clear the bit for next frame (deferred; the same-frame gather already
-        // reads the collapsed pair this system just wrote).
-        commands.add(DisableSnapById { id });
+        // reads the collapsed pair this system just wrote). A row the query
+        // yields is live for the whole body (SCH7), so the resolve cannot
+        // miss; the handle it returns carries the CURRENT generation, which is
+        // what lets apply tell this body from a later occupant of the same id
+        // (H-06).
+        let entity = entities.get(id);
+        debug_assert!(
+            entity.is_some(),
+            "invariant SCH7: a row yielded by the query resolves to a live entity"
+        );
+        let Some(entity) = entity else { continue };
+        commands.add(DisableSnap { entity });
     }
 }
 
-/// A deferred `disable::<SnapInterpolation>` keyed by [`EntityId`], mirroring
-/// `boyko_scene`'s `SetRenderEnabledById` pattern (resolve the live full `Entity`
-/// at apply time; a dead / stale id is a silent no-op — a despawn may legitimately
-/// race the enqueued disable within the frame).
-struct DisableSnapById {
-    /// The flagged row's entity id, read from the matched archetype's id column.
-    id: EntityId,
+/// A deferred `disable::<SnapInterpolation>` keyed by the full [`Entity`] (id +
+/// generation) that was live when [`snap_apply`] enqueued it: the shape of
+/// `boyko_scene::visibility_sync`'s `SetRenderEnabled` (rung A9) and of the
+/// kernel's own `EnableTagCommand`. The flagged row's bare `EntityId` (the
+/// archetype's id column has no generation) is resolved to the live handle at
+/// enqueue through the [`Entities`] param; at apply, [`EcsMaster::disable`]'s
+/// own `live_inland` resolve (null + generation, one slot read) drops a dead
+/// body (a despawn may legitimately race the enqueued disable within the
+/// frame — the same silent no-op as before) or an id a later spawn re-occupied
+/// under a bumped generation.
+///
+/// # Hazard H-06 — why the generation travels with the command
+///
+/// The first shipped form carried the bare `EntityId` and re-resolved
+/// "whatever is live at that id" at apply (`EcsMaster::get_entity`), so a
+/// despawn of `E` and a spawn of `F` on `E`'s recycled id in the SAME frame,
+/// drained before this command, cleared `F`'s freshly-set snap bit — `F`
+/// streaked on its first frame (unification plan 02, row A9's class; rung
+/// A9b). Gate:
+/// `deferred_toggles_recycled_id::snap_disable_pending_for_a_despawned_entity_does_not_clear_its_recycled_ids_bit`.
+///
+/// # Layout
+///
+/// ```text
+/// +0  : entity: Entity (16 B — usize id + u32 generation + pad)
+/// +16 : end
+/// ```
+#[repr(C)]
+struct DisableSnap {
+    /// The flagged body, resolved from the matched archetype's id column
+    /// through [`Entities`] at enqueue.
+    entity: Entity,
 }
 
-impl Command for DisableSnapById {
+impl Command for DisableSnap {
     fn apply(self, world: &mut EcsMaster) {
-        // Resolve the live full `Entity` (current generation) at apply time; a
-        // dead / stale id ⇒ silent no-op. `disable` clears the enable bit via the
-        // live inland (never a captured enqueue-time row), so a swap-remove that
-        // moved another entity is honored. This is the same `EntityId`-keyed
-        // resolve-at-apply pattern `boyko_scene`'s `SetRenderEnabledById` uses (the
-        // id column has no generation; the full `Entity` is the only safe key).
-        let Some(entity) = world.get_entity(self.id) else {
-            return;
-        };
-        world.disable::<SnapInterpolation>(entity);
+        // No resolve of our own: `disable` reads the slot once and drops a
+        // dead or generation-stale handle there (H-06). The bit op resolves
+        // the row via the live inland (never a captured enqueue-time row), so
+        // a swap-remove that moved another entity is honored.
+        world.disable::<SnapInterpolation>(self.entity);
     }
 }
 
@@ -196,3 +227,9 @@ impl TeleportCommandsExt for EntityCommands<'_, '_> {
 // Layout pin (house style): an EnableTag carries no data — its bit is the whole
 // datum. A silent widening would break the zero-sized-tag contract.
 const _: () = assert!(size_of::<SnapInterpolation>() == 0);
+
+// Layout pin (the A9 discipline): the deferred disable is one `Entity`,
+// `#[repr(C)]` — 16 B, 8-aligned. A silent widening would change the
+// per-command arena cost.
+const _: () = assert!(size_of::<DisableSnap>() == 16);
+const _: () = assert!(align_of::<DisableSnap>() == 8);

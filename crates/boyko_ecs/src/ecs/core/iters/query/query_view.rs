@@ -41,6 +41,7 @@ use crate::ecs::core::iters::query::filter_enable::query_view_enable_passes;
 use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
 use crate::ecs::core::iters::query::par_chunk;
 use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
+use crate::ecs::core::iters::query::point_filter;
 use crate::ecs::core::iters::query::state::QueryDataState;
 use crate::ecs::core::iters::query::tag_terms::{
     TagTerms, any_term_matched, archetype_passes_tag_terms, count_term_matched,
@@ -225,8 +226,7 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //     has borrowed the state yet, so this `&mut` reborrow is exclusive
         //     (no aliasing `&`/`&mut` to the cache slot is live). The `&mut`
         //     is dropped before the function returns.
-        let state_mut: &mut QueryDataState<D, F> =
-            unsafe { &mut *(*self.state.as_ptr()).get() };
+        let state_mut: &mut QueryDataState<D, F> = unsafe { &mut *(*self.state.as_ptr()).get() };
         <F as QueryFilter>::seed_state(&mut state_mut.filter_state, filter);
     }
 
@@ -355,11 +355,9 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //   `archetype_master()` deref; the resolved slice borrows the cached
         //   state's term scratch, not the cell.
         let master = unsafe { self.world.world().archetype_master() };
-        state.term_scratch.resolve_term_filtered(
-            &self.terms,
-            master,
-            &state.archetype_state,
-        )
+        state
+            .term_scratch
+            .resolve_term_filtered(&self.terms, master, &state.archetype_state)
     }
 
     /// Returns the number of currently-matched archetypes.
@@ -434,7 +432,13 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //   filtered slice); the cursor walks it term-free.
         let ids = self.driver_ids();
         unsafe {
-            QueryIter::new(self.state(), ids, self.world, SystemMeta::dummy(), self.enable_terms)
+            QueryIter::new(
+                self.state(),
+                ids,
+                self.world,
+                SystemMeta::dummy(),
+                self.enable_terms,
+            )
         }
     }
 
@@ -454,7 +458,13 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         //   `driver_ids`, so there is no conflict with the `&mut self` gate.
         let ids = self.driver_ids();
         unsafe {
-            QueryIterMut::new(self.state(), ids, self.world, SystemMeta::dummy(), self.enable_terms)
+            QueryIterMut::new(
+                self.state(),
+                ids,
+                self.world,
+                SystemMeta::dummy(),
+                self.enable_terms,
+            )
         }
     }
 
@@ -468,7 +478,12 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     where
         D: DenseQueryData + ReadOnlyQueryData,
     {
-        const { assert!(D::HAS_DENSE, "QueryView::dense_iter requires a dense `D` (storage = \"dense\")") };
+        const {
+            assert!(
+                D::HAS_DENSE,
+                "QueryView::dense_iter requires a dense `D` (storage = \"dense\")"
+            )
+        };
         // Dense-enable plan D0 — reject an enable-bearing `F` (the dense fast path
         // is archetype-agnostic and cannot honor a per-row enable term). Use
         // `iter()` for `QueryView<&Dense, Enabled<Tag>>`. See
@@ -488,7 +503,12 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     where
         D: DenseQueryData,
     {
-        const { assert!(D::HAS_DENSE, "QueryView::dense_iter_mut requires a dense `D` (storage = \"dense\")") };
+        const {
+            assert!(
+                D::HAS_DENSE,
+                "QueryView::dense_iter_mut requires a dense `D` (storage = \"dense\")"
+            )
+        };
         // Dense-enable plan D0 — reject an enable-bearing `F` (the `&mut` leak the
         // fix closes). Use `iter_mut()` for `QueryView<&mut Dense, Enabled<Tag>>`.
         // See [`assert_dense_iter_no_enable`](super::query::assert_dense_iter_no_enable).
@@ -623,21 +643,28 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     /// term, IS applied per-row here: a disabled (resp. enabled) entity returns
     /// `None`.
     ///
-    /// # Note (C3-r7-c)
+    /// # `F` is applied per row (KE13)
     ///
-    /// Non-archetypal **change-detection** filters (`Changed<C>` / `Added<C>`)
-    /// can never reach a `QueryView`: `EcsMaster::query<D, F>()` rejects any
-    /// change-detection `D`/`F` at compile time (W4 `const`-assert). So `get`
-    /// only ever sees archetypal and enable terms — there is no silent-ignore
-    /// path. For per-row change detection, use `Query<D, F>` as a SystemParam
-    /// inside a system body via `Schedule`. (Independently, mixing an enable
-    /// term with `Changed`/`Added` in one query is also a compile error.)
+    /// Change-detection filters (`Changed<C>` / `Added<C>`) still cannot reach
+    /// a `QueryView`: `EcsMaster::query<D, F>()` rejects them at compile time
+    /// (W4 `const`-assert), which is why the meta-free dispatch below is sound.
+    ///
+    /// ⚠ **That is NOT the same statement as "there is no silent-ignore path",
+    /// which this paragraph used to make.** It enumerated the term kinds as
+    /// "archetypal or enable" and concluded the archetype bitset had already
+    /// decided everything else — true when written, and falsified by the Dense
+    /// plan. A dense `With<C>` / `Without<C>` is a THIRD kind: `IS_ARCHETYPAL`
+    /// is `false` and `matches_component_set` admits every archetype, so its
+    /// only gate is the per-row `filter_fetch` this method makes at
+    /// [`point_filter_passes`]. Without that call `get` returned `Some` for a
+    /// non-member and disagreed with [`Self::iter`] on the same view — KE13.
     ///
     /// # Cost
     ///
     /// O(1) entity-master lookup + a single archetype dispatch. The
     /// matched-set membership check is an `ArchetypeBitSet::contains`
-    /// (one load + bit test).
+    /// (one load + bit test). The `F` predicate const-folds to nothing for an
+    /// archetypal filter, so the common point lookup is unchanged.
     pub fn get(&self, entity: Entity) -> Option<D::Item<'_>>
     where
         D: ReadOnlyQueryData,
@@ -697,6 +724,39 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
                 return None;
             }
         }
+        // KE13: `F`'s per-row predicate — the call this method did not make.
+        // Const-folds to nothing for an archetypal `F` (the 0%-gate).
+        //
+        // A `QueryView` holds no `SystemMeta`, so the NCD arm inside must be
+        // unreachable. `EcsMaster::query` already const-rejects a
+        // change-detection `F`; this assert is what makes that a CHECKED fact
+        // rather than a comment — relaxing the mint would fail to compile here
+        // instead of silently reading a dummy meta.
+        const { assert!(!<F as QueryFilter>::NEEDS_CHANGE_DETECTION) };
+        // Accepted duplication (A6.1): an enable-bearing `F` has
+        // `IS_ARCHETYPAL == false`, so this re-evaluates the enable term the
+        // block above already ran. The two agree by construction (same
+        // `filter_state`, same row), and `Query::get` has done exactly this
+        // since KE3 landed. Removing it would need an `F`-level "already
+        // covered" const — a new mechanism, for one bitmap probe on a cold
+        // point lookup.
+        //
+        // SAFETY (QF3): `arch_ptr` is the live, matched, slab-stable archetype
+        //   pointer and `row < entity_count` (the fast-store invariant). The
+        //   `meta` argument is never read — the `const` assert above pins
+        //   `!NEEDS_CHANGE_DETECTION`, so the arm that would read it is
+        //   const-folded out before codegen.
+        if !unsafe {
+            point_filter::point_filter_passes::<F>(
+                &state.filter_state,
+                self.world,
+                arch_ptr,
+                row,
+                SystemMeta::dummy(),
+            )
+        } {
+            return None;
+        }
         let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
         // Dense plan D3: a dense `D` needs its global `DenseStore` pointer
         // resolved before `fetch` (the iter cursors do this in `QueryIter::new`;
@@ -754,16 +814,14 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
     /// [`with_enabled`](Self::with_enabled) / [`without_enabled`](Self::without_enabled)
     /// terms ARE applied per-row (a filtered-out entity returns `None`).
     ///
-    /// # Note (C3-r7-c)
+    /// # `F` is applied per row (KE13)
     ///
-    /// Non-archetypal **change-detection** filters (`Changed<C>` / `Added<C>`)
-    /// can never reach a `QueryView`: `EcsMaster::query<D, F>()` rejects any
-    /// change-detection `D`/`F` at compile time (W4 `const`-assert). So
-    /// `get_mut` only ever sees archetypal and enable terms — there is no
-    /// silent-ignore path. For per-row change detection, use `Query<D, F>` as a
-    /// SystemParam inside a system body via `Schedule`. (Independently, mixing
-    /// an enable term with `Changed`/`Added` in one query is also a compile
-    /// error.)
+    /// Mirrors [`Self::get`], including the correction recorded there: the
+    /// former "there is no silent-ignore path" claim rested on
+    /// `With`/`Without` being archetypal, which a dense `C` falsifies. The
+    /// per-row [`point_filter_passes`] call below is what closes it. Change
+    /// detection still cannot reach a `QueryView` (W4 `const`-assert), which is
+    /// what makes the meta-free dispatch sound.
     pub fn get_mut(&mut self, entity: Entity) -> Option<D::Item<'_>> {
         let state = self.state();
         // SAFETY (U_C2): cell scoped to '_; `world()` returns a shared
@@ -818,6 +876,26 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
             if !unsafe { cols.passes(row) } {
                 return None;
             }
+        }
+        // KE13: `F`'s per-row predicate — see `get` for the full rationale,
+        // including why the `const` assert (not a comment) is what licenses the
+        // dummy meta and why the enable-term re-evaluation is accepted.
+        const { assert!(!<F as QueryFilter>::NEEDS_CHANGE_DETECTION) };
+        // SAFETY (QF3): `arch_ptr` is live, matched and slab-stable;
+        //   `row < entity_count`. The filter reads SHARED regardless of this
+        //   method's mutability (`Changed::set_table_mut` delegates to
+        //   `set_table_readonly` for that reason), so the `*const` downgrade is
+        //   the correct read surface. `meta` is never read (const assert above).
+        if !unsafe {
+            point_filter::point_filter_passes::<F>(
+                &state.filter_state,
+                self.world,
+                arch_ptr as *const _,
+                row,
+                SystemMeta::dummy(),
+            )
+        } {
+            return None;
         }
         let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
         // Dense plan D3: resolve the dense store pointer before `fetch` — the

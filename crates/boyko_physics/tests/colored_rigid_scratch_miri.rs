@@ -49,11 +49,11 @@
 //! from the pool's worker teardown (`crossbeam-epoch/src/atomic.rs`), which case
 //! (b) alone reproduces; nothing this file allocates is reported. Without the flag
 //! the process exits 1 after `3 passed` (measured L11 C2, msvc nightly miri
-//! a36d05efab 2026-09-09; the gnu pin below is the tree-wide Tree-Borrows recipe
-//! host, see `.cargo/config.toml`):
+//! a36d05efab 2026-09-09 - the host every Miri recipe in this tree spells since
+//! rung AH, 2026-09-21; see `.cargo/config.toml`):
 //! ```text
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-ignore-leaks" \
-//!   cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-physics \
+//!   cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-physics \
 //!   --test colored_rigid_scratch_miri -- --test-threads=1
 //! ```
 //!

@@ -920,13 +920,16 @@ pub struct RemapStats {
 ///
 /// The archetype walk CANNOT reach a dense component's value, because a dense
 /// component has no per-archetype `ComponentPool` — its one column lives in the
-/// world-global `DenseRegistry`. MEASURED, both ways it can present: a
-/// LOADED archetype does not even name the dense id in `component_ids()` (the
-/// loader builds the signature from the file's table columns), while a
-/// SPAWN-built archetype DOES retain it there (`component_ids` keeps
-/// non-signature ids since Dense plan D0) and the table arm then drops it at
-/// `get_pool(cid) == None`. Under either shape the value is never visited, so the
-/// dense arm below is the only route to it: it walks
+/// world-global `DenseRegistry` — and because the table arm iterates
+/// `table_component_ids()` (KE14 D1: the signature-storage subsequence, every
+/// member owning a pool), which excludes every poolless id by mint invariant.
+/// That holds for both ways an archetype can present: a freshly LOADED one does
+/// not name the dense id even in its DECLARATION record (`all_component_ids()` —
+/// the loader mints from the file's table columns), while a SPAWN-built one DOES
+/// retain it there (the declaration record keeps non-signature ids since Dense
+/// plan D0) but never in the table list the arm walks; the `get_pool(cid) ==
+/// None` bail is a backstop, not the mechanism. Under either shape the value is
+/// never visited, so the dense arm below is the only route to it: it walks
 /// `DenseRegistry::dense_ids()` for the same `map_entities_fn` opt-in and applies
 /// it per LIVE slot. Both arms use the SAME unmappable policy — propagate
 /// `DecodeError::UnmappedEntity` — deliberately: a divergence between the storage
@@ -1000,8 +1003,10 @@ pub fn remap_loaded_entities(
             //   `&mut EcsMaster`; this shared reborrow only READS the component-id
             //   set and is dropped at the end of this block (before any write).
             let archetype: &Archetype = unsafe { &*archetype_ptr };
+            // KE14 D1: the TABLE list. Every entry below is turned into a pool
+            // row pointer, and a poolless declaration-record id has none.
             archetype
-                .component_ids()
+                .table_component_ids()
                 .iter()
                 .filter_map(|&cid| {
                     component_registry::get_serialize_info(cid.0)

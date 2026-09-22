@@ -1,6 +1,6 @@
 # Physics perf campaign, window 4b — L11 C2 (the cohort-shaped solve setup) against its parent C0, under the design's G9 (2026-09-22)
 
-Receipts for `docs/MEASUREMENT-QUEUE.md` section 11, the `RESULT, 2026-09-22, window 4b` block, and for the
+Receipts for `docs/MEASUREMENT-QUEUE.md` section 12, the `RESULT, 2026-09-22, window 4b` block, and for the
 dated line in the L11 block of `docs/physics/perf-campaign/levers/00-RULINGS.md`. Read `analysis.md` first: it
 is the results-analyst's reduction, recomputed from `raw/` without the tester's scripts, and it carries the
 block copied into the queue (its section 6 is the draft; the queue block is that draft with this directory's

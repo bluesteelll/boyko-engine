@@ -1,0 +1,51 @@
+bp_g4_scene/all_pairs/1240
+                        time:   [1.8505 ms 1.8566 ms 1.8637 ms]
+bp_g4_scene/grid_w1/1240
+                        time:   [5.4222 ms 5.4478 ms 5.4801 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+bp_g4_scene/grid_w8/1240
+                        time:   [5.4052 ms 5.4085 ms 5.4117 ms]
+bp_g4_scene/tree/1240   time:   [441.35 µs 443.81 µs 447.72 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/all_pairs/10000
+                        time:   [123.48 ms 124.28 ms 125.24 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+bp_g4_scene/grid_w1/10000
+                        time:   [36.717 ms 36.801 ms 36.928 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/grid_w8/10000
+                        time:   [14.491 ms 14.565 ms 14.647 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+bp_g4_scene/tree/10000  time:   [4.7952 ms 4.8075 ms 4.8225 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/all_pairs/100000
+                        time:   [22.010 s 22.128 s 22.231 s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+bp_g4_scene/grid_w1/100000
+                        time:   [334.94 ms 337.37 ms 340.73 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/grid_w8/100000
+                        time:   [125.94 ms 127.80 ms 129.73 ms]
+bp_g4_scene/tree/100000 time:   [59.227 ms 59.634 ms 60.310 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_scene/all_pairs/j100
+                        time:   [1.8543 ms 1.8613 ms 1.8686 ms]
+bp_g4_scene/grid_w1/j100
+                        time:   [4.9771 ms 4.9792 ms 4.9818 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+bp_g4_scene/grid_w8/j100
+                        time:   [4.9838 ms 5.0270 ms 5.0749 ms]
+bp_g4_scene/tree/j100   time:   [442.57 µs 443.38 µs 444.51 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+

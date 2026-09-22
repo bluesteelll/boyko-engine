@@ -258,61 +258,20 @@ fn query_intern_full() -> u32 {
     );
 }
 
-/// Test-only escape hatch: forces the next [`register_new`] call to return
-/// `QueryTypeId(value)`.
-///
-/// Exists solely to exercise the exhaustion branch without burning ~1024
-/// real minter slots. Never call from production code.
-#[cfg(test)]
-pub(crate) fn set_next_id_for_test(value: usize) {
-    QUERY_NEXT_ID.store(value, Ordering::Relaxed);
-}
-
 #[cfg(test)]
 mod tests {
-    // Test-only serialisation of the process-global query-id minter: the `Mutex`
-    // is the harness's exclusion lock (these tests mutate a process-wide counter
-    // and must not overlap), not engine data. Compiled out of every shipping build.
-    #![allow(clippy::disallowed_types)]
-
     use super::*;
 
     use std::mem;
-    use std::panic::{self, AssertUnwindSafe};
     use std::ptr::NonNull;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::OnceLock;
 
-    // ── Test serialization (mirrors Phase 8.5 pattern) ──────────────────
-    //
-    // The tests below mutate `QUERY_NEXT_ID`. Rust's default test harness
-    // runs tests in parallel, so without serialization
-    // `register_new_assigns_distinct_ids` and `register_new_exhaustion_panics`
-    // would race.
-    static TEST_MUTEX: Mutex<()> = Mutex::new(());
-
-    fn acquire_test_lock() -> MutexGuard<'static, ()> {
-        match TEST_MUTEX.lock() {
-            Ok(g) => g,
-            // The exhaustion test panics inside `register_new`. The unwind
-            // poisons the mutex; recover the guard so subsequent tests run.
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-
-    /// Snapshot the counter on entry so it can be restored on exit.
-    struct CounterSnapshot(usize);
-
-    impl CounterSnapshot {
-        fn take() -> Self {
-            Self(QUERY_NEXT_ID.load(Ordering::Relaxed))
-        }
-    }
-
-    impl Drop for CounterSnapshot {
-        fn drop(&mut self) {
-            QUERY_NEXT_ID.store(self.0, Ordering::Relaxed);
-        }
-    }
+    // Nothing here STORES to `QUERY_NEXT_ID`. The lib-test binary runs every src/ test module in
+    // one process, and seven of them mint a first-sight `(D, F)` through `world.query::<D, F>()`
+    // without any lock this module could take: a test that parked the counter at the cap redded a
+    // sibling's unrelated test with `boyko-B0502`, and one that parked it at 0 handed a sibling a
+    // `QueryTypeId` the dispenser had already given out -- the per-world cache's index (A4b). The
+    // exhaustion contract lives in `tests/l6_query_table_exhaustion.rs`, a process of its own.
 
     #[test]
     fn query_type_id_newtype_layout() {
@@ -328,41 +287,22 @@ mod tests {
         );
     }
 
+    /// Three mints on one thread come back distinct and strictly increasing. Strictly increasing,
+    /// not contiguous: other harness threads mint from the same counter, and the gaps are theirs.
     #[test]
     fn register_new_assigns_distinct_ids() {
-        let _guard = acquire_test_lock();
-        let _snap = CounterSnapshot::take();
-
-        set_next_id_for_test(0);
-
         let a = register_new();
         let b = register_new();
         let c = register_new();
 
-        assert_ne!(a, b);
-        assert_ne!(b, c);
-        assert_ne!(a, c);
-
-        assert_eq!(a, QueryTypeId(0));
-        assert_eq!(b, QueryTypeId(1));
-        assert_eq!(c, QueryTypeId(2));
-    }
-
-    #[test]
-    fn register_new_exhaustion_panics() {
-        let _guard = acquire_test_lock();
-        let _snap = CounterSnapshot::take();
-
-        set_next_id_for_test(MAX_QUERY_TYPES - 1);
-        let last = register_new();
-        assert_eq!(last, QueryTypeId(MAX_QUERY_TYPES - 1));
-
-        let result = panic::catch_unwind(AssertUnwindSafe(register_new));
-        assert!(result.is_err());
-
-        // W1 saturate clamp.
-        let pinned = QUERY_NEXT_ID.load(Ordering::Relaxed);
-        assert_eq!(pinned, MAX_QUERY_TYPES);
+        assert!(
+            a.0 < b.0 && b.0 < c.0,
+            "the dispenser is monotonic: expected {a:?} < {b:?} < {c:?}"
+        );
+        assert!(
+            c.0 < MAX_QUERY_TYPES,
+            "the lib-test binary must stay well below the cap; got {c:?}"
+        );
     }
 
     /// QC8 tripwire — the per-world cache slot footprint must fit

@@ -79,7 +79,9 @@
 //       explicitly OUT OF SCOPE this rung — never compiled, never selected by the host.)
 //   (HWRT variant, feature="hwrt": add `-T cs_6_5 -D HWRT=1
 //       -Fo deferred_pbr_hwrt.comp.spv` — RESOLVE_INLINE, the default SHADOW_STAGE; see
-//       compute.rs's `DEFERRED_PBR_HWRT_SPV` embed doc.)
+//       compute.rs's `DEFERRED_PBR_HWRT_SPV` embed doc. The four HWRT variants bind the TLAS @19,
+//       the RayShadowUbo @20 (48 B) and the raster depth `gDepthHw` @21 on top of the 19 shared
+//       bindings; VIS/DENOISED add `gShadowVis` @22, VIS+MV `MotionCamVis` @23 + `gMotionVec` @24.)
 //   (HWRT VIS variant: add `-T cs_6_5 -D HWRT=1 -D SHADOW_STAGE=1
 //       -Fo deferred_pbr_hwrt_vis.comp.spv` — writes gShadowVis and returns before
 //       lighting, the à-trous spatial-denoise pre-pass; see compute.rs's
@@ -358,18 +360,55 @@ static const uint MATERIAL_FLAG_TEXTURED_BIT = 1u;
 //     cold `ResolvedRayShadow` resolve — see that struct's doc). It advances the Vogel-disk cone
 //     rotation below by the golden angle each frame, so the temporal shadow denoiser has
 //     something to average (a frame-invariant rotation is measured dead weight for it).
-// binding 20 (b20): the tunable soft-shadow params UBO. Field ORDER + TYPES exactly match
-// `boyko_render::ResolvedRayShadow` (cone_radius @0, tmax @4, tmin @8, bias @12) PLUS the
-// runner-injected SHADOW_FRAME_SEED @16 — 20 B used of a 32 B std140 block (rounded to the next
-// vec4 boundary; the trailing 12 B is bound-but-unread pad). Declared ENTIRELY under `#if HWRT`
-// — the software `.spv` never references it (the byte-identity gate).
+//   * SHADOW_ORIGIN_MODE / SHADOW_RASTER_FWD (lane fix/hwrt-shadow-ray-origin) are the other
+//     two hot per-frame values (`boyko_render::RayShadowFrame`): under an armed TAA the raster
+//     depth of a RASTER-owned pixel is the Euclidean distance the JITTERED raster wrote, so the
+//     cone-trace origin must be reconstructed on the raster's jittered pixel ray, not the b5
+//     ray — see the `P_shadow` block at the trace. `SHADOW_RASTER_FWD.xyz` is the ray-gen
+//     forward that puts `generate_ray` through the raster's sub-pixel sample (the host's
+//     `raster_ray_forward`: `fwd - right*(jx*aspect*tan) + up*(jy*tan)`, from the UNJITTERED
+//     view, so it is exact under either jitter scope). Mode 0 (TAA off / ortho) is a STRUCTURAL
+//     skip — `P_shadow` is a plain copy of `P`, so every non-TAA hwrt frame is byte-identical.
+// binding 20 (b20): the tunable soft-shadow params UBO. Field ORDER + TYPES exactly match the
+// cold `boyko_render::ResolvedRayShadow` (cone_radius @0, tmax @4, tmin @8, bias @12) PLUS the
+// runner-injected hot `boyko_render::RayShadowFrame` tail (seed @16, origin mode @20, an explicit
+// std140 pad @24..32, raster forward @32) — a 48 B std140 block (three vec4 slots, every byte
+// written; the pad is explicit so the HLSL and Rust offsets agree by inspection: a `float4`
+// cannot straddle a 16-B slot, so `SHADOW_RASTER_FWD` lands at 32 whatever the packing).
+// Declared ENTIRELY under `#if HWRT` — the software `.spv` never references it (the
+// byte-identity gate).
 cbuffer RayShadowUbo : register(b20) {
-    float SHADOW_CONE_RADIUS; // was 0.035 (tan(half-angle) of the sun disk, ~2°)
-    float SHADOW_RAY_TMAX;    // was 1e4
-    float SHADOW_RAY_TMIN;    // was 1e-3
-    float SHADOW_RAY_BIAS;    // was 1e-3
-    uint  SHADOW_FRAME_SEED;  // rung 3b: per-frame counter, offset 16 (see above)
+    float  SHADOW_CONE_RADIUS;  // @0  was 0.035 (tan(half-angle) of the sun disk, ~2°)
+    float  SHADOW_RAY_TMAX;     // @4  was 1e4
+    float  SHADOW_RAY_TMIN;     // @8  was 1e-3
+    float  SHADOW_RAY_BIAS;     // @12 was 1e-3
+    uint   SHADOW_FRAME_SEED;   // @16 rung 3b: per-frame counter (see above)
+    uint   SHADOW_ORIGIN_MODE;  // @20 0 = legacy origin P (structural skip); 1 = raster-ray origin on raster-owned pixels
+    uint   _shadow_pad0;        // @24 explicit: keeps SHADOW_RASTER_FWD at 32 by inspection
+    uint   _shadow_pad1;        // @28
+    float4 SHADOW_RASTER_FWD;   // @32 xyz = fwd_r (the raster's jittered ray-gen forward, unit-agnostic like cam_forward.xyz); w = 0, unread
 };
+
+// binding 21 (lane fix/hwrt-shadow-ray-origin): the raster DEPTH image — the SAME depth-aspect
+// sampled view (+ `depth_sampler`) the marcher binds at its @1 (`gDepth`), so this reads exactly
+// the texel the marcher / `viewt_from_depth` decoded `gViewT` from. Read ONLY inside the trace
+// (`csm_mode != OFF && NoL > 0`) and ONLY when `SHADOW_ORIGIN_MODE != 0` (a wave-uniform UBO
+// gate), to tell a RASTER-owned pixel from an SDF-owned one: both producers write `gViewT` as
+// `md * MESH_DEPTH_T_MAX` for a mesh-covered pixel (the marcher's `t_mesh`, `viewt_from_depth`'s
+// `md * pc.mesh_norm`), a power-of-two multiply that is EXACT in fp32, and an SDF-owned pixel has
+// `t < t_mesh` STRICTLY (`own_pixel`), so `gViewT == md * 64` is a bit-exact, tolerance-free
+// producer test. Declared ENTIRELY under `#if HWRT` (the byte-identity gate); the host inserts
+// it at 21 in every HWRT resolve-family layout, so `gShadowVis` / `MotionCamVis` / `gMotionVec`
+// below moved to 22 / 23 / 24.
+[[vk::binding(21)]] Texture2D<float> gDepthHw;
+// Mirrors `sdf_gbuffer_composite.hlsl`'s DEPTH_CLEAR / the host MESH_DEPTH_CLEAR (the far-plane
+// sentinel the raster / `mesh_depth_neutral_clear` clear to): `md < 1.0` means a mesh covered
+// the pixel.
+static const float HWRT_DEPTH_CLEAR      = 1.0;
+// Mirrors `compute.rs` MESH_DEPTH_T_MAX (`mesh_view_t_norm(PERSPECTIVE)`); TAA is
+// perspective-only, so the ORTHO norm (10) is never the live one under mode 1. A host↔shader
+// text tripwire (`boyko_rhi_vulkan/tests/hwrt_depth_norm_mirror.rs`) pins the two values equal.
+static const float HWRT_MESH_DEPTH_T_MAX = 64.0;
 
 // R2a-4b soft-shadow (owner-eval): the hard single-ray trace read TOO SHARP, so the mesh-shadow
 // term cone-samples N rays jittered within the sun's angular disk around `l` and averages the miss
@@ -391,11 +430,12 @@ cbuffer RayShadowUbo : register(b20) {
 #endif
 
 #if SHADOW_STAGE != SHADOW_STAGE_RESOLVE_INLINE
-// binding 21 (u21): the shadow-visibility image (Rung 3a spatial denoise). RG: R = raw mesh_vis,
+// binding 22 (u22): the shadow-visibility image (Rung 3a spatial denoise). RG: R = raw mesh_vis,
 // G = validity (1 = a real mesh-shadow sample was written; 0 = the neutral fill on a pixel that
 // never reached the mesh arm). Declared ENTIRELY under `SHADOW_STAGE != RESOLVE_INLINE` so the
-// RESOLVE_INLINE `.spv` (the byte-identity gate) never references it — 21 is the next free HWRT
-// binding after the TLAS @19 + RayShadowUbo @20. ONE binding serves BOTH stages: the VIS stage
+// RESOLVE_INLINE `.spv` (the byte-identity gate) never references it — 22 is the next free HWRT
+// binding after the TLAS @19 + RayShadowUbo @20 + gDepthHw @21 (it was 21 before the lane
+// fix/hwrt-shadow-ray-origin inserted the depth image). ONE binding serves BOTH stages: the VIS stage
 // UAV-WRITES `float2(mesh_vis, 1.0)` here, and the RESOLVE_DENOISED stage `.Load`s the à-trous-
 // FILTERED value the host binds into this same slot (the host swaps the descriptor between stages).
 // `[[vk::image_format("rg16")]]` pins the `OpTypeImage` to `Rg16` (`shaderStorageImageWriteWithout-
@@ -404,24 +444,25 @@ cbuffer RayShadowUbo : register(b20) {
 // the RESOLVE_DENOISED stage reads the FINAL à-trous output (also RG16, either ring by parity), so
 // the single "rg16" pin matches the bound view on EVERY level and every `levels` value — no
 // format-class mismatch on the odd-parity or DENOISED bind (the former RG8-vs-RG16 divergence).
-[[vk::image_format("rg16")]] RWTexture2D<float2> gShadowVis : register(u21);
+[[vk::image_format("rg16")]] RWTexture2D<float2> gShadowVis : register(u22);
 #endif
 
 #ifdef MOTION_VECTORS
 // Rung 3b step 5b: the SDF-pixel motion-vector output + the camera pair. Declared ONLY under
 // MOTION_VECTORS (the `deferred_pbr_hwrt_vis_mv` variant — SHADOW_STAGE=VIS + MOTION_VECTORS), so
-// the base VIS / DENOISED / RESOLVE_INLINE `.spv` never reference bindings 22/23 and their layouts
-// stay the frozen byte-identity gate. binding 22: the `MotionCam` UBO (current + previous
+// the base VIS / DENOISED / RESOLVE_INLINE `.spv` never reference bindings 23/24 and their layouts
+// stay the frozen byte-identity gate. binding 23: the `MotionCam` UBO (current + previous
 // marcher-aligned proj*view, column-major — the SAME 128 B camera pair the raster MV variant reads,
-// so the mesh and SDF motion vectors share ONE camera basis). binding 23 (u23): the `motion_vec`
-// image the raster wrote MESH pixels into; this stage adds the SDF pixels (camera-only). Pinned
+// so the mesh and SDF motion vectors share ONE camera basis). binding 24 (u24): the `motion_vec`
+// image the raster wrote MESH pixels into; this stage adds the SDF pixels (camera-only). (Both
+// were 22/23 before the lane fix/hwrt-shadow-ray-origin inserted gDepthHw @21.) Pinned
 // **rg16f** (`R16G16_SFLOAT`, matching the image) — NOT `rg16`/UNORM: Δuv is SIGNED and can exceed
 // [0,1], so a UNORM pin would clamp negative/>1 motion and disagree with the raster's SFLOAT pixels.
-[[vk::binding(22)]] cbuffer MotionCamVis {
+[[vk::binding(23)]] cbuffer MotionCamVis {
     float4x4 mv_cur_view_proj;   // current marcher-aligned proj*view
     float4x4 mv_prev_view_proj;  // last frame's marcher-aligned proj*view
 };
-[[vk::image_format("rg16f")]] RWTexture2D<float2> gMotionVec : register(u23);
+[[vk::image_format("rg16f")]] RWTexture2D<float2> gMotionVec : register(u24);
 
 // Marcher-aligned clip -> [0,1]^2 screen UV. The projection (`marcher_view_proj_rows`) bakes the
 // y-flip into clip.y, so this is the plain NDC remap (NO extra negation) — IDENTICAL to the gbuffer
@@ -999,6 +1040,40 @@ void main(uint3 tid : SV_DispatchThreadID) {
                                          ? (dot(rd, cam_forward.xyz) * view_t)
                                          : view_t;
 #if HWRT
+    #if SHADOW_STAGE != SHADOW_STAGE_RESOLVE_DENOISED
+                        // Lane fix/hwrt-shadow-ray-origin: `P` above is `ro + rd * view_t` on the b5
+                        // ray, but a RASTER-owned pixel's `view_t` is the Euclidean distance of the
+                        // surface the JITTERED raster put here (gbuffer_mrt.fs.hlsl under
+                        // gbuffer_push_from_view_jittered) — pairing it with the b5 ray displaces P
+                        // by t*dtheta (mm..cm at the far floor) and, on the +y jitter phases, puts
+                        // the origin UNDER the receiver beyond an iso-line: every cone ray self-hits
+                        // (the 2026-09-21 mechanism note; 11k..102k px per phase, jumping every
+                        // frame). The exact origin is eye + rd_r*view_t with rd_r the ray through
+                        // the pixel the raster sampled (residual: the rasteriser's sub-pixel snap
+                        // + fp, <= ~0.05 mm at 10 m, >= 30x under the 1.82 mm bias+TMin guard —
+                        // SHADOW_RASTER_FWD from the host: the
+                        // unjittered forward sheared by the raster's OWN jitter — independent of
+                        // the b5 scope). SDF-owned pixels are marched on the b5 ray itself and stay
+                        // on `P`. Producer test: raster-owned <=> gViewT == md*64 (bit-exact: both
+                        // producers write md*64.0, a power-of-two multiply; an SDF hit has
+                        // t < t_mesh strictly). SHADOW_ORIGIN_MODE == 0 (TAA off / ortho) is a
+                        // STRUCTURAL skip: P_shadow is a copy of P. Only the trace origin moves —
+                        // the CSM `P`, `csm_view_z`, SSCS, the point/spot `P` and the MV write keep
+                        // `P`, so the HWRT-vs-software delta stays confined to the trace.
+                        float3 P_shadow = P;
+                        if (SHADOW_ORIGIN_MODE != 0u) {
+                            float md = gDepthHw.Load(int3((int)px, (int)py, 0)).r;
+                            bool raster_owned = (md < HWRT_DEPTH_CLEAR)
+                                             && (view_t == md * HWRT_MESH_DEPTH_T_MAX);
+                            if (raster_owned) {
+                                float3 ro_r, rd_r;
+                                generate_ray(px, py, w, h, camera_mode, cam_eye.xyz,
+                                             float4(SHADOW_RASTER_FWD.xyz, cam_forward.w),
+                                             cam_right, cam_up.xyz, ro_r, rd_r);
+                                P_shadow = ro_r + rd_r * view_t;
+                            }
+                        }
+    #endif
     #if SHADOW_STAGE == SHADOW_STAGE_RESOLVE_INLINE
                         // R2a-4b (owner-eval, soft): the mesh-shadow term routes to a SOFT `rayQuery`
                         // TLAS trace (replacing the CSM shadow-map sample for mesh geometry). The
@@ -1031,7 +1106,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                             float2 sh_d = float2(cos(sh_t), sin(sh_t)) * (sh_r * SHADOW_CONE_RADIUS);
                             float3 sh_dir = normalize(l + sh_tx * sh_d.x + sh_ty * sh_d.y);
                             RayDesc shadow_ray;
-                            shadow_ray.Origin = P + n * SHADOW_RAY_BIAS;
+                            shadow_ray.Origin = P_shadow + n * SHADOW_RAY_BIAS;
                             shadow_ray.Direction = sh_dir;
                             shadow_ray.TMin = SHADOW_RAY_TMIN;
                             shadow_ray.TMax = SHADOW_RAY_TMAX;
@@ -1066,7 +1141,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                             float2 sh_d = float2(cos(sh_t), sin(sh_t)) * (sh_r * SHADOW_CONE_RADIUS);
                             float3 sh_dir = normalize(l + sh_tx * sh_d.x + sh_ty * sh_d.y);
                             RayDesc shadow_ray;
-                            shadow_ray.Origin = P + n * SHADOW_RAY_BIAS;
+                            shadow_ray.Origin = P_shadow + n * SHADOW_RAY_BIAS;
                             shadow_ray.Direction = sh_dir;
                             shadow_ray.TMin = SHADOW_RAY_TMIN;
                             shadow_ray.TMax = SHADOW_RAY_TMAX;

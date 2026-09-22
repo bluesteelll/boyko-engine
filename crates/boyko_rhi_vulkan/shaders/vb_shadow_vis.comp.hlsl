@@ -76,7 +76,7 @@
 //   binding 6 (u6): RWTexture2D<float2> (rg16)  gShadowVis  -- WRITE. RG: R = raw mesh
 //                   visibility, G = validity (1 = a real sample, 0 = the neutral background
 //                   seed) -- the SAME format + semantics `deferred_pbr.hlsl`'s `gShadowVis`
-//                   (binding 21) carries, consumed by the SAME à-trous denoiser + temporal
+//                   (binding 22) carries, consumed by the SAME à-trous denoiser + temporal
 //                   reproject chain.
 //
 // `SHADOW_RAY_COUNT` is `[[vk::constant_id(0)]]` (spec-const, default 16 -- BYTE-IDENTICAL to

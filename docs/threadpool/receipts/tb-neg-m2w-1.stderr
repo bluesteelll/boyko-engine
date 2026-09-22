@@ -1,3 +1,108 @@
+warning: binary `boyko_demo` should have a kebab-case name
+  |
+1 | D:/wt/_targets/ah-miri-msvc\miri\...\boyko_demo.exe
+  |                                      ^^^^^^^^^^
+  |
+  = note: `cargo::non_kebab_case_bins` is set to `warn` by default
+help: to change the binary name to `boyko-demo`, convert `bin.name`
+ --> crates\boyko_demo\Cargo.toml:8:8
+  |
+8 - name = "boyko_demo"
+8 + name = "boyko-demo"
+  |
+warning: `boyko_demo` (manifest) generated 1 warning
+warning: binary `always_zone` should have a kebab-case name
+  |
+1 | D:/wt/_targets/ah-miri-msvc\miri\...\always_zone.exe
+  |                                      ^^^^^^^^^^^
+  |
+  = note: `cargo::non_kebab_case_bins` is set to `warn` by default
+help: to change the binary name to `always-zone`, convert the file stem
+  |
+1 - src\bin\always_zone.rs
+1 + src\bin\always-zone.rs
+  |
+warning: binary `deep_zone` should have a kebab-case name
+  |
+1 | D:/wt/_targets/ah-miri-msvc\miri\...\deep_zone.exe
+  |                                      ^^^^^^^^^
+  |
+help: to change the binary name to `deep-zone`, convert the file stem
+  |
+1 - src\bin\deep_zone.rs
+1 + src\bin\deep-zone.rs
+  |
+warning: `profile-fixture` (manifest) generated 2 warnings
+warning: binary `emit_field` should have a kebab-case name
+   |
+ 1 | D:/wt/_targets/ah-miri-msvc\miri\...\emit_field.exe
+   |                                      ^^^^^^^^^^
+   |
+   = note: `cargo::non_kebab_case_bins` is set to `warn` by default
+help: to change the binary name to `emit-field`, convert `bin.name`
+  --> crates\boyko_shaderdsl\Cargo.toml:28:8
+   |
+28 - name = "emit_field"
+28 + name = "emit-field"
+   |
+warning: binary `emit_particles` should have a kebab-case name
+   |
+ 1 | D:/wt/_targets/ah-miri-msvc\miri\...\emit_particles.exe
+   |                                      ^^^^^^^^^^^^^^
+   |
+help: to change the binary name to `emit-particles`, convert `bin.name`
+  --> crates\boyko_shaderdsl\Cargo.toml:58:8
+   |
+58 - name = "emit_particles"
+58 + name = "emit-particles"
+   |
+warning: binary `emit_probe_gi` should have a kebab-case name
+   |
+ 1 | D:/wt/_targets/ah-miri-msvc\miri\...\emit_probe_gi.exe
+   |                                      ^^^^^^^^^^^^^
+   |
+help: to change the binary name to `emit-probe-gi`, convert `bin.name`
+  --> crates\boyko_shaderdsl\Cargo.toml:51:8
+   |
+51 - name = "emit_probe_gi"
+51 + name = "emit-probe-gi"
+   |
+warning: binary `emit_ssao_variants` should have a kebab-case name
+   |
+ 1 | D:/wt/_targets/ah-miri-msvc\miri\...\emit_ssao_variants.exe
+   |                                      ^^^^^^^^^^^^^^^^^^
+   |
+help: to change the binary name to `emit-ssao-variants`, convert `bin.name`
+  --> crates\boyko_shaderdsl\Cargo.toml:33:8
+   |
+33 - name = "emit_ssao_variants"
+33 + name = "emit-ssao-variants"
+   |
+warning: binary `emit_vb` should have a kebab-case name
+   |
+ 1 | D:/wt/_targets/ah-miri-msvc\miri\...\emit_vb.exe
+   |                                      ^^^^^^^
+   |
+help: to change the binary name to `emit-vb`, convert `bin.name`
+  --> crates\boyko_shaderdsl\Cargo.toml:41:8
+   |
+41 - name = "emit_vb"
+41 + name = "emit-vb"
+   |
+warning: `boyko_shaderdsl` (manifest) generated 5 warnings
+warning: binary `prof_decode` should have a kebab-case name
+   |
+ 1 | D:/wt/_targets/ah-miri-msvc\miri\...\prof_decode.exe
+   |                                      ^^^^^^^^^^^
+   |
+   = note: `cargo::non_kebab_case_bins` is set to `warn` by default
+help: to change the binary name to `prof-decode`, convert `bin.name`
+  --> tools\prof_decode\Cargo.toml:21:8
+   |
+21 - name = "prof_decode"
+21 + name = "prof-decode"
+   |
+warning: `prof_decode` (manifest) generated 1 warning
 warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
    --> crates\boyko_diag\src\profiling_abi.rs:590:10
     |
@@ -12,9 +117,9 @@ help: replace the use of the deprecated method
     |
 
 warning: `boyko-diag` (lib) generated 1 warning (run `cargo fix --lib -p boyko-diag` to apply 1 suggestion)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
-     Running tests\tb_neg_m2w_block_reference.rs (target\miri\x86_64-pc-windows-gnu\debug\build\boyko-threadpool/8c0372105ebb495d\out\tb_neg_m2w_block_reference-8c0372105ebb495d.exe)
-error: Undefined Behavior: deallocation through <220844> (root of the allocation) at alloc73803[0x0] is forbidden
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests\tb_neg_m2w_block_reference.rs (D:/wt/_targets/ah-miri-msvc\miri\x86_64-pc-windows-msvc\debug\build\boyko-threadpool/e8620a16ac5a60a3\out\tb_neg_m2w_block_reference-e8620a16ac5a60a3.exe)
+error: Undefined Behavior: deallocation through <176273> (root of the allocation) at alloc60807[0x38] is forbidden
  --> crates\boyko_threadpool\src\block.rs:341:16
  ::: crates\boyko_threadpool\src\block.rs:344:17
   |
@@ -22,32 +127,34 @@ error: Undefined Behavior: deallocation through <220844> (root of the allocation
   |
   = help: this indicates a potential bug in the program: it performed an invalid operation, but the Tree Borrows rules it violated are still experimental
   = help: see https://github.com/rust-lang/unsafe-code-guidelines/blob/master/wip/tree-borrows.md for further information
-  = help: the accessed tag <220844> (root of the allocation) is foreign to the protected tag <228705> (i.e., it is not a child)
-  = help: this deallocation (acting as a foreign write access) would cause the protected tag <228705> (currently Frozen) to become Disabled
+  = help: the accessed tag <176273> (root of the allocation) is foreign to the protected tag <225297> (i.e., it is not a child)
+  = help: this deallocation (acting as a foreign write access) would cause the protected tag <225297> (currently Frozen) to become Disabled
   = help: protected tags must never be Disabled
-help: the accessed tag <220844> was created here
+help: the accessed tag <176273> was created here
  --> crates\boyko_threadpool\src\block.rs:482:28
-help: the protected tag <228705> was created here, in the initial state Frozen
+help: the protected tag <225297> was created here, in the initial state Frozen
  --> crates\boyko_threadpool\src\task\scoped.rs:303:17
   = note: this is on thread `a_protector_over_chunk_memory_held_across_the_release_is_caught_by_tree_borrows`
   = note: stack backtrace:
           0: boyko_threadpool::block::ScopeBlock::free_all
               at crates\boyko_threadpool\src\block.rs:341:17: 344:18
           1: <boyko_threadpool::Scope<'_> as std::ops::Drop>::drop
-              at crates\boyko_threadpool\src\scope.rs:1479:18: 1479:39
+              at crates\boyko_threadpool\src\scope.rs:1470:18: 1470:39
           2: std::ptr::drop_glue::<boyko_threadpool::Scope<'_>> - shim(Some(boyko_threadpool::Scope<'_>))
-              at C:\Users\flint\.rustup\toolchains\nightly-x86_64-pc-windows-gnu\lib\rustlib\src\rust\library\core\src\ptr\mod.rs:848:1: 850:25
+              at C:\Users\flint\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\ptr\mod.rs:848:1: 850:25
           3: std::mem::drop::<boyko_threadpool::Scope<'_>>
-              at C:\Users\flint\.rustup\toolchains\nightly-x86_64-pc-windows-gnu\lib\rustlib\src\rust\library\core\src\mem\mod.rs:1049:1: 1049:2
-          4: boyko_threadpool::PoolInner::install::<'_, {closure@crates\boyko_threadpool\tests\tb_neg_m2w_block_reference.rs:287:26: 287:33}, ()>
-              at crates\boyko_threadpool\src\thread_pool.rs:341:9: 341:20
-          5: boyko_threadpool::ThreadPool::install::<'_, {closure@crates\boyko_threadpool\tests\tb_neg_m2w_block_reference.rs:287:26: 287:33}, ()>
-              at crates\boyko_threadpool\src\thread_pool.rs:534:9: 534:30
-          6: armed::drive
+              at C:\Users\flint\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\mem\mod.rs:1049:1: 1049:2
+          4: boyko_threadpool::Scope::<'_>::join_after_body
+              at crates\boyko_threadpool\src\scope.rs:1230:9: 1230:19
+          5: boyko_threadpool::PoolInner::install::<'_, {closure@crates\boyko_threadpool\tests\tb_neg_m2w_block_reference.rs:287:26: 287:33}, ()>
+              at crates\boyko_threadpool\src\thread_pool.rs:298:9: 298:32
+          6: boyko_threadpool::ThreadPool::install::<'_, {closure@crates\boyko_threadpool\tests\tb_neg_m2w_block_reference.rs:287:26: 287:33}, ()>
+              at crates\boyko_threadpool\src\thread_pool.rs:492:9: 492:30
+          7: armed::drive
               at crates\boyko_threadpool\tests\tb_neg_m2w_block_reference.rs:287:13: 320:15
-          7: a_protector_over_chunk_memory_held_across_the_release_is_caught_by_tree_borrows
+          8: a_protector_over_chunk_memory_held_across_the_release_is_caught_by_tree_borrows
               at crates\boyko_threadpool\tests\tb_neg_m2w_block_reference.rs:186:5: 186:19
-          8: a_protector_over_chunk_memory_held_across_the_release_is_caught_by_tree_borrows::{closure#0}
+          9: a_protector_over_chunk_memory_held_across_the_release_is_caught_by_tree_borrows::{closure#0}
               at crates\boyko_threadpool\tests\tb_neg_m2w_block_reference.rs:167:85: 167:85
 
 note: some details are omitted, run with `MIRIFLAGS=-Zmiri-backtrace=full` for a verbose backtrace
@@ -57,4 +164,4 @@ error: aborting due to 1 previous error
 error: test failed, to rerun pass `-p boyko-threadpool --test tb_neg_m2w_block_reference`
 
 Caused by:
-  process didn't exit successfully: `C:\Users\flint\.rustup\toolchains\nightly-x86_64-pc-windows-gnu\bin\cargo-miri.exe runner 'D:\wt\threadpool\target\miri\x86_64-pc-windows-gnu\debug\build\boyko-threadpool/8c0372105ebb495d\out\tb_neg_m2w_block_reference-8c0372105ebb495d.exe' --include-ignored --nocapture` (exit code: 1)
+  process didn't exit successfully: `C:\Users\flint\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin\cargo-miri.exe runner 'D:/wt/_targets/ah-miri-msvc\miri\x86_64-pc-windows-msvc\debug\build\boyko-threadpool/e8620a16ac5a60a3\out\tb_neg_m2w_block_reference-e8620a16ac5a60a3.exe' --include-ignored --nocapture` (exit code: 1)

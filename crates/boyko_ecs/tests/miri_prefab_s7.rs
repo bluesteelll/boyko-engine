@@ -19,7 +19,7 @@
 //! command-queue, a documented non-gate — see miri_phase19):
 //! ```powershell
 //! $env:MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-//! cargo +nightly miri test -p boyko-ecs --test miri_prefab_s7
+//! cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_prefab_s7
 //! ```
 //! `-Zmiri-ignore-leaks` isolates the TB signal from the `App` -> `ThreadPool`
 //! `Arc` teardown leak (an allocator artifact orthogonal to TB), exactly as the

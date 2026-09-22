@@ -1,0 +1,470 @@
+{
+ "generated": "2026-09-22T08:19:13.440+03:00",
+ "rows_json": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win4\\rows.json",
+ "rows_l5_json": null,
+ "toolchain": "stable-x86_64-pc-windows-msvc",
+ "profile": "parity",
+ "logical_cpus": 16,
+ "boyko": {
+  "c3": {
+   "exe": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win4\\bin\\runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae"
+  }
+ },
+ "jolt": {},
+ "rows": {
+  "T-A-tree": {
+   "id": "T-A-tree",
+   "engine": "boyko",
+   "role": "c3",
+   "ws": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": "T-A-allpairs",
+   "once": false,
+   "timed": true,
+   "what": "the design's G5 headline row (cfg-A) with the Tree"
+  },
+  "T-A-allpairs": {
+   "id": "T-A-allpairs",
+   "engine": "boyko",
+   "role": "c3",
+   "ws": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "allpairs"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": null,
+   "once": false,
+   "timed": true,
+   "what": "its same-binary A (cfg-A, AllPairs)"
+  },
+  "T-D-tree": {
+   "id": "T-D-tree",
+   "engine": "boyko",
+   "role": "c3",
+   "ws": [
+    1,
+    8
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": "T-D-allpairs",
+   "once": false,
+   "timed": true,
+   "what": "the shipped default with the Tree (the C4 default-to-be)"
+  },
+  "T-D-allpairs": {
+   "id": "T-D-allpairs",
+   "engine": "boyko",
+   "role": "c3",
+   "ws": [
+    1,
+    8
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "allpairs"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": null,
+   "once": false,
+   "timed": true,
+   "what": "window 3's D-L5 re-taken on this binary (the bridge)"
+  },
+  "R-tree": {
+   "id": "R-tree",
+   "engine": "boyko",
+   "role": "c3",
+   "ws": [
+    1,
+    8
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": "R-allpairs",
+   "once": false,
+   "timed": true,
+   "what": "the design's R row, Tree"
+  },
+  "R-allpairs": {
+   "id": "R-allpairs",
+   "engine": "boyko",
+   "role": "c3",
+   "ws": [
+    1,
+    8
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "allpairs"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": null,
+   "once": false,
+   "timed": true,
+   "what": "the design's R row, AllPairs"
+  },
+  "S16-tree": {
+   "id": "S16-tree",
+   "engine": "boyko",
+   "role": "c3",
+   "ws": [
+    1
+   ],
+   "args": [
+    "--scene",
+    "s16",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": "S16-allpairs",
+   "once": false,
+   "timed": true,
+   "what": "the brute path (17 rows <= brute_max_rows 64), Tree"
+  },
+  "S16-allpairs": {
+   "id": "S16-allpairs",
+   "engine": "boyko",
+   "role": "c3",
+   "ws": [
+    1
+   ],
+   "args": [
+    "--scene",
+    "s16",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "allpairs"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": null,
+   "once": false,
+   "timed": true,
+   "what": "the brute path, AllPairs"
+  },
+  "T-A-tree-armed": {
+   "id": "T-A-tree-armed",
+   "engine": "boyko",
+   "role": "c3",
+   "ws": [
+    1,
+    8
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": true,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": "T-A-allpairs-armed",
+   "once": false,
+   "timed": true,
+   "what": "the tree span, t_q, check_step on every step"
+  },
+  "T-A-allpairs-armed": {
+   "id": "T-A-allpairs-armed",
+   "engine": "boyko",
+   "role": "c3",
+   "ws": [
+    1,
+    8
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "allpairs"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": true,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null,
+   "expect_pose_of": null,
+   "once": false,
+   "timed": true,
+   "what": "the armed A twin: Delta-bp = physics_broadphase span allpairs - tree"
+  },
+  "T-C-tree": {
+   "id": "T-C-tree",
+   "engine": "boyko",
+   "role": "c3",
+   "ws": [
+    1,
+    8
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree"
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": true,
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": "T-A-tree",
+   "frozen_by": null,
+   "expect_pose_of": "T-A-allpairs",
+   "once": false,
+   "timed": true,
+   "what": "the protocol's canary J-C on the Tree: --canary-frac 0.05 --canary-ref-ns <T-A-tree window mean at the same W, most recent valid process>"
+  }
+ },
+ "expect_pose": {
+  "T-A-tree": "0x32d5e235342b4143",
+  "T-A-allpairs": "0x32d5e235342b4143",
+  "T-D-tree": "0x32d5e235342b4143",
+  "T-D-allpairs": "0x32d5e235342b4143",
+  "R-tree": "0xee2a67a98434919a",
+  "R-allpairs": "0xee2a67a98434919a",
+  "S16-tree": "0x71313833f6a8e645",
+  "S16-allpairs": "0x71313833f6a8e645",
+  "T-A-tree-armed": "0x32d5e235342b4143",
+  "T-A-allpairs-armed": "0x32d5e235342b4143",
+  "T-C-tree": "0x32d5e235342b4143"
+ },
+ "expect_jolt_hash": {},
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "order": "pass 0: W ascending, tree/allpairs alternating inside a W group (the row order here); pass 1: the whole list reversed",
+  "warmup_per_pass": {
+   "exe": "bin/runner_c3.exe",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--workers",
+    "8",
+    "--steps",
+    "500"
+   ],
+   "timed": false
+  },
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "rerun_contaminated_once_at_end_of_pass": true,
+  "band_void": false,
+  "placement": "P-none",
+  "steps": 500,
+  "window": [
+   0,
+   500
+  ],
+  "subwindows_reported": [
+   [
+    0,
+    100
+   ],
+   [
+    100,
+    500
+   ]
+  ],
+  "idle_rule": "tools/wait_idle3.ps1: 0 build procs AND 0 procs from D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 90 min before pass 0"
+ }
+}

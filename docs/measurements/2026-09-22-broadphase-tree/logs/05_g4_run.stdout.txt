@@ -1,0 +1,176 @@
+2026-09-22T03:43:01.301+03:00 G4 START test=False block A 12 processes, block B 144 processes; exes {"broadphase": ["D:/wt/_targets/mq-de06b6c9/release/deps\\broadphase-595045019352a67f.exe", "efb84636b2d52a904e052307d637e9ba5c905ef3a1e51c352260d70cbd56a6a0"], "churn": ["D:/wt/_targets/mq-de06b6c9/release/deps\\row_identity_churn-ec1df0bd330016d8.exe", "d8ba73fc98c3e0355a09be29df57b149f8651170444fe461ee3d2800bb5c4c91"]}; state {'time': '2026-09-22T03:43:01.301+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)', 'battery_and_proc_count': '{"BatteryStatus":2,"EstimatedChargeRemaining":100}\r\n223'}
+2026-09-22T03:43:01.469+03:00 block A: idle rule (wait_idle3.ps1)
+2026-09-22T03:48:22.339+03:00 block A: idle reached; opening receipt 1.17% (build procs []); {'time': '2026-09-22T03:48:22.339+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)', 'battery_and_proc_count': '{"BatteryStatus":2,"EstimatedChargeRemaining":100}\r\n225'}
+2026-09-22T03:58:16.861+03:00   A k1 [  1] bp_g4_uniform: exit 0 wall 589.391s cpu_s 678.938 rb 1.17% ra 3.65% others 2.57% estimates 28
+2026-09-22T04:08:09.571+03:00   A k1 [  2] bp_g4_disparity: exit 0 wall 587.656s cpu_s 651.344 rb 3.65% ra 1.04% others 2.72% estimates 28
+2026-09-22T04:17:39.263+03:00   A k1 [  3] bp_g4_scene: exit 0 wall 564.635s cpu_s 682.0 rb 1.04% ra 2.28% others 2.82% estimates 16
+2026-09-22T04:22:30.546+03:00   A k1 [  4] bp_g4_maintenance: exit 0 wall 286.233s cpu_s 287.938 rb 2.28% ra 1.92% others 2.95% estimates 21
+2026-09-22T04:31:08.257+03:00   A k2 [  5] bp_g4_uniform: exit 0 wall 512.657s cpu_s 608.484 rb 1.92% ra 6.5% others 2.53% estimates 28 CONTAMINATED-after(6.5%)
+2026-09-22T04:41:10.402+03:00   A k2 [  6] bp_g4_disparity: exit 0 wall 572.07s cpu_s 634.984 rb 1.29% ra 1.33% others 2.58% estimates 28
+2026-09-22T04:49:20.059+03:00   A k2 [  7] bp_g4_scene: exit 0 wall 484.608s cpu_s 598.625 rb 1.33% ra 1.21% others 2.83% estimates 16
+2026-09-22T04:54:12.116+03:00   A k2 [  8] bp_g4_maintenance: exit 0 wall 287.006s cpu_s 288.094 rb 1.21% ra 1.32% others 3.12% estimates 21
+2026-09-22T05:03:00.401+03:00   A k3 [  9] bp_g4_uniform: exit 0 wall 523.226s cpu_s 614.656 rb 1.32% ra 1.19% others 2.63% estimates 28
+2026-09-22T05:12:01.187+03:00   A k3 [ 10] bp_g4_disparity: exit 0 wall 535.726s cpu_s 596.703 rb 1.19% ra 1.33% others 2.56% estimates 28
+2026-09-22T05:20:10.187+03:00   A k3 [ 11] bp_g4_scene: exit 0 wall 483.946s cpu_s 599.625 rb 1.33% ra 1.25% others 2.72% estimates 16
+2026-09-22T05:25:01.016+03:00   A k3 [ 12] bp_g4_maintenance: exit 0 wall 285.774s cpu_s 287.688 rb 1.25% ra 2.58% others 3.11% estimates 21
+2026-09-22T05:25:01.017+03:00 block A: re-running 1 process(es) at the end of the block: [(5, 2, 'bp_g4_uniform', 'contaminated')]
+2026-09-22T05:36:01.193+03:00   A k2 [  5] bp_g4_uniform RERUN (contaminated): exit 0 wall 519.58s cpu_s 610.672 rb 1.71% ra 2.36% others 2.66% estimates 28
+2026-09-22T05:36:01.194+03:00 block A: done
+2026-09-22T05:36:01.194+03:00 block B: idle rule (wait_idle3.ps1)
+2026-09-22T05:38:22.096+03:00 block B: idle reached; opening receipt 5.45% (build procs []); {'time': '2026-09-22T05:38:22.096+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)', 'battery_and_proc_count': '{"BatteryStatus":2,"EstimatedChargeRemaining":100}\r\n229'}
+2026-09-22T05:39:41.602+03:00   B k1 [ 13] row_identity_churn/burst_migrate/sleeping_on_tree: exit 0 wall 49.361s cpu_s 49.812 rb 1.41% ra 5.33% others 2.13% estimates 1 CONTAMINATED-after(5.33%)
+2026-09-22T05:40:58.238+03:00   B k1 [ 14] row_identity_churn/burst_migrate/sleeping_on_allpairs: exit 0 wall 46.581s cpu_s 46.953 rb 2.26% ra 0.99% others 1.93% estimates 1
+2026-09-22T05:41:51.105+03:00   B k1 [ 15] row_identity_churn/burst_despawn/sleeping_on_tree: exit 0 wall 47.824s cpu_s 48.203 rb 0.99% ra 4.67% others 2.46% estimates 1
+2026-09-22T05:42:42.555+03:00   B k1 [ 16] row_identity_churn/burst_despawn/sleeping_on_allpairs: exit 0 wall 46.412s cpu_s 46.938 rb 4.67% ra 1.37% others 2.09% estimates 1
+2026-09-22T05:43:35.687+03:00   B k1 [ 17] row_identity_churn/first_archetype_spawn/sleeping_on_tree: exit 0 wall 48.089s cpu_s 48.406 rb 1.37% ra 9.54% others 2.18% estimates 1 CONTAMINATED-after(9.54%)
+2026-09-22T05:44:52.386+03:00   B k1 [ 18] row_identity_churn/first_archetype_spawn/sleeping_on_allpairs: exit 0 wall 46.642s cpu_s 47.016 rb 2.51% ra 1.28% others 2.06% estimates 1
+2026-09-22T05:45:45.837+03:00   B k1 [ 19] row_identity_churn/archetype_shift/sleeping_on_tree: exit 0 wall 48.413s cpu_s 48.922 rb 1.28% ra 1.31% others 1.84% estimates 1
+2026-09-22T05:46:37.519+03:00   B k1 [ 20] row_identity_churn/archetype_shift/sleeping_on_allpairs: exit 0 wall 46.643s cpu_s 47.172 rb 1.31% ra 5.3% others 2.34% estimates 1 CONTAMINATED-after(5.3%)
+2026-09-22T05:47:56.264+03:00   B k1 [ 21] row_identity_churn/swap_churn/sleeping_on_tree: exit 0 wall 48.688s cpu_s 49.203 rb 1.74% ra 5.78% others 2.27% estimates 1 CONTAMINATED-after(5.78%)
+2026-09-22T05:49:12.656+03:00   B k1 [ 22] row_identity_churn/swap_churn/sleeping_on_allpairs: exit 0 wall 46.336s cpu_s 46.562 rb 1.4% ra 1.31% others 2.24% estimates 1
+2026-09-22T05:50:05.040+03:00   B k1 [ 23] row_identity_churn/stable/sleeping_on_tree: exit 0 wall 47.342s cpu_s 47.75 rb 1.31% ra 5.19% others 2.51% estimates 1 CONTAMINATED-after(5.19%)
+2026-09-22T05:51:21.213+03:00   B k1 [ 24] row_identity_churn/stable/sleeping_on_allpairs: exit 0 wall 46.118s cpu_s 46.094 rb 1.5% ra 7.16% others 1.83% estimates 1 CONTAMINATED-after(7.16%)
+2026-09-22T05:52:41.423+03:00   B k1 [ 25] row_identity_churn/burst_migrate/sleeping_off_tree: exit 0 wall 50.155s cpu_s 50.688 rb 0.72% ra 2.9% others 1.89% estimates 1
+2026-09-22T05:53:33.689+03:00   B k1 [ 26] row_identity_churn/burst_migrate/sleeping_off_allpairs: exit 0 wall 47.228s cpu_s 47.172 rb 2.9% ra 4.06% others 2.63% estimates 1
+2026-09-22T05:54:28.569+03:00   B k1 [ 27] row_identity_churn/burst_despawn/sleeping_off_tree: exit 0 wall 49.841s cpu_s 50.484 rb 4.06% ra 1.91% others 1.96% estimates 1
+2026-09-22T05:55:20.265+03:00   B k1 [ 28] row_identity_churn/burst_despawn/sleeping_off_allpairs: exit 0 wall 46.658s cpu_s 46.641 rb 1.91% ra 1.31% others 1.86% estimates 1
+2026-09-22T05:56:15.950+03:00   B k1 [ 29] row_identity_churn/first_archetype_spawn/sleeping_off_tree: exit 0 wall 50.648s cpu_s 50.922 rb 1.31% ra 6.68% others 2.46% estimates 1 CONTAMINATED-after(6.68%)
+2026-09-22T05:57:32.427+03:00   B k1 [ 30] row_identity_churn/first_archetype_spawn/sleeping_off_allpairs: exit 0 wall 46.406s cpu_s 46.734 rb 0.72% ra 7.1% others 2.26% estimates 1 CONTAMINATED-after(7.1%)
+2026-09-22T05:58:48.745+03:00   B k1 [ 31] row_identity_churn/archetype_shift/sleeping_off_tree: exit 0 wall 46.261s cpu_s 46.141 rb 1.27% ra 1.47% others 0.43% estimates 1
+2026-09-22T05:59:39.294+03:00   B k1 [ 32] row_identity_churn/archetype_shift/sleeping_off_allpairs: exit 0 wall 45.512s cpu_s 45.672 rb 1.47% ra 0.34% others 0.19% estimates 1
+2026-09-22T06:00:30.520+03:00   B k1 [ 33] row_identity_churn/swap_churn/sleeping_off_tree: exit 0 wall 46.188s cpu_s 46.516 rb 0.34% ra 0.53% others 0.22% estimates 1
+2026-09-22T06:01:21.164+03:00   B k1 [ 34] row_identity_churn/swap_churn/sleeping_off_allpairs: exit 0 wall 45.607s cpu_s 45.719 rb 0.53% ra 0.51% others 0.23% estimates 1
+2026-09-22T06:02:12.131+03:00   B k1 [ 35] row_identity_churn/stable/sleeping_off_tree: exit 0 wall 45.932s cpu_s 46.156 rb 0.51% ra 1.08% others 0.31% estimates 1
+2026-09-22T06:03:05.408+03:00   B k1 [ 36] row_identity_churn/stable/sleeping_off_allpairs: exit 0 wall 48.244s cpu_s 48.344 rb 1.08% ra 0.52% others 0.13% estimates 1
+2026-09-22T06:03:58.457+03:00   B k2 [ 37] row_identity_churn/stable/sleeping_off_allpairs: exit 0 wall 48.014s cpu_s 48.094 rb 0.52% ra 0.47% others 0.21% estimates 1
+2026-09-22T06:04:49.591+03:00   B k2 [ 38] row_identity_churn/stable/sleeping_off_tree: exit 0 wall 46.098s cpu_s 46.312 rb 0.47% ra 0.45% others 0.22% estimates 1
+2026-09-22T06:05:40.228+03:00   B k2 [ 39] row_identity_churn/swap_churn/sleeping_off_allpairs: exit 0 wall 45.6s cpu_s 45.688 rb 0.45% ra 0.42% others 0.24% estimates 1
+2026-09-22T06:06:31.481+03:00   B k2 [ 40] row_identity_churn/swap_churn/sleeping_off_tree: exit 0 wall 46.216s cpu_s 46.016 rb 0.42% ra 0.52% others 0.16% estimates 1
+2026-09-22T06:07:24.960+03:00   B k2 [ 41] row_identity_churn/archetype_shift/sleeping_off_allpairs: exit 0 wall 48.443s cpu_s 48.484 rb 0.52% ra 0.21% others 0.19% estimates 1
+2026-09-22T06:08:16.012+03:00   B k2 [ 42] row_identity_churn/archetype_shift/sleeping_off_tree: exit 0 wall 46.015s cpu_s 46.203 rb 0.21% ra 1.9% others 0.19% estimates 1
+2026-09-22T06:09:04.218+03:00   B k2 [ 43] row_identity_churn/first_archetype_spawn/sleeping_off_allpairs: exit 0 wall 43.169s cpu_s 43.391 rb 1.9% ra 0.61% others 0.29% estimates 1
+2026-09-22T06:09:55.539+03:00   B k2 [ 44] row_identity_churn/first_archetype_spawn/sleeping_off_tree: exit 0 wall 46.284s cpu_s 46.266 rb 0.61% ra 1.24% others 0.28% estimates 1
+2026-09-22T06:10:43.828+03:00   B k2 [ 45] row_identity_churn/burst_despawn/sleeping_off_allpairs: exit 0 wall 43.253s cpu_s 43.25 rb 1.24% ra 0.55% others 0.14% estimates 1
+2026-09-22T06:11:34.974+03:00   B k2 [ 46] row_identity_churn/burst_despawn/sleeping_off_tree: exit 0 wall 46.11s cpu_s 46.422 rb 0.55% ra 0.71% others 0.18% estimates 1
+2026-09-22T06:12:23.129+03:00   B k2 [ 47] row_identity_churn/burst_migrate/sleeping_off_allpairs: exit 0 wall 43.118s cpu_s 43.328 rb 0.71% ra 0.35% others 0.15% estimates 1
+2026-09-22T06:13:14.317+03:00   B k2 [ 48] row_identity_churn/burst_migrate/sleeping_off_tree: exit 0 wall 46.151s cpu_s 46.484 rb 0.35% ra 1.09% others 0.31% estimates 1
+2026-09-22T06:14:06.629+03:00   B k2 [ 49] row_identity_churn/stable/sleeping_on_allpairs: exit 0 wall 47.275s cpu_s 47.344 rb 1.09% ra 0.36% others 0.23% estimates 1
+2026-09-22T06:14:55.894+03:00   B k2 [ 50] row_identity_churn/stable/sleeping_on_tree: exit 0 wall 44.228s cpu_s 44.375 rb 0.36% ra 0.3% others 0.16% estimates 1
+2026-09-22T06:15:48.031+03:00   B k2 [ 51] row_identity_churn/swap_churn/sleeping_on_allpairs: exit 0 wall 47.101s cpu_s 47.25 rb 0.3% ra 0.57% others 0.21% estimates 1
+2026-09-22T06:16:37.624+03:00   B k2 [ 52] row_identity_churn/swap_churn/sleeping_on_tree: exit 0 wall 44.557s cpu_s 44.906 rb 0.57% ra 0.46% others 0.24% estimates 1
+2026-09-22T06:17:30.134+03:00   B k2 [ 53] row_identity_churn/archetype_shift/sleeping_on_allpairs: exit 0 wall 47.472s cpu_s 47.312 rb 0.46% ra 1.56% others 0.2% estimates 1
+2026-09-22T06:18:19.686+03:00   B k2 [ 54] row_identity_churn/archetype_shift/sleeping_on_tree: exit 0 wall 44.517s cpu_s 44.891 rb 1.56% ra 0.57% others 0.21% estimates 1
+2026-09-22T06:19:08.931+03:00   B k2 [ 55] row_identity_churn/first_archetype_spawn/sleeping_on_allpairs: exit 0 wall 44.21s cpu_s 44.25 rb 0.57% ra 0.53% others 0.26% estimates 1
+2026-09-22T06:19:58.472+03:00   B k2 [ 56] row_identity_churn/first_archetype_spawn/sleeping_on_tree: exit 0 wall 44.506s cpu_s 44.719 rb 0.53% ra 0.47% others 0.21% estimates 1
+2026-09-22T06:20:50.701+03:00   B k2 [ 57] row_identity_churn/burst_despawn/sleeping_on_allpairs: exit 0 wall 47.194s cpu_s 47.359 rb 0.47% ra 1.19% others 0.29% estimates 1
+2026-09-22T06:21:40.316+03:00   B k2 [ 58] row_identity_churn/burst_despawn/sleeping_on_tree: exit 0 wall 44.578s cpu_s 44.703 rb 1.19% ra 0.47% others 0.17% estimates 1
+2026-09-22T06:22:29.739+03:00   B k2 [ 59] row_identity_churn/burst_migrate/sleeping_on_allpairs: exit 0 wall 44.386s cpu_s 44.75 rb 0.47% ra 0.82% others 0.15% estimates 1
+2026-09-22T06:23:19.600+03:00   B k2 [ 60] row_identity_churn/burst_migrate/sleeping_on_tree: exit 0 wall 44.823s cpu_s 45.25 rb 0.82% ra 0.81% others 0.26% estimates 1
+2026-09-22T06:24:09.419+03:00   B k3 [ 61] row_identity_churn/burst_migrate/sleeping_on_tree: exit 0 wall 44.783s cpu_s 44.938 rb 0.81% ra 0.32% others 0.19% estimates 1
+2026-09-22T06:25:01.669+03:00   B k3 [ 62] row_identity_churn/burst_migrate/sleeping_on_allpairs: exit 0 wall 47.213s cpu_s 47.297 rb 0.32% ra 1.46% others 0.21% estimates 1
+2026-09-22T06:25:51.269+03:00   B k3 [ 63] row_identity_churn/burst_despawn/sleeping_on_tree: exit 0 wall 44.565s cpu_s 44.828 rb 1.46% ra 0.19% others 0.25% estimates 1
+2026-09-22T06:26:43.478+03:00   B k3 [ 64] row_identity_churn/burst_despawn/sleeping_on_allpairs: exit 0 wall 47.173s cpu_s 47.281 rb 0.19% ra 0.59% others 0.21% estimates 1
+2026-09-22T06:27:33.099+03:00   B k3 [ 65] row_identity_churn/first_archetype_spawn/sleeping_on_tree: exit 0 wall 44.584s cpu_s 44.641 rb 0.59% ra 0.89% others 0.18% estimates 1
+2026-09-22T06:28:25.435+03:00   B k3 [ 66] row_identity_churn/first_archetype_spawn/sleeping_on_allpairs: exit 0 wall 47.3s cpu_s 47.703 rb 0.89% ra 1.41% others 0.31% estimates 1
+2026-09-22T06:29:15.016+03:00   B k3 [ 67] row_identity_churn/archetype_shift/sleeping_on_tree: exit 0 wall 44.545s cpu_s 44.469 rb 1.41% ra 0.48% others 0.18% estimates 1
+2026-09-22T06:30:03.209+03:00   B k3 [ 68] row_identity_churn/archetype_shift/sleeping_on_allpairs: exit 0 wall 43.156s cpu_s 43.391 rb 0.48% ra 0.81% others 0.15% estimates 1
+2026-09-22T06:30:52.649+03:00   B k3 [ 69] row_identity_churn/swap_churn/sleeping_on_tree: exit 0 wall 44.406s cpu_s 44.672 rb 0.81% ra 0.51% others 0.17% estimates 1
+2026-09-22T06:31:44.704+03:00   B k3 [ 70] row_identity_churn/swap_churn/sleeping_on_allpairs: exit 0 wall 47.021s cpu_s 47.125 rb 0.51% ra 0.65% others 0.18% estimates 1
+2026-09-22T06:32:33.998+03:00   B k3 [ 71] row_identity_churn/stable/sleeping_on_tree: exit 0 wall 44.259s cpu_s 44.297 rb 0.65% ra 0.8% others 0.16% estimates 1
+2026-09-22T06:33:25.961+03:00   B k3 [ 72] row_identity_churn/stable/sleeping_on_allpairs: exit 0 wall 46.927s cpu_s 47.312 rb 0.8% ra 0.55% others 0.21% estimates 1
+2026-09-22T06:34:17.193+03:00   B k3 [ 73] row_identity_churn/burst_migrate/sleeping_off_tree: exit 0 wall 46.195s cpu_s 46.469 rb 0.55% ra 0.52% others 0.22% estimates 1
+2026-09-22T06:35:07.922+03:00   B k3 [ 74] row_identity_churn/burst_migrate/sleeping_off_allpairs: exit 0 wall 45.693s cpu_s 45.891 rb 0.52% ra 0.41% others 0.3% estimates 1
+2026-09-22T06:36:02.527+03:00   B k3 [ 75] row_identity_churn/burst_despawn/sleeping_off_tree: exit 0 wall 49.568s cpu_s 49.344 rb 0.41% ra 1.27% others 1.18% estimates 1
+2026-09-22T06:36:51.259+03:00   B k3 [ 76] row_identity_churn/burst_despawn/sleeping_off_allpairs: exit 0 wall 43.694s cpu_s 43.656 rb 1.27% ra 1.06% others 0.22% estimates 1
+2026-09-22T06:37:42.858+03:00   B k3 [ 77] row_identity_churn/first_archetype_spawn/sleeping_off_tree: exit 0 wall 46.562s cpu_s 46.75 rb 1.06% ra 0.42% others 0.2% estimates 1
+2026-09-22T06:38:33.405+03:00   B k3 [ 78] row_identity_churn/first_archetype_spawn/sleeping_off_allpairs: exit 0 wall 45.513s cpu_s 45.438 rb 0.42% ra 0.66% others 0.23% estimates 1
+2026-09-22T06:39:24.830+03:00   B k3 [ 79] row_identity_churn/archetype_shift/sleeping_off_tree: exit 0 wall 46.388s cpu_s 46.625 rb 0.66% ra 1.05% others 0.18% estimates 1
+2026-09-22T06:40:15.373+03:00   B k3 [ 80] row_identity_churn/archetype_shift/sleeping_off_allpairs: exit 0 wall 45.506s cpu_s 45.375 rb 1.05% ra 0.65% others 0.19% estimates 1
+2026-09-22T06:41:06.576+03:00   B k3 [ 81] row_identity_churn/swap_churn/sleeping_off_tree: exit 0 wall 46.166s cpu_s 46.219 rb 0.65% ra 0.42% others 0.2% estimates 1
+2026-09-22T06:41:57.197+03:00   B k3 [ 82] row_identity_churn/swap_churn/sleeping_off_allpairs: exit 0 wall 45.586s cpu_s 45.625 rb 0.42% ra 0.59% others 0.21% estimates 1
+2026-09-22T06:42:48.284+03:00   B k3 [ 83] row_identity_churn/stable/sleeping_off_tree: exit 0 wall 46.052s cpu_s 46.406 rb 0.59% ra 0.74% others 0.16% estimates 1
+2026-09-22T06:43:41.679+03:00   B k3 [ 84] row_identity_churn/stable/sleeping_off_allpairs: exit 0 wall 48.36s cpu_s 48.453 rb 0.74% ra 1.3% others 0.28% estimates 1
+2026-09-22T06:44:34.930+03:00   B k4 [ 85] row_identity_churn/stable/sleeping_off_allpairs: exit 0 wall 48.216s cpu_s 48.391 rb 1.3% ra 0.37% others 0.37% estimates 1
+2026-09-22T06:45:26.135+03:00   B k4 [ 86] row_identity_churn/stable/sleeping_off_tree: exit 0 wall 46.169s cpu_s 46.328 rb 0.37% ra 0.75% others 0.22% estimates 1
+2026-09-22T06:46:16.687+03:00   B k4 [ 87] row_identity_churn/swap_churn/sleeping_off_allpairs: exit 0 wall 45.515s cpu_s 45.531 rb 0.75% ra 0.5% others 0.23% estimates 1
+2026-09-22T06:47:07.868+03:00   B k4 [ 88] row_identity_churn/swap_churn/sleeping_off_tree: exit 0 wall 46.144s cpu_s 46.484 rb 0.5% ra 1.28% others 0.35% estimates 1
+2026-09-22T06:48:01.121+03:00   B k4 [ 89] row_identity_churn/archetype_shift/sleeping_off_allpairs: exit 0 wall 48.218s cpu_s 48.094 rb 1.28% ra 0.37% others 0.19% estimates 1
+2026-09-22T06:48:52.258+03:00   B k4 [ 90] row_identity_churn/archetype_shift/sleeping_off_tree: exit 0 wall 46.103s cpu_s 46.141 rb 0.37% ra 0.7% others 0.22% estimates 1
+2026-09-22T06:49:42.767+03:00   B k4 [ 91] row_identity_churn/first_archetype_spawn/sleeping_off_allpairs: exit 0 wall 45.47s cpu_s 45.703 rb 0.7% ra 0.41% others 0.2% estimates 1
+2026-09-22T06:50:34.246+03:00   B k4 [ 92] row_identity_churn/first_archetype_spawn/sleeping_off_tree: exit 0 wall 46.444s cpu_s 46.359 rb 0.41% ra 0.49% others 0.25% estimates 1
+2026-09-22T06:51:22.288+03:00   B k4 [ 93] row_identity_churn/burst_despawn/sleeping_off_allpairs: exit 0 wall 43.009s cpu_s 42.906 rb 0.49% ra 0.43% others 0.19% estimates 1
+2026-09-22T06:52:13.420+03:00   B k4 [ 94] row_identity_churn/burst_despawn/sleeping_off_tree: exit 0 wall 46.098s cpu_s 46.281 rb 0.43% ra 0.29% others 0.26% estimates 1
+2026-09-22T06:53:01.618+03:00   B k4 [ 95] row_identity_churn/burst_migrate/sleeping_off_allpairs: exit 0 wall 43.163s cpu_s 43.125 rb 0.29% ra 0.47% others 0.25% estimates 1
+2026-09-22T06:53:52.857+03:00   B k4 [ 96] row_identity_churn/burst_migrate/sleeping_off_tree: exit 0 wall 46.205s cpu_s 46.438 rb 0.47% ra 0.55% others 0.29% estimates 1
+2026-09-22T06:54:44.801+03:00   B k4 [ 97] row_identity_churn/stable/sleeping_on_allpairs: exit 0 wall 46.908s cpu_s 46.891 rb 0.55% ra 1.79% others 0.21% estimates 1
+2026-09-22T06:55:34.223+03:00   B k4 [ 98] row_identity_churn/stable/sleeping_on_tree: exit 0 wall 44.385s cpu_s 44.359 rb 1.79% ra 0.59% others 0.18% estimates 1
+2026-09-22T06:56:26.290+03:00   B k4 [ 99] row_identity_churn/swap_churn/sleeping_on_allpairs: exit 0 wall 47.031s cpu_s 47.109 rb 0.59% ra 0.47% others 0.16% estimates 1
+2026-09-22T06:57:15.698+03:00   B k4 [100] row_identity_churn/swap_churn/sleeping_on_tree: exit 0 wall 44.372s cpu_s 44.562 rb 0.47% ra 0.59% others 0.21% estimates 1
+2026-09-22T06:58:03.734+03:00   B k4 [101] row_identity_churn/archetype_shift/sleeping_on_allpairs: exit 0 wall 43.001s cpu_s 43.234 rb 0.59% ra 0.86% others 0.2% estimates 1
+2026-09-22T06:58:53.409+03:00   B k4 [102] row_identity_churn/archetype_shift/sleeping_on_tree: exit 0 wall 44.64s cpu_s 44.969 rb 0.86% ra 0.5% others 0.21% estimates 1
+2026-09-22T06:59:45.570+03:00   B k4 [103] row_identity_churn/first_archetype_spawn/sleeping_on_allpairs: exit 0 wall 47.124s cpu_s 47.359 rb 0.5% ra 0.56% others 0.14% estimates 1
+2026-09-22T07:00:35.225+03:00   B k4 [104] row_identity_churn/first_archetype_spawn/sleeping_on_tree: exit 0 wall 44.619s cpu_s 45.047 rb 0.56% ra 0.59% others 0.17% estimates 1
+2026-09-22T07:01:27.275+03:00   B k4 [105] row_identity_churn/burst_despawn/sleeping_on_allpairs: exit 0 wall 47.015s cpu_s 47.406 rb 0.59% ra 0.52% others 0.18% estimates 1
+2026-09-22T07:02:17.010+03:00   B k4 [106] row_identity_churn/burst_despawn/sleeping_on_tree: exit 0 wall 44.7s cpu_s 44.828 rb 0.52% ra 1.43% others 0.23% estimates 1
+2026-09-22T07:03:09.327+03:00   B k4 [107] row_identity_churn/burst_migrate/sleeping_on_allpairs: exit 0 wall 47.281s cpu_s 47.453 rb 1.43% ra 0.31% others 0.15% estimates 1
+2026-09-22T07:03:59.147+03:00   B k4 [108] row_identity_churn/burst_migrate/sleeping_on_tree: exit 0 wall 44.782s cpu_s 45.25 rb 0.31% ra 0.36% others 0.21% estimates 1
+2026-09-22T07:04:48.942+03:00   B k5 [109] row_identity_churn/burst_migrate/sleeping_on_tree: exit 0 wall 44.759s cpu_s 44.984 rb 0.36% ra 0.51% others 0.22% estimates 1
+2026-09-22T07:05:41.103+03:00   B k5 [110] row_identity_churn/burst_migrate/sleeping_on_allpairs: exit 0 wall 47.126s cpu_s 47.578 rb 0.51% ra 0.9% others 0.18% estimates 1
+2026-09-22T07:06:30.630+03:00   B k5 [111] row_identity_churn/burst_despawn/sleeping_on_tree: exit 0 wall 44.492s cpu_s 44.375 rb 0.9% ra 0.58% others 0.15% estimates 1
+2026-09-22T07:07:19.874+03:00   B k5 [112] row_identity_churn/burst_despawn/sleeping_on_allpairs: exit 0 wall 44.208s cpu_s 44.266 rb 0.58% ra 0.42% others 0.27% estimates 1
+2026-09-22T07:08:09.586+03:00   B k5 [113] row_identity_churn/first_archetype_spawn/sleeping_on_tree: exit 0 wall 44.676s cpu_s 44.969 rb 0.42% ra 0.44% others 0.18% estimates 1
+2026-09-22T07:09:01.946+03:00   B k5 [114] row_identity_churn/first_archetype_spawn/sleeping_on_allpairs: exit 0 wall 47.324s cpu_s 47.656 rb 0.44% ra 0.43% others 0.35% estimates 1
+2026-09-22T07:09:51.685+03:00   B k5 [115] row_identity_churn/archetype_shift/sleeping_on_tree: exit 0 wall 44.702s cpu_s 44.797 rb 0.43% ra 1.33% others 0.27% estimates 1
+2026-09-22T07:10:39.862+03:00   B k5 [116] row_identity_churn/archetype_shift/sleeping_on_allpairs: exit 0 wall 43.14s cpu_s 43.234 rb 1.33% ra 0.39% others 0.13% estimates 1
+2026-09-22T07:11:29.401+03:00   B k5 [117] row_identity_churn/swap_churn/sleeping_on_tree: exit 0 wall 44.503s cpu_s 44.797 rb 0.39% ra 0.79% others 0.23% estimates 1
+2026-09-22T07:12:21.503+03:00   B k5 [118] row_identity_churn/swap_churn/sleeping_on_allpairs: exit 0 wall 47.064s cpu_s 47.328 rb 0.79% ra 0.41% others 0.22% estimates 1
+2026-09-22T07:13:10.829+03:00   B k5 [119] row_identity_churn/stable/sleeping_on_tree: exit 0 wall 44.289s cpu_s 44.422 rb 0.41% ra 1.01% others 0.19% estimates 1
+2026-09-22T07:14:02.885+03:00   B k5 [120] row_identity_churn/stable/sleeping_on_allpairs: exit 0 wall 47.019s cpu_s 46.812 rb 1.01% ra 0.38% others 0.25% estimates 1
+2026-09-22T07:14:54.289+03:00   B k5 [121] row_identity_churn/burst_migrate/sleeping_off_tree: exit 0 wall 46.367s cpu_s 46.359 rb 0.38% ra 0.56% others 0.13% estimates 1
+2026-09-22T07:15:42.405+03:00   B k5 [122] row_identity_churn/burst_migrate/sleeping_off_allpairs: exit 0 wall 43.08s cpu_s 43.219 rb 0.56% ra 0.61% others 0.21% estimates 1
+2026-09-22T07:16:33.431+03:00   B k5 [123] row_identity_churn/burst_despawn/sleeping_off_tree: exit 0 wall 45.99s cpu_s 46.016 rb 0.61% ra 0.36% others 0.15% estimates 1
+2026-09-22T07:17:24.213+03:00   B k5 [124] row_identity_churn/burst_despawn/sleeping_off_allpairs: exit 0 wall 45.747s cpu_s 45.531 rb 0.36% ra 1.34% others 0.17% estimates 1
+2026-09-22T07:18:15.578+03:00   B k5 [125] row_identity_churn/first_archetype_spawn/sleeping_off_tree: exit 0 wall 46.328s cpu_s 46.234 rb 1.34% ra 0.49% others 0.12% estimates 1
+2026-09-22T07:19:06.195+03:00   B k5 [126] row_identity_churn/first_archetype_spawn/sleeping_off_allpairs: exit 0 wall 45.58s cpu_s 45.625 rb 0.49% ra 0.37% others 0.18% estimates 1
+2026-09-22T07:19:57.711+03:00   B k5 [127] row_identity_churn/archetype_shift/sleeping_off_tree: exit 0 wall 46.482s cpu_s 46.625 rb 0.37% ra 1.34% others 0.2% estimates 1
+2026-09-22T07:20:51.240+03:00   B k5 [128] row_identity_churn/archetype_shift/sleeping_off_allpairs: exit 0 wall 48.492s cpu_s 48.766 rb 1.34% ra 1.26% others 0.29% estimates 1
+2026-09-22T07:21:42.812+03:00   B k5 [129] row_identity_churn/swap_churn/sleeping_off_tree: exit 0 wall 46.536s cpu_s 46.688 rb 1.26% ra 0.24% others 0.14% estimates 1
+2026-09-22T07:22:31.065+03:00   B k5 [130] row_identity_churn/swap_churn/sleeping_off_allpairs: exit 0 wall 43.218s cpu_s 43.141 rb 0.24% ra 0.58% others 0.24% estimates 1
+2026-09-22T07:23:22.180+03:00   B k5 [131] row_identity_churn/stable/sleeping_off_tree: exit 0 wall 46.081s cpu_s 46.344 rb 0.58% ra 0.51% others 0.28% estimates 1
+2026-09-22T07:24:15.665+03:00   B k5 [132] row_identity_churn/stable/sleeping_off_allpairs: exit 0 wall 48.446s cpu_s 48.641 rb 0.51% ra 0.62% others 0.22% estimates 1
+2026-09-22T07:25:09.059+03:00   B k6 [133] row_identity_churn/stable/sleeping_off_allpairs: exit 0 wall 48.357s cpu_s 48.391 rb 0.62% ra 0.32% others 0.21% estimates 1
+2026-09-22T07:26:00.137+03:00   B k6 [134] row_identity_churn/stable/sleeping_off_tree: exit 0 wall 46.043s cpu_s 46.25 rb 0.32% ra 1.44% others 0.13% estimates 1
+2026-09-22T07:26:48.293+03:00   B k6 [135] row_identity_churn/swap_churn/sleeping_off_allpairs: exit 0 wall 43.121s cpu_s 43.266 rb 1.44% ra 0.66% others 0.17% estimates 1
+2026-09-22T07:27:39.656+03:00   B k6 [136] row_identity_churn/swap_churn/sleeping_off_tree: exit 0 wall 46.329s cpu_s 46.719 rb 0.66% ra 0.58% others 0.15% estimates 1
+2026-09-22T07:28:32.991+03:00   B k6 [137] row_identity_churn/archetype_shift/sleeping_off_allpairs: exit 0 wall 48.3s cpu_s 48.219 rb 0.58% ra 1.59% others 0.21% estimates 1
+2026-09-22T07:29:24.238+03:00   B k6 [138] row_identity_churn/archetype_shift/sleeping_off_tree: exit 0 wall 46.212s cpu_s 46.234 rb 1.59% ra 0.41% others 0.35% estimates 1
+2026-09-22T07:30:14.944+03:00   B k6 [139] row_identity_churn/first_archetype_spawn/sleeping_off_allpairs: exit 0 wall 45.671s cpu_s 45.875 rb 0.41% ra 0.57% others 0.22% estimates 1
+2026-09-22T07:31:06.508+03:00   B k6 [140] row_identity_churn/first_archetype_spawn/sleeping_off_tree: exit 0 wall 46.531s cpu_s 46.828 rb 0.57% ra 0.56% others 0.22% estimates 1
+2026-09-22T07:31:54.802+03:00   B k6 [141] row_identity_churn/burst_despawn/sleeping_off_allpairs: exit 0 wall 43.257s cpu_s 43.062 rb 0.56% ra 1.23% others 0.29% estimates 1
+2026-09-22T07:32:46.006+03:00   B k6 [142] row_identity_churn/burst_despawn/sleeping_off_tree: exit 0 wall 46.167s cpu_s 46.203 rb 1.23% ra 0.51% others 0.12% estimates 1
+2026-09-22T07:33:34.231+03:00   B k6 [143] row_identity_churn/burst_migrate/sleeping_off_allpairs: exit 0 wall 43.189s cpu_s 43.469 rb 0.51% ra 0.85% others 0.14% estimates 1
+2026-09-22T07:34:25.352+03:00   B k6 [144] row_identity_churn/burst_migrate/sleeping_off_tree: exit 0 wall 46.085s cpu_s 46.25 rb 0.85% ra 0.77% others 0.21% estimates 1
+2026-09-22T07:35:17.260+03:00   B k6 [145] row_identity_churn/stable/sleeping_on_allpairs: exit 0 wall 46.873s cpu_s 47.078 rb 0.77% ra 0.49% others 0.24% estimates 1
+2026-09-22T07:36:06.539+03:00   B k6 [146] row_identity_churn/stable/sleeping_on_tree: exit 0 wall 44.242s cpu_s 44.375 rb 0.49% ra 1.5% others 0.23% estimates 1
+2026-09-22T07:36:58.593+03:00   B k6 [147] row_identity_churn/swap_churn/sleeping_on_allpairs: exit 0 wall 47.017s cpu_s 46.984 rb 1.5% ra 0.47% others 0.14% estimates 1
+2026-09-22T07:37:48.095+03:00   B k6 [148] row_identity_churn/swap_churn/sleeping_on_tree: exit 0 wall 44.464s cpu_s 44.797 rb 0.47% ra 0.53% others 0.27% estimates 1
+2026-09-22T07:38:37.127+03:00   B k6 [149] row_identity_churn/archetype_shift/sleeping_on_allpairs: exit 0 wall 43.996s cpu_s 44.156 rb 0.53% ra 2.42% others 1.06% estimates 1
+2026-09-22T07:39:26.768+03:00   B k6 [150] row_identity_churn/archetype_shift/sleeping_on_tree: exit 0 wall 44.603s cpu_s 44.969 rb 2.42% ra 1.43% others 0.22% estimates 1
+2026-09-22T07:40:18.626+03:00   B k6 [151] row_identity_churn/first_archetype_spawn/sleeping_on_allpairs: exit 0 wall 46.822s cpu_s 46.828 rb 1.43% ra 0.37% others 0.17% estimates 1
+2026-09-22T07:41:07.926+03:00   B k6 [152] row_identity_churn/first_archetype_spawn/sleeping_on_tree: exit 0 wall 44.264s cpu_s 44.547 rb 0.37% ra 0.95% others 0.23% estimates 1
+2026-09-22T07:41:59.826+03:00   B k6 [153] row_identity_churn/burst_despawn/sleeping_on_allpairs: exit 0 wall 46.864s cpu_s 47.203 rb 0.95% ra 0.92% others 0.2% estimates 1
+2026-09-22T07:42:49.228+03:00   B k6 [154] row_identity_churn/burst_despawn/sleeping_on_tree: exit 0 wall 44.366s cpu_s 44.562 rb 0.92% ra 0.7% others 0.18% estimates 1
+2026-09-22T07:43:38.512+03:00   B k6 [155] row_identity_churn/burst_migrate/sleeping_on_allpairs: exit 0 wall 44.249s cpu_s 44.094 rb 0.7% ra 5.85% others 0.26% estimates 1 CONTAMINATED-after(5.85%)
+2026-09-22T07:44:53.264+03:00   B k6 [156] row_identity_churn/burst_migrate/sleeping_on_tree: exit 0 wall 44.694s cpu_s 44.891 rb 0.29% ra 0.32% others 0.16% estimates 1
+2026-09-22T07:44:53.265+03:00 block B: re-running 9 process(es) at the end of the block: [(13, 1, 'row_identity_churn/burst_migrate/sleeping_on_tree', 'contaminated'), (17, 1, 'row_identity_churn/first_archetype_spawn/sleeping_on_tree', 'contaminated'), (20, 1, 'row_identity_churn/archetype_shift/sleeping_on_allpairs', 'contaminated'), (21, 1, 'row_identity_churn/swap_churn/sleeping_on_tree', 'contaminated'), (23, 1, 'row_identity_churn/stable/sleeping_on_tree', 'contaminated'), (24, 1, 'row_identity_churn/stable/sleeping_on_allpairs', 'contaminated'), (29, 1, 'row_identity_churn/first_archetype_spawn/sleeping_off_tree', 'contaminated'), (30, 1, 'row_identity_churn/first_archetype_spawn/sleeping_off_allpairs', 'contaminated'), (155, 6, 'row_identity_churn/burst_migrate/sleeping_on_allpairs', 'contaminated')]
+2026-09-22T07:47:58.469+03:00   B k1 [ 13] row_identity_churn/burst_migrate/sleeping_on_tree RERUN (contaminated): exit 0 wall 44.676s cpu_s 44.719 rb 1.09% ra 0.94% others 0.3% estimates 1
+2026-09-22T07:48:48.099+03:00   B k1 [ 17] row_identity_churn/first_archetype_spawn/sleeping_on_tree RERUN (contaminated): exit 0 wall 44.595s cpu_s 44.875 rb 0.94% ra 0.49% others 0.26% estimates 1
+2026-09-22T07:49:37.321+03:00   B k1 [ 20] row_identity_churn/archetype_shift/sleeping_on_allpairs RERUN (contaminated): exit 0 wall 44.187s cpu_s 44.5 rb 0.49% ra 0.27% others 0.18% estimates 1
+2026-09-22T07:50:26.812+03:00   B k1 [ 21] row_identity_churn/swap_churn/sleeping_on_tree RERUN (contaminated): exit 0 wall 44.455s cpu_s 44.578 rb 0.27% ra 0.59% others 0.27% estimates 1
+2026-09-22T07:51:15.910+03:00   B k1 [ 23] row_identity_churn/stable/sleeping_on_tree RERUN (contaminated): exit 0 wall 44.062s cpu_s 44.094 rb 0.59% ra 0.41% others 0.18% estimates 1
+2026-09-22T07:52:07.863+03:00   B k1 [ 24] row_identity_churn/stable/sleeping_on_allpairs RERUN (contaminated): exit 0 wall 46.914s cpu_s 47.266 rb 0.41% ra 0.61% others 0.15% estimates 1
+2026-09-22T07:52:59.091+03:00   B k1 [ 29] row_identity_churn/first_archetype_spawn/sleeping_off_tree RERUN (contaminated): exit 0 wall 46.192s cpu_s 46.359 rb 0.61% ra 0.33% others 0.17% estimates 1
+2026-09-22T07:53:47.666+03:00   B k1 [ 30] row_identity_churn/first_archetype_spawn/sleeping_off_allpairs RERUN (contaminated): exit 0 wall 43.538s cpu_s 43.75 rb 0.33% ra 0.37% others 0.33% estimates 1
+2026-09-22T07:54:36.984+03:00   B k6 [155] row_identity_churn/burst_migrate/sleeping_on_allpairs RERUN (contaminated): exit 0 wall 44.284s cpu_s 44.5 rb 0.37% ra 1.07% others 0.17% estimates 1
+2026-09-22T07:54:36.985+03:00 block B: done
+2026-09-22T07:54:37.365+03:00 G4 END status complete; {'time': '2026-09-22T07:54:37.365+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)', 'battery_and_proc_count': '{"BatteryStatus":2,"EstimatedChargeRemaining":100}\r\n227'}

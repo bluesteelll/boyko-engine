@@ -128,7 +128,7 @@
 //! # surface) from boyko's own `scope.rs` frames.
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-many-seeds=0..16 \
 //!   -Zmiri-permissive-provenance -Zmiri-ignore-leaks" \
-//!   cargo +nightly miri test -p boyko-threadpool --test miri_scope
+//!   cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-threadpool --test miri_scope
 //! ```
 //!
 //! `-Zmiri-ignore-leaks` is STILL required after Phase 9.3b, but NOT because of
@@ -370,7 +370,7 @@ fn refuse_to_certify_without_a_reachability_arm() {}
 /// ```powershell
 /// $env:MIRIFLAGS = "-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks -Zmiri-many-seeds=0..32"
 /// Write-Output "MIRIFLAGS=$env:MIRIFLAGS"
-/// cargo +nightly miri test -p boyko-threadpool --test miri_scope nested_scope_from_worker_is_stolen_by_sibling
+/// cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-threadpool --test miri_scope nested_scope_from_worker_is_stolen_by_sibling
 /// Remove-Item Env:MIRIFLAGS
 /// ```
 ///

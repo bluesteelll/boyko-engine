@@ -1,0 +1,3 @@
+commit a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae
+C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/win4/logs/02_build_parity.log:   Compiling boyko-physics v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_physics)
+C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/win4/logs/03_build_bench.log:   Compiling boyko-physics v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_physics)

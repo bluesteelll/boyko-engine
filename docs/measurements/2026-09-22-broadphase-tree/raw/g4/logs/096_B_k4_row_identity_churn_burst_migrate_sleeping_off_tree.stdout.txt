@@ -1,0 +1,5 @@
+row_identity_churn/burst_migrate/sleeping_off_tree
+                        time:   [9.7489 ms 9.7914 ms 9.8362 ms]
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+

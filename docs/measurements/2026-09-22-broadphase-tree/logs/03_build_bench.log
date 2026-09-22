@@ -1,0 +1,91 @@
+       Fresh unicode-ident v1.0.26
+       Fresh cfg-if v1.0.5
+       Fresh windows-link v0.2.1
+       Fresh proc-macro2 v1.0.107
+       Fresh windows-sys v0.61.2
+       Fresh quote v1.0.47
+       Fresh crossbeam-utils v0.8.23
+       Fresh syn v2.0.119
+       Fresh crossbeam-epoch v0.9.21
+       Fresh crossbeam-deque v0.8.8
+       Fresh zerocopy-derive v0.8.57
+       Fresh boyko-diag v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_diag)
+       Fresh autocfg v1.5.1
+       Fresh zerocopy v0.8.57
+       Fresh serde_core v1.0.229
+       Fresh boyko-log v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_log)
+       Fresh getrandom v0.3.4
+       Fresh syn v3.0.6
+       Fresh boyko-threadpool v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_threadpool)
+       Fresh rand_core v0.9.5
+       Fresh serde_derive v1.0.229
+       Fresh crossbeam-queue v0.3.14
+       Fresh regex-syntax v0.8.11
+       Fresh static_assertions v1.1.0
+       Fresh once_cell v1.21.4
+       Fresh boyko-utils v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_utils)
+       Fresh fixedbitset v0.5.7
+       Fresh either v1.18.0
+       Fresh boyko-ecs v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_ecs)
+       Fresh getrandom v0.4.3
+       Fresh zmij v1.0.23
+       Fresh serde v1.0.229
+       Fresh num-traits v0.2.19
+       Fresh half v2.7.1
+       Fresh boyko-macros v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_macros)
+       Fresh winapi-util v0.1.11
+       Fresh fastrand v2.5.0
+       Fresh clap_lex v1.1.1
+       Fresh itoa v1.0.18
+       Fresh memchr v2.8.3
+       Fresh anstyle v1.0.14
+       Fresh ciborium-io v0.2.2
+       Fresh plotters-backend v0.3.7
+       Fresh ciborium-ll v0.2.2
+       Fresh serde_json v1.0.151
+       Fresh plotters-svg v0.3.7
+       Fresh clap_builder v4.6.7
+       Fresh tempfile v3.27.0
+       Fresh boyko-input v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_input)
+       Fresh same-file v1.0.6
+       Fresh rayon-core v1.13.0
+       Fresh itertools v0.10.5
+       Fresh regex-automata v0.4.18
+       Fresh ppv-lite86 v0.2.21
+       Fresh boyko_shaderdsl v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_shaderdsl)
+       Fresh fnv v1.0.7
+       Fresh wait-timeout v0.2.1
+       Fresh bit-vec v0.8.0
+       Fresh cast v0.3.0
+       Fresh quick-error v1.2.3
+       Fresh boyko-math v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_math)
+       Fresh boyko-scene v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_scene)
+       Fresh rusty-fork v0.3.1
+       Fresh bit-set v0.8.0
+       Fresh criterion-plot v0.5.0
+       Fresh regex v1.13.1
+       Fresh walkdir v2.5.0
+       Fresh boyko_sdf_math v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_sdf_math)
+       Fresh rayon v1.12.0
+       Fresh rand_chacha v0.9.0
+       Fresh tinytemplate v1.2.1
+       Fresh plotters v0.3.7
+       Fresh ciborium v0.2.2
+       Fresh clap v4.6.7
+       Fresh rand_xorshift v0.4.0
+       Fresh rand v0.9.5
+       Fresh is-terminal v0.4.17
+       Fresh bitflags v2.13.2
+       Fresh anes v0.1.6
+       Fresh oorandom v11.1.5
+       Fresh unarray v0.1.4
+       Dirty boyko-physics v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_physics): the file `crates\boyko_physics\src\broadphase_tree\mod.rs` has changed (13434485774.085501000s, 2h 50m 47s after last build at 13434475527.751462700s)
+   Compiling boyko-physics v0.1.0 (D:\wt\mq-de06b6c9\crates\boyko_physics)
+       Fresh proptest v1.11.0
+       Fresh criterion v0.5.1
+     Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name boyko_physics --edition=2024 'crates\boyko_physics\src\lib.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C embed-bitcode=no -C codegen-units=1 --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --cfg 'feature="default"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("bench-alloc", "default"))' -C metadata=9c783471150c5331 -C extra-filename=-31ef3807374d0bb3 --out-dir 'D:/wt/_targets/mq-de06b6c9\release\deps' -C strip=debuginfo -L 'dependency=D:/wt/_targets/mq-de06b6c9\release\deps' --extern 'boyko_diag=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_diag-3af21f3ddcdfe5fd.rmeta' --extern 'boyko_ecs=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_ecs-79252f3ece4102bd.rmeta' --extern 'boyko_log=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_log-4133e038e32a2ab2.rmeta' --extern 'boyko_macros=D:/wt/_targets/mq-de06b6c9\release\deps\boyko_macros-4f4f609790ce3d2a.dll' --extern 'boyko_math=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_math-80103f60bc9d85e6.rmeta' --extern 'boyko_scene=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_scene-d5634feb33468716.rmeta' --extern 'boyko_threadpool=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_threadpool-e005ded63fe91c31.rmeta' --extern 'boyko_utils=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_utils-73794c61b1a89869.rmeta' --extern 'boyko_sdf_math=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_sdf_math-c4a5cfa67e797343.rmeta' -C target-cpu=x86-64-v3`
+     Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name broadphase --edition=2024 'crates\boyko_physics\benches\broadphase.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C opt-level=3 -C embed-bitcode=no -C codegen-units=1 --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --cfg test --cfg 'feature="default"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("bench-alloc", "default"))' -C metadata=be9d7ca3e3ffbdc2 -C extra-filename=-595045019352a67f --out-dir 'D:/wt/_targets/mq-de06b6c9\release\deps' -C strip=debuginfo -L 'dependency=D:/wt/_targets/mq-de06b6c9\release\deps' --extern 'boyko_diag=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_diag-3af21f3ddcdfe5fd.rlib' --extern 'boyko_ecs=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_ecs-79252f3ece4102bd.rlib' --extern 'boyko_log=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_log-4133e038e32a2ab2.rlib' --extern 'boyko_macros=D:/wt/_targets/mq-de06b6c9\release\deps\boyko_macros-4f4f609790ce3d2a.dll' --extern 'boyko_math=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_math-80103f60bc9d85e6.rlib' --extern 'boyko_physics=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_physics-31ef3807374d0bb3.rlib' --extern 'boyko_scene=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_scene-d5634feb33468716.rlib' --extern 'boyko_threadpool=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_threadpool-e005ded63fe91c31.rlib' --extern 'boyko_utils=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_utils-73794c61b1a89869.rlib' --extern 'boyko_sdf_math=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_sdf_math-c4a5cfa67e797343.rlib' --extern 'criterion=D:/wt/_targets/mq-de06b6c9\release\deps\libcriterion-6ae2aa2ac07dc15d.rlib' --extern 'proptest=D:/wt/_targets/mq-de06b6c9\release\deps\libproptest-eacc32c94469f900.rlib' -C target-cpu=x86-64-v3`
+     Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name row_identity_churn --edition=2024 'crates\boyko_physics\benches\row_identity_churn.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C opt-level=3 -C embed-bitcode=no -C codegen-units=1 --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --cfg test --cfg 'feature="default"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("bench-alloc", "default"))' -C metadata=b718c2542cb17326 -C extra-filename=-ec1df0bd330016d8 --out-dir 'D:/wt/_targets/mq-de06b6c9\release\deps' -C strip=debuginfo -L 'dependency=D:/wt/_targets/mq-de06b6c9\release\deps' --extern 'boyko_diag=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_diag-3af21f3ddcdfe5fd.rlib' --extern 'boyko_ecs=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_ecs-79252f3ece4102bd.rlib' --extern 'boyko_log=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_log-4133e038e32a2ab2.rlib' --extern 'boyko_macros=D:/wt/_targets/mq-de06b6c9\release\deps\boyko_macros-4f4f609790ce3d2a.dll' --extern 'boyko_math=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_math-80103f60bc9d85e6.rlib' --extern 'boyko_physics=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_physics-31ef3807374d0bb3.rlib' --extern 'boyko_scene=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_scene-d5634feb33468716.rlib' --extern 'boyko_threadpool=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_threadpool-e005ded63fe91c31.rlib' --extern 'boyko_utils=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_utils-73794c61b1a89869.rlib' --extern 'boyko_sdf_math=D:/wt/_targets/mq-de06b6c9\release\deps\libboyko_sdf_math-c4a5cfa67e797343.rlib' --extern 'criterion=D:/wt/_targets/mq-de06b6c9\release\deps\libcriterion-6ae2aa2ac07dc15d.rlib' --extern 'proptest=D:/wt/_targets/mq-de06b6c9\release\deps\libproptest-eacc32c94469f900.rlib' -C target-cpu=x86-64-v3`
+    Finished `bench` profile [optimized] target(s) in 19.08s
+  Executable `D:/wt/_targets/mq-de06b6c9\release\deps\broadphase-595045019352a67f.exe`
+  Executable `D:/wt/_targets/mq-de06b6c9\release\deps\row_identity_churn-ec1df0bd330016d8.exe`

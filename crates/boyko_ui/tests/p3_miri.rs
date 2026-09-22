@@ -15,7 +15,7 @@
 //!   * `UiName::as_str` (the `from_utf8_unchecked` unsafe) + the hand-written
 //!     `Ord` (the diff key, P3 Decision 9) — `Ord`-consistent-with-`Eq`.
 //!
-//! Run: `cargo +nightly miri test -p boyko-ui --test p3_miri`.
+//! Run: `cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ui --test p3_miri`.
 
 use boyko_ui::components::UiName;
 use boyko_ui::text::parse_ui;

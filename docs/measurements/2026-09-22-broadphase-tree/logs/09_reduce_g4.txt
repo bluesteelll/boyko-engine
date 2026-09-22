@@ -1,0 +1,176 @@
+processes 166 used 156 excluded slots 0
+| cell | K | median | min | max | range % | SE % | per-k (ms) |
+|---|---|---|---|---|---|---|---|
+| bp_g4_disparity/all_pairs/1000 | 3 | 0.6547 ms | 0.647 | 0.6548 | 1.19 | 0.50 | k1=0.6547 k2=0.647 k3=0.6548 |
+| bp_g4_disparity/all_pairs/10000 | 3 | 75.94 ms | 74.8 | 76.21 | 1.86 | 0.71 | k1=74.8 k2=76.21 k3=75.94 |
+| bp_g4_disparity/all_pairs/100000 | 3 | 1.485e+04 ms | 1.224e+04 | 1.528e+04 | 20.48 | 8.02 | k1=1.485e+04 k2=1.528e+04 k3=1.224e+04 |
+| bp_g4_disparity/all_pairs/128 | 3 | 13.89 us | 13.76 | 13.92 | 1.16 | 0.45 | k1=13.92 k2=13.76 k3=13.89 |
+| bp_g4_disparity/all_pairs/17 | 3 | 0.29 us | 0.2897 | 0.2908 | 0.40 | 0.15 | k1=0.29 k2=0.2908 k3=0.2897 |
+| bp_g4_disparity/all_pairs/256 | 3 | 48.44 us | 48.14 | 48.53 | 0.81 | 0.31 | k1=48.53 k2=48.14 k3=48.44 |
+| bp_g4_disparity/all_pairs/64 | 3 | 3.499 us | 3.461 | 3.502 | 1.17 | 0.47 | k1=3.502 k2=3.461 k3=3.499 |
+| bp_g4_disparity/grid_w1/1000 | 3 | 2.439 ms | 2.438 | 2.443 | 0.22 | 0.08 | k1=2.439 k2=2.438 k3=2.443 |
+| bp_g4_disparity/grid_w1/10000 | 3 | 15.93 ms | 15.91 | 15.95 | 0.23 | 0.08 | k1=15.91 k2=15.93 k3=15.95 |
+| bp_g4_disparity/grid_w1/100000 | 3 | 139.3 ms | 139.2 | 140.3 | 0.74 | 0.30 | k1=139.3 k2=139.2 k3=140.3 |
+| bp_g4_disparity/grid_w1/128 | 3 | 0.1756 ms | 0.1754 | 0.176 | 0.33 | 0.12 | k1=0.176 k2=0.1754 k3=0.1756 |
+| bp_g4_disparity/grid_w1/17 | 3 | 7.29 us | 7.284 | 7.31 | 0.37 | 0.14 | k1=7.31 k2=7.284 k3=7.29 |
+| bp_g4_disparity/grid_w1/256 | 3 | 0.3513 ms | 0.3508 | 0.3526 | 0.50 | 0.19 | k1=0.3526 k2=0.3508 k3=0.3513 |
+| bp_g4_disparity/grid_w1/64 | 3 | 52.6 us | 52.24 | 52.72 | 0.91 | 0.34 | k1=52.72 k2=52.24 k3=52.6 |
+| bp_g4_disparity/grid_w8/1000 | 3 | 2.445 ms | 2.441 | 2.456 | 0.63 | 0.24 | k1=2.456 k2=2.441 k3=2.445 |
+| bp_g4_disparity/grid_w8/10000 | 3 | 8.649 ms | 8.618 | 8.926 | 3.56 | 1.42 | k1=8.649 k2=8.926 k3=8.618 |
+| bp_g4_disparity/grid_w8/100000 | 3 | 83.61 ms | 83.2 | 84.36 | 1.38 | 0.51 | k1=83.61 k2=84.36 k3=83.2 |
+| bp_g4_disparity/grid_w8/128 | 3 | 0.1762 ms | 0.1754 | 0.1776 | 1.23 | 0.45 | k1=0.1762 k2=0.1754 k3=0.1776 |
+| bp_g4_disparity/grid_w8/17 | 3 | 7.312 us | 7.297 | 7.312 | 0.21 | 0.09 | k1=7.312 k2=7.312 k3=7.297 |
+| bp_g4_disparity/grid_w8/256 | 3 | 0.3517 ms | 0.3506 | 0.3521 | 0.42 | 0.16 | k1=0.3506 k2=0.3517 k3=0.3521 |
+| bp_g4_disparity/grid_w8/64 | 3 | 52.55 us | 52.18 | 52.65 | 0.90 | 0.34 | k1=52.65 k2=52.18 k3=52.55 |
+| bp_g4_disparity/tree/1000 | 3 | 0.2306 ms | 0.2293 | 0.2308 | 0.65 | 0.26 | k1=0.2293 k2=0.2308 k3=0.2306 |
+| bp_g4_disparity/tree/10000 | 3 | 3.557 ms | 3.552 | 3.581 | 0.81 | 0.31 | k1=3.581 k2=3.557 k3=3.552 |
+| bp_g4_disparity/tree/100000 | 3 | 45.73 ms | 45.58 | 46.81 | 2.68 | 1.06 | k1=46.81 k2=45.73 k3=45.58 |
+| bp_g4_disparity/tree/128 | 3 | 14.68 us | 14.61 | 14.79 | 1.18 | 0.43 | k1=14.68 k2=14.61 k3=14.79 |
+| bp_g4_disparity/tree/17 | 3 | 2.323 us | 2.317 | 2.328 | 0.47 | 0.17 | k1=2.328 k2=2.317 k3=2.323 |
+| bp_g4_disparity/tree/256 | 3 | 31.4 us | 31.27 | 31.56 | 0.93 | 0.34 | k1=31.4 k2=31.27 k3=31.56 |
+| bp_g4_disparity/tree/64 | 3 | 6.996 us | 6.995 | 7.016 | 0.31 | 0.13 | k1=7.016 k2=6.996 k3=6.995 |
+| bp_g4_maintenance/admission_from_empty/10000 | 3 | 4.838 ms | 4.826 | 4.968 | 2.94 | 1.18 | k1=4.838 k2=4.826 k3=4.968 |
+| bp_g4_maintenance/admission_from_empty/100000 | 3 | 62.54 ms | 61.43 | 63.31 | 3.00 | 1.09 | k1=62.54 k2=61.43 k3=63.31 |
+| bp_g4_maintenance/admission_from_empty/1240 | 3 | 0.4729 ms | 0.4674 | 0.4832 | 3.32 | 1.22 | k1=0.4674 k2=0.4729 k3=0.4832 |
+| bp_g4_maintenance/admission_of_64/10000 | 3 | 0.5302 ms | 0.5291 | 0.533 | 0.72 | 0.27 | k1=0.5291 k2=0.533 k3=0.5302 |
+| bp_g4_maintenance/admission_of_64/100000 | 3 | 9.725 ms | 9.418 | 9.801 | 3.94 | 1.51 | k1=9.725 k2=9.801 k3=9.418 |
+| bp_g4_maintenance/admission_of_64/1240 | 3 | 69.17 us | 69.03 | 70.99 | 2.83 | 1.14 | k1=69.03 k2=69.17 k3=70.99 |
+| bp_g4_maintenance/compaction/10000 | 3 | 2.355 ms | 2.354 | 2.356 | 0.05 | 0.02 | k1=2.354 k2=2.355 k3=2.356 |
+| bp_g4_maintenance/compaction/100000 | 3 | 30.35 ms | 30.25 | 30.42 | 0.54 | 0.20 | k1=30.35 k2=30.25 k3=30.42 |
+| bp_g4_maintenance/compaction/1240 | 3 | 0.2069 ms | 0.2061 | 0.207 | 0.45 | 0.18 | k1=0.2061 k2=0.2069 k3=0.207 |
+| bp_g4_maintenance/eviction_filter/10000 | 3 | 0.3893 ms | 0.3885 | 0.3899 | 0.36 | 0.13 | k1=0.3885 k2=0.3899 k3=0.3893 |
+| bp_g4_maintenance/eviction_filter/100000 | 3 | 6.08 ms | 5.977 | 6.12 | 2.34 | 0.88 | k1=5.977 k2=6.12 k3=6.08 |
+| bp_g4_maintenance/eviction_filter/1240 | 3 | 46.17 us | 46.1 | 46.49 | 0.86 | 0.33 | k1=46.49 k2=46.17 k3=46.1 |
+| bp_g4_maintenance/high_jumper/10000 | 3 | 0.5053 ms | 0.5053 | 0.5069 | 0.33 | 0.13 | k1=0.5069 k2=0.5053 k3=0.5053 |
+| bp_g4_maintenance/high_jumper/100000 | 3 | 9.607 ms | 9.549 | 9.62 | 0.73 | 0.28 | k1=9.549 k2=9.607 k3=9.62 |
+| bp_g4_maintenance/high_jumper/1240 | 3 | 59.91 us | 59.61 | 60.01 | 0.67 | 0.25 | k1=59.91 k2=59.61 k3=60.01 |
+| bp_g4_maintenance/shift_translation/10000 | 3 | 0.4681 ms | 0.4678 | 0.4704 | 0.56 | 0.22 | k1=0.4678 k2=0.4681 k3=0.4704 |
+| bp_g4_maintenance/shift_translation/100000 | 3 | 9.196 ms | 9.157 | 9.856 | 7.61 | 3.09 | k1=9.196 k2=9.856 k3=9.157 |
+| bp_g4_maintenance/shift_translation/1240 | 3 | 55.42 us | 55.13 | 56.43 | 2.36 | 0.90 | k1=56.43 k2=55.42 k3=55.13 |
+| bp_g4_maintenance/stable/10000 | 3 | 0.2784 ms | 0.2741 | 0.2804 | 2.26 | 0.84 | k1=0.2804 k2=0.2784 k3=0.2741 |
+| bp_g4_maintenance/stable/100000 | 3 | 4.368 ms | 4.279 | 4.457 | 4.07 | 1.47 | k1=4.457 k2=4.279 k3=4.368 |
+| bp_g4_maintenance/stable/1240 | 3 | 32.69 us | 32.33 | 33.45 | 3.44 | 1.27 | k1=32.69 k2=33.45 k3=32.33 |
+| bp_g4_scene/all_pairs/10000 | 3 | 123.4 ms | 123.2 | 123.4 | 0.19 | 0.07 | k1=123.4 k2=123.4 k3=123.2 |
+| bp_g4_scene/all_pairs/100000 | 3 | 1.763e+04 ms | 1.755e+04 | 2.219e+04 | 26.33 | 10.90 | k1=2.219e+04 k2=1.763e+04 k3=1.755e+04 |
+| bp_g4_scene/all_pairs/1240 | 3 | 1.849 ms | 1.848 | 1.853 | 0.27 | 0.11 | k1=1.853 k2=1.848 k3=1.849 |
+| bp_g4_scene/all_pairs/j100 | 3 | 1.854 ms | 1.852 | 1.858 | 0.30 | 0.11 | k1=1.858 k2=1.854 k3=1.852 |
+| bp_g4_scene/grid_w1/10000 | 3 | 36.79 ms | 36.75 | 36.85 | 0.29 | 0.10 | k1=36.75 k2=36.79 k3=36.85 |
+| bp_g4_scene/grid_w1/100000 | 3 | 336.3 ms | 336.2 | 336.6 | 0.11 | 0.04 | k1=336.3 k2=336.2 k3=336.6 |
+| bp_g4_scene/grid_w1/1240 | 3 | 5.411 ms | 5.41 | 5.427 | 0.33 | 0.13 | k1=5.427 k2=5.411 k3=5.41 |
+| bp_g4_scene/grid_w1/j100 | 3 | 4.981 ms | 4.979 | 4.981 | 0.05 | 0.02 | k1=4.979 k2=4.981 k3=4.981 |
+| bp_g4_scene/grid_w8/10000 | 3 | 14.52 ms | 14.5 | 14.55 | 0.32 | 0.12 | k1=14.55 k2=14.52 k3=14.5 |
+| bp_g4_scene/grid_w8/100000 | 3 | 128.1 ms | 124.5 | 130.1 | 4.39 | 1.61 | k1=128.1 k2=130.1 k3=124.5 |
+| bp_g4_scene/grid_w8/1240 | 3 | 5.411 ms | 5.41 | 5.422 | 0.23 | 0.09 | k1=5.411 k2=5.41 k3=5.422 |
+| bp_g4_scene/grid_w8/j100 | 3 | 4.982 ms | 4.971 | 4.991 | 0.40 | 0.15 | k1=4.982 k2=4.971 k3=4.991 |
+| bp_g4_scene/tree/10000 | 3 | 4.807 ms | 4.803 | 4.814 | 0.23 | 0.08 | k1=4.803 k2=4.807 k3=4.814 |
+| bp_g4_scene/tree/100000 | 3 | 59.34 ms | 59.18 | 59.61 | 0.72 | 0.26 | k1=59.34 k2=59.18 k3=59.61 |
+| bp_g4_scene/tree/1240 | 3 | 0.4415 ms | 0.4414 | 0.4418 | 0.11 | 0.04 | k1=0.4418 k2=0.4415 k3=0.4414 |
+| bp_g4_scene/tree/j100 | 3 | 0.4429 ms | 0.4424 | 0.444 | 0.36 | 0.13 | k1=0.4429 k2=0.444 k3=0.4424 |
+| bp_g4_uniform/all_pairs/1000 | 3 | 0.6343 ms | 0.6308 | 0.6349 | 0.64 | 0.25 | k1=0.6349 k2r=0.6343 k3=0.6308 |
+| bp_g4_uniform/all_pairs/10000 | 3 | 75.67 ms | 74.84 | 76.76 | 2.53 | 0.92 | k1=75.67 k2r=76.76 k3=74.84 |
+| bp_g4_uniform/all_pairs/100000 | 3 | 1.202e+04 ms | 1.175e+04 | 1.688e+04 | 42.65 | 17.38 | k1=1.688e+04 k2r=1.175e+04 k3=1.202e+04 |
+| bp_g4_uniform/all_pairs/128 | 3 | 11.74 us | 11.72 | 11.74 | 0.18 | 0.07 | k1=11.74 k2r=11.74 k3=11.72 |
+| bp_g4_uniform/all_pairs/17 | 3 | 0.182 us | 0.1817 | 0.1822 | 0.24 | 0.09 | k1=0.1822 k2r=0.1817 k3=0.182 |
+| bp_g4_uniform/all_pairs/256 | 3 | 43.93 us | 43.9 | 43.98 | 0.17 | 0.06 | k1=43.9 k2r=43.93 k3=43.98 |
+| bp_g4_uniform/all_pairs/64 | 3 | 2.767 us | 2.76 | 2.77 | 0.35 | 0.13 | k1=2.767 k2r=2.76 k3=2.77 |
+| bp_g4_uniform/grid_w1/1000 | 3 | 0.6651 ms | 0.665 | 0.6667 | 0.26 | 0.11 | k1=0.665 k2r=0.6651 k3=0.6667 |
+| bp_g4_uniform/grid_w1/10000 | 3 | 8.069 ms | 8.05 | 8.101 | 0.64 | 0.23 | k1=8.05 k2r=8.069 k3=8.101 |
+| bp_g4_uniform/grid_w1/100000 | 3 | 89.69 ms | 89.49 | 90.39 | 1.01 | 0.38 | k1=90.39 k2r=89.69 k3=89.49 |
+| bp_g4_uniform/grid_w1/128 | 3 | 49.08 us | 48.86 | 49.13 | 0.55 | 0.21 | k1=48.86 k2r=49.13 k3=49.08 |
+| bp_g4_uniform/grid_w1/17 | 3 | 3.105 us | 3.101 | 3.123 | 0.72 | 0.28 | k1=3.123 k2r=3.101 k3=3.105 |
+| bp_g4_uniform/grid_w1/256 | 3 | 0.1178 ms | 0.1177 | 0.1182 | 0.43 | 0.16 | k1=0.1177 k2r=0.1182 k3=0.1178 |
+| bp_g4_uniform/grid_w1/64 | 3 | 47.69 us | 47.5 | 47.75 | 0.53 | 0.20 | k1=47.69 k2r=47.5 k3=47.75 |
+| bp_g4_uniform/grid_w8/1000 | 3 | 0.6661 ms | 0.6642 | 0.6703 | 0.92 | 0.34 | k1=0.6703 k2r=0.6642 k3=0.6661 |
+| bp_g4_uniform/grid_w8/10000 | 3 | 3.44 ms | 3.436 | 3.473 | 1.07 | 0.43 | k1=3.436 k2r=3.473 k3=3.44 |
+| bp_g4_uniform/grid_w8/100000 | 3 | 36.41 ms | 36.08 | 36.5 | 1.16 | 0.44 | k1=36.08 k2r=36.41 k3=36.5 |
+| bp_g4_uniform/grid_w8/128 | 3 | 48.96 us | 48.89 | 48.99 | 0.19 | 0.07 | k1=48.99 k2r=48.96 k3=48.89 |
+| bp_g4_uniform/grid_w8/17 | 3 | 3.103 us | 3.101 | 3.142 | 1.30 | 0.53 | k1=3.103 k2r=3.101 k3=3.142 |
+| bp_g4_uniform/grid_w8/256 | 3 | 0.1177 ms | 0.1175 | 0.1183 | 0.69 | 0.26 | k1=0.1175 k2r=0.1177 k3=0.1183 |
+| bp_g4_uniform/grid_w8/64 | 3 | 47.56 us | 47.5 | 47.76 | 0.56 | 0.21 | k1=47.56 k2r=47.5 k3=47.76 |
+| bp_g4_uniform/tree/1000 | 3 | 0.1531 ms | 0.151 | 0.1556 | 3.01 | 1.09 | k1=0.1556 k2r=0.1531 k3=0.151 |
+| bp_g4_uniform/tree/10000 | 3 | 3.022 ms | 3.02 | 3.028 | 0.26 | 0.10 | k1=3.022 k2r=3.028 k3=3.02 |
+| bp_g4_uniform/tree/100000 | 3 | 39.85 ms | 39.72 | 40.06 | 0.85 | 0.31 | k1=40.06 k2r=39.85 k3=39.72 |
+| bp_g4_uniform/tree/128 | 3 | 10.32 us | 10.3 | 10.34 | 0.39 | 0.14 | k1=10.32 k2r=10.3 k3=10.34 |
+| bp_g4_uniform/tree/17 | 3 | 1.771 us | 1.762 | 1.811 | 2.76 | 1.06 | k1=1.771 k2r=1.811 k3=1.762 |
+| bp_g4_uniform/tree/256 | 3 | 22 us | 21.87 | 22.06 | 0.85 | 0.32 | k1=21.87 k2r=22 k3=22.06 |
+| bp_g4_uniform/tree/64 | 3 | 4.471 us | 4.46 | 4.474 | 0.32 | 0.12 | k1=4.471 k2r=4.46 k3=4.474 |
+| row_identity_churn/archetype_shift/sleeping_off_allpairs | 6 | 11.58 ms | 11.55 | 11.73 | 1.56 | 0.35 | k1=11.73 k2=11.55 k3=11.71 k4=11.56 k5=11.58 k6=11.59 |
+| row_identity_churn/archetype_shift/sleeping_off_tree | 6 | 9.694 ms | 9.656 | 9.951 | 3.04 | 0.67 | k1=9.677 k2=9.656 k3=9.889 k4=9.69 k5=9.951 k6=9.698 |
+| row_identity_churn/archetype_shift/sleeping_on_allpairs | 6 | 5.994 ms | 5.873 | 6.092 | 3.66 | 0.66 | k1r=5.959 k2=5.959 k3=6.092 k4=5.873 k5=6.042 k6=6.03 |
+| row_identity_churn/archetype_shift/sleeping_on_tree | 6 | 4.183 ms | 4.141 | 4.589 | 10.72 | 2.10 | k1=4.589 k2=4.161 k3=4.152 k4=4.21 k5=4.205 k6=4.141 |
+| row_identity_churn/burst_despawn/sleeping_off_allpairs | 6 | 12 ms | 11.76 | 12.4 | 5.31 | 0.89 | k1=12.4 k2=12.1 k3=11.98 k4=11.76 k5=12 k6=12 |
+| row_identity_churn/burst_despawn/sleeping_off_tree | 6 | 9.653 ms | 9.612 | 10.22 | 6.26 | 1.23 | k1=10.22 k2=9.612 k3=9.797 k4=9.638 k5=9.634 k6=9.668 |
+| row_identity_churn/burst_despawn/sleeping_on_allpairs | 6 | 5.814 ms | 5.791 | 6.33 | 9.26 | 1.86 | k1=6.33 k2=5.826 k3=5.8 k4=5.802 k5=5.854 k6=5.791 |
+| row_identity_churn/burst_despawn/sleeping_on_tree | 6 | 4.13 ms | 4.113 | 4.452 | 8.22 | 1.66 | k1=4.452 k2=4.135 k3=4.113 k4=4.126 k5=4.12 k6=4.133 |
+| row_identity_churn/burst_migrate/sleeping_off_allpairs | 6 | 11.95 ms | 11.83 | 12.64 | 6.80 | 1.30 | k1=12.64 k2=11.83 k3=11.95 k4=11.86 k5=12.07 k6=11.94 |
+| row_identity_churn/burst_migrate/sleeping_off_tree | 6 | 9.755 ms | 9.714 | 10.55 | 8.54 | 1.69 | k1=10.55 k2=9.714 k3=9.757 k4=9.754 k5=9.92 k6=9.746 |
+| row_identity_churn/burst_migrate/sleeping_on_allpairs | 6 | 5.832 ms | 5.82 | 6.464 | 11.05 | 2.27 | k1=6.464 k2=5.843 k3=5.836 k4=5.827 k5=5.82 k6r=5.824 |
+| row_identity_churn/burst_migrate/sleeping_on_tree | 6 | 4.19 ms | 4.164 | 4.203 | 0.93 | 0.16 | k1r=4.203 k2=4.192 k3=4.189 k4=4.164 k5=4.19 k6=4.184 |
+| row_identity_churn/first_archetype_spawn/sleeping_off_allpairs | 6 | 11.86 ms | 11.71 | 11.91 | 1.74 | 0.38 | k1r=11.91 k2=11.91 k3=11.71 k4=11.74 k5=11.83 k6=11.89 |
+| row_identity_churn/first_archetype_spawn/sleeping_off_tree | 6 | 9.874 ms | 9.754 | 9.987 | 2.37 | 0.43 | k1r=9.754 k2=9.815 k3=9.987 k4=9.929 k5=9.873 k6=9.874 |
+| row_identity_churn/first_archetype_spawn/sleeping_on_allpairs | 6 | 5.83 ms | 5.812 | 6.348 | 9.20 | 1.86 | k1=6.348 k2=5.877 k3=5.816 k4=5.812 k5=5.842 k6=5.817 |
+| row_identity_churn/first_archetype_spawn/sleeping_on_tree | 6 | 4.15 ms | 4.114 | 4.176 | 1.51 | 0.29 | k1r=4.163 k2=4.126 k3=4.154 k4=4.176 k5=4.147 k6=4.114 |
+| row_identity_churn/stable/sleeping_off_allpairs | 6 | 11.59 ms | 11.51 | 11.68 | 1.52 | 0.27 | k1=11.62 k2=11.56 k3=11.55 k4=11.51 k5=11.68 k6=11.62 |
+| row_identity_churn/stable/sleeping_off_tree | 6 | 9.606 ms | 9.553 | 9.739 | 1.93 | 0.36 | k1=9.614 k2=9.608 k3=9.604 k4=9.739 k5=9.553 k6=9.561 |
+| row_identity_churn/stable/sleeping_on_allpairs | 6 | 5.739 ms | 5.724 | 5.791 | 1.18 | 0.21 | k1r=5.734 k2=5.791 k3=5.737 k4=5.724 k5=5.742 k6=5.754 |
+| row_identity_churn/stable/sleeping_on_tree | 6 | 4.043 ms | 4.04 | 4.058 | 0.46 | 0.09 | k1r=4.058 k2=4.041 k3=4.051 k4=4.04 k5=4.044 k6=4.043 |
+| row_identity_churn/swap_churn/sleeping_off_allpairs | 6 | 11.88 ms | 11.83 | 11.98 | 1.30 | 0.23 | k1=11.83 k2=11.87 k3=11.9 k4=11.86 k5=11.92 k6=11.98 |
+| row_identity_churn/swap_churn/sleeping_off_tree | 6 | 9.769 ms | 9.733 | 9.94 | 2.12 | 0.43 | k1=9.773 k2=9.739 k3=9.733 k4=9.766 k5=9.94 k6=9.87 |
+| row_identity_churn/swap_churn/sleeping_on_allpairs | 6 | 5.803 ms | 5.782 | 6.27 | 8.41 | 1.70 | k1=6.27 k2=5.783 k3=5.782 k4=5.827 k5=5.793 k6=5.812 |
+| row_identity_churn/swap_churn/sleeping_on_tree | 6 | 4.12 ms | 4.104 | 4.167 | 1.54 | 0.29 | k1r=4.167 k2=4.13 k3=4.132 k4=4.109 k5=4.104 k6=4.109 |
+
+| stop rule | cell | value ms | limit ms | fired |
+|---|---|---|---|---|
+| J snapshot | bp_g4_scene/tree/j100 | 0.4429 | 0.3 | True |
+| Tree vs Grid | bp_g4_uniform/128 | tree 0.01032 vs grid_w1 0.04908 (ratio 0.210) | bar range 1.4 % / SE 0.5 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_uniform/256 | tree 0.022 vs grid_w1 0.1178 (ratio 0.187) | bar range 1.9 % / SE 0.7 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_uniform/1000 | tree 0.1531 vs grid_w1 0.6651 (ratio 0.230) | bar range 6.0 % / SE 2.2 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_uniform/10000 | tree 3.022 vs grid_w1 8.069 (ratio 0.374) | bar range 1.4 % / SE 0.5 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_uniform/100000 | tree 39.85 vs grid_w1 89.69 (ratio 0.444) | bar range 2.6 % / SE 1.0 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_disparity/128 | tree 0.01468 vs grid_w1 0.1756 (ratio 0.084) | bar range 2.5 % / SE 0.9 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_disparity/256 | tree 0.0314 vs grid_w1 0.3513 (ratio 0.089) | bar range 2.1 % / SE 0.8 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_disparity/1000 | tree 0.2306 vs grid_w1 2.439 (ratio 0.095) | bar range 1.4 % / SE 0.5 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_disparity/10000 | tree 3.557 vs grid_w1 15.93 (ratio 0.223) | bar range 1.7 % / SE 0.6 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_disparity/100000 | tree 45.73 vs grid_w1 139.3 (ratio 0.328) | bar range 5.6 % / SE 2.2 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_scene/1240 | tree 0.4415 vs grid_w1 5.411 (ratio 0.082) | bar range 0.7 % / SE 0.3 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_scene/10000 | tree 4.807 vs grid_w1 36.79 (ratio 0.131) | bar range 0.7 % / SE 0.3 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_scene/100000 | tree 59.34 vs grid_w1 336.3 (ratio 0.176) | bar range 1.5 % / SE 0.5 % | claimed slower: range False SE False |
+| Tree vs Grid | bp_g4_scene/j100 | tree 0.4429 vs grid_w1 4.981 (ratio 0.089) | bar range 0.7 % / SE 0.3 % | claimed slower: range False SE False |
+| stable | bp_g4_maintenance/stable/1240 | 0.03269 | 0.058 | False |
+| stable | bp_g4_maintenance/stable/10000 | 0.2784 | 0.46 | False |
+| stable | bp_g4_maintenance/stable/100000 | 4.368 | 4.6 | False |
+| shift_translation | bp_g4_maintenance/shift_translation/1240 - stable/1240 | 0.02273 | 0.062 | False |
+| shift_translation | bp_g4_maintenance/shift_translation/10000 - stable/10000 | 0.1897 | 0.5 | False |
+| shift_translation | bp_g4_maintenance/shift_translation/100000 - stable/100000 | 4.828 | 5 | False |
+| eviction_filter | bp_g4_maintenance/eviction_filter/1240 - stable/1240 | 0.01348 | 0.048 | False |
+| eviction_filter | bp_g4_maintenance/eviction_filter/10000 - stable/10000 | 0.1108 | 0.38 | False |
+| eviction_filter | bp_g4_maintenance/eviction_filter/100000 - stable/100000 | 1.712 | 3.8 | False |
+| compaction | bp_g4_maintenance/compaction/1240 - eviction_filter/1240 | 0.1607 | 0.05 | True |
+| compaction | bp_g4_maintenance/compaction/10000 - eviction_filter/10000 | 1.966 | 0.4 | True |
+| compaction | bp_g4_maintenance/compaction/100000 - eviction_filter/100000 | 24.27 | 6 | True |
+| admission_of_64 | bp_g4_maintenance/admission_of_64/1240 - stable/1240 | 0.03648 | 0.12 | False |
+| admission_of_64 | bp_g4_maintenance/admission_of_64/10000 - stable/10000 | 0.2518 | 0.8 | False |
+| admission_of_64 | bp_g4_maintenance/admission_of_64/100000 - stable/100000 | 5.357 | 9.8 | False |
+| admission_from_empty | bp_g4_maintenance/admission_from_empty/1240 - stable/1240 | 0.4402 | 0.46 | False |
+| admission_from_empty | bp_g4_maintenance/admission_from_empty/10000 - stable/10000 | 4.56 | 4.8 | False |
+| admission_from_empty | bp_g4_maintenance/admission_from_empty/100000 - stable/100000 | 58.17 | 60 | False |
+| high_jumper | bp_g4_maintenance/high_jumper/1240 - stable/1240 | 0.02722 | 0.062 | False |
+| high_jumper | bp_g4_maintenance/high_jumper/10000 - stable/10000 | 0.2269 | 0.5 | False |
+| high_jumper | bp_g4_maintenance/high_jumper/100000 - stable/100000 | 5.239 | 5 | True |
+
+| churn arm | sleeping | allpairs ms | tree ms | ratio | claimed faster (range / SE) | tree - tree(stable) ms |
+|---|---|---|---|---|---|---|
+| stable | sleeping_off | 11.589524259259262 | 9.605926380147631 | 0.8288456165466095 | True / True | 0.0 |
+| swap_churn | sleeping_off | 11.88338440545809 | 9.769333911513323 | 0.8221003022528015 | True / True | 0.1634075313656926 |
+| archetype_shift | sleeping_off | 11.581936869338378 | 9.694110416666668 | 0.8370025260913416 | True / True | 0.08818403651903756 |
+| first_archetype_spawn | sleeping_off | 11.859306866635542 | 9.873577626678877 | 0.8325594183296471 | True / True | 0.2676512465312462 |
+| burst_despawn | sleeping_off | 12.001241319444444 | 9.652880330882352 | 0.8043234923743037 | True / True | 0.0469539507347215 |
+| burst_migrate | sleeping_off | 11.94544975877193 | 9.755124763071894 | 0.81663938655038 | False / True | 0.1491983829242643 |
+| stable | sleeping_on | 5.7394629482323225 | 4.04305869047619 | 0.7044315342642639 | True / True | 0.0 |
+| swap_churn | sleeping_on | 5.802638132352941 | 4.119799986471862 | 0.7099874044362134 | True / True | 0.0767412959956713 |
+| archetype_shift | sleeping_on | 5.994358696428571 | 4.182995484330484 | 0.6978220183624824 | True / True | 0.1399367938542939 |
+| first_archetype_spawn | sleeping_on | 5.829639320261438 | 4.1503877626050425 | 0.7119458914344828 | True / True | 0.1073290721288519 |
+| burst_despawn | sleeping_on | 5.813768874493927 | 4.129554513888889 | 0.710305931150102 | True / True | 0.0864958234126987 |
+| burst_migrate | sleeping_on | 5.831703870879121 | 4.1897546130952374 | 0.7184443356283862 | True / True | 0.14669592261904757 |
+
+STOP RULES FIRED: ['J snapshot', 'compaction', 'compaction', 'compaction', 'high_jumper']

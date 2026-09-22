@@ -1,7 +1,7 @@
 // Phase 8a Step 13 — Miri test suite for the `SystemParam` + `Resources`
 // subsystem.
 //
-// These tests are written to be run under `cargo +nightly miri test`. They
+// These tests are written to be run under `cargo +nightly-x86_64-pc-windows-msvc miri test`. They
 // exercise the unsafe code paths added in Steps 2 / 4-7 / 8 / 9 and verify
 // that no UB (uninit reads, retag failures, double-frees, aliased mutable
 // references) is detected by Miri.

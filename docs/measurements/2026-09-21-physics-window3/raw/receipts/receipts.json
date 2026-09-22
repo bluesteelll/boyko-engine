@@ -1,0 +1,204 @@
+[
+ {
+  "row": "JOLT-T",
+  "role": "v530",
+  "engine": "jolt",
+  "W": 1,
+  "timed": false,
+  "attempt": "receipt",
+  "exe": "D:/tmp/jolt/build-v5.3.0-dist/PerformanceTest.exe",
+  "exe_sha256": "29b23ad1cfc38b7fb39b484b8cc2cfad522a0a910fd03d6e3a15f8b90e0cefac",
+  "args": [
+   "-s=Pyramid",
+   "-q=Discrete",
+   "-receipt",
+   "-t=1",
+   "-i=500"
+  ],
+  "cwd": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win3\\raw\\receipts\\JOLT-T_receipt_W1",
+  "start": "2026-09-21T04:42:03.133+03:00",
+  "pid": 8380,
+  "mask_requested": null,
+  "mask_readback": "0xffff",
+  "system_mask": "0xffff",
+  "wall_s": 8.108,
+  "exit": 0,
+  "percpu_busy": [
+   6.4,
+   4.4,
+   56.8,
+   19.3,
+   11.0,
+   1.5,
+   13.3,
+   1.7,
+   7.5,
+   10.6,
+   3.7,
+   2.3,
+   8.1,
+   1.2,
+   5.8,
+   2.3
+  ],
+  "proc_cpu_s": 8.078,
+  "others_cpu_s": 1.503,
+  "others_busy_pct": 1.16,
+  "others_top5": [
+   {
+    "name": "claude.exe",
+    "pid": 5268,
+    "cpu_s": 0.516
+   },
+   {
+    "name": "Taskmgr.exe",
+    "pid": 22656,
+    "cpu_s": 0.438
+   },
+   {
+    "name": "steam.exe",
+    "pid": 3144,
+    "cpu_s": 0.109
+   },
+   {
+    "name": "steamwebhelper.exe",
+    "pid": 3288,
+    "cpu_s": 0.094
+   },
+   {
+    "name": "nvsphelper64.exe",
+    "pid": 13884,
+    "cpu_s": 0.078
+   }
+  ],
+  "perf": [],
+  "end": "2026-09-21T04:42:11.258+03:00",
+  "jolt": {
+   "patch_line": "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=1",
+   "stat_lines": [
+    {
+     "quality": "Discrete",
+     "threads": 1,
+     "steps_per_s": 61.83519,
+     "hash": "0xee15b89965ec747"
+    }
+   ]
+  },
+  "files": [
+   "receipt_discrete_th1.csv",
+   "stderr.txt",
+   "stdout.txt"
+  ],
+  "receipt_csv": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win3\\raw\\receipts\\JOLT-T_receipt_W1\\receipt_discrete_th1.csv",
+  "manifolds": {
+   "n_frames": 500,
+   "mean_0_500": 8171.046,
+   "mean_0_100": 7031.22,
+   "mean_100_500": 8456.0025,
+   "final": 8456.0,
+   "points_mean_100_500": 31034.94,
+   "active_bodies_min": 1240.0
+  }
+ },
+ {
+  "row": "JOLT56-T",
+  "role": "v560",
+  "engine": "jolt",
+  "W": 1,
+  "timed": false,
+  "attempt": "receipt",
+  "exe": "D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe",
+  "exe_sha256": "918fd2b70ecc634cc0574cb676c56a3c929a46a51173cf9aa76fdd628e2ef0ad",
+  "args": [
+   "-s=Pyramid",
+   "-q=Discrete",
+   "-receipt",
+   "-t=1",
+   "-i=500"
+  ],
+  "cwd": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win3\\raw\\receipts\\JOLT56-T_receipt_W1",
+  "start": "2026-09-21T04:42:11.261+03:00",
+  "pid": 21848,
+  "mask_requested": null,
+  "mask_readback": "0xffff",
+  "system_mask": "0xffff",
+  "wall_s": 4.96,
+  "exit": 0,
+  "percpu_busy": [
+   4.4,
+   1.9,
+   65.7,
+   31.8,
+   6.9,
+   0.9,
+   2.8,
+   0.9,
+   2.5,
+   0.9,
+   2.5,
+   0.3,
+   2.5,
+   3.1,
+   2.8,
+   0.6
+  ],
+  "proc_cpu_s": 4.875,
+  "others_cpu_s": 0.907,
+  "others_busy_pct": 1.14,
+  "others_top5": [
+   {
+    "name": "claude.exe",
+    "pid": 5268,
+    "cpu_s": 0.406
+   },
+   {
+    "name": "Taskmgr.exe",
+    "pid": 22656,
+    "cpu_s": 0.234
+   },
+   {
+    "name": "steamwebhelper.exe",
+    "pid": 3288,
+    "cpu_s": 0.094
+   },
+   {
+    "name": "steam.exe",
+    "pid": 3144,
+    "cpu_s": 0.047
+   },
+   {
+    "name": "nvsphelper64.exe",
+    "pid": 13884,
+    "cpu_s": 0.047
+   }
+  ],
+  "perf": [],
+  "end": "2026-09-21T04:42:16.239+03:00",
+  "jolt": {
+   "patch_line": "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=1",
+   "stat_lines": [
+    {
+     "quality": "Discrete",
+     "threads": 1,
+     "steps_per_s": 101.177139,
+     "hash": "0xb8522b4e3fc62cfe"
+    }
+   ]
+  },
+  "files": [
+   "receipt_discrete_th1.csv",
+   "stderr.txt",
+   "stdout.txt"
+  ],
+  "receipt_csv": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win3\\raw\\receipts\\JOLT56-T_receipt_W1\\receipt_discrete_th1.csv",
+  "manifolds": {
+   "n_frames": 500,
+   "mean_0_500": 8199.646,
+   "mean_0_100": 7042.23,
+   "mean_100_500": 8489.0,
+   "final": 8489.0,
+   "points_mean_100_500": 31111.9575,
+   "active_bodies_min": 1240.0
+  }
+ }
+]

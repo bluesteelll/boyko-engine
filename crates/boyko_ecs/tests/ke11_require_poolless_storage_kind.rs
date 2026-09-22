@@ -479,6 +479,77 @@ fn site2_insert_constructs_the_required_dense_component() {
     );
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// SITE 3 — the `apply_replace_in_place` fast path (KE14 D3)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// **KE14 D3.** A third site, reached by an insert whose merged signature equals
+/// the source's, so `InsertCommand` takes the in-place replace fast path and
+/// never enters `migrate_entity_insert` at all. That path had no required pass,
+/// so the requirement was silently never constructed — a MISS, not a panic,
+/// which is why neither site-1 nor site-2 coverage could see it.
+///
+/// Reaching it takes an entity that already hosts every TABLE id of the bundle
+/// while NOT being a member of the dense requirement. The `remove` in the middle
+/// is what produces that state: `RemoveCommand` routes a dense id to
+/// `dense_remove_and_fire` (no migration), so the archetype is untouched and the
+/// second insert's merged set still equals the source.
+#[test]
+fn site3_replace_in_place_constructs_the_required_dense_component() {
+    let mut world = EcsMaster::new();
+    let e = insert_bundle_into_anchored(&mut world, BDense { a: KReqDense773 { v: 1 } });
+    let arch_before = world
+        .entity_archetype_id(e)
+        .expect("the entity is live after the first insert");
+    assert_eq!(
+        read_dense::<KDense770>(&world, e).map(|c| c.x),
+        Some(DENSE_CTOR_SENTINEL),
+        "precondition: the migrating insert constructed it"
+    );
+
+    // Drop the dense membership WITHOUT changing the archetype.
+    world.run_system(move |mut cmds: Commands| {
+        cmds.entity(e).remove::<KDense770>();
+    });
+    assert!(
+        !world.has_component(e, KDense770::component_id()),
+        "precondition: the dense remove tombstoned the membership"
+    );
+    assert_eq!(
+        world.entity_archetype_id(e),
+        Some(arch_before),
+        "precondition: a dense remove performs NO archetype migration — if this \
+         reds, the second insert below would migrate and would not reach the \
+         in-place replace path this test exists for"
+    );
+
+    // Re-insert the SAME require-bearing bundle. Every table id is already
+    // hosted, so `merged_archetype_id` returns the source and the command takes
+    // `apply_replace_in_place`.
+    world.run_system(move |mut cmds: Commands| {
+        cmds.entity(e).insert(BDense { a: KReqDense773 { v: 2 } });
+    });
+    assert_eq!(
+        world.entity_archetype_id(e),
+        Some(arch_before),
+        "precondition: the re-insert really was the in-place replace path"
+    );
+
+    assert!(
+        world.has_component(e, KDense770::component_id()),
+        "site 3: the in-place replace path must construct the required DENSE \
+         component too. Absent here is KE14 D3 — the path has no required pass"
+    );
+    assert_eq!(
+        read_dense::<KDense770>(&world, e),
+        Some(KDense770 {
+            x: DENSE_CTOR_SENTINEL
+        }),
+        "site 3: presence alone is not the gate — the slot must hold the CTOR's \
+         value, not a zeroed or stale one"
+    );
+}
+
 /// present⇒skip at site 2, against the **dense membership oracle**.
 ///
 /// The pre-KE11 shape asked `src.component_ids().contains(&req_id)` — the TABLE

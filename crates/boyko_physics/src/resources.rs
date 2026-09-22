@@ -27,6 +27,7 @@ use crate::scratch_ids::{
     sensor_overlaps_id, sleep_island_key_id, sleep_latch_prev_id, touched_awake_id,
     touched_solver_id, vn_initial_id,
 };
+use crate::broadphase_tree::sphere_bound_feasible;
 use crate::systems::body_bounding_radius;
 
 /// Number of bits in one [`BitSet256`] chunk.
@@ -40,7 +41,12 @@ const BITS_PER_CHUNK: usize = 256;
 /// opts into the uniform-grid CSR counting-sort, which emits candidate pairs then
 /// applies the SAME sphere-bound feasibility predicate as all-pairs and SORTS the
 /// survivors by `(min, max)` — so its [`ContactPairs`] output is bit-identical to
-/// all-pairs (the O2 correctness gate). The choice is a single runtime branch in
+/// all-pairs (the O2 correctness gate). [`Tree`](BroadphaseKind::Tree) opts into
+/// the packed-BVH broadphase with a persistent static set
+/// ([`BroadphaseTree`](crate::broadphase_tree::BroadphaseTree)), whose pair set is
+/// AllPairs' exact set by construction (the same predicate on the same bits, one
+/// owner per pair, an integer-count assembly) — bit-identical too, and serial.
+/// The choice is a single runtime branch in
 /// [`physics_broadphase`](crate::systems::physics_broadphase) (the one-branch
 /// floor).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,6 +57,13 @@ pub enum BroadphaseKind {
     /// The uniform-grid CSR counting-sort broadphase (opt-in, O2). Produces a
     /// `(min, max)`-sorted pair set bit-identical to [`AllPairs`](Self::AllPairs).
     Grid,
+    /// The packed-BVH broadphase with a persistent static set (opt-in, the tree
+    /// broadphase design; it becomes the default at its commit C4). Produces a
+    /// `(min, max)`-sorted pair set bit-identical to [`AllPairs`](Self::AllPairs);
+    /// runs the all-pairs loop itself at or below
+    /// [`BroadphaseTree::brute_max_rows`](crate::broadphase_tree::BroadphaseTree::brute_max_rows)
+    /// rows.
+    Tree,
 }
 
 /// Who drives [`PhysicsConfig::broadphase`] — the user (Manual, the 0%-gate) or
@@ -149,8 +162,9 @@ pub struct PhysicsConfig {
     pub contact_damping: f32,
     /// Broadphase algorithm (default [`BroadphaseKind::AllPairs`] = the shipped
     /// O(n²) loop, byte-identical to today). Set to [`BroadphaseKind::Grid`] to
-    /// opt into the O2 uniform-grid broadphase, whose pair set is bit-identical to
-    /// all-pairs (the 0%-gate flag — a single runtime branch in
+    /// opt into the O2 uniform-grid broadphase, or to [`BroadphaseKind::Tree`] for
+    /// the packed-BVH broadphase with a persistent static set; both pair sets are
+    /// bit-identical to all-pairs (the 0%-gate flag — a single runtime branch in
     /// [`physics_broadphase`](crate::systems::physics_broadphase)).
     pub broadphase: BroadphaseKind,
     /// Who drives [`broadphase`](Self::broadphase) — the user
@@ -228,7 +242,8 @@ pub struct PhysicsConfig {
     ///
     /// Effective only on the grid broadphase path
     /// ([`BroadphaseKind::Grid`](BroadphaseKind::Grid)); it is a no-op for the
-    /// shipped all-pairs loop. When `true`,
+    /// shipped all-pairs loop and for the tree broadphase, which is serial by
+    /// design (its parallel query wave is deferred, D6 of its design). When `true`,
     /// [`physics_broadphase`](crate::systems::physics_broadphase) routes the grid
     /// to [`BroadphaseGrid::build_parallel`](BroadphaseGrid::build_parallel), which
     /// keeps the CSR build (count + prefix-sum + scatter) and the oversized emit
@@ -1524,12 +1539,17 @@ impl BroadphaseGrid {
     }
 
     /// The SAME sphere-bound feasibility predicate the all-pairs path uses
-    /// (`delta.length_squared() <= (rA + rB)²`) — the O2 0%-correctness contract.
+    /// (`delta.length_squared() <= (rA + rB)²`) — the O2 0%-correctness contract,
+    /// delegated to the one predicate the tree broadphase also evaluates
+    /// ([`sphere_bound_feasible`]).
     #[inline]
     fn feasible(a: &BodyState, b: &BodyState) -> bool {
-        let bound = body_bounding_radius(a) + body_bounding_radius(b);
-        let delta = b.position - a.position;
-        delta.length_squared() <= bound * bound
+        sphere_bound_feasible(
+            a.position,
+            body_bounding_radius(a),
+            b.position,
+            body_bounding_radius(b),
+        )
     }
 
     /// Emits within-cell all-pairs candidates, deduped to the minimum shared cell

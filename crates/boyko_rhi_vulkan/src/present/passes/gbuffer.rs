@@ -2538,7 +2538,7 @@ impl Renderer<'_> {
         // on EVERY current frame — NO bind, NO dispatch, NO barrier — and the resolve stays
         // RESOLVE_INLINE-hwrt ⇒ BYTE-IDENTICAL). When `Some`:
         //   (a) the VIS pass re-runs the resolve front-matter + traces the TLAS, WRITING
-        //       `gShadowVis` (@21 of its 22-binding set = `shadow_vis[fi]`); dispatched at the
+        //       `gShadowVis` (@22 of its 23-binding set = `shadow_vis[fi]`); dispatched at the
         //       resolve's 1D group count.
         //   (b) `levels` à-trous passes ping-pong `shadow_vis` ⇄ `shadow_vis2`, each pushing
         //       `step = 1 << level` (a 4-byte `{ uint step }`); dispatched at the SAME grid.
@@ -2573,15 +2573,15 @@ impl Renderer<'_> {
                 .shadow_vis
                 .expect("invariant: scene.shadow.is_some() ⇒ shadow_vis pass declared");
             // HW-RT Rung 3b step 5b: select the SDF motion-vector VIS-variant pipeline + its
-            // 24-binding set when temporal is active (`sdf_mv_active()`). That variant writes
-            // `gShadowVis` @21 (bit-identical to the base VIS) AND each SDF pixel's camera-only `Δuv`
-            // to `motion_vec` @23. `sdf_mv_active()` is the SINGLE source shared with
+            // 25-binding set when temporal is active (`sdf_mv_active()`). That variant writes
+            // `gShadowVis` @22 (bit-identical to the base VIS) AND each SDF pixel's camera-only `Δuv`
+            // to `motion_vec` @24. `sdf_mv_active()` is the SINGLE source shared with
             // `declare_deferred_graph` (the `motion_vec` STORAGE write is declared under the SAME
             // predicate — W1: the barrier declaration and this write must never disagree). `Some`
             // implies the boot MV pipeline exists (⇒ RT + storage), a strict superset of the VIS-MV
             // set-build gate, so both `expect`s hold (they trip loudly on a future gate loosening,
             // matching the step-5a `expect` discipline). When false ⇒ the base VIS pipeline + its
-            // 22-binding set (byte-identical).
+            // 23-binding set (byte-identical).
             let (vis_pipeline, vis_set) = if scene.sdf_mv_active() {
                 let p = scene
                     .vis_mv_pipeline
@@ -2597,10 +2597,10 @@ impl Renderer<'_> {
             // barriers for the "shadow_vis" pass into `cmd`.
             ts.cmd();
             self.record_graph_pass(vis_pass, cmd, targets, scene, fi);
-            // SAFETY: recording is open; the selected VIS pipeline + its layout (22-binding base or
-            // 24-binding VIS-MV) are live on this device (caller contract); `vis_set` binds the
-            // resolve inputs + `gShadowVis` @21 = `shadow_vis[fi]` (the write target) [+ the
-            // `MotionCam` UBO @22 + `motion_vec[fi]` @23 on the VIS-MV path]; `dispatch_group_count_x`
+            // SAFETY: recording is open; the selected VIS pipeline + its layout (23-binding base or
+            // 25-binding VIS-MV) are live on this device (caller contract); `vis_set` binds the
+            // resolve inputs + `gShadowVis` @22 = `shadow_vis[fi]` (the write target) [+ the
+            // `MotionCam` UBO @23 + `motion_vec[fi]` @24 on the VIS-MV path]; `dispatch_group_count_x`
             // covers the pixel count (the resolve grid); `&vis_set.descriptor_set` is a
             // single-element local alive for the call. The VIS shader reads its camera/params from
             // the bound UBOs; the resolve's 80-byte push range is declared-but-unread here (no push
@@ -2650,7 +2650,7 @@ impl Renderer<'_> {
                 atrous_sets.len() >= atrous_levels,
                 "invariant: the à-trous set array must hold at least `atrous_levels` levels"
             );
-            // The DENOISED resolve set binds `gShadowVis` @21 to the FINAL à-trous ring (or, on the
+            // The DENOISED resolve set binds `gShadowVis` @22 to the FINAL à-trous ring (or, on the
             // temporal path, `gVisIn` @0 of the temporal set), chosen by `final_is_vis2` (odd count ⇒
             // `shadow_vis2`, even/`0` ⇒ `shadow_vis` = the raw VIS). Assert the record parity matches so
             // the bind target can never diverge from the à-trous chain's last write (a divergence would
@@ -2846,8 +2846,8 @@ impl Renderer<'_> {
         );
         // HW-RT rung 3a: the DENOISED resolve triple (the à-trous ON path). When the scene wires
         // `scene.shadow` (the step-7 gate; kept `None` this rung), the resolve binds the DENOISED
-        // pipeline (`deferred_pbr_hwrt_denoised.comp`, reading the FILTERED `gShadowVis` @21) + its
-        // 22-binding layout + the DENOISED resolve set — REPLACING the RESOLVE_INLINE-hwrt triple. It
+        // pipeline (`deferred_pbr_hwrt_denoised.comp`, reading the FILTERED `gShadowVis` @22) + its
+        // 23-binding layout + the DENOISED resolve set — REPLACING the RESOLVE_INLINE-hwrt triple. It
         // takes priority over `hwrt_triple` (both need `scene.tlas`, but `scene.shadow.is_some()`
         // implies the à-trous stack ran this frame). `None` ⇒ fall through to `hwrt_triple`
         // (RESOLVE_INLINE) or the software triple ⇒ byte-identical.

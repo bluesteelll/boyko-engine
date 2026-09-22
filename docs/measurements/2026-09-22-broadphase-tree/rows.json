@@ -1,0 +1,406 @@
+{
+ "_doc": [
+  "Window 4 run list: tree broadphase C3 (G5 of docs/physics/perf-campaign/levers/broadphase/04-DESIGN-REV2.md) under the window-3 protocol block.",
+  "The recipe: scratchpad/treebp/g4_g5_recipe.md section 2. One binary (bin/runner_c3.exe, parity profile, commit a46b8287); --broadphase is the same-binary A/B.",
+  "Expected poses are the pose gate's (logs/04_pose_gate.txt): J (cfg default AND cfg a, tree = allpairs = grid, W 1/8/16) 0x32d5e235342b4143; rest 0xee2a67a98434919a; s16 0x71313833f6a8e645.",
+  "boyko args are the driver's spelling (tools/lib/driver.py boyko_args): the row args, then --workers W --steps 500 --window 0..500 --csv <cwd>/run.csv --pose-out <cwd>/pose.bin --label <id>@W<W> [--arm-profiler] [--canary-frac 0.05 --canary-ref-ns T] [--expect-pose <twin pose.bin>].",
+  "Jolt v5.6.0 is NOT re-run: its cells are window 3's (D:/wt/joltab/docs/measurements/2026-09-21-physics-window3/analysis.md section 1). No v5.3.0 row."
+ ],
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "order": "pass 0: W ascending, tree/allpairs alternating inside a W group (the row order here); pass 1: the whole list reversed",
+  "warmup_per_pass": {
+   "exe": "bin/runner_c3.exe",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--workers",
+    "8",
+    "--steps",
+    "500"
+   ],
+   "timed": false
+  },
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "rerun_contaminated_once_at_end_of_pass": true,
+  "band_void": false,
+  "placement": "P-none",
+  "steps": 500,
+  "window": [
+   0,
+   500
+  ],
+  "subwindows_reported": [
+   [
+    0,
+    100
+   ],
+   [
+    100,
+    500
+   ]
+  ],
+  "idle_rule": "tools/wait_idle3.ps1: 0 build procs AND 0 procs from D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 90 min before pass 0"
+ },
+ "rows": [
+  {
+   "id": "T-A-tree",
+   "engine": "boyko",
+   "role": "c3",
+   "what": "the design's G5 headline row (cfg-A) with the Tree",
+   "exe": "bin/runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0x32d5e235342b4143",
+   "expect_pose_of": "T-A-allpairs",
+   "timed": true
+  },
+  {
+   "id": "T-A-allpairs",
+   "engine": "boyko",
+   "role": "c3",
+   "what": "its same-binary A (cfg-A, AllPairs)",
+   "exe": "bin/runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0x32d5e235342b4143",
+   "expect_pose_of": null,
+   "timed": true
+  },
+  {
+   "id": "T-D-tree",
+   "engine": "boyko",
+   "role": "c3",
+   "what": "the shipped default with the Tree (the C4 default-to-be)",
+   "exe": "bin/runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0x32d5e235342b4143",
+   "expect_pose_of": "T-D-allpairs",
+   "timed": true
+  },
+  {
+   "id": "T-D-allpairs",
+   "engine": "boyko",
+   "role": "c3",
+   "what": "window 3's D-L5 re-taken on this binary (the bridge)",
+   "exe": "bin/runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0x32d5e235342b4143",
+   "expect_pose_of": null,
+   "timed": true
+  },
+  {
+   "id": "R-tree",
+   "engine": "boyko",
+   "role": "c3",
+   "what": "the design's R row, Tree",
+   "exe": "bin/runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae",
+   "args": [
+    "--scene",
+    "rest",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0xee2a67a98434919a",
+   "expect_pose_of": "R-allpairs",
+   "timed": true
+  },
+  {
+   "id": "R-allpairs",
+   "engine": "boyko",
+   "role": "c3",
+   "what": "the design's R row, AllPairs",
+   "exe": "bin/runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae",
+   "args": [
+    "--scene",
+    "rest",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0xee2a67a98434919a",
+   "expect_pose_of": null,
+   "timed": true
+  },
+  {
+   "id": "S16-tree",
+   "engine": "boyko",
+   "role": "c3",
+   "what": "the brute path (17 rows <= brute_max_rows 64), Tree",
+   "exe": "bin/runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae",
+   "args": [
+    "--scene",
+    "s16",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0x71313833f6a8e645",
+   "expect_pose_of": "S16-allpairs",
+   "timed": true
+  },
+  {
+   "id": "S16-allpairs",
+   "engine": "boyko",
+   "role": "c3",
+   "what": "the brute path, AllPairs",
+   "exe": "bin/runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae",
+   "args": [
+    "--scene",
+    "s16",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0x71313833f6a8e645",
+   "expect_pose_of": null,
+   "timed": true
+  },
+  {
+   "id": "T-A-tree-armed",
+   "engine": "boyko",
+   "role": "c3",
+   "what": "the tree span, t_q, check_step on every step",
+   "exe": "bin/runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": true,
+   "expected_pose": "0x32d5e235342b4143",
+   "expect_pose_of": "T-A-allpairs-armed",
+   "timed": true
+  },
+  {
+   "id": "T-A-allpairs-armed",
+   "engine": "boyko",
+   "role": "c3",
+   "what": "the armed A twin: Delta-bp = physics_broadphase span allpairs - tree",
+   "exe": "bin/runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": true,
+   "expected_pose": "0x32d5e235342b4143",
+   "expect_pose_of": null,
+   "timed": true
+  },
+  {
+   "id": "T-C-tree",
+   "engine": "boyko",
+   "role": "c3",
+   "what": "the protocol's canary J-C on the Tree: --canary-frac 0.05 --canary-ref-ns <T-A-tree window mean at the same W, most recent valid process>",
+   "exe": "bin/runner_c3.exe",
+   "sha256": "19456ab440e21d79132c8a98901698edeae7e80f6c816ce65aa2b374614b080b",
+   "commit": "a46b828797b5e4ff9881598fcc8c4a7e82dcd6ae",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": true,
+   "expected_pose": "0x32d5e235342b4143",
+   "expect_pose_of": "T-A-allpairs",
+   "timed": true,
+   "canary_of": "T-A-tree"
+  }
+ ]
+}

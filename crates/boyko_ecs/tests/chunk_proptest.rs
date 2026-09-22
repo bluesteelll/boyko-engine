@@ -30,7 +30,7 @@
 //!
 //! # Run scope (Miri)
 //!
-//! Run under `cargo +nightly miri test --test chunk_proptest` is **NOT**
+//! Run under `cargo +nightly-x86_64-pc-windows-msvc miri test --test chunk_proptest` is **NOT**
 //! recommended at the default 256-case proptest budget — each case spawns
 //! thousands of entities and Miri's per-allocation overhead is prohibitive.
 //! Per plan §11.5 / §11.3 the small-generator proptest variants live inside

@@ -1,0 +1,6 @@
+row_identity_churn/first_archetype_spawn/sleeping_on_tree
+                        time:   [4.1537 ms 4.1666 ms 4.1787 ms]
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) low mild
+  1 (5.00%) high severe
+

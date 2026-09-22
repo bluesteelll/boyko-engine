@@ -427,15 +427,15 @@ the same `test`/`jz`, so the no-callback hot path stays byte-identical (the
 0%-gate, bench-verified).
 
 **Dynamic bit maintenance** — `ArchetypeMaster::add_observer`
-([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):842)
+([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):848)
 runs an add-first walk (`iter_archetypes_mut`, raise the bit on archetypes
 containing `cid`) only when the `(kind, cid)` list went empty → non-empty;
-`remove_observer` ([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):875) runs a remove-last recompute (`flags = (flags &
+`remove_observer` ([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):892) runs a remove-last recompute (`flags = (flags &
 !bit) | (any_sibling_observes_kind ? bit : 0)`, preserving the hook bit) only
 when the list became empty. Both seed sites (`create_archetype`,
 `add_existing_archetype` [archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):477) and both walks are cross-checked by the
 `#[cfg(debug_assertions)]` bit⇔registry tripwire
-`debug_assert_observer_flags_consistent` ([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):929).
+`debug_assert_observer_flags_consistent` ([archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):980).
 
 **Dispatch (the 4 `#[cold] #[inline(never)]` fire fns)** —
 [core/component/observers/dispatch.rs](../crates/boyko_ecs/src/ecs/core/component/observers/dispatch.rs):
@@ -464,16 +464,16 @@ migration paths — counted against this ledger per the Phase-14b lesson):
 
 | Site | File:line (observer calls) | Kinds |
 |------|----------------------------|-------|
-| `EcsMaster::create_entity` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):139, fires 282/302 | add, insert |
-| `EcsMaster::create_entity_at` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):357, fires 464/484 | add, insert |
-| `EcsMaster::fire_despawn_hooks` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):707, fires 790/802 | replace, remove |
-| `SpawnAtCommand::apply` | [commands/spawn_at_command.rs](../crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs):115, fires 386/406 | add, insert |
-| `InsertCommand::apply_replace_in_place` | [commands/insert_command.rs](../crates/boyko_ecs/src/ecs/core/commands/insert_command.rs):113, fires 176/201 | replace, insert |
-| `migrate_entity_insert` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):384, fires 951/970 | add, insert |
-| `migrate_entity_remove` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1166, fires 1184/1190 | replace, remove |
-| `migrate_entity_attach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1558, fires 1667/1679 | add, insert |
-| `migrate_entity_detach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1846, fires 1892/1902 | replace, remove |
-| `retag_in_place` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):2110, fires 2006/2042 | replace, insert |
+| `EcsMaster::create_entity` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):128, fires 265/279 | add, insert |
+| `EcsMaster::create_entity_at` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):334, fires 435/449 | add, insert |
+| `EcsMaster::fire_despawn_hooks` | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):672, fires 754/766 | replace, remove |
+| `SpawnAtCommand::apply` | [commands/spawn_at_command.rs](../crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs):114, fires 466/480 | add, insert |
+| `InsertCommand::apply_replace_in_place` | [commands/insert_command.rs](../crates/boyko_ecs/src/ecs/core/commands/insert_command.rs):115, fires 178/203 | replace, insert |
+| `migrate_entity_insert` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):507, fires 1232/1251 | add, insert |
+| `migrate_entity_remove` | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1313, fires 1471/1477 | replace, remove |
+| `migrate_entity_attach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1724, fires 1977/1989 | add, insert |
+| `migrate_entity_detach_ids` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):2022, fires 2205/2215 | replace, remove |
+| `retag_in_place` (Phase 22) | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):2291, fires 2321/2357 | replace, insert |
 
 The plan's original "6 fire sites" undercounted: Phase 14a also fires at the 4
 deferred-command apply sites (rows 4–7), so observers were silent for
@@ -549,18 +549,18 @@ via the POD `AddTagCommand`/`RemoveTagCommand`
 
 **Dynamic migration (D9)** — allocation-free id-keyed helpers in
 [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):
-`merged_archetype_id_dyn` (:1416) / `without_ids_archetype_id` (:1491, maps
+`merged_archetype_id_dyn` (:1573) / `without_ids_archetype_id` (:1654, maps
 `kept.is_empty()` → the EMPTY archetype — O3) / `migrate_entity_attach_ids`
-(:1558, zero-retained attach-FROM-empty is first-class) /
-`migrate_entity_detach_ids` (:1846) / `retag_in_place` (:2110, the present-tag
+(:1724, zero-retained attach-FROM-empty is first-class) /
+`migrate_entity_detach_ids` (:2022) / `retag_in_place` (:2291, the present-tag
 replace path). All three fire hooks + observers (ledger rows 8–10 in §3.6)
 with Phase-14a §3.4 reborrow confinement. `MAX_BUNDLE_ARITY` raised 8 → 16
-(:58, lock-step with the derive and `spawn_at_command.rs`).
+(:59, lock-step with the derive and `spawn_at_command.rs`).
 
 **Empty archetype (D5)** — entities may hold zero components. Lazy: resolved
 through `get_or_create_archetype(&[])` on first demand (no reserved constant,
 preserves the Phase-12.6 lazy `EcsMaster::new` budget). `EcsMaster::spawn_empty`
-([ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):683);
+([ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):648);
 `Commands::spawn_empty`
 ([params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):190)
 = `spawn(EmptyBundle)` — the hand-written zero-component bundle
@@ -646,19 +646,19 @@ compile-reject change detection on a bitset tag.
 
 **Signature filtering (Step 4)** — archetype construction skips any id with
 `storage_kind == Bitset`. The signature mask is built through the single shared
-`filtered_signature_mask` helper ([archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):353 — every
+`filtered_signature_mask` helper ([archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):392 — every
 non-signature-storage id is skipped there, so the registry-minted signature
 matches bit-for-bit), and the pool bundle skips the same ids at
-`Archetype::create_by_ids` (:365) and `register_component_inplace` (:527). The
+`Archetype::create_by_ids` (:405) and `register_component_inplace` (:583). The
 `enable_store` field
 ([archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):154~)
 sits on every `Archetype` (`EnableStore::new()` at both construction sites);
-`set_enable_bit` (archetype.rs:656) flips the paged bit and returns
+`set_enable_bit` (archetype.rs:759) flips the paged bit and returns
 `newly_allocated == true` only on the first column for the tag; `enable_column_ptr`
-(archetype.rs:634) hands the query fetch a borrowed `*const EnableColumn` (or
+(archetype.rs:737) hands the query fetch a borrowed `*const EnableColumn` (or
 NULL). `swap_remove_row` / remove paths fire `enable_store.swap_remove_row` only
 when `!enable_store.is_empty()` (the 0%-gate for enable-free archetypes,
-archetype.rs:1243~/:1275~/:1333~/:1356~).
+archetype.rs:1357~/:1275~/:1333~/:1356~).
 
 **The cull oracle (D2)** —
 [component/enable/enable_presence.rs](../crates/boyko_ecs/src/ecs/core/component/enable/enable_presence.rs)
@@ -702,8 +702,8 @@ before touching `archetype_master`) → flips the bit → fires
 whose `apply` calls `enable_id`/`disable_id` at the apply window. Cross-archetype
 migration copies the enable bits via the borrow-free two-phase snapshot in
 [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs)
-(`read_source_enable_bits` :137 PHASE-1 / `write_target_enable_bits` :162
-PHASE-2 / `fire_enable_column_alloc_bookkeeping` :195 O2), each gated by
+(`read_source_enable_bits` :140 PHASE-1 / `write_target_enable_bits` :165
+PHASE-2 / `fire_enable_column_alloc_bookkeeping` :198 O2), each gated by
 `EnableStore::is_empty` so an enable-free entity is byte-identical to before.
 
 **Query integration (D2/D4/D7)** — three shapes, all archetype-granularity cull
@@ -724,7 +724,7 @@ PHASE-2 / `fire_enable_column_alloc_bookkeeping` :195 O2), each gated by
   `EnableTerms` (per-view, ≤ `MAX_ENABLE_TERMS = 8`,
   [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):449) populated by
   `with_enabled` / `without_enabled` on `Query`
-  ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):200/:215)
+  ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):201/:216)
   and `QueryView`
   ([query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):283/:298);
   NEVER stored in the shared interned `QueryState` (QS1 stays term-agnostic —
@@ -1010,7 +1010,7 @@ The dual-generation design (Phase 5c) is the ArchetypeId-ABA fix:
 discovery `find_*`, `archetype_generation()` / `structural_generation()`,
 `add_existing_archetype` (477), `iter_archetypes` / `iter_archetypes_mut`,
 `clear()`, plus the observer surface documented in §3.6:
-`add_observer` (842) / `remove_observer` (875).
+`add_observer` (848) / `remove_observer` (892).
 
 ---
 
@@ -1053,10 +1053,10 @@ that declares it:
 - Construction — [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):
   `new()` (426) / `with_capacity(entity_cap, arch_cap)` (473).
 - Archetypes / spawn / despawn — [entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):
-  `create_archetype` (48) / `get_or_create_archetype` (55);
-  `create_entity(arch, &[(id, bytes)]) -> EcsResult<Entity>` (139);
-  `spawn_one::<A>` (598) / `spawn_two::<A, B>` (634) / `spawn_empty` (683);
-  `delete_entity` (814).
+  `create_archetype` (37) / `get_or_create_archetype` (44);
+  `create_entity(arch, &[(id, bytes)]) -> EcsResult<Entity>` (128);
+  `spawn_one::<A>` (563) / `spawn_two::<A, B>` (599) / `spawn_empty` (648);
+  `delete_entity` (778).
 - Bulk spawn — `spawn_batch::<B, I>` ([ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):1079).
 - Component access — [component_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs):
   `get_component_raw` (176) / `set_component_raw` (461);
@@ -1157,9 +1157,9 @@ re-export surface). The Phase-5c `QueryState` archetype-match cache and
 ### 8.1. Query / QueryView
 
 ```rust
-// query/query.rs:67
+// query/query.rs:68
 pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> { /* SystemParam */ }
-// query/query_view.rs:83
+// query/query_view.rs:84
 pub struct QueryView<'w, D: QueryData, F: QueryFilter = ()> { /* direct API */ }
 ```
 
@@ -1261,7 +1261,7 @@ pub(crate) fn archetype_passes_tag_terms(&TagTerms, &Archetype) -> bool; // :150
 ```
 
 `Query::with_tag`/`without_tag`
-([query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):168/:178)
+([query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):169/:179)
 and the `QueryView` mirrors
 ([query/query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):249/:259)
 push into a per-view, stack-only, `Copy` `TagTerms`. The shared interned
@@ -1372,7 +1372,7 @@ silently no-op). Leaf params:
 | `ResMut<'w, R>` | [params/resmut.rs](../crates/boyko_ecs/src/ecs/core/system/params/resmut.rs):42 | exclusive resource write |
 | `Local<'s, T>` | [params/local.rs](../crates/boyko_ecs/src/ecs/core/system/params/local.rs):62 | per-system state (Phase 13) |
 | `Commands<'s>` | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):97 | deferred mutation (§10) |
-| `Query<'w, 's, D, F>` | [iters/query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):67 | typed query (§8) |
+| `Query<'w, 's, D, F>` | [iters/query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):68 | typed query (§8) |
 | `EventReader<'s, E>` / `EventWriter<'s, E>` | [params/event_reader.rs](../crates/boyko_ecs/src/ecs/core/system/params/event_reader.rs):87 / [event_writer.rs](../crates/boyko_ecs/src/ecs/core/system/params/event_writer.rs):89 | events (§14) |
 
 - `UnsafeEcsCell<'w>`
@@ -2038,11 +2038,12 @@ split (no parallel data system — the SP4 race remediation put both solvers on 
 - [components.rs](../crates/boyko_physics/src/components.rs) — `RigidBody` / `Collider` / `Contact` columns; `bundles.rs` — `DynamicBody` / `Trigger`.
 - [manifold.rs](../crates/boyko_physics/src/manifold.rs) — `Manifold` / `ContactPoint` (the contact currency, `SDF_SENTINEL`).
 - [narrowphase/](../crates/boyko_physics/src/narrowphase/) — convex contact generators (`sphere_box`, `box_box` with a feature-id-stable OBB cache in `axis_cache.rs`); `dispatch.rs` is the L5 parallel narrowphase: the step's candidate pairs cut into contiguous chunks, collided on the pool's workers, joined in pair order and their axis writes replayed serially — bit-identical to the serial loop for any worker count (gate `narrowphase_parallel_equivalence.rs`).
+- [broadphase_tree/](../crates/boyko_physics/src/broadphase_tree/) — the tree broadphase (`BroadphaseKind::Tree`, opt-in until its commit C4): `mod.rs` is the `BroadphaseTree` resource — the per-row verify over the previous step's records, the persistent static set (a packed tree plus the sorted `SS` pair list, carried through row changes by translation and the patch rule of ruling W1, admitted by the rent rule), the segment stream and the integer-count assembly; `bvh.rs` the implicit packed 8-wide BVH (Morton radix build, query, kill); `kernel.rs` the AVX2 / scalar 8-wide tests, whose leaf test is the all-pairs expression on the same bits, so the pair set is all-pairs' exact set. Serial, no heap allocation per step, every buffer a `ScratchColumn` on its own id cohort (`scratch_ids.rs`). Gates: `broadphase_tree/tests.rs` (G0 kernel, G1 oracle on single-step worlds and row-change scripts) and [tests/broadphase_tree_scenes.rs](../crates/boyko_physics/tests/broadphase_tree_scenes.rs) (G2: the oracle and the pose bytes on J / R / S16 and the churn arms, with the structural bounds). Design: `docs/physics/perf-campaign/levers/broadphase/04-DESIGN-REV2.md`.
 - [solver/](../crates/boyko_physics/src/solver/) — `SoftStepSolver` / `ColoredSoftStepSolver` / `NoopSolver` (`soft_step.rs`, `warm_start.rs` — the reference solver's per-point table, `warm_records.rs` — the colored solver's per-manifold warm store found by a merge-join (L11 C1), `contact.rs`, `simd.rs`, `colored.rs` — since L11 C2 over `CohortColumns`, the cohort-shaped AoSoA layout: one 320 B head per 8-group cohort plus one 320 B block per rank, the store's records shaped at the fill).
 - [soft/](../crates/boyko_physics/src/soft/) — soft-body (`component.rs`, `collide.rs`, `self_collision.rs`, `coupling.rs`, `colored.rs`).
 - [sdf_query.rs](../crates/boyko_physics/src/sdf_query.rs) — body-vs-SDF via `boyko_sdf_math` (zero readback, zero graphics deps).
 - [scene_sync.rs](../crates/boyko_physics/src/scene_sync.rs) — `boyko_scene` `Transform` ↔ body sync.
-- [resources.rs](../crates/boyko_physics/src/resources.rs) — `PhysicsConfig`, the single tunables `Resource`, plus its three selector enums: `BroadphaseKind` (`AllPairs` default / `Grid`), `BroadphaseSelectMode` (`Manual` default / `Auto`) and `SdfNarrowphaseKernel` (`Scalar` default / `Avx2`). Every kernel choice is a runtime field, never a `cfg` — see the note under **Entry point**.
+- [resources.rs](../crates/boyko_physics/src/resources.rs) — `PhysicsConfig`, the single tunables `Resource`, plus its three selector enums: `BroadphaseKind` (`AllPairs` default / `Grid` / `Tree`), `BroadphaseSelectMode` (`Manual` default / `Auto`) and `SdfNarrowphaseKernel` (`Scalar` default / `Avx2`). Every kernel choice is a runtime field, never a `cfg` — see the note under **Entry point**.
 - [body_set.rs](../crates/boyko_physics/src/body_set.rs) — the row selection shared by gather, apply and soft apply: `BodySetFilter` / `BodyQuery` and the per-stage data aliases, pinned by signature and const checks and compared once at wire-up (defect A5).
 
 **Sleeping, and defect A4.** `IslandSleep` (in [resources.rs](../crates/boyko_physics/src/resources.rs))
@@ -2175,7 +2176,7 @@ hand-FFI Vulkan backend (std-only, no third-party crates; the FFI mirrors
 - [memory.rs](../crates/boyko_rhi_vulkan/src/memory.rs) / [suballocator.rs](../crates/boyko_rhi_vulkan/src/suballocator.rs) — a `VkDeviceMemory` free-list sub-allocator with coalescing.
 - [rhi_impl/](../crates/boyko_rhi_vulkan/src/rhi_impl/) — the `RhiApi` impl, split by the god-file refactor into [mod.rs](../crates/boyko_rhi_vulkan/src/rhi_impl/mod.rs) (the `Vulkan` marker + ownership/teardown discipline), [device.rs](../crates/boyko_rhi_vulkan/src/rhi_impl/device.rs) (device / queue / `ComputeLayouts`) and [encoder.rs](../crates/boyko_rhi_vulkan/src/rhi_impl/encoder.rs) (`VulkanCommandEncoder` with `pipeline_barrier` lowering).
 - [compute.rs](../crates/boyko_rhi_vulkan/src/compute.rs) — compute dispatch + the `golden_*` CPU oracles.
-- [swapchain.rs](../crates/boyko_rhi_vulkan/src/swapchain.rs) / [window.rs](../crates/boyko_rhi_vulkan/src/window.rs) / [texture.rs](../crates/boyko_rhi_vulkan/src/texture.rs) — the on-screen path (surface / swapchain / present / image barriers).
+- [swapchain.rs](../crates/boyko_rhi_vulkan/src/swapchain.rs) / [window.rs](../crates/boyko_rhi_vulkan/src/window.rs) / [texture.rs](../crates/boyko_rhi_vulkan/src/texture.rs) — the on-screen path (surface / swapchain / present / image barriers). The host-side capture of that path is `boyko_app`'s [host_dump.rs](../crates/boyko_app/src/host_dump.rs): `BOYKO_HOST_DUMP` (one frame, the golden dump) and, since lane fix/hwrt-shadow-ray-origin, `BOYKO_HOST_DUMP_FRAMES=N` / `BOYKO_HOST_DUMP_SETTLE=S` — N consecutive presented frames through a `DRAIN_FRAMES + 1` staging ring, each with a state line in `<stem>_frames.txt` (the values the GPU consumed: jitter phase, the host's CSM arming vs the header's CSM bit, the hwrt seed / origin mode / raster forward).
 - [framegraph/](../crates/boyko_rhi_vulkan/src/framegraph/) — the Render Dependency Graph (declare → compile auto-barriers → execute), the single sync authority replacing the hand-barrier path.
 - [brick_atlas.rs](../crates/boyko_rhi_vulkan/src/brick_atlas.rs) / [mesh_sdf_texture.rs](../crates/boyko_rhi_vulkan/src/mesh_sdf_texture.rs) — SDF brick-atlas + mesh-SDF textures.
 
@@ -2198,7 +2199,8 @@ graphics-aware types live here, never in the kernel. GPU access is compiler-enfo
 - Shadows: [csm_config.rs](../crates/boyko_render/src/csm_config.rs) / [csm_caster.rs](../crates/boyko_render/src/csm_caster.rs) / [shadow_atlas.rs](../crates/boyko_render/src/shadow_atlas.rs) (CSM cascades + punctual atlas) + `ssao_*`. Host plan R4 + the vkval shadow gate: `sync_csm_light_gate` (csm_caster.rs) writes the header gate from `ResolvedCsm::depth_pass_armed`, the same call the host arms the depth pass with (a mesh leg, a fitted sun AND live casters; the mesh-leg term is `ResolvedRenderPath::mesh_shadow_producers`, read once in `resolve_csm_cascades`), and `sync_punctual_light_gate` (shadow_atlas.rs) does the same for the atlas. The bit can trail or lead the host by 1–2 frames; every unarmed frame uploads the DISABLED UBO (`frame_uniform`), so no frame samples a cascade it did not render (the atlas's one open point-light case is F2, in `sync_punctual_light_gate`'s doc).
 - Occlusion culling (VG R3, two-phase HZB): [hzb_config.rs](../crates/boyko_render/src/hzb_config.rs) is the PRODUCER knob (`HzbMode::{Off, Build}` — does the engine maintain a depth pyramid) and [occlusion_config.rs](../crates/boyko_render/src/occlusion_config.rs) the CONSUMER knob (`OcclusionMode::{Off, TwoPhase}` — does the owner want the decision), two types because they are two questions; both are `Copy` Resources read live per frame, both default to `Off`, and enablement is structural (`mode != Off`), never a stored flag. [occlusion_marker.rs](../crates/boyko_render/src/occlusion_marker.rs)'s `OcclusionCulling` is the per-entity CAPABILITY — a table-storage ZST whose presence is the datum, read non-filteringly as `Option<&T>` so the gather's lock-step with the instance ring survives; `Off` suppresses the TEST, never the GATHER, so the marked-instance counter means one thing regardless of the knob. [hzb.rs](../crates/boyko_render/src/hzb.rs) is the host mirror of the shader's verdict, used as an ORACLE by the GPU gates rather than as production code. Plugins: `HzbPlugin`, `OcclusionPlugin` (composed unconditionally — `Off` is the 0 %-gate, so every golden pin stays byte-identical BY CONSTRUCTION). The host side (`boyko_app`) owns `hzb_plan_for`'s producer-or-consumer disjunct, `occlusion_arm_for`, and `OcclusionForce` — a DIAGNOSTIC verdict override (`KeepAll`/`DeferAll`) that is deliberately not owner surface and lives outside `boyko_render` for that reason. Spec: [VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md](VG-R3-P4-CONFIG-AND-INSTRUMENT-PLAN.md).
 - Token-typed uploads: [upload.rs](../crates/boyko_render/src/upload.rs) — `upload_camera_ring` / `upload_instance_models` (R3) + `upload_light_table` (per-slot staging ring — the R4 host-write-vs-GPU-copy race pin) / `upload_csm_ring` (the 336 B `ResolvedCsm` mirror, unconditional per frame).
-- View: [view.rs](../crates/boyko_render/src/view.rs) consumes the engine-derived `ViewUniform` (from `boyko_scene`) as the single view source.
+- View: [view.rs](../crates/boyko_render/src/view.rs) consumes the engine-derived `ViewUniform` (from `boyko_scene`) as the single view source. `raster_ray_forward` (lane fix/hwrt-shadow-ray-origin) is the ray-gen forward that puts `generate_ray` through the sub-pixel position the JITTERED raster sampled — `fwd - right*(jx*aspect*tan) + up*(jy*tan)`, from the UNJITTERED view — so the HWRT resolve reconstructs a raster-owned pixel's shadow-ray origin as `eye + rd_r * gViewT` exactly (Gate 1b projects a point through `marcher_view_proj_rows_jittered` and asserts the ray through that pixel points back at it). NB the b5 shear `composite_perspective_from_view_sheared` has the OPPOSITE sign (the D2 open question; a pin test records it).
+- HWRT shadow-params UBO (binding 20 of every HWRT resolve-family set, 48 B): the cold `ResolvedRayShadow` head ([ray_shadow_config.rs](../crates/boyko_render/src/ray_shadow_config.rs), @0..16) + the hot `RayShadowFrame` tail ([upload.rs](../crates/boyko_render/src/upload.rs), @16..48: the rung-3b seed, `origin_mode` — 0 = the legacy `P`, a structural skip; 1 = the raster-ray origin on raster-owned pixels — and `raster_fwd`), packed by the runner's step 5d'' every HWRT frame (`upload_ray_shadow_ring`). The shader tells raster-owned from SDF-owned pixels bit-exactly (`gViewT == md * 64` against the raster depth `gDepthHw` @21) — `crates/boyko_rhi_vulkan/tests/hwrt_depth_norm_mirror.rs` pins the host↔shader constants.
 - Asset loaders (in-house, zero third-party decode deps): [loaders/](../crates/boyko_render/src/loaders/) — `obj`, `png_texture`, `ron_material`, and `glb` (glTF 2.0 binary → `MeshData`, VG-R0 rung R0b: concatenates primitives, composes node hierarchies, bakes each placement into model space).
 - VG-R0 density census: [vg_census.rs](../crates/boyko_render/src/vg_census.rs) — the host reducer that turns one `vb_id` readback into a census row (covered pixels, distinct visible triangles, the power-of-two histogram and its modal bucket), plus the workspace's streaming SHA-256. Pure CPU and device-free by design, which is why it is its own module; the armed GPU half lives in `boyko_app`. Distinct triangles are counted by sorting packed `(instance, primitive)` keys and counting runs — `HashMap` is banned here and a run's *length* is that triangle's covered-pixel count, so the histogram falls out of the same pass. See [FEATURE_MAP.md](FEATURE_MAP.md)'s "VG-R0 density census" section for the whole instrument.
 

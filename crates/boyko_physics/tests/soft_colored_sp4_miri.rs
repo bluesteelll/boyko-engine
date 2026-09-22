@@ -32,7 +32,7 @@
 //! Run (the load-bearing command):
 //! ```text
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation" \
-//!   cargo +nightly-x86_64-pc-windows-gnu miri test -p boyko-physics \
+//!   cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-physics \
 //!   --test soft_colored_sp4_miri -- --test-threads=1
 //! ```
 //!

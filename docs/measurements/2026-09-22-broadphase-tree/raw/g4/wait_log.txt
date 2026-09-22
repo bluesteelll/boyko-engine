@@ -1,0 +1,23 @@
+﻿# wait_idle3.ps1 start 2026-09-22T03:43:01.6998874+03:00; poll every 60 s, max 90 polls; quiet = build procs 0 AND lane-target procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-22T03:43:01.7163774+03:00 cpu10=4.66% procs=223 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=1 top3(cpu s in ~10s): claude(28784)=4.19s claude(28700)=1.73s claude(30548)=0.38s
+poll   2 2026-09-22T03:44:01.7230691+03:00 cpu10=1.85% procs=221 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=2 top3(cpu s in ~10s): claude(28700)=0.55s claude(30548)=0.34s claude(28784)=0.31s
+poll   3 2026-09-22T03:45:01.7275730+03:00 cpu10=6.27% procs=221 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=False streak=0 top3(cpu s in ~10s): claude(28784)=3.88s claude(28700)=2.56s claude(30548)=0.39s
+poll   4 2026-09-22T03:46:01.7431402+03:00 cpu10=1.01% procs=225 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=1 top3(cpu s in ~10s): claude(28700)=0.70s claude(28784)=0.45s claude(30548)=0.13s
+poll   5 2026-09-22T03:47:01.7502842+03:00 cpu10=3.82% procs=225 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=2 top3(cpu s in ~10s): claude(28784)=2.47s claude(28700)=2.09s claude(30548)=0.27s
+poll   6 2026-09-22T03:48:01.7637087+03:00 cpu10=1.52% procs=225 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=3 top3(cpu s in ~10s): claude(28784)=0.61s claude(28700)=0.55s claude(30548)=0.23s
+# IDLE reached at 2026-09-22T03:48:11.9302921+03:00 after 6 polls
+# wait_idle3.ps1 start 2026-09-22T05:25:01.3025345+03:00; poll every 60 s, max 90 polls; quiet = build procs 0 AND lane-target procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-22T05:25:01.3107065+03:00 cpu10=1.87% procs=225 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=1 top3(cpu s in ~10s): claude(28700)=0.59s claude(28784)=0.27s powershell(17704)=0.25s
+poll   2 2026-09-22T05:26:01.3279681+03:00 cpu10=3.14% procs=226 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=2 top3(cpu s in ~10s): claude(28784)=2.53s claude(28700)=0.97s steam(10136)=0.17s
+poll   3 2026-09-22T05:27:01.3425244+03:00 cpu10=1.87% procs=226 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=3 top3(cpu s in ~10s): claude(28784)=0.55s claude(28700)=0.41s claude(30548)=0.19s
+# IDLE reached at 2026-09-22T05:27:11.5140275+03:00 after 3 polls
+# wait_idle3.ps1 start 2026-09-22T05:36:01.4274625+03:00; poll every 60 s, max 90 polls; quiet = build procs 0 AND lane-target procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-22T05:36:01.4353162+03:00 cpu10=3.13% procs=229 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=1 top3(cpu s in ~10s): claude(28700)=0.56s claude(28784)=0.45s powershell(9468)=0.30s
+poll   2 2026-09-22T05:37:01.4373251+03:00 cpu10=2.61% procs=228 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=2 top3(cpu s in ~10s): claude(28784)=1.92s claude(28700)=0.67s claude(30548)=0.17s
+poll   3 2026-09-22T05:38:01.4417105+03:00 cpu10=1.51% procs=228 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=3 top3(cpu s in ~10s): claude(28700)=0.56s claude(28784)=0.50s claude(30548)=0.11s
+# IDLE reached at 2026-09-22T05:38:11.6226395+03:00 after 3 polls
+# wait_idle3.ps1 start 2026-09-22T07:44:53.5173327+03:00; poll every 60 s, max 90 polls; quiet = build procs 0 AND lane-target procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-22T07:44:53.5343293+03:00 cpu10=1.15% procs=226 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=1 top3(cpu s in ~10s): powershell(25604)=0.23s claude(30548)=0.22s steamwebhelper(30596)=0.06s
+poll   2 2026-09-22T07:45:53.5571492+03:00 cpu10=1.53% procs=227 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=2 top3(cpu s in ~10s): claude(30548)=0.11s steamwebhelper(18396)=0.05s tee(37804)=0.03s
+poll   3 2026-09-22T07:46:53.5666828+03:00 cpu10=1.85% procs=227 build_procs=0 [] lane_target_procs=0 [] D_free_GB=82.18 quiet=True streak=3 top3(cpu s in ~10s): NVIDIA Overlay(14052)=0.03s claude(30548)=0.03s steamwebhelper(30596)=0.03s
+# IDLE reached at 2026-09-22T07:47:03.7031632+03:00 after 3 polls

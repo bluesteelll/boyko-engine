@@ -15,8 +15,7 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
-use boyko_ecs::ecs::core::system::{Commands, NonSendRes, NonSendResMut, Res, ResMut};
-use boyko_ecs::ecs::identifiers::primitives::EntityId;
+use boyko_ecs::ecs::core::system::{Commands, Entities, NonSendRes, NonSendResMut, Res, ResMut};
 use boyko_macros::Resource;
 use boyko_rhi::RhiDevice;
 use boyko_rhi_vulkan::device::VulkanContext;
@@ -277,28 +276,62 @@ pub struct ValidateCursor {
 }
 
 /// Deferred disable of [`RenderEnabled`] for a mesh row [`validate_asset_refs`]
-/// found stale this frame (asset-streaming plan F5 Decision 6) — keyed by
-/// [`EntityId`], mirroring `boyko_scene::visibility_sync`'s
-/// `SetRenderEnabledById`: a read-only query yields only `EntityId` (there is
-/// no `QueryData for Entity` and no world-resolving `SystemParam` in this
-/// kernel — see that fn's doc), so the live, generation-correct `Entity` is
-/// re-resolved at apply time via [`EcsMaster::get_entity`]. A dead/stale id (a
-/// despawn racing this frame) is a silent no-op — the same contract as the
-/// kernel's own `EnableTagCommand`.
+/// found stale this frame (asset-streaming plan F5 Decision 6) — keyed by the
+/// full [`Entity`] (id + generation) that was live when it was enqueued: the
+/// shape of `boyko_scene::visibility_sync`'s `SetRenderEnabled` (rung A9) and
+/// of the kernel's own `EnableTagCommand`.
+///
+/// The gather yields a bare [`EntityId`] per row (`Query::iter_entities`); the
+/// system resolves it to the live handle at enqueue through the [`Entities`]
+/// param — one slot read per stale row, and a row the query yields is live
+/// for the whole body (SCH7). At apply, [`EcsMaster::disable`]'s own
+/// `live_inland` resolve (null + generation, one slot read) drops a dead
+/// entity (a despawn racing this frame — the same silent no-op as before)
+/// or an id a later spawn re-occupied under a bumped generation.
+///
+/// # Hazard H-06 — why the generation travels with the command
+///
+/// The first shipped form carried the bare `EntityId` and re-resolved
+/// "whatever is live at that id" at apply (`EcsMaster::get_entity`), so a
+/// despawn of `E` and a spawn of `F` on `E`'s recycled id, drained before
+/// this command, cleared `F`'s bit instead of `E`'s (unification plan 02,
+/// row A9's class; rung A9b). Today the window is also closed by
+/// exclusivity — `validate_asset_refs` reads a `NonSendRes`, which makes it
+/// `CpuExclusive`, so the scheduler applies its queue inline after its body
+/// — but that is an accident of the param list, not a property of the
+/// command; the key is what closes it by construction. The gate stages the
+/// window through the kernel's body/apply split:
+/// `deferred_toggles_recycled_id::stale_mesh_disable_pending_for_a_despawned_entity_does_not_clear_its_recycled_ids_bit`.
+///
+/// # Layout
+///
+/// ```text
+/// +0  : entity: Entity (16 B — usize id + u32 generation + pad)
+/// +16 : end
+/// ```
+///
+/// [`EntityId`]: boyko_ecs::ecs::identifiers::primitives::EntityId
+#[repr(C)]
 struct DisableStaleMeshCommand {
-    /// The stale row's entity id, read from the matched archetype's entity-id
-    /// column at gather time (`Query::iter_entities`).
-    id: EntityId,
+    /// The stale row's entity, resolved from the matched archetype's
+    /// entity-id column through [`Entities`] at gather time.
+    entity: Entity,
 }
 
 impl Command for DisableStaleMeshCommand {
     fn apply(self, world: &mut EcsMaster) {
-        let Some(entity) = world.get_entity(self.id) else {
-            return;
-        };
-        world.disable::<RenderEnabled>(entity);
+        // No resolve of our own: `disable` reads the slot once and drops a
+        // dead or generation-stale handle there (H-06). The bit op resolves
+        // the row via the live inland (never a captured enqueue-time row), so
+        // a swap-remove that moved another entity is honored.
+        world.disable::<RenderEnabled>(self.entity);
     }
 }
+
+// Layout pin (house style, the A9 discipline): one `Entity`, `#[repr(C)]` —
+// 16 B, 8-aligned. A silent widening would change the per-command arena cost.
+const _: () = assert!(size_of::<DisableStaleMeshCommand>() == 16);
+const _: () = assert!(align_of::<DisableStaleMeshCommand>() == 8);
 
 /// Best-effort staleness net for `MeshHandle`/`MaterialHandle` carriers
 /// (asset-streaming plan F5 Decision 6) — the SOLE backstop for a bare-slot
@@ -401,6 +434,7 @@ impl Command for DisableStaleMeshCommand {
 pub fn validate_asset_refs(
     q_mesh: Query<(&MeshHandle, &MeshRefGen), Enabled<RenderEnabled>>,
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
+    entities: Entities,
     mut cursor: ResMut<ValidateCursor>,
     mut cmd: Commands,
 ) {
@@ -421,7 +455,17 @@ pub fn validate_asset_refs(
         let stale = mesh_assets.try_generation(slot) != Some(g)
             || mesh_assets.state_of_index(slot) != Some(AssetLoadState::Loaded);
         if stale {
-            cmd.add(DisableStaleMeshCommand { id });
+            // A row the query yields is live for the whole body (SCH7), so
+            // the resolve cannot miss; the handle it returns carries the
+            // CURRENT generation, which is what lets apply tell this row
+            // from a later occupant of the same id (H-06).
+            let entity = entities.get(id);
+            debug_assert!(
+                entity.is_some(),
+                "invariant SCH7: a row yielded by the query resolves to a live entity"
+            );
+            let Some(entity) = entity else { continue };
+            cmd.add(DisableStaleMeshCommand { entity });
         }
     }
 

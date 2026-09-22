@@ -9,7 +9,7 @@
 //! mutates the dense scratch in place.
 //!
 //! This file drives `SoftStepSolver::solve` DIRECTLY with a hand-built
-//! `body_b == SDF_SENTINEL` manifold and a one-body scratch, so `cargo +nightly
+//! `body_b == SDF_SENTINEL` manifold and a one-body scratch, so `cargo +nightly-x86_64-pc-windows-msvc
 //! miri test -p boyko-physics --test sdf_sentinel_solve_miri` validates the C1
 //! sentinel solve under Miri's UB checker — specifically:
 //!

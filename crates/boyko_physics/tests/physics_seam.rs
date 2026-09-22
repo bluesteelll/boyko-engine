@@ -409,7 +409,7 @@ fn sphere_sphere_narrowphase_3d() {
 // intractable under Miri's preemptive scheduler. These two tests drive the SAME
 // 3D math the integrate system and the narrowphase system use — the quaternion
 // step and the sphere-sphere geometry — purely through the public math API, with
-// ZERO threads, so `cargo +nightly miri test` can validate the integrate +
+// ZERO threads, so `cargo +nightly-x86_64-pc-windows-msvc miri test` can validate the integrate +
 // narrowphase paths for UB without hitting the spin loop. They are also normal
 // native tests (always run under `cargo test`).
 

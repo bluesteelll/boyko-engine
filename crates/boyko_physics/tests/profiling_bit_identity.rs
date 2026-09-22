@@ -7,9 +7,10 @@
 //! A zone writes no simulation data, so two runs of the same scene agree whether or not the zones
 //! are armed, compiled, or wired at all: the pose comparison alone cannot fail. What makes it a
 //! test of the instrument is its two companions. The armed run must have recorded at least one
-//! sample on each of the twenty-four physics zones and on each system span — so the comparison was
+//! sample on each of the thirty-one physics zones and on each system span — so the comparison was
 //! made with the instrument live — and the disarmed run must have pushed nothing at all into any
-//! lane — so the "disarmed" arm was not quietly armed.
+//! lane — so the "disarmed" arm was not quietly armed. The four tree-broadphase spans and its
+//! three counters are among them: the harness forces the tree path, so they open on every step.
 //!
 //! # The runs
 //!

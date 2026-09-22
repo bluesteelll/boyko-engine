@@ -187,7 +187,7 @@ pub struct GBufferTargets {
     #[cfg(feature = "hwrt")]
     pub(crate) shadow_temporal_hist: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
     /// HW-RT Rung 3b: the temporal-accumulate OUTPUT `temporal_out` RING (`R16G16_UNORM`, full-res)
-    /// — the accumulated visibility the DENOISED resolve reads at `gShadowVis` @21 when temporal is
+    /// — the accumulated visibility the DENOISED resolve reads at `gShadowVis` @22 when temporal is
     /// on. A DEDICATED target (avoids the in-place neighborhood-read race). RINGED + `Option`-
     /// guarded like [`Self::motion_vec`]. No pass reads it yet (step 6). `#[cfg(feature = "hwrt")]`.
     #[cfg(feature = "hwrt")]
@@ -253,7 +253,7 @@ pub struct GBufferTargets {
     /// STORAGE image @19 (SOFTWARE-ONLY — the C1 fix; never entering any HWRT-consumed array),
     /// bound-but-unread when the flag-gated branch is dead (every current material). The software
     /// set is EXACT-FILL at `RESOLVE_SOFTWARE_TOTAL_BINDINGS` (20), under the cap of
-    /// `MAX_BIND_GROUP_BINDINGS` (24). NO per-frame update.
+    /// `MAX_BIND_GROUP_BINDINGS` (25). NO per-frame update.
     ///
     /// A RING (one per in-flight frame): slot `i` binds `scene.camera_ring[i]` @5 +
     /// `scene.csm_cascade_ring[i]` @13 — the lock-free per-frame ring fix; every other binding is
@@ -528,7 +528,7 @@ pub struct GBufferTargets {
     pub(crate) aa_arm: AaArm,
     /// HW-RT rung 3a: the VIS-variant resolve descriptor set RING (one per in-flight frame), written
     /// ONCE against [`ShadowVisActivation::resolve_layout`](crate::present::scene_types::ShadowVisActivation::resolve_layout)
-    /// — the 21 RESOLVE_INLINE-hwrt bindings PLUS `gShadowVis` STORAGE image @21 fed slot `i`'s
+    /// — the 22 RESOLVE_INLINE-hwrt bindings PLUS `gShadowVis` STORAGE image @22 fed slot `i`'s
     /// `shadow_vis[i]` (the VIS pass WRITES it). `None` unless BOTH the scene wires the denoise
     /// activation (`scene.shadow.is_some()`) AND the HWRT resolve resources exist. RINGED like
     /// [`Self::resolve_set_hwrt`]; the recorder selects `shadow_vis_resolve_set[self.frame_index]`.
@@ -536,8 +536,8 @@ pub struct GBufferTargets {
     #[cfg(feature = "hwrt")]
     pub(crate) shadow_vis_resolve_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// HW-RT rung 3a: the DENOISED-variant resolve descriptor set RING (one per in-flight frame),
-    /// written ONCE against the SAME 22-binding VIS/DENOISED layout — identical to
-    /// [`Self::shadow_vis_resolve_set`] except `gShadowVis` @21 is fed the FINAL à-trous output
+    /// written ONCE against the SAME 23-binding VIS/DENOISED layout — identical to
+    /// [`Self::shadow_vis_resolve_set`] except `gShadowVis` @22 is fed the FINAL à-trous output
     /// (`shadow_vis[i]` when `final_is_vis2 == false`, `shadow_vis2[i]` when `true`), which the
     /// DENOISED resolve READS. `None` on the OFF path; the recorder selects
     /// `shadow_denoised_resolve_set[self.frame_index]` when routing is denoised.
@@ -560,11 +560,11 @@ pub struct GBufferTargets {
     #[cfg(feature = "hwrt")]
     pub(crate) shadow_denoise_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve descriptor set RING (one per
-    /// in-flight frame), written ONCE per extent against the 24-binding VIS-MV layout
+    /// in-flight frame), written ONCE per extent against the 25-binding VIS-MV layout
     /// ([`GBufferScene::vis_mv_layout`](crate::present::scene_types::GBufferScene::vis_mv_layout)) —
-    /// the SAME 22 VIS bindings as [`Self::shadow_vis_resolve_set`] (incl. `gShadowVis` @21 =
-    /// `shadow_vis[i]`, the WRITE target) PLUS the `MotionCam` UBO @22 (`motion_cam_ubo[i]`) + the
-    /// `motion_vec` STORAGE image @23 (`motion_vec[i]`, the SDF-Δuv WRITE target). `None` unless
+    /// the SAME 23 VIS bindings as [`Self::shadow_vis_resolve_set`] (incl. `gShadowVis` @22 =
+    /// `shadow_vis[i]`, the WRITE target) PLUS the `MotionCam` UBO @23 (`motion_cam_ubo[i]`) + the
+    /// `motion_vec` STORAGE image @24 (`motion_vec[i]`, the SDF-Δuv WRITE target). `None` unless
     /// temporal is on AND the spatial denoise is on (so the base VIS set + `scene.shadow` exist too —
     /// `mode == Both` this rung) AND the RT + storage MV resources exist. The recorder selects
     /// `shadow_vis_mv_resolve_set[self.frame_index]` when [`GBufferScene::sdf_mv_active`](crate::present::scene_types::GBufferScene::sdf_mv_active).
@@ -591,7 +591,7 @@ pub struct GBufferTargets {
     #[cfg(feature = "hwrt")]
     pub(crate) shadow_temporal_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// HW-RT Rung 3b step 6: the DENOISED resolve set RING for the TEMPORAL path — a sibling of
-    /// [`Self::shadow_denoised_resolve_set`] identical except `gShadowVis` @21 is fed
+    /// [`Self::shadow_denoised_resolve_set`] identical except `gShadowVis` @22 is fed
     /// `temporal_out[i]` (the temporal-accumulate OUTPUT) instead of the à-trous FINAL ring, which the
     /// DENOISED resolve READS when temporal is active. `None` on the OFF path; the recorder selects
     /// `shadow_temporal_denoised_resolve_set[self.frame_index]` when
@@ -2370,7 +2370,7 @@ const _: () = assert!(
 );
 
 /// HW-RT Rung 3b: the temporal-accumulate OUTPUT `temporal_out` format: `R16G16_UNORM` — the SAME
-/// format as [`SHADOW_VIS_FORMAT`] (the DENOISED resolve reads it at `gShadowVis` @21). A DEDICATED
+/// format as [`SHADOW_VIS_FORMAT`] (the DENOISED resolve reads it at `gShadowVis` @22). A DEDICATED
 /// target (not an in-place write into the à-trous ping-pong) so the reproject's 3×3 neighborhood
 /// read cannot race the accumulate write.
 #[cfg(feature = "hwrt")]
@@ -2427,7 +2427,7 @@ const RESOLVE_SOFTWARE_BINDINGS: usize = 19;
 /// (`TLAS_ACCEL_BINDING`/`RESOLVE_HWRT_*` all key off it) — bumping `RESOLVE_SOFTWARE_BINDINGS`
 /// itself would shift the TLAS 19→20 in every HWRT resolve set and overflow
 /// `RESOLVE_HWRT_VIS_MV_BINDINGS` past [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS)
-/// (24). `gPbr` is appended ONLY to the software set (never into [`resolve_software_entries`]'s
+/// (25). `gPbr` is appended ONLY to the software set (never into [`resolve_software_entries`]'s
 /// shared output), so no HWRT constant or `.spv` is affected.
 const RESOLVE_SOFTWARE_TOTAL_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 1;
 
@@ -2439,21 +2439,56 @@ const RESOLVE_SOFTWARE_TOTAL_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 1;
 #[cfg(feature = "hwrt")]
 const TLAS_ACCEL_BINDING: u32 = RESOLVE_SOFTWARE_BINDINGS as u32;
 
-/// HW-RT rung 3a: the binding count of the VIS/DENOISED deferred-resolve set (indices 0..=21) — the
-/// 21 RESOLVE_INLINE-hwrt bindings (`RESOLVE_SOFTWARE_BINDINGS + 2` = the 19 shared + TLAS @19 +
-/// soft-shadow UBO @20) PLUS `gShadowVis` STORAGE image @21. The EXACT-fill tripwire for both the
-/// VIS and DENOISED sets — under the rung-3a cap of [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS)
-/// (22). The software resolve stays EXACT at 19, the RESOLVE_INLINE-hwrt resolve EXACT at 21; only
-/// this layout fills 22.
+/// Lane fix/hwrt-shadow-ray-origin: the binding index of the raster DEPTH image (`gDepthHw`,
+/// SAMPLED) in EVERY HWRT resolve-family set — right after the TLAS @19 and the soft-shadow UBO
+/// @20, so the `[0..18 shared][19 TLAS][20 UBO][21 depth]` prefix is identical across the five
+/// rings [`GBufferTargets::tlas_accel_sets`] enumerates. The trace reads it to tell a raster-owned
+/// pixel (`gViewT == md*64`) from an SDF-owned one before placing the shadow-ray origin on the
+/// raster's jittered ray. Derived from the same source as [`TLAS_ACCEL_BINDING`].
 #[cfg(feature = "hwrt")]
-const RESOLVE_HWRT_DENOISE_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 3;
+const HWRT_DEPTH_BINDING: u32 = TLAS_ACCEL_BINDING + 2;
 
-/// HW-RT Rung 3b step 5b: the binding count of the VIS-MV deferred-resolve set (indices 0..=23) —
-/// the 22 VIS/DENOISED bindings ([`RESOLVE_HWRT_DENOISE_BINDINGS`]) PLUS the `MotionCam` UNIFORM
-/// buffer @22 + the `motion_vec` STORAGE image @23. The EXACT-fill tripwire for the VIS-MV set,
-/// filling [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS) (24) exactly.
+/// The binding count of the RESOLVE_INLINE-hwrt deferred-resolve set (indices 0..=21) — the 19
+/// shared + TLAS @19 + soft-shadow UBO @20 + the raster depth @21 ([`HWRT_DEPTH_BINDING`]). The
+/// EXACT-fill tripwire for [`GBufferTargets::resolve_set_hwrt`].
+#[cfg(feature = "hwrt")]
+const RESOLVE_HWRT_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 3;
+
+// The depth entry is chained right after the soft-shadow UBO in every HWRT builder below, so the
+// RESOLVE_INLINE-hwrt set ends exactly at it — the chain POSITION and the binding INDEX the HLSL
+// declares (`[[vk::binding(21)]] gDepthHw`) are one number.
+#[cfg(feature = "hwrt")]
+const _: () = assert!(RESOLVE_HWRT_BINDINGS == HWRT_DEPTH_BINDING as usize + 1);
+
+/// HW-RT rung 3a: the binding count of the VIS/DENOISED deferred-resolve set (indices 0..=22) — the
+/// 22 RESOLVE_INLINE-hwrt bindings ([`RESOLVE_HWRT_BINDINGS`]: the 19 shared + TLAS @19 +
+/// soft-shadow UBO @20 + raster depth @21) PLUS `gShadowVis` STORAGE image @22. The EXACT-fill
+/// tripwire for both the VIS and DENOISED sets — under the cap of
+/// [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS) (25). The software resolve stays
+/// EXACT at 19, the RESOLVE_INLINE-hwrt resolve EXACT at 22; only this layout fills 23.
+#[cfg(feature = "hwrt")]
+const RESOLVE_HWRT_DENOISE_BINDINGS: usize = RESOLVE_HWRT_BINDINGS + 1;
+
+/// HW-RT Rung 3b step 5b: the binding count of the VIS-MV deferred-resolve set (indices 0..=24) —
+/// the 23 VIS/DENOISED bindings ([`RESOLVE_HWRT_DENOISE_BINDINGS`]) PLUS the `MotionCam` UNIFORM
+/// buffer @23 + the `motion_vec` STORAGE image @24. The EXACT-fill tripwire for the VIS-MV set,
+/// filling [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS) (25) exactly.
 #[cfg(feature = "hwrt")]
 const RESOLVE_HWRT_VIS_MV_BINDINGS: usize = RESOLVE_HWRT_DENOISE_BINDINGS + 2;
+
+/// Lane fix/hwrt-shadow-ray-origin: the ONE spelling of the raster-depth entry every HWRT
+/// resolve-family set chains at [`HWRT_DEPTH_BINDING`] — the SAME depth-aspect sampled view +
+/// `depth_sampler` the marcher binds at its @1 (`vocab_set`), so the resolve's producer test reads
+/// exactly the image the marcher / `viewt_from_depth` decoded `gViewT` from. Five call sites, one
+/// definition: the rings cannot drift on this binding.
+#[cfg(feature = "hwrt")]
+fn hwrt_depth_entry<'a>(
+    scene: &GBufferScene<'a>,
+    depth_ring: &'a [VulkanTexture; FRAMES_IN_FLIGHT],
+    slot: usize,
+) -> BindGroupEntry<'a, Vulkan> {
+    BindGroupEntry::SampledImage { texture: &depth_ring[slot], sampler: scene.depth_sampler }
+}
 
 /// The six per-in-flight-slot G-buffer image RINGS' slot views the resolve set binds — bundled so
 /// [`resolve_software_entries`] takes ONE argument for them instead of six (clippy
@@ -2667,9 +2702,9 @@ impl GBufferTargets {
 /// Moved field-by-field into the [`GBufferTargets`] `Option`s at `create` time.
 #[cfg(feature = "hwrt")]
 struct ShadowDenoiseSets {
-    /// The VIS resolve set RING (`gShadowVis` @21 = `shadow_vis[i]`, the VIS pass WRITES it).
+    /// The VIS resolve set RING (`gShadowVis` @22 = `shadow_vis[i]`, the VIS pass WRITES it).
     vis_resolve: [VulkanBindGroup; FRAMES_IN_FLIGHT],
-    /// The DENOISED resolve set RING (`gShadowVis` @21 = the FINAL à-trous output, READ).
+    /// The DENOISED resolve set RING (`gShadowVis` @22 = the FINAL à-trous output, READ).
     denoised_resolve: [VulkanBindGroup; FRAMES_IN_FLIGHT],
     /// The per-level à-trous set rings (`sets[level][fi]`).
     atrous: [[VulkanBindGroup; FRAMES_IN_FLIGHT]; crate::present::MAX_ATROUS_LEVELS as usize],
@@ -2710,7 +2745,7 @@ struct ShadowTemporalSets {
     /// The 8-binding temporal reproject set ring (`gVisIn`/motion/viewt/hist-in/hist-out/temporal-out
     /// + the temporal UBO + the camera UBO).
     temporal: [VulkanBindGroup; FRAMES_IN_FLIGHT],
-    /// The DENOISED-temporal resolve set ring (`gShadowVis` @21 = `temporal_out[i]`, the READ).
+    /// The DENOISED-temporal resolve set ring (`gShadowVis` @22 = `temporal_out[i]`, the READ).
     denoised: [VulkanBindGroup; FRAMES_IN_FLIGHT],
 }
 
@@ -3654,7 +3689,7 @@ impl DeferredSets {
                     )
                 });
             // The software resolve set is EXACT-FILL at `RESOLVE_SOFTWARE_TOTAL_BINDINGS` (20: the
-            // 19 shared bindings + `gPbr` @19), under the cap of `MAX_BIND_GROUP_BINDINGS` (24).
+            // 19 shared bindings + `gPbr` @19), under the cap of `MAX_BIND_GROUP_BINDINGS` (25).
             // Keeping it EXACT (not `<= cap`) preserves the UNDER-FILL tripwire (a missing binding)
             // AND the over-fill tripwire. `RESOLVE_SOFTWARE_BINDINGS` (19) itself is UNTOUCHED and
             // stays the HWRT-family derivation base — every HWRT resolve variant still fills its
@@ -4853,13 +4888,14 @@ impl DeferredSets {
             };
 
         // R2a-4b: the HWRT-variant resolve set RING — built ONLY when the scene wires BOTH the
-        // 21-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
+        // 22-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
         // + `ctx.ray_query_enabled()` + config HardwareTri). `None` on every software path ⇒ the
         // recorder binds the 19-binding `resolve_set` against the software pipeline ⇒ byte-identical
         // to the golden. Built LAST (after every other fallible set) so its own error path tears
         // down everything prior; no upstream path knows about it. Slot `i`'s set is the 19 software
         // entries PLUS binding 19 = slot `i`'s persistent TLAS PLUS rung-1b binding 20 = the HWRT
-        // soft-shadow-params UBO.
+        // soft-shadow-params UBO PLUS binding 21 = slot `i`'s raster depth image (the shadow-ray
+        // origin's producer test, lane fix/hwrt-shadow-ray-origin).
         #[cfg(feature = "hwrt")]
         let resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> =
             match (scene.resolve_layout_hwrt, scene.resolve_tlas_hwrt) {
@@ -4871,7 +4907,8 @@ impl DeferredSets {
                         // The HWRT resolve set = the SAME 19 shared bindings the software set uses
                         // (via `resolve_software_entries`, so they cannot drift) + the 20th
                         // `AccelerationStructure` at binding 19 (slot `slot`'s frame-stable TLAS) +
-                        // the rung-1b 21st `UniformBuffer` at binding 20 (the soft-shadow-params UBO).
+                        // the rung-1b 21st `UniformBuffer` at binding 20 (the soft-shadow-params UBO)
+                        // + the 22nd `SampledImage` at binding 21 (slot `slot`'s raster depth).
                         let imgs = ResolveSlotImages {
                             albedo: &core.albedo[slot],
                             normal: &core.normal[slot],
@@ -4888,13 +4925,13 @@ impl DeferredSets {
                             light_index_buf,
                         );
                         // Append binding 19 (the `rayQuery` trace target) + rung-1b binding 20 (the
-                        // HWRT soft-shadow-params UBO) to the shared 19 → `RESOLVE_SOFTWARE_BINDINGS
-                        // + 2` (21) EXACT-fill. `BindGroupEntry` is not `Copy` (it holds a
-                        // `&A::AccelerationStructure`), so MOVE the shared entries into 0..=18 via a
-                        // by-value iterator chained with the TLAS + UBO entries — each element is
-                        // placed exactly once. The UBO entry mirrors the csm/atlas
-                        // `BindGroupEntry::UniformBuffer` shape.
-                        const RESOLVE_HWRT_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 2;
+                        // HWRT soft-shadow-params UBO) + binding 21 (the raster depth) to the shared
+                        // 19 → `RESOLVE_HWRT_BINDINGS` (22) EXACT-fill. `BindGroupEntry` is not
+                        // `Copy` (it holds a `&A::AccelerationStructure`), so MOVE the shared entries
+                        // into 0..=18 via a by-value iterator chained with the TLAS + UBO + depth
+                        // entries — each element is placed exactly once. The UBO entry mirrors the
+                        // csm/atlas `BindGroupEntry::UniformBuffer` shape; the depth entry is the
+                        // marcher's own `vocab_set` @1 spelling (`hwrt_depth_entry`).
                         let mut chained = shared
                             .into_iter()
                             .chain(core::iter::once(BindGroupEntry::AccelerationStructure {
@@ -4902,7 +4939,8 @@ impl DeferredSets {
                             }))
                             .chain(core::iter::once(BindGroupEntry::UniformBuffer {
                                 buffer: &scene.ray_shadow_ubo[slot],
-                            }));
+                            }))
+                            .chain(core::iter::once(hwrt_depth_entry(scene, &core.depth, slot)));
                         let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_HWRT_BINDINGS] =
                             core::array::from_fn(|_| {
                                 chained.next().expect(
@@ -5925,8 +5963,9 @@ impl GBufferTargets {
     /// `VulkanError`, leaving nothing leaked for the caller to reason about beyond the rings/sets it
     /// built before calling this.
     ///
-    /// The VIS + DENOISED resolve sets fill EXACTLY [`RESOLVE_HWRT_DENOISE_BINDINGS`] (22): the shared
-    /// 19 (via [`resolve_software_entries`]) + TLAS @19 + soft-shadow UBO @20 + `gShadowVis` @21. The
+    /// The VIS + DENOISED resolve sets fill EXACTLY [`RESOLVE_HWRT_DENOISE_BINDINGS`] (23): the shared
+    /// 19 (via [`resolve_software_entries`]) + TLAS @19 + soft-shadow UBO @20 + raster depth @21 +
+    /// `gShadowVis` @22. The
     /// VIS set binds `gShadowVis` to `shadow_vis[i]` (write target); the DENOISED set binds it to the
     /// FINAL à-trous output (`shadow_vis[i]` for even `levels`, `shadow_vis2[i]` for odd). Each à-trous
     /// level `i` binds `gVisIn`/`gVisOut` = (`i`-even ? `shadow_vis` : `shadow_vis2`) / the OTHER.
@@ -5939,6 +5978,7 @@ impl GBufferTargets {
     fn build_shadow_denoise_sets(
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,
+        depth: &[VulkanTexture; FRAMES_IN_FLIGHT],
         albedo: &[VulkanTexture; FRAMES_IN_FLIGHT],
         normal: &[VulkanTexture; FRAMES_IN_FLIGHT],
         material: &[VulkanTexture; FRAMES_IN_FLIGHT],
@@ -5957,7 +5997,7 @@ impl GBufferTargets {
         //   * `scene.shadow_denoise_enabled` — the boot `ShadowDenoiseConfig::enabled()` (mode ==
         //     Spatial). `false` on the default (mode `None`) world ⇒ NO sets built (byte-identical).
         //   * `scene.resolve_layout_denoise_hwrt` / `scene.atrous_layout_denoise_hwrt` — the STABLE
-        //     22-binding VIS/DENOISED + 6-binding à-trous LAYOUTS from the boot pipelines (`Some`
+        //     23-binding VIS/DENOISED + 6-binding à-trous LAYOUTS from the boot pipelines (`Some`
         //     on an RT + hwrt device REGARDLESS of the per-frame gate). These replace the former
         //     `scene.shadow.as_ref().resolve_layout` — the bug's linchpin.
         //   * `shadow_vis` / `shadow_vis2` — the RG16 ping-pong target rings (device
@@ -5974,7 +6014,7 @@ impl GBufferTargets {
             (true, Some(rl), Some(al), Some(v), Some(v2), Some(t)) => (rl, al, v, v2, t),
             _ => return Ok(None),
         };
-        // The final à-trous output the DENOISED resolve reads at `gShadowVis` @21 (ping-pong
+        // The final à-trous output the DENOISED resolve reads at `gShadowVis` @22 (ping-pong
         // parity). W1: the SAME `clamped_levels() % 2 == 1` the record + graph + the per-frame
         // `ShadowVisActivation::final_is_vis2` use — threaded stably so the DENOISED set binds the
         // correct ring at create. When the per-frame activation later opens, the record site
@@ -6025,11 +6065,12 @@ impl GBufferTargets {
         let ubo: [BoundBuffer; FRAMES_IN_FLIGHT] =
             ubo_slots.map(|s| s.expect("invariant: every à-trous UBO ring slot built"));
 
-        // Builds ONE 22-binding VIS/DENOISED resolve set for `slot`, binding `gShadowVis` @21 to
+        // Builds ONE 23-binding VIS/DENOISED resolve set for `slot`, binding `gShadowVis` @22 to
         // `vis_target[slot]`. Shared by the VIS (write target = `shadow_vis`) + DENOISED
-        // (read target = `final_ring`) rings — the first 21 bindings are IDENTICAL to the
-        // RESOLVE_INLINE-hwrt set (via `resolve_software_entries` + TLAS @19 + soft-shadow UBO @20),
-        // so they cannot drift. Exact-fill at `RESOLVE_HWRT_DENOISE_BINDINGS` (22).
+        // (read target = `final_ring`) rings — the first 22 bindings are IDENTICAL to the
+        // RESOLVE_INLINE-hwrt set (via `resolve_software_entries` + TLAS @19 + soft-shadow UBO @20
+        // + raster depth @21), so they cannot drift. Exact-fill at `RESOLVE_HWRT_DENOISE_BINDINGS`
+        // (23).
         let build_resolve_set = |slot: usize,
                                  vis_target: &[VulkanTexture; FRAMES_IN_FLIGHT]|
          -> Result<VulkanBindGroup, crate::error::VulkanError> {
@@ -6051,6 +6092,7 @@ impl GBufferTargets {
                 .chain(core::iter::once(BindGroupEntry::UniformBuffer {
                     buffer: &scene.ray_shadow_ubo[slot],
                 }))
+                .chain(core::iter::once(hwrt_depth_entry(scene, depth, slot)))
                 .chain(core::iter::once(BindGroupEntry::StorageImage {
                     texture: &vis_target[slot],
                 }));
@@ -6069,7 +6111,7 @@ impl GBufferTargets {
             RhiDevice::create_bind_group(ctx, &desc)
         };
 
-        // (2) The VIS resolve set ring (`gShadowVis` @21 = `shadow_vis[i]`, the WRITE target).
+        // (2) The VIS resolve set ring (`gShadowVis` @22 = `shadow_vis[i]`, the WRITE target).
         let mut vis_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for (slot, dst) in vis_slots.iter_mut().enumerate() {
@@ -6095,7 +6137,7 @@ impl GBufferTargets {
         let vis_resolve: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
             vis_slots.map(|s| s.expect("invariant: every VIS resolve ring slot built"));
 
-        // (3) The DENOISED resolve set ring (`gShadowVis` @21 = the FINAL à-trous output, the READ
+        // (3) The DENOISED resolve set ring (`gShadowVis` @22 = the FINAL à-trous output, the READ
         // target). On failure, drain the VIS ring + the UBO ring too.
         let mut den_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
@@ -6396,10 +6438,10 @@ impl GBufferTargets {
     /// set per in-flight frame) against the boot VIS-MV layout ([`GBufferScene::vis_mv_layout`]).
     ///
     /// The set = the SAME 22 VIS/DENOISED entries the base VIS set builds (the 19 shared via
-    /// [`resolve_software_entries`] + TLAS @19 + soft-shadow UBO @20 + `gShadowVis` @21 =
-    /// `shadow_vis[slot]`, the WRITE target) PLUS the `MotionCam` UBO @22 (`motion_cam[slot]`) + the
-    /// `motion_vec` STORAGE image @23 (`motion_vec[slot]`, the SDF-Δuv WRITE target). Exact-fill at
-    /// [`RESOLVE_HWRT_VIS_MV_BINDINGS`] (24).
+    /// [`resolve_software_entries`] + TLAS @19 + soft-shadow UBO @20 + raster depth @21 +
+    /// `gShadowVis` @22 = `shadow_vis[slot]`, the WRITE target) PLUS the `MotionCam` UBO @23
+    /// (`motion_cam[slot]`) + the `motion_vec` STORAGE image @24 (`motion_vec[slot]`, the SDF-Δuv
+    /// WRITE target). Exact-fill at [`RESOLVE_HWRT_VIS_MV_BINDINGS`] (25).
     ///
     /// DECOUPLED from the per-frame activation (the same lesson as [`Self::build_shadow_denoise_sets`]):
     /// it gates on the STABLE signals — NOT `scene.temporal_enabled` — so the set already exists
@@ -6423,6 +6465,7 @@ impl GBufferTargets {
     fn build_shadow_vis_mv_resolve_set(
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,
+        depth: &[VulkanTexture; FRAMES_IN_FLIGHT],
         albedo: &[VulkanTexture; FRAMES_IN_FLIGHT],
         normal: &[VulkanTexture; FRAMES_IN_FLIGHT],
         material: &[VulkanTexture; FRAMES_IN_FLIGHT],
@@ -6443,7 +6486,9 @@ impl GBufferTargets {
         // `vis_mv_layout` / `motion_cam_ubo_ring` are `Some` whenever the boot MV resources exist
         // (an RT + storage device), independent of the temporal mode. Any absent ⇒ the byte-identical
         // OFF path. When temporal is OFF (`mode == Spatial`) the set is built-but-unused (the recorder
-        // gates USE on `sdf_mv_active()`); a small boot-time cost that removes the panic.
+        // gates USE on `sdf_mv_active()`); a small boot-time cost that removes the panic. The 25-entry
+        // set is `resolve_software_entries` + TLAS @19 + UBO @20 + depth @21 + vis @22 + cam @23 +
+        // mv @24.
         let (vis_mv_layout, motion_cam, vis_ring, mvec, tlas) = match (
             scene.shadow_denoise_enabled,
             scene.vis_mv_layout,
@@ -6469,8 +6514,8 @@ impl GBufferTargets {
             };
             let shared =
                 resolve_software_entries(scene, &imgs, slot, cluster_grid_buf, light_index_buf);
-            // The 22 VIS bindings (identical to `build_resolve_set`'s VIS chain) + `MotionCam` @22 +
-            // `motion_vec` @23. `gShadowVis` @21 binds `shadow_vis[slot]` (the WRITE target, same as
+            // The 23 VIS bindings (identical to `build_resolve_set`'s VIS chain) + `MotionCam` @23 +
+            // `motion_vec` @24. `gShadowVis` @22 binds `shadow_vis[slot]` (the WRITE target, same as
             // the base VIS set).
             let mut chained = shared
                 .into_iter()
@@ -6480,6 +6525,7 @@ impl GBufferTargets {
                 .chain(core::iter::once(BindGroupEntry::UniformBuffer {
                     buffer: &scene.ray_shadow_ubo[slot],
                 }))
+                .chain(core::iter::once(hwrt_depth_entry(scene, depth, slot)))
                 .chain(core::iter::once(BindGroupEntry::StorageImage {
                     texture: &vis_ring[slot],
                 }))
@@ -6523,7 +6569,7 @@ impl GBufferTargets {
 
     /// HW-RT Rung 3b step 6: builds the temporal-denoise descriptor sets — the temporal reproject UBO
     /// ring, the 8-binding temporal reproject set, and the sibling DENOISED-temporal resolve set (which
-    /// binds `gShadowVis` @21 to `temporal_out` instead of the à-trous ring).
+    /// binds `gShadowVis` @22 to `temporal_out` instead of the à-trous ring).
     ///
     /// DECOUPLED from the per-frame temporal activation (the same lesson as
     /// [`Self::build_shadow_vis_mv_resolve_set`]): it gates on the STABLE signals so the sets already
@@ -6543,6 +6589,7 @@ impl GBufferTargets {
     fn build_shadow_temporal_sets(
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,
+        depth: &[VulkanTexture; FRAMES_IN_FLIGHT],
         albedo: &[VulkanTexture; FRAMES_IN_FLIGHT],
         normal: &[VulkanTexture; FRAMES_IN_FLIGHT],
         material: &[VulkanTexture; FRAMES_IN_FLIGHT],
@@ -6671,10 +6718,11 @@ impl GBufferTargets {
         let temporal: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
             temporal_slots.map(|s| s.expect("invariant: every temporal reproject set slot built"));
 
-        // (3) The DENOISED-temporal resolve set ring — the SAME 22 VIS/DENOISED entries as the base
-        // DENOISED set (the 19 shared via `resolve_software_entries` + TLAS @19 + soft-shadow UBO @20)
-        // EXCEPT `gShadowVis` @21 = `temporal_out[slot]` (the DENOISED resolve READS the accumulated
-        // visibility). Exact-fill at `RESOLVE_HWRT_DENOISE_BINDINGS` (22). On a slot's failure, drain
+        // (3) The DENOISED-temporal resolve set ring — the SAME 23 VIS/DENOISED entries as the base
+        // DENOISED set (the 19 shared via `resolve_software_entries` + TLAS @19 + soft-shadow UBO @20
+        // + raster depth @21) EXCEPT `gShadowVis` @22 = `temporal_out[slot]` (the DENOISED resolve
+        // READS the accumulated visibility). Exact-fill at `RESOLVE_HWRT_DENOISE_BINDINGS` (23). On a
+        // slot's failure, drain
         // the [0..slot) denoised-temporal sets + the whole temporal set ring + the UBO ring.
         let mut den_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
@@ -6697,6 +6745,7 @@ impl GBufferTargets {
                 .chain(core::iter::once(BindGroupEntry::UniformBuffer {
                     buffer: &scene.ray_shadow_ubo[slot],
                 }))
+                .chain(core::iter::once(hwrt_depth_entry(scene, depth, slot)))
                 .chain(core::iter::once(BindGroupEntry::StorageImage {
                     texture: &tout[slot],
                 }));
@@ -8307,6 +8356,7 @@ impl GBufferTargets {
         ) = match Self::build_shadow_denoise_sets(
             ctx,
             scene,
+            &core.depth,
             &core.albedo,
             &core.normal,
             &core.material,
@@ -8488,13 +8538,14 @@ impl GBufferTargets {
             };
 
         // HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve set ring. Built LAST
-        // (after `motion_vec`, which it binds @23) and DEGRADE-TO-NONE (opt-in, no dependents) —
+        // (after `motion_vec`, which it binds @24) and DEGRADE-TO-NONE (opt-in, no dependents) —
         // like the temporal target rings, it needs no teardown weaving. `None` on every OFF path
         // (temporal off / spatial off / non-storage device) ⇒ byte-identical.
         #[cfg(feature = "hwrt")]
         let shadow_vis_mv_resolve_set = Self::build_shadow_vis_mv_resolve_set(
             ctx,
             scene,
+            &depth,
             &albedo,
             &normal,
             &material,
@@ -8517,6 +8568,7 @@ impl GBufferTargets {
             match Self::build_shadow_temporal_sets(
                 ctx,
                 scene,
+                &depth,
                 &albedo,
                 &normal,
                 &material,
@@ -9976,17 +10028,22 @@ mod tests {
         assert_eq!(RESOLVE_SOFTWARE_TOTAL_BINDINGS, RESOLVE_SOFTWARE_BINDINGS + 1);
     }
 
-    /// Textured-PBR T6a (the critic's C1 fix): every HWRT-family resolve binding count derived
-    /// from `RESOLVE_SOFTWARE_BINDINGS` is UNCHANGED by the software-only `gPbr` append — the
-    /// TLAS stays at binding 19, and the largest HWRT set (`RESOLVE_HWRT_VIS_MV_BINDINGS`) stays
-    /// EXACTLY at the `MAX_BIND_GROUP_BINDINGS` cap (24), not 25 (which would panic the fixed
-    /// `[VkDescriptorSetLayoutBinding; 24]`-class arrays the rhi_impl backend allocates).
+    /// Textured-PBR T6a (the critic's C1 fix) + lane fix/hwrt-shadow-ray-origin: every HWRT-family
+    /// resolve binding count derived from `RESOLVE_SOFTWARE_BINDINGS` is UNCHANGED by the
+    /// software-only `gPbr` append — the TLAS stays at binding 19, the raster depth sits at 21
+    /// in every HWRT set (RESOLVE_INLINE-hwrt 22, VIS/DENOISED 23), and the largest HWRT set
+    /// (`RESOLVE_HWRT_VIS_MV_BINDINGS`) sits EXACTLY at the `MAX_BIND_GROUP_BINDINGS` cap (25),
+    /// not above it (which would panic the fixed `[VkDescriptorSetLayoutBinding; 25]`-class arrays
+    /// the rhi_impl backend allocates).
     #[test]
     #[cfg(feature = "hwrt")]
     fn hwrt_resolve_binding_counts_unchanged_by_the_c1_fix() {
         assert_eq!(TLAS_ACCEL_BINDING, 19, "TLAS must stay at binding 19 (unshifted by gPbr)");
-        assert_eq!(RESOLVE_HWRT_DENOISE_BINDINGS, 22);
-        assert_eq!(RESOLVE_HWRT_VIS_MV_BINDINGS, 24, "must stay exactly at MAX_BIND_GROUP_BINDINGS");
+        assert_eq!(HWRT_DEPTH_BINDING, 21, "the raster depth is inserted at 21 in every HWRT set");
+        assert_eq!(RESOLVE_HWRT_BINDINGS, 22);
+        assert_eq!(RESOLVE_HWRT_DENOISE_BINDINGS, 23);
+        assert_eq!(RESOLVE_HWRT_VIS_MV_BINDINGS, 25, "must sit exactly at MAX_BIND_GROUP_BINDINGS");
+        assert_eq!(RESOLVE_HWRT_VIS_MV_BINDINGS, boyko_rhi::MAX_BIND_GROUP_BINDINGS);
     }
 
     /// The fault a forced boot-clear failure delivers to the policy funnel: the shape

@@ -64,6 +64,10 @@ pub mod bundles;
 /// Grid), gated Manual-by-default (the 0%-gate). The physics analogue of the P1
 /// lighting policy; ECS-native, cold, zero hot-path cost.
 pub mod broadphase_policy;
+/// The tree broadphase ([`BroadphaseKind::Tree`]): a packed 8-wide BVH over the moving rows
+/// and a persistent static set, serial and heap-free per step, whose pair set is the all-pairs
+/// loop's exact set (`docs/physics/perf-campaign/levers/broadphase/04-DESIGN-REV2.md`).
+pub mod broadphase_tree;
 pub mod components;
 pub mod manifold;
 pub mod math;
@@ -95,6 +99,9 @@ pub mod solver;
 pub mod systems;
 
 pub use broadphase_policy::{GRID_HI, GRID_LO, PhysicsStats, select_broadphase};
+pub use broadphase_tree::{
+    BroadphaseTree, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into, sphere_bound_feasible,
+};
 pub use bundles::{DynamicBody, Trigger};
 pub use components::{
     Collider, ColliderShape, Contact, Kinematic, RigidBody, RigidBodyBundle, RigidBodyMass, Sensor,

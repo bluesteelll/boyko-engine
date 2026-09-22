@@ -30,6 +30,24 @@ applies these to rev 1:
 - **Open question 3:** L2 is exempt from the end-to-end T(W) gate, because no measured row runs `Auto`; its
   gates are the structural ones in the plan.
 
+**T(W) gate measured 2026-09-21** (window 3, `docs/measurements/2026-09-21-physics-window3/analysis.md` §3; the
+2026-09-21 block of `docs/MEASUREMENT-QUEUE.md` §10). On the shipped default row (`--cfg default`: simd on,
+AllPairs under `Manual`, sleeping off) C4 `de06b6c9` against C2 `aac562a7` reads **−2.435 ms at W=8 (−31.3 %)**,
+claimed under range, IQR and SE (bars 15.7 / 5.3 / 3.0 %), and the same-binary A/B (`--parallel-np off` against
+on, W=8) reads **+2.626 ms (+49.1 %)**, claimed under all three (36.3 / 9.6 / 7.0 %) — L5's rule (realized
+ΔT(8) ≥ 1.33 ms, claimed) is cleared by 2×, at the top of the 2.4–2.6 ms prediction. At W = 2 / 4 / 16: −13.6 /
+−25.5 / −32.0 %, claimed under IQR and SE (the min–max reading is inflated by one contaminated pass-0 process per
+cell). One pose `0x32d5e235342b4143` across C2, C4 and every W (77/77 timed processes plus the untimed 500-step
+gate with its 501-step red control); equal knobs across the two binaries (`--parallel-np off` against C2, W=8)
++2.4 %, not claimed. **At W=1 C4 reads +1.34 % (+0.142 ms) over C2, claimed under SE only** (bars 4.5 / 1.5 /
+1.0 %; K = 5 and 6 against the design's K = 12 at W=1): a one-worker pool takes the serial loop by design
+(`one_worker_parallel_narrowphase_runs_the_serial_loop`), so this is a C3 + C4 binary difference, not the flag,
+and whether it is "a claimed regression at any W" turns on which spread the claim rule means — `../00-RULINGS.md`
+names SE, §10's RESULT block keeps range / IQR with SE beside them and calls the question OPEN. That is the
+orchestrator's call; a same-binary `--parallel-np off` W=1 row at K = 12 (about 2.5 minutes) settles it. Not
+exercised by the window: the design's own row for the rule (J-A, cfg-A, at C2 and C4), the armed rows (I(W),
+E(W) at W = 2, 4, 16), the R rows and the J-C canary on C4 — those gate rows stay open.
+
 ## Broadphase redesign (`BroadphaseKind::Tree`): REVISE (rev 2) before implementation
 
 No blocking remark; the exactness and determinism core holds (only the exact AllPairs set is bit-identical,
@@ -89,6 +107,22 @@ first commit. Order of lanes: L5 (approved above) → broadphase → L10.
   in a cargo test is a red, never a pass.
 - Optional remarks adopted where cheap.
 
+**G4 / G5 measured 2026-09-22 (window 4, `docs/measurements/2026-09-22-broadphase-tree/analysis.md`; the 2026-09-22
+block of `docs/MEASUREMENT-QUEUE.md` §11; C3 binary `a46b8287`, K=6, Jolt v5.6.0 only). Every directional gate passes:
+the Tree is claimed faster than AllPairs on the same binary at every W on J cfg-A (−8.6 … −24.4 %), on the shipped
+default row (−14.5 % at W=1, −32.6 % at W=8), on R (−11.5 / −22.5 %) and on all 12 churn arms, S16 unchanged, one
+pose per scene, structure clean, canary seen; the headline Δbp(8) = 1.488 ms clears the 1.03 ms bar; `T-D-tree` at
+W=8 reads **3.699 ms = 1.440× Jolt v5.6.0** (0.918× at W=1; a projection until the default ships). **But the stop
+rules FIRED** — G4 rule 1 `J snapshot` 0.443 ms > 0.30, the G5 tree-span gate 0.476 / 0.466 ms > 0.36 / 0.35, rule 6
+`compaction` at every m and rule 9 `high jumper` at 100k — all on one quantity, the J-scale query at 334 ns per row
+against the design's 100–150 — **so C4 (the default flip) is DEFERRED by the recipe's letter until the query-cost
+investigation of `analysis.md` §8 has run and the J snapshot cell and the armed rows are re-taken.** Constants:
+`TREE_BRUTE_MAX_ROWS` = 64 (derived, unchanged); `AUTO_TREE_LO/HI` 64 / 256 by the recipe's grid rule (126 / 140 by
+L2's procedure), committed only after the refinement run between 64 and 256; `ADMIT_BUILD_RATIO` and C2 (D6)
+DEFERRED — the recipe's `c_build` formula contains c_q and must be corrected first, and C2 is built iff the
+post-investigation t_q(J, W=1) ≥ 0.235 ms on the default row (0.316 on cfg-A) at E = 0.68. The investigation can
+change the flip's size, not its sign, unless it finds the excess is work the design forbids.
+
 **L10 rev 2** (`L10-sleeping/04-DESIGN-REV2.md`, review `05-REVIEW-OF-REV2.md`):
 - **W1:** the Tree's hint is PRE_HELD minus the prologue restore list (or `release` runs for every restore on
   a Tree step); a debug assertion of Invariant V over `withheld` after the kind arm; the mutation
@@ -145,7 +179,7 @@ predicted setup 0.425 → 0.10–0.21 µs per manifold. Rulings:
   the model predicts growth — on the scalar cut walk (`simd_solve = false`) at W=8 against W=4 — because on the
   shipped kernel a colour spawns at most 32 tasks at any lane count (the ruling's "48 at W=8" was the ceiling
   `lanes × CHUNKS_PER_WORKER`, not the count the cohort-snapped cut walk produces).
-- **G9 on C2 (2026-09-22, window 4b; `docs/measurements/2026-09-22-l11-solve-setup/`, queue section 11):** C1+C2 against C0 (`f8873aae` against `146a1125`), K=12 interleaved under the P0 protocol, passes every realized-gain gate the design set on this tip — T(1) `J-As` −1.996 ms (10.693 → 8.697; bar −0.81), T(8) −1.103 (5.342 → 4.240; bar −0.61), solve_build −0.573 / −0.542 at W=1 / 8 (bar −0.29), store −0.141 / −0.134 (bar −0.11); wide colours −27.7 % / −28.5 % and cfg-A faster at every W, so both "not claimed slower" gates hold; the setup 1.643 → 0.832 ms, serial at both W; 0.885× / 1.650× Jolt v5.6.0 at W=1 / 8 (1.69× / 3.07× per manifold); poses and counters bit-identical on both binaries. **C3 still owes the warm_apply gate (−0.19 ms): the tip reads −0.092 from C1's merge-join, 0.519 ms against C3's 0.15–0.30 target, and the design's setup band (0.44–0.93) is met at 0.832 only with C3 outstanding;** C4's in-binary A/B at W=8 stays conditional on D10 (the setup is 20 % of the tip's 4.24 ms step). Facts for the design, not reds: on the all-frozen `R-S` the tip's solve_build is +16 µs per step and its store, 0.128 ms, sits above the predicted 0.05–0.10.
+- **G9 on C2 (2026-09-22, window 4b; `docs/measurements/2026-09-22-l11-solve-setup/`, queue section 12):** C1+C2 against C0 (`f8873aae` against `146a1125`), K=12 interleaved under the P0 protocol, passes every realized-gain gate the design set on this tip — T(1) `J-As` −1.996 ms (10.693 → 8.697; bar −0.81), T(8) −1.103 (5.342 → 4.240; bar −0.61), solve_build −0.573 / −0.542 at W=1 / 8 (bar −0.29), store −0.141 / −0.134 (bar −0.11); wide colours −27.7 % / −28.5 % and cfg-A faster at every W, so both "not claimed slower" gates hold; the setup 1.643 → 0.832 ms, serial at both W; 0.885× / 1.650× Jolt v5.6.0 at W=1 / 8 (1.69× / 3.07× per manifold); poses and counters bit-identical on both binaries. **C3 still owes the warm_apply gate (−0.19 ms): the tip reads −0.092 from C1's merge-join, 0.519 ms against C3's 0.15–0.30 target, and the design's setup band (0.44–0.93) is met at 0.832 only with C3 outstanding;** C4's in-binary A/B at W=8 stays conditional on D10 (the setup is 20 % of the tip's 4.24 ms step). Facts for the design, not reds: on the all-frozen `R-S` the tip's solve_build is +16 µs per step and its store, 0.128 ms, sits above the predicted 0.05–0.10.
 - **L12 is commissioned** (the effective-mass cache per inertia epoch: 5 of 12 sweeps compute, 7 load;
   bit-identical) as its own design after L11.
 

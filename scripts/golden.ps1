@@ -30,10 +30,10 @@
          the working directory, so it would still build one tree with the other tree's settings.
 
     Windows / single RTX-3060 / windows-msvc (the workstation's build host since 2026-09-10;
-    every sha256 in PINS.toml was blessed on the preceding windows-gnu host and none has been
-    re-run under msvc -- PINS.toml's header states what to do with a first mismatch, and it is
-    NOT -Bless). Windowed dumps require --test-threads=1 and are #[ignore]d, so this is a
-    human/orchestrator command -- it never runs on CI (no GPU there).
+    every sha256 in PINS.toml was blessed on windows-gnu, or re-blessed on msvc for a render cause;
+    msvc dumps the gnu-blessed bytes (32/32 at 8668b9c7; 61/61 checked at 54e186d9), so a first mismatch
+    is diagnosed, NOT -Blessed -- PINS.toml's header). Windowed dumps require --test-threads=1 and
+    are #[ignore]d, so this is a human/orchestrator command -- it never runs on CI (no GPU there).
 
 .PARAMETER Pin
     Which pin in goldens\PINS.toml to gate. Default: grand_showcase.

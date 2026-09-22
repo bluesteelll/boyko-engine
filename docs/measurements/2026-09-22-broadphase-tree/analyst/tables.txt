@@ -1,0 +1,384 @@
+== bin/SHA256SUMS: {'runner_c3.exe': '19456ab440e2', 'broadphase-595045019352a67f.exe': 'efb84636b2d5', 'row_identity_churn-ec1df0bd330016d8.exe': 'd8ba73fc98c3'}
+== runner_c3.exe sha256 now: 19456ab440e2 (matches)
+== G5 selection: 159 records = 2 warm-ups + 156 originals + 1 re-runs; used 156; excluded slots 0
+   slot pass 1 seq 75: rerun (original: invalid ["pose 0xf6e397d168e0e8b8 != 0x32d5e235342b4143"])
+== G5 input checks: max |csv mean - driver mean_ms| = 0 ms; max |csv mean - runner window_mean_ns| = 0 ns; steps!=500: []; void: []
+== G5 pose hashes per (scene, cfg): {'jolt/a': ['0x32d5e235342b4143'], 'jolt/default': ['0x32d5e235342b4143'], 'rest/default': ['0xee2a67a98434919a'], 's16/default': ['0x71313833f6a8e645']}
+== G5 pose.bin sha256 per (scene, cfg): {'jolt/a': ['eff361e1bdf7'], 'jolt/default': ['eff361e1bdf7'], 'rest/default': ['89f084c2816b'], 's16/default': ['82c192b5aa86']}
+== G5 expect_pose: Counter({'none': 84, 'match': 72})
+== G5 knobs: Counter({('T-A-tree', 'Tree', 'Manual', 64, False, True, True, False): 24, ('T-A-allpairs', 'AllPairs', 'Manual', 64, False, True, True, False): 24, ('T-D-tree', 'Tree', 'Manual', 64, True, True, True, False): 12, ('T-D-allpairs', 'AllPairs', 'Manual', 64, True, True, True, False): 12, ('R-tree', 'Tree', 'Manual', 64, True, True, True, False): 12, ('R-allpairs', 'AllPairs', 'Manual', 64, True, True, True, False): 12, ('T-A-tree', 'Tree', 'Manual', 64, False, False, False, False): 6, ('T-A-allpairs-armed', 'AllPairs', 'Manual', 64, False, False, False, False): 6, ('T-C-tree', 'Tree', 'Manual', 64, False, False, False, False): 6, ('T-A-allpairs', 'AllPairs', 'Manual', 64, False, False, False, False): 6, ('T-A-tree-armed', 'Tree', 'Manual', 64, False, True, True, False): 6, ('T-A-allpairs-armed', 'AllPairs', 'Manual', 64, False, True, True, False): 6, ('T-C-tree', 'Tree', 'Manual', 64, False, True, True, False): 6, ('S16-tree', 'Tree', 'Manual', 64, True, True, True, False): 6, ('S16-allpairs', 'AllPairs', 'Manual', 64, True, True, True, False): 6, ('T-A-tree-armed', 'Tree', 'Manual', 64, False, False, False, False): 6})
+== G5 threads: pool_workers==W: True; dispatcher: Counter({1: 156}); mask: Counter({'0xffff': 156}); target_env: Counter({'msvc': 156}); debug_assertions: Counter({False: 156}); zone tier: Counter({'dev': 156}); exe sha: Counter({'19456ab4': 156})
+== G5 counts: final manifolds/pairs per scene: Counter({('jolt', 4515, 9559): 120, ('rest', 6670, 9570): 24, ('s16', 16, 31): 12})
+== G5 TreeDiag gate (2.2 item 2): violations none
+== G5 invalid process 075_r2_T-D-allpairs_W1: ['pose 0xf6e397d168e0e8b8 != 0x32d5e235342b4143']; pose bytes differing from 030_r1_T-D-allpairs_W1: 42845 of 64480; first differing step 439 (top_y ('28.990158', '28.990156')); steps differing (top_y, manifolds, pairs) (58, 48, 0); others 0.22 %; receipts (0.85, 0.68)
+== G5 receipts (all timed attempts, before+after): n=314 median 1.00 p90 1.84 max 3.97; >5%: 0; build procs seen: 0; contaminated attempts: 0
+== G5 during-process witness others_busy_pct over used: median 0.29 p95 0.88 max 6.49; >3%: [('006_r0_R-allpairs_W8', 6.49, [{'name': 'python.exe', 'pid': 16036, 'cpu_s': 3.75}, {'name': 'steam.exe', 'pid': 10136, 'cpu_s': 0.031}])]; waited_s nonzero: 0
+
+== G5 cells (median over K of the [0,500) window mean, ms/step; range / IQR / SE %; values)
+  R-allpairs@W1            K=6    13.9059 [13.6707-14.0529]   2.75 /  0.32 /  0.46   sub [0,100)/[100,500) 13.9891 / 13.8849   13.6707, 13.8745, 13.8901, 13.9218, 13.9233, 14.0529
+  R-tree@W1                K=6    12.3082 [12.2217-12.7038]   3.92 /  1.17 /  0.75   sub [0,100)/[100,500) 12.4395 / 12.2920   12.2217, 12.2393, 12.2671, 12.3494, 12.4039, 12.7038
+  S16-allpairs@W1          K=6     0.0450 [0.0445-0.0459]   3.01 /  1.59 /  0.60   sub [0,100)/[100,500) 0.0484 / 0.0441   0.0445, 0.0446, 0.0448, 0.0452, 0.0454, 0.0459
+  S16-tree@W1              K=6     0.0448 [0.0445-0.0458]   3.08 /  1.83 /  0.65   sub [0,100)/[100,500) 0.0488 / 0.0439   0.0445, 0.0445, 0.0448, 0.0449, 0.0455, 0.0458
+  T-A-allpairs@W1          K=6    19.5711 [19.4435-19.6971]   1.30 /  0.34 /  0.22   sub [0,100)/[100,500) 19.3080 / 19.6290   19.4435, 19.5199, 19.5511, 19.5911, 19.5961, 19.6971
+  T-A-allpairs-armed@W1    K=6    19.5546 [19.2706-19.7255]   2.33 /  0.71 /  0.41   sub [0,100)/[100,500) 19.1945 / 19.6302   19.2706, 19.4109, 19.5342, 19.5750, 19.5822, 19.7255
+  T-A-tree@W1              K=6    17.8887 [17.7909-18.1075]   1.77 /  0.48 /  0.32   sub [0,100)/[100,500) 17.5680 / 17.9558   17.7909, 17.8251, 17.8631, 17.9144, 17.9217, 18.1075
+  T-A-tree-armed@W1        K=6    17.8700 [17.7608-18.1505]   2.18 /  1.08 /  0.44   sub [0,100)/[100,500) 17.6923 / 17.9456   17.7608, 17.8374, 17.8400, 17.9000, 18.0750, 18.1505
+  T-C-tree@W1              K=6    18.7639 [18.6803-18.9201]   1.28 /  0.45 /  0.24   sub [0,100)/[100,500) 18.5390 / 18.8244   18.6803, 18.7596, 18.7599, 18.7679, 18.8686, 18.9201
+  T-D-allpairs@W1          K=6    10.5537 [10.4639-10.7378]   2.60 /  1.05 /  0.49   sub [0,100)/[100,500) 10.4448 / 10.5809   10.4639, 10.5148, 10.5520, 10.5553, 10.6620, 10.7378
+  T-D-tree@W1              K=6     9.0262 [8.9176-9.0917]   1.93 /  0.97 /  0.38   sub [0,100)/[100,500) 8.9662 / 9.0342   8.9176, 8.9761, 9.0006, 9.0518, 9.0753, 9.0917
+  T-A-allpairs@W2          K=6    12.2700 [12.1556-12.2920]   1.11 /  0.80 /  0.26   sub [0,100)/[100,500) 12.0969 / 12.3081   12.1556, 12.1740, 12.2513, 12.2886, 12.2917, 12.2920
+  T-A-tree@W2              K=6    10.5878 [10.5113-10.6917]   1.70 /  0.76 /  0.32   sub [0,100)/[100,500) 10.4738 / 10.6217   10.5113, 10.5530, 10.5868, 10.5888, 10.6591, 10.6917
+  T-A-allpairs@W4          K=6     8.5305 [8.5081-8.7359]   2.67 /  1.46 /  0.59   sub [0,100)/[100,500) 8.4633 / 8.5467   8.5081, 8.5151, 8.5261, 8.5349, 8.6782, 8.7359
+  T-A-tree@W4              K=6     6.8738 [6.8258-7.0866]   3.79 /  1.37 /  0.73   sub [0,100)/[100,500) 6.8239 / 6.8864   6.8258, 6.8360, 6.8602, 6.8874, 6.9522, 7.0866
+  R-allpairs@W8            K=6     6.8474 [6.6937-7.4401]  10.90 /  2.65 /  2.00   sub [0,100)/[100,500) 6.9273 / 6.7811   6.6937, 6.7786, 6.8141, 6.8806, 6.9984, 7.4401
+  R-tree@W8                K=6     5.3097 [5.0855-5.4814]   7.46 /  5.38 /  1.65   sub [0,100)/[100,500) 5.2036 / 5.3201   5.0855, 5.1291, 5.2209, 5.3984, 5.4509, 5.4814
+  T-A-allpairs@W8          K=6     6.6421 [6.5817-6.7404]   2.39 /  1.26 /  0.47   sub [0,100)/[100,500) 6.5866 / 6.6560   6.5817, 6.5870, 6.6286, 6.6557, 6.6894, 6.7404
+  T-A-allpairs-armed@W8    K=6     6.6947 [6.6057-7.0288]   6.32 /  2.19 /  1.21   sub [0,100)/[100,500) 6.6348 / 6.7097   6.6057, 6.6126, 6.6806, 6.7088, 6.7990, 7.0288
+  T-A-tree@W8              K=6     5.0234 [5.0006-5.0812]   1.60 /  0.51 /  0.29   sub [0,100)/[100,500) 4.9908 / 5.0316   5.0006, 5.0107, 5.0141, 5.0327, 5.0390, 5.0812
+  T-A-tree-armed@W8        K=6     5.0186 [5.0118-5.2985]   5.71 /  2.85 /  1.28   sub [0,100)/[100,500) 5.0203 / 5.0210   5.0118, 5.0125, 5.0179, 5.0193, 5.2025, 5.2985
+  T-C-tree@W8              K=6     5.3397 [5.2935-6.0387]  13.96 /  1.74 /  2.78   sub [0,100)/[100,500) 5.3363 / 5.3082   5.2935, 5.3009, 5.3064, 5.3731, 5.4023, 6.0387
+  T-D-allpairs@W8          K=6     5.4905 [5.3267-5.5493]   4.05 /  2.15 /  0.84   sub [0,100)/[100,500) 5.3121 / 5.5350   5.3267, 5.3532, 5.4861, 5.4949, 5.5081, 5.5493
+  T-D-tree@W8              K=6     3.6987 [3.6880-3.7706]   2.23 /  0.79 /  0.44   sub [0,100)/[100,500) 3.6968 / 3.6995   3.6880, 3.6892, 3.6984, 3.6991, 3.7281, 3.7706
+  T-A-allpairs@W16         K=6     6.4863 [6.4383-6.5832]   2.23 /  0.90 /  0.42   sub [0,100)/[100,500) 6.4692 / 6.4897   6.4383, 6.4671, 6.4700, 6.5027, 6.5342, 6.5832
+  T-A-tree@W16             K=6     4.9258 [4.8693-5.1730]   6.17 /  0.91 /  1.15   sub [0,100)/[100,500) 4.9161 / 4.9253   4.8693, 4.8844, 4.9244, 4.9272, 4.9432, 5.1730
+
+== window 3 cells recomputed from its runs.jsonl (137 used of 169 timed; excluded slots 1)
+  JOLT56-T@W1    K=6    9.8282 [9.5183-11.3644] 18.78 /  3.31 /  3.50  9.518, 9.669, 9.783, 9.873, 10.073, 11.364
+  JOLT56-T@W2    K=6    5.7705 [5.7028-5.8177]  1.99 /  0.87 /  0.38  5.703, 5.717, 5.768, 5.773, 5.783, 5.818
+  JOLT56-T@W4    K=6    3.5814 [3.5194-3.6634]  4.02 /  2.36 /  0.83  3.519, 3.542, 3.579, 3.584, 3.653, 3.663
+  JOLT56-T@W8    K=6    2.5693 [2.5007-3.1241] 24.26 /  3.09 /  4.76  2.501, 2.504, 2.545, 2.593, 2.594, 3.124
+  JOLT56-T@W16   K=6    2.3885 [2.3375-2.4645]  5.32 /  3.42 /  1.12  2.337, 2.343, 2.377, 2.400, 2.445, 2.465
+  D-L5@W1        K=6   10.7379 [10.6840-10.7928]  1.01 /  0.73 /  0.23  10.684, 10.696, 10.701, 10.775, 10.776, 10.793
+  D-L5@W2        K=6    7.8645 [7.7673-8.7445] 12.43 /  1.66 /  2.43  7.767, 7.793, 7.807, 7.922, 7.928, 8.744
+  D-L5@W4        K=6    6.1728 [6.1061-6.7100]  9.78 /  1.62 /  1.89  6.106, 6.123, 6.171, 6.174, 6.255, 6.710
+  D-L5@W8        K=6    5.3474 [5.3070-5.6506]  6.43 /  1.70 /  1.24  5.307, 5.334, 5.345, 5.350, 5.454, 5.651
+  D-L5@W16       K=6    5.5518 [5.4795-6.8382] 24.47 /  3.74 /  4.87  5.480, 5.499, 5.511, 5.592, 5.749, 6.838
+
+== G5 comparisons: tree against allpairs (B against A; effect = B/A - 1; bars r / i / s %; claimed r/i/s)
+  T-A-tree vs T-A-allpairs @W1                           19.5711 ->   17.8887  ratio 0.9140    -8.60 %  (-1.6824 ms)  bars 4.39 / 1.18 / 0.78  Y/Y/Y
+  T-A-tree vs T-A-allpairs @W2                           12.2700 ->   10.5878  ratio 0.8629   -13.71 %  (-1.6822 ms)  bars 4.07 / 2.19 / 0.83  Y/Y/Y
+  T-A-tree vs T-A-allpairs @W4                            8.5305 ->    6.8738  ratio 0.8058   -19.42 %  (-1.6567 ms)  bars 9.28 / 4.00 / 1.88  Y/Y/Y
+  T-A-tree vs T-A-allpairs @W8                            6.6421 ->    5.0234  ratio 0.7563   -24.37 %  (-1.6187 ms)  bars 5.75 / 2.72 / 1.11  Y/Y/Y
+  T-A-tree vs T-A-allpairs @W16                           6.4863 ->    4.9258  ratio 0.7594   -24.06 %  (-1.5605 ms)  bars 13.12 / 2.56 / 2.45  Y/Y/Y
+  T-D-tree vs T-D-allpairs @W1                           10.5537 ->    9.0262  ratio 0.8553   -14.47 %  (-1.5275 ms)  bars 6.47 / 2.86 / 1.23  Y/Y/Y
+  R-tree vs R-allpairs @W1                               13.9059 ->   12.3082  ratio 0.8851   -11.49 %  (-1.5977 ms)  bars 9.57 / 2.43 / 1.75  Y/Y/Y
+  T-A-tree-armed vs T-A-allpairs-armed @W1               19.5546 ->   17.8700  ratio 0.9139    -8.61 %  (-1.6846 ms)  bars 6.38 / 2.59 / 1.20  Y/Y/Y
+  T-A-tree-armed vs T-A-tree (arming cost) @W1           17.8887 ->   17.8700  ratio 0.9990    -0.10 %  (-0.0187 ms)  bars 5.62 / 2.36 / 1.08  n/n/n
+  T-A-allpairs-armed vs T-A-allpairs (arming) @W1        19.5711 ->   19.5546  ratio 0.9992    -0.08 %  (-0.0165 ms)  bars 5.33 / 1.58 / 0.93  n/n/n
+  T-C-tree vs T-A-tree (canary rise) @W1                 17.8887 ->   18.7639  ratio 1.0489    +4.89 %  (+0.8752 ms)  bars 4.37 / 1.31 / 0.79  Y/Y/Y
+  T-D-tree vs T-D-allpairs @W8                            5.4905 ->    3.6987  ratio 0.6737   -32.63 %  (-1.7918 ms)  bars 9.26 / 4.59 / 1.91  Y/Y/Y
+  R-tree vs R-allpairs @W8                                6.8474 ->    5.3097  ratio 0.7754   -22.46 %  (-1.5377 ms)  bars 26.41 / 12.00 / 5.19  n/Y/Y
+  T-A-tree-armed vs T-A-allpairs-armed @W8                6.6947 ->    5.0186  ratio 0.7496   -25.04 %  (-1.6761 ms)  bars 17.04 / 7.19 / 3.52  Y/Y/Y
+  T-A-tree-armed vs T-A-tree (arming cost) @W8            5.0234 ->    5.0186  ratio 0.9990    -0.10 %  (-0.0048 ms)  bars 11.87 / 5.79 / 2.62  n/n/n
+  T-A-allpairs-armed vs T-A-allpairs (arming) @W8         6.6421 ->    6.6947  ratio 1.0079    +0.79 %  (+0.0526 ms)  bars 13.51 / 5.06 / 2.60  n/n/n
+  T-C-tree vs T-A-tree (canary rise) @W8                  5.0234 ->    5.3397  ratio 1.0630    +6.30 %  (+0.3163 ms)  bars 28.10 / 3.62 / 5.60  n/Y/Y
+  S16-tree vs S16-allpairs @W1                            0.0450 ->    0.0448  ratio 0.9962    -0.38 %  (-0.0002 ms)  bars 8.61 / 4.84 / 1.77  n/n/n
+
+== the bridge: T-D-allpairs (this window) against window 3's D-L5 (same physics code, de06b6c9 = a46b8287 minus the C3 tree)
+  T-D-allpairs@W1 vs win3 D-L5@W1                        10.7379 ->   10.5537  ratio 0.9828    -1.72 %  (-0.1842 ms)  bars 5.57 / 2.57 / 1.08  n/n/Y
+  T-D-tree@W1 vs win3 D-L5@W1                            10.7379 ->    9.0262  ratio 0.8406   -15.94 %  (-1.7117 ms)  bars 4.36 / 2.43 / 0.88  Y/Y/Y
+  T-D-allpairs@W8 vs win3 D-L5@W8                         5.3474 ->    5.4905  ratio 1.0268    +2.68 %  (+0.1431 ms)  bars 15.20 / 5.49 / 3.00  n/n/n
+  T-D-tree@W8 vs win3 D-L5@W8                             5.3474 ->    3.6987  ratio 0.6917   -30.83 %  (-1.6487 ms)  bars 13.60 / 3.76 / 2.63  Y/Y/Y
+
+== against Jolt v5.6.0 (window 3 cells; boyko / Jolt)
+  T-D-tree@W1 / JOLT56-T@W1                               9.8282 ->    9.0262  ratio 0.9184    -8.16 %  (-0.8020 ms)  bars 37.76 / 6.89 / 7.04  n/Y/Y
+  T-D-allpairs@W1 / JOLT56-T@W1                           9.8282 ->   10.5537  ratio 1.0738    +7.38 %  (+0.7255 ms)  bars 37.92 / 6.95 / 7.07  n/Y/Y
+  T-D-tree@W8 / JOLT56-T@W8                               2.5693 ->    3.6987  ratio 1.4396   +43.96 %  (+1.1295 ms)  bars 48.73 / 6.37 / 9.56  n/Y/Y
+  T-D-allpairs@W8 / JOLT56-T@W8                           2.5693 ->    5.4905  ratio 2.1370  +113.70 %  (+2.9213 ms)  bars 49.20 / 7.53 / 9.67  Y/Y/Y
+  T-A-tree@W1 / JOLT56-T@W1                               9.8282 ->   17.8887  ratio 1.8201   +82.01 %  (+8.0606 ms)  bars 37.73 / 6.69 / 7.03  Y/Y/Y
+  T-A-tree@W2 / JOLT56-T@W2                               5.7705 ->   10.5878  ratio 1.8348   +83.48 %  (+4.8173 ms)  bars 5.24 / 2.31 / 1.00  Y/Y/Y
+  T-A-tree@W4 / JOLT56-T@W4                               3.5814 ->    6.8738  ratio 1.9193   +91.93 %  (+3.2924 ms)  bars 11.06 / 5.46 / 2.21  Y/Y/Y
+  T-A-tree@W8 / JOLT56-T@W8                               2.5693 ->    5.0234  ratio 1.9552   +95.52 %  (+2.4542 ms)  bars 48.64 / 6.26 / 9.54  Y/Y/Y
+  T-A-tree@W16 / JOLT56-T@W16                             2.3885 ->    4.9258  ratio 2.0623  +106.23 %  (+2.5373 ms)  bars 16.29 / 7.07 / 3.21  Y/Y/Y
+
+== scaling
+  T-A-tree T(1)/T(W): W2 1.690, W4 2.602, W8 3.561, W16 3.632 ; T(8)/T(16) = 1.020
+  T-A-tree W16 vs W8                                      5.0234 ->    4.9258  ratio 0.9806    -1.94 %  (-0.0976 ms)  bars 12.74 / 2.09 / 2.38  n/n/n
+  T-A-allpairs T(1)/T(W): W2 1.595, W4 2.294, W8 2.947, W16 3.017 ; T(8)/T(16) = 1.024
+  T-A-allpairs W16 vs W8                                  6.6421 ->    6.4863  ratio 0.9765    -2.35 %  (-0.1558 ms)  bars 6.54 / 3.10 / 1.26  n/n/Y
+  T-D-tree T(1)/T(8) = 2.440
+  T-D-allpairs T(1)/T(8) = 1.922
+  R-tree T(1)/T(8) = 2.318
+  R-allpairs T(1)/T(8) = 2.031
+  JOLT56-T T(1)/T(8) = 3.825
+
+== armed rows: per-process median over steps [100,500) of each span, then the cell median over K (ms)
+  T-A-tree-armed@W1: armed=[True] structure {'span_n_sets': [(1, 1, 1, 1)], 'queried_plus_members': [1241], 'queried': [1240, 1241], 'members': [0, 1], 'rebuilds_total': [1], 'bp_pairs_final': [9559], 'sigma_max_ms': 0.721426, 'canary_ns': [None]}
+     phys_bp_verify           median[100,500): 0.0078 [0.0075-0.0082] (range 8.30%, SE 1.41%)   mean[0,500): 0.0083 [0.0081-0.0086]   values 0.0075, 0.0077, 0.0078, 0.0079, 0.0079, 0.0082
+     phys_bp_build            median[100,500): 0.0267 [0.0255-0.0273] (range 6.96%, SE 1.25%)   mean[0,500): 0.0264 [0.0259-0.0279]   values 0.0255, 0.0262, 0.0266, 0.0268, 0.0270, 0.0273
+     phys_bp_query            median[100,500): 0.4140 [0.4135-0.4175] (range 0.97%, SE 0.20%)   mean[0,500): 0.4527 [0.4493-0.4587]   values 0.4135, 0.4135, 0.4139, 0.4141, 0.4157, 0.4175
+     phys_bp_assemble         median[100,500): 0.0264 [0.0254-0.0268] (range 5.16%, SE 0.96%)   mean[0,500): 0.0281 [0.0274-0.0284]   values 0.0254, 0.0263, 0.0263, 0.0264, 0.0268, 0.0268
+     sigma                    median[100,500): 0.4756 [0.4727-0.4795] (range 1.41%, SE 0.28%)   mean[0,500): 0.5162 [0.5119-0.5219]   values 0.4727, 0.4734, 0.4755, 0.4756, 0.4781, 0.4795
+     sys_physics_broadphase   median[100,500): 0.4762 [0.4734-0.4801] (range 1.40%, SE 0.28%)   mean[0,500): 0.5167 [0.5124-0.5223]   values 0.4734, 0.4738, 0.4762, 0.4762, 0.4788, 0.4801
+     sys_select_broadphase    median[100,500): 0.0001 [0.0001-0.0001] (range 27.27%, SE 6.18%)   mean[0,500): 0.0001 [0.0001-0.0002]   values 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001
+  T-A-tree-armed@W8: armed=[True] structure {'span_n_sets': [(1, 1, 1, 1)], 'queried_plus_members': [1241], 'queried': [1240, 1241], 'members': [0, 1], 'rebuilds_total': [1], 'bp_pairs_final': [9559], 'sigma_max_ms': 0.739032, 'canary_ns': [None]}
+     phys_bp_verify           median[100,500): 0.0066 [0.0065-0.0067] (range 3.43%, SE 0.68%)   mean[0,500): 0.0063 [0.0063-0.0066]   values 0.0065, 0.0066, 0.0066, 0.0066, 0.0067, 0.0067
+     phys_bp_build            median[100,500): 0.0228 [0.0217-0.0229] (range 5.33%, SE 1.20%)   mean[0,500): 0.0230 [0.0219-0.0233]   values 0.0217, 0.0219, 0.0227, 0.0228, 0.0229, 0.0229
+     phys_bp_query            median[100,500): 0.4110 [0.4099-0.4127] (range 0.68%, SE 0.14%)   mean[0,500): 0.4134 [0.4124-0.4163]   values 0.4099, 0.4099, 0.4108, 0.4113, 0.4120, 0.4127
+     phys_bp_assemble         median[100,500): 0.0261 [0.0259-0.0266] (range 2.74%, SE 0.50%)   mean[0,500): 0.0268 [0.0267-0.0275]   values 0.0259, 0.0259, 0.0261, 0.0261, 0.0261, 0.0266
+     sigma                    median[100,500): 0.4662 [0.4643-0.4687] (range 0.95%, SE 0.16%)   mean[0,500): 0.4697 [0.4672-0.4731]   values 0.4643, 0.4659, 0.4661, 0.4664, 0.4672, 0.4687
+     sys_physics_broadphase   median[100,500): 0.4665 [0.4645-0.4689] (range 0.96%, SE 0.16%)   mean[0,500): 0.4700 [0.4675-0.4733]   values 0.4645, 0.4662, 0.4664, 0.4666, 0.4674, 0.4689
+     sys_select_broadphase    median[100,500): 0.0001 [0.0001-0.0001] (range 20.00%, SE 5.28%)   mean[0,500): 0.0001 [0.0001-0.0001]   values 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001
+  T-A-allpairs-armed@W1: armed=[True] structure {'span_n_sets': [(0, 0, 0, 0)], 'queried_plus_members': [0], 'queried': [0], 'members': [0], 'rebuilds_total': [0], 'bp_pairs_final': [9559], 'sigma_max_ms': 0.0, 'canary_ns': [None]}
+     phys_bp_verify           median[100,500): 0.0000 [0.0000-0.0000] (range nan%, SE nan%)   mean[0,500): 0.0000 [0.0000-0.0000]   values 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000
+     phys_bp_build            median[100,500): 0.0000 [0.0000-0.0000] (range nan%, SE nan%)   mean[0,500): 0.0000 [0.0000-0.0000]   values 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000
+     phys_bp_query            median[100,500): 0.0000 [0.0000-0.0000] (range nan%, SE nan%)   mean[0,500): 0.0000 [0.0000-0.0000]   values 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000
+     phys_bp_assemble         median[100,500): 0.0000 [0.0000-0.0000] (range nan%, SE nan%)   mean[0,500): 0.0000 [0.0000-0.0000]   values 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000
+     sigma                    median[100,500): 0.0000 [0.0000-0.0000] (range nan%, SE nan%)   mean[0,500): 0.0000 [0.0000-0.0000]   values 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000
+     sys_physics_broadphase   median[100,500): 2.0291 [1.9550-2.0659] (range 5.46%, SE 1.08%)   mean[0,500): 2.0341 [2.0063-2.0511]   values 1.9550, 1.9831, 2.0137, 2.0446, 2.0493, 2.0659
+     sys_select_broadphase    median[100,500): 0.0001 [0.0001-0.0001] (range 54.55%, SE 9.49%)   mean[0,500): 0.0001 [0.0001-0.0002]   values 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001
+  T-A-allpairs-armed@W8: armed=[True] structure {'span_n_sets': [(0, 0, 0, 0)], 'queried_plus_members': [0], 'queried': [0], 'members': [0], 'rebuilds_total': [0], 'bp_pairs_final': [9559], 'sigma_max_ms': 0.0, 'canary_ns': [None]}
+     phys_bp_verify           median[100,500): 0.0000 [0.0000-0.0000] (range nan%, SE nan%)   mean[0,500): 0.0000 [0.0000-0.0000]   values 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000
+     phys_bp_build            median[100,500): 0.0000 [0.0000-0.0000] (range nan%, SE nan%)   mean[0,500): 0.0000 [0.0000-0.0000]   values 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000
+     phys_bp_query            median[100,500): 0.0000 [0.0000-0.0000] (range nan%, SE nan%)   mean[0,500): 0.0000 [0.0000-0.0000]   values 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000
+     phys_bp_assemble         median[100,500): 0.0000 [0.0000-0.0000] (range nan%, SE nan%)   mean[0,500): 0.0000 [0.0000-0.0000]   values 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000
+     sigma                    median[100,500): 0.0000 [0.0000-0.0000] (range nan%, SE nan%)   mean[0,500): 0.0000 [0.0000-0.0000]   values 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000
+     sys_physics_broadphase   median[100,500): 1.9543 [1.9475-1.9588] (range 0.58%, SE 0.10%)   mean[0,500): 1.9541 [1.9478-1.9649]   values 1.9475, 1.9533, 1.9541, 1.9544, 1.9548, 1.9588
+     sys_select_broadphase    median[100,500): 0.0001 [0.0001-0.0001] (range 0.00%, SE 0.00%)   mean[0,500): 0.0001 [0.0001-0.0001]   values 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001
+  T-C-tree@W1: armed=[True] structure {'span_n_sets': [(1, 1, 1, 1)], 'queried_plus_members': [1241], 'queried': [1240, 1241], 'members': [0, 1], 'rebuilds_total': [1], 'bp_pairs_final': [9559], 'sigma_max_ms': 0.748276, 'canary_ns': [889545, 891253, 893153, 895721, 905374]}
+     phys_bp_verify           median[100,500): 0.0074 [0.0069-0.0081] (range 17.26%, SE 3.01%)   mean[0,500): 0.0081 [0.0069-0.0085]   values 0.0069, 0.0073, 0.0074, 0.0074, 0.0078, 0.0081
+     phys_bp_build            median[100,500): 0.0259 [0.0243-0.0267] (range 9.28%, SE 1.70%)   mean[0,500): 0.0262 [0.0254-0.0268]   values 0.0243, 0.0258, 0.0259, 0.0260, 0.0266, 0.0267
+     phys_bp_query            median[100,500): 0.4141 [0.4113-0.4169] (range 1.34%, SE 0.25%)   mean[0,500): 0.4537 [0.4407-0.4570]   values 0.4113, 0.4124, 0.4135, 0.4148, 0.4149, 0.4169
+     phys_bp_assemble         median[100,500): 0.0260 [0.0250-0.0266] (range 5.95%, SE 1.16%)   mean[0,500): 0.0278 [0.0269-0.0282]   values 0.0250, 0.0257, 0.0258, 0.0262, 0.0266, 0.0266
+     sigma                    median[100,500): 0.4735 [0.4661-0.4776] (range 2.43%, SE 0.47%)   mean[0,500): 0.5162 [0.4999-0.5203]   values 0.4661, 0.4708, 0.4713, 0.4756, 0.4762, 0.4776
+     sys_physics_broadphase   median[100,500): 0.4741 [0.4665-0.4780] (range 2.43%, SE 0.47%)   mean[0,500): 0.5167 [0.5004-0.5208]   values 0.4665, 0.4714, 0.4720, 0.4761, 0.4768, 0.4780
+     sys_select_broadphase    median[100,500): 0.0001 [0.0001-0.0001] (range 43.48%, SE 10.15%)   mean[0,500): 0.0001 [0.0001-0.0002]   values 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001
+     sys_parity_canary        median[100,500): 0.8925 [0.8898-0.9057] (range 1.78%, SE 0.34%)   mean[0,500): 0.8926 [0.8899-0.9057]   values 0.8898, 0.8899, 0.8916, 0.8935, 0.8961, 0.9057
+  T-C-tree@W8: armed=[True] structure {'span_n_sets': [(1, 1, 1, 1)], 'queried_plus_members': [1241], 'queried': [1240, 1241], 'members': [0, 1], 'rebuilds_total': [1], 'bp_pairs_final': [9559], 'sigma_max_ms': 0.713057, 'canary_ns': [250030, 250537, 250707, 251948, 254059]}
+     phys_bp_verify           median[100,500): 0.0066 [0.0065-0.0066] (range 2.05%, SE 0.38%)   mean[0,500): 0.0063 [0.0062-0.0065]   values 0.0065, 0.0066, 0.0066, 0.0066, 0.0066, 0.0066
+     phys_bp_build            median[100,500): 0.0223 [0.0218-0.0239] (range 9.08%, SE 1.63%)   mean[0,500): 0.0225 [0.0220-0.0241]   values 0.0218, 0.0221, 0.0222, 0.0224, 0.0225, 0.0239
+     phys_bp_query            median[100,500): 0.4097 [0.4084-0.4144] (range 1.46%, SE 0.26%)   mean[0,500): 0.4124 [0.4106-0.4175]   values 0.4084, 0.4095, 0.4096, 0.4098, 0.4098, 0.4144
+     phys_bp_assemble         median[100,500): 0.0259 [0.0257-0.0262] (range 2.10%, SE 0.42%)   mean[0,500): 0.0268 [0.0267-0.0272]   values 0.0257, 0.0257, 0.0258, 0.0259, 0.0260, 0.0262
+     sigma                    median[100,500): 0.4646 [0.4629-0.4696] (range 1.43%, SE 0.26%)   mean[0,500): 0.4686 [0.4660-0.4744]   values 0.4629, 0.4637, 0.4644, 0.4647, 0.4664, 0.4696
+     sys_physics_broadphase   median[100,500): 0.4648 [0.4631-0.4698] (range 1.44%, SE 0.27%)   mean[0,500): 0.4688 [0.4662-0.4747]   values 0.4631, 0.4639, 0.4646, 0.4649, 0.4667, 0.4698
+     sys_select_broadphase    median[100,500): 0.0001 [0.0001-0.0001] (range 18.18%, SE 5.10%)   mean[0,500): 0.0001 [0.0001-0.0001]   values 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001
+     sys_parity_canary        median[100,500): 0.2516 [0.2503-0.2543] (range 1.59%, SE 0.36%)   mean[0,500): 0.2516 [0.2503-0.2543]   values 0.2503, 0.2507, 0.2510, 0.2522, 0.2543, 0.2543
+
+== the tree span (gate 2.3): sigma of the four phys_bp spans, median over [100,500) then over K; limit 0.36 (W1) / 0.35 (W8) ms
+  W1: sigma 0.4756 ms vs 0.36 -> FAIL (verify 0.0078 build 0.0267 query 0.4140 assemble 0.0264)
+  W8: sigma 0.4662 ms vs 0.35 -> FAIL (verify 0.0066 build 0.0228 query 0.4110 assemble 0.0261)
+
+== delta-bp (gate 2.3): physics_broadphase system span, allpairs-armed minus tree-armed; bar 1.03 ms at W=8
+  W1 median_100_500 allpairs 2.0291 [1.9550-2.0659] tree 0.4762 [0.4734-0.4801]  delta 1.5529 ms  tree/allpairs 0.2347 (-76.5 %) bars 11.28 / 5.87 / 2.23 Y/Y/Y
+  W1 mean_0_500     allpairs 2.0341 [2.0063-2.0511] tree 0.5167 [0.5124-0.5223]  delta 1.5174 ms  tree/allpairs 0.2540 (-74.6 %) bars 5.86 / 3.07 / 1.16 Y/Y/Y
+     P0b's armed bp (design table): 2.100 ms; tree-armed step vs allpairs-armed step delta 1.6846 ms
+  W8 median_100_500 allpairs 1.9543 [1.9475-1.9588] tree 0.4665 [0.4645-0.4689]  delta 1.4878 ms  tree/allpairs 0.2387 (-76.1 %) bars 2.23 / 0.42 / 0.37 Y/Y/Y
+  W8 mean_0_500     allpairs 1.9541 [1.9478-1.9649] tree 0.4700 [0.4675-0.4733]  delta 1.4841 ms  tree/allpairs 0.2405 (-75.9 %) bars 3.06 / 1.09 / 0.55 Y/Y/Y
+     P0b's armed bp (design table): 1.945 ms; tree-armed step vs allpairs-armed step delta 1.6761 ms
+
+== t_q (1.3): T-A-tree-armed@W1 phys_bp_query_ns, median over [100,500) then over K
+  t_q(J, W1) = 0.4140 ms [0.4135-0.4175]; per row 333.8 ns; at W8 0.4110 ms
+  D6 on T-A-tree: T(8) 5.0234, 5 % = 0.2512 ms; t_q*(1-1/8) at E=1, omega=0: 0.3622 (omega budget 0.1110); at E=0.5: 0.3105 (budget 0.0593); E needed at omega=0: 0.318
+  D6 on T-D-tree: T(8) 3.6987, 5 % = 0.1849 ms; t_q*(1-1/8) at E=1, omega=0: 0.3622 (omega budget 0.1773); at E=0.5: 0.3105 (budget 0.1255); E needed at omega=0: 0.226
+  design D6 arithmetic: saving 0.095-0.145 ms = 1.0-1.6 %% of T(8)=9.162 (deferred); design c_q 100-150 ns/row => t_q 0.124-0.186 ms
+
+== canary (gate 2.3): T-C-tree; the canary's own system span vs canary_ns; the step rise vs T-A-tree
+  W1: canary_ns [889545, 891253, 893153, 895721, 905374] (0.8895 ms); span median[100,500) 0.8925 [0.8898-0.9057] ms (span/canary ['1.0034', '1.0015', '0.9993', '0.9965', '0.9858']); step rise +0.8752 ms (['0.984', '0.982', '0.980', '0.977', '0.967'] of canary) Y/Y/Y bars 4.37 / 1.31 / 0.79
+  W8: canary_ns [250030, 250537, 250707, 251948, 254059] (0.2500 ms); span median[100,500) 0.2516 [0.2503-0.2543] ms (span/canary ['1.0062', '1.0042', '1.0035', '0.9986', '0.9903']); step rise +0.3163 ms (['1.265', '1.263', '1.262', '1.256', '1.245'] of canary) n/Y/Y bars 28.10 / 3.62 / 5.60
+
+
+== G4 selection: 166 records (156 originals + 10 re-runs); used 156; excluded 0
+   A k2 seq 5 bp_g4_uniform: rerun (original: contaminated before=False after=True)
+   B k1 seq 13 row_identity_churn/burst_migrate/sleeping_on_tree: rerun (original: contaminated before=False after=True)
+   B k1 seq 17 row_identity_churn/first_archetype_spawn/sleeping_on_tree: rerun (original: contaminated before=False after=True)
+   B k1 seq 20 row_identity_churn/archetype_shift/sleeping_on_allpairs: rerun (original: contaminated before=False after=True)
+   B k1 seq 21 row_identity_churn/swap_churn/sleeping_on_tree: rerun (original: contaminated before=False after=True)
+   B k1 seq 23 row_identity_churn/stable/sleeping_on_tree: rerun (original: contaminated before=False after=True)
+   B k1 seq 24 row_identity_churn/stable/sleeping_on_allpairs: rerun (original: contaminated before=False after=True)
+   B k1 seq 29 row_identity_churn/first_archetype_spawn/sleeping_off_tree: rerun (original: contaminated before=False after=True)
+   B k1 seq 30 row_identity_churn/first_archetype_spawn/sleeping_off_allpairs: rerun (original: contaminated before=False after=True)
+   B k6 seq 155 row_identity_churn/burst_migrate/sleeping_on_allpairs: rerun (original: contaminated before=False after=True)
+== G4 exes: [('broadphase-595045019352a67f.exe', 'efb84636b2d5'), ('row_identity_churn-ec1df0bd330016d8.exe', 'd8ba73fc98c3')]
+== G4 build procs during / voided: 0 / 0; exit codes [0]; masks ['0xffff']
+== G4 receipts (all attempts): n=332 median 0.61 p90 1.79 max 9.54; >5%: 10; contaminated attempts 10 (before 0 / after 10); others_busy_pct over used: median 0.22 p95 2.64 max 3.12; waited_s>0: 7
+== G4 timing: first start 2026-09-22T03:48:22.340+03:00, last end 2026-09-22T07:54:31.967+03:00
+== G4 estimates.json files read: 117 cells; missing files: none
+== G4 structural receipts: 78 keys; non-identical across processes: none
+== G4 receipts against the recipe's dry run:
+   bp_g4_scene/1240                                     expected {'rows': 1241, 'pairs': 9570, 'members': 1, 'static_rebuilds': 1} got {'rows': 1241, 'pairs': 9570, 'members': 1, 'static_rebuilds': 1} ok
+   bp_g4_scene/j100                                     expected {'rows': 1241, 'pairs': 9564, 'members': 1, 'static_rebuilds': 1} got {'rows': 1241, 'pairs': 9564, 'members': 1, 'static_rebuilds': 1} ok
+   bp_g4_scene/10000                                    expected {'pairs': 83559, 'members': 1}                got {'pairs': 83559, 'members': 1}           ok
+   bp_g4_scene/100000                                   expected {'pairs': 840494, 'members': 1}               got {'pairs': 840494, 'members': 1}          ok
+   bp_g4_uniform/100000                                 expected {'pairs': 293501, 'members': 0}               got {'pairs': 293501, 'members': 0}          ok
+   bp_g4_disparity/100000                               expected {'pairs': 574763, 'members': 0}               got {'pairs': 574763, 'members': 0}          ok
+   stable/1240 pairs                                    expected 9464                                          got 9464                                     ok
+   high_jumper/1240                                     expected partners 9, translations +1, patches +18, evictions 0, rebuilds 0 got (9, 1, 18, 0, 0)                         ok
+   compaction/1240                                      expected evictions +1, rebuilds +1, members m/2        got (1, 1, 620)                              ok
+   admission_of_64/1240                                 expected rebuilds +1, members m+64                     got (1, 1304)                                ok
+   shift_translation/1240                               expected translations +1, patches 0, evictions 0       got (1, 0, 0)                                ok
+   stable/10000 pairs                                   expected 83149                                         got 83149                                    ok
+   high_jumper/10000                                    expected partners 9, translations +1, patches +18, evictions 0, rebuilds 0 got (9, 1, 18, 0, 0)                         ok
+   compaction/10000                                     expected evictions +1, rebuilds +1, members m/2        got (1, 1, 5000)                             ok
+   admission_of_64/10000                                expected rebuilds +1, members m+64                     got (1, 10064)                               ok
+   shift_translation/10000                              expected translations +1, patches 0, evictions 0       got (1, 0, 0)                                ok
+   stable/100000 pairs                                  expected 867834                                        got 867834                                   ok
+   high_jumper/100000                                   expected partners 9, translations +1, patches +18, evictions 0, rebuilds 0 got (9, 1, 18, 0, 0)                         ok
+   compaction/100000                                    expected evictions +1, rebuilds +1, members m/2        got (1, 1, 50000)                            ok
+   admission_of_64/100000                               expected rebuilds +1, members m+64                     got (1, 100064)                              ok
+   shift_translation/100000                             expected translations +1, patches 0, evictions 0       got (1, 0, 0)                                ok
+   maintenance oracle                                   expected oracle ok                                     got ['oracle ok']                            ok
+   row_identity_churn/stable/sleeping_off_tree/tree     expected translations +0 evictions 0 static_rebuilds 1 members 1 got (0, 0, 1, 1)                             ok
+   row_identity_churn/stable/sleeping_on_tree/tree      expected translations +0 evictions 0 static_rebuilds 1 members 1 got (0, 0, 1, 1)                             ok
+   row_identity_churn/swap_churn/sleeping_off_tree/tree expected translations +4 evictions 0 static_rebuilds 1 members 1 got (4, 0, 1, 1)                             ok
+   row_identity_churn/swap_churn/sleeping_on_tree/tree  expected translations +4 evictions 0 static_rebuilds 1 members 1 got (4, 0, 1, 1)                             ok
+   row_identity_churn/archetype_shift/sleeping_off_tree/tree expected translations +4 evictions 0 static_rebuilds 1 members 1 got (4, 0, 1, 1)                             ok
+   row_identity_churn/archetype_shift/sleeping_on_tree/tree expected translations +4 evictions 0 static_rebuilds 1 members 1 got (4, 0, 1, 1)                             ok
+   row_identity_churn/first_archetype_spawn/sleeping_off_tree/tree expected translations +4 evictions 0 static_rebuilds 1 members 1 got (4, 0, 1, 1)                             ok
+   row_identity_churn/first_archetype_spawn/sleeping_on_tree/tree expected translations +4 evictions 0 static_rebuilds 1 members 1 got (4, 0, 1, 1)                             ok
+   row_identity_churn/burst_despawn/sleeping_off_tree/tree expected translations +4 evictions 0 static_rebuilds 1 members 1 got (4, 0, 1, 1)                             ok
+   row_identity_churn/burst_despawn/sleeping_on_tree/tree expected translations +4 evictions 0 static_rebuilds 1 members 1 got (4, 0, 1, 1)                             ok
+   row_identity_churn/burst_migrate/sleeping_off_tree/tree expected translations +4 evictions 0 static_rebuilds 1 members 1 got (4, 0, 1, 1)                             ok
+   row_identity_churn/burst_migrate/sleeping_on_tree/tree expected translations +4 evictions 0 static_rebuilds 1 members 1 got (4, 0, 1, 1)                             ok
+
+== G4 pair-finding cells (median over K=3 of criterion median.point_estimate, ms; [min-max]; range % / SE %)
+  bp_g4_uniform
+    n=17      all_pairs 0.00018 [0.00018-0.00018] 0.24/0.09 | grid_w1 0.00310 [0.00310-0.00312] 0.72/0.28 | grid_w8 0.00310 [0.00310-0.00314] 1.30/0.53 | tree 0.00177 [0.00176-0.00181] 2.76/1.06
+    n=64      all_pairs 0.00277 [0.00276-0.00277] 0.35/0.13 | grid_w1 0.04769 [0.04750-0.04775] 0.53/0.20 | grid_w8 0.04756 [0.04750-0.04776] 0.56/0.21 | tree 0.00447 [0.00446-0.00447] 0.32/0.12
+    n=128     all_pairs 0.01174 [0.01172-0.01174] 0.18/0.07 | grid_w1 0.04908 [0.04886-0.04913] 0.55/0.21 | grid_w8 0.04896 [0.04889-0.04899] 0.19/0.07 | tree 0.01032 [0.01030-0.01034] 0.39/0.14
+    n=256     all_pairs 0.04393 [0.04390-0.04398] 0.17/0.06 | grid_w1 0.11781 [0.11770-0.11820] 0.43/0.16 | grid_w8 0.11770 [0.11746-0.11828] 0.69/0.26 | tree 0.02200 [0.02187-0.02206] 0.85/0.32
+    n=1000    all_pairs 0.63429 [0.63078-0.63487] 0.64/0.25 | grid_w1 0.66505 [0.66495-0.66671] 0.26/0.11 | grid_w8 0.66610 [0.66419-0.67033] 0.92/0.34 | tree 0.15310 [0.15104-0.15565] 3.01/1.09
+    n=10000   all_pairs 75.66812 [74.84449-76.75705] 2.53/0.92 | grid_w1 8.06945 [8.04974-8.10132] 0.64/0.23 | grid_w8 3.44025 [3.43650-3.47347] 1.07/0.43 | tree 3.02200 [3.01993-3.02776] 0.26/0.10
+    n=100000  all_pairs 12017.64780 [11754.44905-16879.43365] 42.65/17.38 | grid_w1 89.69384 [89.48690-90.39072] 1.01/0.38 | grid_w8 36.41353 [36.07763-36.50088] 1.16/0.44 | tree 39.84834 [39.72211-40.06275] 0.85/0.31
+  bp_g4_disparity
+    n=17      all_pairs 0.00029 [0.00029-0.00029] 0.40/0.15 | grid_w1 0.00729 [0.00728-0.00731] 0.37/0.14 | grid_w8 0.00731 [0.00730-0.00731] 0.21/0.09 | tree 0.00232 [0.00232-0.00233] 0.47/0.17
+    n=64      all_pairs 0.00350 [0.00346-0.00350] 1.17/0.47 | grid_w1 0.05260 [0.05224-0.05272] 0.91/0.34 | grid_w8 0.05255 [0.05218-0.05265] 0.90/0.34 | tree 0.00700 [0.00699-0.00702] 0.31/0.13
+    n=128     all_pairs 0.01389 [0.01376-0.01392] 1.16/0.45 | grid_w1 0.17564 [0.17540-0.17598] 0.33/0.12 | grid_w8 0.17615 [0.17540-0.17757] 1.23/0.45 | tree 0.01468 [0.01461-0.01479] 1.18/0.43
+    n=256     all_pairs 0.04844 [0.04814-0.04853] 0.81/0.31 | grid_w1 0.35130 [0.35084-0.35260] 0.50/0.19 | grid_w8 0.35175 [0.35061-0.35208] 0.42/0.16 | tree 0.03140 [0.03127-0.03156] 0.93/0.34
+    n=1000    all_pairs 0.65472 [0.64695-0.65477] 1.19/0.50 | grid_w1 2.43928 [2.43811-2.44340] 0.22/0.08 | grid_w8 2.44539 [2.44096-2.45644] 0.63/0.24 | tree 0.23064 [0.22927-0.23076] 0.65/0.26
+    n=10000   all_pairs 75.94469 [74.80162-76.21450] 1.86/0.71 | grid_w1 15.92952 [15.91466-15.95114] 0.23/0.08 | grid_w8 8.64941 [8.61841-8.92604] 3.56/1.42 | tree 3.55746 [3.55249-3.58118] 0.81/0.31
+    n=100000  all_pairs 14852.64365 [12240.05505-15282.40290] 20.48/8.02 | grid_w1 139.34011 [139.24902-140.27549] 0.74/0.30 | grid_w8 83.60690 [83.20283-84.35518] 1.38/0.51 | tree 45.73375 [45.58234-46.80887] 2.68/1.06
+  bp_g4_scene
+    n=1240    all_pairs 1.84852 [1.84803-1.85309] 0.27/0.11 | grid_w1 5.41130 [5.40963-5.42734] 0.33/0.13 | grid_w8 5.41053 [5.41007-5.42242] 0.23/0.09 | tree 0.44153 [0.44138-0.44185] 0.11/0.04
+    n=10000   all_pairs 123.39383 [123.19166-123.42262] 0.19/0.07 | grid_w1 36.79069 [36.74513-36.85051] 0.29/0.10 | grid_w8 14.52169 [14.49858-14.54524] 0.32/0.12 | tree 4.80724 [4.80253-4.81357] 0.23/0.08
+    n=100000  all_pairs 17633.16685 [17550.45925-22192.43665] 26.33/10.90 | grid_w1 336.32155 [336.24015-336.59535] 0.11/0.04 | grid_w8 128.10569 [124.48891-130.11290] 4.39/1.61 | tree 59.33755 [59.18441-59.61129] 0.72/0.26
+    n=j100    all_pairs 1.85381 [1.85230-1.85782] 0.30/0.11 | grid_w1 4.98092 [4.97884-4.98118] 0.05/0.02 | grid_w8 4.98228 [4.97074-4.99090] 0.40/0.15 | tree 0.44295 [0.44236-0.44397] 0.36/0.13
+
+== G4 maintenance cells (ms)
+    m=1240   stable                 0.032693 [0.032326-0.033449] range 3.44% SE 1.27%  values 0.032326, 0.032693, 0.033449
+    m=1240   admission_from_empty   0.472896 [0.467450-0.483151] range 3.32% SE 1.22%  values 0.467450, 0.472896, 0.483151
+    m=1240   admission_of_64        0.069173 [0.069031-0.070990] range 2.83% SE 1.14%  values 0.069031, 0.069173, 0.070990
+    m=1240   eviction_filter        0.046175 [0.046096-0.046492] range 0.86% SE 0.33%  values 0.046096, 0.046175, 0.046492
+    m=1240   shift_translation      0.055419 [0.055127-0.056434] range 2.36% SE 0.90%  values 0.055127, 0.055419, 0.056434
+    m=1240   compaction             0.206916 [0.206054-0.206989] range 0.45% SE 0.18%  values 0.206054, 0.206916, 0.206989
+    m=1240   high_jumper            0.059913 [0.059605-0.060009] range 0.67% SE 0.25%  values 0.059605, 0.059913, 0.060009
+    m=10000  stable                 0.278409 [0.274112-0.280405] range 2.26% SE 0.84%  values 0.274112, 0.278409, 0.280405
+    m=10000  admission_from_empty   4.838439 [4.825813-4.967834] range 2.94% SE 1.18%  values 4.825813, 4.838439, 4.967834
+    m=10000  admission_of_64        0.530212 [0.529135-0.532959] range 0.72% SE 0.27%  values 0.529135, 0.530212, 0.532959
+    m=10000  eviction_filter        0.389254 [0.388508-0.389914] range 0.36% SE 0.13%  values 0.388508, 0.389254, 0.389914
+    m=10000  shift_translation      0.468092 [0.467820-0.470448] range 0.56% SE 0.22%  values 0.467820, 0.468092, 0.470448
+    m=10000  compaction             2.355094 [2.354260-2.355503] range 0.05% SE 0.02%  values 2.354260, 2.355094, 2.355503
+    m=10000  high_jumper            0.505309 [0.505280-0.506923] range 0.33% SE 0.13%  values 0.505280, 0.505309, 0.506923
+    m=100000 stable                 4.367788 [4.279070-4.456983] range 4.07% SE 1.47%  values 4.279070, 4.367788, 4.456983
+    m=100000 admission_from_empty   62.537267 [61.432883-63.311900] range 3.00% SE 1.09%  values 61.432883, 62.537267, 63.311900
+    m=100000 admission_of_64        9.724500 [9.417800-9.800800] range 3.94% SE 1.51%  values 9.417800, 9.724500, 9.800800
+    m=100000 eviction_filter        6.079693 [5.977096-6.119618] range 2.34% SE 0.88%  values 5.977096, 6.079693, 6.119618
+    m=100000 shift_translation      9.195693 [9.156539-9.856362] range 7.61% SE 3.09%  values 9.156539, 9.195693, 9.856362
+    m=100000 compaction             30.349800 [30.252887-30.415937] range 0.54% SE 0.20%  values 30.252887, 30.349800, 30.415937
+    m=100000 high_jumper            9.607018 [9.549261-9.619728] range 0.73% SE 0.28%  values 9.549261, 9.607018, 9.619728
+
+== G4 churn cells (K=6, ms per churn step)
+    stable                 sleeping_off allpairs 11.58952 [11.50577-11.68230] range 1.52% IQR 0.55% SE 0.27%  values 11.50577, 11.54958, 11.56356, 11.61548, 11.61679, 11.68230
+    stable                 sleeping_off tree     9.60593 [9.55322-9.73900] range 1.93% IQR 0.42% SE 0.36%  values 9.55322, 9.56135, 9.60374, 9.60811, 9.61416, 9.73900
+    stable                 sleeping_on  allpairs 5.73946 [5.72372-5.79137] range 1.18% IQR 0.30% SE 0.21%  values 5.72372, 5.73362, 5.73660, 5.74233, 5.75431, 5.79137
+    stable                 sleeping_on  tree     4.04306 [4.03966-4.05818] range 0.46% IQR 0.19% SE 0.09%  values 4.03966, 4.04080, 4.04259, 4.04352, 4.05090, 4.05818
+    swap_churn             sleeping_off allpairs 11.88338 [11.83069-11.98493] range 1.30% IQR 0.45% SE 0.23%  values 11.83069, 11.86031, 11.86927, 11.89749, 11.92273, 11.98493
+    swap_churn             sleeping_off tree     9.76933 [9.73301-9.93976] range 2.12% IQR 1.02% SE 0.43%  values 9.73301, 9.73881, 9.76584, 9.77282, 9.86991, 9.93976
+    swap_churn             sleeping_on  allpairs 5.80264 [5.78202-6.27024] range 8.41% IQR 0.65% SE 1.70%  values 5.78202, 5.78327, 5.79332, 5.81195, 5.82713, 6.27024
+    swap_churn             sleeping_on  tree     4.11980 [4.10378-4.16716] range 1.54% IQR 0.54% SE 0.29%  values 4.10378, 4.10865, 4.10946, 4.13014, 4.13157, 4.16716
+    archetype_shift        sleeping_off allpairs 11.58194 [11.55359-11.73455] range 1.56% IQR 0.99% SE 0.35%  values 11.55359, 11.56182, 11.57681, 11.58706, 11.71079, 11.73455
+    archetype_shift        sleeping_off tree     9.69411 [9.65592-9.95105] range 3.04% IQR 1.66% SE 0.67%  values 9.65592, 9.67711, 9.69045, 9.69777, 9.88894, 9.95105
+    archetype_shift        sleeping_on  allpairs 5.99436 [5.87299-6.09217] range 3.66% IQR 1.33% SE 0.66%  values 5.87299, 5.95906, 5.95921, 6.02951, 6.04164, 6.09217
+    archetype_shift        sleeping_on  tree     4.18300 [4.14054-4.58911] range 10.72% IQR 1.30% SE 2.10%  values 4.14054, 4.15177, 4.16089, 4.20510, 4.20980, 4.58911
+    first_archetype_spawn  sleeping_off allpairs 11.85931 [11.70709-11.91378] range 1.74% IQR 1.17% SE 0.38%  values 11.70709, 11.74070, 11.82852, 11.89010, 11.90589, 11.91378
+    first_archetype_spawn  sleeping_off tree     9.87358 [9.75364-9.98728] range 2.37% IQR 0.87% SE 0.43%  values 9.75364, 9.81502, 9.87276, 9.87439, 9.92936, 9.98728
+    first_archetype_spawn  sleeping_on  allpairs 5.82964 [5.81160-6.34805] range 9.20% IQR 0.89% SE 1.86%  values 5.81160, 5.81616, 5.81737, 5.84191, 5.87696, 6.34805
+    first_archetype_spawn  sleeping_on  tree     4.15039 [4.11357-4.17618] range 1.51% IQR 0.71% SE 0.29%  values 4.11357, 4.12582, 4.14727, 4.15350, 4.16294, 4.17618
+    burst_despawn          sleeping_off allpairs 12.00124 [11.75803-12.39575] range 5.31% IQR 0.76% SE 0.89%  values 11.75803, 11.98078, 12.00056, 12.00192, 12.10181, 12.39575
+    burst_despawn          sleeping_off tree     9.65288 [9.61188-10.21633] range 6.26% IQR 1.34% SE 1.23%  values 9.61188, 9.63446, 9.63787, 9.66789, 9.79702, 10.21633
+    burst_despawn          sleeping_on  allpairs 5.81377 [5.79121-6.32982] range 9.26% IQR 0.81% SE 1.86%  values 5.79121, 5.79962, 5.80177, 5.82577, 5.85413, 6.32982
+    burst_despawn          sleeping_on  tree     4.12955 [4.11259-4.45204] range 8.22% IQR 0.31% SE 1.66%  values 4.11259, 4.11982, 4.12636, 4.13275, 4.13491, 4.45204
+    burst_migrate          sleeping_off allpairs 11.94545 [11.83285-12.64495] range 6.80% IQR 1.36% SE 1.30%  values 11.83285, 11.85909, 11.93650, 11.95440, 12.06979, 12.64495
+    burst_migrate          sleeping_off tree     9.75512 [9.71428-10.54782] range 8.54% IQR 1.34% SE 1.69%  values 9.71428, 9.74606, 9.75356, 9.75669, 9.91968, 10.54782
+    burst_migrate          sleeping_on  allpairs 5.83170 [5.81953-6.46418] range 11.05% IQR 0.28% SE 2.27%  values 5.81953, 5.82385, 5.82717, 5.83624, 5.84259, 6.46418
+    burst_migrate          sleeping_on  tree     4.18975 [4.16399-4.20299] range 0.93% IQR 0.15% SE 0.16%  values 4.16399, 4.18387, 4.18949, 4.19002, 4.19217, 4.20299
+
+== G4 tree against all_pairs and grid_w1 per n (B against A; claimed under range / SE)
+  bp_g4_uniform      n=17      tree/all_pairs 9.7286 ( +872.9 %) bars  5.55/ 2.14 Y/Y   all_pairs/tree 0.1028 (  -89.7 %) Y/Y   tree/grid_w1 0.5703 (  -43.0 %) bars  5.71/ 2.20 Y/Y   tree/grid_w8 0.5706
+  bp_g4_uniform      n=64      tree/all_pairs 1.6157 (  +61.6 %) bars  0.95/ 0.36 Y/Y   all_pairs/tree 0.6189 (  -38.1 %) Y/Y   tree/grid_w1 0.0937 (  -90.6 %) bars  1.24/ 0.47 Y/Y   tree/grid_w8 0.0940
+  bp_g4_uniform      n=128     tree/all_pairs 0.8791 (  -12.1 %) bars  0.86/ 0.32 Y/Y   all_pairs/tree 1.1375 (  +13.7 %) Y/Y   tree/grid_w1 0.2102 (  -79.0 %) bars  1.36/ 0.51 Y/Y   tree/grid_w8 0.2107
+  bp_g4_uniform      n=256     tree/all_pairs 0.5008 (  -49.9 %) bars  1.73/ 0.64 Y/Y   all_pairs/tree 1.9967 (  +99.7 %) Y/Y   tree/grid_w1 0.1868 (  -81.3 %) bars  1.90/ 0.71 Y/Y   tree/grid_w8 0.1869
+  bp_g4_uniform      n=1000    tree/all_pairs 0.2414 (  -75.9 %) bars  6.15/ 2.24 Y/Y   all_pairs/tree 4.1429 ( +314.3 %) Y/Y   tree/grid_w1 0.2302 (  -77.0 %) bars  6.04/ 2.19 Y/Y   tree/grid_w8 0.2298
+  bp_g4_uniform      n=10000   tree/all_pairs 0.0399 (  -96.0 %) bars  5.08/ 1.85 Y/Y   all_pairs/tree 25.0391 (+2403.9 %) Y/Y   tree/grid_w1 0.3745 (  -62.6 %) bars  1.38/ 0.51 Y/Y   tree/grid_w8 0.8784
+  bp_g4_uniform      n=100000  tree/all_pairs 0.0033 (  -99.7 %) bars 85.31/34.76 Y/Y   all_pairs/tree 301.5847 (+30058.5 %) Y/Y   tree/grid_w1 0.4443 (  -55.6 %) bars  2.64/ 0.99 Y/Y   tree/grid_w8 1.0943
+  bp_g4_disparity    n=17      tree/all_pairs 8.0108 ( +701.1 %) bars  1.24/ 0.45 Y/Y   all_pairs/tree 0.1248 (  -87.5 %) Y/Y   tree/grid_w1 0.3187 (  -68.1 %) bars  1.20/ 0.44 Y/Y   tree/grid_w8 0.3177
+  bp_g4_disparity    n=64      tree/all_pairs 1.9993 (  +99.9 %) bars  2.42/ 0.97 Y/Y   all_pairs/tree 0.5002 (  -50.0 %) Y/Y   tree/grid_w1 0.1330 (  -86.7 %) bars  1.93/ 0.73 Y/Y   tree/grid_w8 0.1331
+  bp_g4_disparity    n=128     tree/all_pairs 1.0568 (   +5.7 %) bars  3.32/ 1.25 Y/Y   all_pairs/tree 0.9463 (   -5.4 %) Y/Y   tree/grid_w1 0.0836 (  -91.6 %) bars  2.46/ 0.90 Y/Y   tree/grid_w8 0.0833
+  bp_g4_disparity    n=256     tree/all_pairs 0.6481 (  -35.2 %) bars  2.47/ 0.91 Y/Y   all_pairs/tree 1.5429 (  +54.3 %) Y/Y   tree/grid_w1 0.0894 (  -91.1 %) bars  2.11/ 0.77 Y/Y   tree/grid_w8 0.0893
+  bp_g4_disparity    n=1000    tree/all_pairs 0.3523 (  -64.8 %) bars  2.71/ 1.12 Y/Y   all_pairs/tree 2.8387 ( +183.9 %) Y/Y   tree/grid_w1 0.0946 (  -90.5 %) bars  1.36/ 0.54 Y/Y   tree/grid_w8 0.0943
+  bp_g4_disparity    n=10000   tree/all_pairs 0.0468 (  -95.3 %) bars  4.06/ 1.56 Y/Y   all_pairs/tree 21.3480 (+2034.8 %) Y/Y   tree/grid_w1 0.2233 (  -77.7 %) bars  1.68/ 0.65 Y/Y   tree/grid_w8 0.4113
+  bp_g4_disparity    n=100000  tree/all_pairs 0.0031 (  -99.7 %) bars 41.32/16.18 Y/Y   all_pairs/tree 324.7633 (+32376.3 %) Y/Y   tree/grid_w1 0.3282 (  -67.2 %) bars  5.56/ 2.20 Y/Y   tree/grid_w8 0.5470
+  bp_g4_scene        n=1240    tree/all_pairs 0.2389 (  -76.1 %) bars  0.59/ 0.23 Y/Y   all_pairs/tree 4.1866 ( +318.7 %) Y/Y   tree/grid_w1 0.0816 (  -91.8 %) bars  0.69/ 0.27 Y/Y   tree/grid_w8 0.0816
+  bp_g4_scene        n=10000   tree/all_pairs 0.0390 (  -96.1 %) bars  0.59/ 0.22 Y/Y   all_pairs/tree 25.6684 (+2466.8 %) Y/Y   tree/grid_w1 0.1307 (  -86.9 %) bars  0.73/ 0.27 Y/Y   tree/grid_w8 0.3310
+  bp_g4_scene        n=100000  tree/all_pairs 0.0034 (  -99.7 %) bars 52.67/21.81 Y/Y   all_pairs/tree 297.1671 (+29616.7 %) Y/Y   tree/grid_w1 0.1764 (  -82.4 %) bars  1.45/ 0.53 Y/Y   tree/grid_w8 0.4632
+  bp_g4_scene        n=j100    tree/all_pairs 0.2389 (  -76.1 %) bars  0.94/ 0.35 Y/Y   all_pairs/tree 4.1852 ( +318.5 %) Y/Y   tree/grid_w1 0.0889 (  -91.1 %) bars  0.74/ 0.27 Y/Y   tree/grid_w8 0.0889
+
+== 1.2 stop rules (medians, ms)
+   J snapshot       bp_g4_scene/tree/j100                  0.442946 vs 0.300000  (1.48x)  FIRED 
+   Tree vs Grid     tree/grid_w1 at n > 64 (uniform, disparity, scene): uniform/128 0.210, uniform/256 0.187, uniform/1000 0.230, uniform/10000 0.374, uniform/100000 0.444, disparity/128 0.084, disparity/256 0.089, disparity/1000 0.095, disparity/10000 0.223, disparity/100000 0.328, scene/1240 0.082, scene/10000 0.131, scene/100000 0.176 -> held (tree never slower)
+   stable           stable/1240                            0.032693 vs 0.058000  (0.56x)  held 
+   translation      shift_translation/1240 - stable        0.022725 vs 0.062000  (0.37x)  held 
+   eviction         eviction_filter/1240 - stable          0.013482 vs 0.048000  (0.28x)  held 
+   compaction       compaction/1240 - eviction_filter      0.160741 vs 0.050000  (3.21x)  FIRED (compaction - stable = 0.174222; from_empty - stable = 0.440203)
+   admission of 64  admission_of_64/1240 - stable          0.036480 vs 0.120000  (0.30x)  held 
+   from empty       admission_from_empty/1240 - stable     0.440203 vs 0.460000  (0.96x)  held 
+   high jumper W1   high_jumper/1240 - stable              0.027220 vs 0.062000  (0.44x)  held (high_jumper min-max 0.059605-0.060009, stable 0.032693 [0.032326-0.033449]; min-max of the difference 0.026156..0.027683)
+   stable           stable/10000                           0.278409 vs 0.460000  (0.61x)  held 
+   translation      shift_translation/10000 - stable       0.189683 vs 0.500000  (0.38x)  held 
+   eviction         eviction_filter/10000 - stable         0.110845 vs 0.380000  (0.29x)  held 
+   compaction       compaction/10000 - eviction_filter     1.965840 vs 0.400000  (4.91x)  FIRED (compaction - stable = 2.076685; from_empty - stable = 4.560030)
+   admission of 64  admission_of_64/10000 - stable         0.251803 vs 0.800000  (0.31x)  held 
+   from empty       admission_from_empty/10000 - stable    4.560030 vs 4.800000  (0.95x)  held 
+   high jumper W1   high_jumper/10000 - stable             0.226899 vs 0.500000  (0.45x)  held (high_jumper min-max 0.505280-0.506923, stable 0.278409 [0.274112-0.280405]; min-max of the difference 0.224876..0.232811)
+   stable           stable/100000                          4.367788 vs 4.600000  (0.95x)  held 
+   translation      shift_translation/100000 - stable      4.827905 vs 5.000000  (0.97x)  held 
+   eviction         eviction_filter/100000 - stable        1.711905 vs 3.800000  (0.45x)  held 
+   compaction       compaction/100000 - eviction_filter    24.270107 vs 6.000000  (4.05x)  FIRED (compaction - stable = 25.982012; from_empty - stable = 58.169479)
+   admission of 64  admission_of_64/100000 - stable        5.356712 vs 9.800000  (0.55x)  held 
+   from empty       admission_from_empty/100000 - stable   58.169479 vs 60.000000  (0.97x)  held 
+   high jumper W1   high_jumper/100000 - stable            5.239230 vs 5.000000  (1.05x)  FIRED (high_jumper min-max 9.549261-9.619728, stable 4.367788 [4.279070-4.456983]; min-max of the difference 5.092278..5.340658)
+
+== 1.1 churn claim rules (K=6): tree faster than allpairs per arm, claimed (range / IQR / SE); tree(arm) - tree(stable) <= 0.05 ms
+   stable                 sleeping_off allpairs 11.58952 tree 9.60593  tree/allpairs 0.8288 (-17.12 %) bars 4.92 / 1.38 / 0.90 Y/Y/Y | tree-stable +0.00000 ms (<= 0.05; vs stable +0.00 % n/n/n) | allpairs-stable +0.00000 | DiD +0.00000
+   swap_churn             sleeping_off allpairs 11.88338 tree 9.76933  tree/allpairs 0.8221 (-17.79 %) bars 4.97 / 2.24 / 0.99 Y/Y/Y | tree-stable +0.16341 ms (ABOVE 0.05; vs stable +1.70 % n/n/Y) | allpairs-stable +0.29386 | DiD -0.13045
+   archetype_shift        sleeping_off allpairs 11.58194 tree 9.69411  tree/allpairs 0.8370 (-16.30 %) bars 6.84 / 3.86 / 1.51 Y/Y/Y | tree-stable +0.08818 ms (ABOVE 0.05; vs stable +0.92 % n/n/n) | allpairs-stable -0.00759 | DiD +0.09577
+   first_archetype_spawn  sleeping_off allpairs 11.85931 tree 9.87358  tree/allpairs 0.8326 (-16.74 %) bars 5.88 / 2.93 / 1.15 Y/Y/Y | tree-stable +0.26765 ms (ABOVE 0.05; vs stable +2.79 % n/Y/Y) | allpairs-stable +0.26978 | DiD -0.00213
+   burst_despawn          sleeping_off allpairs 12.00124 tree 9.65288  tree/allpairs 0.8043 (-19.57 %) bars 16.43 / 3.08 / 3.04 Y/Y/Y | tree-stable +0.04695 ms (<= 0.05; vs stable +0.49 % n/n/n) | allpairs-stable +0.41172 | DiD -0.36476
+   burst_migrate          sleeping_off allpairs 11.94545 tree 9.75512  tree/allpairs 0.8166 (-18.34 %) bars 21.84 / 3.82 / 4.27 n/Y/Y | tree-stable +0.14920 ms (ABOVE 0.05; vs stable +1.55 % n/n/n) | allpairs-stable +0.35593 | DiD -0.20673
+   stable                 sleeping_on  allpairs 5.73946 tree 4.04306  tree/allpairs 0.7044 (-29.56 %) bars 2.53 / 0.71 / 0.46 Y/Y/Y | tree-stable +0.00000 ms (<= 0.05; vs stable +0.00 % n/n/n) | allpairs-stable +0.00000 | DiD +0.00000
+   swap_churn             sleeping_on  allpairs 5.80264 tree 4.11980  tree/allpairs 0.7100 (-29.00 %) bars 17.11 / 1.69 / 3.45 Y/Y/Y | tree-stable +0.07674 ms (ABOVE 0.05; vs stable +1.90 % n/Y/Y) | allpairs-stable +0.06318 | DiD +0.01357
+   archetype_shift        sleeping_on  allpairs 5.99436 tree 4.18300  tree/allpairs 0.6978 (-30.22 %) bars 22.66 / 3.72 / 4.41 Y/Y/Y | tree-stable +0.13994 ms (ABOVE 0.05; vs stable +3.46 % n/Y/n) | allpairs-stable +0.25490 | DiD -0.11496
+   first_archetype_spawn  sleeping_on  allpairs 5.82964 tree 4.15039  tree/allpairs 0.7119 (-28.81 %) bars 18.65 / 2.27 / 3.76 Y/Y/Y | tree-stable +0.10733 ms (ABOVE 0.05; vs stable +2.65 % n/Y/Y) | allpairs-stable +0.09018 | DiD +0.01715
+   burst_despawn          sleeping_on  allpairs 5.81377 tree 4.12955  tree/allpairs 0.7103 (-28.97 %) bars 24.77 / 1.73 / 4.98 Y/Y/Y | tree-stable +0.08650 ms (ABOVE 0.05; vs stable +2.14 % n/Y/n) | allpairs-stable +0.07431 | DiD +0.01219
+   burst_migrate          sleeping_on  allpairs 5.83170 tree 4.18975  tree/allpairs 0.7184 (-28.16 %) bars 22.19 / 0.64 / 4.56 Y/Y/Y | tree-stable +0.14670 ms (ABOVE 0.05; vs stable +3.63 % Y/Y/Y) | allpairs-stable +0.09224 | DiD +0.05445
+
+== 1.4 C4 constants
+  bp_g4_uniform: n=17 ap/tree 0.103 (-89.7 %, bars 5.5/2.1; ap slower claimed n/n; tree faster claimed n/n); n=64 ap/tree 0.619 (-38.1 %, bars 0.9/0.4; ap slower claimed n/n; tree faster claimed n/n); n=128 ap/tree 1.137 (+13.7 %, bars 0.9/0.3; ap slower claimed Y/Y; tree faster claimed Y/Y); n=256 ap/tree 1.997 (+99.7 %, bars 1.7/0.6; ap slower claimed Y/Y; tree faster claimed Y/Y); n=1000 ap/tree 4.143 (+314.3 %, bars 6.2/2.2; ap slower claimed Y/Y; tree faster claimed Y/Y)
+     -> largest n with all_pairs not claimed slower = 64; smallest n with tree claimed faster = 128; monotone True; log-log crossover 111
+  bp_g4_disparity: n=17 ap/tree 0.125 (-87.5 %, bars 1.2/0.5; ap slower claimed n/n; tree faster claimed n/n); n=64 ap/tree 0.500 (-50.0 %, bars 2.4/1.0; ap slower claimed n/n; tree faster claimed n/n); n=128 ap/tree 0.946 (-5.4 %, bars 3.3/1.2; ap slower claimed n/n; tree faster claimed n/n); n=256 ap/tree 1.543 (+54.3 %, bars 2.5/0.9; ap slower claimed Y/Y; tree faster claimed Y/Y); n=1000 ap/tree 2.839 (+183.9 %, bars 2.7/1.1; ap slower claimed Y/Y; tree faster claimed Y/Y)
+     -> largest n with all_pairs not claimed slower = 128; smallest n with tree claimed faster = 256; monotone True; log-log crossover 138
+  TREE_BRUTE_MAX_ROWS = min(uniform, disparity) = 64 (today 64); AUTO_TREE_LO = 64, AUTO_TREE_HI = 256 (the wider band; LO >= TREE_BRUTE_MAX_ROWS); log-log crossovers uniform 111 / disparity 138
+
+  ADMIT_BUILD_RATIO = (c_build + k*c_list) / c_q; c_q = t_q(J)/1240 = 0.413964 ms / 1240 = 333.84 ns/row (check: uniform/tree/10000 / 10000 = 302.20 ns/row)
+   m=1240   c_build 355.00 ns/row  c_list 1.425 ns/entry  k=7.63  num 365.87 ns/row  ratio: /c_q(J) 1.0960  /c_q(10k bound) 1.2107  /design c_q mid (125 ns) 2.9270
+   m=10000  c_build 456.00 ns/row  c_list 1.333 ns/entry  k=8.31  num 467.09 ns/row  ratio: /c_q(J) 1.3991  /c_q(10k bound) 1.5456  /design c_q mid (175 ns) 2.6691
+   m=100000 c_build 581.69 ns/row  c_list 1.973 ns/entry  k=8.68  num 598.81 ns/row  ratio: /c_q(J) 1.7937  /c_q(10k bound) 1.9815  /design c_q mid (250 ns) 2.3953
+
+  the compaction arm's timed step re-queries h = ceil(m/2) evicted rows as Q rows (benches/broadphase.rs, MaintArm::Compaction); residual = (compaction - eviction_filter) - (h-1)*c_q:
+   m=1240   h=620    compaction-ev 0.1607 ms = 259 ns per live leaf; (h-1)*c_q at 334 ns/row = 0.2066 ms; residual -0.0459 ms vs design compaction (0.015, 0.025) ms; 0.5*(from_empty-stable) = 0.2201
+   m=10000  h=5000   compaction-ev 1.9658 ms = 393 ns per live leaf; (h-1)*c_q at 302 ns/row = 1.5107 ms; residual 0.4551 ms vs design compaction (0.12, 0.2) ms; 0.5*(from_empty-stable) = 2.2800
+   m=100000 h=50000  compaction-ev 24.2701 ms = 485 ns per live leaf; (h-1)*c_q at 398 ns/row = 19.9238 ms; residual 4.3463 ms vs design compaction (2.0, 3.0) ms; 0.5*(from_empty-stable) = 29.0847
+  c_build bounded from admission_of_64 (timed step = radix rebuild over m+64 + 64 queries + merge): (a64 - stable - 64*c_q(J)) / (m+64) is an UPPER bound on the radix c_build:
+   m=1240   c_build <= 11.6 ns/row (<= 1.3 if the merge is one list pass); (c_build + k*c_list)/c_q(J) <= 0.067 (0.036); with the design's mid c_q: 0.180
+   m=10000  c_build <= 22.9 ns/row (<= 11.9 if the merge is one list pass); (c_build + k*c_list)/c_q(J) <= 0.102 (0.069); with the design's mid c_q: 0.194
+   m=100000 c_build <= 53.3 ns/row (<= 36.2 if the merge is one list pass); (c_build + k*c_list)/c_q(J) <= 0.211 (0.160); with the design's mid c_q: 0.282
+   m=10k: ratio 1.3991 -> nearest (num, den) with den <= 8: (7, 5) = 1.4000; with the 10k-bound c_q: 1.5456 -> (11, 7)
