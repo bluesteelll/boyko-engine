@@ -1,12 +1,10 @@
 //! `ui! { .. }` function-like macro implementation.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 
 /// Implementation of the `ui!` macro (see the public entry in `lib.rs`).
-pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    ui_macro::expand(input.into())
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+pub(crate) fn ui_impl(input: TokenStream) -> TokenStream {
+    ui_macro::expand(input).unwrap_or_else(syn::Error::into_compile_error)
 }
 
 /// The `ui!` authoring macro: parser, compile-time validation, and two-pass

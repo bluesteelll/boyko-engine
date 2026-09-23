@@ -6,10 +6,10 @@
 //! hook wiring + entity-remap metadata are folded into the `Component` derive via
 //! [`RelationshipRole`] (re-exported to [`crate::component`]).
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Ident, Path, Type, Visibility, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, Ident, Path, Type, Visibility};
 
 use crate::common::FieldAccess;
 use crate::component::ComponentHookPaths;
@@ -170,8 +170,7 @@ impl RelationshipRole {
                  conflicting #[component(on_insert=...)] / #[component(on_replace=...)] \
                  — the generic relationship hook is installed automatically.",
             )
-            .to_compile_error()
-            .into());
+            .to_compile_error());
         }
         Ok(())
     }
@@ -221,8 +220,7 @@ pub(crate) fn parse_relationship_role(input: &DeriveInput) -> Result<Option<Rela
              #[relationship_target(...)] (the reverse index); a relation has two \
              distinct component types",
         )
-        .to_compile_error()
-        .into());
+        .to_compile_error());
     }
 
     if has_rel {
@@ -242,7 +240,7 @@ pub(crate) fn parse_relationship_role(input: &DeriveInput) -> Result<Option<Rela
 /// foreign-key `Entity` field (Relations v1, Decision 4). `target` is required.
 fn parse_relationship_source(input: &DeriveInput) -> Result<RelationshipSourceSpec, TokenStream> {
     let err = |span: Span, msg: &str| -> TokenStream {
-        syn::Error::new(span, msg).to_compile_error().into()
+        syn::Error::new(span, msg).to_compile_error()
     };
 
     let mut target: Option<Path> = None;
@@ -271,7 +269,7 @@ fn parse_relationship_source(input: &DeriveInput) -> Result<RelationshipSourceSp
             ))
         });
         if let Err(e) = result {
-            return Err(e.to_compile_error().into());
+            return Err(e.to_compile_error());
         }
     }
 
@@ -301,7 +299,7 @@ fn parse_relationship_source(input: &DeriveInput) -> Result<RelationshipSourceSp
 /// error at the user's struct.
 fn select_relationship_field(input: &DeriveInput) -> Result<FieldAccess, TokenStream> {
     let err = |span: Span, msg: &str| -> TokenStream {
-        syn::Error::new(span, msg).to_compile_error().into()
+        syn::Error::new(span, msg).to_compile_error()
     };
     let fields = match &input.data {
         Data::Struct(s) => &s.fields,
@@ -391,7 +389,7 @@ fn select_relationship_field(input: &DeriveInput) -> Result<FieldAccess, TokenSt
 /// `retain_empty` (W1 — `RETAIN_EMPTY = false` is deferred to v1.1).
 fn parse_relationship_target(input: &DeriveInput) -> Result<RelationshipTargetSpec, TokenStream> {
     let err = |span: Span, msg: &str| -> TokenStream {
-        syn::Error::new(span, msg).to_compile_error().into()
+        syn::Error::new(span, msg).to_compile_error()
     };
 
     let mut source: Option<Path> = None;
@@ -425,7 +423,7 @@ fn parse_relationship_target(input: &DeriveInput) -> Result<RelationshipTargetSp
             ))
         });
         if let Err(e) = result {
-            return Err(e.to_compile_error().into());
+            return Err(e.to_compile_error());
         }
     }
 
@@ -470,7 +468,7 @@ fn select_relationship_target_field(
     input: &DeriveInput,
 ) -> Result<(FieldAccess, Type), TokenStream> {
     let err = |span: Span, msg: &str| -> TokenStream {
-        syn::Error::new(span, msg).to_compile_error().into()
+        syn::Error::new(span, msg).to_compile_error()
     };
     let fields = match &input.data {
         Data::Struct(s) => &s.fields,
@@ -523,8 +521,8 @@ fn select_relationship_target_field(
 }
 
 /// Implementation of `#[derive(Relationship)]` (see the public entry in `lib.rs`).
-pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+pub(crate) fn relationship_macro_impl(input: TokenStream) -> TokenStream {
+    let input = crate::common::parse2_or_compile_error!(input as DeriveInput);
 
     let spec = match parse_relationship_source(&input) {
         Ok(s) => s,
@@ -608,12 +606,12 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }
 
 /// Implementation of `#[derive(RelationshipTarget)]` (see the public entry in `lib.rs`).
-pub(crate) fn expand_target(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+pub(crate) fn relationship_target_macro_impl(input: TokenStream) -> TokenStream {
+    let input = crate::common::parse2_or_compile_error!(input as DeriveInput);
 
     let spec = match parse_relationship_target(&input) {
         Ok(s) => s,
@@ -670,7 +668,7 @@ pub(crate) fn expand_target(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }
 
 /// `true` iff the derive input is a struct with exactly one field (tuple or named).

@@ -1,10 +1,10 @@
 //! Procedural macros for the `boyko-engine` ECS.
 //!
-//! Each `#[proc_macro*]` entry point below is a thin delegator whose full
-//! documentation lives on the entry itself; the implementation is in the
-//! sibling module of the same name (`component`, `relationship`, `resource`,
-//! `event`, `bundle`, `system_set`, `actionlike`, `ui`, `bindable`). Genuinely
-//! shared helpers live in `common`.
+//! Each `#[proc_macro*]` entry point below is a one-line wrapper over its `proc_macro2` twin,
+//! `<module>::<entry>_impl`, in the sibling module of the same name (`component`, `relationship`,
+//! `resource`, `event`, `bundle`, `system_set`, `actionlike`, `ui`, `bindable`, `state_chart`);
+//! the twins are what UG-15 leg (1)'s expanded corpus (M-b, `ug15_corpus`) runs, because
+//! `proc_macro::TokenStream` exists only inside a compiler-invoked macro. Shared helpers: `common`.
 //!
 //! `boyko-macros` has NO dependency on `boyko-ecs` / `boyko-ui` / `boyko-input`:
 //! every `boyko_ecs::…` (etc.) path a derive produces is emitted as a TOKEN
@@ -22,9 +22,9 @@ mod resource;
 mod state_chart;
 mod system_set;
 mod ui;
+#[cfg(test)] mod ug15_corpus;
 
 use proc_macro::TokenStream;
-
 
 /// Derive macro for implementing the Component trait.
 ///
@@ -171,7 +171,7 @@ use proc_macro::TokenStream;
     attributes(component, require, entities, relationship, relationship_target, reflect)
 )]
 pub fn component_macro(input: TokenStream) -> TokenStream {
-    component::expand(input)
+    component::component_macro_impl(input.into()).into()
 }
 
 /// Derive macro for the source-of-truth side of a relation — `Relationship`.
@@ -206,7 +206,7 @@ pub fn component_macro(input: TokenStream) -> TokenStream {
 /// `boyko-ecs` for tests. Real usage lives in `boyko-ecs` integration tests.
 #[proc_macro_derive(Relationship, attributes(relationship))]
 pub fn relationship_macro(input: TokenStream) -> TokenStream {
-    relationship::expand(input)
+    relationship::relationship_macro_impl(input.into()).into()
 }
 
 /// Derive macro for the reverse-index side of a relation — `RelationshipTarget`.
@@ -236,7 +236,7 @@ pub fn relationship_macro(input: TokenStream) -> TokenStream {
 /// The example is `ignore`'d for the same reason as `#[derive(Component)]`.
 #[proc_macro_derive(RelationshipTarget, attributes(relationship_target))]
 pub fn relationship_target_macro(input: TokenStream) -> TokenStream {
-    relationship::expand_target(input)
+    relationship::relationship_target_macro_impl(input.into()).into()
 }
 
 /// Derive macro for implementing the Resource trait.
@@ -264,7 +264,7 @@ pub fn relationship_target_macro(input: TokenStream) -> TokenStream {
 /// tests.
 #[proc_macro_derive(Resource)]
 pub fn resource_macro(input: TokenStream) -> TokenStream {
-    resource::expand(input)
+    resource::resource_macro_impl(input.into()).into()
 }
 
 /// Attribute macro for defining an event type.
@@ -314,8 +314,8 @@ pub fn resource_macro(input: TokenStream) -> TokenStream {
 /// proc-macro crates cannot pull in their own consumers. End-to-end tests live
 /// in `boyko-ecs/tests/event_attribute.rs`.
 #[proc_macro_attribute]
-pub fn event(_args: TokenStream, input: TokenStream) -> TokenStream {
-    event::expand(_args, input)
+pub fn event(args: TokenStream, input: TokenStream) -> TokenStream {
+    event::event_impl(args.into(), input.into()).into()
 }
 
 /// Derive macro for the sealed [`Bundle`] trait — Phase 8.5 Step 4.
@@ -381,7 +381,7 @@ pub fn event(_args: TokenStream, input: TokenStream) -> TokenStream {
 /// would create a cycle). Real usage lives in `boyko-ecs` integration tests.
 #[proc_macro_derive(Bundle)]
 pub fn bundle_macro(input: TokenStream) -> TokenStream {
-    bundle::expand(input)
+    bundle::bundle_macro_impl(input.into()).into()
 }
 
 /// Derive macro for the [`SystemSet`] marker trait — Phase 9 Wave 7 Step 21,
@@ -436,7 +436,7 @@ pub fn bundle_macro(input: TokenStream) -> TokenStream {
 /// [`TypeId`]: std::any::TypeId
 #[proc_macro_derive(SystemSet)]
 pub fn system_set_macro(input: TokenStream) -> TokenStream {
-    system_set::expand(input)
+    system_set::system_set_macro_impl(input.into()).into()
 }
 
 /// Derive macro for the [`Actionlike`] trait — `boyko_input` I2.
@@ -491,7 +491,7 @@ pub fn system_set_macro(input: TokenStream) -> TokenStream {
 /// lives in `boyko-input` integration tests.
 #[proc_macro_derive(Actionlike, attributes(actionlike))]
 pub fn actionlike_macro(input: TokenStream) -> TokenStream {
-    actionlike::expand(input)
+    actionlike::actionlike_macro_impl(input.into()).into()
 }
 
 /// Function-like macro: author a UI entity tree as a literal nested block (GUI
@@ -555,7 +555,7 @@ pub fn actionlike_macro(input: TokenStream) -> TokenStream {
 /// `boyko-ui` integration tests.
 #[proc_macro]
 pub fn ui(input: TokenStream) -> TokenStream {
-    ui::expand(input)
+    ui::ui_impl(input.into()).into()
 }
 
 /// Derive macro for `boyko_ui::binding::Bindable` (GUI P4 Decision 7).
@@ -587,7 +587,7 @@ pub fn ui(input: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_derive(Bindable, attributes(bind))]
 pub fn bindable_macro(input: TokenStream) -> TokenStream {
-    bindable::expand(input)
+    bindable::bindable_macro_impl(input.into()).into()
 }
 
 /// Hierarchical state machines (Harel-lite charts) with a **flat** runtime.
@@ -646,5 +646,5 @@ pub fn bindable_macro(input: TokenStream) -> TokenStream {
 /// usage lives in `aether-tests`.
 #[proc_macro]
 pub fn state_chart(input: TokenStream) -> TokenStream {
-    state_chart::expand(input.into()).into()
+    state_chart::state_chart_impl(input.into()).into()
 }
