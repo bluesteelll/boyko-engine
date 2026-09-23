@@ -56,6 +56,15 @@ rand = "0.9"
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
+# Rung B2, the id census and G-RES over the demo's world (`tests/g_res_id_census_demo_world.rs`):
+# the test builds a replica of `DemoApp::new`'s world half (the eframe half needs a window), and a
+# drift guard PARSES `src/app.rs` so the replica goes RED the moment the demo's world construction
+# changes. `quote` prints the parsed statements and `proc-macro2` names their token types. Not new
+# nodes in the graph: `boyko-macros` (a `[dependencies]` entry above) already pulls the same pinned
+# `syn`, `quote` and `proc-macro2`.
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
 
 # Phase 20.1 G2 — 16 B baseline vs 24 B interpolated pack mirror (★R1-4:
 # baseline measured FIRST; gate = 24 B <= 5 ns/row absolute if baseline <= 3,
