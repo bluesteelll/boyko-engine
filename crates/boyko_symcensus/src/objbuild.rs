@@ -184,6 +184,9 @@ pub struct Built {
     pub map: Option<PathBuf>,
     /// `(crate, rlib)` for every census crate cargo reported an rlib for in this build.
     pub rlibs: Vec<(String, PathBuf)>,
+    /// `(crate, OUT_DIR)` of every census crate's build script in this build (leg (1)'s
+    /// generated sources, critique O3).
+    pub out_dirs: Vec<(String, PathBuf)>,
     /// The final unit's `--print link-args` output.
     pub link_args: String,
     /// The final unit's rustc command line, from cargo's `-v` output.
@@ -313,6 +316,7 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
     let mut artifact: Option<Json> = None;
     let mut finished_ok: Option<bool> = None;
     let mut rlibs: Vec<(String, PathBuf)> = Vec::new();
+    let mut out_dirs: Vec<(String, PathBuf)> = Vec::new();
     for line in stdout.lines() {
         let t = line.trim();
         if t.is_empty() {
@@ -340,6 +344,14 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
                             rlibs.push((tname.to_owned(), PathBuf::from(p)));
                         }
                     }
+                }
+            }
+            Some("build-script-executed") => {
+                let id = msg.get("package_id").and_then(Json::as_str).unwrap_or("");
+                if let (Some(c), Some(dir)) =
+                    (CENSUS_CRATES.iter().find(|c| id.contains(&format!("/crates/{c}#"))), msg.get("out_dir").and_then(Json::as_str))
+                {
+                    out_dirs.push(((*c).to_owned(), PathBuf::from(dir)));
                 }
             }
             Some("build-finished") => finished_ok = msg.get("success").and_then(Json::as_bool),
@@ -454,6 +466,7 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
         pdb,
         map,
         rlibs,
+        out_dirs,
         link_args,
         final_rustc,
         object_sha256,

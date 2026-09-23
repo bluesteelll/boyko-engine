@@ -18,15 +18,21 @@
 //! lock while the nested `cargo rustc` runs in the same target dir.
 
 pub mod candidates;
+pub mod contain;
 pub mod host;
 pub mod json;
+pub mod leg7b;
 pub mod llvm;
+pub mod maps;
 pub mod normalize;
 pub mod objbuild;
 pub mod objview;
 pub mod pe;
+pub mod pins;
 pub mod probe;
 pub mod red;
+pub mod seam;
 pub mod sha256;
 pub mod snapshot;
+pub mod source;
 pub mod tools;

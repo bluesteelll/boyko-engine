@@ -1,0 +1,4 @@
+# UG-15 leg (3) size_of pins (03 section 6): type<TAB>size<TAB>align. One pin for dev AND --release (no struct body carries a cfg-gated field); Miri is N/A.
+EcsMaster	5056	64
+ComponentPool	128	8
+Scope	384	64

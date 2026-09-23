@@ -14,18 +14,32 @@
 //! ug15 probe iii [--out <file>]
 //! ug15 probe iv  [--subjects a,b,…] [--arms ABC] [--out <file>]
 //! ug15 probe v   --parent-dir <dir> [--out <file>]
+//! ug15 leg1 census | deps [--write]                  # leg (1) by hand; `deps --write` re-pins
+//! ug15 leg2 capture [--out <file>]                    # B3 only: writes ug15/pins/*
+//! ug15 leg2 check [--rename <file>] [--named <file>] [--subjects a,b,…] [--out <file>]
+//! ug15 leg7b --subject <S> [--out <file>]             # rlib object census + generated sources
+//! ug15 map a capture [--out <file>]                    # writes ug15/maps/file-map.tsv
+//! ug15 map b capture --arm <label> --out <file>        # on a layout control branch
+//! ug15 map b diff --type <T> <arm1> <arm2>             # rewrites T's rows of ug15/maps/layout-map.tsv
+//! ug15 map c capture|check                             # ug15/maps/containment.tsv
 //! ```
 //!
 //! Every command prints what it read and from where; a RED prints `RED [<kind>]: …` and exits 1.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use boyko_symcensus::contain;
+use boyko_symcensus::leg7b;
 use boyko_symcensus::llvm;
+use boyko_symcensus::maps;
 use boyko_symcensus::normalize::RenameList;
+use boyko_symcensus::pins;
 use boyko_symcensus::objbuild::{self, Control, Ctx, Request, Subject};
 use boyko_symcensus::objview::{Llvm, ObjView};
 use boyko_symcensus::probe;
+use boyko_symcensus::source;
 use boyko_symcensus::red::{Red, RedKind, Result};
 use boyko_symcensus::snapshot::{self, Snapshot};
 use boyko_symcensus::tools;
@@ -172,6 +186,15 @@ fn run(args: &[String]) -> Result<()> {
             }
         }
         "leg7" => leg7(args),
+        "leg2" => leg2(args),
+        "leg1" => leg1(args),
+        "leg7b" => {
+            let ctx = Ctx::new()?;
+            let llvm = Llvm::resolve(&ctx.host)?;
+            let s = objbuild::subject(required(args, "--subject")?)?;
+            emit(&leg7b::run(&ctx, &llvm, s)?, opt(args, "--out"))
+        }
+        "map" => map_cmd(args),
         "probe" => probe_cmd(args),
         other => Err(Red::new(RedKind::Usage, format!("unknown command `{other}`"))),
     }
@@ -194,6 +217,15 @@ fn leg7(args: &[String]) -> Result<()> {
                 .collect();
             header.extend(built.receipt().lines().map(str::to_owned));
             let snap = Snapshot::capture(&llvm, &built, header)?;
+            // Anti-vacuity (03 §6 leg 7): every leg-(2) pin of this subject is present in (b).
+            if let Some(file) = pins::read_pins(&ctx.root, s.key)? {
+                let names: BTreeSet<&str> = snap.multiset.keys().map(|(n, _, _)| n.as_str()).collect();
+                let missing: Vec<&str> = file.pins.iter().map(|p| p.name.as_str()).filter(|n| !names.contains(n)).collect();
+                if !missing.is_empty() {
+                    return Err(Red::new(RedKind::SymbolAbsent, format!("leg (7): leg-(2) pin(s) of {} absent from the object: {missing:?}", s.key)));
+                }
+                println!("leg (7): all {} leg-(2) pin(s) of {} present in (b)", file.pins.len(), s.key);
+            }
             let text = snap.to_text();
             let p = Path::new(out);
             if let Some(parent) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -282,5 +314,189 @@ fn probe_cmd(args: &[String]) -> Result<()> {
             emit(&probe::probe_v(&ctx, &llvm, Path::new(parent), &maps)?, out)
         }
         _ => Err(Red::new(RedKind::Usage, "probe i|iii|iv|v")),
+    }
+}
+
+fn leg2(args: &[String]) -> Result<()> {
+    let ctx = Ctx::new()?;
+    let llvm = Llvm::resolve(&ctx.host)?;
+    let read = |p: &str| std::fs::read_to_string(p).map_err(|e| Red::io(Path::new(p), &e));
+    match args.get(1).map(String::as_str) {
+        Some("capture") => emit(&pins::capture(&ctx, &llvm)?, opt(args, "--out")),
+        Some("check") => {
+            let rename = match opt(args, "--rename") {
+                Some(f) => RenameList::parse(&read(f)?)?,
+                None => RenameList::default(),
+            };
+            let named = match opt(args, "--named") {
+                Some(f) => pins::parse_named(&read(f)?)?,
+                None => Vec::new(),
+            };
+            let subs = subjects(args, &["boyko_demo", "clear", "swap_remove", "query_dsl", "phase9_scheduler"])?;
+            match pins::check(&ctx, &llvm, &rename, &named, &subs) {
+                Ok(text) => emit(&text, opt(args, "--out")),
+                Err(red) => {
+                    if let Some(p) = opt(args, "--out") {
+                        let _ = std::fs::write(p, red.to_string());
+                    }
+                    Err(red)
+                }
+            }
+        }
+        _ => Err(Red::new(RedKind::Usage, "leg2 capture|check")),
+    }
+}
+
+fn map_cmd(args: &[String]) -> Result<()> {
+    let ctx = Ctx::new()?;
+    let data = pins::data_dir(&ctx.root).join("maps");
+    std::fs::create_dir_all(&data).map_err(|e| Red::io(&data, &e))?;
+    let read = |p: &str| std::fs::read_to_string(p).map_err(|e| Red::io(Path::new(p), &e));
+    match (args.get(1).map(String::as_str), args.get(2).map(String::as_str)) {
+        (Some("a"), Some("capture")) => {
+            let llvm = Llvm::resolve(&ctx.host)?;
+            let symbolizer = tools::symbolizer()?;
+            let mut text = probe::header(&ctx, &llvm, "sensitivity map (a) capture (route a1)");
+            text.push_str(&symbolizer.receipt_line());
+            text.push('\n');
+            let subs: Vec<Subject> = maps::committed_pins(&ctx.root)?.into_iter().map(|(s, _)| s).collect();
+            let m = maps::capture_a(&ctx, &llvm, &symbolizer, &subs, &mut text)?;
+            let path = data.join("file-map.tsv");
+            let tsv = maps::file_map_tsv(&m);
+            std::fs::write(&path, &tsv).map_err(|e| Red::io(&path, &e))?;
+            // The absent list's carrier column: a pinned body whose inline frames name the candidate.
+            let ap = pins::absent_path(&ctx.root);
+            let mut absent = pins::parse_absent(&read(&ap.to_string_lossy())?)?;
+            for a in &mut absent {
+                let needle = absent_function(&a.cand);
+                let carriers: Vec<String> = m
+                    .iter()
+                    .filter(|((subj, _, _), pm)| {
+                        *subj == a.subject && pm.as_ref().is_some_and(|pm| pm.functions.iter().any(|f| needle.is_some_and(|n| f.contains(n))))
+                    })
+                    .map(|((_, cand, name), _)| format!("{cand} `{name}`"))
+                    .collect();
+                let base = a.reason.split(" | carrier").next().unwrap_or(&a.reason).to_owned();
+                a.reason = if carriers.is_empty() {
+                    format!("{base} | carrier: no pinned body of this subject lists it among its inline frames (map (a))")
+                } else {
+                    format!("{base} | carrier per map (a): {}", carriers.join("; "))
+                };
+            }
+            std::fs::write(&ap, pins::absent_text(&absent)).map_err(|e| Red::io(&ap, &e))?;
+            text.push_str(&format!("wrote {} ({} rows) and the carrier column of {}\n", path.display(), tsv.lines().count().saturating_sub(2), ap.display()));
+            emit(&text, opt(args, "--out"))
+        }
+        (Some("b"), Some("capture")) => {
+            let llvm = Llvm::resolve(&ctx.host)?;
+            let label = required(args, "--arm")?;
+            let out = required(args, "--out")?;
+            let subs: Vec<Subject> = maps::committed_pins(&ctx.root)?.into_iter().map(|(s, _)| s).collect();
+            let body = maps::capture_b_arm(&ctx, &llvm, &subs, label)?;
+            let head: String = probe::header(&ctx, &llvm, &format!("map (b) arm {label}")).lines().map(|l| format!("# {l}\n")).collect();
+            emit(&format!("{head}{body}"), Some(out))
+        }
+        (Some("b"), Some("diff")) => {
+            let ty = required(args, "--type")?;
+            let rest: Vec<&String> = args.iter().skip(3).filter(|a| !a.starts_with("--") && a.as_str() != ty).collect();
+            let (Some(a), Some(b)) = (rest.first(), rest.get(1)) else {
+                return Err(Red::new(RedKind::Usage, "map b diff --type <T> <arm1> <arm2>"));
+            };
+            let rows = maps::diff_b(ty, &read(a)?, &read(b)?, &data.join("layout-map.tsv"))?;
+            let mut text = format!("map (b) {ty}: {} pin(s) differ between {a} and {b}\n", rows.len());
+            for r in &rows {
+                text.push_str(&format!("  {r}\n"));
+            }
+            emit(&text, opt(args, "--out"))
+        }
+        (Some("c"), Some(which @ ("capture" | "check"))) => {
+            let c = contain::capture(&ctx.root)?;
+            let tsv = contain::to_tsv(&c);
+            let path = data.join("containment.tsv");
+            let mut text = format!("map (c): {} file(s) walked, {} type definition(s), {} row(s)\n", c.files, c.defs, c.rows.len());
+            if which == "capture" {
+                std::fs::write(&path, &tsv).map_err(|e| Red::io(&path, &e))?;
+                text.push_str(&format!("wrote {}\n", path.display()));
+                return emit(&text, opt(args, "--out"));
+            }
+            let committed = read(&path.to_string_lossy())?.replace("\r\n", "\n");
+            if committed == tsv {
+                text.push_str("map (c): identical to the committed map\n");
+                return emit(&text, opt(args, "--out"));
+            }
+            let a: BTreeSet<&str> = committed.lines().collect();
+            let b: BTreeSet<&str> = tsv.lines().collect();
+            for l in a.difference(&b) {
+                text.push_str(&format!("  committed only: {l}\n"));
+            }
+            for l in b.difference(&a) {
+                text.push_str(&format!("  tree only:      {l}\n"));
+            }
+            emit(&text, opt(args, "--out"))?;
+            Err(Red::new(RedKind::Mismatch, "map (c) differs from the committed map; re-capture it in this rung's merge"))
+        }
+        _ => Err(Red::new(RedKind::Usage, "map a capture | map b capture|diff | map c capture|check")),
+    }
+}
+
+/// The function name a candidate's inlined frames carry, for the absent list's carrier column.
+fn absent_function(cand: &str) -> Option<&'static str> {
+    Some(match cand {
+        "R-1" => "register_new<",
+        "R-2" => "component_id",
+        "D-2" | "D-3" => "register_new",
+        "D-4" => "resource_registry::register_new",
+        "D-5" => "register_event_new",
+        "R-3" => "try_register_dynamic",
+        "R-4" => "register_layout",
+        "S-1" => "add_system",
+        "H-3" => "Schedule::run",
+        "P29-1" => "grow_rows",
+        "P29-2" => "commit_subregion",
+        "P29-3" => "run_check_ticks_scan",
+        "P29-4" => "ScopeBlock::grow",
+        _ => return None,
+    })
+}
+
+fn leg1(args: &[String]) -> Result<()> {
+    let root = boyko_symcensus::host::workspace_root();
+    boyko_symcensus::host::check_cwd()?;
+    match args.get(1).map(String::as_str) {
+        Some("census") => {
+            let (findings, stats, per) = source::census(&root)?;
+            let mut text = format!("leg (1) read: {stats}\n");
+            for (c, s) in &per {
+                text.push_str(&format!("  {c}: {s}\n"));
+            }
+            text.push_str(&format!("counted: {}\n", findings.len()));
+            for f in &findings {
+                text.push_str(&format!("  {f}\n"));
+            }
+            emit(&text, opt(args, "--out"))
+        }
+        Some("deps") => {
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let rows = source::census_crate_deps(&root, &cargo)?;
+            let mut text = String::from(
+                "# UG-15 leg (1) dependency pin (critique W6): every direct dependency of every census crate, by kind.\n\
+                 # A dependency's macros emit tokens into the invoking crate, where the source walk cannot see them;\n\
+                 # a change here is RED until someone has read what the new dependency emits. Re-pin: `ug15 leg1 deps --write`.\n\
+                 # crate\tdependency\tkind\ttarget\n",
+            );
+            for r in &rows {
+                text.push_str(&format!("{r}\n"));
+            }
+            if flag(args, "--write") {
+                let p = pins::data_dir(&root).join("pins").join("leg1-deps.pins");
+                if let Some(d) = p.parent() {
+                    std::fs::create_dir_all(d).map_err(|e| Red::io(d, &e))?;
+                }
+                std::fs::write(&p, &text).map_err(|e| Red::io(&p, &e))?;
+                eprintln!("ug15: wrote {}", p.display());
+            }
+            emit(&text, None)
+        }
+        _ => Err(Red::new(RedKind::Usage, "leg1 census|deps [--write]")),
     }
 }
