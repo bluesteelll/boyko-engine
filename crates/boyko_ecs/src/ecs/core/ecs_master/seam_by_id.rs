@@ -197,6 +197,9 @@ impl EcsMaster {
     /// 3. **A required id that is `Gpu`-resident** reaches
     ///    `residency_conflict_panic` inside the archetype resolver, because
     ///    arm 3 checks only the caller's own `id`. Shared with the typed path.
+    ///
+    /// MOD-SEAM MS-08: a by-id structural op the modding seam consumes (KF-47, KC-21). The
+    /// marker is a doc line only: this item adds no code for modding (05 section 3.2).
     pub fn add_component_by_id(
         &mut self,
         entity: Entity,
@@ -504,6 +507,9 @@ impl EcsMaster {
     /// The attach direction DOES fire them — its helper
     /// (`migrate_entity_attach_ids_with_bytes`) is this rung's own sibling with
     /// no other caller.
+    ///
+    /// MOD-SEAM MS-08: a by-id structural op the modding seam consumes (KF-47, KC-21). The
+    /// marker is a doc line only: this item adds no code for modding (05 section 3.2).
     pub fn remove_component_by_id(&mut self, entity: Entity, id: ComponentId) -> bool {
         let inland: EntityInland = {
             let Some(slot) = self.entity_master.entities_inland.get(entity.id().0) else {
@@ -620,6 +626,9 @@ impl EcsMaster {
     ///
     /// Stamps `changed` ONLY. `added` is preserved, which is why
     /// `stamp_slot_ticks` / `fill_ticks` are not the mechanism: they write both.
+    ///
+    /// MOD-SEAM MS-08: a by-id structural op the modding seam consumes (KF-47, KC-21). The
+    /// marker is a doc line only: this item adds no code for modding (05 section 3.2).
     pub fn mark_component_changed(&mut self, entity: Entity, id: ComponentId) -> bool {
         let current_tick = self.current_tick();
         let inland: EntityInland = {
