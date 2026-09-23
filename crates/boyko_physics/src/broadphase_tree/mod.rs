@@ -55,7 +55,7 @@
 //! |---|---|
 //! | `phys_bp_verify` | the locator, the verify pass, maintenance (leaf scan, list pass, compaction, admission) — unconditionally, once per step; the cursor stamp follows the assembly, outside the zones |
 //! | `phys_bp_build` | the active tree over Q |
-//! | `phys_bp_query` | each Q row, in Morton order, against the active tree (`row > query`) and the static tree, by the selected [`QueryKernel`]; then each Wide row's loop. Every row's partners form one segment `[< row \| > row]` in one stream |
+//! | `phys_bp_query` | each Q row, in Morton order, against the active tree (`row > query`) and the static tree, by the selected [`QueryKernel`](crate::broadphase_tree::QueryKernel); then each Wide row's loop. Every row's partners form one segment `[< row \| > row]` in one stream |
 //! | `phys_bp_assemble` | rev counts → bucket starts → a scatter over rows ascending → `resize(P)` → a per-row merge of its forward run, its `SS` run and its bucket |
 //!
 //! The counters `phys_bp_queried` (`|Q| + |Wide|`), `phys_bp_members` (`|S|`) and
@@ -68,9 +68,9 @@
 //! Two kernels answer the Q rows, selected by [`BroadphaseTree::set_query_kernel`], and they
 //! write the same bytes: the stream and every Q row's `(seg, nrev, nfwd)`.
 //!
-//! * [`QueryKernel::RowWalk`] (C1's kernel): per Q row, one depth-first walk of each tree, the
+//! * [`QueryKernel::RowWalk`](crate::broadphase_tree::QueryKernel::RowWalk) (C1's kernel): per Q row, one depth-first walk of each tree, the
 //!   active one filtered to `row > query` after the exact test.
-//! * [`QueryKernel::LeafList`] (the default; design C3b, F1 — a packet traversal over the eight
+//! * [`QueryKernel::LeafList`](crate::broadphase_tree::QueryKernel::LeafList) (the default; design C3b, F1 — a packet traversal over the eight
 //!   Morton-adjacent rows of a leaf): per active leaf node `L`, one walk of each tree with `L`'s
 //!   box collects the candidate leaves (`PackedBvh8::collect_leaves`); each row of `L` then
 //!   tests them eight at a time against its own query box — the static ones first, the active
@@ -98,7 +98,7 @@
 //!
 //! The non-default `bp-query-counts` feature (C3b, the query-cost investigation) adds the
 //! `counts` module and, per tree, one probe of relaxed atomics holding the last query's counts.
-//! It and the crate's own test build also count the last leaf-list pass ([`LeafListCounts`]).
+//! It and the crate's own test build also count the last leaf-list pass (`LeafListCounts`).
 //! Without either, none of it exists: the default build's pass is the uncounted kernel.
 
 use core::mem::MaybeUninit;
