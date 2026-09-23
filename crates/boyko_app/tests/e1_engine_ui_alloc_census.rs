@@ -52,9 +52,22 @@
 //! # Pins and their rule
 //!
 //! [`pin`] is the census's `Pin` shape. Pins are recorded at B2 from the first run and confirmed by
-//! two more (counts only) as **ceilings that only fall**: a lower reading on a later rung lowers the
-//! pin; an upward move is RED, re-measured and attributed, never widened (G-ALLOC "budget only
-//! decreases"; UG-03 P9).
+//! two more (counts only). Every run reads identically frame for frame, so the structural pins —
+//! scope, chunk and dispatch MAX — are **exact**: a higher reading is RED, re-measured and
+//! attributed, never widened; a lower one is RED as well, and the rung that caused it lowers the
+//! pin in its own commit, so no pin sits above its reading as unrecorded headroom that a later
+//! regression could spend unseen (G-ALLOC "budget only decreases"; UG-03 P9 "pins are re-derived,
+//! never widened"). OTHER and realloc are pinned at 0, which cannot fall.
+//!
+//! **The injector block is bounded, not pinned: at most one per frame.** crossbeam's `Injector`
+//! allocates a block per 63 pushes, so the blocks in a window are `pushes / 63` at a phase set by
+//! every push since boot. The default build's cadence is exactly every other frame (5 in the
+//! window, whatever the phase), but the `hwrt` build — one more Main system — reads
+//! `0 1 1 0 1 0 1 0 1 0`, a cadence that drifts: its window total depends on the phase, so an exact
+//! total would be a pin on history, not on structure. The cost, stated: the classifier is by
+//! layout, so one data-path object of exactly the block's layout (1520 B, align 8) is counted as an
+//! injector block. On a frame that already carries its block it reads `injector 2` and is RED; on
+//! a block-free frame it passes. The census's copy of the classifier has the same limit.
 //!
 //! # Red-first (test-only knobs, no engine source reads them)
 //!
@@ -677,8 +690,10 @@ const RELEASE: bool = !cfg!(debug_assertions);
 /// its two probe frames), each a `ScopeShared` plus one
 /// `ScopeBlock` chunk — scope 2, chunk 2 on every steady frame — plus an injector block on every
 /// other frame; MAX 5 = dispatch MAX 5; OTHER 0; realloc 0. Debug and release read the same, so one
-/// pin set serves both. Headroom is zero both ways: every count here is structural, so a higher
-/// reading is a regression to attribute and a lower one re-derives the pin down.
+/// pin set serves both. Headroom is zero both ways — `gate` holds scope, chunk and dispatch MAX
+/// EXACT: every count here is structural, so a higher reading is a regression to attribute and a
+/// lower one is RED until the pin is re-derived down. (The injector block is bounded per frame, not
+/// pinned: see the header.)
 fn pin() -> Pin {
     Pin {
         scope: (2, 2),
@@ -921,11 +936,19 @@ fn gate(row: &Row, steady_instances: &[usize], ui_nodes: usize, ui_roots: usize)
         ),
     );
     check(
-        row.dispatch_max <= p.dispatch_max,
-        format!(
-            "dispatch MAX {} > pinned {}",
-            row.dispatch_max, p.dispatch_max
-        ),
+        row.dispatch_max == p.dispatch_max,
+        if row.dispatch_max > p.dispatch_max {
+            format!(
+                "dispatch MAX {} > pinned {} — a regression to attribute, never widened",
+                row.dispatch_max, p.dispatch_max
+            )
+        } else {
+            format!(
+                "dispatch MAX {} < pinned {} — re-derive the pin down in this commit (P9: a pin above \
+                 its reading is headroom a later regression spends unseen)",
+                row.dispatch_max, p.dispatch_max
+            )
+        },
     );
     check(
         row.scope.0 >= p.scope.0 && row.scope.1 <= p.scope.1,
@@ -969,7 +992,7 @@ fn gate(row: &Row, steady_instances: &[usize], ui_nodes: usize, ui_roots: usize)
         ),
     );
     say!(
-        "GATE E1 ({}): MAX {} dispatch {} <= {} scope {}..={} in {}..={} chunk {}..={} in {}..={} OTHER {} <= {} \
+        "GATE E1 ({}): MAX {} dispatch {} == {} scope {}..={} in {}..={} chunk {}..={} in {}..={} OTHER {} <= {} \
          EPOCH {} realloc {} <= {}",
         if RELEASE { "release" } else { "debug" },
         row.max,
