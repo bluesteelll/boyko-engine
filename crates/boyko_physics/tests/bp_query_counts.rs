@@ -38,6 +38,12 @@ mod scenes;
 use boyko_physics::broadphase_tree::counts::{QueryCounts, RowQueryCounts, TreeShape};
 use boyko_physics::broadphase_tree::{BroadphaseTree, all_pairs_into};
 use boyko_physics::resources::{BodyState, ContactPairs};
+use boyko_physics::systems::body_bounding_radius;
+
+/// With this variable set to a directory, each counted scene is also written there: the rows'
+/// bits as the tree reads them and the replay's per-row counts, so an out-of-tree model of the
+/// kernel can be checked against this replay row by row before it counts anything else.
+const DUMP_DIR_VAR: &str = "BP_QUERY_COUNTS_DUMP";
 
 use scenes::{J_SNAPSHOT_STEPS, TREE_WARM_STEPS, disparity_scene, j_snapshot, make_dynamic, scene};
 
@@ -152,6 +158,10 @@ fn count(label: &str, bodies: &[BodyState]) -> Counted {
         "{label}: each Q row finds itself once and each Q-Q pair from both ends"
     );
 
+    if let Ok(dir) = std::env::var(DUMP_DIR_VAR) {
+        dump(std::path::Path::new(&dir), label, bodies, &rows);
+    }
+
     Counted {
         label: label.to_owned(),
         rows_total: n,
@@ -162,6 +172,51 @@ fn count(label: &str, bodies: &[BodyState]) -> Counted {
         active: tree.active_shape(),
         statics: tree.static_shape(),
     }
+}
+
+/// Writes `<label>.rows.bin` (per body row, little-endian: the bits of `x`, `y`, `z` and
+/// `body_bounding_radius`, then `1` if the row was queried, else `0`: 20 B a row) and
+/// `<label>.counts.csv` (the replay's per-row counts, in replay order = active-leaf slot order)
+/// into `dir`, with `/` in the label replaced by `_`.
+fn dump(dir: &std::path::Path, label: &str, bodies: &[BodyState], rows: &[RowQueryCounts]) {
+    let slug = label.replace('/', "_");
+    let mut queried = vec![0u32; bodies.len()];
+    for r in rows {
+        queried[r.row as usize] = 1;
+    }
+    let mut bin = Vec::with_capacity(bodies.len() * 20);
+    for (body, &q) in bodies.iter().zip(&queried) {
+        let p = body.position;
+        for v in [p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), body_bounding_radius(body).to_bits(), q] {
+            bin.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    std::fs::write(dir.join(format!("{slug}.rows.bin")), bin).expect("dump: rows.bin is writable");
+    let mut csv = String::from(
+        "row,a_box,a_leaf,a_desc,a_cand,a_lanebox,a_exact,a_emit,s_box,s_leaf,s_desc,s_cand,s_lanebox,s_exact,s_emit\n",
+    );
+    for r in rows {
+        let (a, s) = (&r.active, &r.statics);
+        csv.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            r.row,
+            a.box_tests,
+            a.leaf_tests,
+            a.descents,
+            a.leaf_candidates,
+            a.leaf_box_hits,
+            a.exact_hits,
+            r.emitted_active,
+            s.box_tests,
+            s.leaf_tests,
+            s.descents,
+            s.leaf_candidates,
+            s.leaf_box_hits,
+            s.exact_hits,
+            r.emitted_statics,
+        ));
+    }
+    std::fs::write(dir.join(format!("{slug}.counts.csv")), csv).expect("dump: counts.csv is writable");
 }
 
 /// One `| metric | mean | p50 | p95 | max |` row.
