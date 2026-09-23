@@ -600,7 +600,8 @@ jobs:
   # RUSTFLAGS: this job needs its own, and because the variable REPLACES rather than appends it has
   # to repeat everything the tree relies on.
   #   * `-D warnings` — repeated for the reason every other job repeats it. VERIFIED locally: the
-  #     crate and all five models compile clean under `--cfg loom -D warnings`.
+  #     crate and all six models compile clean under `--cfg loom -D warnings` (re-verified
+  #     2026-09-23, B3, when the sixth model joined the job).
   #   * `-C target-cpu=x86-64-v3` — KEPT, unlike the `miri` job just above. Miri opts out because it
   #     interprets MIR and never executes machine code, so the ISA buys it nothing; this job
   #     executes a real binary, so the ISA baseline is a real property of the artifact under test.
@@ -616,7 +617,8 @@ jobs:
   #
   # LOOM_MAX_PREEMPTIONS=3 is the bound `docs/threadpool/KE16-DESIGN.md` §8 (the W-b row) and
   # `KE16-DESIGN-MEASUREMENT.md:388` both specify. Measured wall time for the five models at that
-  # bound, release, on the bench box: ~1 s of model time after a ~75 s cold build.
+  # bound, release, on the bench box: ~1 s of model time after a ~75 s cold build (a 2026-09-02
+  # reading, taken before the sixth model joined).
   loom:
     name: loom (threadpool wake protocol)
     runs-on: ubuntu-latest
@@ -629,7 +631,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: loom
-      # THE FIVE MODEL NAMES ARE WRITTEN OUT **AND** THE COUNT IS PINNED, because neither half is
+      # THE SIX MODEL NAMES ARE WRITTEN OUT **AND** THE COUNT IS PINNED, because neither half is
       # sufficient on its own. Both vacuous forms were probed on 2026-09-02 and BOTH EXIT 0:
       #   * built without `--cfg loom`, the harness prints `running 0 tests` and cargo exits 0;
       #   * with one name in the `--exact` list renamed, the harness prints `running 4 tests` and
@@ -638,19 +640,21 @@ jobs:
       # verbatim. `0 filtered out` is part of the pin deliberately: it goes red if the `--exact`
       # list and the compiled model set stop being the same set, in EITHER direction.
       #
-      # WHERE THE FIVE CAME FROM: they are every `#[test]` in `tests/loom_pool.rs` that is not
-      # behind a `#[cfg(feature = "ke16-…")]` gate — the model set of a default build, read off
-      # `loom_pool --list` on 2026-09-02. The file holds 8 further models behind the KE16 tournament
-      # features (`ke16-a5`, `ke16-w-gate`, `ke16-w-count`). They are deliberately NOT in this job:
-      # `KE16-DESIGN.md` §4 says those switches are DELETED once the verdict lands, and a permanent
-      # gate keyed to a temporary feature breaks on the commit that removes it. They belong to the
-      # candidate's own measurement step, run per-candidate with `--features`.
+      # WHERE THE SIX CAME FROM: they are every `#[test]` in `tests/loom_pool.rs`, read off
+      # `loom_pool --list` on 2026-09-23 (B3). On 2026-09-02 the list held five: every model then
+      # not behind a KE16 tournament feature (`ke16-a5`, `ke16-w-gate`, `ke16-w-count`), kept out
+      # because `KE16-DESIGN.md` §4 deletes those switches once the verdict lands, and a permanent
+      # gate keyed to a temporary feature breaks on the commit that removes it. The verdict landed
+      # and Step App removed the features; the file's one surviving gated model,
+      # `loom_m1c_count_gated_completion_wakes_the_parked_worker_joiner`, is now unconditional. A
+      # default build therefore compiled six models while this job named five, and `0 filtered out`
+      # would have failed on the first run. The sixth is named here for that reason.
       #
-      # ADDING A MODEL: add its name to the list AND bump both `5`s. Forgetting is not silent — an
-      # unlisted new model shows up as `1 filtered out`, and a listed one moves `running 5 tests` to
-      # `running 6 tests`; either way the pin fails. That friction IS the gate: it is what makes
+      # ADDING A MODEL: add its name to the list AND bump both `6`s. Forgetting is not silent — an
+      # unlisted new model shows up as `1 filtered out`, and a listed one moves `running 6 tests` to
+      # `running 7 tests`; either way the pin fails. That friction IS the gate: it is what makes
       # this job unable to pass while measuring nothing.
-      - name: cargo test --release --test loom_pool (5 models, count-pinned)
+      - name: cargo test --release --test loom_pool (6 models, count-pinned)
         shell: bash
         run: |
           set +e
@@ -661,6 +665,7 @@ jobs:
             loom_m2_calibration_no_producer_fence_is_lost \
             loom_m2b_idle_cas_contention_exactly_one \
             loom_m3_shutdown_handshake_worker_exits \
+            loom_m1c_count_gated_completion_wakes_the_parked_worker_joiner \
             > loom.log 2>&1
           status=$?
           set -e
@@ -669,12 +674,12 @@ jobs:
             echo "::error::loom models failed (cargo exit $status)"
             exit "$status"
           fi
-          if ! grep -qx "running 5 tests" loom.log; then
-            echo "::error::loom ran the wrong number of models -- expected the line 'running 5 tests'. A run that compiles the models and executes none exits 0; this is the check that forbids it."
+          if ! grep -qx "running 6 tests" loom.log; then
+            echo "::error::loom ran the wrong number of models -- expected the line 'running 6 tests'. A run that compiles the models and executes none exits 0; this is the check that forbids it."
             exit 1
           fi
-          if ! grep -q "^test result: ok\. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" loom.log; then
-            echo "::error::loom summary line did not match '5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' -- a model was ignored, filtered, or added without updating this job."
+          if ! grep -q "^test result: ok\. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" loom.log; then
+            echo "::error::loom summary line did not match '6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' -- a model was ignored, filtered, or added without updating this job."
             exit 1
           fi
-          echo "loom: 5 models executed and passed at LOOM_MAX_PREEMPTIONS=$LOOM_MAX_PREEMPTIONS"
+          echo "loom: 6 models executed and passed at LOOM_MAX_PREEMPTIONS=$LOOM_MAX_PREEMPTIONS"
