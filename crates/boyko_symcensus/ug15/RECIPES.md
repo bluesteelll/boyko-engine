@@ -37,6 +37,24 @@ UG15="$CARGO_TARGET_DIR/debug/ug15.exe"
 | `$UG15 leg7 compare PARENT CHILD --expect NAME [--expect NAME]` | a red CONTROL (critique C1): passes only if every NAME is among the child-only (b) entries |
 | `$UG15 textcheck --subject S --seam SNAPSHOT` | `.text` of `release` equals the seam-census snapshot's |
 | `$UG15 probe i\|iii\|iv\|v …` | B3's probe build (`receipts/b3/probe-*.txt`, `receipts/b3/PROBES.md`) |
+| `$UG15 leg1 census` | leg (1) by hand: what the walk read and what it counted (the gate is the test below) |
+| `$UG15 leg1 deps [--write]` | the census crates' direct dependency set; `--write` re-pins `pins/leg1-deps.pins` after review |
+| `$UG15 leg2 capture` | **B3 only**: builds the five subjects under `release`, writes `pins/leg2-<subject>.pins` and `pins/leg2-absent.txt` |
+| `$UG15 leg2 check [--rename F] [--named F] [--subjects a,b]` | strict leg (2): RED `symbol absent` on a pinned name with no symbol, RED `moved` on an unnamed body change; `--named` lists `<cand or name>\t<reason>` for an attributed rung |
+| `$UG15 leg7b --subject boyko_demo` | leg (7b) over the census rlibs' object members (bitcode), plus leg (1) over the census build scripts' generated `OUT_DIR` sources |
+| `$UG15 map a capture` | map (a) under `sensitivity-map` (route a1): `maps/file-map.tsv`, and the carrier column of `pins/leg2-absent.txt` |
+| `$UG15 map b capture --arm L --out F` / `map b diff --type T A B` | map (b) on a layout control branch; `diff` rewrites T's rows of `maps/layout-map.tsv` |
+| `$UG15 map c capture\|check` | map (c): `maps/containment.tsv` from the leg-(1) walker; `check` REDs on any drift (re-capture in the rung's merge) |
+
+**The light legs are tests** (UG-01 runs them on every rung):
+
+```bash
+cargo test -p boyko-symcensus --test ug15_leg1_source_census --test ug15_leg1_shapes \
+  --test ug15_leg3_size_of --test ug15_leg5_seam_inventory --test ug15_legs_4_6_na \
+  --test normalize_fixtures --test dev_only_edge -- --nocapture
+cargo test --release -p boyko-symcensus --test ug15_leg3_size_of -- --nocapture   # leg (3) in release
+cargo test -p boyko-macros --lib ug15_corpus -- --nocapture                        # M-b
+```
 
 Subjects: `boyko_demo`, `clear` (boyko-app's example), `swap_remove`, `query_dsl`, `phase9_scheduler`.
 
