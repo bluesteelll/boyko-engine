@@ -167,7 +167,8 @@
 //! --parallel-np on|off         set parallel_narrowphase (L5), under any --cfg
 //! --contact-reuse on|off       set contact_reuse (L9b), under any --cfg; either value also reads
 //!                              the narrowphase's pair classes after every step (untimed) into the
-//!                              summary's `pair_classes`
+//!                              summary's `pair_classes`, as does any row whose config has
+//!                              contact_reuse on without the flag
 //! --reuse-distance D           contact_reuse_distance τ in metres (with --contact-reuse on)
 //! --broadphase allpairs|tree|grid
 //!                              set broadphase (tree broadphase C3) under Manual selection, under
@@ -198,7 +199,8 @@
 //!   `void, colors, wide_colors, waves, g_ns, u_ns, r_ns, sys_sum_ns, disp_lane, worker_lane_max`
 //!   and, per system and per physics zone, `<name>_ns` and `<name>_n` (counters: `<name>` is the
 //!   value). `awake` is blank when sleeping is off.
-//! * `pair_classes` (with `--contact-reuse`): the narrowphase's pair classes summed over the
+//! * `pair_classes` (with `--contact-reuse`, or with contact reuse on in the row's config; `null`
+//!   otherwise): the narrowphase's pair classes summed over the
 //!   window (`Manifolds::pair_classes`, read after every step, untimed) — `reused`, `sep_hits`,
 //!   `full`, `full_contacts`, `records_built`, `non_box`, `pairs` — and `h`, the share of the
 //!   touching box pairs served from a record, `reused / (reused + full_contacts)`. A counter, not a
@@ -1473,9 +1475,13 @@ fn run(args: &Args) -> ExitCode {
     let mut first_void: Option<String> = None;
     let mut solve_on_dispatcher_steps = 0usize;
     let mut first_frozen_step: Option<usize> = None;
-    // L9: the pair classes, per step, read only when the row names `--contact-reuse`.
+    // L9: the pair classes, per step. Read on every row whose EFFECTIVE config has reuse on, since
+    // the void probe after the run reads them there whether or not the row named the flag, and on
+    // every row that names `--contact-reuse` (the summary's `pair_classes`). A reuse-off row that
+    // does not name the flag walks no tags.
+    let read_classes = contact_reuse || args.contact_reuse.is_some();
     let mut classes: Vec<PairClasses> =
-        Vec::with_capacity(if args.contact_reuse.is_some() { args.steps } else { 0 });
+        Vec::with_capacity(if read_classes { args.steps } else { 0 });
     let top = *rig.boxes.last().expect("invariant: every scene spawns dynamic bodies");
 
     for step in 0..args.steps {
@@ -1517,7 +1523,7 @@ fn run(args: &Args) -> ExitCode {
             });
         }
         rows.push(StepRow { wall_ns: wall.as_nanos() as u64, manifolds, pairs, top_y, awake });
-        if args.contact_reuse.is_some() {
+        if read_classes {
             classes.push(rig.world.resource::<Manifolds>().pair_classes());
         }
 
@@ -1603,6 +1609,8 @@ fn run(args: &Args) -> ExitCode {
         first_void.get_or_insert_with(|| format!("the disarmed run pushed {traffic} samples"));
     }
     // L9 (design, "Integration"): a reuse-on row that reused nothing over steps [100, 500) is void.
+    // It tests the effective config, which is also what `read_classes` tests, so `classes` holds
+    // one entry per step on every row it indexes, the flag named or not.
     let reuse_probe = REUSE_PROBE.0..REUSE_PROBE.1.min(args.steps);
     if contact_reuse
         && !reuse_probe.is_empty()

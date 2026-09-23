@@ -19,6 +19,10 @@
 //! `sleep_frames = 8`; the pile is stepped until `IslandSleep::is_row_awake` is false for
 //! every tracked body.
 //!
+//! The box-pile scene of `e_*` is a static floor box, a support cube S and an upper cube U
+//! resting on it, with L9 contact reuse forced on. It exists because L9's ruling W2 needs a
+//! box pile: contact reuse touches box pairs only, so no sphere scene here can go red on it.
+//!
 //! # Cases
 //!
 //! | test | change applied | before A4 | after A4 |
@@ -27,6 +31,7 @@
 //! | `a_the_wake_lands_*` (I1) | `delete_entity` of S (last row); U must be awake on the FIRST step after it | not run | GREEN |
 //! | `b_*` | `Commands::remove::<RigidBody>()` on S (S leaves both the gather and the apply walk) | RED | GREEN |
 //! | `d_*` | S's `RigidBody::position` written 10 m away (a support loss with no removal) | RED | GREEN |
+//! | `e_*` (L9 ruling W2) | box pile, contact reuse on: S lowered by τ_eff / 2, so U's record refreshes with every point lifted (D6) and the pair has no manifold | not run | GREEN |
 //! | `c_*` | `disable::<Simulated>()` on S (S stays in the gather, parked) | GREEN guard | GREEN guard |
 //! | `control_deleting_a_body_*` | `delete_entity` of L (last row), which touches only the static floor: nobody may wake | GREEN | GREEN |
 //! | `control_deleting_a_lone_body_*` (I2) | `delete_entity` of L from row 1: S swap-moves and the island ids renumber; nobody may wake | not run | GREEN |
@@ -72,6 +77,8 @@ use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_colored_solve;
+#[cfg(not(miri))]
+use boyko_physics::resources::PairClasses;
 use boyko_physics::resources::{
     ConstraintGraph, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
 };
@@ -660,6 +667,218 @@ fn b_removing_the_supports_rigid_body_wakes_the_body_it_carried() {
 )]
 fn d_teleporting_the_support_away_wakes_the_body_it_carried() {
     assert_upper_fell(&scene(Change::TeleportSupport, Order::SupportLast, false));
+}
+
+// ── (e) a box pile: the support lowered by less than τ_eff, contact reuse on ─────
+
+/// Half-extent of the box-pile scene's cubes.
+#[cfg(not(miri))]
+const CUBE_HALF: f32 = 0.5;
+/// The contact-reuse distance τ of the box-pile scene: 2 mm, one of G-L9b-6's readout
+/// distances. Both box pairs (cube on cube, cube on the 20 m floor) have τ_eff = τ, since the
+/// radius and half-extent clamps are 5 % of 0.866 m and of 0.5 m.
+///
+/// Not the 1 mm default. The settled pile's S-U points sit up to 0.45 mm deep (read on this
+/// scene, 2026-09-23), so a drop must exceed that to lift them all. A hit allows at most
+/// |Δd| = τ_eff/√2, counted from the pose its record was built at: 0.71 mm at τ = 1 mm. That
+/// leaves a window too thin on both sides.
+#[cfg(not(miri))]
+const BOX_PILE_REUSE_DISTANCE: f32 = 0.002;
+/// How far (e) lowers the box support: half of τ_eff. That is below τ_eff, as ruling W2 asks.
+/// It is deeper than the pile's resting S-U penetration, which the test asserts as a premise.
+/// And it leaves 0.41 mm of the criterion's τ_eff/√2 for the drift since the record was built.
+#[cfg(not(miri))]
+const BOX_SUPPORT_DROP: f32 = 0.5 * BOX_PILE_REUSE_DISTANCE;
+
+/// A unit-mass cube of half-extent [`CUBE_HALF`] at rest.
+#[cfg(not(miri))]
+fn cube(id: u32, position: Vec3) -> Spec {
+    Spec {
+        id,
+        position,
+        shape: ColliderShape::Box {
+            half_extents: Vec3::new(CUBE_HALF, CUBE_HALF, CUBE_HALF),
+        },
+        inv_mass: 1.0,
+    }
+}
+
+/// What the box-pile scene observed.
+#[cfg(not(miri))]
+#[derive(Debug)]
+struct BoxPileOutcome {
+    settle_steps: usize,
+    /// The narrowphase's pair classes on the last settle step and on the step after the drop.
+    classes_latched: PairClasses,
+    classes_after_drop: PairClasses,
+    /// The deepest penetration of the S-U manifold's points on the last settle step.
+    upper_depth_latched: f32,
+    upper_y_before: f32,
+    upper_awake_first_step: bool,
+    upper_contacts_after_first_step: Vec<u32>,
+    upper_awake_steps: usize,
+    upper_y_after: f32,
+    upper_contacts_after: Vec<u32>,
+}
+
+/// Floor + cube S under cube U, contact reuse forced on; settle until both are latched;
+/// lower S by [`BOX_SUPPORT_DROP`]; run `POST_STEPS` steps.
+#[cfg(not(miri))]
+fn box_pile_scene() -> BoxPileOutcome {
+    let mut h = Harness::new();
+    {
+        let cfg = h.world.resource_mut::<PhysicsConfig>();
+        cfg.contact_reuse = true;
+        cfg.contact_reuse_distance = BOX_PILE_REUSE_DISTANCE;
+    }
+    h.spawn(floor());
+    let support = h.spawn(cube(SUPPORT, Vec3::new(0.0, CUBE_HALF, 0.0)));
+    let upper = h.spawn(cube(UPPER, Vec3::new(0.0, 3.0 * CUBE_HALF, 0.0)));
+    assert_eq!(
+        h.walk_ids(),
+        vec![FLOOR, SUPPORT, UPPER],
+        "construction: walk order of the box pile"
+    );
+
+    let settle_steps = h.settle_until_latched(&[SUPPORT, UPPER]);
+    h.assert_walk_matches_gather();
+    let classes_latched = h.world.resource::<Manifolds>().pair_classes();
+    assert_eq!(
+        h.contact_ids(UPPER),
+        vec![SUPPORT],
+        "construction: U must rest on S and touch nothing else before the drop"
+    );
+    assert_eq!(
+        h.contact_ids(SUPPORT),
+        vec![FLOOR, UPPER],
+        "construction: S must rest on the floor and carry U before the drop"
+    );
+    let upper_y_before = h.body(upper).position.y;
+    let upper_depth_latched = {
+        let pair = [h.row_of(SUPPORT) as u32, h.row_of(UPPER) as u32];
+        h.world
+            .resource::<Manifolds>()
+            .manifolds()
+            .iter()
+            .filter(|m| pair.contains(&m.body_a.0) && pair.contains(&m.body_b.0))
+            .flat_map(|m| m.points[..usize::from(m.count)].iter())
+            .fold(0.0f32, |d, p| d.max(-p.separation))
+    };
+
+    {
+        let mut body = h
+            .world
+            .get_component_mut::<RigidBody>(support)
+            .expect("construction: S is live");
+        body.position.y -= BOX_SUPPORT_DROP;
+    }
+    assert_eq!(
+        h.walk_ids(),
+        vec![FLOOR, SUPPORT, UPPER],
+        "construction: a pose write moves no row"
+    );
+
+    h.step();
+    let classes_after_drop = h.world.resource::<Manifolds>().pair_classes();
+    let upper_awake_first_step = h.awake(UPPER);
+    let upper_contacts_after_first_step = h.contact_ids(UPPER);
+    let mut upper_awake_steps = usize::from(upper_awake_first_step);
+    for _ in 1..POST_STEPS {
+        h.step();
+        upper_awake_steps += usize::from(h.awake(UPPER));
+    }
+
+    BoxPileOutcome {
+        settle_steps,
+        classes_latched,
+        classes_after_drop,
+        upper_depth_latched,
+        upper_y_before,
+        upper_awake_first_step,
+        upper_contacts_after_first_step,
+        upper_awake_steps,
+        upper_y_after: h.body(upper).position.y,
+        upper_contacts_after: h.contact_ids(UPPER),
+    }
+}
+
+/// (e) L9 contact reuse, ruling W2 (`docs/physics/perf-campaign/levers/00-RULINGS.md`): a
+/// latched box pile whose support S is lowered by half of τ_eff must wake the box U it
+/// carried. With contact reuse on, both box pairs are served from their records on that step
+/// (the drop is inside what the criterion accepts). The drop is deeper than U's resting
+/// penetration, so every point of U's record lifts: the refresh keeps none (design D6), the
+/// pair has no manifold, the island's count changes, and U wakes. A refresh that kept the
+/// lifted points, or a hit that kept its manifold, leaves U latched above S with the count
+/// unchanged. This test turns red then; the sphere scenes above cannot, since contact reuse
+/// touches box pairs only.
+///
+/// Contact reuse is forced on here (it is off by default before L9 C4), with its distance
+/// set by [`BOX_PILE_REUSE_DISTANCE`], so the arm is the same before and after C4.
+/// `cfg(not(miri))` for the same reason as the scenes above: the real schedule on a thread
+/// pool is intractable under Miri.
+#[test]
+#[cfg(not(miri))]
+fn e_lowering_a_box_support_by_less_than_tau_eff_wakes_the_box_it_carried() {
+    let o = under_watchdog(
+        "box pile: S lowered by half of tau_eff, contact reuse on",
+        box_pile_scene,
+    );
+    assert!(
+        o.upper_depth_latched < BOX_SUPPORT_DROP,
+        "premise: U's deepest resting point on S must be shallower than the {BOX_SUPPORT_DROP} m \
+         drop, or the drop lifts no point off and nothing is tested; it sits {} m deep",
+        o.upper_depth_latched
+    );
+    println!(
+        "(e) box pile: latched after {} steps, U {} m deep on S, drop {BOX_SUPPORT_DROP} m; pair \
+         classes latched {:?}, after the drop {:?}; U awake on {}/{POST_STEPS} steps, y {} -> {}",
+        o.settle_steps,
+        o.upper_depth_latched,
+        o.classes_latched,
+        o.classes_after_drop,
+        o.upper_awake_steps,
+        o.upper_y_before,
+        o.upper_y_after
+    );
+    let served_by_records = |c: &PairClasses| c.reused == 2 && c.full == 0;
+    assert!(
+        served_by_records(&o.classes_latched),
+        "premise: on the step the pile latched (after {} steps), both box contacts (floor-S and \
+         S-U) must be served from their records, or the pile is not on the reuse path this test \
+         is about; pair classes {:?}",
+        o.settle_steps,
+        o.classes_latched
+    );
+    assert!(
+        served_by_records(&o.classes_after_drop),
+        "premise: on the step after S is lowered by {BOX_SUPPORT_DROP} m, both box pairs must \
+         still hit their records, so that S-U losing its manifold is the refresh dropping lifted \
+         points (D6) and not a full collision finding a gap; pair classes {:?}",
+        o.classes_after_drop
+    );
+    assert!(
+        o.upper_awake_first_step,
+        "support moved by less than tau_eff, contact reuse on: U's row must be awake on the first \
+         step after S is lowered by {BOX_SUPPORT_DROP} m, since every point of U's contact lifted \
+         and the island's manifold count changed; U's contacts on that step: {:?} (S = {SUPPORT} \
+         must not be among them); awake on {}/{POST_STEPS} steps; pair classes on that step {:?}",
+        o.upper_contacts_after_first_step, o.upper_awake_steps, o.classes_after_drop
+    );
+    assert!(
+        !o.upper_contacts_after_first_step.contains(&SUPPORT),
+        "all of U's points lifted by {BOX_SUPPORT_DROP} m, so U and S must have no manifold on \
+         the first step after the drop (D6); U's contacts on that step: {:?}",
+        o.upper_contacts_after_first_step
+    );
+    assert!(
+        o.upper_contacts_after == [SUPPORT]
+            && (o.upper_y_after - o.upper_y_before).abs() <= MAX_CARRIED_DRIFT,
+        "after the wake U must land back on S within {POST_STEPS} steps: U's contacts {:?}, \
+         y before = {}, y after = {} (bound {MAX_CARRIED_DRIFT} m)",
+        o.upper_contacts_after,
+        o.upper_y_before,
+        o.upper_y_after
+    );
 }
 
 // ── (c) guard: a parked support is not a lost support ────────────────────────

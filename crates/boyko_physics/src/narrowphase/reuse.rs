@@ -577,7 +577,8 @@ mod tests {
     //!   at most `2·τ_eff` deeper than the refresh's; (c) every corner of the smaller body moved by
     //!   at most τ_eff in the larger body's frame (lemma L9-L3). Mutations M-b1 (the criterion
     //!   without its rotation term), M-b3 (the refresh's normal carried by the incident body) and
-    //!   M-b4 (no τ_eff clamp) must each turn it red.
+    //!   M-b4 (no τ_eff clamp) must each turn it red. Two fixed cases run first and carry M-b1's
+    //!   witness, so no random draw can leave the rotation term unexercised.
     //! * **G-L9b-2** — lemma L9-L1: after a forced miss (a teleport and back, a shape change and
     //!   back) the outputs of three steps at frozen poses are bitwise equal, and a record's first
     //!   step equals its next. M-b5 (a miss emitting the raw full collision) must turn it red.
@@ -1084,6 +1085,41 @@ mod tests {
         }
     }
 
+    /// G-L9b-1's two fixed rotation witnesses, so that M-b1's visibility does not rest on the
+    /// random draw. Among the random cases, a hit whose rotation term reaches half of the
+    /// criterion's budget comes up about 7 times in 4096 (`SoundSeen::rotation_bound`), so about one
+    /// run in 2000 would read 0.
+    ///
+    /// A cube of half-extent 0.5 (body B, S) rests 0.5 mm deep on a 2 × 1 × 2 m base (body A, F:
+    /// the larger radius, no tie) at τ = 1 mm, where τ_eff = τ. Between the poses S turns about the
+    /// x axis through its own centre. Δd is then exactly 0, and the criterion's left side is its
+    /// rotation term alone, `8 s² (r_S + τ_eff)²`, which each case sets to `k·τ_eff²`:
+    ///
+    /// * `k = 0.8`: a hit, and the rotation term is 0.8 of the budget (the witness counts from
+    ///   0.5), so every run counts it in `rotation_bound`;
+    /// * `k = 8`: a miss that the rotation term alone decides. Without that term (M-b1) it is a
+    ///   hit on which the corners 0.707 m off the axis move `√(k/2)·0.707·τ_eff / (r_S + τ_eff)`
+    ///   ≈ 1.63 τ_eff, so check (c) fails on every run.
+    #[cfg(not(miri))]
+    fn rotation_witnesses() -> [SoundCase; 2] {
+        let tau = 1.0e-3;
+        let (ha, hb) = (Vec3::new(1.0, 0.5, 1.0), Vec3::new(0.5, 0.5, 0.5));
+        let base = (Vec3::ZERO, Quat::IDENTITY);
+        let centre = Vec3::new(0.0, ha.y + hb.y - 0.5 * tau, 0.0);
+        let arm = hb.length() + tau;
+        [0.8f32, 8.0].map(|k| {
+            let s = (k / 8.0).sqrt() * tau / arm;
+            let turned = about(Vec3::new(1.0, 0.0, 0.0), 2.0 * s.asin());
+            SoundCase {
+                ha,
+                hb,
+                pose0: [base, (centre, Quat::IDENTITY)],
+                pose1: [base, (centre, turned)],
+                tau,
+            }
+        })
+    }
+
     /// `v` as `f64`s.
     #[cfg(not(miri))]
     fn f64s(v: Vec3) -> [f64; 3] {
@@ -1305,15 +1341,38 @@ mod tests {
         Ok(())
     }
 
-    /// G-L9b-1: the criterion's soundness (module docs). 4096 cases.
+    /// G-L9b-1: the criterion's soundness (module docs). 4096 random cases, after the two fixed
+    /// rotation witnesses of [`rotation_witnesses`].
     ///
     /// Mutations this must turn red: M-b1, the criterion without `4 s² (r_S + τ_eff)²` (a rotation
-    /// about S's centre moves no centre, so only (c) and (b) catch it); M-b3, the refresh measuring
-    /// against the incident body's own face normal instead of the reference face's (a); M-b4, τ_eff
-    /// unclamped (the small and thin boxes, (c)).
+    /// about S's centre moves no centre, so only (c) and (b) catch it; the fixed `k = 8` witness
+    /// catches it on every run, before any random case); M-b3, the refresh measuring against the
+    /// incident body's own face normal instead of the reference face's (a); M-b4, τ_eff unclamped
+    /// (the small and thin boxes, (c)).
     #[test]
     #[cfg(not(miri))]
     fn the_criterion_bounds_what_a_hit_can_miss() {
+        // The rotation witnesses: fixed, so a run cannot draw zero of them.
+        let [bound, decided] = rotation_witnesses();
+        let mut seen_bound = SoundSeen::default();
+        if let Err(why) = sound_check(&bound, &mut seen_bound) {
+            panic!("the fixed rotation-bound witness (k = 0.8): {why}; case {bound:?}");
+        }
+        assert!(
+            seen_bound.hits == 1 && seen_bound.rotation_bound == 1,
+            "the fixed rotation-bound witness must be a hit whose rotation term is at least half of \
+             the criterion's budget: {seen_bound:?}"
+        );
+        let mut seen_decided = SoundSeen::default();
+        if let Err(why) = sound_check(&decided, &mut seen_decided) {
+            panic!("the fixed rotation-decided witness (k = 8): {why}; case {decided:?}");
+        }
+        assert!(
+            seen_decided.records == 1 && seen_decided.misses == 1,
+            "the fixed rotation-decided witness must build a record and miss it: {seen_decided:?}"
+        );
+        println!("G-L9b-1 fixed rotation witnesses: k = 0.8 {seen_bound:?}; k = 8 {seen_decided:?}");
+
         let totals = Cell::new(SoundSeen::default());
         let config = ProptestConfig { cases: 4096, failure_persistence: None, ..ProptestConfig::default() };
         proptest!(config, |(seed in any::<u64>())| {
@@ -1330,10 +1389,8 @@ mod tests {
         assert!(seen.hits >= 512 && seen.misses >= 512, "the criterion must both keep and reject: {seen:?}");
         assert!(seen.corners > 0, "(a) checked no original corner: {seen:?}");
         assert!(seen.unseen_deeper > 0, "(b) never saw a deeper unseen feature: {seen:?}");
-        assert!(
-            seen.rotation_bound > 0,
-            "no hit was bounded by the rotation term (M-b1 could not be seen): {seen:?}"
-        );
+        // `seen.rotation_bound` is printed, not asserted: the fixed witnesses above carry M-b1's
+        // visibility, since the random draw reads 0 about once in 2000 runs.
         assert!(seen.small > 0, "no hit on a box the clamp binds (M-b4 could not be seen): {seen:?}");
         assert!(seen.far_incident > 0, "no face hit with a far incident body (review O4): {seen:?}");
         assert!(seen.partial > 0, "no face hit on a record that kept fewer than four points: {seen:?}");
