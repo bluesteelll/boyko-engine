@@ -22,8 +22,8 @@ mod resource;
 mod state_chart;
 mod system_set;
 mod ui;
-#[cfg(test)] mod ug15_corpus;
-
+#[cfg(test)]
+mod ug15_corpus;
 use proc_macro::TokenStream;
 
 /// Derive macro for implementing the Component trait.
