@@ -22,7 +22,13 @@
 //! `MIN_PARALLEL_BODIES` = 4096 it takes the serial path, so those rows read like `grid_w1`)
 //! and `tree` ([`BroadphaseTree::step_direct`] with the tree path forced, timed in its steady
 //! state: three untimed steps first, so a static is a member and every timed step is an
-//! `Identity` verify, the active build, the queries and the assembly). Sizes: the design's
+//! `Identity` verify, the active build, the queries and the assembly). `tree` runs the default
+//! query kernel ([`QueryKernel::LeafList`], C3b); `tree_rowwalk` is the same step with
+//! [`QueryKernel::RowWalk`], C1's per-row walk, so the two kernels are compared in one binary.
+//! Before timing, each family and size prints a receipt per kernel — the `TreeDiag` counts of the
+//! active leaf nodes each path answered (`leaf_list_leaves`, `fallback_leaves`,
+//! `row_walk_leaves`) — and asserts that the kernel it names is the one that ran; each timed arm
+//! asserts it again on its own instance. Sizes: the design's
 //! {17, 64, 128, 256, 1k, 10k, 100k} for `uniform` (unit spheres on a jittered lattice) and
 //! `disparity` (the O2 W1 scene: small spheres plus four giants); `scene` is Jolt's pyramid on
 //! its static floor at 1 240 boxes (J at t = 0), 10k and 100k (taller pyramids, truncated), and
@@ -60,7 +66,9 @@ use std::time::{Duration, Instant};
 use criterion::{BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use std::hint::black_box;
 
-use boyko_physics::broadphase_tree::{BroadphaseTree, NO_PREV_ROW, TreeDiag, all_pairs_into};
+use boyko_physics::broadphase_tree::{
+    BroadphaseTree, NO_PREV_ROW, QueryKernel, TreeDiag, all_pairs_into,
+};
 use boyko_physics::components::ColliderShape;
 use boyko_physics::manifold::BodyIndex;
 use boyko_physics::math::Vec3;
@@ -365,7 +373,51 @@ fn in_scene(n: usize) -> Vec<BodyState> {
 
 // ── G4 pair finding ───────────────────────────────────────────────────────────
 
-/// The four pair-finding arms over one body set, labelled `param`.
+/// Asserts that `d`, a tree's counters after tree-path steps under `kernel`, names `kernel` as
+/// the path that answered its active leaves: the leaf list (some of them possibly through its
+/// fallback) or the per-row walk, and never the other.
+fn assert_kernel_receipt(d: &TreeDiag, kernel: QueryKernel, what: &str) {
+    match kernel {
+        QueryKernel::LeafList => {
+            assert!(d.leaf_list_leaves + d.fallback_leaves > 0, "{what}: the leaf list answered no leaf: {d:?}");
+            assert_eq!(d.row_walk_leaves, 0, "{what}: the per-row walk ran under the leaf list: {d:?}");
+        }
+        QueryKernel::RowWalk => {
+            assert!(d.row_walk_leaves > 0, "{what}: the per-row walk answered no leaf: {d:?}");
+            assert_eq!(
+                (d.leaf_list_leaves, d.fallback_leaves),
+                (0, 0),
+                "{what}: the leaf list ran under the per-row walk: {d:?}"
+            );
+        }
+    }
+}
+
+/// The tree arm under `kernel`: its steady state, then the timed step.
+fn bench_tree_arm(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    name: &str,
+    kernel: QueryKernel,
+    param: &str,
+    bodies: &[BodyState],
+) {
+    group.bench_with_input(BenchmarkId::new(name, param), bodies, |b, bodies| {
+        let mut tree = BroadphaseTree::with_capacity(bodies.len());
+        tree.set_brute_max_rows(0);
+        tree.set_query_kernel(kernel);
+        let mut out = ContactPairs::with_capacity(0);
+        for _ in 0..TREE_WARM_STEPS {
+            tree.step_direct(bodies, &mut out);
+        }
+        assert_kernel_receipt(&tree.diag(), kernel, name);
+        b.iter(|| {
+            tree.step_direct(black_box(bodies), &mut out);
+            black_box(out.pairs().len());
+        });
+    });
+}
+
+/// The five pair-finding arms over one body set, labelled `param`.
 fn bench_g4_arms(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     pool: &Arc<ThreadPool>,
@@ -377,10 +429,12 @@ fn bench_g4_arms(
     let mut oracle = ContactPairs::with_capacity(0);
     all_pairs_into(bodies, &mut oracle);
     assert!(!oracle.pairs().is_empty(), "anti-vacuity: {family}/{param} must produce pairs");
-    {
-        // The Tree's steady state equals the oracle, and the receipt names what it holds.
+    for kernel in [QueryKernel::LeafList, QueryKernel::RowWalk] {
+        // The Tree's steady state equals the oracle under each kernel, and the receipt names
+        // what it holds and the kernel that answered.
         let mut tree = BroadphaseTree::with_capacity(n);
         tree.set_brute_max_rows(0);
+        tree.set_query_kernel(kernel);
         let mut out = ContactPairs::with_capacity(0);
         for _ in 0..TREE_WARM_STEPS {
             tree.step_direct(bodies, &mut out);
@@ -388,17 +442,22 @@ fn bench_g4_arms(
         assert_eq!(
             out.pairs(),
             oracle.pairs(),
-            "{family}/{param}: the tree's steady-state pair set is AllPairs'"
+            "{family}/{param} ({kernel:?}): the tree's steady-state pair set is AllPairs'"
         );
         let d = tree.diag();
+        assert_kernel_receipt(&d, kernel, &format!("bp_g4_{family}/{param}"));
         eprintln!(
-            "bp_g4_{family}/{param}: rows {n} pairs {} tree members {} static_rebuilds {} \
-             wide {} excluded {}",
+            "bp_g4_{family}/{param}: kernel {kernel:?} rows {n} pairs {} tree members {} \
+             static_rebuilds {} wide {} excluded {} leaf_list_leaves {} fallback_leaves {} \
+             row_walk_leaves {}",
             oracle.pairs().len(),
             d.members,
             d.static_rebuilds,
             d.wide_rows,
-            d.excluded_rows
+            d.excluded_rows,
+            d.leaf_list_leaves,
+            d.fallback_leaves,
+            d.row_walk_leaves
         );
     }
 
@@ -431,18 +490,8 @@ fn bench_g4_arms(
             });
         });
     });
-    group.bench_with_input(BenchmarkId::new("tree", param), bodies, |b, bodies| {
-        let mut tree = BroadphaseTree::with_capacity(bodies.len());
-        tree.set_brute_max_rows(0);
-        let mut out = ContactPairs::with_capacity(0);
-        for _ in 0..TREE_WARM_STEPS {
-            tree.step_direct(bodies, &mut out);
-        }
-        b.iter(|| {
-            tree.step_direct(black_box(bodies), &mut out);
-            black_box(out.pairs().len());
-        });
-    });
+    bench_tree_arm(group, "tree", QueryKernel::LeafList, param, bodies);
+    bench_tree_arm(group, "tree_rowwalk", QueryKernel::RowWalk, param, bodies);
 }
 
 /// G4 pair finding: the `uniform` and `disparity` families at the design's sizes, and the

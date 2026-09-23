@@ -40,8 +40,32 @@
 //! `add`, `cmp LE_OQ` / `GE_OQ`) round exactly as their scalar `f32` counterparts, and the
 //! in-crate G0 property test pins the two against each other on adversarial inputs. The source
 //! census test at the end of this file keeps the arm free of fused and approximate ops.
+//!
+//! # The leaf-list tests (C3b, F1)
+//!
+//! The leaf-list query (`mod.rs`, [`QueryKernel::LeafList`](super::QueryKernel)) keeps, per
+//! 8-row active leaf, a [`CandList`]: the leaves whose parent-lane box meets the leaf's box, as
+//! six box rows, a leaf index and (on the active tree) the leaf's largest row, eight candidates
+//! to a chunk. Each row then runs
+//!
+//! * the prefilter ([`CandList::for_each_kept`]): the six `LE_OQ` / `GE_OQ` compares of
+//!   [`box_mask`], on bit copies of the same parent-lane boxes against the same [`QueryBox`] —
+//!   so a candidate is kept exactly when the per-row walk would have tested its leaf — and, on
+//!   the active tree, `maxrow > row` as a signed 32-bit compare (rows stay below `2^24`);
+//! * [`leaf_mask_above`]: [`leaf_mask`] and `lane row > row` in one mask, the per-row walk's
+//!   `t > row` filter moved into the vector. [`NO_LANE_ROW`](super::bvh::NO_LANE_ROW) reads as
+//!   `-1`, which is above no row.
+//!
+//! The collection left-packs the selected lanes of a level-1 node with a 256-entry permutation
+//! table ([`CandList::push_lanes`]). The integer ops (`cmpgt_epi32`, the permutes, the
+//! zero-extension) are exact, so the arms agree bit for bit here too (G-LL4).
 
-use super::bvh::{LEAF_R, LEAF_X, LEAF_Y, LEAF_Z, MAX_X, MAX_Y, MAX_Z, MIN_X, MIN_Y, MIN_Z, Node8};
+use core::mem::MaybeUninit;
+
+use super::bvh::{
+    LANES, LEAF_MAXROW, LEAF_R, LEAF_ROW, LEAF_X, LEAF_Y, LEAF_Z, MAX_X, MAX_Y, MAX_Z, MIN_X,
+    MIN_Y, MIN_Z, Node8,
+};
 
 /// The relative slack of a cull bound: `2^-20`, sixteen ulp of `f32`.
 const SLACK_REL: f32 = 1.0 / 1_048_576.0;
@@ -53,6 +77,43 @@ const SLACK_REL: f32 = 1.0 / 1_048_576.0;
 /// `2^-126` here, sized for sub-normal *rows*, and missed pairs at `|p| ~ 2^-60`, `|r| ~ 2^-90`
 /// — the review of C1, W1; `g1_subnormal_pairs_are_found` pins it.)
 const SLACK_ABS: f32 = 1.0 / (1u128 << 72) as f32;
+
+/// Candidate leaves one leaf-list collection may hold per tree. A leaf whose collection exceeds
+/// it answers its rows with the per-row walk instead (the fallback, counted in
+/// [`TreeDiag::fallback_leaves`](super::TreeDiag::fallback_leaves)). Counted at 1 000 rows the
+/// largest collection is 89 on J and 126 on the disparity scene (design C3b, §6).
+pub(crate) const LEAF_LIST_CAP: usize = 128;
+
+/// A [`CandList`] row's length: the cap plus one chunk, so the eight-lane left-pack store at
+/// `len ≤ LEAF_LIST_CAP` and the pad chunk both stay inside it.
+const CAND_BUF: usize = LEAF_LIST_CAP + LANES;
+
+// Every row of a `CandList` starts on a 32-byte boundary, so a chunk load is aligned.
+const _: () = assert!(CAND_BUF.is_multiple_of(LANES) && (CAND_BUF * 4).is_multiple_of(32));
+
+/// The left-pack permutations: byte `j` of entry `m` is the lane of the `j`-th set bit of `m`;
+/// the bytes past `popcount(m)` are `0`.
+const PACK_TABLE: [u64; 256] = pack_table();
+
+const fn pack_table() -> [u64; 256] {
+    let mut table = [0u64; 256];
+    let mut m = 0usize;
+    while m < 256 {
+        let mut entry = 0u64;
+        let mut j = 0u32;
+        let mut k = 0u64;
+        while k < 8 {
+            if m & (1 << k) != 0 {
+                entry |= k << (8 * j);
+                j += 1;
+            }
+            k += 1;
+        }
+        table[m] = entry;
+        m += 1;
+    }
+    table
+}
 
 /// The half-extent a row's cull box gets on every axis: `|r| + (‖p‖∞ + |r|)·2^-20 + 2^-72`.
 ///
@@ -105,6 +166,448 @@ pub(crate) fn leaf_mask(node: &Node8, x: f32, y: f32, z: f32, r: f32) -> u32 {
     #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
     {
         leaf_mask_scalar(node, x, y, z, r)
+    }
+}
+
+/// [`leaf_mask`] restricted to the lanes whose row is above `row`: the leaf-list query's exact
+/// test, with the per-row walk's `t > row` filter in the mask. `row < 2^24`; an empty or
+/// killed lane (row [`NO_LANE_ROW`](super::bvh::NO_LANE_ROW), `-1` as `i32`) is never above it.
+#[inline]
+pub(crate) fn leaf_mask_above(node: &Node8, x: f32, y: f32, z: f32, r: f32, row: u32) -> u32 {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+    {
+        leaf_mask_above_avx2(node, x, y, z, r, row)
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
+    {
+        leaf_mask_above_scalar(node, x, y, z, r, row)
+    }
+}
+
+/// The scalar arm of [`leaf_mask_above`].
+//
+// `dead_code`: as for `box_mask_scalar`.
+#[allow(dead_code)]
+#[inline]
+pub(crate) fn leaf_mask_above_scalar(node: &Node8, x: f32, y: f32, z: f32, r: f32, row: u32) -> u32 {
+    let mut above = 0u32;
+    for k in 0..LANES {
+        let hit = node.p[LEAF_ROW][k].to_bits() as i32 > row as i32;
+        above |= u32::from(hit) << k;
+    }
+    leaf_mask_scalar(node, x, y, z, r) & above
+}
+
+/// The candidate leaves of one leaf-list collection, structure of arrays: each candidate's
+/// parent-lane box (six rows in the [`Node8`] internal row order), its leaf index and, on the
+/// active tree, its largest row ([`LEAF_MAXROW`]). A row's tests read it eight candidates — one
+/// chunk — at a time.
+///
+/// Function-local scratch of the query pass (about 4.4 KB), never initialised as a whole: every
+/// push writes all eight arrays of each lane it appends, and [`seal`](Self::seal) writes one
+/// pad chunk behind the last candidate, whose empty box (`+inf` mins, `-inf` maxes) meets no
+/// query box. A lane, once written, stays initialised for the list's lifetime, so every lane
+/// below `LANES · chunks` is initialised whenever `chunks` was set by a seal.
+#[repr(C, align(32))]
+pub(crate) struct CandList {
+    /// `b[MIN_X ..= MAX_Z][i]`: candidate `i`'s parent-lane box.
+    b: [[MaybeUninit<f32>; CAND_BUF]; 6],
+    /// Candidate `i`'s leaf node index (level 0).
+    idx: [MaybeUninit<u32>; CAND_BUF],
+    /// Candidate `i`'s largest live row (read by the active list's prefilter only; a static
+    /// list's pushes write `0`).
+    maxrow: [MaybeUninit<u32>; CAND_BUF],
+    /// Candidates pushed.
+    len: usize,
+    /// Chunks readable since the last seal: `len.div_ceil(LANES)` then, `0` after a clear.
+    chunks: usize,
+}
+
+impl CandList {
+    /// An empty list. Writes nothing into the rows.
+    #[inline]
+    pub(crate) fn new() -> Self {
+        Self {
+            b: [[MaybeUninit::uninit(); CAND_BUF]; 6],
+            idx: [MaybeUninit::uninit(); CAND_BUF],
+            maxrow: [MaybeUninit::uninit(); CAND_BUF],
+            len: 0,
+            chunks: 0,
+        }
+    }
+
+    /// Candidates held.
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Test-only: chunks of eight candidates a row tests (`0` until sealed).
+    #[cfg(test)]
+    pub(crate) fn chunks(&self) -> usize {
+        self.chunks
+    }
+
+    /// Empties the list.
+    #[inline]
+    pub(crate) fn clear(&mut self) {
+        self.len = 0;
+        self.chunks = 0;
+    }
+
+    /// Appends one candidate: leaf `leaf` with box `[lo, hi]` and largest row `maxrow`. Returns
+    /// `false`, appending nothing, when the list would exceed `cap ≤ LEAF_LIST_CAP`.
+    #[inline]
+    pub(crate) fn push_one(&mut self, lo: [f32; 3], hi: [f32; 3], leaf: u32, maxrow: u32, cap: usize) -> bool {
+        debug_assert!(cap <= LEAF_LIST_CAP, "invariant: the cap fits the buffer");
+        let i = self.len;
+        if i + 1 > cap {
+            return false;
+        }
+        let rows = [lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]];
+        for (row, v) in self.b.iter_mut().zip(rows) {
+            row[i] = MaybeUninit::new(v);
+        }
+        self.idx[i] = MaybeUninit::new(leaf);
+        self.maxrow[i] = MaybeUninit::new(maxrow);
+        self.len = i + 1;
+        self.chunks = 0;
+        true
+    }
+
+    /// Left-packs the lanes of the level-1 `node` set in `mask` (its box rows, and leaf
+    /// indices `first + lane`) behind the candidates held, in ascending lane order. With
+    /// `leaves`, each pushed candidate's largest row is read from its leaf node's
+    /// [`LEAF_MAXROW`] row; without, it is `0`. Returns `false`, appending nothing, when the
+    /// list would exceed `cap ≤ LEAF_LIST_CAP`.
+    #[inline]
+    pub(crate) fn push_lanes(&mut self, node: &Node8, mask: u32, first: u32, cap: usize, leaves: Option<&[Node8]>) -> bool {
+        self.push_lanes_arm::<false>(node, mask, first, cap, leaves)
+    }
+
+    /// [`push_lanes`](Self::push_lanes) with the store arm chosen: `SCALAR` forces the scalar
+    /// arm (G-LL4's reference); otherwise the build's arm.
+    #[inline]
+    pub(crate) fn push_lanes_arm<const SCALAR: bool>(
+        &mut self,
+        node: &Node8,
+        mask: u32,
+        first: u32,
+        cap: usize,
+        leaves: Option<&[Node8]>,
+    ) -> bool {
+        debug_assert!(cap <= LEAF_LIST_CAP, "invariant: the cap fits the buffer");
+        debug_assert!(mask < 1 << LANES, "a lane mask has eight bits");
+        let len = self.len;
+        let count = mask.count_ones() as usize;
+        if len + count > cap {
+            return false;
+        }
+        if SCALAR {
+            self.push_lanes_scalar(node, mask, first);
+        } else {
+            #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+            self.push_lanes_avx2(node, mask, first);
+            #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
+            self.push_lanes_scalar(node, mask, first);
+        }
+        if let Some(leaves) = leaves {
+            let mut m = mask;
+            let mut i = len;
+            while m != 0 {
+                let k = m.trailing_zeros();
+                m &= m - 1;
+                let leaf = &leaves[(first + k) as usize];
+                self.maxrow[i] = MaybeUninit::new(leaf.p[LEAF_MAXROW][0].to_bits());
+                i += 1;
+            }
+        }
+        self.len = len + count;
+        self.chunks = 0;
+        true
+    }
+
+    /// The scalar arm of the left-pack: the reference the AVX2 arm is pinned against (G-LL4).
+    #[inline]
+    fn push_lanes_scalar(&mut self, node: &Node8, mask: u32, first: u32) {
+        let mut m = mask;
+        let mut i = self.len;
+        while m != 0 {
+            let k = m.trailing_zeros() as usize;
+            m &= m - 1;
+            for (row, src) in self.b.iter_mut().zip(&node.p) {
+                row[i] = MaybeUninit::new(src[k]);
+            }
+            self.idx[i] = MaybeUninit::new(first + k as u32);
+            self.maxrow[i] = MaybeUninit::new(0);
+            i += 1;
+        }
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+    #[inline]
+    fn push_lanes_avx2(&mut self, node: &Node8, mask: u32, first: u32) {
+        use core::arch::x86_64::{
+            __m256i, _mm_cvtsi64_si128, _mm256_add_epi32, _mm256_cvtepu8_epi32, _mm256_load_ps,
+            _mm256_permutevar8x32_epi32, _mm256_permutevar8x32_ps, _mm256_set1_epi32,
+            _mm256_setr_epi32, _mm256_setzero_si256, _mm256_storeu_ps, _mm256_storeu_si256,
+        };
+        let len = self.len;
+        debug_assert!(len <= LEAF_LIST_CAP, "invariant: a push starts at or below the cap");
+        let entry = PACK_TABLE[(mask & 0xff) as usize];
+        // SAFETY: `len ≤ cap ≤ LEAF_LIST_CAP` (checked by `push_lanes` before this call), so the
+        // eight-lane stores at `len` end at `len + 8 ≤ CAND_BUF`, inside each row array, whose
+        // pointer is derived from `&mut self` and so is valid for writes; `storeu` has no
+        // alignment requirement and the lanes are `MaybeUninit`, so writing them is always
+        // sound. The loads read the 32-byte aligned, initialised `[f32; 8]` rows of the borrowed
+        // node (`Node8` is `#[repr(C, align(32))]`). The `avx2` feature is compiled in (the
+        // `cfg` on this function). The lanes past `popcount(mask)` receive permuted node lanes:
+        // initialised values that the next push or the seal's pad overwrites before a row
+        // reads them as candidates.
+        unsafe {
+            let perm = _mm256_cvtepu8_epi32(_mm_cvtsi64_si128(entry as i64));
+            for (row, src) in self.b.iter_mut().zip(&node.p) {
+                let v = _mm256_permutevar8x32_ps(_mm256_load_ps(src.as_ptr()), perm);
+                _mm256_storeu_ps(row.as_mut_ptr().add(len).cast::<f32>(), v);
+            }
+            let ids = _mm256_add_epi32(
+                _mm256_set1_epi32(first as i32),
+                _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7),
+            );
+            _mm256_storeu_si256(
+                self.idx.as_mut_ptr().add(len).cast::<__m256i>(),
+                _mm256_permutevar8x32_epi32(ids, perm),
+            );
+            _mm256_storeu_si256(self.maxrow.as_mut_ptr().add(len).cast::<__m256i>(), _mm256_setzero_si256());
+        }
+    }
+
+    /// Closes the list for reading: one pad chunk behind the last candidate (an empty box,
+    /// leaf `0`, max row `0`), then `chunks = len.div_ceil(LANES)`.
+    #[inline]
+    pub(crate) fn seal(&mut self) {
+        let len = self.len;
+        debug_assert!(len <= LEAF_LIST_CAP, "invariant: a list holds at most the cap");
+        for (r, row) in self.b.iter_mut().enumerate() {
+            let pad = if r < MAX_X { f32::INFINITY } else { f32::NEG_INFINITY };
+            for lane in &mut row[len..len + LANES] {
+                *lane = MaybeUninit::new(pad);
+            }
+        }
+        for lane in &mut self.idx[len..len + LANES] {
+            *lane = MaybeUninit::new(0);
+        }
+        for lane in &mut self.maxrow[len..len + LANES] {
+            *lane = MaybeUninit::new(0);
+        }
+        self.chunks = len.div_ceil(LANES);
+    }
+
+    /// Calls `f` with the leaf index of every candidate that passes the prefilter against the
+    /// query box `q` — the cull of [`box_mask`] on the candidates' parent-lane boxes and, with
+    /// `MAXROW`, `maxrow > row` — in candidate order, eight candidates per test. A leaf whose
+    /// largest row is at or below `row` holds no partner the row emits, so the active list is
+    /// read with `MAXROW` and the static one without.
+    ///
+    /// The per-row loop of the leaf-list query: it owns the chunk bound, so neither the chunk
+    /// reads nor the index reads carry a check of their own.
+    #[inline]
+    pub(crate) fn for_each_kept<const MAXROW: bool>(&self, q: &QueryBox, row: u32, mut f: impl FnMut(u32)) {
+        for c in 0..self.chunks {
+            // SAFETY: `c < chunks`, the loop bound.
+            let mut m = unsafe { self.prefilter_unchecked::<MAXROW>(c, q, row) };
+            while m != 0 {
+                let k = m.trailing_zeros() as usize;
+                m &= m - 1;
+                debug_assert!(k < LANES, "a prefilter mask has eight bits");
+                // SAFETY: `c < chunks` (the loop bound) and `k < LANES` (a set bit of a prefilter
+                // mask, which both arms build from eight lanes: `movemask_ps` of eight lanes, or
+                // eight shifted bits), so `8c + k < LANES · chunks ≤ len + LANES ≤ CAND_BUF`: a
+                // lane a push or the seal's pad wrote (see `prefilter_scalar_unchecked`).
+                f(unsafe { self.idx.get_unchecked(LANES * c + k).assume_init() });
+            }
+        }
+    }
+
+    /// Test-only: candidates of chunk `c` whose box meets `q` (bit `k` for candidate `8c + k`),
+    /// through the build's arm.
+    ///
+    /// # Panics
+    ///
+    /// If `c ≥ chunks()`.
+    #[cfg(test)]
+    pub(crate) fn prefilter_box(&self, c: usize, q: &QueryBox) -> u32 {
+        assert!(c < self.chunks, "invariant: a sealed chunk");
+        // SAFETY: `c < chunks`, asserted above.
+        unsafe { self.prefilter_unchecked::<false>(c, q, 0) }
+    }
+
+    /// Test-only: `prefilter_box` and `maxrow > row`, through the build's arm.
+    ///
+    /// # Panics
+    ///
+    /// If `c ≥ chunks()`.
+    #[cfg(test)]
+    pub(crate) fn prefilter_box_maxrow(&self, c: usize, q: &QueryBox, row: u32) -> u32 {
+        assert!(c < self.chunks, "invariant: a sealed chunk");
+        // SAFETY: `c < chunks`, asserted above.
+        unsafe { self.prefilter_unchecked::<true>(c, q, row) }
+    }
+
+    /// Test-only: the scalar arm of both prefilters, the reference the AVX2 arm is pinned
+    /// against (G-LL4).
+    ///
+    /// # Panics
+    ///
+    /// If `c ≥ chunks()`.
+    #[cfg(test)]
+    pub(crate) fn prefilter_scalar<const MAXROW: bool>(&self, c: usize, q: &QueryBox, row: u32) -> u32 {
+        assert!(c < self.chunks, "invariant: a sealed chunk");
+        // SAFETY: `c < chunks`, asserted above.
+        unsafe { self.prefilter_scalar_unchecked::<MAXROW>(c, q, row) }
+    }
+
+    /// The build's prefilter arm.
+    ///
+    /// # Safety
+    ///
+    /// `c < self.chunks()`.
+    #[inline]
+    unsafe fn prefilter_unchecked<const MAXROW: bool>(&self, c: usize, q: &QueryBox, row: u32) -> u32 {
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+        {
+            // SAFETY: the caller guarantees `c < chunks`.
+            unsafe { self.prefilter_avx2::<MAXROW>(c, q, row) }
+        }
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
+        {
+            // SAFETY: the caller guarantees `c < chunks`.
+            unsafe { self.prefilter_scalar_unchecked::<MAXROW>(c, q, row) }
+        }
+    }
+
+    /// The scalar prefilter: the arm every non-AVX2 build and Miri run, and G-LL4's reference.
+    ///
+    /// # Safety
+    ///
+    /// `c < self.chunks()`.
+    //
+    // `dead_code`: as for `box_mask_scalar` (an AVX2 non-test build has no caller).
+    #[allow(dead_code)]
+    #[inline]
+    unsafe fn prefilter_scalar_unchecked<const MAXROW: bool>(&self, c: usize, q: &QueryBox, row: u32) -> u32 {
+        debug_assert!(c < self.chunks, "invariant: a sealed chunk");
+        let mut mask = 0u32;
+        for k in 0..LANES {
+            let i = LANES * c + k;
+            // SAFETY: the caller guarantees `c < chunks`, which a seal set to
+            // `len.div_ceil(LANES)`, so `i < LANES · chunks ≤ len + LANES − 1 < CAND_BUF`: a lane
+            // a push wrote (`i < len`; every push writes all eight arrays of each lane it
+            // appends) or the seal's pad wrote (`len ≤ i < len + LANES`). A written lane stays
+            // initialised (see the type docs).
+            let b = unsafe {
+                [
+                    self.b[MIN_X].get_unchecked(i).assume_init(),
+                    self.b[MIN_Y].get_unchecked(i).assume_init(),
+                    self.b[MIN_Z].get_unchecked(i).assume_init(),
+                    self.b[MAX_X].get_unchecked(i).assume_init(),
+                    self.b[MAX_Y].get_unchecked(i).assume_init(),
+                    self.b[MAX_Z].get_unchecked(i).assume_init(),
+                ]
+            };
+            let mut hit = q.lo[0] <= b[MAX_X]
+                && q.hi[0] >= b[MIN_X]
+                && q.lo[1] <= b[MAX_Y]
+                && q.hi[1] >= b[MIN_Y]
+                && q.lo[2] <= b[MAX_Z]
+                && q.hi[2] >= b[MIN_Z];
+            if MAXROW {
+                // SAFETY: as above; a push writes the lane's max row too.
+                let maxrow = unsafe { self.maxrow.get_unchecked(i).assume_init() };
+                hit &= maxrow as i32 > row as i32;
+            }
+            mask |= u32::from(hit) << k;
+        }
+        mask
+    }
+
+    /// The AVX2 prefilter.
+    ///
+    /// # Safety
+    ///
+    /// `c < self.chunks()`.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+    #[inline]
+    unsafe fn prefilter_avx2<const MAXROW: bool>(&self, c: usize, q: &QueryBox, row: u32) -> u32 {
+        use core::arch::x86_64::{
+            __m256, __m256i, _CMP_GE_OQ, _CMP_LE_OQ, _mm256_and_ps, _mm256_castsi256_ps,
+            _mm256_cmp_ps, _mm256_cmpgt_epi32, _mm256_load_ps, _mm256_load_si256,
+            _mm256_movemask_ps, _mm256_set1_epi32, _mm256_set1_ps,
+        };
+        debug_assert!(c < self.chunks, "invariant: a sealed chunk");
+        let base = LANES * c;
+        // SAFETY: the caller guarantees `c < chunks`, so lanes `base .. base + 8` lie below
+        // `LANES · chunks ≤ len + LANES ≤ CAND_BUF` and were written by a push or the seal's pad
+        // (a written lane stays initialised; see the type docs). Each row array is 32-byte
+        // aligned (`#[repr(C, align(32))]`, rows of `CAND_BUF · 4` bytes, a multiple of 32, as
+        // the const assertion above pins) and `base · 4` is a multiple of 32, so the aligned
+        // loads are aligned. The `avx2` feature is compiled in (the `cfg` on this function).
+        unsafe {
+            let load = |r: usize| -> __m256 { _mm256_load_ps(self.b[r].as_ptr().add(base).cast::<f32>()) };
+            let m = _mm256_cmp_ps::<_CMP_LE_OQ>(_mm256_set1_ps(q.lo[0]), load(MAX_X));
+            let m = _mm256_and_ps(m, _mm256_cmp_ps::<_CMP_GE_OQ>(_mm256_set1_ps(q.hi[0]), load(MIN_X)));
+            let m = _mm256_and_ps(m, _mm256_cmp_ps::<_CMP_LE_OQ>(_mm256_set1_ps(q.lo[1]), load(MAX_Y)));
+            let m = _mm256_and_ps(m, _mm256_cmp_ps::<_CMP_GE_OQ>(_mm256_set1_ps(q.hi[1]), load(MIN_Y)));
+            let m = _mm256_and_ps(m, _mm256_cmp_ps::<_CMP_LE_OQ>(_mm256_set1_ps(q.lo[2]), load(MAX_Z)));
+            let m = _mm256_and_ps(m, _mm256_cmp_ps::<_CMP_GE_OQ>(_mm256_set1_ps(q.hi[2]), load(MIN_Z)));
+            let m = if MAXROW {
+                let maxrow = _mm256_load_si256(self.maxrow.as_ptr().add(base).cast::<__m256i>());
+                let above = _mm256_cmpgt_epi32(maxrow, _mm256_set1_epi32(row as i32));
+                _mm256_and_ps(m, _mm256_castsi256_ps(above))
+            } else {
+                m
+            };
+            _mm256_movemask_ps(m) as u32
+        }
+    }
+
+    /// Test-only: candidate `i`'s box rows, leaf index and max row.
+    ///
+    /// # Panics
+    ///
+    /// If `i ≥ len()`.
+    #[cfg(test)]
+    pub(crate) fn lane(&self, i: usize) -> ([f32; 6], u32, u32) {
+        assert!(i < self.len, "a pushed candidate");
+        // SAFETY: `i < len`: a lane a push wrote, and every push writes all eight arrays of each
+        // lane it appends.
+        unsafe {
+            (
+                [
+                    self.b[MIN_X][i].assume_init(),
+                    self.b[MIN_Y][i].assume_init(),
+                    self.b[MIN_Z][i].assume_init(),
+                    self.b[MAX_X][i].assume_init(),
+                    self.b[MAX_Y][i].assume_init(),
+                    self.b[MAX_Z][i].assume_init(),
+                ],
+                self.idx[i].assume_init(),
+                self.maxrow[i].assume_init(),
+            )
+        }
+    }
+
+    /// Test-only: the leaf index of candidate `8c + k`.
+    ///
+    /// # Panics
+    ///
+    /// If `c ≥ chunks()` or `k ≥ 8`.
+    #[cfg(test)]
+    pub(crate) fn leaf(&self, c: usize, k: usize) -> u32 {
+        assert!(c < self.chunks && k < LANES, "invariant: a lane of a sealed chunk");
+        // SAFETY: `8c + k < LANES · chunks ≤ len + LANES ≤ CAND_BUF`, a lane a push or the
+        // seal's pad wrote (see `prefilter_scalar_unchecked`).
+        unsafe { self.idx.get_unchecked(LANES * c + k).assume_init() }
     }
 }
 
@@ -200,6 +703,33 @@ fn leaf_mask_avx2(node: &Node8, x: f32, y: f32, z: f32, r: f32) -> u32 {
         let bound = _mm256_add_ps(_mm256_load_ps(node.p[LEAF_R].as_ptr()), _mm256_set1_ps(r));
         let bb = _mm256_mul_ps(bound, bound);
         _mm256_movemask_ps(_mm256_cmp_ps::<_CMP_LE_OQ>(t, bb)) as u32
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+#[inline]
+fn leaf_mask_above_avx2(node: &Node8, x: f32, y: f32, z: f32, r: f32, row: u32) -> u32 {
+    use core::arch::x86_64::{
+        __m256i, _CMP_LE_OQ, _mm256_add_ps, _mm256_and_ps, _mm256_castsi256_ps, _mm256_cmp_ps,
+        _mm256_cmpgt_epi32, _mm256_load_ps, _mm256_load_si256, _mm256_movemask_ps,
+        _mm256_mul_ps, _mm256_set1_epi32, _mm256_set1_ps, _mm256_sub_ps,
+    };
+    // SAFETY: as in `leaf_mask_avx2`, plus the `LEAF_ROW` row: a 32-byte aligned `[f32; 8]`
+    // of the borrowed node read as eight `i32` (the same bits; every bit pattern is a valid
+    // `i32`). The float arithmetic is `leaf_mask_avx2`'s op for op; the row compare is exact.
+    unsafe {
+        let dx = _mm256_sub_ps(_mm256_load_ps(node.p[LEAF_X].as_ptr()), _mm256_set1_ps(x));
+        let dy = _mm256_sub_ps(_mm256_load_ps(node.p[LEAF_Y].as_ptr()), _mm256_set1_ps(y));
+        let dz = _mm256_sub_ps(_mm256_load_ps(node.p[LEAF_Z].as_ptr()), _mm256_set1_ps(z));
+        let t = _mm256_mul_ps(dx, dx);
+        let t = _mm256_add_ps(t, _mm256_mul_ps(dy, dy));
+        let t = _mm256_add_ps(t, _mm256_mul_ps(dz, dz));
+        let bound = _mm256_add_ps(_mm256_load_ps(node.p[LEAF_R].as_ptr()), _mm256_set1_ps(r));
+        let bb = _mm256_mul_ps(bound, bound);
+        let hit = _mm256_cmp_ps::<_CMP_LE_OQ>(t, bb);
+        let rows = _mm256_load_si256(node.p[LEAF_ROW].as_ptr().cast::<__m256i>());
+        let above = _mm256_cmpgt_epi32(rows, _mm256_set1_epi32(row as i32));
+        _mm256_movemask_ps(_mm256_and_ps(hit, _mm256_castsi256_ps(above))) as u32
     }
 }
 

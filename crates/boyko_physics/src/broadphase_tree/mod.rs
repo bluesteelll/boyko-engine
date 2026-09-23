@@ -55,7 +55,7 @@
 //! |---|---|
 //! | `phys_bp_verify` | the locator, the verify pass, maintenance (leaf scan, list pass, compaction, admission) — unconditionally, once per step; the cursor stamp follows the assembly, outside the zones |
 //! | `phys_bp_build` | the active tree over Q |
-//! | `phys_bp_query` | each Q row, in Morton order, against the active tree (`row > query`) and the static tree; then each Wide row's loop. Every row's partners form one segment `[< row \| > row]` in one stream |
+//! | `phys_bp_query` | each Q row, in Morton order, against the active tree (`row > query`) and the static tree, by the selected [`QueryKernel`]; then each Wide row's loop. Every row's partners form one segment `[< row \| > row]` in one stream |
 //! | `phys_bp_assemble` | rev counts → bucket starts → a scatter over rows ascending → `resize(P)` → a per-row merge of its forward run, its `SS` run and its bucket |
 //!
 //! The counters `phys_bp_queried` (`|Q| + |Wide|`), `phys_bp_members` (`|S|`) and
@@ -63,12 +63,36 @@
 //! With `N ≤ brute_max_rows` the step is [`all_pairs_into`], the state is untouched and the
 //! cursor is not stamped, so the next tree step is a `Reset`.
 //!
+//! # Query kernels (C3b)
+//!
+//! Two kernels answer the Q rows, selected by [`BroadphaseTree::set_query_kernel`], and they
+//! write the same bytes: the stream and every Q row's `(seg, nrev, nfwd)`.
+//!
+//! * [`QueryKernel::RowWalk`] (C1's kernel): per Q row, one depth-first walk of each tree, the
+//!   active one filtered to `row > query` after the exact test.
+//! * [`QueryKernel::LeafList`] (the default; design C3b, F1 — a packet traversal over the eight
+//!   Morton-adjacent rows of a leaf): per active leaf node `L`, one walk of each tree with `L`'s
+//!   box collects the candidate leaves (`PackedBvh8::collect_leaves`); each row of `L` then
+//!   tests them eight at a time against its own query box — the static ones first, the active
+//!   ones with the max-row cut — and runs the exact test on the kept ones, the active ones with
+//!   `row > query` in the mask (`kernel.rs`, "The leaf-list tests"). The pair set is the walk's
+//!   by construction: `L`'s box contains each of its rows' query boxes, so every leaf a row's
+//!   walk would test is collected; the prefilter is the walk's cull on the same bits; a leaf
+//!   whose largest row is at or below the row holds nothing the row emits. The per-row sort
+//!   then gives each segment the walk's bytes at the walk's offset, because segments are
+//!   written in the same slot order. A collection over `kernel::LEAF_LIST_CAP` candidates on
+//!   either tree answers that leaf's rows with the per-row walk (the fallback).
+//!
+//! [`TreeDiag`] counts the active leaf nodes each path answered (`leaf_list_leaves`,
+//! `fallback_leaves`, `row_walk_leaves`), so a receipt names the kernel that ran.
+//!
 //! # Storage
 //!
 //! Every durable buffer is a [`ScratchColumn`] on the `BROADPHASE_TREE` cohort of
 //! `scratch_ids.rs` (ids 417..407 since L11 C2 narrowed the solver cohort; 399..389 at the
-//! design). Function-local scratch is the traversal stack and the radix histogram. No `Vec`,
-//! no pool, no atomics.
+//! design). Function-local scratch is the traversal stack, the radix histogram and the
+//! leaf-list query's two candidate lists (`kernel::CandList`, about 4.4 KB each on the stack,
+//! never initialised as a whole). No `Vec`, no pool, no atomics.
 //!
 //! The non-default `bp-query-counts` feature (C3b, the query-cost investigation) adds the
 //! `counts` module and, per tree, one probe of relaxed atomics holding the last query's counts.
@@ -92,7 +116,10 @@ use crate::scratch_ids::{
 };
 use crate::systems::body_bounding_radius;
 
-use self::bvh::{Item, NO_LANE_ROW, Node8, PackedBvh8};
+use self::bvh::{
+    Item, LANES, LEAF_R, LEAF_ROW, LEAF_X, LEAF_Y, LEAF_Z, NO_LANE_ROW, Node8, PackedBvh8,
+};
+use self::kernel::{CandList, LEAF_LIST_CAP, QueryBox, leaf_mask, leaf_mask_above};
 
 pub(crate) mod bvh;
 #[cfg(feature = "bp-query-counts")]
@@ -123,6 +150,10 @@ const COMPACT_MIN_DEAD: u32 = 64;
 
 /// Segment length up to which the per-row sort is an insertion sort.
 const INSERTION_SORT_MAX: usize = 32;
+
+/// Entries the leaf-list query grows the stream by, at least, when a leaf's worst case would
+/// pass its initialised length.
+const STREAM_GROW: usize = 4096;
 
 /// Displacement runs of the carried rows the patch rule tells apart; above it every carried row
 /// is a jumper and the list is sorted whole.
@@ -247,6 +278,27 @@ pub struct TreeDiag {
     pub locator_resets: u64,
     /// The current `|S| + |Z|`.
     pub members: u64,
+    /// Active leaf nodes (up to eight Q rows each) the leaf-list query answered
+    /// ([`QueryKernel::LeafList`]).
+    pub leaf_list_leaves: u64,
+    /// Active leaf nodes the leaf-list query handed to the per-row walk because a collection
+    /// held more than its cap of candidate leaves.
+    pub fallback_leaves: u64,
+    /// Active leaf nodes the per-row walk answered with [`QueryKernel::RowWalk`] selected.
+    pub row_walk_leaves: u64,
+}
+
+/// The kernel that answers the Q rows' queries (module docs, "Query kernels"). Both write the
+/// same stream and records; the choice moves no pair and no pose byte.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum QueryKernel {
+    /// Per Q row, one depth-first walk of each tree (C1's kernel): the reference, and the
+    /// leaf-list query's fallback.
+    RowWalk,
+    /// Per active leaf node, one walk of each tree collects the candidate leaves; each row then
+    /// prefilters them eight at a time and runs the exact test on the kept ones (C3b, F1).
+    #[default]
+    LeafList,
 }
 
 /// The tree broadphase's state: the active and the static tree, two record buffers, the static
@@ -279,6 +331,12 @@ pub struct BroadphaseTree {
     rent: u64,
     /// Rows at or below which the brute loop runs.
     brute_max_rows: u32,
+    /// The Q rows' query kernel.
+    kernel: QueryKernel,
+    /// The leaf-list collection cap, lowered by the fallback gate (test builds only; every
+    /// other build uses `kernel::LEAF_LIST_CAP`).
+    #[cfg(test)]
+    leaf_list_cap: usize,
     /// `|S|`.
     members: u32,
     /// This step's pending static rows (the verify writes, the maintenance reads).
@@ -330,6 +388,9 @@ impl BroadphaseTree {
             cursor: RemapCursor::default(),
             rent: 0,
             brute_max_rows: TREE_BRUTE_MAX_ROWS,
+            kernel: QueryKernel::default(),
+            #[cfg(test)]
+            leaf_list_cap: LEAF_LIST_CAP,
             members: 0,
             pending_step: 0,
             needs_scan: false,
@@ -360,6 +421,41 @@ impl BroadphaseTree {
     #[inline]
     pub fn brute_max_rows(&self) -> u32 {
         self.brute_max_rows
+    }
+
+    /// Selects the kernel that answers the Q rows (module docs, "Query kernels"). The pair set
+    /// and its order do not depend on it; the G4 bench's `tree_rowwalk` arm uses it for a
+    /// same-binary A/B.
+    #[inline]
+    pub fn set_query_kernel(&mut self, kernel: QueryKernel) {
+        self.kernel = kernel;
+    }
+
+    /// The selected query kernel.
+    #[inline]
+    pub fn query_kernel(&self) -> QueryKernel {
+        self.kernel
+    }
+
+    /// The leaf-list collection cap: `kernel::LEAF_LIST_CAP`, or the fallback gate's lowered
+    /// value.
+    #[inline]
+    fn leaf_list_cap(&self) -> usize {
+        #[cfg(test)]
+        {
+            self.leaf_list_cap
+        }
+        #[cfg(not(test))]
+        {
+            LEAF_LIST_CAP
+        }
+    }
+
+    /// Lowers the leaf-list collection cap, so a small scene exercises the fallback.
+    #[cfg(test)]
+    fn set_leaf_list_cap(&mut self, cap: usize) {
+        assert!(cap <= LEAF_LIST_CAP, "the cap fits the candidate buffers");
+        self.leaf_list_cap = cap;
     }
 
     /// One step under direct drive, for a harness outside the crate that holds no gather (the
@@ -838,36 +934,24 @@ impl BroadphaseTree {
         active.build(items_view.as_slice(), sort_a, sort_b);
     }
 
-    /// Queries every Q row (Morton order) and loops every Wide row (row order), appending each
-    /// row's segment to the stream. Returns `|Q| + |Wide|`.
+    /// Queries every Q row (Morton order) with the selected kernel and loops every Wide row
+    /// (row order), appending each row's segment to the stream. Returns `|Q| + |Wide|`.
     fn query_all(&mut self, n: usize) -> u64 {
-        let Self { active, statics, rec, cur, aux, .. } = self;
+        let cap = self.leaf_list_cap();
+        let Self { active, statics, rec, cur, aux, kernel, diag, .. } = self;
         let mut recs_view = rec[usize::from(*cur)].build_view();
         let recs = recs_view.as_mut_slice();
         let mut stream = aux.build_view();
-        stream.clear();
 
-        for slot in 0..active.leaves() {
-            let leaf = active.leaf(slot);
-            let row = leaf.row;
-            debug_assert_ne!(row, NO_LANE_ROW, "the active tree has no dead lane");
-            let seg = stream.len();
-            active.query(leaf.x, leaf.y, leaf.z, leaf.r, |t| {
-                if t > row {
-                    stream.push(t);
+        match *kernel {
+            QueryKernel::LeafList => leaf_list_pass(active, statics, recs, &mut stream, cap, diag),
+            QueryKernel::RowWalk => {
+                stream.clear();
+                for slot in 0..active.leaves() {
+                    row_walk_slot(active, statics, recs, &mut stream, slot);
                 }
-            });
-            statics.query(leaf.x, leaf.y, leaf.z, leaf.r, |t| {
-                stream.push(t);
-            });
-            let segment = &mut stream.as_mut_slice()[seg..];
-            sort_segment(segment);
-            let nrev = segment.partition_point(|&t| t < row);
-            debug_assert!(segment.get(nrev).is_none_or(|&t| t > row), "a row is not its own partner");
-            let rec = &mut recs[row as usize];
-            rec.seg = seg as u32;
-            rec.nrev = nrev as u32;
-            rec.nfwd = (segment.len() - nrev) as u32;
+                diag.row_walk_leaves += u64::from(active.leaves().div_ceil(LANES as u32));
+            }
         }
 
         let mut wide = 0u64;
@@ -1031,8 +1115,177 @@ fn strictly_sorted(keys: &[u64]) -> bool {
     keys.windows(2).all(|w| w[0] < w[1])
 }
 
+/// The per-row walk of the Q row in active leaf slot `slot` (C1's query kernel): one walk of
+/// each tree, the active one filtered to `row > query`, appended to the stream as the row's
+/// sorted segment, and the row's record.
+#[inline]
+fn row_walk_slot(
+    active: &PackedBvh8,
+    statics: &PackedBvh8,
+    recs: &mut [RowRec],
+    stream: &mut ScratchBuildView<'_, u32>,
+    slot: u32,
+) {
+    let leaf = active.leaf(slot);
+    let row = leaf.row;
+    debug_assert_ne!(row, NO_LANE_ROW, "the active tree has no dead lane");
+    let seg = stream.len();
+    active.query(leaf.x, leaf.y, leaf.z, leaf.r, |t| {
+        if t > row {
+            stream.push(t);
+        }
+    });
+    statics.query(leaf.x, leaf.y, leaf.z, leaf.r, |t| {
+        stream.push(t);
+    });
+    let segment = &mut stream.as_mut_slice()[seg..];
+    sort_segment(segment);
+    let nrev = segment.partition_point(|&t| t < row);
+    debug_assert!(segment.get(nrev).is_none_or(|&t| t > row), "a row is not its own partner");
+    let rec = &mut recs[row as usize];
+    rec.seg = seg as u32;
+    rec.nrev = nrev as u32;
+    rec.nfwd = (segment.len() - nrev) as u32;
+}
+
+/// The leaf-list query of every Q row (module docs, "Query kernels"; design C3b, F1). Per
+/// active leaf node `L`, in slot order: one collection walk of each tree with `L`'s box; then
+/// per live lane of `L`, ascending, the row's tests — the static candidates (or the static
+/// tree's one leaf node, which the per-row walk also tests without a cull), then the active
+/// candidates with the max-row cut, the exact test on each kept leaf with `row > query` in the
+/// active mask — and the segment's sort and record, exactly as the per-row walk writes them.
+///
+/// The stream is written by index into its initialised length, which a step leaves at least
+/// at the previous step's length: before a leaf whose worst case (`live · 8` entries per
+/// candidate) could pass it, the stream is grown out of line, the only call on the path. At the
+/// end it is cut to the written length, and the Wide loop appends after it.
+///
+/// `#[inline(never)]`: one call per step, and a symbol of its own keeps its registers apart from
+/// the rest of the step and gives the codegen receipt (G-LL7) something to read.
+#[inline(never)]
+fn leaf_list_pass(
+    active: &PackedBvh8,
+    statics: &PackedBvh8,
+    recs: &mut [RowRec],
+    stream: &mut ScratchBuildView<'_, u32>,
+    cap: usize,
+    diag: &mut TreeDiag,
+) {
+    debug_assert!(active.maxrow_valid(), "invariant: the active tree is not killed or re-rowed after its build");
+    debug_assert_eq!(active.dead(), 0, "the active tree has no dead lane");
+    let mut act = CandList::new();
+    let mut sta = CandList::new();
+    let a_leaves = active.leaf_nodes();
+    let s_leaves = statics.leaf_nodes();
+    let s_single = statics.levels() == 1;
+    let slots = active.leaves() as usize;
+    let mut w = 0usize;
+    let mut len = stream.len();
+    let mut served = 0u64;
+    for (l, node) in a_leaves.iter().enumerate() {
+        let live = (slots - l * LANES).min(LANES);
+        let box_l = active.leaf_box(l);
+        let collected = active.collect_leaves::<true>(&box_l, &mut act, cap)
+            && (s_single || statics.collect_leaves::<false>(&box_l, &mut sta, cap));
+        if !collected {
+            w = fallback_leaf(active, statics, recs, stream, w, l, live);
+            len = w;
+            diag.fallback_leaves += 1;
+            continue;
+        }
+        let need = live * LANES * (act.len() + if s_single { 1 } else { sta.len() });
+        if w + need > len {
+            len = grow_stream(stream, w + need.max(STREAM_GROW));
+        }
+        let out = stream.as_mut_slice();
+        for k in 0..live {
+            let (x, y, z, r) = (node.p[LEAF_X][k], node.p[LEAF_Y][k], node.p[LEAF_Z][k], node.p[LEAF_R][k]);
+            let row = node.p[LEAF_ROW][k].to_bits();
+            let q = QueryBox::of(x, y, z, r);
+            let seg = w;
+            if s_single {
+                let s = &s_leaves[0];
+                w = emit_lanes(out, w, s, leaf_mask(s, x, y, z, r));
+            } else {
+                sta.for_each_kept::<false>(&q, row, |leaf| {
+                    let s = &s_leaves[leaf as usize];
+                    w = emit_lanes(out, w, s, leaf_mask(s, x, y, z, r));
+                });
+            }
+            act.for_each_kept::<true>(&q, row, |leaf| {
+                debug_assert!((leaf as usize) < a_leaves.len(), "a candidate is a leaf node of the tree");
+                // SAFETY: `act` was filled by `active.collect_leaves` over this tree, unchanged
+                // since, and holds leaf node indices only: `8·i + k` for a lane `k` of level-1
+                // node `i` whose box met `box_l`, and `build` writes a finite box into lane `k`
+                // only when `8·i + k < count[0]` (an empty lane's `+inf / −inf` box meets no
+                // finite box, and `box_l` is a Normal row's, finite), or `0` in a one-level tree.
+                // A pad lane (leaf `0`) is never kept: its empty box meets no query box. So
+                // `leaf < count[0] = a_leaves.len()`.
+                let a = unsafe { a_leaves.get_unchecked(leaf as usize) };
+                w = emit_lanes(out, w, a, leaf_mask_above(a, x, y, z, r, row));
+            });
+            let segment = &mut out[seg..w];
+            sort_segment(segment);
+            let nrev = segment.partition_point(|&t| t < row);
+            debug_assert!(segment.get(nrev).is_none_or(|&t| t > row), "a row is not its own partner");
+            let rec = &mut recs[row as usize];
+            rec.seg = seg as u32;
+            rec.nrev = nrev as u32;
+            rec.nfwd = (segment.len() - nrev) as u32;
+        }
+        served += 1;
+    }
+    stream.truncate(w);
+    diag.leaf_list_leaves += served;
+}
+
+/// Writes the row of every lane of the leaf `node` set in `mask` at `out[w..]`, ascending;
+/// returns the new write index.
+#[inline]
+fn emit_lanes(out: &mut [u32], mut w: usize, node: &Node8, mut mask: u32) -> usize {
+    while mask != 0 {
+        let k = mask.trailing_zeros() as usize;
+        mask &= mask - 1;
+        out[w] = node.p[LEAF_ROW][k].to_bits();
+        w += 1;
+    }
+    w
+}
+
+/// The leaf-list query's fallback: the `live` rows of active leaf node `l` through the per-row
+/// walk, the stream cut to `w` first. Returns the new write index, which is also the stream's
+/// length.
+#[cold]
+#[inline(never)]
+fn fallback_leaf(
+    active: &PackedBvh8,
+    statics: &PackedBvh8,
+    recs: &mut [RowRec],
+    stream: &mut ScratchBuildView<'_, u32>,
+    w: usize,
+    l: usize,
+    live: usize,
+) -> usize {
+    stream.truncate(w);
+    for k in 0..live {
+        row_walk_slot(active, statics, recs, stream, (l * LANES + k) as u32);
+    }
+    stream.len()
+}
+
+/// Grows the stream to `len` entries, past its length (the new tail zero-filled); returns
+/// `len`.
+#[cold]
+#[inline(never)]
+fn grow_stream(stream: &mut ScratchBuildView<'_, u32>, len: usize) -> usize {
+    debug_assert!(len > stream.len(), "a grow grows");
+    stream.resize(len, 0);
+    stream.len()
+}
+
 /// Sorts one row's segment: insertion sort up to [`INSERTION_SORT_MAX`] entries, the unstable
-/// sort above.
+/// sort above (out of line: it is rare, and a call kept out of the query loops keeps them
+/// compact).
 #[inline]
 fn sort_segment(segment: &mut [u32]) {
     if segment.len() <= INSERTION_SORT_MAX {
@@ -1046,8 +1299,15 @@ fn sort_segment(segment: &mut [u32]) {
             segment[j] = v;
         }
     } else {
-        segment.sort_unstable();
+        sort_long_segment(segment);
     }
+}
+
+/// The unstable sort of a segment longer than [`INSERTION_SORT_MAX`].
+#[cold]
+#[inline(never)]
+fn sort_long_segment(segment: &mut [u32]) {
+    segment.sort_unstable();
 }
 
 /// Merges the sorted `added` keys into the sorted `list` (disjoint keys), in place from the end.

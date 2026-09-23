@@ -14,6 +14,10 @@
 //! * A leaf lane holds `x, y, z, r` and the row's bits. An empty or killed lane holds
 //!   `x = +inf` and row [`NO_LANE_ROW`]; the exact test on it is always false, because every
 //!   query is a Normal row whose bound is finite.
+//! * A leaf node's sixth row is spare but for lane 0, [`LEAF_MAXROW`]: the bits of the node's
+//!   largest live row, written by the build. It is exact until a lane of the tree is killed or
+//!   re-rowed ([`PackedBvh8::maxrow_valid`]); only the active tree, rebuilt every step and never
+//!   killed, reads it (the leaf-list query's max-row cut).
 //!
 //! # Kill
 //!
@@ -33,7 +37,7 @@
 use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 
-use super::kernel::{QueryBox, box_mask, leaf_mask, padded_radius};
+use super::kernel::{CandList, QueryBox, box_mask, leaf_mask, padded_radius};
 
 #[cfg(feature = "bp-query-counts")]
 use super::counts::{QueryCounts, QueryProbe, TreeShape, shape_of};
@@ -61,6 +65,9 @@ pub(crate) const LEAF_R: usize = 3;
 /// Index of the row-bits row of a leaf node's `p` (a `u32` carried as `f32` bits, never used
 /// in arithmetic).
 pub(crate) const LEAF_ROW: usize = 4;
+/// Index of a leaf node's spare row, whose lane 0 holds the bits of the node's largest live row
+/// (a `u32` carried as `f32` bits, never used in arithmetic).
+pub(crate) const LEAF_MAXROW: usize = 5;
 
 /// The row bits of an empty or killed leaf lane. Rows stay below `2^24`, so it is never a row.
 pub(crate) const NO_LANE_ROW: u32 = u32::MAX;
@@ -164,6 +171,9 @@ pub(crate) struct PackedBvh8 {
     leaves: u32,
     /// Killed lanes among them.
     dead: u32,
+    /// Every leaf node's [`LEAF_MAXROW`] is its largest live row: set by a build, cleared by a
+    /// kill or a re-row.
+    maxrow_valid: bool,
     /// The last query's counts (`bp-query-counts` only).
     #[cfg(feature = "bp-query-counts")]
     probe: QueryProbe,
@@ -178,6 +188,7 @@ impl PackedBvh8 {
             levels: 0,
             leaves: 0,
             dead: 0,
+            maxrow_valid: true,
             #[cfg(feature = "bp-query-counts")]
             probe: QueryProbe::new(),
         }
@@ -199,6 +210,46 @@ impl PackedBvh8 {
     #[inline]
     pub(crate) fn live(&self) -> u32 {
         self.leaves - self.dead
+    }
+
+    /// Levels of the tree; `0` for an empty tree, `1` for a single leaf node.
+    #[inline]
+    pub(crate) fn levels(&self) -> usize {
+        usize::from(self.levels)
+    }
+
+    /// `true` while every leaf node's [`LEAF_MAXROW`] is its largest live row (no kill or
+    /// re-row since the last build).
+    #[inline]
+    pub(crate) fn maxrow_valid(&self) -> bool {
+        self.maxrow_valid
+    }
+
+    /// The leaf nodes (level 0), `leaves().div_ceil(8)` of them.
+    #[inline]
+    pub(crate) fn leaf_nodes(&self) -> &[Node8] {
+        let nodes = self.nodes.as_read_slice();
+        let count = if self.levels == 0 { 0 } else { self.level_start[1] as usize };
+        &nodes[..count]
+    }
+
+    /// Leaf node `leaf`'s box: its lane of its level-1 parent, or, in a one-level tree, the
+    /// union [`leaf_bounds`] computes for such a lane (the same bits).
+    #[inline]
+    pub(crate) fn leaf_box(&self, leaf: usize) -> QueryBox {
+        let nodes = self.nodes.as_read_slice();
+        if self.levels == 1 {
+            debug_assert_eq!(leaf, 0, "a one-level tree has one leaf node");
+            let (lo, hi) = leaf_bounds(&nodes[0]);
+            return QueryBox { lo, hi };
+        }
+        debug_assert!(self.levels > 1, "invariant: a leaf box of a non-empty tree");
+        let parent = &nodes[self.level_start[1] as usize + leaf / LANES];
+        let k = leaf % LANES;
+        QueryBox {
+            lo: [parent.p[MIN_X][k], parent.p[MIN_Y][k], parent.p[MIN_Z][k]],
+            hi: [parent.p[MAX_X][k], parent.p[MAX_Y][k], parent.p[MAX_Z][k]],
+        }
     }
 
     /// The contents of leaf slot `slot`.
@@ -236,6 +287,7 @@ impl PackedBvh8 {
             "invariant: a killed lane is never re-rowed"
         );
         node.p[LEAF_ROW][(slot as usize) % LANES] = f32::from_bits(row);
+        self.maxrow_valid = false;
     }
 
     /// Kills the live lane `slot`: its exact test becomes false and it is dropped by the next
@@ -253,12 +305,13 @@ impl PackedBvh8 {
         node.p[LEAF_X][k] = f32::INFINITY;
         node.p[LEAF_ROW][k] = f32::from_bits(NO_LANE_ROW);
         self.dead += 1;
+        self.maxrow_valid = false;
         debug_assert!(self.dead <= self.leaves, "invariant: dead ≤ leaves");
     }
 
     /// Rebuilds the tree over `items` (every one a Normal row), with `keys_a` / `keys_b` as the
     /// radix sort's ping-pong buffers. After the build, leaf slot `s` holds the `s`-th item in
-    /// Morton order and no lane is dead.
+    /// Morton order, no lane is dead, and every leaf node's [`LEAF_MAXROW`] is its largest row.
     pub(crate) fn build(
         &mut self,
         items: &[Item],
@@ -269,6 +322,7 @@ impl PackedBvh8 {
         debug_assert!(n < 1 << 24, "invariant: rows stay below 2^24");
         self.dead = 0;
         self.leaves = n as u32;
+        self.maxrow_valid = true;
         if n == 0 {
             self.nodes.build_view().clear();
             self.levels = 0;
@@ -312,6 +366,16 @@ impl PackedBvh8 {
             node.p[LEAF_Z][k] = item.z;
             node.p[LEAF_R][k] = item.r;
             node.p[LEAF_ROW][k] = f32::from_bits(item.row);
+        }
+        for node in nodes.iter_mut().take(count[0] as usize) {
+            let mut maxrow = 0u32;
+            for &bits in &node.p[LEAF_ROW] {
+                let row = bits.to_bits();
+                if row != NO_LANE_ROW {
+                    maxrow = maxrow.max(row);
+                }
+            }
+            node.p[LEAF_MAXROW][0] = f32::from_bits(maxrow);
         }
 
         // Each level above is the union of the level below.
@@ -401,6 +465,55 @@ impl PackedBvh8 {
         }
         #[cfg(feature = "bp-query-counts")]
         self.probe.publish(counts);
+    }
+
+    /// Collects into `out`, in ascending leaf order, every leaf node whose box meets `q`: the
+    /// leaf-list query's one walk per active leaf (C3b, F1), over the internal nodes only. At a
+    /// level-1 node the box mask selects leaf children, whose lane boxes are left-packed into
+    /// `out`; above it the children are pushed highest lane first, so the lowest is popped
+    /// first. A one-level tree yields its one leaf node with its [`leaf_box`](Self::leaf_box),
+    /// an empty tree nothing. With `MAXROW` each candidate carries its node's [`LEAF_MAXROW`].
+    ///
+    /// Returns `false` when more than `cap` leaf nodes meet `q`: the list is then partial and
+    /// unsealed, and the caller answers the rows another way. On `true` the list is sealed.
+    pub(crate) fn collect_leaves<const MAXROW: bool>(&self, q: &QueryBox, out: &mut CandList, cap: usize) -> bool {
+        out.clear();
+        let levels = usize::from(self.levels);
+        let nodes = self.nodes.as_read_slice();
+        if levels == 1 {
+            let b = self.leaf_box(0);
+            let maxrow = if MAXROW { nodes[0].p[LEAF_MAXROW][0].to_bits() } else { 0 };
+            if !out.push_one(b.lo, b.hi, 0, maxrow, cap) {
+                return false;
+            }
+        } else if levels > 1 {
+            let leaves = &nodes[..self.level_start[1] as usize];
+            let mut stack = [0u32; STACK];
+            let mut depth = 1usize;
+            stack[0] = pack(levels - 1, 0);
+            while depth > 0 {
+                depth -= 1;
+                let (level, index) = unpack(stack[depth]);
+                let node = &nodes[self.level_start[level] as usize + index];
+                let mut mask = box_mask(node, q);
+                if level == 1 {
+                    let maxrow_of = if MAXROW { Some(leaves) } else { None };
+                    if mask != 0 && !out.push_lanes(node, mask, (index * LANES) as u32, cap, maxrow_of) {
+                        return false;
+                    }
+                } else {
+                    while mask != 0 {
+                        let k = 31 - mask.leading_zeros() as usize;
+                        mask &= !(1 << k);
+                        debug_assert!(depth < STACK, "invariant: stack depth ≤ 7·levels + 1");
+                        stack[depth] = pack(level - 1, index * LANES + k);
+                        depth += 1;
+                    }
+                }
+            }
+        }
+        out.seal();
+        true
     }
 }
 
