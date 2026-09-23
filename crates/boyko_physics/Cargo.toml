@@ -68,6 +68,14 @@ default = []
 # `cargo bench --features bench-alloc` to swap in mimalloc for A/B signal
 # extraction. See docs/BENCHMARKING.md.
 bench-alloc = ["dep:mimalloc"]
+# C3b of the tree broadphase (the query-cost investigation, section 8 of
+# docs/measurements/2026-09-22-broadphase-tree/analysis.md): per-query walk counters in
+# `PackedBvh8::query` and the tree-shape receipts of `broadphase_tree::counts`. OFF by default
+# and enabled by no crate in the workspace; with it off the counting statements do not exist, so
+# the default build's code is the uncounted kernel. Its one consumer is
+# `tests/bp_query_counts.rs`: `cargo test -p boyko-physics --features bp-query-counts --test
+# bp_query_counts -- --nocapture`.
+bp-query-counts = []
 
 [dev-dependencies]
 # Rung L8a: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` blocks that assert

@@ -9,6 +9,14 @@
 //!   drive it, each with its structural counts.
 //! * **Unit** — the rent rule, the patch merge (the review's traced high-jumper case, with `a`
 //!   pinned), Morton codes over huge ranges, and the consumed mark against a non-injective map.
+//! * **G-LL** (C3b, the leaf-list query) — G-LL1: after every tree-path step of every [`Sim`]
+//!   scene the query stage is re-run under both kernels and its bytes (the stream and every
+//!   row's `(seg, nrev, nfwd)`) compared; G-LL2: the G1 property tests draw the step's kernel,
+//!   so the oracle sees both; G-LL4: every leaf-list test's kernel arm equals its scalar arm;
+//!   G-LL5: a lowered collection cap takes the fallback, which keeps the bytes; the one-leaf
+//!   active tree over a multi-leaf static tree (C3b review, W1); the max row the cut reads and
+//!   the kept-count pin, the cut's gate in the default test command (W2); the small-segment
+//!   network (F2) against `sort_unstable` on every length it takes.
 //!
 //! Every test is device-free and heap-light; under Miri the property tests shrink to 16 cases
 //! at n ≤ 24 and the kernel is the scalar arm.
@@ -22,11 +30,18 @@ use crate::math::Vec3;
 use crate::resources::{BodyState, ContactPairs};
 use crate::row_identity::{NO_ROW, RowIdentity, RowKey, RowRemap};
 
-use super::bvh::{Item, LANES, LEAF_R, LEAF_ROW, LEAF_X, LEAF_Y, LEAF_Z, Node8, PackedBvh8};
-use super::kernel::{QueryBox, box_mask, box_mask_scalar, leaf_mask, leaf_mask_scalar};
+use super::bvh::{
+    Item, LANES, LEAF_MAXROW, LEAF_R, LEAF_ROW, LEAF_X, LEAF_Y, LEAF_Z, NO_LANE_ROW, Node8,
+    PackedBvh8,
+};
+use super::kernel::{
+    CandList, LEAF_LIST_CAP, NETWORK_SORT_MAX, QueryBox, box_mask, box_mask_scalar, leaf_mask,
+    leaf_mask_above, leaf_mask_above_scalar, leaf_mask_scalar, sort_network, sort_network_scalar,
+};
 use super::{
-    ADMIT_BUILD_RATIO, BroadphaseTree, JUMPER, KIND_EXCLUDED, KIND_WIDE, TREE_BRUTE_MAX_ROWS,
-    TreeDiag, all_pairs_into, classify, mark_jumpers, merge_into_sorted, sphere_bound_feasible,
+    ADMIT_BUILD_RATIO, BroadphaseTree, JUMPER, KIND_EXCLUDED, KIND_WIDE, LeafListCounts,
+    QueryKernel, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into, classify, mark_jumpers,
+    merge_into_sorted, sphere_bound_feasible,
 };
 use crate::systems::body_bounding_radius;
 use crate::scratch_ids::{TREE_ACTIVE, TREE_SORT_A, TREE_SORT_B, TREE_SS, tree_column_id};
@@ -110,8 +125,14 @@ impl Sim {
     }
 
     /// One tree step against the oracle, without a gather (direct drive, or a missed gather).
+    /// A tree-path step is followed by G-LL1: its query stage, re-run under both kernels, writes
+    /// the same bytes.
     fn step_no_gather(&mut self) -> TreeDiag {
         self.tree.step(&self.bodies, &self.rows, &mut self.out);
+        let n = self.bodies.len();
+        if n > self.tree.brute_max_rows() as usize {
+            assert_kernels_agree(&mut self.tree, n);
+        }
         all_pairs_into(&self.bodies, &mut self.oracle);
         assert_eq!(
             self.out.pairs(),
@@ -202,6 +223,46 @@ fn settled(dynamics: usize) -> Sim {
     assert_eq!(d2.evictions, 0);
     assert!(sim.pairs() >= 3 + dynamics, "anti-vacuity: the statics and the boxes touch the floor");
     sim
+}
+
+/// The bytes the query stage of the last tree-path step writes: the stream and every row's
+/// `(seg, nrev, nfwd)`.
+type QueryStage = (Vec<u32>, Vec<(u32, u32, u32)>);
+
+/// Re-runs the query stage of the last tree-path step (`n` rows) under `kernel` and returns its
+/// bytes. The trees and the records' bits are the step's and the stage reads nothing else, so
+/// the re-run is the step's stage; the selected kernel and the counters are restored.
+fn query_stage(tree: &mut BroadphaseTree, n: usize, kernel: QueryKernel) -> QueryStage {
+    let (kernel_before, diag_before) = (tree.kernel, tree.diag);
+    tree.kernel = kernel;
+    tree.query_all(n);
+    tree.kernel = kernel_before;
+    tree.diag = diag_before;
+    let stream = tree.aux.as_read_slice().to_vec();
+    let records = tree.rec[usize::from(tree.cur)]
+        .as_read_slice()
+        .iter()
+        .take(n)
+        .map(|r| (r.seg, r.nrev, r.nfwd))
+        .collect();
+    (stream, records)
+}
+
+/// G-LL1: the leaf list writes the per-row walk's bytes on the state of the last tree-path step.
+///
+/// Each mutation below was applied when the gate was written, and this module's tests went RED
+/// under it through this check or the oracle: `>=` for `>` in `leaf_mask_above` (a row emits
+/// itself), the collection run with the leaf's first row's box in place of the leaf's box, the
+/// static tree's one leaf node skipped, the max-row cut flipped to `maxrow < row`, the max row
+/// built as the smallest live row, the fallback skipped (G-LL5). Two mutations of the cut keep
+/// candidates that emit nothing and so write the same bytes — invisible here BY DESIGN: the cut
+/// as `maxrow >= row` (RED only in G-LL4, whose reference definition is the strict cut) and the
+/// active prefilter without the cut at all (RED only in the kept-count pin).
+fn assert_kernels_agree(tree: &mut BroadphaseTree, n: usize) {
+    let leaf_list = query_stage(tree, n, QueryKernel::LeafList);
+    let row_walk = query_stage(tree, n, QueryKernel::RowWalk);
+    assert_eq!(leaf_list.0, row_walk.0, "G-LL1: the leaf list's stream is the per-row walk's (n = {n})");
+    assert_eq!(leaf_list.1, row_walk.1, "G-LL1: the leaf list's records are the per-row walk's (n = {n})");
 }
 
 /// The `SS` list holds exactly the floor–pillar pairs.
@@ -428,9 +489,12 @@ proptest! {
     fn g1_single_step_worlds_equal_all_pairs(
         specs in prop::collection::vec(spec(), 1..G1_MAX_N),
         sign in 0u8..3u8,
+        row_walk in any::<bool>(),
     ) {
         let bodies = world(&specs, sign);
         let mut sim = Sim::new(bodies);
+        // G-LL2: the oracle checks the step's own kernel, either one.
+        sim.tree.set_query_kernel(if row_walk { QueryKernel::RowWalk } else { QueryKernel::LeafList });
         for _ in 0..3 {
             sim.step_no_gather();
         }
@@ -1365,8 +1429,11 @@ proptest! {
     fn g1_random_churn_scripts_equal_all_pairs(
         ops in prop::collection::vec(churn_op(), 4..24),
         dynamics in 4usize..14,
+        row_walk in any::<bool>(),
     ) {
         let mut sim = settled(dynamics);
+        // G-LL2: the oracle checks the step's own kernel, either one.
+        sim.tree.set_query_kernel(if row_walk { QueryKernel::RowWalk } else { QueryKernel::LeafList });
         for op in ops {
             let n = sim.bodies.len();
             match op {
@@ -1511,4 +1578,370 @@ fn edge_all_excluded_world_has_no_pairs() {
     assert_eq!(d.wide_rows, 0);
     assert_eq!(d.members, 0, "an Excluded static is never pending");
     assert_eq!(sim.tree.active.leaves(), 0);
+}
+
+// ── C3b: the leaf-list query (G-LL4, G-LL5, the review's W1 and W2) ─────────────────────────
+
+/// A row's bits for the leaf-list tests: small rows (so rows collide with the query row), rows
+/// near `2^24`, and the empty-lane sentinel.
+fn lane_row() -> BoxedStrategy<u32> {
+    prop_oneof![
+        4 => 0u32..24,
+        2 => (1u32 << 24) - 24..(1u32 << 24),
+        1 => Just(NO_LANE_ROW),
+    ]
+    .boxed()
+}
+
+/// A query row for the leaf-list tests, drawn from the same ranges as [`lane_row`] (no sentinel:
+/// a query row is a row).
+fn query_row() -> BoxedStrategy<u32> {
+    prop_oneof![0u32..24, (1u32 << 24) - 24..(1u32 << 24)].boxed()
+}
+
+/// A level-1 node whose lanes hold the given boxes.
+fn internal_node(lo: &[(f32, f32, f32); LANES], hi: &[(f32, f32, f32); LANES]) -> Node8 {
+    let mut node = Node8 { p: [[0.0; 8]; 6] };
+    for k in 0..LANES {
+        node.p[0][k] = lo[k].0;
+        node.p[1][k] = lo[k].1;
+        node.p[2][k] = lo[k].2;
+        node.p[3][k] = hi[k].0;
+        node.p[4][k] = hi[k].1;
+        node.p[5][k] = hi[k].2;
+    }
+    node
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: G0_CASES,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// G-LL4: `leaf_mask_above`'s kernel arm equals its scalar arm and is `leaf_mask` masked to
+    /// the lanes whose row is above the query row.
+    #[test]
+    fn gll4_leaf_mask_above_arms_agree(
+        lanes in prop::array::uniform8((any_f32(), any_f32(), any_f32(), any_f32(), lane_row())),
+        q in (any_f32(), any_f32(), any_f32(), any_f32()),
+        row in query_row(),
+    ) {
+        let node = leaf_node(&lanes);
+        let (qx, qy, qz, qr) = q;
+        let got = leaf_mask_above(&node, qx, qy, qz, qr, row);
+        prop_assert_eq!(got, leaf_mask_above_scalar(&node, qx, qy, qz, qr, row), "kernel arm ≠ scalar arm");
+        let mut above = 0u32;
+        for (k, lane) in lanes.iter().enumerate() {
+            if lane.4 != NO_LANE_ROW && lane.4 > row {
+                above |= 1 << k;
+            }
+        }
+        prop_assert_eq!(got, leaf_mask(&node, qx, qy, qz, qr) & above, "the mask is the exact test above the row");
+    }
+
+    /// G-LL4: two left-packed pushes and a seal through the kernel arm equal the scalar arm lane
+    /// for lane (boxes, leaf indices, max rows), and both prefilters equal their scalar arms and
+    /// the reference definition on every chunk — the pad lanes never pass.
+    #[test]
+    fn gll4_left_pack_and_prefilter_arms_agree(
+        lo in prop::array::uniform8((any_f32(), any_f32(), any_f32())),
+        hi in prop::array::uniform8((any_f32(), any_f32(), any_f32())),
+        masks in (0u32..256, 0u32..256),
+        firsts in (0u32..4, 0u32..4),
+        maxrows in prop::collection::vec(query_row(), 32),
+        q in (-4.0f32..4.0f32, -4.0f32..4.0f32, -4.0f32..4.0f32, 0.0f32..4.0f32),
+        row in query_row(),
+    ) {
+        let node = internal_node(&lo, &hi);
+        // 32 leaf nodes whose max rows the active pushes read.
+        let mut leaves = vec![Node8 { p: [[0.0; 8]; 6] }; 32];
+        for (leaf, &m) in leaves.iter_mut().zip(&maxrows) {
+            leaf.p[LEAF_MAXROW][0] = f32::from_bits(m);
+        }
+        let (mut kernel_slot, mut scalar_slot) = (core::mem::MaybeUninit::uninit(), core::mem::MaybeUninit::uninit());
+        let kernel = CandList::init_in(&mut kernel_slot);
+        let scalar = CandList::init_in(&mut scalar_slot);
+        for (mask, first) in [(masks.0, firsts.0 * 8), (masks.1, firsts.1 * 8)] {
+            prop_assert!(kernel.push_lanes_arm::<false>(&node, mask, first, LEAF_LIST_CAP, Some(&leaves)));
+            prop_assert!(scalar.push_lanes_arm::<true>(&node, mask, first, LEAF_LIST_CAP, Some(&leaves)));
+        }
+        kernel.seal();
+        scalar.seal();
+        let len = (masks.0.count_ones() + masks.1.count_ones()) as usize;
+        prop_assert_eq!(kernel.len(), len);
+        prop_assert_eq!(scalar.len(), len);
+        prop_assert_eq!(kernel.chunks(), len.div_ceil(LANES));
+        // The reference: the two pushes' lanes in ascending lane order.
+        let mut want = Vec::new();
+        for (mask, first) in [(masks.0, firsts.0 * 8), (masks.1, firsts.1 * 8)] {
+            for k in 0..LANES {
+                if mask >> k & 1 == 1 {
+                    let b = [node.p[0][k], node.p[1][k], node.p[2][k], node.p[3][k], node.p[4][k], node.p[5][k]];
+                    let leaf = first + k as u32;
+                    want.push((b, leaf, maxrows[leaf as usize]));
+                }
+            }
+        }
+        for (i, w) in want.iter().enumerate() {
+            let (kb, kl, km) = kernel.lane(i);
+            let (sb, sl, sm) = scalar.lane(i);
+            let bits = |b: [f32; 6]| b.map(f32::to_bits);
+            prop_assert_eq!(bits(kb), bits(w.0), "kernel lane {} box", i);
+            prop_assert_eq!(bits(sb), bits(w.0), "scalar lane {} box", i);
+            prop_assert_eq!((kl, km), (w.1, w.2), "kernel lane {} leaf / max row", i);
+            prop_assert_eq!((sl, sm), (w.1, w.2), "scalar lane {} leaf / max row", i);
+        }
+        let qb = QueryBox { lo: [q.0, q.1, q.2], hi: [q.0 + q.3, q.1 + q.3, q.2 + q.3] };
+        for c in 0..kernel.chunks() {
+            let boxed = kernel.prefilter_box(c, &qb);
+            let cut = kernel.prefilter_box_maxrow(c, &qb, row);
+            prop_assert_eq!(boxed, kernel.prefilter_scalar::<false>(c, &qb, row), "box prefilter arms, chunk {}", c);
+            prop_assert_eq!(cut, kernel.prefilter_scalar::<true>(c, &qb, row), "max-row prefilter arms, chunk {}", c);
+            prop_assert_eq!(boxed, scalar.prefilter_box(c, &qb), "the two lists agree, chunk {}", c);
+            for k in 0..LANES {
+                let i = c * LANES + k;
+                let (want_box, want_cut) = match want.get(i) {
+                    Some((b, _, m)) => {
+                        let meets = qb.lo[0] <= b[3] && qb.hi[0] >= b[0]
+                            && qb.lo[1] <= b[4] && qb.hi[1] >= b[1]
+                            && qb.lo[2] <= b[5] && qb.hi[2] >= b[2];
+                        (meets, meets && *m > row)
+                    }
+                    None => (false, false),
+                };
+                prop_assert_eq!(boxed >> k & 1 == 1, want_box, "candidate {} box", i);
+                prop_assert_eq!(cut >> k & 1 == 1, want_cut, "candidate {} cut", i);
+                if want_box {
+                    prop_assert_eq!(kernel.leaf(c, k), want[i].1);
+                }
+            }
+        }
+    }
+}
+
+/// The review's W2: after a build, every leaf node's `LEAF_MAXROW` is its largest live row —
+/// the partial last leaf included — and the cut's validity flag follows builds, kills and
+/// re-rows.
+#[test]
+fn leaf_maxrow_is_the_largest_live_row_after_a_build() {
+    crate::scratch_ids::register_tree_column_layouts();
+    let mut tree = PackedBvh8::new(tree_column_id(TREE_ACTIVE), 4096);
+    let mut ka = ScratchColumn::<u64>::new(tree_column_id(TREE_SORT_A), 4096);
+    let mut kb = ScratchColumn::<u64>::new(tree_column_id(TREE_SORT_B), 4096);
+    // 21 items (two full leaves and one of five), rows scattered and not in position order.
+    let items: Vec<Item> = (0..21u32)
+        .map(|i| Item::new((i * 7 % 21) as f32, (i % 3) as f32, 0.0, 0.5, (i * 37) % 101 + 3))
+        .collect();
+    tree.build(&items, &mut ka, &mut kb);
+    assert!(tree.maxrow_valid(), "a build makes the max rows exact");
+    let leaves = tree.leaf_nodes();
+    assert_eq!(leaves.len(), 3);
+    for (l, node) in leaves.iter().enumerate() {
+        let live: Vec<u32> = node.p[LEAF_ROW].iter().map(|b| b.to_bits()).filter(|&r| r != NO_LANE_ROW).collect();
+        assert_eq!(live.len(), if l == 2 { 5 } else { 8 }, "leaf {l}'s live lanes");
+        assert_eq!(
+            node.p[LEAF_MAXROW][0].to_bits(),
+            *live.iter().max().expect("a leaf node has a live lane"),
+            "leaf {l}: the max row is the largest live row"
+        );
+    }
+    tree.set_leaf_row(3, 999);
+    assert!(!tree.maxrow_valid(), "a re-row invalidates the max rows");
+    tree.build(&items, &mut ka, &mut kb);
+    assert!(tree.maxrow_valid());
+    tree.kill(20);
+    assert!(!tree.maxrow_valid(), "a kill invalidates the max rows");
+}
+
+/// The review's W1: a one-leaf active tree (at most eight Q rows) over a multi-leaf static
+/// tree. The active collection is the one leaf with its own box, the static collection runs
+/// over the static tree's internal nodes, and every pair of the Q rows is found once.
+#[test]
+fn gll_one_leaf_active_tree_over_a_multi_leaf_static_tree() {
+    // 72 static spheres on a line (nine leaf nodes, two levels), five dynamic spheres resting on
+    // five of them and touching each other in a row.
+    let mut bodies: Vec<BodyState> = (0..72).map(|k| sphere([1.5 * k as f32, 0.0, 0.0], 0.8, 0.0, false)).collect();
+    for k in 0..5 {
+        bodies.push(sphere([3.0 + 1.2 * k as f32, 1.2, 0.0], 0.7, 1.0, false));
+    }
+    let mut sim = Sim::new(bodies);
+    for _ in 0..4 {
+        sim.step_no_gather();
+    }
+    assert_eq!(sim.tree.diag().members, 72, "the statics were admitted");
+    assert_eq!(sim.tree.active.leaves(), 5, "Q is the five dynamics");
+    assert_eq!(sim.tree.active.levels(), 1, "a one-leaf active tree");
+    assert!(sim.tree.statics.levels() > 1, "a static tree with internal nodes");
+    let dynamic_pairs = sim.out.pairs().iter().filter(|(a, b)| a.0 >= 72 || b.0 >= 72).count();
+    assert!(dynamic_pairs >= 4 + 5, "anti-vacuity: the dynamics touch each other and the line");
+    let d = sim.tree.diag();
+    assert!(d.leaf_list_leaves > 0 && d.fallback_leaves == 0, "the leaf list answered: {d:?}");
+}
+
+/// G-LL5: a collection over the cap answers its leaf with the per-row walk. With the cap
+/// lowered below every collection (a cluster in which every leaf's box meets every leaf) each
+/// active leaf falls back, on the active and on the static side; the pair set is the oracle's
+/// and the bytes are the leaf list's (both checked by `Sim`). At the cap the leaf list answers
+/// every leaf again.
+#[test]
+fn gll5_a_collection_over_the_cap_falls_back() {
+    // 40 spheres of radius 2 in a 1.8-wide cube: every pair touches, five leaf nodes.
+    let cluster = |inv_mass: f32, offset: f32| -> Vec<BodyState> {
+        (0..40)
+            .map(|k| {
+                let p = [(k % 3) as f32 * 0.9 + offset, (k / 3 % 3) as f32 * 0.9, (k / 9) as f32 * 0.45];
+                sphere(p, 2.0, inv_mass, false)
+            })
+            .collect()
+    };
+    // Active overflow: five leaves each collect five, cap 4.
+    let mut sim = Sim::new(cluster(1.0, 0.0));
+    sim.tree.set_leaf_list_cap(4);
+    let d = sim.step_no_gather();
+    assert_eq!(sim.tree.active.leaves(), 40);
+    assert_eq!((d.fallback_leaves, d.leaf_list_leaves), (5, 0), "every active leaf fell back: {d:?}");
+    assert_eq!(sim.pairs(), 40 * 39 / 2, "anti-vacuity: every pair touches");
+    sim.tree.set_leaf_list_cap(5);
+    let d = sim.step_no_gather();
+    assert_eq!((d.fallback_leaves, d.leaf_list_leaves), (5, 5), "at the cap the leaf list answers");
+
+    // Static overflow: the same cluster static (five static leaves) under eight dynamics.
+    let mut bodies = cluster(0.0, 0.0);
+    bodies.extend(cluster(1.0, 0.3).into_iter().take(8));
+    let mut sim = Sim::new(bodies);
+    for _ in 0..3 {
+        sim.step_no_gather();
+    }
+    assert_eq!(sim.tree.diag().members, 40, "the cluster was admitted");
+    assert!(sim.tree.statics.levels() > 1);
+    let before = sim.tree.diag();
+    sim.tree.set_leaf_list_cap(4);
+    let d = sim.step_no_gather();
+    assert_eq!(d.fallback_leaves - before.fallback_leaves, 1, "the one active leaf fell back on its static collection");
+    assert_eq!(d.leaf_list_leaves, before.leaf_list_leaves);
+    sim.tree.set_leaf_list_cap(LEAF_LIST_CAP);
+    let d = sim.step_no_gather();
+    assert_eq!(d.leaf_list_leaves - before.leaf_list_leaves, 1);
+}
+
+/// The kernel receipts: every active leaf node of a tree-path step is counted once, by the path
+/// that answered it, and a brute step counts nothing.
+#[test]
+fn receipts_name_the_kernel_that_ran() {
+    let mut sim = settled(30);
+    let before = sim.tree.diag();
+    let leaves = u64::from(sim.tree.active.leaves().div_ceil(LANES as u32));
+    assert!(leaves >= 4, "anti-vacuity: several active leaf nodes");
+    let d = sim.step();
+    assert_eq!(d.leaf_list_leaves - before.leaf_list_leaves, leaves, "the default kernel is the leaf list");
+    assert_eq!((d.row_walk_leaves, d.fallback_leaves), (before.row_walk_leaves, before.fallback_leaves));
+    sim.tree.set_query_kernel(QueryKernel::RowWalk);
+    let d2 = sim.step();
+    assert_eq!(d2.row_walk_leaves - d.row_walk_leaves, leaves, "the per-row walk when selected");
+    assert_eq!(d2.leaf_list_leaves, d.leaf_list_leaves);
+    assert_eq!(sim.tree.query_kernel(), QueryKernel::RowWalk);
+}
+
+/// The kept-count reference of the review's W2 on the active tree of the last step: per Q row,
+/// the active leaf nodes whose box meets the row's query box, without and with the max-row cut.
+/// It reads every leaf node, not the collection — `L`'s box contains each of its rows' query
+/// boxes, so every leaf node whose box meets a row's query box is in `L`'s collection — and
+/// takes each node's largest row from its lanes, not from `LEAF_MAXROW`, so it shares nothing
+/// with the pass but the tree.
+fn kept_reference(tree: &PackedBvh8) -> (u64, u64) {
+    let leaves = tree.leaf_nodes();
+    let boxes: Vec<QueryBox> = (0..leaves.len()).map(|m| tree.leaf_box(m)).collect();
+    let maxrows: Vec<u32> = leaves
+        .iter()
+        .map(|node| node.p[LEAF_ROW].iter().map(|b| b.to_bits()).filter(|&r| r != NO_LANE_ROW).max().unwrap_or(0))
+        .collect();
+    let (mut without_cut, mut with_cut) = (0u64, 0u64);
+    for slot in 0..tree.leaves() {
+        let leaf = tree.leaf(slot);
+        let q = QueryBox::of(leaf.x, leaf.y, leaf.z, leaf.r);
+        for (b, &maxrow) in boxes.iter().zip(&maxrows) {
+            let meets = (0..3).all(|a| q.lo[a] <= b.hi[a] && q.hi[a] >= b.lo[a]);
+            without_cut += u64::from(meets);
+            with_cut += u64::from(meets && maxrow > leaf.row);
+        }
+    }
+    (without_cut, with_cut)
+}
+
+/// The kept-count pin's scene counts (`kept_reference`), pinned so a change of the scene or of
+/// the reference is visible: without the cut, and with it.
+const KEPT_PIN_WITHOUT_CUT: u64 = 48;
+const KEPT_PIN_WITH_CUT: u64 = 42;
+
+/// The review's W2, the max-row cut's gate in the default test command: on a line of touching
+/// spheres whose rows are scattered against their positions (so a leaf node's rows span the
+/// row range and the cut decides), the pass keeps exactly the reference's candidates with the
+/// cut, strictly fewer than without it. G-LL1 cannot see the cut — a candidate it removes emits
+/// nothing — so this is the gate that goes RED when the cut is dropped (the pass's active
+/// prefilter run without `maxrow > row`) or loosened to `maxrow >= row`.
+#[test]
+fn gll3_kept_count_pin_sees_the_max_row_cut() {
+    // 40 radius-0.6 spheres at unit spacing: row `r` sits at `x = (17·r) mod 40`.
+    let bodies: Vec<BodyState> = (0..40u32).map(|r| sphere([((17 * r) % 40) as f32, 0.0, 0.0], 0.6, 1.0, false)).collect();
+    let mut sim = Sim::new(bodies);
+    sim.step_no_gather();
+    assert_eq!(sim.pairs(), 39, "anti-vacuity: the line's 39 touching neighbours");
+    let (without_cut, with_cut) = kept_reference(&sim.tree.active);
+    let c: LeafListCounts = sim.tree.ll_counts;
+    assert_eq!(c.kept_active, with_cut, "the pass keeps the reference's candidates under the cut: {c:?}");
+    assert!(with_cut < without_cut, "anti-vacuity: the cut removes candidates on this scene");
+    assert_eq!((without_cut, with_cut), (KEPT_PIN_WITHOUT_CUT, KEPT_PIN_WITH_CUT), "the scene's pinned counts");
+    assert_eq!((c.leaves, c.rows), (5, 40));
+    assert_eq!(c.emitted, 39, "one owner per pair");
+    assert_eq!((c.cands_static, c.kept_static), (0, 0), "no static set");
+}
+
+/// Values for the network's property test: a few small ones (so duplicates are common), the
+/// padding value itself, and the full range.
+fn network_value() -> BoxedStrategy<u32> {
+    prop_oneof![4 => 0u32..6, 1 => Just(u32::MAX), 1 => Just(u32::MAX - 1), 2 => any::<u32>()].boxed()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: G0_CASES,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// F2's gate: on every length `0..=16`, with duplicates and `u32::MAX` (the padding value)
+    /// in the input, the network's kernel arm and its scalar arm both equal `sort_unstable`.
+    #[test]
+    fn f2_network_sorts_like_sort_unstable(values in prop::collection::vec(network_value(), 0..=NETWORK_SORT_MAX)) {
+        let mut want = values.clone();
+        want.sort_unstable();
+        let mut kernel = values.clone();
+        sort_network(&mut kernel);
+        prop_assert_eq!(&kernel, &want, "kernel arm");
+        let mut scalar = values;
+        sort_network_scalar(&mut scalar);
+        prop_assert_eq!(&scalar, &want, "scalar arm");
+    }
+}
+
+/// F2: every length `0..=16` is sorted, each from its reverse and from a rotation (the proptest
+/// draws lengths at random; this one takes each).
+#[test]
+fn f2_network_sorts_every_length() {
+    for n in 0..=NETWORK_SORT_MAX {
+        let reversed: Vec<u32> = (0..n as u32).rev().collect();
+        let rotated: Vec<u32> = (0..n as u32).map(|i| (i * 5 + 3) % (n as u32).max(1)).collect();
+        for input in [reversed, rotated] {
+            let mut want = input.clone();
+            want.sort_unstable();
+            let mut kernel = input.clone();
+            sort_network(&mut kernel);
+            assert_eq!(kernel, want, "kernel arm, n = {n}");
+            let mut scalar = input;
+            sort_network_scalar(&mut scalar);
+            assert_eq!(scalar, want, "scalar arm, n = {n}");
+        }
+    }
 }
