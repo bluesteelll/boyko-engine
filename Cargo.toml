@@ -210,6 +210,14 @@ edition = "2024"
 # engine_packages_census needs the constant it pins; boyko-diag has an empty [dependencies]
 # table, so this adds nothing to any graph.
 boyko-diag = { path = "crates/boyko_diag" }
+# UG-02 (tests/runtime_data_ledger_gate.rs) WALKS every scanned crate's module tree with syn
+# instead of grepping it: a text scanner misses tuple variants, aliases, `cfg(not(test))`,
+# hand-wrapped generics and every head but `Vec<` (allocator design P6, W4). No new graph
+# node: these are the workspace entries, and the feature set is exactly the one boyko_ui's
+# census dev-dependencies already request (`full` + `visit`), so no target-side feature moves.
+syn = { workspace = true, features = ["visit"] }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
 
 [lints]
 workspace = true
