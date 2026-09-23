@@ -94,6 +94,16 @@ boyko_shaderdsl = { path = "../boyko_shaderdsl", default-features = false }
 syn = { workspace = true, features = ["visit"] }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
+# Rung B2, G-GRAPH app (b), E1 and the id census: the UI half of the headless app (b) — today's UI
+# plugin composition (`UiPlugin`, `UiInteractionPlugin`, `UiBindingPlugin`, `UiWidgetsPlugin`,
+# `UiAnimationPlugin`) until UI2 lands `boyko_app::UiPlugins`. Dev-only: the host's shipping build
+# gains no UI edge (ED19 makes that edge UI2's decision, not B2's).
+boyko-ui = { path = "../boyko_ui" }
+# Rung B2: G-GRAPH's extraction self-test builds a `ScheduleBuilder` on the app's pool, and E1's
+# counting allocator cross-checks its chunk-class predicate against
+# `boyko_threadpool::__layout_receipt` and prices raw `pool.install` frames. Already in the graph
+# through `boyko-ecs`; named so the tests can reach the pool type and the receipt.
+boyko-threadpool = { path = "../boyko_threadpool" }
 
 [lints]
 workspace = true

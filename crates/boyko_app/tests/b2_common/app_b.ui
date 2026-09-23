@@ -1,0 +1,13 @@
+version=1
+#b2_root  UiLayout { layout_type: Column, width: Px(320), height: Px(200) }
+    UiRoot
+    #b2_title  UiLayout { layout_type: Row, width: Stretch(1), height: Px(24) }
+        UiText { color: 4294967295, size_px: 16.0, font: 0, align: Center }
+    #b2_button  UiLayout { layout_type: Column, width: Px(96), height: Px(32) }
+        Button
+        UiBackground { color: 0 }
+        OnClick(0)
+    #b2_track  UiLayout { layout_type: Row, width: Px(200), height: Px(20) }
+        Bar
+        #b2_fill  UiLayout { layout_type: Row, width: Pct(50), height: Px(20) }
+            BarFill
