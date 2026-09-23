@@ -311,6 +311,24 @@ const CREEP_FROM: usize = 600;
 const CREEP_TO: usize = 3000;
 /// A7-R1's bound on horizontal displacement over the window: 2 × Box2D's `B2_LINEAR_SLOP`.
 const CREEP_BOUND_M: f32 = 0.01;
+/// A7-R1's exact reading, pinned by its bits: D_max = 0.0007180063 m (`0x3a3c_3896`; box
+/// 1227, layer 12) on the default config, where contact reuse is off. Read in msvc release at
+/// L9 C3 (`aef7dda4`); the S5 rung recorded it as 0.0007180 m (module header). The comparison
+/// is on bits. The test prints D_max with `{}`, which is `f32`'s shortest round-trip form, so
+/// the printed decimal parses back to exactly these bits.
+///
+/// This is a regression pin, separate from [`CREEP_BOUND_M`], which is an acceptance
+/// criterion and is never tightened toward a reading. The pin makes "nothing moved"
+/// mechanical: until 2026-09-23 A7-R1 checked only the bound, and a scratch mutation that
+/// turned contact reuse on by default moved D_max to 0.0006670445 m with the test green.
+///
+/// **Re-pin rule.** The value moves only with a commit that changes values by design (a
+/// value-changing lever). That commit re-reads it from A7-R1's own `D_max` line (msvc
+/// release), re-pins it here in the same commit, and names the lever and the old value in
+/// this doc. In a commit that claims bit identity, a change is a defect, never a re-pin. L9
+/// C4 (contact reuse on by default) is such a lever and re-pins it. By the L9 design its
+/// reuse-off run must still read this value exactly.
+const A7_R1_D_MAX_BITS: u32 = 0x3a3c_3896;
 /// A7-R1's standing guard: the largest vertical drop any pile box may have taken by
 /// [`CREEP_FROM`]. Half a box edge — losing one layer costs a full [`BOX_SIZE`], while the
 /// vertical settle's penetration slop is millimetres per layer. Without it a pile that had
@@ -1684,7 +1702,10 @@ fn a_quarter_overlap_face_contact_has_distinct_feature_ids() {
 ///   steps 3000-5400 it adds another 1.0965 mm (module header).
 ///
 /// [`CREEP_BOUND_M`] is not tightened toward the reading: it is an acceptance criterion at
-/// Box2D's slop scale, not a regression pin. A revert of A7b's selection alone (the edge taken
+/// Box2D's slop scale, not a regression pin. The regression pin is separate: D_max must also
+/// equal [`A7_R1_D_MAX_BITS`] exactly, re-pinned only under that constant's rule.
+///
+/// A revert of A7b's selection alone (the edge taken
 /// whenever its SAT depth is below the face's by more than `SAT_EPS`) is caught at the kernel
 /// by A7-N9 (`narrowphase/box_box.rs`) and in the scene by THIS test: it read D_max =
 /// 0.10017 m under that mutation (msvc release, 2026-09-18), while A7-R2 still froze and
@@ -1775,6 +1796,19 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
             layer_of(JOLT, worst.1),
             top_sum.0 / n,
             top_sum.1 / n
+        );
+        assert_eq!(
+            worst.0.to_bits(),
+            A7_R1_D_MAX_BITS,
+            "A7-R1: D_max moved: {} m ({:#010x}, box {}), pinned {} m ({A7_R1_D_MAX_BITS:#010x}), \
+             contact reuse {}. It is still within the {CREEP_BOUND_M} m bound, so this is a value \
+             change, not a creep. In a commit that claims bit identity it is a defect; only a \
+             value-changing lever re-pins, under `A7_R1_D_MAX_BITS`'s rule",
+            worst.0,
+            worst.0.to_bits(),
+            worst.1,
+            f32::from_bits(A7_R1_D_MAX_BITS),
+            h.world.resource::<PhysicsConfig>().contact_reuse
         );
     });
 }

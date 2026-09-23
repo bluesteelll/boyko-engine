@@ -165,6 +165,11 @@
 //!                              (cfg-A/B at W > 1 and --cfg default have it on), refused at
 //!                              W = 1 (J-P1 is retired, see "Configurations")
 //! --parallel-np on|off         set parallel_narrowphase (L5), under any --cfg
+//! --contact-reuse on|off       set contact_reuse (L9b), under any --cfg; either value also reads
+//!                              the narrowphase's pair classes after every step (untimed) into the
+//!                              summary's `pair_classes`, as does any row whose config has
+//!                              contact_reuse on without the flag
+//! --reuse-distance D           contact_reuse_distance τ in metres (with --contact-reuse on)
 //! --broadphase allpairs|tree|grid
 //!                              set broadphase (tree broadphase C3) under Manual selection, under
 //!                              any --cfg
@@ -194,8 +199,15 @@
 //!   `void, colors, wide_colors, waves, g_ns, u_ns, r_ns, sys_sum_ns, disp_lane, worker_lane_max`
 //!   and, per system and per physics zone, `<name>_ns` and `<name>_n` (counters: `<name>` is the
 //!   value). `awake` is blank when sleeping is off.
+//! * `pair_classes` (with `--contact-reuse`, or with contact reuse on in the row's config; `null`
+//!   otherwise): the narrowphase's pair classes summed over the
+//!   window (`Manifolds::pair_classes`, read after every step, untimed) — `reused`, `sep_hits`,
+//!   `full`, `full_contacts`, `records_built`, `non_box`, `pairs` — and `h`, the share of the
+//!   touching box pairs served from a record, `reused / (reused + full_contacts)`. A counter, not a
+//!   time, so it is a result on a shared machine.
 //! * exit code: 0 ok; 2 bad flags; 3 void (anti-vacuity, frozen-by, disarmed ring traffic,
-//!   dropped samples); 4 `--expect-pose` mismatch; 101 panic.
+//!   dropped samples, a reuse-on row with no reuse over steps [100, 500)); 4 `--expect-pose`
+//!   mismatch; 101 panic.
 //!
 //! # Self-check (no `--scene`)
 //!
@@ -300,6 +312,7 @@ use boyko_threadpool::ThreadPoolBuilder;
 use boyko_physics::components::{
     Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
+use boyko_physics::manifold::BodyIndex;
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::narrowphase::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};
 use boyko_physics::broadphase_tree::{BroadphaseTree, TreeDiag};
@@ -308,15 +321,15 @@ use boyko_physics::profiling::{
     COUNTER_ZONE_COUNT, COUNTER_ZONES, PHYS_BP_ASSEMBLE, PHYS_BP_BUILD, PHYS_BP_MEMBERS,
     PHYS_BP_PAIRS, PHYS_BP_QUERIED, PHYS_BP_QUERY, PHYS_BP_REBUILDS, PHYS_BP_VERIFY,
     PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT,
-    PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS,
-    PHYS_NP_POINTS, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN,
+    PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_FULL, PHYS_NP_MANIFOLDS,
+    PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_NP_REUSED, PHYS_NP_SEP_HITS, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN,
     PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
     PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
     WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
 };
 use boyko_physics::resources::{
     BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
-    PhysicsConfig, SolverScratch,
+    PairClasses, PhysicsConfig, SolverScratch,
 };
 use boyko_physics::solver::SoftStepSolver;
 
@@ -365,6 +378,9 @@ const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// The self-check's step count.
 const SELF_CHECK_STEPS: usize = 3;
+/// The steps a contact-reuse row must reuse a record in, or be void (L9 design, "Integration":
+/// J's pile settles before step ~188, so a reuse-on row that reused nothing here measured nothing).
+const REUSE_PROBE: (usize, usize) = (100, 500);
 
 // ── Command line ──────────────────────────────────────────────────────────────
 
@@ -453,6 +469,8 @@ struct Args {
     cfg: CfgKind,
     parallel_solve: bool,
     parallel_np: Option<bool>,
+    contact_reuse: Option<bool>,
+    reuse_distance: Option<f32>,
     broadphase: Option<BroadphaseKind>,
     sleeping: bool,
     threshold: Option<f32>,
@@ -483,7 +501,8 @@ fn usage_error(msg: &str) -> ExitCode {
     eprintln!(
         "usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] \
          [--gap G] [--solver colored|reference] [--cfg a|as|b|default] [--parallel-solve] \
-         [--parallel-np on|off] [--broadphase allpairs|tree|grid] [--sleeping] [--threshold T] \
+         [--parallel-np on|off] [--contact-reuse on|off] [--reuse-distance D] \
+         [--broadphase allpairs|tree|grid] [--sleeping] [--threshold T] \
          [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] [--csv PATH] \
          [--pose-out PATH] [--expect-pose PATH] [--label TEXT]"
     );
@@ -518,6 +537,8 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut cfg = CfgKind::Default;
     let mut parallel_solve = false;
     let mut parallel_np = None;
+    let mut contact_reuse = None;
+    let mut reuse_distance = None;
     let mut broadphase = None;
     let mut sleeping = false;
     let mut threshold = None;
@@ -566,6 +587,16 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
                     other => return Err(format!("--parallel-np: expected on|off, got {other:?}")),
                 }
             }
+            "--contact-reuse" => {
+                contact_reuse = match it.next().as_deref() {
+                    Some("on") => Some(true),
+                    Some("off") => Some(false),
+                    other => return Err(format!("--contact-reuse: expected on|off, got {other:?}")),
+                }
+            }
+            "--reuse-distance" => {
+                reuse_distance = Some(parse_num::<f32>("--reuse-distance", it.next())?);
+            }
             "--broadphase" => {
                 broadphase = match it.next().as_deref() {
                     Some("allpairs") => Some(BroadphaseKind::AllPairs),
@@ -605,6 +636,8 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         cfg,
         parallel_solve,
         parallel_np,
+        contact_reuse,
+        reuse_distance,
         broadphase,
         sleeping,
         threshold,
@@ -657,6 +690,14 @@ fn validate(a: &Args) -> Result<(), String> {
     }
     if a.threshold.is_some() && !a.sleeping {
         return Err("--threshold needs --sleeping".into());
+    }
+    if let Some(d) = a.reuse_distance {
+        if a.contact_reuse != Some(true) {
+            return Err("--reuse-distance needs --contact-reuse on".into());
+        }
+        if !d.is_finite() || d < 0.0 {
+            return Err(format!("--reuse-distance {d} must be finite and >= 0"));
+        }
     }
     if let Some(k) = a.frozen_by {
         if !a.sleeping {
@@ -836,6 +877,12 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
     if let Some(np) = args.parallel_np {
         cfg.parallel_narrowphase = np;
     }
+    if let Some(reuse) = args.contact_reuse {
+        cfg.contact_reuse = reuse;
+    }
+    if let Some(d) = args.reuse_distance {
+        cfg.contact_reuse_distance = d;
+    }
     if let Some(kind) = args.broadphase {
         cfg.broadphase_select = BroadphaseSelectMode::Manual;
         cfg.broadphase = kind;
@@ -962,6 +1009,10 @@ struct Shape {
     bp_rebuilds: u64,
     /// Whether it classed a Wide or Excluded row this step (never, on these scenes).
     bp_kinds_moved: bool,
+    /// Candidate pairs with a sphere on either side, counted here from the shapes.
+    non_box: u64,
+    /// The narrowphase's own pair classes (`Manifolds::pair_classes`, from its tags).
+    classes: PairClasses,
 }
 
 /// Recomputes this step's color classes and narrowphase output. A frozen island's manifolds are
@@ -971,8 +1022,13 @@ struct Shape {
 fn step_shape(world: &EcsMaster, colored: bool, sleeping: bool, bp_prev: &mut TreeDiag) -> Shape {
     let manifolds = world.resource::<Manifolds>().manifolds();
     let bp = world.resource::<BroadphaseTree>().diag();
+    let bodies = world.resource::<SolverScratch>().bodies();
+    let is_box = |row: BodyIndex| matches!(bodies[row.0 as usize].shape, ColliderShape::Box { .. });
+    let candidate_pairs = world.resource::<ContactPairs>().pairs();
     let mut shape = Shape {
-        pairs: world.resource::<ContactPairs>().pairs().len() as u64,
+        pairs: candidate_pairs.len() as u64,
+        non_box: candidate_pairs.iter().filter(|&&(a, b)| !(is_box(a) && is_box(b))).count() as u64,
+        classes: world.resource::<Manifolds>().pair_classes(),
         manifolds: manifolds.len() as u64,
         points: manifolds.iter().map(|m| u64::from(m.count)).sum(),
         rows: world.resource::<SolverScratch>().bodies_len() as u64,
@@ -1046,6 +1102,8 @@ struct Structure {
     broadphase: BroadphaseKind,
     /// `BroadphaseTree::brute_max_rows()`: with `Tree`, the tree path runs above it.
     brute_max_rows: u32,
+    /// `PhysicsConfig::contact_reuse`.
+    contact_reuse: bool,
 }
 
 /// The narrowphase's chunk count for a step of `pairs` candidate pairs, or 0 when it runs the
@@ -1072,8 +1130,17 @@ fn check_step(
     shape: &Shape,
     st: Structure,
 ) -> Result<(), String> {
-    let Structure { colored, sleeping, substeps, relax, parallel_np, lanes, broadphase, brute_max_rows } =
-        st;
+    let Structure {
+        colored,
+        sleeping,
+        substeps,
+        relax,
+        parallel_np,
+        lanes,
+        broadphase,
+        brute_max_rows,
+        contact_reuse,
+    } = st;
     let n_sys = zones.systems.len();
     for (k, (name, _)) in zones.systems.iter().enumerate() {
         if counts[k] != 1 {
@@ -1124,6 +1191,19 @@ fn check_step(
         }
     }
     let base = n_sys + SPAN_ZONES.len();
+    // L9's pair classes close over the step's pairs (ruling W4): the tags' own non-box count is
+    // the shapes', the four classes sum to the pairs, and a row without reuse reuses nothing.
+    let cl = shape.classes;
+    if (cl.pairs, cl.non_box) != (shape.pairs, shape.non_box)
+        || cl.full + cl.reused + cl.sep_hits + cl.non_box != shape.pairs
+        || (!contact_reuse && cl.reused != 0)
+    {
+        return Err(format!(
+            "the pair classes {cl:?} do not close over {} pairs ({} non-box, contact_reuse \
+             {contact_reuse})",
+            shape.pairs, shape.non_box
+        ));
+    }
     // On a tree-path step every row is queried or a member (`q + m == N`: these scenes have no
     // Wide or Excluded row), so the queried value is `N − members`.
     let expected_counters: [(&ZoneHandle, u64, u64); COUNTER_ZONE_COUNT] = [
@@ -1137,6 +1217,9 @@ fn check_step(
         (&PHYS_BP_QUERIED, tp, shape.rows - shape.bp_members),
         (&PHYS_BP_MEMBERS, tp, shape.bp_members),
         (&PHYS_BP_REBUILDS, tp, shape.bp_rebuilds),
+        (&PHYS_NP_REUSED, 1, cl.reused),
+        (&PHYS_NP_SEP_HITS, 1, cl.sep_hits),
+        (&PHYS_NP_FULL, 1, cl.full),
     ];
     for &(handle, want_n, want_v) in &expected_counters {
         let k = base + counter_index(handle);
@@ -1272,6 +1355,8 @@ fn self_check() -> ExitCode {
         cfg: CfgKind::A,
         parallel_solve: false,
         parallel_np: None,
+        contact_reuse: None,
+        reuse_distance: None,
         broadphase: None,
         sleeping: false,
         threshold: None,
@@ -1311,14 +1396,15 @@ fn run(args: &Args) -> ExitCode {
     let traffic_before = ring_traffic();
     let mut rig = build(args, canary_ns);
     let colored = args.solver == SolverKind::Colored;
-    let (substeps, relax, sleeping, parallel_np, config_json) = {
+    let (substeps, relax, sleeping, parallel_np, contact_reuse, config_json) = {
         let cfg = rig.world.resource::<PhysicsConfig>();
         let tree_brute_max_rows = rig.world.resource::<BroadphaseTree>().brute_max_rows();
         let json = format!(
             "{{\"substeps\":{},\"relax_iterations\":{},\"broadphase\":{},\"broadphase_select\":{},\
              \"tree_brute_max_rows\":{tree_brute_max_rows},\
              \"simd\":{},\"simd_solve\":{},\"parallel_solve\":{},\"parallel_broadphase\":{},\
-             \"parallel_narrowphase\":{},\"sleeping\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\"colored\":{},\
+             \"parallel_narrowphase\":{},\"contact_reuse\":{},\"contact_reuse_distance\":{},\
+             \"sleeping\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\"colored\":{},\
              \"contact_hertz\":{},\"contact_damping\":{}}}",
             cfg.substeps,
             cfg.relax_iterations,
@@ -1329,6 +1415,8 @@ fn run(args: &Args) -> ExitCode {
             cfg.parallel_solve,
             cfg.parallel_broadphase,
             cfg.parallel_narrowphase,
+            cfg.contact_reuse,
+            json_f64(f64::from(cfg.contact_reuse_distance)),
             cfg.sleeping,
             json_f64(f64::from(cfg.sleep_threshold)),
             cfg.sleep_frames,
@@ -1341,6 +1429,7 @@ fn run(args: &Args) -> ExitCode {
             u64::from(cfg.relax_iterations),
             cfg.sleeping,
             cfg.parallel_narrowphase,
+            cfg.contact_reuse,
             json,
         )
     };
@@ -1368,6 +1457,7 @@ fn run(args: &Args) -> ExitCode {
         lanes: args.workers,
         broadphase,
         brute_max_rows,
+        contact_reuse,
     };
     let mut bp_prev = rig.world.resource::<BroadphaseTree>().diag();
     let n_cols = zones.as_ref().map_or(0, ZoneTable::len);
@@ -1385,6 +1475,13 @@ fn run(args: &Args) -> ExitCode {
     let mut first_void: Option<String> = None;
     let mut solve_on_dispatcher_steps = 0usize;
     let mut first_frozen_step: Option<usize> = None;
+    // L9: the pair classes, per step. Read on every row whose EFFECTIVE config has reuse on, since
+    // the void probe after the run reads them there whether or not the row named the flag, and on
+    // every row that names `--contact-reuse` (the summary's `pair_classes`). A reuse-off row that
+    // does not name the flag walks no tags.
+    let read_classes = contact_reuse || args.contact_reuse.is_some();
+    let mut classes: Vec<PairClasses> =
+        Vec::with_capacity(if read_classes { args.steps } else { 0 });
     let top = *rig.boxes.last().expect("invariant: every scene spawns dynamic bodies");
 
     for step in 0..args.steps {
@@ -1426,6 +1523,9 @@ fn run(args: &Args) -> ExitCode {
             });
         }
         rows.push(StepRow { wall_ns: wall.as_nanos() as u64, manifolds, pairs, top_y, awake });
+        if read_classes {
+            classes.push(rig.world.resource::<Manifolds>().pair_classes());
+        }
 
         if let Some(zones) = &zones {
             let profiler = rig.world.resource::<Profiler>();
@@ -1508,6 +1608,48 @@ fn run(args: &Args) -> ExitCode {
         void_steps += 1;
         first_void.get_or_insert_with(|| format!("the disarmed run pushed {traffic} samples"));
     }
+    // L9 (design, "Integration"): a reuse-on row that reused nothing over steps [100, 500) is void.
+    // It tests the effective config, which is also what `read_classes` tests, so `classes` holds
+    // one entry per step on every row it indexes, the flag named or not.
+    let reuse_probe = REUSE_PROBE.0..REUSE_PROBE.1.min(args.steps);
+    if contact_reuse
+        && !reuse_probe.is_empty()
+        && classes[reuse_probe.clone()].iter().all(|c| c.reused == 0)
+    {
+        void_steps += 1;
+        first_void.get_or_insert_with(|| {
+            format!("contact reuse is on and no pair reused its record over steps {reuse_probe:?}")
+        });
+    }
+    let classes_json = if classes.is_empty() {
+        "null".to_owned()
+    } else {
+        let sum = classes[window.0..window.1].iter().fold(PairClasses::default(), |s, c| PairClasses {
+            pairs: s.pairs + c.pairs,
+            non_box: s.non_box + c.non_box,
+            sep_hits: s.sep_hits + c.sep_hits,
+            reused: s.reused + c.reused,
+            full: s.full + c.full,
+            full_contacts: s.full_contacts + c.full_contacts,
+            records_built: s.records_built + c.records_built,
+        });
+        let touching = sum.reused + sum.full_contacts;
+        let h = if touching == 0 { f64::NAN } else { sum.reused as f64 / touching as f64 };
+        format!(
+            "{{\"window\":[{},{}],\"pairs\":{},\"non_box\":{},\"sep_hits\":{},\"reused\":{},\
+             \"full\":{},\"full_contacts\":{},\"records_built\":{},\"h\":{}}}",
+            window.0,
+            window.1,
+            sum.pairs,
+            sum.non_box,
+            sum.sep_hits,
+            sum.reused,
+            sum.full,
+            sum.full_contacts,
+            sum.records_built,
+            json_f64(h),
+        )
+    };
 
     let pose = pose_bytes(&rig.world, &rig.boxes);
     let pose_hash = fnv1a64(&pose);
@@ -1614,7 +1756,7 @@ fn run(args: &Args) -> ExitCode {
          \"void_steps\":{void_steps},\"first_void\":{},\"drops_total\":{},\
          \"disarmed_ring_traffic\":{},\"ticks_per_ns\":{},\"waves_total\":{waves_total},\
          \"first_frozen_step\":{},\"frozen_by\":{},\"awake_max_from_frozen_by\":{},\
-         \"broadphase_tree\":{bp_json},\
+         \"broadphase_tree\":{bp_json},\"pair_classes\":{classes_json},\
          \"threads\":{{\"pool_workers\":{},\"dispatcher\":1,\"solve_on_dispatcher_steps\":\
          {solve_on_dispatcher_steps},\"armed_steps\":{},\"dispatcher_lane_samples_max\":{disp_max}}}}}",
         json_str(RUNNER_ID),

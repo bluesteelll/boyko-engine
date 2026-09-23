@@ -252,6 +252,15 @@ name = "jolt_parity_pyramid"
 harness = false
 
 [[bench]]
+# L9 C0: the narrowphase class bench (levers/L9-contact-reuse/02-DESIGN-REV1.md) - J and R
+# snapshots at step 300 and a moving rain scene, every candidate pair classed separated /
+# touching / fast with structural asserts (closure, a SAT replica, the step's manifold count, the
+# design's J counts), and each class's ns per pair, read in a quiet window only. Custom main like
+# the parity runner: without `--bench` it runs a small self-check.
+name = "narrowphase_classes"
+harness = false
+
+[[bench]]
 # Defect A (interim): what the row identity map costs per kind of structural change, on the
 # real colored schedule over the Jolt pyramid plus two sphere churn pools — stable /
 # swap_churn / archetype_shift / first_archetype_spawn / burst_despawn / burst_migrate, each

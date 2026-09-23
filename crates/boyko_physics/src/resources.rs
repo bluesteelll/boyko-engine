@@ -18,10 +18,13 @@ use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
+use crate::narrowphase::carry::{NO_SEQ, PairCarry, PairTag};
+use crate::narrowphase::reuse::RowFrame;
 use crate::row_identity::{NO_ISLAND_KEY, NO_ROW, RemapCursor, RowIdentity, RowRemap, SleepLatch};
 use crate::scratch_ids::{
     body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
-    box_axis_cache_id, contact_pairs_id, manifolds_id, np_stage_id,
+    box_axis_cache_id, contact_pairs_id, contact_pairs_prev_id, manifolds_id, np_stage_id,
+    row_frames_id,
     register_narrowphase_column_layouts,
     register_graph_column_layouts, register_scratch_layouts, scratch_reserve_rows,
     sensor_overlaps_id, sleep_island_key_id, sleep_latch_prev_id, touched_awake_id,
@@ -332,6 +335,38 @@ pub struct PhysicsConfig {
     /// blocks), pinned by the frame allocation census. Toggling it changes performance,
     /// never the result.
     pub parallel_narrowphase: bool,
+    /// L9b CONTACT REUSE (default `false`, commit C3 of
+    /// `docs/physics/perf-campaign/levers/L9-contact-reuse/02-DESIGN-REV1.md`).
+    ///
+    /// When `true`, a touching box-box pair that is slow (its relative motion over a step
+    /// is small against the reuse distance) and involves no sensor keeps a record of its
+    /// last full collision — the reference face and the kept incident points, or the edge
+    /// pair — and, while its relative pose stays within τ_eff of that collision (measured
+    /// in the larger body's frame, scaled by the smaller body's extent), refreshes the
+    /// record from the current poses instead of running the SAT and the clip: each kept
+    /// point is carried with its body and its separation re-measured against the reference
+    /// face, and a point that lifted off is dropped (`narrowphase/reuse.rs`).
+    ///
+    /// **It changes values**, within the design's bounds (lemma L9-L3): an unseen feature
+    /// penetrates at most τ_eff before the next full collision, and the lever arms are off
+    /// by at most τ_eff. It never changes determinism: the output of a slow pair is a pure
+    /// function of its record and the current poses (a miss emits the refresh of the record
+    /// it just built, lemma L9-L1), and the serial loop and any partition of the parallel
+    /// narrowphase produce the same bits for any worker count.
+    ///
+    /// **Default OFF** (commit C3: the machinery is dormant, every trajectory is the one
+    /// the engine produced before it). Toggling it at runtime needs no epoch: off, the
+    /// records are ignored and not written; on, the next full collision of a slow pair
+    /// builds one.
+    pub contact_reuse: bool,
+    /// τ, the reuse distance in metres (default [`DEFAULT_CONTACT_REUSE_DISTANCE`], 1 mm);
+    /// only meaningful when [`contact_reuse`](Self::contact_reuse) is `true`. Must be finite
+    /// and `>= 0`; `0` disables reuse in effect (only bitwise-unchanged poses would hit).
+    ///
+    /// A pair's effective distance τ_eff is `τ` clamped by 5 % of the smaller bounding
+    /// radius and by 5 % of the thinnest half-extent of either box, so small and thin boxes
+    /// get a proportionally tighter bound. A change takes effect at the next check.
+    pub contact_reuse_distance: f32,
     /// Opt into the O8 per-island SLEEPING / deactivation (default `false`).
     ///
     /// Effective only on the colored-solve path (the
@@ -485,6 +520,10 @@ pub const DEFAULT_SLEEP_THRESHOLD: f32 = 1.0e-4;
 /// still-settling stack (no velocity-driven flap; no self-wake from frozen energy).
 pub const DEFAULT_SLEEP_FRAMES: u16 = 60;
 
+/// Default contact-reuse distance τ, in metres (L9b D4): 1 mm, a tenth of A7-R1's 10 mm
+/// creep bound.
+pub const DEFAULT_CONTACT_REUSE_DISTANCE: f32 = 0.001;
+
 impl Default for PhysicsConfig {
     fn default() -> Self {
         Self {
@@ -554,6 +593,10 @@ impl Default for PhysicsConfig {
             // chunks below two lanes, so W=1 opens no scope. The serial loop stays the
             // same-binary A/B (`parallel_narrowphase = false`).
             parallel_narrowphase: true,
+            // Default OFF at L9 C3 (the dormant commit): every trajectory is the one the
+            // engine produced before contact reuse existed. C4 is the commit that turns it on.
+            contact_reuse: false,
+            contact_reuse_distance: DEFAULT_CONTACT_REUSE_DISTANCE,
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.
             sleeping: false,
@@ -613,6 +656,10 @@ pub enum IntegrationMode {
 /// (IM-1). The list is sorted deterministically by `(min, max)` (D4) so contact
 /// iteration order is reproducible (float add is non-associative). The column is
 /// cleared and refilled each step, capacity reused.
+///
+/// The previous step's list is kept beside it (L9 D9, the narrowphase's pair carry):
+/// the broadphase swaps the two at its start ([`rotate`](Self::rotate)) and stamps the
+/// list it builds with the gather sequence it was built on.
 #[derive(Resource)]
 pub struct ContactPairs {
     /// Candidate pairs in deterministic `(min, max)` order.
@@ -623,6 +670,18 @@ pub struct ContactPairs {
     /// pointer laundered through a whole-buffer `&mut [T]`. Consumers read
     /// [`pairs`](Self::pairs).
     pub(crate) pairs: ScratchColumn<(BodyIndex, BodyIndex)>,
+    /// The previous broadphase's pairs, in the same order (L9 D9): the list the
+    /// narrowphase's pair carry joins this step's pairs against. Swapped with `pairs`
+    /// at the start of every broadphase, so the two columns alternate roles.
+    pairs_prev: ScratchColumn<(BodyIndex, BodyIndex)>,
+    /// The gather sequence `pairs` was built on, or `NO_SEQ` before the first
+    /// broadphase (review OQ4's stamp).
+    seq: u64,
+    /// The gather sequence `pairs_prev` was built on, or `NO_SEQ`.
+    seq_prev: u64,
+    /// Broadphases opened so far ([`rotate`](Self::rotate) calls): the ordinal of the list in
+    /// `pairs`, which tells two lists built on one gather apart.
+    rotations: u64,
 }
 
 impl Default for ContactPairs {
@@ -638,12 +697,53 @@ impl ContactPairs {
     /// Builds an empty pair buffer pre-sized for `capacity` pairs.
     pub fn with_capacity(capacity: usize) -> Self {
         register_broadphase_column_layouts();
+        let reserve = capacity.max(scratch_reserve_rows(size_of::<(BodyIndex, BodyIndex)>()));
         Self {
-            pairs: ScratchColumn::new(
-                contact_pairs_id(),
-                capacity.max(scratch_reserve_rows(size_of::<(BodyIndex, BodyIndex)>())),
-            ),
+            pairs: ScratchColumn::new(contact_pairs_id(), reserve),
+            // The same reserve: the two columns swap roles every step.
+            pairs_prev: ScratchColumn::new(contact_pairs_prev_id(), reserve),
+            seq: NO_SEQ,
+            seq_prev: NO_SEQ,
+            rotations: 0,
         }
+    }
+
+    /// Opens a broadphase step (L9 D9): the current list becomes the previous one, and
+    /// the list the broadphase fills next is stamped with gather `seq` and the next
+    /// rotation ordinal. O(1): the two columns swap. Every broadphase arm clears the list
+    /// before it fills it.
+    #[inline]
+    pub(crate) fn rotate(&mut self, seq: u64) {
+        core::mem::swap(&mut self.pairs, &mut self.pairs_prev);
+        self.seq_prev = self.seq;
+        self.seq = seq;
+        self.rotations += 1;
+    }
+
+    /// The ordinal of the current list: the number of broadphases opened so far. The
+    /// previous list's is one less.
+    #[inline]
+    pub(crate) fn rotations(&self) -> u64 {
+        self.rotations
+    }
+
+    /// The previous broadphase's pairs (L9 D9), in `(min, max)` order.
+    #[inline]
+    pub(crate) fn pairs_prev(&self) -> &[(BodyIndex, BodyIndex)] {
+        self.pairs_prev.as_read_slice()
+    }
+
+    /// The gather sequence the current list was built on (`NO_SEQ` before the first
+    /// broadphase).
+    #[inline]
+    pub(crate) fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// The gather sequence the previous list was built on.
+    #[inline]
+    pub(crate) fn seq_prev(&self) -> u64 {
+        self.seq_prev
     }
 
     /// The contiguous read slice over this step's candidate pairs, in the
@@ -2367,6 +2467,21 @@ pub struct Manifolds {
     /// filled only on growth); rows outside a chunk's written runs are stale and never
     /// read. Untouched while `parallel_narrowphase` is off.
     pub(crate) np_stage: ScratchColumn<Manifold>,
+    /// The per-row orientation frames (L9 D2, `narrowphase/reuse.rs`): row `r`'s world box
+    /// axes, `Mat3::from_quat(rotation)`'s columns, written for every box row once per step
+    /// at the entry of the narrowphase, so a box pair reads two frames instead of converting
+    /// two quaternions — and, on a step that requested contact reuse, its bounding radius.
+    ///
+    /// Its length is the step's row count whenever the fill ran; a non-box row's slot is
+    /// stale and never read. Untouched on a step whose pairs build their frames per pair
+    /// (fewer pairs than half the rows).
+    pub(crate) row_frames: ScratchColumn<RowFrame>,
+    /// The pair carry (L9 D9, `narrowphase/carry.rs`): every candidate pair's tag and — with
+    /// contact reuse on — its reuse record, this step's and the previous step's, the jumper
+    /// bitset of the join, and the stamps that tie them to the pair list they index. It
+    /// carries a separated box pair's separating axis (L9a (ii)) and a slow touching box
+    /// pair's last full collision (L9b) to the next step.
+    pub(crate) pair_carry: PairCarry,
     /// Steps whose narrowphase dispatched chunks across the pool — monotonic, written
     /// only by the calling thread after the join. A structural witness, read through
     /// [`narrowphase_dispatches`](Self::narrowphase_dispatches).
@@ -2400,8 +2515,89 @@ impl Manifolds {
             // The same ceiling: the stage holds at most one manifold per candidate pair,
             // and a reservation is address space, not commit, until a dispatch grows it.
             np_stage: ScratchColumn::new(np_stage_id(), reserve),
+            // One frame per body row. `capacity` counts pairs, not rows, so the floor is the
+            // budget every scratch column gets; the fill declines a step past it.
+            row_frames: ScratchColumn::new(
+                row_frames_id(),
+                capacity.max(scratch_reserve_rows(size_of::<RowFrame>())),
+            ),
+            pair_carry: PairCarry::with_capacity(capacity),
             np_dispatches: 0,
         }
+    }
+
+    /// Diagnostic: an FNV-1a 64 hash of the pair tags the last narrowphase wrote (L9 D9),
+    /// in pair order — equal across the serial loop and any chunking of the parallel one.
+    /// O(pairs).
+    pub fn pair_tags_fingerprint(&self) -> u64 {
+        self.pair_carry.tags().iter().fold(0xcbf2_9ce4_8422_2325, |h, t| {
+            t.bits()
+                .to_le_bytes()
+                .iter()
+                .fold(h, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3))
+        })
+    }
+
+    /// Diagnostic: how many box pairs of the last narrowphase were found separated by the
+    /// separating axis their previous step carried, without running the SAT (L9a (ii)).
+    /// O(pairs).
+    pub fn separated_axis_hits(&self) -> usize {
+        self.pair_carry.tags().iter().filter(|t| t.has(PairTag::SEPHIT)).count()
+    }
+
+    /// Diagnostic: the last narrowphase's candidate pairs by how each was collided (L9), from
+    /// the pair tags. O(pairs).
+    pub fn pair_classes(&self) -> PairClasses {
+        let tags = self.pair_carry.tags();
+        let mut c = PairClasses { pairs: tags.len() as u64, ..PairClasses::default() };
+        for t in tags {
+            if !t.has(PairTag::BOX) {
+                c.non_box += 1;
+            } else if t.has(PairTag::SEPHIT) {
+                c.sep_hits += 1;
+            } else if t.has(PairTag::HIT) {
+                c.reused += 1;
+            } else {
+                c.full += 1;
+                c.full_contacts += u64::from(t.axis().is_some());
+                c.records_built += u64::from(t.has(PairTag::REC));
+            }
+        }
+        c
+    }
+
+    /// Diagnostic: an FNV-1a 64 hash of the reuse records the last narrowphase wrote (L9b) —
+    /// every pair slot whose tag carries `REC`, its index and every word of its record, in pair
+    /// order. Equal across the serial loop and any chunking of the parallel one. O(pairs).
+    pub fn reuse_records_fingerprint(&self) -> u64 {
+        let records = self.pair_carry.records();
+        let fnv = |h: u64, w: u32| {
+            w.to_le_bytes()
+                .iter()
+                .fold(h, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3))
+        };
+        self.pair_carry
+            .tags()
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.has(PairTag::REC))
+            .fold(0xcbf2_9ce4_8422_2325, |h, (k, _)| {
+                records[k].words().iter().fold(fnv(h, k as u32), |h, &w| fnv(h, w))
+            })
+    }
+
+    /// Diagnostic: steps whose pair carry could not be joined although it had been stamped
+    /// before — a missed gather, or a pair list that is not the one the carry's tags index.
+    /// Flat while the pipeline runs every step.
+    #[inline]
+    pub fn pair_carry_resets(&self) -> u64 {
+        self.pair_carry.resets()
+    }
+
+    /// Diagnostic: steps whose rows moved, so the pair carry built its jumper bitset.
+    #[inline]
+    pub fn pair_carry_jumper_builds(&self) -> u64 {
+        self.pair_carry.jumper_builds()
     }
 
     /// Diagnostic: the number of steps whose narrowphase dispatched its pairs across the
@@ -2444,6 +2640,27 @@ impl Manifolds {
     pub fn sensor_overlaps_build(&mut self) -> ScratchBuildView<'_, Manifold> {
         self.sensor_overlaps.build_view()
     }
+}
+
+/// The last narrowphase's candidate pairs by how each was collided (L9), from the pair tags
+/// ([`Manifolds::pair_classes`]): `non_box + sep_hits + reused + full == pairs`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PairClasses {
+    /// Candidate pairs the narrowphase tagged.
+    pub pairs: u64,
+    /// Sphere-sphere and sphere-box pairs.
+    pub non_box: u64,
+    /// Box pairs the separating axis they carried from the previous step rejected, the SAT not
+    /// run (L9a (ii)).
+    pub sep_hits: u64,
+    /// Box pairs whose output came from their contact-reuse record (L9b), the SAT not run.
+    pub reused: u64,
+    /// Box pairs whose full collision (SAT, clip) ran.
+    pub full: u64,
+    /// Of `full`, the pairs whose full collision produced a contact.
+    pub full_contacts: u64,
+    /// Of `full_contacts`, the slow pairs that built a reuse record from it (L9b misses).
+    pub records_built: u64,
 }
 
 /// Bit width of one `color_occ` word (a `u64` per-color body bitset cell).
