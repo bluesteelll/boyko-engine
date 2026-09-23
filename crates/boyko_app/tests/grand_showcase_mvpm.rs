@@ -160,7 +160,7 @@ fn setup(
 /// `--features hwrt`, `BOYKO_SHADOW_DENOISE=temporal` (or `both`), `BOYKO_DISABLE_VALIDATION=1`;
 /// the orchestrator runs it on the GPU to dump the screenshot (not byte-pinned — see module doc).
 #[test]
-#[ignore = "gpu-windowed+gpu-cap: needs a real windowed hwrt+temporal-capable GPU device; the orchestrator runs it to dump the F8-mv screenshot"]
+#[ignore = "gpu-windowed+gpu-cap: needs a real windowed GPU device with ray query + RG16 storage; run it with --features hwrt and BOYKO_SHADOW_DENOISE=temporal, since without them it takes the MV-only pipeline and passes having shown nothing; the orchestrator runs it to dump the F8-mv screenshot"]
 fn grand_showcase_mvpm_screenshot_dump() {
     let mut app = App::new();
     app.add_plugins(EnginePlugins::window("boyko_engine grand showcase mvpm", 512, 512));
