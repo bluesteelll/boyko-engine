@@ -371,7 +371,10 @@ pub fn probe_iii(ctx: &Ctx, llvm: &Llvm, map_path: &Path) -> Result<String> {
     if rvas.is_empty() {
         return Err(Red::new(RedKind::EmptyCensus, "no instruction disassembled in the body's image range"));
     }
-    let frames = llvm::symbolize(&symbolizer, &built.image, built.pdb.as_deref(), &rvas)?;
+    if built.pdb.is_none() {
+        return Err(Red::new(RedKind::NoObject, format!("no PDB beside {}; the sensitivity-map profile must write one", built.image.display())));
+    }
+    let frames = llvm::symbolize(&symbolizer, &built.image, &rvas)?;
     let mut files: BTreeSet<String> = BTreeSet::new();
     let mut fns: BTreeMap<String, usize> = BTreeMap::new();
     let mut hit: Option<(u64, Vec<Frame>)> = None;

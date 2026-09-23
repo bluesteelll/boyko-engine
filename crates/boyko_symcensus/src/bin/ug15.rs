@@ -7,6 +7,7 @@
 //! ug15 nm     <file>                          # the instrument's control E: RED on a msvc image
 //! ug15 rlibs  --subject <S> [--profile <P>]   # leg (7b)'s member formats (PC-7)
 //! ug15 leg7 snapshot --subject <S> [--profile <P>] --out <file>
+//! ug15 textcheck --subject <S> --seam <snapshot>  # .text of release == seam-census
 //! ug15 leg7 compare  <parent> <child> [--rename <file>]
 //! ug15 probe i   [--subjects a,b,…] [--out <file>]      # probes (i) and (ii)
 //! ug15 probe iii [--out <file>]
@@ -133,6 +134,35 @@ fn run(args: &[String]) -> Result<()> {
             text.push_str(&probe::rlib_formats(&llvm, &built)?);
             built.check_intact()?;
             emit(&text, opt(args, "--out"))
+        }
+        "textcheck" => {
+            // 03 §6 leg (7): the seam-census profile must change symbols only, so its image's
+            // `.text` must equal `release`'s. The seam-census side comes from a leg-(7) snapshot.
+            let ctx = Ctx::new()?;
+            let llvm = Llvm::resolve(&ctx.host)?;
+            let s = objbuild::subject(required(args, "--subject")?)?;
+            let seam_file = required(args, "--seam")?;
+            let seam = Snapshot::parse(&std::fs::read_to_string(seam_file).map_err(|e| Red::io(Path::new(seam_file), &e))?)?;
+            let built = objbuild::build(&ctx, &Request { subject: s, profile: "release", extra_rustc: &[], emit_obj: true })?;
+            let rel = llvm::size_a(&llvm.size, &built.image)?;
+            built.check_intact()?;
+            let mut text = probe::header(&ctx, &llvm, &format!(".text check of {}: release vs seam-census", s.key));
+            text.push_str(&built.receipt());
+            text.push_str(&format!("{:<10} {:>12} {:>12}\n", "section", "release", "seam-census"));
+            for (name, size) in &rel {
+                let other = seam.sections.iter().find(|(n, _)| n == name).map(|(_, v)| *v);
+                text.push_str(&format!("{name:<10} {size:>12} {:>12}\n", other.map_or_else(|| "-".to_owned(), |v| v.to_string())));
+            }
+            let get = |rows: &[(String, u64)]| rows.iter().find(|(n, _)| n == ".text").map(|(_, v)| *v);
+            let (a, b) = (get(&rel), get(&seam.sections));
+            let same = a.is_some() && a == b;
+            text.push_str(&format!(".text equal: {same}\n"));
+            emit(&text, opt(args, "--out"))?;
+            if same {
+                Ok(())
+            } else {
+                Err(Red::new(RedKind::Mismatch, format!(".text differs: release {a:?} vs seam-census {b:?}")))
+            }
         }
         "leg7" => leg7(args),
         "probe" => probe_cmd(args),

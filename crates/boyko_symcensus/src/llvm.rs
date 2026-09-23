@@ -652,16 +652,17 @@ pub struct Frame {
 
 /// Symbolizes each RVA in `rvas` against `image` (`--relative-address`, JSON output, inlined frames
 /// included — the tool's default). Returns one frame list per address, innermost first.
-pub fn symbolize(tool: &Tool, image: &Path, pdb: Option<&Path>, rvas: &[u64]) -> Result<Vec<Vec<Frame>>> {
-    let mut args: Vec<std::ffi::OsString> = vec![
+///
+/// There is no `--pdb` argument: the MSVC Build Tools copy (LLVM 21.0.0git) does not accept one
+/// (measured at B3: `unknown argument '--pdb=…'`), and finds the PDB through the image's CodeView
+/// record, which rustc writes as the bare file name (`/PDBALTPATH:%_PDB%`), beside the image.
+pub fn symbolize(tool: &Tool, image: &Path, rvas: &[u64]) -> Result<Vec<Vec<Frame>>> {
+    let args: Vec<std::ffi::OsString> = vec![
         "--output-style=JSON".into(),
         "--relative-address".into(),
         "--inlining".into(),
         format!("--obj={}", image.display()).into(),
     ];
-    if let Some(p) = pdb {
-        args.push(format!("--pdb={}", p.display()).into());
-    }
     let mut all = Vec::with_capacity(rvas.len());
     for chunk in rvas.chunks(256) {
         let mut a = args.clone();
