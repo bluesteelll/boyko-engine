@@ -1,0 +1,1953 @@
+# ug15 leg2 pins v1
+# == leg (2) pins of query_dsl under release
+# tree         D:\wt\lighttable (HEAD 6c5582bfaa15d1b83dcc0100e79b436d91e5832d, 5 uncommitted path(s))
+# target dir   D:/wt/_targets/vkval-msvc
+# host         x86_64-pc-windows-msvc (msvc)
+# rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
+# rustc -vV    binary: rustc
+# rustc -vV    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+# rustc -vV    commit-date: 2026-09-01
+# rustc -vV    host: x86_64-pc-windows-msvc
+# rustc -vV    release: 1.98.1
+# rustc -vV    LLVM version: 22.1.8
+# llvm-nm          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-nm.exe
+# llvm-objdump     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe
+# llvm-readobj     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-readobj.exe
+# llvm-size        LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-size.exe
+# llvm-ar          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-ar.exe
+# subject      query_dsl (boyko-ecs --bench query_dsl)
+# profile      release
+# object       D:/wt/_targets/vkval-msvc\release\deps\query_dsl-edb2d7fd551dc4e0.o
+# object sha   89a3b8e44643db19e05d37027a11ed11aa8f08b6de9149723738574be77ab03d
+# image        D:/wt/_targets/vkval-msvc\release\deps\query_dsl-edb2d7fd551dc4e0.exe
+# image sha    b9b1f09dab75226f50e395b63791a33a2ae0570da70cca1196b3b8942960eeee
+# pdb          D:/wt/_targets/vkval-msvc\release\deps\query_dsl-edb2d7fd551dc4e0.pdb
+# link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\deps\\query_dsl-edb2d7fd551dc4e0.query_dsl.a9d60259b1c44575-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcwybrrW\\libwindows_sys-04007b6cdfc72af3.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcwybrrW\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:D:/wt/_targets/vkval-msvc\\release\\deps\\query_dsl-edb2d7fd551dc4e0.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis"
+# final rustc  Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name query_dsl --edition=2024 'crates\boyko_ecs\benches\query_dsl.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C opt-level=3 -C lto=fat --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --cfg test --cfg 'feature="default"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("bench-alloc", "big_query_table", "default", "profiling-analysis"))' -C metadata=88590414a51523df -C extra-filename=-edb2d7fd551dc4e0 --out-dir 'D:/wt/_targets/vkval-msvc\release\deps' -C strip=debuginfo -L 'dependency=D:/wt/_targets/vkval-msvc\release\deps' --extern 'boyko_diag=D:/wt/_targets/vkval-msvc\release\deps\libboyko_diag-b560511677c8eafc.rlib' --extern 'boyko_ecs=D:/wt/_targets/vkval-msvc\release\deps\libboyko_ecs-2f70a22dd5086947.rlib' --extern 'boyko_log=D:/wt/_targets/vkval-msvc\release\deps\libboyko_log-64926abcbf6a9ab1.rlib' --extern 'boyko_macros=D:/wt/_targets/vkval-msvc\release\deps\boyko_macros-f880e435a2f5fc23.dll' --extern 'boyko_threadpool=D:/wt/_targets/vkval-msvc\release\deps\libboyko_threadpool-cb2f82ea77d07ccb.rlib' --extern 'boyko_utils=D:/wt/_targets/vkval-msvc\release\deps\libboyko_utils-51889ff239bec636.rlib' --extern 'criterion=D:/wt/_targets/vkval-msvc\release\deps\libcriterion-509d3e8aa853fb48.rlib' --extern 'crossbeam_queue=D:/wt/_targets/vkval-msvc\release\deps\libcrossbeam_queue-2ffb2c6ef794751d.rlib' --extern 'crossbeam_utils=D:/wt/_targets/vkval-msvc\release\deps\libcrossbeam_utils-b5ab10e0cdae4b40.rlib' --extern 'fixedbitset=D:/wt/_targets/vkval-msvc\release\deps\libfixedbitset-6438f21b34608389.rlib' --extern 'proptest=D:/wt/_targets/vkval-msvc\release\deps\libproptest-7bc9698dcdcc7a5a.rlib' --extern 'rand=D:/wt/_targets/vkval-msvc\release\deps\librand-987591a5f3bbc988.rlib' --extern 'static_assertions=D:/wt/_targets/vkval-msvc\release\deps\libstatic_assertions-8e4736a6d0969db2.rlib' --extern 'trybuild=D:/wt/_targets/vkval-msvc\release\deps\libtrybuild-231a8c13d3577aab.rlib' --emit=obj --print link-args -C target-cpu=x86-64-v3`
+== query_dsl | R-4 | boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag> | size=376 (section RawDataSize) | copies=1 | sha256=f010ad75ee62a86f049e8cfab92f099c7efd21a82e2beb5047c7c54c9721294a
+<boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>> @+0x0:
+     0: push rsi
+     1: push rdi
+     2: sub rsp, 0x78
+     6: mov qword ptr [rsp + 0x28], rcx
+     b: cmp rcx, 0x200
+    12: jae 0xa0
+    18: shl rcx, 0x6
+    1c: lea rsi, [rip] ; REL32 boyko_ecs::ecs::core::component::component_registry::LAYOUTS
+    23: mov qword ptr [rsp + 0x30], 0x4
+    2c: mov qword ptr [rsp + 0x38], 0x4
+    35: mov qword ptr [rsp + 0x40], 0x0
+    3e: lea rdi, [rip] ; REL32 <anon-data>
+    45: mov qword ptr [rsp + 0x48], rdi
+    4a: mov qword ptr [rsp + 0x50], 0xe
+    53: vmovdqu xmm0, xmmword ptr [rip] ; REL32 <anon-data>
+    5b: vmovdqu xmmword ptr [rsp + 0x58], xmm0
+    61: mov eax, dword ptr [rcx + rsi + 0x38]
+    65: test eax, eax
+    67: jne 0xe1
+    69: cmp qword ptr [rsp + 0x48], 0x0
+    6f: je 0x99
+    71: mov rax, qword ptr [rsp + 0x28]
+    76: shl rax, 0x6
+    7a: mov ecx, dword ptr [rax + rsi + 0x38]
+    7e: test ecx, ecx
+    80: jne 0xfc
+    82: add rsi, rax
+    85: vmovdqu xmm0, xmmword ptr [rsi + 0x28]
+    8a: vpxor xmm0, xmm0, xmmword ptr [rip] ; REL32 __xmm@f1979d5ff196276f43daeb353a91aa03
+    92: vptest xmm0, xmm0
+    97: jne 0x116
+    99: add rsp, 0x78
+    9d: pop rdi
+    9e: pop rsi
+    9f: ret
+    a0: lea rax, [rsp + 0x28]
+    a5: mov qword ptr [rsp + 0x30], rax
+    aa: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+    b1: mov qword ptr [rsp + 0x38], rax
+    b6: lea rcx, [rip] ; REL32 <anon-data>
+    bd: mov qword ptr [rsp + 0x40], rcx
+    c2: mov qword ptr [rsp + 0x48], rax
+    c7: lea rcx, [rip] ; REL32 <anon-data>
+    ce: lea r8, [rip] ; REL32 <anon-data>
+    d5: lea rdx, [rsp + 0x30]
+    da: call 0xdf ; REL32 core::panicking::panic_fmt
+    df: ud2
+    e1: add rcx, rsi
+    e4: lea rdx, [rsp + 0x30]
+    e9: call 0xee ; REL32 <std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::initialize::<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::get_or_init<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::try_insert::{closure#0}>::{closure#0}, !>
+    ee: cmp qword ptr [rsp + 0x48], 0x0
+    f4: jne 0x71
+    fa: jmp 0x99
+    fc: lea rcx, [rip] ; REL32 <anon-data>
+   103: lea r8, [rip] ; REL32 <anon-data>
+   10a: mov edx, 0x39
+   10f: call 0x114 ; REL32 core::option::expect_failed
+   114: ud2
+   116: add rsi, 0x18
+   11a: mov qword ptr [rsp + 0x68], rdi
+   11f: mov qword ptr [rsp + 0x70], 0xe
+   128: lea rax, [rsp + 0x28]
+   12d: mov qword ptr [rsp + 0x30], rax
+   132: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+   139: mov qword ptr [rsp + 0x38], rax
+   13e: mov qword ptr [rsp + 0x40], rsi
+   143: lea rax, [rip] ; REL32 <&str as core::fmt::Display>::fmt
+   14a: mov qword ptr [rsp + 0x48], rax
+   14f: lea rcx, [rsp + 0x68]
+   154: mov qword ptr [rsp + 0x50], rcx
+   159: mov qword ptr [rsp + 0x58], rax
+   15e: lea rcx, [rip] ; REL32 <anon-data>
+   165: lea r8, [rip] ; REL32 <anon-data>
+   16c: lea rdx, [rsp + 0x30]
+   171: call 0x176 ; REL32 core::panicking::panic_fmt
+   176: ud2
+== query_dsl | H-1 | <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()> | size=1184 (section RawDataSize) | copies=1 | sha256=ac7105c2c6b4a6fc96f4bfc4859d6eea91c8804b3416e359579df29547a70bda
+<<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>> @+0x0:
+     0: push rbp
+     1: push r14
+     3: push rsi
+     4: push rdi
+     5: push rbx
+     6: sub rsp, 0x610
+     d: lea rbp, [rsp + 0x80]
+    15: vmovdqa xmmword ptr [rbp + 0x580], xmm6
+    1d: and rsp, -0x40
+    21: mov rbx, rsp
+    24: mov qword ptr [rbx + 0x5f0], rbp
+    2b: mov qword ptr [rbp + 0x578], -0x2
+    36: mov rsi, rcx
+    39: mov qword ptr [rbx + 0x150], -0x1
+    44: vpxor xmm0, xmm0, xmm0
+    48: vmovdqa ymmword ptr [rbx + 0x300], ymm0
+    50: vmovdqa ymmword ptr [rbx + 0x320], ymm0
+    58: vmovdqa ymmword ptr [rbx + 0x340], ymm0
+    60: vmovdqa ymmword ptr [rbx + 0x360], ymm0
+    68: vmovdqa ymmword ptr [rbx + 0x380], ymm0
+    70: vmovdqa ymmword ptr [rbx + 0x3a0], ymm0
+    78: lea rax, [rip] ; REL32 <anon-data>
+    7f: mov qword ptr [rbx + 0x3c0], rax
+    86: mov qword ptr [rbx + 0x3c8], 0x46
+    91: mov qword ptr [rbx + 0x3d0], 0x1
+    9c: mov qword ptr [rbx + 0x3d8], 0x1
+    a7: mov dword ptr [rbx + 0x3e0], 0x3dcc5001
+    b1: mov dword ptr [rbx + 0x3e4], 0x3dcc5001
+    bb: mov qword ptr [rbx + 0x3e8], 0x0
+    c6: mov byte ptr [rbx + 0x3f0], 0x0
+    cd: mov word ptr [rbx + 0x3f2], 0x0
+    d6: mov eax, dword ptr [rcx + 0x13b8]
+    dc: add eax, 0x3dcc5000
+    e1: mov dword ptr [rbx + 0x3e0], eax
+    e7: mov dword ptr [rbx + 0x3e4], eax
+    ed: lea rcx, [rbx + 0x400]
+    f4: mov rdx, rsi
+    f7: vzeroupper
+    fa: call 0xff ; REL32 <boyko_ecs::ecs::core::iters::query::state::QueryDataState<&query_dsl::Position, ()>>::new
+    ff: nop
+   100: lea rcx, [rbx + 0x60]
+   104: call 0x109 ; REL32 <boyko_ecs::ecs::core::system::filtered_access_set::FilteredAccessSet>::new
+   109: nop
+   10a: cmp byte ptr [rbx + 0x128], 0x1
+   111: jne 0x11c
+   113: mov rdi, qword ptr [rbx + 0x120]
+   11a: jmp 0x176
+   11c: mov rax, qword ptr [rbx + 0x5b0]
+   123: mov rcx, rax
+   126: shr rcx, 0x6
+   12a: cmp rax, 0x1ff
+   130: ja 0x26b
+   136: mov rdx, qword ptr [rbx + 8*rcx + 0xa0]
+   13e: bt rdx, rax
+   142: jb 0x228
+   148: mov edx, 0x1
+   14d: shlx rdx, rdx, rax
+   152: or qword ptr [rbx + 8*rcx + 0x60], rdx
+   157: mov rdi, qword ptr [rbx + 0x120]
+   15e: shl rax, 0x4
+   162: lea rcx, [rip] ; REL32 <anon-data>
+   169: mov qword ptr [rdi + rax], rcx
+   16d: mov qword ptr [rdi + rax + 0x8], 0x14
+   176: lea r14, [rbx + 0x300]
+   17d: vmovaps ymm0, ymmword ptr [rbx + 0x100]
+   185: vmovaps ymmword ptr [r14 + 0xa0], ymm0
+   18e: vmovaps ymm0, ymmword ptr [rbx + 0xe0]
+   196: vmovaps ymmword ptr [r14 + 0x80], ymm0
+   19f: vmovdqa ymm0, ymmword ptr [rbx + 0x60]
+   1a4: vmovaps ymm1, ymmword ptr [rbx + 0x80]
+   1ac: vmovaps ymm2, ymmword ptr [rbx + 0xa0]
+   1b4: vmovaps ymm3, ymmword ptr [rbx + 0xc0]
+   1bc: vmovaps ymmword ptr [r14 + 0x60], ymm3
+   1c2: vmovaps ymmword ptr [r14 + 0x40], ymm2
+   1c8: vmovaps ymmword ptr [r14 + 0x20], ymm1
+   1ce: vmovdqa ymmword ptr [r14], ymm0
+   1d3: vzeroupper
+   1d6: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+   1dc: mov rcx, rax
+   1df: xor edx, edx
+   1e1: mov r8, rdi
+   1e4: call qword ptr [rip] ; REL32 __imp_HeapFree
+   1ea: lea rcx, [rbx + 0x140]
+   1f1: lea rdx, [rbx + 0x400]
+   1f8: mov r8d, 0x1c0
+   1fe: call 0x203 ; REL32 memcpy
+   203: cmp qword ptr [rbx + 0x150], -0x1
+   20b: jne 0x27f
+   20d: lea rcx, [rip] ; REL32 <anon-data>
+   214: lea r8, [rip] ; REL32 <anon-data>
+   21b: mov edx, 0x3a
+   220: call 0x225 ; REL32 core::option::expect_failed
+   225: nop
+   226: jmp 0x27d
+   228: mov rcx, qword ptr [rbx + 0x120]
+   22f: mov rdx, rax
+   232: shl rdx, 0x4
+   236: vmovdqu xmm0, xmmword ptr [rcx + rdx + 0x2000]
+   23f: vmovdqu xmmword ptr [rbx + 0x30], xmm0
+   244: lea rcx, [rip] ; REL32 <anon-data>
+   24b: mov qword ptr [rbx + 0x40], rcx
+   24f: mov qword ptr [rbx + 0x48], 0x14
+   257: mov qword ptr [rbx + 0x50], rax
+   25b: mov byte ptr [rbx + 0x58], 0x3
+   25f: lea rcx, [rbx + 0x30]
+   263: call 0x268 ; REL32 boyko_ecs::ecs::core::system::params::diagnostics::intra_system_conflict_panic
+   268: nop
+   269: jmp 0x27d
+   26b: lea r8, [rip] ; REL32 <anon-data>
+   272: mov edx, 0x8
+   277: call 0x27c ; REL32 core::panicking::panic_bounds_check
+   27c: nop
+   27d: ud2
+   27f: mov rax, qword ptr [rbx + 0x2e8]
+   286: test rax, rax
+   289: jne 0x3b2
+   28f: lea rdi, [rsi + 0x1b0]
+   296: vmovdqa xmm6, xmmword ptr [rbx + 0x140]
+   29e: lea rcx, [rbx + 0x140]
+   2a5: mov rdx, rdi
+   2a8: call 0x2ad ; REL32 <boyko_ecs::ecs::core::iters::query_state::QueryState>::update_archetypes
+   2ad: nop
+   2ae: vpxor xmm0, xmm6, xmmword ptr [rsi + 0x320]
+   2b6: vptest xmm0, xmm0
+   2bb: je 0x2d4
+   2bd: mov rdx, qword ptr [rbx + 0x2f0]
+   2c4: lea rcx, [rbx + 0x140]
+   2cb: mov r8, rdi
+   2ce: call 0x2d3 ; REL32 <boyko_ecs::ecs::core::iters::query::state::QueryDataState<&mut query_dsl::Position, ()>>::post_filter_matched
+   2d3: nop
+   2d4: mov rax, qword ptr [rbx + 0x158]
+   2db: mov rcx, qword ptr [rbx + 0x160]
+   2e2: lea rdx, [rbx + 0x2f0]
+   2e9: lea rcx, [rax + 8*rcx]
+   2ed: vpxor xmm0, xmm0, xmm0
+   2f1: vmovdqu ymmword ptr [rbx + 0x4c8], ymm0
+   2f9: vmovdqu ymmword ptr [rbx + 0x4b0], ymm0
+   301: vmovdqu ymmword ptr [rbx + 0x490], ymm0
+   309: vmovdqu ymmword ptr [rbx + 0x470], ymm0
+   311: vmovdqu ymmword ptr [rbx + 0x450], ymm0
+   319: vmovdqu ymmword ptr [rbx + 0x430], ymm0
+   321: mov qword ptr [rbx + 0x400], rax
+   328: mov qword ptr [rbx + 0x408], rcx
+   32f: mov qword ptr [rbx + 0x410], rdx
+   336: mov qword ptr [rbx + 0x418], r14
+   33d: mov qword ptr [rbx + 0x420], r14
+   344: mov qword ptr [rbx + 0x428], rsi
+   34b: vpxor xmm6, xmm6, xmm6
+   34f: lea rdi, [rbx + 0x400]
+   356: mov rcx, rdi
+   359: vzeroupper
+   35c: call 0x361 ; REL32 <boyko_ecs::ecs::core::iters::query::iter::QueryIter<&query_dsl::Position, ()> as core::iter::traits::iterator::Iterator>::next
+   361: nop
+   362: test rax, rax
+   365: je 0x377
+   367: vmovd xmm0, dword ptr [rax]
+   36b: vmovd dword ptr [rbx + 0x60], xmm0
+   370: vaddss xmm6, xmm6, dword ptr [rbx + 0x60]
+   375: jmp 0x356
+   377: vmovss dword ptr [rbx + 0x400], xmm6
+   37f: vmovd xmm0, dword ptr [rbx + 0x400]
+   387: mov rcx, rsi
+   38a: call 0x38f ; REL32 <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::drain_deferred_hook_queue
+   38f: nop
+   390: lea rcx, [rbx + 0x140]
+   397: call 0x39c ; REL32 core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<query_dsl::bench_query_mut_iter::{closure#0}::{closure#0}::{closure#0}, fn(boyko_ecs::ecs::core::iters::query::query::Query<&mut query_dsl::Position>)>>
+   39c: vmovaps xmm6, xmmword ptr [rbp + 0x580]
+   3a4: lea rsp, [rbp + 0x590]
+   3ab: pop rbx
+   3ac: pop rdi
+   3ad: pop rsi
+   3ae: pop r14
+   3b0: pop rbp
+   3b1: ret
+   3b2: lea rcx, [rbx + 0x2e0]
+   3b9: call 0x3be ; REL32 <boyko_ecs::ecs::core::iters::query::term_list::TermScratch>::reclaim_retired_slow
+   3be: jmp 0x28f
+   3c3: nop word ptr cs:[rax + rax]
+<?dtor$20@?0?<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>@4HA> @+0x3d0:
+   3d0: mov qword ptr [rsp + 0x10], rdx
+   3d5: push rbp
+   3d6: push r14
+   3d8: push rsi
+   3d9: push rdi
+   3da: push rbx
+   3db: sub rsp, 0x30
+   3df: lea rbp, [rdx + 0x80]
+   3e6: vmovdqa xmmword ptr [rsp + 0x20], xmm6
+   3ec: and rdx, -0x40
+   3f0: mov rbx, rdx
+   3f3: mov rsi, qword ptr [rbx + 0x120]
+   3fa: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+   400: mov rcx, rax
+   403: xor edx, edx
+   405: mov r8, rsi
+   408: call qword ptr [rip] ; REL32 __imp_HeapFree
+   40e: vmovdqa xmm6, xmmword ptr [rsp + 0x20]
+   414: add rsp, 0x30
+   418: pop rbx
+   419: pop rdi
+   41a: pop rsi
+   41b: pop r14
+   41d: pop rbp
+   41e: ret
+   41f: nop
+<?dtor$21@?0?<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>@4HA> @+0x420:
+   420: mov qword ptr [rsp + 0x10], rdx
+   425: push rbp
+   426: push r14
+   428: push rsi
+   429: push rdi
+   42a: push rbx
+   42b: sub rsp, 0x30
+   42f: lea rbp, [rdx + 0x80]
+   436: vmovdqa xmmword ptr [rsp + 0x20], xmm6
+   43c: and rdx, -0x40
+   440: mov rbx, rdx
+   443: lea rcx, [rbx + 0x400]
+   44a: call 0x44f ; REL32 core::ptr::drop_glue::<(boyko_ecs::ecs::core::iters::query::state::QueryDataState<&mut query_dsl::Position, ()>,)>
+   44f: vmovdqa xmm6, xmmword ptr [rsp + 0x20]
+   455: add rsp, 0x30
+   459: pop rbx
+   45a: pop rdi
+   45b: pop rsi
+   45c: pop r14
+   45e: pop rbp
+   45f: ret
+<?dtor$23@?0?<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>@4HA> @+0x460:
+   460: mov qword ptr [rsp + 0x10], rdx
+   465: push rbp
+   466: push r14
+   468: push rsi
+   469: push rdi
+   46a: push rbx
+   46b: sub rsp, 0x30
+   46f: lea rbp, [rdx + 0x80]
+   476: vmovdqa xmmword ptr [rsp + 0x20], xmm6
+   47c: and rdx, -0x40
+   480: mov rbx, rdx
+   483: lea rcx, [rbx + 0x140]
+   48a: call 0x48f ; REL32 core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<query_dsl::bench_query_mut_iter::{closure#0}::{closure#0}::{closure#0}, fn(boyko_ecs::ecs::core::iters::query::query::Query<&mut query_dsl::Position>)>>
+   48f: vmovaps xmm6, xmmword ptr [rsp + 0x20]
+   495: add rsp, 0x30
+   499: pop rbx
+   49a: pop rdi
+   49b: pop rsi
+   49c: pop r14
+   49e: pop rbp
+   49f: ret
+== query_dsl | H-1 | <criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}> | size=119 (section RawDataSize) | copies=1 | sha256=e602b850ff6c5044f23b25c6d0351c1ad988b8c5427dea986f5e38324af0f795
+<<criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>> @+0x0:
+     0: push r14
+     2: push rsi
+     3: push rdi
+     4: push rbp
+     5: push rbx
+     6: sub rsp, 0x40
+     a: mov rdi, rdx
+     d: mov rsi, rcx
+    10: mov byte ptr [rcx + 0x30], 0x1
+    14: call 0x19 ; REL32 <std::time::Instant>::now
+    19: mov qword ptr [rsp + 0x20], rax
+    1e: mov dword ptr [rsp + 0x28], edx
+    22: call 0x27 ; REL32 <std::time::Instant>::now
+    27: mov rbx, rax
+    2a: mov ebp, edx
+    2c: mov r14, qword ptr [rsi + 0x28]
+    30: test r14, r14
+    33: je 0x42
+    35: mov rcx, rdi
+    38: call 0x3d ; REL32 <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>
+    3d: dec r14
+    40: jne 0x35
+    42: mov qword ptr [rsp + 0x30], rbx
+    47: mov dword ptr [rsp + 0x38], ebp
+    4b: lea rcx, [rsp + 0x30]
+    50: call 0x55 ; REL32 <std::time::Instant>::elapsed
+    55: mov qword ptr [rsi], rax
+    58: mov dword ptr [rsi + 0x8], edx
+    5b: lea rcx, [rsp + 0x20]
+    60: call 0x65 ; REL32 <std::time::Instant>::elapsed
+    65: mov qword ptr [rsi + 0x10], rax
+    69: mov dword ptr [rsi + 0x18], edx
+    6c: add rsp, 0x40
+    70: pop rbx
+    71: pop rbp
+    72: pop rdi
+    73: pop rsi
+    74: pop r14
+    76: ret
+== query_dsl | H-1 | <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench | size=419 (section RawDataSize) | copies=1 | sha256=d6e9dd58824ce0cc967227552a41f296af45e14845257473e3e2700bc9c3f225
+<<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench> @+0x0:
+     0: push rbp
+     1: push r15
+     3: push r14
+     5: push r13
+     7: push r12
+     9: push rsi
+     a: push rdi
+     b: push rbx
+     c: sub rsp, 0x88
+    13: lea rbp, [rsp + 0x80]
+    1b: mov qword ptr [rbp], -0x2
+    23: mov rbx, rdx
+    26: mov rdx, qword ptr [rbp + 0x70]
+    2a: mov byte ptr [rbp - 0x20], 0x0
+    2e: mov qword ptr [rbp - 0x50], 0x0
+    36: mov dword ptr [rbp - 0x48], 0x0
+    3d: mov qword ptr [rbp - 0x30], r8
+    41: mov qword ptr [rbp - 0x40], 0x0
+    49: mov dword ptr [rbp - 0x38], 0x0
+    50: test rdx, rdx
+    53: je 0x10b
+    59: mov rdi, r9
+    5c: mov qword ptr [rbp - 0x10], rcx
+    60: lea r14, [8*rdx]
+    68: xor ecx, ecx
+    6a: mov rdx, r14
+    6d: call 0x72 ; REL32 std::sys::alloc::windows::process_heap_alloc
+    72: test rax, rax
+    75: je 0x14d
+    7b: mov rsi, qword ptr [rbp + 0x78]
+    7f: xor r13d, r13d
+    82: lea r14, [rbp - 0x50]
+    86: lea r15, [rbp - 0x60]
+    8a: xor r12d, r12d
+    8d: mov qword ptr [rbp - 0x8], rax
+    91: nop word ptr cs:[rax + rax]
+    a0: mov rax, qword ptr [rdi + 8*r12]
+    a4: mov qword ptr [rbp - 0x28], rax
+    a8: mov qword ptr [rbp - 0x18], rsi
+    ac: mov rax, qword ptr [rbp - 0x18]
+    b0: mov rdx, qword ptr [rbx]
+    b3: mov rcx, r14
+    b6: call 0xbb ; REL32 <criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>
+    bb: nop
+    bc: cmp byte ptr [rbp - 0x20], 0x0
+    c0: je 0x132
+    c2: mov byte ptr [rbp - 0x20], 0x0
+    c6: mov edx, 0x3b9aca00
+    cb: mulx rcx, rax, qword ptr [rbp - 0x50]
+    d1: mov edx, dword ptr [rbp - 0x48]
+    d4: add rax, rdx
+    d7: adc rcx, 0x0
+    db: mov qword ptr [rbp - 0x60], rax
+    df: mov qword ptr [rbp - 0x58], rcx
+    e3: mov rcx, r15
+    e6: call 0xeb ; REL32 __floattidf
+    eb: mov rax, qword ptr [rbp - 0x8]
+    ef: vmovsd qword ptr [rax + 8*r13], xmm0
+    f5: inc r13
+    f8: inc r12
+    fb: cmp r12, qword ptr [rbp + 0x70]
+    ff: jne 0xa0
+   101: mov rcx, qword ptr [rbp - 0x10]
+   105: mov rdx, qword ptr [rbp + 0x70]
+   109: jmp 0x113
+   10b: mov eax, 0x8
+   110: xor r13d, r13d
+   113: mov qword ptr [rcx], rdx
+   116: mov qword ptr [rcx + 0x8], rax
+   11a: mov qword ptr [rcx + 0x10], r13
+   11e: add rsp, 0x88
+   125: pop rbx
+   126: pop rdi
+   127: pop rsi
+   128: pop r12
+   12a: pop r13
+   12c: pop r14
+   12e: pop r15
+   130: pop rbp
+   131: ret
+   132: lea rcx, [rip] ; REL32 <anon-data>
+   139: lea r8, [rip] ; REL32 <anon-data>
+   140: mov edx, 0x3d
+   145: call 0x14a ; REL32 std::panicking::begin_panic::<&str>
+   14a: nop
+   14b: ud2
+   14d: mov ecx, 0x8
+   152: mov rdx, r14
+   155: call 0x15a ; REL32 alloc::raw_vec::handle_error
+   15a: ud2
+   15c: nop dword ptr [rax]
+<?dtor$9@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench@4HA> @+0x160:
+   160: mov qword ptr [rsp + 0x10], rdx
+   165: push rbp
+   166: push r15
+   168: push r14
+   16a: push r13
+   16c: push r12
+   16e: push rsi
+   16f: push rdi
+   170: push rbx
+   171: sub rsp, 0x28
+   175: lea rbp, [rdx + 0x80]
+   17c: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+   182: mov rcx, rax
+   185: xor edx, edx
+   187: mov r8, qword ptr [rbp - 0x8]
+   18b: call qword ptr [rip] ; REL32 __imp_HeapFree
+   191: nop
+   192: add rsp, 0x28
+   196: pop rbx
+   197: pop rdi
+   198: pop rsi
+   199: pop r12
+   19b: pop r13
+   19d: pop r14
+   19f: pop r15
+   1a1: pop rbp
+   1a2: ret
+== query_dsl | H-1 | <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample | size=6092 (section RawDataSize) | copies=1 | sha256=3273b4e0c5c09b5b3e6a6e572545f479595fa55deb40450051fa06ffef5e89c7
+<<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample> @+0x0:
+     0: push rbp
+     1: push r15
+     3: push r14
+     5: push r13
+     7: push r12
+     9: push rsi
+     a: push rdi
+     b: push rbx
+     c: sub rsp, 0x298
+    13: lea rbp, [rsp + 0x80]
+    1b: vmovapd xmmword ptr [rbp + 0x200], xmm12
+    23: vmovdqa xmmword ptr [rbp + 0x1f0], xmm11
+    2b: vmovapd xmmword ptr [rbp + 0x1e0], xmm10
+    33: vmovapd xmmword ptr [rbp + 0x1d0], xmm9
+    3b: vmovapd xmmword ptr [rbp + 0x1c0], xmm8
+    43: vmovapd xmmword ptr [rbp + 0x1b0], xmm7
+    4b: vmovapd xmmword ptr [rbp + 0x1a0], xmm6
+    53: mov qword ptr [rbp + 0x198], -0x2
+    5e: mov r13, r8
+    61: mov rbx, rdx
+    64: mov r12, rcx
+    67: mov r15, qword ptr [rbp + 0x298]
+    6e: mov r14, qword ptr [rbp + 0x280]
+    75: cmp byte ptr [r14 + 0x48], 0x0
+    7a: mov qword ptr [rbp + 0x180], r8
+    81: je 0x2ae
+    87: mov rsi, qword ptr [r14]
+    8a: mov edi, dword ptr [r14 + 0x8]
+    8e: vmovsd xmm7, qword ptr [r14 + 0x40]
+    94: call 0x99 ; REL32 <std::time::Instant>::now
+    99: mov qword ptr [rbp - 0x50], rax
+    9d: mov dword ptr [rbp - 0x48], edx
+    a0: mov qword ptr [rbp + 0x130], 0x1
+    ab: mov rbx, qword ptr [rbx]
+    ae: mov qword ptr [rsp + 0x28], r15
+    b3: mov qword ptr [rsp + 0x20], 0x1
+    bc: lea rcx, [rbp + 0x38]
+    c0: lea r9, [rbp + 0x130]
+    c7: mov rdx, rbx
+    ca: mov r8, r13
+    cd: call 0xd2 ; REL32 <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench
+    d2: cmp qword ptr [rbp + 0x48], 0x0
+    d7: je 0xeb2
+    dd: mov r14, qword ptr [rbp + 0x40]
+    e1: vmovsd xmm6, qword ptr [r14]
+    e6: cmp qword ptr [rbp + 0x38], 0x0
+    eb: je 0x101
+    ed: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+    f3: mov rcx, rax
+    f6: xor edx, edx
+    f8: mov r8, r14
+    fb: call qword ptr [rip] ; REL32 __imp_HeapFree
+   101: lea rcx, [rbp - 0x50]
+   105: call 0x10a ; REL32 <std::time::Instant>::elapsed
+   10a: cmp rax, rsi
+   10d: jne 0x4fc
+   113: cmp edx, edi
+   115: ja 0x502
+   11b: mov qword ptr [rbp + 0x178], r12
+   122: mov r14d, 0x1
+   128: vmovsd xmm9, qword ptr [rip] ; REL32 __real@4014000000000000
+   130: lea r12, [rbp - 0x50]
+   134: jmp 0x15b
+   136: nop word ptr cs:[rax + rax]
+   140: xor ecx, ecx
+   142: cmp edx, edi
+   144: seta cl
+   147: xor edx, edx
+   149: cmp rax, rsi
+   14c: seta dl
+   14f: cmove edx, ecx
+   152: cmp dl, 0x1
+   155: je 0x232
+   15b: mov r15, r14
+   15e: vmovapd xmm8, xmm6
+   162: add r14, r14
+   165: mov qword ptr [rbp + 0x130], r14
+   16c: mov rax, qword ptr [rbp + 0x298]
+   173: mov qword ptr [rsp + 0x28], rax
+   178: mov qword ptr [rsp + 0x20], 0x1
+   181: lea rcx, [rbp + 0x38]
+   185: mov rdx, rbx
+   188: mov r8, r13
+   18b: lea r9, [rbp + 0x130]
+   192: call 0x197 ; REL32 <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench
+   197: cmp qword ptr [rbp + 0x48], 0x0
+   19c: je 0xea0
+   1a2: mov r13, qword ptr [rbp + 0x40]
+   1a6: vmovsd xmm6, qword ptr [r13]
+   1ac: cmp qword ptr [rbp + 0x38], 0x0
+   1b1: je 0x1c7
+   1b3: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+   1b9: mov rcx, rax
+   1bc: xor edx, edx
+   1be: mov r8, r13
+   1c1: call qword ptr [rip] ; REL32 __imp_HeapFree
+   1c7: vaddsd xmm0, xmm6, xmm6
+   1cb: vaddsd xmm0, xmm8, xmm0
+   1cf: vdivsd xmm10, xmm0, xmm9
+   1d4: vsubsd xmm0, xmm8, xmm10
+   1d9: vmulsd xmm0, xmm0, xmm0
+   1dd: vaddsd xmm1, xmm10, xmm10
+   1e2: vsubsd xmm1, xmm6, xmm1
+   1e6: vmulsd xmm1, xmm1, xmm1
+   1ea: vaddsd xmm0, xmm0, xmm1
+   1ee: vsqrtsd xmm11, xmm0, xmm0
+   1f2: mov rcx, r12
+   1f5: call 0x1fa ; REL32 <std::time::Instant>::elapsed
+   1fa: vmulsd xmm0, xmm10, xmm7
+   1fe: vucomisd xmm0, xmm11
+   203: mov r13, qword ptr [rbp + 0x180]
+   20a: jbe 0x140
+   210: xor ecx, ecx
+   212: cmp edx, 0x5f5e101
+   218: setae cl
+   21b: xor r8d, r8d
+   21e: test rax, rax
+   221: setne r8b
+   225: cmove r8d, ecx
+   229: test r8b, r8b
+   22c: je 0x140
+   232: mov edx, 0x10
+   237: xor ecx, ecx
+   239: call 0x23e ; REL32 std::sys::alloc::windows::process_heap_alloc
+   23e: test rax, rax
+   241: je 0xee0
+   247: mov rsi, rax
+   24a: vmovq xmm0, r14
+   24f: vmovq xmm1, r15
+   254: vpunpcklqdq xmm0, xmm1, xmm0
+   258: vpxor xmm1, xmm1, xmm1
+   25c: vpblendd xmm1, xmm0, xmm1, 0xa
+   262: vpor xmm1, xmm1, xmmword ptr [rip] ; REL32 __xmm@43300000000000004330000000000000
+   26a: vpsrlq xmm0, xmm0, 0x20
+   26f: vpor xmm0, xmm0, xmmword ptr [rip] ; REL32 __xmm@45300000000000004530000000000000
+   277: vsubpd xmm0, xmm0, xmmword ptr [rip] ; REL32 __xmm@45300000001000004530000000100000
+   27f: vaddpd xmm0, xmm1, xmm0
+   283: vmovupd xmmword ptr [rax], xmm0
+   287: mov edx, 0x10
+   28c: xor ecx, ecx
+   28e: call 0x293 ; REL32 std::sys::alloc::windows::process_heap_alloc
+   293: test rax, rax
+   296: je 0xf99
+   29c: vmovsd qword ptr [rax], xmm8
+   2a0: xor ecx, ecx
+   2a2: mov r12, qword ptr [rbp + 0x178]
+   2a9: jmp 0x549
+   2ae: mov qword ptr [rbp + 0x170], rbx
+   2b5: mov qword ptr [rbp + 0x178], r12
+   2bc: mov rsi, qword ptr [rbp + 0x288]
+   2c3: mov edx, 0x3b9aca00
+   2c8: mulx rdx, rax, qword ptr [r14]
+   2cd: mov rbx, qword ptr [r14 + 0x10]
+   2d1: mov r12d, dword ptr [r14 + 0x18]
+   2d5: mov ecx, 0x3b9aca00
+   2da: mov r15, r9
+   2dd: mov r8d, dword ptr [r14 + 0x8]
+   2e1: add r8, rax
+   2e4: mov qword ptr [rbp + 0x128], r8
+   2eb: adc rdx, 0x0
+   2ef: mov qword ptr [rbp + 0x168], rdx
+   2f6: lea rdi, [rsi + 0xd8]
+   2fd: mov rdx, rbx
+   300: mulx rcx, rax, rcx
+   305: add rax, r12
+   308: adc rcx, 0x0
+   30c: mov qword ptr [rbp + 0x10], rax
+   310: mov qword ptr [rbp + 0x18], rcx
+   314: lea rcx, [rbp + 0x10]
+   318: call 0x31d ; REL32 __floattidf
+   31d: vmovapd xmm6, xmm0
+   321: mov qword ptr [rbp + 0x120], rdi
+   328: mov rcx, rdi
+   32b: mov qword ptr [rbp + 0x188], r15
+   332: mov rdx, r15
+   335: vmovapd xmm2, xmm0
+   339: call 0x33e ; REL32 <criterion::report::Reports as criterion::report::Report>::warmup
+   33e: mov r15, rsi
+   341: cmp byte ptr [rsi + 0x170], 0x2
+   348: je 0x3ac
+   34a: mov r13, qword ptr [r15 + 0x168]
+   351: add r13, 0x8
+   355: lea rcx, [rbp + 0x40]
+   359: mov rdx, qword ptr [rbp + 0x188]
+   360: call 0x365 ; REL32 <criterion::connection::RawBenchmarkId as core::convert::From<&criterion::report::BenchmarkId>>::from
+   365: vmovsd qword ptr [rbp + 0xa0], xmm6
+   36d: movabs rax, -0x7ffffffffffffffc
+   377: mov qword ptr [rbp + 0x38], rax
+   37b: lea rcx, [rbp + 0x130]
+   382: lea r8, [rbp + 0x38]
+   386: mov rdx, r13
+   389: call 0x38e ; REL32 <criterion::connection::Connection>::send
+   38e: nop
+   38f: cmp dword ptr [rbp + 0x130], -0x1
+   396: jne 0xef1
+   39c: lea rcx, [rbp + 0x38]
+   3a0: call 0x3a5 ; REL32 core::ptr::drop_glue::<criterion::connection::OutgoingMessage>
+   3a5: mov r13, qword ptr [rbp + 0x180]
+   3ac: mov rax, qword ptr [rbp + 0x298]
+   3b3: mov qword ptr [rsp + 0x20], rax
+   3b8: mov rcx, qword ptr [rbp + 0x170]
+   3bf: mov rdx, r13
+   3c2: mov r8, rbx
+   3c5: mov r9d, r12d
+   3c8: call 0x3cd ; REL32 <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up
+   3cd: mov qword ptr [rbp + 0x160], rax
+   3d4: mov qword ptr [rbp + 0x158], rdx
+   3db: mov rax, qword ptr [rip] ; REL32 criterion::DEBUG_ENABLED
+   3e2: cmp rax, 0x2
+   3e6: jne 0xec4
+   3ec: movzx eax, byte ptr [rip + 0x8] ; REL32 criterion::DEBUG_ENABLED
+   3f3: mov rbx, r15
+   3f6: test al, 0x1
+   3f8: je 0x491
+   3fe: vmovsd xmm0, qword ptr [rbp + 0x160]
+   406: vmovsd xmm1, qword ptr [rip] ; REL32 __xmm@00000000000000004530000043300000
+   40e: vunpcklps xmm0, xmm0, xmm1
+   412: vmovapd xmm2, xmmword ptr [rip] ; REL32 __xmm@45300000000000004330000000000000
+   41a: vsubpd xmm0, xmm0, xmm2
+   41e: vshufpd xmm3, xmm0, xmm0, 0x1
+   423: vaddsd xmm0, xmm3, xmm0
+   427: vmovsd xmm3, qword ptr [rbp + 0x158]
+   42f: vunpcklps xmm1, xmm3, xmm1
+   433: vsubpd xmm1, xmm1, xmm2
+   437: vshufpd xmm2, xmm1, xmm1, 0x1
+   43c: vaddsd xmm1, xmm2, xmm1
+   440: vdivsd xmm0, xmm0, xmm1
+   444: vmovsd qword ptr [rbp - 0x50], xmm0
+   449: lea rax, [rbp + 0x158]
+   450: mov qword ptr [rbp + 0x38], rax
+   454: lea rax, [rip] ; REL32 <u64 as core::fmt::Display>::fmt
+   45b: mov qword ptr [rbp + 0x40], rax
+   45f: lea rcx, [rbp + 0x160]
+   466: mov qword ptr [rbp + 0x48], rcx
+   46a: mov qword ptr [rbp + 0x50], rax
+   46e: lea rax, [rbp - 0x50]
+   472: mov qword ptr [rbp + 0x58], rax
+   476: lea rax, [rip] ; REL32 <f64 as core::fmt::Display>::fmt
+   47d: mov qword ptr [rbp + 0x60], rax
+   481: lea rcx, [rip] ; REL32 <anon-data>
+   488: lea rdx, [rbp + 0x38]
+   48c: call 0x491 ; REL32 std::io::stdio::_print
+   491: vmovsd xmm0, qword ptr [rbp + 0x160]
+   499: vmovsd xmm8, qword ptr [rip] ; REL32 __xmm@00000000000000004530000043300000
+   4a1: vunpcklps xmm0, xmm0, xmm8
+   4a6: vmovapd xmm9, xmmword ptr [rip] ; REL32 __xmm@45300000000000004330000000000000
+   4ae: vsubpd xmm0, xmm0, xmm9
+   4b3: vshufpd xmm1, xmm0, xmm0, 0x1
+   4b8: vaddsd xmm0, xmm1, xmm0
+   4bc: vmovsd xmm1, qword ptr [rbp + 0x158]
+   4c4: vunpcklps xmm1, xmm1, xmm8
+   4c9: vsubpd xmm1, xmm1, xmm9
+   4ce: vshufpd xmm2, xmm1, xmm1, 0x1
+   4d3: vaddsd xmm1, xmm2, xmm1
+   4d7: vdivsd xmm7, xmm0, xmm1
+   4db: mov r13, qword ptr [r14 + 0x38]
+   4df: movzx eax, byte ptr [r14 + 0x49]
+   4e4: test eax, eax
+   4e6: je 0x573
+   4ec: cmp eax, 0x1
+   4ef: jne 0x624
+   4f5: xor esi, esi
+   4f7: jmp 0x627
+   4fc: jbe 0x11b
+   502: mov edx, 0x10
+   507: xor ecx, ecx
+   509: call 0x50e ; REL32 std::sys::alloc::windows::process_heap_alloc
+   50e: test rax, rax
+   511: je 0xee0
+   517: mov rsi, rax
+   51a: vmovddup xmm0, qword ptr [rip] ; REL32 __real@3ff0000000000000
+   522: vmovupd xmmword ptr [rax], xmm0
+   526: mov edx, 0x10
+   52b: xor ecx, ecx
+   52d: call 0x532 ; REL32 std::sys::alloc::windows::process_heap_alloc
+   532: test rax, rax
+   535: je 0xf80
+   53b: vmovsd qword ptr [rax], xmm6
+   53f: vaddsd xmm6, xmm6, qword ptr [rip] ; REL32 __real@3eb0c6f7a0b5ed8d
+   547: mov cl, 0x1
+   549: vmovsd qword ptr [rax + 0x8], xmm6
+   54e: mov byte ptr [r12 + 0x10], cl
+   553: mov qword ptr [r12], rsi
+   557: mov qword ptr [r12 + 0x8], 0x2
+   560: mov qword ptr [r12 + 0x18], rax
+   565: mov qword ptr [r12 + 0x20], 0x2
+   56e: jmp 0xe4e
+   573: mov rax, qword ptr [rbp + 0x128]
+   57a: mov qword ptr [rbp + 0x20], rax
+   57e: mov rax, qword ptr [rbp + 0x168]
+   585: mov qword ptr [rbp + 0x28], rax
+   589: lea rcx, [rbp + 0x20]
+   58d: call 0x592 ; REL32 __floattidf
+   592: lea rax, [r13 + 0x1]
+   596: imul rax, r13
+   59a: shr rax
+   59d: vdivsd xmm1, xmm0, xmm7
+   5a1: vcvtsi2sd xmm2, xmm5, rax
+   5a6: vdivsd xmm1, xmm1, xmm2
+   5aa: vroundsd xmm1, xmm1, xmm1, 0xa
+   5b0: vcvttsd2si rax, xmm1
+   5b5: mov rcx, rax
+   5b8: vsubsd xmm3, xmm1, qword ptr [rip] ; REL32 __real@43e0000000000000
+   5c0: vcvttsd2si rdx, xmm3
+   5c5: sar rcx, 0x3f
+   5c9: and rdx, rcx
+   5cc: or rdx, rax
+   5cf: xor eax, eax
+   5d1: vxorpd xmm3, xmm3, xmm3
+   5d5: vucomisd xmm1, xmm3
+   5d9: cmovae rax, rdx
+   5dd: vucomisd xmm1, qword ptr [rip] ; REL32 __real@43efffffffffffff
+   5e5: mov rcx, -0x1
+   5ec: cmovbe rcx, rax
+   5f0: vmovq xmm1, rcx
+   5f5: vpunpckldq xmm1, xmm1, xmmword ptr [rip] ; REL32 __xmm@00000000000000004530000043300000
+   5fd: vsubpd xmm1, xmm1, xmmword ptr [rip] ; REL32 __xmm@45300000000000004330000000000000
+   605: vshufpd xmm3, xmm1, xmm1, 0x1
+   60a: vaddsd xmm1, xmm3, xmm1
+   60e: vmulsd xmm1, xmm2, xmm1
+   612: vmulsd xmm1, xmm7, xmm1
+   616: vaddsd xmm0, xmm0, xmm0
+   61a: vucomisd xmm1, xmm0
+   61e: seta sil
+   622: jmp 0x627
+   624: mov sil, 0x1
+   627: mov rdi, qword ptr [rbp + 0x188]
+   62e: mov qword ptr [rsp + 0x20], r14
+   633: lea rcx, [rbp + 0x108]
+   63a: mov edx, esi
+   63c: vmovapd xmm2, xmm7
+   640: mov r9, r13
+   643: call 0x648 ; REL32 <criterion::ActualSamplingMode>::iteration_counts
+   648: mov r10, qword ptr [rbp + 0x110]
+   64f: mov r15, qword ptr [rbp + 0x118]
+   656: lea r12, [8*r15]
+   65e: test r15, r15
+   661: mov qword ptr [rbp + 0x188], r10
+   668: je 0x685
+   66a: mov eax, r15d
+   66d: and eax, 0x7
+   670: cmp r15, 0x8
+   674: jae 0x695
+   676: vmovsd xmm6, qword ptr [rip] ; REL32 __real@8000000000000000
+   67e: xor ecx, ecx
+   680: jmp 0x7c0
+   685: vmovsd xmm6, qword ptr [rip] ; REL32 __real@8000000000000000
+   68d: xor r14d, r14d
+   690: jmp 0x960
+   695: mov rdx, r15
+   698: and rdx, -0x8
+   69c: vmovddup xmm0, xmm7
+   6a0: vmovsd xmm6, qword ptr [rip] ; REL32 __real@8000000000000000
+   6a8: xor ecx, ecx
+   6aa: vxorpd xmm1, xmm1, xmm1
+   6ae: vpbroadcastq xmm2, qword ptr [rip] ; REL32 __real@4330000000000000
+   6b7: vpbroadcastq xmm3, qword ptr [rip] ; REL32 __real@4530000000000000
+   6c0: vmovddup xmm4, qword ptr [rip] ; REL32 __real@4530000000100000
+   6c8: nop dword ptr [rax + rax]
+   6d0: vmovsd xmm5, qword ptr [r10 + 8*rcx]
+   6d6: vunpcklps xmm5, xmm5, xmm8
+   6db: vsubpd xmm5, xmm5, xmm9
+   6e0: vshufpd xmm10, xmm5, xmm5, 0x1
+   6e5: vaddsd xmm5, xmm10, xmm5
+   6e9: vmulsd xmm5, xmm7, xmm5
+   6ed: vaddsd xmm5, xmm6, xmm5
+   6f1: vmovdqu xmm6, xmmword ptr [r10 + 8*rcx + 0x8]
+   6f8: vmovdqu xmm10, xmmword ptr [r10 + 8*rcx + 0x18]
+   6ff: vmovdqu xmm11, xmmword ptr [r10 + 8*rcx + 0x28]
+   706: vpblendd xmm12, xmm6, xmm1, 0xa
+   70c: vpor xmm12, xmm12, xmm2
+   710: vpsrlq xmm6, xmm6, 0x20
+   715: vpor xmm6, xmm6, xmm3
+   719: vsubpd xmm6, xmm6, xmm4
+   71d: vaddpd xmm6, xmm12, xmm6
+   721: vmulpd xmm6, xmm0, xmm6
+   725: vaddsd xmm5, xmm5, xmm6
+   729: vshufpd xmm6, xmm6, xmm6, 0x1
+   72e: vaddsd xmm5, xmm5, xmm6
+   732: vpblendd xmm6, xmm10, xmm1, 0xa
+   738: vpor xmm6, xmm6, xmm2
+   73c: vpsrlq xmm10, xmm10, 0x20
+   742: vpor xmm10, xmm10, xmm3
+   746: vsubpd xmm10, xmm10, xmm4
+   74a: vaddpd xmm6, xmm10, xmm6
+   74e: vmulpd xmm6, xmm0, xmm6
+   752: vaddsd xmm5, xmm5, xmm6
+   756: vshufpd xmm6, xmm6, xmm6, 0x1
+   75b: vaddsd xmm5, xmm5, xmm6
+   75f: vpblendd xmm6, xmm11, xmm1, 0xa
+   765: vpor xmm6, xmm6, xmm2
+   769: vpsrlq xmm10, xmm11, 0x20
+   76f: vpor xmm10, xmm10, xmm3
+   773: vsubpd xmm10, xmm10, xmm4
+   777: vaddpd xmm6, xmm10, xmm6
+   77b: vmulpd xmm6, xmm0, xmm6
+   77f: vaddsd xmm5, xmm5, xmm6
+   783: vshufpd xmm6, xmm6, xmm6, 0x1
+   788: vaddsd xmm5, xmm5, xmm6
+   78c: vmovsd xmm6, qword ptr [r10 + 8*rcx + 0x38]
+   793: vunpcklps xmm6, xmm6, xmm8
+   798: vsubpd xmm6, xmm6, xmm9
+   79d: vshufpd xmm10, xmm6, xmm6, 0x1
+   7a2: vaddsd xmm6, xmm10, xmm6
+   7a6: vmulsd xmm6, xmm7, xmm6
+   7aa: vaddsd xmm6, xmm5, xmm6
+   7ae: add rcx, 0x8
+   7b2: cmp rdx, rcx
+   7b5: jne 0x6d0
+   7bb: test rax, rax
+   7be: je 0x806
+   7c0: lea rcx, [r10 + 8*rcx]
+   7c4: xor edx, edx
+   7c6: vmovsd xmm0, qword ptr [rip] ; REL32 __xmm@00000000000000004530000043300000
+   7ce: vmovapd xmm1, xmmword ptr [rip] ; REL32 __xmm@45300000000000004330000000000000
+   7d6: nop word ptr cs:[rax + rax]
+   7e0: vmovsd xmm2, qword ptr [rcx + 8*rdx]
+   7e5: vunpcklps xmm2, xmm2, xmm0
+   7e9: vsubpd xmm2, xmm2, xmm1
+   7ed: vshufpd xmm3, xmm2, xmm2, 0x1
+   7f2: vaddsd xmm2, xmm3, xmm2
+   7f6: vmulsd xmm2, xmm7, xmm2
+   7fa: vaddsd xmm6, xmm6, xmm2
+   7fe: inc rdx
+   801: cmp rax, rdx
+   804: jne 0x7e0
+   806: lea rcx, [r12 - 0x8]
+   80b: mov rdx, rcx
+   80e: shr rdx, 0x3
+   812: inc rdx
+   815: mov eax, edx
+   817: and eax, 0x7
+   81a: cmp rcx, 0x38
+   81e: jae 0x82b
+   820: xor r14d, r14d
+   823: mov rcx, r10
+   826: jmp 0x93a
+   82b: and rdx, -0x8
+   82f: xor r14d, r14d
+   832: mov rcx, r10
+   835: jmp 0x84e
+   837: nop word ptr [rax + rax]
+   840: add rcx, 0x40
+   844: add rdx, -0x8
+   848: je 0x935
+   84e: mov r9, r14
+   851: mov r14, -0x1
+   858: mov r8, -0x1
+   85f: add r9, qword ptr [rcx]
+   862: jae 0x8c0
+   864: mov r9, -0x1
+   86b: add r8, qword ptr [rcx + 0x8]
+   86f: jae 0x8d0
+   871: mov r8, -0x1
+   878: add r9, qword ptr [rcx + 0x10]
+   87c: jae 0x8e0
+   87e: mov r9, -0x1
+   885: add r8, qword ptr [rcx + 0x18]
+   889: jae 0x8f0
+   88b: mov r8, -0x1
+   892: add r9, qword ptr [rcx + 0x20]
+   896: jae 0x900
+   898: mov r9, -0x1
+   89f: add r8, qword ptr [rcx + 0x28]
+   8a3: jae 0x910
+   8a5: mov r8, -0x1
+   8ac: add r9, qword ptr [rcx + 0x30]
+   8b0: jae 0x920
+   8b2: add r8, qword ptr [rcx + 0x38]
+   8b6: jb 0x840
+   8b8: jmp 0x92d
+   8ba: nop word ptr [rax + rax]
+   8c0: mov r8, r9
+   8c3: mov r9, -0x1
+   8ca: add r8, qword ptr [rcx + 0x8]
+   8ce: jb 0x871
+   8d0: mov r9, r8
+   8d3: mov r8, -0x1
+   8da: add r9, qword ptr [rcx + 0x10]
+   8de: jb 0x87e
+   8e0: mov r8, r9
+   8e3: mov r9, -0x1
+   8ea: add r8, qword ptr [rcx + 0x18]
+   8ee: jb 0x88b
+   8f0: mov r9, r8
+   8f3: mov r8, -0x1
+   8fa: add r9, qword ptr [rcx + 0x20]
+   8fe: jb 0x898
+   900: mov r8, r9
+   903: mov r9, -0x1
+   90a: add r8, qword ptr [rcx + 0x28]
+   90e: jb 0x8a5
+   910: mov r9, r8
+   913: mov r8, -0x1
+   91a: add r9, qword ptr [rcx + 0x30]
+   91e: jb 0x8b2
+   920: mov r8, r9
+   923: add r8, qword ptr [rcx + 0x38]
+   927: jb 0x840
+   92d: mov r14, r8
+   930: jmp 0x840
+   935: test rax, rax
+   938: je 0x960
+   93a: xor edx, edx
+   93c: mov r8, -0x1
+   943: nop word ptr cs:[rax + rax]
+   950: add r14, qword ptr [rcx + 8*rdx]
+   954: cmovb r14, r8
+   958: inc rdx
+   95b: cmp rax, rdx
+   95e: jne 0x950
+   960: mov qword ptr [rsp + 0x20], r14
+   965: mov rcx, qword ptr [rbp + 0x120]
+   96c: mov rdx, rdi
+   96f: mov r8, r13
+   972: vmovapd xmm3, xmm6
+   976: call 0x97b ; REL32 <criterion::report::Reports as criterion::report::Report>::measurement_start
+   97b: nop
+   97c: cmp byte ptr [rbx + 0x170], 0x2
+   983: je 0xa13
+   989: mov rbx, qword ptr [rbx + 0x168]
+   990: lea rcx, [rbp - 0x50]
+   994: mov rdx, rdi
+   997: call 0x99c ; REL32 <criterion::connection::RawBenchmarkId as core::convert::From<&criterion::report::BenchmarkId>>::from
+   99c: nop
+   99d: vmovupd ymm0, ymmword ptr [rbp - 0x50]
+   9a2: vmovupd ymm1, ymmword ptr [rbp - 0x30]
+   9a7: vmovupd ymm2, ymmword ptr [rbp - 0x10]
+   9ac: vmovupd ymmword ptr [rbp + 0x80], ymm2
+   9b4: vmovupd ymmword ptr [rbp + 0x60], ymm1
+   9b9: vmovupd ymmword ptr [rbp + 0x40], ymm0
+   9be: mov qword ptr [rbp + 0xa0], r13
+   9c5: vmovsd qword ptr [rbp + 0xa8], xmm6
+   9cd: add rbx, 0x8
+   9d1: mov qword ptr [rbp + 0xb0], r14
+   9d8: movabs rax, -0x7ffffffffffffffb
+   9e2: mov qword ptr [rbp + 0x38], rax
+   9e6: lea rcx, [rbp + 0x130]
+   9ed: lea r8, [rbp + 0x38]
+   9f1: mov rdx, rbx
+   9f4: vzeroupper
+   9f7: call 0x9fc ; REL32 <criterion::connection::Connection>::send
+   9fc: nop
+   9fd: cmp dword ptr [rbp + 0x130], -0x1
+   a04: jne 0xf3a
+   a0a: lea rcx, [rbp + 0x38]
+   a0e: call 0xa13 ; REL32 core::ptr::drop_glue::<criterion::connection::OutgoingMessage>
+   a13: mov rax, qword ptr [rbp + 0x170]
+   a1a: mov rdx, qword ptr [rax]
+   a1d: mov rax, qword ptr [rbp + 0x298]
+   a24: mov qword ptr [rsp + 0x28], rax
+   a29: mov qword ptr [rsp + 0x20], r15
+   a2e: lea rcx, [rbp + 0x38]
+   a32: mov r8, qword ptr [rbp + 0x180]
+   a39: mov r9, qword ptr [rbp + 0x188]
+   a40: call 0xa45 ; REL32 <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench
+   a45: nop
+   a46: test r15, r15
+   a49: mov dword ptr [rbp + 0x168], esi
+   a4f: je 0xa97
+   a51: xor ecx, ecx
+   a53: mov rdx, r12
+   a56: call 0xa5b ; REL32 std::sys::alloc::windows::process_heap_alloc
+   a5b: test rax, rax
+   a5e: je 0xfb2
+   a64: mov r13, rax
+   a67: cmp r15, 0x4
+   a6b: setb al
+   a6e: mov rcx, r13
+   a71: mov rbx, qword ptr [rbp + 0x188]
+   a78: sub rcx, rbx
+   a7b: cmp rcx, 0x80
+   a82: setb cl
+   a85: or cl, al
+   a87: je 0xab0
+   a89: xor eax, eax
+   a8b: mov r12, qword ptr [rbp + 0x178]
+   a92: jmp 0xc19
+   a97: mov r13d, 0x8
+   a9d: mov r12, qword ptr [rbp + 0x178]
+   aa4: mov rbx, qword ptr [rbp + 0x188]
+   aab: jmp 0xd8c
+   ab0: cmp r15, 0x10
+   ab4: mov r12, qword ptr [rbp + 0x178]
+   abb: jae 0xac4
+   abd: xor eax, eax
+   abf: jmp 0xbab
+   ac4: mov rax, r15
+   ac7: and rax, -0x10
+   acb: xor ecx, ecx
+   acd: vxorpd xmm0, xmm0, xmm0
+   ad1: vpbroadcastq ymm1, qword ptr [rip] ; REL32 __real@4330000000000000
+   ada: vpbroadcastq ymm2, qword ptr [rip] ; REL32 __real@4530000000000000
+   ae3: vbroadcastsd ymm3, qword ptr [rip] ; REL32 __real@4530000000100000
+   aec: nop dword ptr [rax]
+   af0: vmovdqu ymm4, ymmword ptr [rbx + 8*rcx]
+   af5: vmovdqu ymm5, ymmword ptr [rbx + 8*rcx + 0x20]
+   afb: vmovdqu ymm6, ymmword ptr [rbx + 8*rcx + 0x40]
+   b01: vmovdqu ymm7, ymmword ptr [rbx + 8*rcx + 0x60]
+   b07: vpblendd ymm10, ymm4, ymm0, 0xaa
+   b0d: vpor ymm10, ymm10, ymm1
+   b11: vpsrlq ymm4, ymm4, 0x20
+   b16: vpor ymm4, ymm4, ymm2
+   b1a: vsubpd ymm4, ymm4, ymm3
+   b1e: vaddpd ymm4, ymm10, ymm4
+   b22: vpblendd ymm10, ymm5, ymm0, 0xaa
+   b28: vpor ymm10, ymm10, ymm1
+   b2c: vpsrlq ymm5, ymm5, 0x20
+   b31: vpor ymm5, ymm5, ymm2
+   b35: vsubpd ymm5, ymm5, ymm3
+   b39: vaddpd ymm5, ymm10, ymm5
+   b3d: vpblendd ymm10, ymm6, ymm0, 0xaa
+   b43: vpor ymm10, ymm10, ymm1
+   b47: vpsrlq ymm6, ymm6, 0x20
+   b4c: vpor ymm6, ymm6, ymm2
+   b50: vsubpd ymm6, ymm6, ymm3
+   b54: vaddpd ymm6, ymm10, ymm6
+   b58: vpblendd ymm10, ymm7, ymm0, 0xaa
+   b5e: vpor ymm10, ymm10, ymm1
+   b62: vpsrlq ymm7, ymm7, 0x20
+   b67: vpor ymm7, ymm7, ymm2
+   b6b: vsubpd ymm7, ymm7, ymm3
+   b6f: vaddpd ymm7, ymm10, ymm7
+   b73: vmovupd ymmword ptr [r13 + 8*rcx], ymm4
+   b7a: vmovupd ymmword ptr [r13 + 8*rcx + 0x20], ymm5
+   b81: vmovupd ymmword ptr [r13 + 8*rcx + 0x40], ymm6
+   b88: vmovupd ymmword ptr [r13 + 8*rcx + 0x60], ymm7
+   b8f: add rcx, 0x10
+   b93: cmp rax, rcx
+   b96: jne 0xaf0
+   b9c: cmp r15, rax
+   b9f: je 0xd8c
+   ba5: test r15b, 0xc
+   ba9: je 0xc19
+   bab: mov rcx, rax
+   bae: mov rax, r15
+   bb1: and rax, -0x4
+   bb5: vxorpd xmm0, xmm0, xmm0
+   bb9: vpbroadcastq ymm1, qword ptr [rip] ; REL32 __real@4330000000000000
+   bc2: vpbroadcastq ymm2, qword ptr [rip] ; REL32 __real@4530000000000000
+   bcb: vbroadcastsd ymm3, qword ptr [rip] ; REL32 __real@4530000000100000
+   bd4: nop word ptr cs:[rax + rax]
+   be0: vmovdqu ymm4, ymmword ptr [rbx + 8*rcx]
+   be5: vpblendd ymm5, ymm4, ymm0, 0xaa
+   beb: vpor ymm5, ymm5, ymm1
+   bef: vpsrlq ymm4, ymm4, 0x20
+   bf4: vpor ymm4, ymm4, ymm2
+   bf8: vsubpd ymm4, ymm4, ymm3
+   bfc: vaddpd ymm4, ymm5, ymm4
+   c00: vmovupd ymmword ptr [r13 + 8*rcx], ymm4
+   c07: add rcx, 0x4
+   c0b: cmp rax, rcx
+   c0e: jne 0xbe0
+   c10: cmp r15, rax
+   c13: je 0xd8c
+   c19: mov edx, r15d
+   c1c: sub edx, eax
+   c1e: mov rcx, rax
+   c21: and edx, 0x7
+   c24: je 0xc65
+   c26: vmovsd xmm0, qword ptr [rip] ; REL32 __xmm@00000000000000004530000043300000
+   c2e: vmovapd xmm1, xmmword ptr [rip] ; REL32 __xmm@45300000000000004330000000000000
+   c36: mov rcx, rax
+   c39: nop dword ptr [rax]
+   c40: vmovsd xmm2, qword ptr [rbx + 8*rcx]
+   c45: vunpcklps xmm2, xmm2, xmm0
+   c49: vsubpd xmm2, xmm2, xmm1
+   c4d: vshufpd xmm3, xmm2, xmm2, 0x1
+   c52: vaddsd xmm2, xmm3, xmm2
+   c56: vmovsd qword ptr [r13 + 8*rcx], xmm2
+   c5d: inc rcx
+   c60: dec rdx
+   c63: jne 0xc40
+   c65: sub rax, r15
+   c68: cmp rax, -0x8
+   c6c: ja 0xd8c
+   c72: nop word ptr cs:[rax + rax]
+   c80: vmovsd xmm0, qword ptr [rbx + 8*rcx]
+   c85: vunpcklps xmm0, xmm0, xmm8
+   c8a: vsubpd xmm0, xmm0, xmm9
+   c8f: vshufpd xmm1, xmm0, xmm0, 0x1
+   c94: vaddsd xmm0, xmm1, xmm0
+   c98: vmovsd qword ptr [r13 + 8*rcx], xmm0
+   c9f: vmovsd xmm0, qword ptr [rbx + 8*rcx + 0x8]
+   ca5: vunpcklps xmm0, xmm0, xmm8
+   caa: vsubpd xmm0, xmm0, xmm9
+   caf: vshufpd xmm1, xmm0, xmm0, 0x1
+   cb4: vaddsd xmm0, xmm1, xmm0
+   cb8: vmovsd qword ptr [r13 + 8*rcx + 0x8], xmm0
+   cbf: vmovsd xmm0, qword ptr [rbx + 8*rcx + 0x10]
+   cc5: vunpcklps xmm0, xmm0, xmm8
+   cca: vsubpd xmm0, xmm0, xmm9
+   ccf: vshufpd xmm1, xmm0, xmm0, 0x1
+   cd4: vaddsd xmm0, xmm1, xmm0
+   cd8: vmovsd qword ptr [r13 + 8*rcx + 0x10], xmm0
+   cdf: vmovsd xmm0, qword ptr [rbx + 8*rcx + 0x18]
+   ce5: vunpcklps xmm0, xmm0, xmm8
+   cea: vsubpd xmm0, xmm0, xmm9
+   cef: vshufpd xmm1, xmm0, xmm0, 0x1
+   cf4: vaddsd xmm0, xmm1, xmm0
+   cf8: vmovsd qword ptr [r13 + 8*rcx + 0x18], xmm0
+   cff: vmovsd xmm0, qword ptr [rbx + 8*rcx + 0x20]
+   d05: vunpcklps xmm0, xmm0, xmm8
+   d0a: vsubpd xmm0, xmm0, xmm9
+   d0f: vshufpd xmm1, xmm0, xmm0, 0x1
+   d14: vaddsd xmm0, xmm1, xmm0
+   d18: vmovsd qword ptr [r13 + 8*rcx + 0x20], xmm0
+   d1f: vmovsd xmm0, qword ptr [rbx + 8*rcx + 0x28]
+   d25: vunpcklps xmm0, xmm0, xmm8
+   d2a: vsubpd xmm0, xmm0, xmm9
+   d2f: vshufpd xmm1, xmm0, xmm0, 0x1
+   d34: vaddsd xmm0, xmm1, xmm0
+   d38: vmovsd qword ptr [r13 + 8*rcx + 0x28], xmm0
+   d3f: vmovsd xmm0, qword ptr [rbx + 8*rcx + 0x30]
+   d45: vunpcklps xmm0, xmm0, xmm8
+   d4a: vsubpd xmm0, xmm0, xmm9
+   d4f: vshufpd xmm1, xmm0, xmm0, 0x1
+   d54: vaddsd xmm0, xmm1, xmm0
+   d58: vmovsd qword ptr [r13 + 8*rcx + 0x30], xmm0
+   d5f: vmovsd xmm0, qword ptr [rbx + 8*rcx + 0x38]
+   d65: vunpcklps xmm0, xmm0, xmm8
+   d6a: vsubpd xmm0, xmm0, xmm9
+   d6f: vshufpd xmm1, xmm0, xmm0, 0x1
+   d74: vaddsd xmm0, xmm1, xmm0
+   d78: vmovsd qword ptr [r13 + 8*rcx + 0x38], xmm0
+   d7f: add rcx, 0x8
+   d83: cmp r15, rcx
+   d86: jne 0xc80
+   d8c: mov r14, qword ptr [rbp + 0x40]
+   d90: mov rsi, qword ptr [rbp + 0x48]
+   d94: cmp qword ptr [rbp + 0x38], rsi
+   d98: jbe 0xdee
+   d9a: test rsi, rsi
+   d9d: je 0xdf3
+   d9f: lea rdi, [8*rsi]
+   da7: vzeroupper
+   daa: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+   db0: mov rcx, rax
+   db3: xor edx, edx
+   db5: mov r8, r14
+   db8: mov r9, rdi
+   dbb: call qword ptr [rip] ; REL32 __imp_HeapReAlloc
+   dc1: test rax, rax
+   dc4: jne 0xe0f
+   dc6: mov qword ptr [rbp + 0x170], r14
+   dcd: mov qword ptr [rbp + 0x178], r13
+   dd4: mov qword ptr [rbp + 0x180], r15
+   ddb: mov ecx, 0x8
+   de0: mov rdx, rdi
+   de3: call 0xde8 ; REL32 alloc::raw_vec::handle_error
+   de8: nop
+   de9: jmp 0xfc7
+   dee: mov rax, r14
+   df1: jmp 0xe0f
+   df3: vzeroupper
+   df6: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+   dfc: mov rcx, rax
+   dff: xor edx, edx
+   e01: mov r8, r14
+   e04: call qword ptr [rip] ; REL32 __imp_HeapFree
+   e0a: mov eax, 0x8
+   e0f: mov ecx, dword ptr [rbp + 0x168]
+   e15: mov byte ptr [r12 + 0x10], cl
+   e1a: mov qword ptr [r12], r13
+   e1e: mov qword ptr [r12 + 0x8], r15
+   e23: mov qword ptr [r12 + 0x18], rax
+   e28: mov qword ptr [r12 + 0x20], rsi
+   e2d: cmp qword ptr [rbp + 0x108], 0x0
+   e35: je 0xe4e
+   e37: vzeroupper
+   e3a: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+   e40: mov rcx, rax
+   e43: xor edx, edx
+   e45: mov r8, rbx
+   e48: call qword ptr [rip] ; REL32 __imp_HeapFree
+   e4e: mov rax, r12
+   e51: vmovaps xmm6, xmmword ptr [rbp + 0x1a0]
+   e59: vmovaps xmm7, xmmword ptr [rbp + 0x1b0]
+   e61: vmovaps xmm8, xmmword ptr [rbp + 0x1c0]
+   e69: vmovaps xmm9, xmmword ptr [rbp + 0x1d0]
+   e71: vmovaps xmm10, xmmword ptr [rbp + 0x1e0]
+   e79: vmovaps xmm11, xmmword ptr [rbp + 0x1f0]
+   e81: vmovaps xmm12, xmmword ptr [rbp + 0x200]
+   e89: add rsp, 0x298
+   e90: pop rbx
+   e91: pop rdi
+   e92: pop rsi
+   e93: pop r12
+   e95: pop r13
+   e97: pop r14
+   e99: pop r15
+   e9b: pop rbp
+   e9c: vzeroupper
+   e9f: ret
+   ea0: lea rcx, [rip] ; REL32 <anon-data>
+   ea7: call 0xeac ; REL32 core::option::unwrap_failed
+   eac: nop
+   ead: jmp 0xfc7
+   eb2: lea rcx, [rip] ; REL32 <anon-data>
+   eb9: call 0xebe ; REL32 core::option::unwrap_failed
+   ebe: nop
+   ebf: jmp 0xfc7
+   ec4: call 0xec9 ; REL32 <once_cell::imp::OnceCell<bool>>::initialize::<<once_cell::sync::OnceCell<bool>>::get_or_init<<once_cell::sync::Lazy<bool>>::force::{closure#0}>::{closure#0}, <once_cell::sync::OnceCell<_>>::get_or_init::Void>
+   ec9: movzx eax, byte ptr [rip + 0x8] ; REL32 criterion::DEBUG_ENABLED
+   ed0: mov rbx, r15
+   ed3: test al, 0x1
+   ed5: jne 0x3fe
+   edb: jmp 0x491
+   ee0: mov ecx, 0x8
+   ee5: mov edx, 0x10
+   eea: call 0xeef ; REL32 alloc::alloc::handle_alloc_error
+   eef: ud2
+   ef1: mov rax, qword ptr [rbp + 0x150]
+   ef8: mov qword ptr [rbp - 0x30], rax
+   efc: vmovupd ymm0, ymmword ptr [rbp + 0x130]
+   f04: vmovupd ymmword ptr [rbp - 0x50], ymm0
+   f09: lea rax, [rip] ; REL32 <anon-data>
+   f10: mov qword ptr [rsp + 0x20], rax
+   f15: lea rcx, [rip] ; REL32 <anon-data>
+   f1c: lea r9, [rip] ; REL32 <anon-data>
+   f23: lea r8, [rbp - 0x50]
+   f27: mov edx, 0x2b
+   f2c: vzeroupper
+   f2f: call 0xf34 ; REL32 core::result::unwrap_failed
+   f34: nop
+   f35: jmp 0xfc7
+   f3a: mov rax, qword ptr [rbp + 0x150]
+   f41: mov qword ptr [rbp - 0x30], rax
+   f45: vmovupd ymm0, ymmword ptr [rbp + 0x130]
+   f4d: vmovupd ymmword ptr [rbp - 0x50], ymm0
+   f52: lea rax, [rip] ; REL32 <anon-data>
+   f59: mov qword ptr [rsp + 0x20], rax
+   f5e: lea rcx, [rip] ; REL32 <anon-data>
+   f65: lea r9, [rip] ; REL32 <anon-data>
+   f6c: lea r8, [rbp - 0x50]
+   f70: mov edx, 0x2b
+   f75: vzeroupper
+   f78: call 0xf7d ; REL32 core::result::unwrap_failed
+   f7d: nop
+   f7e: jmp 0xfc7
+   f80: mov qword ptr [rbp + 0x180], rsi
+   f87: mov ecx, 0x8
+   f8c: mov edx, 0x10
+   f91: call 0xf96 ; REL32 alloc::alloc::handle_alloc_error
+   f96: nop
+   f97: jmp 0xfc7
+   f99: mov qword ptr [rbp + 0x180], rsi
+   fa0: mov ecx, 0x8
+   fa5: mov edx, 0x10
+   faa: call 0xfaf ; REL32 alloc::alloc::handle_alloc_error
+   faf: nop
+   fb0: jmp 0xfc7
+   fb2: mov byte ptr [rbp + 0x197], 0x1
+   fb9: mov ecx, 0x8
+   fbe: mov rdx, r12
+   fc1: call 0xfc6 ; REL32 alloc::raw_vec::handle_error
+   fc6: nop
+   fc7: ud2
+   fc9: nop dword ptr [rax]
+<?dtor$13@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA> @+0xfd0:
+   fd0: mov qword ptr [rsp + 0x10], rdx
+   fd5: push rbp
+   fd6: push r15
+   fd8: push r14
+   fda: push r13
+   fdc: push r12
+   fde: push rsi
+   fdf: push rdi
+   fe0: push rbx
+   fe1: sub rsp, 0xa8
+   fe8: lea rbp, [rdx + 0x80]
+   fef: vmovapd xmmword ptr [rsp + 0x30], xmm12
+   ff5: vmovdqa xmmword ptr [rsp + 0x40], xmm11
+   ffb: vmovapd xmmword ptr [rsp + 0x50], xmm10
+  1001: vmovapd xmmword ptr [rsp + 0x60], xmm9
+  1007: vmovapd xmmword ptr [rsp + 0x70], xmm8
+  100d: vmovapd xmmword ptr [rsp + 0x80], xmm7
+  1016: vmovapd xmmword ptr [rsp + 0x90], xmm6
+  101f: lea rcx, [rbp + 0x38]
+  1023: call 0x1028 ; REL32 core::ptr::drop_glue::<criterion::connection::OutgoingMessage>
+  1028: vmovaps xmm6, xmmword ptr [rsp + 0x90]
+  1031: vmovaps xmm7, xmmword ptr [rsp + 0x80]
+  103a: vmovaps xmm8, xmmword ptr [rsp + 0x70]
+  1040: vmovaps xmm9, xmmword ptr [rsp + 0x60]
+  1046: vmovaps xmm10, xmmword ptr [rsp + 0x50]
+  104c: vmovaps xmm11, xmmword ptr [rsp + 0x40]
+  1052: vmovaps xmm12, xmmword ptr [rsp + 0x30]
+  1058: add rsp, 0xa8
+  105f: pop rbx
+  1060: pop rdi
+  1061: pop rsi
+  1062: pop r12
+  1064: pop r13
+  1066: pop r14
+  1068: pop r15
+  106a: pop rbp
+  106b: ret
+  106c: nop dword ptr [rax]
+<?dtor$14@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA> @+0x1070:
+  1070: mov qword ptr [rsp + 0x10], rdx
+  1075: push rbp
+  1076: push r15
+  1078: push r14
+  107a: push r13
+  107c: push r12
+  107e: push rsi
+  107f: push rdi
+  1080: push rbx
+  1081: sub rsp, 0xa8
+  1088: lea rbp, [rdx + 0x80]
+  108f: vmovapd xmmword ptr [rsp + 0x30], xmm12
+  1095: vmovdqa xmmword ptr [rsp + 0x40], xmm11
+  109b: vmovapd xmmword ptr [rsp + 0x50], xmm10
+  10a1: vmovapd xmmword ptr [rsp + 0x60], xmm9
+  10a7: vmovapd xmmword ptr [rsp + 0x70], xmm8
+  10ad: vmovapd xmmword ptr [rsp + 0x80], xmm7
+  10b6: vmovapd xmmword ptr [rsp + 0x90], xmm6
+  10bf: lea rcx, [rbp - 0x50]
+  10c3: call 0x10c8 ; REL32 core::ptr::drop_glue::<criterion::connection::MessageError>
+  10c8: vmovapd xmm6, xmmword ptr [rsp + 0x90]
+  10d1: vmovapd xmm7, xmmword ptr [rsp + 0x80]
+  10da: vmovapd xmm8, xmmword ptr [rsp + 0x70]
+  10e0: vmovapd xmm9, xmmword ptr [rsp + 0x60]
+  10e6: vmovapd xmm10, xmmword ptr [rsp + 0x50]
+  10ec: vmovdqa xmm11, xmmword ptr [rsp + 0x40]
+  10f2: vmovapd xmm12, xmmword ptr [rsp + 0x30]
+  10f8: add rsp, 0xa8
+  10ff: pop rbx
+  1100: pop rdi
+  1101: pop rsi
+  1102: pop r12
+  1104: pop r13
+  1106: pop r14
+  1108: pop r15
+  110a: pop rbp
+  110b: ret
+  110c: nop dword ptr [rax]
+<?dtor$29@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA> @+0x1110:
+  1110: mov qword ptr [rsp + 0x10], rdx
+  1115: push rbp
+  1116: push r15
+  1118: push r14
+  111a: push r13
+  111c: push r12
+  111e: push rsi
+  111f: push rdi
+  1120: push rbx
+  1121: sub rsp, 0xa8
+  1128: lea rbp, [rdx + 0x80]
+  112f: vmovapd xmmword ptr [rsp + 0x30], xmm12
+  1135: vmovdqa xmmword ptr [rsp + 0x40], xmm11
+  113b: vmovapd xmmword ptr [rsp + 0x50], xmm10
+  1141: vmovapd xmmword ptr [rsp + 0x60], xmm9
+  1147: vmovapd xmmword ptr [rsp + 0x70], xmm8
+  114d: vmovapd xmmword ptr [rsp + 0x80], xmm7
+  1156: vmovapd xmmword ptr [rsp + 0x90], xmm6
+  115f: cmp qword ptr [rbp + 0x108], 0x0
+  1167: je 0x1181
+  1169: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  116f: mov rcx, rax
+  1172: xor edx, edx
+  1174: mov r8, qword ptr [rbp + 0x188]
+  117b: call qword ptr [rip] ; REL32 __imp_HeapFree
+  1181: vmovaps xmm6, xmmword ptr [rsp + 0x90]
+  118a: vmovaps xmm7, xmmword ptr [rsp + 0x80]
+  1193: vmovaps xmm8, xmmword ptr [rsp + 0x70]
+  1199: vmovaps xmm9, xmmword ptr [rsp + 0x60]
+  119f: vmovaps xmm10, xmmword ptr [rsp + 0x50]
+  11a5: vmovaps xmm11, xmmword ptr [rsp + 0x40]
+  11ab: vmovaps xmm12, xmmword ptr [rsp + 0x30]
+  11b1: add rsp, 0xa8
+  11b8: pop rbx
+  11b9: pop rdi
+  11ba: pop rsi
+  11bb: pop r12
+  11bd: pop r13
+  11bf: pop r14
+  11c1: pop r15
+  11c3: pop rbp
+  11c4: ret
+  11c5: nop word ptr cs:[rax + rax]
+<?dtor$86@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA> @+0x11d0:
+  11d0: mov qword ptr [rsp + 0x10], rdx
+  11d5: push rbp
+  11d6: push r15
+  11d8: push r14
+  11da: push r13
+  11dc: push r12
+  11de: push rsi
+  11df: push rdi
+  11e0: push rbx
+  11e1: sub rsp, 0xa8
+  11e8: lea rbp, [rdx + 0x80]
+  11ef: vmovapd xmmword ptr [rsp + 0x30], xmm12
+  11f5: vmovdqa xmmword ptr [rsp + 0x40], xmm11
+  11fb: vmovapd xmmword ptr [rsp + 0x50], xmm10
+  1201: vmovapd xmmword ptr [rsp + 0x60], xmm9
+  1207: vmovapd xmmword ptr [rsp + 0x70], xmm8
+  120d: vmovapd xmmword ptr [rsp + 0x80], xmm7
+  1216: vmovapd xmmword ptr [rsp + 0x90], xmm6
+  121f: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  1225: mov rcx, rax
+  1228: xor edx, edx
+  122a: mov r8, qword ptr [rbp + 0x170]
+  1231: call qword ptr [rip] ; REL32 __imp_HeapFree
+  1237: cmp qword ptr [rbp + 0x180], 0x0
+  123f: je 0x1259
+  1241: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  1247: mov rcx, rax
+  124a: xor edx, edx
+  124c: mov r8, qword ptr [rbp + 0x178]
+  1253: call qword ptr [rip] ; REL32 __imp_HeapFree
+  1259: mov byte ptr [rbp + 0x197], 0x0
+  1260: vmovapd xmm6, xmmword ptr [rsp + 0x90]
+  1269: vmovapd xmm7, xmmword ptr [rsp + 0x80]
+  1272: vmovapd xmm8, xmmword ptr [rsp + 0x70]
+  1278: vmovapd xmm9, xmmword ptr [rsp + 0x60]
+  127e: vmovapd xmm10, xmmword ptr [rsp + 0x50]
+  1284: vmovdqa xmm11, xmmword ptr [rsp + 0x40]
+  128a: vmovapd xmm12, xmmword ptr [rsp + 0x30]
+  1290: add rsp, 0xa8
+  1297: pop rbx
+  1298: pop rdi
+  1299: pop rsi
+  129a: pop r12
+  129c: pop r13
+  129e: pop r14
+  12a0: pop r15
+  12a2: pop rbp
+  12a3: ret
+  12a4: nop word ptr cs:[rax + rax]
+<?dtor$93@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA> @+0x12b0:
+  12b0: mov qword ptr [rsp + 0x10], rdx
+  12b5: push rbp
+  12b6: push r15
+  12b8: push r14
+  12ba: push r13
+  12bc: push r12
+  12be: push rsi
+  12bf: push rdi
+  12c0: push rbx
+  12c1: sub rsp, 0xa8
+  12c8: lea rbp, [rdx + 0x80]
+  12cf: vmovapd xmmword ptr [rsp + 0x30], xmm12
+  12d5: vmovdqa xmmword ptr [rsp + 0x40], xmm11
+  12db: vmovapd xmmword ptr [rsp + 0x50], xmm10
+  12e1: vmovapd xmmword ptr [rsp + 0x60], xmm9
+  12e7: vmovapd xmmword ptr [rsp + 0x70], xmm8
+  12ed: vmovapd xmmword ptr [rsp + 0x80], xmm7
+  12f6: vmovapd xmmword ptr [rsp + 0x90], xmm6
+  12ff: cmp byte ptr [rbp + 0x197], 0x0
+  1306: je 0x136b
+  1308: cmp qword ptr [rbp + 0x38], 0x0
+  130d: je 0x1327
+  130f: mov rsi, qword ptr [rbp + 0x40]
+  1313: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  1319: mov rcx, rax
+  131c: xor edx, edx
+  131e: mov r8, rsi
+  1321: call qword ptr [rip] ; REL32 __imp_HeapFree
+  1327: vmovapd xmm6, xmmword ptr [rsp + 0x90]
+  1330: vmovapd xmm7, xmmword ptr [rsp + 0x80]
+  1339: vmovapd xmm8, xmmword ptr [rsp + 0x70]
+  133f: vmovapd xmm9, xmmword ptr [rsp + 0x60]
+  1345: vmovapd xmm10, xmmword ptr [rsp + 0x50]
+  134b: vmovdqa xmm11, xmmword ptr [rsp + 0x40]
+  1351: vmovapd xmm12, xmmword ptr [rsp + 0x30]
+  1357: add rsp, 0xa8
+  135e: pop rbx
+  135f: pop rdi
+  1360: pop rsi
+  1361: pop r12
+  1363: pop r13
+  1365: pop r14
+  1367: pop r15
+  1369: pop rbp
+  136a: ret
+  136b: vmovapd xmm6, xmmword ptr [rsp + 0x90]
+  1374: vmovapd xmm7, xmmword ptr [rsp + 0x80]
+  137d: vmovapd xmm8, xmmword ptr [rsp + 0x70]
+  1383: vmovapd xmm9, xmmword ptr [rsp + 0x60]
+  1389: vmovapd xmm10, xmmword ptr [rsp + 0x50]
+  138f: vmovdqa xmm11, xmmword ptr [rsp + 0x40]
+  1395: vmovapd xmm12, xmmword ptr [rsp + 0x30]
+  139b: add rsp, 0xa8
+  13a2: pop rbx
+  13a3: pop rdi
+  13a4: pop rsi
+  13a5: pop r12
+  13a7: pop r13
+  13a9: pop r14
+  13ab: pop r15
+  13ad: pop rbp
+  13ae: ret
+  13af: nop
+<?dtor$106@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA> @+0x13b0:
+  13b0: mov qword ptr [rsp + 0x10], rdx
+  13b5: push rbp
+  13b6: push r15
+  13b8: push r14
+  13ba: push r13
+  13bc: push r12
+  13be: push rsi
+  13bf: push rdi
+  13c0: push rbx
+  13c1: sub rsp, 0xa8
+  13c8: lea rbp, [rdx + 0x80]
+  13cf: vmovapd xmmword ptr [rsp + 0x30], xmm12
+  13d5: vmovdqa xmmword ptr [rsp + 0x40], xmm11
+  13db: vmovapd xmmword ptr [rsp + 0x50], xmm10
+  13e1: vmovapd xmmword ptr [rsp + 0x60], xmm9
+  13e7: vmovapd xmmword ptr [rsp + 0x70], xmm8
+  13ed: vmovapd xmmword ptr [rsp + 0x80], xmm7
+  13f6: vmovapd xmmword ptr [rsp + 0x90], xmm6
+  13ff: cmp qword ptr [rbp + 0x38], 0x0
+  1404: je 0x141e
+  1406: mov rsi, qword ptr [rbp + 0x40]
+  140a: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  1410: mov rcx, rax
+  1413: xor edx, edx
+  1415: mov r8, rsi
+  1418: call qword ptr [rip] ; REL32 __imp_HeapFree
+  141e: vmovaps xmm6, xmmword ptr [rsp + 0x90]
+  1427: vmovaps xmm7, xmmword ptr [rsp + 0x80]
+  1430: vmovaps xmm8, xmmword ptr [rsp + 0x70]
+  1436: vmovaps xmm9, xmmword ptr [rsp + 0x60]
+  143c: vmovaps xmm10, xmmword ptr [rsp + 0x50]
+  1442: vmovaps xmm11, xmmword ptr [rsp + 0x40]
+  1448: vmovaps xmm12, xmmword ptr [rsp + 0x30]
+  144e: add rsp, 0xa8
+  1455: pop rbx
+  1456: pop rdi
+  1457: pop rsi
+  1458: pop r12
+  145a: pop r13
+  145c: pop r14
+  145e: pop r15
+  1460: pop rbp
+  1461: ret
+  1462: nop word ptr cs:[rax + rax]
+<?dtor$122@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA> @+0x1470:
+  1470: mov qword ptr [rsp + 0x10], rdx
+  1475: push rbp
+  1476: push r15
+  1478: push r14
+  147a: push r13
+  147c: push r12
+  147e: push rsi
+  147f: push rdi
+  1480: push rbx
+  1481: sub rsp, 0xa8
+  1488: lea rbp, [rdx + 0x80]
+  148f: vmovapd xmmword ptr [rsp + 0x30], xmm12
+  1495: vmovdqa xmmword ptr [rsp + 0x40], xmm11
+  149b: vmovapd xmmword ptr [rsp + 0x50], xmm10
+  14a1: vmovapd xmmword ptr [rsp + 0x60], xmm9
+  14a7: vmovapd xmmword ptr [rsp + 0x70], xmm8
+  14ad: vmovapd xmmword ptr [rsp + 0x80], xmm7
+  14b6: vmovapd xmmword ptr [rsp + 0x90], xmm6
+  14bf: cmp qword ptr [rbp + 0x38], 0x0
+  14c4: je 0x14de
+  14c6: mov rsi, qword ptr [rbp + 0x40]
+  14ca: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  14d0: mov rcx, rax
+  14d3: xor edx, edx
+  14d5: mov r8, rsi
+  14d8: call qword ptr [rip] ; REL32 __imp_HeapFree
+  14de: vmovaps xmm6, xmmword ptr [rsp + 0x90]
+  14e7: vmovaps xmm7, xmmword ptr [rsp + 0x80]
+  14f0: vmovaps xmm8, xmmword ptr [rsp + 0x70]
+  14f6: vmovaps xmm9, xmmword ptr [rsp + 0x60]
+  14fc: vmovaps xmm10, xmmword ptr [rsp + 0x50]
+  1502: vmovaps xmm11, xmmword ptr [rsp + 0x40]
+  1508: vmovaps xmm12, xmmword ptr [rsp + 0x30]
+  150e: add rsp, 0xa8
+  1515: pop rbx
+  1516: pop rdi
+  1517: pop rsi
+  1518: pop r12
+  151a: pop r13
+  151c: pop r14
+  151e: pop r15
+  1520: pop rbp
+  1521: ret
+  1522: nop word ptr cs:[rax + rax]
+<?dtor$125@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA> @+0x1530:
+  1530: mov qword ptr [rsp + 0x10], rdx
+  1535: push rbp
+  1536: push r15
+  1538: push r14
+  153a: push r13
+  153c: push r12
+  153e: push rsi
+  153f: push rdi
+  1540: push rbx
+  1541: sub rsp, 0xa8
+  1548: lea rbp, [rdx + 0x80]
+  154f: vmovapd xmmword ptr [rsp + 0x30], xmm12
+  1555: vmovdqa xmmword ptr [rsp + 0x40], xmm11
+  155b: vmovapd xmmword ptr [rsp + 0x50], xmm10
+  1561: vmovapd xmmword ptr [rsp + 0x60], xmm9
+  1567: vmovapd xmmword ptr [rsp + 0x70], xmm8
+  156d: vmovapd xmmword ptr [rsp + 0x80], xmm7
+  1576: vmovapd xmmword ptr [rsp + 0x90], xmm6
+  157f: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  1585: mov rcx, rax
+  1588: xor edx, edx
+  158a: mov r8, qword ptr [rbp + 0x180]
+  1591: call qword ptr [rip] ; REL32 __imp_HeapFree
+  1597: vmovaps xmm6, xmmword ptr [rsp + 0x90]
+  15a0: vmovaps xmm7, xmmword ptr [rsp + 0x80]
+  15a9: vmovaps xmm8, xmmword ptr [rsp + 0x70]
+  15af: vmovaps xmm9, xmmword ptr [rsp + 0x60]
+  15b5: vmovaps xmm10, xmmword ptr [rsp + 0x50]
+  15bb: vmovaps xmm11, xmmword ptr [rsp + 0x40]
+  15c1: vmovaps xmm12, xmmword ptr [rsp + 0x30]
+  15c7: add rsp, 0xa8
+  15ce: pop rbx
+  15cf: pop rdi
+  15d0: pop rsi
+  15d1: pop r12
+  15d3: pop r13
+  15d5: pop r14
+  15d7: pop r15
+  15d9: pop rbp
+  15da: ret
+  15db: nop dword ptr [rax + rax]
+<?dtor$128@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA> @+0x15e0:
+  15e0: mov qword ptr [rsp + 0x10], rdx
+  15e5: push rbp
+  15e6: push r15
+  15e8: push r14
+  15ea: push r13
+  15ec: push r12
+  15ee: push rsi
+  15ef: push rdi
+  15f0: push rbx
+  15f1: sub rsp, 0xa8
+  15f8: lea rbp, [rdx + 0x80]
+  15ff: vmovapd xmmword ptr [rsp + 0x30], xmm12
+  1605: vmovdqa xmmword ptr [rsp + 0x40], xmm11
+  160b: vmovapd xmmword ptr [rsp + 0x50], xmm10
+  1611: vmovapd xmmword ptr [rsp + 0x60], xmm9
+  1617: vmovapd xmmword ptr [rsp + 0x70], xmm8
+  161d: vmovapd xmmword ptr [rsp + 0x80], xmm7
+  1626: vmovapd xmmword ptr [rsp + 0x90], xmm6
+  162f: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  1635: mov rcx, rax
+  1638: xor edx, edx
+  163a: mov r8, qword ptr [rbp + 0x180]
+  1641: call qword ptr [rip] ; REL32 __imp_HeapFree
+  1647: vmovaps xmm6, xmmword ptr [rsp + 0x90]
+  1650: vmovaps xmm7, xmmword ptr [rsp + 0x80]
+  1659: vmovaps xmm8, xmmword ptr [rsp + 0x70]
+  165f: vmovaps xmm9, xmmword ptr [rsp + 0x60]
+  1665: vmovaps xmm10, xmmword ptr [rsp + 0x50]
+  166b: vmovaps xmm11, xmmword ptr [rsp + 0x40]
+  1671: vmovaps xmm12, xmmword ptr [rsp + 0x30]
+  1677: add rsp, 0xa8
+  167e: pop rbx
+  167f: pop rdi
+  1680: pop rsi
+  1681: pop r12
+  1683: pop r13
+  1685: pop r14
+  1687: pop r15
+  1689: pop rbp
+  168a: ret
+  168b: nop dword ptr [rax + rax]
+<?dtor$130@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA> @+0x1690:
+  1690: mov qword ptr [rsp + 0x10], rdx
+  1695: push rbp
+  1696: push r15
+  1698: push r14
+  169a: push r13
+  169c: push r12
+  169e: push rsi
+  169f: push rdi
+  16a0: push rbx
+  16a1: sub rsp, 0xa8
+  16a8: lea rbp, [rdx + 0x80]
+  16af: vmovapd xmmword ptr [rsp + 0x30], xmm12
+  16b5: vmovdqa xmmword ptr [rsp + 0x40], xmm11
+  16bb: vmovapd xmmword ptr [rsp + 0x50], xmm10
+  16c1: vmovapd xmmword ptr [rsp + 0x60], xmm9
+  16c7: vmovapd xmmword ptr [rsp + 0x70], xmm8
+  16cd: vmovapd xmmword ptr [rsp + 0x80], xmm7
+  16d6: vmovapd xmmword ptr [rsp + 0x90], xmm6
+  16df: lea rcx, [rbp + 0x38]
+  16e3: call 0x16e8 ; REL32 core::ptr::drop_glue::<criterion::connection::OutgoingMessage>
+  16e8: vmovapd xmm6, xmmword ptr [rsp + 0x90]
+  16f1: vmovapd xmm7, xmmword ptr [rsp + 0x80]
+  16fa: vmovapd xmm8, xmmword ptr [rsp + 0x70]
+  1700: vmovapd xmm9, xmmword ptr [rsp + 0x60]
+  1706: vmovapd xmm10, xmmword ptr [rsp + 0x50]
+  170c: vmovdqa xmm11, xmmword ptr [rsp + 0x40]
+  1712: vmovapd xmm12, xmmword ptr [rsp + 0x30]
+  1718: add rsp, 0xa8
+  171f: pop rbx
+  1720: pop rdi
+  1721: pop rsi
+  1722: pop r12
+  1724: pop r13
+  1726: pop r14
+  1728: pop r15
+  172a: pop rbp
+  172b: ret
+  172c: nop dword ptr [rax]
+<?dtor$131@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA> @+0x1730:
+  1730: mov qword ptr [rsp + 0x10], rdx
+  1735: push rbp
+  1736: push r15
+  1738: push r14
+  173a: push r13
+  173c: push r12
+  173e: push rsi
+  173f: push rdi
+  1740: push rbx
+  1741: sub rsp, 0xa8
+  1748: lea rbp, [rdx + 0x80]
+  174f: vmovapd xmmword ptr [rsp + 0x30], xmm12
+  1755: vmovdqa xmmword ptr [rsp + 0x40], xmm11
+  175b: vmovapd xmmword ptr [rsp + 0x50], xmm10
+  1761: vmovapd xmmword ptr [rsp + 0x60], xmm9
+  1767: vmovapd xmmword ptr [rsp + 0x70], xmm8
+  176d: vmovapd xmmword ptr [rsp + 0x80], xmm7
+  1776: vmovapd xmmword ptr [rsp + 0x90], xmm6
+  177f: lea rcx, [rbp - 0x50]
+  1783: call 0x1788 ; REL32 core::ptr::drop_glue::<criterion::connection::MessageError>
+  1788: vmovapd xmm6, xmmword ptr [rsp + 0x90]
+  1791: vmovapd xmm7, xmmword ptr [rsp + 0x80]
+  179a: vmovapd xmm8, xmmword ptr [rsp + 0x70]
+  17a0: vmovapd xmm9, xmmword ptr [rsp + 0x60]
+  17a6: vmovapd xmm10, xmmword ptr [rsp + 0x50]
+  17ac: vmovdqa xmm11, xmmword ptr [rsp + 0x40]
+  17b2: vmovapd xmm12, xmmword ptr [rsp + 0x30]
+  17b8: add rsp, 0xa8
+  17bf: pop rbx
+  17c0: pop rdi
+  17c1: pop rsi
+  17c2: pop r12
+  17c4: pop r13
+  17c6: pop r14
+  17c8: pop r15
+  17ca: pop rbp
+  17cb: ret
+== query_dsl | H-1 | <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up | size=342 (section RawDataSize) | copies=1 | sha256=f50360bac98bf319e82035a801dc85127cea9cb9cb9729caaa54924a6084b08d
+<<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up> @+0x0:
+     0: push r15
+     2: push r14
+     4: push r13
+     6: push r12
+     8: push rsi
+     9: push rdi
+     a: push rbp
+     b: push rbx
+     c: sub rsp, 0x68
+    10: mov esi, r9d
+    13: mov rdi, r8
+    16: mov r15, qword ptr [rsp + 0xd0]
+    1e: mov byte ptr [rsp + 0x60], 0x0
+    23: mov qword ptr [rsp + 0x58], 0x1
+    2c: mov qword ptr [rsp + 0x30], 0x0
+    35: mov dword ptr [rsp + 0x38], 0x0
+    3d: mov qword ptr [rsp + 0x50], rdx
+    42: mov qword ptr [rsp + 0x40], 0x0
+    4b: mov dword ptr [rsp + 0x48], 0x0
+    53: mov r12, qword ptr [rcx]
+    56: mov qword ptr [rsp + 0x28], r15
+    5b: mov rax, qword ptr [rsp + 0x28]
+    60: mov rdx, qword ptr [r12]
+    64: lea rcx, [rsp + 0x30]
+    69: call 0x6e ; REL32 <criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>
+    6e: cmp byte ptr [rsp + 0x60], 0x1
+    73: jne 0x102
+    79: xor ebx, ebx
+    7b: lea r14, [rsp + 0x30]
+    80: xor r13d, r13d
+    83: xor ebp, ebp
+    85: nop word ptr cs:[rax + rax]
+    90: mov byte ptr [rsp + 0x60], 0x0
+    95: add r13, qword ptr [rsp + 0x40]
+    9a: jb 0x13c
+    a0: mov rax, qword ptr [rsp + 0x58]
+    a5: add ebp, dword ptr [rsp + 0x48]
+    a9: cmp ebp, 0x3b9aca00
+    af: jb 0xc4
+    b1: cmp r13, -0x1
+    b5: je 0x13c
+    bb: inc r13
+    be: add ebp, 0xc4653600
+    c4: add rbx, rax
+    c7: xor ecx, ecx
+    c9: cmp ebp, esi
+    cb: seta cl
+    ce: xor edx, edx
+    d0: cmp r13, rdi
+    d3: seta dl
+    d6: cmove edx, ecx
+    d9: test dl, dl
+    db: jne 0x11c
+    dd: add rax, rax
+    e0: mov qword ptr [rsp + 0x58], rax
+    e5: mov qword ptr [rsp + 0x28], r15
+    ea: mov rax, qword ptr [rsp + 0x28]
+    ef: mov rdx, qword ptr [r12]
+    f3: mov rcx, r14
+    f6: call 0xfb ; REL32 <criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>
+    fb: cmp byte ptr [rsp + 0x60], 0x0
+   100: jne 0x90
+   102: lea rcx, [rip] ; REL32 <anon-data>
+   109: lea r8, [rip] ; REL32 <anon-data>
+   110: mov edx, 0x3d
+   115: call 0x11a ; REL32 std::panicking::begin_panic::<&str>
+   11a: ud2
+   11c: imul rcx, r13, 0x3b9aca00
+   123: mov eax, ebp
+   125: add rax, rcx
+   128: mov rdx, rbx
+   12b: add rsp, 0x68
+   12f: pop rbx
+   130: pop rbp
+   131: pop rdi
+   132: pop rsi
+   133: pop r12
+   135: pop r13
+   137: pop r14
+   139: pop r15
+   13b: ret
+   13c: lea rcx, [rip] ; REL32 <anon-data>
+   143: lea r8, [rip] ; REL32 <anon-data>
+   14a: mov edx, 0x1e
+   14f: call 0x154 ; REL32 core::option::expect_failed
+   154: ud2

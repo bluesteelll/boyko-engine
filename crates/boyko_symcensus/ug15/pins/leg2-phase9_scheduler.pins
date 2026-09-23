@@ -1,0 +1,2851 @@
+# ug15 leg2 pins v1
+# == leg (2) pins of phase9_scheduler under release
+# tree         D:\wt\lighttable (HEAD 6c5582bfaa15d1b83dcc0100e79b436d91e5832d, 6 uncommitted path(s))
+# target dir   D:/wt/_targets/vkval-msvc
+# host         x86_64-pc-windows-msvc (msvc)
+# rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
+# rustc -vV    binary: rustc
+# rustc -vV    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+# rustc -vV    commit-date: 2026-09-01
+# rustc -vV    host: x86_64-pc-windows-msvc
+# rustc -vV    release: 1.98.1
+# rustc -vV    LLVM version: 22.1.8
+# llvm-nm          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-nm.exe
+# llvm-objdump     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe
+# llvm-readobj     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-readobj.exe
+# llvm-size        LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-size.exe
+# llvm-ar          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-ar.exe
+# subject      phase9_scheduler (boyko-ecs --bench phase9_scheduler)
+# profile      release
+# object       D:/wt/_targets/vkval-msvc\release\deps\phase9_scheduler-9be91b8d38f7a4ef.o
+# object sha   7d7a5f2b070e38c190e2f430fd3a1b02d6fc83eb4432544cab3f4e4f58d39f55
+# image        D:/wt/_targets/vkval-msvc\release\deps\phase9_scheduler-9be91b8d38f7a4ef.exe
+# image sha    dee168fd794cf32de82840d9e0e54ceacb245310696bb31e428e996263a3d8f6
+# pdb          D:/wt/_targets/vkval-msvc\release\deps\phase9_scheduler-9be91b8d38f7a4ef.pdb
+# link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\deps\\phase9_scheduler-9be91b8d38f7a4ef.phase9_scheduler.c722b92bc2b87835-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcSIixhB\\libwindows_sys-04007b6cdfc72af3.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcSIixhB\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:D:/wt/_targets/vkval-msvc\\release\\deps\\phase9_scheduler-9be91b8d38f7a4ef.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis"
+# final rustc  Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name phase9_scheduler --edition=2024 'crates\boyko_ecs\benches\phase9_scheduler.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C opt-level=3 -C lto=fat --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --cfg test --cfg 'feature="default"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("bench-alloc", "big_query_table", "default", "profiling-analysis"))' -C metadata=ae140be5907c2b40 -C extra-filename=-9be91b8d38f7a4ef --out-dir 'D:/wt/_targets/vkval-msvc\release\deps' -C strip=debuginfo -L 'dependency=D:/wt/_targets/vkval-msvc\release\deps' --extern 'boyko_diag=D:/wt/_targets/vkval-msvc\release\deps\libboyko_diag-b560511677c8eafc.rlib' --extern 'boyko_ecs=D:/wt/_targets/vkval-msvc\release\deps\libboyko_ecs-2f70a22dd5086947.rlib' --extern 'boyko_log=D:/wt/_targets/vkval-msvc\release\deps\libboyko_log-64926abcbf6a9ab1.rlib' --extern 'boyko_macros=D:/wt/_targets/vkval-msvc\release\deps\boyko_macros-f880e435a2f5fc23.dll' --extern 'boyko_threadpool=D:/wt/_targets/vkval-msvc\release\deps\libboyko_threadpool-cb2f82ea77d07ccb.rlib' --extern 'boyko_utils=D:/wt/_targets/vkval-msvc\release\deps\libboyko_utils-51889ff239bec636.rlib' --extern 'criterion=D:/wt/_targets/vkval-msvc\release\deps\libcriterion-509d3e8aa853fb48.rlib' --extern 'crossbeam_queue=D:/wt/_targets/vkval-msvc\release\deps\libcrossbeam_queue-2ffb2c6ef794751d.rlib' --extern 'crossbeam_utils=D:/wt/_targets/vkval-msvc\release\deps\libcrossbeam_utils-b5ab10e0cdae4b40.rlib' --extern 'fixedbitset=D:/wt/_targets/vkval-msvc\release\deps\libfixedbitset-6438f21b34608389.rlib' --extern 'proptest=D:/wt/_targets/vkval-msvc\release\deps\libproptest-7bc9698dcdcc7a5a.rlib' --extern 'rand=D:/wt/_targets/vkval-msvc\release\deps\librand-987591a5f3bbc988.rlib' --extern 'static_assertions=D:/wt/_targets/vkval-msvc\release\deps\libstatic_assertions-8e4736a6d0969db2.rlib' --extern 'trybuild=D:/wt/_targets/vkval-msvc\release\deps\libtrybuild-231a8c13d3577aab.rlib' --emit=obj --print link-args -C target-cpu=x86-64-v3`
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::schedule::schedule::Schedule>::run | size=11626 (section RawDataSize) | copies=1 | sha256=d26fc7683a37e10c3020e3f01cfc634eaf404330fc49548ca6e2ab1963b6a240
+<<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run> @+0x0:
+     0: push rbp
+     1: push r15
+     3: push r14
+     5: push r13
+     7: push r12
+     9: push rsi
+     a: push rdi
+     b: push rbx
+     c: sub rsp, 0x5b8
+    13: lea rbp, [rsp + 0x80]
+    1b: vmovdqa xmmword ptr [rbp + 0x520], xmm11
+    23: vmovdqa xmmword ptr [rbp + 0x510], xmm10
+    2b: vmovdqa xmmword ptr [rbp + 0x500], xmm9
+    33: vmovdqa xmmword ptr [rbp + 0x4f0], xmm8
+    3b: vmovdqa xmmword ptr [rbp + 0x4e0], xmm7
+    43: vmovdqa xmmword ptr [rbp + 0x4d0], xmm6
+    4b: and rsp, -0x80
+    4f: mov rbx, rsp
+    52: mov qword ptr [rbx + 0x540], rbp
+    59: mov qword ptr [rbp + 0x4c8], -0x2
+    64: mov rax, rdx
+    67: mov rsi, rcx
+    6a: mov rdx, qword ptr [rdx + 0x170]
+    71: mov rcx, qword ptr [rcx + 0x1c0]
+    78: cmp rdx, rcx
+    7b: jne 0x3e0
+    81: mov qword ptr [rbx + 0x38], rax
+    85: mov rax, qword ptr [rsi + 0x58]
+    89: mov r14, qword ptr [rsi + 0x160]
+    90: mov r15, qword ptr [rsi + 0x168]
+    97: xor r8d, r8d
+    9a: test al, al
+    9c: setne r8b
+    a0: shr rax, 0x3
+    a4: and rax, -0x20
+    a8: shl r8d, 0x5
+    ac: add r8, rax
+    af: je 0xbc
+    b1: mov rcx, qword ptr [rsi + 0x48]
+    b5: xor edx, edx
+    b7: call 0xbc ; REL32 memset
+    bc: mov rax, qword ptr [rsi + 0x70]
+    c0: xor r8d, r8d
+    c3: test al, al
+    c5: setne r8b
+    c9: shr rax, 0x3
+    cd: and rax, -0x20
+    d1: shl r8d, 0x5
+    d5: add r8, rax
+    d8: je 0xe5
+    da: mov rcx, qword ptr [rsi + 0x60]
+    de: xor edx, edx
+    e0: call 0xe5 ; REL32 memset
+    e5: mov rax, qword ptr [rsi + 0x88]
+    ec: xor r8d, r8d
+    ef: test al, al
+    f1: setne r8b
+    f5: shr rax, 0x3
+    f9: and rax, -0x20
+    fd: shl r8d, 0x5
+   101: add r8, rax
+   104: je 0x111
+   106: mov rcx, qword ptr [rsi + 0x78]
+   10a: xor edx, edx
+   10c: call 0x111 ; REL32 memset
+   111: mov rax, qword ptr [rsi + 0xb8]
+   118: xor r8d, r8d
+   11b: test al, al
+   11d: setne r8b
+   121: shr rax, 0x3
+   125: and rax, -0x20
+   129: shl r8d, 0x5
+   12d: add r8, rax
+   130: je 0x140
+   132: mov rcx, qword ptr [rsi + 0xa8]
+   139: xor edx, edx
+   13b: call 0x140 ; REL32 memset
+   140: mov rax, qword ptr [rsi + 0xd0]
+   147: xor r8d, r8d
+   14a: test al, al
+   14c: setne r8b
+   150: shr rax, 0x3
+   154: and rax, -0x20
+   158: shl r8d, 0x5
+   15c: add r8, rax
+   15f: je 0x16f
+   161: mov rcx, qword ptr [rsi + 0xc0]
+   168: xor edx, edx
+   16a: call 0x16f ; REL32 memset
+   16f: mov rax, qword ptr [rsi + 0xe8]
+   176: xor r8d, r8d
+   179: test al, al
+   17b: setne r8b
+   17f: shr rax, 0x3
+   183: and rax, -0x20
+   187: shl r8d, 0x5
+   18b: add r8, rax
+   18e: je 0x19e
+   190: mov rcx, qword ptr [rsi + 0xd8]
+   197: xor edx, edx
+   199: call 0x19e ; REL32 memset
+   19e: mov rax, qword ptr [rsi + 0x98]
+   1a5: cmp r15, rax
+   1a8: cmovb rax, r15
+   1ac: test rax, rax
+   1af: je 0x317
+   1b5: mov rcx, qword ptr [rsi + 0x90]
+   1bc: cmp rax, 0x8
+   1c0: setb dl
+   1c3: mov r8, rcx
+   1c6: sub r8, r14
+   1c9: cmp r8, 0x80
+   1d0: setb r8b
+   1d4: or r8b, dl
+   1d7: je 0x1e0
+   1d9: xor edx, edx
+   1db: jmp 0x27e
+   1e0: cmp rax, 0x40
+   1e4: jae 0x1ea
+   1e6: xor edx, edx
+   1e8: jmp 0x24c
+   1ea: mov rdx, rax
+   1ed: and rdx, -0x40
+   1f1: xor r8d, r8d
+   1f4: nop word ptr cs:[rax + rax]
+   200: vmovdqu ymm0, ymmword ptr [r14 + 2*r8]
+   206: vmovdqu ymm1, ymmword ptr [r14 + 2*r8 + 0x20]
+   20d: vmovdqu ymm2, ymmword ptr [r14 + 2*r8 + 0x40]
+   214: vmovdqu ymm3, ymmword ptr [r14 + 2*r8 + 0x60]
+   21b: vmovdqu ymmword ptr [rcx + 2*r8], ymm0
+   221: vmovdqu ymmword ptr [rcx + 2*r8 + 0x20], ymm1
+   228: vmovdqu ymmword ptr [rcx + 2*r8 + 0x40], ymm2
+   22f: vmovdqu ymmword ptr [rcx + 2*r8 + 0x60], ymm3
+   236: add r8, 0x40
+   23a: cmp rdx, r8
+   23d: jne 0x200
+   23f: cmp rax, rdx
+   242: je 0x317
+   248: test al, 0x38
+   24a: je 0x27e
+   24c: mov r8, rdx
+   24f: mov rdx, rax
+   252: and rdx, -0x8
+   256: nop word ptr cs:[rax + rax]
+   260: vmovdqu xmm0, xmmword ptr [r14 + 2*r8]
+   266: vmovdqu xmmword ptr [rcx + 2*r8], xmm0
+   26c: add r8, 0x8
+   270: cmp rdx, r8
+   273: jne 0x260
+   275: cmp rax, rdx
+   278: je 0x317
+   27e: mov r9, rax
+   281: mov r8, rdx
+   284: and r9, 0x7
+   288: je 0x2a2
+   28a: mov r8, rdx
+   28d: nop dword ptr [rax]
+   290: movzx r10d, word ptr [r14 + 2*r8]
+   295: mov word ptr [rcx + 2*r8], r10w
+   29a: inc r8
+   29d: dec r9
+   2a0: jne 0x290
+   2a2: sub rdx, rax
+   2a5: cmp rdx, -0x8
+   2a9: ja 0x317
+   2ab: nop dword ptr [rax + rax]
+   2b0: movzx edx, word ptr [r14 + 2*r8]
+   2b5: mov word ptr [rcx + 2*r8], dx
+   2ba: movzx edx, word ptr [r14 + 2*r8 + 0x2]
+   2c0: mov word ptr [rcx + 2*r8 + 0x2], dx
+   2c6: movzx edx, word ptr [r14 + 2*r8 + 0x4]
+   2cc: mov word ptr [rcx + 2*r8 + 0x4], dx
+   2d2: movzx edx, word ptr [r14 + 2*r8 + 0x6]
+   2d8: mov word ptr [rcx + 2*r8 + 0x6], dx
+   2de: movzx edx, word ptr [r14 + 2*r8 + 0x8]
+   2e4: mov word ptr [rcx + 2*r8 + 0x8], dx
+   2ea: movzx edx, word ptr [r14 + 2*r8 + 0xa]
+   2f0: mov word ptr [rcx + 2*r8 + 0xa], dx
+   2f6: movzx edx, word ptr [r14 + 2*r8 + 0xc]
+   2fc: mov word ptr [rcx + 2*r8 + 0xc], dx
+   302: movzx edx, word ptr [r14 + 2*r8 + 0xe]
+   308: mov word ptr [rcx + 2*r8 + 0xe], dx
+   30e: add r8, 0x8
+   312: cmp rax, r8
+   315: jne 0x2b0
+   317: mov rax, qword ptr [rsi + 0xa0]
+   31e: mov dword ptr [rax + 0x8], 0xffffffff
+   325: mov edi, 0x1
+   32a: mov rcx, qword ptr [rbx + 0x38]
+   32e: lock
+   32f: xadd dword ptr [rcx + 0x13b8], edi
+   336: inc edi
+   338: mov dword ptr [rsi + 0x1c8], edi
+   33e: mov eax, dword ptr [rcx + 0x13b8]
+   344: sub eax, dword ptr [rcx + 0x13bc]
+   34a: cmp eax, 0x1ee627ff
+   34f: mov dword ptr [rbx + 0x30], edi
+   352: ja 0x3e7
+   358: mov rcx, qword ptr [rsi + 0x10]
+   35c: mov qword ptr [rbx + 0x48], rcx
+   360: test rcx, rcx
+   363: je 0x41e
+   369: mov r12, qword ptr [rsi + 0x8]
+   36d: mov rax, qword ptr [rbx + 0x48]
+   371: lea rax, [8*rax]
+   379: lea rax, [rax + 4*rax]
+   37d: mov qword ptr [rbx + 0x50], rax
+   381: mov r15, qword ptr [rsi + 0x1a0]
+   388: xor r14d, r14d
+   38b: xor r13d, r13d
+   38e: jmp 0x3c1
+   390: mov rcx, qword ptr [r12 + r13]
+   394: mov rax, qword ptr [r12 + r13 + 0x8]
+   399: vzeroupper
+   39c: call qword ptr [rax + 0x58]
+   39f: mov edx, dword ptr [rax + 0xe4]
+   3a5: mov rcx, qword ptr [r12 + r13]
+   3a9: mov rax, qword ptr [r12 + r13 + 0x8]
+   3ae: mov r8d, edi
+   3b1: call qword ptr [rax + 0x68]
+   3b4: add r13, 0x28
+   3b8: inc r14
+   3bb: cmp qword ptr [rbx + 0x50], r13
+   3bf: je 0x41e
+   3c1: cmp r14, r15
+   3c4: jae 0x390
+   3c6: mov rax, qword ptr [rsi + 0x190]
+   3cd: mov rcx, r14
+   3d0: shr rcx, 0x6
+   3d4: mov rax, qword ptr [rax + 8*rcx]
+   3d8: bt rax, r14
+   3dc: jb 0x3b4
+   3de: jmp 0x390
+   3e0: call 0x3e5 ; REL32 boyko_ecs::ecs::core::schedule::schedule::schedule_world_mismatch_panic
+   3e5: ud2
+   3e7: mov rdi, qword ptr [rbx + 0x38]
+   3eb: mov rcx, rdi
+   3ee: vzeroupper
+   3f1: call 0x3f6 ; REL32 boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+   3f6: mov rcx, rsi
+   3f9: mov edx, dword ptr [rbx + 0x30]
+   3fc: call 0x401 ; REL32 <boyko_ecs::ecs::core::schedule::schedule::Schedule>::check_change_ticks
+   401: mov eax, dword ptr [rbx + 0x30]
+   404: mov dword ptr [rdi + 0x13bc], eax
+   40a: mov edi, dword ptr [rbx + 0x30]
+   40d: mov rcx, qword ptr [rsi + 0x10]
+   411: mov qword ptr [rbx + 0x48], rcx
+   415: test rcx, rcx
+   418: jne 0x369
+   41e: mov rdi, qword ptr [rsi + 0x150]
+   425: test rdi, rdi
+   428: jne 0x55d
+   42e: mov rax, qword ptr [rbx + 0x38]
+   432: lock
+   433: inc dword ptr [rax + 0x13b8]
+   439: cmp qword ptr [rbx + 0x48], 0x0
+   43e: je 0x1fe3
+   444: mov rax, qword ptr [rsi + 0x158]
+   44b: lock
+   44c: inc qword ptr [rax]
+   44f: jle 0x23a0
+   455: mov qword ptr [rbx + 0xf0], rax
+   45c: mov r8, qword ptr [rax + 0x10]
+   460: lock
+   461: inc qword ptr [r8 + 0x300]
+   468: lea r14, [r8 + 0x80]
+   46f: mov eax, dword ptr [rip] ; REL32 _tls_index
+   475: mov rcx, qword ptr gs:[0x58]
+   47e: mov rax, qword ptr [rcx + 8*rax]
+   482: lea rcx, [rax] ; SECREL boyko_threadpool::tls::ACTIVE_POOL::{K#0}::{closure#1}::__RUST_STD_INTERNAL_VAL
+   489: mov qword ptr [rbx + 0x148], rcx
+   490: mov rcx, qword ptr [rax] ; SECREL boyko_threadpool::tls::ACTIVE_POOL::{K#0}::{closure#1}::__RUST_STD_INTERNAL_VAL
+   497: mov qword ptr [rbx + 0x140], rcx
+   49e: mov qword ptr [rax], r14 ; SECREL boyko_threadpool::tls::ACTIVE_POOL::{K#0}::{closure#1}::__RUST_STD_INTERNAL_VAL
+   4a5: lea r9, [rax] ; SECREL boyko_threadpool::tls::LANE_DEPOSIT::{K#0}::{closure#1}::__RUST_STD_INTERNAL_VAL
+   4ac: mov ecx, dword ptr [rax + 0x10] ; SECREL boyko_threadpool::tls::LANE_DEPOSIT::{K#0}::{closure#1}::__RUST_STD_INTERNAL_VAL
+   4b2: mov dword ptr [rbx + 0x8c], ecx
+   4b8: lea rcx, [rax] ; SECREL boyko_diag::lane::LANE::{K#0}::{closure#1}::__RUST_STD_INTERNAL_VAL
+   4bf: mov qword ptr [rbx + 0x138], rcx
+   4c6: movzx ecx, word ptr [rax] ; SECREL boyko_diag::lane::LANE::{K#0}::{closure#1}::__RUST_STD_INTERNAL_VAL
+   4cd: mov word ptr [rbx + 0x5e], cx
+   4d1: mov dword ptr [rax + 0x10], 0xfffffffe ; SECREL boyko_threadpool::tls::LANE_DEPOSIT::{K#0}::{closure#1}::__RUST_STD_INTERNAL_VAL
+   4db: mov word ptr [rax], 0x40 ; SECREL boyko_diag::lane::LANE::{K#0}::{closure#1}::__RUST_STD_INTERNAL_VAL
+   4e4: mov rax, qword ptr [rax] ; SECREL std::thread::current::CURRENT
+   4eb: cmp rax, 0x2
+   4ef: mov qword ptr [rbx + 0xe8], r8
+   4f6: mov qword ptr [rbx + 0xe0], r9
+   4fd: jbe 0x593
+   503: lock
+   504: inc qword ptr [rax - 0x10]
+   508: jle 0x23a0
+   50e: add rax, -0x10
+   512: mov ecx, 0xfffffffe
+   517: mov qword ptr [rbx + 0x3c0], rax
+   51e: cmp qword ptr [r9], r14
+   521: jne 0x5c1
+   527: cmp ecx, dword ptr [r8 + 0x400]
+   52e: jae 0x5c1
+   534: mov ecx, ecx
+   536: mov rdx, qword ptr [r8 + 0x1a8]
+   53d: cmp rdx, rcx
+   540: jbe 0x238c
+   546: mov rdx, qword ptr [r8 + 0x1a0]
+   54d: shl rcx, 0x7
+   551: add rcx, rdx
+   554: add rcx, 0x80
+   55b: jmp 0x5c3
+   55d: mov r14, qword ptr [rsi + 0x148]
+   564: shl rdi, 0x5
+   568: xor r15d, r15d
+   56b: movzx r8d, byte ptr [r14 + r15 + 0x18]
+   571: mov byte ptr [r14 + r15 + 0x18], 0x0
+   577: mov rcx, qword ptr [rbx + 0x38]
+   57b: mov edx, dword ptr [rbx + 0x30]
+   57e: vzeroupper
+   581: call qword ptr [r14 + r15]
+   585: add r15, 0x20
+   589: cmp rdi, r15
+   58c: jne 0x56b
+   58e: jmp 0x42e
+   593: mov rcx, rax
+   596: vzeroupper
+   599: call 0x59e ; REL32 std::thread::current::init_current
+   59e: nop
+   59f: mov r9, qword ptr [rbx + 0xe0]
+   5a6: mov ecx, dword ptr [r9 + 0x10]
+   5aa: mov r8, qword ptr [rbx + 0xe8]
+   5b1: mov qword ptr [rbx + 0x3c0], rax
+   5b8: cmp qword ptr [r9], r14
+   5bb: je 0x527
+   5c1: xor ecx, ecx
+   5c3: mov qword ptr [rbx + 0x200], 0x0
+   5ce: mov qword ptr [rbx + 0x280], 0x0
+   5d9: mov qword ptr [rbx + 0x288], rax
+   5e0: mov qword ptr [rbx + 0x290], rcx
+   5e7: mov edx, 0x180
+   5ec: xor ecx, ecx
+   5ee: vzeroupper
+   5f1: call 0x5f6 ; REL32 std::sys::alloc::windows::process_heap_alloc
+   5f6: test rax, rax
+   5f9: je 0x231a
+   5ff: lea rcx, [rsi + 0x58]
+   603: mov qword ptr [rbx + 0xb0], rcx
+   60a: mov rcx, rax
+   60d: and rcx, -0x80
+   611: mov qword ptr [rcx + 0x78], rax
+   615: vmovaps ymm0, ymmword ptr [rbx + 0x200]
+   61d: vmovdqa ymm1, ymmword ptr [rbx + 0x220]
+   625: vmovdqa ymm2, ymmword ptr [rbx + 0x240]
+   62d: vmovdqa ymm3, ymmword ptr [rbx + 0x260]
+   635: vmovaps ymmword ptr [rcx + 0x80], ymm0
+   63d: vmovdqa ymmword ptr [rcx + 0xa0], ymm1
+   645: vmovdqa ymmword ptr [rcx + 0xc0], ymm2
+   64d: vmovdqa ymmword ptr [rcx + 0xe0], ymm3
+   655: lea rax, [rsi + 0x70]
+   659: mov qword ptr [rbx + 0xd8], rax
+   660: vmovaps ymm0, ymmword ptr [rbx + 0x280]
+   668: vmovaps ymmword ptr [rcx + 0x100], ymm0
+   670: lea rax, [rsi + 0xb8]
+   677: mov qword ptr [rbx + 0x188], rax
+   67e: vmovaps ymm0, ymmword ptr [rbx + 0x2a0]
+   686: vmovaps ymmword ptr [rcx + 0x120], ymm0
+   68e: lea rax, [rsi + 0xd0]
+   695: mov qword ptr [rbx + 0x198], rax
+   69c: vmovaps ymm0, ymmword ptr [rbx + 0x2c0]
+   6a4: vmovaps ymmword ptr [rcx + 0x140], ymm0
+   6ac: lea rax, [rsi + 0xe8]
+   6b3: mov qword ptr [rbx + 0x190], rax
+   6ba: vmovdqa ymm0, ymmword ptr [rbx + 0x2e0]
+   6c2: vmovdqa ymmword ptr [rcx + 0x160], ymm0
+   6ca: lea rax, [rcx + 0x80]
+   6d1: vpxor xmm0, xmm0, xmm0
+   6d5: vmovdqu ymmword ptr [rbx + 0x4e8], ymm0
+   6dd: vmovdqu ymmword ptr [rbx + 0x4c8], ymm0
+   6e5: vmovdqu ymmword ptr [rbx + 0x4a8], ymm0
+   6ed: vmovdqu ymmword ptr [rbx + 0x488], ymm0
+   6f5: vmovdqu ymmword ptr [rbx + 0x468], ymm0
+   6fd: vmovdqu ymmword ptr [rbx + 0x448], ymm0
+   705: vmovdqu ymmword ptr [rbx + 0x428], ymm0
+   70d: vmovdqu ymmword ptr [rbx + 0x408], ymm0
+   715: vmovdqu ymmword ptr [rbx + 0x3e8], ymm0
+   71d: mov qword ptr [rbx + 0x3c0], r14
+   724: mov qword ptr [rbx + 0x3c8], rax
+   72b: vpxor xmm0, xmm0, xmm0
+   72f: vmovdqa xmmword ptr [rbx + 0x3d0], xmm0
+   737: mov qword ptr [rbx + 0x3e0], 0x0
+   742: mov byte ptr [rbx + 0x508], 0x0
+   749: mov rax, qword ptr [rsi + 0x10]
+   74d: mov qword ptr [rbx + 0x1e0], rax
+   754: mov rax, qword ptr [rsi + 0xa0]
+   75b: mov qword ptr [rbx + 0xc8], rax
+   762: mov eax, dword ptr [rip] ; REL32 _tls_index
+   768: mov rcx, qword ptr gs:[0x58]
+   771: mov rax, qword ptr [rcx + 8*rax]
+   775: lea rax, [rax] ; SECREL boyko_ecs::ecs::core::component::hooks::scope::HOOK_DRAIN_DEPTH::{K#0}::{closure#1}::__RUST_STD_INTERNAL_VAL
+   77c: mov qword ptr [rbx + 0x50], rax
+   780: mov r15, qword ptr [rbx + 0xc8]
+   787: mov rax, qword ptr [r15]
+   78a: mov ecx, dword ptr [r15 + 0x8]
+   78e: cmp ecx, -0x1
+   791: jne 0x1f1e
+   797: mov rcx, qword ptr [rsi + 0x48]
+   79b: mov rdx, qword ptr [rsi + 0x58]
+   79f: mov r8, rdx
+   7a2: shr r8, 0x6
+   7a6: and edx, 0x3f
+   7a9: mov r9d, edx
+   7ac: not r9b
+   7af: movabs r10, 0x7fffffffffffffff
+   7b9: shrx r10, r10, r9
+   7be: xor r11d, r11d
+   7c1: xor r9d, r9d
+   7c4: mov r12, qword ptr [rip] ; REL32 __imp_SwitchToThread
+   7cb: jmp 0x7e7
+   7cd: nop dword ptr [rax]
+   7d0: mov rdi, r10
+   7d3: test rdx, rdx
+   7d6: je 0x808
+   7d8: and rdi, qword ptr [rcx + 8*r11]
+   7dc: inc r11
+   7df: popcnt rdi, rdi
+   7e4: add r9, rdi
+   7e7: cmp r11, r8
+   7ea: seta dil
+   7ee: sbb dil, 0x0
+   7f2: je 0x7d0
+   7f4: movzx r14d, dil
+   7f8: mov rdi, -0x1
+   7ff: cmp r14d, 0xff
+   806: je 0x7d8
+   808: test rax, rax
+   80b: je 0xaf4
+   811: cmp rax, r9
+   814: je 0x81f
+   816: test r9, r9
+   819: jne 0xaf4
+   81f: mov rdi, qword ptr [r15]
+   822: xor r13d, r13d
+   825: mov qword ptr [rbx + 0x30], rdi
+   829: nop dword ptr [rax]
+   830: cmp r13, rdi
+   833: jae 0xaf0
+   839: mov rcx, qword ptr [r15 + 0x80]
+   840: xor r14d, r14d
+   843: jmp 0x84f
+   845: inc r14d
+   848: mov rcx, qword ptr [r15 + 0x80]
+   84f: mov rax, qword ptr [r15 + 0x188]
+   856: mov rdx, qword ptr [r15 + 0x190]
+   85d: lea r10, [rax - 0x1]
+   861: and r10, rcx
+   864: mov r8, r10
+   867: shl r8, 0x4
+   86b: mov r9, qword ptr [rdx + r8]
+   86f: lea r11, [rcx + 0x1]
+   873: cmp r11, r9
+   876: jne 0x8e0
+   878: inc r10
+   87b: cmp r10, qword ptr [r15 + 0x180]
+   882: jb 0x894
+   884: neg rax
+   887: and rax, rcx
+   88a: add rax, qword ptr [r15 + 0x188]
+   891: mov r9, rax
+   894: mov rax, rcx
+   897: lock
+   898: cmpxchg qword ptr [r15 + 0x80], r9
+   8a0: je 0x980
+   8a6: cmp r14d, 0x6
+   8aa: mov ecx, 0x6
+   8af: cmovb ecx, r14d
+   8b3: mov edx, 0x1
+   8b8: nop dword ptr [rax + rax]
+   8c0: pause
+   8c2: shrx r8d, edx, ecx
+   8c7: inc edx
+   8c9: test r8d, r8d
+   8cc: je 0x8c0
+   8ce: cmp r14d, 0x7
+   8d2: adc r14d, 0x0
+   8d6: mov rcx, rax
+   8d9: jmp 0x84f
+   8de: nop
+   8e0: cmp r9, rcx
+   8e3: jne 0x940
+   8e5: lock
+   8e6: or dword ptr [rsp], 0x0
+   8ea: mov rax, qword ptr [r15 + 0x100]
+   8f1: cmp rax, rcx
+   8f4: je 0x830
+   8fa: cmp r14d, 0x6
+   8fe: mov eax, 0x6
+   903: cmovb eax, r14d
+   907: mov ecx, 0x1
+   90c: nop dword ptr [rax]
+   910: pause
+   912: shrx edx, ecx, eax
+   917: inc ecx
+   919: test edx, edx
+   91b: je 0x910
+   91d: cmp r14d, 0x7
+   921: adc r14d, 0x0
+   925: mov rcx, qword ptr [r15 + 0x80]
+   92c: jmp 0x84f
+   931: nop word ptr cs:[rax + rax]
+   940: cmp r14d, 0x6
+   944: ja 0x962
+   946: mov eax, 0x1
+   94b: nop dword ptr [rax + rax]
+   950: pause
+   952: shrx ecx, eax, r14d
+   957: inc eax
+   959: test ecx, ecx
+   95b: je 0x950
+   95d: jmp 0x845
+   962: vzeroupper
+   965: call r12
+   968: cmp r14d, 0xb
+   96c: jae 0x848
+   972: jmp 0x845
+   977: nop word ptr [rax + rax]
+   980: add rdx, r8
+   983: movzx r14d, word ptr [rdx + 0x8]
+   988: add rcx, qword ptr [r15 + 0x188]
+   98f: mov qword ptr [rdx], rcx
+   992: inc r13
+   995: mov qword ptr [rbx + 0x60], r14
+   999: lea rax, [rsi + 0x58]
+   99d: cmp qword ptr [rax], r14
+   9a0: mov qword ptr [rbx + 0x48], r13
+   9a4: jbe 0x1ddb
+   9aa: mov r15d, r14d
+   9ad: shr r15d, 0x6
+   9b1: mov rax, -0x2
+   9b8: mov ecx, r14d
+   9bb: rol rax, cl
+   9be: mov rcx, qword ptr [rsi + 0x48]
+   9c2: and qword ptr [rcx + 8*r15], rax
+   9c6: mov rax, qword ptr [rbx + 0x50]
+   9ca: inc dword ptr [rax]
+   9cc: mov rdx, qword ptr [rsi + 0x10]
+   9d0: cmp rdx, r14
+   9d3: jbe 0x21ac
+   9d9: mov rax, qword ptr [rsi + 0x8]
+   9dd: lea rdx, [r14 + 4*r14]
+   9e1: mov rcx, qword ptr [rax + 8*rdx]
+   9e5: mov rax, qword ptr [rax + 8*rdx + 0x8]
+   9ea: mov rdx, qword ptr [rbx + 0x38]
+   9ee: vzeroupper
+   9f1: call qword ptr [rax + 0x48]
+   9f4: nop
+   9f5: mov rdx, qword ptr [rbx + 0x50]
+   9f9: mov eax, dword ptr [rdx]
+   9fb: mov ecx, eax
+   9fd: dec ecx
+   9ff: mov dword ptr [rdx], ecx
+   a01: jne 0xa46
+   a03: mov rcx, qword ptr [rbx + 0x50]
+   a07: mov dword ptr [rcx], eax
+   a09: xor edi, edi
+   a0b: mov r12, qword ptr [rbx + 0x38]
+   a0f: nop
+   a10: cmp qword ptr [r12 + 0x1368], 0x0
+   a19: je 0xa40
+   a1b: inc rdi
+   a1e: cmp rdi, 0x1000000
+   a25: ja 0x1cd7
+   a2b: mov rcx, r12
+   a2e: call 0xa33 ; REL32 <boyko_ecs::ecs::core::commands::command_queue::CommandQueue>::apply_via_raw_twin
+   a33: nop
+   a34: jmp 0xa10
+   a36: nop word ptr cs:[rax + rax]
+   a40: mov rax, qword ptr [rbx + 0x50]
+   a44: dec dword ptr [rax]
+   a46: mov qword ptr [rbx + 0x60], r14
+   a4a: lea rax, [rsi + 0x70]
+   a4e: cmp qword ptr [rax], r14
+   a51: jbe 0x1e2c
+   a57: mov eax, 0x1
+   a5c: shlx rax, rax, r14
+   a61: mov rcx, qword ptr [rsi + 0x60]
+   a65: or qword ptr [rcx + 8*r15], rax
+   a69: mov rdx, qword ptr [rsi + 0x178]
+   a70: cmp rdx, r14
+   a73: jbe 0x21c4
+   a79: mov rcx, qword ptr [rsi + 0x170]
+   a80: shl r14d, 0x4
+   a84: mov rax, qword ptr [rcx + r14 + 0x8]
+   a89: test rax, rax
+   a8c: mov r15, qword ptr [rbx + 0xc8]
+   a93: mov r12, qword ptr [rip] ; REL32 __imp_SwitchToThread
+   a9a: mov rdi, qword ptr [rbx + 0x30]
+   a9e: mov r13, qword ptr [rbx + 0x48]
+   aa2: je 0x830
+   aa8: mov r8, qword ptr [rcx + r14]
+   aac: add rax, rax
+   aaf: mov r9, qword ptr [rsi + 0x90]
+   ab6: mov rdx, qword ptr [rsi + 0x98]
+   abd: xor r10d, r10d
+   ac0: movzx ecx, word ptr [r8 + r10]
+   ac5: cmp rdx, rcx
+   ac8: jbe 0x2095
+   ace: dec word ptr [r9 + 2*rcx]
+   ad3: add r10, 0x2
+   ad7: cmp rax, r10
+   ada: jne 0xac0
+   adc: jmp 0x830
+   ae1: nop word ptr cs:[rax + rax]
+   af0: lock
+   af1: sub qword ptr [r15], rdi
+   af4: mov rdi, qword ptr [rsi + 0x190]
+   afb: mov r15, qword ptr [rsi + 0x1a0]
+   b02: xor eax, eax
+   b04: test r15b, r15b
+   b07: setne al
+   b0a: mov rcx, r15
+   b0d: shr rcx, 0x3
+   b11: and rcx, -0x20
+   b15: shl eax, 0x5
+   b18: add rax, rcx
+   b1b: xor ecx, ecx
+   b1d: nop dword ptr [rax]
+   b20: cmp rax, rcx
+   b23: je 0xbb1
+   b29: vmovdqa ymm0, ymmword ptr [rdi + rcx]
+   b2e: add rcx, 0x20
+   b32: vptest ymm0, ymm0
+   b37: je 0xb20
+   b39: mov r12, qword ptr [rsi + 0x48]
+   b3d: mov r13, qword ptr [rsi + 0x58]
+   b41: mov rax, r13
+   b44: shr rax, 0x6
+   b48: mov ecx, r13d
+   b4b: and ecx, 0x3f
+   b4e: mov edx, ecx
+   b50: not dl
+   b52: movabs r8, 0x7fffffffffffffff
+   b5c: shrx rdx, r8, rdx
+   b61: xor r9d, r9d
+   b64: xor r8d, r8d
+   b67: jmp 0xb87
+   b69: nop dword ptr [rax]
+   b70: mov r10, rdx
+   b73: test rcx, rcx
+   b76: je 0xba8
+   b78: and r10, qword ptr [r12 + 8*r9]
+   b7c: inc r9
+   b7f: popcnt r10, r10
+   b84: add r8, r10
+   b87: cmp r9, rax
+   b8a: seta r10b
+   b8e: sbb r10b, 0x0
+   b92: je 0xb70
+   b94: movzx r11d, r10b
+   b98: mov r10, -0x1
+   b9f: cmp r11d, 0xff
+   ba6: je 0xb78
+   ba8: test r8, r8
+   bab: je 0x1700
+   bb1: mov rax, qword ptr [rsi + 0x60]
+   bb5: mov rcx, qword ptr [rsi + 0x70]
+   bb9: mov rdx, rcx
+   bbc: shr rdx, 0x6
+   bc0: and ecx, 0x3f
+   bc3: mov r8d, ecx
+   bc6: not r8b
+   bc9: movabs r9, 0x7fffffffffffffff
+   bd3: shrx r8, r9, r8
+   bd8: xor r10d, r10d
+   bdb: xor r9d, r9d
+   bde: jmp 0xbf7
+   be0: mov r11, r8
+   be3: test rcx, rcx
+   be6: je 0xc17
+   be8: and r11, qword ptr [rax + 8*r10]
+   bec: inc r10
+   bef: popcnt r11, r11
+   bf4: add r9, r11
+   bf7: cmp r10, rdx
+   bfa: seta r11b
+   bfe: sbb r11b, 0x0
+   c02: je 0xbe0
+   c04: movzx edi, r11b
+   c08: mov r11, -0x1
+   c0f: cmp edi, 0xff
+   c15: je 0xbe8
+   c17: cmp r9, qword ptr [rbx + 0x1e0]
+   c1e: je 0x1f31
+   c24: mov r15, qword ptr [rsi + 0x10]
+   c28: lea rcx, [rsi + 0x18]
+   c2c: mov rax, qword ptr [rcx + 0x10]
+   c30: mov qword ptr [rbx + 0xa0], rax
+   c37: vmovups xmm0, xmmword ptr [rcx]
+   c3b: vmovaps xmmword ptr [rbx + 0x90], xmm0
+   c43: mov qword ptr [rsi + 0x18], 0x0
+   c4b: mov qword ptr [rsi + 0x20], 0x2
+   c53: mov qword ptr [rsi + 0x28], 0x0
+   c5b: lea rcx, [rsi + 0x30]
+   c5f: mov rax, qword ptr [rcx + 0x10]
+   c63: mov qword ptr [rbx + 0x70], rax
+   c67: vmovdqu xmm0, xmmword ptr [rcx]
+   c6b: vmovdqa xmmword ptr [rbx + 0x60], xmm0
+   c70: mov qword ptr [rsi + 0x30], 0x0
+   c78: mov qword ptr [rsi + 0x38], 0x2
+   c80: mov qword ptr [rsi + 0x40], 0x0
+   c88: xor r12d, r12d
+   c8b: jmp 0xca5
+   c8d: nop dword ptr [rax]
+   c90: mov rax, qword ptr [rsi + 0x60]
+   c94: mov rcx, r14
+   c97: shr rcx, 0x6
+   c9b: mov rax, qword ptr [rax + 8*rcx]
+   c9f: bt rax, r14
+   ca3: jae 0xcbd
+   ca5: cmp r12, r15
+   ca8: jae 0x10c0
+   cae: mov r14, r12
+   cb1: inc r12
+   cb4: lea rax, [rsi + 0x70]
+   cb8: cmp r14, qword ptr [rax]
+   cbb: jb 0xc90
+   cbd: lea rax, [rsi + 0x58]
+   cc1: mov r8, qword ptr [rax]
+   cc4: cmp r14, r8
+   cc7: jae 0xcde
+   cc9: mov rax, qword ptr [rsi + 0x48]
+   ccd: mov rcx, r14
+   cd0: shr rcx, 0x6
+   cd4: mov rax, qword ptr [rax + 8*rcx]
+   cd8: bt rax, r14
+   cdc: jb 0xca5
+   cde: mov rdx, qword ptr [rsi + 0x98]
+   ce5: cmp r14, rdx
+   ce8: jae 0x215b
+   cee: mov rax, qword ptr [rsi + 0x90]
+   cf5: cmp word ptr [rax + 2*r14], 0x0
+   cfb: jne 0xca5
+   cfd: mov rdx, qword ptr [rsi + 0x188]
+   d04: cmp r14, rdx
+   d07: jae 0x21d9
+   d0d: mov r9, r12
+   d10: mov r12, r15
+   d13: mov rax, qword ptr [rsi + 0x48]
+   d17: mov r10, qword ptr [rsi + 0x180]
+   d1e: lea r11, [r14 + 2*r14]
+   d22: mov rcx, qword ptr [r10 + 8*r11 + 0x10]
+   d27: mov rdi, rcx
+   d2a: shr rdi, 0x6
+   d2e: and ecx, 0x3f
+   d31: cmp rcx, 0x1
+   d35: sbb rdi, -0x1
+   d39: mov rcx, r8
+   d3c: shr rcx, 0x6
+   d40: xor edx, edx
+   d42: mov r15, r8
+   d45: and r15, 0x3f
+   d49: mov qword ptr [rbx + 0x48], r15
+   d4d: setne dl
+   d50: add rdx, rcx
+   d53: cmp rdx, rdi
+   d56: cmovae rdx, rdi
+   d5a: mov r10, qword ptr [r10 + 8*r11]
+   d5e: mov r11, rdx
+   d61: movabs rdi, 0x7fffffffffffffc
+   d6b: and r11, rdi
+   d6e: lea rdi, [8*r11 + 0x20]
+   d76: xor r13d, r13d
+   d79: nop dword ptr [rax]
+   d80: lea r15, [r13 + 0x20]
+   d84: cmp rdi, r15
+   d87: je 0xda5
+   d89: vmovdqu ymm0, ymmword ptr [r10 + r13]
+   d8f: vptest ymm0, ymmword ptr [rax + r13]
+   d95: mov r13, r15
+   d98: je 0xd80
+   d9a: mov r15, r12
+   d9d: mov r12, r9
+   da0: jmp 0xca5
+   da5: mov r15, r12
+   da8: mov r12, r9
+   dab: nop dword ptr [rax + rax]
+   db0: cmp r11, rdx
+   db3: jae 0xdc8
+   db5: mov rdi, qword ptr [rax + 8*r11]
+   db9: test qword ptr [r10 + 8*r11], rdi
+   dbd: lea r11, [r11 + 0x1]
+   dc1: je 0xdb0
+   dc3: jmp 0xca5
+   dc8: mov rdx, qword ptr [rsi + 0x10]
+   dcc: cmp r14, rdx
+   dcf: jae 0x22a5
+   dd5: mov rdx, qword ptr [rsi + 0x8]
+   dd9: lea r10, [r14 + 4*r14]
+   ddd: cmp byte ptr [rdx + 8*r10 + 0x20], 0x0
+   de3: je 0xe48
+   de5: mov r9, qword ptr [rbx + 0x48]
+   de9: test r9, r9
+   dec: je 0xe9f
+   df2: not r9b
+   df5: movabs rdx, 0x7fffffffffffffff
+   dff: shrx rdx, rdx, r9
+   e04: xor r8d, r8d
+   e07: xor r9d, r9d
+   e0a: jmp 0xe22
+   e0c: nop dword ptr [rax]
+   e10: mov r10, rdx
+   e13: and r10, qword ptr [rax + 8*r8]
+   e17: inc r8
+   e1a: popcnt r10, r10
+   e1f: add r9, r10
+   e22: cmp r8, rcx
+   e25: seta r10b
+   e29: sbb r10b, 0x0
+   e2d: je 0xe10
+   e2f: movzx r11d, r10b
+   e33: mov r10, -0x1
+   e3a: cmp r11d, 0xff
+   e41: je 0xe13
+   e43: jmp 0x1074
+   e48: mov rdi, qword ptr [rbx + 0x70]
+   e4c: cmp rdi, qword ptr [rbx + 0x60]
+   e50: jne 0xe63
+   e52: mov byte ptr [rbx + 0x2d], 0x0
+   e56: lea rcx, [rbx + 0x60]
+   e5a: vzeroupper
+   e5d: call 0xe62 ; REL32 <alloc::raw_vec::RawVec<boyko_ecs::ecs::core::schedule::conflict_graph::SystemIndex>>::grow_one
+   e62: nop
+   e63: mov rax, qword ptr [rbx + 0x68]
+   e67: mov word ptr [rax + 2*rdi], r14w
+   e6c: inc rdi
+   e6f: mov qword ptr [rbx + 0x70], rdi
+   e73: mov qword ptr [rbx + 0x78], r14
+   e77: lea rax, [rsi + 0x58]
+   e7b: cmp r14, qword ptr [rax]
+   e7e: jae 0x2040
+   e84: mov eax, 0x1
+   e89: shlx rax, rax, r14
+   e8e: mov rcx, qword ptr [rsi + 0x48]
+   e92: shr r14, 0x6
+   e96: or qword ptr [rcx + 8*r14], rax
+   e9a: jmp 0xca5
+   e9f: test rcx, rcx
+   ea2: je 0x107d
+   ea8: cmp r8, 0x100
+   eaf: jae 0xebb
+   eb1: xor r9d, r9d
+   eb4: xor edx, edx
+   eb6: jmp 0x1060
+   ebb: cmp r8, 0x400
+   ec2: vpxor xmm9, xmm9, xmm9
+   ec7: vpbroadcastd ymm10, dword ptr [rip] ; REL32 __real@0f0f0f0f
+   ed0: vbroadcasti128 ymm11, xmmword ptr [rip] ; REL32 __xmm@04030302030202010302020102010100
+   ed9: jae 0xee5
+   edb: xor edx, edx
+   edd: xor r9d, r9d
+   ee0: jmp 0xffa
+   ee5: mov rdx, rcx
+   ee8: and rdx, -0x10
+   eec: mov r9, r8
+   eef: shr r9, 0x3
+   ef3: and r9, -0x80
+   ef7: vpxor xmm0, xmm0, xmm0
+   efb: xor r10d, r10d
+   efe: vpxor xmm1, xmm1, xmm1
+   f02: vpxor xmm2, xmm2, xmm2
+   f06: vpxor xmm3, xmm3, xmm3
+   f0a: nop word ptr [rax + rax]
+   f10: vmovdqu ymm4, ymmword ptr [rax + r10]
+   f16: vmovdqu ymm5, ymmword ptr [rax + r10 + 0x20]
+   f1d: vmovdqu ymm6, ymmword ptr [rax + r10 + 0x40]
+   f24: vmovdqu ymm7, ymmword ptr [rax + r10 + 0x60]
+   f2b: vpand ymm8, ymm10, ymm4
+   f2f: vpshufb ymm8, ymm11, ymm8
+   f34: vpsrlw ymm4, ymm4, 0x4
+   f39: vpand ymm4, ymm10, ymm4
+   f3d: vpshufb ymm4, ymm11, ymm4
+   f42: vpaddb ymm4, ymm8, ymm4
+   f46: vpsadbw ymm4, ymm9, ymm4
+   f4a: vpaddq ymm0, ymm4, ymm0
+   f4e: vpand ymm4, ymm10, ymm5
+   f52: vpshufb ymm4, ymm11, ymm4
+   f57: vpsrlw ymm5, ymm5, 0x4
+   f5c: vpand ymm5, ymm10, ymm5
+   f60: vpshufb ymm5, ymm11, ymm5
+   f65: vpaddb ymm4, ymm5, ymm4
+   f69: vpsadbw ymm4, ymm9, ymm4
+   f6d: vpaddq ymm1, ymm4, ymm1
+   f71: vpand ymm4, ymm10, ymm6
+   f75: vpshufb ymm4, ymm11, ymm4
+   f7a: vpsrlw ymm5, ymm6, 0x4
+   f7f: vpand ymm5, ymm10, ymm5
+   f83: vpshufb ymm5, ymm11, ymm5
+   f88: vpaddb ymm4, ymm5, ymm4
+   f8c: vpsadbw ymm4, ymm9, ymm4
+   f90: vpaddq ymm2, ymm4, ymm2
+   f94: vpand ymm4, ymm10, ymm7
+   f98: vpshufb ymm4, ymm11, ymm4
+   f9d: vpsrlw ymm5, ymm7, 0x4
+   fa2: vpand ymm5, ymm10, ymm5
+   fa6: vpshufb ymm5, ymm11, ymm5
+   fab: vpaddb ymm4, ymm5, ymm4
+   faf: vpsadbw ymm4, ymm9, ymm4
+   fb3: vpaddq ymm3, ymm4, ymm3
+   fb7: sub r10, -0x80
+   fbb: cmp r9, r10
+   fbe: jne 0xf10
+   fc4: vpaddq ymm0, ymm1, ymm0
+   fc8: vpaddq ymm0, ymm2, ymm0
+   fcc: vpaddq ymm0, ymm3, ymm0
+   fd0: vextracti128 xmm1, ymm0, 0x1
+   fd6: vpaddq xmm0, xmm0, xmm1
+   fda: vpshufd xmm1, xmm0, 0xee
+   fdf: vpaddq xmm0, xmm0, xmm1
+   fe3: vmovq r9, xmm0
+   fe8: cmp rcx, rdx
+   feb: je 0x1074
+   ff1: test r8d, 0x300
+   ff8: je 0x1060
+   ffa: mov r8, rdx
+   ffd: mov rdx, rcx
+  1000: and rdx, -0x4
+  1004: vmovq xmm0, r9
+  1009: nop dword ptr [rax]
+  1010: vmovdqu ymm1, ymmword ptr [rax + 8*r8]
+  1016: vpand ymm2, ymm10, ymm1
+  101a: vpshufb ymm2, ymm11, ymm2
+  101f: vpsrlw ymm1, ymm1, 0x4
+  1024: vpand ymm1, ymm10, ymm1
+  1028: vpshufb ymm1, ymm11, ymm1
+  102d: vpaddb ymm1, ymm1, ymm2
+  1031: vpsadbw ymm1, ymm9, ymm1
+  1035: vpaddq ymm0, ymm1, ymm0
+  1039: add r8, 0x4
+  103d: cmp rdx, r8
+  1040: jne 0x1010
+  1042: vextracti128 xmm1, ymm0, 0x1
+  1048: vpaddq xmm0, xmm0, xmm1
+  104c: vpshufd xmm1, xmm0, 0xee
+  1051: vpaddq xmm0, xmm0, xmm1
+  1055: vmovq r9, xmm0
+  105a: jmp 0x106f
+  105c: nop dword ptr [rax]
+  1060: xor r8d, r8d
+  1063: popcnt r8, qword ptr [rax + 8*rdx]
+  1069: inc rdx
+  106c: add r9, r8
+  106f: cmp rcx, rdx
+  1072: jne 0x1060
+  1074: test r9, r9
+  1077: jne 0xca5
+  107d: mov rax, qword ptr [rbx + 0xa0]
+  1084: mov rdi, rax
+  1087: cmp rax, qword ptr [rbx + 0x90]
+  108e: jne 0x10a4
+  1090: mov byte ptr [rbx + 0x2d], 0x0
+  1094: lea rcx, [rbx + 0x90]
+  109b: vzeroupper
+  109e: call 0x10a3 ; REL32 <alloc::raw_vec::RawVec<boyko_ecs::ecs::core::schedule::conflict_graph::SystemIndex>>::grow_one
+  10a3: nop
+  10a4: mov rcx, qword ptr [rbx + 0x98]
+  10ab: mov word ptr [rcx + 2*rdi], r14w
+  10b0: inc rdi
+  10b3: mov qword ptr [rbx + 0xa0], rdi
+  10ba: jmp 0x10ce
+  10bc: nop dword ptr [rax]
+  10c0: mov rcx, qword ptr [rbx + 0x98]
+  10c7: mov rdi, qword ptr [rbx + 0xa0]
+  10ce: mov qword ptr [rbx + 0xc0], rdi
+  10d5: lea rax, [rcx + 2*rdi]
+  10d9: mov qword ptr [rbx + 0xd0], rax
+  10e0: xor r12d, r12d
+  10e3: jmp 0x10fb
+  10e5: nop word ptr cs:[rax + rax]
+  10f0: mov rcx, qword ptr [rbx + 0x30]
+  10f4: add rcx, 0x2
+  10f8: inc r12
+  10fb: cmp rcx, qword ptr [rbx + 0xd0]
+  1102: je 0x1330
+  1108: movzx r14d, word ptr [rcx]
+  110c: mov qword ptr [rbx + 0x78], r14
+  1110: lea rax, [rsi + 0x58]
+  1114: cmp qword ptr [rax], r14
+  1117: jbe 0x1ce2
+  111d: mov qword ptr [rbx + 0x30], rcx
+  1121: mov qword ptr [rbx + 0x48], r12
+  1125: mov r12d, r14d
+  1128: shr r12d, 0x6
+  112c: mov eax, 0x1
+  1131: shlx r15, rax, r14
+  1136: mov rax, qword ptr [rsi + 0x48]
+  113a: or qword ptr [rax + 8*r12], r15
+  113e: cmp qword ptr [rsi + 0x1a0], r14
+  1145: jbe 0x11b2
+  1147: mov rax, qword ptr [rsi + 0x190]
+  114e: test qword ptr [rax + 8*r12], r15
+  1152: je 0x11b2
+  1154: mov rdx, qword ptr [rsi + 0x10]
+  1158: cmp rdx, r14
+  115b: jbe 0x2177
+  1161: mov rax, qword ptr [rsi + 0x8]
+  1165: lea rdi, [r14 + 4*r14]
+  1169: mov rcx, qword ptr [rax + 8*rdi]
+  116d: mov rax, qword ptr [rax + 8*rdi + 0x8]
+  1172: mov rax, qword ptr [rax + 0x58]
+  1176: mov byte ptr [rbx + 0x2d], 0x0
+  117a: vzeroupper
+  117d: call rax
+  117f: nop
+  1180: mov rdx, qword ptr [rsi + 0x10]
+  1184: cmp rdx, r14
+  1187: jbe 0x2193
+  118d: mov r8, qword ptr [rsi + 0x8]
+  1191: mov edx, dword ptr [rax + 0xe4]
+  1197: mov rcx, qword ptr [r8 + 8*rdi]
+  119b: mov rax, qword ptr [r8 + 8*rdi + 0x8]
+  11a0: mov r8d, dword ptr [rsi + 0x1c8]
+  11a7: mov rax, qword ptr [rax + 0x68]
+  11ab: mov byte ptr [rbx + 0x2d], 0x0
+  11af: call rax
+  11b1: nop
+  11b2: mov rdx, qword ptr [rsi + 0x10]
+  11b6: cmp rdx, r14
+  11b9: jbe 0x2111
+  11bf: mov rax, qword ptr [rsi + 0x8]
+  11c3: lea rdi, [r14 + 4*r14]
+  11c7: mov rcx, qword ptr [rax + 8*rdi]
+  11cb: mov rax, qword ptr [rax + 8*rdi + 0x8]
+  11d0: mov rax, qword ptr [rax + 0x58]
+  11d4: mov byte ptr [rbx + 0x2d], 0x0
+  11d8: vzeroupper
+  11db: call rax
+  11dd: nop
+  11de: mov qword ptr [rbx + 0x200], 0x0
+  11e9: mov rdx, qword ptr [rsi + 0x10]
+  11ed: cmp rdx, r14
+  11f0: jbe 0x212d
+  11f6: mov rax, qword ptr [rsi + 0x8]
+  11fa: mov rcx, qword ptr [rax + 8*rdi]
+  11fe: mov rax, qword ptr [rax + 8*rdi + 0x8]
+  1203: mov rdx, qword ptr [rbx + 0x38]
+  1207: call qword ptr [rax + 0x40]
+  120a: nop
+  120b: mov rax, qword ptr [rbx + 0x50]
+  120f: inc dword ptr [rax]
+  1211: mov rdx, qword ptr [rsi + 0x10]
+  1215: cmp rdx, r14
+  1218: jbe 0x20fc
+  121e: mov rax, qword ptr [rsi + 0x8]
+  1222: mov rcx, qword ptr [rax + 8*rdi]
+  1226: mov rax, qword ptr [rax + 8*rdi + 0x8]
+  122b: mov rdx, qword ptr [rbx + 0x38]
+  122f: call qword ptr [rax + 0x48]
+  1232: nop
+  1233: mov rdx, qword ptr [rbx + 0x50]
+  1237: mov eax, dword ptr [rdx]
+  1239: mov ecx, eax
+  123b: dec ecx
+  123d: mov dword ptr [rdx], ecx
+  123f: jne 0x1286
+  1241: mov rcx, qword ptr [rbx + 0x50]
+  1245: mov dword ptr [rcx], eax
+  1247: xor edi, edi
+  1249: mov r13, qword ptr [rbx + 0x38]
+  124d: nop dword ptr [rax]
+  1250: cmp qword ptr [r13 + 0x1368], 0x0
+  1258: je 0x1280
+  125a: inc rdi
+  125d: cmp rdi, 0x1000000
+  1264: ja 0x1ccc
+  126a: mov rcx, r13
+  126d: call 0x1272 ; REL32 <boyko_ecs::ecs::core::commands::command_queue::CommandQueue>::apply_via_raw_twin
+  1272: nop
+  1273: jmp 0x1250
+  1275: nop word ptr cs:[rax + rax]
+  1280: mov rax, qword ptr [rbx + 0x50]
+  1284: dec dword ptr [rax]
+  1286: mov qword ptr [rbx + 0x78], r14
+  128a: lea rax, [rsi + 0x58]
+  128e: cmp qword ptr [rax], r14
+  1291: jbe 0x1d37
+  1297: mov rax, qword ptr [rsi + 0x48]
+  129b: mov rcx, r15
+  129e: not rcx
+  12a1: and qword ptr [rax + 8*r12], rcx
+  12a5: mov qword ptr [rbx + 0x78], r14
+  12a9: cmp qword ptr [rsi + 0x70], r14
+  12ad: jbe 0x1d89
+  12b3: mov rax, qword ptr [rsi + 0x60]
+  12b7: or qword ptr [rax + 8*r12], r15
+  12bb: mov rdx, qword ptr [rsi + 0x178]
+  12c2: cmp rdx, r14
+  12c5: jbe 0x2142
+  12cb: mov rcx, qword ptr [rsi + 0x170]
+  12d2: shl r14d, 0x4
+  12d6: mov rax, qword ptr [rcx + r14 + 0x8]
+  12db: test rax, rax
+  12de: mov r12, qword ptr [rbx + 0x48]
+  12e2: je 0x10f0
+  12e8: mov r8, qword ptr [rcx + r14]
+  12ec: add rax, rax
+  12ef: xor r9d, r9d
+  12f2: nop word ptr cs:[rax + rax]
+  1300: movzx ecx, word ptr [r8 + r9]
+  1305: mov rdx, qword ptr [rsi + 0x98]
+  130c: cmp rdx, rcx
+  130f: jbe 0x202a
+  1315: mov rdx, qword ptr [rsi + 0x90]
+  131c: dec word ptr [rdx + 2*rcx]
+  1320: add r9, 0x2
+  1324: cmp rax, r9
+  1327: jne 0x1300
+  1329: jmp 0x10f0
+  132e: nop
+  1330: cmp qword ptr [rbx + 0xc0], 0x0
+  1338: je 0x1480
+  133e: mov qword ptr [rbx + 0xa0], 0x0
+  1349: lea rax, [rsi + 0x18]
+  134d: cmp qword ptr [rax], 0x0
+  1351: je 0x136e
+  1353: mov r14, qword ptr [rsi + 0x20]
+  1357: vzeroupper
+  135a: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  1360: mov rcx, rax
+  1363: xor edx, edx
+  1365: mov r8, r14
+  1368: call qword ptr [rip] ; REL32 __imp_HeapFree
+  136e: mov rax, qword ptr [rbx + 0xa0]
+  1375: vmovdqa xmm0, xmmword ptr [rbx + 0x90]
+  137d: lea rcx, [rsi + 0x18]
+  1381: vmovdqu xmmword ptr [rcx], xmm0
+  1385: mov qword ptr [rcx + 0x10], rax
+  1389: mov rax, qword ptr [rbx + 0x70]
+  138d: mov qword ptr [rbx + 0x210], rax
+  1394: vmovaps xmm0, xmmword ptr [rbx + 0x60]
+  1399: vmovaps xmmword ptr [rbx + 0x200], xmm0
+  13a1: lea rax, [rsi + 0x30]
+  13a5: cmp qword ptr [rax], 0x0
+  13a9: je 0x13c6
+  13ab: mov r14, qword ptr [rsi + 0x38]
+  13af: vzeroupper
+  13b2: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  13b8: mov rcx, rax
+  13bb: xor edx, edx
+  13bd: mov r8, r14
+  13c0: call qword ptr [rip] ; REL32 __imp_HeapFree
+  13c6: mov rax, qword ptr [rbx + 0x210]
+  13cd: lea rcx, [rsi + 0x30]
+  13d1: mov qword ptr [rcx + 0x10], rax
+  13d5: vmovdqa xmm0, xmmword ptr [rbx + 0x200]
+  13dd: vmovdqu xmmword ptr [rcx], xmm0
+  13e1: test r12, r12
+  13e4: jne 0x780
+  13ea: mov rax, qword ptr [rsi + 0x48]
+  13ee: mov rcx, qword ptr [rsi + 0x58]
+  13f2: mov rdx, rcx
+  13f5: shr rdx, 0x6
+  13f9: and ecx, 0x3f
+  13fc: mov r8d, ecx
+  13ff: not r8b
+  1402: movabs r9, 0x7fffffffffffffff
+  140c: shrx r8, r9, r8
+  1411: xor r10d, r10d
+  1414: xor r9d, r9d
+  1417: jmp 0x1437
+  1419: nop dword ptr [rax]
+  1420: mov r11, r8
+  1423: test rcx, rcx
+  1426: je 0x1457
+  1428: and r11, qword ptr [rax + 8*r10]
+  142c: inc r10
+  142f: popcnt r11, r11
+  1434: add r9, r11
+  1437: cmp r10, rdx
+  143a: seta r11b
+  143e: sbb r11b, 0x0
+  1442: je 0x1420
+  1444: movzx edi, r11b
+  1448: mov r11, -0x1
+  144f: cmp edi, 0xff
+  1455: je 0x1428
+  1457: test r9, r9
+  145a: je 0x780
+  1460: mov byte ptr [rbx + 0x2e], 0x1
+  1464: mov ecx, 0x186a0
+  1469: vzeroupper
+  146c: call 0x1471 ; REL32 std::thread::functions::park_timeout
+  1471: nop
+  1472: jmp 0x780
+  1477: nop word ptr [rax + rax]
+  1480: lea rax, [rsi + 0x18]
+  1484: cmp qword ptr [rax], 0x0
+  1488: je 0x14a5
+  148a: mov r14, qword ptr [rsi + 0x20]
+  148e: vzeroupper
+  1491: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  1497: mov rcx, rax
+  149a: xor edx, edx
+  149c: mov r8, r14
+  149f: call qword ptr [rip] ; REL32 __imp_HeapFree
+  14a5: mov rax, qword ptr [rbx + 0xa0]
+  14ac: lea rcx, [rsi + 0x18]
+  14b0: mov qword ptr [rcx + 0x10], rax
+  14b4: vmovdqa xmm0, xmmword ptr [rbx + 0x90]
+  14bc: vmovdqu xmmword ptr [rcx], xmm0
+  14c0: mov rax, qword ptr [rbx + 0x70]
+  14c4: test rax, rax
+  14c7: je 0x1389
+  14cd: mov r15, qword ptr [rbx + 0x68]
+  14d1: lea r13, [r15 + 2*rax]
+  14d5: nop word ptr cs:[rax + rax]
+  14e0: cmp r15, r13
+  14e3: je 0x1574
+  14e9: movzx r14d, word ptr [r15]
+  14ed: add r15, 0x2
+  14f1: cmp qword ptr [rsi + 0x1a0], r14
+  14f8: jbe 0x14e0
+  14fa: mov rax, qword ptr [rsi + 0x190]
+  1501: mov ecx, r14d
+  1504: shr ecx, 0x6
+  1507: mov rax, qword ptr [rax + 8*rcx]
+  150b: bt rax, r14
+  150f: jae 0x14e0
+  1511: mov rdx, qword ptr [rsi + 0x10]
+  1515: cmp rdx, r14
+  1518: jbe 0x224d
+  151e: mov rax, qword ptr [rsi + 0x8]
+  1522: lea rdi, [r14 + 4*r14]
+  1526: mov rcx, qword ptr [rax + 8*rdi]
+  152a: mov rax, qword ptr [rax + 8*rdi + 0x8]
+  152f: mov rax, qword ptr [rax + 0x58]
+  1533: mov byte ptr [rbx + 0x2d], 0x1
+  1537: vzeroupper
+  153a: call rax
+  153c: nop
+  153d: mov rdx, qword ptr [rsi + 0x10]
+  1541: cmp rdx, r14
+  1544: jbe 0x2269
+  154a: mov r8, qword ptr [rsi + 0x8]
+  154e: mov edx, dword ptr [rax + 0xe4]
+  1554: mov rcx, qword ptr [r8 + 8*rdi]
+  1558: mov rax, qword ptr [r8 + 8*rdi + 0x8]
+  155d: mov r8d, dword ptr [rsi + 0x1c8]
+  1564: mov rax, qword ptr [rax + 0x68]
+  1568: mov byte ptr [rbx + 0x2d], 0x1
+  156c: call rax
+  156e: nop
+  156f: jmp 0x14e0
+  1574: mov r15, qword ptr [rsi + 0x8]
+  1578: mov rax, qword ptr [rbx + 0x68]
+  157c: mov rcx, qword ptr [rbx + 0x70]
+  1580: mov qword ptr [rbx + 0x70], 0x0
+  1588: lea rdx, [rax + 2*rcx]
+  158c: mov qword ptr [rbx + 0x208], rdx
+  1593: lea rdx, [rbx + 0x60]
+  1597: mov qword ptr [rbx + 0x210], rdx
+  159e: mov qword ptr [rbx + 0x218], rcx
+  15a5: mov qword ptr [rbx + 0x220], 0x0
+  15b0: test rcx, rcx
+  15b3: je 0x1389
+  15b9: nop dword ptr [rax]
+  15c0: lea rcx, [rax + 0x2]
+  15c4: mov qword ptr [rbx + 0x200], rcx
+  15cb: movzx edi, word ptr [rax]
+  15ce: mov rax, qword ptr [rbx + 0x3c8]
+  15d5: lock
+  15d6: inc qword ptr [rax]
+  15d9: mov r14, qword ptr [rbx + 0x3c0]
+  15e0: mov r13, qword ptr [rbx + 0x3c8]
+  15e7: mov rdx, qword ptr [rbx + 0x3d0]
+  15ee: mov rcx, qword ptr [rbx + 0x3d8]
+  15f5: sub rcx, rdx
+  15f8: mov eax, edx
+  15fa: neg eax
+  15fc: and eax, 0x7
+  15ff: sub rcx, rax
+  1602: setb r8b
+  1606: cmp rcx, 0x30
+  160a: setb cl
+  160d: or cl, r8b
+  1610: jne 0x1630
+  1612: lea rcx, [rdx + rax]
+  1616: add rcx, 0x30
+  161a: mov qword ptr [rbx + 0x3d0], rcx
+  1621: test rdx, rdx
+  1624: je 0x1630
+  1626: add rdx, rax
+  1629: jmp 0x1665
+  162b: nop dword ptr [rax + rax]
+  1630: mov edx, 0x30
+  1635: lea rcx, [rbx + 0x3d0]
+  163c: vzeroupper
+  163f: call 0x1644 ; REL32 <boyko_threadpool::block::ScopeBlock>::grow
+  1644: nop
+  1645: mov rax, qword ptr [rbx + 0x3d0]
+  164c: mov ecx, eax
+  164e: neg ecx
+  1650: and ecx, 0x7
+  1653: lea rdx, [rax + rcx]
+  1657: add rax, rcx
+  165a: add rax, 0x30
+  165e: mov qword ptr [rbx + 0x3d0], rax
+  1665: lea rax, [rip] ; REL32 boyko_threadpool::task::scoped::drop_unrun_scoped::<boyko_ecs::ecs::core::iters::query::par_iter::for_each_impl<&phase9_scheduler::Val, (), phase9_scheduler::bench_par_iter_4096_entities::{closure#0}::{closure#0}>::{closure#0}::{closure#0}::{closure#0}::{closure#0}>
+  166c: mov qword ptr [rdx], rax
+  166f: mov qword ptr [rdx + 0x8], r13
+  1673: mov rax, qword ptr [rbx + 0xc8]
+  167a: mov qword ptr [rdx + 0x10], rax
+  167e: mov qword ptr [rdx + 0x18], r15
+  1682: mov rax, qword ptr [rbx + 0x38]
+  1686: mov qword ptr [rdx + 0x20], rax
+  168a: mov word ptr [rdx + 0x28], di
+  168e: mov rcx, r14
+  1691: lea r8, [rip] ; REL32 boyko_threadpool::task::scoped::run_scoped::<<boyko_ecs::ecs::core::schedule::schedule::Schedule>::try_dispatch_ready::{closure#0}>
+  1698: vzeroupper
+  169b: call 0x16a0 ; REL32 boyko_threadpool::worker::push_task
+  16a0: nop
+  16a1: inc r12
+  16a4: mov rax, qword ptr [rbx + 0x200]
+  16ab: cmp rax, qword ptr [rbx + 0x208]
+  16b2: jne 0x15c0
+  16b8: mov rdi, qword ptr [rbx + 0x220]
+  16bf: test rdi, rdi
+  16c2: je 0x1389
+  16c8: mov r14, qword ptr [rbx + 0x210]
+  16cf: mov rax, qword ptr [rbx + 0x218]
+  16d6: mov r15, qword ptr [r14 + 0x10]
+  16da: cmp rax, r15
+  16dd: je 0x16f4
+  16df: mov rcx, qword ptr [r14 + 0x8]
+  16e3: lea rdx, [rcx + 2*rax]
+  16e7: lea rcx, [rcx + 2*r15]
+  16eb: lea r8, [rdi + rdi]
+  16ef: call 0x16f4 ; REL32 memmove
+  16f4: add r15, rdi
+  16f7: mov qword ptr [r14 + 0x10], r15
+  16fb: jmp 0x1389
+  1700: mov rax, qword ptr [rsi + 0x10]
+  1704: mov qword ptr [rbx + 0x1e8], rax
+  170b: test rax, rax
+  170e: je 0xbb1
+  1714: mov eax, dword ptr [rsi + 0x1c8]
+  171a: mov dword ptr [rbx + 0xd0], eax
+  1720: mov rax, qword ptr [rsi + 0x60]
+  1724: mov qword ptr [rbx + 0x158], rax
+  172b: mov rax, qword ptr [rsi + 0x70]
+  172f: mov qword ptr [rbx + 0x170], rax
+  1736: mov rax, qword ptr [rsi + 0x98]
+  173d: mov qword ptr [rbx + 0xb8], rax
+  1744: mov rax, qword ptr [rsi + 0x90]
+  174b: mov qword ptr [rbx + 0x168], rax
+  1752: mov rax, qword ptr [rsi + 0xb8]
+  1759: mov qword ptr [rbx + 0x1d8], rax
+  1760: mov rax, qword ptr [rsi + 0xa8]
+  1767: mov qword ptr [rbx + 0x150], rax
+  176e: mov rax, qword ptr [rsi + 0x108]
+  1775: mov qword ptr [rbx + 0x128], rax
+  177c: mov rax, qword ptr [rsi + 0x100]
+  1783: mov qword ptr [rbx + 0x1d0], rax
+  178a: mov rax, qword ptr [rsi + 0x120]
+  1791: mov qword ptr [rbx + 0x120], rax
+  1798: mov rax, qword ptr [rsi + 0x118]
+  179f: mov qword ptr [rbx + 0x1c8], rax
+  17a6: mov r11, qword ptr [rsi + 0x130]
+  17ad: add r11, -0x20
+  17b1: mov r14, qword ptr [rsi + 0x138]
+  17b8: mov rax, qword ptr [rsi + 0x178]
+  17bf: mov qword ptr [rbx + 0x110], rax
+  17c6: mov rax, qword ptr [rsi + 0x170]
+  17cd: mov qword ptr [rbx + 0x118], rax
+  17d4: xor r9d, r9d
+  17d7: mov qword ptr [rbx + 0x1c0], rdi
+  17de: mov qword ptr [rbx + 0x1b8], r15
+  17e5: mov qword ptr [rbx + 0x1b0], r12
+  17ec: mov qword ptr [rbx + 0x1a8], r13
+  17f3: mov qword ptr [rbx + 0x80], r11
+  17fa: jmp 0x1828
+  17fc: nop dword ptr [rax]
+  1800: mov rax, r9
+  1803: shr rax, 0x6
+  1807: mov rcx, qword ptr [rbx + 0x158]
+  180e: mov rax, qword ptr [rcx + 8*rax]
+  1812: bt rax, r9
+  1816: jae 0x1831
+  1818: inc r9
+  181b: cmp r9, qword ptr [rbx + 0x1e8]
+  1822: je 0xbb1
+  1828: cmp r9, qword ptr [rbx + 0x170]
+  182f: jb 0x1800
+  1831: cmp r9, r13
+  1834: jae 0x1847
+  1836: mov rax, r9
+  1839: shr rax, 0x6
+  183d: mov rax, qword ptr [r12 + 8*rax]
+  1841: bt rax, r9
+  1845: jb 0x1818
+  1847: cmp r9, qword ptr [rbx + 0xb8]
+  184e: jae 0x2282
+  1854: cmp r9, r15
+  1857: jae 0x1818
+  1859: mov rax, qword ptr [rbx + 0x168]
+  1860: cmp word ptr [rax + 2*r9], 0x0
+  1866: jne 0x1818
+  1868: mov rax, r9
+  186b: shr rax, 0x6
+  186f: mov qword ptr [rbx + 0xf8], rax
+  1876: mov rax, qword ptr [rdi + 8*rax]
+  187a: bt rax, r9
+  187e: jae 0x1818
+  1880: cmp r9, qword ptr [rbx + 0x1d8]
+  1887: jae 0x22c1
+  188d: mov eax, 0x1
+  1892: shlx r8, rax, r9
+  1897: mov rax, qword ptr [rbx + 0x150]
+  189e: mov rcx, qword ptr [rbx + 0xf8]
+  18a5: mov rax, qword ptr [rax + 8*rcx]
+  18a9: test rax, r8
+  18ac: jne 0x1818
+  18b2: or rax, r8
+  18b5: mov rcx, qword ptr [rbx + 0x150]
+  18bc: mov rdx, qword ptr [rbx + 0xf8]
+  18c3: mov qword ptr [rcx + 8*rdx], rax
+  18c7: cmp r9, qword ptr [rbx + 0x128]
+  18ce: jae 0x232c
+  18d4: mov qword ptr [rbx + 0x1a0], r8
+  18db: mov qword ptr [rbx + 0x100], r9
+  18e2: lea rax, [r9 + 2*r9]
+  18e6: mov rcx, qword ptr [rbx + 0x1d0]
+  18ed: mov rdx, qword ptr [rcx + 8*rax + 0x10]
+  18f2: mov qword ptr [rbx + 0x30], rdx
+  18f6: test rdx, rdx
+  18f9: je 0x19b4
+  18ff: lea rax, [rcx + 8*rax]
+  1903: mov dil, 0x1
+  1906: xor r13d, r13d
+  1909: nop dword ptr [rax]
+  1910: mov byte ptr [rbx + 0x48], dil
+  1914: mov rdx, qword ptr [rax + 0x10]
+  1918: cmp r13, rdx
+  191b: jae 0x21f5
+  1921: mov r15, rax
+  1924: mov rax, qword ptr [rax + 0x8]
+  1928: mov rcx, r13
+  192b: shl rcx, 0x4
+  192f: mov r12, qword ptr [rax + rcx]
+  1933: mov rdi, qword ptr [rax + rcx + 0x8]
+  1938: mov rax, qword ptr [rdi + 0x28]
+  193c: mov byte ptr [rbx + 0x2e], 0x1
+  1940: mov rcx, r12
+  1943: mov rdx, qword ptr [rbx + 0x38]
+  1947: vzeroupper
+  194a: call rax
+  194c: nop
+  194d: mov rax, qword ptr [rdi + 0x58]
+  1951: mov byte ptr [rbx + 0x2e], 0x1
+  1955: mov rcx, r12
+  1958: call rax
+  195a: nop
+  195b: mov edx, dword ptr [rax + 0xe4]
+  1961: mov rax, qword ptr [rdi + 0x68]
+  1965: mov byte ptr [rbx + 0x2e], 0x1
+  1969: mov rcx, r12
+  196c: mov r8d, dword ptr [rbx + 0xd0]
+  1973: call rax
+  1975: nop
+  1976: mov rax, qword ptr [rdi + 0x30]
+  197a: mov byte ptr [rbx + 0x2e], 0x1
+  197e: mov rcx, r12
+  1981: mov rdx, qword ptr [rbx + 0x38]
+  1985: call rax
+  1987: nop
+  1988: inc r13
+  198b: movzx edi, byte ptr [rbx + 0x48]
+  198f: and dil, al
+  1992: cmp r13, qword ptr [rbx + 0x30]
+  1996: mov rax, r15
+  1999: jne 0x1910
+  199f: mov r9, qword ptr [rbx + 0x100]
+  19a6: cmp r9, qword ptr [rbx + 0x120]
+  19ad: jb 0x19cb
+  19af: jmp 0x234c
+  19b4: mov dil, 0x1
+  19b7: mov r9, qword ptr [rbx + 0x100]
+  19be: cmp r9, qword ptr [rbx + 0x120]
+  19c5: jae 0x234c
+  19cb: mov rcx, r9
+  19ce: shl rcx, 0x4
+  19d2: mov rax, qword ptr [rbx + 0x1c8]
+  19d9: mov rdx, qword ptr [rax + rcx + 0x8]
+  19de: mov qword ptr [rbx + 0x1f0], rdx
+  19e5: test rdx, rdx
+  19e8: mov r11, qword ptr [rbx + 0x80]
+  19ef: mov qword ptr [rbx + 0x130], rcx
+  19f6: je 0x1c0b
+  19fc: lea r12, [rax + rcx]
+  1a00: mov rax, qword ptr [rsi + 0xc0]
+  1a07: mov qword ptr [rbx + 0x180], rax
+  1a0e: mov rax, qword ptr [rsi + 0xd0]
+  1a15: mov qword ptr [rbx + 0xc0], rax
+  1a1c: mov rax, qword ptr [rsi + 0xe8]
+  1a23: mov qword ptr [rbx + 0x178], rax
+  1a2a: mov rax, qword ptr [rsi + 0xd8]
+  1a31: xor r8d, r8d
+  1a34: mov qword ptr [rbx + 0x160], r12
+  1a3b: mov qword ptr [rbx + 0x108], rax
+  1a42: jmp 0x1a60
+  1a44: nop word ptr cs:[rax + rax]
+  1a50: and dil, r10b
+  1a53: cmp r8, qword ptr [rbx + 0x1f0]
+  1a5a: je 0x1c0b
+  1a60: mov rdx, qword ptr [r12 + 0x8]
+  1a65: cmp r8, rdx
+  1a68: jae 0x2211
+  1a6e: mov rax, qword ptr [r12]
+  1a72: mov r13, qword ptr [rax + 8*r8]
+  1a76: inc r8
+  1a79: mov r10b, 0x1
+  1a7c: xor r15d, r15d
+  1a7f: mov rcx, r15
+  1a82: shl rcx, 0x5
+  1a86: add rcx, r11
+  1a89: nop dword ptr [rax]
+  1a90: cmp r15, r14
+  1a93: jae 0x1a50
+  1a95: inc r15
+  1a98: lea rax, [rcx + 0x20]
+  1a9c: cmp qword ptr [rcx + 0x30], r13
+  1aa0: mov rcx, rax
+  1aa3: jne 0x1a90
+  1aa5: mov qword ptr [rbx + 0x30], r8
+  1aa9: movzx ecx, word ptr [rax + 0x18]
+  1aad: cmp qword ptr [rbx + 0xc0], rcx
+  1ab4: jbe 0x1b00
+  1ab6: mov r11d, ecx
+  1ab9: shr r11d, 0x6
+  1abd: mov edx, ecx
+  1abf: and edx, 0x3f
+  1ac2: mov r8, qword ptr [rbx + 0x180]
+  1ac9: mov r8, qword ptr [r8 + 8*r11]
+  1acd: bt r8, rdx
+  1ad1: jae 0x1b00
+  1ad3: cmp qword ptr [rbx + 0x178], rcx
+  1ada: jbe 0x1bf6
+  1ae0: mov rax, qword ptr [rbx + 0x108]
+  1ae7: shrx rax, qword ptr [rax + 8*r11], rdx
+  1aed: jmp 0x1bf8
+  1af2: nop word ptr cs:[rax + rax]
+  1b00: mov qword ptr [rbx + 0x1f8], rcx
+  1b07: mov byte ptr [rbx + 0x47], r10b
+  1b0b: mov byte ptr [rbx + 0x48], dil
+  1b0f: mov r12, qword ptr [rax]
+  1b12: mov rdi, qword ptr [rax + 0x8]
+  1b16: mov rax, qword ptr [rdi + 0x28]
+  1b1a: mov byte ptr [rbx + 0x2e], 0x1
+  1b1e: mov rcx, r12
+  1b21: mov rdx, qword ptr [rbx + 0x38]
+  1b25: vzeroupper
+  1b28: call rax
+  1b2a: nop
+  1b2b: mov rax, qword ptr [rdi + 0x58]
+  1b2f: mov byte ptr [rbx + 0x2e], 0x1
+  1b33: mov rcx, r12
+  1b36: call rax
+  1b38: nop
+  1b39: mov edx, dword ptr [rax + 0xe4]
+  1b3f: mov rax, qword ptr [rdi + 0x68]
+  1b43: mov byte ptr [rbx + 0x2e], 0x1
+  1b47: mov rcx, r12
+  1b4a: mov r8d, dword ptr [rbx + 0xd0]
+  1b51: call rax
+  1b53: nop
+  1b54: mov rax, qword ptr [rdi + 0x30]
+  1b58: mov byte ptr [rbx + 0x2e], 0x1
+  1b5c: mov rcx, r12
+  1b5f: mov rdx, qword ptr [rbx + 0x38]
+  1b63: call rax
+  1b65: nop
+  1b66: mov r9, qword ptr [rbx + 0x1f8]
+  1b6d: mov qword ptr [rbx + 0x60], r9
+  1b71: cmp qword ptr [rbx + 0xc0], r9
+  1b78: jbe 0x1e7a
+  1b7e: mov ecx, r9d
+  1b81: shr ecx, 0x6
+  1b84: mov edx, 0x1
+  1b89: shlx rdx, rdx, r9
+  1b8e: mov r8, qword ptr [rbx + 0x180]
+  1b95: or qword ptr [r8 + 8*rcx], rdx
+  1b99: mov qword ptr [rbx + 0x60], r9
+  1b9d: cmp qword ptr [rbx + 0x178], r9
+  1ba4: jbe 0x1ecc
+  1baa: test al, al
+  1bac: je 0x1bbb
+  1bae: mov r10, qword ptr [rbx + 0x108]
+  1bb5: or rdx, qword ptr [r10 + 8*rcx]
+  1bb9: jmp 0x1bc8
+  1bbb: mov r10, qword ptr [rbx + 0x108]
+  1bc2: andn rdx, rdx, qword ptr [r10 + 8*rcx]
+  1bc8: mov r9, qword ptr [rbx + 0x100]
+  1bcf: mov r11, qword ptr [rbx + 0x80]
+  1bd6: movzx edi, byte ptr [rbx + 0x48]
+  1bda: mov r12, qword ptr [rbx + 0x160]
+  1be1: mov r8, qword ptr [rbx + 0x30]
+  1be5: mov qword ptr [r10 + 8*rcx], rdx
+  1be9: movzx r10d, byte ptr [rbx + 0x47]
+  1bee: and r10b, al
+  1bf1: jmp 0x1a7f
+  1bf6: xor eax, eax
+  1bf8: mov r8, qword ptr [rbx + 0x30]
+  1bfc: mov r11, qword ptr [rbx + 0x80]
+  1c03: and r10b, al
+  1c06: jmp 0x1a7f
+  1c0b: test dil, 0x1
+  1c0f: mov rdi, qword ptr [rbx + 0x1c0]
+  1c16: mov r15, qword ptr [rbx + 0x1b8]
+  1c1d: mov r12, qword ptr [rbx + 0x1b0]
+  1c24: mov r13, qword ptr [rbx + 0x1a8]
+  1c2b: jne 0x1818
+  1c31: mov qword ptr [rbx + 0x60], r9
+  1c35: cmp r9, qword ptr [rbx + 0x170]
+  1c3c: jae 0x20a7
+  1c42: mov rax, qword ptr [rbx + 0x158]
+  1c49: mov rcx, qword ptr [rbx + 0xf8]
+  1c50: mov rdx, qword ptr [rbx + 0x1a0]
+  1c57: or qword ptr [rax + 8*rcx], rdx
+  1c5b: cmp r9, qword ptr [rbx + 0x110]
+  1c62: jae 0x236c
+  1c68: mov rax, qword ptr [rbx + 0x118]
+  1c6f: mov rcx, qword ptr [rbx + 0x130]
+  1c76: mov rax, qword ptr [rax + rcx + 0x8]
+  1c7b: test rax, rax
+  1c7e: je 0x1818
+  1c84: mov rcx, qword ptr [rbx + 0x118]
+  1c8b: mov rdx, qword ptr [rbx + 0x130]
+  1c92: mov rdx, qword ptr [rcx + rdx]
+  1c96: add rax, rax
+  1c99: xor r8d, r8d
+  1c9c: nop dword ptr [rax]
+  1ca0: movzx ecx, word ptr [rdx + r8]
+  1ca5: cmp qword ptr [rbx + 0xb8], rcx
+  1cac: jbe 0x222d
+  1cb2: mov r10, qword ptr [rbx + 0x168]
+  1cb9: dec word ptr [r10 + 2*rcx]
+  1cbe: add r8, 0x2
+  1cc2: cmp rax, r8
+  1cc5: jne 0x1ca0
+  1cc7: jmp 0x1818
+  1ccc: call 0x1cd1 ; REL32 boyko_ecs::ecs::core::ecs_master::ecs_master::drain_runaway_panic
+  1cd1: nop
+  1cd2: jmp 0x23a0
+  1cd7: call 0x1cdc ; REL32 boyko_ecs::ecs::core::ecs_master::ecs_master::drain_runaway_panic
+  1cdc: nop
+  1cdd: jmp 0x23a0
+  1ce2: lea rax, [rbx + 0x78]
+  1ce6: mov qword ptr [rbx + 0x200], rax
+  1ced: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+  1cf4: mov qword ptr [rbx + 0x208], rax
+  1cfb: mov rcx, qword ptr [rbx + 0xb0]
+  1d02: mov qword ptr [rbx + 0x210], rcx
+  1d09: mov qword ptr [rbx + 0x218], rax
+  1d10: mov byte ptr [rbx + 0x2d], 0x0
+  1d14: lea rcx, [rip] ; REL32 <anon-data>
+  1d1b: lea r8, [rip] ; REL32 <anon-data>
+  1d22: lea rdx, [rbx + 0x200]
+  1d29: vzeroupper
+  1d2c: call 0x1d31 ; REL32 core::panicking::panic_fmt
+  1d31: nop
+  1d32: jmp 0x23a0
+  1d37: lea rax, [rbx + 0x78]
+  1d3b: mov qword ptr [rbx + 0x200], rax
+  1d42: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+  1d49: mov qword ptr [rbx + 0x208], rax
+  1d50: mov rcx, qword ptr [rbx + 0xb0]
+  1d57: mov qword ptr [rbx + 0x210], rcx
+  1d5e: mov qword ptr [rbx + 0x218], rax
+  1d65: mov byte ptr [rbx + 0x2d], 0x0
+  1d69: lea rcx, [rip] ; REL32 <anon-data>
+  1d70: lea r8, [rip] ; REL32 <anon-data>
+  1d77: lea rdx, [rbx + 0x200]
+  1d7e: call 0x1d83 ; REL32 core::panicking::panic_fmt
+  1d83: nop
+  1d84: jmp 0x23a0
+  1d89: lea rax, [rbx + 0x78]
+  1d8d: mov qword ptr [rbx + 0x200], rax
+  1d94: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+  1d9b: mov qword ptr [rbx + 0x208], rax
+  1da2: mov rcx, qword ptr [rbx + 0xd8]
+  1da9: mov qword ptr [rbx + 0x210], rcx
+  1db0: mov qword ptr [rbx + 0x218], rax
+  1db7: mov byte ptr [rbx + 0x2d], 0x0
+  1dbb: lea rcx, [rip] ; REL32 <anon-data>
+  1dc2: lea r8, [rip] ; REL32 <anon-data>
+  1dc9: lea rdx, [rbx + 0x200]
+  1dd0: call 0x1dd5 ; REL32 core::panicking::panic_fmt
+  1dd5: nop
+  1dd6: jmp 0x23a0
+  1ddb: lea rax, [rbx + 0x60]
+  1ddf: mov qword ptr [rbx + 0x200], rax
+  1de6: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+  1ded: mov qword ptr [rbx + 0x208], rax
+  1df4: mov rcx, qword ptr [rbx + 0xb0]
+  1dfb: mov qword ptr [rbx + 0x210], rcx
+  1e02: mov qword ptr [rbx + 0x218], rax
+  1e09: lea rcx, [rip] ; REL32 <anon-data>
+  1e10: lea r8, [rip] ; REL32 <anon-data>
+  1e17: lea rdx, [rbx + 0x200]
+  1e1e: vzeroupper
+  1e21: call 0x1e26 ; REL32 core::panicking::panic_fmt
+  1e26: nop
+  1e27: jmp 0x23a0
+  1e2c: lea rax, [rbx + 0x60]
+  1e30: mov qword ptr [rbx + 0x200], rax
+  1e37: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+  1e3e: mov qword ptr [rbx + 0x208], rax
+  1e45: mov rcx, qword ptr [rbx + 0xd8]
+  1e4c: mov qword ptr [rbx + 0x210], rcx
+  1e53: mov qword ptr [rbx + 0x218], rax
+  1e5a: lea rcx, [rip] ; REL32 <anon-data>
+  1e61: lea r8, [rip] ; REL32 <anon-data>
+  1e68: lea rdx, [rbx + 0x200]
+  1e6f: call 0x1e74 ; REL32 core::panicking::panic_fmt
+  1e74: nop
+  1e75: jmp 0x23a0
+  1e7a: lea rax, [rbx + 0x60]
+  1e7e: mov qword ptr [rbx + 0x200], rax
+  1e85: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+  1e8c: mov qword ptr [rbx + 0x208], rax
+  1e93: mov rcx, qword ptr [rbx + 0x198]
+  1e9a: mov qword ptr [rbx + 0x210], rcx
+  1ea1: mov qword ptr [rbx + 0x218], rax
+  1ea8: mov byte ptr [rbx + 0x2e], 0x1
+  1eac: lea rcx, [rip] ; REL32 <anon-data>
+  1eb3: lea r8, [rip] ; REL32 <anon-data>
+  1eba: lea rdx, [rbx + 0x200]
+  1ec1: call 0x1ec6 ; REL32 core::panicking::panic_fmt
+  1ec6: nop
+  1ec7: jmp 0x23a0
+  1ecc: lea rax, [rbx + 0x60]
+  1ed0: mov qword ptr [rbx + 0x200], rax
+  1ed7: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+  1ede: mov qword ptr [rbx + 0x208], rax
+  1ee5: mov rcx, qword ptr [rbx + 0x190]
+  1eec: mov qword ptr [rbx + 0x210], rcx
+  1ef3: mov qword ptr [rbx + 0x218], rax
+  1efa: mov byte ptr [rbx + 0x2e], 0x1
+  1efe: lea rcx, [rip] ; REL32 <anon-data>
+  1f05: lea r8, [rip] ; REL32 <anon-data>
+  1f0c: lea rdx, [rbx + 0x200]
+  1f13: call 0x1f18 ; REL32 core::panicking::panic_fmt
+  1f18: nop
+  1f19: jmp 0x23a0
+  1f1e: mov byte ptr [rbx + 0x2e], 0x1
+  1f22: mov rcx, rsi
+  1f25: mov rdx, r15
+  1f28: vzeroupper
+  1f2b: call 0x1f30 ; REL32 <boyko_ecs::ecs::core::schedule::schedule::Schedule>::cancel_after_panic
+  1f30: nop
+  1f31: lea rsi, [rbx + 0x200]
+  1f38: lea rdx, [rbx + 0x3c0]
+  1f3f: mov r8d, 0x148
+  1f45: mov rcx, rsi
+  1f48: vzeroupper
+  1f4b: call 0x1f50 ; REL32 memcpy
+  1f50: vmovdqu ymm0, ymmword ptr [rbx + 0x509]
+  1f58: vmovdqu ymm1, ymmword ptr [rbx + 0x520]
+  1f60: vmovdqu ymmword ptr [rbx + 0x349], ymm0
+  1f68: vmovdqu ymmword ptr [rbx + 0x360], ymm1
+  1f70: mov byte ptr [rbx + 0x348], 0x1
+  1f77: mov byte ptr [rbx + 0x2e], 0x0
+  1f7b: mov rcx, rsi
+  1f7e: vzeroupper
+  1f81: call 0x1f86 ; REL32 <boyko_threadpool::scope::Scope as core::ops::drop::Drop>::drop
+  1f86: nop
+  1f87: mov rax, qword ptr [rbx + 0xe0]
+  1f8e: mov ecx, dword ptr [rbx + 0x8c]
+  1f94: mov dword ptr [rax + 0x10], ecx
+  1f97: mov rax, qword ptr [rbx + 0x138]
+  1f9e: movzx ecx, word ptr [rbx + 0x5e]
+  1fa2: mov word ptr [rax], cx
+  1fa5: mov rax, qword ptr [rbx + 0x148]
+  1fac: mov rcx, qword ptr [rbx + 0x140]
+  1fb3: mov qword ptr [rax], rcx
+  1fb6: mov rax, qword ptr [rbx + 0xe8]
+  1fbd: lock
+  1fbe: dec qword ptr [rax + 0x300]
+  1fc5: mov rax, qword ptr [rbx + 0xf0]
+  1fcc: lock
+  1fcd: dec qword ptr [rax]
+  1fd0: jne 0x1fe3
+  1fd2: mov byte ptr [rbx + 0x2f], 0x0
+  1fd6: mov rcx, qword ptr [rbx + 0xf0]
+  1fdd: call 0x1fe2 ; REL32 <alloc::sync::Arc<boyko_threadpool::thread_pool::ThreadPool>>::drop_slow
+  1fe2: nop
+  1fe3: vmovaps xmm6, xmmword ptr [rbp + 0x4d0]
+  1feb: vmovaps xmm7, xmmword ptr [rbp + 0x4e0]
+  1ff3: vmovaps xmm8, xmmword ptr [rbp + 0x4f0]
+  1ffb: vmovaps xmm9, xmmword ptr [rbp + 0x500]
+  2003: vmovaps xmm10, xmmword ptr [rbp + 0x510]
+  200b: vmovaps xmm11, xmmword ptr [rbp + 0x520]
+  2013: lea rsp, [rbp + 0x538]
+  201a: pop rbx
+  201b: pop rdi
+  201c: pop rsi
+  201d: pop r12
+  201f: pop r13
+  2021: pop r14
+  2023: pop r15
+  2025: pop rbp
+  2026: vzeroupper
+  2029: ret
+  202a: mov byte ptr [rbx + 0x2d], 0x0
+  202e: lea r8, [rip] ; REL32 <anon-data>
+  2035: call 0x203a ; REL32 core::panicking::panic_bounds_check
+  203a: nop
+  203b: jmp 0x23a0
+  2040: lea rax, [rbx + 0x78]
+  2044: mov qword ptr [rbx + 0x200], rax
+  204b: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+  2052: mov qword ptr [rbx + 0x208], rax
+  2059: mov rcx, qword ptr [rbx + 0xb0]
+  2060: mov qword ptr [rbx + 0x210], rcx
+  2067: mov qword ptr [rbx + 0x218], rax
+  206e: mov byte ptr [rbx + 0x2d], 0x0
+  2072: lea rcx, [rip] ; REL32 <anon-data>
+  2079: lea r8, [rip] ; REL32 <anon-data>
+  2080: lea rdx, [rbx + 0x200]
+  2087: vzeroupper
+  208a: call 0x208f ; REL32 core::panicking::panic_fmt
+  208f: nop
+  2090: jmp 0x23a0
+  2095: lea r8, [rip] ; REL32 <anon-data>
+  209c: call 0x20a1 ; REL32 core::panicking::panic_bounds_check
+  20a1: nop
+  20a2: jmp 0x23a0
+  20a7: lea rax, [rbx + 0x60]
+  20ab: mov qword ptr [rbx + 0x200], rax
+  20b2: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+  20b9: mov qword ptr [rbx + 0x208], rax
+  20c0: mov rcx, qword ptr [rbx + 0xd8]
+  20c7: mov qword ptr [rbx + 0x210], rcx
+  20ce: mov qword ptr [rbx + 0x218], rax
+  20d5: mov byte ptr [rbx + 0x2e], 0x1
+  20d9: lea rcx, [rip] ; REL32 <anon-data>
+  20e0: lea r8, [rip] ; REL32 <anon-data>
+  20e7: lea rdx, [rbx + 0x200]
+  20ee: vzeroupper
+  20f1: call 0x20f6 ; REL32 core::panicking::panic_fmt
+  20f6: nop
+  20f7: jmp 0x23a0
+  20fc: lea r8, [rip] ; REL32 <anon-data>
+  2103: mov rcx, r14
+  2106: call 0x210b ; REL32 core::panicking::panic_bounds_check
+  210b: nop
+  210c: jmp 0x23a0
+  2111: mov byte ptr [rbx + 0x2d], 0x0
+  2115: lea r8, [rip] ; REL32 <anon-data>
+  211c: mov rcx, r14
+  211f: vzeroupper
+  2122: call 0x2127 ; REL32 core::panicking::panic_bounds_check
+  2127: nop
+  2128: jmp 0x23a0
+  212d: lea r8, [rip] ; REL32 <anon-data>
+  2134: mov rcx, r14
+  2137: call 0x213c ; REL32 core::panicking::panic_bounds_check
+  213c: nop
+  213d: jmp 0x23a0
+  2142: mov byte ptr [rbx + 0x2d], 0x0
+  2146: lea r8, [rip] ; REL32 <anon-data>
+  214d: mov rcx, r14
+  2150: call 0x2155 ; REL32 core::panicking::panic_bounds_check
+  2155: nop
+  2156: jmp 0x23a0
+  215b: mov byte ptr [rbx + 0x2d], 0x0
+  215f: lea r8, [rip] ; REL32 <anon-data>
+  2166: mov rcx, r14
+  2169: vzeroupper
+  216c: call 0x2171 ; REL32 core::panicking::panic_bounds_check
+  2171: nop
+  2172: jmp 0x23a0
+  2177: mov byte ptr [rbx + 0x2d], 0x0
+  217b: lea r8, [rip] ; REL32 <anon-data>
+  2182: mov rcx, r14
+  2185: vzeroupper
+  2188: call 0x218d ; REL32 core::panicking::panic_bounds_check
+  218d: nop
+  218e: jmp 0x23a0
+  2193: mov byte ptr [rbx + 0x2d], 0x0
+  2197: lea r8, [rip] ; REL32 <anon-data>
+  219e: mov rcx, r14
+  21a1: call 0x21a6 ; REL32 core::panicking::panic_bounds_check
+  21a6: nop
+  21a7: jmp 0x23a0
+  21ac: lea r8, [rip] ; REL32 <anon-data>
+  21b3: mov rcx, r14
+  21b6: vzeroupper
+  21b9: call 0x21be ; REL32 core::panicking::panic_bounds_check
+  21be: nop
+  21bf: jmp 0x23a0
+  21c4: lea r8, [rip] ; REL32 <anon-data>
+  21cb: mov rcx, r14
+  21ce: call 0x21d3 ; REL32 core::panicking::panic_bounds_check
+  21d3: nop
+  21d4: jmp 0x23a0
+  21d9: mov byte ptr [rbx + 0x2d], 0x0
+  21dd: lea r8, [rip] ; REL32 <anon-data>
+  21e4: mov rcx, r14
+  21e7: vzeroupper
+  21ea: call 0x21ef ; REL32 core::panicking::panic_bounds_check
+  21ef: nop
+  21f0: jmp 0x23a0
+  21f5: mov byte ptr [rbx + 0x2e], 0x1
+  21f9: lea r8, [rip] ; REL32 <anon-data>
+  2200: mov rcx, r13
+  2203: vzeroupper
+  2206: call 0x220b ; REL32 core::panicking::panic_bounds_check
+  220b: nop
+  220c: jmp 0x23a0
+  2211: mov byte ptr [rbx + 0x2e], 0x1
+  2215: mov rcx, r8
+  2218: lea r8, [rip] ; REL32 <anon-data>
+  221f: vzeroupper
+  2222: call 0x2227 ; REL32 core::panicking::panic_bounds_check
+  2227: nop
+  2228: jmp 0x23a0
+  222d: mov byte ptr [rbx + 0x2e], 0x1
+  2231: lea r8, [rip] ; REL32 <anon-data>
+  2238: mov rdx, qword ptr [rbx + 0xb8]
+  223f: vzeroupper
+  2242: call 0x2247 ; REL32 core::panicking::panic_bounds_check
+  2247: nop
+  2248: jmp 0x23a0
+  224d: mov byte ptr [rbx + 0x2d], 0x1
+  2251: lea r8, [rip] ; REL32 <anon-data>
+  2258: mov rcx, r14
+  225b: vzeroupper
+  225e: call 0x2263 ; REL32 core::panicking::panic_bounds_check
+  2263: nop
+  2264: jmp 0x23a0
+  2269: mov byte ptr [rbx + 0x2d], 0x1
+  226d: lea r8, [rip] ; REL32 <anon-data>
+  2274: mov rcx, r14
+  2277: call 0x227c ; REL32 core::panicking::panic_bounds_check
+  227c: nop
+  227d: jmp 0x23a0
+  2282: mov byte ptr [rbx + 0x2e], 0x1
+  2286: lea r8, [rip] ; REL32 <anon-data>
+  228d: mov rcx, r9
+  2290: mov rdx, qword ptr [rbx + 0xb8]
+  2297: vzeroupper
+  229a: call 0x229f ; REL32 core::panicking::panic_bounds_check
+  229f: nop
+  22a0: jmp 0x23a0
+  22a5: mov byte ptr [rbx + 0x2d], 0x0
+  22a9: lea r8, [rip] ; REL32 <anon-data>
+  22b0: mov rcx, r14
+  22b3: vzeroupper
+  22b6: call 0x22bb ; REL32 core::panicking::panic_bounds_check
+  22bb: nop
+  22bc: jmp 0x23a0
+  22c1: mov qword ptr [rbx + 0x60], r9
+  22c5: lea rax, [rbx + 0x60]
+  22c9: mov qword ptr [rbx + 0x200], rax
+  22d0: lea rax, [rip] ; REL32 <usize as core::fmt::Display>::fmt
+  22d7: mov qword ptr [rbx + 0x208], rax
+  22de: mov rcx, qword ptr [rbx + 0x188]
+  22e5: mov qword ptr [rbx + 0x210], rcx
+  22ec: mov qword ptr [rbx + 0x218], rax
+  22f3: mov byte ptr [rbx + 0x2e], 0x1
+  22f7: lea rcx, [rip] ; REL32 <anon-data>
+  22fe: lea r8, [rip] ; REL32 <anon-data>
+  2305: lea rdx, [rbx + 0x200]
+  230c: vzeroupper
+  230f: call 0x2314 ; REL32 core::panicking::panic_fmt
+  2314: nop
+  2315: jmp 0x23a0
+  231a: mov ecx, 0x80
+  231f: mov edx, 0x100
+  2324: call 0x2329 ; REL32 alloc::alloc::handle_alloc_error
+  2329: nop
+  232a: jmp 0x23a0
+  232c: mov byte ptr [rbx + 0x2e], 0x1
+  2330: lea r8, [rip] ; REL32 <anon-data>
+  2337: mov rcx, r9
+  233a: mov rdx, qword ptr [rbx + 0x128]
+  2341: vzeroupper
+  2344: call 0x2349 ; REL32 core::panicking::panic_bounds_check
+  2349: nop
+  234a: jmp 0x23a0
+  234c: mov byte ptr [rbx + 0x2e], 0x1
+  2350: lea r8, [rip] ; REL32 <anon-data>
+  2357: mov rcx, r9
+  235a: mov rdx, qword ptr [rbx + 0x120]
+  2361: vzeroupper
+  2364: call 0x2369 ; REL32 core::panicking::panic_bounds_check
+  2369: nop
+  236a: jmp 0x23a0
+  236c: mov byte ptr [rbx + 0x2e], 0x1
+  2370: lea r8, [rip] ; REL32 <anon-data>
+  2377: mov rcx, r9
+  237a: mov rdx, qword ptr [rbx + 0x110]
+  2381: vzeroupper
+  2384: call 0x2389 ; REL32 core::panicking::panic_bounds_check
+  2389: nop
+  238a: jmp 0x23a0
+  238c: mov qword ptr [rbx + 0x38], rax
+  2390: lea r8, [rip] ; REL32 <anon-data>
+  2397: vzeroupper
+  239a: call 0x239f ; REL32 core::panicking::panic_bounds_check
+  239f: nop
+  23a0: ud2
+  23a2: nop word ptr cs:[rax + rax]
+<?dtor$327@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x23b0:
+  23b0: mov qword ptr [rsp + 0x10], rdx
+  23b5: push rbp
+  23b6: push r15
+  23b8: push r14
+  23ba: push r13
+  23bc: push r12
+  23be: push rsi
+  23bf: push rdi
+  23c0: push rbx
+  23c1: sub rsp, 0x88
+  23c8: lea rbp, [rdx + 0x80]
+  23cf: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  23d5: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  23db: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  23e1: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  23e7: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  23ed: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  23f3: and rdx, -0x80
+  23f7: mov rbx, rdx
+  23fa: mov rax, qword ptr [rbx + 0x38]
+  23fe: lock
+  23ff: dec qword ptr [rax]
+  2402: jne 0x2410
+  2404: lea rcx, [rbx + 0x3c0]
+  240b: call 0x2410 ; REL32 <alloc::sync::Arc<std::thread::thread::Inner, std::alloc::System>>::drop_slow
+  2410: vmovdqa xmm6, xmmword ptr [rsp + 0x70]
+  2416: vmovdqa xmm7, xmmword ptr [rsp + 0x60]
+  241c: vmovdqa xmm8, xmmword ptr [rsp + 0x50]
+  2422: vmovdqa xmm9, xmmword ptr [rsp + 0x40]
+  2428: vmovdqa xmm10, xmmword ptr [rsp + 0x30]
+  242e: vmovdqa xmm11, xmmword ptr [rsp + 0x20]
+  2434: add rsp, 0x88
+  243b: pop rbx
+  243c: pop rdi
+  243d: pop rsi
+  243e: pop r12
+  2440: pop r13
+  2442: pop r14
+  2444: pop r15
+  2446: pop rbp
+  2447: ret
+  2448: nop dword ptr [rax + rax]
+<?dtor$330@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x2450:
+  2450: mov qword ptr [rsp + 0x10], rdx
+  2455: push rbp
+  2456: push r15
+  2458: push r14
+  245a: push r13
+  245c: push r12
+  245e: push rsi
+  245f: push rdi
+  2460: push rbx
+  2461: sub rsp, 0x88
+  2468: lea rbp, [rdx + 0x80]
+  246f: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  2475: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  247b: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  2481: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  2487: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  248d: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  2493: and rdx, -0x80
+  2497: mov rbx, rdx
+  249a: lea rcx, [rbx + 0x200]
+  24a1: call 0x24a6 ; REL32 core::ptr::drop_glue::<boyko_threadpool::scope::ScopeShared>
+  24a6: vmovdqa xmm6, xmmword ptr [rsp + 0x70]
+  24ac: vmovdqa xmm7, xmmword ptr [rsp + 0x60]
+  24b2: vmovdqa xmm8, xmmword ptr [rsp + 0x50]
+  24b8: vmovdqa xmm9, xmmword ptr [rsp + 0x40]
+  24be: vmovdqa xmm10, xmmword ptr [rsp + 0x30]
+  24c4: vmovdqa xmm11, xmmword ptr [rsp + 0x20]
+  24ca: add rsp, 0x88
+  24d1: pop rbx
+  24d2: pop rdi
+  24d3: pop rsi
+  24d4: pop r12
+  24d6: pop r13
+  24d8: pop r14
+  24da: pop r15
+  24dc: pop rbp
+  24dd: ret
+  24de: nop
+<?dtor$331@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x24e0:
+  24e0: mov qword ptr [rsp + 0x10], rdx
+  24e5: push rbp
+  24e6: push r15
+  24e8: push r14
+  24ea: push r13
+  24ec: push r12
+  24ee: push rsi
+  24ef: push rdi
+  24f0: push rbx
+  24f1: sub rsp, 0x88
+  24f8: lea rbp, [rdx + 0x80]
+  24ff: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  2505: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  250b: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  2511: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  2517: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  251d: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  2523: and rdx, -0x80
+  2527: mov rbx, rdx
+  252a: lea rcx, [rbx + 0x200]
+  2531: call 0x2536 ; REL32 <alloc::vec::drain::Drain<boyko_ecs::ecs::core::schedule::conflict_graph::SystemIndex> as core::ops::drop::Drop>::drop
+  2536: mov byte ptr [rbx + 0x2d], 0x1
+  253a: vmovdqa xmm6, xmmword ptr [rsp + 0x70]
+  2540: vmovdqa xmm7, xmmword ptr [rsp + 0x60]
+  2546: vmovdqa xmm8, xmmword ptr [rsp + 0x50]
+  254c: vmovdqa xmm9, xmmword ptr [rsp + 0x40]
+  2552: vmovdqa xmm10, xmmword ptr [rsp + 0x30]
+  2558: vmovdqa xmm11, xmmword ptr [rsp + 0x20]
+  255e: add rsp, 0x88
+  2565: pop rbx
+  2566: pop rdi
+  2567: pop rsi
+  2568: pop r12
+  256a: pop r13
+  256c: pop r14
+  256e: pop r15
+  2570: pop rbp
+  2571: ret
+  2572: nop word ptr cs:[rax + rax]
+<?dtor$332@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x2580:
+  2580: mov qword ptr [rsp + 0x10], rdx
+  2585: push rbp
+  2586: push r15
+  2588: push r14
+  258a: push r13
+  258c: push r12
+  258e: push rsi
+  258f: push rdi
+  2590: push rbx
+  2591: sub rsp, 0x88
+  2598: lea rbp, [rdx + 0x80]
+  259f: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  25a5: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  25ab: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  25b1: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  25b7: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  25bd: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  25c3: and rdx, -0x80
+  25c7: mov rbx, rdx
+  25ca: mov rax, qword ptr [rbx + 0x50]
+  25ce: dec dword ptr [rax]
+  25d0: vmovdqa xmm6, xmmword ptr [rsp + 0x70]
+  25d6: vmovdqa xmm7, xmmword ptr [rsp + 0x60]
+  25dc: vmovdqa xmm8, xmmword ptr [rsp + 0x50]
+  25e2: vmovdqa xmm9, xmmword ptr [rsp + 0x40]
+  25e8: vmovdqa xmm10, xmmword ptr [rsp + 0x30]
+  25ee: vmovdqa xmm11, xmmword ptr [rsp + 0x20]
+  25f4: add rsp, 0x88
+  25fb: pop rbx
+  25fc: pop rdi
+  25fd: pop rsi
+  25fe: pop r12
+  2600: pop r13
+  2602: pop r14
+  2604: pop r15
+  2606: pop rbp
+  2607: ret
+  2608: nop dword ptr [rax + rax]
+<?dtor$333@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x2610:
+  2610: mov qword ptr [rsp + 0x10], rdx
+  2615: push rbp
+  2616: push r15
+  2618: push r14
+  261a: push r13
+  261c: push r12
+  261e: push rsi
+  261f: push rdi
+  2620: push rbx
+  2621: sub rsp, 0x88
+  2628: lea rbp, [rdx + 0x80]
+  262f: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  2635: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  263b: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  2641: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  2647: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  264d: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  2653: and rdx, -0x80
+  2657: mov rbx, rdx
+  265a: mov rax, qword ptr [rbx + 0x50]
+  265e: dec dword ptr [rax]
+  2660: mov byte ptr [rbx + 0x2d], 0x0
+  2664: vmovdqa xmm6, xmmword ptr [rsp + 0x70]
+  266a: vmovdqa xmm7, xmmword ptr [rsp + 0x60]
+  2670: vmovdqa xmm8, xmmword ptr [rsp + 0x50]
+  2676: vmovdqa xmm9, xmmword ptr [rsp + 0x40]
+  267c: vmovdqa xmm10, xmmword ptr [rsp + 0x30]
+  2682: vmovdqa xmm11, xmmword ptr [rsp + 0x20]
+  2688: add rsp, 0x88
+  268f: pop rbx
+  2690: pop rdi
+  2691: pop rsi
+  2692: pop r12
+  2694: pop r13
+  2696: pop r14
+  2698: pop r15
+  269a: pop rbp
+  269b: ret
+  269c: nop dword ptr [rax]
+<?dtor$334@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x26a0:
+  26a0: mov qword ptr [rsp + 0x10], rdx
+  26a5: push rbp
+  26a6: push r15
+  26a8: push r14
+  26aa: push r13
+  26ac: push r12
+  26ae: push rsi
+  26af: push rdi
+  26b0: push rbx
+  26b1: sub rsp, 0x88
+  26b8: lea rbp, [rdx + 0x80]
+  26bf: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  26c5: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  26cb: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  26d1: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  26d7: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  26dd: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  26e3: and rdx, -0x80
+  26e7: mov rbx, rdx
+  26ea: lea rcx, [rbx + 0x200]
+  26f1: call 0x26f6 ; REL32 core::ptr::drop_glue::<core::option::Option<boyko_ecs::ecs::core::profiling::zones::SystemSpan>>
+  26f6: mov byte ptr [rbx + 0x2d], 0x0
+  26fa: vmovdqa xmm6, xmmword ptr [rsp + 0x70]
+  2700: vmovdqa xmm7, xmmword ptr [rsp + 0x60]
+  2706: vmovdqa xmm8, xmmword ptr [rsp + 0x50]
+  270c: vmovdqa xmm9, xmmword ptr [rsp + 0x40]
+  2712: vmovdqa xmm10, xmmword ptr [rsp + 0x30]
+  2718: vmovdqa xmm11, xmmword ptr [rsp + 0x20]
+  271e: add rsp, 0x88
+  2725: pop rbx
+  2726: pop rdi
+  2727: pop rsi
+  2728: pop r12
+  272a: pop r13
+  272c: pop r14
+  272e: pop r15
+  2730: pop rbp
+  2731: ret
+  2732: nop word ptr cs:[rax + rax]
+<?dtor$335@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x2740:
+  2740: mov qword ptr [rsp + 0x10], rdx
+  2745: push rbp
+  2746: push r15
+  2748: push r14
+  274a: push r13
+  274c: push r12
+  274e: push rsi
+  274f: push rdi
+  2750: push rbx
+  2751: sub rsp, 0x88
+  2758: lea rbp, [rdx + 0x80]
+  275f: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  2765: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  276b: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  2771: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  2777: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  277d: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  2783: and rdx, -0x80
+  2787: mov rbx, rdx
+  278a: mov rax, qword ptr [rbx + 0x50]
+  278e: dec dword ptr [rax]
+  2790: vmovdqa xmm6, xmmword ptr [rsp + 0x70]
+  2796: vmovdqa xmm7, xmmword ptr [rsp + 0x60]
+  279c: vmovdqa xmm8, xmmword ptr [rsp + 0x50]
+  27a2: vmovdqa xmm9, xmmword ptr [rsp + 0x40]
+  27a8: vmovdqa xmm10, xmmword ptr [rsp + 0x30]
+  27ae: vmovdqa xmm11, xmmword ptr [rsp + 0x20]
+  27b4: add rsp, 0x88
+  27bb: pop rbx
+  27bc: pop rdi
+  27bd: pop rsi
+  27be: pop r12
+  27c0: pop r13
+  27c2: pop r14
+  27c4: pop r15
+  27c6: pop rbp
+  27c7: ret
+  27c8: nop dword ptr [rax + rax]
+<?dtor$336@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x27d0:
+  27d0: mov qword ptr [rsp + 0x10], rdx
+  27d5: push rbp
+  27d6: push r15
+  27d8: push r14
+  27da: push r13
+  27dc: push r12
+  27de: push rsi
+  27df: push rdi
+  27e0: push rbx
+  27e1: sub rsp, 0x88
+  27e8: lea rbp, [rdx + 0x80]
+  27ef: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  27f5: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  27fb: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  2801: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  2807: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  280d: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  2813: and rdx, -0x80
+  2817: mov rbx, rdx
+  281a: mov r15, qword ptr [rbx + 0x30]
+  281e: mov r12, qword ptr [rbx + 0x48]
+  2822: cmp r12, r15
+  2825: mov rdi, qword ptr [rbx + 0xc8]
+  282c: mov r14, qword ptr [rip] ; REL32 __imp_SwitchToThread
+  2833: jb 0x2895
+  2835: lock
+  2836: sub qword ptr [rdi], r15
+  2839: mov byte ptr [rbx + 0x2e], 0x1
+  283d: vmovaps xmm6, xmmword ptr [rsp + 0x70]
+  2843: vmovaps xmm7, xmmword ptr [rsp + 0x60]
+  2849: vmovaps xmm8, xmmword ptr [rsp + 0x50]
+  284f: vmovaps xmm9, xmmword ptr [rsp + 0x40]
+  2855: vmovaps xmm10, xmmword ptr [rsp + 0x30]
+  285b: vmovaps xmm11, xmmword ptr [rsp + 0x20]
+  2861: add rsp, 0x88
+  2868: pop rbx
+  2869: pop rdi
+  286a: pop rsi
+  286b: pop r12
+  286d: pop r13
+  286f: pop r14
+  2871: pop r15
+  2873: pop rbp
+  2874: ret
+  2875: nop word ptr cs:[rax + rax]
+  2880: add rcx, qword ptr [rdi + 0x188]
+  2887: add rdx, r8
+  288a: mov qword ptr [rdx], rcx
+  288d: inc r12
+  2890: cmp r12, r15
+  2893: je 0x2835
+  2895: mov rcx, qword ptr [rdi + 0x80]
+  289c: xor esi, esi
+  289e: jmp 0x28a9
+  28a0: inc esi
+  28a2: mov rcx, qword ptr [rdi + 0x80]
+  28a9: mov rax, qword ptr [rdi + 0x188]
+  28b0: mov rdx, qword ptr [rdi + 0x190]
+  28b7: lea r10, [rax - 0x1]
+  28bb: and r10, rcx
+  28be: mov r8, r10
+  28c1: shl r8, 0x4
+  28c5: mov r9, qword ptr [rdx + r8]
+  28c9: lea r11, [rcx + 0x1]
+  28cd: cmp r11, r9
+  28d0: jne 0x2930
+  28d2: inc r10
+  28d5: cmp r10, qword ptr [rdi + 0x180]
+  28dc: jb 0x28ee
+  28de: neg rax
+  28e1: and rax, rcx
+  28e4: add rax, qword ptr [rdi + 0x188]
+  28eb: mov r9, rax
+  28ee: mov rax, rcx
+  28f1: lock
+  28f2: cmpxchg qword ptr [rdi + 0x80], r9
+  28fa: je 0x2880
+  28fc: cmp esi, 0x6
+  28ff: mov ecx, 0x6
+  2904: cmovb ecx, esi
+  2907: mov edx, 0x1
+  290c: nop dword ptr [rax]
+  2910: pause
+  2912: shrx r8d, edx, ecx
+  2917: inc edx
+  2919: test r8d, r8d
+  291c: je 0x2910
+  291e: cmp esi, 0x7
+  2921: adc esi, 0x0
+  2924: mov rcx, rax
+  2927: jmp 0x28a9
+  2929: nop dword ptr [rax]
+  2930: cmp r9, rcx
+  2933: jne 0x2980
+  2935: lock
+  2936: or dword ptr [rsp], 0x0
+  293a: mov rax, qword ptr [rdi + 0x100]
+  2941: cmp rax, rcx
+  2944: je 0x2835
+  294a: cmp esi, 0x6
+  294d: mov eax, 0x6
+  2952: cmovb eax, esi
+  2955: mov ecx, 0x1
+  295a: nop word ptr [rax + rax]
+  2960: pause
+  2962: shrx edx, ecx, eax
+  2967: inc ecx
+  2969: test edx, edx
+  296b: je 0x2960
+  296d: cmp esi, 0x7
+  2970: adc esi, 0x0
+  2973: mov rcx, qword ptr [rdi + 0x80]
+  297a: jmp 0x28a9
+  297f: nop
+  2980: cmp esi, 0x6
+  2983: ja 0x29a2
+  2985: mov eax, 0x1
+  298a: nop word ptr [rax + rax]
+  2990: pause
+  2992: shrx ecx, eax, esi
+  2997: inc eax
+  2999: test ecx, ecx
+  299b: je 0x2990
+  299d: jmp 0x28a0
+  29a2: call r14
+  29a5: cmp esi, 0xb
+  29a8: jae 0x28a2
+  29ae: jmp 0x28a0
+  29b3: nop word ptr cs:[rax + rax]
+<?dtor$358@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x29c0:
+  29c0: mov qword ptr [rsp + 0x10], rdx
+  29c5: push rbp
+  29c6: push r15
+  29c8: push r14
+  29ca: push r13
+  29cc: push r12
+  29ce: push rsi
+  29cf: push rdi
+  29d0: push rbx
+  29d1: sub rsp, 0x88
+  29d8: lea rbp, [rdx + 0x80]
+  29df: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  29e5: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  29eb: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  29f1: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  29f7: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  29fd: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  2a03: and rdx, -0x80
+  2a07: mov rbx, rdx
+  2a0a: mov rax, qword ptr [rbx + 0x50]
+  2a0e: dec dword ptr [rax]
+  2a10: mov byte ptr [rbx + 0x2d], 0x0
+  2a14: vmovdqa xmm6, xmmword ptr [rsp + 0x70]
+  2a1a: vmovdqa xmm7, xmmword ptr [rsp + 0x60]
+  2a20: vmovdqa xmm8, xmmword ptr [rsp + 0x50]
+  2a26: vmovdqa xmm9, xmmword ptr [rsp + 0x40]
+  2a2c: vmovdqa xmm10, xmmword ptr [rsp + 0x30]
+  2a32: vmovdqa xmm11, xmmword ptr [rsp + 0x20]
+  2a38: add rsp, 0x88
+  2a3f: pop rbx
+  2a40: pop rdi
+  2a41: pop rsi
+  2a42: pop r12
+  2a44: pop r13
+  2a46: pop r14
+  2a48: pop r15
+  2a4a: pop rbp
+  2a4b: ret
+  2a4c: nop dword ptr [rax]
+<?dtor$359@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x2a50:
+  2a50: mov qword ptr [rsp + 0x10], rdx
+  2a55: push rbp
+  2a56: push r15
+  2a58: push r14
+  2a5a: push r13
+  2a5c: push r12
+  2a5e: push rsi
+  2a5f: push rdi
+  2a60: push rbx
+  2a61: sub rsp, 0x88
+  2a68: lea rbp, [rdx + 0x80]
+  2a6f: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  2a75: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  2a7b: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  2a81: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  2a87: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  2a8d: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  2a93: and rdx, -0x80
+  2a97: mov rbx, rdx
+  2a9a: movzx edi, byte ptr [rbx + 0x2d]
+  2a9e: cmp qword ptr [rbx + 0x60], 0x0
+  2aa3: je 0x2abd
+  2aa5: mov rsi, qword ptr [rbx + 0x68]
+  2aa9: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  2aaf: mov rcx, rax
+  2ab2: xor edx, edx
+  2ab4: mov r8, rsi
+  2ab7: call qword ptr [rip] ; REL32 __imp_HeapFree
+  2abd: cmp qword ptr [rbx + 0x90], 0x0
+  2ac5: sete al
+  2ac8: or dil, al
+  2acb: test dil, 0x1
+  2acf: jne 0x2aec
+  2ad1: mov rsi, qword ptr [rbx + 0x98]
+  2ad8: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+  2ade: mov rcx, rax
+  2ae1: xor edx, edx
+  2ae3: mov r8, rsi
+  2ae6: call qword ptr [rip] ; REL32 __imp_HeapFree
+  2aec: mov byte ptr [rbx + 0x2e], 0x1
+  2af0: vmovaps xmm6, xmmword ptr [rsp + 0x70]
+  2af6: vmovaps xmm7, xmmword ptr [rsp + 0x60]
+  2afc: vmovaps xmm8, xmmword ptr [rsp + 0x50]
+  2b02: vmovaps xmm9, xmmword ptr [rsp + 0x40]
+  2b08: vmovaps xmm10, xmmword ptr [rsp + 0x30]
+  2b0e: vmovaps xmm11, xmmword ptr [rsp + 0x20]
+  2b14: add rsp, 0x88
+  2b1b: pop rbx
+  2b1c: pop rdi
+  2b1d: pop rsi
+  2b1e: pop r12
+  2b20: pop r13
+  2b22: pop r14
+  2b24: pop r15
+  2b26: pop rbp
+  2b27: ret
+  2b28: nop dword ptr [rax + rax]
+<?dtor$364@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x2b30:
+  2b30: mov qword ptr [rsp + 0x10], rdx
+  2b35: push rbp
+  2b36: push r15
+  2b38: push r14
+  2b3a: push r13
+  2b3c: push r12
+  2b3e: push rsi
+  2b3f: push rdi
+  2b40: push rbx
+  2b41: sub rsp, 0x88
+  2b48: lea rbp, [rdx + 0x80]
+  2b4f: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  2b55: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  2b5b: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  2b61: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  2b67: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  2b6d: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  2b73: and rdx, -0x80
+  2b77: mov rbx, rdx
+  2b7a: cmp byte ptr [rbx + 0x2e], 0x0
+  2b7e: je 0x2bc4
+  2b80: lea rcx, [rbx + 0x3c0]
+  2b87: call 0x2b8c ; REL32 <boyko_threadpool::scope::Scope as core::ops::drop::Drop>::drop
+  2b8c: vmovdqa xmm6, xmmword ptr [rsp + 0x70]
+  2b92: vmovdqa xmm7, xmmword ptr [rsp + 0x60]
+  2b98: vmovdqa xmm8, xmmword ptr [rsp + 0x50]
+  2b9e: vmovdqa xmm9, xmmword ptr [rsp + 0x40]
+  2ba4: vmovdqa xmm10, xmmword ptr [rsp + 0x30]
+  2baa: vmovdqa xmm11, xmmword ptr [rsp + 0x20]
+  2bb0: add rsp, 0x88
+  2bb7: pop rbx
+  2bb8: pop rdi
+  2bb9: pop rsi
+  2bba: pop r12
+  2bbc: pop r13
+  2bbe: pop r14
+  2bc0: pop r15
+  2bc2: pop rbp
+  2bc3: ret
+  2bc4: vmovdqa xmm6, xmmword ptr [rsp + 0x70]
+  2bca: vmovdqa xmm7, xmmword ptr [rsp + 0x60]
+  2bd0: vmovdqa xmm8, xmmword ptr [rsp + 0x50]
+  2bd6: vmovdqa xmm9, xmmword ptr [rsp + 0x40]
+  2bdc: vmovdqa xmm10, xmmword ptr [rsp + 0x30]
+  2be2: vmovdqa xmm11, xmmword ptr [rsp + 0x20]
+  2be8: add rsp, 0x88
+  2bef: pop rbx
+  2bf0: pop rdi
+  2bf1: pop rsi
+  2bf2: pop r12
+  2bf4: pop r13
+  2bf6: pop r14
+  2bf8: pop r15
+  2bfa: pop rbp
+  2bfb: ret
+  2bfc: nop dword ptr [rax]
+<?dtor$367@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x2c00:
+  2c00: mov qword ptr [rsp + 0x10], rdx
+  2c05: push rbp
+  2c06: push r15
+  2c08: push r14
+  2c0a: push r13
+  2c0c: push r12
+  2c0e: push rsi
+  2c0f: push rdi
+  2c10: push rbx
+  2c11: sub rsp, 0x88
+  2c18: lea rbp, [rdx + 0x80]
+  2c1f: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  2c25: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  2c2b: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  2c31: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  2c37: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  2c3d: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  2c43: and rdx, -0x80
+  2c47: mov rbx, rdx
+  2c4a: mov rax, qword ptr [rbx + 0xe0]
+  2c51: mov ecx, dword ptr [rbx + 0x8c]
+  2c57: mov dword ptr [rax + 0x10], ecx
+  2c5a: mov rax, qword ptr [rbx + 0x138]
+  2c61: movzx ecx, word ptr [rbx + 0x5e]
+  2c65: mov word ptr [rax], cx
+  2c68: mov rax, qword ptr [rbx + 0x148]
+  2c6f: mov rcx, qword ptr [rbx + 0x140]
+  2c76: mov qword ptr [rax], rcx
+  2c79: mov rax, qword ptr [rbx + 0xe8]
+  2c80: lock
+  2c81: dec qword ptr [rax + 0x300]
+  2c88: mov byte ptr [rbx + 0x2f], 0x1
+  2c8c: vmovdqa xmm6, xmmword ptr [rsp + 0x70]
+  2c92: vmovdqa xmm7, xmmword ptr [rsp + 0x60]
+  2c98: vmovdqa xmm8, xmmword ptr [rsp + 0x50]
+  2c9e: vmovdqa xmm9, xmmword ptr [rsp + 0x40]
+  2ca4: vmovdqa xmm10, xmmword ptr [rsp + 0x30]
+  2caa: vmovdqa xmm11, xmmword ptr [rsp + 0x20]
+  2cb0: add rsp, 0x88
+  2cb7: pop rbx
+  2cb8: pop rdi
+  2cb9: pop rsi
+  2cba: pop r12
+  2cbc: pop r13
+  2cbe: pop r14
+  2cc0: pop r15
+  2cc2: pop rbp
+  2cc3: ret
+  2cc4: nop word ptr cs:[rax + rax]
+<?dtor$368@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA> @+0x2cd0:
+  2cd0: mov qword ptr [rsp + 0x10], rdx
+  2cd5: push rbp
+  2cd6: push r15
+  2cd8: push r14
+  2cda: push r13
+  2cdc: push r12
+  2cde: push rsi
+  2cdf: push rdi
+  2ce0: push rbx
+  2ce1: sub rsp, 0x88
+  2ce8: lea rbp, [rdx + 0x80]
+  2cef: vmovdqa xmmword ptr [rsp + 0x20], xmm11
+  2cf5: vmovdqa xmmword ptr [rsp + 0x30], xmm10
+  2cfb: vmovdqa xmmword ptr [rsp + 0x40], xmm9
+  2d01: vmovdqa xmmword ptr [rsp + 0x50], xmm8
+  2d07: vmovdqa xmmword ptr [rsp + 0x60], xmm7
+  2d0d: vmovdqa xmmword ptr [rsp + 0x70], xmm6
+  2d13: and rdx, -0x80
+  2d17: mov rbx, rdx
+  2d1a: cmp byte ptr [rbx + 0x2f], 0x0
+  2d1e: mov rcx, qword ptr [rbx + 0xf0]
+  2d25: je 0x2d32
+  2d27: lock
+  2d28: dec qword ptr [rcx]
+  2d2b: jne 0x2d32
+  2d2d: call 0x2d32 ; REL32 <alloc::sync::Arc<boyko_threadpool::thread_pool::ThreadPool>>::drop_slow
+  2d32: vmovaps xmm6, xmmword ptr [rsp + 0x70]
+  2d38: vmovaps xmm7, xmmword ptr [rsp + 0x60]
+  2d3e: vmovaps xmm8, xmmword ptr [rsp + 0x50]
+  2d44: vmovaps xmm9, xmmword ptr [rsp + 0x40]
+  2d4a: vmovaps xmm10, xmmword ptr [rsp + 0x30]
+  2d50: vmovaps xmm11, xmmword ptr [rsp + 0x20]
+  2d56: add rsp, 0x88
+  2d5d: pop rbx
+  2d5e: pop rdi
+  2d5f: pop rsi
+  2d60: pop r12
+  2d62: pop r13
+  2d64: pop r14
+  2d66: pop r15
+  2d68: pop rbp
+  2d69: ret
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::apply | size=1 (section RawDataSize) | copies=1 | sha256=bfb4f2a33b98810ab2a429e03b44fcfa2e8edae9bd589a241de5c7fcc040c1d3
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::apply> @+0x0:
+     0: ret
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::check_change_tick | size=64 (section RawDataSize) | copies=1 | sha256=1f80893059b2e50a93b55596de574023219c07ba10d9fb66f4ecd07e3f66cd32
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::check_change_tick> @+0x0:
+     0: mov eax, dword ptr [rcx + 0xe0]
+     6: mov r8d, dword ptr [rcx + 0xe4]
+     d: mov r9d, edx
+    10: sub r9d, eax
+    13: lea r10d, [rdx + 0x3dcc5000]
+    1a: cmp r9d, 0xc233b001
+    21: cmovae eax, r10d
+    25: mov dword ptr [rcx + 0xe0], eax
+    2b: sub edx, r8d
+    2e: cmp edx, 0xc233b001
+    34: cmovae r8d, r10d
+    38: mov dword ptr [rcx + 0xe4], r8d
+    3f: ret
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::has_deferred | size=3 (section RawDataSize) | copies=1 | sha256=4180e57ab6de6ea731119347ae54f349e582839d05e05b941eb669f62efc3bc6
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::has_deferred> @+0x0:
+     0: xor eax, eax
+     2: ret
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize | size=204 (section RawDataSize) | copies=1 | sha256=bcf4c1a7a5740da6f641f74e87e399bd8604db86aa58d4b7f21e14f59086ac37
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize> @+0x0:
+     0: push rbp
+     1: push rsi
+     2: push rdi
+     3: sub rsp, 0x100
+     a: lea rbp, [rsp + 0x80]
+    12: and rsp, -0x20
+    16: cmp byte ptr [rcx + 0x100], 0x1
+    1d: jne 0x2a
+    1f: lea rsp, [rbp + 0x80]
+    26: pop rdi
+    27: pop rsi
+    28: pop rbp
+    29: ret
+    2a: mov eax, dword ptr [rdx + 0x13b8]
+    30: add eax, 0x3dcc5000
+    35: mov dword ptr [rcx + 0xe0], eax
+    3b: mov dword ptr [rcx + 0xe4], eax
+    41: lea rax, [rsp + 0x20]
+    46: mov rdi, rcx
+    49: mov rcx, rax
+    4c: call 0x51 ; REL32 <boyko_ecs::ecs::core::system::filtered_access_set::FilteredAccessSet>::new
+    51: vmovaps ymm0, ymmword ptr [rsp + 0xc0]
+    5a: vmovaps ymmword ptr [rdi + 0xa0], ymm0
+    62: mov rsi, qword ptr [rsp + 0xe0]
+    6a: vmovaps ymm0, ymmword ptr [rsp + 0xa0]
+    73: vmovaps ymmword ptr [rdi + 0x80], ymm0
+    7b: vmovaps ymm0, ymmword ptr [rsp + 0x20]
+    81: vmovaps ymm1, ymmword ptr [rsp + 0x40]
+    87: vmovaps ymm2, ymmword ptr [rsp + 0x60]
+    8d: vmovaps ymm3, ymmword ptr [rsp + 0x80]
+    96: vmovaps ymmword ptr [rdi + 0x60], ymm3
+    9b: vmovaps ymmword ptr [rdi + 0x40], ymm2
+    a0: vmovaps ymmword ptr [rdi + 0x20], ymm1
+    a5: vmovaps ymmword ptr [rdi], ymm0
+    a9: vzeroupper
+    ac: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+    b2: mov rcx, rax
+    b5: xor edx, edx
+    b7: mov r8, rsi
+    ba: call qword ptr [rip] ; REL32 __imp_HeapFree
+    c0: mov byte ptr [rdi + 0x100], 0x1
+    c7: jmp 0x1f
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::meta | size=4 (section RawDataSize) | copies=1 | sha256=814105ff4f73389b539a0a0c3208dafc76f75ed10d6be77171e859a03b69bc57
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::meta> @+0x0:
+     0: mov rax, rcx
+     3: ret
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::name | size=15 (section RawDataSize) | copies=1 | sha256=44472b443f47b70da11287fa7ab10cc3c35abe987b981ce36f4390ab09a5049f
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::name> @+0x0:
+     0: mov rax, qword ptr [rcx + 0xc0]
+     7: mov rdx, qword ptr [rcx + 0xc8]
+     e: ret
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher | size=52 (section RawDataSize) | copies=1 | sha256=68d2fe4a980d35faeb198194a64cfaffd1e08560d774ba0918bc9b16475ab66d
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher> @+0x0:
+     0: sub rsp, 0x28
+     4: cmp byte ptr [rcx + 0x100], 0x0
+     b: je 0x1a
+     d: lock
+     e: inc qword ptr [rip] ; REL32 phase9_scheduler::bench_schedule_two_disjoint::A
+    15: add rsp, 0x28
+    19: ret
+    1a: lea rcx, [rip] ; REL32 <anon-data>
+    21: lea r8, [rip] ; REL32 <anon-data>
+    28: mov edx, 0x3a
+    2d: call 0x32 ; REL32 core::option::expect_failed
+    32: ud2
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe | size=52 (section RawDataSize) | copies=1 | sha256=a691fa490291547d46c77a275975fb1ad854fc475c21789eb9447b1f758a2cb4
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe> @+0x0:
+     0: sub rsp, 0x28
+     4: cmp byte ptr [rcx + 0x100], 0x1
+     b: jne 0x1a
+     d: lock
+     e: inc qword ptr [rip] ; REL32 phase9_scheduler::bench_schedule_two_disjoint::A
+    15: add rsp, 0x28
+    19: ret
+    1a: lea rcx, [rip] ; REL32 <anon-data>
+    21: lea r8, [rip] ; REL32 <anon-data>
+    28: mov edx, 0x3a
+    2d: call 0x32 ; REL32 core::option::expect_failed
+    32: ud2
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_change_ticks | size=14 (section RawDataSize) | copies=1 | sha256=028671234b512837cdf8a8e0cec4373307168e319a659bfd86e8c0d9605fb89f
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_change_ticks> @+0x0:
+     0: mov dword ptr [rcx + 0xe0], edx
+     6: mov dword ptr [rcx + 0xe4], r8d
+     d: ret
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_zone | size=8 (section RawDataSize) | copies=1 | sha256=f94977ccfffa654954b4389320a1bccf3ef73f6c3a8087643db59c350d5dd620
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_zone> @+0x0:
+     0: mov word ptr [rcx + 0xf2], dx
+     7: ret
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher | size=52 (section RawDataSize) | copies=1 | sha256=b43bc7aa5a7033343f05105455b0f82c10ec23cb79d2d1c2663a3dc21ddc1dd1
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher> @+0x0:
+     0: sub rsp, 0x28
+     4: cmp byte ptr [rcx + 0x100], 0x0
+     b: je 0x1a
+     d: lock
+     e: inc qword ptr [rip] ; REL32 phase9_scheduler::bench_schedule_two_disjoint::B
+    15: add rsp, 0x28
+    19: ret
+    1a: lea rcx, [rip] ; REL32 <anon-data>
+    21: lea r8, [rip] ; REL32 <anon-data>
+    28: mov edx, 0x3a
+    2d: call 0x32 ; REL32 core::option::expect_failed
+    32: ud2
+== phase9_scheduler | H-3 | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe | size=52 (section RawDataSize) | copies=1 | sha256=13d7157385f8b0418d125c5f7a2c61a4963329e06b8f31904ee01e728e8419b6
+<<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe> @+0x0:
+     0: sub rsp, 0x28
+     4: cmp byte ptr [rcx + 0x100], 0x1
+     b: jne 0x1a
+     d: lock
+     e: inc qword ptr [rip] ; REL32 phase9_scheduler::bench_schedule_two_disjoint::B
+    15: add rsp, 0x28
+    19: ret
+    1a: lea rcx, [rip] ; REL32 <anon-data>
+    21: lea r8, [rip] ; REL32 <anon-data>
+    28: mov edx, 0x3a
+    2d: call 0x32 ; REL32 core::option::expect_failed
+    32: ud2
+== phase9_scheduler | H-3 | core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()>> | size=49 (section RawDataSize) | copies=1 | sha256=1ce506ef77ea2541976feff5ca0452c4ab2230b625c924021788e205b156c130
+<core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()>>> @+0x0:
+     0: push rsi
+     1: sub rsp, 0x20
+     5: mov rsi, qword ptr [rcx + 0xe8]
+     c: test rsi, rsi
+     f: je 0x2b
+    11: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+    17: mov rcx, rax
+    1a: xor edx, edx
+    1c: mov r8, rsi
+    1f: add rsp, 0x20
+    23: pop rsi
+    24: jmp qword ptr [rip] ; REL32 __imp_HeapFree
+    2b: add rsp, 0x20
+    2f: pop rsi
+    30: ret
