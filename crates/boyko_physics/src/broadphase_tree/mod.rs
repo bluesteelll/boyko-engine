@@ -66,8 +66,9 @@
 //! # Storage
 //!
 //! Every durable buffer is a [`ScratchColumn`] on the `BROADPHASE_TREE` cohort of
-//! `scratch_ids.rs` (ids 399..389). Function-local scratch is the traversal stack and the radix
-//! histogram. No `Vec`, no pool, no atomics.
+//! `scratch_ids.rs` (ids 417..407 since L11 C2 narrowed the solver cohort; 399..389 at the
+//! design). Function-local scratch is the traversal stack and the radix histogram. No `Vec`,
+//! no pool, no atomics.
 
 use boyko_diag::zone;
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};

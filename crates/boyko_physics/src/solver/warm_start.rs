@@ -1,5 +1,11 @@
 //! The cross-frame warm-start impulse cache (P2 W3 — the C3 rebuild-each-frame
-//! flat table).
+//! flat table) of the reference [`SoftStepSolver`](super::SoftStepSolver).
+//!
+//! Since L11 C1 the colored solver keeps its own warm store — one record per
+//! manifold in stream order, found by a merge-join, in `solver/warm_records.rs` —
+//! and no longer probes or refills this table. The table stays as the reference
+//! solver's store and as the oracle the colored records are checked against
+//! (`colored_tests.rs`, `g2_records`).
 //!
 //! TGS-Soft is a velocity-level sequential-impulse solver: each frame it must
 //! re-converge every contact's accumulated impulse from a seed. Zero-seeding
@@ -22,13 +28,9 @@
 //!    FRESHLY-ZEROED `write` table, in deterministic manifold order;
 //! 3. swaps `read` ↔ `write` at frame end.
 //!
-//! A contact of a FROZEN (sleeping) island is not solved, so it has no converged
-//! impulse this frame. The colored solver re-inserts its entry from `read` under
-//! its current-row key, after the solved contacts and in ascending manifold
-//! order, so every entry is still rewritten every frame and the island wakes
-//! with the impulses it froze with (B1). Which frozen keys are carried depends on
-//! `read`'s key set (a miss drops the entry), never on its slot layout, so the
-//! determinism below still holds.
+//! The reference solver has no sleep path, so every entry it stores is a solved
+//! contact's. (The colored solver's B1 carry of a frozen island's impulses lives
+//! with its records, `warm_records.rs`.)
 //!
 //! Because the write table is a pure function of *this frame's* contact set
 //! (cleared then refilled in manifold order, no insertion history carried over),
@@ -48,7 +50,7 @@
 //! from the control run's velocity, 1.26e4× the control's resting noise (measured by
 //! `warm_start_survivor_moved_into_a_deleted_row_matches_control_velocity` in
 //! `tests/row_keyed_state_defect_a.rs`, whose failure message reports both). The
-//! solvers translate each lookup through the gather's row identity map
+//! solver translates each lookup through the gather's row identity map
 //! (`row_identity.rs`, interim; U7's `PairCache` replaces it): stored keys stay in
 //! current rows, and a lookup uses the
 //! rows the pair held when the table was written. A pair whose row order flipped, or
@@ -222,8 +224,8 @@ fn shift_for(len: usize) -> u32 {
 /// depends only on the key set, not on the insertion order, while the slot each
 /// key lands in depends on the insertion SEQUENCE (a colliding key takes the next
 /// free slot, which an earlier insert may have filled). Bit-identical slot
-/// contents therefore need a deterministic insertion sequence, which the solvers'
-/// canonical store provides — the determinism property.
+/// contents therefore need a deterministic insertion sequence, which the solver's
+/// manifold-order store provides — the determinism property.
 pub struct WarmStartTable {
     /// The slots; length is always a power of two (`mask = len - 1`). Empty
     /// slots carry the [`EMPTY`] sentinel key. Backed by a [`ScratchColumn`]

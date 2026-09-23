@@ -297,7 +297,8 @@ pub struct PhysicsConfig {
     /// **Bit-identity is the gate:** the parallel result is BIT-FOR-BIT identical to
     /// the single-threaded colored solve for ANY worker count (the disjoint-body
     /// partition makes each body's accumulation independent of which worker runs
-    /// which group, and the canonical IM-2b warm store is worker-count-independent).
+    /// which group, and the warm store — a write by manifold index — is
+    /// worker-count-independent).
     /// When `false` — or when no pool is attached to the running thread, or the
     /// attached pool has a single worker — the colored solve runs the O5
     /// single-threaded path, BYTE-IDENTICAL to O5 (the O6 0%-gate). The one-worker
@@ -2454,7 +2455,7 @@ const OCC_WORD_BITS: u32 = 64;
 /// trigger).
 ///
 /// ⚠ **RETIRED AS THE DISPATCH GATE.** The whole-solve gate now reads the widest
-/// COLOR's slot count (`ContactColumns::widest_color_slots`, colored.rs) against
+/// COLOR's slot count (`CohortColumns::widest_color_slots`, colored.rs) against
 /// the solver's own `MIN_PARALLEL_SLOTS_PER_COLOR`. This const survives as the
 /// island-size threshold the P2 tests are written against; nothing in the solve
 /// path reads it.
@@ -2658,7 +2659,7 @@ impl ConstraintGraph {
     /// is a set of body-disjoint manifolds, and manifolds in different islands are
     /// always body-disjoint, so `n` disjoint pairs give `max_island_constraints ==
     /// 1` and a single color of `n` slots. The whole-solve gate reads
-    /// `ContactColumns::widest_color_slots` instead — see
+    /// `CohortColumns::widest_color_slots` instead — see
     /// [`LARGE_ISLAND_CONSTRAINTS`](crate::resources::LARGE_ISLAND_CONSTRAINTS) for
     /// the full account.
     ///

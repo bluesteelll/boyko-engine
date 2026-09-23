@@ -1156,12 +1156,12 @@ pub fn physics_build_graph(
 ///
 /// Calls [`ColoredSoftStepSolver::solve_colored`](crate::solver::ColoredSoftStepSolver::solve_colored)
 /// directly (not through [`RigidSolver::solve`], whose signature carries no
-/// graph): the solver builds its SoA `ContactColumns` in color order, runs the
+/// graph): the solver builds its cohort tables (`CohortColumns`) in color order, runs the
 /// substep loop solving colors `0..n_colors` sequentially (a Gauss-Seidel sweep
-/// across colors), then stores the converged impulses in canonical order
-/// (IM-2b). Registered ONLY on the colored path, where it stands in for
-/// `physics_solve_step` — the generic step stage is NOT registered, so the two
-/// never both run. A world wired with the reference
+/// across colors), then stores the converged impulses by manifold index
+/// (`solver::warm_records`, L11 C1). Registered ONLY on the colored path, where it
+/// stands in for `physics_solve_step` — the generic step stage is NOT registered,
+/// so the two never both run. A world wired with the reference
 /// [`SoftStepSolver`](crate::solver::SoftStepSolver) never reaches this stage (that
 /// solver is byte-untouched). Per color the sweep runs the O7 AVX2 cohort kernel
 /// when [`PhysicsConfig::simd_solve`] is on (the default) and the scalar oracle

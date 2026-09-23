@@ -1,0 +1,313 @@
+{
+ "generated": "2026-09-22T08:18:13.491+03:00",
+ "rows_json": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win4b\\rows.json",
+ "toolchain": "stable-x86_64-pc-windows-msvc",
+ "profile": "parity",
+ "logical_cpus": 16,
+ "binaries": {
+  "parent": {
+   "exe": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win4b\\bin\\runner_parent.exe",
+   "sha256": "8dfd01435495a7e38956fbe04b07eca918438c8948c45b5288bc2000e419970c",
+   "commit": "146a1125edffdfbfd078e5343d6226379ed04a70"
+  },
+  "tip": {
+   "exe": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win4b\\bin\\runner_tip.exe",
+   "sha256": "29dbd993ea817c1125f36a09e1b06efc65116ae0e0edadaeb9d602991eac3df0",
+   "commit": "f8873aaeef02474e95a205f543d57511fe010691"
+  }
+ },
+ "rows": {
+  "J-As": {
+   "id": "J-As",
+   "block": "main",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "as"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0x32d5e235342b4143",
+   "ws": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null
+  },
+  "J-A": {
+   "id": "J-A",
+   "block": "main",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "expected_pose": "0x32d5e235342b4143",
+   "ws": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null
+  },
+  "R": {
+   "id": "R",
+   "block": "main",
+   "args": [
+    "--scene",
+    "rest",
+    "--solver",
+    "colored"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 1100,
+   "window": [
+    600,
+    1100
+   ],
+   "armed": true,
+   "expected_pose": "0x87e561d20589d4a5",
+   "ws": [
+    1,
+    8
+   ],
+   "dry_steps": 30,
+   "dry_window": [
+    20,
+    30
+   ],
+   "canary_of": null,
+   "frozen_by": null
+  },
+  "R-S": {
+   "id": "R-S",
+   "block": "main",
+   "args": [
+    "--scene",
+    "rest",
+    "--sleeping"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 800,
+   "window": [
+    300,
+    800
+   ],
+   "armed": true,
+   "frozen_by": 300,
+   "expected_pose": "0x2a2b7926a48aab00",
+   "ws": [
+    1,
+    8
+   ],
+   "dry_steps": 30,
+   "dry_window": [
+    20,
+    30
+   ],
+   "canary_of": null
+  },
+  "S16": {
+   "id": "S16",
+   "block": "main",
+   "args": [
+    "--scene",
+    "s16",
+    "--cfg",
+    "a"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 300,
+   "window": [
+    0,
+    300
+   ],
+   "armed": true,
+   "expected_pose": "0x8877dbb1192e9b92",
+   "ws": [
+    1
+   ],
+   "dry_steps": 10,
+   "dry_window": [
+    0,
+    10
+   ],
+   "canary_of": null,
+   "frozen_by": null
+  },
+  "J-As-a": {
+   "id": "J-As-a",
+   "block": "armed",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "as"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": true,
+   "expected_pose": "0x32d5e235342b4143",
+   "ws": [
+    1,
+    8
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "canary_of": null,
+   "frozen_by": null
+  },
+  "J-C": {
+   "id": "J-C",
+   "block": "canary",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "as"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": true,
+   "canary_of": "J-As-a",
+   "expected_pose": "0x32d5e235342b4143",
+   "once_per_binary": true,
+   "ws": [
+    1
+   ],
+   "dry_steps": 12,
+   "dry_window": [
+    0,
+    12
+   ],
+   "frozen_by": null
+  }
+ },
+ "protocol": {
+  "k_per_cell": 12,
+  "passes": 2,
+  "rounds_per_pass": 6,
+  "armed_block": {
+   "k_per_cell": 12,
+   "passes": 2,
+   "rounds_per_pass": 6,
+   "note": "reduced to 3 rounds per pass (K=6) if time presses; the report says which"
+  },
+  "order": "pass 0: W ascending; inside a W group row by row, parent then tip; pass 1: the whole list reversed",
+  "warmup_per_pass": {
+   "exe": "bin/runner_tip.exe",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "as",
+    "--workers",
+    "8",
+    "--steps",
+    "500"
+   ],
+   "timed": false
+  },
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "rerun_contaminated_once_at_end_of_pass": true,
+  "band_void": false,
+  "placement": "P-none"
+ },
+ "blocks": [
+  {
+   "name": "main",
+   "passes": 2,
+   "rounds": 6
+  },
+  {
+   "name": "armed",
+   "passes": 2,
+   "rounds": 6
+  },
+  {
+   "name": "canary",
+   "passes": 1,
+   "rounds": 1
+  }
+ ],
+ "gate_dir": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\d9f1cf70-4eed-44f3-9e33-2efbf030fc1a\\scratchpad\\win4b\\gate"
+}

@@ -1157,6 +1157,268 @@ rehearsals, criterion's `sample.json` / `benchmark.json` / `tukey.json` and its 
 
 ---
 
+## 12. Physics — the solve setup per contact (L11 C1+C2 against C0), the design's G9 — TIMED 2026-09-22 (window 4b)
+
+**RESULT, 2026-09-22, window 4b (L11 C1+C2 against C0), G9 of `levers/L11-solve-setup/02-DESIGN-REV1.md`.**
+One window, complete, under the window-3 protocol block (the 2026-09-19 ruling: median over K separate
+processes of the window mean; spread = min-max, IQR, the median's SE; claimed iff |effect| >
+2*hypot(spread_A, spread_B), printed under all three readings, G9's SE form the gate; 5-s receipts before and
+after every process, > 5 % or a build process => re-run once at the end of the pass; 10-s receipt and three
+quiet 60-s polls before each block; no band void; P-none; every process ran with `--expect-pose`).
+**K = 12** (two passes x six rounds; G9's own K). **Jolt v5.6.0 is the only reference (owner ruling
+2026-09-21) and it was not re-run: its window-3 cells are used** (`918fd2b7`, K=6: 9.828 / 5.770 / 3.581 /
+2.569 / 2.388 ms at W = 1 / 2 / 4 / 8 / 16; window 3 is `docs/measurements/2026-09-21-physics-window3/` at
+`2ce03b66` on `merge/ke16-into-ecsnative`, not on this lane). Owner's workstation (Ryzen 9 5900HS, 8C/16T,
+High performance, AC; the owner's agent sessions, Telegram and a browser open - see contamination). Timed
+08:20:42-10:12:19 +03:00, after the window-4 runner had finished. rustc 1.98.1 `host: x86_64-pc-windows-msvc`,
+no RUSTFLAGS, `CARGO_INCREMENTAL=0`, cargo `parity` (inherits `release`: fat LTO, default CGU), zone tier
+`dev`. Binaries: parent = C0 `146a1125` (`git archive` into a scratch tree, cold build into
+`D:/wt/_targets/l11-parent-msvc`; the test-only setup digest + the `J-As` runner row, **no solver change**)
+`runner_parent` sha256 `8dfd0143`; tip = C2 `f8873aae` (= C0 + C1 `691891c4` + C2, the lane's HEAD,
+`D:/wt/lighttable` clean, built into `D:/wt/_targets/vkval-msvc`) `runner_tip` `29dbd993`; each build's
+`Compiling boyko-physics (path)` line names its tree (`bin/COMMIT.txt`). Ancestry: window 3's `de06b6c9`
+(L5 C4) is an ancestor of the parent; between them the only `boyko_physics` source commits are A1b
+`8af0e3b9` and C0 itself. Poses per row bit-identical on both binaries in all 410 used processes (J rows
+`0x32d5e235342b4143`, R `0x87e561d20589d4a5`, R-S `0x2a2b7926a48aab00`, S16 `0x8877dbb1192e9b92`, the C0
+tester's values; `expect_pose: "match"` 410/410, against the parent's untimed gate pose, with a 501-step red
+control that exits 4); counters identical (J rows 4,524.246 manifolds per step over [0,500), 109.32 waves;
+R 6,662.3; R-S 6,675 all frozen; S16 16); void 0, drops 0, disarmed ring traffic 0, workers = W, mask
+`0xffff`.
+
+**Rows.** `J-As` (`--scene jolt --gap 0.5 --cfg as`: colored, `simd_solve` on, `parallel_solve` /
+`parallel_broadphase` / `parallel_narrowphase` = W>1, AllPairs, sleeping off) and `J-A` (`--cfg a`: the same
+with `simd_solve` off) at W 1/2/4/8/16, 500 steps, disarmed; `R` (`--scene rest --solver colored`, the
+default config; `--parallel-solve` at W=8 is a no-op since L4) at W 1/8, 1100 steps, window [600,1100),
+armed; `R-S` (`--scene rest --sleeping --frozen-by 300`) at W 1/8, 800 steps, window [300,800), armed; `S16`
+(`--scene s16 --cfg a`) at W 1, 300 steps, armed; the armed `J-As-a` (`--cfg as --arm-profiler`) at W 1/8;
+the canary `J-C` (`J-As-a` + `--canary-frac 0.05`) once per binary at W 1. Jolt not run. 34 cells,
+parent/tip interleaved inside each W group, pass 1 reversed, one untimed warm-up per pass; 410 slots, 42
+re-runs, **K = 12 in every cell**, 0 dropped, 0 non-zero exits.
+
+**Contamination.** 499 5-s receipts: median 1.44 % busy, p90 4.81 %, max 12.35 %, **42 over 5 %** (37 of
+them in main pass 1, 08:55-09:57: the owner's sessions, Telegram, a browser - never a build process); every
+hot original has a clean re-run. Main pass 0 (08:20-08:52), the armed block (09:59-10:09) and the canary
+(10:12) were quiet. The parent's W >= 2 cells sit 0.4-1.4 ms higher in pass 1 than in pass 0 (the tip's
+0.1-0.4 ms), and the pooled min-max ranges carry that: where a claim below holds under IQR and SE but not
+min-max, that is the reason. Pass 0 alone (K = 6 per side) claims every `J-As` cell under all three
+readings. In every `J-As` cell the two binaries' min-max ranges are disjoint (the parent's fastest process
+is slower than the tip's slowest).
+
+| W | J-As parent | J-As tip | Delta ms (effect; claimed r/i/s) | J-A parent -> tip | Jolt v5.6.0 (window 3) | J-As tip / v5.6.0 |
+|---|---|---|---|---|---|---|
+| 1 | 10.693 [10.438-11.620] | **8.697** [8.395-9.308] | **-1.996 (-18.7 %; n/Y/Y; ranges disjoint)** | 19.582 -> 18.932 (-3.3 %, n/Y/Y) | 9.828 [9.518-11.364] | **0.885** |
+| 2 | 7.659 [7.624-9.178] | 6.221 [6.169-7.062] | -1.438 (-18.8 %; n/n/Y; disjoint) | 12.325 -> 11.465 (-7.0 %, SE) | 5.770 | 1.078 |
+| 4 | 6.176 [6.042-7.646] | 4.923 [4.890-5.334] | -1.253 (-20.3 %; n/Y/Y; disjoint) | 8.529 -> 7.769 (-8.9 %, SE) | 3.581 | 1.374 |
+| 8 | 5.342 [5.215-6.903] | **4.240** [4.204-5.004] | **-1.103 (-20.6 %; n/n/Y; disjoint)** | 6.592 -> 5.910 (-10.4 %, SE) | 2.569 [2.501-3.124] | **1.650** |
+| 16 | 5.469 [5.344-6.737] | 4.357 [4.329-5.201] | -1.112 (-20.3 %; n/n/Y; disjoint) | 6.663 -> 5.660 (-15.1 %, SE) | 2.388 | 1.824 |
+
+`R`: 14.300 -> 11.161 ms at W=1 (-3.139, -22.0 %, n/Y/Y) and 6.781 -> 5.246 at W=8 (-1.535, -22.6 %, SE) -
+the lever's largest absolute gain, on 6,662 manifolds per step. `R-S`: -1.5 % / -3.7 %, not claimed either
+way. `S16`: -1.2 %, not claimed. Armed `J-As-a`: 10.658 -> 8.554 (W=1, -2.105 ms, -19.8 %) and 5.275 -> 4.242
+(W=8, -1.033, -19.6 %), claimed under all three readings (SE 0.2-0.8 %); armed against disarmed is not
+claimed on either binary (-1.65...+0.05 %), so the armed row is a fair proxy for T. Scaling: `J-As`
+T(1)/T(8) = 2.002 (parent) and 2.051 (tip); W=16 against W=8 +2.4 % / +2.8 %, not claimed - neither binary
+scales beyond eight workers.
+
+- **G9 gates (the design's bars = 0.6 x the lower predicted Delta, as the design lists them): T(1) `J-As`
+  -1.996 ms <= -0.81 PASS (2.5x the bar; the worst process pairing, tip-slowest against parent-fastest, is
+  still -1.130); T(8) -1.103 <= -0.61 PASS (1.8x); solve_build -0.573 / -0.542 ms (W=1 / 8) <= -0.29 PASS
+  (2x; worst pairing -0.550); store -0.141 / -0.134 <= -0.11 PASS (worst pairing -0.131 / -0.118); wide
+  colours "not claimed slower" holds - faster, -27.7 % / -28.5 % at W=1 / 8, claimed above SE (the design's
+  -10...-25 % is exceeded); cfg-A (`J-A`) not claimed slower at any W - faster at all five, claimed under SE
+  (W=1 under IQR too). warm_apply's bar (-0.19 ms) is C3's (the 8-lane-wide apply) and C3 is not in this
+  tip; C1's merge-join already reads -0.092 ms (0.611 -> 0.519 at W=1), reported, not gated.** The
+  window-report's arithmetic gated against bars discounted twice (0.486 / 0.366 / 0.174 / 0.066); every gate
+  passes under both; the design's are binding and are the ones quoted here.
+- **Per stage, `J-As-a`, us per manifold on the design's 4,524.2 (the same denominator before and after -
+  the lever is bit-identical), parent -> tip at W=1 / W=8 (reading A: per process the window mean, then the
+  median over K):** solve_build 0.191 -> 0.064 / 0.189 -> 0.069 (0.864 -> 0.291 / 0.856 -> 0.314 ms, -66 %);
+  warm_apply 0.135 -> 0.115 / 0.137 -> 0.118 (0.611 -> 0.519 / 0.621 -> 0.532 ms, -15 %); store 0.036 ->
+  0.005 / 0.035 -> 0.006 (0.163 -> 0.022 / 0.160 -> 0.026 ms, -87 %); **setup total 0.363 -> 0.184 / 0.362 ->
+  0.193 (1.643 -> 0.832 / 1.638 -> 0.871 ms, -49 %; serial at both W)**; wide colours 0.770 -> 0.557 /
+  0.193 -> 0.138 (3.484 -> 2.520 / 0.875 -> 0.625 ms); the solve span 1.157 -> 0.762 / 0.583 -> 0.357
+  (5.235 -> 3.445 / 2.635 -> 1.615 ms, -34 % / -39 %). Broadphase and narrowphase moved < 0.08 ms (not lever
+  effects). Where the -2.1 ms at W=1 comes from: setup -0.811, wide colours -0.964, executor gap -0.156,
+  broadphase -0.079, narrowphase -0.040, the rest -0.02; sum -2.07 against the T delta -2.105. Design
+  targets: solve_build 0.25-0.55 ms (measured 0.291), store 0.04-0.08 (0.022, below the band), wide colours
+  2.68-3.22 (2.520, below), T(1) 8.67-9.79 (8.697), T(8) 3.93-4.69 (4.240); the setup band 0.44-0.93 holds
+  the measured 0.832 only with C3's warm_apply outstanding. The parent's baselines (solve_build 0.864,
+  warm 0.611, store 0.163, setup 1.643) sit below the design's P0 column (1.038 / 0.614 / 0.270 / 1.922,
+  taken from J-B on the P0 tip); the realized deltas are against the actual parent, as G9 says.
+- **The bridge to window 3 holds:** the parent's `J-A`@W1 against window 3's `J-A`@W1 (equal knobs, both
+  trees) 19.582 against 19.483, +0.5 % (n/n/n); its `J-As`@W1 against window 3's shipped default
+  `D-L5`@W1 (the same code path at one worker) 10.693 against 10.738, -0.4 % (n/n/n); each median inside the
+  other's min-max. `J-A`@W8 sits -2.58 ms under window 3's, which is L5's measured gain (window 3: -2.435 ms
+  for C4 against C2). The W=8 `J-As`/`D-L5` pairing (-0.1 %) is knob-mismatched (`parallel_broadphase` on in
+  `as`, off in the default) and is a caveat, not a bridge. Cross-window uncertainty for any mixed claim:
+  about 0.5 % at W=1.
+- **Against Jolt v5.6.0 (window 3's cells, the only reference): at W=1 the tip's `J-As`, 8.697 ms, is
+  0.885x its 9.828 (-11.5 %; claimed under IQR and SE, not min-max - the Jolt W=1 cell holds one 11.364 ms
+  process); per manifold per step over [100,500) with each side's own count (boyko 4,519.3; v5.6.0 8,489.0)
+  1.69x (1.938 against 1.1445 us) - inside the design's predicted 1.68-1.90 at its good edge. At W=8 1.650x
+  its 2.569 (+65 %, claimed under all three); per manifold 3.07x; inside the design's predicted 1.58-1.88 /
+  2.95-3.52. The parent was 1.088x and 2.079x; window 3's shipped default `D-L5` was 1.093x and 2.081x.**
+  At W = 2 / 4 / 16: 1.078x (SE only) / 1.374x / 1.824x. cfg-A (`J-A`) stays 1.9-2.4x at every W; it is
+  not the shipped configuration. The honest W=1 statement, as in window 3: 0.89x on the step, 1.69x per
+  manifold, the truth between (boyko carries 1.88x fewer manifolds). The remaining W=8 gap is the serial
+  0.87 ms setup, the 1.92 ms AllPairs broadphase and the 0.52 ms narrowphase, none of which this lever
+  addresses.
+- **The canary (`J-C`, K = 1 per binary):** the span reads the injected spin on both binaries (parent 543,367
+  ns against 543,045 injected, +0.06 %; tip 428,595 against 428,103, +0.12 %); the wall rise is seen on the
+  parent (+0.494 ms for a 0.543 ms spin, outside the `J-As-a` cell's min-max) and lies inside the spread on
+  the tip (+0.198 ms for 0.428, inside 8.384-8.960) - not resolvable at K = 1.
+- **Facts for the design, not claims:** `R-S` (all frozen) holds the window's only tip-slower stages -
+  solve_build +16 us per step (0.034 -> 0.050 ms, +48 %, IQR and SE) and narrow colours +1.5 us (+68 %) on
+  6,675 frozen manifolds; its tip store, 0.127-0.129 ms, is above the design's predicted 0.05-0.10 for the
+  B1 carry (the parent's 0.316 / 0.259 sit at the design's "today"); T is not claimed either way. The
+  parent's `R`-row setup spans are bimodal by process (solve_build 1.19-1.43 in eight, 1.87-2.12 in four;
+  store 0.24-0.31 / 0.51-0.68) where the tip's are tight - P0's "a process draws its own speed" on the
+  per-point table and hash probe the lever deleted, and why the `R` setup deltas are claimed under SE only.
+
+**Not claimed / not measured.** Per-contact parity with v5.6.0 (1.69x / 3.07x per manifold; the design said
+a zero setup still leaves 1.77x, the remainder is collision detection - L5, the tree broadphase, L9); a Jolt
+per-stage setup comparison (Jolt not run; its setup sits inside FindCollisions); setup scaling at W=8 (the
+setup is serial on both binaries, 0.83-0.87 ms on the tip at both W; C4's in-binary A/B not run); **C3's
+warm_apply gate** (-0.19 ms; C3 is not in this tip); memory receipts (the design's ~2 MB committed-page
+shrink); the pooled min-max reading for the J and R rows (pass-1 contamination; pass 0 alone claims them);
+`parallel_broadphase` isolated at W=8; W=16 against W=8 on either binary; the broadphase / narrowphase
+deltas as lever effects; the wall rise of the canary on the tip at K = 1. Only values, poses, counters and
+spans are claimed; every pose and counter is identical across the two binaries.
+
+Receipts: `docs/measurements/2026-09-22-l11-solve-setup/`: `README.md` (the protocol block and the binaries
+table), `analysis.md` (this reduction, verbatim), `window_report.md`, `rows.json`, `bin/SHA256SUMS`,
+`bin/COMMIT.txt` (no exe committed), `logs/`, `raw/` (`runs.jsonl`, `manifest.json`, `window_state.json`,
+`window_log.txt`, `wait_log.txt`, `main-p{0,1}/`, `armed-p{0,1}/`, `canary-p0/`, `analysis.json`,
+`tables.md`, `sensitivity.md`), `gate/` (the pose files and the red control), `tools/`, `analyst/`
+(`reduction.json`, `tables_analyst.md`). `dry/` and `test/` were rehearsals and are not in the tree, nor are
+the exes and `__pycache__/`.
+
+## 13. Physics — the combined tip (tree broadphase + L11 C3) against Jolt v5.6.0, and L11 C3's warm_apply gate (G9) — TIMED 2026-09-23 (window 5)
+
+**RESULT, 2026-09-23, window 5: the headline on tip `cbd86a65` (L11 C0-C3 + the integration line's tree
+broadphase C1+C3, A1b, A3, hwrt) and G9 on C3 against its parent `0ca312bd` (the same lane one commit earlier:
+C0-C2 + the line, no C3).** One window, complete, under the window-3 protocol block (the 2026-09-19 ruling:
+median over K separate processes of the window mean; spread = min-max, IQR, the median's SE; claimed iff
+|effect| > 2*hypot(spread_A, spread_B), printed under all three readings r / i / s - this window requires BOTH
+min-max and SE, G9's own form is SE; 5-s receipts before and after every process, > 5 % => re-run once at the
+end of the pass; 10-s receipt and three quiet 60-s polls before each pass; a build or lane process at any point
+of a timed pass voids the pass; no band void; P-none; every process ran with `--expect-pose`). **K = 6** (two
+passes x three rounds per block; tree/AllPairs and parent/tip alternating inside each W group, pass 1
+reversed). **Jolt v5.6.0 is the only reference (owner ruling 2026-09-21) and it was not re-run: its window-3
+cells are used** (`918fd2b7`, K=6: 9.828 / 5.770 / 3.581 / 2.569 / 2.388 ms at W = 1 / 2 / 4 / 8 / 16;
+window 3 is `docs/measurements/2026-09-21-physics-window3/`, on this lane since `0ca312bd`). Owner's
+workstation (Ryzen 9 5900HS, 8C/16T, High performance, AC). Timed 00:40:17-03:12:50 +03:00; the blocks that
+count: headline 02:16-02:48, g9 02:51-03:04, armed 03:07-03:12. rustc 1.98.1 `x86_64-pc-windows-msvc`, no
+RUSTFLAGS, `CARGO_INCREMENTAL=0`, cargo `parity` (inherits `release`: fat LTO, default CGU), zone tier `dev`.
+Binaries: parent = `0ca312bd` (`git archive` into a scratch tree, cold build into
+`D:/wt/_targets/l11-parent-msvc`) `runner_parent` sha256 `3993684b`; tip = `cbd86a65` (the lane's HEAD,
+`D:/wt/lighttable` clean, built into `D:/wt/_targets/vkval-msvc`) `runner_tip` `9c7caff1`; each build's
+`Compiling boyko-physics (path)` line names its tree (`README.md`, `logs/build_*.log`). `cbd86a65^` =
+`0ca312bd`, and C3 touches only `crates/boyko_physics` (`solver/colored.rs` and two test files). Poses
+bit-identical on every binary and arm in all 196 processes that produced a result (J `0x32d5e235342b4143` on
+`--cfg default` with either broadphase and on `--cfg as`; rest `0xee2a67a98434919a`; `expect_pose: "match"`
+against the parent's untimed gate pose; six 501-step red controls, three per binary, exit 4 - the gate can
+fail); counters identical on both binaries; TreeDiag `static_rebuilds 1, members 1`, all else 0, on every tree
+process and all zero on AllPairs; void 0, workers = W, mask `0xffff`, printed config field-equal parent/tip.
+
+**Rows.** Headline, tip only, disarmed, 500 steps: `HL-D-tree` / `HL-D-allpairs` (`--scene jolt --gap 0.5 --cfg
+default --broadphase tree|allpairs`, window 4's `T-D-*`) at W 1/2/4/8; `HL-R-tree` / `HL-R-allpairs` (`--scene
+rest --cfg default`) at W 1/8. G9: `J-As` (`--cfg as`: colored, `simd_solve` on, the three parallel flags =
+W>1, AllPairs, sleeping off) parent/tip at W 1/8, disarmed; the armed twins `J-As-a` (`--arm-profiler`) at
+W 1/8. 16 cells, 120 slots, 25 re-runs, 117 slots used; 3 dropped because the original and its re-run were
+both hot, so `HL-D-tree` W1, `HL-D-allpairs` W2 and tip `J-As` W8 are K = 5 (a make-up outside the protocol
+set ran each once more); 0 non-zero exits.
+
+**Contamination.** Three attempts of the headline's pass 0 were VOIDED by build or lane processes (00:52 two
+`rustc`, 00:57 `cargo` appearing, 01:07 `cargo` and another lane's test binary under
+`D:/wt/_targets/joltab-msvc`); the idle rule then waited 69 polls (01:07-02:15). None of their 42 timed
+processes is in a cell. Protocol set, 145 processes: before-receipts median 2.70 %, max 4.97 %, 0 over 5 %;
+after-receipts median 2.95 %, p90 6.71 %, max 13.20 %, 28 over 5 % (25 hot originals, 3 hot re-runs). The
+during-process witness over the used set: median 1.48 %, p95 4.55 %, max 7.20 % - about 4x window 4b's
+0.33 %.
+
+| W | tree (`--cfg default --broadphase tree`) | AllPairs (shipped default) | Jolt v5.6.0 (window 3) | tree / v5.6.0 (effect; claimed r/i/s) | AllPairs / v5.6.0 | tree / AllPairs |
+|---|---|---|---|---|---|---|
+| 1 | **7.106** [6.891-7.286] K=5 | 8.782 [8.528-9.136] | 9.828 [9.518-11.364] | **0.723 (-27.7 %; n/Y/Y)** | 0.894 (n/n/Y) | 0.809 (-19.1 %; Y/Y/Y) |
+| 2 | 4.659 [4.469-5.559] | 6.435 [6.244-6.557] K=5 | 5.770 [5.703-5.818] | 0.807 (-19.3 %; n/Y/Y) | 1.115 (Y/Y/Y) | 0.724 (-27.6 %; n/Y/Y) |
+| 4 | 3.315 [3.297-3.398] | 4.976 [4.867-5.561] | 3.581 [3.519-3.663] | 0.926 (-7.4 %; n/Y/Y) | 1.389 (Y/Y/Y) | 0.666 (-33.4 %; Y/Y/Y) |
+| 8 | **2.716** [2.520-2.963] | 4.296 [4.213-4.539] | 2.569 [2.501-3.124] | **1.057 (+5.7 %; n/n/n)** | 1.672 (Y/Y/Y) | 0.632 (-36.8 %; Y/Y/Y) |
+
+Rest (tip, no Jolt reference): tree against AllPairs 9.768 against 11.274 ms at W=1 (-13.4 %, n/Y/Y) and
+3.803 against 5.397 at W=8 (-29.5 %, Y/Y/Y).
+
+- **The headline: with the tree broadphase the tip's default config is 0.723x Jolt v5.6.0 at W=1 (7.106
+  against 9.828 ms, -2.72 ms; claimed under IQR and SE, not min-max - the min-max failure is Jolt's own
+  window-3 cell, which holds one 11.364 ms process; without it 0.726x under all three, a sensitivity reading,
+  not the ruled statistic) and 1.057x at W=8 (2.716 against 2.569 ms, +0.147; not claimed under any reading -
+  the two cannot be told apart at eight workers in this window).** 0.807x / 0.926x at W = 2 / 4 (IQR and SE).
+  The shipped AllPairs default on the same binary is 0.894x (SE) / 1.115x / 1.389x / 1.672x at W 1/2/4/8, and
+  the tree beats it on that binary at every W (all three readings at W 1/4/8, IQR and SE at W=2). Per manifold
+  per step over [100,500), each side's own count (boyko 4,519.26, v5.6.0 8,489.0): tree 1.38x / 1.53x / 1.72x
+  / 1.96x Jolt at W 1/2/4/8 - the per-step lead rests on boyko's 1.88x smaller contact set, and the truth lies
+  between the two readings. T(1)/T(8): tree 2.616, AllPairs 2.044, Jolt 3.825. Since window 4 (`T-D-tree` on
+  `a46b8287`): 9.026 -> 7.106 ms at W=1 (0.918x -> 0.723x) and 3.699 -> 2.716 at W=8 (1.440x -> 1.057x),
+  cross-window, the code difference L11 C1-C3.
+- **The tree is still not the shipped default, and C4 (the flip) stays DEFERRED:** every `--cfg default`
+  process prints AllPairs under Manual select and the tree rows force the kind; no tree row here is armed, so
+  window 4's stop rules (G4 rule 1 `J snapshot` 0.443 > 0.30, the G5 tree span 0.476 / 0.466 > 0.36 / 0.35,
+  rules 6 and 9) were not re-taken and stand, as does the query-cost investigation they call for.
+- **G9 on C3 - warm_apply PASS.** Armed `J-As-a` at W=1, reading B (per-process median over [100,500), the
+  design's and window 4b's convention): parent 0.5285 [0.5265-0.5297] -> tip 0.2960 [0.2949-0.2978] ms, Delta
+  -0.2325 ms (-44.0 %) against the -0.19 bar (the design's listed delta, already the 0.6x realized-gain bar,
+  not discounted a second time), margin 0.0425, claimed under all three readings, the worst process pairing
+  still -0.2287. At W=8 -0.2348 (0.5391 -> 0.3043), claimed; reading A (the window mean) -0.2264 / -0.2310,
+  claimed. 0.74x the lower predicted Delta (-0.314); the tip's 0.296 ms is 0.0654 us per manifold, inside the
+  design's 0.15-0.30 ms target at its slow edge; against window 4b's C2 value 0.519 (cross-window) -0.223.
+  "Wide colours not claimed slower" holds (the kernel -0.077 / +0.0006 ms, n/n/n). Setup (build + warm +
+  store) 0.876 -> 0.656 at W=1 and 0.890 -> 0.672 at W=8, inside the design's 0.44-0.93 band; solve_build,
+  store, broadphase and narrowphase do not move (C3 does not touch them). Counters identical: 4,519 manifolds,
+  9,559 pairs, 11 colours (9 wide), 108 waves, 17,054 points per step.
+- **C3 on the step:** `J-As` 8.859 -> 8.627 ms at W=1 (-0.232, -2.6 %) and 4.726 -> 4.510 at W=8 (-0.216,
+  -4.6 %), not claimed at K=6 - the step gain is the warm_apply gain, at K=6's SE resolution; the armed wall at
+  W=1 is -0.348 ms (SE only). The design sets no separate step gate for C3 (C1+C2 passed T(1)/T(8) in window
+  4b). Cumulative L11 C0 -> C3, chained across windows 4b and 5: -2.23 ms at W=1 and -1.32 ms at W=8.
+- **Bridges.** (1) The tip's AllPairs default row against window 4's `T-D-allpairs` (10.554 / 5.491) does not
+  reproduce literally and cannot - the tip carries L11 C0-C3, A1b and A3. With the lever's measured deltas
+  subtracted, the chain predicts 8.326 / 4.172 against the measured 8.782 / 4.296: residuals +5.5 % / +3.0 %,
+  inside the chain's bars, so it holds as a chain. (2) This window's parent `J-As` against window 4b's tip
+  (the same solver code; the line merge between them): W=1 1.019 (reproduces, n/n/n); **W=8 1.115 (+11.5 %),
+  does NOT reproduce under SE or IQR** (the armed twin +6.0 %, holds), with the code-identical kernel +4.1 % at
+  W=8 and -0.2 % at W=1 - machine state at W=8 is the likely reading; a W8-only code cost is not ruled out.
+  In-window comparisons are unaffected (interleaved; parent and tip moved together). **Every cross-window W=8
+  ratio here (tree/Jolt 1.057, AllPairs/Jolt 1.672, window 4's 3.699 -> 2.716) is qualified**: a 6-11 %
+  correction leaves tree/Jolt at W=8 unclaimed either way and AllPairs/Jolt claimed.
+- **What the remaining W=8 gap is made of** (arithmetic from the tip's armed `J-As-a` spans with window 4's
+  tree broadphase span swapped in; the budget reproduces the measured tree row to -2.5 % at W=8 and +0.9 % at
+  W=1): 1.392 ms of the row does not shrink with W - the tree broadphase 0.4665 (query 0.411), serial-in-solve
+  0.771 (solve_build 0.336, warm_apply 0.304 after C3, integrate 0.080, store 0.031, gravity 0.013),
+  build_graph / gather / apply 0.154. At window 4's 334 ns per queried row (design 100-150) the query is
+  0.225-0.287 ms over the design at W=8, larger than the whole +0.147 ms gap to Jolt (not measured: at the
+  design's query cost the row would read 2.43-2.49 ms, 0.95-0.97x). L11's own C4 (D10, the parallel fill):
+  solve_build(8) after C3 is 7.45 % of T(8) on `J-As` tip, above D10's 5 % trigger - reported, not decided.
+
+**Not claimed / not measured.** Tree against Jolt under both spreads at any W (W 1/2/4 under IQR and SE only,
+W=8 not at all); the tree as the shipped default (C4 deferred; no G4 arm, tree span or query cost
+re-measured, since the tree rows are disarmed); a Jolt per-stage comparison (Jolt not run); the tree's C4/C5, the sleeper set,
+churn, R-S and Auto-select (sleeping off everywhere, `sleeper_rebuilds` 0); **C3's other G9 rows** (J-A's cfg-A
+"not claimed slower", R, R-S, S16, W 2/4/16, K=12, the canary) - C3 has passed warm_apply and "wide colours not
+claimed slower" on `J-As-a`, the rest of its G9 is open; C3's step gain on the disarmed rows; tree against
+AllPairs under min-max at W=2 and on rest W=1; the make-up processes. Open: bridge 2 at W=8 can be settled by
+interleaving window 4b's `runner_tip` (`29dbd993`) with this window's parent on `J-As` at W=8 (about a minute
+timed). L7 is retired after C3 (`levers/00-RULINGS.md`, the L11 block).
+
+Receipts: `docs/measurements/2026-09-23-combined-tree-l11/`: `README.md` (the protocol block, the binaries
+table with the `Compiling` lines, what was reused from window 3 and why), `analysis.md` (the analyst's
+reduction, verbatim), `rows.json`, `bin/SHA256SUMS`, `bin/COMMIT.txt` (no exe committed), `logs/`, `raw/`
+(`runs.jsonl`, `manifest.json`, `window_state.json`, `window_log.txt`, `wait_log.txt`, the counted
+`headline-p0-v3/`, `headline-p1/`, `g9-p{0,1}/`, `armed-p{0,1}/`, the voided `headline-p0/`, `-v1/`, `-v2/`,
+`makeup/`, `analysis.json`, `tables.md`, `process_receipts.md`; one `pose.bin` per distinct pose, not one per
+process), `gate/` (the two reference poses and the red controls), `tools/`, `analyst/` (`reduction.json`,
+`tables.txt`). `test/` was a rehearsal and is not in the tree, nor are the exes, `__pycache__/` and the
+duplicate pose files.
+
+---
+
 ## When an entry is done
 
 Strike it with the date and the receipt's location, rather than deleting it. An entry that was run

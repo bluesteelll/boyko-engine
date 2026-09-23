@@ -334,6 +334,7 @@ struct RankBlock {                  // 320 B, HOT: one per (cohort, rank)
   - `cargo test --workspace --all-targets --no-fail-fast` with **zero pin moves**.
 - **G6, correctness bounds:** A7-R1, A7-R2, the sleep suites, `support_loss_wakes_sleepers`, `frozen_island_warm_start`, `row_keyed_state_defect_a` all pass with assertions byte-unchanged.
 - **G7, census:** 0 heap per step after warm-up, and scope/chunk pins unchanged (C1–C3). C4: +1 scope, pinned, plus a 1-worker twin of G-L4-1 that must allocate 0.
+  - **Correction (2026-09-21, after C2's census adjudication):** "scope/chunk pins unchanged (C1–C3)" was a prediction, and it did not survive C2's capture shrink. Scope did not move (134 on every frame), but the colour task's closure shrank with the view it captures — `ContactSolveView` 200 B → `CohortSolveView` 40 B, the spawned closure 264 → 104 B, its `ScopedCell` 280 → 120 B, so 34 cells fit a 4 KiB `ScopeBlock` chunk where 14 did — and the 96 colour scopes a step that spawned 15..=23 tasks at W=4 no longer take a second chunk. The release S1c pins moved DOWN: chunk 230 → 134, dispatch MAX 365 → 269, on every one of 4,352 long-run steps (−96 per step, frame for frame, against a C1 control rebuilt from `git archive`; the 17 × 256-step protocol of `alloc_frame_census.rs`, header "S1c after L11 C2"); the debug pins did not move. This is the census's own re-pin case — a narrowing with no headroom either way — not a widening, and "0 heap per step after warm-up" holds as written. The attribution binary's row D lost its `four > two` witness for the same reason (W=2 == W=4 == W=8 on the shipped kernel: a colour spawns at most 32 tasks at W=8, since `n_chunks` is a ceiling the cohort-snapped cut walk rounds down, and 32 × 120 B fits one block); it now pins `chunk == scope` per frame at W = 2/4/8 and keeps the strict lane-growth assertion where the model predicts growth — on the scalar cut walk (`simd_solve = false`), W=8 against W=4.
 - **G8, Miri:** kernel, fill and store at small n. C4: scalar-parallel and fill on `std::thread::scope`.
 - **Named mutations, each recorded red before its commit lands:**
 
@@ -373,7 +374,7 @@ struct RankBlock {                  // 320 B, HOT: one per (cohort, rank)
 - **Values:** nothing. A red pin is a defect, not a re-bless.
 - **Layout tests ported in C2:** `colored_tests.rs:736-772`, `:855-984`, `:1420-1454`, `:1577-1626`, `:1708-1900`, `:2101`. `:264` and `:443` stay (`group_start` remains).
 - **Scratch-id and component-id census:** re-run, with `CONTACT_COLUMN_COUNT` 31 → 12.
-- **Census pins:** zero diff (C1–C3); +1 scope (C4).
+- **Census pins:** zero diff (C1–C3); +1 scope (C4). *(Corrected 2026-09-21: C2 moved the release S1c chunk and dispatch pins DOWN — see the G7 correction above.)*
 - **Runner:**
   - the zone set is unchanged, so per-run structural expectations hold;
   - `J-As` row added;

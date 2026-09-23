@@ -1,0 +1,127 @@
+{
+  "_doc": [
+    "Window 3 run list (physics perf campaign, L4+L2 measured against the P0b bridge and Jolt).",
+    "Protocol = P0b's ruling (D:/wt/joltab/docs/MEASUREMENT-QUEUE.md section 10 RESULT block; ANALYSIS.md):",
+    "a cell's statistic is the MEDIAN over K=6 separate processes of the process's window mean;",
+    "resolution = process-to-process spread (min-max, IQR; the median's SE 1.2533*SD/sqrt(K) supplementary);",
+    "a comparison is claimed only if |effect| > 2*hypot(spread_A, spread_B); a 5-s load receipt before and",
+    "after each process (> 5 % busy => re-run that process once at the end of its pass); a 10-s receipt",
+    "before each pass; no band-based void; placement P-none (no affinity call).",
+    "Two passes of 3 rounds; row order interleaved (Jolt and boyko alternating inside a W group) and",
+    "reversed between passes. One untimed warm-up process opens each pass.",
+    "Every exe below is verified against bin/SHA256SUMS before each pass. Nothing is compiled in the window.",
+    "boyko args are the driver's spelling (tools/driver.py boyko_args): the row args, then",
+    "--workers W --steps 500 --window 0..500 --csv <cwd>/run.csv --pose-out <cwd>/pose.bin --label <id>@W<W>.",
+    "Jolt args: the row args, then -t=W -i=500 (tools/driver.py jolt_args)."
+  ],
+  "protocol": {
+    "k_per_cell": 6,
+    "passes": 2,
+    "rounds_per_pass": 3,
+    "order": "pass 0: W ascending, Jolt/boyko alternating inside a W group; pass 1: the whole list reversed",
+    "warmup_per_pass": {"exe": "bin/runner_l4l2.exe", "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "default", "--workers", "8", "--steps", "500"], "timed": false},
+    "receipt_s_between_processes": 5.0,
+    "receipt_s_before_pass": 10.0,
+    "busy_pct_limit": 5.0,
+    "rerun_contaminated_once_at_end_of_pass": true,
+    "band_void": false,
+    "placement": "P-none",
+    "steps": 500,
+    "window": [0, 500],
+    "subwindows_reported": [[0, 100], [100, 500]]
+  },
+  "bin_dir": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/win3/bin",
+  "sha256sums": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/win3/bin/SHA256SUMS",
+  "rows": [
+    {
+      "id": "D-L4L2",
+      "engine": "boyko",
+      "what": "the default configuration at aac562a7 = f236ebdd + C1 (L4: parallel_solve default on, lanes<2 inline) + C2 (L2: GRID_LO/GRID_HI 2,700/3,000). Printed knobs (logs/07): colored, simd_solve on, parallel_solve on, broadphase AllPairs under broadphase_select Manual, sleeping off, substeps 4, relax 2.",
+      "exe": "bin/runner_l4l2.exe",
+      "sha256": "368d4104578bd621a2eccc3be99e903a9843e070a118e94c90d4b354d1410aeb",
+      "commit": "aac562a7101451e6aee077b81fc1fb80c61b4587",
+      "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "default"],
+      "workers": [1, 2, 4, 8, 16],
+      "steps": 500,
+      "window": [0, 500],
+      "armed": false,
+      "expected_pose": "0x32d5e235342b4143",
+      "expect_pose_of": "J-A",
+      "timed": true
+    },
+    {
+      "id": "J-A",
+      "engine": "boyko",
+      "what": "the P0b bridge: runner_tip (dbd85977) cfg-A = colored, simd_solve OFF, parallel_solve = (W>1), AllPairs/Manual. P0b's J-A-d1 cell, re-taken in this window so the bridge to the P0b table is same-window.",
+      "exe": "bin/runner_tip.exe",
+      "sha256": "ef9325efa9a277274f602c59504b0856f75ae1ddec7d683b0ac5f8c5bf7968c3",
+      "commit": "dbd859771b4d7aee5f560c7d3cbceccd0f1af179",
+      "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "a"],
+      "workers": [1, 8],
+      "steps": 500,
+      "window": [0, 500],
+      "armed": false,
+      "expected_pose": "0x32d5e235342b4143",
+      "timed": true,
+      "p0b_reference_ms": {"1": 19.671, "8": 9.162}
+    },
+    {
+      "id": "JOLT-T",
+      "engine": "jolt",
+      "what": "Jolt v5.3.0 Distribution, the repository's pyramid_scene.patch (banner 'boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0').",
+      "exe": "D:/tmp/jolt/build-v5.3.0-dist/PerformanceTest.exe",
+      "sha256": "29b23ad1cfc38b7fb39b484b8cc2cfad522a0a910fd03d6e3a15f8b90e0cefac",
+      "args": ["-s=Pyramid", "-q=Discrete", "-f"],
+      "workers": [1, 2, 4, 8, 16],
+      "steps": 500,
+      "window": [0, 500],
+      "expected_hash_500": "0xee15b89965ec747",
+      "timed": true,
+      "p0b_reference_ms": {"1": 15.723, "2": 8.794, "4": 5.229, "8": 3.533, "16": 3.209}
+    },
+    {
+      "id": "JOLT56-T",
+      "engine": "jolt",
+      "what": "Jolt v5.6.0 Distribution, same patch.",
+      "exe": "D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe",
+      "sha256": "918fd2b70ecc634cc0574cb676c56a3c929a46a51173cf9aa76fdd628e2ef0ad",
+      "args": ["-s=Pyramid", "-q=Discrete", "-f"],
+      "workers": [1, 2, 4, 8, 16],
+      "steps": 500,
+      "window": [0, 500],
+      "expected_hash_500": "0xb8522b4e3fc62cfe",
+      "timed": true,
+      "p0b_reference_ms": {"1": 9.650, "2": 5.708, "4": 3.557, "8": 2.493, "16": 2.447}
+    }
+  ],
+  "conditional_rows": [
+    {
+      "id": "D-L5",
+      "engine": "boyko",
+      "condition": "C4 (L5, the parallel narrowphase) has landed on D:/wt/l5np: l5np HEAD != aac562a7 and its log names L5. At build time (2026-09-21 00:33) l5np HEAD == aac562a7, so this block is EMPTY.",
+      "fill_in": "The window stage builds the l5np HEAD runner into its own worktree + target dir (never D:/wt/l5np or joltab-msvc/vkval-msvc), copies it to bin/runner_l5.exe, appends its sha256 to bin/SHA256SUMS, re-reads the runner's usage text at THAT commit for the parallel-narrowphase flag's spelling (the '--parallel-np off' below is the task's spelling, not yet a runner flag), and asserts its 500-step --cfg default pose at W=1, 8, 16 equals 0x32d5e235342b4143 (L5 must be bit-identical) before any timed process.",
+      "exe": "bin/runner_l5.exe",
+      "sha256": null,
+      "commit": null,
+      "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "default"],
+      "workers": [1, 2, 4, 8, 16],
+      "steps": 500,
+      "window": [0, 500],
+      "armed": false,
+      "expected_pose": "0x32d5e235342b4143",
+      "timed": true,
+      "extra_cells": [
+        {"id": "D-L5-npoff", "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "default", "--parallel-np", "off"], "workers": [8], "note": "flag spelling to be confirmed against the l5np HEAD runner's usage text"}
+      ]
+    }
+  ],
+  "cells_total_unconditional": 17,
+  "processes_total_unconditional": 102,
+  "comparisons": [
+    "D-L4L2 vs J-A at W=1 and W=8 (same window): the price of the default (simd_solve on, parallel_solve default) against the P0b bridge",
+    "J-A(this window) vs P0b J-A-d1 (19.671 / 9.162 ms): the bridge itself; if it moves beyond resolution, the window is not comparable to P0b's table",
+    "D-L4L2 vs JOLT-T and JOLT56-T at each W: boyko/Jolt like for like",
+    "D-L4L2 T(1)/T(W): scaling",
+    "D-L5 vs D-L4L2 at each W, if D-L5 is filled"
+  ]
+}

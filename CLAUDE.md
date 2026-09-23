@@ -204,7 +204,7 @@ The repair belongs in those two crates, not in the gate.
 The four commands above run **none** of the `#[ignore]`d tests — **355 sites (191 unconditional +
 164 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-23 on `merge/ke16-into-ecsnative` after
 the A6 reflection and A7 advanced-UI merges**, by `tests/ignore_reasons_census.rs`'s own printed
-line (`355 sites (191 plain, 164 cfg_attr) across 12 crates, 1767 .rs files walked, 0 waivers`).
+line (`355 sites (191 plain, 164 cfg_attr) across 12 crates, 1768 .rs files walked, 0 waivers`).
 The last move, 336 → 355, is those two lanes and nothing else, both measured against the same
 `6a733f26` and disjoint in files: the reflection lane's **+16** — **+3 plain**
 (`boyko_ecs/tests/seam_by_id.rs` ×2, `reflect_fixture/tests/reflect_absence_census.rs` ×1) and
@@ -238,8 +238,9 @@ attributed by `git diff` against each merge's second parent — the light-table 
 in `boyko_physics/tests/narrowphase_parallel_equivalence.rs`
 (`jolt_pyramid_parallel_narrowphase_is_bit_identical`, L5 C3). The light-table lane's own "324"
 was 320 + 4 on its branch point, which predates the L2 calibration's +7 and the simd_solve +1; an
-independent enumeration reproduces 355 / 191 / 164 across **12** crates and **1,767** `.rs` files
-walked (1,667 at `6a733f26`; +71 from the A6 merge, which added `boyko_reflect`, `reflect_fixture`
+independent enumeration reproduces 355 / 191 / 164 across **12** crates and **1,768** `.rs` files
+walked (1,767 after the A6 and A7 merges, +1 from the L11 solve-setup merge -
+`boyko_physics/src/solver/warm_records.rs`, no ignore site; 1,667 at `6a733f26`; +71 from the A6 merge, which added `boyko_reflect`, `reflect_fixture`
 and `reflect_dogfood`; +29 from the A7 merge — 14 `boyko_render` tests, 7 `boyko_ui` tests,
 2 `boyko_ui` sources, 3 `boyko_shaderdsl`, 2 `boyko_render` sources and 1 `boyko_render` bench, of
 which only `ui_s0_measure.rs` carries ignore sites;

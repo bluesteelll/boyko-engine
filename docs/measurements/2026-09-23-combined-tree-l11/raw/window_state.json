@@ -1,0 +1,94 @@
+{
+ "start": "2026-09-23T00:40:17.720+03:00",
+ "test": false,
+ "placement": "P-none (no affinity call)",
+ "blocks": [
+  {
+   "name": "headline",
+   "passes": 2,
+   "rounds": 3,
+   "cells_per_round": 12,
+   "order_pass0": [
+    "HL-D-tree#tip@W1",
+    "HL-D-allpairs#tip@W1",
+    "HL-R-tree#tip@W1",
+    "HL-R-allpairs#tip@W1",
+    "HL-D-tree#tip@W2",
+    "HL-D-allpairs#tip@W2",
+    "HL-D-tree#tip@W4",
+    "HL-D-allpairs#tip@W4",
+    "HL-D-tree#tip@W8",
+    "HL-D-allpairs#tip@W8",
+    "HL-R-tree#tip@W8",
+    "HL-R-allpairs#tip@W8"
+   ]
+  },
+  {
+   "name": "g9",
+   "passes": 2,
+   "rounds": 3,
+   "cells_per_round": 4,
+   "order_pass0": [
+    "J-As#parent@W1",
+    "J-As#tip@W1",
+    "J-As#parent@W8",
+    "J-As#tip@W8"
+   ]
+  },
+  {
+   "name": "armed",
+   "passes": 2,
+   "rounds": 3,
+   "cells_per_round": 4,
+   "order_pass0": [
+    "J-As-a#parent@W1",
+    "J-As-a#tip@W1",
+    "J-As-a#parent@W8",
+    "J-As-a#tip@W8"
+   ]
+  }
+ ],
+ "voids": [
+  {
+   "block": "headline",
+   "pass": 0,
+   "attempt": 0,
+   "time": "2026-09-23T00:52:53.903+03:00",
+   "why": "build/lane process during/after the process: presence {'build': ['rustc.exe(24440)', 'rustc.exe(8164)'], 'lane': []} busy ['rustc.exe'] during [] new []",
+   "timed_processes_voided": 32
+  },
+  {
+   "block": "headline",
+   "pass": 0,
+   "attempt": 1,
+   "time": "2026-09-23T00:57:39.976+03:00",
+   "why": "build/lane process during/after the process: presence {'build': ['cargo.exe(17100)', 'cargo.exe(14056)', 'cargo.exe(34060)', 'cargo.exe(12252)', 'cargo.exe(31632)', 'cargo.exe(38752)', 'cargo.exe(23144)', 'cargo.exe(27520)'], 'lane': []} busy ['cargo.exe'] during ['cargo.exe'] new ['cargo.exe']",
+   "timed_processes_voided": 6
+  },
+  {
+   "block": "headline",
+   "pass": 0,
+   "attempt": 2,
+   "time": "2026-09-23T01:07:00.087+03:00",
+   "why": "build/lane process present before the process: {'build': ['cargo.exe(16264)', 'cargo.exe(24776)'], 'lane': ['D:\\\\wt\\\\_targets\\\\joltab-msvc\\\\debug\\\\deps\\\\ignore_reasons_census-306c797280658493.exe(6712)']} busy ['cargo.exe']",
+   "timed_processes_voided": 4
+  }
+ ],
+ "machine_before": {
+  "time": "2026-09-23T00:40:18.085+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n239"
+ },
+ "end": "2026-09-23T03:12:50.894+03:00",
+ "machine_after": {
+  "time": "2026-09-23T03:12:51.295+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+  "battery_and_proc_count": "{\"BatteryStatus\":2,\"EstimatedChargeRemaining\":100}\r\n243"
+ },
+ "binaries_after": "all match",
+ "status": "complete",
+ "timed_processes": 187,
+ "reruns": 25,
+ "warmups": 9,
+ "voided_processes": 42
+}
