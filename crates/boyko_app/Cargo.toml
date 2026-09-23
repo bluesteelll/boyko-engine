@@ -84,6 +84,35 @@ bytemuck.workspace = true
 # production `boyko_app` path names the eDSL. `default-features = false` keeps the `emit`
 # (std/codegen) half off — only the f32 Eval path is linked.
 boyko_shaderdsl = { path = "../boyko_shaderdsl", default-features = false }
+# Rung B2, G-LOOP (plan gate UG-14): `tests/g_loop_runner_world_writes.rs` PARSES `src/runner.rs`
+# and walks `frame_loop` with `syn::visit::Visit` instead of scanning it, because a line grep cannot
+# tell `app.world()` handed to a helper from `app.world().resource::<T>()`. `visit` on top of the
+# workspace base's `full`; `quote` prints each site's key from its tokens; `proc-macro2` names the
+# token types. Not a new node in the graph: `boyko-macros` (a `[dependencies]` entry above) already
+# pulls the same pinned `syn`, `quote` and `proc-macro2`. Test-only, the `boyko_ui` precedent
+# (`ui_a1_source_census`).
+syn = { workspace = true, features = ["visit"] }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+# Rung B2, G-GRAPH app (b), E1 and the id census: the UI half of the headless app (b) — today's UI
+# plugin composition (`UiPlugin`, `UiInteractionPlugin`, `UiBindingPlugin`, `UiWidgetsPlugin`,
+# `UiAnimationPlugin`) until UI2 lands `boyko_app::UiPlugins`. Dev-only: the host's shipping build
+# gains no UI edge (ED19 makes that edge UI2's decision, not B2's).
+boyko-ui = { path = "../boyko_ui" }
+# Rung B2: G-GRAPH's extraction self-test builds a `ScheduleBuilder` on the app's pool, and E1's
+# counting allocator cross-checks its chunk-class predicate against
+# `boyko_threadpool::__layout_receipt` and prices raw `pool.install` frames. Already in the graph
+# through `boyko-ecs`; named so the tests can reach the pool type and the receipt.
+boyko-threadpool = { path = "../boyko_threadpool" }
+
+# Rung B2, E1 (plan gate UG-03's engine scene, the design's G-ALLOC): its own runner, like
+# `boyko_physics`'s `alloc_frame_census`. The counter is a process-global `#[global_allocator]`, and
+# libtest keeps a second thread alive beside the test that allocates on its own schedule; with
+# `harness = false` nothing else runs in the process.
+[[test]]
+name = "e1_engine_ui_alloc_census"
+path = "tests/e1_engine_ui_alloc_census.rs"
+harness = false
 
 [lints]
 workspace = true
