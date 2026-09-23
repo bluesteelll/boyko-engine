@@ -1,0 +1,65 @@
+== probe (iv) P6-1 reproducibility
+tree         D:\wt\lighttable (HEAD c2756e8273211c19f1018fce2b975ee75ad5873a, 0 uncommitted path(s))
+target dir   D:/wt/_targets/vkval-msvc
+host         x86_64-pc-windows-msvc (msvc)
+rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
+rustc -vV    binary: rustc
+rustc -vV    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+rustc -vV    commit-date: 2026-09-01
+rustc -vV    host: x86_64-pc-windows-msvc
+rustc -vV    release: 1.98.1
+rustc -vV    LLVM version: 22.1.8
+llvm-nm          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-nm.exe
+llvm-objdump     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe
+llvm-readobj     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-readobj.exe
+llvm-size        LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-size.exe
+llvm-ar          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-ar.exe
+(A) swap_remove final-unit rebuild: object byte-identical true (c6fead8df54be9b2 / c6fead8df54be9b2); candidate bodies normalised-identical true (5 bodies); (7)(b) multiset identical true; image byte-identical false
+  image bytes 0xf0..0xf1 (1 B) differ: COFF header TimeDateStamp
+  image bytes 0x2b0c44..0x2b0c45 (1 B) differ: .rdata +0x88c44
+  image bytes 0x2b0c60..0x2b0c61 (1 B) differ: .rdata +0x88c60
+  image bytes 0x2b0c7c..0x2b0c7d (1 B) differ: .rdata +0x88c7c
+  image bytes 0x2b0e00..0x2b0e01 (1 B) differ: .rdata +0x88e00
+(A) query_dsl final-unit rebuild: object byte-identical true (89a3b8e44643db19 / 89a3b8e44643db19); candidate bodies normalised-identical true (6 bodies); (7)(b) multiset identical true; image byte-identical false
+  image bytes 0xf0..0xf1 (1 B) differ: COFF header TimeDateStamp
+  image bytes 0x2ce1f4..0x2ce1f5 (1 B) differ: .rdata +0x88ff4
+  image bytes 0x2ce210..0x2ce211 (1 B) differ: .rdata +0x89010
+  image bytes 0x2ce22c..0x2ce22d (1 B) differ: .rdata +0x8902c
+  image bytes 0x2ce380..0x2ce381 (1 B) differ: .rdata +0x89180
+(A) phase9_scheduler final-unit rebuild: object byte-identical true (7d7a5f2b070e38c1 / 7d7a5f2b070e38c1); candidate bodies normalised-identical true (14 bodies); (7)(b) multiset identical true; image byte-identical false
+  image bytes 0xf0..0xf1 (1 B) differ: COFF header TimeDateStamp
+  image bytes 0x2d42e4..0x2d42e5 (1 B) differ: .rdata +0x8a0e4
+  image bytes 0x2d4300..0x2d4301 (1 B) differ: .rdata +0x8a100
+  image bytes 0x2d431c..0x2d431d (1 B) differ: .rdata +0x8a11c
+  image bytes 0x2d4480..0x2d4481 (1 B) differ: .rdata +0x8a280
+(A) boyko_demo final-unit rebuild: object byte-identical true (3f91d946be687c25 / 3f91d946be687c25); candidate bodies normalised-identical true (7 bodies); (7)(b) multiset identical true; image byte-identical false
+  image bytes 0xf8..0xf9 (1 B) differ: COFF header TimeDateStamp
+  image bytes 0xa87ce4..0xa87ce5 (1 B) differ: .rdata +0x2610e4
+  image bytes 0xa87d00..0xa87d01 (1 B) differ: .rdata +0x261100
+  image bytes 0xa87d1c..0xa87d1d (1 B) differ: .rdata +0x26111c
+  image bytes 0xa87e70..0xa87e80 (16 B) differ: .rdata +0x261270
+(A) clear final-unit rebuild: object byte-identical true (5c516d98162dda9a / 5c516d98162dda9a); candidate bodies normalised-identical true (10 bodies); (7)(b) multiset identical true; image byte-identical false
+  image bytes 0x100..0x101 (1 B) differ: COFF header TimeDateStamp
+  image bytes 0x49d7b4..0x49d7b5 (1 B) differ: .rdata +0x2bf9b4
+  image bytes 0x49d7d0..0x49d7d1 (1 B) differ: .rdata +0x2bf9d0
+  image bytes 0x49d7ec..0x49d7ed (1 B) differ: .rdata +0x2bf9ec
+  image bytes 0x49d980..0x49d981 (1 B) differ: .rdata +0x2bfb80
+(B) touched 6 crate roots: ["D:\\wt\\lighttable\\crates\\boyko_ecs\\src\\lib.rs", "D:\\wt\\lighttable\\crates\\boyko_utils\\src\\lib.rs", "D:\\wt\\lighttable\\crates\\boyko_threadpool\\src\\lib.rs", "D:\\wt\\lighttable\\crates\\boyko_log\\src\\lib.rs", "D:\\wt\\lighttable\\crates\\boyko_diag\\src\\lib.rs", "D:\\wt\\lighttable\\crates\\boyko_macros\\src\\lib.rs"]
+(B) swap_remove after a front-end rebuild of the census crates: object byte-identical true (c6fead8df54be9b2 / c6fead8df54be9b2); candidate bodies normalised-identical true (5 bodies); (7)(b) multiset identical true; image byte-identical false
+  image bytes 0xf0..0xf1 (1 B) differ: COFF header TimeDateStamp
+  image bytes 0x2b0c44..0x2b0c45 (1 B) differ: .rdata +0x88c44
+  image bytes 0x2b0c60..0x2b0c61 (1 B) differ: .rdata +0x88c60
+  image bytes 0x2b0c7c..0x2b0c7d (1 B) differ: .rdata +0x88c7c
+  image bytes 0x2b0e00..0x2b0e01 (1 B) differ: .rdata +0x88e00
+(C) boyko_demo with /Brepro: object byte-identical true (3f91d946be687c25 / 3f91d946be687c25); candidate bodies normalised-identical true (7 bodies); (7)(b) multiset identical true; image byte-identical true
+(C) boyko_demo: /Brepro image byte-identical true
+(C) clear with /Brepro: object byte-identical true (5c516d98162dda9a / 5c516d98162dda9a); candidate bodies normalised-identical true (10 bodies); (7)(b) multiset identical true; image byte-identical false
+  image bytes 0x100..0x104 (4 B) differ: COFF header TimeDateStamp
+  image bytes 0x49d7b4..0x49d7b8 (4 B) differ: .rdata +0x2bf9b4
+  image bytes 0x49d7d0..0x49d7d4 (4 B) differ: .rdata +0x2bf9d0
+  image bytes 0x49d7ec..0x49d7f0 (4 B) differ: .rdata +0x2bf9ec
+  image bytes 0x49d808..0x49d80c (4 B) differ: .rdata +0x2bfa08
+  image bytes 0x49d970..0x49d981 (17 B) differ: .rdata +0x2bfb70
+  image bytes 0x49dcc4..0x49dce4 (32 B) differ: .rdata +0x2bfec4
+(C) clear: /Brepro image byte-identical false
+DECISION (iv): profile.release is reproducible for the object census (byte-identical objects, or normalised-identical bodies and multisets); legs (2), (7b) and (7)(b) use profile.release (legs 7/7b through seam-census); no [profile.ug15-det]

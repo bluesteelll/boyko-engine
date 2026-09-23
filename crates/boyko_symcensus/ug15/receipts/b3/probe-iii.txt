@@ -1,0 +1,194 @@
+== probe (iii) inline-frame resolution (route a1 vs a2)
+tree         D:\wt\lighttable (HEAD 6e9f25570266d546e9f3936d7dc7f46eee433593, 3 uncommitted path(s))
+target dir   D:/wt/_targets/vkval-msvc
+host         x86_64-pc-windows-msvc (msvc)
+rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
+rustc -vV    binary: rustc
+rustc -vV    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+rustc -vV    commit-date: 2026-09-01
+rustc -vV    host: x86_64-pc-windows-msvc
+rustc -vV    release: 1.98.1
+rustc -vV    LLVM version: 22.1.8
+llvm-nm          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-nm.exe
+llvm-objdump     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe
+llvm-readobj     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-readobj.exe
+llvm-size        LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-size.exe
+llvm-ar          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-ar.exe
+llvm-symbolizer  LLVM version 21.0.0git [msvc build tools] C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\llvm-symbolizer.exe
+subject      swap_remove (boyko-ecs --bench swap_remove)
+profile      sensitivity-map
+object       D:/wt/_targets/vkval-msvc\sensitivity-map\deps\swap_remove-4eadc01df1b49408.o
+object sha   6da3caf7eea0bb612f3286cfa5a07665e88ead94cf01eac8b839d867d34391fc
+image        D:/wt/_targets/vkval-msvc\sensitivity-map\deps\swap_remove-4eadc01df1b49408.exe
+image sha    23a90bd0578f09f9ff2a6bbf52c92675bd75e87e1e8e5e91086236762017c005
+pdb          D:/wt/_targets/vkval-msvc\sensitivity-map\deps\swap_remove-4eadc01df1b49408.pdb
+map          D:/wt/_targets/vkval-msvc\ug15\maps\probe-iii-swap_remove.map
+link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\sensitivity-map\\deps\\swap_remove-4eadc01df1b49408.swap_remove.203e4047fb33f277-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\sensitivity-map\\deps\\rustcgWEG7W\\libwindows_sys-0c44f0cbbbc201a6.rlib" "D:/wt/_targets/vkval-msvc\\sensitivity-map\\deps\\rustcgWEG7W\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:D:/wt/_targets/vkval-msvc\\sensitivity-map\\deps\\swap_remove-4eadc01df1b49408.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis" "/MAP:D:/wt/_targets/vkval-msvc\\ug15\\maps\\probe-iii-swap_remove.map"
+H-2 body <criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>: calls a VmColumn::swap_remove symbol: false; vm_column.rs Location: None
+H-2 body swap_remove::bench_swap_remove::{closure#0}::{closure#0}: calls a VmColumn::swap_remove symbol: false; vm_column.rs Location: None
+H-2 body <criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench: calls a VmColumn::swap_remove symbol: false; vm_column.rs Location: None
+H-2 body <criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up: calls a VmColumn::swap_remove symbol: false; vm_column.rs Location: None
+H-2 body <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity: calls a VmColumn::swap_remove symbol: false; vm_column.rs Location: Some(LocationRef { anon: "anon.af1772c5020a22369c511d4f42b0fdba.8", file: "crates\\boyko_ecs\\src\\ecs\\memory\\vm_column.rs", line: 281, col: 9 })
+chosen body <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity (section len 2195), inlined frame witnessed by Location crates\boyko_ecs\src\ecs\memory\vm_column.rs:281
+/MAP: 0001:000330a0       _RNvMNtNtNtNtCsajVDa9kJrVf_9boyko_ecs3ecs4core10ecs_master10entity_apiNtNtB4_10ecs_master9EcsMaster13delete_entity 00000001400340a0 f   swap_remove-4eadc01df1b49408.swap_remove.203e4047fb33f277-cgu.0.rcgu.o
+image base 0x140000000, body VA 0x1400340a0, RVA 0x340a0
+instructions in the image range: 550
+addresses whose outermost frame names delete_entity: 550 of 550
+distinct frame functions (106):
+      5  alloc::alloc::Global::deallocate_impl
+      5  alloc::alloc::Global::deallocate_impl_runtime
+      5  alloc::alloc::dealloc_nonnull
+      5  alloc::alloc::impl$1::deallocate
+      6  alloc::raw_vec::RawVec::ptr
+      2  alloc::raw_vec::RawVecInner::current_memory
+      7  alloc::raw_vec::RawVecInner::deallocate
+      6  alloc::raw_vec::RawVecInner::non_null
+      6  alloc::raw_vec::RawVecInner::ptr
+      7  alloc::raw_vec::impl$3::drop
+      3  alloc::vec::Vec::as_mut_ptr
+      3  alloc::vec::Vec::as_mut_slice
+      4  alloc::vec::Vec::as_ptr
+      3  alloc::vec::Vec::as_slice
+      5  alloc::vec::Vec::len
+      9  alloc::vec::Vec::push
+      9  alloc::vec::Vec::push_mut
+      2  alloc::vec::Vec::set_len
+     25  alloc::vec::Vec::swap_remove
+     12  alloc::vec::impl$10::deref_mut
+      8  alloc::vec::impl$14::index
+     38  alloc::vec::impl$15::index_mut
+      3  alloc::vec::impl$9::deref
+      4  boyko_ecs::ecs::core::archetype::archetype::Archetype::enable_reserve_rows
+    218  boyko_ecs::ecs::core::archetype::archetype::Archetype::remove_entity
+     12  boyko_ecs::ecs::core::archetype::archetype_bundle::ArchetypeBundle::get_archetype_ptr_mut
+      6  boyko_ecs::ecs::core::archetype::archetype_bundle::ArchetypeBundle::slot_ptr_mut
+     12  boyko_ecs::ecs::core::archetype::archetype_master::ArchetypeMaster::archetype_ptr_for
+      2  boyko_ecs::ecs::core::component::component_pool_bundle::ComponentPoolBundle::pools_iter
+     27  boyko_ecs::ecs::core::component::component_pool_bundle::ComponentPoolBundle::pop_entity
+     63  boyko_ecs::ecs::core::component::component_pool_bundle::ComponentPoolBundle::swap_remove_unit
+     12  boyko_ecs::ecs::core::component::enable::enable_store::EnableStore::is_empty
+     12  boyko_ecs::ecs::core::component::enable::enable_store::SmallList4::is_empty
+      8  boyko_ecs::ecs::core::component::enable::enable_store::SmallList4::len
+     11  boyko_ecs::ecs::core::component::hooks::scope::DeferredScopeGuard::enter
+      4  boyko_ecs::ecs::core::component::hooks::scope::HOOK_DRAIN_DEPTH::constant$0::closure$1
+      7  boyko_ecs::ecs::core::component::hooks::scope::impl$0::enter::closure$0
+      6  boyko_ecs::ecs::core::component::hooks::scope::impl$1::drop
+      6  boyko_ecs::ecs::core::component::hooks::scope::impl$1::drop::closure$0
+    103  boyko_ecs::ecs::core::component::observers::entity_store::EntityObserverStore::retire
+    550  boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster::delete_entity
+    482  boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster::delete_entity_core
+     45  boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster::drain_deferred_hook_queue
+      1  boyko_ecs::ecs::core::entity::entity_inland::EntityInland::is_null
+      1  boyko_ecs::ecs::core::entity::entity_inland::EntityInland::set_unit_index
+     81  boyko_ecs::ecs::core::entity::entity_master::EntityMaster::deallocate_entity
+     22  boyko_ecs::ecs::core::entity::entity_master::EntityMaster::is_entity_valid
+     44  boyko_ecs::ecs::core::entity::entity_reservoir::EntityReservoir::push_free
+      3  boyko_ecs::ecs::core::entity::entity_reservoir::EntityReservoir::set_top_mut
+     20  boyko_ecs::ecs::core::entity::entity_reservoir::EntityReservoir::settle
+      2  boyko_ecs::ecs::core::entity::entity_reservoir::EntityReservoir::top_mut
+      6  boyko_ecs::ecs::core::entity::inland_store::impl$1::deref
+      3  boyko_ecs::ecs::core::entity::inland_store::impl$2::deref_mut
+      1  boyko_ecs::ecs::identifiers::primitives::impl$102::eq
+     19  boyko_ecs::ecs::memory::component_pool::ComponentPool::pop
+     15  boyko_ecs::ecs::memory::component_pool::ComponentPool::row_ptr
+     50  boyko_ecs::ecs::memory::component_pool::ComponentPool::swap_remove
+      9  boyko_ecs::ecs::memory::vm_column::VmColumn::get
+     22  boyko_ecs::ecs::memory::vm_column::VmColumn::push
+     62  boyko_ecs::ecs::memory::vm_column::VmColumn::swap_remove
+     10  boyko_ecs::ecs::memory::vm_column::VmColumn::truncate
+     66  boyko_utils::sparse_map::sparse_map::SparseMap::swap_remove
+      2  core::alloc::layout::Layout::size
+      3  core::cell::Cell::get
+      9  core::cell::Cell::replace
+      8  core::cell::Cell::set
+      6  core::cmp::Ord::max
+      2  core::iter::adapters::map::impl$2::next
+      2  core::iter::traits::iterator::Iterator::max
+      2  core::iter::traits::iterator::Iterator::max_by
+      2  core::iter::traits::iterator::Iterator::reduce
+      2  core::mem::drop
+     12  core::mem::replace
+      3  core::num::impl$11::saturating_sub
+      4  core::num::impl$8::wrapping_add
+      4  core::ops::function::FnOnce::call_once
+      3  core::option::Option::as_mut
+     12  core::option::Option::expect
+      3  core::ptr::const_ptr::impl$0::add
+      3  core::ptr::const_ptr::impl$0::read
+      4  core::ptr::copy
+      4  core::ptr::copy_nonoverlapping
+     30  core::ptr::drop_glue
+     11  core::ptr::mut_ptr::impl$0::add
+      4  core::ptr::mut_ptr::impl$0::read
+      2  core::ptr::mut_ptr::impl$0::write
+      4  core::ptr::non_null::impl$15::eq
+      7  core::ptr::read
+      5  core::ptr::write
+     12  core::slice::impl$0::get
+      4  core::slice::impl$0::get_mut
+      4  core::slice::impl$0::iter_mut
+      7  core::slice::index::impl$0::index
+     21  core::slice::index::impl$1::index_mut
+     13  core::slice::index::impl$2::get
+      4  core::slice::index::impl$2::get_mut
+      7  core::slice::index::impl$2::index
+     30  core::slice::index::impl$2::index_mut
+      4  core::slice::iter::IterMut::new
+      2  core::slice::iter::impl$171::next
+     14  core::slice::iter::impl$178::next
+      5  std::alloc::__default_lib_allocator::__rdl_dealloc
+      1  std::sys::alloc::windows::get_process_heap
+      5  std::sys::alloc::windows::impl$0::dealloc
+     17  std::thread::local::LocalKey::try_with
+     17  std::thread::local::LocalKey::with
+file map for this body (44 files):
+  /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\alloc\src\vec\mod.rs
+  /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\core\src\ptr\mod.rs
+  /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\core\src\ptr\mut_ptr.rs
+  /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\std\src\alloc.rs
+  /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library\std\src\sys\alloc\windows.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\alloc\src\alloc.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\alloc\src\raw_vec\mod.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\alloc\src\vec\mod.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\alloc\layout.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\cell.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\cmp.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\iter\adapters\map.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\iter\traits\iterator.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\mem\mod.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\num\uint_macros.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\ops\function.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\option.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\ptr\const_ptr.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\ptr\mod.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\ptr\mut_ptr.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\ptr\non_null.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\slice\index.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\slice\iter.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\slice\iter\macros.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\core\src\slice\mod.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\std\src\sys\thread_local\native\mod.rs
+  C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\src\rust\library\std\src\thread\local.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\archetype\archetype.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\archetype\archetype_bundle.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\archetype\archetype_master.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\component\component_pool_bundle.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\component\enable\enable_store.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\component\hooks\scope.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\component\observers\entity_store.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\ecs_master\ecs_master.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\ecs_master\entity_api.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\entity\entity_inland.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\entity\entity_master.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\entity\entity_reservoir.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\entity\inland_store.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\identifiers\primitives.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\memory\component_pool.rs
+  D:\wt\lighttable\crates\boyko_ecs\src\ecs\memory\vm_column.rs
+  D:\wt\lighttable\crates\boyko_utils\src\sparse_map\sparse_map.rs
+PASS: RVA 0x34481 resolves the inlined frame chain:
+  boyko_ecs::ecs::memory::vm_column::VmColumn::swap_remove @ D:\wt\lighttable\crates\boyko_ecs\src\ecs\memory\vm_column.rs:282
+  boyko_ecs::ecs::core::archetype::archetype::Archetype::remove_entity @ D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\archetype\archetype.rs:1383
+  boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster::delete_entity_core @ D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\ecs_master\entity_api.rs:1051
+  boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster::delete_entity @ D:\wt\lighttable\crates\boyko_ecs\src\ecs\core\ecs_master\entity_api.rs:779
+DECISION (iii): route (a1) — the file map comes from the msvc image and its sensitivity-map PDB

@@ -1,0 +1,10 @@
+1.5G	D:/wt/_targets/vkval-msvc/release
+1.0K	D:/wt/_targets/vkval-msvc/CACHEDIR.TAG
+193M	D:/wt/_targets/vkval-msvc/bench-shipped
+656M	D:/wt/_targets/vkval-msvc/debug
+1.5G	D:/wt/_targets/vkval-msvc/release
+2.0G	D:/wt/_targets/vkval-msvc/seam-census
+325M	D:/wt/_targets/vkval-msvc/sensitivity-map
+0	D:/wt/_targets/vkval-msvc/tmp
+45M	D:/wt/_targets/vkval-msvc/ug15
+D:              238G  118G  120G  50% /d
