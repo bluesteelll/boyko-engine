@@ -35,6 +35,9 @@ use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 
 use super::kernel::{QueryBox, box_mask, leaf_mask, padded_radius};
 
+#[cfg(feature = "bp-query-counts")]
+use super::counts::{QueryCounts, QueryProbe, TreeShape, shape_of};
+
 /// Index of the `min_x` row of an internal node's `p`.
 pub(crate) const MIN_X: usize = 0;
 /// Index of the `min_y` row of an internal node's `p`.
@@ -66,7 +69,7 @@ pub(crate) const NO_LANE_ROW: u32 = u32::MAX;
 pub(crate) const LANES: usize = 8;
 
 /// The most levels a tree can have: `8^13 > 2^24` rows, the row bound of this crate.
-const MAX_LEVELS: usize = 13;
+pub(crate) const MAX_LEVELS: usize = 13;
 
 /// The traversal stack's capacity: at most seven pushes net per internal level plus the root
 /// (`7 · (MAX_LEVELS − 1) + 1 = 85`).
@@ -161,6 +164,9 @@ pub(crate) struct PackedBvh8 {
     leaves: u32,
     /// Killed lanes among them.
     dead: u32,
+    /// The last query's counts (`bp-query-counts` only).
+    #[cfg(feature = "bp-query-counts")]
+    probe: QueryProbe,
 }
 
 impl PackedBvh8 {
@@ -172,6 +178,8 @@ impl PackedBvh8 {
             levels: 0,
             leaves: 0,
             dead: 0,
+            #[cfg(feature = "bp-query-counts")]
+            probe: QueryProbe::new(),
         }
     }
 
@@ -337,9 +345,14 @@ impl PackedBvh8 {
     /// Walks the tree for the Normal row at `(x, y, z)` with bounding radius `r`, calling
     /// `accept(row)` for every live lane whose exact test passes. The caller filters (its own
     /// row, the `row > query` rule of the active tree, the admission rule).
+    ///
+    /// Under `bp-query-counts` the walk is counted and the counts are published for
+    /// `last_query`; without the feature no counting statement exists.
     #[inline]
     pub(crate) fn query(&self, x: f32, y: f32, z: f32, r: f32, mut accept: impl FnMut(u32)) {
         if self.levels == 0 {
+            #[cfg(feature = "bp-query-counts")]
+            self.probe.publish(QueryCounts::default());
             return;
         }
         let nodes = self.nodes.as_read_slice();
@@ -349,6 +362,8 @@ impl PackedBvh8 {
         let mut stack = [0u32; STACK];
         let mut depth = 1usize;
         stack[0] = pack(root_level, 0);
+        #[cfg(feature = "bp-query-counts")]
+        let mut counts = QueryCounts::default();
         while depth > 0 {
             depth -= 1;
             let (level, index) = unpack(stack[depth]);
@@ -362,6 +377,8 @@ impl PackedBvh8 {
             let node = unsafe { nodes.get_unchecked(node_index) };
             if level == 0 {
                 let mut mask = leaf_mask(node, x, y, z, r);
+                #[cfg(feature = "bp-query-counts")]
+                counts.note_leaf(node, &q, mask);
                 while mask != 0 {
                     let k = mask.trailing_zeros() as usize;
                     mask &= mask - 1;
@@ -371,6 +388,8 @@ impl PackedBvh8 {
                 }
             } else {
                 let mut mask = box_mask(node, &q);
+                #[cfg(feature = "bp-query-counts")]
+                counts.note_internal(mask);
                 while mask != 0 {
                     let k = mask.trailing_zeros() as usize;
                     mask &= mask - 1;
@@ -380,6 +399,29 @@ impl PackedBvh8 {
                 }
             }
         }
+        #[cfg(feature = "bp-query-counts")]
+        self.probe.publish(counts);
+    }
+}
+
+/// The counting build's read side: the last query's counts and the tree's shape.
+#[cfg(feature = "bp-query-counts")]
+impl PackedBvh8 {
+    /// The counts of the last [`query`](Self::query) on this tree.
+    #[inline]
+    pub(crate) fn last_query(&self) -> QueryCounts {
+        self.probe.last()
+    }
+
+    /// The tree's shape: levels, occupancy, child counts and per-level box figures.
+    pub(crate) fn shape(&self) -> TreeShape {
+        shape_of(
+            self.nodes.as_read_slice(),
+            &self.level_start,
+            usize::from(self.levels),
+            self.leaves,
+            self.dead,
+        )
     }
 }
 

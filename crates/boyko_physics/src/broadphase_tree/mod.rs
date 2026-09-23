@@ -69,6 +69,10 @@
 //! `scratch_ids.rs` (ids 417..407 since L11 C2 narrowed the solver cohort; 399..389 at the
 //! design). Function-local scratch is the traversal stack and the radix histogram. No `Vec`,
 //! no pool, no atomics.
+//!
+//! The non-default `bp-query-counts` feature (C3b, the query-cost investigation) adds the
+//! `counts` module and, per tree, one probe of relaxed atomics holding the last query's counts.
+//! Without it neither exists.
 
 use boyko_diag::zone;
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
@@ -91,6 +95,8 @@ use crate::systems::body_bounding_radius;
 use self::bvh::{Item, NO_LANE_ROW, Node8, PackedBvh8};
 
 pub(crate) mod bvh;
+#[cfg(feature = "bp-query-counts")]
+pub mod counts;
 pub(crate) mod kernel;
 #[cfg(test)]
 mod tests;
