@@ -19,7 +19,7 @@
 //! | `phys_sleep_begin` / `phys_sleep_freeze` / `phys_sleep_end` | 0 / 0 / 0 sleeping off; 1 / 2 / 1 on |
 //! | `phys_np_dispatch` / `phys_np_compact` / `phys_np_axis_commit` | 1 each when the recomputed narrowphase chunk count is at least 2, else 0 |
 //! | `phys_bp_verify` / `phys_bp_build` / `phys_bp_query` / `phys_bp_assemble` | 1 each on a tree-path step, 0 on the AllPairs step |
-//! | each of the seven step counters | 1, with the step's value as its total |
+//! | each of the ten step counters | 1, with the step's value as its total |
 //! | `phys_bp_queried` / `phys_bp_members` / `phys_bp_rebuilds` | tree path: (1, N − members) / (1, [step ≥ 2]) / (1, [step == 2]); AllPairs: (0, 0) |
 //! | every system of the schedule (its `SystemSpan`) | 1 |
 //!
@@ -46,7 +46,10 @@
 //! pass on the other side's zero — and a DIFFERENT number of each, or a bug that swapped the two
 //! classes would leave both counts unchanged. (Measured: on a scene with one of each, inverting
 //! the class predicate in `solve_all_colors` passed this test.) The narrowphase counters are recomputed from `Manifolds` and
-//! `ContactPairs`, the broadphase counter from `ContactPairs`.
+//! `ContactPairs`, the broadphase counter from `ContactPairs`. The three narrowphase class counters
+//! (L9: reused, separated-axis hits, full) are the narrowphase's public `pair_classes`, which must
+//! close over the step: their non-box count equals the one recomputed here from the pairs' shapes,
+//! the four classes sum to the pairs, and with contact reuse off (the harness) nothing is reused.
 //!
 //! The narrowphase's chunk count is recomputed from the pair count, the pool's worker count and the
 //! exported `NP_*` constants — with the `lanes < 2` term, as the engine's rule has it — and the
@@ -92,13 +95,15 @@ use boyko_physics::profiling::{
     COUNTER_ZONE_COUNT, COUNTER_ZONES, PHYS_BP_ASSEMBLE, PHYS_BP_BUILD, PHYS_BP_MEMBERS,
     PHYS_BP_PAIRS, PHYS_BP_QUERIED, PHYS_BP_QUERY, PHYS_BP_REBUILDS, PHYS_BP_VERIFY,
     PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT,
-    PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS,
-    PHYS_NP_POINTS, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN,
+    PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_FULL, PHYS_NP_MANIFOLDS,
+    PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_NP_REUSED, PHYS_NP_SEP_HITS, PHYS_PASS_BIASED,
+    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN,
     PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
     PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
     WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
 };
 use boyko_physics::broadphase_tree::BroadphaseTree;
+use boyko_physics::components::ColliderShape;
 use boyko_physics::resources::{
     BroadphaseKind, ConstraintGraph, ContactPairs, IslandSleep, Manifolds, PhysicsConfig,
     SolverScratch,
@@ -307,6 +312,31 @@ fn physics_zones_count_exactly() {
         );
         let np = u64::from(np_chunks >= 2);
 
+        // L9's pair classes close over the step (their non-box count recomputed from the shapes).
+        let classes = scene.world.resource::<Manifolds>().pair_classes();
+        let non_box = {
+            let rows = scene.world.resource::<SolverScratch>().bodies();
+            let is_box = |r: u32| matches!(rows[r as usize].shape, ColliderShape::Box { .. });
+            scene
+                .world
+                .resource::<ContactPairs>()
+                .pairs()
+                .iter()
+                .filter(|&&(a, b)| !(is_box(a.0) && is_box(b.0)))
+                .count() as u64
+        };
+        assert_eq!(
+            (classes.pairs, classes.non_box, classes.reused),
+            (shape.pairs, non_box, 0),
+            "step {step}: the pair classes' pairs and non-box pairs are the step's, and with              contact reuse off nothing is reused ({classes:?})"
+        );
+        assert_eq!(
+            classes.full + classes.reused + classes.sep_hits + classes.non_box,
+            shape.pairs,
+            "step {step}: the pair classes close over the pairs ({classes:?})"
+        );
+        assert!(classes.full > 0, "step {step}: no box pair ran the full collision ({classes:?})");
+
         // The tree broadphase's structure: the harness scene's one static (the floor) is pending
         // at step 1 and admitted at step 2 — one rebuild there, one member from then on, every
         // other row queried. Recomputed from the row count and the step, not from `diag()`.
@@ -358,7 +388,7 @@ fn physics_zones_count_exactly() {
             );
         }
 
-        // (samples per step, value): the seven step counters sample once per step; the three
+        // (samples per step, value): the ten step counters sample once per step; the three
         // tree counters once per tree-path step and never otherwise.
         let expected_counters: [(&ZoneHandle, u64, u64); COUNTER_ZONE_COUNT] = [
             (&PHYS_SLOTS_WIDE, 1, shape.wide_slots),
@@ -371,6 +401,9 @@ fn physics_zones_count_exactly() {
             (&PHYS_BP_QUERIED, tp, bp_queried),
             (&PHYS_BP_MEMBERS, tp, bp_members),
             (&PHYS_BP_REBUILDS, tp, bp_rebuilds),
+            (&PHYS_NP_REUSED, 1, classes.reused),
+            (&PHYS_NP_SEP_HITS, 1, classes.sep_hits),
+            (&PHYS_NP_FULL, 1, classes.full),
         ];
         for (k, &(handle, samples, value)) in expected_counters.iter().enumerate() {
             assert!(

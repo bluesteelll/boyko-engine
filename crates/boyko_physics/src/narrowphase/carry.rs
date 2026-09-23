@@ -3,10 +3,12 @@
 //!
 //! Every candidate pair of a step writes one [`PairTag`] at its stream slot `k`. The next step
 //! finds, for each of its pairs, the slot `j` the same two bodies held in the previous step's pair
-//! list — the **join** — and reads the tag written there. What a tag carries today is the exact
-//! fast path's cached separating axis (L9a (ii)): a box pair the SAT separated on axis `s`
-//! evaluates `s` first on the next step, and skips the SAT while it still separates. Commit C3
-//! adds the reuse records (L9b), indexed by the same slots.
+//! list — the **join** — and reads the tag written there. A tag carries the exact fast path's
+//! cached separating axis (L9a (ii)): a box pair the SAT separated on axis `s` evaluates `s` first
+//! on the next step, and skips the SAT while it still separates. With contact reuse on (L9b,
+//! commit C3, `narrowphase/reuse.rs`) a slow touching box pair also writes a [`ReuseRecord`] at
+//! its slot `k` of a second double-buffered column and sets `REC` in its tag; the next step reads
+//! the record at the joined slot `j`.
 //!
 //! # The join (D9, lemma L9-J)
 //!
@@ -55,11 +57,11 @@
 //!
 //! # Threads (W invariance)
 //!
-//! During the parallel narrowphase's scope, `pairs_prev`, the previous tags, the jumper bitset and
-//! the row map are shared and read-only; each chunk writes the tags of its own slots `[lo, hi)`
-//! through the column's solve view (`narrowphase/dispatch.rs`). The serial loop and the chunks call
-//! the same cursor and the same per-pair function, so the tags equal the serial loop's for any
-//! partition.
+//! During the parallel narrowphase's scope, `pairs_prev`, the previous tags, the previous records,
+//! the jumper bitset and the row map are shared and read-only; each chunk writes the tags and the
+//! records of its own slots `[lo, hi)` through the columns' solve views (`narrowphase/dispatch.rs`).
+//! The serial loop and the chunks call the same cursor and the same per-pair function, so the tags
+//! and the records equal the serial loop's for any partition.
 //!
 //! ZERO `unsafe` here; every column is a kernel `ScratchColumn` (principle 0), grown in place, no
 //! per-step heap allocation.
@@ -68,11 +70,12 @@ use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 
 use crate::manifold::BodyIndex;
 use crate::narrowphase::axis_cache::SAT_AXIS_COUNT;
+use crate::narrowphase::reuse::{Prev, ReuseRecord, ReuseStep};
 use crate::resources::ContactPairs;
 use crate::row_identity::{NO_ROW, RemapCursor, RowIdentity, RowRemap};
 use crate::scratch_ids::{
     jumper_bits_id, pair_tag_id, pair_tag_prev_id, register_narrowphase_column_layouts,
-    scratch_reserve_rows,
+    reuse_id, reuse_prev_id, scratch_reserve_rows,
 };
 
 /// The stamp of a pair list or a carry that no step stamped, or whose stamp was invalidated.
@@ -90,11 +93,16 @@ const UNSET: usize = usize::MAX;
 /// | 4 | `BOX`: both shapes are boxes |
 /// | 5 | `PUSHED`: the pair emitted a manifold (into either stream) |
 /// | 6, 7 | `SET`, `SETTLED`: reserved for L10 (never written here) |
-/// | 8 | `REC`: reserved for L9b's record (commit C3) |
+/// | 8 | `REC`: the pair's reuse record at this slot was written this step (L9b) |
 /// | 9 | `SEP`: the pair is separated, on the axis in bits 12–15 |
-/// | 10 | `HIT`: reserved for L9b (commit C3) |
+/// | 10 | `HIT`: the pair's output came from its record, not the SAT (L9b) |
 /// | 11 | `SEPHIT`: the carried separating axis still separated it; the SAT did not run |
 /// | 12–15 | the separating axis, `0..15`, valid iff `SEP` |
+///
+/// A `REC` tag's axis field holds the SAT axis of the record's last full collision, which a hit
+/// carries forward unchanged. A box pair's tag has at most one of `HIT` (from a record) and
+/// `SEPHIT` (from the carried separating axis); neither means the full collision ran. That is the
+/// closure of the narrowphase's per-step counters.
 ///
 /// One layout shared with L10 (ruling O7): L10 rev 2.2 adopts this `u16` in place of rev 2's
 /// `u8` (its Δ3), with its `SET` and `SETTLED` at bits 6 and 7. Every pair kind writes its tag
@@ -114,8 +122,12 @@ impl PairTag {
     pub(crate) const BOX: u16 = 1 << 4;
     /// Bit 5: the pair emitted a manifold.
     pub(crate) const PUSHED: u16 = 1 << 5;
+    /// Bit 8: the pair's reuse record at this slot was written this step.
+    pub(crate) const REC: u16 = 1 << 8;
     /// Bit 9: the pair is separated on the axis in bits 12–15.
     pub(crate) const SEP: u16 = 1 << 9;
+    /// Bit 10: the pair's output came from its reuse record.
+    pub(crate) const HIT: u16 = 1 << 10;
     /// Bit 11: the carried separating axis still separated the pair.
     pub(crate) const SEPHIT: u16 = 1 << 11;
     /// The separating axis field's shift.
@@ -157,6 +169,21 @@ impl PairTag {
                 | if hit { Self::SEPHIT } else { 0 }
                 | (u16::from(axis) << Self::SEP_SHIFT),
         )
+    }
+
+    /// The tag of a slow box pair that wrote its reuse record this step (L9b), on the record's SAT
+    /// axis `axis` (`0..15`): `hit` when the output came from the previous step's record rather than
+    /// the full collision; `pushed` whether its manifold was emitted.
+    #[inline]
+    pub(crate) fn box_recorded(axis: usize, pushed: bool, hit: bool) -> Self {
+        Self(Self::box_contact(axis, pushed).0 | Self::REC | if hit { Self::HIT } else { 0 })
+    }
+
+    /// The tag of a box pair whose edge record's axis now separates it (L9b): separated exactly on
+    /// `axis`, found from the record.
+    #[inline]
+    pub(crate) fn box_separated_by_record(axis: u8) -> Self {
+        Self(Self::box_separated(axis, false).0 | Self::HIT)
     }
 
     /// The tag of a box pair with no contact for a reason other than a separating axis (no face
@@ -247,14 +274,19 @@ pub(crate) struct CarryIn<'a> {
     pairs_prev: &'a [(BodyIndex, BodyIndex)],
     /// The current rows stage 2 resolved, ascending; read only on a Rows step.
     stage2: &'a [u32],
+    /// The step's requested contact reuse (L9b); [`PairCarry::open`] turns it off when the record
+    /// column cannot hold a record per pair.
+    reuse: ReuseStep,
 }
 
 impl CarryIn<'static> {
-    /// No carry: every pair misses its join, and the step still writes every tag.
+    /// No carry: every pair misses its join, and the step still writes every tag. Contact reuse
+    /// off.
     pub(crate) const NONE: Self = Self {
         remap: RowRemap::Reset,
         pairs_prev: &[],
         stage2: &[],
+        reuse: ReuseStep::OFF,
     };
 }
 
@@ -271,13 +303,27 @@ impl<'a> CarryIn<'a> {
                 remap,
                 pairs_prev: &[],
                 stage2: &[],
+                reuse: ReuseStep::OFF,
             },
             _ => Self {
                 remap,
                 pairs_prev,
                 stage2,
+                reuse: ReuseStep::OFF,
             },
         }
+    }
+
+    /// This carry with the step's requested contact reuse.
+    #[inline]
+    pub(crate) fn with_reuse(self, reuse: ReuseStep) -> Self {
+        Self { reuse, ..self }
+    }
+
+    /// The step's requested contact reuse.
+    #[inline]
+    pub(crate) fn reuse(&self) -> ReuseStep {
+        self.reuse
     }
 }
 
@@ -303,9 +349,20 @@ pub(crate) struct PairJoin<'a> {
     tag_prev: &'a [PairTag],
     /// One bit per current row: set iff stage 2 resolved it. Read only on a Rows step.
     jumpers: &'a [u64],
+    /// The previous step's reuse records, one per slot of `pairs_prev` it wrote (L9b); empty when
+    /// this step does not reuse.
+    records: &'a [ReuseRecord],
+    /// This step's contact reuse and parity, as [`PairCarry::open`] settled them.
+    reuse: ReuseStep,
 }
 
 impl<'a> PairJoin<'a> {
+    /// This step's contact reuse and parity (L9b).
+    #[inline]
+    pub(crate) fn reuse(&self) -> ReuseStep {
+        self.reuse
+    }
+
     /// A cursor for one run of consecutive pairs (the serial loop's `[0, n)`, a chunk's
     /// `[lo, hi)`). It positions itself at the lower bound of the run's first merged key — one
     /// binary search per run — and merges forward from there.
@@ -338,7 +395,7 @@ pub(crate) struct JoinCursor<'a> {
     last_merged: Option<u64>,
 }
 
-impl JoinCursor<'_> {
+impl<'a> JoinCursor<'a> {
     /// The join of the pair `(a, b)` (`a < b`, the run's next pair): the slot its two bodies held
     /// in `pairs_prev`, or `None`.
     #[inline]
@@ -370,16 +427,33 @@ impl JoinCursor<'_> {
     }
 
     /// The tag the pair `(a, b)` wrote in the previous step, in its current roles, or
-    /// [`PairTag::NONE`] when it has no join.
-    #[inline]
+    /// [`PairTag::NONE`] when it has no join: [`prev`](Self::prev)'s tag.
+    #[cfg(test)]
     pub(crate) fn prev_tag(&mut self, a: BodyIndex, b: BodyIndex) -> PairTag {
-        match self.find(a, b) {
-            Some(hit) => {
-                let tag = self.join.tag_prev[hit.j as usize];
-                if hit.flipped { tag.flipped() } else { tag }
-            }
-            None => PairTag::NONE,
-        }
+        self.prev(a, b).tag
+    }
+
+    /// What the pair `(a, b)` (`a < b`, the run's next pair) left in the previous step (L9 D9): its
+    /// tag in the current roles, and — when the tag carries `REC` and this step reuses — its record,
+    /// as stored.
+    #[inline]
+    pub(crate) fn prev(&mut self, a: BodyIndex, b: BodyIndex) -> Prev<'a> {
+        let Some(hit) = self.find(a, b) else {
+            return Prev::NONE;
+        };
+        let stored = self.join.tag_prev[hit.j as usize];
+        let tag = if hit.flipped { stored.flipped() } else { stored };
+        let record = if self.join.reuse.on && stored.has(PairTag::REC) {
+            let record = self.join.records.get(hit.j as usize);
+            debug_assert!(
+                record.is_some_and(|r| r.parity() != self.join.reuse.parity),
+                "invariant: a REC tag's record was written at its slot in the previous step"
+            );
+            record
+        } else {
+            None
+        };
+        Prev { tag, record, flipped: hit.flipped }
     }
 
     /// The monotone merge: advances to the first slot whose key is not below `key`, and matches
@@ -440,6 +514,14 @@ pub(crate) struct PairCarry {
     /// One bit per current row, set iff stage 2 resolved it; rebuilt on the steps whose rows
     /// moved and read only on those.
     jumper_bits: ScratchColumn<u64>,
+    /// The reuse records being written this step, one slot per candidate pair (L9b); swapped
+    /// with `rec_prev` at the start of each narrowphase. Grown only on a step that reuses, and a
+    /// slot is valid only where this step's tag carries `REC`.
+    rec: ScratchColumn<ReuseRecord>,
+    /// The previous step's reuse records, indexed by the slots of `ContactPairs::pairs_prev`.
+    rec_prev: ScratchColumn<ReuseRecord>,
+    /// The parity of the last narrowphase path that opened the carry.
+    parity: bool,
     /// The carry's place in the gather sequence (the row-identity protocol).
     cursor: RemapCursor,
     /// The stamp of the pair list the tags in `tag` index, or [`NO_SEQ`] when they index none a
@@ -463,6 +545,9 @@ impl PairCarry {
     pub(crate) fn with_capacity(pairs: usize) -> Self {
         register_narrowphase_column_layouts();
         let tag_reserve = pairs.max(scratch_reserve_rows(size_of::<PairTag>()));
+        // A reservation is address space, not commit: the record columns commit only on a step
+        // that reuses (2 × P × 128 B at P pairs, review O2).
+        let rec_reserve = pairs.max(scratch_reserve_rows(size_of::<ReuseRecord>()));
         Self {
             tag: ScratchColumn::new(pair_tag_id(), tag_reserve),
             tag_prev: ScratchColumn::new(pair_tag_prev_id(), tag_reserve),
@@ -470,6 +555,9 @@ impl PairCarry {
                 jumper_bits_id(),
                 scratch_reserve_rows(size_of::<u64>()),
             ),
+            rec: ScratchColumn::new(reuse_id(), rec_reserve),
+            rec_prev: ScratchColumn::new(reuse_prev_id(), rec_reserve),
+            parity: false,
             cursor: RemapCursor::default(),
             seq: NO_SEQ,
             list: 0,
@@ -502,30 +590,43 @@ impl PairCarry {
         CarryIn::new(remap, pairs.pairs_prev(), stage2)
     }
 
-    /// A narrowphase path's prologue, before its first pair: swaps the tag columns, grows this
-    /// step's to `n_pairs` (at most to its reserve), builds the jumper bitset on a Rows step, and
-    /// returns the step's join and the column the pairs' tags go into. Invalidates the stamp until
+    /// A narrowphase path's prologue, before its first pair: swaps the tag and record columns and
+    /// flips the parity, grows this step's tags to `n_pairs` (at most to its reserve), settles
+    /// whether the step reuses (requested, and every pair has a tag and a record slot) and grows its
+    /// record column if so, builds the jumper bitset on a Rows step, and returns the step's join and
+    /// the columns the pairs' tags and records go into. Invalidates the stamp until
     /// [`stamp`](Self::stamp).
     pub(crate) fn open<'a>(
         &'a mut self,
         carry: CarryIn<'a>,
         n_pairs: usize,
-    ) -> (PairJoin<'a>, &'a mut ScratchColumn<PairTag>) {
+    ) -> (PairJoin<'a>, &'a mut ScratchColumn<PairTag>, &'a mut ScratchColumn<ReuseRecord>) {
         let Self {
             tag,
             tag_prev,
             jumper_bits,
+            rec,
+            rec_prev,
+            parity,
             seq,
             len,
             jumper_builds,
             ..
         } = self;
         core::mem::swap(tag, tag_prev);
+        core::mem::swap(rec, rec_prev);
+        *parity = !*parity;
         *seq = NO_SEQ;
         if tag.len() < n_pairs {
             grow_tags(tag, n_pairs);
         }
         *len = n_pairs.min(tag.len());
+        let mut reuse = carry.reuse;
+        reuse.on &= *len == n_pairs && n_pairs <= rec.capacity();
+        reuse.parity = *parity;
+        if reuse.on && rec.len() < n_pairs {
+            grow_records(rec, n_pairs);
+        }
         debug_assert!(
             tag_prev.len() >= carry.pairs_prev.len(),
             "invariant: a joined step's previous tags cover every previous pair"
@@ -536,13 +637,16 @@ impl PairCarry {
         }
         let tag_prev: &'a ScratchColumn<PairTag> = tag_prev;
         let jumper_bits: &'a ScratchColumn<u64> = jumper_bits;
+        let rec_prev: &'a ScratchColumn<ReuseRecord> = rec_prev;
         let join = PairJoin {
             remap: carry.remap,
             pairs_prev: carry.pairs_prev,
             tag_prev: tag_prev.as_read_slice(),
             jumpers: jumper_bits.as_read_slice(),
+            records: if reuse.on { rec_prev.as_read_slice() } else { &[] },
+            reuse,
         };
-        (join, tag)
+        (join, tag, rec)
     }
 
     /// The narrowphase system's epilogue, after the pair loop: stamps the carry with the gather
@@ -571,6 +675,13 @@ impl PairCarry {
         self.tag.capacity().min(self.tag_prev.capacity())
     }
 
+    /// The record column the last narrowphase path wrote (L9b): slot `k` is valid iff
+    /// [`tags`](Self::tags)`[k]` carries `REC`.
+    #[inline]
+    pub(crate) fn records(&self) -> &[ReuseRecord] {
+        self.rec.as_read_slice()
+    }
+
     /// Steps whose carry was not joined although it had been stamped before.
     #[inline]
     pub(crate) fn resets(&self) -> u64 {
@@ -591,6 +702,14 @@ impl PairCarry {
 fn grow_tags(tag: &mut ScratchColumn<PairTag>, n: usize) {
     let n = n.min(tag.capacity());
     tag.build_view().resize(n, PairTag::NONE);
+}
+
+/// Grows this step's record column to `n` rows (the caller checked the reserve); the fill covers
+/// only the new rows, which no pair reads before a step writes them.
+#[cold]
+#[inline(never)]
+fn grow_records(rec: &mut ScratchColumn<ReuseRecord>, n: usize) {
+    rec.build_view().resize(n, ReuseRecord::UNWRITTEN);
 }
 
 /// Rebuilds the jumper bitset for `rows` current rows: all clear, then one bit per row stage 2
@@ -795,7 +914,7 @@ mod tests {
                 RowRemap::Reset => self.seen.reset_steps += 1,
                 RowRemap::Identity => {}
             }
-            let (join, tag_column) = self.carry.open(src, now.len());
+            let (join, tag_column, _) = self.carry.open(src, now.len());
             let mut cursor = join.cursor();
             let mut reads = join.cursor();
             for (k, &(a, b)) in now.iter().enumerate() {

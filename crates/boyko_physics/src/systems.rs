@@ -72,14 +72,18 @@ use crate::components::{ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use crate::math::Vec3;
 use crate::narrowphase::axis_cache::SAT_AXIS_COUNT;
-use crate::narrowphase::box_box::{BoxBoxOutcome, Obb, box_box_classify_carried};
+use crate::narrowphase::box_box::{BoxBoxContact, BoxBoxOutcome, Obb, box_box_classify_carried};
 use crate::narrowphase::carry::{CarryIn, PairTag};
 use crate::narrowphase::dispatch::try_parallel;
 use crate::narrowphase::feature_vertex_face;
-use crate::narrowphase::reuse::{RowFrame, fill_row_frames};
+use crate::narrowphase::reuse::{
+    PairGeom, Prev, Refreshed, ReuseRecord, ReuseStep, RowFrame, build, criterion,
+    fill_row_frames, is_fast, refresh,
+};
 use crate::narrowphase::sphere_box::sphere_box_contact;
 use crate::profiling::{
-    PHYS_BP_PAIRS, PHYS_NP_CHUNKS, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, counter,
+    PHYS_BP_PAIRS, PHYS_NP_CHUNKS, PHYS_NP_FULL, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS,
+    PHYS_NP_REUSED, PHYS_NP_SEP_HITS, counter,
 };
 use crate::resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode,
@@ -420,6 +424,13 @@ pub fn physics_broadphase(
 /// evaluates first, skipping the SAT while it still separates (L9a (ii), exact). The carry is
 /// classified before either path runs and stamped after, with the pair list its tags index.
 ///
+/// # Contact reuse (L9b, `narrowphase/reuse.rs`)
+///
+/// With [`PhysicsConfig::contact_reuse`] on, a slow touching box pair writes a reuse record beside
+/// its tag, and the next step refreshes that record from the current poses instead of running the
+/// SAT and the clip while the relative motion stays within the reuse distance. Off by default:
+/// then every pair takes the path above, bit for bit.
+///
 /// # The serial loop and the parallel chunks (L5)
 ///
 /// With [`PhysicsConfig::parallel_narrowphase`] on (the default since L5 C4), the step
@@ -451,9 +462,17 @@ pub fn physics_narrowphase(
     // pre-read through the row identity map first, before any write of this step
     // (defect A, interim).
     let prefetched = manifolds.box_axis_cache.begin_frame_synced(pairs, bodies, &scratch.rows);
+    // L9b: the step's reuse parameters, and whether a hit must re-key its hysteresis entry
+    // (ruling W1), which `begin_frame_synced` has just settled.
+    let reuse = ReuseStep::new(
+        cfg.contact_reuse,
+        cfg.contact_reuse_distance,
+        cfg.dt,
+        manifolds.box_axis_cache.keys_changed(),
+    );
     // L9 D9: how this step's pairs join the previous step's tags — classified here, before
     // either path opens the carry, and stamped below, after the pair loop.
-    let carry = manifolds.pair_carry.source(contact_pairs, &scratch.rows);
+    let carry = manifolds.pair_carry.source(contact_pairs, &scratch.rows).with_reuse(reuse);
     // L5: the flag is a request; the dispatch returns 0 whenever it runs no chunk, and
     // then the serial loop below produces the step's streams.
     let chunks = if cfg.parallel_narrowphase {
@@ -476,11 +495,19 @@ pub fn physics_narrowphase(
         manifolds.manifolds().iter().map(|m| u64::from(m.count)).sum::<u64>()
     );
     counter!(PHYS_NP_CHUNKS, chunks as u64);
+    // L9: the step's pair classes, from the tags in one walk, only while the profiler is armed.
+    // `full + reused + sep_hits + non-box = pairs` (the closure a reader checks).
+    if boyko_diag::zone_enabled!(PHYS_NP_FULL) {
+        let classes = manifolds.pair_classes();
+        counter!(PHYS_NP_REUSED, classes.reused);
+        counter!(PHYS_NP_SEP_HITS, classes.sep_hits);
+        counter!(PHYS_NP_FULL, classes.full);
+    }
 }
 
-/// [`narrowphase_serial_with`] with no pair carry: every pair misses its join (and still writes
-/// its tag). For the tests' direct callers, which hold no `ContactPairs`; the next system step's
-/// carry is then a Reset.
+/// [`narrowphase_serial_with`] with no pair carry and contact reuse off: every pair misses its
+/// join (and still writes its tag). For the tests' direct callers, which hold no `ContactPairs`;
+/// the next system step's carry is then a Reset.
 #[cfg(test)]
 pub(crate) fn narrowphase_serial(
     manifolds: &mut Manifolds,
@@ -493,9 +520,9 @@ pub(crate) fn narrowphase_serial(
 
 /// The serial narrowphase loop: every candidate pair in `(min, max)` order, the
 /// manifold pushed into the solver buffer or the sensor-overlap buffer, the pair's tag
-/// written (L9 D9), and a box-box pair's chosen axis written into the hysteresis table
-/// in the same iteration. The per-row orientation frames are filled and the pair carry
-/// opened first (L9 D2, D9).
+/// and reuse record written (L9 D9), and a box-box pair's chosen axis written into the
+/// hysteresis table in the same iteration. The per-row orientation frames are filled and
+/// the pair carry opened first (L9 D2, D9).
 ///
 /// The path a step takes whenever the parallel narrowphase does not dispatch, and the
 /// oracle that path's gates compare against. `prefetched` is what
@@ -527,12 +554,15 @@ pub(crate) fn narrowphase_serial_with(
     sensor_out.clear();
     // L9 D2: every box row's frame, once, before the first pair (or `None`: the pairs build
     // their frames per pair, the same bits).
-    let frames = fill_row_frames(row_frames, bodies, pairs.len());
-    // L9 D9: the previous step's tags, joined pair by pair with one monotone cursor.
-    let (join, tag_column) = pair_carry.open(carry, pairs.len());
+    let frames = fill_row_frames(row_frames, bodies, pairs.len(), carry.reuse().on);
+    // L9 D9: the previous step's tags and records, joined pair by pair with one monotone cursor.
+    let (join, tag_column, record_column) = pair_carry.open(carry, pairs.len());
+    let reuse = join.reuse();
     let mut join = join.cursor();
     let mut tag_view = tag_column.build_view();
     let tags = tag_view.as_mut_slice();
+    let mut record_view = record_column.build_view();
+    let records = record_view.as_mut_slice();
 
     for (k, &(a, b)) in pairs.iter().enumerate() {
         let ba = &bodies[a.0 as usize];
@@ -545,13 +575,14 @@ pub(crate) fn narrowphase_serial_with(
         // the pre-S5 push).
         let is_overlap = ba.is_sensor || bb.is_sensor;
 
-        let (manifold, axis, tag) = collide_pair(
+        let PairOut { manifold, axis, tag, record } = collide_pair(
             a,
             b,
             ba,
             bb,
             frames,
-            || join.prev_tag(a, b),
+            reuse,
+            || join.prev(a, b),
             || axis_cache.read_hint(prefetched, k, a, b),
         );
         if let Some(axis) = axis {
@@ -563,6 +594,10 @@ pub(crate) fn narrowphase_serial_with(
         // invalid (`PairCarry::stamp`), so no later step reads a tag this step did not write.
         if let Some(slot) = tags.get_mut(k) {
             *slot = tag;
+        }
+        // A record exists only on a step that reuses, which `open` grew the column for.
+        if let Some(record) = record {
+            records[k] = record;
         }
 
         if let Some(manifold) = manifold {
@@ -585,20 +620,51 @@ pub(crate) fn narrowphase_serial_with(
     }
 }
 
-/// Collides one candidate pair `(a, b)` by the two bodies' shapes, returning the
-/// manifold (or `None` when the shapes do not touch), for a box-box pair that
-/// produced a contact the SAT axis it chose, and the pair's tag (L9 D9).
+/// One candidate pair's collision (L9 D9): what both narrowphase paths store for it.
+pub(crate) struct PairOut {
+    /// The manifold, or `None` when the shapes do not touch (or every point of a reused face
+    /// lifted off, D6).
+    pub(crate) manifold: Option<Manifold>,
+    /// The SAT axis the hysteresis table stores for the pair this step, or `None` when it stores
+    /// nothing.
+    pub(crate) axis: Option<usize>,
+    /// The pair's tag.
+    pub(crate) tag: PairTag,
+    /// The reuse record the pair writes at its slot, iff its tag carries `REC` (L9b).
+    pub(crate) record: Option<ReuseRecord>,
+}
+
+impl PairOut {
+    /// The output of a pair whose generator ran on today's path: no record.
+    #[inline]
+    fn today(manifold: Option<Manifold>, axis: Option<usize>, tag: PairTag) -> Self {
+        Self { manifold, axis, tag, record: None }
+    }
+
+    /// The output of a non-box pair: its manifold and a tag that records only whether it was
+    /// emitted.
+    #[inline]
+    fn non_box(manifold: Option<Manifold>) -> Self {
+        let tag = PairTag::non_box(pushes(manifold.as_ref()));
+        Self::today(manifold, None, tag)
+    }
+}
+
+/// Collides one candidate pair `(a, b)` by the two bodies' shapes (L9 D9): the manifold (or
+/// `None` when the shapes do not touch), the SAT axis the hysteresis table stores, the pair's tag
+/// and its reuse record.
 ///
-/// A pure function of the two bodies, their frames, the carried tag and the hint, which is
-/// what lets the parallel narrowphase run it per pair on any thread. `prev` (the tag the
-/// pair's two bodies wrote in the previous step, through the join) and `hint` are called only
-/// for a box-box pair — the only generator that reads either — so they cost nothing on the
-/// other shape pairs, and `hint` is not called when the carried separating axis still
-/// separates the pair (L9a (ii)). Both narrowphase paths call this one function.
+/// A pure function of the two bodies, their frames, the step's reuse parameters, what the pair
+/// left in the previous step and the hint, which is what lets the parallel narrowphase run it per
+/// pair on any thread. `prev` (the tag and the record the pair's two bodies wrote in the previous
+/// step, through the join) and `hint` are called only for a box-box pair — the only generator that
+/// reads either — so they cost nothing on the other shape pairs, and `hint` is not called when the
+/// carried separating axis still separates the pair (L9a (ii)) or the pair reuses its record
+/// (L9b, D10). Both narrowphase paths call this one function.
 ///
 /// `frames` is the step's per-row orientation frame column (L9 D2), or `None` on a step
 /// whose fill declined; a box pair then builds its two frames with the same
-/// [`RowFrame::of`], so the result does not depend on which (`narrowphase/reuse.rs`).
+/// [`RowFrame::axes_of`], so the result does not depend on which (`narrowphase/reuse.rs`).
 ///
 /// - **sphere-sphere**: inline single-point center-to-center contact (the W2 path).
 /// - **sphere-box**: [`sphere_box_contact`], which emits normal A→B with
@@ -606,38 +672,31 @@ pub(crate) fn narrowphase_serial_with(
 /// - **box-sphere**: the same generator with the sphere as A and the box as B (keyed
 ///   `b, a`), remapped to `(a, b)` order so the dense rows match and the normal runs
 ///   A(box)→B(sphere).
-/// - **box-box**: [`box_box_classify_carried`] — the carried separating axis first, then the
-///   classifier biased by the hint; the returned axis is the one to persist for next frame's
-///   hysteresis.
+/// - **box-box**: [`collide_box_pair`] — the carried separating axis, the reuse record
+///   (L9b), then the classifier biased by the hint.
 #[inline]
-pub(crate) fn collide_pair(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn collide_pair<'r>(
     a: BodyIndex,
     b: BodyIndex,
     ba: &BodyState,
     bb: &BodyState,
     frames: Option<&[RowFrame]>,
-    prev: impl FnOnce() -> PairTag,
+    reuse: ReuseStep,
+    prev: impl FnOnce() -> Prev<'r>,
     hint: impl FnOnce() -> Option<usize>,
-) -> (Option<Manifold>, Option<usize>, PairTag) {
+) -> PairOut {
     match (ba.shape, bb.shape) {
         (ColliderShape::Sphere { radius: ra }, ColliderShape::Sphere { radius: rb }) => {
-            let m = sphere_sphere_manifold(a, b, ba, bb, ra, rb);
-            let tag = PairTag::non_box(pushes(m.as_ref()));
-            (m, None, tag)
+            PairOut::non_box(sphere_sphere_manifold(a, b, ba, bb, ra, rb))
         }
-        (ColliderShape::Sphere { radius }, ColliderShape::Box { half_extents }) => {
-            let m =
-                sphere_box_contact(a, b, ba.position, radius, bb.position, bb.rotation, half_extents);
-            let tag = PairTag::non_box(pushes(m.as_ref()));
-            (m, None, tag)
-        }
-        (ColliderShape::Box { half_extents }, ColliderShape::Sphere { radius }) => {
-            let m =
-                sphere_box_contact(b, a, bb.position, radius, ba.position, ba.rotation, half_extents)
-                    .map(flip_manifold);
-            let tag = PairTag::non_box(pushes(m.as_ref()));
-            (m, None, tag)
-        }
+        (ColliderShape::Sphere { radius }, ColliderShape::Box { half_extents }) => PairOut::non_box(
+            sphere_box_contact(a, b, ba.position, radius, bb.position, bb.rotation, half_extents),
+        ),
+        (ColliderShape::Box { half_extents }, ColliderShape::Sphere { radius }) => PairOut::non_box(
+            sphere_box_contact(b, a, bb.position, radius, ba.position, ba.rotation, half_extents)
+                .map(flip_manifold),
+        ),
         (ColliderShape::Box { half_extents: ha }, ColliderShape::Box { half_extents: hb }) => {
             let (oa, ob) = match frames {
                 Some(frames) => (
@@ -649,23 +708,173 @@ pub(crate) fn collide_pair(
                     Obb::new(bb.position, bb.rotation, hb),
                 ),
             };
-            match box_box_classify_carried(&oa, &ob, a, b, prev().sep_axis(), hint) {
-                BoxBoxOutcome::Contact(c) => {
-                    let tag = PairTag::box_contact(c.reference_axis, c.manifold.count > 0);
-                    (Some(c.manifold), Some(c.reference_axis), tag)
-                }
-                BoxBoxOutcome::Separated(axis) => {
-                    debug_assert!(
-                        axis < SAT_AXIS_COUNT,
-                        "invariant: a separating SAT axis is canonical 0..15"
-                    );
-                    (None, None, PairTag::box_separated(axis, false))
-                }
-                BoxBoxOutcome::StillSeparated(axis) => {
-                    (None, None, PairTag::box_separated(axis, true))
-                }
-                BoxBoxOutcome::NoContact => (None, None, PairTag::BOX_NO_CONTACT),
+            let radii = || match frames {
+                Some(frames) => (frames[a.0 as usize].radius, frames[b.0 as usize].radius),
+                None => (ha.length(), hb.length()),
+            };
+            collide_box_pair(a, b, ba, bb, &oa, &ob, radii, reuse, prev(), hint)
+        }
+    }
+}
+
+/// The box-box arm of [`collide_pair`] on the boxes `(oa, ob)`:
+///
+/// 1. **The carried separating axis (L9a (ii)).** A `SEP` tag's axis is evaluated first; while it
+///    separates, the pair is separated and nothing else runs.
+/// 2. **The reuse record (L9b).** A `REC` tag's record, flipped into the current roles, is kept
+///    iff the pair is slow ([`slow_geom`]) and passes [`criterion`]: its [refresh](refresh) is the
+///    output, the record is copied to this step's slot, and the hysteresis table is written only on
+///    a step whose key set changed (ruling W1).
+/// 3. **The full collision** — the classifier biased by the hint. A slow pair builds a record from
+///    a contact and emits that record's refresh (D7); any other pair emits the contact.
+///
+/// A `REC` tag never carries `SEP`, so at most one of 1 and 2 applies.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn collide_box_pair(
+    a: BodyIndex,
+    b: BodyIndex,
+    ba: &BodyState,
+    bb: &BodyState,
+    oa: &Obb,
+    ob: &Obb,
+    radii: impl Fn() -> (f32, f32),
+    reuse: ReuseStep,
+    prev: Prev<'_>,
+    hint: impl FnOnce() -> Option<usize>,
+) -> PairOut {
+    // The pair's reuse geometry, computed at most once: `None` until needed, then whether the pair
+    // is slow (`Some(Some(g))`) or takes today's path (`Some(None)`).
+    let mut geom = None;
+    if let Some(stored) = prev.record {
+        let slow = slow_geom(ba, bb, oa, ob, &radii, reuse);
+        geom = Some(slow);
+        if let Some(g) = slow {
+            let record = if prev.flipped { stored.flipped() } else { *stored };
+            if let Some(out) = reuse_record(&record, a, b, ba, bb, oa, ob, &g, prev.tag, reuse) {
+                return out;
             }
+        }
+    }
+    match box_box_classify_carried(oa, ob, a, b, prev.tag.sep_axis(), hint) {
+        BoxBoxOutcome::Contact(c) => {
+            let slow = geom.unwrap_or_else(|| slow_geom(ba, bb, oa, ob, &radii, reuse));
+            match slow {
+                Some(g) => record_contact(c, a, b, ba, bb, oa, ob, &g, reuse),
+                None => {
+                    let tag = PairTag::box_contact(c.reference_axis, c.manifold.count > 0);
+                    PairOut::today(Some(c.manifold), Some(c.reference_axis), tag)
+                }
+            }
+        }
+        BoxBoxOutcome::Separated(axis) => {
+            debug_assert!(
+                axis < SAT_AXIS_COUNT,
+                "invariant: a separating SAT axis is canonical 0..15"
+            );
+            PairOut::today(None, None, PairTag::box_separated(axis, false))
+        }
+        BoxBoxOutcome::StillSeparated(axis) => {
+            PairOut::today(None, None, PairTag::box_separated(axis, true))
+        }
+        BoxBoxOutcome::NoContact => PairOut::today(None, None, PairTag::BOX_NO_CONTACT),
+    }
+}
+
+/// The reuse geometry of a box pair that takes the reuse path this step (L9b D3, D8), or `None`
+/// when it takes today's: reuse off, a sensor on either side, τ_eff not positive (a degenerate
+/// box, or τ = 0), or a fast pair.
+#[inline]
+fn slow_geom(
+    ba: &BodyState,
+    bb: &BodyState,
+    oa: &Obb,
+    ob: &Obb,
+    radii: &impl Fn() -> (f32, f32),
+    reuse: ReuseStep,
+) -> Option<PairGeom> {
+    if !reuse.on || ba.is_sensor || bb.is_sensor {
+        return None;
+    }
+    let (ra, rb) = radii();
+    let g = PairGeom::new(oa, ob, ra, rb, reuse.tau);
+    (g.tau_eff > 0.0 && !is_fast(ba, bb, &g, reuse.dt2)).then_some(g)
+}
+
+/// A slow pair's record `record` (in the current roles) on this step's boxes: the hit's output,
+/// or `None` for a miss (the shapes changed, the criterion failed, the edge degenerated). `tag` is
+/// the previous step's tag in the current roles, whose axis is the record's.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn reuse_record(
+    record: &ReuseRecord,
+    a: BodyIndex,
+    b: BodyIndex,
+    ba: &BodyState,
+    bb: &BodyState,
+    oa: &Obb,
+    ob: &Obb,
+    g: &PairGeom,
+    tag: PairTag,
+    reuse: ReuseStep,
+) -> Option<PairOut> {
+    debug_assert!(tag.axis().is_some(), "invariant: a REC tag carries its record's SAT axis");
+    let axis = usize::from(tag.axis()?);
+    if !criterion(record, oa, ob, ba.rotation, bb.rotation, g) {
+        return None;
+    }
+    match refresh(record, oa, ob, a, b) {
+        Refreshed::Contact(m) => {
+            let pushed = m.count > 0;
+            Some(PairOut {
+                manifold: pushed.then_some(m),
+                // D10 and ruling W1: a hit writes no axis, except on a step whose key set changed,
+                // where it re-keys its entry with the axis its record was built on.
+                axis: reuse.rekey.then_some(axis),
+                tag: PairTag::box_recorded(axis, pushed, true),
+                record: Some(record.with_parity(reuse.parity)),
+            })
+        }
+        Refreshed::Separated(sep) => {
+            Some(PairOut::today(None, None, PairTag::box_separated_by_record(sep)))
+        }
+        Refreshed::Degenerate => None,
+    }
+}
+
+/// A slow pair's full collision `c`: the record built from it, and that record's refresh as the
+/// output (D7), so the output is a pure function of the record and the poses.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn record_contact(
+    c: BoxBoxContact,
+    a: BodyIndex,
+    b: BodyIndex,
+    ba: &BodyState,
+    bb: &BodyState,
+    oa: &Obb,
+    ob: &Obb,
+    g: &PairGeom,
+    reuse: ReuseStep,
+) -> PairOut {
+    let axis = c.reference_axis;
+    let record = build(&c, oa, ob, ba.rotation, bb.rotation, g, reuse.parity);
+    match refresh(&record, oa, ob, a, b) {
+        Refreshed::Contact(m) => {
+            let pushed = m.count > 0;
+            PairOut {
+                manifold: pushed.then_some(m),
+                axis: Some(axis),
+                tag: PairTag::box_recorded(axis, pushed, false),
+                record: Some(record),
+            }
+        }
+        // An edge record re-evaluates the very axis the full collision chose, on the same
+        // boxes: it overlaps and exists. Kept total rather than trusted.
+        Refreshed::Separated(_) | Refreshed::Degenerate => {
+            debug_assert!(false, "invariant: a record refreshes to a contact on the poses it was built on");
+            let tag = PairTag::box_contact(axis, c.manifold.count > 0);
+            PairOut::today(Some(c.manifold), Some(axis), tag)
         }
     }
 }

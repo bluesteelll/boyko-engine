@@ -55,7 +55,7 @@
 //! three `phys_bp_*` structural counters (`broadphase_tree/mod.rs`). A reader derives the path
 //! from the configuration, the row count and `brute_max_rows()` — never from the implementation.
 //!
-//! Each of the seven step counters is emitted exactly once per step, including when its value is
+//! Each of the ten step counters is emitted exactly once per step, including when its value is
 //! zero, so its per-step sample count is 1 and its per-step `total` is the value; the three
 //! tree counters are emitted once per tree-path step and not otherwise:
 //!
@@ -71,6 +71,13 @@
 //! | [`PHYS_BP_QUERIED`] | rows the tree broadphase queried or looped (`\|Q\| + \|Wide\|`), tree path only |
 //! | [`PHYS_BP_MEMBERS`] | rows in its persistent sets (`\|S\| + \|Z\|`), tree path only |
 //! | [`PHYS_BP_REBUILDS`] | its admissions and compactions this step, tree path only |
+//! | [`PHYS_NP_REUSED`] | box pairs whose output came from their contact-reuse record (L9b) |
+//! | [`PHYS_NP_SEP_HITS`] | box pairs their carried separating axis rejected, the SAT not run (L9a) |
+//! | [`PHYS_NP_FULL`] | box pairs whose full collision ran (neither of the two above) |
+//!
+//! The three narrowphase class counters are computed after the pair loop from the pairs' tags,
+//! and close: `PHYS_NP_FULL + PHYS_NP_REUSED + PHYS_NP_SEP_HITS` plus the non-box pairs is
+//! `PHYS_NP_PAIRS`. With contact reuse off `PHYS_NP_REUSED` is 0.
 //!
 //! A step with no simulated dynamic body returns from the solve before its first zone, so the
 //! solve zones and the two slot counters are absent on that step; the broadphase and narrowphase
@@ -138,13 +145,16 @@ declare_zone!(PHYS_NP_CHUNKS, name = "phys_np_chunks", scope = ROOT_SCOPE, tier 
 declare_zone!(PHYS_BP_QUERIED, name = "phys_bp_queried", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_BP_MEMBERS, name = "phys_bp_members", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_BP_REBUILDS, name = "phys_bp_rebuilds", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_NP_REUSED, name = "phys_np_reused", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_NP_SEP_HITS, name = "phys_np_sep_hits", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_NP_FULL, name = "phys_np_full", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 
 /// Span zones this crate declares: the length of [`SPAN_ZONES`], so a reader's expectation
 /// table is typed by it and a zone without an expectation does not compile.
 pub const SPAN_ZONE_COUNT: usize = 21;
 
 /// Counter zones this crate declares: the length of [`COUNTER_ZONES`].
-pub const COUNTER_ZONE_COUNT: usize = 10;
+pub const COUNTER_ZONE_COUNT: usize = 13;
 
 /// Every span zone this crate declares, in the order of the table in the module docs.
 ///
@@ -187,10 +197,13 @@ pub static COUNTER_ZONES: [&ZoneHandle; COUNTER_ZONE_COUNT] = [
     &PHYS_BP_QUERIED,
     &PHYS_BP_MEMBERS,
     &PHYS_BP_REBUILDS,
+    &PHYS_NP_REUSED,
+    &PHYS_NP_SEP_HITS,
+    &PHYS_NP_FULL,
 ];
 
 /// Whether this build compiles the physics zones at all. Every zone is `Deep`, so one `const`
-/// answers for all thirty-one; `false` under a profile whose tier ceiling is below `Deep`, where
+/// answers for all thirty-four; `false` under a profile whose tier ceiling is below `Deep`, where
 /// every site folds to nothing and an armed profiler records none of them.
 pub const ZONES_COMPILED: bool = (PHYS_SOLVE_BUILD::TIER as u8) <= (GLOBAL_TIER as u8);
 

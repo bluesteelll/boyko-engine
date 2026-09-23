@@ -335,6 +335,38 @@ pub struct PhysicsConfig {
     /// blocks), pinned by the frame allocation census. Toggling it changes performance,
     /// never the result.
     pub parallel_narrowphase: bool,
+    /// L9b CONTACT REUSE (default `false`, commit C3 of
+    /// `docs/physics/perf-campaign/levers/L9-contact-reuse/02-DESIGN-REV1.md`).
+    ///
+    /// When `true`, a touching box-box pair that is slow (its relative motion over a step
+    /// is small against the reuse distance) and involves no sensor keeps a record of its
+    /// last full collision — the reference face and the kept incident points, or the edge
+    /// pair — and, while its relative pose stays within τ_eff of that collision (measured
+    /// in the larger body's frame, scaled by the smaller body's extent), refreshes the
+    /// record from the current poses instead of running the SAT and the clip: each kept
+    /// point is carried with its body and its separation re-measured against the reference
+    /// face, and a point that lifted off is dropped (`narrowphase/reuse.rs`).
+    ///
+    /// **It changes values**, within the design's bounds (lemma L9-L3): an unseen feature
+    /// penetrates at most τ_eff before the next full collision, and the lever arms are off
+    /// by at most τ_eff. It never changes determinism: the output of a slow pair is a pure
+    /// function of its record and the current poses (a miss emits the refresh of the record
+    /// it just built, lemma L9-L1), and the serial loop and any partition of the parallel
+    /// narrowphase produce the same bits for any worker count.
+    ///
+    /// **Default OFF** (commit C3: the machinery is dormant, every trajectory is the one
+    /// the engine produced before it). Toggling it at runtime needs no epoch: off, the
+    /// records are ignored and not written; on, the next full collision of a slow pair
+    /// builds one.
+    pub contact_reuse: bool,
+    /// τ, the reuse distance in metres (default [`DEFAULT_CONTACT_REUSE_DISTANCE`], 1 mm);
+    /// only meaningful when [`contact_reuse`](Self::contact_reuse) is `true`. Must be finite
+    /// and `>= 0`; `0` disables reuse in effect (only bitwise-unchanged poses would hit).
+    ///
+    /// A pair's effective distance τ_eff is `τ` clamped by 5 % of the smaller bounding
+    /// radius and by 5 % of the thinnest half-extent of either box, so small and thin boxes
+    /// get a proportionally tighter bound. A change takes effect at the next check.
+    pub contact_reuse_distance: f32,
     /// Opt into the O8 per-island SLEEPING / deactivation (default `false`).
     ///
     /// Effective only on the colored-solve path (the
@@ -488,6 +520,10 @@ pub const DEFAULT_SLEEP_THRESHOLD: f32 = 1.0e-4;
 /// still-settling stack (no velocity-driven flap; no self-wake from frozen energy).
 pub const DEFAULT_SLEEP_FRAMES: u16 = 60;
 
+/// Default contact-reuse distance τ, in metres (L9b D4): 1 mm, a tenth of A7-R1's 10 mm
+/// creep bound.
+pub const DEFAULT_CONTACT_REUSE_DISTANCE: f32 = 0.001;
+
 impl Default for PhysicsConfig {
     fn default() -> Self {
         Self {
@@ -557,6 +593,10 @@ impl Default for PhysicsConfig {
             // chunks below two lanes, so W=1 opens no scope. The serial loop stays the
             // same-binary A/B (`parallel_narrowphase = false`).
             parallel_narrowphase: true,
+            // Default OFF at L9 C3 (the dormant commit): every trajectory is the one the
+            // engine produced before contact reuse existed. C4 is the commit that turns it on.
+            contact_reuse: false,
+            contact_reuse_distance: DEFAULT_CONTACT_REUSE_DISTANCE,
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.
             sleeping: false,
@@ -2430,16 +2470,17 @@ pub struct Manifolds {
     /// The per-row orientation frames (L9 D2, `narrowphase/reuse.rs`): row `r`'s world box
     /// axes, `Mat3::from_quat(rotation)`'s columns, written for every box row once per step
     /// at the entry of the narrowphase, so a box pair reads two frames instead of converting
-    /// two quaternions.
+    /// two quaternions — and, on a step that requested contact reuse, its bounding radius.
     ///
     /// Its length is the step's row count whenever the fill ran; a non-box row's slot is
     /// stale and never read. Untouched on a step whose pairs build their frames per pair
     /// (fewer pairs than half the rows).
     pub(crate) row_frames: ScratchColumn<RowFrame>,
-    /// The pair carry (L9 D9, `narrowphase/carry.rs`): every candidate pair's tag, this
-    /// step's and the previous step's, the jumper bitset of the join, and the stamps that
-    /// tie the tags to the pair list they index. It carries a separated box pair's
-    /// separating axis to the next step (L9a (ii)).
+    /// The pair carry (L9 D9, `narrowphase/carry.rs`): every candidate pair's tag and — with
+    /// contact reuse on — its reuse record, this step's and the previous step's, the jumper
+    /// bitset of the join, and the stamps that tie them to the pair list they index. It
+    /// carries a separated box pair's separating axis (L9a (ii)) and a slow touching box
+    /// pair's last full collision (L9b) to the next step.
     pub(crate) pair_carry: PairCarry,
     /// Steps whose narrowphase dispatched chunks across the pool — monotonic, written
     /// only by the calling thread after the join. A structural witness, read through
@@ -2504,6 +2545,47 @@ impl Manifolds {
         self.pair_carry.tags().iter().filter(|t| t.has(PairTag::SEPHIT)).count()
     }
 
+    /// Diagnostic: the last narrowphase's candidate pairs by how each was collided (L9), from
+    /// the pair tags. O(pairs).
+    pub fn pair_classes(&self) -> PairClasses {
+        let tags = self.pair_carry.tags();
+        let mut c = PairClasses { pairs: tags.len() as u64, ..PairClasses::default() };
+        for t in tags {
+            if !t.has(PairTag::BOX) {
+                c.non_box += 1;
+            } else if t.has(PairTag::SEPHIT) {
+                c.sep_hits += 1;
+            } else if t.has(PairTag::HIT) {
+                c.reused += 1;
+            } else {
+                c.full += 1;
+                c.full_contacts += u64::from(t.axis().is_some());
+                c.records_built += u64::from(t.has(PairTag::REC));
+            }
+        }
+        c
+    }
+
+    /// Diagnostic: an FNV-1a 64 hash of the reuse records the last narrowphase wrote (L9b) —
+    /// every pair slot whose tag carries `REC`, its index and every word of its record, in pair
+    /// order. Equal across the serial loop and any chunking of the parallel one. O(pairs).
+    pub fn reuse_records_fingerprint(&self) -> u64 {
+        let records = self.pair_carry.records();
+        let fnv = |h: u64, w: u32| {
+            w.to_le_bytes()
+                .iter()
+                .fold(h, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3))
+        };
+        self.pair_carry
+            .tags()
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.has(PairTag::REC))
+            .fold(0xcbf2_9ce4_8422_2325, |h, (k, _)| {
+                records[k].words().iter().fold(fnv(h, k as u32), |h, &w| fnv(h, w))
+            })
+    }
+
     /// Diagnostic: steps whose pair carry could not be joined although it had been stamped
     /// before — a missed gather, or a pair list that is not the one the carry's tags index.
     /// Flat while the pipeline runs every step.
@@ -2558,6 +2640,27 @@ impl Manifolds {
     pub fn sensor_overlaps_build(&mut self) -> ScratchBuildView<'_, Manifold> {
         self.sensor_overlaps.build_view()
     }
+}
+
+/// The last narrowphase's candidate pairs by how each was collided (L9), from the pair tags
+/// ([`Manifolds::pair_classes`]): `non_box + sep_hits + reused + full == pairs`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PairClasses {
+    /// Candidate pairs the narrowphase tagged.
+    pub pairs: u64,
+    /// Sphere-sphere and sphere-box pairs.
+    pub non_box: u64,
+    /// Box pairs the separating axis they carried from the previous step rejected, the SAT not
+    /// run (L9a (ii)).
+    pub sep_hits: u64,
+    /// Box pairs whose output came from their contact-reuse record (L9b), the SAT not run.
+    pub reused: u64,
+    /// Box pairs whose full collision (SAT, clip) ran.
+    pub full: u64,
+    /// Of `full`, the pairs whose full collision produced a contact.
+    pub full_contacts: u64,
+    /// Of `full_contacts`, the slow pairs that built a reuse record from it (L9b misses).
+    pub records_built: u64,
 }
 
 /// Bit width of one `color_occ` word (a `u64` per-color body bitset cell).

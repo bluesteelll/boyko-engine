@@ -20,6 +20,11 @@
 //! (`Manifolds::pair_carry_jumper_builds` rose by one), the carry was never Reset, and carried
 //! separating axes rejected pairs on both steps (`Manifolds::separated_axis_hits`).
 //!
+//! The census runs twice, on two worlds: with contact reuse off (the default), and forced on (L9
+//! C3), where the pairs also read, copy and rebuild their reuse records — through a row move, a
+//! flipped join and a jumper search among them. The reuse-on arm's witness: pairs reused their
+//! records on both steps of every cycle.
+//!
 //! RED-first (C2's log): a `Vec::with_capacity` in the jumper build makes every moved step count
 //! one acquisition more.
 //!
@@ -41,7 +46,7 @@ use boyko_threadpool::ThreadPoolBuilder;
 use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_systems;
-use boyko_physics::resources::Manifolds;
+use boyko_physics::resources::{Manifolds, PhysicsConfig};
 use boyko_physics::solver::DefaultRigidSolver;
 
 /// Heap acquisitions (`alloc`, `alloc_zeroed` through `alloc`, `realloc`) on every thread.
@@ -167,32 +172,37 @@ fn spawn_pile(world: &mut EcsMaster) -> Vec<Entity> {
     bodies
 }
 
-/// Heap acquisitions of one step, and the step's carried-axis rejections.
-fn counted_step(world: &mut EcsMaster, physics: &mut Schedule) -> (u64, usize) {
+/// Heap acquisitions of one step, the step's carried-axis rejections and its reused pairs.
+fn counted_step(world: &mut EcsMaster, physics: &mut Schedule) -> (u64, usize, u64) {
     let before = ACQUISITIONS.load(Ordering::Relaxed);
     physics.run(world);
     let acquisitions = ACQUISITIONS.load(Ordering::Relaxed) - before;
-    (
-        acquisitions,
-        world.resource::<Manifolds>().separated_axis_hits(),
-    )
+    let m = world.resource::<Manifolds>();
+    (acquisitions, m.separated_axis_hits(), m.pair_classes().reused)
 }
 
 #[test]
 fn a_step_whose_rows_moved_allocates_what_an_unmoved_step_does() {
+    census(false);
+    census(true);
+}
+
+/// One census arm, contact reuse set to `reuse` (module docs).
+fn census(reuse: bool) {
     let mut world = EcsMaster::new();
     let mut bodies = spawn_pile(&mut world);
     let mut builder = ScheduleBuilder::new(ThreadPoolBuilder::new().num_threads(1).build());
     add_physics_systems::<DefaultRigidSolver>(&mut builder, &mut world);
     world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
     let mut physics = builder.build(&mut world);
+    world.resource_mut::<PhysicsConfig>().contact_reuse = reuse;
     for _ in 0..WARM_STEPS {
         physics.run(&mut world);
     }
 
     let mut rows = Vec::with_capacity(CYCLES);
     for cycle in 0..CYCLES {
-        let (unmoved, unmoved_hits) = counted_step(&mut world, &mut physics);
+        let (unmoved, unmoved_hits, unmoved_reused) = counted_step(&mut world, &mut physics);
         let builds = world.resource::<Manifolds>().pair_carry_jumper_builds();
         // A body in the middle of the spawn order: the tail body swap-moves into its row.
         let doomed = bodies.remove(bodies.len() / 2 - cycle);
@@ -200,9 +210,14 @@ fn a_step_whose_rows_moved_allocates_what_an_unmoved_step_does() {
             world.delete_entity(doomed),
             "construction: a live body is despawnable"
         );
-        let (moved, moved_hits) = counted_step(&mut world, &mut physics);
+        let (moved, moved_hits, moved_reused) = counted_step(&mut world, &mut physics);
         let m = world.resource::<Manifolds>();
         rows.push((cycle, unmoved, moved, unmoved_hits, moved_hits));
+        assert_eq!(
+            (unmoved_reused > 0, moved_reused > 0),
+            (reuse, reuse),
+            "contact_reuse {reuse}, cycle {cycle}: reused pairs ({unmoved_reused}, {moved_reused})"
+        );
         assert_eq!(
             m.pair_carry_jumper_builds(),
             builds + 1,
@@ -217,7 +232,7 @@ fn a_step_whose_rows_moved_allocates_what_an_unmoved_step_does() {
     }
     let resets = world.resource::<Manifolds>().pair_carry_resets();
     println!(
-        "G-C-3 (cycle, unmoved acquisitions, moved acquisitions, unmoved hits, moved hits): {rows:?}; carry resets {resets}"
+        "G-C-3 contact_reuse {reuse} (cycle, unmoved acquisitions, moved acquisitions, unmoved hits, moved hits): {rows:?}; carry resets {resets}"
     );
     assert_eq!(resets, 0, "the pair carry lost its place");
     let fewest = rows
@@ -228,8 +243,9 @@ fn a_step_whose_rows_moved_allocates_what_an_unmoved_step_does() {
     for &(cycle, _, moved, _, _) in &rows {
         assert!(
             moved <= fewest,
-            "cycle {cycle}: the step whose rows moved made {moved} heap acquisitions, the fewest \
-             of any unmoved step {fewest}: the carry's translated join or jumper build allocates"
+            "contact_reuse {reuse}, cycle {cycle}: the step whose rows moved made {moved} heap \
+             acquisitions, the fewest of any unmoved step {fewest}: the carry's translated join, \
+             jumper build or record copy allocates"
         );
     }
 }

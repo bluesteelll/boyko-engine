@@ -14,7 +14,18 @@
 //!   `occupied`, hashed by field);
 //! * the pair tags of L9's pair carry (`Manifolds::pair_tags_fingerprint`, L9 G-C-2): every pair's
 //!   tag, in pair order, including the separated pairs its carried separating axis rejected;
+//! * the reuse records (`Manifolds::reuse_records_fingerprint`, L9b G-L9b-3): every record a tag
+//!   says was written this step, its slot and every word — empty while contact reuse is off;
 //! * the pose: every live body's `RigidBody` bits, in the order the bodies were spawned.
+//!
+//! # G-L9b-3 — the same matrix with contact reuse forced on
+//!
+//! [`parallel_narrowphase_with_contact_reuse_matches_the_serial_oracle_under_churn`] runs the churned
+//! scene with `contact_reuse` on in every arm, against the 1-worker flag-off oracle with it on too:
+//! the reused manifolds, the records, the tags and the poses equal the serial loop's at every
+//! worker count. Its witness: records are built and reused on the churned steps, and the carry
+//! never loses its place. The mutations M-c4 (a chunk's cursor started at slot `lo`) and M-b6 (a
+//! chunk reading this step's record column instead of the previous step's) must turn it red.
 //!
 //! # Non-vacuity
 //!
@@ -46,8 +57,9 @@
 //! # The Jolt pyramid (slow)
 //!
 //! [`jolt_pyramid_parallel_narrowphase_is_bit_identical`] runs Jolt's `PyramidScene.h` pile for 600
-//! steps at W ∈ {1, 8, 16} with the flag on against the 1-worker flag-off oracle. Ignored as
-//! `slow:`; run it in release with `-- --ignored`.
+//! steps at W ∈ {1, 8, 16} with the flag on against the 1-worker flag-off oracle, with contact
+//! reuse off and then forced on (L9b G-L9b-3). Ignored as `slow:`; run it in release with
+//! `-- --ignored`.
 //!
 //! Spins real thread pools (intractable under Miri), so `cfg(not(miri))`; the Miri leg of the same
 //! property is `narrowphase::dispatch`'s `chunks_on_threads_equal_the_serial_loop`.
@@ -171,6 +183,11 @@ struct Rig {
 
 impl Rig {
     fn new(workers: usize, parallel_np: bool) -> Self {
+        Self::with_reuse(workers, parallel_np, false)
+    }
+
+    /// [`new`](Self::new), with `contact_reuse` set to `reuse` (L9b).
+    fn with_reuse(workers: usize, parallel_np: bool, reuse: bool) -> Self {
         let mut world = EcsMaster::new();
         let base = [RigidBody::component_id(), RigidBodyMass::component_id(), Collider::component_id()];
         let archetypes = Archetypes {
@@ -190,6 +207,8 @@ impl Rig {
              of this gate are the override, not the default"
         );
         cfg.parallel_narrowphase = parallel_np;
+        assert!(!cfg.contact_reuse, "L9 C3: contact reuse is off by default");
+        cfg.contact_reuse = reuse;
         let mut rig =
             Self { world, physics, archetypes, live: Vec::new(), pile: Vec::new(), spawned: 0 };
         rig.spawn_scene();
@@ -360,13 +379,14 @@ fn pose_hash(world: &EcsMaster, bodies: &[Entity]) -> u64 {
     })
 }
 
-/// One step's five hashes.
+/// One step's six hashes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StepHashes {
     stream: u64,
     sensor: u64,
     table: u64,
     tags: u64,
+    records: u64,
     pose: u64,
 }
 
@@ -385,17 +405,29 @@ struct Witness {
     jumper_builds: u64,
     /// Steps whose pair carry was Reset although stamped.
     carry_resets: u64,
+    /// Box pairs whose output came from their reuse record, over every step (L9b).
+    reused: u64,
+    /// Box pairs that built a reuse record from their full collision, over every step (L9b).
+    records_built: u64,
+    /// Reused pairs on the steps right after a churn, whose rows moved.
+    reused_after_churn: u64,
 }
 
 /// Runs one arm of the churned scene and returns its per-step hashes and its witness. Asserts the
 /// dispatch counter's per-step movement for the arm's worker count and flag.
 fn run_churned(workers: usize, parallel_np: bool) -> (Vec<StepHashes>, Witness) {
-    let mut rig = Rig::new(workers, parallel_np);
+    run_churned_with(workers, parallel_np, false)
+}
+
+/// [`run_churned`] with `contact_reuse` set to `reuse`.
+fn run_churned_with(workers: usize, parallel_np: bool, reuse: bool) -> (Vec<StepHashes>, Witness) {
+    let mut rig = Rig::with_reuse(workers, parallel_np, reuse);
     let dispatches_per_step = u64::from(parallel_np && workers >= 2);
     let mut hashes = Vec::with_capacity(STEPS);
     let mut witness = Witness { min_pairs: usize::MAX, ..Witness::default() };
     for step in 0..STEPS {
-        if step > 0 && step % CHURN_EVERY == 0 {
+        let churned = step > 0 && step % CHURN_EVERY == 0;
+        if churned {
             rig.churn();
         }
         let before = rig.manifolds().narrowphase_dispatches();
@@ -415,11 +447,18 @@ fn run_churned(workers: usize, parallel_np: bool) -> (Vec<StepHashes>, Witness) 
         witness.box_sphere_flips +=
             m.manifolds().iter().filter(|mf| is_box(mf.body_a.0) && !is_box(mf.body_b.0)).count();
         witness.separated_axis_hits += m.separated_axis_hits();
+        let classes = m.pair_classes();
+        witness.reused += classes.reused;
+        witness.records_built += classes.records_built;
+        if churned {
+            witness.reused_after_churn += classes.reused;
+        }
         hashes.push(StepHashes {
             stream: stream_hash(m.manifolds()),
             sensor: stream_hash(m.sensor_overlaps()),
             table: m.box_axis_cache.fingerprint(),
             tags: m.pair_tags_fingerprint(),
+            records: m.reuse_records_fingerprint(),
             pose: pose_hash(&rig.world, &rig.live),
         });
     }
@@ -490,8 +529,47 @@ fn parallel_narrowphase_matches_the_serial_oracle_under_churn() {
     );
     assert!(witness.jumper_builds > 0, "the pair carry never built its jumper bitset ({compared})");
     assert_eq!(witness.carry_resets, 0, "the pair carry lost its place ({compared})");
+    assert_eq!(
+        (witness.reused, witness.records_built),
+        (0, 0),
+        "contact reuse is off, so no record is built or reused ({compared})"
+    );
     let moved = oracle.first().map(|h| h.pose) != oracle.last().map(|h| h.pose);
     assert!(moved, "the scene must move ({compared})");
+}
+
+/// G-L9b-3: the churned matrix with contact reuse forced on in the oracle and in every arm.
+#[test]
+fn parallel_narrowphase_with_contact_reuse_matches_the_serial_oracle_under_churn() {
+    let (oracle, witness) = run_churned_with(1, false, true);
+    println!("G-L9b-3 oracle witness: {witness:?}");
+    let mut arms = 0usize;
+    for workers in WORKERS {
+        for parallel_np in [false, true] {
+            if workers == 1 && !parallel_np {
+                continue;
+            }
+            let (arm, arm_witness) = run_churned_with(workers, parallel_np, true);
+            assert_matches(&oracle, &arm, workers, parallel_np);
+            assert_eq!(
+                (arm_witness.reused, arm_witness.records_built),
+                (witness.reused, witness.records_built),
+                "W={workers}, parallel_narrowphase {parallel_np}: the reuse classes differ"
+            );
+            arms += 1;
+        }
+    }
+    let compared = format!("{arms} arms matched the oracle on all {STEPS} steps; {witness:?}");
+    println!("G-L9b-3: {compared}");
+    assert!(witness.min_pairs >= MIN_PAIRS, "every arm must dispatch ({compared})");
+    assert!(witness.records_built > 0, "no pair built a reuse record ({compared})");
+    assert!(witness.reused > 0, "no pair reused its record ({compared})");
+    assert!(
+        witness.reused_after_churn > 0,
+        "no pair reused its record on a step whose rows moved ({compared})"
+    );
+    assert!(witness.jumper_builds > 0, "the rows never moved ({compared})");
+    assert_eq!(witness.carry_resets, 0, "the pair carry lost its place ({compared})");
 }
 
 /// Steps the un-churned scene `steps` times and returns the dispatch counter's rise and the fewest
@@ -532,8 +610,9 @@ const JOLT_SEPARATION: f32 = 0.5;
 const PYRAMID_STEPS: usize = 600;
 
 /// Jolt's pyramid on one world: a (50, 1, 50) floor and 1240 unit-density boxes of half-extent 1,
-/// friction 0.2, placed index for index as `PyramidScene.h` places them.
-fn pyramid(workers: usize, parallel_np: bool) -> (EcsMaster, Schedule, Vec<Entity>) {
+/// friction 0.2, placed index for index as `PyramidScene.h` places them; `contact_reuse` set to
+/// `reuse` (L9b).
+fn pyramid(workers: usize, parallel_np: bool, reuse: bool) -> (EcsMaster, Schedule, Vec<Entity>) {
     let mut world = EcsMaster::new();
     let archetype = world.create_archetype(&[
         RigidBody::component_id(),
@@ -601,38 +680,48 @@ fn pyramid(workers: usize, parallel_np: bool) -> (EcsMaster, Schedule, Vec<Entit
     add_physics_systems::<DefaultRigidSolver>(&mut builder, &mut world);
     world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
     let physics = builder.build(&mut world);
-    world.resource_mut::<PhysicsConfig>().parallel_narrowphase = parallel_np;
+    let cfg = world.resource_mut::<PhysicsConfig>();
+    cfg.parallel_narrowphase = parallel_np;
+    cfg.contact_reuse = reuse;
     (world, physics, boxes)
 }
 
-/// Per-step hashes of the pyramid, and the number of dispatched steps.
-fn run_pyramid(workers: usize, parallel_np: bool) -> (Vec<StepHashes>, u64) {
-    let (mut world, mut physics, boxes) = pyramid(workers, parallel_np);
+/// Per-step hashes of the pyramid, the number of dispatched steps and of reused pairs.
+fn run_pyramid(workers: usize, parallel_np: bool, reuse: bool) -> (Vec<StepHashes>, u64, u64) {
+    let (mut world, mut physics, boxes) = pyramid(workers, parallel_np, reuse);
+    let mut reused = 0;
     let mut hashes = Vec::with_capacity(PYRAMID_STEPS);
     for _ in 0..PYRAMID_STEPS {
         physics.run(&mut world);
         let m = world.resource::<Manifolds>();
+        reused += m.pair_classes().reused;
         hashes.push(StepHashes {
             stream: stream_hash(m.manifolds()),
             sensor: stream_hash(m.sensor_overlaps()),
             table: m.box_axis_cache.fingerprint(),
             tags: m.pair_tags_fingerprint(),
+            records: m.reuse_records_fingerprint(),
             pose: pose_hash(&world, &boxes),
         });
     }
     let dispatches = world.resource::<Manifolds>().narrowphase_dispatches();
-    (hashes, dispatches)
+    (hashes, dispatches, reused)
 }
 
 #[test]
 #[ignore = "slow: Jolt's 1240-box pyramid for 600 steps on four worlds; run in release with -- --ignored"]
 fn jolt_pyramid_parallel_narrowphase_is_bit_identical() {
-    let (oracle, none) = run_pyramid(1, false);
-    assert_eq!(none, 0, "the flag-off oracle must not dispatch");
-    for workers in [1, 8, 16] {
-        let (arm, dispatches) = run_pyramid(workers, true);
-        let want = if workers >= 2 { PYRAMID_STEPS as u64 } else { 0 };
-        assert_eq!(dispatches, want, "W={workers}: dispatched steps");
-        assert_matches(&oracle, &arm, workers, true);
+    // With contact reuse off (the default), then forced on (L9b G-L9b-3): each against its own
+    // one-worker flag-off oracle.
+    for reuse in [false, true] {
+        let (oracle, none, oracle_reused) = run_pyramid(1, false, reuse);
+        assert_eq!(none, 0, "the flag-off oracle must not dispatch");
+        assert_eq!(oracle_reused > 0, reuse, "contact_reuse {reuse}: reused pairs {oracle_reused}");
+        for workers in [1, 8, 16] {
+            let (arm, dispatches, _) = run_pyramid(workers, true, reuse);
+            let want = if workers >= 2 { PYRAMID_STEPS as u64 } else { 0 };
+            assert_eq!(dispatches, want, "W={workers}: dispatched steps");
+            assert_matches(&oracle, &arm, workers, true);
+        }
     }
 }

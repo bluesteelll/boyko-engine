@@ -50,7 +50,7 @@ use crate::manifold::{BodyIndex, Manifold};
 use crate::math::Vec3;
 use crate::narrowphase::axis_cache::AxisEntry;
 use crate::narrowphase::carry::PairTag;
-use crate::narrowphase::reuse::RowFrame;
+use crate::narrowphase::reuse::{ReuseRecord, RowFrame};
 use crate::resources::BodyState;
 use crate::row_identity::{RowKey, SleepLatch};
 use crate::solver::contact::BodyEffective;
@@ -1047,17 +1047,19 @@ fn register_solver_tail_layouts() {
 // pair's two rows in the same pair loop, and its pair carry (L9 C2,
 // `narrowphase/carry.rs`) adds the two per-pair tag columns — this step's, written
 // at pair `k`, and the previous step's, read at the joined slot beside
-// `pairs_prev` — and the jumper bitset the join probes at a pair's two rows. One
-// cohort, so their ids must be pairwise distinct mod `POOL_STAGGER_LINES`; they MAY
-// reuse the solver / graph / broadphase slots, since those loops never run at the
-// same index at the same moment.
+// `pairs_prev` — and the jumper bitset the join probes at a pair's two rows. Contact
+// reuse's records (L9 C3) are two more per-pair columns swept the same way as the
+// tags: this step's written at pair `k`, the previous step's read at the joined
+// slot. One cohort, so their ids must be pairwise distinct mod
+// `POOL_STAGGER_LINES`; they MAY reuse the solver / graph / broadphase slots, since
+// those loops never run at the same index at the same moment.
 
 /// Number of `ScratchColumn`s backing [`Manifolds`](crate::resources::Manifolds):
 /// the solver buffer, the sensor-overlap buffer, the box-axis cache slots, the
 /// parallel narrowphase's staging column, its per-pair axis commit, the per-row
 /// orientation frames (L9 C1), the two per-pair tag columns and the jumper bitset
-/// (L9 C2).
-pub(crate) const NARROWPHASE_COLUMN_COUNT: usize = 9;
+/// (L9 C2), and the two per-pair reuse-record columns (L9 C3).
+pub(crate) const NARROWPHASE_COLUMN_COUNT: usize = 11;
 
 /// Top of the narrowphase cohort — one id below the broadphase cohort's bottom.
 pub(crate) const SCRATCH_ID_NARROWPHASE_TOP: usize = BROADPHASE_COHORT_BOTTOM - 1;
@@ -1106,7 +1108,7 @@ const _: () = assert!(
 /// `1` = `sensor_overlaps`, `2` = the box-axis cache slots, `3` = the parallel
 /// narrowphase's staging column, `4` = its per-pair axis commit, `5` = the per-row
 /// orientation frames, `6` and `7` = the two per-pair tag columns, `8` = the jumper
-/// bitset).
+/// bitset, `9` and `10` = the two per-pair reuse-record columns).
 #[inline]
 pub(crate) fn narrowphase_column_id(k: usize) -> ComponentId {
     debug_assert!(k < NARROWPHASE_COLUMN_COUNT, "narrowphase column index out of cohort");
@@ -1120,8 +1122,9 @@ pub(crate) fn narrowphase_column_id(k: usize) -> ComponentId {
 /// in the same passes, so a shared id would put element `i` of two of them in one
 /// cache set — plus the `AxisEntry` slot table, the `u8` axis commit, the
 /// `RowFrame` column, the two `PairTag` columns (under different ids too: they swap
-/// roles every step and one is read while the other is written) and the `u64`
-/// jumper bitset.
+/// roles every step and one is read while the other is written), the `u64`
+/// jumper bitset and the two `ReuseRecord` columns (different ids, for the tags'
+/// reason).
 pub(crate) fn register_narrowphase_column_layouts() {
     register_layout::<Manifold>(narrowphase_column_id(0).get());
     register_layout::<Manifold>(narrowphase_column_id(1).get());
@@ -1132,6 +1135,8 @@ pub(crate) fn register_narrowphase_column_layouts() {
     register_layout::<PairTag>(narrowphase_column_id(6).get());
     register_layout::<PairTag>(narrowphase_column_id(7).get());
     register_layout::<u64>(narrowphase_column_id(8).get());
+    register_layout::<ReuseRecord>(narrowphase_column_id(9).get());
+    register_layout::<ReuseRecord>(narrowphase_column_id(10).get());
     register_row_identity_layouts();
 }
 
@@ -1195,6 +1200,19 @@ pub(crate) fn pair_tag_prev_id() -> ComponentId {
 #[inline]
 pub(crate) fn jumper_bits_id() -> ComponentId {
     narrowphase_column_id(8)
+}
+
+/// The [`ComponentId`] for one of the pair carry's two per-pair reuse-record columns
+/// (L9 C3).
+#[inline]
+pub(crate) fn reuse_id() -> ComponentId {
+    narrowphase_column_id(9)
+}
+
+/// The [`ComponentId`] for the pair carry's other per-pair reuse-record column (L9 C3).
+#[inline]
+pub(crate) fn reuse_prev_id() -> ComponentId {
+    narrowphase_column_id(10)
 }
 
 /// The [`ComponentId`] wrapper for [`SCRATCH_ID_SERIAL_MANIFOLD_CONSTRAINTS`].

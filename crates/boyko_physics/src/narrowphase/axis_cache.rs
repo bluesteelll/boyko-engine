@@ -262,6 +262,10 @@ pub struct BoxAxisCache {
     /// Table grows (each one also clears) in [`begin_frame`](Self::begin_frame). Diagnostic,
     /// cold.
     grows: u64,
+    /// Whether the current frame's key set changed: `begin_frame` grew or cleared the table, or
+    /// `begin_frame_synced` pre-read the carried axes (the rows moved, or its carry was Reset).
+    /// On such a frame a contact-reuse hit re-keys its pair's entry (L9 ruling W1).
+    keys_changed: bool,
 }
 
 /// The read-only hint source the parallel narrowphase's chunks share (L5 D2).
@@ -334,6 +338,7 @@ impl BoxAxisCache {
             prefetched_frames: 0,
             load_clears: 0,
             grows: 0,
+            keys_changed: false,
         }
     }
 
@@ -362,6 +367,7 @@ impl BoxAxisCache {
     /// trigger fires, the table is left in place and allocates nothing.
     pub fn begin_frame(&mut self, pairs: usize) {
         let len = next_pow2(2 * pairs.max(1));
+        self.keys_changed = len > self.slots.len() || self.occupied > self.slots.len() / 2;
         if len > self.slots.len() {
             // Grow to a fresh larger table; it starts empty, so occupancy resets.
             // `clear` before `resize` is what makes it fresh — the surviving prefix
@@ -486,10 +492,20 @@ impl BoxAxisCache {
             self.prefetched_frames += 1;
         }
         self.begin_frame(pairs.len());
+        self.keys_changed |= prefetched;
         // Every current pair's previous axis is captured, and every later write this step
         // is `set(a, b)` in current rows: the table is keyed by this gather from here on.
         self.cursor.stamp(rows);
         prefetched
+    }
+
+    /// Whether this frame's key set changed — the table grew or cleared, or the rows moved or
+    /// the carry was Reset — so an entry a pair does not `set` this frame is lost or stale under
+    /// its current key. A contact-reuse hit writes its record's axis on such a frame, and only on
+    /// one (L9 ruling W1: the table stays keyed for hit pairs).
+    #[inline]
+    pub(crate) fn keys_changed(&self) -> bool {
+        self.keys_changed
     }
 
     /// Fills the carried-axis column: for every box-box candidate pair, the axis stored

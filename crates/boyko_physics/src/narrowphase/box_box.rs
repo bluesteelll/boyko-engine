@@ -54,11 +54,19 @@
 //! * **The box frame is an input** ([`Obb::from_frame`]): the narrowphase reads each box
 //!   row's axes from the per-step frame column (`narrowphase/reuse.rs`) instead of
 //!   converting the row's quaternion per pair. [`Obb::new`] is the same computation
-//!   through [`RowFrame::of`], so both give the same bits.
+//!   through [`RowFrame::axes_of`], so both give the same bits.
 //!
 //! The crate's narrowphase enters through [`box_box_classify`]; [`box_box_contact`] keeps
 //! its signature as a wrapper over it. The pre-L9 bodies of `Obb::new`, the SAT and
 //! `box_box_contact` stay as the test oracle `pre_l9` (gate G-L9a-1).
+//!
+//! # Contact reuse (L9b, `narrowphase/reuse.rs`)
+//!
+//! Two small entries serve the reuse records, and neither changes a contact: [`contact_feature`]
+//! names the feature a contact was built on — the reference face `face_contact` picked, re-derived
+//! from the contact's axis and normal with the same [`most_aligned_face`], or the edge pair — and
+//! [`refresh_edge`] re-evaluates an edge record's axis exactly as [`sat`] evaluates its candidate
+//! of that index and builds today's edge contact on it.
 //!
 //! ZERO `unsafe`, no heap allocation (fixed-size stack buffers), deterministic.
 
@@ -162,28 +170,35 @@ const SAT_AXES: usize = 6 + EDGE_AXES;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Obb {
     /// World center.
-    center: Vec3,
+    pub(crate) center: Vec3,
     /// World-space unit axis directions (local x, y, z).
-    axes: [Vec3; 3],
+    pub(crate) axes: [Vec3; 3],
     /// Half-extents along each local axis.
-    half: [f32; 3],
+    pub(crate) half: [f32; 3],
 }
 
 impl Obb {
     /// Builds the world OBB from a body's center, orientation, and local
-    /// half-extents: [`from_frame`](Self::from_frame) of [`RowFrame::of`]`(rotation)`.
+    /// half-extents, with the axes of [`RowFrame::axes_of`]`(rotation)`.
     #[inline]
     pub(crate) fn new(center: Vec3, rotation: Quat, half_extents: Vec3) -> Self {
-        Self::from_frame(center, &RowFrame::of(rotation), half_extents)
+        Self::from_axes(center, RowFrame::axes_of(rotation), half_extents)
     }
 
     /// Builds the world OBB from a body's center, its step's orientation frame (L9 D2) and its
-    /// local half-extents. Given `RowFrame::of(rotation)` it is [`new`](Self::new), bit for bit.
+    /// local half-extents. Given a frame of `RowFrame::axes_of(rotation)` it is
+    /// [`new`](Self::new), bit for bit.
     #[inline]
     pub(crate) fn from_frame(center: Vec3, frame: &RowFrame, half_extents: Vec3) -> Self {
+        Self::from_axes(center, frame.axes, half_extents)
+    }
+
+    /// Builds the world OBB from a center, world axes and local half-extents.
+    #[inline]
+    fn from_axes(center: Vec3, axes: [Vec3; 3], half_extents: Vec3) -> Self {
         Self {
             center,
-            axes: frame.axes,
+            axes,
             half: [half_extents.x, half_extents.y, half_extents.z],
         }
     }
@@ -881,6 +896,91 @@ fn patch_depth(m: &Manifold) -> f32 {
     m.points[..usize::from(m.count)]
         .iter()
         .fold(0.0f32, |deepest, p| deepest.max(-p.separation))
+}
+
+/// The contact feature a box-box contact was built on (L9b D5): what a reuse record stores to
+/// refresh the contact without the SAT and the clip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FeatureRef {
+    /// A face contact: the reference face is `axis` (`0..3`) of body B iff `ref_is_b`, on its
+    /// positive side iff `positive`; the other body is the incident one.
+    Face {
+        /// Whether the reference face is body B's.
+        ref_is_b: bool,
+        /// The reference face's local axis.
+        axis: u8,
+        /// Whether it is the positive side of that axis.
+        positive: bool,
+    },
+    /// An edge-edge contact on `A.axes[ea] × B.axes[eb]`.
+    Edge {
+        /// Body A's edge axis.
+        ea: u8,
+        /// Body B's edge axis.
+        eb: u8,
+    },
+}
+
+/// The feature the contact `c` of the boxes `(a, b)` was built on (L9b D5).
+///
+/// `c.reference_axis` names the SAT candidate whose [`face_contact`] or [`edge_contact`] built the
+/// manifold (every path of [`box_box_classify`] and [`edge_fallback`] reports that one). A face
+/// contact's manifold normal is that candidate's oriented axis, so the reference face is the one
+/// `face_contact` picked: [`most_aligned_face`] of the reference box along the normal (FaceA) or
+/// its negation (FaceB), the same inputs and so the same face.
+pub(crate) fn contact_feature(a: &Obb, b: &Obb, c: &BoxBoxContact) -> FeatureRef {
+    let i = c.reference_axis;
+    debug_assert!(i < SAT_AXES, "invariant: a chosen SAT axis is 0..15");
+    if i < 6 {
+        let ref_is_b = i >= 3;
+        let (reference, dir) =
+            if ref_is_b { (b, c.manifold.normal * -1.0) } else { (a, c.manifold.normal) };
+        let (axis, positive, _) = most_aligned_face(reference, dir);
+        FeatureRef::Face { ref_is_b, axis: axis as u8, positive }
+    } else {
+        FeatureRef::Edge { ea: ((i - 6) / 3) as u8, eb: ((i - 6) % 3) as u8 }
+    }
+}
+
+/// What [`refresh_edge`] found.
+pub(crate) enum EdgeRefresh {
+    /// The edge axis overlaps: today's edge contact on it.
+    Contact(Manifold),
+    /// The edge axis separates the boxes, on this canonical axis (`6..15`).
+    Separated(u8),
+    /// The edge pair is parallel now: no axis.
+    Degenerate,
+}
+
+/// Re-evaluates the edge axis `A.axes[ea] × B.axes[eb]` of the boxes `(a, b)` and, when it
+/// overlaps, builds today's edge contact on it (L9b D5, the refresh of an edge record).
+///
+/// The axis is built and evaluated exactly as [`sat`] builds and evaluates its candidate of the same
+/// index, so a negative depth is a negative SAT candidate — the pair is separated exactly — and on
+/// the poses the record was built on the contact is the full collision's, bit for bit.
+#[inline]
+pub(crate) fn refresh_edge(
+    a: &Obb,
+    b: &Obb,
+    ea: usize,
+    eb: usize,
+    body_a: BodyIndex,
+    body_b: BodyIndex,
+) -> EdgeRefresh {
+    debug_assert!(ea < 3 && eb < 3, "invariant: edge axes are 0..3");
+    let index = 6 + 3 * ea + eb;
+    let Some(cand) =
+        eval_axis(a, b, a.axes[ea].cross(b.axes[eb]), SatClass::Edge { a: ea, b: eb }, index)
+    else {
+        return EdgeRefresh::Degenerate;
+    };
+    if cand.depth < 0.0 {
+        return EdgeRefresh::Separated(index as u8);
+    }
+    match edge_contact(a, b, &cand, ea, eb, body_a, body_b) {
+        Some(m) => EdgeRefresh::Contact(m),
+        None => EdgeRefresh::Degenerate,
+    }
 }
 
 #[cfg(test)]
@@ -2941,6 +3041,11 @@ mod tests {
         hint: Option<usize>,
     }
 
+    /// The step frame of a body with orientation `q` (the fill's axes; no pair reads the radius).
+    fn frame_of(q: Quat) -> RowFrame {
+        RowFrame { axes: RowFrame::axes_of(q), radius: 0.0 }
+    }
+
     /// A contact as words: every manifold field and point slot, then the reference axis.
     fn contact_words(c: &BoxBoxContact) -> Vec<u32> {
         let m = &c.manifold;
@@ -2971,7 +3076,7 @@ mod tests {
     }
 
     /// One G-L9a-1 case: [`box_box_classify`] on boxes built from the step's frames
-    /// ([`Obb::from_frame`] of [`RowFrame::of`]) and the public [`box_box_contact`] against the
+    /// ([`Obb::from_frame`] of [`RowFrame::axes_of`]) and the public [`box_box_contact`] against the
     /// pre-L9 oracle — the manifold's words and the axis, or no contact; a separated answer must
     /// name the FIRST axis in canonical order whose depth is negative on the oracle's boxes.
     fn l9a_case(p: L9aPose) -> Result<L9aSeen, String> {
@@ -2980,8 +3085,8 @@ mod tests {
                 .map(|c| contact_words(&c))
         });
         let kernel = std::panic::catch_unwind(|| {
-            let a = Obb::from_frame(p.ca, &RowFrame::of(p.qa), p.ha);
-            let b = Obb::from_frame(p.cb, &RowFrame::of(p.qb), p.hb);
+            let a = Obb::from_frame(p.ca, &frame_of(p.qa), p.ha);
+            let b = Obb::from_frame(p.cb, &frame_of(p.qb), p.hb);
             match box_box_classify(&a, &b, A, B, p.hint) {
                 BoxBoxOutcome::Contact(c) => (Some(contact_words(&c)), None),
                 BoxBoxOutcome::Separated(axis) => (None, Some(axis)),
@@ -3049,7 +3154,7 @@ mod tests {
     /// case draws a random hint.
     ///
     /// Mutations recorded red (C1's red-first log): M-a1, the early exit on `depth <= 0.0`,
-    /// calls the lattice's zero-depth contacts separated; M-a2, `RowFrame::of` storing the rows of
+    /// calls the lattice's zero-depth contacts separated; M-a2, `RowFrame::axes_of` storing the rows of
     /// `Mat3::from_quat` instead of its columns, transposes every rotated box.
     #[test]
     #[cfg(not(miri))]
@@ -3192,8 +3297,8 @@ mod tests {
                 .map(|c| contact_words(&c))
         });
         let kernel = std::panic::catch_unwind(|| {
-            let a = Obb::from_frame(p.ca, &RowFrame::of(p.qa), p.ha);
-            let b = Obb::from_frame(p.cb, &RowFrame::of(p.qb), p.hb);
+            let a = Obb::from_frame(p.ca, &frame_of(p.qa), p.ha);
+            let b = Obb::from_frame(p.cb, &frame_of(p.qb), p.hb);
             match box_box_classify_carried(&a, &b, A, B, sep, || p.hint) {
                 BoxBoxOutcome::Contact(c) => (Some(contact_words(&c)), None, false),
                 BoxBoxOutcome::Separated(axis) => (None, Some(axis), false),
