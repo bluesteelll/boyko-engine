@@ -34,6 +34,9 @@ pub const SEH_PREFIXES: [&str; 5] = ["$cppxdata$", "$ip2state$", "$stateUnwindMa
 /// The placeholder for an anonymous data reference.
 pub const ANON: &str = "<anon-data>";
 
+/// The normalised spelling of every `$ehgcr_<ordinal>_<n>` label.
+pub const EH_LABEL: &str = "$ehgcr";
+
 /// `true` if the raw name is anonymous data.
 #[must_use]
 pub fn is_anon(raw: &str) -> bool {
@@ -110,8 +113,23 @@ pub fn demangle(map: &BTreeMap<String, String>, raw: &str) -> String {
     }
     for p in SEH_PREFIXES {
         if let Some(inner) = raw.strip_prefix(p) {
+            // `$handlerMap$<n>$<owner>`: the handler index is part of the owner's own codegen.
+            if let Some((n, owner_raw)) = inner.split_once('$')
+                && !n.is_empty()
+                && n.bytes().all(|b| b.is_ascii_digit())
+            {
+                return format!("{p}{n}${}", owner(map, owner_raw));
+            }
             return format!("{p}{}", owner(map, inner));
         }
+    }
+    // `$ehgcr_<function ordinal>_<n>`: MSVC-style EH continuation labels inside a function, numbered
+    // by the function's ordinal in the module. Measured at B3 (probe (v)): adding one function to
+    // `boyko_ecs` renumbered 66 of them in `boyko_demo`. The ordinal says nothing about the code.
+    if let Some(rest) = raw.strip_prefix("$ehgcr_")
+        && rest.bytes().all(|b| b.is_ascii_digit() || b == b'_')
+    {
+        return EH_LABEL.to_owned();
     }
     if let Some(rest) = raw.strip_prefix('?') {
         // `?dtor$14@?0?<fn>@4HA`, `?catch$3@?0?<fn>@4HA`
