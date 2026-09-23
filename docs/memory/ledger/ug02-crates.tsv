@@ -1,0 +1,65 @@
+# UG-02 crate declarations (runtime data ledger rev 5; read by tests/runtime_data_ledger_gate.rs).
+# kind: crate (value = full | emitted | unscanned | pending), include, unreached, third-party.
+# The gate checks: declared crates = workspace members (+ the root package); a `pending` crate is
+# not yet a member; no full/emitted crate has a non-dev dependency on an unscanned or pending
+# crate; every third-party non-dev dependency of a full crate is declared here; the `include!`
+# list is exact; every .rs under a scanned src/ is reached by the module walk, cfg-excluded, or
+# declared `unreached`. The baseline modes of the scanned crates also live in gate code
+# (BASELINE_SCANNED), so this file can add crates but cannot demote one.
+kind	path	value	reason
+crate	crates/boyko_ecs	full	runtime kernel
+crate	crates/boyko_utils	full	runtime: a normal dependency of boyko_ecs, boyko_input, boyko_physics, boyko_rhi
+crate	crates/boyko_threadpool	full	runtime: the pool every parallel system runs on
+crate	crates/boyko_log	full	runtime: logging, linked into every engine crate
+crate	crates/boyko_diag	full	runtime: diagnostics and profiling, linked into every engine crate
+crate	crates/boyko_math	full	runtime: a normal dependency of physics, render, ui, scene, app, fontbake
+crate	crates/boyko_sdf_math	full	runtime: a normal dependency of physics, render, rhi_vulkan, app
+crate	crates/boyko_shaderdsl	full	a normal dependency of boyko_rhi_vulkan (optional) and boyko_sdf_math; its rows are mostly compile-time, and they are compared too (every heap hit is a row)
+crate	crates/boyko_physics	full	runtime
+crate	crates/boyko_scene	full	runtime
+crate	crates/boyko_input	full	runtime
+crate	crates/boyko_serialize	full	runtime
+crate	crates/boyko_image	full	runtime: a normal dependency of boyko_render
+crate	crates/boyko_fontbake	full	a normal dependency of boyko_render and boyko_ui
+crate	crates/boyko_rhi	full	runtime
+crate	crates/boyko_rhi_vulkan	full	runtime
+crate	crates/boyko_render	full	runtime
+crate	crates/boyko_ui	full	runtime
+crate	crates/boyko_reflect	full	an optional normal dependency of boyko_render and boyko_scene
+crate	crates/boyko_app	full	runtime host layer
+crate	crates/boyko_demo	full	the shipped binary
+crate	.	full	the root package's src/ (a placeholder binary)
+crate	crates/boyko_macros	emitted	proc-macro crate: only its quote! templates are scanned, because the code they emit runs in every user crate; its own proc-macro code is compile-time
+crate	crates/aether_lang	unscanned	proc-macro implementation library; its only dependent is crates/aether (a proc-macro)
+crate	crates/aether	unscanned	proc-macro crate; its only dependent is crates/aether_tests
+crate	crates/aether_tests	unscanned	tests of aether; no library code
+crate	crates/bench_bevy_vs_boyko	unscanned	bench harness; nothing depends on it
+crate	crates/reflect_fixture	unscanned	reflection test fixture; nothing depends on it
+crate	crates/reflect_dogfood	unscanned	reflection test fixture; nothing depends on it
+crate	crates/profile_fixture	unscanned	profiling test fixture; nothing depends on it
+crate	crates/profile_fixture_log	unscanned	profiling test fixture; nothing depends on it
+crate	tools/prof_decode	unscanned	offline profile decoder; every row is compile-time and nothing depends on it
+crate	crates/boyko_symcensus	pending	B3's dev-only symbol census crate, declared ahead so B1 and B3 merge in either order; the merge that makes it a member reclassifies it (W5)
+include	crates/boyko_diag/src/profile.rs	concat ! (env ! ("OUT_DIR") , "/profile_axis.rs")	a build-script file under OUT_DIR, generated from the profile axis; no source walk can see it
+third-party	crates/boyko_ecs	fixedbitset	FixedBitSet is a vocabulary head (heap words)
+third-party	crates/boyko_ecs	crossbeam-queue	ArrayQueue and SegQueue are vocabulary heads
+third-party	crates/boyko_ecs	crossbeam-utils	CachePadded only: no heap type
+third-party	crates/boyko_ecs	static_assertions	compile-time assertions only: no heap type
+third-party	crates/boyko_ecs	mimalloc	optional allocator shim (feature `mimalloc`); a #[global_allocator] static is a site of its own
+third-party	crates/boyko_ecs	libc	cfg(unix) FFI for the VmReservation backing: no heap type
+third-party	crates/boyko_ecs	loom	cfg(loom) model-checker shim: never in a shipped build
+third-party	crates/boyko_threadpool	crossbeam-deque	Injector, Worker and Stealer are vocabulary heads
+third-party	crates/boyko_threadpool	crossbeam-utils	CachePadded only: no heap type
+third-party	crates/boyko_threadpool	loom	cfg(loom) model-checker shim: never in a shipped build
+third-party	crates/boyko_physics	mimalloc	optional allocator shim (feature `mimalloc`)
+third-party	crates/boyko_fontbake	ttf-parser	parses borrowed font bytes: no heap type crosses into our code
+third-party	crates/boyko_input	windows-sys	raw Win32 FFI: no heap type
+third-party	crates/boyko_rhi_vulkan	windows-sys	raw Win32 FFI: no heap type
+third-party	crates/boyko_render	bytemuck	POD casts: no heap type
+third-party	crates/boyko_demo	bytemuck	POD casts: no heap type
+third-party	crates/boyko_demo	eframe	eframe / egui types are imposed on the demo's UI (the 10 out-of-scope:third-party rows); none is a vocabulary head
+third-party	crates/boyko_demo	rand	RNG state is inline: no heap type
+third-party	crates/boyko_demo	wasm-bindgen	cfg(wasm32) JS glue: never in a native build
+third-party	crates/boyko_demo	wasm-bindgen-futures	cfg(wasm32) JS glue: never in a native build
+third-party	crates/boyko_demo	console_error_panic_hook	cfg(wasm32) panic hook: never in a native build
+third-party	crates/boyko_demo	getrandom	cfg(wasm32) entropy source: no heap type

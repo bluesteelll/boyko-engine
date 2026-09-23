@@ -14,9 +14,8 @@
 //! `docs/memory/ledger/ug02-pins.tsv` is append-only. Its last line must equal the counts over the
 //! ledger; line to line, every count only falls, except on a `merge-raise` line with a reason (a
 //! merge that adds rows re-derives them in the same commit, 03 §2). The first line is anchored
-//! in gate code (`GENESIS`, which lands with the rev-5 pins), and every later line carries the
-//! FNV-1a hash of the one before, so the history cannot be rewritten in place without a
-//! gate-code edit (critique W4 (a)).
+//! here, in [`GENESIS`], and every later line carries the FNV-1a hash of the one before, so the
+//! history cannot be rewritten in place without a gate-code edit (critique W4 (a)).
 //!
 //! # Fixtures
 //!
@@ -29,6 +28,10 @@ mod scan;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// The first line of `docs/memory/ledger/ug02-pins.tsv`: rung B1's pins (ledger rev 5).
+const GENESIS: &str = "B1\tpin\t1660\t2825\t36\t1155\t5\t5\tecs-storage=203;ecs-schedule=174;ecs-services=110;pool-utils-log=176;physics-scene-math=104;render=161;rhi=111;ui-input=94;app-demo=297;codec-tools=527;macros-aether=8;ui-lane=318;reflect-lane=7\t-\tledger rev 5: the three census trees re-derived on the integ/unified trunk c1e9f1db by the syn scanner (unified plan 02 B1; 03 UG-02)";
 
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -36,6 +39,76 @@ fn repo_root() -> &'static Path {
 
 fn no_lines(_: proc_macro2::Span) -> Option<u32> {
     None
+}
+
+fn real_report() -> &'static scan::GateReport {
+    static REPORT: OnceLock<scan::GateReport> = OnceLock::new();
+    REPORT.get_or_init(|| {
+        scan::run_gate(&scan::GateConfig {
+            data_root: repo_root(),
+            scan_root: repo_root(),
+            genesis: Some(GENESIS),
+            baseline: scan::BASELINE_SCANNED,
+            line_of: &no_lines,
+        })
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The gate on the real tree
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ledger_matches_the_trunk() {
+    let rep = real_report();
+    println!("{}", rep.render());
+    // Anti-vacuity: a gate that scanned nothing and compared nothing is not green.
+    assert!(rep.files > 0, "no file was parsed");
+    assert!(rep.sites > 0, "no site was scanned");
+    assert!(rep.compared > 0, "the comparison set is empty");
+    assert!(
+        rep.failures.is_empty(),
+        "UG-02 RED: {} failures ({} extra, {} missing)",
+        rep.failures.len(),
+        rep.extra,
+        rep.missing
+    );
+}
+
+#[test]
+fn pins_equal_the_ledger_and_only_decrease() {
+    let pins = real_report().with_tag("PIN");
+    assert!(pins.is_empty(), "pin failures:\n{}", join(&pins));
+}
+
+#[test]
+fn every_workspace_member_is_declared() {
+    let members = real_report().with_tag("MEMBER");
+    assert!(members.is_empty(), "member failures:\n{}", join(&members));
+}
+
+#[test]
+fn empty_scan_root_is_red_on_the_real_floors() {
+    let empty = tmp("empty_scan_root");
+    let rep = scan::run_gate(&scan::GateConfig {
+        data_root: repo_root(),
+        scan_root: &empty,
+        genesis: Some(GENESIS),
+        baseline: scan::BASELINE_SCANNED,
+        line_of: &no_lines,
+    });
+    show_red("empty_scan_root_is_red_on_the_real_floors", &rep);
+    let floors = rep.with_tag("FLOOR");
+    assert_eq!(
+        floors.len(),
+        scan::GROUPS.len(),
+        "an empty scan root must be RED on every group's floor, got:\n{}",
+        rep.render()
+    );
+}
+
+fn join(v: &[&String]) -> String {
+    v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
