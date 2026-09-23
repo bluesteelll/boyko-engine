@@ -20,6 +20,7 @@ boyko_ecs	static_assertions	normal	lib
 boyko_ecs	trybuild	dev	lib
 boyko_log	boyko-diag	normal	lib
 boyko_log	trybuild	dev	lib
+boyko_macros	boyko-symcensus	dev	lib
 boyko_macros	proc-macro2	normal	lib
 boyko_macros	quote	normal	lib
 boyko_macros	syn	normal	lib
