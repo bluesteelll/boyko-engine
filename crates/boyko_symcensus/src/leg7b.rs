@@ -52,7 +52,7 @@ fn member_symbols(nm: &crate::tools::Tool, file: &Path) -> Result<Vec<String>> {
 /// Runs leg (7b) and the generated-source scan for `s`; returns the receipt, RED on a violation.
 pub fn run(ctx: &Ctx, llvm: &Llvm, s: Subject) -> Result<String> {
     let built = objbuild::build(ctx, &Request::new(s, PROFILE, &[]))?;
-    let mut out = crate::probe::header(ctx, llvm, &format!("leg (7b) rlib object census of {} under {PROFILE}", s.key));
+    let mut out = crate::probes::header(ctx, llvm, &format!("leg (7b) rlib object census of {} under {PROFILE}", s.key));
     out.push_str(&built.receipt());
     let census = census_rlibs(ctx, llvm, &built, &mut out)?;
     let generated = generated_sources(ctx, &built, &mut out)?;

@@ -41,6 +41,9 @@ pub enum RedKind {
     Usage,
     /// Two captures that must be identical are not.
     Mismatch,
+    /// The committed leg-(2) data is not the set capture froze: a pin file, a pin block, a
+    /// frozen row or a candidate's disposition (pinned or recorded absent) is missing or extra.
+    PinSet,
 }
 
 impl RedKind {
@@ -63,6 +66,7 @@ impl RedKind {
             Self::Io => "io",
             Self::Usage => "usage",
             Self::Mismatch => "mismatch",
+            Self::PinSet => "pin set",
         }
     }
 }

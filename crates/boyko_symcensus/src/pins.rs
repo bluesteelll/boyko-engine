@@ -17,6 +17,15 @@
 //! [`RedKind::SymbolAbsent`] — "absent", never "moved by 0" (P29: a missing symbol means
 //! somebody removed an attribute; critique W1). A body whose normalised text differs is "moved":
 //! RED unless the rung names it (attributed mode, 02 §2's table).
+//!
+//! **The frozen set is closed** (B3 review W1). A pin that is no longer in the committed data is
+//! never checked, so a deleted pin file, or a pin block cut out with its body, would otherwise read
+//! as a smaller green. Capture therefore writes `pins/leg2-frozen.tsv`, one row per pinned body,
+//! beside the pin files, and every reader of a pin file goes through [`read_pins`], which REDs
+//! [`RedKind::PinSet`] unless (1) every (candidate, subject) pair of [`CANDIDATES`] is either in
+//! the frozen list or in `pins/leg2-absent.txt`, never both and never neither, and (2) the
+//! subject's pin file holds exactly its frozen rows. The row set is compared, not a count, so a
+//! multi-name candidate (H-1, H-2, H-3) cannot lose one name while it keeps another.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -179,14 +188,171 @@ pub fn absent_path(root: &Path) -> PathBuf {
     data_dir(root).join("pins").join("leg2-absent.txt")
 }
 
-/// Reads the committed pin file of `subject`, if there is one.
-pub fn read_pins(root: &Path, subject: &str) -> Result<Option<PinFile>> {
-    let p = pin_path(root, subject);
-    match std::fs::read_to_string(&p) {
-        Ok(t) => PinFile::parse(&t).map(Some),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(Red::io(&p, &e)),
+/// `pins/leg2-frozen.tsv`.
+#[must_use]
+pub fn frozen_path(root: &Path) -> PathBuf {
+    data_dir(root).join("pins").join("leg2-frozen.tsv")
+}
+
+/// One row of the frozen list: one pinned body, as capture wrote it into its pin file.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Frozen {
+    /// The subject key.
+    pub subject: String,
+    /// The candidate id.
+    pub cand: String,
+    /// The normalised demangled name.
+    pub name: String,
+    /// The section's `RawDataSize`.
+    pub size: u64,
+    /// How many copies carry this body.
+    pub copies: usize,
+    /// sha256 of the normalised body.
+    pub sha256: String,
+}
+
+impl Frozen {
+    /// The frozen row of `pin`.
+    #[must_use]
+    pub fn of(pin: &Pin) -> Self {
+        Self {
+            subject: pin.subject.clone(),
+            cand: pin.cand.clone(),
+            name: pin.name.clone(),
+            size: pin.size,
+            copies: pin.copies,
+            sha256: pin.sha256.clone(),
+        }
     }
+}
+
+/// The text of the frozen list: `subject\tcand\tname\tsize\tcopies\tsha256`, in the order given.
+#[must_use]
+pub fn frozen_text(rows: &[Frozen]) -> String {
+    let mut s = String::from(
+        "# UG-15 leg (2): the pin set capture froze, one row per pinned body (B3 review W1). Written by\n\
+         # `ug15 leg2 capture` beside the pin files; every reader of a pin file REDs [pin set] unless the\n\
+         # file holds exactly its subject's rows here, and unless every (candidate, subject) pair of the\n\
+         # candidate list is either here or in leg2-absent.txt.\n\
+         # subject\tcand\tname\tsize\tcopies\tsha256\n",
+    );
+    for r in rows {
+        let _ = writeln!(s, "{}\t{}\t{}\t{}\t{}\t{}", r.subject, r.cand, r.name, r.size, r.copies, r.sha256);
+    }
+    s
+}
+
+/// Parses the frozen list.
+pub fn parse_frozen(text: &str) -> Result<Vec<Frozen>> {
+    let mut v = Vec::new();
+    for l in text.lines().map(|l| l.trim_end_matches('\r')).filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+        let f: Vec<&str> = l.split('\t').collect();
+        let bad = || Red::new(RedKind::Malformed, format!("frozen-list line not understood: {l}"));
+        let [subject, cand, name, size, copies, sha] = f.as_slice() else { return Err(bad()) };
+        v.push(Frozen {
+            subject: (*subject).to_owned(),
+            cand: (*cand).to_owned(),
+            name: (*name).to_owned(),
+            size: size.parse().map_err(|_| bad())?,
+            copies: copies.parse().map_err(|_| bad())?,
+            sha256: (*sha).to_owned(),
+        });
+    }
+    Ok(v)
+}
+
+/// Reads a committed file that must exist: a missing one is RED [`RedKind::PinSet`], because the
+/// data it holds is what makes the frozen set closed.
+fn read_required(p: &Path, what: &str) -> Result<String> {
+    match std::fs::read_to_string(p) {
+        Ok(t) => Ok(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(Red::new(RedKind::PinSet, format!("{} is missing: {what}", p.display())))
+        }
+        Err(e) => Err(Red::io(p, &e)),
+    }
+}
+
+/// The committed frozen list.
+pub fn read_frozen(root: &Path) -> Result<Vec<Frozen>> {
+    parse_frozen(&read_required(&frozen_path(root), "the frozen list says which pins capture froze, so without it a lost pin cannot be told from one never taken")?)
+}
+
+/// The committed absent list.
+pub fn read_absent(root: &Path) -> Result<Vec<Absent>> {
+    parse_absent(&read_required(&absent_path(root), "the absent list is the other half of every candidate's disposition")?)
+}
+
+/// RED [`RedKind::PinSet`] unless every (candidate, subject) pair of [`CANDIDATES`] is either
+/// frozen (at least one row) or recorded absent, never both and never neither, and unless every
+/// frozen or absent row names such a pair.
+pub fn verify_closure(frozen: &[Frozen], absent: &[Absent]) -> Result<()> {
+    let mut faults: Vec<String> = Vec::new();
+    for c in CANDIDATES {
+        for s in c.subjects {
+            let pinned = frozen.iter().any(|f| f.cand == c.id && f.subject == *s);
+            let gone = absent.iter().any(|a| a.cand == c.id && a.subject == *s);
+            match (pinned, gone) {
+                (true, true) => faults.push(format!("{} in {s} is both frozen and recorded absent", c.id)),
+                (false, false) => faults.push(format!("{} in {s} is neither frozen nor recorded absent", c.id)),
+                _ => {}
+            }
+        }
+    }
+    let known = |cand: &str, subject: &str| CANDIDATES.iter().any(|c| c.id == cand && c.subjects.contains(&subject));
+    for f in frozen.iter().filter(|f| !known(&f.cand, &f.subject)) {
+        faults.push(format!("frozen row {} `{}` in {}: the candidate list names no such pair", f.cand, f.name, f.subject));
+    }
+    for a in absent.iter().filter(|a| !known(&a.cand, &a.subject)) {
+        faults.push(format!("absent row {} in {}: the candidate list names no such pair", a.cand, a.subject));
+    }
+    if faults.is_empty() {
+        Ok(())
+    } else {
+        Err(Red::new(RedKind::PinSet, format!("leg (2)'s committed data is not closed over the candidate list: {faults:?}")))
+    }
+}
+
+/// RED [`RedKind::PinSet`] unless `file` (the parsed pin file of `subject`, `None` when it does
+/// not exist) holds exactly the frozen rows of `subject`: no file where rows are frozen, no row
+/// missing, none added.
+pub fn verify_file(subject: &str, file: Option<&PinFile>, frozen: &[Frozen]) -> Result<()> {
+    let mut want: Vec<Frozen> = frozen.iter().filter(|f| f.subject == subject).cloned().collect();
+    let Some(file) = file else {
+        return if want.is_empty() {
+            Ok(())
+        } else {
+            Err(Red::new(RedKind::PinSet, format!("leg2-{subject}.pins is missing and the frozen list holds {} pin(s) of {subject}", want.len())))
+        };
+    };
+    let mut got: Vec<Frozen> = file.pins.iter().map(Frozen::of).collect();
+    want.sort();
+    got.sort();
+    if got == want {
+        return Ok(());
+    }
+    let missing: Vec<String> = want.iter().filter(|w| !got.contains(w)).map(|f| format!("{} `{}` {}", f.cand, f.name, &f.sha256[..f.sha256.len().min(12)])).collect();
+    let extra: Vec<String> = got.iter().filter(|g| !want.contains(g)).map(|f| format!("{} `{}` {} (subject {})", f.cand, f.name, &f.sha256[..f.sha256.len().min(12)], f.subject)).collect();
+    Err(Red::new(
+        RedKind::PinSet,
+        format!("leg2-{subject}.pins holds {} pin(s), the frozen list {}: frozen but not in the file {missing:?}; in the file but not frozen {extra:?}", got.len(), want.len()),
+    ))
+}
+
+/// Reads the committed pin file of `subject` and proves it is the one capture froze: RED
+/// [`RedKind::PinSet`] on any break of [`verify_closure`] or [`verify_file`]. `Ok(None)` only when
+/// the frozen list holds no row of `subject` and no file exists.
+pub fn read_pins(root: &Path, subject: &str) -> Result<Option<PinFile>> {
+    let frozen = read_frozen(root)?;
+    verify_closure(&frozen, &read_absent(root)?)?;
+    let p = pin_path(root, subject);
+    let file = match std::fs::read_to_string(&p) {
+        Ok(t) => Some(PinFile::parse(&t)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(Red::io(&p, &e)),
+    };
+    verify_file(subject, file.as_ref(), &frozen)?;
+    Ok(file)
 }
 
 /// The defined CODE symbols whose normalised name is `name` (funclets excluded; they come with
@@ -240,16 +406,18 @@ fn build_view(ctx: &Ctx, llvm: &Llvm, s: Subject) -> Result<(Built, ObjView)> {
 
 /// The provenance header of a pin file.
 fn provenance(ctx: &Ctx, llvm: &Llvm, built: &Built) -> Vec<String> {
-    let mut h: Vec<String> = crate::probe::header(ctx, llvm, &format!("leg (2) pins of {} under {PROFILE}", built.subject.key)).lines().map(str::to_owned).collect();
+    let mut h: Vec<String> = crate::probes::header(ctx, llvm, &format!("leg (2) pins of {} under {PROFILE}", built.subject.key)).lines().map(str::to_owned).collect();
     h.extend(built.receipt().lines().map(str::to_owned));
     h
 }
 
-/// Leg (2) capture: writes `pins/leg2-<subject>.pins` for every subject with a candidate and
-/// `pins/leg2-absent.txt`; returns the receipt. RED if a subject yields no pin at all.
+/// Leg (2) capture: writes `pins/leg2-<subject>.pins` for every subject with a candidate,
+/// `pins/leg2-absent.txt` and `pins/leg2-frozen.tsv`; returns the receipt. RED if a subject yields
+/// no pin at all, or if the written data is not closed over the candidate list.
 pub fn capture(ctx: &Ctx, llvm: &Llvm) -> Result<String> {
-    let mut out = crate::probe::header(ctx, llvm, "leg (2) capture");
+    let mut out = crate::probes::header(ctx, llvm, "leg (2) capture");
     let mut absent: Vec<Absent> = Vec::new();
+    let mut frozen: Vec<Frozen> = Vec::new();
     for s in SUBJECTS {
         let cands: Vec<&Candidate> = CANDIDATES.iter().filter(|c| c.subjects.contains(&s.key)).collect();
         if cands.is_empty() {
@@ -285,10 +453,15 @@ pub fn capture(ctx: &Ctx, llvm: &Llvm) -> Result<String> {
         }
         let p = pin_path(&ctx.root, s.key);
         write(&p, &file.to_text())?;
+        frozen.extend(file.pins.iter().map(Frozen::of));
         let _ = writeln!(out, "{}: {} pin(s) -> {}", s.key, file.pins.len(), p.display());
     }
     absent.sort();
+    verify_closure(&frozen, &absent)?;
     write(&absent_path(&ctx.root), &absent_text(&absent))?;
+    let fp = frozen_path(&ctx.root);
+    write(&fp, &frozen_text(&frozen))?;
+    let _ = writeln!(out, "frozen: {} pin(s) -> {}", frozen.len(), fp.display());
     let _ = writeln!(out, "absent candidates: {}", absent.len());
     for a in &absent {
         let _ = writeln!(out, "  {} in {}: {}", a.cand, a.subject, a.reason);
@@ -349,16 +522,32 @@ fn multiset(pins: &[Pin]) -> BTreeMap<String, BTreeSet<(String, u64, usize)>> {
 }
 
 /// Leg (2) check against the committed pins, under an optional rename list (old → new) and
-/// named moves. Returns the receipt; RED on an absent pinned name or an unnamed move.
+/// named moves. Returns the receipt; RED on a committed pin set that is not the frozen one (read
+/// for every subject before anything is built), an absent pinned name, or an unnamed move.
 pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, String)], subjects: &[Subject]) -> Result<String> {
-    let mut out = crate::probe::header(ctx, llvm, "leg (2) check");
+    let mut out = crate::probes::header(ctx, llvm, "leg (2) check");
     let _ = writeln!(out, "rename entries {}, named moves {}", rename.0.len(), named.len());
+    // Every subject's file is verified against the frozen list, not only the ones built below:
+    // the pin set is one committed dataset, and `--subjects` narrows the builds, not the data.
+    let mut files: Vec<(Subject, PinFile)> = Vec::with_capacity(subjects.len());
+    let mut verified = 0usize;
+    for s in SUBJECTS {
+        let Some(file) = read_pins(&ctx.root, s.key)? else { continue };
+        verified += 1;
+        if subjects.contains(&s) {
+            files.push((s, file));
+        }
+    }
+    let _ = writeln!(
+        out,
+        "pin set: {} frozen pin(s); {verified} pin file(s) hold exactly their frozen rows; every candidate is frozen or recorded absent",
+        read_frozen(&ctx.root)?.len()
+    );
     let mut absent: Vec<String> = Vec::new();
     let mut moved: Vec<String> = Vec::new();
     let mut named_moved: Vec<String> = Vec::new();
     let mut checked = 0usize;
-    for &s in subjects {
-        let Some(file) = read_pins(&ctx.root, s.key)? else { continue };
+    for (s, file) in files {
         let (built, view) = build_view(ctx, llvm, s)?;
         let mut by_name_pins: BTreeMap<String, Vec<Pin>> = BTreeMap::new();
         for p in &file.pins {

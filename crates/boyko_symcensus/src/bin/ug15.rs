@@ -16,7 +16,7 @@
 //! ug15 probe iv  [--subjects a,b,…] [--arms ABC] [--out <file>]
 //! ug15 probe v   --parent-dir <dir> [--out <file>]
 //! ug15 leg1 census | deps [--write]                  # leg (1) by hand; `deps --write` re-pins
-//! ug15 leg2 capture [--out <file>]                    # B3 only: writes ug15/pins/*
+//! ug15 leg2 capture [--out <file>]                    # B3 only: writes ug15/pins/* and the frozen list
 //! ug15 leg2 check [--rename <file>] [--named <file>] [--subjects a,b,…] [--out <file>]
 //! ug15 leg7b --subject <S> [--out <file>]             # rlib object census + generated sources
 //! ug15 map a capture [--out <file>]                    # writes ug15/maps/file-map.tsv
@@ -39,7 +39,7 @@ use boyko_symcensus::normalize::RenameList;
 use boyko_symcensus::pins;
 use boyko_symcensus::objbuild::{self, Control, Ctx, Request, Subject};
 use boyko_symcensus::objview::{Llvm, ObjView};
-use boyko_symcensus::probe;
+use boyko_symcensus::probes;
 use boyko_symcensus::source;
 use boyko_symcensus::red::{Red, RedKind, Result};
 use boyko_symcensus::snapshot::{self, Snapshot};
@@ -55,6 +55,11 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The library's build progress ([`objbuild::Echo`]) goes to this binary's stderr.
+fn echo_stderr(line: &str) {
+    eprintln!("{line}");
 }
 
 /// `--name value` from `args`.
@@ -102,8 +107,8 @@ fn run(args: &[String]) -> Result<()> {
     };
     match cmd {
         "tools" => {
-            let ctx = Ctx::new()?;
-            let mut text = probe::header(&ctx, &Llvm::resolve(&ctx.host)?, "ug15 tools");
+            let ctx = Ctx::new(echo_stderr)?;
+            let mut text = probes::header(&ctx, &Llvm::resolve(&ctx.host)?, "ug15 tools");
             text.push_str(&tools::symbolizer()?.receipt_line());
             text.push('\n');
             let found = tools::msvc_symbolizers();
@@ -114,7 +119,7 @@ fn run(args: &[String]) -> Result<()> {
             emit(&text, opt(args, "--out"))
         }
         "build" => {
-            let ctx = Ctx::new()?;
+            let ctx = Ctx::new(echo_stderr)?;
             let s = objbuild::subject(required(args, "--subject")?)?;
             let profile = opt(args, "--profile").unwrap_or("release");
             let mut extra: Vec<String> = args.iter().position(|a| a == "--").map(|i| args[i + 1..].to_vec()).unwrap_or_default();
@@ -132,14 +137,14 @@ fn run(args: &[String]) -> Result<()> {
             let built = objbuild::build(&ctx, &Request { subject: s, profile, extra_rustc: &extra, control })?;
             let llvm = Llvm::resolve(&ctx.host)?;
             let view = ObjView::load(&llvm, &built.object)?;
-            let mut text = probe::header(&ctx, &llvm, "ug15 build");
+            let mut text = probes::header(&ctx, &llvm, "ug15 build");
             text.push_str(&built.receipt());
             text.push_str(&format!("symbols      {} defined, {} undefined\n", view.syms.defined.len(), view.syms.undefined.len()));
             built.check_intact()?;
             emit(&text, opt(args, "--out"))
         }
         "nm" => {
-            let ctx = Ctx::new()?;
+            let ctx = Ctx::new(echo_stderr)?;
             let llvm = Llvm::resolve(&ctx.host)?;
             let file = args.get(1).ok_or_else(|| Red::new(RedKind::Usage, "nm <file>"))?;
             let tab = llvm::nm(&llvm.nm, Path::new(file))?;
@@ -148,7 +153,7 @@ fn run(args: &[String]) -> Result<()> {
         "members" => {
             // The instrument's control M: an archive with no object member once `lib.rmeta` is
             // skipped must RED [member count], never read as "a census of zero".
-            let ctx = Ctx::new()?;
+            let ctx = Ctx::new(echo_stderr)?;
             let llvm = Llvm::resolve(&ctx.host)?;
             let file = args.get(1).ok_or_else(|| Red::new(RedKind::Usage, "members <archive>"))?;
             let members = llvm::rlib_members(&llvm.ar, Path::new(file))?;
@@ -159,21 +164,21 @@ fn run(args: &[String]) -> Result<()> {
             emit(&text, None)
         }
         "rlibs" => {
-            let ctx = Ctx::new()?;
+            let ctx = Ctx::new(echo_stderr)?;
             let llvm = Llvm::resolve(&ctx.host)?;
             let s = objbuild::subject(required(args, "--subject")?)?;
             let profile = opt(args, "--profile").unwrap_or("seam-census");
             let built = objbuild::build(&ctx, &Request::new(s, profile, &[]))?;
-            let mut text = probe::header(&ctx, &llvm, "ug15 rlibs (leg 7b member formats)");
+            let mut text = probes::header(&ctx, &llvm, "ug15 rlibs (leg 7b member formats)");
             text.push_str(&built.receipt());
-            text.push_str(&probe::rlib_formats(&llvm, &built)?);
+            text.push_str(&probes::rlib_formats(&llvm, &built)?);
             built.check_intact()?;
             emit(&text, opt(args, "--out"))
         }
         "textcheck" => {
             // 03 §6 leg (7): the seam-census profile must change symbols only, so its image's
             // `.text` must equal `release`'s. The seam-census side comes from a leg-(7) snapshot.
-            let ctx = Ctx::new()?;
+            let ctx = Ctx::new(echo_stderr)?;
             let llvm = Llvm::resolve(&ctx.host)?;
             let s = objbuild::subject(required(args, "--subject")?)?;
             let seam_file = required(args, "--seam")?;
@@ -181,7 +186,7 @@ fn run(args: &[String]) -> Result<()> {
             let built = objbuild::build(&ctx, &Request::new(s, "release", &[]))?;
             let rel = llvm::size_a(&llvm.size, &built.image)?;
             built.check_intact()?;
-            let mut text = probe::header(&ctx, &llvm, &format!(".text check of {}: release vs seam-census", s.key));
+            let mut text = probes::header(&ctx, &llvm, &format!(".text check of {}: release vs seam-census", s.key));
             text.push_str(&built.receipt());
             text.push_str(&format!("{:<10} {:>12} {:>12}\n", "section", "release", "seam-census"));
             for (name, size) in &rel {
@@ -203,7 +208,7 @@ fn run(args: &[String]) -> Result<()> {
         "leg2" => leg2(args),
         "leg1" => leg1(args),
         "leg7b" => {
-            let ctx = Ctx::new()?;
+            let ctx = Ctx::new(echo_stderr)?;
             let llvm = Llvm::resolve(&ctx.host)?;
             let s = objbuild::subject(required(args, "--subject")?)?;
             emit(&leg7b::run(&ctx, &llvm, s)?, opt(args, "--out"))
@@ -217,28 +222,35 @@ fn run(args: &[String]) -> Result<()> {
 fn leg7(args: &[String]) -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("snapshot") => {
-            let ctx = Ctx::new()?;
+            let ctx = Ctx::new(echo_stderr)?;
             let llvm = Llvm::resolve(&ctx.host)?;
             let s = objbuild::subject(required(args, "--subject")?)?;
             let profile = opt(args, "--profile").unwrap_or("seam-census");
             let out = required(args, "--out")?;
+            // Read before the build, so a pin set that is not the frozen one REDs [pin set] at once
+            // (B3 review W1): a missing pin file is never "nothing to check".
+            let pinned = pins::read_pins(&ctx.root, s.key)?;
             let map = maps_dir(&ctx)?.join(format!("leg7-{}-{profile}.map", s.key));
             let extra = vec!["-C".to_owned(), format!("link-arg=/MAP:{}", map.display())];
             let built = objbuild::build(&ctx, &Request::new(s, profile, &extra))?;
-            let mut header: Vec<String> = probe::header(&ctx, &llvm, &format!("leg (7) snapshot of {} under {profile}", s.key))
+            let mut header: Vec<String> = probes::header(&ctx, &llvm, &format!("leg (7) snapshot of {} under {profile}", s.key))
                 .lines()
                 .map(str::to_owned)
                 .collect();
             header.extend(built.receipt().lines().map(str::to_owned));
             let snap = Snapshot::capture(&llvm, &built, header)?;
             // Anti-vacuity (03 §6 leg 7): every leg-(2) pin of this subject is present in (b).
-            if let Some(file) = pins::read_pins(&ctx.root, s.key)? {
-                let names: BTreeSet<&str> = snap.multiset.keys().map(|(n, _, _)| n.as_str()).collect();
-                let missing: Vec<&str> = file.pins.iter().map(|p| p.name.as_str()).filter(|n| !names.contains(n)).collect();
-                if !missing.is_empty() {
-                    return Err(Red::new(RedKind::SymbolAbsent, format!("leg (7): leg-(2) pin(s) of {} absent from the object: {missing:?}", s.key)));
+            // `None` only when the frozen list holds no pin of this subject (`read_pins`).
+            match pinned {
+                Some(file) => {
+                    let names: BTreeSet<&str> = snap.multiset.keys().map(|(n, _, _)| n.as_str()).collect();
+                    let missing: Vec<&str> = file.pins.iter().map(|p| p.name.as_str()).filter(|n| !names.contains(n)).collect();
+                    if !missing.is_empty() {
+                        return Err(Red::new(RedKind::SymbolAbsent, format!("leg (7): leg-(2) pin(s) of {} absent from the object: {missing:?}", s.key)));
+                    }
+                    println!("leg (7): all {} leg-(2) pin(s) of {} present in (b)", file.pins.len(), s.key);
                 }
-                println!("leg (7): all {} leg-(2) pin(s) of {} present in (b)", file.pins.len(), s.key);
+                None => println!("leg (7): the frozen leg-(2) set holds no pin of {}, so there is no presence to check", s.key),
             }
             let text = snap.to_text();
             let p = Path::new(out);
@@ -306,33 +318,33 @@ fn leg7(args: &[String]) -> Result<()> {
 }
 
 fn probe_cmd(args: &[String]) -> Result<()> {
-    let ctx = Ctx::new()?;
+    let ctx = Ctx::new(echo_stderr)?;
     let llvm = Llvm::resolve(&ctx.host)?;
     let out = opt(args, "--out");
     match args.get(1).map(String::as_str) {
         Some("i") | Some("ii") => {
             let subs = subjects(args, &["swap_remove", "boyko_demo", "clear", "query_dsl", "phase9_scheduler"])?;
-            emit(&probe::probe_i_ii(&ctx, &llvm, &subs)?, out)
+            emit(&probes::probe_i_ii(&ctx, &llvm, &subs)?, out)
         }
         Some("iii") => {
             let map = maps_dir(&ctx)?.join("probe-iii-swap_remove.map");
-            emit(&probe::probe_iii(&ctx, &llvm, &map)?, out)
+            emit(&probes::probe_iii(&ctx, &llvm, &map)?, out)
         }
         Some("iv") => {
             let subs = subjects(args, &["swap_remove", "query_dsl", "phase9_scheduler", "boyko_demo", "clear"])?;
-            emit(&probe::probe_iv(&ctx, &llvm, &subs, opt(args, "--arms").unwrap_or("ABC"))?, out)
+            emit(&probes::probe_iv(&ctx, &llvm, &subs, opt(args, "--arms").unwrap_or("ABC"))?, out)
         }
         Some("v") => {
             let parent = required(args, "--parent-dir")?;
             let maps = maps_dir(&ctx)?;
-            emit(&probe::probe_v(&ctx, &llvm, Path::new(parent), &maps)?, out)
+            emit(&probes::probe_v(&ctx, &llvm, Path::new(parent), &maps)?, out)
         }
         _ => Err(Red::new(RedKind::Usage, "probe i|iii|iv|v")),
     }
 }
 
 fn leg2(args: &[String]) -> Result<()> {
-    let ctx = Ctx::new()?;
+    let ctx = Ctx::new(echo_stderr)?;
     let llvm = Llvm::resolve(&ctx.host)?;
     let read = |p: &str| std::fs::read_to_string(p).map_err(|e| Red::io(Path::new(p), &e));
     match args.get(1).map(String::as_str) {
@@ -362,7 +374,7 @@ fn leg2(args: &[String]) -> Result<()> {
 }
 
 fn map_cmd(args: &[String]) -> Result<()> {
-    let ctx = Ctx::new()?;
+    let ctx = Ctx::new(echo_stderr)?;
     let data = pins::data_dir(&ctx.root).join("maps");
     std::fs::create_dir_all(&data).map_err(|e| Red::io(&data, &e))?;
     let read = |p: &str| std::fs::read_to_string(p).map_err(|e| Red::io(Path::new(p), &e));
@@ -370,7 +382,7 @@ fn map_cmd(args: &[String]) -> Result<()> {
         (Some("a"), Some("capture")) => {
             let llvm = Llvm::resolve(&ctx.host)?;
             let symbolizer = tools::symbolizer()?;
-            let mut text = probe::header(&ctx, &llvm, "sensitivity map (a) capture (route a1)");
+            let mut text = probes::header(&ctx, &llvm, "sensitivity map (a) capture (route a1)");
             text.push_str(&symbolizer.receipt_line());
             text.push('\n');
             let subs: Vec<Subject> = maps::committed_pins(&ctx.root)?.into_iter().map(|(s, _)| s).collect();
@@ -407,7 +419,7 @@ fn map_cmd(args: &[String]) -> Result<()> {
             let out = required(args, "--out")?;
             let subs: Vec<Subject> = maps::committed_pins(&ctx.root)?.into_iter().map(|(s, _)| s).collect();
             let body = maps::capture_b_arm(&ctx, &llvm, &subs, label)?;
-            let head: String = probe::header(&ctx, &llvm, &format!("map (b) arm {label}")).lines().map(|l| format!("# {l}\n")).collect();
+            let head: String = probes::header(&ctx, &llvm, &format!("map (b) arm {label}")).lines().map(|l| format!("# {l}\n")).collect();
             emit(&format!("{head}{body}"), Some(out))
         }
         (Some("b"), Some("diff")) => {

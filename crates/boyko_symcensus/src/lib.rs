@@ -29,7 +29,7 @@ pub mod objbuild;
 pub mod objview;
 pub mod pe;
 pub mod pins;
-pub mod probe;
+pub mod probes;
 pub mod red;
 pub mod seam;
 pub mod sha256;

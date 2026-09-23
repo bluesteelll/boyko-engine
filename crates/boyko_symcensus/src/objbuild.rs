@@ -112,6 +112,14 @@ pub fn subject(key: &str) -> Result<Subject> {
     })
 }
 
+/// Where a build's progress goes, one line at a time: the instrument's `building …` line and
+/// cargo's stderr as it arrives.
+///
+/// A function, not a print, because this is a library: the workspace's print census
+/// (`crates/boyko_log/tests/print_census.rs`) admits no print macro outside `src/bin/`, and the
+/// `ug15` binary is the one place that decides progress goes to its stderr.
+pub type Echo = fn(&str);
+
 /// Where and with what the instrument builds.
 #[derive(Clone, Debug)]
 pub struct Ctx {
@@ -121,15 +129,18 @@ pub struct Ctx {
     pub target: PathBuf,
     /// The active toolchain.
     pub host: Host,
+    /// The progress sink every build writes to.
+    pub echo: Echo,
 }
 
 impl Ctx {
     /// Resolves the tree, the toolchain and the target dir; RED on any refusal of [`host`].
-    pub fn new() -> Result<Self> {
+    /// Build progress goes to `echo`.
+    pub fn new(echo: Echo) -> Result<Self> {
         host::check_cwd()?;
         let host = host::host()?;
         let target = host::target_dir(&host)?;
-        Ok(Self { root: host::workspace_root(), target, host })
+        Ok(Self { root: host::workspace_root(), target, host, echo })
     }
 }
 
@@ -279,13 +290,14 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
         .env("CARGO_TARGET_DIR", &ctx.target)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    eprintln!("ug15: building {} ({} {} {}) under `{}`", s.key, s.package, s.kind.flag(), s.name, req.profile);
+    (ctx.echo)(&format!("ug15: building {} ({} {} {}) under `{}`", s.key, s.package, s.kind.flag(), s.name, req.profile));
     let mut child = cmd
         .spawn()
         .map_err(|e| Red::new(RedKind::ToolAbsent, format!("could not spawn cargo: {e}")))?;
 
     let stderr = child.stderr.take().expect("invariant: stderr was piped");
     let needle = format!("--crate-name {stem} ");
+    let sink = ctx.echo;
     let echo = std::thread::spawn(move || {
         let mut kept = Vec::new();
         for line in BufReader::new(stderr).lines().map_while(std::result::Result::ok) {
@@ -295,9 +307,9 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
                     kept.push(line.clone());
                 }
                 let cut: String = line.chars().take(160).collect();
-                eprintln!("{cut}{}", if cut.len() < line.len() { " …" } else { "" });
+                sink(&format!("{cut}{}", if cut.len() < line.len() { " …" } else { "" }));
             } else {
-                eprintln!("{line}");
+                sink(&line);
             }
         }
         kept

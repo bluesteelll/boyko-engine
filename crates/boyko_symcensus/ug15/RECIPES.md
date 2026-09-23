@@ -39,8 +39,8 @@ UG15="$CARGO_TARGET_DIR/debug/ug15.exe"
 | `$UG15 probe i\|iii\|iv\|v …` | B3's probe build (`receipts/b3/probe-*.txt`, `receipts/b3/PROBES.md`) |
 | `$UG15 leg1 census` | leg (1) by hand: what the walk read and what it counted (the gate is the test below) |
 | `$UG15 leg1 deps [--write]` | the census crates' direct dependency set; `--write` re-pins `pins/leg1-deps.pins` after review |
-| `$UG15 leg2 capture` | **B3 only**: builds the five subjects under `release`, writes `pins/leg2-<subject>.pins` and `pins/leg2-absent.txt` |
-| `$UG15 leg2 check [--rename F] [--named F] [--subjects a,b]` | strict leg (2): RED `symbol absent` on a pinned name with no symbol, RED `moved` on an unnamed body change; `--named` lists `<cand or name>\t<reason>` for an attributed rung |
+| `$UG15 leg2 capture` | **B3 only**: builds the five subjects under `release`, writes `pins/leg2-<subject>.pins`, `pins/leg2-absent.txt` and `pins/leg2-frozen.tsv` (the frozen set, one row per pinned body) |
+| `$UG15 leg2 check [--rename F] [--named F] [--subjects a,b]` | strict leg (2): first, before any build, RED `pin set` unless every pin file holds exactly its rows of `pins/leg2-frozen.tsv` and every (candidate, subject) pair is frozen or in `pins/leg2-absent.txt` (a deleted file or block is never a smaller green; `--subjects` narrows the builds, not this); then RED `symbol absent` on a pinned name with no symbol, RED `moved` on an unnamed body change; `--named` lists `<cand or name>\t<reason>` for an attributed rung |
 | `$UG15 leg7b --subject boyko_demo` | leg (7b) over the census rlibs' object members (bitcode), plus leg (1) over the census build scripts' generated `OUT_DIR` sources |
 | `$UG15 map a capture` | map (a) under `sensitivity-map` (route a1): `maps/file-map.tsv`, and the carrier column of `pins/leg2-absent.txt` |
 | `$UG15 map b capture --arm L --out F` / `map b diff --type T A B` | map (b) on a layout control branch; `diff` rewrites T's rows of `maps/layout-map.tsv` |
