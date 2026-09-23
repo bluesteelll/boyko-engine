@@ -1,10 +1,10 @@
 # Engine runtime as ECS - design
 
 - **Date:** 2026-09-11
-- **Revision:** rev 2 after one critique pass
+- **Revision:** ~~rev 2 after one critique pass~~ (the rev-2 header, kept; rev 3 restated it in its P-header block). ~~**Current: rev 4 (2026-09-23): the rev-3 patch plus the rev-4 patch, both appended at the end; written by unified-system-plan step DOC-2 and reviewed by engine critique pass 3 (EP3).**~~ **Current: rev 4.1 (2026-09-23): the rev-3, rev-4 and rev-4.1 patches, appended at the end in that order. Rev 4 was written by unified-system-plan step DOC-2; engine critique pass 3 (EP3) reviewed it (CHANGES_REQUESTED: 1 Critical, 4 Important), and rev 4.1 resolves every remark.**
 - **Research (surveys and the owner's orders):** [ENGINE-RUNTIME-ECS-RESEARCH.md](ENGINE-RUNTIME-ECS-RESEARCH.md)
 - **Sibling physics study:** [../physics/PHYSICS-ECS-UNIFICATION-DESIGN.md](../physics/PHYSICS-ECS-UNIFICATION-DESIGN.md) (owns physics and kernel features K1-K7; this design consumes them and files proposed changes to them as inputs, section 13). The file exists in M at the time of writing; its later revisions (a pass-2 critique and a rev 3 patch appended there) are not reflected here.
-- **Status:** design only. No gate was run and no timing was taken. The owner questions in section 14 (Q1-Q5) are open.
+- **Status:** ~~design only. No gate was run and no timing was taken. The owner questions in section 14 (Q1-Q5) are open.~~ (rev 2's status, kept). **Current: design only; Q1-Q5 decided (rev 3); ~~rev 4 pending EP3, which must close before D-S3(iii), AS2 and every engine-sourced D-E rung. See "Status after rev 4" at the end of the file.~~ EP3 ran on 2026-09-23, and rev 4.1 resolves its remarks. See "Status after rev 4.1" at the end of the file.**
 
 ## Code trees
 
@@ -2931,3 +2931,1274 @@ Depends on: ED5, ED8, ED9, ED16–ED20, §17.
 - `D:\wt\joltab\crates\boyko_render\src\material.rs`
 - `D:\wt\joltab\crates\boyko_render\src\material_table.rs`
 - `D:\wt\ui\crates\boyko_ui\src\interaction\focus.rs`
+
+---
+
+# Rev 4 patch
+
+## How to read rev 4
+
+- **Why rev 4 exists.** Engine critique pass 3 never ran on rev 3 (unified plan risk RK-2, `docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md:171`). Rev 3 was filed against physics rev 3, and physics rev 4 and rev 5 changed the part this design depends on (K6: `M:…PHYSICS…:2449-2463`, `:3330-3343`). The unified system plan, rev 6.2, makes the rulings, and its step DOC-2 writes rev 4 (00 §5, the rows at `:156` and `:162`). **Engine critique pass 3 (EP3)** reviews the rev-3 patch, rev 4 and physics Erratum E2 together (02 §2, `:98`).
+- **What rev 4 changes.** Each block names its ruling.
+  1. K6′ is re-filed against physics rev 5 (U-3; 01 KC-12, KC-13): P4-ED16, with its consequences in P4-§0, P4-ED5, P4-ED15, P4-§5, P4-names, P4-§6, P4-§9, P4-§10, P4-§11, P4-§13, P4-§17 and P4-§18.
+  2. EK1 is registry-free (U-2; 01 KC-10): P4-§0, P4-§9, P4-§10, P4-§13.
+  3. EK15b's redirect **enqueues** the `Pinned` removal instead of performing it (02 §4.4): P4-§0, P4-ED5, P4-§9, P4-§10, P4-§17.
+  4. Rung prerequisites are remapped to plan rung ids (02 §2 Phase E; 02 §6): P4-§9, P4-§12, P4-§13.
+  5. EK7 gains a third swap policy, `#[event(swap = "every_tick")]` (KC-37 (d), rung D-E8), and its lanes are keyed by writer, not worker (KC-37 (b), rung D-E20, U-21): P4-§0, P4-ED7, P4-§6, P4-§9, P4-§10, P4-§11, P4-§17.
+  6. `FixedTime`'s frame-level getters move into `Time` (D-E23, U-25), so this design's interpolation readers read `Time::fixed_overstep_fraction()`: P4-§0, P4-§4.2, P4-§6, P4-§10, P4-§15, P4-§17.
+- **Reading order:** rev 2 body → the rev-3 patch (`P-…`) → the rev-4 patch (`P4-…`). A section that rev 4 does not name reads as rev 3 left it. As in rev 3, a **Removed** quote leaves the reading order, not the file: every quoted passage stays where it is, and each is named by its line on this tree.
+- **Edited in place:** only the header's two lines, `:4` and `:7`. Each keeps its old text, struck through, on the same line, so no line number moves; the plan cites this file by line (for example `:1883`, `:2080-2092`, `:2454`, `:2824`).
+- **Kernel names.** The kernel is now the plan's KC-01..KC-37 (`UNIFIED-SYSTEM-PLAN-01-KERNEL-CONTRACT.md` §2), mapped from this design's ids in 01 §3. Where rev 2 or rev 3 names a physics rung (U1, U2, U5b, S0) as the owner of a kernel feature, rev 4 names the KC and the plan rung that lands it (P4-§9, P4-§12).
+- **Trees.** Line numbers of this file, of the physics design and of the plan are on `u/doc-1-2` @ `49f2fcfb`. The physics design's lines up to `:3803` are unchanged by Erratum E2, which is appended at `:3805-4035`. Code is cited on two trees, each named at the citation: **[J]** = `D:/wt/joltab` @ `d552be05`, the plan's tree; **[I]** = `integ/unified` @ `c33d786d`, the trunk line on 2026-09-23. Rev 2 and rev 3 read J at `d11962a9`; their citations are re-derived only where rev 4 relies on one. External sources are listed at the end.
+- Nothing was built, run or timed.
+
+---
+
+## P4-header
+
+**Removed (rev 3 P-header, `:1793`):**
+> - **Revision:** rev 3 after two critique passes (rev 3 is the patch appended after the pass-2 log)
+
+**Added:**
+> - **Revision:** rev 4 (2026-09-23): the rev-3 patch, then the rev-4 patch appended after it. Rev 4 was written by the unified system plan's step DOC-2, without a pass-3 critique of rev 3. Engine critique pass 3 (EP3) reviews both, together with physics Erratum E2.
+
+**Removed (`:1799`):**
+> Rev 3 of this design is checked against physics rev 2 plus its rev-3 patch (D13 binder/anchors, D14 release at the chain head, K3 `StorageKind::Group`, K6 `release_dying`).
+
+**Added:**
+> Rev 4 is checked against physics rev 5 plus Errata E1 and E2. The group release policy is an associated type (`Immediate` / `Chained` / `Stamped`); `GroupHead<G>` and `GroupTail<G>` take `&G::ChainKey`; `DenseGroupMut`, `release_dying` and `chain_head_registered` no longer exist.
+
+**Removed (`:1805`):**
+> - **Status:** design only. No gate was run and no timing was taken. Q1–Q5 were decided under the owner's delegation (`ENGINE-RUNTIME-ECS-DECISIONS.md`): Q1 (a), Q2 (b), Q3 (b), Q4 (a), Q5 on the owner's word.
+
+**Added:**
+> - **Status:** design only. No gate was run and no timing was taken. Q1–Q5 stay decided as in rev 3. Rev 4 is pending EP3, which must close before D-S3(iii), AS2 and every engine-sourced D-E rung. D-E0, D-E18 and D-E19 are not engine-sourced and do not wait (02 §2).
+
+---
+
+## P4-§0: corrections table
+
+**Removed (rev 2 X-14, consequence cell, `:76`):**
+> EK1's core is consumed from physics U1. This design adds only the `Default` impl.
+
+**Added:**
+> EK1 is kernel feature KC-10, registry-free (U-2), landed by plan rung D-S2 (= physics U1). Its `Default` is part of KC-10 (P4-§9).
+
+**Removed (rev 3 X-19, consequence cell, `:1816`):**
+> K6′ is re-filed on `DenseGroupMut<G>`. R1 becomes function systems (ED16).
+
+**Added:**
+> Physics rev 4 deleted `DenseGroupMut`, `release_dying` and the `chain_head_registered` refusal (`M:…PHYSICS…:2463`), and rev 5 keys chain authority on `&G::ChainKey` (`:3330-3343`). K6′ is re-filed against rev 5 as the `Stamped` policy plus KC-13 (P4-ED16). R1 stays three function systems.
+
+**Removed (rev 3 X-28, tree cell, `:1825`):**
+> `M:…PHYSICS…:1371` "`EcsMaster::clear` resets every group store."
+
+**Added:**
+> `M:…PHYSICS…:1371` "`EcsMaster::clear` resets every group store." **Rev 4:** true for `Immediate` and `Chained` groups only. A `Stamped` group's `clear()` moves every live slot to `dying` with a stamp and releases nothing (01 KC-12; physics Erratum E2-1; P4-ED5).
+
+**Added (four rows after X-30):**
+
+| ID | Premise | What the tree / sibling says | Consequence |
+|---|---|---|---|
+| X-31 (rev 4) | EK7's lanes: `OsEventSink` holds "buffer ptr + dispatcher lane" (rev 2 §10, `:957`) | [J] `crates/boyko_ecs/src/ecs/core/system/params/event_writer.rs:131-133`, `:162-164`: `send` and `send_many` take the lane from the running thread's worker id. So two systems on one worker interleave, and which events a full lane refuses depends on W (01 §2.1, H-02) | Lanes are keyed by writer (U-21; P4-ED7) |
+| X-32 (rev 4) | Fixed→Fixed events are served by `wait_for_fixed` | [J] `crates/boyko_ecs/src/ecs/core/app/app.rs:713-720`: the swap happens once per frame, gated on substeps, before the substep loop (`:730-733`). An event sent at tick k is readable at k+1 only when a frame boundary falls between the two ticks (H-19) | A third policy, `every_tick` (KC-37 (d); P4-ED7) |
+| X-33 (rev 4) | `Time` and `FixedTime` are unchanged (§4.2 `:659`; §15 `:1195`) | [J] `crates/boyko_app/src/runner.rs:2282` `let overstep = world.resource::<FixedTime>().overstep_fraction();` is the render lerp alpha (host plan R5); [J] `crates/boyko_demo/src/app.rs:513` reads the same getter; [J] `crates/boyko_input/src/action/process.rs:106` reads `fixed.steps_this_frame()`. The three frame-level getters depend on pacing, and `steps_this_frame` is written after the loop, so Fixed code sees the previous frame's count (H-20) | The three move into `Time` (U-25; P4-§4.2) |
+| X-34 (rev 4) | EK15b's redirect "removes `Pinned`" inside `delete_entity_core` (rev 3 `:2546`) | [J] `crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs:1050-1051`: the redirect sits in the `if !flags.is_empty()` branch, before `fire_despawn_hooks`, while the despawn holds its `DeferredScopeGuard`. A removal there is a row move at hook depth ≥ 1 inside the despawn (unified plan, critic pass 2, O1; 02 §4.4). The deferred route exists: [J] and [I] `hierarchy/commands.rs:108-109`, `fn enqueue_child_of_removal` pushes `RemoveCommand::<ChildOf>` onto `deferred_hook_queue` | The redirect enqueues `RemoveCommand::<Pinned>` (P4-§9, EK15b) |
+
+---
+
+## P4-ED5: assets are entities (policy, writers, redirect, clear)
+
+**Removed (rev 3 P-ED5, `:1883`):**
+> Each has `RELEASE = DeferredStamped` (K6′, ED16) and `EDIT_LOG = true` (EK6g). The group marker types are private to `boyko_render`, so only its facades can name `DenseGroupMut` over them.
+
+**Added:**
+> Each has `type Release = Stamped` (KC-12; P4-ED16) and `EDIT_LOG = true` (EK6g). The group marker types are private to `boyko_render`, so only its facades can name `GroupHead` over them, and only `boyko_render` can construct their chain keys (`#[dense_group]` emits `<G>ChainKey` with a `pub(crate)` constructor, `M:…PHYSICS…:3337`).
+
+**Removed (`:1889`):**
+> - **Value writers.** Only these systems hold `DenseGroupMut<G>`:
+
+**Added:**
+> - **Value writers.** Only these systems hold `GroupHead<G>`. It is physics rev 5's param: it writes every column id and the recycle node, reads the slot-map node and provides typed views (`M:…PHYSICS…:3402-3404`). `DenseGroupMut` was deleted by physics rev 4 (`:2463`). The table of writers is unchanged:
+
+**Removed (`:1897`, first sentence):**
+> `AssetWrite<K>` is a hand-written SystemParam (X-27) over `DenseGroupMut<K::Group>`, `GroupEditsMut<K::Group>` and `GroupSlot` reads.
+
+**Added:**
+> `AssetWrite<K>` is a hand-written SystemParam (X-27) over `GroupHead<K::Group>`, `GroupEditsMut<K::Group>` and `GroupSlot` reads.
+
+**Removed (`:1907`):**
+> - **Release.** `DeferredStamped` plus K6′ at R1's horizon (ED16). The dying bytes stay intact until the release.
+
+**Added:**
+> - **Release.** `Stamped` plus KC-13 (a) at R1's horizon (P4-ED16). A removal never releases, and the dying bytes stay intact until the release.
+
+**Removed (`:1918`):**
+> - A despawn request on an asset whose count is > 0 unpins it instead (EK15b redirect).
+
+**Added:**
+> - A despawn request on an asset whose count is > 0 is deferred instead. The redirect enqueues the `Pinned` removal, which the outermost drain applies at depth 0 (EK15b, P4-§9). The asset stays alive, and is unpinned once that drain has run.
+
+**Removed (`:1936`):**
+> - `EcsMaster::clear()` resets every group store (`:1371`). For a world with asset groups it is therefore legal only at teardown, after `release_dense_group_at_teardown` (EK11 rank 4). A debug assert checks that no asset device lane still holds a resource.
+
+**Added:**
+> - `EcsMaster::clear()` resets no `Stamped` group. It moves every live slot to `dying` with a stamp, keeps `len`, and releases nothing (01 KC-12; physics Erratum E2-1). R1 or the teardown form releases those slots later, each visiting its device lane first.
+>   - So `clear()` no longer frees a slot that a submitted frame names. Rev 3's rule "legal only at teardown", and its debug assert, are withdrawn as a GPU-safety rule; the assert would now fire on a correct world, because the lanes keep their resources until the release.
+>   - `clear_gameplay()` stays the gameplay reset, because `clear()` also despawns every asset entity.
+>   - D-S3(iii)'s red-first test (a `Stamped` slot is never released by `clear()`) gates this.
+
+Depends on: P4-ED16, P4-§9 (EK15b).
+
+---
+
+## P4-ED7: event swap policies and writer lanes (EK7)
+
+**Added (after rev 2 ED7's last paragraph, `:290`):**
+
+> **EK7 (rev 4): three swap policies, and lanes keyed by writer.**
+>
+> **Policies.** `#[event(swap = "every_frame" | "wait_for_fixed" | "every_tick")]`, a per-type const.
+> - `every_frame`: swapped at the frame's swap point ③ in every frame. `RawInput` uses it (`:279`).
+> - `wait_for_fixed`: today's gated swap ([J] `app.rs:713-720`, under `EventUpdatePolicy::WaitForFixed`): once per frame, and only in a frame whose fixed loop ran at least one substep. It serves a type written in Fixed and read in Main; physics S7's contact events keep it (`:288`). Bevy uses the same cadence since 0.12.1: its event queues swap on "every update that runs FixedUpdate one or more times" (External sources).
+> - **`every_tick` (new; KC-37 (d), rung D-E8).** The type swaps before every Fixed substep, inside `fixed_advance`'s closure ([J] `app.rs:730-733`), instead of at the frame's gated swap. An event sent at tick k is therefore readable at tick k+1 at any pacing (H-19; Bevy's issue #7691 records the same class for fixed-step readers). A Main-schedule reader of an `every_tick` type is refused at `App::finish` with a coded panic, because two substeps in one frame would swap its events out unseen. In a replay session, every event type that Fixed reads is `every_tick` (rule B; the boundary report's check 3, 01 §2.1).
+> - **Default path** (unified plan, critic pass 6, O1). `App::finish` records whether any `every_tick` type exists, and `update_with_delta` chooses between two monomorphised `fixed_advance` calls with one predicted branch per frame. A game with no `every_tick` type runs today's substep closure byte for byte. The cost is one `bool` in `App` and one branch per frame, outside the loop.
+>
+> **Lanes keyed by writer** (KC-37 (b), rung D-E20, U-21).
+> - `EventWriterState` holds a lane index assigned at `init_state`, in registration order. Its `thread_count` field becomes `lane`, so the state stays 24 B ([J] `system/params/event_writer.rs:50-63`, `:287-290`).
+> - `send` and `send_many` stop reading the worker id ([J] `:131-133`, `:162-164`): one TLS read fewer per send. The reader state changes to match, and the flat reader buffer concatenates lanes in lane order.
+> - The per-lane capacity applies per writer, so which events a full lane refuses no longer depends on W.
+> - No lock is needed. `EventWriter` holds `&'s mut` state (`:89-91`), and the scheduler never runs one system instance on two threads at once, so a writer lane has one writer at a time. In debug builds the lane records its owner system and asserts it on `send`.
+> - `EcsMaster::events().send_event` becomes dispatcher-only. On a worker it returns `Err(EcsError::EventSendOffDispatcher)` and writes nothing. Its check replaces today's lane routing read ([J] `events/event_dispatcher.rs:290-292`), so the TLS read count is the same. Workers use `EventWriter`.
+> - **`OsEventSink<E>`** writes a writer lane of its own, assigned when `os_event_sink::<E>()` mints the sink at setup, instead of "the dispatcher lane" (rev 2 §10, `:957`). It is still written only on the dispatcher thread, inside `pump_events`, and IN4's lane-full coalescing test applies to that lane. *This is rev 4's application of U-21 to the one writer that is not a system; EP3 to confirm.*
+> - **Memory:** one lane per writer instead of one per worker. That is lower for types with at most W writers, and higher above. UG-20 records lanes and reader-buffer bytes per event type.
+> - **Precedent.** Unity's `EntityCommandBuffer.ParallelWriter` makes playback deterministic by sorting on a caller-supplied key that is independent of scheduling (the chunk index), not on the recording thread (External sources). Writer lanes reach the same property with no sort, because the lane index is fixed at `init_state`.
+> - **Overturn** (00 §3 U-21): MQ-21 shows `send` or `update_events` slower beyond its band, or memory above UG-20's band. Then: worker lanes, plus a merge at the swap by (writer index, per-writer sequence).
+>
+> **Order.** D-E20 lands before D-E8 (02 §4.4, fixed order #10): KC-26's per-type policy and `every_tick` build on writer lanes.
+
+Depends on: §6, §9 (EK7), §10, §11, §17.
+
+---
+
+## P4-ED15: K7 residuals (N5)
+
+**Removed (rev 3 P-ED15, `:2042`):**
+> - A group holding `SpanRef` columns releases with `release_dying_with(visit)` (K6′), which frees each dying slot's span **before** the DEAD overwrite (N5). Rev-3 `release_dying` has no visitor (`M:…PHYSICS…:1453-1457`), so without this each despawn would leak its span.
+
+**Added:**
+> - A group's span-typed columns are freed by the **kernel**, before the DEAD fill, at every release point: a removal that releases at once, `open_chain`'s flush, the first out-of-chain op's flush, `clear()` where it releases, `release_dying_before`, and the teardown form (01 KC-15, KC-13; physics Erratum E2-4). A span-typed group column owns its `SegmentedColumn` inside the group store.
+>   - `release_dying_with` is not built (01 §5). The user visitor of KC-13 remains only for per-slot resources the kernel does not own: the device lanes.
+>   - `SpanRef::DEAD` and the no-op `free(DEAD)` (`:2041`) stay.
+
+---
+
+## P4-ED16: K6′ re-filed against physics rev 5 (U-3)
+
+**Removed (rev 3 P-ED16, left in place):**
+- the title (`:2073`):
+  > ### ED16 (rev 3, B2/B3). One deferred-release capability: rev-3 K6 plus a stamped-horizon form on `DenseGroupMut` (K6′, re-filed against physics rev 3)
+- "What physics rev 3 has" (`:2075-2078`) and K6′'s four items (`:2080-2092`);
+- the physics paragraph (`:2094`):
+  > **Physics's horizon is "all".** S1 keeps calling `release_dying()` unchanged. Rev 2's "physics passes its S6 `this_run`" is withdrawn. It was wrong twice: physics releases at the head of S1 now, and a `this_run` horizon would keep in `dying` every slot removed in an earlier Fixed apply window of the same run, stamped `this_run + 1`, which is physics's B2 ghost.
+- the assets paragraph (`:2096`):
+  > **Assets.** R1 is three function systems, `render_retire::<K>` for K ∈ {Mesh, Material, Texture}. Each holds `DenseGroupMut<K::Group>`, `NonSendMut<K::DeviceLane>` and `NonSend<FrameInFlight>`, and calls `release_dying_before(frame.completed_gather, |slot| lane.free(slot))`.
+- two of the rejected alternatives (`:2121-2122`):
+  > - An exclusive R1 on `EcsMaster`: it panics per `:1483`.
+  > - A per-group opt-out of the refusal: the flag would stop guarding physics's chain against an exclusive release.
+
+**Added:**
+
+> ### ED16 (rev 4, U-3). One deferred-release capability: the `Stamped` policy and KC-13 (K6′, re-filed against physics rev 5)
+>
+> **What physics rev 5 has** (`M:…PHYSICS…:2449-2463`, `:3330-3343`, `:3402-3404`).
+> - `GroupHead<G>::open_chain(&G::ChainKey)` runs in S1. It DEAD-fills every dying slot, frees it, and sets `chain_open`. `GroupTail<G>::close_chain(&key)` runs in S6.
+> - A removal defers iff `chain_open`, and otherwise releases at once. The first out-of-chain op flushes `dying`.
+> - `release_dying`, `DenseGroupMut`, `EcsMaster::release_dense_group` and the `chain_head_registered` refusal are deleted (`:2463`, `:3336`). Rev 3's K6′ filed items 2 and 3 on two of them, and item 4 existed to get past the third.
+> - **The hazard under rev 5 alone.** An asset group runs no chain, so it would release a slot at removal while a submitted frame still names it (01 §4 R-C).
+>
+> **K6′, re-filed** (U-3; 01 KC-12, KC-13; physics Erratum E2-1).
+> 1. **The policy is a type.** `DenseGroup` gains `type Release: ReleasePolicy`, with marker types `Immediate`, `Chained` and `Stamped`, each carrying `const KIND: Release`. It replaces rev 3's `RELEASE = Immediate | Deferred | DeferredStamped`: `DeferredStamped` becomes `Stamped`, and rev 3's `Deferred`, which is physics's policy, becomes `Chained`. The erased paths read a 1-byte `release` in `DenseGroupStore`.
+> 2. **`Stamped` removal.** It always defers, and stamps `died` with `current_tick()`: `this_run + 1` in an apply window, `this_run` in a state transition (X-25). It is never released at removal and never by the first-op flush. `clear()` moves every live slot to `dying` with a stamp and keeps `len`. Only `Stamped` groups carry `died: VmColumn<Tick>`.
+> 3. **The horizon form, KC-13 (a).** `GroupHead<G>::release_dying_before(&mut self, key: &G::ChainKey, horizon: Tick, visit: impl FnMut(u32)) -> u32 where G: DenseGroup<Release = Stamped>`.
+>    - A call on a `Chained` or `Immediate` group fails with E0271 before monomorphisation, which replaces rev 3's const-assert. The bound sits on the method, so the error is E0271 rather than E0599 (physics Erratum E2-1).
+>    - It debug-asserts that `horizon` is not newer than the caller's `this_run` (wrap-aware).
+>    - It releases exactly {dying : `died` strictly older than `horizon`}. Per slot: `visit(slot)`, then the kernel's span free, then the DEAD fill.
+>    - Released slots go to `free` in dying order, retained entries are compacted in order, and it returns `len()`.
+> 4. **The teardown form, KC-13 (b), rung D-E9.** `EcsMaster::release_dense_group_at_teardown::<G>(&mut self, key: &G::ChainKey, token: &TeardownToken, visit: impl FnMut(u32)) -> u32`.
+>    - It has the same bound, so it is refused for `Immediate` (which has no dying entries) and for `Chained` (which has no per-slot resource outside the kernel to visit).
+>    - It releases every dying entry in the same per-slot order.
+>    - `TeardownToken(PhantomData<*const ()>)` has a private field and no public constructor, is not `Clone`, `Copy` or `Default`, and is `!Send + !Sync`. Only KC-27's teardown driver (EK11) mints it, when no schedule runs, and it passes `&TeardownToken` to rank callbacks of type `for<'t> fn(&mut EcsMaster, &'t TeardownToken)`. So no system can obtain a token, and no callback can keep one.
+> 5. **Not built:** rev 3's item 3, `release_dying_with`. The kernel frees spans at every release point (P4-ED15).
+>
+> **Who and when.**
+> - *Who* is decided by the chain key. Only `boyko_render` can construct the asset groups' keys, because `#[dense_group]` emits `<G>ChainKey` with a `pub(crate)` constructor and the group markers are private to `boyko_render` (P-ED5, `:1883`). No runtime claim exists.
+> - *When* is the horizon: `completed_gather` for R1, covered by the proof below; "everything" for the teardown form, which the token confines to a point where no schedule runs, after the rank callback has idled the device (`:2454`).
+>
+> **Physics.** `PhysicsBody` is `Chained`: S1 calls `open_chain(&PhysicsBodyChainKey::new())` and S6 calls `close_chain(&…)` (`M:…PHYSICS…:3616`). Rev 3's "S1 keeps calling `release_dying()` unchanged" (`:2094`) no longer applies: that API does not exist, and physics's release is rev 5's `Chained` rule. No byte of `PhysicsBody` changes.
+>
+> **Assets.** R1 is three function systems, `render_retire::<K>` for K ∈ {Mesh, Material, Texture}.
+> - Each holds `GroupHead<K::Group>`, `NonSendMut<K::DeviceLane>` and `NonSend<FrameInFlight>`, and calls `release_dying_before(key, frame.completed_gather, |slot| lane.free(slot))`.
+> - The key comes from a render-private item of `GpuAssetKind`, for example a `const` of the group's `ChainKey`. `<K::Group as DenseGroup>::ChainKey`'s constructor is an inherent `pub(crate)` function, which generic code cannot call through the associated type.
+> - The per-kind visitors are rev 3's: mesh frees the geometry range; texture destroys the VkImage and re-nulls the descriptor; material is a no-op.
+>
+> **The horizon and its proof** stand as rev 3 wrote them (`:2101-2112`), with one precision in step 3.
+> - "By in-order queue completion" (`:2109`) is to be read as the fence rule. The Vulkan specification lets batches "complete out of order", but a fence signal operation defined by `vkQueueSubmit` "additionally include[s] in the first synchronization scope all commands that occur earlier in submission order" (External sources).
+> - So once R0's wait on slot s returns, every frame submitted before the frame last submitted from s **on the same queue** is complete. That is the property step 3 uses, and it needs every frame's recorded work on the queue that signals R0's fence.
+> - *AS2's FIF-slot-reuse proptest models exactly that. Whether any recorded work reaches a second queue was not checked for this revision; EP3 to confirm.*
+>
+> **Cost.**
+> - +4 B per dying entry, for `Stamped` groups only.
+> - One compare per dying entry per R1 run.
+> - One compare of the `release` byte, inside the `#[cold]` `anchor_transition` and the first-op flush only.
+> - `PhysicsBody`: 0.
+>
+> **Rejected** (rev 3's list, restated for rev 5):
+> - a `this_run` horizon (B2);
+> - an exclusive R1 on `EcsMaster`: KC-13 offers an exclusive release only with a `TeardownToken`, which no system can hold;
+> - a per-group opt-out of rev 5's out-of-chain release rule: the policy type does the same job at compile time, with no flag;
+> - `g_{N−2}` read from the overwritten slot (rev 2's defect, B3).
+>
+> **Rungs.** The `Stamped` policy, `died`, `release_dying_before` and the `clear()` stamping rule land in D-S3(iii). The teardown form lands in D-E9 (02 §2). Both wait for EP3.
+
+Depends on: §5 `FrameInFlight`, §6 R0/R1/R5, P4-§9 (K6′), §11, P4-§12 (AS2), P4-§13, P4-§17.
+
+---
+
+## P4-§4.2: datum rows (D-E23)
+
+**Removed (rev 2 §4.2, `:659`):**
+> | `Time`, `FixedTime`, `State<S>`, records | Resources | unchanged | — |
+
+**Added:**
+> | `Time`, `FixedTime`, `State<S>`, records **(rev 4)** | Resources | unchanged, except that `FixedTime`'s frame-level getters `overstep()`, `overstep_fraction()` and `steps_this_frame()` move into `Time` as `fixed_overstep()`, `fixed_overstep_fraction()` and `fixed_steps()`, written once after the fixed loop. `FixedTime` keeps only tick-level values: `timestep`, `delta`, `delta_secs`, `elapsed` (U-25) | D-E23 |
+
+**Added (after §4.2's table):**
+> **`FixedTime`'s frame-level values move into `Time` (rev 4; U-25, H-20).**
+> - **Why.** The three getters depend on pacing (X-33), so a Fixed system that reads them breaks replay determinism, and no check can see which getter of an allowed resource a system calls. Inside `Time`, they fall under rule B's existing refusal of a Fixed read of `Time`.
+> - **The interpolation readers read `Time::fixed_overstep_fraction()`.**
+>   - That value is the render lerp alpha (host plan R5), which the runner reads today at [J] `runner.rs:2282` and `boyko_demo` at [J] `app.rs:513`.
+>   - HO4 moves the runner's frame into the Render schedule, so the system that assembles the frame's scene parameters (R5 `render_record`, §6) reads `Res<Time>`.
+>   - Render runs after Fixed and Main, so it sees the value written once after this frame's fixed loop. That is the same point the runner samples today ("sampled in Main AFTER the fixed loop settled", [J] `runner.rs:2276-2281`).
+>   - Common practice: the blend factor between two fixed states is the accumulator's remainder divided by the timestep (Fiedler, "Fix Your Timestep!"), and Bevy exposes it as `Time<Fixed>::overstep_fraction()` for interpolation systems in `Update` (External sources). It is a frame-level fact, which is why it moves to the frame clock here.
+> - `boyko_input`'s `clear_consumed_fixed_edges`, in `InputSet`, reads `Time::fixed_steps()` instead of `FixedTime::steps_this_frame()` ([J] `crates/boyko_input/src/action/process.rs:102-109`).
+> - **Cost:** 0 added lookups per frame. `fixed_advance` still makes one post-loop resource lookup ([J] `crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs:82-83`), now of `Time`, and the last `expend` returns the remainder for the debug assert.
+> - **Rung:** D-E23 (lock set and full caller list: 02 §2). **Overturn** (00 §3 U-25): an owner API ruling that `FixedTime` keeps the getters; then a `FixedFrame` resource with the same refusal, at the same runtime cost.
+
+---
+
+## P4-§5: data structures and drop order
+
+**Removed (rev 3 P-§5, `:2440-2441`, the K6′ comment):**
+```
+// K6′ (physics-owned; input re-filed against rev 3): RELEASE = DeferredStamped only. Recycle gains
+//   died: VmColumn<Tick>, parallel to `dying` (+4 B per dying entry). Deferred groups (PhysicsBody) unchanged.
+```
+**Added:**
+```rust
+// K6′ (rev 4; KC-12, KC-13): `type Release = Stamped` only. The group store gains
+//   died: VmColumn<Tick>, parallel to `dying` (+4 B per dying entry), and a 1-byte `release` for the erased
+//   paths. Chained groups (PhysicsBody) unchanged.
+```
+
+**Removed (rev 3 P-§5, drop order, `:2454`):**
+> 4. asset device lanes. First the device idle, then `release_dense_group_at_teardown::<G>(&TeardownToken, lane-free visitor)` per asset group (K6′ item 4), then the lanes drop.
+
+**Added:**
+> 4. asset device lanes. First the device idle, then `release_dense_group_at_teardown::<G>(&key, &TeardownToken, lane-free visitor)` per asset group (KC-13 (b); P4-ED16), then the lanes drop. The rank callback has the type `for<'t> fn(&mut EcsMaster, &'t TeardownToken)`, and the keys come from `GpuAssetKind` (P4-ED16).
+
+---
+
+## P4-names: the remaining rev-3 sites that use the old API names
+
+The blocks above quote every rev-3 passage whose meaning changes. The following rev-3 passages change only by name, and read with these substitutions:
+- `DeferredStamped` → `Stamped`; `RELEASE = X` → `type Release = X`;
+- `DenseGroupMut<G>` → `GroupHead<G>`;
+- `release_dying_before(horizon, visit)` → `release_dying_before(key, horizon, visit)`;
+- `release_dying()` (physics) → rev 5's `open_chain(&key)` flush.
+
+Sites on this tree: `:2115` (ED16's cost line), `:2238`, `:2295`, `:2325`, `:2383`, `:2565`, and `:2713` (AS2's content cell). The changelog rows at `:2896`, `:2904` and `:2916` are the record of rev 3 and stay as written.
+
+---
+
+## P4-§6: system graph
+
+**Removed (rev 2 §6, `:778`):**
+>   ③ per-type event swap (EK7)  ④ Fixed × N  ⑤ Main  ⑥ Render (EK10; skipped when absent)
+
+**Added:**
+>   ③ per-type event swap (EK7: `every_frame` types; `wait_for_fixed` types when the gate allows)  ④ Fixed × N (each substep first swaps the `every_tick` types, KC-37 (d); after the loop, `Time` receives `fixed_steps` / `fixed_overstep` / `fixed_overstep_fraction`, U-25)  ⑤ Main  ⑥ Render (EK10; skipped when absent)
+
+**Removed (rev 3 P-§6, `:2483`, last cell):**
+> after `GameplaySet`, before `RenderPrepareSet`; writers of one group serialise on `DenseGroupMut<G>`
+
+**Added:**
+> after `GameplaySet`, before `RenderPrepareSet`; writers of one group serialise on `GroupHead<G>`
+
+**Removed (rev 3 P-§6, `:2504`, fragment):**
+> (**function systems**: `DenseGroupMut<K::Group>` + `NonSendMut<K::DeviceLane>` + `NonSend<FrameInFlight>`; `release_dying_before(completed_gather, lane.free)`)
+
+**Added:**
+> (**function systems**: `GroupHead<K::Group>` + `NonSendMut<K::DeviceLane>` + `NonSend<FrameInFlight>`; `release_dying_before(key, completed_gather, lane.free)`, P4-ED16)
+
+**Removed (rev 3 P-§6, `:2505`, fragment):**
+> install values via `DenseGroupMut`
+
+**Added:**
+> install values via `GroupHead`
+
+**Added (to R5's row, rev 3 `:2511`):**
+> R5 reads `Res<Time>` for the interpolation alpha, `fixed_overstep_fraction()` (U-25; P4-§4.2).
+
+---
+
+## P4-§9: kernel features
+
+**Removed (rev 2, EK1 row, `:893`):**
+> | EK1 **(rev 2)** | **= physics K1 storage cohorts**, plus `impl Default for ScratchColumn<T>` (a width-1 cohort) so `Local<ScratchColumn<T>>` works | K1: "`ScratchCohort::reserve(width)`: registry-free scratch pools" (`M:…:466`). The LIFO frame is the existing `truncate` (X-17) | KF-scratch-column-for-type; registry-free id; id bands (C-8); **EK13 folded in** | every render lane, UI scratch/pack, input arrays, host scratch, propagation, save/load, CSR tables | **physics U1**; `Default` here |
+
+**Added:**
+> | EK1 **(rev 4)** | **= KC-10: registry-free scratch columns and cohorts** | `ScratchColumn::<T>::for_type(rows)`; `Default` is an unreserved column (stagger taken at construction, reservation at its first push), so `Local<ScratchColumn<T>>` works with no id and no syscall before its first push; `ScratchCohort::reserve(width)` + `in_cohort(&c, k, rows)`; the pool stores `NO_COMPONENT_ID` and its own stagger. **Zero `ComponentId`s** (U-2): the physics scratch band is deleted; the render lanes' `register_asset_layout::<u32>` borrowing ([J] `crates/boyko_render/src/mesh_draw.rs:429`) is deleted; the frame graph's 17 (release) to 19 (debug) lane ids go to 0 (`docs/memory/RUNTIME-DATA-LEDGER.md:874`). The LIFO frame is the existing `truncate` (X-17) | KF-scratch-column-for-type; registry-free id; id bands (C-8); EK13 folded in; allocator P43's "one id per element type" superseded | every render lane, UI scratch/pack, input arrays, host scratch, propagation, save/load, CSR tables | **KC-10, plan rung D-S2** (= physics U1); `WorldScratch` in D-R2a |
+
+**Removed (rev 2, EK7 row, `:899`):**
+> | EK7 | Per-type event swap + OS sink | `#[event(swap = …)]`; `OsEventSink<E>` | host K1+K2 | `RawInput`; physics S7 keeps `WaitForFixed` | here (**phys needs**) |
+
+**Added:**
+> | EK7 **(rev 4)** | Per-type event swap, writer lanes, OS sink | `#[event(swap = "every_frame" \| "wait_for_fixed" \| "every_tick")]`; lanes keyed by writer; `send_event` dispatcher-only; `OsEventSink<E>` with its own lane (P4-ED7) | host K1+K2 | `RawInput` (`every_frame`); physics S7 keeps `wait_for_fixed` for Main readers; any type Fixed reads in a replay session is `every_tick` | **KC-26 + KC-37 (b), (d): D-E20 → D-E8** |
+
+**Removed (rev 2, EK14 row, owner cell, `:906`):**
+> **physics S0**
+
+**Added:**
+> **KC-15, plan rung D-S5**; physics S0 consumes it
+
+**Removed (rev 3 P-§9, EK15b row, `:2546`, fragment):**
+> If the sum is > 0 it removes `Pinned` and returns `DespawnOutcome::Deferred`.
+
+**Added:**
+> If the sum is > 0 and the entity has `Pinned`, it **enqueues** `RemoveCommand::<Pinned>` on `deferred_hook_queue`; then it drops the scope guard and returns `DespawnOutcome::Deferred` (below). Owner cell: **KC-29b, plan rung D-E2**.
+
+> **EK15b's redirect, placed (rev 4; 02 §4.4).** The step order inside `delete_entity_core` ([J] `entity_api.rs:980-1112`; [I] from `:944`) is fixed:
+> 1. inland validity checks;
+> 2. archetype re-mint and flags read;
+> 3. **the redirect**, inside the existing `if !flags.is_empty()` branch, before `fire_despawn_hooks` ([J] `:1050-1051`; [I] `:1014-1015`). If `flags.contains(COUNTED_TARGET)`, sum the counted targets on the cold path. If the sum is > 0:
+>    - if the entity has `Pinned`, **enqueue** `RemoveCommand::<Pinned>` on `deferred_hook_queue`, the route `enqueue_child_of_removal` already uses ([J] and [I] `hierarchy/commands.rs:108-109`);
+>    - drop the scope guard;
+>    - return `DespawnOutcome::Deferred`.
+>
+>    Nothing below has run: no hook fired, no dense tombstone written, no observer retired, no row moved or removed, no slot unbound;
+> 4. despawn hooks, dense tombstones, observer retire;
+> 5. `remove_entity` ([J] `:1087`);
+> 6. D-S3(ii)'s `unbind`, where `deallocate_entity` runs today.
+>
+> - **Why enqueue.** The `Pinned` removal is then an ordinary migration, applied by the outermost drain at depth 0, with its hooks at that depth. Performing it inside the despawn would be a row move at hook depth ≥ 1 (X-34). Bevy draws the same line: its `DeferredWorld`, the world that hooks receive, "disallows structural ECS changes", which go through `commands()` and apply when the world is next flushed (External sources).
+> - **Cost.** The table-only, hook-free path skips the `!flags.is_empty()` branch, so no instruction is added to it. MQ-20 records the timing.
+> - **Return types.** `delete_entity` and `despawn_without_children` keep `-> bool` and return `true`, meaning "the handle was live". The new `pub fn try_despawn` returns the `DespawnOutcome`. 94 call sites in 50 files use that `bool` (02 §2, D-E2), so changing the type would put all of them in D-E2's touch set.
+> - **Ordering against the group store.** D-S3(ii) lands before D-E2 (02 §4.4, fixed order #1): the redirect must return before `unbind` can drop a slot.
+
+**Removed (rev 3 P-§9, K6′ row, `:2559`):**
+> | K6′ **(rev 3, re-filed)** | Stamped horizon on `release_dying` | `RELEASE = DeferredStamped` (`died` stamps); `DenseGroupMut::release_dying_before(horizon, visit)`; `release_dying_with(visit)` (N5); `EcsMaster::release_dense_group_at_teardown(&TeardownToken, visit)`. Physics's `release_dying()` is unchanged (horizon "all") | rev 1 `Retiring{epoch}` | assets (ED16), K7 group banks | **physics** (input filed; lands with or after U2) |
+
+**Added:**
+> | K6′ **(rev 4, re-filed against physics rev 5)** | The `Stamped` release policy and KC-13 | `type Release = Stamped` (`died` stamps); `GroupHead<G>::release_dying_before(&key, horizon, visit)`, bounded `Release = Stamped`; `EcsMaster::release_dense_group_at_teardown(&key, &TeardownToken, visit)`; `PhysicsBody` stays `Chained`, unchanged (P4-ED16) | rev 1 `Retiring{epoch}` | assets (ED16) | **KC-12 + KC-13 (a): D-S3(iii); KC-13 (b): D-E9** |
+
+**Removed (rev 3 P-§9, the order list, `:2572-2577`):**
+> 1. **Physics-owned, in physics's rung order:** K1 (U1) → K2 + K3 + K6 (U2) [+ K6′ once accepted] → K4 (U3) → K5a/b (P1/P2) → K7 (S0) [+ the K7 input: DEAD `SpanRef`, release visitor].
+> 2. **This design's, interleaved by dependency:** EK22 → EK15a → EK15b → EK2 → EK5 → EK3 → EK4 → EK6 → EK7 → EK8 → EK9 → EK10 → EK11 → EK12.
+
+(and its four sub-bullets, `:2574-2577`)
+
+**Added:**
+> **Order (rev 4).** The kernel is landed by the unified plan's rungs, in the plan's DAG (02 §3), not in this design's order. Each feature maps as follows (01 §3; 02 §2):
+>
+> | This design | Kernel feature | Plan rung |
+> |---|---|---|
+> | EK1 (with `Default`) | KC-10 | D-S2; `WorldScratch`: D-R2a |
+> | EK2 | KC-22 | D-E3 |
+> | EK3 | KC-23 (structural log) | D-E5 |
+> | EK4 | KC-25 | D-E6 |
+> | EK5 | KC-24 | D-E4 |
+> | EK6, EK6g | KC-23 | D-E7 |
+> | EK7, EK8 | KC-26, with KC-37 (b) and (d) | D-E20 → D-E8 |
+> | EK9, EK10, EK11 | KC-27, with KC-13 (b) | D-E9 |
+> | EK12 | KC-16 | D-S6 |
+> | EK13 | deleted (X-17) | — |
+> | EK14 (= K7) | KC-15 | D-S5 |
+> | EK15a, EK15b | KC-29a, KC-29b | D-E2 |
+> | EK15c | KC-29c | D-E10 |
+> | EK16 | KC-34 (the EK16 half) | D-E16, after D-E15's KF-36 edge |
+> | EK17 | deleted (Q1a) | — |
+> | EK18 | KC-28 | D-E11 |
+> | EK19 | KC-30a | D-E12 |
+> | EK20 | KC-31 | D-E13 |
+> | EK21 | KC-32 | D-E17 |
+> | EK22 | KC-20 | D-E1 |
+> | K3 (dense groups, binder) | KC-12 | D-S3(i), D-S3(ii) |
+> | K6′ | KC-12 (`Stamped`) + KC-13 | D-S3(iii); D-E9 |
+> | K4 (dense `par_iter`) | KC-14 | D-S4 |
+> | K5a, K5b | KC-08 | D-M5 |
+> | RF1 | render, not kernel | RE4 |
+>
+> - Every rung sourced from this design waits for EP3 (RK-2). D-S3(iii) waits for EP3 as well, because its `Stamped` half comes from here (02 §2).
+
+Depends on: P4-ED5, P4-ED7, P4-ED15, P4-ED16, P4-§12.
+
+---
+
+## P4-§10: public API
+
+**Removed (rev 2, `:956-957`):**
+```
+// #[event(swap = "every_frame" | "wait_for_fixed")]                                     // EK7
+#[derive(Clone, Copy)] pub struct OsEventSink<E: Event> { /* buffer ptr + dispatcher lane */ }
+```
+**Added:**
+```rust
+// #[event(swap = "every_frame" | "wait_for_fixed" | "every_tick")]                     // EK7 (rev 4; KC-37 (d))
+#[derive(Clone, Copy)] pub struct OsEventSink<E: Event> { /* buffer ptr + its own writer lane (U-21) */ }
+// EventWriterState: `thread_count` becomes `lane: u32`, assigned at init_state; still 24 B    // KC-37 (b)
+// EcsMaster::events().send_event: dispatcher-only; on a worker Err(EcsError::EventSendOffDispatcher), nothing written
+```
+
+**Removed (rev 2, `:967`):**
+```
+impl<T: Copy + 'static> Default for ScratchColumn<T>;                                        // EK1 addition (after K1)
+```
+**Added:**
+```rust
+impl<T: Copy + 'static> ScratchColumn<T> { pub fn for_type(rows: usize) -> Self; }          // EK1 = KC-10: 0 ComponentIds
+impl<T: Copy + 'static> Default for ScratchColumn<T>;  // unreserved: stagger now, reservation at first push
+impl ScratchCohort { pub fn reserve(width: usize) -> Self; }                                 // + ScratchColumn::in_cohort
+```
+
+**Removed (rev 3 P-§10, `:2595`):**
+```
+pub enum DespawnOutcome { Despawned, Deferred /* counted target > 0: unpinned instead (N2) */, Refused /* sentinel */ }
+```
+**Added:**
+```rust
+pub enum DespawnOutcome { Despawned, Deferred /* counted target > 0: `Pinned` removal enqueued (rev 4) */, Refused /* sentinel */ }
+impl EcsMaster { pub fn try_despawn(&mut self, e: Entity) -> DespawnOutcome; }  // delete_entity / despawn_without_children keep -> bool
+```
+
+**Removed (rev 3 P-§10, `:2612-2617`):**
+```
+// physics-owned K6′ (input, ED16); release_dying() itself is unchanged
+impl<G: DenseGroup> DenseGroupMut<'_, G> {
+    pub fn release_dying_before(&mut self, horizon: Tick, visit: impl FnMut(u32)) -> u32; // G::RELEASE == DeferredStamped
+    pub fn release_dying_with(&mut self, visit: impl FnMut(u32)) -> u32;                  // visitor before DEAD fill (N5)
+}
+impl EcsMaster { pub fn release_dense_group_at_teardown<G: DenseGroup>(&mut self, t: &TeardownToken, visit: impl FnMut(u32)); }
+```
+**Added:**
+```rust
+// kernel KC-12 / KC-13 (physics Erratum E2-1); PhysicsBody is `Chained`, unchanged
+pub trait DenseGroup: 'static { const WIDTH: usize; type Release: ReleasePolicy; type Anchor: Component; type ChainKey: 'static; }
+pub struct Immediate; pub struct Chained; pub struct Stamped;   // each: impl ReleasePolicy { const KIND: Release }
+impl<G: DenseGroup> GroupHead<'_, G> {
+    pub fn release_dying_before(&mut self, key: &G::ChainKey, horizon: Tick, visit: impl FnMut(u32)) -> u32
+    where G: DenseGroup<Release = Stamped>;
+}
+impl EcsMaster {
+    pub fn release_dense_group_at_teardown<G: DenseGroup<Release = Stamped>>(
+        &mut self, key: &G::ChainKey, t: &TeardownToken, visit: impl FnMut(u32)) -> u32;
+}
+// not built: release_dying_with (the kernel frees spans, P4-ED15)
+```
+
+**Removed (rev 3 P-§10, `:2629-2630` and `:2634`):**
+```
+pub fn render_retire<K: GpuAssetKind>(group: DenseGroupMut<K::Group>, lane: NonSendMut<K::DeviceLane>,
+                                      frame: NonSend<FrameInFlight>);                          // R1 ×3
+pub struct AssetWrite<'w, K: GpuAssetKind>;  // hand-written SystemParam: DenseGroupMut + GroupEditsMut + GroupSlot reads
+```
+**Added:**
+```rust
+pub fn render_retire<K: GpuAssetKind>(group: GroupHead<K::Group>, lane: NonSendMut<K::DeviceLane>,
+                                      frame: NonSend<FrameInFlight>);                          // R1 ×3
+pub struct AssetWrite<'w, K: GpuAssetKind>;  // hand-written SystemParam: GroupHead + GroupEditsMut + GroupSlot reads
+// boyko_ecs time (D-E23, U-25)
+impl Time { pub fn fixed_steps(&self) -> u32; pub fn fixed_overstep(&self) -> Duration; pub fn fixed_overstep_fraction(&self) -> f32; }
+// FixedTime keeps timestep(), delta(), delta_secs(), elapsed(); overstep(), overstep_fraction() and steps_this_frame() leave it
+```
+
+---
+
+## P4-§11: multithreading
+
+**Removed (rev 2 §11, `:1013-1014`):**
+> - apply windows: commands, triggers, EK3 writes, relation hooks, K7 relocations, K6′ stamps;
+> - the event swap;
+
+**Added:**
+> - apply windows: commands, triggers, EK3 writes, relation hooks, K7 relocations, `Stamped` `died` stamps, and the `Pinned` removal that a deferred despawn enqueues (applied by the outermost drain at depth 0);
+> - the event swaps: the frame's swap, and the per-substep swap of `every_tick` types inside the fixed loop;
+
+**Added (after rev 3 P-§11's last bullet, `:2672`):**
+> - **Event lanes (rev 4).** One lane per writer: an `EventWriter`'s state, or an `OsEventSink`. A lane has one writer at a time, because `EventWriter` holds `&'s mut` state and a system instance never runs on two threads at once. No lock and no atomic. `send_event` writes only on the dispatcher.
+> - **Group params (rev 4).** Rev 3's bullet at `:2672` reads with `GroupHead` in place of `DenseGroupMut`. The access sets are the same (`M:…PHYSICS…:2484-2486`), so R1 and Main's asset writers still serialise on the group's column and recycle nodes.
+
+---
+
+## P4-§12: rung prerequisites remapped to plan rung ids
+
+Rev 2 and rev 3 name each rung's prerequisites by this design's feature ids (EK*, K*), by physics rungs (U1, U2, U5b, S0) and by owner questions. The plan lands every kernel feature in its own rungs (02 §2: lanes MEM, STORE and ENG), so each engine rung's prerequisites are restated as plan rung ids, as 02 §2 Phase E lists them ("Engine lanes … prerequisites remapped"). 02 §6 maps the ledger rungs: these engine rungs retire R4 (156 rows). **Where rev 2 or rev 3 and this table disagree, this table rules.** Every other cell of each row (content, gates) is unchanged unless another P4 block names it.
+
+| Rung | Rev 2 / rev 3 prerequisite (line) | Plan prerequisite (02 §2) |
+|---|---|---|
+| K0 | — (`:1051`) | Not a rung. The gate baselines land in the plan's Phase B: G-FORM is UG-02 (B1); G-GRAPH is UG-13, G-LOOP is UG-14 and G-RES is UG-20 (B2); G-PERF is MQ-11 (03 §1, §5). G-ALLOC has no row of its own in 03; its nearest plan gate is UG-03, the per-class allocation census, whose App scenes D-M2 pins (02 §2). *Mapping G-ALLOC is left to EP3* |
+| UI0 | — (`:1052`) | A7 (merge `feat/ui-advanced` = engine UI0) |
+| K-EK* | per §9 (`:1053`) | the plan rungs of P4-§9's mapping table |
+| IN1 | EK7 (`:1054`) | D-E8 |
+| IN2 | K1 + EK1 `Default`, EK22 (`:2707`) | D-S2, D-E1 |
+| IN3 | UI0, IN2, HO3, EK22 (`:2708`) | A7, IN2, HO3 |
+| IN4 | EK7 (`:1057`) | D-E8 |
+| HO1 | EK9 (`:1058`) | D-E9 |
+| HO2 | EK10, AS1 (`:1059`) | D-E9, AS1 |
+| HO3 | IN1, EK9 (`:2709`) | IN1, D-E9 |
+| HO4 | EK10, EK11 (`:2710`) | D-E9 |
+| HO5 | HO4 (`:1062`) | HO4 |
+| HO6 | EK11 (`:1063`) | D-E9 |
+| RE1 | Q4 (`:1064`) | — (Q4 decided) |
+| RE2 | AS1 (`:1065`) | AS1 |
+| RE4 | EK5, HO4 (`:2711`) | D-E4, HO4 |
+| RE5 | EK3, EK4 (`:1067`) | D-E5, D-E6 |
+| RE6 | AS3, EK6g (`:2712`) | AS3, D-E7 |
+| RE7 | EK12 (`:1069`) | D-S6 |
+| RE8 | K1 + EK1 `Default` (`:1070`) | D-S2 |
+| RE9 | physics U5b + physics's acceptance of the input; EK3 (`:1071`) | U5 (physics rev 3 folded U5b into U5, `M:…PHYSICS…:1992`), D-E5 |
+| AS1 | — (`:1073`) | — |
+| AS2 | K3 (physics U2), K6′ accepted, EK6g (`:2713`) | D-S3(iii), D-E7, D-E9, EP3 |
+| AS3 | AS2 (`:2715`) | AS2 |
+| AS4 | EK15b, EK22 (`:2716`) | D-E2, D-E1 |
+| AS5 | AS4, EK22 (`:2717`) | AS4 |
+| UI2 | UI0, HO3 (`:2718`) | A7, HO3 |
+| UI3 | EK15a, K1 + EK1 `Default` (`:1076`) | D-E2, D-S2 |
+| UI4 | EK8 (`:2719`) | D-E8 |
+| UI5 | EK2, EK6 (`:1078`) | D-E3, D-E7 |
+| UI6 | EK3 (`:1079`) | D-E5 |
+| UI6s | UI0 (`:1080`) | A7 |
+| UI7 | AS series, UI6s (`:2720`) | AS5, UI6s |
+| UI8 | EK3, HO4, RE4 (`:1082`) | D-E5, HO4, RE4 |
+| UI10 | EK21, K1 (`:1084`) | D-E17, D-S2 |
+| SC1 | EK3, K1 (`:1085`) | D-E5, D-S2 |
+| SC2 | — (`:1086`) | — |
+| SC3 | — (`:2721`) | — |
+| SC4 | EK20 (`:1088`) | D-E13 |
+| SC5 | EK19 (`:1089`) | D-E12 |
+| SC6 | EK18 (`:1090`) | D-E11 |
+| LG1 | — (`:1091`) | — |
+| LG2 | Q4 (`:1092`) | — (Q4 decided) |
+| K-EK15c | K7 + the K7 input (N5) (`:2722`) | the rung is D-E10 (KC-29c); its prerequisites are D-S5 and D-E2 |
+| K-EK22 | — (`:2725`) | the rung is D-E1 (KC-20); its prerequisites are D-S1(i) (the registry files) and EP3 |
+| K-EK6g | K3 (physics U2) (`:2726`) | the rung is D-E7 (KC-23, EK6 + EK6g); its prerequisites are D-E6 and D-S3(iii) |
+
+- EP3 closes before AS2 and before every engine-sourced D-E rung. So every rung above that depends on a D-E rung other than D-E0, D-E18 and D-E19 also waits for EP3, through that rung.
+- The rows' extra-gate cells are unchanged, except the AS4 and K-EK15c cells, which P4-§17 restates.
+
+---
+
+## P4-§13: hand-offs
+
+**Removed (rev 3 P-§13, `:2739-2740`):**
+> | Physics study | K7 (= EK14) | ED15's shape, plus `SpanRef::DEAD` and the rule that a group holding `SpanRef` columns releases through `release_dying_with(visit)` (N5); one `SegmentedColumn` per group column | EK15c waits for physics S0 and this input; no UI rung waits |
+> | Physics study | K6 → K6′ (re-filed against rev 3) | `RELEASE = DeferredStamped` with `died` stamps; `DenseGroupMut::release_dying_before(horizon, visit)`; `release_dying_with(visit)`; `EcsMaster::release_dense_group_at_teardown(&TeardownToken, visit)`. **Physics keeps `release_dying()` unchanged (horizon "all").** No byte of `PhysicsBody` changes | AS2 waits for acceptance and physics U2 |
+
+**Added:**
+> | Physics study → unified plan | K7 (= EK14) | **Settled** (U-3): KC-15, with `SpanRef::DEAD`, one `SegmentedColumn` per group column, and spans freed by the kernel at every release point (N5; physics Erratum E2-4) | KC-15 lands in D-S5; EK15c (D-E10) follows it; no UI rung waits |
+> | Physics study → unified plan | K6 → K6′ (re-filed against rev 5) | **Settled** (U-3): the `Stamped` policy plus KC-13 (physics Erratum E2-1; P4-ED16). No byte of `PhysicsBody` changes | D-S3(iii) (and D-E9 for the teardown form); AS2 waits for D-S3(iii), D-E7, D-E9 and EP3 |
+
+**Removed (rev 2 §13, `:1128-1130`, the ordering cells):**
+> RE9 after physics U5b (`:795`)
+
+> lands after U1
+
+> EK7 before physics E1
+
+**Added:**
+> RE9 after physics U5 (U5b was folded into U5, `M:…PHYSICS…:1992`) and D-E5
+
+> **Settled** (U-2): the `Default` is part of KC-10 and lands in D-S2
+
+> D-E8 before physics E1 (02 §2 Phase E: E1 needs D-E8). S7's events keep `wait_for_fixed` for Main readers; a type that Fixed reads in a replay session is `every_tick` (KC-37 (d))
+
+---
+
+## P4-§15: what this design does not change
+
+**Removed (rev 2 §15, `:1195`):**
+> - **`Time`/`FixedTime`/`State` and `state_chart!`.**
+
+**Added:**
+> - **`Time`/`FixedTime`/`State` and `state_chart!`**, except that `FixedTime`'s three frame-level getters move into `Time` (U-25; P4-§4.2).
+
+---
+
+## P4-§16: integration
+
+**Added (to rev 3 P-§16's `boyko_ecs`, `boyko_app` and `boyko_input` bullets):**
+> - **boyko_ecs (rev 4):** EK7's writer lanes and the `every_tick` swap (D-E20, D-E8); `Time`'s three fixed-loop getters (D-E23); the EK15b redirect's enqueue in `delete_entity_core` (D-E2); physics's release policy type and KC-13 are consumed (D-S3(ii), D-S3(iii), D-E9); `ScratchColumn::for_type` and the lazy `Default` are consumed (D-S2).
+> - **boyko_app (rev 4):** the runner's interpolation read moves to `Res<Time>` (D-E23), and then into the Render schedule with HO4.
+> - **boyko_input (rev 4):** `clear_consumed_fixed_edges` reads `Res<Time>` (D-E23).
+> - **boyko_render (rev 4):** `render_retire::<K>` and the facades hold `GroupHead<K::Group>`; `GpuAssetKind` carries the render-private chain-key item (P4-ED16).
+
+---
+
+## P4-§17: validation
+
+**Removed (rev 3 P-§17, `:2812`):**
+> - A despawn request on a target with count > 0 returns `Deferred` and unpins it, on every despawn path; the target dies at count 0.
+
+**Added:**
+> - A despawn request on a target with count > 0 returns `Deferred` on every despawn path: `try_despawn` returns it, and `delete_entity` and `despawn_without_children` return `true`.
+>   - Inside `delete_entity_core` the row is untouched. The `Pinned` removal applies at depth 0 in the outermost drain, and its `on_remove` test hook records depth 0.
+>   - Afterwards the target has no `Pinned`, its group slot is live and unchanged, and it dies at count 0.
+>   - **Mutation:** moving the redirect below `archetype.remove_entity` ([J] `entity_api.rs:1087`) makes `group_get` return `None`, so the test goes red (02 §2, D-E2 `counted_target_despawn_keeps_group_slot`).
+
+**Removed (rev 3 P-§17, `:2820-2824`):**
+> - **K6′:**
+>   - `release_dying()` is byte-identical to rev 3's.
+>   - `release_dying_before(h)` releases exactly {dying : `died` strictly older than h}, appends them to `free` in dying order, and keeps retained entries in order.
+>   - Both visitor forms call the visitor once per slot, before the DEAD fill.
+>   - `release_dense_group_at_teardown` without a token does not compile, and with a token releases every dying entry.
+
+**Added:**
+> - **K6′ (rev 4):**
+>   - Physics's `Chained` release is unchanged: the physics golden and `PhysicsBody`'s layout pins do not move.
+>   - **The `Stamped` proptest** (D-S3(iii)): a `Stamped` slot is never released before its horizon, and never by removal, the first-op flush or `clear()`. `release_dying_before(h)` releases exactly {dying : `died` strictly older than h}, appends them to `free` in dying order, and keeps retained entries in order.
+>   - `release_dying_before` on a `Chained` group fails to compile with E0271 (UG-17).
+>   - The visitor runs once per slot, before the span free and the DEAD fill.
+>   - The teardown form does not compile without a token, with a token built outside `boyko_ecs`, with a token a rank callback tries to store, or on a `Chained` group (D-E9's four fixtures). With a token it releases every dying entry.
+> - **Events (rev 4).**
+>   - **Writer lanes** (D-E20, 02 §2): every run's event sequence equals the W = 1 sequence; each writer's refused count is 0 at every W; a worker's `send_event` returns `Err(EventSendOffDispatcher)`, and an apply-path call delivers.
+>   - **`every_tick`** (D-E8; UG-22's pacing arm S-R2 is the end-to-end gate, H-19): an event that a Fixed system sends at tick k is read at tick k+1 at every pacing; a Main reader of an `every_tick` type panics at `App::finish` with its code; an app with no `every_tick` type runs the unchanged substep closure.
+> - **`Time` (rev 4; D-E23, 02 §2):**
+>   - a `compile_fail` fixture calls `FixedTime::steps_this_frame()`;
+>   - the existing pins move to `Time` and keep their values: `fixed_steps() == 16` and `fixed_overstep() == 0` after an exact multiple, `fixed_overstep() < timestep`, and a permanent 0 without a Fixed schedule;
+>   - `clear_consumed_fixed_edges`'s sticky-edge tests stay green.
+
+**Added (edge cases):**
+> - a despawn of a pinned asset with count > 0, inside a hook (the `Pinned` removal still applies at depth 0);
+> - `clear()` on a world with live asset groups (no slot released; R1 releases at the horizon);
+> - a Main system that reads an `every_tick` event type (refused at `App::finish`).
+
+---
+
+## P4-§18: open questions
+
+**Removed (rev 3 P-§18, `:2877`):**
+> - **O-9 (rev 3):** whether physics accepts ED15's K7 shape plus the N5 input, and the re-filed K6′ (four additive items, zero bytes for `PhysicsBody`). Until it does, EK15c and AS2–AS5 are blocked, and nothing else is.
+
+**Added:**
+> - **O-9 (closed in rev 4).** The unified plan settles both: K7 is KC-15, with the kernel freeing spans (U-3, N5), and K6′ is the `Stamped` policy plus KC-13 (U-3). Physics Erratum E2 records both. EK15c waits for D-S5, and AS2–AS5 wait for D-S3(iii), D-E7, D-E9 and EP3 (P4-§12).
+
+O-11, O-12 and O-13 are unchanged.
+
+---
+
+## Changelog: rev 3 → rev 4
+
+| Change | Ruling applied | Supersedes on this tree (left in place) | Sections | Plan rung |
+|---|---|---|---|---|
+| K6′ re-filed against physics rev 5: `type Release` (`Immediate` / `Chained` / `Stamped`), KC-13 (a) on `GroupHead` with `&G::ChainKey`, KC-13 (b) with the key and the token; `release_dying_with` not built; `DenseGroupMut` read as `GroupHead`; `clear()` stamps `Stamped` groups | U-3; 01 KC-12, KC-13 (§4 R-C) | `:1816`, `:1825`, `:1883`, `:1889`, `:1897`, `:1907`, `:1936`, `:2042`, `:2073-2099`, `:2121-2122`, `:2440-2441`, `:2454`, `:2483`, `:2504`, `:2505`, `:2559`, `:2612-2617`, `:2629-2634`, `:2672`, `:2739-2740`, `:2820-2824`, `:2877`; by name only: `:2115`, `:2238`, `:2295`, `:2325`, `:2383`, `:2565`, `:2713` | P4-§0, ED5, ED15, ED16, §5, names, §6, §9, §10, §11, §13, §17, §18 | D-S3(ii), D-S3(iii), D-E9 |
+| EK1 registry-free | U-2; 01 KC-10 | `:76`, `:893`, `:967`, `:1129` (ordering cell) | P4-§0, §9, §10, §13 | D-S2 (+ D-R2a) |
+| EK15b redirect enqueues `RemoveCommand::<Pinned>` | 02 §4.4 | `:1918`, `:2546` (fragment), `:2595`, `:2812` | P4-§0 (X-34), ED5, §9, §10, §17 | D-E2 |
+| Prerequisites remapped to plan rung ids | 02 §2 Phase E; 02 §6 | the prerequisite cells of `:1051-1093` and `:2707-2726`; `:2572-2577`; `:906` (owner); `:1128`, `:1130` (ordering cells) | §9, §12, §13 | — |
+| EK7 third policy `every_tick` | KC-37 (d) | `:778`, `:899`, `:956`, `:1014` | P4-§0 (X-32), ED7, §6, §9, §10, §11, §17 | D-E8 |
+| EK7 lanes keyed by writer; `send_event` dispatcher-only; `OsEventSink` lane | KC-37 (b); U-21 | `:899`, `:957` | P4-§0 (X-31), ED7, §9, §10, §11, §17 | D-E20 |
+| `FixedTime`'s frame-level getters move into `Time`; interpolation readers read `Time::fixed_overstep_fraction()` | U-25 (D-E23); H-20 | `:659`, `:778`, `:1195` | P4-§0 (X-33), §4.2, §6, §10, §15, §16, §17 | D-E23 |
+| O-9 closed | U-2, U-3 | `:2877` | §18 | — |
+
+## External sources (read 2026-09-23)
+
+- Vulkan fence signal scope. The specification's fence section, quoted in the Khronos community thread "vkQueueSubmit fence order guarantees": "Fence signal operations that are defined by vkQueueSubmit additionally include in the first synchronization scope all commands that occur earlier in submission order." <https://community.khronos.org/t/vkqueuesubmit-fence-order-guarantees/109036>. The `vkQueueSubmit` reference page: batches "begin execution in the order they appear in pSubmits, but may complete out of order." <https://docs.vulkan.org/refpages/latest/refpages/source/vkQueueSubmit.html>
+- Bevy 0.13 release notes (the event swap cadence of 0.12.1: "every update that runs FixedUpdate one or more times"): <https://bevy.org/news/bevy-0-13/>. Bevy issue #7691, "Events can be missed or double-counted by fixed time step systems": <https://github.com/bevyengine/bevy/issues/7691>. Bevy PR #13808 (`ShouldUpdateEvents`): <https://github.com/bevyengine/bevy/pull/13808>
+- Bevy `Time<Fixed>` and `overstep_fraction()` for interpolation: <https://docs.rs/bevy/latest/bevy/time/struct.Time.html>, <https://docs.rs/bevy/latest/bevy/time/struct.Fixed.html>, and the example <https://github.com/bevyengine/bevy/blob/main/examples/movement/physics_in_fixed_timestep.rs>
+- Glenn Fiedler, "Fix Your Timestep!": the remainder "divid[ed] by dt" is the blending factor, `const double alpha = accumulator / dt;`. <https://gafferongames.com/post/fix_your_timestep/>
+- Unity Entities, "Entity command buffer playback": commands are sorted by a sort key before playback; with keys independent of scheduling (`ChunkIndexInQuery`) playback is deterministic. <https://docs.unity3d.com/Packages/com.unity.entities@1.0/manual/systems-entity-command-buffer-playback.html>
+- Bevy `DeferredWorld`: "A World reference that disallows structural ECS changes"; structural changes go through `commands()` and apply when the world is next flushed. <https://docs.rs/bevy/latest/bevy/ecs/world/struct.DeferredWorld.html>
+- Rust error index, E0271, "A type mismatched an associated type of a trait": <https://doc.rust-lang.org/error_codes/E0271.html>
+
+# Status after rev 4 (2026-09-23)
+
+- **Rev 4 = the rev 2 body + the rev-3 patch + the rev-4 patch.** Design only: no gate was run and no timing was taken.
+- **Rev 4 is pending engine critique pass 3 (EP3).** Its scope is the rev-3 patch, rev 4 and physics Erratum E2. EP3 must close before D-S3(iii), AS2 and every engine-sourced D-E rung. D-E0, D-E18 and D-E19 are not engine-sourced and do not wait (02 §2).
+- Q1–Q5 stay decided (rev 3). O-9 is closed. O-11, O-12 and O-13 stay open.
+- Three rev-4 statements are marked for EP3 to confirm: the `OsEventSink`'s own writer lane (P4-ED7), the single-queue premise of the horizon proof's step 3 (P4-ED16), and the method-level bound that makes misuse E0271 rather than E0599 (P4-ED16; physics Erratum E2-1).
+- Evidence: this file, the physics design and the plan at `49f2fcfb`; code at `d552be05` and `c33d786d`, read with read-only git.
+
+# Critique log - pass 3 (EP3, 2026-09-23)
+
+**Critic and scope.** The critic is `architecture-critic`, running the unified plan's engine critique pass 3 (EP3). Its scope was the rev-3 patch, rev 4 and physics Erratum E2 (02 §2).
+
+**What it read.** The documents, uncommitted, on `49f2fcfb`, and the code in the `D:/wt/joltab` working copy (HEAD `integ/unified`). It had no shell.
+
+**Verdict.** CHANGES_REQUESTED: 1 Critical, 4 Important, 5 Optional.
+
+**How this log is laid out.**
+- The architect's action for each remark comes first, in the table below; the actions are rev 4.1's, appended after this log.
+- The review follows, reproduced verbatim.
+- Pass-3 remark ids (C1, W1–W4, O1–O5) are a new series. They are not pass 2's B*/N*/O* ids.
+- Physics Erratum E3 logs the two remarks that fall on the physics design, O1 and O3, together with the review's passages about E2.
+
+## Architect's action per remark (rev 4.1)
+
+| EP3 | Action | Where in rev 4.1 | Plan (same-line patches, dated 2026-09-23) |
+|---|---|---|---|
+| C1 (Critical) | FIX. `DESPAWN_AT_ZERO` is re-evaluated at two edges: the count reaching 0 (rev 3's edge), and `Pinned` leaving the entity (new: `Pinned`'s `on_remove`). Each edge enqueues `DespawnAtZeroCommand`, which despawns only if, at its apply, the entity is live, unpinned and at count 0. The redirect still enqueues `RemoveCommand::<Pinned>`. D-E2's red-first set gains both of EP3's orders, the reverse order, a user unpin at count 0, and a re-pin race, each with its mutation | P4.1-§9; P4.1-§17; AS4's cell (P4.1-§12) | 02 §4.4 step 3 (`02:724-726`); 02 §2 D-E2 (`02:282-284`) |
+| W1 | FIX. No absolute depth is asserted, because the drain applies every command inside its own bracket. The observable is a sequence witness, `["returned", "unpinned"]`, plus "no despawn hook or observer of E ran" | P4.1-§17 | `02:282-283`, `02:724-725` |
+| W2 | FIX. EP3's suggested form is refined: a sealed *supertrait* would still leak `Group`, because a trait bound gives access to its supertraits' associated items (the Rust Reference). So the group, the lane and the key ride on a separate sealed trait in a private module, not a supertrait of `GpuAssetKind`. The key accessor takes an unnameable token. Five UG-17 fixtures and a green arm land with AS2 | P4.1-ED16; P4.1-§10; AS2's cell (P4.1-§12) | — |
+| W3 | FIX. `EcsMaster::clear()` is refused with a coded panic, before any store is touched, while an `AssetSentinel` lives. `:2717` and `:2743` are superseded, and `:3497` is corrected | P4.1-ED5; P4.1-§12; P4.1-§13 | — |
+| W4 | FIX. G-ALLOC is UG-03's engine scenes: E1 (headless `EnginePlugins` + `UiPlugins`, lands in B2) and E1v (the VisibilityBuffer boot in the device leg, lands in HO2 as its red-first). HO2's cell is restated | P4.1-§12 | 03 UG-03 (`03:12`, `03:39`); 02 B2 (`02:72`) |
+| O1 | ADOPTED in physics Erratum E3-1: `open_chain` and `close_chain` are bounded to `Release = Chained` (E0271) | physics E3-1 | 02 D-S3(iii) (`02:143`) |
+| O2 | ADOPTED. The `every_tick` reader refusal covers every schedule other than Fixed | P4.1-ED7; P4.1-§17 | 02 D-E8 (`02:169`) |
+| O3 | ADOPTED in physics Erratum E3-2: E2-7's heading and fact line are reworded | physics E3-2 | 00 `:161` |
+| O4 | ADOPTED. [I] `boyko_ui/tests/ui_a0_clock.rs:421` joins D-E23's caller list | P4.1-§4.2 | 02 D-E23 (`02:184`) |
+| O5 | ADOPTED. `os_event_sink` takes `&mut self` and is setup-only. The rank-4 teardown callback takes each lane out of the world before the release | P4.1-ED7; P4.1-§5 | — |
+| Flags (a)–(e) | (a) and (c) accepted by EP3; (b) confirmed on [I] as well; (d) is W2's subject; (e) is W3's | P4.1-ED7; P4.1-ED16 | — |
+| Q1 | D-E20–D-E23 are plan-sourced (KC-37 (b), (c), (i), (j)), not engine-sourced. Like D-E0, D-E18 and D-E19, they do not wait for EP3; the plan's DAG already draws them so (02 `:550`) | P4.1-§12 | 00 `:156` |
+| Q2 | Intended, and now stated: the despawn at zero is a plain despawn, and it cascades | P4.1-§9 | — |
+
+The review follows verbatim.
+
+VERDICT: CHANGES_REQUESTED; CRITICAL=1; IMPORTANT=4
+
+# Architecture review: EP3 (engine design rev-3 patch and rev 4, physics Erratum E2)
+
+**Trees read.** Documents in `D:/wt/docs` at `49f2fcfb`, uncommitted DOC-2 state. Code is the `D:/wt/joltab` working copy: its HEAD is `integ/unified` and it may carry A8's in-progress edits, so code line numbers are working-copy numbers. I have no shell, so this review ran no git or cargo command. The DOC-2 report's ancestry claims (`8af0e3b9`, `c33d786d`) are taken as written; I checked only their content.
+
+## Verdict
+[ ] APPROVED
+[X] CHANGES REQUESTED
+
+The checks the brief asked for mostly pass:
+- **K6′ against physics rev 5 and E2's markers:** consistent. `PhysicsBody` is `Chained` and unchanged. `GroupHead` has no claim in rev 5 (`PHYSICS…:3336-3343`, `:3402-3404`), so several asset writers may hold it.
+- **EK1:** registry-free, matching KC-10 and U-2.
+- **X-14 wording:** matches the code. `spawn` and `reserve_entity` are at joltab `commands.rs:169-170` and main checkout `:164-165`.
+- **A1b row identity:** matches what landed. `RowKey(u64) = (slot << 32) | generation` is at `row_identity.rs:130-141`, `keys_equal` at `:572`, and `ids.push(RowKey::of(live))` at `systems.rs:274`. The three ids re-registered with RowKey types are at `scratch_ids.rs:719-723`.
+- **Prerequisite remap:** all rows of P4-§12 (`:3447-3494`) match 02 §2 Phase E and the D-E table, and no rev-2 rung row (`:1051-1093`) is dropped.
+- **FixedTime → Time move:** complete for the interpolation readers. The only code readers of `overstep_fraction()` are the runner (`runner.rs:2468`, which feeds `gpu_scene/mod.rs:6521`, a record-time push constant, so it belongs in R5) and the demo (`app.rs:513`).
+- **Where the remarks fall:** none of them touches D-S3(iii)'s own content. C1 and W1 block D-E2. W2 blocks AS2. W3 blocks AS5. W4 blocks HO2 and the other HO/UI gate lists. A re-review scoped to the delta is enough.
+
+## Remarks
+
+### 🔴 Critical
+
+#### C1. Enqueuing the `Pinned` removal loses the despawn: a pinned asset whose last user is despawned in the same queue never dies
+**Where:** engine P4-§9 EK15b (`ENGINE-RUNTIME-ECS-DESIGN.md:3279-3297`), P4-ED5 `:3040`. The source of the text is plan 02 §4.4 step 3 (`UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md:713-726`). The trigger rule is rev 3's EK15b row (`:2546`).
+
+**Problem:** `DESPAWN_AT_ZERO` is edge-triggered in exactly one place: the unlink command's apply, and only when the entity has no `Pinned` (`:2546`). Rev 4 moves the `Pinned` removal out of `delete_entity_core` and onto `deferred_hook_queue`. Two facts in the code make that removal land after the unlink:
+- A relation's hooks only enqueue, and a despawn's `on_replace` enqueues an `UnlinkCommand` (`relationship/mod.rs:24-32`, `:617-620`).
+- A system's whole command queue is applied at depth ≥ 1, and the queue is drained once, after it (`schedule.rs:910-919`).
+
+So for `commands.despawn(instance); commands.despawn(asset);`, where the asset is pinned and the instance is its last user, the steps are:
+1. `despawn(I)` enqueues `Unlink(I→A)`.
+2. `despawn(A)` still sees count 1, because the unlink has not applied, so the redirect enqueues `Remove<Pinned>(A)`.
+3. The drain applies `Unlink`. The count reaches 0, but `A` still has `Pinned`, so no despawn is enqueued.
+4. The drain applies `Remove<Pinned>`. Nothing re-checks the count.
+
+The same order arises in a hierarchy cascade whose children list an instance before its asset. Rev 3's synchronous removal did not have this window.
+
+**Consequence:** in the ordinary level-unload order (users first, then the preloaded resource), the asset stays alive, unpinned, at count 0, forever. It keeps its group slot (one of AS3's 4096 texture slots), its VRAM and its entity. This contradicts AS4's own red-first, "dies when the last instance unlinks" (`:2716`).
+
+**Confidence:** CONFIRMED (the code and design lines above).
+
+**What is needed:** the deferred path must carry the despawn intent. Either the enqueued work re-evaluates the counted sum once `Pinned` is gone, or `Pinned`'s removal also triggers `DESPAWN_AT_ZERO`. Patch 02 §4.4 as well as rev 4. D-E2's red-first set must include "[despawn(last user), despawn(pinned asset)] in one system's `Commands`" and the same order inside one hook's deferred queue.
+
+### 🟡 Important
+
+#### W1. The D-E2 red-first asserts a hook depth the code cannot produce
+**Where:** P4-§17 `:3554` ("its `on_remove` test hook records depth 0"), edge case `:3581`; plan 02 `:282-283`.
+
+**Problem:** `drain_deferred_hook_queue` brackets its own walk with a `DeferredScopeGuard` (`ecs_master.rs:681-690`). Every command it applies, `Remove<Pinned>` included, therefore runs at `hook_drain_depth() ≥ 1`, and so do that command's hooks (`hooks/scope.rs:65-67`, `:89-90`).
+
+**Consequence:** the gate is red by construction. The obvious way to make it green is to drop or move the drain's bracket, and that reintroduces the F1 double-apply the bracket exists to prevent (`ecs_master.rs:681-689`).
+
+**Confidence:** CONFIRMED.
+
+**What is needed:** restate the observable in terms the code has. For example: the removal happens after `delete_entity_core` returned (a sequence witness), and no despawn hook of the target is on the stack. Patch 02 as well.
+
+#### W2. The asset groups' privacy and chain-key route is not expressible as written
+**Where:** P-ED5 `:1883`; P4-ED5 `:3016`; P4-ED16 `:3135`, `:3142`; the API at `:3417-3419` and rev 3 `:2629-2635`.
+
+**Problem:** `render_retire<K: GpuAssetKind>` and `AssetWrite<'w, K: GpuAssetKind>` are public, and `AssetWrite<Material>` is used "from any Main system" (`:1895`). Two consequences follow:
+- **The marker type cannot stay private.** On a public `GpuAssetKind`, `impl GpuAssetKind for Material { type Group = MaterialGroup; }` with a private marker is error E0446 ("private type in public interface", Rust error index).
+- **The suggested key item is not private.** "A render-private item of `GpuAssetKind`, for example a `const`" would be readable by any crate that can name `Mesh` or `Material`, because a trait item has its trait's visibility.
+
+**Consequence:** the likely fixes break both guarantees.
+- Making the markers `pub` lets any crate hold `GroupHead<MaterialGroup>` and write group columns without marking the EK6g edit log, so R2 never uploads the change.
+- Exposing the key lets any crate call `release_dying_before` with its own horizon, releasing slots that in-flight frames still name. That is a GPU use-after-free or a device-lost.
+
+**Confidence:** CONFIRMED for the language rule and the signatures. Which resolution a developer picks is PLAUSIBLE.
+
+**What is needed:** name the form: a sealed or private-module supertrait that carries `Group` and the key accessor (or an equivalent). Add a UG-17 fixture proving an outside crate can neither name the group's `GroupHead` nor obtain the key.
+
+#### W3. Rev 3's `clear()` rule survives in two rung and hand-off cells, and the post-`clear()` sentinel state is undefined
+**Where:** AS5's gate cell `:2717` ("`EcsMaster::clear()` on a world with live asset lanes trips the debug assert"); P-§13 hand-off row `:2743` ("legal … only at teardown"). Both contradict P4-ED5 `:3047`, which withdraws the assert because it "would now fire on a correct world". P4-§12 `:3497` says P4-§17 restates the AS4 and K-EK15c cells, but it restates neither.
+
+**Consequence (confirmed part):** AS5 is told to build and gate an assert that rev 4 says is wrong.
+
+**Consequence (plausible, latent part):** `clear()` fires no despawn hooks (`ecs_master.rs:1026-1046`), so the `AssetSentinel` refusal is bypassed. Slot 0 then goes to `dying`, R1's texture visitor destroys the sentinel's VkImage at the horizon, and LIFO reuse hands slot 0 to the next user asset. That breaks AS3's "first user asset gets slot ≥ 1" and every DEAD or slot-0 default. There is no production caller of `EcsMaster::clear()` on [I] today.
+
+**What is needed:**
+- Supersede `:2717` and `:2743`.
+- State `clear()`'s contract for a world that holds sentinels: refuse it, or re-seed the sentinels and keep slot 0 out of R1.
+- Correct `:3497`.
+
+#### W4. G-ALLOC is left unmapped, but HO2's gate depends on it
+**Where:** P4-§12 K0 `:3449`. G-ALLOC is defined at rev 3 `:2690`, and HO2's gate at `:1059` names it ("the 24 KB/frame allocation gone").
+
+**Problem:** UG-03's scenes are physics scenes: S0, S0b, S1a–c, S2 and S3 (`03:12`). None composes `EnginePlugins` + `UiPlugins` with UI nodes > 0 and instances > 0.
+
+**Consequence:** the render/UI frame's "data path 0" allocation budget and HO2's gate have no gate in the plan's inventory, so allocations can creep into the render/UI frame loop with no red.
+
+**Confidence:** CONFIRMED for the text; PLAUSIBLE that no existing scene covers it.
+
+**What is needed:** map G-ALLOC to a named UG-03 scene (an engine app scene with its anti-vacuity), name the rung that lands it (B2, or the first HO rung), and restate HO2's cell.
+
+### 🟢 Optional
+
+- **O1. The chain methods are not bounded by policy.** `open_chain` and `close_chain` are not bounded to `Release = Chained` (physics `:3402`; E2-1 `:3841-3845`). E2-1's `Stamped` invariant (`:3881`) omits `open_chain`, and an `open_chain` on an asset group releases every stamped slot at once. Either bound the methods (E0271, same fixture family) or add a census of zero call sites in `boyko_render`.
+- **O2. The `every_tick` reader refusal names only Main** (`:3064`; 02 `:169`). A Render-schedule reader has the same miss in frames with ≥ 2 substeps. The refusal could cover every non-Fixed schedule at the same zero runtime cost.
+- **O3. E2-7 contradicts itself.** Its heading and "The fact" line (physics `:3995-3997`) keep "the solve order follows archetype-row order until U7", but its own next bullet (U5 switches S2–S6 to slots, `:1998`) says otherwise. The report's reading is correct: rows drive S2–S6 through U4, and row-keyed state lasts until U7. The headline should be reworded to match.
+- **O4. D-E23's caller list is incomplete on the trunk.** `D:/wt/joltab/crates/boyko_ui/tests/ui_a0_clock.rs:421` calls `FixedTime::overstep()` and is not in 02's list (`:184`, which was verified at `d552be05`). The compiler will catch it, but the rung would hit an undeclared file mid-work.
+- **O5. Two API details.**
+  - `os_event_sink(&self)` (`:958`) has to mint a lane (`:3073`), so it needs `&mut` or a statement that it is setup-only.
+  - The teardown form's visitor cannot borrow a NonSend lane stored in the same `&mut EcsMaster`, so the rank callback must take the lanes out first (`:3208`).
+
+## Flags DOC-2 raised for EP3
+- **(a) `OsEventSink`'s own lane:** accepted. `send` is `unsafe` with a dispatcher-thread contract (`:960`), so the lane has one writer.
+- **(b) Single-queue premise of the horizon proof:** confirmed. The device creates one queue (`boyko_rhi_vulkan/src/device.rs:3840`, `:1258`), and `present/targets.rs:2363` relies on the same. Step 3's reading as the fence rule holds.
+- **(c) E0271 rather than E0599:** accepted. A method-level `where` gives E0271, and an `impl`-level bound would give E0599. D-S3(iii)'s fixture is the check.
+- **(d) Render-private key item:** see W2.
+- **(e) `clear()` on `Stamped` groups:** correct as a GPU-safety change; see W3 for the stale cells and the sentinel state.
+
+## Positive
+- The append-only revisions with same-line header edits keep every cited line number valid.
+- Placing the redirect inside `!flags.is_empty()` (`entity_api.rs:1013-1016`) adds nothing to the table-only path.
+- The method-level `where` for E0271, and the teardown token taken as a `for<'t> fn` argument, are both correct.
+- Writer lanes keep the 24 B `#[repr(C)]` state (`event_writer.rs:49-63`).
+- Separating the engine's N5 from physics's N5 is right.
+- E2-7 correctly re-cites U5's switch to slots.
+- The prerequisite remap is complete.
+
+## Open questions for the architect
+1. Are D-E20–D-E23 engine-sourced for EP3's purposes? The 02 DAG gives them no EP3 edge (`02:550`), while 00 §5, RK-2 and the lane-ENG text name only D-E0, D-E18 and D-E19 as exempt. EP3 raises nothing against the D-E20 or D-E23 text, so state the classification explicitly.
+2. For a counted target, `despawn_without_children` returns `Deferred`, and the later despawn at count 0 is a plain one that cascades to children. Is that intended?
+
+Sources: [Rust error index E0446](https://doc.rust-lang.org/error_codes/E0446.html); [RFC 2145 type privacy](https://rust-lang.github.io/rfcs/2145-type-privacy.html).
+
+# Rev 4.1 patch
+
+## How to read rev 4.1
+
+- **Why rev 4.1 exists.** Engine critique pass 3 (EP3; the log above) returned CHANGES_REQUESTED with 1 Critical, 4 Important and 5 Optional remarks. Rev 4.1 resolves the Critical and every Important remark, and adopts all five Optional ones. Two of those, O1 and O3, fall on the physics design and land there as Erratum E3.
+- **Reading order:** rev 2 body → the rev-3 patch (`P-…`) → the rev-4 patch (`P4-…`) → the rev-4.1 patch (`P4.1-…`).
+  - A section that rev 4.1 does not name reads as rev 4 left it. Where rev 4.1 and earlier text disagree, rev 4.1 rules.
+  - As before, a **Removed** quote takes a passage out of the reading order, not out of the file. Each quoted passage is named by its line on this tree.
+- **Edited in place:** only the header's two lines, `:4` and `:7`. Each keeps its old text struck through on the same line, so no line number moves.
+- **Trees.**
+  - Line numbers of this file, of the physics design and of the plan are on `u/doc-1-2`. Its base is `49f2fcfb`, and the allocator's commit `226894d9` sits beneath this patch; that commit touches no line cited here except in plan files 00, 02 and 03, and those edits are same-line.
+  - Code is cited on **[I]** = `integ/unified` @ `c33d786d`, read with read-only `git show`, and on **[J]** = `d552be05` where rev 4 cited it.
+  - EP3 cited the `D:/wt/joltab` working copy. Where its numbers differ from [I], both are given.
+- **Plan edits.** Every plan passage these remarks name is patched on its own line, dated 2026-09-23 and marked `⚠`. The changelog lists them.
+- Nothing was built, run or timed.
+
+---
+
+## P4.1-header
+
+**Removed (rev 4 P4-header, `:2975`):**
+> - **Status:** design only. No gate was run and no timing was taken. Q1–Q5 stay decided as in rev 3. Rev 4 is pending EP3, which must close before D-S3(iii), AS2 and every engine-sourced D-E rung. D-E0, D-E18 and D-E19 are not engine-sourced and do not wait (02 §2).
+
+**Added:**
+> - **Status:** design only. No gate was run and no timing was taken. Q1–Q5 stay decided as in rev 3.
+>   - EP3 ran on 2026-09-23, and rev 4.1 resolves every remark it made.
+>   - By EP3's own map, none of its remarks touches D-S3(iii)'s content. C1 and W1 fall on D-E2, W2 on AS2, W3 on AS5 and W4 on HO2, and each of those rungs builds on rev 4.1's resolution.
+>   - D-E0, D-E18, D-E19 and D-E20–D-E23 are not engine-sourced and do not wait for EP3 (P4.1-§12).
+
+---
+
+## P4.1-§9: EK15b, `DESPAWN_AT_ZERO` at two edges (EP3 C1, Q2)
+
+**Removed (rev 3 P-§9, EK15b row, `:2546`, fragment):**
+> Target option `const DESPAWN_AT_ZERO`: the unlink command apply, under `&mut EcsMaster`, enqueues a despawn when the sum over the entity's counted targets reaches 0 and the entity has no `Pinned`.
+
+**Removed (rev 4 P4-ED5, `:3040`):**
+> - A despawn request on an asset whose count is > 0 is deferred instead. The redirect enqueues the `Pinned` removal, which the outermost drain applies at depth 0 (EK15b, P4-§9). The asset stays alive, and is unpinned once that drain has run.
+
+**Removed (rev 4 P4-§9, `:3294`, first sentence):**
+> The `Pinned` removal is then an ordinary migration, applied by the outermost drain at depth 0, with its hooks at that depth.
+
+**Added:**
+
+> **`DESPAWN_AT_ZERO` is re-evaluated at two edges** (rev 4.1; EP3 C1).
+> 1. **The count edge** (rev 3's). The unlink command's apply brings the sum over the entity's counted targets to 0.
+> 2. **The pin edge** (new). `Pinned` leaves the entity, whatever removed it: the redirect's enqueued `RemoveCommand::<Pinned>`, a user's `remove::<Pinned>()`, or the entity's own despawn. `Pinned` (KC-29b) gains an `on_remove` hook for this edge.
+>
+> Each edge enqueues `DespawnAtZeroCommand(e)` on `deferred_hook_queue`. Its apply runs under `&mut EcsMaster` and despawns `e` if and only if all three conditions hold **at that apply**:
+> - (i) `e` is live (a generation check);
+> - (ii) `e` has no `Pinned`;
+> - (iii) the sum over `e`'s counted targets is 0.
+>
+> Otherwise it does nothing. The despawn is a plain despawn through `delete_entity_core`, whose redirect finds the sum at 0 and does not fire.
+>
+> - **A deferred despawn request** on an asset whose count is > 0 (EK15b's redirect; rev 4's step order, P4-§9) enqueues the `Pinned` removal and returns `Deferred`. The outermost drain applies that removal inside its own bracket, after `delete_entity_core` and the rest of the queue have returned (P4.1-§17). The removal fires the pin edge. So the asset dies in the drain in which its count is 0 and its pin is gone, whichever of the two happened first.
+>
+> **Why the decision is taken at apply time.** Relation hooks only enqueue: [I] `crates/boyko_ecs/src/ecs/core/relationship/generic_hooks.rs:142` pushes `UnlinkCommand` from `on_replace`. A system's command queue is applied whole, and then the one drain runs ([I] `schedule/schedule.rs:911-919`). So the unlink, the unpin, and any re-link or re-pin of the same entity can arrive in one queue in any order. The three conditions, checked at apply, describe the state after all of them. A decision taken when the command was queued would describe a state that may no longer hold. The orders, walked:
+> - **EP3's order, `[despawn(I), despawn(A)]` in one system's `Commands`**, A pinned and I its last user:
+>   1. `despawn(I)` enqueues `Unlink(I→A)`.
+>   2. `despawn(A)` sees count 1, enqueues `RemoveCommand::<Pinned>(A)`, and returns `Deferred`.
+>   3. The drain applies the unlink. The count is now 0, but `Pinned` is present, so the count edge's command will do nothing.
+>   4. The drain applies the unpin, and its `on_remove` enqueues `DespawnAtZeroCommand(A)`.
+>   5. The drain's `while !is_empty()` loop applies that command. A is live, unpinned and at count 0, so A is despawned in that drain.
+>
+>   Rev 4 left A alive, unpinned, at count 0, forever.
+> - **The reverse order, `[despawn(A), despawn(I)]`.** The unpin applies first and queues `DespawnAtZeroCommand(A)` while the count is still 1. The unlink then brings the count to 0 and queues a second one. The first command to apply sees count 0 and despawns A. The second finds A dead and does nothing.
+> - **A hierarchy cascade** that lists the instance before the asset, and **the same two despawns issued from inside one hook's deferred queue**, both go through the same flat queue, with the same outcome.
+> - **A re-pin between the unlink and the apply** (`[unlink I→A to 0, insert Pinned on A]` in one queue). The count edge's command finds `Pinned` and does nothing, so A stays alive, pinned, at count 0. Rev 3's plain despawn would have killed A. Rev 4.1 closes that window too.
+>
+> **What does not change.**
+> - The redirect, and the step order inside `delete_entity_core` (02 §4.4; 01 `:977`): the redirect still enqueues `RemoveCommand::<Pinned>`.
+> - An unpinned asset that was never linked is not despawned, because neither edge has fired. A loading asset may be unreferenced (ED5).
+> - **EP3 Q2:** the despawn at zero is a plain despawn, so it cascades to hierarchy children.
+>   - A deferred `despawn_without_children` records no per-request mode. Recording one would cost a component or a flag per deferred entity.
+>   - Asset entities are hierarchy leaves in this design (ED5: an asset's value is a group slot or a table component, and asset → asset links are counted relations, N3), so no current asset is affected.
+>   - A caller who needs an entity's children kept re-parents them before making the request.
+>
+> **Cost.**
+> - **The table-only, hook-free path: 0.** `Pinned`'s hook flag is set only on archetypes that hold `Pinned`. Those are asset archetypes, and they already take the `!flags.is_empty()` branch for `COUNTED_TARGET` ([I] `ecs_master/entity_api.rs:1014`).
+> - One enqueue per `Pinned` removal, and one per unlink that reaches 0. Both are cold.
+> - Each apply costs one generation check, one `Pinned` lookup and the cold counted sum.
+> - A redundant command, from the pin edge firing inside the entity's own despawn or from both edges in one drain, finds the entity dead and does nothing. The drain already relies on generation-checked no-ops for re-entered despawns ([I] `ecs_master/ecs_master.rs:696-698`).
+>
+> **Precedent.** Bevy's `on_remove` hook runs when a component is removed, and a despawn counts as removing every component. It runs before the value leaves, and it receives a `DeferredWorld` whose `commands()` make structural changes later, including a despawn (External sources).
+>
+> **Rejected.**
+> - **Re-checking the count inside the unpin command only** (EP3's first option). It closes C1's order, but it leaves the same zombie for a user's `remove::<Pinned>()` at count 0, which rev 3 already had. That would fix the race and leave the class open.
+> - **A plain despawn from either edge.** A re-pin before the apply would be ignored.
+>
+> **Rung:** D-E2 (KC-29b). **Plan:** 02 §4.4 step 3's closing paragraph (`02:724-726`) and 02 §2's D-E2 red-first list (`02:282-284`) are patched on the same lines.
+
+---
+
+## P4.1-ED5: `EcsMaster::clear()` on a world that holds an `AssetSentinel` (EP3 W3)
+
+**Removed (rev 3 P-§12, AS5's gate cell, `:2717`, fragment):**
+> `EcsMaster::clear()` on a world with live asset lanes trips the debug assert;
+
+**Removed (rev 3 P-§13, hand-off row, `:2743`, third cell):**
+> legal for worlds with asset groups only at teardown; `clear_gameplay()` is the gameplay reset (X-28)
+
+**Removed (rev 4 P4-§17, edge case, `:3582`):**
+> - `clear()` on a world with live asset groups (no slot released; R1 releases at the horizon);
+
+**Added:**
+
+> **`EcsMaster::clear()` is refused while an `AssetSentinel` lives** (rev 4.1; EP3 W3). It panics with a coded, `#[cold]` message **before it touches any store**. The message names the two resets that exist: `clear_gameplay()`, the gameplay reset, which keeps assets and sentinels, and the teardown driver (KC-27, D-E9).
+> - **The check.** The kernel already knows `AssetSentinel`, because KC-29b refuses its despawn (rev 3 `:2546`). `clear()` looks for rows in any archetype that holds `AssetSentinel`'s id. That is one registry lookup plus a walk over the archetypes holding that id, on `clear()`'s cold path only.
+> - **Why refuse, not re-seed.** EP3 W3 traced the failure:
+>   1. `clear()` fires no hook ([I] `ecs_master/ecs_master.rs:1026-1046`), so the sentinel's despawn refusal is bypassed.
+>   2. Rev 4's stamping rule then puts slot 0 in `dying`.
+>   3. R1's texture visitor destroys the sentinel's VkImage at the horizon.
+>   4. LIFO reuse hands slot 0 to the next user asset.
+>   5. That breaks AS3's "first user asset gets slot ≥ 1" and every DEAD or slot-0 default.
+>
+>   Re-seeding cannot put the sentinel back at slot 0. A `Stamped` `clear()` keeps `len`, and slot 0 is in `dying`, so the next spawn gets slot `len`. It would take an R1 exemption for slot 0 and a binder special case, for a call that has no production caller ([I] `git grep` finds none outside tests and `EcsMaster` itself). The refusal costs nothing and keeps AS3's invariant structural.
+> - **What stays from rev 4.**
+>   - On a world whose `Stamped` groups hold slots but no sentinel (D-S3(iii)'s `TG` test world, or a headless test app), `clear()` stamps and releases nothing (rev 4 `:3046`).
+>   - The GPU-safety reason for rev 3's debug assert stays withdrawn (`:3047`).
+> - **Teardown is unaffected.** The teardown driver does not call `clear()`: rank 4 idles the device, releases each asset group with the token, and drops the lanes (P4.1-§5).
+> - **Rung.** The refusal lands in D-E2, with KC-29b's `AssetSentinel` despawn refusal, and is tested there with a test sentinel. AS5's gate cell asserts it on a render world (P4.1-§12).
+>
+> **Added (the hand-off row's third cell, replacing `:2743`'s):**
+> > refused (a coded panic) while an `AssetSentinel` lives; on a sentinel-free world it stamps `Stamped` groups and releases nothing (rev 4); `clear_gameplay()` is the gameplay reset (X-28)
+>
+> **Added (edge cases, replacing `:3582`):**
+> - `clear()` on a world with a live `Stamped` group and no sentinel: no slot released; R1 releases at the horizon.
+> - `clear()` on a world that holds an `AssetSentinel`: the coded panic, and a `catch_unwind` test reads `live_count` and every group's `len` unchanged.
+
+---
+
+## P4.1-ED7: `every_tick` readers in any non-Fixed schedule, and `os_event_sink`'s receiver (EP3 O2, O5, flag (a))
+
+**Removed (rev 4 P4-ED7, `:3064`, sentence):**
+> A Main-schedule reader of an `every_tick` type is refused at `App::finish` with a coded panic, because two substeps in one frame would swap its events out unseen.
+
+**Added:**
+> A reader of an `every_tick` type in any schedule other than Fixed (Main, Render or any other) is refused at `App::finish` with a coded panic, because two substeps in one frame would swap its events out unseen. A Render reader misses them exactly as a Main reader does (EP3 O2). The check is the one D-E8 already runs at `App::finish` for Main readers, applied to every non-Fixed schedule, so its runtime cost is 0.
+
+**Removed (rev 2 §10, `:958`):**
+```
+impl EcsMaster { pub fn os_event_sink<E: Event>(&self) -> OsEventSink<E>; }
+```
+**Added:**
+```rust
+impl EcsMaster { pub fn os_event_sink<E: Event>(&mut self) -> OsEventSink<E>; }  // setup only: mints the sink's writer lane (U-21)
+```
+- It takes `&mut self` because it mints a writer lane (P4-ED7, `:3073`). It is called at setup, from a plugin's `build`, where the world is held exclusively (EP3 O5).
+- **Flag (a) confirmed** by EP3: `send` is `unsafe`, with a dispatcher-thread contract (`:960`), so the sink's own lane has one writer.
+
+---
+
+## P4.1-ED16: the asset groups' privacy, and the route to their keys (EP3 W2, flags (b), (c), (d))
+
+**Removed (rev 3 P-ED5, `:1883`, second sentence):**
+> The group marker types are private to `boyko_render`, so only its facades can name `DenseGroupMut` over them.
+
+**Removed (rev 4 P4-ED5, `:3016`, second sentence):**
+> The group marker types are private to `boyko_render`, so only its facades can name `GroupHead` over them, and only `boyko_render` can construct their chain keys (`#[dense_group]` emits `<G>ChainKey` with a `pub(crate)` constructor, `M:…PHYSICS…:3337`).
+
+**Removed (rev 4 P4-ED16, `:3135`):**
+> - *Who* is decided by the chain key. Only `boyko_render` can construct the asset groups' keys, because `#[dense_group]` emits `<G>ChainKey` with a `pub(crate)` constructor and the group markers are private to `boyko_render` (P-ED5, `:1883`). No runtime claim exists.
+
+**Removed (rev 4 P4-ED16, `:3142`):**
+> - The key comes from a render-private item of `GpuAssetKind`, for example a `const` of the group's `ChainKey`. `<K::Group as DenseGroup>::ChainKey`'s constructor is an inherent `pub(crate)` function, which generic code cannot call through the associated type.
+
+**Removed (rev 4 P4-§16, `:3543`, fragment):**
+> `GpuAssetKind` carries the render-private chain-key item (P4-ED16).
+
+**Added:**
+
+> **Why rev 4's wording cannot be built** (EP3 W2).
+> - `render_retire<K: GpuAssetKind>` and `AssetWrite<'w, K: GpuAssetKind>` are public, and `AssetWrite<Material>` is used "from any Main system" (`:1895`).
+> - A private marker in `impl GpuAssetKind for Material { type Group = MaterialGroup; }` is error E0446, "A private type or trait was used in a public associated type signature" (Rust error index).
+> - A key item on `GpuAssetKind` is readable by any crate that can name `Mesh` or `Material`, because a trait's items have the trait's visibility.
+> - The obvious repairs break the guarantees:
+>   - `pub` markers let any crate hold `GroupHead<MaterialGroup>` and write group columns without marking EK6g's edit log, so R2 never uploads the change.
+>   - An exposed key lets any crate call `release_dying_before` with a horizon of its own, releasing slots that in-flight frames still name.
+>
+> **Why not a sealed supertrait** (EP3's first suggestion).
+> - The Rust Reference: "anywhere a generic or trait object is bounded by a trait, it has access to the associated items of its supertraits".
+> - Sealing through a supertrait prevents implementation, not use: "downstream code can call its methods" (predr.ag's guide to sealed traits).
+> - So with `trait GpuAssetKind: sealed::HasGroup`, the projection `K::Group` would resolve in any downstream `fn f<K: GpuAssetKind>`. That is the leak.
+>
+> **The form** (rev 4.1):
+> ```rust
+> // boyko_render
+> pub trait GpuAssetKind: sealed::Sealed + 'static {   // user-visible items only
+>     type Value: Copy + 'static;                     // what AssetRead / AssetWrite hand out (rev 3 `:2633-2635`)
+> }
+> mod sealed {                                        // private: no path into it exists outside boyko_render
+>     pub trait Sealed {}                             // so no downstream crate can implement GpuAssetKind
+>     pub struct Token(());                           // unnameable outside the crate: a fn taking it is uncallable there
+>     pub trait AssetGroupKind: super::GpuAssetKind { // NOT a supertrait of GpuAssetKind: no public bound reaches it
+>         type Group: DenseGroup<Release = Stamped>;
+>         type DeviceLane: 'static;
+>         fn chain_key(_: Token) -> <Self::Group as DenseGroup>::ChainKey;   // body: <G>ChainKey::new(), pub(crate)
+>     }
+>     // #[dense_group] MeshGroup, MaterialGroup, TextureGroup: `pub` items of this private module
+>     // pub struct AssetWriteState<K>; pub struct AssetReadState<K>;          // SystemParam::State types, private fields
+> }
+> ```
+> - **Why each piece compiles.**
+>   - `impl sealed::AssetGroupKind for Material { type Group = sealed::MaterialGroup; … }`: for an associated type in an impl, RFC 2145 keeps E0446 as a hard error "using the old rules based on local `pub` annotations and not reachability". The trait and the marker are both `pub` by annotation, so the impl is accepted, and still no path outside the crate reaches either.
+>   - Bounds that name `sealed::AssetGroupKind` on public items: the `private_bounds` lint compares the bound's visibility with the item's *effective* visibility (RFC 2145), and the bound is `pub` by annotation. This is the ordinary sealed-trait shape, which RFC 2145 names as a legitimate use. AS2's clippy leg (UG-01, `-D warnings`) is the check that it raises no lint.
+>   - The `SystemParam::State` types are `pub` structs of the private module with private fields. The same rule as for the markers applies.
+> - **What an outside crate can do.** It can write `AssetRead<'_, Material>` and `AssetWrite<'_, Material>` in a Main system, and read and edit material values through them; every edit marks the EK6g log. It cannot be generic over `AssetWrite<'_, K>` for its own `K`, because the struct's bound is one it cannot name. It cannot reach a group type or a key at all.
+> - **How render obtains the key.**
+>   - `render_retire::<K>` calls `K::chain_key(sealed::Token(()))`.
+>   - `<G>ChainKey`'s constructor is an inherent `pub(crate)` fn (physics `:3337`), which generic code cannot call through `<K::Group as DenseGroup>::ChainKey`. The trait method is therefore the route.
+>   - Its `Token` argument keeps it uncallable outside the crate, even if a later edit exposed the trait (the "priv-token" technique; External sources).
+> - **R1 is not a user API.** `render_retire` becomes `pub(crate)`, and the render plugin registers its three instances.
+> - **Gates.** UG-17 fixtures land in AS2, the first rung that builds the form. An outside test crate must fail to compile each of:
+>   1. `boyko_render::…::sealed::MaterialGroup` by path → E0603 (the module is private);
+>   2. `GroupHead<'_, <Material as GpuAssetKind>::Group>` → E0576 (no such associated item in `GpuAssetKind`);
+>   3. `fn f<K: GpuAssetKind>(_: GroupHead<'_, K::Group>)` → E0220 (not defined in the bound's traits);
+>   4. `sealed::Token(())`, or `<Material as sealed::AssetGroupKind>::chain_key(…)` → E0603;
+>   5. `render_retire::<Material>` → E0603.
+>
+>   **Green arm (anti-vacuity):** the same outside crate compiles a Main system that takes `AssetWrite<'_, Material>` and edits a value. The `.stderr` files pin the exact text; the codes listed are the expected ones (Rust error index).
+> - **Cost:** 0. Only visibility and trait layout change, and every call is monomorphised as before.
+> - **Rejected:**
+>   - a sealed supertrait carrying `Group` (it leaks, above);
+>   - a `const` key item on `GpuAssetKind` (a trait's items have the trait's visibility);
+>   - `pub` markers (the column writes would bypass EK6g).
+>
+> **Flags (b) and (c), confirmed.**
+> - **(b)** The device creates one queue: `queue_count: 1` and queue index 0 ([I] `crates/boyko_rhi_vulkan/src/device.rs:3925`, `:1258`; EP3 cites the working copy's `:3840`). So step 3 of ED16's proof reads as the fence rule and holds (P4-ED16, `:3146-3148`).
+> - **(c)** The method-level `where` gives E0271, where an `impl`-level bound would give E0599. D-S3(iii)'s fixture is the check.
+>
+> **Added (to rev 3 P-§16's `boyko_render` bullet, replacing `:3543`'s fragment):** `render_retire::<K>` and the facades hold `GroupHead<K::Group>` through `sealed::AssetGroupKind`, which also carries the device lane and the chain-key accessor (P4.1-ED16).
+
+---
+
+## P4.1-§10: public API (EP3 W2)
+
+**Removed (rev 4 P4-§10, `:3417-3419`):**
+```
+pub fn render_retire<K: GpuAssetKind>(group: GroupHead<K::Group>, lane: NonSendMut<K::DeviceLane>,
+                                      frame: NonSend<FrameInFlight>);                          // R1 ×3
+pub struct AssetWrite<'w, K: GpuAssetKind>;  // hand-written SystemParam: GroupHead + GroupEditsMut + GroupSlot reads
+```
+**Removed (rev 3 P-§10, `:2633`, `:2635`):**
+```
+pub struct AssetRead<'w, K: GpuAssetKind>;   // hand-written SystemParam: DenseColumn<K::Value> + GroupSlot reads
+impl<K: GpuAssetKind> AssetWrite<'_, K> { pub fn get_mut(&mut self, h: Handle<K>) -> Option<&mut K::Value>; } // marks
+```
+**Added:**
+```rust
+// boyko_render (rev 4.1; EP3 W2): see P4.1-ED16 for GpuAssetKind and `sealed`
+pub(crate) fn render_retire<K: sealed::AssetGroupKind>(group: GroupHead<K::Group>, lane: NonSendMut<K::DeviceLane>,
+                                                       frame: NonSend<FrameInFlight>);        // R1 ×3, registered by the render plugin
+pub struct AssetRead<'w, K: sealed::AssetGroupKind>;   // hand-written SystemParam: DenseColumn<K::Value> + GroupSlot reads
+pub struct AssetWrite<'w, K: sealed::AssetGroupKind>;  // hand-written SystemParam: GroupHead + GroupEditsMut + GroupSlot reads
+impl<K: sealed::AssetGroupKind> AssetWrite<'_, K> { pub fn get_mut(&mut self, h: Handle<K>) -> Option<&mut K::Value>; } // marks
+```
+
+---
+
+## P4.1-§4.2: D-E23's caller list (EP3 O4)
+
+**Added (to D-E23's caller list, P4-§4.2 `:3186` and 02 §2):** [I] `crates/boyko_ui/tests/ui_a0_clock.rs:421` calls `FixedTime::overstep()`. It is present on [I] `c33d786d` and absent at [J] `d552be05`, where 02's list was verified. It migrates to `Time::fixed_overstep()` with the other tests. 02 `:184` is patched on the same line.
+
+---
+
+## P4.1-§5: the teardown drop order (EP3 O5, W2)
+
+**Removed (rev 4 P4-§5, `:3208`):**
+> 4. asset device lanes. First the device idle, then `release_dense_group_at_teardown::<G>(&key, &TeardownToken, lane-free visitor)` per asset group (KC-13 (b); P4-ED16), then the lanes drop. The rank callback has the type `for<'t> fn(&mut EcsMaster, &'t TeardownToken)`, and the keys come from `GpuAssetKind` (P4-ED16).
+
+**Added:**
+> 4. asset device lanes.
+>    - First the device idle.
+>    - Then, for each asset kind `K`, the rank callback takes `K::DeviceLane` out of the world by value (it is a NonSend resource) and calls `world.release_dense_group_at_teardown::<K::Group>(&K::chain_key(sealed::Token(())), t, |slot| lane.free(slot))` with the owned lane. Then it drops the lane.
+>    - The visitor therefore borrows no world storage while `&mut EcsMaster` is held (EP3 O5).
+>    - The rank callback has the type `for<'t> fn(&mut EcsMaster, &'t TeardownToken)`, and it lives in `boyko_render`, where `sealed::AssetGroupKind` is nameable (P4.1-ED16).
+
+---
+
+## P4.1-§12: rung cells (EP3 W2, W3, W4, C1, Q1)
+
+**Removed (rev 4 P4-§12, K0 row, `:3449`, last two sentences):**
+> G-ALLOC has no row of its own in 03; its nearest plan gate is UG-03, the per-class allocation census, whose App scenes D-M2 pins (02 §2). *Mapping G-ALLOC is left to EP3*
+
+**Added:**
+
+> **G-ALLOC is two scenes of UG-03's census** (rev 4.1; EP3 W4). One scene is headless and one runs on a device, because the allocation HO2 removes happens only on a device frame. G-ALLOC's definition is rev 3's (`:2690`).
+> - **E1: headless; lands in B2.**
+>   - **The app.** UG-13's app (b), `EnginePlugins` + `UiPlugins::<TestAction>`, which B2 builds for G-GRAPH, run for steady frames 10..20 under UG-03's process-global counting allocator and per-class pins.
+>   - **What "data path" means.** It is UG-03's OTHER class: every steady-frame allocation that is not the scheduler's, the pool's or the injector's.
+>   - **Pins.** They are recorded at B2 as ceilings that may only fall (G-ALLOC's "budget only decreases"; UG-03's rule that pins are never widened). OTHER's target is 0.
+>   - **Anti-vacuity** (rev 3 `:2690`): UI nodes > 0 and mesh instances > 0 in the world before frame 10. Either count at 0 is red.
+>   - **What it sees:** input, UI, Main-side render-prep and host systems. It does not see the Render schedule's device work or the runner's VB path, which need a device.
+> - **E1v: device; lands in HO2 as HO2's red-first.**
+>   - **The run.** A VisibilityBuffer boot, of `boyko_demo` or the smallest app that selects the VB path, run in UG-12's device leg (`--test-threads=1`). The gate binary uses the same counting allocator, over steady frames 10..20.
+>   - **What it records:** OTHER, plus the count of allocations of ≥ 24 KiB per steady frame.
+>   - **Anti-vacuity:** the path reads VB, and VB instances > 0.
+>   - **The red-first.** At HO2's cut, E1v records at least 1 such allocation per VB frame. That is the `FilteredAccessSet::bit_owners` box ([J] and [I] `crates/boyko_ecs/src/ecs/core/system/filtered_access_set.rs:146`), which the runner's per-frame `run_system` of `sync_vb_instance_ring_system` allocates ([J] `crates/boyko_app/src/runner.rs:1625`; [I] `:1714`, through `guarded_run_system`). After HO2, the count is 0.
+>   - **Its first run is also a measurement.** The 24 KB claim is code-derived (`ENGINE-RUNTIME-ECS-RESEARCH.md:924`, `:937`), so E1v's first run at HO2's cut is the measurement the research asked for. A first run that records 0 is a finding to report before HO2 proceeds, not a green.
+> - **Plan:** 03's UG-03 row (`03:12`) and its per-rung list (`03:39`), and 02's B2 row (`02:72`), are patched on the same lines.
+
+**Removed (rev 2 §12, HO2's gate cell, `:1059`, fragment):**
+> the 24 KB/frame allocation gone (G-ALLOC)
+
+**Added:**
+> UG-03 scene E1v records 0 allocations of ≥ 24 KiB per steady VB frame (it recorded ≥ 1 at HO2's cut), and E1's OTHER class does not rise
+
+**Added (to AS2's gate cell, rev 3 `:2713-2714`; EP3 W2):** the five UG-17 privacy fixtures and their green arm (P4.1-ED16).
+
+**Added (to AS4's gate cell, rev 3 `:2716`; EP3 C1):** **C1 red-first:** `[despawn(last instance), despawn(pinned asset)]` in one system's `Commands` despawns the asset in that system's drain, and so does the same pair issued from one hook's deferred queue (P4.1-§9, P4.1-§17).
+
+**Added (to AS5's gate cell, replacing `:2717`'s fragment; EP3 W3):** `EcsMaster::clear()` on a render world, which holds the slot-0 sentinels, panics with its code and changes nothing (P4.1-ED5);
+
+**Removed (rev 4 P4-§12, notes, `:3496-3497`):**
+> - EP3 closes before AS2 and before every engine-sourced D-E rung. So every rung above that depends on a D-E rung other than D-E0, D-E18 and D-E19 also waits for EP3, through that rung.
+> - The rows' extra-gate cells are unchanged, except the AS4 and K-EK15c cells, which P4-§17 restates.
+
+**Added:**
+> - **Engine-sourced** means a D-E rung whose content this design defines, through the EK* features of P4-§9's table: D-E1–D-E17. It does not cover D-E0 (physics P-§14, KC-36), D-E18 or D-E19 (ledger KF-10 and KF-09), or D-E20–D-E23 (EP3 Q1).
+>   - D-E20–D-E23 are the plan's KC-37 (b), (c), (i) and (j): the replay contract, 01 §2.1.
+>   - Rev 4 applies D-E20's and D-E23's rulings to this design, and the design names neither D-E21 nor D-E22.
+>   - The plan's DAG already gives all seven no EP3 edge (02 `:550`, `:555`), and EP3 raised nothing against the D-E20 or D-E23 text.
+> - **Extra-gate cells.** They are unchanged, except the AS2, AS4, AS5 and HO2 cells, which rev 4.1 restates above. Rev 4 said P4-§17 restated the AS4 and K-EK15c cells; it restated neither (EP3 W3). K-EK15c's cell (`:2722`) stands as rev 3 wrote it.
+
+---
+
+## P4.1-§17: validation (EP3 W1, C1, O2)
+
+**Removed (rev 4 P4-§17, `:3554`):**
+> - Inside `delete_entity_core` the row is untouched. The `Pinned` removal applies at depth 0 in the outermost drain, and its `on_remove` test hook records depth 0.
+
+**Removed (rev 4 P4-§17, edge case, `:3581`):**
+> - a despawn of a pinned asset with count > 0, inside a hook (the `Pinned` removal still applies at depth 0);
+
+**Added:**
+> - **Where the `Pinned` removal runs** (EP3 W1).
+>   - **Why no depth is asserted.** No command that the drain applies can observe depth 0. `drain_deferred_hook_queue` brackets its own walk with a `DeferredScopeGuard` ([I] `ecs_master/ecs_master.rs:690`, the F1 fix explained at `:681-689`). So every command it applies, and every hook those commands fire, reads `hook_drain_depth() ≥ 1` ([I] `component/hooks/scope.rs:65-67`, `:89-90`). No absolute depth is asserted.
+>   - **Sequence witness.** One system's `Commands` queue `despawn(E)` and then a closure command that appends `"returned"` to a test log. `Pinned`'s test `on_remove` hook appends `"unpinned"`. The log must read `["returned", "unpinned"]`: the removal ran in the drain, after `delete_entity_core` and the rest of the queue had returned. **Mutation:** performing the removal inside the redirect gives `["unpinned", "returned"]`, which is red.
+>   - **Nothing of E's despawn ran.** A test `on_remove` hook on E's anchor `TA` and a despawn observer on E both record nothing. Inside the `"unpinned"` hook, `group_get(E)` returns E's bytes.
+> - **`DESPAWN_AT_ZERO`'s two edges** (EP3 C1). These are added to D-E2's `counted_target_despawn_keeps_group_slot` set. The setup is `TG` (`Stamped`, anchor `TA`), a `CountOnly` relation, and an entity I that is E's only user. Each case:
+>   1. `[despawn(I), despawn(E)]` in one system's `Commands`, with E pinned → E is dead after that system's drain, and its `TG` slot is in `dying`, stamped with that tick. This case is red on rev 4, which leaves E alive, unpinned, at count 0.
+>   2. The same two despawns, enqueued from one hook's deferred queue → the same result.
+>   3. The reverse order, `[despawn(E), despawn(I)]` → E is dead, and E's despawn hooks ran exactly once.
+>   4. `remove::<Pinned>()` on a live E at count 0 → E is dead in the same drain.
+>   5. `[unlink I→E, insert Pinned on E]` in one queue → E is alive, pinned, at count 0.
+>   6. An unpinned E that was never linked → E is alive after 10 frames.
+>
+>   **Mutations:** deleting the pin edge (`Pinned`'s `on_remove`) turns 1, 2 and 4 red; dropping the `Pinned` re-check from `DespawnAtZeroCommand` turns 5 red.
+>
+> **Added (edge case, replacing `:3581`):**
+> - a despawn of a pinned asset with count > 0, issued from inside a hook: the `Pinned` removal still runs in the outermost drain, after the hook's own op has returned (the sequence witness, driven from a hook's deferred queue).
+
+**Removed (rev 4 P4-§17, `:3574`, fragment):**
+> a Main reader of an `every_tick` type panics at `App::finish` with its code;
+
+**Added:**
+> a Main reader and a Render reader of an `every_tick` type each panic at `App::finish` with the code (EP3 O2);
+
+**Removed (rev 4 P4-§17, edge case, `:3583`):**
+> - a Main system that reads an `every_tick` event type (refused at `App::finish`).
+
+**Added:**
+> - a Main or Render system that reads an `every_tick` event type (refused at `App::finish`).
+
+---
+
+## P4.1-§13: hand-offs (EP3 W3)
+
+The K7 and K6′ hand-offs (P4-§13) stand. The `EcsMaster::clear()` hand-off's third cell (`:2743`) reads as P4.1-ED5 restates it.
+
+---
+
+## Changelog: rev 4 → rev 4.1
+
+| EP3 | Change | Supersedes on this tree (left in place) | Sections | Plan (same-line, 2026-09-23) | Rung |
+|---|---|---|---|---|---|
+| C1 | `DESPAWN_AT_ZERO` at two edges (count and pin); `DespawnAtZeroCommand` re-checks liveness, `Pinned` and the count at its apply; the despawn at zero cascades (Q2) | `:2546` (fragment), `:3040`, `:3294` (first sentence) | P4.1-§9, §12 (AS4), §17 | `02:724-726`, `02:282-284` | D-E2 |
+| W1 | The redirect's observable is a sequence witness; no absolute depth | `:3554`, `:3581` | P4.1-§17 | `02:282-283`, `02:724-725` | D-E2 |
+| W2 | Sealed, non-super `sealed::AssetGroupKind` carrying the group, the lane and the key (behind a token); `render_retire` is `pub(crate)`; five UG-17 fixtures and a green arm | `:1883` (2nd sentence), `:3016` (2nd sentence), `:3135`, `:3142`, `:3417-3419`, `:2633`, `:2635`, `:3543` (fragment) | P4.1-ED16, §10, §12 (AS2) | — | AS2 |
+| W3 | `clear()` refused while an `AssetSentinel` lives; the stale AS5 and hand-off cells superseded; `:3497` corrected | `:2717` (fragment), `:2743` (3rd cell), `:3582`, `:3497` | P4.1-ED5, §12, §13 | — | D-E2; AS5 |
+| W4 | G-ALLOC = UG-03 scenes E1 (B2) and E1v (HO2's red-first); HO2's cell restated | `:3449` (last two sentences), `:1059` (fragment) | P4.1-§12 | `03:12`, `03:39`, `02:72` | B2; HO2 |
+| O1 | `open_chain`/`close_chain` bounded to `Chained` | physics `:3435`, `:3439` | physics E3-1 | `02:143` | D-S3(iii) |
+| O2 | The `every_tick` refusal covers every non-Fixed schedule | `:3064` (sentence), `:3574` (fragment), `:3583` | P4.1-ED7, §17 | `02:169` | D-E8 |
+| O3 | E2-7's heading and fact line reworded | physics `:3995`, `:3997` | physics E3-2 | `00:161` | — |
+| O4 | D-E23's caller list gains [I] `ui_a0_clock.rs:421` | — (adds to `:3186`'s list) | P4.1-§4.2 | `02:184` | D-E23 |
+| O5 | `os_event_sink(&mut self)`, setup-only; rank 4 takes each lane out before the release | `:958`, `:3208` | P4.1-ED7, §5 | — | D-E20; D-E9 |
+| Q1 | D-E20–D-E23 are plan-sourced and do not wait for EP3 | `:2975` (status), `:3496` | P4.1-header, §12 | `00:156` (status) | — |
+
+## External sources (read 2026-09-23)
+
+- Rust error index:
+  - E0446, "A private type or trait was used in a public associated type signature": <https://doc.rust-lang.org/error_codes/E0446.html>
+  - E0220, "The associated type used was not defined in the trait": <https://doc.rust-lang.org/error_codes/E0220.html>
+  - E0576, "An associated item wasn't found in the given type": <https://doc.rust-lang.org/error_codes/E0576.html>
+  - E0603, "A private item was used outside its scope": <https://doc.rust-lang.org/error_codes/E0603.html>
+- RFC 2145, "Type privacy": associated types in impls keep E0446 "using the old rules based on local `pub` annotations and not reachability". `private_bounds` is reported when a bound's visibility is below the item's *effective* visibility, and the lint is warn-by-default. The RFC names "emulation of sealed traits" as a legitimate use. <https://rust-lang.github.io/rfcs/2145-type-privacy.html>. The lint list: <https://doc.rust-lang.org/rustc/lints/listing/warn-by-default.html#private-bounds>
+- The Rust Reference, "Traits", "Supertraits": "anywhere a generic or trait object is bounded by a trait, it has access to the associated items of its supertraits". <https://doc.rust-lang.org/reference/items/traits.html>
+- Predrag Gruevski, "A definitive guide to sealed traits in Rust". With supertrait sealing, "downstream code can call its methods". A method is sealed by giving it a parameter of "a public struct in a private module" (the priv-token). <https://predr.ag/blog/definitive-guide-to-sealed-traits-in-rust/>
+- Bevy `ComponentHooks` (the `on_remove` hook "will be run when this component is removed from an entity. Despawning an entity counts as removing all of its components"; hooks receive a `DeferredWorld` whose `commands()` defer structural changes, including a despawn): <https://docs.rs/bevy/latest/bevy/ecs/lifecycle/struct.ComponentHooks.html>
+
+# Status after rev 4.1 (2026-09-23)
+
+- **Rev 4.1 = the rev 2 body + the rev-3, rev-4 and rev-4.1 patches.** Design only: no gate was run and no timing was taken.
+- **EP3 ran on 2026-09-23 and returned CHANGES_REQUESTED** (1 Critical, 4 Important, 5 Optional). Rev 4.1 resolves C1 and W1–W4 and adopts O1–O5. O1 and O3 land in physics Erratum E3. No remark needs an owner ruling.
+- **What waits on what.**
+  - By EP3's map, none of its remarks touches D-S3(iii)'s content.
+  - D-E2 (C1, W1, and W3's refusal), AS2 (W2), AS5 (W3) and HO2 (W4) build on rev 4.1's resolutions. A re-review scoped to the rev-4.1 delta can confirm them before those rungs cut; EP3 judged "a re-review scoped to the delta is enough". Whether EP3 now counts as closed for 02 §2's "must close before" is the orchestrator's call.
+  - D-E0, D-E18, D-E19 and D-E20–D-E23 are not engine-sourced and do not wait (P4.1-§12).
+- **Open items.** Q1–Q5 stay decided (rev 3). O-9 is closed (rev 4). O-11, O-12 and O-13 stay open.
+- **Evidence.**
+  - This file, the physics design and the plan, at `49f2fcfb` plus this branch's two commits.
+  - Code at [I] `c33d786d`, and at [J] `d552be05` where cited, read with read-only `git show` and `git grep`.
+  - External sources as listed.

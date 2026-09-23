@@ -2,9 +2,9 @@
 
 - **Date:** 2026-09-10
 - **Code tree:** `D:/wt/joltab` @ `ca582e72` (branch `merge/ke16-into-ecsnative`)
-- **Revision:** rev 2 after one critique pass
+- **Revision:** ~~rev 2 after one critique pass~~ (the rev-2 header, kept). **Current: rev 5, closed 2026-09-11, ~~plus Erratum E1 and Erratum E2 (2026-09-23; unified-system-plan step DOC-2, reviewed by EP3)~~ plus Errata E1, E2 and E3 (2026-09-23: E2 is unified-system-plan step DOC-2, reviewed by EP3; E3 adopts EP3's two remarks on this file).** See the ~~two~~ three status sections at the end of the file.
 - **Research (surveys and the owner's orders):** [PHYSICS-ECS-UNIFICATION-RESEARCH.md](PHYSICS-ECS-UNIFICATION-RESEARCH.md)
-- **Status:** design only. No gate was run and no timing was taken. The owner questions in section 14 (Q1-Q5) are open.
+- **Status:** ~~design only. No gate was run and no timing was taken. The owner questions in section 14 (Q1-Q5) are open.~~ (rev 2's status, kept). **Current: closed at rev 5; ~~Erratum E2 is pending engine critique pass 3 (EP3).~~ EP3 reviewed Erratum E2 on 2026-09-23 with no Critical or Important remark on this file; Erratum E3 adopts its two Optional ones. Design only: no gate was run and no timing was taken for any revision or erratum.**
 
 ## Provenance tags
 
@@ -3801,3 +3801,352 @@ The critic's NB1 fix is "one erratum line, appended with this log". This file is
   - NB4: state in §11 that `GangLane` is neither `Clone` nor `Copy` and is `!Sync`, and add a trybuild fixture for a gang op inside a body.
   - NB5: (a) test-only token access for `clear_resets_live_count` (entity_master.rs:979/988) and `clear_keeps_commit` (inland_store.rs:484); (b) the `ALL_STORAGE_KINDS` compile-error wording overstates what the check does; (c) the `storage_kind` doc's `# Panics` section (mod.rs:385-388) needs updating.
 - **The code changes that the rev-5 patch lists in P5-§16 are implementation work, not edits to this document.** That list covers `boyko_macros`, `component_registry/mod.rs`, `inland_store.rs`, `entity_master.rs`, `ecs_master.rs`, `boyko_threadpool` including the `worker.rs:402-404` doc, and the `boyko_physics` docs on `ContactPairs`, `Manifolds` and `Sensor`. None of it was applied in this round. The evidence for every pass comes from `D:/wt/joltab` (merge/ke16-into-ecsnative @ d11962a9). No cargo was run and nothing was timed.
+
+# Erratum E2 (2026-09-23): the unified system plan's rulings (step DOC-2)
+
+## How to read Erratum E2
+
+- **What it is.** The unified system plan (rev 6.2) owes this design one erratum, E2, as its step DOC-2 (`docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md` §5, the rows at `:155` and `:161`; `UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md` §2, "Document steps", `:97`). E2 applies the plan's rulings U-2, U-3, U-17, U-20 and U-28 (00 §3), the kernel contract's KC-10, KC-12, KC-13, KC-15 and KC-36 (01 §2), and hazards H-03 and H-16 (01 §2.1). It adds no mechanism of its own. Each item restates a ruling the plan has already made, at the place where this design states the text the ruling supersedes.
+- **Append-only, as before.** Nothing above is rewritten. The only lines edited in place are the two header lines at the top of the file (`:5`, `:7`); each keeps its old text, struck through, on the same line. So no line number cited anywhere in this file, or in the plan, moves. Where E2 supersedes a passage, the passage is named below by its line on this tree and left where it is.
+- **Reading order:** rev 2 → `P-§…` → `P4-§…` → `P5-§…` → Erratum E1 → **Erratum E2**. Where E2 and earlier text disagree, E2 rules.
+- **Review.** E2 is reviewed by engine critique pass 3 (EP3), together with the engine design's rev-3 patch and rev 4 (02 §2). EP3 must close before D-S3(iii), AS2 and every engine-sourced D-E rung.
+- **Trees.** Line numbers of this file are on `u/doc-1-2` @ `49f2fcfb` (the same commit as `feat/multi-paradigm-render` @ `49f2fcfb`). E2 is appended after `:3803`, so no earlier number moves. Code is cited on two trees, and each citation names its tree:
+  - **[J]** = `D:/wt/joltab` @ `d552be05`, the plan's tree;
+  - **[I]** = `integ/unified` @ `c33d786d`, the trunk line on 2026-09-23.
+
+  Plan documents are cited at `49f2fcfb`. Every citation below was re-located by content on the tree it names, with read-only `git show` / `git grep`; none is copied from the plan without that check. Neither this file nor the engine design changed between the plan's `b716a5dc` and `49f2fcfb` (`git log b716a5dc..49f2fcfb` on both paths is empty), so the plan's citations into them hold here.
+- Nothing was built, run or timed for this erratum.
+
+## E2-1. `Release` is an associated type with markers `Immediate`, `Chained` and `Stamped` (U-3; 01 KC-12, KC-13)
+
+**Supersedes (left in place):**
+- rev 2 §9 (`:519-520`): `pub enum GroupRelease { Immediate, Deferred }` and `const RELEASE: GroupRelease` in `DenseGroup`, as carried by P4-§9 (`:2751`) and P5-§9 (`:3417-3421`);
+- rev 2 §8 K3 (`:478`) "`RELEASE = Immediate | Deferred` (D14);", the invariant note (`:489`) "for deferred groups only. Immediate groups keep that invariant.", D14's opening (`:238`) "A group may declare `RELEASE = Deferred`." and the §5 comment (`:335`) `// PhysicsBody: RELEASE = Deferred; anchored on Collider (D13).`;
+- the §8 K6 row as rev 4 restated it (`:2708`), as the only release policy. It stays, as the `Chained` policy.
+
+**Replacement (§9, K3):**
+```rust
+pub enum Release { Immediate, Chained, Stamped }        // erased form: 1 B in DenseGroupStore
+pub trait ReleasePolicy: 'static { const KIND: Release; }
+pub struct Immediate; impl ReleasePolicy for Immediate { const KIND: Release = Release::Immediate; }
+pub struct Chained;   impl ReleasePolicy for Chained   { const KIND: Release = Release::Chained; }
+pub struct Stamped;   impl ReleasePolicy for Stamped   { const KIND: Release = Release::Stamped; }
+pub trait DenseGroup: 'static {
+    const WIDTH: usize;
+    type Release: ReleasePolicy;      // replaces `const RELEASE: GroupRelease`
+    type Anchor: Component;
+    type ChainKey: 'static;
+}
+// PhysicsBody: `type Release = Chained;` (rev-5 D14, unchanged)
+impl<G: DenseGroup> GroupHead<'_, G> {
+    pub fn release_dying_before(&mut self, key: &G::ChainKey, horizon: Tick,
+                                visit: impl FnMut(u32)) -> u32
+    where G: DenseGroup<Release = Stamped>;                                    // KC-13 (a)
+}
+impl EcsMaster {
+    pub fn release_dense_group_at_teardown<G: DenseGroup<Release = Stamped>>(
+        &mut self, key: &G::ChainKey, token: &TeardownToken, visit: impl FnMut(u32)) -> u32; // KC-13 (b)
+}
+```
+
+**The three policies** (01 KC-12):
+- **`Immediate`.** A removal releases at once: DEAD fill, then push to `free`. `clear()` DEAD-fills every slot.
+- **`Chained`.** Rev 5's D14, exactly (`:2449-2463` with `:3330-3343`). A removal defers iff `chain_open`, and otherwise releases at once. The first out-of-chain op flushes `dying`. `open_chain(&key)` flushes `dying` at S1. `clear()` keeps rev 4's rule (`:2458-2462`). **`PhysicsBody` is `Chained`.**
+- **`Stamped`.** A removal always defers: the slot enters `dying` with its bytes, and its `died` entry is stamped with `current_tick()` (`this_run + 1` in an apply window, `this_run` in a state transition). A `Stamped` slot is never released at removal and never by the out-of-chain flush. `clear()` moves every live slot to `dying` with a stamp and keeps `len`. The slot is released only by KC-13's two forms:
+  - **(a) the horizon form**, from any system that holds `GroupHead<G>` and the chain key. It releases exactly {dying : `died` strictly older than `horizon`}, and debug-asserts that `horizon` is not newer than the caller's `this_run` (wrap-aware). Per slot it runs `visit(slot)`, then the kernel's span free (E2-4), then the DEAD fill. Released slots are appended to `free` in dying order, retained entries are compacted in order, and it returns `len()`.
+  - **(b) the teardown form.** It releases every dying entry in the same per-slot order. It needs a `TeardownToken`, which only the kernel's teardown driver mints (KC-27), when no schedule runs.
+
+**Erased paths.** `anchor_transition` and the first-op flush cannot see `G`: they iterate `DenseRegistry::groups` (`:2363-2366`, `:2393`). So `DenseGroupStore` carries `release: Release` (1 B). It is written once, at `ensure_group`, with `<G::Release as ReleasePolicy>::KIND` from the group registration's erased descriptor, and read by those two paths. `died: VmColumn<Tick>` exists for `Stamped` groups only.
+
+**Misuse is a type error.** A `Stamped`-only API names `G: DenseGroup<Release = Stamped>`. Calling it on a `Chained` or `Immediate` group fails before monomorphisation with E0271, "A type mismatched an associated type of a trait" (Rust error index, below). The horizon form carries its bound as a method-level `where` clause, not as the bound of a separate `impl` block. A method hidden by an unsatisfied `impl` bound is reported as E0599 instead, and the plan's UG-17 fixtures expect E0271 (02 §2, D-S3(iii) and D-E9). *This follows from rustc's rules and was not compiled here (a documents-only step); D-S3(iii)'s fixture is the check.* Because it is a type error, no fixture depends on whether trybuild checks or builds.
+
+**Who and when.**
+- *Who* may release is decided by the chain key, as in rev 5: `<G>ChainKey` has a `pub(crate)` constructor, so only the declaring crate can name it.
+- *When* is a separate question, and only `Stamped` groups ask it. The horizon's provenance is the caller's obligation: for the engine's asset groups it is render's `completed_gather`, gated by AS2's FIF-slot-reuse proptest. The kernel checks only that a horizon is not in the future (01 §4 R-C).
+
+**Why (01 §4 R-C).**
+- The engine design's rev 3 filed its deferred asset release (K6′) on `DenseGroupMut::release_dying_before` and on the `chain_head_registered` refusal (`ENGINE-RUNTIME-ECS-DESIGN.md:2080-2092`).
+- Rev 4 of this design deleted both (`:2463`). Rev 5 keeps the rule that a group with no chain releases at removal (`:2496`, "A world with no chain never opens one, so every removal releases at once").
+- So under rev 5 alone, an asset group, which runs no chain, would free a slot at removal while a submitted GPU frame still names it.
+- A per-group policy type keeps rev 5's rule for `PhysicsBody` byte for byte, and gives assets a stamped horizon.
+
+**Cost.**
+- 0 bytes for `PhysicsBody`.
+- One compare of the `release` byte, only inside the `#[cold]` `anchor_transition` (`:1377`) and the first-op flush. That is 0 on every op whose anchor mask is unchanged; the per-op cost stays two byte loads and one compare (`:1413`).
+- +4 B per dying entry, for `Stamped` groups only.
+- `GroupHead` methods are monomorphised on `G::Release`.
+
+**Invariants added to §8 K3** (01 §7):
+- the store's `release` byte equals `<G::Release as ReleasePolicy>::KIND` at every typed entry;
+- a `Stamped` dying slot is never released before its horizon, and never by removal, the first-op flush or `clear()`;
+- `horizon` is not newer than `this_run` (wrap-aware).
+
+**Not built:** `release_dying_with`. Its only purpose was the span leak, which the kernel now closes (E2-4; 01 KC-13, §5).
+
+**Mapping and rungs.**
+- K6 (rev 5 chain) → KC-12 (`Chained`); D14 → KC-12, plus KC-13 for `Stamped` (01 §3).
+- The group store with its `release` byte lands in plan rung D-S3(ii). The `Stamped` policy, `died`, `release_dying_before` and the `clear()` stamping rule land in D-S3(iii). The teardown form lands in D-E9, with KC-27 (02 §2).
+- §12 U2's content cell (`:2981`, read with Erratum E1) is split along the same line.
+
+## E2-2. U1 deletes the scratch band (U-2; 01 KC-10)
+
+**Supersedes (left in place):**
+- §8 K1 (`:466`): "Replaces `scratch_ids.rs`";
+- the K1 API in §9 (`:512-513`);
+- the U1 row (`:790`): "K1 cohorts; migrate `scratch_ids.rs` and render lanes";
+- §16 (`:901`): "`scratch_ids.rs` deleted after U1";
+- D9's evidence (`:201`), the band constant `const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;` ([J] `crates/boyko_physics/src/scratch_ids.rs:685`; [I] `:857`).
+
+**Replacement.** Scratch cohorts are **registry-free**. A scratch pool takes no `ComponentId`, and the physics scratch band is deleted, not migrated.
+- **API** (01 KC-10, authoritative over §9's names):
+  - `ScratchColumn::<T>::for_type(rows)`;
+  - `Default` is an unreserved column: its stagger is taken at construction, and its reservation is made at its first push;
+  - `ScratchCohort::reserve(width)` plus `ScratchColumn::in_cohort(&c, k, rows)`. §9's `new_in` reads as `in_cohort`;
+  - `pub(crate) ComponentPool::new_untracked_raw(layout, type_id, drop_fn, stagger, rows, reserve)`.
+- **Identity without an id.** The pool's `component_id: usize` becomes `component_id: u32` plus `stagger: u32`. That is the same 8 B, so the 128 / 144 B `size_of` pins hold. A registry-free pool stores `NO_COMPONENT_ID = u32::MAX`, and takes its stagger from one process-global `NEXT_STAGGER`.
+- **Deleted with the band:** every id it reserves. The plan counts about 90 physics scratch ids ([J] `scratch_ids.rs:681`, "Finishing Stage 4 needs roughly 90 scratch ids"). They include the interim row-identity cohort's three ids, which A1b re-registered as `RowKey` / `(RowKey, u32)` under the same numbers (`8af0e3b9`, E2-6). Physics builds regain 128 ids of the 512-id space.
+- **Not affected: group column ids.** `#[dense_group]` registration still mints `StorageKind::Group` ids contiguously (K1's second clause; D13). Those are registered component ids, not scratch.
+- This supersedes allocator P43's "one registered id per element type" for scratch pools.
+
+**Rung.** Plan rung D-S2 is physics U1 (02 §2); the `WorldScratch` half lands in D-R2a. D-S2's gates include:
+- staggers pairwise distinct mod 64 within a cohort, and consecutive for same-type singles;
+- `NEXT_ID` unchanged across 1000 cohort and 1000 `for_type` constructions;
+- `size_of::<ComponentPool>()` still 128 / 144.
+
+**Overturn** (00 §3 U-2): D-S2 finds an untracked-pool path that needs a registered id. P43's rule then applies.
+
+## E2-3. NB2 is closed as ruling U-17
+
+**Supersedes (left in place):** pass 5's NB2 direction (`:3760`) and the open NB2 item of the status section (`:3799`). Both become a ruling.
+
+**Ruling.** S1 (`physics_prepare`) and S6 (`physics_writeback`) are `pub(crate)`, and they are registered only through `PhysicsPlugin`, whose uniqueness the kernel already enforces (`boyko-B1801`, [J] `crates/boyko_ecs/src/ecs/core/app/app.rs:547`). Every non-panicking S6 exit reaches `close_chain`.
+- **Today** the physics systems are exported: [J] `crates/boyko_physics/src/lib.rs:86` `pub mod systems;` and the re-export at `:115`; [I] `:99` and `:134`.
+- **Cost:** 0 runtime instructions. It is a visibility change.
+- **Gates:**
+  - a UG-17 fixture that registers S1 from outside `boyko_physics` fails with E0603, "A private item was used outside its scope" (Rust error index, below);
+  - a U4 test asserts that `chain_open` is clear after every S6 exit path.
+
+  The rev-5 census (`:3643`: one call site each for `open_chain(` and `close_chain(`) stays. It pins call sites; this ruling pins exits.
+- **Rejected:** a runtime "chain systems registered together" check. It costs one build-time scan per schedule, and it still cannot see a user system that calls neither.
+- **Overturn** (00 §3 U-17): an owner scope ruling that games may assemble the physics pipeline from individual systems. S1 and S6 then become `pub`, behind a typed builder that registers both or neither.
+
+## E2-4. N5: the kernel frees spans inside every release point (U-3; 01 KC-13, KC-15)
+
+"N5" here is the **engine** design's pass-2 finding N5 (`ENGINE-RUNTIME-ECS-DESIGN.md:1640-1648`). It is not this file's pass-2 N5 (`:1195`, the U5a/U5b addressing finding).
+
+**The defect.** A `SpanRef` header held in a group column (a soft body's particle span, an animation bone array) is overwritten by the DEAD fill without being freed, so each release leaks its span. The engine's rev 3 answered with a visitor, `release_dying_with(visit)` (`ENGINE-RUNTIME-ECS-DESIGN.md:2042`, `:2089`). It was filed on rev 3's `release_dying` (`:1453-1457`), which rev 4 of this design deleted (`:2463`).
+
+**Replacement.** Spans need no user visitor. A span-typed group column owns its `SegmentedColumn` inside the group store, one column per group column. The **kernel** frees each released slot's spans before the DEAD fill, at every release point:
+- **the five that D-S5 gates** (02 §2):
+  - a removal that releases at once (`Immediate`, or `Chained` outside the chain);
+  - `open_chain`'s flush of `dying`;
+  - the first out-of-chain op's flush;
+  - `clear()` where it releases (`Immediate`, and `Chained` with `!chain_open`);
+  - `release_dying_before` (KC-13 (a): `visit(slot)`, then the span free, then DEAD);
+- **the teardown form** (KC-13 (b)), which lands later, in D-E9, and uses the same per-slot order.
+
+`SpanRef::DEAD = { ptr: dangling, len: 0, class: u8::MAX }`, and `free(DEAD)` is a no-op. The user visitor of KC-13 exists only for per-slot resources the kernel does not own (the engine's device lanes). `release_dying_with` is **not built** (01 KC-13, §5).
+
+**Physics cost:** 0. `PhysicsBody` has no span-typed column. The physics consumer is SoftBody (Q2 (a), K7), in rung S0.
+
+**Rung.** D-S5 (KC-15 plus span-typed group columns). Its gates: a proptest against a `Vec` model with the frontier bounded by live spans; copies ≤ 2n; Miri on a `SpanRef` read across a sibling relocation; spans freed before DEAD at all five release points.
+
+## E2-5. X-14 corrected (U-20; 01 KC-36)
+
+**Supersedes (left in place):** the consequence cell of the X-14 row (`:1267`): "Entity ids and dense slots handed out in one window already depend on thread timing when two systems of one round both issue structural commands. This is true for every storage and predates this design. Rev 3 adds no physics command to any window."
+
+**Corrected consequence cell** (the plan's wording, 00 §5 `:155`):
+> Command order, hook order and dense slots handed out in one window depend on completion-pop order (fixed by KC-36). Entity ids do not depend on the window: `Commands::spawn` claims them on the worker during the phase (`commands.rs:169-173`), so they depend on claim interleaving whatever the apply order (U-20).
+
+The last sentence of the old cell still holds: from rev 3 on, physics adds no command to any window (D14).
+
+**Citations, re-located by content.**
+- `commands.rs:169-173` (`crates/boyko_ecs/src/ecs/core/system/params/commands.rs`) is `pub fn spawn` through its closing brace, with `let entity = self.entity_counter.reserve_entity();` at `:170`, on both [J] and [I]. On the main checkout @ `49f2fcfb` the same body is `:164-168`.
+- The completion-pop drain, which this row cites as `schedule.rs:781` / `:810` (at `ca582e72`), is [J] `schedule/schedule.rs:783-860` (pop `:799`, apply `:828`).
+- On [I] the drain is still pop-ordered, through A2's `ApplyDrainGuard` (`apply_window_drain` `:881`, apply `:912`, pop `:987`). **KC-36 has not landed there.**
+
+**What KC-36 is.** P-§14's scheduler item (`:2021`) is now kernel feature KC-36, plan rung D-E0.
+- `apply_window_drain` first drains the completion queue into a preallocated window bitset in `executor_scratch`, then applies in ascending system index by word scan.
+- Cost: O(k + ⌈n/64⌉) per window with no sort, at most 16 extra word loads for n ≤ 1024 systems. This supersedes P-§14's "O(k log k)".
+- It fixes, within one window and for every storage: apply order, command order, the order of hooks across systems, table-row order, and dense and group slot assignment. The order of hooks **within one structural op** is KC-37 (c), rung D-E21.
+- The P-§2 determinism note (`:1279`) and D14's "in-window order among gameplay commands" (`:1472`) read with this: after D-E0, that order is ascending system index.
+
+**Why ids stay outside.**
+- Ids are claimed on the worker before any window: [J] `commands.rs:169-173` → `entity_counter.rs:200-219` → `entity_reservoir.rs:160-190`.
+- The owner's Q-9 answer requires replays to name entities by stable keys, not ids (00 §7). U-20 prices the two rejected forms: placeholder ids resolved at apply, and per-system id leases.
+- No physics mechanism keys on an id value. Body identity is the group slot (D1), and the interim row-identity map compares full entities for equality only (E2-6).
+
+## E2-6. The row-identity map matches the full `Entity` (A1b, H-03): landed
+
+This design does not name the interim row-identity map, `crates/boyko_physics/src/row_identity.rs`. It is defect A's interim carry, written after rev 5. It carries warm-start entries, the sleep latch and the box-axis hint across gathers by row, until U5/U7 delete it (02 §2, row A1b).
+
+**The item.** The map matches the full `Entity`: id **and** generation.
+- Before A1b it matched generation-less `EntityId`s ([J] `row_identity.rs:18-26`; matching at `:519` and `:580`).
+- So in the one gather where `is_added` is false (a deferred spawn applied inside the physics schedule run, before the gather), a body spawned on a recycled id inherited the dead body's sleep latch, warm entries and axis hint for one step (H-03).
+
+**Landed** as `8af0e3b9` (2026-09-21), "fix(physics): the row identity key is the full Entity - slot AND generation". It is an ancestor of `integ/unified` (`git merge-base --is-ancestor 8af0e3b9 integ/unified` succeeds).
+- `RowKey(u64) = (slot << 32) | generation`: `#[repr(transparent)]`, 8 B, align 8, built by `RowKey::of(Entity)` ([I] `row_identity.rs:130`, `:135-141`). `ids_equal` became `keys_equal` over `u64` (`:572`).
+- `physics_gather` takes `Entities` and pushes `RowKey::of(entities.get(entity).expect(..))` ([I] `systems.rs:217`, `:271-274`). `Query::iter_entities` yields only the slot; the generation lives in the entity fast store.
+- Cost per gathered row: one 16 B entity fast-store load. The key stays 8 B, so the `cur` / `prev` columns and the sort pool keep their bytes.
+- Red-first pair: `tests/row_identity_remap.rs`. In variant A, Y takes X's recycled id at generation + 1; in variant B, Y gets a fresh id. Y's post-step velocity bits must be equal across A and B.
+
+**After U5/U7** a body's identity is its group slot (D1) plus D15's `fresh_step` rule, and the map, `RowKey` and its scratch cohort are deleted. The plan's gate for H-03 is UG-22's id-perturbation arm (S-R1; 01 §2.1).
+
+## E2-7. Until U7, physics order follows archetype-row order (H-16), and replays do not wait for U7 (U-28)
+
+**The fact.** Until U7, the solve order follows archetype-row order. [J] `crates/boyko_physics/src/systems.rs:28-35` ([I] `:34-41`) is the IM-2 doc: "Pair/solve order keys on the dense [`BodyIndex`] = archetype row order".
+- Through U4, the gather's row order drives S2–S6 (the rev-3 U4 row, `:1981`: "the gather still drives the solve").
+- U5 switches S2–S6 to slots (`:1998`). Until U7, the interim row-identity map (E2-6) still carries per-body state across gathers by row.
+- So U7 is the rung after which no physics order or state is keyed on archetype rows. That is H-16's register row (01 §2.1). This design's §15 (`:868`) already records that colouring values may change where slot order ≠ row order.
+
+**Replays do not depend on U7 for this.**
+- A Main-side move of a keyed entity, such as a Main system inserting a marker onto a body, would reorder the rows that every Fixed query iterates, physics included.
+- Rule B's move clause (U-28; 01 §2.1) forbids it. Nothing outside Fixed may spawn or despawn a keyed entity, or insert or remove a table (signature) component on one. Non-fragmenting components (dense, bitset) that no Fixed system reads are exempt.
+- Every keyed entity carries `ReplayKey`, so a keyed entity's table holds only keyed entities. A move made inside Fixed is simulation: it follows from the recorded inputs, under KC-36 and D-E21.
+- A breach is detected, not refused. A verify session takes a move digest `Σ mix(key, archetype id, row)` at Fixed index 0 before each tick and at Main index 0 after the frame's last tick. A difference is red and names the frame (RP-2).
+
+**Consequence.** UG-22 has no arm deferred to U7 (02 §1 rule 10; 02 §2, Phase E). U4–U7 still move physics to group-slot order (KC-12), for this design's own reasons (D1: F-3 and the row-shift warm-start misses).
+
+## Changelog: Erratum E2
+
+| Item | Ruling applied | Supersedes in this file (left in place) | Plan rung |
+|---|---|---|---|
+| E2-1 `Release` associated type | U-3; 01 KC-12, KC-13 | `:238`, `:335`, `:478`, `:489`, `:519-520`, `:2751`, `:3417-3421`; the K6 row `:2708` as the only policy | D-S3(ii) (store byte); D-S3(iii) (`Stamped`, horizon form); D-E9 (teardown form) |
+| E2-2 U1 deletes the band | U-2; 01 KC-10 | `:201`, `:466`, `:512-513`, `:790`, `:901` | D-S2 (= U1) |
+| E2-3 NB2 | U-17 | `:3760`; `:3799` (open item) | U4 (exit test); UG-17 fixture |
+| E2-4 N5, span freeing | U-3; 01 KC-13, KC-15 | the engine's `release_dying_with` (filed on `:1453-1457`, deleted by `:2463`) | D-S5; D-E9 |
+| E2-5 X-14 | U-20; 01 KC-36 | `:1267` (consequence cell); `:2021` ("O(k log k)"); the reading of `:1279`, `:1472` | D-E0 |
+| E2-6 row identity | A1b; H-03 | none (the map postdates rev 5) | A1b (landed, `8af0e3b9`) |
+| E2-7 row order until U7 | H-16; U-28 | none; qualifies `:868`, `:1981`, `:1998` | RP-2 (move digest); U7 |
+
+## External sources (read 2026-09-23)
+
+- Rust error index, E0271, "A type mismatched an associated type of a trait": <https://doc.rust-lang.org/error_codes/E0271.html>
+- Rust error index, E0603, "A private item was used outside its scope": <https://doc.rust-lang.org/error_codes/E0603.html>
+
+# Status after Erratum E2 (2026-09-23)
+
+- The design stays **closed at rev 5**. Errata E1 (2026-09-11) and E2 (2026-09-23) apply on top of it, in that order. E2 adds no mechanism: each item restates a ruling of the unified system plan, rev 6.2.
+- **E2 is pending review by engine critique pass 3 (EP3)**, which also reviews the engine design's rev-3 patch and rev 4 (02 §2). D-S3(iii), AS2 and every engine-sourced D-E rung wait for EP3. D-E0, D-E18 and D-E19 do not (02 §2).
+- **Pass-5 non-blocking items after E2:**
+  - NB1: closed textually by E1;
+  - NB2: closed as ruling U-17 (E2-3), implemented in U4;
+  - NB3, NB4, NB5: unchanged, to be handled during implementation.
+- Evidence for E2: this file and the plan at `49f2fcfb`; code at `d552be05` and `c33d786d`, read with read-only git. No cargo was run and nothing was timed.
+
+# Critique log - EP3 (2026-09-23): the parts that concern this file
+
+EP3 is the unified plan's engine critique pass 3. It reviewed Erratum E2 together with the engine design's rev-3 patch and rev 4 (02 §2).
+- **Where the full review is.** Its full output is logged verbatim in the engine design (`docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md`, "Critique log - pass 3 (EP3, 2026-09-23)"), with the architect's action for every remark.
+- **What is quoted here.** Every passage of the review that concerns this file, verbatim, in the review's order.
+- **The verdict here.** The verdict is the pass's. None of its Critical or Important remarks falls on this file; two Optional remarks do (O1, O3), and Erratum E3 below adopts both.
+
+## Verdict (the pass's)
+
+> VERDICT: CHANGES_REQUESTED; CRITICAL=1; IMPORTANT=4
+
+## The checks that concern this file (verbatim)
+
+> - **K6′ against physics rev 5 and E2's markers:** consistent. `PhysicsBody` is `Chained` and unchanged. `GroupHead` has no claim in rev 5 (`PHYSICS…:3336-3343`, `:3402-3404`), so several asset writers may hold it.
+> - **X-14 wording:** matches the code. `spawn` and `reserve_entity` are at joltab `commands.rs:169-170` and main checkout `:164-165`.
+> - **A1b row identity:** matches what landed. `RowKey(u64) = (slot << 32) | generation` is at `row_identity.rs:130-141`, `keys_equal` at `:572`, and `ids.push(RowKey::of(live))` at `systems.rs:274`. The three ids re-registered with RowKey types are at `scratch_ids.rs:719-723`.
+> - **Where the remarks fall:** none of them touches D-S3(iii)'s own content. C1 and W1 block D-E2. W2 blocks AS2. W3 blocks AS5. W4 blocks HO2 and the other HO/UI gate lists. A re-review scoped to the delta is enough.
+
+## Non-blocking findings on this file (verbatim)
+
+> - **O1. The chain methods are not bounded by policy.** `open_chain` and `close_chain` are not bounded to `Release = Chained` (physics `:3402`; E2-1 `:3841-3845`). E2-1's `Stamped` invariant (`:3881`) omits `open_chain`, and an `open_chain` on an asset group releases every stamped slot at once. Either bound the methods (E0271, same fixture family) or add a census of zero call sites in `boyko_render`.
+
+**Architect's action:** ADOPTED, by bounding the methods (E3-1).
+
+> - **O3. E2-7 contradicts itself.** Its heading and "The fact" line (physics `:3995-3997`) keep "the solve order follows archetype-row order until U7", but its own next bullet (U5 switches S2–S6 to slots, `:1998`) says otherwise. The report's reading is correct: rows drive S2–S6 through U4, and row-keyed state lasts until U7. The headline should be reworded to match.
+
+**Architect's action:** ADOPTED (E3-2).
+
+## Flags DOC-2 raised that concern this file (verbatim)
+
+> - **(c) E0271 rather than E0599:** accepted. A method-level `where` gives E0271, and an `impl`-level bound would give E0599. D-S3(iii)'s fixture is the check.
+
+## Positive (verbatim, the items on this file)
+
+> - Separating the engine's N5 from physics's N5 is right.
+> - E2-7 correctly re-cites U5's switch to slots.
+
+# Erratum E3 (2026-09-23): EP3's two remarks on Erratum E2
+
+## How to read Erratum E3
+
+- **What it is.** E3 adopts the two Optional remarks EP3 made on this file (the log above). It adds one type bound (E3-1) and rewords one heading (E3-2).
+- **Append-only, as before.** Only the header lines `:5` and `:7` are edited in place, each keeping its old text struck through. Every superseded passage is named below by its line on this tree and left where it is.
+- **Reading order:** rev 2 → `P-§…` → `P4-§…` → `P5-§…` → Erratum E1 → Erratum E2 → **Erratum E3**. Where E3 and earlier text disagree, E3 rules.
+- **Trees.** Line numbers are on `u/doc-1-2` (base `49f2fcfb`); E2 and E3 are appended after `:3803`, so no earlier line number moves.
+- Nothing was built, run or timed.
+
+## E3-1. `open_chain` and `close_chain` are bounded to `Release = Chained` (EP3 O1; U-3; 01 KC-12)
+
+**Supersedes (left in place):** the two chain signatures of P5-§9 (`:3435`, `:3439`):
+```
+    pub fn open_chain(&mut self, key: &G::ChainKey) -> u32; // K6: flush dying, chain_open = true; returns slot_bound
+impl<G: DenseGroup> GroupTail<'_, G> { pub fn close_chain(&mut self, key: &G::ChainKey); }
+```
+It also supersedes E2-1's second invariant (`:3881`), in the form below.
+
+**Replacement (§9, K3):**
+```rust
+impl<G: DenseGroup> GroupHead<'_, G> {
+    pub fn open_chain(&mut self, key: &G::ChainKey) -> u32
+    where G: DenseGroup<Release = Chained>;              // KC-12's chain; flush dying, chain_open = true; returns slot_bound
+}
+impl<G: DenseGroup> GroupTail<'_, G> {
+    pub fn close_chain(&mut self, key: &G::ChainKey)
+    where G: DenseGroup<Release = Chained>;
+}
+```
+
+**Why.**
+- `open_chain` flushes `dying`: it DEAD-fills and frees every dying slot (rev 5 D14, `:2449-2463`). On a `Stamped` group, which the engine's asset groups are, one call would release every stamped slot at once, ignoring the horizon that a submitted frame depends on (01 §4 R-C).
+- The chain key does not stop it: the engine's render crate holds its groups' keys, because it needs them for `release_dying_before` (engine P4.1-ED16).
+- An `Immediate` group has no chain, so the call has no meaning there either.
+- The bound makes the misuse a type error, E0271, before monomorphisation. It is the same form and the same fixture family as KC-13's `Release = Stamped` bound (E2-1): a method-level `where`, not an `impl`-level bound, so the error is E0271 rather than E0599.
+
+**The invariant, restated** (E2-1's second bullet, `:3881`): a `Stamped` dying slot is never released before its horizon, and never by removal, the first-op flush, `open_chain` or `clear()`. `open_chain` cannot be named on a `Stamped` group, so for it the invariant holds by type.
+
+**Cost.** 0. `PhysicsBody` is `Chained`, so S1's and S6's calls (`:3616`) compile unchanged, and the bound is checked before monomorphisation.
+
+**Gate.** Two UG-17 fixtures in D-S3(iii)'s E0271 family: `open_chain` on a `Stamped` group → E0271, and `close_chain` on a `Stamped` group → E0271. The plan's D-S3(iii) row (`02:143`) is patched on the same line (2026-09-23).
+
+**Rejected:** EP3's alternative, a census of zero `open_chain` call sites in `boyko_render`. It pins call sites in one crate, and it cannot see a generic caller instantiated elsewhere; the bound covers every caller at no cost.
+
+## E3-2. E2-7's heading and fact line, reworded (EP3 O3)
+
+**Supersedes (left in place):**
+- E2-7's heading (`:3995`): "Until U7, physics order follows archetype-row order (H-16), and replays do not wait for U7 (U-28)";
+- the first sentence of E2-7's "The fact" (`:3997`): "Until U7, the solve order follows archetype-row order."
+
+**Replacement:**
+
+> **E2-7. Physics state is row-keyed until U7 (H-16): rows drive the solve through U4, U5 moves S2–S6 to slots, and replays do not wait for U7 (U-28).**
+>
+> **The fact.** Through U4, the gather's row order drives S2–S6 (`:1981`). From U5, S2–S6 address bodies by slot (`:1998`), but until U7 the interim row-identity map (E2-6) still carries per-body state across gathers by row. So U7 is the rung after which no physics order or state is keyed on archetype rows.
+
+E2-7's bullets (`:3998-4000`) and its replay paragraphs (`:4002-4008`) stand; they already say this. The plan's row that E2-7 applies (00 §5, `00:161`, "Until U7, the solve order follows archetype-row order") is marked on the same line with this reading (2026-09-23).
+
+**Cost.** None; a text fix.
+
+## Changelog: Erratum E3
+
+| Item | EP3 | Supersedes in this file (left in place) | Plan (same-line, 2026-09-23) | Plan rung |
+|---|---|---|---|---|
+| E3-1 chain methods bounded to `Chained` | O1 | `:3435`, `:3439`; the invariant at `:3881` | `02:143` | D-S3(iii) |
+| E3-2 E2-7 reworded | O3 | `:3995`; `:3997` (first sentence) | `00:161` | — |
+
+## External sources (read 2026-09-23)
+
+- Rust error index, E0271 (as in E2): <https://doc.rust-lang.org/error_codes/E0271.html>
+
+# Status after Erratum E3 (2026-09-23)
+
+- The design stays **closed at rev 5**. Errata E1 (2026-09-11), E2 and E3 (2026-09-23) apply on top of it, in that order.
+- **EP3 reviewed Erratum E2 on 2026-09-23.** It raised no Critical or Important remark against this file. Its two Optional remarks on this file are adopted by E3. Its verdict for the pass as a whole, CHANGES_REQUESTED, rests on engine-design remarks, which the engine's rev 4.1 resolves.
+- **What waits.** D-S3(iii)'s own content is untouched by EP3's remarks (EP3's map). It gains E3-1's two fixtures. Whether EP3 now counts as closed for D-S3(iii)'s prerequisite ("EP3 closed", `02:143`) is the orchestrator's call.
+- **Pass-5 non-blocking items:** unchanged since E2. NB1 is closed by E1, NB2 is closed as U-17 (E2-3), and NB3–NB5 are to be handled during implementation.
+- **Evidence.** This file and the plan at `49f2fcfb` plus this branch's commits. EP3's review is logged in the engine design. No cargo was run and nothing was timed.

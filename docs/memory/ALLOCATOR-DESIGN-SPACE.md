@@ -1,13 +1,13 @@
-# Allocator design space - rev 1, its first critique, and rev 2
+# Allocator design space - rev 1, its first critique, and rev 2 — current: ~~rev 2.5~~ rev 2.6 (2026-09-23)
 
 Date: 2026-09-10 (Parts I-II), 2026-09-16 (Part III). Trees: **ecsnative** = `D:/wt/ecsnative` (`feat/ecs-native-storage` @ `ad0ebea4`), **merge** = `D:/wt/merge` (`merge/ke16-into-render` @ `d2c8c646`), **joltab** = `D:/wt/joltab` (`merge/ke16-into-ecsnative` @ `d552be05`, the tree Part III reads), **main** = `D:/claude/BoykoEngine` (read-only). Companion: [ALLOCATOR-RESEARCH.md](ALLOCATOR-RESEARCH.md) (the four lens reports this design is built on).
 
-> ⚠ **STATUS (2026-09-17): closed at rev 2.4 by orchestrator ruling.** Critique pass 6 found no
-> Critical remark; its five Important remarks (W1-W5) are recorded as OPEN at the end of this file and
-> are resolved in the rungs that implement the affected items. The unified system plan
+> ⚠ **STATUS (2026-09-23, rev 2.6): critique pass 7 (AP7) reviewed rev 2.5 and returned CHANGES_REQUESTED with 0 Critical, 2 Important and 5 Optional remarks. [Rev 2.6](#rev-26-2026-09-23), now the last Part, resolves both Important remarks and adopts all five Optional ones (P52–P55); the pass-7 log precedes it. No owner ruling is needed. One item stays open for the plan, not for this file: a mechanism for the modding-crate `#[used]`/ctor ban (P53.3). C1's prerequisite, "AP7 has closed rev 2.5" (plan 02 §2), is the orchestrator's to declare.** *Rev 2.5's status, superseded:* ~~**STATUS (2026-09-23): rev 2.5 is written — step DOC-1 of the unified system plan — and awaits critique pass 7 (AP7), whose scope is the rev-2.5 delta and the pass-6 dispositions only; C1 waits for AP7.**~~ [Rev 2.5](#rev-25-2026-09-23) is ~~the last Part of this file~~ the Part before the pass-7 log. It moves the Heap class (with `HeapDyn`), `TableSet` and `DropColumn` to revival forms (P46), re-points §7 to the plan's file 05 (P47), keeps the thread context out of `boyko_memory` (P48), strikes `HeapRef::alloc_cold` from P29 (P49), gives every pass-6 remark a disposition (P50) and fixes pass 6's stale passages in place (P51). Its in-place markers begin `⚠ Rev 2.5`, and no line above it moved. *Superseded status:* ~~**STATUS (2026-09-17): closed at rev 2.4 by orchestrator ruling.** Critique pass 6 found no~~
+> ~~Critical remark; its five Important remarks (W1-W5) are recorded as OPEN at the end of this file and~~
+> ~~are resolved in the rungs that implement the affected items.~~ The unified system plan
 > (`docs/unification/UNIFIED-SYSTEM-PLAN-*.md`) is the binding reading of this design: its rulings
 > U-1 (the Heap class is deferred, not built), U-4, U-6, U-7 and U-8 supersede the corresponding
-> parts here.
+> parts here. *(Rev 2.5: so do U-2, U-9, U-10, U-11 and U-19 where they touch this file; P46–P51 write them in.)*
 
 > ⚠ **REV 2 EXISTS, and it is Part III at the end of this file ([Rev 2 (2026-09-16)](#rev-2-2026-09-16)).**
 > It is a PATCH against rev 1, not a replacement: Part I stays verbatim, and every change in Part III
@@ -49,7 +49,7 @@ Date: 2026-09-10 (Parts I-II), 2026-09-16 (Part III). Trees: **ecsnative** = `D:
 > the scope frame and the chunk, both freed at the join and allocated again by the next scope.
 > Rev 2 starts from these facts. The design and the critique below are unchanged.
 
-Structure of this file: Part I is the architect's rev-1 design reproduced VERBATIM (including its opening orientation note); it has NOT been edited to answer the critique. Part II is the critique log of pass 1, one row per finding with its evidence and the action it takes into rev 2. **Part III is rev 2** — it carries the heading `Rev 2 (2026-09-16)` rather than the word "Part", and it is a delta against Part I: P0-P14, each naming the Part I text it removes and the text that replaces it, then a change log mapping every pass-1 row to its disposition, then the open questions for pass 2. Provenance tags as in the research file: [S] source read, [D] official doc / paper, [B] blog or talk (recorded, not relied on); in-tree claims carry `[tree] path:line`.
+Structure of this file: Part I is the architect's rev-1 design reproduced VERBATIM (including its opening orientation note); it has NOT been edited to answer the critique. Part II is the critique log of pass 1, one row per finding with its evidence and the action it takes into rev 2. **Part III is rev 2** — it carries the heading `Rev 2 (2026-09-16)` rather than the word "Part", and it is a delta against Part I: P0-P14, each naming the Part I text it removes and the text that replaces it, then a change log mapping every pass-1 row to its disposition, then the open questions for pass 2. Provenance tags as in the research file: [S] source read, [D] official doc / paper, [B] blog or talk (recorded, not relied on); in-tree claims carry `[tree] path:line`. **Rev 2.5 (2026-09-23)** follows critique pass 6's review at the end of the file. It is the first revision that also marks superseded text where it stands, Part I included: a marker is a suffix on the existing line that begins `⚠ Rev 2.5`, or stale words struck through beside their correction. No sentence is deleted, and no line is inserted before rev 2.5, because 24 other documents cite this file by line number.
 
 ---
 
@@ -114,13 +114,13 @@ Everything else — including the threadpool's `Box<ScopeShared>`, the scope blo
 
 ### What (i) cannot do, and what stays where
 
-- **Address stability under growth is a property of `VmColumn`/`ComponentPool`/`InlandStore` only.** Every site where a pointer is held across a push keeps those primitives: pool rows (`row_ptr`, `[ecsnative] component_pool.rs:816-834`), `ScratchSolveView` copies held by workers (`scratch_column.rs:28-38`), `s2e`, `entity_ids`, the inland store. The new `HeapVec<T>` **relocates on growth** exactly like `Vec` and is therefore allowed only where no pointer into it outlives a push — a `debug_assert!`-free rule enforced by review and by the ledger's `class` column (`heap` sites must state "no pointer held").
+- **Address stability under growth is a property of `VmColumn`/`ComponentPool`/`InlandStore` only.** Every site where a pointer is held across a push keeps those primitives: pool rows (`row_ptr`, `[ecsnative] component_pool.rs:816-834`), `ScratchSolveView` copies held by workers (`scratch_column.rs:28-38`), `s2e`, `entity_ids`, the inland store. The new `HeapVec<T>` **relocates on growth** exactly like `Vec` and is therefore allowed only where no pointer into it outlives a push — a `debug_assert!`-free rule enforced by review and by the ledger's `class` column (`heap` sites must state "no pointer held"). ⚠ *Rev 2.5 (P46): `HeapVec` is a revival form, not built (U-1); its relocate-on-grow clients take KC-15 spans, which relocate on grow too (plan 01 KC-15).*
 - **Third-party runtime allocations are not reached by (i).** The one such site on the frame path is crossbeam-deque (`Injector::push` allocates a 31-slot block; `Worker` doubles; crossbeam-epoch allocates a node per sealed bag `[S deque.rs, internal.rs]`) — replaced by an in-house bounded deque in rung 1d. `std::thread::spawn` is accepted (tag `os-thread`).
 - **`String` ergonomics** — `format!` is gone from engine crates; `core::fmt::Write` into a `HeapString`/`LogRing` replaces it.
 
 ### Rejected alternatives, closed
 
-- **(ii) as a bridge for droppable/setup-once structures only.** Rejected: the same sites are served by `DropColumn<T>` and `HeapVec<T>` without nightly, and a second container vocabulary would split the codebase in two styles. No `Allocator` impl ships in v1 — it would be client-less, the exact X.J retirement criterion.
+- **(ii) as a bridge for droppable/setup-once structures only.** Rejected: the same sites are served by `DropColumn<T>` and `HeapVec<T>` without nightly, and a second container vocabulary would split the codebase in two styles. No `Allocator` impl ships in v1 — it would be client-less, the exact X.J retirement criterion. ⚠ *Rev 2.5 (P46): the rejection stands; those sites are now served by KC-16's owning column and the ledger forms, because `DropColumn` and `HeapVec` are revival forms (U-8, U-1).*
 - **`allocator-api2` shim on stable.** Rejected: a third-party container as the engine's canonical vector contradicts the in-house rule for engine libraries, and it still needs the newtype for the gate.
 - **A process-singleton heap (`&'static`).** Rejected: tests build many `EcsMaster`s concurrently; a single-writer heap shared across them is a data race. Heaps are per owner.
 
@@ -128,19 +128,19 @@ Everything else — including the threadpool's `Box<ScopeShared>`, the scope blo
 
 ### 2.0 The crate split (architecture decision)
 
-`boyko_memory` — new crate containing `vm.rs`, `vm_column.rs`, `utils.rs`, the granule/page constants, and the four classes below. `boyko_ecs` keeps `component_pool.rs`, `device_column.rs`, `inland_store.rs`, `scratch_column.rs` (they know ticks, ids, and the stagger). Reason: `boyko_threadpool` and `boyko_utils` need reservations and cannot depend on `boyko_ecs` (cycle: `boyko_ecs` → `boyko_threadpool`). `boyko_memory` has no dependencies beyond the OS crates already used by `vm.rs`.
+`boyko_memory` — new crate containing `vm.rs`, `vm_column.rs`, `utils.rs`, the granule/page constants, and the four classes below. `boyko_ecs` keeps `component_pool.rs`, `device_column.rs`, `inland_store.rs`, `scratch_column.rs` (they know ticks, ids, and the stagger). Reason: `boyko_threadpool` and `boyko_utils` need reservations and cannot depend on `boyko_ecs` (cycle: `boyko_ecs` → `boyko_threadpool`). `boyko_memory` has no dependencies beyond the OS crates already used by `vm.rs`. ⚠ *Rev 2.5 (P48, U-19): the engine thread context is not placed here — it lives in `boyko_threadpool`, which keeps G5's `#![no_std]` for this crate; and of the classes below this crate holds none (Heap and Table are revival forms, P46; Frame is deleted, P34; Scope's chunk structures are threadpool-internal, P2/P16). The current §2.0 is P48.*
 
 ### 2.1 Lifetime classes — the table
 
 | Class | Primitive(s) | Lifetime | Owner / thread rule | Free semantics | Zero-fill | Reset | Address-stable | Resident floor per instance (pre-plan → post-plan) |
 |---|---|---|---|---|---|---|---|---|
-| **Column** (exists) | `ComponentPool`, `VmColumn<T>`, `InlandStore`, `ScratchColumn` + new `DropColumn<T>`, `ByteColumn` | persistent | single writer (`&mut`), readers anywhere | `len` rollback / `swap_remove` | yes, fresh commit only | none | **yes** | 64 KiB → 4 KiB (lazy: 0 until first push) |
+| **Column** (exists) ⚠ *Rev 2.5 (P46): `DropColumn` is a revival form, U-8 → KC-16* | `ComponentPool`, `VmColumn<T>`, `InlandStore`, `ScratchColumn` + new `DropColumn<T>`, `ByteColumn` | persistent | single writer (`&mut`), readers anywhere | `len` rollback / `swap_remove` | yes, fresh commit only | none | **yes** | 64 KiB → 4 KiB (lazy: 0 until first push) |
 | **Frame** | `FrameArena` + `FrameVec<T>`, `FrameSlice<T>` | one frame between two `reset()` calls at a fixed schedule position | **dispatcher thread only** | none; `mark()/rewind(mark)` LIFO | **no** | `reset()` at frame start | within a frame | 0 until used → high-water mark, page-rounded |
 | **Scope** | `ScopeArena` (one per thread slot, `W+1`), replaces `ScopeBlock`'s `std::alloc` chunks and `Box<ScopeShared>` | one `Scope` (nested LIFO) | the thread that opened the scope; indexed by `wid` from the existing single TLS read | `rewind(mark)` at join | **no** | at join | within a scope | 0 until used → HWM; typical ≤ 64 KiB |
-| **Heap** | `Heap` + `HeapVec<T>`, `HeapBox<T>`, `HeapDyn<V>`, `HeapString`, `SortedMap<K,V>` | persistent, individually freed | **single writer** (structural mutation = dispatcher-only, EM2 `[ecsnative] entity_master.rs:16`); readers anywhere | size-class intrusive LIFO free lists | **no** (reused) | none | **no** (relocates on grow) | 64 KiB for the whole heap (self-packed at 4 KiB pages) — independent of the packing plan |
-| **Table** | `TableSet` — one reservation, N fixed-length typed tables laid out at build | build-once | single writer at build; readers anywhere | none | yes | none | yes | total bytes granule-rounded: 64 KiB → 4 KiB |
+| **Heap** ⚠ *Rev 2.5 (P46): revival form, not built (U-1)* | `Heap` + `HeapVec<T>`, `HeapBox<T>`, `HeapDyn<V>`, `HeapString`, `SortedMap<K,V>` | persistent, individually freed | **single writer** (structural mutation = dispatcher-only, EM2 `[ecsnative] entity_master.rs:16`); readers anywhere | size-class intrusive LIFO free lists | **no** (reused) | none | **no** (relocates on grow) | 64 KiB for the whole heap (self-packed at 4 KiB pages) — independent of the packing plan |
+| **Table** ⚠ *Rev 2.5 (P46): revival form, not built (U-7 → KC-18)* | `TableSet` — one reservation, N fixed-length typed tables laid out at build | build-once | single writer at build; readers anywhere | none | yes | none | yes | total bytes granule-rounded: 64 KiB → 4 KiB |
 
-Five rows because `TableSet` is a *shape* of the Column class (fixed length, many tables, one reservation) that kills ~20 `Box<[..]>` fields with one granule; it is listed separately because its API differs.
+Five rows because `TableSet` is a *shape* of the Column class (fixed length, many tables, one reservation) that kills ~20 `Box<[..]>` fields with one granule; it is listed separately because its API differs. ⚠ *Rev 2.5 (P46): of the five, Column and Scope are built; Frame is deleted (P34); Heap and Table are revival forms.*
 
 ### 2.2 The library's own contract additions (to `VmReservation`)
 
@@ -151,7 +151,7 @@ Five rows because `TableSet` is a *shape* of the Column class (fixed length, man
 ### 2.3 Data structures
 
 ```rust
-// ---------- Column class additions (boyko_memory) ----------
+// ---------- Column class additions (boyko_memory) ----------  // ⚠ Rev 2.5 (P46): DropColumn is a revival form (U-8 → KC-16); ByteColumn stays (KC-03)
 
 /// VmColumn without the Copy bound: runs destructors on truncate/swap_remove/Drop.
 /// Same reservation shape, same growth ladder, same address stability.
@@ -202,7 +202,7 @@ pub struct ScopeArena {
 }
 // Accessed only by the owning thread through `UnsafeCell` in the pool's per-slot table.
 
-// ---------- Heap class ----------
+// ---------- Heap class ----------  // ⚠ Rev 2.5 (P46): revival form, not built (U-1, U-9)
 
 /// Single-writer size-class heap on two reservations.
 pub struct Heap {
@@ -245,7 +245,7 @@ pub struct HeapString(HeapVec<u8>);   // utf8 invariant; impl core::fmt::Write; 
 /// Sorted-vector map for build-time lookups that were HashMaps. O(log n) get, O(n) insert.
 pub struct SortedMap<K: Ord + Copy, V> { keys: HeapVec<K>, vals: HeapVec<V> }
 
-// ---------- Table class ----------
+// ---------- Table class ----------  // ⚠ Rev 2.5 (P46): revival form, not built (U-7 → KC-18)
 
 /// One reservation, N typed fixed-length tables, laid out at build.
 pub struct TableSet { res: VmReservation, used: usize }
@@ -256,7 +256,7 @@ pub struct Table<T> { ptr: NonNull<T>, len: u32 }       // 16 B handle into a Ta
 ### 2.4 Public API (signatures)
 
 ```rust
-// Column
+// Column  // ⚠ Rev 2.5 (P46): the DropColumn block is a revival form (U-8)
 impl<T> DropColumn<T> {
     pub fn new(label: &'static str, reserve_elems: usize) -> Self;
     pub fn push(&mut self, v: T) -> u32;                 // warm compare len < committed, #[cold] grow
@@ -290,7 +290,7 @@ impl ScopeArena {
     pub fn rewind(&mut self, mark: usize);
 }
 
-// Heap
+// Heap  // ⚠ Rev 2.5 (P46): revival form (U-1)
 impl Heap {
     pub fn new(label: &'static str) -> Self;
     pub fn alloc(&mut self, layout: Layout) -> NonNull<u8>;          // never zeroed
@@ -307,7 +307,7 @@ impl<T> HeapVec<T> {
 }
 impl HeapDyn<V> { pub fn new<T>(heap: &mut Heap, value: T, vtable: &'static V) -> Self; pub fn data(&self) -> NonNull<u8>; pub fn vtable(&self) -> &'static V; }
 
-// Table
+// Table  // ⚠ Rev 2.5 (P46): revival form (U-7)
 impl TableLayout { pub fn new() -> Self; pub fn field<T>(&mut self, n: usize) -> TableSlot<T>; }
 impl TableSet { pub fn build(layout: TableLayout) -> Self; pub fn table<T>(&self, s: TableSlot<T>) -> Table<T>; }
 ```
@@ -324,7 +324,7 @@ impl TableSet { pub fn build(layout: TableLayout) -> Self; pub fn table<T>(&self
 | `VmColumn::ensure_len_zeroed(n)` | `if n > committed {cold commit}; len = max(len, n)` | O(1) | none | 1 | replaces `Vec::resize(n, ABSENT)` loops; requires the absent value to be 0 (`slot+1` encoding for `EntitySlotMap`) |
 | `Heap::alloc` large | exact-size run from `large_free` LIFO (first match by `len_granules`), else frontier | O(k) over free runs, cold | — | cold | clients: `HeapVec` above 64 KiB only; coalescing deferred until a measured fragmentation number |
 
-SIMD: none of these are vectorisable and none need to be — all are cold-or-O(1) bookkeeping; the data they hold is what gets vectorised.
+SIMD: none of these are vectorisable and none need to be — all are cold-or-O(1) bookkeeping; the data they hold is what gets vectorised. ⚠ *Rev 2.5 (P46): the three `Heap`/`HeapVec` rows above belong to the Heap's revival form.*
 
 ## 3. The gate ladder
 
@@ -334,7 +334,7 @@ SIMD: none of these are vectorisable and none need to be — all are cold-or-O(1
 | **G2** | **Frame allocation census as a gate** | with rung 1 | `crates/boyko_physics/tests/alloc_frame_census.rs` (untracked on ecsnative) becomes `tests/alloc_frame_gate.rs` at the workspace root: per scene `STEADY_MAX_S0..S3, S1a, S1b` constants; the assertion is `measured_max <= STEADY_MAX_X`; each rung lowers its constants; end state = 0 everywhere. Process-global counter (the `boyko_app/tests/zero_alloc.rs` shape, worker-visible, `:47`), not the `thread_local!` shape of `colored_solve_zero_alloc_o5.rs:281-284` | run with a deliberate `Vec::new()`+push in a system → red |
 | **G3** | **`DenyAfterSteady`** | with rung 1, opt-in per gate binary | `#[global_allocator]` that delegates to `System` until `enter_steady()`; afterwards `alloc` writes a fixed 64-byte message with `WriteFile`/`write(2)` and `abort()`s. Not unwinding (required by `GlobalAlloc`); Miri arm: counts instead of aborting (the tree measured Tree-Borrows UB delegating to Windows `System` for over-aligned blocks under Miri, `[merge] block.rs:759-782` — the deny gate is `cfg(not(miri))`) | same as G2's canary, must abort |
 | **G4** | **clippy `disallowed-types`** on `alloc::vec::Vec`, `alloc::boxed::Box`, `alloc::string::String`, `alloc::sync::Arc`, `alloc::collections::*` (plus the existing `HashMap` etc.) | end state, when the ledger for a crate is ≤ 10 sites (allows are then exceptions with rationale, not noise) | per crate: `#![cfg_attr(test, allow(clippy::disallowed_types))]` at the crate root covers unit tests in one line; integration tests in `tests/` get the same line each; the type ban fires on annotated locals and `collect::<Vec<_>>()` turbofish too, so production locals are covered here. The tree's L8c rejection (`[ecsnative] clippy.toml:32-63`, ~1051 sites) was of `disallowed-macros` without a crate-level test allow; this rung uses one | (a) `Vec` field in production → red; (b) `Vec` local in a `#[cfg(test)]` module → **must not** red (a canary that does not fire is a finding — verify both directions) |
-| **G5** | **`#![no_std]` without `extern crate alloc`** | end state | for `boyko_memory` and `boyko_utils` only — structurally no `Vec`/`Box`/`String`/`format!` can be named. Not for `boyko_ecs` (needs `std::sync::OnceLock`, `std::thread` via the pool) | compile |
+| **G5** ⚠ *Rev 2.5 (P48): stands; the thread context stays out of `boyko_memory` so that it can* ⚠ *Rev 2.6 (P55, AP7 answer 1): per target — `#![no_std]` on every target; `extern crate alloc` only under `vm.rs`'s fallback `cfg(any(miri, not(any(windows, unix))))`; the compile check runs on the windows and unix targets; lands with UG-07 at F2, not C1* | **`#![no_std]` without `extern crate alloc`** | end state | for `boyko_memory` and `boyko_utils` only — structurally no `Vec`/`Box`/`String`/`format!` can be named. Not for `boyko_ecs` (needs `std::sync::OnceLock`, `std::thread` via the pool) | compile |
 
 The counting gates remain **lower bounds** (`[D GlobalAlloc docs]`: the optimizer may elide); G1+G4 are the upper bound on written sites; G3 is the process-level proof.
 
@@ -355,7 +355,7 @@ Not part of this campaign's code, but rung 2 is uneconomic without it (F4's own 
 | 1e | `TermList` `Box::new` per (tag-terms, generation) epoch (`term_list.rs:141-170`); `traverse_iter.rs:51, 284` scratch (flagged per-call by Lens C, unverified) | conditional | `HeapDyn`/`HeapVec` (epoch-rate) / `FrameVec` (per call) | conditional |
 
 ### Rung 2 — per-entity side stores (Principle 0), after rung 0
-| Site | After | Determinism note |
+| Site | After ⚠ *Rev 2.5 (P46.3): the `DropColumn`, `HeapVec` and `SparseMap` destinations below are re-pointed to KC-15/KC-16/KC-18* | Determinism note |
 |---|---|---|
 | `EntityMaster.free_entity_ids: Vec<EntityId>` (`entity_master.rs:73`) | `VmColumn<EntityId>` used as a stack; `as_mut_slice()` for the `sort_unstable_by` at `:499` | push/pop order identical → reuse order identical |
 | `DenseStore.free: Vec<u32>` (`dense_store.rs:126`) | `VmColumn<u32>` stack | same |
@@ -370,7 +370,7 @@ Not part of this campaign's code, but rung 2 is uneconomic without it (F4's own 
 | `boyko_utils::SparseMap`/`SparseSlotMap` (3 `Vec`s each) | `HeapVec` fields, `new_in(&mut Heap)` | — |
 
 ### Rung 3 — setup-once and build products (zero per-frame cost; on the list because of the ruling)
-| Site | After |
+| Site | After ⚠ *Rev 2.5 (P46.3): the `TableSet`, `HeapVec`, `HeapDyn`, `SortedMap` and `DropColumn` destinations below are re-pointed to the ledger forms* |
 |---|---|
 | `Schedule.{systems: Vec<SystemBox>, system_conditions: Vec<Vec<BoolSystem>>, system_gating_sets, set_conditions, state_entries}` (`[merge] schedule.rs:116-187`), `ConflictGraph.{pred_count, successors, conflict_bits}` (`conflict_graph.rs:68-77`), `ExecutorScratch.{exclusive_to_run, to_spawn, pred_remaining}` + `Box<CompletionChannel>` (`executor_scratch.rs:219-330`) | one `TableSet` per `Schedule` ("ScheduleTables"): systems as `Table<HeapDyn<SystemVTable>>`… no — systems as `Table<ErasedSystem>` where the erased object bytes live in the heap; conditions as CSR (`Table<u32>` offsets + `Table<BoolSystem>`); successors CSR; bitsets as `Table<u64>`; scratch as `Table<SystemIndex>`; `CompletionChannel` in-table (already `NonNull`-addressed) |
 | `SystemBox(Box<dyn System>)` (`system_box.rs:83`) | `ErasedSystem { data: NonNull<u8>, vtable: &'static SystemVTable }` (the `Task` pattern) |
@@ -402,7 +402,7 @@ Not part of this campaign's code, but rung 2 is uneconomic without it (F4's own 
 | Threadpool: `ThreadPool::new(workers)` unchanged; `Scope` API unchanged; lane capacity `LANE_CAP` becomes a build parameter with a default | none |
 
 ### 5.2 Determinism proofs owed per rung
-| Rung | Obligation | Proof |
+| Rung | Obligation | Proof ⚠ *Rev 2.5 (P46): the `Heap` rows (reuse order here; P8/O8's capacity classes) belong to the Heap's revival form* |
 |---|---|---|
 | 1a/1b | `ScopeArena` addresses depend on which worker ran the spawner | **no computation reads a task cell's address** — cells are executed and discarded. Canary: `cfg(feature = "mem-shake")` offsets each per-worker arena base by `wid × 4096 × prime` so any address dependence changes results; the `{1,N}` physics oracle (`[ecsnative] plugin.rs:386`) must stay green with and without it |
 | 1d | task execution order under the bounded deque + inline-overflow | the oracle is index-addressed and order-independent by construction (colored solve); loom model of push/pop/steal + a test that forces overflow (`LANE_CAP = 2` under test) with the oracle |
@@ -412,7 +412,7 @@ Not part of this campaign's code, but rung 2 is uneconomic without it (F4's own 
 | 2 | Frame arena | dispatcher-only; `debug_assert!(owner == current)` under `cfg(debug_assertions)` |
 
 ### 5.3 Miri / loom under Tree Borrows
-- **Provenance granularity is the reservation.** Miri cannot see a use-after-free or overlap *inside* a `Heap`/arena `[D std::ptr; D arXiv 2206.11728]`. Compensation: under `cfg(any(miri, feature = "mem-sanitize"))` the Heap keeps a live-bit column (1 bit per 16-B unit), `free` asserts the bit is set and clears it, `alloc` asserts clear and sets it, freed chunks are filled with `0xDD` beyond the link word; `FrameArena::rewind`/`reset` and `ScopeArena::rewind` fill the released range with `0xDD`. This is `FLECS_SANITIZE` `[S flecs.h]`, and it is the only use-after-free detector the arenas will ever have.
+- **Provenance granularity is the reservation.** Miri cannot see a use-after-free or overlap *inside* a `Heap`/arena `[D std::ptr; D arXiv 2206.11728]`. Compensation: under `cfg(any(miri, feature = "mem-sanitize"))` the Heap keeps a live-bit column (1 bit per 16-B unit), `free` asserts the bit is set and clears it, `alloc` asserts clear and sets it, freed chunks are filled with `0xDD` beyond the link word; `FrameArena::rewind`/`reset` and `ScopeArena::rewind` fill the released range with `0xDD`. This is `FLECS_SANITIZE` `[S flecs.h]`, and it is the only use-after-free detector the arenas will ever have. ⚠ *Rev 2.5 (P46): every `Heap` clause of §5.3, as amended by P3, P11 and P15/15.5, belongs to the Heap's revival form; the chunk, column and scope clauses stand.*
 - **Tree Borrows rules inherited from `ScopeBlock` (`[merge] block.rs:35-81`) become library-wide invariants**: TB-1 no bookkeeping word inside a *live* chunk (the intrusive link exists only while the chunk is on a free list, and is read/written through raw pointers derived from the reservation base, never through a reference to the payload type); TB-2 allocate-and-initialise (`alloc` returns `NonNull`, the caller writes before minting any reference); TB-3 no `Deref` from an arena handle that outlives the frame/scope (`FrameVec<'f, T>` borrows the arena; `Scope` cells are consumed at execution).
 - **Miri reserve sizes**: every class's reservation has a Miri arm constant (Heap small 8 MiB, large 8 MiB, Frame 4 MiB, Scope 1 MiB/slot) because the fallback arm eagerly `alloc_zeroed`s the full `os_len` (`[ecsnative] vm.rs:168-179`); exhaustion under Miri is a loud panic, as `reserve` already is.
 - **`-Zmiri-ignore-leaks`**: a `HeapVec` never freed before its `Heap` drops is not a leak to Miri (the reservation is released). The sanitize live-bit column reports it instead: `Heap::drop` asserts zero live bits under `mem-sanitize`.
@@ -436,7 +436,7 @@ Not part of this campaign's code, but rung 2 is uneconomic without it (F4's own 
 5. Rung 1a-1c (threadpool scope arena, byte columns); re-run G2; lower constants.
 6. Rung 1d: in-house bounded deque + injector; loom tests; `{1,N}` oracle with `mem-shake`.
 7. Rung 2 (after packing plan S0-S2); property tests for LIFO and `slot+1`.
-8. Rung 3 (`TableSet`s for Schedule/Master/Pool; `ErasedSystem`; `Arc` removal; signature changes).
+8. Rung 3 (`TableSet`s for Schedule/Master/Pool; `ErasedSystem`; `Arc` removal; signature changes). ⚠ *Rev 2.5 (P46.3): KC-18 tables and KC-07's inline arrays, not `TableSet`s; `ErasedSystem` (KC-17) and the `Arc` removal (KC-07) stand.*
 9. Rung 4; G4 per crate as each drops below 10 sites; G5 for `boyko_memory`/`boyko_utils`.
 
 ## Metrics and validation
@@ -570,7 +570,7 @@ Target file: this file. Rev 1 (Part I) stays verbatim; this patch is **Part III 
 
 ## P1 (closes C1) — §2.1 Heap row, §2.3 Heap/HeapVec/HeapBox/HeapDyn, §2.4 Heap API: bookkeeping moves INSIDE the reservation
 
-**Depends on:** §5.3 TB-1..3 (as amended by P11), §5.1 drop order, the `row_ptr` provenance argument at `crates/boyko_ecs/src/ecs/memory/component_pool.rs:817-829`, and `ScopeBlock`'s D1 at `crates/boyko_threadpool/src/block.rs:35-42`.
+**Depends on:** §5.3 TB-1..3 (as amended by P11), §5.1 drop order, the `row_ptr` provenance argument at `crates/boyko_ecs/src/ecs/memory/component_pool.rs:817-829`, and `ScopeBlock`'s D1 at `crates/boyko_threadpool/src/block.rs:35-42`. ⚠ *Rev 2.5 (P46): P1 is the Heap's revival form, not built (U-1); its `DynVTable` shape survives as KC-17's record vtable.*
 
 **The shape, chosen from the critic's three:** (b) — *bookkeeping inside the reservation, handles pointing at the reservation base*. (a) `&self` + `UnsafeCell` is rejected because it does not close the hole: the disabling retag is `&mut EcsMaster`, not `&mut Heap`, so an `UnsafeCell` inside the `Heap` struct would have to be argued from TB's byte-precise interior-mutability rule (`ReservedIM` tolerates foreign writes, `[B ralfj 2023]`, `[S miri tree_borrows/perms.rs]`), a rule that is **model-version-dependent and opt-in** — Miri's default is still Stacked Borrows (`[S miri README]`). (c) explicit-heap `free(self, &mut Heap)` is rejected because `Children(HeapVec<Entity>)` is dropped by `ComponentPool`'s type-erased `drop_fn(*mut u8)` (`crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs:83, 117`), which has no `&mut Heap` to pass and cannot get one without a thread-local or a global — both forbidden. (b) needs no aliasing-model subtlety at all: it is the argument the tree already ships twice.
 
@@ -1066,7 +1066,7 @@ W1 predicted this and rev 2 makes it sharper: with retention, `free_all` perform
 
 ## P8 (closes O1, O2, O3, O6, O7, O8, Q3, Q4, Q5, Q6; retires O5) — the small rows
 
-**O1 — ZST.** `class(0) = 0`, a class that never allocates: `HeapRef::alloc` returns `NonNull::dangling()` for `size == 0` and `free` returns immediately, the shape `ScopeBlock::emplace` already ships (`block.rs:253-261`). The rev-1 formula `(0+15)>>4 - 1` underflowed; `CLASS_COUNT` becomes 25 and the formula is stated in P1. Affected clients: `HeapDyn`/`HeapBox` of a capture-less closure — the `Box<dyn FnOnce(&mut EcsMaster)>` field at `[merge] schedule_builder.rs:92` and its construction at `:263`. (Rev 1's critique row cited `[merge] schedule_builder.rs:1090`; that line is `systems: Vec<String>` in `OrderingCycle` and is not a closure site — corrected here.)
+**O1 — ZST.** `class(0) = 0`, a class that never allocates: `HeapRef::alloc` returns `NonNull::dangling()` for `size == 0` and `free` returns immediately, the shape `ScopeBlock::emplace` already ships (`block.rs:253-261`). The rev-1 formula `(0+15)>>4 - 1` underflowed; `CLASS_COUNT` becomes 25 and the formula is stated in P1. Affected clients: `HeapDyn`/`HeapBox` of a capture-less closure — the `Box<dyn FnOnce(&mut EcsMaster)>` field at `[merge] schedule_builder.rs:92` and its construction at `:263`. (Rev 1's critique row cited `[merge] schedule_builder.rs:1090`; that line is `systems: Vec<String>` in `OrderingCycle` and is not a closure site — corrected here.) ⚠ *Rev 2.5 (P46): this O1, O3 (as ruled by P15), O8, Q4's Heap and `TableSet` rows (as replaced by P30/O1), Q5 and Q3's `TableSet` build point belong to the revival forms; O2, O6, O7, Q3's growable-column half and Q6 stand.*
 
 **O2 — padding.** The `ScopeArena` whose `_pad: [u8; 24]` made 72 B round to 128 B is deleted (P2); `ChunkCache` states `size_of == 64` as a build-failing assert and carries **no explicit `_pad`**.
 
@@ -1156,7 +1156,7 @@ Rev 1's 4 GiB + 16 GiB is cut to 1 GiB + 1 GiB: `InlandStore` already reserves 1
 > | 1b | `ScopeBlock` chunks via `std::alloc` (import `block.rs:101`, `alloc` at `:482` inside `grow`, `dealloc` at `:341` inside `free_all`) | 1 alloc+free per spawning scope, 4 KiB doubling (1.74/scope measured) | `ChunkArena` (one pool reservation) + per-claimed-slot `ChunkCache`; **`ScopeBlock` itself is unchanged** — only `grow`'s source and `free_all`'s sink move (P2) | ~210 per parallel physics step |
 > | 1f **(NEW)** | per-thread first touch landing in early frames (checkpoint defect 6): crossbeam-epoch `Local` (2304 B) on a thread's first steal, and std's 30-B UTF-16 thread-name copy for `SetThreadDescription` | 660 of 1056 `Local`s landed at frame ≥ 64, i.e. **inside** the steady window, so G2's OTHER allowance is load-bearing rather than decorative | `ThreadPoolBuilder::build` waits for its workers to boot and pre-registers each with the epoch collector | moves 2 × W acquisitions out of the frame window; lets every App scene's OTHER budget drop to 0 |
 
-> | 1d | crossbeam `Injector` — owned at `thread_pool.rs:113` (`injector_global: CachePadded<Injector<Task>>`), pushed at `worker.rs:687-688` — and with it crossbeam-epoch | 1 block per **64** outside pushes (`1520 = 8 + 63 × 24`, Q6); measured 0.125/frame on S1c and `n/63` on S0. **The worker path already allocates nothing** — a worker's push lands in its own Chase-Lev ring (`place_task`, `worker.rs:750` → `push_on_lane_no_wake`, `:700`), which is why rev 1's "replace the per-lane deque" half is withdrawn: the lanes are not a per-frame cost, they double once and stop | bounded MPMC **injector** ring (`W × LANE_CAP`, `LANE_CAP = 4096`, 16 B thin task → 64 KiB per lane) in the pool's `TableSet`; the per-lane Chase-Lev deques stay crossbeam's in v1 and are re-examined only if 1f fails to move the epoch `Local` out of the window. **Overflow policy: the pushing thread spins with `crossbeam_utils::Backoff` (already a dependency), `#[cold]`, and NEVER executes the task inline** | the injector blocks; the epoch `Local` follows 1f |
+> | 1d | crossbeam `Injector` — owned at `thread_pool.rs:113` (`injector_global: CachePadded<Injector<Task>>`), pushed at `worker.rs:687-688` — and with it crossbeam-epoch | 1 block per **64** outside pushes (`1520 = 8 + 63 × 24`, Q6); measured 0.125/frame on S1c and `n/63` on S0. **The worker path already allocates nothing** — a worker's push lands in its own Chase-Lev ring (`place_task`, `worker.rs:750` → `push_on_lane_no_wake`, `:700`), which is why rev 1's "replace the per-lane deque" half is withdrawn: the lanes are not a per-frame cost, they double once and stop | bounded MPMC **injector** ring (`W × LANE_CAP`, `LANE_CAP = 4096`, 16 B thin task → 64 KiB per lane) in the pool's `TableSet` ⚠ *Rev 2.5 (P46.3): in the pool's own reservation, KC-06 — `TableSet` is a revival form (U-7)*; the per-lane Chase-Lev deques stay crossbeam's in v1 and are re-examined only if 1f fails to move the epoch `Local` out of the window. **Overflow policy: the pushing thread spins with `crossbeam_utils::Backoff` (already a dependency), `#[cold]`, and NEVER executes the task inline** | the injector blocks; the epoch `Local` follows 1f |
 
 **Q2 is answered by removing the mechanism that raised it.** Rev 1's inline-overflow policy would have executed a concurrent SYSTEM on the dispatcher inside `try_dispatch_ready`, which is a re-entrancy question against the apply window and the dispatcher-owned `ExecutorScratch` (`[merge] executor_scratch.rs:216-219`, "**Dispatcher-owned** — workers never touch this"). Rev 2 does not execute anything inline, so the question does not arise. **Liveness proof for the spin, which is what replaces it:** a full ring means ≥ `cap` tasks are enqueued; every idle worker steals from the injector, and a worker blocked in a nested join also *executes* tasks from it (`join_on_worker`). The only state in which nothing drains is "every worker is parked", and a worker parks only when the queues are empty — which contradicts full. Modelled in loom (push/steal, steal/steal, and a forced-overflow arm with `LANE_CAP = 2` under `cfg(test)`), and the overflow counter is pinned at **0 occurrences** in the census gate, so the cold path is measured to be cold rather than assumed to be.
 
@@ -1195,29 +1195,29 @@ Rev 1's 4 GiB + 16 GiB is cut to 1 GiB + 1 GiB: `InlandStore` already reserves 1
 
 ## P12 (NEW section §7) — the modding seam: additive, and compiled out means absent
 
-**Depends on:** P1 (`HeapRef` is the whole allocator ABI), P8/O6 (`raw` is allowlisted), §3 (G6 joins the ladder).
+**Depends on:** P1 (`HeapRef` is the whole allocator ABI), P8/O6 (`raw` is allowlisted), §3 (G6 joins the ladder). ⚠ *Rev 2.5 (P47): §7 is re-pointed to the plan's file 05 (`docs/unification/UNIFIED-SYSTEM-PLAN-05-MODDING-READINESS.md`), which is authoritative for its content; G6 = UG-15.*
 
 **The requirement, restated as a falsifiable end state.** A build whose dependency graph does not contain `boyko_modding` must be **byte-identical in the engine's own code** to a build of a tree where that crate does not exist: no indirection, no lookup, no branch, no registry, no lock, no allocation, no exported symbol, no binary-size delta, no startup work.
 
-**The mechanism that makes it true by construction, rather than by care: modding is a CRATE, not a feature.** A cargo feature still compiles code into the kernel crate and can perturb inlining decisions and layout; a crate that is not in the graph contributes nothing to compile. `boyko_modding` depends on `boyko_ecs` and `boyko_memory`; nothing depends on it except an application that wants mods.
+**The mechanism that makes it true by construction, rather than by care: modding is a CRATE, not a feature.** A cargo feature still compiles code into the kernel crate and can perturb inlining decisions and layout; a crate that is not in the graph contributes nothing to compile. `boyko_modding` depends on `boyko_ecs` and `boyko_memory`; nothing depends on it except an application that wants mods. ⚠ *Rev 2.5 (P47): the one crate `boyko_modding` is retired in favour of `boyko_mod_host`, `boyko_mod_api` and `boyko_mod_registry`; the kernel half of any modding item is generic over `ModSeam` and is not compiled when unused (05 §1).*
 
 **What the kernel must expose (the complete additive list, and each entry's cost when unused):**
 
 | # | Seam | Shape | Cost when modding is absent |
 |---|---|---|---|
-| K-MOD-1 | allocation | `HeapRef::{alloc, free, grow}` take a **runtime `Layout`** and are non-generic | none — `HeapDyn` already needs them, so they exist either way; an unreachable `pub fn` is dropped at link |
-| K-MOD-2 | heap identity | `HeapRef` is `Copy + Send + Sync`, 8 B, `#[repr(transparent)]` over `NonNull<u8>` | none — it is the handle every engine collection already carries (P1) |
-| K-MOD-3 | mod memory lifetime | **one `Heap` per mod**: `Heap::new()` → 2 lazy reservations. Unloading a mod is `Heap::drop` = 2 `VirtualFree`, which bounds a mod's leak at its own reservation and never touches the engine's free lists | none — no `Heap` is constructed |
-| K-MOD-4 | dynamic components | **the pool constructor is ALREADY layout-erased and non-generic**: `ComponentPool::new(component_id: usize, reserve_rows: usize)` (`component_pool.rs:279`) resolves `component_layout`, `drop_fn` and `type_id` out of `component_registry::get_layout_unchecked(component_id)` (`:284-288`). There is no `ComponentPool::new::<T>()` and therefore no generic path a mod would have to duplicate — the mod's pool and the engine's pool are the same call | **none, and this is the key to "identical codegen"** — there is no second path and no branch to take; the erased entry point already IS the only one |
-| K-MOD-5 | dynamic ids | the id counter is `component_registry::register_new::<T>()` (`component_registry/mod.rs:920-921`, `NEXT_ID.fetch_add(1, Ordering::Relaxed)`) — the **same counter** the derive macro uses. It is generic today only to key the `TypeId` mint, so the additive seam is a non-generic sibling taking `(Layout, Option<DropFn>)`; the kernel never distinguishes the resulting ids, so it never branches on origin | none — the counter and its `fetch_add` exist for the derive |
-| K-MOD-6 | dynamic drop glue | the `drop_fn` a pool already stores: `pub type DropFn = unsafe fn(*mut u8)` (`component_registry/mod.rs:83`) in `pub drop_fn: Option<DropFn>` (`:117`) — the Bevy `Option<unsafe fn(OwningPtr)>` shape `[S blob_array.rs]`, already in-tree. A mod supplies an `extern "C"` thunk | none |
-| K-MOD-7 | what is NOT exposed | `boyko_memory::raw::{reserve, commit, base}`, `FrameArena`, `ChunkArena`/`ChunkCache`, `ScopeBlock`. A mod gets `Heap`/`HeapVec`/columns and nothing that could commit pages or reach the pool's scope memory | enforced by O6's allowlist gate |
-| K-MOD-8 | registry | the mod registry is a **`Resource` inserted by `boyko_modding`** at first load (Principle 0: it is ECS data, not a side store). **No kernel field, no enum variant, no `Option<ModRegistry>` anywhere in `EcsMaster`** | none — an un-inserted resource slot is an index that is never read; `size_of::<EcsMaster>()` is unchanged, and G6 asserts it |
-| K-MOD-9 | ABI | every `#[no_mangle] extern "C"` thunk lives in `boyko_modding`; the kernel exports no C symbol | none — no symbol exists to export |
+| K-MOD-1 ⚠ *Rev 2.5 (P47): withdrawn with U-1 (05 §4)* | allocation | `HeapRef::{alloc, free, grow}` take a **runtime `Layout`** and are non-generic | none — `HeapDyn` already needs them, so they exist either way; an unreachable `pub fn` is dropped at link |
+| K-MOD-2 ⚠ *Rev 2.5 (P47): withdrawn with U-1 (05 §4)* | heap identity | `HeapRef` is `Copy + Send + Sync`, 8 B, `#[repr(transparent)]` over `NonNull<u8>` | none — it is the handle every engine collection already carries (P1) |
+| K-MOD-3 ⚠ *Rev 2.5 (P47): removed (U-1, U-10; 05 §4)* | mod memory lifetime | **one `Heap` per mod**: `Heap::new()` → 2 lazy reservations. Unloading a mod is `Heap::drop` = 2 `VirtualFree`, which bounds a mod's leak at its own reservation and never touches the engine's free lists | none — no `Heap` is constructed |
+| K-MOD-4 ⚠ *Rev 2.5 (P47): kept (05 §2 row 3)* | dynamic components | **the pool constructor is ALREADY layout-erased and non-generic**: `ComponentPool::new(component_id: usize, reserve_rows: usize)` (`component_pool.rs:279`) resolves `component_layout`, `drop_fn` and `type_id` out of `component_registry::get_layout_unchecked(component_id)` (`:284-288`). There is no `ComponentPool::new::<T>()` and therefore no generic path a mod would have to duplicate — the mod's pool and the engine's pool are the same call | **none, and this is the key to "identical codegen"** — there is no second path and no branch to take; the erased entry point already IS the only one |
+| K-MOD-5 ⚠ *Rev 2.5 (P47): kept as MS-03 and MS-02b (05 §3.2, §4)* | dynamic ids | the id counter is `component_registry::register_new::<T>()` (`component_registry/mod.rs:920-921`, `NEXT_ID.fetch_add(1, Ordering::Relaxed)`) — the **same counter** the derive macro uses. It is generic today only to key the `TypeId` mint, so the additive seam is a non-generic sibling taking `(Layout, Option<DropFn>)`; the kernel never distinguishes the resulting ids, so it never branches on origin | none — the counter and its `fetch_add` exist for the derive |
+| K-MOD-6 ⚠ *Rev 2.5 (P47): kept as MS-09 (05 §4)* | dynamic drop glue | the `drop_fn` a pool already stores: `pub type DropFn = unsafe fn(*mut u8)` (`component_registry/mod.rs:83`) in `pub drop_fn: Option<DropFn>` (`:117`) — the Bevy `Option<unsafe fn(OwningPtr)>` shape `[S blob_array.rs]`, already in-tree. A mod supplies an `extern "C"` thunk | none |
+| K-MOD-7 ⚠ *Rev 2.5 (P47, P51): kept per 05 §4; its gate is UG-15 leg (1) plus a `raw` import census* | what is NOT exposed | ~~`boyko_memory::raw::{reserve, commit, base}`~~ `boyko_memory::raw::{reserve, commit_at}` ⚠ *Rev 2.6 (P54/O4): KC-01's names*, ~~`FrameArena`,~~ `ChunkArena`/~~`ChunkCache`~~ `SlotChunks`, `ScopeBlock`. A mod gets ~~`Heap`/`HeapVec`/~~columns and nothing that could commit pages or reach the pool's scope memory | enforced by O6's allowlist gate |
+| K-MOD-8 ⚠ *Rev 2.5 (P47): kept (05 §4)* | registry | the mod registry is a **`Resource` inserted by `boyko_modding`** at first load (Principle 0: it is ECS data, not a side store). **No kernel field, no enum variant, no `Option<ModRegistry>` anywhere in `EcsMaster`** | none — an un-inserted resource slot is an index that is never read; `size_of::<EcsMaster>()` is unchanged, and G6 asserts it |
+| K-MOD-9 ⚠ *Rev 2.5 (P47): kept = UG-15 leg (1) (05 §4)* | ABI | every `#[no_mangle] extern "C"` thunk lives in `boyko_modding`; the kernel exports no C symbol | none — no symbol exists to export |
 
-**Why a mod gets its own `Heap` rather than the world's.** Three reasons, all performance or soundness: (i) HV-3's single-writer invariant would otherwise be shared with untrusted code; (ii) a mod's free-list corruption would be a kernel corruption; (iii) unload becomes `O(1)` and leak-bounded instead of a walk. Cost to the engine: zero, because no `Heap` is constructed when no mod is loaded. **Overturn gate:** if a scene loads > 64 mods and the per-mod 4 KiB header pages show up in the resident profile, mods share one `Heap` partitioned by class range.
+**Why a mod gets its own `Heap` rather than the world's.** Three reasons, all performance or soundness: (i) HV-3's single-writer invariant would otherwise be shared with untrusted code; (ii) a mod's free-list corruption would be a kernel corruption; (iii) unload becomes `O(1)` and leak-bounded instead of a walk. Cost to the engine: zero, because no `Heap` is constructed when no mod is loaded. **Overturn gate:** if a scene loads > 64 mods and the per-mod 4 KiB header pages show up in the resident profile, mods share one `Heap` partitioned by class range. ⚠ *Rev 2.5 (P47): withdrawn with K-MOD-3 — under load-only (U-10) reason (iii) is void, and reasons (i) and (ii) apply to any engine structure a mod writes (05 §4).*
 
-**G6 — the zero-cost gate (joins the ladder in §3):**
+**G6 — the zero-cost gate (joins the ladder in §3):** ⚠ *Rev 2.5 (P47): G6 = UG-15 (the plan's 03 §6, U-11); the row-by-row map is P47.3.*
 
 | Check | Mechanism | Red-first canary |
 |---|---|---|
@@ -1281,11 +1281,11 @@ Rev 1's 4 GiB + 16 GiB is cut to 1 GiB + 1 GiB: `InlandStore` already reserves 1
 > |---|---|---|---|
 > | M-A1 | `Schedule::run` floor, 0/1/2/4/8/16 systems | before / after 1a+1b | the **count** goes 2 → 0 (G2, no machine needed); the time delta is expected to be tens of ns and is recorded, not asserted |
 > | M-A2 | `par_iter` over 1M entities in 4096-row chunks | chunk cache hit vs `std::alloc` | per-scope cost of the chunk source |
-> | M-A3 | `HeapRef::alloc/free` at 16 B and 256 B | vs `System` | bar: mimalloc's < 10 ns median `[B Forrest Smith]` |
-> | M-A4 | `HeapVec::push` vs `Vec::push`, 1k / 1M | — | must be within noise (same algorithm); a difference means the class ladder is wrong |
+> | M-A3 ⚠ *Rev 2.5 (P46): struck with U-1 (03 MQ-08)* | `HeapRef::alloc/free` at 16 B and 256 B | vs `System` | bar: mimalloc's < 10 ns median `[B Forrest Smith]` |
+> | M-A4 ⚠ *Rev 2.5 (P46): struck with U-1 (03 MQ-08)* | `HeapVec::push` vs `Vec::push`, 1k / 1M | — | must be within noise (same algorithm); a difference means the class ladder is wrong |
 > | M-A5 | `EntitySlotMap` growth to 1M ids | `ensure_len_zeroed` vs `resize` | the fill loop is the measured difference |
 > | M-A6 | 1240-body pile, W = 1/8/16 | before / after rung 1 | **this is the entry that would overturn P0**: > 1 % attributable to the removed acquisitions raises rung 1's priority; < 0.3 % confirms the unification-only justification |
-> | M-A7 | Miri RSS of the existing suite | before setting O3's constants | the Heap's Miri arm sizes |
+> | M-A7 ⚠ *Rev 2.5 (P46): kept as AL:M-A7 (03 MQ-08); its Heap half is the revival form's* | Miri RSS of the existing suite | before setting O3's constants | the Heap's Miri arm sizes |
 
 ---
 
@@ -1470,7 +1470,7 @@ The arms are "the crate present but unused by the binary" and "the crate removed
 
 ## P15 (closes C1) — the O3/P1 contradiction is RULED, and the header gains a self-contained reserve/commit route
 
-**Depends on:** P1 (HEAP-1, `HeapRef` = reservation base), P11 TB-1 (as amended), §2.2 (the D1 commit-page relaxation), §5.1 drop order, `vm.rs:109, 168-179, 184, 199-209`, `constants.rs:7` (`COMMIT_GRANULE = 64 * 1024`).
+**Depends on:** P1 (HEAP-1, `HeapRef` = reservation base), P11 TB-1 (as amended), §2.2 (the D1 commit-page relaxation), §5.1 drop order, `vm.rs:109, 168-179, 184, 199-209`, `constants.rs:7` (`COMMIT_GRANULE = 64 * 1024`). ⚠ *Rev 2.5 (P46): P15's Heap half (15.1–15.6) is the Heap's revival form (U-1); `raw::commit_at` survives as KC-01's single commit route.*
 
 ### 15.1 The ruling
 
@@ -1874,7 +1874,7 @@ The critic is right on all three counts and the third is the decisive one: `give
 
 **Added:**
 
-> - **loom — and the sentence rev 2 had here was the defect, not a summary of it.** Saying "`ChunkCache` … no atomics — nothing to model" pointed at the wrong object: the atomics that make `SlotChunks` sound are in the **claim protocol**, and that is exactly what a model must cover. `Heap` and `FrameArena` genuinely have no cross-thread protocol (single owner, P15/P19) and stay unmodelled, with that stated as a property of their ownership rather than of their field types. Mandatory models, using the pool's existing `cfg(loom)` shim (`[merge] sync.rs:1-15` for the contract, `:63-89` for the two re-export arms — `:31-36` is the "deliberately **not** shimmed" list and is not the shim):
+> - **loom — and the sentence rev 2 had here was the defect, not a summary of it.** Saying "`ChunkCache` … no atomics — nothing to model" pointed at the wrong object: the atomics that make `SlotChunks` sound are in the **claim protocol**, and that is exactly what a model must cover. ~~`Heap` and `FrameArena` genuinely have no cross-thread protocol (single owner, P15/P19) and stay unmodelled, with that stated as a property of their ownership rather than of their field types.~~ ⚠ *Rev 2.5 (P51, pass-6 O1): no class outside the claim protocol, the carve and the injector is left with a cross-thread protocol to model — the Frame class is deleted (P34) and the Heap is not built (U-1); the Heap's revival form keeps its single-owner argument (HV-3, P15/P19), stated as a property of its ownership rather than of its field types.* Mandatory models, using the pool's existing `cfg(loom)` shim (`[merge] sync.rs:1-15` for the contract, `:63-89` for the two re-export arms — `:31-36` is the "deliberately **not** shimmed" list and is not the shim):
 >   1. **claim/handoff (the C3(1) shape):** thread A claims slot s, `give`s a chunk, releases; thread B claims s, `take`s it, writes it. Assert B observes A's chunk contents and the head chain. **Red-first: weaken either side to `Relaxed` → loom must report the missing edge.** This is the model that decides whether the Acquire/Release argument in 17.2 is real.
 >   2. **claim exclusivity:** `D+1` threads racing `fetch_or`; at most one holds each bit; the `(D+1)`-th degrades to `NO_CACHE_SLOT` and stays correct.
 >   3. **carve:** two threads `fetch_add` concurrently; ranges disjoint; each commits its own; the VA-bound check fires exactly once per over-advance.
@@ -1901,12 +1901,12 @@ The critic's mechanism is exact: a crate outside the binary's dependency closure
 
 > | Check | Mechanism | Red-first canary |
 > |---|---|---|
-> | (b) **no kernel code growth across the seam** | `.text` size of four kernel symbols, pinned as **absolute constants measured on the PARENT of the seam-landing commit** and written into `tests/mod_seam_pins.rs` in that same commit. The four are chosen so the pin has a guaranteed subject — **every pinned symbol is `#[inline(never)]` or `#[cold]` at its definition**, because an `#[inline]` function may leave no symbol at all and an absent symbol would read as a skip: `Schedule::run`, `ComponentPool::new` (`component_pool.rs:279`, non-generic), `ScopeBlock::grow` (`block.rs:425`, `#[inline(never)]` — this replaces rev 2's `ScopeBlock::bump`, which is `#[inline]` at `block.rs:368` and may not exist), `HeapRef::alloc_cold` (P15's `#[cold]` page-assign path). **A missing symbol is RED, never a skip.** | add a `cfg!(feature = "modding")` branch, a `Layout` parameter, or a registry lookup to any of the four → red |
+> | (b) **no kernel code growth across the seam** | `.text` size of four kernel symbols, pinned as **absolute constants measured on the PARENT of the seam-landing commit** and written into `tests/mod_seam_pins.rs` in that same commit. ~~The four are chosen so the pin has a guaranteed subject — **every pinned symbol is `#[inline(never)]` or `#[cold]` at its definition**, because an `#[inline]` function may leave no symbol at all and an absent symbol would read as a skip: `Schedule::run`, `ComponentPool::new` (`component_pool.rs:279`, non-generic), `ScopeBlock::grow` (`block.rs:425`, `#[inline(never)]` — this replaces rev 2's `ScopeBlock::bump`, which is `#[inline]` at `block.rs:368` and may not exist), `HeapRef::alloc_cold` (P15's `#[cold]` page-assign path).~~ ⚠ *Rev 2.6 (P52, AP7 W1): superseded by P29 (`:2609-2625`) and P49 (`:4561`). The pinned set is `ComponentPool::grow_rows`, `ComponentPool::commit_subregion`, `run_check_ticks_scan`, `ScopeBlock::grow`; `Schedule::run` and `ComponentPool::new` carry no inline attribute and are not pinned, and `HeapRef::alloc_cold` is never built (U-1)* **A missing symbol is RED, never a skip.** | add a `cfg!(feature = "modding")` branch, a `Layout` parameter, or a registry lookup to ~~any of the four~~ any symbol of P29's pinned set ⚠ *Rev 2.5 (P51, pass-6 O1): named by P29's rule, not by a count — four after P49* → red |
 > | (c) **no kernel growth** | `size_of::<EcsMaster>()`, `size_of::<ComponentPool>()`, `size_of::<Scope>()` pinned as **absolute numbers** from the same parent commit (the tree already pins struct sizes and already has a re-bless process for them — `rust-toolchain.toml:24-25`) | add an `Option<ModRegistry>` field → red |
 > | (d) **no startup work** | the census (G2) setup+steady numbers of the modding-absent build pinned as **absolute constants** from the parent commit | construct anything at boot in the off arm → red |
-> | (e) **the seam cannot grow silently** (NEW) | G1's `syn` scanner (P6 — the parse already happens) asserts that the set of kernel items carrying `#[doc(hidden)] pub` + the `mod-seam` marker attribute equals the named list K-MOD-1..K-MOD-10, **exactly** (an extra entry is red, a missing entry is red) | add a tenth erased entry point without a ledger row → red |
+> | (e) **the seam cannot grow silently** (NEW) ⚠ *Rev 2.5 (P47): superseded by P33/33.2 and P38.3; now UG-15 leg (5)* | G1's `syn` scanner (P6 — the parse already happens) asserts that the set of kernel items carrying `#[doc(hidden)] pub` + the `mod-seam` marker attribute equals the named list K-MOD-1..K-MOD-10, **exactly** (an extra entry is red, a missing entry is red) | add a tenth erased entry point without a ledger row → red |
 > | (a) no exported symbol | **unchanged**, with its tool decided in 18.2 | add a `#[no_mangle] pub extern "C" fn` to `boyko_ecs` → red |
-> | (f) **cargo feature unification / graph leakage** (the two-arm build, RELABELLED) | the two-arm build is KEPT — crate-present-but-unused vs crate-absent — and its true job is written down: it catches a mod crate that enables a feature of a shared dependency, or that pulls the kernel into a different codegen unit set. It **cannot** see a seam the kernel carries in both arms, and the table says so where a reader will look | enable a non-default feature of a shared dep from `boyko_modding` → red |
+> | (f) **cargo feature unification / graph leakage** (the two-arm build, RELABELLED) ⚠ *Rev 2.5 (P47): = UG-15 leg (6), its only role* | the two-arm build is KEPT — crate-present-but-unused vs crate-absent — and its true job is written down: it catches a mod crate that enables a feature of a shared dependency, or that pulls the kernel into a different codegen unit set. It **cannot** see a seam the kernel carries in both arms, and the table says so where a reader will look | enable a non-default feature of a shared dep from `boyko_modding` → red |
 >
 > **Re-bless discipline, borrowed verbatim from G2.** A pin moves only with a written reason in the same commit. Two legitimate reasons exist and are named: a toolchain bump (all rows re-derived at once, with the version in the header — the tree already lives with this, `rust-toolchain.toml:24-25`) and a deliberate kernel change unrelated to the seam. "It moved and I widened it" is the failure the G2 header already forbids and this file repeats the sentence.
 >
@@ -1954,7 +1954,7 @@ W1 is correct and its fix cannot be `frame(&mut self)`. But `frame(&self)` on a 
 
 ### 19.2 HV-4: no heap handle inside a component value — which removes W5 and answers open question 4
 
-**Removed** (P1's Added code block, the HV-3 comment lines, verbatim):
+**Removed** (P1's Added code block, the HV-3 comment lines, verbatim): ⚠ *Rev 2.5 (P46): HV-3 and HV-4, with G1's HV-4 assertion and the `hv3-owner` column, belong to the Heap's revival form (U-1); `Children` as a relation (below) stands.*
 
 > // HV-3 (NEW): push / pop / grow / Drop run ONLY on the heap's owner thread.
 > //   Reads (`Deref`, `as_slice`, `iter`) run anywhere. Enforced by the scheduler
@@ -2045,8 +2045,8 @@ W1 is correct and its fix cannot be `frame(&mut self)`. But `frame(&self)` on a 
 
 **Added:**
 
-> **one `Heap` per mod**: `Heap::new()` → 2 eager reservations, 1 committed header page (P15). Unloading is **four ordered steps, and `Heap::drop` is the LAST**, because a `Heap::drop` with entities still carrying that mod's components would run the mod's `drop_fn` against released VA:
-> 1. remove the mod's component types from every archetype and drop their rows — **K-MOD-10 (NEW seam entry):** `EcsMaster::remove_component_type(id: ComponentId)`, `#[cold]`, non-generic, cost-free when absent (no caller ⇒ dropped at link; it is in G6(e)'s pinned inventory). **There is no such operation in the tree today** (searched `ecs_master/`: `despawn_without_children` at `entity_api.rs:837` is per entity, and nothing unregisters a type), so this is a genuinely new kernel entry and is on the critical path of "a mod can be unloaded at all";
+> **one `Heap` per mod**: `Heap::new()` → 2 eager reservations, 1 committed header page (P15). Unloading is **four ordered steps, and `Heap::drop` is the LAST**, because a `Heap::drop` with entities still carrying that mod's components would run the mod's `drop_fn` against released VA: ⚠ *Rev 2.5 (P47): K-MOD-3 is removed (U-1; 05 §4) and K-MOD-10 is deleted (U-10, load-only); this unload sequence has no subject.*
+> 1. remove the mod's component types from every archetype and drop their rows — **K-MOD-10 (NEW seam entry):** `EcsMaster::remove_component_type(id: ComponentId)`, `#[cold]`, non-generic, cost-free when absent (no caller ⇒ dropped at link; it is in G6(e)'s pinned inventory). **There is no such operation in the tree today** (searched `ecs_master/`: `despawn_without_children` at `entity_api.rs:837` is per entity, and nothing unregisters a type), so this is a genuinely new kernel entry and is on the critical path of "a mod can be unloaded at all"; ⚠ *Rev 2.5 (P47): deleted (U-10).*
 > 2. drop the mod's `ComponentPool`s (releases their reservations);
 > 3. `Heap::drop` — 2 `VirtualFree`, and its debug `live_allocs == 0` assert (P15/15.5) is what catches a missed step 1;
 > 4. return the ids to `boyko_modding`'s free list.
@@ -2056,7 +2056,7 @@ W1 is correct and its fix cannot be `frame(&mut self)`. But `frame(&self)` on a 
 
 ## P22 (closes optional O1, O2) — the run table's bound and policy; the sanitize map's home
 
-**Depends on:** P15 (header layout, the third reservation), P1 (large tier).
+**Depends on:** P15 (header layout, the third reservation), P1 (large tier). ⚠ *Rev 2.5 (P46): P22 is the Heap's revival form (U-1).*
 
 **Removed** (P1's Added `HeapHeader` trailing comments — already quoted and removed in P15/15.2 — the clauses concerning `MAX_RUNS` and the live map placement, restated here for the record):
 
@@ -2369,7 +2369,7 @@ Preventing that requires the child to take the parent by `&mut`, which refuses t
 
 ## P25 (closes C2) — the page-assignment quantum is a function of the class, stated as a table, and the three derived numbers are re-derived
 
-**Depends on:** P1's ladder (`:669-675`), P15/15.2 (`COMMIT_PAGE`, header), P15/15.3, P15/15.4, P8/Q4, P22/O1.
+**Depends on:** P1's ladder (`:669-675`), P15/15.2 (`COMMIT_PAGE`, header), P15/15.3, P15/15.4, P8/Q4, P22/O1. ⚠ *Rev 2.5 (P46): P25 is the Heap's revival form (U-1); its 204 KiB worst case is one of U-1's reasons.*
 
 ### 25.1 The defect and the ruling
 
@@ -2463,7 +2463,7 @@ The arithmetic is as the critic states it. `size_class(c)` is `16c` for `c ∈ 1
 
 **Added:**
 
-> *(Step 4 is deleted: there is no free list and no id return. Unload is three steps — `remove_component_type` per world, drop the mod's pools, `Heap::drop` — and **K-MOD-10 stands unchanged**, still the genuinely new kernel entry on the critical path of "a mod can be unloaded at all".)*
+> *(Step 4 is deleted: there is no free list and no id return. Unload is three steps — `remove_component_type` per world, drop the mod's pools, `Heap::drop` — and **K-MOD-10 stands unchanged**, still the genuinely new kernel entry on the critical path of "a mod can be unloaded at all".)* ⚠ *Rev 2.5 (P47): K-MOD-10 is deleted (U-10, load-only).*
 
 ### 26.2 The gate
 
@@ -2612,7 +2612,7 @@ The critic's mechanism is right: the gate's own rule ("a missing symbol is RED, 
 
 **Added:**
 
-> The symbols are chosen by a **rule with three conditions, each checkable before the pin is written**, because rev 2.1 chose two that fail it and would have made the gate red on the shipped tree: a pinned symbol must (i) already carry `#[inline(never)]` or `#[cold]` **at its definition, for its own stated reason, cited file:line** — never an attribute added for this gate, which would be a codegen change to the engine bought for the modding build; (ii) be **non-generic**, so it has one mangled name rather than one per instantiation; (iii) lie on a path the seam could plausibly perturb. The five:
+> The symbols are chosen by a **rule with three conditions, each checkable before the pin is written**, because rev 2.1 chose two that fail it and would have made the gate red on the shipped tree: a pinned symbol must (i) already carry `#[inline(never)]` or `#[cold]` **at its definition, for its own stated reason, cited file:line** — never an attribute added for this gate, which would be a codegen change to the engine bought for the modding build; (ii) be **non-generic**, so it has one mangled name rather than one per instantiation; (iii) lie on a path the seam could plausibly perturb. The five: ⚠ *Rev 2.5 (P49): four — `HeapRef::alloc_cold` is struck (U-1).*
 >
 > | symbol | attribute, cited | why the seam would move it |
 > |---|---|---|
@@ -2620,7 +2620,7 @@ The critic's mechanism is right: the gate's own rule ("a missing symbol is RED, 
 > | `ComponentPool::commit_subregion` | `#[inline(never)]`, `component_pool.rs:559` | the commit route; K-MOD-7's `raw` seal and P15's `commit_at` both land on it |
 > | `run_check_ticks_scan` | `#[inline(never)]`, `check_ticks.rs:107` | walks every registered component id per tick check; an id-origin branch shows here |
 > | `ScopeBlock::grow` | `#[inline(never)]`, `block.rs:425` | the threadpool allocation path (replaces rev 2's `ScopeBlock::bump`, which is `#[inline]` at `block.rs:368` and may not exist) |
-> | `HeapRef::alloc_cold` | `#[cold]` by construction, P15/15.3 | the heap's page-assign path, written by this campaign |
+> | ~~`HeapRef::alloc_cold`~~ ⚠ *Rev 2.5 (P49): struck — U-1 never builds it; four symbols remain* | ~~`#[cold]` by construction, P15/15.3~~ | ~~the heap's page-assign path, written by this campaign~~ |
 >
 > **`Schedule::run` and `ComponentPool::new` are NOT pinned**, and the reason is recorded rather than left as an omission: neither carries an inline attribute today (`schedule.rs:286`, `component_pool.rs:279` — the `#[cold] #[inline(never)]` at `schedule.rs:510-511` belongs to a different function), so pinning them would have forced condition (i) to be bought with an attribute the engine does not otherwise want. **A missing symbol is RED, never a skip** — and under this rule a missing symbol now means "somebody removed an attribute", which is a real finding, instead of "the rule was written against symbols that never had one".
 >
@@ -2649,20 +2649,20 @@ The critic's mechanism is right: the gate's own rule ("a missing symbol is RED, 
 >
 > | Owner | Reservations | VA (release) | VA (Miri) | Resident floor at boot |
 > |---|---|---|---|---|
-> | `EcsMaster` | Heap small, Heap large, FrameArena (**ONE**, P27) | 1 GiB + 1 GiB + 256 MiB = **2.25 GiB** | 1 MiB + 256 KiB + 4 MiB | **4 KiB** — the heap's header page, committed by `Heap::new` (15.2); Frame is lazy, so 0 |
-> | `EcsMaster` | sanitize live map (P22/O2) | — (cfg'd out) | 8 KiB | 0 |
-> | `EcsMaster` | MasterTables (`TableSet`) | granule-rounded total, ≤ 4 MiB | same | one granule, 4 KiB after packing-plan D1 |
+> | `EcsMaster` ⚠ *Rev 2.5 (P46): Heap revival form; Frame deleted (P34)* | Heap small, Heap large, FrameArena (**ONE**, P27) | 1 GiB + 1 GiB + 256 MiB = **2.25 GiB** | 1 MiB + 256 KiB + 4 MiB | **4 KiB** — the heap's header page, committed by `Heap::new` (15.2); Frame is lazy, so 0 |
+> | `EcsMaster` ⚠ *Rev 2.5 (P46): Heap revival form* | sanitize live map (P22/O2) | — (cfg'd out) | 8 KiB | 0 |
+> | `EcsMaster` ⚠ *Rev 2.5 (P46): `TableSet` revival form (U-7)* | MasterTables (`TableSet`) | granule-rounded total, ≤ 4 MiB | same | one granule, 4 KiB after packing-plan D1 |
 > | `ThreadPool` | ChunkArena | **1 GiB** (16.5) | 2 MiB | 0 → peak concurrently-live chunk bytes; **≤ 390 KiB at W=16**, pinned by G2b (M-A10) |
 > | `ThreadPool` | `SlotChunks` (inline in `PoolInner`, not a reservation) | — | — | 448 B × (W+D) = **10.5 KiB at W=16, D=8** (P28) |
-> | `Schedule` | ScheduleTables | ≤ 1 MiB | same | 4 KiB |
+> | `Schedule` ⚠ *Rev 2.5 (P46): `TableSet` revival form (U-7)* | ScheduleTables | ≤ 1 MiB | same | 4 KiB |
 > | per `ComponentPool` | unchanged | unchanged | unchanged | 64 KiB → 4 KiB after packing plan S0-S2 |
-> | per mod (§7) | Heap small + large | 2 GiB | 1 MiB + 256 KiB | **4 KiB** (its own header page) |
+> | per mod (§7) ⚠ *Rev 2.5 (P47): withdrawn with K-MOD-3* | Heap small + large | 2 GiB | 1 MiB + 256 KiB | **4 KiB** (its own header page) |
 >
 > **Per-`EcsMaster` eager Miri cost: 1.26 MiB** (15.4, unchanged). Rev 1's 4 GiB + 16 GiB is cut to 1 GiB + 1 GiB: `InlandStore` already reserves 1 GiB on 64-bit (`inland_store.rs:5`, `DEFAULT_INLAND_RESERVE`) and is the tree's precedent. **The large tier's client list is empty after rung 2 and CONDITIONALLY non-empty at rung 3** — see P22/O1 as amended by P25/25.2, where the condition is a pinned counter rather than a claim. **Overturn gate:** a `Heap` exhausting 1 GiB of VA in any suite reds its own `#[cold]` exhaustion panic, which is the signal to raise the constant.
 
 ### O2 — `HeapHeader`'s line split is made true by a pad
 
-**Removed** (P15/15.2, the doc sentence, verbatim):
+**Removed** (P15/15.2, the doc sentence, verbatim): ⚠ *Rev 2.5 (P46): O2 (`LINE0_PAD`) is the Heap's revival form.*
 
 > /// Line 0 is everything the COLD paths need (limits, frontiers, the large base)
 > /// and is touched once per page assignment; line 1.. is `free[]`, which the
@@ -2700,13 +2700,13 @@ Cost: ≤ 36 B inside a page that is already committed. The `assert!` is what ke
 
 ## P31 — the pass-3 open questions, answered
 
-**1. Can G2b's `commit_delta` be 0 in the churn scenes?** Almost certainly not, and a flat pin would be red by construction — the critic's own catalogued failure. **Ruling: the counter is attributed by owner at the choke point, at zero cost.** `raw::commit_at` takes a `const OWNER: CommitOwner` parameter (`Column | Heap | Chunk | Frame | Table`) and increments `COMMITTED_BYTES: [AtomicUsize; 5]` at a **compile-time** index — same one relaxed RMW, no branch, no extra load. G2b then pins `Heap + Chunk + Frame + Table` at **0** over the steady window (these are the campaign's own structures; a commit there in a steady frame is the defect the gate exists for) and **reports** `Column`, whose legitimate growth is bounded separately by the scene's entity high-water. **M-A9** measures `commit_delta` by owner over S1c/S2 on today's tree *before* the pin is written; if `Column` is nonzero in a steady window that is a finding about column growth, not a licence to widen the pin. The anti-vacuity direction of G2b is unchanged and now applies per owner: the setup window must report nonzero for **each** owner class that the scene uses.
+**1. Can G2b's `commit_delta` be 0 in the churn scenes?** Almost certainly not, and a flat pin would be red by construction — the critic's own catalogued failure. **Ruling: the counter is attributed by owner at the choke point, at zero cost.** `raw::commit_at` takes a `const OWNER: CommitOwner` parameter (`Column | Heap | Chunk | Frame | Table`) and increments `COMMITTED_BYTES: [AtomicUsize; 5]` at a **compile-time** index — same one relaxed RMW, no branch, no extra load. G2b then pins `Heap + Chunk + Frame + Table` at **0** over the steady window (these are the campaign's own structures; a commit there in a steady frame is the defect the gate exists for) and **reports** `Column`, whose legitimate growth is bounded separately by the scene's entity high-water. **M-A9** measures `commit_delta` by owner over S1c/S2 on today's tree *before* the pin is written; if `Column` is nonzero in a steady window that is a finding about column growth, not a licence to widen the pin. The anti-vacuity direction of G2b is unchanged and now applies per owner: the setup window must report nonzero for **each** owner class that the scene uses. ⚠ *Rev 2.5 (P46.3): three owners — `Column`, `Chunk`, `Table` (the `Heap` owner leaves with U-1, `Frame` with P34; KC-01); G2b = UG-04 pins `Chunk` and `Table` at 0 and reports `Column`.*
 
 **2. Peak concurrently-live chunk bytes.** Accepted as stated: **M-A10** measures `chunk_bytes_resident` on the pile (the colored solve's 121 scopes/step across W=4, `frame-allocation-census.md:252`), and **the row moves into rung 1a's exit criteria**, not only 16.5's paragraph. 16.5's "≤ 4 chunks ≈ 16 KiB per slot, ≤ 390 KiB per pool" is labelled *derived from install + one nested `par_iter`* and is superseded by M-A10's number when it exists.
 
-**3. HV-4's boundary for `Local<T>` and Resources.** The critic is right that `ResMut<T>` in a parallel system is "a type a worker can obtain `&mut` to" by definition, so the permitted owner set is smaller than "the four structures". **Ruling: `hv3-owner` takes a value from a CLOSED vocabulary — `schedule`, `schedule-builder`, `registry`, `master-table` — and G1 refuses any other value, including an empty one.** A `Resource` is not an owner class; a `Local` is not an owner class. Consequence for the `SparseMap` rows rung 2 routes to `HeapVec` fields: a `SparseMap` user that is not one of the four **cannot become a heap row** and takes `VmColumn` instead. That decides the question by gate rather than by enumeration, so it does not need the enumeration now — which is the point, because the enumeration would go stale.
+**3. HV-4's boundary for `Local<T>` and Resources.** The critic is right that `ResMut<T>` in a parallel system is "a type a worker can obtain `&mut` to" by definition, so the permitted owner set is smaller than "the four structures". **Ruling: `hv3-owner` takes a value from a CLOSED vocabulary — `schedule`, `schedule-builder`, `registry`, `master-table` — and G1 refuses any other value, including an empty one.** A `Resource` is not an owner class; a `Local` is not an owner class. Consequence for the `SparseMap` rows rung 2 routes to `HeapVec` fields: a `SparseMap` user that is not one of the four **cannot become a heap row** and takes `VmColumn` instead. That decides the question by gate rather than by enumeration, so it does not need the enumeration now — which is the point, because the enumeration would go stale. ⚠ *Rev 2.5 (P46): the `hv3-owner` vocabulary belongs to the Heap's revival form (U-1); the `SparseMap` rows take `VmColumn`s (KC-18).*
 
-**4. Toolchain version beside each `.text` number.** Accepted verbatim. `tests/mod_seam_pins.rs`'s header records `rustc -Vv` output beside each of the five pinned numbers (P29 makes it five), so a re-bless after a toolchain bump is distinguishable from a re-bless after a seam change **by reading the file**, not the git log. P18's re-bless discipline already names the two legitimate reasons; this makes the first one self-evidencing.
+**4. Toolchain version beside each `.text` number.** Accepted verbatim. `tests/mod_seam_pins.rs`'s header records `rustc -Vv` output beside each of the ~~five~~ four pinned numbers (P29 makes it ~~five~~ four ⚠ *Rev 2.5 (P49)*), so a re-bless after a toolchain bump is distinguishable from a re-bless after a seam change **by reading the file**, not the git log. P18's re-bless discipline already names the two legitimate reasons; this makes the first one self-evidencing.
 
 ---
 
@@ -2917,7 +2917,7 @@ P31/1 puts `const OWNER: CommitOwner` on `raw::commit_at`, but P15 makes `VmRese
 
 ### 32.1 The ruling
 
-**R1. One table, and its value type is `ComponentId`, not `TagId`.** `TAG_NAMES` is renamed `DYN_NAMES` and becomes `OnceLock<Mutex<HashMap<Box<str>, ComponentId>>>`. This is the one field the critique identified, and it is the whole fork: `TagId` is `#[repr(transparent)]` over `ComponentId` (`tags.rs:47-49`), so **the map's value is the same word and the same bytes** — the change costs no memory and no instruction, it removes a claim the map was making and could not keep.
+**R1. One table, and its value type is `ComponentId`, not `TagId`.** `TAG_NAMES` is renamed `DYN_NAMES` and becomes `OnceLock<Mutex<HashMap<Box<str>, ComponentId>>>`. This is the one field the critique identified, and it is the whole fork: `TagId` is `#[repr(transparent)]` over `ComponentId` (`tags.rs:47-49`), so **the map's value is the same word and the same bytes** — the change costs no memory and no instruction, it removes a claim the map was making and could not keep. ⚠ *Rev 2.5 (P47): the rename is option A's, modding Stage 3 (05 MS-02b); D-S1(i)'s rename list is empty and the map keeps its name until then (05 RM-3).*
 
 **R2. Kind is never stored; it is re-derived from the tables that are already authoritative.** The lookup path computes `is_zst = get_layout(id).is_some_and(|l| l.is_zst())` and `kind = storage_kind(id)` — two cold loads from `LAYOUTS`/`STORAGE_KIND` — and hands back a handle only when they agree with the handle's own invariant:
 
@@ -3073,7 +3073,7 @@ static DYN_ID_CEILING: AtomicUsize = AtomicUsize::new(MAX_COMPONENTS);
 | one shared mint body replacing three | code **shrinks** |
 | `DYN_ID_CEILING` | 8 B `.bss`; one relaxed RMW per pin at boot; one relaxed load per type's first touch |
 | `new_dynamic`, `try_register_dynamic_by_name`, `dynamic_by_name`, `add_component_raw`, `remove_component_type` | no caller ⇒ dropped at link; G6(a) still asserts no exported symbol |
-| G6(b)'s five pinned symbols | none of them is touched (`component_pool.rs:559, 600`, `check_ticks.rs:107`, `block.rs:425`, `HeapRef::alloc_cold`) |
+| G6(b)'s ~~five~~ four pinned symbols ⚠ *Rev 2.5 (P49)* | none of them is touched (`component_pool.rs:559, 600`, `check_ticks.rs:107`, `block.rs:425`, ~~`HeapRef::alloc_cold`~~) |
 | G6(c)'s `size_of` pins | unchanged — every addition is a static or a free function |
 | G6(d) startup work | unchanged — `OnceLock`, lazy, and `DYN_ID_CEILING` is const-initialised |
 
@@ -3098,7 +3098,7 @@ static DYN_ID_CEILING: AtomicUsize = AtomicUsize::new(MAX_COMPONENTS);
 **Added** (three rows):
 
 > | `Children` is a **relation**, not a component value (P19/19.2); no public `Children(HeapVec<..>)` type ever exists | `boyko_scene`, `boyko_ui` hierarchy users read through the relation API; nothing migrates a `HeapVec` |
-> | `EcsMaster` gains `heap: Heap`, `tables: TableSet`. **No `frame` field and no `frame()` accessor** (P34) | none |
+> | ⚠ *Rev 2.5 (P46.3): neither field — U-1, U-7.* `EcsMaster` gains ~~`heap: Heap`, `tables: TableSet`~~. **No `frame` field and no `frame()` accessor** (P34) | none |
 > | **`DescendantsIter::new`, `AncestorsIter::new`, `EcsMaster::descendants`, `EcsMaster::ancestors` are removed and replaced by `*_in` forms taking `&mut TraversalScratch`** | `prelude.rs:1` (the type is re-exported), `relationship_api.rs:45-50, 57-62` (the two `pub &self` constructors), `observer_api.rs` (3 sites), `relation/mod.rs` (2), `query/mod.rs` (1), `relationship/mod.rs` (1), and the tests `boyko_ecs/tests/relations_query_scaling.rs` (13 uses), `relations_query_dsl.rs` (2), `boyko_scene/tests/gates_composition_structural.rs` (1) — 34 occurrences across 10 files, counted in joltab |
 
 **Two corrections to the critique's own blast radius, in the direction that makes the row bigger.** (i) The test files do not name `DescendantsIter`; they call `EcsMaster::descendants` (`relationship_api.rs:57-62`), a `pub` `&self` method P27 did not mention. Removing only the iterator's constructor would leave a `pub` method calling a deleted function. (ii) `AncestorsIter` carries the **same** `VisitedSet` (`traverse_iter.rs:206, 213-214`) and `DescendantsIter` carries a second `Vec` besides it — `stack: Vec<(Entity, usize)>` (`:284`) — which the `ACYCLIC` const-fold does *not* remove. Both walks, both buffers, and both `EcsMaster` accessors move together or the row is a half-migration.
@@ -3164,16 +3164,16 @@ Add P27's own two re-pointings (UI lanes → `ScratchColumn`, worker scratch →
 | 5 | §2.3, the Frame-class block | already quoted and replaced by P4; deleted with P4 | — |
 | 6 | §2.4, the Frame API (`:267-277`) | ``// Frame`` / ``impl FrameArena { pub fn new(label: &'static str) -> Self; pub fn alloc(&mut self, layout: Layout) -> NonNull<u8>; pub fn alloc_slice_uninit<T>(&mut self, n: usize) -> NonNull<T>; pub fn vec<T: Copy>(&mut self, cap: u32) -> FrameVec<'_, T>; pub fn mark(&self) -> FrameMark; pub fn rewind(&mut self, m: FrameMark); pub fn reset(&mut self); pub fn high_water(&self) -> usize; }`` | *(block deleted)* |
 | 7 | §2.5, the algorithm row (`:312`) | `\| `FrameArena::alloc` \| `p = align_up(cur, a); n = p+size; if n > end {cold commit}; cur = n` \| O(1) \| one line (`cur`,`end`), sequential writes into the arena \| 1 predictable \| identical to `ScopeBlock::bump` (`[merge] block.rs:369-398`) \|` | *(row deleted)* |
-| 8 | §4 rung 1e (`:348`) | `\| 1e \| `TermList` `Box::new` per (tag-terms, generation) epoch (`term_list.rs:141-170`); `traverse_iter.rs:51, 284` scratch (flagged per-call by Lens C, unverified) \| conditional \| `HeapDyn`/`HeapVec` (epoch-rate) / `FrameVec` (per call) \| conditional \|` | `\| 1e \| `TermList` `Box::new` per (tag-terms, generation) epoch (`term_list.rs:141-170`); `traverse_iter.rs:51, 284` scratch \| conditional \| `HeapDyn`/`HeapVec` (epoch-rate, `registry`-owned per P31/3) / **`Local<TraversalScratch>` of two `ScratchColumn`s** (per call) \| conditional \|` |
+| 8 ⚠ *Rev 2.5 (P46.3): `TermList` → KC-17 / KC-10, not `HeapDyn`/`HeapVec`* | §4 rung 1e (`:348`) | `\| 1e \| `TermList` `Box::new` per (tag-terms, generation) epoch (`term_list.rs:141-170`); `traverse_iter.rs:51, 284` scratch (flagged per-call by Lens C, unverified) \| conditional \| `HeapDyn`/`HeapVec` (epoch-rate) / `FrameVec` (per call) \| conditional \|` | `\| 1e \| `TermList` `Box::new` per (tag-terms, generation) epoch (`term_list.rs:141-170`); `traverse_iter.rs:51, 284` scratch \| conditional \| `HeapDyn`/`HeapVec` (epoch-rate, `registry`-owned per P31/3) / **`Local<TraversalScratch>` of two `ScratchColumn`s** (per call) \| conditional \|` |
 | 9 | §4 rung 2, the UI-lanes row (`:362`) | `\| UI frame lanes (`boyko_ui/resources.rs:216-254`, `pick.rs`, `focus.rs`, `bind_system.rs`), render `ui/pack.rs:143-150` \| `FrameVec` on the `FrameArena` (clear+refill per frame is exactly the frame class); `Vec<Vec<Entity>>` pools → CSR `FrameVec<u32>` offsets + flat `FrameVec<Entity>` two-pass \| dispatcher-only systems (UI runs exclusive) — verify per system in the rung \|` | `\| UI frame lanes (`boyko_ui/resources.rs:216-254`, `pick.rs`, `focus.rs`, `bind_system.rs`), render `ui/pack.rs:143-150` \| **`ScratchColumn` owned by the system** (`Local`, or KF-44 for an exclusive system) — the destination ledger rev 4 already records for these exact rows (`ledger/ui-lane.md:139-143`); `Vec<Vec<Entity>>` pools → CSR `ScratchColumn<u32>` offsets + flat `ScratchColumn<Entity>` two-pass \| no verification owed: a `ScratchColumn` is per-system state, so the dispatcher-only question does not arise \|` |
-| 10 | §5.3, the loom bullet as replaced by P17 (`:1866`) | `- **loom** — `Heap`, `FrameArena` and `ChunkCache` have no atomics (single writer / single slot owner); …` | `- **loom** — `Heap` and `ChunkCache` have no atomics (single writer / single slot owner); …` *(remainder unchanged)* |
+| 10 ⚠ *Rev 2.6 (P54/O1, AP7 O1): this site edited P11's bullet (`:1182`), which P17 had already removed (17.5, `:1873`). The live loom text is P17's Added block (`:1877`, with P51's fix), and this row's "`Heap` and `ChunkCache` have no atomics" is the sentence P17 called the defect* | §5.3, the loom bullet as replaced by P17 (`:1866`) | `- **loom** — `Heap`, `FrameArena` and `ChunkCache` have no atomics (single writer / single slot owner); …` | `- **loom** — `Heap` and `ChunkCache` have no atomics (single writer / single slot owner); …` *(remainder unchanged)* |
 | 11 | P3's sanitize line (`:925`) | `> `FrameArena::rewind`/`reset` fill the released range with `0xDD` under the same gate.` | *(line deleted — `rewind` was deleted by P24 and the arena by this patch; a third instance of the W1 class, not named in pass 4)* |
 | 12 | 15.4's Miri table row (`:1607`) | `\| FrameArena, per slot \| 64 MiB \| **0** (stays LAZY — P19) \| it has no reservation-resident header, so laziness costs it no branch on the handle path \|` | *(row deleted. **Per-`EcsMaster` eager Miri cost stays 1.26 MiB** — the Frame arena contributed 0 to it, so no derived number moves)* |
-| 13 | P30/O1's table, the `EcsMaster` row (`:2645`) | `\| `EcsMaster` \| Heap small, Heap large, FrameArena (**ONE**, P27) \| 1 GiB + 1 GiB + 256 MiB = **2.25 GiB** \| 1 MiB + 256 KiB + 4 MiB \| **4 KiB** — the heap's header page, committed by `Heap::new` (15.2); Frame is lazy, so 0 \|` | `\| `EcsMaster` \| Heap small, Heap large \| 1 GiB + 1 GiB = **2 GiB** \| 1 MiB + 256 KiB \| **4 KiB** — the heap's header page, committed by `Heap::new` (15.2) \|` |
-| 14 | K-MOD-7's not-exposed list (`:1207`) | `…`boyko_memory::raw::{reserve, commit, base}`, `FrameArena`, `ChunkArena`/`ChunkCache`, `ScopeBlock`.…` | `…`boyko_memory::raw::{reserve, commit, base}`, `ChunkArena`/`ChunkCache`, `ScopeBlock`.…` |
-| 15 | P14's implementation-plan step 3 (`:1257`) | `> 3. `boyko_memory` primitives: `ZeroInit` + the relaxed `VmColumn` bound (P5), `DropColumn`, `ByteColumn`, `FrameArena`/`FrameVec` (`&self`, P4), `Heap`/`HeapHeader`/`HeapRef`/`HeapVec`/`HeapBox`/`HeapDyn`/`HeapString`/`SortedMap` (P1), `TableSet`. Each with unit tests, the sanitize arm, and **both** Miri legs (P11). **C1's red-first test lands in this step, before any client**, and the O3/P1 laziness contradiction flagged in P8 is resolved before the `Heap` is written.` | `> 3. `boyko_memory` primitives: `ZeroInit` + the relaxed `VmColumn` bound (P5), `DropColumn`, `ByteColumn`, `Heap`/`HeapHeader`/`HeapRef`/`HeapVec`/`HeapBox`/`HeapDyn`/`SortedMap` (P1), `TableSet`. **No Frame class (P34) and no `HeapString` (P35).** Each with unit tests, the sanitize arm, and **both** Miri legs (P11). **C1's red-first Miri test lands in this step, before any client**, and the O3/P1 laziness contradiction flagged in P8 is resolved before the `Heap` is written.` *(this is the single authoritative edit of the line; P35 does not re-edit it)* |
-| 16 | Metrics, the unit-test bullet (`:438`) | `- **Mandatory unit tests**: each primitive's growth across a commit boundary; `DropColumn` destructor count on truncate/swap_remove/drop; `Heap` class boundaries (16, 256, 257, 512, 64 KiB, 64 KiB+1); free-list LIFO order; `FrameArena` mark/rewind LIFO `debug_assert`; `TableSet` alignment of every table; sanitize double-free detection (red-first).` | `- **Mandatory unit tests**: each primitive's growth across a commit boundary; `DropColumn` destructor count on truncate/swap_remove/drop; `Heap` class boundaries (16, 256, 257, 512, 64 KiB, 64 KiB+1); free-list LIFO order; `TableSet` alignment of every table; sanitize double-free detection (red-first).` *(the `mark/rewind` clause was already dead after P24 — the second unnamed W1-class instance)* |
-| 17 | Metrics, the `debug_assert!` bullet (`:440`) | `- **`debug_assert!` invariants**: owner thread on `Heap`/`FrameArena` mutation; `len <= committed`; LIFO mark order; class ↔ layout on `free`; `TableSet` bounds; HV-1 at `Heap::drop` (sanitize).` | `- **`debug_assert!` invariants**: owner thread on `Heap` mutation; `len <= committed`; class ↔ layout on `free`; `TableSet` bounds; HV-1 at `Heap::drop` (sanitize).` |
+| 13 ⚠ *Rev 2.5 (P46): the Heap rows are the revival form's* | P30/O1's table, the `EcsMaster` row (`:2645`) | `\| `EcsMaster` \| Heap small, Heap large, FrameArena (**ONE**, P27) \| 1 GiB + 1 GiB + 256 MiB = **2.25 GiB** \| 1 MiB + 256 KiB + 4 MiB \| **4 KiB** — the heap's header page, committed by `Heap::new` (15.2); Frame is lazy, so 0 \|` | `\| `EcsMaster` \| Heap small, Heap large \| 1 GiB + 1 GiB = **2 GiB** \| 1 MiB + 256 KiB \| **4 KiB** — the heap's header page, committed by `Heap::new` (15.2) \|` |
+| 14 ⚠ *Rev 2.5 (P51, pass-6 O1): read `SlotChunks` for `ChunkCache` (P16's rename); the Heap also leaves the list (U-1, P47)* | K-MOD-7's not-exposed list (`:1207`) | `…`boyko_memory::raw::{reserve, commit, base}`, `FrameArena`, `ChunkArena`/`ChunkCache`, `ScopeBlock`.…` | `…`boyko_memory::raw::{reserve, commit, base}`, `ChunkArena`/`ChunkCache`, `ScopeBlock`.…` |
+| 15 ⚠ *Rev 2.5 (P46.3): no `DropColumn`, no Heap class, no `TableSet` — step 3 is `ZeroInit` + the relaxed bound and `ByteColumn`; C1's Miri test is not written (03 §3)* | P14's implementation-plan step 3 (`:1257`) | `> 3. `boyko_memory` primitives: `ZeroInit` + the relaxed `VmColumn` bound (P5), `DropColumn`, `ByteColumn`, `FrameArena`/`FrameVec` (`&self`, P4), `Heap`/`HeapHeader`/`HeapRef`/`HeapVec`/`HeapBox`/`HeapDyn`/`HeapString`/`SortedMap` (P1), `TableSet`. Each with unit tests, the sanitize arm, and **both** Miri legs (P11). **C1's red-first test lands in this step, before any client**, and the O3/P1 laziness contradiction flagged in P8 is resolved before the `Heap` is written.` | `> 3. `boyko_memory` primitives: `ZeroInit` + the relaxed `VmColumn` bound (P5), `DropColumn`, `ByteColumn`, `Heap`/`HeapHeader`/`HeapRef`/`HeapVec`/`HeapBox`/`HeapDyn`/`SortedMap` (P1), `TableSet`. **No Frame class (P34) and no `HeapString` (P35).** Each with unit tests, the sanitize arm, and **both** Miri legs (P11). **C1's red-first Miri test lands in this step, before any client**, and the O3/P1 laziness contradiction flagged in P8 is resolved before the `Heap` is written.` *(this is the single authoritative edit of the line; P35 does not re-edit it)* |
+| 16 ⚠ *Rev 2.5 (P46.2): the `DropColumn`, `Heap` and `TableSet` tests are the revival forms'* | Metrics, the unit-test bullet (`:438`) | `- **Mandatory unit tests**: each primitive's growth across a commit boundary; `DropColumn` destructor count on truncate/swap_remove/drop; `Heap` class boundaries (16, 256, 257, 512, 64 KiB, 64 KiB+1); free-list LIFO order; `FrameArena` mark/rewind LIFO `debug_assert`; `TableSet` alignment of every table; sanitize double-free detection (red-first).` | `- **Mandatory unit tests**: each primitive's growth across a commit boundary; `DropColumn` destructor count on truncate/swap_remove/drop; `Heap` class boundaries (16, 256, 257, 512, 64 KiB, 64 KiB+1); free-list LIFO order; `TableSet` alignment of every table; sanitize double-free detection (red-first).` *(the `mark/rewind` clause was already dead after P24 — the second unnamed W1-class instance)* |
+| 17 ⚠ *Rev 2.5 (P46.2): the `Heap` and `TableSet` asserts are the revival forms'* | Metrics, the `debug_assert!` bullet (`:440`) | `- **`debug_assert!` invariants**: owner thread on `Heap`/`FrameArena` mutation; `len <= committed`; LIFO mark order; class ↔ layout on `free`; `TableSet` bounds; HV-1 at `Heap::drop` (sanitize).` | `- **`debug_assert!` invariants**: owner thread on `Heap` mutation; `len <= committed`; class ↔ layout on `free`; `TableSet` bounds; HV-1 at `Heap::drop` (sanitize).` |
 | 18 | Open questions, item 1 (`:444`) | `1. `FrameVec<T: Copy>` in v1 — the inventory found no droppable per-frame data; if the critic finds one, the answer is `DropColumn` on the Heap, not a finalizer chain.` | *(item deleted — the inventory found no per-frame data of any kind that wants an arena)* |
 
 ### 34.3 What this buys
@@ -3184,7 +3184,7 @@ Add P27's own two re-pointings (UI lanes → `ScratchColumn`, worker scratch →
 
 ## P35 (closes W2) — `HeapString` is retired, and rung 4's heap destinations are re-pointed to columns
 
-**Depends on:** P31/3 (the closed `hv3-owner` vocabulary), P1/HV-3 (single-writer), §1's retirement criterion ("a client-less primitive does not ship"), P34 (the same criterion, applied one section earlier).
+**Depends on:** P31/3 (the closed `hv3-owner` vocabulary), P1/HV-3 (single-writer), §1's retirement criterion ("a client-less primitive does not ship"), P34 (the same criterion, applied one section earlier). ⚠ *Rev 2.5 (P46): rung 4's column destinations stand; `HeapString`'s revival gate now sits inside the Heap's revival form (U-1).*
 
 **The critic's argument is correct and it reaches further than `HeapString`.** Under P31/3 an `hv3-owner` must be `schedule`, `schedule-builder`, `registry` or `master-table`. Rung 4's owners are a log ring written from worker threads, an asset loader, a UI text pipeline, an app title and a serializer — **none** of them is one of the four, so rung 4 cannot land as written for `HeapVec` either, not only for `HeapString`. Adding a fifth value would dissolve the vocabulary that makes HV-3 provable, so it is refused.
 
@@ -3257,7 +3257,7 @@ The critique's premise is right (COFF symbols carry no `st_size`) and its churn 
 
 **Added** (P18/18.2, after the tool choice):
 
-> **How the per-symbol number is obtained, per object format.** The measurement runs on the **rlib's object members**, not on the linked binary, for two reasons: local and `pub(crate)` symbols survive there (two of the five pinned symbols carry local linkage — `commit_subregion` is a private `fn` at `component_pool.rs:560`, `grow_rows` is `pub(crate)` at `:601`), and the quantity P18 wants is the kernel's codegen, not the linker's placement.
+> **How the per-symbol number is obtained, per object format.** The measurement runs on the **rlib's object members**, not on the linked binary, for two reasons: local and `pub(crate)` symbols survive there (two of the ~~five~~ four pinned symbols ⚠ *Rev 2.5 (P49)* carry local linkage — `commit_subregion` is a private `fn` at `component_pool.rs:560`, `grow_rows` is `pub(crate)` at `:601`), and the quantity P18 wants is the kernel's codegen, not the linker's placement.
 > - **ELF leg**: `llvm-nm --print-size` — `st_size` is exact.
 > - **PE/COFF leg**: `llvm-objdump --disassemble-symbols=<mangled>`, whose listing ends at the next symbol in the section; the number is therefore the function's size **rounded up to the 16-byte function alignment**. It is not perturbed by an unrelated function being placed after it, because that function contributes its own symbol and becomes the new boundary.
 > - The two legs measure slightly different quantities (exact vs 16-B-quantised), so **the pins are per leg**, alongside the `rustc -Vv` stamp P31/4 already requires. A leg whose pins were blessed on the other leg's numbers is a re-bless error, and the header's stamp is what makes it visible.
@@ -3268,7 +3268,7 @@ Accepted, with one self-correction to P31/1's shape: `const OWNER: CommitOwner` 
 
 **Added** (P31/1, after the ruling sentence):
 
-> **The parameter is a marker type with an associated index, not an enum const param:** `raw::commit_at<O: CommitOwner>(..)` where `trait CommitOwner { const INDEX: usize; }` and `Column`/`Heap`/`Chunk`/`Frame`/`Table`(minus `Frame`, deleted by P34 — **four** owners) are unit structs. Monomorphisation folds `COMMITTED_BYTES[O::INDEX]` to a constant address: same one relaxed RMW, no branch, no extra load, and no unstable feature. **`VmReservation::commit` carries the parameter through** — `commit<O: CommitOwner>(&mut self, ..)` — so `VmColumn`, `ComponentPool` and `TableSet` each name their own owner and the `Table` arm is not pinned at 0 vacuously by a wrapper that hard-codes one value. G2b's anti-vacuity direction (nonzero per used owner class at setup) would have caught this at rung time; naming it here saves the discovery.
+> **The parameter is a marker type with an associated index, not an enum const param:** `raw::commit_at<O: CommitOwner>(..)` where `trait CommitOwner { const INDEX: usize; }` and `Column`/`Heap`/`Chunk`/`Frame`/`Table`(minus `Frame`, deleted by P34 — **four** owners) are unit structs. Monomorphisation folds `COMMITTED_BYTES[O::INDEX]` to a constant address: same one relaxed RMW, no branch, no extra load, and no unstable feature. **`VmReservation::commit` carries the parameter through** — `commit<O: CommitOwner>(&mut self, ..)` — so `VmColumn`, `ComponentPool` and `TableSet` each name their own owner and the `Table` arm is not pinned at 0 vacuously by a wrapper that hard-codes one value. G2b's anti-vacuity direction (nonzero per used owner class at setup) would have caught this at rung time; naming it here saves the discovery. ⚠ *Rev 2.5 (P46.3): three owners — `Heap` leaves with U-1; `TableSet` is a revival form, so the `Table` owner is KC-18's `VmColumn<T, TableOwner>`.*
 
 ---
 
@@ -3280,11 +3280,11 @@ Accepted, with one self-correction to P31/1's shape: `const OWNER: CommitOwner` 
 
 **3. Can `ScratchColumn` hold `(Entity, u32)` and `u64`? Yes — but the rule that applies is not the one the question assumes, and it has a price.** `ScratchColumn::new(component_id, reserve_rows)` requires a **registered `ComponentId` whose layout matches `T`** (`component/scratch/scratch_column.rs:50-104`; it asserts `!needs_drop::<T>()`, then `debug_assert`s `layout.size() == size_of::<T>()` and `layout.align() >= align_of::<T>()`). `VmColumn`'s divisibility pin, relaxed by §2.2/P5, is not the constraint; **two ids out of the shared 512 are**. So:
 
-> **Added** (rung 1e, as a note on the `TraversalScratch` row): `TraversalScratch { visited: ScratchColumn<u64>, stack: ScratchColumn<(Entity, u32)> }` consumes **two `ComponentId`s**, process-wide and once, registered through `register_layout` (the doc-sanctioned synthetic use, `component_registry/mod.rs:1012-1024`) from two file-local `OnceLock`s inside the non-generic `TraversalScratch::new` (non-generic, so rust#22991's monomorphisation-collapse trap does not apply). Each registration lowers `DYN_ID_CEILING` (P32/32.4), so the budget accounting is automatic rather than a comment. `(Entity, u32)` also narrows the shipped `(Entity, usize)` frontier entry (`traverse_iter.rs:284`) — depth is capped at `MAX_PROPAGATION_DEPTH` (1024), so `u32` is sound and the entry shrinks 16 B → 12 B.
+> **Added** (rung 1e, as a note on the `TraversalScratch` row): `TraversalScratch { visited: ScratchColumn<u64>, stack: ScratchColumn<(Entity, u32)> }` consumes **two `ComponentId`s**, process-wide and once, registered through `register_layout` (the doc-sanctioned synthetic use, `component_registry/mod.rs:1012-1024`) from two file-local `OnceLock`s inside the non-generic `TraversalScratch::new` (non-generic, so rust#22991's monomorphisation-collapse trap does not apply). Each registration lowers `DYN_ID_CEILING` (P32/32.4), so the budget accounting is automatic rather than a comment. `(Entity, u32)` also narrows the shipped `(Entity, usize)` frontier entry (`traverse_iter.rs:284`) — depth is capped at `MAX_PROPAGATION_DEPTH` (1024), so `u32` is sound and the entry shrinks 16 B → 12 B. ⚠ *Rev 2.5 (P50, U-2): superseded — `TraversalScratch` builds both columns with `ScratchColumn::for_type` and consumes no `ComponentId` (KC-10); `DYN_ID_CEILING` was deleted by P39.*
 
 **4. `ensure_len_zeroed` after a shrink.** Accepted as a contract line with a debug mechanism, because the critic is right that it is true until the first client that truncates:
 
-> **Added** (§2.2, third bullet): `ensure_len_zeroed(n)` relies on the **fresh-commit** zero-fill contract (`vm.rs:19-37`), so a column that truncated and regrew within its already-committed range reads its own stale bytes, where the `slot+1` / zero encoding expects "absent". No named client shrinks today (`EntitySlotMap`, `LiveBitmap`, `EnableStore.pages` only grow), so this is a contract, not a defect. It is held by a mechanism rather than by the sentence: `VmColumn<T: Copy>` carries `#[cfg(debug_assertions)] ever_truncated: bool`, set by `truncate`/`set_len` on any shrink, and `ensure_len_zeroed` `debug_assert!`s it is clear. Release cost: zero (the field is `cfg`'d out). A client that legitimately needs both writes the zeros itself and says so at the call site.
+> **Added** (§2.2, third bullet): `ensure_len_zeroed(n)` relies on the **fresh-commit** zero-fill contract (`vm.rs:19-37`), so a column that truncated and regrew within its already-committed range reads its own stale bytes, where the `slot+1` / zero encoding expects "absent". No named client shrinks today (`EntitySlotMap`, `LiveBitmap`, `EnableStore.pages` only grow), so this is a contract, not a defect. It is held by a mechanism rather than by the sentence: ~~`VmColumn<T: Copy>`~~ `VmColumn<T: ZeroInit>` ⚠ *Rev 2.5 (P51, pass-6 O1): P5 made `ZeroInit` the struct bound* carries `#[cfg(debug_assertions)] ever_truncated: bool`, set by `truncate`/`set_len` on any shrink, and `ensure_len_zeroed` `debug_assert!`s it is clear. Release cost: zero (the field is `cfg`'d out). A client that legitimately needs both writes the zeros itself and says so at the call site.
 
 ---
 
@@ -3528,7 +3528,7 @@ G6 pins five `.text` symbols, three `size_of`s, startup numbers, symbol absence,
 
 ## P38 (closes pass-5 C1) — §7 CONSUMES KF-47; the seam adds no attach path of its own
 
-**Depends on / re-read before judging:** P12 (K-MOD table, G6), P26/26.1 constraint 1 (`drop_fn: None`), P32/32.1 R2 (the kind oracle), P32/32.6 (the gate rows), P33/33.2 (G6(e)), P29 (the five `.text` pins).
+**Depends on / re-read before judging:** P12 (K-MOD table, G6), P26/26.1 constraint 1 (`drop_fn: None`), P32/32.1 R2 (the kind oracle), P32/32.6 (the gate rows), P33/33.2 (G6(e)), P29 (the ~~five~~ four `.text` pins ⚠ *Rev 2.5 (P49)*).
 
 ### 38.1 The ruling
 
@@ -3570,7 +3570,7 @@ A sized dynamic id reaches those arms unchanged: `STORAGE_KIND`'s default reads 
 > >
 > > **The duplication question was already priced by the lane, and the same way.** It did not make the typed insert erased either; it added a sibling helper `migrate_entity_attach_ids_with_bytes` whose only caller is the by-id attach (`seam_by_id.rs:497-499`). The refusal Rev 2.3 wrote — never put a runtime-length memcpy on the engine's own `insert` — is therefore preserved as a *fact about the tree*, not as a fresh argument.
 > >
-> > **Cost when modding is absent: zero, and now zero for a stronger reason.** KF-47 is shipped kernel capability with engine clients of its own (scene load, prefab KF-13, serialize KF-08/09, undo, network apply — `RUNTIME-DATA-LEDGER.md:1662`). §7 adds **no function** to the kernel for attach/detach/mark, so there is nothing for a no-modding build to drop at link and nothing for G6(b)'s five `.text` pins to fail to see. Rev 2.3's answer relied on link-time dead-code elimination of a function §7 had created; this one does not create it.
+> > **Cost when modding is absent: zero, and now zero for a stronger reason.** KF-47 is shipped kernel capability with engine clients of its own (scene load, prefab KF-13, serialize KF-08/09, undo, network apply — `RUNTIME-DATA-LEDGER.md:1662`). §7 adds **no function** to the kernel for attach/detach/mark, so there is nothing for a no-modding build to drop at link and nothing for G6(b)'s ~~five~~ four `.text` pins ⚠ *Rev 2.5 (P49)* to fail to see. Rev 2.3's answer relied on link-time dead-code elimination of a function §7 had created; this one does not create it.
 > >
 > > **Two inherited limits a mod sees, stated because a mod author hits them and the seam did not author them:**
 > > - **entity-targeted observers do not fire on a by-id detach.** MEASURED by the lane: typed remove fires 1, by-id remove fires 0, and the call still returns `true` (`seam_by_id.rs:486-499`). The cause is a *pre-existing shared* helper (`migrate_entity_detach_ids`, also `remove_tag`'s), it is filed in `docs/OPEN-QUESTIONS.md` and gated RED-by-design by `g17`. §7 inherits it and must not "fix" it inside the modding rung — that is a kernel change with `remove_tag` in its blast radius.
@@ -3594,7 +3594,7 @@ A sized dynamic id reaches those arms unchanged: `STORAGE_KIND`'s default reads 
 
 **Added:**
 
-> | (e) **the seam cannot grow silently** (NEW) | G1's `syn` scanner (P6 — the parse already happens) asserts that the set of kernel **function items** carrying the doc-line marker `/// MOD-SEAM: K-MOD-n` equals the list below, **exactly** (an extra entry is red, a missing entry is red). **Membership is a rule, not a taste** (P29's form): an item is in the inventory iff a mod can reach it **and** its operation is *erased* — it takes a runtime `Layout`, a `ComponentId`, or raw bytes. It is **class A** (`#[doc(hidden)] pub` + marker) iff it has **no engine caller**, and **class B** (ordinary `pub` + marker) otherwise; pinning by doc-visibility alone would have made the rule unstatable. **Class A — 4:** `ComponentLayout::new_dynamic`, `component_registry::{try_register_dynamic_by_name, dynamic_by_name}`, `EcsMaster::remove_component_type`. **Class B — 9:** `HeapRef::{alloc, free, grow}`, `Heap::new`, `ComponentPool::new`, `EcsMaster::{add_component_by_id, remove_component_by_id, mark_component_changed}`, `EnableTagId::try_from_component_id`. **Thirteen items.** K-MOD-2/3/7/8/9 are not function items and are pinned by (a), (c) and O6's allowlist instead | add a fourteenth erased entry point without a ledger row → red; delete a marker line → red |
+> | (e) **the seam cannot grow silently** (NEW) ⚠ *Rev 2.5 (P47): = UG-15 leg (5); the list is 05 §3's, by this rule — the four `HeapRef`/`Heap::new` items leave with U-1, `remove_component_type` with U-10, and class A is MS-02b's (option A, Stage 3)* | G1's `syn` scanner (P6 — the parse already happens) asserts that the set of kernel **function items** carrying the doc-line marker `/// MOD-SEAM: K-MOD-n` equals the list below, **exactly** (an extra entry is red, a missing entry is red). **Membership is a rule, not a taste** (P29's form): an item is in the inventory iff a mod can reach it **and** its operation is *erased* — it takes a runtime `Layout`, a `ComponentId`, or raw bytes. It is **class A** (`#[doc(hidden)] pub` + marker) iff it has **no engine caller**, and **class B** (ordinary `pub` + marker) otherwise; pinning by doc-visibility alone would have made the rule unstatable. **Class A — 4:** `ComponentLayout::new_dynamic`, `component_registry::{try_register_dynamic_by_name, dynamic_by_name}`, `EcsMaster::remove_component_type`. **Class B — 9:** `HeapRef::{alloc, free, grow}`, `Heap::new`, `ComponentPool::new`, `EcsMaster::{add_component_by_id, remove_component_by_id, mark_component_changed}`, `EnableTagId::try_from_component_id`. **Thirteen items.** K-MOD-2/3/7/8/9 are not function items and are pinned by (a), (c) and O6's allowlist instead | add a fourteenth erased entry point without a ledger row → red; delete a marker line → red |
 
 **Why the count grew from ten to thirteen while the kernel grew by nothing:** three of the four additions are code that ships either way and is now *named* by the gate; the tenth item (`add_component_raw`) was deleted. The inventory got bigger and the seam got smaller, which is the direction (e) exists to detect — and it is now derivable from the rule rather than from a list a merge can invalidate.
 
@@ -3615,7 +3615,7 @@ A sized dynamic id reaches those arms unchanged: `STORAGE_KIND`'s default reads 
 
 **Added:**
 
-> | `new_dynamic`, `try_register_dynamic_by_name`, `dynamic_by_name`, `remove_component_type` (class A — four, not five) | no caller ⇒ dropped at link, now **measured** by G6(f)'s `.text` delta rather than asserted; G6(a) still asserts no exported symbol |
+> | `new_dynamic`, `try_register_dynamic_by_name`, `dynamic_by_name`, `remove_component_type` (class A — four, not five) | no caller ⇒ dropped at link, now **measured** by ~~G6(f)'s~~ G6(g)'s `.text` delta rather than asserted ⚠ *Rev 2.5 (P47): that row cannot see a kernel item; the measurement is UG-15 legs (7) and (7b), and under rule S-1 these items have no object code without an implementor*; G6(a) still asserts no exported symbol |
 > | `add_component_by_id` / `remove_component_by_id` / `mark_component_changed` / `try_from_component_id` (class B) | **0** — shipped kernel capability with engine clients (KF-47); the seam adds a doc line to each |
 
 ---
@@ -3659,7 +3659,7 @@ The critique is right and the number is worse than it states. `register_layout` 
 >
 > - **`try_register_dynamic`: an occupied slot is SKIPPED, not fatal.** The CAS loop already exists (`mod.rs:967-992`); on `LAYOUTS[current].set(..) == Err` the mint takes the next index and retries, and returns `None` only at `MAX_COMPONENTS`. `dynamic_slot_occupied_panic` (`:996-1010`) loses its only trigger and is **deleted** with its misleading "test-only escape hatch" message. The plan-O2 rule it protected is untouched and is the reason skipping is correct rather than convenient: the sentinel-`TypeId` idempotent arm stays refused, and advancing preserves the uniqueness it exists to protect (two names never alias one id).
 > - **`register_new`: same shape, existing arms first.** Same-`TypeId` occupancy keeps its idempotent return (`:935-936`); *different*-`TypeId` occupancy retries with a fresh index instead of panicking; the release exhaustion assert stays exactly where it is, at `MAX_COMPONENTS`.
-> - **Cost, and it is negative against Rev 2.3:** **zero added instructions on the success path** (the retry lives inside the branch that today panics), **zero bytes of `.bss`** (Rev 2.3 added 8 B and one relaxed RMW per pin plus one relaxed load per type's first touch — all deleted), **zero ids lost** by any build. `get_layout_unchecked`, `ComponentPool::new` and P29's five pinned symbols are untouched.
+> - **Cost, and it is negative against Rev 2.3:** **zero added instructions on the success path** (the retry lives inside the branch that today panics), **zero bytes of `.bss`** (Rev 2.3 added 8 B and one relaxed RMW per pin plus one relaxed load per type's first touch — all deleted), **zero ids lost** by any build. `get_layout_unchecked`, `ComponentPool::new` and P29's ~~five~~ four pinned symbols are untouched. ⚠ *Rev 2.6 (P54/O2): four after P49. A count marker only: P39's mechanism and gate stand as pass 6 reviewed them*
 > - **The two directions, stated separately, because Rev 2.3's "fail-closed" claim covered one of them.** *Mint walks into a pin* — **fixed**: the mint takes another slot; this is the direction modding makes worse, because mod names draw from the same upward counter. *Pin lands on a slot the counter already took* — **diagnosed, not fixed**: `register_layout`'s different-type panic stands and its message gains the id-space census below. Fixing that direction requires reserving a band before any mint, i.e. a compile-time floor, which charges the ids to every build including ones that never link the band owner — the exact cost W4 refused. It is refused again, with the overturn gate in 39.4.
 > - **The diagnosis that replaces the atomic, at zero steady cost:** `#[cold] pub fn id_space_census() -> IdSpaceCensus` scans the 512 `LAYOUTS` slots once, on a path that has already failed, and reports `{occupied, static, dynamic, pinned_above_counter, next_id}`. `DynMintError::IdSpaceExhausted` carries it, and `register_layout`'s panic prints it. **This is strictly more than Rev 2.3's gate demanded** (it names every out-of-band occupant, not one id) and it costs one cold function with no caller in a steady frame.
 
@@ -3669,18 +3669,18 @@ The critique is right and the number is worse than it states. `register_layout` 
 
 > | # | Case | Verdict | Red-first mutation |
 > |---|---|---|---|
-> | G-MINT-1 | mint one dynamic name → id `k`; `register_layout::<B>(k+1)`; mint a second name | **GREEN, and this is the discriminator**: the second name gets `k+2`, not an error and not a panic. The rejected `fetch_min` semantics fail this case, so the gate tells the two apart — which 32.4's could not | restore the occupancy panic → the test observes an abort instead of `k+2` |
-> | G-MINT-2 | pin id 100, then mint 200 distinct dynamic names | **GREEN**: all 200 succeed, none is 100 — *a mid-id pin does not reduce the budget*, the green the critique asked for | apply `fetch_min` on `register_layout` → the first mint past 100 fails |
-> | G-MINT-3 | own binary `tests/registry_id_exhaustion.rs`, **one** `#[test]` (it consumes the process id space; ignore class `solo` per the repository's reason-prefix vocabulary) — fill the space, then `try_register_dynamic_by_name` | `Err(IdSpaceExhausted)`, **no panic**, and the message carries the census counts | delete the `None` return at the ceiling → the mint spins |
-> | G-MINT-4 | `register_layout::<A>(100)` twice (idempotent), then `register_layout::<B>(100)` | second is a no-op; third panics, naming both types **and** the census | none needed — this pins the shipped per-slot contract so a future "band" edit cannot widen it silently |
+> | G-MINT-1 ⚠ *Rev 2.6 (P54/O5): built in D-S1(i)'s isolated form (02 `:300-307`; 03 UG-19): its own binary, a relative pin, and it expects `Ok(j)` with `j != k + 1`* | mint one dynamic name → id `k`; `register_layout::<B>(k+1)`; mint a second name | **GREEN, and this is the discriminator**: the second name gets `k+2`, not an error and not a panic. The rejected `fetch_min` semantics fail this case, so the gate tells the two apart — which 32.4's could not | restore the occupancy panic → the test observes an abort instead of `k+2` |
+> | G-MINT-2 ⚠ *Rev 2.6 (P54/O5): D-S1(i)'s form: its own binary; pin `P = next_id + 32`, not id 100, after asserting `free ≥ 201`* | pin id 100, then mint 200 distinct dynamic names | **GREEN**: all 200 succeed, none is 100 — *a mid-id pin does not reduce the budget*, the green the critique asked for | apply `fetch_min` on `register_layout` → the first mint past 100 fails |
+> | G-MINT-3 ⚠ *Rev 2.6 (P54/O5): D-S1(i)'s form: `registry_mint_exhaustion.rs`, not ignored; its mutation panics out of bounds on `LAYOUTS[512]` rather than spinning* | own binary `tests/registry_id_exhaustion.rs`, **one** `#[test]` (it consumes the process id space; ignore class `solo` per the repository's reason-prefix vocabulary) — fill the space, then `try_register_dynamic_by_name` | `Err(IdSpaceExhausted)`, **no panic**, and the message carries the census counts | delete the `None` return at the ceiling → the mint spins |
+> | G-MINT-4 ⚠ *Rev 2.6 (P54/O5): D-S1(i)'s form: its own binary, with the relative pin `P`, not id 100* | `register_layout::<A>(100)` twice (idempotent), then `register_layout::<B>(100)` | second is a no-op; third panics, naming both types **and** the census | none needed — this pins the shipped per-slot contract so a future "band" edit cannot widen it silently |
 
 ### 39.4 Overturn gate for the refused band (question 2, answered)
 
-**P37/3's two traversal ids come from no band. They are ordinary mints.** `ScratchColumn::new` needs "a registered `ComponentId` whose layout matches `T`" (`scratch_column.rs:50-104`) — and `register_new::<T>()` registers `ComponentLayout::new_static::<T>()`, which *is* that (`mod.rs:920-947`). `register_layout` was never required; it was required only if the ids had to be **compile-time constants**, which is why `boyko_physics` uses it (its cohorts are computed, e.g. `broadphase_column_id(k) = SCRATCH_ID_BROADPHASE_TOP - k`, `scratch_ids.rs:697-702`) and why the traversal scratch does not. So: two `register_new` calls behind two file-local `OnceLock`s inside the non-generic `TraversalScratch::new`, **no pin, no band, no ceiling interaction, and no process-global effect beyond consuming two ids** — which P43 counts.
+**P37/3's two traversal ids come from no band. They are ordinary mints.** `ScratchColumn::new` needs "a registered `ComponentId` whose layout matches `T`" (`scratch_column.rs:50-104`) — and `register_new::<T>()` registers `ComponentLayout::new_static::<T>()`, which *is* that (`mod.rs:920-947`). `register_layout` was never required; it was required only if the ids had to be **compile-time constants**, which is why `boyko_physics` uses it (its cohorts are computed, e.g. `broadphase_column_id(k) = SCRATCH_ID_BROADPHASE_TOP - k`, `scratch_ids.rs:697-702`) and why the traversal scratch does not. So: two `register_new` calls behind two file-local `OnceLock`s inside the non-generic `TraversalScratch::new`, **no pin, no band, no ceiling interaction, and no process-global effect beyond consuming two ids** — which P43 counts. ⚠ *Rev 2.5 (P50, U-2): superseded — no id at all; `TraversalScratch` uses `ScratchColumn::for_type` (KC-10). P39's mechanism (39.2) and gate (39.3) are unchanged.*
 
-**The physics band is untouched.** `SCRATCH_REGION_MIN_ID = MAX_COMPONENTS - 128` with its compile-time floor assert (`scratch_ids.rs:685, :690-695`) and its 142-type census (`:671-684`) remain the shipped protection: a margin plus a loud panic, exactly as its own doc says.
+**The physics band is untouched.** `SCRATCH_REGION_MIN_ID = MAX_COMPONENTS - 128` with its compile-time floor assert (`scratch_ids.rs:685, :690-695`) and its 142-type census (`:671-684`) remain the shipped protection: a margin plus a loud panic, exactly as its own doc says. ⚠ *Rev 2.5 (P50, U-2): the band is deleted at D-S2 (KC-10); its 128 ids go to 0.*
 
-**Overturn gate (the one measurement that would buy the band back):** if M-A13 shows the production counter's steady high-water above **320** (i.e. within 64 of the physics floor of 384) in any shipping scene, the band becomes a kernel-declared `const` with the mint ceiling derived from it, and every build pays the 128 ids. Until then that cost is charged to nobody.
+**Overturn gate (the one measurement that would buy the band back):** if M-A13 shows the production counter's steady high-water above **320** (i.e. within 64 of the physics floor of 384) in any shipping scene, the band becomes a kernel-declared `const` with the mint ceiling derived from it, and every build pays the 128 ids. Until then that cost is charged to nobody. ⚠ *Rev 2.5 (P50, U-2): void with the band; U-2's own overturn is D-S2 finding an untracked-pool path that needs a registered id.*
 
 ---
 
@@ -3708,7 +3708,7 @@ The critique is correct and the invalidation is precise: the shipped soundness a
 
 ## P41 (closes pass-5 W2) — C1's Miri gate derives its handle list, and its floor is re-derived from free sites
 
-**Depends on / re-read:** P35 (the derived heap-client set), §2.1's Heap row as amended by P35, §2.3's `SortedMap` declaration (`:239`).
+**Depends on / re-read:** P35 (the derived heap-client set), §2.1's Heap row as amended by P35, §2.3's `SortedMap` declaration (`:239`). ⚠ *Rev 2.5 (P46, P50): P41's gate is not built (U-1; the plan's 03 §3); pass-6 W3 is carried with the revival form (P46.4).*
 
 The critique is right twice: the body names a retired type, and the floor counted the wrong thing. `SortedMap { keys: HeapVec<K>, vals: HeapVec<V> }` (`:239`), so `HeapVec::drop` fires 1 (HeapVec) + 2 (SortedMap) = **3**, while `HeapBox` and `HeapDyn` free through `HeapRef::free` directly and never touch `HeapVec::drop`. "≥ 5, one per handle type" was counting allocations and calling them types.
 
@@ -3740,7 +3740,7 @@ The critique is right twice: the body names a retired type, and the floor counte
 
 **Added:**
 
-> | `boyko_utils::SparseMap::new_in(HeapRef)` — **`&mut Heap` is not a receiver anywhere in this design** (pass-1 C1; the bookkeeping lives inside the reservation, P1) | the archetype registry, which is an `hv3-owner` (`registry`). **Any other `SparseMap` user cannot become a heap row at all and takes `VmColumn` instead** (P31/3) |
+> | ⚠ *Rev 2.5 (P46.3): `SparseMap` moves into `boyko_ecs` on `VmColumn`s (KC-18, rung ~~D-R2d~~ D-M1); no `HeapRef`.* ⚠ *Rev 2.6 (P54/O3): D-M1 moves `SparseMap` (01 KC-16; 02 `:127`); D-R2d only retires its KF-02 row.* `boyko_utils::SparseMap::new_in(HeapRef)` — **`&mut Heap` is not a receiver anywhere in this design** (pass-1 C1; the bookkeeping lives inside the reservation, P1) | the archetype registry, which is an `hv3-owner` (`registry`). **Any other `SparseMap` user cannot become a heap row at all and takes `VmColumn` instead** (P31/3) |
 
 *Why this row mattered more than the other three: rev 2.1 added mutation M2 because "a developer picks the exit that compiles", and this table is where a developer reads the API surface.*
 
@@ -3776,9 +3776,9 @@ The critique is right twice: the body names a retired type, and the floor counte
 
 I read `ScratchColumn` rather than assuming the per-instance cost. `ScratchColumn::new(component_id, reserve_rows)` uses the id for exactly two things: `ComponentPool::new_untracked` resolves the **layout** from it (`scratch_column.rs:88-104`; `component_pool.rs:279-288`), and `pool_base_stagger(component_id)` derives the pool's leading in-reservation offset (`component_pool.rs:322-335`). The column is a **private field**, never handed out (`scratch_column.rs:43-48, :59-68`), and a scratch column is in no archetype signature. Therefore:
 
-> **Rule (new, stated in P34's destinations table): one registered `ComponentId` per distinct scratch ELEMENT TYPE, not per `ScratchColumn` instance.** Twenty systems each holding a `ScratchColumn<Entity>` cost **one** id between them.
+> **Rule (new, stated in P34's destinations table): one registered `ComponentId` per distinct scratch ELEMENT TYPE, not per `ScratchColumn` instance.** Twenty systems each holding a `ScratchColumn<Entity>` cost **one** id between them. ⚠ *Rev 2.5 (P50, pass-6 O2): the rule is superseded by U-2 — scratch is registry-free, zero ids; the layout-token finding above stands as the fact U-2 rests on (plan 01 R-B).*
 >
-> **The one exception is a cache fact, not a correctness fact:** two columns of the same element type that are iterated **in the same loop** should take distinct ids, because `pool_base_stagger` is a function of the id, so sharing it gives them the same leading offset and defeats the P2-CACHE-FIX that exists to keep co-touched columns off the same L1 sets. Necessary, not sufficient — the stagger is periodic, so two distinct ids can still collide; the rule buys the easy half. **Overturn gate:** if a rebuild pass shows L1d conflict misses between two same-typed co-iterated columns, split the id (or re-derive the stagger period), and record the measurement.
+> **The one exception is a cache fact, not a correctness fact:** two columns of the same element type that are iterated **in the same loop** should take distinct ids, because `pool_base_stagger` is a function of the id, so sharing it gives them the same leading offset and defeats the P2-CACHE-FIX that exists to keep co-touched columns off the same L1 sets. Necessary, not sufficient — the stagger is periodic, so two distinct ids can still collide; the rule buys the easy half. **Overturn gate:** if a rebuild pass shows L1d conflict misses between two same-typed co-iterated columns, split the id (or re-derive the stagger period), and record the measurement. ⚠ *Rev 2.5 (P50, U-2): the stagger is now a constructor argument taken from one process-global round-robin seed (KC-10); MQ-16 measures co-iterated same-layout columns.*
 
 ### 43.2 The projected delta, beside M-A13's measured base
 
@@ -3786,18 +3786,18 @@ I read `ScratchColumn` rather than assuming the per-instance cost. `ScratchColum
 
 **Added:**
 
-> **Measurement entry (specified, not run): M-A13** — the id-space census at steady state for `boyko_demo` and the playground scene, taken through `id_space_census()` (P39): `NEXT_ID` high-water, occupied slots, and their partition into static / dynamic-tag / dynamic-sized(asset) / pinned-out-of-band.
+> **Measurement entry (specified, not run): M-A13** — the id-space census at steady state for `boyko_demo` and the playground scene, taken through `id_space_census()` (P39): `NEXT_ID` high-water, occupied slots, and their partition into static / dynamic-tag / dynamic-sized(asset) / pinned-out-of-band. ⚠ *Rev 2.5 (P50): M-A13 is AL:M-A13 / MD:M-K3 (plan 03 §5, structural); under U-2 the scratch rows of the table below are 0 ids and the physics band is deleted, and `MAX_MOD_TYPES` is replaced by MS-03's D2 bound (05 §4).*
 >
 > **M-A13 measures a tree that has not yet spent what this design commits it to spending, so the cap is checked against base + projected delta, never against the base alone.** The projected delta, by the rule in 43.1:
 >
 > | destination | distinct element types | ids |
 > |---|---|---|
-> | `TraversalScratch` (P37/3) | `u64`, `(Entity, u32)` | 2 |
+> | `TraversalScratch` (P37/3) | `u64`, `(Entity, u32)` | ~~2~~ 0 ⚠ *Rev 2.5 (U-2)* |
 > | rung 2's CSR two-pass (hierarchy rebuild) | `u32` offsets, `Entity` flat | 2 (shared with any other CSR of the same two types) |
 > | UI frame lanes as CSR pairs (P34, 5 sites) | reuses `u32` / `Entity` unless a lane's element is a struct | 0-2 beyond the above |
 > | KF-44's 21 exclusive-system `Local` rows (`RUNTIME-DATA-LEDGER.md:820`) | **derived by the rung from the ledger's per-row element types**, not guessed here | ≤ the number of distinct element types among them |
 >
-> **Headroom arithmetic, labelled as a projection:** 512 total − 128 physics band (physics builds only, `scratch_ids.rs:685`) − ~142 derive sites (the physics census's own over-count, `:671-684`) − assets and dynamic tags (M-A13's job) − the delta above. `MAX_MOD_TYPES = 128` stays a **self-restraint inside `boyko_modding`** until M-A13 exists; 39.2 removed the mechanism that would have made the budget a runtime quantity, so the arithmetic is now over constants and one census.
+> **Headroom arithmetic, labelled as a projection:** 512 total − 128 physics band (physics builds only, `scratch_ids.rs:685`) − ~142 derive sites (the physics census's own over-count, `:671-684`) − assets and dynamic tags (M-A13's job) − the delta above. `MAX_MOD_TYPES = 128` stays a **self-restraint inside `boyko_modding`** until M-A13 exists; 39.2 removed the mechanism that would have made the budget a runtime quantity, so the arithmetic is now over constants and one census. ⚠ *Rev 2.5 (P50): superseded arithmetic — the band is deleted (U-2) and the bound is MS-03's D2 (05 §4).*
 
 ### 43.3 Rung-1 entry criterion, both directions (question 3)
 
@@ -3825,11 +3825,11 @@ Accepted, and the counterexample verified: `register_asset_layout::<T>(drop_fn)`
 
 Accepted. The gap is real: G6 pins symbols, `size_of`s, startup numbers and the inventory, while "no binary size" rests on "no caller ⇒ dropped at link", which nothing measures — and P36/O2 deliberately reads `.text` from the **rlib's object members**, where an unused function is still present.
 
-**Added** (a new row in the G6 table, after (e)):
+**Added** (a new row in the G6 table, after (e)): ⚠ *Rev 2.5 (P47, pass-6 W1): the row below is relabelled (g) and is answered by UG-15 leg (7).*
 
-> | (f) **no binary-size delta** (NEW) | `llvm-size` on the **linked** `boyko_demo`, both arms of (b): arm A declares `boyko_modding` as a dependency and never calls it, arm B removes the dependency. `.text`, `.rodata` and total section bytes must be **equal**, delta pinned at **0** | make the binary call one class-A seam function → nonzero; add `#[no_mangle]` to a kernel item → nonzero |
+> | ~~(f)~~ (g) **no binary-size delta** (NEW) ⚠ *Rev 2.5 (P47, pass-6 W1): relabelled; both arms link the same kernel, so this row cannot see a kernel-side survivor — UG-15 leg (7) does* | `llvm-size` on the **linked** `boyko_demo`, both arms of (b): arm A declares `boyko_modding` as a dependency and never calls it, arm B removes the dependency. `.text`, `.rodata` and total section bytes must be **equal**, delta pinned at **0** | make the binary call one class-A seam function → nonzero; add `#[no_mangle]` to a kernel item → nonzero |
 
-**Why a delta and not the absolute number the critique suggested** — and this is a refusal with a reason, not a dodge: an absolute `.text` pin needs a re-bless on every unrelated kernel edit and on every toolchain bump, which is the churn P18 already manages for five symbols and would now manage for a whole section; a **difference between two arms of the same commit** needs no re-bless ever, is immune to toolchain drift, and tests the exact claim ("dropped at link") rather than a proxy for it. It is also the only form that can be red-first without touching the kernel. The cost is that it cannot detect a size regression shared by both arms — which is (b)'s job, per symbol, and is where that question belongs.
+**Why a delta and not the absolute number the critique suggested** — and this is a refusal with a reason, not a dodge: an absolute `.text` pin needs a re-bless on every unrelated kernel edit and on every toolchain bump, which is the churn P18 already manages for ~~five~~ four symbols (⚠ *Rev 2.6, P54/O2: four after P49*) and would now manage for a whole section; a **difference between two arms of the same commit** needs no re-bless ever, is immune to toolchain drift, and tests the exact claim ("dropped at link") rather than a proxy for it. It is also the only form that can be red-first without touching the kernel. The cost is that it cannot detect a size regression shared by both arms — which is (b)'s job, per symbol, and is where that question belongs.
 
 ---
 
@@ -3872,13 +3872,13 @@ Accepted. The gap is real: G6 pins symbols, `size_of`s, startup numbers and the 
 
 ## Critique pass 6 log (final)
 
-Verdict: CHANGES_REQUESTED, no Critical remark. Closed by orchestrator ruling; the remarks below are OPEN.
+Verdict: CHANGES_REQUESTED, no Critical remark. Closed by orchestrator ruling; the remarks below are OPEN. ⚠ *Rev 2.5 (P50): every remark now has a disposition, recorded at its own line and in P50.*
 
-- [IMPORTANT W1 - no critical findings this pass; important findings also withhold APPROVED] The new G6 binary-size row (P44, ALLOCATOR-DESIGN-SPACE.md:3823) compares two builds that link the same kernel. P18's own row (f) (:1902) says that two-arm build cannot see anything the kernel carries in both arms. So it cannot observe what P38.5 (:3611) says it now measures: whether the four class-A kernel functions are dropped at link. Its `#[no_mangle]` canary cannot fire, and the table now has two rows labelled (f).
-- [IMPORTANT W2] The registry gate rows added by P39/P40 are written as if the registry were per-test. It is process-global, write-once and capped at 512 ids. (a) G-MINT-2 and G-MINT-4 pin the same id 100 in one binary. (b) G-MINT-1 asserts an exact successor while G-MINT-2's 200 mints run on another thread, and it can hit the pin-side panic. (c) G-MINT-3 is ignored under class `solo`, so it runs in no gate. (d) P40 row 8 races only on its first iteration, so its red-first check is unlikely to fire.
-- [IMPORTANT W3] P41's anti-vacuity counter lives in `HeapRef::free` and must equal 5. The test body itself calls `HeapRef::free` once per handle repetition, so a correct implementation reads at least 9 and the gate fails on it.
-- [IMPORTANT W4] P38.3's membership rule (reachable by a mod AND erased) is not what G6(e) checks; G6(e) only compares kernel marker lines against a list. The shipped `pub register_hooks_by_id` (joltab component_registry/mod.rs:864-906) fits the rule, is not in the 13-item list, and is not on K-MOD-7's not-exposed list. It writes process-global hook function pointers. The only thing forbidding that for mod ids is P26/3's prose, and a forwarded call leaves stale pointers that fire after a reload.
-- [IMPORTANT W5] The runtime data ledger (rev 4 on disk) still specifies rungs 1a, 1b and 1d with rev-1 mechanisms: KF-33 is a per-thread arena with a new TLS pointer (RUNTIME-DATA-LEDGER.md:1446-1457), KF-34 replaces the per-lane rings (:1459-1468), and the order of work puts these rows at rung 5 (:1783). P2, P10 and P16/P17 replaced all three and P14 schedules them at rung 1. P43.3's entry check does not cover this, so pass-1 C2's closure has not reached the document that assigns the work.
+- [IMPORTANT W1 - no critical findings this pass; important findings also withhold APPROVED] The new G6 binary-size row (P44, ALLOCATOR-DESIGN-SPACE.md:3823) compares two builds that link the same kernel. P18's own row (f) (:1902) says that two-arm build cannot see anything the kernel carries in both arms. So it cannot observe what P38.5 (:3611) says it now measures: whether the four class-A kernel functions are dropped at link. Its `#[no_mangle]` canary cannot fire, and the table now has two rows labelled (f). → *Rev 2.5 (P50): answered by UG-15 leg (7); the duplicate (f) is relabelled (g); leg (6) keeps only feature unification (P47).*
+- [IMPORTANT W2] The registry gate rows added by P39/P40 are written as if the registry were per-test. It is process-global, write-once and capped at 512 ids. (a) G-MINT-2 and G-MINT-4 pin the same id 100 in one binary. (b) G-MINT-1 asserts an exact successor while G-MINT-2's 200 mints run on another thread, and it can hit the pin-side panic. (c) G-MINT-3 is ignored under class `solo`, so it runs in no gate. (d) P40 row 8 races only on its first iteration, so its red-first check is unlikely to fire. → *Rev 2.5 (P50): D-S1(i)'s isolated tests (the plan's 02 §2 red-first list; UG-19).*
+- [IMPORTANT W3] P41's anti-vacuity counter lives in `HeapRef::free` and must equal 5. The test body itself calls `HeapRef::free` once per handle repetition, so a correct implementation reads at least 9 and the gate fails on it. → *Rev 2.5 (P50): void under U-1 — P41's gate is not built; carried with the revival form (P46.4).*
+- [IMPORTANT W4] P38.3's membership rule (reachable by a mod AND erased) is not what G6(e) checks; G6(e) only compares kernel marker lines against a list. The shipped `pub register_hooks_by_id` (joltab component_registry/mod.rs:864-906) fits the rule, is not in the 13-item list, and is not on K-MOD-7's not-exposed list. It writes process-global hook function pointers. The only thing forbidding that for mod ids is P26/3's prose, and a forwarded call leaves stale pointers that fire after a reload. → *Rev 2.5 (P50): the plan's 05 §5, row AP6-W4.*
+- [IMPORTANT W5] The runtime data ledger (rev 4 on disk) still specifies rungs 1a, 1b and 1d with rev-1 mechanisms: KF-33 is a per-thread arena with a new TLS pointer (RUNTIME-DATA-LEDGER.md:1446-1457), KF-34 replaces the per-lane rings (:1459-1468), and the order of work puts these rows at rung 5 (:1783). P2, P10 and P16/P17 replaced all three and P14 schedules them at rung 1. P43.3's entry check does not cover this, so pass-1 C2's closure has not reached the document that assigns the work. → *Rev 2.5 (P50): B1 (ledger rev 5; the plan's 02 §2).*
 
 # Architecture review: allocator design space, Rev 2.4 (pass 6)
 
@@ -3935,7 +3935,7 @@ None.
 
 #### W1. G6's new binary-size row compares two builds that link the same kernel, so it cannot see what P38.5 says it now measures
 
-**Where**
+**Where** ⚠ **Disposition (rev 2.5, P50):** answered by UG-15 leg (7); the row is relabelled (g) (P47.4); leg (6) keeps feature unification only.
 - P44/O2's new row "(f) no binary-size delta" (`:3823`).
 - P38.5's cost row (`:3611`): class A is "no caller => dropped at link, now **measured** by G6(f)'s `.text` delta rather than asserted".
 - P18's existing row (f) (`:1902`).
@@ -3968,7 +3968,7 @@ This is pass-2 C4's defect class ("a proof that compares a build to itself"), ba
 
 #### W2. The registry gate rows are written as if the registry were per-test
 
-**Where:** P39/39.3 G-MINT-1..4 (`:3663-3668`); P40 gate row 8 (`:3698`).
+**Where:** P39/39.3 G-MINT-1..4 (`:3663-3668`); P40 gate row 8 (`:3698`). ⚠ **Disposition (rev 2.5, P50):** D-S1(i)'s isolated tests (plan 02 §2).
 
 **Facts the rows run into**
 - `LAYOUTS` is a process-global, write-once table.
@@ -4002,7 +4002,7 @@ This is pass-2 C4's defect class ("a proof that compares a build to itself"), ba
 
 #### W3. P41's anti-vacuity equality fails on a correct implementation
 
-**Where:** P41's Anti-vacuity cell (`:3722`).
+**Where:** P41's Anti-vacuity cell (`:3722`). ⚠ **Disposition (rev 2.5, P50):** void under U-1; carried with the Heap's revival form (P46.4).
 
 **Problem**
 - The counter moved to `HeapRef::free` and must **equal** 5.
@@ -4021,7 +4021,7 @@ This is pass-2 C4's defect class ("a proof that compares a build to itself"), ba
 
 #### W4. P38.3's membership rule is not what G6(e) checks, and a shipped hook-registration path makes the gap dangerous
 
-**Where**
+**Where** ⚠ **Disposition (rev 2.5, P50):** plan 05 §5, row AP6-W4.
 - P38.3's rule and 13-item list (`:3590`).
 - P26 constraint 3 (`:2448`): "HOOKS[id] is never written for a mod id".
 - K-MOD-7's not-exposed list (`:1207`, as amended by P34).
@@ -4057,7 +4057,7 @@ P32/32.6 row 4 inspects `HOOKS[id]` only for whatever its own test mod does, so 
 
 #### W5. The work order still specifies rung 1 with the mechanisms pass 1 blocked and Rev 2 deleted
 
-**Where:** rungs 1a/1b/1d (P2, P10, P16, P17) and P43.3's entry criterion (`:3799`), against ledger rev 4.
+**Where:** rungs 1a/1b/1d (P2, P10, P16, P17) and P43.3's entry criterion (`:3799`), against ledger rev 4. ⚠ **Disposition (rev 2.5, P50):** B1.
 
 **Problem.** The ledger, which assigns the work, still describes the rows these rungs touch with rev-1 mechanisms, and its evidence cites rev-1 lines:
 - **KF-33** (`RUNTIME-DATA-LEDGER.md:1446-1457`):
@@ -4092,15 +4092,15 @@ On the design side:
 
 #### O1. Stale passages the replace-don't-annotate rule still misses
 
-- **P17's current loom bullet (`:1870`)** still says "`Heap` and `FrameArena` genuinely have no cross-thread protocol". P34 site 10 edited the text P17 had *already removed* (`:1866`), so the live sentence still names a deleted class.
-- **P18(b)'s canary** says "any of the four"; P29 pins five symbols.
-- **P37/4** says "`VmColumn<T: Copy>` carries ... `ever_truncated`", but P5 made the struct bound `ZeroInit`.
-- **K-MOD-7 (`:1207`)** still says `ChunkCache`. P16's blanket rename covers it, but a reader of that row alone will not know.
-- **The G6 table has two rows labelled (f)** (see W1).
+- **P17's current loom bullet (`:1870`)** still says "`Heap` and `FrameArena` genuinely have no cross-thread protocol". P34 site 10 edited the text P17 had *already removed* (`:1866`), so the live sentence still names a deleted class. → *fixed in place, rev 2.5 P51 (the sentence is at `:1877` on this tree)*
+- **P18(b)'s canary** says "any of the four"; P29 pins five symbols. → *fixed in place, rev 2.5 P51*
+- **P37/4** says "`VmColumn<T: Copy>` carries ... `ever_truncated`", but P5 made the struct bound `ZeroInit`. → *fixed in place, rev 2.5 P51*
+- **K-MOD-7 (`:1207`)** still says `ChunkCache`. P16's blanket rename covers it, but a reader of that row alone will not know. → *fixed in place, rev 2.5 P51 (the row is at `:1214` on this tree)*
+- **The G6 table has two rows labelled (f)** (see W1). → *relabelled (g), rev 2.5 P47.4*
 
 #### O2. The one-id-per-element-type rule has a shipped mechanism that the design's own client does not use
 
-- **The rule has a shipped mechanism.** P43.1's rule is already practised in the tree: `register_asset_layout::<T>(None)` memoizes one id per element type, and `mesh_draw.rs:418-434` uses it that way.
+- **The rule has a shipped mechanism.** P43.1's rule is already practised in the tree: `register_asset_layout::<T>(None)` memoizes one id per element type, and `mesh_draw.rs:418-434` uses it that way. ⚠ **Disposition (rev 2.5, P50):** void under U-2 — scratch is registry-free, so `TraversalScratch` uses `for_type` and no id.
 - **The design's own client bypasses it.** P39.4 prescribes `register_new` behind two file-local `OnceLock`s for `TraversalScratch`. Those cannot share an id with that memo. So the design's first named client breaks its own rule, and 43.2's "shared with any other CSR of the same two types" cannot happen. Name the memo as the mechanism.
 - **The stagger exception may already be violated in shipped code.** Render shares one `u32` id across `counts`, `offsets` and `cursors` (`mesh_draw.rs:446-448`), which are likely iterated together. That makes them the natural first subject of 43.1's overturn gate.
 
@@ -4152,7 +4152,927 @@ On the design side:
 1. **(Architect 1, the reflect-merge dependency.)** The dependency is correct. When the rung starts is the owner's schedule call.
 2. **(Architect 2, G6(f) and `#[used]`/ctor.)** As written, the unused dependency is never loaded, so a `#[used]` static or ctor in `boyko_modding` cannot reach arm A either; the gate will not "find out first" (W1). The ruling you propose — forbid both in `boyko_modding` — is still worth writing, and a `syn` check over that crate enforces it cheaply.
 3. **(Architect 3, `g17`.)** Agreed. Have the inherited-limit paragraph cite `g17` by name and its RED-by-design status, so the paragraph's deletion is tied to the lane flipping that test.
-4. **(Mine, PLAUSIBLE, no consequence found.)** P40 says "a reader reaches an id only through `DYN_NAMES`". Readers that scan `LAYOUTS` — `is_type_registered_as_component` (`mod.rs:1111`), P39's `id_space_census`, any reflect-side enumeration — see a published layout before the kind store. I found no such reader that acts on the kind. Either confirm there is none, or scope the sentence to readers that obtain the id through the name table.
-5. **(Mine.)** Class A lists `EcsMaster::remove_component_type` as having no engine caller. P21 says unload steps 1-2 are "kernel operations the engine already needs for world teardown". If world teardown calls it, the membership rule makes it class B. Which is it?
+4. **(Mine, PLAUSIBLE, no consequence found.)** P40 says "a reader reaches an id only through `DYN_NAMES`". Readers that scan `LAYOUTS` — `is_type_registered_as_component` (`mod.rs:1111`), P39's `id_space_census`, any reflect-side enumeration — see a published layout before the kind store. I found no such reader that acts on the kind. Either confirm there is none, or scope the sentence to readers that obtain the id through the name table. ⚠ **Disposition (rev 2.5, P50):** D-S1(i)'s cut lists every `LAYOUTS` scanner and confirms none acts on the kind, or else scopes P40's sentence (plan 02 §2).
+5. **(Mine.)** Class A lists `EcsMaster::remove_component_type` as having no engine caller. P21 says unload steps 1-2 are "kernel operations the engine already needs for world teardown". If world teardown calls it, the membership rule makes it class B. Which is it? ⚠ **Disposition (rev 2.5, P50):** void — `remove_component_type` is deleted (U-10).
 
-Status: closed at rev 2.4 (critique pass 6) by orchestrator ruling; open remarks W1-W5 above.
+Status: closed at rev 2.4 (critique pass 6) by orchestrator ruling; open remarks W1-W5 above. ⚠ *Rev 2.5: every remark above has a disposition (P50); rev 2.5 follows.*
+
+---
+
+# Rev 2.5 (2026-09-23)
+
+# Allocator design — Rev 2.5 (patch against Rev 2.4)
+
+**Scope.** Step DOC-1 of the unified system plan (`docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md` §5, first row; `UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md` §2, "Document steps"). Unlike rev 2 to 2.4, this revision answers no critique of its own. It writes the plan's rulings into the file the plan builds on, and it gives every remark of critique pass 6 (the plan calls it AP6) a disposition. Six patches:
+
+- **P46:** revival forms for the Heap class (with `HeapDyn`), `TableSet` and `DropColumn` (plan rulings U-1, U-7, U-8, U-9).
+- **P47:** §7 is re-pointed to the plan's file 05; G6 = UG-15; pass-6 W1's duplicate (f) is relabelled.
+- **P48:** §2.0. The engine thread context lives in `boyko_threadpool`, and `boyko_memory` keeps G5's `#![no_std]` (U-19).
+- **P49:** P29. `HeapRef::alloc_cold` is struck, and four symbols remain.
+- **P50:** a disposition for every pass-6 remark.
+- **P51:** pass-6 O1's stale passages, fixed in place.
+
+**Review.** Critique pass 7 (AP7) reviews **only this delta and the pass-6 dispositions**, because pass 6 already reviewed rev 2.4 (plan 02 §2). C1 waits for AP7: P48 rewrites §2.0, and §2.0 is what C1 builds.
+
+**What does not change.** The following content stands:
+- `ByteColumn` and `ZeroInit` (P5, P37/4);
+- `ChunkArena`/`SlotChunks` (P2, P16, P17, P28, P36/O1);
+- the injector ring and its spin (P10, P20);
+- rung 1f;
+- the gate ladder G1–G5 with G2b (P6, P7, P9, P23, P31/1 as corrected by P36/O3).
+
+P39 and P40 stay as pass 6 reviewed them. P39.4 carries a marker that records U-2's effect on its client paragraph, not on the mechanism. Where a surviving item names a primitive that P46 moves, only that name is re-pointed (P46.3).
+
+**Trees.**
+- **Documents:** read in `D:/wt/docs`, branch `u/doc-1-2` @ `49f2fcfb`, cut from `feat/multi-paradigm-render`.
+- **This file is byte-identical at `b716a5dc` and `49f2fcfb`:** `git diff --stat b716a5dc 49f2fcfb -- docs/memory/ALLOCATOR-DESIGN-SPACE.md` prints nothing. So every plan citation into this file "at `b716a5dc`" holds here. Each one was still re-located by content before use (P50).
+- **Plan files** are cited as `00`…`05`, meaning `docs/unification/UNIFIED-SYSTEM-PLAN-0N-*.md` at `49f2fcfb`. The ledger is `docs/memory/RUNTIME-DATA-LEDGER.md` at `49f2fcfb` (rev 4).
+- **Code:** one file was read, read-only, for P48's open question: `crates/boyko_ecs/src/ecs/memory/vm.rs` at `49f2fcfb`.
+- No cargo command, build or test was run.
+
+**Convention, and one addition to it.**
+- **The file's form is kept.** Each change quotes the text **removed** verbatim and then gives the text **added**, so the history reads in one place.
+- **New in rev 2.5: superseded passages are also marked where they stand.** Since rev 2, the file header has warned that a removed sentence "still reads as current where it stands". Pass 6's O1 found passages that the append-only form had missed. So every passage this revision supersedes now carries a marker on its own line: a suffix that begins `⚠ Rev 2.5`. Where the words themselves are corrected (P49, P51), the stale words are struck (`~~…~~`) beside their replacement.
+- **Two rules bind the markers.**
+  - **No sentence is deleted.**
+  - **No line is inserted before this Part.** Every marker is appended to an existing line, because 24 other documents cite this file by line number (ripgrep for `ALLOCATOR-DESIGN-SPACE.md:[0-9]` under `docs/`, excluding the frozen `docs/ru/`). Many of those citations carry no tree tag.
+- **So rev 2.5 moves no line of lines 1–4158.** The marker index at the end of this Part lists every line it touched.
+
+---
+
+## P46 — the Heap class (with `HeapDyn`), `TableSet` and `DropColumn` become revival forms (U-1, U-7, U-8, U-9)
+
+**Depends on / re-read:**
+- plan 00 §3, rulings U-1, U-7, U-8, U-9 (`00:108`, `:114-116`);
+- plan 01:
+  - §2 KC-01, KC-03, KC-06, KC-07, KC-10, KC-15..KC-18 (`01:78-105`);
+  - §3's "Allocator rev 2.4" mapping (`01:456-490`);
+  - §4 R-A, R-F, R-G (`01:499-521`, `:570-572`);
+  - §8, the revival-form shape (`01:984-989`);
+- plan 03 §3 ("C1: Heap test not applicable (U-1)", `03:55`) and §5 MQ-08 (`03:135`);
+- this file: P1, P8, P15, P19/19.2, P22, P25, P30, P31, P35, P41.
+
+### 46.1 The ruling, and what a revival form is
+
+**The four primitive families are not built.**
+- Plan 00 §3 rules each one by performance and names the gate that would overturn it.
+- The kernel contract takes their clients into ledger forms (01 §3, the "Allocator rev 2.4" rows; 01 §4 R-A, R-F, R-G).
+
+**A revival form** is the plan's device for a reviewed design that is not built; 01 §8 applies it to the windows word arm.
+- **The text is kept,** so that an overturn builds a reviewed design rather than a new one.
+- **The revival form states** the design (by location), its gates and its trigger, with the reason it is not built now.
+- **Nothing is deleted.** No text of P1, P15, P22, P25, P41 or the rest of the Heap design is removed. This patch states which text belongs to which revival form, and which rulings route the former clients.
+
+**The Heap class:** `Heap`, `HeapHeader`, `HeapRef`, `HeapVec`, `HeapBox`, `SortedMap`, plus `HeapString`, already retired by P35.
+- **Ruling:** U-1, deferred and not built.
+- **Why not now:**
+  - The per-frame cost is equal either way, because every client is build-time.
+  - The Heap would cost an eager Miri reserve of 1.26 MiB per `EcsMaster` and 2 GiB of VA per master (`:3171-3172`), with a worst resident of 204 KiB (`:2718`).
+  - It would add a new unsafe surface that is sensitive to Tree Borrows: `HeapHeader`, `HeapRef`, the class free lists and a 448-entry run table (01 R-A).
+  - The ledger forms cost a 4 KiB floor per column after D-M1 and add no new `unsafe`. They run on `ComponentPool` code that is already hot in L1i.
+- **Clients go to** (01 KCs):
+  - K7 spans (KC-15, `SegmentedColumn`): pow2 classes with LIFO class free lists, i.e. the `HeapVec` algorithm inside ECS storage (01 R-A);
+  - the erased record column (KC-17);
+  - fixed `VmColumn` tables (KC-18);
+  - sorted `ScratchColumn` pairs (KC-10).
+  - Row-level routing is the ledger's. B1 names this design authoritative for mechanism and the ledger for row inventory (02 §2).
+- **Revival trigger** (the ruling's overturn gate; 00 U-1, 05 §4), either of:
+  - ledger rev 5 finds a row that needs storage that is individually freed, variable-size and non-`Copy`, owned by `schedule`, `registry` or `master-table`, and not expressible as KC-15, KC-17 or KC-18;
+  - modding Stage 3 needs mod-private freed memory. The heap then lives in `boyko_mod_host`, not in the kernel.
+
+**`HeapDyn`**
+- **Ruling:** U-1 (its storage is the Heap) and U-9 (its role).
+- **Why not now:**
+  - U-9 stores erased objects (`Box<dyn System>`, `Box<dyn FnOnce>`, resource values) in KF-07 records. They sit behind this design's own `ErasedSystem { data, vtable }` handle, are dropped all at once after being appended, and cost one indirection, as today.
+  - `HeapDyn` is that handle plus a `HeapRef` word (24 B, P8/Q5), with one individually freed heap object per value.
+  - KC-17's handle is 16 B, and its records are freed together.
+- **Clients go to:** KC-17's `RecordColumn` plus `ErasedSystem` (16 B).
+- **What survives:** the `DynVTable` shape becomes KC-17's record vtable. That shape is a `&'static` per-trait vtable built by a generic `const fn`, with `LAYOUT` as an associated const and `drop_in_place` (P1, P8/Q5). 01 KC-17 reads: "`&'static` vtable (`drop_in_place`, `LAYOUT` const)".
+- **Revival trigger:**
+  - U-9's overturn (AL:M-A1's dispatch floor regresses beyond its band) reopens the question of the erased-object form. `HeapDyn` is then the reviewed candidate.
+  - `HeapDyn` also needs the Heap's own trigger, because its storage is the Heap.
+
+**`TableSet`:** `TableSet`, `TableLayout`, `TableSlot<T>`, `Table<T>`.
+- **Ruling:** U-7, deferred.
+- **Why not now:**
+  - Fixed kernel tables become fixed-capacity `VmColumn`s, or inline arrays inside one existing reservation (KF-31).
+  - After D-M1 each such column has a 4 KiB floor. So one reservation per table set shares granules only for tables smaller than a page.
+  - 01 R-F: "KF-31's inline arrays and the deferred TableSet produce the same memory".
+- **Clients go to:**
+  - KC-18 (`VmColumn<T, TableOwner>`, the `Table` producers of UG-04);
+  - KC-07 (`PoolInner` in one reservation, with inline `MAX_WORKERS` arrays);
+  - KC-06 (the injector ring, in the pool's reservation).
+- **Revival trigger:** UG-20 records more than 64 KiB of sub-page tables per `EcsMaster` (00 U-7).
+
+**`DropColumn<T>`**
+- **Ruling:** U-8, not built.
+- **Why not now:**
+  - The owning column (KF-02 / EK12) is a typed view over an untracked `ComponentPool` with drop glue.
+  - The pool already stores `drop_fn`, and KC-10's registry-free constructor takes it by value from `T`. The column therefore uses **no `ComponentId`** (U-2).
+  - That leaves no second droppable column type to cover under Miri.
+- **Clients go to:** KC-16 `OwnedColumn<T>`, built on KC-10's `ComponentPool::new_untracked_raw(.., drop_fn, ..)`.
+- **Revival trigger:** **none named.** U-8's overturn column reads "none expected". A revival would need a new ruling, and it would start from this text (open question 3).
+
+### 46.2 What each revival form keeps
+
+The kept text stays where it is, and each location carries a `⚠ Rev 2.5` marker (see the marker index).
+- **The gates below are not built while their form is not built.** 03 §3 already records "C1: Heap test not applicable (U-1)", and 03 §5 MQ-08 strikes AL:M-A3 and AL:M-A4.
+- They return with their form, unchanged unless the reviving rung re-derives them.
+
+**Heap class, with `HeapDyn`: design.**
+- §2.1's Heap row, as replaced by P1 and P35.
+- §2.3/§2.4's Heap blocks, as replaced by P1, P15/15.2 and P30/O2.
+- §2.5's `Heap`/`HeapVec` rows.
+- P1: HEAP-1, `HeapRef` = reservation base, HV-1..HV-3, and the rejected 16-B `HeapVec` sub-variant with its overturn gate.
+- P8: O1 (the ZST class); O3 as ruled by P15/15.1; O8; Q5 (`HeapDyn` is 24 B).
+- P15:
+  - eager reserve with lazy commit;
+  - the self-sufficient header;
+  - `raw::commit_at` as the header's commit route;
+  - the cold path as amended by P25;
+  - 15.4's Miri constants as amended by P25/25.3.
+- P19/19.2: HV-4.
+- P22: `MAX_RUNS = 448`, and the sanitize map's own reservation.
+- P25: the class-scaled page quantum (worst case 51 pages = 204 KiB).
+- P30: O1's Heap rows, and O2 (`LINE0_PAD`).
+- P31/3: the closed `hv3-owner` vocabulary.
+- P35: the retirement of `HeapString`, its revival gate, and the derived heap-client set.
+
+**Heap class: gates.**
+- C1's red-first Miri test `miri_heap_handle_aliasing.rs` on both legs: P1, P15/15.6's M1 and M2, and P41's derived body. **Pass-6 W3 is carried with it** (46.4).
+- G1's HV-1 declaration-order assertion, and the debug `live_allocs == 0` backstop (P15/15.5).
+- G1's HV-4 assertion, and the ledger's `hv3-owner` column (P19/19.2, P31/3).
+- The ledger's `max-bytes` column, and `large_allocs` pinned at 0 (P25/25.2).
+- The full-run-table counter pinned at 0 (P22/O1).
+- The sanitize live-bit map (P3 (a), P22/O2).
+- `assert!(offset_of!(HeapHeader, free) == 64)` (P30/O2).
+- G2b's `Heap` owner pinned at 0 (P31/1).
+- §5.2's reuse-order row, and P8/O8's capacity re-baseline row.
+- The Heap halves of the unit-test and `debug_assert!` bullets (P34 sites 16 and 17):
+  - "`Heap` class boundaries (16, 256, 257, 512, 64 KiB, 64 KiB+1); free-list LIFO order";
+  - "owner thread on `Heap` mutation; class ↔ layout on `free`; HV-1 at `Heap::drop`".
+- Measurements M-A3, M-A4, and M-A7's Heap constants (P14). 03 MQ-08 strikes AL:M-A3 and AL:M-A4.
+
+**Heap class: modding half.** K-MOD-1..K-MOD-3 and the "> 64 mods share one `Heap`" overturn (P12, P21). P47 withdraws them from §7. Only U-1's second trigger revives them, and then in `boyko_mod_host`.
+
+**Heap class: trigger and reason.** See 46.1.
+
+**`TableSet`: design.**
+- §2.1's Table row, §2.3's Table block and §2.4's Table API.
+- P8/Q3's build point: `MasterTables` is built at `App::finish()` and holds only sites whose count is final there. Q3's other half stands and is not part of the revival form: `EventBuffer` lanes and `EnableStore.pages` left the class for growable columns (01 KC-03).
+- P30/O1's `MasterTables` and `ScheduleTables` rows.
+- P36/O3's statement that `TableSet` names its own commit owner.
+
+**`TableSet`: gates.** The unit test "`TableSet` alignment of every table" and the debug assert "`TableSet` bounds" (P34 sites 16 and 17).
+
+**`TableSet`: what survives in the kernel.** The `Table` commit owner.
+- It is the owner of KC-18's tables, declared `VmColumn<T, TableOwner>`, and UG-04 pins it at 0 in the steady window (01 KC-01; 03 UG-04).
+- UG-04's red control: a KC-18 table built with the default owner reads 0 at setup.
+
+**`DropColumn`: design.**
+- The `DropColumn<T>` entry in §2.1's Column row.
+- §2.3's `DropColumn` struct (32 B) and §2.4's `DropColumn` API.
+- The rung-2 and rung-3 rows that name it (46.3).
+
+**`DropColumn`: gates.** The unit test "`DropColumn` destructor count on truncate/swap_remove/drop" (P34 site 16).
+- Its property is also the property KC-16 must hold: each destructor runs exactly once on truncate, `swap_remove` and drop.
+- Which test proves it for KC-16 is the plan's rung to decide, not this file's.
+
+### 46.3 Consequences for content that stays
+
+These items stay. Only the name of a primitive that P46 moves is re-pointed.
+
+- **The commit owner** (P31/1 as corrected by P36/O3): `raw::commit_at<O: CommitOwner>`, counted in `COMMITTED_BYTES[O::INDEX]`. Source: 01 KC-01; 03 UG-04.
+  - **There are three owners: `Column`, `Chunk` and `Table`.** `Heap` leaves with U-1, and `Frame` left with P34 (P36/O3 already counted four).
+  - G2b (UG-04) pins `Chunk` and `Table` at 0 over the steady window and reports `Column`.
+  - The anti-vacuity direction applies per owner whose producer has landed: `Chunk` from D-M2 (`ChunkArena`), `Table` from D-M1 (KC-18).
+- **G1 (UG-02).** The `syn` ledger gate stays (P6). Its three Heap-only assertions have no subject and are not built (46.2): HV-1 declaration order (P15/15.5), HV-4 on component values (P19/19.2), and the `hv3-owner` and `max-bytes` columns (P31/3, P25/25.2). Source: 03 UG-02.
+- **Rung 1c** is unchanged: `ByteColumn` (`spare_ptr` + `set_len`) holds `CommandQueue.bytes`, `panic_recovery` (P8/O7) and `ErasedKindBuffer.data`. It maps to KC-03 + KC-17 (01 §3: "1c → KC-17 + KC-03").
+- **Rung 1d** (P10) keeps the injector ring unchanged. Its home is **the pool's own reservation** (KC-06, "pool reservation"), not "the pool's `TableSet`". Source: 01 KC-06, KC-07; U-7.
+- **Rung 1e** (P34 site 8): the per-epoch `TermList` boxes go to KC-17 records or KC-10, not to `HeapDyn`/`HeapVec`. `Local<TraversalScratch>` is unchanged. Source: 01 §3 ("1e `TermList` → KC-17 / KC-10").
+- **Rung 2** (Part I §4, as amended). Source: 01 KC-15, KC-16, KC-18; 00 §5 (the ledger row).
+  - The observer arenas and `TriggerLists.by_trigger` move from `DropColumn<..>` and `HeapVec<HeapVec<..>>` to KC-16 or KC-15, per ledger row.
+  - `boyko_utils::SparseMap` (Part I, and P42 (1)'s `new_in(HeapRef)` row) moves into `boyko_ecs` on `VmColumn`s (KC-18; rung ~~D-R2d~~ D-M1). ⚠ *Rev 2.6 (P54/O3): D-M1 moves it (01 KC-16, `01:103`; 02 `:127`); D-R2d only retires its KF-02 row (`sparse_map.rs:10`).*
+- **Rung 3** (Part I §4). Source: 01 §3, R-A.
+  - `ScheduleTables`, `MasterTables` and `PoolTables` become KC-18's fixed `VmColumn` tables and KC-07's inline arrays (U-7).
+  - `Table<ErasedSystem>` becomes KC-17.
+  - The builder's `SortedMap` becomes sorted `ScratchColumn` pairs (KC-10).
+  - `HeapDyn<FnOnceVTable>` becomes KC-17.
+  - `DropColumn<ComponentPool>` and `DropColumn<Option<DenseStore>>` become KC-16 or KC-18, per ledger row.
+  - Unchanged: the `Arc<ThreadPool>` removal (KC-07); `EventBuffer` lanes and `EnableStore.pages` as growable `VmColumn`s (P8/Q3).
+- **§5.1** (as replaced by P33/33.1 and P42 (1)): `EcsMaster` gains **neither** `heap: Heap` **nor** `tables: TableSet`. The `SparseMap` row follows rung 2 above. Source: U-1, U-7.
+- **P30/O1's reservation table.** Source: U-1, U-7.
+  - These rows belong to the revival forms: `EcsMaster`'s Heap rows (and P34 site 13's replacement), the sanitize-map row, `MasterTables`, `ScheduleTables`, and the per-mod row.
+  - These rows stand: the `ThreadPool` rows (`ChunkArena` at 1 GiB, 2 MiB under Miri; `SlotChunks` at 448 B × (W+D)) and the per-`ComponentPool` row.
+- **P14 step 3** (as replaced by P34 site 15). Source: 01 KC-01, KC-03; 03 §3.
+  - `boyko_memory`'s primitives are `ZeroInit` + the relaxed `VmColumn` bound (P5) and `ByteColumn`. There is no `DropColumn`, no Heap class and no `TableSet`.
+  - C1's red-first Miri test is not written.
+- **§1**, "What (i) cannot do" and "Rejected alternatives". Source: 01 KC-15, KC-16.
+  - `HeapVec`'s relocate-on-grow clients take KC-15 spans, which also relocate on grow.
+  - The rejection of `allocator_api` stands. Its sites are now served by KC-16 and the ledger forms instead of `DropColumn`/`HeapVec`.
+
+### 46.4 Pass-6 W3, carried with the Heap's revival form
+
+**Removed:** nothing. P41's Anti-vacuity cell (`:3729`) stays as the revival form's text.
+
+**Added** (a note bound to P41's cell; the rung that revives the Heap applies it):
+
+> **Pass-6 W3 (`:4003-4020`): the counter's location contradicts its derivation.**
+> - The counter sits in `HeapRef::free` and must equal 5.
+> - The test body calls `owner.heap.as_ref().free(..)` once per handle repetition, and that call is `HeapRef::free` too. So a correct implementation reads 5 + 4 = 9.
+> - It reads more if `push 8` or a `SortedMap` insert grows through `HeapRef::grow`, whose documented slow path is alloc + memcpy + free (`:744-745`).
+>
+> **The derivation stands; the constant does not.** Before the test is written, the reviving rung chooses one of pass 6's three repairs and records the choice in the test header:
+> 1. count at the handles' `Drop` sites, which is the quantity the derivation describes;
+> 2. derive the constant including the body's own frees and any grow frees, and say which;
+> 3. assert a lower bound instead of an equality.
+>
+> Until then the gate is not built (U-1; 03 §3), so the remark has no current subject. It is **void under U-1 and carried here** (plan 02 §2, row W3).
+
+---
+
+## P47 — §7 is re-pointed to the plan's file 05; G6 = UG-15; pass-6 W1's duplicate (f) is relabelled
+
+**Depends on / re-read:**
+- this file: P12 (§7 and G6), P18, P21, P26, P29, P32, P33/33.2, P38, P44/O2;
+- plan 00 §3, U-10 and U-11 (`00:117-118`);
+- plan 01 §3's §7 rows (`01:474-485`), and 01 KC-19a/KC-19b;
+- plan 03 §6, UG-15 legs (1)–(7b) (`03:165-184`);
+- plan 05:
+  - §1: H-1, rule S-1 and the crate names (`05:25-96`);
+  - §3 (`05:115-214`);
+  - §4, the reconciliation table (`05:216-231`);
+  - §5, row AP6-W4 (`05:252`);
+  - §6 (`05:265-306`).
+
+### 47.1 The ruling
+
+**§7 is no longer this file's to specify.**
+- Plan file 05 carries modding as testable properties under two rules:
+  - the owner's requirement H-1;
+  - rule S-1: kernel modding code is generic over `ModSeam`, so it is not compiled when it is unused.
+- 05 §4 is the reconciliation of this section with the closed modding design.
+- **From rev 2.5, file 05 is authoritative for §7's content.** §7's text stays as the history of how its items were derived, and each K-MOD row carries a marker pointing to its disposition in 05.
+
+**The crate is renamed.** P12's single crate `boyko_modding` is retired in favour of three (05 §1 (a)), and no kernel crate depends on any of them:
+- `boyko_mod_host` (the host image);
+- `boyko_mod_api` (the mod image);
+- `boyko_mod_registry` (the modding game binary only).
+
+### 47.2 The K-MOD rows, re-pointed
+
+**K-MOD-3 and K-MOD-10 are removed** (00 §5, the DOC-1 row). The other rows follow 05 §4.
+
+- **K-MOD-1** (`HeapRef::{alloc, free, grow}`, taking a runtime `Layout`): **withdrawn with U-1**, because mods use engine storage forms. Now: the Heap's revival form (P46); 05 §4, first row.
+- **K-MOD-2** (`HeapRef` identity): **withdrawn with U-1**. Now: the same.
+- **K-MOD-3** (one `Heap` per mod; P12, with the unload steps of P21 and P26): **removed.** Now: 05 §4, first row.
+  - Its reason (iii), O(1) unload, is void under load-only (U-10).
+  - Its reasons (i) and (ii) apply to any engine structure a mod writes, and a heap does not solve them (05 §4).
+  - It is revived only by U-1's second trigger, and then in `boyko_mod_host`.
+- **K-MOD-4** (the erased pool constructor): **kept.** Now: 05 §2, row 3 ("Pool construction").
+- **K-MOD-5, with P26 and P39:** **kept.** Now: 05 §3.2 MS-02b and MS-03; 01 KC-19a/b.
+  - The skip mint is KC-19a, a bug fix in rung D-S1(i). The occupancy reads are MS-03 (Stage 1, rung D-S1(ii)).
+  - The sized by-name mint is MS-02b: option A only, at modding Stage 3. It covers `intern_or_mint_sized`, `new_dynamic`, `try_register_dynamic_by_name` and `dynamic_by_name`.
+- **K-MOD-6** (`drop_fn` scoped to the seam, P44/O1): **kept.** Now: 05 MS-09 (mod components are POD in v1).
+- **K-MOD-7** (the not-exposed list): **kept.** Now: 05 §4, row K-MOD-7.
+  - `FrameArena` (P34) and the Heap (U-1) are removed from the list.
+  - `ChunkCache` reads `SlotChunks` (P16); P51 fixes the row.
+  - Its gate is UG-15 leg (1) plus a `raw` import census.
+  - Under option A, `register_hooks_by_id` and the typed hooks builder join the list (pass-6 W4; 05 §5, row AP6-W4).
+- **K-MOD-8** (the registry is a `Resource` in the modding crate): **kept** (05 §4).
+- **K-MOD-9** (no C symbol in the kernel): **kept = UG-15 leg (1).** Now: 05 §4; 03 §6 leg (1).
+  - Leg (1) is a `syn` census of export and retention attributes, non-Rust-ABI function definitions and global assembly.
+  - It is never re-blessed, and its owner-held allowlist is empty.
+- **K-MOD-10** (`EcsMaster::remove_component_type`; P21, P26): **removed.** It is deleted by U-10: mods are load-only, and kernel registries are write-once. Now: 05 §4, row K-MOD-10; 00 U-10.
+  - It was class A of P38.3's inventory, so class A shrinks to three items.
+  - Those three are MS-02b's (option A, Stage 3).
+- **K-MOD-11** (P32/32.5, as consumed by P38): **already consumed.** KF-47's by-id ops carry `MOD-SEAM` doc markers. Now: 05 MS-08; 01 KC-21.
+- **`MAX_MOD_TYPES = 128`** (P26, P43.2): **replaced** by MS-03's D2 bound. That bound is `ENGINE_COMPONENT_CEILING`, held by a census, and it is computed against MD:M-K3 after D-S2 frees the physics band. Now: 05 §4 and MS-03.
+- **P32 R1 (`TAG_NAMES` → `DYN_NAMES`) and P40's sized body:** option A, Stage 3 (MS-02b). Now: 01 §3; 01 KC-19a; 05 RM-3.
+  - P40's **tag path** lands in D-S1(i) as KC-19a's `intern_or_mint_tag(name, kind)`.
+  - P40's mechanism is unchanged. Only the map's name changes: it stays `TAG_NAMES` until MS-02b, because D-S1(i)'s rename list is empty.
+
+### 47.3 G6 = UG-15
+
+U-11 merges allocator G6 and the modding design's M-P1 into one gate, UG-15 (03 §6). Its legs succeed G6's rows:
+
+| G6 row (P12 → P18 → P29/P33/P38/P44) | UG-15 leg (03 §6) |
+|---|---|
+| (a) no exported symbol (P18/18.2) | leg (1), the source census (K-MOD-9's rule), and leg (7)(c), the linked image's export directory |
+| (b) no kernel code growth: the pinned `.text` set (P18, P29, P31/4, P36/O2) | leg (2): asm pins read from the post-LTO object on the msvc gate host (U-22). The set is P29's as struck by P49 (four symbols), plus the bodies leg (2) adds |
+| (c) no kernel growth: `size_of` pins | leg (3) |
+| (d) no startup work | leg (4), startup equality |
+| (e) the seam cannot grow silently (P33/33.2 → P38.3) | leg (5): the `MOD-SEAM` markers equal the list in **05 §3**, derived by P38.3's membership rule, plus rule S-1's shape check. P38.3's thirteen-item list is not restated here, so it cannot drift from 05. The four `HeapRef`/`Heap::new` items leave with U-1, `remove_component_type` leaves with U-10, and the three remaining class-A items are MS-02b's |
+| **(f)** cargo feature unification and graph leakage (P18, the two-arm build) | **leg (6), and that is its only role.** Cargo builds a dependency with the union of every feature that any package in the graph enables on it `[D Cargo Book, "Feature unification"]`. So a modding crate can switch on a feature of a shared dependency for a game that never asked for it; `cargo tree -e features` shows it |
+| **(g)**, relabelled from P44/O2's second "(f)": no binary-size delta | **leg (7)**, the linked seam census, run on every seam commit against its parent (47.4) |
+
+### 47.4 Pass-6 W1: the duplicate (f)
+
+**Removed** (P44/O2, the row's label, `:3830`):
+
+> (f) **no binary-size delta** (NEW)
+
+**Added:**
+
+> (g) **no binary-size delta** (NEW)
+
+UG-15 leg (7) answers the row; its own two-arm mechanism does not. The row stays as P44 wrote it, with the struck label beside the new one, so its history reads.
+
+**Why the row cannot see its subject** (pass 6, W1, `:3936-3967`; checked against the toolchain's documentation rather than taken on trust):
+- **The arms.** Arm A declares the modding crate as a dependency and never calls it; arm B removes the dependency.
+- **An unreferenced crate is not linked.** rustc links a crate passed with `--extern` only when code references it. The rustc lint documentation gives `extern crate foo as _` as the way to link a crate "for the side effect of ensuring the given crate is linked, even though it is not otherwise directly referenced" `[D rustc lint unused_extern_crates]`. So arm A's binary carries nothing of the unused crate that arm B lacks, except what feature unification changes, and that is row (f)'s subject.
+- **Every class-A item (P38.3) is a kernel item,** present in both arms. A kernel-side survivor grows both arms equally, and the delta stays 0.
+- **Neither canary can fire.** `#[no_mangle]` on a kernel item changes both arms. "The binary calls a class-A function" names no mechanism that makes the call arm-specific.
+
+**What does see it: UG-15 leg (7).**
+- **Where it runs:** on every seam commit, in strict mode, against the commit's **parent**.
+- **What it compares** (03 §6), under the commit's rename list; all three must be identical:
+  - the linked `boyko_demo`'s section sizes;
+  - its defined-symbol multiset, over all bindings including local ones, because a fat-LTO survivor is local;
+  - its export directory.
+- **Why that works.** The parent does not carry the seam item, and the commit does. That is the longitudinal baseline P18/18.1 already said the quantity needs ("the seam the kernel carries in both arms … is a *longitudinal* quantity, so the baseline must be longitudinal"), applied to the linked binary.
+- **Its red controls** (vii) and (viii) (03 §6) are the canaries P44's row lacked:
+  - (vii): `boyko_demo` calls a kernel `pub fn` that no engine path calls. Leg (7) goes red.
+  - (viii): a kernel `static` holds a fn pointer, with no attribute and no caller. Leg (7) goes red while leg (1) stays green.
+- **Leg (7b)** adds the census of rlib object members, for items the linker would have dropped (05 §6).
+
+**Leg (6) keeps only the feature-unification role** (plan 02 §2, row W1; 00 §5).
+- P38.5's cost row says class A is "dropped at link, now **measured** by G6(f)'s `.text` delta" (`:3618`). That row now reads (g), and the measurement is leg (7)'s.
+- Under S-1 (05 §1 (b)), the class-A items are generic over `ModSeam` and have **no object code** without an implementor. So the claim no longer rests on the linker at all, and legs (7) and (7b) are its proof.
+
+**Pass 6's answer to the architect's question 2** (`:4153`): forbid `#[used]` statics and ctors in the modding crate, enforced by a `syn` check. ~~Leg (6)'s own control in 03 §6 carries it ("a `#[used]` static in a modding crate", run from the first modding crate on).~~ ⚠ *Rev 2.6 (P53, AP7 W2): withdrawn. Under this Part's own arm A (declared, never referenced; `:4483`) that static never reaches the binary, so the control cannot go red, and no `syn` check reads modding-crate source. The ban is a rule without a gate; P53.3 hands a candidate mechanism to the plan (03 §6).*
+
+---
+
+## P48 — §2.0: the engine thread context lives in `boyko_threadpool`, and `boyko_memory` stays `#![no_std]` (U-19)
+
+**Depends on / re-read:**
+- this file: §2.0 (`:131`) and §3 G5 (`:337`);
+- plan 00 §3, U-18 and U-19 (`00:125-126`), and 00 §5's ledger row (`00:157`);
+- plan 01 §2: KC-01 (Layer 0, `01:78`) and KC-04 (Layer 1, `01:91`); plan 01 §6, items 1–11 (`01:624-915`);
+- the ledger, `RUNTIME-DATA-LEDGER.md:1626`, `:1629` and `:1718`.
+
+**The placement this reverses.**
+- The design itself never placed the thread context, but the ledger it is read with does:
+  - KF-45 is "Kind: capability (memory library, below the pool)" (`RUNTIME-DATA-LEDGER.md:1626`).
+  - Its provider is the "KF-32 memory layer" (`:1629`).
+  - The ledger's net result says: "KF-32, a layering move of the memory library below the pool; KF-45's thread-context column lives there" (`:1718`).
+- §2.0 is where KF-32's crate split is specified (01 §3: "§2.0 crate split → KC-01"). So this is where the placement is overruled, before C1 builds the crate.
+- Ledger rev 5 restates the ledger side (00 §5, ledger row; rung B1).
+
+**Removed** (§2.0, `:131`, verbatim, without its rev-2.5 marker):
+
+> `boyko_memory` — new crate containing `vm.rs`, `vm_column.rs`, `utils.rs`, the granule/page constants, and the four classes below. `boyko_ecs` keeps `component_pool.rs`, `device_column.rs`, `inland_store.rs`, `scratch_column.rs` (they know ticks, ids, and the stagger). Reason: `boyko_threadpool` and `boyko_utils` need reservations and cannot depend on `boyko_ecs` (cycle: `boyko_ecs` → `boyko_threadpool`). `boyko_memory` has no dependencies beyond the OS crates already used by `vm.rs`.
+
+**Added:**
+
+> `boyko_memory` is a new crate. It contains `vm.rs`, `vm_column.rs`, `utils.rs` and the granule/page constants; the `#[doc(hidden)] pub mod raw` (`reserve`, `commit_at<O: CommitOwner>`), with `COMMITTED_BYTES[O::INDEX]` over three owners (P15/15.2, P31/1, P36/O3, P46.3); and the Column-class contract of §2.2 as amended by P5 and P37/4 (`ZeroInit`, `ByteColumn`, `ensure_len_zeroed`, the stack helpers). These are kernel contract items KC-01 and KC-03. ⚠ *Rev 2.6 (P54/O4): two rungs land them. C1 lands KC-01 only (the move, `raw::{reserve, commit_at}`, the UG-04 counter; 02 `:119`), and D-M1 lands KC-03 (`ZeroInit`, `ByteColumn`, `ensure_len_zeroed`, the stack helpers; 02 `:127`).*
+>
+> **It holds no lifetime class of its own.**
+> - The Heap and Table classes are revival forms (P46).
+> - The Frame class is deleted (P34).
+> - The Scope class's `ChunkArena`/`SlotChunks` are `pub(crate)` in `boyko_threadpool` (P2, P16; KC-05).
+>
+> `boyko_ecs` keeps `component_pool.rs`, `device_column.rs`, `inland_store.rs` and `scratch_column.rs` (they know ticks, ids and the stagger), and KC-16's owning column.
+>
+> **Why the split:** `boyko_threadpool` and `boyko_utils` need reservations and cannot depend on `boyko_ecs` (cycle: `boyko_ecs` → `boyko_threadpool`). `boyko_memory` has no dependencies beyond the OS crates `vm.rs` already uses.
+>
+> **The engine thread context is not here** (U-19; 01 KC-04, §6). It lives in **`boyko_threadpool::thread_ctx`**, the one crate every client already depends on:
+> - the per-thread record table: `THREAD_RECORDS` (8192 × 64 B) and the `THREAD_BUSY` bitmap, both all-zero `.bss` statics;
+> - the per-thread word that holds the record's index + 1;
+> - the claim/adopt/release protocol;
+> - the `EXIT_GUARD` exit hook.
+>
+> `boyko_ecs` reaches its 24-B region of a record only through `ThreadRecord::ext_ptr()`, called from `boyko_ecs`'s `ecs_fields()`.
+>
+> **The reason is G5.**
+> - The word is a const-initialised, `Drop`-free `thread_local!` `Cell<usize>`, and the exit hook is std's TLS destructor on a guard.
+> - Both are std. The macro is `std::thread_local` `[D Rust std: macro thread_local]`. The destructor behaviour is `std::thread::LocalKey`'s: "values that implement `Drop` get destructed when a thread exits" `[D Rust std: LocalKey]`.
+> - The only non-std route is the `#[thread_local]` attribute on a `static`, which is feature-gated `[D Unstable Book: thread_local; rust-lang/rust#29594]`.
+> - So a thread context in `boyko_memory` would cost this crate G5's `#![no_std]` (`:337`). That attribute is the structural guarantee that no `Vec`, `Box`, `String` or `format!` can be named in the memory library.
+> - In `boyko_threadpool` it costs nothing, because that crate is std already: it spawns the workers.
+>
+> **Not built here either:** the windows word arm (a `TlsAlloc` slot read at `gs:[0x1480 + 8·index]` after a canary). It is plan 01 §8's revival form D-M6w, and if U-19 (a) or (b) ever builds it, it lives in `boyko_threadpool` and `boyko_diag`.
+
+**Cost.** P48 changes no mechanism of KC-04. It changes only which crate is recorded as KC-04's home. KC-04's costs are the plan's (00 U-19).
+
+---
+
+## P49 — P29: `HeapRef::alloc_cold` is struck; four symbols remain
+
+**Depends on:**
+- this file: P18/18.1 (b), P29, P31/4, P36/O2;
+- plan 00 §3 U-1;
+- the plan's own critic pass 5, W1 (a) (`00:881-906`);
+- plan 03 §6 leg (2) (`03:170`).
+
+**Why.**
+- **The finding.** The plan's critic pass 5 (W1 (a)) found that the P29 set has five symbols, including `HeapRef::alloc_cold`.
+  - U-1 defers the whole Heap class, and `HeapRef` has 0 hits in the kernel tree.
+  - P29's own rule reads "A missing symbol is RED, never a skip" (`:2625`).
+  - So a gate built on the five is red by construction at its first capture (B3).
+- **Where the strike lives.** The critic asked that DOC-1 carry the strike (`00:906`). UG-15 leg (2) already pins "the P29 set without `HeapRef::alloc_cold` … (four symbols)" (03 §6).
+
+**Removed** (P29, the fifth row of the symbol table, `:2623`, verbatim):
+
+> | `HeapRef::alloc_cold` | `#[cold]` by construction, P15/15.3 | the heap's page-assign path, written by this campaign |
+
+**Added:** *(the row is struck in place. It returns with the Heap's revival form (P46.2), where it meets P29's three conditions by construction.)*
+
+**The four pinned symbols.** Each meets P29's three conditions through its own attribute:
+
+| symbol | attribute, as P29 cited it at `d552be05` |
+|---|---|
+| `ComponentPool::grow_rows` | `#[inline(never)]`, `component_pool.rs:600` |
+| `ComponentPool::commit_subregion` | `#[inline(never)]`, `component_pool.rs:559` |
+| `run_check_ticks_scan` | `#[inline(never)]`, `check_ticks.rs:107` |
+| `ScopeBlock::grow` | `#[inline(never)]`, `block.rs:425` |
+
+The rung that captures the pins re-reads each site at its cut (B3, on the trunk). A symbol absent from the post-LTO object is recorded with its reason, per 03 §6 ("Missing symbols").
+
+**The count elsewhere.** The number "five" appears in ~~eight~~ nine places. From rev 2.5 each one reads four: ⚠ *Rev 2.6 (P54/O2): the ninth, `:3832` (P44/O2), was missed; rev 2.6 marks it, and `:3662` below, so every live site now reads four.*
+- `:2615`, P29, "The five:": marked in place.
+- `:2709`, P31/4, "beside each of the five pinned numbers (P29 makes it five)": struck in place. It is an instruction to the pin file's header.
+- `:3076`, P32/32.7, "G6(b)'s five pinned symbols" (and the list naming `HeapRef::alloc_cold`): struck in place.
+- `:3260`, P36/O2, "two of the five pinned symbols carry local linkage": struck in place. It is still two (`commit_subregion`, `grow_rows`).
+- `:3531`, P38's Depends line, "P29 (the five `.text` pins)": struck in place.
+- `:3573`, P38.1, "G6(b)'s five `.text` pins": struck in place.
+- `:3662`, P39.2, "P29's five pinned symbols are untouched": ~~**not marked.**~~ P39 stays as pass 6 reviewed it (00 §5), and the sentence stays true of the four. ⚠ *Rev 2.6 (P54/O2): marked after all; a count marker leaves P39's mechanism and gate as reviewed.*
+- `:1904`, P18(b)'s canary, "any of the four": pass-6 O1. P51 re-words it by rule, so that it cannot go stale again.
+
+---
+
+## P50 — critique pass 6: every remark's disposition
+
+**Depends on:**
+- pass 6's review (`:3873-4158`);
+- plan 02 §2:
+  - "AP6's open remarks, mapped to rungs" (`02:100-112`);
+  - the red-first list "D-S1(i), isolated registry rows (AP6 W2)" (`02:300-315`);
+  - B1 (`02:71`);
+  - D-S2 (`02:140`);
+- plan 05 §5, row AP6-W4 (`05:252`);
+- plan 00 §6, RK-1 (`00:170`).
+
+Each remark carries a marker at its own line, and the summary lines `:3877-3881` carry one too.
+
+**W1: G6's binary-size row compares two builds that link the same kernel** (`:3936-3967`).
+- **Disposition:** answered by UG-15 leg (7).
+  - Leg (7) runs on seam commits against the parent, and it sees kernel survivors that the two-arm row cannot.
+  - The duplicate (f) is relabelled (g).
+  - Leg (6) keeps only feature unification.
+- **Carried in:** P47.3, P47.4; 03 §6 legs (6) and (7); 02 §2 row W1.
+
+**W2: the registry gate rows are written as if the registry were per-test** (`:3969-4001`).
+- **Disposition:** D-S1(i)'s isolated tests.
+  - Each stateful case is the only `#[test]` in its own binary. Cargo runs test binaries serially, and the leg checks `running 1 test`.
+  - Pins are relative: `P = id_space_census().next_id + 32`.
+  - The dynamic mint is the engine's tag path.
+  - G-MINT-3 is not ignored.
+  - Row 8 is a lib unit test with a `cfg(test)` rendezvous after the intern lock, so its red is deterministic on the first pass.
+  - Pass 6's corrected G-MINT-3 prediction (an out-of-bounds panic on `LAYOUTS[512]`, not a spin) is the red-first text.
+- **Carried in:** 02 §2's red-first list for D-S1(i); 03 UG-19. P39.3's rows stay as pass 6 reviewed them, and the rung writes D-S1(i)'s form.
+
+**W3: P41's anti-vacuity equality fails on a correct implementation** (`:4003-4020`).
+- **Disposition:** **void under U-1**, because P41's gate is not built. The remark is carried with the revival form.
+- **Carried in:** P46.4; 03 §3.
+
+**W4: P38.3's membership rule is not what G6(e) checks; `register_hooks_by_id`** (`:4022-4056`).
+- **Disposition:** plan 05 §5, row AP6-W4.
+  - The dangling-hook consequence is void under U-10: mods are load-only, so an image is never unmapped.
+  - The mismatch between rule and gate is scoped to option A. Option A's Stage-3 rung does two things:
+    - it adds `register_hooks_by_id` and the typed hooks builder to K-MOD-7's not-exposed list;
+    - it replaces leg (5)'s marker comparison with a reference census: the kernel paths that `boyko_mod_api` and `boyko_mod_host` name must equal the marked inventory.
+  - Cost to a non-modding build: 0.
+- **Carried in:** 05 §5; P47.2 (K-MOD-7).
+
+**W5: the ledger still specifies rung 1 with the mechanisms pass 1 blocked** (`:4058-4089`).
+- **Disposition:** rung B1, ledger rev 5.
+  - It restates KF-33 (`RUNTIME-DATA-LEDGER.md:1446-1457`), KF-34 (`:1459-1470`), `ledger/pool-utils-log.md:18` and the order-of-work row (`:1783`) to P2/P10/P16/P17 and to rungs D-M2/D-M3.
+  - It names **this design authoritative for mechanism and the ledger for row inventory**. That adopts pass 6's second "What is needed" item.
+- **Carried in:** 02 §2, B1.
+
+**O1: stale passages that the replace-don't-annotate rule still misses** (`:4093-4099`).
+- **Disposition:** **fixed in place.**
+- **Carried in:** P51.
+
+**O2: the one-id-per-element-type rule has a shipped mechanism that the design's own client does not use** (`:4101-4105`).
+- **Disposition:** **void under U-2.**
+  - Scratch cohorts are registry-free and use zero `ComponentId`s. So `TraversalScratch` builds its columns with `ScratchColumn::for_type`, and it needs no `register_new`, no memo from `register_asset_layout` and no id at all.
+- **What stays:** P43.1's layout-token **finding** (`:3777`). It is the fact U-2 rests on (01 R-B).
+- **What is superseded:**
+  - P43.1's one-id-per-type **rule** (`:3779`);
+  - 43.2's two `TraversalScratch` ids (`:3795`);
+  - P39.4's two `register_new` calls (`:3679`).
+- **The stagger exception** (`:3781`) becomes KC-10's stagger policy: one process-global `NEXT_STAGGER`, consecutive cache lines within a cohort, measured by MQ-16. Its render example is now a D-S2 client of `for_type`: one `u32` id shared across `counts`, `offsets` and `cursors` (`mesh_draw.rs:446-448`, as pass 6 read it).
+- **Carried in:** 00 U-2; 01 KC-10, R-B; 02 D-S2.
+
+**Question 4: P40 says a reader reaches an id only through `DYN_NAMES`, but `LAYOUTS` scanners see a layout before its kind** (`:4155`).
+- **Disposition:** D-S1(i)'s cut.
+  - The cut lists every `LAYOUTS` scanner (`is_type_registered_as_component`, `id_space_census`, the reflect enumerations).
+  - It confirms that none of them acts on the kind. If one does, it scopes P40's sentence to readers that obtain the id through the name table.
+  - P40 is unchanged until then.
+- **Carried in:** 02 §2, row Q4.
+
+**Question 5: is `remove_component_type` class A or class B?** (`:4156`).
+- **Disposition:** **void.** The function is deleted (U-10), and P47.2 removes K-MOD-10.
+- **Carried in:** 00 U-10; 05 §4.
+
+**Pass 6's answers to the architect's pass-6 questions** (`:4152-4154`) are also recorded:
+1. The dependency on the reflect merge is correct, and its date is the owner's call.
+2. See P47.4.
+3. The inherited-limit paragraph of P38.1 cites `g17` and its RED-by-design status, so the paragraph is deleted when the lane flips that test. This is a standing obligation, and rev 2.5 does not change it.
+
+---
+
+## P51 — pass-6 O1: the stale passages, fixed in place
+
+**Depends on:** P5, P16 (the rename `ChunkCache` → `SlotChunks`), P17/17.5, P18/18.1 (b), P29, P34, P37/4, P44/O2; pass 6, O1 (`:4093-4099`).
+
+**Where the passages are.** Pass 6 cited two of them at `:1870` and `:1207`. On this tree, as at `b716a5dc`, those sentences are at `:1877` and `:1214`: the review read a pre-commit working copy that ran seven lines low (plan 00 §9 V-61). Each fix strikes the stale words in place and writes the correction beside them.
+
+**1. P17/17.5's live loom bullet** (`:1877`). P34 site 10 had edited the text that P17 had already removed (`:1873`), so this sentence was never corrected.
+- **Removed:** `` `Heap` and `FrameArena` genuinely have no cross-thread protocol (single owner, P15/P19) and stay unmodelled, with that stated as a property of their ownership rather than of their field types. ``
+- **Added (in place):** No class outside the claim protocol, the carve and the injector is left with a cross-thread protocol to model. The Frame class is deleted (P34), and the Heap is not built (U-1). The Heap's revival form keeps its single-owner argument (HV-3, P15/P19), stated as a property of its ownership rather than of its field types.
+
+**2. P18/18.1's (b) canary** (`:1904`).
+- **Removed:** `any of the four`
+- **Added (in place):** "any symbol of P29's pinned set": four after P49. The set is named by P29's rule, not by a count, so a later strike or addition cannot make this canary stale again.
+
+**3. P37/4** (`:3287`).
+- **Removed:** `` `VmColumn<T: Copy>` ``
+- **Added (in place):** `` `VmColumn<T: ZeroInit>` ``. P5 made `ZeroInit` the struct bound; `Copy` remains only on the by-value methods.
+
+**4. K-MOD-7** (`:1214`), and its live replacement, P34 site 14's Added cell (`:3173`).
+- **Removed:** `` `ChunkCache` `` in both places. At `:1214`, also `` `FrameArena` `` and `` `Heap`/`HeapVec`/ ``.
+- **Added (in place):**
+  - At `:1214`: `` `SlotChunks` `` (P16's rename, now named where the row is read). `FrameArena` is struck (P34). The sentence becomes "a mod gets … columns" (U-1: mods use engine storage forms, 05 §4).
+  - At `:3173`: the rename is given in the site-number cell, because the Added cell is a code span.
+
+**5. The two rows labelled (f)** (`:1909`, `:3830`).
+- **Removed:** the second label, `(f)`.
+- **Added (in place):** `(g)`. See P47.4.
+
+---
+
+## Change log (rev 2.4 → rev 2.5)
+
+| Row | Disposition | Where |
+|---|---|---|
+| Plan U-1, U-9 | The Heap class, with `HeapDyn`, becomes a revival form. Its clients go to KC-15/17/18/10, and `DynVTable` survives as KC-17's vtable. Its gates are not built (C1's Miri test, HV-1, HV-4, `hv3-owner`, `max-bytes`, the run-table counter, the sanitize map, `LINE0_PAD`, M-A3/M-A4). Its trigger is U-1's | P46 |
+| Plan U-7 | `TableSet` becomes a revival form; its clients go to KC-18, KC-07 and KC-06. The `Table` commit owner survives | P46 |
+| Plan U-8 | `DropColumn` becomes a revival form; KC-16 over KC-10's registry-free constructor replaces it. No trigger is named | P46 |
+| Consequences | `CommitOwner` has three owners (Column, Chunk, Table). Rungs 1d, 1e, 2 and 3, §5.1, P30/O1 and P14 step 3 are re-pointed | P46.3 |
+| Pass-6 W3 | Void under U-1; carried with the revival form, together with pass 6's three repairs | P46.4 |
+| §7 | Re-pointed to the plan's file 05. K-MOD-3 and K-MOD-10 are removed; K-MOD-1 and K-MOD-2 are withdrawn with U-1; the rest map to 05's rows. `boyko_modding` becomes `boyko_mod_host` / `_api` / `_registry` | P47 |
+| G6 (U-11) | G6 = UG-15, mapped row by row. The duplicate (f) is relabelled (g) and answered by leg (7); leg (6) keeps feature unification only (pass-6 W1) | P47 |
+| Plan U-19 | §2.0: the thread context belongs to `boyko_threadpool`, and `boyko_memory` keeps G5's `#![no_std]`. §2.0 is restated to what the crate now holds | P48 |
+| Plan critic pass 5, W1 (a) | P29: `HeapRef::alloc_cold` is struck, leaving four symbols. Eight count sites are re-pointed: six struck or marked, `:3662` recorded and left as reviewed, `:1904` re-worded by P51 | P49 |
+| Pass-6 W2, W4, W5, O2, Q4, Q5 | Respectively: D-S1(i)'s isolated tests; 05 §5 row AP6-W4; B1; void under U-2; D-S1(i)'s cut; void under U-10 | P50 |
+| Pass-6 O1 | Five stale passages fixed in place | P51 |
+| Convention | Superseded passages are marked in place on their own line, and no line before this Part moved | header (`:5`, `:52`); marker index |
+| Unchanged | `ByteColumn`, `ZeroInit`, `ChunkArena`/`SlotChunks`, the injector and its spin, 1f, the content of G1–G5 and G2b, P39 and P40 (mechanisms and gates), P2, P3, P16, P17, P20, P28, P36/O1 | — |
+
+## Open questions for pass 7 (AP7) ⚠ *Rev 2.6: answered by AP7; P55 records the answers*
+
+1. **G5 against `vm.rs`'s fallback arm.** P48 keeps G5's "`#![no_std]` without `extern crate alloc`" for `boyko_memory`, as the plan asks. But the first file of that crate already names `alloc`.
+   - **The evidence.** `vm.rs`'s Miri / non-(windows, unix) arm imports `std::alloc::{Layout, alloc_zeroed, dealloc}` under `#[cfg(any(miri, not(any(windows, unix))))]` (`crates/boyko_ecs/src/ecs/memory/vm.rs:39-40`, used at `:176` and `:295`, at `49f2fcfb`). P8/O3's and P15/15.4's Miri constants depend on that arm.
+   - **The consequence.** G5 as written can hold only in configurations where that arm is compiled out.
+   - **Not ruled here.** The question is outside DOC-1's row, and G5 lands at F2 (03 UG-07).
+   - **A candidate** that keeps the guarantee where it matters: `#![no_std]` unconditionally; `extern crate alloc` only under that same `cfg`; and G5's compile check run on the windows and unix targets. AP7 may judge that this belongs to C1's cut instead.
+2. **Leg (6)'s text in plan 03 §6** still reads "has equal linked section sizes (P44), and `cargo tree -e features` shows no modding feature" (`03:179`). P47 records leg (6) as feature unification only, per plan 02 §2 (row W1) and 00 §5. Whether 03 §6 should drop the size clause is an edit to a plan file, not to this file.
+3. **`DropColumn` has no revival trigger.** U-8 names none, and P46 records that rather than inventing one. AP7 may prefer to close this revival form as "deleted" (the form P34 and P35 used) instead of "not built".
+4. **K-MOD-1 and K-MOD-2.** The DOC-1 row names only K-MOD-3 and K-MOD-10 as removed, while 05 §4 withdraws K-MOD-1, K-MOD-2 and K-MOD-3 together under U-1. P47 follows 05 §4, the section §7 is re-pointed to, and records K-MOD-1 and K-MOD-2 as withdrawn with the Heap's revival form, not as deleted.
+
+## Marker index (every in-place change of rev 2.5; no line number moved)
+
+| Patch | Lines (this file) |
+|---|---|
+| Header | `:1` (title), `:5-7` and `:10` (status: the new status, with the superseded one struck), `:52` (the structure note) |
+| P46 | `:117`, `:123`, `:137`, `:140`, `:141`, `:143`, `:154`, `:205`, `:248`, `:259`, `:293`, `:310`, `:327`, `:358`, `:373`, `:405`, `:415`, `:439`, `:573`, `:1069`, `:1159`, `:1284`, `:1285`, `:1288`, `:1473`, `:1957`, `:2059`, `:2372`, `:2652`, `:2653`, `:2654`, `:2657`, `:2665`, `:2703`, `:2707`, `:3101`, `:3167`, `:3172`, `:3174`, `:3175`, `:3176`, `:3187`, `:3271`, `:3711`, `:3743` |
+| P47 | `:1198`, `:1202`, `:1208`–`:1216`, `:1218`, `:1220`, `:1907`, `:1909`, `:2048`, `:2049`, `:2466`, `:2659`, `:2920`, `:3597`, `:3618`, `:3828`, `:3830` |
+| P48 | `:131`, `:337` |
+| P49 | `:2615`, `:2623` (row struck), `:2709`, `:3076`, `:3260`, `:3531`, `:3573` |
+| P50 | `:3283`, `:3679`, `:3681`, `:3683`, `:3779`, `:3781`, `:3789`, `:3795`, `:3800`, `:3875`, `:3877`–`:3881`, `:3938`, `:3971`, `:4005`, `:4024`, `:4060`, `:4095`–`:4099`, `:4103`, `:4155`, `:4156`, `:4158` |
+| P51 | `:1214` (struck and corrected), `:1877`, `:1904`, `:3173`, `:3287`, `:3830` (relabelled) |
+
+**Files read for this patch** (read-only, except this file):
+- In `D:/wt/docs` @ `49f2fcfb`:
+  - `docs/memory/ALLOCATOR-DESIGN-SPACE.md`;
+  - `docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md`, `-01-KERNEL-CONTRACT.md`, `-02-ORDER-OF-WORK.md`, `-03-GATES.md`, `-05-MODDING-READINESS.md`;
+  - `docs/memory/RUNTIME-DATA-LEDGER.md` (`:1-14`, `:1620-1645`, `:1710-1725`);
+  - `crates/boyko_ecs/src/ecs/memory/vm.rs` (import and fallback lines only).
+- A workspace ripgrep for `ALLOCATOR-DESIGN-SPACE.md:[0-9]` under `docs/`, and for heading-anchor links into this file (none found).
+
+**External sources (read 2026-09-23):**
+- `[D Rust std: macro thread_local]` <https://doc.rust-lang.org/std/macro.thread_local.html>: the macro is `std::thread_local`.
+- `[D Rust std: LocalKey]` <https://doc.rust-lang.org/std/thread/struct.LocalKey.html>: "values that implement `Drop` get destructed when a thread exits", with the platform caveats, including Windows process exit and fibers. These are the caveats KC-04's restrictions already name (01 §6 item 8).
+- `[D Unstable Book: thread_local]` <https://doc.rust-lang.org/beta/unstable-book/language-features/thread-local.html>: `#[thread_local]` on `static` items is feature-gated; tracking issue rust-lang/rust#29594.
+- `[D Cargo Book, "Feature unification"]` <https://doc.rust-lang.org/cargo/reference/features.html#feature-unification>: "When a dependency is used by multiple packages, Cargo will use the union of all features enabled on that dependency when building it."
+- `[D rustc lint unused_extern_crates]` <https://doc.rust-lang.org/stable/nightly-rustc/rustc_lint/builtin/static.UNUSED_EXTERN_CRATES.html>: `extern crate foo as _` is the way to link a crate "even though it is not otherwise directly referenced". The companion lint `unused_crate_dependencies` <https://doc.rust-lang.org/stable/nightly-rustc/rustc_lint/builtin/static.UNUSED_CRATE_DEPENDENCIES.html> reports an `--extern` dependency "never referenced via `use`, `extern crate`, or in any path".
+
+Status: rev 2.5 written (DOC-1, 2026-09-23); critique pass 7 (AP7) ~~reviews~~ reviewed the rev-2.5 delta and the pass-6 dispositions. ⚠ *Rev 2.6: the pass-7 log and rev 2.6 follow.*
+
+## Critique pass 7 log (AP7, 2026-09-23)
+
+Verdict: CHANGES_REQUESTED, with 0 Critical, 2 Important and 5 Optional remarks. The scope was the rev-2.5 delta and the pass-6 dispositions only (plan 02 §2). The critic read this file uncommitted on `49f2fcfb` and checked it against the main checkout at the same commit (it had no shell, so no diff). Each remark's disposition is listed first; the review follows verbatim. Rev 2.6, the next Part, is the architect's response. ⚠ *Every disposition below points into rev 2.6.*
+
+- [IMPORTANT W1] The O1 fix at `:1904` left P18(b)'s superseded symbol list (`Schedule::run`, `ComponentPool::new`, `ScopeBlock::grow`, `HeapRef::alloc_cold`) standing beside the new "four after P49" canary, so the cell reads as if that list were current. A leg-(2) capture taken from `:1904` would record three of P29's four subjects as absent, and nothing would go red. → *Rev 2.6 (P52): the list is struck in place, and the cell now names P29's set. Resolved.*
+- [IMPORTANT W2] P47.4 (`:4503`) says leg (6)'s red control carries pass 6's `#[used]`/ctor ban. P47.4's own argument (`:4483`) shows that an unreferenced modding crate never reaches arm A, so that control cannot go red, and no `syn` check reads modding-crate source. Plan 03 also calls arm A "linked" (`03:177`), where P44 only declares it. → *Rev 2.6 (P53): the claim is withdrawn in place. Arm A is stated as declared-only, and 03's word is corrected in place. The ban is recorded as having no mechanism today, and a candidate (a source census plus an object-section census of the modding crates) is handed to the plan (03 §6) as an open item. Resolved in this file; the mechanism is the plan's to adopt.*
+- [OPTIONAL O1–O5] → *Rev 2.6 (P54): all five adopted, as markers:*
+  - *O1: P34 site 10 (`:3169`);*
+  - *O2: the "five" sites `:3832` and `:3662`, and P49's own census (`:4593`, `:4600`);*
+  - *O3: `SparseMap` moves in D-M1 (`:3743`, `:4355`);*
+  - *O4: C1 lands KC-01 only, and D-M1 lands KC-03 (`:4529`); K-MOD-7's `raw` names (`:1214`);*
+  - *O5: the G-MINT rows point to D-S1(i)'s form (`:3672-3675`).*
+- [ANSWERS] The critic's answers to rev 2.5's four open questions are recorded in P55. The answer to question 1 adds a per-target statement to G5 (`:337`).
+
+VERDICT: CHANGES_REQUESTED; CRITICAL=0; IMPORTANT=2
+
+# Architecture review: allocator design rev 2.5 (critique pass 7, AP7)
+
+## Verdict
+[ ] APPROVED — the plan is ready for implementation
+[X] CHANGES REQUESTED — 0 critical, 2 important, 5 optional. Both important remarks are one-paragraph text fixes, and neither touches a mechanism.
+
+**What I reviewed.** Only the rev-2.5 delta and the pass-6 (AP6) dispositions, per 02 §2. File: `D:/wt/docs/docs/memory/ALLOCATOR-DESIGN-SPACE.md`, uncommitted, on `49f2fcfb`. There is no shell here, so I did not run a diff. Instead I checked the edits against the main checkout `D:/claude/BoykoEngine/docs/memory/ALLOCATOR-DESIGN-SPACE.md`, which is at the same commit:
+- The status line is `:4158` in both files.
+- The marker index adds up to exactly 117 lines, as the report says.
+- The spot-checked lines (`:131`, `:1159`, `:1877`, `:1904`) keep their positions.
+
+## Remarks
+
+### Critical
+None.
+
+### Important
+
+#### W1. The O1 fix at `:1904` leaves the wrong four symbols in the cell it edits, and the new marker makes them read as current
+**Where:** P51 item 2 and the marker at `:1904`, P18(b)'s mechanism cell.
+**Problem:**
+- The canary now reads "any symbol of P29's pinned set … four after P49".
+- About 30 words earlier, the same cell still says "The four are chosen …: `Schedule::run`, `ComponentPool::new`, `ScopeBlock::grow`, `HeapRef::alloc_cold`". That list was superseded by P29 (Removed at `:2611`).
+- Before rev 2.5 the cell was stale but at least consistent with itself. Now the count "four" sits beside a four-item list, and three of those four items are wrong.
+- The report (item 8) left the list alone on purpose. But this is the class AP6 O1 names: a replaced passage that still reads as current. And rev 2.5's own rule (`:4195`) promises a marker wherever this revision supersedes text.
+
+**Consequence:** Suppose someone captures the UG-15 leg-(2) pins at B3 from `:1904` instead of from P29.
+- They pin `Schedule::run` and `ComponentPool::new`, which have no inline attribute, so P29 refused them. They also pin `alloc_cold`, which is never built.
+- Under 03 §6's rule that the pin list is frozen at B3 with absent candidates recorded, those three would be recorded as absent.
+- `grow_rows`, `commit_subregion` and `run_check_ticks_scan` would never be pinned. Leg (2) would lose three of its four P29 subjects without anything going red.
+
+**Confidence:** CONFIRMED for the text (`:1904` against `:2615-2623`). PLAUSIBLE for the path to harm: 03 `:170` and P47.3 row (b) both point readers to P29.
+**What is needed:** Mark the cell's symbol list as superseded by P29/P49 where it stands, so that the only set the cell names is P29's.
+
+#### W2. P47.4 says leg (6)'s red control carries AP6's `#[used]`/ctor ban, but P47.4's own argument shows that control cannot go red
+**Where:** P47.4, `:4503`, against `:4483`. Also 03 `:184` and `:169`.
+**Problem:**
+- `:4483` argues, citing the rustc lint documentation (I re-checked the quote), that arm A never loads the unreferenced modding crate. So arm A "carries nothing of the unused crate … except what feature unification changes".
+- `:4503` then says AP6's recommended ruling is carried by leg (6)'s red control in 03 §6. That ruling is to forbid `#[used]` statics and ctors in modding crates, "enforced by a `syn` check". The control is "a `#[used]` static in a modding crate".
+- These two claims contradict each other. By `:4483`, that static never reaches arm A, so leg (6)'s size comparison stays equal and the red control cannot fire. This is the same point AP6 made at `:4153`: "the gate will not 'find out first'".
+- No `syn` check covers modding crates either. Leg (1)'s census scope is the six kernel crates plus `boyko_memory` (03 `:169`).
+- 03 `:177` also describes arm A as "linked", while P44 (`:3830`) and P47.4 describe it as declared and never referenced. Those are two different builds.
+
+**Consequence:**
+- At the first modding crate, the tester runs a red control that stays green. That is this repo's "canary that cannot fire" failure, and the usual outcome is that the control gets dropped or re-blessed.
+- Meanwhile the ban is recorded as "carried" when nothing enforces it. That is the "a check believed to cover more than it does" failure AP6 cited in W1.
+- No non-modding game is harmed: an unreferenced crate is not linked.
+
+**Confidence:** CONFIRMED. The contradiction is plain in the text (`:4483` against `:4503`), and the scope is fixed by 03 `:169`.
+**What is needed:**
+- P47.4 should stop claiming the control carries the ban. Record the ban and the control's fireability as open for the plan (03 §6).
+- State which arm-A form is meant: declared-only as in P44, or force-linked as 03 says. Leg (6)'s size clause means different things under each.
+- Give the ban a mechanism that reads modding-crate source, or state that it has none.
+
+### Optional
+
+**O1.** Pass-6 O1 item 1 is fixed at `:1877` but not at its cause.
+- P34 site 10 (`:3169`) still reads as the latest replacement of §5.3's loom bullet, and it restates the rev-2 "`Heap` and `ChunkCache` have no atomics" sentence that P17 had called the defect.
+- The consequence is low: 03 §3 carries the D-M2 claim/release loom model on its own.
+- A marker on site 10 saying it edited text P17 had already removed would close the chain.
+
+**O2.** P49's census of "five" misses one live site, and contradicts itself on another.
+- `:3832` (P44/O2) says "the churn P18 already manages for five symbols".
+- P49 says "From rev 2.5 each one reads four", yet it deliberately leaves `:3662` reading "five".
+
+**O3.** The `SparseMap` move is cited to the wrong rung.
+- P46.3 and the `:3743` marker say "rung D-R2d".
+- 01 KC-16 (`01:103`) says D-M1 moves `SparseMap`, and D-R2d only retires the `sparse_map.rs:10` KF-02 row. 02's D-M1 row (`02:127`) lists "`SparseMap` ×3".
+
+**O4.** P48's new §2.0 folds KC-01 and KC-03 into one crate description. But C1 is KC-01 only (`02:119`), and KC-03 (`ZeroInit`, `ByteColumn`, `ensure_len_zeroed`, the stack helpers) is D-M1 (`02:127`).
+- One clause naming that split would stop C1 from being read as including KC-03.
+- In the same area: K-MOD-7 (`:1214`, which P51 edited) still names `raw::{reserve, commit, base}`, while §2.0 and KC-01 name `raw::{reserve, commit_at}`.
+
+**O5.** P39.3's G-MINT rows (`:3672-3675`) carry no pointer to their D-S1(i) form, which is 02 `:300-307` and UG-19.
+- Read alone, they still show absolute id 100, the `solo` ignore class, and "the mint spins".
+- A pointer marker would not change P39's mechanism or gate, so P39 would still stand "as AP6 reviewed" it. The low consequence is because 02 and UG-19 are what the rung actually reads.
+
+## Answers to rev 2.5's open questions
+
+1. **G5 against `vm.rs`.**
+   - The conflict is real, and it has been there since rev 1; P48 did not introduce it. P48's claim holds for the thread context.
+   - The fallback arm is not Miri-only. `vm.rs:25` documents it as "Fallback (Miri / wasm32 / exotic)", and `vm.rs:39-40` confirms the `std::alloc` import. So G5's scope has to be stated per target.
+   - The candidate fix is sound: `#![no_std]`, plus `extern crate alloc` under the same `cfg`, plus the compile check on windows and unix.
+   - Its home is UG-07 (F2, 03 `:16`), not C1. C1 does not add `#![no_std]`. This does not hold C1.
+2. **Leg (6)'s size clause at 03 `:179`.** Keep it.
+   - By P47.4's own argument, the two arms differ only by feature unification, so the size comparison is how leg (6) observes it.
+   - UG-16 (03 `:25`) also names "the modding-arm delta is leg (6)".
+   - "Its only role" limits what leg (6) is claimed to see, not how it sees it. See W2 for the arm-A question.
+3. **`DropColumn`'s trigger.** Keep it as a revival form with no trigger named. 00 §5 lists `DropColumn` among the revival forms, so relabelling it "deleted" would contradict the binding spec.
+4. **K-MOD-1 and K-MOD-2.** Following 05 §4 is correct, because P47.1 makes file 05 authoritative for §7. The DOC-1 row's list of removed K-MOD rows was not meant to be complete.
+
+## Positive (preserve)
+
+- **The no-line-move convention, with a complete marker index.** It protects 24 citing documents. The index count and the line alignment both check out.
+- **P46's revival forms.** Each family carries its ruling, its reason (with U-1's numbers re-located to `:3171-3172` and `:2718`), its clients by KC, its trigger, and its design and gates by location. `DropColumn` honestly says "none named". Everything the DOC-1 row says stays does stay: `ByteColumn`, `ZeroInit`, `ChunkArena`/`SlotChunks`, the injector (`:1159` is re-homed only), 1f, the G-ladder, P39/P40's mechanisms, and the P39.4 markers that record only U-2.
+- **P46.4 carries W3 with AP6's three repairs and picks none.** The choice correctly belongs to the rung that revives the Heap. The re-located citations (`:3729`, `:744-745`) are right.
+- **P48 is consistent with 01 §6.**
+  - `ext_ptr`/`ecs_fields`, the 8192 × 64 B `.bss` table and the bitmap all match.
+  - The two external citations check out:
+    - the `LocalKey` destructor quote;
+    - `#[thread_local]` being feature-gated under rust-lang/rust#29594.
+  - The ledger lines `:1626`, `:1629` and `:1718` match.
+  - The design never placed the thread context before; `grep` finds 0 hits.
+- **P49.** Exactly four symbols remain, each with its reason. It matches 03 leg (2), and the canary is now worded by rule rather than by count.
+- **P47.2 and P47.3.** The K-MOD rows match 05 §4 row by row, and G6 rows (a)–(e) map to the right UG-15 legs.
+- **P50.** Every disposition is where 02 §2 puts it: W2 at `02:300-307`, W4 at `05:252`, W5 at `02:71`, and O2, Q4 and Q5 as ruled.
+
+**Topics walked with no finding:** the three commit owners against KC-01 and UG-04, the HeapDyn → KC-17 sizes, the TableSet → KC-18/07/06 routing, and every external source.
+
+## Open questions for the architect
+
+None beyond W2's arm-A definition: declared-only or force-linked. That question belongs to the plan (03 §6 and P44), not to this file.
+
+Status: rev 2.5 reviewed by critique pass 7: CHANGES_REQUESTED, 0 Critical, 2 Important. Rev 2.6 follows and resolves both Important remarks.
+
+---
+
+# Rev 2.6 (2026-09-23)
+
+# Allocator design — Rev 2.6 (patch against Rev 2.5): closes critique pass 7
+
+**Scope.** Rev 2.6 answers critique pass 7 (AP7; the log above). That covers its two Important remarks (W1, W2), its five Optional ones (O1–O5), and the four answers AP7 gave to rev 2.5's open questions. It adds no allocator mechanism. Four patches:
+- **P52:** AP7 W1. P18(b)'s superseded symbol list is struck where it stands.
+- **P53:** AP7 W2. Leg (6) does not carry the modding-crate `#[used]`/ctor ban, and arm A is declared-only. The ban has no mechanism yet; a candidate is handed to the plan.
+- **P54:** AP7 O1–O5, adopted as markers.
+- **P55:** AP7's answers to rev 2.5's open questions, recorded. G5 is stated per target.
+
+**Trees.**
+- **Documents:** this file and the plan, on `u/doc-1-2` @ `49f2fcfb`. Rev 2.5 is written but not yet committed beneath this Part; both land in one commit.
+- **Code:** `crates/boyko_ecs/src/ecs/memory/vm.rs:20-40`, read-only on `integ/unified` @ `c33d786d`, for P55.
+- No cargo command, build or test was run.
+
+**Convention.** Rev 2.5's convention is unchanged:
+- each superseded passage is marked where it stands, with a suffix that begins `⚠ Rev 2.6`;
+- stale words are struck beside their correction;
+- no sentence is deleted;
+- no line before this Part moved.
+
+The marker index at the end of this Part lists every line it touched.
+
+---
+
+## P52 — AP7 W1: P18(b)'s superseded symbol list is struck where it stands
+
+**Where.** P18/18.1 (b), the mechanism cell of G6's row (b), at `:1904`.
+
+**The defect** (AP7 W1).
+- P51 re-worded the cell's canary by rule ("any symbol of P29's pinned set … four after P49").
+- But about thirty words earlier, the same cell still named rev 2.1's four: `Schedule::run`, `ComponentPool::new`, `ScopeBlock::grow` and `HeapRef::alloc_cold`.
+- P29 had already replaced that list (Removed at `:2609-2611`, Added at `:2613-2625`), and P49 struck `HeapRef::alloc_cold`.
+- So the count "four" sat beside a four-item list, and three of those four items were wrong.
+
+**Removed** (struck in place, `:1904`, verbatim):
+
+> The four are chosen so the pin has a guaranteed subject — **every pinned symbol is `#[inline(never)]` or `#[cold]` at its definition**, because an `#[inline]` function may leave no symbol at all and an absent symbol would read as a skip: `Schedule::run`, `ComponentPool::new` (`component_pool.rs:279`, non-generic), `ScopeBlock::grow` (`block.rs:425`, `#[inline(never)]` — this replaces rev 2's `ScopeBlock::bump`, which is `#[inline]` at `block.rs:368` and may not exist), `HeapRef::alloc_cold` (P15's `#[cold]` page-assign path).
+
+**Added** (the marker beside it):
+
+> The pinned set is P29's, with P49's strike: `ComponentPool::grow_rows`, `ComponentPool::commit_subregion`, `run_check_ticks_scan`, `ScopeBlock::grow`. `Schedule::run` and `ComponentPool::new` carry no inline attribute and are not pinned (P29); `HeapRef::alloc_cold` is never built (U-1).
+
+**Why it matters.**
+- 03 §6 freezes the leg-(2) pin list at B3 and records every absent candidate with its reason ("Missing symbols").
+- A capture taken from `:1904` instead of from P29 would have pinned two symbols P29 refused and one that is never built. It would have recorded all three as absent, and it would never have pinned `grow_rows`, `commit_subregion` or `run_check_ticks_scan`.
+- Leg (2) would then have lost three of its four P29 subjects, and nothing would have gone red.
+- After P52, P29's is the only set the cell names. 03 `:170` and P47.3 row (b) already point readers to P29.
+
+The cell's "**A missing symbol is RED, never a skip.**" is not struck, because P29 keeps the rule.
+
+**Cost.** None; this is a text fix.
+
+## P53 — AP7 W2: leg (6) does not carry the `#[used]`/ctor ban; arm A is declared-only; the ban has no mechanism yet
+
+**Where.**
+- P47.4's closing paragraph (`:4503`), against P47.4's own argument (`:4483`);
+- P44/O2's row (`:3830`);
+- plan 03 §6: leg (4) (`03:177`), leg (6) (`03:179`) and the controls row (`03:184`).
+
+### 53.1 The "carried" claim is withdrawn
+
+`:4503` said that leg (6)'s control, "a `#[used]` static in a modding crate", carries pass 6's recommended ruling. That ruling forbids `#[used]` statics and constructors in the modding crate, "enforced by a `syn` check". The sentence is struck in place, and two facts refute it.
+- **The control cannot fire.**
+  - P47.4 argues, from the rustc lint documentation, that arm A never loads the unreferenced modding crate. So arm A "carries nothing of the unused crate … except what feature unification changes" (`:4483`).
+  - A `#[used]` static in that crate therefore never reaches arm A's binary. Leg (6)'s size comparison stays equal, and the control stays green.
+  - Pass 6 made the same point at `:4153`: "the gate will not 'find out first'".
+- **No check reads modding-crate source.** UG-15 leg (1)'s scope is the six kernel crates, plus `boyko_memory` from C1 on (`03:169`).
+
+A red control that cannot go red is this repository's "canary that cannot fire". A ban recorded as carried by such a control is "a check believed to cover more than it does" (AP7 W2).
+
+### 53.2 Arm A is declared-only
+
+P44's row defines both arms (`:3830`): "arm A declares `boyko_modding` as a dependency and never calls it, arm B removes the dependency". That is the form P47.4 argues from. It is also the only form under which leg (6) measures what 00 §5 assigns it: feature unification alone.
+- **Declared-only.**
+  - Rustc loads a crate passed with `--extern` only when code references it. `extern crate foo as _` is the documented way to link a crate that is "not otherwise directly referenced" `[D rustc lint unused_extern_crates]`.
+  - So the two arms differ only in what Cargo's feature unification changes in the crates both arms link `[D Cargo Book, "Feature unification"]`.
+  - Leg (6)'s size clause (`03:179`) is how that difference is observed, and `cargo tree -e features` names it (P55, answer 2).
+- **Force-linked** (`extern crate … as _` in the game).
+  - Arm A would then also carry the modding crates' own link survivors.
+  - That is a different configuration: a game that links modding. Its cost is P2's budget, measured by MD:M-A3 (`03:177`), not a zero-delta leg.
+- **03's wording.**
+  - Plan 03 §6 leg (4) calls arm A "the modding crates linked and never called" (`03:177`).
+  - It cites P44 for the definition, so "linked" is a transcription error, not a second design. It is corrected in place in 03, dated 2026-09-23.
+  - With arm A declared-only, leg (4)'s startup equality and leg (6)'s size equality both hold by construction, except for feature unification, which is exactly their subject.
+
+### 53.3 The ban has no mechanism today; a candidate is handed to the plan
+
+Pass 6's recommended ruling stands as a **rule without a gate**.
+- It matters only in the configuration of 53.2's force-linked bullet: a game that links a modding crate runs that crate's constructors before `main`, even with no mod loaded.
+- Nothing in 03 §6 observes that today.
+- Leg (6)'s control in `03:184` is marked in place as unable to fire, so that no tester runs it as a gate.
+
+**Candidate mechanism.** It is open for the plan (03 §6). This file does not adopt it, because the ban is a modding-crate rule and its gate belongs to UG-15.
+- **(a) Source.**
+  - Extend UG-15 leg (1)'s `syn` walk to the three modding crates (`boyko_mod_host`, `boyko_mod_api`, `boyko_mod_registry`; 05 §4), with an empty allowlist.
+  - Leg (1) already counts `used` and `link_section` attributes (`03:169`), so a `#[used]` static written in a modding crate is red.
+  - **Red control:** a `#[used]` static in a modding crate → leg (1) red.
+- **(b) Objects.**
+  - Extend leg (7b)'s rlib object census (`03:181`) to the modding crates' object members.
+  - It is red on any section whose name begins `.init_array`, `.ctors`, `.CRT$XC` or `.CRT$XI`. Those are the sections that hold a load-time constructor on ELF and on Windows.
+  - (a) alone cannot see a constructor written through a third-party macro, because leg (1) walks unexpanded source. The `ctor` crate's `#[ctor]` expands to `#[used]` plus `#[link_section = ".init_array"]` on Linux and `".CRT$XCU"` on Windows `[D ctor crate docs]`.
+  - **Red control:** `#[ctor]` on a function in a modding crate, in the control branch only → (b) red while (a) stays green. This proves (b) is not redundant with (a).
+- **When.** Both run from the first modding crate on, which is when leg (6) stops being N/A (UG-15's status cell, `03:24`).
+
+**Cost.** None at runtime:
+- (a) adds three crates to an existing walk;
+- (b) adds three crates' object members to an existing census.
+
+### 53.4 What does not change
+
+P47.4's argument, and its answer to pass-6 W1, stand: legs (7) and (7b) see kernel survivors, and leg (6) keeps only feature unification. P44's row keeps its relabel to (g) (P47).
+
+## P54 — AP7 O1–O5, adopted
+
+Each fix is a marker on the line it corrects. None changes a mechanism or a gate.
+
+| AP7 | Line(s) | Marker |
+|---|---|---|
+| O1 | `:3169` (P34 site 10) | The site edited P11's loom bullet (`:1182`), which P17 had already removed (17.5, `:1873`). The live §5.3 loom text is P17's Added block (`:1877`, with P51's fix). The rev-2 sentence "`Heap` and `ChunkCache` have no atomics", which this row restates, is the sentence P17 called the defect. 03 §3 carries the D-M2 claim/release loom model on its own. |
+| O2 | `:3832` (P44/O2); `:3662` (P39.2); `:4593` and `:4600` (P49's census) | "Five" becomes four at `:3832`, the ninth site, which P49's census missed. `:3662` is now marked too. A count marker changes neither P39's mechanism nor its gate, so P39 still stands as pass 6 reviewed it (the same reasoning as O5). P49's census line and its `:3662` item carry the correction. |
+| O3 | `:3743` (P42's row, rev-2.5 marker); `:4355` (P46.3) | `SparseMap` moves in **D-M1** (01 KC-16, `01:103`; 02's D-M1 row, `02:127`, "`SparseMap` ×3"). D-R2d only retires its KF-02 row (`sparse_map.rs:10`). |
+| O4 | `:4529` (P48's §2.0); `:1214` (K-MOD-7) | §2.0's crate holds KC-01 and KC-03, but two rungs land them. **C1 lands KC-01 only**: the move, `raw::{reserve, commit_at}` and the UG-04 counter (`02:119`). **D-M1 lands KC-03**: `ZeroInit`, `ByteColumn`, `ensure_len_zeroed` and the stack helpers (`02:127`). K-MOD-7's `raw::{reserve, commit, base}` reads as KC-01's `raw::{reserve, commit_at}`. |
+| O5 | `:3672`–`:3675` (P39.3, G-MINT-1..4) | These rows are built in D-S1(i)'s isolated form (02 `:300-307`; 03 UG-19), not as written here. Each is the only test in its own binary, with the relative pin `P = next_id + 32` instead of absolute id 100. G-MINT-1 expects `Ok(j)` with `j != k + 1`. G-MINT-3 is not ignored, and its mutation panics out of bounds on `LAYOUTS[512]` instead of spinning. The pointer changes neither P39's mechanism nor its gate. |
+
+## P55 — AP7's answers to rev 2.5's open questions, recorded
+
+| Rev 2.5 question | AP7's answer | Recorded as |
+|---|---|---|
+| 1. G5 against `vm.rs`'s fallback arm | The conflict is real and has existed since rev 1. P48 did not introduce it, and P48's claim holds for the thread context. The fallback arm is not Miri-only: `vm.rs:25` documents it as "Fallback (Miri / wasm32 / exotic)", and `:39-40` import `std::alloc` under `cfg(any(miri, not(any(windows, unix))))`, both re-read at `c33d786d`. The candidate fix is sound. Its home is UG-07 (F2, `03:16`), not C1, which adds no `#![no_std]`. C1 is not held. | G5 (`:337`) is stated per target, with a marker in place. `#![no_std]` applies on every target, and `extern crate alloc` only under the fallback arm's `cfg`. G5's compile check runs on the windows and unix targets, where "no `Vec`/`Box`/`String`/`format!` can be named" holds in full. It lands with UG-07 at F2. |
+| 2. Leg (6)'s size clause (`03:179`) | Keep it. By P47.4's own argument, the two arms differ only by feature unification, so the size comparison is how leg (6) observes it. UG-16 (`03:25`) also states that "the modding-arm delta is leg (6)". "Its only role" limits what leg (6) is claimed to see, not how it sees it. | Closed, with no plan edit. The arm-A definition it depends on is P53.2. |
+| 3. `DropColumn`'s trigger | Keep it as a revival form with no trigger named. 00 §5 lists `DropColumn` among the revival forms, so calling it "deleted" would contradict the binding spec. | Closed; P46 is unchanged. |
+| 4. K-MOD-1 and K-MOD-2 | Following 05 §4 is correct, because P47.1 makes file 05 authoritative for §7. The DOC-1 row's list was not meant to be complete. | Closed; P47 is unchanged. |
+
+## Change log (rev 2.5 → rev 2.6)
+
+| Row | Disposition | Where |
+|---|---|---|
+| AP7 W1 | P18(b)'s superseded symbol list is struck in place; the cell names P29's set | P52; `:1904` |
+| AP7 W2 | The "carried by leg (6)" claim is withdrawn, and arm A is stated as declared-only (P44). 03's "linked" is corrected in place, and 03's leg-(6) control is marked as unable to fire. The ban is a rule without a gate, and its candidate mechanism, (a) source plus (b) objects, is open for the plan | P53; `:4503`; `03:177`, `03:184` |
+| AP7 O1 | P34 site 10 edited already-removed text; marker | P54; `:3169` |
+| AP7 O2 | "Five" corrected at `:3832` and `:3662`; P49's census corrected | P54; `:3832`, `:3662`, `:4593`, `:4600` |
+| AP7 O3 | `SparseMap` moves in D-M1, not D-R2d | P54; `:3743`, `:4355` |
+| AP7 O4 | C1 = KC-01 only, and D-M1 = KC-03; K-MOD-7's `raw` names | P54; `:4529`, `:1214` |
+| AP7 O5 | G-MINT rows point to D-S1(i)'s isolated form | P54; `:3672`–`:3675` |
+| AP7 answers 1–4 | G5 is stated per target (UG-07, F2); leg (6)'s size clause is kept; `DropColumn` stays a revival form; K-MOD-1/2 follow 05 §4 | P55; `:337` |
+| Unchanged | Every mechanism and gate of rev 2.5, including P39 and P40 as pass 6 reviewed them | — |
+
+## Marker index (every in-place change of rev 2.6; no line number moved)
+
+| Patch | Lines (this file) |
+|---|---|
+| Header | `:1` (title), `:5` (status: the rev-2.6 status, with rev 2.5's struck) |
+| P52 | `:1904` |
+| P53 | `:4503` |
+| P54 | `:1214`, `:3169`, `:3662`, `:3672`, `:3673`, `:3674`, `:3675`, `:3743`, `:3832`, `:4355`, `:4529`, `:4593`, `:4600` |
+| P55 | `:337`, `:4736` (rev 2.5's open questions, marked answered) |
+| Rev 2.5's closing status | `:4774` |
+
+**Also edited in place, outside this file** (plan 03, same-line edits, dated 2026-09-23): `03:177` (arm A is declared-only) and `03:184` (leg (6)'s control cannot fire; the ban's mechanism is open).
+
+**Files read for this patch** (read-only, except this file and the two 03 lines):
+- in `D:/wt/docs` @ `49f2fcfb`: this file, and `docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md`, `-01-KERNEL-CONTRACT.md` (`:103`), `-02-ORDER-OF-WORK.md` (`:91-98`, `:119`, `:127`, `:300-312`) and `-03-GATES.md` (`:16`, `:24-25`, `:169-184`);
+- in `D:/wt/joltab`, read-only through `git show c33d786d:`: `crates/boyko_ecs/src/ecs/memory/vm.rs` (`:20-40`).
+
+**External sources (read 2026-09-23):**
+- `[D rustc lint unused_extern_crates]` and `[D Cargo Book, "Feature unification"]`: as in rev 2.5.
+- `[D ctor crate docs]` <https://docs.rs/ctor/latest/ctor/>: `#[ctor]` is implemented as a `#[used]` static with `link_section = ".init_array"` on Linux, `".CRT$XCU"` on Windows (GNU and MSVC) and `"__DATA,__mod_init_func"` on Apple targets. The crate states that it "explicitly subverts" Rust's rule that nothing happens before `main`.
+
+Status: rev 2.6 (2026-09-23). AP7's W1 and W2 are resolved and O1–O5 are adopted; no owner ruling is needed. One item is open for the plan, not for this file: the mechanism of the modding-crate `#[used]`/ctor ban (P53.3). C1's prerequisite, "AP7 has closed rev 2.5" (02 §2), is the orchestrator's to declare, either by ruling (as for pass 6) or after a re-review scoped to this Part.
