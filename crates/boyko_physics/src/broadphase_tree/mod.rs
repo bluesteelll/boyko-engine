@@ -482,16 +482,19 @@ impl BroadphaseTree {
 
     /// The leaf-list collection cap: `kernel::LEAF_LIST_CAP`, or the fallback gate's lowered
     /// value.
+    ///
+    /// The test build narrows the production value with a `#[cfg(test)]` statement rather than
+    /// splitting the body into a `#[cfg(test)]` / `#[cfg(not(test))]` pair: the workspace's
+    /// source censuses blank every item whose predicate names `test`, so a `not(test)` item — the
+    /// production branch — would be read as test-only
+    /// (`production_reachability_census::the_cfg_test_rule_has_no_not_test_counterexample_in_the_tree`).
+    /// Outside `cfg(test)` the body is the constant alone.
     #[inline]
     fn leaf_list_cap(&self) -> usize {
+        let cap = LEAF_LIST_CAP;
         #[cfg(test)]
-        {
-            self.leaf_list_cap
-        }
-        #[cfg(not(test))]
-        {
-            LEAF_LIST_CAP
-        }
+        let cap = cap.min(self.leaf_list_cap);
+        cap
     }
 
     /// Lowers the leaf-list collection cap, so a small scene exercises the fallback.
