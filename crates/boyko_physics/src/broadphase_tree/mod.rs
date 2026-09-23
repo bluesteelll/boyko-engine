@@ -80,8 +80,10 @@
 //!   walk would test is collected; the prefilter is the walk's cull on the same bits; a leaf
 //!   whose largest row is at or below the row holds nothing the row emits. The per-row sort
 //!   then gives each segment the walk's bytes at the walk's offset, because segments are
-//!   written in the same slot order. A collection over `kernel::LEAF_LIST_CAP` candidates on
-//!   either tree answers that leaf's rows with the per-row walk (the fallback).
+//!   written in the same slot order. A segment of up to 16 entries is sorted by a branch-free
+//!   network (`kernel::sort_network`, C3b F2), a longer one as the walk sorts it. A collection
+//!   over `kernel::LEAF_LIST_CAP` candidates on either tree answers that leaf's rows with the
+//!   per-row walk (the fallback).
 //!
 //! [`TreeDiag`] counts the active leaf nodes each path answered (`leaf_list_leaves`,
 //! `fallback_leaves`, `row_walk_leaves`), so a receipt names the kernel that ran.
@@ -122,7 +124,9 @@ use crate::systems::body_bounding_radius;
 use self::bvh::{
     Item, LANES, LEAF_R, LEAF_ROW, LEAF_X, LEAF_Y, LEAF_Z, NO_LANE_ROW, Node8, PackedBvh8,
 };
-use self::kernel::{CandList, LEAF_LIST_CAP, QueryBox, leaf_mask, leaf_mask_above};
+use self::kernel::{
+    CandList, LEAF_LIST_CAP, NETWORK_SORT_MAX, QueryBox, leaf_mask, leaf_mask_above, sort_network,
+};
 
 pub(crate) mod bvh;
 #[cfg(feature = "bp-query-counts")]
@@ -1331,7 +1335,7 @@ fn leaf_list_pass(
                 counts.emitted += segment.len() as u64;
                 counts.sort_shifts += inversions(segment);
             }
-            sort_segment(segment);
+            sort_leaf_list_segment(segment);
             let nrev = segment.partition_point(|&t| t < row);
             debug_assert!(segment.get(nrev).is_none_or(|&t| t > row), "a row is not its own partner");
             let rec = &mut recs[row as usize];
@@ -1416,6 +1420,18 @@ fn sort_segment(segment: &mut [u32]) {
         }
     } else {
         sort_long_segment(segment);
+    }
+}
+
+/// Sorts one leaf-list segment: the network up to `kernel::NETWORK_SORT_MAX` entries (C3b, F2),
+/// [`sort_segment`] above. The per-row walk keeps [`sort_segment`] for every length, so it
+/// stays the kernel C1 shipped.
+#[inline]
+fn sort_leaf_list_segment(segment: &mut [u32]) {
+    if segment.len() <= NETWORK_SORT_MAX {
+        sort_network(segment);
+    } else {
+        sort_segment(segment);
     }
 }
 

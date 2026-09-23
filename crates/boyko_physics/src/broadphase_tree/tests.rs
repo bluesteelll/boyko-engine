@@ -15,7 +15,8 @@
 //!   so the oracle sees both; G-LL4: every leaf-list test's kernel arm equals its scalar arm;
 //!   G-LL5: a lowered collection cap takes the fallback, which keeps the bytes; the one-leaf
 //!   active tree over a multi-leaf static tree (C3b review, W1); the max row the cut reads and
-//!   the kept-count pin, the cut's gate in the default test command (W2).
+//!   the kept-count pin, the cut's gate in the default test command (W2); the small-segment
+//!   network (F2) against `sort_unstable` on every length it takes.
 //!
 //! Every test is device-free and heap-light; under Miri the property tests shrink to 16 cases
 //! at n ≤ 24 and the kernel is the scalar arm.
@@ -34,8 +35,8 @@ use super::bvh::{
     PackedBvh8,
 };
 use super::kernel::{
-    CandList, LEAF_LIST_CAP, QueryBox, box_mask, box_mask_scalar, leaf_mask, leaf_mask_above,
-    leaf_mask_above_scalar, leaf_mask_scalar,
+    CandList, LEAF_LIST_CAP, NETWORK_SORT_MAX, QueryBox, box_mask, box_mask_scalar, leaf_mask,
+    leaf_mask_above, leaf_mask_above_scalar, leaf_mask_scalar, sort_network, sort_network_scalar,
 };
 use super::{
     ADMIT_BUILD_RATIO, BroadphaseTree, JUMPER, KIND_EXCLUDED, KIND_WIDE, LeafListCounts,
@@ -1895,4 +1896,52 @@ fn gll3_kept_count_pin_sees_the_max_row_cut() {
     assert_eq!((c.leaves, c.rows), (5, 40));
     assert_eq!(c.emitted, 39, "one owner per pair");
     assert_eq!((c.cands_static, c.kept_static), (0, 0), "no static set");
+}
+
+/// Values for the network's property test: a few small ones (so duplicates are common), the
+/// padding value itself, and the full range.
+fn network_value() -> BoxedStrategy<u32> {
+    prop_oneof![4 => 0u32..6, 1 => Just(u32::MAX), 1 => Just(u32::MAX - 1), 2 => any::<u32>()].boxed()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: G0_CASES,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// F2's gate: on every length `0..=16`, with duplicates and `u32::MAX` (the padding value)
+    /// in the input, the network's kernel arm and its scalar arm both equal `sort_unstable`.
+    #[test]
+    fn f2_network_sorts_like_sort_unstable(values in prop::collection::vec(network_value(), 0..=NETWORK_SORT_MAX)) {
+        let mut want = values.clone();
+        want.sort_unstable();
+        let mut kernel = values.clone();
+        sort_network(&mut kernel);
+        prop_assert_eq!(&kernel, &want, "kernel arm");
+        let mut scalar = values;
+        sort_network_scalar(&mut scalar);
+        prop_assert_eq!(&scalar, &want, "scalar arm");
+    }
+}
+
+/// F2: every length `0..=16` is sorted, each from its reverse and from a rotation (the proptest
+/// draws lengths at random; this one takes each).
+#[test]
+fn f2_network_sorts_every_length() {
+    for n in 0..=NETWORK_SORT_MAX {
+        let reversed: Vec<u32> = (0..n as u32).rev().collect();
+        let rotated: Vec<u32> = (0..n as u32).map(|i| (i * 5 + 3) % (n as u32).max(1)).collect();
+        for input in [reversed, rotated] {
+            let mut want = input.clone();
+            want.sort_unstable();
+            let mut kernel = input.clone();
+            sort_network(&mut kernel);
+            assert_eq!(kernel, want, "kernel arm, n = {n}");
+            let mut scalar = input;
+            sort_network_scalar(&mut scalar);
+            assert_eq!(scalar, want, "scalar arm, n = {n}");
+        }
+    }
 }

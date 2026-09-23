@@ -59,6 +59,15 @@
 //! The collection left-packs the selected lanes of a level-1 node with a 256-entry permutation
 //! table ([`CandList::push_lanes`]). The integer ops (`cmpgt_epi32`, the permutes, the
 //! zero-extension) are exact, so the arms agree bit for bit here too (G-LL4).
+//!
+//! # The small-segment sort (C3b, F2)
+//!
+//! [`sort_network`] sorts a leaf-list segment of up to [`NETWORK_SORT_MAX`] entries with a
+//! bitonic network in one or two ymm registers (`vpminud` / `vpmaxud`, fixed shuffles and
+//! blends, padded with `u32::MAX`): no data-dependent branch, where the insertion sort takes one
+//! per shift. A sort's result does not depend on how it is reached, so the network writes the
+//! insertion sort's bytes; the property test pins both arms against `sort_unstable` on every
+//! length it takes.
 
 use core::mem::MaybeUninit;
 
@@ -114,6 +123,177 @@ const fn pack_table() -> [u64; 256] {
     }
     table
 }
+
+/// Segment length up to which the leaf-list pass sorts with [`sort_network`].
+pub(crate) const NETWORK_SORT_MAX: usize = 16;
+
+/// The compare-exchange steps `(k, j)` of a bitonic sort of 16: block size `k`, partner
+/// distance `j`. The first six sort each half of eight (ascending below lane 8, descending
+/// above); the last four merge them.
+const BITONIC_16: [(usize, usize); 10] = [(2, 1), (4, 2), (4, 1), (8, 4), (8, 2), (8, 1), (16, 8), (16, 4), (16, 2), (16, 1)];
+
+/// The lanes `offset .. offset + 8` of step `(k, j)` that keep the larger of their pair, as an
+/// eight-bit blend mask: lane `i` pairs with `i ^ j`; the lower of the pair (`i & j == 0`) keeps
+/// the smaller in an ascending block (`i & k == 0`) and the larger in a descending one.
+const fn keeps_max(k: usize, j: usize, offset: usize) -> i32 {
+    let mut mask = 0i32;
+    let mut lane = 0;
+    while lane < 8 {
+        let i = offset + lane;
+        if (i & j != 0) != (i & k != 0) {
+            mask |= 1 << lane;
+        }
+        lane += 1;
+    }
+    mask
+}
+
+/// Sorts `segment` ascending, `segment.len() ≤ NETWORK_SORT_MAX`: the leaf-list pass's
+/// small-segment sort (C3b, F2; module docs, "The small-segment sort").
+#[inline]
+pub(crate) fn sort_network(segment: &mut [u32]) {
+    debug_assert!(segment.len() <= NETWORK_SORT_MAX, "the network sorts at most 16 entries");
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+    {
+        sort_network_avx2(segment);
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
+    {
+        sort_network_scalar(segment);
+    }
+}
+
+/// The scalar arm of [`sort_network`]: the same bitonic network of 16 over a `u32::MAX`-padded
+/// copy. The reference the AVX2 arm is pinned against, and the arm every non-AVX2 build and
+/// Miri run.
+///
+/// # Panics
+///
+/// If `segment.len() > NETWORK_SORT_MAX`.
+//
+// `dead_code`: as for `box_mask_scalar`.
+#[allow(dead_code)]
+#[inline]
+pub(crate) fn sort_network_scalar(segment: &mut [u32]) {
+    let n = segment.len();
+    let mut v = [u32::MAX; NETWORK_SORT_MAX];
+    v[..n].copy_from_slice(segment);
+    for (k, j) in BITONIC_16 {
+        for i in 0..NETWORK_SORT_MAX {
+            let l = i ^ j;
+            if l > i {
+                let (lo, hi) = (v[i].min(v[l]), v[i].max(v[l]));
+                let ascending = i & k == 0;
+                (v[i], v[l]) = if ascending { (lo, hi) } else { (hi, lo) };
+            }
+        }
+    }
+    segment.copy_from_slice(&v[..n]);
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+#[inline]
+fn sort_network_avx2(segment: &mut [u32]) {
+    use core::arch::x86_64::{
+        __m256i, _mm256_andnot_si256, _mm256_cmpgt_epi32, _mm256_loadu_si256, _mm256_maskload_epi32,
+        _mm256_maskstore_epi32, _mm256_max_epu32, _mm256_min_epu32, _mm256_or_si256,
+        _mm256_set1_epi32, _mm256_setr_epi32, _mm256_storeu_si256,
+    };
+    let n = segment.len();
+    debug_assert!(n <= NETWORK_SORT_MAX, "the network sorts at most 16 entries");
+    if n < 2 {
+        return;
+    }
+    let p = segment.as_mut_ptr();
+    // SAFETY: `2 ≤ n ≤ 16`, and `segment` is borrowed mutably. The masked loads and stores
+    // touch only the lanes their mask enables: `lane < n` from `p` (the `n ≤ 8` arm) and
+    // `8 + lane < n` from `p.add(8)` (the `n > 8` arm, where `n ≥ 9` puts `p.add(8)` inside
+    // `segment`), all inside it. The full load and store of the first register in the `n > 8`
+    // arm touch `segment[0..8]`, inside it. `loadu` / `storeu` / `maskload` / `maskstore` have no
+    // alignment requirement. The shuffles, min / max and blends are register ops. The `avx2`
+    // feature is compiled in (the `cfg` on this function).
+    unsafe {
+        let iota = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+        let ones = _mm256_set1_epi32(-1);
+        if n <= 8 {
+            let live = _mm256_cmpgt_epi32(_mm256_set1_epi32(n as i32), iota);
+            let v = _mm256_maskload_epi32(p.cast::<i32>(), live);
+            let v = _mm256_or_si256(v, _mm256_andnot_si256(live, ones));
+            // The bitonic sort of eight: the first six steps of the sixteen, lower half.
+            let v = bitonic8_lower_avx2(v);
+            _mm256_maskstore_epi32(p.cast::<i32>(), live, v);
+        } else {
+            let live = _mm256_cmpgt_epi32(_mm256_set1_epi32(n as i32 - 8), iota);
+            let a = _mm256_loadu_si256(p.cast::<__m256i>());
+            let b = _mm256_maskload_epi32(p.add(8).cast::<i32>(), live);
+            let b = _mm256_or_si256(b, _mm256_andnot_si256(live, ones));
+            // Each half sorted by the first six steps (the upper half descending, lanes 8..16),
+            // then the four merge steps.
+            let a = bitonic8_lower_avx2(a);
+            let b = bitonic8_upper_avx2(b);
+            let (a, b) = (_mm256_min_epu32(a, b), _mm256_max_epu32(a, b));
+            let a = merge8_avx2(a);
+            let b = merge8_avx2(b);
+            _mm256_storeu_si256(p.cast::<__m256i>(), a);
+            _mm256_maskstore_epi32(p.add(8).cast::<i32>(), live, b);
+        }
+    }
+}
+
+/// One compare-exchange step at partner distance `J ∈ {1, 2, 4}` within a register: every lane
+/// meets `lane ^ J`, the lanes of `KEEP_MAX` keep the larger.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+#[inline]
+fn exchange_avx2<const J: usize, const KEEP_MAX: i32>(v: core::arch::x86_64::__m256i) -> core::arch::x86_64::__m256i {
+    use core::arch::x86_64::{
+        _mm256_blend_epi32, _mm256_max_epu32, _mm256_min_epu32, _mm256_permute4x64_epi64,
+        _mm256_shuffle_epi32,
+    };
+    // SAFETY: register ops only; the `avx2` feature is compiled in (the `cfg` on this function).
+    unsafe {
+        let partner = match J {
+            1 => _mm256_shuffle_epi32::<0b10_11_00_01>(v),
+            2 => _mm256_shuffle_epi32::<0b01_00_11_10>(v),
+            _ => _mm256_permute4x64_epi64::<0b01_00_11_10>(v),
+        };
+        _mm256_blend_epi32::<KEEP_MAX>(_mm256_min_epu32(v, partner), _mm256_max_epu32(v, partner))
+    }
+}
+
+/// The first six steps of [`BITONIC_16`] on lanes `0 .. 8`: sorts them ascending.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+#[inline]
+fn bitonic8_lower_avx2(v: core::arch::x86_64::__m256i) -> core::arch::x86_64::__m256i {
+    let v = exchange_avx2::<1, { keeps_max(2, 1, 0) }>(v);
+    let v = exchange_avx2::<2, { keeps_max(4, 2, 0) }>(v);
+    let v = exchange_avx2::<1, { keeps_max(4, 1, 0) }>(v);
+    let v = exchange_avx2::<4, { keeps_max(8, 4, 0) }>(v);
+    let v = exchange_avx2::<2, { keeps_max(8, 2, 0) }>(v);
+    exchange_avx2::<1, { keeps_max(8, 1, 0) }>(v)
+}
+
+/// The first six steps of [`BITONIC_16`] on lanes `8 .. 16`: sorts them descending.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+#[inline]
+fn bitonic8_upper_avx2(v: core::arch::x86_64::__m256i) -> core::arch::x86_64::__m256i {
+    let v = exchange_avx2::<1, { keeps_max(2, 1, 8) }>(v);
+    let v = exchange_avx2::<2, { keeps_max(4, 2, 8) }>(v);
+    let v = exchange_avx2::<1, { keeps_max(4, 1, 8) }>(v);
+    let v = exchange_avx2::<4, { keeps_max(8, 4, 8) }>(v);
+    let v = exchange_avx2::<2, { keeps_max(8, 2, 8) }>(v);
+    exchange_avx2::<1, { keeps_max(8, 1, 8) }>(v)
+}
+
+/// The last three steps of [`BITONIC_16`] within one register (every block ascending, so both
+/// halves take the same masks): a bitonic eight becomes sorted.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
+#[inline]
+fn merge8_avx2(v: core::arch::x86_64::__m256i) -> core::arch::x86_64::__m256i {
+    let v = exchange_avx2::<4, { keeps_max(16, 4, 0) }>(v);
+    let v = exchange_avx2::<2, { keeps_max(16, 2, 0) }>(v);
+    exchange_avx2::<1, { keeps_max(16, 1, 0) }>(v)
+}
+
 
 /// The half-extent a row's cull box gets on every axis: `|r| + (‖p‖∞ + |r|)·2^-20 + 2^-72`.
 ///
