@@ -1058,6 +1058,33 @@ struct Tables {
     methods: BTreeMap<(String, String), Vec<Typed>>,
     /// `thread_local!` static name → declared type.
     tls: BTreeMap<String, Typed>,
+    /// Every module name declared in the crate (a path that starts with one is crate-local).
+    mods: BTreeSet<String>,
+}
+
+/// One scanned crate's aliases, kept for the whole scan so that a qualified path or a `use` of
+/// another scanned crate's alias resolves (review W5).
+struct CrateAliases {
+    /// The name code uses for the crate: `[lib] name`, else the package name with `-` → `_`,
+    /// else the directory name.
+    lib: String,
+    aliases: BTreeMap<String, Vec<AliasDef>>,
+    /// Per-file `use` maps, indexed by [`AliasDef::file_idx`].
+    uses: Vec<UseMap>,
+    mods: BTreeSet<String>,
+}
+
+fn crate_lib_name(root: &Path, crate_dir: &str) -> String {
+    let manifest = if crate_dir == "." {
+        root.join("Cargo.toml")
+    } else {
+        root.join(crate_dir).join("Cargo.toml")
+    };
+    let text = fs::read_to_string(manifest).unwrap_or_default();
+    manifest_table_name(&text, "[lib]")
+        .or_else(|| manifest_package_name(&text))
+        .map(|n| n.replace('-', "_"))
+        .unwrap_or_else(|| crate_dir.rsplit('/').next().unwrap_or(crate_dir).to_owned())
 }
 
 struct TableCollector<'t> {
@@ -1180,6 +1207,9 @@ impl<'ast> Visit<'ast> for TableCollector<'_> {
             Item::Trait(tr) => {
                 self.t.defined.insert(tr.ident.to_string());
             }
+            Item::Mod(m) => {
+                self.t.mods.insert(m.ident.to_string());
+            }
             _ => {}
         }
         visit::visit_item(self, i);
@@ -1192,10 +1222,12 @@ impl<'ast> Visit<'ast> for TableCollector<'_> {
 // Type heads
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/// A generic-parameter binding frame for alias expansion.
+/// A generic-parameter binding frame for alias expansion. `uses` and `krate` are where the
+/// frame's names resolve: the scanned file, or the file and crate that define an expanded alias.
 struct Frame<'f> {
     binds: Vec<(String, &'f Type)>,
     uses: &'f UseMap,
+    krate: usize,
     parent: Option<&'f Frame<'f>>,
 }
 
@@ -1203,6 +1235,9 @@ struct TypeCx<'a> {
     vocab: &'a Vocab,
     tables: &'a Tables,
     files: &'a [SrcFile],
+    /// Every scanned crate's aliases (review W5), and the index of the crate being visited.
+    crates: &'a [CrateAliases],
+    me: usize,
 }
 
 impl TypeCx<'_> {
@@ -1225,6 +1260,30 @@ impl TypeCx<'_> {
             };
         }
         "Box<T>".to_owned()
+    }
+
+    /// The scanned crate whose alias table a type path resolves in, or `None` for a path into
+    /// std or a crate that is not scanned (review W5). A bare name resolves in the frame's crate
+    /// unless a `use` imports it from elsewhere; a qualified or imported path resolves by its
+    /// leading segment: `crate` / `self` / `super` or a module of the frame's crate, or the lib
+    /// name of a scanned crate. Aliases are keyed by name per crate, so two same-named aliases
+    /// with different heads stay ALIAS-AMBIGUOUS, qualified or not.
+    fn alias_crate(&self, path: &syn::Path, frame: &Frame<'_>) -> Option<usize> {
+        let first = path.segments.first()?.ident.to_string();
+        let by_lib = |name: &str| self.crates.iter().position(|c| c.lib == name);
+        if path.leading_colon.is_some() {
+            return by_lib(&first);
+        }
+        let lead = match frame.uses.get(&first) {
+            Some(full) => full.first().cloned().unwrap_or_else(|| first.clone()),
+            None if path.segments.len() == 1 => return Some(frame.krate),
+            None => first,
+        };
+        match lead.as_str() {
+            "crate" | "self" | "super" => Some(frame.krate),
+            _ if self.crates[frame.krate].mods.contains(&lead) => Some(frame.krate),
+            _ => by_lib(&lead),
+        }
     }
 
     /// The first heap head in pre-order, or `None`. `mut_ref` lets the walk descend through
@@ -1287,8 +1346,8 @@ impl TypeCx<'_> {
                         .collect(),
                     _ => Vec::new(),
                 };
-                if segs.len() == 1
-                    && let Some(defs) = self.tables.aliases.get(&name)
+                if let Some(k) = self.alias_crate(&tp.path, frame)
+                    && let Some(defs) = self.crates[k].aliases.get(&name)
                 {
                     let n_args = args.len();
                     let fitting: Vec<&AliasDef> =
@@ -1300,7 +1359,8 @@ impl TypeCx<'_> {
                                 d.params.iter().cloned().zip(args.iter().copied()).collect();
                             let inner = Frame {
                                 binds,
-                                uses: &self.files[d.file_idx].uses,
+                                uses: &self.crates[k].uses[d.file_idx],
+                                krate: k,
                                 parent: Some(frame),
                             };
                             results.insert(self.head(&d.ty, &inner, false, depth + 1, fail, at));
@@ -1709,6 +1769,7 @@ impl<'a> Visitor<'a> {
         Frame {
             binds: Vec::new(),
             uses: self.uses,
+            krate: self.tcx.me,
             parent: None,
         }
     }
@@ -1755,8 +1816,12 @@ impl<'a> Visitor<'a> {
                     if let Some(k) = std_alloc_call(&rp) {
                         return Some(k);
                     }
+                    if let Some(k) = self.head_ctor_path(ep) {
+                        return Some(k);
+                    }
+                    return self.ufcs_ctor(ep, &c.args);
                 }
-                self.head_ctor(&c.func)
+                None
             }
             Expr::MethodCall(m) => {
                 let name = m.method.to_string();
@@ -1779,16 +1844,87 @@ impl<'a> Visitor<'a> {
     }
 
     fn collect_container(&mut self, m: &syn::ExprMethodCall) -> String {
-        m.turbofish
-            .as_ref()
-            .and_then(|tf| {
-                tf.args.iter().find_map(|a| match a {
-                    GenericArgument::Type(t) => Some(t.clone()),
-                    _ => None,
-                })
-            })
-            .and_then(|t| self.head_of(&t, false))
+        self.turbofish_head(m.turbofish.as_ref())
             .unwrap_or_else(|| "inferred".to_owned())
+    }
+
+    /// The heap head of a turbofish's first type argument (`::<Vec<_>>`), if it names one.
+    fn turbofish_head(
+        &mut self,
+        tf: Option<&syn::AngleBracketedGenericArguments>,
+    ) -> Option<String> {
+        let t = tf?.args.iter().find_map(|a| match a {
+            GenericArgument::Type(t) => Some(t.clone()),
+            _ => None,
+        })?;
+        self.head_of(&t, false)
+    }
+
+    /// A method constructor called through its path, with the receiver as the first argument
+    /// (`ToString::to_string(&x)`, `str::to_owned(s)`, `<[u8]>::to_vec(v)`, `Vec::clone(&v)`,
+    /// `Iterator::collect::<Vec<_>>(it)`): the allocation the method-call form counts (review O1,
+    /// tester N1). The qualifier must be a type or a trait (upper-case, `str`, or a `<T>::`
+    /// self type), so a module's free function that shares a method's name is not one.
+    fn ufcs_ctor(
+        &mut self,
+        ep: &syn::ExprPath,
+        args: &Punctuated<Expr, Token![,]>,
+    ) -> Option<String> {
+        let segs = &ep.path.segments;
+        let last = segs.last()?;
+        // The qualifier's own path segment, when it has one (for `Box`'s container shape).
+        let qual_seg: Option<&syn::PathSegment> = match &ep.qself {
+            Some(q) => match &*q.ty {
+                Type::Path(tp) if tp.qself.is_none() => tp.path.segments.last(),
+                _ => None,
+            },
+            None if segs.len() >= 2 => Some(&segs[segs.len() - 2]),
+            None => return None,
+        };
+        let qualifier = match (&ep.qself, qual_seg) {
+            (Some(q), _) => Visitor::type_name(&q.ty).unwrap_or_default(),
+            (None, Some(s)) if segs.len() == 2 && ep.path.leading_colon.is_none() => {
+                TypeCx::canon(self.uses, &s.ident.to_string())
+            }
+            (None, Some(s)) => s.ident.to_string(),
+            (None, None) => return None,
+        };
+        let is_type = ep.qself.is_some()
+            || qualifier == "str"
+            || qualifier.chars().next().is_some_and(char::is_uppercase);
+        if !is_type {
+            return None;
+        }
+        let name = last.ident.to_string();
+        let n = args.len().checked_sub(1)?;
+        let turbofish = match &last.arguments {
+            PathArguments::AngleBracketed(ab) => Some(ab),
+            _ => None,
+        };
+        match (name.as_str(), n) {
+            ("collect", 0) => Some(
+                self.turbofish_head(turbofish)
+                    .unwrap_or_else(|| "inferred".to_owned()),
+            ),
+            ("parse", 0) => self.turbofish_head(turbofish),
+            ("clone", 0) if self.tcx.vocab.is_head(&qualifier) => match qualifier.as_str() {
+                "Arc" | "Rc" => None,
+                "Box" => Some(
+                    qual_seg
+                        .map(TypeCx::box_container)
+                        .unwrap_or_else(|| "Box<T>".to_owned()),
+                ),
+                _ => Some(qualifier),
+            },
+            ("clone", 0) if qualifier == "Clone" => {
+                let recv = match &args[0] {
+                    Expr::Reference(r) => &*r.expr,
+                    other => other,
+                };
+                self.clone_receiver_head(recv)
+            }
+            _ => method_ctor(&name, n).map(str::to_owned),
+        }
     }
 
     /// Marks the constructors that form a declaration's value: the receiver spine, `?`, block
@@ -1868,12 +2004,12 @@ impl<'a> Visitor<'a> {
     }
 
     /// `(container)` if `func` is a path to a heap head's constructor.
-    fn head_ctor(&self, func: &Expr) -> Option<String> {
+    fn head_ctor(&mut self, func: &Expr) -> Option<String> {
         let Expr::Path(ep) = func else { return None };
         self.head_ctor_path(ep)
     }
 
-    fn head_ctor_path(&self, ep: &syn::ExprPath) -> Option<String> {
+    fn head_ctor_path(&mut self, ep: &syn::ExprPath) -> Option<String> {
         let segs = &ep.path.segments;
         let fname = segs.last()?.ident.to_string();
         if !is_ctor_fn(&fname) {
@@ -1900,7 +2036,7 @@ impl<'a> Visitor<'a> {
             (name, Some(s.clone()))
         };
         if !self.tcx.vocab.is_head(&tyname) {
-            return None;
+            return self.alias_ctor(ep, &tyname);
         }
         Some(match tyname.as_str() {
             "Box" => {
@@ -1917,9 +2053,31 @@ impl<'a> Visitor<'a> {
         })
     }
 
+    /// A constructor called through a heap alias (`Contour::new()` for
+    /// `type Contour = Vec<Segment>`, `m::Buf::with_capacity(n)`): the aliased head's constructor
+    /// (review W5, the alias hole's constructor form). Only a qualifier that resolves to an alias
+    /// counts, so `Option::<Vec<u8>>::default()` stays no site.
+    fn alias_ctor(&mut self, ep: &syn::ExprPath, tyname: &str) -> Option<String> {
+        let segs = &ep.path.segments;
+        if ep.qself.is_some() || segs.len() < 2 {
+            return None;
+        }
+        let qualifier = syn::Path {
+            leading_colon: ep.path.leading_colon,
+            segments: segs.iter().take(segs.len() - 1).cloned().collect(),
+        };
+        let k = self.tcx.alias_crate(&qualifier, &self.frame())?;
+        self.tcx.crates[k].aliases.get(tyname)?;
+        let ty = Type::Path(syn::TypePath {
+            qself: None,
+            path: qualifier,
+        });
+        self.head_of(&ty, false)
+    }
+
     /// A constructor named as a VALUE (`.map(PathBuf::from)`, `.map(Vec::into_boxed_slice)`,
     /// `.map(ToString::to_string)`): the call happens inside the adapter, the site is here.
-    fn ctor_as_value(&self, ep: &syn::ExprPath) -> Option<String> {
+    fn ctor_as_value(&mut self, ep: &syn::ExprPath) -> Option<String> {
         if ep.path.segments.len() < 2 && ep.qself.is_none() {
             return None;
         }
@@ -2238,6 +2396,7 @@ impl<'a> Visitor<'a> {
         let frame = Frame {
             binds: Vec::new(),
             uses,
+            krate: self.tcx.me,
             parent: None,
         };
         let mut fail = Vec::new();
@@ -2768,6 +2927,9 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
                 } else if let Some(k) = self.head_ctor(&c.func) {
                     let path = self.fn_path();
                     self.push_site(Shape::Ctor, path, k, c.func.span(), text);
+                } else if let Some(k) = self.ufcs_ctor(ep, &c.args) {
+                    let path = self.fn_path();
+                    self.push_site(Shape::Ctor, path, k, c.func.span(), text);
                 }
             }
         } else {
@@ -2797,6 +2959,12 @@ impl<'ast> Visit<'ast> for Visitor<'_> {
             let mut hit: Option<(Shape, String)> = None;
             if name == "collect" {
                 hit = Some((Shape::Ctor, self.collect_container(m)));
+            } else if name == "parse"
+                && n_args == 0
+                && let Some(h) = self.turbofish_head(m.turbofish.as_ref())
+            {
+                // `s.parse::<String>()` builds the head it names (tester N1).
+                hit = Some((Shape::Ctor, h));
             } else if name == "clone" && n_args == 0 {
                 if let Some(h) = self.clone_receiver_head(&m.receiver) {
                     hit = Some((Shape::Ctor, h));
@@ -2916,10 +3084,40 @@ pub struct ScanOut {
 /// Scans every `full` and `emitted` crate of `decls` under `root`.
 pub fn scan(root: &Path, decls: &Decls, vocab: &Vocab, line_of: LineOf<'_>) -> ScanOut {
     let mut out = ScanOut::default();
-    for (crate_dir, (mode, _)) in &decls.crates {
-        if !matches!(mode, Mode::Full | Mode::Emitted) {
+    let scanned = || {
+        decls
+            .crates
+            .iter()
+            .filter(|(_, (mode, _))| matches!(mode, Mode::Full | Mode::Emitted))
+    };
+    // Pass 1 (review W5): every scanned crate's aliases, so a path through another crate's alias
+    // resolves. One crate's syntax trees are held at a time; pass 2 walks the same files again
+    // and reports the walk's failures, so pass 1's are dropped here.
+    let mut crates: Vec<CrateAliases> = Vec::new();
+    let mut crate_idx: BTreeMap<&str, usize> = BTreeMap::new();
+    for (crate_dir, _) in scanned() {
+        if !crate_src(root, crate_dir).is_dir() {
             continue;
         }
+        let walk = walk_crate(root, crate_dir, &mut Vec::new());
+        let mut tables = Tables::default();
+        for (i, f) in walk.files.iter().enumerate() {
+            TableCollector {
+                t: &mut tables,
+                file_idx: i,
+                self_ty: None,
+            }
+            .visit_file(&f.ast);
+        }
+        crate_idx.insert(crate_dir, crates.len());
+        crates.push(CrateAliases {
+            lib: crate_lib_name(root, crate_dir),
+            aliases: tables.aliases,
+            uses: walk.files.into_iter().map(|f| f.uses).collect(),
+            mods: tables.mods,
+        });
+    }
+    for (crate_dir, (mode, _)) in scanned() {
         let src = crate_src(root, crate_dir);
         if !src.is_dir() {
             out.failures.push(format!(
@@ -2969,6 +3167,11 @@ pub fn scan(root: &Path, decls: &Decls, vocab: &Vocab, line_of: LineOf<'_>) -> S
             vocab,
             tables: &tables,
             files: &walk.files,
+            crates: &crates,
+            me: crate_idx
+                .get(crate_dir.as_str())
+                .copied()
+                .expect("invariant: pass 1 indexed every scanned crate that has a src/"),
         };
         let physics = crate_dir == "crates/boyko_physics";
         for f in &walk.files {
@@ -3347,6 +3550,10 @@ pub fn parse_pins(text: &str) -> Result<Vec<PinLine>, String> {
 
 /// The history rules: genesis anchored in gate code, a hash chain, unique rungs, and every
 /// count non-increasing line to line except on a reasoned `merge-raise` (critique W4 (a)).
+///
+/// Only the first line is anchored. The chain catches an in-place edit that is not re-chained;
+/// an edit that re-chains (the failure prints the hash to paste) passes, so lines 2..N are
+/// append-only by the merge recipe's numstat check (PC-k), not by this function (review W1).
 pub fn check_pin_history(pins: &[PinLine], genesis: Option<&str>, fail: &mut Vec<String>) {
     let mut rungs = BTreeSet::new();
     for (i, p) in pins.iter().enumerate() {
@@ -3447,14 +3654,19 @@ pub fn workspace_members(root_manifest: &str) -> Vec<String> {
 }
 
 fn manifest_package_name(manifest: &str) -> Option<String> {
-    let mut in_pkg = false;
+    manifest_table_name(manifest, "[package]")
+}
+
+/// The `name = "…"` key of one manifest table (`[package]`, `[lib]`).
+fn manifest_table_name(manifest: &str, table: &str) -> Option<String> {
+    let mut in_table = false;
     for raw in manifest.lines() {
         let line = raw.trim();
         if line.starts_with('[') {
-            in_pkg = line == "[package]";
+            in_table = line == table;
             continue;
         }
-        if in_pkg
+        if in_table
             && let Some(rest) = line.strip_prefix("name")
             && let Some(v) = rest.trim_start().strip_prefix('=')
         {
@@ -4061,9 +4273,14 @@ pub fn run_gate(cfg: &GateConfig<'_>) -> GateReport {
                     let floor = last.floors.get(*g).copied().unwrap_or(0);
                     let cmp = compared_by_group.get(*g).copied().unwrap_or(0);
                     let scanned = matched_by_group.get(*g).copied().unwrap_or(0);
+                    let cmp_sign = if scanned < floor { "<" } else { ">=" };
                     rep.receipt.push(format!(
-                        "floors: {g} scanned {scanned} >= floor {floor} (comparison set {cmp})"
+                        "floors: {g} scanned {scanned} {cmp_sign} floor {floor} (comparison set {cmp})"
                     ));
+                    // A floor of 0 is legal exactly when the group has no compared row (review
+                    // W2: the rung that retires a group's last row, e.g. macros-aether's KF-43
+                    // rows at D-E13, pins 0). `floor == cmp` makes a 0 on a group that still has
+                    // rows RED; an empty scan of a scanned crate is RED per crate (CRATE).
                     if floor != cmp {
                         fail.push(format!(
                             "PIN  floor {g}={floor} but the group's comparison set is {cmp}"
@@ -4072,11 +4289,6 @@ pub fn run_gate(cfg: &GateConfig<'_>) -> GateReport {
                     if scanned < floor {
                         rep.floor_failures += 1;
                         fail.push(format!("FLOOR  {g} scanned={scanned} < floor={floor}"));
-                    }
-                    if floor == 0 {
-                        fail.push(format!(
-                            "PIN  floor {g} is 0: a group with no compared row cannot see an empty scan"
-                        ));
                     }
                 }
                 rep.receipt.push(format!(

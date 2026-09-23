@@ -14,8 +14,13 @@
 //! `docs/memory/ledger/ug02-pins.tsv` is append-only. Its last line must equal the counts over the
 //! ledger; line to line, every count only falls, except on a `merge-raise` line with a reason (a
 //! merge that adds rows re-derives them in the same commit, 03 §2). The first line is anchored
-//! here, in [`GENESIS`], and every later line carries the FNV-1a hash of the one before, so the
-//! history cannot be rewritten in place without a gate-code edit (critique W4 (a)).
+//! here, in [`GENESIS`], so rewriting it needs a gate-code edit (critique W4 (a)). Every later line
+//! carries the FNV-1a hash of the one before; that link catches an edit that forgets to re-chain,
+//! but it is NOT an anchor: the hash is public and the failure prints the value that repairs it, so
+//! any line after the first can be edited in place and re-chained with data edits alone (review
+//! W1). Append-only for lines 2..N is kept by the merge recipe, which requires
+//! `git diff --numstat <base> -- docs/memory/ledger/ug02-pins.tsv` to delete no line (plan
+//! correction PC-k), not by this gate.
 //!
 //! # Fixtures
 //!
@@ -208,6 +213,53 @@ fn f2_aliases_resolve_and_an_ambiguous_alias_is_red() {
         LIB,
         &["field|S::a|Vec", "field|S::b|Vec", "field|S::c|Vec"],
     );
+
+    // Review W5: a qualified path to a crate-local alias (`crate::`, `self::`, `super::`, a
+    // module prefix) is the alias too, and a std path whose last segment names one is not.
+    let qualified = "mod m { pub type Buf = Vec<u8>; pub mod n { pub type Deep = super::Buf; } }\n\
+                     type Result<T> = Vec<T>;\n\
+                     pub struct PA { a: crate::m::Buf, b: m::Buf, c: self::m::Buf, d: m::n::Deep, \
+                     e: std::io::Result<u8>, f: Result<u8> }\n";
+    let out = scan_fixture("f2_qualified", &[(LIB, qualified)], &[]);
+    expect_sites(
+        &out,
+        LIB,
+        &[
+            "field|PA::a|Vec",
+            "field|PA::b|Vec",
+            "field|PA::c|Vec",
+            "field|PA::d|Vec",
+            "field|PA::f|Vec",
+        ],
+    );
+
+    // Review W5: another scanned crate's alias, by path, by `use`, and by `::` path; a `use` from
+    // std of a name this crate also aliases is std's type.
+    let other = "pub type Scratch = std::collections::VecDeque<u8>;\n";
+    let user = "use o::Scratch;\nuse std::io::Result;\nmod inner { pub type Result<T> = Vec<T>; }\n\
+                pub struct PB { a: o::Scratch, b: Scratch, c: ::o::Scratch, d: Result<u8> }\n";
+    let out = scan_fixture(
+        "f2_cross_crate",
+        &[(LIB, user), ("crates/o/src/lib.rs", other)],
+        &[("crates/o", "full")],
+    );
+    expect_sites(
+        &out,
+        LIB,
+        &[
+            "field|PB::a|VecDeque",
+            "field|PB::b|VecDeque",
+            "field|PB::c|VecDeque",
+        ],
+    );
+
+    // Review W5: a constructor called through a heap alias is the head's constructor; a
+    // qualifier that is no alias, with a heap type argument, is not.
+    let ctor = "type Contour = Vec<u8>;\nmod m { pub type Buf = String; }\n\
+                pub fn g() { let c = Contour::new(); let d = m::Buf::with_capacity(4); \
+                let e = Option::<Vec<u8>>::default(); drop((c, d, e)); }\n";
+    let out = scan_fixture("f2_alias_ctor", &[(LIB, ctor)], &[]);
+    expect_sites(&out, LIB, &["local|g|String", "local|g|Vec"]);
 
     let amb = "mod m1 { pub type Amb = Vec<u8>; }\nmod m2 { pub type Amb = String; }\n\
                pub struct T { a: Amb }\n";
@@ -439,6 +491,36 @@ fn k12_a_constructor_named_as_a_value() {
             "return|f|Vec",
             "local|f|PathBuf",
             "local|f|inferred",
+        ],
+    );
+}
+
+#[test]
+fn k13_method_constructors_called_by_path_and_parse() {
+    // Review O1 / tester N1: the path-call form of a method constructor is the same allocation
+    // as the method-call form; a module's free function of the same name, a refcount clone and
+    // `mem::replace` are not.
+    let src = "pub fn f(v: &Vec<u8>, s: &str, x: u32, it: std::ops::Range<u32>, a: &std::sync::Arc<u8>) {\n    \
+               let p = ToString::to_string(&x);\n    let q = str::to_owned(s);\n    \
+               let r = Vec::clone(v);\n    let t = Clone::clone(v);\n    \
+               let u = Iterator::collect::<Vec<u32>>(it);\n    let w = s.parse::<String>();\n    \
+               let y = <[u8]>::to_vec(v);\n    let z = std::path::Path::to_path_buf(std::path::Path::new(s));\n    \
+               let n1 = std::sync::Arc::clone(a);\n    let n2 = std::mem::replace(&mut 0u8, 1);\n    \
+               let n3 = util::to_string(x);\n    let n4 = s.parse::<u32>();\n    \
+               drop((p, q, r, t, u, w, y, z, n1, n2, n3, n4));\n}\n";
+    let out = scan_fixture("k13", &[(LIB, src)], &[]);
+    expect_sites(
+        &out,
+        LIB,
+        &[
+            "local|f|String",
+            "local|f|inferred",
+            "local|f|Vec",
+            "local|f|Vec",
+            "local|f|Vec",
+            "local|f|String",
+            "local|f|Vec",
+            "local|f|PathBuf",
         ],
     );
 }
@@ -808,6 +890,13 @@ fn control_empty_scan_dir_is_red_on_the_floor() {
         "every floor must be RED:\n{}",
         rep.render()
     );
+    // Review O2: the receipt states the failing comparison, not `>=`.
+    let failing = format!("floors: {} scanned 0 < floor 2", scan::GROUPS[0]);
+    assert!(
+        rep.receipt.iter().any(|l| l.starts_with(&failing)),
+        "the receipt must print `<` for a failing floor:\n{}",
+        rep.render()
+    );
 }
 
 #[test]
@@ -923,6 +1012,42 @@ fn control_ruled_needs_a_keeping_ruling() {
 }
 
 #[test]
+fn control_an_emptied_group_pins_floor_zero() {
+    // Review W2: the rung that retires a group's last compared row (macros-aether's KF-43 rows
+    // at D-E13) pins that group's floor at 0, and that is GREEN; a floor of 0 on a group that
+    // still has compared rows is RED.
+    let c = Control::new("c_floor_zero");
+    let emptied = scan::GROUPS[0];
+    let src = base_lib()
+        .replace("    pub f0: Vec<u8>,\n", "")
+        .replace("    pub f1: Vec<u8>,\n", "");
+    write(&c.root, LIB, &src);
+    let rows: Vec<RowSpec> = base_rows()
+        .into_iter()
+        .filter(|r| r.group != emptied)
+        .collect();
+    c.ledger(&rows);
+    let rep = c.run();
+    assert_green(&rep);
+    assert!(
+        rep.receipt
+            .iter()
+            .any(|l| l.contains(&format!("floors: {emptied} scanned 0 >= floor 0"))),
+        "the emptied group must be pinned at 0:\n{}",
+        rep.render()
+    );
+    let kept = scan::GROUPS[1];
+    let line = pins_line("F0", "pin", &rows, "-", "fixture")
+        .replace(&format!(";{kept}=2;"), &format!(";{kept}=0;"));
+    write(
+        &c.root,
+        scan::PINS_TSV,
+        &format!("{}\n{line}\n", scan::PINS_HEADER.join("\t")),
+    );
+    assert_red_only(&c.run(), "PIN", &format!("floor {kept}=0"));
+}
+
+#[test]
 fn control_pin_raise_needs_merge_raise() {
     let c = Control::new("c_pin");
     let rows = base_rows();
@@ -957,7 +1082,8 @@ fn control_pin_raise_needs_merge_raise() {
 
 #[test]
 fn control_pin_history_is_anchored() {
-    // Critique W4 (a): the first line is anchored in gate code; later lines are hash-chained.
+    // Critique W4 (a): the first line is anchored in gate code; later lines are hash-chained,
+    // which catches an edit that is not re-chained (review W1: not an anchor, see the header).
     let c = Control::new("c_anchor");
     let rows = base_rows();
     let first = pins_line("F0", "pin", &rows, "-", "fixture");
