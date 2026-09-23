@@ -414,8 +414,9 @@ pub(crate) fn try_parallel(
                         // SAFETY: `ctx` came from `prepare` for these pairs; the closed-form
                         //   cuts partition `[0, n)` into ascending, disjoint ranges with
                         //   distinct chunk indices, so no two tasks share a stage row, a
-                        //   commit row or a `meta` slot; nothing takes a slice over the stage
-                        //   or the commit until `pool.scope` has joined every task.
+                        //   commit row, a tag row or a `meta` slot; nothing takes a slice over
+                        //   the stage, the commit or the tags until `pool.scope` has joined
+                        //   every task.
                         unsafe { np_chunk(*ctx, chunk, lo, hi) }
                     });
                 }
@@ -711,7 +712,8 @@ mod tests {
         for &chunk in order {
             // SAFETY: `ctx` came from `prepare` for these pairs; `cuts` is ascending from 0 to
             //   n, so the chunks' ranges are disjoint, and they run one after another on this
-            //   thread; no slice over the stage or the commit is taken until `compact`.
+            //   thread; no slice over the stage, the commit or the tags is taken until
+            //   `compact`.
             unsafe { np_chunk(ctx, chunk, cuts[chunk], cuts[chunk + 1]) };
         }
         compact(m, chunks, |c| (cuts[c], cuts[c + 1]), &meta);
