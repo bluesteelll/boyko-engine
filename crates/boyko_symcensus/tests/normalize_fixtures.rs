@@ -64,3 +64,19 @@ fn a_rename_list_maps_bounded_occurrences_only() {
     assert!(RenameList::parse("a ->").is_err());
     assert_eq!(RenameList::parse("x → y").unwrap_or_else(|e| panic!("{e}")).0.len(), 1);
 }
+
+#[test]
+fn a_pin_file_reads_the_same_through_a_crlf_checkout() {
+    use boyko_symcensus::pins::PinFile;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ug15/pins/leg2-boyko_demo.pins");
+    let lf = std::fs::read_to_string(&path).expect("the committed boyko_demo pins").replace("\r\n", "\n");
+    let crlf = lf.replace('\n', "\r\n");
+    let a = PinFile::parse(&lf).unwrap_or_else(|r| panic!("{r}"));
+    let b = PinFile::parse(&crlf).unwrap_or_else(|r| panic!("{r}"));
+    assert!(!a.pins.is_empty(), "the committed pin file holds no pin");
+    assert_eq!(a.pins, b.pins, "core.autocrlf's CRLF checkout must not change a pin");
+    let mut edited = lf.clone();
+    let at = edited.find("\n     0: ").expect("a body line");
+    edited.insert_str(at + 1, " ");
+    assert!(PinFile::parse(&edited).is_err(), "a hand-edited body must not parse");
+}

@@ -103,7 +103,12 @@ impl PinFile {
     }
 
     /// Parses a pin file; RED if a body's sha256 is not the one its header records (a hand edit).
+    ///
+    /// Line endings are normalised to LF first: the digests are taken over LF text, and a Windows
+    /// checkout with `core.autocrlf = true` (this repository's default) writes the committed LF
+    /// blob back as CRLF, which would otherwise read as an edit of every body.
     pub fn parse(text: &str) -> Result<Self> {
+        let text = text.replace("\r\n", "\n");
         let mut lines = text.split_inclusive('\n');
         if lines.next().map(str::trim_end) != Some(MAGIC) {
             return Err(Red::new(RedKind::Malformed, format!("not a pin file: the first line is not `{MAGIC}`")));
