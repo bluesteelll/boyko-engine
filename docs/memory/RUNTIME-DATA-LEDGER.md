@@ -27,7 +27,7 @@ The working files (the group JSON ledgers with every non_row, the lane JSONs, `g
 
 **Disclosure:** the gap agent ran `rustc.exe --version` once, by mistake, while locating rust-src; it built nothing. The rev-1 disclosures (two `rustc --version` runs in the timing window) stand in the pool-utils-log and app-demo files.
 
-⚠ **Rev 5**: **2825 active rows** in 23 crates from 13 groups: 2330 carried from rev 4, 495 new, 14 retired, 13 rev-4 rows found to be non_rows; 1660 in-scope std-heap rows (`ACTIVE_STD_HEAP_ROWS`), 1155 out of scope, 10 kernel storage (M5); totals and tables in [Rev 5 totals](#rev-5-totals). ~~**Totals:** **2357 active rows** in 23 crates from 13 groups; 132 superseded rows (122 in ui-input.md, 9 in render.md, 1 in ecs-storage.md); 4685 non_rows (rev 4: the delta census adds its hits and the lines the delta deleted leave; no supplementary rows since rev 3, and the non_rows of sites a lane re-censused are not counted twice). **691 rows (29.3 %) land in an ECS data form** (component, dense-component, enable-state, relation, event, resource-column or system-scratch). 264 are kernel-internal, 290 diagnostics, 10 scope-arena, and 1102 out of scope, 1021 of them compile-time. **0 rows are class U. 0 questions are left undecided.**~~
+⚠ **Rev 5**: **2829 active rows** in 23 crates from 13 groups: 2330 carried from rev 4, 499 new, 14 retired, 13 rev-4 rows found to be non_rows; 1660 in-scope std-heap rows (`ACTIVE_STD_HEAP_ROWS`), 1159 out of scope, 10 kernel storage (M5); totals and tables in [Rev 5 totals](#rev-5-totals). ~~**Totals:** **2357 active rows** in 23 crates from 13 groups; 132 superseded rows (122 in ui-input.md, 9 in render.md, 1 in ecs-storage.md); 4685 non_rows (rev 4: the delta census adds its hits and the lines the delta deleted leave; no supplementary rows since rev 3, and the non_rows of sites a lane re-censused are not counted twice). **691 rows (29.3 %) land in an ECS data form** (component, dense-component, enable-state, relation, event, resource-column or system-scratch). 264 are kernel-internal, 290 diagnostics, 10 scope-arena, and 1102 out of scope, 1021 of them compile-time. **0 rows are class U. 0 questions are left undecided.**~~
 
 ## Contents
 
@@ -47,12 +47,12 @@ The working files (the group JSON ledgers with every non_row, the lane JSONs, `g
   - [ecs-storage](ledger/ecs-storage.md): 109 active rows, 1 superseded (D:/wt/joltab) ⚠ **Rev 5**: 204 active (107 carried, 97 new), `integ/unified` @ `c1e9f1db`
   - [ecs-schedule](ledger/ecs-schedule.md): 166 active rows (D:/wt/joltab) ⚠ **Rev 5**: 183 active (166 carried, 17 new), `integ/unified` @ `c1e9f1db`
   - [ecs-services](ledger/ecs-services.md): 77 active rows (D:/wt/joltab) ⚠ **Rev 5**: 111 active (76 carried, 35 new), `integ/unified` @ `c1e9f1db`
-  - [pool-utils-log](ledger/pool-utils-log.md): 131 active rows (D:/wt/joltab) ⚠ **Rev 5**: 181 active (129 carried, 52 new), `integ/unified` @ `c1e9f1db`
+  - [pool-utils-log](ledger/pool-utils-log.md): 131 active rows (D:/wt/joltab) ⚠ **Rev 5**: 184 active (129 carried, 55 new), `integ/unified` @ `c1e9f1db`
   - [physics-scene-math](ledger/physics-scene-math.md): 102 active rows (D:/wt/joltab) ⚠ **Rev 5**: 113 active (102 carried, 11 new), `integ/unified` @ `c1e9f1db`
   - [render](ledger/render.md): 160 active rows, 9 superseded (D:/wt/joltab) ⚠ **Rev 5**: 170 active (150 carried, 20 new), `integ/unified` @ `c1e9f1db`
   - [rhi](ledger/rhi.md): 64 active rows (D:/wt/joltab) ⚠ **Rev 5**: 111 active (62 carried, 49 new), `integ/unified` @ `c1e9f1db`
   - [ui-input](ledger/ui-input.md): 83 active rows, 122 superseded (D:/wt/joltab) ⚠ **Rev 5**: 100 active (83 carried, 17 new), `integ/unified` @ `c1e9f1db`
-  - [app-demo](ledger/app-demo.md): 256 active rows (D:/wt/joltab) ⚠ **Rev 5**: 297 active (251 carried, 46 new), `integ/unified` @ `c1e9f1db`
+  - [app-demo](ledger/app-demo.md): 256 active rows (D:/wt/joltab) ⚠ **Rev 5**: 298 active (251 carried, 47 new), `integ/unified` @ `c1e9f1db`
   - [codec-tools](ledger/codec-tools.md): 527 active rows (D:/wt/joltab) ⚠ **Rev 5**: 545 active (526 carried, 19 new), `integ/unified` @ `c1e9f1db`
   - [macros-aether](ledger/macros-aether.md): 462 active rows (D:/wt/joltab) ⚠ **Rev 5**: 465 active (462 carried, 3 new), `integ/unified` @ `c1e9f1db`
   - [ui-lane](ledger/ui-lane.md): 196 active rows (D:/wt/ui) ⚠ **Rev 5**: 321 active (192 carried, 129 new), `integ/unified` @ `c1e9f1db`
@@ -895,7 +895,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_ecs (provides); boyko_render, boyko_rhi_vulkan, boyko_app; pool-utils-log only conditionally
 - **Plan:** No plan owns it. It conflicts with ALLOCATOR-DESIGN-SPACE `DropColumn<T>` (the same capability, but as a new primitive on VmReservation).
 - **Merged from:** render `KF-owning-scratch-column`; ecs-storage `KF-owning-scratch-column`; ecs-services `KF-owning-scratch-column`; rhi `KF-owning-scratch-column`; pool-utils-log `KF-owning-scratch-column (render group's name; CONDITIONAL here)`
-- **Rows (9):** crates/boyko_ecs/src/ecs/core/component/component_pool_bundle.rs:13; crates/boyko_ecs/src/ecs/core/component/dense/dense_registry.rs:78; crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs:769; crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs:953; crates/boyko_ecs/src/ecs/core/asset/staging.rs:58; crates/boyko_utils/src/sparse_map/sparse_map.rs:10; crates/boyko_render/src/retired_gpu_buffers.rs:53,59; crates/boyko_rhi_vulkan/src/memory.rs:728 ⚠ **Rev 5** (00 section 5; 02 D-S6, D-E15, D-R2d): one plan rung per row - the seven boyko_ecs and boyko_render rows (`component_pool_bundle.rs:13`, `dense_registry.rs:78`, `enable_store.rs:769`, `ecs_master.rs:953`, `staging.rs:58`, `retired_gpu_buffers.rs:53,59`, rev-4 coordinates) go to **D-S6**; `boyko_rhi_vulkan/src/memory.rs:728` to **D-E15** (the KF-36 edge, then KC-16); `boyko_utils/src/sparse_map/sparse_map.rs:10` to **D-R2d**. Each row's destination names its rung.
+- **Rows (9):** crates/boyko_ecs/src/ecs/core/component/component_pool_bundle.rs:13; crates/boyko_ecs/src/ecs/core/component/dense/dense_registry.rs:78; crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs:769; crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs:953; crates/boyko_ecs/src/ecs/core/asset/staging.rs:58; crates/boyko_utils/src/sparse_map/sparse_map.rs:10; crates/boyko_render/src/retired_gpu_buffers.rs:53,59; crates/boyko_rhi_vulkan/src/memory.rs:728 ⚠ **Rev 5** (00 section 5; 02 D-S6, D-E15, D-R2d): one plan rung per row - the seven boyko_ecs and boyko_render rows (`component_pool_bundle.rs:13`, `dense_registry.rs:78`, `enable_store.rs:769`, `ecs_master.rs:953`, `staging.rs:58`, `retired_gpu_buffers.rs:53,59`, rev-4 coordinates) go to **D-S6**; `boyko_rhi_vulkan/src/memory.rs:728` to **D-E15** (the KF-36 edge, then KC-16); `boyko_utils/src/sparse_map/sparse_map.rs:10` to **D-R2d**. Each row's destination names its rung. Rev 5's new rows of the same data carry the same rung (B1 review W3; trunk coordinates): D-S6 `ecs/core/asset/staging.rs:63`, `ecs/core/component/component_pool_bundle.rs:27`, `ecs/core/component/component_pool_bundle.rs:35`, `ecs/core/component/dense/dense_registry.rs:103`, `ecs/core/component/dense/dense_registry.rs:101`, `ecs/core/component/dense/dense_registry.rs:100`, `ecs/core/component/enable/enable_store.rs:600`, `ecs/core/component/enable/enable_store.rs:615`, `ecs/core/component/enable/enable_store.rs:867`, `ecs/core/component/enable/enable_store.rs:806`; D-E15 `memory.rs:737`; D-R2d `sparse_map/sparse_map.rs:28`, `sparse_map/sparse_map.rs:38`.
 - **Evidence:**
   - boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs:43 "pub struct ScratchColumn&lt;T: Copy> {"
   - boyko_ecs/src/ecs/memory/component_pool.rs:1694 "pub(crate) unsafe fn take_at&lt;T: 'static>(&mut self, idx: usize) -> T {"
@@ -1422,7 +1422,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_threadpool, boyko_ecs, boyko_app, boyko_demo
 - **Plan:** ALLOCATOR-DESIGN-SPACE decides "`App` owns the pool by value". Its TableSet is not needed (plan conflict).
 - **Merged from:** app-demo `KF-app-owns-pool`; pool-utils-log `KF-pool-single-reservation`
-- **Rows (19):** crates/boyko_threadpool/src/thread_pool.rs:128,132,135,401,412,529,664,672,673,688,709,711,713,714,756; crates/boyko_threadpool/src/worker.rs:43; crates/boyko_demo/src/app.rs:183,266; crates/boyko_demo/src/sim/runner.rs:153 ⚠ **Rev 5**: `crates/boyko_demo/src/app.rs:266` (`Arc::clone(&pool)`) is a rev-5 non_row - a refcount increment is not an allocation; the pool the demo owns is still the row at `app.rs:183`. `thread_pool.rs:132` (the `Stealer` array) is decided here, not under KF-34 (see KF-34 below).
+- **Rows (19):** crates/boyko_threadpool/src/thread_pool.rs:128,132,135,401,412,529,664,672,673,688,709,711,713,714,756; crates/boyko_threadpool/src/worker.rs:43; crates/boyko_demo/src/app.rs:183,266; crates/boyko_demo/src/sim/runner.rs:153 ⚠ **Rev 5**: `crates/boyko_demo/src/app.rs:266` (`Arc::clone(&pool)`) is a rev-5 non_row - a refcount increment is not an allocation; the pool the demo owns is still the row at `app.rs:183`. `thread_pool.rs:132` (the `Stealer` array) is decided here, not under KF-34 (see KF-34 below). Rev 5 rows 7 new sites of the same data that rev 4 missed (`thread_pool.rs:690`, `thread_pool.rs:697`, `thread_pool.rs:757`, `thread_pool.rs:768`, `thread_pool.rs:796`, `thread_pool.rs:695`, `thread_pool.rs:763`, trunk coordinates: the `Arc<[..]>` conversions, the `injector_local` injectors, the `join_handles` list, `Arc::new(PoolInner)` and `Arc::new(ThreadPool)`); their destinations name **KF-31 / D-M4**, so D-M4 retires 25 rows (B1 review W3).
 - **Evidence:**
   - crates/boyko_ecs/src/ecs/core/app/app.rs:214 "pub fn with_pool(pool: Arc&lt;ThreadPool>) -> Self {"
   - docs/memory/ALLOCATOR-DESIGN-SPACE.md:331 (main checkout D:/claude/BoykoEngine, untracked draft) "\| `Arc<ThreadPool>` in `Schedule`, `ScheduleBuilder`, `App` (`schedule.rs:122`, `app.rs:191`) \| **removed**: `Schedule::run(&mut self, master, pool: &ThreadPool)`; `ScheduleBuilder::build(self, pool: &ThreadPool)`. `App` owns the pool by value \|"
@@ -1463,7 +1463,7 @@ The physics unification design orders its own kernel features K1-K7 (design sect
 - **Crates:** boyko_threadpool
 - **Plan:** ⚠ **Rev 5**: allocator P10 (the injector row, and row 1f for the epoch `Local`), P17 (the loom list); unified plan rung D-M3; the design is authoritative for the mechanism, this ledger for the row inventory. ~~ALLOCATOR-DESIGN-SPACE rung 1d (loom model mandatory).~~
 - **Merged from:** pool-utils-log `KF-inhouse-lanes`
-- **Rows (4):** crates/boyko_threadpool/src/thread_pool.rs:113,132,682; crates/boyko_threadpool/src/worker.rs:347 ⚠ **Rev 5**, row by row (rev-4 coordinates): `thread_pool.rs:113` (`injector_global`) -> **D-M3**; `:132` (the `Stealer` array) -> **KF-31 / D-M4** (the array moves into `PoolInner`'s reservation); `:682` (a lane's crossbeam `Worker` buffer) and `worker.rs:347` (the epoch `Local`) -> **`out-of-scope:ruled`, U-5**, with U-5's overturn (UG-03 shows lane growth or the epoch `Local` in a steady window after 1f).
+- **Rows (4):** crates/boyko_threadpool/src/thread_pool.rs:113,132,682; crates/boyko_threadpool/src/worker.rs:347 ⚠ **Rev 5**, row by row (rev-4 coordinates): `thread_pool.rs:113` (`injector_global`) -> **D-M3**; `:132` (the `Stealer` array) -> **KF-31 / D-M4** (the array moves into `PoolInner`'s reservation); `:682` (a lane's crossbeam `Worker` buffer) and `worker.rs:347` (the epoch `Local`) -> **`out-of-scope:ruled`, U-5**, with U-5's overturn (UG-03 shows lane growth or the epoch `Local` in a steady window after 1f). Rev 5's new rows of the same data carry the same decisions (B1 review W3; trunk coordinates): `thread_pool.rs:769` (`injector_global`'s constructor) -> **D-M3**; `thread_pool.rs:690` (the `Stealer` array it is built as) -> **KF-31 / D-M4**; `worker.rs:44` (`worker_main`'s `deque` parameter, the lane `Worker`) -> **`out-of-scope:ruled`, U-5**.
 - **Evidence:**
   - ⚠ **Rev 5**: the rev-1 draft's per-lane mechanism, withdrawn by allocator P10 (`ALLOCATOR-DESIGN-SPACE.md:1144`) and U-5. ~~[main checkout D:/claude/BoykoEngine, untracked rev-1 file] docs/memory/ALLOCATOR-DESIGN-SPACE.md:347 "**in-house bounded Chase-Lev** per lane on a `Table<Task>` ring in the pool's `TableSet`"~~
 - **Group notes:**
@@ -1804,7 +1804,7 @@ A class-B row that constructs a field migrating in an earlier rung moves with th
 | `crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs:263` (`ScheduleBuilder::insert_state`) | B | event | a state registration that becomes a kernel Command record |
 | `crates/boyko_ecs/src/ecs/core/asset/path_index.rs:172` (`PathIndex::merge`) | B | resource-column | the asset path index's merge scratch over its own column |
 
-With this list and the three field reads, the seven steps reproduce the published rung of all 2357 active rows with no exception (checked in rev 4's repair pass). Every other step is already mechanical: step 3's `scope-arena` is an `ecs_form` value, not prose. ⚠ **Rev 5**: the rule is applied unchanged to the 2825 rev-5 rows (a new row has no kernel-feature membership); the rev-5 rung table is in [Rev 5 totals](#rev-5-totals).
+With this list and the three field reads, the seven steps reproduce the published rung of all 2357 active rows with no exception (checked in rev 4's repair pass). Every other step is already mechanical: step 3's `scope-arena` is an `ecs_form` value, not prose. ⚠ **Rev 5**: the rule is applied unchanged to the 2829 rev-5 rows (a new row has no kernel-feature membership, except the 22 new rows of a decided datum, which carry their datum's, B1 review W3); the rev-5 rung table is in [Rev 5 totals](#rev-5-totals).
 
 |  | R2 | R3 | R4 | R5 | R6 | OOS | total |
 |---|---|---|---|---|---|---|---|
@@ -2341,7 +2341,7 @@ The durable fix is mechanical and belongs to the gate named in "Not a gate yet":
 
 ---
 
-*Row-count check: active rows 2357 = runtime-data-ledger.tsv data lines 2357 = sum of the group files' active rows 2357; superseded rows 132.* ⚠ **Rev 5**: active rows 2825 = runtime-data-ledger.tsv data lines 2825 = sum of the group files' active rows 2825 (rows tables plus the `Rev 5 rows` tables, less the rows marked RETIRED or NON_ROW); UG-02 checks the first two on every commit.
+*Row-count check: active rows 2357 = runtime-data-ledger.tsv data lines 2357 = sum of the group files' active rows 2357; superseded rows 132.* ⚠ **Rev 5**: active rows 2829 = runtime-data-ledger.tsv data lines 2829 = sum of the group files' active rows 2829 (rows tables plus the `Rev 5 rows` tables, less the rows marked RETIRED or NON_ROW); UG-02 checks the first two on every commit.
 
 ## Rev 5 (2026-09-23): the ledger on the trunk, and UG-02
 
@@ -2367,46 +2367,47 @@ are in each group file's appended `Rev 5 rows` table. No line of this index befo
 
 ### Rev 5 totals
 
-**2825 active rows** in 23 crates: 2330 carried from rev 4, 495 new; 14 rev-4 rows retired
+**2829 active rows** in 23 crates: 2330 carried from rev 4, 499 new; 14 rev-4 rows retired
 and 13 found to be non_rows. **1660 in-scope std-heap rows** (`ACTIVE_STD_HEAP_ROWS`: in scope and not kernel
-storage), 1155 out of scope, 10 kernel storage (M5), 36 semantic, 489 in crates or crate parts the gate does
-not scan. **886 rows (31.4 %) land in an ECS data form.**
+storage), 1159 out of scope, 10 kernel storage (M5), 39 semantic, 489 in crates or crate parts the gate does
+not scan. **887 rows (31.4 %) land in an ECS data form.**
 
 | group | active | carried | new | retired | non_row | semantic | compared (floor) | R2 | R3 | R4 | R5 | R6 | OOS |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | ecs-storage | 204 | 107 | 97 | 1 | 1 | 0 | 203 | 170 | . | 25 | . | 9 | . |
 | ecs-schedule | 183 | 166 | 17 | 0 | 0 | 9 | 174 | 158 | . | 4 | 6 | 15 | . |
-| ecs-services | 111 | 76 | 35 | 0 | 1 | 1 | 110 | 88 | . | 10 | . | 12 | 1 |
-| pool-utils-log | 181 | 129 | 52 | 1 | 1 | 5 | 176 | 11 | . | 21 | 40 | 20 | 89 |
+| ecs-services | 111 | 76 | 35 | 0 | 1 | 1 | 110 | 89 | . | 9 | . | 12 | 1 |
+| pool-utils-log | 184 | 129 | 55 | 1 | 1 | 8 | 176 | 11 | . | 21 | 39 | 20 | 93 |
 | physics-scene-math | 113 | 102 | 11 | 0 | 0 | 0 | 104 | . | 86 | 10 | . | 17 | . |
 | render | 170 | 150 | 20 | 8 | 2 | 9 | 161 | 1 | . | 11 | . | 156 | 2 |
 | rhi | 111 | 62 | 49 | 1 | 1 | 0 | 111 | . | . | 69 | . | 25 | 17 |
 | ui-input | 100 | 83 | 17 | 0 | 0 | 6 | 94 | . | . | 9 | . | 91 | . |
-| app-demo | 297 | 251 | 46 | 3 | 2 | 0 | 297 | . | . | 25 | . | 237 | 35 |
+| app-demo | 298 | 251 | 47 | 3 | 2 | 0 | 298 | . | . | 25 | . | 238 | 35 |
 | codec-tools | 545 | 526 | 19 | 0 | 1 | 3 | 527 | . | . | 1 | . | 56 | 488 |
 | macros-aether | 465 | 462 | 3 | 0 | 0 | 0 | 8 | 8 | . | . | . | . | 457 |
 | ui-lane | 321 | 192 | 129 | 0 | 4 | 3 | 318 | 5 | . | 51 | . | 216 | 49 |
 | reflect-lane | 24 | 24 | 0 | 0 | 0 | 0 | 7 | 2 | . | . | . | 5 | 17 |
-| **total** | **2825** | **2330** | **495** | **14** | **13** | **36** | **2290** | **443** | **86** | **236** | **46** | **859** | **1155** |
+| **total** | **2829** | **2330** | **499** | **14** | **13** | **39** | **2291** | **444** | **86** | **235** | **45** | **860** | **1159** |
 
 The `compared` column is the group's comparison set, which is its UG-02 floor. The rung columns apply the ledger's
-seven-step rule (section Order of work) unchanged; a new row is in no kernel feature's row list, so step 4's fourth
-disjunct never places a new row.
+seven-step rule (section Order of work) unchanged. A new row is in no kernel feature's row list, except the
+22 new rows that are the same datum as a decided row (B1 review W3), which carry their datum's kernel
+feature; step 4's fourth disjunct places 1 of them (at R2, with their datum) and no other new row.
 
-- **Forms:** out-of-scope:compile-time 1045, system-scratch 494, diagnostics 394, kernel-internal 380, resource-column 200, dense-component 72, out-of-scope:test-only 60, component 49, relation 37, out-of-scope:os-owned 35, event 26, out-of-scope:third-party 12, scope-arena 10, enable-state 8, out-of-scope:ruled 3.
-- **Classes:** B 654, C 1105, D 486, E 26, F 243, K 149, R 99, S 11, T 44, X 8. **0 rows are class U.**
-- **Kinds** (for scanned rows, the kind the syntax reports; 33 rev-4 rows changed kind): local 1908, field 445, return 245, param 189, static 38.
-- **Shapes:** ctor 1212, unscanned 489, field 380, let 240, ret 213, param 180, tls 31, semantic:str-into 14, raw 10, m5 10, macro 9, emitted 8, static 7, semantic:into 5, semantic:scope-shared 4, semantic:scope-block 4, semantic:clone 4, semantic:boxed-raw-pointer 3, semantic:panic-payload 1, semantic:crossbeam-epoch 1.
+- **Forms:** out-of-scope:compile-time 1045, system-scratch 494, diagnostics 394, kernel-internal 379, resource-column 201, dense-component 72, out-of-scope:test-only 63, component 49, relation 37, out-of-scope:os-owned 35, event 26, out-of-scope:third-party 12, scope-arena 10, enable-state 8, out-of-scope:ruled 4.
+- **Classes:** B 654, C 1108, D 487, E 26, F 243, K 149, R 99, S 11, T 44, X 8. **0 rows are class U.**
+- **Kinds** (for scanned rows, the kind the syntax reports; 33 rev-4 rows changed kind): local 1912, field 445, return 245, param 189, static 38.
+- **Shapes:** ctor 1213, unscanned 489, field 380, let 240, ret 213, param 180, tls 31, semantic:str-into 14, raw 10, m5 10, macro 9, emitted 8, static 7, semantic:into 5, semantic:scope-shared 4, semantic:scope-block 4, semantic:clone 4, semantic:boxed-raw-pointer 3, semantic:std-owned-return 3, semantic:panic-payload 1, semantic:crossbeam-epoch 1.
 
-**Rung table (rev 5).** R2 443, R3 86, R4 236, R5 46, R6 859, out of scope 1155; check:
-443 + 86 + 236 + 46 + 859 + 1155 = 2825 = total 2825. The mapping of ledger rungs to plan rungs
+**Rung table (rev 5).** R2 444, R3 86, R4 235, R5 45, R6 860, out of scope 1159; check:
+444 + 86 + 235 + 45 + 860 + 1159 = 2829 = total 2829. The mapping of ledger rungs to plan rungs
 is 02 section 6's, and 02 section 6's counts (R2 333 / R3 80 / R4 156 / R5 38 / R6 648 / OOS 1102) are superseded by
 these, which each retiring rung re-reads before it starts (the recount rule).
 
 **The pin, reconciled term by term.** Rev 4 had 1245 rows in the rev-5 `ACTIVE_STD_HEAP_ROWS` sense (in scope, not M5;
 the plan's "2357" is rev 4's total of all rows). Rev 5: 1245 - 13 retired - 9 non_rows - 3 moved to
 `out-of-scope:ruled` + 440 new in scope = **1660**. Out of scope: 1102 - 1 retired - 4 non_rows + 3 ruled
-+ 55 new = **1155**. Total: 2357 - 14 - 13 + 495 = **2825**.
++ 59 new = **1159**. Total: 2357 - 14 - 13 + 499 = **2829**.
 
 ### How rev 5 was made
 
@@ -2432,7 +2433,7 @@ not committed: `ug02dump/` (a scratch cargo project that `#[path]`-includes the 
   is the `RawBlob` definition row, now keyed to its allocating call. Every scanner
   rule the calibration changed is pinned by a fixture in `tests/runtime_data_ledger_gate.rs`.
 - **R1, carry to the trunk by key.** A row carries by its line-free key `(file, kind|item_path|container)`, as a multiset;
-  no file among the carried rows was renamed. Where a key's multiplicity changed (388 keys), rows and trunk sites
+  no file among the carried rows was renamed. Where a key's multiplicity changed (389 keys), rows and trunk sites
   were paired by the similarity of the row's rev-4 evidence to the trunk line, then by line distance (critique W7); each such
   key and its pairing is a record in `changes5.json`. No site was claimed by rows of two census trees (the overlap rule, the
   tree closest to the trunk by `git diff --numstat`, never fired). Keyless rows (semantic, M5, unscanned) were re-located by
@@ -2442,6 +2443,12 @@ not committed: `ug02dump/` (a scratch cargo project that `#[path]`-includes the 
 - **R2, restatements.** Applied to rows and to this index (next sections).
 - **R3.** The TSV is regenerated, the group files rendered in place, this part written, and the pins' first line written.
   An independent checker (`verify5.py`) recomputes every number in this part from the committed TSV and group files.
+- **The B1 review re-derivation.** Rev 5 was re-derived from the census trees after the B1 review, with the scanner as the
+  review fixed it (alias paths across modules and crates, path-call method constructors, `.parse::<Head>()`,
+  `io::Error::new/other`). All 49 trees were dumped again; the fixes changed no site on any tree except
+  `io::Error::other` at `boyko_app/src/profiling/stream.rs:227`, one site on every tree since `d552be05` (a rev-4 miss, now a
+  row). The review also rowed three allocations no scanner rule sees (semantic `std-owned-return`, W4) and carried the S3-S8
+  decisions to the new rows of the same data (W3). The pins were re-written before B1 merged.
 
 ### Why the row count rose: the census by syntax
 
@@ -2450,7 +2457,7 @@ are sites that the one rule set sees and rev 4 did not row:
 
 | cause | rows |
 |---|---|
-| rev-4 miss (the site exists at the census tree with no row) | 409 |
+| rev-4 miss (the site exists at the census tree with no row) | 413 |
 | added by ui-lane commits after its census (615cda8f..0646e876, merged by 6eb8b8b6) | 22 |
 | added by 4f89869c Merge branch 'fix/boot-validation-errors' into merge/ke16-into-ecsnative | 20 |
 | added by 2e543e55 merge: feat/multi-paradigm-render (49f2fcfb) into the integration line (c33d786d) - the integ/unified trunk cut (Phase A row A8) | 19 |
@@ -2463,7 +2470,7 @@ Most rev-4 misses are one of four shapes: a constructor inside a struct literal 
 rowed in some groups and not in others; a `&mut` parameter of an own heap-holding type (`rep: &mut UiParseReport`, 62 rows),
 which the uniform parameter rule counts like `&mut Vec`; a typed `let` whose value is an existing allocation (`Box::from_raw`,
 `Arc::clone`), which owns a head; and a `.clone()` whose receiver type the syntax pins. Their form and class are inherited
-from the nearest rev-4 rows (same item 162, same type or fn prefix 158, same file 152, same crate 23), and the destination says so: the rung that retires such a row confirms or
+from the nearest rev-4 rows (same item 165, same type or fn prefix 159, same file 152, same crate 23), and the destination says so: the rung that retires such a row confirms or
 re-forms it in its cut, as the recount rule already requires of every rung.
 
 ### UG-02: what a site is
@@ -2485,10 +2492,32 @@ lives in gate code and `ledger/ug02-vocab.tsv` may only add (it adds `RawBlob` a
 | `tls` | static | each `static` of a `thread_local!` (container: the inner head, else `tls-key`) |
 | `ret` / `param` | return / param | an owning (or `&mut`) head in a signature of a fn or closure with a body |
 | `let` | local | a typed `let` whose type holds a head; it absorbs the constructors of the same container that form its value |
-| `ctor` | local | a constructor not absorbed: `Head::new/with_capacity/from/..`, `vec!`, `format!`, `.to_vec/.to_string/.to_owned/.collect/..`, a constructor named as a value (`.map(PathBuf::from)`), the allocating std calls (`std::fs::*`, `File::open/create`, `OpenOptions::open`, `std::env::*`, `Command::new`, `thread::spawn`, `Builder::spawn`), the stable sorts (`sort`, `sort_by`, `sort_by_key`, `sort_by_cached_key`), and `.clone()` of a receiver whose type is pinned (an `Arc`/`Rc` clone is a refcount increment, not a site) |
+| `ctor` | local | a constructor not absorbed: `Head::new/with_capacity/from/..` (also through a heap alias, `Contour::new()`), `vec!`, `format!`, `.to_vec/.to_string/.to_owned/.collect/..` and the same methods called by path (`ToString::to_string(&x)`, `str::to_owned(s)`, `<[T]>::to_vec(v)`, `Iterator::collect::<C>(it)`, `Vec::clone(&v)`), `.parse::<Head>()`, a constructor named as a value (`.map(PathBuf::from)`), the allocating std calls (`std::fs::*`, `File::open/create`, `OpenOptions::open`, `std::env::*`, `Command::new`, `thread::spawn`, `Builder::spawn`, `io::Error::new/other`), the stable sorts (`sort`, `sort_by`, `sort_by_key`, `sort_by_cached_key`), and `.clone()` of a receiver whose type is pinned (an `Arc`/`Rc` clone is a refcount increment, not a site) |
 | `raw` | local | `std::alloc::{alloc, alloc_zeroed, realloc}` and `System.alloc*` |
 | `macro` | local | a head found by token scan in a `macro_rules!` body or an unparsed macro invocation |
 | `emitted` | local | a head found by token scan in a `quote!` template of `boyko_macros` (the code runs in every user crate) |
+
+**Aliases** (P6's alias hole; B1 review W5). A type path resolves through `type` aliases to its head. The alias is looked up
+in the crate the path names: a bare name in its own crate unless a `use` imports it from elsewhere; a qualified or imported
+path by its leading segment (`crate`, `self`, `super`, a module of the crate, or another scanned crate's lib name). A bare
+name imported from std or an unscanned crate is that crate's type, never a same-named local alias. Aliases are keyed by name
+per crate, so two same-named aliases with different heads are `ALIAS-AMBIGUOUS` (RED), qualified or not.
+
+**What the scanner does not see** (each has 0 instances on the trunk unless a row says otherwise; a future one passes
+UG-02 green, so the rung that adds one rows it by hand as `semantic`):
+
+- A std method that returns an owned heap value and is not on the closed constructor list, when the syntax cannot pin
+  its receiver's type. On the trunk: `DirEntry::path()` / `DirEntry::file_name()` in `boyko_diag`'s
+  `gate::resolve_tool` (`storage.rs:557`, `storage.rs:571`, `storage.rs:575`, semantic `std-owned-return`, B1 review W4). The class is open by construction.
+- `Clone::clone(v)` and `.clone()` whose receiver type the syntax does not pin (semantic `clone` where it occurs).
+- In `emitted` mode, a `quote!` nested inside another macro or inside a `macro_rules!` body.
+- Functions inside a `const _: () = { .. }` block.
+- `.unzip()` and a typed tuple `let` whose value is one call: one site for two collections.
+- A same-container constructor in the argument of a non-constructor call inside a typed `let`
+  (`let out: Vec<u8> = transform(Vec::with_capacity(n))` is one site for two allocations).
+- An alias defined in another crate's code the gate does not scan, and a glob-imported (`use x::*`) alias.
+- A third-party dependency's heap types beyond the vocabulary: `third-party` declarations are free text, and a declared
+  dependency's heap type becomes a head only when `ledger/ug02-vocab.tsv` adds it.
 
 A row that no syntax can see is `semantic:<id>` - its allocation is inside std or the pool, or behind a conversion the syntax
 cannot type. Semantic rows are outside the exact comparison and pinned by count (`SEMANTIC_ROWS`), so a site cannot escape
@@ -2502,6 +2531,7 @@ exactness by being relabelled: relabelling a scanned site's row leaves the site 
 | `semantic:scope-block` | 4 |
 | `semantic:clone` | 4 |
 | `semantic:boxed-raw-pointer` | 3 |
+| `semantic:std-owned-return` | 3 |
 | `semantic:panic-payload` | 1 |
 | `semantic:crossbeam-epoch` | 1 |
 
@@ -2517,9 +2547,9 @@ owning_entity (and `none` only where the ledger allows it), shape, and the site'
 
 **`out-of-scope:ruled`** is new in rev 5 (cut D11): a row a plan ruling keeps by design. Its destination begins with the
 ruling id, and the ruling must be one of the closed list in gate code that keep sites by design (U-5, U-19; critique W4).
-The ruling's overturn returns the row to scope. Three rows carry it: `boyko_diag/src/lane.rs:139` (`LANE`, U-19),
-`boyko_threadpool/src/thread_pool.rs:686` (a lane's crossbeam `Worker` buffer, U-5) and `boyko_threadpool/src/worker.rs:369`
-(crossbeam-epoch's `Local`, U-5, semantic).
+The ruling's overturn returns the row to scope. 4 rows carry it: `boyko_diag/src/lane.rs:139` (U-19); `boyko_threadpool/src/thread_pool.rs:686` (U-5); `boyko_threadpool/src/worker.rs:44` (U-5); `boyko_threadpool/src/worker.rs:369` (U-5). They are `LANE` (U-19), a lane's
+crossbeam `Worker` buffer at its construction and at `worker_main`'s `deque` parameter (U-5; the parameter row is new in rev 5
+and carries the construction row's ruling, B1 review W3), and crossbeam-epoch's `Local` (U-5, semantic).
 
 **Crates** (`ledger/ug02-crates.tsv`): 22 scanned in full (every runtime crate, the crates they depend on, and the root
 package), `boyko_macros` in emitted mode, 9 unscanned with a reason, `crates/boyko_symcensus` pending (B3's crate, declared
@@ -2531,20 +2561,26 @@ exact. The scanned crates' baseline modes live in gate code, so a data edit cann
 ### Pins
 
 `ledger/ug02-pins.tsv` is append-only. Its last line must equal the ledger; from line to line every count only falls,
-except on a `merge-raise` line with a reason (03 section 2). The first line is anchored in the gate code (`GENESIS`), and every
-later line carries the FNV-1a hash of the one before, so the history cannot be rewritten in place without editing the gate
-(critique W4). The out-of-scope count is pinned too, so moving an in-scope row out of scope needs a reasoned raise (the ledger's
-own third gate assertion). The genesis line, rung B1:
+except on a `merge-raise` line with a reason (03 section 2). The first line is anchored in the gate code (`GENESIS`), so
+rewriting it needs a gate edit (critique W4). Every later line carries the FNV-1a hash of the one before; the link catches a
+line edited in place and not re-chained, but it is no anchor: the hash is public and the failure prints the value that
+repairs it, so any line after the first can be rewritten with data edits alone (B1 review W1). Lines 2..N are append-only by
+the merge recipe - `git diff --numstat <base> -- docs/memory/ledger/ug02-pins.tsv` must delete no line (plan correction
+PC-k) - not by the gate. The pins guard counts, not row forms: swapping the forms of two rows keeps every count. The
+out-of-scope count is pinned too, so moving an in-scope row out of scope needs a reasoned raise (the ledger's own third
+gate assertion). A group's floor is its comparison set; it may be 0 exactly when the group has no compared row (the rung
+that retires a group's last compared row pins 0; B1 review W2), and an empty scan of a scanned crate is RED per crate. The
+genesis line, rung B1 (written at the B1 review, before B1 merged):
 
 | pin | value |
 |---|---|
 | `ACTIVE_STD_HEAP_ROWS` | 1660 |
-| `TOTAL_ACTIVE_ROWS` | 2825 |
-| `SEMANTIC_ROWS` | 36 |
-| `OUT_OF_SCOPE_ROWS` | 1155 |
+| `TOTAL_ACTIVE_ROWS` | 2829 |
+| `SEMANTIC_ROWS` | 39 |
+| `OUT_OF_SCOPE_ROWS` | 1159 |
 | `PHYSICS_POOL_SCOPE` (`pool.scope`, `.scope(` method calls in `boyko_physics` non-test code) | 5 |
 | `PHYSICS_ACTIVE_POOL` (`try_with_active_pool(`) | 5 |
-| floors (each group's comparison set) | `ecs-storage=203;ecs-schedule=174;ecs-services=110;pool-utils-log=176;physics-scene-math=104;render=161;rhi=111;ui-input=94;app-demo=297;codec-tools=527;macros-aether=8;ui-lane=318;reflect-lane=7` |
+| floors (each group's comparison set) | `ecs-storage=203;ecs-schedule=174;ecs-services=110;pool-utils-log=176;physics-scene-math=104;render=161;rhi=111;ui-input=94;app-demo=298;codec-tools=527;macros-aether=8;ui-lane=318;reflect-lane=7` |
 
 The physics slice is 5 + 5, not the plan's "4": the parallel narrowphase added `narrowphase/dispatch.rs:330` and `:351`. The
 slice's sites are not ledger rows (the allocations are rowed at the pool); they are counted and pinned so they only fall.
@@ -2570,6 +2606,26 @@ destinations (KF-02 9, KF-45 record 9, ScopeShared 6, KF-33 chunk 4, KF-45 LANE 
   exist under UG-02).
 - **KF-02's rows** (S8): 7 to D-S6, `boyko_rhi_vulkan/src/memory.rs` to D-E15, `boyko_utils/src/sparse_map/sparse_map.rs` to
   D-R2d.
+- **New rows of decided data** (B1 review W3). A rev-5 new row that is the same datum as a row S3-S8 decided, or as a KF-31
+  row, carries that decision and names its plan rung in its destination (22 rows): `ecs/core/asset/staging.rs:63` -> D-S6, `ecs/core/component/component_pool_bundle.rs:27` -> D-S6, `ecs/core/component/component_pool_bundle.rs:35` -> D-S6, `ecs/core/component/dense/dense_registry.rs:103` -> D-S6, `ecs/core/component/dense/dense_registry.rs:101` -> D-S6, `ecs/core/component/dense/dense_registry.rs:100` -> D-S6, `ecs/core/component/enable/enable_store.rs:600` -> D-S6, `ecs/core/component/enable/enable_store.rs:615` -> D-S6, `ecs/core/component/enable/enable_store.rs:867` -> D-S6, `ecs/core/component/enable/enable_store.rs:806` -> D-S6, `memory.rs:737` -> D-E15, `thread_pool.rs:690` -> KF-31 / D-M4, `thread_pool.rs:697` -> KF-31 / D-M4, `thread_pool.rs:757` -> KF-31 / D-M4, `thread_pool.rs:768` -> KF-31 / D-M4, `thread_pool.rs:796` -> KF-31 / D-M4, `thread_pool.rs:695` -> KF-31 / D-M4, `thread_pool.rs:769` -> D-M3, `thread_pool.rs:763` -> KF-31 / D-M4, `worker.rs:44` -> U-5, `sparse_map/sparse_map.rs:28` -> D-R2d, `sparse_map/sparse_map.rs:38` -> D-R2d. KF-31 is
+  then 25 rows (18 rev-4 rows of its list, `app.rs:266` being a non_row, + 7 new).
+
+The rows each plan rung or ruling retires, counted over every active row whose destination names it:
+
+| plan rung | rows | rev-4 rows | new rows |
+|---|---|---|---|
+| D-M2 | 10 | 10 | 0 |
+| D-M3 | 2 | 1 | 1 |
+| KF-31 / D-M4 | 8 | 1 | 7 |
+| D-M6 | 11 | 11 | 0 |
+| D-S6 | 17 | 7 | 10 |
+| D-E15 | 2 | 1 | 1 |
+| D-R2d | 3 | 1 | 2 |
+| ruled U-5 | 3 | 2 | 1 |
+| ruled U-19 | 1 | 1 | 0 |
+
+`KF-31 / D-M4` counts the rows whose destination names it: the `Stealer` array's rev-4 row and the new rows. The other
+rev-4 rows of KF-31's list keep their rev-4 destinations, and D-M4 retires all 25.
 
 ### Rows retired in rev 5 (14)
 
@@ -2612,15 +2668,19 @@ destinations (KF-02 9, KF-45 record 9, ScopeShared 6, KF-33 chunk 4, KF-45 LANE 
 
 - PC1 closed (U-1) and PC5 closed (U-6), above.
 - The plan's "pins 2357 active" (02 B1; 00 section 2) is rev 4's total of all rows; the pin UG-02 defines is
-  `ACTIVE_STD_HEAP_ROWS` (1660 at rev 5), and `TOTAL_ACTIVE_ROWS` (2825) is pinned beside it.
-- D-M3's "KF-34 (4)" (02) counts rows U-5 keeps: under U-5, D-M3 retires the injector row; the `Stealer` array is KF-31's
-  (D-M4); two rows are ruled out of scope.
+  `ACTIVE_STD_HEAP_ROWS` (1660 at rev 5), and `TOTAL_ACTIVE_ROWS` (2829) is pinned beside it.
+- D-M3's "KF-34 (4)" (02) counts rows U-5 keeps: under U-5, D-M3 retires the injector's 2 rows (the field and,
+  new in rev 5, its constructor); the `Stealer` array is KF-31's (D-M4); the lane `Worker` (2 rows, its
+  construction and `worker_main`'s parameter) and the epoch `Local` are ruled out of scope.
+- D-M4's "KF-31 (19)" (02) is 25 at rev 5; D-S6's KF-02 rows are 17, D-E15's 2 and
+  D-R2d's 3 (the table above).
 - The physics slice "4 -> 0" (03 UG-02) is 5 + 5 on the trunk.
 
 ### Change log, rev 4 -> rev 5
 
-Every change is one record in `rev5/out/changes5.json`: r1-new 495, r1-multiplicity 388, r0-semantic 36, r2-restate 35, relocated 33, kind 33, r1-retired 14, r0-non-row 13, shape 5, o7-line-check 1, r0-rekey 1. `r1-new` is a
+Every change is one record in `rev5/out/changes5.json`: r1-new 496, r1-multiplicity 389, r0-semantic 36, r2-restate 35, relocated 33, kind 33, r2-restate-new 22, r1-retired 14, r0-non-row 13, shape 5, r5-semantic-new 3, o7-line-check 1, r0-rekey 1. `r1-new` is a
 new row (with its cause and inheritance basis), `r1-multiplicity` a key whose row and site counts differ (with the
-pairing), `r0-semantic` / `r0-non-row` / `r0-rekey` the R0 outcomes above, `r2-restate` a restatement, `relocated` a keyless
+pairing), `r0-semantic` / `r0-non-row` / `r0-rekey` the R0 outcomes above, `r2-restate` a restatement, `r2-restate-new` a
+new row carrying the decision of its datum (B1 review W3), `r5-semantic-new` a new semantic row (B1 review W4), `relocated` a keyless
 row found by substring or similarity, `kind` a kind re-read from the syntax, `r1-retired` a retirement with its merge, and
 `o7-line-check` the one superseded row whose coordinate the group file pins to another commit.

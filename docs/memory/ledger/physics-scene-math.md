@@ -188,7 +188,7 @@ Every row, no elision, sorted by file and line. Columns:
 
 ## Rev 5 rows
 
-Rows the rev-5 recount added to this group (11): sites the syn scanner (UG-02, `tests/ledger_scan_support/mod.rs`) finds on the trunk that no rev-4 row carried. Each names its cause (a rev-4 miss at the census tree, or the merge that added it) and the basis its form and class were inherited from; the rung that retires the row confirms or re-forms it in its cut. The evidence is the verbatim trunk line. Columns as in the Rows table above.
+Rows the rev-5 recount added to this group (11): sites the syn scanner (UG-02, `tests/ledger_scan_support/mod.rs`) finds on the trunk that no rev-4 row carried. Each names its cause (a rev-4 miss at the census tree, or the merge that added it) and the basis its form and class were inherited from; the rung that retires the row confirms or re-forms it in its cut. A row that is the same datum as a row rev 5 restated (S3-S8) or as a KF-31 row carries that decision and names its plan rung (B1 review W3). The evidence is the verbatim trunk line. Columns as in the Rows table above.
 
 | file:line + evidence | owner | container&lt;elem&gt; | class | ecs_form | owning_entity | memory destination | plan_ref | note |
 |---|---|---|---|---|---|---|---|---|

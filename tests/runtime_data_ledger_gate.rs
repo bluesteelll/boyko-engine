@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// The first line of `docs/memory/ledger/ug02-pins.tsv`: rung B1's pins (ledger rev 5).
-const GENESIS: &str = "B1\tpin\t1660\t2825\t36\t1155\t5\t5\tecs-storage=203;ecs-schedule=174;ecs-services=110;pool-utils-log=176;physics-scene-math=104;render=161;rhi=111;ui-input=94;app-demo=297;codec-tools=527;macros-aether=8;ui-lane=318;reflect-lane=7\t-\tledger rev 5: the three census trees re-derived on the integ/unified trunk c1e9f1db by the syn scanner (unified plan 02 B1; 03 UG-02)";
+const GENESIS: &str = "B1\tpin\t1660\t2829\t39\t1159\t5\t5\tecs-storage=203;ecs-schedule=174;ecs-services=110;pool-utils-log=176;physics-scene-math=104;render=161;rhi=111;ui-input=94;app-demo=298;codec-tools=527;macros-aether=8;ui-lane=318;reflect-lane=7\t-\tledger rev 5: the three census trees re-derived on the integ/unified trunk c1e9f1db by the syn scanner (unified plan 02 B1; 03 UG-02)";
 
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -491,6 +491,29 @@ fn k12_a_constructor_named_as_a_value() {
             "return|f|Vec",
             "local|f|PathBuf",
             "local|f|inferred",
+        ],
+    );
+}
+
+#[test]
+fn k14_io_error_payloads() {
+    // Review W4: `io::Error::new` / `io::Error::other` box their payload (and a `&str`
+    // payload's String); `io::Error::from(kind)` and `last_os_error` allocate nothing.
+    let src = "use std::io;\nuse std::io::Error;\n\
+               pub fn f(k: bool) -> io::Result<()> {\n    \
+               if k { return Err(io::Error::other(\"closed\")); }\n    \
+               let _a = Error::new(io::ErrorKind::Other, \"b\");\n    \
+               let _b = std::io::Error::other(\"c\");\n    \
+               let _c = io::Error::from(io::ErrorKind::NotFound);\n    \
+               let _d = io::Error::last_os_error();\n    Ok(())\n}\n";
+    let out = scan_fixture("k14", &[(LIB, src)], &[]);
+    expect_sites(
+        &out,
+        LIB,
+        &[
+            "local|f|io::Error",
+            "local|f|io::Error",
+            "local|f|io::Error",
         ],
     );
 }

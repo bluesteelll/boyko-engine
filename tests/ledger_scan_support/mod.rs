@@ -1484,6 +1484,11 @@ fn std_alloc_call(path: &str) -> Option<String> {
         if m == "Command" && f == "new" {
             return Some("Command".to_owned());
         }
+        // `io::Error::new` / `other` box a `Custom` and the payload (a `&str` payload's String
+        // too); `from(kind)` and `last_os_error` do not allocate (review W4).
+        if n >= 3 && segs[n - 3] == "io" && m == "Error" && (f == "new" || f == "other") {
+            return Some("io::Error".to_owned());
+        }
     }
     None
 }

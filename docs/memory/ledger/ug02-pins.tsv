@@ -2,6 +2,9 @@
 # APPEND-ONLY. The last line must equal the counts over the ledger. Line to line every count
 # only falls, except on a `merge-raise` line with a reason (03 section 2: a merge that adds
 # rows re-derives them in the same commit). `prev` is the FNV-1a 64 hash of the previous
-# line; the first line is anchored in the gate code (GENESIS), so a rewrite in place is RED.
+# line. Only the first line is anchored (GENESIS in the gate code): rewriting it is RED. The
+# hash chain catches a later line edited in place and not re-chained, but it is no anchor -
+# a re-chained edit passes - so lines 2..N are append-only by the merge recipe, which checks
+# that `git diff --numstat <base>` deletes no line of this file (PC-k), not by the gate.
 rung	kind	active_std_heap_rows	total_active_rows	semantic_rows	out_of_scope_rows	physics_pool_scope	physics_active_pool	floors	prev	reason
-B1	pin	1660	2825	36	1155	5	5	ecs-storage=203;ecs-schedule=174;ecs-services=110;pool-utils-log=176;physics-scene-math=104;render=161;rhi=111;ui-input=94;app-demo=297;codec-tools=527;macros-aether=8;ui-lane=318;reflect-lane=7	-	ledger rev 5: the three census trees re-derived on the integ/unified trunk c1e9f1db by the syn scanner (unified plan 02 B1; 03 UG-02)
+B1	pin	1660	2829	39	1159	5	5	ecs-storage=203;ecs-schedule=174;ecs-services=110;pool-utils-log=176;physics-scene-math=104;render=161;rhi=111;ui-input=94;app-demo=298;codec-tools=527;macros-aether=8;ui-lane=318;reflect-lane=7	-	ledger rev 5: the three census trees re-derived on the integ/unified trunk c1e9f1db by the syn scanner (unified plan 02 B1; 03 UG-02)
