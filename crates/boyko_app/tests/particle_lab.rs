@@ -93,7 +93,7 @@ const MIN_ALPHA_PIXELS: usize = 64;
 /// **The armed particle dump.** See the module doc for what it asserts and what it hands to the
 /// owner.
 #[test]
-#[ignore = "needs a real windowed GPU device; orchestrator-run particles-P0 live fire (gates #12/#16)"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; orchestrator-run particles-P0 live fire (gates #12/#16)"]
 fn particle_lab_screenshot_dump() {
     particle_scene::print_config("particle_lab");
     let dump = std::env::var("BOYKO_HOST_DUMP").unwrap_or_default();

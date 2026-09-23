@@ -202,7 +202,7 @@ fn report(n: usize) {
 
 /// §10.8 leg (a): the rect-only gather baseline at N ∈ {256, 2048}.
 #[test]
-#[ignore = "measurement harness - run explicitly with --ignored --nocapture"]
+#[ignore = "generator: measurement harness - run explicitly with --ignored --nocapture"]
 fn measure_gather_baseline() {
     report(256);
     report(2048);
@@ -246,7 +246,7 @@ fn measure_gather_baseline() {
 /// `ui_pack_inputs!` — the plan's §6 says so, and a leg measuring a component that does
 /// not exist would be measuring nothing.
 #[test]
-#[ignore = "measurement harness - run explicitly with --ignored --nocapture"]
+#[ignore = "generator: measurement harness - run explicitly with --ignored --nocapture"]
 fn measure_gather_with_sprite_components() {
     const PACK_INPUTS: usize = boyko_render::ui_pack_inputs!(count);
     println!(
@@ -353,7 +353,7 @@ fn report_seam(n: usize) {
 
 /// §10.8 leg (d) + §10.3 at N ∈ {256, 2048}, headless.
 #[test]
-#[ignore = "measurement harness - run explicitly with --ignored --nocapture"]
+#[ignore = "slow: measurement harness - run explicitly with --ignored --nocapture"]
 fn measure_seam_static_and_changed() {
     report_seam(256);
     report_seam(2048);

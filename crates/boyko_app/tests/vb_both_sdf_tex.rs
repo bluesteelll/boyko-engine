@@ -129,7 +129,7 @@ fn setup(
 /// orchestrator runs it on the GPU to dump the screenshot and blesses `[vb_both_sdf_tex]` after
 /// the owner's visual sign-off.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the TEXTURED VisibilityBuffer x Both + SDF screenshot"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the TEXTURED VisibilityBuffer x Both + SDF screenshot"]
 fn vb_both_sdf_tex_screenshot_dump() {
     let mut app = App::new();
     let plugins = EnginePlugins::window(

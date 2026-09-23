@@ -294,7 +294,7 @@ fn churn_step(
 }
 
 #[test]
-#[ignore = "needs a real windowed GPU device with validation layers ON (do NOT set \
+#[ignore = "gpu-windowed: needs a real windowed GPU device with validation layers ON (do NOT set \
             BOYKO_DISABLE_VALIDATION — see this file's module doc); run with \
             --test-threads=1, once default-features and once --features hwrt"]
 fn mesh_churn_over_many_frames_never_leaks_or_double_frees_against_a_live_device() {

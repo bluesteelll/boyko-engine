@@ -236,7 +236,7 @@ fn ubo_words(sample_count: u32) -> [u32; UBO_BYTES / 4] {
 
 /// SDFDDGI I3 GOLDEN: the GPU `ddgi_probe_sample` equals `goldens::probe_sample` to BITS.
 #[test]
-#[ignore = "live dispatch golden (RTX + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: live dispatch golden (RTX + --nocapture --test-threads=1); the orchestrator runs it"]
 fn probe_sample_gpu_eq_cpu_to_bits() {
     let Some(ctx) = boot_or_skip() else {
         return;

@@ -1054,7 +1054,7 @@ fn run_case(
 /// VG R3 P1-7 GATE G3: `hzb_build.comp.hlsl` equals `boyko_render::hzb::build_pyramid` to BITS,
 /// over the seven-extent sweep, with no engine involved.
 #[test]
-#[ignore = "live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
 fn hzb_build_gpu_eq_oracle_to_bits() {
     let Some(ctx) = boot_or_skip() else {
         return;
@@ -1111,7 +1111,7 @@ fn hzb_build_gpu_eq_oracle_to_bits() {
 /// other bit difference, anywhere, still fails. That is a narrowing of the sweep's claim, not a
 /// suspension of it, and it goes red if the hardware's behaviour moves in either direction.
 #[test]
-#[ignore = "live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
 fn hzb_build_signed_zero_is_the_hardware_min_tie() {
     let Some(ctx) = boot_or_skip() else {
         return;
@@ -1219,7 +1219,7 @@ const NAN_ROW: HandRow = HandRow {
 /// NaN (the rasteriser clamps to `[minDepth, maxDepth]`), so this is a CONTRACT being verified,
 /// not a hot case — but it is the contract the whole conservative-reduce argument rests on.
 #[test]
-#[ignore = "live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
 fn hzb_build_nan_collapses_to_negative_infinity() {
     let Some(ctx) = boot_or_skip() else {
         return;

@@ -196,7 +196,7 @@ fn spawn_minimal_view(commands: &mut Commands) {
 }
 
 #[test]
-#[ignore = "needs a real windowed GPU device with the VisibilityBuffer descriptor-indexing cap; run with --test-threads=1"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device with the VisibilityBuffer descriptor-indexing cap; run with --test-threads=1"]
 fn a_retired_mesh_releases_its_vb_geometry_table_slot() {
     let mut app = App::new();
     app.insert_resource(FrameBudget(BUDGET));

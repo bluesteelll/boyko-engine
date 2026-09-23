@@ -411,7 +411,7 @@ fn setup(
 /// its own, so a boot with no exit condition renders forever — the worst failure a sweep can have,
 /// and the one `vg_occ_split_timing`'s worker documents at length.
 #[test]
-#[ignore = "spawned by the drivers below; needs a real windowed GPU device"]
+#[ignore = "gpu-windowed: spawned by the drivers below; needs a real windowed GPU device"]
 fn vb_sv0_produce_run_worker() {
     let Ok(fixture) = std::env::var(ENV_FIXTURE) else {
         eprintln!(
@@ -544,7 +544,7 @@ fn run_worker(fixture: &str, sv0_armed: bool) -> Option<Artifact> {
 /// (arm (b) stays dead)"*. The prediction was written into the design and into
 /// [`check_viewt_gap`]'s doc; nothing re-pointed the table it was about.
 #[test]
-#[ignore = "live GPU measurement; the orchestrator runs it with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU measurement; the orchestrator runs it with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
 fn dp6_0b_fused_leg_matches_its_expectation_table() {
     let Some(art) = run_worker("fused", true) else { return };
     // The SPLIT table, on the `[vb_both_sdf]` fixture: with the term armed this boot resolves
@@ -593,7 +593,7 @@ fn dp6_0b_fused_leg_matches_its_expectation_table() {
 
 /// **The split leg** — `[vb_both_ssao]`'s boot, SV0 armed.
 #[test]
-#[ignore = "live GPU measurement; the orchestrator runs it with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU measurement; the orchestrator runs it with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
 fn dp6_0b_split_leg_matches_its_expectation_table() {
     let Some(art) = run_worker("split", true) else { return };
     if let Err(why) = check_expectations(&art.zones, &table_split(true)) {

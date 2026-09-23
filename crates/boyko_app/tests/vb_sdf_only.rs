@@ -88,7 +88,7 @@ fn setup(mut commands: Commands) {
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the VisibilityBuffer x Sdf screenshot"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the VisibilityBuffer x Sdf screenshot"]
 fn vb_sdf_only_screenshot_dump() {
     let mut app = App::new();
     let plugins = EnginePlugins::window("boyko_engine vb sdf only", 512, 512);

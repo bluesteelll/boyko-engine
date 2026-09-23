@@ -69,7 +69,7 @@ fn miri_fixed_advance_counting_closure() {
 /// covered pool-less by M-P20-1. Run explicitly with
 /// `cargo miri test … -- --ignored` on a fast box if desired.
 #[test]
-#[ignore = "windows-gnu Miri executor wall-time (bugfix_56 class); driver logic covered by M-P20-1"]
+#[ignore = "miri-slow: windows-gnu Miri executor wall-time (bugfix_56 class); driver logic covered by M-P20-1"]
 fn miri_app_driver_substeps_and_hold() {
     let counter = Arc::new(AtomicU32::new(0));
     let c = Arc::clone(&counter);

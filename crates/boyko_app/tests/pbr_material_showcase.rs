@@ -297,7 +297,7 @@ fn apply_eval_lighting_knobs(mut cfg: ResMut<LightingConfig>) {
 ///
 /// `#[ignore]`: needs a real windowed GPU device; the orchestrator runs it on the GPU.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the owner's PBR material showcase screenshot"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the owner's PBR material showcase screenshot"]
 fn pbr_material_showcase_screenshot_dump() {
     let knobs = EvalKnobs::from_env();
     let mut app = App::new();

@@ -244,7 +244,7 @@ fn setup_corpus(
 /// **The corpus probe WORKER** — one process, one committed camera path, one `VB_CULL_READBACK`
 /// line. Driven by [`vb_inst_cull_corpus_gate`]; the probe path arrives in the environment.
 #[test]
-#[ignore = "needs a real windowed GPU device and the fetched corpus payload; the corpus gate spawns it per camera path"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device and the fetched corpus payload; the corpus gate spawns it per camera path"]
 fn vb_inst_cull_corpus_worker() {
     // The worker is meaningless without the camera path the gate hands it, and `--ignored` runs
     // BOTH tests in this binary — so a direct invocation lands here with nothing set. Skip BY NAME
@@ -284,7 +284,7 @@ fn vb_inst_cull_corpus_worker() {
 /// **The corpus gate.** Every committed camera path, on the real content, with the ARMED numbers
 /// asserted per path — each of them a count the CPU census measured independently first.
 #[test]
-#[ignore = "needs a real windowed GPU device and the fetched corpus payload; drives one worker process per committed camera path"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device and the fetched corpus payload; drives one worker process per committed camera path"]
 fn vb_inst_cull_corpus_gate() {
     if !vg_corpus_scene::payload_present() {
         eprintln!(

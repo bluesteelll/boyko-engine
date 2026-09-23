@@ -129,7 +129,7 @@ fn spawn_three<A: Component, B: Component, C: Component>(
 // under the Miri interpreter (cf. Phase 9.x "multi-thread Miri deferred").
 // The Miri UB coverage for this fix lives in the single-threaded
 // `run_closure_once` tests below (mirrors `tests/miri_phase10.rs`).
-#[cfg_attr(miri, ignore = "threadpool busy-wait stalls under Miri; see miri_* tests")]
+#[cfg_attr(miri, ignore = "miri-slow: threadpool busy-wait stalls under Miri; see miri_* tests")]
 fn or_changed_with_does_not_leak_unchanged_in_b_lacking_archetype() {
     // Recover from poisoning: the guard only serialises probe access, and
     // every test resets its probes at the start, so a panic in a sibling
@@ -215,7 +215,7 @@ fn or_changed_with_does_not_leak_unchanged_in_b_lacking_archetype() {
 /// must visit ONLY the mutated rows — `Without<B>` must NOT contribute its
 /// unconditional `true`.
 #[test]
-#[cfg_attr(miri, ignore = "threadpool busy-wait stalls under Miri; see miri_* tests")]
+#[cfg_attr(miri, ignore = "miri-slow: threadpool busy-wait stalls under Miri; see miri_* tests")]
 fn or_changed_without_does_not_leak_in_b_present_archetype() {
     // Recover from poisoning: the guard only serialises probe access, and
     // every test resets its probes at the start, so a panic in a sibling
@@ -306,7 +306,7 @@ fn or_changed_without_does_not_leak_in_b_present_archetype() {
 /// against over-correcting (the fix must not start dropping legitimate
 /// archetypal-arm rows).
 #[test]
-#[cfg_attr(miri, ignore = "threadpool busy-wait stalls under Miri; see miri_* tests")]
+#[cfg_attr(miri, ignore = "miri-slow: threadpool busy-wait stalls under Miri; see miri_* tests")]
 fn or_still_admits_archetypal_arm_rows() {
     // Recover from poisoning: the guard only serialises probe access, and
     // every test resets its probes at the start, so a panic in a sibling
@@ -369,7 +369,7 @@ fn or_still_admits_archetypal_arm_rows() {
 /// return every row of any archetype containing A OR B, and none of an
 /// archetype containing neither.
 #[test]
-#[cfg_attr(miri, ignore = "threadpool busy-wait stalls under Miri; see miri_* tests")]
+#[cfg_attr(miri, ignore = "miri-slow: threadpool busy-wait stalls under Miri; see miri_* tests")]
 fn or_fully_archetypal_unaffected() {
     // Recover from poisoning: the guard only serialises probe access, and
     // every test resets its probes at the start, so a panic in a sibling

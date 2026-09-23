@@ -268,7 +268,7 @@ fn setup(
 /// (`vb_occ_split_gate.rs`) says the recorder recorded two scopes; the non-vacuity clause
 /// (`Σ n_defer > 0`) needs a fixture that actually occludes, which is step P3-8's `vb_occ_mixed`.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the VisibilityBuffer mesh-only screenshot"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the VisibilityBuffer mesh-only screenshot"]
 fn vb_mesh_screenshot_dump() {
     let mut app = App::new();
     let plugins = EnginePlugins::window("boyko_engine vb mesh-only", 512, 512);
@@ -535,7 +535,7 @@ fn run_pin(pin: &str, pins: &str) -> PinProbe {
 /// one. Read `OCC_PINS`'s doc for why the negative leg is required, and this section's header for
 /// what the gate cannot claim.
 #[test]
-#[ignore = "live GPU gate (spawns five windowed workers); the orchestrator runs it with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate (spawns five windowed workers); the orchestrator runs it with --test-threads=1"]
 fn vb_mesh_occ_pins_actually_split() {
     let pins = std::fs::read_to_string(pins_path())
         .expect("invariant: goldens/PINS.toml is in the repository");

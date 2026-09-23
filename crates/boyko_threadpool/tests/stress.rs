@@ -278,7 +278,7 @@ fn stress_panic_path_survivors_run_once_and_panic_propagates() {
 // =========================================================================
 
 #[test]
-#[ignore = "best-effort fairness probe; timing-flaky on shared CI (plan D6)"]
+#[ignore = "flaky: best-effort fairness probe; timing-flaky on shared CI (plan D6)"]
 fn no_starvation_every_worker_makes_progress() {
     let workers = 4;
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();

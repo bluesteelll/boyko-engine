@@ -1881,7 +1881,7 @@ fn pass_label(index: usize) -> String {
 /// `--nocapture` is not optional: without it libtest swallows the output and the run looks
 /// like a silent pass.
 #[test]
-#[ignore = "generator, not a gate: prints the pin below as Rust source; the orchestrator runs it"]
+#[ignore = "generator: generator, not a gate: prints the pin below as Rust source; the orchestrator runs it"]
 fn dump_maximal_frame_barrier_stream() {
     let f = build_maximal_frame();
     let img = f.g.img_barriers();

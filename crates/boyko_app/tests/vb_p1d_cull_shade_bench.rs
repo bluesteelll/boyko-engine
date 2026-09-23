@@ -578,7 +578,7 @@ fn setup(
 /// `BOYKO_VB_BENCH_GRID=<dim_x>x<dim_y>x<dim_z>`; the orchestrator sweeps `N_ps ∈ {8, 64, 256,
 /// 1024}` × `{froxel, flat}`, and separately (H1.5) the four grids at fixed `N_ps = 512`.
 #[test]
-#[ignore = "needs a real windowed GPU device; BOYKO_VB_ZONE=1 BOYKO_VB_BENCH_LIGHTS=<n> \
+#[ignore = "gpu-windowed: needs a real windowed GPU device; BOYKO_VB_ZONE=1 BOYKO_VB_BENCH_LIGHTS=<n> \
             [BOYKO_VB_FROXEL_FORCE_OFF=1] [BOYKO_VB_BENCH_GRID=<x>x<y>x<z>] \
             BOYKO_DISABLE_VALIDATION=1 -- --ignored --nocapture --test-threads=1; the \
             orchestrator sweeps N_ps, both legs, and (H1.5) the froxel grid"]

@@ -99,7 +99,7 @@ fn state_floor_and_filter_each_decide_delivery_on_their_own() {
 }
 
 #[test]
-#[ignore = "drives every sink Off; run alone -- `--ignored --test-threads=1`"]
+#[ignore = "solo: drives every sink Off; run alone -- `--ignored --test-threads=1`"]
 fn an_armed_target_no_sink_accepts_is_unsunk_and_says_so() {
     // Runs `#[ignore]`d and alone because its condition is EVERY SINK OFF, which is a process-wide
     // state: any other test in this binary emitting while it holds that state would have its
