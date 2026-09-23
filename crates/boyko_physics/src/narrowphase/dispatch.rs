@@ -494,6 +494,8 @@ mod tests {
     use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
     use crate::math::{Mat3, Quat, Vec3};
     #[cfg(not(miri))]
+    use crate::narrowphase::carry::jumper_words;
+    #[cfg(not(miri))]
     use crate::narrowphase::reuse::Prev;
     use crate::narrowphase::reuse::ReuseStep;
     use crate::row_identity::RowRemap;
@@ -839,8 +841,8 @@ mod tests {
     enum CarryKind {
         /// The previous frame's rows are this frame's.
         Identity,
-        /// The rows moved: `prev_row` and the rows stage 2 resolved.
-        Rows { prev_row: Vec<u32>, stage2: Vec<u32> },
+        /// The rows moved: `prev_row`, the rows stage 2 resolved and their jumper bitset.
+        Rows { prev_row: Vec<u32>, stage2: Vec<u32>, jumpers: Vec<u64> },
         /// No carry.
         Reset,
     }
@@ -854,7 +856,8 @@ mod tests {
                 0..=3 => Self::Identity,
                 4..=6 => {
                     let (prev_row, stage2) = random_rows_map(rng, n, m);
-                    Self::Rows { prev_row, stage2 }
+                    let jumpers = jumper_words(n, &stage2);
+                    Self::Rows { prev_row, stage2, jumpers }
                 }
                 _ => Self::Reset,
             }
@@ -863,8 +866,8 @@ mod tests {
         fn carry<'a>(&'a self, pairs_prev: &'a [(BodyIndex, BodyIndex)]) -> CarryIn<'a> {
             match self {
                 Self::Identity => CarryIn::new(RowRemap::Identity, pairs_prev, &[]),
-                Self::Rows { prev_row, stage2 } => {
-                    CarryIn::new(RowRemap::Rows(prev_row), pairs_prev, stage2)
+                Self::Rows { prev_row, jumpers, .. } => {
+                    CarryIn::new(RowRemap::Rows(prev_row), pairs_prev, jumpers)
                 }
                 Self::Reset => CarryIn::NONE,
             }

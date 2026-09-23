@@ -51,7 +51,7 @@ use crate::math::Vec3;
 use crate::narrowphase::axis_cache::AxisEntry;
 use crate::narrowphase::carry::PairTag;
 use crate::narrowphase::reuse::{ReuseRecord, RowFrame};
-use crate::resources::BodyState;
+use crate::resources::{BodyState, IslandScratch};
 use crate::row_identity::{RowKey, SleepLatch};
 use crate::solver::contact::BodyEffective;
 use crate::solver::soft_step::{ManifoldConstraint, PointConstraint};
@@ -554,7 +554,7 @@ pub(crate) fn register_soft_graph_column_layouts() {
 // `RowIdentity` (row_identity.rs) records the gather's per-row `RowKey`s (slot index +
 // generation, one `u64`) and builds the previous-row map and its stage-2 row list (T5);
 // `IslandSleep` and `BoxAxisCache` each keep one carry scratch. Eight
-// columns in TWO runs, plus `IslandSleep`'s island contact key in the gap between them,
+// columns in TWO runs, plus `IslandSleep`'s per-row latch in the gap between them,
 // because the loops they are swept in differ:
 //
 // * UPPER run (3 ids, directly below the soft-graph cohort): the current and previous
@@ -566,21 +566,23 @@ pub(crate) fn register_soft_graph_column_layouts() {
 //   builds, which sweep the SOLVER cohort; the axis carry is written and read beside the
 //   narrowphase's pair list, manifolds and axis slots; the stage-2 list is pushed beside
 //   `prev_row` in the build's stage 2 (L9 C2, T5).
-// * THE ISLAND CONTACT KEY (one id, in the gap): `IslandSleep::begin_step` sweeps it beside
-//   the graph's `island_of` and `island_manifold_start`, and `permute_latch` sweeps it beside
-//   `prev_row` and the latch carry. Its id is the highest id below the upper run whose slot
-//   clears the constraint-graph cohort, derived independently of `prev_row`'s. An ordering
-//   assert keeps it strictly between the runs, so the cohort width check also proves it
-//   clear of every other row-identity column.
+// * THE SLEEP LATCH (one id, in the gap): `IslandSleep`'s per-row `SleepLatch` (asleep, the
+//   debounce and the island contact key; L10 C0, design D14, which moved the latch onto the
+//   id the island contact key held alone). `IslandSleep::begin_step` sweeps it beside the
+//   graph's `island_of` and `island_manifold_start`, `end_step` beside the `BodyState`
+//   snapshot, and `permute_latch` beside `prev_row` and the latch carry. Its id is the
+//   highest id below the upper run whose slot clears the constraint-graph cohort, derived
+//   independently of `prev_row`'s. An ordering assert keeps it strictly between the runs, so
+//   the cohort width check also proves it clear of every other row-identity column.
 //
 // ⚠ THE GAP BETWEEN THE RUNS IS LOAD-BEARING. The solver cohort is 44 ids wide and owns
 // stagger slots 20..=63, so `prev_row` cannot sit anywhere in a contiguous run below the
 // soft-graph cohort (slots 31..=37) without sharing a cache set with a contact column
 // (slot 34 is `color_offsets`). The lower run therefore starts at the highest id whose
 // slot clears the whole solver cohort — COMPUTED rather than hand-picked, so a cohort
-// above that moves re-derives it — and the ids between the runs, except the island contact
-// key's, stay free for a later cohort. The asserts below prove every co-swept family at
-// compile time.
+// above that moves re-derives it — and the ids between the runs, except the sleep latch's,
+// stay free for a later cohort. The asserts below prove every co-swept family at compile
+// time.
 
 /// Whether `id` shares a cache-set stagger slot with any id of the contiguous run
 /// `bottom ..= top`.
@@ -646,37 +648,39 @@ pub(crate) const SCRATCH_ID_ROW_STAGE2: usize = SCRATCH_ID_ROW_PREV - 4;
 /// Bottom of the row-identity cohort (inclusive).
 pub(crate) const SCRATCH_ID_ROW_IDENTITY_BOTTOM: usize = SCRATCH_ID_ROW_STAGE2;
 
-/// Synthetic id for `IslandSleep`'s per-row island contact key (defect A4), in the gap
-/// between the two runs: the highest id below the upper run whose stagger slot clears the
-/// constraint-graph cohort.
+/// Synthetic id for `IslandSleep`'s per-row latch (`SleepLatch`: asleep, the debounce and the
+/// island contact key; L10 C0, design D14), in the gap between the two runs: the highest id
+/// below the upper run whose stagger slot clears the constraint-graph cohort. Before C0 the
+/// island contact key (defect A4) held this id alone, beside two `Vec` side stores.
 ///
 /// Derived independently of [`SCRATCH_ID_ROW_PREV`], which is not searched again from it:
 /// if a future cohort move makes the two searches collide, the ordering assert below fires
 /// and the id must be re-derived.
-pub(crate) const SCRATCH_ID_SLEEP_ISLAND_KEY: usize = highest_id_clear_of(
+pub(crate) const SCRATCH_ID_SLEEP_LATCH: usize = highest_id_clear_of(
     SCRATCH_ID_ROW_ADDED - 1,
     SCRATCH_ID_GRAPH_TOP,
     SCRATCH_ID_GRAPH_BOTTOM,
 );
 
-// `begin_step`: the island contact key beside `island_of` and `island_manifold_start`.
+// `begin_step`: the latch beside `island_of` and `island_manifold_start`.
 const _: () = assert!(
-    !shares_stagger_slot(
-        SCRATCH_ID_SLEEP_ISLAND_KEY,
-        SCRATCH_ID_GRAPH_TOP,
-        SCRATCH_ID_GRAPH_BOTTOM
-    ),
-    "begin_step sweeps the sleep key beside island_of and island_manifold_start, and its slot is \
+    !shares_stagger_slot(SCRATCH_ID_SLEEP_LATCH, SCRATCH_ID_GRAPH_TOP, SCRATCH_ID_GRAPH_BOTTOM),
+    "begin_step sweeps the sleep latch beside island_of and island_manifold_start, and its slot is \
      one of the graph cohort's"
 );
 
-// `permute_latch`: the island contact key beside `prev_row` and the latch carry. Because
-// the key lies strictly between the runs, the cohort width check below proves its slot
-// distinct from both, and it cannot equal any row-identity id.
+// `end_step`: the latch beside the `BodyState` snapshot.
 const _: () = assert!(
-    SCRATCH_ID_ROW_PREV < SCRATCH_ID_SLEEP_ISLAND_KEY
-        && SCRATCH_ID_SLEEP_ISLAND_KEY < SCRATCH_ID_ROW_ADDED,
-    "the sleep key sits between the row-identity runs, so the cohort width proves it clear of \
+    SCRATCH_ID_SLEEP_LATCH % POOL_STAGGER_LINES != SCRATCH_ID_BODY_STATE % POOL_STAGGER_LINES,
+    "end_step sweeps the sleep latch beside the BodyState snapshot, and the two share a slot"
+);
+
+// `permute_latch`: the latch beside `prev_row` and the latch carry. Because the latch lies
+// strictly between the runs, the cohort width check below proves its slot distinct from
+// both, and it cannot equal any row-identity id.
+const _: () = assert!(
+    SCRATCH_ID_ROW_PREV < SCRATCH_ID_SLEEP_LATCH && SCRATCH_ID_SLEEP_LATCH < SCRATCH_ID_ROW_ADDED,
+    "the sleep latch sits between the row-identity runs, so the cohort width proves it clear of \
      prev_row and the latch carry and it shares no id"
 );
 
@@ -727,9 +731,9 @@ const _: () = assert!(
 
 /// Registers the element layout of every row-identity column, idempotently.
 ///
-/// Two `RowKey` columns, four `u32` columns (the added rows, `prev_row`, the stage-2 row
-/// list and the island contact key), the `(RowKey, u32)` sort pool, the `SleepLatch` carry
-/// and the `u8` axis carry.
+/// Two `RowKey` columns, three `u32` columns (the added rows, `prev_row` and the stage-2 row
+/// list), the `(RowKey, u32)` sort pool, the `SleepLatch` carry and the `SleepLatch` latch in
+/// the gap, and the `u8` axis carry.
 pub(crate) fn register_row_identity_layouts() {
     register_layout::<RowKey>(SCRATCH_ID_ROW_ENTITY);
     register_layout::<RowKey>(SCRATCH_ID_ROW_ENTITY_PREV);
@@ -739,7 +743,7 @@ pub(crate) fn register_row_identity_layouts() {
     register_layout::<SleepLatch>(SCRATCH_ID_SLEEP_LATCH_PREV);
     register_layout::<u8>(SCRATCH_ID_AXIS_REMAP);
     register_layout::<u32>(SCRATCH_ID_ROW_STAGE2);
-    register_layout::<u32>(SCRATCH_ID_SLEEP_ISLAND_KEY);
+    register_layout::<SleepLatch>(SCRATCH_ID_SLEEP_LATCH);
 }
 
 // ── The BROADPHASE-TREE cohort (the tree broadphase, `broadphase_tree/`) ─────
@@ -854,6 +858,45 @@ pub(crate) fn register_tree_column_layouts() {
     register_layout::<u32>(tree_column_id(TREE_AUX).get());
 }
 
+// ── The SLEEP ISLAND SCRATCH (L10 C0, design D14) ───────────────────────────
+//
+// `IslandSleep`'s per-island `IslandScratch` (the frozen decision and the speed² metric), one
+// id directly below the broadphase-tree cohort. `begin_step` writes it beside the sleep latch
+// and the graph's `island_of` / `island_manifold_start` and reads it beside the awake mask
+// (`TOUCHED_AWAKE`); `end_step` writes it beside the `BodyState` snapshot and reads it beside
+// the latch. Its slot must clear each of those families, and each is asserted below.
+
+/// Synthetic id for `IslandSleep`'s per-island scratch (L10 C0, design D14): one id below the
+/// broadphase-tree cohort's bottom.
+pub(crate) const SCRATCH_ID_SLEEP_ISLAND_SCRATCH: usize = SCRATCH_ID_TREE_BOTTOM - 1;
+
+const _: () = assert!(
+    !shares_stagger_slot(
+        SCRATCH_ID_SLEEP_ISLAND_SCRATCH,
+        SCRATCH_ID_GRAPH_TOP,
+        SCRATCH_ID_GRAPH_BOTTOM
+    ),
+    "begin_step and end_step sweep the island scratch beside island_of and \
+     island_manifold_start, and its slot is one of the graph cohort's"
+);
+
+const _: () = assert!(
+    SCRATCH_ID_SLEEP_ISLAND_SCRATCH % POOL_STAGGER_LINES
+        != SCRATCH_ID_SLEEP_LATCH % POOL_STAGGER_LINES
+        && SCRATCH_ID_SLEEP_ISLAND_SCRATCH % POOL_STAGGER_LINES
+            != SCRATCH_ID_BODY_STATE % POOL_STAGGER_LINES
+        && SCRATCH_ID_SLEEP_ISLAND_SCRATCH % POOL_STAGGER_LINES
+            != SCRATCH_ID_TOUCHED_AWAKE % POOL_STAGGER_LINES,
+    "the island scratch is swept beside the sleep latch, the BodyState snapshot and the awake \
+     mask, and it shares a slot with one of them"
+);
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_SLEEP_ISLAND_SCRATCH`].
+#[inline]
+pub(crate) fn sleep_island_scratch_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_SLEEP_ISLAND_SCRATCH)
+}
+
 /// The lowest id the physics scratch region may occupy.
 ///
 /// The region grows DOWNWARD from the top of the id space while production
@@ -879,11 +922,13 @@ pub(crate) fn register_tree_column_layouts() {
 /// and the census above is the thing to re-run before moving this number again.
 const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;
 
-// The broadphase-tree cohort is the region's lowest edge today. The floor is asserted
-// against the LOWEST cohort rather than against whichever one happened to be last
-// when this was written — add a cohort below and move this assert with it.
+// The sleep island scratch, one id below the broadphase-tree cohort, is the region's lowest
+// edge today (L10 C0). The floor is asserted against the LOWEST id rather than against
+// whichever cohort happened to be last when this was written — add a cohort below and move
+// this assert with it.
 const _: () = assert!(
-    SCRATCH_ID_TREE_BOTTOM >= SCRATCH_REGION_MIN_ID,
+    SCRATCH_ID_SLEEP_ISLAND_SCRATCH >= SCRATCH_REGION_MIN_ID
+        && SCRATCH_ID_SLEEP_ISLAND_SCRATCH < SCRATCH_ID_TREE_BOTTOM,
     "the physics scratch region has grown below SCRATCH_REGION_MIN_ID; production \
      ids climb from 0 and the reserved region is no longer comfortably out of \
      their reach. Re-run the census in that constant's docs before lowering it"
@@ -962,6 +1007,7 @@ pub(crate) fn register_scratch_layouts() {
     register_contact_column_layouts();
     register_solver_tail_layouts();
     register_row_identity_layouts();
+    register_layout::<IslandScratch>(SCRATCH_ID_SLEEP_ISLAND_SCRATCH);
 }
 
 /// Registers the [`Layout`](std::alloc::Layout) of every contact column's element
@@ -1047,7 +1093,9 @@ fn register_solver_tail_layouts() {
 // pair's two rows in the same pair loop, and its pair carry (L9 C2,
 // `narrowphase/carry.rs`) adds the two per-pair tag columns — this step's, written
 // at pair `k`, and the previous step's, read at the joined slot beside
-// `pairs_prev` — and the jumper bitset the join probes at a pair's two rows. Contact
+// `pairs_prev` — and the jumper bitset the join probes at a pair's two rows (owned by
+// `ContactPairs` and built by the broadphase's `rotate` since L10 C0; it keeps this cohort's
+// id because the join is the loop that sweeps it beside the pairs). Contact
 // reuse's records (L9 C3) are two more per-pair columns swept the same way as the
 // tags: this step's written at pair `k`, the previous step's read at the joined
 // slot. One cohort, so their ids must be pairwise distinct mod
@@ -1058,7 +1106,8 @@ fn register_solver_tail_layouts() {
 /// the solver buffer, the sensor-overlap buffer, the box-axis cache slots, the
 /// parallel narrowphase's staging column, its per-pair axis commit, the per-row
 /// orientation frames (L9 C1), the two per-pair tag columns and the jumper bitset
-/// (L9 C2), and the two per-pair reuse-record columns (L9 C3).
+/// (L9 C2; `ContactPairs` owns the bitset since L10 C0), and the two per-pair
+/// reuse-record columns (L9 C3).
 pub(crate) const NARROWPHASE_COLUMN_COUNT: usize = 11;
 
 /// Top of the narrowphase cohort — one id below the broadphase cohort's bottom.
@@ -1195,8 +1244,8 @@ pub(crate) fn pair_tag_prev_id() -> ComponentId {
     narrowphase_column_id(7)
 }
 
-/// The [`ComponentId`] for `Manifolds::jumper_bits`, the pair carry's bitset of the rows
-/// stage 2 resolved (L9 D9).
+/// The [`ComponentId`] for `ContactPairs::jumper_bits`, the pair carry's bitset of the rows
+/// stage 2 resolved (L9 D9; in `Manifolds` until L10 C0 moved its build to the broadphase).
 #[inline]
 pub(crate) fn jumper_bits_id() -> ComponentId {
     narrowphase_column_id(8)
@@ -1269,10 +1318,10 @@ pub(crate) fn sleep_latch_prev_id() -> ComponentId {
     ComponentId::new(SCRATCH_ID_SLEEP_LATCH_PREV)
 }
 
-/// The [`ComponentId`] wrapper for [`SCRATCH_ID_SLEEP_ISLAND_KEY`].
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_SLEEP_LATCH`].
 #[inline]
-pub(crate) fn sleep_island_key_id() -> ComponentId {
-    ComponentId::new(SCRATCH_ID_SLEEP_ISLAND_KEY)
+pub(crate) fn sleep_latch_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_SLEEP_LATCH)
 }
 
 /// The [`ComponentId`] wrapper for [`SCRATCH_ID_AXIS_REMAP`].
@@ -1540,7 +1589,7 @@ mod tests {
     /// The cohort is TWO contiguous runs: three ids directly below the soft-graph cohort,
     /// then a gap, then five ids whose top is the highest id clear of the solver cohort's
     /// slots. A single contiguous run would put `prev_row` on a contact column's slot. The
-    /// gap holds the sleep key, checked by `the_sleep_key_loops_have_distinct_slots`.
+    /// gap holds the sleep latch, checked by `the_sleep_step_loops_have_distinct_slots`.
     #[test]
     fn row_identity_cohort_is_two_contiguous_runs() {
         let ids = row_identity_cohort_ids();
@@ -1575,49 +1624,75 @@ mod tests {
         );
     }
 
-    /// The eight row-identity ids and the sleep key in their gap each get their own slot.
+    /// The eight row-identity ids and the sleep latch in their gap each get their own slot.
     #[test]
     fn row_identity_cohort_has_distinct_slots() {
         let mut ids = row_identity_cohort_ids();
-        ids.push(SCRATCH_ID_SLEEP_ISLAND_KEY);
+        ids.push(SCRATCH_ID_SLEEP_LATCH);
         assert_cohort_slots_distinct(
-            "row-identity cohort + sleep key",
+            "row-identity cohort + sleep latch",
             &ids,
             ROW_IDENTITY_UPPER_COUNT + ROW_IDENTITY_LOWER_COUNT + 1,
         );
     }
 
-    /// U9 (defect A4): the sleep key's two loops. `IslandSleep::begin_step` sweeps it beside
-    /// the graph cohort's `island_of` and `island_manifold_start`, and `permute_latch`
-    /// sweeps it beside `prev_row` and the latch carry. The key also sits strictly between
-    /// the row-identity runs, checked here on runtime values (the twin of the const
-    /// ordering assert).
+    /// U9 (defect A4) and L10 C0 (design D14): the loops of `IslandSleep`'s step.
+    /// `begin_step` sweeps the latch and the island scratch beside the graph cohort's
+    /// `island_of` and `island_manifold_start`, then the island scratch beside the awake mask;
+    /// `end_step` sweeps the island scratch and the latch beside the `BodyState` snapshot and
+    /// `island_of`; `permute_latch` sweeps the latch beside `prev_row` and the latch carry. The
+    /// latch also sits strictly between the row-identity runs, checked here on runtime values
+    /// (the twin of the const ordering assert).
     #[test]
-    fn the_sleep_key_loops_have_distinct_slots() {
+    fn the_sleep_step_loops_have_distinct_slots() {
         let mut begin_step = graph_cohort_ids();
-        begin_step.push(SCRATCH_ID_SLEEP_ISLAND_KEY);
+        begin_step.extend([SCRATCH_ID_SLEEP_LATCH, SCRATCH_ID_SLEEP_ISLAND_SCRATCH]);
         assert_cohort_slots_distinct(
-            "begin_step first loop: graph cohort + sleep key",
+            "begin_step first loop: graph cohort + sleep latch + island scratch",
             &begin_step,
-            GRAPH_COLUMN_COUNT + 1,
+            GRAPH_COLUMN_COUNT + 2,
+        );
+        let mut awake_mask = graph_cohort_ids();
+        awake_mask.extend([SCRATCH_ID_TOUCHED_AWAKE, SCRATCH_ID_SLEEP_ISLAND_SCRATCH]);
+        assert_cohort_slots_distinct(
+            "begin_step awake mask: graph cohort + awake mask + island scratch",
+            &awake_mask,
+            GRAPH_COLUMN_COUNT + 2,
+        );
+        let mut end_step = graph_cohort_ids();
+        end_step.extend([
+            SCRATCH_ID_BODY_STATE,
+            SCRATCH_ID_SLEEP_LATCH,
+            SCRATCH_ID_SLEEP_ISLAND_SCRATCH,
+        ]);
+        assert_cohort_slots_distinct(
+            "end_step: graph cohort + BodyState + sleep latch + island scratch",
+            &end_step,
+            GRAPH_COLUMN_COUNT + 3,
         );
         assert_cohort_slots_distinct(
-            "permute_latch: prev_row + latch carry + sleep key",
+            "permute_latch: prev_row + latch carry + sleep latch",
             &[
                 SCRATCH_ID_ROW_PREV,
                 SCRATCH_ID_SLEEP_LATCH_PREV,
-                SCRATCH_ID_SLEEP_ISLAND_KEY,
+                SCRATCH_ID_SLEEP_LATCH,
             ],
             3,
         );
         // Runtime values (`black_box`), so this is not a restatement of the const assert.
         let lower_top = std::hint::black_box(SCRATCH_ID_ROW_PREV);
-        let key = std::hint::black_box(SCRATCH_ID_SLEEP_ISLAND_KEY);
+        let latch = std::hint::black_box(SCRATCH_ID_SLEEP_LATCH);
         let upper_bottom = std::hint::black_box(SCRATCH_ID_ROW_ADDED);
         assert!(
-            lower_top < key && key < upper_bottom,
-            "the sleep key {key} must lie strictly between the row-identity runs (lower run top \
-             {lower_top}, upper run bottom {upper_bottom})"
+            lower_top < latch && latch < upper_bottom,
+            "the sleep latch {latch} must lie strictly between the row-identity runs (lower run \
+             top {lower_top}, upper run bottom {upper_bottom})"
+        );
+        let scratch = std::hint::black_box(SCRATCH_ID_SLEEP_ISLAND_SCRATCH);
+        assert!(
+            (SCRATCH_REGION_MIN_ID..SCRATCH_ID_TREE_BOTTOM).contains(&scratch),
+            "the island scratch {scratch} must sit below the broadphase-tree cohort and above \
+             the scratch region floor {SCRATCH_REGION_MIN_ID}"
         );
     }
 
@@ -1663,7 +1738,8 @@ mod tests {
     #[test]
     fn row_identity_cohort_shares_no_id_with_another_cohort() {
         let mut row = row_identity_cohort_ids();
-        row.push(SCRATCH_ID_SLEEP_ISLAND_KEY);
+        row.extend([SCRATCH_ID_SLEEP_LATCH, SCRATCH_ID_SLEEP_ISLAND_SCRATCH]);
+        let tree: Vec<usize> = (0..TREE_COLUMN_COUNT).map(|k| tree_column_id(k).get()).collect();
         for (name, ids) in [
             ("solver", solver_cohort_ids()),
             ("graph", graph_cohort_ids()),
@@ -1671,6 +1747,7 @@ mod tests {
             ("narrowphase", narrowphase_cohort_ids()),
             ("soft-coupling", soft_coupling_cohort_ids()),
             ("soft-graph", soft_graph_cohort_ids()),
+            ("broadphase-tree", tree),
         ] {
             for id in &row {
                 assert!(!ids.contains(id), "row-identity id {id} also belongs to the {name} cohort");
@@ -1682,7 +1759,7 @@ mod tests {
     /// registration would size the column for the wrong element.
     #[test]
     fn row_identity_layouts_register_each_element_size() {
-        register_row_identity_layouts();
+        register_scratch_layouts();
         for (id, size) in [
             (SCRATCH_ID_ROW_ENTITY, size_of::<RowKey>()),
             (SCRATCH_ID_ROW_ENTITY_PREV, size_of::<RowKey>()),
@@ -1693,7 +1770,9 @@ mod tests {
             (SCRATCH_ID_SLEEP_LATCH_PREV, 8),
             (SCRATCH_ID_AXIS_REMAP, size_of::<u8>()),
             (SCRATCH_ID_ROW_STAGE2, size_of::<u32>()),
-            (SCRATCH_ID_SLEEP_ISLAND_KEY, 4),
+            // L10 C0 (D14): the latch takes the island contact key's id, 4 B -> 8 B.
+            (SCRATCH_ID_SLEEP_LATCH, 8),
+            (SCRATCH_ID_SLEEP_ISLAND_SCRATCH, 8),
         ] {
             assert_eq!(
                 boyko_ecs::ecs::core::component::component_registry::get_component_size(id),

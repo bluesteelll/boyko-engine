@@ -3579,6 +3579,71 @@
         assert!(sleep.is_row_asleep(0), "the resting body must end latched asleep");
     }
 
+    /// **L10 C0, mutation M0's carrier — the island metric is the MAX over its rows.** One
+    /// island of three dynamic rows chained on a static floor, driven through
+    /// `begin_step` / `end_step` directly:
+    ///
+    /// * every row at 0.6 × the threshold: each row, and so the MAX, is below it while the
+    ///   SUM (1.8 ×) is above, so the island latches asleep after the debounce;
+    /// * one row at 2 × the threshold, the others at rest: the MAX is above it, so the busy
+    ///   row keeps its whole island awake (the "single busy row" rule the docs state).
+    ///
+    /// M0 (the energy MAX replaced by a SUM in `end_step`) turns the first arm red; the
+    /// design's named carrier, `sleeping_pipeline_o8`, stays green under it (measured at
+    /// C0), because none of its assertions reads a sleep decision.
+    #[test]
+    fn island_metric_is_the_max_over_its_rows() {
+        let threshold = DEFAULT_SLEEP_THRESHOLD;
+        let debounce: u16 = 8;
+        let bodies = vec![
+            dyn_sphere(Vec3::new(0.0, 0.5, 0.0), 1.0, 0.5, 0.0),
+            dyn_sphere(Vec3::new(0.0, 1.5, 0.0), 1.0, 0.5, 0.0),
+            dyn_sphere(Vec3::new(0.0, 2.5, 0.0), 1.0, 0.5, 0.0),
+            static_body(Vec3::ZERO),
+        ];
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let ms = vec![
+            manifold(0, 3, Vec3::new(0.0, -1.0, 0.0), -0.01, Vec3::ZERO),
+            manifold(0, 1, up, -0.01, Vec3::ZERO),
+            manifold(1, 2, up, -0.01, Vec3::ZERO),
+        ];
+        let graph = build_graph(&bodies, &ms);
+        let isl = graph.island_of(0);
+        assert!(
+            isl != ConstraintGraph::NO_ISLAND && graph.island_of(1) == isl && graph.island_of(2) == isl,
+            "construction: the three dynamic rows form one island"
+        );
+        let run = |speeds2: [f32; 3]| {
+            let mut sleep = IslandSleep::with_capacity(4, 4);
+            let mut bs = bodies.clone();
+            for (b, v2) in bs.iter_mut().zip(speeds2) {
+                b.linear_velocity = Vec3::new(v2.sqrt(), 0.0, 0.0);
+            }
+            for _ in 0..2 * debounce {
+                sleep.begin_step(&graph, bs.len());
+                sleep.end_step(&bs, &graph, threshold, debounce);
+            }
+            [0, 1, 2].map(|r| sleep.is_row_asleep(r))
+        };
+        let slow = 0.6 * threshold;
+        assert!(
+            3.0 * slow >= threshold,
+            "construction: the rows' speed² sum must reach the threshold for the arm to separate MAX \
+             from SUM"
+        );
+        assert_eq!(
+            run([slow; 3]),
+            [true; 3],
+            "every row below the threshold: the island's MAX is below it, so all three latch asleep \
+             (a SUM, 1.8 x the threshold, would keep them awake)"
+        );
+        assert_eq!(
+            run([2.0 * threshold, 0.0, 0.0]),
+            [false; 3],
+            "one busy row keeps its whole island awake"
+        );
+    }
+
     /// **Gate 9 probe — does a dense resting pile actually latch asleep, and after
     /// how many frames?** This mirrors the criterion `sleeping` bench's `pile_scene`
     /// (a grid of sphere columns on a floor with vertical + lateral contacts) and
@@ -3718,7 +3783,7 @@
                 }
                 for isl in 0..n_islands {
                     let expect_frozen = member_count[isl] > 0 && all_asleep[isl];
-                    // An island with no members is `frozen_islands[isl] == true` by the
+                    // An island with no members is `is_island_frozen(isl) == true` by the
                     // resize default but has no rows, so no row reports awake/frozen via it.
                     if member_count[isl] > 0 {
                         prop_assert_eq!(

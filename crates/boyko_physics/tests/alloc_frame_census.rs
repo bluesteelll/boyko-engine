@@ -519,6 +519,12 @@
 //! still green. Headroom is zero wherever a count is
 //! structural and is justified at each non-zero pin (see [`pins`]).
 //!
+//! **S1d (L10 C0)** is S1b with `sleeping` on: the pile freezes inside the window, so its
+//! steady frames drive `IslandSleep::begin_step` / `end_step` over the frozen path, and a
+//! frozen row on some steady frame is its anti-vacuity. It carries S1b's pin exactly: since
+//! C0 the latch and the per-island scratch are kernel columns, so sleeping adds no heap
+//! acquisition to a step. RED-first: a `Vec::with_capacity(1)` in `begin_step`.
+//!
 //! S1c's number is DATA-DEPENDENT: its warm-up spans 290..387 as the pile
 //! collapses, and after it the count moves in whole dispatched colours as the
 //! contact set settles (268..269 per step over 4,352 steps since L11 C2; 364..365
@@ -715,7 +721,7 @@ use boyko_physics::components::{
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{add_physics_colored_solve, add_physics_systems};
-use boyko_physics::resources::{Manifolds, PhysicsConfig};
+use boyko_physics::resources::{IslandSleep, Manifolds, PhysicsConfig};
 use boyko_physics::solver::SoftStepSolver;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1911,13 +1917,15 @@ fn spawn_jolt_pyramid(world: &mut EcsMaster) -> Vec<Entity> {
     out
 }
 
-/// One arm of S1.
+/// One arm of S1. `sleeping` sets `PhysicsConfig::sleeping` (the colored solve's island
+/// sleep, `IslandSleep`); a sleeping arm must also see a frozen row on some steady frame.
 fn run_pyramid_arm(
     rows: &mut Vec<Row>,
     label: &str,
     colored: bool,
     workers: usize,
     parallel: bool,
+    sleeping: bool,
 ) {
     let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
 
@@ -1940,7 +1948,7 @@ fn run_pyramid_arm(
         // Since L5 C4 the default is ON; the serial arm (S1b) overrides it so that it
         // stays the control, and the parallel arm carries the dispatch it prices.
         cfg.parallel_narrowphase = parallel;
-        cfg.sleeping = false;
+        cfg.sleeping = sleeping;
     }
     let mut schedule = builder.build(&mut world);
 
@@ -1975,10 +1983,21 @@ fn run_pyramid_arm(
     // pin would see it).
     let np_after_setup = world.resource::<Manifolds>().narrowphase_dispatches();
     let mut np_log: Vec<u64> = Vec::with_capacity(TOTAL_FRAMES + 2);
+    // A sleeping arm's witness that the frozen path ran inside the window: steady frames on
+    // which some row is frozen. Read from `IslandSleep` after each frame; the read allocates
+    // nothing, so it cannot move the counts it sits beside.
+    let rows_n = bodies.len() + 1;
+    let mut frame = 0usize;
+    let mut frozen_frames = 0usize;
     drive(
         || {
             schedule.run(&mut world);
             np_log.push(world.resource::<Manifolds>().narrowphase_dispatches());
+            frame += 1;
+            if sleeping && frame > WARM_BUDGET {
+                let sleep = world.resource::<IslandSleep>();
+                frozen_frames += usize::from((0..rows_n).any(|r| !sleep.is_row_awake(r)));
+            }
         },
         &mut samples,
     );
@@ -2048,15 +2067,22 @@ fn run_pyramid_arm(
         "{label}: ANTI-VACUITY FAILED — no sampled body moved (max {max_move}); the \
          integrate/solve stages did not advance the world"
     );
+    assert!(
+        !sleeping || frozen_frames > 0,
+        "{label}: ANTI-VACUITY FAILED — sleeping is on and no row froze on any of the \
+         {STEADY_FRAMES} steady frames, so the frozen path never ran inside the window"
+    );
 
     rows.push(report(
         label,
         &format!(
-            "{} dynamic bodies + 1 static floor, {workers} worker(s), sleeping OFF, \
+            "{} dynamic bodies + 1 static floor, {workers} worker(s), sleeping {}, \
              dt=1/60. Frame = ONE fixed step = one real physics `Schedule::run`. \
              Steady-state contacts = {contacts}; sampled bodies moved up to {max_move:.3} m; \
-             the narrowphase dispatched on {np_window} of the {STEADY_FRAMES} steady frames.",
-            bodies.len()
+             the narrowphase dispatched on {np_window} of the {STEADY_FRAMES} steady frames; \
+             a row was frozen on {frozen_frames} of them.",
+            bodies.len(),
+            if sleeping { "ON" } else { "OFF" }
         ),
         setup,
         &samples,
@@ -2075,6 +2101,7 @@ fn s1a_rigid_pile_reference_pipeline_serial(rows: &mut Vec<Row>) {
         false,
         1,
         false,
+        false,
     );
 }
 
@@ -2090,6 +2117,22 @@ fn s1b_rigid_pile_colored_serial(rows: &mut Vec<Row>) {
         true,
         4,
         false,
+        false,
+    );
+}
+
+/// L10 C0 (design 04 "Gates", C0): S1b with `sleeping` on — the pile freezes inside the
+/// window, so the steady frames run `IslandSleep`'s latch and per-island columns through
+/// `begin_step` / `end_step` on the frozen path. Its pin is S1b's: sleeping adds no heap
+/// acquisition to a step. RED-first: a `Vec::with_capacity(1)` in `begin_step`.
+fn s1d_rigid_pile_colored_serial_sleeping(rows: &mut Vec<Row>) {
+    run_pyramid_arm(
+        rows,
+        "S1d — rigid pile, DEFAULT pipeline (colored + simd_solve), parallel OFF, sleeping ON",
+        true,
+        4,
+        false,
+        true,
     );
 }
 
@@ -2103,6 +2146,7 @@ fn s1c_rigid_pile_colored_parallel(rows: &mut Vec<Row>) {
         true,
         4,
         true,
+        false,
     );
 }
 
@@ -2445,7 +2489,7 @@ impl Pin {
 /// every colour scope fits its first block, so chunk 230 -> 134 and dispatch MAX 365 ->
 /// 269 on every frame of the long run; scope unmoved, and the debug pin unmoved because
 /// its long run reproduced every figure (header, "S1c after L11 C2").
-fn pins() -> [Pin; 12] {
+fn pins() -> [Pin; 13] {
     // An App frame: one install frame (a `ScopeShared` + one chunk) and at most
     // one injector block — the block arrives once per 63 dispatcher-side pushes,
     // so its per-frame max is 1 and it is already inside the measured 3.
@@ -2507,6 +2551,12 @@ fn pins() -> [Pin; 12] {
         Pin {
             other_per_frame: colored_other,
             ..app("S1b", 1, 4)
+        },
+        // L10 C0: S1b with sleeping on, pinned as S1b — the latch and the per-island scratch
+        // are kernel columns resized in place, so a sleeping step acquires nothing S1b does not.
+        Pin {
+            other_per_frame: colored_other,
+            ..app("S1d", 1, 4)
         },
         if RELEASE {
             // 1240 bodies. RE-PINNED from the 4,352-step long run after A7b
@@ -2743,6 +2793,7 @@ fn frame_allocation_census() {
     s1a_rigid_pile_reference_pipeline_serial(&mut rows);
     s1b_rigid_pile_colored_serial(&mut rows);
     s1c_rigid_pile_colored_parallel(&mut rows);
+    s1d_rigid_pile_colored_serial_sleeping(&mut rows);
 
     // ── Anti-vacuity across arms: the parallel dispatch really did engage ──
     //

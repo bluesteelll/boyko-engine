@@ -326,7 +326,8 @@ pub fn physics_gather(
 ///
 /// Before the arm runs, the previous step's list is kept as `pairs_prev` and the new list is
 /// stamped with this gather's sequence ([`ContactPairs::rotate`], L9 D9): the narrowphase's pair
-/// carry joins this step's pairs against it. All three arms fill the list the rotation hands them.
+/// carry joins this step's pairs against it, reading the jumper bitset the rotation rebuilds on a
+/// step whose rows moved (L10 C0). All three arms fill the list the rotation hands them.
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
@@ -339,8 +340,9 @@ pub fn physics_broadphase(
 ) {
     let bodies = scratch.bodies();
     let pairs = &mut *pairs;
-    // L9 D9: before the kind match, so every arm fills the swapped-in list.
-    pairs.rotate(scratch.rows.gather_seq());
+    // L9 D9: before the kind match, so every arm fills the swapped-in list. On a step whose
+    // rows moved it also rebuilds the carry's jumper bitset (L10 C0, design 06 Δ9).
+    pairs.rotate(&scratch.rows);
 
     match cfg.broadphase {
         // The shipped all-pairs loop, kept VERBATIM so the default path's asm is
@@ -712,7 +714,20 @@ pub(crate) fn collide_pair<'r>(
                 Some(frames) => (frames[a.0 as usize].radius, frames[b.0 as usize].radius),
                 None => (ha.length(), hb.length()),
             };
-            collide_box_pair(a, b, ba, bb, &oa, &ob, radii, reuse, prev(), hint)
+            let out = collide_box_pair(a, b, ba, bb, &oa, &ob, radii, reuse, prev(), hint);
+            // L9's axis commit is `PairTag::rekeys` (L10 C0, design 06 D-C): a pair writes its
+            // hysteresis axis only with a tag that re-keys and carries that axis, and on a step
+            // whose key set changed it writes one iff its tag re-keys.
+            debug_assert!(
+                out.axis.is_none_or(|axis| out.tag.rekeys() && out.tag.axis() == Some(axis as u8))
+                    && (!reuse.rekey || out.axis.is_some() == out.tag.rekeys()),
+                "invariant: a box pair's axis write is PairTag::rekeys: axis {:?}, tag {:#06x}, \
+                 rekey step {}",
+                out.axis,
+                out.tag.bits(),
+                reuse.rekey
+            );
+            out
         }
     }
 }
@@ -2067,3 +2082,153 @@ mod o9_manifold_tests {
     }
 }
 
+
+#[cfg(test)]
+mod pair_tag_rekeys_tests {
+    //! L10 C0 (design 06 D-C; plan E3): `PairTag::rekeys` is L9's axis commit, extracted. Over
+    //! every outcome a box pair can reach — a full contact, a record built, a record hit, a
+    //! separation, a carried separation, a box pair with no contact, and the non-box pairs —
+    //! a pair writes its hysteresis axis only with a tag that re-keys and carries that axis,
+    //! and on a step whose key set changed it writes one iff its tag re-keys. Mutation
+    //! `rekeys = has(REC)` turns this red on the first full contact.
+
+    use super::*;
+    use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
+    use crate::math::{Mat3, Quat, Vec3};
+
+    /// xorshift64*: a seeded, dependency-free generator.
+    struct Rng(u64);
+
+    impl Rng {
+        fn unit(&mut self) -> f32 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32 / (1u64 << 24) as f32
+        }
+
+        fn range(&mut self, lo: f32, hi: f32) -> f32 {
+            lo + (hi - lo) * self.unit()
+        }
+    }
+
+    fn body(position: Vec3, rotation: Quat, shape: ColliderShape, v: Vec3, inv_mass: f32) -> BodyState {
+        let body = RigidBody { position, linear_velocity: v, rotation, angular_velocity: Vec3::ZERO };
+        let mass = RigidBodyMass { inv_inertia: Mat3::IDENTITY, inv_mass, restitution: 0.0, friction: 0.5 };
+        let collider = Collider { shape, layer: 1, mask: 1 };
+        BodyState::from_columns(&body, &mass, &collider, false, true, false)
+    }
+
+    /// A static slab, boxes of random orientation packed above it (most pairs touch, the
+    /// far ones separate), every third one fast, and two spheres among them.
+    fn scene(seed: u64) -> Vec<BodyState> {
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let slab = ColliderShape::Box { half_extents: Vec3::new(4.0, 0.5, 4.0) };
+        let mut bodies = vec![body(Vec3::new(0.0, -0.5, 0.0), Quat::IDENTITY, slab, Vec3::ZERO, 0.0)];
+        for i in 0..10 {
+            let q = Quat::new(rng.range(-0.3, 0.3), rng.range(-1.0, 1.0), rng.range(-0.3, 0.3), 1.0)
+                .normalize();
+            let p = Vec3::new(rng.range(-1.5, 1.5), rng.range(0.3, 1.6), rng.range(-1.5, 1.5));
+            let h = Vec3::new(rng.range(0.3, 0.6), rng.range(0.3, 0.6), rng.range(0.3, 0.6));
+            let v = if i % 3 == 0 { Vec3::new(0.0, -2.0, 0.0) } else { Vec3::ZERO };
+            bodies.push(body(p, q, ColliderShape::Box { half_extents: h }, v, 1.0));
+        }
+        for _ in 0..2 {
+            let p = Vec3::new(rng.range(-1.0, 1.0), rng.range(0.3, 1.2), rng.range(-1.0, 1.0));
+            bodies.push(body(p, Quat::IDENTITY, ColliderShape::Sphere { radius: 0.4 }, Vec3::ZERO, 1.0));
+        }
+        bodies
+    }
+
+    /// The outcome classes the scenes reached.
+    #[derive(Debug, Default)]
+    struct Seen {
+        full: u64,
+        built: u64,
+        hits: u64,
+        rekeyed_hits: u64,
+        separated: u64,
+        sep_hits: u64,
+        non_box: u64,
+    }
+
+    /// The commit rule on one output: `rekey` is whether the step's key set changed.
+    fn check(out: &PairOut, rekey: bool, seen: &mut Seen) {
+        let tag = out.tag;
+        if let Some(axis) = out.axis {
+            assert!(
+                tag.rekeys() && tag.axis() == Some(axis as u8),
+                "a pair wrote axis {axis} with tag {:#06x}: its tag must re-key and carry it",
+                tag.bits()
+            );
+        }
+        if rekey {
+            assert_eq!(
+                out.axis.is_some(),
+                tag.rekeys(),
+                "on a key-change step a pair writes an axis iff its tag re-keys: tag {:#06x}",
+                tag.bits()
+            );
+        }
+        if !tag.has(PairTag::BOX) {
+            seen.non_box += 1;
+        } else if tag.has(PairTag::REC | PairTag::HIT) {
+            seen.hits += 1;
+            seen.rekeyed_hits += u64::from(out.axis.is_some());
+        } else if tag.has(PairTag::REC) {
+            seen.built += 1;
+        } else if tag.has(PairTag::SEPHIT) {
+            seen.sep_hits += 1;
+        } else if tag.has(PairTag::SEP) {
+            seen.separated += 1;
+        } else if tag.axis().is_some() {
+            seen.full += 1;
+        }
+    }
+
+    #[test]
+    fn rekeys_is_the_axis_commit_of_every_box_outcome() {
+        let mut seen = Seen::default();
+        for seed in 0..24 {
+            let bodies = scene(seed);
+            let n = bodies.len() as u32;
+            for reuse_on in [false, true] {
+                for rekey in [false, true] {
+                    let step = |parity| ReuseStep { on: reuse_on, tau: 1.0e-3, dt2: 1.0 / 3600.0, rekey, parity };
+                    for a in 0..n {
+                        for b in a + 1..n {
+                            let (ia, ib) = (BodyIndex(a), BodyIndex(b));
+                            let (ba, bb) = (&bodies[a as usize], &bodies[b as usize]);
+                            // The pair's first step: no join, no hint.
+                            let first = collide_pair(ia, ib, ba, bb, None, step(false), || Prev::NONE, || None);
+                            check(&first, rekey, &mut seen);
+                            // Its next step at the same poses reads what the first left: a record
+                            // hits, a separating axis still separates, a contact reads its hint.
+                            let prev = Prev {
+                                tag: first.tag,
+                                record: first.record.as_ref().filter(|_| reuse_on),
+                                flipped: false,
+                            };
+                            let hint = first.axis;
+                            let next = collide_pair(ia, ib, ba, bb, None, step(true), || prev, || hint);
+                            check(&next, rekey, &mut seen);
+                        }
+                    }
+                }
+            }
+        }
+        println!("rekeys coverage: {seen:?}");
+        assert!(
+            seen.full > 0
+                && seen.built > 0
+                && seen.hits > 0
+                && seen.rekeyed_hits > 0
+                && seen.separated > 0
+                && seen.sep_hits > 0
+                && seen.non_box > 0,
+            "anti-vacuity: every outcome class must be reached: {seen:?}"
+        );
+    }
+}

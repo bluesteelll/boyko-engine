@@ -26,8 +26,9 @@
 //! strictly increasing in stream order (the walk consumes both cursors in step, so those rows carry
 //! a strictly increasing `prev_row`; `RowIdentity::stage2_rows`). Those pairs therefore merge-join
 //! against `pairs_prev` with one monotone cursor. A pair with an endpoint that stage 2 resolved — a
-//! **jumper**, marked in a per-row bitset built from `stage2_rows` on the steps whose rows moved —
-//! binary-searches instead. Either way the result is the definition's, so `j` depends neither on
+//! **jumper**, marked in a per-row bitset built from `stage2_rows` on the steps whose rows moved,
+//! at the start of the broadphase (`ContactPairs::rotate`; L10 C0 moved the build there from this
+//! module's prologue, so the broadphase reads the same bits) — binary-searches instead. Either way the result is the definition's, so `j` depends neither on
 //! how the pairs are cut into chunks nor on which implementation found it: a chunk's cursor starts
 //! at the lower bound of its first merged key, which is where a cursor walked from pair 0 stands
 //! when it reaches that key.
@@ -58,7 +59,8 @@
 //! # Threads (W invariance)
 //!
 //! During the parallel narrowphase's scope, `pairs_prev`, the previous tags, the previous records,
-//! the jumper bitset and the row map are shared and read-only; each chunk writes the tags and the
+//! the jumper bitset (built by the broadphase before the narrowphase runs) and the row map are
+//! shared and read-only; each chunk writes the tags and the
 //! records of its own slots `[lo, hi)` through the columns' solve views (`narrowphase/dispatch.rs`).
 //! The serial loop and the chunks call the same cursor and the same per-pair function, so the tags
 //! and the records equal the serial loop's for any partition.
@@ -74,8 +76,8 @@ use crate::narrowphase::reuse::{Prev, ReuseRecord, ReuseStep};
 use crate::resources::ContactPairs;
 use crate::row_identity::{NO_ROW, RemapCursor, RowIdentity, RowRemap};
 use crate::scratch_ids::{
-    jumper_bits_id, pair_tag_id, pair_tag_prev_id, register_narrowphase_column_layouts,
-    reuse_id, reuse_prev_id, scratch_reserve_rows,
+    pair_tag_id, pair_tag_prev_id, register_narrowphase_column_layouts, reuse_id, reuse_prev_id,
+    scratch_reserve_rows,
 };
 
 /// The stamp of a pair list or a carry that no step stamped, or whose stamp was invalidated.
@@ -224,6 +226,22 @@ impl PairTag {
         (u16::from(axis) != Self::AXIS_NONE).then_some(axis)
     }
 
+    /// Whether the pair that wrote this tag keys its hysteresis entry on a step whose key set
+    /// changed: iff the tag carries a SAT axis — a contact from the full collision, a reuse
+    /// record built from one, or a record hit (ruling W1 re-keys a hit on such a step). A full
+    /// contact also writes its axis on every other step; a hit writes it only on such a step.
+    ///
+    /// The commit rule of L9's narrowphase, extracted as the one function L10's axis mirror
+    /// calls too (L10 C0, design 06 D-C). L9 writes no `SET` bit, so the design's form
+    /// `REC ∨ (SET ∧ ¬REC)` is read on this tree as the axis field, which is what L9's writes
+    /// actually carry: `box_contact` and `box_recorded` set it, and every other tag — a
+    /// separated pair, a record whose axis now separates, a box pair with no contact, a
+    /// non-box pair, [`NONE`](Self::NONE) — leaves it at none.
+    #[inline]
+    pub(crate) fn rekeys(self) -> bool {
+        self.axis().is_some()
+    }
+
     /// This tag as seen by the pair with bodies A and B exchanged (a join whose two rows swapped
     /// order): both axis fields name the same geometric axes in the exchanged roles.
     #[inline]
@@ -263,17 +281,18 @@ const fn pack(a: u32, b: u32) -> u64 {
 }
 
 /// The external half of a step's pair carry (D9): how this step's rows map to the rows the
-/// previous pair list was built on, that list, and the rows stage 2 resolved. Built by
-/// [`PairCarry::source`] in the narrowphase system, or [`NONE`](Self::NONE) for a caller with no
-/// carry.
+/// previous pair list was built on, that list, and the jumper bitset of the rows stage 2
+/// resolved. Built by [`PairCarry::source`] in the narrowphase system, or
+/// [`NONE`](Self::NONE) for a caller with no carry.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CarryIn<'a> {
     /// Identity, Rows or Reset.
     remap: RowRemap<'a>,
     /// The previous step's candidate pairs, `(min, max)`-sorted; empty on Reset.
     pairs_prev: &'a [(BodyIndex, BodyIndex)],
-    /// The current rows stage 2 resolved, ascending; read only on a Rows step.
-    stage2: &'a [u32],
+    /// One bit per current row, set iff stage 2 resolved it (`ContactPairs::rotate` builds it,
+    /// or [`jumper_words`] in a test); read only on a Rows step.
+    jumpers: &'a [u64],
     /// The step's requested contact reuse (L9b); [`PairCarry::open`] turns it off when the record
     /// column cannot hold a record per pair.
     reuse: ReuseStep,
@@ -285,7 +304,7 @@ impl CarryIn<'static> {
     pub(crate) const NONE: Self = Self {
         remap: RowRemap::Reset,
         pairs_prev: &[],
-        stage2: &[],
+        jumpers: &[],
         reuse: ReuseStep::OFF,
     };
 }
@@ -296,19 +315,19 @@ impl<'a> CarryIn<'a> {
     pub(crate) fn new(
         remap: RowRemap<'a>,
         pairs_prev: &'a [(BodyIndex, BodyIndex)],
-        stage2: &'a [u32],
+        jumpers: &'a [u64],
     ) -> Self {
         match remap {
             RowRemap::Reset => Self {
                 remap,
                 pairs_prev: &[],
-                stage2: &[],
+                jumpers: &[],
                 reuse: ReuseStep::OFF,
             },
             _ => Self {
                 remap,
                 pairs_prev,
-                stage2,
+                jumpers,
                 reuse: ReuseStep::OFF,
             },
         }
@@ -502,8 +521,9 @@ impl<'a> JoinCursor<'a> {
 }
 
 /// The pair carry's state in [`Manifolds`](crate::resources::Manifolds) (D9): this step's and the
-/// previous step's tags, the jumper bitset, and the stamps that tie the tags to the pair list
-/// they index. Kernel columns only (principle 0).
+/// previous step's tags and reuse records, and the stamps that tie the tags to the pair list they
+/// index. The join's jumper bitset lives beside the pair lists, in
+/// [`ContactPairs`] (L10 C0). Kernel columns only (principle 0).
 pub(crate) struct PairCarry {
     /// The tags being written this step, one per candidate pair; swapped with `tag_prev` at the
     /// start of each narrowphase. Its length only grows; rows at or past this step's pair count
@@ -511,9 +531,6 @@ pub(crate) struct PairCarry {
     tag: ScratchColumn<PairTag>,
     /// The previous step's tags, indexed by the slots of `ContactPairs::pairs_prev`.
     tag_prev: ScratchColumn<PairTag>,
-    /// One bit per current row, set iff stage 2 resolved it; rebuilt on the steps whose rows
-    /// moved and read only on those.
-    jumper_bits: ScratchColumn<u64>,
     /// The reuse records being written this step, one slot per candidate pair (L9b); swapped
     /// with `rec_prev` at the start of each narrowphase. Grown only on a step that reuses, and a
     /// slot is valid only where this step's tag carries `REC`.
@@ -536,7 +553,9 @@ pub(crate) struct PairCarry {
     /// Steps whose carry was not joined although it had been stamped before: a missed gather or a
     /// stamp that is not `pairs_prev`'s. Diagnostic.
     resets: u64,
-    /// Steps whose rows moved, so the jumper bitset was built. Diagnostic.
+    /// Steps whose join ran across moved rows (a Rows step), reading the jumper bitset the
+    /// broadphase rebuilt for them. Diagnostic; before L10 C0 the carry built the bitset itself
+    /// on exactly these steps, and this counted the builds.
     jumper_builds: u64,
 }
 
@@ -551,10 +570,6 @@ impl PairCarry {
         Self {
             tag: ScratchColumn::new(pair_tag_id(), tag_reserve),
             tag_prev: ScratchColumn::new(pair_tag_prev_id(), tag_reserve),
-            jumper_bits: ScratchColumn::new(
-                jumper_bits_id(),
-                scratch_reserve_rows(size_of::<u64>()),
-            ),
             rec: ScratchColumn::new(reuse_id(), rec_reserve),
             rec_prev: ScratchColumn::new(reuse_prev_id(), rec_reserve),
             parity: false,
@@ -569,7 +584,10 @@ impl PairCarry {
 
     /// The narrowphase system's prologue: classifies the carry against the current gather and
     /// returns the join's source — a Reset when the carry missed a gather, or when the list its
-    /// tags index is not `pairs_prev` (module docs, "The stamps").
+    /// tags index is not `pairs_prev` (module docs, "The stamps"). On a Rows step the source
+    /// carries the jumper bitset `ContactPairs::rotate` built on this gather; a list rotated
+    /// before this gather (a driver order the shipped schedule never takes) has none, and the
+    /// step is a Reset too.
     pub(crate) fn source<'a>(
         &mut self,
         pairs: &'a ContactPairs,
@@ -583,19 +601,24 @@ impl PairCarry {
             self.resets += u64::from(self.seq != NO_SEQ);
             return CarryIn::NONE;
         }
-        let stage2 = match remap {
-            RowRemap::Rows(_) => rows.stage2_rows(),
+        let jumpers = match remap {
+            RowRemap::Rows(_) => {
+                if pairs.jumper_seq() != rows.gather_seq() {
+                    self.resets += 1;
+                    return CarryIn::NONE;
+                }
+                pairs.jumper_bits()
+            }
             RowRemap::Identity | RowRemap::Reset => &[],
         };
-        CarryIn::new(remap, pairs.pairs_prev(), stage2)
+        CarryIn::new(remap, pairs.pairs_prev(), jumpers)
     }
 
     /// A narrowphase path's prologue, before its first pair: swaps the tag and record columns and
     /// flips the parity, grows this step's tags to `n_pairs` (at most to its reserve), settles
     /// whether the step reuses (requested, and every pair has a tag and a record slot) and grows its
-    /// record column if so, builds the jumper bitset on a Rows step, and returns the step's join and
-    /// the columns the pairs' tags and records go into. Invalidates the stamp until
-    /// [`stamp`](Self::stamp).
+    /// record column if so, and returns the step's join and the columns the pairs' tags and records
+    /// go into. Invalidates the stamp until [`stamp`](Self::stamp).
     pub(crate) fn open<'a>(
         &'a mut self,
         carry: CarryIn<'a>,
@@ -604,7 +627,6 @@ impl PairCarry {
         let Self {
             tag,
             tag_prev,
-            jumper_bits,
             rec,
             rec_prev,
             parity,
@@ -632,17 +654,19 @@ impl PairCarry {
             "invariant: a joined step's previous tags cover every previous pair"
         );
         if let RowRemap::Rows(prev_row) = carry.remap {
-            build_jumpers(jumper_bits, prev_row.len(), carry.stage2);
+            debug_assert!(
+                carry.jumpers.len() >= prev_row.len().div_ceil(64),
+                "invariant: a Rows step's jumper bitset holds a bit per current row"
+            );
             *jumper_builds += 1;
         }
         let tag_prev: &'a ScratchColumn<PairTag> = tag_prev;
-        let jumper_bits: &'a ScratchColumn<u64> = jumper_bits;
         let rec_prev: &'a ScratchColumn<ReuseRecord> = rec_prev;
         let join = PairJoin {
             remap: carry.remap,
             pairs_prev: carry.pairs_prev,
             tag_prev: tag_prev.as_read_slice(),
-            jumpers: jumper_bits.as_read_slice(),
+            jumpers: carry.jumpers,
             records: if reuse.on { rec_prev.as_read_slice() } else { &[] },
             reuse,
         };
@@ -688,7 +712,7 @@ impl PairCarry {
         self.resets + self.cursor.resets()
     }
 
-    /// Steps whose rows moved, so the jumper bitset was built.
+    /// Steps whose join ran across moved rows, reading the jumper bitset.
     #[inline]
     pub(crate) fn jumper_builds(&self) -> u64 {
         self.jumper_builds
@@ -713,14 +737,20 @@ fn grow_records(rec: &mut ScratchColumn<ReuseRecord>, n: usize) {
 }
 
 /// Rebuilds the jumper bitset for `rows` current rows: all clear, then one bit per row stage 2
-/// resolved. `O(rows / 64 + stage2.len())`, on the steps whose rows moved.
+/// resolved. `O(rows / 64 + stage2.len())`, on the steps whose rows moved; called by
+/// `ContactPairs::rotate` at the start of the broadphase (L10 C0, design 06 Δ9).
 #[cold]
 #[inline(never)]
-fn build_jumpers(bits: &mut ScratchColumn<u64>, rows: usize, stage2: &[u32]) {
+pub(crate) fn build_jumpers(bits: &mut ScratchColumn<u64>, rows: usize, stage2: &[u32]) {
     let mut view = bits.build_view();
     view.clear();
     view.resize(rows.div_ceil(64), 0);
-    let words = view.as_mut_slice();
+    mark_jumpers(view.as_mut_slice(), rows, stage2);
+}
+
+/// Sets one bit per row of `stage2` in `words`, a cleared bitset of `rows` rows.
+#[inline]
+fn mark_jumpers(words: &mut [u64], rows: usize, stage2: &[u32]) {
     for &r in stage2 {
         debug_assert!(
             (r as usize) < rows,
@@ -728,6 +758,15 @@ fn build_jumpers(bits: &mut ScratchColumn<u64>, rows: usize, stage2: &[u32]) {
         );
         words[(r >> 6) as usize] |= 1 << (r & 63);
     }
+}
+
+/// The jumper bitset of `rows` current rows with `stage2` resolved by stage 2, as the broadphase
+/// builds it: for a test that drives the carry with an explicit map.
+#[cfg(test)]
+pub(crate) fn jumper_words(rows: usize, stage2: &[u32]) -> Vec<u64> {
+    let mut words = vec![0; rows.div_ceil(64)];
+    mark_jumpers(&mut words, rows, stage2);
+    words
 }
 
 #[cfg(test)]
@@ -851,7 +890,7 @@ mod tests {
                 .collect();
             list.sort_unstable();
             list.dedup();
-            self.pairs.rotate(self.rows.gather_seq());
+            self.pairs.rotate(&self.rows);
             {
                 let mut view = self.pairs.pairs_build();
                 view.clear();
@@ -1292,6 +1331,21 @@ mod tests {
             t.hits > 0 && t.flipped > 0 && t.jumper_pairs > 0 && t.rows_steps > 0,
             "{t:?}"
         );
+    }
+
+    /// L10 C0 (design 06 D-C): `rekeys` over every `u16` is L9's commit field — the tag's axis
+    /// field is not none — whatever the flag bits. The behaviour over the outcomes
+    /// `collide_box_pair` reaches is `systems::pair_tag_rekeys_tests`.
+    #[test]
+    fn rekeys_is_the_axis_field_over_every_tag() {
+        let mut rekeying = 0u32;
+        for bits in 0..=u16::MAX {
+            let tag = PairTag(bits);
+            let axis_set = bits & PairTag::AXIS_MASK != PairTag::AXIS_NONE;
+            assert_eq!(tag.rekeys(), axis_set, "tag {bits:#06x}");
+            rekeying += u32::from(axis_set);
+        }
+        assert_eq!(rekeying, 15 << 12, "15 of the 16 axis values re-key, under every flag word");
     }
 
     /// The flip remap is an involution and exchanges A's faces with B's and `(ea, eb)` with

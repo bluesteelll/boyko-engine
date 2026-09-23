@@ -145,7 +145,16 @@
 //! migration and soft-body rung S0; on the trunk, physics rungs U6 and S0 of
 //! `docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md` §12, scheduled in the unified plan's Phase E.
 //!
-//! # The pin: 34, re-derived on the trunk (rung B4) — delta 0
+//! # The pin: 30 since L10 C0 — 34 re-derived on the trunk (rung B4), delta 0, until then
+//!
+//! **L10 C0 (2026-09-24) migrated `IslandSleep`'s four `Vec` fields onto two kernel columns**
+//! (`docs/physics/perf-campaign/levers/L10-sleeping/04-DESIGN-REV2.md` D14: the per-row
+//! `asleep` / `below_count` joined the island contact key in one `SleepLatch` column, and the
+//! per-island `frozen_islands` / `energy` became one `IslandScratch` column). That pre-empts
+//! U6's `IslandSleep` removal, so its row left [`KNOWN_VEC_FIELD_SITES`] and
+//! [`PINNED_VEC_FIELDS`] went 34 → 30 in the same commit, by the rule below. The receipts in
+//! this header that name `IslandSleep` (m2, m3, m3b, b2) are the gate's red-first history on
+//! the tree that still held it.
 //!
 //! [`PINNED_VEC_FIELDS`] is the number the unified plan reads
 //! (`docs/unification/UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md`, Phase B row B4 and the Phase E
@@ -451,10 +460,10 @@ struct Allowed {
     rung: &'static str,
 }
 
-/// The two durable `Vec` side stores that survive in `boyko_physics`, at `ad0ebea4` and on the
-/// B4 trunk alike.
+/// The durable `Vec` side store that survives in `boyko_physics`: one since L10 C0 migrated
+/// `IslandSleep` (design D14), two at `ad0ebea4` and on the B4 trunk.
 ///
-/// Both are **named rungs**, which is why they are exceptions rather than repairs. Everything else
+/// It is a **named rung**, which is why it is an exception rather than a repair. Everything else
 /// in the crate has already migrated: 202 `ScratchColumn` lines at `ad0ebea4` (across `lib.rs`,
 /// `narrowphase/axis_cache.rs`, `resources.rs`, `scratch_ids.rs`,
 /// `solver/{colored,soft_step,warm_start}.rs` and `soft/{colored,coupling}.rs`), and 235 on the B4
@@ -470,16 +479,6 @@ struct Allowed {
 /// nobody ever held.
 const KNOWN_VEC_FIELD_SITES: &[Allowed] = &[
     Allowed {
-        file: "crates/boyko_physics/src/resources.rs",
-        owner: "IslandSleep",
-        fields: 4,
-        rung: "physics rung U6, docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md §12 (`IslandSleep` \
-               → `BodyGate` + island scratch; pin 34 → 30), the island-sleep migration that \
-               `ad0ebea4` named as a prerequisite of the destruction ladder — the per-ROW \
-               latch/debounce buffers (`asleep`, `below_count`) and the per-ISLAND frame scratch \
-               (`frozen_islands`, `energy`) become kernel storage there",
-    },
-    Allowed {
         file: "crates/boyko_physics/src/soft/component.rs",
         owner: "SoftBody",
         fields: 30,
@@ -492,12 +491,13 @@ const KNOWN_VEC_FIELD_SITES: &[Allowed] = &[
 
 /// The pin: exactly how many `Vec`-typed fields the scan may find.
 ///
-/// 34 at `ad0ebea4` and 34 on the B4 trunk, delta 0 (module doc, "The pin"). The unified plan
-/// reads its physics census numbers from this constant: U6 takes it to 30, S0 to 0. The assertion
+/// 34 at `ad0ebea4` and 34 on the B4 trunk, delta 0; 30 since L10 C0, which migrated
+/// `IslandSleep`'s four fields ahead of U6 (module doc, "The pin"). The unified plan reads its
+/// physics census numbers from this constant: S0 takes it to 0. The assertion
 /// below holds it equal to the sum of [`KNOWN_VEC_FIELD_SITES`]' counts, so the pin and the rows
 /// can only move together — and they move only in the commit that migrates a store, never to
 /// meet green.
-const PINNED_VEC_FIELDS: usize = 34;
+const PINNED_VEC_FIELDS: usize = 30;
 
 const _: () = {
     let mut sum = 0;
@@ -1500,12 +1500,12 @@ fn no_unlisted_vec_side_store_in_boyko_physics() {
          tests/physics_vec_side_store_census.rs naming the struct, its exact field count, and THE \
          RUNG THAT REMOVES IT, and raise PINNED_VEC_FIELDS by the same count — the unified plan \
          reads that pin, so a raise is a recorded finding, not a tidy-up. A row without a named \
-         rung is a parking space, and the two rows there today are both named rungs (U6, \
-         S0).\n\n{NARROWING}",
+         rung is a parking space, and the one row there today is a named rung (S0; L10 C0 \
+         retired U6's `IslandSleep` row).\n\n{NARROWING}",
         unlisted.join("\n  ")
     );
 
-    // ── The pin, in the physics design's own words (R0): red if the count is not 34.
+    // ── The pin, in the physics design's own words (R0): red if the count is not the pin (30).
     assert!(
         c.vec_fields.len() == PINNED_VEC_FIELDS,
         "the scan found {} `Vec`-typed field(s) under {SCANNED_ROOT}; the pin is \
@@ -1513,7 +1513,8 @@ fn no_unlisted_vec_side_store_in_boyko_physics() {
          Every field found is on KNOWN_VEC_FIELD_SITES (the clause above \
          passed), so the difference is inside a listed struct, and \
          `every_known_vec_side_store_is_present_at_its_declared_count` names it. The unified plan \
-         reads this pin (U6: 34 → 30, S0: 30 → 0): lower it and the row together, in the commit \
+         reads this pin (L10 C0: 34 → 30, ahead of U6; S0: 30 → 0): lower it and the row \
+         together, in the commit \
          that migrates the store, never to meet green.\n\n{NARROWING}",
         c.vec_fields.len()
     );

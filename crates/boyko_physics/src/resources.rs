@@ -18,16 +18,17 @@ use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
-use crate::narrowphase::carry::{NO_SEQ, PairCarry, PairTag};
+use crate::narrowphase::carry::{NO_SEQ, PairCarry, PairTag, build_jumpers};
 use crate::narrowphase::reuse::RowFrame;
 use crate::row_identity::{NO_ISLAND_KEY, NO_ROW, RemapCursor, RowIdentity, RowRemap, SleepLatch};
 use crate::scratch_ids::{
     body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
-    box_axis_cache_id, contact_pairs_id, contact_pairs_prev_id, manifolds_id, np_stage_id,
-    row_frames_id,
+    box_axis_cache_id, contact_pairs_id, contact_pairs_prev_id, jumper_bits_id, manifolds_id,
+    np_stage_id, row_frames_id,
     register_narrowphase_column_layouts,
     register_graph_column_layouts, register_scratch_layouts, scratch_reserve_rows,
-    sensor_overlaps_id, sleep_island_key_id, sleep_latch_prev_id, touched_awake_id,
+    sensor_overlaps_id, sleep_island_scratch_id, sleep_latch_id, sleep_latch_prev_id,
+    touched_awake_id,
     touched_solver_id, vn_initial_id,
 };
 use crate::broadphase_tree::sphere_bound_feasible;
@@ -659,7 +660,9 @@ pub enum IntegrationMode {
 ///
 /// The previous step's list is kept beside it (L9 D9, the narrowphase's pair carry):
 /// the broadphase swaps the two at its start ([`rotate`](Self::rotate)) and stamps the
-/// list it builds with the gather sequence it was built on.
+/// list it builds with the gather sequence it was built on. On a step whose rows moved,
+/// `rotate` also rebuilds the jumper bitset the carry's join reads (L10 C0 moved the build
+/// here from the narrowphase prologue, design 06 Δ9, so the broadphase can read it too).
 #[derive(Resource)]
 pub struct ContactPairs {
     /// Candidate pairs in deterministic `(min, max)` order.
@@ -682,6 +685,13 @@ pub struct ContactPairs {
     /// Broadphases opened so far ([`rotate`](Self::rotate) calls): the ordinal of the list in
     /// `pairs`, which tells two lists built on one gather apart.
     rotations: u64,
+    /// One bit per current row, set iff the gather's stage 2 resolved it — a **jumper**,
+    /// whose pairs the carry's join finds by binary search instead of the monotone merge (L9
+    /// D9, `narrowphase/carry.rs`). Rebuilt by [`rotate`](Self::rotate) on a step whose rows
+    /// moved (L10 C0, design 06 Δ9) and read only on such a step.
+    jumper_bits: ScratchColumn<u64>,
+    /// The gather sequence `jumper_bits` was built on, or `NO_SEQ` before the first build.
+    jumper_seq: u64,
 }
 
 impl Default for ContactPairs {
@@ -697,6 +707,8 @@ impl ContactPairs {
     /// Builds an empty pair buffer pre-sized for `capacity` pairs.
     pub fn with_capacity(capacity: usize) -> Self {
         register_broadphase_column_layouts();
+        // The jumper bitset's id is the narrowphase cohort's, where the join reads it.
+        register_narrowphase_column_layouts();
         let reserve = capacity.max(scratch_reserve_rows(size_of::<(BodyIndex, BodyIndex)>()));
         Self {
             pairs: ScratchColumn::new(contact_pairs_id(), reserve),
@@ -705,19 +717,47 @@ impl ContactPairs {
             seq: NO_SEQ,
             seq_prev: NO_SEQ,
             rotations: 0,
+            jumper_bits: ScratchColumn::new(
+                jumper_bits_id(),
+                scratch_reserve_rows(size_of::<u64>()),
+            ),
+            jumper_seq: NO_SEQ,
         }
     }
 
     /// Opens a broadphase step (L9 D9): the current list becomes the previous one, and
-    /// the list the broadphase fills next is stamped with gather `seq` and the next
-    /// rotation ordinal. O(1): the two columns swap. Every broadphase arm clears the list
-    /// before it fills it.
+    /// the list the broadphase fills next is stamped with the gather sequence of `rows` and
+    /// the next rotation ordinal. O(1): the two columns swap. Every broadphase arm clears the
+    /// list before it fills it.
+    ///
+    /// On a step whose rows moved it also rebuilds the jumper bitset from `rows`' stage-2
+    /// list (L10 C0, design 06 Δ9), `O(rows / 64 + jumpers)`. The bits are the ones the
+    /// narrowphase prologue built before C0: a carry that joins on a `Rows` step classified
+    /// against this same gather.
     #[inline]
-    pub(crate) fn rotate(&mut self, seq: u64) {
+    pub(crate) fn rotate(&mut self, rows: &RowIdentity) {
         core::mem::swap(&mut self.pairs, &mut self.pairs_prev);
         self.seq_prev = self.seq;
-        self.seq = seq;
+        self.seq = rows.gather_seq();
         self.rotations += 1;
+        if rows.rows_changed() {
+            build_jumpers(&mut self.jumper_bits, rows.rows_len(), rows.stage2_rows());
+            self.jumper_seq = rows.gather_seq();
+        }
+    }
+
+    /// The jumper bitset (one bit per current row, set iff stage 2 resolved it), valid on a
+    /// step whose rows moved and whose broadphase ran on that gather
+    /// ([`jumper_seq`](Self::jumper_seq)).
+    #[inline]
+    pub(crate) fn jumper_bits(&self) -> &[u64] {
+        self.jumper_bits.as_read_slice()
+    }
+
+    /// The gather sequence the jumper bitset was built on (`NO_SEQ` before the first build).
+    #[inline]
+    pub(crate) fn jumper_seq(&self) -> u64 {
+        self.jumper_seq
     }
 
     /// The ordinal of the current list: the number of broadphases opened so far. The
@@ -2477,8 +2517,9 @@ pub struct Manifolds {
     /// (fewer pairs than half the rows).
     pub(crate) row_frames: ScratchColumn<RowFrame>,
     /// The pair carry (L9 D9, `narrowphase/carry.rs`): every candidate pair's tag and — with
-    /// contact reuse on — its reuse record, this step's and the previous step's, the jumper
-    /// bitset of the join, and the stamps that tie them to the pair list they index. It
+    /// contact reuse on — its reuse record, this step's and the previous step's, and the
+    /// stamps that tie them to the pair list they index (the join's jumper bitset lives in
+    /// [`ContactPairs`] since L10 C0). It
     /// carries a separated box pair's separating axis (L9a (ii)) and a slow touching box
     /// pair's last full collision (L9b) to the next step.
     pub(crate) pair_carry: PairCarry,
@@ -2594,7 +2635,10 @@ impl Manifolds {
         self.pair_carry.resets()
     }
 
-    /// Diagnostic: steps whose rows moved, so the pair carry built its jumper bitset.
+    /// Diagnostic: steps whose pair carry joined across moved rows, reading the jumper bitset
+    /// the broadphase rebuilt on that step (L10 C0 moved the build from the narrowphase
+    /// prologue into [`ContactPairs::rotate`]; the count is the one it kept before, one per
+    /// such step).
     #[inline]
     pub fn pair_carry_jumper_builds(&self) -> u64 {
         self.pair_carry.jumper_builds()
@@ -3410,39 +3454,45 @@ fn occ_set(occ: &mut [u64], base: usize, body: u32) {
 ///
 /// # Capacity reuse (zero per-step alloc)
 ///
-/// The per-row buffers are resized to the live row count (a one-time grow like every
-/// other physics buffer); the per-island scratch is cleared + resized each step. No
-/// per-step heap allocation in steady state. The `awake_rows` mask reuses the
-/// engine's growable [`TouchedMask`] bitset, and the island contact key is a kernel
-/// `ScratchColumn<u32>` whose reservation is taken at construction.
+/// Every buffer is a kernel column whose reservation is taken at construction (L10 C0,
+/// design D14): the per-row latch and the per-island scratch are `ScratchColumn`s, resized
+/// in place to the live row and island counts, and the `awake_rows` mask reuses the
+/// engine's growable [`TouchedMask`] bitset. No per-step heap allocation in steady state.
 #[derive(Resource)]
 pub struct IslandSleep {
-    /// Per-ROW sleep LATCH — `true` once this row's island has been below
-    /// [`PhysicsConfig::sleep_threshold`] for [`PhysicsConfig::sleep_frames`]
-    /// consecutive frames, `false` until then or after a wake. Indexed by the current
-    /// gather row and carried across row moves by `rekey_rows`, so it survives topology
-    /// changes intact (the whole point of the rewrite). A row whose body is new, or was
-    /// not in the previous gather, starts `false` (awake).
-    asleep: Vec<bool>,
-    /// Per-ROW consecutive frames its island has been below
-    /// [`PhysicsConfig::sleep_threshold`] — the debounce counter. Saturates at
-    /// [`PhysicsConfig::sleep_frames`]; reset to `0` when the row's island is above
-    /// threshold or the row is woken. Indexed by BODY ROW; a new row defaults `0`.
-    below_count: Vec<u16>,
-    /// Per-ISLAND "frozen this frame" decision, DERIVED in [`begin_step`](Self::begin_step)
-    /// from the per-row latch (`frozen_islands[i]` is `true` iff every member dynamic
-    /// row of island `i` is latched `asleep`). Pure per-frame scratch (cleared +
-    /// resized to this build's island count each step) — it is NOT a persistent latch,
-    /// so there is no volatile-id carry. Drives the manifold SOLVE-skip predicate.
-    frozen_islands: Vec<bool>,
-    /// Per-island SPEED² metric this frame (`max |v|²+|ω|² over the island's dynamic
-    /// rows`, mass-INDEPENDENT), exact arithmetic. Pure scratch (clear + resize each
-    /// step) — recomputed every [`end_step`](Self::end_step). Named `energy` for
-    /// brevity; it is a speed² proxy, NOT a mass-weighted kinetic energy.
-    energy: Vec<f32>,
+    /// Per-ROW sleep latch, one 8 B [`SleepLatch`] per row (L10 C0, design D14):
+    ///
+    /// * `asleep` — `true` once this row's island has been below
+    ///   [`PhysicsConfig::sleep_threshold`] for [`PhysicsConfig::sleep_frames`] consecutive
+    ///   frames, `false` until then or after a wake;
+    /// * `below_count` — the debounce counter: consecutive frames the row's island has been
+    ///   below the threshold, saturating at `sleep_frames`, reset to `0` when the island is
+    ///   above it or the row is woken;
+    /// * `island_key` — the number of manifolds filed under this row's island at the
+    ///   previous [`begin_step`](Self::begin_step), or [`NO_ISLAND_KEY`] for a row that had
+    ///   no island then or whose body is new (defect A4).
+    ///
+    /// Indexed by the current gather row and carried across row moves by `rekey_rows`, so it
+    /// survives topology changes intact; a row whose body is new, or was not in the previous
+    /// gather, starts [`SleepLatch::FRESH`] (awake). `begin_step` reads one element per row
+    /// instead of three arrays. A kernel column under `SCRATCH_ID_SLEEP_LATCH`, the id and
+    /// cache-set slot the island contact key held alone before C0.
+    latch: ScratchColumn<SleepLatch>,
+    /// Per-ISLAND step scratch, one 8 B [`IslandScratch`] per island of this step's build
+    /// (L10 C0, design D14): the FROZEN decision [`begin_step`](Self::begin_step) derives
+    /// from the row latch (every member dynamic row latched asleep), which drives the
+    /// manifold SOLVE-skip predicate, and the speed² metric [`end_step`](Self::end_step)
+    /// accumulates (`max |v|² + |ω|²` over the island's dynamic rows, mass-INDEPENDENT,
+    /// exact arithmetic — a speed² proxy, NOT a mass-weighted kinetic energy). Pure per-frame
+    /// scratch, not a persistent latch, so there is no volatile-id carry.
+    ///
+    /// `begin_step` sizes it to its build's island count, every island a freeze candidate;
+    /// `end_step` resets only the metric of its build's islands and never shortens it, so the
+    /// frozen decisions `begin_step` took stay readable after the step.
+    island_scratch: ScratchColumn<IslandScratch>,
     /// Body→awake mask (`true` = the row is awake this step). Drives the SOLVE +
-    /// INTEGRATE skip — NOT the gather skip (IM-1). Rebuilt each step from
-    /// `frozen_islands` + the graph's `island_of`; a row with no island (static /
+    /// INTEGRATE skip — NOT the gather skip (IM-1). Rebuilt each step from the islands'
+    /// frozen decisions + the graph's `island_of`; a row with no island (static /
     /// out-of-island) is awake (immovable bodies cost nothing to "integrate" — the
     /// kernels no-op them).
     awake_rows: TouchedMask,
@@ -3450,23 +3500,42 @@ pub struct IslandSleep {
     /// [`wake_all`](Self::wake_all)) — consumed once on the next solve, which clears
     /// every row's latch before deciding afresh.
     wake_all: bool,
-    /// Carry scratch for `rekey_rows`: the previous gather's latch and island contact key,
-    /// copied out before both are permuted to the current rows. 8 B/row, written on change
-    /// steps only (defect A, interim; U6 deletes it).
+    /// Carry scratch for `rekey_rows`: the previous gather's latch, copied out before the
+    /// latch is permuted to the current rows. 8 B/row, written on change steps only
+    /// (defect A, interim; U6 deletes it).
     latch_prev: ScratchColumn<SleepLatch>,
-    /// Per-ROW island contact key: the number of manifolds filed under this row's island
-    /// at the previous [`begin_step`](Self::begin_step), or [`NO_ISLAND_KEY`] for a row
-    /// that had no island then or whose body is new. A kernel column under
-    /// `SCRATCH_ID_SLEEP_ISLAND_KEY`. Written for every row by every `begin_step` and
-    /// carried across row moves by `rekey_rows` (defect A4; U6 moves it, U7 makes it
-    /// deletable).
-    island_key: ScratchColumn<u32>,
     /// Rows unlatched by wake-on-contact-change since construction. A diagnostic counter,
     /// like [`remap_resets`](Self::remap_resets).
     contact_wakes: u64,
     /// The latch's place in the gather sequence (defect A, interim; U6 deletes it).
     cursor: RemapCursor,
 }
+
+/// One island's per-step sleep scratch (L10 C0, design D14): the frozen decision and the
+/// speed² metric of [`IslandSleep`]'s per-island column. 8 B, align 4, every byte a named
+/// field.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct IslandScratch {
+    /// The island's speed² metric this step, `max |v|² + |ω|²` over its dynamic rows.
+    energy: f32,
+    /// `1` iff every member dynamic row is latched asleep this step (the island is FROZEN).
+    frozen: u8,
+    /// Zero.
+    _p: [u8; 3],
+}
+
+impl IslandScratch {
+    /// An island of this step's build before its members are read: a freeze candidate.
+    const CANDIDATE: Self = Self { energy: 0.0, frozen: 1, _p: [0; 3] };
+    /// An island past the count the last `begin_step` decided: not frozen.
+    const THAWED: Self = Self { energy: 0.0, frozen: 0, _p: [0; 3] };
+}
+
+const _: () = assert!(
+    size_of::<IslandScratch>() == 8 && align_of::<IslandScratch>() == 4,
+    "IslandScratch is the 8 B, align 4 per-island sleep element (D14)"
+);
 
 impl Default for IslandSleep {
     /// Hand-written because `awake_rows`'s backing column needs its reserved
@@ -3481,29 +3550,23 @@ impl IslandSleep {
     /// Builds an empty sleep state pre-sized for `islands` islands and `rows` bodies
     /// (no later realloc in steady state).
     ///
-    /// The per-row latch buffers reserve `rows`; the per-island scratch reserves
-    /// `islands` (the worst case is one singleton island per row, so `islands` is a
-    /// hint — the scratch grows to the live island count and reuses that capacity).
-    /// The latch carry and the island contact key are kernel columns that reserve
-    /// address space for at least `rows` rows at the kernel's column budget and commit
-    /// pages as they grow.
+    /// Every buffer is a kernel column that reserves address space at the kernel's column
+    /// budget and commits pages as it grows: the latch and its carry for at least `rows`
+    /// rows, the per-island scratch for at least `islands` islands (the worst case is one
+    /// singleton island per row, so `islands` is a hint — the scratch grows to the live
+    /// island count and reuses that capacity).
     pub fn with_capacity(islands: usize, rows: usize) -> Self {
         register_scratch_layouts();
+        let latch_reserve = rows.max(scratch_reserve_rows(size_of::<SleepLatch>()));
         Self {
-            asleep: Vec::with_capacity(rows),
-            below_count: Vec::with_capacity(rows),
-            frozen_islands: Vec::with_capacity(islands),
-            energy: Vec::with_capacity(islands),
+            latch: ScratchColumn::new(sleep_latch_id(), latch_reserve),
+            island_scratch: ScratchColumn::new(
+                sleep_island_scratch_id(),
+                islands.max(scratch_reserve_rows(size_of::<IslandScratch>())),
+            ),
             awake_rows: TouchedMask::with_capacity(touched_awake_id(), rows),
             wake_all: false,
-            latch_prev: ScratchColumn::new(
-                sleep_latch_prev_id(),
-                rows.max(scratch_reserve_rows(size_of::<SleepLatch>())),
-            ),
-            island_key: ScratchColumn::new(
-                sleep_island_key_id(),
-                rows.max(scratch_reserve_rows(size_of::<u32>())),
-            ),
+            latch_prev: ScratchColumn::new(sleep_latch_prev_id(), latch_reserve),
             contact_wakes: 0,
             cursor: RemapCursor::default(),
         }
@@ -3535,10 +3598,10 @@ impl IslandSleep {
     /// asleep), NOT a persistent per-island latch.
     #[inline]
     pub fn is_island_frozen(&self, island: u32) -> bool {
-        self.frozen_islands
+        self.island_scratch
+            .as_read_slice()
             .get(island as usize)
-            .copied()
-            .unwrap_or(false)
+            .is_some_and(|s| s.frozen != 0)
     }
 
     /// Returns `true` if body `row` is awake this step (drives the SOLVE / INTEGRATE
@@ -3558,9 +3621,10 @@ impl IslandSleep {
     /// energy / debounce path. Call AFTER a `begin_step` has sized the per-row buffers.
     #[cfg(test)]
     pub(crate) fn force_sleep_row(&mut self, row: usize) {
-        if row < self.asleep.len() {
-            self.asleep[row] = true;
-            self.below_count[row] = DEFAULT_SLEEP_FRAMES;
+        let mut view = self.latch.build_view();
+        if let Some(latch) = view.as_mut_slice().get_mut(row) {
+            latch.asleep = true;
+            latch.below_count = DEFAULT_SLEEP_FRAMES;
         }
     }
 
@@ -3569,12 +3633,12 @@ impl IslandSleep {
     /// per-frame decision). `false` for an out-of-range row.
     #[cfg(test)]
     pub(crate) fn is_row_asleep(&self, row: usize) -> bool {
-        self.asleep.get(row).copied().unwrap_or(false)
+        self.latch.as_read_slice().get(row).is_some_and(|l| l.asleep)
     }
 
-    /// Resizes the per-ROW latch buffers and the island contact key to `n_rows`, keeping
-    /// the entries of rows that still exist and defaulting any newly-appeared row to
-    /// awake (`asleep = false`, debounce `0`, key [`NO_ISLAND_KEY`]).
+    /// Resizes the per-ROW latch to `n_rows`, keeping the entries of rows that still exist
+    /// and defaulting any newly-appeared row to awake ([`SleepLatch::FRESH`]: `asleep =
+    /// false`, debounce `0`, key [`NO_ISLAND_KEY`]).
     ///
     /// This only sizes the buffers and does not decide which body a row holds. On the
     /// gather-driven path `rekey_rows` has already aligned and sized the latch;
@@ -3596,9 +3660,7 @@ impl IslandSleep {
     /// key. Not reachable today (`inv_mass` is stable after spawn). See
     /// [`end_step`](Self::end_step).
     fn sync_rows(&mut self, n_rows: usize) {
-        self.asleep.resize(n_rows, false);
-        self.below_count.resize(n_rows, 0);
-        self.island_key.build_view().resize(n_rows, NO_ISLAND_KEY);
+        self.latch.build_view().resize(n_rows, SleepLatch::FRESH);
     }
 
     /// Re-keys the per-row latch to the current gather's rows (defect A, interim).
@@ -3607,9 +3669,9 @@ impl IslandSleep {
     /// no-dynamic-body early return, so a transient all-disabled step does not force a
     /// wake on the next one.
     /// * `Identity` — the latch is already keyed by these rows.
-    /// * `Rows` — the latch and the island contact key are permuted: each row takes the
-    ///   latch and key of the row its body held one gather ago, and a new body starts
-    ///   awake with key [`NO_ISLAND_KEY`].
+    /// * `Rows` — the latch, island contact key included, is permuted: each row takes the
+    ///   latch of the row its body held one gather ago, and a new body starts awake with
+    ///   key [`NO_ISLAND_KEY`].
     /// * `Reset` — the latch missed a gather (sleeping was off, or the resource was
     ///   replaced). It is sized to this gather and a global wake is left pending, so
     ///   every latch is cleared before `begin_step` reads one: on this solve, or on the
@@ -3623,7 +3685,7 @@ impl IslandSleep {
             RowRemap::Rows(prev_row) => {
                 self.permute_latch(prev_row);
                 debug_assert_eq!(
-                    self.asleep.len(),
+                    self.latch.len(),
                     rows.rows_len(),
                     "invariant: a Rows re-key sizes the latch to the gather"
                 );
@@ -3632,7 +3694,7 @@ impl IslandSleep {
                 self.sync_rows(rows.rows_len());
                 self.wake_all = true;
                 debug_assert_eq!(
-                    self.asleep.len(),
+                    self.latch.len(),
                     rows.rows_len(),
                     "invariant: a Reset re-key sizes the latch to the gather"
                 );
@@ -3649,45 +3711,29 @@ impl IslandSleep {
         self.cursor.resets()
     }
 
-    /// Permutes the per-row latch and island contact key through `prev_row` (the `Rows`
-    /// arm of `rekey_rows`). O(m + n), sequential.
+    /// Permutes the per-row latch, island contact key included, through `prev_row` (the
+    /// `Rows` arm of `rekey_rows`): the latch is copied to its carry, then each row takes
+    /// its body's previous element. O(m + n), sequential.
     #[cold]
     #[inline(never)]
     fn permute_latch(&mut self, prev_row: &[u32]) {
-        let old_len = self.asleep.len();
+        let old_len = self.latch.len();
         {
-            let keys = self.island_key.as_read_slice();
-            debug_assert_eq!(
-                keys.len(),
-                old_len,
-                "invariant: the island contact key is sized with the latch"
-            );
             let mut carry = self.latch_prev.build_view();
             carry.clear();
-            for ((&asleep, &below_count), &island_key) in
-                self.asleep.iter().zip(&self.below_count).zip(keys)
-            {
-                carry.push(SleepLatch::new(below_count, asleep, island_key));
-            }
+            carry.extend_from_slice(self.latch.as_read_slice());
         }
-        let n = prev_row.len();
-        self.asleep.resize(n, false);
-        self.below_count.resize(n, 0);
-        let mut key_view = self.island_key.build_view();
-        key_view.resize(n, NO_ISLAND_KEY);
-        let keys = key_view.as_mut_slice();
+        let mut view = self.latch.build_view();
+        view.resize(prev_row.len(), SleepLatch::FRESH);
         let carry = self.latch_prev.as_read_slice();
-        for (row, &p) in prev_row.iter().enumerate() {
+        for (latch, &p) in view.as_mut_slice().iter_mut().zip(prev_row) {
             // A latch last sized by a direct drive can be shorter than the previous
             // gather, so an old row past its end starts awake like a new body.
-            let latch = if p != NO_ROW && (p as usize) < old_len {
+            *latch = if p != NO_ROW && (p as usize) < old_len {
                 carry[p as usize]
             } else {
                 SleepLatch::FRESH
             };
-            self.asleep[row] = latch.asleep;
-            self.below_count[row] = latch.below_count;
-            keys[row] = latch.island_key;
         }
     }
 
@@ -3789,23 +3835,43 @@ impl IslandSleep {
     /// "awake" since the integrate kernels no-op an `inv_mass == 0` row).
     pub(crate) fn begin_step(&mut self, graph: &ConstraintGraph, n_rows: usize) {
         self.sync_rows(n_rows);
+        let Self {
+            latch,
+            island_scratch,
+            awake_rows,
+            wake_all,
+            contact_wakes,
+            ..
+        } = self;
+        let mut latch_view = latch.build_view();
+        debug_assert_eq!(
+            latch_view.len(),
+            n_rows,
+            "invariant: sync_rows sized the latch to the rows"
+        );
+        // Re-sliced to `n_rows`: the loops visit exactly the rows the latch was sized to.
+        let latches = &mut latch_view.as_mut_slice()[..n_rows];
 
         // Explicit / config-change wake: clear every row's latch before deciding, so
         // no island can be frozen this frame.
-        if self.wake_all {
-            self.asleep.fill(false);
-            self.below_count.fill(0);
-            self.wake_all = false;
+        if *wake_all {
+            for l in latches.iter_mut() {
+                l.asleep = false;
+                l.below_count = 0;
+            }
+            *wake_all = false;
         }
 
         // One pass per row: compare and store the island contact key (unlatching a row
         // whose island's count changed), then derive the per-island FROZEN decision from
-        // the row latch: an island starts a candidate to freeze (`true`) and is cleared
-        // the moment any member dynamic row is found awake. A static/out-of-island row
-        // (`NO_ISLAND`) is not a member.
+        // the row latch: an island starts a candidate to freeze and is cleared the moment
+        // any member dynamic row is found awake. A static/out-of-island row (`NO_ISLAND`)
+        // is not a member.
         let n_islands = graph.n_islands() as usize;
-        self.frozen_islands.clear();
-        self.frozen_islands.resize(n_islands, true);
+        let mut scratch_view = island_scratch.build_view();
+        scratch_view.clear();
+        scratch_view.resize(n_islands, IslandScratch::CANDIDATE);
+        let islands = scratch_view.as_mut_slice();
         let starts = graph.island_starts();
         // Hoisted beside `starts`: `island_of(row)` re-derives this slice and
         // bound-checks the row on every call, once per row of the sweep below
@@ -3815,64 +3881,55 @@ impl IslandSleep {
             n_islands == 0 || starts.len() == n_islands + 1,
             "invariant: the island CSR holds n_islands + 1 offsets"
         );
-        {
-            let mut key_view = self.island_key.build_view();
-            debug_assert_eq!(
-                key_view.len(),
-                n_rows,
-                "invariant: sync_rows sized the island contact key to the rows"
+        // A row past the graph's rows has no island, which is what `island_of` answers
+        // for it, so it takes the sentinel and touches no latch. The shipped wiring builds
+        // the graph over every row, so this tail is empty there; a graph built over fewer
+        // rows, or not yet built, reaches it.
+        let (in_graph, past_graph) = latches.split_at_mut(n_rows.min(ids.len()));
+        for l in past_graph {
+            l.island_key = NO_ISLAND_KEY;
+        }
+        for (l, &isl) in in_graph.iter_mut().zip(ids) {
+            if isl == ConstraintGraph::NO_ISLAND {
+                // The sentinel is what unlatches a row that returns to an island after a
+                // static phase.
+                l.island_key = NO_ISLAND_KEY;
+                continue;
+            }
+            let i = isl as usize;
+            // `i + 1` first: its bound check implies the one on `i`.
+            let hi = starts[i + 1];
+            let lo = starts[i];
+            let key = hi - lo;
+            debug_assert!(
+                key != NO_ISLAND_KEY,
+                "invariant: a live island contact key is below the sentinel"
             );
-            // Re-sliced to `n_rows`: the loop visits exactly the rows the latch was
-            // sized to.
-            let keys = &mut key_view.as_mut_slice()[..n_rows];
-            // A row past the graph's rows has no island, which is what `island_of`
-            // answers for it, so it takes the sentinel and touches no latch. The
-            // shipped wiring builds the graph over every row, so this tail is empty
-            // there; a graph built over fewer rows, or not yet built, reaches it.
-            let (keys, keys_past_graph) = keys.split_at_mut(n_rows.min(ids.len()));
-            keys_past_graph.fill(NO_ISLAND_KEY);
-            for (row, (stored, &isl)) in keys.iter_mut().zip(ids).enumerate() {
-                if isl == ConstraintGraph::NO_ISLAND {
-                    // The sentinel is what unlatches a row that returns to an island
-                    // after a static phase.
-                    *stored = NO_ISLAND_KEY;
-                    continue;
-                }
-                let i = isl as usize;
-                // `i + 1` first: its bound check implies the one on `i`.
-                let hi = starts[i + 1];
-                let lo = starts[i];
-                let key = hi - lo;
-                debug_assert!(
-                    key != NO_ISLAND_KEY,
-                    "invariant: a live island contact key is below the sentinel"
-                );
-                // Wake-on-contact-change. It only clears a latch, and it runs before the
-                // fold below so a woken row makes its island active on this step.
-                if self.asleep[row] && *stored != key {
-                    self.asleep[row] = false;
-                    // A restarted debounce keeps a slowly accelerating woken body from
-                    // re-latching at this step's `end_step`.
-                    self.below_count[row] = 0;
-                    self.contact_wakes += 1;
-                }
-                *stored = key;
-                if !self.asleep[row] {
-                    // An awake member row forces its whole island active this frame
-                    // (wake-on-merge: a new / moving row joining a slept pile wakes it).
-                    self.frozen_islands[i] = false;
-                }
+            // Wake-on-contact-change. It only clears a latch, and it runs before the fold
+            // below so a woken row makes its island active on this step.
+            if l.asleep && l.island_key != key {
+                l.asleep = false;
+                // A restarted debounce keeps a slowly accelerating woken body from
+                // re-latching at this step's `end_step`.
+                l.below_count = 0;
+                *contact_wakes += 1;
+            }
+            l.island_key = key;
+            if !l.asleep {
+                // An awake member row forces its whole island active this frame
+                // (wake-on-merge: a new / moving row joining a slept pile wakes it).
+                islands[i].frozen = 0;
             }
         }
 
         // Build the body→awake mask from the per-island frozen decision. A row is
         // awake iff it has no island, or its island is not frozen this frame.
-        self.awake_rows.reset(n_rows);
+        awake_rows.reset(n_rows);
         for row in 0..n_rows {
             let isl = graph.island_of(row as u32);
-            let awake = isl == ConstraintGraph::NO_ISLAND || !self.frozen_islands[isl as usize];
+            let awake = isl == ConstraintGraph::NO_ISLAND || islands[isl as usize].frozen == 0;
             if awake {
-                self.awake_rows.set(row);
+                awake_rows.set(row);
             }
         }
     }
@@ -3929,10 +3986,23 @@ impl IslandSleep {
         threshold: f32,
         frames: u16,
     ) {
-        // Reset the per-island speed² accumulators (scratch, sized to this build).
+        // Reset the per-island speed² accumulators of this build's islands. The column is
+        // never shortened here: the frozen decisions `begin_step` took stay readable, and
+        // an island past its count reads not frozen.
         let n_islands = graph.n_islands() as usize;
-        self.energy.clear();
-        self.energy.resize(n_islands, 0.0);
+        let Self {
+            latch,
+            island_scratch,
+            ..
+        } = self;
+        let mut scratch_view = island_scratch.build_view();
+        if scratch_view.len() < n_islands {
+            scratch_view.resize(n_islands, IslandScratch::THAWED);
+        }
+        let islands = scratch_view.as_mut_slice();
+        for s in &mut islands[..n_islands] {
+            s.energy = 0.0;
+        }
 
         // Accumulate the per-island MAX dynamic-row speed² (exact, deterministic).
         for (row, b) in bodies.iter().enumerate() {
@@ -3948,7 +4018,7 @@ impl IslandSleep {
             let w = b.angular_velocity;
             // Exact speed² + angular speed² (no sqrt — order-fixed dot products).
             let e = v.dot(v) + w.dot(w);
-            let slot = &mut self.energy[isl as usize];
+            let slot = &mut islands[isl as usize].energy;
             if e > *slot {
                 *slot = e;
             }
@@ -3956,7 +4026,8 @@ impl IslandSleep {
 
         // Advance the per-ROW debounce / latch from each island's speed². A row's
         // island is below threshold ⇒ tick its debounce; above ⇒ reset + wake.
-        for row in 0..self.asleep.len() {
+        let mut latch_view = latch.build_view();
+        for (row, l) in latch_view.as_mut_slice().iter_mut().enumerate() {
             if row >= bodies.len() || bodies[row].inv_mass == 0.0 {
                 // No live dynamic body at this row this frame — leave its latch
                 // untouched (it carries forward; `begin_step` defaults new rows awake).
@@ -3966,15 +4037,14 @@ impl IslandSleep {
             if isl == ConstraintGraph::NO_ISLAND {
                 continue;
             }
-            if self.energy[isl as usize] < threshold {
-                let c = &mut self.below_count[row];
-                if *c < frames {
-                    *c += 1;
+            if islands[isl as usize].energy < threshold {
+                if l.below_count < frames {
+                    l.below_count += 1;
                 }
-                self.asleep[row] = *c >= frames;
+                l.asleep = l.below_count >= frames;
             } else {
-                self.below_count[row] = 0;
-                self.asleep[row] = false;
+                l.below_count = 0;
+                l.asleep = false;
             }
         }
     }

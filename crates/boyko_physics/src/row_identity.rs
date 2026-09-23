@@ -236,8 +236,8 @@ impl RowRemap<'_> {
     }
 }
 
-/// One row's sleep latch and island contact key: the element of `IslandSleep`'s permute
-/// carry. 8 B, align 4.
+/// One row's sleep latch and island contact key: the element of `IslandSleep`'s per-row latch
+/// column and of its permute carry (L10 C0, design D14). 8 B, align 4.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SleepLatch {
@@ -527,6 +527,14 @@ impl RowIdentity {
     #[inline]
     pub(crate) fn gather_seq(&self) -> u64 {
         self.gather_seq
+    }
+
+    /// Whether the current gather's rows differ from the previous gather's, so a consumer
+    /// keyed one gather ago classifies as `Rows` (L10 C0: the broadphase rebuilds the jumper
+    /// bitset on exactly these steps).
+    #[inline]
+    pub(crate) fn rows_changed(&self) -> bool {
+        !self.stable
     }
 
     /// The rows of the current gather that stage 2 resolved, ascending (T5), or none when the
