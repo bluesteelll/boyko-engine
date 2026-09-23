@@ -3,12 +3,13 @@
 //!
 //! ```text
 //! ug15 tools
-//! ug15 build  --subject <S> [--profile <P>] [--map <file>] [--drop-emit-obj] [-- <rustc args>]
+//! ug15 build  --subject <S> [--profile <P>] [--map <file>] [-- <rustc args>]
+//!             [--control-drop-emit-obj | --control-no-touch]   # the instrument's controls O / P
 //! ug15 nm     <file>                          # the instrument's control E: RED on a msvc image
 //! ug15 rlibs  --subject <S> [--profile <P>]   # leg (7b)'s member formats (PC-7)
 //! ug15 leg7 snapshot --subject <S> [--profile <P>] --out <file>
 //! ug15 textcheck --subject <S> --seam <snapshot>  # .text of release == seam-census
-//! ug15 leg7 compare  <parent> <child> [--rename <file>]
+//! ug15 leg7 compare  <parent> <child> [--rename <file>] [--expect <name>]…  # --expect: a red control
 //! ug15 probe i   [--subjects a,b,…] [--out <file>]      # probes (i) and (ii)
 //! ug15 probe iii [--out <file>]
 //! ug15 probe iv  [--subjects a,b,…] [--arms ABC] [--out <file>]
@@ -22,7 +23,7 @@ use std::process::ExitCode;
 
 use boyko_symcensus::llvm;
 use boyko_symcensus::normalize::RenameList;
-use boyko_symcensus::objbuild::{self, Ctx, Request, Subject};
+use boyko_symcensus::objbuild::{self, Control, Ctx, Request, Subject};
 use boyko_symcensus::objview::{Llvm, ObjView};
 use boyko_symcensus::probe;
 use boyko_symcensus::red::{Red, RedKind, Result};
@@ -106,12 +107,18 @@ fn run(args: &[String]) -> Result<()> {
                 extra.push("-C".to_owned());
                 extra.push(format!("link-arg=/MAP:{m}"));
             }
-            let built = objbuild::build(&ctx, &Request { subject: s, profile, extra_rustc: &extra, emit_obj: !flag(args, "--drop-emit-obj") })?;
+            let control = if flag(args, "--control-drop-emit-obj") {
+                Control::DropEmitObj
+            } else if flag(args, "--control-no-touch") {
+                Control::NoTouch
+            } else {
+                Control::None
+            };
+            let built = objbuild::build(&ctx, &Request { subject: s, profile, extra_rustc: &extra, control })?;
             let llvm = Llvm::resolve(&ctx.host)?;
             let view = ObjView::load(&llvm, &built.object)?;
             let mut text = probe::header(&ctx, &llvm, "ug15 build");
             text.push_str(&built.receipt());
-            text.push_str(&format!("final rustc  {}\n", built.final_rustc.trim()));
             text.push_str(&format!("symbols      {} defined, {} undefined\n", view.syms.defined.len(), view.syms.undefined.len()));
             built.check_intact()?;
             emit(&text, opt(args, "--out"))
@@ -128,7 +135,7 @@ fn run(args: &[String]) -> Result<()> {
             let llvm = Llvm::resolve(&ctx.host)?;
             let s = objbuild::subject(required(args, "--subject")?)?;
             let profile = opt(args, "--profile").unwrap_or("seam-census");
-            let built = objbuild::build(&ctx, &Request { subject: s, profile, extra_rustc: &[], emit_obj: true })?;
+            let built = objbuild::build(&ctx, &Request::new(s, profile, &[]))?;
             let mut text = probe::header(&ctx, &llvm, "ug15 rlibs (leg 7b member formats)");
             text.push_str(&built.receipt());
             text.push_str(&probe::rlib_formats(&llvm, &built)?);
@@ -143,7 +150,7 @@ fn run(args: &[String]) -> Result<()> {
             let s = objbuild::subject(required(args, "--subject")?)?;
             let seam_file = required(args, "--seam")?;
             let seam = Snapshot::parse(&std::fs::read_to_string(seam_file).map_err(|e| Red::io(Path::new(seam_file), &e))?)?;
-            let built = objbuild::build(&ctx, &Request { subject: s, profile: "release", extra_rustc: &[], emit_obj: true })?;
+            let built = objbuild::build(&ctx, &Request::new(s, "release", &[]))?;
             let rel = llvm::size_a(&llvm.size, &built.image)?;
             built.check_intact()?;
             let mut text = probe::header(&ctx, &llvm, &format!(".text check of {}: release vs seam-census", s.key));
@@ -180,7 +187,7 @@ fn leg7(args: &[String]) -> Result<()> {
             let out = required(args, "--out")?;
             let map = maps_dir(&ctx)?.join(format!("leg7-{}-{profile}.map", s.key));
             let extra = vec!["-C".to_owned(), format!("link-arg=/MAP:{}", map.display())];
-            let built = objbuild::build(&ctx, &Request { subject: s, profile, extra_rustc: &extra, emit_obj: true })?;
+            let built = objbuild::build(&ctx, &Request::new(s, profile, &extra))?;
             let mut header: Vec<String> = probe::header(&ctx, &llvm, &format!("leg (7) snapshot of {} under {profile}", s.key))
                 .lines()
                 .map(str::to_owned)
@@ -218,6 +225,26 @@ fn leg7(args: &[String]) -> Result<()> {
             let diffs = snapshot::compare(&parent, &child, &rename);
             let total: usize = parent.multiset.values().sum();
             println!("leg (7) compare: parent {a} ({total} symbols), child {b}, rename entries {}", rename.0.len());
+            let expect: Vec<&str> = args.iter().enumerate().filter(|(_, x)| *x == "--expect").filter_map(|(i, _)| args.get(i + 1)).map(String::as_str).collect();
+            if !expect.is_empty() {
+                // A red CONTROL (critique C1): the diff must name each expected survivor among the
+                // child-only (b) entries. A section-size-only or unrelated-symbol diff is a FAILED
+                // control, because the edit that keeps a survivor alive moves `.text` by itself.
+                for d in &diffs {
+                    println!("  {d}");
+                }
+                let missing: Vec<&str> =
+                    expect.iter().copied().filter(|e| !diffs.iter().any(|d| d.starts_with("(b) child only") && d.contains(e))).collect();
+                return if missing.is_empty() {
+                    println!("control: leg (7) RED on the named survivor(s) {expect:?} — the control PASSES");
+                    Ok(())
+                } else {
+                    Err(Red::new(
+                        RedKind::Mismatch,
+                        format!("control FAILED: leg (7)(b) has no child-only entry naming {missing:?} ({} diff lines)", diffs.len()),
+                    ))
+                };
+            }
             if diffs.is_empty() {
                 println!("leg (7): (a), (b) and (c) identical");
                 Ok(())

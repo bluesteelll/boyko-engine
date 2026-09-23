@@ -33,7 +33,7 @@ pub fn header(ctx: &Ctx, llvm: &Llvm, what: &str) -> String {
 }
 
 fn release(ctx: &Ctx, s: Subject) -> Result<Built> {
-    objbuild::build(ctx, &Request { subject: s, profile: "release", extra_rustc: &[], emit_obj: true })
+    objbuild::build(ctx, &Request::new(s, "release", &[]))
 }
 
 /// A decoded `core::panic::Location` referenced as anonymous data.
@@ -292,7 +292,7 @@ pub fn probe_iii(ctx: &Ctx, llvm: &Llvm, map_path: &Path) -> Result<String> {
     out.push('\n');
     let s = objbuild::subject("swap_remove")?;
     let extra = vec!["-C".to_owned(), format!("link-arg=/MAP:{}", map_path.display())];
-    let built = objbuild::build(ctx, &Request { subject: s, profile: "sensitivity-map", extra_rustc: &extra, emit_obj: true })?;
+    let built = objbuild::build(ctx, &Request::new(s, "sensitivity-map", &extra))?;
     out.push_str(&built.receipt());
     let view = ObjView::load(llvm, &built.object)?;
     let relocs = llvm::relocations(&llvm.readobj, &built.object)?;
@@ -427,7 +427,7 @@ struct Capture {
 }
 
 fn capture(ctx: &Ctx, llvm: &Llvm, s: Subject, extra: &[String]) -> Result<Capture> {
-    let built = objbuild::build(ctx, &Request { subject: s, profile: "release", extra_rustc: extra, emit_obj: true })?;
+    let built = objbuild::build(ctx, &Request::new(s, "release", extra))?;
     let view = ObjView::load(llvm, &built.object)?;
     let mut bodies = BTreeMap::new();
     for cand in CANDIDATES.iter().filter(|c| c.subjects.contains(&s.key)) {
@@ -544,7 +544,7 @@ pub fn probe_v(ctx: &Ctx, llvm: &Llvm, parent_dir: &Path, map_dir: &Path) -> Res
         let s = objbuild::subject(key)?;
         let map = map_dir.join(format!("probe-v-{key}.map"));
         let extra = vec!["-C".to_owned(), format!("link-arg=/MAP:{}", map.display())];
-        let built = objbuild::build(ctx, &Request { subject: s, profile: "seam-census", extra_rustc: &extra, emit_obj: true })?;
+        let built = objbuild::build(ctx, &Request::new(s, "seam-census", &extra))?;
         out.push_str(&built.receipt());
         let view = ObjView::load(llvm, &built.object)?;
         let map_text = std::fs::read_to_string(&map).map_err(|e| Red::io(&map, &e))?;

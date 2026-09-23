@@ -173,14 +173,19 @@ inherits = "release"
 [profile.bench-shipped]
 inherits = "release"
 
-# UG-15 legs (7) and (7b) (03 §6): the shipped codegen with every symbol kept. `strip` is explicit
-# rather than inherited: cargo >= 1.77 sets `strip = "debuginfo"` by itself when no debuginfo is
-# requested (cargo PR #13257; disabled on msvc since 1.77.1), and the windows-gnu comparison leg
-# must mean the same thing as the msvc one. The recipe checks that this profile's `.text` equals
-# `release`'s, so the profile changes symbols only.
+# UG-15 legs (7) and (7b) (03 §6): EXACTLY the shipped codegen, in an artifact directory only the
+# `ug15` instrument writes, so no other recipe's `cargo build --release` can relink an image this
+# gate reads. No other key, and that is MEASURED, not tidiness (B3, 2026-09-23, rustc 1.98.1 msvc):
+#   * the plan's `strip = "none"` changed CODEGEN. Cargo hashes `strip` into every unit's
+#     `-C metadata`, so every crate's disambiguator, v0 symbol name and CGU partition moved, and
+#     `.text` came out 1,957,315 B for `clear` against release's 1,956,051 (demo: 8,546,370 vs
+#     8,546,242). The census reads the post-LTO OBJECT, which link-time stripping never touches,
+#     so the key bought nothing and cost the identity with release the recipe checks;
+#   * the profile NAME is not hashed: `bench-shipped` (also `inherits = "release"` alone) gave
+#     sections, defined-symbol multiset and exports identical to release's for `clear`.
+# The recipe checks `.text` equality with `release` (`ug15 textcheck`).
 [profile.seam-census]
 inherits = "release"
-strip = "none"
 
 # UG-15 sensitivity map (a) (03 §6): line tables and inline sites for `llvm-symbolizer`. The map
 # only ATTRIBUTES a pin move; no pin is ever taken under this profile. The keys are set here, never

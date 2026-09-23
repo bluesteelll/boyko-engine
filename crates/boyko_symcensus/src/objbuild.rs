@@ -133,6 +133,17 @@ impl Ctx {
     }
 }
 
+/// A deliberate instrument fault, for the instrument's own red controls only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Control {
+    /// Every real leg.
+    None,
+    /// Control O: `--emit=obj` is not passed, so no object is written by this build.
+    DropEmitObj,
+    /// Control P: the root source is not touched, so a repeated build finds the unit fresh.
+    NoTouch,
+}
+
 /// One build request.
 #[derive(Clone, Debug)]
 pub struct Request<'a> {
@@ -142,8 +153,16 @@ pub struct Request<'a> {
     pub profile: &'a str,
     /// Extra rustc arguments for the final unit, after `--emit=obj --print link-args`.
     pub extra_rustc: &'a [String],
-    /// `true` for every real leg. `false` exists only for the instrument's red control O.
-    pub emit_obj: bool,
+    /// [`Control::None`] for every real leg.
+    pub control: Control,
+}
+
+impl<'a> Request<'a> {
+    /// A real-leg request.
+    #[must_use]
+    pub const fn new(subject: Subject, profile: &'a str, extra_rustc: &'a [String]) -> Self {
+        Self { subject, profile, extra_rustc, control: Control::None }
+    }
 }
 
 /// A paired build.
@@ -214,6 +233,9 @@ impl Built {
             s.push_str(&format!("map          {}\n", m.display()));
         }
         s.push_str(&format!("link args    {}\n", self.link_args.trim()));
+        // The final unit's rustc line carries its `--cfg feature=…` set and every codegen flag, so a
+        // move caused by feature unification or a flag can be attributed from the receipt (O8).
+        s.push_str(&format!("final rustc  {}\n", self.final_rustc.trim()));
         s
     }
 }
@@ -239,13 +261,13 @@ pub fn build(ctx: &Ctx, req: &Request<'_>) -> Result<Built> {
     };
     let stem = s.name.replace('-', "_");
 
-    let bumped = touch(&src)?;
+    let bumped = if req.control == Control::NoTouch { SystemTime::UNIX_EPOCH } else { touch(&src)? };
 
     let mut cmd = Command::new(cargo_program());
     cmd.current_dir(&ctx.root)
         .args(["rustc", "-v", "-p", s.package, s.kind.flag(), s.name, "--profile", req.profile])
         .args(["--message-format=json-render-diagnostics", "--"]);
-    if req.emit_obj {
+    if req.control != Control::DropEmitObj {
         cmd.arg("--emit=obj");
     }
     cmd.args(["--print", "link-args"]).args(req.extra_rustc);

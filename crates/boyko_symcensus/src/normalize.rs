@@ -40,10 +40,26 @@ pub fn is_anon(raw: &str) -> bool {
     ANON_PREFIXES.iter().any(|p| raw.starts_with(p))
 }
 
-/// Strips v0 disambiguators, a legacy hash and `.llvm.<N>` from a demangled name.
+/// Strips v0 disambiguators, a legacy hash, `.llvm.<N>`, and LLVM's local-name uniquifier from a
+/// demangled name.
+///
+/// The uniquifier is MEASURED at B3: when fat LTO internalises two locals of one name, LLVM renames
+/// the later `<name>.<N>` with a module-wide counter (`$cppxdata$…SystemBox3new.4715`), and the
+/// demangler prints the suffix as ` (.4715)`. The counter moves with unrelated code, so it is
+/// dropped; the copies then count as one name with multiplicity in leg (7)(b).
 #[must_use]
 pub fn norm_name(demangled: &str) -> String {
     let mut s = demangled;
+    while let Some(head) = s.strip_suffix(')').and_then(|h| h.rsplit_once(" (.")).and_then(|(h, n)| n.bytes().all(|b| b.is_ascii_digit()).then_some(h)) {
+        s = head;
+    }
+    while let Some((head, n)) = s.rsplit_once('.')
+        && !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
+        && (head.starts_with("_R") || head.starts_with('$') || head.starts_with('?'))
+    {
+        s = head;
+    }
     if let Some(i) = s.find(".llvm.")
         && s[i + 6..].bytes().all(|b| b.is_ascii_digit())
     {
@@ -117,7 +133,14 @@ pub fn demangle(map: &BTreeMap<String, String>, raw: &str) -> String {
 }
 
 fn owner(map: &BTreeMap<String, String>, inner: &str) -> String {
-    map.get(inner).map_or_else(|| inner.to_owned(), |d| norm_name(d))
+    if let Some(d) = map.get(inner) {
+        return norm_name(d);
+    }
+    // `<owner>.<N>`: the uniquified copy's owner may be absent under that spelling.
+    match inner.rsplit_once('.') {
+        Some((head, n)) if n.bytes().all(|b| b.is_ascii_digit()) => map.get(head).map_or_else(|| inner.to_owned(), |d| norm_name(d)),
+        _ => inner.to_owned(),
+    }
 }
 
 /// A declared rename list: `old -> new` per line (`→` accepted), `#` comments. Applied to
