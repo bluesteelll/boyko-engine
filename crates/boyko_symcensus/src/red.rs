@@ -42,7 +42,9 @@ pub enum RedKind {
     /// Two captures that must be identical are not.
     Mismatch,
     /// The committed leg-(2) data is not the set capture froze: a pin file, a pin block, a
-    /// frozen row or a candidate's disposition (pinned or recorded absent) is missing or extra.
+    /// frozen row or a candidate's disposition (pinned or recorded absent) is missing or extra
+    /// (read before any build), or a built object contradicts a disposition — a pair recorded
+    /// absent is present, or a pinned candidate locates a name that is not frozen.
     PinSet,
 }
 

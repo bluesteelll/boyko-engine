@@ -26,12 +26,26 @@
 //! the frozen list or in `pins/leg2-absent.txt`, never both and never neither, and (2) the
 //! subject's pin file holds exactly its frozen rows. The row set is compared, not a count, so a
 //! multi-name candidate (H-1, H-2, H-3) cannot lose one name while it keeps another.
+//!
+//! **The dispositions are re-verified against the object** (B3 retest R1). The committed data is
+//! only claims until an object confirms them: a consistent edit of all three files can move a
+//! pinned pair into the absent list, or cut one name of a multi-name candidate from both the pin
+//! file and the frozen list, and the pre-build read cannot tell either from what capture wrote.
+//! So [`check`] builds every subject the candidate list names and, per subject, REDs
+//! [`RedKind::PinSet`] on each [`contradicted`] disposition: a pair recorded absent whose rules
+//! now locate a symbol ("recorded absent, but present" — also a real codegen change, a candidate
+//! that fat LTO used to inline away and no longer does), and a name that a pinned candidate's
+//! `Exact` or `Contains` rule locates but that is not pinned ("located, but not frozen").
+//! `FirstWithPrefix` rules take no part in the second test: cut D5 freezes the instantiation the
+//! rule chose at capture by NAME, so a re-run of the rule that picks another instantiation is not
+//! a fault, and the one frozen name is already checked by name (RED [`RedKind::SymbolAbsent`] if
+//! it goes). A contradiction is never a named move: `--named` attributes body changes, not the set.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::candidates::{self, CANDIDATES, Candidate};
+use crate::candidates::{self, CANDIDATES, Candidate, Rule};
 use crate::llvm::Sym;
 use crate::normalize::{self, RenameList};
 use crate::objbuild::{self, Built, Ctx, Request, SUBJECTS, Subject};
@@ -331,8 +345,21 @@ pub fn verify_file(subject: &str, file: Option<&PinFile>, frozen: &[Frozen]) -> 
     if got == want {
         return Ok(());
     }
-    let missing: Vec<String> = want.iter().filter(|w| !got.contains(w)).map(|f| format!("{} `{}` {}", f.cand, f.name, &f.sha256[..f.sha256.len().min(12)])).collect();
-    let extra: Vec<String> = got.iter().filter(|g| !want.contains(g)).map(|f| format!("{} `{}` {} (subject {})", f.cand, f.name, &f.sha256[..f.sha256.len().min(12)], f.subject)).collect();
+    // The difference is taken as MULTISETS (B3 retest R2): a duplicated block is a row the file
+    // holds once more than the frozen list, and a membership test would name nothing.
+    let mut net: BTreeMap<&Frozen, i64> = BTreeMap::new();
+    for g in &got {
+        *net.entry(g).or_default() += 1;
+    }
+    for w in &want {
+        *net.entry(w).or_default() -= 1;
+    }
+    let row = |f: &Frozen, n: i64| {
+        let times = if n.abs() > 1 { format!(" ×{}", n.abs()) } else { String::new() };
+        format!("{} `{}` {} (subject {}){times}", f.cand, f.name, &f.sha256[..f.sha256.len().min(12)], f.subject)
+    };
+    let missing: Vec<String> = net.iter().filter(|(_, n)| **n < 0).map(|(f, n)| row(f, *n)).collect();
+    let extra: Vec<String> = net.iter().filter(|(_, n)| **n > 0).map(|(f, n)| row(f, *n)).collect();
     Err(Red::new(
         RedKind::PinSet,
         format!("leg2-{subject}.pins holds {} pin(s), the frozen list {}: frozen but not in the file {missing:?}; in the file but not frozen {extra:?}", got.len(), want.len()),
@@ -359,22 +386,22 @@ pub fn read_pins(root: &Path, subject: &str) -> Result<Option<PinFile>> {
 /// their owner's section).
 #[must_use]
 pub fn by_name<'a>(view: &'a ObjView, name: &str) -> Vec<&'a Sym> {
-    view.syms
-        .defined
-        .iter()
-        .filter(|s| candidates::is_code(s.class) && !s.raw.starts_with('?') && normalize::norm_name(&s.name) == name)
-        .collect()
+    by_name_in(&view.syms.defined, name)
 }
 
-/// The candidate's located symbols in `view`, grouped by normalised name.
-fn locate_all<'a>(view: &'a ObjView, cand: &Candidate) -> BTreeMap<String, Vec<&'a Sym>> {
+fn by_name_in<'a>(defined: &'a [Sym], name: &str) -> Vec<&'a Sym> {
+    defined.iter().filter(|s| candidates::is_code(s.class) && !s.raw.starts_with('?') && normalize::norm_name(&s.name) == name).collect()
+}
+
+/// The candidate's located symbols among `defined`, grouped by normalised name.
+fn locate_all<'a>(defined: &'a [Sym], cand: &Candidate) -> BTreeMap<String, Vec<&'a Sym>> {
     let mut out: BTreeMap<String, Vec<&'a Sym>> = BTreeMap::new();
     for rule in cand.rules {
-        for s in candidates::locate(&view.syms.defined, *rule) {
+        for s in candidates::locate(defined, *rule) {
             let name = normalize::norm_name(&s.name);
             // A `FirstWithPrefix` rule picks one symbol; its NAME is what is frozen, so every copy
             // of that name joins the pin.
-            for copy in by_name(view, &name) {
+            for copy in by_name_in(defined, &name) {
                 let v = out.entry(name.clone()).or_default();
                 if !v.iter().any(|x| x.raw == copy.raw) {
                     v.push(copy);
@@ -383,6 +410,44 @@ fn locate_all<'a>(view: &'a ObjView, cand: &Candidate) -> BTreeMap<String, Vec<&
         }
     }
     out
+}
+
+/// The dispositions of `subject` that its built object contradicts, one sentence each (empty when
+/// the object confirms them all). `defined` is the object's defined symbol table, `file` the
+/// subject's verified pin file (empty when every pair of the subject is recorded absent), and
+/// `rename` the check's rename list, through which the pinned names are read.
+///
+/// - **recorded absent, but present**: an absent row of `subject` whose candidate's rules locate
+///   at least one defined code symbol.
+/// - **located, but not frozen**: a name that an `Exact` or `Contains` rule of a candidate pinned
+///   in `subject` locates, and that is none of that candidate's pinned names. `FirstWithPrefix`
+///   rules are skipped here (cut D5; see the module doc).
+///
+/// A row naming no candidate is not reported here: [`verify_closure`] has already REDed it.
+#[must_use]
+pub fn contradicted(subject: &str, defined: &[Sym], file: &PinFile, absent: &[Absent], rename: &RenameList) -> Vec<String> {
+    let mut faults: Vec<String> = Vec::new();
+    for a in absent.iter().filter(|a| a.subject == subject) {
+        let Some(c) = CANDIDATES.iter().find(|c| c.id == a.cand) else { continue };
+        let found = locate_all(defined, c);
+        if !found.is_empty() {
+            faults.push(format!("recorded absent, but present: {} in {subject}: {:?}", c.id, found.keys().collect::<Vec<_>>()));
+        }
+    }
+    for c in CANDIDATES.iter().filter(|c| c.subjects.contains(&subject)) {
+        let pinned: BTreeSet<String> = file.pins.iter().filter(|p| p.cand == c.id).map(|p| rename.apply(&p.name)).collect();
+        if pinned.is_empty() {
+            continue;
+        }
+        let mut extra: BTreeSet<String> = BTreeSet::new();
+        for rule in c.rules.iter().filter(|r| !matches!(r, Rule::FirstWithPrefix(_))) {
+            extra.extend(candidates::locate(defined, *rule).into_iter().map(|s| normalize::norm_name(&s.name)).filter(|n| !pinned.contains(n)));
+        }
+        for name in extra {
+            faults.push(format!("located, but not frozen: {} in {subject}: `{name}`", c.id));
+        }
+    }
+    faults
 }
 
 /// The pins of one (candidate or pinned) name: one entry per distinct normalised body.
@@ -426,7 +491,7 @@ pub fn capture(ctx: &Ctx, llvm: &Llvm) -> Result<String> {
         let (built, view) = build_view(ctx, llvm, s)?;
         let mut file = PinFile { header: provenance(ctx, llvm, &built), pins: Vec::new() };
         for c in cands {
-            let found = locate_all(&view, c);
+            let found = locate_all(&view.syms.defined, c);
             if found.is_empty() {
                 absent.push(Absent {
                     cand: c.id.to_owned(),
@@ -523,7 +588,12 @@ fn multiset(pins: &[Pin]) -> BTreeMap<String, BTreeSet<(String, u64, usize)>> {
 
 /// Leg (2) check against the committed pins, under an optional rename list (old → new) and
 /// named moves. Returns the receipt; RED on a committed pin set that is not the frozen one (read
-/// for every subject before anything is built), an absent pinned name, or an unnamed move.
+/// for every subject before anything is built), a disposition the built object contradicts
+/// ([`contradicted`]), an absent pinned name, or an unnamed move.
+///
+/// Every subject the candidate list names is built, including one with no pin file (all of its
+/// pairs recorded absent). `subjects` narrows the builds, and with them the object half: a
+/// subject that is not built has its dispositions read but not re-verified.
 pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, String)], subjects: &[Subject]) -> Result<String> {
     let mut out = crate::probes::header(ctx, llvm, "leg (2) check");
     let _ = writeln!(out, "rename entries {}, named moves {}", rename.0.len(), named.len());
@@ -532,12 +602,21 @@ pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, Stri
     let mut files: Vec<(Subject, PinFile)> = Vec::with_capacity(subjects.len());
     let mut verified = 0usize;
     for s in SUBJECTS {
-        let Some(file) = read_pins(&ctx.root, s.key)? else { continue };
-        verified += 1;
+        let file = match read_pins(&ctx.root, s.key)? {
+            Some(file) => {
+                verified += 1;
+                file
+            }
+            // No frozen row and no file: every pair of the subject is recorded absent, and those
+            // claims are still re-verified against its object below.
+            None if CANDIDATES.iter().any(|c| c.subjects.contains(&s.key)) => PinFile::default(),
+            None => continue,
+        };
         if subjects.contains(&s) {
             files.push((s, file));
         }
     }
+    let recorded_absent = read_absent(&ctx.root)?;
     let _ = writeln!(
         out,
         "pin set: {} frozen pin(s); {verified} pin file(s) hold exactly their frozen rows; every candidate is frozen or recorded absent",
@@ -546,9 +625,16 @@ pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, Stri
     let mut absent: Vec<String> = Vec::new();
     let mut moved: Vec<String> = Vec::new();
     let mut named_moved: Vec<String> = Vec::new();
+    let mut contradictions: Vec<String> = Vec::new();
     let mut checked = 0usize;
+    let mut reverified_absent = 0usize;
     for (s, file) in files {
         let (built, view) = build_view(ctx, llvm, s)?;
+        reverified_absent += recorded_absent.iter().filter(|a| a.subject == s.key).count();
+        for f in contradicted(s.key, &view.syms.defined, &file, &recorded_absent, rename) {
+            let _ = writeln!(out, "CONTRADICTED {f}");
+            contradictions.push(f);
+        }
         let mut by_name_pins: BTreeMap<String, Vec<Pin>> = BTreeMap::new();
         for p in &file.pins {
             by_name_pins.entry(p.name.clone()).or_default().push(p.clone());
@@ -602,8 +688,12 @@ pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, Stri
         built.check_intact()?;
     }
     let _ = writeln!(out, "checked {checked} pin(s): {} absent, {} moved unnamed, {} moved named", absent.len(), moved.len(), named_moved.len());
+    let _ = writeln!(out, "dispositions re-verified against the objects: {reverified_absent} recorded-absent pair(s); {} contradiction(s)", contradictions.len());
     if checked == 0 {
         return Err(Red::new(RedKind::EmptyCensus, format!("{out}leg (2) found no committed pin to check")));
+    }
+    if !contradictions.is_empty() {
+        return Err(Red::new(RedKind::PinSet, format!("{out}leg (2) RED: the built object(s) contradict the committed dispositions: {contradictions:?}")));
     }
     if !absent.is_empty() {
         return Err(Red::new(RedKind::SymbolAbsent, format!("{out}leg (2) RED: pinned symbol(s) absent: {absent:?}")));
