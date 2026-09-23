@@ -71,9 +71,11 @@ use crate::broadphase_tree::BroadphaseTree;
 use crate::components::{ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use crate::math::Vec3;
-use crate::narrowphase::box_box::box_box_contact;
+use crate::narrowphase::axis_cache::SAT_AXIS_COUNT;
+use crate::narrowphase::box_box::{BoxBoxOutcome, Obb, box_box_classify};
 use crate::narrowphase::dispatch::try_parallel;
 use crate::narrowphase::feature_vertex_face;
+use crate::narrowphase::reuse::{RowFrame, fill_row_frames};
 use crate::narrowphase::sphere_box::sphere_box_contact;
 use crate::profiling::{
     PHYS_BP_PAIRS, PHYS_NP_CHUNKS, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, counter,
@@ -392,10 +394,11 @@ pub fn physics_broadphase(
 /// - **sphere-box** / **box-sphere**: [`sphere_box_contact`] — a single
 ///   closest-point contact (the box is an OBB: position + body rotation +
 ///   half-extents).
-/// - **box-box**: [`box_box_contact`] — 15-axis SAT + reference-face clip + a
-///   deterministic ≤4-point reduction, biased by the per-pair reference-axis
-///   hysteresis in [`Manifolds::box_axis_cache`] for stable feature ids on a
-///   resting stack (P2 W3/W4).
+/// - **box-box**: [`box_box_contact`](crate::narrowphase::box_box::box_box_contact)'s
+///   kernel — 15-axis SAT + reference-face clip + a deterministic ≤4-point reduction,
+///   biased by the per-pair reference-axis hysteresis in [`Manifolds::box_axis_cache`] for
+///   stable feature ids on a resting stack (P2 W3/W4) — on boxes built from the step's
+///   per-row orientation frames (L9 D2, filled at the entry of either path below).
 ///
 /// Every emitted manifold is keyed by the dense `(a, b)` rows in `(min, max)`
 /// order (IM-1 / D4) with its `normal` pointing A→B, regardless of which body was
@@ -458,7 +461,8 @@ pub fn physics_narrowphase(
 
 /// The serial narrowphase loop: every candidate pair in `(min, max)` order, the
 /// manifold pushed into the solver buffer or the sensor-overlap buffer, and a box-box
-/// pair's chosen axis written into the hysteresis table in the same iteration.
+/// pair's chosen axis written into the hysteresis table in the same iteration. The
+/// per-row orientation frames are filled first (L9 D2).
 ///
 /// The path a step takes whenever the parallel narrowphase does not dispatch, and the
 /// oracle that path's gates compare against. `prefetched` is what
@@ -479,6 +483,9 @@ pub(crate) fn narrowphase_serial(
     let mut sensor_out = manifolds.sensor_overlaps.build_view();
     sensor_out.clear();
     let axis_cache = &mut manifolds.box_axis_cache;
+    // L9 D2: every box row's frame, once, before the first pair (or `None`: the pairs build
+    // their frames per pair, the same bits).
+    let frames = fill_row_frames(&mut manifolds.row_frames, bodies, pairs.len());
 
     for (k, &(a, b)) in pairs.iter().enumerate() {
         let ba = &bodies[a.0 as usize];
@@ -492,7 +499,7 @@ pub(crate) fn narrowphase_serial(
         let is_overlap = ba.is_sensor || bb.is_sensor;
 
         let (manifold, axis) =
-            collide_pair(a, b, ba, bb, || axis_cache.read_hint(prefetched, k, a, b));
+            collide_pair(a, b, ba, bb, frames, || axis_cache.read_hint(prefetched, k, a, b));
         if let Some(axis) = axis {
             // Persist this frame's chosen reference axis for next frame's
             // hysteresis bias (per body pair, deterministic).
@@ -523,10 +530,14 @@ pub(crate) fn narrowphase_serial(
 /// manifold (or `None` when the shapes do not touch) and, for a box-box pair that
 /// produced a contact, the SAT axis it chose.
 ///
-/// A pure function of the two bodies and the hint, which is what lets the parallel
-/// narrowphase run it per pair on any thread. `hint` is called only for a box-box pair
-/// — the only generator that reads the hysteresis — so a caller's hint read costs
+/// A pure function of the two bodies, their frames and the hint, which is what lets the
+/// parallel narrowphase run it per pair on any thread. `hint` is called only for a box-box
+/// pair — the only generator that reads the hysteresis — so a caller's hint read costs
 /// nothing on the other shape pairs. Both narrowphase paths call this one function.
+///
+/// `frames` is the step's per-row orientation frame column (L9 D2), or `None` on a step
+/// whose fill declined; a box pair then builds its two frames with the same
+/// [`RowFrame::of`], so the result does not depend on which (`narrowphase/reuse.rs`).
 ///
 /// - **sphere-sphere**: inline single-point center-to-center contact (the W2 path).
 /// - **sphere-box**: [`sphere_box_contact`], which emits normal A→B with
@@ -534,7 +545,7 @@ pub(crate) fn narrowphase_serial(
 /// - **box-sphere**: the same generator with the sphere as A and the box as B (keyed
 ///   `b, a`), remapped to `(a, b)` order so the dense rows match and the normal runs
 ///   A(box)→B(sphere).
-/// - **box-box**: [`box_box_contact`], biased by the hint; the returned axis is the one
+/// - **box-box**: [`box_box_classify`], biased by the hint; the returned axis is the one
 ///   to persist for next frame's hysteresis.
 #[inline]
 pub(crate) fn collide_pair(
@@ -542,6 +553,7 @@ pub(crate) fn collide_pair(
     b: BodyIndex,
     ba: &BodyState,
     bb: &BodyState,
+    frames: Option<&[RowFrame]>,
     hint: impl FnOnce() -> Option<usize>,
 ) -> (Option<Manifold>, Option<usize>) {
     match (ba.shape, bb.shape) {
@@ -559,11 +571,26 @@ pub(crate) fn collide_pair(
         ),
         (ColliderShape::Box { half_extents: ha }, ColliderShape::Box { half_extents: hb }) => {
             let last_axis = hint();
-            match box_box_contact(
-                a, b, ba.position, ba.rotation, ha, bb.position, bb.rotation, hb, last_axis,
-            ) {
-                Some(c) => (Some(c.manifold), Some(c.reference_axis)),
-                None => (None, None),
+            let (oa, ob) = match frames {
+                Some(frames) => (
+                    Obb::from_frame(ba.position, &frames[a.0 as usize], ha),
+                    Obb::from_frame(bb.position, &frames[b.0 as usize], hb),
+                ),
+                None => (
+                    Obb::new(ba.position, ba.rotation, ha),
+                    Obb::new(bb.position, bb.rotation, hb),
+                ),
+            };
+            match box_box_classify(&oa, &ob, a, b, last_axis) {
+                BoxBoxOutcome::Contact(c) => (Some(c.manifold), Some(c.reference_axis)),
+                BoxBoxOutcome::Separated(axis) => {
+                    debug_assert!(
+                        axis < SAT_AXIS_COUNT,
+                        "invariant: a separating SAT axis is canonical 0..15"
+                    );
+                    (None, None)
+                }
+                BoxBoxOutcome::NoContact => (None, None),
             }
         }
     }

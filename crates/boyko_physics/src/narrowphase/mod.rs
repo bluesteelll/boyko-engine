@@ -7,11 +7,13 @@
 //! generator stays inline in [`physics_narrowphase`](crate::systems::physics_narrowphase);
 //! the box generators live here because they are the heavy correctness surface.
 //!
-//! The one module here that is not a generator is `dispatch`, the parallel narrowphase (L5):
-//! it runs the same per-pair collision over contiguous chunks of the candidate pairs on the
-//! ambient pool's workers and joins their output back in pair order. Its `unsafe` is the three
-//! per-row writes of a chunk into rows no other chunk owns; its public surface is the three
-//! chunking constants re-exported below.
+//! Two modules here are not generators. `dispatch` is the parallel narrowphase (L5): it runs
+//! the same per-pair collision over contiguous chunks of the candidate pairs on the ambient
+//! pool's workers and joins their output back in pair order. Its `unsafe` is the three per-row
+//! writes of a chunk into rows no other chunk owns; its public surface is the three chunking
+//! constants re-exported below. `reuse` is contact reuse (L9): today the per-row orientation
+//! frames a box pair reads instead of converting two quaternions (D2), filled once per step at
+//! the entry of either path; it has no `unsafe`.
 //!
 //! # OBB convention
 //!
@@ -69,6 +71,7 @@
 pub mod axis_cache;
 pub mod box_box;
 pub(crate) mod dispatch;
+pub(crate) mod reuse;
 pub mod sphere_box;
 
 pub use dispatch::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};

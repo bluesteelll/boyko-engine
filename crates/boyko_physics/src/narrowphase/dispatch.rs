@@ -53,9 +53,11 @@
 //!
 //! # Threads, borrows and allocation
 //!
-//! * **Shared and read-only while the chunks run:** the bodies, the pairs, the axis slots and
-//!   the carried-axis column. Their writers (`begin_frame_synced`, `commit_axes`) run serially
-//!   on the calling thread, before and after the scope.
+//! * **Shared and read-only while the chunks run:** the bodies, the pairs, the axis slots, the
+//!   carried-axis column and the per-row orientation frames (L9 D2). Their writers
+//!   (`begin_frame_synced`, [`prepare`]'s frame fill, `commit_axes`) run serially on the
+//!   calling thread, before and after the scope; the frames reach the chunks as a shared slice
+//!   taken after the fill's view is dropped.
 //! * **Exclusive per chunk:** its stage rows `[lo, hi)`, its commit rows `[lo, hi)` and its
 //!   `meta` slot. The cuts are a partition, so no two tasks write one element.
 //! * **Synchronisation:** `spawn` publishes the captures and the scope's join acquires every
@@ -84,6 +86,7 @@ use boyko_threadpool::try_with_active_pool;
 
 use crate::manifold::{BodyIndex, Manifold};
 use crate::narrowphase::axis_cache::{AXIS_NONE, AxisHints, SAT_AXIS_COUNT};
+use crate::narrowphase::reuse::{RowFrame, fill_row_frames};
 use crate::profiling::{PHYS_NP_AXIS_COMMIT, PHYS_NP_COMPACT, PHYS_NP_DISPATCH};
 use crate::resources::{BodyState, Manifolds};
 use crate::systems::collide_pair;
@@ -152,6 +155,9 @@ pub(crate) struct NpChunkCtx<'a> {
     bodies: &'a [BodyState],
     /// The candidate pairs, read-only, in `(min, max)` order.
     pairs: &'a [(BodyIndex, BodyIndex)],
+    /// The step's per-row orientation frames, read-only, or `None` when the fill declined and
+    /// each box pair builds its own (L9 D2).
+    frames: Option<&'a [RowFrame]>,
     /// The hysteresis hints, read-only.
     hints: AxisHints<'a>,
     /// The staging column's per-row write view.
@@ -162,11 +168,11 @@ pub(crate) struct NpChunkCtx<'a> {
     meta: &'a [AtomicU64],
 }
 
-/// Grows the staging column and the per-pair commit to at least the pair count and builds the
-/// context every chunk shares.
+/// Grows the staging column and the per-pair commit to at least the pair count, fills the step's
+/// per-row orientation frames (L9 D2) and builds the context every chunk shares.
 ///
-/// Both columns' lengths only grow, and the fill runs only on growth, so a warm step does no
-/// write here. The views are taken after the growth: a view caches its column's length.
+/// Both columns' lengths only grow, and their fill runs only on growth, so a warm step writes
+/// only the frames here. The views are taken after the growth: a view caches its column's length.
 pub(crate) fn prepare<'a>(
     manifolds: &'a mut Manifolds,
     bodies: &'a [BodyState],
@@ -175,10 +181,11 @@ pub(crate) fn prepare<'a>(
     meta: &'a [AtomicU64],
 ) -> NpChunkCtx<'a> {
     let n = pairs.len();
-    let Manifolds { np_stage, box_axis_cache, .. } = manifolds;
+    let Manifolds { np_stage, box_axis_cache, row_frames, .. } = manifolds;
     if np_stage.len() < n {
         grow_stage(np_stage, n);
     }
+    let frames = fill_row_frames(row_frames, bodies, n);
     let np_stage: &'a ScratchColumn<Manifold> = np_stage;
     let (hints, commit) = box_axis_cache.dispatch_views(prefetched, n);
     let stage = np_stage.solve_view();
@@ -186,7 +193,7 @@ pub(crate) fn prepare<'a>(
         stage.len() >= n && commit.len() >= n,
         "invariant: the stage and the commit hold a row for every candidate pair"
     );
-    NpChunkCtx { bodies, pairs, hints, stage, commit, meta }
+    NpChunkCtx { bodies, pairs, frames, hints, stage, commit, meta }
 }
 
 /// Grows the staging column to `n` rows; the fill covers only the new rows.
@@ -220,7 +227,7 @@ pub(crate) unsafe fn np_chunk(ctx: NpChunkCtx<'_>, chunk: usize, lo: usize, hi: 
         let ba = &ctx.bodies[a.0 as usize];
         let bb = &ctx.bodies[b.0 as usize];
         let mut hint = None;
-        let (manifold, axis) = collide_pair(a, b, ba, bb, || {
+        let (manifold, axis) = collide_pair(a, b, ba, bb, ctx.frames, || {
             hint = ctx.hints.read(k, a, b);
             hint
         });
@@ -712,7 +719,7 @@ mod tests {
             let ba = &scene.bodies[a.0 as usize];
             let bb = &scene.bodies[b.0 as usize];
             let hint = m.box_axis_cache.read_hint(frame.prefetched, k, a, b);
-            let (manifold, axis) = collide_pair(a, b, ba, bb, || hint);
+            let (manifold, axis) = collide_pair(a, b, ba, bb, None, || hint);
             if let Some(axis) = axis {
                 if frame.prefetched {
                     cov.prefetched_box_contacts += 1;

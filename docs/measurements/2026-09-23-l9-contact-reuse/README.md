@@ -47,3 +47,15 @@ snapshot step (a probe system after the narrowphase); classes per the bench's mo
   which is the split the review's OQ3 asked C0 to report.
 - The ns per pair and the refutation reading ("measured costs predict Δt_np(1) < 1.0 ms -> stop")
   are taken in the next quiet window, before C4, under the P0 protocol.
+
+## C1 receipts (L9a (i) and the frame column; bit-identical)
+
+- **G-L9a-2:** the C1 parity runner reproduces every fixture above with `--expect-pose` (ten of ten `match`, exit 0),
+  and the J pose `0x32d5e235342b4143` on cfg default/as × AllPairs/Tree × W 1/8 (eight of eight). Mutation M-a3 (the
+  frame column refilled only on Rows steps, at both fill sites) is red on all ten rows (exit 4; J-A/J-D/J-Son
+  `0x7ca5b1f25e9fd5f0`, R `0x819bdbc068b84057`, R-S `0xa779b5f9e52fd373`).
+- **G-L9a-1** (`narrowphase::box_box::tests::l9a_classify_equals_the_pre_l9_kernel`, 2048 cases): green, with 464
+  contacts at depth exactly zero among its cases; M-a1 (the early exit on `depth <= 0`) and M-a2 (`RowFrame::of`
+  storing rows) are red.
+- Unchanged on C1: A7-R1 D_max 0.0007180063 m (release), the bodytype golden, the pyramid determinism test, the
+  release frame allocation census, the physics `Vec` census (pin 34) and UG-02.

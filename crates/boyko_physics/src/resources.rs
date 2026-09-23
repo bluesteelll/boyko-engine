@@ -18,10 +18,11 @@ use crate::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
+use crate::narrowphase::reuse::RowFrame;
 use crate::row_identity::{NO_ISLAND_KEY, NO_ROW, RemapCursor, RowIdentity, RowRemap, SleepLatch};
 use crate::scratch_ids::{
     body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
-    box_axis_cache_id, contact_pairs_id, manifolds_id, np_stage_id,
+    box_axis_cache_id, contact_pairs_id, manifolds_id, np_stage_id, row_frames_id,
     register_narrowphase_column_layouts,
     register_graph_column_layouts, register_scratch_layouts, scratch_reserve_rows,
     sensor_overlaps_id, sleep_island_key_id, sleep_latch_prev_id, touched_awake_id,
@@ -2367,6 +2368,15 @@ pub struct Manifolds {
     /// filled only on growth); rows outside a chunk's written runs are stale and never
     /// read. Untouched while `parallel_narrowphase` is off.
     pub(crate) np_stage: ScratchColumn<Manifold>,
+    /// The per-row orientation frames (L9 D2, `narrowphase/reuse.rs`): row `r`'s world box
+    /// axes, `Mat3::from_quat(rotation)`'s columns, written for every box row once per step
+    /// at the entry of the narrowphase, so a box pair reads two frames instead of converting
+    /// two quaternions.
+    ///
+    /// Its length is the step's row count whenever the fill ran; a non-box row's slot is
+    /// stale and never read. Untouched on a step whose pairs build their frames per pair
+    /// (fewer pairs than half the rows).
+    pub(crate) row_frames: ScratchColumn<RowFrame>,
     /// Steps whose narrowphase dispatched chunks across the pool — monotonic, written
     /// only by the calling thread after the join. A structural witness, read through
     /// [`narrowphase_dispatches`](Self::narrowphase_dispatches).
@@ -2400,6 +2410,12 @@ impl Manifolds {
             // The same ceiling: the stage holds at most one manifold per candidate pair,
             // and a reservation is address space, not commit, until a dispatch grows it.
             np_stage: ScratchColumn::new(np_stage_id(), reserve),
+            // One frame per body row. `capacity` counts pairs, not rows, so the floor is the
+            // budget every scratch column gets; the fill declines a step past it.
+            row_frames: ScratchColumn::new(
+                row_frames_id(),
+                capacity.max(scratch_reserve_rows(size_of::<RowFrame>())),
+            ),
             np_dispatches: 0,
         }
     }
