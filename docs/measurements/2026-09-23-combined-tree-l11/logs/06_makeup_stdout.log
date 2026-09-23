@@ -1,0 +1,9 @@
+2026-09-23T03:13:43.321+03:00 MAKEUP START for dropped slots [('HL-D-tree', 'tip', 1), ('HL-D-allpairs', 'tip', 2), ('J-As', 'tip', 8)]
+2026-09-23T03:13:43.321+03:00 makeup-a0: idle rule
+2026-09-23T03:16:03.856+03:00 makeup-a0: opening receipt 2.85% presence {'build': [], 'lane': []}
+2026-09-23T03:16:11.046+03:00   makeup warm-up: mean 4.2509 ms pose 0x32d5e235342b4143 expect match rb 2.85% ra 2.36% others 1.1% cpu_s 6.922 wall 2.135s perf 125.8 waited 0.0s
+2026-09-23T03:16:19.615+03:00   makeup [1] HL-D-tree#tip W=1: mean 7.0135 ms pose 0x32d5e235342b4143 expect match rb 2.36% ra 1.55% others 0.97% cpu_s 3.516 wall 3.515s perf 129.4 waited 0.0s
+2026-09-23T03:16:27.796+03:00   makeup [2] HL-D-allpairs#tip W=2: mean 6.2367 ms pose 0x32d5e235342b4143 expect match rb 1.55% ra 1.62% others 1.31% cpu_s 4.969 wall 3.127s perf 129.1 waited 0.0s
+2026-09-23T03:16:34.956+03:00   makeup [3] J-As#tip W=8: mean 4.2020 ms pose 0x32d5e235342b4143 expect match rb 1.62% ra 4.79% others 0.42% cpu_s 6.281 wall 2.11s perf 126.7 waited 0.0s
+2026-09-23T03:16:34.957+03:00 MAKEUP END complete
+exit=0

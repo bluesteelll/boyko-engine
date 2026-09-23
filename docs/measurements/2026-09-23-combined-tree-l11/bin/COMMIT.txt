@@ -1,0 +1,4 @@
+tip    = cbd86a6525175fc18500b9733997d78c2cbc3e44 (perf(physics): the colored solver's warm-start apply is eight lanes wide - warm_apply_avx2 per cohort under simd_solve, ) built in D:/wt/lighttable (git status --short: '') into D:/wt/_targets/vkval-msvc
+parent = 0ca312bd8d696cec739f27d13c98343f4e1d1a9b (merge: merge/ke16-into-ecsnative (f25ea2fa) into perf/physics-l11-solve-setup - the line's A1b, hwrt shadow-origin, A3, ) git archive 0ca312bd | tar -x into scratchpad/win5/parent_tree, tip Cargo.lock copied in (resolved lock differed only in libredox 0.1.24->0.1.25; the copy recompiled nothing), built into D:/wt/_targets/l11-parent-msvc
+branch perf/physics-l11-solve-setup; tip parent-of = 0ca312bd8d696cec739f27d13c98343f4e1d1a9b
+rustc 1.98.1 (48a229cea 2026-09-01) stable-x86_64-pc-windows-msvc, profile parity, no RUSTFLAGS

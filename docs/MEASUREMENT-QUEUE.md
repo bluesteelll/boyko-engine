@@ -1293,6 +1293,130 @@ table), `analysis.md` (this reduction, verbatim), `window_report.md`, `rows.json
 (`reduction.json`, `tables_analyst.md`). `dry/` and `test/` were rehearsals and are not in the tree, nor are
 the exes and `__pycache__/`.
 
+## 13. Physics — the combined tip (tree broadphase + L11 C3) against Jolt v5.6.0, and L11 C3's warm_apply gate (G9) — TIMED 2026-09-23 (window 5)
+
+**RESULT, 2026-09-23, window 5: the headline on tip `cbd86a65` (L11 C0-C3 + the integration line's tree
+broadphase C1+C3, A1b, A3, hwrt) and G9 on C3 against its parent `0ca312bd` (the same lane one commit earlier:
+C0-C2 + the line, no C3).** One window, complete, under the window-3 protocol block (the 2026-09-19 ruling:
+median over K separate processes of the window mean; spread = min-max, IQR, the median's SE; claimed iff
+|effect| > 2*hypot(spread_A, spread_B), printed under all three readings r / i / s - this window requires BOTH
+min-max and SE, G9's own form is SE; 5-s receipts before and after every process, > 5 % => re-run once at the
+end of the pass; 10-s receipt and three quiet 60-s polls before each pass; a build or lane process at any point
+of a timed pass voids the pass; no band void; P-none; every process ran with `--expect-pose`). **K = 6** (two
+passes x three rounds per block; tree/AllPairs and parent/tip alternating inside each W group, pass 1
+reversed). **Jolt v5.6.0 is the only reference (owner ruling 2026-09-21) and it was not re-run: its window-3
+cells are used** (`918fd2b7`, K=6: 9.828 / 5.770 / 3.581 / 2.569 / 2.388 ms at W = 1 / 2 / 4 / 8 / 16;
+window 3 is `docs/measurements/2026-09-21-physics-window3/`, on this lane since `0ca312bd`). Owner's
+workstation (Ryzen 9 5900HS, 8C/16T, High performance, AC). Timed 00:40:17-03:12:50 +03:00; the blocks that
+count: headline 02:16-02:48, g9 02:51-03:04, armed 03:07-03:12. rustc 1.98.1 `x86_64-pc-windows-msvc`, no
+RUSTFLAGS, `CARGO_INCREMENTAL=0`, cargo `parity` (inherits `release`: fat LTO, default CGU), zone tier `dev`.
+Binaries: parent = `0ca312bd` (`git archive` into a scratch tree, cold build into
+`D:/wt/_targets/l11-parent-msvc`) `runner_parent` sha256 `3993684b`; tip = `cbd86a65` (the lane's HEAD,
+`D:/wt/lighttable` clean, built into `D:/wt/_targets/vkval-msvc`) `runner_tip` `9c7caff1`; each build's
+`Compiling boyko-physics (path)` line names its tree (`README.md`, `logs/build_*.log`). `cbd86a65^` =
+`0ca312bd`, and C3 touches only `crates/boyko_physics` (`solver/colored.rs` and two test files). Poses
+bit-identical on every binary and arm in all 196 processes that produced a result (J `0x32d5e235342b4143` on
+`--cfg default` with either broadphase and on `--cfg as`; rest `0xee2a67a98434919a`; `expect_pose: "match"`
+against the parent's untimed gate pose; six 501-step red controls, three per binary, exit 4 - the gate can
+fail); counters identical on both binaries; TreeDiag `static_rebuilds 1, members 1`, all else 0, on every tree
+process and all zero on AllPairs; void 0, workers = W, mask `0xffff`, printed config field-equal parent/tip.
+
+**Rows.** Headline, tip only, disarmed, 500 steps: `HL-D-tree` / `HL-D-allpairs` (`--scene jolt --gap 0.5 --cfg
+default --broadphase tree|allpairs`, window 4's `T-D-*`) at W 1/2/4/8; `HL-R-tree` / `HL-R-allpairs` (`--scene
+rest --cfg default`) at W 1/8. G9: `J-As` (`--cfg as`: colored, `simd_solve` on, the three parallel flags =
+W>1, AllPairs, sleeping off) parent/tip at W 1/8, disarmed; the armed twins `J-As-a` (`--arm-profiler`) at
+W 1/8. 16 cells, 120 slots, 25 re-runs, 117 slots used; 3 dropped because the original and its re-run were
+both hot, so `HL-D-tree` W1, `HL-D-allpairs` W2 and tip `J-As` W8 are K = 5 (a make-up outside the protocol
+set ran each once more); 0 non-zero exits.
+
+**Contamination.** Three attempts of the headline's pass 0 were VOIDED by build or lane processes (00:52 two
+`rustc`, 00:57 `cargo` appearing, 01:07 `cargo` and another lane's test binary under
+`D:/wt/_targets/joltab-msvc`); the idle rule then waited 69 polls (01:07-02:15). None of their 42 timed
+processes is in a cell. Protocol set, 145 processes: before-receipts median 2.70 %, max 4.97 %, 0 over 5 %;
+after-receipts median 2.95 %, p90 6.71 %, max 13.20 %, 28 over 5 % (25 hot originals, 3 hot re-runs). The
+during-process witness over the used set: median 1.48 %, p95 4.55 %, max 7.20 % - about 4x window 4b's
+0.33 %.
+
+| W | tree (`--cfg default --broadphase tree`) | AllPairs (shipped default) | Jolt v5.6.0 (window 3) | tree / v5.6.0 (effect; claimed r/i/s) | AllPairs / v5.6.0 | tree / AllPairs |
+|---|---|---|---|---|---|---|
+| 1 | **7.106** [6.891-7.286] K=5 | 8.782 [8.528-9.136] | 9.828 [9.518-11.364] | **0.723 (-27.7 %; n/Y/Y)** | 0.894 (n/n/Y) | 0.809 (-19.1 %; Y/Y/Y) |
+| 2 | 4.659 [4.469-5.559] | 6.435 [6.244-6.557] K=5 | 5.770 [5.703-5.818] | 0.807 (-19.3 %; n/Y/Y) | 1.115 (Y/Y/Y) | 0.724 (-27.6 %; n/Y/Y) |
+| 4 | 3.315 [3.297-3.398] | 4.976 [4.867-5.561] | 3.581 [3.519-3.663] | 0.926 (-7.4 %; n/Y/Y) | 1.389 (Y/Y/Y) | 0.666 (-33.4 %; Y/Y/Y) |
+| 8 | **2.716** [2.520-2.963] | 4.296 [4.213-4.539] | 2.569 [2.501-3.124] | **1.057 (+5.7 %; n/n/n)** | 1.672 (Y/Y/Y) | 0.632 (-36.8 %; Y/Y/Y) |
+
+Rest (tip, no Jolt reference): tree against AllPairs 9.768 against 11.274 ms at W=1 (-13.4 %, n/Y/Y) and
+3.803 against 5.397 at W=8 (-29.5 %, Y/Y/Y).
+
+- **The headline: with the tree broadphase the tip's default config is 0.723x Jolt v5.6.0 at W=1 (7.106
+  against 9.828 ms, -2.72 ms; claimed under IQR and SE, not min-max - the min-max failure is Jolt's own
+  window-3 cell, which holds one 11.364 ms process; without it 0.726x under all three, a sensitivity reading,
+  not the ruled statistic) and 1.057x at W=8 (2.716 against 2.569 ms, +0.147; not claimed under any reading -
+  the two cannot be told apart at eight workers in this window).** 0.807x / 0.926x at W = 2 / 4 (IQR and SE).
+  The shipped AllPairs default on the same binary is 0.894x (SE) / 1.115x / 1.389x / 1.672x at W 1/2/4/8, and
+  the tree beats it on that binary at every W (all three readings at W 1/4/8, IQR and SE at W=2). Per manifold
+  per step over [100,500), each side's own count (boyko 4,519.26, v5.6.0 8,489.0): tree 1.38x / 1.53x / 1.72x
+  / 1.96x Jolt at W 1/2/4/8 - the per-step lead rests on boyko's 1.88x smaller contact set, and the truth lies
+  between the two readings. T(1)/T(8): tree 2.616, AllPairs 2.044, Jolt 3.825. Since window 4 (`T-D-tree` on
+  `a46b8287`): 9.026 -> 7.106 ms at W=1 (0.918x -> 0.723x) and 3.699 -> 2.716 at W=8 (1.440x -> 1.057x),
+  cross-window, the code difference L11 C1-C3.
+- **The tree is still not the shipped default, and C4 (the flip) stays DEFERRED:** every `--cfg default`
+  process prints AllPairs under Manual select and the tree rows force the kind; no tree row here is armed, so
+  window 4's stop rules (G4 rule 1 `J snapshot` 0.443 > 0.30, the G5 tree span 0.476 / 0.466 > 0.36 / 0.35,
+  rules 6 and 9) were not re-taken and stand, as does the query-cost investigation they call for.
+- **G9 on C3 - warm_apply PASS.** Armed `J-As-a` at W=1, reading B (per-process median over [100,500), the
+  design's and window 4b's convention): parent 0.5285 [0.5265-0.5297] -> tip 0.2960 [0.2949-0.2978] ms, Delta
+  -0.2325 ms (-44.0 %) against the -0.19 bar (the design's listed delta, already the 0.6x realized-gain bar,
+  not discounted a second time), margin 0.0425, claimed under all three readings, the worst process pairing
+  still -0.2287. At W=8 -0.2348 (0.5391 -> 0.3043), claimed; reading A (the window mean) -0.2264 / -0.2310,
+  claimed. 0.74x the lower predicted Delta (-0.314); the tip's 0.296 ms is 0.0654 us per manifold, inside the
+  design's 0.15-0.30 ms target at its slow edge; against window 4b's C2 value 0.519 (cross-window) -0.223.
+  "Wide colours not claimed slower" holds (the kernel -0.077 / +0.0006 ms, n/n/n). Setup (build + warm +
+  store) 0.876 -> 0.656 at W=1 and 0.890 -> 0.672 at W=8, inside the design's 0.44-0.93 band; solve_build,
+  store, broadphase and narrowphase do not move (C3 does not touch them). Counters identical: 4,519 manifolds,
+  9,559 pairs, 11 colours (9 wide), 108 waves, 17,054 points per step.
+- **C3 on the step:** `J-As` 8.859 -> 8.627 ms at W=1 (-0.232, -2.6 %) and 4.726 -> 4.510 at W=8 (-0.216,
+  -4.6 %), not claimed at K=6 - the step gain is the warm_apply gain, at K=6's SE resolution; the armed wall at
+  W=1 is -0.348 ms (SE only). The design sets no separate step gate for C3 (C1+C2 passed T(1)/T(8) in window
+  4b). Cumulative L11 C0 -> C3, chained across windows 4b and 5: -2.23 ms at W=1 and -1.32 ms at W=8.
+- **Bridges.** (1) The tip's AllPairs default row against window 4's `T-D-allpairs` (10.554 / 5.491) does not
+  reproduce literally and cannot - the tip carries L11 C0-C3, A1b and A3. With the lever's measured deltas
+  subtracted, the chain predicts 8.326 / 4.172 against the measured 8.782 / 4.296: residuals +5.5 % / +3.0 %,
+  inside the chain's bars, so it holds as a chain. (2) This window's parent `J-As` against window 4b's tip
+  (the same solver code; the line merge between them): W=1 1.019 (reproduces, n/n/n); **W=8 1.115 (+11.5 %),
+  does NOT reproduce under SE or IQR** (the armed twin +6.0 %, holds), with the code-identical kernel +4.1 % at
+  W=8 and -0.2 % at W=1 - machine state at W=8 is the likely reading; a W8-only code cost is not ruled out.
+  In-window comparisons are unaffected (interleaved; parent and tip moved together). **Every cross-window W=8
+  ratio here (tree/Jolt 1.057, AllPairs/Jolt 1.672, window 4's 3.699 -> 2.716) is qualified**: a 6-11 %
+  correction leaves tree/Jolt at W=8 unclaimed either way and AllPairs/Jolt claimed.
+- **What the remaining W=8 gap is made of** (arithmetic from the tip's armed `J-As-a` spans with window 4's
+  tree broadphase span swapped in; the budget reproduces the measured tree row to -2.5 % at W=8 and +0.9 % at
+  W=1): 1.392 ms of the row does not shrink with W - the tree broadphase 0.4665 (query 0.411), serial-in-solve
+  0.771 (solve_build 0.336, warm_apply 0.304 after C3, integrate 0.080, store 0.031, gravity 0.013),
+  build_graph / gather / apply 0.154. At window 4's 334 ns per queried row (design 100-150) the query is
+  0.225-0.287 ms over the design at W=8, larger than the whole +0.147 ms gap to Jolt (not measured: at the
+  design's query cost the row would read 2.43-2.49 ms, 0.95-0.97x). L11's own C4 (D10, the parallel fill):
+  solve_build(8) after C3 is 7.45 % of T(8) on `J-As` tip, above D10's 5 % trigger - reported, not decided.
+
+**Not claimed / not measured.** Tree against Jolt under both spreads at any W (W 1/2/4 under IQR and SE only,
+W=8 not at all); the tree as the shipped default (C4 deferred; no G4 arm, tree span or query cost
+re-measured, since the tree rows are disarmed); a Jolt per-stage comparison (Jolt not run); the tree's C4/C5, the sleeper set,
+churn, R-S and Auto-select (sleeping off everywhere, `sleeper_rebuilds` 0); **C3's other G9 rows** (J-A's cfg-A
+"not claimed slower", R, R-S, S16, W 2/4/16, K=12, the canary) - C3 has passed warm_apply and "wide colours not
+claimed slower" on `J-As-a`, the rest of its G9 is open; C3's step gain on the disarmed rows; tree against
+AllPairs under min-max at W=2 and on rest W=1; the make-up processes. Open: bridge 2 at W=8 can be settled by
+interleaving window 4b's `runner_tip` (`29dbd993`) with this window's parent on `J-As` at W=8 (about a minute
+timed). L7 is retired after C3 (`levers/00-RULINGS.md`, the L11 block).
+
+Receipts: `docs/measurements/2026-09-23-combined-tree-l11/`: `README.md` (the protocol block, the binaries
+table with the `Compiling` lines, what was reused from window 3 and why), `analysis.md` (the analyst's
+reduction, verbatim), `rows.json`, `bin/SHA256SUMS`, `bin/COMMIT.txt` (no exe committed), `logs/`, `raw/`
+(`runs.jsonl`, `manifest.json`, `window_state.json`, `window_log.txt`, `wait_log.txt`, the counted
+`headline-p0-v3/`, `headline-p1/`, `g9-p{0,1}/`, `armed-p{0,1}/`, the voided `headline-p0/`, `-v1/`, `-v2/`,
+`makeup/`, `analysis.json`, `tables.md`, `process_receipts.md`; one `pose.bin` per distinct pose, not one per
+process), `gate/` (the two reference poses and the red controls), `tools/`, `analyst/` (`reduction.json`,
+`tables.txt`). `test/` was a rehearsal and is not in the tree, nor are the exes, `__pycache__/` and the
+duplicate pose files.
+
 ---
 
 ## When an entry is done

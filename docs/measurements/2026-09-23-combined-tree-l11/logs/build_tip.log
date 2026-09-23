@@ -1,0 +1,4 @@
+   Compiling boyko-physics v0.1.0 (D:\wt\lighttable\crates\boyko_physics)
+    Finished `parity` profile [optimized] target(s) in 21.43s
+  Executable benches\jolt_parity_pyramid.rs (D:/wt/_targets/vkval-msvc\parity\deps\jolt_parity_pyramid-39550833a2ead4ba.exe)
+exit=0

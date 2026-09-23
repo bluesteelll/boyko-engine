@@ -1,0 +1,40 @@
+{
+ "_doc": [
+  "Window 5 run list (2026-09-23). Two questions: (1) HEADLINE on the tip only - J --cfg default with --broadphase tree and allpairs at W 1/2/4/8, rest both ways at W 1/8; (2) G9-ON-C3 - PARENT (0ca312bd, C2 + tree, no C3) vs TIP (cbd86a65, + L11 C3 warm_apply_avx2) interleaved on J-As (--cfg as) at W 1/8, then the armed twins J-As-a (--arm-profiler, --csv) at W 1/8.",
+  "Row spellings: HL-D-* = window 4's T-D-* (--scene jolt --gap 0.5 --cfg default --broadphase tree|allpairs); HL-R-* = window 4's R-* (--scene rest --cfg default --broadphase tree|allpairs, 500 steps); J-As / J-As-a = window 4b's J-As / J-As-a (--scene jolt --gap 0.5 --cfg as; the cfg sets AllPairs, Manual select, simd_solve on).",
+  "Every process: --workers W --steps 500 --window 0..500 --csv <cwd>/run.csv --pose-out <cwd>/pose.bin --label <id>#<binary>@W<W> [--arm-profiler] --expect-pose gate/<pose_ref>_ref.pose (the parent's untimed gate pose: J = parent HL-D-allpairs W1, R = parent HL-R-allpairs W1).",
+  "Expected poses (task): J (cfg default both arms, cfg as, armed) 0x32d5e235342b4143; rest 0xee2a67a98434919a. Expected TreeDiag (task): tree rows static_rebuilds 1, members 1, evictions 0; allpairs rows every field 0.",
+  "Jolt v5.6.0 is NOT re-run: window 3's cells 9.828 / 5.770 / 3.581 / 2.569 / 2.388 ms at W 1/2/4/8/16 are the only reference (owner ruling)."
+ ],
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "blocks": ["headline", "g9", "armed"],
+  "order": "per block, pass 0: W ascending; inside a W group row by row in this file's order (tree then allpairs; parent then tip); pass 1: the whole list reversed",
+  "warmup_per_pass": "one untimed process per pass: headline = tip HL-D-tree W=8; g9/armed = tip J-As W=8",
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "rerun_contaminated_once_at_end_of_pass": true,
+  "void_pass_on_build_process": true,
+  "band_void": false,
+  "placement": "P-none",
+  "steps": 500,
+  "window": [0, 500],
+  "armed_span_steps": [100, 500],
+  "idle_rule": "tools/wait_idle5.ps1: 0 build procs (cargo/rustc/link/miri/...) AND 0 procs from D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 120 polls (120 min) per wait"
+ },
+ "binaries": {
+  "parent": {"exe": "bin/runner_parent.exe", "sha256": "3993684b9f0ab8d99981cf8571a6ad988d1a14dd09675e065a8d22cb78507d1e", "commit": "0ca312bd8d696cec739f27d13c98343f4e1d1a9b"},
+  "tip": {"exe": "bin/runner_tip.exe", "sha256": "9c7caff172cc2ef5fe34d7cb58720e16901ca62e0df78fb2a8a8088c2c8b597e", "commit": "cbd86a6525175fc18500b9733997d78c2cbc3e44"}
+ },
+ "rows": [
+  {"id": "HL-D-tree", "block": "headline", "binaries": ["tip"], "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "default", "--broadphase", "tree"], "workers": [1, 2, 4, 8], "steps": 500, "window": [0, 500], "armed": false, "expected_pose": "0x32d5e235342b4143", "pose_ref": "J", "tree": true},
+  {"id": "HL-D-allpairs", "block": "headline", "binaries": ["tip"], "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "default", "--broadphase", "allpairs"], "workers": [1, 2, 4, 8], "steps": 500, "window": [0, 500], "armed": false, "expected_pose": "0x32d5e235342b4143", "pose_ref": "J", "tree": false},
+  {"id": "HL-R-tree", "block": "headline", "binaries": ["tip"], "args": ["--scene", "rest", "--cfg", "default", "--broadphase", "tree"], "workers": [1, 8], "steps": 500, "window": [0, 500], "armed": false, "expected_pose": "0xee2a67a98434919a", "pose_ref": "R", "tree": true},
+  {"id": "HL-R-allpairs", "block": "headline", "binaries": ["tip"], "args": ["--scene", "rest", "--cfg", "default", "--broadphase", "allpairs"], "workers": [1, 8], "steps": 500, "window": [0, 500], "armed": false, "expected_pose": "0xee2a67a98434919a", "pose_ref": "R", "tree": false},
+  {"id": "J-As", "block": "g9", "binaries": ["parent", "tip"], "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "as"], "workers": [1, 8], "steps": 500, "window": [0, 500], "armed": false, "expected_pose": "0x32d5e235342b4143", "pose_ref": "J", "tree": false},
+  {"id": "J-As-a", "block": "armed", "binaries": ["parent", "tip"], "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "as"], "workers": [1, 8], "steps": 500, "window": [0, 500], "armed": true, "expected_pose": "0x32d5e235342b4143", "pose_ref": "J", "tree": false}
+ ]
+}
