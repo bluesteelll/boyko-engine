@@ -70,8 +70,11 @@
 //! App)` called with `app` (iii) and a callee that is not in the file (iii-b); `app.add_plugins`
 //! (v); a `&World` passed to a helper that calls `send_event` (vi) and the same through a `let`
 //! binding (vii); `(*app).world_mut()` (viii); `let a = &mut *app` (ix); `send_event` on a tracked
-//! `&World` binding (x); a `let app` shadow (xi). The GREEN control (iv) adds a
-//! `app.world().resource::<WindowInfo>()` read and requires the site multiset unchanged.
+//! `&World` binding (x); a `let app` shadow (xi); an unparsable macro that names `app` (xii). The
+//! GREEN control (iv) adds a `app.world().resource::<WindowInfo>()` read and requires the site
+//! multiset unchanged. [`macro_body_claims_do_not_outlive_the_body`] holds the walk's one
+//! address-keyed state to the lifetime of the nodes it names: a claim left on a freed macro body
+//! would be a stale address that a later macro's parse can reuse, hiding a write there.
 //!
 //! # Blind spots, stated
 //!
@@ -484,7 +487,8 @@ struct Walker<'t> {
     app: String,
     /// Names bound by `let <ident> = app.world();`.
     worlds: Vec<String>,
-    /// Addresses of nodes a parent has already classified.
+    /// Addresses of nodes a parent has already classified — only nodes of an AST that outlives the
+    /// walk: a macro body's claims are dropped with the body (`visit_macro`).
     claimed: Vec<usize>,
     depth: u32,
     out: Walk,
@@ -846,9 +850,15 @@ impl<'ast> Visit<'ast> for Walker<'_> {
         }
         match m.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated) {
             Ok(exprs) => {
+                // `claimed` holds node ADDRESSES, and `exprs` is freed when this arm ends: a later
+                // macro's parse can reuse them, and a stale claim at a reused address would hide a
+                // genuine `app.world_mut()` there. Every claim made while walking `exprs` is of a
+                // node inside it (a callee is walked by its own `Walker`), so they go with it.
+                let mark = self.claimed.len();
                 for e in &exprs {
                     self.visit_expr(e);
                 }
+                self.claimed.truncate(mark);
             }
             Err(_) => self.red(format!(
                 "macro `{}!` names `{}` or a &World binding and does not parse as expressions",
@@ -1355,5 +1365,39 @@ fn walk_fails_closed_on_every_unclassified_shape() {
         failures.is_empty(),
         "G-LOOP red controls failed:\n{}",
         failures.join("\n")
+    );
+}
+
+/// `claimed` is keyed by node address, and a macro body is parsed into a temporary that is freed
+/// when its walk ends. A claim that outlived the body would be a stale address that a later macro's
+/// parse can reuse, and a genuine `app.world_mut()` allocated there would then read as already
+/// classified and go uncounted — a silent miss, not a RED, so no site-level control can see it. The
+/// invariant is held directly instead: walking a body whose only statement is a macro that claims
+/// nodes leaves `claimed` empty.
+#[test]
+fn macro_body_claims_do_not_outlive_the_body() {
+    let f: ItemFn = syn::parse_str(
+        "fn frame_loop(app: &mut App) { debug_assert!(app.world().contains_resource::<WindowInfo>()); }",
+    )
+    .expect("invariant: the control fn parses");
+    let fns = BTreeMap::new();
+    let mut w = Walker::new(&fns, "app".to_string(), 0);
+    w.visit_block(&f.block);
+    println!(
+        "control macro body: reads {}, reds {}, claims left {}",
+        w.out.reads,
+        w.out.reds.len(),
+        w.claimed.len()
+    );
+    assert!(
+        w.out.reds.is_empty() && w.out.reads == 1,
+        "ANTI-VACUITY: the walk did not classify the macro body's one read (reads {}, reds {:?})",
+        w.out.reads,
+        w.out.reds
+    );
+    assert!(
+        w.claimed.is_empty(),
+        "{} claim(s) on a freed macro body outlived it — a later parse can reuse those addresses",
+        w.claimed.len()
     );
 }
