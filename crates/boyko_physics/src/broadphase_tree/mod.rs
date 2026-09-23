@@ -96,7 +96,8 @@
 //!
 //! The non-default `bp-query-counts` feature (C3b, the query-cost investigation) adds the
 //! `counts` module and, per tree, one probe of relaxed atomics holding the last query's counts.
-//! Without it neither exists.
+//! It and the crate's own test build also count the last leaf-list pass ([`LeafListCounts`]).
+//! Without either, none of it exists: the default build's pass is the uncounted kernel.
 
 use boyko_diag::zone;
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
@@ -288,6 +289,37 @@ pub struct TreeDiag {
     pub row_walk_leaves: u64,
 }
 
+/// What the last leaf-list pass did (C3b's G-LL3 counts): compiled only in the crate's test
+/// build and under the non-default `bp-query-counts` feature.
+#[cfg(any(test, feature = "bp-query-counts"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LeafListCounts {
+    /// Active leaf nodes the leaf list answered (a fallback leaf is not counted here).
+    pub leaves: u64,
+    /// Q rows the leaf list answered: the live lanes of those leaf nodes.
+    pub rows: u64,
+    /// 8-wide box tests of the collection walks over the active tree.
+    pub collect_box_active: u64,
+    /// 8-wide box tests of the collection walks over the static tree.
+    pub collect_box_static: u64,
+    /// Candidate leaves the active collections held, summed over the leaves answered.
+    pub cands_active: u64,
+    /// Candidate leaves the static collections held, summed over the leaves answered; a one-leaf
+    /// static tree counts its leaf once per active leaf.
+    pub cands_static: u64,
+    /// Prefilter tests — chunks of eight candidates — the rows ran, over both lists (the one
+    /// leaf of a one-leaf static tree is tested without one).
+    pub prefilter_chunks: u64,
+    /// Exact tests on active candidates the prefilter kept.
+    pub kept_active: u64,
+    /// Exact tests on static leaves: those the prefilter kept, or a one-leaf static tree's leaf.
+    pub kept_static: u64,
+    /// Partners the rows emitted into their segments.
+    pub emitted: u64,
+    /// Insertion-sort shifts the segments need in their emission order: their inversions.
+    pub sort_shifts: u64,
+}
+
 /// The kernel that answers the Q rows' queries (module docs, "Query kernels"). Both write the
 /// same stream and records; the choice moves no pair and no pose byte.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -337,6 +369,9 @@ pub struct BroadphaseTree {
     /// other build uses `kernel::LEAF_LIST_CAP`).
     #[cfg(test)]
     leaf_list_cap: usize,
+    /// The last leaf-list pass's counts (test and `bp-query-counts` builds only).
+    #[cfg(any(test, feature = "bp-query-counts"))]
+    ll_counts: LeafListCounts,
     /// `|S|`.
     members: u32,
     /// This step's pending static rows (the verify writes, the maintenance reads).
@@ -391,6 +426,8 @@ impl BroadphaseTree {
             kernel: QueryKernel::default(),
             #[cfg(test)]
             leaf_list_cap: LEAF_LIST_CAP,
+            #[cfg(any(test, feature = "bp-query-counts"))]
+            ll_counts: LeafListCounts::default(),
             members: 0,
             pending_step: 0,
             needs_scan: false,
@@ -938,13 +975,33 @@ impl BroadphaseTree {
     /// (row order), appending each row's segment to the stream. Returns `|Q| + |Wide|`.
     fn query_all(&mut self, n: usize) -> u64 {
         let cap = self.leaf_list_cap();
-        let Self { active, statics, rec, cur, aux, kernel, diag, .. } = self;
+        let Self {
+            active,
+            statics,
+            rec,
+            cur,
+            aux,
+            kernel,
+            diag,
+            #[cfg(any(test, feature = "bp-query-counts"))]
+            ll_counts,
+            ..
+        } = self;
         let mut recs_view = rec[usize::from(*cur)].build_view();
         let recs = recs_view.as_mut_slice();
         let mut stream = aux.build_view();
 
         match *kernel {
-            QueryKernel::LeafList => leaf_list_pass(active, statics, recs, &mut stream, cap, diag),
+            QueryKernel::LeafList => leaf_list_pass(
+                active,
+                statics,
+                recs,
+                &mut stream,
+                cap,
+                diag,
+                #[cfg(any(test, feature = "bp-query-counts"))]
+                ll_counts,
+            ),
             QueryKernel::RowWalk => {
                 stream.clear();
                 for slot in 0..active.leaves() {
@@ -1170,9 +1227,14 @@ fn leaf_list_pass(
     stream: &mut ScratchBuildView<'_, u32>,
     cap: usize,
     diag: &mut TreeDiag,
+    #[cfg(any(test, feature = "bp-query-counts"))] counts: &mut LeafListCounts,
 ) {
     debug_assert!(active.maxrow_valid(), "invariant: the active tree is not killed or re-rowed after its build");
     debug_assert_eq!(active.dead(), 0, "the active tree has no dead lane");
+    #[cfg(any(test, feature = "bp-query-counts"))]
+    {
+        *counts = LeafListCounts::default();
+    }
     let mut act = CandList::new();
     let mut sta = CandList::new();
     let a_leaves = active.leaf_nodes();
@@ -1185,8 +1247,20 @@ fn leaf_list_pass(
     for (l, node) in a_leaves.iter().enumerate() {
         let live = (slots - l * LANES).min(LANES);
         let box_l = active.leaf_box(l);
-        let collected = active.collect_leaves::<true>(&box_l, &mut act, cap)
-            && (s_single || statics.collect_leaves::<false>(&box_l, &mut sta, cap));
+        let collected = active.collect_leaves::<true>(
+            &box_l,
+            &mut act,
+            cap,
+            #[cfg(any(test, feature = "bp-query-counts"))]
+            &mut counts.collect_box_active,
+        ) && (s_single
+            || statics.collect_leaves::<false>(
+                &box_l,
+                &mut sta,
+                cap,
+                #[cfg(any(test, feature = "bp-query-counts"))]
+                &mut counts.collect_box_static,
+            ));
         if !collected {
             w = fallback_leaf(active, statics, recs, stream, w, l, live);
             len = w;
@@ -1197,22 +1271,45 @@ fn leaf_list_pass(
         if w + need > len {
             len = grow_stream(stream, w + need.max(STREAM_GROW));
         }
+        #[cfg(any(test, feature = "bp-query-counts"))]
+        {
+            counts.leaves += 1;
+            counts.rows += live as u64;
+            counts.cands_active += act.len() as u64;
+            counts.cands_static += if s_single { 1 } else { sta.len() as u64 };
+        }
         let out = stream.as_mut_slice();
         for k in 0..live {
             let (x, y, z, r) = (node.p[LEAF_X][k], node.p[LEAF_Y][k], node.p[LEAF_Z][k], node.p[LEAF_R][k]);
             let row = node.p[LEAF_ROW][k].to_bits();
             let q = QueryBox::of(x, y, z, r);
             let seg = w;
+            #[cfg(any(test, feature = "bp-query-counts"))]
+            {
+                counts.prefilter_chunks += (act.chunks() + if s_single { 0 } else { sta.chunks() }) as u64;
+            }
             if s_single {
                 let s = &s_leaves[0];
                 w = emit_lanes(out, w, s, leaf_mask(s, x, y, z, r));
+                #[cfg(any(test, feature = "bp-query-counts"))]
+                {
+                    counts.kept_static += 1;
+                }
             } else {
                 sta.for_each_kept::<false>(&q, row, |leaf| {
                     let s = &s_leaves[leaf as usize];
                     w = emit_lanes(out, w, s, leaf_mask(s, x, y, z, r));
+                    #[cfg(any(test, feature = "bp-query-counts"))]
+                    {
+                        counts.kept_static += 1;
+                    }
                 });
             }
             act.for_each_kept::<true>(&q, row, |leaf| {
+                #[cfg(any(test, feature = "bp-query-counts"))]
+                {
+                    counts.kept_active += 1;
+                }
                 debug_assert!((leaf as usize) < a_leaves.len(), "a candidate is a leaf node of the tree");
                 // SAFETY: `act` was filled by `active.collect_leaves` over this tree, unchanged
                 // since, and holds leaf node indices only: `8·i + k` for a lane `k` of level-1
@@ -1225,6 +1322,11 @@ fn leaf_list_pass(
                 w = emit_lanes(out, w, a, leaf_mask_above(a, x, y, z, r, row));
             });
             let segment = &mut out[seg..w];
+            #[cfg(any(test, feature = "bp-query-counts"))]
+            {
+                counts.emitted += segment.len() as u64;
+                counts.sort_shifts += inversions(segment);
+            }
             sort_segment(segment);
             let nrev = segment.partition_point(|&t| t < row);
             debug_assert!(segment.get(nrev).is_none_or(|&t| t > row), "a row is not its own partner");
@@ -1237,6 +1339,16 @@ fn leaf_list_pass(
     }
     stream.truncate(w);
     diag.leaf_list_leaves += served;
+}
+
+/// The inversions of `segment`: the shifts its insertion sort performs.
+#[cfg(any(test, feature = "bp-query-counts"))]
+fn inversions(segment: &[u32]) -> u64 {
+    let mut count = 0u64;
+    for (i, &a) in segment.iter().enumerate() {
+        count += segment[i + 1..].iter().filter(|&&b| b < a).count() as u64;
+    }
+    count
 }
 
 /// Writes the row of every lane of the leaf `node` set in `mask` at `out[w..]`, ascending;

@@ -476,7 +476,15 @@ impl PackedBvh8 {
     ///
     /// Returns `false` when more than `cap` leaf nodes meet `q`: the list is then partial and
     /// unsealed, and the caller answers the rows another way. On `true` the list is sealed.
-    pub(crate) fn collect_leaves<const MAXROW: bool>(&self, q: &QueryBox, out: &mut CandList, cap: usize) -> bool {
+    ///
+    /// In test and `bp-query-counts` builds, `box_tests` accumulates the walk's 8-wide box tests.
+    pub(crate) fn collect_leaves<const MAXROW: bool>(
+        &self,
+        q: &QueryBox,
+        out: &mut CandList,
+        cap: usize,
+        #[cfg(any(test, feature = "bp-query-counts"))] box_tests: &mut u64,
+    ) -> bool {
         out.clear();
         let levels = usize::from(self.levels);
         let nodes = self.nodes.as_read_slice();
@@ -496,6 +504,10 @@ impl PackedBvh8 {
                 let (level, index) = unpack(stack[depth]);
                 let node = &nodes[self.level_start[level] as usize + index];
                 let mut mask = box_mask(node, q);
+                #[cfg(any(test, feature = "bp-query-counts"))]
+                {
+                    *box_tests += 1;
+                }
                 if level == 1 {
                     let maxrow_of = if MAXROW { Some(leaves) } else { None };
                     if mask != 0 && !out.push_lanes(node, mask, (index * LANES) as u32, cap, maxrow_of) {

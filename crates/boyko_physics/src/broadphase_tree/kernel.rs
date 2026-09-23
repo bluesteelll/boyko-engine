@@ -242,8 +242,9 @@ impl CandList {
         self.len
     }
 
-    /// Test-only: chunks of eight candidates a row tests (`0` until sealed).
-    #[cfg(test)]
+    /// Chunks of eight candidates a row tests (`0` until sealed; test and `bp-query-counts`
+    /// builds only).
+    #[cfg(any(test, feature = "bp-query-counts"))]
     pub(crate) fn chunks(&self) -> usize {
         self.chunks
     }

@@ -14,8 +14,8 @@
 //!   row's `(seg, nrev, nfwd)`) compared; G-LL2: the G1 property tests draw the step's kernel,
 //!   so the oracle sees both; G-LL4: every leaf-list test's kernel arm equals its scalar arm;
 //!   G-LL5: a lowered collection cap takes the fallback, which keeps the bytes; the one-leaf
-//!   active tree over a multi-leaf static tree (C3b review, W1); the max row the cut reads
-//!   (W2).
+//!   active tree over a multi-leaf static tree (C3b review, W1); the max row the cut reads and
+//!   the kept-count pin, the cut's gate in the default test command (W2).
 //!
 //! Every test is device-free and heap-light; under Miri the property tests shrink to 16 cases
 //! at n ≤ 24 and the kernel is the scalar arm.
@@ -38,9 +38,9 @@ use super::kernel::{
     leaf_mask_above_scalar, leaf_mask_scalar,
 };
 use super::{
-    ADMIT_BUILD_RATIO, BroadphaseTree, JUMPER, KIND_EXCLUDED, KIND_WIDE, QueryKernel,
-    TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into, classify, mark_jumpers, merge_into_sorted,
-    sphere_bound_feasible,
+    ADMIT_BUILD_RATIO, BroadphaseTree, JUMPER, KIND_EXCLUDED, KIND_WIDE, LeafListCounts,
+    QueryKernel, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into, classify, mark_jumpers,
+    merge_into_sorted, sphere_bound_feasible,
 };
 use crate::systems::body_bounding_radius;
 use crate::scratch_ids::{TREE_ACTIVE, TREE_SORT_A, TREE_SORT_B, TREE_SS, tree_column_id};
@@ -1840,4 +1840,58 @@ fn receipts_name_the_kernel_that_ran() {
     assert_eq!(d2.row_walk_leaves - d.row_walk_leaves, leaves, "the per-row walk when selected");
     assert_eq!(d2.leaf_list_leaves, d.leaf_list_leaves);
     assert_eq!(sim.tree.query_kernel(), QueryKernel::RowWalk);
+}
+
+/// The kept-count reference of the review's W2 on the active tree of the last step: per Q row,
+/// the active leaf nodes whose box meets the row's query box, without and with the max-row cut.
+/// It reads every leaf node, not the collection — `L`'s box contains each of its rows' query
+/// boxes, so every leaf node whose box meets a row's query box is in `L`'s collection — and
+/// takes each node's largest row from its lanes, not from `LEAF_MAXROW`, so it shares nothing
+/// with the pass but the tree.
+fn kept_reference(tree: &PackedBvh8) -> (u64, u64) {
+    let leaves = tree.leaf_nodes();
+    let boxes: Vec<QueryBox> = (0..leaves.len()).map(|m| tree.leaf_box(m)).collect();
+    let maxrows: Vec<u32> = leaves
+        .iter()
+        .map(|node| node.p[LEAF_ROW].iter().map(|b| b.to_bits()).filter(|&r| r != NO_LANE_ROW).max().unwrap_or(0))
+        .collect();
+    let (mut without_cut, mut with_cut) = (0u64, 0u64);
+    for slot in 0..tree.leaves() {
+        let leaf = tree.leaf(slot);
+        let q = QueryBox::of(leaf.x, leaf.y, leaf.z, leaf.r);
+        for (b, &maxrow) in boxes.iter().zip(&maxrows) {
+            let meets = (0..3).all(|a| q.lo[a] <= b.hi[a] && q.hi[a] >= b.lo[a]);
+            without_cut += u64::from(meets);
+            with_cut += u64::from(meets && maxrow > leaf.row);
+        }
+    }
+    (without_cut, with_cut)
+}
+
+/// The kept-count pin's scene counts (`kept_reference`), pinned so a change of the scene or of
+/// the reference is visible: without the cut, and with it.
+const KEPT_PIN_WITHOUT_CUT: u64 = 48;
+const KEPT_PIN_WITH_CUT: u64 = 42;
+
+/// The review's W2, the max-row cut's gate in the default test command: on a line of touching
+/// spheres whose rows are scattered against their positions (so a leaf node's rows span the
+/// row range and the cut decides), the pass keeps exactly the reference's candidates with the
+/// cut, strictly fewer than without it. G-LL1 cannot see the cut — a candidate it removes emits
+/// nothing — so this is the gate that goes RED when the cut is dropped (the pass's active
+/// prefilter run without `maxrow > row`) or loosened to `maxrow >= row`.
+#[test]
+fn gll3_kept_count_pin_sees_the_max_row_cut() {
+    // 40 radius-0.6 spheres at unit spacing: row `r` sits at `x = (17·r) mod 40`.
+    let bodies: Vec<BodyState> = (0..40u32).map(|r| sphere([((17 * r) % 40) as f32, 0.0, 0.0], 0.6, 1.0, false)).collect();
+    let mut sim = Sim::new(bodies);
+    sim.step_no_gather();
+    assert_eq!(sim.pairs(), 39, "anti-vacuity: the line's 39 touching neighbours");
+    let (without_cut, with_cut) = kept_reference(&sim.tree.active);
+    let c: LeafListCounts = sim.tree.ll_counts;
+    assert_eq!(c.kept_active, with_cut, "the pass keeps the reference's candidates under the cut: {c:?}");
+    assert!(with_cut < without_cut, "anti-vacuity: the cut removes candidates on this scene");
+    assert_eq!((without_cut, with_cut), (KEPT_PIN_WITHOUT_CUT, KEPT_PIN_WITH_CUT), "the scene's pinned counts");
+    assert_eq!((c.leaves, c.rows), (5, 40));
+    assert_eq!(c.emitted, 39, "one owner per pair");
+    assert_eq!((c.cands_static, c.kept_static), (0, 0), "no static set");
 }

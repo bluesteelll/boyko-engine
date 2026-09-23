@@ -24,6 +24,22 @@
 //! (every visited node but the root was descended into; the query row finds itself; a Q–Q pair
 //! is found from both ends and emitted from one; `exact ≤ box hits ≤ candidates ≤ 8 · leaves`).
 //!
+//! **The leaf-list query (C3b, F1).** The step now runs [`QueryKernel::LeafList`], and the
+//! replay above is the per-row walk it replaced, so the replay's figures are the "before". The
+//! driver adds, per counted scene:
+//! * G-LL1: the step's query stage re-run under both kernels writes the same bytes (the stream
+//!   and every `(seg, nrev, nfwd)`), on the bench's own scenes;
+//! * the pass's own counts ([`LeafListCounts`]: collection box tests, candidates, prefilter
+//!   chunks, kept exact tests, emitted partners, sort shifts), printed beside the walk's;
+//! * G-LL3: on the three G4 scenes the counts equal the design's model, which was validated
+//!   row by row against this replay (`sim.py`, 0 mismatching rows of 1 240 / 1 000 / 1 004). The
+//!   max-row cut is the pin's reason: the oracle and G-LL1 cannot see it (a candidate it drops
+//!   emits nothing), and without it J keeps 20 377 exact tests, not 15 575.
+//!
+//! A second test counts the same at the G4 small sizes (17, 64, 128, 256), over a scene with a
+//! multi-leaf static tree, and at 10k and 100k (the leaf list's fallback count; no oracle there),
+//! the C3b review's W5.
+//!
 //! Compiled only under the non-default `bp-query-counts` feature. Without it this file is
 //! empty and `running 0 tests` is the expected output — it is not a pass of anything.
 //!
@@ -35,8 +51,8 @@
 #[path = "../benches/support/bp_g4_scenes.rs"]
 mod scenes;
 
-use boyko_physics::broadphase_tree::counts::{QueryCounts, RowQueryCounts, TreeShape};
-use boyko_physics::broadphase_tree::{BroadphaseTree, all_pairs_into};
+use boyko_physics::broadphase_tree::counts::{LeafListCounts, QueryCounts, RowQueryCounts, TreeShape};
+use boyko_physics::broadphase_tree::{BroadphaseTree, QueryKernel, all_pairs_into};
 use boyko_physics::resources::{BodyState, ContactPairs};
 use boyko_physics::systems::body_bounding_radius;
 
@@ -97,23 +113,48 @@ struct Counted {
     static_pairs: u64,
     active: TreeShape,
     statics: TreeShape,
+    /// The step's leaf-list pass.
+    leaf_list: LeafListCounts,
+    /// Active leaf nodes the step's pass handed to the per-row walk (a collection over the cap).
+    fallback_leaves: u64,
 }
 
-/// Drives `bodies` to the bench's steady state and counts that step's query pass.
-fn count(label: &str, bodies: &[BodyState]) -> Counted {
+/// Drives `bodies` to the bench's steady state and counts that step's query pass, checking the
+/// step's pair set against AllPairs when `oracle` is set (not at 100k rows).
+fn count(label: &str, bodies: &[BodyState], oracle: bool) -> Counted {
     let n = bodies.len();
-    let mut oracle = ContactPairs::with_capacity(0);
-    all_pairs_into(bodies, &mut oracle);
-    assert!(!oracle.pairs().is_empty(), "anti-vacuity: {label} must produce pairs");
+    let mut want = ContactPairs::with_capacity(0);
+    if oracle {
+        all_pairs_into(bodies, &mut want);
+        assert!(!want.pairs().is_empty(), "anti-vacuity: {label} must produce pairs");
+    }
 
     let mut tree = BroadphaseTree::with_capacity(n);
     tree.set_brute_max_rows(0);
+    assert_eq!(tree.query_kernel(), QueryKernel::LeafList, "the default kernel is the leaf list");
     let mut out = ContactPairs::with_capacity(0);
     // `TREE_WARM_STEPS` untimed steps, then one more: the step every timed iteration repeats.
-    for _ in 0..=TREE_WARM_STEPS {
+    let mut fallback_before = 0;
+    for step in 0..=TREE_WARM_STEPS {
+        if step == TREE_WARM_STEPS {
+            fallback_before = tree.diag().fallback_leaves;
+        }
         tree.step_direct(bodies, &mut out);
     }
-    assert_eq!(out.pairs(), oracle.pairs(), "{label}: the tree's steady-state pair set is AllPairs'");
+    if oracle {
+        assert_eq!(out.pairs(), want.pairs(), "{label}: the tree's steady-state pair set is AllPairs'");
+    }
+    assert!(!out.pairs().is_empty(), "anti-vacuity: {label} must produce pairs");
+    let fallback_leaves = tree.diag().fallback_leaves - fallback_before;
+
+    // G-LL1 on the bench's scene: the step's query stage under each kernel, byte for byte. The
+    // leaf-list re-run leaves the pass's counts as the step's.
+    let leaf_list_stage = tree.query_stage(QueryKernel::LeafList);
+    let row_walk_stage = tree.query_stage(QueryKernel::RowWalk);
+    assert!(!leaf_list_stage.0.is_empty(), "anti-vacuity: {label}'s stream holds segments");
+    assert_eq!(leaf_list_stage.0, row_walk_stage.0, "{label}: G-LL1, the leaf list's stream is the per-row walk's");
+    assert_eq!(leaf_list_stage.1, row_walk_stage.1, "{label}: G-LL1, the leaf list's records are the per-row walk's");
+    let leaf_list = tree.leaf_list_counts();
 
     let mut rows = Vec::with_capacity(n);
     let totals = tree.count_query_pass(|r| rows.push(r));
@@ -162,6 +203,14 @@ fn count(label: &str, bodies: &[BodyState]) -> Counted {
         dump(std::path::Path::new(&dir), label, bodies, &rows);
     }
 
+    // The pass's counts are of the same step: every Q row outside a fallback leaf emitted what
+    // the walk emits.
+    if fallback_leaves == 0 {
+        assert_eq!(leaf_list.leaves, u64::from(totals.rows.div_ceil(8)), "{label}: every active leaf node was answered by the leaf list");
+        assert_eq!(leaf_list.rows, u64::from(totals.rows), "{label}: every Q row was answered by the leaf list");
+        assert_eq!(leaf_list.emitted, totals.emitted, "{label}: the leaf list emitted the walk's partners");
+    }
+
     Counted {
         label: label.to_owned(),
         rows_total: n,
@@ -171,6 +220,67 @@ fn count(label: &str, bodies: &[BodyState]) -> Counted {
         static_pairs: totals.static_pairs,
         active: tree.active_shape(),
         statics: tree.static_shape(),
+        leaf_list,
+        fallback_leaves,
+    }
+}
+
+/// The design's model of the leaf-list pass on the three G4 scenes (`sim.py`, C3b design §7,
+/// G-LL3): collection box tests (active tree), active candidates, static candidates, prefilter
+/// chunks, kept exact tests (static included), emitted partners.
+const G_LL3_PINS: [(&str, [u64; 6]); 3] = [
+    ("bp_g4_scene/tree/j100", [1953, 5663, 155, 6216, 15575, 9564]),
+    ("bp_g4_uniform/tree/1000", [1228, 3465, 0, 3848, 7200, 2400]),
+    ("bp_g4_disparity/tree/1000", [1487, 4096, 0, 4560, 11252, 6706]),
+];
+
+/// The six G-LL3 figures of a pass.
+fn g_ll3_figures(c: &LeafListCounts) -> [u64; 6] {
+    [
+        c.collect_box_active,
+        c.cands_active,
+        c.cands_static,
+        c.prefilter_chunks,
+        c.kept_active + c.kept_static,
+        c.emitted,
+    ]
+}
+
+/// The before/after table: per queried row, the per-row walk's work (the replay, every Q row)
+/// against the leaf-list pass's (its own counts, per row it answered: a fallback leaf's rows are
+/// the walk's).
+fn print_before_after(counted: &[Counted]) {
+    println!("\n## The per-row walk (before, every Q row) against the leaf-list pass (after, per row it answered)\n");
+    println!(
+        "| scene | Q rows | members | static levels | fallback leaves | walk: 8-wide tests (box + exact) | walk: exact tests | leaf list: collection box tests | leaf list: prefilter chunks | leaf list: kept exact tests (static) | leaf list: 8-wide tests | tests after / before | candidates / active leaf | emitted | sort shifts |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    for c in counted {
+        let rows = c.rows.len() as f64;
+        let walk_tests: u64 = c.rows.iter().map(|r| u64::from(r.both().tests())).sum();
+        let walk_exact: u64 = c.rows.iter().map(|r| u64::from(r.both().leaf_tests)).sum();
+        let ll = &c.leaf_list;
+        let ll_rows = ll.rows as f64;
+        let ll_tests = ll.collect_box_active + ll.collect_box_static + ll.prefilter_chunks + ll.kept_active + ll.kept_static;
+        println!(
+            "| {} | {} | {} | {} | {} | {:.2} | {:.2} | {:.3} | {:.3} | {:.2} ({:.2}) | {:.2} | {:.3} | {:.2} | {:.3} | {:.2} |",
+            c.label,
+            c.rows.len(),
+            c.members,
+            c.statics.levels,
+            c.fallback_leaves,
+            walk_tests as f64 / rows,
+            walk_exact as f64 / rows,
+            (ll.collect_box_active + ll.collect_box_static) as f64 / ll_rows,
+            ll.prefilter_chunks as f64 / ll_rows,
+            (ll.kept_active + ll.kept_static) as f64 / ll_rows,
+            ll.kept_static as f64 / ll_rows,
+            ll_tests as f64 / ll_rows,
+            (ll_tests as f64 / ll_rows) / (walk_tests as f64 / rows),
+            if ll.leaves > 0 { ll.cands_active as f64 / ll.leaves as f64 } else { 0.0 },
+            ll.emitted as f64 / ll_rows,
+            ll.sort_shifts as f64 / ll_rows,
+        );
     }
 }
 
@@ -289,10 +399,23 @@ fn query_counts_on_the_g4_scenes() {
     let snapshot = j_snapshot();
 
     let counted = [
-        count(&format!("bp_g4_scene/tree/j{J_SNAPSHOT_STEPS}"), &snapshot),
-        count("bp_g4_uniform/tree/1000", &uniform),
-        count("bp_g4_disparity/tree/1000", &disparity),
+        count(&format!("bp_g4_scene/tree/j{J_SNAPSHOT_STEPS}"), &snapshot, true),
+        count("bp_g4_uniform/tree/1000", &uniform, true),
+        count("bp_g4_disparity/tree/1000", &disparity, true),
     ];
+
+    // G-LL3: the pass's counts are the design model's.
+    for (c, (label, pins)) in counted.iter().zip(G_LL3_PINS) {
+        assert_eq!(c.label, label, "the pins are in scene order");
+        assert_eq!(c.fallback_leaves, 0, "{label}: no fallback at 1 000 rows");
+        assert_eq!(c.leaf_list.collect_box_static, 0, "{label}: a one-level or empty static tree needs no box test");
+        assert_eq!(
+            g_ll3_figures(&c.leaf_list),
+            pins,
+            "{label}: G-LL3, [collection box tests, active candidates, static candidates, prefilter chunks, kept exact tests, emitted] = the model's; full counts {:?}",
+            c.leaf_list
+        );
+    }
 
     println!("\n## Summary against the design (04-DESIGN-REV2.md)\n");
     println!(
@@ -324,5 +447,43 @@ fn query_counts_on_the_g4_scenes() {
         print_queries(c);
         print_shape(&c.label, "active", &c.active);
         print_shape(&c.label, "static", &c.statics);
+    }
+    print_before_after(&counted);
+    for c in &counted {
+        println!("\n{}: leaf-list pass {:?}", c.label, c.leaf_list);
+    }
+}
+
+/// The C3b review's W5: the same counts at the G4 small sizes (where the brute threshold and the
+/// AUTO crossovers are read), over a scene whose static tree has several leaf nodes (the shape
+/// of the compaction and admission cells), and at 10k and 100k rows, where the leaf list's
+/// fallback count is the question (no oracle at 100k).
+#[test]
+fn leaf_list_counts_at_the_small_and_large_sizes_and_over_a_multi_leaf_static_tree() {
+    let mut counted = Vec::new();
+    for n in [17usize, 64, 128, 256, 10_000, 100_000] {
+        let oracle = n <= 10_000;
+        let mut uniform = scene(n);
+        make_dynamic(&mut uniform);
+        counted.push(count(&format!("bp_g4_uniform/tree/{n}"), &uniform, oracle));
+        let mut disparity = disparity_scene(n);
+        make_dynamic(&mut disparity);
+        counted.push(count(&format!("bp_g4_disparity/tree/{n}"), &disparity, oracle));
+    }
+    // Every fourth body of the uniform lattice dynamic, the rest static: after the warm-up the
+    // statics are members and the dynamics query a static tree of many leaf nodes.
+    for n in [256usize, 1_000] {
+        let mut mixed = scene(n);
+        for (i, body) in mixed.iter_mut().enumerate() {
+            body.inv_mass = if i % 4 == 0 { 1.0 } else { 0.0 };
+        }
+        let c = count(&format!("mixed_static/tree/{n}"), &mixed, true);
+        assert!(c.statics.levels >= 2, "{}: a static tree with internal nodes", c.label);
+        assert!(c.leaf_list.collect_box_static > 0 && c.leaf_list.cands_static > 0, "{}: the static collection ran", c.label);
+        counted.push(c);
+    }
+    print_before_after(&counted);
+    for c in &counted {
+        println!("\n{}: leaf-list pass {:?}", c.label, c.leaf_list);
     }
 }

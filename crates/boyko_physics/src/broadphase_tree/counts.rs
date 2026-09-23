@@ -21,6 +21,12 @@
 //! * Per tree ([`TreeShape`]): the levels, the leaf occupancy, the internal nodes' child counts,
 //!   and per level the children's boxes against the box of the node that holds them, by surface
 //!   area and by volume.
+//! * Per leaf-list pass ([`LeafListCounts`], the C3b fix F1): the collection walks' box tests,
+//!   the candidates collected, the prefilter chunks, the exact tests kept and the partners
+//!   emitted — counted by the pass itself, in this feature's build and the crate's test build.
+//!   [`BroadphaseTree::leaf_list_counts`] reads the last pass's; [`BroadphaseTree::query_stage`]
+//!   re-runs a step's query stage under either kernel, so a driver can compare the two kernels'
+//!   bytes (G-LL1) on scenes the crate's own tests do not hold.
 //!
 //! # How a pass is counted
 //!
@@ -39,7 +45,9 @@ use super::bvh::{
     MIN_Z, NO_LANE_ROW, Node8,
 };
 use super::kernel::{QueryBox, padded_radius};
-use super::{BroadphaseTree, KIND_WIDE};
+use super::{BroadphaseTree, KIND_WIDE, QueryKernel};
+
+pub use super::LeafListCounts;
 
 /// The most levels a [`TreeShape`] describes (`8^13 > 2^24` rows).
 pub const TREE_MAX_LEVELS: usize = MAX_LEVELS;
@@ -319,6 +327,35 @@ impl BroadphaseTree {
         }
         totals.static_pairs = self.ss.as_read_slice().len() as u64;
         totals
+    }
+
+    /// What the last leaf-list pass did: the pass of the last tree-path step under
+    /// [`QueryKernel::LeafList`], or of the last [`query_stage`](Self::query_stage) re-run under
+    /// it.
+    pub fn leaf_list_counts(&self) -> LeafListCounts {
+        self.ll_counts
+    }
+
+    /// Re-runs the query stage of the last tree-path step under `kernel` and returns its bytes:
+    /// the stream (every Q and Wide row's segment) and every row's `(seg, nrev, nfwd)`. The
+    /// trees and the records' bits are the step's and the stage reads nothing else, so the
+    /// re-run is the step's stage under the other kernel; the selected kernel and the
+    /// structural counters are restored. Allocates the two returned buffers (a counting build's
+    /// driver, never a step).
+    pub fn query_stage(&mut self, kernel: QueryKernel) -> (Vec<u32>, Vec<(u32, u32, u32)>) {
+        let n = self.rec[usize::from(self.cur)].as_read_slice().len();
+        let (kernel_before, diag_before) = (self.kernel, self.diag);
+        self.kernel = kernel;
+        self.query_all(n);
+        self.kernel = kernel_before;
+        self.diag = diag_before;
+        let stream = self.aux.as_read_slice().to_vec();
+        let records = self.rec[usize::from(self.cur)]
+            .as_read_slice()
+            .iter()
+            .map(|r| (r.seg, r.nrev, r.nfwd))
+            .collect();
+        (stream, records)
     }
 
     /// The active tree's shape (the Q rows of the last tree-path step).
