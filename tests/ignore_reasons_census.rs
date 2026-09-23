@@ -107,10 +107,10 @@
 //!   runs in every debug run and cannot pass in release), so it needs a reason but no class.
 //! * **Consistency, not classification.** Four rules, each the negation of a misfile measured in
 //!   this tree. They check a class against what the source says; they never choose one.
-//!   1. A test whose body calls an `*_or_skip` helper, a same-file fn returning
-//!      `Option<VulkanContext>`, or one of [`DEVICE_ENTRY_CALLS`] carries a `gpu*` class (or a
-//!      no-leg class). This is the `boot_*_or_skip` shape that returns early and PASSES on a box
-//!      without a GPU.
+//!   1. A test whose body reaches a device — an `*_or_skip` helper, one of
+//!      [`DEVICE_ENTRY_CALLS`], a same-file fn returning `Option<VulkanContext>`, or a same-file fn
+//!      that reaches one of these ([`device_helpers`]) — carries a `gpu*` class (or a no-leg class).
+//!      This is the `boot_*_or_skip` shape that returns early and PASSES on a box without a GPU.
 //!   2. A test that exists only under Miri (a `cfg` false natively, true under Miri) carries a
 //!      `miri-*` class, and a `miri-*` class needs `miri` somewhere in the site's `cfg` context.
 //!      This is the `#![cfg(miri)]` shape that prints `running 0 tests` natively and exits 0.
@@ -120,10 +120,11 @@
 //!      declared in the crate's `[features]` table, so a renamed feature reds.
 //!   4. The scope rule above.
 //!
-//! What the rules cannot see: a device reached only through a helper that is not a listed entry
-//! call (worker drivers that spawn a child process, a probe type with its own `open`), and a
-//! device-free class chosen wrongly among `solo` / `slow`. Those were settled by reading, and the
-//! per-site record lives with the migration's receipts, not here.
+//! What the rules cannot see: a device reached only through a child process (a driver that
+//! re-executes its own binary to run a windowed worker), through another module's helper
+//! (`particle_scene::build_app`), or through a probe type with its own `open`; and a device-free
+//! class chosen wrongly between `solo` and `slow`. Those were settled by reading; the per-site
+//! record is the B3 migration's receipt, not this file.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1279,35 +1280,24 @@ fn fn_body(mask: &str, braces: &BTreeMap<usize, usize>, from: usize, name: &str)
     }
 }
 
-/// Same-file fns whose signature returns `Option<VulkanContext>` — the boot helpers, under
-/// whatever name a file gave them.
-fn vulkan_boot_helpers(mask: &str) -> Vec<String> {
-    let mut helpers = Vec::new();
+/// Whether `body` calls the fn `name` (a whole identifier followed by `(`).
+fn calls(body: &str, name: &str) -> bool {
     let mut from = 0usize;
-    while let Some(offset) = mask[from..].find("fn ") {
+    while let Some(offset) = body[from..].find(name) {
         let at = from + offset;
-        from = at + 3;
-        if at > 0 && mask[..at].ends_with(is_ident_char) {
-            continue;
-        }
-        let name: String = mask[at + 3..].trim_start().chars().take_while(|c| is_ident_char(*c)).collect();
-        let Some(body) = mask[at..].find(['{', ';']) else { continue };
-        let signature: String = mask[at..at + body].chars().filter(|c| !c.is_whitespace()).collect();
-        if !name.is_empty() && signature.ends_with("->Option<VulkanContext>") {
-            helpers.push(name);
+        from = at + name.len();
+        let bounded = !body[..at].ends_with(is_ident_char) && body[from..].trim_start().starts_with('(');
+        if bounded {
+            return true;
         }
     }
-    helpers
+    false
 }
 
-/// The device entry points a test body calls, by name.
-fn device_entries(body: &str, helpers: &[String]) -> Vec<String> {
-    let mut found = Vec::new();
-    for call in DEVICE_ENTRY_CALLS {
-        if body.contains(call) {
-            found.push(call.to_string());
-        }
-    }
+/// The device entry points a body calls DIRECTLY: [`DEVICE_ENTRY_CALLS`] and `*_or_skip` helpers.
+fn direct_device_entries(body: &str) -> Vec<String> {
+    let mut found: Vec<String> =
+        DEVICE_ENTRY_CALLS.iter().filter(|call| body.contains(*call)).map(|call| call.to_string()).collect();
     let mut from = 0usize;
     while let Some(offset) = body[from..].find("_or_skip") {
         let end = from + offset + "_or_skip".len();
@@ -1319,17 +1309,72 @@ fn device_entries(body: &str, helpers: &[String]) -> Vec<String> {
         }
         from = end;
     }
-    for helper in helpers {
-        let mut from = 0usize;
-        while let Some(offset) = body[from..].find(helper.as_str()) {
-            let at = from + offset;
-            from = at + helper.len();
-            let bounded = (at == 0 || !body[..at].ends_with(is_ident_char))
-                && body[from..].trim_start().starts_with('(');
-            if bounded {
-                found.push(format!("{helper}(…) -> Option<VulkanContext>"));
-                break;
+    found
+}
+
+/// Same-file fns that reach a device, each with why: those returning `Option<VulkanContext>` (the
+/// boot helpers, under whatever name a file gave them), those whose body calls a device entry, and
+/// — to a fixed point — those whose body calls one of these. The closure is what lets the rule see
+/// a test that reaches `with_windowed_present` through a `run_showcase_dump`, or
+/// `EnginePlugins::window` through a file's own `boot()`.
+fn device_helpers(mask: &str, braces: &BTreeMap<usize, usize>) -> BTreeMap<String, String> {
+    /// One `fn` item: its name, its signature with whitespace removed, and its body's braces.
+    struct FnItem {
+        name: String,
+        signature: String,
+        body: Option<(usize, usize)>,
+    }
+    let mut fns = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = mask[from..].find("fn ") {
+        let at = from + offset;
+        from = at + 3;
+        if at > 0 && mask[..at].ends_with(is_ident_char) {
+            continue;
+        }
+        let name: String = mask[at + 3..].trim_start().chars().take_while(|c| is_ident_char(*c)).collect();
+        let Some(end) = mask[at..].find(['{', ';']) else { continue };
+        let signature: String = mask[at..at + end].chars().filter(|c| !c.is_whitespace()).collect();
+        let body = braces.get(&(at + end)).map(|close| (at + end, *close));
+        if !name.is_empty() {
+            fns.push(FnItem { name, signature, body });
+        }
+    }
+    let mut helpers = BTreeMap::new();
+    for FnItem { name, signature, body } in &fns {
+        if signature.ends_with("->Option<VulkanContext>") {
+            helpers.insert(name.clone(), "-> Option<VulkanContext>".to_string());
+        } else if let Some((open, close)) = body
+            && let Some(entry) = direct_device_entries(&mask[*open..=*close]).first()
+        {
+            helpers.insert(name.clone(), format!("reaches {entry}"));
+        }
+    }
+    loop {
+        let mut grew = false;
+        for FnItem { name, body, .. } in &fns {
+            let Some((open, close)) = body else { continue };
+            if helpers.contains_key(name) {
+                continue;
             }
+            let reached = helpers.keys().find(|helper| calls(&mask[*open..=*close], helper)).cloned();
+            if let Some(helper) = reached {
+                helpers.insert(name.clone(), format!("reaches {helper}(…)"));
+                grew = true;
+            }
+        }
+        if !grew {
+            return helpers;
+        }
+    }
+}
+
+/// The device entry points a test body calls, directly or through a same-file helper.
+fn device_entries(body: &str, helpers: &BTreeMap<String, String>) -> Vec<String> {
+    let mut found = direct_device_entries(body);
+    for (helper, why) in helpers {
+        if calls(body, helper) {
+            found.push(format!("{helper}(…) [{why}]"));
         }
     }
     found.sort();
@@ -1358,7 +1403,7 @@ fn contexts_in_text(text: &str, sites: &[Site]) -> Vec<Context> {
     let mask = code_mask(text);
     let braces = brace_pairs(&mask);
     let gates = gates_in(text, &mask, &braces);
-    let helpers = vulkan_boot_helpers(&mask);
+    let helpers = device_helpers(&mask, &braces);
     sites
         .iter()
         .map(|site| {
@@ -2156,7 +2201,18 @@ fn the_consistency_rules_fire_on_the_shapes_they_exist_for() {
             "a boot helper under another name, found by its return type",
             "fn open() -> Option<VulkanContext> { None }\n#[test]\n#[ignore = \"slow: x\"]\nfn t() { let _ = open(); }\n"
                 .to_string(),
-            &["open(…) -> Option<VulkanContext>"],
+            &["open(…) [-> Option<VulkanContext>]"],
+        ),
+        (
+            "a device reached through two same-file helpers",
+            "fn boot() -> App { let mut app = App::new(); app.add_plugins(EnginePlugins::window(\"t\", 1, 1)); app }
+             fn run_dump() { boot().run(); }
+#[test]
+#[ignore = \"solo: x\"]
+fn t() { run_dump(); }
+"
+                .to_string(),
+            &["run_dump(…) [reaches boot(…)]"],
         ),
         (
             "a windowed `boyko_app` test labelled device-free",
