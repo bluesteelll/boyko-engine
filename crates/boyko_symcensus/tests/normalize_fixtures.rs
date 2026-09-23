@@ -77,6 +77,6 @@ fn a_pin_file_reads_the_same_through_a_crlf_checkout() {
     assert_eq!(a.pins, b.pins, "core.autocrlf's CRLF checkout must not change a pin");
     let mut edited = lf.clone();
     let at = edited.find("\n     0: ").expect("a body line");
-    edited.insert_str(at + 1, " ");
+    edited.insert(at + 1, ' ');
     assert!(PinFile::parse(&edited).is_err(), "a hand-edited body must not parse");
 }
