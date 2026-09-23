@@ -12,6 +12,8 @@
 //! * `boyko_ui::binding::bind_system::ui_bind_apply` is scheduled exactly once;
 //! * (b) − (a), against app (a)'s PINNED inventory, holds only `boyko_ui::` and `boyko_input::`
 //!   systems, and (a) − (b) is empty — composing the UI neither added nor removed an engine system.
+//!   Against a pin, an engine system gained or lost moves (b) the same way, so a RED here names
+//!   both causes; app (a)'s own G-GRAPH, RED as well in the engine case, tells them apart.
 //!
 //! # What is NOT measured (Tier B, not landed at B2)
 //!
@@ -109,15 +111,25 @@ fn g_graph_app_b_engine_ui() {
         "G-GRAPH (b) − (a): {} system(s) added by the UI composition",
         added.iter().map(|x| x.1).sum::<u32>()
     );
+    // (a) here is app (a)'s PIN, not an app (a) built in this process: a system the ENGINE gained
+    // or lost moves (b) away from that pin exactly as a UI-composition change would, so neither
+    // message can name the culprit. App (a)'s own G-GRAPH tells them apart — RED there too means
+    // the engine moved, and app (a)'s pin is re-derived first.
     for (n, c) in &added {
         println!("  + ×{c} {n}");
         if !(n.starts_with("boyko_ui::") || n.starts_with("boyko_input::")) {
-            violations.push(format!("B5: the UI composition added `{n}`, which is neither a boyko_ui nor a boyko_input system"));
+            violations.push(format!(
+                "B5: `{n}` ×{c} is in app (b) but not in app (a)'s PINNED inventory, and is neither a \
+                 boyko_ui nor a boyko_input system — the UI composition added it, or the engine did \
+                 (then app (a)'s G-GRAPH is RED as well)"
+            ));
         }
     }
     for (n, c) in &removed {
         violations.push(format!(
-            "B5: the UI composition removed engine system `{n}` ×{c}"
+            "B5: `{n}` ×{c} is in app (a)'s PINNED inventory but not in app (b) — the UI composition \
+             removed an engine system, or the engine no longer registers it (then app (a)'s G-GRAPH \
+             is RED as well)"
         ));
     }
 
