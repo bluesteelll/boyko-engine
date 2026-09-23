@@ -1,0 +1,26 @@
+[package]
+name = "boyko-symcensus"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "UG-15's instrument: post-LTO object builds with a pairing guard, LLVM tool wrappers that are RED on an absent tool or an empty census, and the `ug15` probe / leg driver (unification plan rung B3)."
+
+# DEV-ONLY, and that is a property this crate's position in the graph must keep. No package may
+# name it under `[dependencies]` or `[build-dependencies]`: it spawns `cargo`, `llvm-*` and
+# `llvm-symbolizer`, reads the file system and parses tool output, none of which belongs in a
+# process that ships. Its one planned in-graph edge is `boyko-macros`' `[dev-dependencies]` (the
+# expanded corpus, M-b, runs this crate's visitor from the proc-macro crate's own tests).
+#
+# The table is EMPTY at commit A on purpose. The source walker (leg 1, M-a/M-b) adds `syn`,
+# `proc-macro2` and `quote` from the workspace pins when it lands; nothing here needs a third-party
+# crate, and cargo's JSON messages are read by the hand-rolled reader in `src/json.rs` for the
+# same reason `tests/reflect_manifest_census.rs` rolls its own: a gate whose subject is the build
+# must not pull a third-party graph into the build it measures.
+[dependencies]
+
+[[bin]]
+name = "ug15"
+path = "src/bin/ug15.rs"
+
+[lints]
+workspace = true
