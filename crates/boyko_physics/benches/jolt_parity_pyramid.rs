@@ -66,7 +66,8 @@
 //!   construction (`production_grid_equals_all_pairs`; the O7 bit suite), so cfg-A and cfg-B must
 //!   end in equal pose bytes: `--pose-out` on one run and `--expect-pose` on the other assert it.
 //! * `--cfg default` (the default): `PhysicsConfig::default()` as this tree ships it, except that
-//!   `--parallel-solve` and `--sleeping` force their knobs on. The `rest` rows use it. Since L4
+//!   `--parallel-solve` forces its knob on and `--sleeping on|off` sets its. The `rest` rows use
+//!   it. Since L4
 //!   that default has `parallel_solve` on, so `--parallel-solve` no longer changes a `--cfg
 //!   default` row, and such a row at W ≥ 2 dispatches its wide colors on its own; since L5 C4 it
 //!   has `parallel_narrowphase` on too, so such a row also dispatches its narrowphase at W ≥ 2
@@ -173,9 +174,14 @@
 //! --broadphase allpairs|tree|grid
 //!                              set broadphase (tree broadphase C3) under Manual selection, under
 //!                              any --cfg
-//! --sleeping                   sleeping on
-//! --threshold T                sleep threshold (speed², with --sleeping)
-//! --frozen-by K                void unless every dynamic row is frozen on step K (R-S: 300)
+//! --sleeping [on|off]          set sleeping (L10 C1a). A bare --sleeping is `on`, the spelling
+//!                              every recipe recorded before C1a uses. Unset, the --cfg decides:
+//!                              cfg-A/As/B off, --cfg default the tree's PhysicsConfig default
+//! --sleep-skip off|sets        L10's frozen-pair skip mode; refused until L10 C2a adds
+//!                              PhysicsConfig::sleep_skip
+//! --threshold T                sleep threshold (speed², with --sleeping on)
+//! --frozen-by K                void unless every dynamic row is frozen on step K (R-S: 300;
+//!                              with --sleeping on)
 //! --arm-profiler               the armed profile run
 //! --canary-frac F              with --canary-ref-ns T: the canary spins F*T ns
 //! --canary-ref-ns T
@@ -457,6 +463,17 @@ enum CfgKind {
     Default,
 }
 
+/// L10's frozen-pair skip mode as `--sleep-skip` names it (rev 2.2 Δ1: Replay is retired). Parsed
+/// now so a recipe can spell it; refused by [`validate`] until L10 C2a adds
+/// `PhysicsConfig::sleep_skip`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SleepSkipArg {
+    /// Every pair computed, as without L10.
+    Off,
+    /// Held islands' pairs skipped (L10 C3b).
+    Sets,
+}
+
 /// The parsed command line.
 #[derive(Debug)]
 struct Args {
@@ -472,7 +489,9 @@ struct Args {
     contact_reuse: Option<bool>,
     reuse_distance: Option<f32>,
     broadphase: Option<BroadphaseKind>,
-    sleeping: bool,
+    /// `--sleeping [on|off]`; `None` leaves the --cfg's own value.
+    sleeping: Option<bool>,
+    sleep_skip: Option<SleepSkipArg>,
     threshold: Option<f32>,
     frozen_by: Option<usize>,
     arm_profiler: bool,
@@ -502,7 +521,8 @@ fn usage_error(msg: &str) -> ExitCode {
         "usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] \
          [--gap G] [--solver colored|reference] [--cfg a|as|b|default] [--parallel-solve] \
          [--parallel-np on|off] [--contact-reuse on|off] [--reuse-distance D] \
-         [--broadphase allpairs|tree|grid] [--sleeping] [--threshold T] \
+         [--broadphase allpairs|tree|grid] [--sleeping [on|off]] [--sleep-skip off|sets] \
+         [--threshold T] \
          [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] [--csv PATH] \
          [--pose-out PATH] [--expect-pose PATH] [--label TEXT]"
     );
@@ -540,7 +560,8 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut contact_reuse = None;
     let mut reuse_distance = None;
     let mut broadphase = None;
-    let mut sleeping = false;
+    let mut sleeping = None;
+    let mut sleep_skip = None;
     let mut threshold = None;
     let mut frozen_by = None;
     let mut arm_profiler = false;
@@ -551,7 +572,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut expect_pose = None;
     let mut label = None;
 
-    let mut it = raw.iter().cloned();
+    let mut it = raw.iter().cloned().peekable();
     while let Some(flag) = it.next() {
         match flag.as_str() {
             "--bench" => {}
@@ -609,7 +630,28 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
                     }
                 }
             }
-            "--sleeping" => sleeping = true,
+            "--sleeping" => {
+                sleeping = Some(match it.peek().map(String::as_str) {
+                    Some("on") => {
+                        it.next();
+                        true
+                    }
+                    Some("off") => {
+                        it.next();
+                        false
+                    }
+                    // A bare `--sleeping` is `on`: the spelling of every recipe recorded before
+                    // L10 C1a (the P0 queue, the L9 and L10 fixture READMEs).
+                    _ => true,
+                });
+            }
+            "--sleep-skip" => {
+                sleep_skip = match it.next().as_deref() {
+                    Some("off") => Some(SleepSkipArg::Off),
+                    Some("sets") => Some(SleepSkipArg::Sets),
+                    other => return Err(format!("--sleep-skip: expected off|sets, got {other:?}")),
+                }
+            }
             "--threshold" => threshold = Some(parse_num::<f32>("--threshold", it.next())?),
             "--frozen-by" => frozen_by = Some(parse_num::<usize>("--frozen-by", it.next())?),
             "--arm-profiler" => arm_profiler = true,
@@ -640,6 +682,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         reuse_distance,
         broadphase,
         sleeping,
+        sleep_skip,
         threshold,
         frozen_by,
         arm_profiler,
@@ -672,7 +715,7 @@ fn validate(a: &Args) -> Result<(), String> {
         if a.cfg != CfgKind::Default {
             return Err("--solver reference takes --cfg default only: cfg-A/As/B are colored".into());
         }
-        if a.sleeping || a.parallel_solve || a.canary_frac.is_some() {
+        if a.sleeping == Some(true) || a.parallel_solve || a.canary_frac.is_some() {
             return Err(
                 "--solver reference has no sleeping, no parallel solve and no build_graph stage \
                  for the canary to precede"
@@ -688,8 +731,14 @@ fn validate(a: &Args) -> Result<(), String> {
                 .into(),
         );
     }
-    if a.threshold.is_some() && !a.sleeping {
-        return Err("--threshold needs --sleeping".into());
+    if a.threshold.is_some() && a.sleeping != Some(true) {
+        return Err("--threshold needs --sleeping on".into());
+    }
+    if let Some(mode) = a.sleep_skip {
+        return Err(format!(
+            "--sleep-skip {mode:?}: this tree's PhysicsConfig has no sleep_skip (L10 C2a adds it), \
+             so the row would run a mode it cannot select"
+        ));
     }
     if let Some(d) = a.reuse_distance {
         if a.contact_reuse != Some(true) {
@@ -700,8 +749,8 @@ fn validate(a: &Args) -> Result<(), String> {
         }
     }
     if let Some(k) = a.frozen_by {
-        if !a.sleeping {
-            return Err("--frozen-by needs --sleeping".into());
+        if a.sleeping != Some(true) {
+            return Err("--frozen-by needs --sleeping on".into());
         }
         if k == 0 || k > a.steps {
             return Err(format!("--frozen-by {k} must name a step in 1..={}", a.steps));
@@ -860,14 +909,15 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
             cfg.broadphase = if b { BroadphaseKind::Grid } else { BroadphaseKind::AllPairs };
             // cfg-As and cfg-B run the AVX2 cohort kernel; cfg-A the scalar oracle.
             cfg.simd_solve = args.cfg != CfgKind::A;
-            cfg.sleeping = args.sleeping;
+            // These configurations are pinned rows: sleeping is off unless the row asks.
+            cfg.sleeping = args.sleeping.unwrap_or(false);
         }
         CfgKind::Default => {
             if args.parallel_solve {
                 cfg.parallel_solve = true;
             }
-            if args.sleeping {
-                cfg.sleeping = true;
+            if let Some(sleeping) = args.sleeping {
+                cfg.sleeping = sleeping;
             }
         }
     }
@@ -1358,7 +1408,8 @@ fn self_check() -> ExitCode {
         contact_reuse: None,
         reuse_distance: None,
         broadphase: None,
-        sleeping: false,
+        sleeping: None,
+        sleep_skip: None,
         threshold: None,
         frozen_by: None,
         arm_profiler: false,
