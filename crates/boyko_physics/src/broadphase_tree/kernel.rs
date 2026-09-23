@@ -387,7 +387,8 @@ pub(crate) fn leaf_mask_above_scalar(node: &Node8, x: f32, y: f32, z: f32, r: f3
 /// push writes all eight arrays of each lane it appends, and [`seal`](Self::seal) writes one
 /// pad chunk behind the last candidate, whose empty box (`+inf` mins, `-inf` maxes) meets no
 /// query box. A lane, once written, stays initialised for the list's lifetime, so every lane
-/// below `LANES · chunks` is initialised whenever `chunks` was set by a seal.
+/// below `LANES · chunks` is initialised whenever `chunks` was set by a seal. A push never takes
+/// the list past [`LEAF_LIST_CAP`], whatever cap it is given, so the seal's pad chunk fits.
 #[repr(C, align(32))]
 pub(crate) struct CandList {
     /// `b[MIN_X ..= MAX_Z][i]`: candidate `i`'s parent-lane box.
@@ -444,10 +445,12 @@ impl CandList {
     }
 
     /// Appends one candidate: leaf `leaf` with box `[lo, hi]` and largest row `maxrow`. Returns
-    /// `false`, appending nothing, when the list would exceed `cap ≤ LEAF_LIST_CAP`.
+    /// `false`, appending nothing, when the list would exceed `cap`, clamped to
+    /// [`LEAF_LIST_CAP`] as in [`push_lanes`](Self::push_lanes).
     #[inline]
     pub(crate) fn push_one(&mut self, lo: [f32; 3], hi: [f32; 3], leaf: u32, maxrow: u32, cap: usize) -> bool {
         debug_assert!(cap <= LEAF_LIST_CAP, "invariant: the cap fits the buffer");
+        let cap = cap.min(LEAF_LIST_CAP);
         let i = self.len;
         if i + 1 > cap {
             return false;
@@ -467,7 +470,12 @@ impl CandList {
     /// indices `first + lane`) behind the candidates held, in ascending lane order. With
     /// `leaves`, each pushed candidate's largest row is read from its leaf node's
     /// [`LEAF_MAXROW`] row; without, it is `0`. Returns `false`, appending nothing, when the
-    /// list would exceed `cap ≤ LEAF_LIST_CAP`.
+    /// list would exceed `cap`.
+    ///
+    /// A caller passes `cap ≤ LEAF_LIST_CAP` and an eight-bit `mask` (debug-asserted). Every
+    /// build also clamps `cap` to [`LEAF_LIST_CAP`] and `mask` to its eight lane bits, so a
+    /// caller that breaks either gets a wrong list, never a store past a row or an appended
+    /// lane nobody wrote.
     #[inline]
     pub(crate) fn push_lanes(&mut self, node: &Node8, mask: u32, first: u32, cap: usize, leaves: Option<&[Node8]>) -> bool {
         self.push_lanes_arm::<false>(node, mask, first, cap, leaves)
@@ -486,6 +494,16 @@ impl CandList {
     ) -> bool {
         debug_assert!(cap <= LEAF_LIST_CAP, "invariant: the cap fits the buffer");
         debug_assert!(mask < 1 << LANES, "a lane mask has eight bits");
+        // The AVX2 arm's stores and every later read of the list rest on these two bounds, so
+        // they are enforced here in every build, not trusted to the caller: the list never
+        // passes `LEAF_LIST_CAP`, so an eight-lane store at `len` ends inside the rows; and a
+        // push appends only lanes it writes (the AVX2 arm writes the eight lanes of `mask`'s low
+        // byte). Both are no-ops for `collect_leaves`, whose cap is at most `LEAF_LIST_CAP` and
+        // whose mask is a `box_mask`, and both fold away in the production object: the cap
+        // there is the constant `LEAF_LIST_CAP`, and a movemask's high bits are known zero.
+        // Where the cap is not a constant (the test build), the clamp is loop-invariant.
+        let cap = cap.min(LEAF_LIST_CAP);
+        let mask = mask & ((1 << LANES) - 1);
         let len = self.len;
         let count = mask.count_ones() as usize;
         if len + count > cap {
@@ -495,7 +513,11 @@ impl CandList {
             self.push_lanes_scalar(node, mask, first);
         } else {
             #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
-            self.push_lanes_avx2(node, mask, first);
+            {
+                // SAFETY: `len + count ≤ cap ≤ LEAF_LIST_CAP`: the check above, against the cap
+                // clamped above, both in every build. So `self.len = len ≤ LEAF_LIST_CAP`.
+                unsafe { self.push_lanes_avx2(node, mask, first) };
+            }
             #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
             self.push_lanes_scalar(node, mask, first);
         }
@@ -532,9 +554,15 @@ impl CandList {
         }
     }
 
+    /// The AVX2 arm of the left-pack: eight-lane stores at `len` into every row, whatever
+    /// `popcount(mask)`.
+    ///
+    /// # Safety
+    ///
+    /// `self.len ≤ LEAF_LIST_CAP`.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
     #[inline]
-    fn push_lanes_avx2(&mut self, node: &Node8, mask: u32, first: u32) {
+    unsafe fn push_lanes_avx2(&mut self, node: &Node8, mask: u32, first: u32) {
         use core::arch::x86_64::{
             __m256i, _mm_cvtsi64_si128, _mm256_add_epi32, _mm256_cvtepu8_epi32, _mm256_load_ps,
             _mm256_permutevar8x32_epi32, _mm256_permutevar8x32_ps, _mm256_set1_epi32,
@@ -543,15 +571,18 @@ impl CandList {
         let len = self.len;
         debug_assert!(len <= LEAF_LIST_CAP, "invariant: a push starts at or below the cap");
         let entry = PACK_TABLE[(mask & 0xff) as usize];
-        // SAFETY: `len ≤ cap ≤ LEAF_LIST_CAP` (checked by `push_lanes` before this call), so the
-        // eight-lane stores at `len` end at `len + 8 ≤ CAND_BUF`, inside each row array, whose
-        // pointer is derived from `&mut self` and so is valid for writes; `storeu` has no
-        // alignment requirement and the lanes are `MaybeUninit`, so writing them is always
-        // sound. The loads read the 32-byte aligned, initialised `[f32; 8]` rows of the borrowed
-        // node (`Node8` is `#[repr(C, align(32))]`). The `avx2` feature is compiled in (the
-        // `cfg` on this function). The lanes past `popcount(mask)` receive permuted node lanes:
-        // initialised values that the next push or the seal's pad overwrites before a row
-        // reads them as candidates.
+        // SAFETY: `len ≤ LEAF_LIST_CAP`, the caller's guarantee. The one caller, `push_lanes_arm`,
+        // holds it with a check that runs in every build, `len + popcount(mask) ≤ cap` with its
+        // `cap` first clamped to `LEAF_LIST_CAP`, so the bound does not rest on the cap its own
+        // caller passes (that one is only debug-asserted). So the eight-lane stores at `len` end
+        // at `len + 8 ≤ CAND_BUF`, inside each row array, whose pointer is derived from
+        // `&mut self` and so is valid for writes; `storeu` has no alignment requirement and the
+        // lanes are `MaybeUninit`, so writing them is always sound. The loads read the 32-byte
+        // aligned, initialised `[f32; 8]` rows of the borrowed node (`Node8` is
+        // `#[repr(C, align(32))]`). The `avx2` feature is compiled in (the `cfg` on this
+        // function). The lanes past `popcount(mask)` receive permuted node lanes: initialised
+        // values that the next push or the seal's pad overwrites before a row reads them as
+        // candidates.
         unsafe {
             let perm = _mm256_cvtepu8_epi32(_mm_cvtsi64_si128(entry as i64));
             for (row, src) in self.b.iter_mut().zip(&node.p) {
