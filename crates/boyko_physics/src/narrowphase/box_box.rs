@@ -41,11 +41,39 @@
 //! which two orthonormal frames never produce. The hint picks which contact, never
 //! whether there is one.
 //!
+//! # The exact fast path (L9a, `levers/L9-contact-reuse/02-DESIGN-REV1.md`)
+//!
+//! Two changes that move no bit (Lemma L9-L2):
+//!
+//! * **The SAT returns at the first separating axis** in canonical order ([`sat`]). The
+//!   pair was separated iff ANY axis had a negative depth and [`eval_axis`] is pure, so
+//!   stopping at the first one changes no answer; an overlapping pair still evaluates all
+//!   fifteen axes, in the same order, as before. The axis it stopped on is reported
+//!   ([`BoxBoxOutcome::Separated`]), which is what commit C2 carries as the pair's cached
+//!   separating axis.
+//! * **The box frame is an input** ([`Obb::from_frame`]): the narrowphase reads each box
+//!   row's axes from the per-step frame column (`narrowphase/reuse.rs`) instead of
+//!   converting the row's quaternion per pair. [`Obb::new`] is the same computation
+//!   through [`RowFrame::axes_of`], so both give the same bits.
+//!
+//! The crate's narrowphase enters through [`box_box_classify`]; [`box_box_contact`] keeps
+//! its signature as a wrapper over it. The pre-L9 bodies of `Obb::new`, the SAT and
+//! `box_box_contact` stay as the test oracle `pre_l9` (gate G-L9a-1).
+//!
+//! # Contact reuse (L9b, `narrowphase/reuse.rs`)
+//!
+//! Two small entries serve the reuse records, and neither changes a contact: [`contact_feature`]
+//! names the feature a contact was built on — the reference face `face_contact` picked, re-derived
+//! from the contact's axis and normal with the same [`most_aligned_face`], or the edge pair — and
+//! [`refresh_edge`] re-evaluates an edge record's axis exactly as [`sat`] evaluates its candidate
+//! of that index and builds today's edge contact on it.
+//!
 //! ZERO `unsafe`, no heap allocation (fixed-size stack buffers), deterministic.
 
 use crate::manifold::{BodyIndex, ContactPoint, Manifold};
-use crate::math::{Mat3, Quat, Vec3};
+use crate::math::{Quat, Vec3};
 
+use super::reuse::RowFrame;
 use super::{feature_edge_edge, feature_face_clip, feature_face_face};
 
 /// Penetration ratio within which the current best SAT axis is considered "no
@@ -140,28 +168,34 @@ const SAT_AXES: usize = 6 + EDGE_AXES;
 /// `axes[i]` is the world-space unit direction of the box's local axis `i`
 /// (the rows of `Rᵀ` / columns of `R`), `half[i]` its half-extent along that axis.
 #[derive(Clone, Copy, Debug)]
-struct Obb {
+pub(crate) struct Obb {
     /// World center.
-    center: Vec3,
+    pub(crate) center: Vec3,
     /// World-space unit axis directions (local x, y, z).
-    axes: [Vec3; 3],
+    pub(crate) axes: [Vec3; 3],
     /// Half-extents along each local axis.
-    half: [f32; 3],
+    pub(crate) half: [f32; 3],
 }
 
 impl Obb {
     /// Builds the world OBB from a body's center, orientation, and local
-    /// half-extents.
+    /// half-extents, with the axes of [`RowFrame::axes_of`]`(rotation)`.
     #[inline]
-    fn new(center: Vec3, rotation: Quat, half_extents: Vec3) -> Self {
-        let r = Mat3::from_quat(rotation);
-        // Column `i` of R is the world direction of local axis `i`. With row-major
-        // storage, column `i` is `(rows[0][i], rows[1][i], rows[2][i])`.
-        let axes = [
-            Vec3::new(r.rows[0].x, r.rows[1].x, r.rows[2].x),
-            Vec3::new(r.rows[0].y, r.rows[1].y, r.rows[2].y),
-            Vec3::new(r.rows[0].z, r.rows[1].z, r.rows[2].z),
-        ];
+    pub(crate) fn new(center: Vec3, rotation: Quat, half_extents: Vec3) -> Self {
+        Self::from_axes(center, RowFrame::axes_of(rotation), half_extents)
+    }
+
+    /// Builds the world OBB from a body's center, its step's orientation frame (L9 D2) and its
+    /// local half-extents. Given a frame of `RowFrame::axes_of(rotation)` it is
+    /// [`new`](Self::new), bit for bit.
+    #[inline]
+    pub(crate) fn from_frame(center: Vec3, frame: &RowFrame, half_extents: Vec3) -> Self {
+        Self::from_axes(center, frame.axes, half_extents)
+    }
+
+    /// Builds the world OBB from a center, world axes and local half-extents.
+    #[inline]
+    fn from_axes(center: Vec3, axes: [Vec3; 3], half_extents: Vec3) -> Self {
         Self {
             center,
             axes,
@@ -192,7 +226,7 @@ enum SatClass {
 
 /// The result of the SAT query for an overlapping pair: the shallowest axis of each
 /// class, and last frame's axis re-evaluated on this frame's poses. The face-versus-edge
-/// choice and the hysteresis are made by [`box_box_contact`], because Box3D's rule compares
+/// choice and the hysteresis are made by [`box_box_classify`], because Box3D's rule compares
 /// the edge against the face's REALIZED patch, which only the clip produces (A7b).
 #[derive(Clone, Copy, Debug)]
 struct SatResult {
@@ -255,12 +289,60 @@ fn eval_axis(a: &Obb, b: &Obb, raw_axis: Vec3, class: SatClass, index: usize) ->
     })
 }
 
+/// Why [`sat`] found no overlapping pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SatMiss {
+    /// The first axis in canonical order (`0..15`) whose depth is negative: the boxes are
+    /// separated on it (L9a (i)).
+    Separated(u8),
+    /// Every axis overlaps but no face axis survived the degeneracy guard, which only a
+    /// degenerate rotation produces: no contact, as before S5.
+    NoFaceAxis,
+}
+
+/// Whether an evaluated axis separates the boxes. A NaN depth compares false, as it did when
+/// every axis was evaluated before the check.
+#[inline]
+fn separates(cand: Option<AxisCandidate>) -> bool {
+    matches!(cand, Some(c) if c.depth < 0.0)
+}
+
+/// Whether canonical SAT axis `axis` (`0..15`) still separates the boxes (L9a (ii)): the pair's
+/// separating axis of the previous step, evaluated first on this step's boxes.
+///
+/// The axis is built and evaluated exactly as [`sat`] builds and evaluates its candidate of the
+/// same index — the same raw axis (a face column, or `a.axes[ea].cross(b.axes[eb])` for
+/// `axis = 6 + 3·ea + eb`) through the same [`eval_axis`], judged by the same [`separates`] — so
+/// `true` means the SAT has a negative candidate and reports the pair separated. `false` (the axis
+/// overlaps now, or is degenerate) says nothing, and the SAT runs.
+#[inline]
+pub(crate) fn sep_still_holds(a: &Obb, b: &Obb, axis: u8) -> bool {
+    let i = usize::from(axis);
+    debug_assert!(i < SAT_AXES, "invariant: a carried separating axis is 0..15");
+    let cand = if i < 3 {
+        eval_axis(a, b, a.axes[i], SatClass::FaceA(i), i)
+    } else if i < 6 {
+        eval_axis(a, b, b.axes[i - 3], SatClass::FaceB(i - 3), i)
+    } else {
+        let (ea, eb) = ((i - 6) / 3, (i - 6) % 3);
+        eval_axis(a, b, a.axes[ea].cross(b.axes[eb]), SatClass::Edge { a: ea, b: eb }, i)
+    };
+    separates(cand)
+}
+
 /// Runs the 15-axis SAT and returns the shallowest face axis, the shallowest edge
-/// axis and last frame's axis re-evaluated, or `None` if the boxes are separated on
-/// any axis (P2 W4).
+/// axis and last frame's axis re-evaluated, or why there is no overlap (P2 W4): the first
+/// separating axis in canonical order, or no face axis at all.
 ///
 /// `last_axis` is last frame's chosen SAT-axis index (for the same body pair), or
-/// `None` on a cold contact; [`box_box_contact`] applies the hysteresis to it.
+/// `None` on a cold contact; [`box_box_classify`] applies the hysteresis to it.
+///
+/// **The early exit (L9a (i)).** The axes are evaluated in canonical order and the SAT returns
+/// at the first one with `depth < 0`. It used to evaluate all fifteen and then reject on any
+/// negative one; the answer is "separated" exactly when some axis is negative either way, and
+/// [`eval_axis`] is pure, so the early exit changes no result. An overlapping pair evaluates all
+/// fifteen, in the same order, so every candidate below carries today's bits. The returned axis
+/// is the FIRST negative one; commit C2 caches it, and any negative axis proves separation.
 ///
 /// The two classes are selected in two passes rather than one loop, because a single
 /// ε-window loop whose windows differ by class is order-dependent. Each pass is the
@@ -272,29 +354,31 @@ fn eval_axis(a: &Obb, b: &Obb, raw_axis: Vec3, class: SatClass, index: usize) ->
 // selector, and the `SatClass` payload — three roles a bare `enumerate()` over one
 // array cannot carry, so the explicit index is the correct, readable form.
 #[allow(clippy::needless_range_loop)]
-fn sat(a: &Obb, b: &Obb, last_axis: Option<usize>) -> Option<SatResult> {
+fn sat(a: &Obb, b: &Obb, last_axis: Option<usize>) -> Result<SatResult, SatMiss> {
     // All 15 candidate axes in canonical order: A-face 0..3, B-face 3..6,
     // edge-edge 6..15 (a-major: (a0×b0, a0×b1, a0×b2, a1×b0, …)).
     let mut candidates: [Option<AxisCandidate>; SAT_AXES] = [None; SAT_AXES];
     for i in 0..3 {
         candidates[i] = eval_axis(a, b, a.axes[i], SatClass::FaceA(i), i);
+        if separates(candidates[i]) {
+            return Err(SatMiss::Separated(i as u8));
+        }
     }
     for i in 0..3 {
         candidates[3 + i] = eval_axis(a, b, b.axes[i], SatClass::FaceB(i), 3 + i);
+        if separates(candidates[3 + i]) {
+            return Err(SatMiss::Separated((3 + i) as u8));
+        }
     }
     let mut k = 6;
     for ea in 0..3 {
         for eb in 0..3 {
             let axis = a.axes[ea].cross(b.axes[eb]);
             candidates[k] = eval_axis(a, b, axis, SatClass::Edge { a: ea, b: eb }, k);
+            if separates(candidates[k]) {
+                return Err(SatMiss::Separated(k as u8));
+            }
             k += 1;
-        }
-    }
-
-    // Any axis with non-overlap (depth < 0) ⇒ the boxes are separated.
-    for cand in candidates.iter().flatten() {
-        if cand.depth < 0.0 {
-            return None;
         }
     }
 
@@ -305,9 +389,11 @@ fn sat(a: &Obb, b: &Obb, last_axis: Option<usize>) -> Option<SatResult> {
          degeneracy guard never skips all six"
     );
     // A degenerate rotation leaves no face axis: no contact, as before S5.
-    let face = face?;
+    let Some(face) = face else {
+        return Err(SatMiss::NoFaceAxis);
+    };
 
-    Some(SatResult {
+    Ok(SatResult {
         face,
         edge: shallowest(&candidates[6..]),
         hint: last_axis.and_then(|idx| candidates.get(idx).copied().flatten()),
@@ -643,6 +729,9 @@ fn reduce_points(points: &[ScoredPoint], normal: Vec3, out: &mut [ScoredPoint; 4
 /// they do not overlap (P2 W4). `last_axis` is the previous frame's chosen SAT-axis
 /// index for this body pair (hysteresis); the returned manifold carries the new
 /// axis index out-of-band via [`BoxBoxContact::reference_axis`].
+///
+/// A wrapper over [`box_box_classify`] on two [`Obb::new`] boxes: the crate's narrowphase
+/// calls the classifier directly with the step's frames (L9 D2), and both give the same bits.
 //
 // `clippy::too_many_arguments`: a convex-convex generator genuinely needs both
 // bodies' (center, rotation, half-extents) plus the two row indices and the
@@ -663,8 +752,66 @@ pub fn box_box_contact(
 ) -> Option<BoxBoxContact> {
     let a = Obb::new(a_center, a_rotation, a_half);
     let b = Obb::new(b_center, b_rotation, b_half);
+    match box_box_classify(&a, &b, body_a, body_b, last_axis) {
+        BoxBoxOutcome::Contact(c) => Some(c),
+        BoxBoxOutcome::Separated(_)
+        | BoxBoxOutcome::StillSeparated(_)
+        | BoxBoxOutcome::NoContact => None,
+    }
+}
 
-    let sat = sat(&a, &b, last_axis)?;
+/// What [`box_box_classify`] found for one box pair (L9a).
+pub(crate) enum BoxBoxOutcome {
+    /// The boxes touch: the manifold and the SAT axis to persist for the hysteresis.
+    Contact(BoxBoxContact),
+    /// The SAT separated the boxes on this canonical axis (`0..15`), the first negative one in
+    /// canonical order.
+    Separated(u8),
+    /// The pair's carried separating axis (`0..15`) still separates the boxes, so the SAT did not
+    /// run (L9a (ii), [`box_box_classify_carried`]).
+    StillSeparated(u8),
+    /// No contact for any other reason: no face axis (a degenerate rotation), a degenerate
+    /// reference face, or a fallback with no edge axis.
+    NoContact,
+}
+
+/// [`box_box_classify`] behind the pair's carried separating axis (L9a (ii), D1): when `sep_axis`
+/// names an axis that still separates the boxes ([`sep_still_holds`]), the pair is separated and
+/// neither the hint nor the SAT is consulted; otherwise the classifier runs on the hint `hint`
+/// returns. Contact or no contact is the classifier's answer either way (lemma L9-L2), and the
+/// narrowphase collides every box pair through this one function.
+#[inline]
+pub(crate) fn box_box_classify_carried(
+    a: &Obb,
+    b: &Obb,
+    body_a: BodyIndex,
+    body_b: BodyIndex,
+    sep_axis: Option<u8>,
+    hint: impl FnOnce() -> Option<usize>,
+) -> BoxBoxOutcome {
+    if let Some(axis) = sep_axis
+        && sep_still_holds(a, b, axis)
+    {
+        return BoxBoxOutcome::StillSeparated(axis);
+    }
+    box_box_classify(a, b, body_a, body_b, hint())
+}
+
+/// Classifies the box pair `(a, b)` and, when they touch, generates its contact (P2 W4; L9a):
+/// [`box_box_contact`]'s answer on the two given boxes, plus the separating axis when the SAT
+/// rejects the pair. `last_axis` is the previous frame's chosen SAT-axis index for this body pair.
+pub(crate) fn box_box_classify(
+    a: &Obb,
+    b: &Obb,
+    body_a: BodyIndex,
+    body_b: BodyIndex,
+    last_axis: Option<usize>,
+) -> BoxBoxOutcome {
+    let sat = match sat(a, b, last_axis) {
+        Ok(sat) => sat,
+        Err(SatMiss::Separated(axis)) => return BoxBoxOutcome::Separated(axis),
+        Err(SatMiss::NoFaceAxis) => return BoxBoxOutcome::NoContact,
+    };
 
     // Face versus edge, Box3D's rule (A7b; see FACE_AXIS_PREFERENCE). The face's patch is
     // built here only when the SAT's own answer is the edge. Otherwise the edge cannot win —
@@ -673,7 +820,7 @@ pub fn box_box_contact(
     let mut face_built: Option<Manifold> = None;
     let best = match sat.edge {
         Some(edge) if edge.depth < sat.face.depth - SAT_EPS => {
-            match face_contact(&a, &b, &sat.face, body_a, body_b) {
+            match face_contact(a, b, &sat.face, body_a, body_b) {
                 Ok(m) if edge.depth >= patch_depth(&m) - FACE_AXIS_PREFERENCE => {
                     face_built = Some(m);
                     sat.face
@@ -705,11 +852,14 @@ pub fn box_box_contact(
 
     let (manifold, reference_axis) = match chosen.class {
         SatClass::Edge { a: ea, b: eb } => {
-            (edge_contact(&a, &b, &chosen, ea, eb, body_a, body_b)?, chosen.index)
+            let Some(m) = edge_contact(a, b, &chosen, ea, eb, body_a, body_b) else {
+                return BoxBoxOutcome::NoContact;
+            };
+            (m, chosen.index)
         }
         SatClass::FaceA(_) | SatClass::FaceB(_) => match face_built {
             Some(m) if chosen.index == sat.face.index => (m, chosen.index),
-            built => match face_contact(&a, &b, &chosen, body_a, body_b) {
+            built => match face_contact(a, b, &chosen, body_a, body_b) {
                 Ok(m) => (m, chosen.index),
                 // A held face hint that realizes no patch yields to the best face's patch when
                 // the choice above already built it: the answer the pair gets with no hint, as
@@ -720,14 +870,19 @@ pub fn box_box_contact(
                         HELD_FACE_YIELDS.with(|n| n.set(n.get() + 1));
                         (m, sat.face.index)
                     }
-                    None => return edge_fallback(&a, &b, &sat, body_a, body_b),
+                    None => {
+                        return match edge_fallback(a, b, &sat, body_a, body_b) {
+                            Some(c) => BoxBoxOutcome::Contact(c),
+                            None => BoxBoxOutcome::NoContact,
+                        };
+                    }
                 },
-                Err(FaceMiss::Degenerate) => return None,
+                Err(FaceMiss::Degenerate) => return BoxBoxOutcome::NoContact,
             },
         },
     };
 
-    Some(BoxBoxContact {
+    BoxBoxOutcome::Contact(BoxBoxContact {
         manifold,
         reference_axis,
     })
@@ -741,6 +896,91 @@ fn patch_depth(m: &Manifold) -> f32 {
     m.points[..usize::from(m.count)]
         .iter()
         .fold(0.0f32, |deepest, p| deepest.max(-p.separation))
+}
+
+/// The contact feature a box-box contact was built on (L9b D5): what a reuse record stores to
+/// refresh the contact without the SAT and the clip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FeatureRef {
+    /// A face contact: the reference face is `axis` (`0..3`) of body B iff `ref_is_b`, on its
+    /// positive side iff `positive`; the other body is the incident one.
+    Face {
+        /// Whether the reference face is body B's.
+        ref_is_b: bool,
+        /// The reference face's local axis.
+        axis: u8,
+        /// Whether it is the positive side of that axis.
+        positive: bool,
+    },
+    /// An edge-edge contact on `A.axes[ea] × B.axes[eb]`.
+    Edge {
+        /// Body A's edge axis.
+        ea: u8,
+        /// Body B's edge axis.
+        eb: u8,
+    },
+}
+
+/// The feature the contact `c` of the boxes `(a, b)` was built on (L9b D5).
+///
+/// `c.reference_axis` names the SAT candidate whose [`face_contact`] or [`edge_contact`] built the
+/// manifold (every path of [`box_box_classify`] and [`edge_fallback`] reports that one). A face
+/// contact's manifold normal is that candidate's oriented axis, so the reference face is the one
+/// `face_contact` picked: [`most_aligned_face`] of the reference box along the normal (FaceA) or
+/// its negation (FaceB), the same inputs and so the same face.
+pub(crate) fn contact_feature(a: &Obb, b: &Obb, c: &BoxBoxContact) -> FeatureRef {
+    let i = c.reference_axis;
+    debug_assert!(i < SAT_AXES, "invariant: a chosen SAT axis is 0..15");
+    if i < 6 {
+        let ref_is_b = i >= 3;
+        let (reference, dir) =
+            if ref_is_b { (b, c.manifold.normal * -1.0) } else { (a, c.manifold.normal) };
+        let (axis, positive, _) = most_aligned_face(reference, dir);
+        FeatureRef::Face { ref_is_b, axis: axis as u8, positive }
+    } else {
+        FeatureRef::Edge { ea: ((i - 6) / 3) as u8, eb: ((i - 6) % 3) as u8 }
+    }
+}
+
+/// What [`refresh_edge`] found.
+pub(crate) enum EdgeRefresh {
+    /// The edge axis overlaps: today's edge contact on it.
+    Contact(Manifold),
+    /// The edge axis separates the boxes, on this canonical axis (`6..15`).
+    Separated(u8),
+    /// The edge pair is parallel now: no axis.
+    Degenerate,
+}
+
+/// Re-evaluates the edge axis `A.axes[ea] × B.axes[eb]` of the boxes `(a, b)` and, when it
+/// overlaps, builds today's edge contact on it (L9b D5, the refresh of an edge record).
+///
+/// The axis is built and evaluated exactly as [`sat`] builds and evaluates its candidate of the same
+/// index, so a negative depth is a negative SAT candidate — the pair is separated exactly — and on
+/// the poses the record was built on the contact is the full collision's, bit for bit.
+#[inline]
+pub(crate) fn refresh_edge(
+    a: &Obb,
+    b: &Obb,
+    ea: usize,
+    eb: usize,
+    body_a: BodyIndex,
+    body_b: BodyIndex,
+) -> EdgeRefresh {
+    debug_assert!(ea < 3 && eb < 3, "invariant: edge axes are 0..3");
+    let index = 6 + 3 * ea + eb;
+    let Some(cand) =
+        eval_axis(a, b, a.axes[ea].cross(b.axes[eb]), SatClass::Edge { a: ea, b: eb }, index)
+    else {
+        return EdgeRefresh::Degenerate;
+    };
+    if cand.depth < 0.0 {
+        return EdgeRefresh::Separated(index as u8);
+    }
+    match edge_contact(a, b, &cand, ea, eb, body_a, body_b) {
+        Some(m) => EdgeRefresh::Contact(m),
+        None => EdgeRefresh::Degenerate,
+    }
 }
 
 #[cfg(test)]
@@ -1076,6 +1316,142 @@ fn closest_points_on_segments(
     let t = ((b * s + f) / e).clamp(-hb, hb);
     let s = ((b * t - c) / a).clamp(-ha, ha);
     (pa + da * s, pb + db * t)
+}
+
+/// The pre-L9 bodies of `Obb::new`, the SAT and `box_box_contact` — their code verbatim, the
+/// comments and the test-only yield counter dropped: the oracle of gate G-L9a-1 (`levers/L9-contact-reuse/02-DESIGN-REV1.md`, "The
+/// pre-change body is kept as a `#[cfg(test)]` oracle"). The SAT evaluates all fifteen axes and
+/// then rejects on any negative one, and the box axes are converted from the quaternion inline,
+/// so a defect in the early exit or in the frame column cannot reach both sides of the gate.
+/// Everything past the SAT is shared with the kernel, which L9a does not change.
+#[cfg(test)]
+mod pre_l9 {
+    use super::*;
+    use crate::math::Mat3;
+
+    /// The pre-L9 `Obb::new`.
+    pub(super) fn obb(center: Vec3, rotation: Quat, half_extents: Vec3) -> Obb {
+        let r = Mat3::from_quat(rotation);
+        // Column `i` of R is the world direction of local axis `i`. With row-major
+        // storage, column `i` is `(rows[0][i], rows[1][i], rows[2][i])`.
+        let axes = [
+            Vec3::new(r.rows[0].x, r.rows[1].x, r.rows[2].x),
+            Vec3::new(r.rows[0].y, r.rows[1].y, r.rows[2].y),
+            Vec3::new(r.rows[0].z, r.rows[1].z, r.rows[2].z),
+        ];
+        Obb {
+            center,
+            axes,
+            half: [half_extents.x, half_extents.y, half_extents.z],
+        }
+    }
+
+    /// The pre-L9 SAT: all fifteen axes, then `None` on any negative depth.
+    #[allow(clippy::needless_range_loop)]
+    fn sat(a: &Obb, b: &Obb, last_axis: Option<usize>) -> Option<SatResult> {
+        let mut candidates: [Option<AxisCandidate>; SAT_AXES] = [None; SAT_AXES];
+        for i in 0..3 {
+            candidates[i] = eval_axis(a, b, a.axes[i], SatClass::FaceA(i), i);
+        }
+        for i in 0..3 {
+            candidates[3 + i] = eval_axis(a, b, b.axes[i], SatClass::FaceB(i), 3 + i);
+        }
+        let mut k = 6;
+        for ea in 0..3 {
+            for eb in 0..3 {
+                let axis = a.axes[ea].cross(b.axes[eb]);
+                candidates[k] = eval_axis(a, b, axis, SatClass::Edge { a: ea, b: eb }, k);
+                k += 1;
+            }
+        }
+
+        // Any axis with non-overlap (depth < 0) ⇒ the boxes are separated.
+        for cand in candidates.iter().flatten() {
+            if cand.depth < 0.0 {
+                return None;
+            }
+        }
+
+        let face = shallowest(&candidates[..6]);
+        debug_assert!(
+            face.is_some(),
+            "invariant: a box's face axes are unit rotation columns (length² = 1), so the \
+             degeneracy guard never skips all six"
+        );
+        let face = face?;
+
+        Some(SatResult {
+            face,
+            edge: shallowest(&candidates[6..]),
+            hint: last_axis.and_then(|idx| candidates.get(idx).copied().flatten()),
+        })
+    }
+
+    /// The pre-L9 `box_box_contact`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn box_box_contact(
+        body_a: BodyIndex,
+        body_b: BodyIndex,
+        a_center: Vec3,
+        a_rotation: Quat,
+        a_half: Vec3,
+        b_center: Vec3,
+        b_rotation: Quat,
+        b_half: Vec3,
+        last_axis: Option<usize>,
+    ) -> Option<BoxBoxContact> {
+        let a = obb(a_center, a_rotation, a_half);
+        let b = obb(b_center, b_rotation, b_half);
+
+        let sat = sat(&a, &b, last_axis)?;
+
+        let mut face_built: Option<Manifold> = None;
+        let best = match sat.edge {
+            Some(edge) if edge.depth < sat.face.depth - SAT_EPS => {
+                match face_contact(&a, &b, &sat.face, body_a, body_b) {
+                    Ok(m) if edge.depth >= patch_depth(&m) - FACE_AXIS_PREFERENCE => {
+                        face_built = Some(m);
+                        sat.face
+                    }
+                    _ => edge,
+                }
+            }
+            _ => sat.face,
+        };
+
+        let chosen = match sat.hint {
+            Some(last)
+                if last.index != best.index
+                    && best.depth >= last.depth / HYSTERESIS_RATIO
+                    && !(last.is_edge() && !best.is_edge()) =>
+            {
+                last
+            }
+            _ => best,
+        };
+
+        let (manifold, reference_axis) = match chosen.class {
+            SatClass::Edge { a: ea, b: eb } => {
+                (edge_contact(&a, &b, &chosen, ea, eb, body_a, body_b)?, chosen.index)
+            }
+            SatClass::FaceA(_) | SatClass::FaceB(_) => match face_built {
+                Some(m) if chosen.index == sat.face.index => (m, chosen.index),
+                built => match face_contact(&a, &b, &chosen, body_a, body_b) {
+                    Ok(m) => (m, chosen.index),
+                    Err(FaceMiss::Empty) => match built {
+                        Some(m) => (m, sat.face.index),
+                        None => return edge_fallback(&a, &b, &sat, body_a, body_b),
+                    },
+                    Err(FaceMiss::Degenerate) => return None,
+                },
+            },
+        };
+
+        Some(BoxBoxContact {
+            manifold,
+            reference_axis,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -2576,6 +2952,579 @@ mod tests {
                 ids_of(&c.manifold)
             );
         }
+    }
+
+    // ── G-L9a-1: the exact fast path against the pre-L9 oracle ─────────────────────────────
+
+    /// xorshift64*: the seeded draws of the G-L9a-1 arms.
+    struct Draw(u64);
+
+    impl Draw {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+
+        fn range(&mut self, lo: f32, hi: f32) -> f32 {
+            let unit = (self.next() >> 40) as f32 / (1u64 << 24) as f32;
+            lo + (hi - lo) * unit
+        }
+
+        fn int(&mut self, lo: i32, hi: i32) -> f32 {
+            (lo + self.below((hi - lo + 1) as u64) as i32) as f32
+        }
+
+        fn rotation(&mut self) -> Quat {
+            loop {
+                let q = Quat::new(
+                    self.range(-1.0, 1.0),
+                    self.range(-1.0, 1.0),
+                    self.range(-1.0, 1.0),
+                    self.range(-1.0, 1.0),
+                );
+                let n2 = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+                if (0.01..=1.0).contains(&n2) {
+                    return q.normalize();
+                }
+            }
+        }
+
+        /// The identity or a half turn about a coordinate axis: `Mat3::from_quat` of each is
+        /// exact (entries 0 and ±1), so an integer lattice stays exact under it.
+        fn exact_rotation(&mut self) -> Quat {
+            match self.below(4) {
+                0 => Quat::IDENTITY,
+                1 => Quat::new(1.0, 0.0, 0.0, 0.0),
+                2 => Quat::new(0.0, 1.0, 0.0, 0.0),
+                _ => Quat::new(0.0, 0.0, 1.0, 0.0),
+            }
+        }
+
+        fn hint(&mut self) -> Option<usize> {
+            let h = self.below(SAT_AXES as u64 + 1) as usize;
+            (h < SAT_AXES).then_some(h)
+        }
+
+        /// Half-extents with each component zero one time in three.
+        fn degenerate_half(&mut self) -> Vec3 {
+            let mut h = Vec3::new(self.range(0.2, 1.5), self.range(0.2, 1.5), self.range(0.2, 1.5));
+            if self.below(3) == 0 {
+                h.x = 0.0;
+            }
+            if self.below(3) == 0 {
+                h.y = 0.0;
+            }
+            if self.below(3) == 0 {
+                h.z = 0.0;
+            }
+            h
+        }
+    }
+
+    /// One pose of a G-L9a-1 case.
+    #[derive(Clone, Copy, Debug)]
+    struct L9aPose {
+        ca: Vec3,
+        qa: Quat,
+        ha: Vec3,
+        cb: Vec3,
+        qb: Quat,
+        hb: Vec3,
+        hint: Option<usize>,
+    }
+
+    /// The step frame of a body with orientation `q` (the fill's axes; no pair reads the radius).
+    fn frame_of(q: Quat) -> RowFrame {
+        RowFrame { axes: RowFrame::axes_of(q), radius: 0.0 }
+    }
+
+    /// A contact as words: every manifold field and point slot, then the reference axis.
+    fn contact_words(c: &BoxBoxContact) -> Vec<u32> {
+        let m = &c.manifold;
+        let mut w = vec![m.body_a.0, m.body_b.0, u32::from(m.count)];
+        w.extend([m.normal.x, m.normal.y, m.normal.z].map(f32::to_bits));
+        for p in &m.points {
+            w.extend(
+                [p.anchor_a.x, p.anchor_a.y, p.anchor_a.z, p.anchor_b.x, p.anchor_b.y, p.anchor_b.z]
+                    .map(f32::to_bits),
+            );
+            w.extend([p.separation.to_bits(), p.feature_id]);
+        }
+        w.push(c.reference_axis as u32);
+        w
+    }
+
+    /// What one G-L9a-1 case exercised.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum L9aSeen {
+        Contact,
+        /// A contact on a pose with an axis of depth exactly zero: the pair an early exit on
+        /// `depth <= 0` would call separated.
+        ContactAtZeroDepth,
+        Separated,
+        NoContact,
+        /// Both sides panicked (a degenerate reference face's debug assertion).
+        BothPanicked,
+    }
+
+    /// One G-L9a-1 case: [`box_box_classify`] on boxes built from the step's frames
+    /// ([`Obb::from_frame`] of [`RowFrame::axes_of`]) and the public [`box_box_contact`] against the
+    /// pre-L9 oracle — the manifold's words and the axis, or no contact; a separated answer must
+    /// name the FIRST axis in canonical order whose depth is negative on the oracle's boxes.
+    fn l9a_case(p: L9aPose) -> Result<L9aSeen, String> {
+        let oracle = std::panic::catch_unwind(|| {
+            pre_l9::box_box_contact(A, B, p.ca, p.qa, p.ha, p.cb, p.qb, p.hb, p.hint)
+                .map(|c| contact_words(&c))
+        });
+        let kernel = std::panic::catch_unwind(|| {
+            let a = Obb::from_frame(p.ca, &frame_of(p.qa), p.ha);
+            let b = Obb::from_frame(p.cb, &frame_of(p.qb), p.hb);
+            match box_box_classify(&a, &b, A, B, p.hint) {
+                BoxBoxOutcome::Contact(c) => (Some(contact_words(&c)), None),
+                BoxBoxOutcome::Separated(axis) => (None, Some(axis)),
+                BoxBoxOutcome::StillSeparated(_) => {
+                    panic!("box_box_classify reads no carried axis")
+                }
+                BoxBoxOutcome::NoContact => (None, None),
+            }
+        });
+        let wrapper = std::panic::catch_unwind(|| {
+            box_box_contact(A, B, p.ca, p.qa, p.ha, p.cb, p.qb, p.hb, p.hint)
+                .map(|c| contact_words(&c))
+        });
+        let (oracle, (kernel, separated), wrapper) = match (oracle, kernel, wrapper) {
+            (Ok(o), Ok(k), Ok(w)) => (o, k, w),
+            (Err(_), Err(_), Err(_)) => return Ok(L9aSeen::BothPanicked),
+            (o, k, w) => {
+                return Err(format!(
+                    "panic mismatch: oracle panicked {}, classify {}, box_box_contact {}; {p:?}",
+                    o.is_err(),
+                    k.is_err(),
+                    w.is_err()
+                ));
+            }
+        };
+        if kernel != oracle || wrapper != oracle {
+            return Err(format!(
+                "outcome differs from the pre-L9 oracle: oracle {oracle:?}, classify {kernel:?} \
+                 (separated on {separated:?}), box_box_contact {wrapper:?}; {p:?}"
+            ));
+        }
+        let (a, b) = (pre_l9::obb(p.ca, p.qa, p.ha), pre_l9::obb(p.cb, p.qb, p.hb));
+        let cands = candidates_of(&a, &b);
+        let first_negative = cands.iter().position(|c| matches!(c, Some(c) if c.depth < 0.0));
+        match separated {
+            Some(axis) => {
+                if first_negative != Some(usize::from(axis)) {
+                    return Err(format!(
+                        "separated on axis {axis}, but the first negative axis in canonical \
+                         order is {first_negative:?}; {p:?}"
+                    ));
+                }
+                Ok(L9aSeen::Separated)
+            }
+            None if first_negative.is_some() => Err(format!(
+                "axis {first_negative:?} is negative but classify did not report the pair \
+                 separated; {p:?}"
+            )),
+            None if kernel.is_some() => {
+                let zero = cands.iter().flatten().any(|c| c.depth == 0.0);
+                Ok(if zero { L9aSeen::ContactAtZeroDepth } else { L9aSeen::Contact })
+            }
+            None => Ok(L9aSeen::NoContact),
+        }
+    }
+
+    /// G-L9a-1 (`levers/L9-contact-reuse/02-DESIGN-REV1.md`, commit C1): the SAT's early exit
+    /// and the frame-built boxes give the pre-L9 kernel's answer bit for bit — the manifold, the
+    /// axis to persist, or no contact — and a separated pair is reported on its first negative
+    /// axis. Three arms: arbitrary poses; exactly touching integer lattices (identity or half-turn
+    /// orientations, integer centres and half-extents, the offset along one axis exactly the sum
+    /// of the half-extents, and every other offset an integer, so faces, edges and corners meet
+    /// at depth exactly zero); and degenerate extents (a zero half-extent on some axes, where the
+    /// kernel's reference-face guard may panic in debug and must then panic on both sides). Every
+    /// case draws a random hint.
+    ///
+    /// Mutations recorded red (C1's red-first log): M-a1, the early exit on `depth <= 0.0`,
+    /// calls the lattice's zero-depth contacts separated; M-a2, `RowFrame::axes_of` storing the rows of
+    /// `Mat3::from_quat` instead of its columns, transposes every rotated box.
+    #[test]
+    #[cfg(not(miri))]
+    fn l9a_classify_equals_the_pre_l9_kernel() {
+        use proptest::prelude::*;
+        use std::cell::Cell;
+
+        let seen = Cell::new([0u64; 5]);
+        let bump = |s: L9aSeen| {
+            let mut counts = seen.get();
+            counts[s as usize] += 1;
+            seen.set(counts);
+        };
+        let config = ProptestConfig { cases: 2048, failure_persistence: None, ..ProptestConfig::default() };
+        proptest!(config, |(seed in any::<u64>(), arm in 0u8..3)| {
+            let mut d = Draw(seed | 1);
+            let pose = match arm {
+                0 => {
+                    // A pile's coordinates (tens of metres), B within reach of A.
+                    let ca = Vec3::new(d.range(-30.0, 30.0), d.range(0.0, 30.0), d.range(-30.0, 30.0));
+                    L9aPose {
+                        ca,
+                        qa: d.rotation(),
+                        ha: Vec3::new(d.range(0.2, 1.5), d.range(0.2, 1.5), d.range(0.2, 1.5)),
+                        cb: ca + Vec3::new(d.range(-2.5, 2.5), d.range(-2.5, 2.5), d.range(-2.5, 2.5)),
+                        qb: d.rotation(),
+                        hb: Vec3::new(d.range(0.2, 1.5), d.range(0.2, 1.5), d.range(0.2, 1.5)),
+                        hint: d.hint(),
+                    }
+                }
+                1 => {
+                    let ha = Vec3::new(d.int(1, 3), d.int(1, 3), d.int(1, 3));
+                    let hb = Vec3::new(d.int(1, 3), d.int(1, 3), d.int(1, 3));
+                    let sum = [ha.x + hb.x, ha.y + hb.y, ha.z + hb.z];
+                    let touch = d.below(3) as usize;
+                    let mut off = [0.0f32; 3];
+                    for (i, o) in off.iter_mut().enumerate() {
+                        let s = sum[i] as i32;
+                        *o = if i == touch {
+                            if d.below(2) == 0 { sum[i] } else { -sum[i] }
+                        } else {
+                            d.int(-s - 1, s + 1)
+                        };
+                    }
+                    let ca = Vec3::new(d.int(-40, 40), d.int(0, 40), d.int(-40, 40));
+                    L9aPose {
+                        ca,
+                        qa: d.exact_rotation(),
+                        ha,
+                        cb: ca + Vec3::new(off[0], off[1], off[2]),
+                        qb: d.exact_rotation(),
+                        hb,
+                        hint: d.hint(),
+                    }
+                }
+                _ => {
+                    let ha = d.degenerate_half();
+                    let hb = d.degenerate_half();
+                    L9aPose {
+                        ca: Vec3::new(d.range(-1.5, 1.5), d.range(-1.5, 1.5), d.range(-1.5, 1.5)),
+                        qa: if d.below(2) == 0 { d.exact_rotation() } else { d.rotation() },
+                        ha,
+                        cb: Vec3::ZERO,
+                        qb: if d.below(2) == 0 { d.exact_rotation() } else { d.rotation() },
+                        hb,
+                        hint: d.hint(),
+                    }
+                }
+            };
+            match l9a_case(pose) {
+                Ok(s) => bump(s),
+                Err(msg) => prop_assert!(false, "arm {}, seed {:#x}: {}", arm, seed, msg),
+            }
+        });
+        let [contact, zero, separated, no_contact, panicked] = seen.get();
+        println!(
+            "G-L9a-1 coverage: contact {contact}, contact at zero depth {zero}, separated \
+             {separated}, no contact {no_contact}, both panicked {panicked}"
+        );
+        assert!(contact > 0, "no case produced a contact");
+        assert!(zero > 0, "no case produced a contact at depth exactly zero (the M-a1 witness)");
+        assert!(separated > 0, "no case was separated");
+    }
+
+    // ── G-L9a-3: the carried separating axis against the pre-L9 oracle ───────────────────────
+
+    /// The raw (unnormalised) axis of canonical index `axis` on boxes `a` and `b`: the face column,
+    /// or the edge cross product before [`eval_axis`] normalises it.
+    fn raw_axis(a: &Obb, b: &Obb, axis: usize) -> Vec3 {
+        if axis < 3 {
+            a.axes[axis]
+        } else if axis < 6 {
+            b.axes[axis - 3]
+        } else {
+            let (ea, eb) = ((axis - 6) / 3, (axis - 6) % 3);
+            a.axes[ea].cross(b.axes[eb])
+        }
+    }
+
+    /// The depth mutation M-a5 would test: the separation along the RAW axis, with no
+    /// normalisation and no degeneracy guard. Mathematically it has the normalised depth's sign;
+    /// in `f32` the two roundings can disagree at a knife edge.
+    fn raw_depth(a: &Obb, b: &Obb, axis: usize) -> f32 {
+        let raw = raw_axis(a, b, axis);
+        let delta = b.center - a.center;
+        a.projection_radius(raw) + b.projection_radius(raw) - delta.dot(raw).abs()
+    }
+
+    /// What one G-L9a-3 case exercised.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum L9a3Seen {
+        /// The carried axis still separated the boxes: the SAT did not run.
+        Hit,
+        /// A carried axis that no longer separates, then the SAT separated the pair.
+        StaleThenSeparated,
+        /// A carried axis that no longer separates, then a contact.
+        StaleThenContact,
+        /// No carried axis.
+        NoCarry,
+        /// Both sides panicked (a degenerate reference face's debug assertion).
+        BothPanicked,
+    }
+
+    /// Witnesses the two mutations need, counted per case.
+    #[derive(Clone, Copy, Debug, Default)]
+    struct L9a3Witness {
+        /// A contact whose carried axis has depth exactly zero (M-a4 calls it separated).
+        zero_depth_carried: u64,
+        /// A contact whose carried axis has a non-negative normalised depth and a negative raw
+        /// one (M-a5 calls it separated).
+        raw_sign_flip_carried: u64,
+    }
+
+    /// One G-L9a-3 case: [`box_box_classify_carried`] on frame-built boxes with a carried axis
+    /// `sep` against the pre-L9 oracle (which carries nothing) — the contact's words and axis, or
+    /// no contact; a hit must name an axis whose depth is negative on the oracle's boxes.
+    fn l9a3_case(p: L9aPose, sep: Option<u8>, w: &mut L9a3Witness) -> Result<L9a3Seen, String> {
+        let oracle = std::panic::catch_unwind(|| {
+            pre_l9::box_box_contact(A, B, p.ca, p.qa, p.ha, p.cb, p.qb, p.hb, p.hint)
+                .map(|c| contact_words(&c))
+        });
+        let kernel = std::panic::catch_unwind(|| {
+            let a = Obb::from_frame(p.ca, &frame_of(p.qa), p.ha);
+            let b = Obb::from_frame(p.cb, &frame_of(p.qb), p.hb);
+            match box_box_classify_carried(&a, &b, A, B, sep, || p.hint) {
+                BoxBoxOutcome::Contact(c) => (Some(contact_words(&c)), None, false),
+                BoxBoxOutcome::Separated(axis) => (None, Some(axis), false),
+                BoxBoxOutcome::StillSeparated(axis) => (None, Some(axis), true),
+                BoxBoxOutcome::NoContact => (None, None, false),
+            }
+        });
+        let (oracle, (kernel, separated, hit)) = match (oracle, kernel) {
+            (Ok(o), Ok(k)) => (o, k),
+            (Err(_), Err(_)) => return Ok(L9a3Seen::BothPanicked),
+            (o, k) => {
+                return Err(format!(
+                    "panic mismatch: oracle panicked {}, carried classify {}; sep {sep:?}, {p:?}",
+                    o.is_err(),
+                    k.is_err()
+                ));
+            }
+        };
+        if kernel != oracle {
+            return Err(format!(
+                "outcome differs from the pre-L9 oracle: oracle {oracle:?}, carried classify \
+                 {kernel:?} (separated on {separated:?}, hit {hit}); sep {sep:?}, {p:?}"
+            ));
+        }
+        let (a, b) = (pre_l9::obb(p.ca, p.qa, p.ha), pre_l9::obb(p.cb, p.qb, p.hb));
+        let cands = candidates_of(&a, &b);
+        if hit {
+            let axis = separated.expect("invariant: a hit names its axis");
+            if sep != Some(axis) || !matches!(cands[usize::from(axis)], Some(c) if c.depth < 0.0) {
+                return Err(format!(
+                    "a hit on axis {axis} (carried {sep:?}) whose oracle depth is {:?}; {p:?}",
+                    cands[usize::from(axis)].map(|c| c.depth)
+                ));
+            }
+            return Ok(L9a3Seen::Hit);
+        }
+        let Some(s) = sep else {
+            return Ok(L9a3Seen::NoCarry);
+        };
+        let s = usize::from(s);
+        if oracle.is_some() {
+            let depth = cands[s].map(|c| c.depth);
+            w.zero_depth_carried += u64::from(depth == Some(0.0));
+            let flips = matches!(depth, Some(d) if d >= 0.0) && raw_depth(&a, &b, s) < 0.0;
+            w.raw_sign_flip_carried += u64::from(flips);
+            Ok(L9a3Seen::StaleThenContact)
+        } else {
+            Ok(L9a3Seen::StaleThenSeparated)
+        }
+    }
+
+    /// The largest centre offset `t` along `dir` (from `lo`, which overlaps, towards `hi`, which
+    /// does not) at which candidate `axis` of the oracle's boxes still has depth `>= 0`: a
+    /// bisection over `f32`, so the pair lands on the knife edge of that axis.
+    fn knife_edge(p: &L9aPose, dir: Vec3, axis: usize, mut lo: f32, mut hi: f32) -> f32 {
+        let depth = |t: f32| {
+            let a = pre_l9::obb(p.ca, p.qa, p.ha);
+            let b = pre_l9::obb(p.ca + dir * t, p.qb, p.hb);
+            candidates_of(&a, &b)[axis].map_or(f32::NAN, |c| c.depth)
+        };
+        for _ in 0..80 {
+            let mid = 0.5 * (lo + hi);
+            if mid == lo || mid == hi {
+                break;
+            }
+            if depth(mid) >= 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// G-L9a-3 (`levers/L9-contact-reuse/02-DESIGN-REV1.md`, commit C2): a box pair's carried
+    /// separating axis, arbitrary and mostly STALE, never changes the answer —
+    /// [`box_box_classify_carried`] on frame-built boxes returns the pre-L9 kernel's contact bit
+    /// for bit, or no contact, and a pair it reports separated without the SAT has a negative
+    /// depth on the carried axis. Four arms, each with a random hint: arbitrary poses (the carried
+    /// axis the pair's own first negative axis half the time, any axis or none otherwise);
+    /// exactly touching integer lattices (the carried axis the touching face half the time);
+    /// knife-edge face contacts on arbitrary orientations (the offset bisected in `f32` to the
+    /// last one whose depth on the carried face is not negative); degenerate extents.
+    ///
+    /// Mutations recorded red (C2's red-first log): M-a4, the carried check accepting
+    /// `depth <= 0`, calls the lattice's zero-depth contacts separated; M-a5, the carried check
+    /// on the raw (unnormalised) axis, calls a knife-edge contact separated where the two
+    /// roundings disagree in sign. Each has a witness counted here, so the gate cannot pass
+    /// vacuously.
+    #[test]
+    #[cfg(not(miri))]
+    fn l9a_carried_separating_axis_equals_the_pre_l9_kernel() {
+        use proptest::prelude::*;
+        use std::cell::Cell;
+
+        let seen = Cell::new([0u64; 5]);
+        let witness = Cell::new(L9a3Witness::default());
+        let config = ProptestConfig { cases: 4096, failure_persistence: None, ..ProptestConfig::default() };
+        proptest!(config, |(seed in any::<u64>(), arm in 0u8..4)| {
+            let mut d = Draw(seed | 1);
+            let random_sep = |d: &mut Draw| {
+                let s = d.below(SAT_AXES as u64 + 1) as u8;
+                (usize::from(s) < SAT_AXES).then_some(s)
+            };
+            let (pose, sep) = match arm {
+                0 => {
+                    let ca = Vec3::new(d.range(-30.0, 30.0), d.range(0.0, 30.0), d.range(-30.0, 30.0));
+                    let pose = L9aPose {
+                        ca,
+                        qa: d.rotation(),
+                        ha: Vec3::new(d.range(0.2, 1.5), d.range(0.2, 1.5), d.range(0.2, 1.5)),
+                        cb: ca + Vec3::new(d.range(-2.5, 2.5), d.range(-2.5, 2.5), d.range(-2.5, 2.5)),
+                        qb: d.rotation(),
+                        hb: Vec3::new(d.range(0.2, 1.5), d.range(0.2, 1.5), d.range(0.2, 1.5)),
+                        hint: d.hint(),
+                    };
+                    let first_negative = {
+                        let (a, b) = (pre_l9::obb(pose.ca, pose.qa, pose.ha), pre_l9::obb(pose.cb, pose.qb, pose.hb));
+                        candidates_of(&a, &b).iter().position(|c| matches!(c, Some(c) if c.depth < 0.0))
+                    };
+                    let sep = match first_negative {
+                        Some(s) if d.below(2) == 0 => Some(s as u8),
+                        _ => random_sep(&mut d),
+                    };
+                    (pose, sep)
+                }
+                1 => {
+                    let ha = Vec3::new(d.int(1, 3), d.int(1, 3), d.int(1, 3));
+                    let hb = Vec3::new(d.int(1, 3), d.int(1, 3), d.int(1, 3));
+                    let sum = [ha.x + hb.x, ha.y + hb.y, ha.z + hb.z];
+                    let touch = d.below(3) as usize;
+                    let mut off = [0.0f32; 3];
+                    for (i, o) in off.iter_mut().enumerate() {
+                        let s = sum[i] as i32;
+                        *o = if i == touch {
+                            if d.below(2) == 0 { sum[i] } else { -sum[i] }
+                        } else {
+                            d.int(-s - 1, s + 1)
+                        };
+                    }
+                    let ca = Vec3::new(d.int(-40, 40), d.int(0, 40), d.int(-40, 40));
+                    let pose = L9aPose {
+                        ca,
+                        qa: d.exact_rotation(),
+                        ha,
+                        cb: ca + Vec3::new(off[0], off[1], off[2]),
+                        qb: d.exact_rotation(),
+                        hb,
+                        hint: d.hint(),
+                    };
+                    // Under a half turn a box's face `touch` is still the world axis `touch`.
+                    let sep = match d.below(4) {
+                        0 => Some(touch as u8),
+                        1 => Some(3 + touch as u8),
+                        _ => random_sep(&mut d),
+                    };
+                    (pose, sep)
+                }
+                2 => {
+                    let mut pose = L9aPose {
+                        ca: Vec3::new(d.range(-30.0, 30.0), d.range(0.0, 30.0), d.range(-30.0, 30.0)),
+                        qa: d.rotation(),
+                        ha: Vec3::new(d.range(0.3, 1.5), d.range(0.3, 1.5), d.range(0.3, 1.5)),
+                        cb: Vec3::ZERO,
+                        qb: if d.below(2) == 0 { Quat::IDENTITY } else { d.rotation() },
+                        hb: Vec3::new(d.range(0.3, 1.5), d.range(0.3, 1.5), d.range(0.3, 1.5)),
+                        hint: d.hint(),
+                    };
+                    if d.below(2) == 0 {
+                        pose.qb = pose.qa;
+                    }
+                    // B above A's face `i`, a little off its centre, pushed out along the face
+                    // normal to the knife edge of that face's axis.
+                    let a = pre_l9::obb(pose.ca, pose.qa, pose.ha);
+                    let b0 = pre_l9::obb(Vec3::ZERO, pose.qb, pose.hb);
+                    let i = d.below(3) as usize;
+                    let (j, k) = ((i + 1) % 3, (i + 2) % 3);
+                    let lateral = a.axes[j] * d.range(-0.3, 0.3) * a.half[j]
+                        + a.axes[k] * d.range(-0.3, 0.3) * a.half[k];
+                    let n = a.axes[i];
+                    let reach = a.half[i] + b0.projection_radius(n);
+                    let dir = n + lateral * (1.0 / reach);
+                    let t = knife_edge(&pose, dir, i, 0.9 * reach, 1.1 * reach);
+                    pose.cb = pose.ca + dir * t;
+                    (pose, Some(i as u8))
+                }
+                _ => {
+                    let ha = d.degenerate_half();
+                    let hb = d.degenerate_half();
+                    let pose = L9aPose {
+                        ca: Vec3::new(d.range(-1.5, 1.5), d.range(-1.5, 1.5), d.range(-1.5, 1.5)),
+                        qa: if d.below(2) == 0 { d.exact_rotation() } else { d.rotation() },
+                        ha,
+                        cb: Vec3::ZERO,
+                        qb: if d.below(2) == 0 { d.exact_rotation() } else { d.rotation() },
+                        hb,
+                        hint: d.hint(),
+                    };
+                    (pose, random_sep(&mut d))
+                }
+            };
+            let mut w = witness.get();
+            match l9a3_case(pose, sep, &mut w) {
+                Ok(s) => {
+                    let mut counts = seen.get();
+                    counts[s as usize] += 1;
+                    seen.set(counts);
+                    witness.set(w);
+                }
+                Err(msg) => prop_assert!(false, "arm {}, seed {:#x}: {}", arm, seed, msg),
+            }
+        });
+        let [hit, stale_separated, stale_contact, no_carry, panicked] = seen.get();
+        let w = witness.get();
+        println!(
+            "G-L9a-3 coverage: hit {hit}, stale then separated {stale_separated}, stale then \
+             contact {stale_contact}, no carry {no_carry}, both panicked {panicked}; {w:?}"
+        );
+        assert!(hit > 0, "no carried axis still separated its pair");
+        assert!(stale_separated > 0, "no stale carried axis fell back to a separated SAT");
+        assert!(stale_contact > 0, "no stale carried axis fell back to a contact");
+        assert!(w.zero_depth_carried > 0, "no contact carried an axis of depth exactly zero (the M-a4 witness)");
+        assert!(
+            w.raw_sign_flip_carried > 0,
+            "no contact carried an axis whose raw depth is negative (the M-a5 witness)"
+        );
     }
 
     impl ContactPoint {

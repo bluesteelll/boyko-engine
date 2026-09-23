@@ -3,10 +3,11 @@
 //! A body's solver row is its position in [`physics_gather`]'s walk, and rows are NOT
 //! stable across steps: a despawn swap-removes (the archetype's tail body moves into the
 //! freed row), a spawn appends, and a component insert or remove migrates a body to
-//! another archetype and shifts every row walked after it. Four consumers keep state
+//! another archetype and shifts every row walked after it. Five consumers keep state
 //! keyed by row from one step to the next: the sleep latch ([`IslandSleep`]), the warm
-//! start tables of both solvers and the box-box axis cache ([`BoxAxisCache`]). Without
-//! this map each of them reads the state of whichever body used to hold the row.
+//! start tables of both solvers, the box-box axis cache ([`BoxAxisCache`]) and the
+//! narrowphase's pair carry (L9, `narrowphase/carry.rs`). Without this map each of them
+//! reads the state of whichever body used to hold the row.
 //!
 //! The gather records the [`RowKey`] of every row (the entity's slot index and generation)
 //! and the rows whose `RigidBody` was added since it last ran. When the rows changed,
@@ -49,6 +50,15 @@
 //! Either way the step costs at most `9 · (n + m)` sequential compares plus stage 2 over
 //! the rows it could not align.
 //!
+//! # The stage-2 rows (T5)
+//!
+//! [`RowIdentity::stage2_rows`] lists, ascending, the rows of a changed gather that stage 2
+//! resolved. Every other row is either new ([`NO_ROW`]) or was matched by the aligned walk
+//! (E3), which consumes both cursors in step, so the rows outside the list carry a strictly
+//! increasing `prev_row`. A consumer that joins a list sorted by the previous rows against one
+//! sorted by the current rows (the pair carry) merges the rows outside the list in one
+//! monotone pass and searches only the pairs that touch a listed row — its "jumpers".
+//!
 //! # Deleted by the unification rungs
 //!
 //! U5 (slots, no row ever moves) deletes the aligned walk, stage 2 and the walk budget.
@@ -70,7 +80,7 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::scratch_ids::{
     register_scratch_layouts, row_added_id, row_entity_id, row_entity_prev_id, row_prev_id,
-    row_remap_sort_id, scratch_reserve_rows,
+    row_remap_sort_id, row_stage2_id, scratch_reserve_rows,
 };
 
 /// The `prev_row` value of a body that held no row one gather ago, or whose `RigidBody`
@@ -420,6 +430,9 @@ pub(crate) struct RowIdentity {
     prev_row: ScratchColumn<u32>,
     /// Stage 2's pool of previous rows the aligned walk left unconsumed. Cold only.
     sort_buf: ScratchColumn<(RowKey, u32)>,
+    /// The current rows stage 2 resolved, ascending (T5); valid iff `!stable`. Cold only:
+    /// written by the build, read on the steps whose rows changed.
+    stage2: ScratchColumn<u32>,
     /// Previous-row maps built (steps whose rows changed). Structural diagnostic.
     remap_builds: u64,
     /// Current rows resolved by stage 2. Structural cost diagnostic.
@@ -453,6 +466,7 @@ impl RowIdentity {
             added_rows: ScratchColumn::new(row_added_id(), row_reserve),
             prev_row: ScratchColumn::new(row_prev_id(), row_reserve),
             sort_buf: ScratchColumn::new(row_remap_sort_id(), sort_reserve),
+            stage2: ScratchColumn::new(row_stage2_id(), row_reserve),
             remap_builds: 0,
             remap_searched: 0,
             walk: WalkCounters::default(),
@@ -508,6 +522,26 @@ impl RowIdentity {
         self.cur.len()
     }
 
+    /// The current gather's sequence number: the stamp a consumer compares with a stamp it
+    /// recorded, such as the pair list's (`ContactPairs`, L9).
+    #[inline]
+    pub(crate) fn gather_seq(&self) -> u64 {
+        self.gather_seq
+    }
+
+    /// The rows of the current gather that stage 2 resolved, ascending (T5), or none when the
+    /// rows are unchanged. Every row outside the list is new or was aligned, so the rows
+    /// outside it that held a row carry a strictly increasing `prev_row` (module docs, "The
+    /// stage-2 rows").
+    #[inline]
+    pub(crate) fn stage2_rows(&self) -> &[u32] {
+        if self.stable {
+            &[]
+        } else {
+            self.stage2.as_read_slice()
+        }
+    }
+
     /// Previous-row maps built so far.
     #[inline]
     pub(crate) fn remap_builds(&self) -> u64 {
@@ -554,12 +588,14 @@ impl RowIdentity {
         self.remap_builds += 1;
         let mut prev_row = self.prev_row.build_view();
         let mut pool = self.sort_buf.build_view();
+        let mut stage2 = self.stage2.build_view();
         let searched = build_prev_row_into(
             self.cur.as_read_slice(),
             self.prev.as_read_slice(),
             self.added_rows.as_read_slice(),
             &mut prev_row,
             &mut pool,
+            &mut stage2,
             &mut self.walk,
         );
         self.remap_searched += searched as u64;
@@ -576,8 +612,8 @@ fn keys_equal(cur: &[RowKey], prev: &[RowKey]) -> bool {
         == 0
 }
 
-/// Builds `prev_row` for `cur` against `prev` and returns the number of rows resolved by
-/// stage 2.
+/// Builds `prev_row` for `cur` against `prev`, lists the rows stage 2 resolved in `stage2`
+/// (ascending), and returns their number.
 ///
 /// **Stage 1, aligned walk.** Cursor `i` over `prev` (length `m`), `j` over `cur` (length
 /// `n`), `a` over `added` (ascending). Both lookahead offsets are distances of at least 1
@@ -596,6 +632,7 @@ fn build_prev_row_into(
     added: &[u32],
     prev_row: &mut ScratchBuildView<'_, u32>,
     pool: &mut ScratchBuildView<'_, (RowKey, u32)>,
+    stage2: &mut ScratchBuildView<'_, u32>,
     walk: &mut WalkCounters,
 ) -> usize {
     let n = cur.len();
@@ -603,6 +640,7 @@ fn build_prev_row_into(
     prev_row.clear();
     prev_row.resize(n, NO_ROW);
     pool.clear();
+    stage2.clear();
     let out = prev_row.as_mut_slice();
 
     let mut budget = REMAP_BUDGET_PER_ROW * (n + m);
@@ -692,6 +730,7 @@ fn build_prev_row_into(
             if *slot != SEARCH {
                 continue;
             }
+            stage2.push(r as u32);
             *slot = match pool.binary_search_by_key(&cur[r], |&(key, _)| key) {
                 Ok(hit) => take_pool_row(pool, hit),
                 Err(_) => NO_ROW,
@@ -703,6 +742,7 @@ fn build_prev_row_into(
         out.iter().all(|&p| p != SEARCH),
         "invariant: stage 2 resolves every SEARCH row"
     );
+    debug_assert_eq!(stage2.len(), searched, "invariant: stage 2 lists every row it resolved");
     debug_assert!(
         out.iter().all(|&p| p == NO_ROW || (p as usize) < m),
         "invariant: every previous row names a row of the previous gather"
@@ -943,6 +983,45 @@ mod tests {
         }
     }
 
+    /// T5: `stage2_rows` lists, ascending, exactly the `searched` rows stage 2 resolved (none on
+    /// a stable gather), and every row outside the list that held a row carries a strictly
+    /// increasing `prev_row` — the property the pair carry's merge-join rests on
+    /// (`narrowphase/carry.rs`).
+    fn check_stage2_rows(rows: &RowIdentity, map: &[u32], searched: u64) -> Result<(), String> {
+        let listed = rows.stage2_rows();
+        if rows.stable && !listed.is_empty() {
+            return Err(format!("a stable gather lists stage-2 rows {listed:?}"));
+        }
+        if listed.len() as u64 != searched {
+            return Err(format!(
+                "stage2_rows {listed:?} lists {} rows, stage 2 resolved {searched}",
+                listed.len()
+            ));
+        }
+        if !listed.windows(2).all(|w| w[0] < w[1])
+            || listed.iter().any(|&r| r as usize >= map.len())
+        {
+            return Err(format!(
+                "stage2_rows {listed:?} is not an ascending list of rows below {}",
+                map.len()
+            ));
+        }
+        let mut last: Option<u32> = None;
+        for (r, &p) in map.iter().enumerate() {
+            if p == NO_ROW || listed.binary_search(&(r as u32)).is_ok() {
+                continue;
+            }
+            if last.is_some_and(|l| p <= l) {
+                return Err(format!(
+                    "row {r} is outside stage2_rows {listed:?} but its prev_row {p} does not \
+                     rise above the previous such row's {last:?} (map {map:?})"
+                ));
+            }
+            last = Some(p);
+        }
+        Ok(())
+    }
+
     /// [`check_gather_keys`] over slots at generation 0.
     fn check_gather(
         rows: &mut RowIdentity,
@@ -964,6 +1043,7 @@ mod tests {
     ) -> Result<(), String> {
         let mut cursor = RemapCursor::default();
         cursor.stamp(rows);
+        let searched_before = rows.remap_searched;
         gather_keys(rows, cur, added);
         let (stable, expected) = oracle(prev, cur, added);
         if rows.stable != stable {
@@ -973,6 +1053,7 @@ mod tests {
         if got != expected {
             return Err(format!("prev_row {got:?} (oracle {expected:?})"));
         }
+        check_stage2_rows(rows, &got, rows.remap_searched - searched_before)?;
         match cursor.remap(rows) {
             RowRemap::Identity if stable => {}
             RowRemap::Rows(map) if !stable && map == expected.as_slice() => {}

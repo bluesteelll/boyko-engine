@@ -345,6 +345,7 @@ collide_box_pair(k):                           // pure in (bodies, frames, T0 hi
 - **A4 (wake on count change):**
   - A hit keeps its manifold, unless every point lifted, which is today's semantics. A support moved by less than τ_eff does not change the count; today it usually does not either.
   - `support_loss_wakes_sleepers` uses sphere scenes, which L9b does not touch.
+  - Ruling W2 added its box-pile arm after C3 (2026-09-23): `e_lowering_a_box_support_by_less_than_tau_eff_wakes_the_box_it_carried`, contact reuse forced on at τ = 2 mm, the support lowered by τ_eff/2. A refresh that keeps lifted points turns it red.
 - **U7 and the row-keyed stores:** L9 and L10 share **one** carry, so there are 5 stores total, not 6. U5/U7 turn it into a persistent per-pair store without translation.
 
 ## Integration (file:line)
@@ -442,6 +443,7 @@ collide_box_pair(k):                           // pure in (bodies, frames, T0 hi
   - G2/G7 observed counts (budgets untouched) and G8's freeze step.
   - P0's H8 manifold count (4,519 → read again; the per-manifold denominators move with it).
   - Any golden fed by box-pile physics.
+  - The two exact pins added after C3 (2026-09-23): `default_world_pyramid_determinism.rs`'s `PINNED_FINAL_HASH` (release and debug) and A7-R1's `A7_R1_D_MAX_BITS` in `sleep_settles_box_piles.rs`. Each is re-pinned under its own doc's rule. A7-R1's reuse-off run keeps reading `0x3a3c_3896` (0.0007180063 m) exactly.
   - The red set is enumerated by running C4. Each pin is re-measured under its own file's rule. A test whose subject is the exact narrowphase sets `contact_reuse: false` explicitly, with a comment saying why.
 
 ## What it cannot claim

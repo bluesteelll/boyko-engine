@@ -7,11 +7,18 @@
 //! generator stays inline in [`physics_narrowphase`](crate::systems::physics_narrowphase);
 //! the box generators live here because they are the heavy correctness surface.
 //!
-//! The one module here that is not a generator is `dispatch`, the parallel narrowphase (L5):
-//! it runs the same per-pair collision over contiguous chunks of the candidate pairs on the
-//! ambient pool's workers and joins their output back in pair order. Its `unsafe` is the three
-//! per-row writes of a chunk into rows no other chunk owns; its public surface is the three
-//! chunking constants re-exported below.
+//! Three modules here are not generators. `dispatch` is the parallel narrowphase (L5): it runs
+//! the same per-pair collision over contiguous chunks of the candidate pairs on the ambient
+//! pool's workers and joins their output back in pair order. Its `unsafe` is the five per-row
+//! writes of a chunk into rows no other chunk owns; its public surface is the three chunking
+//! constants re-exported below. `reuse` and `carry` are contact reuse (L9): `reuse` holds the
+//! per-row orientation frames a box pair reads instead of converting two quaternions (D2),
+//! filled once per step at the entry of either path, and the reuse records — build, criterion,
+//! refresh — through which a slow touching box pair keeps its last full collision's features
+//! within a tolerance (L9b, off by default); `carry` holds the per-pair tags and records each
+//! step writes and the next step joins by the two bodies' rows (D9), which carry a separated box
+//! pair's separating axis so the SAT runs only once it stops separating (L9a (ii)), and a slow
+//! pair's record. Neither has `unsafe`; the chunks' tag and record writes are `dispatch`'s.
 //!
 //! # OBB convention
 //!
@@ -68,7 +75,9 @@
 
 pub mod axis_cache;
 pub mod box_box;
+pub(crate) mod carry;
 pub(crate) mod dispatch;
+pub(crate) mod reuse;
 pub mod sphere_box;
 
 pub use dispatch::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};

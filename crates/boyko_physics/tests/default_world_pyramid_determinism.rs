@@ -17,9 +17,14 @@
 //!   with `parallel_solve` on. `simd_solve` is a speed path over `solve_color`, so a
 //!   difference here is a kernel defect.
 //!
-//! Cross-PROCESS run-to-run is not asserted here (one process cannot compare against
-//! another without a pinned hash); the test prints the final hash of each run so two
-//! invocations of this binary can be compared by hand.
+//! The trajectory is also pinned across processes and commits: the reference run's final
+//! hash must equal [`PINNED_FINAL_HASH`], one value per profile (the scene differs by
+//! profile, below). This makes "nothing moved" mechanical. A commit that claims bit
+//! identity and moves the default world's pyramid by one bit turns this red even when
+//! every arm still agrees with every other. Until 2026-09-23 the hash was only printed,
+//! and a scratch mutation that turned contact reuse on by default moved it (release
+//! `0xa38620b38cbca8d3` -> `0xb583189fa681f3a6`) while the test stayed green. The pin's
+//! doc carries its re-pin rule.
 //!
 //! # Scene size per profile
 //!
@@ -77,6 +82,22 @@ const FRAMES: usize = if cfg!(debug_assertions) { 60 } else { 120 };
 
 /// Fixed timestep (Jolt's `cDeltaTime`).
 const DT: f32 = 1.0 / 60.0;
+
+/// The reference run's final hash, per profile: release (height 15, 120 frames)
+/// `0xa386_20b3_8cbc_a8d3`, debug (height 10, 60 frames) `0xc7eb_531b_1e1a_c19b`. Both were
+/// read on msvc at L9 C3 (`aef7dda4`), where contact reuse is off by default.
+///
+/// **Re-pin rule.** The value moves only with a commit that changes values by design (a
+/// value-changing lever). That commit re-reads BOTH profiles from this test's own
+/// `reference final hash` line, re-pins both here in the same commit, and names the lever
+/// and the old values in this doc. In a commit that claims bit identity, a change is a
+/// defect, never a re-pin. L9 C4 (contact reuse on by default) is such a lever and
+/// re-pins it.
+const PINNED_FINAL_HASH: u64 = if cfg!(debug_assertions) {
+    0xc7eb_531b_1e1a_c19b
+} else {
+    0xa386_20b3_8cbc_a8d3
+};
 
 /// The colored solver's per-color dispatch floor (`MIN_PARALLEL_SLOTS_PER_COLOR`,
 /// private to `solver/colored.rs`), mirrored for the non-vacuity witness only.
@@ -332,5 +353,14 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
         diverged.is_empty(),
         "the default world diverged from 1w parallel_solve=false (SIMD) on the pyramid:\n  {}",
         diverged.join("\n  ")
+    );
+    let reference_final = reference.hashes.last().copied().unwrap_or(0);
+    assert_eq!(
+        reference_final, PINNED_FINAL_HASH,
+        "the default world's pyramid trajectory moved: reference final hash {reference_final:#018x}, \
+         pinned {PINNED_FINAL_HASH:#018x} (height {PYRAMID_HEIGHT}, {FRAMES} frames). Every arm \
+         still agrees with the reference, so this is a value change, not a determinism defect. In \
+         a commit that claims bit identity it is a defect; only a value-changing lever re-pins, \
+         under `PINNED_FINAL_HASH`'s rule"
     );
 }

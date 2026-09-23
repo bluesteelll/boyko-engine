@@ -49,6 +49,8 @@ use crate::broadphase_tree::bvh::{Item, Node8};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::Vec3;
 use crate::narrowphase::axis_cache::AxisEntry;
+use crate::narrowphase::carry::PairTag;
+use crate::narrowphase::reuse::{ReuseRecord, RowFrame};
 use crate::resources::BodyState;
 use crate::row_identity::{RowKey, SleepLatch};
 use crate::solver::contact::BodyEffective;
@@ -400,12 +402,21 @@ pub(crate) const SCRATCH_ID_BROADPHASE_BOTTOM: usize =
 /// so it is one loop, not two.
 pub(crate) const SCRATCH_ID_CONTACT_PAIRS: usize = SCRATCH_ID_BROADPHASE_BOTTOM - 1;
 
-/// Bottom of the broadphase COHORT (inclusive) — one below the grid's own bottom,
-/// because the pair list belongs to it.
-const BROADPHASE_COHORT_BOTTOM: usize = SCRATCH_ID_CONTACT_PAIRS;
+/// Synthetic id for [`ContactPairs`](crate::resources::ContactPairs)'s previous
+/// step's pair list (L9 C2, the pair carry's `pairs_prev`).
+///
+/// One id below the pair list and part of the same cohort: the two columns swap
+/// roles at the start of every broadphase, so either one is the list the grid
+/// and the tree write and the narrowphase reads, and the narrowphase's join reads
+/// the other in the same pass.
+pub(crate) const SCRATCH_ID_CONTACT_PAIRS_PREV: usize = SCRATCH_ID_CONTACT_PAIRS - 1;
 
-/// Width of the broadphase cohort: the grid's columns plus the pair list.
-const BROADPHASE_COHORT_WIDTH: usize = BROADPHASE_COLUMN_COUNT + 1;
+/// Bottom of the broadphase COHORT (inclusive) — two below the grid's own bottom,
+/// because both pair lists belong to it.
+const BROADPHASE_COHORT_BOTTOM: usize = SCRATCH_ID_CONTACT_PAIRS_PREV;
+
+/// Width of the broadphase cohort: the grid's columns plus the two pair lists.
+const BROADPHASE_COHORT_WIDTH: usize = BROADPHASE_COLUMN_COUNT + 2;
 
 const _: () = assert!(
     BROADPHASE_COHORT_WIDTH <= POOL_STAGGER_LINES,
@@ -541,8 +552,8 @@ pub(crate) fn register_soft_graph_column_layouts() {
 // —— The ROW-IDENTITY cohort (defect A, interim) ————————————————————
 //
 // `RowIdentity` (row_identity.rs) records the gather's per-row `RowKey`s (slot index +
-// generation, one `u64`) and builds the previous-row map; `IslandSleep` and `BoxAxisCache`
-// each keep one carry scratch. Seven
+// generation, one `u64`) and builds the previous-row map and its stage-2 row list (T5);
+// `IslandSleep` and `BoxAxisCache` each keep one carry scratch. Eight
 // columns in TWO runs, plus `IslandSleep`'s island contact key in the gap between them,
 // because the loops they are swept in differ:
 //
@@ -550,10 +561,11 @@ pub(crate) fn register_soft_graph_column_layouts() {
 //   row keys and the added rows. The gather pushes the keys and the added rows at row `i`
 //   in the loop that pushes the BodyState snapshot, and the two key columns swap roles
 //   every gather, so all three must clear `SCRATCH_ID_BODY_STATE`'s slot.
-// * LOWER run (4 ids): `prev_row`, the stage-2 sort pool, the latch carry and the axis
-//   carry. `prev_row` is read inside both solvers' constraint builds, which sweep the
-//   SOLVER cohort; the axis carry is written and read beside the narrowphase's pair list,
-//   manifolds and axis slots.
+// * LOWER run (5 ids): `prev_row`, the stage-2 sort pool, the latch carry, the axis
+//   carry and the stage-2 row list. `prev_row` is read inside both solvers' constraint
+//   builds, which sweep the SOLVER cohort; the axis carry is written and read beside the
+//   narrowphase's pair list, manifolds and axis slots; the stage-2 list is pushed beside
+//   `prev_row` in the build's stage 2 (L9 C2, T5).
 // * THE ISLAND CONTACT KEY (one id, in the gap): `IslandSleep::begin_step` sweeps it beside
 //   the graph's `island_of` and `island_manifold_start`, and `permute_latch` sweeps it beside
 //   `prev_row` and the latch carry. Its id is the highest id below the upper run whose slot
@@ -600,7 +612,7 @@ const fn highest_id_clear_of(start: usize, top: usize, bottom: usize) -> usize {
 const ROW_IDENTITY_UPPER_COUNT: usize = 3;
 
 /// Number of ids in the row-identity cohort's lower run.
-const ROW_IDENTITY_LOWER_COUNT: usize = 4;
+const ROW_IDENTITY_LOWER_COUNT: usize = 5;
 
 /// Top of the row-identity cohort — one id below the soft-graph cohort's bottom.
 pub(crate) const SCRATCH_ID_ROW_IDENTITY_TOP: usize = SCRATCH_ID_SOFT_GRAPH_BOTTOM - 1;
@@ -625,11 +637,14 @@ pub(crate) const SCRATCH_ID_ROW_REMAP_SORT: usize = SCRATCH_ID_ROW_PREV - 1;
 /// Synthetic id for `IslandSleep`'s latch carry scratch.
 pub(crate) const SCRATCH_ID_SLEEP_LATCH_PREV: usize = SCRATCH_ID_ROW_PREV - 2;
 
-/// Synthetic id for `BoxAxisCache`'s per-pair carried axis. Bottom of the lower run.
+/// Synthetic id for `BoxAxisCache`'s per-pair carried axis.
 pub(crate) const SCRATCH_ID_AXIS_REMAP: usize = SCRATCH_ID_ROW_PREV - 3;
 
+/// Synthetic id for `RowIdentity`'s stage-2 row list (T5, L9 C2). Bottom of the lower run.
+pub(crate) const SCRATCH_ID_ROW_STAGE2: usize = SCRATCH_ID_ROW_PREV - 4;
+
 /// Bottom of the row-identity cohort (inclusive).
-pub(crate) const SCRATCH_ID_ROW_IDENTITY_BOTTOM: usize = SCRATCH_ID_AXIS_REMAP;
+pub(crate) const SCRATCH_ID_ROW_IDENTITY_BOTTOM: usize = SCRATCH_ID_ROW_STAGE2;
 
 /// Synthetic id for `IslandSleep`'s per-row island contact key (defect A4), in the gap
 /// between the two runs: the highest id below the upper run whose stagger slot clears the
@@ -676,7 +691,7 @@ const _: () = assert!(
 
 const _: () = assert!(
     SCRATCH_ID_ROW_ADDED == SCRATCH_ID_ROW_IDENTITY_TOP - (ROW_IDENTITY_UPPER_COUNT - 1)
-        && SCRATCH_ID_AXIS_REMAP == SCRATCH_ID_ROW_PREV - (ROW_IDENTITY_LOWER_COUNT - 1),
+        && SCRATCH_ID_ROW_STAGE2 == SCRATCH_ID_ROW_PREV - (ROW_IDENTITY_LOWER_COUNT - 1),
     "a row-identity run has a hole: its named ids no longer tile the declared counts"
 );
 
@@ -712,9 +727,9 @@ const _: () = assert!(
 
 /// Registers the element layout of every row-identity column, idempotently.
 ///
-/// Two `RowKey` columns, three `u32` columns (the added rows, `prev_row` and the island
-/// contact key), the `(RowKey, u32)` sort pool, the `SleepLatch` carry and the `u8` axis
-/// carry.
+/// Two `RowKey` columns, four `u32` columns (the added rows, `prev_row`, the stage-2 row
+/// list and the island contact key), the `(RowKey, u32)` sort pool, the `SleepLatch` carry
+/// and the `u8` axis carry.
 pub(crate) fn register_row_identity_layouts() {
     register_layout::<RowKey>(SCRATCH_ID_ROW_ENTITY);
     register_layout::<RowKey>(SCRATCH_ID_ROW_ENTITY_PREV);
@@ -723,6 +738,7 @@ pub(crate) fn register_row_identity_layouts() {
     register_layout::<(RowKey, u32)>(SCRATCH_ID_ROW_REMAP_SORT);
     register_layout::<SleepLatch>(SCRATCH_ID_SLEEP_LATCH_PREV);
     register_layout::<u8>(SCRATCH_ID_AXIS_REMAP);
+    register_layout::<u32>(SCRATCH_ID_ROW_STAGE2);
     register_layout::<u32>(SCRATCH_ID_SLEEP_ISLAND_KEY);
 }
 
@@ -732,12 +748,13 @@ pub(crate) fn register_row_identity_layouts() {
 // ping-pong pair, the item list, two record buffers, the static pair list and the scratch
 // stream — and two reserved for commit C5, the sleeper tree and its pair list. The verify
 // sweeps a record buffer beside `BodyState` (slot 63) and, on a `Rows` step, `prev_row` (slot
-// 37); the assembly writes `ContactPairs` (slot 16) beside the stream and the records; commit
-// C5's hint reads `TOUCHED_AWAKE` (in the solver cohort, slots 38..=63). The cohort sits
-// directly below the row-identity cohort, ids 417..=407, slots 33..=23, so every one of those
-// co-swept families is clear of it — each is asserted below. (Every id here moved up by 18
-// when L11 C2 narrowed the solver cohort from 44 ids to 26; the asserts, not this prose, are
-// the proof.)
+// 37); the assembly writes `ContactPairs` (slot 16, or 15 on the steps its two lists have
+// swapped roles, L9 C2) beside the stream and the records; commit C5's hint reads
+// `TOUCHED_AWAKE` (in the solver cohort, slots 38..=63). The cohort sits directly below the
+// row-identity cohort, ids 416..=406, slots 32..=22, so every one of those co-swept families is
+// clear of it — each is asserted below. (Every id here moved up by 18 when L11 C2 narrowed the
+// solver cohort from 44 ids to 26, and down by one when L9 C2 added the stage-2 row list; the
+// asserts, not this prose, are the proof.)
 
 /// Number of `ScratchColumn`s backing [`BroadphaseTree`](crate::broadphase_tree::BroadphaseTree).
 pub(crate) const TREE_COLUMN_COUNT: usize = 11;
@@ -787,10 +804,16 @@ const _: () = assert!(
     "the tree's verify streams BodyState beside its records, and one of the cohort's slots is BODY_STATE's"
 );
 
-// The assembly: the pair list beside the stream and the records.
+// The assembly: the pair list beside the stream and the records. Either pair column is the
+// list on a given step: the two swap roles at every broadphase (L9 C2).
 const _: () = assert!(
-    !shares_stagger_slot(SCRATCH_ID_CONTACT_PAIRS, SCRATCH_ID_TREE_TOP, SCRATCH_ID_TREE_BOTTOM),
-    "the tree's assembly writes ContactPairs beside its stream, and one of the cohort's slots is CONTACT_PAIRS's"
+    !shares_stagger_slot(SCRATCH_ID_CONTACT_PAIRS, SCRATCH_ID_TREE_TOP, SCRATCH_ID_TREE_BOTTOM)
+        && !shares_stagger_slot(
+            SCRATCH_ID_CONTACT_PAIRS_PREV,
+            SCRATCH_ID_TREE_TOP,
+            SCRATCH_ID_TREE_BOTTOM
+        ),
+    "the tree's assembly writes ContactPairs beside its stream, and one of the cohort's slots is a pair column's"
 );
 
 // A `Rows` step: `prev_row` beside the records and the inverse map.
@@ -876,9 +899,10 @@ pub(crate) fn broadphase_column_id(k: usize) -> ComponentId {
 /// Registers the element layout of every [`BroadphaseGrid`] column, idempotently.
 ///
 /// Eleven `u32` columns, one `f32` (`scratch_radii`, k = 9) and one
-/// `(BodyIndex, BodyIndex)` pair column (`candidates`, k = 10). The registry's
-/// collision check keys on `(slot, TypeId)`, so registering each under its REAL
-/// type means a wrong-typed reuse of a slot panics loudly rather than aliasing.
+/// `(BodyIndex, BodyIndex)` pair column (`candidates`, k = 10), then the two
+/// `ContactPairs` lists. The registry's collision check keys on `(slot, TypeId)`,
+/// so registering each under its REAL type means a wrong-typed reuse of a slot
+/// panics loudly rather than aliasing.
 pub(crate) fn register_broadphase_column_layouts() {
     for k in 0..BROADPHASE_COLUMN_COUNT {
         match k {
@@ -888,6 +912,7 @@ pub(crate) fn register_broadphase_column_layouts() {
         }
     }
     register_layout::<(BodyIndex, BodyIndex)>(SCRATCH_ID_CONTACT_PAIRS);
+    register_layout::<(BodyIndex, BodyIndex)>(SCRATCH_ID_CONTACT_PAIRS_PREV);
 }
 
 /// The [`ComponentId`] for [`ContactPairs`](crate::resources::ContactPairs)'s
@@ -895,6 +920,13 @@ pub(crate) fn register_broadphase_column_layouts() {
 #[inline]
 pub(crate) fn contact_pairs_id() -> ComponentId {
     ComponentId::new(SCRATCH_ID_CONTACT_PAIRS)
+}
+
+/// The [`ComponentId`] for [`ContactPairs`](crate::resources::ContactPairs)'s
+/// previous step's pair list (L9 C2).
+#[inline]
+pub(crate) fn contact_pairs_prev_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_CONTACT_PAIRS_PREV)
 }
 
 /// Registers the element layout of every [`ConstraintGraph`] column, idempotently.
@@ -1002,7 +1034,7 @@ fn register_solver_tail_layouts() {
     register_layout::<(u32, BodyState)>(SCRATCH_ID_COLORED_FROZEN_ROWS);
 }
 
-// —— The NARROWPHASE cohort (audit Stage 4; L5) ———————————————————
+// —— The NARROWPHASE cohort (audit Stage 4; L5; L9) ———————————————————
 //
 // `Manifolds`' buffers are swept together by the narrowphase: one pass over the
 // candidate pairs writes a manifold into either `manifolds` or `sensor_overlaps`
@@ -1010,15 +1042,24 @@ fn register_solver_tail_layouts() {
 // narrowphase (L5, `narrowphase/dispatch.rs`) adds two columns to the same
 // cohort: its chunk loop writes the staging column and the per-pair axis commit
 // beside `pairs` and the axis slots, and its compaction reads the staging column
-// beside `manifolds` and `sensor_overlaps`. One cohort, so their ids must be
-// pairwise distinct mod `POOL_STAGGER_LINES`; they MAY reuse the solver / graph /
-// broadphase slots, since those loops never run at the same index at the same
-// moment.
+// beside `manifolds` and `sensor_overlaps`. Contact reuse (L9 C1,
+// `narrowphase/reuse.rs`) adds the per-row orientation frames, read at a box
+// pair's two rows in the same pair loop, and its pair carry (L9 C2,
+// `narrowphase/carry.rs`) adds the two per-pair tag columns — this step's, written
+// at pair `k`, and the previous step's, read at the joined slot beside
+// `pairs_prev` — and the jumper bitset the join probes at a pair's two rows. Contact
+// reuse's records (L9 C3) are two more per-pair columns swept the same way as the
+// tags: this step's written at pair `k`, the previous step's read at the joined
+// slot. One cohort, so their ids must be pairwise distinct mod
+// `POOL_STAGGER_LINES`; they MAY reuse the solver / graph / broadphase slots, since
+// those loops never run at the same index at the same moment.
 
 /// Number of `ScratchColumn`s backing [`Manifolds`](crate::resources::Manifolds):
 /// the solver buffer, the sensor-overlap buffer, the box-axis cache slots, the
-/// parallel narrowphase's staging column and its per-pair axis commit.
-pub(crate) const NARROWPHASE_COLUMN_COUNT: usize = 5;
+/// parallel narrowphase's staging column, its per-pair axis commit, the per-row
+/// orientation frames (L9 C1), the two per-pair tag columns and the jumper bitset
+/// (L9 C2), and the two per-pair reuse-record columns (L9 C3).
+pub(crate) const NARROWPHASE_COLUMN_COUNT: usize = 11;
 
 /// Top of the narrowphase cohort — one id below the broadphase cohort's bottom.
 pub(crate) const SCRATCH_ID_NARROWPHASE_TOP: usize = BROADPHASE_COHORT_BOTTOM - 1;
@@ -1065,7 +1106,9 @@ const _: () = assert!(
 
 /// The [`ComponentId`] for narrowphase column `k` (`0` = `manifolds`,
 /// `1` = `sensor_overlaps`, `2` = the box-axis cache slots, `3` = the parallel
-/// narrowphase's staging column, `4` = its per-pair axis commit).
+/// narrowphase's staging column, `4` = its per-pair axis commit, `5` = the per-row
+/// orientation frames, `6` and `7` = the two per-pair tag columns, `8` = the jumper
+/// bitset, `9` and `10` = the two per-pair reuse-record columns).
 #[inline]
 pub(crate) fn narrowphase_column_id(k: usize) -> ComponentId {
     debug_assert!(k < NARROWPHASE_COLUMN_COUNT, "narrowphase column index out of cohort");
@@ -1077,13 +1120,23 @@ pub(crate) fn narrowphase_column_id(k: usize) -> ComponentId {
 /// Three `Manifold` columns under DIFFERENT ids — the solver buffer, the
 /// sensor-overlap buffer and the parallel narrowphase's staging column are swept
 /// in the same passes, so a shared id would put element `i` of two of them in one
-/// cache set — plus the `AxisEntry` slot table and the `u8` axis commit.
+/// cache set — plus the `AxisEntry` slot table, the `u8` axis commit, the
+/// `RowFrame` column, the two `PairTag` columns (under different ids too: they swap
+/// roles every step and one is read while the other is written), the `u64`
+/// jumper bitset and the two `ReuseRecord` columns (different ids, for the tags'
+/// reason).
 pub(crate) fn register_narrowphase_column_layouts() {
     register_layout::<Manifold>(narrowphase_column_id(0).get());
     register_layout::<Manifold>(narrowphase_column_id(1).get());
     register_layout::<AxisEntry>(narrowphase_column_id(2).get());
     register_layout::<Manifold>(narrowphase_column_id(3).get());
     register_layout::<u8>(narrowphase_column_id(4).get());
+    register_layout::<RowFrame>(narrowphase_column_id(5).get());
+    register_layout::<PairTag>(narrowphase_column_id(6).get());
+    register_layout::<PairTag>(narrowphase_column_id(7).get());
+    register_layout::<u64>(narrowphase_column_id(8).get());
+    register_layout::<ReuseRecord>(narrowphase_column_id(9).get());
+    register_layout::<ReuseRecord>(narrowphase_column_id(10).get());
     register_row_identity_layouts();
 }
 
@@ -1119,6 +1172,47 @@ pub(crate) fn np_stage_id() -> ComponentId {
 #[inline]
 pub(crate) fn axis_commit_id() -> ComponentId {
     narrowphase_column_id(4)
+}
+
+/// The [`ComponentId`] for `Manifolds::row_frames`, the per-row orientation frames
+/// (L9 D2).
+#[inline]
+pub(crate) fn row_frames_id() -> ComponentId {
+    narrowphase_column_id(5)
+}
+
+/// The [`ComponentId`] for `Manifolds::pair_tag`, one of the pair carry's two per-pair
+/// tag columns (L9 D9).
+#[inline]
+pub(crate) fn pair_tag_id() -> ComponentId {
+    narrowphase_column_id(6)
+}
+
+/// The [`ComponentId`] for `Manifolds::pair_tag_prev`, the other per-pair tag column
+/// (L9 D9).
+#[inline]
+pub(crate) fn pair_tag_prev_id() -> ComponentId {
+    narrowphase_column_id(7)
+}
+
+/// The [`ComponentId`] for `Manifolds::jumper_bits`, the pair carry's bitset of the rows
+/// stage 2 resolved (L9 D9).
+#[inline]
+pub(crate) fn jumper_bits_id() -> ComponentId {
+    narrowphase_column_id(8)
+}
+
+/// The [`ComponentId`] for one of the pair carry's two per-pair reuse-record columns
+/// (L9 C3).
+#[inline]
+pub(crate) fn reuse_id() -> ComponentId {
+    narrowphase_column_id(9)
+}
+
+/// The [`ComponentId`] for the pair carry's other per-pair reuse-record column (L9 C3).
+#[inline]
+pub(crate) fn reuse_prev_id() -> ComponentId {
+    narrowphase_column_id(10)
 }
 
 /// The [`ComponentId`] wrapper for [`SCRATCH_ID_SERIAL_MANIFOLD_CONSTRAINTS`].
@@ -1185,6 +1279,12 @@ pub(crate) fn sleep_island_key_id() -> ComponentId {
 #[inline]
 pub(crate) fn axis_remap_id() -> ComponentId {
     ComponentId::new(SCRATCH_ID_AXIS_REMAP)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_ROW_STAGE2`].
+#[inline]
+pub(crate) fn row_stage2_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_ROW_STAGE2)
 }
 
 /// The [`ComponentId`] wrapper for [`SCRATCH_ID_VN_INITIAL`].
@@ -1285,6 +1385,7 @@ mod tests {
         let mut ids: Vec<usize> =
             (0..BROADPHASE_COLUMN_COUNT).map(|k| broadphase_column_id(k).get()).collect();
         ids.push(SCRATCH_ID_CONTACT_PAIRS);
+        ids.push(SCRATCH_ID_CONTACT_PAIRS_PREV);
         ids
     }
 
@@ -1422,7 +1523,7 @@ mod tests {
 
     // —— The row-identity cohort (defect A interim fix, Decision 4; two runs) ————————
 
-    /// The row-identity cohort's seven ids: the upper run, then the lower run.
+    /// The row-identity cohort's eight ids: the upper run, then the lower run.
     fn row_identity_cohort_ids() -> Vec<usize> {
         vec![
             SCRATCH_ID_ROW_ENTITY,
@@ -1432,11 +1533,12 @@ mod tests {
             SCRATCH_ID_ROW_REMAP_SORT,
             SCRATCH_ID_SLEEP_LATCH_PREV,
             SCRATCH_ID_AXIS_REMAP,
+            SCRATCH_ID_ROW_STAGE2,
         ]
     }
 
     /// The cohort is TWO contiguous runs: three ids directly below the soft-graph cohort,
-    /// then a gap, then four ids whose top is the highest id clear of the solver cohort's
+    /// then a gap, then five ids whose top is the highest id clear of the solver cohort's
     /// slots. A single contiguous run would put `prev_row` on a contact column's slot. The
     /// gap holds the sleep key, checked by `the_sleep_key_loops_have_distinct_slots`.
     #[test]
@@ -1473,7 +1575,7 @@ mod tests {
         );
     }
 
-    /// The seven row-identity ids and the sleep key in their gap each get their own slot.
+    /// The eight row-identity ids and the sleep key in their gap each get their own slot.
     #[test]
     fn row_identity_cohort_has_distinct_slots() {
         let mut ids = row_identity_cohort_ids();
@@ -1590,6 +1692,7 @@ mod tests {
             // The widened (defect A4) carry element: latch + island contact key.
             (SCRATCH_ID_SLEEP_LATCH_PREV, 8),
             (SCRATCH_ID_AXIS_REMAP, size_of::<u8>()),
+            (SCRATCH_ID_ROW_STAGE2, size_of::<u32>()),
             (SCRATCH_ID_SLEEP_ISLAND_KEY, 4),
         ] {
             assert_eq!(
