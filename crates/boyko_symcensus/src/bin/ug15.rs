@@ -6,6 +6,7 @@
 //! ug15 build  --subject <S> [--profile <P>] [--map <file>] [-- <rustc args>]
 //!             [--control-drop-emit-obj | --control-no-touch]   # the instrument's controls O / P
 //! ug15 nm     <file>                          # the instrument's control E: RED on a msvc image
+//! ug15 members <archive>                     # the instrument's control M: RED [member count] on an rmeta-only archive
 //! ug15 rlibs  --subject <S> [--profile <P>]   # leg (7b)'s member formats (PC-7)
 //! ug15 leg7 snapshot --subject <S> [--profile <P>] --out <file>
 //! ug15 textcheck --subject <S> --seam <snapshot>  # .text of release == seam-census
@@ -143,6 +144,19 @@ fn run(args: &[String]) -> Result<()> {
             let file = args.get(1).ok_or_else(|| Red::new(RedKind::Usage, "nm <file>"))?;
             let tab = llvm::nm(&llvm.nm, Path::new(file))?;
             emit(&format!("{file}: {} defined, {} undefined symbols", tab.defined.len(), tab.undefined.len()), None)
+        }
+        "members" => {
+            // The instrument's control M: an archive with no object member once `lib.rmeta` is
+            // skipped must RED [member count], never read as "a census of zero".
+            let ctx = Ctx::new()?;
+            let llvm = Llvm::resolve(&ctx.host)?;
+            let file = args.get(1).ok_or_else(|| Red::new(RedKind::Usage, "members <archive>"))?;
+            let members = llvm::rlib_members(&llvm.ar, Path::new(file))?;
+            let mut text = format!("{file}: {} member(s)\n", members.len());
+            for m in &members {
+                text.push_str(&format!("  {} {:?} {} B\n", m.name, m.format, m.size));
+            }
+            emit(&text, None)
         }
         "rlibs" => {
             let ctx = Ctx::new()?;
