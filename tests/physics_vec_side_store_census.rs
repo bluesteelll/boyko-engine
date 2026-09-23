@@ -19,17 +19,30 @@
 //!
 //! # What is checked
 //!
-//! **A struct field whose declared type mentions `Vec<`, in any `.rs` under
-//! [`SCANNED_ROOT`], outside `#[cfg(test)]` regions and outside files loaded only through a
-//! `#[cfg(test)]`-gated `mod` item, must appear on [`KNOWN_VEC_FIELD_SITES`] — and each entry on
-//! that list must still be found, at exactly the field count it declares. The entries sum to
-//! [`PINNED_VEC_FIELDS`], which is the pin the unified plan reads (see "The pin" below).**
+//! **A struct field whose declared type mentions `Vec<` — or a `static` item whose declared type
+//! does — in any `.rs` under [`SCANNED_ROOT`], outside `#[cfg(test)]` regions and outside files
+//! loaded only through a `#[cfg(test)]`-gated `mod` item, must appear on
+//! [`KNOWN_VEC_FIELD_SITES`] — and each entry on that list must still be found, at exactly the
+//! field count it declares. The entries sum to [`PINNED_VEC_FIELDS`], which is the pin the unified
+//! plan reads (see "The pin" below).**
 //!
 //! Three shapes count as a field-bearing body, so the obvious ways around a braced-struct-only
 //! reader are closed: a braced `struct`, a tuple `struct Foo(Vec<u32>);`, and a braced enum variant
 //! `enum E { V { x: Vec<u32> } }`. The latter two carry no `Vec` in this crate today (measured —
 //! the run prints the container count they contribute to), so they cost nothing now and exist
 //! because a hole that costs nothing today is exactly the hole a future rung walks through.
+//!
+//! A **`static` item** is read wherever it is declared — at module level, inside a `thread_local!`
+//! block (braced or written on one line), or inside a `fn` body — and with any type that spans
+//! lines joined first. A static outlives every frame by construction, so the function-local
+//! scratch argument below cannot cover it: `thread_local!` around a `Cell<Vec<_>>` is exactly the
+//! "preallocate and reuse" shape principle 5 pushes an author toward, and it is a side store. A
+//! static is reported as `NAME::<static>`; if one is ever excused, its row names the static as the
+//! owner with a count of 1. It counts toward [`PINNED_VEC_FIELDS`] like a field. Measured on the
+//! B4 trunk: six live statics (`row_identity.rs` 1, `profiling.rs` 2, `soft/self_collision.rs` 3),
+//! none `Vec`-typed, so the reader costs no row and no pin change; the two `thread_local!`
+//! statics in `narrowphase/box_box.rs` sit under `#[cfg(test)]` and are suppressed. The reader
+//! was added by the B4 review fix — see "Review fix" below for the hole it closed.
 //!
 //! # What this predicate does NOT decide — stated here, and re-stated in the failure message
 //!
@@ -39,18 +52,26 @@
 //!   **shape** and lets [`KNOWN_VEC_FIELD_SITES`] carry the **judgement**, one entry per site with
 //!   a written argument — the same self-documenting discipline as the mandatory `// SAFETY:`
 //!   comments and the `#[allow(clippy::disallowed_types)]` rationales.
-//! * **It reads a struct FIELD, not every `Vec`.** A `Vec` in a function signature, a local, a
-//!   return type, a `const`, a tuple type or a trait method is invisible to it, deliberately: a
-//!   function-local scratch `Vec` is legitimate under CLAUDE.md and a gate that reported it would
-//!   be a gate everyone learns to `#[allow]` past.
+//! * **It reads a struct FIELD and a `static` item, not every `Vec`.** A `Vec` in a function
+//!   signature, a local, a return type, a `const`, a tuple type or a trait method is invisible to
+//!   it, deliberately: a function-local scratch `Vec` is legitimate under CLAUDE.md and a gate that
+//!   reported it would be a gate everyone learns to `#[allow]` past. One persistent form hides in
+//!   that list: an ECS system parameter `Local<Vec<_>>` is state kept across runs, written in a
+//!   function signature. `SCANNED_ROOT` holds **zero** `Local<` on the B4 trunk (measured, test
+//!   files included). Whether a `Local` is kernel storage or a side store is a principle-0 question
+//!   for the architect, not one a text census can settle, so the form is stated here, not decided.
 //! * **It matches the TEXT `Vec<`, not a resolved type.** Two consequences, one in each direction.
 //!   A field written through an alias — `type Rows = Vec<u32>;` then `rows: Rows` — is **invisible**
 //!   and is the cheapest way around this gate; measured at `ad0ebea4` and again on the B4 trunk,
 //!   `SCANNED_ROOT` contains **zero** `type … = …Vec<…>` aliases, so the hole is empty rather than
-//!   merely unnoticed, but it is a hole and nothing here can close it without a type resolver. In
-//!   the other direction, a field
-//!   whose type merely *mentions* `Vec<` inside a generic argument (`Option<Vec<u32>>`,
-//!   `[Vec<u32>; 4]`) **is** caught, which is intended — the storage is still a `Vec` on the side.
+//!   merely unnoticed, but it is a hole and nothing here can close it without a type resolver. A
+//!   use-rename is just as cheap — `use std::vec::Vec as Column;` then `rows: Column<u32>` — and so
+//!   is a turbofish in type position, `rows: Vec::<u32>`, which rustfmt rewrites to `Vec<u32>` but
+//!   which no gate runs rustfmt over. Both compile clippy-clean, and `SCANNED_ROOT` holds **zero**
+//!   of either on the B4 trunk (`Vec as` 0, `Vec::<` 0, test files included). In the other
+//!   direction, a field whose type merely *mentions* `Vec<` inside a generic argument
+//!   (`Option<Vec<u32>>`, `[Vec<u32>; 4]`) **is** caught, which is intended — the storage is still
+//!   a `Vec` on the side.
 //!   `VecDeque<` contains no `Vec<` and is not matched; if one is ever added as a durable side
 //!   store, this gate will not see it (zero `VecDeque` under `SCANNED_ROOT` on the B4 trunk).
 //! * **A tuple ENUM variant is not read.** `enum E { V(Vec<u32>) }` slips through, where the
@@ -87,8 +108,12 @@
 //!   live module that happened to carry one of its names. Every way the resolution can miss — a
 //!   `mod` nested in an inline block, a `#[path]` through `..`, a blank line inside the attribute
 //!   stack, an attribute on the `mod` item's own line, a child `mod` of a test file — leaves the
-//!   file SCANNED: a false red naming a line, never a false green. The one false-green shape is the cfg predicate's, stated in the next
-//!   bullet.
+//!   file SCANNED: a false red naming a line, never a false green. A file that any top-level live
+//!   `mod` item also resolves to stays scanned too, whatever test item also loads it: until the
+//!   B4 review fix, `#[cfg(test)] #[path = "util.rs"] mod util_under_test;` beside a live
+//!   `pub mod util;` skipped the live `util.rs` whole (zero such pairs on the B4 trunk — its two
+//!   `#[path]` items each name a `*_tests.rs` file declared nowhere else). The one false-green
+//!   shape left in this skip is the cfg predicate's, stated in the next bullet.
 //! * ⚠ **And that predicate reads `#[cfg(not(test))]` as a test region too**, because it asks
 //!   only whether the whole token `test` appears. A `Vec` field under `#[cfg(not(test))]` — live
 //!   code by definition — would therefore be SKIPPED, which is a *false green*, the one direction
@@ -165,8 +190,11 @@
 //! A census that scans nothing reports a triumphant zero, which is this corpus's most-repeated
 //! defect class. So:
 //!
-//! 1. **[`MIN_CONTAINERS`] / [`MIN_FIELDS`] floors** — a walk that stopped walking, or a field
-//!    parser that stopped parsing, reds instead of passing over an empty set. *Fired by m5 below.*
+//! 1. **[`MIN_CONTAINERS`] / [`MIN_FIELDS`] / [`MIN_STATICS`] floors** — a walk that stopped
+//!    walking, a field parser that stopped parsing, or a `static` reader that stopped reading,
+//!    reds instead of passing over an empty set. *Fired by m5 below, and by r2 for the statics.*
+//!    The statics floor has to be its own clause: zero statics are `Vec`-typed today, so guard 2
+//!    cannot notice a dead static reader either.
 //! 2. **At least one `Vec` field FOUND** — a type matcher that stopped matching would otherwise
 //!    report "no side stores" over a crate that has 34 of them, and it would do so with the field
 //!    denominator **unchanged**, which is why guard 1 cannot stand in for it. *Fired by m4.*
@@ -299,6 +327,68 @@
 //!   crates/boyko_physics/src/broadphase_tree/tests.rs @ line 68  `Sim::ids: Vec<usize>`
 //!   crates/boyko_physics/src/broadphase_tree/tests.rs @ line 73  `Sim::generation: Vec<u32>`
 //!   crates/boyko_physics/src/broadphase_tree/tests.rs @ line 75  `Sim::fresh: Vec<usize>`
+//! ```
+//!
+//! # Review fix: `static` items, and a live file a test item also loads
+//!
+//! The B4 review found the census blind to a `Vec` held in a `static` or a `thread_local!` (W1),
+//! a form this crate already writes for non-`Vec` state. The fix added the `static` item reader,
+//! the [`MIN_STATICS`] floor and the positive cases in both synthetic controls, and it keeps a file
+//! scanned when a live `mod` item also loads it (O2). Pin, rows and denominators are unchanged:
+//! 38 files, 97 containers, 500 fields, 6 `static` items, 34 `Vec`-typed, 5 of 5 tests passed.
+//! The receipts above predate the reader, so their report lines carry no `static` count. Each
+//! mutation below was reverted and `cmp`-verified against its snapshot.
+//!
+//! **(r0) The hole, on the scanner as B4 first committed it** — three lines inserted after
+//! `ROW_IDENTITY_EPOCH` in `row_identity.rs`: a `pub static` `OnceLock<Vec<u32>>`, a one-line
+//! `thread_local! { static …: Cell<Vec<u32>> = … }`, and a static whose `OnceLock<` type wraps
+//! onto a `Vec<u8>` on the next line. All three compile. The old scanner stayed green:
+//!
+//! ```text
+//! …97 field-bearing container(s), 500 field declaration(s) parsed, 34 of them `Vec`-typed (pin 34)…
+//! test result: ok. 5 passed; 0 failed
+//! ```
+//!
+//! **(r1) The same three lines, with the fix:**
+//!
+//! ```text
+//! …500 field declaration(s) and 9 `static` item(s) parsed, 37 of them `Vec`-typed (pin 34)…
+//! a NEW `std::Vec` side store has appeared in boyko_physics:
+//!   crates/boyko_physics/src/row_identity.rs @ line 118  `B4_FIX_ROWS::<static>: std::sync::OnceLock<Vec<u32>>`
+//!   crates/boyko_physics/src/row_identity.rs @ line 119  `B4_FIX_SCRATCH::<static>: std::cell::Cell<Vec<u32>>`
+//!   crates/boyko_physics/src/row_identity.rs @ line 120  `B4_FIX_WRAPPED::<static>: std::sync::OnceLock< Vec<u8>, >`
+//! test result: FAILED. 4 passed; 1 failed
+//! ```
+//!
+//! **(r2) The static reader broken** (`static_items`'s keyword `"static"` → `"statik"`). The
+//! `Vec` count stays at 34, because no live static is `Vec`-typed, so guard 2 cannot see this. The
+//! statics floor and both synthetic controls do:
+//!
+//! ```text
+//! …500 field declaration(s) and 0 `static` item(s) parsed, 34 of them `Vec`-typed (pin 34)…
+//! the scan read only 0 `static` item(s) (floor 3). The static-item reader has stopped reading. …
+//! static_items("pub static ROWS: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();") read the wrong thing
+//!   left: []
+//! test result: FAILED. 2 passed; 3 failed
+//! ```
+//!
+//! **(r3) The join for a type that wraps across lines disabled** ([`STATIC_JOIN_LOOKAHEAD`]
+//! `8` → `0`). The container control loses `WRAPPED::<static>`, and red-first run r1 shows the same
+//! shape on the live tree (`B4_FIX_WRAPPED`):
+//!
+//! ```text
+//!   left: ["Braced::kept", …, "ROWS::<static>", "SCRATCH::<static>", "LOCAL::<static>"]
+//!  right: ["Braced::kept", …, "ROWS::<static>", "SCRATCH::<static>", "WRAPPED::<static>", "LOCAL::<static>"]
+//! test result: FAILED. 4 passed; 1 failed
+//! ```
+//!
+//! **(r4) The O2 exclusion removed** (the `retain` that drops a file a live `mod` item also
+//! resolves to). The module-file control then skips the live `util.rs`:
+//!
+//! ```text
+//!   left: [… ("c/src/t.rs", "c/src/lib.rs @ line 5"), ("c/src/util.rs", "c/src/other.rs @ line 3")]
+//!  right: [… ("c/src/t.rs", "c/src/lib.rs @ line 5")]
+//! test result: FAILED. 4 passed; 1 failed
 //! ```
 //!
 //! # Scope, and the widening this file owes
@@ -437,12 +527,21 @@ const MIN_CONTAINERS: usize = 35;
 /// would otherwise report a clean tree.
 const MIN_FIELDS: usize = 200;
 
+/// Floor on `static` items read. Six live ones on the B4 trunk; half of that catches a static
+/// reader that stopped reading, which neither the field floors nor guard 2 can see while no static
+/// is `Vec`-typed.
+const MIN_STATICS: usize = 3;
+
 /// Cap on how many lines one field declaration may span before the join gives up. The longest real
 /// one is two; the cap keeps a malformed file from running the join to the end of the body.
 const FIELD_JOIN_LOOKAHEAD: usize = 8;
 
 /// Cap on how many lines a tuple-struct declaration may span before its `;` is expected.
 const TUPLE_JOIN_LOOKAHEAD: usize = 8;
+
+/// Cap on how many lines a `static` item's declared type may span before its `=` or `;`. Reaching
+/// the cap keeps everything joined so far as the type — a false red at worst, never a missed `Vec`.
+const STATIC_JOIN_LOOKAHEAD: usize = 8;
 
 /// One `Vec`-typed field, as the failure message reports it.
 struct VecField {
@@ -451,9 +550,9 @@ struct VecField {
     /// 1-indexed line of the declaration's LAST line (the one carrying the `,`), which is where a
     /// reader's eye lands on the type.
     line: usize,
-    /// The struct — or `Enum::Variant` — that declares it.
+    /// The struct — or `Enum::Variant` — that declares it, or the `static` item's own name.
     owner: String,
-    /// The field's name, or `<positional>` for a tuple struct.
+    /// The field's name, `<positional>` for a tuple struct, or `<static>` for a `static` item.
     field: String,
     /// The declared type, as written.
     ty: String,
@@ -472,7 +571,9 @@ struct Census {
     containers: usize,
     /// Field declarations parsed, of any type.
     fields: usize,
-    /// The subset whose declared type mentions `Vec<`.
+    /// `static` items read, of any type.
+    statics: usize,
+    /// The fields and `static` items whose declared type mentions `Vec<`.
     vec_fields: Vec<VecField>,
 }
 
@@ -705,6 +806,102 @@ fn split_top_level_commas(body: &str) -> Vec<&str> {
     out
 }
 
+/// Byte index of the first `=` or `;` in `ty` outside `<…>`, `(…)` and `[…]` — where a `static`
+/// item's declared type ends and its initializer (or, for an `extern` static, the item) begins —
+/// or `None` when the text ends first.
+///
+/// `[T; N]`'s `;` sits inside the brackets and `Box<dyn Iterator<Item = T>>`'s `=` inside the
+/// angles, so neither ends the type early. The `>` of a `fn` pointer's `->` closes nothing.
+fn type_end(ty: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut prev = ' ';
+    for (idx, c) in ty.char_indices() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' if prev == '-' => {}
+            '>' | ')' | ']' => depth -= 1,
+            '=' | ';' if depth <= 0 => return Some(idx),
+            _ => {}
+        }
+        prev = c;
+    }
+    None
+}
+
+/// One `static` item that starts on a line.
+struct StaticItem {
+    /// The static's name.
+    name: String,
+    /// Its declared type, as far as the line carries it.
+    ty: String,
+    /// Whether the type ended on the line (an `=` or `;` was reached).
+    closed: bool,
+}
+
+/// Every `static NAME: TYPE` item that starts in `code`, which has had its `//` comment stripped.
+///
+/// Keyed on the declaration shape — the token `static`, an optional `mut`, a name, one `:` —
+/// anywhere on the line, so `pub(crate) static`, `static mut`, a static inside a `fn` body and the
+/// one-line `thread_local! { static A: T = …; static B: U = …; }` are all read. A `static` right
+/// after `'` is a lifetime (`&'static str`, `T: 'static`), not an item, and string bodies are
+/// removed first so a literal cannot declare one. Only the last item on a line can be left open.
+fn static_items(code: &str) -> Vec<StaticItem> {
+    const KEYWORD: &str = "static";
+    let code = strip_strings(code);
+    let bytes = code.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = code[from..].find(KEYWORD) {
+        let start = from + offset;
+        let end = start + KEYWORD.len();
+        from = end;
+        let before_ok = start == 0 || {
+            let b = bytes[start - 1] as char;
+            !is_ident_char(b) && b != '\''
+        };
+        let after_ok = code[end..].chars().next().is_none_or(|c| !is_ident_char(c));
+        if !(before_ok && after_ok) {
+            continue;
+        }
+        let mut rest = code[end..].trim_start();
+        if let Some(after_mut) = rest.strip_prefix("mut")
+            && after_mut.starts_with(char::is_whitespace)
+        {
+            rest = after_mut.trim_start();
+        }
+        let name: String = rest.chars().take_while(|c| is_ident_char(*c)).collect();
+        if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        let Some(ty) = rest[name.len()..].trim_start().strip_prefix(':') else {
+            continue;
+        };
+        if ty.starts_with(':') {
+            continue;
+        }
+        match type_end(ty) {
+            Some(stop) => {
+                out.push(StaticItem {
+                    name,
+                    ty: ty[..stop].trim().to_string(),
+                    closed: true,
+                });
+                // `ty` is a suffix of `code`, so its offset is the length difference.
+                from = code.len() - ty.len() + stop;
+            }
+            None => {
+                out.push(StaticItem {
+                    name,
+                    ty: ty.trim().to_string(),
+                    closed: false,
+                });
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Read a body written entirely on one line — `Edge { a: usize, b: usize },`, a live shape in
 /// `narrowphase/box_box.rs`.
 ///
@@ -811,6 +1008,39 @@ fn scan_file(rel: &str, text: &str, census: &mut Census) {
         }
         while enums.last().is_some_and(|(_, d)| depth < *d) {
             enums.pop();
+        }
+
+        // A `static` outlives every frame whatever scope declares it, so it is read at any depth —
+        // module level, a `thread_local!` block, a `fn` body — not only inside an open body.
+        let statics = static_items(t);
+        if !statics.is_empty() {
+            for item in statics {
+                let mut ty = item.ty;
+                if !item.closed {
+                    let mut end = idx;
+                    while end + 1 < lines.len() && end - idx < STATIC_JOIN_LOOKAHEAD {
+                        end += 1;
+                        let next = strip_strings(&strip_line_comment(lines[end]));
+                        let joined = format!("{ty} {}", next.trim());
+                        if let Some(stop) = type_end(&joined) {
+                            ty = joined[..stop].trim().to_string();
+                            break;
+                        }
+                        ty = joined;
+                    }
+                }
+                census.statics += 1;
+                if ty.contains(VEC_NEEDLE) {
+                    census.vec_fields.push(VecField {
+                        file: rel.to_string(),
+                        line: lineno,
+                        owner: item.name,
+                        field: "<static>".to_string(),
+                        ty,
+                    });
+                }
+            }
+            continue;
         }
 
         // A `struct NAME` whose brace arrives on a later line.
@@ -1054,21 +1284,30 @@ fn mod_file_candidates(declaring: &str, decl: &ModDecl) -> Vec<String> {
 ///
 /// A file pulled in by `#[cfg(test)] mod tests;` carries no cfg of its own, so [`scan_file`]'s
 /// region skipper cannot see it: the signal sits on the DECLARING item, and this reads it there.
-/// Only a top-level `mod NAME;` with a test cfg in its stack counts, and only when it resolves to a
-/// scanned file. Every miss leaves a file scanned — a false red, never a false green.
+/// Only a top-level `mod NAME;` with a test cfg in its stack counts, only when it resolves to a
+/// scanned file, and only when no top-level live `mod` item resolves to that file as well — a
+/// `#[cfg(test)] #[path]` item that re-loads a live module must not take the live module with it.
+/// Every miss leaves a file scanned — a false red, never a false green.
 fn cfg_test_module_files(sources: &[(String, String)]) -> BTreeMap<String, String> {
     let scanned: BTreeSet<&str> = sources.iter().map(|(rel, _)| rel.as_str()).collect();
     let mut gated = BTreeMap::new();
+    let mut live = BTreeSet::new();
     for (rel, text) in sources {
-        for decl in mod_decls(text).into_iter().filter(|d| d.cfg_test) {
-            if let Some(file) = mod_file_candidates(rel, &decl)
+        for decl in mod_decls(text) {
+            let Some(file) = mod_file_candidates(rel, &decl)
                 .into_iter()
                 .find(|c| scanned.contains(c.as_str()))
-            {
+            else {
+                continue;
+            };
+            if decl.cfg_test {
                 gated.insert(file, format!("{rel}:{}", decl.line));
+            } else {
+                live.insert(file);
             }
         }
     }
+    gated.retain(|file, _| !live.contains(file));
     gated
 }
 
@@ -1123,6 +1362,7 @@ fn census() -> Census {
         cfg_test_regions: 0,
         containers: 0,
         fields: 0,
+        statics: 0,
         vec_fields: Vec::new(),
     };
     for (rel, text) in &sources {
@@ -1143,14 +1383,15 @@ fn report(c: &Census) {
     println!(
         "[physics Vec side-store census] root={SCANNED_ROOT}  {} file(s) scanned, {} \
          `#[cfg(test)]` module file(s) skipped ({:?}), {} `#[cfg(test)]` region(s) suppressed, {} \
-         field-bearing container(s), {} field declaration(s) parsed, {} of them `Vec`-typed \
-         (pin {PINNED_VEC_FIELDS}), {} exception row(s)",
+         field-bearing container(s), {} field declaration(s) and {} `static` item(s) parsed, {} \
+         of them `Vec`-typed (pin {PINNED_VEC_FIELDS}), {} exception row(s)",
         c.files,
         c.skipped_test_files.len(),
         c.skipped_test_files,
         c.cfg_test_regions,
         c.containers,
         c.fields,
+        c.statics,
         c.vec_fields.len(),
         KNOWN_VEC_FIELD_SITES.len(),
     );
@@ -1171,16 +1412,22 @@ fn report(c: &Census) {
 /// gate for the first time is meeting it in a failure message, not in the module doc.
 const NARROWING: &str = "\
 WHAT THIS GATE DOES AND DOES NOT DECIDE:\n\
-\x20 * It forbids the SHAPE (`Vec<` in a struct field's declared type), because the actual rule — \
+\x20 * It forbids the SHAPE (`Vec<` in the declared type of a struct field or a `static` item), \
+because the actual rule — \
 durable subsystem data must live in ECS storage — is NOT decidable from a declaration. A frame \
 scratch buffer and a per-entity mirror are spelled identically.\n\
 \x20 * The judgement therefore lives in KNOWN_VEC_FIELD_SITES, one row per site with the rung that \
 removes it — the same discipline as `// SAFETY:` and the `#[allow(clippy::disallowed_types)]` \
 rationales.\n\
+\x20 * A `static` item IS a finding when its type mentions `Vec<` — at module level, in a \
+`thread_local!` block or in a `fn` body — because a static outlives every frame. It is reported as \
+`NAME::<static>`; a row excusing one names the static as the owner, with a count of 1.\n\
 \x20 * A `Vec` in a function signature, a local or a return type is NOT a finding here and never \
-was: CLAUDE.md names function-local scratch as legitimate.\n\
-\x20 * The match is textual. A field written through an alias (`type Rows = Vec<u32>`) is invisible \
-to it, and so is a `VecDeque`.";
+was: CLAUDE.md names function-local scratch as legitimate. That includes an ECS `Local<Vec<_>>` \
+system parameter, which is persistent (zero of them in boyko_physics on the B4 trunk).\n\
+\x20 * The match is textual. A field written through an alias (`type Rows = Vec<u32>`), a \
+use-rename (`use std::vec::Vec as Column`) or a type-position turbofish (`Vec::<u32>`) is \
+invisible to it, and so is a `VecDeque` (zero of each in boyko_physics on the B4 trunk).";
 
 /// The ban: no `Vec`-typed field in `boyko_physics` outside the enumerated sites.
 #[test]
@@ -1202,6 +1449,14 @@ fn no_unlisted_vec_side_store_in_boyko_physics() {
         "the scan parsed only {} field declaration(s) (floor {MIN_FIELDS}). The field parser has \
          stopped parsing; every clean run after this point would be clean from emptiness.",
         c.fields
+    );
+    assert!(
+        c.statics >= MIN_STATICS,
+        "the scan read only {} `static` item(s) (floor {MIN_STATICS}). The static-item reader has \
+         stopped reading. No static in {SCANNED_ROOT} is `Vec`-typed today, so the `Vec` count \
+         cannot notice this: a `Vec` in a `static` or a `thread_local!` would pass unseen from \
+         here on.",
+        c.statics
     );
 
     // ── Anti-vacuity guard 2: the type matcher still matches something.
@@ -1238,9 +1493,9 @@ fn no_unlisted_vec_side_store_in_boyko_physics() {
          across this crate already on the B4 trunk), a `Resource`-owned column or a dense \
          component for durable per-element state. That is the outcome this gate exists to \
          produce.\n\
-         \x20 2. If it is genuinely function-local scratch, it does not belong in a struct field at \
-         all — make it a local. If it is test code in a file of its own, declare that file with \
-         `#[cfg(test)] mod …;` and the scan skips it.\n\
+         \x20 2. If it is genuinely function-local scratch, it does not belong in a struct field \
+         or a `static` at all — make it a local. If it is test code in a file of its own, declare \
+         that file with `#[cfg(test)] mod …;` and the scan skips it.\n\
          \x20 3. Only if neither holds, add a row to KNOWN_VEC_FIELD_SITES in \
          tests/physics_vec_side_store_census.rs naming the struct, its exact field count, and THE \
          RUNG THAT REMOVES IT, and raise PINNED_VEC_FIELDS by the same count — the unified plan \
@@ -1254,7 +1509,8 @@ fn no_unlisted_vec_side_store_in_boyko_physics() {
     assert!(
         c.vec_fields.len() == PINNED_VEC_FIELDS,
         "the scan found {} `Vec`-typed field(s) under {SCANNED_ROOT}; the pin is \
-         {PINNED_VEC_FIELDS}. Every field found is on KNOWN_VEC_FIELD_SITES (the clause above \
+         {PINNED_VEC_FIELDS}. A `static` item whose type mentions `Vec<` counts as one field. \
+         Every field found is on KNOWN_VEC_FIELD_SITES (the clause above \
          passed), so the difference is inside a listed struct, and \
          `every_known_vec_side_store_is_present_at_its_declared_count` names it. The unified plan \
          reads this pin (U6: 34 → 30, S0: 30 → 0): lower it and the row together, in the commit \
@@ -1379,6 +1635,65 @@ fn the_field_parser_reads_every_shape_it_will_meet() {
         );
     }
 
+    // `static` items: every declaration shape read with its type cut at the right `=` / `;`, and
+    // a lifetime, a string literal or a longer identifier never read as one.
+    type Want<'a> = &'a [(&'a str, &'a str, bool)];
+    let static_cases: &[(&str, Want)] = &[
+        (
+            "pub static ROWS: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();",
+            &[("ROWS", "std::sync::OnceLock<Vec<u32>>", true)],
+        ),
+        (
+            "pub(crate) static mut COUNT: u64 = 0;",
+            &[("COUNT", "u64", true)],
+        ),
+        (
+            "pub static SPAN_ZONES: [&ZoneHandle; SPAN_ZONE_COUNT] = [",
+            &[("SPAN_ZONES", "[&ZoneHandle; SPAN_ZONE_COUNT]", true)],
+        ),
+        (
+            "thread_local! { static A: Cell<Vec<u8>> = const { Cell::new(Vec::new()) }; \
+             static B: Cell<u64> = const { Cell::new(0) }; }",
+            &[("A", "Cell<Vec<u8>>", true), ("B", "Cell<u64>", true)],
+        ),
+        (
+            "static ITER: Box<dyn Iterator<Item = Vec<u32>> + Sync> = make();",
+            &[("ITER", "Box<dyn Iterator<Item = Vec<u32>> + Sync>", true)],
+        ),
+        (
+            "static F: fn(u32) -> Vec<u32> = f;",
+            &[("F", "fn(u32) -> Vec<u32>", true)],
+        ),
+        (
+            "unsafe extern \"C\" { safe static EXT: u32; }",
+            &[("EXT", "u32", true)],
+        ),
+        (
+            "static WRAPPED: std::cell::RefCell<",
+            &[("WRAPPED", "std::cell::RefCell<", false)],
+        ),
+        ("pub fn f(x: &'static str) -> &'static [u32] {", &[]),
+        ("where T: 'static,", &[]),
+        ("let s = \"static FAKE: Vec<u32> = x;\";", &[]),
+        ("pub is_static: Vec<bool>,", &[]),
+        ("static::helper();", &[]),
+    ];
+    for (line, want) in static_cases {
+        let got: Vec<(String, String, bool)> = static_items(line)
+            .into_iter()
+            .map(|s| (s.name, s.ty, s.closed))
+            .collect();
+        let got_ref: Vec<(&str, &str, bool)> = got
+            .iter()
+            .map(|(n, t, closed)| (n.as_str(), t.as_str(), *closed))
+            .collect();
+        assert_eq!(
+            got_ref.as_slice(),
+            *want,
+            "static_items({line:?}) read the wrong thing"
+        );
+    }
+
     // Region suppression: every cfg spelling that gates test code in this crate.
     for line in [
         "#[cfg(test)]",
@@ -1406,10 +1721,11 @@ fn the_field_parser_reads_every_shape_it_will_meet() {
 /// The scanner's end-to-end control, on a synthetic file carrying every container shape.
 ///
 /// `the_field_parser_reads_every_shape_it_will_meet` proves the line parser; this proves the state
-/// machine around it — the brace tracking, the `#[cfg(test)]` region skip, and the three
-/// field-bearing container shapes. A tuple struct and a braced enum variant carry no `Vec` in
-/// `boyko_physics` today, so the live corpus cannot exercise those two paths at all: without this
-/// control they would be code that has never once run against a positive case.
+/// machine around it — the brace tracking, the `#[cfg(test)]` region skip, the three
+/// field-bearing container shapes and the `static` item reader. A tuple struct, a braced enum
+/// variant and a `static` carry no `Vec` in `boyko_physics` today, so the live corpus cannot
+/// exercise those paths at all: without this control they would be code that has never once run
+/// against a positive case.
 #[test]
 fn the_scanner_sees_every_container_shape_and_skips_test_regions() {
     let source = concat!(
@@ -1431,11 +1747,26 @@ fn the_scanner_sees_every_container_shape_and_skips_test_regions() {
         "{\n",
         "    pub late: Vec<T>,\n",
         "}\n",
+        "/// A doc comment naming `static DOC: Vec<u8>` declares nothing.\n",
+        "pub static ROWS: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();\n",
+        "static mut COUNT: u64 = 0;\n",
+        "thread_local! { static SCRATCH: std::cell::Cell<Vec<u32>> = const { \
+         std::cell::Cell::new(Vec::new()) }; }\n",
+        "thread_local! {\n",
+        "    static WRAPPED: std::cell::RefCell<\n",
+        "        Vec<u8>,\n",
+        "    > = const { std::cell::RefCell::new(Vec::new()) };\n",
+        "}\n",
+        "pub fn lifetimes(x: &'static str) -> &'static str {\n",
+        "    static LOCAL: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();\n",
+        "    x\n",
+        "}\n",
         "#[cfg(test)]\n",
         "mod tests {\n",
         "    pub struct Suppressed {\n",
         "        pub invisible: Vec<u8>,\n",
         "    }\n",
+        "    static HIDDEN_INVISIBLE: Vec<u8> = Vec::new();\n",
         "}\n",
         "#[cfg(all(test, target_arch = \"x86_64\"))]\n",
         "fn helper() {\n",
@@ -1450,6 +1781,7 @@ fn the_scanner_sees_every_container_shape_and_skips_test_regions() {
         cfg_test_regions: 0,
         containers: 0,
         fields: 0,
+        statics: 0,
         vec_fields: Vec::new(),
     };
     scan_file("synthetic.rs", source, &mut c);
@@ -1466,12 +1798,23 @@ fn the_scanner_sees_every_container_shape_and_skips_test_regions() {
             "Tuple::<positional>".to_string(),
             "Shape::Mesh::verts".to_string(),
             "Generic::late".to_string(),
+            "ROWS::<static>".to_string(),
+            "SCRATCH::<static>".to_string(),
+            "WRAPPED::<static>".to_string(),
+            "LOCAL::<static>".to_string(),
         ],
         "the scanner did not see every container shape (or saw a suppressed one). Missing \
          `Tuple::<positional>` means `struct Foo(Vec<u32>);` is a one-line way around this gate; \
-         missing `Shape::Mesh::verts` means a braced enum variant is; seeing anything named \
-         `invisible` means `#[cfg(test)]` suppression is broken in the direction that reds honest \
-         trees."
+         missing `Shape::Mesh::verts` means a braced enum variant is; missing a `<static>` means \
+         a `static` / `thread_local!` item is (`WRAPPED`: a type wrapped across lines; `LOCAL`: a \
+         static inside a `fn` body); seeing anything named `DOC` or `invisible` means a comment \
+         was read as code or `#[cfg(test)]` suppression is broken in the direction that reds \
+         honest trees."
+    );
+    assert_eq!(
+        c.statics, 5,
+        "`static` items read: ROWS, COUNT, SCRATCH, WRAPPED, LOCAL. The `&'static` lifetimes and \
+         the doc comment are not items, and HIDDEN_INVISIBLE sits in a `#[cfg(test)]` region"
     );
     assert_eq!(
         c.cfg_test_regions, 2,
@@ -1492,8 +1835,9 @@ fn the_scanner_sees_every_container_shape_and_skips_test_regions() {
 ///
 /// The live tree exercises only the positive half (three gated files). This fixes the other
 /// half too: a live module NAMED `tests.rs` stays scanned, a `feature = "test_only"` cfg does not
-/// gate, and a `mod` nested in an inline block is not resolved — the stated narrowing, which
-/// leaves its file scanned rather than skipped.
+/// gate, a live module that a test `#[path]` item also loads stays scanned, and a `mod` nested in
+/// an inline block is not resolved — the stated narrowing, which leaves its file scanned rather
+/// than skipped.
 #[test]
 fn a_test_module_file_is_skipped_by_its_declaring_cfg_not_by_its_name() {
     let src = |rel: &str, text: &str| (rel.to_string(), text.to_string());
@@ -1515,8 +1859,14 @@ fn a_test_module_file_is_skipped_by_its_declaring_cfg_not_by_its_name() {
                 "mod inline {\n",
                 "    mod nested;\n",
                 "}\n",
+                "pub mod util;\n",
             ),
         ),
+        src(
+            "c/src/other.rs",
+            "#[cfg(test)]\n#[path = \"util.rs\"]\nmod util_under_test;\n",
+        ),
+        src("c/src/util.rs", ""),
         src(
             "c/src/live.rs",
             concat!(
@@ -1552,7 +1902,8 @@ fn a_test_module_file_is_skipped_by_its_declaring_cfg_not_by_its_name() {
         ],
         "the test-module skip resolved the wrong set. Missing `grid/tests.rs` or `live_tests.rs` \
          means one of the two live layouts is scanned as live code (a false red on the trunk); \
-         seeing `tree/tests.rs` means a live module is skipped for its NAME, and seeing `f.rs` \
-         means a non-test cfg gates — both false greens."
+         seeing `tree/tests.rs` means a live module is skipped for its NAME, seeing `f.rs` \
+         means a non-test cfg gates, and seeing `util.rs` means a live module is skipped because \
+         a test `#[path]` item also loads it — all three false greens."
     );
 }
