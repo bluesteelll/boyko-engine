@@ -109,12 +109,17 @@ pub struct QueryView<'w, D: QueryData, F: QueryFilter = ()> {
     /// takes the byte-identical cursor / point-lookup fast path (0%-gate).
     enable_terms: EnableTerms,
 
-    /// Lifetime binding to `&'w mut EcsMaster` plus invariance over
+    /// Lifetime binding to `&'w mut EcsMaster` plus a type carrier for
     /// `(D, F)`. Two separate marker fields keep the type signature
     /// readable (clippy::type_complexity) — the lifetime carrier and the
-    /// `fn` invariance carrier each have a single responsibility.
+    /// `(D, F)` type carrier each have a single responsibility.
+    ///
+    /// The second is NOT invariance, as its old name
+    /// (`_data_filter_invariance`) claimed: a `fn` **return** position is
+    /// covariant. `D` and `F` are bounded `+ 'static` at every use site, so
+    /// neither carries a lifetime for variance to act on.
     _world_borrow: PhantomData<&'w mut ()>,
-    _data_filter_invariance: PhantomData<fn() -> (D, F)>,
+    _data_filter_marker: PhantomData<fn() -> (D, F)>,
 }
 
 // ── Send/Sync — W1 single canonical assertion ──────────────────────────────
@@ -196,7 +201,7 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
             // `without_enabled` populate them.
             enable_terms: EnableTerms::EMPTY,
             _world_borrow: PhantomData,
-            _data_filter_invariance: PhantomData,
+            _data_filter_marker: PhantomData,
         }
     }
 

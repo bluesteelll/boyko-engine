@@ -78,13 +78,17 @@
 //! for the full argument.
 
 use boyko_ecs::ecs::core::asset::assets::Assets;
+use boyko_log::codes::{OnceSite, W2208};
 use boyko_ecs::ecs::core::asset::handle::Handle;
 use boyko_ecs::ecs::core::resources::resource::NonSendResource;
 #[cfg(feature = "hwrt")]
 use boyko_rhi::AsIndexType;
-use boyko_rhi::enums::IndexType;
-use boyko_rhi::{BufferDesc, BufferUsage, MemoryLocation, RhiDevice};
+use boyko_rhi::descriptor::{BarrierDesc, BufferBarrier, BufferCopy};
+use boyko_rhi::enums::{BarrierAccess, BarrierStage, IndexType};
+use boyko_rhi::{BufferDesc, BufferUsage, MemoryLocation, RhiCommandEncoder, RhiDevice, RhiQueue};
+use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::device::VulkanContext;
+use boyko_rhi_vulkan::error::VulkanError;
 use boyko_scene::render_caps::MeshHandle;
 
 use crate::mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, Vertex};
@@ -249,6 +253,136 @@ fn local_aabb(vertices: &[Vertex]) -> ([f32; 3], [f32; 3]) {
 /// # Panics
 /// Same contract as [`MeshAssetsExt::register_mesh`]: a buffer create / map
 /// failure at asset-registration time is a setup failure.
+/// Creates a DEVICE-LOCAL buffer holding `bytes`, uploaded through a host-visible staging
+/// buffer and one fenced submit — the setup-time geometry upload.
+///
+/// `dst_access` is what the buffer will be read as (vertex fetch, index fetch, storage
+/// read); the barrier at the end of the copy makes the transfer write visible to exactly
+/// that. Mirrors `upload_texture_2d`'s staged-upload shape verbatim, including its
+/// destroy-once error edges.
+///
+/// # Fallback, and why it is not silent
+///
+/// If the device-local allocation fails (a device with no device-local heap the allocator
+/// can serve), this falls back to the previous host-visible buffer and says so once. That
+/// keeps a low-end device running at the OLD speed rather than refusing to boot — but it
+/// says which of the two happened, because "the mesh path is 100x slower here" must never
+/// be something a reader has to infer.
+///
+/// # Panics
+///
+/// Panics if the staging upload itself fails (encoder / fence / submit) — a setup-stage
+/// device error, the same contract `build_mesh_gpu` already had for its allocations.
+fn upload_device_local(
+    ctx: &VulkanContext,
+    bytes: &[u8],
+    usage: BufferUsage,
+    dst_access: BarrierAccess,
+) -> BoundBuffer {
+    let size = bytes.len() as u64;
+    let device_buffer = ctx.create_buffer(&BufferDesc {
+        size,
+        usage: usage | BufferUsage::TRANSFER_DST,
+        location: MemoryLocation::DeviceLocal,
+    });
+    let Ok(device_buffer) = device_buffer else {
+        report_host_visible_fallback(size);
+        let fallback = ctx
+            .create_buffer(&BufferDesc { size, usage, location: MemoryLocation::HostVisibleCoherent })
+            .expect("invariant: mesh buffer create (host-visible fallback)");
+        let ptr = ctx
+            .buffer_mapped_ptr(&fallback)
+            .expect("invariant: host-visible mesh buffer is mapped");
+        // SAFETY: `ptr` is the mapped first byte of a freshly created host-coherent buffer of
+        // exactly `size` bytes; `bytes` is a distinct, equally-sized allocation. Unique writer,
+        // no submit has referenced the buffer yet, host-coherent ⇒ no flush.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.as_ptr(), bytes.len());
+        }
+        return fallback;
+    };
+
+    let staging = ctx
+        .create_buffer(&BufferDesc {
+            size,
+            usage: BufferUsage::TRANSFER_SRC,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("invariant: mesh staging buffer create");
+    let staging_ptr = ctx
+        .buffer_mapped_ptr(&staging)
+        .expect("invariant: staging buffer is host-mapped");
+    // SAFETY: as above — freshly created host-coherent staging of exactly `size` bytes, a
+    // distinct source slice, unique writer before any submit.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), staging_ptr.as_ptr(), bytes.len());
+    }
+
+    let mut encoder = ctx
+        .create_command_encoder()
+        .expect("invariant: mesh upload encoder create");
+    let fence = ctx.create_fence(false).expect("invariant: mesh upload fence create");
+    let record = (|| -> Result<(), VulkanError> {
+        encoder.begin()?;
+        encoder.copy_buffer(
+            &staging,
+            &device_buffer,
+            &[BufferCopy { src_offset: 0, dst_offset: 0, size }],
+        );
+        // The transfer write must be visible to the vertex/index fetch (or storage read) of
+        // every LATER submit. A fence wait alone orders the host, not the device's access
+        // scopes — so the dependency is declared here, in the same command buffer.
+        encoder.pipeline_barrier(&BarrierDesc {
+            src_stage: BarrierStage::TRANSFER,
+            dst_stage: BarrierStage::VERTEX_INPUT | BarrierStage::COMPUTE_SHADER,
+            buffers: &[BufferBarrier {
+                buffer: &device_buffer,
+                src_access: BarrierAccess::TRANSFER_WRITE,
+                dst_access,
+            }],
+        });
+        encoder.end()?;
+        ctx.rhi_queue().submit(&encoder, &fence)?;
+        ctx.wait_fence(&fence, u64::MAX)?;
+        Ok(())
+    })();
+    // SAFETY: `encoder` / `fence` / `staging` were created on `ctx` above and the submit (if
+    // it ran) is fence-waited; each is destroyed exactly once here.
+    unsafe {
+        ctx.destroy_command_encoder(encoder);
+        ctx.destroy_fence(fence);
+        ctx.destroy_buffer(staging);
+    }
+    record.expect("invariant: mesh staging upload (setup stage)");
+    device_buffer
+}
+
+/// A `Once` latch is PROCESS state, so it is a named module-level `static` rather than one
+/// tucked inside the reporter — an observer must be able to reset it (the `W2206_SITE`
+/// precedent in `texture.rs`).
+pub(crate) static W2208_SITE: OnceSite = OnceSite::new();
+
+/// Reports `boyko-W2208`: mesh geometry stayed in host-visible memory.
+///
+/// Cold, latched, and a `warn!` rather than an `info!` — the consequence is a measured ~40x
+/// on the shadow passes, not a cosmetic difference, and silence would send the next reader
+/// hunting the regression everywhere except here. A separate `fn` so a test can call it
+/// without a device whose device-local allocation fails (which nothing can construct).
+#[cold]
+#[inline(never)]
+fn report_host_visible_fallback(size: u64) {
+    if W2208_SITE.claim() {
+        boyko_log::warn!(
+            boyko_log::Render,
+            W2208,
+            "mesh geometry: no device-local allocation for {} bytes — the buffer stays \
+             host-visible, so every draw fetches it across the bus (MEASURED ~40x slower on the \
+             shadow depth passes of a discrete GPU)",
+            size
+        );
+    }
+}
+
 pub fn build_mesh_gpu(
     ctx: &VulkanContext,
     vertices: &[Vertex],
@@ -311,29 +445,32 @@ pub fn build_mesh_gpu(
     let vertex_usage = BufferUsage::VERTEX | as_bits | vb_bits;
     let index_usage = BufferUsage::INDEX | as_bits | vb_bits;
 
-    // --- Vertex buffer: copy the model-space vertices in once. ---
-    let vertex_bytes = core::mem::size_of_val(vertices) as u64;
-    let vertex_buffer = ctx
-        .create_buffer(&BufferDesc {
-            size: vertex_bytes,
-            usage: vertex_usage,
-            location: MemoryLocation::HostVisibleCoherent,
-        })
-        .expect("invariant: mesh vertex buffer create");
-    let vb_ptr = ctx
-        .buffer_mapped_ptr(&vertex_buffer)
-        .expect("invariant: host-visible vertex buffer is mapped");
-    // SAFETY: `vb_ptr` points to `vertex_bytes` mapped host-coherent bytes; `vertices`
-    // is a distinct `vertex_bytes`-byte slice (`#[repr(C)]`, tightly packed); the two
-    // regions do not overlap (a fresh device allocation vs the caller's slice). The
-    // copy completes before any GPU submit references the buffer.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            vertices.as_ptr().cast::<u8>(),
-            vb_ptr.as_ptr(),
-            vertex_bytes as usize,
-        );
-    }
+    // --- Vertex buffer: staged once into DEVICE-LOCAL memory. ---
+    //
+    // MEASURED 2026-08-26 on an RTX 3060 Laptop, and this line is why the measurement
+    // happened: while these buffers were `HostVisibleCoherent`, every draw fetched the
+    // mesh across PCIe from system RAM. A 24-vertex cube never showed it; one 160 k-vertex
+    // model (10.3 MB) did, because the shadow passes re-fetch the whole buffer per cascade
+    // and per cube face. GPU zone medians, same scene, one model added:
+    //
+    //   ZONE_GBUF_PUNCTUAL_DEPTH  0.038 ms -> 4.247 ms
+    //   ZONE_GBUF_CSM_DEPTH       0.052 ms -> 1.797 ms
+    //
+    // The cost tracked BYTES x PASSES, not triangles — the signature of a bus read, not of
+    // rasterisation. Device-local + one staged copy at registration is the standard fix and
+    // the one the texture path (`upload_texture_2d`) has always used.
+    let vertex_bytes_slice: &[u8] = unsafe {
+        // SAFETY: `Vertex` is `#[repr(C)]`, tightly packed (the 64-byte const-assert in
+        // `mesh.rs`) and contains no padding or pointers, so its slice aliases as bytes for
+        // the length below; the borrow lives only for this call.
+        core::slice::from_raw_parts(vertices.as_ptr().cast::<u8>(), core::mem::size_of_val(vertices))
+    };
+    let vertex_buffer = upload_device_local(
+        ctx,
+        vertex_bytes_slice,
+        vertex_usage,
+        BarrierAccess::VERTEX_ATTRIBUTE_READ | BarrierAccess::SHADER_READ,
+    );
 
     // --- Index buffer: width chosen above; the bytes are built host-side then copied. ---
     let index_bytes: Vec<u8> = match index_type {
@@ -377,26 +514,13 @@ pub fn build_mesh_gpu(
             bytes
         }
     };
-    let index_buffer = ctx
-        .create_buffer(&BufferDesc {
-            size: index_bytes.len() as u64,
-            usage: index_usage,
-            location: MemoryLocation::HostVisibleCoherent,
-        })
-        .expect("invariant: mesh index buffer create");
-    let ib_ptr = ctx
-        .buffer_mapped_ptr(&index_buffer)
-        .expect("invariant: host-visible index buffer is mapped");
-    // SAFETY: `ib_ptr` points to `index_bytes.len()` mapped host-coherent bytes;
-    // `index_bytes` is a distinct, equally-sized owned allocation (no overlap with the
-    // device buffer). The copy completes before any GPU submit references the buffer.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            index_bytes.as_ptr(),
-            ib_ptr.as_ptr(),
-            index_bytes.len(),
-        );
-    }
+    // Device-local, staged — see the vertex buffer above for the measurement behind it.
+    let index_buffer = upload_device_local(
+        ctx,
+        &index_bytes,
+        index_usage,
+        BarrierAccess::INDEX_READ | BarrierAccess::SHADER_READ,
+    );
 
     // HW-RT rung R2a-3: build this mesh's per-mesh BLAS EAGERLY on an RT device (Principle 0
     // — durable per-mesh data ON the record). The BLAS reads the vertex + index buffers just
@@ -814,5 +938,32 @@ mod tests {
         let h = size * 0.5;
         assert_eq!(min, [-h, -h, -h]);
         assert_eq!(max, [h, h, h]);
+    }
+}
+
+#[cfg(test)]
+mod w2208_observer {
+    use super::*;
+    use boyko_log::probe::{watch, watched};
+
+    use crate::log_probe::arm;
+
+    /// The device-local fallback warns, and warns exactly once.
+    ///
+    /// The condition itself — a `create_buffer(DeviceLocal)` that fails — cannot be built in a
+    /// test (it needs a device with no device-local heap), which is exactly why the reporter is
+    /// its own function: the CODE is observable even when the situation is not reproducible.
+    #[test]
+    fn w2208_warns_once_when_geometry_stays_host_visible() {
+        arm();
+        W2208_SITE.reset();
+
+        watch(b'W', W2208.number());
+        report_host_visible_fallback(10_260_288);
+        assert_eq!(watched(), 1, "the host-visible fallback warns");
+
+        watch(b'W', W2208.number());
+        report_host_visible_fallback(1_271_424);
+        assert_eq!(watched(), 0, "Once: the second mesh is silent");
     }
 }

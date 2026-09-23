@@ -25,8 +25,9 @@
 //!   stay on the generic solve: `build_graph` is `None`.
 //!
 //! A second test, [`physics_plugin_default_solver_tripwire`], carries the merge
-//! obligation for the render line's `PhysicsPlugin`: it is VACUOUS on this line
-//! (no `PhysicsPlugin` exists here) and goes live the moment one is merged in.
+//! obligation for the render line's `PhysicsPlugin`. It was VACUOUS on the physics line
+//! (no `PhysicsPlugin` existed there) and went live at the A8 merge (the `integ/unified`
+//! cut), which brought the plugin in and made its default `DefaultRigidSolver`.
 //!
 //! This file spins up `boyko_threadpool` (intractable under Miri), so it is
 //! `cfg(not(miri))`.
@@ -307,8 +308,8 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 /// exists, requires its default type parameter to be `DefaultRigidSolver` and no
 /// `new()` / `Default` impl to be pinned to `SoftStepSolver`.
 ///
-/// ⚠ VACUOUS on this line: no `PhysicsPlugin` is declared here, so the test prints
-/// that and passes. It goes live, without an edit, the moment one is merged in. It
+/// ⚠ It was VACUOUS on the physics line, where no `PhysicsPlugin` was declared: the test
+/// printed that and passed. It went live, without an edit, at the A8 merge. It
 /// checks the declaration's text, not the behaviour; the behavioural leg is G1(e)
 /// re-run through `PhysicsPlugin::new()` after the merge.
 #[test]

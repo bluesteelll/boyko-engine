@@ -201,7 +201,8 @@ Three blockers travel with specific files and **must not be softened**:
   `stable-x86_64-pc-windows-gnu` toolchain ships only `rust-objcopy` and `rust-lld`"*. MEASURED
   2026-09-10: `llvm-tools` is installed on BOTH stable toolchains (`rustup component list` reports
   `llvm-tools-x86_64-pc-windows-{gnu,msvc} (installed)`), and each carries `llvm-readobj.exe` /
-  `llvm-nm.exe` / `llvm-objdump.exe` under `lib/rustlib/<triple>/bin/`, which is where
+  `llvm-nm.exe` / `llvm-objdump.exe` (and `llc`, `llvm-ar`, `llvm-cov`, `llvm-profdata`,
+  `llvm-size`, `llvm-strip`, `opt`) under `lib/rustlib/<triple>/bin/`, which is where
   `boyko_diag::storage::resolve_tool` looks after `PATH`. `objdump` and `nm` are on `PATH` too,
   from WinLibs' mingw64; only the `llvm-` spellings are off it, so the `PATH` half of the original
   finding was never the question. The instrument itself is green: `boyko_diag`'s `gate::` suite,

@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>boyko-engine — architecture graph</title>
+<style>
+  :root {
+    --bg: #12161c; --panel: #1a2029; --panel2: #212a35; --text: #d7dee8;
+    --dim: #8b98a8; --accent: #4aa3ff; --border: #2c3644; --red: #e05c5c;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
+  #topbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--border); }
+  #topbar h1 { font-size: 14px; margin: 0 12px 0 0; font-weight: 600; }
+  .lvl-btn { background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    padding: 4px 14px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  .lvl-btn.active { background: var(--accent); color: #08131f; border-color: var(--accent); font-weight: 600; }
+  #search { background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    padding: 4px 10px; border-radius: 4px; width: 260px; }
+  #search:focus { outline: none; border-color: var(--accent); }
+  #stats { color: var(--dim); font-size: 12px; margin-left: auto; }
+  #searchlist { position: absolute; top: 44px; left: 220px; z-index: 30; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px; max-height: 320px; overflow-y: auto;
+    width: 420px; display: none; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
+  #searchlist div { padding: 5px 10px; cursor: pointer; border-bottom: 1px solid var(--border); }
+  #searchlist div:hover { background: var(--panel2); }
+  #searchlist .sub { color: var(--dim); font-size: 11px; margin-left: 6px; }
+  #net { position: absolute; inset: 44px 380px 0 0; }
+  #panel { position: absolute; top: 44px; right: 0; bottom: 0; width: 380px; overflow-y: auto;
+    background: var(--panel); border-left: 1px solid var(--border); padding: 14px 16px 40px; }
+  #panel h2 { margin: 0 0 2px; font-size: 16px; word-break: break-all; }
+  #panel .kind { display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+    padding: 1px 8px; border-radius: 8px; margin-bottom: 8px; }
+  #panel .meta { color: var(--dim); font-size: 12px; margin-bottom: 10px; }
+  #panel .desc { margin: 0 0 12px; white-space: pre-wrap; }
+  #panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+    margin: 14px 0 6px; }
+  #panel .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  #panel .chip { background: var(--panel2); border: 1px solid var(--border); border-radius: 3px;
+    padding: 1px 7px; font-size: 12px; font-family: Consolas, monospace; cursor: default; }
+  #panel ul { list-style: none; margin: 0; padding: 0; }
+  #panel li { padding: 4px 6px; border-radius: 3px; cursor: pointer; font-size: 12px;
+    font-family: Consolas, monospace; word-break: break-all; }
+  #panel li:hover { background: var(--panel2); }
+  #panel li .w { color: var(--dim); float: right; }
+  #panel .x { position: absolute; top: 8px; right: 12px; cursor: pointer; color: var(--dim); font-size: 16px; }
+  #panel .x:hover { color: var(--text); }
+  .flag-xl { color: var(--red); font-weight: 600; }
+  #legend { position: absolute; left: 12px; bottom: 12px; background: rgba(26,32,41,.92);
+    border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; font-size: 11px;
+    z-index: 20; max-width: 240px; }
+  #legend b { display: block; margin-bottom: 4px; }
+  #legend .row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  #legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  #hint { position: absolute; left: 12px; top: 54px; color: var(--dim); font-size: 11px; z-index: 20; }
+  #loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--dim); font-size: 15px; }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <h1>boyko-engine · arch graph</h1>
+  <button class="lvl-btn" data-lvl="systems">Systems (61)</button>
+  <button class="lvl-btn" data-lvl="crates">Crates (25)</button>
+  <button class="lvl-btn" data-lvl="files">Files (699)</button>
+  <input id="search" placeholder="Search files, symbols, systems…  (Enter = first hit)" autocomplete="off">
+  <span id="stats"></span>
+</div>
+<div id="searchlist"></div>
+<div id="net"><div id="loading">loading arch-graph…</div></div>
+<div id="panel"></div>
+<div id="legend"></div>
+<div id="hint">click a node → details · double-click a system/crate → drill in · drag to rearrange</div>
+<script src="vendor/vis-network.min.js"></script>
+<script src="arch-graph.js"></script>
+<script>
+'use strict';
+const G = window.ARCH_GRAPH;
+const nodesById = new Map();
+[...G.systems, ...G.crates, ...G.files].forEach(n => nodesById.set(n.id, n));
+
+const byId = (arr) => new Map(arr.map(n => [n.id, n]));
+const sysById = byId(G.systems), crateById = byId(G.crates), fileById = byId(G.files);
+
+// incoming/outgoing adjacency for the panel
+const outAdj = new Map(), inAdj = new Map(), edgesAll = [];
+function addEdge(e) {
+  edgesAll.push(e);
+  if (!outAdj.has(e.from)) outAdj.set(e.from, []);
+  if (!inAdj.has(e.to)) inAdj.set(e.to, []);
+  outAdj.get(e.from).push(e); inAdj.get(e.to).push(e);
+}
+G.system_edges.forEach(e => addEdge({...e, level: 'systems'}));
+G.crate_edges.forEach(e => addEdge({...e, level: 'crates'}));
+G.edges.forEach(e => addEdge({...e, level: 'files'}));
+
+const LAYER_COLORS = {
+  kernel: '#e74c3c', sim: '#27ae60', render: '#2980b9', ui: '#e67e22',
+  host: '#f1c40f', diagnostics: '#7f8c8d', tooling: '#b7950b'
+};
+
+let network = null;
+let currentLevel = 'systems';
+let focusFilter = null;   // {kind:'system'|'crate', id}
+
+// ---------------------------------------------------------------- datasets
+function systemDataset() {
+  const nodes = G.systems.map(s => ({
+    id: s.id, label: s.label, title: s.description,
+    value: Math.max(20, s.loc / 900), group: s.layer,
+    color: { background: s.color, border: shade(s.color, -30),
+             highlight: { background: s.color, border: '#fff' } },
+    font: { color: '#d7dee8', size: 13 }, shape: 'dot'
+  }));
+  const edges = G.system_edges.map(e => ({
+    id: `se:${e.from}:${e.to}`, from: e.from, to: e.to,
+    value: Math.min(8, Math.max(.6, Math.sqrt(e.weight) / 2.2)),
+    title: e.description, arrows: 'to', color: { color: '#5a6b80', highlight: '#4aa3ff' }
+  }));
+  return { nodes, edges };
+}
+
+function crateDataset() {
+  const nodes = G.crates.map(c => {
+    const layer = layerOfCrate(c);
+    return {
+      id: c.id, label: c.name, title: c.description,
+      value: Math.max(12, c.loc / 2500),
+      color: { background: LAYER_COLORS[layer] || '#97c2fc',
+               border: shade(LAYER_COLORS[layer] || '#97c2fc', -30),
+               highlight: { background: LAYER_COLORS[layer] || '#97c2fc', border: '#fff' } },
+      font: { color: '#10151b', size: 12, face: 'Consolas, monospace' }, shape: 'box'
+    };
+  });
+  const edges = G.crate_edges.map(e => ({
+    id: `ce:${e.kind}:${e.from}:${e.to}`, from: e.from, to: e.to,
+    value: Math.min(6, Math.max(.5, Math.sqrt(e.weight) / 2.5)),
+    title: e.description, arrows: 'to', dashes: e.kind.startsWith('cargo'),
+    color: { color: e.kind.startsWith('cargo') ? '#3c4a5c' : '#5a6b80', highlight: '#4aa3ff' }
+  }));
+  return { nodes, edges };
+}
+
+function layerOfCrate(c) {
+  const sys = (c.systems || []).map(id => sysById.get('system:' + id)).filter(Boolean);
+  if (!sys.length) return 'tooling';
+  const counts = {};
+  sys.forEach(s => counts[s.layer] = (counts[s.layer] || 0) + s.loc);
+  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+}
+
+function fileDataset(filter) {
+  let files = G.files;
+  if (filter) {
+    if (filter.kind === 'system') files = G.files.filter(f => f.system === filter.id.slice(7));
+    else files = G.files.filter(f => f.crate === filter.id.slice(6));
+  }
+  const nodes = files.map(f => {
+    const s = f.system ? sysById.get('system:' + f.system) : null;
+    const col = s ? s.color : '#66707d';
+    const big = f.size_class === 'xl' || f.size_class === 'l';
+    return {
+      id: f.id, label: shortName(f.path), title: f.description,
+      value: Math.max(4, Math.sqrt(f.loc)),
+      color: { background: shade(col, f.refactor_candidate ? -55 : -15),
+               border: f.refactor_candidate ? '#e05c5c' : shade(col, -40),
+               highlight: { background: col, border: '#fff' } },
+      font: { color: big ? '#ffd9d9' : '#c3ccd8', size: 10, face: 'Consolas, monospace' },
+      shape: 'dot'
+    };
+  });
+  const ids = new Set(nodes.map(n => n.id));
+  let edges = G.edges.filter(e => ids.has(e.from) && ids.has(e.to));
+  return { nodes, edges: edges.map(e => ({
+    id: `fe:${e.from}:${e.to}`, from: e.from, to: e.to,
+    value: Math.min(4, Math.max(.25, Math.sqrt(e.weight) / 2)),
+    title: (e.uses && e.uses.length ? 'uses: ' + e.uses.join(', ') : 'imports'),
+    arrows: 'to', color: { color: 'rgba(90,107,128,.35)', highlight: '#4aa3ff' }
+  }))};
+}
+
+function shortName(p) {
+  const parts = p.split('/'); return parts[parts.length - 1];
+}
+function shade(hex, pct) {
+  const n = parseInt(hex.slice(1), 16);
+  let r = (n >> 16) + pct, g = ((n >> 8) & 255) + pct, b = (n & 255) + pct;
+  const cl = x => Math.max(0, Math.min(255, x));
+  return '#' + ((cl(r) << 16) | (cl(g) << 8) | cl(b)).toString(16).padStart(6, '0');
+}
+
+// ---------------------------------------------------------------- render
+const OPTIONS = {
+  layout: { improvedLayout: true },
+  physics: { solver: 'barnesHut', barnesHut: { gravitationalConstant: -3200,
+    springLength: 110, springConstant: .04, avoidOverlap: .3 },
+    stabilization: { iterations: 220 } },
+  interaction: { hover: true, tooltipDelay: 120, navigationButtons: false,
+    keyboard: false, multiselect: false },
+  nodes: { borderWidth: 1 },
+  edges: { selectionWidth: 1.6 }
+};
+
+function render(level, filter) {
+  currentLevel = level; focusFilter = filter || null;
+  let ds;
+  if (level === 'systems') ds = systemDataset();
+  else if (level === 'crates') ds = crateDataset();
+  else ds = fileDataset(focusFilter);
+  document.getElementById('loading').style.display = 'block';
+  const data = { nodes: new vis.DataSet(ds.nodes), edges: new vis.DataSet(ds.edges) };
+  if (network) network.destroy();
+  network = new vis.Network(document.getElementById('net'), data, OPTIONS);
+  network.once('stabilizationIterationsDone', () => {
+    document.getElementById('loading').style.display = 'none';
+    network.fit();
+  });
+  network.on('click', params => {
+    if (params.nodes.length) showPanel(params.nodes[0]);
+    else if (params.edges.length) showEdgePanel(params.edges[0]);
+    else closePanel();
+  });
+  network.on('doubleClick', params => {
+    if (!params.nodes.length) return;
+    const id = params.nodes[0];
+    if (currentLevel === 'systems') {
+      render('files', { kind: 'system', id });
+      updateButtons();
+    } else if (currentLevel === 'crates') {
+      render('files', { kind: 'crate', id });
+      updateButtons();
+    } else {
+      showPanel(id);   // files: open the source-file detail
+    }
+  });
+  updateButtons(); updateLegend(); updateStats(level);
+}
+
+function updateButtons() {
+  document.querySelectorAll('.lvl-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.lvl === currentLevel);
+    if (b.dataset.lvl === 'files') {
+      b.textContent = focusFilter
+        ? 'Files: ' + (focusFilter.kind === 'system'
+            ? sysById.get(focusFilter.id).label
+            : focusFilter.id.slice(6))
+        : 'Files (699)';
+    }
+  });
+}
+
+function updateLegend() {
+  const el = document.getElementById('legend');
+  if (currentLevel === 'files') {
+    el.innerHTML = '<b>Files</b>' +
+      '<div class="row"><span class="sw" style="background:#e05c5c"></span>red border / pink = ≥2500 LOC (refactor candidate)</div>' +
+      '<div class="row"><span class="sw" style="background:#66707d"></span>size ∝ √LOC · color = owning system</div>' +
+      '<div class="row">arrow A→B = A imports B</div>';
+  } else if (currentLevel === 'crates') {
+    el.innerHTML = '<b>Crates (by dominant layer)</b>' + Object.entries(LAYER_COLORS)
+      .map(([k, v]) => `<div class="row"><span class="sw" style="background:${v}"></span>${k}</div>`).join('') +
+      '<div class="row">dashed = Cargo.toml dev-dep · solid = import use</div>';
+  } else {
+    el.innerHTML = '<b>Systems (colored by layer)</b>' + Object.entries(LAYER_COLORS)
+      .map(([k, v]) => `<div class="row"><span class="sw" style="background:${v}"></span>${k}</div>`).join('') +
+      '<div class="row">size ∝ LOC · double-click → its files</div>';
+  }
+}
+
+function updateStats(level) {
+  const el = document.getElementById('stats');
+  if (level === 'files' && focusFilter) {
+    const ds = fileDataset(focusFilter);
+    el.textContent = `${ds.nodes.length} files shown · ${ds.edges.length} edges`;
+  } else if (level === 'files') {
+    el.textContent = `${G.files.length} files · ${G.edges.length} edges`;
+  } else if (level === 'crates') {
+    el.textContent = `${G.crates.length} crates · ${G.crate_edges.length} edges`;
+  } else {
+    el.textContent = `${G.systems.length} systems · ${G.system_edges.length} edges`;
+  }
+}
+
+// ---------------------------------------------------------------- panel
+function closePanel() { document.getElementById('panel').innerHTML = ''; }
+
+function showPanel(id) {
+  const n = nodesById.get(id); if (!n) return;
+  const p = document.getElementById('panel');
+  const kindColor = n.kind === 'system' ? (n.color || '#4aa3ff')
+    : n.kind === 'crate' ? (LAYER_COLORS[layerOfCrate(n)] || '#4aa3ff') : '#8b98a8';
+  let html = `<span class="x" onclick="closePanel()">✕</span>
+    <span class="kind" style="background:${kindColor};color:#0b1117">${n.kind}</span>
+    <h2>${esc(displayName(n))}</h2>
+    <div class="meta">${esc(metaLine(n))}</div>
+    <div class="desc">${esc(n.description || n.summary || '')}</div>`;
+  if (n.symbols && n.symbols.length)
+    html += `<h3>pub symbols</h3><div class="chips">${n.symbols.map(s => `<span class="chip">${esc(s)}</span>`).join('')}</div>`;
+  if (n.kind === 'system') html += `<h3>crates</h3><div class="chips">${n.crates.map(c => `<span class="chip">${esc(c)}</span>`).join('')}</div>`;
+  if (n.cargo_deps && n.cargo_deps.length)
+    html += `<h3>cargo deps</h3><div class="chips">${n.cargo_deps.map(d =>
+      `<span class="chip" title="${d.dev ? 'dev-dependency' : 'dependency'}">${esc(d.to)}${d.dev ? ' (dev)' : ''}</span>`).join('')}</div>`;
+  if (n.kind === 'file')
+    html += `<h3>open</h3><ul><li onclick="openSource('${esc(n.path)}')">${esc('crates/… ' + n.path)}</li></ul>`;
+  html += connectionsHtml(id);
+  p.innerHTML = html;
+  p.scrollTop = 0;
+}
+
+function showEdgePanel(edgeId) {
+  // vis gives us the edge id we assigned; find its data
+  let e = null;
+  for (const cand of edgesAll) {
+    if (edgeId.startsWith('se:') && cand.level === 'systems' && edgeId === `se:${cand.from}:${cand.to}`) { e = cand; break; }
+    if (edgeId.startsWith('ce:') && cand.level === 'crates' && edgeId === `ce:${cand.kind}:${cand.from}:${cand.to}`) { e = cand; break; }
+    if (edgeId.startsWith('fe:') && cand.level === 'files' && edgeId === `fe:${cand.from}:${cand.to}`) { e = cand; break; }
+  }
+  if (!e) return;
+  const p = document.getElementById('panel');
+  let html = `<span class="x" onclick="closePanel()">✕</span>
+    <span class="kind" style="background:#5a6b80;color:#0b1117">edge · ${e.kind}</span>
+    <h2>${esc(displayName(nodesById.get(e.from)))} → ${esc(displayName(nodesById.get(e.to)))}</h2>
+    <div class="meta">weight ${e.weight}</div>
+    <div class="desc">${esc(e.description || '')}</div>`;
+  if (e.uses && e.uses.length)
+    html += `<h3>imported paths</h3><ul>${e.uses.map(u => `<li>${esc(u)}</li>`).join('')}</ul>`;
+  if (e.examples)
+    html += `<h3>heaviest file pairs</h3><ul>${e.examples.map(x =>
+      `<li onclick="openFilePair('${esc(x.from)}','${esc(x.to)}')">${esc(shortName(x.from))} → ${esc(shortName(x.to))}<span class="w">${x.w}</span></li>`).join('')}</ul>`;
+  p.innerHTML = html; p.scrollTop = 0;
+}
+
+function connectionsHtml(id) {
+  const outs = (outAdj.get(id) || []).filter(e => e.level === currentLevel)
+    .sort((a, b) => b.weight - a.weight).slice(0, 12);
+  const ins = (inAdj.get(id) || []).filter(e => e.level === currentLevel)
+    .sort((a, b) => b.weight - a.weight).slice(0, 12);
+  const li = (e, dir) => {
+    const other = dir === '→' ? e.to : e.from;
+    const n = nodesById.get(other);
+    return `<li onclick="jump('${esc(other)}')">${dir} ${esc(displayName(n))}<span class="w">${e.weight}</span></li>`;
+  };
+  let html = '';
+  if (outs.length) html += `<h3>imports (out)</h3><ul>${outs.map(e => li(e, '→')).join('')}</ul>`;
+  if (ins.length) html += `<h3>imported by (in)</h3><ul>${ins.map(e => li(e, '←')).join('')}</ul>`;
+  return html;
+}
+
+function displayName(n) {
+  if (!n) return '(?)';
+  if (n.kind === 'system') return n.label;
+  if (n.kind === 'crate') return n.name;
+  return shortName(n.path);
+}
+function metaLine(n) {
+  if (n.kind === 'system') return `${n.files} files · ${n.loc} LOC · layer: ${n.layer}`;
+  if (n.kind === 'crate') return `${n.files} files · ${n.loc} LOC · ${n.dir}`;
+  const s = n.system ? sysById.get('system:' + n.system) : null;
+  return `${n.loc} LOC (${n.size_class}) · ${n.module || n.path}` +
+    (s ? ` · ${s.label}` : '') +
+    (n.refactor_candidate ? ' · <span class="flag-xl">refactor candidate</span>' : '');
+}
+
+function jump(id) {
+  const n = nodesById.get(id); if (!n) return;
+  if (n.kind === 'system' && currentLevel !== 'systems') { render('systems'); setTimeout(() => network.focus(id, { scale: 1.2 }), 900); }
+  else if (n.kind === 'crate' && currentLevel !== 'crates') { render('crates'); setTimeout(() => network.focus(id, { scale: 1.2 }), 900); }
+  else if (n.kind === 'file') {
+    if (currentLevel !== 'files') { render('files'); setTimeout(() => network.focus(id, { scale: 1.4 }), 1600); }
+    else network.focus(id, { scale: 1.4 });
+    setTimeout(() => { network.selectNodes([id]); showPanel(id); }, currentLevel === 'files' ? 350 : 1700);
+  } else { network.focus(id, { scale: 1.2 }); showPanel(id); }
+}
+window.jump = jump; window.closePanel = closePanel;
+
+function openSource(rel) { window.open('file:///' + G.root.replace(/\\/g, '/') + '/' + rel, '_blank'); }
+function openFilePair(a, b) { openSource(a); setTimeout(() => openSource(b), 300); }
+window.openSource = openSource;
+
+// ---------------------------------------------------------------- search
+const searchIndex = [];
+G.files.forEach(f => {
+  searchIndex.push({ id: f.id, text: f.path, sub: `${f.loc} LOC` });
+  (f.symbols || []).forEach(s => searchIndex.push({ id: f.id, text: s, sub: 'symbol in ' + shortName(f.path) }));
+});
+G.systems.forEach(s => searchIndex.push({ id: s.id, text: s.label, sub: 'system' }));
+G.crates.forEach(c => searchIndex.push({ id: c.id, text: c.name, sub: 'crate' }));
+
+const sl = document.getElementById('searchlist');
+document.getElementById('search').addEventListener('input', ev => {
+  const q = ev.target.value.trim().toLowerCase();
+  if (q.length < 2) { sl.style.display = 'none'; return; }
+  const hits = searchIndex.filter(x => x.text.toLowerCase().includes(q)).slice(0, 24);
+  sl.innerHTML = hits.map((h, i) =>
+    `<div data-id="${h.id}"><b>${esc(h.text)}</b><span class="sub">${esc(h.sub)}</span></div>`).join('');
+  sl.style.display = hits.length ? 'block' : 'none';
+  [...sl.children].forEach((el, i) => el.onclick = () => {
+    const n = nodesById.get(hits[i].id);
+    if (n.kind === 'system') { render('systems'); }
+    if (n.kind === 'crate') { render('crates'); }
+    if (n.kind === 'file' && currentLevel !== 'files') render('files');
+    setTimeout(() => jump(hits[i].id), currentLevel === 'files' ? 1500 : 900);
+    sl.style.display = 'none';
+  });
+});
+document.getElementById('search').addEventListener('keydown', ev => {
+  if (ev.key === 'Enter' && sl.firstChild) sl.firstChild.click();
+  if (ev.key === 'Escape') { sl.style.display = 'none'; }
+});
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape') closePanel(); });
+
+function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
+
+document.querySelectorAll('.lvl-btn').forEach(b => b.onclick = () => {
+  render(b.dataset.lvl, b.dataset.lvl === 'files' ? focusFilter : null);
+});
+
+render('systems');
+</script>
+</body>
+</html>

@@ -1151,8 +1151,10 @@ impl VbTargets {
         // VB-SV0 DP3b: the term ring — full-extent `R8G8_UNORM`, STORAGE (the pass's `u6`) |
         // SAMPLED (the tails' @10) | TRANSFER_DST (the one-time seed below). STORAGE on RG8 is
         // DEVICE-OPTIONAL (VUID-VkImageCreateInfo-usage) — probe-gated: an unsupported device
-        // gets a SAMPLED-only ring (the seed keeps it white, the tails read the neutral term)
-        // and SV0 resolves unarmable, so the pass that would storage-write it never exists.
+        // gets a SAMPLED-only ring and SV0 resolves unarmable, so the pass that would
+        // storage-write it never exists AND nothing ever reads it (the tails' term read is
+        // mode-gated, and mode is clamped to 0 on such a device) — the ring is then a bound,
+        // seeded, never-touched descriptor, which is exactly what keeps recording branch-free.
         let sdf_term_storage = if ctx.device_caps().rg8_unorm_storage_ok {
             ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST
         } else {
@@ -3447,22 +3449,25 @@ struct DeferredSets {
     #[cfg(feature = "hwrt")]
     resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 1: the FXAA INPUT set RING, `None` when AA is off ([`Self::build`]'s
-    /// `aa_out` param is `None`). Built AFTER every hwrt-family set (so its own error path tears
-    /// down every prior set); no upstream path knows about it.
+    /// `aa_out` param is `None`). Built AFTER `resolve_set_hwrt` and BEFORE the SMAA sets: its
+    /// own error path tears down every prior set, and every later ladder drains it in turn.
     fxaa_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 2: pass 1's (edge) INPUT set RING — `None` when SMAA is off. THE NEW
-    /// TERMINAL fallible set (W1), built LAST (after `fxaa_set`) so its own error path tears down
-    /// every prior set including `fxaa_set` (Option-guarded no-op under SMAA, present for
-    /// symmetry).
+    /// TERMINAL fallible set at its introduction (the W1 discipline: build a NEW set LAST, so its
+    /// own error path tears down every prior set and no existing ladder learns a new arm) —
+    /// `downsample_set`/`vb_cull_set`/`vb_set0_late` have since taken the terminal slot in turn.
+    /// Built after `fxaa_set` (drained as an Option-guarded no-op under SMAA, for symmetry),
+    /// before `downsample_set`.
     smaa_edge_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 2: pass 2's (weight) INPUT set RING — `None` when SMAA is off.
     smaa_weight_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 2: pass 3's (blend) INPUT set RING — `None` when SMAA is off.
     smaa_blend_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// VG rung R2c0: the batch-cull's own 1-set ring (`VbIndirect` @0, `VbBatchDesc` @1,
-    /// `VbCullVisible` @2, `VbCullCount` @3). THE NEW TERMINAL fallible set, built LAST — after
-    /// `downsample_set` — so its own error path tears down every prior set and no EXISTING error
-    /// path had to learn about it. `None` unless the whole R2c0 arm is wired.
+    /// `VbCullVisible` @2, `VbCullCount` @3). Built after `downsample_set` and before
+    /// `vb_set0_late` (which superseded it as the terminal fallible set); its own error path
+    /// tears down every prior set by delegating to [`Self::destroy`]. `None` unless the whole
+    /// R2c0 arm is wired.
     vb_cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// VG R3 piece 3 step P3-2 (plan D5): `vb_set0` with ONE entry changed — @11 binds
     /// `vb_late_visible` instead of `vb_visible_instance`. THE NEW TERMINAL fallible set, built
@@ -3470,8 +3475,8 @@ struct DeferredSets {
     /// error path had to learn about it. `None` unless `scene.path_is_vb()`.
     vb_set0_late: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 3: the SSAA downsample INPUT set RING — `None` when SSAA is off.
-    /// THE NEW TERMINAL fallible set (W1), built LAST (after `smaa_*_set`) so its own error
-    /// path tears down every prior set.
+    /// Built after `smaa_*_set` and before `vb_cull_set`: its own error path tears down every
+    /// prior set, and the two later ladders drain it via [`Self::destroy`].
     downsample_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
 }
 
@@ -3485,7 +3490,7 @@ impl DeferredSets {
     /// armed) — it feeds the three SMAA sets (edge → weight → blend, built in that order, AFTER
     /// `fxaa_set`). The SSAA `downsample_set` sampler is derived internally from `scene.ssaa`
     /// (mirrors how `aa_sampler` is derived from `scene.aa` above — no separate param, `scene` is
-    /// already threaded through); it is built LAST (after `smaa_*_set`). `forward` is
+    /// already threaded through); it is built after `smaa_*_set` (before `vb_cull_set`). `forward` is
     /// [`GBufferTargets::forward`]'s already-built value (`Some` iff `TargetsProfile::ForwardMesh`)
     /// — needed for `sdf_forward_set`'s `gForwardDepth` binding, which must reference the SAME
     /// `forward.depth[i]` ring `record_forward` samples.
@@ -3943,12 +3948,18 @@ impl DeferredSets {
                 match RhiDevice::create_bind_group(ctx, &desc) {
                     Ok(g) => Some(g),
                     Err(e) => {
-                        // SAFETY: the (optional) ssao & cull rings + the resolve & vocab rings were
-                        // created on `ctx`; referenced by no submission; each destroyed exactly once
-                        // (reverse acquisition: ssao → cull → resolve → vocab). The cull & ssao rings
-                        // are `Option`-guarded (present only when L1 / SSAO wired); the images are
+                        // SAFETY: the (optional) viewt-from-depth/ssao/cull rings + the resolve &
+                        // vocab rings were created on `ctx`; referenced by no submission; each
+                        // destroyed exactly once (reverse acquisition: viewt_from_depth → ssao →
+                        // cull → resolve → vocab). The viewt-from-depth/ssao/cull rings are
+                        // `Option`-guarded (present only when their pass is wired); the images are
                         // owned by the caller.
                         unsafe {
+                            if let Some(vd) = viewt_from_depth_set {
+                                for g in vd {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
                             if let Some(ss) = ssao_set {
                                 for g in ss {
                                     RhiDevice::destroy_bind_group(ctx, g);
@@ -4011,10 +4022,11 @@ impl DeferredSets {
                 Ok(g) => *dst = Some(g),
                 Err(e) => {
                     // SAFETY: the present slots already built [0..slot) + the (optional) ddgi-update
-                    // set + the (optional) ssao & cull rings + the resolve & vocab rings were created
-                    // on `ctx`; referenced by no submission; each destroyed exactly once (reverse
-                    // acquisition). The ddgi/cull/ssao are `Option`-guarded; the images are owned by
-                    // the caller.
+                    // set + the (optional) viewt-from-depth/ssao/cull rings + the resolve & vocab
+                    // rings were created on `ctx`; referenced by no submission; each destroyed
+                    // exactly once (reverse acquisition: present → ddgi → viewt_from_depth → ssao →
+                    // cull → resolve → vocab). The ddgi/viewt-from-depth/ssao/cull sets are
+                    // `Option`-guarded; the images are owned by the caller.
                     unsafe {
                         for s in present_slots.iter_mut() {
                             if let Some(g) = s.take() {
@@ -4023,6 +4035,11 @@ impl DeferredSets {
                         }
                         if let Some(du) = ddgi_update_set {
                             RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(vd) = viewt_from_depth_set {
+                            for g in vd {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
                         }
                         if let Some(ss) = ssao_set {
                             for g in ss {
@@ -4124,10 +4141,10 @@ impl DeferredSets {
             }
             if let Some(e) = failure {
                 // SAFETY: the sdf-forward slots already built [0..slot) + the present ring + the
-                // (optional) ddgi-update/ssao/cull rings + the resolve & vocab rings were created
-                // on `ctx`, referenced by no submission; each destroyed exactly once (reverse
-                // acquisition). The optional sets are `Option`-guarded; the images are owned by
-                // the caller.
+                // (optional) ddgi-update/viewt-from-depth/ssao/cull rings + the resolve & vocab
+                // rings were created on `ctx`, referenced by no submission; each destroyed exactly
+                // once (reverse acquisition). The optional sets are `Option`-guarded; the images
+                // are owned by the caller.
                 unsafe {
                     for s in sdf_forward_slots.iter_mut() {
                         if let Some(g) = s.take() {
@@ -4139,6 +4156,11 @@ impl DeferredSets {
                     }
                     if let Some(du) = ddgi_update_set {
                         RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(vd) = viewt_from_depth_set {
+                        for g in vd {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
                     }
                     if let Some(ss) = ssao_set {
                         for g in ss {
@@ -4236,10 +4258,10 @@ impl DeferredSets {
             }
             if let Some(e) = failure {
                 // SAFETY: the vb slots already built [0..slot) + the sdf-forward + present +
-                // (optional) ddgi-update/ssao/cull + the resolve & vocab rings were created on
-                // `ctx`, referenced by no submission; each destroyed exactly once (reverse
-                // acquisition). The optional sets are `Option`-guarded; the images are owned by
-                // the caller.
+                // (optional) ddgi-update/viewt-from-depth/ssao/cull + the resolve & vocab rings
+                // were created on `ctx`, referenced by no submission; each destroyed exactly once
+                // (reverse acquisition). The optional sets are `Option`-guarded; the images are
+                // owned by the caller.
                 unsafe {
                     for s in vb_slots.iter_mut() {
                         if let Some(g) = s.take() {
@@ -4256,6 +4278,11 @@ impl DeferredSets {
                     }
                     if let Some(du) = ddgi_update_set {
                         RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(vd) = viewt_from_depth_set {
+                        for g in vd {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
                     }
                     if let Some(ss) = ssao_set {
                         for g in ss {
@@ -4288,6 +4315,21 @@ impl DeferredSets {
         // the light table, `gVbId` (sampled, the placeholder-sampler idiom), `gSdfTerm` (STORAGE
         // — the pass WRITES it; the tails' @10 reads the same ring as SAMPLED), and the SDF edit
         // list (the deferred/marcher sets' identical expression).
+        // The rg8 degrade chain has THREE host sites that must agree on ONE probe: the runner's
+        // `.with_rg8_unorm_storage(..)` into the resolve (the armable conjunct), the SAMPLED-only
+        // ring creation above, and this set's skip. The first is the only one a regression can
+        // silently drop (RenderPathDeviceCaps::new defaults the field TRUE for its eight pre-SV0
+        // callers), and no CPU test can observe the disagreement — it needs a device where the
+        // probe answers false. This assert is the runtime seam joining the chain: if the device
+        // lacks RG8 storage, the boot resolve MUST have known it (armable false), else the frame
+        // is headed for the recorder's sv0 expect() with a set this arm never built.
+        debug_assert!(
+            ctx.device_caps().rg8_unorm_storage_ok
+                || !scene.resolved_render_path.vb_sdf_mesh_armable,
+            "invariant (rg8 degrade chain): the device probes rg8_unorm_storage_ok == false but \
+             the boot resolve armed vb_sdf_mesh_armable — the runner's .with_rg8_unorm_storage() \
+             chain into RenderPathDeviceCaps was lost (its default is true)"
+        );
         let sdf_mesh_shadow_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if let (true, true, Some(layout)) = (
             scene.path_is_vb(),
             // The set's @6 is a STORAGE_IMAGE descriptor over the `sdf_term` ring — on a device
@@ -4350,6 +4392,11 @@ impl DeferredSets {
                     }
                     if let Some(du) = ddgi_update_set {
                         RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(vd) = viewt_from_depth_set {
+                        for g in vd {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
                     }
                     if let Some(ss) = ssao_set {
                         for g in ss {
@@ -4438,10 +4485,10 @@ impl DeferredSets {
             }
             if let Some(e) = failure {
                 // SAFETY: the vb-tex slots already built [0..slot) + the sdf-mesh-shadow ring + `vb_set0` (fully built) +
-                // the sdf-forward + present + (optional) ddgi-update/ssao/cull + the resolve &
-                // vocab rings were created on `ctx`, referenced by no submission; each destroyed
-                // exactly once (reverse acquisition). The optional sets are `Option`-guarded; the
-                // images are owned by the caller.
+                // the sdf-forward + present + (optional) ddgi-update/viewt-from-depth/ssao/cull +
+                // the resolve & vocab rings were created on `ctx`, referenced by no submission;
+                // each destroyed exactly once (reverse acquisition). The optional sets are
+                // `Option`-guarded; the images are owned by the caller.
                 unsafe {
                     for s in vb_tex_slots.iter_mut() {
                         if let Some(g) = s.take() {
@@ -4468,6 +4515,11 @@ impl DeferredSets {
                     }
                     if let Some(du) = ddgi_update_set {
                         RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(vd) = viewt_from_depth_set {
+                        for g in vd {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
                     }
                     if let Some(ss) = ssao_set {
                         for g in ss {
@@ -4563,11 +4615,12 @@ impl DeferredSets {
                 }
             }
             if let Some(e) = failure {
-                // SAFETY: the vb-froxel slots already built [0..slot) + `vb_set0_tex`/`vb_set0`
-                // (fully built) + the sdf-forward + present + (optional) ddgi-update/ssao/cull +
-                // the resolve & vocab rings were created on `ctx`, referenced by no submission;
-                // each destroyed exactly once (reverse acquisition). The optional sets are
-                // `Option`-guarded; the images are owned by the caller.
+                // SAFETY: the vb-froxel slots already built [0..slot) + `vb_set0_tex`/the
+                // sdf-mesh-shadow ring/`vb_set0` (fully built) + the sdf-forward + present +
+                // (optional) ddgi-update/viewt-from-depth/ssao/cull + the resolve & vocab rings
+                // were created on `ctx`, referenced by no submission; each destroyed exactly once
+                // (reverse acquisition). The optional sets are `Option`-guarded; the images are
+                // owned by the caller.
                 unsafe {
                     for s in vb_froxel_slots.iter_mut() {
                         if let Some(g) = s.take() {
@@ -4599,6 +4652,11 @@ impl DeferredSets {
                     }
                     if let Some(du) = ddgi_update_set {
                         RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(vd) = viewt_from_depth_set {
+                        for g in vd {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
                     }
                     if let Some(ss) = ssao_set {
                         for g in ss {
@@ -4703,10 +4761,11 @@ impl DeferredSets {
             }
             if let Some(e) = failure {
                 // SAFETY: the vb-tex-froxel slots already built [0..slot) + `vb_set0_froxel`/
-                // `vb_set0_tex`/`vb_set0` (fully built) + the sdf-forward + present + (optional)
-                // ddgi-update/ssao/cull + the resolve & vocab rings were created on `ctx`,
-                // referenced by no submission; each destroyed exactly once (reverse acquisition).
-                // The optional sets are `Option`-guarded; the images are owned by the caller.
+                // `vb_set0_tex`/the sdf-mesh-shadow ring/`vb_set0` (fully built) + the
+                // sdf-forward + present + (optional) ddgi-update/viewt-from-depth/ssao/cull + the
+                // resolve & vocab rings were created on `ctx`, referenced by no submission; each
+                // destroyed exactly once (reverse acquisition). The optional sets are
+                // `Option`-guarded; the images are owned by the caller.
                 unsafe {
                     for s in vb_tex_froxel_slots.iter_mut() {
                         if let Some(g) = s.take() {
@@ -4743,6 +4802,11 @@ impl DeferredSets {
                     }
                     if let Some(du) = ddgi_update_set {
                         RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(vd) = viewt_from_depth_set {
+                        for g in vd {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
                     }
                     if let Some(ss) = ssao_set {
                         for g in ss {
@@ -4814,8 +4878,9 @@ impl DeferredSets {
                 }
                 if let Some(e) = failure {
                     // SAFETY: the rz slots already built [0..slot) + `vb_set0_tex_froxel`/
-                    // `vb_set0_froxel`/`vb_set0_tex`/`vb_set0` (fully built) + the sdf-forward +
-                    // present + (optional) ddgi-update/ssao/cull + the resolve & vocab rings were
+                    // `vb_set0_froxel`/`vb_set0_tex`/the sdf-mesh-shadow ring/`vb_set0` (fully
+                    // built) + the sdf-forward + present + (optional)
+                    // ddgi-update/viewt-from-depth/ssao/cull + the resolve & vocab rings were
                     // created on `ctx`, referenced by no submission; each destroyed exactly once
                     // (reverse acquisition). The optional sets are `Option`-guarded; the images
                     // are owned by the caller.
@@ -4861,6 +4926,11 @@ impl DeferredSets {
                         if let Some(du) = ddgi_update_set {
                             RhiDevice::destroy_bind_group(ctx, du);
                         }
+                        if let Some(vd) = viewt_from_depth_set {
+                            for g in vd {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
                         if let Some(ss) = ssao_set {
                             for g in ss {
                                 RhiDevice::destroy_bind_group(ctx, g);
@@ -4891,11 +4961,12 @@ impl DeferredSets {
         // 22-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
         // + `ctx.ray_query_enabled()` + config HardwareTri). `None` on every software path ⇒ the
         // recorder binds the 19-binding `resolve_set` against the software pipeline ⇒ byte-identical
-        // to the golden. Built LAST (after every other fallible set) so its own error path tears
-        // down everything prior; no upstream path knows about it. Slot `i`'s set is the 19 software
-        // entries PLUS binding 19 = slot `i`'s persistent TLAS PLUS rung-1b binding 20 = the HWRT
-        // soft-shadow-params UBO PLUS binding 21 = slot `i`'s raster depth image (the shadow-ray
-        // origin's producer test, lane fix/hwrt-shadow-ray-origin).
+        // to the golden. Built after `viewt_from_vb_depth_set` and before `fxaa_set` (it was the
+        // terminal fallible set when introduced; the AA/VG sets have since grown past it): its own
+        // error path tears down everything prior, and every later ladder drains it in turn. Slot
+        // `i`'s set is the 19 software entries PLUS binding 19 = slot `i`'s persistent TLAS PLUS
+        // rung-1b binding 20 = the HWRT soft-shadow-params UBO PLUS binding 21 = slot `i`'s raster
+        // depth image (the shadow-ray origin's producer test, lane fix/hwrt-shadow-ray-origin).
         #[cfg(feature = "hwrt")]
         let resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> =
             match (scene.resolve_layout_hwrt, scene.resolve_tlas_hwrt) {
@@ -4962,14 +5033,47 @@ impl DeferredSets {
                         }
                     }
                     if let Some(e) = failure {
-                        // SAFETY: the HWRT slots already built [0..slot) + the present ring + the
-                        // (optional) ddgi-update/ssao/cull + the resolve & vocab rings were created on
-                        // `ctx`; referenced by no submission; each destroyed exactly once (reverse
-                        // acquisition). The optional sets are `Option`-guarded; the images are owned by
-                        // the caller.
+                        // SAFETY: the HWRT slots already built [0..slot) + the (optional) rz
+                        // (`viewt_from_vb_depth_set`) ring + the (optional) VB family
+                        // (`vb_set0_tex_froxel`/`vb_set0_froxel`/`vb_set0_tex`/
+                        // `sdf_mesh_shadow_set0`/`vb_set0`) + the (optional) sdf-forward ring + the
+                        // present ring + the (optional) ddgi-update/viewt-from-depth/ssao/cull + the
+                        // resolve & vocab rings were created on `ctx`; referenced by no submission;
+                        // each destroyed exactly once (reverse acquisition). The optional sets are
+                        // `Option`-guarded; the images are owned by the caller.
                         unsafe {
                             for s in hwrt_slots.iter_mut() {
                                 if let Some(g) = s.take() {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            if let Some(rz) = viewt_from_vb_depth_set {
+                                for g in rz {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            if let Some(vtf) = vb_set0_tex_froxel {
+                                for g in vtf {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            if let Some(vf) = vb_set0_froxel {
+                                for g in vf {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            if let Some(vt) = vb_set0_tex {
+                                for g in vt {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            if let Some(sms) = sdf_mesh_shadow_set0 {
+                                for g in sms {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            if let Some(vs) = vb_set0 {
+                                for g in vs {
                                     RhiDevice::destroy_bind_group(ctx, g);
                                 }
                             }
@@ -4983,6 +5087,11 @@ impl DeferredSets {
                             }
                             if let Some(du) = ddgi_update_set {
                                 RhiDevice::destroy_bind_group(ctx, du);
+                            }
+                            if let Some(vd) = viewt_from_depth_set {
+                                for g in vd {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
                             }
                             if let Some(ss) = ssao_set {
                                 for g in ss {
@@ -5010,9 +5119,9 @@ impl DeferredSets {
                 _ => None,
             };
 
-        // Anti-aliasing Stage 1: the FXAA INPUT set RING, built LAST (after every other fallible
-        // set, including the HWRT resolve variant) so its own error path tears down everything
-        // prior; no upstream path knows about it. Slot `i` binds `lit[i]` — the FXAA pass's
+        // Anti-aliasing Stage 1: the FXAA INPUT set RING, built after the HWRT resolve variant
+        // and before the SMAA sets: its own error path tears down everything prior, and every
+        // later ladder drains it in turn. Slot `i` binds `lit[i]` — the FXAA pass's
         // INPUT, never `aa_out` (the pass's OUTPUT, which appears in no set but `present_set`) —
         // plus the dedicated LINEAR/ClampToEdge `aa_sampler`, against `scene.present_layout` (the
         // same single-`CombinedImageSampler` shape `present_set` uses). `None` when AA is off.
@@ -5035,8 +5144,11 @@ impl DeferredSets {
                     }
                 }
                 if let Some(e) = failure {
-                    // SAFETY: the fxaa slots already built [0..slot) + the present ring + the
-                    // (optional) HWRT resolve ring + the (optional) ddgi-update/ssao/cull + the
+                    // SAFETY: the fxaa slots already built [0..slot) + the (optional) HWRT resolve
+                    // ring + the (optional) rz (`viewt_from_vb_depth_set`) ring + the (optional)
+                    // VB family (`vb_set0_tex_froxel`/`vb_set0_froxel`/`vb_set0_tex`/
+                    // `sdf_mesh_shadow_set0`/`vb_set0`) + the (optional) sdf-forward ring + the
+                    // present ring + the (optional) ddgi-update/viewt-from-depth/ssao/cull + the
                     // resolve & vocab rings were created on `ctx`; referenced by no submission;
                     // each destroyed exactly once (reverse acquisition). The optional sets are
                     // `Option`-guarded; the images are owned by the caller.
@@ -5052,6 +5164,36 @@ impl DeferredSets {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
+                        if let Some(rz) = viewt_from_vb_depth_set {
+                            for g in rz {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vtf) = vb_set0_tex_froxel {
+                            for g in vtf {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vf) = vb_set0_froxel {
+                            for g in vf {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vt) = vb_set0_tex {
+                            for g in vt {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(sms) = sdf_mesh_shadow_set0 {
+                            for g in sms {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vs) = vb_set0 {
+                            for g in vs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
                         if let Some(sfs) = sdf_forward_set {
                             for g in sfs {
                                 RhiDevice::destroy_bind_group(ctx, g);
@@ -5062,6 +5204,11 @@ impl DeferredSets {
                         }
                         if let Some(du) = ddgi_update_set {
                             RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(vd) = viewt_from_depth_set {
+                            for g in vd {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
                         }
                         if let Some(ss) = ssao_set {
                             for g in ss {
@@ -5098,11 +5245,11 @@ impl DeferredSets {
             "invariant: smaa_imgs and scene.smaa must arm/disarm together"
         );
 
-        // Anti-aliasing Stage 2: the three SMAA sets (edge → weight → blend), the NEW TERMINAL
-        // fallible set (W1) — built LAST, after `fxaa_set` (mutually exclusive with it — never
-        // both `Some`), so their own error path tears down EVERY prior set, `fxaa_set` included
-        // (an `Option`-guarded no-op under SMAA, present for symmetry with the fxaa_set ladder
-        // above). `None` when SMAA is off.
+        // Anti-aliasing Stage 2: the three SMAA sets (edge → weight → blend), built after
+        // `fxaa_set` (mutually exclusive with it — never both `Some`) and before
+        // `downsample_set`: their own error paths tear down EVERY prior set, `fxaa_set` included
+        // (an `Option`-guarded no-op under SMAA, drained for symmetry with the fxaa_set ladder
+        // above), and every later ladder drains all three in turn. `None` when SMAA is off.
         let (smaa_edge_set, smaa_weight_set, smaa_blend_set) = match (scene.smaa.as_ref(), smaa_imgs) {
             (Some(smaa), Some(imgs)) => {
                 // Pass 1 (edge): scene.present_layout, lit[i] + smaa.sampler (mirrors fxaa_set's
@@ -5130,9 +5277,12 @@ impl DeferredSets {
                 if let Some(e) = failure {
                     // SAFETY: the edge slots already built [0..slot) + everything built prior
                     // (the `fxaa_set` `Option`-guarded no-op under SMAA + the (optional) HWRT
-                    // resolve ring + the present ring + the (optional) ddgi-update/ssao/cull +
-                    // the resolve & vocab rings) were created on `ctx`; referenced by no
-                    // submission; each destroyed exactly once (reverse acquisition).
+                    // resolve ring + the (optional) rz (`viewt_from_vb_depth_set`) ring + the
+                    // (optional) VB family (`vb_set0_tex_froxel`/`vb_set0_froxel`/`vb_set0_tex`/
+                    // `sdf_mesh_shadow_set0`/`vb_set0`) + the (optional) sdf-forward ring + the
+                    // present ring + the (optional) ddgi-update/viewt-from-depth/ssao/cull + the
+                    // resolve & vocab rings) were created on `ctx`; referenced by no submission;
+                    // each destroyed exactly once (reverse acquisition).
                     unsafe {
                         for s in edge_slots.iter_mut() {
                             if let Some(g) = s.take() {
@@ -5150,6 +5300,36 @@ impl DeferredSets {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
+                        if let Some(rz) = viewt_from_vb_depth_set {
+                            for g in rz {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vtf) = vb_set0_tex_froxel {
+                            for g in vtf {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vf) = vb_set0_froxel {
+                            for g in vf {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vt) = vb_set0_tex {
+                            for g in vt {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(sms) = sdf_mesh_shadow_set0 {
+                            for g in sms {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vs) = vb_set0 {
+                            for g in vs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
                         if let Some(sfs) = sdf_forward_set {
                             for g in sfs {
                                 RhiDevice::destroy_bind_group(ctx, g);
@@ -5160,6 +5340,11 @@ impl DeferredSets {
                         }
                         if let Some(du) = ddgi_update_set {
                             RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(vd) = viewt_from_depth_set {
+                            for g in vd {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
                         }
                         if let Some(ss) = ssao_set {
                             for g in ss {
@@ -5217,8 +5402,9 @@ impl DeferredSets {
                 }
                 if let Some(e) = failure {
                     // SAFETY: the weight slots already built [0..slot) + the fully-built
-                    // `edge_set` + everything built prior were created on `ctx`; referenced by
-                    // no submission; each destroyed exactly once (reverse acquisition).
+                    // `edge_set` + everything built prior (the edge ladder's own SAFETY
+                    // enumeration above) were created on `ctx`; referenced by no submission;
+                    // each destroyed exactly once (reverse acquisition).
                     unsafe {
                         for s in weight_slots.iter_mut() {
                             if let Some(g) = s.take() {
@@ -5239,6 +5425,36 @@ impl DeferredSets {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
+                        if let Some(rz) = viewt_from_vb_depth_set {
+                            for g in rz {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vtf) = vb_set0_tex_froxel {
+                            for g in vtf {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vf) = vb_set0_froxel {
+                            for g in vf {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vt) = vb_set0_tex {
+                            for g in vt {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(sms) = sdf_mesh_shadow_set0 {
+                            for g in sms {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vs) = vb_set0 {
+                            for g in vs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
                         if let Some(sfs) = sdf_forward_set {
                             for g in sfs {
                                 RhiDevice::destroy_bind_group(ctx, g);
@@ -5249,6 +5465,11 @@ impl DeferredSets {
                         }
                         if let Some(du) = ddgi_update_set {
                             RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(vd) = viewt_from_depth_set {
+                            for g in vd {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
                         }
                         if let Some(ss) = ssao_set {
                             for g in ss {
@@ -5300,9 +5521,9 @@ impl DeferredSets {
                 }
                 if let Some(e) = failure {
                     // SAFETY: the blend slots already built [0..slot) + the fully-built
-                    // `weight_set` + `edge_set` + everything built prior were created on `ctx`;
-                    // referenced by no submission; each destroyed exactly once (reverse
-                    // acquisition).
+                    // `weight_set` + `edge_set` + everything built prior (the edge ladder's own
+                    // SAFETY enumeration above) were created on `ctx`; referenced by no
+                    // submission; each destroyed exactly once (reverse acquisition).
                     unsafe {
                         for s in blend_slots.iter_mut() {
                             if let Some(g) = s.take() {
@@ -5326,6 +5547,36 @@ impl DeferredSets {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
+                        if let Some(rz) = viewt_from_vb_depth_set {
+                            for g in rz {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vtf) = vb_set0_tex_froxel {
+                            for g in vtf {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vf) = vb_set0_froxel {
+                            for g in vf {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vt) = vb_set0_tex {
+                            for g in vt {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(sms) = sdf_mesh_shadow_set0 {
+                            for g in sms {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vs) = vb_set0 {
+                            for g in vs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
                         if let Some(sfs) = sdf_forward_set {
                             for g in sfs {
                                 RhiDevice::destroy_bind_group(ctx, g);
@@ -5336,6 +5587,11 @@ impl DeferredSets {
                         }
                         if let Some(du) = ddgi_update_set {
                             RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(vd) = viewt_from_depth_set {
+                            for g in vd {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
                         }
                         if let Some(ss) = ssao_set {
                             for g in ss {
@@ -5365,10 +5621,11 @@ impl DeferredSets {
             _ => (None, None, None),
         };
 
-        // Anti-aliasing Stage 3: the SSAA downsample INPUT set RING — THE NEW TERMINAL
-        // fallible set (W1), built LAST (after `smaa_*_set`) so its own error path tears down
-        // every prior set, including the (mutually exclusive) `fxaa_set`/`smaa_*_set`
-        // (`Option`-guarded no-ops under SSAA, present for symmetry with the ladders above).
+        // Anti-aliasing Stage 3: the SSAA downsample INPUT set RING — built after `smaa_*_set`
+        // and before `vb_cull_set`: its own error path tears down every prior set, including the
+        // (mutually exclusive) `fxaa_set`/`smaa_*_set` (`Option`-guarded no-ops under SSAA,
+        // drained for symmetry with the ladders above), and the two later ladders drain it via
+        // `DeferredSets::destroy`.
         // `None` when SSAA is off. Mirrors `fxaa_set`'s exact shape: slot `i` binds `lit[i]`
         // (the 2× ring slot — the downsample's INPUT, never `aa_out`) + the dedicated NEAREST
         // `ssaa_sampler`, against `scene.present_layout` (the shader's `.Load` ignores the
@@ -5395,10 +5652,13 @@ impl DeferredSets {
                 if let Some(e) = failure {
                     // SAFETY: the downsample slots already built [0..slot) + everything built
                     // prior (the `smaa_*_set`/`fxaa_set` `Option`-guarded no-ops under SSAA +
-                    // the (optional) HWRT resolve ring + the present ring + the (optional)
-                    // ddgi-update/ssao/cull + the resolve & vocab rings) were created on `ctx`;
-                    // referenced by no submission; each destroyed exactly once (reverse
-                    // acquisition).
+                    // the (optional) HWRT resolve ring + the (optional) rz
+                    // (`viewt_from_vb_depth_set`) ring + the (optional) VB family
+                    // (`vb_set0_tex_froxel`/`vb_set0_froxel`/`vb_set0_tex`/
+                    // `sdf_mesh_shadow_set0`/`vb_set0`) + the (optional) sdf-forward ring + the
+                    // present ring + the (optional) ddgi-update/viewt-from-depth/ssao/cull + the
+                    // resolve & vocab rings) were created on `ctx`; referenced by no submission;
+                    // each destroyed exactly once (reverse acquisition).
                     unsafe {
                         for s in ds_slots.iter_mut() {
                             if let Some(g) = s.take() {
@@ -5431,6 +5691,36 @@ impl DeferredSets {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
+                        if let Some(rz) = viewt_from_vb_depth_set {
+                            for g in rz {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vtf) = vb_set0_tex_froxel {
+                            for g in vtf {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vf) = vb_set0_froxel {
+                            for g in vf {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vt) = vb_set0_tex {
+                            for g in vt {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(sms) = sdf_mesh_shadow_set0 {
+                            for g in sms {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vs) = vb_set0 {
+                            for g in vs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
                         if let Some(sfs) = sdf_forward_set {
                             for g in sfs {
                                 RhiDevice::destroy_bind_group(ctx, g);
@@ -5441,6 +5731,11 @@ impl DeferredSets {
                         }
                         if let Some(du) = ddgi_update_set {
                             RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(vd) = viewt_from_depth_set {
+                            for g in vd {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
                         }
                         if let Some(ss) = ssao_set {
                             for g in ss {
@@ -5468,11 +5763,11 @@ impl DeferredSets {
             None => None,
         };
 
-        // VG rung R2c0: the batch-cull's own 1-set ring — THE NEW TERMINAL fallible set (the W1
-        // discipline `smaa_edge_set`'s doc states). Built LAST, so its error path tears down every
-        // prior set and no EXISTING error path needed a new arm; that teardown is delegated to
-        // `DeferredSets::destroy`, which already walks reverse acquisition order, rather than
-        // hand-copied for the twentieth time.
+        // VG rung R2c0: the batch-cull's own 1-set ring (the W1 discipline `smaa_edge_set`'s doc
+        // states; `vb_set0_late` has since taken the terminal slot). Built after `downsample_set`
+        // and before `vb_set0_late`, so its error path tears down every prior set; that teardown
+        // is delegated to `DeferredSets::destroy`, which already walks reverse acquisition order,
+        // rather than hand-copied for the twentieth time.
         //
         // Gated on the layout plus the four R2c0 buffers plus (since R2d-2) the mesh-bounds table.
         // `GpuSceneBundles` mints `vb_cull_layout`/`vb_batch_cull_pipeline` together or not at all,
@@ -5787,15 +6082,15 @@ impl DeferredSets {
     }
 
     /// Tears down the deferred sets in reverse acquisition order (vb-set0-late → vb-cull →
-    /// ssaa-downsample → smaa → fxaa → resolve-hwrt → viewt-from-vb-depth → sdf-forward-march →
-    /// present → ddgi-update → viewt-from-depth → ssao → cull → resolve → vocab), consuming `self`.
+    /// ssaa-downsample → smaa → fxaa → resolve-hwrt → viewt-from-vb-depth → vb-set0-tex-froxel →
+    /// vb-set0-froxel → vb-set0-tex → sdf-mesh-shadow → vb-set0 → sdf-forward-march → present →
+    /// ddgi-update → viewt-from-depth → ssao → cull → resolve → vocab), consuming `self`.
     ///
     /// # Safety
     ///
     /// `ctx` is live; no submission references these descriptor sets; each is destroyed exactly once
-    /// (the by-value `self`). The `cull`/`ssao`/`viewt_from_depth`/`ddgi-update`/`resolve-hwrt`/
-    /// `viewt_from_vb_depth`/`sdf-forward-march`/`fxaa`/`smaa_*`/`downsample`/`vb_cull`/
-    /// `vb_set0_late` sets are `Option`-guarded (present only when their feature was wired).
+    /// (the by-value `self`). Every field except the unconditional `vocab_set`/`resolve_set`/
+    /// `present_set` rings is `Option`-guarded (present only when its feature was wired).
     unsafe fn destroy(self, ctx: &VulkanContext) {
         // SAFETY: per the contract `ctx` is live and nothing references these sets; each was created
         // on `ctx` and is destroyed exactly once, in reverse acquisition order.

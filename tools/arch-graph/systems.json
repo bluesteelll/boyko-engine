@@ -1,0 +1,1362 @@
+{
+ "comment": "System layer for the architecture graph. Each system groups files by REAL module paths (see generate.py --dump-tree). 'assign' entries are (crate lib-name, module prefix) pairs; a file joins the system whose prefix is the longest match. An entry with module \"\" is the crate-wide catch-all. Summaries describe what the modules contain, keyed to module names in code.",
+ "systems": [
+  {
+   "id": "ecs-memory",
+   "label": "ECS Memory (VM pools)",
+   "layer": "kernel",
+   "color": "#e74c3c",
+   "summary": "VmReservation reserve/commit backing, the type-erased self-growing ComponentPool, VmColumn, device-column handles.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::memory"
+    }
+   ]
+  },
+  {
+   "id": "ecs-archetype-entity",
+   "label": "Archetypes & Entities",
+   "layer": "kernel",
+   "color": "#c0392b",
+   "summary": "Archetype inline-column storage, archetype registry/master/bundle slab, entity allocation with generation recycle and the inland fast store.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::archetype"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::entity"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::identifiers"
+    }
+   ]
+  },
+  {
+   "id": "ecs-component-registry",
+   "label": "Components & Registry",
+   "layer": "kernel",
+   "color": "#d35400",
+   "summary": "Component trait/mask/registry (lazy ComponentId mint, layouts), pool bundles, scratch columns.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::component::component"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::component::component_mask"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::component::component_pool_bundle"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::component::component_registry"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::component::scratch"
+    }
+   ]
+  },
+  {
+   "id": "ecs-tags-enable",
+   "label": "Tags & EnableTag backends",
+   "layer": "kernel",
+   "color": "#cd6155",
+   "summary": "Two tag storage backends: signature/table tags with the name-keyed dynamic mint, and the enable-bit (bitset) backend with its presence oracle.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::component::component_registry::tags"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::component::enable"
+    }
+   ]
+  },
+  {
+   "id": "ecs-dense",
+   "label": "Dense components",
+   "layer": "kernel",
+   "color": "#a93226",
+   "summary": "Non-fragmenting dense component storage: dense registry/store, entity slot map, live bitmap, views.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::component::dense"
+    }
+   ]
+  },
+  {
+   "id": "ecs-hooks-observers",
+   "label": "Hooks & Observers",
+   "layer": "kernel",
+   "color": "#cb4335",
+   "summary": "Component lifecycle hooks (add/insert/replace/remove) and observers, archetype flag gates, deferred hook queue, observer dispatch/propagation.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::component::hooks"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::component::observers"
+    }
+   ]
+  },
+  {
+   "id": "ecs-relationships",
+   "label": "Relationships & Hierarchy",
+   "layer": "kernel",
+   "color": "#922b21",
+   "summary": "Relationship edges (generic hooks, collections, edge observers) and the parent-child hierarchy module.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::relationship"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::hierarchy"
+    }
+   ]
+  },
+  {
+   "id": "ecs-clone-prefab",
+   "label": "Clone / Prefab",
+   "layer": "kernel",
+   "color": "#641e16",
+   "summary": "Entity cloning: cloner, deep clone, map, materialize, prefab instantiation.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::clone"
+    }
+   ]
+  },
+  {
+   "id": "ecs-queries",
+   "label": "Query DSL & Iteration",
+   "layer": "kernel",
+   "color": "#8e44ad",
+   "summary": "Typed query DSL: data leaves (Read/Write/Option/Ref/Mut/AnyOf/tuples), filters, query state caching, chunked/SIMD iteration, par_iter/par_chunk, tag/enable terms, relation traversal.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::iters"
+    }
+   ]
+  },
+  {
+   "id": "ecs-commands",
+   "label": "Commands (deferred)",
+   "layer": "kernel",
+   "color": "#7d3c98",
+   "summary": "Command queue + per-command types (spawn/insert/remove/despawn/batch/observe/tag), the archetype migration helpers.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::commands"
+    }
+   ]
+  },
+  {
+   "id": "ecs-systems-api",
+   "label": "System param machinery",
+   "layer": "kernel",
+   "color": "#6c3483",
+   "summary": "System/IntoSystem/FunctionSystem, SystemParam leaves (Res/ResMut/Local/Query/Commands/EventReader/EventWriter/NonSend), access sets, UnsafeEcsCell, dispatcher token.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::system"
+    }
+   ]
+  },
+  {
+   "id": "ecs-scheduler",
+   "label": "Schedule & Executor",
+   "layer": "kernel",
+   "color": "#5b2c6f",
+   "summary": "Schedule/ScheduleBuilder, conflict graph, ordering, run conditions, system sets, executor scratch, boxed systems.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::schedule"
+    }
+   ]
+  },
+  {
+   "id": "ecs-events",
+   "label": "Events",
+   "layer": "kernel",
+   "color": "#4a235a",
+   "summary": "Event trait/registry, double-buffered dispatcher, per-lane buffers, participants/parameters split.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::events"
+    }
+   ]
+  },
+  {
+   "id": "ecs-resources",
+   "label": "Resources",
+   "layer": "kernel",
+   "color": "#3b2d50",
+   "summary": "Resource slab, registries, NonSend resources.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::resources"
+    }
+   ]
+  },
+  {
+   "id": "ecs-assets",
+   "label": "Assets (kernel)",
+   "layer": "kernel",
+   "color": "#2e4053",
+   "summary": "ECS-native asset system: server, handles, path index, staging, backing.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::asset"
+    }
+   ]
+  },
+  {
+   "id": "ecs-app-facade",
+   "label": "App / States / Time",
+   "layer": "kernel",
+   "color": "#1f618d",
+   "summary": "App builder + Plugin/Plugins/AppExit, states with transitions, Time/FixedTime clock and the fixed-step loop driver.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::app"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::state"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::time"
+    }
+   ]
+  },
+  {
+   "id": "ecs-serialize-seam",
+   "label": "ECS serialize seam",
+   "layer": "kernel",
+   "color": "#34495e",
+   "summary": "The kernel-side serialization seam: wire format types, load writer.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::serialize"
+    }
+   ]
+  },
+  {
+   "id": "ecs-master",
+   "label": "EcsMaster facade",
+   "layer": "kernel",
+   "color": "#17202a",
+   "summary": "The world object's per-surface impl files: entity/component/bundle/resource/event/state/tag/observer/relationship APIs.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::ecs_master"
+    }
+   ]
+  },
+  {
+   "id": "ecs-profiling-log",
+   "label": "ECS profiling & log",
+   "layer": "diagnostics",
+   "color": "#7f8c8d",
+   "summary": "ECS-internal profiling store/zones/histograms and the ECS log ring plugin.",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::profiling"
+    },
+    {
+     "crate": "boyko_ecs",
+     "module": "ecs::core::log"
+    }
+   ]
+  },
+  {
+   "id": "ecs-kernel-glue",
+   "label": "ECS crate root/glue",
+   "layer": "kernel",
+   "color": "#626567",
+   "summary": "lib/prelude re-exports, constants, error enum \u2014 crate-level glue (catch-all).",
+   "assign": [
+    {
+     "crate": "boyko_ecs",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "threadpool",
+   "label": "Thread pool",
+   "layer": "kernel",
+   "color": "#f39c12",
+   "summary": "Chase-Lev work-stealing pool: scope fork/join, workers, TLS.",
+   "assign": [
+    {
+     "crate": "boyko_threadpool",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "utils-collections",
+   "label": "Utils (collections)",
+   "layer": "kernel",
+   "color": "#d4ac0d",
+   "summary": "BitSet/BitSet256/BitMask, SparseMap/SparseSlotMap, Slot, type interning.",
+   "assign": [
+    {
+     "crate": "boyko_utils",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "macros-derives",
+   "label": "Proc macros (derives)",
+   "layer": "tooling",
+   "color": "#b7950b",
+   "summary": "Compile-time derives: Component/Resource/Bundle/SystemSet, #[event], relationship/bindable/actionlike/ui macro support.",
+   "assign": [
+    {
+     "crate": "boyko_macros",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "math",
+   "label": "Math (SIMD POD)",
+   "layer": "sim",
+   "color": "#27ae60",
+   "summary": "Vec2/3/4, Quat, Mat3/4, Affine3A, Ray \u2014 bit-deterministic scalar math.",
+   "assign": [
+    {
+     "crate": "boyko_math",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "scene",
+   "label": "Scene (Transform/Camera)",
+   "layer": "sim",
+   "color": "#1e8449",
+   "summary": "Transform/GlobalTransform propagation, camera + rig + ViewUniform, visibility sync, render caps, schedule sets.",
+   "assign": [
+    {
+     "crate": "boyko_scene",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "physics-solver",
+   "label": "Physics solver",
+   "layer": "sim",
+   "color": "#186a3b",
+   "summary": "TGS-Soft rigid solver: colored parallel solve, SIMD kernels, warm start, soft-step; soft-body solver set (colored, coupling, self-collision).",
+   "assign": [
+    {
+     "crate": "boyko_physics",
+     "module": "solver"
+    },
+    {
+     "crate": "boyko_physics",
+     "module": "soft"
+    }
+   ]
+  },
+  {
+   "id": "physics-collision",
+   "label": "Physics collision",
+   "layer": "sim",
+   "color": "#145a32",
+   "summary": "Narrowphase pairs (box/box, sphere/box, axis cache), broadphase policy, manifolds, SDF body-vs-field query and its SIMD path.",
+   "assign": [
+    {
+     "crate": "boyko_physics",
+     "module": "narrowphase"
+    },
+    {
+     "crate": "boyko_physics",
+     "module": "broadphase_policy"
+    },
+    {
+     "crate": "boyko_physics",
+     "module": "manifold"
+    },
+    {
+     "crate": "boyko_physics",
+     "module": "sdf_query"
+    },
+    {
+     "crate": "boyko_physics",
+     "module": "sdf_simd"
+    },
+    {
+     "crate": "boyko_physics",
+     "module": "math"
+    }
+   ]
+  },
+  {
+   "id": "physics-plugin",
+   "label": "Physics ECS integration",
+   "layer": "sim",
+   "color": "#0e5f2e",
+   "summary": "Physics plugin/schedules, solver resources and scratch ids, body/collider components and bundles, scene sync (catch-all for the crate root).",
+   "assign": [
+    {
+     "crate": "boyko_physics",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "input",
+   "label": "Input (actions)",
+   "layer": "sim",
+   "color": "#16a085",
+   "summary": "Raw event queue (win32), keycode/scancode tables, rebindable action maps, clash policy, persistence grammar.",
+   "assign": [
+    {
+     "crate": "boyko_input",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "sdf-math",
+   "label": "SDF math (shared field)",
+   "layer": "sim",
+   "color": "#138d75",
+   "summary": "Analytic SDF edit-list field, brick model, mesh SDF \u2014 the shared CPU/GPU field vocabulary (no_std leaf over the shader eDSL).",
+   "assign": [
+    {
+     "crate": "boyko_sdf_math",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "serialize",
+   "label": "World save/load",
+   "layer": "sim",
+   "color": "#0b5345",
+   "summary": "Custom binary world serialization: format, save, load (codegen-shaped, not reflection).",
+   "assign": [
+    {
+     "crate": "boyko_serialize",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "rhi-traits",
+   "label": "RHI trait surface",
+   "layer": "render",
+   "color": "#2980b9",
+   "summary": "Backend-agnostic RHI: api/device/encoder traits, descriptor + handle types, enums.",
+   "assign": [
+    {
+     "crate": "boyko_rhi",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "vulkan-device-ffi",
+   "label": "Vulkan device & FFI",
+   "layer": "render",
+   "color": "#21618c",
+   "summary": "Raw Vulkan FFI declarations, device + queue boot, suballocator, memory, window/surface/swapchain, texture + bindless tables, RT acceleration structures, ABI guard.",
+   "assign": [
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "ffi"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "device"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "rhi_impl"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "memory"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "suballocator"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "window"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "swapchain"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "texture"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "bindless"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "geometry_bindless"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "accel"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "accel_build"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "accel_ffi"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "abi_guard"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "debug"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "error"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "log_probe"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "vulkan-compute",
+   "label": "Vulkan compute & techniques",
+   "layer": "render",
+   "color": "#1a5276",
+   "summary": "The embedded SPIR-V compute/pipeline registry plus technique modules: DDGI, brick atlas, mesh-SDF texture upload.",
+   "assign": [
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "compute"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "ddgi"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "brick_atlas"
+    },
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "mesh_sdf_texture"
+    }
+   ]
+  },
+  {
+   "id": "vulkan-goldens",
+   "label": "Golden byte-identity harness",
+   "layer": "render",
+   "color": "#5d6d7e",
+   "summary": "The golden-image byte-identity regression harness for renders.",
+   "assign": [
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "goldens"
+    }
+   ]
+  },
+  {
+   "id": "framegraph",
+   "label": "Render dependency graph",
+   "layer": "render",
+   "color": "#1f618d",
+   "summary": "Framegraph RDG: graph declaration/compile (barrier planning), ids, record, sync validation.",
+   "assign": [
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "framegraph"
+    }
+   ]
+  },
+  {
+   "id": "present-pipeline",
+   "label": "Present pipeline & passes",
+   "layer": "render",
+   "color": "#154360",
+   "summary": "The frame driver + graph bridge (per-path framegraph assembly), targets/descriptor profiles, scene types, gpu zones, and the pass chain (gbuffer, forward, vb, particles, taa/smaa/fxaa/rcas, blit).",
+   "assign": [
+    {
+     "crate": "boyko_rhi_vulkan",
+     "module": "present"
+    }
+   ]
+  },
+  {
+   "id": "render-columns",
+   "label": "GPU-resident columns",
+   "layer": "render",
+   "color": "#5b2c86",
+   "summary": "Device-local ECS component columns (GpuColumn manager), GpuSystem, 3D instance/transform packing, upload paths.",
+   "assign": [
+    {
+     "crate": "boyko_render",
+     "module": "gpu_column"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "gpu_system"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "gpu3d_instance"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "gpu3d_system"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "gpu_transform3d"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "gpu_transform_pack"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "gpu_upload"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "retired_gpu_buffers"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "upload"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "barrier"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "view"
+    }
+   ]
+  },
+  {
+   "id": "render-path-config",
+   "label": "Render path resolution",
+   "layer": "render",
+   "color": "#4a235a",
+   "summary": "RenderPath/GeometryLegs selection, the immutable resolved-path carrier, degrade ladder, 3D render plugin wiring.",
+   "assign": [
+    {
+     "crate": "boyko_render",
+     "module": "render_path_config"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "render_path_plugin"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "render3d_plugin"
+    }
+   ]
+  },
+  {
+   "id": "render-lighting",
+   "label": "Lighting & shadows",
+   "layer": "render",
+   "color": "#6c3483",
+   "summary": "Light components/tables, froxel clustered culling, CSM cascades + casters, shadow atlas, ray-traced shadow backend, frustum culling, motion camera.",
+   "assign": [
+    {
+     "crate": "boyko_render",
+     "module": "light"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "light_plugin"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "light_policy"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "light_reconcile"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "light_system"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "csm_caster"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "csm_config"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "csm_marker"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "csm_plugin"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "shadow_atlas"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "shadow_marker"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "shadow_plugin"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "ray_backend"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "ray_plugin"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "ray_shadow_config"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "frustum"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "motion_cam"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "gbuffer_depth"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "snap_interpolation"
+    }
+   ]
+  },
+  {
+   "id": "render-occlusion",
+   "label": "Occlusion & HZB",
+   "layer": "render",
+   "color": "#76448a",
+   "summary": "Two-phase HZB occlusion culling knobs/markers/plugins, the host-side verdict oracle, VG census.",
+   "assign": [
+    {
+     "crate": "boyko_render",
+     "module": "hzb"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "hzb_config"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "hzb_plugin"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "occlusion_config"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "occlusion_marker"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "occlusion_plugin"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "vg_census"
+    }
+   ]
+  },
+  {
+   "id": "render-materials",
+   "label": "Meshes & materials",
+   "layer": "render",
+   "color": "#884ea0",
+   "summary": "Mesh assets/data/draw + geometry tables, material tables, bindless textures, tangent space, asset refcounting, loaders (glb/obj/png/ron), bundles.",
+   "assign": [
+    {
+     "crate": "boyko_render",
+     "module": "mesh"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "mesh_assets"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "mesh_data"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "mesh_draw"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "mesh_geometry_table"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "material"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "material_table"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "texture"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "texture_data"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "bindless"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "tangent"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "asset_refcount"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "loaders"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "bundles"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "instance_model"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "sdf_edit"
+    }
+   ]
+  },
+  {
+   "id": "render-particles",
+   "label": "Particles",
+   "layer": "render",
+   "color": "#9b59b6",
+   "summary": "GPU particle components/config/effects, the particle clock and system, plugin.",
+   "assign": [
+    {
+     "crate": "boyko_render",
+     "module": "particle"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "particle_clock"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "particle_config"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "particle_effect"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "particle_plugin"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "particle_system"
+    }
+   ]
+  },
+  {
+   "id": "render-postfx",
+   "label": "Post-processing configs",
+   "layer": "render",
+   "color": "#7fb3d5",
+   "summary": "AA configs (TAA/SMAA/FXAA/SSAA), jitter/state, SSAO, shadow denoise \u2014 render-side config + plugin wiring for the vulkan passes.",
+   "assign": [
+    {
+     "crate": "boyko_render",
+     "module": "aa_config"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "aa_plugin"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "taa_config"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "taa_jitter"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "taa_state"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "smaa_luts"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "ssao_config"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "ssao_plugin"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "shadow_denoise_config"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "shadow_denoise_plugin"
+    }
+   ]
+  },
+  {
+   "id": "render-ddgi",
+   "label": "DDGI (render side)",
+   "layer": "render",
+   "color": "#af7ac5",
+   "summary": "Render-side DDGI config/plugin/update (dynamic global illumination).",
+   "assign": [
+    {
+     "crate": "boyko_render",
+     "module": "ddgi_config"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "ddgi_plugin"
+    },
+    {
+     "crate": "boyko_render",
+     "module": "ddgi_update"
+    }
+   ]
+  },
+  {
+   "id": "render-ui-bridge",
+   "label": "Render\u2194UI bridge",
+   "layer": "render",
+   "color": "#a569bd",
+   "summary": "Render-side UI draw planning, instance packing, upload; glyph-quad resources.",
+   "assign": [
+    {
+     "crate": "boyko_render",
+     "module": "ui"
+    }
+   ]
+  },
+  {
+   "id": "render-misc",
+   "label": "Render crate root",
+   "layer": "render",
+   "color": "#859299",
+   "summary": "boyko_render lib/prelude/error/log_probe \u2014 crate glue (catch-all).",
+   "assign": [
+    {
+     "crate": "boyko_render",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "shaderdsl",
+   "label": "Shader eDSL",
+   "layer": "render",
+   "color": "#2471a3",
+   "summary": "Rust shader math authored once: field leaves, marchers, scalar f32 oracle vs Emit HLSL printer, cf/vb/ssao/shadow/particle leaf sets, the emit bin.",
+   "assign": [
+    {
+     "crate": "boyko_shaderdsl",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "fontbake",
+   "label": "Font baking (MTSDF)",
+   "layer": "tooling",
+   "color": "#bdc3c7",
+   "summary": "Load-time MTSDF atlas baker: face loading, glyph extraction, msdf distance/color/error-correction, atlas packing.",
+   "assign": [
+    {
+     "crate": "boyko_fontbake",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "image-png",
+   "label": "PNG decode (in-house)",
+   "layer": "tooling",
+   "color": "#aab7b8",
+   "summary": "Zero-dependency PNG/zlib/DEFLATE decoder.",
+   "assign": [
+    {
+     "crate": "boyko_image",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "ui-core",
+   "label": "UI core & interaction",
+   "layer": "ui",
+   "color": "#e67e22",
+   "summary": "ECS-native UI: layout system, widget components, interaction (focus/dispatch/actions), anchors/units, data binding, profiling overlay.",
+   "assign": [
+    {
+     "crate": "boyko_ui",
+     "module": "anchor"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": "binding"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": "bundles"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": "components"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": "interaction"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": "layout"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": "plugin"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": "profiling_overlay"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": "resources"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": "units"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": "widgets"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "ui-text",
+   "label": "UI text (MSDF)",
+   "layer": "ui",
+   "color": "#d68910",
+   "summary": "Text pipeline: .ui text AST/parser, shaping, measurement, splitting, dispatch, serialization.",
+   "assign": [
+    {
+     "crate": "boyko_ui",
+     "module": "text"
+    }
+   ]
+  },
+  {
+   "id": "ui-world-reload",
+   "label": "UI world-space & hot-reload",
+   "layer": "ui",
+   "color": "#ba4a00",
+   "summary": "Diegetic world-space UI (pick/project/visibility) and .ui document hot-reload (reconcile/tree view).",
+   "assign": [
+    {
+     "crate": "boyko_ui",
+     "module": "world"
+    },
+    {
+     "crate": "boyko_ui",
+     "module": "reload"
+    }
+   ]
+  },
+  {
+   "id": "app-host",
+   "label": "App host & runner",
+   "layer": "host",
+   "color": "#f1c40f",
+   "summary": "Windowed host: OS loop, device-singleton boot, EnginePlugins wiring, window info, fly camera, diag gate.",
+   "assign": [
+    {
+     "crate": "boyko_app",
+     "module": "runner"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "host"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "device"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "plugins"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "window_info"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "fly"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "prelude"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "diag"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "light_gate"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "particle_gate"
+    },
+    {
+     "crate": "boyko_app",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "app-gpu-scene",
+   "label": "GPU scene host",
+   "layer": "host",
+   "color": "#d4ac0d",
+   "summary": "The windowed G-buffer scene host: static bundle boot, CSM arming, interpolation, TLAS, particle scene wiring.",
+   "assign": [
+    {
+     "crate": "boyko_app",
+     "module": "gpu_scene"
+    }
+   ]
+  },
+  {
+   "id": "app-instrumentation",
+   "label": "App instrumentation",
+   "layer": "diagnostics",
+   "color": "#95a5a6",
+   "summary": "Host-side probes and dumps: HZB plan/arm/force/dump, VB cull probes, VG census dump, particle readback, host dump.",
+   "assign": [
+    {
+     "crate": "boyko_app",
+     "module": "hzb_dump"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "hzb_plan"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "occlusion_arm"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "occlusion_force"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "particle_readback"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "vb_cull_probe"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "vb_probe_dump"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "vg_census_dump"
+    },
+    {
+     "crate": "boyko_app",
+     "module": "host_dump"
+    }
+   ]
+  },
+  {
+   "id": "app-profiling",
+   "label": "App profiling pipeline",
+   "layer": "diagnostics",
+   "color": "#7f8c8d",
+   "summary": "Profiling artifact stream/reduce/contrast/correlate + the alloc shim.",
+   "assign": [
+    {
+     "crate": "boyko_app",
+     "module": "profiling"
+    }
+   ]
+  },
+  {
+   "id": "log",
+   "label": "Logging (boyko_log)",
+   "layer": "diagnostics",
+   "color": "#707b7c",
+   "summary": "Lock-free log lanes, records, diagnostic codes, sinks (binary/file/ecs/crash), lifecycle, census, logdec bin.",
+   "assign": [
+    {
+     "crate": "boyko_log",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "diag-telemetry",
+   "label": "Diagnostics & telemetry",
+   "layer": "diagnostics",
+   "color": "#616a6b",
+   "summary": "boyko_diag: clocks, lanes, sample/loss storage, telemetry, profiling ABI + dynamic registry.",
+   "assign": [
+    {
+     "crate": "boyko_diag",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "aether-lang",
+   "label": "Aether language (offline)",
+   "layer": "tooling",
+   "color": "#99a3a4",
+   "summary": "The Aether DSL: lexer/parser, AST, macro expansion, diagnostics \u2014 compile/bake-time only.",
+   "assign": [
+    {
+     "crate": "aether_lang",
+     "module": ""
+    },
+    {
+     "crate": "aether",
+     "module": ""
+    },
+    {
+     "crate": "aether_tests",
+     "module": ""
+    }
+   ]
+  },
+  {
+   "id": "apps-demos-benches",
+   "label": "Demos, apps & benches",
+   "layer": "host",
+   "color": "#ccd1d1",
+   "summary": "boyko_demo sandbox (wgpu+egui dogfood), cross-engine benches, profile fixtures, the thin root binary.",
+   "assign": [
+    {
+     "crate": "boyko_demo",
+     "module": ""
+    },
+    {
+     "crate": "bench_bevy_vs_boyko",
+     "module": ""
+    },
+    {
+     "crate": "boyko_engine_bin",
+     "module": ""
+    },
+    {
+     "crate": "profile_fixture",
+     "module": ""
+    },
+    {
+     "crate": "profile_fixture_log",
+     "module": ""
+    }
+   ]
+  }
+ ]
+}

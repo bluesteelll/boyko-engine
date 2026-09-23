@@ -313,9 +313,10 @@ pub fn check_selections(selections: &[StageSelection]) -> Result<(), SelectionMi
 
 /// Panics unless the three position-pairing stages select the same rows.
 ///
-/// Called once by `add_physics_pipeline`. A hard `assert` rather than a `debug_assert!`: a
-/// disagreement would otherwise write solved state into the wrong entities in a release build,
-/// silently.
+/// Called once per wire-up by `insert_physics_resources`, the world half that both the builder
+/// form (`add_physics_*`) and `PhysicsPlugin` drive. A hard `assert` rather than a
+/// `debug_assert!`: a disagreement would otherwise write solved state into the wrong entities in
+/// a release build, silently.
 pub(crate) fn assert_body_set_agrees(world: &mut EcsMaster) {
     let selections = body_walker_selections(world);
     if let Err(mismatch) = check_selections(&selections) {

@@ -3980,7 +3980,13 @@ fn ignore_markers_are_measured_by_what_they_silence() {
         // 743 -> 798 in the A7 merge, every one of the 55 on a line the merge inserted: what A7's
         // 21 markers and the 7 the merge added silence, measured by the scan rather than
         // estimated. The line's 743 are unchanged.
-        ("OPEN-QUESTIONS.md", 798),
+        //
+        // 798 -> 797 in the A8 merge (the `integ/unified` cut): the marker over the pass-8
+        // checkpoint line silenced one finding, "path does not exist" for
+        // `docs/unification/checkpoint-2026-09-11/msvc-citations-pass8-work-order.md`, a file
+        // that lived only on `feat/multi-paradigm-render`. The merge brought the file in, so the
+        // marker silenced nothing and came off in the same commit.
+        ("OPEN-QUESTIONS.md", 797),
         ("AETHER-GAIA-REVISION-2026-08-29.md", 0),
         ("gaia/CAMPAIGN.md", 0),
         ("gaia/DECISIONS.md", 0),
@@ -5344,7 +5350,7 @@ fn measured_claims() -> (Vec<MeasuredClaim>, Vec<String>) {
 ///   a document (*"N of the 25 test names appear in this file verbatim"*), and
 ///   `llvm-nm --defined-only` over a linked binary (*"six defined symbols"*). There is nothing to
 ///   re-read: one needs a `cargo test` process, the other a release build and a symbol table.
-/// * **The census's OWN figures, quoted back into the documents** — 367 bound `.rs` citations, 188
+/// * **The census's OWN figures, quoted back into the documents** — 375 bound `.rs` citations, 188
 ///   unbindable, 12 dead, 179 formerly dropped, 12 known-stale. (242/174/5 until the A6 merge
 ///   brought the line's crates under the same scan, then 331 until the A6 follow-up added four
 ///   citations — two into `migration_helpers` and two into the archetype module — each written
@@ -5352,7 +5358,13 @@ fn measured_claims() -> (Vec<MeasuredClaim>, Vec<String>) {
 ///   and would have landed in the unbindable ledger, where nothing checks it. Then 335 until the
 ///   A7 merge: the UI campaign's sources brought 26 bound citations and 3 ambiguous plus 3 dead
 ///   fragments, and the merge's repair bound those six by writing enough path — every cited line
-///   read in the union first — so both ledgers are back at 188 and 12. The figures
+///   read in the union first — so both ledgers are back at 188 and 12. Then 367 until the A8
+///   merge (the `integ/unified` cut): `feat/multi-paradigm-render`'s two near-twin examples,
+///   `boyko_app/examples/{playground,_hud_probe}.rs`, brought 4 bound citations and 4 ambiguous
+///   fragments (`runner.rs`, `bindless.rs`, twice each), and the merge bound those four by
+///   writing enough path, each line re-derived on the merged tree first (the runner's
+///   default-material pin had moved 69 lines, the bindless sampler's range 23) — 188 and 12
+///   again. The figures
 ///   that moved are re-derived from the run, and `179 formerly dropped` is left as the
 ///   historical figure it always was.) ⚠️ The first read **240** until
 ///   2026-08-29, two behind a tree the same landing had moved, and it is the one figure in this

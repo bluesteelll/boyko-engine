@@ -210,6 +210,12 @@ impl BarrierAccess {
     /// `VK_ACCESS_INDEX_READ_BIT` — the access [`BarrierStage::VERTEX_INPUT`] performs
     /// on a bound index buffer. See that constant's doc for the one consumer.
     pub const INDEX_READ: BarrierAccess = BarrierAccess(0x0000_0002);
+    /// `VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT` — the OTHER access
+    /// [`BarrierStage::VERTEX_INPUT`] performs: the fixed-function vertex fetch reading a
+    /// bound vertex buffer. Added with the device-local mesh upload
+    /// (`boyko_render::mesh_assets::upload_device_local`), whose staged `TRANSFER_WRITE`
+    /// has to be made visible to exactly this access before the first draw binds it.
+    pub const VERTEX_ATTRIBUTE_READ: BarrierAccess = BarrierAccess(0x0000_0008);
 
     /// The empty set (no access bits).
     pub const NONE: BarrierAccess = BarrierAccess(0);

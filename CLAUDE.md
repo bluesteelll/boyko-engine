@@ -202,10 +202,15 @@ The repair belongs in those two crates, not in the gate.
 ### The ignored suite — legs by what the machine has
 
 The four commands above run **none** of the `#[ignore]`d tests — **355 sites (191 unconditional +
-164 `#[cfg_attr(<cfg>, ignore = …)]`), measured 2026-09-23 on `merge/ke16-into-ecsnative` after
-the A6 reflection and A7 advanced-UI merges**, by `tests/ignore_reasons_census.rs`'s own printed
-line (`355 sites (191 plain, 164 cfg_attr) across 12 crates, 1768 .rs files walked, 0 waivers`).
-The last move, 336 → 355, is those two lanes and nothing else, both measured against the same
+164 `#[cfg_attr(<cfg>, ignore = …)]`), re-measured 2026-09-23 on `integ/unified` at the A8 cut**,
+by `tests/ignore_reasons_census.rs`'s own printed line (`355 sites (191 plain, 164 cfg_attr)
+across 12 crates, 1770 .rs files walked, 0 waivers`). A8 — `feat/multi-paradigm-render` merged
+into the integration line — moved no site: that side adds no ignore attribute (its `git diff`
+against the merge base `d2c8c646`), and its only new `.rs` files are the two examples
+`boyko_app/examples/{playground,_hud_probe}.rs`, which carry none, so the one figure that moved
+is the files walked, 1,768 → 1,770. The same line read 1,768 earlier that day on
+`merge/ke16-into-ecsnative`, after the A6 reflection and A7 advanced-UI merges.
+The last site move, 336 → 355, is those two lanes and nothing else, both measured against the same
 `6a733f26` and disjoint in files: the reflection lane's **+16** — **+3 plain**
 (`boyko_ecs/tests/seam_by_id.rs` ×2, `reflect_fixture/tests/reflect_absence_census.rs` ×1) and
 **+13 `cfg_attr(miri, …)`** (`boyko_reflect/tests/c1_scalar.rs` ×11, the full-range proptests;
@@ -238,8 +243,10 @@ attributed by `git diff` against each merge's second parent — the light-table 
 in `boyko_physics/tests/narrowphase_parallel_equivalence.rs`
 (`jolt_pyramid_parallel_narrowphase_is_bit_identical`, L5 C3). The light-table lane's own "324"
 was 320 + 4 on its branch point, which predates the L2 calibration's +7 and the simd_solve +1; an
-independent enumeration reproduces 355 / 191 / 164 across **12** crates and **1,768** `.rs` files
-walked (1,767 after the A6 and A7 merges, +1 from the L11 solve-setup merge -
+independent enumeration on `merge/ke16-into-ecsnative` reproduced 355 / 191 / 164 across **12**
+crates and **1,768** `.rs` files walked (1,770 on `integ/unified`, +2 from the A8 examples — the
+census's own line above, not a second enumeration; 1,767 after the A6 and A7 merges, +1 from the
+L11 solve-setup merge -
 `boyko_physics/src/solver/warm_records.rs`, no ignore site; 1,667 at `6a733f26`; +71 from the A6 merge, which added `boyko_reflect`, `reflect_fixture`
 and `reflect_dogfood`; +29 from the A7 merge — 14 `boyko_render` tests, 7 `boyko_ui` tests,
 2 `boyko_ui` sources, 3 `boyko_shaderdsl`, 2 `boyko_render` sources and 1 `boyko_render` bench, of
@@ -455,6 +462,11 @@ makes the prefixes mechanical has to say which class a release-only-but-device-f
 - OS: Windows / Linux (x86_64)
 - SIMD: AVX2 baseline; AVX-512 optionally via `cfg(target_feature)`
 - Edition: Rust 2024
+- Development host (the owner's machine): **MSVC** since 2026-09-17 — `stable-x86_64-pc-windows-msvc`
+  for builds, `nightly-x86_64-pc-windows-msvc` for Miri; spell both. `stable-x86_64-pc-windows-gnu`
+  stays installed only to compare against numbers pinned before that date, which were blessed under
+  windows-gnu. Loom's `--cfg loom` goes through a `target."cfg(windows)"` key, never
+  `build.rustflags` (see the tester's instructions for why that form compiles every model away).
 
 ## Documentation — two layers
 
@@ -479,7 +491,66 @@ In [.claude/agents/](.claude/agents/) the following are defined:
 
 The main Claude in the chat acts as the **orchestrator** — chooses the right agents for each task and runs the iteration loops.
 
-**Model routing** (set via each agent's `model:` frontmatter): **every role runs on Opus** — owner decision, 2026-07-26. The previous split put `developer`, `tester`, `researcher`, `doc-writer` and `project-analyst` on Sonnet as "mechanical / gathering" roles. That premise did not survive contact with this codebase: the roles it called mechanical are the ones that catch the campaign's defects. On the VB-SV0 stage alone, implementers refuted the orchestrator's own prescriptions **nine times** — a ULP tolerance that was wrong in form because the leaf ends in a cancellation, a `-D`-push route replaced by an `OpArrayLength` bound the orchestrator had not considered, a z-range check whose prescribed site would have panicked at boot in every process, and a NaN claim corrected on the wrong leaf. None of that is transcription work. Do not downgrade any role without a measured before/after quality diff — this applies to all nine now, not only to `code-reviewer` (which remains the last line against `unsafe`/atomics UB). The orchestrator itself stays on the session model.
+**Model routing** (set via each agent's `model:` frontmatter): **every role runs on Opus** — owner decision, 2026-07-26, and as of 2026-09-07 there is finally a MEASURED diff behind it rather than only a judgement.
+
+**The measurement (2026-09-07).** 27 retrieval questions over this tree, each with a ripgrep-verified
+ground-truth passage and phrased WITHOUT the target's own distinctive vocabulary, run through an
+identical brief on three tiers. The task is the most *mechanical* thing an agent here ever does —
+search, read, report a file and line span — so it is the friendliest possible case for a cheaper tier:
+
+| tier | found | rank-1 | TIGHT MRR | **confidently WRONG** | returned nothing |
+|---|---|---|---|---|---|
+| haiku | 14/27 | 14 | 0.519 | **8** | 3 |
+| sonnet | 23/27 | 22 | 0.833 | **4** | 0 |
+| opus | **27/27** | **25** | **0.957** | **0** | 0 |
+
+The decisive column is the fourth, not the first. Sonnet asserted "I found it" on **four** questions
+where its answer was wrong; Opus did so **zero** times. A confident wrong answer is this
+repository's own catalogued failure mode, and it is the one a downstream reader cannot detect.
+
+⚠️ **A six-question pilot of the same experiment said Sonnet TIED with Opus (6/6 each) and was
+wrong** — those six happened to be questions Sonnet gets right. n=6 could not separate the tiers;
+n=27 separated them by four answers and by all of the false confidence. Any future routing
+measurement needs at least ~25 items, and must score *confident-but-wrong* separately from *missed*.
+
+**The second measurement — the development workflow itself, from this repository's own history.**
+The roles named below ran on Sonnet until 2026-07-26 and on Opus after, one repo, one orchestrator:
+a natural before/after. Matched 43-day windows either side of the switch (545 vs 470 commits):
+
+| signal | Sonnet era | Opus era | ratio |
+|---|---|---|---|
+| `fix:` commits — actual defect repairs | 10.6% | 10.6% | **1.00×** |
+| commit-subject length — the style confounder | 10.4 words | 14.7 words | 1.41× |
+| **numeric corrections** per 100 commits ("19 stale sites, not the 9 reported") | 4.0 | 13.4 | **3.32×** |
+| **self-refutations** per 100 commits (the workflow catching its OWN output) | 7.9 | **50.9** | **6.45×** |
+
+Commit style did become more discursive, which is why the raw "admits something was wrong" rate
+proves nothing on its own — but self-refutation grew **4.6× faster than subject length**, so prose
+cannot explain it. And the repair rate is *identical*: the workflow does not ship more fixes, it
+finds far more falsehood in what it and its predecessors had already written — "the gate that passed
+its own red mutation", "the gate caught its own author twice", "two of Rev 10's own repairs were
+wrong, and the review caught both", "3 of 5 repairs first made it worse". The matched Sonnet window
+contains **two** self-refutations, one of them a plain race fix.
+
+⚠️ Confounded, and the confounder is named: the Opus era coincides with campaigns *about* gate
+quality (diagnostics ladders, the anchors gate, VG critique rounds), which generate self-refutation
+by their nature. Topic selection is part of the effect; the 6.45× is not attributable to the tier
+alone. What survives the confounder is the pairing with the retrieval table above — **two
+independent measurements, one synthetic and one historical, both isolating the same faculty: not
+capability, but self-scepticism.** Opus's edge is knowing when its own output is wrong, which is
+precisely the axis this repository's entire failure taxonomy runs along ("a check that could not
+fail", "green from emptiness", "a confident wrong answer").
+
+**So the downgrade question is answered in the negative, with numbers, for the one role that can be
+measured cheaply — and the roles above it are protected LESS, not more.** Only facts are gated
+downstream, never judgement: `cargo` catches code that does not compile but not UB in an `unsafe`
+block; a `tester`'s pass/fail is gated while a test that *cannot fail* reads as green; a
+`doc-writer`'s output is gated by nothing at all (repairing doc rot introduced new falsehoods in 3
+of 5 measured attempts). Do not downgrade any role on the argument that it is "mechanical" — that
+premise was tested here and failed. **Optimise effort, batch size and redundant arms instead of the
+tier** (`effort:` is a per-call knob on Opus and keeps its judgement).
+
+The previous split put `developer`, `tester`, `researcher`, `doc-writer` and `project-analyst` on Sonnet as "mechanical / gathering" roles. The previous split put `developer`, `tester`, `researcher`, `doc-writer` and `project-analyst` on Sonnet as "mechanical / gathering" roles. That premise did not survive contact with this codebase: the roles it called mechanical are the ones that catch the campaign's defects. On the VB-SV0 stage alone, implementers refuted the orchestrator's own prescriptions **nine times** — a ULP tolerance that was wrong in form because the leaf ends in a cancellation, a `-D`-push route replaced by an `OpArrayLength` bound the orchestrator had not considered, a z-range check whose prescribed site would have panicked at boot in every process, and a NaN claim corrected on the wrong leaf. None of that is transcription work. Do not downgrade any role without a measured before/after quality diff — this applies to all nine now, not only to `code-reviewer` (which remains the last line against `unsafe`/atomics UB). The orchestrator itself stays on the session model.
 
 ## Orchestration discipline
 
@@ -492,7 +563,12 @@ The main Claude in the chat acts as the **orchestrator** — chooses the right a
 
 - Chat messages between Claude and the user can be in Russian.
 - **Every artifact written into the repository is in English**: code, doc comments, inline comments, commit messages, internal docs, agent prompts, mdBook content, audit reports — everything. No mixed-language files.
-- **ONE EXCEPTION: [`docs/ru/`](docs/ru/).** Owner-granted 2026-08-02. That directory holds Russian versions of documents the owner reads and edits himself. The files there are NOT a rule violation and must not be "fixed" back to English. Everything outside it stays English, including the originals. The English version is the SOURCE OF TRUTH and the Russian one follows it; editing either side updates the other **in the same commit**, because a diverged pair is worse than a missing one — the reader cannot tell which is current and finds out only by acting on the stale one. See [`docs/ru/README.md`](docs/ru/README.md). ⚠️ **MEASURED 2026-09-22, at the A6 reflection merge: that directory is not what a report about one of its files says it is.** `docs/ru/OPEN-QUESTIONS.md` conflicted and was resolved to this line's side verbatim (blob `494a0751`, byte-identical) — but `docs/ru/README.md` moved from `b063d115` to the lane's `2471df73`, **+21 lines**, with no conflict raised at all, because this line had not touched the file since the merge base and git took the lane's side silently. Two reports then said *"the frozen directory held"* on the strength of the file that did hold. **The text is KEPT**: it was written by lane commit `d272e1fd` on 2026-08-29, nine days before the 2026-09-07 freeze, and it is a lesson about twin parity (that comparing the two sides tests SAMENESS, not TRUTH) rather than a translation update — refusing it would delete a lane's own record to satisfy a rule that did not exist when it was written. What was wrong was the reporting, not the resolution. **And the freeze is not on this line at all:** this bullet, on both A6 merge parents and on the merge base, still states the pairing rule the owner WITHDREW on 2026-09-07; that paragraph lives only on `feat/multi-paradigm-render` (`49f2fcfb`), which is not an ancestor here. So a reader checking this tree is told the opposite, the A6 merge could not have decided the question from its own parents, and when this line meets that branch **this bullet WILL conflict and the owner's side (the freeze) is the newer decision and wins.** One more thing to expect there: the owner's CLAUDE.md says the freeze *"is announced in `docs/ru/README.md` itself"*, and that file carries **zero** mentions of the freeze or its date in either parent's version. Writing one is an owner call on a frozen directory, so nothing in the A6 line touches that file.
+- **ONE EXCEPTION: [`docs/ru/`](docs/ru/).** Owner-granted 2026-08-02. That directory holds Russian versions of documents the owner reads himself. The files there are NOT a rule violation and must not be "fixed" back to English. Everything outside it stays English, including the originals.
+- ⚠️ **`docs/ru/` is FROZEN as of 2026-09-07 — owner decision — and its pairing rule is WITHDRAWN.** The English documents are the source of truth and are the only side maintained. Do not update the Russian side when the English one changes, and do not translate new documents into it.
+  - The freeze was taken with its cost stated and accepted: the pair **will** diverge, which is exactly what the withdrawn rule warned about — a reader cannot tell which side is current and finds out only by acting on the stale one. That is why the freeze is announced in [`docs/ru/README.md`](docs/ru/README.md) itself, where the reader lands, rather than only here.
+  - It began from a synchronised state: both sides were last written by `efd7735f` (2026-09-03), verified by `git log -1` per path, so the divergence is measurable from that commit forward rather than unknown.
+  - A future session must NOT "repair" the divergence by re-syncing or by deleting the directory. Either is an owner call, not a tidy-up.
+  - One addition inside the directory postdates the rule it would have followed but predates the freeze, and is kept: `docs/ru/README.md`'s section on twin checks testing SAMENESS rather than TRUTH (lane commit `d272e1fd`, 2026-08-29, +21 lines). It reached the integration line through the A6 reflection merge with no conflict raised — that line had not touched the file since the merge base, so git took the lane's side silently — while two reports said *"the frozen directory held"* on the strength of the one file there that did hold (MEASURED 2026-09-22). A report about one file of this directory is not a report about the directory. The A8 merge (the `integ/unified` cut) kept that section, unchanged, below the freeze announcement: re-syncing it and dropping it are both the owner's calls, not a merge's.
 
 ## Rules for agents
 
@@ -544,6 +620,119 @@ unsafe { ... }
 - **`expect("invariant: ...")`** instead of `unwrap()` wherever panic is by design.
 - **`debug_assert!`** for invariant checks on the hot path (they vanish in release).
 - **Imports grouped**: std → external → crate → self.
+
+## Code navigation — the LSP is the ground truth about a symbol
+
+`rust-analyzer` serves every `.rs` file through the `LSP` tool, declared by a machine-local plugin at
+`~/.claude/skills/rust-analyzer-local/.lsp.json`. Prefer it for anything about a symbol's identity or
+its relations, because it answers out of the compiler front-end instead of an index that can be
+stale:
+
+- `goToDefinition` / `findReferences` / `goToImplementation` — exact and workspace-wide.
+- `hover` — type, doc comment, and the **computed** layout (`size = 312 (0x138), align = 0x8, no
+  Drop`), which is load-bearing in a codebase whose principles are about layout.
+- `workspaceSymbol` — locate a type or function by name across every crate.
+- `incomingCalls` / `outgoingCalls` — call hierarchy, for tracing a hot path.
+
+Use `Grep` (it is ripgrep) when the question is literal or pattern-shaped — a `// SAFETY:` census,
+an `#[allow(clippy::disallowed_types)]` sweep, a string inside a shader — and graphify when it is
+architectural rather than about one symbol.
+
+### Meaning in prose and comments — `semble`, and where it beats ripgrep
+
+Rationale in this repo lives in Markdown and in long comment blocks, so the answering words often
+are not the asking words. `semble` (machine-local, `pip install --user "semble[mcp]"`) indexes
+`.md` and `.rs` — tree-sitter chunking carries comment nodes verbatim — and re-validates its cache
+on **every** search, so it cannot go a month stale the way a manually-rebuilt index can.
+
+Use the wrapper, [`tools/semsearch.py`](tools/semsearch.py), rather than `semble` bare — it adds
+the cross-encoder rerank stage that carries most of the measured value, and it prints both orders:
+
+```
+python tools/semsearch.py "<question>" <tree> -k 8
+```
+
+Bare `semble search` also works; its `--content` defaults to **code only**, so pass `all` (or
+`docs`) there or prose is silently not searched.
+
+**The configuration is a measured optimum over 27 ground-truthed questions, not a guess.** Every
+number below is `hits@10` on the strict metric (the returned span must actually overlap the target):
+
+| configuration | hits@10 | recall@40 |
+|---|---|---|
+| semble as shipped — chunk 750, no rerank | **8** | 11 |
+| chunk 1500, fused rerank | 12 | 14 |
+| **chunk 4500, pool 40, fused at α=0.5** ← the wrapper's defaults | **16** | **17** |
+
+**hits@10 doubled and recall went 11 → 17**, from a chunk constant, a pool cap, an 80 MB
+cross-encoder and a fusion weight — no new model, no torch, no npm. Four things were each measured
+and each is counter-intuitive, so do not "simplify" them away:
+
+- **The chunk budget is the biggest single lever, and the shipped default is the worst setting.**
+  750 chars (~190 tokens) against rationale blocks averaging ~2,200 splits a block into ~4
+  fragments, which semble's own ranker then penalises (2nd fragment from a file ×0.5, 3rd ×0.25).
+  Swept: 750 is last of {750, 1500, 3000, 4500, 6000} on every metric. The wrapper patches the
+  constant at call time rather than editing `site-packages`, because a patched install is silently
+  reverted by the next upgrade.
+- **A deeper pool is worse AND dearer.** Recall does not improve past 40 (5/6 at 40, 150 and 400),
+  while reranking degrades monotonically and cost grows 10× (27 s → 272 s/query). This reproduces
+  arXiv 2411.11767's finding that a pointwise reranker beats the retriever alone in barely half of
+  measured cases at high K.
+- **Fusion is required; both extremes lose.** At chunk 4500, hits@10 is 11 with the first stage
+  alone, 14 with the cross-encoder alone, and **16 fused at α=0.5**. Replacing the order outright
+  moved one target from rank 38 to 2 while pushing a rank-1 target down to 9 — which is why the
+  wrapper prints `was=#N`, and why `--no-rerank` exists.
+- **Do not change the embedding model.** The default `potion-code-16M-v2` measured best;
+  `potion-retrieval-32M` and `potion-base-32M` both scored worse and dropped a code target out of
+  the top 40 entirely, and merging all three candidate pools recovered no recall the default did not
+  already have.
+
+**The split is measured, not assumed (2026-09-07), and it goes both ways:**
+
+- **Broad topical question → semble.** "Which subsystem decides shadow-map stability" against
+  ripgrep is `shadow` = **6,265 occurrences in 270 files**, useless as a starting point; semble
+  returned 8 ranked hits including the right plan document and the doc comment recording why the
+  shadow-map camera once pointed 180° away.
+- **Specific rationale with a guessable rare word → ripgrep.** "Why can the yield count not be
+  tuned" was found by `tune|tuned|tunable` scoped to one crate — **3 files**, answer among them —
+  while semble **missed it in the top 5 even in the tree that holds it**.
+- Rule of thumb that follows: if a keyword guess would return few files, grep; if it would return
+  hundreds, let semble rank.
+
+⚠️ **A bigger embedding model is not the fix, and it was tested twice.** On a single question
+`potion-retrieval-32M` (249 MB) looked better than the default and `potion-multilingual-128M`
+(1002 MB) looked worse; on the six-question set the default won outright. The reason is structural:
+every one of them is a *static* embedding — token vectors summed with no attention — so a paraphrase
+bridge like "cannot be tuned" ⇒ "no constant threshold can certify it" is out of reach **by
+construction**, and semble loads only `model2vec.StaticModel`. That is the ceiling a cross-encoder
+steps over, because it reads the query and the chunk together.
+
+The failure was diagnosed before it was fixed, and the diagnostic is reusable: a **near-verbatim**
+query retrieves the target at rank 1 with score ~**0.0197** — measured three times, on three
+different targets — while a paraphrase of the same question leaves it outside the top 5 at ~0.009.
+So the chunk is indexed and recall is adequate; only the ordering fails. **Treat a first-stage top
+score below ~0.012 as "nothing really matched"** and prefer a ripgrep guess on a rare word from the
+question. Semble's own `rerank` is a lexical heuristic (file/identifier boost, path penalties over
+an RRF fusion with BM25) and is already on — it is not a cross-encoder, so the two stack.
+
+⚠️ `semble mcp` does not exist — it exits 2. The CLI satisfies the integration need on its own.
+Shader grammars are absent (`wgsl`, `hlsl` warn and fall back to line chunking).
+
+⚠️ **The server covers ONLY the projects listed in `settings["rust-analyzer"].linkedProjects`, and
+that key REPLACES project auto-discovery rather than extending it.** Two consequences, both measured
+2026-09-07:
+
+- A file in a worktree that is not listed gets **syntax only**: `documentSymbol` answers in full
+  while `hover`, `findReferences` and `workspaceSymbol` come back **empty**. That empty answer is
+  indistinguishable from "no such symbol", so it is a silent wrong answer, not an error.
+- The main checkout must never be dropped from the list, or fixing a lane breaks what already
+  worked.
+
+The list therefore carries the main checkout plus whichever lanes are under work, and lanes are
+removed as they finish: each project costs several GB of RSS, growing with query volume. When two
+trees are linked, `workspaceSymbol` returns one hit per tree for identically-named packages —
+tell them apart by path form, since a linked lane answers with an absolute path and the main
+checkout with a relative one.
 
 ## graphify
 

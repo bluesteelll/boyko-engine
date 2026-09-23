@@ -1,32 +1,44 @@
-//! Physics-pipeline wiring — the `PhysicsPlugin`-shaped free function (plan D3 /
-//! MINOR-1).
+//! Physics-pipeline wiring — the free functions (plan D3 / MINOR-1) and the
+//! `App`-facing [`PhysicsPlugin`].
 //!
-//! There is no `Plugin` trait in the engine (the demo wires systems via a free
-//! fn taking `&mut ScheduleBuilder`), so [`add_physics_systems`] is the faithful
-//! idiom: it inserts the physics resources on the world and registers the six
-//! pipeline stages on the builder in deterministic `.after(...)` order, returning
-//! the stage handles so the caller can identify the physics block.
+//! Two entry shapes over ONE implementation:
 //!
-//! Per MINOR-1 it does NOT call `builder.build(world)` — that consumes the
-//! builder and is the caller's job.
+//! * [`add_physics_systems`] & friends — the BUILDER form: the caller owns a
+//!   `ScheduleBuilder` and an `EcsMaster` and hands both over. This is what every
+//!   test / bench / hand-driven world uses. Per MINOR-1 it does NOT call
+//!   `builder.build(world)` — that consumes the builder and is the caller's job.
+//! * [`PhysicsPlugin`] — the APP form: `app.add_plugin(PhysicsPlugin::new())`.
+//!
+//! The `App` never lends the world and the fixed-schedule builder at the same
+//! time (`App::add_systems_cfg_in` passes the builder to a closure while the
+//! `App` — and therefore the world — is already borrowed), so the builder form is
+//! UNCALLABLE from a plugin. That is why the implementation is split into
+//! [`insert_physics_resources`] (world half) and [`register_physics_pipeline`]
+//! (schedule half): each half needs only one of the two borrows, and both entry
+//! shapes drive the same pair with the same [`PipelineOpts`].
 //!
 //! # The solve stage follows the solver type (2026-09-18)
 //!
-//! Every `add_physics_*::<S>` entry selects the solve stage from `S` alone, once,
-//! at wire-up (cold code). `S = `[`ColoredSoftStepSolver`] — the default world's
-//! solver, named [`DefaultRigidSolver`](crate::solver::DefaultRigidSolver) — wires
-//! the constraint graph ([`physics_build_graph`]), the colored solve
-//! ([`physics_solve_colored`]) and the per-island sleep state ([`IslandSleep`]);
-//! any other `S` wires the generic [`physics_solve_step::<S>`](physics_solve_step),
-//! unchanged. So the reference [`SoftStepSolver`](crate::solver::SoftStepSolver)
-//! is still selected by naming it, and the foundation
+//! Every `add_physics_*::<S>` entry — and [`PhysicsPlugin<S>`] — selects the solve
+//! stage from `S` alone, once, at wire-up (cold code). `S = `[`ColoredSoftStepSolver`]
+//! — the default world's solver, named
+//! [`DefaultRigidSolver`](crate::solver::DefaultRigidSolver) — wires the constraint
+//! graph ([`physics_build_graph`]), the colored solve ([`physics_solve_colored`]) and
+//! the per-island sleep state ([`IslandSleep`]); any other `S` wires the generic
+//! [`physics_solve_step::<S>`](physics_solve_step), unchanged. So the reference
+//! [`SoftStepSolver`](crate::solver::SoftStepSolver) is still selected by naming it,
+//! and the foundation
 //! [`NoopSolver`](crate::solver::NoopSolver) can never be paired with the colored
 //! stage (the colored solver owns integration; the no-op solver does not).
 
+use core::marker::PhantomData;
 use std::any::TypeId;
 
+use boyko_ecs::ecs::core::app::CoreSchedule;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
-use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
+use boyko_ecs::ecs::core::schedule::{ScheduleBuilder, SystemConfig};
+use boyko_ecs::{App, Plugin};
+use boyko_scene::FixedSet;
 
 use crate::broadphase_policy::{PhysicsStats, select_broadphase};
 use crate::broadphase_tree::BroadphaseTree;
@@ -43,7 +55,7 @@ use crate::soft::{
     physics_soft_step_colored, physics_soft_step_coupled,
 };
 use crate::solver::colored::ColoredSoftStepSolver;
-use crate::solver::RigidSolver;
+use crate::solver::{DefaultRigidSolver, RigidSolver};
 use crate::systems::{
     physics_apply, physics_broadphase, physics_build_graph, physics_gather, physics_integrate,
     physics_narrowphase, physics_narrowphase_sdf, physics_solve_colored, physics_solve_step,
@@ -452,6 +464,74 @@ pub fn add_physics_soft_colored<S: RigidSolver + Default>(
     add_physics_pipeline::<S>(builder, world, false, false, true, false, true, false)
 }
 
+/// The six pipeline-SHAPE flags, as one `Copy` record.
+///
+/// The wiring has two halves that need DIFFERENT exclusive borrows —
+/// [`insert_physics_resources`] takes `&mut EcsMaster`, [`register_physics_pipeline`]
+/// takes `&mut ScheduleBuilder` — and an `App` hands out only one of them at a time
+/// (`App::add_systems_cfg_in` yields the builder while it owns the world), which is
+/// exactly why the pre-split single function could not be called from a `Plugin`.
+/// Both halves must be handed the SAME shape or the registered stages and the
+/// inserted resources disagree; passing one record instead of positional `bool`s
+/// makes that mismatch unwritable. The public free functions keep their positional
+/// signatures unchanged.
+///
+/// There is no `colored_solve` flag: the solve stage is selected by the solver TYPE
+/// (see [`PipelineOpts::resolve`]), so a flag could only disagree with it.
+#[derive(Clone, Copy)]
+struct PipelineOpts {
+    /// Splice the body-vs-SDF narrowphase stage + insert [`SdfField`] (W5).
+    with_sdf: bool,
+    /// Build the O4 constraint graph (islands + coloring). Implied when `S` is the
+    /// colored solver, which consumes the graph.
+    colored: bool,
+    /// Run the SP1 XPBD soft-body position pass.
+    soft: bool,
+    /// SP2 soft<->rigid coupling (requires `soft`).
+    coupling: bool,
+    /// SP4 colored soft step (requires `soft`, excludes `coupling`).
+    soft_colored: bool,
+    /// Wrap the std-lib S5 `Transform` <-> `RigidBody` pose sync around the block.
+    scene_sync: bool,
+}
+
+impl PipelineOpts {
+    /// Resolves the shape against the solver type, once, at wire-up (cold), and
+    /// returns it with the derived `colored_solve` flag.
+    ///
+    /// The colored solve stage reads `ResMut<ColoredSoftStepSolver>` by name, so tying
+    /// it to `S` makes the solver resource inserted by [`insert_physics_resources`]
+    /// (`S::default()`) exactly the one it reads, and the `IntegrationMode` stamped
+    /// from `S` exactly the one it needs (it owns integration). The colored solve
+    /// consumes the graph, hence the implication `colored |= colored_solve`.
+    ///
+    /// Called by BOTH halves, so a [`PhysicsPlugin`] build (which calls them
+    /// separately) resolves and validates exactly like a free-function call.
+    fn resolve<S: RigidSolver + Default>(self) -> (Self, bool) {
+        let colored_solve = TypeId::of::<S>() == TypeId::of::<ColoredSoftStepSolver>();
+        let resolved = Self { colored: self.colored || colored_solve, ..self };
+        resolved.debug_validate();
+        (resolved, colored_solve)
+    }
+
+    /// The caller-upheld invariants the type system cannot express.
+    fn debug_validate(self) {
+        let Self { soft, coupling, soft_colored, .. } = self;
+        debug_assert!(
+            !coupling || soft,
+            "invariant: soft↔rigid coupling requires the soft pass (soft == true)"
+        );
+        debug_assert!(
+            !soft_colored || soft,
+            "invariant: the colored soft step requires the soft pass (soft == true)"
+        );
+        debug_assert!(
+            !(soft_colored && coupling),
+            "invariant: the colored soft step is the non-coupling path (SP4 IM-1 boundary)"
+        );
+    }
+}
+
 /// Shared wiring for every `add_physics_*` entry: inserts the resources and
 /// registers the pipeline, optionally splicing the SDF-collision stage and/or the
 /// constraint-graph stage between narrowphase and solve, and selecting the
@@ -473,25 +553,33 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     soft_colored: bool,
     scene_sync: bool,
 ) -> PhysicsStageKeys {
-    // Once per world, at wire-up (cold). The colored solve stage reads
-    // `ResMut<ColoredSoftStepSolver>` by name, so tying it to `S` makes the solver
-    // resource inserted below (`S::default()`) exactly the one it reads, and the
-    // `IntegrationMode` stamped from `S` exactly the one it needs (it owns
-    // integration). The colored solve consumes the graph, hence the implication.
-    let colored_solve = TypeId::of::<S>() == TypeId::of::<ColoredSoftStepSolver>();
-    let colored = colored || colored_solve;
-    debug_assert!(
-        !coupling || soft,
-        "invariant: soft↔rigid coupling requires the soft pass (soft == true)"
-    );
-    debug_assert!(
-        !soft_colored || soft,
-        "invariant: the colored soft step requires the soft pass (soft == true)"
-    );
-    debug_assert!(
-        !(soft_colored && coupling),
-        "invariant: the colored soft step is the non-coupling path (SP4 IM-1 boundary)"
-    );
+    let opts = PipelineOpts {
+        with_sdf,
+        colored,
+        soft,
+        coupling,
+        soft_colored,
+        scene_sync,
+    };
+    insert_physics_resources::<S>(world, opts);
+    // `None` — the free-function path registers the stages in NO set, exactly as
+    // before the split. Joining `FixedSet::Gameplay` is the `App`/[`PhysicsPlugin`]
+    // path's addition only, so every existing caller's schedule shape (and the
+    // determinism goldens keyed to it) is byte-identical.
+    register_physics_pipeline::<S>(builder, opts, None)
+}
+
+/// The WORLD half of the wiring: inserts every resource the chosen pipeline shape
+/// needs, and checks the position-pairing stages' row selections (defect A5).
+///
+/// Split out of `add_physics_pipeline` so a `Plugin` can insert the resources while
+/// it holds `&mut EcsMaster` and register the stages later, when the `App` hands it
+/// the `&mut ScheduleBuilder`. Order is irrelevant between the two halves —
+/// registration never reads a resource, it only names systems — so the split is
+/// behavior-preserving by construction.
+fn insert_physics_resources<S: RigidSolver + Default>(world: &mut EcsMaster, opts: PipelineOpts) {
+    let (opts, _) = opts.resolve::<S>();
+    let PipelineOpts { with_sdf, colored, soft, coupling, soft_colored, .. } = opts;
     // Reused, capacity-preserving step buffers (principle 5 — no per-step alloc).
     // The `colored` flag rides the config so `physics_build_graph` (registered only
     // when `colored`) and any future graph consumer share one switch.
@@ -591,8 +679,64 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         IntegrationMode::Foundation
     };
     world.insert_resource(integration_mode);
+    // The O5 solve stage is NOT generic: `physics_solve_colored` reads
+    // `ResMut<ColoredSoftStepSolver>` by name. It is registered only when `S` IS
+    // `ColoredSoftStepSolver` (`PipelineOpts::resolve`), so this `S::default()` is
+    // exactly the resource it reads, on every entry shape — a `PhysicsPlugin<S>` cannot
+    // register a colored stage whose parameter does not resolve.
+    //
+    // That failure was MEASURED on the render line while the solve was still a flag,
+    // and it is worse than it sounds: the param resolve panics on a SCHEDULER WORKER,
+    // and a worker panic in the windowed host does not take the process down — the
+    // window simply stops responding, with no CPU burn and the panic text buried in
+    // stderr. "Hangs on boot" is a terrible name for "one resource was missing".
     world.insert_resource(S::default());
 
+    // Defect A5: the gather, apply and soft apply pair their rows by position, so their
+    // selections must agree. Once per wire-up; a hard assert, because a disagreement is
+    // silent state corruption in a release build. The signature pins in `body_set` list
+    // every stage that pairs rows by position. It reads only the world, so it lives in
+    // this half and runs for both entry shapes.
+    crate::body_set::assert_body_set_agrees(world);
+}
+
+/// Joins one stage to `set`, or leaves it unset.
+///
+/// [`SystemConfig`] is a consuming builder, so an OPTIONAL `.in_set(..)` cannot be
+/// written inline in a chain; this is that `Option` adapter. `None` reproduces the
+/// pre-split registration byte-for-byte.
+#[inline]
+fn joined<'a>(cfg: SystemConfig<'a>, set: Option<FixedSet>) -> SystemConfig<'a> {
+    match set {
+        Some(s) => cfg.in_set(s),
+        None => cfg,
+    }
+}
+
+/// The SCHEDULE half of the wiring: registers the pipeline stages on `builder` in
+/// the deterministic `.after(..)` order and returns their handles.
+///
+/// `set` joins EVERY stage to one [`FixedSet`] (the [`PhysicsPlugin`] passes
+/// `FixedSet::Gameplay`). That membership is load-bearing rather than cosmetic:
+/// `EnginePlugins` orders `FixedSet::Snapshot.after(FixedSet::Gameplay)`, and the
+/// engine's interpolation pack (`pack_gpu_transforms`) lives in `Snapshot` — so
+/// without the join the pack could read a body's `Transform` from BEFORE this
+/// substep's solve, which is the one-substep lag the D4 seam exists to prevent.
+/// `None` keeps the stages unset (the free-function path).
+fn register_physics_pipeline<S: RigidSolver + Default>(
+    builder: &mut ScheduleBuilder,
+    opts: PipelineOpts,
+    set: Option<FixedSet>,
+) -> PhysicsStageKeys {
+    let (opts, colored_solve) = opts.resolve::<S>();
+    let PipelineOpts {
+        with_sdf,
+        colored,
+        soft,
+        coupling,
+        soft_colored,
+        scene_sync,
+    } = opts;
     // S5 head: when pose sync is wired, `sync_transform_to_body` is the TRUE
     // block head — Static / Kinematic bodies copy `Transform` INTO `RigidBody`
     // before the gather snapshots it. Registered first so its real `SystemKey` is
@@ -603,7 +747,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // and is serialized before them anyway; the explicit edge makes the order
     // deterministic, not merely conflict-derived.
     let transform_to_body_key = if scene_sync {
-        Some(builder.add_system(sync_transform_to_body).key())
+        Some(joined(builder.add_system(sync_transform_to_body), set).key())
     } else {
         None
     };
@@ -615,13 +759,13 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // the public descriptor index of the engine's `SystemKey` (see
     // `PhysicsStageKeys`).
     let integrate = if let Some(head) = transform_to_body_key {
-        builder.add_system(physics_integrate).after(head).key()
+        joined(builder.add_system(physics_integrate), set).after(head).key()
     } else {
-        builder.add_system(physics_integrate).key()
+        joined(builder.add_system(physics_integrate), set).key()
     };
-    // The gather joins `PhysicsGatherSet` so an external caller can order against it by name.
-    let gather = builder
-        .add_system(physics_gather)
+    // The gather joins `PhysicsGatherSet` so an external caller can order against it by
+    // name, and (on the `App` path) `set` like every other stage.
+    let gather = joined(builder.add_system(physics_gather), set)
         .after(integrate)
         .in_set(PhysicsGatherSet)
         .key();
@@ -631,10 +775,9 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // pinned `.after(select)` below so the ordering is deterministic, not merely
     // conflict-derived (the policy's `ResMut<PhysicsConfig>` vs the broadphase's
     // `Res<PhysicsConfig>` would serialize them anyway, but the edge is explicit).
-    let select = builder.add_system(select_broadphase).after(gather).key();
-    let broadphase = builder.add_system(physics_broadphase).after(select).key();
-    let narrowphase = builder
-        .add_system(physics_narrowphase)
+    let select = joined(builder.add_system(select_broadphase), set).after(gather).key();
+    let broadphase = joined(builder.add_system(physics_broadphase), set).after(select).key();
+    let narrowphase = joined(builder.add_system(physics_narrowphase), set)
         .after(broadphase)
         .key();
 
@@ -647,8 +790,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // handle) before re-borrowing `builder` for the next stage.
     let narrowphase_sdf_key = if with_sdf {
         Some(
-            builder
-                .add_system(physics_narrowphase_sdf)
+            joined(builder.add_system(physics_narrowphase_sdf), set)
                 .after(narrowphase)
                 .key(),
         )
@@ -666,7 +808,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // O4 does not consume the graph). Extract the `SystemKey` immediately (drop the
     // handle) before re-borrowing `builder`.
     let build_graph_key = if colored {
-        let cfg = builder.add_system(physics_build_graph).after(narrowphase);
+        let cfg = joined(builder.add_system(physics_build_graph), set).after(narrowphase);
         let cfg = if let Some(sdf) = narrowphase_sdf_key {
             cfg.after(sdf)
         } else {
@@ -685,9 +827,9 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // `.after(build_graph)` edge load-bearing (not merely documentary as on the O4
     // graph-only path).
     let mut solve_cfg = if colored_solve {
-        builder.add_system(physics_solve_colored).after(narrowphase)
+        joined(builder.add_system(physics_solve_colored), set).after(narrowphase)
     } else {
-        builder.add_system(physics_solve_step::<S>).after(narrowphase)
+        joined(builder.add_system(physics_solve_step::<S>), set).after(narrowphase)
     };
     if let Some(sdf) = narrowphase_sdf_key {
         // Pin the SDF stage before the solve (it must finish appending its
@@ -702,7 +844,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
         solve_cfg = solve_cfg.after(graph);
     }
     let solve = solve_cfg.key();
-    let apply = builder.add_system(physics_apply).after(solve).key();
+    let apply = joined(builder.add_system(physics_apply), set).after(solve).key();
 
     // SP1: the soft-body XPBD pass runs as a SEPARATE position pass AFTER the rigid
     // solve and BEFORE apply. It is a strictly disjoint integrator (it touches only
@@ -725,18 +867,15 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // the SERIAL `step_body` (the SP4 0%-gate), so the schedule output is unchanged.
     let soft_step_key = if soft {
         let cfg = if coupling {
-            builder
-                .add_system(physics_soft_step_coupled)
+            joined(builder.add_system(physics_soft_step_coupled), set)
                 .after(solve)
                 .before(apply)
         } else if soft_colored {
-            builder
-                .add_system(physics_soft_step_colored)
+            joined(builder.add_system(physics_soft_step_colored), set)
                 .after(solve)
                 .before(apply)
         } else {
-            builder
-                .add_system(physics_soft_step)
+            joined(builder.add_system(physics_soft_step), set)
                 .after(solve)
                 .before(apply)
         };
@@ -751,7 +890,7 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // so the `.after(apply)` edge resolves. Off the coupling path this stage does
     // not exist — the schedule-shape 0%-gate.
     if coupling {
-        builder.add_system(physics_soft_rigid_apply).after(apply);
+        joined(builder.add_system(physics_soft_rigid_apply), set).after(apply);
     }
 
     // S5 tail: Dynamic ROOT bodies copy the integrated `RigidBody` pose back OUT
@@ -762,11 +901,13 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     // registered only when `scene_sync` (the 0%-gate: a non-sync schedule never
     // registers these stages, and the physics block is byte-identical).
     let scene_sync_keys = if scene_sync {
-        let body_to_transform = builder.add_system(sync_body_to_transform).after(apply).key();
-        let parented_dynamic_guard = builder
-            .add_system(debug_assert_dynamic_bodies_are_roots)
+        let body_to_transform = joined(builder.add_system(sync_body_to_transform), set)
             .after(apply)
             .key();
+        let parented_dynamic_guard =
+            joined(builder.add_system(debug_assert_dynamic_bodies_are_roots), set)
+                .after(apply)
+                .key();
         Some(SceneSyncKeys {
             // `transform_to_body_key` is `Some` whenever `scene_sync` (registered
             // as the block head above), so the `expect` cannot fire by construction.
@@ -779,12 +920,6 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
     } else {
         None
     };
-
-    // Defect A5: the gather, apply and soft apply pair their rows by position, so their
-    // selections must agree. Once per wire-up; a hard assert, because a disagreement is
-    // silent state corruption in a release build. The signature pins in `body_set` list
-    // every stage that pairs rows by position.
-    crate::body_set::assert_body_set_agrees(world);
 
     PhysicsStageKeys {
         integrate: integrate.0,
@@ -825,3 +960,167 @@ fn add_physics_pipeline<S: RigidSolver + Default>(
 /// a condition configured on it would skip the gather while the later stages still run.
 #[derive(boyko_macros::SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PhysicsGatherSet;
+
+/// The `App`-facing physics plugin: `app.add_plugin(PhysicsPlugin::new())`.
+///
+/// Inserts the physics resources and registers the pipeline into
+/// [`CoreSchedule::Fixed`], with every stage joined to [`FixedSet::Gameplay`] —
+/// the set whose own doc names "user/physics Fixed gameplay". That membership is
+/// what puts the whole physics block BEFORE `FixedSet::Snapshot`, where the
+/// engine's interpolation pack reads each body's post-solve `Transform`.
+///
+/// # Defaults, and why they differ from [`add_physics_systems`]
+///
+/// [`Self::new`] turns the std-lib S5 pose sync ON (the
+/// [`add_physics_systems_with_scene_sync`] shape). A drawn scene reads
+/// `Transform`, so a body whose solved pose never reaches it renders frozen at
+/// its spawn point; the builder form keeps its sync-free default because its
+/// callers are determinism harnesses that read `RigidBody` directly. Turn it off
+/// with [`Self::without_scene_sync`].
+///
+/// The solver defaults to [`DefaultRigidSolver`] — the default world's colored
+/// solve with the O7 AVX2 cohort kernel (owner decision, 2026-09-18) — so the
+/// constraint graph is built and consumed, exactly as
+/// `add_physics_systems::<DefaultRigidSolver>` wires it. Everything else is off, as
+/// the free functions default: no SDF stage, no soft pass (the 0%-gates). The
+/// reference solver is selected by naming it:
+/// `PhysicsPlugin::<SoftStepSolver>::with_solver()`.
+///
+/// ```no_run
+/// # use boyko_ecs::App;
+/// # use boyko_physics::PhysicsPlugin;
+/// let mut app = App::new();
+/// app.add_plugin(PhysicsPlugin::new());
+/// ```
+pub struct PhysicsPlugin<S: RigidSolver + Default = DefaultRigidSolver> {
+    /// The pipeline shape this plugin wires (see [`PipelineOpts`]).
+    opts: PipelineOpts,
+    /// The solver TYPE only — never a value, so the plugin inherits none of the
+    /// solver's auto traits (`fn() -> S` is the variance- and auto-trait-neutral
+    /// marker).
+    solver: PhantomData<fn() -> S>,
+}
+
+impl PhysicsPlugin<DefaultRigidSolver> {
+    /// The default pipeline on [`DefaultRigidSolver`] (the colored solve): pose
+    /// sync ON, every opt-in stage off.
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_solver()
+    }
+}
+
+impl Default for PhysicsPlugin<DefaultRigidSolver> {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S: RigidSolver + Default> PhysicsPlugin<S> {
+    /// [`PhysicsPlugin::new`] on an explicit solver type, e.g.
+    /// `PhysicsPlugin::<SoftStepSolver>::with_solver()` for the reference solve or
+    /// `PhysicsPlugin::<NoopSolver>::with_solver()`. The solve stage follows `S`
+    /// exactly as in [`add_physics_systems`].
+    #[inline]
+    #[must_use]
+    pub fn with_solver() -> Self {
+        Self {
+            opts: PipelineOpts {
+                with_sdf: false,
+                colored: false,
+                soft: false,
+                coupling: false,
+                soft_colored: false,
+                scene_sync: true,
+            },
+            solver: PhantomData,
+        }
+    }
+
+    /// Splices the body-vs-SDF narrowphase stage and inserts the (empty)
+    /// [`SdfField`] the caller fills — the [`add_physics_sdf`] shape (W5).
+    #[inline]
+    #[must_use]
+    pub fn with_sdf(mut self) -> Self {
+        self.opts.with_sdf = true;
+        self
+    }
+
+    /// Builds the O4 constraint graph (islands + coloring) — the
+    /// [`add_physics_colored`] shape. With any `S` other than [`ColoredSoftStepSolver`]
+    /// the graph is NOT consumed and the solve stays byte-identical; with the colored
+    /// solver (the default) the graph is already implied, so this is a no-op there.
+    #[inline]
+    #[must_use]
+    pub fn colored(mut self) -> Self {
+        self.opts.colored = true;
+        self
+    }
+
+    /// Runs the O5 colored solve — the [`add_physics_colored_solve`] shape — by
+    /// switching the solver TYPE to [`ColoredSoftStepSolver`], keeping every other
+    /// option.
+    ///
+    /// The solve stage follows the solver type, not a flag (see the module docs), and
+    /// the stage reads `ResMut<ColoredSoftStepSolver>` by name, so re-typing the plugin
+    /// is what guarantees that resource is the one inserted — see the note in
+    /// [`insert_physics_resources`] for what the missing-resource failure looks like
+    /// from the outside (a frozen window, not a crash). On the default
+    /// [`DefaultRigidSolver`] this changes nothing.
+    #[inline]
+    #[must_use]
+    pub fn colored_solve(self) -> PhysicsPlugin<ColoredSoftStepSolver> {
+        PhysicsPlugin { opts: self.opts, solver: PhantomData }
+    }
+
+    /// Adds the SP1 XPBD soft-body position pass, optionally with the SP2
+    /// soft-rigid `coupling` — the [`add_physics_soft`] shape.
+    #[inline]
+    #[must_use]
+    pub fn soft(mut self, coupling: bool) -> Self {
+        self.opts.soft = true;
+        self.opts.coupling = coupling;
+        self
+    }
+
+    /// Registers the SP4 COLORED soft step in place of the uncoupled one — the
+    /// [`add_physics_soft_colored`] shape (the non-coupling path).
+    #[inline]
+    #[must_use]
+    pub fn soft_colored(mut self) -> Self {
+        self.opts.soft = true;
+        self.opts.coupling = false;
+        self.opts.soft_colored = true;
+        self
+    }
+
+    /// Drops the std-lib S5 pose sync (see the type doc for why it is ON by
+    /// default here). The body then owns its pose in `RigidBody` alone — nothing
+    /// writes `Transform`, so a renderer keeps drawing it at its spawn pose.
+    #[inline]
+    #[must_use]
+    pub fn without_scene_sync(mut self) -> Self {
+        self.opts.scene_sync = false;
+        self
+    }
+}
+
+impl<S: RigidSolver + Default> Plugin for PhysicsPlugin<S> {
+    fn build(&self, app: &mut App) {
+        let opts = self.opts;
+        // The world half FIRST, while nothing else borrows the `App`; the schedule
+        // half runs inside the closure, where the builder is the only borrow on
+        // offer. Order between the halves is irrelevant (registration reads no
+        // resource) — this one is simply the order the borrow checker allows.
+        insert_physics_resources::<S>(app.world_mut(), opts);
+        app.add_systems_cfg_in(CoreSchedule::Fixed, |b| {
+            register_physics_pipeline::<S>(b, opts, Some(FixedSet::Gameplay));
+        });
+    }
+
+    fn name(&self) -> &'static str {
+        "boyko_physics::PhysicsPlugin"
+    }
+}

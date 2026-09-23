@@ -134,7 +134,7 @@ Subsystem-local dense-table sizing newtypes live next to their owners, NOT in
 `primitives.rs`:
 - `ResourceId` — [resources/resource_registry.rs](../crates/boyko_ecs/src/ecs/core/resources/resource_registry.rs)
 - `BundleTypeId` — [bundle/bundle_type_registry.rs](../crates/boyko_ecs/src/ecs/core/bundle/bundle_type_registry.rs)
-- `QueryTypeId` — [iters/query/query_type_registry.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_type_registry.rs):77
+- `QueryTypeId` — [iters/query/query_type_registry.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_type_registry.rs):88
 - `ObserverId` — [component/observers/mod.rs](../crates/boyko_ecs/src/ecs/core/component/observers/mod.rs):59
 - `SystemSetId` — [schedule/system_set.rs](../crates/boyko_ecs/src/ecs/core/schedule/system_set.rs)
 
@@ -724,9 +724,9 @@ PHASE-2 / `fire_enable_column_alloc_bookkeeping` :198 O2), each gated by
   `EnableTerms` (per-view, ≤ `MAX_ENABLE_TERMS = 8`,
   [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):449) populated by
   `with_enabled` / `without_enabled` on `Query`
-  ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):201/:216)
+  ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):207/:222)
   and `QueryView`
-  ([query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):283/:298);
+  ([query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):288/:303);
   NEVER stored in the shared interned `QueryState` (QS1 stays term-agnostic —
   like `TagTerms`). Polarity bit `i`: `1` = `with_enabled` (bit must be set),
   `0` = `without_enabled` (bit must be clear). **Gate caveat:** unlike the
@@ -1261,9 +1261,9 @@ pub(crate) fn archetype_passes_tag_terms(&TagTerms, &Archetype) -> bool; // :150
 ```
 
 `Query::with_tag`/`without_tag`
-([query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):169/:179)
+([query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):175/:185)
 and the `QueryView` mirrors
-([query/query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):249/:259)
+([query/query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):254/:264)
 push into a per-view, stack-only, `Copy` `TagTerms`. The shared interned
 `QueryState` is NEVER mutated by terms (QS1 stays term-agnostic). >8 terms =
 loud release panic at term-add time (`tag_terms_overflow_panic`,
@@ -1925,7 +1925,7 @@ Bundle, SystemSet};`.
 | `MAX_EVENTS` | 256 | [events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs):51 |
 | `MAX_ARCHETYPES` | 1024 | [iters/archetype_bit_set.rs](../crates/boyko_ecs/src/ecs/core/iters/archetype_bit_set.rs):7 |
 | `RESOURCE_SLOT_COUNT` | 256 | [resources/resource_registry.rs](../crates/boyko_ecs/src/ecs/core/resources/resource_registry.rs):51 |
-| `MAX_QUERY_TYPES` | 1024 (4096 with `big_query_table`) | [iters/query/query_type_registry.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_type_registry.rs):85/:90 |
+| `MAX_QUERY_TYPES` | 1024 (4096 with `big_query_table`) | [iters/query/query_type_registry.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_type_registry.rs):96/:101 |
 | `MAX_BUNDLE_TYPES` | 1024 | [bundle/bundle_type_registry.rs](../crates/boyko_ecs/src/ecs/core/bundle/bundle_type_registry.rs):84 |
 | `MAX_CHANGE_AGE` / `CHECK_TICK_THRESHOLD` | ~3/4·u32::MAX / 518_400_000 | [change_detection/tick.rs](../crates/boyko_ecs/src/ecs/core/change_detection/tick.rs) |
 | `MAX_WORKERS` | (pool cap) | [boyko_threadpool/thread_pool.rs](../crates/boyko_threadpool/src/thread_pool.rs) |
@@ -2043,7 +2043,7 @@ split (no parallel data system — the SP4 race remediation put both solvers on 
 - [soft/](../crates/boyko_physics/src/soft/) — soft-body (`component.rs`, `collide.rs`, `self_collision.rs`, `coupling.rs`, `colored.rs`).
 - [sdf_query.rs](../crates/boyko_physics/src/sdf_query.rs) — body-vs-SDF via `boyko_sdf_math` (zero readback, zero graphics deps).
 - [scene_sync.rs](../crates/boyko_physics/src/scene_sync.rs) — `boyko_scene` `Transform` ↔ body sync.
-- [resources.rs](../crates/boyko_physics/src/resources.rs) — `PhysicsConfig`, the single tunables `Resource`, plus its three selector enums: `BroadphaseKind` (`AllPairs` default / `Grid` / `Tree`), `BroadphaseSelectMode` (`Manual` default / `Auto`) and `SdfNarrowphaseKernel` (`Scalar` default / `Avx2`). Every kernel choice is a runtime field, never a `cfg` — see the note under **Entry point**.
+- [resources.rs](../crates/boyko_physics/src/resources.rs) — `PhysicsConfig`, the single tunables `Resource`, plus its three selector enums: `BroadphaseKind` (`AllPairs` default / `Grid` / `Tree`), `BroadphaseSelectMode` (`Manual` default / `Auto`) and `SdfNarrowphaseKernel` (`Scalar` default / `Avx2`). Every kernel choice is a runtime field, never a `cfg` — see the note under **Entry points**.
 - [body_set.rs](../crates/boyko_physics/src/body_set.rs) — the row selection shared by gather, apply and soft apply: `BodySetFilter` / `BodyQuery` and the per-stage data aliases, pinned by signature and const checks and compared once at wire-up (defect A5).
 
 **Sleeping, and defect A4.** `IslandSleep` (in [resources.rs](../crates/boyko_physics/src/resources.rs))
@@ -2065,11 +2065,19 @@ off; with both it freezes (A7-R2, step 248) and creeps 0.72 mm over that window 
 2026-09-18). What stays open is recorded in [OPEN-QUESTIONS.md](OPEN-QUESTIONS.md): that creep is a
 steady drift RATE (~8 cm per simulated hour with sleeping off, the default), and it is unexplained.
 
-**Entry point:** `add_physics_systems::<S>` (+ `_soft` / `_soft_colored` / `_sdf` /
-`_with_scene_sync` variants) adds the fixed-step pipeline to a `ScheduleBuilder`.
+**Entry points:** `add_physics_systems::<S>` (+ `_soft` / `_soft_colored` / `_sdf` /
+`_with_scene_sync` variants) adds the fixed-step pipeline to a `ScheduleBuilder` — the
+form a test / bench that owns both the builder and the world uses. `PhysicsPlugin`
+([plugin.rs](../crates/boyko_physics/src/plugin.rs)) is the `App` form
+(`app.add_plugin(PhysicsPlugin::new())`): it wires the same pipeline into
+`CoreSchedule::Fixed` with every stage joined to `FixedSet::Gameplay`, and defaults the
+scene sync ON. An `App` never lends the world and the fixed builder at once, so the two
+halves (`insert_physics_resources` / `register_physics_pipeline`) exist for exactly that
+reason. Live scene: `boyko_app` —
+[examples/playground.rs](../crates/boyko_app/examples/playground.rs).
 Deterministic, Miri-clean. **The solver type selects the solve stage** (2026-09-18,
-owner decision): `S = DefaultRigidSolver` (= `ColoredSoftStepSolver`) — the default
-world — wires the constraint graph and the colored solve with the O7 AVX2 cohort kernel
+owner decision), on both forms: `S = DefaultRigidSolver` (= `ColoredSoftStepSolver`) — the default
+world, and `PhysicsPlugin`'s default type parameter since the A8 merge — wires the constraint graph and the colored solve with the O7 AVX2 cohort kernel
 on, through every entry; `S = SoftStepSolver` keeps the reference manifold-order solve,
 which stays in the tree as the oracle; any other `S` (e.g. `NoopSolver`) keeps the
 generic step. The colored and reference solves converge to different, equally valid

@@ -267,10 +267,12 @@ const KNOWN_UNREACHABLE_MEMBERS: [RecordedMember; 6] = [
     RecordedMember {
         package: "boyko-physics",
         class: Reach::DevOnlyReferenced,
-        note: "Same shape, found by this census: the ONLY reverse edge is boyko-render's \
-               [dev-dependencies]. The in-house TGS-Soft solver is compiled by no shipped path. A \
-               PhysicsPlugin host wiring is reported in flight on another branch; at this HEAD the \
-               edge does not exist.",
+        note: "Same shape, found by this census. Two reverse edges, both [dev-dependencies]: \
+               boyko-render's (the Gpu3dInstance-packs test) and, since f37650a6, boyko-app's, \
+               annotated 'DEV-ONLY on purpose' for the playground example. The in-house TGS-Soft \
+               solver is compiled by no shipped path. The PhysicsPlugin wiring this row once \
+               reported in flight has landed as that dev-only edge, by the host's layering \
+               invariant (boyko_app owns no simulation), so the class did not move.",
     },
     RecordedMember {
         package: "boyko-serialize",
@@ -335,9 +337,9 @@ struct ExemptPlugin {
 
 /// Plugins a consumer adds, so no in-tree registration is expected.
 ///
-/// Three rows, each an argument. Note what is NOT here: "any plugin in `boyko_app`" would have
+/// Four rows, each an argument. Note what is NOT here: "any plugin in `boyko_app`" would have
 /// swallowed nothing today but is the heuristic that swallows tomorrow's defect.
-const EXEMPT_PLUGINS: [ExemptPlugin; 3] = [
+const EXEMPT_PLUGINS: [ExemptPlugin; 4] = [
     ExemptPlugin {
         ty: "EnginePlugins",
         // The root plugin group. `App::add_plugins(EnginePlugins::window(…))` is written by the
@@ -357,6 +359,19 @@ const EXEMPT_PLUGINS: [ExemptPlugin; 3] = [
         // TransformPlugin — adding both would" duplicate the propagation systems. It is the
         // alternative composition for a consumer who wants propagation without a camera.
         reason: "superseded in-tree by CameraPlugin (plugins.rs:428); the camera-free alternative",
+    },
+    ExemptPlugin {
+        ty: "PhysicsPlugin",
+        // The owner's decision in `f37650a6`, stated on `crates/boyko_app/Cargo.toml`'s
+        // `[dev-dependencies]` row: "DEV-ONLY on purpose: the host's layering invariant ... says
+        // `boyko_app` sequences the frame and mints tokens; it owns no simulation. An example is a
+        // CONSUMER of the engine, not part of it". So `EnginePlugins` composes no simulation and a
+        // scene adds `PhysicsPlugin::new()` itself — the `FlyCameraPlugin` shape. Two
+        // `boyko_app/examples/*` (`playground.rs`, `_hud_probe.rs`) do exactly that, and every edge
+        // into boyko-physics is dev-only, which is what the `KNOWN_UNREACHABLE_MEMBERS` row above
+        // records.
+        reason: "opt-in simulation plugin added by the scene; boyko_app owns no simulation \
+                 (its Cargo.toml [dev-dependencies] row, f37650a6)",
     },
 ];
 

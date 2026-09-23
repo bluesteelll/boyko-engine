@@ -7,7 +7,7 @@
 //! See `docs/PHASE-12.5-QUERY-OPTIMIZATIONS-PLAN.md` §4.1 (data structure),
 //! §7.4 (atomic ordering), and §10.3 (cache memory footprint).
 //!
-//! # Why a `(TypeId, TypeId) → QueryTypeId` HashMap instead of a per-impl `static SLOT`
+//! # Why a `(TypeId, TypeId)` key instead of a per-impl `static SLOT`
 //!
 //! An earlier draft of this module placed `static SLOT: OnceLock<QueryTypeId>`
 //! inside the blanket `impl<D, F> QueryTypeKey for (D, F)` body and called
@@ -22,28 +22,38 @@
 //! `(D, F)` pair would receive the same `QueryTypeId(0)` and the per-world
 //! cache would collapse to one slot.
 //!
-//! v1 fix: a process-global
-//! `OnceLock<Mutex<HashMap<(TypeId, TypeId), QueryTypeId>>>` keyed by
-//! `(TypeId::of::<D>(), TypeId::of::<F>())`. Cost:
+//! The id must therefore be interned under a **runtime** key,
+//! `(TypeId::of::<D>(), TypeId::of::<F>())`. That requirement outlives any
+//! particular table: it is a property of the language, not of the container.
 //!
-//! * Warm path: one `OnceLock::get_or_init` Acquire load (~1 ns) + one
-//!   `Mutex::lock` (~10 ns uncontended) + one `HashMap::get` (~10 ns).
-//!   Total ~20-30 ns per `world.query::<D, F>()` call.
-//! * `EcsMaster::query` is called ~50 times per frame across all systems —
-//!   not 10 000 times per entity. The combined overhead is ~1 µs/frame,
-//!   invisible at 60 Hz.
+//! # The table: [`TypeIntern`], lock-free
 //!
-//! This technically violates CLAUDE.md principle 1 ("no HashMap on the
-//! hot path"), but the cost shows up at most once per system-level call,
-//! never per-entity. Documented trade-off; revisit in Phase 13 if profiling
-//! ever surfaces this on the hot path.
+//! [`REGISTRY`] is a [`TypeIntern`] (`boyko_utils::type_intern`) — an
+//! open-addressed table of write-once slots, sized at twice the id cap so
+//! probes stay short. A warm `world.query::<D, F>()` hashes the key and takes
+//! one acquire load; no lock, no allocation, no `unsafe` on any path. The cold
+//! mint gate is claimed at most once per distinct `(D, F)` per process and
+//! never on a hit — it exists only to make "probe, then claim" atomic, so two
+//! threads racing on a first-sight pair cannot mint two ids for one shape.
+//!
+//! **Superseded v1, removed by the 2026-07 audit:** a process-global
+//! `OnceLock<Mutex<HashMap<(TypeId, TypeId), QueryTypeId>>>`, whose cost this
+//! header used to quote as "~20-30 ns … ~50 times per frame, ~1 µs/frame,
+//! invisible at 60 Hz". The estimate was wrong in kind, not in magnitude: the
+//! memo lookup WAS the locked map, so the lock was taken on EVERY call rather
+//! than on the first, and under the parallel scheduler that is not 20 ns but
+//! one contended process-global lock per worker thread, inside the frame. See
+//! `boyko_utils::type_intern`'s module header for the full finding — four
+//! registries had independently reached for that same shape, each documenting
+//! it as "cold, registration-only", and all four claims were false.
 //!
 //! # Atomic ordering (§7.4)
 //!
 //! Counter ordering is `Relaxed` — uniqueness is the only invariant the
-//! counter itself carries. Per-(D, F) happens-before is enforced by the
-//! global `Mutex<HashMap<...>>` (mutex acquire/release establishes the
-//! necessary ordering for every subsequent reader).
+//! counter itself carries. Per-(D, F) happens-before comes from [`REGISTRY`]:
+//! each slot is published by a `OnceLock` release-store that every subsequent
+//! reader's acquire load pairs with, so a thread that observes an id also
+//! observes everything the minting thread wrote before publishing it.
 //!
 //! # Exhaustion is terminal (mirrors Phase 8.5 W1)
 //!
@@ -66,8 +76,9 @@ use crate::ecs::core::iters::query::filter::QueryFilter;
 /// Minted lazily on the first call to [`QueryTypeKey::query_type_id`] for
 /// each concrete `(D, F)` pair. Two `QueryTypeId` values compare equal iff
 /// they correspond to the same Rust `(D, F)` pair — guaranteed by the
-/// `(TypeId::of::<D>(), TypeId::of::<F>())` key in the global
-/// `Mutex<HashMap<...>>` registry maintained by [`QueryTypeKey`].
+/// `(TypeId::of::<D>(), TypeId::of::<F>())` key under which the process-global
+/// `REGISTRY` intern seats the id: its per-key cold mint gate makes
+/// "probe, then claim" atomic, so one pair can never receive two ids.
 ///
 /// `#[repr(transparent)]` over `usize` so the id can be used directly as
 /// an index into the per-world `Box<[OnceLock<_>; MAX_QUERY_TYPES]>` cache
@@ -125,10 +136,9 @@ static QUERY_NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 #[cold]
 #[inline(never)]
 pub fn register_new() -> QueryTypeId {
-    // Relaxed: uniqueness only. Happens-before is provided by the
-    // surrounding `Mutex<HashMap<...>>` in `QueryTypeKey::query_type_id`
-    // (the mutex acquire/release synchronises every reader behind the
-    // writer that inserted the entry).
+    // Relaxed: uniqueness only. The happens-before edge for the minted id comes from
+    // `REGISTRY`'s per-slot `OnceLock` release-store, paired with each reader's acquire
+    // load — see the `QUERY_NEXT_ID` doc above.
     let id = QUERY_NEXT_ID.fetch_add(1, Ordering::Relaxed);
     if id >= MAX_QUERY_TYPES {
         // Saturate so re-entries cannot push past the cap.
@@ -208,16 +218,18 @@ static REGISTRY: TypeIntern<(TypeId, TypeId), REGISTRY_SLOTS> = TypeIntern::new(
 /// Static-typed key for a `(D, F)` query shape.
 ///
 /// Implemented for every `(D, F)` pair where `D: QueryData + 'static` and
-/// `F: QueryFilter + 'static`. The global `Mutex<HashMap<(TypeId, TypeId),
-/// QueryTypeId>>` serialises racing callers so all observers see the same
-/// id for each pair.
+/// `F: QueryFilter + 'static`. Racing callers are serialised by [`REGISTRY`]'s
+/// per-key cold mint gate — claimed only on a first-sight pair — so all
+/// observers see the same id for each pair.
 ///
 /// # Usage
 ///
 /// `EcsMaster::query<D, F>()` calls `<(D, F) as QueryTypeKey>::query_type_id()`
-/// once per cache lookup. Cost: ~20-30 ns (Mutex lock + HashMap lookup).
-/// Acceptable at system-call frequency (`query()` is called ~50 times per
-/// frame), not at per-entity frequency.
+/// once per cache lookup. A warm call is a key hash plus one acquire load;
+/// that operation count is the claim, because the intern path carries no
+/// measurement in this repo and a nanosecond figure here would be a guess.
+/// The frequency is system-level (`query()` is called ~50 times per frame),
+/// not per-entity.
 pub trait QueryTypeKey: 'static {
     /// Returns the process-global [`QueryTypeId`] for this `(D, F)` pair.
     fn query_type_id() -> QueryTypeId;

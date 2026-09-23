@@ -52,7 +52,11 @@ use crate::timer_resolution::TimerResolutionGuard;
 /// have no path between them by its wave packing, which any unrelated edge can
 /// reshuffle (measured: one added edge between two lighting systems flipped the mesh
 /// gather and `visibility_sync` on the `hwrt` leg, and with them whether frame 0 drew
-/// any mesh). Every cross-plugin reader → writer
+/// any mesh; and, earlier and independently, MEASURED 2026-08-26 on the playground's
+/// camera-parented HUD panel — the first entity moved from a Main-schedule system — the
+/// affine pack ran before `propagate_transforms`, so its `InstanceModelCol` held the
+/// previous frame's pose every frame while its `GlobalTransform` was current). Every
+/// cross-plugin reader → writer
 /// dependency of the render path is therefore a named set edge declared in `build`:
 /// `VisibilitySet::Validate` after `VisibilitySet::Sync` and `VisibilitySet::Read` after
 /// both (`RenderEnabled`, set by `visibility_sync`; `RenderStale` / `MaterialStale`, written by
@@ -977,6 +981,16 @@ pub fn register_main_frame_systems(b: &mut ScheduleBuilder) {
     // `propagate_transforms` (in `CameraSet::Resolve`) writes it. The packs are also after
     // propagation through `visibility_sync` (itself `.after(propagate)`), but that edge
     // carries no data and is not this dependency's declaration.
+    //
+    // MEASURED 2026-08-26 (render line), before any edge declared this: on the first scene
+    // that moves an entity from the MAIN schedule (the playground's camera-parented HUD
+    // panel), its `Transform` and `GlobalTransform` were this frame's while its
+    // `InstanceModelCol` — the affine the GPU draws — held the PREVIOUS frame's pose, every
+    // frame: the pack ran before the propagation. Static props never move, and a physics
+    // body reaches the GPU through the `GpuTransform3D` pair packed in `FixedSet::Snapshot`,
+    // so nothing else showed it. The render line fixed it with a per-system
+    // `.after_set(CameraSet::Resolve)` on `sync_instance_model_cols`; this set edge is the
+    // same order for every member of `InstancePackSet`, and the A8 merge kept only this one.
     b.configure_set(InstancePackSet).after(CameraSet::Resolve);
     // `GlobalTransform`, the lights' (R4b-open-edges): `light_reconcile` derives each
     // light's `direction` / `position` from it (`light_reconcile.rs`, the three
