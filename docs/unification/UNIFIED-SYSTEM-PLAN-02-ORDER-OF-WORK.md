@@ -88,12 +88,12 @@ The four sets are disjoint.
 
 ### Document steps (no code; after this plan is approved; parallel with Phase A)
 
-**AP6 has run.** The allocator design is closed at rev 2.4 by orchestrator ruling. AP6 found 0 Critical and left W1–W5 open (`ALLOCATOR-DESIGN-SPACE.md:5-10`, `:3873-3881` at `b716a5dc`).
+**AP6 has run.** The allocator design is closed at rev 2.4 by orchestrator ruling. AP6 found 0 Critical and left W1–W5 open (`ALLOCATOR-DESIGN-SPACE.md:5-10`, `:3873-3881` at `b716a5dc`). ⚠ **Status (2026-09-23): DOC-1 and AP7 have run.** Rev 2.5 gives every AP6 remark below a disposition (P50). AP7 returned CHANGES_REQUESTED (0 Critical, 2 Important, 5 Optional), and rev 2.6 resolves both Important remarks and adopts the Optional ones (allocator P52–P55).
 
 | Step | Content | Prereq | Must close before |
 |---|---|---|---|
-| DOC-1 | Allocator rev 2.5 (00 §5, first row), including the AP6 dispositions below and AP6 O1's stale passages | plan approval | AP7 |
-| AP7 | Allocator critique pass 7. **Scope:** the rev-2.5 delta and the AP6 dispositions only; AP6 already reviewed rev 2.4 | DOC-1 | C1 (rev 2.5 rewrites §2.0, which C1 builds) |
+| DOC-1 ⚠ *done 2026-09-23: rev 2.5* | Allocator rev 2.5 (00 §5, first row), including the AP6 dispositions below and AP6 O1's stale passages | plan approval | AP7 |
+| AP7 ⚠ *ran 2026-09-23: CHANGES_REQUESTED, 0 Critical / 2 Important / 5 Optional; all resolved in rev 2.6 (P52–P55); its closure, which C1 waits for, is the orchestrator's* | Allocator critique pass 7. **Scope:** the rev-2.5 delta and the AP6 dispositions only; AP6 already reviewed rev 2.4 | DOC-1 | C1 (rev 2.5 rewrites §2.0, which C1 builds) |
 | DOC-2 | Engine rev 4 and physics erratum E2 (00 §5) | plan approval | EP3 |
 | EP3 | Engine critique pass 3. Scope: the rev-3 patch, rev 4 and erratum E2 | DOC-2 | D-S3(iii); AS2; every engine-sourced D-E rung |
 
