@@ -224,15 +224,22 @@ pub(crate) struct CandList {
 }
 
 impl CandList {
-    /// An empty list. Writes nothing into the rows.
+    /// An empty list built in `slot`, writing only its two counts: nothing is written into the
+    /// rows, and nothing is moved. (A `Self { .. }` literal with uninit rows lets LLVM merge the
+    /// zeroed counts with the adjacent uninit row into one `memset` call per list per pass,
+    /// measured in the pass's prologue; this form writes 16 bytes.)
     #[inline]
-    pub(crate) fn new() -> Self {
-        Self {
-            b: [[MaybeUninit::uninit(); CAND_BUF]; 6],
-            idx: [MaybeUninit::uninit(); CAND_BUF],
-            maxrow: [MaybeUninit::uninit(); CAND_BUF],
-            len: 0,
-            chunks: 0,
+    pub(crate) fn init_in(slot: &mut MaybeUninit<Self>) -> &mut Self {
+        let p = slot.as_mut_ptr();
+        // SAFETY: `p` points to `slot`'s storage, valid for writes and aligned for `Self`, and
+        // `&raw mut` projects to the two count fields without creating a reference to the
+        // uninitialised whole. After the two writes every field is valid: the counts are
+        // initialised and the row fields are arrays of `MaybeUninit`, valid in any state. So
+        // `slot` holds a valid `Self`, borrowed mutably for the returned reference's lifetime.
+        unsafe {
+            (&raw mut (*p).len).write(0);
+            (&raw mut (*p).chunks).write(0);
+            slot.assume_init_mut()
         }
     }
 

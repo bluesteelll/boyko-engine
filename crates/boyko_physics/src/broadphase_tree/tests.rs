@@ -1659,8 +1659,9 @@ proptest! {
         for (leaf, &m) in leaves.iter_mut().zip(&maxrows) {
             leaf.p[LEAF_MAXROW][0] = f32::from_bits(m);
         }
-        let mut kernel = CandList::new();
-        let mut scalar = CandList::new();
+        let (mut kernel_slot, mut scalar_slot) = (core::mem::MaybeUninit::uninit(), core::mem::MaybeUninit::uninit());
+        let kernel = CandList::init_in(&mut kernel_slot);
+        let scalar = CandList::init_in(&mut scalar_slot);
         for (mask, first) in [(masks.0, firsts.0 * 8), (masks.1, firsts.1 * 8)] {
             prop_assert!(kernel.push_lanes_arm::<false>(&node, mask, first, LEAF_LIST_CAP, Some(&leaves)));
             prop_assert!(scalar.push_lanes_arm::<true>(&node, mask, first, LEAF_LIST_CAP, Some(&leaves)));

@@ -99,6 +99,8 @@
 //! It and the crate's own test build also count the last leaf-list pass ([`LeafListCounts`]).
 //! Without either, none of it exists: the default build's pass is the uncounted kernel.
 
+use core::mem::MaybeUninit;
+
 use boyko_diag::zone;
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
 use boyko_macros::Resource;
@@ -1235,8 +1237,10 @@ fn leaf_list_pass(
     {
         *counts = LeafListCounts::default();
     }
-    let mut act = CandList::new();
-    let mut sta = CandList::new();
+    let mut act_slot = MaybeUninit::uninit();
+    let mut sta_slot = MaybeUninit::uninit();
+    let act = CandList::init_in(&mut act_slot);
+    let sta = CandList::init_in(&mut sta_slot);
     let a_leaves = active.leaf_nodes();
     let s_leaves = statics.leaf_nodes();
     let s_single = statics.levels() == 1;
@@ -1249,14 +1253,14 @@ fn leaf_list_pass(
         let box_l = active.leaf_box(l);
         let collected = active.collect_leaves::<true>(
             &box_l,
-            &mut act,
+            act,
             cap,
             #[cfg(any(test, feature = "bp-query-counts"))]
             &mut counts.collect_box_active,
         ) && (s_single
             || statics.collect_leaves::<false>(
                 &box_l,
-                &mut sta,
+                sta,
                 cap,
                 #[cfg(any(test, feature = "bp-query-counts"))]
                 &mut counts.collect_box_static,
