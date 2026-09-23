@@ -39,6 +39,10 @@
 //!    `engine_packages_census.rs`'s `USER_PACKAGES` established: an explicit const, one row per
 //!    entry, each row carrying its own reason. A row whose site is no longer bare must be deleted,
 //!    or the list reads as coverage it no longer has.
+//! 6. **Every reason starts with a class from a closed vocabulary** — `<class>: <prose>`, the
+//!    classes in [`IGNORE_CLASSES`] (CLAUDE.md, "The ignored suite"). A missing prefix is RED, a
+//!    prefix outside the list is RED, and so is a class the site's own `cfg` contradicts. See
+//!    "The class prefix" below; `every_site_carries_a_class_its_predicate_allows` is the clause.
 //!
 //! **It is empty today.** The 19 sites that were bare when this gate was written were annotated
 //! rather than waived, because in every case the requirement was recoverable from the test body or
@@ -82,8 +86,46 @@
 //! `code_registry.rs`), commenting an attribute out leaves a `//` at the line start, and the
 //! failure mode there is a *false red* naming a specific line, which takes seconds to diagnose —
 //! not a false green.
+//!
+//! # The class prefix (UG-11, rung B3, 2026-09-23)
+//!
+//! A reason says why; the prefix says **which leg runs the test**, so that every leg is a `grep`
+//! rather than a reading. CLAUDE.md records why the partition cannot be derived from prose: a
+//! keyword classifier put 10 of 143 plain sites on the device-free side and 8 of the 10 were
+//! wrong, all toward green. So every site was classified once, by reading what the test needs,
+//! and this gate keeps the result from rotting.
+//!
+//! * **Grammar.** `[feature+]<class>: <prose>`. The only multi-class spellings are
+//!   `feature+<class>` (the test does not exist or does not run without a cargo feature, and needs
+//!   `<class>` besides) and `gpu-windowed+gpu-cap`, so one requirement set has one spelling and
+//!   one grep. `generator`, `deferred` and `flaky` stand alone: they name no leg, and no leg may
+//!   sweep them in.
+//! * **Scope.** A `cfg_attr` site is ignored only where its predicate holds, so the predicate
+//!   limits the class. It is evaluated in native debug, native release and Miri. A site ignored
+//!   only under Miri runs natively, so its class says why Miri skips it: `miri-slow` or
+//!   `miri-unsupported` and nothing else. A site ignored only in native release names no leg (it
+//!   runs in every debug run and cannot pass in release), so it needs a reason but no class.
+//! * **Consistency, not classification.** Four rules, each the negation of a misfile measured in
+//!   this tree. They check a class against what the source says; they never choose one.
+//!   1. A test whose body calls an `*_or_skip` helper, a same-file fn returning
+//!      `Option<VulkanContext>`, or one of [`DEVICE_ENTRY_CALLS`] carries a `gpu*` class (or a
+//!      no-leg class). This is the `boot_*_or_skip` shape that returns early and PASSES on a box
+//!      without a GPU.
+//!   2. A test that exists only under Miri (a `cfg` false natively, true under Miri) carries a
+//!      `miri-*` class, and a `miri-*` class needs `miri` somewhere in the site's `cfg` context.
+//!      This is the `#![cfg(miri)]` shape that prints `running 0 tests` natively and exits 0.
+//!   3. A test that a cargo feature conditions (a `cfg` over it, or its own `cfg_attr`, names a
+//!      feature) carries `feature`, and its prose names `--features <that feature>`; `feature`
+//!      on a site no feature conditions is RED. Every `--features <name>` in any reason must be
+//!      declared in the crate's `[features]` table, so a renamed feature reds.
+//!   4. The scope rule above.
+//!
+//! What the rules cannot see: a device reached only through a helper that is not a listed entry
+//! call (worker drivers that spawn a child process, a probe type with its own `open`), and a
+//! device-free class chosen wrongly among `solo` / `slow`. Those were settled by reading, and the
+//! per-site record lives with the migration's receipts, not here.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Sites permitted to carry a bare `#[ignore]`, as `(file, test fn, why no reason can be given)`.
@@ -138,6 +180,79 @@ const MIN_SITES: usize = 120;
 /// malformed file from running the resolver to the end of a 7000-line test module.
 const FN_LOOKAHEAD: usize = 24;
 
+/// The closed reason-prefix vocabulary, as `(class, the leg that runs a site carrying it)`.
+///
+/// The list is CLAUDE.md's ("The ignored suite — legs by what the machine has") and it does not
+/// grow here: the B3 migration re-prefixed the five out-of-list prefixes it found (`tractability`,
+/// `instrument`, `M2`, `calibration`, `miri-arm`) rather than admitting them.
+const IGNORE_CLASSES: [(&str, &str); 11] = [
+    ("gpu", "device leg, headless: a Vulkan device and no window; per binary, `-- --ignored --test-threads=1`"),
+    ("gpu-windowed", "device leg on a desktop session: a device, a window and a swapchain"),
+    (
+        "gpu-cap",
+        "device leg on hardware with the optional capability the prose names (RT, ray query, \
+         VK_KHR_pipeline_executable_properties); spelled `gpu-windowed+gpu-cap` when a window is \
+         needed too",
+    ),
+    (
+        "feature",
+        "exists or runs only with `--features <name>`, which the prose names; `feature+<class>` \
+         names the rest of the leg",
+    ),
+    ("solo", "device-free `-- --ignored` leg with `--test-threads=1`: the test holds process-wide state"),
+    (
+        "slow",
+        "device-free, wall-clock budget: a plain site runs in the `-- --ignored` leg; a site ignored \
+         in debug but not in release runs in the ordinary `--release` run",
+    ),
+    (
+        "miri-slow",
+        "runs natively; the Miri leg skips it because Miri would finish it only given hours (a test \
+         that exists only under Miri runs in `cargo miri test … -- --ignored`)",
+    ),
+    (
+        "miri-unsupported",
+        "runs natively; Miri cannot execute what it needs at all (a child process, a custom \
+         `#[global_allocator]`, a deliberate leak)",
+    ),
+    (
+        "generator",
+        "no leg: asserts nothing beyond an instrument sanity check and emits an artifact; run it by \
+         name when the artifact is wanted",
+    ),
+    ("deferred", "no leg: red by design until a named decision or milestone lands"),
+    ("flaky", "no leg: nondeterministic by design"),
+];
+
+/// Classes that name no leg, so they may not be combined with one.
+const STANDALONE_CLASSES: [&str; 3] = ["generator", "deferred", "flaky"];
+
+/// Classes that put a test on a GPU.
+const DEVICE_CLASSES: [&str; 3] = ["gpu", "gpu-windowed", "gpu-cap"];
+
+/// Classes that explain why the Miri leg skips a test.
+const MIRI_CLASSES: [&str; 2] = ["miri-slow", "miri-unsupported"];
+
+/// Every class set a reason may name after an optional leading `feature`, in its one spelling.
+/// A single class is always a valid spelling on its own; this list is what may follow `feature+`
+/// and the one multi-class spelling without it.
+const CLASS_TAILS: [&[&str]; 8] = [
+    &["gpu"],
+    &["gpu-windowed"],
+    &["gpu-cap"],
+    &["gpu-windowed", "gpu-cap"],
+    &["solo"],
+    &["slow"],
+    &["miri-slow"],
+    &["miri-unsupported"],
+];
+
+/// Calls that put the calling test on a device, beside `*_or_skip` helpers and same-file fns
+/// returning `Option<VulkanContext>`. MEASURED on this tree (2026-09-23): the headless tests boot
+/// through `VulkanContext::boot`, the `boyko_app` tests through `EnginePlugins::window`, and
+/// `window_present_gbuffer.rs` through its `with_windowed_present`.
+const DEVICE_ENTRY_CALLS: [&str; 3] = ["VulkanContext::boot", "EnginePlugins::window", "with_windowed_present"];
+
 /// What one source line says about `#[ignore]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IgnoreForm {
@@ -167,10 +282,18 @@ struct Site {
     file: String,
     /// 1-indexed line of the attribute.
     line: usize,
+    /// Byte offset of the start of that line in the file's text.
+    offset: usize,
     /// The test function the attribute decorates, or `None` if the resolver could not find one.
     test_fn: Option<String>,
     form: IgnoreForm,
     spelling: IgnoreSpelling,
+    /// The reason string as rustc reads it (escapes and `\`-continuations decoded), or `None`
+    /// when the attribute has none or the literal could not be read.
+    reason: Option<String>,
+    /// The predicate of a `#[cfg_attr(<predicate>, ignore …)]`, as written; `None` for a plain
+    /// site, or when the predicate could not be delimited.
+    cfg: Option<String>,
 }
 
 fn repo_root() -> PathBuf {
@@ -421,39 +544,62 @@ fn char_literal_len(chars: &[char], i: usize) -> usize {
     }
 }
 
-/// For every line of `text`, whether that line BEGINS inside a string literal.
+/// What one character of a source file is, as far as this census needs to know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lex {
+    /// Code, including the delimiters of a literal (`"`, `r#"`, `"#`, the quotes of `'x'`).
+    Code,
+    /// Inside a `//` or `/* … */` comment, delimiters included.
+    Comment,
+    /// The body of a string or char literal.
+    Literal,
+}
+
+/// Every character of `chars` lexed, one entry per character.
 ///
-/// The classifier reads line starts, so this one bit is all it needs from a lexer — but producing
-/// it honestly takes a real scan: a quote inside a `//` comment, inside a `/* … */` comment, or
-/// inside a raw string's body opens nothing. Index `i` of the result is the flag for line `i` of
-/// `text.lines()`; a file ending in a newline yields one extra trailing entry, which no caller
-/// indexes.
-fn lines_beginning_in_a_string(text: &str) -> Vec<bool> {
-    let chars: Vec<char> = text.chars().collect();
-    // The first line begins in code by definition.
-    let mut flags = vec![false];
+/// One scanner answers both questions this file asks of a lexer — whether a line BEGINS inside a
+/// string ([`lines_beginning_in_a_string`]) and which bytes are code ([`code_mask`]) — so the two
+/// cannot disagree about where a literal ends. A newline is classified by the state it is read
+/// in: inside a string it is literal text, and a `//` comment ends at it.
+fn lex(chars: &[char]) -> Vec<Lex> {
+    fn emit(out: &mut Vec<Lex>, lex: Lex, n: usize) {
+        out.extend(std::iter::repeat_n(lex, n));
+    }
+    let mut out = Vec::with_capacity(chars.len());
     let mut state = Scan::Code;
     let mut i = 0usize;
     while i < chars.len() {
         let c = chars[i];
+        let next = chars.get(i + 1).copied();
         if c == '\n' {
             if state == Scan::LineComment {
                 state = Scan::Code;
             }
-            flags.push(matches!(state, Scan::Str(_)));
+            let lexed = match state {
+                Scan::Str(_) => Lex::Literal,
+                Scan::BlockComment(_) => Lex::Comment,
+                Scan::Code | Scan::LineComment => Lex::Code,
+            };
+            emit(&mut out, lexed, 1);
             i += 1;
             continue;
         }
         match state {
-            Scan::LineComment => i += 1,
+            Scan::LineComment => {
+                emit(&mut out, Lex::Comment, 1);
+                i += 1;
+            }
             Scan::BlockComment(depth) => {
-                if c == '/' && chars.get(i + 1) == Some(&'*') {
+                if c == '/' && next == Some('*') {
                     state = Scan::BlockComment(depth + 1);
+                    emit(&mut out, Lex::Comment, 2);
                     i += 2;
-                } else if c == '*' && chars.get(i + 1) == Some(&'/') {
+                } else if c == '*' && next == Some('/') {
                     state = if depth == 1 { Scan::Code } else { Scan::BlockComment(depth - 1) };
+                    emit(&mut out, Lex::Comment, 2);
                     i += 2;
                 } else {
+                    emit(&mut out, Lex::Comment, 1);
                     i += 1;
                 }
             }
@@ -463,8 +609,10 @@ fn lines_beginning_in_a_string(text: &str) -> Vec<bool> {
                     && chars[i + 1..i + 1 + hashes].iter().all(|h| *h == '#');
                 if closes {
                     state = Scan::Code;
+                    emit(&mut out, Lex::Code, 1 + hashes);
                     i += 1 + hashes;
                 } else {
+                    emit(&mut out, Lex::Literal, 1);
                     i += 1;
                 }
             }
@@ -473,40 +621,103 @@ fn lines_beginning_in_a_string(text: &str) -> Vec<bool> {
                     // A `\`-continued literal escapes the NEWLINE itself, and the newline arm
                     // above must still see it, or every following line's flag shifts by one —
                     // which is precisely the shape at the two lines this scanner exists for.
-                    i += if chars.get(i + 1) == Some(&'\n') { 1 } else { 2 };
+                    let width = if next == Some('\n') { 1 } else { 2 };
+                    emit(&mut out, Lex::Literal, width);
+                    i += width;
+                } else if c == '"' {
+                    state = Scan::Code;
+                    emit(&mut out, Lex::Code, 1);
+                    i += 1;
                 } else {
-                    if c == '"' {
-                        state = Scan::Code;
-                    }
+                    emit(&mut out, Lex::Literal, 1);
                     i += 1;
                 }
             }
             Scan::Code => match c {
-                '/' if chars.get(i + 1) == Some(&'/') => {
+                '/' if next == Some('/') => {
                     state = Scan::LineComment;
+                    emit(&mut out, Lex::Comment, 2);
                     i += 2;
                 }
-                '/' if chars.get(i + 1) == Some(&'*') => {
+                '/' if next == Some('*') => {
                     state = Scan::BlockComment(1);
+                    emit(&mut out, Lex::Comment, 2);
                     i += 2;
                 }
                 '"' => {
                     state = Scan::Str(None);
+                    emit(&mut out, Lex::Code, 1);
                     i += 1;
                 }
-                '\'' => i += char_literal_len(&chars, i),
-                'r' | 'b' | 'c' => match string_open_at(&chars, i) {
+                '\'' => {
+                    let len = char_literal_len(chars, i);
+                    if len == 1 {
+                        emit(&mut out, Lex::Code, 1);
+                    } else {
+                        emit(&mut out, Lex::Code, 1);
+                        emit(&mut out, Lex::Literal, len - 2);
+                        emit(&mut out, Lex::Code, 1);
+                    }
+                    i += len;
+                }
+                'r' | 'b' | 'c' => match string_open_at(chars, i) {
                     Some((len, hashes)) => {
                         state = Scan::Str(hashes);
+                        emit(&mut out, Lex::Code, len);
                         i += len;
                     }
-                    None => i += 1,
+                    None => {
+                        emit(&mut out, Lex::Code, 1);
+                        i += 1;
+                    }
                 },
-                _ => i += 1,
+                _ => {
+                    emit(&mut out, Lex::Code, 1);
+                    i += 1;
+                }
             },
         }
     }
+    // A two-character step at the very end of the input (`\` as the last character of an
+    // unterminated literal) emits one entry past it.
+    out.truncate(chars.len());
+    out
+}
+
+/// For every line of `text`, whether that line BEGINS inside a string literal.
+///
+/// The classifier reads line starts, so this one bit is all it needs from a lexer — but producing
+/// it honestly takes a real scan: a quote inside a `//` comment, inside a `/* … */` comment, or
+/// inside a raw string's body opens nothing. Index `i` of the result is the flag for line `i` of
+/// `text.lines()`; a file ending in a newline yields one extra trailing entry, which no caller
+/// indexes.
+fn lines_beginning_in_a_string(text: &str) -> Vec<bool> {
+    let chars: Vec<char> = text.chars().collect();
+    let lexed = lex(&chars);
+    // The first line begins in code by definition; every other line begins in whatever the
+    // newline before it was read in.
+    let mut flags = vec![false];
+    flags.extend(chars.iter().zip(&lexed).filter(|(c, _)| **c == '\n').map(|(_, l)| *l == Lex::Literal));
     flags
+}
+
+/// `text` with every comment and every literal body blanked to spaces, byte for byte.
+///
+/// Byte offsets are preserved (a multi-byte character becomes as many spaces as it had bytes), so
+/// a position found in the mask indexes the same place in `text`, and a position inside code is a
+/// character boundary in both. Newlines are kept, so line numbers are too.
+fn code_mask(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let lexed = lex(&chars);
+    let mut out = String::with_capacity(text.len());
+    for (c, l) in chars.iter().zip(&lexed) {
+        if *l == Lex::Code || *c == '\n' {
+            out.push(*c);
+        } else {
+            out.extend(std::iter::repeat_n(' ', c.len_utf8()));
+        }
+    }
+    out
 }
 
 /// Every `.rs` file under `dir`, repo-relative, `/`-separated.
@@ -535,8 +746,12 @@ fn collect_rs(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
 fn sites_in_text(file: &str, text: &str) -> Vec<Site> {
     let lines: Vec<&str> = text.lines().collect();
     let begins_in_string = lines_beginning_in_a_string(text);
+    // `text.lines()` splits after every `\n` (a `\r` before it stays in the line's bytes), so line
+    // `k` starts right after the `k`-th newline.
+    let line_starts: Vec<usize> =
+        std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
     let mut sites = Vec::new();
-    for index in 0..lines.len() {
+    for (index, &offset) in line_starts.iter().enumerate().take(lines.len()) {
         // A line whose first non-whitespace characters are `#[cfg_attr(` may be the continuation
         // of a `\`-continued reason string inside a `panic!` rather than an attribute; two live
         // ones are, and were counted until this skip existed.
@@ -553,12 +768,105 @@ fn sites_in_text(file: &str, text: &str) -> Vec<Site> {
         sites.push(Site {
             file: file.to_string(),
             line: index + 1,
+            offset,
             test_fn: resolve_test_fn(&lines, index),
             form,
             spelling,
+            reason: None,
+            cfg: None,
         });
     }
+    // The reason and the predicate are read from the source text, not from the joined line: a
+    // reason continued over several lines must decode exactly as rustc reads it, and a predicate
+    // is delimited by code-level parentheses, which only the mask can tell from quoted ones.
+    if !sites.is_empty() {
+        let mask = code_mask(text);
+        for site in &mut sites {
+            if site.form == IgnoreForm::Reasoned {
+                site.reason = reason_at(text, &mask, site.offset, site.spelling);
+            }
+            if site.spelling == IgnoreSpelling::CfgAttr {
+                site.cfg = cfg_attr_predicate_at(text, &mask, site.offset);
+            }
+        }
+    }
     sites
+}
+
+/// The byte offset in `mask` of the whole-token `ignore` inside the attribute opening at `at`.
+fn ignore_token_at(mask: &str, at: usize, spelling: IgnoreSpelling) -> Option<usize> {
+    match spelling {
+        IgnoreSpelling::Plain => Some(at + mask[at..].find("#[ignore")? + "#[".len()),
+        IgnoreSpelling::CfgAttr => {
+            let open = at + mask[at..].find("#[cfg_attr(")?;
+            let rest = after_ignore_token(&mask[open..])?;
+            Some(mask.len() - rest.len() - "ignore".len())
+        }
+    }
+}
+
+/// The reason string of the ignore attribute opening at byte `at`, decoded as rustc would.
+fn reason_at(text: &str, mask: &str, at: usize, spelling: IgnoreSpelling) -> Option<String> {
+    let token = ignore_token_at(mask, at, spelling)?;
+    let after = token + "ignore".len();
+    let eq = after + mask[after..].find(|c: char| !c.is_whitespace())?;
+    if mask.as_bytes()[eq] != b'=' {
+        return None;
+    }
+    let lit = eq + 1 + mask[eq + 1..].find(|c: char| !c.is_whitespace())?;
+    decode_string_literal(&text[lit..])
+}
+
+/// The value of the string literal at the start of `src`: `"…"` with its escapes, or `r#*"…"#*`.
+///
+/// Only what a reason needs is decoded exactly — `\`-newline continuations (which drop the newline
+/// and the next line's leading whitespace), `\"`, `\\`, `\n`, `\t`, `\r`, `\0` and `\'`; any other
+/// escape keeps its character, which cannot move a prefix or a feature name.
+fn decode_string_literal(src: &str) -> Option<String> {
+    if let Some(raw) = src.strip_prefix('r') {
+        let hashes = raw.chars().take_while(|c| *c == '#').count();
+        let body = raw[hashes..].strip_prefix('"')?;
+        let close = format!("\"{}", "#".repeat(hashes));
+        return Some(body[..body.find(&close)?].to_string());
+    }
+    let mut out = String::new();
+    let mut chars = src.strip_prefix('"')?.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                '\n' | '\r' => {
+                    while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                        chars.next();
+                    }
+                }
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                '0' => out.push('\0'),
+                other => out.push(other),
+            },
+            _ => out.push(c),
+        }
+    }
+    None
+}
+
+/// The predicate of the `#[cfg_attr(<predicate>, ignore …)]` opening at byte `at`: everything up
+/// to the first comma at the attribute's own parenthesis depth.
+fn cfg_attr_predicate_at(text: &str, mask: &str, at: usize) -> Option<String> {
+    let start = at + mask[at..].find("#[cfg_attr(")? + "#[cfg_attr(".len();
+    let mut depth = 0i32;
+    for (offset, b) in mask.as_bytes()[start..].iter().enumerate() {
+        match b {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' if depth == 0 => return None,
+            b')' | b']' => depth -= 1,
+            b',' if depth == 0 => return Some(text[start..start + offset].trim().to_string()),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Every ignore site in the tree, plus the number of `.rs` files the walk visited.
@@ -582,6 +890,630 @@ fn crate_of(file: &str) -> String {
         (Some("crates"), Some(name)) => format!("crates/{name}"),
         _ => "<root>".to_string(),
     }
+}
+
+// ═══════════════════════════ the class prefix ═══════════════════════════════
+
+/// Why a reason's prefix is not a valid class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrefixError {
+    /// The reason does not start with `<word>: ` — it names no class.
+    Missing,
+    /// A `+`-part of the prefix is not in [`IGNORE_CLASSES`] (matching is case-sensitive).
+    Unknown(String),
+    /// Every part is in the vocabulary, but the combination is not one of its spellings.
+    Combination(String),
+    /// A class and nothing after it.
+    NoProse,
+}
+
+/// The classes a reason names, in order, and the prose after them.
+fn parse_prefix(reason: &str) -> Result<(Vec<&'static str>, &str), PrefixError> {
+    let (head, rest) = reason.split_once(':').ok_or(PrefixError::Missing)?;
+    // A head with a space in it is prose that happens to contain a colon ("Miri wall-time: …"),
+    // and `gpu :` is not the documented shape either; both read as no prefix at all.
+    let head_is_a_word =
+        !head.is_empty() && head.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '_'));
+    if !head_is_a_word {
+        return Err(PrefixError::Missing);
+    }
+    let mut classes = Vec::new();
+    for part in head.split('+') {
+        let known = IGNORE_CLASSES.iter().find(|(class, _)| *class == part);
+        classes.push(known.ok_or_else(|| PrefixError::Unknown(part.to_string()))?.0);
+    }
+    let tail_is_spelled = |tail: &[&str]| CLASS_TAILS.contains(&tail);
+    let spelled = match classes.as_slice() {
+        [_] => true,
+        ["feature", tail @ ..] => tail_is_spelled(tail),
+        tail => tail_is_spelled(tail),
+    };
+    if !spelled {
+        return Err(PrefixError::Combination(head.to_string()));
+    }
+    let prose = rest.trim();
+    if prose.is_empty() {
+        return Err(PrefixError::NoProse);
+    }
+    // `gpu:x` would parse, but the prefix is keyed on `<class>: ` by every grep that selects a leg.
+    if !rest.starts_with(char::is_whitespace) {
+        return Err(PrefixError::Missing);
+    }
+    Ok((classes, prose))
+}
+
+/// Every feature name a reason passes to `--features` (comma-separated lists split).
+fn features_named(reason: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut from = 0usize;
+    while let Some(offset) = reason[from..].find("--features") {
+        let after = from + offset + "--features".len();
+        let list = reason[after..].trim_start_matches(|c: char| c.is_whitespace() || c == '=');
+        let token: String =
+            list.chars().take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ',' | '/')).collect();
+        out.extend(token.split(',').filter(|name| !name.is_empty()).map(str::to_string));
+        from = after;
+    }
+    out
+}
+
+// ═══════════════════════════ cfg predicates ═════════════════════════════════
+
+/// A `cfg` predicate, parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pred {
+    All(Vec<Pred>),
+    Any(Vec<Pred>),
+    Not(Box<Pred>),
+    /// `miri`, `debug_assertions`, `test`, `windows`, …
+    Name(String),
+    /// `feature = "x"`, `target_os = "x"`, …
+    Pair(String, String),
+}
+
+/// One configuration a predicate is evaluated in.
+#[derive(Debug, Clone, Copy)]
+struct CfgEnv {
+    miri: bool,
+    debug_assertions: bool,
+    /// Whether every `feature = "…"` holds. The census asks two questions of a feature atom —
+    /// "does the default build see this?" (all off) and "does some build?" (all on).
+    features: bool,
+}
+
+/// `cargo test`: the configuration every rung's UG-01 runs.
+const NATIVE_DEBUG: CfgEnv = CfgEnv { miri: false, debug_assertions: true, features: false };
+/// `cargo test --release`.
+const NATIVE_RELEASE: CfgEnv = CfgEnv { miri: false, debug_assertions: false, features: false };
+/// `cargo miri test`, which builds with debug assertions.
+const MIRI: CfgEnv = CfgEnv { miri: true, debug_assertions: true, features: false };
+
+impl CfgEnv {
+    const fn with_features(self, features: bool) -> Self {
+        Self { features, ..self }
+    }
+}
+
+/// Parse a predicate as written between `cfg(` and its `)`, or `None` if it is not one.
+fn parse_pred(src: &str) -> Option<Pred> {
+    #[derive(Debug, Clone, PartialEq)]
+    enum Tok {
+        Ident(String),
+        Str(String),
+        Open,
+        Close,
+        Comma,
+        Eq,
+    }
+    let mut toks = Vec::new();
+    let mut chars = src.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        match c {
+            c if c.is_whitespace() => {
+                chars.next();
+            }
+            '(' | ')' | ',' | '=' => {
+                chars.next();
+                toks.push(match c {
+                    '(' => Tok::Open,
+                    ')' => Tok::Close,
+                    ',' => Tok::Comma,
+                    _ => Tok::Eq,
+                });
+            }
+            '"' => {
+                chars.next();
+                let value: String = chars.by_ref().take_while(|c| *c != '"').collect();
+                toks.push(Tok::Str(value));
+            }
+            c if is_ident_char(c) => {
+                let mut ident = String::new();
+                while let Some(&c) = chars.peek().filter(|c| is_ident_char(**c)) {
+                    ident.push(c);
+                    chars.next();
+                }
+                toks.push(Tok::Ident(ident));
+            }
+            _ => return None,
+        }
+    }
+
+    fn one(toks: &[Tok], i: &mut usize) -> Option<Pred> {
+        let Some(Tok::Ident(name)) = toks.get(*i).cloned() else { return None };
+        *i += 1;
+        match toks.get(*i) {
+            Some(Tok::Eq) => {
+                let Some(Tok::Str(value)) = toks.get(*i + 1).cloned() else { return None };
+                *i += 2;
+                Some(Pred::Pair(name, value))
+            }
+            Some(Tok::Open) => {
+                *i += 1;
+                let mut args = Vec::new();
+                while toks.get(*i) != Some(&Tok::Close) {
+                    args.push(one(toks, i)?);
+                    match toks.get(*i) {
+                        Some(Tok::Comma) => *i += 1,
+                        Some(Tok::Close) => {}
+                        _ => return None,
+                    }
+                }
+                *i += 1;
+                match name.as_str() {
+                    "all" => Some(Pred::All(args)),
+                    "any" => Some(Pred::Any(args)),
+                    "not" if args.len() == 1 => Some(Pred::Not(Box::new(args.remove(0)))),
+                    _ => None,
+                }
+            }
+            _ => Some(Pred::Name(name)),
+        }
+    }
+
+    let mut i = 0usize;
+    let pred = one(&toks, &mut i)?;
+    (i == toks.len()).then_some(pred)
+}
+
+impl Pred {
+    /// Whether the predicate holds in `env`.
+    ///
+    /// `miri`, `debug_assertions` and `feature = "…"` follow `env`. EVERY OTHER atom (`test`,
+    /// `windows`, `unix`, `target_os = "…"`, …) is taken to hold: the census decides scope along
+    /// the Miri, profile and feature axes, and the platform axis is not one of them — a Windows-only
+    /// file is on the Windows legs, which is what its class already says.
+    fn holds(&self, env: CfgEnv) -> bool {
+        match self {
+            Pred::All(args) => args.iter().all(|p| p.holds(env)),
+            Pred::Any(args) => args.iter().any(|p| p.holds(env)),
+            Pred::Not(inner) => !inner.holds(env),
+            Pred::Name(name) if name == "miri" => env.miri,
+            Pred::Name(name) if name == "debug_assertions" => env.debug_assertions,
+            Pred::Pair(key, _) if key == "feature" => env.features,
+            Pred::Name(_) | Pred::Pair(..) => true,
+        }
+    }
+
+    /// Whether the atom `name` appears anywhere in the predicate.
+    fn mentions(&self, name: &str) -> bool {
+        match self {
+            Pred::All(args) | Pred::Any(args) => args.iter().any(|p| p.mentions(name)),
+            Pred::Not(inner) => inner.mentions(name),
+            Pred::Name(n) => n == name,
+            Pred::Pair(..) => false,
+        }
+    }
+
+    /// Every `feature = "…"` value in the predicate.
+    fn features(&self, out: &mut BTreeSet<String>) {
+        match self {
+            Pred::All(args) | Pred::Any(args) => {
+                for p in args {
+                    p.features(out);
+                }
+            }
+            Pred::Not(inner) => inner.features(out),
+            Pred::Pair(key, value) if key == "feature" => {
+                out.insert(value.clone());
+            }
+            Pred::Name(_) | Pred::Pair(..) => {}
+        }
+    }
+
+    /// True if some Miri setting makes the predicate false with features off and true with them on.
+    fn requires_a_feature(&self) -> bool {
+        [NATIVE_DEBUG, MIRI].iter().any(|env| !self.holds(env.with_features(false)) && self.holds(env.with_features(true)))
+    }
+
+    /// True if the predicate is false in every native configuration and true in some Miri one.
+    fn is_miri_only(&self) -> bool {
+        let native = [NATIVE_DEBUG, NATIVE_RELEASE];
+        let never_native = [false, true].iter().all(|f| native.iter().all(|env| !self.holds(env.with_features(*f))));
+        never_native && [false, true].iter().any(|f| self.holds(MIRI.with_features(*f)))
+    }
+}
+
+/// Where a site is ignored, which limits the class it may carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Scope {
+    /// Ignored in native debug — every plain site, and `cfg_attr` sites whose predicate holds there.
+    Native,
+    /// Ignored in native release only: the test runs in every debug run.
+    ReleaseOnly,
+    /// Ignored under Miri only: the test runs natively.
+    MiriOnly,
+    /// Ignored only when some cargo feature is on.
+    FeatureOnly,
+}
+
+impl Scope {
+    fn of(pred: &Pred) -> Scope {
+        if pred.holds(NATIVE_DEBUG) {
+            Scope::Native
+        } else if pred.holds(NATIVE_RELEASE) {
+            Scope::ReleaseOnly
+        } else if pred.holds(MIRI) {
+            Scope::MiriOnly
+        } else {
+            Scope::FeatureOnly
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Scope::Native => "native",
+            Scope::ReleaseOnly => "release-only",
+            Scope::MiriOnly => "miri-only",
+            Scope::FeatureOnly => "feature-only",
+        }
+    }
+}
+
+// ═══════════════════════════ what the source says about a site ══════════════
+
+/// A `#[cfg(…)]` or `#![cfg(…)]` and the byte range of what it governs.
+struct Gate {
+    start: usize,
+    end: usize,
+    /// `Err` holds the predicate text when the parser could not read it.
+    pred: Result<Pred, String>,
+}
+
+/// Every `{`/`}` pair in `mask`, as a map from each opening brace to its closing one.
+fn brace_pairs(mask: &str) -> BTreeMap<usize, usize> {
+    let mut pairs = BTreeMap::new();
+    let mut open = Vec::new();
+    for (i, b) in mask.bytes().enumerate() {
+        match b {
+            b'{' => open.push(i),
+            b'}' => {
+                if let Some(o) = open.pop() {
+                    pairs.insert(o, i);
+                }
+            }
+            _ => {}
+        }
+    }
+    pairs
+}
+
+/// The index just past the `close` that balances the `open` at `from` (which must be `open`).
+fn balanced_end(mask: &str, from: usize, open: u8, close: u8) -> Option<usize> {
+    let mut depth = 0i32;
+    for (offset, b) in mask.as_bytes()[from..].iter().enumerate() {
+        if *b == open {
+            depth += 1;
+        } else if *b == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(from + offset + 1);
+            }
+        }
+    }
+    None
+}
+
+/// Every `cfg` in a file and the range it governs.
+///
+/// An inner `#![cfg(…)]` governs the block it sits in (the whole file at brace depth 0). An outer
+/// `#[cfg(…)]` governs the item after it: through the matching `}` of the first `{`, or to the
+/// first `;`, `,` or unmatched `}` at parenthesis depth 0, whichever comes first — a fn or a mod,
+/// a `use` or a `let`, a field or an argument.
+fn gates_in(text: &str, mask: &str, braces: &BTreeMap<usize, usize>) -> Vec<Gate> {
+    let bytes = mask.as_bytes();
+    let mut gates = Vec::new();
+    for (marker, inner) in [("#![cfg(", true), ("#[cfg(", false)] {
+        let mut from = 0usize;
+        while let Some(offset) = mask[from..].find(marker) {
+            let start = from + offset;
+            from = start + marker.len();
+            let paren = start + marker.len() - 1;
+            let Some(pred_end) = balanced_end(mask, paren, b'(', b')') else { continue };
+            let src = text[paren + 1..pred_end - 1].trim();
+            let pred = parse_pred(src).ok_or_else(|| src.to_string());
+            let Some(attr_end) = balanced_end(mask, start + marker.find('[').unwrap_or(1), b'[', b']') else {
+                continue;
+            };
+            let end = if inner {
+                braces.iter().filter(|(o, c)| **o < start && start < **c).map(|(_, c)| *c).min().unwrap_or(mask.len())
+            } else {
+                let mut depth = 0i32;
+                let mut end = mask.len();
+                for (k, b) in bytes.iter().enumerate().skip(attr_end) {
+                    match b {
+                        b'(' | b'[' => depth += 1,
+                        b')' | b']' => depth -= 1,
+                        b'{' if depth == 0 => {
+                            end = braces.get(&k).copied().unwrap_or(mask.len());
+                            break;
+                        }
+                        b';' | b',' | b'}' if depth <= 0 => {
+                            end = k;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                end
+            };
+            let start = if inner { braces.keys().filter(|o| **o < start && end == braces[o]).max().copied().unwrap_or(0) } else { start };
+            gates.push(Gate { start, end, pred });
+        }
+    }
+    gates
+}
+
+/// The body of the fn named `name` whose signature follows byte `from`, as a range of `mask`.
+fn fn_body(mask: &str, braces: &BTreeMap<usize, usize>, from: usize, name: &str) -> Option<(usize, usize)> {
+    let mut search = from;
+    loop {
+        let offset = mask[search..].find(name)?;
+        let at = search + offset;
+        search = at + name.len();
+        let before = mask[..at].trim_end();
+        let bounded = mask[search..].chars().next().is_some_and(|c| !is_ident_char(c));
+        if bounded && before.ends_with("fn") && !before[..before.len() - 2].ends_with(is_ident_char) {
+            let open = search + mask[search..].find('{')?;
+            return Some((open, *braces.get(&open)?));
+        }
+    }
+}
+
+/// Same-file fns whose signature returns `Option<VulkanContext>` — the boot helpers, under
+/// whatever name a file gave them.
+fn vulkan_boot_helpers(mask: &str) -> Vec<String> {
+    let mut helpers = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = mask[from..].find("fn ") {
+        let at = from + offset;
+        from = at + 3;
+        if at > 0 && mask[..at].ends_with(is_ident_char) {
+            continue;
+        }
+        let name: String = mask[at + 3..].trim_start().chars().take_while(|c| is_ident_char(*c)).collect();
+        let Some(body) = mask[at..].find(['{', ';']) else { continue };
+        let signature: String = mask[at..at + body].chars().filter(|c| !c.is_whitespace()).collect();
+        if !name.is_empty() && signature.ends_with("->Option<VulkanContext>") {
+            helpers.push(name);
+        }
+    }
+    helpers
+}
+
+/// The device entry points a test body calls, by name.
+fn device_entries(body: &str, helpers: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    for call in DEVICE_ENTRY_CALLS {
+        if body.contains(call) {
+            found.push(call.to_string());
+        }
+    }
+    let mut from = 0usize;
+    while let Some(offset) = body[from..].find("_or_skip") {
+        let end = from + offset + "_or_skip".len();
+        let start = body[..from + offset].rfind(|c: char| !is_ident_char(c)).map_or(0, |i| i + 1);
+        let called = body[end..].trim_start().starts_with(['(', '!']);
+        let whole = body[end..].chars().next().is_none_or(|c| !is_ident_char(c));
+        if called && whole && start < from + offset {
+            found.push(format!("{}(…)", &body[start..end]));
+        }
+        from = end;
+    }
+    for helper in helpers {
+        let mut from = 0usize;
+        while let Some(offset) = body[from..].find(helper.as_str()) {
+            let at = from + offset;
+            from = at + helper.len();
+            let bounded = (at == 0 || !body[..at].ends_with(is_ident_char))
+                && body[from..].trim_start().starts_with('(');
+            if bounded {
+                found.push(format!("{helper}(…) -> Option<VulkanContext>"));
+                break;
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// What the source says about one site beyond its attribute.
+struct Context {
+    scope: Scope,
+    /// A `cfg` over the test that is false natively and true under Miri.
+    miri_gated: bool,
+    /// `miri` appears in the site's `cfg_attr` predicate or in a `cfg` over it.
+    mentions_miri: bool,
+    /// The features that condition the test: named by a `cfg` over it that a feature switches
+    /// on, or by its own `cfg_attr` predicate. Empty when no feature does.
+    features: BTreeSet<String>,
+    /// Device entry points the test body calls.
+    device_entries: Vec<String>,
+    /// Predicates the parser could not read, which the census refuses to guess about.
+    unreadable: Vec<String>,
+}
+
+/// Reads [`Context`] for every site in one file.
+fn contexts_in_text(text: &str, sites: &[Site]) -> Vec<Context> {
+    let mask = code_mask(text);
+    let braces = brace_pairs(&mask);
+    let gates = gates_in(text, &mask, &braces);
+    let helpers = vulkan_boot_helpers(&mask);
+    sites
+        .iter()
+        .map(|site| {
+            let mut ctx = Context {
+                scope: Scope::Native,
+                miri_gated: false,
+                mentions_miri: false,
+                features: BTreeSet::new(),
+                device_entries: Vec::new(),
+                unreadable: Vec::new(),
+            };
+            for gate in gates.iter().filter(|g| g.start <= site.offset && site.offset < g.end) {
+                match &gate.pred {
+                    Ok(pred) => {
+                        ctx.miri_gated |= pred.is_miri_only();
+                        ctx.mentions_miri |= pred.mentions("miri");
+                        if pred.requires_a_feature() {
+                            pred.features(&mut ctx.features);
+                        }
+                    }
+                    Err(src) => ctx.unreadable.push(format!("cfg({src})")),
+                }
+            }
+            if let Some(src) = &site.cfg {
+                match parse_pred(src) {
+                    Some(pred) => {
+                        ctx.scope = Scope::of(&pred);
+                        ctx.mentions_miri |= pred.mentions("miri");
+                        pred.features(&mut ctx.features);
+                    }
+                    None => ctx.unreadable.push(format!("cfg_attr({src}, …)")),
+                }
+            } else if site.spelling == IgnoreSpelling::CfgAttr {
+                ctx.unreadable.push("a cfg_attr predicate the census could not delimit".to_string());
+            }
+            if let Some(name) = &site.test_fn
+                && let Some((open, close)) = fn_body(&mask, &braces, site.offset, name)
+            {
+                ctx.device_entries = device_entries(&mask[open..=close], &helpers);
+            }
+            ctx
+        })
+        .collect()
+}
+
+/// The features a crate declares in its `Cargo.toml` `[features]` table.
+fn declared_features(manifest: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut in_table = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_table = line == "[features]";
+            continue;
+        }
+        if !in_table || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, _)) = line.split_once('=') {
+            let key = key.trim().trim_matches('"');
+            if !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')) {
+                out.insert(key.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Every rule a site breaks, each as one line naming the site.
+///
+/// Pure over its inputs, so the positive controls run the SAME rules on fixtures that the tree
+/// runs on — never a test-local copy of them.
+fn class_violations(site: &Site, ctx: &Context, declared: &BTreeSet<String>) -> Vec<String> {
+    let name = site.test_fn.as_deref().unwrap_or("<unnamed>");
+    let at = format!("{}:{} `{name}` [{}]", site.file, site.line, ctx.scope.name());
+    let mut out = Vec::new();
+    for unreadable in &ctx.unreadable {
+        out.push(format!("{at}: the census cannot evaluate {unreadable}; extend `parse_pred` rather than guess"));
+    }
+    let Some(reason) = site.reason.as_deref() else {
+        out.push(format!("{at}: the reason literal could not be decoded, so its class cannot be read"));
+        return out;
+    };
+    for feature in features_named(reason) {
+        if !feature.contains('/') && !declared.contains(&feature) {
+            out.push(format!(
+                "{at}: names `--features {feature}`, which the crate's [features] table does not declare"
+            ));
+        }
+    }
+    let classes = match parse_prefix(reason) {
+        Ok((classes, _)) => classes,
+        // The one scope that names no leg: the test runs in every debug run.
+        Err(PrefixError::Missing) if ctx.scope == Scope::ReleaseOnly => return out,
+        Err(e) => {
+            let head: String = reason.chars().take(48).collect();
+            let why = match e {
+                PrefixError::Missing => "no `<class>: ` prefix".to_string(),
+                PrefixError::Unknown(part) => format!("`{part}` is not a class"),
+                PrefixError::Combination(head) => format!("`{head}` is not one of the class spellings"),
+                PrefixError::NoProse => "a class with no prose after it".to_string(),
+            };
+            out.push(format!("{at}: {why} — reason starts {head:?}"));
+            return out;
+        }
+    };
+    let spelled = classes.join("+");
+    let has = |set: &[&str]| classes.iter().any(|c| set.contains(c));
+
+    if ctx.scope == Scope::MiriOnly && !(classes == ["miri-slow"] || classes == ["miri-unsupported"]) {
+        out.push(format!(
+            "{at}: `{spelled}` on a site ignored only under Miri — the test runs natively, so the class \
+             says why Miri skips it: `miri-slow` or `miri-unsupported`"
+        ));
+    }
+    if ctx.miri_gated && !has(&MIRI_CLASSES) {
+        out.push(format!(
+            "{at}: `{spelled}` on a test that exists only under Miri — natively it is not even \
+             compiled, so no native leg can run it; the class is `miri-slow` or `miri-unsupported`"
+        ));
+    }
+    if has(&MIRI_CLASSES) && !ctx.mentions_miri {
+        out.push(format!(
+            "{at}: `{spelled}` names Miri, but no `cfg` over this test and no `cfg_attr` on it mentions \
+             `miri` — the Miri leg never sees this ignore"
+        ));
+    }
+    let has_feature = classes.contains(&"feature");
+    if !ctx.features.is_empty() && !has_feature {
+        out.push(format!(
+            "{at}: `{spelled}` on a test that {:?} conditions — it does not exist or does not run in \
+             the default build, so the class starts `feature+`",
+            ctx.features
+        ));
+    }
+    if has_feature && ctx.features.is_empty() {
+        out.push(format!(
+            "{at}: `{spelled}` on a test no cargo feature conditions (no `cfg` over it and no \
+             `cfg_attr` on it names one)"
+        ));
+    }
+    if has_feature {
+        let named = features_named(reason);
+        for feature in ctx.features.difference(&named) {
+            out.push(format!("{at}: `{spelled}` must name `--features {feature}` in its prose"));
+        }
+    }
+    if !ctx.device_entries.is_empty() && !has(&DEVICE_CLASSES) && !has(&STANDALONE_CLASSES) {
+        out.push(format!(
+            "{at}: `{spelled}` on a test that calls {:?} — without a GPU that call returns early and \
+             the test PASSES having measured nothing, so its class is a `gpu*` one",
+            ctx.device_entries
+        ));
+    }
+    out
 }
 
 #[test]
@@ -983,4 +1915,368 @@ fn the_test_name_resolver_finds_the_function_under_the_attributes() {
         None,
         "the resolver named something that is not a function"
     );
+}
+
+/// **The class clause.** Every reasoned site carries a class its own `cfg` allows (module doc,
+/// "The class prefix").
+///
+/// Bare and empty reasons are the first clause's findings and are skipped here, so one defect is
+/// reported once.
+#[test]
+fn every_site_carries_a_class_its_predicate_allows() {
+    let (sites, _) = census();
+    let root = repo_root();
+
+    let mut manifests: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut violations = Vec::new();
+    let mut by_class: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_scope: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let (mut device_entry_sites, mut miri_only_tests, mut feature_conditioned) = (0usize, 0usize, 0usize);
+
+    // `census` yields each file's sites together, in line order.
+    for group in sites.chunk_by(|a, b| a.file == b.file) {
+        let file = &group[0].file;
+        let text = std::fs::read_to_string(root.join(file))
+            .unwrap_or_else(|e| panic!("invariant: the census has just read {file}: {e}"));
+        let krate = crate_of(file);
+        let declared = manifests.entry(krate.clone()).or_insert_with(|| {
+            let dir = if krate == "<root>" { root.clone() } else { root.join(&krate) };
+            let manifest = std::fs::read_to_string(dir.join("Cargo.toml"))
+                .unwrap_or_else(|e| panic!("invariant: {krate} has a Cargo.toml: {e}"));
+            declared_features(&manifest)
+        });
+        let contexts = contexts_in_text(&text, group);
+        for (site, ctx) in group.iter().zip(&contexts) {
+            if site.form != IgnoreForm::Reasoned {
+                continue;
+            }
+            violations.extend(class_violations(site, ctx, declared));
+            *by_scope.entry(ctx.scope.name()).or_default() += 1;
+            let spelled = match site.reason.as_deref().map(parse_prefix) {
+                Some(Ok((classes, _))) => classes.join("+"),
+                _ => "<none>".to_string(),
+            };
+            *by_class.entry(spelled).or_default() += 1;
+            device_entry_sites += usize::from(!ctx.device_entries.is_empty());
+            miri_only_tests += usize::from(ctx.miri_gated);
+            feature_conditioned += usize::from(!ctx.features.is_empty());
+        }
+    }
+
+    let classes: Vec<String> = by_class.iter().map(|(class, n)| format!("{class}={n}")).collect();
+    let scopes: Vec<String> = by_scope.iter().map(|(scope, n)| format!("{scope}={n}")).collect();
+    println!(
+        "[ignore classes] {}; scopes: {}; rule inputs: {device_entry_sites} sites call a device \
+         entry, {miri_only_tests} exist only under Miri, {feature_conditioned} are \
+         feature-conditioned",
+        classes.join(", "),
+        scopes.join(", ")
+    );
+
+    // ── Non-vacuity of each rule. A rule whose input set is empty passes by construction, which is
+    // the shape a broken detector takes: the body reader, the cfg reader and the gate ranges each
+    // feed one rule, and each of those inputs is known to be non-empty on this tree.
+    assert!(
+        device_entry_sites > 0 && miri_only_tests > 0 && feature_conditioned > 0,
+        "a consistency rule examined nothing ({device_entry_sites} device-entry sites, \
+         {miri_only_tests} Miri-only tests, {feature_conditioned} feature-conditioned) — the reader \
+         feeding it is broken, not the tree"
+    );
+    assert!(
+        by_scope.contains_key(Scope::MiriOnly.name()) && by_scope.contains_key(Scope::Native.name()),
+        "the scope evaluator put no site in {by_scope:?} — every cfg_attr(miri, …) site should be \
+         miri-only and every plain site native"
+    );
+
+    let vocabulary: Vec<String> =
+        IGNORE_CLASSES.iter().map(|(class, leg)| format!("  {class:<17} {leg}")).collect();
+    assert!(
+        violations.is_empty(),
+        "{} ignore sites break the class rules:\n  {}\n\n\
+         WHAT TO DO — read what the test NEEDS (its body, its boot call, its `cfg`, its module \
+         header) and put `<class>: ` in front of the reason, keeping the prose. Do NOT choose by \
+         keyword: CLAUDE.md records a keyword classifier that misfiled 8 of 10 sites, every one \
+         toward a green that measured nothing. The classes and their legs:\n{}\n\
+         Spellings: `<class>`, `feature+<class>`, `gpu-windowed+gpu-cap`, \
+         `feature+gpu-windowed+gpu-cap`; `generator`, `deferred` and `flaky` stand alone.",
+        violations.len(),
+        violations.join("\n  "),
+        vocabulary.join("\n")
+    );
+}
+
+/// The prefix parser's own positive control: every shape it accepts and every shape it must not.
+#[test]
+fn the_class_grammar_classifies_every_shape() {
+    use PrefixError::{Combination, Missing, NoProse, Unknown};
+
+    for (class, _) in IGNORE_CLASSES {
+        let reason = format!("{class}: prose");
+        assert_eq!(parse_prefix(&reason), Ok((vec![class], "prose")), "a lone `{class}` must parse");
+    }
+
+    let accepted: &[(&str, &[&str])] = &[
+        ("feature: --features hwrt; a device-free test that exists only with the feature", &["feature"]),
+        ("feature+gpu-cap: --features hwrt; a real RT device", &["feature", "gpu-cap"]),
+        ("feature+gpu-windowed+gpu-cap: --features hwrt; windowed, on RT", &["feature", "gpu-windowed", "gpu-cap"]),
+        ("gpu-windowed+gpu-cap: ray query and a window", &["gpu-windowed", "gpu-cap"]),
+        ("feature+miri-slow: --features tb-neg-m2w, under Miri only", &["feature", "miri-slow"]),
+        // A second colon belongs to the prose.
+        ("miri-slow: Miri wall-time: 64 cases", &["miri-slow"]),
+    ];
+    for (reason, want) in accepted {
+        assert_eq!(parse_prefix(reason).map(|(c, _)| c), Ok(want.to_vec()), "{reason:?} must parse as {want:?}");
+    }
+
+    let rejected: &[(&str, PrefixError)] = &[
+        // No prefix at all — the shape of 177 sites before the migration.
+        ("needs a real windowed GPU device; run with --test-threads=1", Missing),
+        ("Miri wall-time: 64 cases", Missing),
+        // Prefixes outside the vocabulary — the five the migration re-prefixed, and a case slip.
+        ("calibration: builds 3 legs x 3 link configurations", Unknown("calibration".into())),
+        ("tractability: 100k rows through the apply window", Unknown("tractability".into())),
+        ("instrument: reads the recording allocator's tape", Unknown("instrument".into())),
+        ("M2: trilinear stepping deferred to the JCGT cubic", Unknown("M2".into())),
+        ("miri-arm: decides a Tree-Borrows property", Unknown("miri-arm".into())),
+        ("GPU: needs a device", Unknown("GPU".into())),
+        ("feature+: dangling", Unknown(String::new())),
+        // Not the `<class>: ` shape.
+        ("gpu : needs a device", Missing),
+        ("gpu:needs a device", Missing),
+        ("gpu:", NoProse),
+        ("gpu:   ", NoProse),
+        // Classes that exist, combined in a way that is not a spelling.
+        ("deferred+gpu: red by design", Combination("deferred+gpu".into())),
+        ("feature+generator: emits a table", Combination("feature+generator".into())),
+        ("gpu+feature: order", Combination("gpu+feature".into())),
+        ("gpu+gpu-windowed: redundant", Combination("gpu+gpu-windowed".into())),
+        ("gpu-cap+gpu-windowed: the one spelling is the other order", Combination("gpu-cap+gpu-windowed".into())),
+        ("feature+feature: twice", Combination("feature+feature".into())),
+        ("solo+slow: two device-free legs", Combination("solo+slow".into())),
+    ];
+    for (reason, want) in rejected {
+        assert_eq!(parse_prefix(reason).map(|(c, _)| c), Err(want.clone()), "{reason:?} must be refused");
+    }
+
+    let named: &[(&str, &[&str])] = &[
+        ("feature+gpu-cap: requires a real RT GPU (run: --features hwrt -- --ignored)", &["hwrt"]),
+        ("under an arm that only `--features tb-neg-m2w` builds", &["tb-neg-m2w"]),
+        ("--features=a,b and later --features c", &["a", "b", "c"]),
+        ("no flag here", &[]),
+    ];
+    for (reason, want) in named {
+        let got: Vec<String> = features_named(reason).into_iter().collect();
+        let want: Vec<String> = want.iter().map(|s| s.to_string()).collect();
+        assert_eq!(got, want, "features_named({reason:?})");
+    }
+}
+
+/// The predicate evaluator's own positive control, on every predicate shape this tree spells.
+#[test]
+fn a_cfg_predicate_sets_the_scope() {
+    let cases: &[(&str, Scope)] = &[
+        ("miri", Scope::MiriOnly),
+        ("all(miri, unix)", Scope::MiriOnly),
+        ("any(miri, debug_assertions)", Scope::Native),
+        ("not(debug_assertions)", Scope::ReleaseOnly),
+        ("not(all(miri, feature = \"tb-neg-m2w\"))", Scope::Native),
+        ("feature = \"ignore_slow\"", Scope::FeatureOnly),
+        ("all(windows, not(miri))", Scope::Native),
+    ];
+    for (src, want) in cases {
+        let pred = parse_pred(src).unwrap_or_else(|| panic!("{src:?} must parse"));
+        assert_eq!(Scope::of(&pred), *want, "scope of cfg_attr({src}, ignore …)");
+    }
+
+    for bad in ["miri,", "not(a, b)", "frobnicate(miri)", "feature = ", "", "all(miri"] {
+        assert_eq!(parse_pred(bad), None, "{bad:?} is not a predicate and must not be guessed at");
+    }
+
+    let miri_only = parse_pred("miri").expect("parses");
+    assert!(miri_only.is_miri_only() && !miri_only.requires_a_feature());
+    let not_miri = parse_pred("not(miri)").expect("parses");
+    assert!(!not_miri.is_miri_only());
+    let hwrt = parse_pred("all(windows, feature = \"hwrt\")").expect("parses");
+    assert!(hwrt.requires_a_feature() && !hwrt.is_miri_only());
+    let tb_neg = parse_pred("all(miri, feature = \"tb-neg-m2w\")").expect("parses");
+    assert!(tb_neg.requires_a_feature() && tb_neg.is_miri_only());
+}
+
+/// The reason reader's own positive control: a class can only be checked if the reason is read
+/// exactly as rustc reads it, across the multi-line shapes this tree uses.
+#[test]
+fn the_reason_and_the_predicate_are_read_as_rustc_reads_them() {
+    let cases: &[(&str, &str, Option<&str>)] = &[
+        ("#[ignore = \"gpu: one line\"]\nfn t() {}\n", "gpu: one line", None),
+        (
+            "#[ignore = \"gpu: continued \\\n            over two lines\"]\nfn t() {}\n",
+            "gpu: continued over two lines",
+            None,
+        ),
+        (
+            "#[cfg_attr(\n    miri,\n    ignore = \"miri-slow: split \\\n              attribute\"\n)]\nfn t() {}\n",
+            "miri-slow: split attribute",
+            Some("miri"),
+        ),
+        (
+            "#[cfg_attr(not(all(miri, feature = \"x\")), ignore = \"a \\\"quoted\\\" word, (paren\")]\nfn t() {}\n",
+            "a \"quoted\" word, (paren",
+            Some("not(all(miri, feature = \"x\"))"),
+        ),
+        ("#[ignore = r#\"slow: raw \"quote\"\"#]\nfn t() {}\n", "slow: raw \"quote\"", None),
+        ("#[test] #[ignore = \"solo: same line\"]\nfn t() {}\n", "solo: same line", None),
+    ];
+    for (fixture, want_reason, want_cfg) in cases {
+        let sites = sites_in_text("fixture.rs", fixture);
+        assert_eq!(sites.len(), 1, "fixture must hold one site:\n{fixture}");
+        assert_eq!(sites[0].reason.as_deref(), Some(*want_reason), "reason of:\n{fixture}");
+        assert_eq!(sites[0].cfg.as_deref(), *want_cfg, "predicate of:\n{fixture}");
+    }
+}
+
+/// The consistency rules' own positive control: each rule on the shape it exists for, run through
+/// the shipped reader and rules, with a clean twin beside every red so neither half is vacuous.
+#[test]
+fn the_consistency_rules_fire_on_the_shapes_they_exist_for() {
+    const BOOT: &str = "fn boot_or_skip() -> Option<VulkanContext> { None }\n";
+    let declared: BTreeSet<String> = ["hwrt".to_string(), "tb-neg-m2w".to_string()].into();
+    // (what, fixture, substrings each of which must appear in some violation; empty = clean).
+    let cases: Vec<(&str, String, &[&str])> = vec![
+        (
+            "a `solo` test that boots through `boot_or_skip` (the CLAUDE.md trap)",
+            format!("{BOOT}#[test]\n#[ignore = \"solo: run alone\"]\nfn t() {{\n    let Some(_c) = boot_or_skip() else {{ return }};\n}}\n"),
+            &["boot_or_skip(…)"],
+        ),
+        (
+            "the same test as `gpu`",
+            format!("{BOOT}#[test]\n#[ignore = \"gpu: a device\"]\nfn t() {{\n    let Some(_c) = boot_or_skip() else {{ return }};\n}}\n"),
+            &[],
+        ),
+        (
+            "a boot helper under another name, found by its return type",
+            "fn open() -> Option<VulkanContext> { None }\n#[test]\n#[ignore = \"slow: x\"]\nfn t() { let _ = open(); }\n"
+                .to_string(),
+            &["open(…) -> Option<VulkanContext>"],
+        ),
+        (
+            "a windowed `boyko_app` test labelled device-free",
+            "#[test]\n#[ignore = \"slow: x\"]\nfn t() { app.add_plugins(EnginePlugins::window(\"t\", 1, 1)); }\n".to_string(),
+            &["EnginePlugins::window"],
+        ),
+        (
+            "a device `generator` names no leg, so no leg can sweep it in",
+            format!("{BOOT}#[test]\n#[ignore = \"generator: dumps a table\"]\nfn t() {{ let _ = boot_or_skip(); }}\n"),
+            &[],
+        ),
+        (
+            "the boot call in a SIBLING test does not reach this one",
+            format!("{BOOT}#[test]\nfn u() {{ let _ = boot_or_skip(); }}\n#[test]\n#[ignore = \"solo: x\"]\nfn t() {{}}\n"),
+            &[],
+        ),
+        (
+            "a plain `slow` test in a `#![cfg(miri)]` file (the CLAUDE.md trap)",
+            "#![cfg(miri)]\n#[test]\n#[ignore = \"slow: x\"]\nfn t() {}\n".to_string(),
+            &["exists only under Miri"],
+        ),
+        (
+            "the same test as `miri-slow`",
+            "#![cfg(miri)]\n#[test]\n#[ignore = \"miri-slow: x\"]\nfn t() {}\n".to_string(),
+            &[],
+        ),
+        (
+            "a plain `miri-slow` test that nothing ties to Miri",
+            "#[test]\n#[ignore = \"miri-slow: x\"]\nfn t() {}\n".to_string(),
+            &["no `cfg` over this test"],
+        ),
+        (
+            "`cfg_attr(miri, \"slow: …\")` — a non-Miri class at Miri-only scope",
+            "#[test]\n#[cfg_attr(miri, ignore = \"slow: x\")]\nfn t() {}\n".to_string(),
+            &["ignored only under Miri"],
+        ),
+        (
+            "`cfg_attr(miri, \"miri-unsupported: …\")`",
+            "#[test]\n#[cfg_attr(miri, ignore = \"miri-unsupported: a child process\")]\nfn t() {}\n".to_string(),
+            &[],
+        ),
+        (
+            "release-only scope: a reason with no class names no leg and passes",
+            "#[test]\n#[cfg_attr(not(debug_assertions), ignore = \"the guard is a debug_assert\")]\nfn t() {}\n"
+                .to_string(),
+            &[],
+        ),
+        (
+            "release-only scope: a prefix outside the vocabulary still reds",
+            "#[test]\n#[cfg_attr(not(debug_assertions), ignore = \"calibration: x\")]\nfn t() {}\n".to_string(),
+            &["is not a class"],
+        ),
+        (
+            "a `gpu` test in a feature-gated file",
+            "#![cfg(feature = \"hwrt\")]\n#[test]\n#[ignore = \"gpu: x\"]\nfn t() {}\n".to_string(),
+            &["starts `feature+`"],
+        ),
+        (
+            "`feature+gpu` naming the gating feature",
+            "#![cfg(feature = \"hwrt\")]\n#[test]\n#[ignore = \"feature+gpu: --features hwrt; x\"]\nfn t() {}\n"
+                .to_string(),
+            &[],
+        ),
+        (
+            "`feature+gpu` whose prose does not name the flag",
+            "#![cfg(feature = \"hwrt\")]\n#[test]\n#[ignore = \"feature+gpu: x\"]\nfn t() {}\n".to_string(),
+            &["must name `--features hwrt`"],
+        ),
+        (
+            "a fn-level `#[cfg(feature)]`",
+            "#[cfg(feature = \"hwrt\")]\n#[test]\n#[ignore = \"gpu-windowed: x\"]\nfn t() {}\n".to_string(),
+            &["starts `feature+`"],
+        ),
+        (
+            "a `cfg(feature)` over a module reaches the tests inside it",
+            "#[cfg(feature = \"hwrt\")]\nmod m {\n    #[test]\n    #[ignore = \"gpu: x\"]\n    fn t() {}\n}\n".to_string(),
+            &["starts `feature+`"],
+        ),
+        (
+            "a `cfg(feature)` on a SIBLING fn does not reach this one",
+            "#[cfg(feature = \"hwrt\")]\nfn helper() {}\n#[test]\n#[ignore = \"gpu: x\"]\nfn t() {}\n".to_string(),
+            &[],
+        ),
+        (
+            "`feature` on a test that no feature conditions",
+            "#[test]\n#[ignore = \"feature: --features hwrt; x\"]\nfn t() {}\n".to_string(),
+            &["no cargo feature conditions"],
+        ),
+        (
+            "a feature the crate does not declare",
+            "#![cfg(feature = \"nosuch\")]\n#[test]\n#[ignore = \"feature+gpu: --features nosuch; x\"]\nfn t() {}\n"
+                .to_string(),
+            &["does not declare"],
+        ),
+        (
+            "the tb-neg shape: the feature and Miri in the site's own predicate",
+            "#[test]\n#[cfg_attr(not(all(miri, feature = \"tb-neg-m2w\")), ignore = \"feature+miri-slow: only \
+             `--features tb-neg-m2w` builds the arm\")]\nfn t() {}\n"
+                .to_string(),
+            &[],
+        ),
+        (
+            "a predicate the evaluator cannot read reds rather than being guessed at",
+            "#[test]\n#[cfg_attr(frobnicate(miri), ignore = \"miri-slow: x\")]\nfn t() {}\n".to_string(),
+            &["cannot evaluate"],
+        ),
+    ];
+    for (what, fixture, want) in &cases {
+        let sites = sites_in_text("fixture.rs", fixture);
+        assert_eq!(sites.len(), 1, "{what}: the fixture must hold exactly one site:\n{fixture}");
+        let contexts = contexts_in_text(fixture, &sites);
+        let got = class_violations(&sites[0], &contexts[0], &declared);
+        if want.is_empty() {
+            assert!(got.is_empty(), "{what}: expected no violation, got {got:#?}\n{fixture}");
+        }
+        for needle in *want {
+            assert!(
+                got.iter().any(|g| g.contains(needle)),
+                "{what}: expected a violation containing {needle:?}, got {got:#?}\n{fixture}"
+            );
+        }
+    }
 }
