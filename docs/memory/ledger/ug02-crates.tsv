@@ -39,7 +39,7 @@ crate	crates/reflect_dogfood	unscanned	reflection test fixture; nothing depends 
 crate	crates/profile_fixture	unscanned	profiling test fixture; nothing depends on it
 crate	crates/profile_fixture_log	unscanned	profiling test fixture; nothing depends on it
 crate	tools/prof_decode	unscanned	offline profile decoder; every row is compile-time and nothing depends on it
-crate	crates/boyko_symcensus	pending	B3's dev-only symbol census crate, declared ahead so B1 and B3 merge in either order; the merge that makes it a member reclassifies it (W5)
+crate	crates/boyko_symcensus	unscanned	UG-15 instrument (B3); dev-only - tests/dev_only_edge.rs keeps it out of every shipped graph, and nothing but boyko-macros' dev edge depends on it; reclassified from pending by B3, the rung that makes it a member (W5)
 include	crates/boyko_diag/src/profile.rs	concat ! (env ! ("OUT_DIR") , "/profile_axis.rs")	a build-script file under OUT_DIR, generated from the profile axis; no source walk can see it
 third-party	crates/boyko_ecs	fixedbitset	FixedBitSet is a vocabulary head (heap words)
 third-party	crates/boyko_ecs	crossbeam-queue	ArrayQueue and SegQueue are vocabulary heads
