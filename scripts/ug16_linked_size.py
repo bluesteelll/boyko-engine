@@ -31,7 +31,19 @@ Fail-closed (exit 1, RED — never a skip)
   lies in another checkout, or if the dep-info file is missing. A newer input is always curable by
   `cargo build`, because cargo's own fingerprint tracks the same list (a commit-time or tracked-file
   mtime test is not: committing, or editing a test, would red an image cargo will never relink);
-* the output does not parse, or `.text` is 0.
+* the output does not parse, or `.text`, `.rdata` or `Total` is missing or 0 (a banded section read
+  as 0 would disable the band on the next row);
+* the invocation is not exactly one of `--record` / `--compare` (a run that compares nothing must
+  not print PASS), or `--rung` / `--baseline` / `--note` are given without `--record`; a usage error
+  is exit 1, never argparse's 2, which is this script's HOLD;
+* the record path resolves outside the tree this script lives in. A relative `--record` /
+  `--compare` is taken against THIS tree, never the working directory: the agent harness resets the
+  working directory to another checkout after every call, so a cwd-relative record would be read
+  from — or appended to — a tree that is not the one measured;
+* under `--compare`, the record is absent or has no data row: a comparison against nothing is not
+  a PASS (the first row is written with `--record --baseline`);
+* the record, wherever it exists, has no header row, a header other than the columns below, a data
+  row with a different cell count, or a banded cell that is not a positive integer.
 
 What a row identifies
 ---------------------
@@ -43,9 +55,9 @@ Record AFTER the rung's code commit and commit the row separately, and the row r
 Usage
 -----
     python scripts/ug16_linked_size.py --image D:/wt/_targets/ui-msvc/release/boyko_demo.exe \
-        [--record docs/measurements/ug16-linked-size.tsv --rung B2 [--baseline]] \
-        [--compare docs/measurements/ug16-linked-size.tsv] [--llvm-size PATH] \
-        [--toolchain stable-x86_64-pc-windows-msvc] [--note TEXT]
+        (--record docs/measurements/ug16-linked-size.tsv --rung B2 [--baseline] [--note TEXT]
+         | --compare docs/measurements/ug16-linked-size.tsv) \
+        [--llvm-size PATH] [--toolchain stable-x86_64-pc-windows-msvc]
 
 Exit: 0 PASS / recorded, 1 RED, 2 HOLD (band exceeded; owner's written acceptance required).
 No timing of any kind is taken; binary size is not timing.
@@ -75,6 +87,15 @@ COLUMNS = (
 def red(msg: str) -> NoReturn:
     print(f"UG-16 RED: {msg}")
     sys.exit(1)
+
+
+class Parser(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error, and 2 is this script's HOLD: a caller reading the exit
+    code alone would take a mistyped invocation for a band excursion awaiting the owner."""
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stdout)
+        red(f"usage: {message}")
 
 
 def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -114,8 +135,8 @@ def sections(tool: Path, image: Path) -> dict[str, int]:
         parts = line.split()
         if len(parts) >= 2 and parts[1].isdigit() and (parts[0].startswith((".", "_")) or parts[0] == "Total"):
             out[parts[0]] = int(parts[1])
-    if out.get(".text", 0) == 0 or "Total" not in out:
-        red(f"could not parse a non-zero `.text` and a `Total` from llvm-size -A -d:\n{p.stdout}")
+    if any(out.get(name, 0) == 0 for name in (*BANDED, "Total")):
+        red(f"could not parse a non-zero {', '.join(f'`{n}`' for n in (*BANDED, 'Total'))} from llvm-size -A -d:\n{p.stdout}")
     return out
 
 
@@ -197,37 +218,84 @@ def check_image(image: Path) -> float:
     return mtime
 
 
+def record_path(p: Path, flag: str) -> Path:
+    """The record is a file of the tree this script measures: a relative path is taken against that
+    tree, not the working directory, and a path resolving anywhere else is RED."""
+    repo = REPO.resolve()
+    rp = (p if p.is_absolute() else repo / p).resolve()
+    if not rp.is_relative_to(repo):
+        red(f"{flag} `{p}` resolves to `{rp}`, outside this tree ({repo}) — the record belongs to the tree it measures")
+    if rp.exists() and not rp.is_file():
+        red(f"{flag} `{rp}` exists and is not a file")
+    return rp
+
+
 def read_rows(tsv: Path) -> list[dict[str, str]]:
+    """The record's data rows; `[]` only for a file that does not exist yet (which only
+    `--record --baseline` may then create). A file that exists is held to its shape."""
     if not tsv.exists():
         return []
     rows = []
     header: list[str] | None = None
-    for line in tsv.read_text(encoding="utf-8").splitlines():
+    for lineno, line in enumerate(tsv.read_text(encoding="utf-8").splitlines(), 1):
         if not line or line.startswith("#"):
             continue
         cells = line.split("\t")
         if header is None:
             header = cells
             if tuple(header) != COLUMNS:
-                red(f"{tsv}: header {header} is not {list(COLUMNS)}")
+                red(f"{tsv}:{lineno}: header {header} is not {list(COLUMNS)}")
             continue
-        rows.append(dict(zip(header, cells)))
+        if len(cells) != len(COLUMNS):
+            red(f"{tsv}:{lineno}: {len(cells)} cell(s), the header has {len(COLUMNS)}")
+        row = dict(zip(header, cells))
+        for col in ("text", "rdata", "total"):
+            if not row[col].isdecimal() or int(row[col]) == 0:
+                red(f"{tsv}:{lineno}: `{col}` is `{row[col]}`, not a positive integer — the band cannot be applied against it")
+        rows.append(row)
+    if header is None:
+        red(f"{tsv} exists but has no header row")
     return rows
 
 
 def main() -> int:
     # The messages carry non-ASCII punctuation; a redirected Windows console would re-encode them.
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--image", required=True, type=Path)
     ap.add_argument("--llvm-size", type=Path)
     ap.add_argument("--toolchain", default="stable-x86_64-pc-windows-msvc")
-    ap.add_argument("--record", type=Path, help="append a row to this TSV")
-    ap.add_argument("--compare", type=Path, help="compare against this TSV's last row without recording")
-    ap.add_argument("--rung", help="the rung the recorded row belongs to")
-    ap.add_argument("--baseline", action="store_true", help="first row of an empty record (rung B2)")
-    ap.add_argument("--note", default="")
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--record", type=Path, help="append a row to this TSV (a file of this tree)")
+    mode.add_argument("--compare", type=Path, help="compare against this TSV's last row without recording")
+    ap.add_argument("--rung", help="the rung the recorded row belongs to (--record only)")
+    ap.add_argument("--baseline", action="store_true", help="first row of an empty record, rung B2 (--record only)")
+    ap.add_argument("--note", default="", help="free text for the recorded row (--record only)")
     a = ap.parse_args()
+
+    # The record is settled before anything is measured, so no verdict is ever printed over a
+    # comparison that had nothing to compare against.
+    if a.compare:
+        if a.rung or a.baseline or a.note:
+            ap.error("--rung / --baseline / --note apply only to --record")
+        tsv = record_path(a.compare, "--compare")
+        if not tsv.is_file():
+            red(f"--compare record `{tsv}` does not exist — nothing to compare against, so the band cannot be applied")
+        rows = read_rows(tsv)
+        if not rows:
+            red(
+                f"--compare record `{tsv}` has no data row — nothing to compare against, so the band cannot be "
+                "applied (the first row is written with --record --baseline)"
+            )
+    else:
+        if not a.rung:
+            red("--record needs --rung")
+        tsv = record_path(a.record, "--record")
+        rows = read_rows(tsv)
+        if a.baseline and rows:
+            red(f"--baseline is legal only on an empty record; {tsv} has {len(rows)} row(s)")
+        if not a.baseline and not rows:
+            red(f"{tsv} has no rows: the first row is written with --baseline")
 
     tool = a.llvm_size or discover_tool(a.toolchain)
     if not tool.is_file():
@@ -241,35 +309,29 @@ def main() -> int:
     print(f"UG-16 image {image}")
     print(f"      tool  {tool} (LLVM {version}), toolchain {a.toolchain}")
     print(f"      tree  head={head} dirty={dirty} tree_id={tree_id}")
+    print(f"      record {tsv}")
     print(f"{'section':<12}{'size':>12}")
     for name, size in secs.items():
         print(f"{name:<12}{size:>12}")
 
-    tsv = a.record or a.compare
-    rows = read_rows(tsv) if tsv else []
     verdict = "PASS"
     if rows:
         prev = rows[-1]
         print(f"against the last row (rung {prev['rung']}, head {prev['head'][:12]}):")
         for name, col in ((".text", "text"), (".rdata", "rdata"), ("Total", "total")):
+            # Both sides are positive: `read_rows` and `sections` RED on a zero or missing cell.
             old = int(prev[col])
-            new = secs.get(name, 0)
-            pct = (new - old) / old * 100 if old else float("inf")
+            new = secs[name]
             mark = ""
-            if name in BANDED and old and (new - old) / old > BAND:
+            if name in BANDED and (new - old) / old > BAND:
                 verdict = "HOLD"
                 mark = f"  > +{BAND:.0%} band"
-            print(f"  {name:<8} {old:>12} -> {new:>12}  delta {new - old:+d} B ({pct:+.4f} %){mark}")
-    elif tsv:
-        print(f"no previous row in {tsv}: nothing to compare against")
+            print(f"  {name:<8} {old:>12} -> {new:>12}  delta {new - old:+d} B ({(new - old) / old * 100:+.4f} %){mark}")
+    else:
+        # Reachable only under `--record --baseline`: `--compare` REDs above on an empty record.
+        print(f"no previous row in {tsv}: this is the baseline row")
 
     if a.record:
-        if not a.rung:
-            red("--record needs --rung")
-        if a.baseline and rows:
-            red(f"--baseline is legal only on an empty record; {a.record} has {len(rows)} row(s)")
-        if not a.baseline and not rows:
-            red(f"{a.record} has no rows: the first row is written with --baseline")
         if verdict == "HOLD":
             print("UG-16 HOLD: above the +1 % band — the row is NOT recorded; the owner's written acceptance is required")
             return 2
@@ -284,20 +346,20 @@ def main() -> int:
             "image": image.as_posix(),
             "image_mtime_utc": dt.datetime.fromtimestamp(mtime, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "text": str(secs[".text"]),
-            "rdata": str(secs.get(".rdata", 0)),
+            "rdata": str(secs[".rdata"]),
             "total": str(secs["Total"]),
             "sections": ";".join(f"{k}={v}" for k, v in secs.items() if k != "Total"),
             "note": a.note.replace("\t", " "),
         }
-        new_file = not a.record.exists()
-        with a.record.open("a", encoding="utf-8", newline="\n") as f:
+        new_file = not tsv.exists()
+        with tsv.open("a", encoding="utf-8", newline="\n") as f:
             if new_file:
                 f.write("# UG-16 (plan gate, rung B2): linked section sizes of boyko_demo, profile.release (fat LTO),\n")
                 f.write("# llvm-size -A -d. One row per rung; written by scripts/ug16_linked_size.py --record.\n")
                 f.write("# Band: .text or .rdata above +1 % vs the previous row is HOLD for the owner's written acceptance.\n")
                 f.write("\t".join(COLUMNS) + "\n")
             f.write("\t".join(row[c] for c in COLUMNS) + "\n")
-        print(f"UG-16 RECORDED: rung {a.rung} -> {a.record}")
+        print(f"UG-16 RECORDED: rung {a.rung} -> {tsv}")
         return 0
 
     print(f"UG-16 {verdict}")
