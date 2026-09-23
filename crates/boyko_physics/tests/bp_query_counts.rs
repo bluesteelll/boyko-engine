@@ -119,6 +119,12 @@ struct Counted {
     fallback_leaves: u64,
 }
 
+/// Copies a query stage's bytes out of the tree (the library hands them out borrowed), so the
+/// two kernels' stages can be held side by side.
+fn copy_stage<I: Iterator<Item = (u32, u32, u32)>>((stream, records): (&[u32], I)) -> (Vec<u32>, Vec<(u32, u32, u32)>) {
+    (stream.to_vec(), records.collect())
+}
+
 /// Drives `bodies` to the bench's steady state and counts that step's query pass, checking the
 /// step's pair set against AllPairs when `oracle` is set (not at 100k rows).
 fn count(label: &str, bodies: &[BodyState], oracle: bool) -> Counted {
@@ -149,8 +155,8 @@ fn count(label: &str, bodies: &[BodyState], oracle: bool) -> Counted {
 
     // G-LL1 on the bench's scene: the step's query stage under each kernel, byte for byte. The
     // leaf-list re-run leaves the pass's counts as the step's.
-    let leaf_list_stage = tree.query_stage(QueryKernel::LeafList);
-    let row_walk_stage = tree.query_stage(QueryKernel::RowWalk);
+    let leaf_list_stage = copy_stage(tree.query_stage(QueryKernel::LeafList));
+    let row_walk_stage = copy_stage(tree.query_stage(QueryKernel::RowWalk));
     assert!(!leaf_list_stage.0.is_empty(), "anti-vacuity: {label}'s stream holds segments");
     assert_eq!(leaf_list_stage.0, row_walk_stage.0, "{label}: G-LL1, the leaf list's stream is the per-row walk's");
     assert_eq!(leaf_list_stage.1, row_walk_stage.1, "{label}: G-LL1, the leaf list's records are the per-row walk's");

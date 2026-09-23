@@ -336,26 +336,30 @@ impl BroadphaseTree {
         self.ll_counts
     }
 
-    /// Re-runs the query stage of the last tree-path step under `kernel` and returns its bytes:
-    /// the stream (every Q and Wide row's segment) and every row's `(seg, nrev, nfwd)`. The
-    /// trees and the records' bits are the step's and the stage reads nothing else, so the
-    /// re-run is the step's stage under the other kernel; the selected kernel and the
-    /// structural counters are restored. Allocates the two returned buffers (a counting build's
-    /// driver, never a step).
-    pub fn query_stage(&mut self, kernel: QueryKernel) -> (Vec<u32>, Vec<(u32, u32, u32)>) {
+    /// Re-runs the query stage of the last tree-path step under `kernel` and returns its bytes,
+    /// borrowed from the tree: the stream (every Q and Wide row's segment) and every row's
+    /// `(seg, nrev, nfwd)`. The trees and the records' bits are the step's and the stage reads
+    /// nothing else, so the re-run is the step's stage under the other kernel; the selected
+    /// kernel and the structural counters are restored.
+    ///
+    /// Allocates nothing: a driver that compares two kernels' stages copies what it keeps, as
+    /// [`count_query_pass`](Self::count_query_pass) hands its rows to a sink (module docs, "How
+    /// a pass is counted").
+    pub fn query_stage(
+        &mut self,
+        kernel: QueryKernel,
+    ) -> (&[u32], impl Iterator<Item = (u32, u32, u32)> + '_) {
         let n = self.rec[usize::from(self.cur)].as_read_slice().len();
         let (kernel_before, diag_before) = (self.kernel, self.diag);
         self.kernel = kernel;
         self.query_all(n);
         self.kernel = kernel_before;
         self.diag = diag_before;
-        let stream = self.aux.as_read_slice().to_vec();
         let records = self.rec[usize::from(self.cur)]
             .as_read_slice()
             .iter()
-            .map(|r| (r.seg, r.nrev, r.nfwd))
-            .collect();
-        (stream, records)
+            .map(|r| (r.seg, r.nrev, r.nfwd));
+        (self.aux.as_read_slice(), records)
     }
 
     /// The active tree's shape (the Q rows of the last tree-path step).
