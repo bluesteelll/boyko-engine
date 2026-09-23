@@ -105,5 +105,14 @@ boyko-ui = { path = "../boyko_ui" }
 # through `boyko-ecs`; named so the tests can reach the pool type and the receipt.
 boyko-threadpool = { path = "../boyko_threadpool" }
 
+# Rung B2, E1 (plan gate UG-03's engine scene, the design's G-ALLOC): its own runner, like
+# `boyko_physics`'s `alloc_frame_census`. The counter is a process-global `#[global_allocator]`, and
+# libtest keeps a second thread alive beside the test that allocates on its own schedule; with
+# `harness = false` nothing else runs in the process.
+[[test]]
+name = "e1_engine_ui_alloc_census"
+path = "tests/e1_engine_ui_alloc_census.rs"
+harness = false
+
 [lints]
 workspace = true
