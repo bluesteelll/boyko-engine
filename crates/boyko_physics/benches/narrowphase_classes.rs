@@ -43,6 +43,9 @@
 //!   (whether a box pair has a manifold is a function of the two poses alone, so the hint cannot
 //!   change it).
 //! * **The design's J counts:** separated and touching within 5 % of 5,037 and 4,524 (P0b).
+//! * **The carried separating axis (L9 C2):** the pairs the step's narrowphase rejected by the
+//!   separating axis their previous step carried (`Manifolds::separated_axis_hits`, the SAT did
+//!   not run for them) are some of the separated pairs, and on a pile at rest there are some.
 //! * **Moving scene:** `rain` has fast pairs.
 //! * **Timed classes:** every class a scene times holds at least one pair.
 //!
@@ -343,6 +346,8 @@ struct Snapshot {
     hints: Vec<Option<usize>>,
     /// The step's solver manifold count.
     manifolds: usize,
+    /// The step's pairs its carried separating axis rejected (L9 C2).
+    sep_axis_hits: usize,
 }
 
 /// The probe's capture: filled by [`snapshot_probe`] on an armed step.
@@ -353,6 +358,7 @@ struct Probe {
     pairs: Vec<(BodyIndex, BodyIndex)>,
     hints: Vec<Option<usize>>,
     manifolds: usize,
+    sep_axis_hits: usize,
 }
 
 /// Runs after the narrowphase and before the constraint graph, so on an armed step it copies
@@ -374,6 +380,7 @@ fn snapshot_probe(
     probe.pairs = pairs.pairs().to_vec();
     probe.hints = pairs.pairs().iter().map(|&(a, b)| manifolds.box_axis_cache.get(a, b)).collect();
     probe.manifolds = manifolds.manifolds().len();
+    probe.sep_axis_hits = manifolds.separated_axis_hits();
 }
 
 /// Steps the scene on the colored schedule (one worker, sleeping off, AllPairs) and snapshots
@@ -426,6 +433,7 @@ fn snapshot(spec: &SceneSpec) -> Snapshot {
         pairs: probe.pairs,
         hints: probe.hints,
         manifolds: probe.manifolds,
+        sep_axis_hits: probe.sep_axis_hits,
     }
 }
 
@@ -672,6 +680,8 @@ fn indices(classes: &[Class], want: &[Class]) -> Vec<u32> {
 struct SceneReport {
     name: &'static str,
     counts: Counts,
+    /// The step's pairs its carried separating axis rejected (L9 C2).
+    sep_axis_hits: usize,
     timings: Vec<(&'static str, usize, f64)>,
 }
 
@@ -688,6 +698,20 @@ fn run_scene(spec: &SceneSpec, reps: usize, full: bool) -> SceneReport {
     };
     if spec.kind == SceneKind::Rain {
         assert!(counts.fast() > 0, "{}: a moving scene must have fast pairs", spec.name);
+    }
+    assert!(
+        snap.sep_axis_hits <= counts.separated(),
+        "{}: {} pairs rejected by a carried separating axis, but only {} are separated",
+        spec.name,
+        snap.sep_axis_hits,
+        counts.separated()
+    );
+    if spec.kind != SceneKind::Rain {
+        assert!(
+            snap.sep_axis_hits > 0,
+            "{}: no carried separating axis held on a pile (the carry is not live)",
+            spec.name
+        );
     }
     if full && spec.kind == SceneKind::Jolt {
         for (what, got, want) in [
@@ -716,7 +740,7 @@ fn run_scene(spec: &SceneSpec, reps: usize, full: bool) -> SceneReport {
         .collect();
     assert!(!all.is_empty(), "{}: the scene has no candidate pairs (void)", spec.name);
     timings.push(("stream", all.len(), ns_per_pair(&snap, &all, reps)));
-    SceneReport { name: spec.name, counts, timings }
+    SceneReport { name: spec.name, counts, sep_axis_hits: snap.sep_axis_hits, timings }
 }
 
 /// The design's refutation reading from J's counts and costs (module docs, "Timing"): the low
@@ -800,6 +824,13 @@ fn main() -> ExitCode {
             c.first_axis[2],
             c.early_exit_axes as f64 / separated
         );
+        println!(
+            "{}: the carried separating axis rejected {} of the {} separated pairs without the SAT \
+             (L9 C2)",
+            r.name,
+            r.sep_axis_hits,
+            c.separated()
+        );
         for &(label, n, ns) in &r.timings {
             println!(
                 "{}: {label} {n} pairs {ns:.1} ns/pair (NOT A RESULT: timed on a shared machine; \
@@ -820,7 +851,8 @@ fn main() -> ExitCode {
         json.push_str(&format!(
             "{{\"scene\":\"{}\",\"pairs\":{},\"non_box\":{},\"slow_separated\":{},\
              \"fast_separated\":{},\"slow_touching\":{},\"fast_touching\":{},\
-             \"first_axis\":[{},{},{}],\"early_exit_axes\":{},\"timings_not_a_result\":{{",
+             \"first_axis\":[{},{},{}],\"early_exit_axes\":{},\"sep_axis_hits\":{},\
+             \"timings_not_a_result\":{{",
             r.name,
             c.pairs,
             c.non_box,
@@ -831,7 +863,8 @@ fn main() -> ExitCode {
             c.first_axis[0],
             c.first_axis[1],
             c.first_axis[2],
-            c.early_exit_axes
+            c.early_exit_axes,
+            r.sep_axis_hits
         ));
         for (j, &(label, n, ns)) in r.timings.iter().enumerate() {
             if j > 0 {

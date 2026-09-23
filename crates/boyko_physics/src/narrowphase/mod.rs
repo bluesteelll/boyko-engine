@@ -9,11 +9,14 @@
 //!
 //! Two modules here are not generators. `dispatch` is the parallel narrowphase (L5): it runs
 //! the same per-pair collision over contiguous chunks of the candidate pairs on the ambient
-//! pool's workers and joins their output back in pair order. Its `unsafe` is the three per-row
+//! pool's workers and joins their output back in pair order. Its `unsafe` is the four per-row
 //! writes of a chunk into rows no other chunk owns; its public surface is the three chunking
-//! constants re-exported below. `reuse` is contact reuse (L9): today the per-row orientation
-//! frames a box pair reads instead of converting two quaternions (D2), filled once per step at
-//! the entry of either path; it has no `unsafe`.
+//! constants re-exported below. `reuse` and `carry` are contact reuse (L9): `reuse` holds the
+//! per-row orientation frames a box pair reads instead of converting two quaternions (D2),
+//! filled once per step at the entry of either path; `carry` holds the per-pair tags each step
+//! writes and the next step joins by the two bodies' rows (D9), which carry a separated box
+//! pair's separating axis so the SAT runs only once it stops separating (L9a (ii)). Neither has
+//! `unsafe`; the chunks' tag writes are `dispatch`'s.
 //!
 //! # OBB convention
 //!
@@ -70,6 +73,7 @@
 
 pub mod axis_cache;
 pub mod box_box;
+pub(crate) mod carry;
 pub(crate) mod dispatch;
 pub(crate) mod reuse;
 pub mod sphere_box;

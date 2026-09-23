@@ -292,6 +292,29 @@ fn separates(cand: Option<AxisCandidate>) -> bool {
     matches!(cand, Some(c) if c.depth < 0.0)
 }
 
+/// Whether canonical SAT axis `axis` (`0..15`) still separates the boxes (L9a (ii)): the pair's
+/// separating axis of the previous step, evaluated first on this step's boxes.
+///
+/// The axis is built and evaluated exactly as [`sat`] builds and evaluates its candidate of the
+/// same index — the same raw axis (a face column, or `a.axes[ea].cross(b.axes[eb])` for
+/// `axis = 6 + 3·ea + eb`) through the same [`eval_axis`], judged by the same [`separates`] — so
+/// `true` means the SAT has a negative candidate and reports the pair separated. `false` (the axis
+/// overlaps now, or is degenerate) says nothing, and the SAT runs.
+#[inline]
+pub(crate) fn sep_still_holds(a: &Obb, b: &Obb, axis: u8) -> bool {
+    let i = usize::from(axis);
+    debug_assert!(i < SAT_AXES, "invariant: a carried separating axis is 0..15");
+    let cand = if i < 3 {
+        eval_axis(a, b, a.axes[i], SatClass::FaceA(i), i)
+    } else if i < 6 {
+        eval_axis(a, b, b.axes[i - 3], SatClass::FaceB(i - 3), i)
+    } else {
+        let (ea, eb) = ((i - 6) / 3, (i - 6) % 3);
+        eval_axis(a, b, a.axes[ea].cross(b.axes[eb]), SatClass::Edge { a: ea, b: eb }, i)
+    };
+    separates(cand)
+}
+
 /// Runs the 15-axis SAT and returns the shallowest face axis, the shallowest edge
 /// axis and last frame's axis re-evaluated, or why there is no overlap (P2 W4): the first
 /// separating axis in canonical order, or no face axis at all.
@@ -716,7 +739,9 @@ pub fn box_box_contact(
     let b = Obb::new(b_center, b_rotation, b_half);
     match box_box_classify(&a, &b, body_a, body_b, last_axis) {
         BoxBoxOutcome::Contact(c) => Some(c),
-        BoxBoxOutcome::Separated(_) | BoxBoxOutcome::NoContact => None,
+        BoxBoxOutcome::Separated(_)
+        | BoxBoxOutcome::StillSeparated(_)
+        | BoxBoxOutcome::NoContact => None,
     }
 }
 
@@ -727,9 +752,34 @@ pub(crate) enum BoxBoxOutcome {
     /// The SAT separated the boxes on this canonical axis (`0..15`), the first negative one in
     /// canonical order.
     Separated(u8),
+    /// The pair's carried separating axis (`0..15`) still separates the boxes, so the SAT did not
+    /// run (L9a (ii), [`box_box_classify_carried`]).
+    StillSeparated(u8),
     /// No contact for any other reason: no face axis (a degenerate rotation), a degenerate
     /// reference face, or a fallback with no edge axis.
     NoContact,
+}
+
+/// [`box_box_classify`] behind the pair's carried separating axis (L9a (ii), D1): when `sep_axis`
+/// names an axis that still separates the boxes ([`sep_still_holds`]), the pair is separated and
+/// neither the hint nor the SAT is consulted; otherwise the classifier runs on the hint `hint`
+/// returns. Contact or no contact is the classifier's answer either way (lemma L9-L2), and the
+/// narrowphase collides every box pair through this one function.
+#[inline]
+pub(crate) fn box_box_classify_carried(
+    a: &Obb,
+    b: &Obb,
+    body_a: BodyIndex,
+    body_b: BodyIndex,
+    sep_axis: Option<u8>,
+    hint: impl FnOnce() -> Option<usize>,
+) -> BoxBoxOutcome {
+    if let Some(axis) = sep_axis
+        && sep_still_holds(a, b, axis)
+    {
+        return BoxBoxOutcome::StillSeparated(axis);
+    }
+    box_box_classify(a, b, body_a, body_b, hint())
 }
 
 /// Classifies the box pair `(a, b)` and, when they touch, generates its contact (P2 W4; L9a):
@@ -2935,6 +2985,9 @@ mod tests {
             match box_box_classify(&a, &b, A, B, p.hint) {
                 BoxBoxOutcome::Contact(c) => (Some(contact_words(&c)), None),
                 BoxBoxOutcome::Separated(axis) => (None, Some(axis)),
+                BoxBoxOutcome::StillSeparated(_) => {
+                    panic!("box_box_classify reads no carried axis")
+                }
                 BoxBoxOutcome::NoContact => (None, None),
             }
         });
@@ -3079,6 +3132,294 @@ mod tests {
         assert!(contact > 0, "no case produced a contact");
         assert!(zero > 0, "no case produced a contact at depth exactly zero (the M-a1 witness)");
         assert!(separated > 0, "no case was separated");
+    }
+
+    // ── G-L9a-3: the carried separating axis against the pre-L9 oracle ───────────────────────
+
+    /// The raw (unnormalised) axis of canonical index `axis` on boxes `a` and `b`: the face column,
+    /// or the edge cross product before [`eval_axis`] normalises it.
+    fn raw_axis(a: &Obb, b: &Obb, axis: usize) -> Vec3 {
+        if axis < 3 {
+            a.axes[axis]
+        } else if axis < 6 {
+            b.axes[axis - 3]
+        } else {
+            let (ea, eb) = ((axis - 6) / 3, (axis - 6) % 3);
+            a.axes[ea].cross(b.axes[eb])
+        }
+    }
+
+    /// The depth mutation M-a5 would test: the separation along the RAW axis, with no
+    /// normalisation and no degeneracy guard. Mathematically it has the normalised depth's sign;
+    /// in `f32` the two roundings can disagree at a knife edge.
+    fn raw_depth(a: &Obb, b: &Obb, axis: usize) -> f32 {
+        let raw = raw_axis(a, b, axis);
+        let delta = b.center - a.center;
+        a.projection_radius(raw) + b.projection_radius(raw) - delta.dot(raw).abs()
+    }
+
+    /// What one G-L9a-3 case exercised.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum L9a3Seen {
+        /// The carried axis still separated the boxes: the SAT did not run.
+        Hit,
+        /// A carried axis that no longer separates, then the SAT separated the pair.
+        StaleThenSeparated,
+        /// A carried axis that no longer separates, then a contact.
+        StaleThenContact,
+        /// No carried axis.
+        NoCarry,
+        /// Both sides panicked (a degenerate reference face's debug assertion).
+        BothPanicked,
+    }
+
+    /// Witnesses the two mutations need, counted per case.
+    #[derive(Clone, Copy, Debug, Default)]
+    struct L9a3Witness {
+        /// A contact whose carried axis has depth exactly zero (M-a4 calls it separated).
+        zero_depth_carried: u64,
+        /// A contact whose carried axis has a non-negative normalised depth and a negative raw
+        /// one (M-a5 calls it separated).
+        raw_sign_flip_carried: u64,
+    }
+
+    /// One G-L9a-3 case: [`box_box_classify_carried`] on frame-built boxes with a carried axis
+    /// `sep` against the pre-L9 oracle (which carries nothing) — the contact's words and axis, or
+    /// no contact; a hit must name an axis whose depth is negative on the oracle's boxes.
+    fn l9a3_case(p: L9aPose, sep: Option<u8>, w: &mut L9a3Witness) -> Result<L9a3Seen, String> {
+        let oracle = std::panic::catch_unwind(|| {
+            pre_l9::box_box_contact(A, B, p.ca, p.qa, p.ha, p.cb, p.qb, p.hb, p.hint)
+                .map(|c| contact_words(&c))
+        });
+        let kernel = std::panic::catch_unwind(|| {
+            let a = Obb::from_frame(p.ca, &RowFrame::of(p.qa), p.ha);
+            let b = Obb::from_frame(p.cb, &RowFrame::of(p.qb), p.hb);
+            match box_box_classify_carried(&a, &b, A, B, sep, || p.hint) {
+                BoxBoxOutcome::Contact(c) => (Some(contact_words(&c)), None, false),
+                BoxBoxOutcome::Separated(axis) => (None, Some(axis), false),
+                BoxBoxOutcome::StillSeparated(axis) => (None, Some(axis), true),
+                BoxBoxOutcome::NoContact => (None, None, false),
+            }
+        });
+        let (oracle, (kernel, separated, hit)) = match (oracle, kernel) {
+            (Ok(o), Ok(k)) => (o, k),
+            (Err(_), Err(_)) => return Ok(L9a3Seen::BothPanicked),
+            (o, k) => {
+                return Err(format!(
+                    "panic mismatch: oracle panicked {}, carried classify {}; sep {sep:?}, {p:?}",
+                    o.is_err(),
+                    k.is_err()
+                ));
+            }
+        };
+        if kernel != oracle {
+            return Err(format!(
+                "outcome differs from the pre-L9 oracle: oracle {oracle:?}, carried classify \
+                 {kernel:?} (separated on {separated:?}, hit {hit}); sep {sep:?}, {p:?}"
+            ));
+        }
+        let (a, b) = (pre_l9::obb(p.ca, p.qa, p.ha), pre_l9::obb(p.cb, p.qb, p.hb));
+        let cands = candidates_of(&a, &b);
+        if hit {
+            let axis = separated.expect("invariant: a hit names its axis");
+            if sep != Some(axis) || !matches!(cands[usize::from(axis)], Some(c) if c.depth < 0.0) {
+                return Err(format!(
+                    "a hit on axis {axis} (carried {sep:?}) whose oracle depth is {:?}; {p:?}",
+                    cands[usize::from(axis)].map(|c| c.depth)
+                ));
+            }
+            return Ok(L9a3Seen::Hit);
+        }
+        let Some(s) = sep else {
+            return Ok(L9a3Seen::NoCarry);
+        };
+        let s = usize::from(s);
+        if oracle.is_some() {
+            let depth = cands[s].map(|c| c.depth);
+            w.zero_depth_carried += u64::from(depth == Some(0.0));
+            let flips = matches!(depth, Some(d) if d >= 0.0) && raw_depth(&a, &b, s) < 0.0;
+            w.raw_sign_flip_carried += u64::from(flips);
+            Ok(L9a3Seen::StaleThenContact)
+        } else {
+            Ok(L9a3Seen::StaleThenSeparated)
+        }
+    }
+
+    /// The largest centre offset `t` along `dir` (from `lo`, which overlaps, towards `hi`, which
+    /// does not) at which candidate `axis` of the oracle's boxes still has depth `>= 0`: a
+    /// bisection over `f32`, so the pair lands on the knife edge of that axis.
+    fn knife_edge(p: &L9aPose, dir: Vec3, axis: usize, mut lo: f32, mut hi: f32) -> f32 {
+        let depth = |t: f32| {
+            let a = pre_l9::obb(p.ca, p.qa, p.ha);
+            let b = pre_l9::obb(p.ca + dir * t, p.qb, p.hb);
+            candidates_of(&a, &b)[axis].map_or(f32::NAN, |c| c.depth)
+        };
+        for _ in 0..80 {
+            let mid = 0.5 * (lo + hi);
+            if mid == lo || mid == hi {
+                break;
+            }
+            if depth(mid) >= 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// G-L9a-3 (`levers/L9-contact-reuse/02-DESIGN-REV1.md`, commit C2): a box pair's carried
+    /// separating axis, arbitrary and mostly STALE, never changes the answer —
+    /// [`box_box_classify_carried`] on frame-built boxes returns the pre-L9 kernel's contact bit
+    /// for bit, or no contact, and a pair it reports separated without the SAT has a negative
+    /// depth on the carried axis. Four arms, each with a random hint: arbitrary poses (the carried
+    /// axis the pair's own first negative axis half the time, any axis or none otherwise);
+    /// exactly touching integer lattices (the carried axis the touching face half the time);
+    /// knife-edge face contacts on arbitrary orientations (the offset bisected in `f32` to the
+    /// last one whose depth on the carried face is not negative); degenerate extents.
+    ///
+    /// Mutations recorded red (C2's red-first log): M-a4, the carried check accepting
+    /// `depth <= 0`, calls the lattice's zero-depth contacts separated; M-a5, the carried check
+    /// on the raw (unnormalised) axis, calls a knife-edge contact separated where the two
+    /// roundings disagree in sign. Each has a witness counted here, so the gate cannot pass
+    /// vacuously.
+    #[test]
+    #[cfg(not(miri))]
+    fn l9a_carried_separating_axis_equals_the_pre_l9_kernel() {
+        use proptest::prelude::*;
+        use std::cell::Cell;
+
+        let seen = Cell::new([0u64; 5]);
+        let witness = Cell::new(L9a3Witness::default());
+        let config = ProptestConfig { cases: 4096, failure_persistence: None, ..ProptestConfig::default() };
+        proptest!(config, |(seed in any::<u64>(), arm in 0u8..4)| {
+            let mut d = Draw(seed | 1);
+            let random_sep = |d: &mut Draw| {
+                let s = d.below(SAT_AXES as u64 + 1) as u8;
+                (usize::from(s) < SAT_AXES).then_some(s)
+            };
+            let (pose, sep) = match arm {
+                0 => {
+                    let ca = Vec3::new(d.range(-30.0, 30.0), d.range(0.0, 30.0), d.range(-30.0, 30.0));
+                    let pose = L9aPose {
+                        ca,
+                        qa: d.rotation(),
+                        ha: Vec3::new(d.range(0.2, 1.5), d.range(0.2, 1.5), d.range(0.2, 1.5)),
+                        cb: ca + Vec3::new(d.range(-2.5, 2.5), d.range(-2.5, 2.5), d.range(-2.5, 2.5)),
+                        qb: d.rotation(),
+                        hb: Vec3::new(d.range(0.2, 1.5), d.range(0.2, 1.5), d.range(0.2, 1.5)),
+                        hint: d.hint(),
+                    };
+                    let first_negative = {
+                        let (a, b) = (pre_l9::obb(pose.ca, pose.qa, pose.ha), pre_l9::obb(pose.cb, pose.qb, pose.hb));
+                        candidates_of(&a, &b).iter().position(|c| matches!(c, Some(c) if c.depth < 0.0))
+                    };
+                    let sep = match first_negative {
+                        Some(s) if d.below(2) == 0 => Some(s as u8),
+                        _ => random_sep(&mut d),
+                    };
+                    (pose, sep)
+                }
+                1 => {
+                    let ha = Vec3::new(d.int(1, 3), d.int(1, 3), d.int(1, 3));
+                    let hb = Vec3::new(d.int(1, 3), d.int(1, 3), d.int(1, 3));
+                    let sum = [ha.x + hb.x, ha.y + hb.y, ha.z + hb.z];
+                    let touch = d.below(3) as usize;
+                    let mut off = [0.0f32; 3];
+                    for (i, o) in off.iter_mut().enumerate() {
+                        let s = sum[i] as i32;
+                        *o = if i == touch {
+                            if d.below(2) == 0 { sum[i] } else { -sum[i] }
+                        } else {
+                            d.int(-s - 1, s + 1)
+                        };
+                    }
+                    let ca = Vec3::new(d.int(-40, 40), d.int(0, 40), d.int(-40, 40));
+                    let pose = L9aPose {
+                        ca,
+                        qa: d.exact_rotation(),
+                        ha,
+                        cb: ca + Vec3::new(off[0], off[1], off[2]),
+                        qb: d.exact_rotation(),
+                        hb,
+                        hint: d.hint(),
+                    };
+                    // Under a half turn a box's face `touch` is still the world axis `touch`.
+                    let sep = match d.below(4) {
+                        0 => Some(touch as u8),
+                        1 => Some(3 + touch as u8),
+                        _ => random_sep(&mut d),
+                    };
+                    (pose, sep)
+                }
+                2 => {
+                    let mut pose = L9aPose {
+                        ca: Vec3::new(d.range(-30.0, 30.0), d.range(0.0, 30.0), d.range(-30.0, 30.0)),
+                        qa: d.rotation(),
+                        ha: Vec3::new(d.range(0.3, 1.5), d.range(0.3, 1.5), d.range(0.3, 1.5)),
+                        cb: Vec3::ZERO,
+                        qb: if d.below(2) == 0 { Quat::IDENTITY } else { d.rotation() },
+                        hb: Vec3::new(d.range(0.3, 1.5), d.range(0.3, 1.5), d.range(0.3, 1.5)),
+                        hint: d.hint(),
+                    };
+                    if d.below(2) == 0 {
+                        pose.qb = pose.qa;
+                    }
+                    // B above A's face `i`, a little off its centre, pushed out along the face
+                    // normal to the knife edge of that face's axis.
+                    let a = pre_l9::obb(pose.ca, pose.qa, pose.ha);
+                    let b0 = pre_l9::obb(Vec3::ZERO, pose.qb, pose.hb);
+                    let i = d.below(3) as usize;
+                    let (j, k) = ((i + 1) % 3, (i + 2) % 3);
+                    let lateral = a.axes[j] * d.range(-0.3, 0.3) * a.half[j]
+                        + a.axes[k] * d.range(-0.3, 0.3) * a.half[k];
+                    let n = a.axes[i];
+                    let reach = a.half[i] + b0.projection_radius(n);
+                    let dir = n + lateral * (1.0 / reach);
+                    let t = knife_edge(&pose, dir, i, 0.9 * reach, 1.1 * reach);
+                    pose.cb = pose.ca + dir * t;
+                    (pose, Some(i as u8))
+                }
+                _ => {
+                    let ha = d.degenerate_half();
+                    let hb = d.degenerate_half();
+                    let pose = L9aPose {
+                        ca: Vec3::new(d.range(-1.5, 1.5), d.range(-1.5, 1.5), d.range(-1.5, 1.5)),
+                        qa: if d.below(2) == 0 { d.exact_rotation() } else { d.rotation() },
+                        ha,
+                        cb: Vec3::ZERO,
+                        qb: if d.below(2) == 0 { d.exact_rotation() } else { d.rotation() },
+                        hb,
+                        hint: d.hint(),
+                    };
+                    (pose, random_sep(&mut d))
+                }
+            };
+            let mut w = witness.get();
+            match l9a3_case(pose, sep, &mut w) {
+                Ok(s) => {
+                    let mut counts = seen.get();
+                    counts[s as usize] += 1;
+                    seen.set(counts);
+                    witness.set(w);
+                }
+                Err(msg) => prop_assert!(false, "arm {}, seed {:#x}: {}", arm, seed, msg),
+            }
+        });
+        let [hit, stale_separated, stale_contact, no_carry, panicked] = seen.get();
+        let w = witness.get();
+        println!(
+            "G-L9a-3 coverage: hit {hit}, stale then separated {stale_separated}, stale then \
+             contact {stale_contact}, no carry {no_carry}, both panicked {panicked}; {w:?}"
+        );
+        assert!(hit > 0, "no carried axis still separated its pair");
+        assert!(stale_separated > 0, "no stale carried axis fell back to a separated SAT");
+        assert!(stale_contact > 0, "no stale carried axis fell back to a contact");
+        assert!(w.zero_depth_carried > 0, "no contact carried an axis of depth exactly zero (the M-a4 witness)");
+        assert!(
+            w.raw_sign_flip_carried > 0,
+            "no contact carried an axis whose raw depth is negative (the M-a5 witness)"
+        );
     }
 
     impl ContactPoint {

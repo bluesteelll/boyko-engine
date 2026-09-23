@@ -72,7 +72,8 @@ use crate::components::{ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use crate::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use crate::math::Vec3;
 use crate::narrowphase::axis_cache::SAT_AXIS_COUNT;
-use crate::narrowphase::box_box::{BoxBoxOutcome, Obb, box_box_classify};
+use crate::narrowphase::box_box::{BoxBoxOutcome, Obb, box_box_classify_carried};
+use crate::narrowphase::carry::{CarryIn, PairTag};
 use crate::narrowphase::dispatch::try_parallel;
 use crate::narrowphase::feature_vertex_face;
 use crate::narrowphase::reuse::{RowFrame, fill_row_frames};
@@ -318,6 +319,10 @@ pub fn physics_gather(
 ///   It reads the gather's row identity to carry its static set through row
 ///   changes, and opens the four `phys_bp_*` profiling spans on every tree-path
 ///   step.
+///
+/// Before the arm runs, the previous step's list is kept as `pairs_prev` and the new list is
+/// stamped with this gather's sequence ([`ContactPairs::rotate`], L9 D9): the narrowphase's pair
+/// carry joins this step's pairs against it. All three arms fill the list the rotation hands them.
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
@@ -330,6 +335,8 @@ pub fn physics_broadphase(
 ) {
     let bodies = scratch.bodies();
     let pairs = &mut *pairs;
+    // L9 D9: before the kind match, so every arm fills the swapped-in list.
+    pairs.rotate(scratch.rows.gather_seq());
 
     match cfg.broadphase {
         // The shipped all-pairs loop, kept VERBATIM so the default path's asm is
@@ -406,6 +413,13 @@ pub fn physics_broadphase(
 /// The buffer is cleared and refilled each step; the hysteresis cache persists in
 /// place across frames (capacity reused).
 ///
+/// # The pair carry (L9 D9, `narrowphase/carry.rs`)
+///
+/// Every pair writes a tag, and the next step joins its pairs to those tags through the row
+/// identity: a box pair the SAT separated carries its separating axis, which the next step
+/// evaluates first, skipping the SAT while it still separates (L9a (ii), exact). The carry is
+/// classified before either path runs and stamped after, with the pair list its tags index.
+///
 /// # The serial loop and the parallel chunks (L5)
 ///
 /// With [`PhysicsConfig::parallel_narrowphase`] on (the default since L5 C4), the step
@@ -416,8 +430,8 @@ pub fn physics_broadphase(
 /// [`narrowphase_serial`], today's loop — when the flag is off, when no pool of at least
 /// two workers is attached, or when the pairs make fewer than two chunks. Both paths
 /// collide a pair through the one [`collide_pair`], and the parallel path's manifold
-/// stream, sensor stream and hysteresis table state equal the serial path's (the
-/// dispatch module's Lemma 3 and the axis cache's Lemmas 1 and 2).
+/// stream, sensor stream, pair tags and hysteresis table state equal the serial path's (the
+/// dispatch module's Lemma 3, the axis cache's Lemmas 1 and 2, and the carry's lemma L9-J).
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
@@ -428,7 +442,8 @@ pub fn physics_narrowphase(
     mut manifolds: ResMut<Manifolds>,
 ) {
     let bodies = scratch.bodies();
-    let pairs = pairs.pairs();
+    let contact_pairs = &*pairs;
+    let pairs = contact_pairs.pairs();
     let manifolds = &mut *manifolds;
     // Ensure the per-pair hysteresis cache can hold this frame's pairs; it is NOT
     // cleared (a single in-place table — this frame reads last frame's axes). When the
@@ -436,16 +451,20 @@ pub fn physics_narrowphase(
     // pre-read through the row identity map first, before any write of this step
     // (defect A, interim).
     let prefetched = manifolds.box_axis_cache.begin_frame_synced(pairs, bodies, &scratch.rows);
+    // L9 D9: how this step's pairs join the previous step's tags — classified here, before
+    // either path opens the carry, and stamped below, after the pair loop.
+    let carry = manifolds.pair_carry.source(contact_pairs, &scratch.rows);
     // L5: the flag is a request; the dispatch returns 0 whenever it runs no chunk, and
     // then the serial loop below produces the step's streams.
     let chunks = if cfg.parallel_narrowphase {
-        try_parallel(manifolds, bodies, pairs, prefetched)
+        try_parallel(manifolds, bodies, pairs, prefetched, carry)
     } else {
         0
     };
     if chunks == 0 {
-        narrowphase_serial(manifolds, bodies, pairs, prefetched);
+        narrowphase_serial_with(manifolds, bodies, pairs, prefetched, carry);
     }
+    manifolds.pair_carry.stamp(contact_pairs, &scratch.rows);
 
     // Profiling: the step's narrowphase work, counted after the loop from what it emitted,
     // so the loop itself carries no instrument. The point sum walks the solver's manifolds
@@ -459,33 +478,61 @@ pub fn physics_narrowphase(
     counter!(PHYS_NP_CHUNKS, chunks as u64);
 }
 
-/// The serial narrowphase loop: every candidate pair in `(min, max)` order, the
-/// manifold pushed into the solver buffer or the sensor-overlap buffer, and a box-box
-/// pair's chosen axis written into the hysteresis table in the same iteration. The
-/// per-row orientation frames are filled first (L9 D2).
-///
-/// The path a step takes whenever the parallel narrowphase does not dispatch, and the
-/// oracle that path's gates compare against. `prefetched` is what
-/// `BoxAxisCache::begin_frame_synced` returned for this frame.
+/// [`narrowphase_serial_with`] with no pair carry: every pair misses its join (and still writes
+/// its tag). For the tests' direct callers, which hold no `ContactPairs`; the next system step's
+/// carry is then a Reset.
+#[cfg(test)]
 pub(crate) fn narrowphase_serial(
     manifolds: &mut Manifolds,
     bodies: &[BodyState],
     pairs: &[(BodyIndex, BodyIndex)],
     prefetched: bool,
 ) {
-    // Three disjoint field borrows of one `Manifolds`: two refill views plus the
-    // hysteresis cache. The views are taken once for the whole pair loop, not per
-    // push.
-    let mut out = manifolds.manifolds.build_view();
+    narrowphase_serial_with(manifolds, bodies, pairs, prefetched, CarryIn::NONE);
+}
+
+/// The serial narrowphase loop: every candidate pair in `(min, max)` order, the
+/// manifold pushed into the solver buffer or the sensor-overlap buffer, the pair's tag
+/// written (L9 D9), and a box-box pair's chosen axis written into the hysteresis table
+/// in the same iteration. The per-row orientation frames are filled and the pair carry
+/// opened first (L9 D2, D9).
+///
+/// The path a step takes whenever the parallel narrowphase does not dispatch, and the
+/// oracle that path's gates compare against. `prefetched` is what
+/// `BoxAxisCache::begin_frame_synced` returned for this frame; `carry` is what
+/// `PairCarry::source` returned for it.
+pub(crate) fn narrowphase_serial_with(
+    manifolds: &mut Manifolds,
+    bodies: &[BodyState],
+    pairs: &[(BodyIndex, BodyIndex)],
+    prefetched: bool,
+    carry: CarryIn<'_>,
+) {
+    // Disjoint field borrows of one `Manifolds`: two refill views, the hysteresis cache,
+    // the frame column and the pair carry. The views are taken once for the whole pair
+    // loop, not per push.
+    let Manifolds {
+        manifolds: solver_out,
+        sensor_overlaps,
+        box_axis_cache: axis_cache,
+        row_frames,
+        pair_carry,
+        ..
+    } = manifolds;
+    let mut out = solver_out.build_view();
     out.clear();
     // S5: the sensor-overlap signal is rebuilt every step alongside the solver
     // buffer (capacity reused). Empty in any world with no `Sensor` id.
-    let mut sensor_out = manifolds.sensor_overlaps.build_view();
+    let mut sensor_out = sensor_overlaps.build_view();
     sensor_out.clear();
-    let axis_cache = &mut manifolds.box_axis_cache;
     // L9 D2: every box row's frame, once, before the first pair (or `None`: the pairs build
     // their frames per pair, the same bits).
-    let frames = fill_row_frames(&mut manifolds.row_frames, bodies, pairs.len());
+    let frames = fill_row_frames(row_frames, bodies, pairs.len());
+    // L9 D9: the previous step's tags, joined pair by pair with one monotone cursor.
+    let (join, tag_column) = pair_carry.open(carry, pairs.len());
+    let mut join = join.cursor();
+    let mut tag_view = tag_column.build_view();
+    let tags = tag_view.as_mut_slice();
 
     for (k, &(a, b)) in pairs.iter().enumerate() {
         let ba = &bodies[a.0 as usize];
@@ -498,12 +545,24 @@ pub(crate) fn narrowphase_serial(
         // the pre-S5 push).
         let is_overlap = ba.is_sensor || bb.is_sensor;
 
-        let (manifold, axis) =
-            collide_pair(a, b, ba, bb, frames, || axis_cache.read_hint(prefetched, k, a, b));
+        let (manifold, axis, tag) = collide_pair(
+            a,
+            b,
+            ba,
+            bb,
+            frames,
+            || join.prev_tag(a, b),
+            || axis_cache.read_hint(prefetched, k, a, b),
+        );
         if let Some(axis) = axis {
             // Persist this frame's chosen reference axis for next frame's
             // hysteresis bias (per body pair, deterministic).
             axis_cache.set(a, b, axis);
+        }
+        // Past the tag column's reserve a pair goes untagged, and the carry's stamp stays
+        // invalid (`PairCarry::stamp`), so no later step reads a tag this step did not write.
+        if let Some(slot) = tags.get_mut(k) {
+            *slot = tag;
         }
 
         if let Some(manifold) = manifold {
@@ -527,13 +586,15 @@ pub(crate) fn narrowphase_serial(
 }
 
 /// Collides one candidate pair `(a, b)` by the two bodies' shapes, returning the
-/// manifold (or `None` when the shapes do not touch) and, for a box-box pair that
-/// produced a contact, the SAT axis it chose.
+/// manifold (or `None` when the shapes do not touch), for a box-box pair that
+/// produced a contact the SAT axis it chose, and the pair's tag (L9 D9).
 ///
-/// A pure function of the two bodies, their frames and the hint, which is what lets the
-/// parallel narrowphase run it per pair on any thread. `hint` is called only for a box-box
-/// pair — the only generator that reads the hysteresis — so a caller's hint read costs
-/// nothing on the other shape pairs. Both narrowphase paths call this one function.
+/// A pure function of the two bodies, their frames, the carried tag and the hint, which is
+/// what lets the parallel narrowphase run it per pair on any thread. `prev` (the tag the
+/// pair's two bodies wrote in the previous step, through the join) and `hint` are called only
+/// for a box-box pair — the only generator that reads either — so they cost nothing on the
+/// other shape pairs, and `hint` is not called when the carried separating axis still
+/// separates the pair (L9a (ii)). Both narrowphase paths call this one function.
 ///
 /// `frames` is the step's per-row orientation frame column (L9 D2), or `None` on a step
 /// whose fill declined; a box pair then builds its two frames with the same
@@ -545,8 +606,9 @@ pub(crate) fn narrowphase_serial(
 /// - **box-sphere**: the same generator with the sphere as A and the box as B (keyed
 ///   `b, a`), remapped to `(a, b)` order so the dense rows match and the normal runs
 ///   A(box)→B(sphere).
-/// - **box-box**: [`box_box_classify`], biased by the hint; the returned axis is the one
-///   to persist for next frame's hysteresis.
+/// - **box-box**: [`box_box_classify_carried`] — the carried separating axis first, then the
+///   classifier biased by the hint; the returned axis is the one to persist for next frame's
+///   hysteresis.
 #[inline]
 pub(crate) fn collide_pair(
     a: BodyIndex,
@@ -554,23 +616,29 @@ pub(crate) fn collide_pair(
     ba: &BodyState,
     bb: &BodyState,
     frames: Option<&[RowFrame]>,
+    prev: impl FnOnce() -> PairTag,
     hint: impl FnOnce() -> Option<usize>,
-) -> (Option<Manifold>, Option<usize>) {
+) -> (Option<Manifold>, Option<usize>, PairTag) {
     match (ba.shape, bb.shape) {
         (ColliderShape::Sphere { radius: ra }, ColliderShape::Sphere { radius: rb }) => {
-            (sphere_sphere_manifold(a, b, ba, bb, ra, rb), None)
+            let m = sphere_sphere_manifold(a, b, ba, bb, ra, rb);
+            let tag = PairTag::non_box(pushes(m.as_ref()));
+            (m, None, tag)
         }
-        (ColliderShape::Sphere { radius }, ColliderShape::Box { half_extents }) => (
-            sphere_box_contact(a, b, ba.position, radius, bb.position, bb.rotation, half_extents),
-            None,
-        ),
-        (ColliderShape::Box { half_extents }, ColliderShape::Sphere { radius }) => (
-            sphere_box_contact(b, a, bb.position, radius, ba.position, ba.rotation, half_extents)
-                .map(flip_manifold),
-            None,
-        ),
+        (ColliderShape::Sphere { radius }, ColliderShape::Box { half_extents }) => {
+            let m =
+                sphere_box_contact(a, b, ba.position, radius, bb.position, bb.rotation, half_extents);
+            let tag = PairTag::non_box(pushes(m.as_ref()));
+            (m, None, tag)
+        }
+        (ColliderShape::Box { half_extents }, ColliderShape::Sphere { radius }) => {
+            let m =
+                sphere_box_contact(b, a, bb.position, radius, ba.position, ba.rotation, half_extents)
+                    .map(flip_manifold);
+            let tag = PairTag::non_box(pushes(m.as_ref()));
+            (m, None, tag)
+        }
         (ColliderShape::Box { half_extents: ha }, ColliderShape::Box { half_extents: hb }) => {
-            let last_axis = hint();
             let (oa, ob) = match frames {
                 Some(frames) => (
                     Obb::from_frame(ba.position, &frames[a.0 as usize], ha),
@@ -581,19 +649,32 @@ pub(crate) fn collide_pair(
                     Obb::new(bb.position, bb.rotation, hb),
                 ),
             };
-            match box_box_classify(&oa, &ob, a, b, last_axis) {
-                BoxBoxOutcome::Contact(c) => (Some(c.manifold), Some(c.reference_axis)),
+            match box_box_classify_carried(&oa, &ob, a, b, prev().sep_axis(), hint) {
+                BoxBoxOutcome::Contact(c) => {
+                    let tag = PairTag::box_contact(c.reference_axis, c.manifold.count > 0);
+                    (Some(c.manifold), Some(c.reference_axis), tag)
+                }
                 BoxBoxOutcome::Separated(axis) => {
                     debug_assert!(
                         axis < SAT_AXIS_COUNT,
                         "invariant: a separating SAT axis is canonical 0..15"
                     );
-                    (None, None)
+                    (None, None, PairTag::box_separated(axis, false))
                 }
-                BoxBoxOutcome::NoContact => (None, None),
+                BoxBoxOutcome::StillSeparated(axis) => {
+                    (None, None, PairTag::box_separated(axis, true))
+                }
+                BoxBoxOutcome::NoContact => (None, None, PairTag::BOX_NO_CONTACT),
             }
         }
     }
+}
+
+/// Whether a generator's output is emitted: some manifold with at least one point (the loops'
+/// routing condition), which is the tag's `PUSHED` bit.
+#[inline]
+fn pushes(m: Option<&Manifold>) -> bool {
+    m.is_some_and(|m| m.count > 0)
 }
 
 /// Builds the single-point sphere-sphere manifold for the dense pair `(a, b)`, or

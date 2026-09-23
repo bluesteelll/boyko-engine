@@ -12,6 +12,8 @@
 //! * the sensor-overlap stream (`Manifolds::sensor_overlaps`), likewise;
 //! * the hysteresis table state (`BoxAxisCache::fingerprint`: `(key, axis)` per slot and
 //!   `occupied`, hashed by field);
+//! * the pair tags of L9's pair carry (`Manifolds::pair_tags_fingerprint`, L9 G-C-2): every pair's
+//!   tag, in pair order, including the separated pairs its carried separating axis rejected;
 //! * the pose: every live body's `RigidBody` bits, in the order the bodies were spawned.
 //!
 //! # Non-vacuity
@@ -29,6 +31,9 @@
 //!   grow, counted by the table's own diagnostics.
 //! - The streams hold sensor overlaps and box-sphere manifolds whose box is the lower row, the pair
 //!   `collide_pair` flips.
+//! - L9's pair carry is exercised and never loses its place: carried separating axes reject pairs
+//!   (`Manifolds::separated_axis_hits`), the churn's row moves build the jumper bitset
+//!   (`pair_carry_jumper_builds`), and no step's carry is Reset (`pair_carry_resets` stays 0).
 //!
 //! # G-L5-3 W1 — one lane never dispatches
 //!
@@ -355,12 +360,13 @@ fn pose_hash(world: &EcsMaster, bodies: &[Entity]) -> u64 {
     })
 }
 
-/// One step's four hashes.
+/// One step's five hashes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct StepHashes {
     stream: u64,
     sensor: u64,
     table: u64,
+    tags: u64,
     pose: u64,
 }
 
@@ -373,6 +379,12 @@ struct Witness {
     prefetched_frames: u64,
     load_clears: u64,
     grows: u64,
+    /// Pairs rejected by their carried separating axis, over every step (L9a (ii)).
+    separated_axis_hits: usize,
+    /// Steps whose pair carry built its jumper bitset (the rows moved).
+    jumper_builds: u64,
+    /// Steps whose pair carry was Reset although stamped.
+    carry_resets: u64,
 }
 
 /// Runs one arm of the churned scene and returns its per-step hashes and its witness. Asserts the
@@ -402,10 +414,12 @@ fn run_churned(workers: usize, parallel_np: bool) -> (Vec<StepHashes>, Witness) 
         let is_box = |row: u32| matches!(bodies[row as usize].shape, ColliderShape::Box { .. });
         witness.box_sphere_flips +=
             m.manifolds().iter().filter(|mf| is_box(mf.body_a.0) && !is_box(mf.body_b.0)).count();
+        witness.separated_axis_hits += m.separated_axis_hits();
         hashes.push(StepHashes {
             stream: stream_hash(m.manifolds()),
             sensor: stream_hash(m.sensor_overlaps()),
             table: m.box_axis_cache.fingerprint(),
+            tags: m.pair_tags_fingerprint(),
             pose: pose_hash(&rig.world, &rig.live),
         });
     }
@@ -413,6 +427,8 @@ fn run_churned(workers: usize, parallel_np: bool) -> (Vec<StepHashes>, Witness) 
     witness.prefetched_frames = cache.prefetched_frames();
     witness.load_clears = cache.load_clears();
     witness.grows = cache.grows();
+    witness.jumper_builds = rig.manifolds().pair_carry_jumper_builds();
+    witness.carry_resets = rig.manifolds().pair_carry_resets();
     (hashes, witness)
 }
 
@@ -468,6 +484,12 @@ fn parallel_narrowphase_matches_the_serial_oracle_under_churn() {
     assert!(witness.prefetched_frames > 0, "no frame pre-read carried axes ({compared})");
     assert!(witness.load_clears > 0, "the axis table never cleared on load ({compared})");
     assert!(witness.grows > 0, "the axis table never grew ({compared})");
+    assert!(
+        witness.separated_axis_hits > 0,
+        "no carried separating axis rejected a pair (L9a (ii)) ({compared})"
+    );
+    assert!(witness.jumper_builds > 0, "the pair carry never built its jumper bitset ({compared})");
+    assert_eq!(witness.carry_resets, 0, "the pair carry lost its place ({compared})");
     let moved = oracle.first().map(|h| h.pose) != oracle.last().map(|h| h.pose);
     assert!(moved, "the scene must move ({compared})");
 }
@@ -594,6 +616,7 @@ fn run_pyramid(workers: usize, parallel_np: bool) -> (Vec<StepHashes>, u64) {
             stream: stream_hash(m.manifolds()),
             sensor: stream_hash(m.sensor_overlaps()),
             table: m.box_axis_cache.fingerprint(),
+            tags: m.pair_tags_fingerprint(),
             pose: pose_hash(&world, &boxes),
         });
     }
