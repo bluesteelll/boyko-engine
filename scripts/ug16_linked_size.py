@@ -1,11 +1,28 @@
 #!/usr/bin/env python3
-"""UG-16 (plan gate, rung B2 baseline): the linked section sizes of `boyko_demo`, recorded per rung.
+"""UG-16 (plan gate, rung B2 baseline): the linked section sizes of the UG-16 images, recorded per rung.
 
 What it measures
 ----------------
-`llvm-size -A -d` (System V format, decimal) on the linked `boyko_demo` executable built by
-`cargo build --release -p boyko_demo` under `[profile.release]` (`lto = "fat"`). It records `.text`,
-`.rdata` (the PE name of the plan's `.rodata`) and `Total`, and prints every section.
+`llvm-size -A -d` (System V format, decimal) on a linked executable built under `[profile.release]`
+(`lto = "fat"`) and the target's `.cargo/config.toml` rustflags, never `RUSTFLAGS`. It records
+`.text`, `.rdata` (the PE name of the plan's `.rodata`) and `Total`, and prints every section. The
+image is taken by path, and each image has its own record, banded against its own previous row
+(plan 03, UG-16 and its §1 note). The header of a new record names the image's file stem and the
+`--rung` of its first row.
+
+* `boyko_demo`, from rung B2: `cargo build --release --locked -p boyko_demo` (B2 built it before the
+  lock was tracked, without `--locked`), image `<target>/release/boyko_demo.exe`, record
+  `docs/measurements/ug16-linked-size.tsv`. It links only `boyko_ecs`, `boyko_threadpool`,
+  `boyko_diag` and `boyko_log` (plus `eframe`/`wgpu`), so it cannot see a render, physics, UI or app
+  rung.
+* the playground, from rung B2b: `cargo build --release --locked -v -p boyko-app --example
+  playground --message-format=json > <target>/release/examples/playground.json`, image
+  `<target>/release/examples/playground.exe`, passed with `--artifacts` naming that JSON stream (see
+  the stale guard below), record `docs/measurements/ug16-linked-size-playground.tsv`. An example
+  inherits `boyko-app`'s dev-dependency graph and features (B3 PC-40), so its row's `--note` carries
+  the `--cfg feature=…` set of the final `rustc --crate-name playground` line that `-v` prints on
+  stderr (the stream's `features` for the example says the same), and a size move traced to a
+  dev-dependency change is named as that, not as the rung's.
 
 Why the System V format: the default Berkeley format folds `.rdata` into its `data` column on a PE
 image (`text data bss dec hex`, where data = .rdata + .data + .pdata + .fptable + .tls + _RDATA +
@@ -16,8 +33,8 @@ The band
 --------
 Against the TSV's last row: `.text` or `.rdata` above +1 % is exit 2, HOLD — the rung waits for the
 OWNER's written acceptance; no agent accepts it (plan 03, UG-16). `Total` is recorded, not banded.
-The first row of a record is written with `--baseline` (rung B2), which is legal only on an empty
-record.
+The first row of a record is written with `--baseline` (rung B2 for `boyko_demo`, B2b for the
+playground), which is legal only on an empty record.
 
 Fail-closed (exit 1, RED — never a skip)
 ----------------------------------------
@@ -31,6 +48,18 @@ Fail-closed (exit 1, RED — never a skip)
   lies in another checkout, or if the dep-info file is missing. A newer input is always curable by
   `cargo build`, because cargo's own fingerprint tracks the same list (a commit-time or tracked-file
   mtime test is not: committing, or editing a test, would red an image cargo will never relink);
+* the dep-info beside the image is rustc's own rather than cargo's (it names itself as a target), and
+  `--artifacts` is not given. An MSVC executable carries no `-C extra-filename`, because its PDB path
+  is embedded in it, so rustc links an example straight into `examples/`; cargo has nothing to
+  uplift and writes no dep-info of its own, and the `<name>.d` there lists the example's file alone.
+  Its guard would pass over every dependency's source;
+* under `--artifacts` (the build's `--message-format=json` stdout, for such an image): the stream is
+  older than the image or is not JSON, no `compiler-artifact` in it has the image as its
+  `executable`, or a unit in it has no rustc dep-info beside its artifacts. The input list is then
+  the union of every unit's rustc dep-info, a workspace member's paths taken against this tree, and
+  the stale and foreign tests above apply to it. Not read: an in-tree build script's
+  `rerun-if-changed` paths other than its own sources (the only one today, `boyko_diag`'s, names
+  `build.rs` alone);
 * the output does not parse, or `.text`, `.rdata` or `Total` is missing or 0 (a banded section read
   as 0 would disable the band on the next row);
 * the invocation is not exactly one of `--record` / `--compare` (a run that compares nothing must
@@ -58,6 +87,11 @@ Usage
         (--record docs/measurements/ug16-linked-size.tsv --rung B2 [--baseline] [--note TEXT]
          | --compare docs/measurements/ug16-linked-size.tsv) \
         [--llvm-size PATH] [--toolchain stable-x86_64-pc-windows-msvc]
+    python scripts/ug16_linked_size.py --image D:/wt/_targets/ui-msvc/release/examples/playground.exe \
+        --artifacts D:/wt/_targets/ui-msvc/release/examples/playground.json \
+        (--record docs/measurements/ug16-linked-size-playground.tsv --rung B2b [--baseline] [--note TEXT]
+         | --compare docs/measurements/ug16-linked-size-playground.tsv) \
+        [--llvm-size PATH] [--toolchain stable-x86_64-pc-windows-msvc]
 
 Exit: 0 PASS / recorded, 1 RED, 2 HOLD (band exceeded; owner's written acceptance required).
 No timing of any kind is taken; binary size is not timing.
@@ -68,6 +102,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -185,7 +220,13 @@ def dep_info_inputs(image: Path) -> list[Path]:
     # Make-style: `target: dep dep ...`, a backslash-newline continues a line, and a space inside a
     # path is written as backslash-space.
     text = text.replace("\\\n", " ")
-    _, _, deps = text.partition(": ")
+    target, _, deps = text.partition(": ")
+    if Path(target.strip()).resolve() == d.resolve():
+        red(
+            f"dep-info `{d}` is rustc's own (it names itself as a target): it lists this unit's files, not its "
+            "dependencies', because cargo writes no dep-info for an image it links in place (an MSVC example) — "
+            "pass --artifacts with the build's --message-format=json stream"
+        )
     placeholder = "\u0001"
     deps = deps.replace("\\ ", placeholder)
     paths = [Path(tok.replace(placeholder, " ")) for tok in deps.split()]
@@ -194,13 +235,81 @@ def dep_info_inputs(image: Path) -> list[Path]:
     return paths
 
 
-def check_image(image: Path) -> float:
+def rule_inputs(d: Path) -> list[Path]:
+    """Every prerequisite of every rule in a rustc dep-info file (`target: dep ...`, `dep:` rules with
+    none, `#` comments). A relative path is a workspace member's, which cargo passes to rustc
+    relative to the workspace root: this tree."""
+    placeholder = "\u0001"
+    out: list[Path] = []
+    for line in d.read_text(encoding="utf-8", errors="replace").replace("\\\n", " ").splitlines():
+        if line.startswith("#"):
+            continue
+        _, sep, deps = line.partition(": ")
+        if sep:
+            for tok in deps.replace("\\ ", placeholder).split():
+                p = Path(tok.replace(placeholder, " "))
+                out.append(p if p.is_absolute() else REPO / p)
+    return out
+
+
+def unit_dep_info(msg: dict) -> Path | None:
+    """The rustc dep-info beside a `compiler-artifact`'s files: `libX-<hash>.rlib` -> `X-<hash>.d`,
+    `X-<hash>.dll` -> `X-<hash>.d`, `examples/X.exe` -> `examples/X.d`; a build script's artifact is its
+    uplifted `build-script-build[.exe]`, and rustc wrote `build_script_build-<hash>.d` beside it, the
+    hash being its directory's suffix."""
+    name = msg["target"]["name"].replace("-", "_")
+    for f in map(Path, msg["filenames"]):
+        if "custom-build" in msg["target"]["kind"]:
+            d = f.parent / f"{name}-{f.parent.name.rsplit('-', 1)[-1]}.d"
+        else:
+            stem = f.stem[3:] if f.suffix in (".rlib", ".rmeta") and f.stem.startswith("lib") else f.stem
+            d = f.with_name(stem + ".d")
+        if d.is_file():
+            return d
+    return None
+
+
+def artifact_inputs(stream: Path, image: Path) -> tuple[list[Path], int]:
+    """The input list of an image cargo writes no dep-info for, from the build's own
+    `--message-format=json` stream: the union of the rustc dep-info of every unit in it, and the
+    number of units."""
+    if not stream.is_file():
+        red(f"--artifacts `{stream}` does not exist")
+    if stream.stat().st_mtime < image.stat().st_mtime:
+        red(f"--artifacts `{stream}` is older than the image — it is not the stream of the build that linked it")
+    units = []
+    for lineno, line in enumerate(stream.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            red(f"{stream}:{lineno}: not a JSON message — --artifacts takes cargo's --message-format=json stdout alone")
+        if msg.get("reason") == "compiler-artifact":
+            units.append(msg)
+    if not any(u.get("executable") and Path(u["executable"]).resolve() == image.resolve() for u in units):
+        red(f"no compiler-artifact in `{stream}` has `{image}` as its executable — not this image's build")
+    paths: list[Path] = []
+    for u in units:
+        d = unit_dep_info(u)
+        if d is None:
+            red(f"unit `{u['target']['name']}` in `{stream}` has no rustc dep-info beside {u['filenames']}")
+        paths += rule_inputs(d)
+    # rustc lists a unit's sources once per output it names (the `.d` itself, the rlib, the rmeta).
+    return list(dict.fromkeys(paths)), len(units)
+
+
+def check_image(image: Path, artifacts: Path | None) -> float:
     if not image.is_file():
         red(f"image `{image}` does not exist")
     if "release" not in image.resolve().parts:
         red(f"image `{image}` has no `release` path segment — UG-16 measures the `profile.release` build")
     mtime = image.stat().st_mtime
-    inputs = dep_info_inputs(image)
+    if artifacts:
+        inputs, n = artifact_inputs(artifacts, image)
+        via = f"the rustc dep-info of {n} unit(s) in --artifacts"
+    else:
+        inputs, via = dep_info_inputs(image), "dep-info"
     repo = REPO.resolve()
     local = []
     for p in inputs:
@@ -214,7 +323,7 @@ def check_image(image: Path) -> float:
     newest = max(local, key=lambda f: f.stat().st_mtime if f.exists() else float("inf"))
     if not newest.exists() or newest.stat().st_mtime > mtime:
         red(f"image is older than its input `{newest.relative_to(repo).as_posix()}` (or the input is gone) — stale; rebuild")
-    print(f"      inputs {len(local)} source file(s) in this tree per dep-info; newest {newest.relative_to(repo).as_posix()} is not newer than the image")
+    print(f"      inputs {len(local)} source file(s) in this tree per {via}; newest {newest.relative_to(repo).as_posix()} is not newer than the image")
     return mtime
 
 
@@ -264,12 +373,13 @@ def main() -> int:
     ap = Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--image", required=True, type=Path)
     ap.add_argument("--llvm-size", type=Path)
+    ap.add_argument("--artifacts", type=Path, help="the build's --message-format=json stdout, for an image cargo writes no dep-info for")
     ap.add_argument("--toolchain", default="stable-x86_64-pc-windows-msvc")
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--record", type=Path, help="append a row to this TSV (a file of this tree)")
     mode.add_argument("--compare", type=Path, help="compare against this TSV's last row without recording")
     ap.add_argument("--rung", help="the rung the recorded row belongs to (--record only)")
-    ap.add_argument("--baseline", action="store_true", help="first row of an empty record, rung B2 (--record only)")
+    ap.add_argument("--baseline", action="store_true", help="first row of an empty record, rung B2 / B2b (--record only)")
     ap.add_argument("--note", default="", help="free text for the recorded row (--record only)")
     a = ap.parse_args()
 
@@ -302,7 +412,7 @@ def main() -> int:
         red(f"llvm-size not found at `{tool}` (rustup component `llvm-tools`; or pass --llvm-size)")
     version = tool_version(tool)
     image = a.image
-    mtime = check_image(image)
+    mtime = check_image(image, a.artifacts)
     secs = sections(tool, image)
     head, dirty, tree_id = tree_identity()
 
@@ -354,7 +464,8 @@ def main() -> int:
         new_file = not tsv.exists()
         with tsv.open("a", encoding="utf-8", newline="\n") as f:
             if new_file:
-                f.write("# UG-16 (plan gate, rung B2): linked section sizes of boyko_demo, profile.release (fat LTO),\n")
+                # `boyko_demo`'s baseline (`--rung B2`) wrote this line with both names literal.
+                f.write(f"# UG-16 (plan gate, rung {a.rung}): linked section sizes of {image.stem}, profile.release (fat LTO),\n")
                 f.write("# llvm-size -A -d. One row per rung; written by scripts/ug16_linked_size.py --record.\n")
                 f.write("# Band: .text or .rdata above +1 % vs the previous row is HOLD for the owner's written acceptance.\n")
                 f.write("\t".join(COLUMNS) + "\n")
