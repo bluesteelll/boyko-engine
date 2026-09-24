@@ -209,11 +209,11 @@ The repair belongs in those two crates, not in the gate.
 
 The four commands above run **none** of the `#[ignore]`d tests.
 [tests/ignore_reasons_census.rs](tests/ignore_reasons_census.rs) prints what exists on every run
-(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-09-23 on
-`u/b3` at `7d5a0015` (rung B3), it read:
+(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-09-24 on
+the trunk at `79005dfd` (Phase B merged), it read:
 
 ```text
-[ignore census] 355 sites (191 plain, 164 cfg_attr) across 12 crates, 1812 .rs files walked, 0 waivers
+[ignore census] 355 sites (191 plain, 164 cfg_attr) across 12 crates, 1821 .rs files walked, 0 waivers
 [ignore classes] <none>=1, deferred=19, feature+gpu=1, feature+gpu-cap=3, feature+gpu-windowed+gpu-cap=4,
   feature+miri-slow=1, flaky=1, generator=7, gpu=29, gpu-cap=1, gpu-windowed=120, gpu-windowed+gpu-cap=1,
   miri-slow=130, miri-unsupported=27, slow=9, solo=1; scopes: miri-only=156, native=198, release-only=1;
@@ -247,7 +247,11 @@ does not — a bare `#[ignore]` is the **third** way to make a check disappear, 
 The only multi-class spellings are `feature+<class>` and `gpu-windowed+gpu-cap` (so
 `feature+gpu-windowed+gpu-cap` too): one requirement set, one spelling, one grep. `generator`,
 `deferred` and `flaky` stand alone. A missing prefix, a prefix outside the list or a spelling
-outside these is RED. The census also refuses a class that the site's own source contradicts:
+outside these is RED, with one exemption: a site ignored only in native release runs in every debug
+run and names no leg, so its reason may carry no class. A prefix outside the list is still RED
+there. That scope is the `release-only=1` above and the `<none>=1` class count (today
+`crates/boyko_app/src/profiling/reduce.rs`'s `debug_assert!` guard test). The census also
+refuses a class that the site's own source contradicts:
 
 - a `cfg_attr` site is ignored only where its predicate holds, and the census evaluates the
   predicate in native debug, native release and Miri — a site ignored only under Miri takes
@@ -263,7 +267,7 @@ outside these is RED. The census also refuses a class that the site's own source
 
 **So every leg is now a `grep` by prefix, not a reading.** The patterns below skip comment lines
 (`^[^/]*`), and on the tree above each matched the census's own class counts; quote the census,
-not the grep.
+not the grep. The counts in the comments were taken at `7d5a0015` and read the same at `79005dfd`.
 
 **Leg: device-free ignored tests** — the plain `solo`/`slow` sites. Any machine, no GPU.
 

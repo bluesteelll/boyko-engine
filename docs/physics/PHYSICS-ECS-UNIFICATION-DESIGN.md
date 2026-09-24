@@ -87,7 +87,7 @@ Tree: `D:/wt/joltab` @ `ca582e72`. I ran nothing and edited nothing. "arith." me
 | Heap allocations per step | 331.6 | ≤ 16 after P2. The rest are scope boxes and chunks, owned by the allocator plan. |
 | Physics data-path allocations per step | 0 | 0 |
 | Dispatcher rounds in the physics chain | 8 | 6 (§6) |
-| `pool.scope` sites in physics src | 4 (`resources.rs:1957`, `:2049`, `colored.rs:2867`, `soft/colored.rs:1122`) | 0 |
+| `pool.scope` sites in physics src | ~~4 (`resources.rs:1957`, `:2049`, `colored.rs:2867`, `soft/colored.rs:1122`)~~ ⚠ *2026-09-24, reconcile: B1 PC-d, 5 `pool.scope` and 5 `try_with_active_pool` on the trunk, both pinned by UG-02's physics slice (`docs/memory/ledger/ug02-pins.tsv`; plan 00 §2)* | 0 |
 | Per-body persistent + derived bytes | 220 B (arith.) | 168 B (arith., §5) |
 | Tick commit on solver-derived columns | none (scratch) | none (K2, compile-time enforced) |
 | Broadphase `sqrt` per step (AllPairs, n=1241) | 2 × 769,420 | 1241 |
@@ -730,7 +730,7 @@ Finally, `commands.release_dense_group::<PhysicsBody>()`.
 
 **G-form** — `tests/physics_entity_model_census.rs`:
 - the physics `Vec`/`Box`/`HashMap` field scanner, with a list that only shrinks;
-- a `pool.scope(`/`try_with_active_pool(` list that only shrinks (4 → 0);
+- a `pool.scope(`/`try_with_active_pool(` list that only shrinks (~~4 → 0~~ ⚠ *2026-09-24, reconcile: B1 PC-d, 5 `pool.scope` + 5 `try_with_active_pool` on the trunk, each → 0, pinned by UG-02's physics slice (`docs/memory/ledger/ug02-pins.tsv`)*);
 - registry assertions: each group column is Dense, in `PhysicsBody`, `TICKS_TRACKED == false`, with a `DEAD` value;
 - removed ids are unregistered.
 
