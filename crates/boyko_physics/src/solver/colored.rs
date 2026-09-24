@@ -1494,6 +1494,8 @@ pub struct ColoredSoftStepSolver {
     /// Solves that ran past the no-dynamic-body early return. Diagnostic (defect A,
     /// interim).
     solved_steps: u64,
+    /// Solves that took the no-awake fast path (L10 C3a). Diagnostic.
+    fast_path_steps: u64,
     /// The G1 anti-vacuity counters (L11 C0). Zero-sized outside `cfg(test)`.
     counters: SetupCounters,
     /// The last solve's setup digest (L11 C0): the built columns' logical values,
@@ -1537,6 +1539,7 @@ impl ColoredSoftStepSolver {
             warm_cursor: RemapCursor::default(),
             warm_stats: WarmSeedStats::default(),
             solved_steps: 0,
+            fast_path_steps: 0,
             counters: SetupCounters::default(),
             #[cfg(test)]
             step_digest: 0,
@@ -1566,6 +1569,15 @@ impl ColoredSoftStepSolver {
     #[inline]
     pub fn solved_steps(&self) -> u64 {
         self.solved_steps
+    }
+
+    /// Diagnostic: the number of solves that took the no-awake fast path (L10 C3a) — sleeping
+    /// on, no dynamic row awake and no contact point laid out — which run no substep, no
+    /// restitution pass and no freeze capture or restore, and leave every value as the full
+    /// path would. A structural witness: a reader derives the same count from the world.
+    #[inline]
+    pub fn fast_path_steps(&self) -> u64 {
+        self.fast_path_steps
     }
 
     /// The G1 anti-vacuity counters, cumulative since construction (L11 C0).
@@ -1983,6 +1995,16 @@ impl ColoredSoftStepSolver {
             graph.island_of(m.body_b.0)
         };
         isl != ConstraintGraph::NO_ISLAND && sleep.is_island_frozen(isl)
+    }
+
+    /// Whether no dynamic row (`inv_mass != 0`, the rows the freeze capture snapshots) is awake
+    /// this step: the first condition of the no-awake fast path (L10 C3a).
+    #[inline]
+    fn no_awake_dynamic_row(sleep: &IslandSleep, bodies: &[BodyState]) -> bool {
+        !bodies
+            .iter()
+            .enumerate()
+            .any(|(row, b)| is_dynamic_row(b.inv_mass) && sleep.is_row_awake(row))
     }
 
     /// Applies every contact point's seeded accumulated impulse to both bodies'
@@ -3770,6 +3792,13 @@ impl ColoredSoftStepSolver {
     /// [`IslandSleep`] state: slept islands skip ONLY their SOLVE + INTEGRATE work
     /// (the gather is untouched — IM-1), and the energy / debounce / sleep transition
     /// is advanced after the solve for next frame.
+    ///
+    /// A step on which no dynamic row is awake and no contact point is laid out takes the
+    /// no-awake fast path (L10 C3a, [`fast_path_steps`](Self::fast_path_steps)): it skips the
+    /// substep loop, the restitution pass and the freeze capture and restore, which would change
+    /// no state, and still builds the columns (the store's keys and tags), carries every frozen
+    /// manifold's record, swaps the store and advances the sleep state. Its values are the full
+    /// path's, bit for bit.
     pub fn solve_colored_sleeping(
         &mut self,
         config: &PhysicsConfig,
@@ -3859,13 +3888,26 @@ impl ColoredSoftStepSolver {
             counter!(PHYS_SLOTS_NARROW, narrow);
         }
 
+        // L10 C3a (design 06 D-A, 08 A1′/O10): the no-awake fast path. With sleeping on, no
+        // dynamic row awake and no point laid out, the freeze capture, the substep loop, the
+        // restitution pass and the freeze restore change no state: every row the loop integrates
+        // is a frozen row the restore puts back (with its velocity), no cohort is swept, and the
+        // write-back skips every frozen row. So they are skipped, and what does change state
+        // still runs, in order: the build above (P-a's write-side keys, the tags, the empty
+        // layout), the store's carry and swap and the cursor's stamp, the write-back and
+        // `end_step`. A manifold with no dynamic side is solved on every step, so a layout with a
+        // point keeps the full path.
+        let fast = self.columns.len() == 0
+            && sleep_view.is_some_and(|sleep| Self::no_awake_dynamic_row(sleep, scratch.bodies()));
+        self.fast_path_steps += u64::from(fast);
+
         // O8 integrate-freeze (INTEGRATE half): capture the pre-solve hot state of
         // every slept-island body so the per-substep integrate (which streams the
         // WHOLE array — the O1 SIMD kernels are NOT per-lane masked) can be UNDONE for
         // slept rows after the loop. This freezes a slept body's position / rotation /
         // velocity without touching the audited integrate kernels. `frozen` is
         // capacity-reused (empty when sleeping is off — the byte-identical path).
-        {
+        if !fast {
             let mut frozen = self.frozen.build_view();
             frozen.clear();
             if let Some(sleep) = sleep_view {
@@ -3933,11 +3975,14 @@ impl ColoredSoftStepSolver {
         // `+ 1`, for the reason `BroadphaseGrid::build_parallel` gives (KE16 App-1).
         // No pool attached ⇒ `None` ⇒ inline, as the per-color probe already did.
         // Gated red-first by `one_worker_parallel_solve_takes_the_inline_path`.
-        let parallel = config.parallel_solve
+        let parallel = !fast
+            && config.parallel_solve
             && self.columns.widest_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR
             && try_with_active_pool(|pool| pool.num_threads() >= 2) == Some(true);
 
-        for _ in 0..substeps {
+        // L10 C3a: the fast path runs no substep.
+        let passes = if fast { 0 } else { substeps };
+        for _ in 0..passes {
             // (1) Gravity integrate DYNAMIC bodies (shared O1 kernel). Single-
             // threaded — the BodyEffective build view's mut slice (no parallel
             // access in the integrate kernels).
@@ -4012,8 +4057,9 @@ impl ColoredSoftStepSolver {
             }
         }
 
-        // Post-loop restitution (ONCE, velocity-only, bias-free).
-        {
+        // Post-loop restitution (ONCE, velocity-only, bias-free); not on the fast path, which
+        // lays out no point.
+        if !fast {
             let _z = zone!(PHYS_RESTITUTION);
             Self::apply_restitution(
                 &mut self.columns,
@@ -4039,8 +4085,9 @@ impl ColoredSoftStepSolver {
         // matching `BodyEffective` velocity (which `write_back` would copy out) is also
         // restored so the slept body keeps its frozen velocity. Then `write_back` is
         // told to SKIP slept rows, so `physics_apply` leaves the live component
-        // untouched (frozen) — and the gather-walked-every-row IM-1 invariant holds.
-        if sleeping_active {
+        // untouched (frozen) — and the gather-walked-every-row IM-1 invariant holds. The fast
+        // path captured nothing and integrated nothing, so it has nothing to restore.
+        if sleeping_active && !fast {
             let _z = zone!(PHYS_SLEEP_FREEZE);
             let mut snap_view = scratch.bodies.build_view();
             let snapshot = snap_view.as_mut_slice();

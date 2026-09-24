@@ -111,7 +111,11 @@
 //! `phys_pass_relax` = substeps × relax; `phys_color_wide` / `phys_color_narrow` = (wide / narrow
 //! colors) × sweeps, the class recomputed from `ConstraintGraph` and `Manifolds` with the frozen
 //! islands' manifolds excluded exactly as the solve excludes them; the sleep zones 1 / 2 / 1 when
-//! sleeping is on; `phys_sleep_classify` and the `phys_sleep_held` counter (the held rows) 1 each
+//! sleeping is on — except on a step of the colored solve's no-awake fast path (L10 C3a: sleeping
+//! on, no dynamic row awake, no slot solved, all recomputed from the world), which opens neither
+//! freeze span, no substep or color span and no restitution span, and whose count must equal the
+//! solver's own `fast_path_steps` over the run; `phys_sleep_classify` and the `phys_sleep_held`
+//! counter (the held rows) 1 each
 //! when the step's sleep-skip mode is `Sets` (L10: colored, sleeping on, `--sleep-skip` unset or
 //! `sets`); `phys_np_dispatch`, `phys_np_compact` and `phys_np_axis_commit` 1 each when the
 //! recomputed narrowphase chunk count C is at least 2, else 0; each counter once, with its value
@@ -141,7 +145,8 @@
 //! work. The runner does not assume this; it records a witness per armed step: the samples pending
 //! on the dispatcher's lane against the physics zones the solve pushed. If the solve ran on the
 //! dispatcher, all of those samples land on its lane, and `threads.solve_on_dispatcher_steps` in
-//! the summary counts such steps.
+//! the summary counts such steps. A step of the colored solve's no-awake fast path (L10 C3a) is
+//! not counted: it pushes too few solve samples for the comparison to say where the solve ran.
 //!
 //! # The canary (`--canary-frac F --canary-ref-ns T`)
 //!
@@ -342,7 +347,7 @@ use boyko_physics::resources::{
     PairClasses, PhysicsConfig, SleepSkip, SolverScratch,
 };
 use boyko_physics::sleep_sets::SleepSets;
-use boyko_physics::solver::SoftStepSolver;
+use boyko_physics::solver::{ColoredSoftStepSolver, SoftStepSolver};
 
 // ── Scene constants (Jolt `PyramidScene.h`, transcribed) ─────────────────────
 
@@ -1094,6 +1099,16 @@ struct Shape {
     /// Pairs L10's tree seam withheld from the stream (`SleepSets::stats`), `0` off the colored
     /// pipeline.
     withheld: u64,
+    /// Dynamic rows awake this step (`IslandSleep::is_row_awake`), `0` with sleeping off.
+    awake_dynamic: u64,
+}
+
+/// Whether the step took the colored solve's no-awake fast path (L10 C3a), derived from public
+/// state, never from the solver: sleeping on, no dynamic row awake, and no manifold solved —
+/// every stream manifold's island frozen, so the recomputed slots are zero. That step runs no
+/// substep, no restitution pass and no freeze capture or restore.
+fn fast_path(shape: &Shape, colored: bool, sleeping: bool) -> bool {
+    colored && sleeping && shape.awake_dynamic == 0 && shape.wide_slots + shape.narrow_slots == 0
 }
 
 /// Recomputes this step's color classes and narrowphase output. A frozen island's manifolds are
@@ -1129,6 +1144,9 @@ fn step_shape(world: &EcsMaster, colored: bool, sleeping: bool, bp_prev: &mut Tr
     }
     let graph = world.resource::<ConstraintGraph>();
     let sleep = if sleeping { Some(world.resource::<IslandSleep>()) } else { None };
+    shape.awake_dynamic = sleep.map_or(0, |s| {
+        (0..bodies.len()).filter(|&r| bodies[r].inv_mass != 0.0 && s.is_row_awake(r)).count() as u64
+    });
     shape.colors = u64::from(graph.n_colors());
     for c in 0..graph.n_colors() {
         let slots: u32 = graph
@@ -1240,6 +1258,9 @@ fn check_step(
     let c = u64::from(colored);
     let sl = u64::from(colored && sleeping);
     let l10 = u64::from(sets);
+    // L10 C3a: on the no-awake fast path the substep loop, the restitution pass and the freeze
+    // capture and restore do not run; the build, the store, the write-back and the sleep step do.
+    let run = u64::from(!fast_path(shape, colored, sleeping));
     // The narrowphase collides the stream: the logical pairs less the ones L10's tree seam
     // withheld (design 06 §8).
     let stream = shape.pairs - shape.withheld;
@@ -1256,18 +1277,18 @@ fn check_step(
     let spans = &counts[n_sys..n_sys + SPAN_ZONES.len()];
     let expected: [(&ZoneHandle, u64); SPAN_ZONE_COUNT] = [
         (&PHYS_SOLVE_BUILD, c),
-        (&PHYS_GRAVITY, c * substeps),
-        (&PHYS_WARM_APPLY, c * substeps),
-        (&PHYS_INTEGRATE, c * substeps),
-        (&PHYS_PASS_BIASED, c * substeps),
-        (&PHYS_PASS_RELAX, c * substeps * relax),
-        (&PHYS_COLOR_WIDE, shape.wide_colors * sweeps),
-        (&PHYS_COLOR_NARROW, shape.narrow_colors * sweeps),
-        (&PHYS_RESTITUTION, c),
+        (&PHYS_GRAVITY, c * run * substeps),
+        (&PHYS_WARM_APPLY, c * run * substeps),
+        (&PHYS_INTEGRATE, c * run * substeps),
+        (&PHYS_PASS_BIASED, c * run * substeps),
+        (&PHYS_PASS_RELAX, c * run * substeps * relax),
+        (&PHYS_COLOR_WIDE, run * shape.wide_colors * sweeps),
+        (&PHYS_COLOR_NARROW, run * shape.narrow_colors * sweeps),
+        (&PHYS_RESTITUTION, c * run),
         (&PHYS_STORE, c),
         (&PHYS_WRITE_BACK, c),
         (&PHYS_SLEEP_BEGIN, sl),
-        (&PHYS_SLEEP_FREEZE, 2 * sl),
+        (&PHYS_SLEEP_FREEZE, 2 * sl * run),
         (&PHYS_SLEEP_END, sl),
         (&PHYS_SLEEP_CLASSIFY, l10),
         (&PHYS_NP_DISPATCH, np),
@@ -1574,6 +1595,8 @@ fn run(args: &Args) -> ExitCode {
     let mut void_steps = 0usize;
     let mut first_void: Option<String> = None;
     let mut solve_on_dispatcher_steps = 0usize;
+    // L10 C3a: armed steps whose recomputed structure is the no-awake fast path.
+    let mut fast_steps_derived = 0u64;
     let mut first_frozen_step: Option<usize> = None;
     // L9: the pair classes, per step. Read on every row whose EFFECTIVE config has reuse on, since
     // the void probe after the run reads them there whether or not the row named the flag, and on
@@ -1639,6 +1662,8 @@ fn run(args: &Args) -> ExitCode {
                 deltas.push((counts[k], values[k]));
             }
             let shape = step_shape(&rig.world, colored, sleeping, &mut bp_prev);
+            let fast = fast_path(&shape, colored, sleeping);
+            fast_steps_derived += u64::from(fast);
             let verdict = check_step(zones, &counts, &values, &shape, structure);
             let void = verdict.is_err();
             if let Err(why) = verdict {
@@ -1681,7 +1706,9 @@ fn run(args: &Args) -> ExitCode {
                 .sum::<u64>()
                 + counts[n_sys + SPAN_ZONES.len() + counter_index(&PHYS_SLOTS_WIDE)]
                 + counts[n_sys + SPAN_ZONES.len() + counter_index(&PHYS_SLOTS_NARROW)];
-            if solve_samples > 0 && disp_lane >= solve_samples {
+            // A fast-path step (L10 C3a) pushes too few solve samples for the lane comparison to
+            // say where the solve ran, so the witness reads the full-path steps only.
+            if !fast && solve_samples > 0 && disp_lane >= solve_samples {
                 solve_on_dispatcher_steps += 1;
             }
             armed_rows.push(ArmedRow {
@@ -1699,6 +1726,23 @@ fn run(args: &Args) -> ExitCode {
     }
 
     // ── After the run. ──
+    // L10 C3a: the solver's own count of no-awake fast-path steps, and, armed, the same count
+    // derived from public state step by step: a solver that took the path on a step the
+    // structure does not allow it on (or skipped it where it does) voids the row.
+    let fast_steps_engine =
+        colored.then(|| rig.world.resource::<ColoredSoftStepSolver>().fast_path_steps());
+    if armed
+        && let Some(engine) = fast_steps_engine
+        && engine != fast_steps_derived
+    {
+        void_steps += 1;
+        first_void.get_or_insert_with(|| {
+            format!(
+                "the solver took its no-awake fast path on {engine} steps, the structure allows \
+                 {fast_steps_derived}"
+            )
+        });
+    }
     let drops = rig.world.contains_resource::<Profiler>().then(|| rig.world.resource::<Profiler>().drops());
     if let Some(d) = drops
         && d.total() != 0
@@ -1841,6 +1885,12 @@ fn run(args: &Args) -> ExitCode {
         println!(
             "profile: void steps {void_steps}, waves {waves_total}, solve on dispatcher {solve_on_dispatcher_steps} of {} steps",
             armed_rows.len()
+        );
+    }
+    if let Some(engine) = fast_steps_engine {
+        println!(
+            "no-awake fast path (L10 C3a): {engine} steps{}",
+            if armed { format!(", {fast_steps_derived} derived from the structure") } else { String::new() }
         );
     }
     if let Some(why) = &first_void {

@@ -44,6 +44,14 @@
 //! | [`PHYS_BP_QUERY`] | its queries and Wide-row loops | 1 on a tree-path step, else 0 |
 //! | [`PHYS_BP_ASSEMBLE`] | its pair assembly | 1 on a tree-path step, else 0 |
 //!
+//! On a step of the colored solve's no-awake fast path (L10 C3a: sleeping on, no dynamic row
+//! awake and no contact point laid out) the substep loop, the restitution pass and the freeze
+//! capture and restore do not run: [`PHYS_GRAVITY`], [`PHYS_WARM_APPLY`], [`PHYS_INTEGRATE`],
+//! [`PHYS_PASS_BIASED`], [`PHYS_PASS_RELAX`], the two color spans, [`PHYS_RESTITUTION`] and
+//! [`PHYS_SLEEP_FREEZE`] read 0 on it, and `ColoredSoftStepSolver::fast_path_steps` counts it.
+//! A reader derives the path from the world — the awake mask and the recomputed slots — never
+//! from that counter.
+//!
 //! The narrowphase dispatches when `parallel_narrowphase` is on, a pool of at least two workers
 //! is attached and the pair count yields at least two chunks — the chunk count
 //! [`PHYS_NP_CHUNKS`] reports, recomputed from the exported `NP_*` constants
