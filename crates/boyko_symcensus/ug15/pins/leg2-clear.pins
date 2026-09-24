@@ -1,6 +1,6 @@
 # ug15 leg2 pins v1
 # == leg (2) pins of clear under release
-# tree         D:\wt\lighttable (HEAD a6a97c55ccca0a02774b4f6b961a20e4f1dbf9e1, 3 uncommitted path(s))
+# tree         D:\wt\lighttable (HEAD 631c14b98656cef9d46530199c157135c7a0b869, 1 uncommitted path(s))
 # target dir   D:/wt/_targets/vkval-msvc
 # host         x86_64-pc-windows-msvc (msvc)
 # rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
@@ -18,13 +18,13 @@
 # subject      clear (boyko-app --example clear)
 # profile      release
 # object       D:/wt/_targets/vkval-msvc\release\examples\clear.o
-# object sha   5c516d98162dda9a5108223cc2208db8928a3d732e0cef43954aff6872d8fe47
+# object sha   90e8b38e092e30dbf9707a8f79019b3f22a6b7f1b42d73da264c658a0cfb872e
 # image        D:/wt/_targets/vkval-msvc\release\examples\clear.exe
-# image sha    6eaf6474acadc673352bb8920a8229ef140fe535a5dc23a3848097b37c6f9a0e
+# image sha    ac7ffea131f5e731df2a2c90a0059f4e38f8d701770e8485c2be62cd3c95a6b0
 # pdb          D:/wt/_targets/vkval-msvc\release\examples\clear.pdb
-# link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\examples\\clear.clear.e44d60cb4f5a059a-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\examples\\rustccW0OsV\\libwindows_sys-438931091cde2c45.rlib" "D:/wt/_targets/vkval-msvc\\release\\examples\\rustccW0OsV\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "winmm.lib" "user32.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:D:/wt/_targets/vkval-msvc\\release\\examples\\clear.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis"
-# final rustc  Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name clear --edition=2024 'crates\boyko_app\examples\clear.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C opt-level=3 -C lto=fat --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hwrt", "profiling-alloc", "profiling-census"))' -C metadata=3343a1334041dab7 --out-dir 'D:/wt/_targets/vkval-msvc\release\examples' -C strip=debuginfo -L 'dependency=D:/wt/_targets/vkval-msvc\release\deps' --extern 'boyko_app=D:/wt/_targets/vkval-msvc\release\deps\libboyko_app-039a09f70e2628bf.rlib' --extern 'boyko_diag=D:/wt/_targets/vkval-msvc\release\deps\libboyko_diag-b560511677c8eafc.rlib' --extern 'boyko_ecs=D:/wt/_targets/vkval-msvc\release\deps\libboyko_ecs-2f70a22dd5086947.rlib' --extern 'boyko_fontbake=D:/wt/_targets/vkval-msvc\release\deps\libboyko_fontbake-7bf6f040de063476.rlib' --extern 'boyko_input=D:/wt/_targets/vkval-msvc\release\deps\libboyko_input-8b753057ea004ccb.rlib' --extern 'boyko_log=D:/wt/_targets/vkval-msvc\release\deps\libboyko_log-64926abcbf6a9ab1.rlib' --extern 'boyko_macros=D:/wt/_targets/vkval-msvc\release\deps\boyko_macros-f880e435a2f5fc23.dll' --extern 'boyko_math=D:/wt/_targets/vkval-msvc\release\deps\libboyko_math-691a90f099553bba.rlib' --extern 'boyko_physics=D:/wt/_targets/vkval-msvc\release\deps\libboyko_physics-9837b005f132116d.rlib' --extern 'boyko_render=D:/wt/_targets/vkval-msvc\release\deps\libboyko_render-f2096f6585ca22bf.rlib' --extern 'boyko_scene=D:/wt/_targets/vkval-msvc\release\deps\libboyko_scene-7fe78beeed6440a5.rlib' --extern 'boyko_rhi=D:/wt/_targets/vkval-msvc\release\deps\libboyko_rhi-8f04a45cab82b45e.rlib' --extern 'boyko_rhi_vulkan=D:/wt/_targets/vkval-msvc\release\deps\libboyko_rhi_vulkan-de8f5eeea3fd23ae.rlib' --extern 'boyko_sdf_math=D:/wt/_targets/vkval-msvc\release\deps\libboyko_sdf_math-33c564606409eae8.rlib' --extern 'boyko_shaderdsl=D:/wt/_targets/vkval-msvc\release\deps\libboyko_shaderdsl-ad6ba3404cad468c.rlib' --extern 'bytemuck=D:/wt/_targets/vkval-msvc\release\deps\libbytemuck-23c8285741eda9c3.rlib' --emit=obj --print link-args -C target-cpu=x86-64-v3`
-== clear | P29-1 | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows | size=412 (section RawDataSize) | copies=1 | sha256=6d1f39c203ae3ae9c50521dbd9d5b021aa198254dbe26bd568770f301277d9b5
+# link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\examples\\clear.clear.bfab6263c7db0219-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\examples\\rustcE9xJfE\\libwindows_sys-438931091cde2c45.rlib" "D:/wt/_targets/vkval-msvc\\release\\examples\\rustcE9xJfE\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "winmm.lib" "user32.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:D:/wt/_targets/vkval-msvc\\release\\examples\\clear.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis"
+# final rustc  Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name clear --edition=2024 'crates\boyko_app\examples\clear.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C opt-level=3 -C lto=fat --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hwrt", "profiling-alloc", "profiling-census"))' -C metadata=ebf7c5f7c840b234 --out-dir 'D:/wt/_targets/vkval-msvc\release\examples' -C strip=debuginfo -L 'dependency=D:/wt/_targets/vkval-msvc\release\deps' --extern 'boyko_app=D:/wt/_targets/vkval-msvc\release\deps\libboyko_app-039a09f70e2628bf.rlib' --extern 'boyko_diag=D:/wt/_targets/vkval-msvc\release\deps\libboyko_diag-b560511677c8eafc.rlib' --extern 'boyko_ecs=D:/wt/_targets/vkval-msvc\release\deps\libboyko_ecs-2f70a22dd5086947.rlib' --extern 'boyko_fontbake=D:/wt/_targets/vkval-msvc\release\deps\libboyko_fontbake-7bf6f040de063476.rlib' --extern 'boyko_input=D:/wt/_targets/vkval-msvc\release\deps\libboyko_input-8b753057ea004ccb.rlib' --extern 'boyko_log=D:/wt/_targets/vkval-msvc\release\deps\libboyko_log-64926abcbf6a9ab1.rlib' --extern 'boyko_macros=D:/wt/_targets/vkval-msvc\release\deps\boyko_macros-f880e435a2f5fc23.dll' --extern 'boyko_math=D:/wt/_targets/vkval-msvc\release\deps\libboyko_math-691a90f099553bba.rlib' --extern 'boyko_physics=D:/wt/_targets/vkval-msvc\release\deps\libboyko_physics-9837b005f132116d.rlib' --extern 'boyko_render=D:/wt/_targets/vkval-msvc\release\deps\libboyko_render-f2096f6585ca22bf.rlib' --extern 'boyko_scene=D:/wt/_targets/vkval-msvc\release\deps\libboyko_scene-7fe78beeed6440a5.rlib' --extern 'boyko_threadpool=D:/wt/_targets/vkval-msvc\release\deps\libboyko_threadpool-cb2f82ea77d07ccb.rlib' --extern 'boyko_ui=D:/wt/_targets/vkval-msvc\release\deps\libboyko_ui-485a532075ed0e88.rlib' --extern 'boyko_rhi=D:/wt/_targets/vkval-msvc\release\deps\libboyko_rhi-8f04a45cab82b45e.rlib' --extern 'boyko_rhi_vulkan=D:/wt/_targets/vkval-msvc\release\deps\libboyko_rhi_vulkan-de8f5eeea3fd23ae.rlib' --extern 'boyko_sdf_math=D:/wt/_targets/vkval-msvc\release\deps\libboyko_sdf_math-33c564606409eae8.rlib' --extern 'boyko_shaderdsl=D:/wt/_targets/vkval-msvc\release\deps\libboyko_shaderdsl-ad6ba3404cad468c.rlib' --extern 'bytemuck=D:/wt/_targets/vkval-msvc\release\deps\libbytemuck-23c8285741eda9c3.rlib' --extern 'proc_macro2=D:/wt/_targets/vkval-msvc\release\deps\libproc_macro2-b2a4a04e5dbfc61b.rlib' --extern 'quote=D:/wt/_targets/vkval-msvc\release\deps\libquote-b19716e3235b779a.rlib' --extern 'syn=D:/wt/_targets/vkval-msvc\release\deps\libsyn-653086f4fd13e534.rlib' --emit=obj --print link-args -C target-cpu=x86-64-v3`
+== clear | P29-1 | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows | size=466 (section RawDataSize) | copies=1 | sha256=c1df52f91f878e4e490bf67d73312544d3d20cf8acf63bdc30d7ae360e39d893
 <<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows> @+0x0:
      0: push r15
      2: push r14
@@ -52,120 +52,122 @@
     31: pop r14
     33: pop r15
     35: ret
-    36: mov rbx, qword ptr [rcx + 0x8]
-    3a: test rbx, rbx
+    36: mov r12, qword ptr [rcx + 0x8]
+    3a: test r12, r12
     3d: jne 0x4c
     3f: mov rdi, rdx
     42: call 0x47 ; REL32 <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows_zst
     47: mov rdx, rdi
     4a: jmp 0x1f
-    4c: mov r12, rcx
-    4f: mov r9d, dword ptr [rcx + 0x50]
-    53: and r9d, 0x3f
-    57: shl r9d, 0x6
-    5b: lea rcx, [rsp + 0x28]
-    60: mov rdi, rdx
+    4c: mov rbp, rdx
+    4f: mov rbx, rcx
+    52: mov r15d, dword ptr [rcx + 0x50]
+    56: and r15d, 0x3f
+    5a: shl r15d, 0x6
+    5e: lea rcx, [rsp + 0x28]
     63: mov rdx, rsi
-    66: mov r8, rbx
-    69: call 0x6e ; REL32 boyko_ecs::ecs::constants::pool_byte_layout
-    6e: mov rax, rbx
-    71: imul rax, rdi
-    75: cmp rax, -0xffff
-    7b: jae 0x149
-    81: mov r13, rdi
-    84: add rax, 0xffff
-    8a: and rax, -0x10000
-    90: mov r8, qword ptr [r12 + 0x40]
-    95: cmp r8, 0x10001
-    9c: mov edx, 0x10000
-    a1: cmovae rdx, r8
-    a5: cmp rdx, 0x4000000
-    ac: mov r9d, 0x4000000
-    b2: cmovb r9, rdx
-    b6: xor edi, edi
-    b8: sub rax, r8
-    bb: cmovae rdi, rax
-    bf: cmp rdi, r9
-    c2: cmovbe rdi, r9
-    c6: mov r14, qword ptr [r12 + 0x70]
-    cb: add rdi, r8
-    ce: mov rdx, qword ptr [rsp + 0x28]
-    d3: mov rax, qword ptr [rsp + 0x30]
-    d8: cmp rax, rdi
-    db: cmovb rdi, rax
-    df: mov rcx, r14
-    e2: mov r9, rdi
-    e5: call 0xea ; REL32 <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
-    ea: mov rax, rdi
-    ed: or rax, rbx
-    f0: shr rax, 0x20
-    f4: je 0x100
-    f6: mov rax, rdi
-    f9: xor edx, edx
-    fb: div rbx
-    fe: jmp 0x106
-   100: mov eax, edi
-   102: xor edx, edx
-   104: div ebx
-   106: cmp rsi, rax
-   109: cmovb rax, rsi
-   10d: lea rbx, [4*rax]
-   115: cmp rbx, -0xffff
-   11c: jae 0x149
-   11e: mov rdx, r13
-   121: mov rcx, r12
-   124: add rbx, 0xffff
-   12b: and rbx, -0x10000
-   132: mov r15, qword ptr [r12 + 0x48]
-   137: cmp rbx, r15
-   13a: ja 0x163
-   13c: mov qword ptr [rcx + 0x40], rdi
-   140: mov qword ptr [rcx + 0x30], rax
-   144: jmp 0x1f
-   149: lea rcx, [rip] ; REL32 <anon-data>
-   150: lea r8, [rip] ; REL32 <anon-data>
-   157: mov edx, 0x7f
-   15c: call 0x161 ; REL32 core::panicking::panic_fmt
-   161: ud2
-   163: mov rdx, qword ptr [rsp + 0x40]
-   168: mov rcx, r14
-   16b: mov r8, r15
-   16e: mov r9, rbx
-   171: mov rbp, rax
-   174: call 0x179 ; REL32 <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
-   179: mov rdx, qword ptr [rsp + 0x48]
-   17e: mov rcx, r14
-   181: mov r8, r15
-   184: mov r9, rbx
-   187: call 0x18c ; REL32 <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
-   18c: mov rax, rbp
-   18f: mov rcx, r12
-   192: mov rdx, r13
-   195: mov qword ptr [r12 + 0x48], rbx
-   19a: jmp 0x13c
-== clear | P29-2 | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion | size=93 (section RawDataSize) | copies=1 | sha256=8365a5d6b84ad3f372cfe674a6005bf82b6d99a42218d1e3a093f53dfff99a18
+    66: mov r8, r12
+    69: mov r9, r15
+    6c: call 0x71 ; REL32 boyko_ecs::ecs::constants::pool_byte_layout
+    71: mov r14, qword ptr [rsp + 0x30]
+    76: lea rax, [r14 + r15]
+    7a: cmp rax, -0xfff
+    80: jae 0x17d
+    86: mov rdx, qword ptr [rsp + 0x38]
+    8b: lea rcx, [rdx + r15]
+    8f: cmp rcx, -0xfff
+    96: jae 0x17d
+    9c: mov qword ptr [rsp + 0x20], rdx
+    a1: mov rdi, r12
+    a4: imul rdi, rbp
+    a8: add rdi, r15
+    ab: cmp rdi, -0xfff
+    b2: jae 0x17d
+    b8: add rax, 0xfff
+    be: and rax, -0x1000
+    c4: add rdi, 0xfff
+    cb: and rdi, -0x1000
+    d2: mov r8, qword ptr [rbx + 0x40]
+    d6: mov r13, qword ptr [rbx + 0x70]
+    da: cmp r8, 0x1001
+    e1: mov ecx, 0x1000
+    e6: cmovae rcx, r8
+    ea: cmp rcx, 0x4000000
+    f1: mov edx, 0x4000000
+    f6: cmovb rdx, rcx
+    fa: xor ecx, ecx
+    fc: sub rdi, r8
+    ff: cmovb rdi, rcx
+   103: cmp rdi, rdx
+   106: cmovbe rdi, rdx
+   10a: add rdi, r8
+   10d: cmp rax, rdi
+   110: cmovb rdi, rax
+   114: mov rcx, r13
+   117: xor edx, edx
+   119: mov r9, rdi
+   11c: call 0x121 ; REL32 <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
+   121: mov rax, rdi
+   124: sub rax, r15
+   127: mov rcx, rax
+   12a: or rcx, r12
+   12d: shr rcx, 0x20
+   131: je 0x13a
+   133: xor edx, edx
+   135: div r12
+   138: jmp 0x13f
+   13a: xor edx, edx
+   13c: div r12d
+   13f: cmp rsi, rax
+   142: cmovb rax, rsi
+   146: lea r15, [r15 + 4*rax]
+   14a: cmp r15, -0xfff
+   151: jae 0x17d
+   153: mov rdx, rbp
+   156: mov rcx, rbx
+   159: add r15, 0xfff
+   160: and r15, -0x1000
+   167: mov r12, qword ptr [rbx + 0x48]
+   16b: cmp r15, r12
+   16e: ja 0x197
+   170: mov qword ptr [rcx + 0x40], rdi
+   174: mov qword ptr [rcx + 0x30], rax
+   178: jmp 0x1f
+   17d: lea rcx, [rip] ; REL32 <anon-data>
+   184: lea r8, [rip] ; REL32 <anon-data>
+   18b: mov edx, 0x79
+   190: call 0x195 ; REL32 core::panicking::panic_fmt
+   195: ud2
+   197: add qword ptr [rsp + 0x20], r14
+   19c: mov rcx, r13
+   19f: mov rdx, r14
+   1a2: mov r8, r12
+   1a5: mov r9, r15
+   1a8: mov r14, rax
+   1ab: call 0x1b0 ; REL32 <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
+   1b0: mov rcx, r13
+   1b3: mov rdx, qword ptr [rsp + 0x20]
+   1b8: mov r8, r12
+   1bb: mov r9, r15
+   1be: call 0x1c3 ; REL32 <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
+   1c3: mov rax, r14
+   1c6: mov rcx, rbx
+   1c9: mov rdx, rbp
+   1cc: mov qword ptr [rbx + 0x48], r15
+   1d0: jmp 0x170
+== clear | P29-2 | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion | size=37 (section RawDataSize) | copies=1 | sha256=f72ee0f187be40485ea8d1b6983c6412d0f023e56c6e1ebcec8d5558fcf3c18e
 <<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion> @+0x0:
      0: sub rsp, 0x28
-     4: add r9, rdx
-     7: cmp r9, -0xffff
-     e: jae 0x3c
-    10: test rcx, rcx
-    13: je 0x56
-    15: add r9, 0xffff
-    1c: and r9, -0x10000
-    23: add r8, rdx
-    26: and r8, -0x10000
-    2d: mov rdx, r8
-    30: mov r8, r9
-    33: add rsp, 0x28
-    37: jmp 0x3c ; REL32 <boyko_ecs::ecs::memory::vm::VmReservation>::commit
-    3c: lea rcx, [rip] ; REL32 <anon-data>
-    43: lea r8, [rip] ; REL32 <anon-data>
-    4a: mov edx, 0x7f
-    4f: call 0x54 ; REL32 core::panicking::panic_fmt
-    54: ud2
-    56: call 0x5b ; REL32 <boyko_ecs::ecs::memory::component_pool::PoolBacking>::grow_is_host_only
-    5b: ud2
+     4: test rcx, rcx
+     7: je 0x1e
+     9: add r8, rdx
+     c: add r9, rdx
+     f: mov rdx, r8
+    12: mov r8, r9
+    15: add rsp, 0x28
+    19: jmp 0x1e ; REL32 <boyko_ecs::ecs::memory::vm::VmReservation>::commit
+    1e: call 0x23 ; REL32 <boyko_ecs::ecs::memory::component_pool::PoolBacking>::grow_is_host_only
+    23: ud2
 == clear | P29-3 | boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan | size=1163 (section RawDataSize) | copies=1 | sha256=270ce025c9d0df16ab7a8e669685751ed5ce544aafb1ebb2703adaafe76bdedb
 <boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan> @+0x0:
      0: push rbp

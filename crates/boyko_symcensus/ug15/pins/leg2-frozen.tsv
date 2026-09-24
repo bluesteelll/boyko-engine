@@ -3,15 +3,15 @@
 # file holds exactly its subject's rows here, and unless every (candidate, subject) pair of the
 # candidate list is either here or in leg2-absent.txt.
 # subject	cand	name	size	copies	sha256
-boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	412	1	6d1f39c203ae3ae9c50521dbd9d5b021aa198254dbe26bd568770f301277d9b5
-boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	93	1	8365a5d6b84ad3f372cfe674a6005bf82b6d99a42218d1e3a093f53dfff99a18
+boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	466	1	c1df52f91f878e4e490bf67d73312544d3d20cf8acf63bdc30d7ae360e39d893
+boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	37	1	f72ee0f187be40485ea8d1b6983c6412d0f023e56c6e1ebcec8d5558fcf3c18e
 boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	1163	1	270ce025c9d0df16ab7a8e669685751ed5ce544aafb1ebb2703adaafe76bdedb
 boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	207	1	5d6330778d5586c76a7649bd63ec9bec1ca1e5c2f1f560e6c70928ecfb23b83c
 boyko_demo	D-2	boyko_ecs::ecs::core::iters::query::query_type_registry::register_new	143	1	16a34425c52375ec5a34b1499396ee0db5071b8c596e9a9d99b89d042fde0e76
 boyko_demo	D-3	boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new	102	1	3d9d9328638bc8b9a5df0a428343eb6e001f944d18881594319786dd3cc9bf54
 boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	651	1	e2cacac095a7312f1a2597de1eb117bf118715ac5dd7101d8dd9ecbbf75ce049
-clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	412	1	6d1f39c203ae3ae9c50521dbd9d5b021aa198254dbe26bd568770f301277d9b5
-clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	93	1	8365a5d6b84ad3f372cfe674a6005bf82b6d99a42218d1e3a093f53dfff99a18
+clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	466	1	c1df52f91f878e4e490bf67d73312544d3d20cf8acf63bdc30d7ae360e39d893
+clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	37	1	f72ee0f187be40485ea8d1b6983c6412d0f023e56c6e1ebcec8d5558fcf3c18e
 clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	1163	1	270ce025c9d0df16ab7a8e669685751ed5ce544aafb1ebb2703adaafe76bdedb
 clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	207	1	5d6330778d5586c76a7649bd63ec9bec1ca1e5c2f1f560e6c70928ecfb23b83c
 clear	R-1	boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>	439	3	04c8c1e8e39895cc47f2e61ae7eb6a222c7dccecafd635c4a561ce6b2cc27a2a
