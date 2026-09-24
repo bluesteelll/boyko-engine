@@ -10996,8 +10996,7 @@ wrong by the time they were re-measured here.** (i) The site count was **327**, 
 `g12c` ignore this rung just wrote is itself the 327th, so the figure moved *because of* the change
 it was describing, and it moved again for the same reason: EG2-R round 3's `g17` takes it to
 **328** (`grep -rn '#\[ignore' --include=*.rs crates/ | wc -l` → 328, re-measured at that round).
-It is **405** on the tree today too (401 at `2431c570`; the A7 merge adds three; rung D-M0's
-`solo:` OS-truth test adds one) <!-- measure: tree-lines crates rs #[ignore = 405 -->, and that
+It is **405** on the tree today too (401 at `2431c570`; A7 adds three, D-M0's `solo:` test one) <!-- measure: tree-lines crates rs #[ignore = 405 -->, and that
 half is no longer prose: the round stamp keeps the historical sentence true, and the marker keeps
 the live one checkable — a paragraph whose whole subject is that a count rots should not carry one
 that nothing re-takes.
